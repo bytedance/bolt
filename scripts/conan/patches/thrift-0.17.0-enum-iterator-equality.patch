@@ -1,0 +1,45 @@
+diff --git a/recipes/thrift/all/conandata.yml b/recipes/thrift/all/conandata.yml
+--- a/recipes/thrift/all/conandata.yml
++++ b/recipes/thrift/all/conandata.yml
+@@ -35,6 +35,10 @@ patches:
+     - patch_file: "patches/cmake-0.16.0.patch"
+       patch_description: "use cci packages"
+       patch_type: "conan"
++    - patch_file: "patches/0.17.0-0002-fix-enum-iterator-comparison.patch"
++      patch_description: "add equality comparison to TEnumIterator"
++      patch_type: "backport"
++      patch_source: "https://github.com/apache/thrift/pull/2633"
+   "0.16.0":
+     - patch_file: "patches/cmake-0.16.0.patch"
+       patch_description: "use cci packages"
+diff --git a/recipes/thrift/all/patches/0.17.0-0002-fix-enum-iterator-comparison.patch b/recipes/thrift/all/patches/0.17.0-0002-fix-enum-iterator-comparison.patch
+new file mode 100644
+--- /dev/null
++++ b/recipes/thrift/all/patches/0.17.0-0002-fix-enum-iterator-comparison.patch
+@@ -0,0 +1,26 @@
++diff --git a/lib/cpp/src/thrift/Thrift.h b/lib/cpp/src/thrift/Thrift.h
++index d5066ee71077337e61931a1d85798a38c15c809f..338694b7f3ff949f5a528ac81c8805ce617b00cb 100644
++--- a/lib/cpp/src/thrift/Thrift.h
+++++ b/lib/cpp/src/thrift/Thrift.h
++@@ -61,4 +61,4 @@ public:
++-  bool operator!=(const TEnumIterator& end) {
++-    THRIFT_UNUSED_VARIABLE(end);
++-    assert(end.n_ == -1);
++-    return (ii_ != n_);
+++  bool operator==(const TEnumIterator& rhs) const {
+++    bool is_end = ii_ == n_ || n_ == -1;
+++    bool is_rhs_end = rhs.ii_ == rhs.n_ || rhs.n_ == -1;
+++    return (ii_ == rhs.ii_ && n_ == rhs.n_) || (is_end && is_rhs_end);
++@@ -66,0 +67,2 @@ public:
+++  bool operator!=(const TEnumIterator& rhs) const { return !(*this == rhs); }
+++
++diff --git a/lib/cpp/src/thrift/windows/Operators.h b/lib/cpp/src/thrift/windows/Operators.h
++index 9b8609680028b40b6ac608305dbac30817086cb6..406e11eb6ec74a1071a81a16886a786e03f4b2c2 100644
++--- a/lib/cpp/src/thrift/windows/Operators.h
+++++ b/lib/cpp/src/thrift/windows/Operators.h
++@@ -32,5 +31,0 @@ class TEnumIterator;
++-inline bool operator==(const TEnumIterator&, const TEnumIterator&) {
++-  // Not entirely sure what the test should be here. It is only to enable
++-  // iterator debugging and is not used in release mode.
++-  return true;
++-}

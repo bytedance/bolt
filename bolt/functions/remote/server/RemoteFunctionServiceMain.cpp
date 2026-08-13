@@ -44,12 +44,12 @@
 /// below.
 
 DEFINE_string(
-    uds_path,
+    bolt_remote_function_uds_path,
     "/tmp/remote.socket",
     "Unix domain socket used by the thrift server.");
 
 DEFINE_string(
-    function_prefix,
+    bolt_remote_function_prefix,
     "json.test_schema.",
     "Prefix to be added to the functions being registered");
 
@@ -65,10 +65,11 @@ int main(int argc, char* argv[]) {
   // Always registers all Presto functions and make them available under a
   // certain prefix/namespace.
   LOG(INFO) << "Registering Presto functions";
-  functions::prestosql::registerAllScalarFunctions(FLAGS_function_prefix);
+  functions::prestosql::registerAllScalarFunctions(
+      FLAGS_bolt_remote_function_prefix);
 
   folly::SocketAddress location{
-      folly::SocketAddress::makeFromPath(FLAGS_uds_path)};
+      folly::SocketAddress::makeFromPath(FLAGS_bolt_remote_function_uds_path)};
 
   LOG(INFO) << "Initializing thrift server";
   auto handler = std::make_shared<functions::RemoteFunctionServiceHandler>();

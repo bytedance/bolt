@@ -228,6 +228,14 @@ class BoltShuffleWriter : public ShuffleWriter {
 
   const uint64_t cachedPayloadSize() const override;
 
+  int64_t peakBytesAllocated() const {
+    auto peakBytes = boltPool_->peakBytes();
+    if (dynamic_cast<BoltArrowMemoryPool*>(pool_) == nullptr) {
+      peakBytes += pool_->max_memory();
+    }
+    return peakBytes;
+  }
+
   arrow::Status evictPartitionBuffers(uint32_t partitionId, bool reuseBuffers);
 
   int64_t rawPartitionBytes() const;
@@ -596,6 +604,7 @@ class BoltShuffleWriter : public ShuffleWriter {
         metrics_.rawPartitionLengths.begin(),
         metrics_.rawPartitionLengths.end(),
         0LL);
+    metrics_.peakBytes = peakBytesAllocated();
   }
 
   void logShuffleCheckStats(const char* writerType) const;

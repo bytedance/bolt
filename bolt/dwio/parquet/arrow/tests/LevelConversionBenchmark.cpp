@@ -33,6 +33,9 @@
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
 
+#include <algorithm>
+#include <map>
+#include <memory>
 #include <random>
 
 using namespace bytedance::bolt::parquet::arrow;
@@ -46,6 +49,13 @@ enum class ListShape {
   kSingleElement,
   kMixed,
   kLong,
+};
+
+enum class LeafNullShape {
+  kAllValidFlat,
+  kMiddleNullFlat,
+  kAllValidRepeated,
+  kMiddleNullRepeated,
 };
 
 struct Levels {
@@ -113,6 +123,50 @@ LevelInfo listLevelInfo() {
   return info;
 }
 
+LevelInfo leafNullLevelInfo(LeafNullShape shape) {
+  LevelInfo info;
+  if (shape == LeafNullShape::kAllValidRepeated ||
+      shape == LeafNullShape::kMiddleNullRepeated) {
+    info.rep_level = 1;
+    info.repeated_ancestor_def_level = 1;
+    info.def_level = 2;
+  } else {
+    info.def_level = 2;
+  }
+  return info;
+}
+
+std::vector<int16_t> makeLeafNullLevels(
+    int32_t numLevels,
+    LeafNullShape shape) {
+  std::vector<int16_t> levels;
+  levels.reserve(numLevels);
+  const auto nullIndex = numLevels / 2;
+  switch (shape) {
+    case LeafNullShape::kAllValidFlat:
+      levels.assign(numLevels, 2);
+      break;
+    case LeafNullShape::kMiddleNullFlat:
+      levels.assign(numLevels, 2);
+      levels[nullIndex] = 1;
+      break;
+    case LeafNullShape::kAllValidRepeated:
+    case LeafNullShape::kMiddleNullRepeated:
+      for (int32_t i = 0; i < numLevels; ++i) {
+        if (i % 11 == 0) {
+          levels.push_back(0);
+        } else if (
+            shape == LeafNullShape::kMiddleNullRepeated && i == nullIndex) {
+          levels.push_back(1);
+        } else {
+          levels.push_back(2);
+        }
+      }
+      break;
+  }
+  return levels;
+}
+
 class LevelConversionBenchmark {
  public:
   explicit LevelConversionBenchmark(ListShape shape)
@@ -165,6 +219,243 @@ class LevelConversionBenchmark {
   ValidityBitmapInputOutput io_;
 };
 
+enum class FusedListShape {
+  kSingleElement,
+  kMixed,
+  kLong,
+};
+
+Levels makeFusedLevels(int32_t numLists, FusedListShape shape) {
+  std::mt19937 rng(kSeed);
+  std::uniform_int_distribution<int32_t> mixedLengthDist(0, 12);
+  std::uniform_int_distribution<int32_t> longLengthDist(32, 128);
+  std::uniform_int_distribution<int32_t> pct(0, 99);
+
+  Levels levels;
+  for (int32_t list = 0; list < numLists; ++list) {
+    if (list % 19 == 0) {
+      // Null struct and therefore null list.
+      levels.definitions.push_back(0);
+      levels.repetitions.push_back(0);
+      continue;
+    }
+    if (list % 17 == 0) {
+      // Present struct, empty list.
+      levels.definitions.push_back(2);
+      levels.repetitions.push_back(0);
+      continue;
+    }
+
+    int32_t length = 1;
+    if (shape == FusedListShape::kMixed) {
+      length = mixedLengthDist(rng);
+    } else if (shape == FusedListShape::kLong) {
+      length = longLengthDist(rng);
+    }
+    if (length == 0) {
+      levels.definitions.push_back(2);
+      levels.repetitions.push_back(0);
+      continue;
+    }
+
+    for (int32_t index = 0; index < length; ++index) {
+      levels.definitions.push_back(pct(rng) < 10 ? 3 : 4);
+      levels.repetitions.push_back(index == 0 ? 0 : 1);
+    }
+  }
+  return levels;
+}
+
+LevelInfo fusedListLevelInfo() {
+  LevelInfo info;
+  info.rep_level = 1;
+  info.def_level = 3;
+  return info;
+}
+
+LevelInfo fusedStructLevelInfo() {
+  LevelInfo info;
+  info.rep_level = 0;
+  info.def_level = 1;
+  return info;
+}
+
+LevelInfo unsupportedFusedStructLevelInfo() {
+  LevelInfo info = fusedStructLevelInfo();
+  info.rep_level = 1;
+  return info;
+}
+
+class FusedLevelConversionBenchmark {
+ public:
+  FusedLevelConversionBenchmark(int32_t numLists, FusedListShape shape)
+      : numLists_(numLists), levels_(makeFusedLevels(numLists, shape)) {
+    lengths_.resize(numLists);
+    listValidity_.resize(numLists);
+    structValidity_.resize(numLists);
+  }
+
+  int64_t separate() {
+    auto listOutput = makeOutput(listValidity_);
+    DefRepLevelsToListLengths(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        &listOutput,
+        lengths_.data());
+
+    auto structOutput = makeOutput(structValidity_);
+    DefRepLevelsToBitmap(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedStructLevelInfo(),
+        &structOutput);
+    return listOutput.values_read + structOutput.values_read;
+  }
+
+  int64_t fused() {
+    auto listOutput = makeOutput(listValidity_);
+    auto structOutput = makeOutput(structValidity_);
+    const auto converted = DefRepLevelsToListLengthsAndStructBitmap(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        fusedStructLevelInfo(),
+        &listOutput,
+        lengths_.data(),
+        &structOutput);
+    folly::doNotOptimizeAway(converted);
+    return listOutput.values_read + structOutput.values_read;
+  }
+
+  int64_t fallback() {
+    auto listOutput = makeOutput(listValidity_);
+    auto structOutput = makeOutput(structValidity_);
+    const auto converted = DefRepLevelsToListLengthsAndStructBitmap(
+        levels_.definitions.data(),
+        levels_.repetitions.data(),
+        levels_.definitions.size(),
+        fusedListLevelInfo(),
+        unsupportedFusedStructLevelInfo(),
+        &listOutput,
+        lengths_.data(),
+        &structOutput);
+    folly::doNotOptimizeAway(converted);
+    if (!converted) {
+      DefRepLevelsToListLengths(
+          levels_.definitions.data(),
+          levels_.repetitions.data(),
+          levels_.definitions.size(),
+          fusedListLevelInfo(),
+          &listOutput,
+          lengths_.data());
+
+      structOutput = makeOutput(structValidity_);
+      DefRepLevelsToBitmap(
+          levels_.definitions.data(),
+          levels_.repetitions.data(),
+          levels_.definitions.size(),
+          fusedStructLevelInfo(),
+          &structOutput);
+    }
+    return listOutput.values_read + structOutput.values_read;
+  }
+
+ private:
+  ValidityBitmapInputOutput makeOutput(std::vector<uint8_t>& validity) {
+    std::fill(validity.begin(), validity.end(), 0);
+    ValidityBitmapInputOutput output;
+    output.valid_bits = validity.data();
+    output.values_read_upper_bound = numLists_;
+    return output;
+  }
+
+  int32_t numLists_;
+  Levels levels_;
+  std::vector<int32_t> lengths_;
+  std::vector<uint8_t> listValidity_;
+  std::vector<uint8_t> structValidity_;
+};
+
+class LeafNullsBenchmark {
+ public:
+  LeafNullsBenchmark(int32_t numLevels, LeafNullShape shape)
+      : numLevels_(numLevels),
+        levelInfo_(leafNullLevelInfo(shape)),
+        definitions_(makeLeafNullLevels(numLevels, shape)) {
+    bitmap_.resize(numLevels);
+  }
+
+  int64_t materialize() {
+    resetBitmap();
+    auto output = makeOutput(0);
+    DefLevelsToBitmap(
+        definitions_.data(), definitions_.size(), levelInfo_, &output);
+    return output.values_read;
+  }
+
+  int64_t shortcut() {
+    resetBitmap();
+    bool allValidPrefix = true;
+    const int32_t firstSegmentEnd = numLevels_ / 2;
+    appendWithShortcut(0, firstSegmentEnd, allValidPrefix);
+    appendWithShortcut(firstSegmentEnd, numLevels_, allValidPrefix);
+    return valuesWritten_;
+  }
+
+ private:
+  int64_t appendWithShortcut(int32_t begin, int32_t end, bool& allValidPrefix) {
+    int64_t valuesRead = 0;
+    if (allValidPrefix &&
+        DefLevelsAreAllValid(
+            definitions_.data() + begin,
+            end - begin,
+            levelInfo_,
+            end - begin,
+            &valuesRead)) {
+      valuesWritten_ += valuesRead;
+      return valuesRead;
+    }
+
+    const auto startOffset = valuesWritten_;
+    bitmap_.resize((startOffset + end - begin + 7) / 8);
+    if (allValidPrefix) {
+      if (startOffset > 0) {
+        std::fill(bitmap_.begin(), bitmap_.end(), 0xff);
+      }
+      allValidPrefix = false;
+    }
+
+    auto output = makeOutput(startOffset);
+    DefLevelsToBitmap(
+        definitions_.data() + begin, end - begin, levelInfo_, &output);
+    valuesWritten_ += output.values_read;
+    return output.values_read;
+  }
+
+  void resetBitmap() {
+    std::fill(bitmap_.begin(), bitmap_.end(), 0);
+    valuesWritten_ = 0;
+  }
+
+  ValidityBitmapInputOutput makeOutput(int64_t offset) {
+    ValidityBitmapInputOutput output;
+    output.valid_bits = bitmap_.data();
+    output.valid_bits_offset = offset;
+    output.values_read_upper_bound = numLevels_;
+    return output;
+  }
+
+  int32_t numLevels_;
+  LevelInfo levelInfo_;
+  std::vector<int16_t> definitions_;
+  std::vector<uint8_t> bitmap_;
+  int64_t valuesWritten_{0};
+};
+
 LevelConversionBenchmark& benchmark(ListShape shape) {
   static LevelConversionBenchmark singleElement(ListShape::kSingleElement);
   static LevelConversionBenchmark mixed(ListShape::kMixed);
@@ -178,6 +469,31 @@ LevelConversionBenchmark& benchmark(ListShape shape) {
       return longLists;
   }
   return singleElement;
+}
+
+FusedLevelConversionBenchmark& fusedBenchmark(
+    int32_t numLists,
+    FusedListShape shape) {
+  using Key = std::pair<int32_t, FusedListShape>;
+  static std::map<Key, std::unique_ptr<FusedLevelConversionBenchmark>>
+      benchmarks;
+  const Key key{numLists, shape};
+  auto& instance = benchmarks[key];
+  if (!instance) {
+    instance = std::make_unique<FusedLevelConversionBenchmark>(numLists, shape);
+  }
+  return *instance;
+}
+
+LeafNullsBenchmark& leafNullsBenchmark(int32_t numLevels, LeafNullShape shape) {
+  using Key = std::pair<int32_t, LeafNullShape>;
+  static std::map<Key, std::unique_ptr<LeafNullsBenchmark>> benchmarks;
+  const Key key{numLevels, shape};
+  auto& instance = benchmarks[key];
+  if (!instance) {
+    instance = std::make_unique<LeafNullsBenchmark>(numLevels, shape);
+  }
+  return *instance;
 }
 
 void runOffsetsThenLengths(uint32_t iters, ListShape shape) {
@@ -195,6 +511,37 @@ void runDirectLengths(uint32_t iters, ListShape shape) {
   suspender.dismiss();
   while (iters--) {
     folly::doNotOptimizeAway(instance.directLengths());
+  }
+}
+
+void runFusedLevelConversion(
+    uint32_t iters,
+    int32_t numLists,
+    FusedListShape shape,
+    bool fused,
+    bool fallback = false) {
+  folly::BenchmarkSuspender suspender;
+  auto& instance = fusedBenchmark(numLists, shape);
+  suspender.dismiss();
+  while (iters--) {
+    folly::doNotOptimizeAway(
+        fallback    ? instance.fallback()
+            : fused ? instance.fused()
+                    : instance.separate());
+  }
+}
+
+void runLeafNulls(
+    uint32_t iters,
+    int32_t numLevels,
+    LeafNullShape shape,
+    bool shortcut) {
+  folly::BenchmarkSuspender suspender;
+  auto& instance = leafNullsBenchmark(numLevels, shape);
+  suspender.dismiss();
+  while (iters--) {
+    folly::doNotOptimizeAway(
+        shortcut ? instance.shortcut() : instance.materialize());
   }
 }
 
@@ -227,6 +574,52 @@ BENCHMARK(offsetsThenLengths_long, iters) {
 BENCHMARK_RELATIVE(directLengths_long, iters) {
   runDirectLengths(iters, ListShape::kLong);
 }
+
+BENCHMARK_DRAW_LINE();
+
+#define FUSED_LEVEL_CONVERSION_BENCHMARK(size, shape, name)                   \
+  BENCHMARK(separateStructAndList_##name##_##size, iters) {                   \
+    runFusedLevelConversion(iters, size, FusedListShape::shape, false);       \
+  }                                                                           \
+  BENCHMARK_RELATIVE(fusedStructAndList_##name##_##size, iters) {             \
+    runFusedLevelConversion(iters, size, FusedListShape::shape, true);        \
+  }                                                                           \
+  BENCHMARK_RELATIVE(fallbackStructAndList_##name##_##size, iters) {          \
+    runFusedLevelConversion(iters, size, FusedListShape::shape, false, true); \
+  }                                                                           \
+  BENCHMARK_DRAW_LINE()
+
+FUSED_LEVEL_CONVERSION_BENCHMARK(1024, kSingleElement, single);
+FUSED_LEVEL_CONVERSION_BENCHMARK(65536, kSingleElement, single);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1048576, kSingleElement, single);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1024, kMixed, mixed);
+FUSED_LEVEL_CONVERSION_BENCHMARK(65536, kMixed, mixed);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1048576, kMixed, mixed);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1024, kLong, long);
+FUSED_LEVEL_CONVERSION_BENCHMARK(65536, kLong, long);
+FUSED_LEVEL_CONVERSION_BENCHMARK(1048576, kLong, long);
+
+#define LEAF_NULLS_BENCHMARK(size, shape, name)                  \
+  BENCHMARK(leafNullsMaterialize_##name##_##size, iters) {       \
+    runLeafNulls(iters, size, LeafNullShape::shape, false);      \
+  }                                                              \
+  BENCHMARK_RELATIVE(leafNullsShortcut_##name##_##size, iters) { \
+    runLeafNulls(iters, size, LeafNullShape::shape, true);       \
+  }                                                              \
+  BENCHMARK_DRAW_LINE()
+
+LEAF_NULLS_BENCHMARK(4096, kAllValidFlat, allValidFlat);
+LEAF_NULLS_BENCHMARK(65536, kAllValidFlat, allValidFlat);
+LEAF_NULLS_BENCHMARK(1048576, kAllValidFlat, allValidFlat);
+LEAF_NULLS_BENCHMARK(4096, kMiddleNullFlat, middleNullFlat);
+LEAF_NULLS_BENCHMARK(65536, kMiddleNullFlat, middleNullFlat);
+LEAF_NULLS_BENCHMARK(1048576, kMiddleNullFlat, middleNullFlat);
+LEAF_NULLS_BENCHMARK(4096, kAllValidRepeated, allValidRepeated);
+LEAF_NULLS_BENCHMARK(65536, kAllValidRepeated, allValidRepeated);
+LEAF_NULLS_BENCHMARK(1048576, kAllValidRepeated, allValidRepeated);
+LEAF_NULLS_BENCHMARK(4096, kMiddleNullRepeated, middleNullRepeated);
+LEAF_NULLS_BENCHMARK(65536, kMiddleNullRepeated, middleNullRepeated);
+LEAF_NULLS_BENCHMARK(1048576, kMiddleNullRepeated, middleNullRepeated);
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);

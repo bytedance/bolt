@@ -71,10 +71,6 @@ namespace {
   return algo;
 }
 
-// Schema-mismatch checks for ReaderBase::convertType.
-constexpr const char* kTypeMappingErrorFmtStr =
-    "Schema mismatch, Column: [{}], From Kind: {}, To Kind: {}";
-
 std::string parquetSourceTypeName(const thrift::SchemaElement& schemaElement) {
   if (schemaElement.__isset.converted_type) {
     return fmt::format(
@@ -125,8 +121,17 @@ bool acceptsDateFile(const bytedance::bolt::TypePtr& t) {
       t->kind() == bytedance::bolt::TypeKind::VARCHAR;
 }
 
-bool acceptsFloatingPointFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+bool acceptsRealFileForReaderCast(const bytedance::bolt::TypePtr& t) {
   return t->kind() == bytedance::bolt::TypeKind::VARCHAR;
+}
+
+bool acceptsDoubleFileForReaderCast(const bytedance::bolt::TypePtr& t) {
+#ifdef SPARK_COMPATIBLE
+  return t->kind() == bytedance::bolt::TypeKind::BIGINT ||
+      acceptsRealFileForReaderCast(t);
+#else
+  return acceptsRealFileForReaderCast(t);
+#endif
 }
 
 // Compatibility predicate for Parquet INT32-physical source columns
@@ -1070,7 +1075,8 @@ TypePtr ReaderBase::convertType(
             isCompatibleFunc(requestedType->asArray().elementType());
         if (!(strictMatch || unannotatedArrayMatch)) {
           BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
-              kTypeMappingErrorFmtStr,
+              "{} Column: [{}], From Kind: {}, To Kind: {}",
+              kParquetTypeMappingErrorPrefix,
               schemaElement.name,
               parquetSourceTypeName(schemaElement),
               mapTypeKindToName(requestedType->kind())));
@@ -1279,13 +1285,13 @@ TypePtr ReaderBase::convertType(
       case thrift::Type::type::FLOAT:
         checkRequested([](const TypePtr& t) {
           return t->kind() == TypeKind::REAL || t->kind() == TypeKind::DOUBLE ||
-              acceptsFloatingPointFileForReaderCast(t);
+              acceptsRealFileForReaderCast(t);
         });
         return REAL();
       case thrift::Type::type::DOUBLE:
         checkRequested([](const TypePtr& t) {
           return t->kind() == TypeKind::DOUBLE ||
-              acceptsFloatingPointFileForReaderCast(t);
+              acceptsDoubleFileForReaderCast(t);
         });
         return DOUBLE();
       case thrift::Type::type::BYTE_ARRAY:
@@ -1361,6 +1367,7 @@ void ReaderBase::scheduleRowGroups(
   // clear old RowGroup
   if (currentGroup >= 1) {
     inputs_.erase(rowGroupIds[currentGroup - 1]);
+    reader.releaseRowGroupReader();
   }
   // load current RowGroup and prefetch new RowGroup
   auto numRowGroupsToLoad = std::min(

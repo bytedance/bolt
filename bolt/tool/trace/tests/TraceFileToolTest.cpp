@@ -250,13 +250,14 @@ TEST_F(TraceFileToolTest, basic) {
     SCOPED_TRACE(testData.debugString());
     const auto testDir = TempDirectoryPath::create();
     const auto destRoot = testDir->getPath();
-    FLAGS_source_root_dir = traceRoot;
-    FLAGS_dest_root_dir = destRoot;
-    FLAGS_trace_query_id = testData.traceQueryId;
-    FLAGS_trace_task_id = testData.traceTaskId;
-    FLAGS_trace_file_op = "copy";
+    FLAGS_bolt_trace_file_source_root_dir = traceRoot;
+    FLAGS_bolt_trace_file_destination_root_dir = destRoot;
+    FLAGS_bolt_trace_file_query_id = testData.traceQueryId;
+    FLAGS_bolt_trace_file_task_id = testData.traceTaskId;
+    FLAGS_bolt_trace_file_operation = "copy";
     TraceFileToolRunner runner;
-    if (FLAGS_trace_query_id.empty() && !FLAGS_trace_task_id.empty()) {
+    if (FLAGS_bolt_trace_file_query_id.empty() &&
+        !FLAGS_bolt_trace_file_task_id.empty()) {
       BOLT_ASSERT_THROW(
           runner.init(),
           "Trace query ID is empty but trace task ID is not empty");

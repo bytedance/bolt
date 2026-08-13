@@ -33,6 +33,7 @@
 
 #include <limits>
 #include "bolt/common/base/Crc.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/common/memory/RawVector.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -43,7 +44,6 @@
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/VectorTypeUtils.h"
 
-DECLARE_int32(shuffle_zstd_compression_level);
 namespace bytedance::bolt::serializer::presto {
 namespace {
 constexpr int8_t kCompressedBitMask = 1;
@@ -3526,8 +3526,8 @@ class PrestoVectorSerializer : public VectorSerializer {
         codec_(
             compressionKind == common::CompressionKind::CompressionKind_ZSTD
                 ? folly::io::zstd::getCodec(folly::io::zstd::Options(
-                      FLAGS_shuffle_zstd_compression_level
-                          ? FLAGS_shuffle_zstd_compression_level
+                      FLAGS_bolt_shuffle_zstd_compression_level
+                          ? FLAGS_bolt_shuffle_zstd_compression_level
                           : 3))
                 : common::compressionKindToCodec(compressionKind)) {
     const auto types = rowType->children();
@@ -3686,20 +3686,6 @@ std::unique_ptr<BatchVectorSerializer> PrestoVectorSerde::createBatchSerializer(
   const auto prestoOptions = toPrestoOptions(options);
   return std::make_unique<PrestoBatchVectorSerializer>(
       pool, prestoOptions.useLosslessTimestamp, prestoOptions.compressionKind);
-}
-
-void PrestoVectorSerde::deprecatedSerializeEncoded(
-    const RowVectorPtr& vector,
-    StreamArena* streamArena,
-    const Options* options,
-    OutputStream* out) {
-  auto prestoOptions = toPrestoOptions(options);
-  auto serializer = std::make_unique<PrestoVectorSerializer>(
-      vector,
-      streamArena,
-      prestoOptions.useLosslessTimestamp,
-      prestoOptions.compressionKind);
-  serializer->flushEncoded(vector, out);
 }
 
 void PrestoVectorSerde::deserialize(

@@ -476,18 +476,12 @@ void PageReader::readPageDefLevels() {
   BOLT_CHECK_NOT_NULL(
       wideDefineDecoder_, "parquet read error with maxDefine = {}", maxDefine_);
   wideDefineDecoder_->GetBatch(definitionLevels_.data(), numRepDefsInPage_);
-  leafNulls_.resize(bits::nwords(numRepDefsInPage_));
-  numRowsInPage_ = getLengthsAndNulls(
-      LevelMode::kNulls,
-      leafInfo_,
-      0,
-      numRepDefsInPage_,
-      numRepDefsInPage_,
-      nullptr,
-      leafNulls_.data(),
-      0);
-  leafNullsSize_ = numRowsInPage_;
+  leafNullsSize_ = 0;
+  leafNullsAllValidPrefix_ = true;
   numLeafNullsConsumed_ = 0;
+  erasedLeafNullWords_ = 0;
+  numRowsInPage_ = appendLeafNullsFromLevels(0, numRepDefsInPage_);
+  leafNullsSize_ = numRowsInPage_;
 }
 
 void PageReader::updateRowInfoAfterPageSkipped() {
@@ -738,6 +732,7 @@ void PageReader::prepareDataPageV2(
 }
 
 void PageReader::prepareDictionary(const PageHeader& pageHeader) {
+  pageData_ = nullptr;
   dictionary_.numValues = pageHeader.dictionary_page_header.num_values;
   dictionaryEncoding_ = pageHeader.dictionary_page_header.encoding;
   dictionary_.sorted = pageHeader.dictionary_page_header.__isset.is_sorted &&
@@ -749,13 +744,18 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
   cryptoCtx_.startDecryptWithDictionaryPage = false;
   int32_t compressedLen = pageHeader.compressed_page_size;
   int32_t uncompressedLen = pageHeader.uncompressed_page_size;
+  bool decryptedPage = false;
   if (codec_ != thrift::CompressionCodec::UNCOMPRESSED) {
     pageData_ = readBytes(compressedLen, pageBuffer_);
     if (cryptoCtx_.dataDecryptor != nullptr) {
       decryptPageData(compressedLen);
+      decryptedPage = true;
     }
     pageData_ = decompressData(
         pageData_, compressedLen, pageHeader.uncompressed_page_size);
+    if (decryptedPage) {
+      decryptionBuffer_.reset();
+    }
   } else {
     if (cryptoCtx_.dataDecryptor != nullptr) {
       pageData_ = readBytes(uncompressedLen, pageBuffer_);
@@ -859,14 +859,19 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
           AlignedBuffer::allocate<StringView>(dictionary_.numValues, &pool_);
       auto numBytes = uncompressedLen;
       auto values = dictionary_.values->asMutable<StringView>();
-      dictionary_.strings = AlignedBuffer::allocate<char>(numBytes, &pool_);
-      auto strings = dictionary_.strings->asMutable<char>();
-      if (pageData_) {
-        memcpy(strings, pageData_, numBytes);
+      if (auto ownedPageBuffer = takeOwnedPageBuffer(pageData_, numBytes)) {
+        dictionary_.strings = std::move(ownedPageBuffer);
       } else {
-        dwio::common::readBytes(
-            numBytes, inputStream_.get(), strings, bufferStart_, bufferEnd_);
+        dictionary_.strings = AlignedBuffer::allocate<char>(numBytes, &pool_);
+        auto strings = dictionary_.strings->asMutable<char>();
+        if (pageData_) {
+          memcpy(strings, pageData_, numBytes);
+        } else {
+          dwio::common::readBytes(
+              numBytes, inputStream_.get(), strings, bufferStart_, bufferEnd_);
+        }
       }
+      auto strings = dictionary_.strings->asMutable<char>();
       auto header = strings;
       for (auto i = 0; i < dictionary_.numValues; ++i) {
         auto length = *reinterpret_cast<const int32_t*>(header);
@@ -948,6 +953,27 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
       BOLT_UNSUPPORTED(
           "Parquet type {} not supported for dictionary", parquetType);
   }
+  pageData_ = nullptr;
+  pageBuffer_.reset();
+  decompressedData_.reset();
+  decryptionBuffer_.reset();
+}
+
+BufferPtr PageReader::takeOwnedPageBuffer(
+    const char* FOLLY_NULLABLE data,
+    size_t size) {
+  if (data == nullptr) {
+    return nullptr;
+  }
+  if (decompressedData_ && data == decompressedData_->as<char>()) {
+    decompressedData_->setSize(size);
+    return std::move(decompressedData_);
+  }
+  if (decryptionBuffer_ && data == decryptionBuffer_->as<char>()) {
+    decryptionBuffer_->setSize(size);
+    return std::move(decryptionBuffer_);
+  }
+  return nullptr;
 }
 
 void PageReader::makeFilterCache(dwio::common::ScanState& state) {
@@ -1001,16 +1027,8 @@ void PageReader::preloadPageRepDefs(const bool keepRepDefRawData) {
       repeatDecoder_->GetBatch(
           repetitionLevels_.data() + begin, numRepDefsInPage_);
     }
-    leafNulls_.resize(bits::nwords(leafNullsSize_ + numRepDefsInPage_));
-    auto numLeaves = getLengthsAndNulls(
-        LevelMode::kNulls,
-        leafInfo_,
-        begin,
-        begin + numRepDefsInPage_,
-        numRepDefsInPage_,
-        nullptr,
-        leafNulls_.data(),
-        leafNullsSize_);
+    auto numLeaves =
+        appendLeafNullsFromLevels(begin, begin + numRepDefsInPage_);
     leafNullsSize_ += numLeaves;
     numLeavesInPage_.push_back(numLeaves);
   }
@@ -1178,7 +1196,8 @@ void PageReader::decodeRepDefsFromBuffer() {
   int64_t erasedBits = erasedLeafNullWords_ * WordBits;
   BOLT_CHECK_LE(numLeafNullsConsumed_, leafNullsSize_ + erasedBits);
   // clear consumed nulls
-  if (numLeafNullsConsumed_ - erasedBits > WordBits) {
+  if (!leafNullsAllValidPrefix_ &&
+      numLeafNullsConsumed_ - erasedBits > WordBits) {
     auto consumedWords = bits::nwords(numLeafNullsConsumed_ - erasedBits) - 1;
     auto totalNullWords = bits::nwords(leafNullsSize_);
     auto unConsumedNullWords = totalNullWords - consumedWords;
@@ -1259,20 +1278,42 @@ void PageReader::decodeRepDefsFromBuffer() {
     defineDecoder.GetBatch(definitionLevels_.data() + begin, numRepDefsInPage);
     rawData += defineLength;
 
-    leafNulls_.resize(bits::nwords(leafNullsSize_ + numRepDefsInPage));
-    auto numLeaves = getLengthsAndNulls(
-        LevelMode::kNulls,
-        leafInfo_,
-        begin,
-        begin + numRepDefsInPage,
-        numRepDefsInPage,
-        nullptr,
-        leafNulls_.data(),
-        leafNullsSize_);
+    auto numLeaves = appendLeafNullsFromLevels(begin, begin + numRepDefsInPage);
     leafNullsSize_ += numLeaves;
     numLeavesInPage_.push_back(numLeaves);
   }
   preloadedRepDefs_.pop_front();
+}
+
+int32_t PageReader::appendLeafNullsFromLevels(int32_t begin, int32_t end) {
+  int64_t valuesRead = 0;
+  if (leafNullsAllValidPrefix_ &&
+      arrow::DefLevelsAreAllValid(
+          definitionLevels_.data() + begin,
+          end - begin,
+          leafInfo_,
+          end - begin,
+          &valuesRead)) {
+    return static_cast<int32_t>(valuesRead);
+  }
+
+  const auto startOffset = leafNullsSize_;
+  leafNulls_.resize(bits::nwords(startOffset + end - begin));
+  if (leafNullsAllValidPrefix_) {
+    if (startOffset > 0) {
+      bits::fillBits(leafNulls_.data(), 0, startOffset, bits::kNotNull);
+    }
+    leafNullsAllValidPrefix_ = false;
+  }
+  return getLengthsAndNulls(
+      LevelMode::kNulls,
+      leafInfo_,
+      begin,
+      end,
+      end - begin,
+      nullptr,
+      leafNulls_.data(),
+      startOffset);
 }
 
 int32_t PageReader::getLengthsAndNulls(
@@ -1322,6 +1363,25 @@ int32_t PageReader::getLengthsAndNulls(
       bits.values_read,
       maxItems);
   return static_cast<int32_t>(bits.values_read);
+}
+
+bool PageReader::getListLengthsAndStructNulls(
+    const arrow::LevelInfo& listInfo,
+    const arrow::LevelInfo& structInfo,
+    int32_t begin,
+    int32_t end,
+    arrow::ValidityBitmapInputOutput* listBits,
+    int32_t* lengths,
+    arrow::ValidityBitmapInputOutput* structBits) const {
+  return arrow::DefRepLevelsToListLengthsAndStructBitmap(
+      definitionLevels_.data() + begin,
+      repetitionLevels_.data() + begin,
+      end - begin,
+      listInfo,
+      structInfo,
+      listBits,
+      lengths,
+      structBits);
 }
 
 void PageReader::makeDecoder() {
@@ -1440,6 +1500,11 @@ int32_t PageReader::skipNulls(int32_t numValues) {
   if (!defineDecoder_ && isTopLevel_) {
     return numValues;
   }
+  if (!isTopLevel_ && leafNullsAllValidPrefix_) {
+    BOLT_CHECK_LE(numLeafNullsConsumed_ + numValues, leafNullsSize_);
+    numLeafNullsConsumed_ += numValues;
+    return numValues;
+  }
   BOLT_CHECK(1 == maxDefine_ || !leafNulls_.empty());
   dwio::common::ensureCapacity<bool>(tempNulls_, numValues, &pool_);
   tempNulls_->setSize(0);
@@ -1511,6 +1576,13 @@ PageReader::readNulls(int32_t numValues, BufferPtr& buffer) {
     defineDecoder_->readBits(
         numValues, buffer->asMutable<uint64_t>(), &allOnes);
     return allOnes ? nullptr : buffer->as<uint64_t>();
+  }
+
+  if (leafNullsAllValidPrefix_) {
+    BOLT_CHECK_LE(numLeafNullsConsumed_ + numValues, leafNullsSize_);
+    numLeafNullsConsumed_ += numValues;
+    buffer = nullptr;
+    return nullptr;
   }
 
   const int64_t erasedBits = erasedLeafNullWords_ * 64;
@@ -1642,7 +1714,7 @@ bool PageReader::rowsForPage(
     rows = folly::Range<const vector_size_t*>(
         rowsCopy_->data(), rowsCopy_->size());
   }
-  reader.prepareNulls(rows, nulls != nullptr, currentVisitorRow_);
+  reader.prepareOutputNulls(rows, nulls != nullptr, currentVisitorRow_);
   currentVisitorRow_ += numToVisit;
   firstUnvisited_ = visitBase_ + visitorRows_[currentVisitorRow_ - 1] + 1;
   return true;
@@ -1773,6 +1845,9 @@ void PageReader::decryptPageData(int32_t& compressedLen) {
       compressedLen,
       const_cast<uint8_t*>(decryptionBuffer_->as<uint8_t>()),
       decryptionBuffer_->size());
+  if (pageBuffer_ && pageData_ == pageBuffer_->as<char>()) {
+    pageBuffer_.reset();
+  }
   pageData_ = decryptionBuffer_->as<char>();
 }
 

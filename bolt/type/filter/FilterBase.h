@@ -39,6 +39,9 @@
 
 namespace bytedance::bolt::common {
 
+inline constexpr const char* kBigintRangeTestBytesRangeErrorPrefix =
+    "BigintRange::testBytesRange() is not supported.";
+
 enum class FilterKind {
   kAlwaysFalse,
   kAlwaysTrue,
@@ -908,6 +911,14 @@ class BigintRange final : public Filter {
     }
 
     return !(min > upper_ || max < lower_);
+  }
+
+  bool testBytesRange(
+      std::optional<std::string_view> /*min*/,
+      std::optional<std::string_view> /*max*/,
+      bool /*hasNull*/) const final {
+    BOLT_UNSUPPORTED(
+        "{} Filter: {}", kBigintRangeTestBytesRangeErrorPrefix, toString());
   }
 
   int64_t lower() const {

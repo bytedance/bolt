@@ -33,11 +33,7 @@
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/caching/SsdFileTracker.h"
 #include "bolt/common/file/File.h"
-
-#include <gflags/gflags.h>
-
-DECLARE_bool(ssd_odirect);
-DECLARE_bool(ssd_verify_write);
+#include "bolt/common/flags/BoltFlags.h"
 namespace bytedance::bolt::cache {
 
 // A 64 bit word describing a SSD cache entry in an SsdFile. The low

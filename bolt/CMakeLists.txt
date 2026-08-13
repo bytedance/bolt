@@ -81,7 +81,7 @@ function(bolt_add_library target_name)
       "exec/prefixsort/tests/utils"
       "duckdb/conversion")
 
-  set(BASE_COMP_LIST "buffer" "core" "type" "common" "vector" "row" "serializers" "version" "flag_definitions")
+  set(BASE_COMP_LIST "buffer" "core" "type" "common" "vector" "row" "serializers" "version")
 
   set(EXECUTION_COMP_LIST "exec" "jit" "expression")
 
@@ -165,8 +165,6 @@ add_subdirectory(type)
 add_subdirectory(vector)
 add_subdirectory(row)
 add_subdirectory(version)
-add_subdirectory(flag_definitions)
-
 if(${BOLT_ENABLE_SPARK_COMPATIBLE})
   add_subdirectory(shuffle)
 endif()
@@ -276,6 +274,7 @@ if(${BOLT_BUILD_TEST_UTILS})
   add_library(bolt_testutils ${BOLT_TESTUTILS_OBJECT_TARGETS})
   target_link_libraries(bolt_testutils PUBLIC
                                   bolt_engine
+                                  bolt_test_flags
                                   $<$<CONFIG:Debug>:bolt_debug_util>
                                   duckdb::duckdb
                                   GTest::gtest

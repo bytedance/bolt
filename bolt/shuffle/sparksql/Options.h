@@ -206,6 +206,7 @@ struct ShuffleWriterMetrics {
   // total time for shuffle write, including split, evict, write, compress
   int64_t shuffleWriteTime{0};
   int64_t dataSize{0};
+  int64_t peakBytes{0};
   std::vector<int64_t> partitionLengths{};
   std::vector<int64_t> rawPartitionLengths{}; // Uncompressed size.
 };

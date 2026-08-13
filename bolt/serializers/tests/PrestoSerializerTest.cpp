@@ -291,25 +291,6 @@ class PrestoSerializerTest
     return stats;
   }
 
-  void serializeEncoded(
-      const RowVectorPtr& rowVector,
-      std::ostream* output,
-      const serializer::presto::PrestoVectorSerde::PrestoOptions*
-          serdeOptions) {
-    bytedance::bolt::serializer::presto::PrestoOutputStreamListener listener;
-    OStreamOutputStream out(output, &listener);
-    StreamArena arena{pool_.get()};
-    auto paramOptions = getParamSerdeOptions(serdeOptions);
-
-    for (const auto& child : rowVector->children()) {
-      paramOptions.encodings.push_back(child->encoding());
-    }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    serde_->deprecatedSerializeEncoded(rowVector, &arena, &paramOptions, &out);
-#pragma GCC diagnostic pop
-  }
-
   void assertEqualEncoding(
       const RowVectorPtr& expected,
       const RowVectorPtr& actual) {
@@ -359,17 +340,6 @@ class PrestoSerializerTest
     }
 
     assertEqualVectors(expected, result);
-  }
-
-  void testEncodedRoundTrip(
-      const RowVectorPtr& data,
-      const serializer::presto::PrestoVectorSerde::PrestoOptions* serdeOptions =
-          nullptr) {
-    std::ostringstream out;
-    serializeEncoded(data, &out, serdeOptions);
-    const auto serialized = out.str();
-
-    verifySerializedEncodedData(data, serialized, serdeOptions);
   }
 
   void serializeBatch(
@@ -630,12 +600,6 @@ TEST_P(PrestoSerializerTest, longDecimal) {
     vector->setNull(i, true);
   }
   testRoundTrip(vector);
-}
-
-// Test that hierarchically encoded columns (rows) have their encodings
-// preserved.
-TEST_P(PrestoSerializerTest, encodings) {
-  testEncodedRoundTrip(encodingsTestVector());
 }
 
 // Test that hierarchically encoded columns (rows) have their encodings

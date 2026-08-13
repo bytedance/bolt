@@ -36,6 +36,7 @@
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/vector/tests/utils/VectorMaker.h"
 
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
@@ -49,6 +50,12 @@ const uint32_t kNumRowsPerBatch = 60000;
 const uint32_t kNumBatches = 50;
 const uint32_t kNumRowsPerRowGroup = 10000;
 const double kFilterErrorMargin = 0.2;
+
+enum class AllValidReadShape {
+  kTopLevelBigInt,
+  kList,
+  kMap,
+};
 
 class ParquetReaderBenchmark {
  public:
@@ -278,6 +285,120 @@ class ParquetReaderBenchmark {
   RuntimeStatistics runtimeStats_;
 };
 
+class AllValidReadBenchmark {
+ public:
+  explicit AllValidReadBenchmark(AllValidReadShape shape)
+      : rootPool_(memory::memoryManager()->addRootPool(
+            fmt::format("AllValidReadBenchmark-{}", shapeName(shape)))),
+        leafPool_(rootPool_->addLeafChild(
+            fmt::format("AllValidReadBenchmark-{}", shapeName(shape)))),
+        fileName_(fmt::format("all_valid_{}.parquet", shapeName(shape))),
+        vectorMaker_(leafPool_.get()),
+        rowType_(makeRowType(shape)) {
+    writeFile(makeData(shape));
+  }
+
+  uint64_t read(uint32_t nextSize) {
+    dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+    auto input = std::make_unique<BufferedInput>(
+        std::make_shared<LocalReadFile>(fileFolder_->path + "/" + fileName_),
+        readerOpts.getMemoryPool());
+    auto reader = std::make_unique<ParquetReader>(std::move(input), readerOpts);
+
+    RowReaderOptions rowReaderOpts;
+    rowReaderOpts.select(std::make_shared<ColumnSelector>(
+        rowType_, std::vector<std::string>{rowType_->nameOf(0)}));
+    auto scanSpec = std::make_shared<ScanSpec>("");
+    scanSpec->addAllChildFields(*rowType_);
+    rowReaderOpts.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+
+    VectorPtr result = BaseVector::create(rowType_, 0, leafPool_.get());
+    uint64_t rows = 0;
+    while (rowReader->next(nextSize, result)) {
+      auto rowVector = result->asUnchecked<RowVector>();
+      auto child = rowVector->childAt(0)->loadedVector();
+      rows += rowVector->size();
+      folly::doNotOptimizeAway(child->retainedSize());
+    }
+    return rows;
+  }
+
+ private:
+  static const char* shapeName(AllValidReadShape shape) {
+    switch (shape) {
+      case AllValidReadShape::kTopLevelBigInt:
+        return "bigint";
+      case AllValidReadShape::kList:
+        return "list";
+      case AllValidReadShape::kMap:
+        return "map";
+    }
+    return "unknown";
+  }
+
+  static RowTypePtr makeRowType(AllValidReadShape shape) {
+    switch (shape) {
+      case AllValidReadShape::kTopLevelBigInt:
+        return ROW({"c0"}, {BIGINT()});
+      case AllValidReadShape::kList:
+        return ROW({"c0"}, {ARRAY(BIGINT())});
+      case AllValidReadShape::kMap:
+        return ROW({"c0"}, {MAP(INTEGER(), BIGINT())});
+    }
+    return ROW({"c0"}, {BIGINT()});
+  }
+
+  RowVectorPtr makeData(AllValidReadShape shape) {
+    switch (shape) {
+      case AllValidReadShape::kTopLevelBigInt:
+        return vectorMaker_.rowVector({vectorMaker_.flatVector<int64_t>(
+            kNumRowsPerBatch, [](vector_size_t row) { return row; })});
+      case AllValidReadShape::kList:
+        return vectorMaker_.rowVector({vectorMaker_.arrayVector<int64_t>(
+            kNumRowsPerBatch,
+            [](vector_size_t /*row*/) { return 4; },
+            [](vector_size_t row, vector_size_t index) {
+              return static_cast<int64_t>(row * 10 + index);
+            })});
+      case AllValidReadShape::kMap:
+        return vectorMaker_.rowVector({vectorMaker_.mapVector<int32_t, int64_t>(
+            kNumRowsPerBatch,
+            [](vector_size_t /*row*/) { return 4; },
+            [](vector_size_t /*row*/, vector_size_t index) {
+              return static_cast<int32_t>(index);
+            },
+            [](vector_size_t row, vector_size_t index) {
+              return static_cast<int64_t>(row * 10 + index);
+            })});
+    }
+    return nullptr;
+  }
+
+  void writeFile(const RowVectorPtr& data) {
+    const auto path = fileFolder_->path + "/" + fileName_;
+    auto localWriteFile = std::make_unique<LocalWriteFile>(path, true, false);
+    auto sink =
+        std::make_unique<WriteFileSink>(std::move(localWriteFile), path);
+    bytedance::bolt::parquet::WriterOptions options;
+    options.enableDictionary = false;
+    options.memoryPool = rootPool_.get();
+    bytedance::bolt::parquet::Writer writer(std::move(sink), options, rowType_);
+    for (uint32_t i = 0; i < kNumBatches; ++i) {
+      writer.write(data);
+    }
+    writer.close();
+  }
+
+  std::shared_ptr<memory::MemoryPool> rootPool_;
+  std::shared_ptr<memory::MemoryPool> leafPool_;
+  const std::string fileName_;
+  const std::shared_ptr<bytedance::bolt::exec::test::TempDirectoryPath>
+      fileFolder_ = bytedance::bolt::exec::test::TempDirectoryPath::create();
+  test::VectorMaker vectorMaker_;
+  RowTypePtr rowType_;
+};
+
 void run(
     uint32_t,
     const std::string& columnName,
@@ -291,6 +412,31 @@ void run(
   BIGINT()->toString();
   benchmark.readSingleColumn(
       columnName, type, 0, filterRateX100, nullsRateX100, nextSize);
+}
+
+AllValidReadBenchmark& allValidReadBenchmark(AllValidReadShape shape) {
+  static AllValidReadBenchmark topLevelBigInt(
+      AllValidReadShape::kTopLevelBigInt);
+  static AllValidReadBenchmark list(AllValidReadShape::kList);
+  static AllValidReadBenchmark map(AllValidReadShape::kMap);
+  switch (shape) {
+    case AllValidReadShape::kTopLevelBigInt:
+      return topLevelBigInt;
+    case AllValidReadShape::kList:
+      return list;
+    case AllValidReadShape::kMap:
+      return map;
+  }
+  return topLevelBigInt;
+}
+
+void runAllValidRead(uint32_t iters, AllValidReadShape shape) {
+  folly::BenchmarkSuspender suspender;
+  auto& benchmark = allValidReadBenchmark(shape);
+  suspender.dismiss();
+  while (iters--) {
+    folly::doNotOptimizeAway(benchmark.read(50000));
+  }
 }
 
 #define PARQUET_BENCHMARKS_FILTER_NULLS(_type_, _name_, _filter_, _null_) \
@@ -413,6 +559,19 @@ PARQUET_BENCHMARKS(BIGINT(), BigInt);
 PARQUET_BENCHMARKS(DOUBLE(), Double);
 PARQUET_BENCHMARKS_NO_FILTER(MAP(BIGINT(), BIGINT()), Map);
 PARQUET_BENCHMARKS_NO_FILTER(ARRAY(BIGINT()), List);
+
+BENCHMARK(AllValidTopLevelBigInt_next_50k_plain, iters) {
+  runAllValidRead(iters, AllValidReadShape::kTopLevelBigInt);
+}
+
+BENCHMARK(AllValidList_next_50k_plain, iters) {
+  runAllValidRead(iters, AllValidReadShape::kList);
+}
+
+BENCHMARK(AllValidMap_next_50k_plain, iters) {
+  runAllValidRead(iters, AllValidReadShape::kMap);
+}
+BENCHMARK_DRAW_LINE();
 
 // TODO: Add all data types
 

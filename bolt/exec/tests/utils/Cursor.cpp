@@ -31,8 +31,21 @@
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/common/file/FileSystems.h"
 
+#include <folly/system/HardwareConcurrency.h>
+
+#include <algorithm>
 #include <filesystem>
+
 namespace bytedance::bolt::exec::test {
+
+namespace {
+constexpr unsigned kMaxTestExecutorThreads = 4;
+}
+
+unsigned testExecutorConcurrency() {
+  return std::min(
+      kMaxTestExecutorThreads, std::max(1u, folly::hardware_concurrency()));
+}
 
 bool waitForTaskDriversToFinish(exec::Task* task, uint64_t maxWaitMicros) {
   BOLT_USER_CHECK(!task->isRunning());
@@ -231,7 +244,7 @@ class MultiThreadedTaskCursor : public TaskCursorBase {
       : TaskCursorBase(
             params,
             std::make_shared<folly::CPUThreadPoolExecutor>(
-                std::thread::hardware_concurrency())),
+                testExecutorConcurrency())),
         maxDrivers_{params.maxDrivers},
         numConcurrentSplitGroups_{params.numConcurrentSplitGroups},
         numSplitGroups_{params.numSplitGroups} {

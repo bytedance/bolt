@@ -44,7 +44,10 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::serializer;
 using namespace bytedance::bolt::test;
 
-DEFINE_string(codec, "none", "Compression codec to use in the benchmark.");
+DEFINE_string(
+    bolt_benchmark_codec,
+    "none",
+    "Compression codec to use in the benchmark.");
 
 namespace {
 
@@ -804,7 +807,7 @@ int main(int argc, char** argv) {
   folly::init(&argc, &argv);
   bytedance::bolt::memory::initializeMemoryManager({});
   try {
-    Bench bench(FLAGS_codec);
+    Bench bench(FLAGS_bolt_benchmark_codec);
     bench.runAll();
   } catch (const std::exception& e) {
     std::cerr << "Benchmark failed: " << e.what() << std::endl;

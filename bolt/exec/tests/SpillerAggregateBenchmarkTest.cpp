@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
   serializer::presto::PrestoVectorSerde::registerVectorSerde();
   filesystems::registerLocalFileSystem();
 
-  auto spillerTypeName = FLAGS_spiller_benchmark_spiller_type;
+  auto spillerTypeName = FLAGS_bolt_benchmark_spiller_spiller_type;
   std::transform(
       spillerTypeName.begin(),
       spillerTypeName.end(),

@@ -269,25 +269,6 @@ class ArrowSerializerTest
     return stats;
   }
 
-  void serializeEncoded(
-      const RowVectorPtr& rowVector,
-      std::ostream* output,
-      const serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions*
-          serdeOptions) {
-    serializer::arrowserde::ArrowOutputStreamListener listener;
-    OStreamOutputStream out(output, &listener);
-    StreamArena arena{pool_.get()};
-    auto paramOptions = getParamSerdeOptions(serdeOptions);
-
-    for (const auto& child : rowVector->children()) {
-      paramOptions.encodings.push_back(child->encoding());
-    }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    serde_->deprecatedSerializeEncoded(rowVector, &arena, &paramOptions, &out);
-#pragma GCC diagnostic pop
-  }
-
   void assertEqualEncoding(
       const RowVectorPtr& expected,
       const RowVectorPtr& actual) {
@@ -337,17 +318,6 @@ class ArrowSerializerTest
     }
 
     assertEqualVectors(expected, result);
-  }
-
-  void testEncodedRoundTrip(
-      const RowVectorPtr& data,
-      const serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions*
-          serdeOptions = nullptr) {
-    std::ostringstream out;
-    serializeEncoded(data, &out, serdeOptions);
-    const auto serialized = out.str();
-
-    verifySerializedEncodedData(data, serialized, serdeOptions);
   }
 
   void serializeBatch(
@@ -611,21 +581,14 @@ TEST_P(ArrowSerializerTest, longDecimal) {
 }
 
 // Test that hierarchically encoded columns (rows) have their encodings
-// preserved.
-TEST_P(ArrowSerializerTest, encodings) {
-  GTEST_SKIP() << "Using deprecated function, not yet support";
-  testEncodedRoundTrip(encodingsTestVector());
-}
-
-// Test that hierarchically encoded columns (rows) have their encodings
-// preserved by the PrestoBatchVectorSerializer.
+// preserved by the ArrowBatchVectorSerializer.
 TEST_P(ArrowSerializerTest, encodingsBatchVectorSerializer) {
-  GTEST_SKIP() << "Using deprecated function, not yet support";
+  GTEST_SKIP() << "Not yet supported by ArrowBatchVectorSerializer";
   testBatchVectorSerializerRoundTrip(encodingsTestVector());
 }
 
 TEST_P(ArrowSerializerTest, scatterEncoded) {
-  GTEST_SKIP() << "Using deprecated function, not yet support";
+  GTEST_SKIP() << "Not yet supported by ArrowBatchVectorSerializer";
   // Makes a struct with nulls and constant/dictionary encoded children. The
   // children need to get gaps where the parent struct has a null.
   VectorFuzzer::Options opts;

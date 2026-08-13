@@ -17,14 +17,15 @@
 #include <fmt/format.h>
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
+#include <algorithm>
+#include <random>
 #include <string>
 
 #include <arrow/api.h>
 #include <arrow/array.h>
 #include <arrow/c/bridge.h>
-#include <arrow/testing/gtest_util.h>
-#include <arrow/testing/random.h>
 
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -37,6 +38,8 @@ using namespace bytedance::bolt;
 
 void mockSchemaRelease(ArrowSchema*) {}
 void mockArrayRelease(ArrowArray*) {}
+
+memory::MemoryManager memoryManager;
 
 class ArrowBridgeArrayImportBenchmark {
  protected:
@@ -84,8 +87,7 @@ class ArrowBridgeArrayImportAsOwnerBenchmark
   }
 };
 
-std::shared_ptr<memory::MemoryPool> pool{
-    memory::deprecatedAddDefaultLeafMemoryPool()};
+std::shared_ptr<memory::MemoryPool> pool{memoryManager.addLeafPool()};
 
 void runImportFromArrowAsViewer(
     uint32_t,
@@ -111,58 +113,64 @@ ArrowArray stringViewArray_halfNull;
 ArrowSchema stringSchema;
 ArrowSchema stringViewSchema;
 
+template <typename Builder>
 void createStringArray(
-    arrow::random::RandomArrayGenerator& gen,
+    std::mt19937& generator,
     ArrowSchema& schema,
     ArrowArray& data,
     size_t minStringLength,
     size_t maxStringLength,
-    double null_prob) {
-  std::shared_ptr<arrow::Array> random_strings =
-      gen.String(kRowsPerVector, minStringLength, maxStringLength, null_prob);
-  ASSERT_OK(arrow::ExportType(*random_strings->type(), &schema));
-  ASSERT_OK(arrow::ExportArray(*random_strings, &data));
-}
+    double nullProbability) {
+  Builder builder;
+  std::uniform_int_distribution<size_t> lengthDistribution(
+      minStringLength, maxStringLength);
+  std::uniform_int_distribution<int> characterDistribution('a', 'z');
+  std::bernoulli_distribution nullDistribution(nullProbability);
 
-void createStringViewArray(
-    arrow::random::RandomArrayGenerator& gen,
-    ArrowSchema& schema,
-    ArrowArray& data,
-    size_t minStringLength,
-    size_t maxStringLength,
-    double null_prob) {
-  std::shared_ptr<arrow::Array> random_strings = gen.StringView(
-      kRowsPerVector, minStringLength, maxStringLength, null_prob);
-  ASSERT_OK(arrow::ExportType(*random_strings->type(), &schema));
-  ASSERT_OK(arrow::ExportArray(*random_strings, &data));
+  for (int32_t i = 0; i < kRowsPerVector; ++i) {
+    if (nullDistribution(generator)) {
+      ASSERT_OK(builder.AppendNull());
+      continue;
+    }
+
+    std::string value(lengthDistribution(generator), '\0');
+    std::generate(value.begin(), value.end(), [&]() {
+      return static_cast<char>(characterDistribution(generator));
+    });
+    ASSERT_OK(builder.Append(value));
+  }
+
+  ASSERT_OK_AND_ASSIGN(auto randomStrings, builder.Finish());
+  ASSERT_OK(arrow::ExportType(*randomStrings->type(), &schema));
+  ASSERT_OK(arrow::ExportArray(*randomStrings, &data));
 }
 
 void createArrowArrays() {
-  arrow::random::RandomArrayGenerator generator(42);
+  std::mt19937 generator(42);
   size_t minStringLength = 0;
   size_t maxStringLength = 50;
-  createStringArray(
+  createStringArray<arrow::StringBuilder>(
       generator,
       stringSchema,
       stringArray,
       minStringLength,
       maxStringLength,
       0);
-  createStringViewArray(
+  createStringArray<arrow::StringViewBuilder>(
       generator,
       stringViewSchema,
       stringViewArray,
       minStringLength,
       maxStringLength,
       0);
-  createStringArray(
+  createStringArray<arrow::StringBuilder>(
       generator,
       stringSchema,
       stringArray_halfNull,
       minStringLength,
       maxStringLength,
       0.5);
-  createStringViewArray(
+  createStringArray<arrow::StringViewBuilder>(
       generator,
       stringViewSchema,
       stringViewArray_halfNull,

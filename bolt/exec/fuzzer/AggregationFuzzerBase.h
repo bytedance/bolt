@@ -34,6 +34,7 @@
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/Split.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/fuzzer/InputGenerator.h"
 #include "bolt/exec/fuzzer/ReferenceQueryRunner.h"
 #include "bolt/exec/fuzzer/ResultVerifier.h"
@@ -42,33 +43,6 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
-DECLARE_int32(steps);
-
-DECLARE_int32(duration_sec);
-
-DECLARE_int32(batch_size);
-
-DECLARE_int32(num_batches);
-
-DECLARE_int32(max_num_varargs);
-
-DECLARE_double(null_ratio);
-
-DECLARE_string(repro_persist_path);
-
-DECLARE_bool(persist_and_run_once);
-
-DECLARE_bool(log_signature_stats);
-
-DECLARE_int32(string_length);
-
-DECLARE_bool(string_variable_length);
-
-DECLARE_bool(enable_string_incremental_generation);
-
-DECLARE_bool(enable_duplicates);
-
-DECLARE_bool(enable_dictionary);
 namespace bytedance::bolt::exec::test {
 
 using bytedance::bolt::fuzzer::CallableSignature;
@@ -90,8 +64,8 @@ class AggregationFuzzerBase {
       : customVerificationFunctions_{customVerificationFunctions},
         customInputGenerators_{customInputGenerators},
         queryConfigs_{queryConfigs},
-        persistAndRunOnce_{FLAGS_persist_and_run_once},
-        reproPersistPath_{FLAGS_repro_persist_path},
+        persistAndRunOnce_{FLAGS_bolt_fuzzer_persist_and_run_once},
+        reproPersistPath_{FLAGS_bolt_fuzzer_repro_persist_path},
         referenceQueryRunner_{std::move(referenceQueryRunner)},
         vectorFuzzer_{getFuzzerOptions(timestampPrecision), pool_.get()} {
     filesystems::registerLocalFileSystem();
@@ -189,14 +163,14 @@ class AggregationFuzzerBase {
   static VectorFuzzer::Options getFuzzerOptions(
       VectorFuzzer::Options::TimestampPrecision timestampPrecision) {
     VectorFuzzer::Options opts;
-    opts.vectorSize = FLAGS_batch_size;
-    opts.stringVariableLength = FLAGS_string_variable_length;
-    opts.stringLength = FLAGS_string_length;
-    opts.nullRatio = FLAGS_null_ratio;
+    opts.vectorSize = FLAGS_bolt_fuzzer_batch_size;
+    opts.stringVariableLength = FLAGS_bolt_fuzzer_string_variable_length;
+    opts.stringLength = FLAGS_bolt_fuzzer_string_length;
+    opts.nullRatio = FLAGS_bolt_fuzzer_null_ratio;
     opts.enableStringIncrementalGeneration =
-        FLAGS_enable_string_incremental_generation;
-    opts.enableDuplicates = FLAGS_enable_duplicates;
-    opts.enableDictionary = FLAGS_enable_dictionary;
+        FLAGS_bolt_fuzzer_enable_string_incremental_generation;
+    opts.enableDuplicates = FLAGS_bolt_fuzzer_enable_duplicates;
+    opts.enableDictionary = FLAGS_bolt_fuzzer_enable_dictionary;
     opts.timestampPrecision = timestampPrecision;
     opts.charEncodings = std::vector<UTF8CharList>{
         UTF8CharList::ASCII,
@@ -327,16 +301,17 @@ class AggregationFuzzerBase {
 };
 
 // Returns true if the elapsed time is greater than or equal to
-// FLAGS_duration_sec. If FLAGS_duration_sec is 0, returns true if the
-// iterations is greater than or equal to FLAGS_steps.
+// FLAGS_bolt_fuzzer_duration_sec. If FLAGS_bolt_fuzzer_duration_sec is 0,
+// returns true if the iterations is greater than or equal to
+// FLAGS_bolt_fuzzer_steps.
 template <typename T>
 bool isDone(size_t i, T startTime) {
-  if (FLAGS_duration_sec > 0) {
+  if (FLAGS_bolt_fuzzer_duration_sec > 0) {
     std::chrono::duration<double> elapsed =
         std::chrono::system_clock::now() - startTime;
-    return elapsed.count() >= FLAGS_duration_sec;
+    return elapsed.count() >= FLAGS_bolt_fuzzer_duration_sec;
   }
-  return i >= FLAGS_steps;
+  return i >= FLAGS_bolt_fuzzer_steps;
 }
 
 // Returns whether type is supported in TableScan. Empty Row type and Unknown

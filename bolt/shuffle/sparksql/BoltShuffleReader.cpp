@@ -409,7 +409,8 @@ std::unique_ptr<InMemoryPayload> BoltColumnarBatchDeserializer::drainSaved() {
         std::move(savedPayload),
         memoryPool_,
         INT64_MAX,
-        INT64_MIN);
+        INT64_MIN,
+        /*sourceBuffersResizable=*/true);
     BOLT_CHECK(result.ok(), "Failed to merge payloads");
     payload = std::move(result.ValueUnsafe());
   }

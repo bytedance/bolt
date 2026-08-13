@@ -40,20 +40,11 @@
 
 #include "bolt/exec/PartitionFunction.h"
 #include "bolt/exec/fuzzer/AggregationFuzzerBase.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/expression/fuzzer/FuzzerToolkit.h"
 #include "bolt/vector/VectorPrinter.h"
 #include "bolt/vector/VectorSaver.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
-
-DEFINE_bool(
-    enable_sorted_aggregations,
-    true,
-    "When true, generates plans with aggregations over sorted inputs");
-
-DEFINE_bool(
-    enable_window_reference_verification,
-    false,
-    "When true, the results of the window aggregation are compared to reference DB results");
 
 using bytedance::bolt::fuzzer::CallableSignature;
 using bytedance::bolt::fuzzer::SignatureTemplate;
@@ -261,7 +252,7 @@ AggregationFuzzer::AggregationFuzzer(
 
   if (persistAndRunOnce_ && reproPersistPath_.empty()) {
     std::cout
-        << "--repro_persist_path must be specified if --persist_and_run_once is specified"
+        << "--bolt_fuzzer_repro_persist_path must be specified if --bolt_fuzzer_persist_and_run_once is specified"
         << std::endl;
     exit(1);
   }
@@ -332,8 +323,8 @@ bool supportsDistinctInputs(const CallableSignature& signature) {
 
 void AggregationFuzzer::go() {
   BOLT_CHECK(
-      FLAGS_steps > 0 || FLAGS_duration_sec > 0,
-      "Either --steps or --duration_sec needs to be greater than zero.")
+      FLAGS_bolt_fuzzer_steps > 0 || FLAGS_bolt_fuzzer_duration_sec > 0,
+      "Either --bolt_fuzzer_steps or --bolt_fuzzer_duration_sec needs to be greater than zero.")
 
   auto startTime = std::chrono::system_clock::now();
   size_t iteration = 0;
@@ -384,12 +375,13 @@ void AggregationFuzzer::go() {
             call,
             input,
             customVerification,
-            FLAGS_enable_window_reference_verification);
+            FLAGS_bolt_fuzzer_enable_window_reference_verification);
         if (failed) {
           signatureWithStats.second.numFailed++;
         }
       } else {
-        const bool sortedInputs = FLAGS_enable_sorted_aggregations &&
+        const bool sortedInputs =
+            FLAGS_bolt_fuzzer_enable_sorted_aggregations &&
             canSortInputs(signature) && vectorFuzzer_.coinToss(0.2);
 
         // Exclude approx_xxx aggregations since their verifiers may not be able
@@ -473,7 +465,7 @@ void AggregationFuzzer::go() {
 
     if (persistAndRunOnce_) {
       LOG(WARNING)
-          << "Iteration succeeded with --persist_and_run_once flag enabled "
+          << "Iteration succeeded with --bolt_fuzzer_persist_and_run_once flag enabled "
              "(expecting crash failure)";
       exit(0);
     }

@@ -10,6 +10,7 @@ services:
       context: .
       dockerfile: Dockerfile.conanserver
     image: localhost:5000/conan-server:latest
+    restart: unless-stopped
     env_file:
       - variables.env
     ports:
@@ -19,6 +20,21 @@ services:
     command: ["/usr/local/bin/start-conan-server.sh"]
   bolt-registry:
     image: registry:2
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q --spider
+          --header='Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
+          http://localhost:5000/v2/bolt-ci/manifests/20260114 &&
+          wget -q --spider
+          --header='Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
+          http://localhost:5000/v2/conan-server/manifests/latest
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     ports:
       - '5000:5000'
     volumes:
@@ -28,6 +44,9 @@ services:
       service: base-runner
       file: runner-base-compose.yml
     privileged: true
+    depends_on:
+      bolt-registry:
+        condition: service_healthy
     scale: 4
     volumes:
       - ${HOST_DATA_DIR}/runner-data/docker:${DOCKER_DATA_DIR}
@@ -45,7 +64,11 @@ services:
       service: base-runner
       file: runner-base-compose.yml
     privileged: true
-    scale: 5
+    depends_on:
+      bolt-registry:
+        condition: service_healthy
+    # Keep one compatibility runner until workflows created from the old main drain.
+    scale: 1
     volumes:
       - ${HOST_DATA_DIR}/runner-data/docker:/data/docker
       - ${HOST_DATA_DIR}/runner-data/small/workspace:/data/workspace

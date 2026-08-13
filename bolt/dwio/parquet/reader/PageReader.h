@@ -49,6 +49,7 @@
 namespace bytedance::bolt::parquet {
 constexpr int16_t kNonPageOrdinal = static_cast<int16_t>(-1);
 constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
+struct PageReaderTestPeer;
 
 struct CryptoContext {
   CryptoContext(
@@ -139,6 +140,15 @@ class PageReader {
       int32_t* FOLLY_NULLABLE lengths,
       uint64_t* FOLLY_NULLABLE nulls,
       int64_t nullsStartIndex) const;
+
+  bool getListLengthsAndStructNulls(
+      const arrow::LevelInfo& listInfo,
+      const arrow::LevelInfo& structInfo,
+      int32_t begin,
+      int32_t end,
+      arrow::ValidityBitmapInputOutput* listBits,
+      int32_t* FOLLY_NONNULL lengths,
+      arrow::ValidityBitmapInputOutput* structBits) const;
 
   /// Applies 'visitor' to values in the ColumnChunk of 'this'. The
   /// operation to perform and The operand rows are given by
@@ -306,11 +316,14 @@ class PageReader {
       int64_t row,
       const bool keepRepDefRawData);
   void makeDecoder();
+  BufferPtr takeOwnedPageBuffer(const char* FOLLY_NULLABLE data, size_t size);
 
   // For a non-top level leaf, reads the defs and sets 'leafNulls_' and
   // 'numRowsInPage_' accordingly. This is used for non-top level leaves when
   // 'hasChunkRepDefs_' is false.
   void readPageDefLevels();
+
+  int32_t appendLeafNullsFromLevels(int32_t begin, int32_t end);
 
   // Returns a pointer to contiguous space for the next 'size' bytes
   // from current position. Copies data into 'copy' if the range
@@ -524,6 +537,8 @@ class PageReader {
   // Number of valid bits in 'leafNulls_'
   int64_t leafNullsSize_{0};
 
+  bool leafNullsAllValidPrefix_{true};
+
   // Number of leaf nulls read.
   int64_t numLeafNullsConsumed_{0};
 
@@ -638,6 +653,8 @@ class PageReader {
   // Tracks output count for the current physical page. -1 means there is no
   // active page being accounted.
   int32_t currentPageNumValues_{-1};
+
+  friend struct PageReaderTestPeer;
 };
 
 FOLLY_ALWAYS_INLINE dwio::common::compression::CompressionOptions

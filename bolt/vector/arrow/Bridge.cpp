@@ -37,6 +37,7 @@
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DictionaryVector.h"
@@ -45,7 +46,6 @@
 #include "bolt/vector/VectorTypeUtils.h"
 #include "bolt/vector/arrow/Abi.h"
 
-DEFINE_bool(collect_import_time, false, "run q1");
 namespace bytedance::bolt {
 
 namespace {
@@ -3033,7 +3033,7 @@ VectorPtr importFromArrowImplWithMeasure(
     bool isViewer) {
   auto static zero_epoch = decltype(conv_begin)::duration::zero();
   auto this_begin = std::chrono::high_resolution_clock::now();
-  if (FLAGS_collect_import_time) {
+  if (FLAGS_bolt_collect_import_time) {
     const std::lock_guard<std::mutex> lock(g_conv_mutex_begin);
     if (conv_begin.time_since_epoch() == zero_epoch) {
       conv_begin = this_begin;
@@ -3043,7 +3043,7 @@ VectorPtr importFromArrowImplWithMeasure(
   auto result =
       importFromArrowImpl(options, arrowSchema, arrowArray, pool, isViewer);
 
-  if (FLAGS_collect_import_time) {
+  if (FLAGS_bolt_collect_import_time) {
     auto this_end = std::chrono::high_resolution_clock::now();
     auto diff = std::chrono::duration_cast<std::chrono::nanoseconds>(
         this_end - this_begin);

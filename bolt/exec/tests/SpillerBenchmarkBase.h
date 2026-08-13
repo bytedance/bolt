@@ -38,17 +38,16 @@
 #include "bolt/type/Type.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DECLARE_string(spiller_benchmark_compression_kind);
-DECLARE_string(spiller_benchmark_name);
-DECLARE_string(spiller_benchmark_path);
-DECLARE_string(spiller_benchmark_spiller_type);
-DECLARE_uint32(spiller_benchmark_num_key_columns);
-DECLARE_uint32(spiller_benchmark_num_spill_vectors);
-DECLARE_uint32(spiller_benchmark_spill_executor_size);
-DECLARE_uint32(spiller_benchmark_spill_vector_size);
-DECLARE_uint64(spiller_benchmark_max_spill_file_size);
-DECLARE_uint64(spiller_benchmark_min_spill_run_size);
-DECLARE_uint64(spiller_benchmark_write_buffer_size);
+DECLARE_string(bolt_benchmark_spiller_compression_kind);
+DECLARE_string(bolt_benchmark_spiller_name);
+DECLARE_string(bolt_benchmark_spiller_path);
+DECLARE_string(bolt_benchmark_spiller_spiller_type);
+DECLARE_uint32(bolt_benchmark_spiller_num_key_columns);
+DECLARE_uint32(bolt_benchmark_spiller_num_spill_vectors);
+DECLARE_uint32(bolt_benchmark_spiller_spill_executor_size);
+DECLARE_uint32(bolt_benchmark_spiller_spill_vector_size);
+DECLARE_uint64(bolt_benchmark_spiller_max_spill_file_size);
+DECLARE_uint64(bolt_benchmark_spiller_write_buffer_size);
 namespace bytedance::bolt::exec::test {
 // This test measures the spill input overhead in spill join & probe.
 class SpillerBenchmarkBase {

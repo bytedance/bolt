@@ -393,13 +393,15 @@ int64_t OverAcquireMemoryTarget::borrow(int64_t size) {
     try {
       overTarget_->borrow(diff); // we don't have to check the returned value
     } catch (const BoltException& e) {
-      BOLT_FAIL(
-          "Over-acquire memory target borrow failed, granted {}, try borrowing {}, current {}, ratio {}, error {}",
+      LOG(ERROR) << fmt::format(
+          "Over-acquire memory target borrow failed, granted {}, try "
+          "borrowing {}, current {}, ratio {}, error {}",
           granted,
           expectedOverAcquired,
           overAcquired,
           ratio_,
           e.message());
+      throw;
     }
   }
   return granted;

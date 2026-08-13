@@ -30,13 +30,10 @@
 
 #include "bolt/exec/fuzzer/WindowFuzzer.h"
 
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
-DEFINE_bool(
-    enable_window_reference_verification,
-    false,
-    "When true, the results of the window aggregation are compared to reference DB results");
 namespace bytedance::bolt::exec::test {
 
 namespace {
@@ -132,8 +129,8 @@ WindowFuzzer::generateSortingKeysAndOrders(
 
 void WindowFuzzer::go() {
   BOLT_CHECK(
-      FLAGS_steps > 0 || FLAGS_duration_sec > 0,
-      "Either --steps or --duration_sec needs to be greater than zero.")
+      FLAGS_bolt_fuzzer_steps > 0 || FLAGS_bolt_fuzzer_duration_sec > 0,
+      "Either --bolt_fuzzer_steps or --bolt_fuzzer_duration_sec needs to be greater than zero.")
 
   auto startTime = std::chrono::system_clock::now();
   size_t iteration = 0;
@@ -192,7 +189,7 @@ void WindowFuzzer::go() {
         input,
         customVerification,
         customVerifier,
-        FLAGS_enable_window_reference_verification);
+        FLAGS_bolt_fuzzer_enable_window_reference_verification);
     if (failed) {
       signatureWithStats.second.numFailed++;
     }
@@ -202,7 +199,7 @@ void WindowFuzzer::go() {
 
     if (persistAndRunOnce_) {
       LOG(WARNING)
-          << "Iteration succeeded with --persist_and_run_once flag enabled "
+          << "Iteration succeeded with --bolt_fuzzer_persist_and_run_once flag enabled "
              "(expecting crash failure)";
       exit(0);
     }

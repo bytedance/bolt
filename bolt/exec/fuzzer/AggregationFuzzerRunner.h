@@ -60,26 +60,28 @@ namespace bytedance::bolt::exec::test {
 ///
 /// The common usage pattern is as following:
 ///
-///  $ ./bolt_aggregate_fuzzer_test --steps 10000
+///  $ ./bolt_aggregate_fuzzer_test --bolt_fuzzer_steps 10000
 ///
 /// The important flags that control AggregateFuzzer's behavior are:
 ///
-///  --steps: how many iterations to run.
-///  --duration_sec: alternatively, for how many seconds it should run (takes
-///          precedence over --steps).
-///  --seed: pass a deterministic seed to reproduce the behavior (each iteration
+///  --bolt_fuzzer_steps: how many iterations to run.
+///  --bolt_fuzzer_duration_sec: alternatively, for how many seconds it should
+///  run (takes
+///          precedence over --bolt_fuzzer_steps).
+///  --bolt_fuzzer_seed: pass a deterministic seed to reproduce the behavior
+///  (each iteration
 ///          will print a seed as part of the logs).
 ///  --v=1: verbose logging; print a lot more details about the execution.
-///  --only: restrict the functions to fuzz.
-///  --batch_size: size of input vector batches generated.
+///  --bolt_fuzzer_only: restrict the functions to fuzz.
+///  --bolt_fuzzer_batch_size: size of input vector batches generated.
 ///
 /// e.g:
 ///
 ///  $ ./bolt_aggregation_fuzzer_test \
-///         --steps 10000 \
-///         --seed 123 \
+///         --bolt_fuzzer_steps 10000 \
+///         --bolt_fuzzer_seed 123 \
 ///         --v=1 \
-///         --only "min,max"
+///         --bolt_fuzzer_only "min,max"
 class AggregationFuzzerRunner {
  public:
   static int run(

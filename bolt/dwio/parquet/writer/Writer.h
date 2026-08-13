@@ -155,6 +155,10 @@ struct WriterOptions {
   int64_t parquet_block_size = -1;
   std::vector<int32_t> expectedRowsInEachBlock;
   int64_t dataPageSize = 1'024 * 1'024;
+  // A page is flushed when either dataPageSize or this logical row limit is
+  // reached. The row limit protects highly compressible and all-null columns,
+  // whose encoded byte size may otherwise stay small for billions of values.
+  int64_t maxRowsPerDataPage = arrow::kDefaultMaxRowsPerPage;
   int64_t dictionaryPageSizeLimit = 1'024 * 1'024;
   // Growth ratio passed to ArrowDataBufferSink. The default value is a
   // heuristic borrowed from

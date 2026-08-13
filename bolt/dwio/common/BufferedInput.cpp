@@ -34,8 +34,6 @@
 #include "bolt/dwio/common/BufferedInput.h"
 #include "folly/io/Cursor.h"
 
-DEFINE_bool(wsVRLoad, false, "Use WS VRead API to load");
-
 using ::bytedance::bolt::common::Region;
 namespace bytedance::bolt::dwio::common {
 
@@ -127,7 +125,7 @@ bool BufferedInput::useVRead() const {
   // to wsVRLoad=true we may change the value of this GFLAG programmatically
   // from a config update so we can rollback fast from config without the need
   // of a deployment
-  return wsVRLoad_.value_or(FLAGS_wsVRLoad);
+  return wsVRLoad_.value_or(FLAGS_bolt_use_ws_vread);
 }
 
 // Sort regions and enqueuedToOffset in the same way

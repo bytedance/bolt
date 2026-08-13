@@ -47,11 +47,11 @@ void JoinSpillInputBenchmarkBase::setUp() {
     return spillDir_;
   };
   spillConfig_.updateAndCheckSpillLimitCb = [&](uint64_t) {};
-  spillConfig_.fileNamePrefix = FLAGS_spiller_benchmark_name;
-  spillConfig_.writeBufferSize = FLAGS_spiller_benchmark_write_buffer_size;
+  spillConfig_.fileNamePrefix = FLAGS_bolt_benchmark_spiller_name;
+  spillConfig_.writeBufferSize = FLAGS_bolt_benchmark_spiller_write_buffer_size;
   spillConfig_.executor = executor_.get();
   spillConfig_.compressionKind =
-      stringToCompressionKind(FLAGS_spiller_benchmark_compression_kind);
+      stringToCompressionKind(FLAGS_bolt_benchmark_spiller_compression_kind);
   spillConfig_.maxSpillRunRows = 0;
   spillConfig_.fileCreateConfig = {};
 
@@ -60,7 +60,7 @@ void JoinSpillInputBenchmarkBase::setUp() {
       rowType_,
       HashBitRange{29, 29},
       &spillConfig_,
-      FLAGS_spiller_benchmark_max_spill_file_size);
+      FLAGS_bolt_benchmark_spiller_max_spill_file_size);
   spiller_->setPartitionsSpilled({0});
   spiller_->setSpillConfig(&spillConfig_);
 }

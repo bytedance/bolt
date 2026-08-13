@@ -34,7 +34,7 @@
 #include <optional>
 
 #include "bolt/common/base/BitUtil.h"
-DECLARE_bool(bmi2); // NOLINT
+#include "bolt/common/flags/BoltFlags.h"
 namespace bytedance {
 namespace bolt {
 namespace test {
@@ -136,7 +136,7 @@ void runScatterBits(int32_t n, bool isSimple) {
   std::vector<uint64_t> mask;
   std::vector<uint64_t> target;
   BENCHMARK_SUSPEND {
-    FLAGS_bmi2 = !isSimple; // NOLINT
+    FLAGS_bolt_enable_bmi2 = !isSimple; // NOLINT
     setupScatterBits(source, numSource, mask, target);
   }
   auto sourceBits = reinterpret_cast<const char*>(source.data());
@@ -145,7 +145,7 @@ void runScatterBits(int32_t n, bool isSimple) {
     bits::scatterBits(
         numSource, target.size() * 64, sourceBits, mask.data(), targetBits);
   }
-  FLAGS_bmi2 = true; // NOLINT
+  FLAGS_bolt_enable_bmi2 = true; // NOLINT
 }
 
 BENCHMARK(BM_scatterBitsSimple, n) {

@@ -33,6 +33,7 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/caching/AsyncDataCache.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -66,8 +67,6 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::common::test;
 using namespace bytedance::bolt::exec::test;
-
-DECLARE_int32(cache_prefetch_min_pct);
 
 namespace {
 void verifyCacheStats(
@@ -1571,6 +1570,63 @@ TEST_F(TableScanTest, batchSize) {
 
     EXPECT_EQ(opStats.outputVectors, 16);
   }
+}
+
+TEST_F(TableScanTest, readsAfterReaderOutputReuse) {
+  const vector_size_t size = 10;
+  auto c0 = makeFlatVector<int64_t>(size, folly::identity);
+  auto c1 = makeFlatVector<std::string>(
+      size, [](auto row) { return fmt::format("value-{}", row); });
+  auto c2 = makeRowVector({
+      makeFlatVector<int32_t>(size, [](auto row) { return row * 3; }),
+  });
+  auto offsets = [&]() {
+    std::vector<vector_size_t> values(size);
+    std::iota(values.begin(), values.end(), 0);
+    return values;
+  };
+  auto keys = makeFlatVector<int32_t>(size, folly::identity);
+  auto ints = makeFlatVector<int64_t>(size, [](auto row) { return row * 11; });
+  auto nestedRows = makeRowVector({
+      makeFlatVector<int64_t>(size, [](auto row) { return row * 7; }),
+  });
+  auto arrayInts = makeArrayVector(offsets(), ints);
+  auto mapInts = makeMapVector(offsets(), keys, ints);
+  auto arrayRows = makeArrayVector(offsets(), nestedRows);
+  auto mapRows = makeMapVector(offsets(), keys, nestedRows);
+  auto arrayArrayInts = makeArrayVector(offsets(), arrayInts);
+  auto mapArrayInts = makeMapVector(offsets(), keys, arrayInts);
+  auto arrayMapRows = makeArrayVector(offsets(), mapRows);
+  auto mapArrayRows = makeMapVector(offsets(), keys, arrayRows);
+  auto mapArrayMapRows = makeMapVector(offsets(), keys, arrayMapRows);
+  auto arrayMapArrayRows = makeArrayVector(offsets(), mapArrayRows);
+  auto data = makeRowVector(std::vector<VectorPtr>{
+      c0,
+      c1,
+      c2,
+      arrayInts,
+      mapInts,
+      arrayRows,
+      mapRows,
+      arrayArrayInts,
+      mapArrayInts,
+      arrayMapRows,
+      mapArrayRows,
+      mapArrayMapRows,
+      arrayMapArrayRows,
+  });
+
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->path, data);
+
+  auto plan = tableScanNode(asRowType(data->type()));
+  auto task = AssertQueryBuilder(plan)
+                  .splits(makeHiveConnectorSplits({filePath}))
+                  .config(QueryConfig::kMaxOutputBatchRows, "3")
+                  .assertResults(data);
+
+  const auto opStats = task->taskStats().pipelineStats[0].operatorStats[0];
+  EXPECT_GT(opStats.outputVectors, 1);
 }
 
 // Test that adding the same split with the same sequence id does not cause
@@ -4580,16 +4636,14 @@ TEST_F(TableScanTest, orcDecimalFilter) {
   ASSERT_TRUE(amount);
 }
 
-TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareDisable) {
-  auto guard = folly::makeGuard([]() {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
-  });
+DEBUG_ONLY_TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareDisable) {
   // expect throw exception
   std::string errorMsg = "testing throw exception when prepare";
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::connector::hive::SplitReader::prepareSplit",
+      std::function<void(SplitReader*)>(
+          [&](SplitReader*) { throw std::runtime_error(errorMsg); }));
   try {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = errorMsg;
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
     auto rowType = asRowType(data->type());
@@ -4612,16 +4666,14 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareDisable) {
   }
 }
 
-TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareAttempt3) {
-  auto guard = folly::makeGuard([]() {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
-  });
+DEBUG_ONLY_TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareAttempt3) {
   // expect throw exception
   std::string errorMsg = "testing throw exception when prepare";
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::connector::hive::SplitReader::prepareSplit",
+      std::function<void(SplitReader*)>(
+          [&](SplitReader*) { throw std::runtime_error(errorMsg); }));
   try {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = errorMsg;
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
     auto rowType = asRowType(data->type());
@@ -4651,15 +4703,13 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareAttempt3) {
   }
 }
 
-TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareCanIgnore) {
-  auto guard = folly::makeGuard([]() {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
-  });
+DEBUG_ONLY_TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareCanIgnore) {
   // can be ignore
   std::string errorMsg = "testing throw exception when prepare";
-  FLAGS_testing_only_set_scan_exception_mesg_for_prepare = errorMsg;
-  FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::connector::hive::SplitReader::prepareSplit",
+      std::function<void(SplitReader*)>(
+          [&](SplitReader*) { throw std::runtime_error(errorMsg); }));
   auto iota = makeFlatVector<int32_t>(10, folly::identity);
   auto data = makeRowVector({iota, makeRowVector({iota})});
   auto rowType = asRowType(data->type());
@@ -4685,14 +4735,12 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenPrepareCanIgnore) {
       .assertResults(expected);
 }
 
-TEST_F(TableScanTest, ignoreCorruptFileWhenNextDisable) {
-  auto guard = folly::makeGuard([]() {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
-  });
-  FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
+DEBUG_ONLY_TEST_F(TableScanTest, ignoreCorruptFileWhenNextDisable) {
   std::string errorMsg = "ignore corrupt file when next";
-  FLAGS_testing_only_set_scan_exception_mesg_for_next = errorMsg;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::connector::hive::SplitReader::next",
+      std::function<void(SplitReader*)>(
+          [&](SplitReader*) { throw std::runtime_error(errorMsg); }));
   try {
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
@@ -4719,14 +4767,12 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextDisable) {
   }
 }
 
-TEST_F(TableScanTest, ignoreCorruptFileWhenNextAttempt3) {
-  auto guard = folly::makeGuard([]() {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
-  });
-  FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
+DEBUG_ONLY_TEST_F(TableScanTest, ignoreCorruptFileWhenNextAttempt3) {
   std::string errorMsg = "ignore corrupt file when next";
-  FLAGS_testing_only_set_scan_exception_mesg_for_next = errorMsg;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::connector::hive::SplitReader::next",
+      std::function<void(SplitReader*)>(
+          [&](SplitReader*) { throw std::runtime_error(errorMsg); }));
   try {
     auto iota = makeFlatVector<int32_t>(10, folly::identity);
     auto data = makeRowVector({iota, makeRowVector({iota})});
@@ -4757,14 +4803,12 @@ TEST_F(TableScanTest, ignoreCorruptFileWhenNextAttempt3) {
   }
 }
 
-TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
-  auto guard = folly::makeGuard([]() {
-    FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
-    FLAGS_testing_only_set_scan_exception_mesg_for_next = "";
-  });
-  FLAGS_testing_only_set_scan_exception_mesg_for_prepare = "";
+DEBUG_ONLY_TEST_F(TableScanTest, ignoreCorruptFileWhenNextCanIgnore) {
   std::string errorMsg = "ignore corrupt file when next";
-  FLAGS_testing_only_set_scan_exception_mesg_for_next = errorMsg;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::connector::hive::SplitReader::next",
+      std::function<void(SplitReader*)>(
+          [&](SplitReader*) { throw std::runtime_error(errorMsg); }));
   auto iota = makeFlatVector<int32_t>(10, folly::identity);
   auto data = makeRowVector({iota, makeRowVector({iota})});
   auto rowType = asRowType(data->type());

@@ -43,49 +43,45 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
 DEFINE_string(
-    spiller_benchmark_name,
+    bolt_benchmark_spiller_name,
     "SpillerBenchmarkTest",
     "The name of this benchmark");
 DEFINE_string(
-    spiller_benchmark_path,
+    bolt_benchmark_spiller_path,
     "",
     "The directory path for spilling. e.g. with '/path/to/dir' provided, spill "
     "file like '/path/to/dir/SpillerBenchmarkTest-spill-0-0-0' will be "
     "created.");
 DEFINE_string(
-    spiller_benchmark_compression_kind,
+    bolt_benchmark_spiller_compression_kind,
     "none",
     "The compression kind to compress spill rows before write to disk");
 DEFINE_string(
-    spiller_benchmark_spiller_type,
+    bolt_benchmark_spiller_spiller_type,
     "AGGREGATE_INPUT",
     "The spiller type name.");
 DEFINE_uint32(
-    spiller_benchmark_num_spill_vectors,
+    bolt_benchmark_spiller_num_spill_vectors,
     10'000,
     "The number of vectors for spilling");
 DEFINE_uint32(
-    spiller_benchmark_num_key_columns,
+    bolt_benchmark_spiller_num_key_columns,
     2,
     "The number of key columns");
 DEFINE_uint32(
-    spiller_benchmark_spill_executor_size,
+    bolt_benchmark_spiller_spill_executor_size,
     std::thread::hardware_concurrency(),
     "The spiller executor size in number of threads");
 DEFINE_uint32(
-    spiller_benchmark_spill_vector_size,
+    bolt_benchmark_spiller_spill_vector_size,
     100,
     "The number of rows per each spill vector");
 DEFINE_uint64(
-    spiller_benchmark_max_spill_file_size,
+    bolt_benchmark_spiller_max_spill_file_size,
     2 << 30,
     "The max spill file size");
 DEFINE_uint64(
-    spiller_benchmark_min_spill_run_size,
-    1 << 30,
-    "The minimum spiller run size");
-DEFINE_uint64(
-    spiller_benchmark_write_buffer_size,
+    bolt_benchmark_spiller_write_buffer_size,
     1 << 20,
     "The spill write buffer size");
 using namespace bytedance::bolt::memory;
@@ -93,15 +89,15 @@ namespace bytedance::bolt::exec::test {
 
 void SpillerBenchmarkBase::setUp() {
   rootPool_ =
-      memory::memoryManager()->addRootPool(FLAGS_spiller_benchmark_name);
-  pool_ = rootPool_->addLeafChild(FLAGS_spiller_benchmark_name);
+      memory::memoryManager()->addRootPool(FLAGS_bolt_benchmark_spiller_name);
+  pool_ = rootPool_->addLeafChild(FLAGS_bolt_benchmark_spiller_name);
 
   rowType_ =
       ROW({"c0", "c1", "c2", "c3", "c4"},
           {INTEGER(), BIGINT(), VARCHAR(), VARBINARY(), DOUBLE()});
 
-  numInputVectors_ = FLAGS_spiller_benchmark_num_spill_vectors;
-  inputVectorSize_ = FLAGS_spiller_benchmark_spill_vector_size;
+  numInputVectors_ = FLAGS_bolt_benchmark_spiller_num_spill_vectors;
+  inputVectorSize_ = FLAGS_bolt_benchmark_spiller_spill_vector_size;
   {
     VectorFuzzer::Options options;
     options.vectorSize = inputVectorSize_;
@@ -112,18 +108,18 @@ void SpillerBenchmarkBase::setUp() {
     rowVectors_.push_back(vectorFuzzer_->fuzzRow(rowType_));
   }
 
-  if (FLAGS_spiller_benchmark_spill_executor_size != 0) {
+  if (FLAGS_bolt_benchmark_spiller_spill_executor_size != 0) {
     executor_ = std::make_unique<folly::IOThreadPoolExecutor>(
-        FLAGS_spiller_benchmark_spill_executor_size,
+        FLAGS_bolt_benchmark_spiller_spill_executor_size,
         std::make_shared<folly::NamedThreadFactory>(
-            FLAGS_spiller_benchmark_name));
+            FLAGS_bolt_benchmark_spiller_name));
   }
 
-  if (FLAGS_spiller_benchmark_path.empty()) {
+  if (FLAGS_bolt_benchmark_spiller_path.empty()) {
     tempDir_ = exec::test::TempDirectoryPath::create();
     spillDir_ = tempDir_->path;
   } else {
-    spillDir_ = FLAGS_spiller_benchmark_path;
+    spillDir_ = FLAGS_bolt_benchmark_spiller_path;
   }
 
   fs_ = filesystems::getFileSystem(spillDir_, {});

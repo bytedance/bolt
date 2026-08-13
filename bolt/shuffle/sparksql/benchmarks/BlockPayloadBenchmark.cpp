@@ -41,11 +41,14 @@
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "shuffle/sparksql/compression/Codec.h"
 
-DEFINE_string(file, "", "Path to parquet file for benchmark");
-DEFINE_string(codec, "lz4", "Codec type: lz4 or zstd");
-DEFINE_int32(cpu_offset, 0, "CPU offset for affinity");
-DEFINE_bool(checksum, false, "Enable checksum");
-DEFINE_bool(test_corruption, false, "Run corruption detection test");
+DEFINE_string(bolt_benchmark_file, "", "Path to parquet file for benchmark");
+DEFINE_string(bolt_benchmark_codec, "lz4", "Codec type: lz4 or zstd");
+DEFINE_int32(bolt_benchmark_cpu_offset, 0, "CPU offset for affinity");
+DEFINE_bool(bolt_benchmark_checksum, false, "Enable checksum");
+DEFINE_bool(
+    bolt_benchmark_test_corruption,
+    false,
+    "Run corruption detection test");
 
 using arrow::RecordBatchReader;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -253,7 +256,8 @@ void runSerializeBenchmark(bool checksumEnabled, size_t iterations) {
   setCpu(config.cpuOffset);
 
   if (config.datafile.empty()) {
-    std::cerr << "No datafile specified. Use --file=<path>" << std::endl;
+    std::cerr << "No datafile specified. Use --bolt_benchmark_file=<path>"
+              << std::endl;
     return;
   }
 
@@ -377,7 +381,8 @@ void runDeserializeBenchmark(bool checksumEnabled, size_t iterations) {
   setCpu(config.cpuOffset);
 
   if (config.datafile.empty()) {
-    std::cerr << "No datafile specified. Use --file=<path>" << std::endl;
+    std::cerr << "No datafile specified. Use --bolt_benchmark_file=<path>"
+              << std::endl;
     return;
   }
 
@@ -458,10 +463,10 @@ void runDeserializeBenchmark(bool checksumEnabled, size_t iterations) {
     }
   }
 
-  std::shared_ptr<Codec> sharedCodec = std::move(Codec::create(
+  std::shared_ptr<Codec> sharedCodec = Codec::create(
       config.codec,
       CodecOptions{
-          CodecBackend::NONE, kDefaultCompressionLevel, checksumEnabled}));
+          CodecBackend::NONE, kDefaultCompressionLevel, checksumEnabled});
 
   suspender.dismiss();
 
@@ -521,7 +526,8 @@ void runCorruptionBenchmark(bool checksumEnabled, size_t iterations) {
   setCpu(config.cpuOffset);
 
   if (config.datafile.empty()) {
-    std::cerr << "No datafile specified. Use --file=<path>" << std::endl;
+    std::cerr << "No datafile specified. Use --bolt_benchmark_file=<path>"
+              << std::endl;
     return;
   }
 
@@ -743,27 +749,27 @@ int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   auto& config = getConfig();
-  config.datafile = FLAGS_file;
-  config.cpuOffset = FLAGS_cpu_offset;
-  config.checksumEnabled = FLAGS_checksum;
-  config.testCorruption = FLAGS_test_corruption;
+  config.datafile = FLAGS_bolt_benchmark_file;
+  config.cpuOffset = FLAGS_bolt_benchmark_cpu_offset;
+  config.checksumEnabled = FLAGS_bolt_benchmark_checksum;
+  config.testCorruption = FLAGS_bolt_benchmark_test_corruption;
 
   // Parse codec type from string
-  std::string codecStr = FLAGS_codec;
+  std::string codecStr = FLAGS_bolt_benchmark_codec;
   std::transform(codecStr.begin(), codecStr.end(), codecStr.begin(), ::tolower);
   if (codecStr == "zstd") {
     config.codec = CodecType::ZSTD;
   } else if (codecStr == "lz4") {
     config.codec = CodecType::LZ4_FRAME;
   } else {
-    std::cerr << "Unknown codec: " << FLAGS_codec << ". Use 'lz4' or 'zstd'."
-              << std::endl;
+    std::cerr << "Unknown codec: " << FLAGS_bolt_benchmark_codec
+              << ". Use 'lz4' or 'zstd'." << std::endl;
     return EXIT_FAILURE;
   }
 
   if (config.datafile.empty()) {
     std::cerr
-        << "No datafile specified. Use --file=<path> to specify a parquet file."
+        << "No datafile specified. Use --bolt_benchmark_file=<path> to specify a parquet file."
         << std::endl;
     return EXIT_FAILURE;
   }

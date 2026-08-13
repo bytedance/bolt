@@ -25,6 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
+add_subdirectory(flags)
 add_subdirectory(process)
 add_subdirectory(base)
 add_subdirectory(caching)

@@ -46,8 +46,6 @@
 #include <fstream>
 #include <numeric>
 
-DEFINE_bool(ssd_odirect, true, "Use O_DIRECT for SSD cache IO");
-DEFINE_bool(ssd_verify_write, false, "Read back data after writing to SSD");
 namespace bytedance::bolt::cache {
 
 namespace {
@@ -143,7 +141,7 @@ SsdFile::SsdFile(
       executor_(executor) {
   int32_t oDirect = 0;
 #ifdef linux
-  oDirect = FLAGS_ssd_odirect ? O_DIRECT : 0;
+  oDirect = FLAGS_bolt_ssd_odirect ? O_DIRECT : 0;
 #endif // linux
   fd_ = open(fileName_.c_str(), O_CREAT | O_RDWR | oDirect, S_IRUSR | S_IWUSR);
   if (FOLLY_UNLIKELY(fd_ < 0)) {
@@ -427,7 +425,7 @@ void SsdFile::write(std::vector<CachePin>& pins) {
         FileCacheKey key = {
             entry->key().fileNum, static_cast<uint64_t>(entry->offset())};
         entries_[std::move(key)] = SsdRun(offset, size);
-        if (FLAGS_ssd_verify_write) {
+        if (FLAGS_bolt_ssd_verify_write) {
           verifyWrite(*entry, SsdRun(offset, size));
         }
         offset += size;

@@ -325,11 +325,11 @@ TEST_F(TableWriterReplayerTest, runner) {
   ASSERT_EQ(summary.rawInputRows, 0);
   ASSERT_EQ(summary.rawInputBytes, 0);
 
-  FLAGS_root_dir = traceRoot;
-  FLAGS_query_id = task->queryCtx()->queryId();
-  FLAGS_task_id = task->taskId();
-  FLAGS_node_id = traceNodeId;
-  FLAGS_summary = true;
+  FLAGS_bolt_trace_replay_root_dir = traceRoot;
+  FLAGS_bolt_trace_replay_query_id = task->queryCtx()->queryId();
+  FLAGS_bolt_trace_replay_task_id = task->taskId();
+  FLAGS_bolt_trace_replay_node_id = traceNodeId;
+  FLAGS_bolt_trace_replay_summary = true;
   {
     TraceReplayRunner runner;
     runner.init();
@@ -337,10 +337,10 @@ TEST_F(TableWriterReplayerTest, runner) {
   }
 
   const auto traceOutputDir = TempDirectoryPath::create();
-  FLAGS_task_id = task->taskId();
-  FLAGS_driver_ids = "";
-  FLAGS_table_writer_output_dir = traceOutputDir->getPath();
-  FLAGS_summary = false;
+  FLAGS_bolt_trace_replay_task_id = task->taskId();
+  FLAGS_bolt_trace_replay_driver_ids = "";
+  FLAGS_bolt_trace_replay_table_writer_output_dir = traceOutputDir->getPath();
+  FLAGS_bolt_trace_replay_summary = false;
   {
     TraceReplayRunner runner;
     runner.init();

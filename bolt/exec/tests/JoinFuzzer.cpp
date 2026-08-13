@@ -36,64 +36,12 @@
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/dwio/dwrf/reader/DwrfReader.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int32(steps, 10, "Number of plans to generate and test.");
-
-DEFINE_int32(
-    duration_sec,
-    0,
-    "For how long it should run (in seconds). If zero, "
-    "it executes exactly --steps iterations and exits.");
-
-DEFINE_int32(
-    batch_size,
-    100,
-    "The number of elements on each generated vector.");
-
-DEFINE_int32(num_batches, 5, "The number of generated vectors.");
-
-DEFINE_double(
-    null_ratio,
-    0.1,
-    "Chance of adding a null value in a vector "
-    "(expressed as double from 0 to 1).");
-
-DEFINE_bool(enable_spill, true, "Whether to test plans with spilling enabled");
-
-DEFINE_int32(string_length, 100, "The max length of generated strings.");
-
-DEFINE_bool(
-    string_variable_length,
-    false,
-    "Whether to generate variable lengths of strings,"
-    "or all the generated strings should have the same length.");
-
-DEFINE_bool(
-    enable_string_incremental_generation,
-    false,
-    "Whether the generated strings could share common substrings.");
-
-DEFINE_bool(
-    enable_duplicates,
-    false,
-    "Whether to allow duplicated data (i.e., reuse already generated tests).");
-
-DEFINE_bool(enable_hugeint, true, "Whether to generate HUGEINT.");
-
-DEFINE_string(
-    repro_persist_path,
-    "",
-    "Directory path for persistence of data and SQL when fuzzer fails for "
-    "future reproduction. Empty string disables this feature.");
-
-DEFINE_bool(
-    enable_duckdb_verification,
-    true,
-    "Whether to compare with DuckDB results.");
 namespace bytedance::bolt::exec::test {
 
 namespace {
@@ -115,14 +63,14 @@ class JoinFuzzer {
  private:
   static VectorFuzzer::Options getFuzzerOptions() {
     VectorFuzzer::Options opts;
-    opts.vectorSize = FLAGS_batch_size;
-    opts.stringLength = FLAGS_string_length;
-    opts.nullRatio = FLAGS_null_ratio;
-    opts.stringVariableLength = FLAGS_string_variable_length;
+    opts.vectorSize = FLAGS_bolt_fuzzer_batch_size;
+    opts.stringLength = FLAGS_bolt_fuzzer_string_length;
+    opts.nullRatio = FLAGS_bolt_fuzzer_null_ratio;
+    opts.stringVariableLength = FLAGS_bolt_fuzzer_string_variable_length;
     opts.enableStringIncrementalGeneration =
-        FLAGS_enable_string_incremental_generation;
-    opts.enableDuplicates = FLAGS_enable_duplicates;
-    opts.enableHugeint = FLAGS_enable_hugeint;
+        FLAGS_bolt_fuzzer_enable_string_incremental_generation;
+    opts.enableDuplicates = FLAGS_bolt_fuzzer_enable_duplicates;
+    opts.enableHugeint = FLAGS_bolt_fuzzer_enable_hugeint;
     opts.charEncodings = std::vector<UTF8CharList>{
         UTF8CharList::ASCII,
         UTF8CharList::UNICODE_CASE_SENSITIVE,
@@ -200,8 +148,8 @@ class JoinFuzzer {
 
 JoinFuzzer::JoinFuzzer(size_t initialSeed)
     : vectorFuzzer_{getFuzzerOptions(), pool_.get()},
-      reproPersistPath_{FLAGS_repro_persist_path},
-      enableDuckdbVerification_{FLAGS_enable_duckdb_verification} {
+      reproPersistPath_{FLAGS_bolt_fuzzer_repro_persist_path},
+      enableDuckdbVerification_{FLAGS_bolt_fuzzer_enable_duckdb_verification} {
   filesystems::registerLocalFileSystem();
   auto hiveConnector =
       connector::getConnectorFactory(connector::kHiveConnectorName)
@@ -213,12 +161,12 @@ JoinFuzzer::JoinFuzzer(size_t initialSeed)
 
 template <typename T>
 bool isDone(size_t i, T startTime) {
-  if (FLAGS_duration_sec > 0) {
+  if (FLAGS_bolt_fuzzer_duration_sec > 0) {
     std::chrono::duration<double> elapsed =
         std::chrono::system_clock::now() - startTime;
-    return elapsed.count() >= FLAGS_duration_sec;
+    return elapsed.count() >= FLAGS_bolt_fuzzer_duration_sec;
   }
-  return i >= FLAGS_steps;
+  return i >= FLAGS_bolt_fuzzer_steps;
 }
 
 core::JoinType JoinFuzzer::pickJoinType() {
@@ -261,7 +209,7 @@ std::vector<RowVectorPtr> JoinFuzzer::generateProbeInput(
 
   auto inputType = ROW(std::move(names), std::move(types));
   std::vector<RowVectorPtr> input;
-  for (auto i = 0; i < FLAGS_num_batches; ++i) {
+  for (auto i = 0; i < FLAGS_bolt_fuzzer_num_batches; ++i) {
     input.push_back(vectorFuzzer_.fuzzInputRow(inputType));
   }
   return input;
@@ -932,7 +880,7 @@ void JoinFuzzer::verify(core::JoinType joinType) {
       ++numFailuresInEquivalentPlans_;
     }
 
-    if (FLAGS_enable_spill) {
+    if (FLAGS_bolt_fuzzer_enable_spill) {
       // Spilling for right semi project doesn't work yet.
       if (auto hashJoin = std::dynamic_pointer_cast<const core::HashJoinNode>(
               altPlans[i].plan)) {
@@ -959,8 +907,8 @@ void JoinFuzzer::verify(core::JoinType joinType) {
 
 void JoinFuzzer::go() {
   BOLT_CHECK(
-      FLAGS_steps > 0 || FLAGS_duration_sec > 0,
-      "Either --steps or --duration_sec needs to be greater than zero.")
+      FLAGS_bolt_fuzzer_steps > 0 || FLAGS_bolt_fuzzer_duration_sec > 0,
+      "Either --bolt_fuzzer_steps or --bolt_fuzzer_duration_sec needs to be greater than zero.")
 
   auto startTime = std::chrono::system_clock::now();
   size_t iteration = 0;

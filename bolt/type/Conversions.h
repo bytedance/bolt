@@ -38,10 +38,10 @@
 #include <string>
 #include <type_traits>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/Type.h"
 
-DECLARE_bool(experimental_enable_legacy_cast);
 namespace bytedance::bolt::util {
 
 struct DefaultCastPolicy {
@@ -590,7 +590,7 @@ struct Converter<TypeKind::VARCHAR, void, TPolicy> {
   /// appending '.0' if it has only the integer part but no fractional part. For
   /// example, for the given string '12345', replace it with '12345.0'.
   static void normalizeStandardNotation(std::string& str) {
-    if (!FLAGS_experimental_enable_legacy_cast &&
+    if (!FLAGS_bolt_experimental_enable_legacy_cast &&
         str.find(".") == std::string::npos && isdigit(str[str.length() - 1])) {
       str += ".0";
     }

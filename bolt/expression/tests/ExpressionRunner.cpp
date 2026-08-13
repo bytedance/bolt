@@ -132,8 +132,7 @@ void ExpressionRunner::run(
   BOLT_CHECK(!sql.empty());
 
   auto queryCtx = core::QueryCtx::create();
-  std::shared_ptr<memory::MemoryPool> pool{
-      memory::deprecatedAddDefaultLeafMemoryPool()};
+  auto pool = memory::memoryManager()->addLeafPool();
   core::ExecCtx execCtx{pool.get(), queryCtx.get()};
 
   RowVectorPtr inputVector;

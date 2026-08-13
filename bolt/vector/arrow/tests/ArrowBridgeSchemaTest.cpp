@@ -30,14 +30,16 @@
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
-#include <arrow/testing/gtest_util.h>
+#include <arrow/type.h>
 #include <gtest/gtest.h>
 #include <string_view>
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/vector/arrow/Bridge.h"
+
 namespace bytedance::bolt::test {
 namespace {
 
@@ -718,7 +720,7 @@ TEST_F(ArrowBridgeSchemaImportTest, dictionaryTypeTest) {
 }
 
 TEST_F(ArrowBridgeSchemaTest, exportToArrowWithConstantEncoding) {
-  auto* pool = &memory::deprecatedSharedLeafPool();
+  auto* pool = pool_.get();
 
   auto elementType = INTEGER();
   auto arrayType = ARRAY(elementType);

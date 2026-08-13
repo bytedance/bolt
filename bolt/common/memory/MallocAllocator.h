@@ -31,10 +31,10 @@
 #pragma once
 
 #include "bolt/common/base/ConcurrentCounter.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryAllocator.h"
 
-DECLARE_bool(bolt_memory_leak_check_enabled);
 namespace bytedance::bolt::memory {
 /// The implementation of MemoryAllocator using malloc.
 class MallocAllocator : public MemoryAllocator {

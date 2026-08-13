@@ -24,6 +24,7 @@
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/vector/tests/utils/VectorMaker.h"
 
 #include <fmt/format.h>
 #include <folly/Benchmark.h>
@@ -40,12 +41,17 @@ using namespace bytedance::bolt::test;
 
 constexpr uint32_t kNumBatches = 50;
 constexpr uint32_t kNumRowsPerRowGroup = 10000;
+constexpr vector_size_t kEncodedInputRows = 100'000;
+constexpr vector_size_t kSchemaBatchRows = 10'000;
 constexpr int64_t kNoSplitDataPageSize = 64 * 1024 * 1024;
 constexpr int64_t kNoSplitSinkCapacity = 8 * 1024 * 1024;
+constexpr int64_t kEncodedInputSinkCapacity = 16 * 1024 * 1024;
 
 struct WriteMetrics {
   uint64_t outputSize;
+  uint64_t rowGroupCount;
   uint64_t dataPageCount;
+  uint64_t dictionaryPageCount;
 };
 
 class ParquetWriterBenchmark {
@@ -54,7 +60,8 @@ class ParquetWriterBenchmark {
       bool disableDictionary,
       const RowTypePtr& rowType,
       int64_t dataPageSize,
-      bool useMemorySink)
+      bool useMemorySink,
+      int64_t memorySinkCapacity = kNoSplitSinkCapacity)
       : disableDictionary_(disableDictionary) {
     rootPool_ = memory::memoryManager()->addRootPool("ParquetWriterBenchmark");
     leafPool_ = rootPool_->addLeafChild("ParquetWriterBenchmark");
@@ -62,7 +69,7 @@ class ParquetWriterBenchmark {
     std::unique_ptr<FileSink> sink;
     if (useMemorySink) {
       auto memorySink = std::make_unique<MemorySink>(
-          kNoSplitSinkCapacity, FileSink::Options{.pool = leafPool_.get()});
+          memorySinkCapacity, FileSink::Options{.pool = leafPool_.get()});
       sink_ = memorySink.get();
       sink = std::move(memorySink);
     } else {
@@ -88,6 +95,10 @@ class ParquetWriterBenchmark {
   }
 
   ~ParquetWriterBenchmark() = default;
+
+  memory::MemoryPool* memoryPool() const {
+    return leafPool_.get();
+  }
 
   void writeToSink(
       const std::vector<RowVectorPtr>& batches,
@@ -124,6 +135,7 @@ class ParquetWriterBenchmark {
         readerOptions);
 
     uint64_t dataPageCount = 0;
+    uint64_t dictionaryPageCount = 0;
     const auto metadata = reader.fileMetaData();
     for (int rowGroupIndex = 0; rowGroupIndex < metadata.numRowGroups();
          ++rowGroupIndex) {
@@ -135,13 +147,17 @@ class ParquetWriterBenchmark {
           if (stats.page_type == thrift::PageType::DATA_PAGE ||
               stats.page_type == thrift::PageType::DATA_PAGE_V2) {
             dataPageCount += stats.count;
+          } else if (stats.page_type == thrift::PageType::DICTIONARY_PAGE) {
+            dictionaryPageCount += stats.count;
           }
         }
       }
     }
     return {
         .outputSize = static_cast<uint64_t>(sink_->size()),
-        .dataPageCount = dataPageCount};
+        .rowGroupCount = static_cast<uint64_t>(metadata.numRowGroups()),
+        .dataPageCount = dataPageCount,
+        .dictionaryPageCount = dictionaryPageCount};
   }
 
  private:
@@ -163,10 +179,13 @@ void reportLayoutOnce(
   std::lock_guard<std::mutex> lock(mutex);
   if (reportedBenchmarks.insert(benchmarkName).second) {
     std::cerr << fmt::format(
-        "LAYOUT {} output_bytes={} data_pages={}\n",
+        "LAYOUT {} output_bytes={} row_groups={} data_pages={} "
+        "dictionary_pages={}\n",
         benchmarkName,
         metrics.outputSize,
-        metrics.dataPageCount);
+        metrics.rowGroupCount,
+        metrics.dataPageCount,
+        metrics.dictionaryPageCount);
   }
 }
 
@@ -260,6 +279,252 @@ void runDictionaryNoSplit(
       false,
       kNoSplitDataPageSize,
       true);
+}
+
+template <typename T, typename MakeValue>
+VectorPtr makeDictionaryVector(
+    vector_size_t numRows,
+    int32_t dictionarySize,
+    memory::MemoryPool* pool,
+    MakeValue makeValue) {
+  test::VectorMaker maker(pool);
+  auto dictionary = maker.flatVector<T>(dictionarySize, std::move(makeValue));
+  auto indices = AlignedBuffer::allocate<vector_size_t>(numRows, pool);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  for (vector_size_t row = 0; row < numRows; ++row) {
+    rawIndices[row] = row % dictionarySize;
+  }
+  return BaseVector::wrapInDictionary(
+      nullptr, std::move(indices), numRows, std::move(dictionary));
+}
+
+VectorPtr makeDictionaryVarchar(
+    vector_size_t numRows,
+    int32_t dictionarySize,
+    memory::MemoryPool* pool) {
+  return makeDictionaryVector<std::string>(
+      numRows, dictionarySize, pool, [](vector_size_t row) {
+        return fmt::format("value_{:06d}", row);
+      });
+}
+
+VectorPtr makeDictionaryInteger(
+    vector_size_t numRows,
+    int32_t dictionarySize,
+    memory::MemoryPool* pool) {
+  return makeDictionaryVector<int32_t>(
+      numRows, dictionarySize, pool, [](vector_size_t row) {
+        return static_cast<int32_t>(row * 7);
+      });
+}
+
+VectorPtr makeNestedDictionaryInteger(
+    vector_size_t numRows,
+    int32_t dictionarySize,
+    memory::MemoryPool* pool) {
+  auto innerDictionary = makeDictionaryInteger(numRows, dictionarySize, pool);
+  auto outerIndices = AlignedBuffer::allocate<vector_size_t>(numRows, pool);
+  auto* rawOuterIndices = outerIndices->asMutable<vector_size_t>();
+  for (vector_size_t row = 0; row < numRows; ++row) {
+    rawOuterIndices[row] = row;
+  }
+  return BaseVector::wrapInDictionary(
+      nullptr, std::move(outerIndices), numRows, std::move(innerDictionary));
+}
+
+RowTypePtr makeRepeatedRowType(
+    int32_t numColumns,
+    const TypePtr& type,
+    bool appendInteger = false) {
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  names.reserve(numColumns + static_cast<int32_t>(appendInteger));
+  types.reserve(numColumns + static_cast<int32_t>(appendInteger));
+  for (int32_t i = 0; i < numColumns; ++i) {
+    names.push_back(fmt::format("c{}", i));
+    types.push_back(type);
+  }
+  if (appendInteger) {
+    names.push_back("nested");
+    types.push_back(INTEGER());
+  }
+  return ROW(std::move(names), std::move(types));
+}
+
+template <typename MakeBatches>
+void runEncodedInputBenchmark(
+    uint32_t iterations,
+    const std::string& benchmarkName,
+    const RowTypePtr& rowType,
+    MakeBatches makeBatches) {
+  for (uint32_t i = 0; i < iterations; ++i) {
+    folly::BenchmarkSuspender suspender;
+    ParquetWriterBenchmark benchmark(
+        false,
+        rowType,
+        bytedance::bolt::parquet::WriterOptions{}.dataPageSize,
+        true,
+        kEncodedInputSinkCapacity);
+    auto batches = makeBatches(benchmark.memoryPool());
+    suspender.dismiss();
+    benchmark.writeToSink(batches, false);
+    suspender.rehire();
+
+    const auto metrics = benchmark.collectMetrics();
+    folly::doNotOptimizeAway(metrics.outputSize);
+    folly::doNotOptimizeAway(metrics.rowGroupCount);
+    folly::doNotOptimizeAway(metrics.dataPageCount);
+    folly::doNotOptimizeAway(metrics.dictionaryPageCount);
+    reportLayoutOnce(benchmarkName, metrics);
+  }
+}
+
+void runInputDictionaryVarchar(uint32_t iterations, int32_t dictionarySize) {
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format("InputDictionaryVarchar_Card{}", dictionarySize),
+      ROW({"c0"}, {VARCHAR()}),
+      [dictionarySize](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        return std::vector<RowVectorPtr>{maker.rowVector(
+            {"c0"},
+            {makeDictionaryVarchar(kEncodedInputRows, dictionarySize, pool)})};
+      });
+}
+
+void runInputDictionaryInteger(uint32_t iterations, int32_t dictionarySize) {
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format("InputDictionaryInteger_Card{}", dictionarySize),
+      ROW({"c0"}, {INTEGER()}),
+      [dictionarySize](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        return std::vector<RowVectorPtr>{maker.rowVector(
+            {"c0"},
+            {makeDictionaryInteger(kEncodedInputRows, dictionarySize, pool)})};
+      });
+}
+
+void runInputDictionaryControl(
+    uint32_t iterations,
+    const std::string& typeName) {
+  const bool isVarchar = typeName == "varchar";
+  TypePtr type;
+  if (isVarchar) {
+    type = VARCHAR();
+  } else {
+    type = INTEGER();
+  }
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format("InputDictionaryControl_Flat{}", typeName),
+      ROW({"c0"}, {type}),
+      [isVarchar](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        VectorPtr column;
+        if (isVarchar) {
+          column = maker.flatVector<std::string>(
+              kEncodedInputRows, [](vector_size_t row) {
+                return fmt::format("value_{:06d}", row % 10);
+              });
+        } else {
+          column = maker.flatVector<int32_t>(
+              kEncodedInputRows,
+              [](vector_size_t row) { return static_cast<int32_t>(row); });
+        }
+        return std::vector<RowVectorPtr>{
+            maker.rowVector({"c0"}, {std::move(column)})};
+      });
+}
+
+void runMixedInputEncodings(
+    uint32_t iterations,
+    int32_t numDictionaryVarcharColumns) {
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format(
+          "MixedInput_{}DictionaryVarchar_1NestedDictionaryInteger",
+          numDictionaryVarcharColumns),
+      makeRepeatedRowType(numDictionaryVarcharColumns, VARCHAR(), true),
+      [numDictionaryVarcharColumns](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        std::vector<std::string> names;
+        std::vector<VectorPtr> columns;
+        names.reserve(numDictionaryVarcharColumns + 1);
+        columns.reserve(numDictionaryVarcharColumns + 1);
+        for (int32_t i = 0; i < numDictionaryVarcharColumns; ++i) {
+          names.push_back(fmt::format("c{}", i));
+          columns.push_back(makeDictionaryVarchar(kEncodedInputRows, 10, pool));
+        }
+        names.push_back("nested");
+        columns.push_back(
+            makeNestedDictionaryInteger(kEncodedInputRows, 50, pool));
+        return std::vector<RowVectorPtr>{
+            maker.rowVector(std::move(names), columns)};
+      });
+}
+
+void runMultiColumnInputDictionary(uint32_t iterations, int32_t numColumns) {
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format("InputDictionaryVarchar_{}Columns", numColumns),
+      makeRepeatedRowType(numColumns, VARCHAR()),
+      [numColumns](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        std::vector<std::string> names;
+        std::vector<VectorPtr> columns;
+        names.reserve(numColumns);
+        columns.reserve(numColumns);
+        for (int32_t i = 0; i < numColumns; ++i) {
+          names.push_back(fmt::format("c{}", i));
+          columns.push_back(makeDictionaryVarchar(kEncodedInputRows, 10, pool));
+        }
+        return std::vector<RowVectorPtr>{
+            maker.rowVector(std::move(names), columns)};
+      });
+}
+
+void runSchemaMultiBatch(
+    uint32_t iterations,
+    int32_t numColumns,
+    int32_t numBatches) {
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format(
+          "SchemaMultiBatch_{}Columns_{}Batches", numColumns, numBatches),
+      makeRepeatedRowType(numColumns, VARCHAR()),
+      [numColumns, numBatches](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        std::vector<std::string> names;
+        std::vector<VectorPtr> columns;
+        names.reserve(numColumns);
+        columns.reserve(numColumns);
+        for (int32_t i = 0; i < numColumns; ++i) {
+          names.push_back(fmt::format("c{}", i));
+          columns.push_back(makeDictionaryVarchar(kSchemaBatchRows, 10, pool));
+        }
+        auto batch = maker.rowVector(std::move(names), columns);
+        return std::vector<RowVectorPtr>(numBatches, std::move(batch));
+      });
+}
+
+void runMapVarcharInteger(uint32_t iterations, int32_t entriesPerRow) {
+  runEncodedInputBenchmark(
+      iterations,
+      fmt::format("MapVarcharInteger_{}Entries", entriesPerRow),
+      ROW({"c0"}, {MAP(VARCHAR(), INTEGER())}),
+      [entriesPerRow](memory::MemoryPool* pool) {
+        test::VectorMaker maker(pool);
+        auto map = maker.mapVector<std::string, int32_t>(
+            kEncodedInputRows,
+            [entriesPerRow](vector_size_t /*row*/) { return entriesPerRow; },
+            [entriesPerRow](vector_size_t index) {
+              return fmt::format("key_{:02d}", index % entriesPerRow);
+            },
+            [](vector_size_t index) { return static_cast<int32_t>(index); });
+        return std::vector<RowVectorPtr>{
+            maker.rowVector({"c0"}, {std::move(map)})};
+      });
 }
 
 #define PARQUET_BENCHMARKS_NULLS(_type_, _name_, _null_)                      \
@@ -357,6 +622,42 @@ PARQUET_DICTIONARY_NO_SPLIT_BENCHMARKS_NULLS(
     VARCHAR(),
     VarcharDictionaryNoSplit,
     20);
+
+// Input vector encoding and schema-shape benchmarks.
+BENCHMARK_NAMED_PARAM(runInputDictionaryVarchar, Card10, 10);
+BENCHMARK_NAMED_PARAM(runInputDictionaryVarchar, Card100, 100);
+BENCHMARK_NAMED_PARAM(runInputDictionaryVarchar, Card1000, 1'000);
+BENCHMARK_NAMED_PARAM(runInputDictionaryVarchar, Card10000, 10'000);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(runInputDictionaryInteger, Card10, 10);
+BENCHMARK_NAMED_PARAM(runInputDictionaryInteger, Card100, 100);
+BENCHMARK_NAMED_PARAM(runInputDictionaryInteger, Card1000, 1'000);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(runInputDictionaryControl, FlatVarchar, "varchar");
+BENCHMARK_NAMED_PARAM(runInputDictionaryControl, FlatInteger, "integer");
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(runMixedInputEncodings, OneDictionaryColumn, 1);
+BENCHMARK_NAMED_PARAM(runMixedInputEncodings, FiveDictionaryColumns, 5);
+BENCHMARK_NAMED_PARAM(runMixedInputEncodings, TenDictionaryColumns, 10);
+BENCHMARK_NAMED_PARAM(runMixedInputEncodings, TwentyDictionaryColumns, 20);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(runMultiColumnInputDictionary, FiveColumns, 5);
+BENCHMARK_NAMED_PARAM(runMultiColumnInputDictionary, TenColumns, 10);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, FiveColumns50Batches, 5, 50);
+BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, TenColumns50Batches, 10, 50);
+BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, TwentyColumns50Batches, 20, 50);
+BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, TenColumns200Batches, 10, 200);
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK_NAMED_PARAM(runMapVarcharInteger, ThreeEntries, 3);
+BENCHMARK_NAMED_PARAM(runMapVarcharInteger, FiveEntries, 5);
+BENCHMARK_NAMED_PARAM(runMapVarcharInteger, TenEntries, 10);
 
 // TODO: Add all data types
 

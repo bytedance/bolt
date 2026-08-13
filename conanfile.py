@@ -351,7 +351,7 @@ class BoltConan(ConanFile):
             self.options[arrow].with_protobuf = True
             self.options[arrow].with_grpc = True
             self.options[arrow].with_flight_rpc = True
-        self.options[arrow].with_test = True
+        self.options[arrow].with_test = False
         self.options[arrow].with_csv = True
         if self.options.get_safe("enable_jit"):
             self.options[llvm_core].with_libedit = False
@@ -417,7 +417,10 @@ class BoltConan(ConanFile):
         num_link_job = os.getenv("NUM_LINK_JOB", "4")
 
         # e.g. `BOLT_LINKER=mold make release`
-        bolt_linker = os.getenv("BOLT_LINKER")
+        if "BOLT_LINKER" in os.environ:
+            bolt_linker = os.getenv("BOLT_LINKER")
+        else:
+            bolt_linker = self.conf.get("user.bolt:linker", default=None)
 
         tc = CMakeToolchain(self, generator="Ninja")
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) ByteDance Ltd. and/or its affiliates
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -12,30 +12,14 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
- * --------------------------------------------------------------------------
- * Copyright (c) ByteDance Ltd. and/or its affiliates.
- * SPDX-License-Identifier: Apache-2.0
- *
- * This file has been modified by ByteDance Ltd. and/or its affiliates on
- * 2025-11-11.
- *
- * Original file was released under the Apache License 2.0,
- * with the full license text available at:
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * This modified file is released under the same license.
- * --------------------------------------------------------------------------
  */
 
-#include <gflags/gflags.h>
-
-// Used in bolt/common/memory/MappedMemory.cpp
+#include "bolt/common/flags/BoltFlags.h"
 
 DEFINE_int32(
     bolt_memory_num_shared_leaf_pools,
     32,
-    "Number of shared leaf memory pools per process");
+    "Deprecated compatibility flag; no longer used");
 
 DEFINE_bool(
     bolt_time_allocations,
@@ -67,9 +51,9 @@ DEFINE_int32(
 
 // Used in common/base/ProcessBase.cpp
 
-DEFINE_bool(avx2, true, "Enables use of AVX2 when available");
+DEFINE_bool(bolt_enable_avx2, true, "Enables use of AVX2 when available");
 
-DEFINE_bool(bmi2, true, "Enables use of BMI2 when available");
+DEFINE_bool(bolt_enable_bmi2, true, "Enables use of BMI2 when available");
 
 // Used in exec/Expr.cpp
 
@@ -116,17 +100,52 @@ DEFINE_bool(
 DEFINE_bool(bolt_memory_use_hugepages, true, "Use explicit huge pages");
 
 DEFINE_int32(
-    shuffle_zstd_compression_level,
+    bolt_shuffle_zstd_compression_level,
     0,
     "shuffle_zstd_compression_level");
 
-DEFINE_bool(bolt_ssd_odirect, true, "Use O_DIRECT for SSD cache IO");
+DEFINE_bool(
+    bolt_memory_pool_capacity_transfer_across_tasks,
+    false,
+    "Whether allow to memory capacity transfer between memory pools from different tasks, which might happen in use case like Spark-Gluten");
 
-DEFINE_string(
-    testing_only_set_scan_exception_mesg_for_prepare,
-    "",
-    "Only used in testing env. Throwing std::exception when call SplitReader::prepareSplit");
-DEFINE_string(
-    testing_only_set_scan_exception_mesg_for_next,
-    "",
-    "Only used in testing env. Throwing std::exception when call SplitReader::next");
+DEFINE_bool(
+    bolt_force_eval_simplified,
+    false,
+    "Whether to overwrite queryCtx and force the "
+    "use of simplified expression evaluation path.");
+
+DEFINE_bool(
+    bolt_experimental_save_input_on_fatal_signal,
+    false,
+    "This is an experimental flag only to be used for debugging "
+    "purposes. If set to true, serializes the input vector data and "
+    "all the SQL expressions in the ExprSet that is currently "
+    "executing, whenever a fatal signal is encountered. Enabling "
+    "this flag makes the signal handler async signal unsafe, so it "
+    "should only be used for debugging purposes. The vector and SQLs "
+    "are serialized to files in directories specified by either "
+    "'bolt_save_input_on_expression_any_failure_path' or "
+    "'bolt_save_input_on_expression_system_failure_path'");
+
+DEFINE_bool(
+    bolt_experimental_enable_legacy_cast,
+    false,
+    "Experimental feature flag for backward compatibility with previous output"
+    " format of type conversions used for casting. This is a temporary solution"
+    " that aims to facilitate a seamless transition for users who rely on the"
+    " legacy behavior and hence can change in the future.");
+
+DEFINE_bool(bolt_collect_import_time, false, "run q1");
+
+DEFINE_bool(bolt_ssd_odirect, true, "Use O_DIRECT for SSD cache IO");
+DEFINE_bool(
+    bolt_ssd_verify_write,
+    false,
+    "Read back data after writing to SSD");
+DEFINE_bool(bolt_use_ws_vread, false, "Use WS VRead API to load");
+
+DEFINE_int32(
+    cache_prefetch_min_pct,
+    80,
+    "Minimum percentage of actual uses over references to a column for prefetching. No prefetch if > 100");

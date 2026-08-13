@@ -40,9 +40,18 @@
 
 #include "bolt/common/memory/MmapAllocator.h"
 
-DEFINE_int64(volume_gb, 2048, "Total GB to allocate during test");
-DEFINE_int64(size_cap_gb, 24, "Size cap: total GB resident at one time");
-DEFINE_bool(use_mmap, true, "Use mmap and madvise to manage fragmentation");
+DEFINE_int64(
+    bolt_benchmark_volume_gb,
+    2048,
+    "Total GB to allocate during test");
+DEFINE_int64(
+    bolt_benchmark_size_cap_gb,
+    24,
+    "Size cap: total GB resident at one time");
+DEFINE_bool(
+    bolt_benchmark_use_mmap,
+    true,
+    "Use mmap and madvise to manage fragmentation");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::memory;
 
@@ -214,7 +223,10 @@ int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   auto test = std::make_unique<FragmentationTest>();
   test->SetUp();
-  test->run(FLAGS_volume_gb << 30, FLAGS_size_cap_gb << 30, FLAGS_use_mmap);
+  test->run(
+      FLAGS_bolt_benchmark_volume_gb << 30,
+      FLAGS_bolt_benchmark_size_cap_gb << 30,
+      FLAGS_bolt_benchmark_use_mmap);
   test->printStats();
   return 0;
 }

@@ -39,12 +39,12 @@
 
 #include <fmt/format.h>
 #include <folly/Synchronized.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include <bolt/common/base/Exceptions.h>
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/SuccinctPrinter.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Allocation.h"
 #include "bolt/common/memory/MemoryAllocator.h"
 #include "bolt/common/memory/MemoryPool.h"
@@ -54,9 +54,6 @@
 #include "folly/Random.h"
 #include "folly/SharedMutex.h"
 
-DECLARE_bool(bolt_memory_leak_check_enabled);
-DECLARE_bool(bolt_memory_pool_debug_enabled);
-DECLARE_bool(bolt_enable_memory_usage_track_in_default_memory_pool);
 namespace bytedance::bolt::memory {
 #define BOLT_MEM_LOG_PREFIX "[MEM] "
 #define BOLT_MEM_LOG(severity) LOG(severity) << BOLT_MEM_LOG_PREFIX
@@ -76,6 +73,18 @@ namespace bytedance::bolt::memory {
 /// managing the memory pools.
 class MemoryManager {
  public:
+  struct ManagedPoolState {
+    enum class Kind {
+      kOnlySystemPools,
+      kHasOutstandingPools,
+      kInvalidSystemState,
+    };
+
+    Kind kind{Kind::kInvalidSystemState};
+    size_t poolCount{0};
+    std::string diagnostic;
+  };
+
   struct Options {
     Options() {}
     /// Specifies the default memory allocation alignment.
@@ -214,12 +223,6 @@ class MemoryManager {
   /// called yet.
   static MemoryManager* getInstance();
 
-  /// Deprecated. Do not use. Remove once existing call sites are updated.
-  /// Returns the process-wide default memory manager instance if exists,
-  /// otherwise creates one based on the specified 'options'.
-  FOLLY_EXPORT static MemoryManager& deprecatedGetInstance(
-      const Options& options = Options{});
-
   /// Returns true if the memory manager has been set.
   static bool testInstance();
 
@@ -265,14 +268,6 @@ class MemoryManager {
       bool allowSpill = true,
       bool allowAbort = false);
 
-  /// Default unmanaged leaf pool with no threadsafe stats support. Libraries
-  /// using this method can get a pool that is shared with other threads. The
-  /// goal is to minimize lock contention while supporting such use cases.
-  ///
-  /// TODO: deprecate this API after all the use cases are able to manage the
-  /// lifecycle of the allocated memory pools properly.
-  MemoryPool& deprecatedSharedLeafPool();
-
   /// Returns the current total memory usage under this memory manager.
   int64_t getTotalBytes() const;
 
@@ -282,6 +277,15 @@ class MemoryManager {
   /// NOTE: this doesn't count the memory manager's internal default root and
   /// leaf memory pools.
   size_t numPools() const;
+
+  /// Invokes 'visitor' on each direct child of the internal system root pool
+  /// without exposing the root pool itself.
+  void visitSystemRootChildren(
+      const std::function<bool(MemoryPool*)>& visitor) const;
+
+  /// Inspects whether only the internal system pools remain alive. The result
+  /// doesn't prevent pools from being created or destroyed after this call.
+  ManagedPoolState inspectManagedPoolState() const;
 
   MemoryAllocator* allocator();
 
@@ -313,10 +317,6 @@ class MemoryManager {
   /// Returns the process wide leaf memory pool used for query tracing.
   MemoryPool* tracePool() const {
     return tracePool_.get();
-  }
-
-  const std::vector<std::shared_ptr<MemoryPool>>& testingSharedLeafPools() {
-    return sharedLeafPools_;
   }
 
  private:
@@ -356,8 +356,6 @@ class MemoryManager {
   const std::shared_ptr<MemoryPool> spillPool_;
   const std::shared_ptr<MemoryPool> cachePool_;
   const std::shared_ptr<MemoryPool> tracePool_;
-  const std::vector<std::shared_ptr<MemoryPool>> sharedLeafPools_;
-
   mutable folly::SharedMutex mutex_;
   // All user root pools allocated from 'this'.
   std::unordered_map<std::string, std::weak_ptr<MemoryPool>> pools_;
@@ -375,28 +373,6 @@ void initializeMemoryManager(const MemoryManager::Options& options);
 /// NOTE: user should have already initialized memory manager by calling.
 /// Otherwise, the function throws.
 MemoryManager* memoryManager();
-
-/// Deprecated. Do not use.
-MemoryManager& deprecatedDefaultMemoryManager();
-
-/// Deprecated. Do not use.
-/// Creates a leaf memory pool from the default memory manager for memory
-/// allocation use. If 'threadSafe' is true, then creates a leaf memory pool
-/// with thread-safe memory usage tracking.
-std::shared_ptr<MemoryPool> deprecatedAddDefaultLeafMemoryPool(
-    const std::string& name = "",
-    bool threadSafe = true);
-
-/// Default unmanaged leaf pool with no threadsafe stats support. Libraries
-/// using this method can get a pool that is shared with other threads. The goal
-/// is to minimize lock contention while supporting such use cases.
-///
-/// TODO: deprecate this API after all the use cases are able to manage the
-/// lifecycle of the allocated memory pools properly.
-MemoryPool& deprecatedSharedLeafPool();
-
-/// Returns the sys root memory pool from the default memory manager.
-MemoryPool& deprecatedRootPool();
 
 /// Returns the system-wide memory pool for spilling memory usage.
 memory::MemoryPool* spillMemoryPool();

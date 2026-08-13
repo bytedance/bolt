@@ -32,7 +32,7 @@ bolt_add_library(
 
 target_link_libraries(
   bolt_process
-  PUBLIC bolt_flag_definitions Folly::folly
+  PUBLIC bolt_common_flags Folly::folly
   PRIVATE fmt::fmt gflags::gflags glog::glog
 )
 

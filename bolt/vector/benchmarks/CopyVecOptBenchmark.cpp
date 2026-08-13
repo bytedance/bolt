@@ -34,9 +34,11 @@
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
-DEFINE_int64(iterations, 1, "run count of each benchmark");
-DEFINE_string(keys, "", "keys to compare equal");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
+DEFINE_int64(bolt_benchmark_iterations, 1, "run count of each benchmark");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::exec;
@@ -124,7 +126,7 @@ class HashVectorsBenchmark : public OperatorTestBase {
     VectorFuzzer::Options opts;
     opts.vectorSize = kRowsPerVector;
     opts.nullRatio = 0;
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
 
     auto getDictVector = [&](TypePtr type) {
       int dictCount = rand() % kRowsPerVector;
@@ -310,7 +312,7 @@ class HashVectorsBenchmark : public OperatorTestBase {
       results.push_back(BaseVector::create(type, rowSize, pool()));
     }
     suspender.dismiss();
-    for (auto j = 0; j < FLAGS_iterations; j++) {
+    for (auto j = 0; j < FLAGS_bolt_benchmark_iterations; j++) {
       for (auto i = 0; i < results.size(); i++) {
         results[i]->copy(vectors[i], *selRows, nullptr, canCopyAll);
       }

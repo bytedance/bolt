@@ -111,4 +111,9 @@ update_conan_remote "bolt-cci-local" "${CCI_HOME}" "local-recipes-index"
 
 update_conan_remote "conancenter" "https://center2.conan.io"
 
+# Repository recipes and their patches must take precedence over cached remote
+# revisions. Keep the CI package remote ahead of conancenter for binary reuse.
+conan remote update bolt-local --index=0
+conan remote update bolt-cci-local --index=1
+
 echo "🎉 All done! Conan remotes configured."

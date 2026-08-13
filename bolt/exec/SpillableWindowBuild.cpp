@@ -586,8 +586,7 @@ SpillableWindowBuild<needSort>::nextPartition() {
     BOLT_CHECK_NOT_NULL(merges_[currentPartition_]);
     std::vector<std::deque<VectorPtr>> aggregateResults;
     for (const auto& func : windowFunctions_) {
-      aggregateResults.emplace_back(
-          std::move(func->getAggregateResultVector()));
+      aggregateResults.emplace_back(func->getAggregateResultVector());
       func->cleanUp();
     }
     if (rowBasedSpillSortMerger_) {

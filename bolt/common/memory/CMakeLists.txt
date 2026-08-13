@@ -78,7 +78,7 @@ target_link_libraries(
   PUBLIC bolt_common_base
          bolt_common_config
          bolt_exception
-         bolt_flag_definitions
+         bolt_common_flags
          bolt_time
          bolt_type_base
          Folly::folly

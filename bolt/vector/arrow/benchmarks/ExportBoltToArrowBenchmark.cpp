@@ -25,7 +25,10 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::exec::test;
@@ -35,9 +38,9 @@ static constexpr int32_t kRowsPerVector = 100'000;
 namespace {
 
 // Boiler plate structures required by vectorMaker.
+memory::MemoryManager memoryManager;
 std::shared_ptr<core::QueryCtx> queryCtx_{core::QueryCtx::create()};
-std::shared_ptr<memory::MemoryPool> pool_{
-    memory::deprecatedAddDefaultLeafMemoryPool()};
+std::shared_ptr<memory::MemoryPool> pool_{memoryManager.addLeafPool()};
 core::ExecCtx execCtx_{pool_.get(), queryCtx_.get()};
 bytedance::bolt::test::VectorMaker vectorMaker_{execCtx_.pool()};
 
@@ -87,7 +90,7 @@ void createVectors() {
   opts.nullRatio = 0;
   opts.stringLength = 50;
   opts.stringVariableLength = true;
-  VectorFuzzer fuzzer(opts, pool_.get(), FLAGS_fuzzer_seed);
+  VectorFuzzer fuzzer(opts, pool_.get(), FLAGS_bolt_benchmark_fuzzer_seed);
 
   integerVec = fuzzer.fuzzFlat(INTEGER());
   bigintVec = fuzzer.fuzzFlat(BIGINT());

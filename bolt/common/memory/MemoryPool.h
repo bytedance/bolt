@@ -38,14 +38,12 @@
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Portability.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Allocation.h"
 #include "bolt/common/memory/MemoryAllocationListener.h"
 #include "bolt/common/memory/MemoryAllocator.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
 
-DECLARE_bool(bolt_memory_leak_check_enabled);
-DECLARE_bool(bolt_memory_pool_debug_enabled);
-DECLARE_bool(bolt_memory_pool_capacity_transfer_across_tasks);
 namespace bytedance::bolt::memory {
 class TestArbitrator;
 class MemoryManager;

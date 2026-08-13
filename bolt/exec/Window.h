@@ -123,7 +123,7 @@ class Window : public Operator {
 
       windowStats.windowSpillTotalTimeUs = windowSpilledStats.spillTotalTimeUs;
       windowStats.windowSpilledFiles = windowSpilledStats.spilledFiles;
-      windowStats.windowSpilledFiles = windowSpilledStats.spilledRows;
+      windowStats.windowSpilledRows = windowSpilledStats.spilledRows;
     }
     return windowStats;
   }

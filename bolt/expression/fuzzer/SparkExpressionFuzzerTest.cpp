@@ -36,18 +36,14 @@
 #include <unordered_set>
 #include <vector>
 
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/expression/fuzzer/FuzzerRunner.h"
 #include "bolt/functions/sparksql/registration/Register.h"
-
-DEFINE_int64(
-    seed,
-    123456,
-    "Initial seed for random number generator "
-    "(use it to reproduce previous results).");
 
 using bytedance::bolt::fuzzer::FuzzerRunner;
 
 int main(int argc, char** argv) {
+  bytedance::bolt::fuzzer::setSparkExpressionFuzzerFlagDefaults();
   bytedance::bolt::functions::sparksql::registerFunctions("");
 
   ::testing::InitGoogleTest(&argc, argv);
@@ -78,5 +74,5 @@ int main(int argc, char** argv) {
   std::unordered_map<std::string, std::string> queryConfigs = {
       {bytedance::bolt::core::QueryConfig::kSparkPartitionId, "123"}};
 
-  return FuzzerRunner::run(FLAGS_seed, skipFunctions, queryConfigs);
+  return FuzzerRunner::run(FLAGS_bolt_fuzzer_seed, skipFunctions, queryConfigs);
 }

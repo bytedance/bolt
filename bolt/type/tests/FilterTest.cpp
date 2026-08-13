@@ -226,6 +226,28 @@ TEST(FilterTest, bigIntRange) {
   }
 }
 
+TEST(FilterTest, bigintRangeUnsupportedBytesRange) {
+  std::vector<std::unique_ptr<Filter>> filters;
+  filters.emplace_back(std::make_unique<BigintRange>(
+      1, std::numeric_limits<int64_t>::max(), false));
+  filters.emplace_back(std::make_unique<BigintRange>(-10, 10, true));
+
+  for (const auto& filter : filters) {
+    try {
+      filter->testBytesRange("a", "z", false);
+      FAIL() << "Expected testBytesRange() to throw";
+    } catch (const BoltException& e) {
+      const std::string message = e.what();
+      EXPECT_NE(
+          message.find(
+              std::string(common::kBigintRangeTestBytesRangeErrorPrefix) +
+              " Filter: "),
+          std::string::npos);
+      EXPECT_NE(message.find(filter->toString()), std::string::npos);
+    }
+  }
+}
+
 TEST(FilterTest, negatedBigintRange) {
   auto filter = notEqual(1, false);
   EXPECT_FALSE(filter->testNull());

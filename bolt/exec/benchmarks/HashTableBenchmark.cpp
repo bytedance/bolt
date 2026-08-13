@@ -42,11 +42,17 @@
 #include <gtest/gtest.h>
 #include <memory>
 
-DEFINE_int64(custom_size, 0, "Custom number of entries");
-DEFINE_int32(custom_hit_rate, 0, "Percentage of hits in custom test");
-DEFINE_int32(custom_key_spacing, 1, "Spacing between key values");
+DEFINE_int64(bolt_benchmark_custom_size, 0, "Custom number of entries");
+DEFINE_int32(
+    bolt_benchmark_custom_hit_rate,
+    0,
+    "Percentage of hits in custom test");
+DEFINE_int32(
+    bolt_benchmark_custom_key_spacing,
+    1,
+    "Spacing between key values");
 
-DEFINE_int32(custom_num_ways, 10, "Number of build threads");
+DEFINE_int32(bolt_benchmark_custom_num_ways, 10, "Number of build threads");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
@@ -657,13 +663,13 @@ int main(int argc, char** argv) {
       HashTableBenchmarkParams("Miss32M", 32000000, 5),
 
       HashTableBenchmarkParams("Hit128M", 128000000, 100)};
-  if (FLAGS_custom_size != 0) {
+  if (FLAGS_bolt_benchmark_custom_size != 0) {
     params.push_back(HashTableBenchmarkParams(
         "Custom",
-        FLAGS_custom_size,
-        FLAGS_custom_hit_rate,
-        FLAGS_custom_key_spacing,
-        FLAGS_custom_num_ways));
+        FLAGS_bolt_benchmark_custom_size,
+        FLAGS_bolt_benchmark_custom_hit_rate,
+        FLAGS_bolt_benchmark_custom_key_spacing,
+        FLAGS_bolt_benchmark_custom_num_ways));
   }
 
   for (auto& param : params) {

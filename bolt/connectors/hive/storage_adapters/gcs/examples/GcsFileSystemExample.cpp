@@ -39,19 +39,20 @@
 
 #include <iostream>
 
-DEFINE_string(gcs_path, "", "Path of GCS bucket");
-DEFINE_string(gcs_max_retry_count, "", "Max retry count");
-DEFINE_string(gcs_max_retry_time, "", "Max retry time");
+DEFINE_string(bolt_gcs_path, "", "Path of GCS bucket");
+DEFINE_string(bolt_gcs_max_retry_count, "", "Max retry count");
+DEFINE_string(bolt_gcs_max_retry_time, "", "Max retry time");
 
 auto newConfiguration() {
   using namespace bytedance::bolt;
   std::unordered_map<std::string, std::string> configOverride = {};
-  if (!FLAGS_gcs_max_retry_count.empty()) {
+  if (!FLAGS_bolt_gcs_max_retry_count.empty()) {
     configOverride.emplace(
-        "hive.gcs.max-retry-count", FLAGS_gcs_max_retry_count);
+        "hive.gcs.max-retry-count", FLAGS_bolt_gcs_max_retry_count);
   }
-  if (!FLAGS_gcs_max_retry_time.empty()) {
-    configOverride.emplace("hive.gcs.max-retry-time", FLAGS_gcs_max_retry_time);
+  if (!FLAGS_bolt_gcs_max_retry_time.empty()) {
+    configOverride.emplace(
+        "hive.gcs.max-retry-time", FLAGS_bolt_gcs_max_retry_time);
   }
   return std::make_shared<const config::ConfigBase>(std::move(configOverride));
 }
@@ -59,17 +60,18 @@ auto newConfiguration() {
 int main(int argc, char** argv) {
   using namespace bytedance::bolt;
   gflags::ParseCommandLineFlags(&argc, &argv, false);
-  if (FLAGS_gcs_path.empty()) {
+  if (FLAGS_bolt_gcs_path.empty()) {
     gflags::ShowUsageWithFlags(argv[0]);
     return 1;
   }
   std::string bucket;
   std::string object;
-  setBucketAndKeyFromGcsPath(FLAGS_gcs_path, bucket, object);
+  setBucketAndKeyFromGcsPath(FLAGS_bolt_gcs_path, bucket, object);
   filesystems::GcsFileSystem gcfs(bucket, newConfiguration());
   gcfs.initializeClient();
-  std::cout << "Opening file for read " << FLAGS_gcs_path << std::endl;
-  std::unique_ptr<ReadFile> file_read = gcfs.openFileForRead(FLAGS_gcs_path);
+  std::cout << "Opening file for read " << FLAGS_bolt_gcs_path << std::endl;
+  std::unique_ptr<ReadFile> file_read =
+      gcfs.openFileForRead(FLAGS_bolt_gcs_path);
   std::size_t file_size = file_read->size();
   std::cout << "File size = " << file_size << std::endl;
   std::string buffer(file_size + 1, '\0');

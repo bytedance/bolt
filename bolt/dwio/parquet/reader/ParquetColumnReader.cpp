@@ -123,7 +123,11 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
             requestedType->type(), fileType, params, scanSpec);
       }
     case TypeKind::DOUBLE:
-      if (requestedType->type()->kind() == TypeKind::VARCHAR) {
+      if (
+#ifdef SPARK_COMPATIBLE
+          requestedType->type()->kind() == TypeKind::BIGINT ||
+#endif
+          requestedType->type()->kind() == TypeKind::VARCHAR) {
         return std::make_unique<FloatingPointColumnReader<double, double>>(
             requestedType->type(), fileType, params, scanSpec, DOUBLE());
       }

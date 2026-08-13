@@ -17,6 +17,7 @@
 #include "bolt/connectors/paimon/tests/HdfsContainerMiniCluster.h"
 
 #include <fmt/core.h>
+#include <folly/Subprocess.h>
 #include <glog/logging.h>
 
 #include <cstdlib>
@@ -29,20 +30,6 @@ namespace {
 // NameNode RPC port used by the container-based minicluster.
 constexpr int kNameNodeRpcPort = 7878;
 
-std::string quoted(const std::string& s) {
-  // Safe quoting for shell invocations in tests.
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
-}
-
 std::string scriptPathForTests() {
   // Provided by ctest via ENVIRONMENT in CMake.
   const char* dir = ::getenv("PAIMON_TEST_SCRIPT_DIR");
@@ -51,10 +38,6 @@ std::string scriptPathForTests() {
   }
   // Fallback for direct execution from repo root.
   return "./bolt/connectors/paimon/tests/hdfs_minicluster.sh";
-}
-
-int runCmd(const std::string& cmd) {
-  return ::system(cmd.c_str());
 }
 
 } // namespace
@@ -85,17 +68,18 @@ void HdfsContainerMiniCluster::Start(std::chrono::seconds timeout) {
 
   const std::string scriptPath = scriptPathForTests();
   const int timeoutSeconds = static_cast<int>(timeout.count());
-  const std::string cmd = fmt::format(
-      "bash {} start --name {} --timeout-seconds {}",
-      quoted(scriptPath),
-      quoted(containerName_),
-      timeoutSeconds);
-
-  LOG(INFO) << "Starting HDFS minicluster via script: " << cmd;
-  const int rc = runCmd(cmd);
-  if (rc != 0) {
+  LOG(INFO) << "Starting HDFS minicluster via script: " << scriptPath;
+  folly::Subprocess process(
+      {scriptPath,
+       "start",
+       "--name",
+       containerName_,
+       "--timeout-seconds",
+       std::to_string(timeoutSeconds)});
+  const auto status = process.wait();
+  if (!status.exited() || status.exitStatus() != 0) {
     throw std::runtime_error(fmt::format(
-        "Failed to start HDFS minicluster, rc={}, cmd={}", rc, cmd));
+        "Failed to start HDFS minicluster, status={}", status.str()));
   }
 
   // Ensure cleanup even if test exits early (best-effort; does not cover
@@ -117,9 +101,15 @@ void HdfsContainerMiniCluster::Stop() noexcept {
   }
 
   const std::string scriptPath = scriptPathForTests();
-  const std::string cmd = fmt::format(
-      "bash {} stop --name {}", quoted(scriptPath), quoted(containerName_));
-  runCmd(cmd);
+  try {
+    folly::Subprocess process({scriptPath, "stop", "--name", containerName_});
+    const auto status = process.wait();
+    if (!status.exited() || status.exitStatus() != 0) {
+      LOG(WARNING) << "Failed to stop HDFS minicluster: " << status.str();
+    }
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Failed to stop HDFS minicluster: " << e.what();
+  }
   if (!started_) {
     return;
   }

@@ -27,14 +27,19 @@
 #include "bolt/type/Type.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_string(temp_file_path, "", "file path of input file");
+DEFINE_string(bolt_benchmark_temp_file_path, "", "file path of input file");
 // DEFINE_bool(enable_window_spill, true, "enable window spill");
-DEFINE_string(row_based_spill_mode, "", "row based spill mode");
-DEFINE_int64(fuzzer_seed, 42, "Seed for random input dataset generator");
-DEFINE_bool(enable_log, false, "enable log");
-DEFINE_int32(window_injection_type, 1, "Type of injections for window");
-DEFINE_bool(input_fuzz, true, "input fuzz");
-DEFINE_int32(warmup_rounds, 0, "nums of warmup rounds");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    42,
+    "Seed for random input dataset generator");
+DEFINE_bool(bolt_benchmark_enable_log, false, "enable log");
+DEFINE_int32(
+    bolt_benchmark_window_injection_type,
+    1,
+    "Type of injections for window");
+DEFINE_bool(bolt_benchmark_input_fuzz, true, "input fuzz");
+DEFINE_int32(bolt_benchmark_warmup_rounds, 0, "nums of warmup rounds");
 // DEFINE_bool(merge_sort_window, false, "enable merge sort window");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
@@ -42,7 +47,7 @@ using namespace bytedance::bolt::exec::test;
 
 int32_t kNumVectors = 2000;
 int32_t kRowsPerVector = 1000;
-int32_t kNumWarmupRounds = FLAGS_warmup_rounds;
+int32_t kNumWarmupRounds = FLAGS_bolt_benchmark_warmup_rounds;
 
 namespace {
 
@@ -160,7 +165,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
 
   SortWindowBenchmark(RowTypePtr inputType) : inputType_(inputType) {
     HiveConnectorTestBase::SetUp();
-    if (FLAGS_enable_log) {
+    if (FLAGS_bolt_benchmark_enable_log) {
       std::cout << "inputType_->names():"
                 << folly::join(",", inputType_->names()) << std::endl;
       std::cout << "inputType_->children():"
@@ -171,11 +176,11 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
     opts.vectorSize = kRowsPerVector;
     opts.nullRatio = 0.1;
 
-    VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+    VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
     std::vector<RowVectorPtr> vectors;
     for (auto i = 0; i < kNumVectors; ++i) {
       RowVectorPtr input;
-      if (FLAGS_input_fuzz == true) {
+      if (FLAGS_bolt_benchmark_input_fuzz == true) {
         input = makeRowVector(
             {"int32", "string", "int64", "double", "data"},
             {
@@ -203,12 +208,13 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
       vectors.emplace_back(input);
     }
 
-    filePath_ = FLAGS_temp_file_path.empty() ? TempFilePath::create()->path
-                                             : FLAGS_temp_file_path;
+    filePath_ = FLAGS_bolt_benchmark_temp_file_path.empty()
+        ? TempFilePath::create()->path
+        : FLAGS_bolt_benchmark_temp_file_path;
 
     writeToFile(filePath_, vectors);
 
-    if (FLAGS_enable_log) {
+    if (FLAGS_bolt_benchmark_enable_log) {
       for (size_t i = 0; i < vectors.size(); ++i) {
         std::cout << "[log by jy][vectors dump] Vector " << i << ":\n"
                   << vectors[i]->toString(0, vectors[i]->size())
@@ -224,7 +230,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
   void TestBody() override {}
 
   SortWindowBenchmarkResult run(const SortWindowBenchmarkParam& param) {
-    if (FLAGS_enable_log) {
+    if (FLAGS_bolt_benchmark_enable_log) {
       std::cout << "[log by jy]" << __FUNCTION__ << std::endl;
       std::cout << "[log by jy]param.caseName: " << param.caseName
                 << ", param.partitionKeys: "
@@ -267,7 +273,7 @@ class SortWindowBenchmark : public HiveConnectorTestBase {
     vector_size_t totalRows = 0;
     int batchCount = 0;
     while (auto result = task->next()) {
-      if (FLAGS_enable_log) {
+      if (FLAGS_bolt_benchmark_enable_log) {
         std::cout << "[log by jy][result dump] Batch " << batchCount++ << " ("
                   << result->size() << " rows):\n";
         std::cout << result->toString(0, result->size()) << "\n\n";
@@ -443,7 +449,7 @@ int main(int argc, char** argv) {
                   caseName,
                   {partitionKey},
                   {sortKey},
-                  (FLAGS_window_injection_type < 3
+                  (FLAGS_bolt_benchmark_window_injection_type < 3
                        ? fmt::format(
                              "{}({}) over (partition by {} order by {})",
                              aggFunc,
@@ -465,13 +471,13 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (FLAGS_enable_log) {
+  if (FLAGS_bolt_benchmark_enable_log) {
     std::cout << "Total number of micro-benchmarks" << params.size()
               << std::endl;
   }
 
   bytedance::bolt::exec::WindowBuildType windowBuildType;
-  switch (FLAGS_window_injection_type) {
+  switch (FLAGS_bolt_benchmark_window_injection_type) {
     case 1:
       windowBuildType =
           bytedance::bolt::exec::WindowBuildType::kSortWindowBuild;

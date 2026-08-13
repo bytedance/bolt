@@ -16,6 +16,7 @@
 
 #include <folly/Random.h>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <exception>
@@ -79,6 +80,38 @@ class TestMemoryUsageRecorder final : public MemoryUsageRecorder {
   }
 };
 
+class TestingMemoryTarget final : public MemoryTarget {
+ public:
+  explicit TestingMemoryTarget(bool failBorrow = false)
+      : failBorrow_(failBorrow) {}
+
+  int64_t borrow(int64_t size) override {
+    if (failBorrow_) {
+      BOLT_UNSUPPORTED("original over-target failure");
+    }
+    usedBytes_ += size;
+    return size;
+  }
+
+  int64_t repay(int64_t size) override {
+    const auto freed = std::min(size, usedBytes_);
+    usedBytes_ -= freed;
+    return freed;
+  }
+
+  int64_t usedBytes() override {
+    return usedBytes_;
+  }
+
+  std::string toString() override {
+    return "TestingMemoryTarget";
+  }
+
+ private:
+  const bool failBorrow_;
+  int64_t usedBytes_{0};
+};
+
 TEST_F(MemoryTargetTest, basic) {
   const int64_t capacity = 1 * 1024 * 1024 * 1024;
   const int64_t taskAttemptId = 996;
@@ -136,6 +169,23 @@ TEST_F(MemoryTargetTest, basic) {
           (singleAllocSize + int64_t(singleAllocSize * overAccquireRatio)));
   for (int64_t i = 0; i < allocationNums; ++i) {
     listener->allocationChanged(-singleAllocSize);
+  }
+}
+
+TEST_F(MemoryTargetTest, overAcquirePreservesException) {
+  MemoryTargetPtr target = std::make_shared<TestingMemoryTarget>();
+  MemoryTargetPtr overTarget = std::make_shared<TestingMemoryTarget>(true);
+  auto overAcquireTarget =
+      MemoryTargetBuilder::overAcquire(target, overTarget, 1.0);
+
+  try {
+    overAcquireTarget->borrow(1);
+    FAIL() << "Expected BoltUserError";
+  } catch (const BoltUserError& e) {
+    EXPECT_EQ(e.message(), "original over-target failure");
+    EXPECT_EQ(e.errorCode(), error_code::kUnsupported.c_str());
+  } catch (const BoltException& e) {
+    FAIL() << "Expected BoltUserError, got " << e.exceptionName();
   }
 }
 

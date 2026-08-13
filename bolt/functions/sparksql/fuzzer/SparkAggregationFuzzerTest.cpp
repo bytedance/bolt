@@ -36,21 +36,9 @@
 #include "bolt/exec/fuzzer/AggregationFuzzerOptions.h"
 #include "bolt/exec/fuzzer/AggregationFuzzerRunner.h"
 #include "bolt/exec/fuzzer/DuckQueryRunner.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/fuzzer/TransformResultVerifier.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
-
-DEFINE_int64(
-    seed,
-    0,
-    "Initial seed for random number generator used to reproduce previous "
-    "results (0 means start with random seed).");
-
-DEFINE_string(
-    only,
-    "",
-    "If specified, Fuzzer will only choose functions from "
-    "this comma separated list of function names "
-    "(e.g: --only \"min\" or --only \"sum,avg\").");
 
 int main(int argc, char** argv) {
   bytedance::bolt::functions::aggregate::sparksql::registerAggregateFunctions(
@@ -119,7 +107,8 @@ int main(int argc, char** argv) {
           {"max", nullptr},
       };
 
-  size_t initialSeed = FLAGS_seed == 0 ? std::time(nullptr) : FLAGS_seed;
+  size_t initialSeed =
+      FLAGS_bolt_fuzzer_seed == 0 ? std::time(nullptr) : FLAGS_bolt_fuzzer_seed;
   auto duckQueryRunner =
       std::make_unique<bytedance::bolt::exec::test::DuckQueryRunner>();
   duckQueryRunner->disableAggregateFunctions({
@@ -143,7 +132,7 @@ int main(int argc, char** argv) {
   using Options = bytedance::bolt::exec::test::AggregationFuzzerOptions;
 
   Options options;
-  options.onlyFunctions = FLAGS_only;
+  options.onlyFunctions = FLAGS_bolt_fuzzer_only;
   options.skipFunctions = skipFunctions;
   options.customVerificationFunctions = customVerificationFunctions;
   return Runner::run(initialSeed, std::move(duckQueryRunner), options);

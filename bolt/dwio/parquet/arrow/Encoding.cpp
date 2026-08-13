@@ -4377,8 +4377,8 @@ class IncrementalLevelRleEncoder::Impl {
   void FlushRepeatedRun() {
     DCHECK_GT(repeat_count_, 0);
     bool result = true;
-    int32_t indicator_value = repeat_count_ << 1;
-    result &= bit_writer_.PutVlqInt(static_cast<uint32_t>(indicator_value));
+    const uint32_t indicator_value = static_cast<uint32_t>(repeat_count_) << 1;
+    result &= bit_writer_.PutVlqInt(indicator_value);
     result &= bit_writer_.PutAligned(
         current_value_, static_cast<int>(bit_util::CeilDiv(bit_width_, 8)));
     DCHECK(result);

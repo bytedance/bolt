@@ -437,6 +437,10 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
   return dwio::common::PositionProvider(empty);
 }
 
+void ParquetData::releaseRowGroupReader() {
+  reader_.reset();
+}
+
 std::pair<int64_t, int64_t> ParquetData::getRowGroupRegion(
     uint32_t index) const {
   auto& rowGroup = rowGroups_[index];

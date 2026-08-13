@@ -104,13 +104,6 @@ class ArrowVectorSerde : public VectorSerde {
       memory::MemoryPool* pool,
       const Options* options) override;
 
-  [[deprecated("Use BatchVectorSerializer instead.")]] void
-  deprecatedSerializeEncoded(
-      const RowVectorPtr& vector,
-      StreamArena* streamArena,
-      const Options* options,
-      OutputStream* out);
-
   bool supportsAppendInDeserialize() const override {
     return true;
   }

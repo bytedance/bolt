@@ -10,7 +10,7 @@ Bolt documentation.
 Generates a list of Spark functions available in Bolt. The output
 to be copy-pasted into bolt/docs/spark_functions.rst file.
 
-> bolt_sparksql_coverage --all
+> bolt_sparksql_coverage --bolt_spark_coverage_all
 
 Generates coverage map using all Spark functions. The output to be copy-pasted
 into bolt/docs/functions/spark/coverage.rst file. The functions appear in alphabetical order.

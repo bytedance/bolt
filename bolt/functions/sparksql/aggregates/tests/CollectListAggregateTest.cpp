@@ -83,6 +83,33 @@ TEST_F(CollectListAggregateTest, groupBy) {
       {});
 }
 
+TEST_F(CollectListAggregateTest, stringGroupBy) {
+  auto input = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 1, 1, 1}),
+       makeNullableFlatVector<std::string>(
+           {"a", std::nullopt, "b", "c", std::nullopt})});
+
+  auto expected = makeRowVector(
+      {makeFlatVector<int32_t>({0, 1}),
+       makeArrayVectorFromJson<std::string>({"[\"a\"]", "[\"b\", \"c\"]"})});
+
+  testAggregations(
+      {input},
+      {"c0"},
+      {"spark_collect_list(c1)"},
+      {"c0", "array_sort(a0)"},
+      {expected});
+  testAggregationsWithCompanion(
+      {input},
+      [](auto& /*builder*/) {},
+      {"c0"},
+      {"spark_collect_list(c1)"},
+      {{VARCHAR()}},
+      {"c0", "array_sort(a0)"},
+      {expected},
+      {});
+}
+
 TEST_F(CollectListAggregateTest, global) {
   auto data = makeRowVector({makeNullableFlatVector<int32_t>(
       {std::nullopt, 1, 2, std::nullopt, 4, 5})});

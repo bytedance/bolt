@@ -42,9 +42,12 @@
 // Set FLAGS_minloglevel to a value in {1,2,3} to disable logging at the
 // INFO(=0) level.
 // Set FLAGS_logtostderr = true to log messages to stderr instead of logfiles
-// Set FLAGS_timing_repeats = n to run timing filter tests n times
-DEFINE_int32(timing_repeats, 0, "Count of repeats for timing filter tests");
-DEFINE_bool(use_random_seed, false, "");
+// Set FLAGS_bolt_testing_timing_repeats = n to run timing filter tests n times
+DEFINE_int32(
+    bolt_testing_timing_repeats,
+    0,
+    "Count of repeats for timing filter tests");
+DEFINE_bool(bolt_testing_use_random_seed, false, "");
 namespace bytedance::bolt::dwio::common {
 using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::type::fbhive;
@@ -315,8 +318,8 @@ void E2EFilterTestBase::testFilterSpecs(
   uint64_t timeWithFilter = 0;
   readWithFilter(spec, mutations, batches, hitRows, timeWithFilter, false);
 
-  if (FLAGS_timing_repeats) {
-    for (auto i = 0; i < FLAGS_timing_repeats; ++i) {
+  if (FLAGS_bolt_testing_timing_repeats) {
+    for (auto i = 0; i < FLAGS_bolt_testing_timing_repeats; ++i) {
       readWithFilter(
           spec, mutations, batches, hitRows, timeWithFilter, false, true);
     }
@@ -324,8 +327,8 @@ void E2EFilterTestBase::testFilterSpecs(
         "    {} hits in {} us, {} input rows/s\n",
         hitRows.size(),
         timeWithFilter,
-        batches[0]->size() * batches.size() * FLAGS_timing_repeats /
-            (timeWithFilter / 1000000.0));
+        batches[0]->size() * batches.size() *
+            FLAGS_bolt_testing_timing_repeats / (timeWithFilter / 1000000.0));
   }
   testReadWithFilterLazy(spec, mutations, batches, hitRows);
 }
@@ -423,7 +426,7 @@ void E2EFilterTestBase::testScenario(
   rowType_ = DataSetBuilder::makeRowType(columns, wrapInStruct);
 
   uint32_t seed = 1;
-  if (FLAGS_use_random_seed) {
+  if (FLAGS_bolt_testing_use_random_seed) {
     seed = folly::Random::secureRand32();
     LOG(INFO) << "Random seed: " << seed;
   }

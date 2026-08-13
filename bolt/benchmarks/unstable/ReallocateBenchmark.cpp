@@ -30,32 +30,38 @@
 // #define ALIGNMENT
 
 #ifdef PRESSURE
-DEFINE_int64(memory_allocation_count, 1000, "The number of allocations");
 DEFINE_int64(
-    memory_allocation_bytes,
+    bolt_benchmark_memory_allocation_count,
+    1000,
+    "The number of allocations");
+DEFINE_int64(
+    bolt_benchmark_memory_allocation_bytes,
     51'539'607'552,
     "The cap of memory allocation bytes");
 DEFINE_int64(
-    allocation_size_seed,
+    bolt_benchmark_allocation_size_seed,
     99887766,
     "Seed for random memory size generator");
 DEFINE_int64(
-    memory_free_every_n_operations,
+    bolt_benchmark_memory_free_every_n_operations,
     1000,
     "Specifies memory free for every N operations. If it is 5, then we free one of existing memory allocation for every 5 memory operations");
 
 #else
-DEFINE_int64(memory_allocation_count, 1000, "The number of allocations");
 DEFINE_int64(
-    memory_allocation_bytes,
+    bolt_benchmark_memory_allocation_count,
+    1000,
+    "The number of allocations");
+DEFINE_int64(
+    bolt_benchmark_memory_allocation_bytes,
     1'000'000'000,
     "The cap of memory allocation bytes");
 DEFINE_int64(
-    allocation_size_seed,
+    bolt_benchmark_allocation_size_seed,
     99887766,
     "Seed for random memory size generator");
 DEFINE_int64(
-    memory_free_every_n_operations,
+    bolt_benchmark_memory_free_every_n_operations,
     5,
     "Specifies memory free for every N operations. If it is 5, then we free one of existing memory allocation for every 5 memory operations");
 #endif
@@ -90,7 +96,7 @@ class MemoryPoolReallocateBenchMark {
         BOLT_USER_FAIL("Unknown allocator type: {}", static_cast<int>(type_));
         break;
     }
-    rng_.seed(FLAGS_allocation_size_seed);
+    rng_.seed(FLAGS_bolt_benchmark_allocation_size_seed);
     pool_ = manager_->addLeafPool("MemoryPoolReallocateBenchMark");
   }
 
@@ -185,7 +191,7 @@ class MemoryPoolReallocateBenchMark {
   }
 
   bool full() const {
-    return sumAllocBytes_ >= FLAGS_memory_allocation_bytes;
+    return sumAllocBytes_ >= FLAGS_bolt_benchmark_memory_allocation_bytes;
   }
 
   bool empty() const {
@@ -218,8 +224,10 @@ class MemoryPoolReallocateBenchMark {
 size_t MemoryPoolReallocateBenchMark::runAllocate() {
   folly::BenchmarkSuspender suspender;
   suspender.dismiss();
-  for (auto iter = 0; iter < FLAGS_memory_allocation_count; ++iter) {
-    if (iter % FLAGS_memory_free_every_n_operations == 0 && !empty()) {
+  for (auto iter = 0; iter < FLAGS_bolt_benchmark_memory_allocation_count;
+       ++iter) {
+    if (iter % FLAGS_bolt_benchmark_memory_free_every_n_operations == 0 &&
+        !empty()) {
       free();
     }
     while (full()) {
@@ -227,7 +235,7 @@ size_t MemoryPoolReallocateBenchMark::runAllocate() {
     }
     allocate();
   }
-  return FLAGS_memory_allocation_count;
+  return FLAGS_bolt_benchmark_memory_allocation_count;
 }
 
 size_t MemoryPoolReallocateBenchMark::runAllocateContiguous() {
@@ -237,8 +245,9 @@ size_t MemoryPoolReallocateBenchMark::runAllocateContiguous() {
 
   folly::BenchmarkSuspender suspender;
   suspender.dismiss();
-  for (auto iter = 0; iter < FLAGS_memory_allocation_count; ++iter) {
-    if (iter % FLAGS_memory_free_every_n_operations == 0 &&
+  for (auto iter = 0; iter < FLAGS_bolt_benchmark_memory_allocation_count;
+       ++iter) {
+    if (iter % FLAGS_bolt_benchmark_memory_free_every_n_operations == 0 &&
         !contiguousAllocationEmpty()) {
       freeContiguous();
     }
@@ -248,7 +257,7 @@ size_t MemoryPoolReallocateBenchMark::runAllocateContiguous() {
     allocateContiguous(allocPages_[iter % 100]);
   }
   allocPages_.clear();
-  return FLAGS_memory_allocation_count;
+  return FLAGS_bolt_benchmark_memory_allocation_count;
 }
 
 size_t MemoryPoolReallocateBenchMark::runAllocateContiguousOnce() {
@@ -259,8 +268,10 @@ size_t MemoryPoolReallocateBenchMark::runAllocateContiguousOnce() {
 size_t MemoryPoolReallocateBenchMark::runAllocateZeroFilled() {
   folly::BenchmarkSuspender suspender;
   suspender.dismiss();
-  for (auto iter = 0; iter < FLAGS_memory_allocation_count; ++iter) {
-    if (iter % FLAGS_memory_free_every_n_operations == 0 && !empty()) {
+  for (auto iter = 0; iter < FLAGS_bolt_benchmark_memory_allocation_count;
+       ++iter) {
+    if (iter % FLAGS_bolt_benchmark_memory_free_every_n_operations == 0 &&
+        !empty()) {
       free();
     }
     while (full()) {
@@ -268,7 +279,7 @@ size_t MemoryPoolReallocateBenchMark::runAllocateZeroFilled() {
     }
     allocateZeroFilled();
   }
-  return FLAGS_memory_allocation_count;
+  return FLAGS_bolt_benchmark_memory_allocation_count;
 }
 
 size_t MemoryPoolReallocateBenchMark::runReallocate() {
@@ -279,8 +290,10 @@ size_t MemoryPoolReallocateBenchMark::runReallocate() {
 
   folly::BenchmarkSuspender suspender;
   suspender.dismiss();
-  for (auto iter = 0; iter < FLAGS_memory_allocation_count; ++iter) {
-    if (iter % FLAGS_memory_free_every_n_operations == 0 && !empty()) {
+  for (auto iter = 0; iter < FLAGS_bolt_benchmark_memory_allocation_count;
+       ++iter) {
+    if (iter % FLAGS_bolt_benchmark_memory_free_every_n_operations == 0 &&
+        !empty()) {
       free();
     }
     while (full()) {
@@ -290,7 +303,7 @@ size_t MemoryPoolReallocateBenchMark::runReallocate() {
   }
   allocPages_.clear();
   reallocPages_.clear();
-  return FLAGS_memory_allocation_count;
+  return FLAGS_bolt_benchmark_memory_allocation_count;
 }
 
 size_t MemoryPoolReallocateBenchMark::runReallocateLarger() {
@@ -299,8 +312,10 @@ size_t MemoryPoolReallocateBenchMark::runReallocateLarger() {
   }
   folly::BenchmarkSuspender suspender;
   suspender.dismiss();
-  for (auto iter = 0; iter < FLAGS_memory_allocation_count; ++iter) {
-    if (iter % FLAGS_memory_free_every_n_operations == 0 && !empty()) {
+  for (auto iter = 0; iter < FLAGS_bolt_benchmark_memory_allocation_count;
+       ++iter) {
+    if (iter % FLAGS_bolt_benchmark_memory_free_every_n_operations == 0 &&
+        !empty()) {
       free();
     }
     while (full()) {
@@ -309,7 +324,7 @@ size_t MemoryPoolReallocateBenchMark::runReallocateLarger() {
     reallocate(allocPages_[iter % 100], allocPages_[iter % 100] * 1.5);
   }
   allocPages_.clear();
-  return FLAGS_memory_allocation_count;
+  return FLAGS_bolt_benchmark_memory_allocation_count;
 }
 
 #ifdef PRESSURE

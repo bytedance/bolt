@@ -54,6 +54,7 @@ static const Payload::Mode kRowVectorMode = BlockPayload::kRowVector;
 static constexpr int64_t kZeroLengthBuffer = 0;
 static constexpr int64_t kNullBuffer = -1;
 static constexpr int64_t kUncompressedBuffer = -2;
+static constexpr int64_t kCompressedBufferHeaderLength = 2 * sizeof(int64_t);
 
 using RowSizeType = int32_t;
 static constexpr int32_t kRowSizeBytes = sizeof(RowSizeType);
@@ -133,7 +134,7 @@ arrow::Result<std::tuple<uint32_t, uint8_t>> readRowsAndMode(
 arrow::Result<int64_t> compressBuffer(
     const std::shared_ptr<arrow::Buffer>& buffer,
     uint8_t* output,
-    int64_t outputLength,
+    int64_t outputRemainingLength,
     Codec* codec) {
   auto outputPtr = &output;
   if (!buffer) {
@@ -144,11 +145,13 @@ arrow::Result<int64_t> compressBuffer(
     write<int64_t>(outputPtr, kZeroLengthBuffer);
     return sizeof(int64_t);
   }
-  static const int64_t kCompressedBufferHeaderLength = 2 * sizeof(int64_t);
   auto* compressedLengthPtr = advance<int64_t>(outputPtr);
   write(outputPtr, static_cast<int64_t>(buffer->size()));
-  auto compressedLength =
-      codec->compress(buffer->data(), buffer->size(), *outputPtr, outputLength);
+  auto compressedLength = codec->compress(
+      buffer->data(),
+      buffer->size(),
+      *outputPtr,
+      outputRemainingLength - kCompressedBufferHeaderLength);
   if (compressedLength >= buffer->size()) {
     // Write uncompressed buffer.
     memcpy(*outputPtr, buffer->data(), buffer->size());
@@ -184,11 +187,15 @@ arrow::Status compressAndFlush(
     ARROW_ASSIGN_OR_RAISE(
         compressed,
         arrow::AllocateResizableBuffer(
-            sizeof(int64_t) * 2 + maxCompressedLength, pool));
+            kCompressedBufferHeaderLength + maxCompressedLength, pool));
     auto output = compressed->mutable_data();
     ARROW_ASSIGN_OR_RAISE(
         compressedSize,
-        compressBuffer(buffer, output, maxCompressedLength, codec));
+        compressBuffer(
+            buffer,
+            output,
+            kCompressedBufferHeaderLength + maxCompressedLength,
+            codec));
   }
 
   {
@@ -723,9 +730,18 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
     std::unique_ptr<InMemoryPayload> append,
     arrow::MemoryPool* pool,
     int64_t rowvectorModeCompressionMinColumns,
-    int64_t rowvectorModeCompressionMaxBufferSize) {
+    int64_t rowvectorModeCompressionMaxBufferSize,
+    bool sourceBuffersResizable) {
   auto mergedRows = source->numRows() + append->numRows();
   auto isValidityBuffer = source->isValidityBuffer();
+
+  auto asResizable =
+      [sourceBuffersResizable](const std::shared_ptr<arrow::Buffer>& buffer) {
+        if (sourceBuffersResizable) {
+          return std::static_pointer_cast<arrow::ResizableBuffer>(buffer);
+        }
+        return std::dynamic_pointer_cast<arrow::ResizableBuffer>(buffer);
+      };
 
   auto numBuffers = append->numBuffers();
   ARROW_RETURN_IF(
@@ -761,8 +777,7 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
         // Because sourceBuffer can be resized, need to save buffer size in
         // advance.
         auto sourceBufferSize = sourceBuffer->size();
-        auto resizable =
-            std::dynamic_pointer_cast<arrow::ResizableBuffer>(sourceBuffer);
+        auto resizable = asResizable(sourceBuffer);
         auto mergedBytes = arrow::bit_util::BytesForBits(mergedRows);
         if (resizable) {
           // If source is resizable, resize and reuse source.
@@ -800,8 +815,7 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
         // advance.
         auto sourceBufferSize = sourceBuffer->size();
         auto mergedSize = sourceBufferSize + appendBuffer->size();
-        auto resizable =
-            std::dynamic_pointer_cast<arrow::ResizableBuffer>(sourceBuffer);
+        auto resizable = asResizable(sourceBuffer);
         if (resizable) {
           // If source is resizable, resize and reuse source.
           RETURN_NOT_OK(resizable->Resize(mergedSize + simd::kPadding));

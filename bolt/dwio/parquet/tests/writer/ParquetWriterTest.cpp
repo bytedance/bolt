@@ -564,6 +564,8 @@ TEST_F(ParquetWriterTest, allNulls) {
   auto sinkPtr = sink.get();
   vp::WriterOptions writerOptions;
   writerOptions.memoryPool = leafPool_.get();
+  writerOptions.enableDictionary = false;
+  writerOptions.maxRowsPerDataPage = 1'000;
 
   auto writer = std::make_unique<vp::Writer>(
       std::move(sink),
@@ -578,6 +580,15 @@ TEST_F(ParquetWriterTest, allNulls) {
   auto reader = createReaderInMemory(*sinkPtr, readerOptions);
   ASSERT_EQ(reader->numberOfRows(), kRows);
   ASSERT_EQ(*reader->rowType(), *schema);
+  int32_t dataPageCount = 0;
+  for (const auto& stats :
+       reader->fileMetaData().rowGroup(0).columnChunk(0).pageEncodingStats()) {
+    if (stats.page_type == thrift::PageType::DATA_PAGE ||
+        stats.page_type == thrift::PageType::DATA_PAGE_V2) {
+      dataPageCount += stats.count;
+    }
+  }
+  ASSERT_EQ(dataPageCount, 5);
 
   auto rowReader = createRowReaderWithSchema(std::move(reader), schema);
   assertReadWithReaderAndExpected(schema, *rowReader, data, *leafPool_);

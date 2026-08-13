@@ -30,12 +30,15 @@
 #include "bolt/functions/sparksql/aggregates/Register.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
-DEFINE_bool(enable_spill, false, "enable hash agg spill");
-DEFINE_string(row_based_spill_mode, "", "row based spill mode");
-DEFINE_string(temp_file_path, "", "file path of input file");
-DEFINE_int64(iterations, 1, "run count of each benchmark");
-DEFINE_int32(jit_level, 0, "jit level");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
+DEFINE_bool(bolt_benchmark_enable_spill, false, "enable hash agg spill");
+DEFINE_string(bolt_benchmark_row_based_spill_mode, "", "row based spill mode");
+DEFINE_string(bolt_benchmark_temp_file_path, "", "file path of input file");
+DEFINE_int64(bolt_benchmark_iterations, 1, "run count of each benchmark");
+DEFINE_int32(bolt_benchmark_jit_level, 0, "jit level");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::connector::hive;
 using namespace bytedance::bolt::exec::test;
@@ -125,11 +128,11 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
 
     inputType_ = ROW({{"i32", INTEGER()}, {"i64", BIGINT()}});
 
-    if (FLAGS_temp_file_path.empty()) {
+    if (FLAGS_bolt_benchmark_temp_file_path.empty()) {
       VectorFuzzer::Options opts;
       opts.vectorSize = kRowsPerVector;
       opts.nullRatio = 0;
-      VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
+      VectorFuzzer fuzzer(opts, pool(), FLAGS_bolt_benchmark_fuzzer_seed);
       auto getDictVector = [&](TypePtr type) {
         int dictCount = rand() % kRowsPerVector;
         dictCount = std::max(dictCount, 3);
@@ -247,7 +250,7 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
       createDuckDbTable("t", vectors);
       std::cout << filePath_ << std::endl;
     } else {
-      filePath_ = FLAGS_temp_file_path;
+      filePath_ = FLAGS_bolt_benchmark_temp_file_path;
     }
   }
 
@@ -391,14 +394,15 @@ class VariousAggregatesBenchmark : public HiveConnectorTestBase {
   std::shared_ptr<exec::Task> makeTask(core::PlanFragment plan) {
     auto queryCtx = core::QueryCtx::create(executor_.get());
     std::unordered_map<std::string, std::string> configs;
-    if (FLAGS_enable_spill) {
+    if (FLAGS_bolt_benchmark_enable_spill) {
       configs[core::QueryConfig::kSpillEnabled] = "true";
       configs[core::QueryConfig::kAggregationSpillEnabled] = "true";
       configs[core::QueryConfig::kAggregationSpillMemoryThreshold] = "10000000";
       configs[core::QueryConfig::kRowBasedSpillMode] =
-          FLAGS_row_based_spill_mode;
+          FLAGS_bolt_benchmark_row_based_spill_mode;
     }
-    configs[core::QueryConfig::kJitLevel] = std::to_string(FLAGS_jit_level);
+    configs[core::QueryConfig::kJitLevel] =
+        std::to_string(FLAGS_bolt_benchmark_jit_level);
     // configs[core::QueryConfig::kMaxOutputBatchRows] = "1024";
     queryCtx->testingOverrideConfigUnsafe(std::move(configs));
     auto task = exec::Task::create(
@@ -422,7 +426,7 @@ void doRun(
     uint32_t,
     const std::string& phyJoinType,
     const std::string& logicalJoinType) {
-  for (int i = 0; i < FLAGS_iterations; i++) {
+  for (int i = 0; i < FLAGS_bolt_benchmark_iterations; i++) {
     if (phyJoinType == "SMJ") {
       benchmark->runSMJ(phyJoinType, logicalJoinType);
     } else {

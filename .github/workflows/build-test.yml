@@ -27,15 +27,57 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
 env:
+  PRE_COMMIT_HOME: /data/pre-commit-cache
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
   CI_NUM_THREADS: "16"
   IN_CI: '1'
+  # Bump this when external CI images/tooling change without a tree change.
+  CI_REUSE_SALT: >-
+    bolt-ci:20260114|conan-server:latest|build-test-v2
+  CI_BASE_SHA: >-
+    ${{ github.event_name == 'pull_request' &&
+        github.event.pull_request.base.sha ||
+        github.event.merge_group.base_sha }}
 
 jobs:
+  reuse-check:
+    runs-on: ubuntu-latest
+    outputs:
+      hit: ${{ steps.reuse.outputs.hit }}
+      tree_sha: ${{ steps.fingerprint.outputs.tree_sha }}
+      base_sha: ${{ steps.fingerprint.outputs.base_sha }}
+      config_hash: ${{ steps.fingerprint.outputs.config_hash }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Compute CI fingerprint
+        id: fingerprint
+        run: |
+          python3 .github/scripts/merge_queue_ci.py fingerprint \
+            --salt "${CI_REUSE_SALT}" \
+            --base-sha "${CI_BASE_SHA}" \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Find reusable CI result
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/merge_queue_ci.py find-reuse \
+            --event "${{ github.event_name }}" \
+            --tree-sha "${{ steps.fingerprint.outputs.tree_sha }}" \
+            --base-sha "${{ steps.fingerprint.outputs.base_sha }}" \
+            --salt "${CI_REUSE_SALT}" \
+            --github-output "${GITHUB_OUTPUT}"
+
   changes:
-    runs-on:  [ self-hosted, small ]
+    runs-on: ubuntu-latest
     outputs:
       source_code: ${{ steps.filter.outputs.source_code }}
     steps:
@@ -45,23 +87,33 @@ jobs:
         id: filter
         with:
           filters: |
+            # Keep the workflow itself unfiltered so required checks are always
+            # reported; only gate the self-hosted compilation jobs here.
             source_code:
               - 'bolt/**'
               - '!bolt/**/*.md'
               - 'Makefile'
               - 'conanfile.py'
               - 'CMakeLists.txt'
-              - 'bolt/**/CMakeLists.txt'
-              - 'scripts/**'
-              - '.github/workflows/**'
+              - 'scripts/conan/**'
+              - 'scripts/install-bolt-deps.sh'
+              - 'scripts/run-clang-tidy.py'
+              - '.clang-tidy'
+              - '.pre-commit-config.yaml'
+              - '.github/actions/bolt-build-base/**'
+              - '.github/workflows/build-test.yml'
   build-test:
-    needs: changes
-    if: ${{ needs.changes.outputs.source_code == 'true' }}
+    name: build-test (${{ matrix.build_type }})
+    needs: [reuse-check, changes]
+    if: >-
+      ${{ needs.reuse-check.outputs.hit != 'true' &&
+          needs.changes.outputs.source_code == 'true' }}
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
       options: --user root --init
       volumes:
+        - /data/pre-commit-cache:/data/pre-commit-cache
         - /data/ccache-data:/data/ccache-data
     services:
       conanserver:
@@ -70,25 +122,43 @@ jobs:
           - /data/conan-server-data:/var/conan/data
     strategy:
       matrix:
-        build_type: [ release, release_spark ]
+        include:
+          - build_type: release
+            build_target: benchmarks-build
+          - build_type: release_spark
+            build_target: release_spark_with_test
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
+    - name: Configure Conan profile for benchmarks
+      if: ${{ matrix.build_type == 'release' }}
+      run: |
+        echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
+
     - name: Bolt build
       run: |
-        make ${{ matrix.build_type }}_with_test
+        make ${{ matrix.build_target }}
+
+    - name: Run clang-tidy
+      if: ${{ matrix.build_type == 'release_spark' }}
+      run: |
+        CLANG_TIDY_SKIP_MISSING=1 pre-commit run clang-tidy --all-files
 
     - name: Run tests
       run: |
-        make unittest_${{ matrix.build_type }}
+        make ctest_release
 
   build-only:
-      needs: changes
-      if: ${{ needs.changes.outputs.source_code == 'true' }}
+      needs: [reuse-check, changes]
+      if: >-
+        ${{ needs.reuse-check.outputs.hit != 'true' &&
+            needs.changes.outputs.source_code == 'true' }}
       runs-on: [ self-hosted, medium ]
       container:
         image: bolt-registry:5000/bolt-ci:20260114
@@ -102,7 +172,7 @@ jobs:
             - /data/conan-server-data:/var/conan/data
       strategy:
         matrix:
-          build_target: [ benchmarks-build, debug_spark_with_test ]
+          build_target: [ debug_spark_with_test ]
       steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -114,3 +184,39 @@ jobs:
         run: |
           echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
           make ${{ matrix.build_target }}
+
+  source-result:
+    needs: [reuse-check, changes, build-test, build-only]
+    if: >-
+      ${{ always() &&
+          needs.reuse-check.result == 'success' &&
+          needs.changes.result == 'success' &&
+          (needs.build-test.result == 'success' ||
+           needs.build-test.result == 'skipped') &&
+          (needs.build-only.result == 'success' ||
+           needs.build-only.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Record tested source
+        id: source
+        run: |
+          python3 .github/scripts/merge_queue_ci.py record-source \
+            --workflow build-test.yml \
+            --event "${{ github.event_name }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --merge-sha "${GITHUB_SHA}" \
+            --tree-sha "${{ needs.reuse-check.outputs.tree_sha }}" \
+            --base-sha "${{ needs.reuse-check.outputs.base_sha }}" \
+            --config-hash "${{ needs.reuse-check.outputs.config_hash }}" \
+            --output ci-source/result.json \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Upload tested source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          path: ci-source/result.json
+          if-no-files-found: error
+          retention-days: 2

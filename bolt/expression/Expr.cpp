@@ -34,6 +34,7 @@
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/SuccinctPrinter.h"
 #include "bolt/common/base/Uuid.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/process/ThreadDebugInfo.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/core/Expressions.h"
@@ -48,24 +49,6 @@
 #include "bolt/vector/SelectivityVector.h"
 #include "bolt/vector/VectorSaver.h"
 
-DEFINE_bool(
-    force_eval_simplified,
-    false,
-    "Whether to overwrite queryCtx and force the "
-    "use of simplified expression evaluation path.");
-
-DEFINE_bool(
-    bolt_experimental_save_input_on_fatal_signal,
-    false,
-    "This is an experimental flag only to be used for debugging "
-    "purposes. If set to true, serializes the input vector data and "
-    "all the SQL expressions in the ExprSet that is currently "
-    "executing, whenever a fatal signal is encountered. Enabling "
-    "this flag makes the signal handler async signal unsafe, so it "
-    "should only be used for debugging purposes. The vector and SQLs "
-    "are serialized to files in directories specified by either "
-    "'bolt_save_input_on_expression_any_failure_path' or "
-    "'bolt_save_input_on_expression_system_failure_path'");
 namespace bytedance::bolt::exec {
 
 folly::Synchronized<std::vector<std::shared_ptr<ExprSetListener>>>&
@@ -2059,7 +2042,7 @@ std::unique_ptr<ExprSet> makeExprSetFromFlag(
     std::vector<core::TypedExprPtr>&& source,
     core::ExecCtx* execCtx) {
   if (execCtx->queryCtx()->queryConfig().exprEvalSimplified() ||
-      FLAGS_force_eval_simplified) {
+      FLAGS_bolt_force_eval_simplified) {
     return std::make_unique<ExprSetSimplified>(std::move(source), execCtx);
   }
   return std::make_unique<ExprSet>(std::move(source), execCtx);

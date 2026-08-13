@@ -471,8 +471,16 @@ class SelectiveColumnReader {
   template <typename T>
   void ensureValuesCapacity(vector_size_t numRows);
 
+  // Prepares output nulls for reading 'rows'. Keeps null decoding for
+  // filtering, but skips result nulls when the filter proves raw output values
+  // are non-null.
+  void prepareOutputNulls(
+      const RowSet& rows,
+      bool inputHasNulls,
+      int32_t extraRows = 0);
+
   // Prepares the result buffer for nulls for reading 'rows'. Leaves
-  // 'extraSpace' bits worth of space in the nulls buffer.
+  // 'extraRows' bits worth of space in the nulls buffer.
   void prepareNulls(const RowSet& rows, bool hasNulls, int32_t extraRows = 0);
 
   void makeCastExpr(TypePtr castSourceType = nullptr);
@@ -543,6 +551,8 @@ class SelectiveColumnReader {
   // should move null flags.  Return nullptr if nulls does not need to be moved.
   // Checks consistency of nulls-related state.
   const uint64_t* shouldMoveNulls(RowSet rows);
+
+  bool filterGuaranteesRawOutputNonNull() const;
 
   void addStringValue(folly::StringPiece value);
 

@@ -32,6 +32,7 @@
 #include <cstdint>
 
 #include "bolt/common/caching/CacheTTLController.h"
+#include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
@@ -40,6 +41,7 @@
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/paimon/deletionvectors/DeletionFileReader.h"
+#include "bolt/dwio/parquet/reader/ParquetReaderCast.h"
 #include "bolt/type/Conversions.h"
 #include "bolt/type/filter/MapSubscriptFilter.h"
 
@@ -108,32 +110,30 @@ bool applyPartitionFilter(
   }
 }
 
-void checkFloatingPointToVarcharFilterCompatibility(
+void checkReaderCastFilter(
     const TypePtr& fileType,
     const TypePtr& requestedType,
     const common::Filter* filter,
     const std::string& path) {
-  if ((fileType->isReal() || fileType->isDouble()) &&
-      requestedType->isVarchar()) {
+  if (parquet::isReaderCastFilterMismatch(fileType, requestedType)) {
     if (filter && !filter->isValueIndependent()) {
       BOLT_USER_FAIL(
-          "Cannot apply VARCHAR filter to physical {} Parquet column {}",
+          "Cannot apply {} filter to physical {} Parquet column {}",
+          requestedType->kindName(),
           fileType->kindName(),
           path);
     }
   }
 }
 
-void checkFloatingPointToVarcharFilter(
+void validateReaderCastFilterRecursive(
     const TypePtr& fileType,
     const TypePtr& requestedType,
     const common::ScanSpec& scanSpec,
     const std::string& path) {
   auto* filter = scanSpec.filter();
-  checkFloatingPointToVarcharFilterCompatibility(
-      fileType, requestedType, filter, path);
-  if ((fileType->isReal() || fileType->isDouble()) &&
-      requestedType->isVarchar()) {
+  checkReaderCastFilter(fileType, requestedType, filter, path);
+  if (parquet::isReaderCastFilterMismatch(fileType, requestedType)) {
     return;
   }
   if (fileType->kind() != requestedType->kind()) {
@@ -148,7 +148,7 @@ void checkFloatingPointToVarcharFilter(
     const auto keyPath = path.empty()
         ? common::ScanSpec::kMapKeysFieldName
         : path + "." + common::ScanSpec::kMapKeysFieldName;
-    checkFloatingPointToVarcharFilterCompatibility(
+    checkReaderCastFilter(
         fileType->childAt(0),
         requestedType->childAt(0),
         mapFilter->keyFilter(),
@@ -156,7 +156,7 @@ void checkFloatingPointToVarcharFilter(
     const auto valuePath = path.empty()
         ? common::ScanSpec::kMapValuesFieldName
         : path + "." + common::ScanSpec::kMapValuesFieldName;
-    checkFloatingPointToVarcharFilterCompatibility(
+    checkReaderCastFilter(
         fileType->childAt(1),
         requestedType->childAt(1),
         mapFilter->valueFilter(),
@@ -185,7 +185,7 @@ void checkFloatingPointToVarcharFilter(
 
     const auto childPath =
         path.empty() ? child->fieldName() : path + "." + child->fieldName();
-    checkFloatingPointToVarcharFilter(
+    validateReaderCastFilterRecursive(
         fileType->childAt(*fileChildIndex),
         requestedType->childAt(*requestedChildIndex),
         *child,
@@ -375,14 +375,10 @@ void SplitReader::prepareSplit(
   baseReader_ = dwio::common::getReaderFactory(baseReaderOpts_.getFileFormat())
                     ->createReader(std::move(baseFileInput), baseReaderOpts_);
 
-  // only for testing
-  if (UNLIKELY(
-          !FLAGS_testing_only_set_scan_exception_mesg_for_prepare.empty())) {
-    throw std::runtime_error(
-        FLAGS_testing_only_set_scan_exception_mesg_for_prepare);
-  }
+  BOLT_TEST_ADJUST(
+      "bytedance::bolt::connector::hive::SplitReader::prepareSplit", this);
 
-  validateFloatingPointToVarcharFilters();
+  validateReaderCastFilter();
   baseRowReaderOpts_.setDisableFloatingPointToVarcharMetadataFilter(
       !isPartOfPaimonSplit_);
 
@@ -629,11 +625,7 @@ uint64_t SplitReader::next(int64_t size, VectorPtr& output) {
   }
   populatePaimonMetadataColumns(output);
 
-  // only for testing
-  if (UNLIKELY(!FLAGS_testing_only_set_scan_exception_mesg_for_next.empty())) {
-    throw std::runtime_error(
-        FLAGS_testing_only_set_scan_exception_mesg_for_next);
-  }
+  BOLT_TEST_ADJUST("bytedance::bolt::connector::hive::SplitReader::next", this);
 
   return rows;
 }
@@ -652,13 +644,13 @@ void SplitReader::populatePaimonMetadataColumns(VectorPtr& output) {
 }
 
 void SplitReader::resetFilterCaches() {
-  validateFloatingPointToVarcharFilters();
+  validateReaderCastFilter();
   if (baseRowReader_) {
     baseRowReader_->resetFilterCaches();
   }
 }
 
-void SplitReader::validateFloatingPointToVarcharFilters() const {
+void SplitReader::validateReaderCastFilter() const {
   if (isPartOfPaimonSplit_ || !baseReader_ ||
       baseReaderOpts_.getFileFormat() != dwio::common::FileFormat::PARQUET) {
     return;
@@ -666,7 +658,7 @@ void SplitReader::validateFloatingPointToVarcharFilters() const {
   const auto requestedType = hiveTableHandle_->dataColumns()
       ? hiveTableHandle_->dataColumns()
       : readerOutputType_;
-  checkFloatingPointToVarcharFilter(
+  validateReaderCastFilterRecursive(
       baseReader_->rowType(), requestedType, *scanSpec_, "");
 }
 

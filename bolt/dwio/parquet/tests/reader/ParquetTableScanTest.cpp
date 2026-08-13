@@ -190,6 +190,11 @@ void rewriteDateConvertedTypeToLogicalTypeOnly(const std::string& path) {
 class MapSubscriptMetadataFilterParser final
     : public exec::PrestoExprToSubfieldFilterParser {
  public:
+  explicit MapSubscriptMetadataFilterParser(
+      std::unique_ptr<common::Filter> valueFilter =
+          common::createBytesRange("1.25", true, "1.25", true, false))
+      : valueFilter_(std::move(valueFilter)) {}
+
   std::optional<std::pair<common::Subfield, std::unique_ptr<common::Filter>>>
   leafCallToSubfieldFilter(
       const core::CallTypedExpr& call,
@@ -199,19 +204,20 @@ class MapSubscriptMetadataFilterParser final
       auto mapAccess = std::dynamic_pointer_cast<const core::CallTypedExpr>(
           call.inputs()[0]);
       if (mapAccess && mapAccess->name() == "element_at") {
-        std::shared_ptr<const common::Filter> valueFilter =
-            common::createBytesRange("1.25", true, "1.25", true, false);
         std::shared_ptr<const common::Filter> keyFilter =
             common::createBytesRange("key", true, "key", true, false);
         return std::make_pair(
             common::Subfield("c0"),
             common::createMapSubscriptFilter(
-                "key", std::move(valueFilter), std::move(keyFilter)));
+                "key", valueFilter_->clone(), std::move(keyFilter)));
       }
     }
     return PrestoExprToSubfieldFilterParser::leafCallToSubfieldFilter(
         call, evaluator, negated);
   }
+
+ private:
+  const std::shared_ptr<const common::Filter> valueFilter_;
 };
 
 class ScopedExprToSubfieldFilterParser {
@@ -814,6 +820,40 @@ TEST_F(ParquetTableScanTest, variantE2EProjectAndAggregation) {
       {"g", "sum_a"},
       {makeFlatVector<int64_t>({1, 2}), makeFlatVector<int64_t>({3, 3})});
   ASSERT_TRUE(assertEqualResults({expected}, {results}));
+}
+
+TEST_F(ParquetTableScanTest, variantReadsAfterReaderOutputReuse) {
+  auto file = TempFilePath::create();
+  WriterOptions writerOptions;
+  auto data = makeVariantParquetBatch(
+      pool(),
+      {1, 2, 3, 4, 5},
+      {R"({"a":10,"name":"aa"})",
+       R"({"a":20,"name":"bb"})",
+       R"({"a":30,"name":"cc"})",
+       R"({"a":40,"name":"dd"})",
+       R"({"a":50,"name":"ee"})"});
+  writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+  auto logicalRowType = ROW({"g", "v"}, {BIGINT(), VARIANT()});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(logicalRowType)
+                  .project(
+                      {"g",
+                       "cast(variant_get(v, '$.a') as bigint) AS a",
+                       "variant_get(v, '$.name') AS name"})
+                  .planNode();
+
+  auto expected = makeRowVector(
+      {"g", "a", "name"},
+      {makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+       makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+       makeFlatVector<std::string>({"aa", "bb", "cc", "dd", "ee"})});
+
+  AssertQueryBuilder(plan)
+      .split(makeSplit(file->getPath()))
+      .config(core::QueryConfig::kMaxOutputBatchRows, "2")
+      .assertResults(expected);
 }
 
 TEST_F(ParquetTableScanTest, nullMap) {
@@ -1591,12 +1631,11 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     bool shouldThrow;
     // Substring to match against the thrown error. Defaults to the
     // BoltUserError raised by ReaderBase::convertType via
-    // BOLT_SCHEMA_MISMATCH_ERROR (same error code as DWRF/ORC, same
-    // "Schema mismatch, ..., From Kind: X, To Kind: Y" layout).
+    // BOLT_SCHEMA_MISMATCH_ERROR with a Parquet-specific stable prefix.
     // Override when a case is rejected by a later layer with a
     // different message (e.g. ParquetColumnReader::matchType in
     // non-Spark builds).
-    const char* errMsg = "Schema mismatch";
+    const char* errMsg = kParquetTypeMappingErrorPrefix;
   };
 
   // clang-format off
@@ -1642,6 +1681,13 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     // ---- Accept: column-reader auto-cast floating point -> VARCHAR. ----
     {"real_to_varchar",                REAL(),          VARCHAR(),          false},
     {"double_to_varchar",              DOUBLE(),        VARCHAR(),          false},
+
+    // ---- Hive SerDe-compatible floating point -> BIGINT cast. ----
+#ifdef SPARK_COMPATIBLE
+    {"double_to_bigint",               DOUBLE(),        BIGINT(),           false},
+#else
+    {"double_to_bigint",               DOUBLE(),        BIGINT(),           true},
+#endif
 
     // ---- Reject: float narrowing ----
     {"double_to_real",                 DOUBLE(),        REAL(),             true},
@@ -2092,6 +2138,135 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharValueFilters) {
   EXPECT_EQ(alwaysFalseResult->size(), 0);
 }
 
+#ifdef SPARK_COMPATIBLE
+TEST_F(ParquetTableScanTest, doubleToBigintValueChecks) {
+  auto data = makeRowVector(
+      {"c0"},
+      {makeNullableFlatVector<double>({1.0, 1.2, -1.8, 0.0, std::nullopt})});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto declared = ROW({"c0"}, {BIGINT()});
+  auto plan =
+      PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .copyResults(pool());
+  auto expected = makeRowVector(
+      {"c0"}, {makeNullableFlatVector<int64_t>({1, 1, -1, 0, std::nullopt})});
+  EXPECT_TRUE(assertEqualResults({expected}, {result}));
+
+  auto isNullPlan = PlanBuilder(pool())
+                        .tableScan(declared, {"c0 IS NULL"}, "", declared)
+                        .planNode();
+  auto isNullResult = AssertQueryBuilder(isNullPlan)
+                          .split(makeSplit(file->getPath()))
+                          .copyResults(pool());
+  auto nullExpected =
+      makeRowVector({"c0"}, {makeNullableFlatVector<int64_t>({std::nullopt})});
+  EXPECT_TRUE(assertEqualResults({nullExpected}, {isNullResult}));
+
+  auto pushdownOnlyPlan = PlanBuilder(pool())
+                              .tableScan(declared, {"c0 = 1"}, "", declared)
+                              .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(pushdownOnlyPlan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply BIGINT filter to physical DOUBLE Parquet column c0");
+}
+#endif
+
+TEST_F(ParquetTableScanTest, integerToDoubleValueFilters) {
+  auto declared = ROW({"c0"}, {DOUBLE()});
+  auto test = [&](const RowVectorPtr& data, const std::string& physicalType) {
+    auto file = exec::test::TempFilePath::create();
+    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+    auto pushdownOnlyPlan = PlanBuilder(pool())
+                                .tableScan(declared, {"c0 > 1.0"}, "", declared)
+                                .planNode();
+    BOLT_ASSERT_THROW(
+        AssertQueryBuilder(pushdownOnlyPlan)
+            .split(makeSplit(file->getPath()))
+            .copyResults(pool()),
+        fmt::format(
+            "Cannot apply DOUBLE filter to physical {} Parquet column c0",
+            physicalType));
+  };
+
+  test(
+      makeRowVector(
+          {"c0"}, {makeNullableFlatVector<int8_t>({1, 2, std::nullopt})}),
+      "TINYINT");
+  test(
+      makeRowVector(
+          {"c0"}, {makeNullableFlatVector<int16_t>({1, 2, std::nullopt})}),
+      "SMALLINT");
+
+  auto data = makeRowVector(
+      {"c0"}, {makeNullableFlatVector<int32_t>({1, 2, 3, std::nullopt})});
+  test(data, "INTEGER");
+
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+  auto extractedFilterPlan = PlanBuilder(pool())
+                                 .tableScan(declared, {}, "c0 > 1.0", declared)
+                                 .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(extractedFilterPlan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply DOUBLE filter to physical INTEGER Parquet column c0");
+
+  auto isNullPlan = PlanBuilder(pool())
+                        .tableScan(declared, {"c0 IS NULL"}, "", declared)
+                        .planNode();
+  auto isNullResult = AssertQueryBuilder(isNullPlan)
+                          .split(makeSplit(file->getPath()))
+                          .copyResults(pool());
+  auto expected =
+      makeRowVector({"c0"}, {makeNullableFlatVector<double>({std::nullopt})});
+  EXPECT_TRUE(assertEqualResults({expected}, {isNullResult}));
+}
+
+TEST_F(ParquetTableScanTest, dateToVarcharValueFilters) {
+  auto data = makeRowVector(
+      {"c0"},
+      {makeNullableFlatVector<int32_t>({1, 2, 3, std::nullopt}, DATE())});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto declared = ROW({"c0"}, {VARCHAR()});
+  auto pushdownOnlyPlan = PlanBuilder(pool())
+                              .tableScan(declared, {"c0 = '1'"}, "", declared)
+                              .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(pushdownOnlyPlan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply VARCHAR filter to physical INTEGER Parquet column c0");
+
+  auto extractedFilterPlan = PlanBuilder(pool())
+                                 .tableScan(declared, {}, "c0 = '1'", declared)
+                                 .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(extractedFilterPlan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply VARCHAR filter to physical INTEGER Parquet column c0");
+
+  auto isNullPlan = PlanBuilder(pool())
+                        .tableScan(declared, {"c0 IS NULL"}, "", declared)
+                        .planNode();
+  auto isNullResult = AssertQueryBuilder(isNullPlan)
+                          .split(makeSplit(file->getPath()))
+                          .copyResults(pool());
+  auto expected = makeRowVector(
+      {"c0"}, {makeNullableFlatVector<StringView>({std::nullopt})});
+  EXPECT_TRUE(assertEqualResults({expected}, {isNullResult}));
+}
+
 TEST_F(ParquetTableScanTest, floatingPointToVarcharFilterOnlyColumn) {
   auto data = makeRowVector(
       {"c0", "c1"},
@@ -2109,6 +2284,25 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharFilterOnlyColumn) {
           .split(makeSplit(file->getPath()))
           .copyResults(pool()),
       "Cannot apply VARCHAR filter to physical DOUBLE Parquet column c0");
+}
+
+TEST_F(ParquetTableScanTest, integerToDoubleFilterOnlyColumn) {
+  auto data = makeRowVector(
+      {"c0", "c1"},
+      {makeFlatVector<int32_t>({1, 2}), makeFlatVector<int64_t>({10, 20})});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto outputType = ROW({"c1"}, {BIGINT()});
+  auto dataColumns = ROW({"c0", "c1"}, {DOUBLE(), BIGINT()});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(outputType, {"c0 > 1.0"}, "", dataColumns)
+                  .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(plan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply DOUBLE filter to physical INTEGER Parquet column c0");
 }
 
 TEST_F(ParquetTableScanTest, floatingPointToVarcharMapValueFilter) {
@@ -2139,6 +2333,136 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharMapValueFilter) {
           .split(makeSplit(file->getPath()))
           .copyResults(pool()),
       "Cannot apply VARCHAR filter to physical DOUBLE Parquet column c0.values");
+}
+
+TEST_F(ParquetTableScanTest, integerToDoubleMapValueFilter) {
+  auto data = makeRowVector(
+      {"c0"},
+      {makeMapVector<StringView, int32_t>({{{"key", 1}}, {{"key", 2}}})});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto declared = ROW({"c0"}, {MAP(VARCHAR(), DOUBLE())});
+  auto filters =
+      common::test::SubfieldFiltersBuilder()
+          .add(
+              "c0",
+              common::createMapSubscriptFilter(
+                  "key",
+                  std::make_unique<common::DoubleRange>(
+                      1.0, false, false, 1.0, false, false, false),
+                  common::createBytesRange("key", true, "key", true, false)))
+          .build();
+  auto tableHandle =
+      makeTableHandle(std::move(filters), nullptr, "hive_table", declared);
+  auto plan = PlanBuilder(pool())
+                  .tableScan(declared, tableHandle, allRegularColumns(declared))
+                  .planNode();
+
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(plan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply DOUBLE filter to physical INTEGER Parquet column c0.values");
+}
+
+TEST_F(ParquetTableScanTest, dateToVarcharMapValueFilter) {
+  auto map = makeMapVector<StringView, int32_t>(
+      {{{"key", 1}}, {{"key", 2}}}, MAP(VARCHAR(), DATE()));
+  auto data = makeRowVector({"c0"}, {map});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto declared = ROW({"c0"}, {MAP(VARCHAR(), VARCHAR())});
+  auto filters =
+      common::test::SubfieldFiltersBuilder()
+          .add(
+              "c0",
+              common::createMapSubscriptFilter(
+                  "key",
+                  common::createBytesRange("1", true, "1", true, false),
+                  common::createBytesRange("key", true, "key", true, false)))
+          .build();
+  auto tableHandle =
+      makeTableHandle(std::move(filters), nullptr, "hive_table", declared);
+  auto plan = PlanBuilder(pool())
+                  .tableScan(declared, tableHandle, allRegularColumns(declared))
+                  .planNode();
+
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(plan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply VARCHAR filter to physical INTEGER Parquet column c0.values");
+}
+
+TEST_F(ParquetTableScanTest, integerReaderCastMapMetadataFilters) {
+  auto test = [&](const RowVectorPtr& data,
+                  const RowTypePtr& declared,
+                  const std::string& filter,
+                  std::unique_ptr<common::Filter> valueFilter,
+                  const RowVectorPtr& expected) {
+    auto file = exec::test::TempFilePath::create();
+    WriterOptions writerOptions;
+    writerOptions.flushPolicyFactory = [] {
+      return std::make_unique<DefaultFlushPolicy>(
+          2, std::numeric_limits<int64_t>::max());
+    };
+    writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+    ScopedExprToSubfieldFilterParser parser(
+        std::make_shared<MapSubscriptMetadataFilterParser>(
+            std::move(valueFilter)));
+    core::PlanNodeId scanNodeId;
+    auto plan =
+        PlanBuilder(pool())
+            .tableScan("hive_table", declared, {}, {}, filter, declared, false)
+            .capturePlanNodeId(scanNodeId)
+            .planNode();
+    std::shared_ptr<exec::Task> task;
+    auto result =
+        AssertQueryBuilder(plan)
+            .config(core::QueryConfig::kMapSubscriptFilterPushdown, "true")
+            .split(makeSplit(file->getPath()))
+            .copyResults(pool(), task);
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    EXPECT_EQ(
+        exec::toPlanStats(task->taskStats())
+            .at(scanNodeId)
+            .customStats.at("skippedStrides")
+            .sum,
+        1);
+  };
+
+  test(
+      makeRowVector(
+          {"c0", "c1"},
+          {makeMapVector<StringView, int32_t>(
+               {{{"key", 1}}, {{"key", 2}}, {{"key", 1}}, {{"key", 2}}}),
+           makeFlatVector<int64_t>({0, 0, 100, 100})}),
+      ROW({"c0", "c1"}, {MAP(VARCHAR(), DOUBLE()), BIGINT()}),
+      "element_at(c0, 'key') = 1.0 AND c1 >= 100",
+      std::make_unique<common::DoubleRange>(
+          1.0, false, false, 1.0, false, false, false),
+      makeRowVector(
+          {"c0", "c1"},
+          {makeMapVector<StringView, double>({{{"key", 1.0}}}),
+           makeFlatVector<int64_t>({100})}));
+
+  test(
+      makeRowVector(
+          {"c0", "c1"},
+          {makeMapVector<StringView, int32_t>(
+               {{{"key", 1}}, {{"key", 2}}, {{"key", 1}}, {{"key", 2}}},
+               MAP(VARCHAR(), DATE())),
+           makeFlatVector<int64_t>({0, 0, 100, 100})}),
+      ROW({"c0", "c1"}, {MAP(VARCHAR(), VARCHAR()), BIGINT()}),
+      "element_at(c0, 'key') = '1' AND c1 >= 100",
+      common::createBytesRange("1", true, "1", true, false),
+      makeRowVector(
+          {"c0", "c1"},
+          {makeMapVector<StringView, StringView>({{{"key", "1"}}}),
+           makeFlatVector<int64_t>({100})}));
 }
 
 TEST_F(ParquetTableScanTest, floatingPointToVarcharMapMetadataFilter) {
@@ -2187,6 +2511,112 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharMapMetadataFilter) {
           .customStats.at("skippedStrides")
           .sum,
       1);
+}
+
+#ifdef SPARK_COMPATIBLE
+TEST_F(ParquetTableScanTest, doubleToBigintMapMetadataFilter) {
+  auto data = makeRowVector(
+      {"c0", "c1"},
+      {makeMapVector<StringView, double>(
+           {{{"key", 1.2}}, {{"key", 2.5}}, {{"key", 1.8}}, {{"key", 2.5}}}),
+       makeFlatVector<int64_t>({0, 0, 100, 100})});
+  auto file = exec::test::TempFilePath::create();
+  WriterOptions writerOptions;
+  writerOptions.flushPolicyFactory = [] {
+    return std::make_unique<DefaultFlushPolicy>(
+        2, std::numeric_limits<int64_t>::max());
+  };
+  writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+  ScopedExprToSubfieldFilterParser parser(
+      std::make_shared<MapSubscriptMetadataFilterParser>(
+          common::createBigintRange(1, 1, false, false)));
+  auto declared = ROW({"c0", "c1"}, {MAP(VARCHAR(), BIGINT()), BIGINT()});
+  core::PlanNodeId scanNodeId;
+  auto plan = PlanBuilder(pool())
+                  .tableScan(
+                      "hive_table",
+                      declared,
+                      {},
+                      {},
+                      "element_at(c0, 'key') = 1 AND c1 >= 100",
+                      declared,
+                      false)
+                  .capturePlanNodeId(scanNodeId)
+                  .planNode();
+  std::shared_ptr<exec::Task> task;
+  auto result =
+      AssertQueryBuilder(plan)
+          .config(core::QueryConfig::kMapSubscriptFilterPushdown, "true")
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool(), task);
+  auto expected = makeRowVector(
+      {"c0", "c1"},
+      {makeMapVector<StringView, int64_t>({{{"key", 1}}}),
+       makeFlatVector<int64_t>({100})});
+  EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  EXPECT_EQ(
+      exec::toPlanStats(task->taskStats())
+          .at(scanNodeId)
+          .customStats.at("skippedStrides")
+          .sum,
+      1);
+}
+#endif
+
+TEST_F(ParquetTableScanTest, integerReaderCastMetadataFilters) {
+  auto test = [&](const RowVectorPtr& data,
+                  const RowTypePtr& declared,
+                  const std::string& filter,
+                  const RowVectorPtr& expected) {
+    auto file = exec::test::TempFilePath::create();
+    WriterOptions writerOptions;
+    writerOptions.flushPolicyFactory = [] {
+      return std::make_unique<DefaultFlushPolicy>(
+          2, std::numeric_limits<int64_t>::max());
+    };
+    writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+    core::PlanNodeId scanNodeId;
+    auto plan =
+        PlanBuilder(pool())
+            .tableScan("hive_table", declared, {}, {}, filter, declared, false)
+            .capturePlanNodeId(scanNodeId)
+            .planNode();
+    std::shared_ptr<exec::Task> task;
+    auto result = AssertQueryBuilder(plan)
+                      .split(makeSplit(file->getPath()))
+                      .copyResults(pool(), task);
+    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    EXPECT_EQ(
+        exec::toPlanStats(task->taskStats())
+            .at(scanNodeId)
+            .customStats.at("skippedStrides")
+            .sum,
+        1);
+  };
+
+  test(
+      makeRowVector(
+          {"c0", "c1"},
+          {makeFlatVector<int32_t>({1, 2, 1, 2}),
+           makeFlatVector<int64_t>({0, 0, 100, 100})}),
+      ROW({"c0", "c1"}, {DOUBLE(), BIGINT()}),
+      "c0 = 1.0 AND c1 >= 100",
+      makeRowVector(
+          {"c0", "c1"},
+          {makeFlatVector<double>({1.0}), makeFlatVector<int64_t>({100})}));
+
+  test(
+      makeRowVector(
+          {"c0", "c1"},
+          {makeFlatVector<int32_t>({1, 2, 1, 2}, DATE()),
+           makeFlatVector<int64_t>({0, 0, 100, 100})}),
+      ROW({"c0", "c1"}, {VARCHAR(), BIGINT()}),
+      "c0 = '1' AND c1 >= 100",
+      makeRowVector(
+          {"c0", "c1"},
+          {makeFlatVector<StringView>({"1"}), makeFlatVector<int64_t>({100})}));
 }
 
 TEST_F(ParquetTableScanTest, floatingPointToVarcharMetadataFilter) {
