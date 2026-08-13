@@ -47,6 +47,50 @@ using namespace bytedance::bolt::dwrf::encryption;
 using namespace bytedance::bolt::memory;
 using namespace bytedance::bolt::type::fbhive;
 
+namespace {
+
+class NamedBadProtoStream : public SeekableInputStream {
+ public:
+  explicit NamedBadProtoStream(std::string name) : name_{std::move(name)} {}
+
+  bool Next(const void** buffer, int32_t* size) override {
+    if (returned_) {
+      return false;
+    }
+    returned_ = true;
+    *buffer = badProto_;
+    *size = sizeof(badProto_);
+    return true;
+  }
+
+  void BackUp(int32_t /*count*/) override {}
+
+  int64_t ByteCount() const override {
+    return returned_ ? sizeof(badProto_) : 0;
+  }
+
+  void seekToPosition(PositionProvider& /*position*/) override {}
+
+  std::string getName() const override {
+    return name_;
+  }
+
+  size_t positionSize() override {
+    return 1;
+  }
+
+  bool SkipInt64(int64_t /*count*/) override {
+    return false;
+  }
+
+ private:
+  const std::string name_;
+  bool returned_{false};
+  const char badProto_[1]{static_cast<char>(0xff)};
+};
+
+} // namespace
+
 void addStats(
     ProtoWriter& writer,
     const Encrypter& encrypter,
@@ -241,4 +285,30 @@ TEST_F(ReaderBaseTest, InvalidPostScriptThrows) {
       { createCorruptedFileReader(1'000'000, 0); }, exception::LoggedException);
   EXPECT_THROW(
       { createCorruptedFileReader(0, 1'000'000); }, exception::LoggedException);
+}
+
+TEST(ProtoUtilsTest, ProtoParseErrorPrefix) {
+  try {
+    ProtoUtils::readProto<proto::PostScript>(
+        std::make_unique<NamedBadProtoStream>("DirectInputStream 49 of 49"));
+    FAIL() << "Expected readProto to throw";
+  } catch (const std::exception& e) {
+    const std::string message = e.what();
+    EXPECT_NE(message.find(kDwrfProtoParseErrorPrefix), std::string::npos);
+    EXPECT_NE(message.find("DirectInputStream 49 of 49"), std::string::npos);
+  }
+
+  try {
+    proto::PostScript postScript;
+    ProtoUtils::readProtoInto<proto::PostScript>(
+        std::make_unique<NamedBadProtoStream>(
+            "SeekableArrayInputStream 49 of 49"),
+        &postScript);
+    FAIL() << "Expected readProto to throw";
+  } catch (const std::exception& e) {
+    const std::string message = e.what();
+    EXPECT_NE(message.find(kDwrfProtoParseErrorPrefix), std::string::npos);
+    EXPECT_NE(
+        message.find("SeekableArrayInputStream 49 of 49"), std::string::npos);
+  }
 }

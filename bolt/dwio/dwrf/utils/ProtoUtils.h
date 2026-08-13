@@ -35,6 +35,9 @@
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::dwrf {
 
+inline constexpr const char* kDwrfProtoParseErrorPrefix =
+    "Failed to parse proto from";
+
 class ProtoUtils final {
  public:
   static void writeType(
@@ -58,7 +61,8 @@ class ProtoUtils final {
     }
     DWIO_ENSURE(
         ret->ParseFromZeroCopyStream(stream.get()),
-        "Failed to parse proto from ",
+        kDwrfProtoParseErrorPrefix,
+        " ",
         stream->getName());
     return ret;
   }
@@ -74,7 +78,8 @@ class ProtoUtils final {
     DWIO_ENSURE(ret);
     DWIO_ENSURE(
         ret->ParseFromZeroCopyStream(stream.get()),
-        "Failed to parse proto from ",
+        kDwrfProtoParseErrorPrefix,
+        " ",
         stream->getName());
     return ret;
   }
