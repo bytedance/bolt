@@ -111,6 +111,7 @@ class E2EFilterTest : public E2EFilterTestBase, public test::VectorTestBase {
     auto result = BaseVector::create(
         outputType ? outputType : data->type(), 0, leafPool_.get());
     auto rowsScanned = rowReader->next(size, result);
+    result->loadedVector();
     return {result, rowsScanned};
   }
 
