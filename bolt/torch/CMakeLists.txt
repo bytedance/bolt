@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_torch Compatibility.cpp Operator.cpp PlanNode.cpp Tensor.cpp Utils.cpp)
+bolt_add_library(bolt_torch Compatibility.cpp Operator.cpp PlanNode.cpp Tensor.cpp Utils.cpp)
 
 target_include_directories(
   bolt_torch

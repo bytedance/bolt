@@ -99,6 +99,7 @@ class BoltConan(ConanFile):
         "enable_colocate": [True, False],
         "io_uring_supported": [True, False],
         "enable_torch": TorchOption.all(),
+        "enable_cudf": [True, False],
         "enable_perf": [True, False],
     }
     default_options = {
@@ -128,6 +129,7 @@ class BoltConan(ConanFile):
         "enable_colocate": False,
         "io_uring_supported": True,
         "enable_torch": TorchOption().value,
+        "enable_cudf": False,
         "enable_perf": False,
     }
 
@@ -249,6 +251,7 @@ class BoltConan(ConanFile):
         self.requires(
             "glog/0.7.1", headers=True, transitive_headers=True, transitive_libs=True
         )
+        self.requires("gflags/2.2.2", transitive_headers=True, transitive_libs=True)
         self.requires("thrift/0.17.0", headers=True, force=True)
         self.requires("roaring/4.3.1", headers=True)
         self.requires("boost/1.85.0", transitive_headers=True, transitive_libs=True)
@@ -262,6 +265,8 @@ class BoltConan(ConanFile):
             self.requires("liburing/2.6")
         if self.options.get_safe("python_bind"):
             self.requires("pybind11/2.13.1")
+        if self.options.get_safe("enable_cudf"):
+            self.requires("cudf/25.06")
         if self.options.get_safe("enable_colocate"):
             self.requires("grpc/1.50.0")
 
@@ -450,6 +455,10 @@ class BoltConan(ConanFile):
         else:
             tc.cache_variables["BOLT_ENABLE_TORCH"] = "OFF"
 
+        tc.cache_variables["BOLT_ENABLE_CUDF"] = (
+            "ON" if self.options.get_safe("enable_cudf") else "OFF"
+        )
+
         if self.options.enable_asan:
             tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fsanitize=address "
             tc.cache_variables["CMAKE_C_FLAGS"] += " -fsanitize=address"
@@ -519,8 +528,9 @@ class BoltConan(ConanFile):
         if self.options.es_build:
             tc.cache_variables["BOLT_ENABLE_SIMDJSON"] = "ON"
 
-        if self.options.python_bind:
-            tc.cache_variables["BOLT_BUILD_PYTHON_PACKAGE"] = "ON"
+        tc.cache_variables["BOLT_BUILD_PYTHON_PACKAGE"] = (
+            "ON" if self.options.python_bind else "OFF"
+        )
 
         if self.options.enable_arrow_connector:
             tc.cache_variables["BOLT_ENABLE_ARROW_CONNECTOR"] = "ON"
@@ -655,6 +665,7 @@ class BoltConan(ConanFile):
                 "openssl::openssl",
                 "libunwind::libunwind",
                 "snappy::snappy",
+                "gflags::gflags",
                 "glog::glog",
                 "thrift::thrift",
                 "roaring::roaring",
@@ -684,6 +695,27 @@ class BoltConan(ConanFile):
                 self.cpp_info.components["bolt_engine"].exelinkflags.append(
                     "-Wl,--export-dynamic-symbol=jit_*"
                 )
+        if (
+            self.options.enable_torch is not None
+            and self.options.enable_torch.value is not None
+        ):
+            self.cpp_info.components["bolt_engine"].requires.append(
+                "libtorch::libtorch"
+            )
+            self.cpp_info.components["bolt_engine"].defines.append("BOLT_HAS_TORCH=1")
+        if self.options.get_safe("python_bind"):
+            self.cpp_info.components["bolt_engine"].requires.append(
+                "pybind11::pybind11_"
+            )
+            self.cpp_info.components["bolt_engine"].defines.append("BOLT_HAS_PYTHON=1")
+        if self.options.get_safe("enable_cudf"):
+            self.cpp_info.components["bolt_engine"].requires.append("cudf::cudf")
+            self.cpp_info.components["bolt_engine"].defines.extend(
+                [
+                    "BOLT_HAS_CUDF=1",
+                    "LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE",
+                ]
+            )
         if self.options.get_safe("enable_s3"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "aws-c-common::aws-c-common"
@@ -710,6 +742,7 @@ class BoltConan(ConanFile):
             )
             self.cpp_info.components["bolt_testutils"].requires = [
                 "bolt_engine",
+                "gflags::gflags",
                 "gtest::gtest",
                 "duckdb::duckdb",
             ]

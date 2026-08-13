@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(bolt_cudf_test_util CudfResource.cpp)
+bolt_add_library(bolt_cudf_test_util CudfResource.cpp)
 
 target_include_directories(bolt_cudf_test_util PRIVATE ${cudf_INCLUDE_DIRS})
 
@@ -29,6 +29,6 @@ target_link_libraries(
 #
 # References: - RMM Fix: https://github.com/rapidsai/rmm/pull/1852 - libcudacxx Docs:
 # https://nvidia.github.io/cccl/libcudacxx/extended_api/memory_resource.html
-target_compile_options(
-  bolt_cudf_test_util PUBLIC -DLIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE -DBOLT_HAS_CUDF=1
+target_compile_definitions(
+  bolt_cudf_test_util PUBLIC LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE BOLT_HAS_CUDF=1
 )

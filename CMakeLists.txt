@@ -752,16 +752,6 @@ if(${BOLT_ENABLE_SUBSTRAIT})
   )
 endif()
 
-file(GLOB_RECURSE SHARED_LIBS "${CMAKE_BINARY_DIR}/bolt/*${CMAKE_SHARED_LIBRARY_SUFFIX}")
-file(GLOB_RECURSE STATIC_LIBS "${CMAKE_BINARY_DIR}/bolt/*${CMAKE_STATIC_LIBRARY_SUFFIX}")
-
-list(APPEND ALL_LIBS ${SHARED_LIBS} ${STATIC_LIBS})
-
-list(FILTER ALL_LIBS EXCLUDE REGEX "benchmarks")
-list(FILTER ALL_LIBS EXCLUDE REGEX "benchmark")
-
-install(FILES ${ALL_LIBS} DESTINATION "lib")
-
 find_package(cityhash REQUIRED CONFIG)
 
 # Adding this down here prevents warnings in dependencies from stopping the build
@@ -781,6 +771,10 @@ endif()
 
 if(BOLT_ENABLE_TORCH)
   find_package(Torch CONFIG REQUIRED)
+endif()
+
+if(BOLT_BUILD_PYTHON_PACKAGE)
+  find_package(pybind11 CONFIG REQUIRED)
 endif()
 
 if(BOLT_ENABLE_CUDF)

@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(
+bolt_add_library(
   bolt_python Aggregate.cpp Function.cpp Operator.cpp PlanNode.cpp PythonScalarFunction.cpp
               Utils.cpp
 )
@@ -54,5 +54,5 @@ if(${ENABLE_BOLT_JIT})
 endif()
 
 # icu is needed as a result of a transitive include calling a function from icu library.
-target_link_libraries(bolt_python PRIVATE ${pybind11_LIBRARIES} icu::icu folly::folly)
+target_link_libraries(bolt_python PRIVATE pybind11::pybind11 icu::icu folly::folly)
 target_compile_definitions(bolt_python PRIVATE ${glog_DEFINITIONS})

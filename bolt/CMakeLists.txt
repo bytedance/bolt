@@ -32,6 +32,7 @@ set(BOLT_FUNCTIONS_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_IO_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_SUBSTRAIT_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_SHUFFLE_OBJECT_TARGETS "" CACHE INTERNAL "")
+set(BOLT_EXTENSIONS_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_TESTUTILS_OBJECT_TARGETS "" CACHE INTERNAL "")
 
 function(bolt_add_library target_name)
@@ -76,6 +77,7 @@ function(bolt_add_library target_name)
       "functions/prestosql/tests/utils"
       "connectors/fuzzer"
       "connectors/tpch"
+      "cudf/tests"
       "exec/fuzzer"
       "exec/tests/utils"
       "exec/prefixsort/tests/utils"
@@ -149,8 +151,8 @@ function(bolt_add_library target_name)
   endif()
 
   if(FIRST_LEVEL_DIR IN_LIST EXTENSIONS_COMP_LIST)
-    list(APPEND EXTENSIONS_OBJECT_TARGETS $<TARGET_OBJECTS:${target_name}>)
-    set(EXTENSIONS_OBJECT_TARGETS ${EXTENSIONS_OBJECT_TARGETS} CACHE INTERNAL "")
+    list(APPEND BOLT_EXTENSIONS_OBJECT_TARGETS $<TARGET_OBJECTS:${target_name}>)
+    set(BOLT_EXTENSIONS_OBJECT_TARGETS ${BOLT_EXTENSIONS_OBJECT_TARGETS} CACHE INTERNAL "")
     return()
   endif()
 
@@ -240,13 +242,15 @@ add_library(bolt_engine
   ${BOLT_BASE_OBJECT_TARGETS}
   ${BOLT_IO_OBJECT_TARGETS}
   ${BOLT_SUBSTRAIT_OBJECT_TARGETS}
-  ${BOLT_SHUFFLE_OBJECT_TARGETS})
+  ${BOLT_SHUFFLE_OBJECT_TARGETS}
+  ${BOLT_EXTENSIONS_OBJECT_TARGETS})
 
 target_link_libraries(bolt_engine PUBLIC
                                   $<$<CONFIG:Debug>:bolt_debug_util>
                                   arrow::arrow
                                   $<$<BOOL:${ENABLE_BOLT_JIT}>:llvm-core::llvm-core>
                                   Folly::folly
+                                  gflags::gflags
                                   gfx::timsort
                                   date::date
                                   re2::re2
@@ -270,14 +274,43 @@ target_link_libraries(bolt_engine PUBLIC
                                   $<$<BOOL:${BOLT_ENABLE_ABFS}>:Azure::azure-storage-blobs Azure::azure-storage-files-datalake Azure::azure-identity>
 )
 
+if(${BOLT_ENABLE_TORCH})
+  target_link_libraries(bolt_engine PUBLIC ${TORCH_LIBRARIES})
+  target_compile_definitions(bolt_engine PUBLIC BOLT_HAS_TORCH=1)
+endif()
+
+if(${BOLT_BUILD_PYTHON_PACKAGE})
+  target_link_libraries(bolt_engine PUBLIC pybind11::pybind11)
+  target_compile_definitions(bolt_engine PUBLIC BOLT_HAS_PYTHON=1)
+endif()
+
+if(${BOLT_ENABLE_CUDF})
+  target_link_libraries(bolt_engine PUBLIC cudf::cudf)
+  target_compile_definitions(
+    bolt_engine PUBLIC BOLT_HAS_CUDF=1 LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE
+  )
+endif()
+
 if(${BOLT_BUILD_TEST_UTILS})
-  add_library(bolt_testutils ${BOLT_TESTUTILS_OBJECT_TARGETS})
+  add_library(bolt_testutils ${BOLT_TESTUTILS_OBJECT_TARGETS} common/testutil/BoltTestFlags.cpp)
   target_link_libraries(bolt_testutils PUBLIC
                                   bolt_engine
-                                  bolt_test_flags
                                   $<$<CONFIG:Debug>:bolt_debug_util>
                                   duckdb::duckdb
+                                  gflags::gflags
                                   GTest::gtest
   )
   target_include_directories(bolt_testutils PUBLIC ${CMAKE_BINARY_DIR})
 endif()
+
+set(BOLT_INSTALL_TARGETS bolt_engine)
+if(${BOLT_BUILD_TEST_UTILS})
+  list(APPEND BOLT_INSTALL_TARGETS bolt_testutils)
+endif()
+
+install(
+  TARGETS ${BOLT_INSTALL_TARGETS}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
