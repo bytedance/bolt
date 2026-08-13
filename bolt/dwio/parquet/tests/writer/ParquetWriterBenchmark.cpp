@@ -47,8 +47,11 @@ constexpr int64_t kNoSplitDataPageSize = 64 * 1024 * 1024;
 constexpr int64_t kNoSplitSinkCapacity = 8 * 1024 * 1024;
 constexpr int64_t kEncodedInputSinkCapacity = 16 * 1024 * 1024;
 
+enum class WritePath { kDirect, kStaging };
+
 struct WriteMetrics {
   uint64_t outputSize;
+  uint64_t rowCount;
   uint64_t rowGroupCount;
   uint64_t dataPageCount;
   uint64_t dictionaryPageCount;
@@ -61,7 +64,8 @@ class ParquetWriterBenchmark {
       const RowTypePtr& rowType,
       int64_t dataPageSize,
       bool useMemorySink,
-      int64_t memorySinkCapacity = kNoSplitSinkCapacity)
+      int64_t memorySinkCapacity = kNoSplitSinkCapacity,
+      WritePath writePath = WritePath::kDirect)
       : disableDictionary_(disableDictionary) {
     rootPool_ = memory::memoryManager()->addRootPool("ParquetWriterBenchmark");
     leafPool_ = rootPool_->addLeafChild("ParquetWriterBenchmark");
@@ -79,7 +83,7 @@ class ParquetWriterBenchmark {
       sink = std::make_unique<WriteFileSink>(std::move(localWriteFile), path);
     }
     bytedance::bolt::parquet::WriterOptions options;
-    options.enableFlushBasedOnBlockSize = true;
+    options.enableFlushBasedOnBlockSize = writePath == WritePath::kDirect;
     options.parquetWriteTimestampUnit = TimestampUnit::kNano;
     options.writeInt96AsTimestamp = true;
     options.dataPageSize = dataPageSize;
@@ -155,6 +159,7 @@ class ParquetWriterBenchmark {
     }
     return {
         .outputSize = static_cast<uint64_t>(sink_->size()),
+        .rowCount = static_cast<uint64_t>(metadata.numRows()),
         .rowGroupCount = static_cast<uint64_t>(metadata.numRowGroups()),
         .dataPageCount = dataPageCount,
         .dictionaryPageCount = dictionaryPageCount};
@@ -179,10 +184,11 @@ void reportLayoutOnce(
   std::lock_guard<std::mutex> lock(mutex);
   if (reportedBenchmarks.insert(benchmarkName).second) {
     std::cerr << fmt::format(
-        "LAYOUT {} output_bytes={} row_groups={} data_pages={} "
+        "LAYOUT {} output_bytes={} rows={} row_groups={} data_pages={} "
         "dictionary_pages={}\n",
         benchmarkName,
         metrics.outputSize,
+        metrics.rowCount,
         metrics.rowGroupCount,
         metrics.dataPageCount,
         metrics.dictionaryPageCount);
@@ -209,6 +215,10 @@ void runImpl(
         disableDictionary, rowType, dataPageSize, reportLayout);
     const auto batches = benchmark.makeSingleColumnData(
         columnName, type, nullsRateX100, numBatches, batchSize);
+    uint64_t expectedRows = 0;
+    for (const auto& batch : *batches) {
+      expectedRows += batch->size();
+    }
     suspender.dismiss();
     benchmark.writeToSink(*batches, true);
     suspender.rehire();
@@ -216,7 +226,9 @@ void runImpl(
     if (reportLayout) {
       const auto metrics = benchmark.collectMetrics();
       folly::doNotOptimizeAway(metrics.outputSize);
+      folly::doNotOptimizeAway(metrics.rowCount);
       folly::doNotOptimizeAway(metrics.dataPageCount);
+      BOLT_CHECK_EQ(metrics.rowCount, expectedRows);
       BOLT_CHECK_EQ(metrics.dataPageCount, 1);
       reportLayoutOnce(
           fmt::format(
@@ -356,7 +368,8 @@ void runEncodedInputBenchmark(
     uint32_t iterations,
     const std::string& benchmarkName,
     const RowTypePtr& rowType,
-    MakeBatches makeBatches) {
+    MakeBatches makeBatches,
+    WritePath writePath = WritePath::kDirect) {
   for (uint32_t i = 0; i < iterations; ++i) {
     folly::BenchmarkSuspender suspender;
     ParquetWriterBenchmark benchmark(
@@ -364,17 +377,24 @@ void runEncodedInputBenchmark(
         rowType,
         bytedance::bolt::parquet::WriterOptions{}.dataPageSize,
         true,
-        kEncodedInputSinkCapacity);
+        kEncodedInputSinkCapacity,
+        writePath);
     auto batches = makeBatches(benchmark.memoryPool());
+    uint64_t expectedRows = 0;
+    for (const auto& batch : batches) {
+      expectedRows += batch->size();
+    }
     suspender.dismiss();
     benchmark.writeToSink(batches, false);
     suspender.rehire();
 
     const auto metrics = benchmark.collectMetrics();
     folly::doNotOptimizeAway(metrics.outputSize);
+    folly::doNotOptimizeAway(metrics.rowCount);
     folly::doNotOptimizeAway(metrics.rowGroupCount);
     folly::doNotOptimizeAway(metrics.dataPageCount);
     folly::doNotOptimizeAway(metrics.dictionaryPageCount);
+    BOLT_CHECK_EQ(metrics.rowCount, expectedRows);
     reportLayoutOnce(benchmarkName, metrics);
   }
 }
@@ -486,12 +506,17 @@ void runMultiColumnInputDictionary(uint32_t iterations, int32_t numColumns) {
 
 void runSchemaMultiBatch(
     uint32_t iterations,
+    WritePath writePath,
     int32_t numColumns,
     int32_t numBatches) {
+  const auto pathName = writePath == WritePath::kDirect ? "Direct" : "Staging";
   runEncodedInputBenchmark(
       iterations,
       fmt::format(
-          "SchemaMultiBatch_{}Columns_{}Batches", numColumns, numBatches),
+          "SchemaMultiBatch_{}_{}Columns_{}Batches",
+          pathName,
+          numColumns,
+          numBatches),
       makeRepeatedRowType(numColumns, VARCHAR()),
       [numColumns, numBatches](memory::MemoryPool* pool) {
         test::VectorMaker maker(pool);
@@ -505,7 +530,8 @@ void runSchemaMultiBatch(
         }
         auto batch = maker.rowVector(std::move(names), columns);
         return std::vector<RowVectorPtr>(numBatches, std::move(batch));
-      });
+      },
+      writePath);
 }
 
 void runMapVarcharInteger(uint32_t iterations, int32_t entriesPerRow) {
@@ -649,10 +675,42 @@ BENCHMARK_NAMED_PARAM(runMultiColumnInputDictionary, FiveColumns, 5);
 BENCHMARK_NAMED_PARAM(runMultiColumnInputDictionary, TenColumns, 10);
 BENCHMARK_DRAW_LINE();
 
-BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, FiveColumns50Batches, 5, 50);
-BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, TenColumns50Batches, 10, 50);
-BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, TwentyColumns50Batches, 20, 50);
-BENCHMARK_NAMED_PARAM(runSchemaMultiBatch, TenColumns200Batches, 10, 200);
+BENCHMARK_NAMED_PARAM(
+    runSchemaMultiBatch,
+    DirectFiveColumns50Batches,
+    WritePath::kDirect,
+    5,
+    50);
+BENCHMARK_NAMED_PARAM(
+    runSchemaMultiBatch,
+    DirectTenColumns50Batches,
+    WritePath::kDirect,
+    10,
+    50);
+BENCHMARK_NAMED_PARAM(
+    runSchemaMultiBatch,
+    DirectTwentyColumns50Batches,
+    WritePath::kDirect,
+    20,
+    50);
+BENCHMARK_NAMED_PARAM(
+    runSchemaMultiBatch,
+    DirectTenColumns200Batches,
+    WritePath::kDirect,
+    10,
+    200);
+BENCHMARK_NAMED_PARAM(
+    runSchemaMultiBatch,
+    StagingTenColumns50Batches,
+    WritePath::kStaging,
+    10,
+    50);
+BENCHMARK_NAMED_PARAM(
+    runSchemaMultiBatch,
+    StagingTenColumns200Batches,
+    WritePath::kStaging,
+    10,
+    200);
 BENCHMARK_DRAW_LINE();
 
 BENCHMARK_NAMED_PARAM(runMapVarcharInteger, ThreeEntries, 3);

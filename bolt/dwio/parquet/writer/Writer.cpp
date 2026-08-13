@@ -742,17 +742,8 @@ void Writer::close() {
 void Writer::createEmptyFile() {
   BOLT_CHECK_NULL(arrowContext_->writer);
   if (!arrowContext_->schema) {
-    ArrowSchema arrowSchema;
-    exportToArrow(
-        BaseVector::create(
-            std::static_pointer_cast<const Type>(schema_),
-            0,
-            exportPool_.get()),
-        arrowSchema,
-        options_,
-        {},
-        exportPool_.get());
-    arrowContext_->schema = ::arrow::ImportSchema(&arrowSchema).ValueOrDie();
+    initializeArrowSchema(BaseVector::create(
+        std::static_pointer_cast<const Type>(schema_), 0, exportPool_.get()));
   }
   createFileWriterIfNotExist();
 }
