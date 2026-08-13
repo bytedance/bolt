@@ -79,6 +79,10 @@ class StructColumnReader : public dwio::common::SelectiveStructColumnReader {
   arrow::ValidityBitmapInputOutput prepareRepDefNulls(int32_t maxItems);
   void setNullsFromRepDefOutput(const arrow::ValidityBitmapInputOutput& bits);
 
+  bool shouldReadChildrenEagerly() const override {
+    return fileType_->isDCMap();
+  }
+
   dwio::common::SelectiveColumnReader* FOLLY_NULLABLE childForRepDefs() const {
     return childForRepDefs_;
   }

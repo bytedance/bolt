@@ -34,7 +34,10 @@
 #include "bolt/exec/prefixsort/PrefixSortAlgorithm.h"
 #include "bolt/exec/prefixsort/tests/utils/EncoderTestUtils.h"
 
-DEFINE_int32(sort_data_seed, 1, "random test data generate seed.");
+DEFINE_int32(
+    bolt_benchmark_sort_data_seed,
+    1,
+    "random test data generate seed.");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 
@@ -103,7 +106,7 @@ int main(int argc, char** argv) {
   folly::init(&argc, &argv);
   memory::MemoryManager::initialize(memory::MemoryManager::Options{});
   bm = std::make_unique<PrefixSortAlgorithmBenchmark>();
-  bm->seed(FLAGS_sort_data_seed);
+  bm->seed(FLAGS_bolt_benchmark_sort_data_seed);
   data10k = bm->generateTestVector(10'000);
   data100k = bm->generateTestVector(100'000);
   data1000k = bm->generateTestVector(1'000'000);

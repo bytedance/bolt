@@ -66,7 +66,8 @@ static constexpr int32_t kDefaultAccumulateBatchMaxColumns =
     0; // default is close
 static constexpr int32_t kDefaultShuffleCheckMaxColumns =
     std::numeric_limits<int32_t>::max();
-
+static constexpr int64_t kDefaultRowBasedShuffleThreshold =
+    std::numeric_limits<int64_t>::max();
 static constexpr int32_t rowBasePartitionThreshold = 8000;
 static constexpr int32_t rowBaseColumnNumThreshold = 5;
 
@@ -113,6 +114,8 @@ struct ShuffleReaderOptions {
 
   // On-wire row format for the row-based shuffle. Must match the writer side.
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
+
+  int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
 
   // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
@@ -180,6 +183,7 @@ struct ShuffleWriterOptions {
   double shuffleCheckRatio = 0;
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
+  int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
   PartitionWriterOptions partitionWriterOptions{};
 };
 

@@ -30,32 +30,35 @@
 
 #include "bolt/common/file/benchmark/ReadBenchmark.h"
 
-DEFINE_string(path, "", "Path of test file");
+DEFINE_string(bolt_benchmark_path, "", "Path of test file");
 DEFINE_int64(
-    file_size_gb,
+    bolt_benchmark_file_size_gb,
     0,
-    "Limits the test to the first --file_size_gb "
-    "of --path. 0 means use the whole file");
-DEFINE_int32(num_threads, 16, "Test parallelism");
-DEFINE_int32(seed, 0, "Random seed, 0 means no seed");
-DEFINE_bool(odirect, false, "Use O_DIRECT");
+    "Limits the test to the first --bolt_benchmark_file_size_gb "
+    "of --bolt_benchmark_path. 0 means use the whole file");
+DEFINE_int32(bolt_benchmark_num_threads, 16, "Test parallelism");
+DEFINE_int32(bolt_benchmark_seed, 0, "Random seed, 0 means no seed");
+DEFINE_bool(bolt_benchmark_odirect, false, "Use O_DIRECT");
 
 DEFINE_int32(
-    bytes,
+    bolt_benchmark_bytes,
     0,
     "If 0, runs through a set of predefined read patterns. "
     "If non-0, this is the size of a single read. The reads are "
-    "made in --num_in_run consecutive batchhes with --gap bytes between each read");
-DEFINE_int32(gap, 0, "Gap between consecutive reads if --bytes is non-0");
+    "made in --bolt_benchmark_num_in_run consecutive batchhes with --bolt_benchmark_gap bytes between each read");
 DEFINE_int32(
-    num_in_run,
+    bolt_benchmark_gap,
+    0,
+    "Gap between consecutive reads if --bolt_benchmark_bytes is non-0");
+DEFINE_int32(
+    bolt_benchmark_num_in_run,
     10,
-    "Number of consecutive reads of --bytes separated by --gap bytes");
+    "Number of consecutive reads of --bolt_benchmark_bytes separated by --bolt_benchmark_gap bytes");
 DEFINE_int32(
-    measurement_size,
+    bolt_benchmark_measurement_size,
     100 << 20,
-    "Total reads per thread when throughput for a --bytes/--gap/--/gap/"
-    "--num_in_run combination");
+    "Total reads per thread when throughput for a --bolt_benchmark_bytes/--bolt_benchmark_gap/--/gap/"
+    "--bolt_benchmark_num_in_run combination");
 
 namespace {
 static bool notEmpty(const char* /*flagName*/, const std::string& value) {
@@ -63,12 +66,15 @@ static bool notEmpty(const char* /*flagName*/, const std::string& value) {
 }
 } // namespace
 
-DEFINE_validator(path, &notEmpty);
+DEFINE_validator(bolt_benchmark_path, &notEmpty);
 namespace bytedance::bolt {
 
 void ReadBenchmark::run() {
-  if (FLAGS_bytes) {
-    modes(FLAGS_bytes, FLAGS_gap, FLAGS_num_in_run);
+  if (FLAGS_bolt_benchmark_bytes) {
+    modes(
+        FLAGS_bolt_benchmark_bytes,
+        FLAGS_bolt_benchmark_gap,
+        FLAGS_bolt_benchmark_num_in_run);
     return;
   }
   modes(1100, 0, 10);

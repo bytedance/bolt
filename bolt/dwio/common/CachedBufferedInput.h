@@ -41,7 +41,6 @@
 #include "bolt/dwio/common/CacheInputStream.h"
 #include "bolt/dwio/common/InputStream.h"
 
-DECLARE_int32(cache_load_quantum);
 namespace bytedance::bolt::dwio::common {
 
 struct CacheRequest {

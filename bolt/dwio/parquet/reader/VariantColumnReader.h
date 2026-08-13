@@ -31,6 +31,10 @@ class VariantColumnReader : public StructColumnReader {
       memory::MemoryPool& pool);
 
   void getValues(const RowSet& rows, VectorPtr* result) override;
+
+  bool shouldReadChildrenEagerly() const override {
+    return true;
+  }
 };
 
 } // namespace bytedance::bolt::parquet

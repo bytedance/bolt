@@ -196,7 +196,8 @@ class InMemoryPayload final : public Payload {
       std::unique_ptr<InMemoryPayload> append,
       arrow::MemoryPool* pool,
       int64_t rowvectorModeCompressionMinColumns,
-      int64_t rowvectorModeCompressionMaxBufferSize);
+      int64_t rowvectorModeCompressionMaxBufferSize,
+      bool sourceBuffersResizable = false);
 
   arrow::Status serialize(arrow::io::OutputStream* outputStream) override;
 

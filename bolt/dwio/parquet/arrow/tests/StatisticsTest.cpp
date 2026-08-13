@@ -42,15 +42,15 @@
 #include <vector>
 
 #include "arrow/array.h"
+#include "arrow/array/builder_binary.h"
 #include "arrow/buffer.h"
 #include "arrow/memory_pool.h"
-#include "arrow/testing/builder.h"
-#include "arrow/testing/gtest_util.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_ops.h"
 #include "arrow/util/ubsan.h"
 
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/dwio/parquet/arrow/ColumnWriter.h"
 #include "bolt/dwio/parquet/arrow/FileWriter.h"
 #include "bolt/dwio/parquet/arrow/Platform.h"
@@ -1248,11 +1248,20 @@ template <typename ArrowType>
 void TestByteArrayStatisticsFromArrow() {
   using TypeTraits = ::arrow::TypeTraits<ArrowType>;
   using ArrayType = typename TypeTraits::ArrayType;
+  using BuilderType = typename TypeTraits::BuilderType;
 
-  auto values = ArrayFromJSON(
-      TypeTraits::type_singleton(),
-      "[\"c123\", \"b123\", \"a123\", null, "
-      "null, \"f123\", \"g123\", \"h123\", \"i123\", \"ü123\"]");
+  BuilderType builder;
+  ASSERT_OK(builder.Append("c123"));
+  ASSERT_OK(builder.Append("b123"));
+  ASSERT_OK(builder.Append("a123"));
+  ASSERT_OK(builder.AppendNull());
+  ASSERT_OK(builder.AppendNull());
+  ASSERT_OK(builder.Append("f123"));
+  ASSERT_OK(builder.Append("g123"));
+  ASSERT_OK(builder.Append("h123"));
+  ASSERT_OK(builder.Append("i123"));
+  ASSERT_OK(builder.Append("ü123"));
+  ASSERT_OK_AND_ASSIGN(auto values, builder.Finish());
 
   const auto& typed_values = static_cast<const ArrayType&>(*values);
 
@@ -1426,7 +1435,11 @@ void CheckExtrema() {
   std::vector<bool> is_valid = {
       true, false, false, false, false, true, true, true};
   std::shared_ptr<Buffer> valid_bitmap;
-  ::arrow::BitmapFromVector(is_valid, &valid_bitmap);
+  ASSERT_OK_AND_ASSIGN(
+      valid_bitmap, ::arrow::AllocateEmptyBitmap(is_valid.size()));
+  for (size_t i = 0; i < is_valid.size(); ++i) {
+    bit_util::SetBitTo(valid_bitmap->mutable_data(), i, is_valid[i]);
+  }
   {
     ARROW_SCOPED_TRACE(
         "spaced unsigned statistics: umin = ",

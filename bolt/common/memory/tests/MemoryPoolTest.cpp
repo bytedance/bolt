@@ -35,15 +35,13 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/caching/SsdCache.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/MallocAllocator.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/MmapAllocator.h"
 #include "bolt/common/memory/SharedArbitrator.h"
 #include "bolt/common/testutil/TestValue.h"
-
-DECLARE_bool(bolt_memory_leak_check_enabled);
-DECLARE_bool(bolt_memory_pool_debug_enabled);
 
 using namespace ::testing;
 using namespace bytedance::bolt::cache;

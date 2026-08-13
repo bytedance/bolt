@@ -266,9 +266,9 @@ class Writer : public dwio::common::Writer {
       std::shared_ptr<::arrow::RecordBatch>& recordBatch);
 
  private:
-  void splitWriteRecordBatch(
-      const VectorPtr& data,
-      std::shared_ptr<::arrow::Schema> arraySchemaPtr);
+  void initializeArrowSchema(const VectorPtr& data);
+
+  void splitWriteRecordBatch(const VectorPtr& data);
 
   // Sets the memory reclaimers for all the memory pools used by this writer.
   void setMemoryReclaimers();

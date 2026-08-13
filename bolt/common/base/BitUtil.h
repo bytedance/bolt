@@ -130,7 +130,7 @@ constexpr inline uint64_t nwords(int32_t bits) {
 }
 
 constexpr inline uint64_t nwords(uint32_t bits) {
-  return roundUp(bits, 64) / 64;
+  return bits / 64 + (bits % 64 != 0);
 }
 
 constexpr inline uint64_t nwords(int64_t bits) {
@@ -139,7 +139,7 @@ constexpr inline uint64_t nwords(int64_t bits) {
 }
 
 constexpr inline uint64_t nwords(uint64_t bits) {
-  return roundUp(bits, 64) / 64;
+  return bits / 64 + (bits % 64 != 0);
 }
 
 inline int32_t getAndClearLastSetBit(uint16_t& bits) {

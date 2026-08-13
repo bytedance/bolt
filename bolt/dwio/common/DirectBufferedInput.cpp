@@ -36,14 +36,13 @@
 
 #include "bolt/common/base/GlobalParameters.h"
 #include "bolt/common/caching/AsyncDataCache.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Allocation.h"
 #include "bolt/common/process/ThreadNameHolder.h"
 #include "bolt/common/process/TraceContext.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/common/DirectInputStream.h"
-
-DECLARE_int32(cache_prefetch_min_pct);
 
 using ::bytedance::bolt::common::Region;
 using bytedance::bolt::common::testutil::TestValue;

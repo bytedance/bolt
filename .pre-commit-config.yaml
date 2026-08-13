@@ -24,6 +24,7 @@ repos:
     rev: v8.30.0
     hooks:
       - id: gitleaks
+        entry: python3 scripts/run-gitleaks.py
 
   - repo: https://github.com/BlankSpruce/gersemi
     rev: 0.25.1
@@ -48,8 +49,6 @@ repos:
         args: [--fix=lf]
       - id: check-toml
         name: Check TOML files
-      - id: check-yaml
-        name: Check YAML files
       - id: check-xml
         name: Check XML files
 
@@ -79,11 +78,10 @@ repos:
         files: ^doc/blog/_posts/.*\.md$
       - id: markdownlint-blog
         name: Lint and fix blog Markdown
-        entry: npx markdownlint-cli2@0.17.2 --fix "doc/blog/**/*.md" "#doc/blog/vendor/**"
+        entry: npx markdownlint-cli2@0.17.2 --fix
         language: system
         files: ^doc/blog/.*\.md$
         exclude: ^doc/blog/vendor/
-        pass_filenames: false
         require_serial: true
       - id: license-header-check
         name: Check for license headers
@@ -101,8 +99,8 @@ repos:
         entry: ./scripts/run-clang-tidy.py
         args: [--diff, auto]
         language: python
+        files: \.(c|cc|cpp|cxx|h|hpp|hxx)$
         pass_filenames: false
-        always_run: true
         additional_dependencies: [clang-tidy==18.1.8]
         require_serial: true
   - repo: https://github.com/codespell-project/codespell
@@ -110,4 +108,3 @@ repos:
     hooks:
     - id: codespell
       name: Spell Check
-      args: ["-L", ".codespellrc"]

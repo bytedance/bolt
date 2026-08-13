@@ -33,11 +33,11 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/WindowFunction.h"
 #include "bolt/exec/fuzzer/AggregationFuzzerBase.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/exec/fuzzer/PrestoQueryRunner.h"
 #include "bolt/exec/fuzzer/ReferenceQueryRunner.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 
-DECLARE_bool(enable_window_reference_verification);
 namespace bytedance::bolt::exec::test {
 
 class WindowFuzzer : public AggregationFuzzerBase {
@@ -62,7 +62,7 @@ class WindowFuzzer : public AggregationFuzzerBase {
 
     if (persistAndRunOnce_ && reproPersistPath_.empty()) {
       std::cerr
-          << "--repro_persist_path must be specified if --persist_and_run_once is specified"
+          << "--bolt_fuzzer_repro_persist_path must be specified if --bolt_fuzzer_persist_and_run_once is specified"
           << std::endl;
       exit(1);
     }

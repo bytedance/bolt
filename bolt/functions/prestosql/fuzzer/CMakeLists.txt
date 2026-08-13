@@ -30,7 +30,6 @@ add_executable(bolt_aggregation_fuzzer_test AggregationFuzzerTest.cpp)
 target_link_libraries(
   bolt_aggregation_fuzzer_test
   bolt_aggregation_fuzzer
-  bolt_aggregation_fuzzer_base
   bolt_aggregates
   bolt_window
   bolt_testutils

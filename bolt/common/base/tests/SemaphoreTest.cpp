@@ -50,6 +50,7 @@ TEST(SemaphoreTest, threads) {
   // consumer threads that acquire the same semaphore. Once a consumer sees that
   // the expected number of acquires have been done, it releases the semaphore
   // enough times to unblock the other consumers.
+  numReleased = 0;
   constexpr int32_t kNumProducers = 20;
   constexpr int32_t kNumConsumers = 20;
   constexpr int32_t kNumOps = 10000;
@@ -63,7 +64,7 @@ TEST(SemaphoreTest, threads) {
       for (;;) {
         sem.acquire();
         int32_t done = ++numDone;
-        if (numDone == kNumOps) {
+        if (done == kNumOps) {
           // All producers are finished, continue the other consumers.
           for (auto i = 0; i < kNumConsumers - 1; ++i) {
             ++numReleased;

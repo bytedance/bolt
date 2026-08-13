@@ -77,6 +77,19 @@ std::pair<std::string, std::string> encodeVariantJson(std::string_view json) {
   return {std::move(value), dict.serialize()};
 }
 
+int64_t loadedToValueHook(const std::shared_ptr<Task>& task) {
+  int64_t sum = 0;
+  for (const auto& pipelineStats : task->taskStats().pipelineStats) {
+    for (const auto& operatorStats : pipelineStats.operatorStats) {
+      auto it = operatorStats.runtimeStats.find("loadedToValueHook");
+      if (it != operatorStats.runtimeStats.end()) {
+        sum += it->second.sum;
+      }
+    }
+  }
+  return sum;
+}
+
 RowVectorPtr makeVariantParquetBatch(
     memory::MemoryPool* pool,
     const std::vector<int64_t>& groups,
@@ -526,6 +539,19 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     writer->close();
   }
 
+  std::unique_ptr<TaskCursor> makeCursorWithoutCopy(
+      const core::PlanNodePtr& plan,
+      const std::string& filePath) {
+    CursorParameters params;
+    params.copyResult = false;
+    params.serialExecution = true;
+    params.planNode = plan;
+    auto cursor = TaskCursor::create(params);
+    cursor->task()->addSplit("0", exec::Split(makeSplit(filePath)));
+    cursor->task()->noMoreSplits("0");
+    return cursor;
+  }
+
   void testTimestampRead(const WriterOptions& options) {
     auto stringToTimestamp = [](std::string_view view) {
       return util::fromTimestampString(view.data(), view.size(), nullptr);
@@ -682,6 +708,151 @@ TEST_F(ParquetTableScanTest, basic) {
       "SELECT max(b), a FROM tmp WHERE a < 3 GROUP BY a");
 }
 
+TEST_F(ParquetTableScanTest, tableScanPreservesLazyVectors) {
+  constexpr vector_size_t kSize = 20;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row + 1; }),
+          makeFlatVector<double>(kSize, [](auto row) { return row + 1; }),
+      });
+  auto file = TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, {});
+  auto rowType = ROW({"a", "b"}, {BIGINT(), DOUBLE()});
+  auto plan = PlanBuilder().tableScan(rowType).planNode();
+
+  auto cursor = makeCursorWithoutCopy(plan, file->getPath());
+  vector_size_t rowOffset = 0;
+  while (cursor->moveNext()) {
+    auto result = cursor->current()->asUnchecked<RowVector>();
+    ASSERT_GT(result->size(), 0);
+    ASSERT_EQ(2, result->childrenSize());
+    ASSERT_TRUE(isLazyNotLoaded(*result->childAt(0)));
+    ASSERT_TRUE(isLazyNotLoaded(*result->childAt(1)));
+
+    auto a = result->childAt(0)->loadedVector()->asFlatVector<int64_t>();
+    auto b = result->childAt(1)->loadedVector()->asFlatVector<double>();
+    for (auto i = 0; i < result->size(); ++i) {
+      EXPECT_EQ(rowOffset + i + 1, a->valueAt(i));
+      EXPECT_EQ(rowOffset + i + 1, b->valueAt(i));
+    }
+    rowOffset += result->size();
+  }
+  ASSERT_EQ(20, rowOffset);
+  ASSERT_TRUE(waitForTaskCompletion(cursor->task().get()));
+}
+
+TEST_F(ParquetTableScanTest, tableScanPreservesComplexLazyVectors) {
+  constexpr vector_size_t kSize = 8;
+  auto data = makeRowVector(
+      {"id", "items", "payload"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+          makeArrayVector<int32_t>(
+              kSize,
+              [](auto row) { return row % 3; },
+              [](auto row) { return row * 7; }),
+          makeRowVector(
+              {"name", "score"},
+              {
+                  makeFlatVector<std::string>(
+                      kSize, [](auto row) { return fmt::format("n{}", row); }),
+                  makeFlatVector<double>(
+                      kSize, [](auto row) { return row * 2.5; }),
+              }),
+      });
+  auto file = TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, {});
+  auto rowType = asRowType(data->type());
+  auto plan = PlanBuilder().tableScan(rowType).planNode();
+
+  auto cursor = makeCursorWithoutCopy(plan, file->getPath());
+  ASSERT_TRUE(cursor->moveNext());
+  auto result = cursor->current();
+  ASSERT_EQ(kSize, result->size());
+  for (auto i = 0; i < result->childrenSize(); ++i) {
+    ASSERT_TRUE(isLazyNotLoaded(*result->childAt(i))) << i;
+    result->childAt(i)->loadedVector();
+  }
+  bytedance::bolt::test::assertEqualVectors(data, result);
+  ASSERT_FALSE(cursor->moveNext());
+  ASSERT_TRUE(waitForTaskCompletion(cursor->task().get()));
+}
+
+TEST_F(ParquetTableScanTest, filterColumnsAreEagerButProjectedColumnsAreLazy) {
+  constexpr vector_size_t kSize = 10;
+  auto data = makeRowVector(
+      {"filter_col", "payload", "items"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+          makeFlatVector<double>(kSize, [](auto row) { return row + 0.25; }),
+          makeArrayVector<int32_t>(
+              kSize,
+              [](auto row) { return row % 2; },
+              [](auto row) { return row + 100; }),
+      });
+  auto file = TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, {});
+  auto rowType = asRowType(data->type());
+  auto plan = PlanBuilder().tableScan(rowType, {"filter_col >= 3"}).planNode();
+
+  auto cursor = makeCursorWithoutCopy(plan, file->getPath());
+  ASSERT_TRUE(cursor->moveNext());
+  auto result = cursor->current();
+  ASSERT_EQ(7, result->size());
+  ASSERT_FALSE(isLazyNotLoaded(*result->childAt(0)));
+  ASSERT_TRUE(isLazyNotLoaded(*result->childAt(1)));
+  ASSERT_TRUE(isLazyNotLoaded(*result->childAt(2)));
+
+  auto filterCol = result->childAt(0)->asFlatVector<int64_t>();
+  auto payload = result->childAt(1)->loadedVector()->asFlatVector<double>();
+  result->childAt(2)->loadedVector();
+  for (auto i = 0; i < result->size(); ++i) {
+    EXPECT_EQ(i + 3, filterCol->valueAt(i));
+    EXPECT_EQ(i + 3.25, payload->valueAt(i));
+  }
+  ASSERT_FALSE(cursor->moveNext());
+  ASSERT_TRUE(waitForTaskCompletion(cursor->task().get()));
+}
+
+TEST_F(ParquetTableScanTest, remainingFilterPreservesLazyOutputWrapper) {
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"a", "b", "payload"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row % 3; }),
+          makeFlatVector<std::string>(
+              kSize, [](auto row) { return fmt::format("payload{}", row); }),
+      });
+  auto file = TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, {});
+  auto rowType = asRowType(data->type());
+  auto plan = PlanBuilder().tableScan(rowType, {}, "b = 1").planNode();
+
+  auto cursor = makeCursorWithoutCopy(plan, file->getPath());
+  ASSERT_TRUE(cursor->moveNext());
+  auto result = cursor->current();
+  ASSERT_EQ(4, result->size());
+  ASSERT_TRUE(isLazyNotLoaded(*result->childAt(0)));
+  ASSERT_FALSE(isLazyNotLoaded(*result->childAt(1)));
+  ASSERT_TRUE(isLazyNotLoaded(*result->childAt(2)));
+
+  DecodedVector a(*result->childAt(0), SelectivityVector(result->size()));
+  DecodedVector b(*result->childAt(1), SelectivityVector(result->size()));
+  DecodedVector payload(*result->childAt(2), SelectivityVector(result->size()));
+  for (auto i = 0; i < result->size(); ++i) {
+    const auto sourceRow = 1 + 3 * i;
+    EXPECT_EQ(sourceRow, a.valueAt<int64_t>(i));
+    EXPECT_EQ(1, b.valueAt<int64_t>(i));
+    EXPECT_EQ(
+        fmt::format("payload{}", sourceRow),
+        payload.valueAt<StringView>(i).str());
+  }
+  ASSERT_FALSE(cursor->moveNext());
+  ASSERT_TRUE(waitForTaskCompletion(cursor->task().get()));
+}
+
 TEST_F(ParquetTableScanTest, aggregatePushdownToSmallPages) {
   const std::vector<std::string> columnNames = {"a", "b", "c"};
   const auto expectedRowVector = makeRowVector(
@@ -717,6 +888,12 @@ TEST_F(ParquetTableScanTest, aggregatePushdownToSmallPages) {
   AssertQueryBuilder(plan)
       .split(makeSplit(filePath->getPath()))
       .assertResults(expectedRowVector);
+
+  std::shared_ptr<Task> task;
+  AssertQueryBuilder(plan)
+      .split(makeSplit(filePath->getPath()))
+      .copyResults(pool(), task);
+  EXPECT_GT(loadedToValueHook(task), 0);
 }
 
 TEST_F(ParquetTableScanTest, countStar) {
@@ -1631,12 +1808,11 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     bool shouldThrow;
     // Substring to match against the thrown error. Defaults to the
     // BoltUserError raised by ReaderBase::convertType via
-    // BOLT_SCHEMA_MISMATCH_ERROR (same error code as DWRF/ORC, same
-    // "Schema mismatch, ..., From Kind: X, To Kind: Y" layout).
+    // BOLT_SCHEMA_MISMATCH_ERROR with a Parquet-specific stable prefix.
     // Override when a case is rejected by a later layer with a
     // different message (e.g. ParquetColumnReader::matchType in
     // non-Spark builds).
-    const char* errMsg = "Schema mismatch";
+    const char* errMsg = kParquetTypeMappingErrorPrefix;
   };
 
   // clang-format off

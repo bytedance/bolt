@@ -74,7 +74,7 @@ class SsdFileTest : public testing::Test {
       int64_t ssdBytes = 0,
       bool setNoCowFlag = false) {
     // tmpfs does not support O_DIRECT, so turn this off for testing.
-    FLAGS_ssd_odirect = false;
+    FLAGS_bolt_ssd_odirect = false;
     cache_ = AsyncDataCache::create(memory::memoryManager()->allocator());
 
     fileName_ = StringIdLease(fileIds(), "fileInStorage");
@@ -255,7 +255,7 @@ TEST_F(SsdFileTest, writeAndRead) {
   constexpr int64_t kSsdSize = 16 * SsdFile::kRegionSize;
   std::vector<TestEntry> allEntries;
   initializeCache(128 * kMB, kSsdSize);
-  FLAGS_ssd_verify_write = true;
+  FLAGS_bolt_ssd_verify_write = true;
   for (auto startOffset = 0; startOffset <= kSsdSize - SsdFile::kRegionSize;
        startOffset += SsdFile::kRegionSize) {
     auto pins =

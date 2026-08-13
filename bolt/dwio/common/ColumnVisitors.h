@@ -168,6 +168,10 @@ class ColumnVisitor {
   using DataType = T;
   static constexpr bool dense = isDense;
   static constexpr bool kHasBulkPath = hasBulkPath;
+  static constexpr bool kHasFilter =
+      !std::is_same_v<TFilter, bolt::common::AlwaysTrue>;
+  static constexpr bool kHasHook =
+      !std::is_same_v<HookType, dwio::common::NoHook>;
   ColumnVisitor(
       TFilter& filter,
       SelectiveColumnReader* reader,
@@ -433,6 +437,10 @@ class ColumnVisitor {
     numValuesBias_ = bias;
   }
 
+  int32_t numValuesBias() const {
+    return numValuesBias_;
+  }
+
   void setNumValues(int32_t size) {
     reader_->setNumValues(numValuesBias_ + size);
     if constexpr (!std::is_same_v<TFilter, bolt::common::AlwaysTrue>) {
@@ -528,7 +536,7 @@ template <
 inline void
 ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::addResult(
     T value) {
-  values_.addValue(rowIndex_, value);
+  values_.addValue(rowIndex_ + numValuesBias_, value);
 }
 
 template <
@@ -539,7 +547,7 @@ template <
     bool hasBulkPath>
 inline void
 ColumnVisitor<T, TFilter, ExtractValues, isDense, hasBulkPath>::addNull() {
-  values_.template addNull<T>(rowIndex_);
+  values_.template addNull<T>(rowIndex_ + numValuesBias_);
 }
 
 template <
@@ -857,7 +865,10 @@ class DictionaryColumnVisitor
         translateByDict(input, numInput, values);
         super::values_.hook().addValues(
             scatter ? scatterRows + super::rowIndex_
-                    : bolt::iota(super::numRows_, super::innerNonNullRows()) +
+                    : bolt::iota(
+                          super::numRows_,
+                          super::innerNonNullRows(),
+                          super::numValuesBias_) +
                     super::rowIndex_,
             values,
             numInput,
@@ -1139,6 +1150,12 @@ class DictionaryColumnVisitor
     return state_.dictionary.numValues;
   }
 
+  static constexpr bool hasFilter() {
+    // Dictionary values cannot be null.
+    return !std::is_same_v<TFilter, bolt::common::AlwaysTrue> &&
+        !std::is_same_v<TFilter, bolt::common::IsNotNull>;
+  }
+
   uint8_t* filterCache() const {
     return state_.filterCache;
   }
@@ -1214,8 +1231,13 @@ class StringDictionaryColumnVisitor
     }
     vector_size_t previous =
         isDense && TFilter::deterministic ? 0 : super::currentRow();
-    if constexpr (std::is_same_v<TFilter, bolt::common::AlwaysTrue>) {
-      super::filterPassed(index);
+    if constexpr (!DictSuper::hasFilter()) {
+      if constexpr (super::kHasHook) {
+        super::values_.addValue(
+            super::rowIndex_ + super::numValuesBias_, valueInDictionary(index));
+      } else {
+        super::filterPassed(index);
+      }
     } else {
       // check the dictionary cache
       if (TFilter::deterministic &&
@@ -1227,7 +1249,7 @@ class StringDictionaryColumnVisitor
         super::filterFailed();
       } else {
         if (bolt::common::applyFilter(
-                super::filter_, valueInDictionary(value, inStrideDict))) {
+                super::filter_, valueInDictionary(index))) {
           super::filterPassed(index);
           if constexpr (TFilter::deterministic) {
             DictSuper::filterCache()[index] = FilterResult::kSuccess;
@@ -1270,25 +1292,31 @@ class StringDictionaryColumnVisitor
       int32_t& numValues) {
     DCHECK(input == values + numValues);
     setByInDict(values + numValues, numInput);
-    if (!hasFilter) {
+    if constexpr (!DictSuper::hasFilter()) {
       if (hasHook) {
         for (auto i = 0; i < numInput; ++i) {
-          auto value = input[i];
           super::values_.addValue(
               scatterRows ? scatterRows[super::rowIndex_ + i]
-                          : super::rowIndex_ + i,
-              value);
+                          : super::rowIndex_ + super::numValuesBias_ + i,
+              valueInDictionary(input[i]));
         }
       }
-      DCHECK_EQ(input, values + numValues);
-      if (scatter) {
+      if constexpr (std::is_same_v<TFilter, bolt::common::IsNotNull>) {
+        auto* begin = (scatter ? scatterRows : super::rows_) + super::rowIndex_;
+        std::copy(begin, begin + numInput, filterHits + numValues);
+        numValues += numInput;
+      } else if (scatter) {
         dwio::common::scatterDense(
             input, scatterRows + super::rowIndex_, numInput, values);
+        numValues = scatterRows[super::rowIndex_ + numInput - 1] + 1;
+      } else {
+        DCHECK_EQ(input, values + numValues);
+        numValues += numInput;
       }
-      numValues = scatter ? scatterRows[super::rowIndex_ + numInput - 1] + 1
-                          : numValues + numInput;
       super::rowIndex_ += numInput;
       return;
+    } else {
+      static_assert(hasFilter);
     }
     constexpr bool filterOnly =
         std::is_same_v<typename super::Extract, DropValues>;
@@ -1325,16 +1353,7 @@ class StringDictionaryColumnVisitor
         while (bits) {
           int index = bits::getAndClearLastSetBit(bits);
           int32_t value = input[i + index];
-          bool result;
-          if (value >= DictSuper::dictionarySize()) {
-            result = applyFilter(
-                super::filter_,
-                valueInDictionary(value - DictSuper::dictionarySize(), true));
-          } else {
-            result =
-                applyFilter(super::filter_, valueInDictionary(value, false));
-          }
-          if (result) {
+          if (applyFilter(super::filter_, valueInDictionary(value))) {
             DictSuper::filterCache()[value] = FilterResult::kSuccess;
             passed |= 1 << index;
           } else {
@@ -1414,65 +1433,15 @@ class StringDictionaryColumnVisitor
     }
   }
 
-  folly::StringPiece valueInDictionary(int64_t index, bool inStrideDict) {
-    if (inStrideDict) {
-      return folly::StringPiece(reinterpret_cast<const StringView*>(
-          DictSuper::state_.dictionary2.values)[index]);
+  folly::StringPiece valueInDictionary(int64_t index) {
+    auto stripeDictSize = DictSuper::state_.dictionary.numValues;
+    if (index < stripeDictSize) {
+      return reinterpret_cast<const StringView*>(
+          DictSuper::state_.dictionary.values)[index];
     }
-    return folly::StringPiece(reinterpret_cast<const StringView*>(
-        DictSuper::state_.dictionary.values)[index]);
+    return reinterpret_cast<const StringView*>(
+        DictSuper::state_.dictionary2.values)[index - stripeDictSize];
   }
-};
-
-class ExtractStringDictionaryToGenericHook {
- public:
-  static constexpr bool kSkipNulls = true;
-  using HookType = ValueHook;
-
-  ExtractStringDictionaryToGenericHook(
-      ValueHook* hook,
-      RowSet rows,
-      RawScanState state)
-
-      : hook_(hook), rows_(rows), state_(state) {}
-
-  bool acceptsNulls() {
-    return hook_->acceptsNulls();
-  }
-
-  template <typename T>
-  void addNull(vector_size_t rowIndex) {
-    hook_->addNull(rowIndex);
-  }
-
-  void addValue(vector_size_t rowIndex, int32_t value) {
-    // We take the string from the stripe or stride dictionary
-    // according to the index. Stride dictionary indices are offset up
-    // by the stripe dict size.
-    if (value < dictionarySize()) {
-      auto view = folly::StringPiece(
-          reinterpret_cast<const StringView*>(state_.dictionary.values)[value]);
-      hook_->addValue(rowIndex, &view);
-    } else {
-      BOLT_DCHECK(state_.inDictionary);
-      auto view = folly::StringPiece(reinterpret_cast<const StringView*>(
-          state_.dictionary2.values)[value - dictionarySize()]);
-      hook_->addValue(rowIndex, &view);
-    }
-  }
-
-  ValueHook& hook() {
-    return *hook_;
-  }
-
- private:
-  int32_t dictionarySize() const {
-    return state_.dictionary.numValues;
-  }
-
-  ValueHook* const hook_;
-  RowSet const rows_;
-  RawScanState state_;
 };
 
 template <typename T, typename TFilter, typename ExtractValues, bool isDense>

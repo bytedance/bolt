@@ -40,6 +40,7 @@
 #include "bolt/common/base/GlobalParameters.h"
 #include "bolt/common/base/StatsReporter.h"
 #include "bolt/common/base/SuccinctPrinter.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryUtils.h"
 #include "bolt/common/memory/sparksql/OomPrinter.h"
@@ -47,13 +48,6 @@
 #include "bolt/common/testutil/TestValue.h"
 
 #include <re2/re2.h>
-
-DEFINE_bool(
-    bolt_memory_pool_capacity_transfer_across_tasks,
-    false,
-    "Whether allow to memory capacity transfer between memory pools from different tasks, which might happen in use case like Spark-Gluten");
-
-DECLARE_bool(bolt_suppress_memory_capacity_exceeding_error_message);
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::memory {

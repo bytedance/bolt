@@ -589,6 +589,26 @@ void Writer::createFileWriterIfNotExist() {
   }
 }
 
+void Writer::initializeArrowSchema(const VectorPtr& data) {
+  BOLT_CHECK_NULL(arrowContext_->schema);
+
+  ArrowSchema schema;
+  exportToArrow(data, schema, options_, {}, exportPool_.get());
+  auto arrowSchema = ::arrow::ImportSchema(&schema).ValueOrDie();
+
+  std::vector<std::shared_ptr<::arrow::Field>> fields;
+  fields.reserve(schema_->size());
+  for (auto i = 0; i < schema_->size(); ++i) {
+    fields.push_back(updateFieldNameRecursive(
+        arrowSchema->fields()[i],
+        *schema_->childAt(i),
+        (arrowSchemaFromHive_ ? arrowSchemaFromHive_->fields()[i]
+                              : arrowSchema->fields()[i]),
+        schema_->nameOf(i)));
+  }
+  arrowContext_->schema = ::arrow::schema(std::move(fields));
+}
+
 dwio::common::StripeProgress getStripeProgress(
     uint64_t stagingRows,
     int64_t stagingBytes) {
@@ -596,9 +616,7 @@ dwio::common::StripeProgress getStripeProgress(
       .stripeRowCount = stagingRows, .stripeSizeEstimate = stagingBytes};
 }
 
-void Writer::splitWriteRecordBatch(
-    const VectorPtr& data,
-    std::shared_ptr<::arrow::Schema> arraySchemaPtr) {
+void Writer::splitWriteRecordBatch(const VectorPtr& data) {
   vector_size_t rowNumPerBatch = data->size();
   if (rowNumPerBatch > minBatchSize_) {
     auto exportSize =
@@ -626,10 +644,8 @@ void Writer::splitWriteRecordBatch(
         options_);
 
     PARQUET_ASSIGN_OR_THROW(
-        auto recordBatch, ::arrow::ImportRecordBatch(&array, arraySchemaPtr));
-    if (!arrowContext_->schema) {
-      arrowContext_->schema = recordBatch->schema();
-    }
+        auto recordBatch,
+        ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
     writeRecordBatch(recordBatch);
     offset += size;
   }
@@ -650,25 +666,15 @@ void Writer::write(const VectorPtr& data) {
       data->type()->equivalent(*schema_),
       "The file schema type should be equal with the input rowvector type.");
 
-  ArrowSchema schema;
-  exportToArrow(data, schema, options_, {}, exportPool_.get());
-
-  // Convert the arrow schema to Schema and then update the column names based
-  // on schema_.
-  auto arrowSchema = ::arrow::ImportSchema(&schema).ValueOrDie();
-  std::vector<std::shared_ptr<::arrow::Field>> newFields;
-  auto childSize = schema_->size();
-  for (auto i = 0; i < childSize; i++) {
-    newFields.push_back(updateFieldNameRecursive(
-        arrowSchema->fields()[i],
-        *schema_->childAt(i),
-        (arrowSchemaFromHive_ ? arrowSchemaFromHive_->fields()[i]
-                              : arrowSchema->fields()[i]),
-        schema_->nameOf(i)));
+  if (!arrowContext_->schema) {
+    initializeArrowSchema(data);
+    if (enableRowGroupAlignedWrite_ || !enableFlushBasedOnBlockSize_) {
+      arrowContext_->stagingChunks.resize(arrowContext_->schema->num_fields());
+    }
   }
 
   if (!enableRowGroupAlignedWrite_ && enableFlushBasedOnBlockSize_) {
-    splitWriteRecordBatch(data, ::arrow::schema(newFields));
+    splitWriteRecordBatch(data);
     return;
   }
 
@@ -676,15 +682,7 @@ void Writer::write(const VectorPtr& data) {
   exportToArrow(data, array, exportPool_.get(), options_);
   PARQUET_ASSIGN_OR_THROW(
       auto recordBatch,
-      ::arrow::ImportRecordBatch(&array, ::arrow::schema(newFields)));
-  if (!arrowContext_->schema) {
-    arrowContext_->schema = recordBatch->schema();
-    for (int colIdx = 0; colIdx < arrowContext_->schema->num_fields();
-         colIdx++) {
-      arrowContext_->stagingChunks.push_back(
-          std::vector<std::shared_ptr<::arrow::Array>>());
-    }
-  }
+      ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
 
   auto bytes = data->estimateFlatSize();
   auto numRows = data->size();
@@ -742,17 +740,11 @@ void Writer::close() {
 }
 
 void Writer::createEmptyFile() {
-  BOLT_CHECK_NULL(arrowContext_->schema);
   BOLT_CHECK_NULL(arrowContext_->writer);
-  ArrowSchema arrowSchema;
-  exportToArrow(
-      BaseVector::create(
-          std::static_pointer_cast<const Type>(schema_), 0, exportPool_.get()),
-      arrowSchema,
-      options_,
-      {},
-      exportPool_.get());
-  arrowContext_->schema = ::arrow::ImportSchema(&arrowSchema).ValueOrDie();
+  if (!arrowContext_->schema) {
+    initializeArrowSchema(BaseVector::create(
+        std::static_pointer_cast<const Type>(schema_), 0, exportPool_.get()));
+  }
   createFileWriterIfNotExist();
 }
 

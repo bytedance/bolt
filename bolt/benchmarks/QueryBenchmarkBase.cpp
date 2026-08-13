@@ -30,80 +30,92 @@
 
 #include "bolt/benchmarks/QueryBenchmarkBase.h"
 
-DEFINE_string(data_format, "parquet", "Data format");
+DEFINE_string(bolt_benchmark_data_format, "parquet", "Data format");
 
 DEFINE_validator(
-    data_format,
+    bolt_benchmark_data_format,
     &bytedance::bolt::QueryBenchmarkBase::validateDataFormat);
 
 DEFINE_bool(
-    include_custom_stats,
+    bolt_benchmark_include_custom_stats,
     false,
     "Include custom statistics along with execution statistics");
-DEFINE_bool(include_results, false, "Include results in the output");
-DEFINE_int32(num_drivers, 4, "Number of drivers");
+DEFINE_bool(
+    bolt_benchmark_include_results,
+    false,
+    "Include results in the output");
+DEFINE_int32(bolt_benchmark_num_drivers, 4, "Number of drivers");
 
-DEFINE_int32(num_splits_per_file, 10, "Number of splits per file");
 DEFINE_int32(
-    cache_gb,
+    bolt_benchmark_num_splits_per_file,
+    10,
+    "Number of splits per file");
+DEFINE_int32(
+    bolt_benchmark_cache_gb,
     0,
     "GB of process memory for cache and query.. if "
     "non-0, uses mmap to allocator and in-process data cache.");
-DEFINE_int32(num_repeats, 1, "Number of times to run each query");
-DEFINE_int32(num_io_threads, 8, "Threads for speculative IO");
+DEFINE_int32(
+    bolt_benchmark_num_repeats,
+    1,
+    "Number of times to run each query");
+DEFINE_int32(bolt_benchmark_num_io_threads, 8, "Threads for speculative IO");
 DEFINE_string(
-    test_flags_file,
+    bolt_benchmark_test_flags_file,
     "",
     "Path to a file containing gflafs and "
     "values to try. Produces results for each flag combination "
     "sorted on performance");
 DEFINE_bool(
-    full_sorted_stats,
+    bolt_benchmark_full_sorted_stats,
     true,
-    "Add full stats to the report on  --test_flags_file");
+    "Add full stats to the report on  --bolt_benchmark_test_flags_file");
 
-DEFINE_string(ssd_path, "", "Directory for local SSD cache");
-DEFINE_int32(ssd_cache_gb, 0, "Size of local SSD cache in GB");
+DEFINE_string(bolt_benchmark_ssd_path, "", "Directory for local SSD cache");
+DEFINE_int32(bolt_benchmark_ssd_cache_gb, 0, "Size of local SSD cache in GB");
 DEFINE_int32(
-    ssd_checkpoint_interval_gb,
+    bolt_benchmark_ssd_checkpoint_interval_gb,
     8,
     "Checkpoint every n "
     "GB new data in cache");
 DEFINE_bool(
-    clear_ram_cache,
+    bolt_benchmark_clear_ram_cache,
     false,
     "Clear RAM cache before each query."
     "Flushes in process and OS file system cache (if root on Linux)");
 DEFINE_bool(
-    clear_ssd_cache,
+    bolt_benchmark_clear_ssd_cache,
     false,
     "Clears SSD cache before "
     "each query");
 
 DEFINE_bool(
-    warmup_after_clear,
+    bolt_benchmark_warmup_after_clear,
     false,
     "Runs one warmup of the query before "
     "measured run. Use to run warm after clearing caches.");
 
 DEFINE_int64(
-    max_coalesced_bytes,
+    bolt_benchmark_max_coalesced_bytes,
     128 << 20,
     "Maximum size of single coalesced IO");
 
 DEFINE_string(
-    max_coalesced_distance_bytes,
+    bolt_benchmark_max_coalesced_distance_bytes,
     "512kB",
     "Maximum distance in bytes in which coalesce will combine requests");
 
 DEFINE_int32(
-    parquet_prefetch_rowgroups,
+    bolt_benchmark_parquet_prefetch_rowgroups,
     1,
     "Number of next row groups to "
     "prefetch. 1 means prefetch the next row group before decoding "
     "the current one");
 
-DEFINE_int32(split_preload_per_driver, 2, "Prefetch split metadata");
+DEFINE_int32(
+    bolt_benchmark_split_preload_per_driver,
+    2,
+    "Prefetch split metadata");
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::dwio::common;
@@ -150,25 +162,26 @@ void QueryBenchmarkBase::printResults(
 }
 
 void QueryBenchmarkBase::initialize() {
-  if (FLAGS_cache_gb) {
+  if (FLAGS_bolt_benchmark_cache_gb) {
     memory::MemoryManager::Options options;
-    int64_t memoryBytes = FLAGS_cache_gb * (1LL << 30);
+    int64_t memoryBytes = FLAGS_bolt_benchmark_cache_gb * (1LL << 30);
     options.useMmapAllocator = true;
     options.allocatorCapacity = memoryBytes;
     options.useMmapArena = true;
     options.mmapArenaCapacityRatio = 1;
     memory::MemoryManager::testingSetInstance(options);
     std::unique_ptr<cache::SsdCache> ssdCache;
-    if (FLAGS_ssd_cache_gb) {
+    if (FLAGS_bolt_benchmark_ssd_cache_gb) {
       constexpr int32_t kNumSsdShards = 16;
       cacheExecutor_ =
           std::make_unique<folly::IOThreadPoolExecutor>(kNumSsdShards);
       ssdCache = std::make_unique<cache::SsdCache>(
-          FLAGS_ssd_path,
-          static_cast<uint64_t>(FLAGS_ssd_cache_gb) << 30,
+          FLAGS_bolt_benchmark_ssd_path,
+          static_cast<uint64_t>(FLAGS_bolt_benchmark_ssd_cache_gb) << 30,
           kNumSsdShards,
           cacheExecutor_.get(),
-          static_cast<uint64_t>(FLAGS_ssd_checkpoint_interval_gb) << 30);
+          static_cast<uint64_t>(FLAGS_bolt_benchmark_ssd_checkpoint_interval_gb)
+              << 30);
     }
 
     cache_ = cache::AsyncDataCache::create(
@@ -182,17 +195,17 @@ void QueryBenchmarkBase::initialize() {
   parse::registerTypeResolver();
   filesystems::registerLocalFileSystem();
 
-  ioExecutor_ =
-      std::make_unique<folly::IOThreadPoolExecutor>(FLAGS_num_io_threads);
+  ioExecutor_ = std::make_unique<folly::IOThreadPoolExecutor>(
+      FLAGS_bolt_benchmark_num_io_threads);
 
   // Add new values into the hive configuration...
   auto configurationValues = std::unordered_map<std::string, std::string>();
   configurationValues[connector::hive::HiveConfig::kMaxCoalescedBytes] =
-      std::to_string(FLAGS_max_coalesced_bytes);
+      std::to_string(FLAGS_bolt_benchmark_max_coalesced_bytes);
   configurationValues[connector::hive::HiveConfig::kMaxCoalescedDistance] =
-      FLAGS_max_coalesced_distance_bytes;
+      FLAGS_bolt_benchmark_max_coalesced_distance_bytes;
   configurationValues[connector::hive::HiveConfig::kPrefetchRowGroups] =
-      std::to_string(FLAGS_parquet_prefetch_rowgroups);
+      std::to_string(FLAGS_bolt_benchmark_parquet_prefetch_rowgroups);
   auto properties = std::make_shared<const config::ConfigBase>(
       std::move(configurationValues));
 
@@ -237,11 +250,11 @@ QueryBenchmarkBase::run(const TpchPlan& tpchPlan) {
   try {
     for (;;) {
       CursorParameters params;
-      params.maxDrivers = FLAGS_num_drivers;
+      params.maxDrivers = FLAGS_bolt_benchmark_num_drivers;
       params.planNode = tpchPlan.plan;
       params.queryConfigs[core::QueryConfig::kMaxSplitPreloadPerDriver] =
-          std::to_string(FLAGS_split_preload_per_driver);
-      const int numSplitsPerFile = FLAGS_num_splits_per_file;
+          std::to_string(FLAGS_bolt_benchmark_split_preload_per_driver);
+      const int numSplitsPerFile = FLAGS_bolt_benchmark_num_splits_per_file;
 
       bool noMoreSplits = false;
       auto addSplits = [&](exec::Task* task) {
@@ -260,7 +273,7 @@ QueryBenchmarkBase::run(const TpchPlan& tpchPlan) {
       };
       auto result = readCursor(params, addSplits);
       ensureTaskCompletion(result.first->task().get());
-      if (++repeat >= FLAGS_num_repeats) {
+      if (++repeat >= FLAGS_bolt_benchmark_num_repeats) {
         return result;
       }
     }
@@ -272,7 +285,7 @@ QueryBenchmarkBase::run(const TpchPlan& tpchPlan) {
 }
 
 void QueryBenchmarkBase::readCombinations() {
-  std::ifstream file(FLAGS_test_flags_file);
+  std::ifstream file(FLAGS_bolt_benchmark_test_flags_file);
   std::string line;
   while (std::getline(file, line)) {
     ParameterDim dim;
@@ -297,7 +310,7 @@ void QueryBenchmarkBase::readCombinations() {
 
 void QueryBenchmarkBase::runCombinations(int32_t level) {
   if (level == parameters_.size()) {
-    if (FLAGS_clear_ram_cache) {
+    if (FLAGS_bolt_benchmark_clear_ram_cache) {
 #ifdef linux
       // system("echo 3 >/proc/sys/vm/drop_caches");
       bool success = false;
@@ -315,7 +328,7 @@ void QueryBenchmarkBase::runCombinations(int32_t level) {
         cache_->clear();
       }
     }
-    if (FLAGS_clear_ssd_cache) {
+    if (FLAGS_bolt_benchmark_clear_ssd_cache) {
       if (cache_) {
         auto ssdCache = cache_->ssdCache();
         if (ssdCache) {
@@ -323,7 +336,7 @@ void QueryBenchmarkBase::runCombinations(int32_t level) {
         }
       }
     }
-    if (FLAGS_warmup_after_clear) {
+    if (FLAGS_bolt_benchmark_warmup_after_clear) {
       std::stringstream result;
       RunStats ignore;
       runMain(result, ignore);
@@ -399,7 +412,7 @@ void QueryBenchmarkBase::runAllCombinations() {
   for (auto& stats : runStats_) {
     std::cout << stats.toString(false);
   }
-  if (FLAGS_full_sorted_stats) {
+  if (FLAGS_bolt_benchmark_full_sorted_stats) {
     std::cout << "Detail for stats:" << std::endl;
     for (auto& stats : runStats_) {
       std::cout << stats.toString(true);

@@ -182,7 +182,7 @@ class AssertQueryBuilder {
 
   static std::unique_ptr<folly::Executor> newExecutor() {
     return std::make_unique<folly::CPUThreadPoolExecutor>(
-        std::thread::hardware_concurrency());
+        testExecutorConcurrency());
   }
 
   // Used by the created task as the default driver executor.

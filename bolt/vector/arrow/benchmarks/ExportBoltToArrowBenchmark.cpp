@@ -25,7 +25,10 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
 using namespace bytedance::bolt::exec::test;
@@ -87,7 +90,7 @@ void createVectors() {
   opts.nullRatio = 0;
   opts.stringLength = 50;
   opts.stringVariableLength = true;
-  VectorFuzzer fuzzer(opts, pool_.get(), FLAGS_fuzzer_seed);
+  VectorFuzzer fuzzer(opts, pool_.get(), FLAGS_bolt_benchmark_fuzzer_seed);
 
   integerVec = fuzzer.fuzzFlat(INTEGER());
   bigintVec = fuzzer.fuzzFlat(BIGINT());

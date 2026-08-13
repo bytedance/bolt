@@ -187,8 +187,9 @@ void SelectiveStructColumnReaderBase::read(
     }
     auto fieldIndex = childSpec->subscript();
     auto reader = children_.at(fieldIndex);
-    if (reader->isTopLevel() && childSpec->projectOut() &&
-        !childSpec->hasFilter() && !childSpec->extractValues()) {
+    if (!shouldReadChildrenEagerly() && reader->isTopLevel() &&
+        childSpec->projectOut() && !childSpec->hasFilter() &&
+        !childSpec->extractValues()) {
       // Will make a LazyVector.
       continue;
     }
@@ -432,8 +433,8 @@ void SelectiveStructColumnReaderBase::getValues(
       setNullField(rows.size(), childResult, childType, resultRow->pool());
       continue;
     }
-    if (childSpec->extractValues() || childSpec->hasFilter() ||
-        !children_[index]->isTopLevel()) {
+    if (shouldReadChildrenEagerly() || childSpec->extractValues() ||
+        childSpec->hasFilter() || !children_[index]->isTopLevel()) {
       children_[index]->getValues(rows, &childResult);
       continue;
     }
@@ -467,8 +468,8 @@ void SelectiveStructColumnReaderBase::getValues(
     auto dcKeys = fileType_->getDcKeys();
     const auto it = dcKeys.find(scanSpec_->fieldName());
     if (it != dcKeys.end()) {
-      auto oldMap = resultRow->childAt(0)->as<MapVector>();
-      auto oldRow = resultRow->childAt(1)->as<RowVector>();
+      auto oldMap = resultRow->childAt(0)->loadedVector()->as<MapVector>();
+      auto oldRow = resultRow->childAt(1)->loadedVector()->as<RowVector>();
       const auto& keys = it->second;
       BOLT_CHECK_EQ(oldRow->childrenSize(), keys.size());
 

@@ -83,6 +83,68 @@ TEST_F(LazyVectorTest, lazyInDictionary) {
   assertCopyableVector(wrapped);
 }
 
+TEST_F(LazyVectorTest, compareLazies) {
+  constexpr vector_size_t kInnerSize = 100;
+  constexpr vector_size_t kOuterSize = 100;
+
+  auto makeLazy = [&]() {
+    return std::make_shared<LazyVector>(
+        pool_.get(),
+        INTEGER(),
+        kInnerSize,
+        std::make_unique<test::SimpleVectorLoader>([&](RowSet /*rows*/) {
+          return makeFlatVector<int32_t>(
+              kInnerSize, [](vector_size_t row) { return row; });
+        }));
+  };
+
+  auto makeDictionary = [&]() {
+    return BaseVector::wrapInDictionary(
+        nullptr,
+        makeIndices(kOuterSize, [](vector_size_t row) { return row; }),
+        kOuterSize,
+        makeLazy());
+  };
+
+  auto expected = makeFlatVector<int32_t>(
+      kInnerSize, [](vector_size_t row) { return row; });
+
+  auto lazy1 = makeLazy();
+  auto lazy2 = makeLazy();
+  for (vector_size_t i = 0; i < kInnerSize; ++i) {
+    EXPECT_EQ(lazy1->compare(expected.get(), i, i, CompareFlags()), 0);
+    EXPECT_EQ(expected->compare(lazy2.get(), i, i, CompareFlags()), 0);
+  }
+
+  auto dictionaryLazy1 = makeDictionary();
+  auto dictionaryLazy2 = makeDictionary();
+  for (vector_size_t i = 0; i < kOuterSize; ++i) {
+    EXPECT_EQ(
+        dictionaryLazy1->compare(expected.get(), i, i, CompareFlags()), 0);
+    EXPECT_EQ(
+        expected->compare(dictionaryLazy2.get(), i, i, CompareFlags()), 0);
+  }
+}
+
+TEST_F(LazyVectorTest, resetClearsNulls) {
+  constexpr vector_size_t kSize = 10;
+  auto loader = [&](RowSet rows) {
+    return makeFlatVector<int32_t>(
+        rows.back() + 1, [](vector_size_t row) { return row; });
+  };
+  LazyVector lazy(
+      pool_.get(),
+      INTEGER(),
+      kSize,
+      std::make_unique<test::SimpleVectorLoader>(loader));
+
+  lazy.setNull(0, true);
+  ASSERT_NE(lazy.nulls(), nullptr);
+
+  lazy.reset(std::make_unique<test::SimpleVectorLoader>(loader), kSize);
+  ASSERT_EQ(lazy.nulls(), nullptr);
+}
+
 TEST_F(LazyVectorTest, rowVectorWithLazyChild) {
   constexpr vector_size_t size = 1000;
   auto columnType = ROW({"a", "b"}, {INTEGER(), INTEGER()});

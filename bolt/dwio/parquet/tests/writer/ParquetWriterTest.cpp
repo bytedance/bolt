@@ -399,6 +399,61 @@ TEST_F(ParquetWriterTest, dictToArrow) {
   assertWrite(parquetPath, kRows, schema, data);
 };
 
+TEST_F(ParquetWriterTest, reuseArrowSchemaAcrossEncodings) {
+  const vector_size_t kRows = 64;
+  auto makeBatch = [&](int32_t offset) {
+    return makeRowVector(
+        {"id", "items", "attributes"},
+        {makeFlatVector<int32_t>(kRows, [&](auto row) { return offset + row; }),
+         makeArrayVector<int64_t>(
+             kRows,
+             [](auto row) { return row % 3; },
+             [&](auto row, auto index) { return offset + row * 10 + index; }),
+         makeMapVector<int64_t, int32_t>(
+             kRows,
+             [](auto row) { return row % 2 + 1; },
+             [&](auto index) { return offset + index; },
+             [&](auto index) { return offset - index; })});
+  };
+  auto first = makeBatch(0);
+  auto second = makeBatch(1'000);
+  auto schema = std::static_pointer_cast<const RowType>(first->type());
+
+  auto& children = second->children();
+  for (auto& child : children) {
+    child = BaseVector::wrapInDictionary(
+        makeNulls(kRows, [](auto row) { return row % 19 == 0; }),
+        makeIndicesInReverse(kRows),
+        kRows,
+        child);
+  }
+
+  auto expected = BaseVector::create(schema, 2 * kRows, pool_.get());
+  expected->copy(first.get(), 0, 0, kRows);
+  expected->copy(second.get(), kRows, 0, kRows);
+
+  std::string parquetPath = tempPath_->path + "/cachedArrowSchema.parquet";
+  auto writer = createWriter(
+      createSink(parquetPath),
+      [&]() {
+        return std::make_unique<LambdaFlushPolicy>(
+            kRowsInRowGroup, kBytesInRowGroup, []() { return false; });
+      },
+      schema);
+  writer->write(BaseVector::create(schema, 0, leafPool_.get()));
+  writer->write(first);
+  writer->flush();
+  writer->write(second);
+  writer->close();
+
+  assertRead(parquetPath, 2 * kRows, schema, expected);
+  auto reader = createLocalParquetReader(parquetPath);
+  const auto& metadata = reader->fileMetaData();
+  ASSERT_EQ(2, metadata.numRowGroups());
+  EXPECT_EQ(kRows, metadata.rowGroup(0).numRows());
+  EXPECT_EQ(kRows, metadata.rowGroup(1).numRows());
+}
+
 TEST_F(ParquetWriterTest, constantComplexToArrow) {
   const size_t kRows = 1100;
   auto type = getType();
@@ -435,18 +490,38 @@ TEST_F(ParquetWriterTest, constantToArrow) {
 };
 
 TEST_F(ParquetWriterTest, splitWrite) {
-  const size_t kRows = 4 * 1024;
+  const vector_size_t kRows = 4 * 1024;
 
   auto type = getType();
   auto schema = std::static_pointer_cast<const RowType>(type);
-  auto data = bytedance::bolt::test::BatchMaker::createBatch(
+  auto first = bytedance::bolt::test::BatchMaker::createBatch(
       type, kRows, *leafPool_, [](auto row) { return row % 10 == 0; });
+  auto second = bytedance::bolt::test::BatchMaker::createBatch(
+      type, kRows, *leafPool_, [](auto row) { return row % 7 == 0; });
+  auto& children = std::dynamic_pointer_cast<RowVector>(second)->children();
+  for (auto& child : children) {
+    child = BaseVector::wrapInDictionary(
+        makeNulls(kRows, [](auto row) { return row % 19 == 0; }),
+        makeIndicesInReverse(kRows),
+        kRows,
+        child);
+  }
+
+  auto expected = BaseVector::create(schema, 2 * kRows, pool_.get());
+  expected->copy(first.get(), 0, 0, kRows);
+  expected->copy(second.get(), kRows, 0, kRows);
 
   std::string parquetPath = tempPath_->path + "/splitWrite.parquet";
   vp::WriterOptions writerOptions{};
-  // Set a smaller value to trigger split write and verify it.
+  // Set a smaller value to exercise multiple record batches per write.
   writerOptions.writeBatchBytes = 1024;
-  assertWrite(parquetPath, kRows, schema, data, writerOptions);
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(first);
+  writer->flush();
+  writer->write(second);
+  writer->close();
+
+  assertRead(parquetPath, 2 * kRows, schema, expected);
 };
 
 TEST_F(ParquetWriterTest, flush) {
@@ -497,7 +572,6 @@ TEST_F(ParquetWriterTest, columnNullable) {
   VectorPtr data = bytedance::bolt::test::BatchMaker::createBatch(
       type, kRows, *leafPool_, [](auto row) { return false; });
 
-  std::string parquetPath = tempPath_->path + "/columnNullable.parquet";
   vp::WriterOptions writerOptions{};
   ArrowSchema cArrowSchema;
   exportToArrow(
@@ -513,12 +587,59 @@ TEST_F(ParquetWriterTest, columnNullable) {
   for (auto i = 0; i < childSize; i++) {
     newFields.push_back(arrowSchema->field(i)->WithNullable(i % 2 == 0));
   }
-  auto writer = createLocalWriter(
-      parquetPath, schema, writerOptions, ::arrow::schema(newFields));
-  writer->write(data);
-  writer->close();
+  auto nullableSchema = ::arrow::schema(newFields);
 
-  assertRead(parquetPath, kRows, schema, data);
+  auto assertNullability = [&](const std::string& parquetPath,
+                               int64_t expectedRows,
+                               int expectedRowGroups) {
+    SCOPED_TRACE(parquetPath);
+    auto fileReader = vp::arrow::ParquetFileReader::OpenFile(parquetPath);
+    const auto metadata = fileReader->metadata();
+    EXPECT_EQ(metadata->num_rows(), expectedRows);
+    EXPECT_EQ(metadata->num_row_groups(), expectedRowGroups);
+
+    const auto* parquetSchema = metadata->schema()->group_node();
+    ASSERT_EQ(parquetSchema->field_count(), childSize);
+    for (auto i = 0; i < childSize; ++i) {
+      EXPECT_EQ(parquetSchema->field(i)->is_optional(), i % 2 == 0);
+    }
+  };
+
+  const auto parquetPath = tempPath_->path + "/columnNullable.parquet";
+  {
+    auto writer =
+        createLocalWriter(parquetPath, schema, writerOptions, nullableSchema);
+    writer->write(data);
+    writer->write(data);
+    writer->close();
+  }
+
+  auto expected = BaseVector::create(schema, 2 * kRows, pool_.get());
+  expected->copy(data.get(), 0, 0, kRows);
+  expected->copy(data.get(), kRows, 0, kRows);
+  assertRead(parquetPath, 2 * kRows, schema, expected);
+  assertNullability(parquetPath, 2 * kRows, 1);
+
+  auto emptyData = BaseVector::create(schema, 0, leafPool_.get());
+  const auto emptyWritePath =
+      tempPath_->path + "/columnNullableEmptyWrite.parquet";
+  {
+    auto writer = createLocalWriter(
+        emptyWritePath, schema, writerOptions, nullableSchema);
+    writer->write(emptyData);
+    writer->close();
+  }
+  assertRead(emptyWritePath, 0, schema, emptyData);
+  assertNullability(emptyWritePath, 0, 0);
+
+  const auto noWritePath = tempPath_->path + "/columnNullableNoWrite.parquet";
+  {
+    auto writer =
+        createLocalWriter(noWritePath, schema, writerOptions, nullableSchema);
+    writer->close();
+  }
+  assertRead(noWritePath, 0, schema, emptyData);
+  assertNullability(noWritePath, 0, 0);
 };
 
 TEST_F(ParquetWriterTest, emptyParquet) {
@@ -541,6 +662,18 @@ TEST_F(ParquetWriterTest, emptyParquet) {
           std::static_pointer_cast<const Type>(schema), 0, leafPool_.get())),
       *leafPool_);
 };
+
+TEST_F(ParquetWriterTest, emptyBatch) {
+  auto schema = ROW({"c0", "c1"}, {INTEGER(), DOUBLE()});
+  auto data = BaseVector::create(schema, 0, leafPool_.get());
+  std::string parquetPath = tempPath_->path + "/emptyBatch.parquet";
+  vp::WriterOptions writerOptions{};
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, 0, schema, data);
+}
 
 TEST_F(ParquetWriterTest, allNulls) {
   auto schema = ROW({"c0"}, {INTEGER()});

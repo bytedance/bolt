@@ -70,6 +70,47 @@ class FilterProjectTest : public OperatorTestBase {
   std::shared_ptr<const RowType> rowType_{
       ROW({"c0", "c1", "c2", "c3"},
           {BIGINT(), INTEGER(), SMALLINT(), DOUBLE()})};
+
+  std::shared_ptr<LazyVector> assertDuplicateIdentityProjectionOverLazy(
+      const std::string& filter,
+      vector_size_t expectedLoadSize,
+      std::function<vector_size_t(vector_size_t)> expectedRowAt) {
+    constexpr vector_size_t size = 100;
+    auto valueAt = [](auto row) -> int32_t { return row; };
+    std::optional<std::function<vector_size_t(vector_size_t)>>
+        expectedRowAtOptional{std::move(expectedRowAt)};
+    auto lazyVector = makeLazyFlatVector<int32_t>(
+        size,
+        valueAt,
+        [](vector_size_t /*row*/) { return false; },
+        expectedLoadSize,
+        expectedRowAtOptional);
+    auto lazyVectors = makeRowVector({
+        makeFlatVector<int32_t>(size, valueAt),
+        lazyVector,
+    });
+
+    auto vectors = makeRowVector({
+        makeFlatVector<int32_t>(size, valueAt),
+        makeFlatVector<int32_t>(size, valueAt),
+    });
+
+    createDuckDbTable({vectors});
+
+    PlanBuilder planBuilder;
+    planBuilder.values({lazyVectors});
+    if (!filter.empty()) {
+      planBuilder.filter(filter);
+    }
+    auto plan = planBuilder.project({"c1", "c1"}).planNode();
+
+    auto sql = std::string{"SELECT c1, c1 FROM tmp"};
+    if (!filter.empty()) {
+      sql += " WHERE " + filter;
+    }
+    assertQuery(plan, sql);
+    return lazyVector;
+  }
 };
 
 TEST_F(FilterProjectTest, filter) {
@@ -337,6 +378,82 @@ TEST_F(FilterProjectTest, projectAndIdentityOverLazy) {
                   .project({"c0 < 10 AND c1 < 10", "c1"})
                   .planNode();
   assertQuery(plan, "SELECT c0 < 10 AND c1 < 10, c1 FROM tmp");
+}
+
+TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazy) {
+  assertDuplicateIdentityProjectionOverLazy(
+      "c0 % 2 = 0", 50, [](vector_size_t index) { return index * 2; });
+}
+
+TEST_F(
+    FilterProjectTest,
+    duplicateIdentityProjectionOverLazyLoadsSelectedRows) {
+  assertDuplicateIdentityProjectionOverLazy(
+      "c0 % 10 = 0", 10, [](vector_size_t index) { return index * 10; });
+}
+
+TEST_F(
+    FilterProjectTest,
+    duplicateIdentityProjectionOverLazyOutputIsSafeForDifferentConsumers) {
+  vector_size_t size = 100;
+  auto valueAt = [](auto row) -> int32_t { return row; };
+  auto lazyVector = makeLazyFlatVector<int32_t>(
+      size,
+      valueAt,
+      [](vector_size_t /*row*/) { return false; },
+      10,
+      [](vector_size_t index) { return index * 10; });
+  auto lazyVectors = makeRowVector({
+      makeFlatVector<int32_t>(size, valueAt),
+      lazyVector,
+  });
+
+  CursorParameters params;
+  params.planNode = PlanBuilder()
+                        .values({lazyVectors})
+                        .filter("c0 % 10 = 0")
+                        .project({"c1", "c1"})
+                        .planNode();
+  params.copyResult = false;
+  auto cursor = TaskCursor::create(params);
+  ASSERT_TRUE(cursor->moveNext());
+
+  auto result = cursor->current();
+  ASSERT_EQ(result->size(), 10);
+  ASSERT_TRUE(lazyVector->isLoaded());
+  auto first = result->childAt(0);
+  auto second = result->childAt(1);
+  ASSERT_EQ(first.get(), second.get());
+
+  SelectivityVector firstRows(result->size(), false);
+  firstRows.setValid(0, true);
+  firstRows.setValid(5, true);
+  firstRows.updateBounds();
+  LazyVector::ensureLoadedRows(first, firstRows);
+
+  auto expected = makeFlatVector<int32_t>(
+      result->size(), [](vector_size_t row) { return row * 10; });
+  bytedance::bolt::test::assertEqualVectors(expected, second);
+
+  ASSERT_FALSE(cursor->moveNext());
+}
+
+TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazyWithoutFilter) {
+  assertDuplicateIdentityProjectionOverLazy(
+      "", 100, [](vector_size_t index) { return index; });
+}
+
+TEST_F(
+    FilterProjectTest,
+    duplicateIdentityProjectionOverLazyAllRowsAfterFilter) {
+  assertDuplicateIdentityProjectionOverLazy(
+      "c0 >= 0", 100, [](vector_size_t index) { return index; });
+}
+
+TEST_F(FilterProjectTest, duplicateIdentityProjectionOverLazyNoRows) {
+  auto lazyVector = assertDuplicateIdentityProjectionOverLazy(
+      "c0 < 0", 0, [](vector_size_t index) { return index; });
+  EXPECT_FALSE(lazyVector->isLoaded());
 }
 
 // Verify that nulls on nested parent are propagated to child without copying

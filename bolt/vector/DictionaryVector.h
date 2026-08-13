@@ -78,7 +78,11 @@ class DictionaryVector : public SimpleVector<T> {
       std::optional<ByteCount> representedBytes = std::nullopt,
       std::optional<ByteCount> storageByteCount = std::nullopt);
 
-  virtual ~DictionaryVector() override = default;
+  virtual ~DictionaryVector() override {
+    if (dictionaryValues_) {
+      dictionaryValues_->clearContainingLazyAndWrapped();
+    }
+  }
 
   bool mayHaveNulls() const override {
     BOLT_DCHECK(initialized_);
@@ -225,7 +229,8 @@ class DictionaryVector : public SimpleVector<T> {
   }
 
   void setDictionaryValues(VectorPtr dictionaryValues) {
-    dictionaryValues_ = dictionaryValues;
+    dictionaryValues_->clearContainingLazyAndWrapped();
+    dictionaryValues_ = std::move(dictionaryValues);
     initialized_ = false;
     setInternalState();
   }

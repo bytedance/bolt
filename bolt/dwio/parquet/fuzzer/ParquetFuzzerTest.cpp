@@ -18,8 +18,10 @@
 #include <gtest/gtest.h>
 
 #include "bolt/dwio/parquet/fuzzer/ParquetFuzzerRunner.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 
 int main(int argc, char** argv) {
+  bytedance::bolt::fuzzer::setParquetFuzzerFlagDefaults();
   // FLAGS_v = 10;
   FLAGS_minloglevel = 1;
   FLAGS_logtostderr = true;

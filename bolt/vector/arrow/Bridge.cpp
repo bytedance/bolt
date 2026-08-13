@@ -37,6 +37,7 @@
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DictionaryVector.h"
@@ -45,7 +46,6 @@
 #include "bolt/vector/VectorTypeUtils.h"
 #include "bolt/vector/arrow/Abi.h"
 
-DEFINE_bool(collect_import_time, false, "run q1");
 namespace bytedance::bolt {
 
 namespace {
@@ -1239,6 +1239,10 @@ bool isCompact(const Vector& vec) {
   return vec.sizeAt(vec.size() - 1) > 0;
 }
 
+bool hasNulls(const BaseVector& vec, vector_size_t size) {
+  return vec.nulls() && BaseVector::countNulls(vec.nulls(), size) > 0;
+}
+
 template <typename Vector>
 void exportOffsets(
     const Vector& vec,
@@ -1250,17 +1254,45 @@ void exportOffsets(
   auto offsets = AlignedBuffer::allocate<vector_size_t>(
       checkedPlus<size_t>(out.length, 1), pool);
   auto rawOffsets = offsets->asMutable<vector_size_t>();
-  if (!rows.changed() && isCompact(vec)) {
+  if (!rows.changed() && !hasNulls(vec, out.length) && isCompact(vec)) {
     auto copiedSize = vec.size() > out.length ? out.length : vec.size();
+
     memcpy(rawOffsets, vec.rawOffsets(), sizeof(vector_size_t) * copiedSize);
-    rawOffsets[copiedSize] = copiedSize == 0
+
+    const vector_size_t base = (copiedSize == 0) ? 0 : rawOffsets[0];
+    const vector_size_t end = (copiedSize == 0)
         ? 0
         : vec.offsetAt(copiedSize - 1) + vec.sizeAt(copiedSize - 1);
+
+    if (base != 0) {
+      for (vector_size_t i = 0; i < copiedSize; ++i) {
+        rawOffsets[i] -= base;
+      }
+    }
+    rawOffsets[copiedSize] = end - base;
+
+    vector_size_t childTotal = 0;
+    if constexpr (std::is_same_v<Vector, ArrayVector>) {
+      childTotal = vec.elements()->size();
+    } else {
+      static_assert(
+          std::is_same_v<Vector, MapVector>,
+          "exportOffsets expects ArrayVector or MapVector");
+      childTotal = vec.mapKeys()->size();
+    }
+
+    if (base != 0 || end != childTotal) {
+      childRows.clearAll();
+      if (end > base) {
+        childRows.addRange(base, end - base);
+      }
+    }
   } else {
     childRows.clearAll();
     // j: Index of element we are writing.
     // k: Total size so far.
-    vector_size_t j = 0, k = 0;
+    vector_size_t j = 0;
+    vector_size_t k = 0;
     rows.apply([&](vector_size_t i) {
       rawOffsets[j++] = k;
       if (!vec.isNullAt(i)) {
@@ -1286,7 +1318,7 @@ void exportOffsetsIPC(
   auto offsets = AlignedBuffer::allocate<vector_size_t>(
       checkedPlus<size_t>(out.length, 1), pool);
   auto rawOffsets = offsets->asMutable<vector_size_t>();
-  if (!rows.changed() && isCompact(vec)) {
+  if (!rows.changed() && !hasNulls(vec, out.length) && isCompact(vec)) {
     const vector_size_t m = out.length;
     BOLT_DCHECK_EQ(m, vec.size(), "fast path assumes out.length == vec.size()");
 
@@ -2177,6 +2209,11 @@ void exportToArrow(
     ArrowArray& arrowArray,
     memory::MemoryPool* pool,
     const ArrowOptions& options) {
+  if (vector->encoding() == VectorEncoding::Simple::LAZY) {
+    exportToArrow(
+        BaseVector::loadedVectorShared(vector), arrowArray, pool, options);
+    return;
+  }
   if (vector->encoding() == VectorEncoding::Simple::CONSTANT &&
       options.flattenConstant && vector->valueVector() != nullptr &&
       !vector->wrappedVector()->isFlatEncoding()) {
@@ -2196,6 +2233,16 @@ void exportToArrow(
     const ArrowOptions& options,
     const std::vector<std::string>& fieldNames,
     memory::MemoryPool* pool) {
+  if (vec->encoding() == VectorEncoding::Simple::LAZY) {
+    exportToArrow(
+        BaseVector::loadedVectorShared(vec),
+        arrowSchema,
+        options,
+        fieldNames,
+        pool);
+    return;
+  }
+
   auto& type = vec->type();
 
   arrowSchema.name = nullptr;
@@ -3033,7 +3080,7 @@ VectorPtr importFromArrowImplWithMeasure(
     bool isViewer) {
   auto static zero_epoch = decltype(conv_begin)::duration::zero();
   auto this_begin = std::chrono::high_resolution_clock::now();
-  if (FLAGS_collect_import_time) {
+  if (FLAGS_bolt_collect_import_time) {
     const std::lock_guard<std::mutex> lock(g_conv_mutex_begin);
     if (conv_begin.time_since_epoch() == zero_epoch) {
       conv_begin = this_begin;
@@ -3043,7 +3090,7 @@ VectorPtr importFromArrowImplWithMeasure(
   auto result =
       importFromArrowImpl(options, arrowSchema, arrowArray, pool, isViewer);
 
-  if (FLAGS_collect_import_time) {
+  if (FLAGS_bolt_collect_import_time) {
     auto this_end = std::chrono::high_resolution_clock::now();
     auto diff = std::chrono::duration_cast<std::chrono::nanoseconds>(
         this_end - this_begin);

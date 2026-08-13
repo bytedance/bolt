@@ -30,8 +30,10 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Crc.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/type/HugeInt.h"
 
+#include <limits>
 #include <unordered_set>
 
 #include <boost/crc.hpp>
@@ -41,7 +43,6 @@
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
 
-DECLARE_bool(bmi2); // NOLINT
 namespace bytedance {
 namespace bolt {
 namespace bits {
@@ -229,6 +230,9 @@ TEST_F(BitUtilTest, nwords) {
   EXPECT_EQ(nwords(64), 1);
   EXPECT_EQ(nwords(65), 2);
   EXPECT_EQ(nwords(uint32_t{65}), 2);
+  EXPECT_EQ(nwords(std::numeric_limits<uint32_t>::max()), 67'108'864);
+  EXPECT_EQ(
+      nwords(std::numeric_limits<uint64_t>::max()), 288'230'376'151'711'744);
 }
 
 TEST_F(BitUtilTest, setBits) {
@@ -726,9 +730,9 @@ TEST_F(BitUtilTest, scatterBits) {
   auto sourceAsChar = reinterpret_cast<char*>(source.data());
   scatterBits(numInMask, kNumBits, sourceAsChar, maskData, test.data());
   // Generate the reference output with the non-BMI implementation.
-  FLAGS_bmi2 = false; // NOLINT
+  FLAGS_bolt_enable_bmi2 = false; // NOLINT
   scatterBits(numInMask, kNumBits, sourceAsChar, maskData, reference.data());
-  FLAGS_bmi2 = true; // NOLINT
+  FLAGS_bolt_enable_bmi2 = true; // NOLINT
   EXPECT_EQ(reference, test);
   // Repeat the same in place.
   scatterBits(numInMask, kNumBits, sourceAsChar, maskData, sourceAsChar);

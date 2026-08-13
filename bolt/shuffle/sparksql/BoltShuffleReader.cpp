@@ -409,7 +409,8 @@ std::unique_ptr<InMemoryPayload> BoltColumnarBatchDeserializer::drainSaved() {
         std::move(savedPayload),
         memoryPool_,
         INT64_MAX,
-        INT64_MIN);
+        INT64_MIN,
+        /*sourceBuffersResizable=*/true);
     BOLT_CHECK(result.ok(), "Failed to merge payloads");
     payload = std::move(result.ValueUnsafe());
   }
@@ -761,8 +762,10 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
   auto partitioning = toPartitioning(partitioningShortName_);
   bool isRowBased = supportAdaptiveShuffleWriter(partitioning) &&
       ((shuffleWriterType_ == ShuffleWriterType::Adaptive &&
-        numPartitions_ >= rowBasePartitionThreshold &&
-        schema_->num_fields() >= rowBaseColumnNumThreshold) ||
+        ((numPartitions_ >= rowBasePartitionThreshold &&
+          schema_->num_fields() >= rowBaseColumnNumThreshold) ||
+         static_cast<int64_t>(numPartitions_) * schema_->num_fields() >
+             rowBasedShuffleThreshold_)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
   if (!zstdCodec_) {
     zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
@@ -880,6 +883,7 @@ BoltShuffleReader::BoltShuffleReader(
   factory_->setpartitioningShortName(options.partitionShortName);
   factory_->setShuffleBufferSize(options.shuffleBufferSize);
   factory_->setRowFormat(options.rowFormat);
+  factory_->setRowBasedShuffleThreshold(options.rowBasedShuffleThreshold);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

@@ -75,7 +75,7 @@ void AggregateSpillBenchmarkBase::setUp() {
   SpillerBenchmarkBase::setUp();
 
   rowContainer_ = setupSpillContainer(
-      rowType_, FLAGS_spiller_benchmark_num_key_columns, pool_);
+      rowType_, FLAGS_bolt_benchmark_spiller_num_key_columns, pool_);
   writeSpillData();
   spiller_ = makeSpiller();
 }
@@ -142,11 +142,11 @@ std::unique_ptr<Spiller> AggregateSpillBenchmarkBase::makeSpiller() {
     return spillDir_;
   };
   spillConfig_.updateAndCheckSpillLimitCb = [&](uint64_t) {};
-  spillConfig_.fileNamePrefix = FLAGS_spiller_benchmark_name;
-  spillConfig_.writeBufferSize = FLAGS_spiller_benchmark_write_buffer_size;
+  spillConfig_.fileNamePrefix = FLAGS_bolt_benchmark_spiller_name;
+  spillConfig_.writeBufferSize = FLAGS_bolt_benchmark_spiller_write_buffer_size;
   spillConfig_.executor = executor_.get();
   spillConfig_.compressionKind =
-      stringToCompressionKind(FLAGS_spiller_benchmark_compression_kind);
+      stringToCompressionKind(FLAGS_bolt_benchmark_spiller_compression_kind);
   spillConfig_.maxSpillRunRows = 0;
   spillConfig_.fileCreateConfig = {};
 

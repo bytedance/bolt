@@ -41,7 +41,6 @@
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/memory/Memory.h"
 
-DECLARE_bool(bolt_memory_use_hugepages);
 namespace bytedance::bolt::memory {
 
 // static

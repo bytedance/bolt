@@ -34,9 +34,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <random>
-#ifdef SPARK_COMPATIBLE
 #include "bolt/common/base/tests/GTestUtils.h"
-#endif
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
@@ -93,6 +91,49 @@ std::string getVariantFixturePath(const std::string& fileName) {
       cwd.string(),
       sourceDir.string());
 }
+
+template <typename T>
+T readHookValue(const void* value) {
+  return *reinterpret_cast<const T*>(value);
+}
+
+template <>
+std::string readHookValue<std::string>(const void* value) {
+  return std::string(*reinterpret_cast<const folly::StringPiece*>(value));
+}
+
+template <typename T>
+class CollectValueHook : public ValueHook {
+ public:
+  explicit CollectValueHook(vector_size_t size)
+      : values_(size), present_(size, false) {}
+
+  void addValue(vector_size_t row, const void* value) override {
+    present_[row] = true;
+    values_[row] = readHookValue<T>(value);
+  }
+
+  const std::vector<T>& values() const {
+    return values_;
+  }
+
+  const std::vector<bool>& present() const {
+    return present_;
+  }
+
+ private:
+  std::vector<T> values_;
+  std::vector<bool> present_;
+};
+
+BaseVector* loadedChildAt(RowVector* row, vector_size_t index) {
+  return row->childAt(index)->loadedVector();
+}
+
+template <typename T>
+FlatVector<T>* loadedFlatChildAt(RowVector* row, vector_size_t index) {
+  return loadedChildAt(row, index)->asFlatVector<T>();
+}
 } // namespace
 
 namespace bytedance::bolt::parquet {
@@ -142,21 +183,45 @@ class ParquetReaderTest : public ParquetTestBase {
   static constexpr vector_size_t kFusedLevelConversionRows = 12'000;
   static constexpr uint32_t kFusedLevelConversionSeed = 20260730;
 
-  std::unique_ptr<dwio::common::RowReader> createRowReader(
-      const std::string& fileName,
-      const RowTypePtr& rowType) {
-    const std::string sample(getExampleFilePath(fileName));
+  std::shared_ptr<exec::test::TempFilePath> writeTempParquet(
+      const std::vector<RowVectorPtr>& data,
+      bytedance::bolt::parquet::WriterOptions options = {}) {
+    BOLT_CHECK_GT(data.size(), 0);
 
+    auto tempFile = exec::test::TempFilePath::create();
+    auto writeFile =
+        std::make_unique<LocalWriteFile>(tempFile->getPath(), true, false);
+    auto sink = std::make_unique<dwio::common::WriteFileSink>(
+        std::move(writeFile), tempFile->getPath());
+    options.memoryPool = rootPool_.get();
+
+    auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+        std::move(sink), options, asRowType(data[0]->type()));
+    for (const auto& batch : data) {
+      writer->write(batch);
+    }
+    writer->close();
+    return tempFile;
+  }
+
+  std::unique_ptr<dwio::common::RowReader> createRowReaderFromPath(
+      const std::string& path,
+      const RowTypePtr& rowType) {
     bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
-    auto reader = createReader(sample, readerOptions);
+    auto reader = createReader(path, readerOptions);
 
     RowReaderOptions rowReaderOpts;
     rowReaderOpts.select(
         std::make_shared<bytedance::bolt::dwio::common::ColumnSelector>(
             rowType, rowType->names()));
     rowReaderOpts.setScanSpec(makeScanSpec(rowType));
-    auto rowReader = reader->createRowReader(rowReaderOpts);
-    return rowReader;
+    return reader->createRowReader(rowReaderOpts);
+  }
+
+  std::unique_ptr<dwio::common::RowReader> createRowReader(
+      const std::string& fileName,
+      const RowTypePtr& rowType) {
+    return createRowReaderFromPath(getExampleFilePath(fileName), rowType);
   }
 
   void assertReadWithExpected(
@@ -273,7 +338,7 @@ TEST_F(ParquetReaderTest, parseDecimal) {
   auto result = BaseVector::create(schema, 1, leafPool_.get());
   rowReader->next(6, result);
   auto decimals = result->as<RowVector>();
-  auto a = decimals->childAt(0)->asFlatVector<int128_t>()->rawValues();
+  auto a = loadedFlatChildAt<int128_t>(decimals, 0)->rawValues();
   EXPECT_EQ(a[0], 64830000);
 }
 
@@ -756,7 +821,8 @@ TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
             {SMALLINT(), INTEGER(), INTEGER(), uint64Type});
     dwio::common::ReaderOptions readerOptions{leafPool_.get()};
     readerOptions.setFileSchema(rowType);
-    BOLT_ASSERT_THROW(createReader(sample, readerOptions), "Schema mismatch");
+    BOLT_ASSERT_THROW(
+        createReader(sample, readerOptions), kParquetTypeMappingErrorPrefix);
   }
 }
 #endif
@@ -855,6 +921,295 @@ TEST_F(ParquetReaderTest, projectNoColumns) {
   ASSERT_TRUE(rowReader->next(kBatchSize, result));
   EXPECT_EQ(result->size(), 10);
   ASSERT_FALSE(rowReader->next(kBatchSize, result));
+}
+
+TEST_F(ParquetReaderTest, producesLazyVectorsForProjectedColumns) {
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row + 1; }),
+          makeFlatVector<double>(kSize, [](auto row) { return row + 1; }),
+      });
+  auto file = writeTempParquet({data});
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(5, result));
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(2, row->childrenSize());
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(0)));
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(1)));
+
+  auto a = row->childAt(0)->loadedVector()->asFlatVector<int64_t>();
+  auto b = row->childAt(1)->loadedVector()->asFlatVector<double>();
+  ASSERT_EQ(5, row->size());
+  for (auto i = 0; i < row->size(); ++i) {
+    EXPECT_EQ(i + 1, a->valueAt(i));
+    EXPECT_EQ(i + 1, b->valueAt(i));
+  }
+}
+
+TEST_F(ParquetReaderTest, producesLazyVectorsForComplexProjectedColumns) {
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"id", "items", "payload"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+          makeArrayVector<int32_t>(
+              kSize,
+              [](auto row) { return row % 4; },
+              [](auto row) { return row * 10; }),
+          makeRowVector(
+              {"name", "score"},
+              {
+                  makeFlatVector<std::string>(
+                      kSize, [](auto row) { return fmt::format("n{}", row); }),
+                  makeFlatVector<double>(
+                      kSize, [](auto row) { return row * 1.5; }),
+              }),
+      });
+  auto file = writeTempParquet({data});
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(kSize, result));
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(kSize, row->size());
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(0)));
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(1)));
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(2)));
+
+  for (auto i = 0; i < row->childrenSize(); ++i) {
+    row->childAt(i)->loadedVector();
+  }
+  test::assertEqualVectors(data, result);
+}
+
+TEST_F(ParquetReaderTest, loadingStaleLazyVectorFailsAfterReaderAdvances) {
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"a", "b"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row + 1; }),
+          makeFlatVector<double>(kSize, [](auto row) { return row + 0.5; }),
+      });
+  auto file = writeTempParquet({data});
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+
+  auto first = BaseVector::create(rowType, 0, leafPool_.get());
+  ASSERT_TRUE(rowReader->next(5, first));
+  auto staleLazy = first->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*staleLazy));
+
+  auto second = BaseVector::create(rowType, 0, leafPool_.get());
+  ASSERT_TRUE(rowReader->next(5, second));
+  BOLT_ASSERT_THROW(
+      staleLazy->loadedVector(),
+      "Loading LazyVector after the enclosing reader has moved");
+
+  auto secondRow = second->asUnchecked<RowVector>();
+  ASSERT_TRUE(isLazyNotLoaded(*secondRow->childAt(0)));
+  auto loaded = secondRow->childAt(0)->loadedVector()->asFlatVector<int64_t>();
+  for (auto i = 0; i < secondRow->size(); ++i) {
+    EXPECT_EQ(i + 6, loaded->valueAt(i));
+  }
+}
+
+TEST_F(ParquetReaderTest, lazyLoadAcrossSmallPages) {
+  constexpr vector_size_t kSize = 32;
+  auto data = makeRowVector(
+      {"id", "name"},
+      {
+          makeFlatVector<int64_t>(kSize, [](auto row) { return row * 11; }),
+          makeFlatVector<std::string>(
+              kSize, [](auto row) { return fmt::format("name-{}", row); }),
+      });
+  bytedance::bolt::parquet::WriterOptions options;
+  options.dataPageSize = 1;
+  auto file = writeTempParquet({data}, options);
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(kSize, result));
+  auto row = result->asUnchecked<RowVector>();
+  ASSERT_EQ(kSize, row->size());
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(0)));
+  ASSERT_TRUE(isLazyNotLoaded(*row->childAt(1)));
+
+  DecodedVector id(*row->childAt(0), SelectivityVector(kSize));
+  DecodedVector name(*row->childAt(1), SelectivityVector(kSize));
+  for (auto i = 0; i < kSize; ++i) {
+    EXPECT_EQ(i * 11, id.valueAt<int64_t>(i));
+    EXPECT_EQ(fmt::format("name-{}", i), name.valueAt<StringView>(i).str());
+  }
+}
+
+TEST_F(
+    ParquetReaderTest,
+    valueHookSkipsNullsForSparseLazyRowsAcrossSmallPages) {
+  constexpr vector_size_t kSize = 32;
+  auto data = makeRowVector(
+      {"id"},
+      {makeFlatVector<int64_t>(
+          kSize,
+          [](auto row) { return row * 11; },
+          [](auto row) { return row == 3 || row == 14; })});
+  bytedance::bolt::parquet::WriterOptions options;
+  options.enableDictionary = false;
+  options.dataPageSize = 1;
+  auto file = writeTempParquet({data}, options);
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(kSize, result));
+  auto id = result->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*id));
+
+  const std::vector<vector_size_t> selectedRows = {2, 3, 7, 14, 20};
+  CollectValueHook<int64_t> hook(kSize);
+  id->asUnchecked<LazyVector>()->load(RowSet(selectedRows), &hook);
+
+  ASSERT_TRUE(hook.present()[0]);
+  EXPECT_EQ(22, hook.values()[0]);
+  EXPECT_FALSE(hook.present()[1]);
+  ASSERT_TRUE(hook.present()[2]);
+  EXPECT_EQ(77, hook.values()[2]);
+  EXPECT_FALSE(hook.present()[3]);
+  ASSERT_TRUE(hook.present()[4]);
+  EXPECT_EQ(220, hook.values()[4]);
+  for (auto row = selectedRows.size(); row < kSize; ++row) {
+    EXPECT_FALSE(hook.present()[row]) << row;
+  }
+}
+
+TEST_F(ParquetReaderTest, valueHookLoadDoesNotPoisonNextLazyBatch) {
+  constexpr vector_size_t kSize = 12;
+  auto data = makeRowVector(
+      {"id"},
+      {makeFlatVector<int64_t>(kSize, [](auto row) { return row * 10; })});
+  auto file = writeTempParquet({data});
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+
+  auto first = BaseVector::create(rowType, 0, leafPool_.get());
+  ASSERT_TRUE(rowReader->next(6, first));
+  auto firstId = first->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*firstId));
+
+  std::vector<vector_size_t> firstRows(6);
+  std::iota(firstRows.begin(), firstRows.end(), 0);
+  CollectValueHook<int64_t> hook(6);
+  firstId->asUnchecked<LazyVector>()->load(RowSet(firstRows), &hook);
+  for (auto row = 0; row < firstRows.size(); ++row) {
+    EXPECT_TRUE(hook.present()[row]) << row;
+    EXPECT_EQ(row * 10, hook.values()[row]);
+  }
+
+  auto second = BaseVector::create(rowType, 0, leafPool_.get());
+  ASSERT_TRUE(rowReader->next(6, second));
+  auto secondId = second->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*secondId));
+  auto loaded = secondId->loadedVector()->asFlatVector<int64_t>();
+  for (auto row = 0; row < second->size(); ++row) {
+    EXPECT_EQ((row + 6) * 10, loaded->valueAt(row));
+  }
+}
+
+TEST_F(ParquetReaderTest, stringValueHookSparseRowsAcrossSmallPages) {
+  constexpr vector_size_t kSize = 32;
+  auto data =
+      makeRowVector({"name"}, {makeFlatVector<std::string>(kSize, [](auto row) {
+                      return fmt::format("direct-{}", row);
+                    })});
+  bytedance::bolt::parquet::WriterOptions options;
+  options.enableDictionary = false;
+  options.dataPageSize = 1;
+  auto file = writeTempParquet({data}, options);
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(kSize, result));
+  auto name = result->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*name));
+
+  const std::vector<vector_size_t> selectedRows = {0, 5, 17, 31};
+  CollectValueHook<std::string> hook(kSize);
+  name->asUnchecked<LazyVector>()->load(RowSet(selectedRows), &hook);
+
+  for (auto row = 0; row < selectedRows.size(); ++row) {
+    EXPECT_TRUE(hook.present()[row]) << row;
+    EXPECT_EQ(fmt::format("direct-{}", selectedRows[row]), hook.values()[row]);
+  }
+  for (auto row = selectedRows.size(); row < kSize; ++row) {
+    EXPECT_FALSE(hook.present()[row]) << row;
+  }
+}
+
+TEST_F(ParquetReaderTest, stringDictionaryValueHookAcrossSmallPages) {
+  constexpr vector_size_t kSize = 32;
+  auto data =
+      makeRowVector({"name"}, {makeFlatVector<std::string>(kSize, [](auto row) {
+                      return fmt::format("dict-{}", row % 5);
+                    })});
+  bytedance::bolt::parquet::WriterOptions options;
+  options.enableDictionary = true;
+  options.dataPageSize = 1;
+  auto file = writeTempParquet({data}, options);
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(kSize, result));
+  auto name = result->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*name));
+
+  std::vector<vector_size_t> rows(kSize);
+  std::iota(rows.begin(), rows.end(), 0);
+  CollectValueHook<std::string> hook(kSize);
+  name->asUnchecked<LazyVector>()->load(RowSet(rows), &hook);
+
+  for (auto i = 0; i < kSize; ++i) {
+    EXPECT_EQ(fmt::format("dict-{}", i % 5), hook.values()[i]);
+  }
+}
+
+TEST_F(ParquetReaderTest, stringDictionaryValueHookSparseRowsAcrossSmallPages) {
+  constexpr vector_size_t kSize = 32;
+  auto data =
+      makeRowVector({"name"}, {makeFlatVector<std::string>(kSize, [](auto row) {
+                      return fmt::format("dict-{}", row % 5);
+                    })});
+  bytedance::bolt::parquet::WriterOptions options;
+  options.enableDictionary = true;
+  options.dataPageSize = 1;
+  auto file = writeTempParquet({data}, options);
+  auto rowType = asRowType(data->type());
+  auto rowReader = createRowReaderFromPath(file->getPath(), rowType);
+  auto result = BaseVector::create(rowType, 0, leafPool_.get());
+
+  ASSERT_TRUE(rowReader->next(kSize, result));
+  auto name = result->asUnchecked<RowVector>()->childAt(0);
+  ASSERT_TRUE(isLazyNotLoaded(*name));
+
+  const std::vector<vector_size_t> selectedRows = {1, 3, 7, 14};
+  CollectValueHook<std::string> hook(kSize);
+  name->asUnchecked<LazyVector>()->load(RowSet(selectedRows), &hook);
+
+  for (auto row = 0; row < selectedRows.size(); ++row) {
+    EXPECT_TRUE(hook.present()[row]) << row;
+    EXPECT_EQ(
+        fmt::format("dict-{}", selectedRows[row] % 5), hook.values()[row]);
+  }
+  for (auto row = selectedRows.size(); row < kSize; ++row) {
+    EXPECT_FALSE(hook.present()[row]) << row;
+  }
 }
 
 // Validates the per-row size estimate produced by
@@ -1093,8 +1448,8 @@ TEST_F(ParquetReaderTest, parseIntDecimal) {
   rowReader->next(6, result);
   EXPECT_EQ(result->size(), 6ULL);
   auto decimals = result->as<RowVector>();
-  auto a = decimals->childAt(0)->asFlatVector<int64_t>()->rawValues();
-  auto b = decimals->childAt(1)->asFlatVector<int64_t>()->rawValues();
+  auto a = loadedFlatChildAt<int64_t>(decimals, 0)->rawValues();
+  auto b = loadedFlatChildAt<int64_t>(decimals, 1)->rawValues();
   for (int i = 0; i < 3; i++) {
     int index = 2 * i;
     EXPECT_EQ(a[index], expectValues[i]);
@@ -1197,7 +1552,8 @@ TEST_F(ParquetReaderTest, parseRowArrayTest) {
 
   ASSERT_TRUE(rowReader->next(1, result));
   // data: 10, 9, <empty>, null, {9}, 2 elements starting at 0 {{9}, {10}}}
-  auto structArray = result->as<RowVector>()->childAt(5)->as<ArrayVector>();
+  auto structArray =
+      loadedChildAt(result->as<RowVector>(), 5)->as<ArrayVector>();
   auto structEle = structArray->elements()
                        ->as<RowVector>()
                        ->childAt(0)
@@ -1878,7 +2234,7 @@ TEST_F(ParquetReaderTest, readEncryptedParquet) {
   EXPECT_EQ(rowsRead, 3);
   EXPECT_EQ(result->size(), 3);
 
-  auto ids = result->as<RowVector>()->childAt(0)->asFlatVector<int64_t>();
+  auto ids = loadedFlatChildAt<int64_t>(result->as<RowVector>(), 0);
   EXPECT_EQ(ids->valueAt(0), 1);
 }
 
@@ -1987,8 +2343,7 @@ TEST_F(ParquetReaderTest, readBinaryAsStringFromNation) {
   rowReader->next(1, result);
   EXPECT_EQ(
       expected,
-      result->as<RowVector>()->childAt(1)->asFlatVector<StringView>()->valueAt(
-          0));
+      loadedFlatChildAt<StringView>(result->as<RowVector>(), 1)->valueAt(0));
 }
 
 TEST_F(ParquetReaderTest, readComplexType) {
@@ -2062,8 +2417,7 @@ TEST_F(ParquetReaderTest, readFixedLenBinaryAsStringFromUuid) {
   rowReader->next(1, result);
   EXPECT_EQ(
       expected,
-      result->as<RowVector>()->childAt(0)->asFlatVector<StringView>()->valueAt(
-          0));
+      loadedFlatChildAt<StringView>(result->as<RowVector>(), 0)->valueAt(0));
 }
 
 TEST_F(ParquetReaderTest, skip) {
@@ -2138,8 +2492,7 @@ TEST_F(ParquetReaderTest, readVarbinaryFromFLBA) {
   rowReader->next(1, result);
   EXPECT_EQ(
       expected,
-      result->as<RowVector>()->childAt(0)->asFlatVector<StringView>()->valueAt(
-          0));
+      loadedFlatChildAt<StringView>(result->as<RowVector>(), 0)->valueAt(0));
 }
 
 TEST_F(ParquetReaderTest, arrayOfMapOfIntKeyArrayValue) {
@@ -2422,7 +2775,7 @@ TEST_F(ParquetReaderTest, integerToVarcharSchemaMismatchCast) {
   ASSERT_EQ(numRows, 5);
 
   auto rowResult = result->as<RowVector>();
-  auto colResult = rowResult->childAt(0)->asFlatVector<StringView>();
+  auto colResult = loadedFlatChildAt<StringView>(rowResult, 0);
   ASSERT_NE(colResult, nullptr);
   EXPECT_EQ(colResult->valueAt(0).str(), "1");
   EXPECT_EQ(colResult->valueAt(1).str(), "2");
@@ -2588,13 +2941,13 @@ TEST_F(ParquetReaderTest, readVariantParquet) {
   EXPECT_EQ(result->size(), 4);
 
   auto row = result->as<RowVector>();
-  auto ids = row->childAt(0)->asFlatVector<int32_t>();
+  auto ids = loadedFlatChildAt<int32_t>(row, 0);
   EXPECT_EQ(ids->valueAt(0), 1);
   EXPECT_EQ(ids->valueAt(1), 2);
   EXPECT_EQ(ids->valueAt(2), 3);
   EXPECT_EQ(ids->valueAt(3), 4);
 
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
   std::vector<std::string> expectedJson = {
       "{\"a\":1,\"b\":[true,\"x\"],\"c\":{\"d\":3.14}}",
       "[1,2,3]",
@@ -2693,7 +3046,7 @@ TEST_F(ParquetReaderTest, readVariantParquetScanSpecOrderMismatch) {
   EXPECT_EQ(rowsRead, 4);
 
   auto row = result->as<RowVector>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   auto variantGet = [&](const VariantValue& value, const StringView& path) {
     auto out = makeFlatVector<StringView>(1);
@@ -2732,8 +3085,8 @@ TEST_F(ParquetReaderTest, readVariantParquetPrimitivesSpark) {
   EXPECT_EQ(rowsRead, 12);
 
   auto row = result->as<RowVector>();
-  auto ids = row->childAt(0)->asFlatVector<int32_t>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto ids = loadedFlatChildAt<int32_t>(row, 0);
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   auto decodeValue = [&](const VariantValue& value) -> std::string {
     if (value.value.empty()) {
@@ -2836,9 +3189,9 @@ TEST_F(ParquetReaderTest, readVariantParquetNestedSpark) {
   EXPECT_EQ(rowsRead, 2);
 
   auto row = result->as<RowVector>();
-  auto arr = row->childAt(1)->as<ArrayVector>();
-  auto map = row->childAt(2)->as<MapVector>();
-  auto st = row->childAt(3)->as<RowVector>();
+  auto arr = loadedChildAt(row, 1)->as<ArrayVector>();
+  auto map = loadedChildAt(row, 2)->as<MapVector>();
+  auto st = loadedChildAt(row, 3)->as<RowVector>();
 
   auto variantGet = [&](const VariantValue& value, const StringView& path) {
     auto out = makeFlatVector<StringView>(1);
@@ -2877,8 +3230,8 @@ TEST_F(ParquetReaderTest, readVariantParquetNestedSpark) {
   EXPECT_EQ(gotK2, "s");
 
   // STRUCT<VARIANT, VARIANT>
-  auto v1 = st->childAt(0)->as<VariantVector>()->valueAt(0);
-  auto v2 = st->childAt(1)->as<VariantVector>()->valueAt(0);
+  auto v1 = loadedChildAt(st, 0)->as<VariantVector>()->valueAt(0);
+  auto v2 = loadedChildAt(st, 1)->as<VariantVector>()->valueAt(0);
   auto [okA, a] = variantGet(v1, "$.a");
   EXPECT_TRUE(okA);
   EXPECT_EQ(a, "1");
@@ -2904,7 +3257,7 @@ TEST_F(ParquetReaderTest, readVariantParquetRawJsonStruct) {
   EXPECT_EQ(rowsRead, 4);
 
   auto row = result->as<RowVector>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   // Raw JSON payloads are expected to have empty metadata.
   EXPECT_TRUE(variants->valueAt(0).metadata.empty());
@@ -2954,7 +3307,7 @@ TEST_F(ParquetReaderTest, readVariantParquetRawParts) {
   EXPECT_EQ(result->size(), 4);
 
   auto row = result->as<RowVector>();
-  auto variants = row->childAt(1)->as<VariantVector>();
+  auto variants = loadedChildAt(row, 1)->as<VariantVector>();
 
   for (int i = 0; i < 4; ++i) {
     if (variants->isNullAt(i)) {

@@ -321,6 +321,10 @@ class BoltColumnarBatchDeserializerFactory {
     rowFormat_ = rowFormat;
   }
 
+  void setRowBasedShuffleThreshold(int64_t threshold) {
+    rowBasedShuffleThreshold_ = threshold;
+  }
+
  private:
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<Codec> codec_;
@@ -333,6 +337,7 @@ class BoltColumnarBatchDeserializerFactory {
   std::string partitioningShortName_;
   bytedance::bolt::row::RowFormat rowFormat_{
       bytedance::bolt::row::RowFormat::DENSE};
+  int64_t rowBasedShuffleThreshold_{kDefaultRowBasedShuffleThreshold};
   arrow::MemoryPool* memoryPool_;
   bytedance::bolt::memory::MemoryPool* boltPool_;
 

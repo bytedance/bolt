@@ -36,6 +36,7 @@
 #include <folly/Range.h>
 #include <folly/container/F14Map.h>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <utility>
@@ -978,7 +979,7 @@ class BaseVector {
   /// unloaded lazy vector should not be wrapped by two separate top level
   /// vectors. This would ensure we avoid it being loaded for two separate set
   /// of rows.
-  bool containsLazyAndIsWrapped_{false};
+  std::atomic_bool containsLazyAndIsWrapped_{false};
 
   // Whether we should use Expr::evalWithMemo to cache the result of evaluation
   // on dictionary values (this vector).  Set to false when the dictionary

@@ -27,8 +27,14 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::memory;
 
-DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
-DEFINE_int64(multiple_vector_count, 10, "different vector count to gather");
+DEFINE_int64(
+    bolt_benchmark_fuzzer_seed,
+    99887766,
+    "Seed for random input dataset generator");
+DEFINE_int64(
+    bolt_benchmark_multiple_vector_count,
+    10,
+    "different vector count to gather");
 static constexpr int32_t kRowsPerVector = 10'000;
 
 struct GatherCopyParam {
@@ -46,8 +52,8 @@ struct GatherCopyParam {
     VectorFuzzer::Options opts;
     opts.vectorSize = batchSize;
     opts.nullRatio = 0;
-    VectorFuzzer fuzzer(opts, pool.get(), FLAGS_fuzzer_seed);
-    for (int32_t i = 0; i < FLAGS_multiple_vector_count; i++) {
+    VectorFuzzer fuzzer(opts, pool.get(), FLAGS_bolt_benchmark_fuzzer_seed);
+    for (int32_t i = 0; i < FLAGS_bolt_benchmark_multiple_vector_count; i++) {
       inputsHolder.push_back(fuzzer.fuzzFlat(ROW({type})));
     }
     for (int32_t i = 0; i < batchSize; i++) {

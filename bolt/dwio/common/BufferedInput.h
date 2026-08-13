@@ -31,12 +31,11 @@
 #pragma once
 
 #include "bolt/common/caching/ScanTracker.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/AllocationPool.h"
 #include "bolt/dwio/common/SeekableInputStream.h"
 #include "bolt/dwio/common/StreamIdentifier.h"
 
-// Use WS VRead API to load
-DECLARE_bool(wsVRLoad);
 namespace bytedance::bolt::dwio::common {
 
 class BufferedInput {

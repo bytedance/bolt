@@ -34,6 +34,7 @@
 #include <fmt/format.h>
 #include <re2/re2.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <ranges>
@@ -86,6 +87,38 @@ void abortPool(memory::MemoryPool* pool) {
     pool->abort(std::current_exception());
   }
 }
+
+class RecordingLazyLoader : public VectorLoader {
+ public:
+  RecordingLazyLoader(
+      VectorPtr vector,
+      std::atomic_bool& loaded,
+      std::atomic_bool& loadedAfterMarker,
+      std::atomic_bool& marker)
+      : vector_(std::move(vector)),
+        loaded_(loaded),
+        loadedAfterMarker_(loadedAfterMarker),
+        marker_(marker) {}
+
+ private:
+  void loadInternal(
+      RowSet rows,
+      ValueHook* hook,
+      vector_size_t resultSize,
+      VectorPtr* result) override {
+    BOLT_CHECK(!hook, "RecordingLazyLoader doesn't support ValueHook");
+    loaded_ = true;
+    loadedAfterMarker_ = loadedAfterMarker_ || marker_.load();
+
+    BOLT_CHECK_EQ(rows.size(), vector_->size());
+    *result = BaseVector::copy(*vector_);
+  }
+
+  const VectorPtr vector_;
+  std::atomic_bool& loaded_;
+  std::atomic_bool& loadedAfterMarker_;
+  std::atomic_bool& marker_;
+};
 } // namespace
 
 class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
@@ -2134,6 +2167,57 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimFromEmptyOrderBy) {
   const auto stats = task->taskStats().pipelineStats;
   ASSERT_EQ(stats[0].operatorStats[1].spilledBytes, 0);
   ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 0);
+}
+
+DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy is not used by this lazy input test\n";
+  }
+
+  auto nonLazyVector = createVectors(1, rowType_, fuzzerOpts_)[0];
+  std::atomic_bool sortBufferAddInputEntered{false};
+  std::atomic_bool lazyLoaded{false};
+  std::atomic_bool lazyLoadedInSortBufferAddInput{false};
+
+  std::vector<VectorPtr> lazyChildren;
+  for (const auto& child : nonLazyVector->children()) {
+    lazyChildren.push_back(std::make_shared<LazyVector>(
+        pool(),
+        child->type(),
+        child->size(),
+        std::make_unique<RecordingLazyLoader>(
+            child,
+            lazyLoaded,
+            lazyLoadedInSortBufferAddInput,
+            sortBufferAddInputEntered)));
+  }
+  auto lazyInput = std::make_shared<RowVector>(
+      pool(),
+      rowType_,
+      nullptr,
+      nonLazyVector->size(),
+      std::move(lazyChildren));
+
+  createDuckDbTable({nonLazyVector});
+
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SortBuffer::addInput",
+      std::function<void(void*)>(
+          ([&](void* /*unused*/) { sortBufferAddInputEntered = true; })));
+
+  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .spillDirectory(spillDirectory->path)
+      .config(core::QueryConfig::kSpillEnabled, true)
+      .config(core::QueryConfig::kOrderBySpillEnabled, true)
+      .plan(PlanBuilder()
+                .values({lazyInput})
+                .orderBy({"c0 ASC NULLS LAST"}, false)
+                .planNode())
+      .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
+
+  ASSERT_TRUE(lazyLoaded);
+  ASSERT_FALSE(lazyLoadedInSortBufferAddInput);
 }
 
 INSTANTIATE_GPU_TEST_SUITE_P(OrderByTestOnCPUOrGPU, OrderByTest);

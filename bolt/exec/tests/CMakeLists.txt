@@ -261,12 +261,15 @@ target_link_libraries(
 )
 
 # Join Fuzzer.
-# exclude bolt_join_fuzzer from bolt_testutils
-# to avoid multiple definition error
-add_library(bolt_join_fuzzer OBJECT JoinFuzzer.cpp)
+add_library(bolt_join_fuzzer STATIC JoinFuzzer.cpp)
 
 target_link_libraries(
-  bolt_join_fuzzer bolt_type bolt_vector_fuzzer bolt_exec_test_lib bolt_expression_test_utility
+  bolt_join_fuzzer
+  bolt_type
+  bolt_vector_fuzzer
+  bolt_exec_test_lib
+  bolt_expression_test_utility
+  bolt_fuzzer_flags
 )
 
 add_executable(bolt_join_fuzzer_test JoinFuzzerTest.cpp)
@@ -281,6 +284,7 @@ add_executable(bolt_exchange_fuzzer_test ExchangeFuzzer.cpp)
 
 target_link_libraries(
   bolt_exchange_fuzzer_test
+  bolt_fuzzer_flags
   bolt_testutils
   GTest::gtest
 )

@@ -32,6 +32,7 @@
 
 #include "bolt/core/ITypedExpr.h"
 #include "bolt/core/QueryCtx.h"
+#include "bolt/exec/fuzzer/FuzzerFlags.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/fuzzer/ExpressionFuzzer.h"
 #include "bolt/expression/fuzzer/FuzzerToolkit.h"
@@ -40,7 +41,6 @@
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
-DECLARE_int32(bolt_fuzzer_max_level_of_nesting);
 namespace bytedance::bolt::fuzzer {
 
 // A tool that utilizes ExpressionFuzzer, VectorFuzzer and ExpressionVerfier to
@@ -76,7 +76,7 @@ class ExpressionFuzzerVerifier {
     int32_t steps = 10;
 
     // For how long it should run (in seconds). If zero it executes exactly
-    // --steps iterations and exits.
+    // --bolt_fuzzer_steps iterations and exits.
     int32_t durationSeconds = 0;
 
     // The number of elements on each generated vector.
@@ -178,8 +178,9 @@ class ExpressionFuzzerVerifier {
       const VectorPtr& resultVectors,
       const std::vector<int>& columnsToWrapInLazy);
 
-  /// If --duration_sec > 0, check if we expired the time budget. Otherwise,
-  /// check if we expired the number of iterations (--steps).
+  /// If --bolt_fuzzer_duration_sec > 0, check if we expired the time budget.
+  /// Otherwise, check if we expired the number of iterations
+  /// (--bolt_fuzzer_steps).
   template <typename T>
   bool isDone(size_t i, T startTime) const;
 

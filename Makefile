@@ -47,7 +47,7 @@
 
 # --- 5. Benchmark Build Targets ---
 .PHONY: benchmarks-basic-build benchmarks-build
-.PHONY: benchmarks-build-spark benchmarks-build-debug
+.PHONY: benchmarks-build-spark benchmarks-build-relwithdebinfo
 
 # --- 6. Test Execution & Coverage ---
 # Targets for running CTest and generating code coverage reports
@@ -79,16 +79,49 @@ BUILD_VERSION ?= main
 PROFILE ?= default
 BUILD_TYPE=Release
 
-# Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,
-# Control whether to build benchmarks
-BOLT_BUILD_BENCHMARKS ?= "OFF"
-# Control whether to build tests with coverage instrumentation
-BOLT_BUILD_TESTING_WITH_COVERAGE ?= "OFF"
-# -----------------------------------------------------------------
-
 # TODO: remove `BUILD_USER` and `BUILD_CHANNEL`
 BUILD_USER ?=
 BUILD_CHANNEL ?=
+
+# Shared Conan arguments used by commands that run from the build directory.
+CONAN_PACKAGE_ARGS = \
+	--name=bolt \
+	--version=${BUILD_VERSION} \
+	--user=${BUILD_USER} \
+	--channel=${BUILD_CHANNEL}
+
+CONAN_HOST_PROFILE_ARGS = \
+	-pr:h ${PROFILE} \
+	-pr:h ../../scripts/conan/bolt.profile
+
+# Package-scoped settings only apply when the matching dependency is in the graph.
+CONAN_BUILD_SETTINGS = \
+	-s llvm-core/*:build_type=Release \
+	-s google-cloud-cpp/*:build_type=Release \
+	-s "&:build_type=${BUILD_TYPE}" \
+	-s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}}
+
+# Reusable Conan option fragments for public build targets.
+CONAN_TEST_CONFIG = -c bolt/*:tools.build:skip_test=False
+CONAN_PRESTO_OPTIONS = -o bolt/*:spark_compatible=False
+CONAN_SPARK_OPTIONS = -o bolt/*:spark_compatible=True
+CONAN_TESTUTIL_OPTIONS = -o bolt/*:enable_testutil=True
+CONAN_PERF_OPTIONS = -o bolt/*:enable_perf=True
+
+# BOLT_LINKER overrides profile-aware automatic linker selection. An explicitly
+# empty value disables automatic selection.
+ifneq ($(origin BOLT_LINKER), undefined)
+export BOLT_LINKER
+endif
+
+# Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,
+# Control whether to build benchmarks
+BOLT_BUILD_BENCHMARKS ?= "OFF"
+# Control whether to build only basic benchmarks
+BOLT_BUILD_BENCHMARKS_BASIC ?= "OFF"
+# Control whether to build tests with coverage instrumentation
+BOLT_BUILD_TESTING_WITH_COVERAGE ?= "OFF"
+# -----------------------------------------------------------------
 
 # temporary variables for build scripts, not intended for users to set directly
 BUILD_BASE_DIR=_build
@@ -134,7 +167,9 @@ OS:=$(shell uname -s)
 
 ifndef CI_NUM_THREADS
 # Make sure each core has 4G memory
-	NUM_THREADS ?=$(shell echo $$(( $(CPU_CORES) < $(MEMORY) / 4 ? $(CPU_CORES) : $(MEMORY) / 4 )) )
+	_NUM_THREADS_CALC := $(shell echo $$(( $(CPU_CORES) < $(MEMORY) / 4 ? $(CPU_CORES) : $(MEMORY) / 4 )) )
+	_NUM_THREADS_FINAL := $(shell echo $$(( $(_NUM_THREADS_CALC) < 1 ? 1 : $(_NUM_THREADS_CALC) )) )
+	NUM_THREADS ?= $(_NUM_THREADS_FINAL)
 else
 	NUM_THREADS ?= $(CI_NUM_THREADS)
 endif
@@ -147,6 +182,11 @@ else
 	NUM_LINK_JOB ?= $(CI_NUM_LINK_JOB)
 endif
 
+CONAN_BUILD_ENV = \
+	NUM_THREADS=$(NUM_THREADS) \
+	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
+	BOLT_BUILD_BENCHMARKS_BASIC=${BOLT_BUILD_BENCHMARKS_BASIC}
+
 ifeq ($(IN_CI), 1)
 	export DEPENDENCY_BUILD_TYPE = Release
 endif
@@ -154,7 +194,7 @@ endif
 
 CPU_TARGET ?= "avx"
 
-PYTHON_EXECUTABLE ?= $(shell which python)
+PYTHON_EXECUTABLE ?= $(shell which python3)
 
 all: 			#: Build the release version
 	$(MAKE) release
@@ -177,10 +217,19 @@ conan_install:
 	git rev-parse HEAD && \
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
+	$(PYTHON_EXECUTABLE) ../../scripts/select-conan-linker.py \
+	   --output conan-linker.options -- \
+	   conan profile show \
+	   $(CONAN_HOST_PROFILE_ARGS) \
+	   $(CONAN_BUILD_SETTINGS) \
+	   ${CONAN_OPTIONS} ${CONAN_OVERRIDE} ${CONAN_CONFIG} \
+	   --format=json && \
+	read CONAN_LINKER_OPTIONS < conan-linker.options && \
 	echo " \
-	-pr:h ${PROFILE} \
-	-pr:h ../../scripts/conan/bolt.profile \
-	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
+	$(CONAN_HOST_PROFILE_ARGS) \
+	${CONAN_OPTIONS} ${CONAN_OVERRIDE} \
+	$${CONAN_LINKER_OPTIONS}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
 	  echo "Conan options and build type unchanged; preserving CMakeCache.txt"; \
@@ -191,44 +240,36 @@ conan_install:
 	mv new_conan.options conan.options && \
 	echo ${BUILD_TYPE} > ../.build_type && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	conan graph info ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
-	   -s llvm-core/*:build_type=Release \
-	   -s "&:build_type=${BUILD_TYPE}" \
-	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	conan graph info ../.. $(CONAN_PACKAGE_ARGS) \
+	   $(CONAN_BUILD_SETTINGS) \
 	   $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing \
 	   --format=html > bolt.conan.graph.html && \
 	export NUM_LINK_JOB=$(NUM_LINK_JOB) && \
-	conan install ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
-	   -s llvm-core/*:build_type=Release \
-	   -s "&:build_type=${BUILD_TYPE}" \
-	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	conan install ../.. $(CONAN_PACKAGE_ARGS) \
+	   $(CONAN_BUILD_SETTINGS) \
 	$${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing  &&\
 	cd -
 
 conan_build: conan_install
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	NUM_THREADS=$(NUM_THREADS) \
-	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
+	$(CONAN_BUILD_ENV) \
 	BOLT_BUILD_TESTING_WITH_COVERAGE=${BOLT_BUILD_TESTING_WITH_COVERAGE} \
-	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
-	   -s llvm-core/*:build_type=Release \
-	   -s "&:build_type=${BUILD_TYPE}" \
-	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
+	conan build ../.. $(CONAN_PACKAGE_ARGS) \
+	   $(CONAN_BUILD_SETTINGS) \
 	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} && \
 	cd -
 
 _compile_db: conan_install
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	NUM_THREADS=$(NUM_THREADS) \
-	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
+	$(CONAN_BUILD_ENV) \
 	BOLT_CONAN_CONFIGURE_ONLY=1 \
-	conan build ../.. --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
-	   -s llvm-core/*:build_type=Release \
-	   -s "&:build_type=${BUILD_TYPE}" \
-	   -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} \
-	   --build=missing $${ALL_CONAN_OPTIONS} && \
+	conan build ../.. $(CONAN_PACKAGE_ARGS) \
+	   $(CONAN_BUILD_SETTINGS) \
+	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} && \
 	cd - && \
 	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target generate_parquet_thrift && \
 	cmake --build --preset conan-$$(echo "${BUILD_TYPE}" | tr [A-Z] [a-z]) --target bolt_dwio_dwrf_proto
@@ -238,18 +279,17 @@ compile_db_all:
 	$(MAKE) _compile_db \
 	BUILD_TYPE=Release \
 	BOLT_BUILD_BENCHMARKS="ON" \
-	CONAN_OPTIONS=" -o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_s3=True \
-					-o bolt/*:enable_gcs=True -o bolt/*:enable_abfs=True" \
-	CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False"
+	CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) -o bolt/*:enable_s3=True \
+						-o bolt/*:enable_gcs=True -o bolt/*:enable_abfs=True" \
+	CONAN_CONFIG="$(CONAN_TEST_CONFIG)"
 
 export_base:
 	cd _build/${BUILD_TYPE} && \
+	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
-	conan export-pkg --name=bolt --version=${BUILD_VERSION} --user=${BUILD_USER} --channel=${BUILD_CHANNEL} \
+	conan export-pkg $(CONAN_PACKAGE_ARGS) \
 	 $${ALL_CONAN_OPTIONS} \
-	 -s llvm-core/*:build_type=Release \
-	 -s "&:build_type=${BUILD_TYPE}" \
-	 -s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}} ${CONAN_CONFIG}\
+	 $(CONAN_BUILD_SETTINGS) ${CONAN_CONFIG}\
 	 ../.. && \
 	cd -
 
@@ -263,55 +303,55 @@ install:
 	$(MAKE) export_base BUILD_TYPE=$(shell cat _build/.build_type)
 
 debug:      	#: Build with debugging symbols
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o bolt/*:spark_compatible=False"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS)"
 
 debug-with-asan:  #: Build the debug version with address sanitizer enabled
 	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS=" -o enable_asan=True "
 
 release:  	#: Build the release version
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS=" -o bolt/*:spark_compatible=False"
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS)"
 
 RelWithDebInfo:
 	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo
 
 release_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 release_with_debug_info_with_test:
-	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 debug_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 debug_with_test_spark:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 debug_with_test_cov:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug BOLT_BUILD_TESTING_WITH_COVERAGE="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 debug_spark:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS="-o bolt/*:spark_compatible=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS)"
 
 release_spark:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS="-o bolt/*:spark_compatible=True"
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS)"
 
 release_spark_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Release CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Release CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 debug_spark_with_test:
-	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True"
+	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
 
 benchmarks-basic-build:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"
 
 benchmarks-build:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"
 
 benchmarks-build-spark:
-	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=True -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"
 
 benchmarks-build-relwithdebinfo:
-	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG=" -c bolt/*:tools.build:skip_test=False" CONAN_OPTIONS="-o bolt/*:spark_compatible=False -o bolt/*:enable_testutil=True -o bolt/*:enable_perf=True"
+	$(MAKE) conan_build BUILD_TYPE=RelWithDebInfo BOLT_BUILD_BENCHMARKS="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_PRESTO_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"
 
 ctest_debug:
 	ctest --test-dir $(BUILD_BASE_DIR)/Debug --timeout 7200 -j $(NUM_THREADS) --output-on-failure
@@ -360,7 +400,7 @@ system_info:
 	@echo "  - Version: \`$(shell $(CXX) --version | head -n 1)\`"
 ifneq ($(CMAKE_EXE),)
 	@echo "- **CMake**: $(shell cmake --version | head -n 1 | awk '{print $$3}')"
-	@echo "- **Ninja**: $(shell ninja --version')"
+	@echo "- **Ninja**: $(shell ninja --version)"
 endif
 	@echo ""
 	@echo "### 3. Conan Dependency Manager"

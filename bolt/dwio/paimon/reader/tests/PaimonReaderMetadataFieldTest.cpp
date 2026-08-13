@@ -185,6 +185,7 @@ class PaimonReaderMetadataFieldTest
     // accumulate results into a single vector
     std::vector<RowVectorPtr> results;
     while (auto result = readTask->next()) {
+      result->loadedVector();
       results.push_back(result);
     }
 
@@ -874,6 +875,7 @@ TEST_F(PaimonReaderMetadataFieldTest, testPaimonFilePathColumnMultiFile) {
   readTask->noMoreSplits(scanNodeId);
   std::vector<RowVectorPtr> results;
   while (auto result = readTask->next()) {
+    result->loadedVector();
     results.push_back(result);
   }
 
