@@ -623,6 +623,9 @@ class QueryConfig {
   static constexpr const char* kParquetRepDefMemoryLimit =
       "parquet_repdef_memory_limit";
 
+  static constexpr const char* kParquetReaderImplicitCastMask =
+      "parquet_reader_implicit_cast_mask";
+
   static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
 
   /// If true, reorder rows by containerId during hybrid join extraction for
@@ -1720,6 +1723,10 @@ class QueryConfig {
 
   int32_t parquetRepDefMemoryLimit() const {
     return get<int32_t>(kParquetRepDefMemoryLimit, 128UL << 20);
+  }
+
+  int64_t parquetReaderImplicitCastMask() const {
+    return get<int64_t>(kParquetReaderImplicitCastMask, 0);
   }
 
   bool enableDynamicConcurrencyAdjustment() const {

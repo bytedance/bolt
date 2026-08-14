@@ -110,6 +110,46 @@ bool matchType(TypeKind schemaType, TypeKind requestType) {
   return true;
 }
 
+bool isIntegerType(const Type& type) {
+  return type.equivalent(*TINYINT()) || type.equivalent(*SMALLINT()) ||
+      type.equivalent(*INTEGER()) || type.equivalent(*BIGINT()) ||
+      type.equivalent(*HUGEINT());
+}
+
+bool maskSparkImplicitCast(
+    const Type& fileType,
+    const Type& requestedType,
+    int64_t castMask) {
+  using CastMask = dwio::common::ParquetReaderImplicitCastMask;
+  if (!fileType.isPrimitiveType() || !requestedType.isPrimitiveType()) {
+    return false;
+  }
+  if (fileType.equivalent(requestedType) ||
+      castMask == static_cast<int64_t>(CastMask::kNone)) {
+    return false;
+  }
+  if (castMask == static_cast<int64_t>(CastMask::kAll)) {
+    return true;
+  }
+  const auto varcharIntegerMask =
+      static_cast<int64_t>(CastMask::kVarcharInteger);
+  const auto varcharDateMask = static_cast<int64_t>(CastMask::kVarcharDate);
+  const auto fileKind = fileType.kind();
+  const auto requestedKind = requestedType.kind();
+
+  // varchar <-> integer
+  const bool blockVarcharInteger = (castMask & varcharIntegerMask) != 0 &&
+      ((fileKind == TypeKind::VARCHAR && isIntegerType(requestedType)) ||
+       (isIntegerType(fileType) && requestedKind == TypeKind::VARCHAR));
+
+  // varchar <-> date
+  const bool blockVarcharDate = (castMask & varcharDateMask) != 0 &&
+      ((fileKind == TypeKind::VARCHAR && requestedType.isDate()) ||
+       (fileType.isDate() && requestedKind == TypeKind::VARCHAR));
+
+  return blockVarcharInteger || blockVarcharDate;
+}
+
 // static
 std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
     const dwio::common::ColumnReaderOptions& columnReaderOptions,
@@ -126,7 +166,17 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
       fileType->childByName("value")->type()->isVarbinary() &&
       fileType->childByName("metadata")->type()->isVarbinary();
 
-  if (!::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    BOLT_CHECK(
+        canReadVariantStructAsVariant ||
+            !maskSparkImplicitCast(
+                *fileType->type(),
+                *requestedType->type(),
+                params.parquetReaderImplicitCastMask),
+        "file schema type {} can not convert to ddl type {}",
+        mapTypeKindToName(fileType->type()->kind()),
+        mapTypeKindToName(requestedType->type()->kind()));
+  } else {
     BOLT_CHECK(
         canReadVariantStructAsVariant ||
             matchType(fileType->type()->kind(), requestedType->type()->kind()),

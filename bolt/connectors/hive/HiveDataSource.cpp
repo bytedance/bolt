@@ -234,6 +234,7 @@ HiveDataSource::HiveDataSource(
   }
 
   recalculateRepDefConf(readerOutputType_, queryConfig);
+  parquetReaderImplicitCastMask_ = queryConfig.parquetReaderImplicitCastMask();
   parquetMaxBatchBytes_ =
       static_cast<int64_t>(queryConfig.preferredOutputBatchBytes());
   ioStats_ = std::make_shared<io::IoStatistics>();
@@ -382,6 +383,8 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
       decodeRepDefPageCount_);
   splitReader->rowReaderOptions().setParquetRepDefMemoryLimit(
       parquetRepDefMemoryLimit_);
+  splitReader->rowReaderOptions().setParquetReaderImplicitCastMask(
+      parquetReaderImplicitCastMask_);
   splitReader->rowReaderOptions().setMaxBatchBytes(parquetMaxBatchBytes_);
 
   TRY_WITH_IGNORE(
