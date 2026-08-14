@@ -1,0 +1,1 @@
+../../../.trae/skills/bolt-query/SKILL.md

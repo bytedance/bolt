@@ -1,0 +1,1 @@
+../../../.trae/skills/bolt-ci-failure-analysis/SKILL.md

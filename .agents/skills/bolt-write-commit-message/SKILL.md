@@ -1,0 +1,1 @@
+../../../.trae/skills/bolt-write-commit-message/SKILL.md

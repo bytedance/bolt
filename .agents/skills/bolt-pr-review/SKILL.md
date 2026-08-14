@@ -1,0 +1,1 @@
+../../../.trae/skills/bolt-pr-review/SKILL.md
