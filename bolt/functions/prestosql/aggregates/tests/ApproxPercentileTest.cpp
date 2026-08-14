@@ -163,15 +163,22 @@ class ApproxPercentileTest : public AggregationTestBase {
       const VectorPtr& weights,
       double percentile,
       double accuracy,
-      const RowVectorPtr& expectedResult) {
+      const RowVectorPtr& expectedResult,
+      const RowVectorPtr& alternateExpectedResult = nullptr) {
     auto rows = weights ? makeRowVector({keys, values, weights})
                         : makeRowVector({keys, values});
     enableTestStreaming();
+    allowInputShuffle();
+    const auto assertExpected = [&](auto& builder) {
+      return assertExpectedOrAlternate(
+          builder, expectedResult, alternateExpectedResult);
+    };
     testAggregations(
-        {rows},
+        [&](auto& builder) { builder.values({rows}); },
         {"c0"},
         {functionCall(true, weights.get(), percentile, accuracy, -1)},
-        {expectedResult});
+        {},
+        assertExpected);
 
     // Companion functions of approx_percentile do not support test streaming
     // because intermediate results are KLL that has non-deterministic shape.
@@ -187,47 +194,22 @@ class ApproxPercentileTest : public AggregationTestBase {
 
     {
       SCOPED_TRACE("Percentile array");
-      auto resultValues = expectedResult->childAt(1);
-      RowVectorPtr expected = nullptr;
-      auto size = resultValues->size();
-      if (resultValues->nulls() &&
-          bits::countNonNulls(resultValues->rawNulls(), 0, size) == 0) {
-        expected = makeRowVector(
-            {expectedResult->childAt(0),
-             BaseVector::createNullConstant(
-                 ARRAY(resultValues->type()), size, pool())});
-      } else {
-        auto elements = BaseVector::create(
-            resultValues->type(), 3 * resultValues->size(), pool());
-        auto offsets = allocateOffsets(resultValues->size(), pool());
-        auto rawOffsets = offsets->asMutable<vector_size_t>();
-        auto sizes = allocateSizes(resultValues->size(), pool());
-        auto rawSizes = sizes->asMutable<vector_size_t>();
-        for (int i = 0; i < resultValues->size(); ++i) {
-          rawOffsets[i] = 3 * i;
-          rawSizes[i] = 3;
-          elements->copy(resultValues.get(), 3 * i + 0, i, 1);
-          elements->copy(resultValues.get(), 3 * i + 1, i, 1);
-          elements->copy(resultValues.get(), 3 * i + 2, i, 1);
-        }
-        expected = makeRowVector(
-            {expectedResult->childAt(0),
-             std::make_shared<ArrayVector>(
-                 pool(),
-                 ARRAY(elements->type()),
-                 nullptr,
-                 resultValues->size(),
-                 offsets,
-                 sizes,
-                 elements)});
-      }
+      auto expected = makePercentileArrayExpected(expectedResult);
+      auto alternateExpected = alternateExpectedResult
+          ? makePercentileArrayExpected(alternateExpectedResult)
+          : nullptr;
 
       enableTestStreaming();
+      allowInputShuffle();
+      const auto assertArrayExpected = [&](auto& builder) {
+        return assertExpectedOrAlternate(builder, expected, alternateExpected);
+      };
       testAggregations(
-          {rows},
+          [&](auto& builder) { builder.values({rows}); },
           {"c0"},
           {functionCall(true, weights.get(), percentile, accuracy, 3)},
-          {expected});
+          {},
+          assertArrayExpected);
 
       // Companion functions of approx_percentile do not support test streaming
       // because intermediate results are KLL that has non-deterministic shape.
@@ -241,6 +223,63 @@ class ApproxPercentileTest : public AggregationTestBase {
           {},
           {expected});
     }
+  }
+
+  RowVectorPtr makePercentileArrayExpected(const RowVectorPtr& expectedResult) {
+    auto resultValues = expectedResult->childAt(1);
+    auto size = resultValues->size();
+    if (resultValues->nulls() &&
+        bits::countNonNulls(resultValues->rawNulls(), 0, size) == 0) {
+      return makeRowVector(
+          {expectedResult->childAt(0),
+           BaseVector::createNullConstant(
+               ARRAY(resultValues->type()), size, pool())});
+    }
+
+    auto elements = BaseVector::create(
+        resultValues->type(), 3 * resultValues->size(), pool());
+    auto offsets = allocateOffsets(resultValues->size(), pool());
+    auto rawOffsets = offsets->asMutable<vector_size_t>();
+    auto sizes = allocateSizes(resultValues->size(), pool());
+    auto rawSizes = sizes->asMutable<vector_size_t>();
+    for (int i = 0; i < resultValues->size(); ++i) {
+      rawOffsets[i] = 3 * i;
+      rawSizes[i] = 3;
+      elements->copy(resultValues.get(), 3 * i + 0, i, 1);
+      elements->copy(resultValues.get(), 3 * i + 1, i, 1);
+      elements->copy(resultValues.get(), 3 * i + 2, i, 1);
+    }
+    return makeRowVector(
+        {expectedResult->childAt(0),
+         std::make_shared<ArrayVector>(
+             pool(),
+             ARRAY(elements->type()),
+             nullptr,
+             resultValues->size(),
+             offsets,
+             sizes,
+             elements)});
+  }
+
+  std::shared_ptr<Task> assertExpectedOrAlternate(
+      AssertQueryBuilder& builder,
+      const RowVectorPtr& expected,
+      const RowVectorPtr& alternateExpected) {
+    if (!alternateExpected) {
+      return builder.assertResults(expected);
+    }
+
+    std::shared_ptr<Task> task;
+    auto actual = builder.copyResults(pool(), task);
+    const auto actualRows = materialize(std::vector<RowVectorPtr>{actual});
+    if (actualRows == materialize(std::vector<RowVectorPtr>{expected}) ||
+        actualRows ==
+            materialize(std::vector<RowVectorPtr>{alternateExpected})) {
+      return task;
+    }
+
+    assertEqualResults({expected}, {actual});
+    return task;
   }
 };
 
@@ -286,8 +325,19 @@ TEST_F(ApproxPercentileTest, groupByAgg) {
   expectedResult = makeRowVector(
       {makeFlatVector(std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6}),
        makeFlatVector(std::vector<int32_t>{16, 17, 18, 19, 20, 21, 22})});
-  testGroupByAgg(keys, values, weights, 0.5, -1, expectedResult);
-  testGroupByAgg(keys, values, weights, 0.5, 0.005, expectedResult);
+  auto streamingExpectedResult = makeRowVector(
+      {makeFlatVector(std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6}),
+       makeFlatVector(std::vector<int32_t>{15, 17, 18, 19, 20, 20, 22})});
+  testGroupByAgg(
+      keys, values, weights, 0.5, -1, expectedResult, streamingExpectedResult);
+  testGroupByAgg(
+      keys,
+      values,
+      weights,
+      0.5,
+      0.005,
+      expectedResult,
+      streamingExpectedResult);
 
   auto valuesWithNulls = makeFlatVector<int32_t>(
       size, [](auto row) { return (row / 7) % 23 + row % 7; }, nullEvery(11));
