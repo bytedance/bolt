@@ -33,6 +33,8 @@
 #include "bolt/functions/lib/aggregates/tests/SumTestBase.h"
 #include "bolt/functions/sparksql/aggregates/Register.h"
 
+#include <cstdlib>
+
 using bytedance::bolt::exec::test::PlanBuilder;
 using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::functions::aggregate::test;
@@ -45,6 +47,43 @@ class SumAggregationTest : public SumTestBase {
     SumTestBase::SetUp();
     registerAggregateFunctions("spark_");
   }
+
+#if !defined(_WIN32)
+  static constexpr const char* kSumInt64SubOpEnv =
+      "BOLT_SPARK_SUM_INT64_USE_SUBOP";
+
+  // Runs partial+final grouped spark_sum twice (SubOp default vs env=0 Base).
+  // On Linux aarch64 + 256-bit SVE, SubOp exercises the SVE kernel; elsewhere
+  // SubOp delegates to Base and this still checks parity.
+  void expectSparkSumInt64SubOpMatchesBase(
+      const std::vector<RowVectorPtr>& batches) {
+    auto runGroupedSparkSum = [&](bool subOpEnabled) -> RowVectorPtr {
+      if (subOpEnabled) {
+        ::unsetenv(kSumInt64SubOpEnv);
+      } else {
+        CHECK_EQ(0, ::setenv(kSumInt64SubOpEnv, "0", 1));
+      }
+      struct UnsetEnv {
+        const char* key;
+        bool enabled;
+        ~UnsetEnv() {
+          if (enabled) {
+            ::unsetenv(key);
+          }
+        }
+      } unset{kSumInt64SubOpEnv, !subOpEnabled};
+
+      PlanBuilder builder(pool());
+      builder.values(batches);
+      builder.partialAggregation({"c0"}, {"spark_sum(c1)"}).finalAggregation();
+      return AssertQueryBuilder(builder.planNode()).copyResults(pool());
+    };
+
+    auto subOpResult = runGroupedSparkSum(true);
+    auto baseResult = runGroupedSparkSum(false);
+    ASSERT_TRUE(assertEqualResults({baseResult}, {subOpResult}));
+  }
+#endif
 
  protected:
   // check global partial agg overflow, and final agg output null
@@ -125,6 +164,247 @@ class SumAggregationTest : public SumTestBase {
 
 TEST_F(SumAggregationTest, overflow) {
   SumTestBase::testAggregateOverflow<int64_t, int64_t, int64_t>("spark_sum");
+}
+
+// DuckDB parity: same SQL/input as reference. Spark sum(bigint) defaults to SubOp;
+// `BOLT_SPARK_SUM_INT64_USE_SUBOP=0` selects Base (see env test below).
+TEST_F(SumAggregationTest, sumInt64SubOpParity) {
+#if !defined(_WIN32)
+  ::unsetenv("BOLT_SPARK_SUM_INT64_USE_SUBOP");
+#endif
+  auto globalInput =
+      makeRowVector({makeFlatVector<int64_t>({7, 11, 13, -5, 2})});
+  createDuckDbTable({globalInput});
+  testAggregations(
+      {globalInput},
+      {},
+      {"spark_sum(c0)"},
+      "SELECT sum(c0) FROM tmp",
+      /*config*/ {},
+      /*testWithTableScan*/ false);
+
+  auto groupedInput = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 1, 1, 1}),
+       makeFlatVector<int64_t>({100, 200, 30, 40, 50})});
+  createDuckDbTable({groupedInput});
+  testAggregations(
+      {groupedInput},
+      {"c0"},
+      {"spark_sum(c1)"},
+      "SELECT c0, sum(c1) FROM tmp GROUP BY c0",
+      {},
+      false);
+}
+
+// Same parity as above with SubOp disabled at process start (POSIX setenv).
+// Gluten: `spark.executorEnv.BOLT_SPARK_SUM_INT64_USE_SUBOP=0` on executors.
+TEST_F(SumAggregationTest, sumInt64SubOpEnvOffParity) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  constexpr const char* kEnv = "BOLT_SPARK_SUM_INT64_USE_SUBOP";
+  ASSERT_EQ(0, ::setenv(kEnv, "0", 1));
+  struct UnsetEnv {
+    const char* key;
+    ~UnsetEnv() {
+      ::unsetenv(key);
+    }
+  } unset{kEnv};
+
+  auto globalInput =
+      makeRowVector({makeFlatVector<int64_t>({7, 11, 13, -5, 2})});
+  createDuckDbTable({globalInput});
+  testAggregations(
+      {globalInput},
+      {},
+      {"spark_sum(c0)"},
+      "SELECT sum(c0) FROM tmp",
+      /*config*/ {},
+      /*testWithTableScan*/ false);
+
+  auto groupedInput = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, 1, 1, 1}),
+       makeFlatVector<int64_t>({100, 200, 30, 40, 50})});
+  createDuckDbTable({groupedInput});
+  testAggregations(
+      {groupedInput},
+      {"c0"},
+      {"spark_sum(c1)"},
+      "SELECT c0, sum(c1) FROM tmp GROUP BY c0",
+      {},
+      false);
+#endif
+}
+
+// Nullable grouped bigint vs DuckDB. On Linux aarch64 + 256-bit SVE the default
+// SubOp uses the SVE kernel; on other hosts SubOp matches Base (no SVE). Name
+// retains legacy "SveGate" — decouple removed outer mayHaveNulls/numNulls gates.
+TEST_F(SumAggregationTest, sumInt64SubOpNullableSveGate) {
+#if !defined(_WIN32)
+  ::unsetenv("BOLT_SPARK_SUM_INT64_USE_SUBOP");
+#endif
+  auto input = makeRowVector({
+      makeFlatVector<int32_t>({0, 0, 1, 1, 1, 2}),
+      makeNullableFlatVector<int64_t>(
+          {10, std::nullopt, 30, 4, std::nullopt, 100}),
+  });
+  createDuckDbTable({input});
+
+  testAggregations(
+      {input},
+      {"c0"},
+      {"spark_sum(c1)"},
+      "SELECT c0, sum(c1) FROM tmp GROUP BY c0",
+      {},
+      false);
+}
+
+// Nullable flat grouped input: SubOp (SVE when canUseSveKernel) vs Base env=0.
+// Complements DuckDB parity tests; catches SVE vs scalar divergence.
+TEST_F(SumAggregationTest, sumInt64SubOpSveMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 1}),
+          makeNullableFlatVector<int64_t>(
+              {10, std::nullopt, 30}),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({1, 1, 2}),
+          makeNullableFlatVector<int64_t>({4, std::nullopt, 100}),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
+}
+
+// Null constant bigint (indicesMode=2, mayHaveNulls): SVE null-mask path vs Base.
+TEST_F(SumAggregationTest, sumInt64SubOpNullConstMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 1}),
+          makeConstant<int64_t>(std::nullopt, 3),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({1, 2, 2}),
+          makeConstant<int64_t>(std::nullopt, 3),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
+}
+
+// Non-null flat bigint (`mayHaveNulls()==false`): PR #52-style decouple must
+// still match Base (covers no-null input + optional no-null groups).
+TEST_F(SumAggregationTest, sumInt64SubOpNonNullFlatMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 1, 1}),
+          makeFlatVector<int64_t>({10, 20, 30, 40}),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({1, 2, 2, 2}),
+          makeFlatVector<int64_t>({50, 100, 200, 300}),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
+}
+
+// Non-null constant bigint (indicesMode=2, `mayHaveNulls()==false`): decouple
+// exposes this shape to SVE; must match Base (uses value[constantIndex]).
+TEST_F(SumAggregationTest, sumInt64SubOpNonNullConstMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 1, 1}),
+          makeConstant<int64_t>(7, 4),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({2, 2, 2, 2}),
+          makeConstant<int64_t>(11, 4),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
+}
+
+// Dictionary bigint (indicesMode=3): gather via `value[indices[row]]`.
+TEST_F(SumAggregationTest, sumInt64SubOpDictionaryMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  auto values = makeFlatVector<int64_t>({10, 20, 30, 40, 50});
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 1, 1}),
+          wrapInDictionary(makeIndices({0, 1, 2, 3}), 4, values),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({2, 2, 2, 2}),
+          wrapInDictionary(makeIndices({1, 2, 3, 4}), 4, values),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
+}
+
+// After batch 1 clears group-null flags (`numNulls_==0`), batch 2 still handles
+// nullable flat input via SVE nullsMode=1 masks.
+TEST_F(SumAggregationTest, sumInt64SubOpNumNullsZeroNullableInputMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 1, 2}),
+          makeFlatVector<int64_t>({10, 20, 30}),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 1, 2}),
+          makeNullableFlatVector<int64_t>({5, std::nullopt, 15}),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
+}
+
+// Two-batch dictionary (indicesMode=3) with different index patterns per batch.
+// Same partial+final plan as other expectSparkSumInt64SubOpMatchesBase tests.
+TEST_F(SumAggregationTest, sumInt64SubOpIntermediateDictionaryMatchesBase) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "BOLT_SPARK_SUM_INT64_USE_SUBOP uses POSIX setenv/unsetenv";
+#else
+  auto values = makeFlatVector<int64_t>({7, 11, 13, 17});
+  const std::vector<RowVectorPtr> batches = {
+      makeRowVector({
+          makeFlatVector<int32_t>({0, 0, 1, 1}),
+          wrapInDictionary(makeIndices({0, 1, 2, 3}), 4, values),
+      }),
+      makeRowVector({
+          makeFlatVector<int32_t>({1, 2, 2, 2}),
+          wrapInDictionary(makeIndices({3, 0, 1, 2}), 4, values),
+      }),
+  };
+
+  expectSparkSumInt64SubOpMatchesBase(batches);
+#endif
 }
 
 TEST_F(SumAggregationTest, hookLimits) {

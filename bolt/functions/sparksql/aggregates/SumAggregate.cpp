@@ -32,12 +32,45 @@
 
 #include "bolt/functions/lib/aggregates/SumAggregateBase.h"
 #include "bolt/functions/sparksql/aggregates/DecimalSumAggregate.h"
+#include "bolt/functions/sparksql/aggregates/SumAggregateSparkInt64SubOp.h"
+
+#include <cctype>
+#include <cstdlib>
+
 using namespace bytedance::bolt::functions::aggregate;
 namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
 template <typename TInput, typename TAccumulator, typename ResultType>
 using SumAggregate = SumAggregateBase<TInput, TAccumulator, ResultType>;
+
+// Process env rollback for Spark BIGINT sum (non-decimal): default SubOp on.
+// Disable with BOLT_SPARK_SUM_INT64_USE_SUBOP=0 / false / no / off (ASCII,
+// case-insensitive for the words). Empty or unknown non-false → SubOp on.
+bool sparkSumInt64UseSubOpFromEnv() {
+  const char* v = std::getenv("BOLT_SPARK_SUM_INT64_USE_SUBOP");
+  if (v == nullptr || *v == '\0') {
+    return true;
+  }
+  if (v[0] == '0' && v[1] == '\0') {
+    return false;
+  }
+  auto eqNoCase = [](const char* a, const char* b) {
+    while (*a && *b) {
+      if (std::tolower(static_cast<unsigned char>(*a)) !=
+          std::tolower(static_cast<unsigned char>(*b))) {
+        return false;
+      }
+      ++a;
+      ++b;
+    }
+    return *a == *b;
+  };
+  if (eqNoCase(v, "false") || eqNoCase(v, "no") || eqNoCase(v, "off")) {
+    return false;
+  }
+  return true;
+}
 
 TypePtr getDecimalSumType(
     const TypePtr& resultType,
@@ -111,6 +144,9 @@ exec::AggregateRegistrationResult registerSum(
                 return std::make_unique<DecimalSumAggregate<int64_t, int128_t>>(
                     resultType, sumType);
               }
+            }
+            if (sparkSumInt64UseSubOpFromEnv()) {
+              return std::make_unique<SumAggregateSparkInt64SubOp>(BIGINT());
             }
             return std::make_unique<SumAggregate<int64_t, int64_t, int64_t>>(
                 BIGINT());

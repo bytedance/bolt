@@ -37,6 +37,12 @@ set(PAAGG_TYPES
 )
 specialize_template(PAAGG_GENERATED_FILES PercentileApproxAggregate.cpp.in ${PAAGG_TYPES})
 
+set(BOLT_SPARK_SUM_INT64_SUBOP_SVE "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*|arm64.*)")
+  list(APPEND BOLT_SPARK_SUM_INT64_SUBOP_SVE SumAggregateSparkInt64SubOpSve.cpp)
+endif()
+
 set(PERCENTILE_TYPES
     "TypeKind::TINYINT"
     "TypeKind::SMALLINT"
@@ -88,7 +94,8 @@ bolt_add_library(
   PercentileAggregate.cpp
   Register.cpp
   RegrReplacementAggregate.cpp
-  SumAggregate.cpp
+  SumAggregateSparkInt64SubOp.cpp
+  ${BOLT_SPARK_SUM_INT64_SUBOP_SVE}
   SumAggregate.cpp
 )
 
@@ -96,6 +103,15 @@ target_link_libraries(
   bolt_functions_spark_aggregates bolt_exec bolt_expression_functions bolt_aggregates bolt_vector
   fmt::fmt
 )
+
+# SumAggregateSparkInt64SubOpSve.cpp uses <arm_sve.h>; default Bolt -march=armv8.3-a
+# does not enable the SVE ISA; compile this Linux AArch64 TU with +sve only.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*|arm64.*)")
+  set_source_files_properties(
+    SumAggregateSparkInt64SubOpSve.cpp
+    PROPERTIES COMPILE_OPTIONS "-march=armv8-a+sve")
+endif()
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
