@@ -129,6 +129,8 @@ set_target_properties(
       ON
 )
 
+add_subdirectory(radixsort)
+
 if(${ENABLE_BOLT_JIT})
   find_package(LLVM REQUIRED CONFIG)
 endif()

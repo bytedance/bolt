@@ -185,6 +185,19 @@ set(
 )
 
 option(BOLT_BUILD_TEST_UTILS "Builds Bolt test utilities" OFF)
+option(
+  BOLT_BUILD_RADIX_SORT_TEST
+  "Build the standalone radix sort contract test."
+  OFF
+)
+option(
+  BOLT_BUILD_RADIX_SORT_BENCHMARK
+  "Build the standalone radix SortBuffer benchmark."
+  OFF
+)
+if(BOLT_BUILD_RADIX_SORT_TEST)
+  set(BOLT_BUILD_TEST_UTILS ON)
+endif()
 set(
   BOLT_TEST_LINKAGE
   "shared"

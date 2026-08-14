@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/DecodedVector.h"
@@ -49,6 +51,18 @@ class ContainerRowSerde {
       const BaseVector& source,
       vector_size_t index,
       ByteOutputStream& out,
+      const ContainerRowSerdeOptions& options);
+
+  static size_t serializedSize(
+      const BaseVector& source,
+      vector_size_t index,
+      const ContainerRowSerdeOptions& options);
+
+  static void serializeTo(
+      const BaseVector& source,
+      vector_size_t index,
+      char* output,
+      size_t outputSize,
       const ContainerRowSerdeOptions& options);
 
   static void deserialize(
