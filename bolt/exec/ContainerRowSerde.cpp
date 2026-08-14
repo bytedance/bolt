@@ -30,7 +30,9 @@
 
 #include "bolt/exec/ContainerRowSerde.h"
 
-#include "bolt/common/memory/HashStringAllocator.h"
+#include <array>
+#include <limits>
+
 #include "bolt/exec/VariantSerdeDetail.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -38,6 +40,163 @@
 namespace bytedance::bolt::exec {
 namespace {
 StringView readStringView(ByteInputStream& stream, std::string& storage);
+
+void addSerializedSize(size_t& total, size_t increment) {
+  BOLT_CHECK_LE(
+      increment,
+      std::numeric_limits<size_t>::max() - total,
+      "Container row serialized size overflow");
+  total += increment;
+}
+
+size_t serializedSizeSwitch(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions& options);
+
+template <TypeKind Kind>
+size_t serializedSizeOne(
+    const BaseVector&,
+    vector_size_t,
+    const ContainerRowSerdeOptions&) {
+  return sizeof(typename TypeTraits<Kind>::NativeType);
+}
+
+template <>
+size_t serializedSizeOne<TypeKind::VARCHAR>(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions&) {
+  const auto value =
+      source.asUnchecked<SimpleVector<StringView>>()->valueAt(index);
+  return sizeof(int32_t) + value.size();
+}
+
+template <>
+size_t serializedSizeOne<TypeKind::VARBINARY>(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions&) {
+  return serializedSizeOne<TypeKind::VARCHAR>(
+      source, index, ContainerRowSerdeOptions{});
+}
+
+template <>
+size_t serializedSizeOne<TypeKind::VARIANT>(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions&) {
+  const auto* variant = source.wrappedVector()->asUnchecked<VariantVector>();
+  const auto value = variant->valueAt(source.wrappedIndex(index));
+  return 2 * sizeof(int32_t) + value.value.size() + value.metadata.size();
+}
+
+template <>
+size_t serializedSizeOne<TypeKind::ROW>(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions& options) {
+  const auto* row = source.wrappedVector()->asUnchecked<RowVector>();
+  const auto wrappedIndex = source.wrappedIndex(index);
+  const auto childCount = row->type()->as<TypeKind::ROW>().size();
+  size_t size =
+      bits::nwords(static_cast<uint64_t>(childCount)) * sizeof(uint64_t);
+  const auto& children = row->children();
+  for (uint32_t child = 0; child < children.size(); ++child) {
+    if (children[child] != nullptr &&
+        !children[child]->isNullAt(wrappedIndex)) {
+      addSerializedSize(
+          size, serializedSizeSwitch(*children[child], wrappedIndex, options));
+    }
+  }
+  return size;
+}
+
+size_t serializedArraySize(
+    const BaseVector& elements,
+    folly::Range<const vector_size_t*> indices,
+    const ContainerRowSerdeOptions& options) {
+  size_t size = sizeof(int32_t) +
+      bits::nwords(static_cast<uint64_t>(indices.size())) * sizeof(uint64_t);
+  for (const auto index : indices) {
+    if (!elements.isNullAt(index)) {
+      addSerializedSize(size, serializedSizeSwitch(elements, index, options));
+    }
+  }
+  return size;
+}
+
+size_t serializedArraySize(
+    const BaseVector& elements,
+    vector_size_t offset,
+    vector_size_t count,
+    const ContainerRowSerdeOptions& options) {
+  size_t size = sizeof(int32_t) +
+      bits::nwords(static_cast<uint64_t>(count)) * sizeof(uint64_t);
+  for (vector_size_t element = 0; element < count; ++element) {
+    const auto index = offset + element;
+    if (!elements.isNullAt(index)) {
+      addSerializedSize(size, serializedSizeSwitch(elements, index, options));
+    }
+  }
+  return size;
+}
+
+template <>
+size_t serializedSizeOne<TypeKind::ARRAY>(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions& options) {
+  const auto* array = source.wrappedVector()->asUnchecked<ArrayVector>();
+  const auto wrappedIndex = source.wrappedIndex(index);
+  return serializedArraySize(
+      *array->elements(),
+      array->offsetAt(wrappedIndex),
+      array->sizeAt(wrappedIndex),
+      options);
+}
+
+template <>
+size_t serializedSizeOne<TypeKind::MAP>(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions& options) {
+  const auto* map = source.wrappedVector()->asUnchecked<MapVector>();
+  const auto wrappedIndex = source.wrappedIndex(index);
+  size_t size = 0;
+  if (options.isKey) {
+    const auto indices = map->sortedKeyIndices(wrappedIndex);
+    addSerializedSize(
+        size, serializedArraySize(*map->mapKeys(), indices, options));
+    addSerializedSize(
+        size, serializedArraySize(*map->mapValues(), indices, options));
+  } else {
+    const auto offset = map->offsetAt(wrappedIndex);
+    const auto count = map->sizeAt(wrappedIndex);
+    addSerializedSize(
+        size, serializedArraySize(*map->mapKeys(), offset, count, options));
+    addSerializedSize(
+        size, serializedArraySize(*map->mapValues(), offset, count, options));
+  }
+  return size;
+}
+
+size_t serializedSizeSwitch(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions& options) {
+  return BOLT_DYNAMIC_TYPE_DISPATCH(
+      serializedSizeOne, source.typeKind(), source, index, options);
+}
+
+class FixedRangeStreamArena final : public StreamArena {
+ public:
+  FixedRangeStreamArena() : StreamArena(nullptr) {}
+
+  void newRange(int32_t, ByteRange*, ByteRange*) override {
+    BOLT_FAIL("Container row contiguous output is too small");
+  }
+};
 
 // Copy from vector to stream.
 void serializeSwitch(
@@ -144,15 +303,16 @@ void serializeMany(
     } else if (simpleVector->encoding() == VectorEncoding::Simple::CONSTANT) {
       auto* constantVector = vector.asUnchecked<ConstantVector<T>>();
       if (!constantVector->isNullAt(0)) {
-        if constexpr (std::is_same_v<T, __int128>) {
-          HashStringAllocator hashStringAllocator(vector.pool());
-          AlignedStlAllocator<T, sizeof(T)> allocator(&hashStringAllocator);
-          std::vector<T, AlignedStlAllocator<T, sizeof(T)>> values(
-              size, constantVector->valueAt(0), allocator);
-          stream.append<T>(values);
-        } else {
-          std::vector<T> values(size, constantVector->valueAt(0));
-          stream.append<T>(values);
+        constexpr vector_size_t kValuesPerChunk = 64;
+        std::array<T, kValuesPerChunk> values;
+        values.fill(constantVector->valueAt(0));
+        vector_size_t offset = 0;
+        while (offset < size) {
+          const auto count =
+              std::min<vector_size_t>(kValuesPerChunk, size - offset);
+          stream.append<T>(
+              folly::Range<const T*>(values.data(), values.data() + count));
+          offset += count;
         }
       }
       return;
@@ -1168,6 +1328,39 @@ void ContainerRowSerde::serialize(
   BOLT_DCHECK(
       !source.isNullAt(index), "Null top-level values are not supported");
   serializeSwitch(source, index, out, options);
+}
+
+// static
+size_t ContainerRowSerde::serializedSize(
+    const BaseVector& source,
+    vector_size_t index,
+    const ContainerRowSerdeOptions& options) {
+  BOLT_DCHECK(
+      !source.isNullAt(index), "Null top-level values are not supported");
+  return serializedSizeSwitch(source, index, options);
+}
+
+// static
+void ContainerRowSerde::serializeTo(
+    const BaseVector& source,
+    vector_size_t index,
+    char* output,
+    size_t outputSize,
+    const ContainerRowSerdeOptions& options) {
+  BOLT_CHECK_LE(
+      outputSize,
+      static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+      "Container row contiguous output exceeds ByteRange");
+  FixedRangeStreamArena arena;
+  ByteOutputStream stream(&arena, false, false);
+  stream.setRange(
+      ByteRange{
+          reinterpret_cast<uint8_t*>(output),
+          static_cast<int32_t>(outputSize),
+          0},
+      0);
+  serialize(source, index, stream, options);
+  BOLT_CHECK_EQ(stream.size(), outputSize);
 }
 
 // static

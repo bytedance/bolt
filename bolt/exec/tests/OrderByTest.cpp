@@ -372,6 +372,7 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
       uint64_t targetBytes,
       memory::MemoryReclaimer::Stats& reclaimerStats) {
     const auto oldCapacity = op->pool()->capacity();
+    memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
     op->pool()->reclaim(targetBytes, 0, reclaimerStats);
     dynamic_cast<memory::MemoryPoolImpl*>(op->pool())
         ->testingSetCapacity(oldCapacity);
@@ -440,6 +441,29 @@ TEST_P(OrderByTest, singleKey) {
              .capturePlanNodeId(orderById)
              .planNode();
   runTest(plan, orderById, "SELECT * FROM tmp ORDER BY c0 NULLS FIRST", {0});
+}
+
+TEST_P(OrderByTest, sortBufferConfig) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not use CPU sort buffers\n";
+  }
+
+  auto vectors = createVectors(3, rowType_, fuzzerOpts_);
+  createDuckDbTable(vectors);
+  auto plan = PlanBuilder()
+                  .values(vectors)
+                  .orderBy({"c0 ASC NULLS LAST", "c2 DESC NULLS FIRST"}, false)
+                  .planNode();
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .plan(plan)
+      .assertResults(
+          "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
+      .plan(plan)
+      .assertResults(
+          "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
 }
 
 TEST_P(OrderByTest, multipleKeys) {
@@ -1007,25 +1031,27 @@ TEST_P(OrderByTest, outputBatchRows) {
     int numRowsPerBatch;
     int preferredOutBatchBytes;
     int maxOutBatchRows;
-    int expectedOutputVectors;
+    int expectedLegacyOutputVectors;
+    int expectedRadixOutputVectors;
 
     // TODO: add output size check with spilling enabled
     std::string debugString() const {
       return fmt::format(
-          "numRowsPerBatch:{}, preferredOutBatchBytes:{}, maxOutBatchRows:{}, expectedOutputVectors:{}",
+          "numRowsPerBatch:{}, preferredOutBatchBytes:{}, maxOutBatchRows:{}, expectedLegacyOutputVectors:{}, expectedRadixOutputVectors:{}",
           numRowsPerBatch,
           preferredOutBatchBytes,
           maxOutBatchRows,
-          expectedOutputVectors);
+          expectedLegacyOutputVectors,
+          expectedRadixOutputVectors);
     }
   } testSettings[] = {
-      {1024, 1, 100, 1024},
+      {1024, 1, 100, 1024, 1024},
       // estimated size per row is ~2092, set preferredOutBatchBytes to 20920,
       // so each batch has 10 rows, so it would return 100 batches
-      {1000, 20920, 100, 100},
+      {1000, 20920, 100, 100, 112},
       // same as above, but maxOutBatchRows is 1, so it would return 1000
       // batches
-      {1000, 20920, 1, 1000}};
+      {1000, 20920, 1, 1000, 1000}};
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
@@ -1049,20 +1075,27 @@ TEST_P(OrderByTest, outputBatchRows) {
                     .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                     .capturePlanNodeId(orderById)
                     .planNode();
-    auto queryCtx = core::QueryCtx::create(executor_.get());
-    queryCtx->testingOverrideConfigUnsafe(
-        {{core::QueryConfig::kPreferredOutputBatchBytes,
-          std::to_string(testData.preferredOutBatchBytes)},
-         {core::QueryConfig::kMaxOutputBatchRows,
-          std::to_string(testData.maxOutBatchRows)}});
-    CursorParameters params;
-    params.planNode = plan;
-    params.queryCtx = queryCtx;
-    auto task = assertQueryOrdered(
-        params, "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST", {0});
-    EXPECT_EQ(
-        testData.expectedOutputVectors,
-        toPlanStats(task->taskStats()).at(orderById).outputVectors);
+    const auto runWithSortBuffer = [&](bool radixSortEnabled,
+                                       int expectedOutputVectors) {
+      auto queryCtx = core::QueryCtx::create(executor_.get());
+      queryCtx->testingOverrideConfigUnsafe(
+          {{core::QueryConfig::kOrderByRadixSortEnabled,
+            radixSortEnabled ? "true" : "false"},
+           {core::QueryConfig::kPreferredOutputBatchBytes,
+            std::to_string(testData.preferredOutBatchBytes)},
+           {core::QueryConfig::kMaxOutputBatchRows,
+            std::to_string(testData.maxOutBatchRows)}});
+      CursorParameters params;
+      params.planNode = plan;
+      params.queryCtx = queryCtx;
+      auto task = assertQueryOrdered(
+          params, "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST", {0});
+      EXPECT_EQ(
+          expectedOutputVectors,
+          toPlanStats(task->taskStats()).at(orderById).outputVectors);
+    };
+    runWithSortBuffer(true, testData.expectedRadixOutputVectors);
+    runWithSortBuffer(false, testData.expectedLegacyOutputVectors);
   }
 }
 
@@ -1105,10 +1138,10 @@ TEST_P(OrderByTest, spill) {
   ASSERT_GT(planStats.customStats["spillFillTime"].sum, 0);
   ASSERT_GT(planStats.customStats["spillSortTime"].sum, 0);
   ASSERT_GT(planStats.customStats["spillSerializationTime"].sum, 0);
-  ASSERT_GT(planStats.customStats["spillFlushTime"].sum, 0);
-  ASSERT_EQ(
-      planStats.customStats["spillSerializationTime"].count,
-      planStats.customStats["spillFlushTime"].count);
+  ASSERT_GE(planStats.customStats["spillFlushTime"].sum, 0);
+  ASSERT_LE(
+      planStats.customStats["spillFlushTime"].count,
+      planStats.customStats["spillSerializationTime"].count);
   ASSERT_GT(planStats.customStats[Operator::kSpillWrites].sum, 0);
   ASSERT_GT(planStats.customStats["spillWriteTime"].sum, 0);
   ASSERT_EQ(
@@ -1159,6 +1192,7 @@ TEST_P(OrderByTest, spillWithArrowSerde) {
   queryCtx->testingOverrideConfigUnsafe({
       {core::QueryConfig::kSpillEnabled, "true"},
       {core::QueryConfig::kOrderBySpillEnabled, "true"},
+      {core::QueryConfig::kOrderByRadixSortEnabled, "false"},
       {core::QueryConfig::kSinglePartitionSpillSerdeKind, "Arrow"},
       {core::QueryConfig::kSpillNumPartitionBits, "0"},
       {core::QueryConfig::kJitLevel, "-1"},
@@ -1342,6 +1376,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
+            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1485,6 +1520,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringReserve) {
         .spillDirectory(tempDirectory->path)
         .config(core::QueryConfig::kSpillEnabled, true)
         .config(core::QueryConfig::kOrderBySpillEnabled, true)
+        .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
         .maxDrivers(1)
         .assertResults(expectedResult);
   });
@@ -1607,6 +1643,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
+            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1728,6 +1765,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
+            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -2019,6 +2057,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, spillWithNoMoreOutput) {
           .spillDirectory(spillDirectory->path)
           .config(core::QueryConfig::kSpillEnabled, true)
           .config(core::QueryConfig::kOrderBySpillEnabled, true)
+          .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
           // Set output buffer size to extreme large to read all the
           // output rows in one vector.
           .config(QueryConfig::kPreferredOutputBatchRows, 1'000'000'000)

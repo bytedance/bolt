@@ -259,6 +259,9 @@ class QueryConfig {
   /// OrderBy spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kOrderBySpillEnabled = "order_by_spill_enabled";
 
+  static constexpr const char* kOrderByRadixSortEnabled =
+      "order_by_radix_sort_enabled";
+
   /// Support orderBy spilling in output stage
   static constexpr const char* kOrderBySpillInOutputStageEnabled =
       "order_by_spill_output_stage_enabled";
@@ -1140,6 +1143,10 @@ class QueryConfig {
   /// spillEnabled()!
   bool orderBySpillEnabled() const {
     return get<bool>(kOrderBySpillEnabled, true);
+  }
+
+  bool orderByRadixSortEnabled() const {
+    return get<bool>(kOrderByRadixSortEnabled, true);
   }
 
   bool orderBySpillInOutputStageEnabled() const {
