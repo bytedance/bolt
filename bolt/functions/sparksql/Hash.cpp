@@ -35,6 +35,7 @@
 #include <type/Type.h>
 #include <vector/ComplexVector.h>
 #include <cstdint>
+#include <cstring>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/expression/DecodedArgs.h"
@@ -878,6 +879,13 @@ class HiveHash<TypeKind::BIGINT> : HiveHashBase {
     }
   }
 
+  ResultType hash(uint64_t input, SeedType seed) const {
+    BOLT_DCHECK(!isDecimal_);
+    int64_t signedInput;
+    std::memcpy(&signedInput, &input, sizeof(input));
+    return HiveHashBase::hashInt64(signedInput, seed);
+  }
+
  private:
   const bool isDecimal_;
   const uint8_t scale_;
@@ -917,33 +925,42 @@ __attribute__((noinline)) bool hiveHashMultiple(
     HiveHash<typeKind> hasher(input->type());
     if constexpr (typeKind != TypeKind::BOOLEAN) {
       if (input->isFlatEncoding()) {
-        auto flatVector =
-            input->asFlatVector<typename TypeTraits<typeKind>::NativeType>();
-        bool hasNoNull = flatVector->rawNulls()
-            ? bits::isAllSet(
-                  flatVector->rawNulls(), 0, inputSize, bits::kNotNull)
-            : true;
-        if (hasNoNull) {
-          auto rawInput = flatVector->rawValues();
-          for (size_t row = 0; row < inputSize; row++) {
-            result[row] =
-                hasher.hash(rawInput[row], useDefaultSeed ? 0 : result[row]);
-          }
-        } else {
-          for (size_t row = 0; row < inputSize; row++) {
-            HiveHashBase::ResultType hashValue;
-            if (flatVector->isNullAt(row)) {
-              hashValue =
-                  HiveHashBase::hashNull(useDefaultSeed ? 0 : result[row]);
-            } else {
-              hashValue = hasher.hash(
-                  flatVector->valueAtFast(row),
-                  useDefaultSeed ? 0 : result[row]);
+        const auto hashFlatVector = [&](const auto* flatVector) {
+          BOLT_CHECK_NOT_NULL(flatVector);
+          bool hasNoNull = flatVector->rawNulls()
+              ? bits::isAllSet(
+                    flatVector->rawNulls(), 0, inputSize, bits::kNotNull)
+              : true;
+          if (hasNoNull) {
+            auto rawInput = flatVector->rawValues();
+            for (size_t row = 0; row < inputSize; row++) {
+              result[row] =
+                  hasher.hash(rawInput[row], useDefaultSeed ? 0 : result[row]);
             }
-            result[row] = hashValue;
+          } else {
+            for (size_t row = 0; row < inputSize; row++) {
+              HiveHashBase::ResultType hashValue;
+              if (flatVector->isNullAt(row)) {
+                hashValue =
+                    HiveHashBase::hashNull(useDefaultSeed ? 0 : result[row]);
+              } else {
+                hashValue = hasher.hash(
+                    flatVector->valueAtFast(row),
+                    useDefaultSeed ? 0 : result[row]);
+              }
+              result[row] = hashValue;
+            }
           }
+          return true;
+        };
+        if constexpr (typeKind == TypeKind::BIGINT) {
+          if (auto flatVector = input->asFlatVector<int64_t>()) {
+            return hashFlatVector(flatVector);
+          }
+          return hashFlatVector(input->asFlatVector<uint64_t>());
         }
-        return true;
+        return hashFlatVector(
+            input->asFlatVector<typename TypeTraits<typeKind>::NativeType>());
       }
     }
     DecodedVector decoded(*input);

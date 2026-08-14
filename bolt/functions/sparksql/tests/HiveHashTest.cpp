@@ -114,6 +114,28 @@ TEST_F(HiveHashTest, Int64) {
   EXPECT_EQ(HiveHash<int64_t>(std::nullopt), 0);
 }
 
+TEST_F(HiveHashTest, unsignedBigintFlatVector) {
+  auto input = makeNullableFlatVector<uint64_t>(
+      {11,
+       std::nullopt,
+       std::numeric_limits<uint64_t>::max(),
+       std::numeric_limits<uint64_t>::max() - 2022},
+      BIGINT());
+  auto result =
+      evaluate<SimpleVector<int32_t>>("hive_hash(c0)", makeRowVector({input}));
+
+  assertEqualVectors(makeFlatVector<int32_t>({11, 0, 0, 2022}), result);
+}
+
+TEST_F(HiveHashTest, bigintDictionaryUsesDecodedPath) {
+  auto flat = makeFlatVector<int64_t>({11, 12});
+  auto dictionary = wrapInDictionary(makeIndices({1, 0}), flat);
+  auto result = evaluate<SimpleVector<int32_t>>(
+      "hive_hash(c0)", makeRowVector({dictionary}));
+
+  assertEqualVectors(makeFlatVector<int32_t>({12, 11}), result);
+}
+
 TEST_F(HiveHashTest, Int32) {
   EXPECT_EQ(HiveHash<int32_t>(INT32_MAX), INT32_MAX);
   // INT32_MIN from hive shell
