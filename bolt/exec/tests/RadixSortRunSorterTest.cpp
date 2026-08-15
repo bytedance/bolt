@@ -61,6 +61,15 @@ class RadixSortRunSorterTest : public testing::Test {
     return key;
   }
 
+  static std::string
+  fixedWideKey(uint64_t suffix, uint32_t width, char prefix = 'p') {
+    std::string key(width, prefix);
+    for (uint32_t byte = 0; byte < sizeof(suffix); ++byte) {
+      key[key.size() - 1 - byte] = static_cast<char>(suffix >> (byte * 8));
+    }
+    return key;
+  }
+
   static std::vector<std::string_view> views(
       const std::vector<std::string>& keys) {
     std::vector<std::string_view> result;
@@ -437,6 +446,22 @@ TEST_F(RadixSortRunSorterTest, longCommonPrefixFallsBackToFullKey) {
     keys.push_back(std::move(key));
   }
   verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32);
+}
+
+TEST_F(RadixSortRunSorterTest, fixedWideSuffixBytesSortBeforeFallback) {
+  std::vector<std::string> keys;
+  for (uint64_t value = 4096; value > 0; --value) {
+    keys.push_back(fixedWideKey(value % 257, 32));
+  }
+  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyFixed32);
+
+  std::vector<std::string> payloadKeys;
+  for (uint64_t value = 4096; value > 0; --value) {
+    payloadKeys.push_back(
+        fixedWideKey(value % 257, 24, static_cast<char>('a' + value % 4)));
+  }
+  verifyAgainstOracle(
+      payloadKeys, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32);
 }
 
 TEST_F(RadixSortRunSorterTest, leadingValiditySkipAvoidsConstantPass) {

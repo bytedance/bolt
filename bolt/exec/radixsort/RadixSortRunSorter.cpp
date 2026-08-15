@@ -29,6 +29,7 @@ namespace {
 constexpr uint64_t kRunDetectionCutoff = 128;
 constexpr uint64_t kComparisonFallbackCutoff = 128;
 constexpr uint64_t kLargeBucketCutoff = 1024;
+constexpr uint32_t kEffectiveRadixPassLimit = sizeof(uint64_t);
 
 uint64_t floorLog2(uint64_t value) {
   uint64_t result = 0;
@@ -307,7 +308,7 @@ class RadixSortRunSorterKernel {
       fullSort(first, last);
       return;
     }
-    sortRadixByte<0>(first, last);
+    sortRadixByte<0>(first, last, 0);
   }
 
   void adaptiveSort(std::span<const uint32_t> skippableByteOffsets = {}) {
@@ -332,8 +333,16 @@ class RadixSortRunSorterKernel {
   };
 
   using Iterator = SegmentedKeyIterator<KIND>;
+  using Traits = RadixSortKeyTraits<KIND>;
   using Compare = RadixSortKeyLess<KIND>;
   using RunList = std::list<Iterator>;
+  static constexpr bool kEnableSuffixRadix =
+      !Traits::kVariable && !Traits::kHasPayload;
+  static constexpr uint32_t kRadixByteLimit = kEnableSuffixRadix
+      ? Traits::kInlineCapacity
+      : std::min<uint32_t>(Traits::kInlineCapacity, sizeof(uint64_t));
+  static constexpr bool kRequiresFullKeyFallback =
+      Traits::kVariable || kRadixByteLimit < Traits::kInlineCapacity;
 
   void comparisonSort(Iterator begin, Iterator end) {
     boost::sort::pdqsort_branchless(begin, end, less_);
@@ -477,7 +486,7 @@ class RadixSortRunSorterKernel {
     if (end - begin < static_cast<int64_t>(kComparisonFallbackCutoff)) {
       fullSort(begin, end);
     } else {
-      sortRadixByte<0>(begin, end);
+      sortRadixByte<0>(begin, end, 0);
     }
   }
 
@@ -505,16 +514,17 @@ class RadixSortRunSorterKernel {
   }
 
   bool requiresFullKeyFallback() const {
-    return RadixSortKeyTraits<KIND>::kVariable ||
-        arena_.layout().radixWidth() <
-        RadixSortKeyTraits<KIND>::kInlineCapacity;
+    return kRequiresFullKeyFallback;
   }
 
   template <uint32_t OFFSET>
-  uint8_t radixByte(const typename RadixSortKeyTraits<KIND>::Type& key) const {
-    static_assert(OFFSET < sizeof(uint64_t));
+  uint8_t radixByte(const typename Traits::Type& key) const {
+    static_assert(OFFSET < Traits::kInlineCapacity);
+    const auto* words = &key.part0;
+    constexpr auto kWord = OFFSET / sizeof(uint64_t);
+    constexpr auto kByte = OFFSET % sizeof(uint64_t);
     return static_cast<uint8_t>(
-        key.part0 >> ((sizeof(uint64_t) - OFFSET - 1) * 8));
+        words[kWord] >> ((sizeof(uint64_t) - kByte - 1) * 8));
   }
 
   template <uint32_t OFFSET>
@@ -529,7 +539,8 @@ class RadixSortRunSorterKernel {
   }
 
   template <uint32_t OFFSET>
-  inline void sortBucket(Iterator begin, Iterator end) {
+  inline void
+  sortBucket(Iterator begin, Iterator end, uint32_t effectivePasses) {
     const auto count = end - begin;
     if (count <= 1) {
       return;
@@ -538,11 +549,11 @@ class RadixSortRunSorterKernel {
       fullSort(begin, end);
       return;
     }
-    sortRadixByte<OFFSET>(begin, end);
+    sortRadixByte<OFFSET>(begin, end, effectivePasses);
   }
 
   template <uint32_t OFFSET>
-  void cycleBucketSort(Iterator begin, Iterator end) {
+  void cycleBucketSort(Iterator begin, Iterator end, uint32_t effectivePasses) {
     PartitionInfo partitions[256];
     for (auto iterator = begin; iterator != end; ++iterator) {
       ++partitions[radixByte<OFFSET>(*iterator)].count;
@@ -597,14 +608,16 @@ class RadixSortRunSorterKernel {
     }
 
   recurse:
-    if (OFFSET + 1 == arena_.layout().radixWidth() &&
-        !requiresFullKeyFallback()) {
-      return;
+    if constexpr (OFFSET + 1 == kRadixByteLimit) {
+      if constexpr (!kRequiresFullKeyFallback) {
+        return;
+      }
     }
     uint64_t startOffset = 0;
     for (auto* bucket = remaining; bucket != remainingEnd; ++bucket) {
       const auto endOffset = partitions[*bucket].nextOffset;
-      sortBucket<OFFSET + 1>(begin + startOffset, begin + endOffset);
+      sortBucket<OFFSET + 1>(
+          begin + startOffset, begin + endOffset, effectivePasses);
       startOffset = endOffset;
     }
   }
@@ -653,7 +666,7 @@ class RadixSortRunSorterKernel {
   }
 
   template <uint32_t OFFSET>
-  void largeBucketSort(Iterator begin, Iterator end) {
+  void largeBucketSort(Iterator begin, Iterator end, uint32_t effectivePasses) {
     PartitionInfo partitions[256];
     for (auto iterator = begin; iterator != end; ++iterator) {
       ++partitions[radixByte<OFFSET>(*iterator)].count;
@@ -695,9 +708,10 @@ class RadixSortRunSorterKernel {
           });
     }
 
-    if (OFFSET + 1 == arena_.layout().radixWidth() &&
-        !requiresFullKeyFallback()) {
-      return;
+    if constexpr (OFFSET + 1 == kRadixByteLimit) {
+      if constexpr (!kRequiresFullKeyFallback) {
+        return;
+      }
     }
     for (auto* bucketIterator = remainingEnd; bucketIterator != remaining;
          --bucketIterator) {
@@ -705,30 +719,36 @@ class RadixSortRunSorterKernel {
       const auto startOffset =
           bucket == 0 ? uint64_t{0} : partitions[bucket - 1].nextOffset;
       const auto endOffset = partitions[bucket].nextOffset;
-      sortBucket<OFFSET + 1>(begin + startOffset, begin + endOffset);
+      sortBucket<OFFSET + 1>(
+          begin + startOffset, begin + endOffset, effectivePasses);
     }
   }
 
   template <uint32_t OFFSET>
-  __attribute__((noinline)) void sortRadixByte(Iterator begin, Iterator end) {
-    if constexpr (OFFSET == sizeof(uint64_t)) {
+  __attribute__((noinline)) void
+  sortRadixByte(Iterator begin, Iterator end, uint32_t effectivePasses) {
+    if constexpr (OFFSET == kRadixByteLimit) {
       if (requiresFullKeyFallback()) {
         fullSort(begin, end);
       }
       return;
     } else {
       if (byteIsSkippable(OFFSET)) {
-        sortRadixByte<OFFSET + 1>(begin, end);
+        sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
         return;
       }
       if (singleRadixBucket<OFFSET>(begin, end)) {
-        sortRadixByte<OFFSET + 1>(begin, end);
+        sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
+        return;
+      }
+      if (effectivePasses == kEffectiveRadixPassLimit) {
+        fullSort(begin, end);
         return;
       }
       if (end - begin < kLargeBucketCutoff) {
-        cycleBucketSort<OFFSET>(begin, end);
+        cycleBucketSort<OFFSET>(begin, end, effectivePasses + 1);
       } else {
-        largeBucketSort<OFFSET>(begin, end);
+        largeBucketSort<OFFSET>(begin, end, effectivePasses + 1);
       }
     }
   }
