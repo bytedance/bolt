@@ -416,7 +416,9 @@ void RadixSortRun::append(const RowVector& input) {
 
   VectorPtr directFixedKey;
   for (uint32_t column = 0; column < keys.childrenSize(); ++column) {
-    keyMayHaveNulls_[column] |= keys.childAt(column)->mayHaveNulls();
+    const auto mayHaveNulls = keys.childAt(column)->mayHaveNulls();
+    keyMayHaveNulls_[column] |= mayHaveNulls;
+    currentRunKeyMayHaveNulls_[column] |= mayHaveNulls;
   }
   EncodedKeyBatch encodedKeys;
   const auto encodeBegin = std::chrono::steady_clock::now();
@@ -505,7 +507,9 @@ void RadixSortRun::finalize() {
   const auto begin = std::chrono::steady_clock::now();
   try {
     RadixSortRunSorter sorter(*storage_);
-    sorter.sort(keyCodec_->leadingSkippableValidityOffsets());
+    const auto skippableValidityOffsets =
+        keyCodec_->leadingSkippableValidityOffsets(currentRunKeyMayHaveNulls_);
+    sorter.sort(skippableValidityOffsets);
   } catch (...) {
     metrics_.sortTimeUs += elapsedUs(begin);
     throw;
@@ -693,6 +697,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     keyCodec_->decodeTrusted(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
+        keyMayHaveNulls_,
         outputPool,
         decodeCursorOutput_,
         decodedKeysOutput_);
@@ -705,6 +710,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     keyCodec_->decodeTrusted(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
+        keyMayHaveNulls_,
         outputPool,
         decodeCursorOutput_,
         decodedKeysOutput_);
@@ -717,6 +723,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     keyCodec_->decodeTrusted(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
+        keyMayHaveNulls_,
         outputPool,
         decodeCursorOutput_,
         decodedKeysOutput_);
@@ -729,6 +736,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     keyCodec_->decodeTrusted(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
+        keyMayHaveNulls_,
         outputPool,
         decodeCursorOutput_,
         decodedKeysOutput_);
@@ -750,6 +758,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
   keyCodec_->decodeTrusted(
       std::span<const EncodedKeyView>(rawViews, count),
       projection_->decodedKeyMask(),
+      keyMayHaveNulls_,
       outputPool,
       decodeCursorOutput_,
       decodedKeysOutput_);
@@ -794,6 +803,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
       keyCodec_->decodeTrusted(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
+          keyMayHaveNulls_,
           outputPool,
           decodeCursorOutput_,
           decodedKeysOutput_);
@@ -807,6 +817,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
       keyCodec_->decodeTrusted(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
+          keyMayHaveNulls_,
           outputPool,
           decodeCursorOutput_,
           decodedKeysOutput_);
@@ -820,6 +831,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
       keyCodec_->decodeTrusted(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
+          keyMayHaveNulls_,
           outputPool,
           decodeCursorOutput_,
           decodedKeysOutput_);
@@ -831,6 +843,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
       keyCodec_->decodeTrusted(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
+          keyMayHaveNulls_,
           outputPool,
           decodeCursorOutput_,
           decodedKeysOutput_);
@@ -874,6 +887,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
   keyCodec_->decodeTrusted(
       std::span<const EncodedKeyView>(rawViews, count),
       projection_->decodedKeyMask(),
+      keyMayHaveNulls_,
       outputPool,
       decodeCursorOutput_,
       decodedKeysOutput_);

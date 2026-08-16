@@ -239,6 +239,7 @@ class RadixSortRun {
         keyLayout_(std::move(keyLayout)),
         storage_(std::move(arena)),
         keyMayHaveNulls_(std::move(keyMayHaveNulls)),
+        currentRunKeyMayHaveNulls_(keyMayHaveNulls_.size(), 0),
         payloadMayHaveNulls_(std::move(payloadMayHaveNulls)) {}
 
   RowVectorPtr decodeKeys(
@@ -273,7 +274,10 @@ class RadixSortRun {
   BufferPtr decodeInlineOutput_;
   BufferPtr decodeViewsOutput_;
   BufferPtr payloadRowsOutput_;
+  // Global across spilled and in-memory runs; used by output decode.
   std::vector<uint8_t> keyMayHaveNulls_;
+  // Current in-memory run only; used by finalize radix pass skipping.
+  std::vector<uint8_t> currentRunKeyMayHaveNulls_;
   std::vector<uint8_t> payloadMayHaveNulls_;
   RadixSortRunState state_{RadixSortRunState::kBuilding};
   uint64_t outputPosition_{0};
