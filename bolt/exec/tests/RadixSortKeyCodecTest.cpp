@@ -453,6 +453,31 @@ TEST_F(RadixSortKeyCodecTest, leadingSkippableValidityOffsets) {
   EXPECT_TRUE(codec->leadingSkippableValidityOffsets().empty());
 }
 
+TEST_F(RadixSortKeyCodecTest, dynamicLeadingSkippableValidityOffsets) {
+  std::unique_ptr<RadixSortKeyCodec> codec;
+  RadixSortKeyCodec::bind(
+      {TINYINT(), SMALLINT(), INTEGER(), TINYINT()},
+      {flags(true, true),
+       flags(true, true),
+       flags(true, true),
+       flags(true, true)},
+      codec);
+  EXPECT_TRUE(codec->leadingSkippableValidityOffsets().empty());
+  const std::vector<uint8_t> allNonNull{0, 0, 0, 0};
+  EXPECT_EQ(
+      codec->leadingSkippableValidityOffsets(allNonNull),
+      (std::vector<uint32_t>{0, 2, 5}));
+  const std::vector<uint8_t> secondMayHaveNulls{0, 1, 0, 0};
+  EXPECT_EQ(
+      codec->leadingSkippableValidityOffsets(secondMayHaveNulls),
+      (std::vector<uint32_t>{0}));
+
+  RadixSortKeyCodec::bind(
+      {VARCHAR(), TINYINT()}, {flags(true, true), flags(true, true)}, codec);
+  const std::vector<uint8_t> variableNonNull{0, 0};
+  EXPECT_TRUE(codec->leadingSkippableValidityOffsets(variableNonNull).empty());
+}
+
 TEST_F(RadixSortKeyCodecTest, knownEncodedKeyBytes) {
   auto integerRows =
       makeRows({makeVector<int32_t>(INTEGER(), {0, -1, std::nullopt})});

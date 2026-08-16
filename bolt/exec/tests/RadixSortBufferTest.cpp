@@ -780,6 +780,129 @@ TEST_F(RadixSortBufferTest, explicitSpillMergesDiskAndMemoryRuns) {
   EXPECT_TRUE(buffer.spillReadStats().has_value());
 }
 
+TEST_F(RadixSortBufferTest, spillMergeNullFreeOutputResetsNullBuffers) {
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(spillDirectory->path);
+  auto first = makeRows(
+      {"text_key",
+       "nullable_key",
+       "fixed_payload",
+       "string_payload",
+       "nullable_payload",
+       "id"},
+      {makeStringVector(
+           VARCHAR(),
+           {std::string("k0"), std::string("k1"), std::string("k4")}),
+       makeVector<int64_t>(BIGINT(), {std::nullopt, 2, 1}),
+       makeVector<int64_t>(BIGINT(), {60, 10, 40}),
+       makeStringVector(
+           VARCHAR(),
+           {std::string(72, 'f'), std::string(72, 'a'), std::string(72, 'd')}),
+       makeVector<int64_t>(BIGINT(), {std::nullopt, 200, 100}),
+       makeVector<int64_t>(BIGINT(), {0, 1, 2})});
+  auto second = makeRows(
+      {"text_key",
+       "nullable_key",
+       "fixed_payload",
+       "string_payload",
+       "nullable_payload",
+       "id"},
+      {makeStringVector(
+           VARCHAR(),
+           {std::string("k3"), std::string("k5"), std::string("k2")}),
+       makeVector<int64_t>(BIGINT(), {3, 0, 4}),
+       makeVector<int64_t>(BIGINT(), {30, 50, 20}),
+       makeStringVector(
+           VARCHAR(),
+           {std::string(72, 'c'), std::string(72, 'e'), std::string(72, 'b')}),
+       makeVector<int64_t>(BIGINT(), {300, 500, 400}),
+       makeVector<int64_t>(BIGINT(), {3, 4, 5})});
+  inputType_ = std::static_pointer_cast<const RowType>(first->type());
+  RadixSortBuffer buffer(
+      inputType_,
+      {0, 1},
+      {flags(true, true), flags(true, true)},
+      pool(),
+      &config);
+  buffer.addInput(first);
+  buffer.spill();
+  ASSERT_TRUE(buffer.spilledStats().has_value());
+  buffer.addInput(second);
+  buffer.noMoreInput();
+
+  auto firstOutput = buffer.getOutput(3);
+  ASSERT_NE(firstOutput, nullptr);
+  ASSERT_NE(firstOutput->childAt(1)->rawNulls(), nullptr);
+  ASSERT_NE(firstOutput->childAt(4)->rawNulls(), nullptr);
+  std::vector<VectorPtr> children;
+  children.reserve(inputType_->size());
+  for (const auto& type : inputType_->children()) {
+    children.push_back(BaseVector::create(type, 6, pool()));
+  }
+  for (uint32_t column = 0; column < children.size(); ++column) {
+    children[column]->copy(
+        firstOutput->childAt(column).get(), 0, 0, firstOutput->size());
+  }
+  vector_size_t offset = firstOutput->size();
+  for (const auto column : {0, 2, 3, 5}) {
+    ASSERT_EQ(firstOutput->childAt(column)->rawNulls(), nullptr) << column;
+    firstOutput->childAt(column)->mutableRawNulls();
+    ASSERT_NE(firstOutput->childAt(column)->rawNulls(), nullptr) << column;
+  }
+  firstOutput.reset();
+
+  auto secondOutput = buffer.getOutput(3);
+  ASSERT_NE(secondOutput, nullptr);
+  EXPECT_NE(secondOutput->childAt(1)->rawNulls(), nullptr);
+  EXPECT_TRUE(secondOutput->childAt(1)->mayHaveNulls());
+  EXPECT_NE(secondOutput->childAt(4)->rawNulls(), nullptr);
+  EXPECT_TRUE(secondOutput->childAt(4)->mayHaveNulls());
+  for (const auto column : {0, 2, 3, 5}) {
+    EXPECT_EQ(secondOutput->childAt(column)->rawNulls(), nullptr) << column;
+    EXPECT_FALSE(secondOutput->childAt(column)->mayHaveNulls()) << column;
+  }
+  for (uint32_t column = 0; column < children.size(); ++column) {
+    children[column]->copy(
+        secondOutput->childAt(column).get(), offset, 0, secondOutput->size());
+  }
+  offset += secondOutput->size();
+  ASSERT_EQ(buffer.getOutput(3), nullptr);
+
+  auto output = std::make_shared<RowVector>(
+      pool(), inputType_, nullptr, offset, std::move(children));
+  auto combined = makeRows(
+      {"text_key",
+       "nullable_key",
+       "fixed_payload",
+       "string_payload",
+       "nullable_payload",
+       "id"},
+      {makeStringVector(
+           VARCHAR(),
+           {std::string("k0"),
+            std::string("k1"),
+            std::string("k4"),
+            std::string("k3"),
+            std::string("k5"),
+            std::string("k2")}),
+       makeVector<int64_t>(BIGINT(), {std::nullopt, 2, 1, 3, 0, 4}),
+       makeVector<int64_t>(BIGINT(), {60, 10, 40, 30, 50, 20}),
+       makeStringVector(
+           VARCHAR(),
+           {std::string(72, 'f'),
+            std::string(72, 'a'),
+            std::string(72, 'd'),
+            std::string(72, 'c'),
+            std::string(72, 'e'),
+            std::string(72, 'b')}),
+       makeVector<int64_t>(BIGINT(), {std::nullopt, 200, 100, 300, 500, 400}),
+       makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5})});
+  expectRowsMatchById(*combined, *output, 5);
+  expectSorted(*output, {0, 1}, {flags(true, true), flags(true, true)});
+  EXPECT_EQ(buffer.numOutputRows(), 6);
+  EXPECT_TRUE(buffer.spillReadStats().has_value());
+}
+
 TEST_F(RadixSortBufferTest, spillConfigOwnsDirectoryPath) {
   auto spillDirectory = exec::test::TempDirectoryPath::create();
   auto config = spillConfig(spillDirectory->path);

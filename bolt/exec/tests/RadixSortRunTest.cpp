@@ -87,6 +87,31 @@ class RadixSortRunTest : public testing::Test {
     return vector;
   }
 
+  template <typename T>
+  BufferPtr makeBuffer(memory::MemoryPool* pool, const std::vector<T>& values) {
+    auto buffer = AlignedBuffer::allocate<T>(values.size(), pool);
+    std::copy(values.begin(), values.end(), buffer->template asMutable<T>());
+    return buffer;
+  }
+
+  ArrayVectorPtr makeNonNullIntegerArrays(vector_size_t size) {
+    std::vector<vector_size_t> offsets(size);
+    std::vector<vector_size_t> sizes(size, 1);
+    std::vector<std::optional<int32_t>> elements(size);
+    for (vector_size_t row = 0; row < size; ++row) {
+      offsets[row] = row;
+      elements[row] = row * 10 + 1;
+    }
+    return std::make_shared<ArrayVector>(
+        runPool_.get(),
+        ARRAY(INTEGER()),
+        nullptr,
+        size,
+        makeBuffer(runPool_.get(), offsets),
+        makeBuffer(runPool_.get(), sizes),
+        makeVector<int32_t>(runPool_.get(), INTEGER(), elements));
+  }
+
   ArrayVectorPtr makeIntegerArrays() {
     const std::array<vector_size_t, 7> offsets{0, 0, 1, 3, 5, 7, 8};
     const std::array<vector_size_t, 7> sizes{0, 1, 2, 2, 2, 1, 0};
@@ -398,6 +423,30 @@ TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
       output->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(0), 42);
 }
 
+TEST_F(RadixSortRunTest, appendNullStatsCalibrateKnownNonNullSkip) {
+  auto input = makeRows(
+      runPool_.get(),
+      {"key", "id"},
+      {makeVector<int64_t>(runPool_.get(), BIGINT(), {2, std::nullopt, 1, 3}),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3})});
+  RadixSortRunOptions options;
+  options.knownNonNullKeys = {true};
+  auto run = createRun(
+      rowTypeOf(*input),
+      ROW({"key"}, {BIGINT()}),
+      {flags(true, false)},
+      {0},
+      {},
+      std::move(options));
+  run->append(*input);
+  EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{1}));
+  run->finalize();
+
+  auto output = collect(*run, 2);
+  expectRowsMatchById(*input, *output, 1);
+  expectSortedByOutput(*output, {0}, {flags(true, false)});
+}
+
 TEST_F(RadixSortRunTest, duplicateDirectKeyStaysInPayload) {
   constexpr vector_size_t kRows = 64;
   std::vector<std::optional<int64_t>> keys(kRows);
@@ -609,6 +658,155 @@ TEST_F(RadixSortRunTest, complexPayloadRoundTripAndSort) {
   auto output = collect(*run, 2);
   expectRowsMatchById(*input, *output, 4);
   expectSortedByOutput(*output, {3}, {flags(true, true)});
+}
+
+TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
+  constexpr vector_size_t kRows = 12;
+  std::vector<std::optional<std::string>> textKeys(kRows);
+  std::vector<std::optional<int64_t>> nullableKeys(kRows);
+  std::vector<std::optional<int32_t>> fixedKeys(kRows);
+  std::vector<std::optional<bool>> boolKeys(kRows);
+  std::vector<std::optional<int64_t>> fixedPayload(kRows);
+  std::vector<std::optional<bool>> boolPayload(kRows);
+  std::vector<std::optional<std::string>> firstStrings(kRows);
+  std::vector<std::optional<std::string>> secondStrings(kRows);
+  std::vector<std::optional<int64_t>> nullablePayload(kRows);
+  std::vector<std::optional<int64_t>> ids(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    textKeys[row] = "key-" + std::to_string(static_cast<int32_t>(kRows - row));
+    if (row % 5 != 0) {
+      nullableKeys[row] = row % 4;
+    }
+    fixedKeys[row] = row % 3;
+    boolKeys[row] = row % 2 == 0;
+    fixedPayload[row] = 100 + row;
+    boolPayload[row] = row % 3 == 0;
+    firstStrings[row] = std::string(40 + row, static_cast<char>('a' + row));
+    secondStrings[row] = "payload-" + std::to_string(row);
+    if (row % 4 != 1) {
+      nullablePayload[row] = 1000 + row;
+    }
+    ids[row] = row;
+  }
+  auto arrays = makeNonNullIntegerArrays(kRows);
+  auto input = makeRows(
+      runPool_.get(),
+      {"text_key",
+       "nullable_key",
+       "fixed_key",
+       "bool_key",
+       "fixed_payload",
+       "bool_payload",
+       "first_string",
+       "second_string",
+       "array_payload",
+       "nullable_payload",
+       "id"},
+      {makeStringVector(runPool_.get(), VARCHAR(), textKeys),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), nullableKeys),
+       makeVector<int32_t>(runPool_.get(), INTEGER(), fixedKeys),
+       makeVector<bool>(runPool_.get(), BOOLEAN(), boolKeys),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), fixedPayload),
+       makeVector<bool>(runPool_.get(), BOOLEAN(), boolPayload),
+       makeStringVector(runPool_.get(), VARCHAR(), firstStrings),
+       makeStringVector(runPool_.get(), VARCHAR(), secondStrings),
+       arrays,
+       makeVector<int64_t>(runPool_.get(), BIGINT(), nullablePayload),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
+  const std::vector<CompareFlags> keyFlags{
+      flags(true, true),
+      flags(true, true),
+      flags(true, true),
+      flags(true, true)};
+  auto run = createRun(
+      rowTypeOf(*input),
+      ROW({"text_key", "nullable_key", "fixed_key", "bool_key"},
+          {VARCHAR(), BIGINT(), INTEGER(), BOOLEAN()}),
+      keyFlags,
+      {0, 1, 2, 3});
+  run->append(*input);
+  EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{0, 1, 0, 0}));
+  EXPECT_EQ(
+      run->payloadMayHaveNulls(), (std::vector<uint8_t>{0, 0, 0, 0, 0, 1, 0}));
+  run->finalize();
+
+  auto first = run->getOutput(4, outputPool_.get());
+  ASSERT_NE(first, nullptr);
+  std::vector<VectorPtr> children;
+  children.reserve(input->childrenSize());
+  for (const auto& type : input->type()->as<TypeKind::ROW>().children()) {
+    children.push_back(BaseVector::create(type, kRows, outputPool_.get()));
+  }
+  for (uint32_t column = 0; column < children.size(); ++column) {
+    children[column]->copy(first->childAt(column).get(), 0, 0, first->size());
+  }
+  vector_size_t offset = first->size();
+  for (const auto column : {0, 2, 3, 4, 5, 6, 7, 8, 10}) {
+    ASSERT_EQ(first->childAt(column)->rawNulls(), nullptr) << column;
+    first->childAt(column)->mutableRawNulls();
+    ASSERT_NE(first->childAt(column)->rawNulls(), nullptr) << column;
+  }
+  first.reset();
+
+  auto second = run->getOutput(4, outputPool_.get());
+  ASSERT_NE(second, nullptr);
+  for (const auto column : {0, 2, 3, 4, 5, 6, 7, 8, 10}) {
+    EXPECT_EQ(second->childAt(column)->rawNulls(), nullptr) << column;
+    EXPECT_FALSE(second->childAt(column)->mayHaveNullsRecursive()) << column;
+  }
+
+  for (uint32_t column = 0; column < children.size(); ++column) {
+    children[column]->copy(
+        second->childAt(column).get(), offset, 0, second->size());
+  }
+  offset += second->size();
+  while (auto batch = run->getOutput(4, outputPool_.get())) {
+    for (uint32_t column = 0; column < children.size(); ++column) {
+      children[column]->copy(
+          batch->childAt(column).get(), offset, 0, batch->size());
+    }
+    offset += batch->size();
+  }
+  ASSERT_EQ(offset, kRows);
+  auto output = std::make_shared<RowVector>(
+      outputPool_.get(), input->type(), nullptr, kRows, std::move(children));
+  expectRowsMatchById(*input, *output, 10);
+  expectSortedByOutput(*output, {0, 1, 2, 3}, keyFlags);
+}
+
+TEST_F(RadixSortRunTest, singleStringPayloadNullFreeReuseResetsNullBuffer) {
+  constexpr vector_size_t kRows = 8;
+  std::vector<std::optional<int64_t>> keys(kRows);
+  std::vector<std::optional<std::string>> strings(kRows);
+  std::vector<std::optional<int64_t>> ids(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    keys[row] = kRows - row;
+    strings[row] = std::string(64 + row, static_cast<char>('a' + row));
+    ids[row] = row;
+  }
+  auto input = makeRows(
+      runPool_.get(),
+      {"key", "string", "id"},
+      {makeVector<int64_t>(runPool_.get(), BIGINT(), keys),
+       makeStringVector(runPool_.get(), VARCHAR(), strings),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
+  auto run = createRun(
+      rowTypeOf(*input), ROW({"key"}, {BIGINT()}), {flags(true, true)}, {0});
+  run->append(*input);
+  EXPECT_EQ(run->payloadMayHaveNulls(), (std::vector<uint8_t>{0, 0}));
+  run->finalize();
+
+  auto first = run->getOutput(3, outputPool_.get());
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(first->childAt(1)->rawNulls(), nullptr);
+  first->childAt(1)->mutableRawNulls();
+  ASSERT_NE(first->childAt(1)->rawNulls(), nullptr);
+  first.reset();
+
+  auto second = run->getOutput(3, outputPool_.get());
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->childAt(1)->rawNulls(), nullptr);
+  EXPECT_FALSE(second->childAt(1)->mayHaveNulls());
 }
 
 TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {

@@ -118,6 +118,9 @@ class RadixSortKeyCodec {
     return leadingSkippableValidityOffsets_;
   }
 
+  std::vector<uint32_t> leadingSkippableValidityOffsets(
+      std::span<const uint8_t> keyMayHaveNulls) const;
+
   void encode(
       const RowVector& input,
       memory::MemoryPool* pool,
@@ -158,6 +161,7 @@ class RadixSortKeyCodec {
   void decodeTrusted(
       std::span<const EncodedKeyView> keys,
       std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
       memory::MemoryPool* pool,
       BufferPtr& cursorScratch,
       RowVectorPtr& result) const;
