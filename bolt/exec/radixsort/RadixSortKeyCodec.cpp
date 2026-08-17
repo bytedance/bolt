@@ -1238,7 +1238,12 @@ void addVariableColumnSizes(
   }
 }
 
-template <typename T, typename ValueAt, typename IsNullAt, typename EncodeBody>
+template <
+    bool MayHaveNulls,
+    typename T,
+    typename ValueAt,
+    typename IsNullAt,
+    typename EncodeBody>
 void encodeFixedColumn(
     const RadixSortKeyColumn& column,
     vector_size_t size,
@@ -1251,14 +1256,27 @@ void encodeFixedColumn(
   const bool descending = !column.flags.ascending;
   for (vector_size_t row = 0; row < size; ++row) {
     auto* output = data + cursors[row];
-    if (isNullAt(row)) {
-      output[0] = static_cast<char>(nullMarker(column.flags));
-      ++cursors[row];
-    } else {
-      output[0] = static_cast<char>(validMarker(column.flags));
-      encodeBody(valueAt(row), output + 1, descending);
-      cursors[row] += bodySize + 1;
+    if constexpr (MayHaveNulls) {
+      if (isNullAt(row)) {
+        output[0] = static_cast<char>(nullMarker(column.flags));
+        ++cursors[row];
+        continue;
+      }
     }
+    output[0] = static_cast<char>(validMarker(column.flags));
+    encodeBody(valueAt(row), output + 1, descending);
+    cursors[row] += bodySize + 1;
+  }
+}
+
+void encodeFixedColumnAllNulls(
+    const RadixSortKeyColumn& column,
+    vector_size_t size,
+    char* data,
+    uint64_t* cursors) {
+  const auto null = static_cast<char>(nullMarker(column.flags));
+  for (vector_size_t row = 0; row < size; ++row) {
+    data[cursors[row]++] = null;
   }
 }
 
@@ -1274,7 +1292,18 @@ void encodeFixedColumn(
     const auto* flat = vector.asUnchecked<FlatVector<T>>();
     const auto* nulls = flat->rawNulls();
     if constexpr (std::is_same_v<T, bool>) {
-      encodeFixedColumn<T>(
+      if (nulls == nullptr) {
+        encodeFixedColumn<false, T>(
+            column,
+            size,
+            data,
+            cursors,
+            [&](vector_size_t row) { return flat->valueAtFast(row); },
+            [](vector_size_t) { return false; },
+            encodeBody);
+        return;
+      }
+      encodeFixedColumn<true, T>(
           column,
           size,
           data,
@@ -1286,7 +1315,18 @@ void encodeFixedColumn(
           encodeBody);
     } else {
       const auto* values = flat->rawValues();
-      encodeFixedColumn<T>(
+      if (nulls == nullptr) {
+        encodeFixedColumn<false, T>(
+            column,
+            size,
+            data,
+            cursors,
+            [&](vector_size_t row) { return values[row]; },
+            [](vector_size_t) { return false; },
+            encodeBody);
+        return;
+      }
+      encodeFixedColumn<true, T>(
           column,
           size,
           data,
@@ -1302,20 +1342,24 @@ void encodeFixedColumn(
   if (vector.encoding() == VectorEncoding::Simple::CONSTANT) {
     const auto* constant = vector.asUnchecked<ConstantVector<T>>();
     const bool isNull = constant->isNullAt(0);
-    const auto value = isNull ? T{} : constant->valueAtFast(0);
-    encodeFixedColumn<T>(
-        column,
-        size,
-        data,
-        cursors,
-        [&](vector_size_t) { return value; },
-        [&](vector_size_t) { return isNull; },
-        encodeBody);
+    if (isNull) {
+      encodeFixedColumnAllNulls(column, size, data, cursors);
+    } else {
+      const auto value = constant->valueAtFast(0);
+      encodeFixedColumn<false, T>(
+          column,
+          size,
+          data,
+          cursors,
+          [&](vector_size_t) { return value; },
+          [](vector_size_t) { return false; },
+          encodeBody);
+    }
     return;
   }
 
   DecodedVector decoded(vector);
-  encodeFixedColumn<T>(
+  encodeFixedColumn<true, T>(
       column,
       size,
       data,
