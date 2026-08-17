@@ -152,13 +152,7 @@ class RadixSortKeyCodec {
       BufferPtr& cursorScratch,
       RowVectorPtr& result) const;
 
-  void decodeTrusted(
-      std::span<const EncodedKeyView> keys,
-      memory::MemoryPool* pool,
-      BufferPtr& cursorScratch,
-      RowVectorPtr& result) const;
-
-  void decodeTrusted(
+  void decode(
       std::span<const EncodedKeyView> keys,
       std::span<const uint8_t> decodedColumns,
       std::span<const uint8_t> mayHaveNulls,

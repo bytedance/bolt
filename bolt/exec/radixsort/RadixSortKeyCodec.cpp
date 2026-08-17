@@ -2391,46 +2391,6 @@ void validateInput(
   BOLT_CHECK(validTypes, "Radix sort key input type does not match codec");
 }
 
-void validateKeys(const EncodedKeyBatch& keys) {
-  BOLT_CHECK_GE(keys.size(), 0, "Encoded key row count is negative");
-  if (keys.format() == EncodedKeyFormat::kFixed64) {
-    auto required = checkedMultiply<uint64_t>(keys.size(), sizeof(uint64_t));
-    BOLT_CHECK(required.has_value(), "Fixed encoded key buffer size overflows");
-    BOLT_CHECK(
-        keys.fixedKeys() != nullptr && keys.fixedKeys()->size() == *required,
-        "Fixed encoded key buffer size does not match rows");
-    return;
-  }
-  auto offsetCount = checkedAdd<uint64_t>(keys.size(), 1);
-  auto requiredOffsetBytes = offsetCount.has_value()
-      ? checkedMultiply<uint64_t>(*offsetCount, sizeof(uint64_t))
-      : std::nullopt;
-  BOLT_CHECK(
-      requiredOffsetBytes.has_value(),
-      "Encoded key offset buffer size overflows");
-  BOLT_CHECK(
-      keys.offsets() != nullptr &&
-          keys.offsets()->size() == *requiredOffsetBytes,
-      "Encoded key offset buffer size does not match rows");
-  const auto* offsets = keys.offsets()->as<uint64_t>();
-  BOLT_CHECK_EQ(offsets[0], 0, "Encoded key offsets must start at zero");
-  bool monotonicOffsets = true;
-  for (vector_size_t row = 0; row < keys.size(); ++row) {
-    monotonicOffsets &= offsets[row] <= offsets[row + 1];
-  }
-  BOLT_CHECK(monotonicOffsets, "Encoded key offsets are not monotonic");
-  const auto totalBytes = offsets[keys.size()];
-  if (totalBytes == 0) {
-    BOLT_CHECK(
-        keys.data() == nullptr || keys.data()->size() == 0,
-        "Empty encoded keys have unexpected data");
-    return;
-  }
-  BOLT_CHECK(
-      keys.data() != nullptr && totalBytes == keys.data()->size(),
-      "Encoded key data size does not match offsets");
-}
-
 void prepareDecodedResult(
     const std::vector<RadixSortKeyColumn>& columns,
     const RowTypePtr& rowType,
@@ -2498,54 +2458,26 @@ void prepareCursorScratch(
   cursors = cursorScratch->asMutable<uint64_t>();
 }
 
-template <bool Checked>
 FOLLY_ALWAYS_INLINE void readMarker(
     const EncodedKeyView& key,
     uint64_t& cursor,
     uint8_t null,
-    uint8_t valid,
     bool& isNull) {
-  if constexpr (Checked) {
-    BOLT_CHECK_LT(
-        cursor, key.bytes.size(), "Radix sort key input is truncated");
-  }
   const auto marker = static_cast<uint8_t>(key.bytes[cursor++]);
-  if (marker == null) {
-    isNull = true;
-    return;
-  }
-  if constexpr (Checked) {
-    BOLT_CHECK_EQ(marker, valid, "Radix sort key validity marker is invalid");
-  }
-  isNull = false;
+  isNull = marker == null;
 }
 
-template <bool Checked>
-FOLLY_ALWAYS_INLINE void
-readValidMarker(const EncodedKeyView& key, uint64_t& cursor, uint8_t valid) {
-  if constexpr (Checked) {
-    BOLT_CHECK_LT(
-        cursor, key.bytes.size(), "Radix sort key input is truncated");
-    BOLT_CHECK_EQ(
-        static_cast<uint8_t>(key.bytes[cursor]),
-        valid,
-        "Radix sort key validity marker is invalid");
-  }
+FOLLY_ALWAYS_INLINE void readValidMarker(uint64_t& cursor) {
   ++cursor;
 }
 
-template <bool Checked, typename T>
+template <typename T>
 FOLLY_ALWAYS_INLINE void readUnsigned(
     const EncodedKeyView& key,
     uint64_t& cursor,
     bool descending,
     T& value) {
   static_assert(std::is_unsigned_v<T>);
-  if constexpr (Checked) {
-    BOLT_CHECK(
-        cursor <= key.bytes.size() && sizeof(T) <= key.bytes.size() - cursor,
-        "Radix sort key input is truncated");
-  }
   auto encoded = loadUnaligned<T>(key.bytes.data() + cursor);
   cursor += sizeof(T);
   if (descending) {
@@ -2554,7 +2486,7 @@ FOLLY_ALWAYS_INLINE void readUnsigned(
   value = fromBigEndian(encoded);
 }
 
-template <bool Checked, typename T>
+template <typename T>
 FOLLY_ALWAYS_INLINE void readSigned(
     const EncodedKeyView& key,
     uint64_t& cursor,
@@ -2563,17 +2495,12 @@ FOLLY_ALWAYS_INLINE void readSigned(
   static_assert(std::is_signed_v<T>);
   using Unsigned = std::make_unsigned_t<T>;
   Unsigned bits;
-  readUnsigned<Checked>(key, cursor, descending, bits);
+  readUnsigned(key, cursor, descending, bits);
   bits ^= Unsigned{1} << (sizeof(T) * 8 - 1);
   std::memcpy(&value, &bits, sizeof(value));
 }
 
-template <
-    bool Checked,
-    bool FirstColumn,
-    bool MayHaveNulls,
-    typename T,
-    typename Decode>
+template <bool FirstColumn, bool MayHaveNulls, typename T, typename Decode>
 void decodeFixedColumn(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
@@ -2582,12 +2509,11 @@ void decodeFixedColumn(
     Decode decode) {
   auto* flat = result->asUnchecked<FlatVector<T>>();
   auto* values = flat->mutableRawValues();
-  const auto valid = validMarker(column.flags);
   if constexpr (!MayHaveNulls) {
     result->resetNulls();
     for (vector_size_t row = 0; row < keys.size(); ++row) {
       auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
-      readValidMarker<Checked>(keys[row], cursor, valid);
+      readValidMarker(cursor);
       decode(keys[row], cursor, values[row]);
       cursors[row] = cursor;
     }
@@ -2601,7 +2527,7 @@ void decodeFixedColumn(
     for (vector_size_t row = 0; row < keys.size(); ++row) {
       auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
       bool isNull;
-      readMarker<Checked>(keys[row], cursor, null, valid, isNull);
+      readMarker(keys[row], cursor, null, isNull);
       if (isNull) {
         if (nulls == nullptr) {
           nulls = flat->mutableRawNulls();
@@ -2616,7 +2542,7 @@ void decodeFixedColumn(
   }
 }
 
-template <bool Checked, bool FirstColumn, bool MayHaveNulls>
+template <bool FirstColumn, bool MayHaveNulls>
 void decodeBooleanColumn(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
@@ -2625,12 +2551,11 @@ void decodeBooleanColumn(
   auto* flat = result->asUnchecked<FlatVector<bool>>();
   auto* values = flat->template mutableRawValues<uint64_t>();
   const bool descending = !column.flags.ascending;
-  const auto valid = validMarker(column.flags);
   if constexpr (!MayHaveNulls) {
     result->resetNulls();
     for (vector_size_t row = 0; row < keys.size(); ++row) {
       auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
-      readValidMarker<Checked>(keys[row], cursor, valid);
+      readValidMarker(cursor);
       auto value = static_cast<uint8_t>(keys[row].bytes[cursor++]);
       if (descending) {
         value = static_cast<uint8_t>(~value);
@@ -2648,7 +2573,7 @@ void decodeBooleanColumn(
     for (vector_size_t row = 0; row < keys.size(); ++row) {
       auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
       bool isNull;
-      readMarker<Checked>(keys[row], cursor, null, valid, isNull);
+      readMarker(keys[row], cursor, null, isNull);
       if (isNull) {
         if (nulls == nullptr) {
           nulls = flat->mutableRawNulls();
@@ -2667,27 +2592,8 @@ void decodeBooleanColumn(
   }
 }
 
-template <bool Checked, bool FirstColumn>
-void skipFixedColumn(
-    const RadixSortKeyColumn& column,
-    std::span<const EncodedKeyView> keys,
-    uint64_t* cursors) {
-  const auto bodySize = *fixedBodySize(*column.type);
-  const auto null = nullMarker(column.flags);
-  const auto valid = validMarker(column.flags);
-  for (vector_size_t row = 0; row < keys.size(); ++row) {
-    auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
-    bool isNull;
-    readMarker<Checked>(keys[row], cursor, null, valid, isNull);
-    if (!isNull) {
-      cursor += bodySize;
-    }
-    cursors[row] = cursor;
-  }
-}
-
 template <bool FirstColumn>
-void skipFixedColumnTrusted(
+void skipFixedColumn(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     uint64_t* cursors) {
@@ -2700,7 +2606,6 @@ void skipFixedColumnTrusted(
   }
 }
 
-template <bool Checked>
 void scanString(
     const EncodedKeyView& key,
     uint64_t cursor,
@@ -2751,7 +2656,7 @@ void scanString(
   BOLT_FAIL("Radix sort key input is truncated");
 }
 
-template <bool Checked, bool FirstColumn, bool MayHaveNulls>
+template <bool FirstColumn, bool MayHaveNulls>
 void decodeStringColumn(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
@@ -2760,7 +2665,6 @@ void decodeStringColumn(
   auto* flat = result->asUnchecked<FlatVector<StringView>>();
   const bool descending = !column.flags.ascending;
   const auto null = nullMarker(column.flags);
-  const auto valid = validMarker(column.flags);
   auto* values = flat->mutableRawValues();
   if constexpr (!MayHaveNulls) {
     result->resetNulls();
@@ -2775,9 +2679,9 @@ void decodeStringColumn(
     auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
     bool isNull;
     if constexpr (MayHaveNulls) {
-      readMarker<Checked>(keys[row], cursor, null, valid, isNull);
+      readMarker(keys[row], cursor, null, isNull);
     } else {
-      readValidMarker<Checked>(keys[row], cursor, valid);
+      readValidMarker(cursor);
       isNull = false;
     }
     if (isNull) {
@@ -2828,9 +2732,9 @@ void decodeStringColumn(
     auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
     bool isNull;
     if constexpr (MayHaveNulls) {
-      readMarker<Checked>(keys[row], cursor, null, valid, isNull);
+      readMarker(keys[row], cursor, null, isNull);
     } else {
-      readValidMarker<Checked>(keys[row], cursor, valid);
+      readValidMarker(cursor);
       isNull = false;
     }
     if (isNull) {
@@ -2838,8 +2742,7 @@ void decodeStringColumn(
     }
     uint64_t decodedSize;
     uint64_t encodedSize;
-    scanString<Checked>(
-        keys[row], cursor, descending, decodedSize, encodedSize);
+    scanString(keys[row], cursor, descending, decodedSize, encodedSize);
     if (!StringView::isInline(decodedSize)) {
       stringBytes += decodedSize;
     }
@@ -2850,9 +2753,9 @@ void decodeStringColumn(
     auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
     bool isNull;
     if constexpr (MayHaveNulls) {
-      readMarker<Checked>(keys[row], cursor, null, valid, isNull);
+      readMarker(keys[row], cursor, null, isNull);
     } else {
-      readValidMarker<Checked>(keys[row], cursor, valid);
+      readValidMarker(cursor);
       isNull = false;
     }
     if (isNull) {
@@ -2866,8 +2769,7 @@ void decodeStringColumn(
     uint64_t decodedSize;
     uint64_t encodedSize;
     const auto encodedBegin = cursor;
-    scanString<Checked>(
-        keys[row], cursor, descending, decodedSize, encodedSize);
+    scanString(keys[row], cursor, descending, decodedSize, encodedSize);
     std::array<char, StringView::kInlineSize> inlineData;
     auto* destination =
         StringView::isInline(decodedSize) ? inlineData.data() : output;
@@ -2904,7 +2806,7 @@ void decodeStringColumn(
   }
 }
 
-template <bool Checked, bool FirstColumn, bool MayHaveNulls>
+template <bool FirstColumn, bool MayHaveNulls>
 void decodeColumn(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
@@ -2912,19 +2814,19 @@ void decodeColumn(
     const VectorPtr& result) {
   const bool descending = !column.flags.ascending;
   if (column.type->isShortDecimal()) {
-    decodeFixedColumn<Checked, FirstColumn, MayHaveNulls, int64_t>(
+    decodeFixedColumn<FirstColumn, MayHaveNulls, int64_t>(
         column,
         keys,
         cursors,
         result,
         [&](const auto& key, auto& cursor, auto& value) {
-          readSigned<Checked>(key, cursor, descending, value);
+          readSigned(key, cursor, descending, value);
         });
     return;
   }
   if (column.type->isLongDecimal() ||
       column.type->kind() == TypeKind::HUGEINT) {
-    decodeFixedColumn<Checked, FirstColumn, MayHaveNulls, int128_t>(
+    decodeFixedColumn<FirstColumn, MayHaveNulls, int128_t>(
         column,
         keys,
         cursors,
@@ -2932,8 +2834,8 @@ void decodeColumn(
         [&](const auto& key, auto& cursor, auto& value) {
           int64_t upper;
           uint64_t lower;
-          readSigned<Checked>(key, cursor, descending, upper);
-          readUnsigned<Checked>(key, cursor, descending, lower);
+          readSigned(key, cursor, descending, upper);
+          readUnsigned(key, cursor, descending, lower);
           value = HugeInt::build(static_cast<uint64_t>(upper), lower);
         });
     return;
@@ -2941,19 +2843,19 @@ void decodeColumn(
 
   switch (column.type->kind()) {
     case TypeKind::BOOLEAN:
-      decodeBooleanColumn<Checked, FirstColumn, MayHaveNulls>(
+      decodeBooleanColumn<FirstColumn, MayHaveNulls>(
           column, keys, cursors, result);
       return;
-#define BOLT_DECODE_SIGNED_COLUMN(kind, cppType)                    \
-  case TypeKind::kind:                                              \
-    decodeFixedColumn<Checked, FirstColumn, MayHaveNulls, cppType>( \
-        column,                                                     \
-        keys,                                                       \
-        cursors,                                                    \
-        result,                                                     \
-        [&](const auto& key, auto& cursor, auto& value) {           \
-          readSigned<Checked>(key, cursor, descending, value);      \
-        });                                                         \
+#define BOLT_DECODE_SIGNED_COLUMN(kind, cppType)           \
+  case TypeKind::kind:                                     \
+    decodeFixedColumn<FirstColumn, MayHaveNulls, cppType>( \
+        column,                                            \
+        keys,                                              \
+        cursors,                                           \
+        result,                                            \
+        [&](const auto& key, auto& cursor, auto& value) {  \
+          readSigned(key, cursor, descending, value);      \
+        });                                                \
     return
       BOLT_DECODE_SIGNED_COLUMN(TINYINT, int8_t);
       BOLT_DECODE_SIGNED_COLUMN(SMALLINT, int16_t);
@@ -2961,43 +2863,31 @@ void decodeColumn(
       BOLT_DECODE_SIGNED_COLUMN(BIGINT, int64_t);
 #undef BOLT_DECODE_SIGNED_COLUMN
     case TypeKind::REAL:
-      decodeFixedColumn<Checked, FirstColumn, MayHaveNulls, float>(
+      decodeFixedColumn<FirstColumn, MayHaveNulls, float>(
           column,
           keys,
           cursors,
           result,
           [&](const auto& key, auto& cursor, auto& value) {
             uint32_t encoded;
-            readUnsigned<Checked>(key, cursor, descending, encoded);
+            readUnsigned(key, cursor, descending, encoded);
             value = decodeFloat(encoded);
-            if constexpr (Checked) {
-              BOLT_CHECK_EQ(
-                  encodeFloat(value),
-                  encoded,
-                  "Radix sort key float body is not canonical");
-            }
           });
       return;
     case TypeKind::DOUBLE:
-      decodeFixedColumn<Checked, FirstColumn, MayHaveNulls, double>(
+      decodeFixedColumn<FirstColumn, MayHaveNulls, double>(
           column,
           keys,
           cursors,
           result,
           [&](const auto& key, auto& cursor, auto& value) {
             uint64_t encoded;
-            readUnsigned<Checked>(key, cursor, descending, encoded);
+            readUnsigned(key, cursor, descending, encoded);
             value = decodeDouble(encoded);
-            if constexpr (Checked) {
-              BOLT_CHECK_EQ(
-                  encodeDouble(value),
-                  encoded,
-                  "Radix sort key double body is not canonical");
-            }
           });
       return;
     case TypeKind::TIMESTAMP:
-      decodeFixedColumn<Checked, FirstColumn, MayHaveNulls, Timestamp>(
+      decodeFixedColumn<FirstColumn, MayHaveNulls, Timestamp>(
           column,
           keys,
           cursors,
@@ -3005,30 +2895,22 @@ void decodeColumn(
           [&](const auto& key, auto& cursor, auto& value) {
             int64_t seconds;
             uint64_t nanos;
-            readSigned<Checked>(key, cursor, descending, seconds);
-            readUnsigned<Checked>(key, cursor, descending, nanos);
-            if constexpr (Checked) {
-              BOLT_CHECK(
-                  nanos <= Timestamp::kMaxNanos &&
-                      seconds >= Timestamp::kMinSeconds &&
-                      seconds <= Timestamp::kMaxSeconds,
-                  "Radix sort key timestamp body is out of range");
-            }
+            readSigned(key, cursor, descending, seconds);
+            readUnsigned(key, cursor, descending, nanos);
             value = Timestamp(seconds, nanos);
           });
       return;
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY:
-      decodeStringColumn<Checked, FirstColumn, MayHaveNulls>(
+      decodeStringColumn<FirstColumn, MayHaveNulls>(
           column, keys, cursors, result);
       return;
     case TypeKind::UNKNOWN: {
       const auto null = nullMarker(column.flags);
-      const auto valid = validMarker(column.flags);
       for (vector_size_t row = 0; row < keys.size(); ++row) {
         auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
         bool isNull;
-        readMarker<Checked>(keys[row], cursor, null, valid, isNull);
+        readMarker(keys[row], cursor, null, isNull);
         cursors[row] = cursor;
         result->setNull(row, true);
       }
@@ -3046,7 +2928,6 @@ void decodeColumn(
   }
 }
 
-template <bool Checked>
 void decodeColumns(
     const std::vector<RadixSortKeyColumn>& columns,
     const RowTypePtr& rowType,
@@ -3074,69 +2955,37 @@ void decodeColumns(
   prepareCursorScratch(
       static_cast<vector_size_t>(keys.size()), pool, cursorScratch, cursors);
   const auto decodeFirstColumn = [&](uint32_t column) {
-    if constexpr (Checked) {
-      decodeColumn<true, true, true>(
-          columns[column], keys, cursors, result->childAt(column));
-    } else if (mayHaveNulls.empty() || mayHaveNulls[column] != 0) {
-      decodeColumn<false, true, true>(
+    if (mayHaveNulls.empty() || mayHaveNulls[column] != 0) {
+      decodeColumn<true, true>(
           columns[column], keys, cursors, result->childAt(column));
     } else {
-      decodeColumn<false, true, false>(
+      decodeColumn<true, false>(
           columns[column], keys, cursors, result->childAt(column));
     }
   };
   const auto decodeNextColumn = [&](uint32_t column) {
-    if constexpr (Checked) {
-      decodeColumn<true, false, true>(
-          columns[column], keys, cursors, result->childAt(column));
-    } else if (mayHaveNulls.empty() || mayHaveNulls[column] != 0) {
-      decodeColumn<false, false, true>(
+    if (mayHaveNulls.empty() || mayHaveNulls[column] != 0) {
+      decodeColumn<false, true>(
           columns[column], keys, cursors, result->childAt(column));
     } else {
-      decodeColumn<false, false, false>(
+      decodeColumn<false, false>(
           columns[column], keys, cursors, result->childAt(column));
     }
   };
 
   if (!decodedColumns.empty() && decodedColumns[0] == 0 &&
       fixedBodySize(*columns[0].type).has_value()) {
-    if constexpr (Checked) {
-      skipFixedColumn<true, true>(columns[0], keys, cursors);
-    } else {
-      skipFixedColumnTrusted<true>(columns[0], keys, cursors);
-    }
+    skipFixedColumn<true>(columns[0], keys, cursors);
   } else {
     decodeFirstColumn(0);
   }
   for (uint32_t column = 1; column < columns.size(); ++column) {
     if (!decodedColumns.empty() && decodedColumns[column] == 0 &&
         fixedBodySize(*columns[column].type).has_value()) {
-      if constexpr (Checked) {
-        skipFixedColumn<true, false>(columns[column], keys, cursors);
-      } else {
-        skipFixedColumnTrusted<false>(columns[column], keys, cursors);
-      }
+      skipFixedColumn<false>(columns[column], keys, cursors);
     } else {
       decodeNextColumn(column);
     }
-  }
-  if constexpr (Checked) {
-    bool consumedWithinKey = true;
-    bool consumedFullKey = true;
-    bool zeroPadding = true;
-    for (vector_size_t row = 0; row < keys.size(); ++row) {
-      consumedWithinKey &= cursors[row] <= keys[row].bytes.size();
-      consumedFullKey &=
-          keys[row].zeroPadded || cursors[row] == keys[row].bytes.size();
-      while (cursors[row] < keys[row].bytes.size()) {
-        zeroPadding &= keys[row].bytes[cursors[row]++] == 0;
-      }
-    }
-    BOLT_CHECK(
-        consumedWithinKey, "Radix sort key decoder consumed past the full key");
-    BOLT_CHECK(
-        consumedFullKey, "Radix sort key decoder did not consume the full key");
-    BOLT_CHECK(zeroPadding, "Radix sort key padding must be zero");
   }
 }
 
@@ -3490,7 +3339,6 @@ void RadixSortKeyCodec::decode(
   BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
   BOLT_CHECK(
       keys.format() == format_, "Encoded key format does not match codec");
-  validateKeys(keys);
   std::vector<std::array<char, sizeof(uint64_t)>> fixedBytes;
   std::vector<EncodedKeyView> views(keys.size());
   if (keys.format() == EncodedKeyFormat::kFixed64) {
@@ -3511,8 +3359,7 @@ void RadixSortKeyCodec::decode(
     }
   }
   BufferPtr cursorScratch;
-  decodeColumns<true>(
-      columns_, rowType_, views, {}, {}, pool, cursorScratch, result);
+  decodeColumns(columns_, rowType_, views, {}, {}, pool, cursorScratch, result);
 }
 
 void RadixSortKeyCodec::decode(
@@ -3528,27 +3375,10 @@ void RadixSortKeyCodec::decode(
     memory::MemoryPool* pool,
     BufferPtr& cursorScratch,
     RowVectorPtr& result) const {
-  BOLT_CHECK(
-      canEncodeDecode_,
-      "Radix sort key codec contains unsupported nested types");
-  BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
-  BOLT_CHECK_LE(
-      keys.size(),
-      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
-      "Encoded key view row count exceeds vector range");
-  decodeColumns<true>(
-      columns_, rowType_, keys, {}, {}, pool, cursorScratch, result);
+  decode(keys, {}, {}, pool, cursorScratch, result);
 }
 
-void RadixSortKeyCodec::decodeTrusted(
-    std::span<const EncodedKeyView> keys,
-    memory::MemoryPool* pool,
-    BufferPtr& cursorScratch,
-    RowVectorPtr& result) const {
-  decodeTrusted(keys, {}, {}, pool, cursorScratch, result);
-}
-
-void RadixSortKeyCodec::decodeTrusted(
+void RadixSortKeyCodec::decode(
     std::span<const EncodedKeyView> keys,
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
@@ -3559,7 +3389,11 @@ void RadixSortKeyCodec::decodeTrusted(
       canEncodeDecode_,
       "Radix sort key codec contains unsupported nested types");
   BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
-  decodeColumns<false>(
+  BOLT_CHECK_LE(
+      keys.size(),
+      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
+      "Encoded key view row count exceeds vector range");
+  decodeColumns(
       columns_,
       rowType_,
       keys,
