@@ -25,6 +25,7 @@
 #include <random>
 #include <sstream>
 
+#include "bolt/exec/radixsort/RadixSortKey.h"
 #include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 #include "bolt/exec/tests/utils/RadixSortComparatorOracle.h"
@@ -536,6 +537,61 @@ TEST_F(RadixSortKeyCodecTest, fixed64BoundaryAndAllocation) {
   EXPECT_EQ(variableKeys.fixedKeys(), nullptr);
   EXPECT_NE(variableKeys.offsets(), nullptr);
   EXPECT_NE(variableKeys.data(), nullptr);
+}
+
+TEST_F(RadixSortKeyCodecTest, selectiveDecodeSkipsFixedPrefix) {
+  auto rows = makeRows(
+      {makeVector<int64_t>(BIGINT(), {10, std::nullopt, -7, 42, std::nullopt}),
+       makeStringVector(
+           VARCHAR(),
+           {std::string("alpha"),
+            std::string("\x00", 1) + std::string("\x01", 1) + "beta",
+            std::nullopt,
+            std::string(128, 'z'),
+            std::string()}),
+       makeVector<double>(
+           DOUBLE(),
+           {1.5,
+            -0.0,
+            std::numeric_limits<double>::quiet_NaN(),
+            std::nullopt,
+            -7.25})});
+  const std::vector<CompareFlags> compareFlags{
+      flags(true, true), flags(false, false), flags(false, true)};
+  auto codec = bind({BIGINT(), VARCHAR(), DOUBLE()}, compareFlags);
+
+  EncodedKeyBatch keys;
+  codec->encode(*rows, pool_.get(), keys);
+  std::vector<EncodedKeyView> views(rows->size());
+  for (vector_size_t row = 0; row < rows->size(); ++row) {
+    views[row] = {keys.variableKeyAt(row), false};
+  }
+
+  BufferPtr cursorScratch;
+  RowVectorPtr decoded;
+  const std::vector<uint8_t> decodedColumns{0, 1, 1};
+  const std::vector<uint8_t> mayHaveNulls{1, 1, 1};
+  codec->decode(
+      std::span<const EncodedKeyView>(views.data(), views.size()),
+      decodedColumns,
+      mayHaveNulls,
+      pool_.get(),
+      cursorScratch,
+      decoded);
+
+  ASSERT_EQ(decoded->childAt(0), nullptr);
+  ASSERT_NE(decoded->childAt(1), nullptr);
+  ASSERT_NE(decoded->childAt(2), nullptr);
+  for (vector_size_t row = 0; row < rows->size(); ++row) {
+    EXPECT_EQ(
+        SortComparatorOracle::compare(
+            *rows->childAt(1), row, *decoded->childAt(1), row, compareFlags[1]),
+        0);
+    EXPECT_EQ(
+        SortComparatorOracle::compare(
+            *rows->childAt(2), row, *decoded->childAt(2), row, compareFlags[2]),
+        0);
+  }
 }
 
 TEST_F(RadixSortKeyCodecTest, emptyBatchAndVariableAllocation) {
