@@ -820,7 +820,7 @@ void encodedSize(
     return;
   }
   if (column.type->kind() == TypeKind::UNKNOWN) {
-    BOLT_CHECK(false, "UNKNOWN sort key values must be null");
+    BOLT_FAIL("UNKNOWN sort key values must be null");
   }
   if (column.type->kind() == TypeKind::ROW) {
     const auto* rowVector = vector.wrappedVector()->as<RowVector>();

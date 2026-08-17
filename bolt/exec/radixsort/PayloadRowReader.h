@@ -19,7 +19,6 @@
 #include <span>
 
 #include "bolt/exec/radixsort/PayloadRowLayout.h"
-#include "bolt/exec/radixsort/RadixSortRunStorage.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::exec::radixsort {
@@ -36,12 +35,6 @@ class PayloadRowReader {
   static void gather(
       const PayloadRowLayout& layout,
       std::span<char* const> rows,
-      memory::MemoryPool* pool,
-      RowVectorPtr& result);
-
-  static void gather(
-      const PayloadRowLayout& layout,
-      const PayloadRowBatch& batch,
       memory::MemoryPool* pool,
       RowVectorPtr& result);
 };

@@ -141,32 +141,9 @@ void swizzlePayloadPointerFields(
   }
 }
 
-void restoreKeyPointerInRow(
-    char* row,
-    RadixSortSpillRowHeader header,
-    const RadixSortKeyLayout& layout) {
-  auto* key = row + RadixSortSpillRow::kHeaderSize;
-  if (!layout.isVariable()) {
-    return;
-  }
-  const auto size = loadUnaligned<uint64_t>(key + *layout.sizeOffset());
-  if (size <= layout.inlineCapacity()) {
-    return;
-  }
-  const auto offset = loadUnaligned<uint64_t>(key + *layout.dataOffset());
-  BOLT_CHECK(isValidRecordRelativeRange(header.totalSize, offset, size));
-  storeUnaligned<char*>(key + *layout.dataOffset(), row + offset);
-}
-
 void trustedRestoreKeyDataPointerInRow(
     char* row,
     const RadixSortKeyLayout& layout);
-
-void trustedRestoreKeyPointerInRow(
-    char* row,
-    const RadixSortKeyLayout& layout) {
-  trustedRestoreKeyDataPointerInRow(row, layout);
-}
 
 void trustedRestoreKeyDataPointerInRow(
     char* row,
@@ -223,11 +200,6 @@ RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
   return result;
 }
 
-uint32_t RadixSortSpillRow::keySize(const RadixSortSpillRunMeta& meta) const {
-  BOLT_CHECK_NOT_NULL(row_);
-  return trustedKeySize(meta);
-}
-
 uint32_t RadixSortSpillRow::trustedKeySize(
     const RadixSortSpillRunMeta& meta) const {
   if (!meta.keyLayout.isVariable()) {
@@ -242,30 +214,11 @@ uint32_t RadixSortSpillRow::trustedKeySize(
       spilledKeyFixedSize(meta.keyLayout, heapSize) + heapSize);
 }
 
-uint32_t RadixSortSpillRow::payloadHeapSize(
-    const RadixSortSpillRunMeta& meta) const {
-  const auto h = header();
-  const auto keyBytes = keySize(meta);
-  auto prefix = checkedAdd<uint64_t>(kHeaderSize, keyBytes);
-  BOLT_CHECK(prefix.has_value(), "Radix sort spill row size overflows");
-  prefix = checkedAdd<uint64_t>(*prefix, meta.payloadFixedSize);
-  BOLT_CHECK(prefix.has_value(), "Radix sort spill row size overflows");
-  BOLT_CHECK_GE(h.totalSize, *prefix);
-  return static_cast<uint32_t>(h.totalSize - *prefix);
-}
-
 uint32_t RadixSortSpillRow::trustedPayloadHeapSize(
     const RadixSortSpillRunMeta& meta) const {
   return static_cast<uint32_t>(
       header().totalSize - kHeaderSize - trustedKeySize(meta) -
       meta.payloadFixedSize);
-}
-
-uint64_t RadixSortSpillRow::serializedSize(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
-    const char* key) {
-  return sizeForSerialize(keyLayout, payloadLayout, key).totalSize;
 }
 
 void RadixSortSpillRow::serialize(
@@ -332,8 +285,8 @@ RadixSortSpillRowHeader RadixSortSpillRow::header() const {
 void RadixSortSpillRow::validate(const RadixSortSpillRunMeta& meta) const {
   const auto h = header();
   BOLT_CHECK_GE(h.totalSize, kHeaderSize);
-  const auto keyBytes = keySize(meta);
-  const auto heapBytes = payloadHeapSize(meta);
+  const auto keyBytes = trustedKeySize(meta);
+  const auto heapBytes = trustedPayloadHeapSize(meta);
   if (meta.payloadFixedSize == 0) {
     BOLT_CHECK_EQ(heapBytes, 0);
   }
@@ -342,73 +295,31 @@ void RadixSortSpillRow::validate(const RadixSortSpillRunMeta& meta) const {
   BOLT_CHECK_EQ(h.totalSize, total);
 }
 
-std::string_view RadixSortSpillRow::keyBytes(
-    const RadixSortSpillRunMeta& meta) const {
-  validate(meta);
-  return trustedKeyBytes(meta);
-}
-
 std::string_view RadixSortSpillRow::trustedKeyBytes(
     const RadixSortSpillRunMeta& meta) const {
   return std::string_view(row_ + kHeaderSize, trustedKeySize(meta));
 }
 
-char* RadixSortSpillRow::payloadFixed(const RadixSortSpillRunMeta& meta) const {
-  validate(meta);
-  return trustedPayloadFixed(meta);
+char* RadixSortSpillRow::trustedPayloadFixedOrEnd(
+    const RadixSortSpillRunMeta& meta) const {
+  return row_ + kHeaderSize + trustedKeySize(meta);
 }
 
 char* RadixSortSpillRow::trustedPayloadFixed(
     const RadixSortSpillRunMeta& meta) const {
-  return meta.payloadFixedSize == 0 ? nullptr
-                                    : row_ + kHeaderSize + trustedKeySize(meta);
-}
-
-char* RadixSortSpillRow::payloadHeap(const RadixSortSpillRunMeta& meta) const {
-  validate(meta);
-  return trustedPayloadHeap(meta);
+  return meta.payloadFixedSize == 0 ? nullptr : trustedPayloadFixedOrEnd(meta);
 }
 
 char* RadixSortSpillRow::trustedPayloadHeap(
     const RadixSortSpillRunMeta& meta) const {
   return trustedPayloadHeapSize(meta) == 0
       ? nullptr
-      : row_ + kHeaderSize + trustedKeySize(meta) + meta.payloadFixedSize;
-}
-
-void RadixSortSpillRow::restoreKeyPointer(
-    const RadixSortSpillRunMeta& meta) const {
-  validate(meta);
-  trustedRestoreKeyPointer(meta);
-}
-
-void RadixSortSpillRow::trustedRestoreKeyPointer(
-    const RadixSortSpillRunMeta& meta) const {
-  trustedRestoreKeyPointerInRow(row_, meta.keyLayout);
+      : trustedPayloadFixedOrEnd(meta) + meta.payloadFixedSize;
 }
 
 void RadixSortSpillRow::trustedRestoreKeyDataPointer(
     const RadixSortSpillRunMeta& meta) const {
   trustedRestoreKeyDataPointerInRow(row_, meta.keyLayout);
-}
-
-void RadixSortSpillRow::restorePayloadPointers(
-    const RadixSortSpillRunMeta& meta,
-    const PayloadRowLayout& payloadLayout) const {
-  validate(meta);
-  if (meta.payloadFixedSize == 0 || !payloadLayout.hasVariableFields()) {
-    return;
-  }
-  auto* fixed = trustedPayloadFixed(meta);
-  swizzlePayloadPointerFields(
-      payloadLayout,
-      row_,
-      fixed,
-      trustedPayloadHeap(meta),
-      header().totalSize,
-      false,
-      false,
-      true);
 }
 
 void RadixSortSpillRow::trustedRestorePayloadPointers(

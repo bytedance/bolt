@@ -256,6 +256,16 @@ class RadixPayloadRowTest : public testing::Test {
     }
     return rows;
   }
+
+  static void gatherPayloadBatch(
+      const PayloadRowLayout& layout,
+      const PayloadRowBatch& batch,
+      memory::MemoryPool* pool,
+      RowVectorPtr& result) {
+    auto rows = rowPointers(batch);
+    PayloadRowReader::gather(
+        layout, std::span<char* const>(rows), pool, result);
+  }
 };
 
 TEST_F(RadixPayloadRowTest, packedLayoutHasNoPadding) {
@@ -458,7 +468,7 @@ TEST_F(RadixPayloadRowTest, scalarStringRoundTripAndDeepCopy) {
 
   auto outputPool = rootPool_->addLeafChild("payload-roundtrip-output");
   RowVectorPtr output;
-  PayloadRowReader::gather(*layout, batch, outputPool.get(), output);
+  gatherPayloadBatch(*layout, batch, outputPool.get(), output);
   expectEquivalent(*input, *output);
 
   const auto outputFloat =
@@ -512,7 +522,7 @@ TEST_F(RadixPayloadRowTest, logicalAndCustomScalarRoundTrip) {
   PayloadRowWriter::append(*input, arena, batch);
 
   RowVectorPtr output;
-  PayloadRowReader::gather(*layout, batch, pool_.get(), output);
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
   expectEquivalent(*input, *output);
   for (uint32_t column = 0; column < input->childrenSize(); ++column) {
     EXPECT_TRUE(output->childAt(column)->type()->equivalent(
@@ -570,7 +580,7 @@ TEST_F(RadixPayloadRowTest, complexRoundTripAndContiguousHeap) {
   }
 
   RowVectorPtr output;
-  PayloadRowReader::gather(*layout, batch, pool_.get(), output);
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
   const auto expectComplexEquivalent = [&]() {
     const auto compareFlags = CompareFlags{
         .nullsFirst = true,
@@ -651,7 +661,7 @@ TEST_F(RadixPayloadRowTest, stringBoundaryRoundTrip) {
   EXPECT_EQ(batch.heapSizeAt(6), 0);
 
   RowVectorPtr output;
-  PayloadRowReader::gather(*layout, batch, pool_.get(), output);
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
   expectEquivalent(*input, *output);
 }
 
@@ -692,7 +702,7 @@ TEST_F(RadixPayloadRowTest, tiledStringRoundTrip) {
   PayloadRowWriter::append(*input, arena, batch);
 
   RowVectorPtr output;
-  PayloadRowReader::gather(*layout, batch, pool_.get(), output);
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
   expectEquivalent(*input, *output);
 
   for (const auto& group : arena.payloadHeapGroups()) {
@@ -758,7 +768,7 @@ TEST_F(RadixPayloadRowTest, fixedSeedRoundTripProperty) {
     PayloadRowBatch batch;
     PayloadRowWriter::append(*input, arena, batch);
     RowVectorPtr output;
-    PayloadRowReader::gather(*layout, batch, pool_.get(), output);
+    gatherPayloadBatch(*layout, batch, pool_.get(), output);
     expectEquivalent(*input, *output);
   }
 }
@@ -812,7 +822,7 @@ TEST_F(RadixPayloadRowTest, dictionaryAndConstantInput) {
   PayloadRowBatch batch;
   PayloadRowWriter::append(*input, arena, batch);
   RowVectorPtr output;
-  PayloadRowReader::gather(*layout, batch, pool_.get(), output);
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
   expectEquivalent(*input, *output);
 }
 
@@ -856,7 +866,7 @@ TEST_F(RadixPayloadRowTest, fixedOnlyAndEmptyInputHaveNoHeap) {
   PayloadRowWriter::append(*fixedInput, sizedArena, sizes, sizedBatch);
   EXPECT_TRUE(sizedArena.payloadHeapGroups().empty());
   RowVectorPtr sizedOutput;
-  PayloadRowReader::gather(*layout, sizedBatch, pool_.get(), sizedOutput);
+  gatherPayloadBatch(*layout, sizedBatch, pool_.get(), sizedOutput);
   expectEquivalent(*fixedInput, *sizedOutput);
 
   auto emptyInput = std::make_shared<RowVector>(
@@ -1074,7 +1084,7 @@ TEST_F(RadixPayloadRowTest, invalidInputs) {
   RadixSortRunStorage emptyArena(
       pool_.get(), keyLayout(), 4, 64, layout, 4, 64);
   emptyArena.allocatePayloadRowBatch(std::span<const uint64_t>{}, emptyBatch);
-  PayloadRowReader::gather(*layout, emptyBatch, pool_.get(), output);
+  gatherPayloadBatch(*layout, emptyBatch, pool_.get(), output);
   EXPECT_EQ(output->size(), 0);
 
   EXPECT_THROW(

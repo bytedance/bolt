@@ -63,11 +63,6 @@ class RadixSortSpillRow {
       const char* key,
       char* payload);
 
-  static uint64_t serializedSize(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
-      const char* key);
-
   static void serialize(
       const RadixSortKeyLayout& keyLayout,
       const PayloadRowLayout* payloadLayout,
@@ -93,41 +88,25 @@ class RadixSortSpillRow {
     return header().totalSize;
   }
 
-  uint32_t keySize(const RadixSortSpillRunMeta& meta) const;
-
-  uint32_t payloadHeapSize(const RadixSortSpillRunMeta& meta) const;
-
   uint32_t trustedKeySize(const RadixSortSpillRunMeta& meta) const;
 
   uint32_t trustedPayloadHeapSize(const RadixSortSpillRunMeta& meta) const;
 
-  std::string_view keyBytes(const RadixSortSpillRunMeta& meta) const;
-
   std::string_view trustedKeyBytes(const RadixSortSpillRunMeta& meta) const;
-
-  char* payloadFixed(const RadixSortSpillRunMeta& meta) const;
 
   char* trustedPayloadFixed(const RadixSortSpillRunMeta& meta) const;
 
-  char* payloadHeap(const RadixSortSpillRunMeta& meta) const;
-
   char* trustedPayloadHeap(const RadixSortSpillRunMeta& meta) const;
 
-  void restoreKeyPointer(const RadixSortSpillRunMeta& meta) const;
-
-  void trustedRestoreKeyPointer(const RadixSortSpillRunMeta& meta) const;
-
   void trustedRestoreKeyDataPointer(const RadixSortSpillRunMeta& meta) const;
-
-  void restorePayloadPointers(
-      const RadixSortSpillRunMeta& meta,
-      const PayloadRowLayout& payloadLayout) const;
 
   void trustedRestorePayloadPointers(
       const RadixSortSpillRunMeta& meta,
       const PayloadRowLayout& payloadLayout) const;
 
  private:
+  char* trustedPayloadFixedOrEnd(const RadixSortSpillRunMeta& meta) const;
+
   char* row_;
 };
 

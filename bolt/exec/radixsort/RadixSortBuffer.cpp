@@ -131,7 +131,6 @@ RadixSortBuffer::RadixSortBuffer(
   keyType_ = ROW(std::move(keyNames), std::move(keyTypes));
   keyMayHaveNulls_.resize(keyType_->size(), 0);
   run_ = makeRun();
-  BOLT_CHECK_NOT_NULL(run_);
 }
 
 RadixSortBuffer::~RadixSortBuffer() {
@@ -361,7 +360,6 @@ void RadixSortBuffer::spillBuildingRun() {
   mergeNullability(keyMayHaveNulls_, run_->keyMayHaveNulls());
   mergeNullability(payloadMayHaveNulls_, run_->payloadMayHaveNulls());
   const auto* storage = run_->storage();
-  BOLT_CHECK_NOT_NULL(storage);
   const auto directory = spillConfig_->getSpillDirPathCb();
   RadixSortSpillWriter writer(
       fmt::format("{}/{}", directory, spillConfig_->fileNamePrefix),
@@ -439,23 +437,16 @@ void RadixSortBuffer::spillRemainingOutput() {
             .count();
     spilledRows += count;
   };
-  if (merger_ != nullptr) {
-    while (spilledRows < remainingRows) {
-      const auto requested = static_cast<vector_size_t>(std::min<uint64_t>(
-          remainingRows - spilledRows, static_cast<uint64_t>(kSpillBatchRows)));
-      const auto count = merger_->collectRows(requested, rawKeys, rawPayloads);
-      BOLT_CHECK_GT(count, 0);
-      writeRows(count);
+  while (spilledRows < remainingRows) {
+    const auto requested = static_cast<vector_size_t>(std::min<uint64_t>(
+        remainingRows - spilledRows, static_cast<uint64_t>(kSpillBatchRows)));
+    const auto count = merger_ != nullptr
+        ? merger_->collectRows(requested, rawKeys, rawPayloads)
+        : run_->collectRemainingRows(requested, rawKeys, rawPayloads);
+    BOLT_CHECK_GT(count, 0);
+    writeRows(count);
+    if (merger_ != nullptr) {
       merger_->releaseRetainedBuffers();
-    }
-  } else {
-    while (spilledRows < remainingRows) {
-      const auto requested = static_cast<vector_size_t>(std::min<uint64_t>(
-          remainingRows - spilledRows, static_cast<uint64_t>(kSpillBatchRows)));
-      const auto count =
-          run_->collectRemainingRows(requested, rawKeys, rawPayloads);
-      BOLT_CHECK_GT(count, 0);
-      writeRows(count);
     }
   }
   BOLT_CHECK_EQ(spilledRows, remainingRows);

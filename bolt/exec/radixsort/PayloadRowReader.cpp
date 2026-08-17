@@ -711,25 +711,4 @@ void PayloadRowReader::gather(
   gather(layout, rows, mayHaveNulls, pool, result);
 }
 
-void PayloadRowReader::gather(
-    const PayloadRowLayout& layout,
-    const PayloadRowBatch& batch,
-    memory::MemoryPool* pool,
-    RowVectorPtr& result) {
-  if (batch.size() == 0) {
-    gather(layout, std::span<char* const>{}, pool, result);
-    return;
-  }
-  if (batch.rows() == nullptr) {
-    result.reset();
-    BOLT_FAIL("Payload row batch rows must not be null");
-  }
-  gather(
-      layout,
-      std::span<char* const>(
-          batch.rows()->as<char*>(), static_cast<uint64_t>(batch.size())),
-      pool,
-      result);
-}
-
 } // namespace bytedance::bolt::exec::radixsort
