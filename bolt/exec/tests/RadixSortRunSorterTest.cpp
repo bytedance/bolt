@@ -464,6 +464,23 @@ TEST_F(RadixSortRunSorterTest, fixedWideSuffixBytesSortBeforeFallback) {
       payloadKeys, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32);
 }
 
+TEST_F(RadixSortRunSorterTest, fewBucketRadixPassesDoNotConsumeBudget) {
+  std::vector<std::string> keys;
+  keys.reserve(4096);
+  for (uint64_t value = 4096; value > 0; --value) {
+    std::string key(32, '\0');
+    for (uint32_t byte = 0; byte < 8; ++byte) {
+      key[byte] = static_cast<char>((value >> (2 * (7 - byte))) & 3);
+    }
+    const auto suffix = value ^ 0x9e3779b97f4a7c15ULL;
+    for (uint32_t byte = 0; byte < sizeof(suffix); ++byte) {
+      key[key.size() - 1 - byte] = static_cast<char>(suffix >> (byte * 8));
+    }
+    keys.push_back(std::move(key));
+  }
+  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyFixed32);
+}
+
 TEST_F(RadixSortRunSorterTest, leadingValiditySkipAvoidsConstantPass) {
   std::vector<std::string> keys;
   for (uint64_t value = 4096; value > 0; --value) {

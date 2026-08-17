@@ -30,6 +30,9 @@ constexpr uint64_t kRunDetectionCutoff = 128;
 constexpr uint64_t kComparisonFallbackCutoff = 128;
 constexpr uint64_t kLargeBucketCutoff = 1024;
 constexpr uint32_t kEffectiveRadixPassLimit = sizeof(uint64_t);
+constexpr uint32_t kFreeRadixPassInformationBits = 2;
+constexpr uint32_t kFreeRadixPassBucketLimit = uint32_t{1}
+    << kFreeRadixPassInformationBits;
 
 uint64_t floorLog2(uint64_t value) {
   uint64_t result = 0;
@@ -538,6 +541,10 @@ class RadixSortRunSorterKernel {
     return true;
   }
 
+  bool isEffectiveRadixPass(uint32_t bucketCount) const {
+    return bucketCount > kFreeRadixPassBucketLimit;
+  }
+
   template <uint32_t OFFSET>
   inline void
   sortBucket(Iterator begin, Iterator end, uint32_t effectivePasses) {
@@ -572,6 +579,12 @@ class RadixSortRunSorterKernel {
       total += count;
       partition.nextOffset = total;
       *remainingEnd++ = static_cast<uint8_t>(bucket);
+    }
+    const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
+    const auto nextPasses = effectivePasses + isEffectiveRadixPass(bucketCount);
+    if (nextPasses > kEffectiveRadixPassLimit) {
+      fullSort(begin, end);
+      return;
     }
     if (remainingEnd - remaining > 1) {
       auto* currentBucket = remaining;
@@ -617,7 +630,7 @@ class RadixSortRunSorterKernel {
     for (auto* bucket = remaining; bucket != remainingEnd; ++bucket) {
       const auto endOffset = partitions[*bucket].nextOffset;
       sortBucket<OFFSET + 1>(
-          begin + startOffset, begin + endOffset, effectivePasses);
+          begin + startOffset, begin + endOffset, nextPasses);
       startOffset = endOffset;
     }
   }
@@ -685,6 +698,12 @@ class RadixSortRunSorterKernel {
       }
       partition.nextOffset = total;
     }
+    const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
+    const auto nextPasses = effectivePasses + isEffectiveRadixPass(bucketCount);
+    if (nextPasses > kEffectiveRadixPassLimit) {
+      fullSort(begin, end);
+      return;
+    }
     auto* unfinished = remainingEnd;
     while (unfinished > remaining + 1) {
       unfinished =
@@ -720,7 +739,7 @@ class RadixSortRunSorterKernel {
           bucket == 0 ? uint64_t{0} : partitions[bucket - 1].nextOffset;
       const auto endOffset = partitions[bucket].nextOffset;
       sortBucket<OFFSET + 1>(
-          begin + startOffset, begin + endOffset, effectivePasses);
+          begin + startOffset, begin + endOffset, nextPasses);
     }
   }
 
@@ -741,14 +760,10 @@ class RadixSortRunSorterKernel {
         sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
         return;
       }
-      if (effectivePasses == kEffectiveRadixPassLimit) {
-        fullSort(begin, end);
-        return;
-      }
       if (end - begin < kLargeBucketCutoff) {
-        cycleBucketSort<OFFSET>(begin, end, effectivePasses + 1);
+        cycleBucketSort<OFFSET>(begin, end, effectivePasses);
       } else {
-        largeBucketSort<OFFSET>(begin, end, effectivePasses + 1);
+        largeBucketSort<OFFSET>(begin, end, effectivePasses);
       }
     }
   }
