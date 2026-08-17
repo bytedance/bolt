@@ -150,7 +150,6 @@ void RadixSortBuffer::addInput(const VectorPtr& input) {
 
   run_->append(*rows);
   inputRows_ += input->size();
-  inputFlatBytes_ += input->estimateFlatSize();
 }
 
 void RadixSortBuffer::noMoreInput() {
@@ -240,10 +239,12 @@ size_t RadixSortBuffer::numOutputRows() const {
 }
 
 std::optional<uint64_t> RadixSortBuffer::estimateOutputRowSize() const {
-  if (inputRows_ == 0 || inputFlatBytes_ == 0) {
+  const auto rows = storedRows_ + run_->size();
+  const auto bytes = storedBytes_ + run_->estimatedOutputBytes();
+  if (rows == 0 || bytes == 0) {
     return std::nullopt;
   }
-  return std::max<uint64_t>(inputFlatBytes_ / inputRows_, 1);
+  return std::max<uint64_t>(bytes / rows, 1);
 }
 
 std::unique_ptr<RadixSortRun> RadixSortBuffer::makeRun() const {
@@ -360,6 +361,8 @@ void RadixSortBuffer::spillBuildingRun() {
   mergeNullability(keyMayHaveNulls_, run_->keyMayHaveNulls());
   mergeNullability(payloadMayHaveNulls_, run_->payloadMayHaveNulls());
   const auto* storage = run_->storage();
+  storedRows_ += run_->size();
+  storedBytes_ += run_->estimatedOutputBytes();
   const auto directory = spillConfig_->getSpillDirPathCb();
   RadixSortSpillWriter writer(
       fmt::format("{}/{}", directory, spillConfig_->fileNamePrefix),

@@ -25,6 +25,7 @@
 
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/exec/SortBuffer.h"
 #include "bolt/exec/radixsort/RadixSortBuffer.h"
 #include "bolt/exec/tests/utils/RadixSortComparatorOracle.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
@@ -300,8 +301,57 @@ class RadixSortBufferTest : public testing::Test {
     return maps;
   }
 
+  MapVectorPtr makeStringStringMapsWithUnusedValues(vector_size_t rows) {
+    std::vector<std::optional<std::string>> keys;
+    std::vector<std::optional<std::string>> values;
+    keys.reserve(rows * 2 + 32);
+    values.reserve(rows * 2 + 32);
+    std::vector<vector_size_t> offsets;
+    std::vector<vector_size_t> sizes;
+    offsets.reserve(rows);
+    sizes.reserve(rows);
+    vector_size_t offset = 0;
+    for (vector_size_t row = 0; row < rows; ++row) {
+      offsets.push_back(offset);
+      const auto entries = row % 5 == 0 ? 0 : 2;
+      sizes.push_back(entries);
+      for (vector_size_t entry = 0; entry < entries; ++entry) {
+        keys.push_back(
+            "k" + std::to_string(row % 11) + "_" + std::to_string(entry));
+        values.push_back(
+            "v" + std::to_string(row % 17) + "_" + std::to_string(entry));
+      }
+      offset += entries;
+    }
+    for (uint32_t unused = 0; unused < 32; ++unused) {
+      keys.push_back(std::string(256, 'u'));
+      values.push_back(std::string(256, 'x'));
+    }
+
+    auto maps = std::make_shared<MapVector>(
+        pool(),
+        MAP(VARCHAR(), VARCHAR()),
+        nullptr,
+        rows,
+        makeBuffer<vector_size_t>(offsets),
+        makeBuffer<vector_size_t>(sizes),
+        makeStringVector(VARCHAR(), keys),
+        makeStringVector(VARCHAR(), values));
+    if (rows > 3) {
+      maps->setNull(3, true);
+    }
+    return maps;
+  }
+
   template <typename T>
   BufferPtr makeBuffer(std::initializer_list<T> values) {
+    auto buffer = AlignedBuffer::allocate<T>(values.size(), pool());
+    std::copy(values.begin(), values.end(), buffer->template asMutable<T>());
+    return buffer;
+  }
+
+  template <typename T>
+  BufferPtr makeBuffer(const std::vector<T>& values) {
     auto buffer = AlignedBuffer::allocate<T>(values.size(), pool());
     std::copy(values.begin(), values.end(), buffer->template asMutable<T>());
     return buffer;
@@ -369,6 +419,87 @@ TEST_F(RadixSortBufferTest, singleRunLifecycleAndMultipleKeys) {
     expectRowsMatchById(*input, *output, 3);
     expectSorted(*output, keyChannels, keyFlags);
   }
+}
+
+TEST_F(RadixSortBufferTest, estimateOutputRowSizeMatchesLegacyForComplexRows) {
+  constexpr vector_size_t kRows = 128;
+  std::vector<std::optional<int64_t>> ids;
+  std::vector<std::optional<int64_t>> groupIds;
+  std::vector<std::optional<int64_t>> localTimes;
+  std::vector<std::optional<int64_t>> authorIds;
+  std::vector<std::optional<int64_t>> hours;
+  std::vector<std::optional<std::string>> users;
+  std::vector<std::optional<std::string>> enterFrom;
+  std::vector<std::optional<std::string>> relationTags;
+  std::vector<std::optional<std::string>> events;
+  ids.reserve(kRows);
+  groupIds.reserve(kRows);
+  localTimes.reserve(kRows);
+  authorIds.reserve(kRows);
+  hours.reserve(kRows);
+  users.reserve(kRows);
+  enterFrom.reserve(kRows);
+  relationTags.reserve(kRows);
+  events.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    ids.push_back(row);
+    groupIds.push_back(row % 13);
+    localTimes.push_back(1'700'000'000'000 + row);
+    authorIds.push_back(row % 19);
+    hours.push_back(row % 24);
+    users.push_back("user_" + std::to_string(row % 31));
+    enterFrom.push_back("enter_" + std::to_string(row % 7));
+    relationTags.push_back(
+        row % 9 == 0 ? std::optional<std::string>{}
+                     : "tag_" + std::to_string(row % 5));
+    events.push_back("event_" + std::to_string(row % 4));
+  }
+
+  auto input = makeRows(
+      {"device_id",
+       "user_id",
+       "group_id",
+       "local_time_ms",
+       "enter_from",
+       "relation_tag",
+       "author_id",
+       "params",
+       "hour",
+       "event"},
+      {makeVector<int64_t>(BIGINT(), ids),
+       makeStringVector(VARCHAR(), users),
+       makeVector<int64_t>(BIGINT(), groupIds),
+       makeVector<int64_t>(BIGINT(), localTimes),
+       makeStringVector(VARCHAR(), enterFrom),
+       makeStringVector(VARCHAR(), relationTags),
+       makeVector<int64_t>(BIGINT(), authorIds),
+       makeStringStringMapsWithUnusedValues(kRows),
+       makeVector<int64_t>(BIGINT(), hours),
+       makeStringVector(VARCHAR(), events)});
+  auto inputType = std::static_pointer_cast<const RowType>(input->type());
+  const std::vector<column_index_t> keyChannels{9};
+  const std::vector<CompareFlags> keyFlags{flags(true, true)};
+
+  tsan_atomic<bool> nonReclaimableSection{false};
+  SortBuffer legacy(
+      inputType, keyChannels, keyFlags, pool(), &nonReclaimableSection);
+  RadixSortBuffer radix(inputType, keyChannels, keyFlags, pool());
+
+  legacy.addInput(input);
+  radix.addInput(input);
+  legacy.noMoreInput();
+  radix.noMoreInput();
+
+  ASSERT_TRUE(legacy.estimateOutputRowSize().has_value());
+  ASSERT_TRUE(radix.estimateOutputRowSize().has_value());
+  const auto legacySize = *legacy.estimateOutputRowSize();
+  const auto radixSize = *radix.estimateOutputRowSize();
+  const auto inputFlatSizePerRow = input->estimateFlatSize() / input->size();
+
+  EXPECT_GT(inputFlatSizePerRow, legacySize * 11 / 10);
+  const auto diff =
+      legacySize > radixSize ? legacySize - radixSize : radixSize - legacySize;
+  EXPECT_LE(diff * 10, legacySize);
 }
 
 TEST_F(RadixSortBufferTest, allOrderDirectionsAndNullPlacements) {

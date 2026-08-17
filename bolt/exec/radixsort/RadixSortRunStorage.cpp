@@ -128,6 +128,28 @@ RadixSortKey RadixSortRunStorage::keyAt(uint64_t index) const {
   return RadixSortKey(layout_, keyDataAt(index));
 }
 
+uint64_t RadixSortRunStorage::estimatedOutputBytes() const {
+  uint64_t bytes = 0;
+  const auto keyBytesPerRow = layout_.hasPayload()
+      ? static_cast<uint64_t>(*layout_.payloadOffset())
+      : static_cast<uint64_t>(layout_.width());
+  for (const auto& block : keyBlocks_) {
+    bytes += static_cast<uint64_t>(block.count) * keyBytesPerRow;
+  }
+  for (const auto& group : keyHeapGroups_) {
+    bytes += group.used;
+  }
+  if (payloadLayout_ != nullptr) {
+    for (const auto& block : payloadFixedBlocks_) {
+      bytes += static_cast<uint64_t>(block.count) * payloadLayout_->rowWidth();
+    }
+    for (const auto& group : payloadHeapGroups_) {
+      bytes += group.used;
+    }
+  }
+  return bytes;
+}
+
 char* RadixSortRunStorage::keyDataAt(uint64_t index) {
   BOLT_CHECK_LT(index, size_);
   const auto blockIndex = index / keysPerBlock_;

@@ -151,6 +151,8 @@ class RadixSortRunStorage {
     return allocationPool_.allocatedBytes();
   }
 
+  uint64_t estimatedOutputBytes() const;
+
   int32_t numRanges() const {
     return allocationPool_.numRanges();
   }
