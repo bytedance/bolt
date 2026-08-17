@@ -176,13 +176,11 @@ void writeFlatScalar(
     const uint64_t* heapSizes,
     PayloadRowBatch& batch) {
   auto** rows = batch.rows()->asMutable<char*>();
-  const bool initializeSlots = layout.hasVariableFields() ||
-      std::any_of(input.children().begin(),
-                  input.children().end(),
-                  [](const auto& vector) {
-                    return vector->typeKind() == TypeKind::UNKNOWN ||
-                        vector->rawNulls() != nullptr;
-                  });
+  const bool initializeSlots = std::any_of(
+      input.children().begin(), input.children().end(), [](const auto& vector) {
+        return vector->typeKind() == TypeKind::UNKNOWN ||
+            vector->rawNulls() != nullptr;
+      });
   for (vector_size_t row = 0; row < input.size(); ++row) {
     if (initializeSlots) {
       std::memset(rows[row], 0, layout.rowWidth());
