@@ -694,7 +694,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
   if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyOnlyVariable32) {
     materializeVariableKeyViews<RadixSortKeyLayoutKind::kKeyOnlyVariable32>(
         *storage_, begin, count, rawInlineBuffers, rawViews);
-    keyCodec_->decodeTrusted(
+    keyCodec_->decode(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
         keyMayHaveNulls_,
@@ -707,7 +707,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     materializeVariableKeyViews<
         RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>(
         *storage_, begin, count, rawInlineBuffers, rawViews);
-    keyCodec_->decodeTrusted(
+    keyCodec_->decode(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
         keyMayHaveNulls_,
@@ -720,7 +720,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     materializeVariableKeyViews<
         RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
         *storage_, begin, count, rawInlineBuffers, rawViews);
-    keyCodec_->decodeTrusted(
+    keyCodec_->decode(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
         keyMayHaveNulls_,
@@ -733,7 +733,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     materializeVariableKeyViews<
         RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
         *storage_, begin, count, rawInlineBuffers, rawViews);
-    keyCodec_->decodeTrusted(
+    keyCodec_->decode(
         std::span<const EncodedKeyView>(rawViews, count),
         projection_->decodedKeyMask(),
         keyMayHaveNulls_,
@@ -755,7 +755,7 @@ RowVectorPtr RadixSortRun::decodeKeys(
     }
     outputRow += range.count;
   }
-  keyCodec_->decodeTrusted(
+  keyCodec_->decode(
       std::span<const EncodedKeyView>(rawViews, count),
       projection_->decodedKeyMask(),
       keyMayHaveNulls_,
@@ -800,7 +800,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
     if (materializeExternalVariableKeyPointerViews<
             RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>(
             keys, rawViews)) {
-      keyCodec_->decodeTrusted(
+      keyCodec_->decode(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
           keyMayHaveNulls_,
@@ -814,7 +814,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
     if (materializeExternalVariableKeyPointerViews<
             RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
             keys, rawViews)) {
-      keyCodec_->decodeTrusted(
+      keyCodec_->decode(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
           keyMayHaveNulls_,
@@ -828,7 +828,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
     if (materializeExternalVariableKeyPointerViews<
             RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
             keys, rawViews)) {
-      keyCodec_->decodeTrusted(
+      keyCodec_->decode(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
           keyMayHaveNulls_,
@@ -840,7 +840,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
   } else if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyOnlyVariable32) {
     if (materializeExternalVariableKeyPointerViews<
             RadixSortKeyLayoutKind::kKeyOnlyVariable32>(keys, rawViews)) {
-      keyCodec_->decodeTrusted(
+      keyCodec_->decode(
           std::span<const EncodedKeyView>(rawViews, count),
           projection_->decodedKeyMask(),
           keyMayHaveNulls_,
@@ -884,7 +884,7 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
           .deconstruct(rawInlineBuffers[row], rawViews[row]);
     }
   }
-  keyCodec_->decodeTrusted(
+  keyCodec_->decode(
       std::span<const EncodedKeyView>(rawViews, count),
       projection_->decodedKeyMask(),
       keyMayHaveNulls_,

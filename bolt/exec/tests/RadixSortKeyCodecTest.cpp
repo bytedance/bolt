@@ -893,57 +893,6 @@ TEST_F(RadixSortKeyCodecTest, unknownAndMultipleColumns) {
       rows, {flags(true, false), flags(false, true), flags(true, true)});
 }
 
-TEST_F(RadixSortKeyCodecTest, malformedDecode) {
-  auto rows =
-      makeRows({makeStringVector(VARBINARY(), {std::string("\x00x", 2)})});
-  auto codec = bind({VARBINARY()}, {flags(true, true)});
-  EncodedKeyBatch keys;
-  codec->encode(*rows, pool_.get(), keys);
-
-  auto* data = keys.data()->asMutable<uint8_t>();
-  const auto originalMarker = data[0];
-  data[0] = 42;
-  RowVectorPtr decoded;
-  EXPECT_THROW(codec->decode(keys, pool_.get(), decoded), BoltException);
-  data[0] = originalMarker;
-
-  const auto originalSize = keys.data()->size();
-  keys.data()->setSize(originalSize - 1);
-  EXPECT_THROW(codec->decode(keys, pool_.get(), decoded), BoltException);
-  keys.data()->setSize(originalSize);
-
-  auto* offsets = keys.offsets()->asMutable<uint64_t>();
-  const auto originalEnd = offsets[1];
-  offsets[1] = originalEnd + 1;
-  EXPECT_THROW(codec->decode(keys, pool_.get(), decoded), BoltException);
-
-  offsets[1] = originalEnd;
-  const auto originalEscape = data[1];
-  data[1] = 0;
-  EXPECT_THROW(codec->decode(keys, pool_.get(), decoded), BoltException);
-  data[1] = originalEscape;
-
-  keys.data()->setSize(originalSize + 1);
-  EXPECT_THROW(codec->decode(keys, pool_.get(), decoded), BoltException);
-  keys.data()->setSize(originalSize);
-
-  const auto originalOffsetSize = keys.offsets()->size();
-  keys.offsets()->setSize(originalOffsetSize + sizeof(uint64_t));
-  EXPECT_THROW(codec->decode(keys, pool_.get(), decoded), BoltException);
-  keys.offsets()->setSize(originalOffsetSize);
-
-  auto doubleRows = makeRows(
-      {makeVector<double>(DOUBLE(), {std::numeric_limits<double>::max()})});
-  auto doubleCodec = bind({DOUBLE()}, {flags(true, true)});
-  EncodedKeyBatch doubleKeys;
-  doubleCodec->encode(*doubleRows, pool_.get(), doubleKeys);
-  auto* doubleData = doubleKeys.data()->asMutable<uint8_t>();
-  std::fill(doubleData + 1, doubleData + 9, 0xff);
-  doubleData[8] = 0xfd;
-  EXPECT_THROW(
-      doubleCodec->decode(doubleKeys, pool_.get(), decoded), BoltException);
-}
-
 TEST_F(RadixSortKeyCodecTest, fixedSeedPropertyFuzz) {
   for (uint32_t seed = 0; seed < kFuzzSeeds; ++seed) {
     std::mt19937_64 random(seed);

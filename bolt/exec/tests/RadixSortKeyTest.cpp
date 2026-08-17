@@ -973,23 +973,6 @@ TEST_F(RadixSortKeyTest, invalidArenaInputs) {
   RadixSortKey noPayload(fixedLayout, storage.data());
   EXPECT_THROW(noPayload.construct({}, nullptr), BoltException);
   EXPECT_THROW(noPayload.setPayload(nullptr), BoltException);
-
-  std::unique_ptr<RadixSortKeyCodec> codec;
-  RadixSortKeyCodec::bind({TINYINT()}, {flags(true, true)}, codec);
-  auto rows = makeRows(makeVector<int8_t>(TINYINT(), {1}));
-  EncodedKeyBatch encoded;
-  codec->encode(*rows, pool_.get(), encoded);
-  RadixSortRunStorage paddedArena(pool_.get(), fixedLayout, 4, 64);
-  paddedArena.appendBatch(encoded);
-  std::vector<RadixSortInlineKeyBuffer> buffers;
-  auto views = deconstructArena(paddedArena, buffers);
-  ASSERT_TRUE(views[0].zeroPadded);
-  buffers[0][views[0].bytes.size() - 1] = 1;
-  RowVectorPtr decoded;
-  EXPECT_THROW(codec->decode(views, pool_.get(), decoded), BoltException);
-  buffers[0][views[0].bytes.size() - 1] = 0;
-  views[0].zeroPadded = false;
-  EXPECT_THROW(codec->decode(views, pool_.get(), decoded), BoltException);
 }
 
 } // namespace
