@@ -116,7 +116,8 @@ class RadixSortBuffer : public SortBufferBase {
   bool outputStageSpilled_{false};
   uint64_t inputRows_{0};
   uint64_t outputRows_{0};
-  uint64_t inputFlatBytes_{0};
+  uint64_t storedRows_{0};
+  uint64_t storedBytes_{0};
   uint64_t encodeTimeUs_{0};
   uint64_t appendTimeUs_{0};
   uint64_t sortTimeUs_{0};

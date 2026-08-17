@@ -176,6 +176,10 @@ class RadixSortRun {
     return storage_ == nullptr ? 0 : storage_->allocatedBytes();
   }
 
+  uint64_t estimatedOutputBytes() const {
+    return storage_ == nullptr ? 0 : storage_->estimatedOutputBytes();
+  }
+
   const RadixSortRunStats& metrics() const {
     return metrics_;
   }
