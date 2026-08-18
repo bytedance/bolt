@@ -283,5 +283,71 @@ TEST_F(FromJsonTest, scalarRootDocumentDoesNotThrow) {
   testFromJson(scalarInput, expectedRow);
 }
 
+TEST_F(FromJsonTest, structFieldNameCaseSensitive) {
+  auto expectedLabels = makeNullableFlatVector<StringView>(
+      {"unknown", std::nullopt, "hello", std::nullopt, "ok"});
+  auto expectedValues = makeNullableFlatVector<StringView>(
+      {"0", std::nullopt, "world", "0", std::nullopt});
+  auto input = makeFlatVector<std::string>({
+      R"({"Label":"unknown","Value":"0"})",
+      R"({"label":"unknown","value":"0"})",
+      R"({"Label":"hello","Value":"world"})",
+      R"({"label":"bad","Value":"0"})",
+      R"({"Label":"ok","value":"1"})",
+  });
+  testFromJson(
+      input,
+      makeRowVector({"Label", "Value"}, {expectedLabels, expectedValues}));
+}
+
+TEST_F(FromJsonTest, structFieldNameCaseSensitiveDedup) {
+  auto input = makeFlatVector<std::string>({
+      R"({"Label":"unknown","Value":"0"})",
+      R"({"label":"unknown","value":"0"})",
+      R"({"label":"lower","Value":"0"})",
+      R"({"Label":"upper","value":"0"})",
+  });
+  auto expectedLabel = makeNullableFlatVector<StringView>(
+      {"unknown", std::nullopt, std::nullopt, "upper"});
+  auto expectedValue = makeNullableFlatVector<StringView>(
+      {"0", std::nullopt, "0", std::nullopt});
+  testFromJson(
+      input, makeRowVector({"Label", "Value"}, {expectedLabel, expectedValue}));
+}
+
+TEST_F(FromJsonTest, structFieldNameLowerCaseSchema) {
+  // The shape that reaches Bolt in production: the schema field names are lower
+  // case, but the JSON keys in the data are not constrained by that.
+  auto expectedLabel = makeNullableFlatVector<StringView>(
+      {"yes", std::nullopt, std::nullopt, "no"});
+  auto expectedValue = makeNullableFlatVector<StringView>(
+      {"1", std::nullopt, "0", std::nullopt});
+  auto input = makeFlatVector<std::string>({
+      R"({"label":"yes","value":"1"})",
+      R"({"Label":"yes","Value":"1"})",
+      R"({"Label":"no","value":"0"})",
+      R"({"label":"no","Value":"0"})",
+  });
+  testFromJson(
+      input, makeRowVector({"label", "value"}, {expectedLabel, expectedValue}));
+}
+
+TEST_F(FromJsonTest, structFieldNameNonAsciiIsExact) {
+  // A non-ASCII field name used to switch the matcher onto a Unicode-aware
+  // lower-casing path, which folded the ASCII names in the same row as well.
+  // Every name is now matched exactly.
+  auto expectedTag =
+      makeNullableFlatVector<StringView>({"a", "b", std::nullopt});
+  auto expectedValue =
+      makeNullableFlatVector<StringView>({"1", std::nullopt, "3"});
+  auto input = makeFlatVector<std::string>({
+      R"({"标签":"a","Value":"1"})",
+      R"({"标签":"b","value":"2"})",
+      R"({"标记":"c","Value":"3"})",
+  });
+  testFromJson(
+      input, makeRowVector({"标签", "Value"}, {expectedTag, expectedValue}));
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test
