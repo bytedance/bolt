@@ -243,30 +243,6 @@ char* RadixSortKey::payload() const {
   return loadUnaligned<char*>(data_ + *layout_->payloadOffset());
 }
 
-void RadixSortKey::setPayload(char* payload) const {
-  BOLT_CHECK(
-      layout_->hasPayload(),
-      "Radix sort key layout does not contain a payload");
-  BOLT_CHECK_NOT_NULL(mutableData_, "Radix sort key storage is read-only");
-  storeUnaligned<char*>(mutableData_ + *layout_->payloadOffset(), payload);
-}
-
-uint64_t RadixSortKey::encodedSize() const {
-  if (!layout_->isVariable()) {
-    return layout_->inlineCapacity();
-  }
-  return std::max<uint64_t>(storedSize(), layout_->inlineCapacity());
-}
-
-uint8_t RadixSortKey::encodedByte(uint64_t offset) const {
-  if (layout_->isVariable() && storedSize() > layout_->inlineCapacity()) {
-    return static_cast<uint8_t>(fullKeyData()[offset]);
-  }
-  const auto word = inlineWord(offset / sizeof(uint64_t));
-  const auto shift = (sizeof(uint64_t) - 1 - offset % sizeof(uint64_t)) * 8;
-  return static_cast<uint8_t>(word >> shift);
-}
-
 uint64_t RadixSortKey::inlineWord(uint32_t index) const {
   return loadUnaligned<uint64_t>(data_ + index * sizeof(uint64_t));
 }

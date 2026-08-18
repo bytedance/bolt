@@ -398,13 +398,6 @@ TEST_F(RadixSortKeyTest, allLayoutsRoundTripAndCompare) {
           physical.fullKeyData() != nullptr,
           keys[index].size() > layout.inlineCapacity());
       EXPECT_EQ(physical.payload(), payload);
-      if (layout.hasPayload()) {
-        uint64_t replacementPayload = index;
-        auto* replacement = reinterpret_cast<char*>(&replacementPayload);
-        physical.setPayload(replacement);
-        EXPECT_EQ(physical.payload(), replacement);
-        physical.setPayload(payload);
-      }
     }
     for (uint64_t left = 0; left < keys.size(); ++left) {
       for (uint64_t right = 0; right < keys.size(); ++right) {
@@ -985,7 +978,6 @@ TEST_F(RadixSortKeyTest, invalidArenaInputs) {
   std::array<char, 8> storage{};
   RadixSortKey noPayload(fixedLayout, storage.data());
   EXPECT_THROW(noPayload.construct({}, nullptr), BoltException);
-  EXPECT_THROW(noPayload.setPayload(nullptr), BoltException);
 }
 
 } // namespace
