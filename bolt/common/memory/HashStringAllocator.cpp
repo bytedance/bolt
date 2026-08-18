@@ -106,6 +106,7 @@ void HashStringAllocator::clear() {
   freeBytes_ = 0;
   cumulativeBytes_ = 0;
   std::fill(std::begin(freeNonEmpty_), std::end(freeNonEmpty_), 0);
+  freeBitmapIndx_ = 0;
   for (auto& pair : allocationsFromPool_) {
     pool()->free(pair.first, pair.second);
   }
@@ -342,29 +343,89 @@ StringView HashStringAllocator::contiguousString(
 
 void HashStringAllocator::freeRestOfBlock(Header* header, int32_t keepBytes) {
   keepBytes = std::max(keepBytes, kMinAlloc);
-  int32_t freeSize = header->size() - keepBytes - sizeof(Header);
+  const int32_t freeSize = header->size() - keepBytes - sizeof(Header);
   if (freeSize <= kMinAlloc) {
     return;
   }
 
   header->setSize(keepBytes);
-  auto newHeader = new (header->end()) Header(freeSize);
-  free(newHeader);
-  // Subtract the size of the new free header
-  cumulativeBytes_ -= sizeof(Header);
+
+  // no need to check previous
+  auto* newHeader = new (header->end()) Header(freeSize);
+  auto finalFreeSize = freeSize;
+  auto* next = newHeader->next();
+  if (next && next->isFree()) {
+    --numFree_;
+    const auto nextSize = next->size();
+    auto* nextAfterMerged = next->next();
+    removeFromFreeList(next);
+    finalFreeSize += nextSize + sizeof(Header);
+    newHeader->setSize(finalFreeSize);
+    next = nextAfterMerged;
+  }
+
+  freeBytes_ += freeSize + sizeof(Header);
+  cumulativeBytes_ -= freeSize + sizeof(Header);
+  ++numFree_;
+
+  const auto freeIndex = freeListIndex(finalFreeSize);
+  const auto wordIndex = freeIndex >> 6;
+  auto& word = freeNonEmpty_[wordIndex];
+  if (word == 0) {
+    freeBitmapIndx_ |= uint64_t{1} << wordIndex;
+  }
+  word |= uint64_t{1} << (freeIndex & 63);
+  free_[freeIndex].insert(
+      reinterpret_cast<CompactDoubleList*>(newHeader->begin()));
+  newHeader->setFree();
+  if (next) {
+    next->setPreviousFree();
+    *previousFreeSize(next) = finalFreeSize;
+  }
 }
 
 int32_t HashStringAllocator::freeListIndex(int size) {
   return std::min(size - kMinAlloc, kNumFreeLists - 1);
 }
 
+int32_t HashStringAllocator::findFirstFreeList(int32_t begin) const {
+  const auto wordIndex = begin >> 6;
+  const auto bitOffset = begin & 63;
+  const auto word = freeNonEmpty_[wordIndex] & (~uint64_t{0} << bitOffset);
+  if (word != 0) {
+    return (wordIndex << 6) + __builtin_ctzll(word);
+  }
+
+  const auto nextWordOffset = wordIndex + 1;
+  const auto remainingWords = nextWordOffset == 64
+      ? uint64_t{0}
+      : freeBitmapIndx_ & (~uint64_t{0} << nextWordOffset);
+  if (remainingWords == 0) {
+    return -1;
+  }
+  const auto nextWord = __builtin_ctzll(remainingWords);
+  return (nextWord << 6) + __builtin_ctzll(freeNonEmpty_[nextWord]);
+}
+
 void HashStringAllocator::removeFromFreeList(Header* header) {
   BOLT_CHECK(header->isFree());
   header->clearFree();
   auto index = freeListIndex(header->size());
-  reinterpret_cast<CompactDoubleList*>(header->begin())->remove();
-  if (free_[index].empty()) {
-    bits::clearBit(freeNonEmpty_, index);
+  const auto listIsEmpty =
+      reinterpret_cast<CompactDoubleList*>(header->begin())->remove();
+  updateFreeListAfterRemoval(index, listIsEmpty);
+}
+
+void HashStringAllocator::updateFreeListAfterRemoval(
+    int32_t index,
+    bool listIsEmpty) {
+  if (listIsEmpty) {
+    const auto wordIndex = index >> 6;
+    const auto word = freeNonEmpty_[wordIndex] & ~(uint64_t{1} << (index & 63));
+    freeNonEmpty_[wordIndex] = word;
+    if (word == 0) {
+      freeBitmapIndx_ &= ~(uint64_t{1} << wordIndex);
+    }
   }
 }
 
@@ -400,7 +461,7 @@ HashStringAllocator::allocateFromFreeLists(
   }
   preferredSize = std::max(kMinAlloc, preferredSize);
   const auto index = freeListIndex(preferredSize);
-  auto available = bits::findFirstBit(freeNonEmpty_, index, kNumFreeLists);
+  auto available = findFirstFreeList(index);
   if (!mustHaveSize && available == -1) {
     available = bits::findLastBit(freeNonEmpty_, 0, index);
   }
@@ -419,21 +480,23 @@ HashStringAllocator::allocateFromFreeList(
     bool mustHaveSize,
     bool isFinalSize,
     int32_t freeListIndex) {
-  auto* item = free_[freeListIndex].next();
-  if (item == &free_[freeListIndex]) {
+  bool listIsEmpty;
+  auto* item = free_[freeListIndex].popFront(listIsEmpty);
+  if (item == nullptr) {
     return nullptr;
   }
   auto found = headerOf(item);
-  BOLT_CHECK(
-      found->isFree() && (!mustHaveSize || found->size() >= preferredSize));
+  const auto foundSize = found->size();
+  BOLT_CHECK(found->isFree() && (!mustHaveSize || foundSize >= preferredSize));
+  auto* next = found->next();
   --numFree_;
-  freeBytes_ -= found->size() + sizeof(Header);
-  removeFromFreeList(found);
-  auto next = found->next();
+  freeBytes_ -= foundSize + sizeof(Header);
+  found->clearFree();
+  updateFreeListAfterRemoval(freeListIndex, listIsEmpty);
   if (next) {
     next->clearPreviousFree();
   }
-  cumulativeBytes_ += found->size();
+  cumulativeBytes_ += foundSize;
   if (isFinalSize) {
     freeRestOfBlock(found, preferredSize);
   }
@@ -445,12 +508,13 @@ void HashStringAllocator::free(Header* _header) {
 
   do {
     Header* continued = nullptr;
-    if (header->isContinued()) {
+    if (header->isContinued()) [[unlikely]] {
       continued = header->nextContinued();
       header->clearContinued();
     }
     if (header->size() > kMaxAlloc && !pool_.isInCurrentRange(header) &&
-        allocationsFromPool_.find(header) != allocationsFromPool_.end()) {
+        allocationsFromPool_.find(header) != allocationsFromPool_.end())
+        [[unlikely]] {
       freeToPool(header, header->size() + sizeof(Header));
       // In `freeToPool()`, it accounts for sizeof(Header).
       cumulativeBytes_ += sizeof(Header);
@@ -469,7 +533,7 @@ void HashStringAllocator::free(Header* _header) {
           BOLT_CHECK(next->isArenaEnd() || !next->isFree());
         }
       }
-      if (header->isPreviousFree()) {
+      if (header->isPreviousFree()) [[unlikely]] {
         auto previousFree = getPreviousFree(header);
         removeFromFreeList(previousFree);
         previousFree->setSize(
@@ -481,7 +545,12 @@ void HashStringAllocator::free(Header* _header) {
       }
       auto freedSize = header->size();
       auto freeIndex = freeListIndex(freedSize);
-      bits::setBit(freeNonEmpty_, freeIndex);
+      const auto wordIndex = freeIndex >> 6;
+      auto& word = freeNonEmpty_[wordIndex];
+      if (word == 0) {
+        freeBitmapIndx_ |= uint64_t{1} << wordIndex;
+      }
+      word |= uint64_t{1} << (freeIndex & 63);
       free_[freeIndex].insert(
           reinterpret_cast<CompactDoubleList*>(header->begin()));
       markAsFree(header);
@@ -577,7 +646,7 @@ inline bool HashStringAllocator::storeStringFast(
       return false;
     }
     auto index = freeListIndex(roundedBytes);
-    auto available = bits::findFirstBit(freeNonEmpty_, index, kNumFreeLists);
+    auto available = findFirstFreeList(index);
     if (available < 0) {
       return false;
     }
@@ -761,6 +830,13 @@ int64_t HashStringAllocator::checkConsistency() const {
 
   BOLT_CHECK_EQ(numInFreeList, numFree_);
   BOLT_CHECK_EQ(bytesInFreeList, freeBytes_);
+  uint64_t expectedFreeBitmapIndex = 0;
+  for (auto i = 0; i < kNumFreeBitmapWords; ++i) {
+    if (freeNonEmpty_[i] != 0) {
+      bits::setBit(&expectedFreeBitmapIndex, i);
+    }
+  }
+  BOLT_CHECK_EQ(freeBitmapIndx_, expectedFreeBitmapIndex);
   return allocatedBytes;
 }
 
