@@ -31,6 +31,9 @@
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include <folly/Random.h>
 
 #include <folly/container/F14Map.h>
@@ -554,6 +557,55 @@ TEST_F(HashStringAllocatorTest, freeLists) {
     allocator_->allocate(kSmall + 1);
   }
   ASSERT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(30));
+}
+
+TEST_F(HashStringAllocatorTest, randomAllocFreeReuse) {
+  constexpr uint64_t kTargetBytes = 128ULL << 20;
+  constexpr int32_t kMaxAllocationSize = 1 << 10;
+  constexpr int32_t kNumRandomOperations = 1'000'000;
+
+  struct Allocation {
+    HashStringAllocator::Header* header;
+    int32_t size;
+  };
+
+  uint64_t allocatedBytes = 0;
+  std::vector<Allocation> allocations;
+  auto allocate = [&]() -> bool {
+    const auto size = static_cast<int32_t>(1 + rand32() % kMaxAllocationSize);
+    auto* header = allocator_->allocate(size);
+    std::memset(header->begin(), 'a', size);
+    allocatedBytes += size;
+    allocations.push_back({header, size});
+    return true;
+  };
+
+  auto free = [&](size_t index) {
+    const auto allocation = allocations[index];
+    allocatedBytes -= allocation.size;
+    std::memset(allocation.header->begin(), '\0', allocation.size);
+    allocator_->free(allocation.header);
+    allocations[index] = allocations.back();
+    allocations.pop_back();
+  };
+
+  while (allocatedBytes < kTargetBytes) {
+    ASSERT_TRUE(allocate());
+  }
+
+  for (auto i = 0; i < kNumRandomOperations; ++i) {
+    if (allocations.empty() || rand32() % 2 == 0) {
+      ASSERT_TRUE(allocate());
+    } else {
+      free(rand32() % allocations.size());
+    }
+  }
+
+  while (!allocations.empty()) {
+    free(allocations.size() - 1);
+  }
+  allocator_->checkConsistency();
+  EXPECT_TRUE(allocator_->isEmpty());
 }
 
 TEST_F(HashStringAllocatorTest, strings) {

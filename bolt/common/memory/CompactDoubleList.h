@@ -57,17 +57,37 @@ class CompactDoubleList {
 
   // inserts 'entry' after 'this'
   void insert(CompactDoubleList* entry) {
-    entry->setNext(next());
+    auto* nextEntry = next();
+    entry->setNext(nextEntry);
     entry->setPrevious(this);
-    next()->setPrevious(entry);
+    nextEntry->setPrevious(entry);
     setNext(entry);
   }
 
-  // Unlinks 'this' from its list. Throws if 'this' is the only element.
-  void remove() {
-    BOLT_CHECK(!empty());
-    previous()->setNext(next());
-    next()->setPrevious(previous());
+  // Removes and returns the first element. Sets 'listIsEmpty' if the list is
+  // empty after the removal. Returns nullptr if the list was already empty.
+  CompactDoubleList* popFront(bool& listIsEmpty) {
+    auto* entry = next();
+    if (entry == this) {
+      listIsEmpty = true;
+      return nullptr;
+    }
+    auto* nextEntry = entry->next();
+    setNext(nextEntry);
+    nextEntry->setPrevious(this);
+    listIsEmpty = nextEntry == this;
+    return entry;
+  }
+
+  // Unlinks 'this' from its list. Returns true if the list is empty after the
+  // removal. Throws if 'this' is not linked to a list.
+  bool remove() {
+    auto* nextEntry = next();
+    BOLT_CHECK(nextEntry != this);
+    auto* previousEntry = previous();
+    previousEntry->setNext(nextEntry);
+    nextEntry->setPrevious(previousEntry);
+    return previousEntry == nextEntry;
   }
 
   CompactDoubleList* next() const {
