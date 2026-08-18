@@ -35,7 +35,7 @@
 #include "bolt/parse/Expressions.h"
 #include "bolt/type/Variant.h"
 
-#include <duckdb.hpp> // @manual
+#include "bolt/duckdb/DuckDbCompat.h"
 #include <duckdb/parser/expression/between_expression.hpp> // @manual
 #include <duckdb/parser/expression/case_expression.hpp> // @manual
 #include <duckdb/parser/expression/cast_expression.hpp> // @manual

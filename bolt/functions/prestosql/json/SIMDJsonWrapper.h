@@ -30,8 +30,35 @@
 
 #pragma once
 
+// clang16 cannot parse parts of libstdc++13's C++23 <ranges>. simdjson only
+// uses this macro to enable optional std::ranges view adapters.
+#include "bolt/common/base/Portability.h"
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+#ifndef SIMDJSON_DISABLE_RANGES
+#define SIMDJSON_DISABLE_RANGES
+#define BOLT_SIMDJSON_UNDEFINE_DISABLE_RANGES
+#endif
+
+#if defined(__cpp_lib_ranges)
+#define BOLT_SIMDJSON_RESTORE_CPP_LIB_RANGES
+#pragma push_macro("__cpp_lib_ranges")
+#undef __cpp_lib_ranges
+#endif
+#endif
+
 #if __has_include("simdjson/singleheader/simdjson.h")
 #include "simdjson/singleheader/simdjson.h"
 #else
 #include "simdjson.h"
+#endif
+
+#if defined(BOLT_SIMDJSON_RESTORE_CPP_LIB_RANGES)
+#pragma pop_macro("__cpp_lib_ranges")
+#undef BOLT_SIMDJSON_RESTORE_CPP_LIB_RANGES
+#endif
+
+#if defined(BOLT_SIMDJSON_UNDEFINE_DISABLE_RANGES)
+#undef SIMDJSON_DISABLE_RANGES
+#undef BOLT_SIMDJSON_UNDEFINE_DISABLE_RANGES
 #endif

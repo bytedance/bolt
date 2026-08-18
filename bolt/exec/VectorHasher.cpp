@@ -78,7 +78,15 @@ inline uint64_t hashOne(DecodedVector& decoded, vector_size_t index) {
 
   // Inlined for scalars.
   using T = typename KindToFlatVector<Kind>::HashRowType;
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+  if constexpr (Kind == TypeKind::HUGEINT) {
+    return HugeInt::hash(decoded.valueAt<T>(index));
+  } else {
+    return folly::hasher<T>()(decoded.valueAt<T>(index));
+  }
+#else
   return folly::hasher<T>()(decoded.valueAt<T>(index));
+#endif
 }
 
 template <TypeKind Kind>

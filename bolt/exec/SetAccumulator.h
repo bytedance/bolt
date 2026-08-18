@@ -41,11 +41,34 @@ namespace bytedance::bolt::aggregate::prestosql {
 
 namespace detail {
 
+template <typename T>
+struct SetAccumulatorHash : std::hash<T> {};
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+struct SetAccumulatorHash<int128_t> {
+  size_t operator()(int128_t value) const noexcept {
+    return HugeInt::hash(value);
+  }
+};
+
+template <>
+struct SetAccumulatorHash<__uint128_t> {
+  size_t operator()(__uint128_t value) const noexcept {
+    return HugeInt::hash(value);
+  }
+};
+#endif
+
 /// Maintains a set of unique values. Non-null values are stored in F14FastSet.
 /// A separate flag tracks presence of the null value.
 template <
     typename T,
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+    typename Hash = SetAccumulatorHash<T>,
+#else
     typename Hash = std::hash<T>,
+#endif
     typename EqualTo = std::equal_to<T>>
 struct SetAccumulator {
   std::optional<vector_size_t> nullIndex;

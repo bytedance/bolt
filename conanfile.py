@@ -161,6 +161,8 @@ class BoltConan(ConanFile):
             if scm_branch != "main":
                 cmd = f"-b {scm_branch} origin/{scm_branch}"
                 git.checkout(cmd)
+                git.run(f"fetch origin {scm_branch}")
+                git.checkout("FETCH_HEAD")
 
     def io_uring_supported(self):
         if not self.options.io_uring_supported:
@@ -182,6 +184,30 @@ class BoltConan(ConanFile):
                 return has_minimum_kernel
         self.output.info("OS is not Linux. io_uring is not supported.")
         return False
+
+    @staticmethod
+    def _append_cache_flags(cache_variables, key, flags):
+        if isinstance(flags, str):
+            flags = [flags]
+        current = str(cache_variables.get(key, "")).strip()
+        additions = [str(flag).strip() for flag in flags if str(flag).strip()]
+        if additions:
+            cache_variables[key] = " ".join(
+                [value for value in [current, *additions] if value]
+            )
+
+    def _toolchain_cxx_flags(self):
+        flags = []
+        if (
+            str(self.settings.compiler) == "clang"
+            and str(self.settings.compiler.get_safe("libcxx")) == "libc++"
+        ):
+            flags.append("-stdlib=libc++")
+        flags.extend(self.conf.get("tools.build:cxxflags", default=[]))
+        return flags
+
+    def _toolchain_c_flags(self):
+        return self.conf.get("tools.build:cflags", default=[])
 
     def requirements(self):
         protobuf_version = os.getenv("PROTOBUF_VERSION", "3.21.4")
@@ -440,13 +466,29 @@ class BoltConan(ConanFile):
             flags = (
                 f"{self.BOLT_GLOBAL_FLAGS} -mavx2 -mfma -mavx -mf16c -mlzcnt -mbmi2 "
             )
-            tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
-            tc.cache_variables["CMAKE_C_FLAGS"] = flags
+            self._append_cache_flags(
+                tc.cache_variables,
+                "CMAKE_CXX_FLAGS",
+                [*self._toolchain_cxx_flags(), flags],
+            )
+            self._append_cache_flags(
+                tc.cache_variables,
+                "CMAKE_C_FLAGS",
+                [*self._toolchain_c_flags(), flags],
+            )
 
         if str(self.settings.arch) in ["armv8", "arm", "armv9"]:
             flags = self._get_arm_cpu_flags()
-            tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
-            tc.cache_variables["CMAKE_C_FLAGS"] = flags
+            self._append_cache_flags(
+                tc.cache_variables,
+                "CMAKE_CXX_FLAGS",
+                [*self._toolchain_cxx_flags(), flags],
+            )
+            self._append_cache_flags(
+                tc.cache_variables,
+                "CMAKE_C_FLAGS",
+                [*self._toolchain_c_flags(), flags],
+            )
         if (
             self.options.enable_torch is not None
             and self.options.enable_torch.value is not None
@@ -746,6 +788,11 @@ class BoltConan(ConanFile):
                 "gtest::gtest",
                 "duckdb::duckdb",
             ]
+        else:
+            self.cpp_info.components["bolt_testutils"].set_property(
+                "cmake_target_name", "bolt::bolt_testutils"
+            )
+            self.cpp_info.components["bolt_testutils"].requires = ["bolt_engine"]
 
     def _get_arm_cpu_flags(self) -> str:
         """

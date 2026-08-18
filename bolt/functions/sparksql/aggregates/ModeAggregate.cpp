@@ -42,10 +42,26 @@ namespace bytedance::bolt::functions::aggregate::sparksql {
 
 namespace {
 
+template <typename T>
+struct ModeAggregateHash : std::hash<T> {};
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+struct ModeAggregateHash<int128_t> {
+  size_t operator()(int128_t value) const noexcept {
+    return HugeInt::hash(value);
+  }
+};
+#endif
+
 // Mode aggregate function for scalar types.
 template <
     typename T,
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+    typename Hash = ModeAggregateHash<T>,
+#else
     typename Hash = std::hash<T>,
+#endif
     typename EqualTo = std::equal_to<T>>
 class ModeAggregate {
  public:

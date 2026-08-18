@@ -29,7 +29,7 @@
  */
 
 #include "bolt/duckdb/conversion/DuckWrapper.h"
-#include <duckdb.hpp>
+#include "bolt/duckdb/DuckDbCompat.h"
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/duckdb/conversion/DuckConversion.h"
 #include "bolt/vector/FlatVector.h"

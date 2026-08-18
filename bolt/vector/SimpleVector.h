@@ -53,6 +53,20 @@ class EvalCtx;
 }
 
 template <typename T>
+inline uint64_t vectorHashValue(const T& value) {
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+  if constexpr (std::is_same_v<T, int128_t> ||
+                std::is_same_v<T, __uint128_t>) {
+    return HugeInt::hash(value);
+  } else {
+    return folly::hasher<T>{}(value);
+  }
+#else
+  return folly::hasher<T>{}(value);
+#endif
+}
+
+template <typename T>
 struct SimpleVectorStats {
   std::optional<T> min;
   std::optional<T> max;
@@ -187,7 +201,7 @@ class SimpleVector : public BaseVector {
    */
   uint64_t hashValueAt(vector_size_t index) const override {
     return isNullAt(index) ? BaseVector::kNullHash
-                           : folly::hasher<T>{}(valueAt(index));
+                           : vectorHashValue(valueAt(index));
   }
 
   std::optional<bool> isSorted() const {

@@ -35,6 +35,7 @@
 #include <folly/Format.h>
 #include <folly/Range.h>
 #include <folly/String.h>
+#include <folly/container/HeterogeneousAccess.h>
 #include <folly/json.h>
 #include <cstdint>
 #include <cstring>
@@ -56,6 +57,29 @@
 #include "bolt/type/Tree.h"
 #include "bolt/type/VariantValue.h"
 #include "folly/CPortability.h"
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+namespace folly {
+template <>
+struct HeterogeneousAccessHash<__int128_t, void> {
+  using folly_is_avalanching = std::true_type;
+
+  size_t operator()(__int128_t value) const noexcept {
+    return bytedance::bolt::HugeInt::hash(value);
+  }
+};
+
+template <>
+struct HeterogeneousAccessHash<__uint128_t, void> {
+  using folly_is_avalanching = std::true_type;
+
+  size_t operator()(__uint128_t value) const noexcept {
+    return bytedance::bolt::HugeInt::hash(value);
+  }
+};
+} // namespace folly
+#endif
+
 namespace bytedance::bolt {
 
 using int128_t = __int128_t;

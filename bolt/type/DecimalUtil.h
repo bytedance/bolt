@@ -37,6 +37,7 @@
 #include "bolt/common/base/CountBits.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Nulls.h"
+#include "bolt/common/base/Portability.h"
 #include "bolt/common/base/Status.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt {
@@ -135,6 +136,66 @@ class DecimalUtil {
 
   enum class DecimalStringFormat { kPlain, kSpark };
 
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+  inline static std::to_chars_result toChars(
+      char* first,
+      char* last,
+      uint128_t value) {
+    char buffer[LongDecimalType::kMaxPrecision + 1];
+    char* position = std::end(buffer);
+    do {
+      *--position = static_cast<char>('0' + value % 10);
+      value /= 10;
+    } while (value != 0);
+
+    const auto size = std::end(buffer) - position;
+    if (last - first < size) {
+      return {last, std::errc::value_too_large};
+    }
+    std::memcpy(first, position, size);
+    return {first + size, std::errc()};
+  }
+
+  inline static std::to_chars_result toChars(
+      char* first,
+      char* last,
+      int128_t value) {
+    if (value < 0) {
+      if (first == last) {
+        return {last, std::errc::value_too_large};
+      }
+      *first++ = '-';
+      return toChars(first, last, static_cast<uint128_t>(-value));
+    }
+    return toChars(first, last, static_cast<uint128_t>(value));
+  }
+
+  template <typename T>
+  inline static std::to_chars_result toChars(char* first, char* last, T value) {
+    return std::to_chars(first, last, value);
+  }
+
+  template <typename T>
+  struct UnsignedDecimalType {
+    using type = typename std::make_unsigned<T>::type;
+  };
+
+  template <>
+  struct UnsignedDecimalType<int128_t> {
+    using type = uint128_t;
+  };
+#else
+  template <typename T>
+  inline static std::to_chars_result toChars(char* first, char* last, T value) {
+    return std::to_chars(first, last, value);
+  }
+
+  template <typename T>
+  struct UnsignedDecimalType {
+    using type = typename std::make_unsigned<T>::type;
+  };
+#endif
+
   template <typename T>
   inline static size_t convertToPlainString(
       T unscaledValue,
@@ -156,7 +217,7 @@ class DecimalUtil {
         *writePosition++ = '-';
         unscaledValue = -unscaledValue;
       }
-      auto [position, errorCode] = std::to_chars(
+      auto [position, errorCode] = toChars(
           writePosition,
           endPosition,
           unscaledValue / (T)DecimalUtil::kPowersOfTen[scale]);
@@ -176,7 +237,7 @@ class DecimalUtil {
         std::memset(writePosition, '0', numLeadingZeros);
         writePosition += numLeadingZeros;
         // Append remaining fraction digits.
-        auto result = std::to_chars(writePosition, endPosition, fraction);
+        auto result = toChars(writePosition, endPosition, fraction);
         BOLT_DCHECK_EQ(
             result.ec,
             std::errc(),
@@ -195,7 +256,7 @@ class DecimalUtil {
       int32_t maxVarcharSize,
       char* const startPosition) {
     if (scale == 0) {
-      auto [endPosition, errorCode] = std::to_chars(
+      auto [endPosition, errorCode] = toChars(
           startPosition, startPosition + maxVarcharSize, unscaledValue);
       BOLT_DCHECK_EQ(
           errorCode,
@@ -237,7 +298,7 @@ class DecimalUtil {
       }
       // [!sci could have made 0]
       *writePosition++ = 'E';
-      auto [position, errorCode] = std::to_chars(
+      auto [position, errorCode] = toChars(
           writePosition, startPosition + maxVarcharSize, adjusted);
       BOLT_DCHECK_EQ(
           errorCode,
@@ -478,7 +539,7 @@ class DecimalUtil {
         return static_cast<TOutput>(0);
       }
       auto shifted = value >> shift;
-      using unsigned_type = typename std::make_unsigned<TOutput>::type;
+      using unsigned_type = typename UnsignedDecimalType<TOutput>::type;
       auto threshold = static_cast<unsigned_type>(1) << (shift - 1);
       auto rest = value & ((((unsigned_type)1) << shift) - 1);
       if (rest >= threshold) {

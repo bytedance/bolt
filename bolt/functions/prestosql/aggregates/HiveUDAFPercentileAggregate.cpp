@@ -496,9 +496,8 @@ class HiveUDAFPercentileAggregate : public exec::Aggregate {
       const std::vector<bool>& isNull) {
     if (!percentiles_) {
       BOLT_USER_CHECK_GT(len, 0, "Percentile cannot be empty");
-      percentiles_ = {
-          .values = std::vector<double>(len),
-      };
+      percentiles_.emplace();
+      percentiles_->values.resize(len);
       for (vector_size_t i = 0; i < len; ++i) {
         BOLT_USER_CHECK(!isNull[i], "Percentile cannot be null");
         BOLT_USER_CHECK_GE(data[i], 0, "Percentile must be between 0 and 1");

@@ -39,7 +39,9 @@
 #include <folly/GroupVarint.h>
 #include <folly/Likely.h>
 #include <algorithm>
+#include <type_traits>
 #include <utility>
+#include "bolt/common/base/Portability.h"
 #include "bolt/common/encode/UInt128.h"
 #include "bolt/common/strings/ByteStream.h"
 namespace bytedance {
@@ -275,6 +277,18 @@ class Varint {
   }
 };
 
+template <typename U>
+struct ZigZagSignedType {
+  using type = typename std::make_signed<U>::type;
+};
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+struct ZigZagSignedType<__uint128_t> {
+  using type = __int128_t;
+};
+#endif
+
 // Zig-zag encoding that maps signed integers with a small absolute value
 // to unsigned integers with a small (positive) value.
 // if x >= 0, ZigZag::encode(x) == 2*x
@@ -290,7 +304,7 @@ class ZigZag {
   static __uint128_t encodeInt128(__int128_t val) {
     return (static_cast<__uint128_t>(val) << 1) ^ (val >> 127);
   }
-  template <typename U, typename T = typename std::make_signed<U>::type>
+  template <typename U, typename T = typename ZigZagSignedType<U>::type>
   static T decode(U val) {
     return static_cast<T>((val >> 1) ^ -(val & 1));
   }

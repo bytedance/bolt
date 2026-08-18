@@ -75,6 +75,25 @@ struct EvalTypeHelper<uint128_t> {
 template <typename T>
 using EvalType = typename EvalTypeHelper<T>::Type;
 
+template <typename T>
+struct VectorMakerStatsHash : std::hash<T> {};
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+struct VectorMakerStatsHash<int128_t> {
+  size_t operator()(int128_t value) const noexcept {
+    return HugeInt::hash(value);
+  }
+};
+
+template <>
+struct VectorMakerStatsHash<uint128_t> {
+  size_t operator()(uint128_t value) const noexcept {
+    return HugeInt::hash(value);
+  }
+};
+#endif
+
 // Struct that caries metadata about a vector of nullable elements.
 template <typename T>
 class VectorMakerStats {
@@ -97,7 +116,7 @@ class VectorMakerStats {
   bool isSorted{false};
 
  private:
-  std::unordered_set<T> distinctSet_;
+  std::unordered_set<T, VectorMakerStatsHash<T>> distinctSet_;
 };
 
 // Generates VectorMakerStats for a given vector of nullable elements.

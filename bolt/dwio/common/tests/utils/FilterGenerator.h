@@ -33,11 +33,13 @@
 #include <folly/Random.h>
 #include <memory>
 
+#include "bolt/common/base/Portability.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/dwio/common/Mutation.h"
 #include "bolt/dwio/common/ScanSpec.h"
 #include "bolt/dwio/common/exception/Exception.h"
 #include "bolt/type/Filter.h"
+#include "bolt/type/HugeInt.h"
 #include "bolt/type/Subfield.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/SimpleVector.h"
@@ -122,6 +124,23 @@ class AbstractColumnStats {
   std::unordered_map<size_t, int> uniques_;
   static uint32_t counter_;
 };
+
+template <typename T>
+size_t columnStatsHash(const T& value) {
+  return folly::hasher<T>()(value);
+}
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+inline size_t columnStatsHash<int128_t>(const int128_t& value) {
+  return HugeInt::hash(value);
+}
+
+template <>
+inline size_t columnStatsHash<uint128_t>(const uint128_t& value) {
+  return HugeInt::hash(value);
+}
+#endif
 
 template <typename T>
 class ColumnStats : public AbstractColumnStats {
@@ -243,7 +262,7 @@ class ColumnStats : public AbstractColumnStats {
       return;
     }
     T value = vector->valueAt(index);
-    size_t hash = folly::hasher<T>()(value) & kUniquesMask;
+    size_t hash = columnStatsHash<T>(value) & kUniquesMask;
     if (uniques_.find(hash) != uniques_.end()) {
       uniques_[hash]++;
       return;
@@ -259,7 +278,7 @@ class ColumnStats : public AbstractColumnStats {
 
     for (; index < values_.size(); index++) {
       auto value = values_[index];
-      size_t hash = folly::hasher<T>()(value) & kUniquesMask;
+      size_t hash = columnStatsHash<T>(value) & kUniquesMask;
       sampleCount += uniques_[hash];
       if (sampleCount >= (pct / 100) * (numSamples_ - numNulls_)) {
         break;

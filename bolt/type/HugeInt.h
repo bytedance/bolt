@@ -33,7 +33,12 @@
 #include <string>
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/Portability.h"
 #include "bolt/type/StringView.h"
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+#include <folly/hash/Hash.h>
+#endif
 
 #pragma once
 namespace bytedance::bolt {
@@ -81,6 +86,20 @@ class HugeInt {
   static constexpr FOLLY_ALWAYS_INLINE uint64_t upper(int128_t value) {
     return static_cast<uint64_t>(value >> 64);
   }
+
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+  static FOLLY_ALWAYS_INLINE size_t hash(int128_t value) {
+    auto unsignedValue = static_cast<uint128_t>(value);
+    return folly::hash::hash_128_to_64(
+        static_cast<uint64_t>(unsignedValue >> 64),
+        static_cast<uint64_t>(unsignedValue));
+  }
+
+  static FOLLY_ALWAYS_INLINE size_t hash(uint128_t value) {
+    return folly::hash::hash_128_to_64(
+        static_cast<uint64_t>(value >> 64), static_cast<uint64_t>(value));
+  }
+#endif
 
   static FOLLY_ALWAYS_INLINE int128_t deserialize(const char* serializedData) {
     int128_t value;

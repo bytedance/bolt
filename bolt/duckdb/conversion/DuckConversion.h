@@ -32,7 +32,14 @@
 
 #include "bolt/type/Type.h"
 
-#include <duckdb.hpp> // @manual
+#include <duckdb/common/types.hpp> // @manual
+#include <duckdb/common/types/date.hpp> // @manual
+#include <duckdb/common/types/hugeint.hpp> // @manual
+#include <duckdb/common/types/timestamp.hpp> // @manual
+#include <duckdb/common/types/value.hpp> // @manual
+#include <duckdb/common/types/vector.hpp> // @manual
+#include <duckdb/common/types/vector_buffer.hpp> // @manual
+#include <duckdb/common/vector_operations/vector_operations.hpp> // @manual
 namespace bytedance::bolt {
 class variant;
 }

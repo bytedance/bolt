@@ -1084,6 +1084,15 @@ uint64_t hashOne(ByteInputStream& stream, const Type* /*type*/) {
   return folly::hasher<T>()(stream.read<T>());
 }
 
+#if defined(BOLT_CLANG_LIBSTDCXX_INT128_COMPAT)
+template <>
+uint64_t hashOne<TypeKind::HUGEINT>(
+    ByteInputStream& stream,
+    const Type* /*type*/) {
+  return HugeInt::hash(stream.read<int128_t>());
+}
+#endif
+
 template <>
 uint64_t hashOne<TypeKind::VARCHAR>(
     ByteInputStream& stream,
