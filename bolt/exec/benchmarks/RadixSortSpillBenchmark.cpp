@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -64,10 +65,79 @@ enum class Implementation : uint8_t {
   kRadix,
 };
 
+struct SchemaShape {
+  uint32_t keys{0};
+  uint32_t payloadColumns{0};
+  uint32_t bigintPayloadColumns{0};
+  uint32_t varcharPayloadColumns{0};
+  uint32_t arrayPayloadColumns{0};
+};
+
 std::shared_ptr<memory::MemoryPool> sourcePool;
-std::vector<ScenarioFixture> fixtures;
+std::vector<std::optional<ScenarioFixture>> fixtures;
 std::array<std::array<Measurements, 2>, kBenchmarkScenarioSpecs.size()>
     measurements;
+
+ScenarioFixture& fixtureFor(uint32_t scenario) {
+  BOLT_CHECK_LT(scenario, fixtures.size());
+  if (!fixtures[scenario].has_value()) {
+    fixtures[scenario] = makeFixture(
+        sourcePool.get(),
+        kBenchmarkScenarioSpecs.at(scenario),
+        ScenarioProfile::kSpill);
+  }
+  return *fixtures[scenario];
+}
+
+bool containsChannel(
+    const std::vector<column_index_t>& channels,
+    column_index_t channel) {
+  return std::find(channels.begin(), channels.end(), channel) != channels.end();
+}
+
+SchemaShape schemaShape(const ScenarioFixture& fixture) {
+  SchemaShape shape;
+  shape.keys = fixture.keyChannels.size();
+  for (column_index_t channel = 0; channel < fixture.rowType->size();
+       ++channel) {
+    if (containsChannel(fixture.keyChannels, channel) ||
+        channel == fixture.idChannel) {
+      continue;
+    }
+    ++shape.payloadColumns;
+    const auto& type = fixture.rowType->childAt(channel);
+    switch (type->kind()) {
+      case TypeKind::BIGINT:
+        ++shape.bigintPayloadColumns;
+        break;
+      case TypeKind::VARCHAR:
+        ++shape.varcharPayloadColumns;
+        break;
+      case TypeKind::ARRAY:
+        ++shape.arrayPayloadColumns;
+        break;
+      default:
+        break;
+    }
+  }
+  return shape;
+}
+
+double averageUs(uint64_t totalUs, uint64_t runs) {
+  return runs == 0 ? 0 : static_cast<double>(totalUs) / runs;
+}
+
+double ratio(
+    uint64_t radixUs,
+    uint64_t radixRuns,
+    uint64_t legacyUs,
+    uint64_t legacyRuns) {
+  const auto legacyAverage = averageUs(legacyUs, legacyRuns);
+  if (legacyAverage == 0) {
+    return 0;
+  }
+  return averageUs(radixUs, radixRuns) / legacyAverage;
+}
 
 std::shared_ptr<memory::MemoryPool> makePool(
     Implementation implementation,
@@ -158,7 +228,7 @@ void record(
 
 void legacySpillE2E(unsigned iterations, uint32_t scenario) {
   folly::BenchmarkSuspender suspender;
-  const auto& fixture = fixtures.at(scenario);
+  const auto& fixture = fixtureFor(scenario);
   const auto& spec = kBenchmarkScenarioSpecs.at(scenario);
   for (unsigned iteration = 0; iteration < iterations; ++iteration) {
     auto directory = exec::test::TempDirectoryPath::create();
@@ -216,7 +286,7 @@ void legacySpillE2E(unsigned iterations, uint32_t scenario) {
 
 void radixSpillE2E(unsigned iterations, uint32_t scenario) {
   folly::BenchmarkSuspender suspender;
-  const auto& fixture = fixtures.at(scenario);
+  const auto& fixture = fixtureFor(scenario);
   const auto& spec = kBenchmarkScenarioSpecs.at(scenario);
   for (unsigned iteration = 0; iteration < iterations; ++iteration) {
     auto directory = exec::test::TempDirectoryPath::create();
@@ -272,6 +342,35 @@ void radixSpillE2E(unsigned iterations, uint32_t scenario) {
 void printSummary() {
   std::printf(
       "\nRadix sort spill benchmark summary (input generation excluded)\n");
+  std::printf("\nExecuted scenario schema shape\n");
+  std::printf(
+      "%-48s %10s %6s %8s %12s %12s %10s\n",
+      "scenario",
+      "rows",
+      "keys",
+      "payload",
+      "payload i64",
+      "payload str",
+      "payload arr");
+  for (uint32_t scenario = 0; scenario < kBenchmarkScenarioSpecs.size();
+       ++scenario) {
+    if (!fixtures[scenario].has_value()) {
+      continue;
+    }
+    const auto& fixture = *fixtures[scenario];
+    const auto shape = schemaShape(fixture);
+    std::printf(
+        "%-48s %10d %6u %8u %12u %12u %10u\n",
+        kBenchmarkScenarioSpecs[scenario].name,
+        kBenchmarkScenarioSpecs[scenario].rows,
+        shape.keys,
+        shape.payloadColumns,
+        shape.bigintPayloadColumns,
+        shape.varcharPayloadColumns,
+        shape.arrayPayloadColumns);
+  }
+
+  std::printf("\nPer-implementation phase timings\n");
   std::printf(
       "%-36s %-8s %10s %10s %10s %10s %10s %12s %10s\n",
       "scenario",
@@ -303,6 +402,41 @@ void printSummary() {
               (1024 * 1024),
           static_cast<double>(result.spillWrites) / result.runs);
     }
+  }
+  std::printf("\nRadix / legacy phase ratios\n");
+  std::printf(
+      "%-36s %10s %10s %10s %10s %10s\n",
+      "scenario",
+      "add1 x",
+      "add2 x",
+      "spill x",
+      "final x",
+      "out x");
+  for (uint32_t scenario = 0; scenario < kBenchmarkScenarioSpecs.size();
+       ++scenario) {
+    const auto& legacy =
+        measurements[scenario][static_cast<uint32_t>(Implementation::kLegacy)];
+    const auto& radix =
+        measurements[scenario][static_cast<uint32_t>(Implementation::kRadix)];
+    if (legacy.runs == 0 || radix.runs == 0) {
+      continue;
+    }
+    std::printf(
+        "%-36s %10.2f %10.2f %10.2f %10.2f %10.2f\n",
+        kBenchmarkScenarioSpecs[scenario].name,
+        ratio(
+            radix.addBeforeSpillUs,
+            radix.runs,
+            legacy.addBeforeSpillUs,
+            legacy.runs),
+        ratio(
+            radix.addAfterSpillUs,
+            radix.runs,
+            legacy.addAfterSpillUs,
+            legacy.runs),
+        ratio(radix.spillUs, radix.runs, legacy.spillUs, legacy.runs),
+        ratio(radix.finalizeUs, radix.runs, legacy.finalizeUs, legacy.runs),
+        ratio(radix.outputUs, radix.runs, legacy.outputUs, legacy.runs));
   }
   std::printf(
       "Legacy SortBuffer uses row-based %s spill with SpillConfig JIT enabled "
@@ -348,6 +482,18 @@ BENCHMARK_DRAW_LINE();
 RADIX_SORT_SPILL_BENCHMARK_PAIR(wide_fixed_payload_1m_spill, 13);
 BENCHMARK_DRAW_LINE();
 RADIX_SORT_SPILL_BENCHMARK_PAIR(wide_string_payload_1m_spill, 14);
+BENCHMARK_DRAW_LINE();
+RADIX_SORT_SPILL_BENCHMARK_PAIR(bucket_write_key_only_1m_spill, 15);
+BENCHMARK_DRAW_LINE();
+RADIX_SORT_SPILL_BENCHMARK_PAIR(bucket_write_fixed_payload_1m_spill, 16);
+BENCHMARK_DRAW_LINE();
+RADIX_SORT_SPILL_BENCHMARK_PAIR(
+    bucket_write_key_string_fixed_payload_1m_spill,
+    17);
+BENCHMARK_DRAW_LINE();
+RADIX_SORT_SPILL_BENCHMARK_PAIR(bucket_write_string_payload_1m_spill, 18);
+BENCHMARK_DRAW_LINE();
+RADIX_SORT_SPILL_BENCHMARK_PAIR(bucket_write_complex_payload_1m_spill, 19);
 #else
 RADIX_SORT_SPILL_BENCHMARK_PAIR(random_i64_10m_spill, 0);
 BENCHMARK_DRAW_LINE();
@@ -375,10 +521,7 @@ int main(int argc, char** argv) {
   using namespace bytedance::bolt::exec::radixsort::benchmark;
   sourcePool = bytedance::bolt::memory::memoryManager()->addLeafPool(
       "radix-spill-inputs");
-  for (const auto& scenario : kBenchmarkScenarioSpecs) {
-    fixtures.push_back(
-        makeFixture(sourcePool.get(), scenario, ScenarioProfile::kSpill));
-  }
+  fixtures.resize(kBenchmarkScenarioSpecs.size());
   folly::runBenchmarks();
   printSummary();
   fixtures.clear();

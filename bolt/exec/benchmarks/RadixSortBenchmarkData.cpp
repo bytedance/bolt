@@ -30,6 +30,7 @@ constexpr uint32_t kSixteenKeyColumns = 16;
 constexpr uint32_t kFixedPayloadColumns = 16;
 constexpr uint32_t kVeryWideFixedPayloadColumns = 64;
 constexpr uint32_t kStringPayloadColumns = 8;
+constexpr uint32_t kBucketMetricColumns = 108;
 
 CompareFlags flags(bool ascending = true, bool nullsFirst = false) {
   return CompareFlags{
@@ -43,6 +44,13 @@ uint64_t randomBits(uint64_t value) {
   value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
   value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
   return value ^ (value >> 31);
+}
+
+template <typename T>
+BufferPtr makeBuffer(memory::MemoryPool* pool, const std::vector<T>& values) {
+  auto buffer = AlignedBuffer::allocate<T>(values.size(), pool);
+  std::copy(values.begin(), values.end(), buffer->template asMutable<T>());
+  return buffer;
 }
 
 template <typename T, typename ValueAt, typename IsNullAt>
@@ -61,6 +69,32 @@ FlatVectorPtr<T> makeFlatVector(
     }
   }
   return result;
+}
+
+bool hasBucketWriteStringKey(ScenarioKind kind) {
+  return kind == ScenarioKind::kBucketWriteKeyOnly ||
+      kind == ScenarioKind::kBucketWriteKeyStringFixedPayload ||
+      kind == ScenarioKind::kBucketWriteStringPayload ||
+      kind == ScenarioKind::kBucketWriteComplexPayload;
+}
+
+bool isBucketWriteScenario(ScenarioKind kind) {
+  return kind == ScenarioKind::kBucketWriteKeyOnly ||
+      kind == ScenarioKind::kBucketWriteFixedPayload ||
+      hasBucketWriteStringKey(kind);
+}
+
+bool hasBucketWritePayload(ScenarioKind kind) {
+  return kind != ScenarioKind::kBucketWriteKeyOnly;
+}
+
+bool hasBucketWriteStringPayload(ScenarioKind kind) {
+  return kind == ScenarioKind::kBucketWriteStringPayload ||
+      kind == ScenarioKind::kBucketWriteComplexPayload;
+}
+
+bool hasBucketWriteComplexPayload(ScenarioKind kind) {
+  return kind == ScenarioKind::kBucketWriteComplexPayload;
 }
 
 template <typename ValueAt, typename IsNullAt>
@@ -148,6 +182,57 @@ RowTypePtr rowTypeFor(ScenarioKind kind, ScenarioProfile profile) {
       types.push_back(BIGINT());
       return ROW(std::move(names), std::move(types));
     }
+    case ScenarioKind::kBucketWriteKeyOnly:
+    case ScenarioKind::kBucketWriteFixedPayload:
+    case ScenarioKind::kBucketWriteKeyStringFixedPayload:
+    case ScenarioKind::kBucketWriteStringPayload:
+    case ScenarioKind::kBucketWriteComplexPayload: {
+      std::vector<std::string> names{"_pre_0", "id", "app_id"};
+      std::vector<TypePtr> types{INTEGER(), BIGINT(), BIGINT()};
+      if (hasBucketWriteStringKey(kind)) {
+        names.push_back("hash_strategy");
+        types.push_back(VARCHAR());
+      }
+      if (hasBucketWritePayload(kind)) {
+        if (hasBucketWriteComplexPayload(kind)) {
+          names.push_back("vid_list");
+          types.push_back(ARRAY(BIGINT()));
+        }
+        if (hasBucketWriteStringPayload(kind)) {
+          names.push_back("enter_date");
+          types.push_back(VARCHAR());
+          names.push_back("user_activeness");
+          types.push_back(VARCHAR());
+          names.push_back("manual_search_activeness");
+          types.push_back(VARCHAR());
+          names.push_back("device_model_level");
+          types.push_back(VARCHAR());
+        }
+        names.push_back("post_search_pv");
+        types.push_back(BIGINT());
+        names.push_back("post_search_pv_action_days");
+        types.push_back(BIGINT());
+        if (hasBucketWriteComplexPayload(kind)) {
+          names.push_back("post_search_pv_30d_days_array");
+          types.push_back(ARRAY(BIGINT()));
+        }
+        names.push_back("post_search_pv_30d_days");
+        types.push_back(BIGINT());
+        if (hasBucketWriteComplexPayload(kind)) {
+          names.push_back("post_sample_manual_pv_7d_array");
+          types.push_back(ARRAY(BIGINT()));
+          names.push_back("post_non_sample_manual_pv_7d_array");
+          types.push_back(ARRAY(BIGINT()));
+        }
+        for (uint32_t column = 0; column < kBucketMetricColumns; ++column) {
+          names.push_back("metric_" + std::to_string(column));
+          types.push_back(BIGINT());
+        }
+      }
+      names.push_back("row_id");
+      types.push_back(BIGINT());
+      return ROW(std::move(names), std::move(types));
+    }
     case ScenarioKind::kInlineVarchar:
     case ScenarioKind::kLongVarchar:
     case ScenarioKind::kVarcharCommonPrefix:
@@ -193,10 +278,251 @@ void addKeyMetadata(
           flags(true, false),
           flags(true, true)};
     }
+  } else if (isBucketWriteScenario(kind)) {
+    fixture.keyChannels = hasBucketWriteStringKey(kind)
+        ? std::vector<column_index_t>{0, 1, 2, 3}
+        : std::vector<column_index_t>{0, 1, 2};
+    fixture.keyFlags.assign(fixture.keyChannels.size(), flags(true, true));
   } else {
     fixture.keyChannels = {0};
     fixture.keyFlags = {flags()};
   }
+}
+
+void addBucketWriteKeys(
+    memory::MemoryPool* pool,
+    ScenarioKind kind,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  children.push_back(makeFlatVector<int32_t>(
+      pool,
+      INTEGER(),
+      size,
+      [&](vector_size_t row) {
+        const auto index = static_cast<uint64_t>(offset + row);
+        return static_cast<int32_t>(
+            (index / 128 + randomBits(index) % 16) % 32768);
+      },
+      [](vector_size_t) { return false; }));
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) {
+        const auto index = static_cast<uint64_t>(offset + row);
+        return static_cast<int64_t>(randomBits(index * 17 + 1));
+      },
+      [](vector_size_t) { return false; }));
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) {
+        static constexpr std::array<int64_t, 8> kAppIds{
+            1128, 2329, 8663, 1180, 1233, 36, 1349, 1967};
+        return kAppIds[(offset + row) % kAppIds.size()];
+      },
+      [](vector_size_t) { return false; }));
+  if (hasBucketWriteStringKey(kind)) {
+    children.push_back(makeStringVector(
+        pool,
+        size,
+        [&](vector_size_t row) {
+          const auto index = static_cast<uint64_t>(offset + row);
+          return (index / 131072) % 2 == 0 ? "did" : "uid";
+        },
+        [](vector_size_t) { return false; }));
+  }
+}
+
+ArrayVectorPtr makeBigintArrayVector(
+    memory::MemoryPool* pool,
+    const TypePtr& type,
+    vector_size_t size,
+    uint32_t maxLength,
+    uint64_t salt,
+    bool allowEmpty,
+    bool allowNulls) {
+  std::vector<vector_size_t> offsets(size);
+  std::vector<vector_size_t> lengths(size);
+  uint64_t elementCount = 0;
+  for (vector_size_t row = 0; row < size; ++row) {
+    const auto index = static_cast<uint64_t>(row) + salt;
+    const bool isNull = allowNulls && index % 97 == 0;
+    const auto length = isNull
+        ? 0
+        : static_cast<vector_size_t>(
+              allowEmpty ? randomBits(index) % (maxLength + 1)
+                         : 1 + randomBits(index) % maxLength);
+    offsets[row] = static_cast<vector_size_t>(elementCount);
+    lengths[row] = length;
+    elementCount += length;
+  }
+  auto elements = makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      static_cast<vector_size_t>(elementCount),
+      [&](vector_size_t element) {
+        return static_cast<int64_t>(randomBits(element + salt * 13));
+      },
+      [](vector_size_t) { return false; });
+  auto result = std::make_shared<ArrayVector>(
+      pool,
+      type,
+      nullptr,
+      size,
+      makeBuffer(pool, offsets),
+      makeBuffer(pool, lengths),
+      elements);
+  if (allowNulls) {
+    for (vector_size_t row = 0; row < size; ++row) {
+      if ((static_cast<uint64_t>(row) + salt) % 97 == 0) {
+        result->setNull(row, true);
+      }
+    }
+  }
+  return result;
+}
+
+void addBucketStringPayload(
+    memory::MemoryPool* pool,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  children.push_back(makeStringVector(
+      pool,
+      size,
+      [&](vector_size_t row) {
+        return "2024" +
+            std::to_string(1000 + static_cast<int>((offset + row) % 300));
+      },
+      [&](vector_size_t row) { return (offset + row) % 71 == 0; }));
+  children.push_back(makeStringVector(
+      pool,
+      size,
+      [&](vector_size_t row) {
+        static constexpr std::array<const char*, 4> kValues{
+            "low", "medium", "high", "inactive"};
+        return kValues[(offset + row) % kValues.size()];
+      },
+      [&](vector_size_t row) { return (offset + row) % 83 == 0; }));
+  children.push_back(makeStringVector(
+      pool,
+      size,
+      [&](vector_size_t row) {
+        static constexpr std::array<const char*, 4> kValues{
+            "manual_low", "manual_mid", "manual_high", "manual_none"};
+        return kValues[(offset + row * 3) % kValues.size()];
+      },
+      [&](vector_size_t row) { return (offset + row) % 89 == 0; }));
+  children.push_back(makeStringVector(
+      pool,
+      size,
+      [&](vector_size_t row) {
+        static constexpr std::array<const char*, 5> kValues{
+            "unknown", "entry", "mid", "premium", "ultra_high_level_device"};
+        return kValues[(offset + row * 5) % kValues.size()];
+      },
+      [&](vector_size_t row) { return (offset + row) % 97 == 0; }));
+}
+
+void addBucketMetricPayload(
+    memory::MemoryPool* pool,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  for (uint32_t column = 0; column < kBucketMetricColumns; ++column) {
+    children.push_back(makeFlatVector<int64_t>(
+        pool,
+        BIGINT(),
+        size,
+        [&](vector_size_t row) {
+          const auto index = static_cast<uint64_t>(offset + row);
+          if (column % 8 == 0) {
+            return static_cast<int64_t>(randomBits(index + column * 17) % 8);
+          }
+          if (column % 8 == 1) {
+            return static_cast<int64_t>(randomBits(index + column * 19) % 1024);
+          }
+          return static_cast<int64_t>(randomBits(index + column * 131));
+        },
+        [&](vector_size_t row) {
+          return column % 5 == 0 && (offset + row + column) % 11 == 0;
+        }));
+  }
+}
+
+void addBucketWritePayload(
+    memory::MemoryPool* pool,
+    ScenarioKind kind,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  if (hasBucketWriteComplexPayload(kind)) {
+    children.push_back(makeBigintArrayVector(
+        pool,
+        ARRAY(BIGINT()),
+        size,
+        4,
+        static_cast<uint64_t>(offset) + 3,
+        false,
+        true));
+  }
+  if (hasBucketWriteStringPayload(kind)) {
+    addBucketStringPayload(pool, offset, size, children);
+  }
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) {
+        return static_cast<int64_t>(randomBits(offset + row) % 4096);
+      },
+      [](vector_size_t) { return false; }));
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) { return (offset + row) % 31 == 0 ? 1 : 0; },
+      [](vector_size_t) { return false; }));
+  if (hasBucketWriteComplexPayload(kind)) {
+    children.push_back(makeBigintArrayVector(
+        pool,
+        ARRAY(BIGINT()),
+        size,
+        29,
+        static_cast<uint64_t>(offset) + 11,
+        true,
+        false));
+  }
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) {
+        return static_cast<int64_t>(randomBits(offset + row + 23) % 30);
+      },
+      [](vector_size_t) { return false; }));
+  if (hasBucketWriteComplexPayload(kind)) {
+    children.push_back(makeBigintArrayVector(
+        pool,
+        ARRAY(BIGINT()),
+        size,
+        6,
+        static_cast<uint64_t>(offset) + 29,
+        true,
+        false));
+    children.push_back(makeBigintArrayVector(
+        pool,
+        ARRAY(BIGINT()),
+        size,
+        6,
+        static_cast<uint64_t>(offset) + 37,
+        true,
+        false));
+  }
+  addBucketMetricPayload(pool, offset, size, children);
 }
 
 void addIntegerKey(
@@ -546,6 +872,16 @@ ScenarioFixture makeFixture(
       case ScenarioKind::kWideStringPayload:
         addIntegerKey(pool, spec, offset, size, children);
         addWideStringPayload(pool, profile, offset, size, children);
+        break;
+      case ScenarioKind::kBucketWriteKeyOnly:
+      case ScenarioKind::kBucketWriteFixedPayload:
+      case ScenarioKind::kBucketWriteKeyStringFixedPayload:
+      case ScenarioKind::kBucketWriteStringPayload:
+      case ScenarioKind::kBucketWriteComplexPayload:
+        addBucketWriteKeys(pool, spec.kind, offset, size, children);
+        if (hasBucketWritePayload(spec.kind)) {
+          addBucketWritePayload(pool, spec.kind, offset, size, children);
+        }
         break;
     }
     children.push_back(makeFlatVector<int64_t>(
