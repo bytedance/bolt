@@ -54,24 +54,32 @@ endif()
 
 target_link_libraries(
   bolt_memory_test
-  PRIVATE bolt_testutils
-          GTest::gmock
-          GTest::gtest
-          GTest::gtest_main
-          $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
-          pthread
-          dl
+  PRIVATE
+    bolt_testutils
+    GTest::gmock
+    GTest::gtest
+    GTest::gtest_main
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
+    pthread
+    dl
 )
 
-gtest_add_tests(bolt_memory_test "" AUTO)
+gtest_add_tests(
+  bolt_memory_test
+  ""
+  AUTO
+)
 
 add_executable(bolt_fragmentation_benchmark FragmentationBenchmark.cpp)
 
 target_link_libraries(
   bolt_fragmentation_benchmark
-  PRIVATE bolt_testutils
-          $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
-          gflags::gflags glog::glog dl
+  PRIVATE
+    bolt_testutils
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
+    gflags::gflags
+    glog::glog
+    dl
 )
 
 add_executable(bolt_concurrent_allocation_benchmark ConcurrentAllocationBenchmark.cpp)

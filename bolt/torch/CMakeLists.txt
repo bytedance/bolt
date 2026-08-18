@@ -17,19 +17,20 @@ bolt_add_library(bolt_torch Compatibility.cpp Operator.cpp PlanNode.cpp Tensor.c
 
 target_include_directories(
   bolt_torch
-  PRIVATE ${TORCH_INCLUDE_DIRS}
-          ${fmt_INCLUDE_DIRS}
-          ${glog_INCLUDE_DIRS} # transitive include
-          ${gflags_INCLUDE_DIRS} # transitive include
-          ${folly_INCLUDE_DIRS} # transitive include
-          ${Boost_INCLUDE_DIRS} # transitive include
-          ${double-conversion_INCLUDE_DIRS} # transitive include
-          ${xsimd_INCLUDE_DIRS} # transitive include
-          ${Libevent_INCLUDE_DIRS} # transitive include
-          ${ryu_INCLUDE_DIRS} # transitive include
-          ${gfx-timsort_INCLUDE_DIRS} # transitive include
-          ${xxHash_INCLUDE_DIRS} # transitive include
-          ${date_INCLUDE_DIRS} # transitive include
+  PRIVATE
+    ${TORCH_INCLUDE_DIRS}
+    ${fmt_INCLUDE_DIRS}
+    ${glog_INCLUDE_DIRS} # transitive include
+    ${gflags_INCLUDE_DIRS} # transitive include
+    ${folly_INCLUDE_DIRS} # transitive include
+    ${Boost_INCLUDE_DIRS} # transitive include
+    ${double-conversion_INCLUDE_DIRS} # transitive include
+    ${xsimd_INCLUDE_DIRS} # transitive include
+    ${Libevent_INCLUDE_DIRS} # transitive include
+    ${ryu_INCLUDE_DIRS} # transitive include
+    ${gfx-timsort_INCLUDE_DIRS} # transitive include
+    ${xxHash_INCLUDE_DIRS} # transitive include
+    ${date_INCLUDE_DIRS} # transitive include
 )
 
 if(${ENABLE_BOLT_JIT})
@@ -37,7 +38,13 @@ if(${ENABLE_BOLT_JIT})
 endif()
 
 # icu is needed as a result of a transitive include calling a function from icu library.
-target_link_libraries(bolt_torch PUBLIC ${TORCH_LIBRARIES} icu::icu folly::folly)
+target_link_libraries(
+  bolt_torch
+  PUBLIC
+    ${TORCH_LIBRARIES}
+    icu::icu
+    folly::folly
+)
 target_compile_definitions(bolt_torch PRIVATE ${glog_DEFINITIONS})
 
 if(${BOLT_BUILD_TESTING})

@@ -31,23 +31,36 @@ target_link_libraries(bolt_is_null_functions bolt_expression)
 
 bolt_add_library(bolt_functions_util LambdaFunctionUtil.cpp RowsTranslationUtil.cpp)
 
-target_link_libraries(bolt_functions_util bolt_vector bolt_common_base)
+target_link_libraries(
+  bolt_functions_util
+  bolt_vector
+  bolt_common_base
+)
 
 find_package(simdjson CONFIG REQUIRED)
 
-set(GK_TYPES
-    "int8_t"
-    "int16_t"
-    "int32_t"
-    "int64_t"
-    "int128_t"
-    "float"
-    "double"
-    "Timestamp"
+set(
+  GK_TYPES
+  "int8_t"
+  "int16_t"
+  "int32_t"
+  "int64_t"
+  "int128_t"
+  "float"
+  "double"
+  "Timestamp"
 )
 specialize_template(GK_GENERATED_FILES GreenwaldKhanna.cpp.in ${GK_TYPES})
 
-set(KLL_TYPES "int8_t" "int16_t" "int32_t" "int64_t" "float" "double")
+set(
+  KLL_TYPES
+  "int8_t"
+  "int16_t"
+  "int32_t"
+  "int64_t"
+  "float"
+  "double"
+)
 specialize_template(KLL_GENERATED_FILES KllSketch.cpp.in ${KLL_TYPES})
 
 bolt_add_library(

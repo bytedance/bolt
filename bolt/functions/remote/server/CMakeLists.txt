@@ -28,12 +28,18 @@
 bolt_add_library(bolt_functions_remote_server RemoteFunctionService.cpp)
 
 target_link_libraries(
-  bolt_functions_remote_server PUBLIC bolt_remote_function_thrift bolt_functions_remote_get_serde
-                                      bolt_type_fbhive bolt_memory
+  bolt_functions_remote_server
+  PUBLIC
+    bolt_remote_function_thrift
+    bolt_functions_remote_get_serde
+    bolt_type_fbhive
+    bolt_memory
 )
 
 add_executable(bolt_functions_remote_server_main RemoteFunctionServiceMain.cpp)
 
 target_link_libraries(
-  bolt_functions_remote_server_main bolt_functions_remote_server bolt_functions_prestosql
+  bolt_functions_remote_server_main
+  bolt_functions_remote_server
+  bolt_functions_prestosql
 )

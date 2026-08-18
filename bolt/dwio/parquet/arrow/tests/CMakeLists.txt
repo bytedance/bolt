@@ -59,8 +59,9 @@ add_executable(
 )
 target_link_libraries(
   bolt_dwio_parquet_level_conversion_benchmark
-  PRIVATE arrow::arrow
-  ${FOLLY_BENCHMARK}
+  PRIVATE
+    arrow::arrow
+    ${FOLLY_BENCHMARK}
 )
 
 bolt_add_library(
@@ -75,6 +76,9 @@ bolt_add_library(
 )
 
 target_link_libraries(
-  bolt_dwio_parquet_arrow_test_lib bolt_dwio_parquet_arrow_lib arrow::arrow GTest::gtest
+  bolt_dwio_parquet_arrow_test_lib
+  bolt_dwio_parquet_arrow_lib
+  arrow::arrow
+  GTest::gtest
   GTest::gtest_main
 )

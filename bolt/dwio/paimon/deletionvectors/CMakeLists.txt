@@ -18,7 +18,10 @@ bolt_add_library(bolt_dwio_paimon_deletion_vector_reader DeletionFileReader.cpp 
 find_package(roaring REQUIRED)
 
 target_link_libraries(
-  bolt_dwio_paimon_deletion_vector_reader bolt_process bolt_link_libs roaring::roaring
+  bolt_dwio_paimon_deletion_vector_reader
+  bolt_process
+  bolt_link_libs
+  roaring::roaring
 )
 
 if(${BOLT_BUILD_TESTING})

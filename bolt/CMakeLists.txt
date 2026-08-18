@@ -25,7 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-
 set(BOLT_BASE_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_EXECUTION_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_FUNCTIONS_OBJECT_TARGETS "" CACHE INTERNAL "")
@@ -36,7 +35,13 @@ set(BOLT_EXTENSIONS_OBJECT_TARGETS "" CACHE INTERNAL "")
 set(BOLT_TESTUTILS_OBJECT_TARGETS "" CACHE INTERNAL "")
 
 function(bolt_add_library target_name)
-  set(options OBJECT STATIC SHARED INTERFACE)
+  set(
+    options
+    OBJECT
+    STATIC
+    SHARED
+    INTERFACE
+  )
   set(oneValueArgs)
   set(multiValueArgs)
   cmake_parse_arguments(BOLT "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -47,7 +52,10 @@ function(bolt_add_library target_name)
   list(REMOVE_ITEM ARGN INTERFACE)
 
   if(BOLT_STATIC OR BOLT_SHARED)
-    message(FATAL_ERROR "Do NOT specify shared/static type, it will be decided automatically by conan")
+    message(
+      FATAL_ERROR
+      "Do NOT specify shared/static type, it will be decided automatically by conan"
+    )
   endif()
 
   # Get current directory relative path
@@ -60,44 +68,71 @@ function(bolt_add_library target_name)
 
   # these are test utils are scattered in different directories
   # TODO: Move these targets to bolt_testutils subdirectory, and adjust the header files accordingly.
-  set(TESTUTIL_PATH_LIST
-      "common/file/tests"
-      "vector/fuzzer"
-      "vector/tests/utils"
-      "expression/tests"
-      "expression/fuzzer"
-      "parse"
-      "dwio/common/tests/utils"
-      "dwio/common/fuzzer"
-      "dwio/parquet/arrow/tests"
-      "tpch/gen/dbgen"
-      "tpch/gen"
-      "functions/lib/aggregates/tests/utils"
-      "functions/lib/window/tests"
-      "functions/prestosql/tests/utils"
-      "connectors/fuzzer"
-      "connectors/tpch"
-      "cudf/tests"
-      "exec/fuzzer"
-      "exec/tests/utils"
-      "exec/prefixsort/tests/utils"
-      "duckdb/conversion")
+  set(
+    TESTUTIL_PATH_LIST
+    "common/file/tests"
+    "vector/fuzzer"
+    "vector/tests/utils"
+    "expression/tests"
+    "expression/fuzzer"
+    "parse"
+    "dwio/common/tests/utils"
+    "dwio/common/fuzzer"
+    "dwio/parquet/arrow/tests"
+    "tpch/gen/dbgen"
+    "tpch/gen"
+    "functions/lib/aggregates/tests/utils"
+    "functions/lib/window/tests"
+    "functions/prestosql/tests/utils"
+    "connectors/fuzzer"
+    "connectors/tpch"
+    "cudf/tests"
+    "exec/fuzzer"
+    "exec/tests/utils"
+    "exec/prefixsort/tests/utils"
+    "duckdb/conversion"
+  )
 
-  set(BASE_COMP_LIST "buffer" "core" "type" "common" "vector" "row" "serializers" "version")
+  set(
+    BASE_COMP_LIST
+    "buffer"
+    "core"
+    "type"
+    "common"
+    "vector"
+    "row"
+    "serializers"
+    "version"
+  )
 
-  set(EXECUTION_COMP_LIST "exec" "jit" "expression")
+  set(
+    EXECUTION_COMP_LIST
+    "exec"
+    "jit"
+    "expression"
+  )
 
   set(FUNCTIONS_COMP_LIST "functions")
 
-  set(IO_COMP_LIST "connectors" "dwio" "external")
+  set(
+    IO_COMP_LIST
+    "connectors"
+    "dwio"
+    "external"
+  )
 
   set(SUBSTRAIT_COMP_LIST "substrait")
 
   set(SHUFFLE_COMP_LIST "shuffle")
 
-  set(EXTENSIONS_COMP_LIST "torch" "cudf" "python")
+  set(
+    EXTENSIONS_COMP_LIST
+    "torch"
+    "cudf"
+    "python"
+  )
 
-  if (BOLT_INTERFACE)
+  if(BOLT_INTERFACE)
     add_library(${target_name} INTERFACE ${ARGN})
     return()
   endif()
@@ -112,7 +147,6 @@ function(bolt_add_library target_name)
     set(BOLT_TESTUTILS_OBJECT_TARGETS ${BOLT_TESTUTILS_OBJECT_TARGETS} CACHE INTERNAL "")
     return()
   endif()
-
 
   if(FIRST_LEVEL_DIR IN_LIST BASE_COMP_LIST)
     list(APPEND BOLT_BASE_OBJECT_TARGETS $<TARGET_OBJECTS:${target_name}>)
@@ -236,42 +270,48 @@ if(${BOLT_BUILD_PYTHON_PACKAGE})
   add_subdirectory(python)
 endif()
 
-add_library(bolt_engine
+add_library(
+  bolt_engine
   ${BOLT_FUNCTIONS_OBJECT_TARGETS}
   ${BOLT_EXECUTION_OBJECT_TARGETS}
   ${BOLT_BASE_OBJECT_TARGETS}
   ${BOLT_IO_OBJECT_TARGETS}
   ${BOLT_SUBSTRAIT_OBJECT_TARGETS}
   ${BOLT_SHUFFLE_OBJECT_TARGETS}
-  ${BOLT_EXTENSIONS_OBJECT_TARGETS})
+  ${BOLT_EXTENSIONS_OBJECT_TARGETS}
+)
 
-target_link_libraries(bolt_engine PUBLIC
-                                  $<$<CONFIG:Debug>:bolt_debug_util>
-                                  arrow::arrow
-                                  $<$<BOOL:${ENABLE_BOLT_JIT}>:llvm-core::llvm-core>
-                                  Folly::folly
-                                  gflags::gflags
-                                  gfx::timsort
-                                  date::date
-                                  re2::re2
-                                  ryu::ryu
-                                  fmt::fmt
-                                  thrift::thrift
-                                  simdjson::simdjson
-                                  sonic-cpp::sonic-cpp
-                                  xxHash::xxhash
-                                  cityhash::cityhash
-                                  utf8proc::utf8proc
-                                  icu::icu
-                                  date::date
-                                  roaring::roaring
-                                  Boost::boost
-                                  Boost::url
-                                  $<$<BOOL:${BOLT_BUILD_TEST_UTILS}>:cpr::cpr>
-                                  $<$<BOOL:${BOLT_ENABLE_SPARK_COMPATIBLE}>:celeborn-cpp-client::celeborn-cpp-client>
-                                  $<$<BOOL:${BOLT_ENABLE_S3}>:aws-sdk-cpp::aws-sdk-cpp>
-                                  $<$<BOOL:${BOLT_ENABLE_GCS}>:google-cloud-cpp::storage>
-                                  $<$<BOOL:${BOLT_ENABLE_ABFS}>:Azure::azure-storage-blobs Azure::azure-storage-files-datalake Azure::azure-identity>
+target_link_libraries(
+  bolt_engine
+  PUBLIC
+    $<$<CONFIG:Debug>:bolt_debug_util>
+    arrow::arrow
+    $<$<BOOL:${ENABLE_BOLT_JIT}>:llvm-core::llvm-core>
+    Folly::folly
+    gflags::gflags
+    gfx::timsort
+    date::date
+    re2::re2
+    ryu::ryu
+    fmt::fmt
+    thrift::thrift
+    simdjson::simdjson
+    sonic-cpp::sonic-cpp
+    xxHash::xxhash
+    cityhash::cityhash
+    utf8proc::utf8proc
+    icu::icu
+    date::date
+    roaring::roaring
+    Boost::boost
+    Boost::url
+    $<$<BOOL:${BOLT_BUILD_TEST_UTILS}>:cpr::cpr>
+    $<$<BOOL:${BOLT_ENABLE_SPARK_COMPATIBLE}>:celeborn-cpp-client::celeborn-cpp-client>
+    $<$<BOOL:${BOLT_ENABLE_S3}>:aws-sdk-cpp::aws-sdk-cpp>
+    $<$<BOOL:${BOLT_ENABLE_GCS}>:google-cloud-cpp::storage>
+    $<$<BOOL:${BOLT_ENABLE_ABFS}>:Azure::azure-storage-blobs
+    Azure::azure-storage-files-datalake
+    Azure::azure-identity>
 )
 
 if(${BOLT_ENABLE_TORCH})
@@ -287,18 +327,27 @@ endif()
 if(${BOLT_ENABLE_CUDF})
   target_link_libraries(bolt_engine PUBLIC cudf::cudf)
   target_compile_definitions(
-    bolt_engine PUBLIC BOLT_HAS_CUDF=1 LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE
+    bolt_engine
+    PUBLIC
+      BOLT_HAS_CUDF=1
+      LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE
   )
 endif()
 
 if(${BOLT_BUILD_TEST_UTILS})
-  add_library(bolt_testutils ${BOLT_TESTUTILS_OBJECT_TARGETS} common/testutil/BoltTestFlags.cpp)
-  target_link_libraries(bolt_testutils PUBLIC
-                                  bolt_engine
-                                  $<$<CONFIG:Debug>:bolt_debug_util>
-                                  duckdb::duckdb
-                                  gflags::gflags
-                                  GTest::gtest
+  add_library(
+    bolt_testutils
+    ${BOLT_TESTUTILS_OBJECT_TARGETS}
+    common/testutil/BoltTestFlags.cpp
+  )
+  target_link_libraries(
+    bolt_testutils
+    PUBLIC
+      bolt_engine
+      $<$<CONFIG:Debug>:bolt_debug_util>
+      duckdb::duckdb
+      gflags::gflags
+      GTest::gtest
   )
   target_include_directories(bolt_testutils PUBLIC ${CMAKE_BINARY_DIR})
 endif()
@@ -309,8 +358,12 @@ if(${BOLT_BUILD_TEST_UTILS})
 endif()
 
 install(
-  TARGETS ${BOLT_INSTALL_TARGETS}
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
+  TARGETS
+    ${BOLT_INSTALL_TARGETS}
+  ARCHIVE
+    DESTINATION lib
+  LIBRARY
+    DESTINATION lib
+  RUNTIME
+    DESTINATION bin
 )

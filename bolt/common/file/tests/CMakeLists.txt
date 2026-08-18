@@ -29,23 +29,36 @@ bolt_add_library(bolt_file_test_utils TestUtils.cpp)
 target_link_libraries(bolt_file_test_utils PUBLIC bolt_file)
 
 if(${BOLT_BUILD_TESTING})
-  add_executable(bolt_file_test FileInputStreamTest.cpp FileTest.cpp UtilsTest.cpp)
+  add_executable(
+    bolt_file_test
+    FileInputStreamTest.cpp
+    FileTest.cpp
+    UtilsTest.cpp
+  )
   add_test(bolt_file_test bolt_file_test)
   target_link_libraries(
     bolt_file_test
-    PRIVATE bolt_testutils
-            GTest::gmock
-            GTest::gtest
-            GTest::gtest_main
+    PRIVATE
+      bolt_testutils
+      GTest::gmock
+      GTest::gtest
+      GTest::gtest_main
   )
 
   if(KERNEL_SUPPORTS_IO_URING)
-    add_executable(bolt_async_file_test AsyncFileTest.cpp UtilsTest.cpp)
+    add_executable(
+      bolt_async_file_test
+      AsyncFileTest.cpp
+      UtilsTest.cpp
+    )
     add_test(bolt_async_file_test bolt_async_file_test)
     target_link_libraries(
-      bolt_async_file_test PRIVATE bolt_testutils
-                                  GTest::gmock
-                                  GTest::gtest GTest::gtest_main
+      bolt_async_file_test
+      PRIVATE
+        bolt_testutils
+        GTest::gmock
+        GTest::gtest
+        GTest::gtest_main
     )
   endif()
 endif()

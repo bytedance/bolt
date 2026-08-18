@@ -25,16 +25,18 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(CMAKE_WINDOW_TEST_LINK_LIBRARIES
-    bolt_testutils
-    gflags::gflags
-    GTest::gtest
-    GTest::gtest_main
+set(
+  CMAKE_WINDOW_TEST_LINK_LIBRARIES
+  bolt_testutils
+  gflags::gflags
+  GTest::gtest
+  GTest::gtest_main
 )
 
 set(CMAKE_WINDOW_TEST_MAIN_FILES Main.cpp)
 
-add_executable(bolt_windows_test
+add_executable(
+  bolt_windows_test
   ${CMAKE_WINDOW_TEST_MAIN_FILES}
   NtileTest.cpp
   RankTest.cpp
@@ -43,10 +45,6 @@ add_executable(bolt_windows_test
   AggregateWindowTest.cpp
 )
 
-add_test(
-  NAME bolt_windows_test
-  COMMAND bolt_windows_test
-  WORKING_DIRECTORY .
-)
+add_test(NAME bolt_windows_test COMMAND bolt_windows_test WORKING_DIRECTORY .)
 
 target_link_libraries(bolt_windows_test ${CMAKE_WINDOW_TEST_LINK_LIBRARIES})

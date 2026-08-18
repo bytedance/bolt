@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(bolt_dwio_paimon_test
-               PaimonReaderDeduplicateTest.cpp
-               PaimonReaderAggregateTest.cpp
-               PaimonReaderPartialUpdateTest.cpp
-               PaimonReaderMetadataFieldTest.cpp
-               PaimonTestUtils.cpp)
+add_executable(
+  bolt_dwio_paimon_test
+  PaimonReaderDeduplicateTest.cpp
+  PaimonReaderAggregateTest.cpp
+  PaimonReaderPartialUpdateTest.cpp
+  PaimonReaderMetadataFieldTest.cpp
+  PaimonTestUtils.cpp
+)
 
 add_test(bolt_dwio_paimon_test bolt_dwio_paimon_test)
 

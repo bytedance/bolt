@@ -77,4 +77,10 @@ target_link_libraries(
   Boost::url
 )
 
-set_property(TARGET bolt_functions_prestosql PROPERTY JOB_POOL_COMPILE high_memory_pool)
+set_property(
+  TARGET
+    bolt_functions_prestosql
+  PROPERTY
+    JOB_POOL_COMPILE
+      high_memory_pool
+)

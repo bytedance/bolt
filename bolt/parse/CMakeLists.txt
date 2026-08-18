@@ -37,7 +37,12 @@ target_link_libraries(
 )
 
 bolt_add_library(bolt_parse_parser ExpressionsParser.cpp QueryPlanner.cpp)
-target_link_libraries(bolt_parse_parser bolt_parse_expression bolt_type bolt_duckdb_parser)
+target_link_libraries(
+  bolt_parse_parser
+  bolt_parse_expression
+  bolt_type
+  bolt_duckdb_parser
+)
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()

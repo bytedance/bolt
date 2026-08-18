@@ -40,5 +40,7 @@ target_link_libraries(
 add_executable(bolt_tpch_speed_test SpeedTest.cpp)
 
 target_link_libraries(
-  bolt_tpch_speed_test bolt_tpch_connector bolt_testutils
+  bolt_tpch_speed_test
+  bolt_tpch_connector
+  bolt_testutils
 )

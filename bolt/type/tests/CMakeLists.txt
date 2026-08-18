@@ -69,7 +69,7 @@ add_executable(bolt_negated_values_filter_benchmark NegatedValuesFilterBenchmark
 
 target_link_libraries(
   bolt_negated_values_filter_benchmark
-   bolt_testutils
+  bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
   GTest::gtest_main

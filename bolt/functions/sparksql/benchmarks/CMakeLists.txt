@@ -25,78 +25,86 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(BOLT_BENCHMARK_DEPS
-    bolt_vector_fuzzer
-    bolt_testutils
-    ${FOLLY_BENCHMARK}
-    GTest::gtest
+set(
+  BOLT_BENCHMARK_DEPS
+  bolt_vector_fuzzer
+  bolt_testutils
+  ${FOLLY_BENCHMARK}
+  GTest::gtest
 )
 add_executable(bolt_sparksql_benchmarks_in In.cpp)
 
 target_link_libraries(
-  bolt_sparksql_benchmarks_in PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_in
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_compare CompareBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_compare PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_compare
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_simd_compare SIMDCompareBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_simd_compare PRIVATE
-  bolt_benchmark_builder
-  ${FOLLY_BENCHMARK})
+  bolt_sparksql_benchmarks_simd_compare
+  PRIVATE
+    bolt_benchmark_builder
+    ${FOLLY_BENCHMARK}
+)
 
 add_executable(bolt_sparksql_benchmarks_regex RegexBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_regex PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_regex
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 add_executable(bolt_sparksql_benchmarks_split Split.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_split PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_split
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_hash HiveHashBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_hash PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_hash
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_map MapBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_map PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_map
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_get_funcs FunctionBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_get_funcs PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_get_funcs
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
 add_executable(bolt_sparksql_benchmarks_unix_timestamp UnixTimestampBenchmark.cpp)
 target_link_libraries(
-  bolt_sparksql_benchmarks_unix_timestamp PRIVATE
-  bolt_benchmark_builder
-  ${BOLT_BENCHMARK_DEPS}
+  bolt_sparksql_benchmarks_unix_timestamp
+  PRIVATE
+    bolt_benchmark_builder
+    ${BOLT_BENCHMARK_DEPS}
 )
 
-add_executable(
-  bolt_collect_list_aggregate_bm
-  CollectListAggregateBenchmark.cpp
-)
+add_executable(bolt_collect_list_aggregate_bm CollectListAggregateBenchmark.cpp)
 
 target_link_libraries(
   bolt_collect_list_aggregate_bm

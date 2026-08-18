@@ -18,14 +18,15 @@ find_package(Arrow CONFIG REQUIRED)
 add_executable(bolt_dwio_txt_writer_test TxtWriterTest.cpp)
 add_test(
   NAME bolt_dwio_txt_writer_test
-  COMMAND bolt_dwio_txt_writer_test
+  COMMAND
+    bolt_dwio_txt_writer_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
   bolt_dwio_txt_writer_test
-PRIVATE
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-  GTest::gmock
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
+    GTest::gmock
 )

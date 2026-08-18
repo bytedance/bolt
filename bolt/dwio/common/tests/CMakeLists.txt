@@ -75,17 +75,16 @@ target_link_libraries(
 )
 
 add_library(bolt_e2e_filter_test_base OBJECT E2EFilterTestBase.cpp)
-target_link_libraries(
-  bolt_e2e_filter_test_base
-  bolt_testutils
-)
+target_link_libraries(bolt_e2e_filter_test_base bolt_testutils)
 
 if(BOLT_ENABLE_ARROW AND BOLT_BUILD_BENCHMARKS)
   add_subdirectory(Lemire/FastPFor)
   add_executable(bolt_dwio_common_bitpack_decoder_benchmark BitPackDecoderBenchmark.cpp)
 
   target_compile_options(
-    bolt_dwio_common_bitpack_decoder_benchmark PRIVATE -Wno-deprecated-declarations
+    bolt_dwio_common_bitpack_decoder_benchmark
+    PRIVATE
+      -Wno-deprecated-declarations
   )
 
   target_link_libraries(

@@ -25,7 +25,8 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_cache_test
+add_executable(
+  bolt_cache_test
   AsyncDataCacheTest.cpp
   CacheTTLControllerTest.cpp
   SsdFileTest.cpp
@@ -39,7 +40,8 @@ add_test(bolt_cache_test bolt_cache_test)
 
 target_link_libraries(
   bolt_cache_test
-  PRIVATE bolt_testutils
-          GTest::gtest
-          GTest::gtest_main
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )

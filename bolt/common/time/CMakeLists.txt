@@ -30,8 +30,10 @@ if(${BOLT_BUILD_TESTING})
 endif()
 
 bolt_add_library(bolt_time CpuWallTimer.cpp Timer.cpp)
-target_link_libraries(bolt_time
-      PRIVATE
-        Folly::folly
-        fmt::fmt
-        $<$<CONFIG:Debug>:bolt_debug_util>)
+target_link_libraries(
+  bolt_time
+  PRIVATE
+    Folly::folly
+    fmt::fmt
+    $<$<CONFIG:Debug>:bolt_debug_util>
+)

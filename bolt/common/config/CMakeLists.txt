@@ -32,6 +32,9 @@ endif()
 bolt_add_library(bolt_common_config Config.cpp)
 target_link_libraries(
   bolt_common_config
-  PUBLIC bolt_common_base bolt_exception
-  PRIVATE re2::re2
+  PUBLIC
+    bolt_common_base
+    bolt_exception
+  PRIVATE
+    re2::re2
 )

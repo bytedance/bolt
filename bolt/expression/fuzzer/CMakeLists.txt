@@ -27,11 +27,20 @@
 
 bolt_add_library(bolt_expression_test_utility ArgumentTypeFuzzer.cpp FuzzerToolkit.cpp)
 
-target_link_libraries(bolt_expression_test_utility bolt_type bolt_expression_functions GTest::gtest)
+target_link_libraries(
+  bolt_expression_test_utility
+  bolt_type
+  bolt_expression_functions
+  GTest::gtest
+)
 
 add_library(
-  bolt_expression_fuzzer STATIC ArgumentTypeFuzzer.cpp ExpressionFuzzer.cpp ExpressionFuzzerVerifier.cpp
-                         FuzzerRunner.cpp
+  bolt_expression_fuzzer
+  STATIC
+  ArgumentTypeFuzzer.cpp
+  ExpressionFuzzer.cpp
+  ExpressionFuzzerVerifier.cpp
+  FuzzerRunner.cpp
 )
 
 target_link_libraries(
@@ -48,21 +57,23 @@ target_link_libraries(
 add_executable(bolt_expression_fuzzer_test ExpressionFuzzerTest.cpp)
 
 target_link_libraries(
-  bolt_expression_fuzzer_test PRIVATE
-  bolt_expression_fuzzer
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_expression_fuzzer_test
+  PRIVATE
+    bolt_expression_fuzzer
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )
 
 add_executable(spark_expression_fuzzer_test SparkExpressionFuzzerTest.cpp)
 
 target_link_libraries(
-  spark_expression_fuzzer_test PRIVATE
-  bolt_expression_fuzzer
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  spark_expression_fuzzer_test
+  PRIVATE
+    bolt_expression_fuzzer
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )
 
 find_package(Arrow CONFIG REQUIRED)

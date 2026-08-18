@@ -67,8 +67,14 @@ bolt_add_library(
 find_package(celeborn-cpp-client CONFIG REQUIRED)
 
 target_link_libraries(
-  bolt_shuffle_spark_impl PUBLIC arrow::arrow ryu::ryu bolt_vector bolt_core bolt_exec
-                                 celeborn-cpp-client::celeborn-cpp-client
+  bolt_shuffle_spark_impl
+  PUBLIC
+    arrow::arrow
+    ryu::ryu
+    bolt_vector
+    bolt_core
+    bolt_exec
+    celeborn-cpp-client::celeborn-cpp-client
 )
 
 if(ENABLE_QAT)
@@ -76,16 +82,27 @@ if(ENABLE_QAT)
   include(BuildQATZstd)
   target_sources(bolt_shuffle_spark_impl PRIVATE compression/qat/QatCodec.cpp)
   target_include_directories(
-    bolt_shuffle_spark_impl PUBLIC ${QATZIP_INCLUDE_DIR} ${QATZSTD_INCLUDE_DIR}
+    bolt_shuffle_spark_impl
+    PUBLIC
+      ${QATZIP_INCLUDE_DIR}
+      ${QATZSTD_INCLUDE_DIR}
   )
-  target_link_libraries(bolt_shuffle_spark_impl PUBLIC qatzip::qatzip qatzstd::qatzstd)
+  target_link_libraries(
+    bolt_shuffle_spark_impl
+    PUBLIC
+      qatzip::qatzip
+      qatzstd::qatzstd
+  )
 endif()
 
 if(ENABLE_IAA)
   include(BuildQpl)
   target_include_directories(bolt_shuffle_spark_impl PUBLIC ${QPL_INCLUDE_DIR})
   target_sources(
-    bolt_shuffle_spark_impl PRIVATE compression/qpl/qpl_job_pool.cpp compression/qpl/qpl_codec.cpp
+    bolt_shuffle_spark_impl
+    PRIVATE
+      compression/qpl/qpl_job_pool.cpp
+      compression/qpl/qpl_codec.cpp
   )
   target_link_libraries(bolt_shuffle_spark_impl PUBLIC qpl::qpl)
 endif()

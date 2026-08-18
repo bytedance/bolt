@@ -28,10 +28,11 @@
 add_executable(bolt_sparksql_coverage Coverage.cpp)
 
 target_link_libraries(
-  bolt_sparksql_coverage PRIVATE
-  # bolt_functions_spark bolt_function_registry
-  # bolt_functions_spark_aggregates
-  # bolt_functions_spark_window
-  bolt_coverage_util
-  bolt_testutils
+  bolt_sparksql_coverage
+  PRIVATE
+    # bolt_functions_spark bolt_function_registry
+    # bolt_functions_spark_aggregates
+    # bolt_functions_spark_window
+    bolt_coverage_util
+    bolt_testutils
 )

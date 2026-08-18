@@ -84,5 +84,9 @@ endif()
 if(${BOLT_ENABLE_CUDF})
   target_compile_definitions(bolt_exec_test_lib PRIVATE BOLT_HAS_CUDF=1)
   target_include_directories(bolt_exec_test_lib SYSTEM PRIVATE ${cudf_INCLUDE_DIRS})
-  target_link_libraries(bolt_exec_test_lib bolt_cudf_exec bolt_cudf_test_util)
+  target_link_libraries(
+    bolt_exec_test_lib
+    bolt_cudf_exec
+    bolt_cudf_test_util
+  )
 endif()

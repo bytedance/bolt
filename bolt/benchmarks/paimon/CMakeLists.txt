@@ -38,7 +38,8 @@ target_link_libraries(
   $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
   Folly::folly
   ${FOLLY_BENCHMARK}
-  fmt::fmt)
+  fmt::fmt
+)
 
 add_executable(bolt_paimon_benchmark PaimonBenchmarkMain.cpp)
 

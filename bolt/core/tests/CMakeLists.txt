@@ -40,7 +40,8 @@ add_test(bolt_core_test bolt_core_test)
 
 target_link_libraries(
   bolt_core_test
-  PRIVATE bolt_testutils
-          GTest::gtest
-          GTest::gtest_main
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )

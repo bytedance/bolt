@@ -39,14 +39,16 @@ bolt_add_library(
 
 target_link_libraries(
   bolt_caching
-  PUBLIC bolt_common_base
-         bolt_exception
-         bolt_file
-         bolt_memory
-         Folly::folly
-         fmt::fmt
-         gflags::gflags
-  PRIVATE bolt_time
+  PUBLIC
+    bolt_common_base
+    bolt_exception
+    bolt_file
+    bolt_memory
+    Folly::folly
+    fmt::fmt
+    gflags::gflags
+  PRIVATE
+    bolt_time
 )
 
 if(${BOLT_BUILD_TESTING})

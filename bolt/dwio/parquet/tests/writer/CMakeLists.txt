@@ -25,14 +25,16 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_parquet_writer_sink_test
+add_executable(
+  bolt_parquet_writer_sink_test
   SinkTests.cpp
   ParquetWriterTest.cpp
 )
 
 add_test(
   NAME bolt_parquet_writer_sink_test
-  COMMAND bolt_parquet_writer_sink_test
+  COMMAND
+    bolt_parquet_writer_sink_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

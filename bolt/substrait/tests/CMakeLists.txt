@@ -41,7 +41,8 @@ add_dependencies(bolt_plan_conversion_test bolt_substrait_plan_converter)
 
 add_test(
   NAME bolt_plan_conversion_test
-  COMMAND bolt_plan_conversion_test
+  COMMAND
+    bolt_plan_conversion_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -55,5 +56,9 @@ target_link_libraries(
 if(${BOLT_ENABLE_TORCH})
   target_compile_definitions(bolt_plan_conversion_test PRIVATE BOLT_HAS_TORCH=1)
   target_include_directories(bolt_plan_conversion_test SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})
-  target_link_libraries(bolt_plan_conversion_test bolt_torch bolt_vector_fuzzer)
+  target_link_libraries(
+    bolt_plan_conversion_test
+    bolt_torch
+    bolt_vector_fuzzer
+  )
 endif()

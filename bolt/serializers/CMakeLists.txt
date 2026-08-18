@@ -34,14 +34,14 @@ bolt_add_library(
 )
 
 target_link_libraries(
-    bolt_presto_serializer
-    bolt_vector
-    bolt_row_fast
-    utf8proc::utf8proc
+  bolt_presto_serializer
+  bolt_vector
+  bolt_row_fast
+  utf8proc::utf8proc
 )
 
 if(${BOLT_BUILD_TESTING})
-    add_subdirectory(tests)
+  add_subdirectory(tests)
 endif()
 
 if(${BOLT_BUILD_BENCHMARKS})

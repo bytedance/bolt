@@ -95,7 +95,13 @@ target_link_libraries(
   Folly::folly
 )
 
-set_property(TARGET bolt_functions_prestosql_impl PROPERTY JOB_POOL_COMPILE high_memory_pool)
+set_property(
+  TARGET
+    bolt_functions_prestosql_impl
+  PROPERTY
+    JOB_POOL_COMPILE
+      high_memory_pool
+)
 
 if(${BOLT_ENABLE_AGGREGATES})
   add_subdirectory(aggregates)

@@ -25,44 +25,47 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(PAAGG_TYPES
-    "int8_t"
-    "int16_t"
-    "int32_t"
-    "int64_t"
-    "int128_t"
-    "float"
-    "double"
-    "Timestamp"
+set(
+  PAAGG_TYPES
+  "int8_t"
+  "int16_t"
+  "int32_t"
+  "int64_t"
+  "int128_t"
+  "float"
+  "double"
+  "Timestamp"
 )
 specialize_template(PAAGG_GENERATED_FILES PercentileApproxAggregate.cpp.in ${PAAGG_TYPES})
 
-set(PERCENTILE_TYPES
-    "TypeKind::TINYINT"
-    "TypeKind::SMALLINT"
-    "TypeKind::INTEGER"
-    "TypeKind::BIGINT"
-    "TypeKind::HUGEINT"
-    "TypeKind::REAL"
-    "TypeKind::DOUBLE"
-    "TypeKind::VARCHAR"
+set(
+  PERCENTILE_TYPES
+  "TypeKind::TINYINT"
+  "TypeKind::SMALLINT"
+  "TypeKind::INTEGER"
+  "TypeKind::BIGINT"
+  "TypeKind::HUGEINT"
+  "TypeKind::REAL"
+  "TypeKind::DOUBLE"
+  "TypeKind::VARCHAR"
 )
 specialize_template(
   PERCENTILE_GENERATED_FILES PercentileAggregate.cpp.in ${PERCENTILE_TYPES}
 )
 
-set(MIN_MAX_BY_TYPES
-    "bool"
-    "int8_t"
-    "int16_t"
-    "int32_t"
-    "int64_t"
-    "int128_t"
-    "float"
-    "double"
-    "StringView"
-    "Timestamp"
-    "ComplexType"
+set(
+  MIN_MAX_BY_TYPES
+  "bool"
+  "int8_t"
+  "int16_t"
+  "int32_t"
+  "int64_t"
+  "int128_t"
+  "float"
+  "double"
+  "StringView"
+  "Timestamp"
+  "ComplexType"
 )
 specialize_template(
   MIN_MAX_BY_GENERATED_FILES MinMaxByAggregate.cpp.in ${MIN_MAX_BY_TYPES}
@@ -93,7 +96,11 @@ bolt_add_library(
 )
 
 target_link_libraries(
-  bolt_functions_spark_aggregates bolt_exec bolt_expression_functions bolt_aggregates bolt_vector
+  bolt_functions_spark_aggregates
+  bolt_exec
+  bolt_expression_functions
+  bolt_aggregates
+  bolt_vector
   fmt::fmt
 )
 

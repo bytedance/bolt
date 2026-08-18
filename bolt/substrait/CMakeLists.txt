@@ -34,7 +34,7 @@ endif()
 
 message(
   STATUS
-    "Found Protobuf compiler: ${Protobuf_PROTOC_EXECUTABLE} (found version ${Protobuf_VERSION})"
+  "Found Protobuf compiler: ${Protobuf_PROTOC_EXECUTABLE} (found version ${Protobuf_VERSION})"
 )
 
 message(STATUS "Proto directory path: ${CMAKE_CURRENT_SOURCE_DIR}/proto")
@@ -43,8 +43,11 @@ set(PROTO_OUTPUT_DIR "${CMAKE_BINARY_DIR}/gen_cpp")
 file(MAKE_DIRECTORY ${PROTO_OUTPUT_DIR})
 
 # Glob all the .proto files
-file(GLOB PROTO_FILES ${SUBSTRAIT_PROTO_DIRECTORY}/*.proto
-     ${SUBSTRAIT_PROTO_DIRECTORY}/extensions/*.proto ${SUBSTRAIT_PROTO_DIRECTORY}/bolt/*.proto
+file(
+  GLOB PROTO_FILES
+  ${SUBSTRAIT_PROTO_DIRECTORY}/*.proto
+  ${SUBSTRAIT_PROTO_DIRECTORY}/extensions/*.proto
+  ${SUBSTRAIT_PROTO_DIRECTORY}/bolt/*.proto
 )
 
 set(PROTO_SRCS "")
@@ -62,43 +65,64 @@ foreach(proto ${PROTO_FILES})
   message(STATUS "Compiling proto file: ${proto}")
   # Generate commands for each .proto file
   add_custom_command(
-    OUTPUT ${PROTO_SRC} ${PROTO_HDR}
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE} ARGS --proto_path=${PROJECT_SOURCE_DIR}/
-            --cpp_out=${PROTO_OUTPUT_DIR} ${proto}
-    DEPENDS ${proto}
+    OUTPUT
+      ${PROTO_SRC}
+      ${PROTO_HDR}
+    COMMAND
+      ${Protobuf_PROTOC_EXECUTABLE}
+    ARGS
+      --proto_path=${PROJECT_SOURCE_DIR}/ --cpp_out=${PROTO_OUTPUT_DIR} ${proto}
+    DEPENDS
+      ${proto}
     COMMENT "Running proto compiler for ${proto}"
     VERBATIM
   )
 endforeach()
 
-set(PROTO_OUTPUT_FILES ${PROTO_HDRS} ${PROTO_SRCS})
-set_source_files_properties(${PROTO_OUTPUT_FILES} PROPERTIES GENERATED TRUE)
+set(
+  PROTO_OUTPUT_FILES
+  ${PROTO_HDRS}
+  ${PROTO_SRCS}
+)
+set_source_files_properties(
+  ${PROTO_OUTPUT_FILES}
+  PROPERTIES
+    GENERATED
+      TRUE
+)
 
 # Custom target to handle all the generated .pb.cc and .pb.h files
 add_custom_target(
-  substrait_proto ALL
-  DEPENDS ${PROTO_OUTPUT_FILES}
+  substrait_proto
+  ALL
+  DEPENDS
+    ${PROTO_OUTPUT_FILES}
   COMMENT "Generating substrait proto files"
 )
 add_dependencies(substrait_proto protobuf::libprotobuf)
 
-set(SRCS
-    ${PROTO_SRCS}
-    SubstraitParser.cpp
-    SubstraitToBoltExpr.cpp
-    SubstraitToBoltPlan.cpp
-    TypeUtils.cpp
-    SubstraitExtensionCollector.cpp
-    BoltToSubstraitExpr.cpp
-    BoltToSubstraitPlan.cpp
-    BoltToSubstraitType.cpp
-    BoltSubstraitSignature.cpp
-    VariantToVectorConverter.cpp
+set(
+  SRCS
+  ${PROTO_SRCS}
+  SubstraitParser.cpp
+  SubstraitToBoltExpr.cpp
+  SubstraitToBoltPlan.cpp
+  TypeUtils.cpp
+  SubstraitExtensionCollector.cpp
+  BoltToSubstraitExpr.cpp
+  BoltToSubstraitPlan.cpp
+  BoltToSubstraitType.cpp
+  BoltSubstraitSignature.cpp
+  VariantToVectorConverter.cpp
 )
 
 bolt_add_library(bolt_substrait_plan_converter ${SRCS})
 target_include_directories(bolt_substrait_plan_converter PUBLIC ${PROTO_OUTPUT_DIR}/)
-target_link_libraries(bolt_substrait_plan_converter bolt_connector bolt_dwio_dwrf_common)
+target_link_libraries(
+  bolt_substrait_plan_converter
+  bolt_connector
+  bolt_dwio_dwrf_common
+)
 
 if(${BOLT_ENABLE_TORCH})
   target_compile_definitions(bolt_substrait_plan_converter PRIVATE BOLT_HAS_TORCH=1)
@@ -109,7 +133,8 @@ endif()
 # Force export this library
 add_custom_target(
   dummy_substrait_target
-  DEPENDS bolt_substrait_plan_converter
+  DEPENDS
+    bolt_substrait_plan_converter
   COMMENT "Exporting substrait plan converter library"
 )
 

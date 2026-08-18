@@ -28,10 +28,11 @@
 add_subdirectory(basic)
 add_subdirectory(unstable)
 
-set(BOLT_BENCHMARK_DEPS
-    bolt_testutils
-    ${FOLLY_BENCHMARK}
-    GTest::gtest
+set(
+  BOLT_BENCHMARK_DEPS
+  bolt_testutils
+  ${FOLLY_BENCHMARK}
+  GTest::gtest
 )
 
 add_library(bolt_benchmark_builder OBJECT ExpressionBenchmarkBuilder.cpp)
@@ -44,9 +45,10 @@ endif()
 
 add_library(bolt_query_benchmark OBJECT QueryBenchmarkBase.cpp)
 target_link_libraries(
-  bolt_query_benchmark PRIVATE
-  bolt_benchmark_builder
-  bolt_testutils
-  Folly::follybenchmark
-  fmt::fmt
+  bolt_query_benchmark
+  PRIVATE
+    bolt_benchmark_builder
+    bolt_testutils
+    Folly::follybenchmark
+    fmt::fmt
 )

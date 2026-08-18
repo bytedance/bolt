@@ -30,4 +30,5 @@ target_link_libraries(
   bolt_row_serializer_benchmark
   bolt_engine
   bolt_vector_fuzzer
-  ${FOLLY_BENCHMARK})
+  ${FOLLY_BENCHMARK}
+)

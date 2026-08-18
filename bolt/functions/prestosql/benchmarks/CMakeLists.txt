@@ -25,19 +25,22 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(BENCHMARK_DEPENDENCIES_NO_FUNC
-    bolt_functions_test_lib
-    bolt_exec
-    bolt_exec_test_lib
-    gflags::gflags
-    Folly::folly
-    ${FOLLY_BENCHMARK}
-    bolt_benchmark_builder
+set(
+  BENCHMARK_DEPENDENCIES_NO_FUNC
+  bolt_functions_test_lib
+  bolt_exec
+  bolt_exec_test_lib
+  gflags::gflags
+  Folly::folly
+  ${FOLLY_BENCHMARK}
+  bolt_benchmark_builder
 )
 
-set(BENCHMARK_DEPENDENCIES
+set(
+  BENCHMARK_DEPENDENCIES
   bolt_functions_prestosql
-  bolt_functions_lib bolt_vector_fuzzer
+  bolt_functions_lib
+  bolt_vector_fuzzer
   ${BENCHMARK_DEPENDENCIES_NO_FUNC}
   bolt_testutils
 )
@@ -63,7 +66,8 @@ add_executable(
   StringAsciiUTFFunctionBenchmarks.cpp
 )
 target_link_libraries(
-  bolt_functions_prestosql_benchmarks_string_ascii_utf_functions ${BENCHMARK_DEPENDENCIES}
+  bolt_functions_prestosql_benchmarks_string_ascii_utf_functions
+  ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_not NotBenchmark.cpp)
@@ -89,119 +93,150 @@ target_link_libraries(bolt_functions_benchmarks_compare ${BENCHMARK_DEPENDENCIES
 
 add_executable(bolt_benchmark_array_writer_with_nulls ArrayWriterBenchmark.cpp)
 target_compile_definitions(bolt_benchmark_array_writer_with_nulls PUBLIC WITH_NULLS=true)
-target_link_libraries(bolt_benchmark_array_writer_with_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_benchmark_array_writer_with_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_benchmark_array_writer_no_nulls ArrayWriterBenchmark.cpp)
-target_link_libraries(bolt_benchmark_array_writer_no_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_benchmark_array_writer_no_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 target_compile_definitions(bolt_benchmark_array_writer_no_nulls PUBLIC WITH_NULLS=false)
 
 add_executable(bolt_benchmark_nested_array_writer_no_nulls NestedArrayWriterBenchmark.cpp)
-target_link_libraries(bolt_benchmark_nested_array_writer_no_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_benchmark_nested_array_writer_no_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 target_compile_definitions(bolt_benchmark_nested_array_writer_no_nulls PUBLIC WITH_NULLS=false)
 
 add_executable(bolt_benchmark_nested_array_writer_with_nulls NestedArrayWriterBenchmark.cpp)
 target_compile_definitions(bolt_benchmark_nested_array_writer_with_nulls PUBLIC WITH_NULLS=true)
 target_link_libraries(
-  bolt_benchmark_nested_array_writer_with_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+  bolt_benchmark_nested_array_writer_with_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
-
 
 add_executable(bolt_benchmark_map_writer_with_nulls MapWriterBenchmarks.cpp)
 target_compile_definitions(bolt_benchmark_map_writer_with_nulls PUBLIC WITH_NULLS=true)
-target_link_libraries(bolt_benchmark_map_writer_with_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_benchmark_map_writer_with_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_benchmark_map_writer_no_nulls MapWriterBenchmarks.cpp)
-target_link_libraries(bolt_benchmark_map_writer_no_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_benchmark_map_writer_no_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 target_compile_definitions(bolt_benchmark_map_writer_no_nulls PUBLIC WITH_NULLS=false)
 
 add_executable(bolt_functions_benchmarks_row_writer_no_nulls RowWriterBenchmark.cpp)
 target_link_libraries(
-  bolt_functions_benchmarks_row_writer_no_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+  bolt_functions_benchmarks_row_writer_no_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_benchmarks_string_writer_no_nulls StringWriterBenchmark.cpp)
 target_link_libraries(
-  bolt_functions_benchmarks_string_writer_no_nulls PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+  bolt_functions_benchmarks_string_writer_no_nulls
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_zip ZipBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_zip PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_zip
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_row Row.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_row PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_row
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_comparisons ComparisonsBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_comparisons PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_comparisons
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_concat ConcatBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_concat PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_concat
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_zip_with ZipWithBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_zip_with PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_zip_with
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_map_zip_with MapZipWithBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_map_zip_with PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_map_zip_with
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_cardinality CardinalityBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_cardinality PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_cardinality
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_benchmarks_simdjson_function_with_expr JsonExprBenchmark.cpp)
 target_link_libraries(
-  bolt_functions_benchmarks_simdjson_function_with_expr PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+  bolt_functions_benchmarks_simdjson_function_with_expr
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_map_subscript MapSubscriptCachingBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_map_subscript PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_map_subscript
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_generic GenericBenchmark.cpp)
-target_link_libraries(bolt_functions_prestosql_benchmarks_generic PRIVATE
-  ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  ${BENCHMARK_DEPENDENCIES}
+target_link_libraries(
+  bolt_functions_prestosql_benchmarks_generic
+  PRIVATE
+    ${BENCHMARK_DEPENDENCIES_NO_FUNC}
+    ${BENCHMARK_DEPENDENCIES}
 )

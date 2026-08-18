@@ -27,7 +27,8 @@ add_executable(
 
 add_test(
   NAME bolt_functions_flink_test
-  COMMAND bolt_functions_flink_test
+  COMMAND
+    bolt_functions_flink_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

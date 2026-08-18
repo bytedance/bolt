@@ -26,7 +26,9 @@
 # --------------------------------------------------------------------------
 
 add_executable(
-  bolt_expression_fuzzer_unit_test ArgumentTypeFuzzerTest.cpp ExpressionFuzzerUnitTest.cpp
+  bolt_expression_fuzzer_unit_test
+  ArgumentTypeFuzzerTest.cpp
+  ExpressionFuzzerUnitTest.cpp
 )
 
 target_link_libraries(

@@ -18,9 +18,14 @@ find_package(Arrow CONFIG REQUIRED)
 add_executable(bolt_dwio_txt_reader_test TxtReaderTest.cpp)
 add_test(
   NAME bolt_dwio_txt_reader_test
-  COMMAND bolt_dwio_txt_reader_test
+  COMMAND
+    bolt_dwio_txt_reader_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
-  bolt_dwio_txt_reader_test bolt_dwio_txt_reader bolt_link_libs ${TXT_TEST_LINK_LIBS} bolt_testutils
+  bolt_dwio_txt_reader_test
+  bolt_dwio_txt_reader
+  bolt_link_libs
+  ${TXT_TEST_LINK_LIBS}
+  bolt_testutils
 )

@@ -26,7 +26,10 @@
 # --------------------------------------------------------------------------
 
 add_executable(
-  bolt_dwio_dwrf_utils_test BitIteratorTests.cpp BufferedWriterTest.cpp ProtoUtilsTests.cpp
+  bolt_dwio_dwrf_utils_test
+  BitIteratorTests.cpp
+  BufferedWriterTest.cpp
+  ProtoUtilsTests.cpp
 )
 
 add_test(bolt_dwio_dwrf_utils_test bolt_dwio_dwrf_utils_test)

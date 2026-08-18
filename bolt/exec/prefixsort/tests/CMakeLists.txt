@@ -33,11 +33,17 @@ add_executable(bolt_exec_prefixsort_test PrefixSortAlgorithmTest.cpp)
 
 add_test(
   NAME bolt_exec_prefixsort_test
-  COMMAND bolt_exec_prefixsort_test
+  COMMAND
+    bolt_exec_prefixsort_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-set_tests_properties(bolt_exec_prefixsort_test PROPERTIES TIMEOUT 3000)
+set_tests_properties(
+  bolt_exec_prefixsort_test
+  PROPERTIES
+    TIMEOUT
+      3000
+)
 
 target_link_libraries(
   bolt_exec_prefixsort_test

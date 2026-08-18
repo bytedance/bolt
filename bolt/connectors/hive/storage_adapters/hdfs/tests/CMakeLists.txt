@@ -26,8 +26,11 @@
 # --------------------------------------------------------------------------
 
 add_executable(
-  bolt_hdfs_file_test HdfsFileSystemTest.cpp HdfsMiniCluster.cpp HdfsUtilTest.cpp
-                      InsertIntoHdfsTest.cpp
+  bolt_hdfs_file_test
+  HdfsFileSystemTest.cpp
+  HdfsMiniCluster.cpp
+  HdfsUtilTest.cpp
+  InsertIntoHdfsTest.cpp
 )
 
 add_test(bolt_hdfs_file_test bolt_hdfs_file_test)

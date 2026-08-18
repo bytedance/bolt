@@ -19,4 +19,10 @@ find_package(fizz REQUIRED CONFIG)
 add_executable(${PROJECT_NAME} test_package.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE fizz::fizz)
 
-set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
+set_property(
+  TARGET
+    ${PROJECT_NAME}
+  PROPERTY
+    CXX_STANDARD
+      17
+)

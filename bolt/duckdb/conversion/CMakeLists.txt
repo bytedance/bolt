@@ -27,12 +27,20 @@
 
 bolt_add_library(bolt_duckdb_conversion DuckConversion.cpp)
 
-target_link_libraries(bolt_duckdb_conversion bolt_core bolt_vector duckdb::duckdb)
+target_link_libraries(
+  bolt_duckdb_conversion
+  bolt_core
+  bolt_vector
+  duckdb::duckdb
+)
 
 bolt_add_library(bolt_duckdb_parser DuckParser.cpp)
 
 target_link_libraries(
-  bolt_duckdb_parser bolt_duckdb_conversion bolt_parse_expression duckdb::duckdb
+  bolt_duckdb_parser
+  bolt_duckdb_conversion
+  bolt_parse_expression
+  duckdb::duckdb
 )
 
 if(${BOLT_BUILD_TESTING})

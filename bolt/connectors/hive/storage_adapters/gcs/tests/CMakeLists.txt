@@ -25,7 +25,11 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_gcs_file_test GcsFileSystemTest.cpp GcsUtilTest.cpp)
+add_executable(
+  bolt_gcs_file_test
+  GcsFileSystemTest.cpp
+  GcsUtilTest.cpp
+)
 add_test(bolt_gcs_file_test bolt_gcsfile_test)
 target_link_libraries(
   bolt_gcs_file_test

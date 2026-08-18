@@ -26,8 +26,11 @@
 # --------------------------------------------------------------------------
 
 add_executable(
-  bolt_presto_types_test HyperLogLogTypeTest.cpp JsonTypeTest.cpp TimestampWithTimeZoneTypeTest.cpp
-                         TypeTestBase.cpp
+  bolt_presto_types_test
+  HyperLogLogTypeTest.cpp
+  JsonTypeTest.cpp
+  TimestampWithTimeZoneTypeTest.cpp
+  TypeTestBase.cpp
 )
 
 add_test(bolt_presto_types_test bolt_presto_types_test)

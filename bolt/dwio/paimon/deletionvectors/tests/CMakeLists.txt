@@ -15,14 +15,19 @@
 
 set(PAIMON_DELETION_TESTS DeleteionVectorTest.cpp)
 if(BOLT_ENABLE_PARQUET)
-  set(PAIMON_DELETION_TESTS ${PAIMON_DELETION_TESTS} DeletionFileReaderTest.cpp)
+  set(
+    PAIMON_DELETION_TESTS
+    ${PAIMON_DELETION_TESTS}
+    DeletionFileReaderTest.cpp
+  )
 endif()
 
 add_executable(bolt_paimon_deletion_vector_reader_test ${PAIMON_DELETION_TESTS})
 
 add_test(
   NAME bolt_paimon_deletion_vector_reader_test
-  COMMAND bolt_paimon_deletion_vector_reader_test
+  COMMAND
+    bolt_paimon_deletion_vector_reader_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

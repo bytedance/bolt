@@ -25,14 +25,20 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_process_test ExceptionTraceTest.cpp TraceContextTest.cpp)
+add_executable(
+  bolt_process_test
+  ExceptionTraceTest.cpp
+  TraceContextTest.cpp
+)
 
 add_test(bolt_process_test bolt_process_test)
 
 target_link_libraries(
-  bolt_process_test PRIVATE
-                    bolt_testutils
-                    GTest::gtest GTest::gtest_main
+  bolt_process_test
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )
 
 add_executable(bolt_crash_report_test CrashReportTest.cpp)
@@ -40,7 +46,8 @@ add_executable(bolt_crash_report_test CrashReportTest.cpp)
 add_test(bolt_crash_report_test bolt_crash_report_test)
 
 target_link_libraries(
-  bolt_crash_report_test PRIVATE
-                         bolt_process_crash_report
-                         GTest::gtest
+  bolt_crash_report_test
+  PRIVATE
+    bolt_process_crash_report
+    GTest::gtest
 )

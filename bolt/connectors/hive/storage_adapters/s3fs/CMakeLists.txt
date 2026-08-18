@@ -30,11 +30,23 @@
 bolt_add_library(bolt_s3fs RegisterS3FileSystem.cpp)
 if(BOLT_ENABLE_S3)
   target_sources(
-    bolt_s3fs PRIVATE S3FileSystem.cpp S3Util.cpp S3Config.cpp S3WriteFile.cpp S3ReadFile.cpp
+    bolt_s3fs
+    PRIVATE
+      S3FileSystem.cpp
+      S3Util.cpp
+      S3Config.cpp
+      S3WriteFile.cpp
+      S3ReadFile.cpp
   )
 
   target_include_directories(bolt_s3fs PUBLIC ${AWSSDK_INCLUDE_DIRS})
-  target_link_libraries(bolt_s3fs bolt_dwio_common Folly::folly ${AWSSDK_LIBRARIES} xsimd::xsimd)
+  target_link_libraries(
+    bolt_s3fs
+    bolt_dwio_common
+    Folly::folly
+    ${AWSSDK_LIBRARIES}
+    xsimd::xsimd
+  )
 
   if(${BOLT_BUILD_TESTING})
     add_subdirectory(tests)

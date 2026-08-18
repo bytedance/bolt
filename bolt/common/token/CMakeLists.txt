@@ -15,4 +15,8 @@
 
 bolt_add_library(bolt_token_extractor ITokenExtractor.cpp)
 
-target_link_libraries(bolt_token_extractor xxHash::xxhash Folly::folly)
+target_link_libraries(
+  bolt_token_extractor
+  xxHash::xxhash
+  Folly::folly
+)

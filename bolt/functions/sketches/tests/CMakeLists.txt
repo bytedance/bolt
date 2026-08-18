@@ -38,7 +38,8 @@ add_executable(
 
 add_test(
   NAME bolt_sketches_aggregates_test
-  COMMAND bolt_sketches_aggregates_test
+  COMMAND
+    bolt_sketches_aggregates_test
   WORKING_DIRECTORY .
 )
 

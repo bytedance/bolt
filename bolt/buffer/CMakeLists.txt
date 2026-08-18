@@ -27,7 +27,12 @@
 
 bolt_add_library(bolt_buffer Buffer.cpp StringViewBufferHolder.cpp)
 
-target_link_libraries(bolt_buffer bolt_memory bolt_common_base Folly::folly)
+target_link_libraries(
+  bolt_buffer
+  bolt_memory
+  bolt_common_base
+  Folly::folly
+)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
@@ -38,7 +43,7 @@ endif()
 target_sources(
   bolt_buffer
   PUBLIC
-  FILE_SET HEADERS
-           BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
-           FILES Buffer.h StringViewBufferHolder.h
+    FILE_SET HEADERS
+      BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+      FILES Buffer.h StringViewBufferHolder.h
 )

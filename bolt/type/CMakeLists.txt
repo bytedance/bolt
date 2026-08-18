@@ -40,7 +40,9 @@ find_package(ryu CONFIG REQUIRED)
 # Header-only interface library for type definitions
 bolt_add_library(bolt_type_headers INTERFACE)
 target_include_directories(
-  bolt_type_headers INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+  bolt_type_headers
+  INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
 
 # Implementation library for core type functionality
@@ -63,25 +65,33 @@ bolt_add_library(
 )
 
 target_include_directories(
-  bolt_type_base PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> ${xxHash_INCLUDE_DIR}
-                        ${ryu_INCLUDE_DIR} ${re2_INCLUDE_DIR} ${date_INCLUDE_DIR}
+  bolt_type_base
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    ${xxHash_INCLUDE_DIR}
+    ${ryu_INCLUDE_DIR}
+    ${re2_INCLUDE_DIR}
+    ${date_INCLUDE_DIR}
 )
 
 target_link_libraries(
   bolt_type_base
-  PUBLIC bolt_type_headers date::date
-  PRIVATE bolt_type_tz
-          bolt_common_base
-          bolt_encode
-          bolt_exception
-          bolt_serialization
-          bolt_status
-          bolt_token_extractor
-          Boost::headers
-          re2::re2
-          xxHash::xxhash
-          ryu::ryu
-          Folly::folly
+  PUBLIC
+    bolt_type_headers
+    date::date
+  PRIVATE
+    bolt_type_tz
+    bolt_common_base
+    bolt_encode
+    bolt_exception
+    bolt_serialization
+    bolt_status
+    bolt_token_extractor
+    Boost::headers
+    re2::re2
+    xxHash::xxhash
+    ryu::ryu
+    Folly::folly
 )
 
 # Main interface library that combines everything
@@ -89,21 +99,22 @@ bolt_add_library(bolt_type INTERFACE)
 
 target_link_libraries(
   bolt_type
-  INTERFACE bolt_type_headers
-            bolt_type_base
-            bolt_filter
-            bolt_vector
-            bolt_exec
-            bolt_type_tz
-            bolt_common_base
-            bolt_encode
-            bolt_exception
-            bolt_serialization
-            bolt_status
-            bolt_token_extractor
-            Boost::headers
-            re2::re2
-            xxHash::xxhash
-            ryu::ryu
-            Folly::folly
+  INTERFACE
+    bolt_type_headers
+    bolt_type_base
+    bolt_filter
+    bolt_vector
+    bolt_exec
+    bolt_type_tz
+    bolt_common_base
+    bolt_encode
+    bolt_exception
+    bolt_serialization
+    bolt_status
+    bolt_token_extractor
+    Boost::headers
+    re2::re2
+    xxHash::xxhash
+    ryu::ryu
+    Folly::folly
 )

@@ -60,7 +60,16 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 target_link_libraries(
-  bolt_functions_spark bolt_functions_spark_impl bolt_is_null_functions simdjson::simdjson
+  bolt_functions_spark
+  bolt_functions_spark_impl
+  bolt_is_null_functions
+  simdjson::simdjson
 )
 
-set_property(TARGET bolt_functions_spark PROPERTY JOB_POOL_COMPILE high_memory_pool)
+set_property(
+  TARGET
+    bolt_functions_spark
+  PROPERTY
+    JOB_POOL_COMPILE
+      high_memory_pool
+)

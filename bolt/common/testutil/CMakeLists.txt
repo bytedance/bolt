@@ -25,7 +25,12 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  add_library(bolt_debug_util OBJECT ScopedTestTime.cpp TestValue.cpp)
+  add_library(
+    bolt_debug_util
+    OBJECT
+    ScopedTestTime.cpp
+    TestValue.cpp
+  )
   target_link_libraries(bolt_debug_util PUBLIC bolt_exception)
 
   if(${BOLT_BUILD_TESTING})

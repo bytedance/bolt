@@ -25,12 +25,18 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_common_hyperloglog_test DenseHllTest.cpp SparseHllTest.cpp)
+add_executable(
+  bolt_common_hyperloglog_test
+  DenseHllTest.cpp
+  SparseHllTest.cpp
+)
 
 add_test(NAME bolt_common_hyperloglog_test COMMAND bolt_common_hyperloglog_test)
 
 target_link_libraries(
-  bolt_common_hyperloglog_test PRIVATE bolt_testutils
-                                       GTest::gtest
-                                       GTest::gtest_main
+  bolt_common_hyperloglog_test
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )

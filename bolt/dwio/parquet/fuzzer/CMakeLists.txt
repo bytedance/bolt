@@ -13,6 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(bolt_parquet_fuzzer_test ParquetFuzzerRunner.cpp ParquetFuzzerTest.cpp)
+add_executable(
+  bolt_parquet_fuzzer_test
+  ParquetFuzzerRunner.cpp
+  ParquetFuzzerTest.cpp
+)
 
-target_link_libraries(bolt_parquet_fuzzer_test bolt_fuzzer_flags bolt_testutils)
+target_link_libraries(
+  bolt_parquet_fuzzer_test
+  bolt_fuzzer_flags
+  bolt_testutils
+)

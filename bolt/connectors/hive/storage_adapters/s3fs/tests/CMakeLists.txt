@@ -28,10 +28,17 @@
 add_executable(bolt_s3config_test S3ConfigTest.cpp)
 add_test(bolt_s3config_test bolt_s3config_test)
 target_link_libraries(
-  bolt_s3config_test bolt_testutils GTest::gtest GTest::gtest_main
+  bolt_s3config_test
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )
 
-add_executable(bolt_s3file_test S3FileSystemTest.cpp S3UtilTest.cpp)
+add_executable(
+  bolt_s3file_test
+  S3FileSystemTest.cpp
+  S3UtilTest.cpp
+)
 add_test(bolt_s3file_test bolt_s3file_test)
 target_link_libraries(
   bolt_s3file_test
@@ -52,7 +59,10 @@ target_link_libraries(
 add_executable(bolt_s3finalize_test S3FileSystemFinalizeTest.cpp)
 add_test(bolt_s3finalize_test bolt_s3finalize_test)
 target_link_libraries(
-  bolt_s3finalize_test bolt_testutils GTest::gtest GTest::gtest_main
+  bolt_s3finalize_test
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )
 
 add_executable(bolt_s3insert_test S3InsertTest.cpp)
@@ -67,7 +77,8 @@ target_link_libraries(
 add_executable(bolt_s3read_test S3ReadTest.cpp)
 add_test(
   NAME bolt_s3read_test
-  COMMAND bolt_s3read_test
+  COMMAND
+    bolt_s3read_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
@@ -80,7 +91,10 @@ target_link_libraries(
 add_executable(bolt_s3metrics_test S3FileSystemMetricsTest.cpp)
 add_test(bolt_s3metrics_test bolt_s3metrics_test)
 target_link_libraries(
-  bolt_s3metrics_test bolt_testutils GTest::gtest GTest::gtest_main
+  bolt_s3metrics_test
+  bolt_testutils
+  GTest::gtest
+  GTest::gtest_main
 )
 
 add_executable(bolt_s3multiendpoints_test S3MultipleEndpointsTest.cpp)

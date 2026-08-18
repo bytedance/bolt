@@ -28,7 +28,8 @@
 add_executable(bolt_exec_vector_hasher_benchmark VectorHasherBenchmark.cpp)
 
 target_link_libraries(
-  bolt_exec_vector_hasher_benchmark PRIVATE
+  bolt_exec_vector_hasher_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -37,7 +38,8 @@ target_link_libraries(
 add_executable(bolt_filter_project_benchmark FilterProjectBenchmark.cpp)
 
 target_link_libraries(
-  bolt_filter_project_benchmark PRIVATE
+  bolt_filter_project_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -46,7 +48,8 @@ target_link_libraries(
 add_executable(bolt_exchange_benchmark ExchangeBenchmark.cpp)
 
 target_link_libraries(
-  bolt_exchange_benchmark PRIVATE
+  bolt_exchange_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -55,7 +58,8 @@ target_link_libraries(
 add_executable(bolt_merge_benchmark MergeBenchmark.cpp)
 
 target_link_libraries(
-  bolt_merge_benchmark PRIVATE
+  bolt_merge_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -64,7 +68,8 @@ target_link_libraries(
 add_executable(bolt_hash_benchmark HashTableBenchmark.cpp)
 
 target_link_libraries(
-  bolt_hash_benchmark PRIVATE
+  bolt_hash_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -74,7 +79,8 @@ add_executable(bolt_sort_random_data_benchmark SortRandomDataBenchmark.cpp)
 
 add_executable(bolt_sort_window_benchmark SortWindowBenchmark.cpp)
 target_link_libraries(
-  bolt_sort_random_data_benchmark PRIVATE
+  bolt_sort_random_data_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -83,14 +89,16 @@ target_link_libraries(
 add_executable(bolt_hash_join_prepare_join_table_benchmark HashJoinPrepareJoinTableBenchmark.cpp)
 
 target_link_libraries(
-  bolt_hash_join_prepare_join_table_benchmark PRIVATE
+  bolt_hash_join_prepare_join_table_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
 )
 
 target_link_libraries(
-  bolt_sort_window_benchmark PRIVATE
+  bolt_sort_window_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -102,7 +110,8 @@ if(${BOLT_ENABLE_PARQUET})
   find_package(Arrow CONFIG REQUIRED)
 
   target_link_libraries(
-    bolt_sort_benchmark PRIVATE
+    bolt_sort_benchmark
+    PRIVATE
       bolt_testutils
       ${FOLLY_BENCHMARK}
       GTest::gtest_main
@@ -111,14 +120,16 @@ endif()
 
 add_executable(bolt_gather_copy_benchmark GatherCopyBenchmark.cpp)
 target_link_libraries(
-  bolt_gather_copy_benchmark bolt_testutils
-    ${FOLLY_BENCHMARK}
-    GTest::gtest_main
+  bolt_gather_copy_benchmark
+  bolt_testutils
+  ${FOLLY_BENCHMARK}
+  GTest::gtest_main
 )
 
 add_executable(rowEqVectors_benchmark RowEqVectorsBenchmark.cpp)
 target_link_libraries(
-  rowEqVectors_benchmark PRIVATE
+  rowEqVectors_benchmark
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main
@@ -126,7 +137,8 @@ target_link_libraries(
 
 add_executable(hash_vectors_bench HashVectorsBenchmark.cpp)
 target_link_libraries(
-  hash_vectors_bench PRIVATE
+  hash_vectors_bench
+  PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
     GTest::gtest_main

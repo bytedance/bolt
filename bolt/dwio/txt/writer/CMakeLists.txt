@@ -16,7 +16,13 @@
 if(BOLT_ENABLE_TXT)
   find_package(Arrow CONFIG REQUIRED)
   bolt_add_library(bolt_dwio_txt_writer RegisterTxtWriter.cpp TxtWriter.cpp)
-  target_link_libraries(bolt_dwio_txt_writer bolt_dwio_common bolt_arrow_bridge arrow::arrow ${FMT})
+  target_link_libraries(
+    bolt_dwio_txt_writer
+    bolt_dwio_common
+    bolt_arrow_bridge
+    arrow::arrow
+    ${FMT}
+  )
 else()
   bolt_add_library(bolt_dwio_txt_writer RegisterTxtWriter.cpp)
   # No additional dependencies

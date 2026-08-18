@@ -25,7 +25,7 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_library(bolt_tpch_benchmark_lib  OBJECT TpchBenchmark.cpp)
+add_library(bolt_tpch_benchmark_lib OBJECT TpchBenchmark.cpp)
 
 target_link_libraries(
   bolt_tpch_benchmark_lib
@@ -39,10 +39,12 @@ target_link_libraries(
 
 add_executable(bolt_tpch_benchmark TpchBenchmarkMain.cpp)
 
-target_link_libraries(bolt_tpch_benchmark PRIVATE
-  bolt_tpch_benchmark_lib
-  bolt_query_benchmark
-  bolt_testutils
-  $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
-  ${FOLLY_BENCHMARK}
+target_link_libraries(
+  bolt_tpch_benchmark
+  PRIVATE
+    bolt_tpch_benchmark_lib
+    bolt_query_benchmark
+    bolt_testutils
+    $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
+    ${FOLLY_BENCHMARK}
 )

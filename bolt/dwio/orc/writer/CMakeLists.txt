@@ -16,7 +16,13 @@
 if(BOLT_ENABLE_ORC)
   find_package(Arrow CONFIG REQUIRED)
   bolt_add_library(bolt_dwio_orc_writer OrcWriter.cpp RegisterOrcWriter.cpp)
-  target_link_libraries(bolt_dwio_orc_writer bolt_dwio_common bolt_arrow_bridge arrow::arrow ${FMT})
+  target_link_libraries(
+    bolt_dwio_orc_writer
+    bolt_dwio_common
+    bolt_arrow_bridge
+    arrow::arrow
+    ${FMT}
+  )
 else()
   bolt_add_library(bolt_dwio_orc_writer RegisterOrcWriter.cpp)
   # No additional dependencies

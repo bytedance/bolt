@@ -28,7 +28,12 @@
 bolt_add_library(bolt_fuzzer_util DuckQueryRunner.cpp PrestoQueryRunner.cpp)
 
 target_link_libraries(
-  bolt_fuzzer_util bolt_core bolt_exec_test_lib cpr::cpr bolt_type_parser Folly::folly
+  bolt_fuzzer_util
+  bolt_core
+  bolt_exec_test_lib
+  cpr::cpr
+  bolt_type_parser
+  Folly::folly
 )
 
 add_library(bolt_fuzzer_flags STATIC FuzzerFlags.cpp)

@@ -26,8 +26,10 @@
 # --------------------------------------------------------------------------
 
 add_executable(
-  bolt_functions_json_test JsonExtractorTest.cpp JsonPathTokenizerTest.cpp
-                           SIMDJsonExtractorTest.cpp
+  bolt_functions_json_test
+  JsonExtractorTest.cpp
+  JsonPathTokenizerTest.cpp
+  SIMDJsonExtractorTest.cpp
 )
 
 add_test(bolt_functions_json_test bolt_functions_json_test)

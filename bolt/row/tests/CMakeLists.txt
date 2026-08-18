@@ -25,16 +25,21 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_row_test CompactRowTest.cpp UnsafeRowTest.cpp
-                             DenseRowTest.cpp)
+add_executable(
+  bolt_row_test
+  CompactRowTest.cpp
+  UnsafeRowTest.cpp
+  DenseRowTest.cpp
+)
 
 add_test(bolt_row_test bolt_row_test)
 
 target_link_libraries(
   bolt_row_test
-  PRIVATE bolt_row_fast
-          bolt_testutils
-          Folly::folly
-          GTest::gtest
-          GTest::gtest_main
+  PRIVATE
+    bolt_row_fast
+    bolt_testutils
+    Folly::folly
+    GTest::gtest
+    GTest::gtest_main
 )

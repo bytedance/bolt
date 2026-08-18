@@ -40,6 +40,10 @@ bolt_add_library(
 
 find_package(sonic-cpp CONFIG REQUIRED)
 target_link_libraries(
-  bolt_functions_spark_specialforms fmt::fmt bolt_functions_json bolt_expression simdjson::simdjson
+  bolt_functions_spark_specialforms
+  fmt::fmt
+  bolt_functions_json
+  bolt_expression
+  simdjson::simdjson
   sonic-cpp::sonic-cpp
 )

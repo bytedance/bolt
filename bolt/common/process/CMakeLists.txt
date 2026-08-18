@@ -32,8 +32,13 @@ bolt_add_library(
 
 target_link_libraries(
   bolt_process
-  PUBLIC bolt_common_flags Folly::folly
-  PRIVATE fmt::fmt gflags::gflags glog::glog
+  PUBLIC
+    bolt_common_flags
+    Folly::folly
+  PRIVATE
+    fmt::fmt
+    gflags::gflags
+    glog::glog
 )
 
 find_package(libbacktrace REQUIRED CONFIG)

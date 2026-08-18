@@ -25,9 +25,17 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_common_coding_test Base64Test.cpp CodingTest.cpp ZigZagTest.cpp)
+add_executable(
+  bolt_common_coding_test
+  Base64Test.cpp
+  CodingTest.cpp
+  ZigZagTest.cpp
+)
 add_test(bolt_common_coding_test bolt_common_coding_test)
 target_link_libraries(
-  bolt_common_coding_test PRIVATE bolt_testutils GTest::gtest
-                                  GTest::gtest_main
+  bolt_common_coding_test
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    GTest::gtest_main
 )

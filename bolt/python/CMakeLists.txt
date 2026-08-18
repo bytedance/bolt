@@ -32,19 +32,20 @@ bolt_add_library(
 
 target_include_directories(
   bolt_python
-  PRIVATE ${pybind11_INCLUDE_DIRS}
-          ${fmt_INCLUDE_DIRS}
-          ${glog_INCLUDE_DIRS} # transitive include
-          ${gflags_INCLUDE_DIRS} # transitive include
-          ${folly_INCLUDE_DIRS} # transitive include
-          ${Boost_INCLUDE_DIRS} # transitive include
-          ${double-conversion_INCLUDE_DIRS} # transitive include
-          ${xsimd_INCLUDE_DIRS} # transitive include
-          ${Libevent_INCLUDE_DIRS} # transitive include
-          ${ryu_INCLUDE_DIRS} # transitive include
-          ${gfx-timsort_INCLUDE_DIRS} # transitive include
-          ${xxHash_INCLUDE_DIRS} # transitive include
-          ${date_INCLUDE_DIRS} # transitive include
+  PRIVATE
+    ${pybind11_INCLUDE_DIRS}
+    ${fmt_INCLUDE_DIRS}
+    ${glog_INCLUDE_DIRS} # transitive include
+    ${gflags_INCLUDE_DIRS} # transitive include
+    ${folly_INCLUDE_DIRS} # transitive include
+    ${Boost_INCLUDE_DIRS} # transitive include
+    ${double-conversion_INCLUDE_DIRS} # transitive include
+    ${xsimd_INCLUDE_DIRS} # transitive include
+    ${Libevent_INCLUDE_DIRS} # transitive include
+    ${ryu_INCLUDE_DIRS} # transitive include
+    ${gfx-timsort_INCLUDE_DIRS} # transitive include
+    ${xxHash_INCLUDE_DIRS} # transitive include
+    ${date_INCLUDE_DIRS} # transitive include
 )
 
 target_compile_options(bolt_python PRIVATE -fvisibility=hidden)
@@ -54,5 +55,11 @@ if(${ENABLE_BOLT_JIT})
 endif()
 
 # icu is needed as a result of a transitive include calling a function from icu library.
-target_link_libraries(bolt_python PRIVATE pybind11::pybind11 icu::icu folly::folly)
+target_link_libraries(
+  bolt_python
+  PRIVATE
+    pybind11::pybind11
+    icu::icu
+    folly::folly
+)
 target_compile_definitions(bolt_python PRIVATE ${glog_DEFINITIONS})

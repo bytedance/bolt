@@ -28,9 +28,19 @@
 add_library(bolt_read_benchmark_lib ReadBenchmark.cpp)
 
 target_link_libraries(
-  bolt_read_benchmark_lib PUBLIC bolt_file bolt_time Folly::folly gflags::gflags
+  bolt_read_benchmark_lib
+  PUBLIC
+    bolt_file
+    bolt_time
+    Folly::folly
+    gflags::gflags
 )
 
 add_executable(bolt_read_benchmark ReadBenchmarkMain.cpp)
 
-target_link_libraries(bolt_read_benchmark PRIVATE bolt_read_benchmark_lib bolt_testutils)
+target_link_libraries(
+  bolt_read_benchmark
+  PRIVATE
+    bolt_read_benchmark_lib
+    bolt_testutils
+)

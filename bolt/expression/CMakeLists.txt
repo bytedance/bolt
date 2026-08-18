@@ -27,14 +27,21 @@
 
 bolt_add_library(bolt_type_signature TypeSignature.cpp)
 
-target_link_libraries(bolt_type_signature bolt_common_base Boost::headers)
+target_link_libraries(
+  bolt_type_signature
+  bolt_common_base
+  Boost::headers
+)
 
 bolt_add_library(
   bolt_expression_functions FunctionSignature.cpp ReverseSignatureBinder.cpp SignatureBinder.cpp
 )
 
 target_link_libraries(
-  bolt_expression_functions bolt_common_base bolt_type_calculation bolt_type_signature
+  bolt_expression_functions
+  bolt_common_base
+  bolt_type_calculation
+  bolt_type_signature
   bolt_signature_parser
 )
 

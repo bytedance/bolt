@@ -30,8 +30,4 @@ if(${BOLT_BUILD_TESTING})
 endif()
 
 bolt_add_library(bolt_common_compression Compression.cpp LzoDecompressor.cpp)
-target_link_libraries(
-  bolt_common_compression
-  PUBLIC Folly::folly
-  PRIVATE bolt_exception
-)
+target_link_libraries(bolt_common_compression PUBLIC Folly::folly PRIVATE bolt_exception)
