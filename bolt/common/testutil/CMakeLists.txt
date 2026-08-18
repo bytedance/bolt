@@ -38,6 +38,17 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   endif()
 endif()
 
+if(${BOLT_BUILD_TEST_UTILS})
+  add_library(bolt_gtest_main STATIC GTestMain.cpp)
+  target_link_libraries(bolt_gtest_main PUBLIC bolt_testutils)
+
+  add_library(bolt_test_flags OBJECT BoltTestFlags.cpp)
+  target_link_libraries(bolt_test_flags PRIVATE gflags::gflags)
+
+  list(APPEND BOLT_TESTUTILS_OBJECT_TARGETS bolt_test_flags)
+  set(BOLT_TESTUTILS_OBJECT_TARGETS ${BOLT_TESTUTILS_OBJECT_TARGETS} CACHE INTERNAL "")
+endif()
+
 if(${BOLT_ENABLE_PERF})
   bolt_add_library(bolt_test_util_gperf OBJECT GPerf.cpp)
 

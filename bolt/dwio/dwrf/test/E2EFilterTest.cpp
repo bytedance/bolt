@@ -35,7 +35,6 @@
 #include "bolt/dwio/dwrf/writer/FlushPolicy.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
 
-#include <folly/init/Init.h>
 using namespace bytedance::bolt::dwio::common;
 using namespace bytedance::bolt::dwrf;
 using namespace bytedance::bolt;
@@ -464,12 +463,4 @@ TEST_F(E2EFilterTest, DISABLED_subfieldsPruning) {
 
 TEST_F(E2EFilterTest, mutationCornerCases) {
   testMutationCornerCases();
-}
-
-// Define main so that gflags get processed.
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

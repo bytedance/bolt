@@ -37,8 +37,6 @@ add_test(bolt_presto_types_test bolt_presto_types_test)
 
 target_link_libraries(
   bolt_presto_types_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
 )

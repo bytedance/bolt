@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 
 #include "bolt/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
@@ -69,9 +68,3 @@ TEST_F(GcsInsertTest, gcsInsertTest) {
   runInsertTest(gcsBucket, kExpectedRows, pool());
 }
 } // namespace bytedance::bolt::filesystems
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  return RUN_ALL_TESTS();
-}

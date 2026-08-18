@@ -47,7 +47,6 @@ set(
   EntropyAggregationTest.cpp
   GeometricMeanTest.cpp
   HistogramTest.cpp
-  Main.cpp
   MapAccumulatorTest.cpp
   MapSumAggregateTest.cpp
   MinMaxByAggregationTest.cpp
@@ -81,25 +80,9 @@ bolt_add_sharded_gtest(bolt_aggregates_test 6)
 
 set(
   BOLT_AGGREGATES_TEST_DEPENDENCIES
-  bolt_aggregates
-  bolt_core
-  bolt_dwio_common_test_utils
-  bolt_exec
-  bolt_exec_test_lib
-  bolt_file
-  bolt_functions_aggregates
-  bolt_functions_aggregates_test_lib
-  bolt_functions_test_lib
-  bolt_functions_prestosql
-  bolt_functions_lib
-  bolt_hive_connector
   bolt_simple_aggregate
   bolt_type
-  bolt_vector_fuzzer
-  bolt_testutils
-  gflags::gflags
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
 )
 
 target_link_libraries(bolt_aggregates_test ${BOLT_AGGREGATES_TEST_DEPENDENCIES})

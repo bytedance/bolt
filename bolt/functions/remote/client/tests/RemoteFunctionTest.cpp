@@ -29,7 +29,6 @@
  */
 
 #include <folly/SocketAddress.h>
-#include <folly/init/Init.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <cstdio>
@@ -190,10 +189,3 @@ BOLT_INSTANTIATE_TEST_SUITE_P(
 
 } // namespace
 } // namespace bytedance::bolt::functions
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

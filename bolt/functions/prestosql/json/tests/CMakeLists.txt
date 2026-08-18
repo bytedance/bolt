@@ -38,8 +38,6 @@ find_package(sonic-cpp CONFIG REQUIRED)
 
 target_link_libraries(
   bolt_functions_json_test
-  bolt_testutils
   Folly::follybenchmark
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
 )

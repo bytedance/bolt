@@ -65,7 +65,9 @@ class LocalFileSinkTest : public testing::Test {
 };
 
 TEST_F(LocalFileSinkTest, missingRegistration) {
-  BOLT_ASSERT_THROW(runTest(), "FileSink is not registered for file:");
+  BOLT_ASSERT_THROW(
+      FileSink::create("unregistered:", {.pool = pool_.get()}),
+      "FileSink is not registered for unregistered:");
 }
 
 TEST_F(LocalFileSinkTest, create) {

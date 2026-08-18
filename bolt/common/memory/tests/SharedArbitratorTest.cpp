@@ -33,7 +33,6 @@
 #include <re2/re2.h>
 #include <deque>
 
-#include <folly/init/Init.h>
 #include <functional>
 #include <optional>
 #include "bolt/common/base/Exceptions.h"
@@ -1454,9 +1453,3 @@ BOLT_INSTANTIATE_TEST_SUITE_P(
           "{}", info.param.isSerialExecutionMode ? "serial" : "parallel");
     });
 } // namespace bytedance::bolt::memory
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  return RUN_ALL_TESTS();
-}

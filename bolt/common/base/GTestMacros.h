@@ -30,12 +30,6 @@
 
 #pragma once
 
-#ifdef BOLT_DISABLE_GOOGLETEST
-// BOLT_FRIEND_TEST macro is only used when testing is enabled.
-// Replacing it with "nothing" is okay when testing is disabled.
-#define BOLT_FRIEND_TEST(X, Y)
-#else
 // Same as FRIEND_TEST(X, Y) defined in gtest/gtest_prod.h
 #define BOLT_FRIEND_TEST(test_case_name, test_name) \
   friend class test_case_name##_##test_name##_Test
-#endif

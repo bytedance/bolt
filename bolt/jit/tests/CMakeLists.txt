@@ -19,22 +19,13 @@ if(${ENABLE_BOLT_JIT})
     RowContainerIRTest.cpp
     ThrustJITv2Test.cpp
   )
-  target_link_libraries(
-    bolt_thrustjit_test
-    PRIVATE
-      bolt_testutils
-      bolt_engine
-      GTest::gtest
-      GTest::gtest_main
-  )
+  target_link_libraries(bolt_thrustjit_test PRIVATE bolt_gtest_main)
   add_test(bolt_thrustjit_test bolt_thrustjit_test)
 
   add_executable(bolt_row_row_cmp_test RowEqRowIRTest.cpp)
   target_link_libraries(
     bolt_row_row_cmp_test
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     Folly::follybenchmark
   )
   bolt_add_sharded_gtest(bolt_row_row_cmp_test 3)
@@ -42,9 +33,7 @@ if(${ENABLE_BOLT_JIT})
   add_executable(bolt_row_vec_cmp_test RowEqVectorsIRTest.cpp)
   target_link_libraries(
     bolt_row_vec_cmp_test
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     Folly::follybenchmark
   )
   add_test(bolt_row_vec_cmp_test bolt_row_vec_cmp_test)
@@ -65,7 +54,7 @@ if(${ENABLE_BOLT_EXPR_JIT})
 
   target_link_libraries(
     bolt_expr_jit_test
-    bolt_functions_test_lib
+    bolt_testutils
     bolt_exec
     bolt_dwio_common
     bolt_aggregates

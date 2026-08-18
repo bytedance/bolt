@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include <folly/init/Init.h>
 #include <vector>
 
 #include "bolt/common/file/FileSystems.h"
@@ -248,11 +247,4 @@ TEST_F(OrcTpchTest, Q21) {
 TEST_F(OrcTpchTest, Q22) {
   std::vector<uint32_t> sortingKeys{0};
   assertQuery(22, std::move(sortingKeys));
-}
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

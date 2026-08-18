@@ -32,8 +32,6 @@ add_test(NAME bolt_signature_parser_test COMMAND bolt_signature_parser_test)
 target_link_libraries(
   bolt_signature_parser_test
   PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     GTest::gmock
 )

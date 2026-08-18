@@ -55,10 +55,8 @@ endif()
 target_link_libraries(
   bolt_memory_test
   PRIVATE
-    bolt_testutils
     GTest::gmock
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     $<$<NOT:$<PLATFORM_ID:Darwin>>:jemalloc::jemalloc>
     pthread
     dl

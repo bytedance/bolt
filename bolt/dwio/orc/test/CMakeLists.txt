@@ -39,9 +39,7 @@ add_test(
 
 target_link_libraries(
   bolt_dwio_orc_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
 )
 
@@ -56,6 +54,6 @@ add_test(
 )
 target_link_libraries(
   bolt_dwio_orc_tpch_test
-  bolt_testutils
+  bolt_gtest_main
   ${TEST_LINK_LIBS}
 )

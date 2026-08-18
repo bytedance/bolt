@@ -36,10 +36,4 @@ gtest_add_tests(
   AUTO
 )
 
-target_link_libraries(
-  bolt_test_util_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_test_util_test PRIVATE bolt_gtest_main)

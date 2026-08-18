@@ -185,6 +185,35 @@ set(
 )
 
 option(BOLT_BUILD_TEST_UTILS "Builds Bolt test utilities" OFF)
+set(
+  BOLT_TEST_LINKAGE
+  "shared"
+  CACHE STRING
+  "How unit tests link the Bolt engine: static or shared."
+)
+set_property(
+  CACHE
+    BOLT_TEST_LINKAGE
+  PROPERTY
+    STRINGS
+      static
+      shared
+)
+if(NOT BOLT_TEST_LINKAGE STREQUAL "static" AND NOT BOLT_TEST_LINKAGE STREQUAL "shared")
+  message(
+    FATAL_ERROR
+    "Unsupported BOLT_TEST_LINKAGE='${BOLT_TEST_LINKAGE}'; expected static or shared"
+  )
+endif()
+if(BUILD_SHARED_LIBS)
+  set(BOLT_LIBRARY_LINKAGE shared)
+else()
+  set(BOLT_LIBRARY_LINKAGE static)
+endif()
+set(BOLT_NEEDS_SEPARATE_TEST_RUNTIME OFF)
+if(BOLT_BUILD_TEST_UTILS AND NOT "${BOLT_TEST_LINKAGE}" STREQUAL "${BOLT_LIBRARY_LINKAGE}")
+  set(BOLT_NEEDS_SEPARATE_TEST_RUNTIME ON)
+endif()
 option(BOLT_BUILD_PYTHON_PACKAGE "Builds Bolt Python bindings" OFF)
 
 # make buildPartitionBounds_ a vector int64 instead of int32 to avoid integer overflow when the
@@ -684,14 +713,12 @@ if(DEFINED FOLLY_BENCHMARK_STATIC_LIB)
     FOLLY_BENCHMARK
     ${FOLLY_BENCHMARK_STATIC_LIB}
     GTest::gtest
-    GTest::gtest_main
   )
 else()
   set(
     FOLLY_BENCHMARK
     Folly::follybenchmark
     GTest::gtest
-    GTest::gtest_main
   )
 endif()
 
@@ -705,12 +732,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 
   # Find Threads library
   find_package(Threads REQUIRED)
-endif()
-
-set(BOLT_DISABLE_GOOGLETEST OFF)
-if(NOT BOLT_BUILD_TEST_UTILS AND NOT BOLT_BUILD_TESTING)
-  set(BOLT_DISABLE_GOOGLETEST ON)
-  add_definitions(-DBOLT_DISABLE_GOOGLETEST)
 endif()
 
 find_package(ryu CONFIG REQUIRED)
@@ -733,8 +754,50 @@ include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/bolt)
 include_directories(${CMAKE_BINARY_DIR}/gen_cpp)
 
-if(NOT BOLT_DISABLE_GOOGLETEST)
+if(BOLT_BUILD_TEST_UTILS OR BOLT_BUILD_TESTING)
   find_package(GTest CONFIG REQUIRED)
+endif()
+if(BOLT_NEEDS_SEPARATE_TEST_RUNTIME)
+  find_package(gflags CONFIG REQUIRED)
+  find_package(glog CONFIG REQUIRED)
+  find_package(gflags_test_runtime CONFIG REQUIRED)
+  find_package(glog_test_runtime CONFIG REQUIRED)
+
+  function(bolt_select_test_runtime host_target test_runtime_target)
+    get_target_property(host_link_libraries ${host_target} INTERFACE_LINK_LIBRARIES)
+    if(NOT host_link_libraries)
+      message(FATAL_ERROR "${host_target} has no link implementation")
+    endif()
+
+    # Conan dependency targets embed gflags::gflags and glog::glog in their
+    # transitive interfaces, so the implementation cannot be selected only at
+    # the direct bolt_engine link. Select it from Bolt's explicit public test
+    # entry targets instead. This does not infer test linkage from target type
+    # or walk the target graph.
+    set(
+      use_test_runtime
+      "$<OR:$<BOOL:$<TARGET_PROPERTY:BOLT_USE_SEPARATE_TEST_RUNTIME>>,$<IN_LIST:bolt_engine_for_tests,$<TARGET_PROPERTY:LINK_LIBRARIES>>,$<IN_LIST:bolt_testutils,$<TARGET_PROPERTY:LINK_LIBRARIES>>,$<IN_LIST:bolt_gtest_main,$<TARGET_PROPERTY:LINK_LIBRARIES>>>"
+    )
+
+    # Preserve the facade's compile usage requirements. Only its implementation
+    # link is selected per consuming target.
+    set_property(
+      TARGET
+        ${host_target}
+      PROPERTY
+        INTERFACE_LINK_LIBRARIES
+          "$<IF:${use_test_runtime},$<LINK_ONLY:${test_runtime_target}>,${host_link_libraries}>"
+    )
+  endfunction()
+
+  bolt_select_test_runtime(
+      gflags::gflags
+      gflags_test_runtime::gflags_test_runtime
+  )
+  bolt_select_test_runtime(
+      glog::glog
+      glog_test_runtime::glog_test_runtime
+  )
 endif()
 
 find_package(xsimd CONFIG REQUIRED)

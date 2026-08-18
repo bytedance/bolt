@@ -32,7 +32,6 @@ target_link_libraries(bolt_hive_config bolt_exception)
 bolt_add_library(
   bolt_hive_connector
   FileHandle.cpp
-  HiveConfig.cpp
   HiveConnector.cpp
   HiveConnectorSplit.cpp
   HiveConnectorUtil.cpp
@@ -90,6 +89,7 @@ list(APPEND ENABLED_FILESYSTEMS "bolt_abfs")
 target_link_libraries(
   bolt_hive_connector
   PUBLIC
+    bolt_hive_config
     bolt_common_io
     bolt_connector
     bolt_dwio_catalog_fbhive

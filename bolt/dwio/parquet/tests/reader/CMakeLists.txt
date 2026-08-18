@@ -41,13 +41,7 @@ add_test(
     bolt_dwio_parquet_reader_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(
-  bolt_dwio_parquet_reader_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_dwio_parquet_reader_test PRIVATE bolt_gtest_main)
 
 add_executable(
   bolt_parquet_filter_test
@@ -60,7 +54,7 @@ bolt_add_sharded_gtest(bolt_parquet_filter_test 4)
 target_link_libraries(
   bolt_parquet_filter_test
   bolt_e2e_filter_test_base
-  bolt_testutils
+  bolt_gtest_main
 )
 
 add_executable(bolt_dwio_parquet_reader_benchmark ParquetReaderBenchmark.cpp)
@@ -117,7 +111,7 @@ target_link_libraries(
   bolt_dwio_parquet_cli_test
   PRIVATE
     bolt_dwio_native_parquet_reader_cli
-    bolt_testutils
+    bolt_gtest_main
 )
 
 if(${BOLT_ENABLE_ARROW})

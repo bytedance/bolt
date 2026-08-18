@@ -31,15 +31,6 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(
-  bolt_paimon_deletion_vector_reader_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
-
-if(BOLT_ENABLE_PARQUET)
-  target_link_libraries(bolt_paimon_deletion_vector_reader_test bolt_dwio_native_parquet_reader)
-endif()
+target_link_libraries(bolt_paimon_deletion_vector_reader_test bolt_gtest_main)
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/examples DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

@@ -61,7 +61,12 @@ set_source_files_properties(
 # ${CMAKE_BINARY_DIR} ${PROTO_FILES_FULL} DEPENDS ${Protobuf_PROTOC_EXECUTABLE} COMMENT "Running
 # proto compiler" VERBATIM) add_custom_target(dwio_proto ALL DEPENDS ${PROTO_OUTPUT_FILES})
 
-bolt_add_library(bolt_dwio_dwrf_proto ${PROTO_SRCS} ${PROTO_HDRS})
+bolt_add_library(
+  bolt_dwio_dwrf_proto
+  ../common/wrap/dwrf-proto-wrapper.cpp
+  ../common/wrap/orc-proto-wrapper.cpp
+  ${PROTO_HDRS}
+)
 
 target_link_libraries(bolt_dwio_dwrf_proto protobuf::libprotobuf)
 target_include_directories(bolt_dwio_dwrf_proto PUBLIC ${CMAKE_BINARY_DIR})

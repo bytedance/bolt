@@ -27,9 +27,8 @@
 
 set(
   BENCHMARK_DEPENDENCIES_NO_FUNC
-  bolt_functions_test_lib
+  bolt_testutils
   bolt_exec
-  bolt_exec_test_lib
   gflags::gflags
   Folly::folly
   ${FOLLY_BENCHMARK}
@@ -40,9 +39,7 @@ set(
   BENCHMARK_DEPENDENCIES
   bolt_functions_prestosql
   bolt_functions_lib
-  bolt_vector_fuzzer
   ${BENCHMARK_DEPENDENCIES_NO_FUNC}
-  bolt_testutils
 )
 
 add_executable(bolt_functions_prestosql_benchmarks_array_contains ArrayContainsBenchmark.cpp)

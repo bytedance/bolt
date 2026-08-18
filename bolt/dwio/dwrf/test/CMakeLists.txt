@@ -32,16 +32,8 @@ find_package(zstd CONFIG REQUIRED)
 
 set(
   TEST_LINK_LIBS
-  bolt_dwio_common_test_utils
-  bolt_dwio_dwrf_proto
-  bolt_dwio_dwrf_reader
-  bolt_dwio_dwrf_writer
-  bolt_testutils
-  gflags::gflags
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
-  glog::glog
 )
 
 include_directories("${CMAKE_BINARY_DIR}")
@@ -431,8 +423,6 @@ add_test(
 
 target_link_libraries(
   bolt_dwio_dwrf_reader_test
-  bolt_dwrf_test_utils
-  bolt_vector_test_lib
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -453,8 +443,6 @@ add_test(
 
 target_link_libraries(
   dwrf_selective_string_dict_reader_test
-  bolt_dwrf_test_utils
-  bolt_vector_test_lib
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -494,8 +482,6 @@ add_test(bolt_dwrf_column_writer_test bolt_dwrf_column_writer_test)
 
 target_link_libraries(
   bolt_dwrf_column_writer_test
-  bolt_dwrf_test_utils
-  bolt_vector_test_lib
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -511,7 +497,6 @@ add_test(bolt_dwrf_column_writer_index_test bolt_dwrf_column_writer_index_test)
 target_link_libraries(
   bolt_dwrf_column_writer_index_test
   bolt_link_libs
-  bolt_dwrf_test_utils
   Folly::folly
   fmt::fmt
   lz4::lz4
@@ -525,7 +510,6 @@ add_test(bolt_dwrf_writer_flush_test bolt_dwrf_writer_flush_test)
 
 target_link_libraries(
   bolt_dwrf_writer_flush_test
-  bolt_dwrf_test_utils
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -540,9 +524,6 @@ add_test(bolt_dwrf_e2e_writer_test bolt_dwrf_e2e_writer_test)
 
 target_link_libraries(
   bolt_dwrf_e2e_writer_test
-  bolt_dwrf_test_utils
-  bolt_vector_fuzzer
-  bolt_vector_test_lib
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -557,9 +538,6 @@ add_test(bolt_dwrf_e2e_reader_test bolt_dwrf_e2e_reader_test)
 
 target_link_libraries(
   bolt_dwrf_e2e_reader_test
-  bolt_dwrf_test_utils
-  bolt_vector_fuzzer
-  bolt_vector_test_lib
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -573,7 +551,6 @@ add_executable(bolt_dwrf_writer_extended_test WriterExtendedTests.cpp)
 
 target_link_libraries(
   bolt_dwrf_writer_extended_test
-  bolt_dwrf_test_utils
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -588,7 +565,6 @@ add_test(bolt_dwrf_column_writer_stats_test bolt_dwrf_column_writer_stats_test)
 
 target_link_libraries(
   bolt_dwrf_column_writer_stats_test
-  bolt_dwrf_test_utils
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -603,7 +579,6 @@ add_test(physical_size_aggregator_test physical_size_aggregator_test)
 
 target_link_libraries(
   physical_size_aggregator_test
-  bolt_dwrf_test_utils
   bolt_link_libs
   Folly::folly
   fmt::fmt
@@ -616,14 +591,14 @@ target_link_libraries(
 add_executable(bolt_dwrf_int_encoder_benchmark IntEncoderBenchmark.cpp)
 target_link_libraries(
   bolt_dwrf_int_encoder_benchmark
-  bolt_engine
+  bolt_testutils
   ${FOLLY_BENCHMARK}
 )
 
 add_executable(bolt_dwrf_float_column_writer_benchmark FloatColumnWriterBenchmark.cpp)
 target_link_libraries(
   bolt_dwrf_float_column_writer_benchmark
-  ${TEST_LINK_LIBS}
+  bolt_testutils
   ${FOLLY_BENCHMARK}
 )
 

@@ -70,14 +70,12 @@ target_link_libraries(
   bolt_aggregates
   bolt_type
   bolt_vector
-  bolt_vector_test_lib
   bolt_exec
-  bolt_exec_test_lib
+  bolt_testutils
   ${ENABLED_FILEFORMATS}
   bolt_dwio_parquet_reader
   bolt_dwio_parquet_writer
   bolt_hive_connector
-  bolt_tpch_connector
   bolt_memory
   ${ENABLED_FILESYSTEMS}
   Folly::folly
@@ -91,9 +89,6 @@ target_link_libraries(
   bolt_query_replayer
   PRIVATE
     bolt_query_trace_replayer_base
-    bolt_exec
-    bolt_exec_test_lib
-    bolt_tpch_connector
     bolt_testutils
 )
 

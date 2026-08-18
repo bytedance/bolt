@@ -35,10 +35,7 @@ target_link_libraries(
   bolt_functions_remote_server
   bolt_functions_remote
   bolt_function_registry
-  bolt_functions_test_lib
-  bolt_exec_test_lib
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
   gflags::gflags
 )

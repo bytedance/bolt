@@ -27,13 +27,4 @@
 
 add_executable(bolt_prestosql_coverage Coverage.cpp)
 
-target_link_libraries(
-  bolt_prestosql_coverage
-  PRIVATE
-    bolt_functions_prestosql
-    bolt_function_registry
-    bolt_aggregates
-    bolt_window
-    bolt_coverage_util
-    bolt_testutils
-)
+target_link_libraries(bolt_prestosql_coverage PRIVATE bolt_testutils)

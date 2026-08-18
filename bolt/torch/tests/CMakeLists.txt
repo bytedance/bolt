@@ -16,7 +16,6 @@
 add_executable(
   torch_test
   test_compatibility.cpp
-  test_main.cpp
   test_operator.cpp
   test_plan_node.cpp
   utils.cpp
@@ -27,9 +26,8 @@ target_link_libraries(
     bolt_torch
     bolt_exec
     bolt_core
-    bolt_exec_test_lib
     glog::glog
-    GTest::gtest
+    bolt_gtest_main
 )
 target_include_directories(
   torch_test

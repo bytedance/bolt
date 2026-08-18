@@ -27,7 +27,6 @@
 
 set(
   BOLT_BENCHMARK_DEPS
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest

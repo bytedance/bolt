@@ -36,8 +36,6 @@ add_test(
 
 target_link_libraries(
   bolt_type_fbhive_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
 )

@@ -36,13 +36,7 @@ add_executable(
 
 add_test(bolt_serializer_test bolt_serializer_test)
 
-target_link_libraries(
-  bolt_serializer_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_serializer_test PRIVATE bolt_gtest_main)
 
 add_executable(bolt_serializer_benchmark SerializerBenchmark.cpp)
 
@@ -51,21 +45,13 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     GTest::gtest
-    GTest::gtest_main
 )
 
 add_executable(bolt_arrowserde_test ArrowSerializerTest.cpp)
 
 add_test(bolt_arrowserde_test bolt_arrowserde_test)
 
-target_link_libraries(
-  bolt_arrowserde_test
-  PRIVATE
-    bolt_presto_serializer
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_arrowserde_test PRIVATE bolt_gtest_main)
 
 add_executable(bolt_arrowserde_benchmark ArrowSerializerBenchmark.cpp)
 
@@ -74,7 +60,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     GTest::gtest
-    GTest::gtest_main
     gflags::gflags
     glog::glog
 )

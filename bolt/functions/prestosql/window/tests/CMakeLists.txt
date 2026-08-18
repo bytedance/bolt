@@ -25,19 +25,10 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(
-  CMAKE_WINDOW_TEST_LINK_LIBRARIES
-  bolt_testutils
-  gflags::gflags
-  GTest::gtest
-  GTest::gtest_main
-)
-
-set(CMAKE_WINDOW_TEST_MAIN_FILES Main.cpp)
+set(CMAKE_WINDOW_TEST_LINK_LIBRARIES bolt_gtest_main)
 
 add_executable(
   bolt_windows_test
-  ${CMAKE_WINDOW_TEST_MAIN_FILES}
   NtileTest.cpp
   RankTest.cpp
   LeadLagTest.cpp

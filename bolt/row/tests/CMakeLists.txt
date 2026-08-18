@@ -37,9 +37,6 @@ add_test(bolt_row_test bolt_row_test)
 target_link_libraries(
   bolt_row_test
   PRIVATE
-    bolt_row_fast
-    bolt_testutils
     Folly::folly
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
 )

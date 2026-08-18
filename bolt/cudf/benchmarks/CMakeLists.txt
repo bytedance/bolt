@@ -18,7 +18,6 @@ add_executable(bolt_cudf_benchmark Main.cpp)
 target_link_libraries(
   bolt_cudf_benchmark
   PRIVATE
-    bolt_tpch_gen
     bolt_testutils
     ${FOLLY_BENCHMARK}
 )

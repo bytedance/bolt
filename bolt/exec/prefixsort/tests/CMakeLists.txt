@@ -45,9 +45,4 @@ set_tests_properties(
       3000
 )
 
-target_link_libraries(
-  bolt_exec_prefixsort_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_exec_prefixsort_test bolt_gtest_main)

@@ -53,11 +53,8 @@ add_test(bolt_base_test bolt_base_test)
 target_link_libraries(
   bolt_base_test
   PRIVATE
-    bolt_testutils
-    bolt_common_base
-    GTest::gtest
     GTest::gmock
-    GTest::gtest_main
+    bolt_gtest_main
 )
 
 add_executable(bolt_memcpy_meter MemcpyTest.cpp)
@@ -66,6 +63,5 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     GTest::gtest
-    GTest::gtest_main
     pthread
 )

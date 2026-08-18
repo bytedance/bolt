@@ -38,12 +38,7 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(
-  bolt_parquet_writer_sink_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_parquet_writer_sink_test bolt_gtest_main)
 
 add_executable(bolt_dwio_parquet_writer_benchmark ParquetWriterBenchmark.cpp)
 target_link_libraries(

@@ -91,6 +91,10 @@ std::shared_ptr<arrow::Buffer> buildStream(
 
 class BoltShuffleReaderTest : public ::testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    bytedance::bolt::memory::MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
     pool_ = arrow::default_memory_pool();
     boltPool_ = bytedance::bolt::memory::memoryManager()->addLeafPool();
@@ -198,9 +202,3 @@ TEST_F(BoltShuffleReaderTest, AllocationCountBounded) {
 
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::test
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  bytedance::bolt::memory::MemoryManager::initialize({});
-  return RUN_ALL_TESTS();
-}

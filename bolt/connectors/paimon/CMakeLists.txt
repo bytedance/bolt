@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-find_package(Paimon CONFIG REQUIRED)
-
 bolt_add_library(
     bolt_connector_paimon
     PaimonConnector.cpp

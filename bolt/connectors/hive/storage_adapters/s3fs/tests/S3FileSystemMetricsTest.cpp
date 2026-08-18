@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
 #include <functional>
 
 #include "bolt/common/base/StatsReporter.h"
@@ -124,6 +123,7 @@ folly::Singleton<BaseStatsReporter> reporter([]() {
 class S3FileSystemMetricsTest : public S3Test {
  protected:
   static void SetUpTestSuite() {
+    BaseStatsReporter::registered = true;
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
   }
 
@@ -176,10 +176,3 @@ TEST_F(S3FileSystemMetricsTest, metrics) {
 }
 
 } // namespace bytedance::bolt::filesystems::test
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  BaseStatsReporter::registered = true;
-  return RUN_ALL_TESTS();
-}

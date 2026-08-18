@@ -25,20 +25,9 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(
-  CMAKE_WINDOW_TEST_LINK_LIBRARIES
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+set(CMAKE_WINDOW_TEST_LINK_LIBRARIES bolt_gtest_main)
 
-set(CMAKE_WINDOW_TEST_MAIN_FILES Main.cpp)
-
-add_executable(
-  bolt_spark_windows_test
-  ${CMAKE_WINDOW_TEST_MAIN_FILES}
-  SparkWindowTest.cpp
-)
+add_executable(bolt_spark_windows_test SparkWindowTest.cpp)
 
 add_test(NAME bolt_spark_windows_test COMMAND bolt_spark_windows_test WORKING_DIRECTORY .)
 

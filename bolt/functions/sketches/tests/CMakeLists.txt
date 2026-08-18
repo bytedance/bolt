@@ -18,7 +18,6 @@ add_compile_options(-Wno-deprecated-declarations)
 
 add_executable(
   bolt_sketches_aggregates_test
-  Main.cpp
   SerDeTest.cpp
   SketchCPCSketchTest.cpp
   SketchCPCTest.cpp
@@ -49,12 +48,9 @@ target_link_libraries(
   bolt_aggregates
   bolt_core
   bolt_exec
-  bolt_exec_test_lib
-  bolt_functions_test_lib
   bolt_functions_prestosql
   bolt_functions_lib
   DataSketches::DataSketches
   ${gflags_LIBRARIES}
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
 )

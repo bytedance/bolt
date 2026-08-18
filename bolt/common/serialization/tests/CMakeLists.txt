@@ -32,10 +32,4 @@ add_executable(
 )
 add_test(bolt_serialization_test bolt_serialization_test)
 
-target_link_libraries(
-  bolt_serialization_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_serialization_test PRIVATE bolt_gtest_main)

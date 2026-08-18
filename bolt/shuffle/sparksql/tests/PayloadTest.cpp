@@ -244,6 +244,10 @@ class CheckingMemoryPool final : public arrow::MemoryPool {
 
 class PayloadTest : public testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    bytedance::bolt::memory::MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
     pool_ = bytedance::bolt::memory::memoryManager()->addLeafPool();
   }
@@ -339,9 +343,3 @@ TEST_F(PayloadTest, CompressedBufferCapacityExcludesHeader) {
 
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::test
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  bytedance::bolt::memory::MemoryManager::initialize({});
-  return RUN_ALL_TESTS();
-}

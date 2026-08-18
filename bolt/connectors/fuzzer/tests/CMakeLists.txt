@@ -29,9 +29,4 @@ add_executable(bolt_fuzzer_connector_test FuzzerConnectorTest.cpp)
 
 add_test(bolt_fuzzer_connector_test bolt_fuzzer_connector_test)
 
-target_link_libraries(
-  bolt_fuzzer_connector_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_fuzzer_connector_test bolt_gtest_main)

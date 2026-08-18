@@ -27,9 +27,8 @@
 
 set(
   BENCHMARK_DEPENDENCIES
-  bolt_functions_test_lib
+  bolt_testutils
   bolt_exec
-  bolt_exec_test_lib
   gflags::gflags
   Folly::folly
   ${FOLLY_BENCHMARK}

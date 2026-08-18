@@ -49,9 +49,7 @@ add_test(bolt_type_test bolt_type_test)
 
 target_link_libraries(
   bolt_type_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
 )
 
@@ -62,7 +60,6 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_negated_values_filter_benchmark NegatedValuesFilterBenchmark.cpp)
@@ -72,7 +69,6 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_negated_bytes_values_benchmark NegatedBytesValuesBenchmark.cpp)
@@ -82,7 +78,6 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_negated_bigint_range_benchmark NegatedBigintRangeBenchmark.cpp)
@@ -92,7 +87,6 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_negated_bytes_range_benchmark NegatedBytesRangeBenchmark.cpp)
@@ -102,7 +96,6 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_string_view_benchmark StringViewBenchmark.cpp)
@@ -112,5 +105,4 @@ target_link_libraries(
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
-  GTest::gtest_main
 )

@@ -39,10 +39,8 @@ if(${BOLT_BUILD_TESTING})
   target_link_libraries(
     bolt_file_test
     PRIVATE
-      bolt_testutils
       GTest::gmock
-      GTest::gtest
-      GTest::gtest_main
+      bolt_gtest_main
   )
 
   if(KERNEL_SUPPORTS_IO_URING)
@@ -55,10 +53,8 @@ if(${BOLT_BUILD_TESTING})
     target_link_libraries(
       bolt_async_file_test
       PRIVATE
-        bolt_testutils
         GTest::gmock
-        GTest::gtest
-        GTest::gtest_main
+        bolt_gtest_main
     )
   endif()
 endif()

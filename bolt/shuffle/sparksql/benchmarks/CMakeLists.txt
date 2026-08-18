@@ -17,7 +17,6 @@ add_executable(bolt_codec_benchmark CodecBenchmark.cpp)
 target_link_libraries(
   bolt_codec_benchmark
   PRIVATE
-    bolt_shuffle_spark_impl
     bolt_testutils
     Folly::folly
     ${FOLLY_BENCHMARK}
@@ -29,7 +28,6 @@ add_executable(bolt_block_payload_benchmark BlockPayloadBenchmark.cpp)
 target_link_libraries(
   bolt_block_payload_benchmark
   PRIVATE
-    bolt_shuffle_spark_impl
     bolt_testutils
     Folly::folly
     ${FOLLY_BENCHMARK}

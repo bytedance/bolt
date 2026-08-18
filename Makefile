@@ -108,6 +108,17 @@ CONAN_SPARK_OPTIONS = -o bolt/*:spark_compatible=True
 CONAN_TESTUTIL_OPTIONS = -o bolt/*:enable_testutil=True
 CONAN_PERF_OPTIONS = -o bolt/*:enable_perf=True
 
+# Controls the complete unit-test runtime linkage. If this differs from the
+# exported Bolt library, Conan provides the opposite gflags/glog variant while
+# CMake reuses the existing Bolt object files. Supported values: static, shared.
+BOLT_TEST_LINKAGE ?= shared
+ifneq ($(BOLT_TEST_LINKAGE),static)
+ifneq ($(BOLT_TEST_LINKAGE),shared)
+$(error Unsupported BOLT_TEST_LINKAGE '$(BOLT_TEST_LINKAGE)'; expected 'static' or 'shared')
+endif
+endif
+export BOLT_TEST_LINKAGE
+
 # BOLT_LINKER overrides profile-aware automatic linker selection. An explicitly
 # empty value disables automatic selection.
 ifneq ($(origin BOLT_LINKER), undefined)

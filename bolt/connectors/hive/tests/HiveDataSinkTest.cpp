@@ -31,7 +31,6 @@
 #include <gtest/gtest.h>
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 
-#include <folly/init/Init.h>
 #include <re2/re2.h>
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -998,13 +997,3 @@ TEST_F(HiveDataSinkTest, lazyVectorForParquet) {
 #endif
 } // namespace
 } // namespace bytedance::bolt::connector::hive
-
-// This main is needed for some tests on linux.
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // Signal handler required for ThreadDebugInfoTest
-  bytedance::bolt::process::addDefaultFatalSignalHandler();
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

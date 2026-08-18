@@ -29,7 +29,6 @@
  */
 
 #include <folly/executors/IOThreadPoolExecutor.h>
-#include <folly/init/Init.h>
 
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
@@ -212,9 +211,3 @@ TEST_F(GcsMultipleEndpointsTest, baseEndpoints) {
 }
 
 } // namespace bytedance::bolt::filesystems
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  return RUN_ALL_TESTS();
-}

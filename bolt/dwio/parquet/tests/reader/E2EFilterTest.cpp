@@ -34,7 +34,6 @@
 #include "bolt/dwio/parquet/writer/Writer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
-#include <folly/init/Init.h>
 #include <limits>
 #include <utility>
 using namespace bytedance::bolt;
@@ -1266,12 +1265,4 @@ TEST_F(E2EFilterTest, configurableWriteSchema) {
                ROW({"ee", "ff"}, {BIGINT(), BIGINT()})),
            BIGINT()});
   test(type, newType);
-}
-
-// Define main so that gflags get processed.
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

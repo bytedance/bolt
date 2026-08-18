@@ -53,9 +53,7 @@ add_executable(
 add_test(bolt_dwio_common_test bolt_dwio_common_test)
 target_link_libraries(
   bolt_dwio_common_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
 )
 

@@ -32,7 +32,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(bolt_filter_project_benchmark FilterProjectBenchmark.cpp)
@@ -42,7 +41,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(bolt_exchange_benchmark ExchangeBenchmark.cpp)
@@ -52,7 +50,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(bolt_merge_benchmark MergeBenchmark.cpp)
@@ -62,7 +59,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(bolt_hash_benchmark HashTableBenchmark.cpp)
@@ -72,7 +68,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(bolt_sort_random_data_benchmark SortRandomDataBenchmark.cpp)
@@ -83,7 +78,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(bolt_hash_join_prepare_join_table_benchmark HashJoinPrepareJoinTableBenchmark.cpp)
@@ -93,7 +87,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 target_link_libraries(
@@ -101,7 +94,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 if(${BOLT_ENABLE_PARQUET})
@@ -114,7 +106,6 @@ if(${BOLT_ENABLE_PARQUET})
     PRIVATE
       bolt_testutils
       ${FOLLY_BENCHMARK}
-      GTest::gtest_main
   )
 endif()
 
@@ -123,7 +114,6 @@ target_link_libraries(
   bolt_gather_copy_benchmark
   bolt_testutils
   ${FOLLY_BENCHMARK}
-  GTest::gtest_main
 )
 
 add_executable(rowEqVectors_benchmark RowEqVectorsBenchmark.cpp)
@@ -132,7 +122,6 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )
 
 add_executable(hash_vectors_bench HashVectorsBenchmark.cpp)
@@ -141,5 +130,4 @@ target_link_libraries(
   PRIVATE
     bolt_testutils
     ${FOLLY_BENCHMARK}
-    GTest::gtest_main
 )

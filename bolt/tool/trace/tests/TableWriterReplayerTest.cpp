@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <memory>
@@ -527,11 +526,3 @@ TEST_F(TableWriterReplayerTest, partitionWrite) {
 }
 
 } // namespace bytedance::bolt::tool::trace::test
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // Signal handler required for ThreadDebugInfoTest
-  bytedance::bolt::process::addDefaultFatalSignalHandler();
-  folly::Init init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

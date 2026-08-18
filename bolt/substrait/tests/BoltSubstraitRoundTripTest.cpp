@@ -29,7 +29,6 @@
  */
 
 #include <folly/Random.h>
-#include <folly/init/Init.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -541,11 +540,4 @@ TEST_F(BoltSubstraitRoundTripTest, dateType) {
                   .filter({"c > DATE '1992-01-01'"})
                   .planNode();
   assertPlanConversion(plan, "SELECT * FROM tmp WHERE c > DATE '1992-01-01'");
-}
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

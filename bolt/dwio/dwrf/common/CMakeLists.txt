@@ -39,8 +39,6 @@ bolt_add_library(
   RLEv1.cpp
   RLEv2.cpp
   Statistics.cpp
-  wrap/dwrf-proto-wrapper.cpp
-  wrap/orc-proto-wrapper.cpp
 )
 
 add_dependencies(bolt_dwio_dwrf_common bolt_dwio_dwrf_proto)

@@ -32,10 +32,4 @@ add_executable(
   ZigZagTest.cpp
 )
 add_test(bolt_common_coding_test bolt_common_coding_test)
-target_link_libraries(
-  bolt_common_coding_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_common_coding_test PRIVATE bolt_gtest_main)

@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
 #include <simdjson.h>
 #include <thrift/protocol/TCompactProtocol.h> //@manual
 #include <thrift/transport/TBufferTransports.h>
@@ -2887,11 +2886,4 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharMetadataFilter) {
             .sum,
         1);
   }
-}
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

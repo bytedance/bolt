@@ -38,10 +38,4 @@ add_executable(
 
 add_test(bolt_cache_test bolt_cache_test)
 
-target_link_libraries(
-  bolt_cache_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_cache_test PRIVATE bolt_gtest_main)

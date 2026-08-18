@@ -18,13 +18,12 @@ add_library(bolt_paimon_benchmark_lib PaimonBenchmark.cpp)
 target_link_libraries(
   bolt_paimon_benchmark_lib
   bolt_query_benchmark
+  bolt_testutils
   bolt_aggregates
   bolt_exec
-  bolt_exec_test_lib
   bolt_dwio_common
   bolt_dwio_common_exception
   bolt_dwio_parquet_reader
-  bolt_dwio_common_test_utils
   bolt_hive_connector
   bolt_exception
   bolt_memory
@@ -34,7 +33,6 @@ target_link_libraries(
   bolt_type
   bolt_type_fbhive
   bolt_caching
-  bolt_vector_test_lib
   $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
   Folly::folly
   ${FOLLY_BENCHMARK}

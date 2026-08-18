@@ -43,12 +43,7 @@ add_executable(
 )
 
 add_test(bolt_dwio_parquet_arrow_test bolt_dwio_parquet_arrow_test)
-target_link_libraries(
-  bolt_dwio_parquet_arrow_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_dwio_parquet_arrow_test bolt_gtest_main)
 
 add_executable(
   bolt_dwio_parquet_level_conversion_benchmark
@@ -80,5 +75,4 @@ target_link_libraries(
   bolt_dwio_parquet_arrow_lib
   arrow::arrow
   GTest::gtest
-  GTest::gtest_main
 )

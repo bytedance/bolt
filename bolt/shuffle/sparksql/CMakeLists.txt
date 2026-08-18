@@ -74,6 +74,7 @@ target_link_libraries(
     bolt_vector
     bolt_core
     bolt_exec
+  PRIVATE
     celeborn-cpp-client::celeborn-cpp-client
 )
 

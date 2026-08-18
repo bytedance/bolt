@@ -71,13 +71,23 @@ set_tests_properties(
       "PAIMON_TEST_SCRIPT_DIR=${CMAKE_CURRENT_SOURCE_DIR};PAIMON_TEST_PYTHON=${Python3_EXECUTABLE}"
 )
 
+set(PAIMON_CONNECTOR_TEST_REGISTRATION_LIBRARIES)
+add_library(paimon_connector_test_compile_deps INTERFACE)
+target_link_libraries(paimon_connector_test_compile_deps INTERFACE bolt_connector_paimon)
+set(PAIMON_CONNECTOR_TEST_CONNECTOR_LIBRARY paimon_connector_test_compile_deps)
+if(NOT BUILD_SHARED_LIBS AND BOLT_TEST_LINKAGE STREQUAL "static")
+  set(PAIMON_CONNECTOR_TEST_CONNECTOR_LIBRARY bolt_connector_paimon)
+  list(
+    APPEND PAIMON_CONNECTOR_TEST_REGISTRATION_LIBRARIES
+    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_avro_file_format>
+    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_local_file_system>
+  )
+endif()
+
 target_link_libraries(
   bolt_paimon_connector_test
   PUBLIC
-    bolt_connector_paimon
-    bolt_testutils
-    bolt_engine
-    bolt_process
+    ${PAIMON_CONNECTOR_TEST_CONNECTOR_LIBRARY}
     Paimon::core
     roaring::roaring
     arrow::arrow
@@ -86,14 +96,12 @@ target_link_libraries(
     protobuf::protobuf
     zstd::libzstd_static
     LZ4::lz4_static
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     glog::glog
     gflags::gflags
     Folly::folly
   PRIVATE
-    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_avro_file_format>
-    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_local_file_system>
+    ${PAIMON_CONNECTOR_TEST_REGISTRATION_LIBRARIES}
     Paimon::tbb
     Paimon::libavrocpp
 )

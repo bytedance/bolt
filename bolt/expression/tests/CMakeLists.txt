@@ -43,7 +43,6 @@ add_executable(
   FunctionCallToSpecialFormTest.cpp
   GenericViewTest.cpp
   GenericWriterTest.cpp
-  Main.cpp
   MapViewTest.cpp
   MapWriterTest.cpp
   PeeledEncodingTest.cpp
@@ -73,9 +72,7 @@ add_test(
 target_link_libraries(
   bolt_expression_test
   PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     GTest::gmock
 )
 
@@ -102,38 +99,19 @@ add_executable(bolt_expression_runner_test ExpressionRunnerTest.cpp)
 target_link_libraries(
   bolt_expression_runner_test
   PRIVATE
-    bolt_expression_runner
-    bolt_exec_test_lib
-    bolt_function_registry
     bolt_testutils
     GTest::gtest
-    GTest::gtest_main
 )
 
 add_executable(spark_expression_runner_test SparkExpressionRunnerTest.cpp)
 target_link_libraries(
   spark_expression_runner_test
-  bolt_expression_runner
-  bolt_exec_test_lib
-  bolt_function_registry
   bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(bolt_expression_verifier_unit_test ExpressionVerifierUnitTest.cpp)
-target_link_libraries(
-  bolt_expression_verifier_unit_test
-  bolt_expression_verifier
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_expression_verifier_unit_test bolt_gtest_main)
 
 add_executable(bolt_expression_runner_unit_test ExpressionRunnerUnitTest.cpp)
-target_link_libraries(
-  bolt_expression_runner_unit_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_expression_runner_unit_test bolt_gtest_main)

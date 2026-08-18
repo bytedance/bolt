@@ -30,11 +30,8 @@ add_executable(bolt_aggregation_fuzzer_test AggregationFuzzerTest.cpp)
 target_link_libraries(
   bolt_aggregation_fuzzer_test
   bolt_aggregation_fuzzer
-  bolt_aggregates
-  bolt_window
   bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 # Window Fuzzer
@@ -43,11 +40,6 @@ add_executable(bolt_window_fuzzer_test WindowFuzzerTest.cpp)
 target_link_libraries(
   bolt_window_fuzzer_test
   bolt_window_fuzzer
-  bolt_fuzzer_util
-  bolt_aggregates
-  bolt_window
-  bolt_expression_test_utility
   bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )

@@ -33,10 +33,4 @@ add_executable(
 
 add_test(NAME bolt_common_hyperloglog_test COMMAND bolt_common_hyperloglog_test)
 
-target_link_libraries(
-  bolt_common_hyperloglog_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_common_hyperloglog_test PRIVATE bolt_gtest_main)

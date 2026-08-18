@@ -31,8 +31,6 @@ add_test(NAME bolt_function_registry_test COMMAND bolt_function_registry_test)
 
 target_link_libraries(
   bolt_function_registry_test
-  bolt_testutils
   GTest::gmock
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
 )

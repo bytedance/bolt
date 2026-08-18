@@ -84,7 +84,6 @@ bolt_add_library(
 
 target_link_libraries(
   bolt_dwio_common
-  bolt_vector_test_lib
   bolt_buffer
   bolt_caching
   bolt_common_io

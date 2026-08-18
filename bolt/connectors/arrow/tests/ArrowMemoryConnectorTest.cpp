@@ -21,8 +21,6 @@
 #include "bolt/type/Type.h"
 #include "gtest/gtest.h"
 
-#include <folly/init/Init.h>
-
 namespace {
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
@@ -497,9 +495,3 @@ TEST_F(ArrowConnectorTest, join) {
   test::assertEqualVectors(expected, output);
 }
 } // namespace
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

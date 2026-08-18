@@ -27,7 +27,6 @@
 
 set(
   BOLT_BENCHMARK_DEPS
-  bolt_vector_fuzzer
   bolt_benchmark_builder
   bolt_testutils
   ${FOLLY_BENCHMARK}
@@ -50,18 +49,10 @@ add_executable(bolt_benchmark_basic_selectivity_vector SelectivityVector.cpp)
 target_link_libraries(bolt_benchmark_basic_selectivity_vector ${BOLT_BENCHMARK_DEPS})
 
 add_executable(bolt_benchmark_basic_vector_compare VectorCompare.cpp)
-target_link_libraries(
-  bolt_benchmark_basic_vector_compare
-  ${BOLT_BENCHMARK_DEPS}
-  bolt_vector_test_lib
-)
+target_link_libraries(bolt_benchmark_basic_vector_compare ${BOLT_BENCHMARK_DEPS})
 
 add_executable(bolt_benchmark_basic_vector_slice VectorSlice.cpp)
-target_link_libraries(
-  bolt_benchmark_basic_vector_slice
-  ${BOLT_BENCHMARK_DEPS}
-  bolt_vector_test_lib
-)
+target_link_libraries(bolt_benchmark_basic_vector_slice ${BOLT_BENCHMARK_DEPS})
 
 add_executable(bolt_benchmark_feature_normalization FeatureNormalization.cpp)
 target_link_libraries(
@@ -75,7 +66,6 @@ target_link_libraries(
   bolt_benchmark_basic_preproc
   ${BOLT_BENCHMARK_DEPS}
   bolt_functions_prestosql
-  bolt_vector_test_lib
 )
 
 add_executable(bolt_like_tpch_benchmark LikeTpchBenchmark.cpp)
@@ -83,8 +73,6 @@ target_link_libraries(
   bolt_like_tpch_benchmark
   ${BOLT_BENCHMARK_DEPS}
   bolt_functions_lib
-  bolt_tpch_gen
-  bolt_vector_test_lib
 )
 
 add_executable(bolt_like_benchmark LikeBenchmark.cpp)
@@ -93,22 +81,13 @@ target_link_libraries(
   ${BOLT_BENCHMARK_DEPS}
   bolt_functions_lib
   bolt_functions_prestosql
-  bolt_vector_test_lib
 )
 
 add_executable(bolt_benchmark_basic_vector_fuzzer VectorFuzzer.cpp)
-target_link_libraries(
-  bolt_benchmark_basic_vector_fuzzer
-  ${BOLT_BENCHMARK_DEPS}
-  bolt_vector_test_lib
-)
+target_link_libraries(bolt_benchmark_basic_vector_fuzzer ${BOLT_BENCHMARK_DEPS})
 
 add_executable(bolt_cast_benchmark CastBenchmark.cpp)
-target_link_libraries(
-  bolt_cast_benchmark
-  ${BOLT_BENCHMARK_DEPS}
-  bolt_vector_test_lib
-)
+target_link_libraries(bolt_cast_benchmark ${BOLT_BENCHMARK_DEPS})
 
 add_executable(bolt_benchmark_expr_flat_no_nulls ExprFlatNoNullsBenchmark.cpp)
 target_link_libraries(
@@ -121,7 +100,6 @@ add_executable(bolt_format_datetime_benchmark FormatDateTimeBenchmark.cpp)
 target_link_libraries(
   bolt_format_datetime_benchmark
   ${BOLT_BENCHMARK_DEPS}
-  bolt_vector_test_lib
   bolt_functions_spark
   bolt_functions_prestosql
 )

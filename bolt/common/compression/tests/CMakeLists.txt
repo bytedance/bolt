@@ -27,10 +27,4 @@
 
 add_executable(bolt_common_compression_test CompressionTest.cpp)
 add_test(bolt_common_compression_test bolt_common_compression_test)
-target_link_libraries(
-  bolt_common_compression_test
-  PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-)
+target_link_libraries(bolt_common_compression_test PRIVATE bolt_gtest_main)

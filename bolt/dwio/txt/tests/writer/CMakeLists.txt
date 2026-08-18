@@ -25,8 +25,6 @@ add_test(
 target_link_libraries(
   bolt_dwio_txt_writer_test
   PRIVATE
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
     GTest::gmock
 )

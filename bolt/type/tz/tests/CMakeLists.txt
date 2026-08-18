@@ -31,8 +31,6 @@ add_test(bolt_type_tz_test bolt_type_tz_test)
 
 target_link_libraries(
   bolt_type_tz_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   pthread
 )

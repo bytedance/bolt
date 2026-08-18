@@ -34,7 +34,5 @@ add_executable(
 target_link_libraries(
   bolt_expression_fuzzer_unit_test
   bolt_expression_fuzzer
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
 )

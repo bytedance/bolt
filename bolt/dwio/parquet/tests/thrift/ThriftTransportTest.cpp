@@ -29,7 +29,6 @@
  */
 
 #include "bolt/dwio/parquet/thrift/ThriftTransport.h"
-#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::dwio::common;
@@ -114,12 +113,4 @@ TEST_F(ThriftTransportTest, bufferedOutOfBoundry) {
 
   // The whole inputStream_ is consumed.
   EXPECT_ANY_THROW(transport_->read(output_.data() + bufferSize_, 1));
-}
-
-// Define main so that gflags get processed.
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }
