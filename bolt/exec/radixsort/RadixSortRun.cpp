@@ -322,10 +322,6 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
       keyFlags.size(),
       "RadixSortRun key type and flag counts do not match");
   BOLT_CHECK(
-      options.knownNonNullKeys.empty() ||
-          options.knownNonNullKeys.size() == keyType->size(),
-      "RadixSortRun non-null key statistics count does not match");
-  BOLT_CHECK(
       options.initialKeyMayHaveNulls.empty() ||
           options.initialKeyMayHaveNulls.size() == keyType->size(),
       "RadixSortRun initial key nullability count does not match");
@@ -338,8 +334,7 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
       outputType, keyType, directKeyChannels, bitExactRequired);
 
   std::unique_ptr<RadixSortKeyCodec> keyCodec;
-  RadixSortKeyCodec::bind(
-      keyType->children(), keyFlags, options.knownNonNullKeys, keyCodec);
+  RadixSortKeyCodec::bind(keyType->children(), keyFlags, keyCodec);
   BOLT_CHECK(
       keyCodec->canEncodeDecode(),
       "RadixSortRun key codec does not support decode");
@@ -414,16 +409,17 @@ void RadixSortRun::append(const RowVector& input) {
       input.size(),
       std::move(keyInputChildren));
 
-  VectorPtr directFixedKey;
   for (uint32_t column = 0; column < keys.childrenSize(); ++column) {
     const auto mayHaveNulls = keys.childAt(column)->mayHaveNulls();
     keyMayHaveNulls_[column] |= mayHaveNulls;
     currentRunKeyMayHaveNulls_[column] |= mayHaveNulls;
   }
+
+  VectorPtr directFixedKey;
   EncodedKeyBatch encodedKeys;
   const auto encodeBegin = std::chrono::steady_clock::now();
   if (keys.childrenSize() == 1 &&
-      keyCodec_->canEncodeSingleFixedFlat(*keys.childAt(0), *storage_)) {
+      keyCodec_->canAppendSingleFixedFlat(*keys.childAt(0), *storage_)) {
     directFixedKey = keys.childAt(0);
   } else {
     keyCodec_->encode(keys, pool_, encodedKeys);
@@ -457,8 +453,8 @@ void RadixSortRun::append(const RowVector& input) {
     if (directFixedKey == nullptr) {
       storage_->appendBatch(encodedKeys, payloads);
     } else {
-      keyCodec_->appendSingleFixedFlat(
-          *directFixedKey, input.size(), *storage_, payloads);
+      BOLT_CHECK(keyCodec_->tryAppendSingleFixedFlat(
+          *directFixedKey, input.size(), *storage_, payloads));
     }
     metrics_.appendTimeUs += elapsedUs(appendBegin);
   } else {
@@ -466,8 +462,8 @@ void RadixSortRun::append(const RowVector& input) {
     if (directFixedKey == nullptr) {
       storage_->appendBatch(encodedKeys);
     } else {
-      keyCodec_->appendSingleFixedFlat(
-          *directFixedKey, input.size(), *storage_, {});
+      BOLT_CHECK(keyCodec_->tryAppendSingleFixedFlat(
+          *directFixedKey, input.size(), *storage_, {}));
     }
     metrics_.appendTimeUs += elapsedUs(appendBegin);
   }
@@ -642,14 +638,13 @@ RowVectorPtr RadixSortRun::decodeKeys(
     uint64_t begin,
     vector_size_t count,
     memory::MemoryPool* outputPool) {
-  if (keyCodec_->canDecodeSingleFixedColumn() && !keyLayout_.isVariable()) {
-    keyCodec_->decodeSingleFixedColumn(
-        *storage_,
-        begin,
-        count,
-        keyMayHaveNulls_[0] != 0,
-        outputPool,
-        decodedKeysOutput_);
+  if (keyCodec_->tryDecodeSingleFixedColumn(
+          *storage_,
+          begin,
+          count,
+          keyMayHaveNulls_[0] != 0,
+          outputPool,
+          decodedKeysOutput_)) {
     return decodedKeysOutput_;
   }
 
@@ -759,13 +754,12 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
     std::span<const char* const> keys,
     memory::MemoryPool* outputPool) {
   const auto count = static_cast<vector_size_t>(keys.size());
-  if (keyCodec_->canDecodeSingleFixedColumn() && !keyLayout_.isVariable()) {
-    keyCodec_->decodeSingleFixedColumn(
-        keys,
-        keyLayout_.kind(),
-        keyMayHaveNulls_[0] != 0,
-        outputPool,
-        decodedKeysOutput_);
+  if (keyCodec_->tryDecodeSingleFixedColumn(
+          keys,
+          keyLayout_.kind(),
+          keyMayHaveNulls_[0] != 0,
+          outputPool,
+          decodedKeysOutput_)) {
     return decodedKeysOutput_;
   }
   const auto prepareScratch =

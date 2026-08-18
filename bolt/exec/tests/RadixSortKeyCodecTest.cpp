@@ -142,6 +142,40 @@ class RadixSortKeyCodecTest : public testing::Test {
     return array;
   }
 
+  ArrayVectorPtr makeIntegerArraysWithElements(
+      const std::vector<std::optional<vector_size_t>>& sizes,
+      VectorPtr elements) {
+    auto offsetBuffer =
+        AlignedBuffer::allocate<vector_size_t>(sizes.size(), pool_.get());
+    auto sizeBuffer =
+        AlignedBuffer::allocate<vector_size_t>(sizes.size(), pool_.get());
+    auto* rawOffsets = offsetBuffer->asMutable<vector_size_t>();
+    auto* rawSizes = sizeBuffer->asMutable<vector_size_t>();
+    vector_size_t offset = 0;
+    for (vector_size_t row = 0; row < sizes.size(); ++row) {
+      rawOffsets[row] = offset;
+      rawSizes[row] = sizes[row].value_or(0);
+      if (sizes[row].has_value()) {
+        offset += *sizes[row];
+      }
+    }
+    BOLT_CHECK_LE(offset, elements->size());
+    auto arrays = std::make_shared<ArrayVector>(
+        pool_.get(),
+        ARRAY(INTEGER()),
+        nullptr,
+        sizes.size(),
+        std::move(offsetBuffer),
+        std::move(sizeBuffer),
+        std::move(elements));
+    for (vector_size_t row = 0; row < sizes.size(); ++row) {
+      if (!sizes[row].has_value()) {
+        arrays->setNull(row, true);
+      }
+    }
+    return arrays;
+  }
+
   RowVectorPtr makeNestedRows() {
     auto rows = std::make_shared<RowVector>(
         pool_.get(),
@@ -264,10 +298,9 @@ class RadixSortKeyCodecTest : public testing::Test {
 
     EncodedKeyBatch keys;
     codec->encode(*rows, pool_.get(), keys);
-    EXPECT_EQ(keys.format(), codec->format());
 
     RowVectorPtr decoded;
-    codec->decode(keys, pool_.get(), decoded);
+    decodeBatch(*codec, keys, decoded);
     ASSERT_EQ(decoded->size(), rows->size());
 
     for (vector_size_t row = 0; row < rows->size(); ++row) {
@@ -282,7 +315,7 @@ class RadixSortKeyCodecTest : public testing::Test {
     const auto comparePair = [&](vector_size_t left, vector_size_t right) {
       const auto expected = SortComparatorOracle::compareRows(
           *rows, left, *rows, right, channels, compareFlags);
-      const auto actual = codec->compare(keys, left, right);
+      const auto actual = compareEncodedKeys(keys, left, right);
       EXPECT_EQ((actual > 0) - (actual < 0), (expected > 0) - (expected < 0))
           << "left " << left << ", right " << right << ", left-values "
           << rows->toString(left) << ", right-values " << rows->toString(right)
@@ -300,6 +333,64 @@ class RadixSortKeyCodecTest : public testing::Test {
         comparePair(left, left + 1);
       }
     }
+  }
+
+  void decodeBatch(
+      const RadixSortKeyCodec& codec,
+      const EncodedKeyBatch& keys,
+      RowVectorPtr& decoded) {
+    std::vector<std::array<char, sizeof(uint64_t)>> fixedBytes;
+    std::vector<EncodedKeyView> views(keys.size());
+    if (keys.format() == EncodedKeyFormat::kFixed64) {
+      fixedBytes.resize(keys.size());
+      for (vector_size_t row = 0; row < keys.size(); ++row) {
+        auto word = keys.fixedKeyAt(row);
+        if constexpr (std::endian::native == std::endian::little) {
+          word = byteSwap(word);
+        }
+        storeUnaligned(fixedBytes[row].data(), word);
+        views[row] = {
+            std::string_view(fixedBytes[row].data(), fixedBytes[row].size()),
+            true};
+      }
+    } else {
+      for (vector_size_t row = 0; row < keys.size(); ++row) {
+        views[row] = {keys.variableKeyAt(row), false};
+      }
+    }
+    BufferPtr cursorScratch;
+    codec.decode(
+        std::span<const EncodedKeyView>(views.data(), views.size()),
+        {},
+        {},
+        pool_.get(),
+        cursorScratch,
+        decoded);
+  }
+
+  static int32_t compareEncodedKeys(
+      const EncodedKeyBatch& keys,
+      vector_size_t left,
+      vector_size_t right) {
+    BOLT_CHECK_GE(left, 0);
+    BOLT_CHECK_GE(right, 0);
+    BOLT_CHECK_LT(left, keys.size());
+    BOLT_CHECK_LT(right, keys.size());
+    if (keys.format() == EncodedKeyFormat::kFixed64) {
+      const auto leftKey = keys.fixedKeyAt(left);
+      const auto rightKey = keys.fixedKeyAt(right);
+      return (leftKey > rightKey) - (leftKey < rightKey);
+    }
+    const auto leftKey = keys.variableKeyAt(left);
+    const auto rightKey = keys.variableKeyAt(right);
+    const auto commonSize = std::min(leftKey.size(), rightKey.size());
+    const auto result =
+        std::memcmp(leftKey.data(), rightKey.data(), commonSize);
+    if (result != 0) {
+      return (result > 0) - (result < 0);
+    }
+    return (leftKey.size() > rightKey.size()) -
+        (leftKey.size() < rightKey.size());
   }
 
   static std::string hex(std::string_view bytes) {
@@ -329,15 +420,6 @@ TEST_F(RadixSortKeyCodecTest, bindMetadataAndCapability) {
   auto codec = bind(
       {INTEGER(), ARRAY(BIGINT()), ROW({{"a", VARCHAR()}})},
       {flags(true, true), flags(false, false), flags(true, false)});
-  ASSERT_EQ(codec->columns().size(), 3);
-  EXPECT_TRUE(codec->columns()[0].encodeDecodeSupported);
-  EXPECT_EQ(codec->columns()[0].maximumEncodedSize, 5);
-  EXPECT_TRUE(codec->columns()[1].encodeDecodeSupported);
-  ASSERT_EQ(codec->columns()[1].children.size(), 1);
-  EXPECT_FALSE(codec->columns()[1].children[0].flags.nullsFirst);
-  EXPECT_TRUE(codec->columns()[2].encodeDecodeSupported);
-  ASSERT_EQ(codec->columns()[2].children.size(), 1);
-  EXPECT_FALSE(codec->columns()[2].children[0].flags.nullsFirst);
   EXPECT_TRUE(codec->canEncodeDecode());
 
   const std::vector<TypePtr> supportedTypes{
@@ -386,11 +468,6 @@ TEST_F(RadixSortKeyCodecTest, invalidBindAndInputContracts) {
   EXPECT_EQ(codec, nullptr);
   EXPECT_THROW(RadixSortKeyCodec::bind({BIGINT()}, {}, codec), BoltException);
   EXPECT_EQ(codec, nullptr);
-  EXPECT_THROW(
-      RadixSortKeyCodec::bind(
-          {BIGINT()}, {flags(true, true)}, {true, false}, codec),
-      BoltException);
-  EXPECT_EQ(codec, nullptr);
 
   auto invalidFlags = flags(true, true);
   invalidFlags.equalsOnly = true;
@@ -432,26 +509,25 @@ TEST_F(RadixSortKeyCodecTest, leadingSkippableValidityOffsets) {
        flags(true, true),
        flags(true, true),
        flags(true, true)},
-      {true, true, true, true},
       codec);
+  const std::vector<uint8_t> allNonNull{0, 0, 0, 0};
   EXPECT_EQ(
-      codec->leadingSkippableValidityOffsets(),
+      codec->leadingSkippableValidityOffsets(allNonNull),
       (std::vector<uint32_t>{0, 2, 5}));
 
   RadixSortKeyCodec::bind(
       {TINYINT(), SMALLINT(), TINYINT()},
       {flags(true, true), flags(true, true), flags(true, true)},
-      {true, false, true},
       codec);
+  const std::vector<uint8_t> secondMayHaveNulls{0, 1, 0};
   EXPECT_EQ(
-      codec->leadingSkippableValidityOffsets(), (std::vector<uint32_t>{0}));
+      codec->leadingSkippableValidityOffsets(secondMayHaveNulls),
+      (std::vector<uint32_t>{0}));
 
   RadixSortKeyCodec::bind(
-      {VARCHAR(), TINYINT()},
-      {flags(true, true), flags(true, true)},
-      {true, true},
-      codec);
-  EXPECT_TRUE(codec->leadingSkippableValidityOffsets().empty());
+      {VARCHAR(), TINYINT()}, {flags(true, true), flags(true, true)}, codec);
+  const std::vector<uint8_t> variableNonNull{0, 0};
+  EXPECT_TRUE(codec->leadingSkippableValidityOffsets(variableNonNull).empty());
 }
 
 TEST_F(RadixSortKeyCodecTest, dynamicLeadingSkippableValidityOffsets) {
@@ -463,7 +539,6 @@ TEST_F(RadixSortKeyCodecTest, dynamicLeadingSkippableValidityOffsets) {
        flags(true, true),
        flags(true, true)},
       codec);
-  EXPECT_TRUE(codec->leadingSkippableValidityOffsets().empty());
   const std::vector<uint8_t> allNonNull{0, 0, 0, 0};
   EXPECT_EQ(
       codec->leadingSkippableValidityOffsets(allNonNull),
@@ -477,6 +552,15 @@ TEST_F(RadixSortKeyCodecTest, dynamicLeadingSkippableValidityOffsets) {
       {VARCHAR(), TINYINT()}, {flags(true, true), flags(true, true)}, codec);
   const std::vector<uint8_t> variableNonNull{0, 0};
   EXPECT_TRUE(codec->leadingSkippableValidityOffsets(variableNonNull).empty());
+}
+
+TEST_F(RadixSortKeyCodecTest, nullFreeInt32KeysSkipBothValidityBytes) {
+  auto codec =
+      bind({INTEGER(), INTEGER()}, {flags(true, true), flags(true, true)});
+  const std::vector<uint8_t> nullFreeKeys{0, 0};
+  EXPECT_EQ(
+      codec->leadingSkippableValidityOffsets(nullFreeKeys),
+      (std::vector<uint32_t>{0, 5}));
 }
 
 TEST_F(RadixSortKeyCodecTest, knownEncodedKeyBytes) {
@@ -512,12 +596,12 @@ TEST_F(RadixSortKeyCodecTest, fixed64BoundaryAndAllocation) {
   auto fixedCodec =
       bind({SMALLINT(), INTEGER()}, {flags(true, true), flags(true, true)});
   EXPECT_EQ(fixedCodec->maximumEncodedSize(), 8);
-  EXPECT_EQ(fixedCodec->format(), EncodedKeyFormat::kFixed64);
 
   auto before = pool_->stats();
   EncodedKeyBatch fixedKeys;
   fixedCodec->encode(*fixedRows, pool_.get(), fixedKeys);
   auto after = pool_->stats();
+  EXPECT_EQ(fixedKeys.format(), EncodedKeyFormat::kFixed64);
   EXPECT_EQ(after.numAllocs - before.numAllocs, 1);
   EXPECT_NE(fixedKeys.fixedKeys(), nullptr);
   EXPECT_EQ(fixedKeys.offsets(), nullptr);
@@ -527,12 +611,12 @@ TEST_F(RadixSortKeyCodecTest, fixed64BoundaryAndAllocation) {
       makeRows({makeVector<int64_t>(BIGINT(), {1, -1, std::nullopt})});
   auto variableCodec = bind({BIGINT()}, {flags(true, true)});
   EXPECT_EQ(variableCodec->maximumEncodedSize(), 9);
-  EXPECT_EQ(variableCodec->format(), EncodedKeyFormat::kVariableBinary);
 
   before = pool_->stats();
   EncodedKeyBatch variableKeys;
   variableCodec->encode(*variableRows, pool_.get(), variableKeys);
   after = pool_->stats();
+  EXPECT_EQ(variableKeys.format(), EncodedKeyFormat::kVariableBinary);
   EXPECT_EQ(after.numAllocs - before.numAllocs, 2);
   EXPECT_EQ(variableKeys.fixedKeys(), nullptr);
   EXPECT_NE(variableKeys.offsets(), nullptr);
@@ -604,7 +688,7 @@ TEST_F(RadixSortKeyCodecTest, emptyBatchAndVariableAllocation) {
   EXPECT_NE(emptyKeys.offsets(), nullptr);
   EXPECT_EQ(emptyKeys.data(), nullptr);
   RowVectorPtr decoded;
-  codec->decode(emptyKeys, pool_.get(), decoded);
+  decodeBatch(*codec, emptyKeys, decoded);
   EXPECT_EQ(decoded->size(), 0);
 
   std::vector<std::optional<std::string>> values;
@@ -765,6 +849,35 @@ TEST_F(RadixSortKeyCodecTest, arrayRoundTripAndOrdering) {
   }
 }
 
+TEST_F(RadixSortKeyCodecTest, fixedArrayRoundTripWithWrappedElements) {
+  const std::vector<std::optional<vector_size_t>> sizes{
+      0, 2, 3, std::nullopt, 1};
+
+  auto dictionaryBase = makeVector<int32_t>(
+      INTEGER(), {7, std::nullopt, -3, 11, 5, std::nullopt});
+  auto dictionaryIndices =
+      AlignedBuffer::allocate<vector_size_t>(6, pool_.get());
+  const std::array<vector_size_t, 6> rawIndices{2, 1, 4, 0, 5, 3};
+  std::memcpy(
+      dictionaryIndices->asMutable<vector_size_t>(),
+      rawIndices.data(),
+      sizeof(rawIndices));
+  auto dictionaryElements = BaseVector::wrapInDictionary(
+      nullptr, dictionaryIndices, rawIndices.size(), dictionaryBase);
+  auto dictionaryArrays =
+      makeIntegerArraysWithElements(sizes, std::move(dictionaryElements));
+
+  auto constantBase = makeVector<int32_t>(INTEGER(), {42});
+  auto constantElements = BaseVector::wrapInConstant(6, 0, constantBase);
+  auto constantArrays =
+      makeIntegerArraysWithElements(sizes, std::move(constantElements));
+
+  for (const auto compareFlags : allFlags()) {
+    verifyProperty(makeRows({dictionaryArrays}), {compareFlags});
+    verifyProperty(makeRows({constantArrays}), {compareFlags});
+  }
+}
+
 TEST_F(RadixSortKeyCodecTest, rowRoundTripAndOrdering) {
   auto rows = makeNestedRows();
   for (const auto compareFlags : allFlags()) {
@@ -835,7 +948,7 @@ TEST_F(RadixSortKeyCodecTest, mapRoundTripAndCanonicalOrdering) {
   auto codec = bind({maps->type()}, {flags(true, true)});
   EncodedKeyBatch keys;
   codec->encode(*makeRows({maps}), pool_.get(), keys);
-  EXPECT_EQ(codec->compare(keys, 2, 3), 0);
+  EXPECT_EQ(compareEncodedKeys(keys, 2, 3), 0);
   EXPECT_EQ(
       SortComparatorOracle::compare(*maps, 2, *maps, 3, flags(true, true)), 0);
 }

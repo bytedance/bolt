@@ -310,7 +310,8 @@ TEST_F(RadixSortRunSorterTest, codecKeysWithManyNullsMatchBoltComparator) {
   arena.appendBatch(encodedKeys, payloads);
 
   RadixSortRunSorter sorter(arena);
-  sorter.sort(codec->leadingSkippableValidityOffsets());
+  const std::vector<uint8_t> keyMayHaveNulls{1};
+  sorter.sort(codec->leadingSkippableValidityOffsets(keyMayHaveNulls));
 
   expectSorted(arena);
   for (uint64_t index = 1; index < arena.size(); ++index) {
