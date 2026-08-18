@@ -892,6 +892,23 @@ TEST_F(CastExprTest, dateToTimestamp) {
       TIMESTAMP());
 }
 
+TEST_F(CastExprTest, numericToTimestampSemantics) {
+  queryCtx_->testingOverrideConfigUnsafe({
+      {core::QueryConfig::kThrowExceptionWhenCastIntToTimestamp, "true"},
+  });
+
+  auto input = makeRowVector({makeFlatVector<int32_t>({1})});
+#ifdef SPARK_COMPATIBLE
+  auto result =
+      evaluate<SimpleVector<Timestamp>>("cast(c0 as timestamp)", input);
+  EXPECT_EQ(result->valueAt(0), Timestamp(1, 0));
+#else
+  BOLT_ASSERT_THROW(
+      evaluate("cast(c0 as timestamp)", input),
+      "unsupported type conversion from INTEGER to TIMESTAMP");
+#endif
+}
+
 TEST_F(CastExprTest, timestampToDate) {
   setTimezone("");
   std::vector<std::optional<Timestamp>> inputTimestamps = {

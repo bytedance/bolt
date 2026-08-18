@@ -669,7 +669,7 @@ void CastExpr::applyCastPrimitives(
     }
   };
 
-#ifndef SPARK_COMPATIABLE
+#ifndef SPARK_COMPATIBLE
   if constexpr (
       (FromKind == TypeKind::INTEGER || FromKind == TypeKind::BIGINT ||
        FromKind == TypeKind::REAL || FromKind == TypeKind::DOUBLE ||
