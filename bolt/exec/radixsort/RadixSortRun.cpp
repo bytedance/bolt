@@ -430,7 +430,6 @@ void RadixSortRun::append(const RowVector& input) {
   }
   const auto encodeTimeUs = elapsedUs(encodeBegin);
 
-  PayloadRowSizes payloadSizes;
   std::vector<uint8_t> payloadMayHaveNulls;
   if (projection_->hasPayload()) {
     std::vector<VectorPtr> payloadInputChildren;
@@ -441,10 +440,6 @@ void RadixSortRun::append(const RowVector& input) {
         nullptr,
         input.size(),
         std::move(payloadInputChildren));
-    if (payloadLayout_->hasVariableFields()) {
-      PayloadRowWriter::measure(
-          payloadInput, *payloadLayout_, pool_, payloadSizes);
-    }
     payloadMayHaveNulls.resize(payloadInput.childrenSize(), 0);
     for (uint32_t column = 0; column < payloadInput.childrenSize(); ++column) {
       payloadMayHaveNulls[column] =
@@ -452,12 +447,7 @@ void RadixSortRun::append(const RowVector& input) {
     }
     const auto appendBegin = std::chrono::steady_clock::now();
     PayloadRowBatch payloadBatch;
-    if (payloadLayout_->hasVariableFields()) {
-      PayloadRowWriter::append(
-          payloadInput, *storage_, payloadSizes, payloadBatch);
-    } else {
-      PayloadRowWriter::appendFixedOnly(payloadInput, *storage_, payloadBatch);
-    }
+    PayloadRowWriter::append(payloadInput, *storage_, payloadBatch);
     BOLT_CHECK_EQ(
         payloadBatch.size(),
         input.size(),
@@ -930,9 +920,9 @@ RowVectorPtr RadixSortRun::gatherPayload(
   PayloadRowReader::gather(
       *payloadLayout_,
       std::span<char* const>(rawRows, count),
-      payloadMayHaveNulls_,
       outputPool,
-      payloadOutput_);
+      payloadOutput_,
+      payloadMayHaveNulls_);
   return payloadOutput_;
 }
 
@@ -946,9 +936,9 @@ RowVectorPtr RadixSortRun::gatherPayloadPointers(
   PayloadRowReader::gather(
       *payloadLayout_,
       payloads,
-      payloadMayHaveNulls_,
       outputPool,
-      payloadOutput_);
+      payloadOutput_,
+      payloadMayHaveNulls_);
   return payloadOutput_;
 }
 

@@ -20,53 +20,11 @@
 
 namespace bytedance::bolt::exec::radixsort {
 
-class PayloadRowSizes {
- public:
-  vector_size_t size() const {
-    return size_;
-  }
-
-  uint64_t fixedBytes() const {
-    return fixedBytes_;
-  }
-
-  uint64_t heapBytes() const {
-    return heapBytes_;
-  }
-
-  uint64_t heapSizeAt(vector_size_t row) const;
-
- private:
-  friend class PayloadRowWriter;
-
-  vector_size_t size_{0};
-  uint64_t fixedBytes_{0};
-  uint64_t heapBytes_{0};
-  BufferPtr heapSizes_;
-};
-
 class PayloadRowWriter {
  public:
-  static void measure(
-      const RowVector& input,
-      const PayloadRowLayout& layout,
-      memory::MemoryPool* pool,
-      PayloadRowSizes& sizes);
-
   static void append(
       const RowVector& input,
       RadixSortRunStorage& arena,
-      PayloadRowBatch& batch);
-
-  static void appendFixedOnly(
-      const RowVector& input,
-      RadixSortRunStorage& arena,
-      PayloadRowBatch& batch);
-
-  static void append(
-      const RowVector& input,
-      RadixSortRunStorage& arena,
-      const PayloadRowSizes& sizes,
       PayloadRowBatch& batch);
 };
 

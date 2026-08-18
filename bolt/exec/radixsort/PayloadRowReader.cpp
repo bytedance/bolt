@@ -65,11 +65,6 @@ bool isNull(const char* row, const PayloadRowColumnLayout& column) {
   return (static_cast<uint8_t>(row[column.nullByte]) & column.nullMask) == 0;
 }
 
-template <typename T>
-void setValue(const VectorPtr& vector, vector_size_t row, const char* slot) {
-  vector->asUnchecked<FlatVector<T>>()->set(row, loadUnaligned<T>(slot));
-}
-
 template <typename T, bool MayHaveNulls>
 void gatherFixedColumn(
     const PayloadRowColumnLayout& column,
@@ -450,92 +445,28 @@ void gatherStringColumn(
   }
 }
 
-void readValue(
+void gatherComplexColumn(
     const PayloadRowColumnLayout& column,
-    const char* row,
-    vector_size_t rowIndex,
-    const VectorPtr& result,
-    char*& stringOutput,
-    const char* stringOutputEnd) {
-  const auto* slot = row + column.offset;
-  if (column.type->isShortDecimal()) {
-    setValue<int64_t>(result, rowIndex, slot);
-    return;
-  }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
-    setValue<int128_t>(result, rowIndex, slot);
-    return;
-  }
-
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN: {
-      const auto value = loadUnaligned<uint8_t>(slot);
-      result->asUnchecked<FlatVector<bool>>()->set(rowIndex, value != 0);
-      return;
+    std::span<char* const> rows,
+    const VectorPtr& result) {
+  BOLT_DCHECK(column.complex);
+  for (vector_size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
+    const auto* row = rows[rowIndex];
+    if (isNull(row, column)) {
+      result->setNull(rowIndex, true);
+      continue;
     }
-    case TypeKind::TINYINT:
-      setValue<int8_t>(result, rowIndex, slot);
-      return;
-    case TypeKind::SMALLINT:
-      setValue<int16_t>(result, rowIndex, slot);
-      return;
-    case TypeKind::INTEGER:
-      setValue<int32_t>(result, rowIndex, slot);
-      return;
-    case TypeKind::BIGINT:
-      setValue<int64_t>(result, rowIndex, slot);
-      return;
-    case TypeKind::REAL:
-      setValue<float>(result, rowIndex, slot);
-      return;
-    case TypeKind::DOUBLE:
-      setValue<double>(result, rowIndex, slot);
-      return;
-    case TypeKind::TIMESTAMP: {
-      const auto seconds = loadUnaligned<int64_t>(slot);
-      const auto nanos = loadUnaligned<uint64_t>(slot + sizeof(int64_t));
-      result->asUnchecked<FlatVector<Timestamp>>()->set(
-          rowIndex, Timestamp(seconds, nanos));
-      return;
+    const auto value = loadUnaligned<PayloadVarlenRef>(row + column.offset);
+    if (value.size == 0) {
+      result->setNull(rowIndex, false);
+      continue;
     }
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY: {
-      const auto value = loadUnaligned<StringView>(slot);
-      auto* flat = result->asUnchecked<FlatVector<StringView>>();
-      if (value.isInline()) {
-        flat->setNoCopy(rowIndex, value);
-        return;
-      }
-      std::memcpy(stringOutput, value.data(), value.size());
-      flat->setNoCopy(
-          rowIndex,
-          StringView(stringOutput, static_cast<int32_t>(value.size())));
-      stringOutput += value.size();
-      return;
-    }
-    case TypeKind::ARRAY:
-    case TypeKind::MAP:
-    case TypeKind::ROW: {
-      const auto value = loadUnaligned<PayloadVarlenRef>(slot);
-      if (value.size == 0) {
-        result->setNull(rowIndex, false);
-        return;
-      }
-      std::vector<ByteRange> ranges{ByteRange{
-          reinterpret_cast<uint8_t*>(value.data),
-          static_cast<int32_t>(value.size),
-          0}};
-      ByteInputStream input(std::move(ranges));
-      exec::ContainerRowSerde::deserialize(input, rowIndex, result.get(), true);
-      return;
-    }
-    case TypeKind::UNKNOWN:
-      BOLT_FAIL("UNKNOWN sort payload values must be null");
-    default:
-      BOLT_FAIL(
-          "Payload row gather is not implemented for {}",
-          column.type->toString());
+    std::vector<ByteRange> ranges{ByteRange{
+        reinterpret_cast<uint8_t*>(value.data),
+        static_cast<int32_t>(value.size),
+        0}};
+    ByteInputStream input(std::move(ranges));
+    exec::ContainerRowSerde::deserialize(input, rowIndex, result.get(), true);
   }
 }
 
@@ -660,23 +591,7 @@ void gatherImpl(
       continue;
     }
 
-    uint64_t stringBytes = 0;
-    char* stringOutput = nullptr;
-    if (stringBytes > 0) {
-      stringOutput = child->asUnchecked<FlatVector<StringView>>()
-                         ->getRawStringBufferWithSpace(stringBytes, true);
-    }
-    const auto* stringOutputEnd =
-        stringOutput == nullptr ? nullptr : stringOutput + stringBytes;
-
-    for (vector_size_t rowIndex = 0; rowIndex < size; ++rowIndex) {
-      const auto* row = rows[rowIndex];
-      if (isNull(row, column)) {
-        child->setNull(rowIndex, true);
-        continue;
-      }
-      readValue(column, row, rowIndex, child, stringOutput, stringOutputEnd);
-    }
+    gatherComplexColumn(column, rows, child);
   }
   if (stringColumnCount > 1) {
     gatherStringColumns<false>(rows, nonNullStringColumns);
@@ -689,26 +604,22 @@ void gatherImpl(
 void PayloadRowReader::gather(
     const PayloadRowLayout& layout,
     std::span<char* const> rows,
-    std::span<const uint8_t> mayHaveNulls,
     memory::MemoryPool* pool,
-    RowVectorPtr& result) {
-  gatherImpl(layout, rows, mayHaveNulls, pool, result);
-}
-
-void PayloadRowReader::gather(
-    const PayloadRowLayout& layout,
-    std::span<char* const> rows,
-    memory::MemoryPool* pool,
-    RowVectorPtr& result) {
-  std::vector<uint8_t> mayHaveNulls(layout.columns().size(), 0);
+    RowVectorPtr& result,
+    std::span<const uint8_t> mayHaveNulls) {
+  if (!mayHaveNulls.empty()) {
+    gatherImpl(layout, rows, mayHaveNulls, pool, result);
+    return;
+  }
+  std::vector<uint8_t> inferredMayHaveNulls(layout.columns().size(), 0);
   for (uint32_t column = 0; column < layout.columns().size(); ++column) {
     uint8_t hasNull = 0;
     for (const auto* row : rows) {
       hasNull |= static_cast<uint8_t>(isNull(row, layout.columns()[column]));
     }
-    mayHaveNulls[column] = hasNull;
+    inferredMayHaveNulls[column] = hasNull;
   }
-  gather(layout, rows, mayHaveNulls, pool, result);
+  gatherImpl(layout, rows, inferredMayHaveNulls, pool, result);
 }
 
 } // namespace bytedance::bolt::exec::radixsort

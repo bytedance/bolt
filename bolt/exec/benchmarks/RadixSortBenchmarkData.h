@@ -48,6 +48,8 @@ enum class ScenarioKind : uint8_t {
   kBucketWriteKeyStringFixedPayload,
   kBucketWriteStringPayload,
   kBucketWriteComplexPayload,
+  kLowCardinalityInt32LogPatternPayload,
+  kLowCardinalityInt32ArrayPayload,
 };
 
 struct ScenarioSpec {
@@ -69,7 +71,7 @@ enum class ScenarioProfile : uint8_t {
   kSpill,
 };
 
-inline constexpr std::array<ScenarioSpec, 19> kInMemoryScenarioSpecs{{
+inline constexpr std::array<ScenarioSpec, 21> kInMemoryScenarioSpecs{{
     {"random_i64_narrow_256k", ScenarioKind::kRandomInt64, 256 * 1024},
     {"duplicate_i64_narrow_256k", ScenarioKind::kDuplicateInt64, 256 * 1024},
     {"low_cardinality_i64_256k",
@@ -102,6 +104,12 @@ inline constexpr std::array<ScenarioSpec, 19> kInMemoryScenarioSpecs{{
      1 * 1024 * 1024},
     {"wide_string_payload_1m",
      ScenarioKind::kWideStringPayload,
+     1 * 1024 * 1024},
+    {"low_card_i32_log_pattern_payload_1m",
+     ScenarioKind::kLowCardinalityInt32LogPatternPayload,
+     1 * 1024 * 1024},
+    {"low_card_i32_30_array15_5_payload_1m",
+     ScenarioKind::kLowCardinalityInt32ArrayPayload,
      1 * 1024 * 1024},
 }};
 

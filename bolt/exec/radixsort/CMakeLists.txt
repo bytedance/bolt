@@ -22,7 +22,6 @@ target_sources(
   RadixSortSpill.cpp
   RadixSortSpillRow.cpp
   PayloadRowLayout.cpp
-  PayloadRowMeasure.cpp
   PayloadRowReader.cpp
   PayloadRowWriter.cpp
   RadixSortRun.cpp
