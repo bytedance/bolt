@@ -476,16 +476,6 @@ class RadixSortKey {
 
   char* payload() const;
 
-  void setPayload(char* payload) const;
-
-  uint64_t encodedSize() const;
-
-  uint8_t encodedByte(uint64_t offset) const;
-
-  const char* rawData() const {
-    return data_;
-  }
-
  private:
   uint64_t inlineWord(uint32_t index) const;
 

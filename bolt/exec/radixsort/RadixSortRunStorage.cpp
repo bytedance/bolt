@@ -154,9 +154,7 @@ char* RadixSortRunStorage::keyDataAt(uint64_t index) {
   BOLT_CHECK_LT(index, size_);
   const auto blockIndex = index / keysPerBlock_;
   const auto indexInBlock = index % keysPerBlock_;
-  BOLT_CHECK_LT(blockIndex, keyBlocks_.size());
   auto& block = keyBlocks_[blockIndex];
-  BOLT_CHECK_LT(indexInBlock, block.count);
   return block.base + indexInBlock * layout_.width();
 }
 
@@ -164,9 +162,7 @@ const char* RadixSortRunStorage::keyDataAt(uint64_t index) const {
   BOLT_CHECK_LT(index, size_);
   const auto blockIndex = index / keysPerBlock_;
   const auto indexInBlock = index % keysPerBlock_;
-  BOLT_CHECK_LT(blockIndex, keyBlocks_.size());
   const auto& block = keyBlocks_[blockIndex];
-  BOLT_CHECK_LT(indexInBlock, block.count);
   return block.base + indexInBlock * layout_.width();
 }
 
@@ -180,9 +176,7 @@ RadixSortKeyRange RadixSortRunStorage::keyRangeAt(
   }
   const auto blockIndex = index / keysPerBlock_;
   const auto indexInBlock = index % keysPerBlock_;
-  BOLT_CHECK_LT(blockIndex, keyBlocks_.size());
   const auto& block = keyBlocks_[blockIndex];
-  BOLT_CHECK_LT(indexInBlock, block.count);
   const auto available = static_cast<vector_size_t>(block.count - indexInBlock);
   return {
       block.base + indexInBlock * layout_.width(),

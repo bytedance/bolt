@@ -855,8 +855,6 @@ void RadixSortSpillFileMergeStream::loadBatch() {
     payload_ = nullptr;
     return;
   }
-  BOLT_CHECK_EQ(keys_.size(), payloads_.size());
-  BOLT_CHECK_GT(keys_.size(), 0);
   index_ = 0;
   key_ = keys_[0];
   payload_ = payloads_[0];
