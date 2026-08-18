@@ -283,5 +283,38 @@ TEST_F(FromJsonTest, scalarRootDocumentDoesNotThrow) {
   testFromJson(scalarInput, expectedRow);
 }
 
+TEST_F(FromJsonTest, structFieldNameCaseSensitive) {
+  auto expectedLabels = makeNullableFlatVector<StringView>(
+      {"unknown", std::nullopt, "hello", std::nullopt, "ok"});
+  auto expectedValues = makeNullableFlatVector<StringView>(
+      {"0", std::nullopt, "world", "0", std::nullopt});
+  auto input = makeFlatVector<std::string>({
+      R"({"Label":"unknown","Value":"0"})",
+      R"({"label":"unknown","value":"0"})",
+      R"({"Label":"hello","Value":"world"})",
+      R"({"label":"bad","Value":"0"})",
+      R"({"Label":"ok","value":"1"})",
+  });
+  testFromJson(
+      input,
+      makeRowVector({"Label", "Value"}, {expectedLabels, expectedValues}));
+}
+
+TEST_F(FromJsonTest, structFieldNameCaseSensitiveDedup) {
+  auto input = makeFlatVector<std::string>({
+      R"({"Label":"unknown","Value":"0"})",
+      R"({"label":"unknown","value":"0"})",
+      R"({"label":"lower","Value":"0"})",
+      R"({"Label":"upper","value":"0"})",
+  });
+  auto expectedLabel = makeNullableFlatVector<StringView>(
+      {"unknown", std::nullopt, std::nullopt, "upper"});
+  auto expectedValue = makeNullableFlatVector<StringView>(
+      {"0", std::nullopt, "0", std::nullopt});
+  testFromJson(
+      input,
+      makeRowVector({"Label", "Value"}, {expectedLabel, expectedValue}));
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test
