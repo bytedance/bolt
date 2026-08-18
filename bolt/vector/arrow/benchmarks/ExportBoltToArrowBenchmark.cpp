@@ -32,6 +32,7 @@ using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
 
 static constexpr int32_t kRowsPerVector = 100'000;
+static constexpr vector_size_t kSmallBatchRows = 128;
 static constexpr vector_size_t kBatchRows = 8'192;
 static constexpr size_t kWideBatchColumns = 1'700;
 
@@ -116,9 +117,11 @@ VectorPtr varcharVecHalfNull;
 VectorPtr varchar2VecHalfNull;
 VectorPtr complexVecHalfNull;
 
+VectorPtr smallNarrowBatch;
 VectorPtr narrowBatch;
 VectorPtr nestedBatch;
 VectorPtr wideBatch;
+std::unique_ptr<ReusableArrowBatchPool> smallNarrowBatchPool;
 std::unique_ptr<ReusableArrowBatchPool> narrowBatchPool;
 std::unique_ptr<ReusableArrowBatchPool> nestedBatchPool;
 std::unique_ptr<ReusableArrowBatchPool> wideBatchPool;
@@ -171,14 +174,17 @@ void createVectors() {
       bigintVecHalfNull->slice(0, kBatchRows),
       varcharVecHalfNull->slice(0, kBatchRows),
   });
+  smallNarrowBatch = narrowBatch->slice(0, kSmallBatchRows);
   nestedBatch = complexVec->slice(0, kBatchRows);
   // Share data vectors so this case isolates per-column Arrow metadata costs.
   wideBatch = vectorMaker_.rowVector(std::vector<VectorPtr>(
       kWideBatchColumns, integerVec->slice(0, kBatchRows)));
 
+  smallNarrowBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
   narrowBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
   nestedBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
   wideBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
+  warmUpBatchPool(smallNarrowBatch, *smallNarrowBatchPool);
   warmUpBatchPool(narrowBatch, *narrowBatchPool);
   warmUpBatchPool(nestedBatch, *nestedBatchPool);
   warmUpBatchPool(wideBatch, *wideBatchPool);
@@ -204,6 +210,14 @@ BENCHMARK_NAMED_PARAM(
     utf8viewHalfNull,
     varchar2VecHalfNull,
     options);
+
+BENCHMARK_DRAW_LINE();
+BENCHMARK_NAMED_PARAM(runExportArrowBatch, narrow8x128, smallNarrowBatch);
+BENCHMARK_NAMED_PARAM(
+    runExportReusableArrowBatch,
+    narrow8x128,
+    smallNarrowBatch,
+    smallNarrowBatchPool.get());
 
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(runExportArrowBatch, narrow8x8192, narrowBatch);
