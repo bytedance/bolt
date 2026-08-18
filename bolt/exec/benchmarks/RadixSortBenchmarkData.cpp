@@ -31,6 +31,8 @@ constexpr uint32_t kFixedPayloadColumns = 16;
 constexpr uint32_t kVeryWideFixedPayloadColumns = 64;
 constexpr uint32_t kStringPayloadColumns = 8;
 constexpr uint32_t kBucketMetricColumns = 108;
+constexpr uint32_t kLowCardinalityArrayOnlyPayloadColumns = 30;
+constexpr uint32_t kLogPatternBigintPayloadColumns = 106;
 
 CompareFlags flags(bool ascending = true, bool nullsFirst = false) {
   return CompareFlags{
@@ -97,6 +99,11 @@ bool hasBucketWriteComplexPayload(ScenarioKind kind) {
   return kind == ScenarioKind::kBucketWriteComplexPayload;
 }
 
+bool isLowCardinalityInt32ArrayPayloadScenario(ScenarioKind kind) {
+  return kind == ScenarioKind::kLowCardinalityInt32LogPatternPayload ||
+      kind == ScenarioKind::kLowCardinalityInt32ArrayPayload;
+}
+
 template <typename ValueAt, typename IsNullAt>
 FlatVectorPtr<StringView> makeStringVector(
     memory::MemoryPool* pool,
@@ -114,6 +121,32 @@ FlatVectorPtr<StringView> makeStringVector(
     }
   }
   return result;
+}
+
+BufferPtr makeDictionaryIndices(
+    memory::MemoryPool* pool,
+    vector_size_t size,
+    vector_size_t baseSize,
+    uint64_t salt) {
+  auto indices = AlignedBuffer::allocate<vector_size_t>(size, pool);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  for (vector_size_t row = 0; row < size; ++row) {
+    rawIndices[row] =
+        static_cast<vector_size_t>(randomBits(row + salt) % baseSize);
+  }
+  return indices;
+}
+
+VectorPtr wrapDictionary(
+    memory::MemoryPool* pool,
+    const VectorPtr& vector,
+    vector_size_t size,
+    uint64_t salt) {
+  return BaseVector::wrapInDictionary(
+      nullptr,
+      makeDictionaryIndices(pool, size, vector->size(), salt),
+      size,
+      vector);
 }
 
 RowTypePtr rowTypeFor(ScenarioKind kind, ScenarioProfile profile) {
@@ -233,6 +266,41 @@ RowTypePtr rowTypeFor(ScenarioKind kind, ScenarioProfile profile) {
       types.push_back(BIGINT());
       return ROW(std::move(names), std::move(types));
     }
+    case ScenarioKind::kLowCardinalityInt32LogPatternPayload: {
+      std::vector<std::string> names;
+      std::vector<TypePtr> types;
+      names.reserve(116);
+      types.reserve(116);
+      uint32_t bigintColumn = 0;
+      for (uint32_t column = 0; column < 115; ++column) {
+        if (column == 0 || column == 10 || column == 27 || column == 32) {
+          names.push_back("array_" + std::to_string(column));
+          types.push_back(ARRAY(BIGINT()));
+        } else if (column >= 3 && column <= 7) {
+          names.push_back("string_" + std::to_string(column));
+          types.push_back(VARCHAR());
+        } else {
+          names.push_back("metric_" + std::to_string(bigintColumn++));
+          types.push_back(BIGINT());
+        }
+      }
+      BOLT_CHECK_EQ(bigintColumn, kLogPatternBigintPayloadColumns);
+      names.push_back("key");
+      types.push_back(INTEGER());
+      return ROW(std::move(names), std::move(types));
+    }
+    case ScenarioKind::kLowCardinalityInt32ArrayPayload: {
+      std::vector<std::string> names;
+      std::vector<TypePtr> types;
+      for (uint32_t column = 0; column < kLowCardinalityArrayOnlyPayloadColumns;
+           ++column) {
+        names.push_back("array_" + std::to_string(column));
+        types.push_back(ARRAY(BIGINT()));
+      }
+      names.push_back("key");
+      types.push_back(INTEGER());
+      return ROW(std::move(names), std::move(types));
+    }
     case ScenarioKind::kInlineVarchar:
     case ScenarioKind::kLongVarchar:
     case ScenarioKind::kVarcharCommonPrefix:
@@ -283,6 +351,10 @@ void addKeyMetadata(
         ? std::vector<column_index_t>{0, 1, 2, 3}
         : std::vector<column_index_t>{0, 1, 2};
     fixture.keyFlags.assign(fixture.keyChannels.size(), flags(true, true));
+  } else if (isLowCardinalityInt32ArrayPayloadScenario(kind)) {
+    fixture.keyChannels = {
+        static_cast<column_index_t>(fixture.rowType->size() - 1)};
+    fixture.keyFlags = {flags(true, true)};
   } else {
     fixture.keyChannels = {0};
     fixture.keyFlags = {flags()};
@@ -383,6 +455,43 @@ ArrayVectorPtr makeBigintArrayVector(
     }
   }
   return result;
+}
+
+ArrayVectorPtr makeAverageLengthBigintArrayVector(
+    memory::MemoryPool* pool,
+    const TypePtr& type,
+    vector_size_t size,
+    uint32_t averageLength,
+    uint64_t salt) {
+  BOLT_CHECK_GT(averageLength, 0);
+  std::vector<vector_size_t> offsets(size);
+  std::vector<vector_size_t> lengths(size);
+  uint64_t elementCount = 0;
+  const auto lengthRange = 2 * averageLength + 1;
+  for (vector_size_t row = 0; row < size; ++row) {
+    const auto index = static_cast<uint64_t>(row) + salt;
+    const auto length =
+        static_cast<vector_size_t>(randomBits(index) % lengthRange);
+    offsets[row] = static_cast<vector_size_t>(elementCount);
+    lengths[row] = length;
+    elementCount += length;
+  }
+  auto elements = makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      static_cast<vector_size_t>(elementCount),
+      [&](vector_size_t element) {
+        return static_cast<int64_t>(randomBits(element + salt * 31));
+      },
+      [](vector_size_t) { return false; });
+  return std::make_shared<ArrayVector>(
+      pool,
+      type,
+      nullptr,
+      size,
+      makeBuffer(pool, offsets),
+      makeBuffer(pool, lengths),
+      elements);
 }
 
 void addBucketStringPayload(
@@ -806,6 +915,125 @@ void addWideStringPayload(
   }
 }
 
+VectorPtr makeLowCardinalityInt32DictionaryKey(
+    memory::MemoryPool* pool,
+    vector_size_t offset,
+    vector_size_t size) {
+  auto base = makeFlatVector<int32_t>(
+      pool,
+      INTEGER(),
+      9,
+      [&](vector_size_t row) { return static_cast<int32_t>(row); },
+      [](vector_size_t) { return false; });
+  auto indices = AlignedBuffer::allocate<vector_size_t>(size, pool);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  for (vector_size_t row = 0; row < size; ++row) {
+    rawIndices[row] = static_cast<vector_size_t>((offset + row) % 9);
+  }
+  return BaseVector::wrapInDictionary(nullptr, indices, size, base);
+}
+
+void addLogPatternPayload(
+    memory::MemoryPool* pool,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  uint32_t bigintColumn = 0;
+  for (uint32_t column = 0; column < 115; ++column) {
+    if (column == 0) {
+      auto base = makeAverageLengthBigintArrayVector(
+          pool, ARRAY(BIGINT()), size, 5, static_cast<uint64_t>(offset) + 17);
+      children.push_back(
+          wrapDictionary(pool, base, size, static_cast<uint64_t>(offset) + 19));
+    } else if (column == 10) {
+      children.push_back(makeAverageLengthBigintArrayVector(
+          pool, ARRAY(BIGINT()), size, 18, static_cast<uint64_t>(offset) + 23));
+    } else if (column == 27 || column == 32) {
+      children.push_back(makeAverageLengthBigintArrayVector(
+          pool,
+          ARRAY(BIGINT()),
+          size,
+          5,
+          static_cast<uint64_t>(offset) + column * 131 + 29));
+    } else if (column == 3 || column == 4) {
+      auto base = makeStringVector(
+          pool,
+          size,
+          [&](vector_size_t row) {
+            return column == 3
+                ? "did"
+                : "strategy-" + std::to_string((offset + row + column) % 128);
+          },
+          [](vector_size_t) { return false; });
+      children.push_back(wrapDictionary(
+          pool, base, size, static_cast<uint64_t>(offset) + column));
+    } else if (column >= 5 && column <= 7) {
+      children.push_back(makeStringVector(
+          pool,
+          size,
+          [&](vector_size_t row) {
+            if (column == 5) {
+              return "2024" +
+                  std::to_string(1000 + static_cast<int>((offset + row) % 300));
+            }
+            if (column == 6) {
+              return "manual-pattern-" + std::to_string((offset + row) % 10000);
+            }
+            return "level-" + std::to_string((offset + row) % 256);
+          },
+          [&](vector_size_t row) {
+            return (offset + row + column) % 97 == 0;
+          }));
+    } else {
+      const bool nullable = column >= 63;
+      const auto metric = bigintColumn++;
+      auto metricVector = makeFlatVector<int64_t>(
+          pool,
+          BIGINT(),
+          size,
+          [&](vector_size_t row) {
+            return static_cast<int64_t>(
+                randomBits(offset + row + metric * 997));
+          },
+          [=](vector_size_t row) {
+            return nullable && (offset + row + metric) % 11 == 0;
+          });
+      if (column == 1 || column == 2) {
+        children.push_back(wrapDictionary(
+            pool,
+            metricVector,
+            size,
+            static_cast<uint64_t>(offset) + column * 47));
+      } else {
+        children.push_back(metricVector);
+      }
+    }
+  }
+  BOLT_CHECK_EQ(bigintColumn, kLogPatternBigintPayloadColumns);
+}
+
+void addLowCardinalityInt32ArrayPayload(
+    memory::MemoryPool* pool,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  for (uint32_t column = 0; column < kLowCardinalityArrayOnlyPayloadColumns;
+       ++column) {
+    auto array = makeAverageLengthBigintArrayVector(
+        pool,
+        ARRAY(BIGINT()),
+        size,
+        column % 2 == 0 ? 15 : 5,
+        static_cast<uint64_t>(offset) + column * 257 + 23);
+    if (column % 2 == 0) {
+      children.push_back(wrapDictionary(
+          pool, array, size, static_cast<uint64_t>(offset) + column * 31));
+    } else {
+      children.push_back(array);
+    }
+  }
+}
+
 } // namespace
 
 ScenarioFixture makeFixture(
@@ -883,13 +1111,24 @@ ScenarioFixture makeFixture(
           addBucketWritePayload(pool, spec.kind, offset, size, children);
         }
         break;
+      case ScenarioKind::kLowCardinalityInt32LogPatternPayload:
+        addLogPatternPayload(pool, offset, size, children);
+        break;
+      case ScenarioKind::kLowCardinalityInt32ArrayPayload:
+        addLowCardinalityInt32ArrayPayload(pool, offset, size, children);
+        break;
     }
-    children.push_back(makeFlatVector<int64_t>(
-        pool,
-        BIGINT(),
-        size,
-        [&](vector_size_t row) { return static_cast<int64_t>(offset + row); },
-        [](vector_size_t) { return false; }));
+    if (isLowCardinalityInt32ArrayPayloadScenario(spec.kind)) {
+      children.push_back(
+          makeLowCardinalityInt32DictionaryKey(pool, offset, size));
+    } else {
+      children.push_back(makeFlatVector<int64_t>(
+          pool,
+          BIGINT(),
+          size,
+          [&](vector_size_t row) { return static_cast<int64_t>(offset + row); },
+          [](vector_size_t) { return false; }));
+    }
     fixture.inputs.push_back(std::make_shared<RowVector>(
         pool, fixture.rowType, nullptr, size, std::move(children)));
   }

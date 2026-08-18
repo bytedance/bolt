@@ -53,18 +53,6 @@ class ContainerRowSerde {
       ByteOutputStream& out,
       const ContainerRowSerdeOptions& options);
 
-  static size_t serializedSize(
-      const BaseVector& source,
-      vector_size_t index,
-      const ContainerRowSerdeOptions& options);
-
-  static void serializeTo(
-      const BaseVector& source,
-      vector_size_t index,
-      char* output,
-      size_t outputSize,
-      const ContainerRowSerdeOptions& options);
-
   static void deserialize(
       ByteInputStream& in,
       vector_size_t index,

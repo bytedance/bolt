@@ -113,28 +113,6 @@ class ContainerRowSerdeTest : public testing::Test,
     allocator_.clear();
   }
 
-  void testContiguousEncoding(const VectorPtr& data, bool isKey) {
-    const ContainerRowSerdeOptions options{.isKey = isKey};
-    for (vector_size_t row = 0; row < data->size(); ++row) {
-      ASSERT_FALSE(data->isNullAt(row));
-      StreamArena arena(pool());
-      ByteOutputStream output(&arena);
-      output.startWrite(128);
-      ContainerRowSerde::serialize(*data, row, output, options);
-      std::ostringstream serialized;
-      OStreamOutputStream sink(&serialized);
-      output.flush(&sink);
-      const auto expected = serialized.str();
-      const auto expectedSize = expected.size();
-      EXPECT_EQ(
-          ContainerRowSerde::serializedSize(*data, row, options), expectedSize);
-      std::vector<char> actual(expectedSize);
-      ContainerRowSerde::serializeTo(
-          *data, row, actual.data(), actual.size(), options);
-      EXPECT_EQ(std::string(actual.data(), actual.size()), expected);
-    }
-  }
-
   void assertNotEqualVectors(const VectorPtr& left, const VectorPtr& right) {
     ASSERT_NE(left->size(), 0);
     for (auto i = 0; i < left->size(); ++i) {
@@ -318,29 +296,6 @@ TEST_F(ContainerRowSerdeTest, map) {
     assertNotEqualVectors(
         data->mapKeys(), deserialized->as<MapVector>()->mapKeys());
   }
-}
-
-TEST_F(ContainerRowSerdeTest, contiguousEncodingMatchesStream) {
-  auto maps = makeMapVector<int64_t, int64_t>({
-      {{2, 20}, {3, 30}, {1, 10}},
-      {{4, 40}},
-      {},
-  });
-  testContiguousEncoding(maps, false);
-  testContiguousEncoding(maps, true);
-
-  auto nested = makeRowVector(
-      {makeFlatVector<std::string>(
-           {"short", std::string(80, 's'), std::string()}),
-       makeArrayVector<int64_t>({{1, 2}, {}, {3, 4, 5}}),
-       maps});
-  testContiguousEncoding(nested, false);
-
-  auto hugeints =
-      makeFlatVector<int128_t>({HugeInt::build(1, 2)}, DECIMAL(20, 3));
-  auto constantHugeints = BaseVector::wrapInConstant(130, 0, hugeints);
-  auto constantArray = makeArrayVector({0, 130}, constantHugeints);
-  testContiguousEncoding(constantArray, false);
 }
 
 TEST_F(ContainerRowSerdeTest, string) {
