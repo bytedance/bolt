@@ -19,9 +19,8 @@
 #include <folly/init/Init.h>
 #include <string>
 
-#include "bolt/exec/tests/utils/Cursor.h"
-#include "bolt/exec/tests/utils/OperatorTestBase.h"
-#include "bolt/exec/tests/utils/PlanBuilder.h"
+#include "bolt/vector/arrow/Abi.h"
+#include "bolt/vector/arrow/Bridge.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorMaker.h"
 
@@ -31,25 +30,58 @@ DEFINE_int64(
     "Seed for random input dataset generator");
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::test;
-using namespace bytedance::bolt::exec::test;
 
 static constexpr int32_t kRowsPerVector = 100'000;
+static constexpr vector_size_t kBatchRows = 8'192;
+static constexpr size_t kWideBatchColumns = 1'700;
 
 namespace {
 
 // Boiler plate structures required by vectorMaker.
 memory::MemoryManager memoryManager;
-std::shared_ptr<core::QueryCtx> queryCtx_{core::QueryCtx::create()};
 std::shared_ptr<memory::MemoryPool> pool_{memoryManager.addLeafPool()};
-core::ExecCtx execCtx_{pool_.get(), queryCtx_.get()};
-bytedance::bolt::test::VectorMaker vectorMaker_{execCtx_.pool()};
+bytedance::bolt::test::VectorMaker vectorMaker_{pool_.get()};
 
 void runExportToArrow(
-    uint32_t,
+    uint32_t iterations,
     VectorPtr vec,
     ArrowOptions options = ArrowOptions{}) {
-  ArrowArray arrowArray;
-  exportToArrow(vec, arrowArray, pool_.get(), options);
+  for (uint32_t i = 0; i < iterations; ++i) {
+    ArrowArray arrowArray{};
+    exportToArrow(vec, arrowArray, pool_.get(), options);
+    folly::doNotOptimizeAway(arrowArray.buffers);
+    arrowArray.release(&arrowArray);
+  }
+}
+
+void runExportArrowBatch(uint32_t iterations, const VectorPtr& vector) {
+  for (uint32_t i = 0; i < iterations; ++i) {
+    ArrowSchema schema{};
+    ArrowArray array{};
+    exportToArrow(vector, schema, ArrowOptions{}, {}, pool_.get());
+    exportToArrow(vector, array, pool_.get(), ArrowOptions{});
+    folly::doNotOptimizeAway(schema.format);
+    folly::doNotOptimizeAway(array.buffers);
+    array.release(&array);
+    schema.release(&schema);
+  }
+}
+
+void runExportReusableArrowBatch(
+    uint32_t iterations,
+    const VectorPtr& vector,
+    ReusableArrowBatchPool* batchPool) {
+  for (uint32_t i = 0; i < iterations; ++i) {
+    ArrowSchema schema{};
+    ArrowArray array{};
+    const auto schemaExported = batchPool->exportToArrow(
+        vector, pool_.get(), ArrowOptions{}, &schema, &array);
+    folly::doNotOptimizeAway(schemaExported);
+    folly::doNotOptimizeAway(schema.format);
+    folly::doNotOptimizeAway(array.buffers);
+    array.release(&array);
+    schema.release(&schema);
+  }
 }
 
 RowTypePtr complexType = ROW({
@@ -84,6 +116,23 @@ VectorPtr varcharVecHalfNull;
 VectorPtr varchar2VecHalfNull;
 VectorPtr complexVecHalfNull;
 
+VectorPtr narrowBatch;
+VectorPtr nestedBatch;
+VectorPtr wideBatch;
+std::unique_ptr<ReusableArrowBatchPool> narrowBatchPool;
+std::unique_ptr<ReusableArrowBatchPool> nestedBatchPool;
+std::unique_ptr<ReusableArrowBatchPool> wideBatchPool;
+
+void warmUpBatchPool(
+    const VectorPtr& vector,
+    ReusableArrowBatchPool& batchPool) {
+  ArrowSchema schema{};
+  ArrowArray array{};
+  batchPool.exportToArrow(vector, pool_.get(), ArrowOptions{}, &schema, &array);
+  array.release(&array);
+  schema.release(&schema);
+}
+
 void createVectors() {
   VectorFuzzer::Options opts;
   opts.vectorSize = kRowsPerVector;
@@ -111,6 +160,28 @@ void createVectors() {
   varcharVecHalfNull = fuzzer.fuzzFlat(VARCHAR());
   varchar2VecHalfNull = fuzzer.fuzzFlat(VARCHAR());
   complexVecHalfNull = fuzzer.fuzzFlat(complexType);
+
+  narrowBatch = vectorMaker_.rowVector({
+      integerVec->slice(0, kBatchRows),
+      bigintVec->slice(0, kBatchRows),
+      realVec->slice(0, kBatchRows),
+      doubleVec->slice(0, kBatchRows),
+      varcharVec->slice(0, kBatchRows),
+      integerVecHalfNull->slice(0, kBatchRows),
+      bigintVecHalfNull->slice(0, kBatchRows),
+      varcharVecHalfNull->slice(0, kBatchRows),
+  });
+  nestedBatch = complexVec->slice(0, kBatchRows);
+  // Share data vectors so this case isolates per-column Arrow metadata costs.
+  wideBatch = vectorMaker_.rowVector(std::vector<VectorPtr>(
+      kWideBatchColumns, integerVec->slice(0, kBatchRows)));
+
+  narrowBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
+  nestedBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
+  wideBatchPool = std::make_unique<ReusableArrowBatchPool>(1);
+  warmUpBatchPool(narrowBatch, *narrowBatchPool);
+  warmUpBatchPool(nestedBatch, *nestedBatchPool);
+  warmUpBatchPool(wideBatch, *wideBatchPool);
 }
 
 BENCHMARK_NAMED_PARAM(runExportToArrow, integer, integerVec);
@@ -133,6 +204,30 @@ BENCHMARK_NAMED_PARAM(
     utf8viewHalfNull,
     varchar2VecHalfNull,
     options);
+
+BENCHMARK_DRAW_LINE();
+BENCHMARK_NAMED_PARAM(runExportArrowBatch, narrow8x8192, narrowBatch);
+BENCHMARK_NAMED_PARAM(
+    runExportReusableArrowBatch,
+    narrow8x8192,
+    narrowBatch,
+    narrowBatchPool.get());
+
+BENCHMARK_DRAW_LINE();
+BENCHMARK_NAMED_PARAM(runExportArrowBatch, nested4x8192, nestedBatch);
+BENCHMARK_NAMED_PARAM(
+    runExportReusableArrowBatch,
+    nested4x8192,
+    nestedBatch,
+    nestedBatchPool.get());
+
+BENCHMARK_DRAW_LINE();
+BENCHMARK_NAMED_PARAM(runExportArrowBatch, wide1700x8192, wideBatch);
+BENCHMARK_NAMED_PARAM(
+    runExportReusableArrowBatch,
+    wide1700x8192,
+    wideBatch,
+    wideBatchPool.get());
 
 } // namespace
 
