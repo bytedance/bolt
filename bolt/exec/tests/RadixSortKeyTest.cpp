@@ -147,6 +147,30 @@ class RadixSortKeyTest : public testing::Test {
     return (left.size() > right.size()) - (left.size() < right.size());
   }
 
+  static int32_t compareEncodedKeys(
+      const EncodedKeyBatch& keys,
+      vector_size_t left,
+      vector_size_t right) {
+    BOLT_CHECK_GE(left, 0);
+    BOLT_CHECK_GE(right, 0);
+    BOLT_CHECK_LT(left, keys.size());
+    BOLT_CHECK_LT(right, keys.size());
+    if (keys.format() == EncodedKeyFormat::kFixed64) {
+      const auto leftKey = keys.fixedKeyAt(left);
+      const auto rightKey = keys.fixedKeyAt(right);
+      return (leftKey > rightKey) - (leftKey < rightKey);
+    }
+    return encodedCompare(keys.variableKeyAt(left), keys.variableKeyAt(right));
+  }
+
+  void decodeViews(
+      const RadixSortKeyCodec& codec,
+      std::span<const EncodedKeyView> views,
+      RowVectorPtr& decoded) {
+    BufferPtr cursorScratch;
+    codec.decode(views, {}, {}, pool_.get(), cursorScratch, decoded);
+  }
+
   static RadixSortKeyLayout layoutFromKind(RadixSortKeyLayoutKind kind) {
     return RadixSortKeyLayout::fromKind(kind);
   }
@@ -623,26 +647,6 @@ TEST_F(RadixSortKeyTest, codecPhysicalCompareProperty) {
                        : std::span<char* const>{});
         ASSERT_EQ(arena.size(), rows->size());
 
-        RadixSortRunStorage directArena(pool_.get(), layout, 3, 64);
-        if (codec->canEncodeSingleFixedFlat(*testCase.vector, directArena)) {
-          codec->appendSingleFixedFlat(
-              *testCase.vector,
-              rows->size(),
-              directArena,
-              hasPayload ? std::span<char* const>(payloads)
-                         : std::span<char* const>{});
-          ASSERT_EQ(directArena.size(), arena.size());
-          for (vector_size_t row = 0; row < rows->size(); ++row) {
-            EXPECT_EQ(
-                std::memcmp(
-                    directArena.keyDataAt(row),
-                    arena.keyDataAt(row),
-                    layout.width()),
-                0)
-                << "row=" << row;
-          }
-        }
-
         for (vector_size_t row = 0; row < rows->size(); ++row) {
           const auto original = encodedKeyAt(encodedKeys, row);
           verifyDeconstructed(layout, arena.keyAt(row), original);
@@ -651,7 +655,7 @@ TEST_F(RadixSortKeyTest, codecPhysicalCompareProperty) {
         }
         for (vector_size_t left = 0; left < rows->size(); ++left) {
           for (vector_size_t right = 0; right < rows->size(); ++right) {
-            const auto expected = codec->compare(encodedKeys, left, right);
+            const auto expected = compareEncodedKeys(encodedKeys, left, right);
             const auto actual = arena.keyAt(left).compare(arena.keyAt(right));
             EXPECT_EQ(
                 (actual > 0) - (actual < 0), (expected > 0) - (expected < 0));
@@ -661,7 +665,10 @@ TEST_F(RadixSortKeyTest, codecPhysicalCompareProperty) {
         std::vector<RadixSortInlineKeyBuffer> buffers;
         auto views = deconstructArena(arena, buffers);
         RowVectorPtr decoded;
-        codec->decode(views, pool_.get(), decoded);
+        decodeViews(
+            *codec,
+            std::span<const EncodedKeyView>(views.data(), views.size()),
+            decoded);
         for (vector_size_t row = 0; row < rows->size(); ++row) {
           EXPECT_EQ(
               SortComparatorOracle::compare(
@@ -712,7 +719,7 @@ TEST_F(RadixSortKeyTest, multipleColumnCodecPhysicalCompare) {
                    : std::span<char* const>{});
     for (vector_size_t left = 0; left < rows->size(); ++left) {
       for (vector_size_t right = 0; right < rows->size(); ++right) {
-        const auto expected = codec->compare(encodedKeys, left, right);
+        const auto expected = compareEncodedKeys(encodedKeys, left, right);
         const auto actual = arena.keyAt(left).compare(arena.keyAt(right));
         EXPECT_EQ((actual > 0) - (actual < 0), (expected > 0) - (expected < 0));
       }
@@ -721,7 +728,10 @@ TEST_F(RadixSortKeyTest, multipleColumnCodecPhysicalCompare) {
     std::vector<RadixSortInlineKeyBuffer> buffers;
     auto views = deconstructArena(arena, buffers);
     RowVectorPtr decoded;
-    codec->decode(views, pool_.get(), decoded);
+    decodeViews(
+        *codec,
+        std::span<const EncodedKeyView>(views.data(), views.size()),
+        decoded);
     const std::vector<column_index_t> channels{0, 1, 2};
     for (vector_size_t row = 0; row < rows->size(); ++row) {
       EXPECT_EQ(
@@ -779,7 +789,10 @@ TEST_F(RadixSortKeyTest, nestedCodecPhysicalCompare) {
   std::vector<RadixSortInlineKeyBuffer> buffers;
   auto views = deconstructArena(arena, buffers);
   RowVectorPtr decoded;
-  codec->decode(views, pool_.get(), decoded);
+  decodeViews(
+      *codec,
+      std::span<const EncodedKeyView>(views.data(), views.size()),
+      decoded);
   for (vector_size_t row = 0; row < rows->size(); ++row) {
     EXPECT_EQ(
         SortComparatorOracle::compareRows(

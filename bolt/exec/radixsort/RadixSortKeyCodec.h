@@ -28,6 +28,7 @@
 
 namespace bytedance::bolt::exec::radixsort {
 
+class RadixSortRun;
 class RadixSortRunStorage;
 struct EncodedKeyView;
 enum class RadixSortKeyLayoutKind : uint8_t;
@@ -82,29 +83,15 @@ class EncodedKeyBatch {
 };
 
 class RadixSortKeyCodec {
+  friend class RadixSortRun;
+
  public:
   static bool supportsEncodeDecode(const Type& type);
 
   static void bind(
       const std::vector<TypePtr>& types,
       const std::vector<CompareFlags>& flags,
-      const std::vector<bool>& knownNonNull,
       std::unique_ptr<RadixSortKeyCodec>& codec);
-
-  static void bind(
-      const std::vector<TypePtr>& types,
-      const std::vector<CompareFlags>& flags,
-      std::unique_ptr<RadixSortKeyCodec>& codec) {
-    bind(types, flags, {}, codec);
-  }
-
-  const std::vector<RadixSortKeyColumn>& columns() const {
-    return columns_;
-  }
-
-  EncodedKeyFormat format() const {
-    return format_;
-  }
 
   std::optional<uint64_t> maximumEncodedSize() const {
     return maximumEncodedSize_;
@@ -112,10 +99,6 @@ class RadixSortKeyCodec {
 
   bool canEncodeDecode() const {
     return canEncodeDecode_;
-  }
-
-  const std::vector<uint32_t>& leadingSkippableValidityOffsets() const {
-    return leadingSkippableValidityOffsets_;
   }
 
   std::vector<uint32_t> leadingSkippableValidityOffsets(
@@ -126,32 +109,6 @@ class RadixSortKeyCodec {
       memory::MemoryPool* pool,
       EncodedKeyBatch& result) const;
 
-  bool canEncodeSingleFixedFlat(
-      const BaseVector& input,
-      const RadixSortRunStorage& arena) const;
-
-  void appendSingleFixedFlat(
-      const BaseVector& input,
-      vector_size_t size,
-      RadixSortRunStorage& arena,
-      std::span<char* const> payloads) const;
-
-  void decode(
-      const EncodedKeyBatch& keys,
-      memory::MemoryPool* pool,
-      RowVectorPtr& result) const;
-
-  void decode(
-      std::span<const EncodedKeyView> keys,
-      memory::MemoryPool* pool,
-      RowVectorPtr& result) const;
-
-  void decode(
-      std::span<const EncodedKeyView> keys,
-      memory::MemoryPool* pool,
-      BufferPtr& cursorScratch,
-      RowVectorPtr& result) const;
-
   void decode(
       std::span<const EncodedKeyView> keys,
       std::span<const uint8_t> decodedColumns,
@@ -159,28 +116,6 @@ class RadixSortKeyCodec {
       memory::MemoryPool* pool,
       BufferPtr& cursorScratch,
       RowVectorPtr& result) const;
-
-  bool canDecodeSingleFixedColumn() const;
-
-  void decodeSingleFixedColumn(
-      const RadixSortRunStorage& arena,
-      uint64_t begin,
-      vector_size_t count,
-      bool mayHaveNulls,
-      memory::MemoryPool* pool,
-      RowVectorPtr& result) const;
-
-  void decodeSingleFixedColumn(
-      std::span<const char* const> keys,
-      RadixSortKeyLayoutKind layoutKind,
-      bool mayHaveNulls,
-      memory::MemoryPool* pool,
-      RowVectorPtr& result) const;
-
-  int32_t compare(
-      const EncodedKeyBatch& keys,
-      vector_size_t left,
-      vector_size_t right) const;
 
  private:
   void encodeSingleFixedFlat(
@@ -192,15 +127,40 @@ class RadixSortKeyCodec {
       std::vector<RadixSortKeyColumn> columns,
       EncodedKeyFormat format,
       std::optional<uint64_t> maximumEncodedSize,
-      bool canEncodeDecode,
-      std::vector<uint32_t> leadingSkippableValidityOffsets);
+      bool canEncodeDecode);
+
+  bool canAppendSingleFixedFlat(
+      const BaseVector& input,
+      const RadixSortRunStorage& arena) const;
+
+  bool tryAppendSingleFixedFlat(
+      const BaseVector& input,
+      vector_size_t size,
+      RadixSortRunStorage& arena,
+      std::span<char* const> payloads) const;
+
+  bool canDecodeSingleFixedColumn() const;
+
+  bool tryDecodeSingleFixedColumn(
+      const RadixSortRunStorage& arena,
+      uint64_t begin,
+      vector_size_t count,
+      bool mayHaveNulls,
+      memory::MemoryPool* pool,
+      RowVectorPtr& result) const;
+
+  bool tryDecodeSingleFixedColumn(
+      std::span<const char* const> keys,
+      RadixSortKeyLayoutKind layoutKind,
+      bool mayHaveNulls,
+      memory::MemoryPool* pool,
+      RowVectorPtr& result) const;
 
   std::vector<RadixSortKeyColumn> columns_;
   RowTypePtr rowType_;
   EncodedKeyFormat format_;
   std::optional<uint64_t> maximumEncodedSize_;
   bool canEncodeDecode_;
-  std::vector<uint32_t> leadingSkippableValidityOffsets_;
   mutable std::vector<uint64_t> encodeCursorScratch_;
 };
 

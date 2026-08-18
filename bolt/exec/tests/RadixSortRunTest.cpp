@@ -423,21 +423,18 @@ TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
       output->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(0), 42);
 }
 
-TEST_F(RadixSortRunTest, appendNullStatsCalibrateKnownNonNullSkip) {
+TEST_F(RadixSortRunTest, appendUpdatesKeyNullabilityStats) {
   auto input = makeRows(
       runPool_.get(),
       {"key", "id"},
       {makeVector<int64_t>(runPool_.get(), BIGINT(), {2, std::nullopt, 1, 3}),
        makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3})});
-  RadixSortRunOptions options;
-  options.knownNonNullKeys = {true};
   auto run = createRun(
       rowTypeOf(*input),
       ROW({"key"}, {BIGINT()}),
       {flags(true, false)},
       {0},
-      {},
-      std::move(options));
+      {});
   run->append(*input);
   EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{1}));
   run->finalize();

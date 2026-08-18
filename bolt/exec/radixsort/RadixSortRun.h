@@ -144,7 +144,6 @@ struct RadixSortRunStats {
 };
 
 struct RadixSortRunOptions {
-  std::vector<bool> knownNonNullKeys;
   std::vector<uint8_t> initialKeyMayHaveNulls;
   std::vector<uint8_t> initialPayloadMayHaveNulls;
   uint32_t keysPerBlock{RadixSortRunStorage::kDefaultKeysPerBlock};
