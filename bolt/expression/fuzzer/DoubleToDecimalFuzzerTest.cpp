@@ -52,8 +52,9 @@ int main(int argc, char** argv) {
     if ((uint64_t)to != decimalValue.low_bits() ||
         (int64_t)(to >> 64) != decimalValue.high_bits()) {
       char cached[64];
-      auto strSize =
-          bytedance::bolt::DecimalUtil::convertToString(to, scale, 64, cached);
+      auto strSize = bytedance::bolt::DecimalUtil::convertToString<
+          bytedance::bolt::DecimalUtil::DecimalStringFormat::kPlain>(
+          to, scale, 64, cached);
       std::cout << std::setprecision(50) << "Mismatch for value: " << d << "\n";
       std::cout << "Expected: " << decimalValue.ToString(scale) << "\n";
       std::cout << "Got: " << std::string_view(cached, strSize) << "\n";

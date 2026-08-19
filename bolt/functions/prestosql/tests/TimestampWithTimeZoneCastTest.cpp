@@ -28,8 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/common/base/SparkCompatibility.h"
-
 #include "bolt/functions/prestosql/tests/CastBaseTest.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 using namespace bytedance::bolt;

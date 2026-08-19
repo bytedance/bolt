@@ -169,8 +169,9 @@ void benchmarkAll(
       } else if (v.second == "short_decimal") {
         input = vectorMaker.flatVector<std::string>(vectorSize, [&](auto j) {
           char buf[32];
-          auto size =
-              DecimalUtil::convertToString<int64_t>(123456789 * j, 6, 32, buf);
+          auto size = DecimalUtil::convertToString<
+              DecimalUtil::DecimalStringFormat::kPlain>(
+              123456789 * j, 6, 32, buf);
           return std::string(buf, size);
         });
       } else if (v.second == "long_decimal") {
@@ -178,7 +179,8 @@ void benchmarkAll(
           char buf[128];
           auto v =
               bytedance::bolt::HugeInt::build(12345 * j, 56789 * j + 12345);
-          auto size = DecimalUtil::convertToString<int64_t>(v, 18, 128, buf);
+          auto size = DecimalUtil::convertToString<
+              DecimalUtil::DecimalStringFormat::kPlain>(v, 18, 128, buf);
           return std::string(buf, size);
         });
       } else {

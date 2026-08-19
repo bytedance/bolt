@@ -264,61 +264,6 @@ class DecimalUtil {
     }
   }
 
-  /// @brief Convert the unscaled value of a decimal to varchar and write to raw
-  /// string buffer from start position.
-  /// @tparam T The type of input value.
-  /// @param unscaledValue The input unscaled value.
-  /// @param scale The scale of decimal.
-  /// @param maxVarcharSize The estimated max size of a varchar.
-  /// @param startPosition The start position to write from.
-  /// @return write size
-  template <typename T>
-  inline static size_t convertToString(
-      T unscaledValue,
-      int32_t scale,
-      int32_t maxVarcharSize,
-      char* const startPosition) {
-    if constexpr (sizeof(T) <= sizeof(int64_t)) {
-      if constexpr (std::is_signed_v<T>) {
-        return convertToString(
-            static_cast<int64_t>(unscaledValue),
-            scale,
-            maxVarcharSize,
-            startPosition);
-      } else {
-        return convertToString(
-            static_cast<uint64_t>(unscaledValue),
-            scale,
-            maxVarcharSize,
-            startPosition);
-      }
-    } else {
-      return convertToString(
-          static_cast<int128_t>(unscaledValue),
-          scale,
-          maxVarcharSize,
-          startPosition);
-    }
-  }
-
-  static size_t convertToString(
-      int64_t unscaledValue,
-      int32_t scale,
-      int32_t maxVarcharSize,
-      char* startPosition);
-
-  static size_t convertToString(
-      uint64_t unscaledValue,
-      int32_t scale,
-      int32_t maxVarcharSize,
-      char* startPosition);
-
-  static size_t convertToString(
-      int128_t unscaledValue,
-      int32_t scale,
-      int32_t maxVarcharSize,
-      char* startPosition);
-
   template <typename T>
   inline static void fillDecimals(
       T* decimals,

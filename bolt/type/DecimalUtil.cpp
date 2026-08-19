@@ -94,40 +94,13 @@ int32_t DecimalUtil::stringSize(int32_t precision, int32_t scale) {
   return strSize;
 }
 
-size_t DecimalUtil::convertToString(
-    int64_t unscaledValue,
-    int32_t scale,
-    int32_t maxVarcharSize,
-    char* startPosition) {
-  return convertToStringForBuild(
-      unscaledValue, scale, maxVarcharSize, startPosition);
-}
-
-size_t DecimalUtil::convertToString(
-    uint64_t unscaledValue,
-    int32_t scale,
-    int32_t maxVarcharSize,
-    char* startPosition) {
-  return convertToStringForBuild(
-      unscaledValue, scale, maxVarcharSize, startPosition);
-}
-
-size_t DecimalUtil::convertToString(
-    int128_t unscaledValue,
-    int32_t scale,
-    int32_t maxVarcharSize,
-    char* startPosition) {
-  return convertToStringForBuild(
-      unscaledValue, scale, maxVarcharSize, startPosition);
-}
-
 std::string DecimalUtil::toString(int128_t value, const TypePtr& type) {
   auto [precision, scale] = getDecimalPrecisionScale(*type);
   auto maxStrSize = stringSize(precision, scale);
   std::string decimalStr;
   decimalStr.resize(maxStrSize);
   auto actualSize =
-      convertToString(value, scale, maxStrSize, decimalStr.data());
+      convertToStringForBuild(value, scale, maxStrSize, decimalStr.data());
   decimalStr.resize(actualSize);
   return decimalStr;
 }

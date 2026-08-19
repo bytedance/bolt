@@ -153,8 +153,12 @@ TEST(DecimalTest, decimalToString) {
 
 TEST(DecimalTest, unsignedDecimalToString) {
   std::string result(32, '\0');
-  const auto size = DecimalUtil::convertToString(
-      std::numeric_limits<uint64_t>::max(), 0, result.size(), result.data());
+  const auto size =
+      DecimalUtil::convertToString<DecimalUtil::DecimalStringFormat::kPlain>(
+          std::numeric_limits<uint64_t>::max(),
+          0,
+          result.size(),
+          result.data());
   result.resize(size);
   EXPECT_EQ("18446744073709551615", result);
 }
