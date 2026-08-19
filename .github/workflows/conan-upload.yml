@@ -27,7 +27,7 @@ on:
         required: true
         type: choice
         options: [All, Release, Debug]
-        default: All
+        default: Release
 
 env:
   CCACHE_DIR: /data/ccache-data

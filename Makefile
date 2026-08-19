@@ -78,6 +78,8 @@ CONAN_OVERRIDE ?=
 BUILD_VERSION ?= main
 PROFILE ?= default
 BUILD_TYPE=Release
+# Build third-party dependencies in Release unless explicitly overridden.
+DEPENDENCY_BUILD_TYPE ?= Release
 
 # TODO: remove `BUILD_USER` and `BUILD_CHANNEL`
 BUILD_USER ?=
@@ -99,7 +101,7 @@ CONAN_BUILD_SETTINGS = \
 	-s llvm-core/*:build_type=Release \
 	-s google-cloud-cpp/*:build_type=Release \
 	-s "&:build_type=${BUILD_TYPE}" \
-	-s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}}
+	-s build_type=${DEPENDENCY_BUILD_TYPE}
 
 # Reusable Conan option fragments for public build targets.
 CONAN_TEST_CONFIG = -c bolt/*:tools.build:skip_test=False
@@ -198,11 +200,6 @@ CONAN_BUILD_ENV = \
 	NUM_LINK_JOB=$(NUM_LINK_JOB) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_BUILD_BENCHMARKS_BASIC=${BOLT_BUILD_BENCHMARKS_BASIC}
-
-ifeq ($(IN_CI), 1)
-	export DEPENDENCY_BUILD_TYPE = Release
-endif
-
 
 CPU_TARGET ?= "avx"
 
