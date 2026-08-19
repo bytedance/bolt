@@ -1593,7 +1593,7 @@ struct DateFormatFunction : public TimestampWithTimezoneSupport<T> {
   bool isConstFormat_ = false;
 };
 
-template <typename T>
+template <typename T, bool SparkCompatible = false>
 struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
@@ -1623,14 +1623,12 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<Timestamp>* /*timestamp*/,
       const arg_type<Varchar>* formatString) {
     sessionTimeZone_ = getTimeZoneFromConfig(config);
-#ifdef SPARK_COMPATIBLE
-    timePolicy_ = parseTimePolicy(config.timeParserPolicy());
-#else
-    if (formatString != nullptr) {
+    if constexpr (SparkCompatible) {
+      timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+    } else if (formatString != nullptr) {
       ensureFormatLegal(
           std::string_view(formatString->data(), formatString->size()));
     }
-#endif
     setFormatter(formatString);
   }
 
@@ -1639,14 +1637,12 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const core::QueryConfig& config,
       const arg_type<TimestampWithTimezone>* /*timestamp*/,
       const arg_type<Varchar>* formatString) {
-#ifdef SPARK_COMPATIBLE
-    timePolicy_ = parseTimePolicy(config.timeParserPolicy());
-#else
-    if (formatString != nullptr) {
+    if constexpr (SparkCompatible) {
+      timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+    } else if (formatString != nullptr) {
       ensureFormatLegal(
           std::string_view(formatString->data(), formatString->size()));
     }
-#endif
     setFormatter(formatString);
   }
 
@@ -1655,10 +1651,10 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<Timestamp>& timestamp,
       const arg_type<Varchar>& formatString) {
     if (!isConstFormat_) {
-#ifndef SPARK_COMPATIBLE
-      ensureFormatLegal(
-          std::string_view(formatString.data(), formatString.size()));
-#endif
+      if constexpr (!SparkCompatible) {
+        ensureFormatLegal(
+            std::string_view(formatString.data(), formatString.size()));
+      }
       setFormatter(&formatString);
     }
 

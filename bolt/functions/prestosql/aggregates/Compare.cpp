@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/prestosql/aggregates/Compare.h"
 using namespace bytedance::bolt::functions::aggregate;
 namespace bytedance::bolt::aggregate::prestosql {
@@ -40,12 +42,10 @@ int32_t compare(
       true, // nullsFirst
       true, // ascending
       false, // equalsOnly
-#ifdef SPARK_COMPATIBLE
-      CompareFlags::NullHandlingMode::kNullAsValue,
-      true
-#else
-      CompareFlags::NullHandlingMode::kNullAsIndeterminate
-#endif
+      ::bytedance::bolt::kSparkCompatible
+          ? CompareFlags::NullHandlingMode::kNullAsValue
+          : CompareFlags::NullHandlingMode::kNullAsIndeterminate,
+      ::bytedance::bolt::kSparkCompatible,
   };
 
   auto result = accumulator->compare(decoded, index, kCompareFlags);

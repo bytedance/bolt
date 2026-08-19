@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/DateTimeFunctions.h"
@@ -42,24 +44,25 @@ void registerDateTimeTimeComponentExtractionFunctionsInternal(
   registerFunction<MillisecondFunction, int64_t, TimestampWithTimezone>(
       {prefix + "millisecond"});
 
-#ifndef SPARK_COMPATIBLE
-  registerFunction<DateTruncFunction, Timestamp, Varchar, Timestamp>(
-      {prefix + "date_trunc"});
-  registerFunction<DateTruncFunction, Date, Varchar, Date>(
-      {prefix + "date_trunc"});
-  registerFunction<
-      DateTruncFunction,
-      TimestampWithTimezone,
-      Varchar,
-      TimestampWithTimezone>({prefix + "date_trunc"});
-  registerFunction<DateTruncFunction, Date, Date, Varchar>({prefix + "trunc"});
-  registerFunction<DateTruncFunction, Date, Timestamp, Varchar>(
-      {prefix + "trunc"});
-  registerFunction<DateTruncFunction, Date, TimestampWithTimezone, Varchar>(
-      {prefix + "trunc"});
-  registerFunction<DateTruncFunction, Date, Varchar, Varchar>(
-      {prefix + "trunc"});
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    registerFunction<DateTruncFunction, Timestamp, Varchar, Timestamp>(
+        {prefix + "date_trunc"});
+    registerFunction<DateTruncFunction, Date, Varchar, Date>(
+        {prefix + "date_trunc"});
+    registerFunction<
+        DateTruncFunction,
+        TimestampWithTimezone,
+        Varchar,
+        TimestampWithTimezone>({prefix + "date_trunc"});
+    registerFunction<DateTruncFunction, Date, Date, Varchar>(
+        {prefix + "trunc"});
+    registerFunction<DateTruncFunction, Date, Timestamp, Varchar>(
+        {prefix + "trunc"});
+    registerFunction<DateTruncFunction, Date, TimestampWithTimezone, Varchar>(
+        {prefix + "trunc"});
+    registerFunction<DateTruncFunction, Date, Varchar, Varchar>(
+        {prefix + "trunc"});
+  }
 }
 } // namespace
 

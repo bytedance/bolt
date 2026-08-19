@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <gtest/gtest.h>
 #include <array>
 #include <cctype>
@@ -1413,8 +1415,10 @@ void StringFunctionsTest::testReplaceFlatVector(
   }
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(StringFunctionsTest, replace) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   replace_input_test_t testsThreeArgs = {
       {{"aaa", "a", "aa"}, {"aaaaaa"}},
       {{"123tech123", "123", "tech"}, {"techtechtech"}},
@@ -1456,6 +1460,9 @@ TEST_F(StringFunctionsTest, replace) {
 }
 
 TEST_F(StringFunctionsTest, replaceWithReusableInputButNoInplace) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto c0 = ({
     auto values = makeFlatVector<std::string>({"foo"});
     auto indices = allocateIndices(100, execCtx_.pool());
@@ -1478,7 +1485,6 @@ TEST_F(StringFunctionsTest, replaceWithReusableInputButNoInplace) {
     EXPECT_TRUE(result->isNullAt(i));
   }
 }
-#endif
 
 TEST_F(StringFunctionsTest, controlExprEncodingPropagation) {
   std::vector<std::string> dataASCII({"ali", "ali", "ali"});
@@ -1972,8 +1978,10 @@ TEST_F(StringFunctionsTest, concatInSwitchExpr) {
   test::assertEqualVectors(expected, result);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(StringFunctionsTest, parseUrl) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto parse_url = [&](std::optional<std::string> url,
                        std::optional<std::string> part,
                        std::optional<std::string> key = std::nullopt) {
@@ -2022,7 +2030,6 @@ TEST_F(StringFunctionsTest, parseUrl) {
       "facebook.com");
   EXPECT_EQ(parse_url("about:blank", "HOST"), std::nullopt);
 }
-#endif
 
 TEST_F(StringFunctionsTest, varbinaryLength) {
   auto vector = makeFlatVector<std::string>(

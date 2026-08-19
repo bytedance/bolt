@@ -31,6 +31,7 @@
 #include "bolt/connectors/hive/SplitReader.h"
 #include <cstdint>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/caching/CacheTTLController.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConfig.h"
@@ -48,6 +49,12 @@
 namespace bytedance::bolt::connector::hive {
 
 namespace {
+template <TypeKind Kind>
+bolt::variant convertPartitionValueFromString(
+    const std::optional<std::string>& value) {
+  return convertFromString<Kind>(value, !::bytedance::bolt::kSparkCompatible);
+}
+
 template <TypeKind kind>
 VectorPtr newConstantFromString(
     const TypePtr& type,
@@ -735,7 +742,9 @@ void SplitReader::setPartitionValue(
         }
       } else {
         constValue = BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-            convertFromString, it->second->dataType()->kind(), value);
+            convertPartitionValueFromString,
+            it->second->dataType()->kind(),
+            value);
       }
       setConstantValue(spec, it->second->dataType(), constValue);
     } catch (const std::exception& e) {

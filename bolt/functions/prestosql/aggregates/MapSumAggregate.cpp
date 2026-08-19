@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/Strings.h"
 #include "bolt/expression/FunctionSignature.h"
@@ -272,11 +274,11 @@ class MapSumAggregate : public exec::Aggregate {
     auto i = map.find(key);
     if (LIKELY(i != map.end())) {
       // aggregate_map_sum does not handle overflow
-#ifdef SPARK_COMPATIBLE
-      i->second += val;
-#else
-      i->second = plus(i->second, val);
-#endif
+      if constexpr (::bytedance::bolt::kSparkCompatible) {
+        i->second += val;
+      } else {
+        i->second = plus(i->second, val);
+      }
       return;
     }
     auto tracker = trackRowSize(group);

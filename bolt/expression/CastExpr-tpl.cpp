@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/expression/CastExpr-tpl.h"
 
 #if defined(__linux__)
@@ -41,11 +43,10 @@ namespace bytedance::bolt::exec::CastUtils {
 
 constexpr size_t kStackBufSize = 64;
 
-#ifdef SPARK_COMPATIBLE
-constexpr bool isInSpark = true;
-#else
-constexpr bool isInSpark = false;
-#endif
+constexpr bool kIsInSpark = ::bytedance::bolt::kSparkCompatible;
+constexpr auto kDecimalStringFormat = kIsInSpark
+    ? DecimalUtil::DecimalStringFormat::kSpark
+    : DecimalUtil::DecimalStringFormat::kPlain;
 
 // convert status to indicate whether conversion behaviors.
 // Note: for INTEGER_OVERFLOW, the output value should save a wrapped value.
@@ -320,7 +321,7 @@ class Converter {
         }
         return status;
       }
-    } else if constexpr (fromString && isInSpark) {
+    } else if constexpr (fromString && kIsInSpark) {
       // spark support trim and does not accept on/off instead of folly::to
       auto boolOpt = sparkStringToBoolean(folly::StringPiece(from));
       if (boolOpt.has_value()) {
@@ -442,7 +443,7 @@ class Converter {
       }
       return tryToWithFolly(newV, to);
     } else if constexpr (fromDecimal) {
-      if constexpr (isInSpark) {
+      if constexpr (kIsInSpark) {
         std::optional<ToType> fValue;
         if constexpr (std::is_same_v<ToKind, RealKind>) {
           fValue = FloatingDecimal::toFloatFromValue(from, fromScale_);
@@ -493,7 +494,7 @@ class Converter {
               }
             }
             to.set(output);
-          } else if (isInSpark) {
+          } else if (kIsInSpark) {
             constexpr TimestampToStringOptions options = {
                 .precision = TimestampToStringOptions::Precision::kMicroseconds,
                 .leadingPositiveSign = true,
@@ -503,7 +504,7 @@ class Converter {
             ts.toTimezone(*timeZone_);
             to.set(ts.toString(options));
           } else {
-            to.set(from.toString(
+            to.set(from.template toString<::bytedance::bolt::kSparkCompatible>(
                 TimestampToStringOptions::Precision::kMilliseconds, timeZone_));
           }
         } else {
@@ -525,7 +526,7 @@ class Converter {
               }
             }
             to.set(output);
-          } else if (isInSpark) {
+          } else if (kIsInSpark) {
             constexpr TimestampToStringOptions options = {
                 .precision = TimestampToStringOptions::Precision::kMicroseconds,
                 .leadingPositiveSign = true,
@@ -571,7 +572,7 @@ class Converter {
     } else if constexpr (fromDecimal) {
       if (canAsInlinedStr_) {
         char inlined[StringView::kInlineSize];
-        auto strSize = DecimalUtil::convertToString(
+        auto strSize = DecimalUtil::convertToString<kDecimalStringFormat>(
             from, fromScale_, StringView::kInlineSize, inlined);
         to.setNoCopy(std::string_view(inlined, strSize));
       } else {
@@ -580,7 +581,7 @@ class Converter {
             kStackBufSize,
             "DecimalSize must be less than 64");
         char cached[kStackBufSize];
-        auto strSize = DecimalUtil::convertToString(
+        auto strSize = DecimalUtil::convertToString<kDecimalStringFormat>(
             from, fromScale_, fromDecimalMaxSize_, cached);
         to.set(std::string_view(cached, strSize));
       }
@@ -627,7 +628,7 @@ class Converter {
       }
     } else if constexpr (fromString) {
       StringView view(from);
-      if (isInSpark) {
+      if (kIsInSpark) {
         bytedance::bolt::functions::stringImpl::
             trimUnicodeWhiteSpace<true, true, StringView, StringView>(
                 view, from);
@@ -643,7 +644,7 @@ class Converter {
 
   TO_KIND(TimestampKind) convert(const FromType& from, ToType& to) {
     if constexpr (std::is_same_v<FromKind, StringKind>) {
-      if (isInSpark) {
+      if (kIsInSpark) {
         auto resultOpt =
             util::fromTimestampWithTimezoneString(from.data(), from.size());
         if (!resultOpt.has_value()) {
@@ -686,7 +687,7 @@ class Converter {
       }
       return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
     } else if constexpr (std::is_same_v<FromKind, BooleanKind>) {
-      if constexpr (isInSpark) {
+      if constexpr (kIsInSpark) {
         // Spark treats boolean as microseconds since epoch when casting to
         // timestamp: false -> 0us, true -> 1us.
         to = Timestamp::fromMicrosNoError(from ? 1 : 0);
@@ -726,9 +727,9 @@ class Converter {
 
   TO_KIND(DateKind) convert(const FromType& from, ToType& to) {
     if constexpr (std::is_same_v<FromKind, StringKind>) {
-      bool isIso8601 = !isInSpark;
+      bool isIso8601 = !kIsInSpark;
       StringView view(from);
-      if (isInSpark) {
+      if (kIsInSpark) {
         bytedance::bolt::functions::stringImpl::
             trimUnicodeWhiteSpace<true, true, StringView, StringView>(
                 view, from);
@@ -908,7 +909,7 @@ class VectorConverter : public ConverterBase {
       exec::EvalCtx& context,
       VectorPtr& result,
       CastErrorPolicy errorPolicy) override {
-    if constexpr (isInSpark) {
+    if constexpr (kIsInSpark) {
       constexpr bool legacy = false;
       constexpr bool truncate = true;
       convertWithPolicy<legacy, truncate>(
@@ -1058,16 +1059,16 @@ void registerConverter() {
   RegisterAllPairs<NumStrType, NumStrType>::apply();
   RegisterAllPairs<DateStrType, DateStrType>::apply();
 
-#ifdef SPARK_COMPATIBLE
-  using IntegerKinds =
-      KindList<TinyintKind, SmallintKind, IntegerKind, BigintKind>;
-  RegisterAllPairs<IntegerKinds, KindList<TimestampKind>>::apply();
-  RegisterAllPairs<KindList<RealKind, DoubleKind>, KindList<TimestampKind>>::
-      apply();
-  RegisterAllPairs<KindList<BooleanKind>, KindList<TimestampKind>>::apply();
-  RegisterAllPairs<IntegerKinds, KindList<BinaryKind>>::apply();
-  RegisterAllPairs<KindList<TimestampKind>, IntegerKinds>::apply();
-#endif
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    using IntegerKinds =
+        KindList<TinyintKind, SmallintKind, IntegerKind, BigintKind>;
+    RegisterAllPairs<IntegerKinds, KindList<TimestampKind>>::apply();
+    RegisterAllPairs<KindList<RealKind, DoubleKind>, KindList<TimestampKind>>::
+        apply();
+    RegisterAllPairs<KindList<BooleanKind>, KindList<TimestampKind>>::apply();
+    RegisterAllPairs<IntegerKinds, KindList<BinaryKind>>::apply();
+    RegisterAllPairs<KindList<TimestampKind>, IntegerKinds>::apply();
+  }
 }
 
 void doCast(
@@ -1176,7 +1177,7 @@ void doCastArrayToVarchar(
   resultElements->addNulls(remainingRows->asRange().bits(), nestedRows);
 
   const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
-  const bool legacyComplex = isInSpark &&
+  const bool legacyComplex = kIsInSpark &&
       (queryConfig.isSparkLegacyCastComplexTypesToStringEnabled() != "false");
   if (queryConfig.enableFlinkCompatible() &&
       arrayElements->type()->isTimestamp()) {
@@ -1309,7 +1310,7 @@ void doCastMapToVarchar(
   auto rawValues = resultValues->as<FlatVector<StringView>>()->rawValues();
 
   const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
-  const bool legacyComplex = isInSpark &&
+  const bool legacyComplex = kIsInSpark &&
       (queryConfig.isSparkLegacyCastComplexTypesToStringEnabled() != "false");
   const bool isFlinkCompatible = queryConfig.enableFlinkCompatible();
 
@@ -1393,7 +1394,7 @@ void doCastRowToVarchar(
   }
 
   const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
-  const bool legacyComplex = isInSpark &&
+  const bool legacyComplex = kIsInSpark &&
       (queryConfig.isSparkLegacyCastComplexTypesToStringEnabled() != "false");
 
   std::string_view leftBracket = legacyComplex ? "[" : "{";

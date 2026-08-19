@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <memory>
@@ -714,8 +716,8 @@ TEST_F(ParquetWriterTest, allNulls) {
   ASSERT_EQ(reader->numberOfRows(), kRows);
   ASSERT_EQ(*reader->rowType(), *schema);
   int32_t dataPageCount = 0;
-  for (const auto& stats :
-       reader->fileMetaData().rowGroup(0).columnChunk(0).pageEncodingStats()) {
+  const auto columnChunk = reader->fileMetaData().rowGroup(0).columnChunk(0);
+  for (const auto& stats : columnChunk.pageEncodingStats()) {
     if (stats.page_type == thrift::PageType::DATA_PAGE ||
         stats.page_type == thrift::PageType::DATA_PAGE_V2) {
       dataPageCount += stats.count;
@@ -1294,8 +1296,10 @@ TEST_F(ParquetWriterTest, arrowPool) {
       *leafPool_);
 };
 
-#ifdef SPARK_COMPATIBLE
 TEST_F(ParquetWriterTest, encoderTestSinkResize0) {
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   int levels_per_page = 100;
   int num_pages = 50;
   auto max_def_level_ = 4;
@@ -1313,4 +1317,3 @@ TEST_F(ParquetWriterTest, encoderTestSinkResize0) {
       getArrowMemoryPool());
   encoder->testSinkResize0();
 };
-#endif

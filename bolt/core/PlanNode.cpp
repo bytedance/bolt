@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <folly/container/F14Set.h>
 
 #include "bolt/common/encode/Base64.h"
@@ -1780,11 +1782,11 @@ RowTypePtr getRowNumberOutputType(
   std::vector<TypePtr> types = inputType->children();
 
   names.push_back(rowNumberColumnName);
-#ifdef SPARK_COMPATIBLE
-  types.push_back(INTEGER());
-#else
-  types.push_back(BIGINT());
-#endif
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    types.push_back(INTEGER());
+  } else {
+    types.push_back(BIGINT());
+  }
 
   return ROW(std::move(names), std::move(types));
 }

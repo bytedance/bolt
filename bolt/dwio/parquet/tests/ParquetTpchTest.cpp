@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <vector>
 
 #include "bolt/common/file/FileSystems.h"
@@ -60,9 +62,9 @@ class ParquetTpchTest : public testing::Test {
 
     functions::prestosql::registerAllScalarFunctions();
     aggregate::prestosql::registerAllAggregateFunctions();
-#ifdef SPARK_COMPATIBLE
-    functions::sparksql::registerFunctions("");
-#endif
+    if constexpr (::bytedance::bolt::kSparkCompatible) {
+      functions::sparksql::registerFunctions("");
+    }
 
     parse::registerTypeResolver();
     filesystems::registerLocalFileSystem();

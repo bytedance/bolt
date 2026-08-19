@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/flinksql/registration/Register.h"
 #include "bolt/functions/prestosql/tests/CastBaseTest.h"
 #include "bolt/parse/TypeResolver.h"

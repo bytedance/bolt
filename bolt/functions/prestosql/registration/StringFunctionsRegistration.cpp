@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/lib/Re2Functions.h"
 #include "bolt/functions/lib/StringUtil.h"
@@ -121,10 +123,10 @@ void registerStringFunctions(const std::string& prefix) {
       Varchar,
       Varchar>({prefix + "split_to_map"});
   BOLT_REGISTER_VECTOR_FUNCTION(udf_concat, prefix + "concat");
-#ifndef SPARK_COMPATIBLE
-  // spark has another implementation
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_replace, prefix + "replace");
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    // spark has another implementation
+    BOLT_REGISTER_VECTOR_FUNCTION(udf_replace, prefix + "replace");
+  }
   BOLT_REGISTER_VECTOR_FUNCTION(udf_reverse, prefix + "reverse");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_to_utf8, prefix + "to_utf8");
   registerFromUtf8(prefix + "from_utf8");
@@ -180,12 +182,12 @@ void registerStringFunctions(const std::string& prefix) {
       Varchar,
       int32_t>({prefix + "locate"});
 
-#ifndef SPARK_COMPATIBLE
-  registerFunction<ParseURLFunction, Varchar, Varchar, Varchar>(
-      {prefix + "parse_url"});
-  registerFunction<ParseURLFunction, Varchar, Varchar, Varchar, Varchar>(
-      {prefix + "parse_url"});
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    registerFunction<ParseURLFunction, Varchar, Varchar, Varchar>(
+        {prefix + "parse_url"});
+    registerFunction<ParseURLFunction, Varchar, Varchar, Varchar, Varchar>(
+        {prefix + "parse_url"});
+  }
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_printf, {prefix + "printf"})
 }

@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "gtest/gtest.h"
 
 #include "bolt/common/base/Exceptions.h"
@@ -557,8 +559,10 @@ TEST_P(ExprEncodingsTest, moreConditional) {
       });
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_P(ExprEncodingsTest, errors) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   prepareTestData();
 
   if (isAllNulls(testData_.bigint2.vector)) {
@@ -568,7 +572,6 @@ TEST_P(ExprEncodingsTest, errors) {
     runWithError("bigint2 % 0");
   }
 }
-#endif
 
 TEST_P(ExprEncodingsTest, maskedErrors) {
   prepareTestData();

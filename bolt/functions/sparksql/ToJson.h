@@ -33,6 +33,7 @@
 #include <cstring>
 #include <string>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/encode/Base64.h"
 #include "bolt/expression/ComplexViewTypes.h"
 #include "bolt/expression/VectorReaders.h"
@@ -76,7 +77,11 @@ void appendDecimal(const T& value, const Type& type, std::string& result) {
   // scientific exponent and leading zero.
   constexpr size_t kMaxDecimalStringSize = LongDecimalType::kMaxPrecision + 7;
   char buffer[kMaxDecimalStringSize];
-  size_t len = DecimalUtil::convertToString<T>(value, scale, maxSize, buffer);
+  constexpr auto kDecimalStringFormat = ::bytedance::bolt::kSparkCompatible
+      ? DecimalUtil::DecimalStringFormat::kSpark
+      : DecimalUtil::DecimalStringFormat::kPlain;
+  size_t len = DecimalUtil::convertToString<kDecimalStringFormat>(
+      value, scale, maxSize, buffer);
   result.append(buffer, len);
 }
 

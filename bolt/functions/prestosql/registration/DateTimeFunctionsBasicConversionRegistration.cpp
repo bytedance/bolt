@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
@@ -57,12 +59,15 @@ void registerBasicConversionFunctionsInternal(const std::string& prefix) {
   registerFunction<ToTimestampFunction, Timestamp, int32_t>(
       {prefix + "to_timestamp"});
 
-#ifndef SPARK_COMPATIBLE
-  registerFunction<DateFormatFunction, Varchar, TimestampWithTimezone, Varchar>(
-      {prefix + "date_format"});
-  registerFunction<sparksql::LastDayFunction, Varchar, Date>(
-      {prefix + "last_day"});
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    registerFunction<
+        DateFormatFunction,
+        Varchar,
+        TimestampWithTimezone,
+        Varchar>({prefix + "date_format"});
+    registerFunction<sparksql::LastDayFunction, Varchar, Date>(
+        {prefix + "last_day"});
+  }
 
   registerFunction<FormatDateTimeFunction, Varchar, Timestamp, Varchar>(
       {prefix + "format_datetime"});

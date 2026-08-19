@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <cstdint>
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 using namespace bytedance::bolt;
@@ -25,15 +27,15 @@ TEST_F(CheckedArithmeticTest, Mod) {
   auto firstVector = makeFlatVector<int32_t>({10, 20, 30});
   auto secondVector = makeFlatVector<int32_t>({0, 1, 2});
   auto expected = makeNullableFlatVector<int32_t>({std::nullopt, 0, 0});
-#ifndef SPARK_COMPATIBLE
-  // When any number mod 0, presto's logic throws an exception
-  EXPECT_THROW(
-      evaluate<SimpleVector<int32_t>>(
-          "mod(c0, c1)", makeRowVector({firstVector, secondVector})),
-      BoltUserError);
-#else
-  auto result = evaluate<SimpleVector<int32_t>>(
-      "mod(c0, c1)", makeRowVector({firstVector, secondVector}));
-  assertEqualVectors(expected, result);
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    // When any number mod 0, presto's logic throws an exception
+    EXPECT_THROW(
+        evaluate<SimpleVector<int32_t>>(
+            "mod(c0, c1)", makeRowVector({firstVector, secondVector})),
+        BoltUserError);
+  } else {
+    auto result = evaluate<SimpleVector<int32_t>>(
+        "mod(c0, c1)", makeRowVector({firstVector, secondVector}));
+    assertEqualVectors(expected, result);
+  }
 }

@@ -236,6 +236,7 @@ option(BOLT_BUILD_BENCHMARKS "Builds Bolt benchmarks" OFF)
 option(BOLT_BUILD_BENCHMARKS_BASIC "Enable Bolt basic benchmarks." OFF)
 
 if(BOLT_ENABLE_SPARK_COMPATIBLE)
+  set(BOLT_SPARK_COMPATIBLE_VALUE true)
   set(SPARK_VERSION "3.5" CACHE STRING "Spark major.minor version")
   set_property(
     CACHE
@@ -251,8 +252,17 @@ if(BOLT_ENABLE_SPARK_COMPATIBLE)
   string(REPLACE "." "_" SPARK_VERSION_ENUM ${SPARK_VERSION})
   set(BOLT_SPARK_VERSION "SPARK_${SPARK_VERSION_ENUM}")
 else()
+  set(BOLT_SPARK_COMPATIBLE_VALUE false)
   set(BOLT_SPARK_VERSION "UNDEFINED")
 endif()
+
+set(BOLT_GENERATED_BASE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/gen_cpp/bolt/common/base")
+file(MAKE_DIRECTORY "${BOLT_GENERATED_BASE_INCLUDE_DIR}")
+configure_file(
+  "${CMAKE_SOURCE_DIR}/bolt/common/base/SparkCompatibility.h.in"
+  "${BOLT_GENERATED_BASE_INCLUDE_DIR}/SparkCompatibility.h"
+  @ONLY
+)
 
 # Enable address sanitizer, this needs to precede the addition of all targets to be enabled for all
 # subdirectories
@@ -696,11 +706,6 @@ if(BOLT_ENABLE_REMOTE_FUNCTIONS)
   find_package(fizz CONFIG REQUIRED)
   find_package(wangle CONFIG REQUIRED)
   find_package(FBThrift CONFIG REQUIRED)
-endif()
-
-if(BOLT_ENABLE_SPARK_COMPATIBLE)
-  message("Enable spark compatible setting.")
-  add_definitions(-DSPARK_COMPATIBLE)
 endif()
 
 if(KERNEL_SUPPORTS_IO_URING)

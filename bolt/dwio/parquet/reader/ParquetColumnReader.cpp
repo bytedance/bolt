@@ -32,6 +32,8 @@
 // Created by Ying Su on 2/14/22.
 //
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
 
 #include "bolt/dwio/common/Options.h"
@@ -47,6 +49,38 @@
 #include "bolt/dwio/parquet/reader/VariantColumnReader.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
 namespace bytedance::bolt::parquet {
+
+void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
+  bool needConvertion = (castExprSet_ && castExprSet_->size() != 0);
+  auto& requestedType = needConvertion ? castSourceType_ : requestedType_;
+  auto& fileType = static_cast<const ParquetTypeWithId&>(*fileType_);
+  bool isUnsigned = false;
+  if (fileType.logicalType_.has_value() &&
+      fileType.logicalType_.value().__isset.INTEGER) {
+    isUnsigned = !fileType.logicalType_.value().INTEGER.isSigned;
+  }
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (!fileType.logicalType_.has_value() &&
+        fileType.convertedType_ == thrift::ConvertedType::UINT_64) {
+      // Legacy Parquet files may carry only the UINT_64 converted type. In
+      // particular, convertType accepts these files as DECIMAL(20, 0). Without
+      // this fallback, getIntValues() would use its HUGEINT path and interpret
+      // each 8-byte physical UINT64 as a 16-byte int128_t. Use the unsigned
+      // path to preserve the UINT64 bits and widen each value correctly.
+      isUnsigned = true;
+    }
+  }
+
+  if (isUnsigned) {
+    getUnsignedIntValues(rows, requestedType, result);
+  } else {
+    getIntValues(rows, requestedType, result);
+  }
+
+  if (needConvertion) {
+    doCastEvaluate(result);
+  }
+}
 
 /* type matching restriction, only allow following type convert
  * real -> real/double/varchar
@@ -93,14 +127,14 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
       fileType->childByName("value")->type()->isVarbinary() &&
       fileType->childByName("metadata")->type()->isVarbinary();
 
-#ifndef SPARK_COMPATIBLE
-  BOLT_CHECK(
-      canReadVariantStructAsVariant ||
-          matchType(fileType->type()->kind(), requestedType->type()->kind()),
-      "file schema type {} can not convert to ddl type {}",
-      mapTypeKindToName(fileType->type()->kind()),
-      mapTypeKindToName(requestedType->type()->kind()));
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    BOLT_CHECK(
+        canReadVariantStructAsVariant ||
+            matchType(fileType->type()->kind(), requestedType->type()->kind()),
+        "file schema type {} can not convert to ddl type {}",
+        mapTypeKindToName(fileType->type()->kind()),
+        mapTypeKindToName(requestedType->type()->kind()));
+  }
 
   switch (fileType->type()->kind()) {
     case TypeKind::INTEGER:
@@ -123,10 +157,8 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
             requestedType->type(), fileType, params, scanSpec);
       }
     case TypeKind::DOUBLE:
-      if (
-#ifdef SPARK_COMPATIBLE
-          requestedType->type()->kind() == TypeKind::BIGINT ||
-#endif
+      if ((::bytedance::bolt::kSparkCompatible &&
+           requestedType->type()->kind() == TypeKind::BIGINT) ||
           requestedType->type()->kind() == TypeKind::VARCHAR) {
         return std::make_unique<FloatingPointColumnReader<double, double>>(
             requestedType->type(), fileType, params, scanSpec, DOUBLE());

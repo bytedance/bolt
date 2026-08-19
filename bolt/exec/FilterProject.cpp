@@ -28,8 +28,10 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/FilterProject.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/core/Expressions.h"
+#include "bolt/exec/FilterProject.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/FieldReference.h"
 #include "bolt/vector/LazyVector.h"
@@ -236,13 +238,13 @@ RowVectorPtr FilterProject::getOutput() {
   vector_size_t size = input_->size();
   bool isCompositeInput = RowVector::isComposite(input_);
 
-#ifdef SPARK_COMPATIBLE
-  if (skipForCompositeInput_ && isCompositeInput) {
-    BOLT_CHECK(!hasFilter_ && !isIdentityProjection_);
-    numProcessedInputRows_ = size;
-    return fillCompositeOutput(size, input_->children());
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (skipForCompositeInput_ && isCompositeInput) {
+      BOLT_CHECK(!hasFilter_ && !isIdentityProjection_);
+      numProcessedInputRows_ = size;
+      return fillCompositeOutput(size, input_->children());
+    }
   }
-#endif
 
   LocalSelectivityVector localRows(*operatorCtx_->execCtx(), size);
   auto* rows = localRows.get();

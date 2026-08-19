@@ -54,12 +54,14 @@
  * SOFTWARE.
  */
 
-#include "bolt/type/TimestampConversion.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <iostream>
 #include <limits>
 #include <set>
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::util {
 
@@ -350,40 +352,40 @@ DateParseResult tryParseDateString(
     return DateParseResult::kUnexpectedEnd;
   }
 
-#ifndef SPARK_COMPATIBLE
-  if (!sparkCompatible) {
-    // Check for an optional trailing " (BC)".
-    if (len - pos >= 5 && characterIsSpace(buf[pos]) && buf[pos + 1] == '(' &&
-        buf[pos + 2] == 'B' && buf[pos + 3] == 'C' && buf[pos + 4] == ')') {
-      if (yearneg || year == 0) {
-        return DateParseResult::kInvalidYear;
-      }
-      year = -year + 1;
-      pos += 5;
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    if (!sparkCompatible) {
+      // Check for an optional trailing " (BC)".
+      if (len - pos >= 5 && characterIsSpace(buf[pos]) && buf[pos + 1] == '(' &&
+          buf[pos + 2] == 'B' && buf[pos + 3] == 'C' && buf[pos + 4] == ')') {
+        if (yearneg || year == 0) {
+          return DateParseResult::kInvalidYear;
+        }
+        year = -year + 1;
+        pos += 5;
 
-      if (year < kMinYear) {
-        return DateParseResult::kInvalidYear;
+        if (year < kMinYear) {
+          return DateParseResult::kInvalidYear;
+        }
       }
-    }
 
-    // In strict mode, check remaining string for non-space characters.
-    if (mode & ParseMode::kStrict) {
-      // Skip trailing spaces.
-      while (pos < len && characterIsSpace(buf[pos])) {
-        pos++;
-      }
-      // Check position. if end was not reached, non-space chars remaining.
-      if (pos < len) {
-        return DateParseResult::kUnexpectedEnd;
-      }
-    } else {
-      // In non-strict mode, check for any direct trailing digits.
-      if (pos < len && characterIsDigit(buf[pos])) {
-        return DateParseResult::kUnexpectedEnd;
+      // In strict mode, check remaining string for non-space characters.
+      if (mode & ParseMode::kStrict) {
+        // Skip trailing spaces.
+        while (pos < len && characterIsSpace(buf[pos])) {
+          pos++;
+        }
+        // Check position. if end was not reached, non-space chars remaining.
+        if (pos < len) {
+          return DateParseResult::kUnexpectedEnd;
+        }
+      } else {
+        // In non-strict mode, check for any direct trailing digits.
+        if (pos < len && characterIsDigit(buf[pos])) {
+          return DateParseResult::kUnexpectedEnd;
+        }
       }
     }
   }
-#endif
 
   daysSinceEpoch = daysSinceEpochFromDate(year, month, day, &isValid);
   return isValid ? DateParseResult::kSuccess : DateParseResult::kInvalidDate;
@@ -867,16 +869,11 @@ int64_t fromTimeString(const char* str, size_t len, bool* nullOutput) {
     pos++;
   }
 
+  constexpr auto kParseMode = ::bytedance::bolt::kSparkCompatible
+      ? ParseMode::kNonStrict | ParseMode::kNonStandardCast
+      : ParseMode::kStrict;
   if (!tryParseTimeString(
-          str + pos,
-          len - pos,
-          pos,
-          microsSinceMidnight,
-#ifndef SPARK_COMPATIBLE
-          ParseMode::kStrict)) {
-#else
-          ParseMode::kNonStrict | ParseMode::kNonStandardCast)) {
-#endif
+          str + pos, len - pos, pos, microsSinceMidnight, kParseMode)) {
     if (nullOutput != nullptr) {
       *nullOutput = true;
       return 0;
@@ -915,16 +912,10 @@ Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
   int64_t daysSinceEpoch;
   int64_t microsSinceMidnight;
 
-  auto result = tryParseDateString(
-      str,
-      len,
-      pos,
-      daysSinceEpoch,
-#ifndef SPARK_COMPATIBLE
-      ParseMode::kNonStrict);
-#else
-      ParseMode::kNonStrict | ParseMode::kNonStandardCast);
-#endif
+  constexpr auto kParseMode = ::bytedance::bolt::kSparkCompatible
+      ? ParseMode::kNonStrict | ParseMode::kNonStandardCast
+      : ParseMode::kNonStrict;
+  auto result = tryParseDateString(str, len, pos, daysSinceEpoch, kParseMode);
   if (result != DateParseResult::kSuccess) {
     if (nullOutput != nullptr) {
       *nullOutput = true;
@@ -946,15 +937,7 @@ Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
 
   size_t timePos = 0;
   if (!tryParseTimeString(
-          str + pos,
-          len - pos,
-          timePos,
-          microsSinceMidnight,
-#ifndef SPARK_COMPATIBLE
-          ParseMode::kNonStrict)) {
-#else
-          ParseMode::kNonStrict | ParseMode::kNonStandardCast)) {
-#endif
+          str + pos, len - pos, timePos, microsSinceMidnight, kParseMode)) {
     if (nullOutput != nullptr) {
       *nullOutput = true;
       return Timestamp{};
@@ -1080,7 +1063,6 @@ std::optional<std::pair<Timestamp, int16_t>> fromTimestampWithTimezoneString(
 }
 
 namespace {
-
 CivilDate civilFromDaysSinceEpoch(int64_t daysSinceEpoch) {
   // Algorithm derived from Howard Hinnant's civil calendar conversions.
   // https://howardhinnant.github.io/date_algorithms.html
@@ -1127,9 +1109,10 @@ CivilTime nanosToCivilTime(uint64_t nanosInDay) {
 }
 
 void validateCivilDateTimeRange(const Timestamp& timestamp, bool isPrecision) {
-  // Spark stores timestamps as int64 microseconds, while Presto stores them as
-  // int64 milliseconds. Make sure the incoming timestamp can be represented in
-  // the corresponding integer range before breaking it into calendar fields.
+  // Spark stores timestamps as int64 microseconds, while Presto stores
+  // them as int64 milliseconds. Make sure the incoming timestamp can be
+  // represented in the corresponding integer range before breaking it
+  // into calendar fields.
   if (isPrecision) {
     (void)timestamp.toMillis();
   } else {

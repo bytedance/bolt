@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
@@ -192,11 +194,7 @@ TEST_P(CovarianceAggregationTest, allSameValue) {
   createDuckDbTable({data});
 
   auto aggName = GetParam();
-#ifdef SPARK_COMPATIBLE
-  bool isInSpark = true;
-#else
-  bool isInSpark = false;
-#endif
+  constexpr bool isInSpark = ::bytedance::bolt::kSparkCompatible;
   if (isInSpark && (aggName == "covar_samp" || aggName == "corr")) {
     std::unordered_map<std::string, std::string> config = {
         {core::QueryConfig::kSparkLegacyStatisticalAggregate, "true"}};

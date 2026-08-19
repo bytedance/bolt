@@ -28,8 +28,10 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/TopNRowNumber.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/exec/OperatorUtils.h"
+#include "bolt/exec/TopNRowNumber.h"
 namespace bytedance::bolt::exec {
 
 namespace {
@@ -519,19 +521,13 @@ RowVectorPtr TopNRowNumber::getOutputFromMemory() {
   // Loop over partitions and emit sorted rows along with row numbers.
   auto output =
       BaseVector::create<RowVector>(outputType_, outputBatchSize_, pool());
-#ifdef SPARK_COMPATIBLE
-  FlatVector<int32_t>* rowNumbers = nullptr;
+  using RowNumber =
+      std::conditional_t<::bytedance::bolt::kSparkCompatible, int32_t, int64_t>;
+  FlatVector<RowNumber>* rowNumbers = nullptr;
   if (generateRowNumber_) {
-    rowNumbers = output->children().back()->as<FlatVector<int32_t>>();
+    rowNumbers = output->children().back()->as<FlatVector<RowNumber>>();
     rowNumbers->resize(outputBatchSize_);
   }
-#else
-  FlatVector<int64_t>* rowNumbers = nullptr;
-  if (generateRowNumber_) {
-    rowNumbers = output->children().back()->as<FlatVector<int64_t>>();
-    rowNumbers->resize(outputBatchSize_);
-  }
-#endif
 
   vector_size_t offset = 0;
   if (remainingRowsInPartition_ > 0) {
@@ -602,19 +598,13 @@ RowVectorPtr TopNRowNumber::getOutputFromSpill() {
 
   auto output =
       BaseVector::create<RowVector>(outputType_, outputBatchSize_, pool());
-#ifdef SPARK_COMPATIBLE
-  FlatVector<int32_t>* rowNumbers = nullptr;
+  using RowNumber =
+      std::conditional_t<::bytedance::bolt::kSparkCompatible, int32_t, int64_t>;
+  FlatVector<RowNumber>* rowNumbers = nullptr;
   if (generateRowNumber_) {
-    rowNumbers = output->children().back()->as<FlatVector<int32_t>>();
+    rowNumbers = output->children().back()->as<FlatVector<RowNumber>>();
     rowNumbers->resize(outputBatchSize_);
   }
-#else
-  FlatVector<int64_t>* rowNumbers = nullptr;
-  if (generateRowNumber_) {
-    rowNumbers = output->children().back()->as<FlatVector<int64_t>>();
-    rowNumbers->resize(outputBatchSize_);
-  }
-#endif
   for (auto i = 0; i < inputChannels_.size(); ++i) {
     output->childAt(inputChannels_[i])->resize(outputBatchSize_);
   }

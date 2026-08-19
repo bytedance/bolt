@@ -29,7 +29,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <parquet/metadata.h>
 #include <thrift/protocol/TCompactProtocol.h> //@manual
 #include <cstdint>
@@ -39,6 +40,7 @@
 #include "bolt/dwio/parquet/encryption/KmsClient.h"
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
 #include "bolt/dwio/parquet/reader/ParquetFooterCache.h"
+#include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/reader/SchemaHelper.h"
 #include "bolt/dwio/parquet/reader/StructColumnReader.h"
 #include "bolt/dwio/parquet/thrift/FmtParquetFormatters.h"
@@ -126,12 +128,9 @@ bool acceptsRealFileForReaderCast(const bytedance::bolt::TypePtr& t) {
 }
 
 bool acceptsDoubleFileForReaderCast(const bytedance::bolt::TypePtr& t) {
-#ifdef SPARK_COMPATIBLE
-  return t->kind() == bytedance::bolt::TypeKind::BIGINT ||
+  return (::bytedance::bolt::kSparkCompatible &&
+          t->kind() == bytedance::bolt::TypeKind::BIGINT) ||
       acceptsRealFileForReaderCast(t);
-#else
-  return acceptsRealFileForReaderCast(t);
-#endif
 }
 
 // Compatibility predicate for Parquet INT32-physical source columns
@@ -175,16 +174,16 @@ bool isInt64Compatible(const bytedance::bolt::TypePtr& type) {
 }
 
 bool isUInt64Compatible(const bytedance::bolt::TypePtr& type) {
-#ifdef SPARK_COMPATIBLE
-  if (type->isDecimal()) {
-    // Spark maps Parquet UINT64 to DECIMAL(20, 0) because it has no unsigned
-    // 64-bit type. Keep this as a dedicated Spark representation mapping, not
-    // general integer-to-Decimal schema evolution. The unsigned integer reader
-    // already widens the 8-byte value to 128 bits without rescaling.
-    const auto [precision, scale] = getDecimalPrecisionScale(*type);
-    return precision == 20 && scale == 0;
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (type->isDecimal()) {
+      // Spark maps Parquet UINT64 to DECIMAL(20, 0) because it has no unsigned
+      // 64-bit type. Keep this as a dedicated Spark representation mapping, not
+      // general integer-to-Decimal schema evolution. The unsigned integer
+      // reader already widens the 8-byte value to 128 bits without rescaling.
+      const auto [precision, scale] = getDecimalPrecisionScale(*type);
+      return precision == 20 && scale == 0;
+    }
   }
-#endif
   return isInt64Compatible(type);
 }
 
@@ -1253,19 +1252,19 @@ TypePtr ReaderBase::convertType(
           });
           return TIMESTAMP();
         }
-#ifdef SPARK_COMPATIBLE
-        if (schemaElement.__isset.logicalType &&
-            schemaElement.logicalType.__isset.INTEGER &&
-            !schemaElement.logicalType.INTEGER.isSigned) {
-          BOLT_CHECK_EQ(
-              schemaElement.logicalType.INTEGER.bitWidth,
-              64,
-              "Unsigned INTEGER logical type on INT64 must have bit width 64");
-          checkRequested(
-              [](const TypePtr& t) { return isUInt64Compatible(t); });
-          return BIGINT();
+        if constexpr (::bytedance::bolt::kSparkCompatible) {
+          if (schemaElement.__isset.logicalType &&
+              schemaElement.logicalType.__isset.INTEGER &&
+              !schemaElement.logicalType.INTEGER.isSigned) {
+            BOLT_CHECK_EQ(
+                schemaElement.logicalType.INTEGER.bitWidth,
+                64,
+                "Unsigned INTEGER logical type on INT64 must have bit width 64");
+            checkRequested(
+                [](const TypePtr& t) { return isUInt64Compatible(t); });
+            return BIGINT();
+          }
         }
-#endif
         if (schemaElement.__isset.converted_type &&
             (schemaElement.converted_type ==
                  thrift::ConvertedType::TIMESTAMP_MILLIS ||

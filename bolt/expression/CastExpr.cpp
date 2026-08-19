@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/expression/CastExpr.h"
 
 #include <fmt/format.h>
@@ -45,6 +47,11 @@
 #include "bolt/vector/FunctionVector.h"
 #include "bolt/vector/SelectivityVector.h"
 namespace bytedance::bolt::exec {
+
+bool CastExpr::setNullInResultAtError() const {
+  // For Spark, set errors in nested values to null as well.
+  return nullOnFailure() && (::bytedance::bolt::kSparkCompatible || inTopLevel);
+}
 
 namespace {
 void propagateErrorsOrSetNulls(
@@ -166,15 +173,15 @@ VectorPtr CastExpr::applyMap(
       newMapKeys,
       newMapValues);
 
-#ifndef SPARK_COMPATIBLE
-  propagateErrorsOrSetNulls(
-      setNullInResultAtError(),
-      context,
-      nestedRows,
-      elementToTopLevelRows,
-      result,
-      oldErrors);
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    propagateErrorsOrSetNulls(
+        setNullInResultAtError(),
+        context,
+        nestedRows,
+        elementToTopLevelRows,
+        result,
+        oldErrors);
+  }
   // Restore original state.
   context.swapErrors(oldErrors);
   return result;
@@ -234,15 +241,15 @@ VectorPtr CastExpr::applyArray(
       sizes,
       newElements);
 
-#ifndef SPARK_COMPATIBLE
-  propagateErrorsOrSetNulls(
-      setNullInResultAtError(),
-      context,
-      nestedRows,
-      elementToTopLevelRows,
-      result,
-      oldErrors);
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    propagateErrorsOrSetNulls(
+        setNullInResultAtError(),
+        context,
+        nestedRows,
+        elementToTopLevelRows,
+        result,
+        oldErrors);
+  }
 
   // Restore original state.
   context.swapErrors(oldErrors);
@@ -343,20 +350,20 @@ VectorPtr CastExpr::applyRow(
       rows.end(),
       std::move(newChildren));
 
-#ifndef SPARK_COMPATIBLE
-  if (setNullInResultAtError()) {
-    // Set errors as nulls.
-    if (auto errors = context.errors()) {
-      rows.applyToSelected([&](auto row) {
-        if (errors->isIndexInRange(row) && !errors->isNullAt(row)) {
-          result->setNull(row, true);
-        }
-      });
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    if (setNullInResultAtError()) {
+      // Set errors as nulls.
+      if (auto errors = context.errors()) {
+        rows.applyToSelected([&](auto row) {
+          if (errors->isIndexInRange(row) && !errors->isNullAt(row)) {
+            result->setNull(row, true);
+          }
+        });
+      }
+      // Restore original state.
+      context.swapErrors(oldErrors);
     }
-    // Restore original state.
-    context.swapErrors(oldErrors);
   }
-#endif
 
   return result;
 }
@@ -420,15 +427,16 @@ void CastExpr::applyPeeled(
       applyCustomCast();
     }
   } else if (fromType->isPrimitiveType() || toType->isPrimitiveType()) {
-#ifdef SPARK_COMPATIBLE
-    CastUtils::CastErrorPolicy policy = nullOnFailure()
-        ? CastUtils::CastErrorPolicy::NullOnFailure
-        : CastUtils::CastErrorPolicy::SparkCastPolicy;
-#else
-    CastUtils::CastErrorPolicy policy = setNullInResultAtError()
-        ? CastUtils::CastErrorPolicy::NullOnFailure
-        : CastUtils::CastErrorPolicy::ThrowOnFailure;
-#endif
+    const auto policy = [&]() {
+      if constexpr (::bytedance::bolt::kSparkCompatible) {
+        return nullOnFailure() ? CastUtils::CastErrorPolicy::NullOnFailure
+                               : CastUtils::CastErrorPolicy::SparkCastPolicy;
+      } else {
+        return setNullInResultAtError()
+            ? CastUtils::CastErrorPolicy::NullOnFailure
+            : CastUtils::CastErrorPolicy::ThrowOnFailure;
+      }
+    }();
     CastUtils::doCast(rows, input, context, fromType, toType, result, policy);
   } else {
     switch (toType->kind()) {

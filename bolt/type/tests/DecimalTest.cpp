@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <gtest/gtest.h>
 
 #include "bolt/common/base/Doubles.h"
@@ -117,15 +119,15 @@ TEST(DecimalTest, decimalToString) {
 
   ASSERT_EQ("1000", DecimalUtil::toString(1000, DECIMAL(20, 0)));
   ASSERT_EQ("1.000", DecimalUtil::toString(1000, DECIMAL(20, 3)));
-#ifdef SPARK_COMPATIBLE
-  ASSERT_EQ("1.000E-7", DecimalUtil::toString(1000, DECIMAL(20, 10)));
-  ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
-  ASSERT_EQ("0E-9", DecimalUtil::toString(0, DECIMAL(20, 9)));
-#else
-  ASSERT_EQ("0.0000001000", DecimalUtil::toString(1000, DECIMAL(20, 10)));
-  ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
-  ASSERT_EQ("0.000000000", DecimalUtil::toString(0, DECIMAL(20, 9)));
-#endif
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    ASSERT_EQ("1.000E-7", DecimalUtil::toString(1000, DECIMAL(20, 10)));
+    ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
+    ASSERT_EQ("0E-9", DecimalUtil::toString(0, DECIMAL(20, 9)));
+  } else {
+    ASSERT_EQ("0.0000001000", DecimalUtil::toString(1000, DECIMAL(20, 10)));
+    ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
+    ASSERT_EQ("0.000000000", DecimalUtil::toString(0, DECIMAL(20, 9)));
+  }
   ASSERT_EQ("-0.001000", DecimalUtil::toString(-1000, DECIMAL(20, 6)));
 
   const auto minShortDecimal =

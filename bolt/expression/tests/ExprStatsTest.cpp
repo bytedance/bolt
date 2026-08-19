@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <gmock/gmock.h>
 #include "bolt/core/Expressions.h"
 #include "bolt/expression/EvalCtx.h"
@@ -377,8 +379,10 @@ TEST_F(ExprStatsTest, specialForms) {
   ASSERT_TRUE(exec::unregisterExprSetListener(listener));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(ExprStatsTest, errorLog) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Register a listener to log exceptions.
   std::vector<Event> events;
   std::vector<std::string> exceptions;
@@ -421,9 +425,9 @@ TEST_F(ExprStatsTest, errorLog) {
   ASSERT_EQ(4, listener->exceptionCount());
   ASSERT_EQ(4, exceptions.size());
 
-  // Test with nested try expressions. Expect errors at rows 2, 3, 4, and 6. Row
-  // 5 in c2 does not cause an error because the corresponding row in c0 is
-  // null, so this row is not evaluated for the division.
+  // Test with nested try expressions. Expect errors at rows 2, 3, 4, and 6.
+  // Row 5 in c2 does not cause an error because the corresponding row in c0
+  // is null, so this row is not evaluated for the division.
   listener->reset();
   exprSet = compileExpressions(
       {"try(try(cast(c0 as integer)) / cast(c2 as integer))"}, rowType);
@@ -450,7 +454,6 @@ TEST_F(ExprStatsTest, errorLog) {
 
   ASSERT_TRUE(exec::unregisterExprSetListener(listener));
 }
-#endif
 
 TEST_F(ExprStatsTest, complexConstants) {
   // Expressions with constants of types not expressible in SQL should use

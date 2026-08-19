@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <folly/Likely.h>
 #include <limits>
 #include "bolt/exec/Aggregate.h"
@@ -321,13 +323,8 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
       const TypePtr& resultType,
       bool throwOnNestedNulls)
       : exec::Aggregate(resultType),
-#ifdef SPARK_COMPATIBLE
-        throwOnNestedNulls_(false)
-#else
-        throwOnNestedNulls_(throwOnNestedNulls)
-#endif
-  {
-  }
+        throwOnNestedNulls_(
+            ::bytedance::bolt::kSparkCompatible ? false : throwOnNestedNulls) {}
 
   bool isFixedSize() const override {
     return false;
@@ -1039,15 +1036,15 @@ exec::AggregateRegistrationResult registerMinMax(
                            .argumentType("UNKNOWN")
                            .build());
 
-#ifdef SPARK_COMPATIBLE
-  signatures.push_back(exec::AggregateFunctionSignatureBuilder()
-                           .typeVariable("K")
-                           .typeVariable("V")
-                           .argumentType("MAP(K,V)")
-                           .returnType("MAP(K,V)")
-                           .intermediateType("MAP(K,V)")
-                           .build());
-#endif
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    signatures.push_back(exec::AggregateFunctionSignatureBuilder()
+                             .typeVariable("K")
+                             .typeVariable("V")
+                             .argumentType("MAP(K,V)")
+                             .returnType("MAP(K,V)")
+                             .intermediateType("MAP(K,V)")
+                             .build());
+  }
 
   for (const auto& type :
        {"tinyint", "integer", "smallint", "bigint", "real", "double"}) {

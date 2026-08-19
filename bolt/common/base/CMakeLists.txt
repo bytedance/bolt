@@ -58,6 +58,12 @@ bolt_add_library(
 find_package(ryu CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
+install(
+  FILES
+    "${BOLT_GENERATED_BASE_INCLUDE_DIR}/SparkCompatibility.h"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/bolt/common/base"
+)
+
 add_compile_definitions(FOLLY_HAVE_INT128_T=1)
 target_link_libraries(
   bolt_common_base

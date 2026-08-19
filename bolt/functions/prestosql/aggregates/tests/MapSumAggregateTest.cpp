@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 #include "bolt/functions/prestosql/ArithmeticImpl.h"
 #include "bolt/type/Conversions.h"
@@ -358,15 +360,14 @@ TEST_F(MapSumAggTest, overflow) {
       std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
           {{"0", std::numeric_limits<int64_t>::max()}},
           {{"0", std::numeric_limits<int64_t>::max()}}};
-#ifdef SPARK_COMPATIBLE
-  auto expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", -2}}};
-#else
-  auto expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", std::numeric_limits<int64_t>::max()}}};
-#endif
+  using Expected =
+      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>;
+  auto expected = Expected{{
+      {"0",
+       ::bytedance::bolt::kSparkCompatible
+           ? int64_t{-2}
+           : std::numeric_limits<int64_t>::max()},
+  }};
 
   auto inputVec = makeMapVector(data);
   auto expectedVec = makeMapVector(expected);
@@ -381,15 +382,12 @@ TEST_F(MapSumAggTest, overflow) {
       std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
           {{"0", std::numeric_limits<int64_t>::min()}},
           {{"0", std::numeric_limits<int64_t>::min()}}};
-#ifdef SPARK_COMPATIBLE
-  expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", 0}}};
-#else
-  expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", std::numeric_limits<int64_t>::min()}}};
-#endif
+  expected = Expected{{
+      {"0",
+       ::bytedance::bolt::kSparkCompatible
+           ? int64_t{0}
+           : std::numeric_limits<int64_t>::min()},
+  }};
   inputVec = makeMapVector(data);
   expectedVec = makeMapVector(expected);
 
@@ -405,15 +403,14 @@ TEST_F(MapSumAggTest, castOverflow) {
       std::vector<std::vector<std::pair<StringView, std::optional<double>>>>{
           {{"0", std::numeric_limits<double>::max()}},
           {{"0", std::numeric_limits<double>::max()}}};
-#ifdef SPARK_COMPATIBLE
-  auto expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", -2}}};
-#else
-  auto expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", std::numeric_limits<int64_t>::max()}}};
-#endif
+  using Expected =
+      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>;
+  auto expected = Expected{{
+      {"0",
+       ::bytedance::bolt::kSparkCompatible
+           ? int64_t{-2}
+           : std::numeric_limits<int64_t>::max()},
+  }};
 
   auto inputVec = makeMapVector(data);
   auto expectedVec = makeMapVector(expected);
@@ -428,15 +425,12 @@ TEST_F(MapSumAggTest, castOverflow) {
       {{"0", -std::numeric_limits<double>::max()}},
       {{"0", -std::numeric_limits<double>::max()}}};
 
-#ifdef SPARK_COMPATIBLE
-  expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", 0}}};
-#else
-  expected =
-      std::vector<std::vector<std::pair<StringView, std::optional<int64_t>>>>{
-          {{"0", std::numeric_limits<int64_t>::min()}}};
-#endif
+  expected = Expected{{
+      {"0",
+       ::bytedance::bolt::kSparkCompatible
+           ? int64_t{0}
+           : std::numeric_limits<int64_t>::min()},
+  }};
 
   inputVec = makeMapVector(data);
   expectedVec = makeMapVector(expected);

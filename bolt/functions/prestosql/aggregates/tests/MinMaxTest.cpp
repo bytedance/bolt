@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <vector/ComplexVector.h>
 #include <limits>
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -381,11 +383,11 @@ TEST_F(MinMaxTest, array) {
       }),
   });
 
-#ifndef SPARK_COMPATIBLE
-  BOLT_ASSERT_THROW(
-      testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected}),
-      "ARRAY comparison not supported for values that contain nulls");
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    BOLT_ASSERT_THROW(
+        testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected}),
+        "ARRAY comparison not supported for values that contain nulls");
+  }
 
   data = makeRowVector({
       makeNullableArrayVector<int64_t>({
@@ -422,11 +424,11 @@ TEST_F(MinMaxTest, row) {
            makeFlatVector<StringView>({"hij"_sv})}),
   });
 
-#ifndef SPARK_COMPATIBLE
-  BOLT_ASSERT_THROW(
-      testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected}),
-      "ROW comparison not supported for values that contain nulls");
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    BOLT_ASSERT_THROW(
+        testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected}),
+        "ROW comparison not supported for values that contain nulls");
+  }
 
   data = makeRowVector({
       makeRowVector({
@@ -472,20 +474,20 @@ TEST_F(MinMaxTest, arrayCheckNulls) {
       }),
   });
 
-#ifndef SPARK_COMPATIBLE
-  for (const auto& expr : {"min(c0)", "max(c0)"}) {
-    testFailingAggregations(
-        {batch, batchWithNull},
-        {},
-        {expr},
-        "ARRAY comparison not supported for values that contain nulls");
-    testFailingAggregations(
-        {batch, batchWithNull},
-        {"c1"},
-        {expr},
-        "ARRAY comparison not supported for values that contain nulls");
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    for (const auto& expr : {"min(c0)", "max(c0)"}) {
+      testFailingAggregations(
+          {batch, batchWithNull},
+          {},
+          {expr},
+          "ARRAY comparison not supported for values that contain nulls");
+      testFailingAggregations(
+          {batch, batchWithNull},
+          {"c1"},
+          {expr},
+          "ARRAY comparison not supported for values that contain nulls");
+    }
   }
-#endif
 }
 
 TEST_F(MinMaxTest, rowCheckNull) {
@@ -521,24 +523,26 @@ TEST_F(MinMaxTest, rowCheckNull) {
       makeFlatVector<int8_t>({1, 2, 3}),
   });
 
-#ifndef SPARK_COMPATIBLE
-  for (const auto& expr : {"min(c0)", "max(c0)"}) {
-    testFailingAggregations(
-        {batch, batchWithNull},
-        {},
-        {expr},
-        "ROW comparison not supported for values that contain nulls");
-    testFailingAggregations(
-        {batch, batchWithNull},
-        {"c1"},
-        {expr},
-        "ROW comparison not supported for values that contain nulls");
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    for (const auto& expr : {"min(c0)", "max(c0)"}) {
+      testFailingAggregations(
+          {batch, batchWithNull},
+          {},
+          {expr},
+          "ROW comparison not supported for values that contain nulls");
+      testFailingAggregations(
+          {batch, batchWithNull},
+          {"c1"},
+          {expr},
+          "ROW comparison not supported for values that contain nulls");
+    }
   }
-#endif
 }
 
-#ifdef SPARK_COMPATIBLE
 TEST_F(MinMaxTest, map) {
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto expected = makeRowVector({
       makeMapVector<StringView, StringView>({{
           {"cpu p96消耗"_sv, "95.4"_sv},
@@ -574,7 +578,6 @@ TEST_F(MinMaxTest, map) {
 
   testAggregations({data}, {}, {"max(c0)"}, {expected});
 }
-#endif
 
 TEST_F(MinMaxTest, failOnUnorderableType) {
   auto data = makeRowVector({
@@ -588,17 +591,17 @@ TEST_F(MinMaxTest, failOnUnorderableType) {
     {
       auto builder = PlanBuilder().values({data});
 
-#ifndef SPARK_COMPATIBLE
-      BOLT_ASSERT_THROW(builder.singleAggregation({}, {expr}), kErrorMessage);
-#endif
+      if constexpr (!::bytedance::bolt::kSparkCompatible) {
+        BOLT_ASSERT_THROW(builder.singleAggregation({}, {expr}), kErrorMessage);
+      }
     }
 
     {
       auto builder = PlanBuilder().values({data});
-#ifndef SPARK_COMPATIBLE
-      BOLT_ASSERT_THROW(
-          builder.singleAggregation({"c1"}, {expr}), kErrorMessage);
-#endif
+      if constexpr (!::bytedance::bolt::kSparkCompatible) {
+        BOLT_ASSERT_THROW(
+            builder.singleAggregation({"c1"}, {expr}), kErrorMessage);
+      }
     }
   }
 }

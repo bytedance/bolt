@@ -89,7 +89,6 @@ add_executable(
   SizeTest.cpp
   SortArrayTest.cpp
   SparkArraySortTest.cpp
-  SparkCastExprTest.cpp
   SparkPartitionIdTest.cpp
   SparkRoundTest.cpp
   SparkSqlDateTimeFunctionsTest.cpp
@@ -107,6 +106,10 @@ add_executable(
   VariantFunctionTest.cpp
   XxHash64Test.cpp
 )
+
+if(BOLT_ENABLE_SPARK_COMPATIBLE)
+  target_sources(bolt_functions_spark_test PRIVATE SparkCastExprTest.cpp)
+endif()
 
 add_test(
   NAME bolt_functions_spark_test

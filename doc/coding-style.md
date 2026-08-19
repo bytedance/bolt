@@ -273,6 +273,43 @@ macro names are always upper-snake-case. Also:
     if/for/while even if they don't use braces and forces use of a trailing
     semicolon.
 
+## Build-Mode Configuration
+
+* Do not use global compile definitions to implement build-mode-specific
+  behavior. In particular, do not reintroduce the `SPARK_COMPATIBLE` macro.
+* Keep build-mode-dependent logic in the implementation files that need it.
+  Prefer a configured `constexpr` value for C++ branches and CMake source
+  selection when an entire source file belongs to one build mode.
+* Do not include build-mode configuration from public or widely included
+  headers unless a template definition itself must vary. Keep unavoidable
+  template-dependent logic in the narrowest internal or `-inl.h` header.
+* Switching build modes must not invalidate unrelated translation units. Check
+  the incremental build scope when adding a new build-mode-dependent branch.
+
+## Command-Line Flags (gflags)
+
+* A flag used by more than one source file must have one owner. Put the only
+  `DECLARE_*` in the owner's header and the only `DEFINE_*` in its source file.
+  Consumers include the owner header and use `FLAGS_xxx`; they must not repeat
+  either macro.
+* A `DEFINE_*` may remain local to a source file only when that source file
+  builds an independent binary and the flag is used nowhere else. Both
+  conditions are required. Typical cases include a single-file benchmark,
+  coverage tool, or a runner's private command-line option.
+* If a local flag gains a second consumer, move it to an owner header and
+  source file instead of adding declarations next to each consumer.
+* Use the existing shared owners when applicable:
+  * Production flags: `bolt/common/flags/BoltFlags.h` and `BoltFlags.cpp`.
+  * Test flags: `bolt/common/testutil/BoltTestFlags.h` and `BoltTestFlags.cpp`.
+  * Fuzzer flags: `bolt/exec/fuzzer/FuzzerFlags.h` and `FuzzerFlags.cpp`.
+  A module may define its own owner pair, but the one-declaration,
+  one-definition rule still applies.
+* Use the corresponding prefix for new flag names:
+  * Production: `bolt_`.
+  * Tests: `bolt_testing_`.
+  * Fuzzers: `bolt_fuzzer_`.
+  * Benchmarks: `bolt_benchmark_`.
+
 ## Headers and Includes
 
 * All header files must have a single-inclusion guard using `#pragma once`

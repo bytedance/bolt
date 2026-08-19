@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -59,13 +61,13 @@ void makeUuid(char* uuid, uint64_t seed) {
 
 void makeUuid(char* uuid, std::mt19937_64& rng) {
   auto next = [&rng]() {
-#ifdef SPARK_COMPATIBLE
-    uint64_t high = rng() << 32;
-    uint64_t low = rng() & 4294967295L;
-    return high | low;
-#else
-    return rng();
-#endif
+    if constexpr (::bytedance::bolt::kSparkCompatible) {
+      uint64_t high = rng() << 32;
+      uint64_t low = rng() & 4294967295L;
+      return high | low;
+    } else {
+      return rng();
+    }
   };
   makeUuid(uuid, next(), next());
 }

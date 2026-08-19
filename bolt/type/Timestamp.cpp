@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/type/Timestamp.h"
 
 #include <date/tz.h>
@@ -57,6 +59,12 @@ Timestamp Timestamp::now() {
                      now.time_since_epoch())
                      .count();
   return fromMillis(epochMs);
+}
+
+std::string Timestamp::toString(
+    const TimestampToStringOptions::Precision& precision,
+    const tz::TimeZone* tz) const {
+  return toString<::bytedance::bolt::kSparkCompatible>(precision, tz);
 }
 
 void Timestamp::toGMT(const tz::TimeZone& zone, bool* hasError) {

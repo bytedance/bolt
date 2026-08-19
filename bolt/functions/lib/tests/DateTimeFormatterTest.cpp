@@ -28,10 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/functions/lib/DateTimeFormatter.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <bolt/common/base/BoltException.h>
 #include <bolt/type/StringView.h>
 #include <date/tz.h>
+#include "bolt/functions/lib/DateTimeFormatter.h"
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
@@ -270,17 +272,17 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
   // d specifier case
   testTokenRange('d', 1, 4, DateTimeFormatSpecifier::DAY_OF_MONTH);
 
-#ifndef SPARK_COMPATIBLE
-  // a specifier case
-  expected = {
-      DateTimeToken(FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2})};
-  EXPECT_EQ(expected, buildJodaDateTimeFormatter("a")->tokens());
-  // minRepresentDigits should be unchanged with higher number of specifier for
-  // HALFDAY_OF_DAY
-  expected = {
-      DateTimeToken(FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2})};
-  EXPECT_EQ(expected, buildJodaDateTimeFormatter("aa")->tokens());
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    // a specifier case
+    expected = {DateTimeToken(
+        FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2})};
+    EXPECT_EQ(expected, buildJodaDateTimeFormatter("a")->tokens());
+    // minRepresentDigits should be unchanged with higher number of specifier
+    // for HALFDAY_OF_DAY
+    expected = {DateTimeToken(
+        FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2})};
+    EXPECT_EQ(expected, buildJodaDateTimeFormatter("aa")->tokens());
+  }
 
   // K specifier case
   testTokenRange('K', 1, 4, DateTimeFormatSpecifier::HOUR_OF_HALFDAY);
@@ -373,13 +375,13 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2}),
   };
 
-#ifndef SPARK_COMPATIBLE
-  EXPECT_EQ(
-      expected,
-      buildJodaDateTimeFormatter(
-          "''CCC-YYYY/xxx//www-00-eeee--EEEEEE---yyyyy///DDDDMM-MMMMddddKKhhhkkHHmmsSSSSSSzzzZZZGGGG'abcdefghijklmnopqrstuvwxyz'aaa")
-          ->tokens());
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    EXPECT_EQ(
+        expected,
+        buildJodaDateTimeFormatter(
+            "''CCC-YYYY/xxx//www-00-eeee--EEEEEE---yyyyy///DDDDMM-MMMMddddKKhhhkkHHmmsSSSSSSzzzZZZGGGG'abcdefghijklmnopqrstuvwxyz'aaa")
+            ->tokens());
+  }
 }
 
 TEST_F(JodaDateTimeFormatterTest, invalidJodaBuild) {
@@ -403,8 +405,10 @@ TEST_F(JodaDateTimeFormatterTest, invalid) {
   EXPECT_THROW(parseJoda("", "Y '"), BoltUserError);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(JodaDateTimeFormatterTest, parseJodaEra) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Normal era cases
   EXPECT_EQ(
       util::fromTimestampString("-100-01-01", nullptr),
@@ -463,7 +467,6 @@ TEST_F(JodaDateTimeFormatterTest, parseJodaEra) {
   EXPECT_THROW(parseJoda("bC", "G"), BoltUserError);
   EXPECT_THROW(parseJoda("Bc", "G"), BoltUserError);
 }
-#endif
 
 TEST_F(JodaDateTimeFormatterTest, parseYearOfEra) {
   // By the default, assume epoch.
@@ -527,9 +530,12 @@ TEST_F(JodaDateTimeFormatterTest, parseYearOfEra) {
   EXPECT_THROW(parseJoda("+100", "Y"), BoltUserError);
 }
 
-#ifndef SPARK_COMPATIBLE
-// Same semantic as YEAR_OF_ERA, except that it accepts zero and negative years.
+// Same semantic as YEAR_OF_ERA, except that it accepts zero and negative
+// years.
 TEST_F(JodaDateTimeFormatterTest, parseYear) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   EXPECT_EQ(
       util::fromTimestampString("123-01-01", nullptr),
       parseJoda("123", "y").timestamp);
@@ -604,6 +610,9 @@ TEST_F(JodaDateTimeFormatterTest, parseYear) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseWeekYear) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Covers entire range of possible week year start dates (12-29 to 01-04)
   EXPECT_EQ(
       util::fromTimestampString("1969-12-29 00:00:00", nullptr),
@@ -682,6 +691,9 @@ TEST_F(JodaDateTimeFormatterTest, parseWeekYear) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseCenturyOfEra) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Probe century range
   EXPECT_EQ(
       util::fromTimestampString("292278900-01-01 00:00:00", nullptr),
@@ -694,7 +706,6 @@ TEST_F(JodaDateTimeFormatterTest, parseCenturyOfEra) {
   EXPECT_THROW(parseJoda("-1", "CCCCCCC"), BoltUserError);
   EXPECT_THROW(parseJoda("2922790", "CCCCCCC"), BoltUserError);
 }
-#endif
 
 TEST_F(JodaDateTimeFormatterTest, parseJodaMonth) {
   // Joda has this weird behavior where if minute or hour is specified, year
@@ -968,8 +979,10 @@ TEST_F(JodaDateTimeFormatterTest, parseClockHourOfHalfDay) {
   //   EXPECT_THROW(parseJoda("123456789", "h"), BoltUserError);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(JodaDateTimeFormatterTest, parseHalfOfDay) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Half of day has no effect if hour or clockhour of day is provided
   // hour of day tests
   EXPECT_EQ(
@@ -1078,7 +1091,8 @@ TEST_F(JodaDateTimeFormatterTest, parseHalfOfDay) {
       util::fromTimestampString("1970-01-01 12:00:00", nullptr),
       parseJoda("1 AM 12", "h a H").timestamp);
 
-  // Half of day still has effect even though hour or clockhour is not provided.
+  // Half of day still has effect even though hour or clockhour is not
+  // provided.
   EXPECT_EQ(
       util::fromTimestampString("1970-01-01 12:00:00", nullptr),
       parseJoda("PM", "a").timestamp);
@@ -1091,6 +1105,9 @@ TEST_F(JodaDateTimeFormatterTest, parseHalfOfDay) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseMinute) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   EXPECT_EQ(
       util::fromTimestampString("1970-01-01 00:08:00", nullptr),
       parseJoda("8", "m").timestamp);
@@ -1105,7 +1122,6 @@ TEST_F(JodaDateTimeFormatterTest, parseMinute) {
   EXPECT_THROW(parseJoda("-1", "m"), BoltUserError);
   //   EXPECT_THROW(parseJoda("123456789", "m"), BoltUserError);
 }
-#endif
 
 TEST_F(JodaDateTimeFormatterTest, parseSecond) {
   EXPECT_EQ(
@@ -1185,8 +1201,10 @@ TEST_F(JodaDateTimeFormatterTest, parseTimezoneOffset) {
   EXPECT_THROW(parseTZ("-16", "ZZ"), BoltUserError);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(JodaDateTimeFormatterTest, parseTimezone) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   EXPECT_THROW(parseJoda("", "z"), BoltUserError);
   EXPECT_THROW(parseJoda("ANY", "z"), BoltUserError);
   EXPECT_THROW(parseJoda("GM", "z"), BoltUserError);
@@ -1201,7 +1219,6 @@ TEST_F(JodaDateTimeFormatterTest, parseTimezone) {
   EXPECT_EQ("+00:00", parseTZ("UTC", "z"));
   EXPECT_EQ("+00:00", parseTZ("UT", "z"));
 }
-#endif
 
 TEST_F(JodaDateTimeFormatterTest, parseMixedYMDFormat) {
   // Common patterns found.
@@ -1568,8 +1585,10 @@ TEST_F(MysqlDateTimeTest, invalidBuild) {
   EXPECT_THROW(buildMysqlDateTimeFormatter(""), BoltUserError);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(MysqlDateTimeTest, formatYear) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto* timezone = tz::locateZone("GMT");
   EXPECT_EQ(
       formatMysqlDateTime(
@@ -1614,6 +1633,9 @@ TEST_F(MysqlDateTimeTest, formatYear) {
 }
 
 TEST_F(MysqlDateTimeTest, formatMonthDay) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto* timezone = tz::locateZone("GMT");
 
   EXPECT_EQ(
@@ -1663,7 +1685,6 @@ TEST_F(MysqlDateTimeTest, formatMonthDay) {
           "%m~%d", util::fromTimestampString("1999-02-29", nullptr), timezone),
       BoltUserError);
 }
-#endif
 
 TEST_F(MysqlDateTimeTest, formatWeekday) {
   auto* timezone = tz::locateZone("GMT");
@@ -2036,9 +2057,12 @@ TEST_F(MysqlDateTimeTest, formatCompositeTime) {
       "23:59:59");
 }
 
-#ifndef SPARK_COMPATIBLE
-// Same semantic as YEAR_OF_ERA, except that it accepts zero and negative years.
+// Same semantic as YEAR_OF_ERA, except that it accepts zero and negative
+// years.
 TEST_F(MysqlDateTimeTest, parseFourDigitYear) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   EXPECT_EQ(
       util::fromTimestampString("123-01-01", nullptr), parseMysql("123", "%Y"));
   EXPECT_EQ(
@@ -2080,7 +2104,6 @@ TEST_F(MysqlDateTimeTest, parseFourDigitYear) {
       util::fromTimestampString("9999-01-01", nullptr),
       parseMysql("9999", "%Y"));
 }
-#endif
 
 TEST_F(MysqlDateTimeTest, parseTwoDigitYear) {
   EXPECT_EQ(
@@ -2096,8 +2119,10 @@ TEST_F(MysqlDateTimeTest, parseTwoDigitYear) {
       parseMysql("80 30", "%y %y"));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(MysqlDateTimeTest, parseWeekYear) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Covers entire range of possible week year start dates (12-29 to 01-04)
   EXPECT_EQ(
       util::fromTimestampString("1969-12-29 00:00:00", nullptr),
@@ -2147,7 +2172,6 @@ TEST_F(MysqlDateTimeTest, parseWeekYear) {
   //   EXPECT_THROW(parseMysql("-292275055", "%x"), BoltUserError);
   //   EXPECT_THROW(parseMysql("292278994", "%x"), BoltUserError);
 }
-#endif
 
 TEST_F(MysqlDateTimeTest, parseMonth) {
   // Joda has this weird behavior where if minute or hour is specified, year
@@ -2432,8 +2456,10 @@ TEST_F(MysqlDateTimeTest, parseClockHourOfHalfDay) {
   //   EXPECT_THROW(parseMysql("123456789", "%l"), BoltUserError);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(MysqlDateTimeTest, parseHalfOfDay) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Half of day has no effect if hour of day is provided
   // hour of day tests
   EXPECT_EQ(
@@ -2558,7 +2584,6 @@ TEST_F(MysqlDateTimeTest, parseHalfOfDay) {
       util::fromTimestampString("1970-01-01 12:00:00", nullptr),
       parseMysql("1 AM 12", "%h %p %H"));
 }
-#endif
 
 TEST_F(MysqlDateTimeTest, parseMinute) {
   EXPECT_EQ(

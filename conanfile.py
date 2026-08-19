@@ -577,8 +577,9 @@ class BoltConan(ConanFile):
         if self.options.enable_arrow_connector:
             tc.cache_variables["BOLT_ENABLE_ARROW_CONNECTOR"] = "ON"
 
-        if self.options.spark_compatible:
-            tc.cache_variables["BOLT_ENABLE_SPARK_COMPATIBLE"] = "ON"
+        tc.cache_variables["BOLT_ENABLE_SPARK_COMPATIBLE"] = (
+            "ON" if self.options.spark_compatible else "OFF"
+        )
 
         if self.options.get_safe("enable_testutil"):
             tc.cache_variables["BOLT_ENABLE_DUCKDB"] = "ON"

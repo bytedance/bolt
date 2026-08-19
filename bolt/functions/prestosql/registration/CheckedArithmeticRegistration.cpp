@@ -28,15 +28,22 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/lib/CheckedArithmetic.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 namespace bytedance::bolt::functions {
+namespace {
+template <typename T>
+using BuildCheckedModulusFunction =
+    CheckedModulusFunction<T, ::bytedance::bolt::kSparkCompatible>;
+} // namespace
 
 void registerCheckedArithmeticFunctions(const std::string& prefix) {
   registerBinaryIntegral<CheckedPlusFunction>({prefix + "plus"});
   registerBinaryIntegral<CheckedMinusFunction>({prefix + "minus"});
   registerBinaryIntegral<CheckedMultiplyFunction>({prefix + "multiply"});
-  registerBinaryIntegral<CheckedModulusFunction>({prefix + "mod"});
+  registerBinaryIntegral<BuildCheckedModulusFunction>({prefix + "mod"});
   registerBinaryIntegral<CheckedDivideFunction>({prefix + "divide"});
   registerUnaryIntegral<CheckedNegateFunction>({prefix + "negate"});
 }

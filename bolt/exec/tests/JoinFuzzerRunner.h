@@ -32,6 +32,7 @@
 
 #include <gtest/gtest.h>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/tests/JoinFuzzer.h"
 #include "bolt/serializers/PrestoSerializer.h"
@@ -75,13 +76,13 @@ class JoinFuzzerRunner {
  public:
   static int run(size_t seed) {
     bytedance::bolt::memory::MemoryManager::initialize({});
-#ifdef SPARK_COMPATIBLE
-    bytedance::bolt::serializer::spark::UnsafeRowVectorSerde::
-        registerVectorSerde();
-#else
-    bytedance::bolt::serializer::presto::PrestoVectorSerde::
-        registerVectorSerde();
-#endif
+    if constexpr (::bytedance::bolt::kSparkCompatible) {
+      bytedance::bolt::serializer::spark::UnsafeRowVectorSerde::
+          registerVectorSerde();
+    } else {
+      bytedance::bolt::serializer::presto::PrestoVectorSerde::
+          registerVectorSerde();
+    }
     bytedance::bolt::filesystems::registerLocalFileSystem();
 
     bytedance::bolt::exec::test::joinFuzzer(seed);

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/DateTimeFunctions.h"
@@ -22,23 +24,23 @@ namespace bytedance::bolt::functions {
 namespace {
 void registerDateTimeDateComponentExtractionFunctionsInternal(
     const std::string& prefix) {
-#ifndef SPARK_COMPATIBLE
-  registerFunction<YearFunction, int64_t, Date>({prefix + "year"});
-  registerFunction<YearFunction, int64_t, Timestamp>({prefix + "year"});
-  registerFunction<QuarterFunction, int64_t, Timestamp>({prefix + "quarter"});
-  registerFunction<QuarterFunction, int64_t, Date>({prefix + "quarter"});
-  registerFunction<MonthFunction, int64_t, Timestamp>({prefix + "month"});
-  registerFunction<MonthFunction, int64_t, Date>({prefix + "month"});
-  registerFunction<WeekFunction, int64_t, Timestamp>(
-      {prefix + "week", prefix + "week_of_year"});
-  registerFunction<WeekFunction, int64_t, Date>(
-      {prefix + "week", prefix + "week_of_year"});
-  registerFunction<HourFunction, int64_t, Timestamp>({prefix + "hour"});
-  registerFunction<MinuteFunction, int64_t, Timestamp>({prefix + "minute"});
-  registerFunction<SecondFunction, int64_t, Timestamp>({prefix + "second"});
-  registerFunction<MillisecondFunction, int64_t, Timestamp>(
-      {prefix + "millisecond"});
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    registerFunction<YearFunction, int64_t, Date>({prefix + "year"});
+    registerFunction<YearFunction, int64_t, Timestamp>({prefix + "year"});
+    registerFunction<QuarterFunction, int64_t, Timestamp>({prefix + "quarter"});
+    registerFunction<QuarterFunction, int64_t, Date>({prefix + "quarter"});
+    registerFunction<MonthFunction, int64_t, Timestamp>({prefix + "month"});
+    registerFunction<MonthFunction, int64_t, Date>({prefix + "month"});
+    registerFunction<WeekFunction, int64_t, Timestamp>(
+        {prefix + "week", prefix + "week_of_year"});
+    registerFunction<WeekFunction, int64_t, Date>(
+        {prefix + "week", prefix + "week_of_year"});
+    registerFunction<HourFunction, int64_t, Timestamp>({prefix + "hour"});
+    registerFunction<MinuteFunction, int64_t, Timestamp>({prefix + "minute"});
+    registerFunction<SecondFunction, int64_t, Timestamp>({prefix + "second"});
+    registerFunction<MillisecondFunction, int64_t, Timestamp>(
+        {prefix + "millisecond"});
+  }
 
   registerFunction<YearFunction, int64_t, TimestampWithTimezone>(
       {prefix + "year"});

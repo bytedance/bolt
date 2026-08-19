@@ -29,9 +29,23 @@
  */
 
 #include "bolt/type/DecimalUtil.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/type/HugeInt.h"
 namespace bytedance::bolt {
 namespace {
+template <typename T>
+size_t convertToStringForBuild(
+    T unscaledValue,
+    int32_t scale,
+    int32_t maxVarcharSize,
+    char* startPosition) {
+  constexpr auto kFormat = kSparkCompatible
+      ? DecimalUtil::DecimalStringFormat::kSpark
+      : DecimalUtil::DecimalStringFormat::kPlain;
+  return DecimalUtil::convertToString<kFormat>(
+      unscaledValue, scale, maxVarcharSize, startPosition);
+}
+
 std::string formatDecimal(uint8_t scale, int128_t unscaledValue) {
   BOLT_DCHECK_GE(scale, 0);
   BOLT_DCHECK_LT(static_cast<size_t>(scale), sizeof(DecimalUtil::kPowersOfTen));
@@ -78,6 +92,24 @@ int32_t DecimalUtil::stringSize(int32_t precision, int32_t scale) {
     ++strSize; // Leading zero.
   }
   return strSize;
+}
+
+size_t DecimalUtil::convertToString(
+    int64_t unscaledValue,
+    int32_t scale,
+    int32_t maxVarcharSize,
+    char* startPosition) {
+  return convertToStringForBuild(
+      unscaledValue, scale, maxVarcharSize, startPosition);
+}
+
+size_t DecimalUtil::convertToString(
+    int128_t unscaledValue,
+    int32_t scale,
+    int32_t maxVarcharSize,
+    char* startPosition) {
+  return convertToStringForBuild(
+      unscaledValue, scale, maxVarcharSize, startPosition);
 }
 
 std::string DecimalUtil::toString(int128_t value, const TypePtr& type) {

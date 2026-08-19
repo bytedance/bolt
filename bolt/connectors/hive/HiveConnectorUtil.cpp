@@ -30,6 +30,7 @@
 
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/connectors/hive/FileHandle.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
@@ -43,6 +44,10 @@
 #include "bolt/type/TimestampConversion.h"
 
 namespace bytedance::bolt::connector::hive {
+
+bool shouldAdjustPartitionTimestampToTimezone() {
+  return !kSparkCompatible;
+}
 
 namespace {
 

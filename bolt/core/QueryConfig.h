@@ -899,14 +899,7 @@ class QueryConfig {
     return get<uint64_t>(kMaxSpillRunRows, kDefault);
   }
 
-  uint64_t maxSpillBytes() const {
-#ifdef SPARK_COMPATIBLE
-    static constexpr uint64_t kDefault = 0UL;
-#else
-    static constexpr uint64_t kDefault = 100UL << 30;
-#endif
-    return get<uint64_t>(kMaxSpillBytes, kDefault);
-  }
+  uint64_t maxSpillBytes() const;
 
   /// Returns the maximum number of bytes to buffer in PartitionedOutput
   /// operator to avoid creating tiny SerializedPages.

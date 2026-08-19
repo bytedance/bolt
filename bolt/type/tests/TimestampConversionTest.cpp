@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/type/TimestampConversion.h"
 
 #include <date/tz.h>
@@ -86,11 +88,11 @@ TEST(DateTimeUtilTest, fromDateString) {
   EXPECT_EQ(-719893, fromDateString("-1-1-1", nullptr));
   EXPECT_EQ(-720258, fromDateString("-2-1-1", nullptr));
 
-// 1BC is equal 0-1-1.
-#ifndef SPARK_COMPATIBLE
-  EXPECT_EQ(-719528, fromDateString("1-1-1 (BC)", nullptr));
-  EXPECT_EQ(-719893, fromDateString("2-1-1 (BC)", nullptr));
-#endif
+  // 1BC is equal 0-1-1.
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    EXPECT_EQ(-719528, fromDateString("1-1-1 (BC)", nullptr));
+    EXPECT_EQ(-719893, fromDateString("2-1-1 (BC)", nullptr));
+  }
 
   // Leading zeros and spaces.
   EXPECT_EQ(-719162, fromDateString("00001-1-1", nullptr));
@@ -117,15 +119,15 @@ TEST(DateTimeUtilTest, fromDateStrInvalid) {
   EXPECT_THROW(fromDateString("2000/01-01", nullptr), BoltUserError);
   EXPECT_THROW(fromDateString("2000 01-01", nullptr), BoltUserError);
 
-#ifndef SPARK_COMPATIBLE
-  // Trailing characters.
-  EXPECT_THROW(fromDateString("2000-01-01   asdf", nullptr), BoltUserError);
-  EXPECT_THROW(fromDateString("2000-01-01 0", nullptr), BoltUserError);
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    // Trailing characters.
+    EXPECT_THROW(fromDateString("2000-01-01   asdf", nullptr), BoltUserError);
+    EXPECT_THROW(fromDateString("2000-01-01 0", nullptr), BoltUserError);
 
-  // Too large of a year.
-  EXPECT_THROW(fromDateString("1000000", nullptr), BoltUserError);
-  EXPECT_THROW(fromDateString("-1000000", nullptr), BoltUserError);
-#endif
+    // Too large of a year.
+    EXPECT_THROW(fromDateString("1000000", nullptr), BoltUserError);
+    EXPECT_THROW(fromDateString("-1000000", nullptr), BoltUserError);
+  }
 }
 
 TEST(DateTimeUtilTest, castFromDateString) {
@@ -209,8 +211,10 @@ TEST(DateTimeUtilTest, fromTimeString) {
   EXPECT_EQ(0, fromTimeString("   \t \n 00:00:00.00  \t", nullptr));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST(DateTimeUtilTest, fromTimeStrInvalid) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   EXPECT_THROW(fromTimeString("", nullptr), BoltUserError);
   EXPECT_THROW(fromTimeString("00", nullptr), BoltUserError);
   EXPECT_THROW(fromTimeString("00:00", nullptr), BoltUserError);
@@ -223,7 +227,6 @@ TEST(DateTimeUtilTest, fromTimeStrInvalid) {
   // Trailing characters.
   EXPECT_THROW(fromTimeString("00:00:00   12", nullptr), BoltUserError);
 }
-#endif
 
 // bash command to verify:
 // $ date -d "2000-01-01 12:21:56Z" +%s

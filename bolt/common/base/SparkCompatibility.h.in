@@ -16,4 +16,9 @@
 
 #pragma once
 
-#include <glog/logging.h>
+namespace bytedance::bolt {
+
+/// True when Bolt is built with Spark-compatible behavior.
+inline constexpr bool kSparkCompatible = @BOLT_SPARK_COMPATIBLE_VALUE@;
+
+} // namespace bytedance::bolt

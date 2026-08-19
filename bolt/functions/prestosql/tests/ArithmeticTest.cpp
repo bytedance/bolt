@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -263,8 +265,10 @@ TEST_F(ArithmeticTest, mod) {
       {kNan, kNan, kNan, kNan, 5.1});
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(ArithmeticTest, modInt) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   std::vector<int64_t> numerInt = {
       9, 10, 0, -9, -10, -11, std::numeric_limits<int64_t>::min()};
   std::vector<int64_t> denomInt = {3, -3, 11, -1, 199999, 77, -1};
@@ -274,7 +278,6 @@ TEST_F(ArithmeticTest, modInt) {
       "mod(c0, c1)", numerInt, denomInt, expectedInt);
   assertError<int64_t>("mod(c0, c1)", {10}, {0}, "Cannot divide by 0");
 }
-#endif
 
 TEST_F(ArithmeticTest, power) {
   std::vector<double> baseDouble = {
