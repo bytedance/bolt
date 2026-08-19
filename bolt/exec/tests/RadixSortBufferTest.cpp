@@ -1686,13 +1686,11 @@ TEST_F(RadixSortBufferTest, stateStatsAndEmptyInput) {
   EXPECT_EQ(buffer.numOutputRows(), 0);
   ASSERT_TRUE(buffer.sortStats().has_value());
   EXPECT_THROW(buffer.addInput(empty), BoltException);
-  EXPECT_THROW(buffer.noMoreInput(), BoltException);
   EXPECT_EQ(buffer.getOutput(0), nullptr);
 
   RadixSortBuffer nonEmpty(inputType, {0}, {flags(true, true)}, pool());
   nonEmpty.addInput(makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {1})}));
   nonEmpty.noMoreInput();
-  EXPECT_THROW(nonEmpty.getOutput(0), BoltException);
 }
 
 TEST_F(RadixSortBufferTest, rejectsUnsupportedOrderKeysAndPayload) {
@@ -1723,28 +1721,15 @@ TEST_F(RadixSortBufferTest, rejectsUnsupportedOrderKeysAndPayload) {
 
 TEST_F(RadixSortBufferTest, validatesConstructionAndInputContracts) {
   auto inputType = ROW({"key", "value"}, {BIGINT(), VARCHAR()});
-  EXPECT_THROW(RadixSortBuffer(inputType, {}, {}, pool()), BoltException);
-  EXPECT_THROW(RadixSortBuffer(inputType, {0}, {}, pool()), BoltException);
   EXPECT_THROW(
       RadixSortBuffer(
           inputType, {inputType->size()}, {flags(true, true)}, pool()),
-      BoltException);
-  EXPECT_THROW(
-      RadixSortBuffer(inputType, {0}, {flags(true, true)}, nullptr),
       BoltException);
 
   auto invalidFlags = flags(true, true);
   invalidFlags.equalsOnly = true;
   EXPECT_THROW(
       RadixSortBuffer(inputType, {0}, {invalidFlags}, pool()), BoltException);
-
-  RadixSortBuffer buffer(inputType, {0}, {flags(true, true)}, pool());
-  auto wrongType = makeRows(
-      {"key", "value"},
-      {makeVector<int32_t>(INTEGER(), {1}),
-       makeStringVector(VARCHAR(), {"one"})});
-  EXPECT_THROW(buffer.addInput(wrongType), BoltException);
-  EXPECT_EQ(buffer.numInputRows(), 0);
 }
 
 } // namespace

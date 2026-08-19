@@ -477,15 +477,7 @@ void gatherImpl(
     memory::MemoryPool* pool,
     RowVectorPtr& result) {
   BOLT_CHECK_NOT_NULL(pool, "Payload row output memory pool must not be null");
-  BOLT_CHECK_LE(
-      rows.size(),
-      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
-      "Payload row output row count exceeds vector range");
   const auto size = static_cast<vector_size_t>(rows.size());
-  BOLT_CHECK_EQ(
-      mayHaveNulls.size(),
-      layout.columns().size(),
-      "Payload row nullability does not match layout");
   prepareResult(layout, size, pool, result);
 
   if (!layout.hasVariableFields()) {

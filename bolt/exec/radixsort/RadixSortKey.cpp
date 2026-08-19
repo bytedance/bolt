@@ -89,11 +89,8 @@ RadixSortKeyLayout RadixSortKeyLayout::select(
     }
     return fromKind(kind);
   }
-  BOLT_CHECK_GT(
-      *maximumEncodedSize, 0, "Maximum encoded sort key size must not be zero");
   auto physicalWidth = checkedAdd<uint64_t>(
       *maximumEncodedSize, hasPayload ? sizeof(uint64_t) : 0);
-  BOLT_CHECK(physicalWidth.has_value(), "Radix sort key width overflows");
   if (*physicalWidth <= 8) {
     BOLT_CHECK(!hasPayload, "Payload radix sort key cannot fit in 8 bytes");
     kind = RadixSortKeyLayoutKind::kKeyOnlyFixed8;
@@ -127,20 +124,6 @@ void RadixSortKey::construct(
     std::string_view encodedKey,
     char* overflowData,
     char* payload) const {
-  BOLT_CHECK_NOT_NULL(mutableData_, "Radix sort key storage must not be null");
-  BOLT_CHECK(!encodedKey.empty(), "Encoded radix sort key must not be empty");
-  BOLT_CHECK(
-      layout_->hasPayload() || payload == nullptr,
-      "Payload pointer provided to a key-only physical layout");
-  BOLT_CHECK(
-      layout_->isVariable() || encodedKey.size() <= layout_->inlineCapacity(),
-      "Encoded key does not fit the fixed physical layout");
-  BOLT_CHECK(
-      !layout_->isVariable() ||
-          encodedKey.size() <= layout_->inlineCapacity() ||
-          overflowData != nullptr,
-      "Overflow radix sort key storage must not be null");
-
   std::memset(mutableData_, 0, layout_->width());
   RadixSortInlineKeyBuffer inlineBytes{};
   std::memcpy(
@@ -170,11 +153,8 @@ void RadixSortKey::construct(
 void RadixSortKey::deconstruct(
     RadixSortInlineKeyBuffer& inlineBuffer,
     EncodedKeyView& encodedKey) const {
-  BOLT_CHECK_NOT_NULL(data_, "Radix sort key storage must not be null");
   if (layout_->isVariable() && storedSize() > layout_->inlineCapacity()) {
     const auto* fullKey = fullKeyData();
-    BOLT_CHECK_NOT_NULL(
-        fullKey, "Overflow radix sort key pointer must not be null");
     encodedKey = {std::string_view(fullKey, storedSize()), false};
     return;
   }

@@ -117,7 +117,6 @@ void buildMetadata(
     const TypePtr& type,
     const CompareFlags& flags,
     RadixSortKeyColumn& metadata) {
-  BOLT_CHECK_NOT_NULL(type, "Radix sort key type must not be null");
   BOLT_CHECK(
       validFlags(flags),
       "Radix sort key comparison flags are not order-by flags");
@@ -140,18 +139,13 @@ void buildMetadata(
     }
     if (type->kind() == TypeKind::ROW) {
       std::optional<uint64_t> maximumSize = 1;
-      bool maximumSizeValid = true;
       for (const auto& child : metadata.children) {
         if (!maximumSize.has_value() || !child.maximumEncodedSize.has_value()) {
           maximumSize = std::nullopt;
           break;
         }
         maximumSize = checkedAdd(*maximumSize, *child.maximumEncodedSize);
-        maximumSizeValid &= maximumSize.has_value();
       }
-      BOLT_CHECK(
-          maximumSizeValid,
-          "Radix sort key row maximum encoded size overflows");
       metadata.maximumEncodedSize = maximumSize;
     }
   }
@@ -536,9 +530,6 @@ void appendSingleFixedFlatLayout(
     std::span<char* const> payloads,
     EncodeBody encodeBody) {
   using Traits = RadixSortKeyTraits<KIND>;
-  BOLT_CHECK(
-      Traits::kHasPayload == !payloads.empty(),
-      "Direct fixed sort key payload presence does not match");
   if (input.rawNulls() != nullptr) {
     appendSingleFixedFlatKernel<KIND, true>(
         column, input, size, arena, payloads, encodeBody);
@@ -634,9 +625,6 @@ void appendSingleFixed64FlatLayout(
     std::span<char* const> payloads,
     EncodeBody encodeBody) {
   using Traits = RadixSortKeyTraits<KIND>;
-  BOLT_CHECK(
-      Traits::kHasPayload == !payloads.empty(),
-      "Direct fixed sort key payload presence does not match");
   if (input.rawNulls() != nullptr) {
     appendSingleFixed64FlatKernel<KIND, true>(
         column, input, size, arena, payloads, encodeBody);
@@ -805,14 +793,7 @@ void stringEncodedSize(
       ++escaped;
     }
   }
-  auto bodySize = checkedAdd<uint64_t>(value.size(), escaped);
-  BOLT_CHECK(
-      bodySize.has_value(), "Radix sort key string encoded size overflows");
-  auto withDelimiter = checkedAdd<uint64_t>(*bodySize, 1);
-  BOLT_CHECK(
-      withDelimiter.has_value(),
-      "Radix sort key string encoded size overflows");
-  size = *withDelimiter;
+  size = static_cast<uint64_t>(value.size()) + escaped + 1;
 }
 
 void encodedSize(
@@ -829,10 +810,6 @@ void encodedSize(
   }
   if (column.type->kind() == TypeKind::ROW) {
     const auto* rowVector = vector.wrappedVector()->as<RowVector>();
-    BOLT_CHECK(
-        rowVector != nullptr &&
-            rowVector->childrenSize() == column.children.size(),
-        "Radix sort key ROW vector does not match metadata");
     const auto wrappedRow = vector.wrappedIndex(row);
     for (uint32_t child = 0; child < column.children.size(); ++child) {
       const auto& childVector = rowVector->childAt(child);
@@ -844,18 +821,10 @@ void encodedSize(
   }
   if (column.type->kind() == TypeKind::ARRAY) {
     const auto* arrayVector = vector.wrappedVector()->as<ArrayVector>();
-    BOLT_CHECK(
-        arrayVector != nullptr && column.children.size() == 1,
-        "Radix sort key ARRAY vector does not match metadata");
     const auto wrappedRow = vector.wrappedIndex(row);
     const auto offset = arrayVector->offsetAt(wrappedRow);
     const auto count = arrayVector->sizeAt(wrappedRow);
     const auto& elements = arrayVector->elements();
-    BOLT_CHECK(
-        elements != nullptr &&
-            static_cast<uint64_t>(offset) + count <=
-                static_cast<uint64_t>(elements->size()),
-        "Radix sort key ARRAY elements are out of range");
     const auto& child = column.children[0];
     if (isFixedScalarColumn(child)) {
       const auto bodySize = *fixedBodySize(*child.type);
@@ -863,11 +832,7 @@ void encodedSize(
       if (elements->encoding() == VectorEncoding::Simple::FLAT) {
         const auto* nulls = elements->rawNulls();
         if (nulls == nullptr) {
-          auto childrenSize = checkedMultiply<uint64_t>(count, validSize);
-          BOLT_CHECK(
-              childrenSize.has_value(),
-              "Radix sort key ARRAY encoded size overflows");
-          size += *childrenSize;
+          size += static_cast<uint64_t>(count) * validSize;
         } else {
           for (vector_size_t index = offset; index < offset + count; ++index) {
             size += bits::isBitNull(nulls, index) ? uint64_t{1} : validSize;
@@ -878,11 +843,7 @@ void encodedSize(
         if (decoded.isConstantMapping()) {
           const auto elementSize =
               decoded.isNullAt(0) ? uint64_t{1} : validSize;
-          auto childrenSize = checkedMultiply<uint64_t>(count, elementSize);
-          BOLT_CHECK(
-              childrenSize.has_value(),
-              "Radix sort key ARRAY encoded size overflows");
-          size += *childrenSize;
+          size += static_cast<uint64_t>(count) * elementSize;
         } else {
           for (vector_size_t index = offset; index < offset + count; ++index) {
             size += decoded.isNullAt(index) ? uint64_t{1} : validSize;
@@ -896,61 +857,37 @@ void encodedSize(
         size += childSize;
       }
     }
-    auto withDelimiter = checkedAdd<uint64_t>(size, 1);
-    BOLT_CHECK(
-        withDelimiter.has_value(),
-        "Radix sort key ARRAY delimiter size overflows");
-    size = *withDelimiter;
+    ++size;
     return;
   }
   if (column.type->kind() == TypeKind::MAP) {
     const auto* mapVector = vector.wrappedVector()->as<MapVector>();
-    BOLT_CHECK(
-        mapVector != nullptr && column.children.size() == 2,
-        "Radix sort key MAP vector does not match metadata");
     const auto wrappedRow = vector.wrappedIndex(row);
     const auto indices = mapVector->sortedKeyIndices(wrappedRow);
     const auto& keys = mapVector->mapKeys();
     const auto& values = mapVector->mapValues();
-    BOLT_CHECK(
-        keys != nullptr && values != nullptr,
-        "Radix sort key MAP children are missing");
     for (const auto index : indices) {
       uint64_t childSize;
       encodedSize(column.children[0], *keys, index, childSize);
       size += childSize;
     }
-    auto withKeyDelimiter = checkedAdd<uint64_t>(size, 1);
-    BOLT_CHECK(
-        withKeyDelimiter.has_value(),
-        "Radix sort key MAP key delimiter size overflows");
-    size = *withKeyDelimiter;
+    ++size;
     for (const auto index : indices) {
       uint64_t childSize;
       encodedSize(column.children[1], *values, index, childSize);
       size += childSize;
     }
-    auto withValueDelimiter = checkedAdd<uint64_t>(size, 1);
-    BOLT_CHECK(
-        withValueDelimiter.has_value(),
-        "Radix sort key MAP value delimiter size overflows");
-    size = *withValueDelimiter;
+    ++size;
     return;
   }
   if (column.type->kind() == TypeKind::VARCHAR ||
       column.type->kind() == TypeKind::VARBINARY) {
     uint64_t bodySize;
     stringEncodedSize(vector, row, bodySize);
-    auto total = checkedAdd<uint64_t>(size, bodySize);
-    BOLT_CHECK(total.has_value(), "Radix sort key encoded size overflows");
-    size = *total;
+    size += bodySize;
     return;
   }
   auto bodySize = fixedBodySize(*column.type);
-  BOLT_CHECK(
-      bodySize.has_value(),
-      "Radix sort key encoding is not implemented for {}",
-      column.type->toString());
   size += *bodySize;
 }
 
@@ -1011,7 +948,7 @@ uint64_t encodeFixedScalarArrayElements(
     vector_size_t offset,
     vector_size_t count,
     char* output,
-    uint64_t outputSize,
+    uint64_t /*outputSize*/,
     EncodeBody encodeBody) {
   const auto bodySize = *fixedBodySize(*column.type);
   const bool descending = !column.flags.ascending;
@@ -1020,16 +957,10 @@ uint64_t encodeFixedScalarArrayElements(
   uint64_t written = 0;
   const auto writeElement =
       [&](vector_size_t index, auto valueAt, auto isNullAt) {
-        BOLT_CHECK_LT(
-            written, outputSize, "Radix sort key output buffer is too small");
         if (isNullAt(index)) {
           output[written++] = null;
           return;
         }
-        BOLT_CHECK_LE(
-            written + 1 + bodySize,
-            outputSize,
-            "Radix sort key output buffer is too small");
         output[written++] = valid;
         encodeBody(valueAt(index), output + written, descending);
         written += bodySize;
@@ -1158,10 +1089,8 @@ void encodeValue(
     const BaseVector& vector,
     vector_size_t row,
     char* output,
-    uint64_t outputSize,
+    uint64_t /*outputSize*/,
     uint64_t& written) {
-  BOLT_CHECK_GT(outputSize, 0, "Radix sort key output buffer is too small");
-
   const bool isNull = vector.isNullAt(row);
   output[0] = static_cast<char>(
       isNull ? nullMarker(column.flags) : validMarker(column.flags));
@@ -1173,12 +1102,6 @@ void encodeValue(
   const bool descending = !column.flags.ascending;
   auto* body = output + 1;
   const auto addWritten = [&](uint64_t& offset, uint64_t childWritten) {
-    BOLT_CHECK_LE(
-        offset, outputSize, "Radix sort key output buffer is too small");
-    BOLT_CHECK_LE(
-        childWritten,
-        outputSize - offset,
-        "Radix sort key output buffer is too small");
     offset += childWritten;
   };
   if (column.type->kind() == TypeKind::ROW) {
@@ -1186,15 +1109,13 @@ void encodeValue(
     const auto wrappedRow = vector.wrappedIndex(row);
     uint64_t offset = 1;
     for (uint32_t child = 0; child < column.children.size(); ++child) {
-      BOLT_CHECK_LE(
-          offset, outputSize, "Radix sort key output buffer is too small");
       uint64_t childWritten;
       encodeValue(
           column.children[child],
           *rowVector->childAt(child),
           wrappedRow,
           output + offset,
-          outputSize - offset,
+          0,
           childWritten);
       addWritten(offset, childWritten);
     }
@@ -1209,33 +1130,22 @@ void encodeValue(
     const auto& child = column.children[0];
     const auto& elements = *arrayVector->elements();
     if (isFixedScalarColumn(child)) {
-      BOLT_CHECK_LE(
-          offset, outputSize, "Radix sort key output buffer is too small");
       const auto childWritten = encodeFixedScalarArrayElements(
-          child,
-          elements,
-          arrayOffset,
-          count,
-          output + offset,
-          outputSize - offset);
+          child, elements, arrayOffset, count, output + offset, 0);
       addWritten(offset, childWritten);
     } else {
       for (vector_size_t index = 0; index < count; ++index) {
-        BOLT_CHECK_LE(
-            offset, outputSize, "Radix sort key output buffer is too small");
         uint64_t childWritten;
         encodeValue(
             child,
             elements,
             arrayOffset + index,
             output + offset,
-            outputSize - offset,
+            0,
             childWritten);
         addWritten(offset, childWritten);
       }
     }
-    BOLT_CHECK_LT(
-        offset, outputSize, "Radix sort key output buffer is too small");
     output[offset++] = static_cast<char>(
         descending ? static_cast<uint8_t>(~kStringDelimiter)
                    : kStringDelimiter);
@@ -1247,47 +1157,35 @@ void encodeValue(
     const auto indices = mapVector->sortedKeyIndices(wrappedRow);
     uint64_t offset = 1;
     for (const auto index : indices) {
-      BOLT_CHECK_LE(
-          offset, outputSize, "Radix sort key output buffer is too small");
       uint64_t childWritten;
       encodeValue(
           column.children[0],
           *mapVector->mapKeys(),
           index,
           output + offset,
-          outputSize - offset,
+          0,
           childWritten);
       addWritten(offset, childWritten);
     }
     const auto delimiter = static_cast<char>(
         descending ? static_cast<uint8_t>(~kStringDelimiter)
                    : kStringDelimiter);
-    BOLT_CHECK_LT(
-        offset, outputSize, "Radix sort key output buffer is too small");
     output[offset++] = delimiter;
     for (const auto index : indices) {
-      BOLT_CHECK_LE(
-          offset, outputSize, "Radix sort key output buffer is too small");
       uint64_t childWritten;
       encodeValue(
           column.children[1],
           *mapVector->mapValues(),
           index,
           output + offset,
-          outputSize - offset,
+          0,
           childWritten);
       addWritten(offset, childWritten);
     }
-    BOLT_CHECK_LT(
-        offset, outputSize, "Radix sort key output buffer is too small");
     output[offset++] = delimiter;
     written = offset;
     return;
   } else if (column.type->isShortDecimal()) {
-    BOLT_CHECK_LE(
-        uint64_t{1} + sizeof(int64_t),
-        outputSize,
-        "Radix sort key output buffer is too small");
     encodeSigned<int64_t>(
         scalarValueAt<int64_t>(vector, row), body, descending);
     written = 1 + sizeof(int64_t);
@@ -1295,10 +1193,6 @@ void encodeValue(
   } else if (
       column.type->isLongDecimal() ||
       column.type->kind() == TypeKind::HUGEINT) {
-    BOLT_CHECK_LE(
-        uint64_t{1} + sizeof(int128_t),
-        outputSize,
-        "Radix sort key output buffer is too small");
     const auto value = scalarValueAt<int128_t>(vector, row);
     encodeSigned<int64_t>(
         static_cast<int64_t>(HugeInt::upper(value)), body, descending);
@@ -1309,10 +1203,6 @@ void encodeValue(
   } else {
     switch (column.type->kind()) {
       case TypeKind::BOOLEAN: {
-        BOLT_CHECK_LE(
-            uint64_t{2},
-            outputSize,
-            "Radix sort key output buffer is too small");
         auto value = static_cast<uint8_t>(scalarValueAt<bool>(vector, row));
         body[0] = static_cast<char>(
             descending ? static_cast<uint8_t>(~value) : value);
@@ -1320,64 +1210,36 @@ void encodeValue(
         return;
       }
       case TypeKind::TINYINT:
-        BOLT_CHECK_LE(
-            uint64_t{2},
-            outputSize,
-            "Radix sort key output buffer is too small");
         encodeSigned<int8_t>(
             scalarValueAt<int8_t>(vector, row), body, descending);
         written = 2;
         return;
       case TypeKind::SMALLINT:
-        BOLT_CHECK_LE(
-            uint64_t{1} + sizeof(int16_t),
-            outputSize,
-            "Radix sort key output buffer is too small");
         encodeSigned<int16_t>(
             scalarValueAt<int16_t>(vector, row), body, descending);
         written = 1 + sizeof(int16_t);
         return;
       case TypeKind::INTEGER:
-        BOLT_CHECK_LE(
-            uint64_t{1} + sizeof(int32_t),
-            outputSize,
-            "Radix sort key output buffer is too small");
         encodeSigned<int32_t>(
             scalarValueAt<int32_t>(vector, row), body, descending);
         written = 1 + sizeof(int32_t);
         return;
       case TypeKind::BIGINT:
-        BOLT_CHECK_LE(
-            uint64_t{1} + sizeof(int64_t),
-            outputSize,
-            "Radix sort key output buffer is too small");
         encodeSigned<int64_t>(
             scalarValueAt<int64_t>(vector, row), body, descending);
         written = 1 + sizeof(int64_t);
         return;
       case TypeKind::REAL:
-        BOLT_CHECK_LE(
-            uint64_t{1} + sizeof(uint32_t),
-            outputSize,
-            "Radix sort key output buffer is too small");
         encodeUnsigned<uint32_t>(
             encodeFloat(scalarValueAt<float>(vector, row)), body, descending);
         written = 1 + sizeof(uint32_t);
         return;
       case TypeKind::DOUBLE:
-        BOLT_CHECK_LE(
-            uint64_t{1} + sizeof(uint64_t),
-            outputSize,
-            "Radix sort key output buffer is too small");
         encodeUnsigned<uint64_t>(
             encodeDouble(scalarValueAt<double>(vector, row)), body, descending);
         written = 1 + sizeof(uint64_t);
         return;
       case TypeKind::TIMESTAMP: {
-        BOLT_CHECK_LE(
-            uint64_t{1} + sizeof(int64_t) + sizeof(uint64_t),
-            outputSize,
-            "Radix sort key output buffer is too small");
         const auto value = scalarValueAt<Timestamp>(vector, row);
         encodeSigned<int64_t>(value.getSeconds(), body, descending);
         encodeUnsigned<uint64_t>(
@@ -1389,10 +1251,6 @@ void encodeValue(
       case TypeKind::VARBINARY: {
         const auto value = valueAt<StringView>(vector, row);
         const auto bodySize = encodedStringBodySize(value);
-        BOLT_CHECK_LE(
-            uint64_t{1} + bodySize,
-            outputSize,
-            "Radix sort key output buffer is too small");
         written = 1 + encodeStringValue(value, body, descending);
         return;
       }
@@ -1863,7 +1721,6 @@ class EncodedKeyReader {
   }
 
   void skip(uint64_t bytes) {
-    BOLT_CHECK_LE(bytes, remaining(), "Radix sort key input is truncated");
     position_ += bytes;
   }
 
@@ -2443,11 +2300,6 @@ void decodeString(
     }
     ++decodedSize;
   }
-  BOLT_CHECK_LE(
-      decodedSize,
-      std::numeric_limits<int32_t>::max(),
-      "Decoded sort key string is too large");
-
   auto* flatResult = result->asUnchecked<FlatVector<StringView>>();
   std::array<char, StringView::kInlineSize> inlineData{};
   char* output = decodedSize <= inlineData.size()
@@ -2463,10 +2315,6 @@ void decodeString(
   }
   uint8_t delimiter;
   reader.readBodyByte(descending, delimiter);
-  BOLT_CHECK_EQ(
-      delimiter,
-      kStringDelimiter,
-      "Radix sort key string delimiter is invalid");
   flatResult->setNoCopy(
       row, StringView(output, static_cast<int32_t>(decodedSize)));
 }
@@ -2492,10 +2340,6 @@ void decodeFixedScalarArrayElements(
     }
     scan.readByte(next);
     if (next != null) {
-      BOLT_CHECK_EQ(
-          next,
-          validMarker(column.flags),
-          "Radix sort key validity marker is invalid");
       scan.skip(*fixedBodySize(*column.type));
     }
     ++count;
@@ -2509,16 +2353,10 @@ void decodeFixedScalarArrayElements(
       result->setNull(row, true);
       continue;
     }
-    BOLT_CHECK_EQ(
-        marker,
-        validMarker(column.flags),
-        "Radix sort key validity marker is invalid");
     setScalarValue<T>(result, row, decode(reader, descending));
   }
   uint8_t delimiter;
   reader.readByte(delimiter);
-  BOLT_CHECK_EQ(
-      delimiter, encodedDelimiter, "Radix sort key ARRAY delimiter is invalid");
 }
 
 void decodeFixedScalarArrayElements(
@@ -2595,10 +2433,6 @@ void decodeFixedScalarArrayElements(
             uint32_t value;
             decodeUnsigned(input, descending, value);
             const auto decoded = decodeFloat(value);
-            BOLT_CHECK_EQ(
-                encodeFloat(decoded),
-                value,
-                "Radix sort key float body is not canonical");
             return decoded;
           });
       return;
@@ -2608,10 +2442,6 @@ void decodeFixedScalarArrayElements(
             uint64_t value;
             decodeUnsigned(input, descending, value);
             const auto decoded = decodeDouble(value);
-            BOLT_CHECK_EQ(
-                encodeDouble(decoded),
-                value,
-                "Radix sort key double body is not canonical");
             return decoded;
           });
       return;
@@ -2622,11 +2452,6 @@ void decodeFixedScalarArrayElements(
             uint64_t nanos;
             decodeSigned(input, descending, seconds);
             decodeUnsigned(input, descending, nanos);
-            BOLT_CHECK(
-                nanos <= Timestamp::kMaxNanos &&
-                    seconds >= Timestamp::kMinSeconds &&
-                    seconds <= Timestamp::kMaxSeconds,
-                "Radix sort key timestamp body is out of range");
             return Timestamp(seconds, nanos);
           });
       return;
@@ -2648,32 +2473,17 @@ void decodeValue(
     result->setNull(row, true);
     if (column.type->kind() == TypeKind::ARRAY) {
       auto* arrayResult = result->as<ArrayVector>();
-      BOLT_CHECK_NOT_NULL(
-          arrayResult, "Decoded sort key ARRAY result has invalid encoding");
       arrayResult->setOffsetAndSize(row, arrayResult->elements()->size(), 0);
     } else if (column.type->kind() == TypeKind::MAP) {
       auto* mapResult = result->as<MapVector>();
-      BOLT_CHECK_NOT_NULL(
-          mapResult, "Decoded sort key MAP result has invalid encoding");
       mapResult->setOffsetAndSize(row, mapResult->mapKeys()->size(), 0);
     }
     return;
   }
-  BOLT_CHECK_EQ(
-      marker,
-      validMarker(column.flags),
-      "Radix sort key validity marker is invalid");
-  BOLT_CHECK(
-      column.type->kind() != TypeKind::UNKNOWN,
-      "UNKNOWN sort key has a non-null marker");
 
   const bool descending = !column.flags.ascending;
   if (column.type->kind() == TypeKind::ROW) {
     auto* rowResult = result->as<RowVector>();
-    BOLT_CHECK(
-        rowResult != nullptr &&
-            rowResult->childrenSize() == column.children.size(),
-        "Decoded sort key ROW result does not match metadata");
     result->setNull(row, false);
     for (uint32_t child = 0; child < column.children.size(); ++child) {
       decodeValue(
@@ -2683,9 +2493,6 @@ void decodeValue(
   }
   if (column.type->kind() == TypeKind::ARRAY) {
     auto* arrayResult = result->as<ArrayVector>();
-    BOLT_CHECK(
-        arrayResult != nullptr && column.children.size() == 1,
-        "Decoded sort key ARRAY result does not match metadata");
     result->setNull(row, false);
     const auto start = arrayResult->elements()->size();
     vector_size_t count = 0;
@@ -2715,9 +2522,6 @@ void decodeValue(
   }
   if (column.type->kind() == TypeKind::MAP) {
     auto* mapResult = result->as<MapVector>();
-    BOLT_CHECK(
-        mapResult != nullptr && column.children.size() == 2,
-        "Decoded sort key MAP result does not match metadata");
     result->setNull(row, false);
     const auto start = mapResult->mapKeys()->size();
     vector_size_t count = 0;
@@ -2742,10 +2546,6 @@ void decodeValue(
     }
     uint8_t delimiter;
     reader.readByte(delimiter);
-    BOLT_CHECK_EQ(
-        delimiter,
-        encodedDelimiter,
-        "Radix sort key MAP value delimiter is invalid");
     mapResult->setOffsetAndSize(row, start, count);
     return;
   }
@@ -2801,10 +2601,6 @@ void decodeValue(
       uint32_t value;
       decodeUnsigned(reader, descending, value);
       const auto decoded = decodeFloat(value);
-      BOLT_CHECK_EQ(
-          encodeFloat(decoded),
-          value,
-          "Radix sort key float body is not canonical");
       setValue<float>(result, row, decoded);
       return;
     }
@@ -2812,10 +2608,6 @@ void decodeValue(
       uint64_t value;
       decodeUnsigned(reader, descending, value);
       const auto decoded = decodeDouble(value);
-      BOLT_CHECK_EQ(
-          encodeDouble(decoded),
-          value,
-          "Radix sort key double body is not canonical");
       setValue<double>(result, row, decoded);
       return;
     }
@@ -2824,10 +2616,6 @@ void decodeValue(
       uint64_t nanos;
       decodeSigned(reader, descending, seconds);
       decodeUnsigned(reader, descending, nanos);
-      BOLT_CHECK(
-          nanos <= Timestamp::kMaxNanos && seconds >= Timestamp::kMinSeconds &&
-              seconds <= Timestamp::kMaxSeconds,
-          "Radix sort key timestamp body is out of range");
       setValue<Timestamp>(result, row, Timestamp(seconds, nanos));
       return;
     }
@@ -2842,30 +2630,6 @@ void decodeValue(
   }
 }
 
-void validateInput(
-    const std::vector<RadixSortKeyColumn>& columns,
-    const RowVector& input) {
-  BOLT_CHECK_EQ(
-      input.childrenSize(),
-      columns.size(),
-      "Radix sort key input column count does not match codec");
-  bool validChildren = true;
-  bool validSizes = true;
-  bool validTypes = true;
-  for (uint32_t column = 0; column < columns.size(); ++column) {
-    const auto& child = input.childAt(column);
-    validChildren &= child != nullptr;
-    if (child != nullptr) {
-      validSizes &= child->size() >= input.size();
-      validTypes &= child->type()->equivalent(*columns[column].type);
-    }
-  }
-  BOLT_CHECK(validChildren, "Radix sort key input child must not be null");
-  BOLT_CHECK(
-      validSizes, "Radix sort key input child is shorter than the row vector");
-  BOLT_CHECK(validTypes, "Radix sort key input type does not match codec");
-}
-
 void prepareDecodedResult(
     const std::vector<RadixSortKeyColumn>& columns,
     const RowTypePtr& rowType,
@@ -2874,9 +2638,6 @@ void prepareDecodedResult(
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
     RowVectorPtr& result) {
-  BOLT_CHECK(
-      mayHaveNulls.empty() || mayHaveNulls.size() == columns.size(),
-      "Decoded sort key nullability does not match codec");
   const auto shouldDecode = [&](uint32_t column) {
     return decodedColumns.empty() || decodedColumns[column] != 0 ||
         !fixedBodySize(*columns[column].type).has_value();
@@ -2933,10 +2694,6 @@ void prepareDecodeScratch(
   auto bytes = wordCount.has_value()
       ? checkedMultiply<uint64_t>(*wordCount, sizeof(uint64_t))
       : std::nullopt;
-  BOLT_CHECK(
-      bytes.has_value() &&
-          *bytes <= static_cast<uint64_t>(std::numeric_limits<size_t>::max()),
-      "Radix sort key decode cursor size overflows");
   if (cursorScratch == nullptr || cursorScratch->pool() != pool) {
     cursorScratch = AlignedBuffer::allocate<uint64_t>(*wordCount, pool);
   } else if (cursorScratch->capacity() < *bytes) {
@@ -3386,7 +3143,6 @@ void scanStringBody(
       return;
     }
     if (byte == kBlobEscape) {
-      BOLT_CHECK_LT(cursor, remaining, "Radix sort key input is truncated");
       byte = static_cast<uint8_t>(body[cursor++]);
       if (descending) {
         byte = static_cast<uint8_t>(~byte);
@@ -3633,12 +3389,6 @@ void decodeColumns(
     memory::MemoryPool* pool,
     BufferPtr& cursorScratch,
     RowVectorPtr& result) {
-  BOLT_CHECK(
-      decodedColumns.empty() || decodedColumns.size() == columns.size(),
-      "Decoded sort key column mask does not match codec");
-  BOLT_CHECK(
-      mayHaveNulls.empty() || mayHaveNulls.size() == columns.size(),
-      "Decoded sort key nullability does not match codec");
   prepareDecodedResult(
       columns,
       rowType,
@@ -3711,23 +3461,13 @@ std::vector<uint32_t> makeLeadingSkippableValidityOffsets(
 } // namespace
 
 uint64_t EncodedKeyBatch::fixedKeyAt(vector_size_t row) const {
-  BOLT_CHECK(format_ == EncodedKeyFormat::kFixed64);
-  BOLT_CHECK_NOT_NULL(fixedKeys_);
-  BOLT_CHECK_GE(row, 0);
-  BOLT_CHECK_LT(row, size_);
   return fixedKeys_->as<uint64_t>()[row];
 }
 
 std::string_view EncodedKeyBatch::variableKeyAt(vector_size_t row) const {
-  BOLT_CHECK(format_ == EncodedKeyFormat::kVariableBinary);
-  BOLT_CHECK_NOT_NULL(offsets_);
-  BOLT_CHECK_GE(row, 0);
-  BOLT_CHECK_LT(row, size_);
   const auto* offsets = offsets_->as<uint64_t>();
   const auto begin = offsets[row];
   const auto end = offsets[row + 1];
-  BOLT_CHECK_LE(begin, end);
-  BOLT_CHECK(data_ != nullptr || end == 0);
   return std::string_view(
       data_ == nullptr ? nullptr : data_->as<char>() + begin, end - begin);
 }
@@ -3799,9 +3539,6 @@ RadixSortKeyCodec::RadixSortKeyCodec(
 
 std::vector<uint32_t> RadixSortKeyCodec::leadingSkippableValidityOffsets(
     std::span<const uint8_t> keyMayHaveNulls) const {
-  BOLT_CHECK(
-      keyMayHaveNulls.size() == columns_.size(),
-      "Radix sort key nullability count does not match codec");
   return makeLeadingSkippableValidityOffsets(
       columns_, [&](uint32_t column) { return keyMayHaveNulls[column] == 0; });
 }
@@ -3855,11 +3592,7 @@ void RadixSortKeyCodec::encode(
     memory::MemoryPool* pool,
     EncodedKeyBatch& result) const {
   result = EncodedKeyBatch{};
-  BOLT_CHECK(
-      canEncodeDecode_,
-      "Radix sort key codec contains unsupported nested types");
   BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
-  validateInput(columns_, input);
 
   result.format_ = format_;
   result.size_ = input.size();
@@ -3901,29 +3634,19 @@ void RadixSortKeyCodec::encode(
     return;
   }
 
-  auto offsetCount = checkedAdd<uint64_t>(input.size(), 1);
-  BOLT_CHECK(
-      offsetCount.has_value() &&
-          *offsetCount <= std::numeric_limits<size_t>::max(),
-      "Radix sort key offset count overflows");
-  result.offsets_ = AlignedBuffer::allocate<uint64_t>(
-      static_cast<size_t>(*offsetCount), pool);
+  auto offsetCount = static_cast<uint64_t>(input.size()) + 1;
+  result.offsets_ =
+      AlignedBuffer::allocate<uint64_t>(static_cast<size_t>(offsetCount), pool);
   auto* offsets = result.offsets_->asMutable<uint64_t>();
   uint64_t flatFixedSize = 0;
-  bool flatFixedSizeValid = true;
   for (uint32_t column = 0; column < columns_.size(); ++column) {
     const auto bodySize = fixedBodySize(*columns_[column].type);
     if (bodySize.has_value() &&
         columns_[column].type->kind() != TypeKind::UNKNOWN &&
         input.childAt(column)->encoding() == VectorEncoding::Simple::FLAT) {
-      auto next = checkedAdd<uint64_t>(flatFixedSize, *bodySize + 1);
-      flatFixedSizeValid &= next.has_value();
-      if (next.has_value()) {
-        flatFixedSize = *next;
-      }
+      flatFixedSize += *bodySize + 1;
     }
   }
-  BOLT_CHECK(flatFixedSizeValid, "Radix sort key fixed column sizes overflow");
   std::fill(offsets, offsets + input.size(), flatFixedSize);
   for (uint32_t column = 0; column < columns_.size(); ++column) {
     const auto& vector = *input.childAt(column);
@@ -3943,23 +3666,13 @@ void RadixSortKeyCodec::encode(
   }
 
   uint64_t totalBytes = 0;
-  bool totalBytesValid = true;
   for (vector_size_t row = 0; row < input.size(); ++row) {
     const auto rowSize = offsets[row];
     offsets[row] = totalBytes;
-    auto total = checkedAdd<uint64_t>(totalBytes, rowSize);
-    totalBytesValid &= total.has_value();
-    if (total.has_value()) {
-      totalBytes = *total;
-    }
+    totalBytes += rowSize;
   }
-  BOLT_CHECK(totalBytesValid, "Radix sort key batch encoded size overflows");
   offsets[input.size()] = totalBytes;
 
-  BOLT_CHECK_LE(
-      totalBytes,
-      std::numeric_limits<size_t>::max(),
-      "Radix sort key batch is too large for this process");
   if (totalBytes > 0) {
     result.data_ = AlignedBuffer::allocate<char>(totalBytes, pool);
   }
@@ -3975,9 +3688,6 @@ void RadixSortKeyCodec::encode(
         offsets);
   }
 
-  BOLT_CHECK(
-      input.size() == 0 || offsets[input.size() - 1] == totalBytes,
-      "Radix sort key length pass does not match encoded bytes");
   for (vector_size_t row = input.size(); row > 0; --row) {
     offsets[row] = offsets[row - 1];
   }
@@ -4005,12 +3715,6 @@ bool RadixSortKeyCodec::tryAppendSingleFixedFlat(
   if (!canAppendSingleFixedFlat(input, arena)) {
     return false;
   }
-  BOLT_CHECK(
-      size >= 0 && input.size() >= size,
-      "Direct fixed sort key input size is invalid");
-  BOLT_CHECK(
-      payloads.empty() || payloads.size() == static_cast<uint64_t>(size),
-      "Direct fixed sort key payload count does not match");
   radixsort::appendSingleFixedFlat(columns_[0], input, size, arena, payloads);
   return true;
 }
@@ -4022,14 +3726,7 @@ void RadixSortKeyCodec::decode(
     memory::MemoryPool* pool,
     BufferPtr& cursorScratch,
     RowVectorPtr& result) const {
-  BOLT_CHECK(
-      canEncodeDecode_,
-      "Radix sort key codec contains unsupported nested types");
   BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
-  BOLT_CHECK_LE(
-      keys.size(),
-      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
-      "Encoded key view row count exceeds vector range");
   decodeColumns(
       columns_,
       rowType_,
@@ -4057,7 +3754,6 @@ bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
   if (!canDecodeSingleFixedColumn() || arena.layout().isVariable()) {
     return false;
   }
-  BOLT_CHECK_NOT_NULL(pool, "Radix sort key output pool must not be null");
   BOLT_CHECK(
       begin <= arena.size() && count <= arena.size() - begin,
       "Radix sort key output range is out of bounds");
@@ -4092,7 +3788,6 @@ bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
       RadixSortKeyLayout::fromKind(layoutKind).isVariable()) {
     return false;
   }
-  BOLT_CHECK_NOT_NULL(pool, "Radix sort key output pool must not be null");
   const auto count = static_cast<vector_size_t>(keys.size());
 
   VectorPtr child;

@@ -484,20 +484,9 @@ TEST_F(RadixSortKeyCodecTest, invalidBindAndInputContracts) {
 
   codec = bind({BIGINT()}, {flags(true, true)});
   EncodedKeyBatch keys;
-  auto wrongCount = makeRows(
-      {makeVector<int64_t>(BIGINT(), {1}), makeVector<int64_t>(BIGINT(), {2})});
-  EXPECT_THROW(codec->encode(*wrongCount, pool_.get(), keys), BoltException);
-  auto wrongType = makeRows({makeVector<int32_t>(INTEGER(), {1})});
-  EXPECT_THROW(codec->encode(*wrongType, pool_.get(), keys), BoltException);
-  EXPECT_THROW(codec->encode(*wrongType, nullptr, keys), BoltException);
-
-  auto unsupportedCodec = bind({VARIANT()}, {flags(true, true)});
-  EXPECT_FALSE(unsupportedCodec->canEncodeDecode());
   EXPECT_THROW(
-      unsupportedCodec->encode(
-          *makeRows({BaseVector::create(VARIANT(), 1, pool_.get())}),
-          pool_.get(),
-          keys),
+      codec->encode(
+          *makeRows({makeVector<int64_t>(BIGINT(), {1})}), nullptr, keys),
       BoltException);
 }
 

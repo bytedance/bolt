@@ -107,7 +107,6 @@ bool PayloadRowLayout::supports(const Type& type) {
 
 std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
     const RowTypePtr& rowType) {
-  BOLT_CHECK_NOT_NULL(rowType, "Payload row row type must not be null");
   if (rowType->size() == 0) {
     return nullptr;
   }
@@ -134,9 +133,7 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
   uint64_t rowWidth = nullBytes;
   if (hasVariableFields) {
     variableSizeOffset = rowWidth;
-    auto next = checkedAdd<uint64_t>(rowWidth, sizeof(uint64_t));
-    BOLT_CHECK(next.has_value(), "Payload row row width overflows");
-    rowWidth = *next;
+    rowWidth += sizeof(uint64_t);
   }
 
   std::vector<PayloadRowColumnLayout> columns;
@@ -173,7 +170,6 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
       unsupportedSlotType);
   BOLT_CHECK(rowWidthValid, "Payload row row width overflows");
 
-  BOLT_CHECK_NE(rowWidth, 0, "Payload row row width must not be zero");
   return std::shared_ptr<const PayloadRowLayout>(new PayloadRowLayout(
       rowType, std::move(columns), nullBytes, variableSizeOffset, rowWidth));
 }
