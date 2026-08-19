@@ -296,9 +296,9 @@ bool StreamingAggregation::isFinished() {
 }
 
 RowVectorPtr StreamingAggregation::getOutput() {
-  NanosecondTimer timer(&stats_.aggOutputTimeNs);
   if (!input_) {
     if (noMoreInput_ && numGroups_ > 0) {
+      NanosecondTimer outputTimer(&stats_.aggOutputTimeNs);
       auto output = createOutput(numGroups_);
       numGroups_ = 0;
       return output;
@@ -317,8 +317,11 @@ RowVectorPtr StreamingAggregation::getOutput() {
 
     auto numPrevGroups = numGroups_;
     {
-      NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
+      NanosecondTimer probeTimer(&stats_.aggProbeTimeNs);
       assignGroups();
+    }
+    {
+      NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
       initializeNewGroups(numPrevGroups);
     }
     evaluateAggregates();
@@ -338,6 +341,7 @@ RowVectorPtr StreamingAggregation::getOutput() {
   }
 
   if (outputSize > 0) {
+    NanosecondTimer outputTimer(&stats_.aggOutputTimeNs);
     output = createOutput(outputSize);
 
     // Rotate the entries in the groups_ vector to move the remaining groups to

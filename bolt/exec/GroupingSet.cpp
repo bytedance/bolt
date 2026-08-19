@@ -588,6 +588,7 @@ void GroupingSet::addGlobalAggregationInput(
   masks_.addInput(input, activeRows_);
 
   auto* group = lookup_->hits[0];
+  NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
 
   for (auto i = 0; i < aggregates_.size(); ++i) {
     if (!aggregates_[i].sortingKeys.empty()) {
