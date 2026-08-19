@@ -403,6 +403,83 @@ TEST_F(SortWindowTest, rankFilterWithoutPartitionKey) {
               "SELECT * FROM (SELECT *, RANK() OVER(ORDER BY score DESC) AS rnk FROM tmp) where rnk <= 10 ORDER BY rnk ");
 }
 
+TEST_F(SortWindowTest, rankFilterReclaimKeepsTopRowsValid) {
+  constexpr vector_size_t size = 100;
+  auto data = makeRowVector(
+      {"user_id", "score"},
+      {
+          makeFlatVector<int64_t>(size, [](auto row) { return row % 10; }),
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+      });
+  createDuckDbTable({data});
+  auto spillDirectory = TempDirectoryPath::create();
+
+  auto plan =
+      PlanBuilder()
+          .values(split(data, 10))
+          .window(
+              {"RANK() OVER(PARTITION BY user_id ORDER BY score DESC) AS rnk"},
+              1)
+          .filter("rnk <= 1")
+          .planNode();
+  auto windowPlan = plan->sources().front();
+  auto windowNode =
+      std::dynamic_pointer_cast<const core::WindowNode>(windowPlan);
+  core::PlanFragment planFragment;
+  planFragment.planNode = windowPlan;
+  auto queryCtx = core::QueryCtx::create(
+      nullptr,
+      core::QueryConfig(
+          {{core::QueryConfig::kSpillEnabled, "true"},
+           {core::QueryConfig::kWindowSpillEnabled, "true"}}));
+  auto task = Task::create(
+      "rankFilterIsNotReclaimable",
+      std::move(planFragment),
+      0,
+      queryCtx,
+      Task::ExecutionMode::kParallel);
+  task->setSpillDirectory(spillDirectory->path);
+  DriverCtx driverCtx(task, 0, 0, 0, 0);
+
+  auto regularWindowNode = std::dynamic_pointer_cast<const core::WindowNode>(
+      PlanBuilder()
+          .values(split(data, 10))
+          .window(
+              {"RANK() OVER(PARTITION BY user_id ORDER BY score DESC) AS rnk"})
+          .planNode());
+  core::PlanFragment regularPlanFragment;
+  regularPlanFragment.planNode = regularWindowNode;
+  auto regularTask = Task::create(
+      "regularWindowIsReclaimable",
+      std::move(regularPlanFragment),
+      0,
+      core::QueryCtx::create(
+          nullptr,
+          core::QueryConfig(
+              {{core::QueryConfig::kSpillEnabled, "true"},
+               {core::QueryConfig::kWindowSpillEnabled, "true"}})),
+      Task::ExecutionMode::kParallel);
+  regularTask->setSpillDirectory(spillDirectory->path);
+  DriverCtx regularDriverCtx(regularTask, 0, 0, 0, 0);
+  Window regularWindow(0, &regularDriverCtx, regularWindowNode);
+  Window rankLimitWindow(0, &driverCtx, windowNode);
+  ASSERT_TRUE(regularWindow.canReclaim());
+  ASSERT_TRUE(rankLimitWindow.canReclaim());
+
+  rankLimitWindow.addInput(split(data, 10)[0]);
+  memory::MemoryReclaimer::Stats stats;
+  rankLimitWindow.reclaim(0, stats);
+  ASSERT_TRUE(rankLimitWindow.needsInput());
+  rankLimitWindow.addInput(split(data, 10)[1]);
+
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .config(core::QueryConfig::kSpillEnabled, true)
+      .config(core::QueryConfig::kWindowSpillEnabled, true)
+      .spillDirectory(spillDirectory->path)
+      .assertResults(
+          "SELECT * FROM (SELECT *, RANK() OVER(PARTITION BY user_id ORDER BY score DESC) AS rnk FROM tmp) WHERE rnk <= 1");
+}
+
 } // namespace
 
 } // namespace bytedance::bolt::exec

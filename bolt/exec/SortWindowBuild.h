@@ -116,6 +116,10 @@ class SortWindowBuild : public WindowBuild {
 
   void initializeNewPartitions();
 
+  void clearTopRows();
+
+  void clearStateBeforeSortSpill() override;
+
   TopRows& partitionAt(char* group) {
     return *reinterpret_cast<TopRows*>(group + partitionOffset_);
   }

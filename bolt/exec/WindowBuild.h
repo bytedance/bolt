@@ -186,6 +186,8 @@ class WindowBuild {
   void sortSpill();
 
  protected:
+  virtual void clearStateBeforeSortSpill() {}
+
   void ensureInputFits(const RowVectorPtr& input);
 
   void sortPartitions();
