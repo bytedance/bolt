@@ -352,37 +352,35 @@ DateParseResult tryParseDateString(
     return DateParseResult::kUnexpectedEnd;
   }
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
-    if (!sparkCompatible) {
-      // Check for an optional trailing " (BC)".
-      if (len - pos >= 5 && characterIsSpace(buf[pos]) && buf[pos + 1] == '(' &&
-          buf[pos + 2] == 'B' && buf[pos + 3] == 'C' && buf[pos + 4] == ')') {
-        if (yearneg || year == 0) {
-          return DateParseResult::kInvalidYear;
-        }
-        year = -year + 1;
-        pos += 5;
-
-        if (year < kMinYear) {
-          return DateParseResult::kInvalidYear;
-        }
+  if (!::bytedance::bolt::kSparkCompatible && !sparkCompatible) {
+    // Check for an optional trailing " (BC)".
+    if (len - pos >= 5 && characterIsSpace(buf[pos]) && buf[pos + 1] == '(' &&
+        buf[pos + 2] == 'B' && buf[pos + 3] == 'C' && buf[pos + 4] == ')') {
+      if (yearneg || year == 0) {
+        return DateParseResult::kInvalidYear;
       }
+      year = -year + 1;
+      pos += 5;
 
-      // In strict mode, check remaining string for non-space characters.
-      if (mode & ParseMode::kStrict) {
-        // Skip trailing spaces.
-        while (pos < len && characterIsSpace(buf[pos])) {
-          pos++;
-        }
-        // Check position. if end was not reached, non-space chars remaining.
-        if (pos < len) {
-          return DateParseResult::kUnexpectedEnd;
-        }
-      } else {
-        // In non-strict mode, check for any direct trailing digits.
-        if (pos < len && characterIsDigit(buf[pos])) {
-          return DateParseResult::kUnexpectedEnd;
-        }
+      if (year < kMinYear) {
+        return DateParseResult::kInvalidYear;
+      }
+    }
+
+    // In strict mode, check remaining string for non-space characters.
+    if (mode & ParseMode::kStrict) {
+      // Skip trailing spaces.
+      while (pos < len && characterIsSpace(buf[pos])) {
+        pos++;
+      }
+      // Check position. if end was not reached, non-space chars remaining.
+      if (pos < len) {
+        return DateParseResult::kUnexpectedEnd;
+      }
+    } else {
+      // In non-strict mode, check for any direct trailing digits.
+      if (pos < len && characterIsDigit(buf[pos])) {
+        return DateParseResult::kUnexpectedEnd;
       }
     }
   }

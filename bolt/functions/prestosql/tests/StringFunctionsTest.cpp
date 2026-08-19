@@ -1416,7 +1416,7 @@ void StringFunctionsTest::testReplaceFlatVector(
 }
 
 TEST_F(StringFunctionsTest, replace) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   replace_input_test_t testsThreeArgs = {
@@ -1460,7 +1460,7 @@ TEST_F(StringFunctionsTest, replace) {
 }
 
 TEST_F(StringFunctionsTest, replaceWithReusableInputButNoInplace) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto c0 = ({
@@ -1979,7 +1979,7 @@ TEST_F(StringFunctionsTest, concatInSwitchExpr) {
 }
 
 TEST_F(StringFunctionsTest, parseUrl) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto parse_url = [&](std::optional<std::string> url,

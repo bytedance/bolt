@@ -796,7 +796,7 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
             2000000000000000000ULL,
             3000000000000000000ULL})});
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     const std::string sample(getExampleFilePath("uint.parquet"));
     dwio::common::ReaderOptions readerOptions{leafPool_.get()};
     readerOptions.setFileSchema(rowType);
@@ -812,7 +812,7 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
 }
 
 TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const std::vector<TypePtr> unsupportedTypes = {
@@ -2828,7 +2828,7 @@ TEST_F(ParquetReaderTest, varcharToBigintSchemaMismatchCast) {
   rowReaderOpts.setScanSpec(scanSpec);
 
   // In non-SPARK builds this is rejected by ParquetColumnReader::matchType.
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
     return;
   }

@@ -324,7 +324,7 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
       bool throwOnNestedNulls)
       : exec::Aggregate(resultType),
         throwOnNestedNulls_(
-            ::bytedance::bolt::kSparkCompatible ? false : throwOnNestedNulls) {}
+            !::bytedance::bolt::kSparkCompatible && throwOnNestedNulls) {}
 
   bool isFixedSize() const override {
     return false;
@@ -1036,7 +1036,7 @@ exec::AggregateRegistrationResult registerMinMax(
                            .argumentType("UNKNOWN")
                            .build());
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     signatures.push_back(exec::AggregateFunctionSignatureBuilder()
                              .typeVariable("K")
                              .typeVariable("V")

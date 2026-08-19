@@ -383,7 +383,7 @@ TEST_F(MinMaxTest, array) {
       }),
   });
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     BOLT_ASSERT_THROW(
         testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected}),
         "ARRAY comparison not supported for values that contain nulls");
@@ -424,7 +424,7 @@ TEST_F(MinMaxTest, row) {
            makeFlatVector<StringView>({"hij"_sv})}),
   });
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     BOLT_ASSERT_THROW(
         testAggregations({data}, {}, {"min(c0)", "max(c0)"}, {expected}),
         "ROW comparison not supported for values that contain nulls");
@@ -474,7 +474,7 @@ TEST_F(MinMaxTest, arrayCheckNulls) {
       }),
   });
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     for (const auto& expr : {"min(c0)", "max(c0)"}) {
       testFailingAggregations(
           {batch, batchWithNull},
@@ -523,7 +523,7 @@ TEST_F(MinMaxTest, rowCheckNull) {
       makeFlatVector<int8_t>({1, 2, 3}),
   });
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     for (const auto& expr : {"min(c0)", "max(c0)"}) {
       testFailingAggregations(
           {batch, batchWithNull},
@@ -540,7 +540,7 @@ TEST_F(MinMaxTest, rowCheckNull) {
 }
 
 TEST_F(MinMaxTest, map) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto expected = makeRowVector({
@@ -591,14 +591,14 @@ TEST_F(MinMaxTest, failOnUnorderableType) {
     {
       auto builder = PlanBuilder().values({data});
 
-      if constexpr (!::bytedance::bolt::kSparkCompatible) {
+      if (!::bytedance::bolt::kSparkCompatible) {
         BOLT_ASSERT_THROW(builder.singleAggregation({}, {expr}), kErrorMessage);
       }
     }
 
     {
       auto builder = PlanBuilder().values({data});
-      if constexpr (!::bytedance::bolt::kSparkCompatible) {
+      if (!::bytedance::bolt::kSparkCompatible) {
         BOLT_ASSERT_THROW(
             builder.singleAggregation({"c1"}, {expr}), kErrorMessage);
       }

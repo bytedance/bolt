@@ -560,7 +560,7 @@ TEST_P(ExprEncodingsTest, moreConditional) {
 }
 
 TEST_P(ExprEncodingsTest, errors) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   prepareTestData();

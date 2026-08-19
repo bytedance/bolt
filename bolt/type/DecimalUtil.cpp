@@ -104,6 +104,15 @@ size_t DecimalUtil::convertToString(
 }
 
 size_t DecimalUtil::convertToString(
+    uint64_t unscaledValue,
+    int32_t scale,
+    int32_t maxVarcharSize,
+    char* startPosition) {
+  return convertToStringForBuild(
+      unscaledValue, scale, maxVarcharSize, startPosition);
+}
+
+size_t DecimalUtil::convertToString(
     int128_t unscaledValue,
     int32_t scale,
     int32_t maxVarcharSize,

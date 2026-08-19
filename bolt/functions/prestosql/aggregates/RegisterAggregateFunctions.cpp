@@ -161,10 +161,11 @@ void registerAllAggregateFunctions(
       prefix, withCompanionFunctions, overwrite);
   functions::aggregate::registerBitDaysOrAggregate(
       prefix + "bit_days_or", withCompanionFunctions, overwrite);
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
-    // hive.udaf.percentile for presto.default.percentile
-    registerHiveUDAFPercentileAggregate(prefix);
+  if (::bytedance::bolt::kSparkCompatible) {
+    return;
   }
+  // hive.udaf.percentile for presto.default.percentile
+  registerHiveUDAFPercentileAggregate(prefix);
 }
 
 extern void registerCountDistinctAggregate(const std::string& prefix);

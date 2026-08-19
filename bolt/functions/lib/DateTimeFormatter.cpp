@@ -364,44 +364,42 @@ int64_t parseTimezone(
           {"PDT", tz::getTimeZoneID("America/Los_Angeles")},
       };
       std::string_view zone(cur, 3);
-      std::string upper;
-      if constexpr (::bytedance::bolt::kSparkCompatible) {
+      auto it = defaultTzNames.find(zone);
+      if (::bytedance::bolt::kSparkCompatible && it == defaultTzNames.end()) {
         // spark accept timezone in lower case
+        std::string upper;
         for (auto& c : zone) {
           upper.push_back(toupper(c));
         }
-        zone = upper;
+        it = defaultTzNames.find(upper);
       }
-      auto it = defaultTzNames.find(zone);
       if (it != defaultTzNames.end()) {
         date.timezoneId = it->second;
         return 3;
       }
     }
-    if constexpr (!::bytedance::bolt::kSparkCompatible) {
-      // The format 'UT' is also accepted for UTC.
-      if ((end - cur == 2) && (*cur == 'U') && (*(cur + 1) == 'T')) {
-        date.timezoneId = 0;
-        return 2;
+    // The format 'UT' is also accepted for UTC.
+    if (!::bytedance::bolt::kSparkCompatible && end - cur == 2 && *cur == 'U' &&
+        *(cur + 1) == 'T') {
+      date.timezoneId = 0;
+      return 2;
+    }
+    if (::bytedance::bolt::kSparkCompatible && (*cur == '+' || *cur == '-')) {
+      int64_t timezoneId = -1;
+      int64_t length = 0;
+      if (legacySpark && (end - cur) >= 5) {
+        // spark LEGACY accept (+/-)HHMM as time zone
+        std::string tz = std::string(cur, 3) + ":" + std::string(cur + 3, 2);
+        timezoneId = tz::getTimeZoneID(tz, false);
+        length = 5;
+      } else if (!legacySpark && (end - cur) >= 6 && *(cur + 3) == ':') {
+        // spark CORRECTED accept (+/-)HH:MM as time zone
+        timezoneId = tz::getTimeZoneID(std::string_view(cur, 6), false);
+        length = 6;
       }
-    } else {
-      if ((*cur == '+') || (*cur == '-')) {
-        int64_t timezoneId = -1;
-        int64_t length = 0;
-        if (legacySpark && (end - cur) >= 5) {
-          // spark LEGACY accept (+/-)HHMM as time zone
-          std::string tz = std::string(cur, 3) + ":" + std::string(cur + 3, 2);
-          timezoneId = tz::getTimeZoneID(tz, false);
-          length = 5;
-        } else if (!legacySpark && (end - cur) >= 6 && *(cur + 3) == ':') {
-          // spark CORRECTED accept (+/-)HH:MM as time zone
-          timezoneId = tz::getTimeZoneID(std::string_view(cur, 6), false);
-          length = 6;
-        }
-        if (timezoneId != -1) {
-          date.timezoneId = timezoneId;
-          return length;
-        }
+      if (timezoneId != -1) {
+        date.timezoneId = timezoneId;
+        return length;
       }
     }
   }
@@ -765,7 +763,7 @@ ErrorCode parseFromPattern(
     if (size == -1) {
       return ErrorCode::PARSE_HALFDAY_ERROR;
     }
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (::bytedance::bolt::kSparkCompatible) {
       date.isHourOfHalfDay = true; // for get_timestamp("PM", "a") case
     }
     cur += size;
@@ -1052,11 +1050,9 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::FRACTION_OF_SECOND:
-        if constexpr (::bytedance::bolt::kSparkCompatible) {
-          date.microsecond = number;
-        } else {
-          date.microsecond = number * util::kMicrosPerMsec;
-        }
+        date.microsecond = ::bytedance::bolt::kSparkCompatible
+            ? number
+            : number * util::kMicrosPerMsec;
         break;
 
       case DateTimeFormatSpecifier::WEEK_YEAR:
@@ -1085,7 +1081,7 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::WEEK_OF_MONTH:
-        if constexpr (!::bytedance::bolt::kSparkCompatible) {
+        if (!::bytedance::bolt::kSparkCompatible) {
           BOLT_NYI(
               "Numeric Joda specifier DateTimeFormatSpecifier::" +
               getSpecifierName(curPattern.specifier) + " not implemented yet.");
@@ -1099,7 +1095,7 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH:
-        if constexpr (!::bytedance::bolt::kSparkCompatible) {
+        if (!::bytedance::bolt::kSparkCompatible) {
           BOLT_NYI(
               "Numeric Joda specifier DateTimeFormatSpecifier::" +
               getSpecifierName(curPattern.specifier) + " not implemented yet.");
@@ -1143,12 +1139,10 @@ uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
       size += token.literal.size();
       continue;
     }
-    if constexpr (!::bytedance::bolt::kSparkCompatible) {
-      if (isSparkOnlyFormatSpecifier(token.pattern.specifier)) {
-        BOLT_UNSUPPORTED(
-            "format is not supported for specifier {}",
-            token.pattern.specifier);
-      }
+    if (!::bytedance::bolt::kSparkCompatible &&
+        isSparkOnlyFormatSpecifier(token.pattern.specifier)) {
+      BOLT_UNSUPPORTED(
+          "format is not supported for specifier {}", token.pattern.specifier);
     }
     switch (token.pattern.specifier) {
       case DateTimeFormatSpecifier::ERA:
@@ -1256,12 +1250,6 @@ int32_t DateTimeFormatter::format(
   const auto weekdayNum = civilDateTime.weekday;
   const auto dayOfYear = civilDateTime.dayOfYear;
   const auto daysSinceEpoch = civilDateTime.daysSinceEpoch;
-  // Compute the UTC civil date/time of the same instant for timezone-aware
-  // formatting decisions (e.g., suppress '+' when local crosses year boundary
-  // but UTC year is still <= 9999).
-  const auto civilDateTimeUtc =
-      util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
-  const auto& calDateUtc = civilDateTimeUtc.date;
   auto weekdayFromDays = [](int64_t daysSinceEpochInput) {
     auto weekday = static_cast<int32_t>((daysSinceEpochInput + 4) % 7);
     return weekday < 0 ? weekday + 7 : weekday;
@@ -1274,12 +1262,11 @@ int32_t DateTimeFormatter::format(
       std::memcpy(result, token.literal.data(), token.literal.size());
       result += token.literal.size();
     } else {
-      if constexpr (!::bytedance::bolt::kSparkCompatible) {
-        if (isSparkOnlyFormatSpecifier(token.pattern.specifier)) {
-          BOLT_UNSUPPORTED(
-              "format is not supported for specifier {}",
-              token.pattern.specifier);
-        }
+      if (!::bytedance::bolt::kSparkCompatible &&
+          isSparkOnlyFormatSpecifier(token.pattern.specifier)) {
+        BOLT_UNSUPPORTED(
+            "format is not supported for specifier {}",
+            token.pattern.specifier);
       }
       switch (token.pattern.specifier) {
         case DateTimeFormatSpecifier::ERA: {
@@ -1306,25 +1293,23 @@ int32_t DateTimeFormatter::format(
                 padContent(std::abs(year) % 100, '0', 2, maxResultEnd, result);
           } else {
             year = year <= 0 ? std::abs(year - 1) : year;
-            if constexpr (::bytedance::bolt::kSparkCompatible) {
-              // spark compatibility: year should contain sign if > 9999.
-              // However, if a timezone is applied and the same instant in UTC
-              // has year-of-era <= 9999 (e.g., Asia/Shanghai at
-              // 10000-01-01 07:59:59 equals 9999-12-31 23:59:59 UTC), suppress
-              // the leading '+'.
-              bool addPlus =
-                  (year > 9999 && token.pattern.minRepresentDigits >= 4);
-              if (timezone != nullptr) {
-                int32_t utcYearEra = calDateUtc.year <= 0
-                    ? std::abs(calDateUtc.year - 1)
-                    : calDateUtc.year;
-                if (utcYearEra <= 9999) {
-                  addPlus = false;
-                }
-              }
-              if (addPlus) {
-                *result++ = '+';
-              }
+            // spark compatibility: year should contain sign if > 9999.
+            // However, if a timezone is applied and the same instant in UTC
+            // has year-of-era <= 9999 (e.g., Asia/Shanghai at
+            // 10000-01-01 07:59:59 equals 9999-12-31 23:59:59 UTC), suppress
+            // the leading '+'.
+            bool addPlus = ::bytedance::bolt::kSparkCompatible && year > 9999 &&
+                token.pattern.minRepresentDigits >= 4;
+            if (addPlus && timezone != nullptr) {
+              const auto civilDateTimeUtc =
+                  util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
+              const auto utcYearEra = civilDateTimeUtc.date.year <= 0
+                  ? std::abs(civilDateTimeUtc.date.year - 1)
+                  : civilDateTimeUtc.date.year;
+              addPlus = utcYearEra > 9999;
+            }
+            if (addPlus) {
+              *result++ = '+';
             }
             result += padContent(
                 year,
@@ -1366,27 +1351,27 @@ int32_t DateTimeFormatter::format(
           [[fallthrough]];
         case DateTimeFormatSpecifier::YEAR: {
           auto year = calDate.year;
-          if constexpr (::bytedance::bolt::kSparkCompatible) {
-            if (token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR) {
-              BOLT_USER_CHECK_EQ(
-                  timePolicy,
-                  TimePolicy::LEGACY,
-                  "WEEK_YEAR is only supported in Spark LEGACY policy");
-              auto weekYear = year;
-              if (calDate.month == 12) {
-                // If the date is in the last week of the year, and this week
-                // contains next year's first day, the week year is next year.
-                if (calDate.day - weekdayNum + 6 > 31) {
-                  weekYear += 1;
-                }
+          if (::bytedance::bolt::kSparkCompatible &&
+              token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR) {
+            BOLT_USER_CHECK_EQ(
+                timePolicy,
+                TimePolicy::LEGACY,
+                "WEEK_YEAR is only supported in Spark LEGACY policy");
+            auto weekYear = year;
+            if (calDate.month == 12) {
+              // If the date is in the last week of the year, and this week
+              // contains next year's first day, the week year is next year.
+              if (calDate.day - weekdayNum + 6 > 31) {
+                weekYear += 1;
               }
-              year = weekYear;
             }
-            if (year < 0 && (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
-              // for spark compatibility, year should be positive for LEGACY
-              // policy or has Era
-              year = abs(year) + 1;
-            }
+            year = weekYear;
+          }
+          if (::bytedance::bolt::kSparkCompatible && year < 0 &&
+              (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
+            // for spark compatibility, year should be positive for LEGACY
+            // policy or has Era
+            year = abs(year) + 1;
           }
           if (token.pattern.minRepresentDigits == 2) {
             year = std::abs(year);
@@ -1398,25 +1383,23 @@ int32_t DateTimeFormatter::format(
                 maxResultEnd,
                 result);
           } else {
-            if constexpr (::bytedance::bolt::kSparkCompatible) {
-              // spark compatibility: year should contain sign if > 9999.
-              // If a timezone is applied and the same instant in UTC has
-              // (adjusted) year <= 9999, suppress the leading '+'.
-              bool addPlus =
-                  (year > 9999 && token.pattern.minRepresentDigits >= 4);
-              if (timezone != nullptr) {
-                int32_t utcYearAdj = calDateUtc.year;
-                if (utcYearAdj < 0 &&
-                    (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
-                  utcYearAdj = std::abs(utcYearAdj) + 1;
-                }
-                if (utcYearAdj <= 9999) {
-                  addPlus = false;
-                }
+            // spark compatibility: year should contain sign if > 9999.
+            // If a timezone is applied and the same instant in UTC has
+            // (adjusted) year <= 9999, suppress the leading '+'.
+            bool addPlus = ::bytedance::bolt::kSparkCompatible && year > 9999 &&
+                token.pattern.minRepresentDigits >= 4;
+            if (addPlus && timezone != nullptr) {
+              const auto civilDateTimeUtc =
+                  util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
+              auto utcYear = civilDateTimeUtc.date.year;
+              if (utcYear < 0 &&
+                  (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
+                utcYear = std::abs(utcYear) + 1;
               }
-              if (addPlus) {
-                *result++ = '+';
-              }
+              addPlus = utcYear > 9999;
+            }
+            if (addPlus) {
+              *result++ = '+';
             }
             result += padContent(
                 year,
@@ -2191,11 +2174,8 @@ std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
           builder.appendDayOfMonth(count);
           break;
         case 'a':
-          if constexpr (::bytedance::bolt::kSparkCompatible) {
-            if (count > 1) {
-              BOLT_USER_FAIL(
-                  "The am-pm-of-day pattern letter count must be 1.");
-            }
+          if (::bytedance::bolt::kSparkCompatible && count > 1) {
+            BOLT_USER_FAIL("The am-pm-of-day pattern letter count must be 1.");
           }
           builder.appendHalfDayOfDay();
           break;
@@ -2227,7 +2207,7 @@ std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
           builder.appendTimeZone(count);
           break;
         case 'X':
-          if constexpr (!::bytedance::bolt::kSparkCompatible) {
+          if (!::bytedance::bolt::kSparkCompatible) {
             BOLT_UNSUPPORTED("Specifier X is not supported.");
           }
           [[fallthrough]];
@@ -2439,11 +2419,8 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
           builder.appendDayOfMonth(count);
           break;
         case 'a':
-          if constexpr (::bytedance::bolt::kSparkCompatible) {
-            if (count > 1) {
-              BOLT_USER_FAIL(
-                  "The am-pm-of-day pattern letter count must be 1.");
-            }
+          if (::bytedance::bolt::kSparkCompatible && count > 1) {
+            BOLT_USER_FAIL("The am-pm-of-day pattern letter count must be 1.");
           }
           builder.appendHalfDayOfDay();
           break;
@@ -2481,7 +2458,7 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
           builder.appendTimeZone(count);
           break;
         case 'X':
-          if constexpr (!::bytedance::bolt::kSparkCompatible) {
+          if (!::bytedance::bolt::kSparkCompatible) {
             BOLT_UNSUPPORTED("Specifier X is not supported.");
           }
           [[fallthrough]];

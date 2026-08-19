@@ -141,7 +141,7 @@ TEST_F(TryExprTest, nestedTryParentErrors) {
 }
 
 TEST_F(TryExprTest, skipExecution) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   registerFunction<CountCallsFunction, int64_t, int64_t>({"count_calls"});
@@ -158,7 +158,7 @@ TEST_F(TryExprTest, skipExecution) {
 }
 
 TEST_F(TryExprTest, skipExecutionEvalSimplified) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   registerFunction<CountCallsFunction, int64_t, int64_t>({"count_calls"});
@@ -176,7 +176,7 @@ TEST_F(TryExprTest, skipExecutionEvalSimplified) {
 }
 
 TEST_F(TryExprTest, skipExecutionWholeBatchEvalSimplified) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   registerFunction<CountCallsFunction, int64_t, int64_t>({"count_calls"});
@@ -195,7 +195,7 @@ TEST_F(TryExprTest, skipExecutionWholeBatchEvalSimplified) {
 /// Verify that subsequent inputs to a non-default-null-behavior function are
 /// not evaluated if previous inputs generated errors.
 TEST_F(TryExprTest, skipExecutionOnInputErrors) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Fail all rows.

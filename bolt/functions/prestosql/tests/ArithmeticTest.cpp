@@ -266,7 +266,7 @@ TEST_F(ArithmeticTest, mod) {
 }
 
 TEST_F(ArithmeticTest, modInt) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   std::vector<int64_t> numerInt = {

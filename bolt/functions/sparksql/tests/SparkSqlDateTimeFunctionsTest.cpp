@@ -22,6 +22,8 @@
 #include <cstdlib>
 #include <fstream>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/expression/UdfTypeResolver.h"
+#include "bolt/functions/prestosql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::functions::sparksql::test {
@@ -1749,7 +1751,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestamp) {
   // to_timestamp exception mode
   setQueryTimeZone("America/Los_Angeles");
   // legacy timeparser
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     EXPECT_EQ(
         Timestamp(
             1580184371,
@@ -1758,7 +1760,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestamp) {
             .value());
   }
   setQueryTimeZone("UTC");
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     EXPECT_EQ(
         "2020-01-28 01:06:11.847000000",
         getTimestampString(
@@ -1854,7 +1856,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestamp) {
 
   // corrected
   setTimeParserPolicy("corrected");
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     EXPECT_EQ(
         std::nullopt,
         getTimestamp(
@@ -2133,7 +2135,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtime) {
       fromUnixTime(getUnixTime("2020-06-30 23:59:59"), "yyyy-MM-dd HH:mm:ss"),
       "2020-07-01 07:59:59");
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     setPolicyAndTimeZone("corrected", "Asia/Shanghai");
     EXPECT_EQ(
         fromUnixTime(-62170185600, "yyyy-MM-dd HH:mm:ss G").value(),
@@ -2186,7 +2188,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeIllegal) {
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, CastStringToLargeTimestamp) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   using util::fromTimestampString;
@@ -2247,13 +2249,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
 
   EXPECT_EQ(
       fromUnixTime(253402300799, "Asia/Shanghai"), "10000-01-01 07:59:59");
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    EXPECT_EQ(
-        fromUnixTime(253402300801, "Asia/Shanghai"), "+10000-01-01 08:00:01");
-  } else {
-    EXPECT_EQ(
-        fromUnixTime(253402300801, "Asia/Shanghai"), "10000-01-01 08:00:01");
-  }
+  EXPECT_EQ(
+      fromUnixTime(253402300801, "Asia/Shanghai"),
+      ::bytedance::bolt::kSparkCompatible ? "+10000-01-01 08:00:01"
+                                          : "10000-01-01 08:00:01");
   EXPECT_EQ(
       fromUnixTime(253402300801, "America/Los_Angeles"), "9999-12-31 16:00:01");
 }
@@ -2324,8 +2323,22 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
           Timestamp(1520989323L, 123456789L), "yyy-MM-dd HH:mm:ss.SSSSSSSSS"));
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, jodaDateFormatDefaultCompatibility) {
+  core::QueryConfig config({});
+  StringView format("YYYY-ww-ee");
+  const Timestamp* timestamp = nullptr;
+  JodaDateFormatFunction<exec::VectorExec> function;
+
+  if (::bytedance::bolt::kSparkCompatible) {
+    EXPECT_NO_THROW(function.initialize({}, config, timestamp, &format));
+  } else {
+    EXPECT_THROW(
+        function.initialize({}, config, timestamp, &format), BoltUserError);
+  }
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, weekBased) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   using util::fromTimestampString;

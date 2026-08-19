@@ -119,15 +119,13 @@ TEST(DecimalTest, decimalToString) {
 
   ASSERT_EQ("1000", DecimalUtil::toString(1000, DECIMAL(20, 0)));
   ASSERT_EQ("1.000", DecimalUtil::toString(1000, DECIMAL(20, 3)));
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    ASSERT_EQ("1.000E-7", DecimalUtil::toString(1000, DECIMAL(20, 10)));
-    ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
-    ASSERT_EQ("0E-9", DecimalUtil::toString(0, DECIMAL(20, 9)));
-  } else {
-    ASSERT_EQ("0.0000001000", DecimalUtil::toString(1000, DECIMAL(20, 10)));
-    ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
-    ASSERT_EQ("0.000000000", DecimalUtil::toString(0, DECIMAL(20, 9)));
-  }
+  ASSERT_EQ(
+      ::bytedance::bolt::kSparkCompatible ? "1.000E-7" : "0.0000001000",
+      DecimalUtil::toString(1000, DECIMAL(20, 10)));
+  ASSERT_EQ("0.0000010000", DecimalUtil::toString(10000, DECIMAL(20, 10)));
+  ASSERT_EQ(
+      ::bytedance::bolt::kSparkCompatible ? "0E-9" : "0.000000000",
+      DecimalUtil::toString(0, DECIMAL(20, 9)));
   ASSERT_EQ("-0.001000", DecimalUtil::toString(-1000, DECIMAL(20, 6)));
 
   const auto minShortDecimal =
@@ -151,6 +149,14 @@ TEST(DecimalTest, decimalToString) {
       DecimalUtil::toString(DecimalUtil::kLongDecimalMax, DECIMAL(38, 0));
   ASSERT_EQ("99999999999999999999999999999999999999", maxLongDecimal);
   ASSERT_EQ(maxLongDecimal.length(), 38);
+}
+
+TEST(DecimalTest, unsignedDecimalToString) {
+  std::string result(32, '\0');
+  const auto size = DecimalUtil::convertToString(
+      std::numeric_limits<uint64_t>::max(), 0, result.size(), result.data());
+  result.resize(size);
+  EXPECT_EQ("18446744073709551615", result);
 }
 
 TEST(DecimalTest, limits) {

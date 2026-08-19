@@ -46,7 +46,7 @@ class RowNumberTest : public OperatorTestBase {
 };
 
 TEST_F(RowNumberTest, spill) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto spillDirectory = exec::test::TempDirectoryPath::create();
@@ -92,7 +92,7 @@ TEST_F(RowNumberTest, spill) {
 }
 
 TEST_F(RowNumberTest, basic) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto data = makeRowVector({
@@ -143,7 +143,7 @@ TEST_F(RowNumberTest, basic) {
 }
 
 TEST_F(RowNumberTest, noPartitionKeys) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto data = makeRowVector({
@@ -193,7 +193,7 @@ TEST_F(RowNumberTest, noPartitionKeys) {
 }
 
 TEST_F(RowNumberTest, largeInput) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto data = makeRowVector({

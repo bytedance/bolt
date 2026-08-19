@@ -76,7 +76,7 @@ class JoinFuzzerRunner {
  public:
   static int run(size_t seed) {
     bytedance::bolt::memory::MemoryManager::initialize({});
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (::bytedance::bolt::kSparkCompatible) {
       bytedance::bolt::serializer::spark::UnsafeRowVectorSerde::
           registerVectorSerde();
     } else {

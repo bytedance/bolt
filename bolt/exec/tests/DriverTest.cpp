@@ -471,7 +471,7 @@ class DriverTest : public OperatorTestBase {
   expectWithDelay([&]() { return test; }, __FILE__, __LINE__, #test)
 
 TEST_F(DriverTest, error) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   CursorParameters params;
@@ -1431,7 +1431,7 @@ DEBUG_ONLY_TEST_F(DriverTest, driverThreadContext) {
 }
 
 DEBUG_ONLY_TEST_F(DriverTest, driverThreadName) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
 

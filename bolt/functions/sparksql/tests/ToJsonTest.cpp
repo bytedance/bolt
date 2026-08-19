@@ -381,30 +381,29 @@ TEST_F(ToJsonTest, fromArray) {
     testToJson(arrayVector, expected);
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    {
-      // Array with short decimals.
-      std::vector<std::vector<int64_t>> decimalArray{
-          {0, 100}, {123456, 1234567890}, {84059812, 1234567800}};
-      auto arrayVector = makeArrayVector<int64_t>(decimalArray, DECIMAL(10, 5));
-      auto expected = makeNullableFlatVector<std::string>(
-          {R"([0.00000,0.00100])",
-           R"([1.23456,12345.67890])",
-           R"([840.59812,12345.67800])"});
-      testToJson(arrayVector, expected);
-    }
-    {
-      // Array with long decimals.
-      std::vector<std::vector<int128_t>> longDecimalArray{
-          {0, 100}, {123456, 123456789112LL}, {84059812, 12345678000}};
-      auto longArrayVector =
-          makeArrayVector<int128_t>(longDecimalArray, DECIMAL(30, 10));
-      auto expected = makeNullableFlatVector<std::string>(
-          {R"([0E-10,1.00E-8])",
-           R"([0.0000123456,12.3456789112])",
-           R"([0.0084059812,1.2345678000])"});
-      testToJson(longArrayVector, expected);
-    }
+  {
+    // Array with short decimals.
+    std::vector<std::vector<int64_t>> decimalArray{
+        {0, 100}, {123456, 1234567890}, {84059812, 1234567800}};
+    auto arrayVector = makeArrayVector<int64_t>(decimalArray, DECIMAL(10, 5));
+    auto expected = makeNullableFlatVector<std::string>(
+        {R"([0.00000,0.00100])",
+         R"([1.23456,12345.67890])",
+         R"([840.59812,12345.67800])"});
+    testToJson(arrayVector, expected);
+  }
+  {
+    // Array with long decimals.
+    std::vector<std::vector<int128_t>> longDecimalArray{
+        {0, 100}, {123456, 123456789112LL}, {84059812, 12345678000}};
+    auto longArrayVector =
+        makeArrayVector<int128_t>(longDecimalArray, DECIMAL(30, 10));
+    auto expected = makeNullableFlatVector<std::string>(
+        {::bytedance::bolt::kSparkCompatible ? R"([0E-10,1.00E-8])"
+                                             : R"([0.0000000000,0.0000000100])",
+         R"([0.0000123456,12.3456789112])",
+         R"([0.0084059812,1.2345678000])"});
+    testToJson(longArrayVector, expected);
   }
 } // namespace bytedance::bolt::functions::sparksql::test
 
@@ -445,33 +444,33 @@ TEST_F(ToJsonTest, fromMap) {
     testToJson(mapVector, expected);
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    {
-      // Map with short decimals.
-      auto mapVector = makeMapVector<std::string, int64_t>(
-          {{{"a", 0}, {"b", 100}},
-           {{"c", 123456}, {"d", 1234567890}},
-           {{"e", 84059812}, {"f", 1234567800}}},
-          MAP(VARCHAR(), DECIMAL(10, 5)));
-      auto expected = makeNullableFlatVector<std::string>(
-          {R"({"a":0.00000,"b":0.00100})",
-           R"({"c":1.23456,"d":12345.67890})",
-           R"({"e":840.59812,"f":12345.67800})"});
-      testToJson(mapVector, expected);
-    }
-    {
-      // Map with long decimals.
-      auto mapVector = makeMapVector<std::string, int128_t>(
-          {{{"a", 0}, {"b", 100}},
-           {{"c", 123456}, {"d", 123456789112LL}},
-           {{"e", 84059812}, {"f", 12345678000}}},
-          MAP(VARCHAR(), DECIMAL(30, 10)));
-      auto expected = makeNullableFlatVector<std::string>(
-          {R"({"a":0E-10,"b":1.00E-8})",
-           R"({"c":0.0000123456,"d":12.3456789112})",
-           R"({"e":0.0084059812,"f":1.2345678000})"});
-      testToJson(mapVector, expected);
-    }
+  {
+    // Map with short decimals.
+    auto mapVector = makeMapVector<std::string, int64_t>(
+        {{{"a", 0}, {"b", 100}},
+         {{"c", 123456}, {"d", 1234567890}},
+         {{"e", 84059812}, {"f", 1234567800}}},
+        MAP(VARCHAR(), DECIMAL(10, 5)));
+    auto expected = makeNullableFlatVector<std::string>(
+        {R"({"a":0.00000,"b":0.00100})",
+         R"({"c":1.23456,"d":12345.67890})",
+         R"({"e":840.59812,"f":12345.67800})"});
+    testToJson(mapVector, expected);
+  }
+  {
+    // Map with long decimals.
+    auto mapVector = makeMapVector<std::string, int128_t>(
+        {{{"a", 0}, {"b", 100}},
+         {{"c", 123456}, {"d", 123456789112LL}},
+         {{"e", 84059812}, {"f", 12345678000}}},
+        MAP(VARCHAR(), DECIMAL(30, 10)));
+    auto expected = makeNullableFlatVector<std::string>(
+        {::bytedance::bolt::kSparkCompatible
+             ? R"({"a":0E-10,"b":1.00E-8})"
+             : R"({"a":0.0000000000,"b":0.0000000100})",
+         R"({"c":0.0000123456,"d":12.3456789112})",
+         R"({"e":0.0084059812,"f":1.2345678000})"});
+    testToJson(mapVector, expected);
   }
 
   {
@@ -607,40 +606,42 @@ TEST_F(ToJsonTest, fromRow) {
     testToJson(input, expected);
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    {
-      // Row with short decimal.
-      auto a = makeFlatVector<std::string>(
-          {"a", "b", "c", "d", "e", "f"}, VARCHAR());
-      auto b = makeFlatVector<int64_t>(
-          {0, 100, 123456, 1234567890, 84059812, 1234567800}, DECIMAL(10, 5));
-      auto input = makeRowVector({a, b});
-      auto expected = makeNullableFlatVector<std::string>(
-          {R"({"c0":"a","c1":0.00000})",
-           R"({"c0":"b","c1":0.00100})",
-           R"({"c0":"c","c1":1.23456})",
-           R"({"c0":"d","c1":12345.67890})",
-           R"({"c0":"e","c1":840.59812})",
-           R"({"c0":"f","c1":12345.67800})"});
-      testToJson(input, expected);
-    }
-    {
-      // Row with long decimal.
-      auto a = makeFlatVector<std::string>(
-          {"a", "b", "c", "d", "e", "f"}, VARCHAR());
-      auto b = makeFlatVector<int128_t>(
-          {0, 100, 123456, 123456789112LL, 84059812, 12345678000},
-          DECIMAL(30, 10));
-      auto input = makeRowVector({a, b});
-      auto expected = makeNullableFlatVector<std::string>(
-          {R"({"c0":"a","c1":0E-10})",
-           R"({"c0":"b","c1":1.00E-8})",
-           R"({"c0":"c","c1":0.0000123456})",
-           R"({"c0":"d","c1":12.3456789112})",
-           R"({"c0":"e","c1":0.0084059812})",
-           R"({"c0":"f","c1":1.2345678000})"});
-      testToJson(input, expected);
-    }
+  {
+    // Row with short decimal.
+    auto a =
+        makeFlatVector<std::string>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
+    auto b = makeFlatVector<int64_t>(
+        {0, 100, 123456, 1234567890, 84059812, 1234567800}, DECIMAL(10, 5));
+    auto input = makeRowVector({a, b});
+    auto expected = makeNullableFlatVector<std::string>(
+        {R"({"c0":"a","c1":0.00000})",
+         R"({"c0":"b","c1":0.00100})",
+         R"({"c0":"c","c1":1.23456})",
+         R"({"c0":"d","c1":12345.67890})",
+         R"({"c0":"e","c1":840.59812})",
+         R"({"c0":"f","c1":12345.67800})"});
+    testToJson(input, expected);
+  }
+  {
+    // Row with long decimal.
+    auto a =
+        makeFlatVector<std::string>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
+    auto b = makeFlatVector<int128_t>(
+        {0, 100, 123456, 123456789112LL, 84059812, 12345678000},
+        DECIMAL(30, 10));
+    auto input = makeRowVector({a, b});
+    auto expected = makeNullableFlatVector<std::string>(
+        {::bytedance::bolt::kSparkCompatible
+             ? R"({"c0":"a","c1":0E-10})"
+             : R"({"c0":"a","c1":0.0000000000})",
+         ::bytedance::bolt::kSparkCompatible
+             ? R"({"c0":"b","c1":1.00E-8})"
+             : R"({"c0":"b","c1":0.0000000100})",
+         R"({"c0":"c","c1":0.0000123456})",
+         R"({"c0":"d","c1":12.3456789112})",
+         R"({"c0":"e","c1":0.0084059812})",
+         R"({"c0":"f","c1":1.2345678000})"});
+    testToJson(input, expected);
   }
 
   {

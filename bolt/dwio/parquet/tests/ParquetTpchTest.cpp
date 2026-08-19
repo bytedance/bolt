@@ -62,7 +62,7 @@ class ParquetTpchTest : public testing::Test {
 
     functions::prestosql::registerAllScalarFunctions();
     aggregate::prestosql::registerAllAggregateFunctions();
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (::bytedance::bolt::kSparkCompatible) {
       functions::sparksql::registerFunctions("");
     }
 

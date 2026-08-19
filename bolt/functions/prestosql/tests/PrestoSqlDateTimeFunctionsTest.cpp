@@ -268,7 +268,7 @@ bool operator==(
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncSignatures) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto signatures = getSignatureStrings("date_trunc");
@@ -540,7 +540,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, fromUnixtime) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, year) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto year = [&](std::optional<Timestamp> date) {
@@ -566,7 +566,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, year) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, yearDate) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto year = [&](std::optional<int32_t> date) {
@@ -609,7 +609,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, yearTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, weekDate) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto weekDate = [&](const char* dateString) {
@@ -638,7 +638,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, weekDate) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, week) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto weekTimestamp = [&](const char* time) {
@@ -688,7 +688,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, weekTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, quarter) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto quarter = [&](std::optional<Timestamp> date) {
@@ -714,7 +714,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, quarter) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, quarterDate) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto quarter = [&](std::optional<int32_t> date) {
@@ -760,7 +760,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, quarterTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, month) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto month = [&](std::optional<Timestamp> date) {
@@ -786,7 +786,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, month) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, monthDate) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto month = [&](std::optional<int32_t> date) {
@@ -829,7 +829,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, monthTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, hour) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto hour = [&](std::optional<Timestamp> date) {
@@ -1333,7 +1333,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, yearOfWeekTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, minute) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto minute = [&](std::optional<Timestamp> date) {
@@ -1418,7 +1418,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, minuteTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, second) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto second = [&](std::optional<Timestamp> timestamp) {
@@ -1476,7 +1476,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, secondTimestampWithTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, millisecond) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto millisecond = [&](std::optional<Timestamp> timestamp) {
@@ -1539,7 +1539,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, millisecondTimestampWithTimezone) {
 
 // date_trunc cannot be access in presto ut
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTrunc) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   std::string optimizationFlags[] = {"true", "false"};
@@ -1652,7 +1652,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTrunc) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, trunc) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const static auto trunc = [&](std::optional<int32_t> date,
@@ -1682,7 +1682,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, trunc) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncDate) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto dateTrunc = [&](const std::string& unit,
@@ -1751,7 +1751,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncDate) {
 
 // Reference dateTruncDateForWeek for test cases explanations
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampForWeek) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto dateTrunc = [&](const std::string& unit,
@@ -1788,7 +1788,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampForWeek) {
 // 4. Convert Back to UTC (remove Time Zone offset)
 // 5. Convert Back to Milliseconds Since the Unix Epoch
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampWithTimezoneForWeek) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto evaluateDateTrunc = [&](const std::string& truncUnit,
@@ -1837,7 +1837,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampWithTimezoneForWeek) {
 TEST_F(
     PrestoSqlDateTimeFunctionsTest,
     dateTruncTimeStampWithTimezoneStringForWeek) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto evaluateDateTruncFromStrings = [&](const std::string& truncUnit,
@@ -1884,7 +1884,7 @@ TEST_F(
       "week", "2024-03-01+23:01:02+14:00", "2024-02-26+00:00:00+14:00");
 }
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimestampWithTimezone) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto evaluateDateTrunc = [&](const std::string& truncUnit,
@@ -2164,7 +2164,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, parseDatetime) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTime) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   using util::fromTimestampString;
@@ -2607,7 +2607,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTimeTimezone) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormat) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto dateFormatOnce = [&](std::optional<Timestamp> timestamp,
@@ -2966,7 +2966,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormat) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormatTimestampWithTimezone) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto testDateFormat =
@@ -3684,7 +3684,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, monthsBetween) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, lastDay) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto lastDayFunc = [&](const std::optional<int32_t>& date) {

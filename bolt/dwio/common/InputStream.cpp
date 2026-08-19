@@ -80,20 +80,19 @@ ReadFileInputStream::ReadFileInputStream(
 uint64_t ReadFileInputStream::getLength() const {
   // file_size_ is populated by hdfsGetPathInfo for Spark, which involves an
   // RPC with the HDFS namenode.
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    uint64_t readTime = 0;
-    uint64_t len = 0;
-    {
-      NanosecondTimer timer(&readTime);
-      len = readFile_->size();
-    }
-    if (stats_) {
-      stats_->incLoadFileMetaDataTimeNs(readTime);
-    }
-    return len;
-  } else {
+  if (!::bytedance::bolt::kSparkCompatible) {
     return readFile_->size();
   }
+  uint64_t readTime = 0;
+  uint64_t len = 0;
+  {
+    NanosecondTimer timer(&readTime);
+    len = readFile_->size();
+  }
+  if (stats_) {
+    stats_->incLoadFileMetaDataTimeNs(readTime);
+  }
+  return len;
 }
 
 void ReadFileInputStream::read(

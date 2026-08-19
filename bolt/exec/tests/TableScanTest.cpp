@@ -4335,7 +4335,7 @@ TEST_F(TableScanTest, timestampPartitionKey) {
               std::end(inputs) - std::begin(inputs),
               [&](auto i) {
                 auto t = util::fromTimestampString(inputs[i], nullptr);
-                if constexpr (!::bytedance::bolt::kSparkCompatible) {
+                if (!::bytedance::bolt::kSparkCompatible) {
                   t.toGMT(Timestamp::defaultTimezone());
                 }
                 return t;

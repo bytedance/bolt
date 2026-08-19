@@ -32,6 +32,7 @@
 
 #include "CheckedArithmeticImpl.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 namespace bytedance::bolt::functions {
 
 template <typename T>
@@ -70,7 +71,9 @@ struct CheckedDivideFunction {
   }
 };
 
-template <typename T, bool NullOnDivideByZero = false>
+template <
+    typename T,
+    bool NullOnDivideByZero = ::bytedance::bolt::kSparkCompatible>
 struct CheckedModulusFunction {
   template <typename TInput>
   FOLLY_ALWAYS_INLINE bool

@@ -123,7 +123,7 @@ void registerStringFunctions(const std::string& prefix) {
       Varchar,
       Varchar>({prefix + "split_to_map"});
   BOLT_REGISTER_VECTOR_FUNCTION(udf_concat, prefix + "concat");
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     // spark has another implementation
     BOLT_REGISTER_VECTOR_FUNCTION(udf_replace, prefix + "replace");
   }

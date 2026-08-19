@@ -164,7 +164,7 @@ TEST_F(SequenceTest, invalidStep) {
 }
 
 TEST_F(SequenceTest, equalBoundsWithZeroStep) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const auto startVector = makeFlatVector<int64_t>({1});

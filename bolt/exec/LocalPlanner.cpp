@@ -467,20 +467,13 @@ void LocalPlanner::plan(
     factory->maxDrivers = detail::maxDrivers(*factory, queryConfig);
     factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
 
-    if constexpr (!::bytedance::bolt::kSparkCompatible) {
-      bool flag = false;
+    if (!::bytedance::bolt::kSparkCompatible && multiDriverOpen) {
       for (auto& node : factory->planNodes) {
         if (std::dynamic_pointer_cast<const core::TableScanNode>(node)) {
-          flag = true;
+          factory->numDrivers = std::min(factory->maxDrivers, maxDrivers * 10);
+          break;
         }
       }
-      if (flag && multiDriverOpen) {
-        factory->numDrivers = std::min(factory->maxDrivers, maxDrivers * 10);
-      } else {
-        factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
-      }
-    } else {
-      factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
     }
 
     // Pipelines running grouped/bucketed execution would have separate groups
@@ -665,54 +658,52 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
     else if (
         auto projectNode =
             std::dynamic_pointer_cast<const core::ProjectNode>(planNode)) {
-      if constexpr (::bytedance::bolt::kSparkCompatible) {
-        // partialagg + project + project
-        if (markSkipProject && (i == markSkipProjectAggIndex + 1)) {
-          auto nextProject = std::dynamic_pointer_cast<const core::ProjectNode>(
-              planNodes[markSkipProjectAggIndex + 2]);
-          if (nextProject && nextProject->projections().size() > 0) {
-            auto callTyped =
-                std::dynamic_pointer_cast<const core::CallTypedExpr>(
-                    nextProject->projections()[0]);
-            if (LIKELY(
-                    callTyped &&
-                    (callTyped->name() == "hive_hash" ||
-                     callTyped->name() == "hash_with_seed"))) {
-              operators.push_back(std::make_unique<FilterProject>(
-                  id,
-                  ctx.get(),
-                  nullptr,
-                  projectNode,
-                  FilterProject::ProjectType::kSkipCompositeRowVector));
-              markSkipProject = false;
-              LOG(INFO) << "mark last project as skip";
-              continue;
-            } else {
-              LOG(INFO) << "next PlanNode is not hashFunction, callTyped = "
-                        << callTyped << ", function name is "
-                        << (callTyped ? callTyped->name() : "unknown");
-            }
+      // partialagg + project + project
+      if (::bytedance::bolt::kSparkCompatible && markSkipProject &&
+          i == markSkipProjectAggIndex + 1) {
+        auto nextProject = std::dynamic_pointer_cast<const core::ProjectNode>(
+            planNodes[markSkipProjectAggIndex + 2]);
+        if (nextProject && nextProject->projections().size() > 0) {
+          auto callTyped = std::dynamic_pointer_cast<const core::CallTypedExpr>(
+              nextProject->projections()[0]);
+          if (LIKELY(
+                  callTyped &&
+                  (callTyped->name() == "hive_hash" ||
+                   callTyped->name() == "hash_with_seed"))) {
+            operators.push_back(std::make_unique<FilterProject>(
+                id,
+                ctx.get(),
+                nullptr,
+                projectNode,
+                FilterProject::ProjectType::kSkipCompositeRowVector));
+            markSkipProject = false;
+            LOG(INFO) << "mark last project as skip";
+            continue;
           } else {
-            LOG(INFO) << "markSkipProject but next PlanNode is not ProjectNode";
+            LOG(INFO) << "next PlanNode is not hashFunction, callTyped = "
+                      << callTyped << ", function name is "
+                      << (callTyped ? callTyped->name() : "unknown");
           }
-          markSkipProject = false;
+        } else {
+          LOG(INFO) << "markSkipProject but next PlanNode is not ProjectNode";
         }
+        markSkipProject = false;
+      }
 
-        // (valuestream or shuffle reader) + project + agg
-        if (i == 1 &&
-            (planNodes[0]->name() == "ValueStream" ||
-             planNodes[0]->name() == "SparkShuffleReader") &&
-            planNodes.size() >= 3 &&
-            std::dynamic_pointer_cast<const core::AggregationNode>(
-                planNodes[2])) {
-          operators.push_back(std::make_unique<FilterProject>(
-              id,
-              ctx.get(),
-              nullptr,
-              projectNode,
-              FilterProject::ProjectType::kSkipCompositeRowVector));
-          continue;
-        }
+      // (valuestream or shuffle reader) + project + agg
+      if (::bytedance::bolt::kSparkCompatible && i == 1 &&
+          (planNodes[0]->name() == "ValueStream" ||
+           planNodes[0]->name() == "SparkShuffleReader") &&
+          planNodes.size() >= 3 &&
+          std::dynamic_pointer_cast<const core::AggregationNode>(
+              planNodes[2])) {
+        operators.push_back(std::make_unique<FilterProject>(
+            id,
+            ctx.get(),
+            nullptr,
+            projectNode,
+            FilterProject::ProjectType::kSkipCompositeRowVector));
+        continue;
       }
       operators.push_back(
           std::make_unique<FilterProject>(id, ctx.get(), nullptr, projectNode));
@@ -785,15 +776,13 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         operators.push_back(std::make_unique<StreamingAggregation>(
             id, ctx.get(), aggregationNode));
       } else {
-        if constexpr (::bytedance::bolt::kSparkCompatible) {
-          // for function like avg/first, intermediate type is ROW<>, eg
-          // ROW<double, bigint> for avg a ProjectNode is added by gluten to
-          // project ROW<double, bigint> to 2 columns and row_contructor these 2
-          // columns back to ROW after shuffle read for CompositeRowVector, skip
-          // project and row_contructor execution
-          markSkipProject =
-              (aggregationNode->isPartial() && i == markSkipProjectAggIndex);
-        }
+        // for function like avg/first, intermediate type is ROW<>, eg
+        // ROW<double, bigint> for avg a ProjectNode is added by gluten to
+        // project ROW<double, bigint> to 2 columns and row_contructor these 2
+        // columns back to ROW after shuffle read for CompositeRowVector, skip
+        // project and row_contructor execution
+        markSkipProject = ::bytedance::bolt::kSparkCompatible &&
+            aggregationNode->isPartial() && i == markSkipProjectAggIndex;
 #if defined BOLT_HAS_CUDF && BOLT_HAS_CUDF == 1
         // Check if all aggregates are supported by cuDF Operator
         bool isCudfSupported =

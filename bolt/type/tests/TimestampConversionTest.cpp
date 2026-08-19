@@ -89,7 +89,7 @@ TEST(DateTimeUtilTest, fromDateString) {
   EXPECT_EQ(-720258, fromDateString("-2-1-1", nullptr));
 
   // 1BC is equal 0-1-1.
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     EXPECT_EQ(-719528, fromDateString("1-1-1 (BC)", nullptr));
     EXPECT_EQ(-719893, fromDateString("2-1-1 (BC)", nullptr));
   }
@@ -119,7 +119,7 @@ TEST(DateTimeUtilTest, fromDateStrInvalid) {
   EXPECT_THROW(fromDateString("2000/01-01", nullptr), BoltUserError);
   EXPECT_THROW(fromDateString("2000 01-01", nullptr), BoltUserError);
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     // Trailing characters.
     EXPECT_THROW(fromDateString("2000-01-01   asdf", nullptr), BoltUserError);
     EXPECT_THROW(fromDateString("2000-01-01 0", nullptr), BoltUserError);
@@ -212,7 +212,7 @@ TEST(DateTimeUtilTest, fromTimeString) {
 }
 
 TEST(DateTimeUtilTest, fromTimeStrInvalid) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   EXPECT_THROW(fromTimeString("", nullptr), BoltUserError);

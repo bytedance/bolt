@@ -2464,7 +2464,7 @@ struct ThrowRuntimeError {
 } // namespace
 
 TEST_P(ParameterizedExprTest, exceptionContext) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto data = makeRowVector({

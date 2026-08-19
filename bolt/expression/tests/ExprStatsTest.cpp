@@ -380,7 +380,7 @@ TEST_F(ExprStatsTest, specialForms) {
 }
 
 TEST_F(ExprStatsTest, errorLog) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Register a listener to log exceptions.

@@ -398,7 +398,6 @@ VectorPtr CastExpr::applyDecimalToFloatCast(
     });
   } else {
     const int32_t scale = precisionScale.second;
-    const int32_t precision = precisionScale.first;
     applyToSelectedNoThrowLocal(context, rows, result, [&](int row) {
       auto inputValue = simpleInput->valueAt(row);
       auto fValue = FloatingDecimal::toFloatFromValue(inputValue, scale);
@@ -735,33 +734,32 @@ void CastExpr::applyCastPrimitives(
     }
   }
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
-    // If we're converting to a TIMESTAMP, check if we need to adjust the
-    // current GMT timezone to the user provided session timezone.
-    if constexpr (ToKind == TypeKind::TIMESTAMP) {
-      auto prestoHook = dynamic_cast<PrestoCastHooks*>(hooks_.get());
-      if (FOLLY_LIKELY(prestoHook)) {
-        const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
-        // If user explicitly asked us to adjust the timezone.
-        if (queryConfig.adjustTimestampToTimezone()) {
-          auto sessionTzName = queryConfig.sessionTimezone();
-          if (!sessionTzName.empty()) {
-            // When context.throwOnError is false, some rows will be marked as
-            // 'failed'. These rows should not be processed further.
-            // 'remainingRows' will contain a subset of 'rows' that have passed
-            // all the checks (e.g. keys are not nulls and number of keys and
-            // values is the same).
-            exec::LocalSelectivityVector remainingRows(context, rows);
-            context.deselectErrors(*remainingRows);
-            // locate_zone throws runtime_error if the timezone couldn't be
-            // found (so we're safe to dereference the pointer).
-            auto* timeZone = tz::locateZone(sessionTzName);
-            auto rawTimestamps = resultFlatVector->mutableRawValues();
-            applyToSelectedNoThrowLocal(
-                context, *remainingRows, result, [&](int row) {
-                  rawTimestamps[row].toGMT(*timeZone);
-                });
-          }
+  // If we're converting to a TIMESTAMP, check if we need to adjust the
+  // current GMT timezone to the user provided session timezone.
+  if constexpr (
+      !::bytedance::bolt::kSparkCompatible && ToKind == TypeKind::TIMESTAMP) {
+    auto prestoHook = dynamic_cast<PrestoCastHooks*>(hooks_.get());
+    if (FOLLY_LIKELY(prestoHook)) {
+      const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+      // If user explicitly asked us to adjust the timezone.
+      if (queryConfig.adjustTimestampToTimezone()) {
+        auto sessionTzName = queryConfig.sessionTimezone();
+        if (!sessionTzName.empty()) {
+          // When context.throwOnError is false, some rows will be marked as
+          // 'failed'. These rows should not be processed further.
+          // 'remainingRows' will contain a subset of 'rows' that have passed
+          // all the checks (e.g. keys are not nulls and number of keys and
+          // values is the same).
+          exec::LocalSelectivityVector remainingRows(context, rows);
+          context.deselectErrors(*remainingRows);
+          // locate_zone throws runtime_error if the timezone couldn't be found
+          // (so we're safe to dereference the pointer).
+          auto* timeZone = tz::locateZone(sessionTzName);
+          auto rawTimestamps = resultFlatVector->mutableRawValues();
+          applyToSelectedNoThrowLocal(
+              context, *remainingRows, result, [&](int row) {
+                rawTimestamps[row].toGMT(*timeZone);
+              });
         }
       }
     }
@@ -928,18 +926,18 @@ void CastExpr::applyCastNonPromitiveToVarcharEval(
     auto* newInput =
         input->as<SimpleVector<typename TypeTraits<FromKind>::NativeType>>();
     auto inputRowValue = newInput->valueAt(row);
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
-      if constexpr (FromKind == TypeKind::TIMESTAMP) {
-        static constexpr TimestampToStringOptions options = {
-            .precision = TimestampToStringOptions::Precision::kMicroseconds,
-            .leadingPositiveSign = true,
-            .skipTrailingZeros = true,
-            .zeroPaddingYear = true,
-            .dateTimeSeparator = ' ',
-        };
-        result.append(inputRowValue.toString(options), flatResult);
-        return;
-      }
+    if constexpr (
+        ::bytedance::bolt::kSparkCompatible &&
+        FromKind == TypeKind::TIMESTAMP) {
+      static constexpr TimestampToStringOptions options = {
+          .precision = TimestampToStringOptions::Precision::kMicroseconds,
+          .leadingPositiveSign = true,
+          .skipTrailingZeros = true,
+          .zeroPaddingYear = true,
+          .dateTimeSeparator = ' ',
+      };
+      result.append(inputRowValue.toString(options), flatResult);
+      return;
     }
     if constexpr (
         FromKind == TypeKind::HUGEINT || FromKind == TypeKind::BIGINT) {

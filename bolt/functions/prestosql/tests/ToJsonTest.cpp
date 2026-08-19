@@ -133,32 +133,31 @@ TEST_F(ToJsonTest, fromArray) {
         "to_json(c0)", {arrayVector}, expectedVector);
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    // Test array with short decimal column
-    std::vector<std::vector<int64_t>> decimalArray{
-        {0, 100}, {123456, 1234567890}, {84059812, 1234567800}};
-    auto arrayVector = makeArrayVector<int64_t>(decimalArray, DECIMAL(10, 5));
-    std::vector<std::optional<JsonNativeType>> expected{
-        R"([0.00000,0.00100])",
-        R"([1.23456,12345.67890])",
-        R"([840.59812,12345.67800])"};
-    auto expectedVector =
-        makeNullableFlatVector<JsonNativeType>(expected, VARCHAR());
-    toJsonSimple("to_json(c0)", {arrayVector}, expectedVector);
+  // Test array with short decimal column
+  std::vector<std::vector<int64_t>> decimalArray{
+      {0, 100}, {123456, 1234567890}, {84059812, 1234567800}};
+  auto arrayVector = makeArrayVector<int64_t>(decimalArray, DECIMAL(10, 5));
+  std::vector<std::optional<JsonNativeType>> expected{
+      R"([0.00000,0.00100])",
+      R"([1.23456,12345.67890])",
+      R"([840.59812,12345.67800])"};
+  auto expectedVector =
+      makeNullableFlatVector<JsonNativeType>(expected, VARCHAR());
+  toJsonSimple("to_json(c0)", {arrayVector}, expectedVector);
 
-    // Test array with long decimal column
-    std::vector<std::vector<int128_t>> longDecimalArray{
-        {0, 100}, {123456, 123456789112LL}, {84059812, 12345678000}};
-    auto longArrayVector =
-        makeArrayVector<int128_t>(longDecimalArray, DECIMAL(30, 10));
-    std::vector<std::optional<JsonNativeType>> longExpected{
-        R"([0E-10,1.00E-8])",
-        R"([0.0000123456,12.3456789112])",
-        R"([0.0084059812,1.2345678000])"};
-    auto longExpectedVector =
-        makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
-    toJsonSimple("to_json(c0)", {longArrayVector}, longExpectedVector);
-  }
+  // Test array with long decimal column
+  std::vector<std::vector<int128_t>> longDecimalArray{
+      {0, 100}, {123456, 123456789112LL}, {84059812, 12345678000}};
+  auto longArrayVector =
+      makeArrayVector<int128_t>(longDecimalArray, DECIMAL(30, 10));
+  std::vector<std::optional<JsonNativeType>> longExpected{
+      ::bytedance::bolt::kSparkCompatible ? R"([0E-10,1.00E-8])"
+                                          : R"([0.0000000000,0.0000000100])",
+      R"([0.0000123456,12.3456789112])",
+      R"([0.0084059812,1.2345678000])"};
+  auto longExpectedVector =
+      makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
+  toJsonSimple("to_json(c0)", {longArrayVector}, longExpectedVector);
 }
 
 TEST_F(ToJsonTest, fromMap) {
@@ -213,37 +212,37 @@ TEST_F(ToJsonTest, fromMap) {
     toJsonSimple("to_json(c0)", {mapVector}, expectedVector);
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    // Tests map with short decimal values.
-    std::vector<std::vector<Pair<StringView, int64_t>>> maps{
-        {{"a", 0}, {"b", 100}},
-        {{"c", 123456}, {"d", 1234567890}},
-        {{"e", 84059812}, {"f", 1234567800}}};
-    std::vector<std::optional<JsonNativeType>> expected{
-        R"({"a":0.00000,"b":0.00100})",
-        R"({"c":1.23456,"d":12345.67890})",
-        R"({"e":840.59812,"f":12345.67800})"};
-    auto mapVector = makeMapVector<StringView, int64_t>(
-        maps, MAP(VARCHAR(), DECIMAL(10, 5)));
-    auto expectedVector =
-        makeNullableFlatVector<JsonNativeType>(expected, VARCHAR());
-    toJsonSimple("to_json(c0)", {mapVector}, expectedVector);
+  // Tests map with short decimal values.
+  std::vector<std::vector<Pair<StringView, int64_t>>> maps{
+      {{"a", 0}, {"b", 100}},
+      {{"c", 123456}, {"d", 1234567890}},
+      {{"e", 84059812}, {"f", 1234567800}}};
+  std::vector<std::optional<JsonNativeType>> expected{
+      R"({"a":0.00000,"b":0.00100})",
+      R"({"c":1.23456,"d":12345.67890})",
+      R"({"e":840.59812,"f":12345.67800})"};
+  auto mapVector =
+      makeMapVector<StringView, int64_t>(maps, MAP(VARCHAR(), DECIMAL(10, 5)));
+  auto expectedVector =
+      makeNullableFlatVector<JsonNativeType>(expected, VARCHAR());
+  toJsonSimple("to_json(c0)", {mapVector}, expectedVector);
 
-    // Tests map with long decimal values.
-    std::vector<std::vector<Pair<StringView, int128_t>>> longDecimalMaps{
-        {{"a", 0}, {"b", 100}},
-        {{"c", 123456}, {"d", 123456789112LL}},
-        {{"e", 84059812}, {"f", 12345678000}}};
-    std::vector<std::optional<JsonNativeType>> longExpected{
-        R"({"a":0E-10,"b":1.00E-8})",
-        R"({"c":0.0000123456,"d":12.3456789112})",
-        R"({"e":0.0084059812,"f":1.2345678000})"};
-    auto longDecimalMapVector = makeMapVector<StringView, int128_t>(
-        longDecimalMaps, MAP(VARCHAR(), DECIMAL(30, 10)));
-    auto longExpectedVector =
-        makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
-    toJsonSimple("to_json(c0)", {longDecimalMapVector}, longExpectedVector);
-  }
+  // Tests map with long decimal values.
+  std::vector<std::vector<Pair<StringView, int128_t>>> longDecimalMaps{
+      {{"a", 0}, {"b", 100}},
+      {{"c", 123456}, {"d", 123456789112LL}},
+      {{"e", 84059812}, {"f", 12345678000}}};
+  std::vector<std::optional<JsonNativeType>> longExpected{
+      ::bytedance::bolt::kSparkCompatible
+          ? R"({"a":0E-10,"b":1.00E-8})"
+          : R"({"a":0.0000000000,"b":0.0000000100})",
+      R"({"c":0.0000123456,"d":12.3456789112})",
+      R"({"e":0.0084059812,"f":1.2345678000})"};
+  auto longDecimalMapVector = makeMapVector<StringView, int128_t>(
+      longDecimalMaps, MAP(VARCHAR(), DECIMAL(30, 10)));
+  auto longExpectedVector =
+      makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
+  toJsonSimple("to_json(c0)", {longDecimalMapVector}, longExpectedVector);
 
   {
     // Tests map whose values are of unknown type.
@@ -397,42 +396,41 @@ TEST_F(ToJsonTest, fromRow) {
     toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    // Test row with short decimal column
-    auto child1 =
-        makeFlatVector<StringView>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
-    auto child2 = makeFlatVector<int64_t>(
-        {0, 100, 123456, 1234567890, 84059812, 1234567800}, DECIMAL(10, 5));
-    auto rowVector = makeRowVector({child1, child2});
-    std::vector<std::optional<JsonNativeType>> expected{
-        R"({"c0":"a","c1":0.00000})",
-        R"({"c0":"b","c1":0.00100})",
-        R"({"c0":"c","c1":1.23456})",
-        R"({"c0":"d","c1":12345.67890})",
-        R"({"c0":"e","c1":840.59812})",
-        R"({"c0":"f","c1":12345.67800})"};
-    auto expectedVector =
-        makeNullableFlatVector<JsonNativeType>(expected, VARCHAR());
-    toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
+  // Test row with short decimal column
+  auto child1 =
+      makeFlatVector<StringView>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
+  auto child2 = makeFlatVector<int64_t>(
+      {0, 100, 123456, 1234567890, 84059812, 1234567800}, DECIMAL(10, 5));
+  auto rowVector = makeRowVector({child1, child2});
+  std::vector<std::optional<JsonNativeType>> expected{
+      R"({"c0":"a","c1":0.00000})",
+      R"({"c0":"b","c1":0.00100})",
+      R"({"c0":"c","c1":1.23456})",
+      R"({"c0":"d","c1":12345.67890})",
+      R"({"c0":"e","c1":840.59812})",
+      R"({"c0":"f","c1":12345.67800})"};
+  auto expectedVector =
+      makeNullableFlatVector<JsonNativeType>(expected, VARCHAR());
+  toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
 
-    // Test row with long decimal column
-    auto longChild1 =
-        makeFlatVector<StringView>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
-    auto longChild2 = makeFlatVector<int128_t>(
-        {0, 100, 123456, 123456789112LL, 84059812, 12345678000},
-        DECIMAL(30, 10));
-    auto longRowVector = makeRowVector({longChild1, longChild2});
-    std::vector<std::optional<JsonNativeType>> longExpected{
-        R"({"c0":"a","c1":0E-10})",
-        R"({"c0":"b","c1":1.00E-8})",
-        R"({"c0":"c","c1":0.0000123456})",
-        R"({"c0":"d","c1":12.3456789112})",
-        R"({"c0":"e","c1":0.0084059812})",
-        R"({"c0":"f","c1":1.2345678000})"};
-    auto longExpectedVector =
-        makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
-    toJsonSimple("to_json(c0)", {longRowVector}, longExpectedVector);
-  }
+  // Test row with long decimal column
+  auto longChild1 =
+      makeFlatVector<StringView>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
+  auto longChild2 = makeFlatVector<int128_t>(
+      {0, 100, 123456, 123456789112LL, 84059812, 12345678000}, DECIMAL(30, 10));
+  auto longRowVector = makeRowVector({longChild1, longChild2});
+  std::vector<std::optional<JsonNativeType>> longExpected{
+      ::bytedance::bolt::kSparkCompatible ? R"({"c0":"a","c1":0E-10})"
+                                          : R"({"c0":"a","c1":0.0000000000})",
+      ::bytedance::bolt::kSparkCompatible ? R"({"c0":"b","c1":1.00E-8})"
+                                          : R"({"c0":"b","c1":0.0000000100})",
+      R"({"c0":"c","c1":0.0000123456})",
+      R"({"c0":"d","c1":12.3456789112})",
+      R"({"c0":"e","c1":0.0084059812})",
+      R"({"c0":"f","c1":1.2345678000})"};
+  auto longExpectedVector =
+      makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
+  toJsonSimple("to_json(c0)", {longRowVector}, longExpectedVector);
 
   // dorado id 111899126, date = 20240106
   {

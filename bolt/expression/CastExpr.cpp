@@ -173,7 +173,7 @@ VectorPtr CastExpr::applyMap(
       newMapKeys,
       newMapValues);
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     propagateErrorsOrSetNulls(
         setNullInResultAtError(),
         context,
@@ -241,7 +241,7 @@ VectorPtr CastExpr::applyArray(
       sizes,
       newElements);
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     propagateErrorsOrSetNulls(
         setNullInResultAtError(),
         context,
@@ -350,19 +350,17 @@ VectorPtr CastExpr::applyRow(
       rows.end(),
       std::move(newChildren));
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
-    if (setNullInResultAtError()) {
-      // Set errors as nulls.
-      if (auto errors = context.errors()) {
-        rows.applyToSelected([&](auto row) {
-          if (errors->isIndexInRange(row) && !errors->isNullAt(row)) {
-            result->setNull(row, true);
-          }
-        });
-      }
-      // Restore original state.
-      context.swapErrors(oldErrors);
+  if (!::bytedance::bolt::kSparkCompatible && setNullInResultAtError()) {
+    // Set errors as nulls.
+    if (auto errors = context.errors()) {
+      rows.applyToSelected([&](auto row) {
+        if (errors->isIndexInRange(row) && !errors->isNullAt(row)) {
+          result->setNull(row, true);
+        }
+      });
     }
+    // Restore original state.
+    context.swapErrors(oldErrors);
   }
 
   return result;
@@ -427,16 +425,11 @@ void CastExpr::applyPeeled(
       applyCustomCast();
     }
   } else if (fromType->isPrimitiveType() || toType->isPrimitiveType()) {
-    const auto policy = [&]() {
-      if constexpr (::bytedance::bolt::kSparkCompatible) {
-        return nullOnFailure() ? CastUtils::CastErrorPolicy::NullOnFailure
-                               : CastUtils::CastErrorPolicy::SparkCastPolicy;
-      } else {
-        return setNullInResultAtError()
-            ? CastUtils::CastErrorPolicy::NullOnFailure
-            : CastUtils::CastErrorPolicy::ThrowOnFailure;
-      }
-    }();
+    const auto policy = setNullInResultAtError()
+        ? CastUtils::CastErrorPolicy::NullOnFailure
+        : (::bytedance::bolt::kSparkCompatible
+               ? CastUtils::CastErrorPolicy::SparkCastPolicy
+               : CastUtils::CastErrorPolicy::ThrowOnFailure);
     CastUtils::doCast(rows, input, context, fromType, toType, result, policy);
   } else {
     switch (toType->kind()) {

@@ -1297,7 +1297,7 @@ TEST_F(ParquetWriterTest, arrowPool) {
 };
 
 TEST_F(ParquetWriterTest, encoderTestSinkResize0) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   int levels_per_page = 100;

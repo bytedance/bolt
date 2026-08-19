@@ -61,13 +61,12 @@ void makeUuid(char* uuid, uint64_t seed) {
 
 void makeUuid(char* uuid, std::mt19937_64& rng) {
   auto next = [&rng]() {
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
-      uint64_t high = rng() << 32;
-      uint64_t low = rng() & 4294967295L;
-      return high | low;
-    } else {
+    if (!::bytedance::bolt::kSparkCompatible) {
       return rng();
     }
+    uint64_t high = rng() << 32;
+    uint64_t low = rng() & 4294967295L;
+    return high | low;
   };
   makeUuid(uuid, next(), next());
 }

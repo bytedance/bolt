@@ -87,7 +87,7 @@ TEST_F(SequenceTest, singleElement) {
 }
 
 TEST_F(SequenceTest, singleElementWithZeroStep) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto bigintResult = evaluate(

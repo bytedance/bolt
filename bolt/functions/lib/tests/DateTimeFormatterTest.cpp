@@ -272,7 +272,7 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
   // d specifier case
   testTokenRange('d', 1, 4, DateTimeFormatSpecifier::DAY_OF_MONTH);
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     // a specifier case
     expected = {DateTimeToken(
         FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2})};
@@ -375,7 +375,7 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2}),
   };
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     EXPECT_EQ(
         expected,
         buildJodaDateTimeFormatter(
@@ -406,7 +406,7 @@ TEST_F(JodaDateTimeFormatterTest, invalid) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseJodaEra) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Normal era cases
@@ -533,7 +533,7 @@ TEST_F(JodaDateTimeFormatterTest, parseYearOfEra) {
 // Same semantic as YEAR_OF_ERA, except that it accepts zero and negative
 // years.
 TEST_F(JodaDateTimeFormatterTest, parseYear) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   EXPECT_EQ(
@@ -610,7 +610,7 @@ TEST_F(JodaDateTimeFormatterTest, parseYear) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseWeekYear) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Covers entire range of possible week year start dates (12-29 to 01-04)
@@ -691,7 +691,7 @@ TEST_F(JodaDateTimeFormatterTest, parseWeekYear) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseCenturyOfEra) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Probe century range
@@ -980,7 +980,7 @@ TEST_F(JodaDateTimeFormatterTest, parseClockHourOfHalfDay) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseHalfOfDay) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Half of day has no effect if hour or clockhour of day is provided
@@ -1105,7 +1105,7 @@ TEST_F(JodaDateTimeFormatterTest, parseHalfOfDay) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseMinute) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   EXPECT_EQ(
@@ -1202,7 +1202,7 @@ TEST_F(JodaDateTimeFormatterTest, parseTimezoneOffset) {
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseTimezone) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   EXPECT_THROW(parseJoda("", "z"), BoltUserError);
@@ -1586,7 +1586,7 @@ TEST_F(MysqlDateTimeTest, invalidBuild) {
 }
 
 TEST_F(MysqlDateTimeTest, formatYear) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto* timezone = tz::locateZone("GMT");
@@ -1633,7 +1633,7 @@ TEST_F(MysqlDateTimeTest, formatYear) {
 }
 
 TEST_F(MysqlDateTimeTest, formatMonthDay) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto* timezone = tz::locateZone("GMT");
@@ -2060,7 +2060,7 @@ TEST_F(MysqlDateTimeTest, formatCompositeTime) {
 // Same semantic as YEAR_OF_ERA, except that it accepts zero and negative
 // years.
 TEST_F(MysqlDateTimeTest, parseFourDigitYear) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   EXPECT_EQ(
@@ -2120,7 +2120,7 @@ TEST_F(MysqlDateTimeTest, parseTwoDigitYear) {
 }
 
 TEST_F(MysqlDateTimeTest, parseWeekYear) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Covers entire range of possible week year start dates (12-29 to 01-04)
@@ -2457,7 +2457,7 @@ TEST_F(MysqlDateTimeTest, parseClockHourOfHalfDay) {
 }
 
 TEST_F(MysqlDateTimeTest, parseHalfOfDay) {
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   // Half of day has no effect if hour of day is provided

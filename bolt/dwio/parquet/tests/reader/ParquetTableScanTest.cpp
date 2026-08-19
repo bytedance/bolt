@@ -2086,7 +2086,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
   }
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
+  if (::bytedance::bolt::kSparkCompatible) {
     // 4. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
     //    Skipped in non-Spark builds because matchType() at
     //    ParquetColumnReader.cpp:95 rejects VARCHAR-file -> INT-requested
@@ -2309,7 +2309,7 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharValueFilters) {
 }
 
 TEST_F(ParquetTableScanTest, doubleToBigintValueChecks) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto data = makeRowVector(
@@ -2685,7 +2685,7 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharMapMetadataFilter) {
 }
 
 TEST_F(ParquetTableScanTest, doubleToBigintMapMetadataFilter) {
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   auto data = makeRowVector(

@@ -238,12 +238,11 @@ RowVectorPtr FilterProject::getOutput() {
   vector_size_t size = input_->size();
   bool isCompositeInput = RowVector::isComposite(input_);
 
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    if (skipForCompositeInput_ && isCompositeInput) {
-      BOLT_CHECK(!hasFilter_ && !isIdentityProjection_);
-      numProcessedInputRows_ = size;
-      return fillCompositeOutput(size, input_->children());
-    }
+  if (::bytedance::bolt::kSparkCompatible && skipForCompositeInput_ &&
+      isCompositeInput) {
+    BOLT_CHECK(!hasFilter_ && !isIdentityProjection_);
+    numProcessedInputRows_ = size;
+    return fillCompositeOutput(size, input_->children());
   }
 
   LocalSelectivityVector localRows(*operatorCtx_->execCtx(), size);

@@ -59,16 +59,15 @@ void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
       fileType.logicalType_.value().__isset.INTEGER) {
     isUnsigned = !fileType.logicalType_.value().INTEGER.isSigned;
   }
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    if (!fileType.logicalType_.has_value() &&
-        fileType.convertedType_ == thrift::ConvertedType::UINT_64) {
-      // Legacy Parquet files may carry only the UINT_64 converted type. In
-      // particular, convertType accepts these files as DECIMAL(20, 0). Without
-      // this fallback, getIntValues() would use its HUGEINT path and interpret
-      // each 8-byte physical UINT64 as a 16-byte int128_t. Use the unsigned
-      // path to preserve the UINT64 bits and widen each value correctly.
-      isUnsigned = true;
-    }
+  if (::bytedance::bolt::kSparkCompatible &&
+      !fileType.logicalType_.has_value() &&
+      fileType.convertedType_ == thrift::ConvertedType::UINT_64) {
+    // Legacy Parquet files may carry only the UINT_64 converted type. In
+    // particular, convertType accepts these files as DECIMAL(20, 0). Without
+    // this fallback, getIntValues() would use its HUGEINT path and interpret
+    // each 8-byte physical UINT64 as a 16-byte int128_t. Use the unsigned
+    // path to preserve the UINT64 bits and widen each value correctly.
+    isUnsigned = true;
   }
 
   if (isUnsigned) {
@@ -127,7 +126,7 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
       fileType->childByName("value")->type()->isVarbinary() &&
       fileType->childByName("metadata")->type()->isVarbinary();
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     BOLT_CHECK(
         canReadVariantStructAsVariant ||
             matchType(fileType->type()->kind(), requestedType->type()->kind()),

@@ -775,7 +775,7 @@ StopReason Driver::runInternal(
                     kOpMethodIsFinished);
               });
               if (finished) {
-                if constexpr (::bytedance::bolt::kSparkCompatible) {
+                if (::bytedance::bolt::kSparkCompatible) {
                   LOG(INFO) << "Operator " << op->name()
                             << " finished. nextOp: " << nextOp->name();
                 }
@@ -793,7 +793,7 @@ StopReason Driver::runInternal(
                     curOperatorId_ + 1,
                     kOpMethodNoMoreInput);
                 auto* nextOpPool = nextOp->pool();
-                if constexpr (::bytedance::bolt::kSparkCompatible) {
+                if (::bytedance::bolt::kSparkCompatible) {
                   LOG(INFO)
                       << "Operator " << nextOp->name() << " no more input. "
                       << nextOpPool->name() << "["
@@ -889,7 +889,7 @@ void Driver::recordYieldCount() {
 // static
 void Driver::run(std::shared_ptr<Driver> self) {
   std::optional<process::ThreadNameHolder> threadNameHolder;
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     threadNameHolder.emplace(self->driverCtx()->task->taskId());
   }
   process::TraceContext trace("Driver::run");

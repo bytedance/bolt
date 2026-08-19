@@ -32,6 +32,7 @@
 
 #include <boost/date_time.hpp>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/functions/prestosql/DateTimeImpl.h"
@@ -1593,7 +1594,9 @@ struct DateFormatFunction : public TimestampWithTimezoneSupport<T> {
   bool isConstFormat_ = false;
 };
 
-template <typename T, bool SparkCompatible = false>
+template <
+    typename T,
+    bool SparkCompatible = ::bytedance::bolt::kSparkCompatible>
 struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 

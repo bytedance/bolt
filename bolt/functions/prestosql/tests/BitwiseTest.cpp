@@ -158,7 +158,7 @@ TEST_F(BitwiseTest, bitCount) {
   EXPECT_EQ(bitCount(kMax64, kMaxBits), 63);
   EXPECT_EQ(bitCount(-2, 2), 1);
 
-  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+  if (!::bytedance::bolt::kSparkCompatible) {
     EXPECT_EQ(bitCount(9), 2);
     EXPECT_EQ(bitCount(-7), 62);
     EXPECT_EQ(bitCount(9), 2);

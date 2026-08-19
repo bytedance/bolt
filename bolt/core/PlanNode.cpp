@@ -1782,11 +1782,9 @@ RowTypePtr getRowNumberOutputType(
   std::vector<TypePtr> types = inputType->children();
 
   names.push_back(rowNumberColumnName);
-  if constexpr (::bytedance::bolt::kSparkCompatible) {
-    types.push_back(INTEGER());
-  } else {
-    types.push_back(BIGINT());
-  }
+  types.push_back(
+      ::bytedance::bolt::kSparkCompatible ? TypePtr{INTEGER()}
+                                          : TypePtr{BIGINT()});
 
   return ROW(std::move(names), std::move(types));
 }

@@ -198,7 +198,7 @@ class CastBaseTest : public FunctionBaseTest {
       const std::vector<std::optional<TFrom>>& input,
       const std::string& expectedErrorMessage,
       const TypePtr& fromType = CppToType<TFrom>::create()) {
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (::bytedance::bolt::kSparkCompatible) {
       auto result = evaluate(
           fmt::format("cast(c0 as {})", typeString),
           makeRowVector({makeNullableFlatVector(input, fromType)}));
@@ -237,7 +237,7 @@ class CastBaseTest : public FunctionBaseTest {
       const VectorPtr& input,
       const VectorPtr& expected,
       const std::string& expectedErrorMessage) {
-    if constexpr (::bytedance::bolt::kSparkCompatible) {
+    if (::bytedance::bolt::kSparkCompatible) {
       testCast(input, expected);
     } else {
       auto msg = queryCtx_->queryConfig().enableOptimizedCast()
