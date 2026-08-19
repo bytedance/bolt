@@ -25,8 +25,7 @@
 #include <vector>
 
 #include "bolt/common/file/FileSystems.h"
-#include "bolt/exec/radixsort/PayloadRowReader.h"
-#include "bolt/exec/radixsort/PayloadRowWriter.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 #include "bolt/exec/radixsort/RadixSortSpill.h"
 #include "bolt/exec/radixsort/RadixSortSpillRow.h"

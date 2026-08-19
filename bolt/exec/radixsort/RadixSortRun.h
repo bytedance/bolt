@@ -19,7 +19,7 @@
 #include <algorithm>
 #include <chrono>
 
-#include "bolt/exec/radixsort/PayloadRowWriter.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortRunSorter.h"
 
 namespace bytedance::bolt::exec::radixsort {

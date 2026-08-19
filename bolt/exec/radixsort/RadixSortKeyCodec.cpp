@@ -24,7 +24,7 @@
 #include <type_traits>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/exec/radixsort/PayloadRowLayout.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortRunStorage.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 #include "bolt/type/HugeInt.h"

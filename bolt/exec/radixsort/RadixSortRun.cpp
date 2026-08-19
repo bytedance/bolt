@@ -21,7 +21,7 @@
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/exec/radixsort/PayloadRowReader.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 
 namespace bytedance::bolt::exec::radixsort {

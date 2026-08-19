@@ -18,12 +18,17 @@
 
 #include <memory>
 #include <optional>
+#include <span>
+#include <type_traits>
 #include <vector>
 
-#include "bolt/common/base/Exceptions.h"
 #include "bolt/type/Type.h"
+#include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::exec::radixsort {
+
+class PayloadRowBatch;
+class RadixSortRunStorage;
 
 struct PayloadVarlenRef {
   uint64_t size;
@@ -92,6 +97,24 @@ class PayloadRowLayout {
   uint32_t nullBytes_;
   std::optional<uint64_t> variableSizeOffset_;
   uint64_t rowWidth_;
+};
+
+class PayloadRowReader {
+ public:
+  static void gather(
+      const PayloadRowLayout& layout,
+      std::span<char* const> rows,
+      memory::MemoryPool* pool,
+      RowVectorPtr& result,
+      std::span<const uint8_t> mayHaveNulls = {});
+};
+
+class PayloadRowWriter {
+ public:
+  static void append(
+      const RowVector& input,
+      RadixSortRunStorage& arena,
+      PayloadRowBatch& batch);
 };
 
 } // namespace bytedance::bolt::exec::radixsort
