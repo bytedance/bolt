@@ -201,6 +201,53 @@ class RadixSortRunTest : public testing::Test {
     return maps;
   }
 
+  MapVectorPtr makeStringStringMaps(
+      memory::MemoryPool* pool,
+      vector_size_t rows) {
+    std::vector<vector_size_t> offsets;
+    std::vector<vector_size_t> sizes;
+    std::vector<std::optional<std::string>> keys;
+    std::vector<std::optional<std::string>> values;
+    offsets.reserve(rows);
+    sizes.reserve(rows);
+    vector_size_t offset = 0;
+    for (vector_size_t row = 0; row < rows; ++row) {
+      offsets.push_back(offset);
+      const vector_size_t entries = row % 7 == 0 ? 0
+          : row % 5 == 0                         ? 16
+          : row % 3 == 0                         ? 8
+                                                 : 3;
+      sizes.push_back(entries);
+      for (vector_size_t entry = 0; entry < entries; ++entry) {
+        keys.push_back(
+            "param_" + std::to_string(entry % 11) + "_" +
+            std::to_string(row % 5));
+        values.push_back(
+            entry % 6 == 0
+                ? std::string(32 + row % 9, static_cast<char>('a' + entry))
+                : "value_" + std::to_string(row) + "_" + std::to_string(entry));
+      }
+      offset += entries;
+    }
+    auto maps = std::make_shared<MapVector>(
+        pool,
+        MAP(VARCHAR(), VARCHAR()),
+        nullptr,
+        rows,
+        makeBuffer(pool, offsets),
+        makeBuffer(pool, sizes),
+        makeStringVector(pool, VARCHAR(), keys),
+        makeStringVector(pool, VARCHAR(), values));
+    if (rows > 9) {
+      maps->setNull(9, true);
+    }
+    return maps;
+  }
+
+  MapVectorPtr makeStringStringMaps(vector_size_t rows) {
+    return makeStringStringMaps(runPool_.get(), rows);
+  }
+
   RowVectorPtr makeRows(
       memory::MemoryPool* pool,
       std::vector<std::string> names,
@@ -655,6 +702,107 @@ TEST_F(RadixSortRunTest, complexPayloadRoundTripAndSort) {
   auto output = collect(*run, 2);
   expectRowsMatchById(*input, *output, 4);
   expectSortedByOutput(*output, {3}, {flags(true, true)});
+}
+
+TEST_F(RadixSortRunTest, eventKeyMapPayloadMultipleBatches) {
+  constexpr vector_size_t kRows = 64;
+  std::vector<std::optional<std::string>> events;
+  std::vector<std::optional<int64_t>> ids;
+  std::vector<std::optional<std::string>> enterFrom;
+  std::vector<std::optional<std::string>> hours;
+  events.reserve(kRows);
+  ids.reserve(kRows);
+  enterFrom.reserve(kRows);
+  hours.reserve(kRows);
+  static constexpr std::array<const char*, 6> kEvents{
+      "video_play", "video_play_pause", "like", "follow", "share", "comment"};
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    const auto eventIndex = row % 10 < 6 ? row % 3 : row % kEvents.size();
+    events.push_back(kEvents[eventIndex]);
+    ids.push_back(row);
+    enterFrom.push_back(
+        row % 4 == 0
+            ? std::optional<std::string>{}
+            : std::optional<std::string>("enter_" + std::to_string(row % 7)));
+    hours.push_back((row % 24 < 10 ? "0" : "") + std::to_string(row % 24));
+  }
+  auto params = makeStringStringMaps(kRows);
+  auto input = makeRows(
+      runPool_.get(),
+      {"event", "id", "enter_from", "params", "hour"},
+      {makeStringVector(runPool_.get(), VARCHAR(), events),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), ids),
+       makeStringVector(runPool_.get(), VARCHAR(), enterFrom),
+       params,
+       makeStringVector(runPool_.get(), VARCHAR(), hours)});
+
+  auto run = createRun(
+      rowTypeOf(*input), ROW({"event"}, {VARCHAR()}), {flags(true, true)}, {0});
+  EXPECT_EQ(
+      run->projection().payloadChannels(),
+      (std::vector<column_index_t>{1, 2, 3, 4}));
+  run->append(*slice(*input, 0, 17));
+  run->append(*slice(*input, 17, 23));
+  run->append(*slice(*input, 40, kRows - 40));
+  run->finalize();
+
+  auto output = collect(*run, 13);
+  expectRowsMatchById(*input, *output, 1);
+  expectSortedByOutput(*output, {0}, {flags(true, true)});
+}
+
+TEST_F(RadixSortRunTest, mapPayloadOutputOwnsDataAfterRunClear) {
+  constexpr vector_size_t kRows = 48;
+  auto sourcePool = rootPool_->addLeafChild("radix-sort-run-map-source-test");
+  std::vector<std::optional<std::string>> events;
+  std::vector<std::optional<int64_t>> ids;
+  events.reserve(kRows);
+  ids.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    events.push_back("event_" + std::to_string(row % 5));
+    ids.push_back(row);
+  }
+  auto input = makeRows(
+      sourcePool.get(),
+      {"event", "params", "id"},
+      {makeStringVector(sourcePool.get(), VARCHAR(), events),
+       makeStringStringMaps(sourcePool.get(), kRows),
+       makeVector<int64_t>(sourcePool.get(), BIGINT(), ids)});
+  auto run = createRun(
+      rowTypeOf(*input), ROW({"event"}, {VARCHAR()}), {flags(true, true)}, {0});
+  run->append(*input);
+  run->finalize();
+
+  auto output = collect(*run, 11);
+  EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
+  EXPECT_EQ(run->storage(), nullptr);
+  EXPECT_EQ(runPool_->currentBytes(), 0);
+  expectRowsMatchById(*input, *output, 2);
+  expectSortedByOutput(*output, {0}, {flags(true, true)});
+}
+
+TEST_F(RadixSortRunTest, directKeyOutputDoesNotDuplicatePayloadForEvent) {
+  auto input = makeRows(
+      runPool_.get(),
+      {"event", "id"},
+      {makeStringVector(
+           runPool_.get(),
+           VARCHAR(),
+           {"play", "play", "click", "share", "click"}),
+       makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3, 4})});
+  auto run = createRun(
+      rowTypeOf(*input), ROW({"event"}, {VARCHAR()}), {flags(true, true)}, {0});
+  ASSERT_EQ(run->projection().columns().size(), 2);
+  EXPECT_EQ(
+      run->projection().columns()[0].source,
+      RadixSortOutputSource::kDecodedKey);
+  EXPECT_EQ(
+      run->projection().payloadChannels(), (std::vector<column_index_t>{1}));
+  run->append(*input);
+  run->finalize();
+  auto output = collect(*run, 2);
+  expectRowsMatchById(*input, *output, 1);
+  expectSortedByOutput(*output, {0}, {flags(true, true)});
 }
 
 TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {

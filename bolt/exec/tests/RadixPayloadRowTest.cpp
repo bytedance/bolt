@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -179,6 +180,55 @@ class RadixPayloadRowTest : public testing::Test {
     return result;
   }
 
+  MapVectorPtr makeLargeStringStringMaps(vector_size_t rows) {
+    std::vector<vector_size_t> offsets;
+    std::vector<vector_size_t> sizes;
+    std::vector<std::optional<std::string>> keys;
+    std::vector<std::optional<std::string>> values;
+    offsets.reserve(rows);
+    sizes.reserve(rows);
+    vector_size_t offset = 0;
+    for (vector_size_t row = 0; row < rows; ++row) {
+      offsets.push_back(offset);
+      if (row % 17 == 0) {
+        sizes.push_back(0);
+        continue;
+      }
+      const vector_size_t entries = row % 11 == 0 ? 0
+          : row % 5 == 0                          ? 24
+          : row % 3 == 0                          ? 12
+                                                  : 5;
+      sizes.push_back(entries);
+      for (vector_size_t entry = 0; entry < entries; ++entry) {
+        keys.push_back(
+            "param_" + std::to_string(entry % 23) + "_" +
+            std::to_string(row % 7));
+        if (entry % 10 == 0) {
+          values.push_back(
+              std::string(48 + row % 17, static_cast<char>('a' + entry % 26)));
+        } else {
+          values.push_back(
+              "value_" + std::to_string(row) + "_" + std::to_string(entry));
+        }
+      }
+      offset += entries;
+    }
+
+    auto result = std::make_shared<MapVector>(
+        pool_.get(),
+        MAP(VARCHAR(), VARCHAR()),
+        nullptr,
+        rows,
+        makeBuffer(pool_.get(), offsets),
+        makeBuffer(pool_.get(), sizes),
+        makeStringVector(VARCHAR(), keys),
+        makeStringVector(VARCHAR(), values));
+    for (vector_size_t row = 0; row < rows; row += 17) {
+      result->setNull(row, true);
+    }
+    return result;
+  }
+
   RowVectorPtr makeTimestampWithTimeZones() {
     auto result = std::make_shared<RowVector>(
         pool_.get(),
@@ -228,6 +278,15 @@ class RadixPayloadRowTest : public testing::Test {
     auto layout = PayloadRowLayout::create(rowType);
     EXPECT_NE(layout, nullptr);
     return layout;
+  }
+
+  template <typename T>
+  static BufferPtr makeBuffer(
+      memory::MemoryPool* pool,
+      const std::vector<T>& values) {
+    auto buffer = AlignedBuffer::allocate<T>(values.size(), pool);
+    std::copy(values.begin(), values.end(), buffer->template asMutable<T>());
+    return buffer;
   }
 
   static void expectEquivalent(
@@ -762,6 +821,139 @@ TEST_F(RadixPayloadRowTest, mixedStringAndComplexPayloadHeapOrder) {
             ? nullptr
             : batch.heapAt(row) + batch.heapSizeAt(row));
   }
+
+  RowVectorPtr output;
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
+  expectEquivalent(*input, *output);
+}
+
+TEST_F(RadixPayloadRowTest, largeMapVarcharVarcharPayloadRoundTrip) {
+  constexpr vector_size_t kRows = 40;
+  auto input = makeRows({
+      makeVector<int64_t>(
+          BIGINT(),
+          [&]() {
+            std::vector<std::optional<int64_t>> values;
+            values.reserve(kRows);
+            for (vector_size_t row = 0; row < kRows; ++row) {
+              values.push_back(row);
+            }
+            return values;
+          }()),
+      makeStringVector(
+          VARCHAR(),
+          [&]() {
+            std::vector<std::optional<std::string>> values;
+            values.reserve(kRows);
+            for (vector_size_t row = 0; row < kRows; ++row) {
+              values.push_back(
+                  row % 9 == 0 ? std::optional<std::string>{}
+                               : std::optional<std::string>(
+                                     "enter_" + std::to_string(row % 7)));
+            }
+            return values;
+          }()),
+      makeLargeStringStringMaps(kRows),
+  });
+  auto layout = payloadLayout(asRowType(input->type()));
+  ASSERT_TRUE(layout->hasVariableFields());
+
+  RadixSortRunStorage arena(
+      pool_.get(), keyLayout(), 64, 4096, layout, 64, 64 * 1024);
+  PayloadRowBatch batch;
+  PayloadRowWriter::append(*input, arena, batch);
+  ASSERT_EQ(batch.size(), kRows);
+
+  uint64_t heapBytes = 0;
+  for (vector_size_t row = 0; row < batch.size(); ++row) {
+    heapBytes += batch.heapSizeAt(row);
+  }
+  EXPECT_GT(heapBytes, 8 * 1024);
+
+  RowVectorPtr output;
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
+  expectEquivalent(*input, *output);
+
+  for (const auto& group : arena.payloadHeapGroups()) {
+    std::memset(group.base, 0x7f, group.used);
+  }
+  expectEquivalent(*input, *output);
+}
+
+TEST_F(RadixPayloadRowTest, logPatternPayloadRoundTrip) {
+  constexpr vector_size_t kRows = 48;
+  std::vector<std::optional<int64_t>> deviceIds;
+  std::vector<std::optional<int64_t>> userIds;
+  std::vector<std::optional<int64_t>> groupIds;
+  std::vector<std::optional<int64_t>> localTimes;
+  std::vector<std::optional<std::string>> enterFrom;
+  std::vector<std::optional<std::string>> relationTag;
+  deviceIds.reserve(kRows);
+  userIds.reserve(kRows);
+  groupIds.reserve(kRows);
+  localTimes.reserve(kRows);
+  enterFrom.reserve(kRows);
+  relationTag.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    deviceIds.push_back(10'000 + row);
+    userIds.push_back(20'000 + row * 3);
+    groupIds.push_back(
+        row % 4 == 0 ? std::optional<int64_t>{}
+                     : std::optional<int64_t>(row % 97));
+    localTimes.push_back(1'787'000'000'000 + row * 1000);
+    enterFrom.push_back(
+        row % 5 == 0
+            ? std::optional<std::string>{}
+            : std::optional<std::string>("enter_" + std::to_string(row % 7)));
+    relationTag.push_back(
+        row % 3 == 0 ? std::optional<std::string>{}
+                     : std::optional<std::string>(
+                           "relation_" + std::to_string(row % 5)));
+  }
+
+  auto eventBase = makeStringVector(
+      VARCHAR(),
+      {std::string("video_play"),
+       std::string("like"),
+       std::string("follow"),
+       std::string("share"),
+       std::string("comment"),
+       std::string("enter_homepage")});
+  std::vector<vector_size_t> eventIndices;
+  eventIndices.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    eventIndices.push_back(row % 10 < 6 ? row % 3 : row % 6);
+  }
+  auto event = BaseVector::wrapInDictionary(
+      nullptr, makeBuffer(pool_.get(), eventIndices), kRows, eventBase);
+  auto hour = BaseVector::wrapInConstant(
+      kRows, 0, makeStringVector(VARCHAR(), {std::string("12")}));
+
+  auto input = makeRows({
+      makeVector<int64_t>(BIGINT(), deviceIds),
+      makeVector<int64_t>(BIGINT(), userIds),
+      makeVector<int64_t>(BIGINT(), groupIds),
+      makeVector<int64_t>(BIGINT(), localTimes),
+      event,
+      makeStringVector(VARCHAR(), enterFrom),
+      makeStringVector(VARCHAR(), relationTag),
+      hour,
+      makeLargeStringStringMaps(kRows),
+  });
+  auto layout = payloadLayout(asRowType(input->type()));
+  ASSERT_EQ(layout->columns().size(), 9);
+  ASSERT_TRUE(layout->hasVariableFields());
+
+  RadixSortRunStorage arena(
+      pool_.get(), keyLayout(), 64, 4096, layout, 64, 64 * 1024);
+  PayloadRowBatch batch;
+  PayloadRowWriter::append(*input, arena, batch);
+
+  uint64_t heapBytes = 0;
+  for (vector_size_t row = 0; row < batch.size(); ++row) {
+    heapBytes += batch.heapSizeAt(row);
+  }
+  EXPECT_GT(heapBytes, 8 * 1024);
 
   RowVectorPtr output;
   gatherPayloadBatch(*layout, batch, pool_.get(), output);

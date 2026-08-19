@@ -953,6 +953,44 @@ TEST_F(RadixSortKeyCodecTest, mapRoundTripAndCanonicalOrdering) {
       SortComparatorOracle::compare(*maps, 2, *maps, 3, flags(true, true)), 0);
 }
 
+TEST_F(RadixSortKeyCodecTest, mapVarcharVarcharKeyCanonicalOrdering) {
+  const std::array<vector_size_t, 5> offsets{0, 0, 2, 4, 6};
+  const std::array<vector_size_t, 5> sizes{0, 2, 2, 2, 0};
+  auto offsetBuffer =
+      AlignedBuffer::allocate<vector_size_t>(offsets.size(), pool_.get());
+  auto sizeBuffer =
+      AlignedBuffer::allocate<vector_size_t>(sizes.size(), pool_.get());
+  std::memcpy(
+      offsetBuffer->asMutable<vector_size_t>(),
+      offsets.data(),
+      sizeof(offsets));
+  std::memcpy(
+      sizeBuffer->asMutable<vector_size_t>(), sizes.data(), sizeof(sizes));
+  auto mapKeys = makeStringVector(VARCHAR(), {"b", "a", "a", "b", "b", "a"});
+  auto mapValues = makeStringVector(VARCHAR(), {"2", "1", "1", "2", "2", "1"});
+  auto maps = std::make_shared<MapVector>(
+      pool_.get(),
+      MAP(VARCHAR(), VARCHAR()),
+      nullptr,
+      offsets.size(),
+      std::move(offsetBuffer),
+      std::move(sizeBuffer),
+      mapKeys,
+      mapValues);
+  maps->setNull(4, true);
+
+  for (const auto compareFlags : allFlags()) {
+    verifyProperty(makeRows({maps}), {compareFlags});
+  }
+
+  auto codec = bind({maps->type()}, {flags(true, true)});
+  EncodedKeyBatch keys;
+  codec->encode(*makeRows({maps}), pool_.get(), keys);
+  EXPECT_EQ(compareEncodedKeys(keys, 1, 2), 0);
+  EXPECT_EQ(
+      SortComparatorOracle::compare(*maps, 1, *maps, 2, flags(true, true)), 0);
+}
+
 TEST_F(RadixSortKeyCodecTest, floatingPointRoundTrip) {
   const auto floatNan = std::numeric_limits<float>::quiet_NaN();
   const auto doubleNan = std::numeric_limits<double>::quiet_NaN();
@@ -1040,6 +1078,44 @@ TEST_F(RadixSortKeyCodecTest, longCommonPrefixAndWrappedInput) {
   auto integers = makeVector<int32_t>(INTEGER(), {7, 11});
   auto constant = BaseVector::wrapInConstant(4, 1, integers);
   verifyProperty(makeRows({constant}), {flags(false, false)});
+}
+
+TEST_F(
+    RadixSortKeyCodecTest,
+    lowCardinalityDictionaryStringKeyRoundTripAndOrdering) {
+  constexpr vector_size_t kRows = 96;
+  auto base = makeStringVector(
+      VARCHAR(),
+      {"video_play",
+       "video_play_pause",
+       "like",
+       "follow",
+       "share",
+       "comment",
+       "enter_homepage",
+       "click_music"});
+  auto indices = AlignedBuffer::allocate<vector_size_t>(kRows, pool_.get());
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    rawIndices[row] = row % 10 < 6 ? row % 3 : row % base->size();
+  }
+  auto events = BaseVector::wrapInDictionary(nullptr, indices, kRows, base);
+  for (const auto compareFlags : allFlags()) {
+    verifyProperty(makeRows({events}), {compareFlags}, false);
+  }
+}
+
+TEST_F(RadixSortKeyCodecTest, multiKeyStringPrefixWithNullableTieBreaker) {
+  auto events = makeStringVector(
+      VARCHAR(),
+      {"play", "play", "play", "click", "click", "share", "share", "share"});
+  auto ids = makeVector<int64_t>(
+      BIGINT(), {3, std::nullopt, 1, 2, std::nullopt, 9, 7, 8});
+  auto groups = makeVector<int32_t>(
+      INTEGER(), {1, 1, std::nullopt, 0, 1, 2, std::nullopt, 2});
+  verifyProperty(
+      makeRows({events, ids, groups}),
+      {flags(true, true), flags(false, false), flags(true, false)});
 }
 
 TEST_F(RadixSortKeyCodecTest, unknownAndMultipleColumns) {

@@ -207,15 +207,18 @@ class RadixSortBufferTest : public testing::Test {
       const RowVector& input,
       const RowVector& output,
       column_index_t idChannel,
-      std::optional<column_index_t> directlyCheckedColumn = std::nullopt) {
+      std::optional<column_index_t> directlyCheckedColumn = std::nullopt,
+      int64_t idBase = 0) {
     ASSERT_EQ(output.size(), input.size());
     std::vector<bool> seen(input.size(), false);
     for (vector_size_t row = 0; row < output.size(); ++row) {
       const auto id = idAt(output, row, idChannel);
-      ASSERT_GE(id, 0);
-      ASSERT_LT(id, input.size());
-      EXPECT_FALSE(seen[id]);
-      seen[id] = true;
+      const auto inputRow = id - idBase;
+      ASSERT_GE(inputRow, 0);
+      ASSERT_LT(inputRow, input.size());
+      const auto inputIndex = static_cast<vector_size_t>(inputRow);
+      EXPECT_FALSE(seen[inputIndex]);
+      seen[inputIndex] = true;
       for (uint32_t column = 0; column < input.childrenSize(); ++column) {
         if (directlyCheckedColumn == column) {
           continue;
@@ -223,7 +226,7 @@ class RadixSortBufferTest : public testing::Test {
         EXPECT_EQ(
             SortComparatorOracle::compare(
                 *input.childAt(column),
-                id,
+                inputIndex,
                 *output.childAt(column),
                 row,
                 flags(true, true)),
@@ -341,6 +344,130 @@ class RadixSortBufferTest : public testing::Test {
       maps->setNull(3, true);
     }
     return maps;
+  }
+
+  MapVectorPtr makeLargeStringStringMaps(vector_size_t rows) {
+    std::vector<std::optional<std::string>> keys;
+    std::vector<std::optional<std::string>> values;
+    std::vector<vector_size_t> offsets;
+    std::vector<vector_size_t> sizes;
+    keys.reserve(rows * 40);
+    values.reserve(rows * 40);
+    offsets.reserve(rows);
+    sizes.reserve(rows);
+    vector_size_t offset = 0;
+    for (vector_size_t row = 0; row < rows; ++row) {
+      offsets.push_back(offset);
+      const vector_size_t entries = row % 13 == 0 ? 0
+          : row % 7 == 0                          ? 32
+          : row % 5 == 0                          ? 24
+          : row % 3 == 0                          ? 12
+                                                  : 5;
+      sizes.push_back(entries);
+      for (vector_size_t entry = 0; entry < entries; ++entry) {
+        keys.push_back(
+            "param_" + std::to_string(entry % 31) + "_" +
+            std::to_string(row % 17));
+        values.push_back(
+            entry % 9 == 0
+                ? std::string(
+                      48 + (row + entry) % 41,
+                      static_cast<char>('a' + entry % 26))
+                : "v_" + std::to_string(row) + "_" + std::to_string(entry));
+      }
+      offset += entries;
+    }
+
+    auto maps = std::make_shared<MapVector>(
+        pool(),
+        MAP(VARCHAR(), VARCHAR()),
+        nullptr,
+        rows,
+        makeBuffer<vector_size_t>(offsets),
+        makeBuffer<vector_size_t>(sizes),
+        makeStringVector(VARCHAR(), keys),
+        makeStringVector(VARCHAR(), values));
+    if (rows > 11) {
+      for (vector_size_t row = 11; row < rows; row += 37) {
+        maps->setNull(row, true);
+      }
+    }
+    return maps;
+  }
+
+  RowVectorPtr makeEventMapPayloadRows(vector_size_t rows) {
+    std::vector<std::optional<int64_t>> deviceIds;
+    std::vector<std::optional<int64_t>> userIds;
+    std::vector<std::optional<int64_t>> groupIds;
+    std::vector<std::optional<int64_t>> localTimes;
+    std::vector<std::optional<std::string>> enterFrom;
+    std::vector<std::optional<std::string>> relationTag;
+    std::vector<std::optional<std::string>> authorId;
+    std::vector<std::optional<std::string>> hour;
+    std::vector<std::optional<std::string>> event;
+    deviceIds.reserve(rows);
+    userIds.reserve(rows);
+    groupIds.reserve(rows);
+    localTimes.reserve(rows);
+    enterFrom.reserve(rows);
+    relationTag.reserve(rows);
+    authorId.reserve(rows);
+    hour.reserve(rows);
+    event.reserve(rows);
+    static constexpr std::array<const char*, 8> kEvents{
+        "video_play",
+        "video_play_pause",
+        "like",
+        "follow",
+        "share",
+        "comment",
+        "enter_homepage",
+        "click_music"};
+    for (vector_size_t row = 0; row < rows; ++row) {
+      deviceIds.push_back(10'000 + row);
+      userIds.push_back(20'000 + row * 3);
+      groupIds.push_back(
+          row % 3 == 0 ? std::optional<int64_t>{}
+                       : std::optional<int64_t>(row % 97));
+      localTimes.push_back(1'787'000'000'000 + row * 1000);
+      enterFrom.push_back(
+          row % 4 == 0 ? std::optional<std::string>{}
+                       : std::optional<std::string>(
+                             "enter_" + std::to_string(row % 11)));
+      relationTag.push_back(
+          row % 2 == 0 ? std::optional<std::string>{}
+                       : std::optional<std::string>(
+                             "relation_" + std::to_string(row % 5)));
+      authorId.push_back(
+          row % 7 == 0 ? std::optional<std::string>{}
+                       : std::optional<std::string>(
+                             "author_" + std::to_string(row % 101)));
+      hour.push_back((row % 24 < 10 ? "0" : "") + std::to_string(row % 24));
+      const auto eventIndex = row % 10 < 6 ? row % 3 : row % kEvents.size();
+      event.push_back(kEvents[eventIndex]);
+    }
+
+    return makeRows(
+        {"device_id",
+         "user_id",
+         "group_id",
+         "local_time_ms",
+         "enter_from",
+         "relation_tag",
+         "author_id",
+         "params",
+         "hour",
+         "event"},
+        {makeVector<int64_t>(BIGINT(), deviceIds),
+         makeVector<int64_t>(BIGINT(), userIds),
+         makeVector<int64_t>(BIGINT(), groupIds),
+         makeVector<int64_t>(BIGINT(), localTimes),
+         makeStringVector(VARCHAR(), enterFrom),
+         makeStringVector(VARCHAR(), relationTag),
+         makeStringVector(VARCHAR(), authorId),
+         makeLargeStringStringMaps(rows),
+         makeStringVector(VARCHAR(), hour),
+         makeStringVector(VARCHAR(), event)});
   }
 
   template <typename T>
@@ -1437,6 +1564,81 @@ TEST_F(RadixSortBufferTest, complexKeyAndPayloadSpillOutput) {
   auto output = collect(buffer, 2);
   expectRowsMatchById(*input, *output, 3);
   expectSorted(*output, keyChannels, keyFlags);
+}
+
+TEST_F(RadixSortBufferTest, eventStringKeyWideMapPayloadSpill) {
+  constexpr vector_size_t kRows = 96;
+  auto input = makeEventMapPayloadRows(kRows);
+  inputType_ = std::static_pointer_cast<const RowType>(input->type());
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(spillDirectory->path, "zstd");
+  const std::vector<column_index_t> keyChannels{9};
+  const std::vector<CompareFlags> keyFlags{flags(true, true)};
+  RadixSortBuffer buffer(inputType_, keyChannels, keyFlags, pool(), &config);
+  buffer.addInput(slice(*input, 0, 33));
+  buffer.spill();
+  buffer.addInput(slice(*input, 33, 31));
+  buffer.spill();
+  buffer.addInput(slice(*input, 64, kRows - 64));
+  buffer.noMoreInput();
+
+  auto output = collect(buffer, 17);
+  expectRowsMatchById(*input, *output, 0, std::nullopt, 10'000);
+  expectSorted(*output, keyChannels, keyFlags);
+  ASSERT_TRUE(buffer.spilledStats().has_value());
+  ASSERT_TRUE(buffer.spillReadStats().has_value());
+  EXPECT_GT(buffer.spilledStats()->spilledRows, kRows / 2);
+  EXPECT_GT(buffer.spilledStats()->spilledBytes, 0);
+  EXPECT_GT(buffer.spillReadStats()->spillReadTimeUs, 0);
+}
+
+TEST_F(RadixSortBufferTest, compressedZstdSpillWithMapPayload) {
+  constexpr vector_size_t kRows = 72;
+  auto input = makeEventMapPayloadRows(kRows);
+  inputType_ = std::static_pointer_cast<const RowType>(input->type());
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(spillDirectory->path, "zstd");
+  const std::vector<column_index_t> keyChannels{9};
+  const std::vector<CompareFlags> keyFlags{flags(true, true)};
+  RadixSortBuffer buffer(inputType_, keyChannels, keyFlags, pool(), &config);
+  buffer.addInput(slice(*input, 0, 25));
+  buffer.addInput(slice(*input, 25, 23));
+  buffer.spill();
+  buffer.addInput(slice(*input, 48, kRows - 48));
+  buffer.noMoreInput();
+
+  auto output = collect(buffer, 16);
+  expectRowsMatchById(*input, *output, 0, std::nullopt, 10'000);
+  expectSorted(*output, keyChannels, keyFlags);
+  ASSERT_TRUE(buffer.spilledStats().has_value());
+  ASSERT_TRUE(buffer.spillReadStats().has_value());
+  EXPECT_GT(buffer.spilledStats()->spilledBytes, 0);
+  EXPECT_GT(buffer.spillReadStats()->spillDecompressTimeUs, 0);
+}
+
+TEST_F(RadixSortBufferTest, outputStageSpillWithMapPayload) {
+  constexpr vector_size_t kRows = 80;
+  auto input = makeEventMapPayloadRows(kRows);
+  inputType_ = std::static_pointer_cast<const RowType>(input->type());
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(spillDirectory->path, "lz4");
+  const std::vector<column_index_t> keyChannels{9};
+  const std::vector<CompareFlags> keyFlags{flags(true, true)};
+  RadixSortBuffer buffer(inputType_, keyChannels, keyFlags, pool(), &config);
+  buffer.addInput(slice(*input, 0, 27));
+  buffer.addInput(slice(*input, 27, 25));
+  buffer.addInput(slice(*input, 52, kRows - 52));
+  buffer.noMoreInput();
+
+  auto prefix = buffer.getOutput(19);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 19);
+  spillRemainingOutputAndCheckStats(buffer, kRows - prefix->size());
+  auto output = collect(buffer, 23, prefix);
+  expectRowsMatchById(*input, *output, 0, std::nullopt, 10'000);
+  expectSorted(*output, keyChannels, keyFlags);
+  EXPECT_EQ(buffer.numOutputRows(), input->size());
+  ASSERT_TRUE(buffer.spillReadStats().has_value());
 }
 
 TEST_F(RadixSortBufferTest, outputOwnsVariableDataAfterBufferDestruction) {
