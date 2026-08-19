@@ -31,7 +31,7 @@
 
 # --- 2. Development Tools & Setup ---
 # Includes code formatting, Conan dependency installation/build, and compilation DB generation
-.PHONY: clang-format-check conan_install conan_build _compile_db compile_db_all
+.PHONY: clang-format-check _conan_prepare conan_install conan_build _compile_db compile_db_all
 
 # --- 3. Conan Package Export ---
 # Export the built package to the local Conan cache
@@ -195,6 +195,7 @@ endif
 
 CONAN_BUILD_ENV = \
 	NUM_THREADS=$(NUM_THREADS) \
+	NUM_LINK_JOB=$(NUM_LINK_JOB) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_BUILD_BENCHMARKS_BASIC=${BOLT_BUILD_BENCHMARKS_BASIC}
 
@@ -221,7 +222,7 @@ clang-format-check:
 	if grep -q 'warning' log.txt; then false; fi
 	@rm -f files.txt log.txt
 
-conan_install:
+_conan_prepare:
 	if [ ! -d "_build" ]; then \
 		mkdir _build; \
 	fi; \
@@ -255,13 +256,19 @@ conan_install:
 	   $(CONAN_BUILD_SETTINGS) \
 	   $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing \
 	   --format=html > bolt.conan.graph.html && \
-	export NUM_LINK_JOB=$(NUM_LINK_JOB) && \
+	cd -
+
+conan_install: _conan_prepare
+	cd _build/${BUILD_TYPE} && \
+	set -f && \
+	read ALL_CONAN_OPTIONS < conan.options && \
+	NUM_LINK_JOB=$(NUM_LINK_JOB) \
 	conan install ../.. $(CONAN_PACKAGE_ARGS) \
 	   $(CONAN_BUILD_SETTINGS) \
 	$${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing  &&\
 	cd -
 
-conan_build: conan_install
+conan_build: _conan_prepare
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
@@ -272,7 +279,7 @@ conan_build: conan_install
 	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} && \
 	cd -
 
-_compile_db: conan_install
+_compile_db: _conan_prepare
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
