@@ -19,7 +19,7 @@
 #include <span>
 #include <string_view>
 
-#include "bolt/exec/radixsort/PayloadRowLayout.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortKey.h"
 
 namespace bytedance::bolt::exec::radixsort {

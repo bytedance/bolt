@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "bolt/common/memory/AllocationPool.h"
-#include "bolt/exec/radixsort/PayloadRowLayout.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortKey.h"
 #include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 

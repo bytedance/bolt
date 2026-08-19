@@ -27,8 +27,8 @@
 #include <vector>
 
 #include "bolt/exec/ContainerRowSerde.h"
-#include "bolt/exec/radixsort/PayloadRowReader.h"
-#include "bolt/exec/radixsort/PayloadRowWriter.h"
+#include "bolt/exec/radixsort/PayloadRow.h"
+#include "bolt/exec/radixsort/RadixSortRunStorage.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 #include "bolt/functions/prestosql/types/HyperLogLogType.h"
 #include "bolt/functions/prestosql/types/JsonType.h"
