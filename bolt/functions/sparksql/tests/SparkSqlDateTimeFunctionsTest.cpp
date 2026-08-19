@@ -2298,8 +2298,35 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
     return resultStringView.getString();
   };
   EXPECT_THROW(
+      dateFormat(fromTimestampString("1970-01-01", nullptr), "u"),
+      BoltUserError);
+  EXPECT_THROW(
+      dateFormat(fromTimestampString("1970-01-01", nullptr), "'abcd"),
+      BoltUserError);
+
+  EXPECT_THROW(
       dateFormat(fromTimestampString("1970-01-01", nullptr), "YYYY-MM-dd"),
       BoltUserError);
+
+  EXPECT_EQ(
+      "AD", dateFormat(fromTimestampString("1970-01-01", nullptr), "G"));
+  EXPECT_EQ(
+      "19", dateFormat(fromTimestampString("1900-01-01", nullptr), "C"));
+  EXPECT_EQ(
+      "2020", dateFormat(fromTimestampString("2020-01-01", nullptr), "Y"));
+  EXPECT_EQ(
+      "1", dateFormat(fromTimestampString("2022-01-01", nullptr), "D"));
+  EXPECT_EQ(
+      "1", dateFormat(fromTimestampString("2022-01-01", nullptr), "d"));
+  EXPECT_EQ(
+      "AM",
+      dateFormat(
+          fromTimestampString("2022-01-01 00:00:00", nullptr), "a"));
+  EXPECT_EQ(
+      "2022-01-01 00:00:00",
+      dateFormat(fromTimestampString("2022-01-01", nullptr),
+                 "yyyy-MM-dd HH:mm:ss"));
+
   EXPECT_EQ(
       "20180314 01:02:03.123",
       dateFormat(
@@ -2319,6 +2346,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
       "2018-03-14 01:02:03.123456789",
       dateFormat(
           Timestamp(1520989323L, 123456789L), "yyy-MM-dd HH:mm:ss.SSSSSSSSS"));
+
+  setTimeParserPolicy("legacy");
+  EXPECT_EQ(
+      "4", dateFormat(fromTimestampString("1970-01-01", nullptr), "u"));
 }
 
 #ifdef SPARK_COMPATIBLE

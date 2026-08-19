@@ -1790,6 +1790,129 @@ struct TimestampToMillisFunction {
   }
 };
 
+template <typename T>
+struct DateFormatFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const arg_type<Timestamp>* /*timestamp*/,
+      const arg_type<Varchar>* formatString) {
+    isLegacyFormatter_ = (parseTimePolicy(config.timeParserPolicy()) ==
+                          TimePolicy::LEGACY);
+    sessionTimeZone_ = getTimeZoneFromConfig(config);
+    if (formatString != nullptr) {
+      setFormatter(*formatString);
+      isConstFormat_ = true;
+    }
+  }
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const arg_type<TimestampWithTimezone>* /*timestampWithTimezone*/,
+      const arg_type<Varchar>* formatString) {
+    isLegacyFormatter_ = (parseTimePolicy(config.timeParserPolicy()) ==
+                          TimePolicy::LEGACY);
+    sessionTimeZone_ = getTimeZoneFromConfig(config);
+    if (formatString != nullptr) {
+      setFormatter(*formatString);
+      isConstFormat_ = true;
+    }
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Varchar>& result,
+      const arg_type<Timestamp>& timestamp,
+      const arg_type<Varchar>& formatString) {
+    if (!isConstFormat_) {
+      setFormatter(formatString);
+    }
+    format(timestamp, sessionTimeZone_, maxResultSize_, result);
+    return true;
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Varchar>& result,
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone,
+      const arg_type<Varchar>& formatString) {
+    auto timestamp = toTimestamp(timestampWithTimezone);
+    return call(result, timestamp, formatString);
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE void setFormatter(const arg_type<Varchar>& formatString) {
+    if (isLegacyFormatter_) {
+      formatter_ = buildLegacySparkDateTimeFormatter(
+          std::string_view(formatString.data(), formatString.size()));
+    } else {
+      validateNonLegacyFormat(formatString);
+      ensureFormatLegal(
+          std::string_view(formatString.data(), formatString.size()));
+      formatter_ = buildJodaDateTimeFormatter(
+          std::string_view(formatString.data(), formatString.size()));
+    }
+    maxResultSize_ = formatter_->maxResultSize(sessionTimeZone_);
+  }
+
+  FOLLY_ALWAYS_INLINE void format(
+      const Timestamp& timestamp,
+      const tz::TimeZone* timeZone,
+      uint32_t maxResultSize,
+      out_type<Varchar>& result) const {
+    result.reserve(maxResultSize);
+    const auto resultSize = formatter_->format(
+        timestamp, timeZone, maxResultSize, result.data(), false);
+    result.resize(resultSize);
+  }
+
+  FOLLY_ALWAYS_INLINE Timestamp toTimestamp(
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone) {
+    const auto milliseconds = *timestampWithTimezone.template at<0>();
+    constexpr int64_t kMaxTimestampWithZoneMillis = (1LL << 51) - 1;
+    constexpr int64_t kMinTimestampWithZoneMillis = -(1LL << 51);
+    if (milliseconds > kMaxTimestampWithZoneMillis ||
+        milliseconds < kMinTimestampWithZoneMillis) {
+      BOLT_USER_FAIL(
+          "Timestamp with timezone overflow: {} ms]", milliseconds);
+    }
+
+    Timestamp timestamp = Timestamp::fromMillis(milliseconds);
+    timestamp.toTimezone(*timestampWithTimezone.template at<1>());
+    return timestamp;
+  }
+
+  FOLLY_ALWAYS_INLINE void validateNonLegacyFormat(
+      const arg_type<Varchar>& formatString) {
+    const char* cur = formatString.data();
+    const char* end = cur + formatString.size();
+    bool inLiteral = false;
+    while (cur < end) {
+      if (*cur == '\'') {
+        if (cur + 1 < end && *(cur + 1) == '\'') {
+          cur += 2;
+          continue;
+        }
+        inLiteral = !inLiteral;
+        ++cur;
+        continue;
+      }
+
+      if (!inLiteral && *cur == 'u') {
+        BOLT_UNSUPPORTED("Specifier {} is not supported.", *cur);
+      }
+      ++cur;
+    }
+  }
+
+  const tz::TimeZone* sessionTimeZone_{nullptr};
+  std::shared_ptr<DateTimeFormatter> formatter_;
+  bool isConstFormat_{false};
+  bool isLegacyFormatter_{false};
+  uint32_t maxResultSize_{0};
+};
+
 template <typename TExec>
 struct MillisToTimestampFunction {
   BOLT_DEFINE_FUNCTION_TYPES(TExec);

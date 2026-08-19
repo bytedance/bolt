@@ -182,10 +182,10 @@ void registerDatetimeFunctions(const std::string& prefix) {
   registerFunction<MillisecondFunction, int32_t, Timestamp>(
       {prefix + "millisecond"});
 
-  registerFunction<JodaDateFormatFunction, Varchar, Timestamp, Varchar>(
+  registerFunction<DateFormatFunction, Varchar, Timestamp, Varchar>(
       {prefix + "date_format"});
   registerFunction<
-      JodaDateFormatFunction,
+      DateFormatFunction,
       Varchar,
       TimestampWithTimezone,
       Varchar>({prefix + "date_format"});
