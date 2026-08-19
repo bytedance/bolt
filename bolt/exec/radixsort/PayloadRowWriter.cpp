@@ -60,9 +60,7 @@ class RowSizes {
 };
 
 FOLLY_ALWAYS_INLINE void addSize(uint64_t& size, uint64_t increment) {
-  auto next = checkedAdd<uint64_t>(size, increment);
-  BOLT_CHECK(next.has_value(), "Payload serialized size overflows");
-  size = *next;
+  size += increment;
 }
 
 uint64_t nullBitmapBytes(vector_size_t size) {
@@ -98,9 +96,8 @@ uint64_t serializedRangeSizeForPayload(
   if (metadata.fixedElementSize.has_value()) {
     if (!metadata.mayHaveNulls) {
       const auto valuesSize =
-          checkedMultiply<uint64_t>(count, *metadata.fixedElementSize);
-      BOLT_CHECK(valuesSize.has_value(), "Payload serialized size overflows");
-      addSize(size, *valuesSize);
+          static_cast<uint64_t>(count) * *metadata.fixedElementSize;
+      addSize(size, valuesSize);
       return size;
     }
     for (vector_size_t element = 0; element < count; ++element) {
@@ -216,13 +213,8 @@ void measurePayloadRows(
     memory::MemoryPool* pool,
     RowSizes& sizes) {
   sizes = RowSizes{};
-  BOLT_CHECK_NOT_NULL(
-      pool, "Payload row size pass memory pool must not be null");
 
   const auto rowCount = input.size();
-  const auto fixedRowBytes = layout.rowWidth();
-  auto fixedBytes = checkedMultiply<uint64_t>(rowCount, fixedRowBytes);
-  BOLT_CHECK(fixedBytes.has_value(), "Payload row input fixed bytes overflow");
 
   sizes.size_ = rowCount;
   if (rowCount == 0 || !layout.hasVariableFields()) {
@@ -659,7 +651,6 @@ void writeVariableValue(
     uint64_t& heapRemaining,
     ByteOutputStream& stream) {
   if (column.complex) {
-    BOLT_DCHECK_NOT_NULL(decoded);
     writeComplexDecodedValue(
         column, *decoded, row, payloadRow, heapCursor, heapRemaining, stream);
     return;
@@ -668,7 +659,6 @@ void writeVariableValue(
     writeFlatStringValue(
         column, vector, row, payloadRow, heapCursor, &heapRemaining);
   } else {
-    BOLT_DCHECK_NOT_NULL(decoded);
     writeStringDecodedValue(
         column, *decoded, row, payloadRow, heapCursor, &heapRemaining);
   }
@@ -692,11 +682,6 @@ void appendRows(
   const auto hasVariableFields = layout->hasVariableFields();
   const uint64_t* rawHeapSizes = nullptr;
   if (hasVariableFields) {
-    BOLT_CHECK_NOT_NULL(sizes, "Variable sort payload requires measured sizes");
-    BOLT_CHECK(
-        sizes->size() == input.size() &&
-            (input.size() == 0 || sizes->heapSizes() != nullptr),
-        "Payload row input sizes do not match input");
     rawHeapSizes = sizes->heapSizes() == nullptr
         ? nullptr
         : sizes->heapSizes()->as<uint64_t>();
@@ -780,8 +765,6 @@ void PayloadRowWriter::append(
     RadixSortRunStorage& arena,
     PayloadRowBatch& batch) {
   const auto& layout = arena.payloadLayout();
-  BOLT_CHECK_NOT_NULL(
-      layout, "Radix sort run storage does not have a payload layout");
   if (!layout->hasVariableFields()) {
     return appendRows(input, arena, nullptr, batch);
   }

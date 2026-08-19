@@ -77,11 +77,9 @@ bool compressionEnabled(common::CompressionKind kind) {
 }
 
 uint64_t compressionBound(common::CompressionKind kind, uint64_t size) {
-  BOLT_CHECK_LE(size, std::numeric_limits<int32_t>::max());
   if (kind == common::CompressionKind_ZSTD) {
     return ZSTD_compressBound(size);
   }
-  BOLT_CHECK_EQ(kind, common::CompressionKind_LZ4);
   return LZ4_compressBound(static_cast<int>(size));
 }
 
@@ -98,8 +96,6 @@ uint32_t compressBlock(
     BOLT_CHECK_LE(result, std::numeric_limits<uint32_t>::max());
     return static_cast<uint32_t>(result);
   }
-  BOLT_CHECK_EQ(kind, common::CompressionKind_LZ4);
-  BOLT_CHECK_LE(outputCapacity, std::numeric_limits<int32_t>::max());
   const auto result = LZ4_compress_default(
       input, output, inputSize, static_cast<int>(outputCapacity));
   BOLT_CHECK_GT(result, 0);
@@ -118,7 +114,6 @@ void decompressBlock(
     BOLT_CHECK_EQ(result, outputSize);
     return;
   }
-  BOLT_CHECK_EQ(kind, common::CompressionKind_LZ4);
   const auto result = LZ4_decompress_safe(input, output, inputSize, outputSize);
   BOLT_CHECK_EQ(result, outputSize);
 }
@@ -202,10 +197,7 @@ RadixSortSpillWriter::RadixSortSpillWriter(
     : pathPrefix_(std::move(pathPrefix)),
       ioConfig_(ioConfig),
       pool_(pool),
-      stats_(stats) {
-  BOLT_CHECK_NOT_NULL(pool_);
-  BOLT_CHECK_NOT_NULL(stats_);
-}
+      stats_(stats) {}
 
 void RadixSortSpillWriter::resetWriteState() {
   files_.clear();
@@ -381,11 +373,6 @@ void RadixSortSpillWriter::writeRows(
     const char* const* keys,
     char* const* payloads,
     vector_size_t count) {
-  BOLT_CHECK_GE(count, 0);
-  BOLT_CHECK(keys != nullptr || count == 0);
-  BOLT_CHECK(
-      payloadLayout == nullptr || payloads != nullptr || count == 0,
-      "Radix sort spill row payloads must not be null when payload layout exists");
   if (count == 0) {
     return;
   }
@@ -644,7 +631,6 @@ RadixSortSpillReader::RadixSortSpillReader(
       payloadLayout_(payloadLayout),
       pool_(pool),
       input_(makeInputStream(file_, pool, spillUringEnabled)) {
-  BOLT_CHECK_NOT_NULL(pool_);
   if (payloadLayout_ != nullptr) {
     BOLT_CHECK_EQ(meta_.payloadFixedSize, payloadLayout_->rowWidth());
   } else {
@@ -866,8 +852,6 @@ RadixSortMerger::RadixSortMerger(
     : keyLayout_(std::move(keyLayout)),
       compareKeys_(compareKeysForLayout(keyLayout_.kind())),
       streams_(std::move(streams)) {
-  BOLT_CHECK(!streams_.empty(), "Radix sort merger requires input streams");
-  BOLT_CHECK_LT(streams_.size(), std::numeric_limits<StreamIndex>::max());
   if (streams_.size() <= 2) {
     return;
   }

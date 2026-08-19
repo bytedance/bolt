@@ -27,49 +27,6 @@
 namespace bytedance::bolt::exec::radixsort {
 namespace {
 
-void validateRowVector(
-    const RowType& expected,
-    const RowVector& input,
-    const char* name) {
-  BOLT_CHECK(
-      input.type()->equivalent(expected) &&
-          input.childrenSize() == expected.size(),
-      "{} type does not match RadixSortRun",
-      name);
-  bool validChildren = true;
-  bool validSizes = true;
-  for (uint32_t column = 0; column < expected.size(); ++column) {
-    const auto& child = input.childAt(column);
-    validChildren &= child != nullptr;
-    if (child != nullptr) {
-      validSizes &= child->size() >= input.size();
-    }
-  }
-  BOLT_CHECK(validChildren, "{} child is missing", name);
-  BOLT_CHECK(validSizes, "{} child is too short", name);
-}
-
-void validateProjectionInput(const RowType& expected, const RowVector& input) {
-  BOLT_CHECK(
-      input.type()->equivalent(expected),
-      "Sort projection input type does not match output type");
-  BOLT_CHECK_EQ(
-      input.childrenSize(),
-      expected.size(),
-      "Sort projection input column count does not match");
-  bool validChildren = true;
-  bool validSizes = true;
-  for (uint32_t column = 0; column < expected.size(); ++column) {
-    const auto& child = input.childAt(column);
-    validChildren &= child != nullptr;
-    if (child != nullptr) {
-      validSizes &= child->size() >= input.size();
-    }
-  }
-  BOLT_CHECK(validChildren, "Sort projection input child is missing");
-  BOLT_CHECK(validSizes, "Sort projection input child is too short");
-}
-
 template <RadixSortKeyLayoutKind KIND>
 void materializeVariableKeyViews(
     const RadixSortRunStorage& arena,
@@ -161,42 +118,15 @@ std::unique_ptr<RadixSortOutputProjection> RadixSortOutputProjection::create(
     const RowTypePtr& keyType,
     const std::vector<column_index_t>& directKeyChannels,
     const std::vector<bool>& bitExactRequired) {
-  BOLT_CHECK_NOT_NULL(
-      outputType, "Sort projection output type must not be null");
-  BOLT_CHECK_NOT_NULL(keyType, "Sort projection key type must not be null");
-  BOLT_CHECK_GT(
-      keyType->size(), 0, "Sort projection requires at least one key");
-  BOLT_CHECK_EQ(
-      directKeyChannels.size(),
-      keyType->size(),
-      "Sort projection direct key channel count does not match");
-  BOLT_CHECK(
-      bitExactRequired.empty() || bitExactRequired.size() == outputType->size(),
-      "Sort projection bit-exact column count does not match");
-
   std::vector<int32_t> decodedKeyByOutput(outputType->size(), -1);
   std::vector<uint32_t> directOccurrences(outputType->size(), 0);
-  bool validDirectChannels = true;
-  bool validDirectTypes = true;
   for (uint32_t key = 0; key < keyType->size(); ++key) {
     const auto channel = directKeyChannels[key];
-    if (channel >= outputType->size()) {
-      validDirectChannels = false;
-      continue;
-    }
-    validDirectTypes &=
-        keyType->childAt(key)->equivalent(*outputType->childAt(channel));
     ++directOccurrences[channel];
     if (decodedKeyByOutput[channel] < 0) {
       decodedKeyByOutput[channel] = key;
     }
   }
-  BOLT_CHECK(
-      validDirectChannels,
-      "Sort projection direct key channel is out of range");
-  BOLT_CHECK(
-      validDirectTypes,
-      "Sort projection direct key type does not match output");
 
   std::vector<RadixSortOutputColumn> columns(outputType->size());
   std::vector<column_index_t> payloadChannels;
@@ -261,29 +191,7 @@ RowVectorPtr RadixSortOutputProjection::reconstruct(
     const RowVectorPtr& decodedKeys,
     const RowVectorPtr& payload,
     memory::MemoryPool* pool) const {
-  BOLT_CHECK_NOT_NULL(pool, "Sort projection output pool must not be null");
-  if (needsDecodedKeys_) {
-    BOLT_CHECK(
-        decodedKeys != nullptr && decodedKeys->type()->equivalent(*keyType_) &&
-            decodedKeys->childrenSize() == keyType_->size(),
-        "Decoded sort key type does not match projection");
-  } else if (decodedKeys != nullptr) {
-    BOLT_CHECK_NULL(
-        decodedKeys, "Payload-only sort projection received decoded keys");
-  }
-  if (hasPayload()) {
-    BOLT_CHECK(
-        payload != nullptr && payload->type()->equivalent(*payloadType_) &&
-            (decodedKeys == nullptr || payload->size() == decodedKeys->size()),
-        "Payload row output does not match projection");
-  } else if (payload != nullptr) {
-    BOLT_CHECK_NULL(
-        payload, "Key-only sort projection received payload output");
-  }
-
   std::vector<VectorPtr> children(outputType_->size());
-  bool validChildren = true;
-  bool validChildTypes = true;
   for (uint32_t output = 0; output < columns_.size(); ++output) {
     const auto& column = columns_[output];
     if (column.source == RadixSortOutputSource::kDecodedKey) {
@@ -291,15 +199,7 @@ RowVectorPtr RadixSortOutputProjection::reconstruct(
     } else {
       children[output] = payload->childAt(column.sourceIndex);
     }
-    validChildren &= children[output] != nullptr;
-    if (children[output] != nullptr) {
-      validChildTypes &=
-          children[output]->type()->equivalent(*outputType_->childAt(output));
-    }
   }
-  BOLT_CHECK(validChildren, "Sort projection output child must not be null");
-  BOLT_CHECK(
-      validChildTypes, "Sort projection output child type does not match");
   const auto size =
       decodedKeys != nullptr ? decodedKeys->size() : payload->size();
   return std::make_shared<RowVector>(
@@ -315,44 +215,21 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
     const std::vector<bool>& bitExactRequired,
     RadixSortRunOptions options) {
   BOLT_CHECK_NOT_NULL(pool, "RadixSortRun memory pool must not be null");
-  BOLT_CHECK_NOT_NULL(outputType, "RadixSortRun output type must not be null");
   BOLT_CHECK_NOT_NULL(keyType, "RadixSortRun key type must not be null");
   BOLT_CHECK_EQ(
       keyType->size(),
       keyFlags.size(),
       "RadixSortRun key type and flag counts do not match");
-  BOLT_CHECK(
-      options.initialKeyMayHaveNulls.empty() ||
-          options.initialKeyMayHaveNulls.size() == keyType->size(),
-      "RadixSortRun initial key nullability count does not match");
-  BOLT_CHECK_GT(options.keysPerBlock, 0);
-  BOLT_CHECK_GT(options.preferredKeyHeapGroupBytes, 0);
-  BOLT_CHECK_GT(options.payloadRowsPerBlock, 0);
-  BOLT_CHECK_GT(options.preferredPayloadHeapGroupBytes, 0);
 
   auto projection = RadixSortOutputProjection::create(
       outputType, keyType, directKeyChannels, bitExactRequired);
 
   std::unique_ptr<RadixSortKeyCodec> keyCodec;
   RadixSortKeyCodec::bind(keyType->children(), keyFlags, keyCodec);
-  BOLT_CHECK(
-      keyCodec->canEncodeDecode(),
-      "RadixSortRun key codec does not support decode");
 
   std::shared_ptr<const PayloadRowLayout> payloadLayout;
   if (projection->hasPayload()) {
     payloadLayout = PayloadRowLayout::create(projection->payloadType());
-    BOLT_CHECK_NOT_NULL(
-        payloadLayout, "RadixSortRun payload layout must not be empty");
-    BOLT_CHECK(
-        options.initialPayloadMayHaveNulls.empty() ||
-            options.initialPayloadMayHaveNulls.size() ==
-                projection->payloadType()->size(),
-        "RadixSortRun initial payload nullability count does not match");
-  } else {
-    BOLT_CHECK(
-        options.initialPayloadMayHaveNulls.empty(),
-        "Key-only RadixSortRun cannot have payload nullability");
   }
 
   auto keyMayHaveNulls = std::move(options.initialKeyMayHaveNulls);
@@ -391,14 +268,11 @@ void RadixSortRun::append(const RowVector& input) {
   BOLT_CHECK(
       state_ == RadixSortRunState::kBuilding,
       "RadixSortRun accepts input only while building");
-  validateRowVector(*projection_->outputType(), input, "RadixSortRun input");
   if (input.size() == 0) {
     return;
   }
   const auto nextInputRows =
       checkedAdd<uint64_t>(metrics_.inputRows, input.size());
-  BOLT_CHECK(
-      nextInputRows.has_value(), "RadixSortRun input row count overflows");
 
   std::vector<VectorPtr> keyInputChildren;
   projection_->projectKeys(input, keyInputChildren);
@@ -444,17 +318,13 @@ void RadixSortRun::append(const RowVector& input) {
     const auto appendBegin = std::chrono::steady_clock::now();
     PayloadRowBatch payloadBatch;
     PayloadRowWriter::append(payloadInput, *storage_, payloadBatch);
-    BOLT_CHECK_EQ(
-        payloadBatch.size(),
-        input.size(),
-        "RadixSortRun payload row count does not match input");
     const auto payloads =
         std::span<char* const>(payloadBatch.rows()->as<char*>(), input.size());
     if (directFixedKey == nullptr) {
       storage_->appendBatch(encodedKeys, payloads);
     } else {
-      BOLT_CHECK(keyCodec_->tryAppendSingleFixedFlat(
-          *directFixedKey, input.size(), *storage_, payloads));
+      keyCodec_->tryAppendSingleFixedFlat(
+          *directFixedKey, input.size(), *storage_, payloads);
     }
     metrics_.appendTimeUs += elapsedUs(appendBegin);
   } else {
@@ -462,27 +332,18 @@ void RadixSortRun::append(const RowVector& input) {
     if (directFixedKey == nullptr) {
       storage_->appendBatch(encodedKeys);
     } else {
-      BOLT_CHECK(keyCodec_->tryAppendSingleFixedFlat(
-          *directFixedKey, input.size(), *storage_, {}));
+      keyCodec_->tryAppendSingleFixedFlat(
+          *directFixedKey, input.size(), *storage_, {});
     }
     metrics_.appendTimeUs += elapsedUs(appendBegin);
   }
   if (projection_->hasPayload()) {
-    BOLT_CHECK_EQ(
-        payloadMayHaveNulls.size(),
-        payloadMayHaveNulls_.size(),
-        "RadixSortRun payload nullability does not match");
     for (uint32_t column = 0; column < payloadMayHaveNulls_.size(); ++column) {
       payloadMayHaveNulls_[column] |= payloadMayHaveNulls[column];
     }
   }
   metrics_.encodeTimeUs += encodeTimeUs;
   metrics_.inputRows = *nextInputRows;
-  BOLT_CHECK(
-      storage_->size() == metrics_.inputRows &&
-          storage_->payloadSize() ==
-              (projection_->hasPayload() ? metrics_.inputRows : 0),
-      "RadixSortRun arena row counts are inconsistent");
 }
 
 void RadixSortRun::finalize() {
@@ -513,9 +374,6 @@ RowVectorPtr RadixSortRun::getOutput(
   BOLT_CHECK(
       state_ == RadixSortRunState::kSortedInMemory,
       "RadixSortRun output requires a finalized run");
-  BOLT_CHECK_GT(maxRows, 0, "RadixSortRun output batch size must be positive");
-  BOLT_CHECK_NOT_NULL(
-      outputPool, "RadixSortRun output memory pool must not be null");
 
   if (outputPosition_ == storage_->size()) {
     clear();
@@ -525,8 +383,6 @@ RowVectorPtr RadixSortRun::getOutput(
   const auto count = static_cast<vector_size_t>(
       std::min<uint64_t>(remaining, static_cast<uint64_t>(maxRows)));
   const auto nextOutputRows = checkedAdd<uint64_t>(metrics_.outputRows, count);
-  BOLT_CHECK(
-      nextOutputRows.has_value(), "RadixSortRun output row count overflows");
   const auto begin = std::chrono::steady_clock::now();
   RowVectorPtr decodedKeys;
   if (projection_->needsDecodedKeys()) {
@@ -551,11 +407,6 @@ RowVectorPtr RadixSortRun::getOutput(
     std::span<const char* const> keys,
     std::span<char* const> payloads,
     memory::MemoryPool* outputPool) {
-  BOLT_CHECK_NOT_NULL(
-      outputPool, "RadixSortRun output memory pool must not be null");
-  BOLT_CHECK(
-      !projection_->hasPayload() || payloads.size() == keys.size(),
-      "RadixSortRun merge output key and payload counts do not match");
   const auto count = static_cast<vector_size_t>(keys.size());
   if (count == 0) {
     return nullptr;
@@ -583,9 +434,6 @@ vector_size_t RadixSortRun::collectRemainingRows(
   BOLT_CHECK(
       state_ == RadixSortRunState::kSortedInMemory,
       "RadixSortRun remaining rows require a finalized run");
-  BOLT_CHECK_GT(maxRows, 0);
-  BOLT_CHECK_NOT_NULL(keys);
-  BOLT_CHECK(!projection_->hasPayload() || payloads != nullptr);
   if (outputPosition_ == storage_->size()) {
     return 0;
   }

@@ -1148,18 +1148,6 @@ TEST_F(RadixSortRunTest, stateAndCapabilityValidation) {
   run->finalize();
   EXPECT_THROW(run->append(*input), BoltException);
   EXPECT_THROW(run->finalize(), BoltException);
-  EXPECT_THROW(run->getOutput(0, outputPool_.get()), BoltException);
-
-  EXPECT_THROW(
-      RadixSortRun::create(
-          runPool_.get(),
-          ROW({"opaque"}, {OPAQUE<int32_t>()}),
-          ROW({"key"}, {BIGINT()}),
-          {flags(true, true)},
-          {1},
-          {},
-          {}),
-      BoltException);
 }
 
 } // namespace

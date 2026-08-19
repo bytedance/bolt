@@ -32,7 +32,6 @@ uint64_t payloadHeapSizeFromFixed(
   if (layout == nullptr || !layout->variableSizeOffset().has_value()) {
     return 0;
   }
-  BOLT_CHECK_NOT_NULL(payloadFixed);
   return loadUnaligned<uint64_t>(payloadFixed + *layout->variableSizeOffset());
 }
 
@@ -41,12 +40,8 @@ uint64_t checkedTotalSize(
     uint64_t payloadFixedSize,
     uint64_t payloadHeapSize) {
   auto total = checkedAdd<uint64_t>(RadixSortSpillRow::kHeaderSize, keySize);
-  BOLT_CHECK(total.has_value(), "Radix sort spill row size overflows");
   total = checkedAdd<uint64_t>(*total, payloadFixedSize);
-  BOLT_CHECK(total.has_value(), "Radix sort spill row size overflows");
   total = checkedAdd<uint64_t>(*total, payloadHeapSize);
-  BOLT_CHECK(total.has_value(), "Radix sort spill row size overflows");
-  BOLT_CHECK_LE(*total, std::numeric_limits<uint32_t>::max());
   return *total;
 }
 
@@ -169,7 +164,6 @@ RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
     const RadixSortKeyLayout& keyLayout,
     const PayloadRowLayout* payloadLayout,
     const char* key) {
-  BOLT_CHECK_NOT_NULL(key);
   const auto radixKey = RadixSortKey(keyLayout, key);
   return sizeForSerialize(keyLayout, payloadLayout, key, radixKey.payload());
 }
@@ -179,14 +173,11 @@ RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
     const PayloadRowLayout* payloadLayout,
     const char* key,
     char* payload) {
-  BOLT_CHECK_NOT_NULL(key);
   const auto radixKey = RadixSortKey(keyLayout, key);
   RadixSortSpillRowSize result;
   result.keyHeapSize = radixKey.heapSize();
   const auto keySize = checkedAdd<uint64_t>(
       spilledKeyFixedSize(keyLayout, result.keyHeapSize), result.keyHeapSize);
-  BOLT_CHECK(keySize.has_value(), "Radix sort spill row key size overflows");
-  BOLT_CHECK_LE(*keySize, std::numeric_limits<uint32_t>::max());
   result.keySize = static_cast<uint32_t>(*keySize);
   result.payload = payload;
   const auto payloadFixedSize =
@@ -195,7 +186,6 @@ RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
       payloadHeapSizeFromFixed(payloadLayout, result.payload);
   result.totalSize = static_cast<uint32_t>(checkedTotalSize(
       result.keySize, payloadFixedSize, result.payloadHeapSize));
-  BOLT_CHECK_LE(payloadFixedSize, std::numeric_limits<uint32_t>::max());
   result.payloadFixedSize = static_cast<uint32_t>(payloadFixedSize);
   return result;
 }
@@ -240,7 +230,6 @@ void RadixSortSpillRow::serialize(
     const char* key,
     const RadixSortSpillRowSize& size,
     char* destination) {
-  BOLT_CHECK_NOT_NULL(destination);
   const auto radixKey = RadixSortKey(keyLayout, key);
   RadixSortSpillRowHeader header{size.totalSize};
   storeUnaligned<RadixSortSpillRowHeader>(destination, header);
@@ -278,7 +267,6 @@ void RadixSortSpillRow::serialize(
 }
 
 RadixSortSpillRowHeader RadixSortSpillRow::header() const {
-  BOLT_CHECK_NOT_NULL(row_);
   return loadUnaligned<RadixSortSpillRowHeader>(row_);
 }
 

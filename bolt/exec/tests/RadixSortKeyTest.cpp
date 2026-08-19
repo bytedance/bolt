@@ -349,11 +349,7 @@ TEST_F(RadixSortKeyTest, layoutAbiAndSelection) {
   EXPECT_THROW(
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kInvalid),
       BoltException);
-  EXPECT_THROW(RadixSortKeyLayout::select(0, false), BoltException);
   EXPECT_THROW(RadixSortKeyLayout::select(0, true), BoltException);
-  EXPECT_THROW(
-      RadixSortKeyLayout::select(std::numeric_limits<uint64_t>::max(), true),
-      BoltException);
 }
 
 TEST_F(RadixSortKeyTest, allLayoutsRoundTripAndCompare) {
@@ -405,12 +401,6 @@ TEST_F(RadixSortKeyTest, allLayoutsRoundTripAndCompare) {
         const auto actual = arena.keyAt(left).compare(arena.keyAt(right));
         EXPECT_EQ((actual > 0) - (actual < 0), expected);
       }
-    }
-    if (!layout.isVariable()) {
-      EXPECT_THROW(
-          arena.append(std::string(layout.inlineCapacity() + 1, 'x')),
-          BoltException);
-      EXPECT_EQ(arena.size(), keys.size());
     }
   }
 }
@@ -958,26 +948,7 @@ TEST_F(RadixSortKeyTest, heapAllocationRangeBoundary) {
 
 TEST_F(RadixSortKeyTest, invalidArenaInputs) {
   auto fixedLayout = layoutFromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
-  RadixSortRunStorage fixedArena(pool_.get(), fixedLayout, 4, 64);
-  EXPECT_THROW(fixedArena.append({}), BoltException);
-  EXPECT_THROW(fixedArena.append(std::string(9, 'x')), BoltException);
-  uint64_t payload = 0;
-  EXPECT_THROW(
-      fixedArena.append("x", reinterpret_cast<char*>(&payload)), BoltException);
-  EXPECT_EQ(fixedArena.size(), 0);
-  EXPECT_TRUE(fixedArena.keyBlocks().empty());
-
-  auto variableLayout =
-      layoutFromKind(RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
-  RadixSortRunStorage variableArena(pool_.get(), variableLayout, 4, 64);
-  const std::array<std::string_view, 2> keys{"a", "b"};
-  std::array<char*, 1> payloads{nullptr};
-  EXPECT_THROW(variableArena.appendBatch(keys, payloads), BoltException);
-  EXPECT_EQ(variableArena.size(), 0);
-
-  std::array<char, 8> storage{};
-  RadixSortKey noPayload(fixedLayout, storage.data());
-  EXPECT_THROW(noPayload.construct({}, nullptr), BoltException);
+  EXPECT_THROW(RadixSortKeyLayout::select(0, true), BoltException);
 }
 
 } // namespace

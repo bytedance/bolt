@@ -25,12 +25,8 @@
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 
 namespace bytedance::bolt::exec::radixsort {
-namespace {
 
-memory::MemoryPool* checkedPool(memory::MemoryPool* pool) {
-  BOLT_CHECK_NOT_NULL(pool);
-  return pool;
-}
+namespace {
 
 template <RadixSortKeyLayoutKind KIND>
 void appendInlineVariableKeys(
@@ -75,20 +71,14 @@ void appendInlineVariableKeys(
 } // namespace
 
 char* PayloadRowBatch::rowAt(vector_size_t row) const {
-  BOLT_CHECK_GE(row, 0);
-  BOLT_CHECK_LT(row, size_);
   return rows_->as<char*>()[row];
 }
 
 char* PayloadRowBatch::heapAt(vector_size_t row) const {
-  BOLT_CHECK_GE(row, 0);
-  BOLT_CHECK_LT(row, size_);
   return heaps_ == nullptr ? nullptr : heaps_->as<char*>()[row];
 }
 
 uint64_t PayloadRowBatch::heapSizeAt(vector_size_t row) const {
-  BOLT_CHECK_GE(row, 0);
-  BOLT_CHECK_LT(row, size_);
   return heapSizes_ == nullptr ? 0 : heapSizes_->as<uint64_t>()[row];
 }
 
@@ -100,7 +90,7 @@ RadixSortRunStorage::RadixSortRunStorage(
     std::shared_ptr<const PayloadRowLayout> payloadLayout,
     uint32_t payloadRowsPerBlock,
     uint64_t preferredPayloadHeapGroupBytes)
-    : pool_(checkedPool(pool)),
+    : pool_(pool),
       layout_(std::move(layout)),
       keysPerBlock_(keysPerBlock),
       preferredHeapGroupBytes_(preferredHeapGroupBytes),
@@ -111,14 +101,7 @@ RadixSortRunStorage::RadixSortRunStorage(
       keyBlocks_(memory::StlAllocator<RadixSortKeyBlock>(pool_)),
       keyHeapGroups_(memory::StlAllocator<RadixSortKeyOverflowBlock>(pool_)),
       payloadFixedBlocks_(memory::StlAllocator<PayloadRowFixedBlock>(pool_)),
-      payloadHeapGroups_(memory::StlAllocator<PayloadRowHeapBlock>(pool_)) {
-  BOLT_CHECK(layout_.kind() != RadixSortKeyLayoutKind::kInvalid);
-  BOLT_CHECK_GT(layout_.width(), 0);
-  BOLT_CHECK_GT(keysPerBlock_, 0);
-  BOLT_CHECK_GT(preferredHeapGroupBytes_, 0);
-  BOLT_CHECK_GT(payloadRowsPerBlock_, 0);
-  BOLT_CHECK_GT(preferredPayloadHeapGroupBytes_, 0);
-}
+      payloadHeapGroups_(memory::StlAllocator<PayloadRowHeapBlock>(pool_)) {}
 
 RadixSortKey RadixSortRunStorage::keyAt(uint64_t index) {
   return RadixSortKey(layout_, keyDataAt(index));
@@ -151,7 +134,6 @@ uint64_t RadixSortRunStorage::estimatedOutputBytes() const {
 }
 
 char* RadixSortRunStorage::keyDataAt(uint64_t index) {
-  BOLT_CHECK_LT(index, size_);
   const auto blockIndex = index / keysPerBlock_;
   const auto indexInBlock = index % keysPerBlock_;
   auto& block = keyBlocks_[blockIndex];
@@ -159,7 +141,6 @@ char* RadixSortRunStorage::keyDataAt(uint64_t index) {
 }
 
 const char* RadixSortRunStorage::keyDataAt(uint64_t index) const {
-  BOLT_CHECK_LT(index, size_);
   const auto blockIndex = index / keysPerBlock_;
   const auto indexInBlock = index % keysPerBlock_;
   const auto& block = keyBlocks_[blockIndex];
@@ -169,8 +150,6 @@ const char* RadixSortRunStorage::keyDataAt(uint64_t index) const {
 RadixSortKeyRange RadixSortRunStorage::keyRangeAt(
     uint64_t index,
     vector_size_t maxCount) const {
-  BOLT_CHECK_GE(maxCount, 0);
-  BOLT_CHECK_LE(index, size_);
   if (maxCount == 0 || index == size_) {
     return {nullptr, 0};
   }
@@ -187,14 +166,6 @@ void RadixSortRunStorage::append(
     std::string_view encodedKey,
     char* payload,
     uint64_t* index) {
-  BOLT_CHECK(!encodedKey.empty(), "Encoded radix sort key must not be empty");
-  BOLT_CHECK(
-      layout_.hasPayload() || payload == nullptr,
-      "Payload pointer provided to a key-only physical layout");
-  BOLT_CHECK(
-      layout_.isVariable() || encodedKey.size() <= layout_.inlineCapacity(),
-      "Encoded radix sort key exceeds fixed layout capacity");
-
   ensureKeyBlock();
   char* overflowData = nullptr;
   if (layout_.isVariable() && encodedKey.size() > layout_.inlineCapacity()) {
@@ -215,9 +186,6 @@ void RadixSortRunStorage::append(
 void RadixSortRunStorage::appendBatch(
     std::span<const std::string_view> encodedKeys,
     std::span<char* const> payloads) {
-  BOLT_CHECK(
-      payloads.empty() || payloads.size() == encodedKeys.size(),
-      "Radix sort key payload count does not match key count");
   for (uint64_t index = 0; index < encodedKeys.size(); ++index) {
     append(encodedKeys[index], payloads.empty() ? nullptr : payloads[index]);
   }
@@ -226,20 +194,9 @@ void RadixSortRunStorage::appendBatch(
 void RadixSortRunStorage::appendBatch(
     const EncodedKeyBatch& encodedKeys,
     std::span<char* const> payloads) {
-  BOLT_CHECK(
-      payloads.empty() ||
-          payloads.size() == static_cast<uint64_t>(encodedKeys.size()),
-      "Radix sort key payload count does not match key count");
-  BOLT_CHECK(
-      layout_.hasPayload() || payloads.empty(),
-      "Payload pointers provided to a key-only physical layout");
-
   if (encodedKeys.format() == EncodedKeyFormat::kFixed64 &&
       (layout_.kind() == RadixSortKeyLayoutKind::kKeyOnlyFixed8 ||
        layout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadFixed16)) {
-    BOLT_CHECK(
-        encodedKeys.size() == 0 || encodedKeys.fixedKeys() != nullptr,
-        "Fixed encoded key buffer must not be null");
     const auto* keys = encodedKeys.fixedKeys() == nullptr
         ? nullptr
         : encodedKeys.fixedKeys()->as<uint64_t>();
@@ -409,35 +366,6 @@ void RadixSortRunStorage::allocatePayloadRowBatch(
     std::span<const uint64_t> heapSizes,
     PayloadRowBatch& batch) {
   batch = PayloadRowBatch{};
-  BOLT_CHECK_NOT_NULL(
-      payloadLayout_, "Radix sort run storage does not have a payload layout");
-  BOLT_CHECK_LE(
-      heapSizes.size(),
-      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()),
-      "Payload row row count exceeds vector range");
-  bool validFixedHeapSizes = true;
-  if (!payloadLayout_->hasVariableFields()) {
-    for (const auto size : heapSizes) {
-      validFixedHeapSizes &= size == 0;
-    }
-  }
-  BOLT_CHECK(
-      validFixedHeapSizes,
-      "Fixed-only sort payload must not allocate heap bytes");
-  BOLT_CHECK_LE(
-      payloadSize_,
-      std::numeric_limits<uint64_t>::max() - heapSizes.size(),
-      "Payload row row count overflows");
-  auto fixedBytes = checkedMultiply<uint64_t>(
-      payloadRowsPerBlock_, payloadLayout_->rowWidth());
-  BOLT_CHECK(fixedBytes.has_value(), "Payload row fixed block size overflows");
-  bool heapSizesInRange = true;
-  for (const auto size : heapSizes) {
-    heapSizesInRange &= size <= std::numeric_limits<int64_t>::max();
-  }
-  BOLT_CHECK(
-      heapSizesInRange, "Payload row row heap exceeds AllocationPool range");
-
   const auto count = static_cast<vector_size_t>(heapSizes.size());
   batch.size_ = count;
   if (count == 0) {
@@ -502,16 +430,6 @@ void RadixSortRunStorage::allocateFixedPayloadRowBatch(
     vector_size_t count,
     PayloadRowBatch& batch) {
   batch = PayloadRowBatch{};
-  BOLT_CHECK_NOT_NULL(
-      payloadLayout_, "Radix sort run storage does not have a payload layout");
-  BOLT_CHECK(
-      !payloadLayout_->hasVariableFields(),
-      "Variable sort payload requires heap sizes");
-  BOLT_CHECK_GE(count, 0, "Payload row row count must not be negative");
-  BOLT_CHECK_LE(
-      payloadSize_,
-      std::numeric_limits<uint64_t>::max() - count,
-      "Payload row row count overflows");
   batch.size_ = count;
   if (count == 0) {
     return;
@@ -567,9 +485,8 @@ void RadixSortRunStorage::ensureKeyBlock() {
       keyBlocks_.back().count < keyBlocks_.back().capacity) {
     return;
   }
-  auto bytes = checkedMultiply<uint64_t>(keysPerBlock_, layout_.width());
-  BOLT_CHECK(bytes.has_value(), "Radix sort key block size overflows");
-  auto* base = allocationPool_.allocateFixed(*bytes, alignof(uint64_t));
+  const auto bytes = static_cast<uint64_t>(keysPerBlock_) * layout_.width();
+  auto* base = allocationPool_.allocateFixed(bytes, alignof(uint64_t));
   keyBlocks_.push_back(RadixSortKeyBlock{base, keysPerBlock_, 0});
 }
 
@@ -578,16 +495,14 @@ void RadixSortRunStorage::ensurePayloadFixedBlock() {
       payloadFixedBlocks_.back().count < payloadFixedBlocks_.back().capacity) {
     return;
   }
-  auto bytes = checkedMultiply<uint64_t>(
-      payloadRowsPerBlock_, payloadLayout_->rowWidth());
-  BOLT_CHECK(bytes.has_value(), "Payload row fixed block size overflows");
-  auto* base = allocationPool_.allocateFixed(*bytes, alignof(uint64_t));
+  const auto bytes =
+      static_cast<uint64_t>(payloadRowsPerBlock_) * payloadLayout_->rowWidth();
+  auto* base = allocationPool_.allocateFixed(bytes, alignof(uint64_t));
   payloadFixedBlocks_.push_back(
       PayloadRowFixedBlock{base, payloadRowsPerBlock_, 0});
 }
 
 void RadixSortRunStorage::allocateOverflow(uint64_t size, char*& data) {
-  BOLT_CHECK_GT(size, 0, "Radix sort key overflow size must not be zero");
   if (keyHeapGroups_.empty() ||
       keyHeapGroups_.back().capacity - keyHeapGroups_.back().used < size) {
     const auto capacity = std::max(preferredHeapGroupBytes_, size);

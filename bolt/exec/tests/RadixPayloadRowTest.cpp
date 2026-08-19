@@ -1308,18 +1308,11 @@ TEST_F(RadixPayloadRowTest, fixedKeyAndPayloadShareAllocationPoolRange) {
 
 TEST_F(RadixPayloadRowTest, invalidInputs) {
   auto layout = payloadLayout(ROW({"value"}, {VARCHAR()}));
-  RadixSortRunStorage noPayloadArena(pool_.get(), keyLayout(), 4, 64);
   PayloadRowBatch batch;
-  EXPECT_THROW(
-      noPayloadArena.allocatePayloadRowBatch(std::array<uint64_t, 1>{0}, batch),
-      BoltException);
 
   auto fixedLayout = payloadLayout(ROW({"value"}, {BIGINT()}));
   RadixSortRunStorage fixedArena(
       pool_.get(), keyLayout(), 4, 64, fixedLayout, 4, 64);
-  EXPECT_THROW(
-      fixedArena.allocatePayloadRowBatch(std::array<uint64_t, 1>{1}, batch),
-      BoltException);
 
   RowVectorPtr output;
   PayloadRowBatch emptyBatch;

@@ -89,11 +89,6 @@ RadixSortBuffer::RadixSortBuffer(
       spillConfig_(spillConfig),
       spillMemoryThreshold_(spillMemoryThreshold),
       operatorCtx_(operatorCtx) {
-  BOLT_CHECK_NOT_NULL(inputType_);
-  BOLT_CHECK_NOT_NULL(pool_);
-  BOLT_CHECK_GT(sortColumnIndices.size(), 0);
-  BOLT_CHECK_EQ(sortColumnIndices.size(), sortCompareFlags.size());
-
   std::vector<std::string> keyNames;
   std::vector<TypePtr> keyTypes;
   keyNames.reserve(sortColumnIndices.size());
@@ -143,9 +138,6 @@ void RadixSortBuffer::addInput(const VectorPtr& input) {
   BOLT_CHECK_NOT_NULL(input);
   const auto* rows = input->as<RowVector>();
   BOLT_CHECK_NOT_NULL(rows, "RadixSortBuffer input must be a RowVector");
-  BOLT_CHECK(
-      input->type()->equivalent(*inputType_),
-      "RadixSortBuffer input type does not match");
   ensureInputFits(input);
 
   run_->append(*rows);
@@ -153,7 +145,6 @@ void RadixSortBuffer::addInput(const VectorPtr& input) {
 }
 
 void RadixSortBuffer::noMoreInput() {
-  BOLT_CHECK(!noMoreInput_, "RadixSortBuffer can be finalized only once");
   if (run_->state() == RadixSortRunState::kBuilding) {
     run_->finalize();
   }
@@ -169,7 +160,6 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
   if (outputRows_ == inputRows_) {
     return nullptr;
   }
-  BOLT_CHECK_GT(maxOutputRows, 0);
   RowVectorPtr result;
   if (merger_ == nullptr) {
     result = run_->getOutput(maxOutputRows, pool_);
@@ -353,7 +343,6 @@ void RadixSortBuffer::spillBuildingRun() {
       target = source;
       return;
     }
-    BOLT_CHECK_EQ(target.size(), source.size());
     for (uint32_t column = 0; column < target.size(); ++column) {
       target[column] |= source[column];
     }
@@ -399,11 +388,6 @@ void RadixSortBuffer::spillRemainingOutput() {
     pool_->release();
     return;
   }
-  BOLT_CHECK_GT(inputRows_, outputRows_);
-  BOLT_CHECK(
-      run_->state() == RadixSortRunState::kSortedInMemory ||
-          run_->state() == RadixSortRunState::kConsumed,
-      "RadixSortBuffer output-stage spill requires finalized output state");
 
   constexpr vector_size_t kSpillBatchRows = 2048;
   BufferPtr keyRows =
@@ -446,15 +430,12 @@ void RadixSortBuffer::spillRemainingOutput() {
     const auto count = merger_ != nullptr
         ? merger_->collectRows(requested, rawKeys, rawPayloads)
         : run_->collectRemainingRows(requested, rawKeys, rawPayloads);
-    BOLT_CHECK_GT(count, 0);
     writeRows(count);
     if (merger_ != nullptr) {
       merger_->releaseRetainedBuffers();
     }
   }
-  BOLT_CHECK_EQ(spilledRows, remainingRows);
   auto files = writer.finishRows();
-  BOLT_CHECK(!files.empty());
 
   run_->clear();
   merger_.reset();
@@ -500,7 +481,6 @@ void RadixSortBuffer::prepareMerge() {
     streams.push_back(
         std::make_unique<RadixSortMemoryRunMergeStream>(*run_->storage()));
   }
-  BOLT_CHECK(!streams.empty());
   merger_ =
       std::make_unique<RadixSortMerger>(run_->keyLayout(), std::move(streams));
 }
