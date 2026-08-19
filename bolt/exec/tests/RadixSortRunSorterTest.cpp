@@ -449,6 +449,29 @@ TEST_F(RadixSortRunSorterTest, longCommonPrefixFallsBackToFullKey) {
   verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32);
 }
 
+TEST_F(RadixSortRunSorterTest, lowCardinalityVariableStringKeyMatchesOracle) {
+  static constexpr std::array<const char*, 8> kEvents{
+      "video_play",
+      "video_play_pause",
+      "like",
+      "follow",
+      "share",
+      "comment",
+      "enter_homepage",
+      "click_music"};
+  std::vector<std::string> keys;
+  keys.reserve(512);
+  for (uint32_t row = 0; row < 512; ++row) {
+    const auto eventIndex = row % 10 < 6 ? row % 3 : row % kEvents.size();
+    keys.push_back(
+        std::string(kEvents[eventIndex]) + "_" + std::to_string(row % 17));
+  }
+  std::reverse(keys.begin(), keys.end());
+
+  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32);
+  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
+}
+
 TEST_F(RadixSortRunSorterTest, fixedWideSuffixBytesSortBeforeFallback) {
   std::vector<std::string> keys;
   for (uint64_t value = 4096; value > 0; --value) {
