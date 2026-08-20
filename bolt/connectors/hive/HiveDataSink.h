@@ -562,7 +562,8 @@ class HiveDataSink : public DataSink {
   }
 
   // Invoked to write 'input' to the specified file writer.
-  void write(size_t index, RowVectorPtr input);
+  // Writes a data-only vector. Partition columns must already be removed.
+  void write(size_t index, RowVectorPtr dataInput);
 
   void closeInternal();
 

@@ -30,6 +30,8 @@
 
 #include "bolt/connectors/hive/HiveDataSink.h"
 
+#include <boost/algorithm/string/predicate.hpp>
+
 #include "bolt/common/base/Counters.h"
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/StatsReporter.h"
@@ -43,6 +45,7 @@
 #include "bolt/dwio/common/SortingWriter.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/SortBuffer.h"
+#include "bolt/vector/Utf8Utils.h"
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::connector::hive {
@@ -83,6 +86,18 @@ RowVectorPtr makeDataInput(
       input->size(),
       std::move(childVectors),
       input->getNullCount());
+}
+
+bool replaceInvalidUtf8ForParquetSerde(
+    const std::shared_ptr<const HiveInsertTableHandle>& insertTableHandle) {
+  constexpr const char* kParquetSerdeMarker =
+      "spark.gluten.sql.native.writer.hive.parquet.serde";
+  const auto& serdeParameters = insertTableHandle->serdeParameters();
+  const auto marker = serdeParameters.find(kParquetSerdeMarker);
+  return insertTableHandle->storageFormat() ==
+      dwio::common::FileFormat::PARQUET &&
+      marker != serdeParameters.end() &&
+      boost::algorithm::iequals(marker->second, "true");
 }
 
 // Returns a subset of column indices corresponding to partition keys.
@@ -448,11 +463,20 @@ void HiveDataSink::appendData(RowVectorPtr input) {
 
   // Lazy load all the input columns.
   input->loadedVector();
+  auto dataInput = makeDataInput(dataChannels_, input);
+
+  auto sanitizeDataInput = [&]() {
+    if (replaceInvalidUtf8ForParquetSerde(insertTableHandle_)) {
+      dataInput = utf8::replaceInvalidUtf8InTopLevelVarchars(
+          dataInput, dataInput->pool());
+    }
+  };
 
   // Write to unpartitioned (and unbucketed) table.
   if (!isPartitioned() && !isBucketed()) {
     const auto index = ensureWriter(HiveWriterId::unpartitionedId());
-    write(index, input);
+    sanitizeDataInput();
+    write(index, dataInput);
     return;
   }
 
@@ -463,11 +487,33 @@ void HiveDataSink::appendData(RowVectorPtr input) {
   // must be zero.
   if (!isBucketed() && partitionIdGenerator_->numPartitions() == 1) {
     const auto index = ensureWriter(HiveWriterId{0});
-    write(index, input);
+    sanitizeDataInput();
+    write(index, dataInput);
     return;
   }
 
   splitInputRowsAndEnsureWriters();
+
+  // wrapAndCombineDict drops top-level row nulls when it slices a batch. The
+  // old per-writer sanitizer therefore visited the backing child values of
+  // these rows. Use a null-free view only when this batch is actually sliced
+  // to preserve that behavior while sanitizing the batch once.
+  const bool needsSlice = std::any_of(
+      partitionSizes_.begin(),
+      partitionSizes_.end(),
+      [&](vector_size_t partitionSize) {
+        return partitionSize != 0 && partitionSize != dataInput->size();
+      });
+  if (needsSlice && dataInput->nulls()) {
+    dataInput = std::make_shared<RowVector>(
+        dataInput->pool(),
+        dataInput->type(),
+        nullptr,
+        dataInput->size(),
+        dataInput->children(),
+        0);
+  }
+  sanitizeDataInput();
 
   for (auto index = 0; index < writers_.size(); ++index) {
     const vector_size_t partitionSize = partitionSizes_[index];
@@ -475,17 +521,16 @@ void HiveDataSink::appendData(RowVectorPtr input) {
       continue;
     }
 
-    RowVectorPtr writerInput = partitionSize == input->size()
-        ? input
-        : exec::wrapAndCombineDict(partitionSize, partitionRows_[index], input);
+    RowVectorPtr writerInput = partitionSize == dataInput->size()
+        ? dataInput
+        : exec::wrapAndCombineDict(
+              partitionSize, partitionRows_[index], dataInput);
     write(index, writerInput);
   }
 }
 
-void HiveDataSink::write(size_t index, RowVectorPtr input) {
+void HiveDataSink::write(size_t index, RowVectorPtr dataInput) {
   WRITER_NON_RECLAIMABLE_SECTION_GUARD(index);
-  auto dataInput = makeDataInput(dataChannels_, input);
-
   writers_[index]->write(dataInput);
   writerInfo_[index]->numWrittenRows += dataInput->size();
 }
