@@ -30,8 +30,6 @@
 
 #pragma once
 
-#include <cstddef>
-
 #include "bolt/common/memory/ByteStream.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/DecodedVector.h"
