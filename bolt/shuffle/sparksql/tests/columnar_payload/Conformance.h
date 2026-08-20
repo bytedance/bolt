@@ -173,7 +173,7 @@
 #include <string>
 #include <vector>
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadVectors.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Vectors.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 

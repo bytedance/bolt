@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadGenerator.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Generator.h"
 
 #include <algorithm>
 #include <cstring>
