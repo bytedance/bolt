@@ -76,6 +76,8 @@ static constexpr int32_t rowBaseColumnNumThreshold = 5;
 // BufferedInputStream (and deserializer) per stream.
 static constexpr bool kDefaultReuseBufferedInputStream = false;
 
+static constexpr bool kDefaultReuseColumnBuffer = false;
+
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
 
@@ -123,6 +125,8 @@ struct ShuffleReaderOptions {
   // Reuse a single BufferedInputStream across all reader streams to avoid the
   // overhead of repeatedly creating/destroying one per stream.
   bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
+
+  bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 };
 
 struct PartitionWriterOptions {

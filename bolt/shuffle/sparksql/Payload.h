@@ -43,6 +43,96 @@
 namespace bytedance::bolt::shuffle::sparksql {
 class ByteBuffer;
 
+class ColumnBufferPool final {
+ public:
+  explicit ColumnBufferPool(arrow::MemoryPool* pool) : pool_(pool) {}
+
+  // Returns a resizable buffer whose logical size is `size` and whose capacity
+  // is at least `size + padding` (padding reserves SIMD over-read space,
+  // mirroring the non-pooled arrow::AllocateResizableBuffer path). Reuses a
+  // free buffer with sufficient capacity when available, otherwise allocates a
+  // new one and tracks it for future reuse.
+  arrow::Result<std::shared_ptr<arrow::ResizableBuffer>> allocate(
+      int64_t size,
+      int64_t padding) {
+    const int64_t capacity = size + padding;
+    if (freeList_.empty()) {
+      // Rebuild the set of solely-owned buffers. This is the only O(M) step and
+      // is amortized across a whole batch's worth of allocate() calls.
+      refillFreeList();
+    }
+    while (!freeList_.empty()) {
+      const size_t idx = freeList_.back();
+      auto& buffer = buffers_[idx];
+      // refillFreeList() only records buffers with use_count() == 1, and the
+      // pool is single-threaded, so a buffer stays solely-owned until we hand
+      // it out here.
+      if (buffer->capacity() >= capacity) {
+        // Fits within existing capacity: just adjust the logical size. Passing
+        // shrink_to_fit=false guarantees no reallocation happens here, and the
+        // [size, capacity) tail keeps at least `padding` bytes for SIMD.
+        auto status = buffer->Resize(size, /*shrink_to_fit=*/false);
+        if (!status.ok()) {
+          return status;
+        }
+        freeList_.pop_back();
+        return buffer;
+      }
+      // Capacity too small for this request; drop it from the free list for the
+      // current batch rather than reallocating, preserving the original
+      // no-realloc-on-reuse behavior.
+      freeList_.pop_back();
+    }
+    auto result = arrow::AllocateResizableBuffer(capacity, pool_);
+    if (!result.ok()) {
+      return result.status();
+    }
+    std::shared_ptr<arrow::ResizableBuffer> buffer =
+        std::move(result).ValueUnsafe();
+    if (padding > 0) {
+      auto status = buffer->Resize(size, /*shrink_to_fit=*/false);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    buffers_.push_back(buffer);
+    return buffer;
+  }
+
+  // Number of buffers currently tracked by the pool. Exposed for tests/metrics.
+  size_t numBuffers() const {
+    return buffers_.size();
+  }
+
+  // Drops all cached buffers and frees their memory back to `pool_`. Buffers
+  // that still escaped into a live payload or RowVector (use_count() > 1) stay
+  // alive until their last owner releases them. Call at close() to return
+  // memory eagerly instead of waiting for the pool's own destruction.
+  void release() {
+    buffers_.clear();
+    freeList_.clear();
+  }
+
+ private:
+  // Recomputes freeList_ as the indices of buffers currently owned only by the
+  // pool (use_count() == 1). Buffers still referenced elsewhere are skipped.
+  void refillFreeList() {
+    freeList_.clear();
+    freeList_.reserve(buffers_.size());
+    for (size_t i = 0; i < buffers_.size(); ++i) {
+      if (buffers_[i].use_count() == 1) {
+        freeList_.push_back(i);
+      }
+    }
+  }
+
+  std::vector<std::shared_ptr<arrow::ResizableBuffer>> buffers_;
+  // Indices into buffers_ that are known to be solely owned by the pool and
+  // thus reusable. Refilled lazily by refillFreeList() when exhausted.
+  std::vector<size_t> freeList_;
+  arrow::MemoryPool* pool_;
+};
+
 class Payload {
  public:
   enum Type : uint8_t {
@@ -128,7 +218,8 @@ class BlockPayload : public Payload {
       uint32_t& numRows,
       uint64_t& decompressTime,
       std::optional<uint8_t>& payloadType,
-      ByteBuffer* readAheadBuffer);
+      ByteBuffer* readAheadBuffer,
+      ColumnBufferPool* bufferPool = nullptr);
 
   static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>>
   deserializeRowVectorModeBuffers(
@@ -137,7 +228,8 @@ class BlockPayload : public Payload {
       arrow::MemoryPool* pool,
       uint32_t& numRows,
       uint64_t& decompressTime,
-      ByteBuffer** readAheadBuffer);
+      ByteBuffer** readAheadBuffer,
+      ColumnBufferPool* bufferPool = nullptr);
 
   arrow::Status serialize(arrow::io::OutputStream* outputStream) override;
 
