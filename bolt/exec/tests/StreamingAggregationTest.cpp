@@ -661,6 +661,5 @@ TEST_F(StreamingAggregationTest, runtimeStatsTimers) {
   ASSERT_LT(
       runtimeStats.at("aggOutputTimeNs").sum,
       runtimeStats.at("aggFunctionTimeNs").sum);
-  ASSERT_GT(runtimeStats.count("aggProbeTimeNs"), 0);
-  EXPECT_GT(runtimeStats.at("aggProbeTimeNs").sum, 0);
+  EXPECT_EQ(runtimeStats.count("aggProbeTimeNs"), 0);
 }

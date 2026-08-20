@@ -317,11 +317,8 @@ RowVectorPtr StreamingAggregation::getOutput() {
 
     auto numPrevGroups = numGroups_;
     {
-      NanosecondTimer probeTimer(&stats_.aggProbeTimeNs);
+      NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
       assignGroups();
-    }
-    {
-      NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
       initializeNewGroups(numPrevGroups);
     }
     evaluateAggregates();

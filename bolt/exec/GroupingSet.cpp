@@ -579,6 +579,7 @@ void GroupingSet::initializeGlobalAggregation() {
 void GroupingSet::addGlobalAggregationInput(
     const RowVectorPtr& input,
     bool mayPushdown) {
+  NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
   initializeGlobalAggregation();
 
   auto numRows = input->size();
@@ -588,7 +589,6 @@ void GroupingSet::addGlobalAggregationInput(
   masks_.addInput(input, activeRows_);
 
   auto* group = lookup_->hits[0];
-  NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
 
   for (auto i = 0; i < aggregates_.size(); ++i) {
     if (!aggregates_[i].sortingKeys.empty()) {
