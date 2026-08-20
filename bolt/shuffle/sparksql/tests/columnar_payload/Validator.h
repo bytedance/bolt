@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadFormat.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Format.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 

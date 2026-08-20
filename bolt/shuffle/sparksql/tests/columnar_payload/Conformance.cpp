@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadConformance.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Conformance.h"
 
 
 namespace bytedance::bolt::shuffle::sparksql::test {
