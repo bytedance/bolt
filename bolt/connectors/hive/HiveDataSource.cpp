@@ -641,19 +641,19 @@ HiveDataSource::prepareReaderOutputForNextRead() {
     return nullptr;
   }
 
+  output_.reset();
   for (auto i = 0; i < reusableOutputPool_->slots.size(); ++i) {
     auto& slot = reusableOutputPool_->slots[i];
     if (slot.inUse) {
       continue;
     }
     slot.inUse = true;
-    output_ = slot.output;
-    if (!output_ || *output_->type() != *readerOutputType_) {
-      output_ = BaseVector::create(readerOutputType_, 0, pool_);
-      slot.output = output_;
+    if (!slot.output || *slot.output->type() != *readerOutputType_) {
+      slot.output = BaseVector::create(readerOutputType_, 0, pool_);
     } else {
-      BaseVector::prepareForReuse(output_, 0);
+      BaseVector::prepareForReuse(slot.output, 0);
     }
+    output_ = slot.output;
     return std::make_shared<ReusableOutputLease>(reusableOutputPool_, i);
   }
 

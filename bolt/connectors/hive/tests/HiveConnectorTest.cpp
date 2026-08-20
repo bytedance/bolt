@@ -460,6 +460,7 @@ class SequentialSplitReader : public HiveSplitReaderBase {
     if (rowOutput == nullptr) {
       return 0;
     }
+    readerOutputs_.push_back(output.get());
     rowOutput->unsafeResize(1);
 
     auto values = AlignedBuffer::allocate<int64_t>(1, pool_);
@@ -490,10 +491,15 @@ class SequentialSplitReader : public HiveSplitReaderBase {
 
   void resetSplit() override {}
 
+  const std::vector<BaseVector*>& readerOutputs() const {
+    return readerOutputs_;
+  }
+
  private:
   RowTypePtr rowType_;
   memory::MemoryPool* pool_;
   int32_t calls_{0};
+  std::vector<BaseVector*> readerOutputs_;
 };
 
 class TestingHiveDataSource : public HiveDataSource {
@@ -722,6 +728,31 @@ TEST_F(HiveConnectorTest, tableScanReusableOutputDoesNotOverwriteHeldChild) {
   ASSERT_NE(secondFlat, nullptr);
   EXPECT_EQ(secondFlat->valueAt(0), 2);
   EXPECT_EQ(heldFlat->valueAt(0), 1);
+}
+
+TEST_F(HiveConnectorTest, tableScanReusableOutputReusesReleasedRoot) {
+  auto rowType = ROW({"c0"}, {BIGINT()});
+  auto dataSource = makeTestingDataSource(
+      rowType, {{core::QueryConfig::kTableScanReusableOutputCount, "1"}});
+  auto splitReader =
+      std::make_unique<SequentialSplitReader>(rowType, pool_.get());
+  auto* rawSplitReader = splitReader.get();
+  dataSource->setSplitReader(std::move(splitReader));
+
+  ContinueFuture future;
+  {
+    auto first = dataSource->next(1, future);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_NE(first.value(), nullptr);
+  }
+  ASSERT_EQ(rawSplitReader->readerOutputs().size(), 1);
+  auto* firstReaderOutput = rawSplitReader->readerOutputs()[0];
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+  ASSERT_EQ(rawSplitReader->readerOutputs().size(), 2);
+  EXPECT_EQ(rawSplitReader->readerOutputs()[1], firstReaderOutput);
 }
 
 TEST_F(HiveConnectorTest, makeScanSpec_requiredSubfields_multilevel) {
