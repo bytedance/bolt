@@ -199,3 +199,33 @@ add_test(
     NAME bolt_shuffle_local_partition_writer_test
     COMMAND bolt_shuffle_local_partition_writer_test
 )
+
+# The reference encoder, validator and corpus depend on nothing but the
+# standard library, so that they can be built and exercised independently of
+# the engine they are the oracle for. ColumnarPayloadVectors.cpp is the single
+# file that bridges them to RowVector.
+add_executable(
+    bolt_columnar_payload_test
+    ColumnarPayloadFormat.cpp
+    ColumnarPayloadGenerator.cpp
+    ColumnarPayloadValidator.cpp
+    ColumnarPayloadVectors.cpp
+    ColumnarPayloadConformance.cpp
+    ColumnarPayloadTest.cpp
+)
+
+target_link_libraries(
+    bolt_columnar_payload_test
+    PRIVATE
+        bolt_exec
+        bolt_vector
+        bolt_vector_test_lib
+        bolt_testutils
+        GTest::gtest
+        GTest::gtest_main
+)
+
+add_test(
+    NAME bolt_columnar_payload_test
+    COMMAND bolt_columnar_payload_test
+)
