@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadVectors.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Vectors.h"
 
 #include "bolt/vector/FlatVector.h"
 

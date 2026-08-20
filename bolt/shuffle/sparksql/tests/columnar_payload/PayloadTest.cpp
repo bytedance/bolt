@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadConformance.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Conformance.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 #include <gtest/gtest.h>
