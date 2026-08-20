@@ -13,16 +13,17 @@
 # limitations under the License.
 
 target_sources(
-  bolt_exec PRIVATE
-  RadixSortBuffer.cpp
-  RadixSortRunSorter.cpp
-  RadixSortRunStorage.cpp
-  RadixSortKeyCodec.cpp
-  RadixSortKey.cpp
-  RadixSortSpill.cpp
-  RadixSortSpillRow.cpp
-  PayloadRow.cpp
-  RadixSortRun.cpp
+  bolt_exec
+  PRIVATE
+    RadixSortBuffer.cpp
+    RadixSortRunSorter.cpp
+    RadixSortRunStorage.cpp
+    RadixSortKeyCodec.cpp
+    RadixSortKey.cpp
+    RadixSortSpill.cpp
+    RadixSortSpillRow.cpp
+    PayloadRow.cpp
+    RadixSortRun.cpp
 )
 
 if(BOLT_BUILD_TESTING OR BOLT_BUILD_RADIX_SORT_TEST)
@@ -39,14 +40,12 @@ if(BOLT_BUILD_TESTING OR BOLT_BUILD_RADIX_SORT_TEST)
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortRunTest.cpp
   )
 
-  target_link_libraries(
-    bolt_radix_sort_test
-    bolt_gtest_main
-  )
+  target_link_libraries(bolt_radix_sort_test bolt_gtest_main)
 
   add_test(
     NAME bolt_radix_sort_test
-    COMMAND bolt_radix_sort_test
+    COMMAND
+      bolt_radix_sort_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
 endif()
@@ -59,9 +58,10 @@ if(BOLT_BUILD_BENCHMARKS OR BOLT_BUILD_RADIX_SORT_BENCHMARK)
   )
 
   target_link_libraries(
-    bolt_radix_sort_buffer_benchmark PRIVATE
-    bolt_engine
-    Folly::follybenchmark
+    bolt_radix_sort_buffer_benchmark
+    PRIVATE
+      bolt_engine
+      Folly::follybenchmark
   )
 
   add_executable(
@@ -72,13 +72,15 @@ if(BOLT_BUILD_BENCHMARKS OR BOLT_BUILD_RADIX_SORT_BENCHMARK)
 
   target_compile_definitions(
     bolt_radix_sort_buffer_large_benchmark
-    PRIVATE RADIX_SORT_LARGE_BENCHMARK=1
+    PRIVATE
+      RADIX_SORT_LARGE_BENCHMARK=1
   )
 
   target_link_libraries(
-    bolt_radix_sort_buffer_large_benchmark PRIVATE
-    bolt_engine
-    Folly::follybenchmark
+    bolt_radix_sort_buffer_large_benchmark
+    PRIVATE
+      bolt_engine
+      Folly::follybenchmark
   )
 
   add_executable(
@@ -89,9 +91,10 @@ if(BOLT_BUILD_BENCHMARKS OR BOLT_BUILD_RADIX_SORT_BENCHMARK)
   )
 
   target_link_libraries(
-    bolt_radix_sort_spill_benchmark PRIVATE
-    bolt_engine
-    Folly::follybenchmark
+    bolt_radix_sort_spill_benchmark
+    PRIVATE
+      bolt_engine
+      Folly::follybenchmark
   )
 
   add_executable(
@@ -103,13 +106,15 @@ if(BOLT_BUILD_BENCHMARKS OR BOLT_BUILD_RADIX_SORT_BENCHMARK)
 
   target_compile_definitions(
     bolt_radix_sort_spill_large_benchmark
-    PRIVATE RADIX_SORT_LARGE_BENCHMARK=1
+    PRIVATE
+      RADIX_SORT_LARGE_BENCHMARK=1
   )
 
   target_link_libraries(
-    bolt_radix_sort_spill_large_benchmark PRIVATE
-    bolt_engine
-    Folly::follybenchmark
+    bolt_radix_sort_spill_large_benchmark
+    PRIVATE
+      bolt_engine
+      Folly::follybenchmark
   )
 
   add_executable(
@@ -118,8 +123,9 @@ if(BOLT_BUILD_BENCHMARKS OR BOLT_BUILD_RADIX_SORT_BENCHMARK)
   )
 
   target_link_libraries(
-    bolt_radix_sort_algorithm_benchmark PRIVATE
-    bolt_engine
-    Folly::follybenchmark
+    bolt_radix_sort_algorithm_benchmark
+    PRIVATE
+      bolt_engine
+      Folly::follybenchmark
   )
 endif()

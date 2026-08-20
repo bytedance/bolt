@@ -30,9 +30,7 @@
 
 #include "bolt/exec/ContainerRowSerde.h"
 
-#include <array>
-#include <limits>
-
+#include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/exec/VariantSerdeDetail.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
@@ -146,16 +144,15 @@ void serializeMany(
     } else if (simpleVector->encoding() == VectorEncoding::Simple::CONSTANT) {
       auto* constantVector = vector.asUnchecked<ConstantVector<T>>();
       if (!constantVector->isNullAt(0)) {
-        constexpr vector_size_t kValuesPerChunk = 64;
-        std::array<T, kValuesPerChunk> values;
-        values.fill(constantVector->valueAt(0));
-        vector_size_t offset = 0;
-        while (offset < size) {
-          const auto count =
-              std::min<vector_size_t>(kValuesPerChunk, size - offset);
-          stream.append<T>(
-              folly::Range<const T*>(values.data(), values.data() + count));
-          offset += count;
+        if constexpr (std::is_same_v<T, __int128>) {
+          HashStringAllocator hashStringAllocator(vector.pool());
+          AlignedStlAllocator<T, sizeof(T)> allocator(&hashStringAllocator);
+          std::vector<T, AlignedStlAllocator<T, sizeof(T)>> values(
+              size, constantVector->valueAt(0), allocator);
+          stream.append<T>(values);
+        } else {
+          std::vector<T> values(size, constantVector->valueAt(0));
+          stream.append<T>(values);
         }
       }
       return;
