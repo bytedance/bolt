@@ -201,7 +201,7 @@ bool SpillStats::operator==(const SpillStats& other) const {
              other.spillWrites,
              other.spillFlushTimeUs,
              other.spillWriteTimeUs,
-             spillMaxLevelExceededCount);
+             other.spillMaxLevelExceededCount);
 }
 
 void SpillStats::reset() {

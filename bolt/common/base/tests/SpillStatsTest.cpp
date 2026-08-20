@@ -72,6 +72,11 @@ TEST(SpillTest, spillStats) {
   ASSERT_TRUE(stats1 != stats2);
   ASSERT_FALSE(stats1 == stats2);
 
+  SpillStats stats3 = stats1;
+  stats3.spillMaxLevelExceededCount = stats1.spillMaxLevelExceededCount + 1;
+  ASSERT_TRUE(stats1 != stats3);
+  ASSERT_FALSE(stats1 == stats3);
+
   ASSERT_TRUE(stats1 == stats1);
   ASSERT_FALSE(stats1 != stats1);
   ASSERT_FALSE(stats1 > stats1);
