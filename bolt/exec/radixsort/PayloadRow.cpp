@@ -35,11 +35,27 @@
 #include "bolt/type/HugeInt.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Timestamp.h"
+#include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/SimpleVector.h"
 #include "bolt/vector/VariantVector.h"
 
 namespace bytedance::bolt::exec::radixsort {
+
+namespace {
+struct VariableColumnWriter {
+  const PayloadRowColumnLayout* column;
+  const BaseVector* vector;
+  const DecodedVector* decoded;
+  const uint64_t* complexSizes;
+};
+} // namespace
+
+struct PayloadRowWriter::Impl {
+  BufferPtr complexSizes;
+  std::vector<std::optional<DecodedVector>> decoded;
+  folly::small_vector<VariableColumnWriter, 32> variableColumns;
+};
 
 namespace {
 
@@ -789,20 +805,31 @@ namespace payload_size {
 
 class RowSizes {
  public:
-  vector_size_t size() const {
-    return size_;
-  }
-
   const BufferPtr& heapSizes() const {
     return heapSizes_;
   }
 
+  const uint64_t* complexSizes(uint32_t ordinal) const {
+    return complexSizes_ + static_cast<uint64_t>(ordinal) * size_;
+  }
+
   vector_size_t size_{0};
   BufferPtr heapSizes_;
+  const uint64_t* complexSizes_{nullptr};
 };
 
 FOLLY_ALWAYS_INLINE void addSize(uint64_t& size, uint64_t increment) {
   size += increment;
+}
+
+int32_t checkedComplexSerializedSize(uint64_t size) {
+  BOLT_CHECK_LE(
+      size,
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+      "A single complex sort payload serialization exceeds ByteRange "
+      "capacity: {} bytes",
+      size);
+  return static_cast<int32_t>(size);
 }
 
 uint64_t nullBitmapBytes(vector_size_t size) {
@@ -953,6 +980,8 @@ void measurePayloadRows(
     const RowVector& input,
     const PayloadRowLayout& layout,
     memory::MemoryPool* pool,
+    BufferPtr reusableHeapSizes,
+    BufferPtr& complexSizeScratch,
     RowSizes& sizes) {
   sizes = RowSizes{};
 
@@ -963,13 +992,31 @@ void measurePayloadRows(
     return;
   }
 
-  sizes.heapSizes_ =
-      AlignedBuffer::allocate<uint64_t>(rowCount, pool, uint64_t{0});
-  auto* rawHeapSizes = sizes.heapSizes_->asMutable<uint64_t>();
+  const auto complexColumnCount = std::count_if(
+      layout.columns().begin(), layout.columns().end(), [](const auto& column) {
+        return column.complex;
+      });
+  auto* rawHeapSizes =
+      prepareReusableBuffer<uint64_t>(reusableHeapSizes, rowCount, pool);
+  std::fill(rawHeapSizes, rawHeapSizes + rowCount, uint64_t{0});
+  sizes.heapSizes_ = std::move(reusableHeapSizes);
+  if (complexColumnCount > 0) {
+    const auto complexSizeCount = checkedMultiply<size_t>(
+        static_cast<size_t>(rowCount), complexColumnCount);
+    BOLT_CHECK(
+        complexSizeCount.has_value(),
+        "Payload row complex size scratch count overflows");
+    auto* rawComplexSizes = prepareReusableBuffer<uint64_t>(
+        complexSizeScratch, *complexSizeCount, pool);
+    std::fill(
+        rawComplexSizes, rawComplexSizes + *complexSizeCount, uint64_t{0});
+    sizes.complexSizes_ = rawComplexSizes;
+  }
   const auto addVariableBytes = [&](vector_size_t row, uint64_t bytes) {
     addSize(rawHeapSizes[row], bytes);
   };
 
+  uint32_t complexOrdinal = 0;
   for (uint32_t column = 0; column < layout.columns().size(); ++column) {
     const auto& metadata = layout.columns()[column];
     if (!metadata.variable) {
@@ -978,6 +1025,13 @@ void measurePayloadRows(
     const auto& vector = *input.childAt(column);
 
     if (metadata.complex) {
+      auto* rawComplexSizes =
+          const_cast<uint64_t*>(sizes.complexSizes(complexOrdinal++));
+      const auto addComplexBytes = [&](vector_size_t row, uint64_t bytes) {
+        checkedComplexSerializedSize(bytes);
+        rawComplexSizes[row] = bytes;
+        addVariableBytes(row, bytes);
+      };
       switch (metadata.type->kind()) {
         case TypeKind::ARRAY: {
           const auto* array =
@@ -985,7 +1039,7 @@ void measurePayloadRows(
           const auto elementMetadata = rangeSizeMetadata(*array->elements());
           if (!vector.mayHaveNulls()) {
             for (vector_size_t row = 0; row < rowCount; ++row) {
-              addVariableBytes(
+              addComplexBytes(
                   row,
                   serializedArraySizeForPayload(
                       *array, vector.wrappedIndex(row), elementMetadata));
@@ -993,7 +1047,7 @@ void measurePayloadRows(
           } else {
             for (vector_size_t row = 0; row < rowCount; ++row) {
               if (!vector.isNullAt(row)) {
-                addVariableBytes(
+                addComplexBytes(
                     row,
                     serializedArraySizeForPayload(
                         *array, vector.wrappedIndex(row), elementMetadata));
@@ -1008,7 +1062,7 @@ void measurePayloadRows(
           const auto valueMetadata = rangeSizeMetadata(*map->mapValues());
           if (!vector.mayHaveNulls()) {
             for (vector_size_t row = 0; row < rowCount; ++row) {
-              addVariableBytes(
+              addComplexBytes(
                   row,
                   serializedMapSizeForPayload(
                       *map,
@@ -1019,7 +1073,7 @@ void measurePayloadRows(
           } else {
             for (vector_size_t row = 0; row < rowCount; ++row) {
               if (!vector.isNullAt(row)) {
-                addVariableBytes(
+                addComplexBytes(
                     row,
                     serializedMapSizeForPayload(
                         *map,
@@ -1048,7 +1102,7 @@ void measurePayloadRows(
               }
               addSize(size, serializedSizeForPayload(*childVector, wrappedRow));
             }
-            addVariableBytes(row, size);
+            addComplexBytes(row, size);
           }
           break;
         }
@@ -1343,16 +1397,22 @@ void writeComplexDecodedValue(
     char* payloadRow,
     char*& heapCursor,
     uint64_t& heapRemaining,
+    uint64_t serializedSize,
     ByteOutputStream& stream) {
   if (decoded.isNullAt(row)) {
     setNull(payloadRow, column);
+    return;
+  }
+  if (serializedSize == 0) {
+    storeUnaligned<PayloadVarlenRef>(
+        payloadRow + column.offset, PayloadVarlenRef{0, nullptr});
     return;
   }
   const auto decodedRow = decoded.index(row);
   stream.setRange(
       ByteRange{
           reinterpret_cast<uint8_t*>(heapCursor),
-          static_cast<int32_t>(heapRemaining),
+          static_cast<int32_t>(serializedSize),
           0},
       0);
   exec::ContainerRowSerde::serialize(
@@ -1361,6 +1421,7 @@ void writeComplexDecodedValue(
       stream,
       exec::ContainerRowSerdeOptions{.isKey = false});
   const auto valueSize = stream.size();
+  BOLT_DCHECK_EQ(valueSize, serializedSize);
   storeUnaligned<PayloadVarlenRef>(
       payloadRow + column.offset,
       PayloadVarlenRef{valueSize, valueSize == 0 ? nullptr : heapCursor});
@@ -1391,10 +1452,18 @@ void writeVariableValue(
     char* payloadRow,
     char*& heapCursor,
     uint64_t& heapRemaining,
+    uint64_t complexSize,
     ByteOutputStream& stream) {
   if (column.complex) {
     writeComplexDecodedValue(
-        column, *decoded, row, payloadRow, heapCursor, heapRemaining, stream);
+        column,
+        *decoded,
+        row,
+        payloadRow,
+        heapCursor,
+        heapRemaining,
+        complexSize,
+        stream);
     return;
   }
   if (vector.encoding() == VectorEncoding::Simple::FLAT) {
@@ -1406,18 +1475,13 @@ void writeVariableValue(
   }
 }
 
-struct VariableColumnWriter {
-  const PayloadRowColumnLayout* column;
-  const BaseVector* vector;
-  const DecodedVector* decoded;
-};
-
 void appendRows(
     const RowVector& input,
     RadixSortRunStorage& arena,
     const payload_size::RowSizes* sizes,
+    std::vector<std::optional<DecodedVector>>& decoded,
+    folly::small_vector<VariableColumnWriter, 32>& variableColumns,
     PayloadRowBatch& batch) {
-  batch = PayloadRowBatch{};
   const auto& layout = arena.payloadLayout();
   BOLT_CHECK_NOT_NULL(
       layout, "Radix sort run storage does not have a payload layout");
@@ -1428,7 +1492,9 @@ void appendRows(
         ? nullptr
         : sizes->heapSizes()->as<uint64_t>();
     arena.allocatePayloadRowBatch(
-        std::span<const uint64_t>(rawHeapSizes, input.size()), batch);
+        std::span<const uint64_t>(rawHeapSizes, input.size()),
+        sizes->heapSizes(),
+        batch);
   } else {
     arena.allocateFixedPayloadRowBatch(input.size(), batch);
   }
@@ -1450,29 +1516,36 @@ void appendRows(
     }
   }
 
-  std::vector<std::unique_ptr<DecodedVector>> decoded(input.childrenSize());
+  decoded.resize(input.childrenSize());
   for (uint32_t column = 0; column < input.childrenSize(); ++column) {
     if (input.childAt(column)->encoding() != VectorEncoding::Simple::FLAT) {
-      decoded[column] = std::make_unique<DecodedVector>(*input.childAt(column));
+      if (decoded[column].has_value()) {
+        decoded[column]->decode(*input.childAt(column));
+      } else {
+        decoded[column].emplace(*input.childAt(column));
+      }
+    } else {
+      decoded[column].reset();
     }
   }
 
-  std::vector<VariableColumnWriter> variableColumns;
-  if (hasVariableFields) {
-    variableColumns.reserve(layout->columns().size());
-  }
+  variableColumns.clear();
+  uint32_t complexOrdinal = 0;
   for (uint32_t column = 0; column < layout->columns().size(); ++column) {
     const auto& metadata = layout->columns()[column];
     if (!metadata.variable) {
       writeFixedColumn(
           metadata,
           *input.childAt(column),
-          decoded[column].get(),
+          decoded[column].has_value() ? &*decoded[column] : nullptr,
           rows,
           input.size());
     } else {
       variableColumns.push_back(VariableColumnWriter{
-          &metadata, input.childAt(column).get(), decoded[column].get()});
+          &metadata,
+          input.childAt(column).get(),
+          decoded[column].has_value() ? &*decoded[column] : nullptr,
+          metadata.complex ? sizes->complexSizes(complexOrdinal++) : nullptr});
     }
   }
 
@@ -1495,6 +1568,7 @@ void appendRows(
           payloadRow,
           heapCursor,
           heapRemaining,
+          writer.complexSizes == nullptr ? 0 : writer.complexSizes[row],
           stream);
     }
   }
@@ -1502,17 +1576,36 @@ void appendRows(
 
 } // namespace
 
+PayloadRowWriter::PayloadRowWriter() : impl_(std::make_unique<Impl>()) {}
+
+PayloadRowWriter::~PayloadRowWriter() = default;
+
+void PayloadRowWriter::clear() {
+  impl_->complexSizes.reset();
+  std::vector<std::optional<DecodedVector>>{}.swap(impl_->decoded);
+  folly::small_vector<VariableColumnWriter, 32>{}.swap(impl_->variableColumns);
+}
+
 void PayloadRowWriter::append(
     const RowVector& input,
     RadixSortRunStorage& arena,
     PayloadRowBatch& batch) {
   const auto& layout = arena.payloadLayout();
   if (!layout->hasVariableFields()) {
-    return appendRows(input, arena, nullptr, batch);
+    return appendRows(
+        input, arena, nullptr, impl_->decoded, impl_->variableColumns, batch);
   }
   payload_size::RowSizes sizes;
-  payload_size::measurePayloadRows(input, *layout, arena.pool(), sizes);
-  appendRows(input, arena, &sizes, batch);
+  auto reusableHeapSizes = std::move(batch.heapSizes_);
+  payload_size::measurePayloadRows(
+      input,
+      *layout,
+      arena.pool(),
+      std::move(reusableHeapSizes),
+      impl_->complexSizes,
+      sizes);
+  appendRows(
+      input, arena, &sizes, impl_->decoded, impl_->variableColumns, batch);
 }
 
 } // namespace bytedance::bolt::exec::radixsort

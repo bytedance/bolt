@@ -22,6 +22,8 @@
 #include <optional>
 #include <type_traits>
 
+#include "bolt/buffer/Buffer.h"
+
 namespace bytedance::bolt::exec::radixsort {
 
 static_assert(
@@ -65,6 +67,23 @@ std::optional<T> checkedMultiply(T left, T right) {
     return std::nullopt;
   }
   return result;
+}
+
+template <typename T>
+T* prepareReusableBuffer(
+    BufferPtr& buffer,
+    size_t count,
+    memory::MemoryPool* pool) {
+  const auto bytes = checkedMultiply<size_t>(count, sizeof(T));
+  BOLT_CHECK(bytes.has_value(), "Radix sort reusable buffer size overflows");
+  if (buffer == nullptr || buffer->pool() != pool || !buffer->isMutable()) {
+    buffer = AlignedBuffer::allocate<T>(count, pool);
+  } else if (buffer->capacity() < *bytes) {
+    AlignedBuffer::reallocate<T>(&buffer, count);
+  } else {
+    buffer->setSize(*bytes);
+  }
+  return buffer->asMutable<T>();
 }
 
 template <typename T>

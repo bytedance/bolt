@@ -201,6 +201,11 @@ class RadixSortRunStorage {
       std::span<const uint64_t> heapSizes,
       PayloadRowBatch& batch);
 
+  void allocatePayloadRowBatch(
+      std::span<const uint64_t> heapSizes,
+      const BufferPtr& sizeStorage,
+      PayloadRowBatch& batch);
+
   void allocateFixedPayloadRowBatch(
       vector_size_t count,
       PayloadRowBatch& batch);

@@ -70,8 +70,9 @@ class RadixSortBuffer : public SortBufferBase {
   void spill() override;
 
   std::optional<common::SpillStats> spilledStats() const override {
-    return spilledFiles_.empty() ? std::nullopt
-                                 : std::make_optional(stats_.copy());
+    auto stats = stats_.copy();
+    return stats.spillRuns == 0 ? std::nullopt
+                                : std::make_optional(std::move(stats));
   }
 
   std::optional<common::SpillReadStats> spillReadStats() const override;
@@ -93,6 +94,8 @@ class RadixSortBuffer : public SortBufferBase {
 
   void prepareMerge();
 
+  void accumulateSpillReadStats();
+
   const RowTypePtr inputType_;
   memory::MemoryPool* const pool_;
   tsan_atomic<bool>* const nonReclaimableSection_;
@@ -109,6 +112,7 @@ class RadixSortBuffer : public SortBufferBase {
   std::unique_ptr<RadixSortRun> run_;
   std::vector<RadixSortSpillFile> spilledFiles_;
   folly::Synchronized<common::SpillStats> stats_;
+  common::SpillReadStats completedSpillReadStats_;
   std::unique_ptr<RadixSortMerger> merger_;
   BufferPtr mergeKeyRows_;
   BufferPtr mergePayloadRows_;

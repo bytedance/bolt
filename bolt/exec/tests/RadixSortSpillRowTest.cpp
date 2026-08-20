@@ -16,10 +16,13 @@
 
 #include <gtest/gtest.h>
 
+#include <zstd.h>
+
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +38,19 @@
 namespace bytedance::bolt::exec::radixsort::test {
 namespace {
 
+constexpr std::array kLayouts{
+    RadixSortKeyLayoutKind::kKeyOnlyFixed8,
+    RadixSortKeyLayoutKind::kKeyOnlyFixed16,
+    RadixSortKeyLayoutKind::kKeyOnlyFixed24,
+    RadixSortKeyLayoutKind::kKeyOnlyFixed32,
+    RadixSortKeyLayoutKind::kKeyOnlyVariable32,
+    RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
+    RadixSortKeyLayoutKind::kKeyWithPayloadFixed24,
+    RadixSortKeyLayoutKind::kKeyWithPayloadFixed32,
+    RadixSortKeyLayoutKind::kKeyWithPayloadVariable32,
+    RadixSortKeyLayoutKind::kKeyWithPayloadVariable56,
+    RadixSortKeyLayoutKind::kKeyWithPayloadVariable64};
+
 class RadixSortSpillRowTest : public testing::Test {
  public:
   static void SetUpTestSuite() {
@@ -43,20 +59,21 @@ class RadixSortSpillRowTest : public testing::Test {
   }
 
  protected:
+  static constexpr uint64_t kBlockHeaderSize = 2 * sizeof(uint32_t);
   std::shared_ptr<memory::MemoryPool> rootPool_{
       memory::memoryManager()->addRootPool()};
   std::shared_ptr<memory::MemoryPool> pool_{
       rootPool_->addLeafChild("radix-sort-spill-row-test")};
 
-  template <typename T>
+  template <typename T, typename U = T>
   FlatVectorPtr<T> makeVector(
       const TypePtr& type,
-      const std::vector<std::optional<T>>& values) {
+      const std::vector<std::optional<U>>& values) {
     auto result =
         BaseVector::create<FlatVector<T>>(type, values.size(), pool_.get());
     for (vector_size_t row = 0; row < values.size(); ++row) {
       if (values[row].has_value()) {
-        result->set(row, *values[row]);
+        result->set(row, T(*values[row]));
       } else {
         result->setNull(row, true);
       }
@@ -66,23 +83,13 @@ class RadixSortSpillRowTest : public testing::Test {
 
   FlatVectorPtr<StringView> makeStringVector(
       const std::vector<std::optional<std::string>>& values) {
-    auto result = BaseVector::create<FlatVector<StringView>>(
-        VARCHAR(), values.size(), pool_.get());
-    for (vector_size_t row = 0; row < values.size(); ++row) {
-      if (values[row].has_value()) {
-        result->set(row, StringView(*values[row]));
-      } else {
-        result->setNull(row, true);
-      }
-    }
-    return result;
+    return makeVector<StringView>(VARCHAR(), values);
   }
 
   RowVectorPtr makeRows(
       std::vector<std::string> names,
       const std::vector<VectorPtr>& children) {
     std::vector<TypePtr> types;
-    types.reserve(children.size());
     for (const auto& child : children) {
       types.push_back(child->type());
     }
@@ -106,10 +113,6 @@ class RadixSortSpillRowTest : public testing::Test {
     std::vector<vector_size_t> sizes;
     std::vector<std::optional<std::string>> keys;
     std::vector<std::optional<std::string>> values;
-    offsets.reserve(rows);
-    sizes.reserve(rows);
-    keys.reserve(rows * 24);
-    values.reserve(rows * 24);
     vector_size_t offset = 0;
     for (vector_size_t row = 0; row < rows; ++row) {
       offsets.push_back(offset);
@@ -146,38 +149,41 @@ class RadixSortSpillRowTest : public testing::Test {
     return maps;
   }
 
-  static CompareFlags flags() {
-    return CompareFlags{
-        .nullsFirst = true,
-        .ascending = true,
-        .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
-  }
-
   static void expectEquivalent(
       const RowVector& expected,
       const RowVector& actual) {
+    const CompareFlags flags{
+        .nullsFirst = true,
+        .ascending = true,
+        .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
     ASSERT_EQ(expected.size(), actual.size());
     ASSERT_EQ(expected.childrenSize(), actual.childrenSize());
     for (uint32_t column = 0; column < expected.childrenSize(); ++column) {
       for (vector_size_t row = 0; row < expected.size(); ++row) {
         const auto result = expected.childAt(column)->compare(
-            actual.childAt(column).get(), row, row, flags());
+            actual.childAt(column).get(), row, row, flags);
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(*result, 0) << "column=" << column << ", row=" << row;
       }
     }
   }
 
-  static const char* stringPointer(const StringView& value) {
-    return loadUnaligned<const char*>(
-        reinterpret_cast<const char*>(&value) + sizeof(uint64_t));
+  void expectStringPayload(
+      const PayloadRowLayout& layout,
+      const std::vector<char*>& payloads,
+      const std::string& expected) {
+    RowVectorPtr output;
+    PayloadRowReader::gather(layout, payloads, pool_.get(), output);
+    EXPECT_EQ(
+        output->childAt(0)->as<FlatVector<StringView>>()->valueAt(0),
+        StringView(expected));
   }
 
   common::SpillConfig::SpillIOConfig spillIOConfig(
       const std::string& directory,
       common::CompressionKind compression,
       uint64_t writeBufferSize) const {
-    return common::SpillConfig::SpillIOConfig{
+    return {
         [directory]() -> const std::string& { return directory; },
         [&](uint64_t) {},
         "radix-sort-spill-test",
@@ -189,22 +195,238 @@ class RadixSortSpillRowTest : public testing::Test {
         std::nullopt};
   }
 
-  std::vector<char*> readSpilledRows(
-      const std::vector<RadixSortSpillFile>& files,
-      const RadixSortSpillRunMeta& meta,
-      const PayloadRowLayout* layout) {
-    std::vector<char*> rows;
-    for (const auto& file : files) {
-      RadixSortSpillReader reader(file, meta, layout, pool_.get(), false);
-      std::vector<char*> keys;
-      std::vector<char*> payloads;
-      while (reader.nextBatch(keys, payloads)) {
-        for (auto* payload : payloads) {
-          rows.push_back(payload);
-        }
+  struct SpilledRun {
+    std::shared_ptr<exec::test::TempDirectoryPath> directory;
+    RadixSortSpillFile file;
+    RadixSortSpillRunMeta meta;
+  };
+
+  template <typename T>
+  void overwriteSpillValue(
+      const std::string& path,
+      uint64_t offset,
+      const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    BOLT_CHECK(file.good(), path);
+    file.seekp(offset);
+    BOLT_CHECK(file.good(), "offset={}", offset);
+    file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    BOLT_CHECK(file.good(), "offset={}", offset);
+  }
+
+  template <typename T>
+  T readSpillValue(const std::string& path, uint64_t offset) {
+    std::ifstream file(path, std::ios::binary);
+    T value;
+    file.seekg(offset);
+    file.read(reinterpret_cast<char*>(&value), sizeof(value));
+    EXPECT_TRUE(file.good()) << "offset=" << offset;
+    return value;
+  }
+
+  SpilledRun spillSingleRun(
+      const RadixSortRunStorage& storage,
+      const PayloadRowLayout* payloadLayout,
+      common::CompressionKind compression = common::CompressionKind_NONE,
+      uint64_t writeBufferSize = 1 << 20,
+      bool outputStage = false) {
+    auto directory = exec::test::TempDirectoryPath::create();
+    folly::Synchronized<common::SpillStats> stats;
+    RadixSortSpillWriter writer(
+        directory->path + "/spill",
+        spillIOConfig(directory->path, compression, writeBufferSize),
+        pool_.get(),
+        &stats);
+    std::vector<RadixSortSpillFile> files;
+    if (outputStage) {
+      std::vector<const char*> keys(storage.size());
+      std::vector<char*> payloads(storage.size());
+      for (uint64_t row = 0; row < storage.size(); ++row) {
+        keys[row] = storage.keyDataAt(row);
+        payloads[row] = RadixSortKey(storage.layout(), keys[row]).payload();
       }
+      writer.writeRows(
+          storage.layout(),
+          payloadLayout,
+          keys.data(),
+          payloads.data(),
+          storage.size());
+      files = writer.finishRows();
+    } else {
+      files = writer.writeRun(storage, payloadLayout);
     }
-    return rows;
+    BOLT_CHECK_EQ(files.size(), 1);
+    auto file = std::move(files.front());
+    EXPECT_EQ(file.rowCount, storage.size());
+    EXPECT_EQ(file.compressionKind, compression);
+    EXPECT_GT(file.size, 0);
+    const auto written = stats.copy();
+    EXPECT_EQ(written.spilledBytes, file.size);
+    EXPECT_GT(written.spillWrites, 0);
+    EXPECT_TRUE(std::filesystem::exists(file.path));
+    return {
+        std::move(directory),
+        std::move(file),
+        {storage.layout(),
+         static_cast<uint32_t>(payloadLayout ? payloadLayout->rowWidth() : 0)}};
+  }
+
+  struct ReadRows {
+    SpilledRun spill;
+    std::unique_ptr<RadixSortSpillReader> reader;
+    std::vector<char*> keys;
+    std::vector<char*> payloads;
+  };
+  ReadRows readAll(SpilledRun spill, const PayloadRowLayout* payloadLayout) {
+    ReadRows result{std::move(spill), nullptr, {}, {}};
+    result.reader = std::make_unique<RadixSortSpillReader>(
+        result.spill.file,
+        result.spill.meta,
+        payloadLayout,
+        pool_.get(),
+        false);
+    std::vector<char*> keys, payloads;
+    while (result.reader->nextBatch(keys, payloads)) {
+      result.keys.insert(result.keys.end(), keys.begin(), keys.end());
+      result.payloads.insert(
+          result.payloads.end(), payloads.begin(), payloads.end());
+    }
+    return result;
+  }
+
+  void appendAndVerify(
+      RadixSortKeyLayoutKind kind,
+      const std::vector<std::string>& keys,
+      const RowVectorPtr& payload,
+      const std::shared_ptr<const PayloadRowLayout>& payloadLayout,
+      common::CompressionKind compression = common::CompressionKind_NONE,
+      uint64_t writeBufferSize = 1 << 20,
+      bool outputStage = false) {
+    auto keyLayout = RadixSortKeyLayout::fromKind(kind);
+    const auto layout = keyLayout.hasPayload() ? payloadLayout : nullptr;
+    RadixSortRunStorage storage(pool_.get(), keyLayout, 4, 64, layout, 4, 1024);
+    PayloadRowBatch rows;
+    if (layout) {
+      PayloadRowWriter payloadWriter;
+      payloadWriter.append(*payload, storage, rows);
+    }
+    for (uint32_t row = 0; row < keys.size(); ++row) {
+      storage.append(keys[row], layout ? rows.rowAt(row) : nullptr);
+    }
+    auto read = readAll(
+        spillSingleRun(
+            storage, layout.get(), compression, writeBufferSize, outputStage),
+        layout.get());
+    ASSERT_EQ(read.keys.size(), storage.size());
+    for (vector_size_t row = 0; row < storage.size(); ++row) {
+      EXPECT_EQ(
+          RadixSortKey(keyLayout, read.keys[row])
+              .compare(RadixSortKey(keyLayout, storage.keyDataAt(row))),
+          0)
+          << "row=" << row;
+    }
+    if (layout) {
+      ASSERT_EQ(read.payloads.size(), storage.size());
+      RowVectorPtr output;
+      PayloadRowReader::gather(*layout, read.payloads, pool_.get(), output);
+      expectEquivalent(*payload, *output);
+    }
+  }
+
+  void expectOversizedRoundTrip(
+      RadixSortKeyLayoutKind kind,
+      const std::shared_ptr<const PayloadRowLayout>& payloadLayout,
+      char* payload) {
+    auto keyLayout = RadixSortKeyLayout::fromKind(kind);
+    RadixSortRunStorage storage(
+        pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 64);
+    storage.append(
+        std::string(
+            keyLayout.isVariable() ? keyLayout.inlineCapacity() : 8, 'a'),
+        payload);
+    auto read = readAll(
+        spillSingleRun(storage, payloadLayout.get()), payloadLayout.get());
+    ASSERT_EQ(read.keys.size(), 1);
+    ASSERT_EQ(read.payloads.size(), 1);
+    EXPECT_EQ(
+        RadixSortKey(keyLayout, read.keys[0])
+            .compare(RadixSortKey(keyLayout, storage.keyDataAt(0))),
+        0);
+    EXPECT_EQ(
+        std::memcmp(read.payloads[0], payload, payloadLayout->rowWidth()), 0);
+  }
+
+  void verifyMerge(
+      const RadixSortKeyLayout& layout,
+      const std::vector<int64_t>& values,
+      bool includeEmpty = false) {
+    std::vector<std::unique_ptr<RadixSortRunStorage>> runs;
+    std::vector<std::unique_ptr<int64_t>> payloadValues;
+    for (const auto value : values) {
+      auto storage =
+          std::make_unique<RadixSortRunStorage>(pool_.get(), layout, 2, 64);
+      payloadValues.push_back(std::make_unique<int64_t>(value));
+      std::string key(sizeof(uint64_t), '\0');
+      key.back() = static_cast<char>(value);
+      storage->append(key, reinterpret_cast<char*>(payloadValues.back().get()));
+      runs.push_back(std::move(storage));
+    }
+    if (includeEmpty) {
+      runs.push_back(
+          std::make_unique<RadixSortRunStorage>(pool_.get(), layout, 2, 64));
+    }
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+    for (const auto& run : runs) {
+      streams.push_back(std::make_unique<RadixSortMemoryRunMergeStream>(*run));
+    }
+    RadixSortMerger merger(layout, std::move(streams));
+    std::vector<const char*> keys(values.size());
+    std::vector<char*> payloads(values.size());
+    const auto count =
+        merger.collectRows(keys.size(), keys.data(), payloads.data());
+    ASSERT_EQ(count, values.size());
+    for (vector_size_t row = 0; row < count; ++row) {
+      EXPECT_EQ(*reinterpret_cast<int64_t*>(payloads[row]), values[row])
+          << "row=" << row;
+    }
+  }
+
+  SpilledRun writeInlineKeySpill(
+      RadixSortKeyLayoutKind kind,
+      uint32_t rowCount) {
+    auto keyLayout = RadixSortKeyLayout::fromKind(kind);
+    RadixSortRunStorage storage(pool_.get(), keyLayout, 4, 64);
+    const auto keySize =
+        keyLayout.isVariable() ? keyLayout.inlineCapacity() : 8;
+    for (uint32_t row = 0; row < rowCount; ++row) {
+      storage.append(std::string(keySize, static_cast<char>(row + 1)));
+    }
+    return spillSingleRun(storage, nullptr);
+  }
+
+  SpilledRun writeLargePayloadSpill(
+      const std::string& value,
+      std::shared_ptr<const PayloadRowLayout>& payloadLayout) {
+    auto payload =
+        makeRows({"payload_string"}, {makeStringVector({value, value, value})});
+    payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
+    RadixSortRunStorage storage(
+        pool_.get(),
+        RadixSortKeyLayout::fromKind(
+            RadixSortKeyLayoutKind::kKeyWithPayloadVariable32),
+        4,
+        64,
+        payloadLayout,
+        4,
+        2 << 20);
+    PayloadRowBatch rows;
+    PayloadRowWriter payloadWriter;
+    payloadWriter.append(*payload, storage, rows);
+    for (vector_size_t row = 0; row < payload->size(); ++row) {
+      storage.append("key_" + std::to_string(row), rows.rowAt(row));
+    }
+    return spillSingleRun(storage, payloadLayout.get());
   }
 };
 
@@ -219,15 +441,16 @@ TEST_F(RadixSortSpillRowTest, fixedPayloadRoundTrip) {
   RadixSortRunStorage arena(
       pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 64);
   PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, arena, payloadBatch);
+  PayloadRowWriter payloadWriter;
+  payloadWriter.append(*payload, arena, payloadBatch);
   arena.append(
       std::string_view("\x10\x00\x00\x00\x00\x00\x00\x01", 8),
       payloadBatch.rowAt(0));
 
   const auto* key = arena.keyDataAt(0);
-  const auto rowSize =
-      RadixSortSpillRow::sizeForSerialize(keyLayout, payloadLayout.get(), key)
-          .totalSize;
+  const auto serializedSize =
+      RadixSortSpillRow::sizeForSerialize(keyLayout, payloadLayout.get(), key);
+  const auto rowSize = serializedSize.totalSize;
   std::vector<char> buffer(rowSize);
   RadixSortSpillRow::serialize(
       keyLayout, payloadLayout.get(), key, buffer.data());
@@ -271,13 +494,14 @@ TEST_F(RadixSortSpillRowTest, variableKeyAndPayloadRoundTrip) {
   RadixSortRunStorage arena(
       pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 1024);
   PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, arena, payloadBatch);
+  PayloadRowWriter payloadWriter;
+  payloadWriter.append(*payload, arena, payloadBatch);
   arena.append(longKey, payloadBatch.rowAt(0));
 
   const auto* key = arena.keyDataAt(0);
-  const auto rowSize =
-      RadixSortSpillRow::sizeForSerialize(keyLayout, payloadLayout.get(), key)
-          .totalSize;
+  const auto serializedSize =
+      RadixSortSpillRow::sizeForSerialize(keyLayout, payloadLayout.get(), key);
+  const auto rowSize = serializedSize.totalSize;
   std::vector<char> buffer(rowSize);
   RadixSortSpillRow::serialize(
       keyLayout, payloadLayout.get(), key, buffer.data());
@@ -285,23 +509,36 @@ TEST_F(RadixSortSpillRowTest, variableKeyAndPayloadRoundTrip) {
   RadixSortSpillRunMeta meta{
       keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
   row.validate(meta);
+  const auto serializedKeyFixedSize =
+      *keyLayout.dataOffset() + sizeof(uint64_t);
+  EXPECT_EQ(serializedSize.keyHeapSize, longKey.size());
+  EXPECT_EQ(serializedSize.keySize, serializedKeyFixedSize + longKey.size());
   EXPECT_EQ(
-      row.trustedKeySize(meta), *keyLayout.payloadOffset() + longKey.size());
+      rowSize,
+      RadixSortSpillRow::kHeaderSize + serializedKeyFixedSize + longKey.size() +
+          payloadLayout->rowWidth() + payloadBatch.heapSizeAt(0));
+  EXPECT_EQ(row.trustedKeySize(meta), serializedKeyFixedSize + longKey.size());
   EXPECT_EQ(row.trustedPayloadHeapSize(meta), payloadBatch.heapSizeAt(0));
 
   const auto* keyRecord = row.trustedKeyBytes(meta).data();
   const auto keyOffset =
       loadUnaligned<uint64_t>(keyRecord + *keyLayout.dataOffset());
-  EXPECT_GE(keyOffset, RadixSortSpillRow::kHeaderSize);
-  EXPECT_LT(keyOffset, row.header().totalSize);
-  EXPECT_NE(
-      reinterpret_cast<const char*>(keyOffset), key + *keyLayout.dataOffset());
+  EXPECT_EQ(keyOffset, RadixSortSpillRow::kHeaderSize + serializedKeyFixedSize);
+  EXPECT_EQ(
+      std::string_view(buffer.data() + keyOffset, longKey.size()), longKey);
 
   auto* fixed = row.trustedPayloadFixed(meta);
+  EXPECT_EQ(
+      fixed,
+      buffer.data() + RadixSortSpillRow::kHeaderSize + serializedKeyFixedSize +
+          longKey.size());
   const auto stringValue =
       loadUnaligned<StringView>(fixed + payloadLayout->columns()[0].offset);
   ASSERT_FALSE(stringValue.isInline());
-  EXPECT_LT(reinterpret_cast<uintptr_t>(stringPointer(stringValue)), rowSize);
+  EXPECT_LT(
+      reinterpret_cast<uintptr_t>(loadUnaligned<const char*>(
+          reinterpret_cast<const char*>(&stringValue) + sizeof(uint64_t))),
+      rowSize);
   const auto nestedValue = loadUnaligned<PayloadVarlenRef>(
       fixed + payloadLayout->columns()[1].offset);
   EXPECT_LT(reinterpret_cast<uintptr_t>(nestedValue.data), rowSize);
@@ -311,6 +548,7 @@ TEST_F(RadixSortSpillRowTest, variableKeyAndPayloadRoundTrip) {
       RadixSortKey(keyLayout, row.trustedKeyBytes(meta).data());
   EXPECT_EQ(
       std::string_view(restoredKey.fullKeyData(), longKey.size()), longKey);
+  EXPECT_EQ(restoredKey.fullKeyData(), buffer.data() + keyOffset);
   row.trustedRestorePayloadPointers(meta, *payloadLayout);
   const auto restoredString =
       loadUnaligned<StringView>(fixed + payloadLayout->columns()[0].offset);
@@ -335,26 +573,7 @@ TEST_F(RadixSortSpillRowTest, variableKeyAndPayloadRoundTrip) {
   expectEquivalent(*expected, *output);
 }
 
-TEST_F(RadixSortSpillRowTest, rejectsCorruptHeaders) {
-  RadixSortSpillRowHeader header{
-      static_cast<uint32_t>(RadixSortSpillRow::kHeaderSize - 1)};
-  RadixSortSpillRunMeta meta{
-      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8), 0};
-  std::vector<char> buffer(sizeof(header) + 8);
-  storeUnaligned<RadixSortSpillRowHeader>(buffer.data(), header);
-  EXPECT_THROW(RadixSortSpillRow(buffer.data()).validate(meta), BoltException);
-
-  header.totalSize = 16;
-  storeUnaligned<RadixSortSpillRowHeader>(buffer.data(), header);
-  EXPECT_THROW(RadixSortSpillRow(buffer.data()).validate(meta), BoltException);
-
-  header.totalSize = 13;
-  storeUnaligned<RadixSortSpillRowHeader>(buffer.data(), header);
-  EXPECT_THROW(RadixSortSpillRow(buffer.data()).validate(meta), BoltException);
-}
-
 TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithoutCompression) {
-  auto directory = exec::test::TempDirectoryPath::create();
   auto payload = makeRows(
       {"payload_string", "payload_bigint"},
       {makeStringVector(
@@ -364,124 +583,66 @@ TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithoutCompression) {
             std::string(96, 'b')}),
        makeVector<int64_t>(BIGINT(), {3, 1, std::nullopt, 2})});
   auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
-  auto keyLayout = RadixSortKeyLayout::fromKind(
-      RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
-  RadixSortRunStorage storage(
-      pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 1024);
-  PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, storage, payloadBatch);
-  const std::array<std::string, 4> keys{
-      std::string(48, 'd'),
-      std::string("alpha"),
-      std::string(80, 'c'),
-      std::string("omega")};
-  for (uint32_t row = 0; row < keys.size(); ++row) {
-    storage.append(keys[row], payloadBatch.rowAt(row));
-  }
-
-  folly::Synchronized<common::SpillStats> stats;
-  RadixSortSpillWriter writer(
-      directory->path + "/spill",
-      spillIOConfig(directory->path, common::CompressionKind_NONE, 96),
-      pool_.get(),
-      &stats);
-  auto files = writer.writeRun(storage, payloadLayout.get());
-  ASSERT_EQ(files.size(), 1);
-  uint64_t spilledRows = 0;
-  for (const auto& file : files) {
-    spilledRows += file.rowCount;
-    EXPECT_GT(file.size, 0);
-  }
-  EXPECT_EQ(spilledRows, storage.size());
-  EXPECT_GT(stats.copy().spilledBytes, 0);
-
-  RadixSortSpillRunMeta meta{
-      keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
-  for (const auto& file : files) {
-    RadixSortSpillReader reader(
-        file, meta, payloadLayout.get(), pool_.get(), false);
-    std::vector<char*> keyRows;
-    std::vector<char*> payloadRows;
-    std::vector<char*> batchKeys;
-    std::vector<char*> batchPayloads;
-    while (reader.nextBatch(batchKeys, batchPayloads)) {
-      keyRows.insert(keyRows.end(), batchKeys.begin(), batchKeys.end());
-      payloadRows.insert(
-          payloadRows.end(), batchPayloads.begin(), batchPayloads.end());
-    }
-    ASSERT_EQ(keyRows.size(), storage.size());
-    ASSERT_EQ(payloadRows.size(), storage.size());
-    for (uint32_t row = 0; row < keyRows.size(); ++row) {
-      EXPECT_EQ(
-          RadixSortKey(keyLayout, keyRows[row])
-              .compare(RadixSortKey(keyLayout, storage.keyDataAt(row))),
-          0);
-    }
-    RowVectorPtr output;
-    PayloadRowReader::gather(
-        *payloadLayout,
-        std::span<char* const>(payloadRows.data(), payloadRows.size()),
-        pool_.get(),
-        output);
-    expectEquivalent(*payload, *output);
-  }
+  appendAndVerify(
+      RadixSortKeyLayoutKind::kKeyWithPayloadVariable32,
+      {std::string(48, 'd'), "alpha", std::string(80, 'c'), "omega"},
+      payload,
+      payloadLayout,
+      common::CompressionKind_NONE,
+      96);
 }
 
-TEST_F(RadixSortSpillRowTest, mixedVariableKeyBlockFallsBackToGenericRead) {
-  auto directory = exec::test::TempDirectoryPath::create();
-  auto payload = makeRows(
-      {"payload_bigint"}, {makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5})});
-  auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
-  auto keyLayout = RadixSortKeyLayout::fromKind(
-      RadixSortKeyLayoutKind::kKeyWithPayloadVariable56);
-  RadixSortRunStorage storage(
-      pool_.get(), keyLayout, 16, 256, payloadLayout, 16, 256);
-  PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, storage, payloadBatch);
-
-  const std::array<std::string, 6> keys{
-      std::string(32, 'a'),
-      std::string(32, 'b'),
-      std::string(32, 'c'),
-      std::string(45, 'd'),
-      std::string(32, 'e'),
-      std::string(32, 'f')};
-  for (uint32_t row = 0; row < keys.size(); ++row) {
-    storage.append(keys[row], payloadBatch.rowAt(row));
+TEST_F(RadixSortSpillRowTest, rejectsUnsupportedCompressionKinds) {
+  common::SpillConfig config;
+  config.maxFileSize =
+      static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  for (const auto kind :
+       {common::CompressionKind_NONE,
+        common::CompressionKind_LZ4,
+        common::CompressionKind_ZSTD}) {
+    config.compressionKind = kind;
+    EXPECT_TRUE(supportsRadixSortSpill(config));
   }
+  config.compressionKind = common::CompressionKind_ZLIB;
+  EXPECT_FALSE(supportsRadixSortSpill(config));
+  config.compressionKind = common::CompressionKind_NONE;
+  config.setJITenableForSpill(false);
+  EXPECT_TRUE(supportsRadixSortSpill(config));
+  config.setJITenableForSpill(true);
+  EXPECT_TRUE(supportsRadixSortSpill(config));
+  config.singlePartitionSerdeKind = "Arrow";
+  EXPECT_FALSE(supportsRadixSortSpill(config));
+  config.singlePartitionSerdeKind.clear();
+  config.maxFileSize = 1ULL << 30;
+  EXPECT_FALSE(supportsRadixSortSpill(config));
 
+  auto directory = exec::test::TempDirectoryPath::create();
   folly::Synchronized<common::SpillStats> stats;
-  RadixSortSpillWriter writer(
-      directory->path + "/spill",
-      spillIOConfig(directory->path, common::CompressionKind_NONE, 4096),
-      pool_.get(),
-      &stats);
-  auto files = writer.writeRun(storage, payloadLayout.get());
-  ASSERT_EQ(files.size(), 1);
+  EXPECT_THROW(
+      RadixSortSpillWriter(
+          directory->path + "/spill",
+          spillIOConfig(
+              directory->path, common::CompressionKind_SNAPPY, 1 << 20),
+          pool_.get(),
+          &stats),
+      BoltException);
 
   RadixSortSpillRunMeta meta{
-      keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
-  RadixSortSpillReader reader(
-      files[0], meta, payloadLayout.get(), pool_.get(), false);
-  std::vector<char*> batchKeys;
-  std::vector<char*> batchPayloads;
-  ASSERT_TRUE(reader.nextBatch(batchKeys, batchPayloads));
-  ASSERT_EQ(batchKeys.size(), keys.size());
-  ASSERT_EQ(batchPayloads.size(), keys.size());
-  for (uint32_t row = 0; row < keys.size(); ++row) {
-    EXPECT_EQ(
-        RadixSortKey(keyLayout, batchKeys[row])
-            .compare(RadixSortKey(keyLayout, storage.keyDataAt(row))),
-        0)
-        << "row=" << row;
-  }
-  EXPECT_FALSE(reader.nextBatch(batchKeys, batchPayloads));
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8), 0};
+  EXPECT_THROW(
+      RadixSortSpillReader(
+          {0, "", 0, 0, common::CompressionKind_SNAPPY},
+          meta,
+          nullptr,
+          pool_.get(),
+          false),
+      BoltException);
 }
 
 TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithCompression) {
   for (const auto compression :
        {common::CompressionKind_LZ4, common::CompressionKind_ZSTD}) {
-    auto directory = exec::test::TempDirectoryPath::create();
+    SCOPED_TRACE(compression);
     auto payload = makeRows(
         {"payload_string"},
         {makeStringVector(
@@ -489,163 +650,84 @@ TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithCompression) {
              std::string(256, 'y'),
              std::string(256, 'z')})});
     auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
-    auto keyLayout = RadixSortKeyLayout::fromKind(
-        RadixSortKeyLayoutKind::kKeyWithPayloadFixed16);
-    RadixSortRunStorage storage(
-        pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 1024);
-    PayloadRowBatch payloadBatch;
-    PayloadRowWriter::append(*payload, storage, payloadBatch);
-    storage.append(
-        std::string_view("\x00\x00\x00\x00\x00\x00\x00\x01", 8),
-        payloadBatch.rowAt(0));
-    storage.append(
-        std::string_view("\x00\x00\x00\x00\x00\x00\x00\x02", 8),
-        payloadBatch.rowAt(1));
-    storage.append(
-        std::string_view("\x00\x00\x00\x00\x00\x00\x00\x03", 8),
-        payloadBatch.rowAt(2));
-
-    folly::Synchronized<common::SpillStats> stats;
-    RadixSortSpillWriter writer(
-        directory->path + "/spill",
-        spillIOConfig(directory->path, compression, 1 << 20),
-        pool_.get(),
-        &stats);
-    auto files = writer.writeRun(storage, payloadLayout.get());
-    ASSERT_EQ(files.size(), 1);
-    RadixSortSpillRunMeta meta{
-        keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
-    for (const auto& file : files) {
-      RadixSortSpillReader reader(
-          file, meta, payloadLayout.get(), pool_.get(), false);
-      std::vector<char*> payloadRows;
-      std::vector<char*> keys;
-      std::vector<char*> payloads;
-      while (reader.nextBatch(keys, payloads)) {
-        payloadRows.insert(payloadRows.end(), payloads.begin(), payloads.end());
-      }
-      RowVectorPtr output;
-      PayloadRowReader::gather(
-          *payloadLayout,
-          std::span<char* const>(payloadRows.data(), payloadRows.size()),
-          pool_.get(),
-          output);
-      expectEquivalent(*payload, *output);
+    std::vector<std::string> keys;
+    for (uint32_t row = 0; row < payload->size(); ++row) {
+      std::array<char, sizeof(uint64_t)> key{};
+      key.back() = static_cast<char>(row + 1);
+      keys.emplace_back(key.data(), key.size());
     }
+    appendAndVerify(
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
+        keys,
+        payload,
+        payloadLayout,
+        compression);
   }
 }
 
 TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithLargeMapPayloadAndZstd) {
   constexpr vector_size_t kRows = 96;
+  std::vector<std::optional<int64_t>> deviceIds;
+  std::vector<std::optional<std::string>> events;
+  std::vector<std::string> keys;
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    deviceIds.push_back(10'000 + row);
+    events.push_back("event_" + std::to_string(row % 8));
+    keys.push_back(*events.back() + "_" + std::to_string(row));
+  }
   auto payload = makeRows(
       {"device_id", "params", "event"},
-      {makeVector<int64_t>(
-           BIGINT(),
-           [&]() {
-             std::vector<std::optional<int64_t>> values;
-             values.reserve(kRows);
-             for (vector_size_t row = 0; row < kRows; ++row) {
-               values.push_back(10'000 + row);
-             }
-             return values;
-           }()),
+      {makeVector<int64_t>(BIGINT(), deviceIds),
        makeLargeStringStringMaps(kRows),
-       makeStringVector([&]() {
-         std::vector<std::optional<std::string>> values;
-         values.reserve(kRows);
-         for (vector_size_t row = 0; row < kRows; ++row) {
-           values.push_back("event_" + std::to_string(row % 8));
-         }
-         return values;
-       }())});
+       makeStringVector(events)});
   auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
-  auto keyLayout = RadixSortKeyLayout::fromKind(
-      RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
-  RadixSortRunStorage storage(
-      pool_.get(), keyLayout, 32, 4096, payloadLayout, 32, 128 * 1024);
-  PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, storage, payloadBatch);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    storage.append(
-        "event_" + std::to_string(row % 8) + "_" + std::to_string(row),
-        payloadBatch.rowAt(row));
-  }
+  appendAndVerify(
+      RadixSortKeyLayoutKind::kKeyWithPayloadVariable32,
+      keys,
+      payload,
+      payloadLayout,
+      common::CompressionKind_ZSTD);
+}
 
-  auto directory = exec::test::TempDirectoryPath::create();
-  folly::Synchronized<common::SpillStats> stats;
-  RadixSortSpillWriter writer(
-      directory->path + "/spill",
-      spillIOConfig(directory->path, common::CompressionKind_ZSTD, 1 << 20),
-      pool_.get(),
-      &stats);
-  auto files = writer.writeRun(storage, payloadLayout.get());
-  ASSERT_EQ(files.size(), 1);
-  EXPECT_EQ(files[0].compressionKind, common::CompressionKind_ZSTD);
-  EXPECT_EQ(files[0].rowCount, kRows);
-  EXPECT_GT(stats.copy().spilledBytes, 0);
-  EXPECT_GT(stats.copy().spillFlushTimeUs, 0);
-
-  RadixSortSpillRunMeta meta{
-      keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
-  for (const auto& file : files) {
+TEST_F(RadixSortSpillRowTest, rejectsBlockSizesBeforeRowAllocation) {
+  for (const auto& [name, header] :
+       std::array<std::pair<const char*, std::array<int32_t, 2>>, 2>{{
+           {"negative uncompressed size", {INT32_MIN, 1}},
+           {"negative stored size", {1, INT32_MIN}},
+       }}) {
+    SCOPED_TRACE(name);
+    auto spill = writeInlineKeySpill(RadixSortKeyLayoutKind::kKeyOnlyFixed8, 1);
+    overwriteSpillValue(spill.file.path, 0, header);
     RadixSortSpillReader reader(
-        file, meta, payloadLayout.get(), pool_.get(), false);
-    std::vector<char*> keys;
-    std::vector<char*> payloadRows;
-    std::vector<char*> batchPayloads;
-    while (reader.nextBatch(keys, batchPayloads)) {
-      payloadRows.insert(
-          payloadRows.end(), batchPayloads.begin(), batchPayloads.end());
-    }
-    ASSERT_EQ(payloadRows.size(), kRows);
-    RowVectorPtr output;
-    PayloadRowReader::gather(
-        *payloadLayout,
-        std::span<char* const>(payloadRows.data(), payloadRows.size()),
-        pool_.get(),
-        output);
-    expectEquivalent(*payload, *output);
+        spill.file, spill.meta, nullptr, pool_.get(), false);
+    const auto allocations = pool_->stats().numAllocs;
+    std::vector<char*> keys, payloads;
+    EXPECT_THROW(reader.nextBatch(keys, payloads), BoltException);
+    EXPECT_EQ(pool_->stats().numAllocs, allocations);
   }
 }
 
-TEST_F(RadixSortSpillRowTest, rejectsTruncatedCompressedBlock) {
-  auto payload = makeRows(
-      {"payload_string"},
-      {makeStringVector({std::string(256, 'x'), std::string(256, 'y')})});
-  auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
-  auto keyLayout = RadixSortKeyLayout::fromKind(
-      RadixSortKeyLayoutKind::kKeyWithPayloadFixed16);
-  RadixSortRunStorage storage(
-      pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 1024);
-  PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, storage, payloadBatch);
-  storage.append(
-      std::string_view("\x00\x00\x00\x00\x00\x00\x00\x01", 8),
-      payloadBatch.rowAt(0));
-  storage.append(
-      std::string_view("\x00\x00\x00\x00\x00\x00\x00\x02", 8),
-      payloadBatch.rowAt(1));
+TEST_F(
+    RadixSortSpillRowTest,
+    rejectsCompressedSizeAboveCodecBoundBeforeAllocation) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage storage(pool_.get(), keyLayout, 4, 64);
+  storage.append(std::string(8, 'k'));
+  auto spill = spillSingleRun(storage, nullptr, common::CompressionKind_ZSTD);
+  const auto uncompressedSize = readSpillValue<int32_t>(spill.file.path, 0);
+  const auto invalidStoredSize =
+      static_cast<int32_t>(ZSTD_compressBound(uncompressedSize) + 1);
+  overwriteSpillValue(spill.file.path, sizeof(int32_t), invalidStoredSize);
+  spill.file.size = kBlockHeaderSize + invalidStoredSize;
+  std::filesystem::resize_file(spill.file.path, spill.file.size);
 
-  auto directory = exec::test::TempDirectoryPath::create();
-  folly::Synchronized<common::SpillStats> stats;
-  RadixSortSpillWriter writer(
-      directory->path + "/spill",
-      spillIOConfig(directory->path, common::CompressionKind_ZSTD, 1 << 20),
-      pool_.get(),
-      &stats);
-  auto files = writer.writeRun(storage, payloadLayout.get());
-  ASSERT_EQ(files.size(), 1);
-  ASSERT_GT(files[0].size, 0);
-  std::filesystem::resize_file(files[0].path, files[0].size - 1);
-  files[0].size -= 1;
-
-  RadixSortSpillRunMeta meta{
-      keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
   RadixSortSpillReader reader(
-      files[0], meta, payloadLayout.get(), pool_.get(), false);
-  std::vector<char*> keys;
-  std::vector<char*> payloads;
+      spill.file, spill.meta, nullptr, pool_.get(), false);
+  const auto allocations = pool_->stats().numAllocs;
+  std::vector<char*> keys, payloads;
   EXPECT_THROW(reader.nextBatch(keys, payloads), BoltException);
+  EXPECT_EQ(pool_->stats().numAllocs, allocations);
 }
 
 TEST_F(RadixSortSpillRowTest, writeRowsOutputStageRoundTripWithPayload) {
@@ -658,62 +740,192 @@ TEST_F(RadixSortSpillRowTest, writeRowsOutputStageRoundTripWithPayload) {
             std::string(112, 'c')}),
        makeVector<int64_t>(BIGINT(), {10, 20, 30, 40})});
   auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
-  auto keyLayout = RadixSortKeyLayout::fromKind(
-      RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
-  RadixSortRunStorage storage(
-      pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 1024);
-  PayloadRowBatch payloadBatch;
-  PayloadRowWriter::append(*payload, storage, payloadBatch);
-  const std::array<std::string, 4> keys{
-      std::string("k3"),
-      std::string("k1"),
-      std::string("k4"),
-      std::string("k2")};
-  std::array<const char*, 4> keyRows{};
-  std::array<char*, 4> payloadRows{};
-  for (vector_size_t row = 0; row < keys.size(); ++row) {
-    storage.append(keys[row], payloadBatch.rowAt(row));
-    keyRows[row] = storage.keyDataAt(row);
-    payloadRows[row] = payloadBatch.rowAt(row);
+  appendAndVerify(
+      RadixSortKeyLayoutKind::kKeyWithPayloadVariable32,
+      {"k3", "k1", "k4", "k2"},
+      payload,
+      payloadLayout,
+      common::CompressionKind_LZ4,
+      128,
+      true);
+}
+
+TEST_F(RadixSortSpillRowTest, fixedAndInlineVariableFastPathRoundTrip) {
+  const auto payload = makeRows(
+      {"payload_bigint", "payload_double"},
+      {makeVector<int64_t>(BIGINT(), {10, std::nullopt, 30}),
+       makeVector<double>(DOUBLE(), {1.5, -0.0, std::nullopt})});
+  auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
+  for (const auto kind : kLayouts) {
+    SCOPED_TRACE(static_cast<uint8_t>(kind));
+    const auto keySize = RadixSortKeyLayout::fromKind(kind).inlineCapacity();
+    appendAndVerify(
+        kind,
+        {
+            std::string(keySize - 1, 'a'),
+            std::string(keySize, '\0'),
+            std::string(keySize, 'z'),
+        },
+        payload,
+        payloadLayout);
+  }
+}
+
+TEST_F(
+    RadixSortSpillRowTest,
+    oversizedFixedAndInlineVariableFastPathRowsRoundTrip) {
+  constexpr uint32_t kColumns = 132'000;
+  std::vector<TypePtr> payloadTypes(kColumns, BIGINT());
+  auto payloadLayout = PayloadRowLayout::create(ROW(std::move(payloadTypes)));
+  ASSERT_GT(payloadLayout->rowWidth(), 1 << 20);
+  auto payload =
+      AlignedBuffer::allocate<char>(payloadLayout->rowWidth(), pool_.get());
+  auto* rawPayload = payload->asMutable<char>();
+  std::memset(rawPayload, 0xff, payloadLayout->nullBytes());
+  for (uint32_t column = 0; column < payloadLayout->columns().size();
+       ++column) {
+    storeUnaligned<int64_t>(
+        rawPayload + payloadLayout->columns()[column].offset,
+        static_cast<int64_t>(column));
   }
 
-  auto directory = exec::test::TempDirectoryPath::create();
-  folly::Synchronized<common::SpillStats> stats;
-  RadixSortSpillWriter writer(
-      directory->path + "/spill",
-      spillIOConfig(directory->path, common::CompressionKind_LZ4, 128),
-      pool_.get(),
-      &stats);
-  writer.writeRows(
-      keyLayout,
-      payloadLayout.get(),
-      keyRows.data(),
-      payloadRows.data(),
-      keyRows.size());
-  auto files = writer.finishRows();
-  ASSERT_EQ(files.size(), 1);
+  for (const auto kind :
+       {RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
+        RadixSortKeyLayoutKind::kKeyWithPayloadVariable32}) {
+    SCOPED_TRACE(static_cast<uint8_t>(kind));
+    expectOversizedRoundTrip(kind, payloadLayout, rawPayload);
+  }
+}
 
-  RadixSortSpillRunMeta meta{
-      keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
+TEST_F(RadixSortSpillRowTest, mixedInlineAndHeapVariableBlockRoundTrip) {
+  const auto payload = makeRows(
+      {"payload_bigint", "payload_double"},
+      {makeVector<int64_t>(BIGINT(), {10, std::nullopt, 30}),
+       makeVector<double>(DOUBLE(), {1.5, -0.0, std::nullopt})});
+  auto payloadLayout = PayloadRowLayout::create(asRowType(payload->type()));
+  for (const auto kind : kLayouts) {
+    auto keyLayout = RadixSortKeyLayout::fromKind(kind);
+    if (!keyLayout.isVariable()) {
+      continue;
+    }
+    SCOPED_TRACE(static_cast<uint8_t>(kind));
+    const auto capacity = keyLayout.inlineCapacity();
+    appendAndVerify(
+        kind,
+        {std::string(capacity == 0 ? 0 : capacity - 1, 'a'),
+         std::string(capacity, 'b'),
+         std::string(capacity + 1, 'c')},
+        payload,
+        payloadLayout);
+  }
+}
+
+TEST_F(
+    RadixSortSpillRowTest,
+    readerRetainsPreviousMultiBlockPayloadsUntilReleased) {
+  const std::string value((1 << 20) + 256, 'r');
+  std::shared_ptr<const PayloadRowLayout> payloadLayout;
+  auto spill = writeLargePayloadSpill(value, payloadLayout);
   RadixSortSpillReader reader(
-      files[0], meta, payloadLayout.get(), pool_.get(), false);
-  std::vector<char*> readKeys;
-  std::vector<char*> readPayloads;
-  ASSERT_TRUE(reader.nextBatch(readKeys, readPayloads));
-  ASSERT_EQ(readKeys.size(), keys.size());
-  ASSERT_EQ(readPayloads.size(), keys.size());
+      spill.file, spill.meta, payloadLayout.get(), pool_.get(), false);
+  std::vector<char*> keys;
+  std::vector<char*> firstPayloads;
+  ASSERT_TRUE(reader.nextBatch(keys, firstPayloads));
 
-  RowVectorPtr output;
-  PayloadRowReader::gather(
-      *payloadLayout,
-      std::span<char* const>(readPayloads.data(), readPayloads.size()),
+  std::vector<char*> nextPayloads;
+  ASSERT_TRUE(reader.nextBatch(keys, nextPayloads));
+
+  expectStringPayload(*payloadLayout, firstPayloads, value);
+  reader.releaseRetainedBuffers(false);
+}
+
+TEST_F(RadixSortSpillRowTest, readerReusesReleasedRowBuffer) {
+  const std::string value((1 << 20) - 1, 'q');
+  std::shared_ptr<const PayloadRowLayout> payloadLayout;
+  auto spill = writeLargePayloadSpill(value, payloadLayout);
+  RadixSortSpillReadBufferCache bufferCache;
+  RadixSortSpillReader reader(
+      spill.file,
+      spill.meta,
+      payloadLayout.get(),
       pool_.get(),
-      output);
-  expectEquivalent(*payload, *output);
+      false,
+      &bufferCache);
+  std::vector<char*> keys;
+  std::vector<char*> firstPayloads;
+  ASSERT_TRUE(reader.nextBatch(keys, firstPayloads));
 
-  std::vector<char*> emptyKeys;
-  std::vector<char*> emptyPayloads;
-  EXPECT_FALSE(reader.nextBatch(emptyKeys, emptyPayloads));
+  std::vector<char*> secondPayloads;
+  ASSERT_TRUE(reader.nextBatch(keys, secondPayloads));
+  reader.releaseRetainedBuffers(false);
+
+  const auto allocationsBeforeThird = pool_->stats().numAllocs;
+  std::vector<char*> thirdPayloads;
+  ASSERT_TRUE(reader.nextBatch(keys, thirdPayloads));
+  EXPECT_EQ(pool_->stats().numAllocs, allocationsBeforeThird);
+
+  expectStringPayload(*payloadLayout, secondPayloads, value);
+
+  reader.releaseRetainedBuffers(false);
+  expectStringPayload(*payloadLayout, thirdPayloads, value);
+
+  RadixSortSpillReader secondReader(
+      spill.file,
+      spill.meta,
+      payloadLayout.get(),
+      pool_.get(),
+      false,
+      &bufferCache);
+  std::vector<char*> sharedPayloads;
+  const auto allocationsBeforeSharedRead = pool_->stats().numAllocs;
+  ASSERT_TRUE(secondReader.nextBatch(keys, sharedPayloads));
+  EXPECT_EQ(pool_->stats().numAllocs, allocationsBeforeSharedRead);
+  EXPECT_EQ(bufferCache.rowBuffer, nullptr);
+}
+
+TEST_F(RadixSortSpillRowTest, mergerHandlesStreamCountsAndExhaustion) {
+  auto layout = RadixSortKeyLayout::fromKind(
+      RadixSortKeyLayoutKind::kKeyWithPayloadFixed16);
+  const std::vector<std::vector<int64_t>> cases{
+      {1}, {1, 2}, {1, 2, 3}, {1, 2, 3, 4, 5}, {1, 2, 3, 4, 5, 6}};
+  for (const auto& values : cases) {
+    SCOPED_TRACE(values.size());
+    verifyMerge(layout, values, true);
+  }
+  verifyMerge(layout, {7, 7, 7, 7, 7, 7});
+}
+
+TEST_F(RadixSortSpillRowTest, fileMergeStreamRemovesOwnedFile) {
+  enum class Failure { kNone, kMissing };
+  for (const auto& [name, failure] : std::array{
+           std::pair{"on destruction", Failure::kNone},
+           std::pair{"reader cannot open file", Failure::kMissing}}) {
+    SCOPED_TRACE(name);
+    auto spill = writeInlineKeySpill(RadixSortKeyLayoutKind::kKeyOnlyFixed8, 1);
+    const auto spillPath = spill.file.path;
+    const auto missingPath = spillPath + ".missing";
+    ASSERT_TRUE(std::filesystem::exists(spillPath));
+    if (failure == Failure::kMissing) {
+      std::filesystem::rename(spillPath, missingPath);
+    }
+    if (failure == Failure::kNone) {
+      {
+        RadixSortSpillFileMergeStream stream(
+            spill.file, spill.meta, nullptr, pool_.get(), false);
+        ASSERT_TRUE(stream.hasData());
+        EXPECT_TRUE(std::filesystem::exists(spillPath));
+      }
+    } else {
+      EXPECT_THROW(
+          RadixSortSpillFileMergeStream(
+              spill.file, spill.meta, nullptr, pool_.get(), false),
+          BoltException);
+    }
+    EXPECT_FALSE(std::filesystem::exists(spillPath));
+    if (failure == Failure::kMissing) {
+      std::filesystem::rename(missingPath, spillPath);
+    }
+  }
 }
 
 } // namespace

@@ -90,6 +90,7 @@ class OrderBy : public Operator {
   void recordSortStats();
 
   std::unique_ptr<SortBufferBase> sortBuffer_;
+  common::SpillStats recordedSpillStats_;
   bool finished_ = false;
   vector_size_t maxOutputRows_;
 };

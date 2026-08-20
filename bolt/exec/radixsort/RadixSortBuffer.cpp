@@ -19,11 +19,14 @@
 #include <algorithm>
 #include <limits>
 
+#include <folly/ScopeGuard.h>
+
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/exec/Spill.h"
 
 namespace bytedance::bolt::exec::radixsort {
+
 namespace {
 
 bool supportsOrderKey(const Type& type) {
@@ -68,6 +71,27 @@ bool requiresBitExactOutput(const Type& type) {
       return false;
     default:
       return false;
+  }
+}
+
+void cleanupSpillFilesNoThrow(
+    const std::vector<RadixSortSpillFile>& files) noexcept {
+  for (const auto& file : files) {
+    if (file.path.empty()) {
+      continue;
+    }
+    try {
+      auto fs = filesystems::getFileSystem(file.path, nullptr);
+      if (fs->exists(file.path)) {
+        fs->remove(file.path);
+      }
+    } catch (const std::exception& error) {
+      LOG(WARNING) << "Failed to remove radix sort spill file '" << file.path
+                   << "': " << error.what();
+    } catch (...) {
+      LOG(WARNING) << "Failed to remove radix sort spill file '" << file.path
+                   << "'";
+    }
   }
 }
 
@@ -129,7 +153,9 @@ RadixSortBuffer::RadixSortBuffer(
 }
 
 RadixSortBuffer::~RadixSortBuffer() {
+  merger_.reset();
   run_.reset();
+  cleanupSpillFilesNoThrow(spilledFiles_);
   pool_->release();
 }
 
@@ -165,23 +191,20 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
     result = run_->getOutput(maxOutputRows, pool_);
   } else {
     const auto begin = std::chrono::steady_clock::now();
+    const auto count = static_cast<vector_size_t>(std::min<uint64_t>(
+        inputRows_ - outputRows_, static_cast<uint64_t>(maxOutputRows)));
     if (mergeKeyRows_ == nullptr ||
         mergeKeyRows_->capacity() <
-            static_cast<uint64_t>(maxOutputRows) * sizeof(char*)) {
+            static_cast<uint64_t>(count) * sizeof(char*)) {
       mergeKeyRows_ =
-          AlignedBuffer::allocate<const char*>(maxOutputRows, pool_, nullptr);
-      mergePayloadRows_ =
-          AlignedBuffer::allocate<char*>(maxOutputRows, pool_, nullptr);
+          AlignedBuffer::allocate<const char*>(count, pool_, nullptr);
+      mergePayloadRows_ = AlignedBuffer::allocate<char*>(count, pool_, nullptr);
     } else {
-      mergeKeyRows_->setSize(
-          static_cast<uint64_t>(maxOutputRows) * sizeof(char*));
-      mergePayloadRows_->setSize(
-          static_cast<uint64_t>(maxOutputRows) * sizeof(char*));
+      mergeKeyRows_->setSize(static_cast<uint64_t>(count) * sizeof(char*));
+      mergePayloadRows_->setSize(static_cast<uint64_t>(count) * sizeof(char*));
     }
     auto** rawKeys = mergeKeyRows_->asMutable<const char*>();
     auto** rawPayloads = mergePayloadRows_->asMutable<char*>();
-    const auto count = static_cast<vector_size_t>(std::min<uint64_t>(
-        inputRows_ - outputRows_, static_cast<uint64_t>(maxOutputRows)));
     const auto outputCount = merger_->collectRows(count, rawKeys, rawPayloads);
     if (outputCount > 0) {
       result = run_->getOutput(
@@ -211,13 +234,18 @@ std::optional<common::SortStats> RadixSortBuffer::sortStats() const {
 }
 
 std::optional<common::SpillReadStats> RadixSortBuffer::spillReadStats() const {
-  if (merger_ == nullptr) {
+  if (merger_ == nullptr && completedSpillReadStats_.spillReadTimeUs == 0 &&
+      completedSpillReadStats_.spillDecompressTimeUs == 0 &&
+      completedSpillReadStats_.spillReadIOTimeUs == 0) {
     return std::nullopt;
   }
-  return common::SpillReadStats{
-      merger_->getSpillReadTime(),
-      merger_->getSpillDecompressTime(),
-      merger_->getSpillReadIOTime()};
+  auto stats = completedSpillReadStats_;
+  if (merger_ != nullptr) {
+    stats.spillReadTimeUs += merger_->getSpillReadTime();
+    stats.spillDecompressTimeUs += merger_->getSpillDecompressTime();
+    stats.spillReadIOTimeUs += merger_->getSpillReadIOTime();
+  }
+  return stats;
 }
 
 size_t RadixSortBuffer::numInputRows() const {
@@ -334,7 +362,7 @@ void RadixSortBuffer::spillBuildingRun() {
   }
   const auto spillBegin = std::chrono::steady_clock::now();
   run_->finalize();
-  const auto& metrics = run_->metrics();
+  const auto metrics = run_->metrics();
   encodeTimeUs_ += metrics.encodeTimeUs;
   appendTimeUs_ += metrics.appendTimeUs;
   sortTimeUs_ += metrics.sortTimeUs;
@@ -350,8 +378,12 @@ void RadixSortBuffer::spillBuildingRun() {
   mergeNullability(keyMayHaveNulls_, run_->keyMayHaveNulls());
   mergeNullability(payloadMayHaveNulls_, run_->payloadMayHaveNulls());
   const auto* storage = run_->storage();
-  storedRows_ += run_->size();
-  storedBytes_ += run_->estimatedOutputBytes();
+  const auto runRows = run_->size();
+  const auto runBytes = run_->estimatedOutputBytes();
+  const auto spilledInputBytes = storage->allocatedBytes();
+  storedRows_ += runRows;
+  storedBytes_ += runBytes;
+
   const auto directory = spillConfig_->getSpillDirPathCb();
   RadixSortSpillWriter writer(
       fmt::format("{}/{}", directory, spillConfig_->fileNamePrefix),
@@ -360,27 +392,51 @@ void RadixSortBuffer::spillBuildingRun() {
       &stats_);
   const auto writeBegin = std::chrono::steady_clock::now();
   auto files = writer.writeRun(*storage, run_->payloadLayout().get());
+  auto cleanupUncommittedFiles =
+      folly::makeGuard([&files]() { cleanupSpillFilesNoThrow(files); });
   const auto serializationTimeUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - writeBegin)
           .count();
-  spilledFiles_.insert(spilledFiles_.end(), files.begin(), files.end());
+  const auto totalTimeUs =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - spillBegin)
+          .count();
+  const auto committedFileCount = files.size();
+  spilledFiles_.insert(
+      spilledFiles_.end(),
+      std::make_move_iterator(files.begin()),
+      std::make_move_iterator(files.end()));
+  cleanupUncommittedFiles.dismiss();
+  run_->clear();
+  run_ = makeRun();
+
+  bool firstSpilledPartition;
   {
     auto locked = stats_.wlock();
+    firstSpilledPartition = locked->spilledPartitions == 0;
     ++locked->spillRuns;
-    locked->spilledInputBytes += storage->allocatedBytes();
-    locked->spilledRows += run_->size();
+    locked->spilledInputBytes += spilledInputBytes;
+    locked->spilledRows += runRows;
     locked->spilledPartitions = 1;
+    locked->spilledFiles += committedFileCount;
     locked->spillFillTimeUs += metrics.encodeTimeUs + metrics.appendTimeUs;
     locked->spillSortTimeUs += metrics.sortTimeUs;
     locked->spillSerializationTimeUs += serializationTimeUs;
-    locked->spillTotalTimeUs +=
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - spillBegin)
-            .count();
+    locked->spillTotalTimeUs += totalTimeUs;
   }
-  run_->clear();
-  run_ = makeRun();
+  common::updateGlobalSpillMemoryBytes(spilledInputBytes);
+  common::updateGlobalSpillAppendStats(runRows, serializationTimeUs);
+  if (firstSpilledPartition) {
+    common::incrementGlobalSpilledPartitionStats();
+  }
+  for (uint64_t file = 0; file < committedFileCount; ++file) {
+    common::incrementGlobalSpilledFiles();
+  }
+  common::updateGlobalSpillFillTime(
+      metrics.encodeTimeUs + metrics.appendTimeUs);
+  common::updateGlobalSpillSortTime(metrics.sortTimeUs);
+  common::updateGlobalSpillTotalTime(totalTimeUs);
 }
 
 void RadixSortBuffer::spillRemainingOutput() {
@@ -436,7 +492,10 @@ void RadixSortBuffer::spillRemainingOutput() {
     }
   }
   auto files = writer.finishRows();
+  const auto spilledInputBytes = writer.inputBytes();
+  const auto committedFileCount = files.size();
 
+  accumulateSpillReadStats();
   run_->clear();
   merger_.reset();
   mergeKeyRows_.reset();
@@ -445,19 +504,43 @@ void RadixSortBuffer::spillRemainingOutput() {
   payloadRows.reset();
   spilledFiles_ = std::move(files);
   outputStageSpilled_ = true;
+  const auto totalTimeUs =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - spillBegin)
+          .count();
+  bool firstSpilledPartition;
   {
     auto locked = stats_.wlock();
+    firstSpilledPartition = locked->spilledPartitions == 0;
     ++locked->spillRuns;
+    locked->spilledInputBytes += spilledInputBytes;
     locked->spilledRows += spilledRows;
     locked->spilledPartitions = 1;
+    locked->spilledFiles += committedFileCount;
     locked->spillSerializationTimeUs += serializationTimeUs;
-    locked->spillTotalTimeUs +=
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - spillBegin)
-            .count();
+    locked->spillTotalTimeUs += totalTimeUs;
   }
+  common::updateGlobalSpillAppendStats(spilledRows, serializationTimeUs);
+  common::updateGlobalSpillMemoryBytes(spilledInputBytes);
+  if (firstSpilledPartition) {
+    common::incrementGlobalSpilledPartitionStats();
+  }
+  for (uint64_t file = 0; file < committedFileCount; ++file) {
+    common::incrementGlobalSpilledFiles();
+  }
+  common::updateGlobalSpillTotalTime(totalTimeUs);
   prepareMerge();
   pool_->release();
+}
+
+void RadixSortBuffer::accumulateSpillReadStats() {
+  if (merger_ == nullptr) {
+    return;
+  }
+  completedSpillReadStats_.spillReadTimeUs += merger_->getSpillReadTime();
+  completedSpillReadStats_.spillDecompressTimeUs +=
+      merger_->getSpillDecompressTime();
+  completedSpillReadStats_.spillReadIOTimeUs += merger_->getSpillReadIOTime();
 }
 
 void RadixSortBuffer::prepareMerge() {
@@ -469,20 +552,26 @@ void RadixSortBuffer::prepareMerge() {
           run_->payloadLayout() == nullptr
               ? 0
               : run_->payloadLayout()->rowWidth())};
+  auto readBufferCache = std::make_unique<RadixSortSpillReadBufferCache>();
   for (const auto& file : spilledFiles_) {
     streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
         file,
         meta,
         run_->payloadLayout().get(),
         memory::spillMemoryPool(),
-        spillConfig_->spillUringEnabled));
+        spillConfig_->spillUringEnabled,
+        readBufferCache.get()));
   }
   if (run_->size() > 0) {
     streams.push_back(
         std::make_unique<RadixSortMemoryRunMergeStream>(*run_->storage()));
   }
-  merger_ =
-      std::make_unique<RadixSortMerger>(run_->keyLayout(), std::move(streams));
+  merger_ = std::make_unique<RadixSortMerger>(
+      run_->keyLayout(), std::move(streams), std::move(readBufferCache));
+  // The merger streams own the spill files after successful construction.
+  // Clear buffer-level metadata to avoid duplicate cleanup and filesystem
+  // probes after each stream removes its file at EOF.
+  spilledFiles_.clear();
 }
 
 } // namespace bytedance::bolt::exec::radixsort

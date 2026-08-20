@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "bolt/exec/radixsort/RadixSortRun.h"
+#include "bolt/exec/radixsort/RadixSortSpill.h"
 #include "bolt/exec/tests/utils/RadixSortComparatorOracle.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/SimpleVector.h"
@@ -41,6 +42,22 @@ class RadixSortRunTest : public testing::Test {
   }
 
  protected:
+  static constexpr std::array<uint64_t, 8> kDoubleBits{
+      0x0000000000000000ULL,
+      0x8000000000000000ULL,
+      0x7ff8000000000001ULL,
+      0x7ff8000000000011ULL,
+      0x7ff0000000000000ULL,
+      0xfff0000000000000ULL,
+      0x3ff0000000000000ULL,
+      0xbff0000000000000ULL};
+  FlatVectorPtr<double> specialDoubles() {
+    return makeVector<double>(
+        DOUBLE(), makeValues<double>(kDoubleBits.size(), [](vector_size_t row) {
+          return std::bit_cast<double>(kDoubleBits[row]);
+        }));
+  }
+
   std::shared_ptr<memory::MemoryPool> rootPool_{
       memory::memoryManager()->addRootPool()};
   std::shared_ptr<memory::MemoryPool> runPool_{
@@ -55,40 +72,69 @@ class RadixSortRunTest : public testing::Test {
         .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
   }
 
-  template <typename T>
+  template <typename T, typename Input = T>
   FlatVectorPtr<T> makeVector(
-      memory::MemoryPool* pool,
       const TypePtr& type,
-      const std::vector<std::optional<T>>& values) {
+      const std::vector<std::optional<Input>>& values,
+      memory::MemoryPool* pool = nullptr) {
+    pool = pool == nullptr ? runPool_.get() : pool;
     auto vector = BaseVector::create<FlatVector<T>>(type, values.size(), pool);
     for (vector_size_t row = 0; row < values.size(); ++row) {
       if (values[row].has_value()) {
-        vector->set(row, *values[row]);
+        vector->set(row, T(*values[row]));
       } else {
         vector->setNull(row, true);
       }
     }
     return vector;
+  }
+
+  template <typename T, typename F>
+  static std::vector<std::optional<T>> makeValues(
+      vector_size_t size,
+      F valueAt) {
+    std::vector<std::optional<T>> values;
+    values.reserve(size);
+    for (vector_size_t row = 0; row < size; ++row) {
+      values.push_back(valueAt(row));
+    }
+    return values;
   }
 
   FlatVectorPtr<StringView> makeStringVector(
-      memory::MemoryPool* pool,
-      const TypePtr& type,
-      const std::vector<std::optional<std::string>>& values) {
-    auto vector =
-        BaseVector::create<FlatVector<StringView>>(type, values.size(), pool);
-    for (vector_size_t row = 0; row < values.size(); ++row) {
-      if (values[row].has_value()) {
-        vector->set(row, StringView(*values[row]));
-      } else {
-        vector->setNull(row, true);
-      }
-    }
-    return vector;
+      const std::vector<std::optional<std::string>>& values,
+      memory::MemoryPool* pool = nullptr) {
+    return makeVector<StringView, std::string>(VARCHAR(), values, pool);
   }
 
-  template <typename T>
-  BufferPtr makeBuffer(memory::MemoryPool* pool, const std::vector<T>& values) {
+  FlatVectorPtr<int64_t> makeIds(
+      vector_size_t size,
+      memory::MemoryPool* pool = nullptr) {
+    return makeVector<int64_t>(
+        BIGINT(),
+        makeValues<int64_t>(size, [](vector_size_t row) { return row; }),
+        pool);
+  }
+
+  static void expectBitExactDoubles(
+      const RowVector& output,
+      column_index_t valueChannel,
+      column_index_t idChannel) {
+    for (vector_size_t row = 0; row < output.size(); ++row) {
+      const auto id = idAt(output, row, idChannel);
+      const auto value = output.childAt(valueChannel)
+                             ->asUnchecked<SimpleVector<double>>()
+                             ->valueAt(row);
+      EXPECT_EQ(std::bit_cast<uint64_t>(value), kDoubleBits[id]);
+    }
+  }
+
+  template <typename Container>
+  BufferPtr makeBuffer(
+      const Container& values,
+      memory::MemoryPool* pool = nullptr) {
+    pool = pool == nullptr ? runPool_.get() : pool;
+    using T = typename Container::value_type;
     auto buffer = AlignedBuffer::allocate<T>(values.size(), pool);
     std::copy(values.begin(), values.end(), buffer->template asMutable<T>());
     return buffer;
@@ -107,34 +153,22 @@ class RadixSortRunTest : public testing::Test {
         ARRAY(INTEGER()),
         nullptr,
         size,
-        makeBuffer(runPool_.get(), offsets),
-        makeBuffer(runPool_.get(), sizes),
-        makeVector<int32_t>(runPool_.get(), INTEGER(), elements));
+        makeBuffer(offsets),
+        makeBuffer(sizes),
+        makeVector<int32_t>(INTEGER(), elements));
   }
 
   ArrayVectorPtr makeIntegerArrays() {
     const std::array<vector_size_t, 7> offsets{0, 0, 1, 3, 5, 7, 8};
     const std::array<vector_size_t, 7> sizes{0, 1, 2, 2, 2, 1, 0};
-    auto offsetBuffer =
-        AlignedBuffer::allocate<vector_size_t>(offsets.size(), runPool_.get());
-    auto sizeBuffer =
-        AlignedBuffer::allocate<vector_size_t>(sizes.size(), runPool_.get());
-    std::memcpy(
-        offsetBuffer->asMutable<vector_size_t>(),
-        offsets.data(),
-        sizeof(offsets));
-    std::memcpy(
-        sizeBuffer->asMutable<vector_size_t>(), sizes.data(), sizeof(sizes));
-    auto elements = makeVector<int32_t>(
-        runPool_.get(), INTEGER(), {1, 1, 2, 1, 3, 1, std::nullopt, 2});
     auto arrays = std::make_shared<ArrayVector>(
         runPool_.get(),
         ARRAY(INTEGER()),
         nullptr,
         offsets.size(),
-        std::move(offsetBuffer),
-        std::move(sizeBuffer),
-        elements);
+        makeBuffer(offsets),
+        makeBuffer(sizes),
+        makeVector<int32_t>(INTEGER(), {1, 1, 2, 1, 3, 1, std::nullopt, 2}));
     arrays->setNull(6, true);
     return arrays;
   }
@@ -146,11 +180,8 @@ class RadixSortRunTest : public testing::Test {
         nullptr,
         7,
         std::vector<VectorPtr>{
-            makeVector<int32_t>(
-                runPool_.get(), INTEGER(), {1, 1, 2, 1, 1, std::nullopt, 1}),
+            makeVector<int32_t>(INTEGER(), {1, 1, 2, 1, 1, std::nullopt, 1}),
             makeStringVector(
-                runPool_.get(),
-                VARCHAR(),
                 {std::string("a"),
                  std::string("b"),
                  std::string("a"),
@@ -165,21 +196,7 @@ class RadixSortRunTest : public testing::Test {
   MapVectorPtr makeIntegerStringMaps() {
     const std::array<vector_size_t, 7> offsets{0, 0, 1, 3, 5, 7, 8};
     const std::array<vector_size_t, 7> sizes{0, 1, 2, 2, 2, 1, 0};
-    auto offsetBuffer =
-        AlignedBuffer::allocate<vector_size_t>(offsets.size(), runPool_.get());
-    auto sizeBuffer =
-        AlignedBuffer::allocate<vector_size_t>(sizes.size(), runPool_.get());
-    std::memcpy(
-        offsetBuffer->asMutable<vector_size_t>(),
-        offsets.data(),
-        sizeof(offsets));
-    std::memcpy(
-        sizeBuffer->asMutable<vector_size_t>(), sizes.data(), sizeof(sizes));
-    auto keys = makeVector<int32_t>(
-        runPool_.get(), INTEGER(), {1, 2, 1, 1, 2, 2, 1, 1});
     auto values = makeStringVector(
-        runPool_.get(),
-        VARCHAR(),
         {std::string("a"),
          std::string("b"),
          std::string("a"),
@@ -193,17 +210,18 @@ class RadixSortRunTest : public testing::Test {
         MAP(INTEGER(), VARCHAR()),
         nullptr,
         offsets.size(),
-        std::move(offsetBuffer),
-        std::move(sizeBuffer),
-        keys,
+        makeBuffer(offsets),
+        makeBuffer(sizes),
+        makeVector<int32_t>(INTEGER(), {1, 2, 1, 1, 2, 2, 1, 1}),
         values);
     maps->setNull(6, true);
     return maps;
   }
 
   MapVectorPtr makeStringStringMaps(
-      memory::MemoryPool* pool,
-      vector_size_t rows) {
+      vector_size_t rows,
+      memory::MemoryPool* pool = nullptr) {
+    pool = pool == nullptr ? runPool_.get() : pool;
     std::vector<vector_size_t> offsets;
     std::vector<vector_size_t> sizes;
     std::vector<std::optional<std::string>> keys;
@@ -234,24 +252,21 @@ class RadixSortRunTest : public testing::Test {
         MAP(VARCHAR(), VARCHAR()),
         nullptr,
         rows,
-        makeBuffer(pool, offsets),
-        makeBuffer(pool, sizes),
-        makeStringVector(pool, VARCHAR(), keys),
-        makeStringVector(pool, VARCHAR(), values));
+        makeBuffer(offsets, pool),
+        makeBuffer(sizes, pool),
+        makeStringVector(keys, pool),
+        makeStringVector(values, pool));
     if (rows > 9) {
       maps->setNull(9, true);
     }
     return maps;
   }
 
-  MapVectorPtr makeStringStringMaps(vector_size_t rows) {
-    return makeStringStringMaps(runPool_.get(), rows);
-  }
-
   RowVectorPtr makeRows(
-      memory::MemoryPool* pool,
       std::vector<std::string> names,
-      const std::vector<VectorPtr>& children) {
+      const std::vector<VectorPtr>& children,
+      memory::MemoryPool* pool = nullptr) {
+    pool = pool == nullptr ? runPool_.get() : pool;
     std::vector<TypePtr> types;
     types.reserve(children.size());
     for (const auto& child : children) {
@@ -265,10 +280,39 @@ class RadixSortRunTest : public testing::Test {
         children);
   }
 
+  RowVectorPtr makeKeyStringRows(
+      const std::vector<std::optional<int64_t>>& keys,
+      const std::vector<std::optional<std::string>>& strings,
+      std::string stringName = "string",
+      memory::MemoryPool* pool = nullptr) {
+    pool = pool == nullptr ? runPool_.get() : pool;
+    return makeRows(
+        {"key", std::move(stringName), "id"},
+        {makeVector<int64_t>(BIGINT(), keys, pool),
+         makeStringVector(strings, pool),
+         makeIds(keys.size(), pool)},
+        pool);
+  }
+
+  RowVectorPtr makeDescendingKeyStringRows(
+      vector_size_t size,
+      uint32_t stringSize,
+      memory::MemoryPool* pool = nullptr) {
+    return makeKeyStringRows(
+        makeValues<int64_t>(
+            size, [size](vector_size_t row) { return size - row; }),
+        makeValues<std::string>(
+            size,
+            [stringSize](vector_size_t row) {
+              return std::string(stringSize, static_cast<char>('a' + row % 20));
+            }),
+        "string",
+        pool);
+  }
+
   static RowTypePtr rowTypeOf(const RowVector& rows) {
     return std::static_pointer_cast<const RowType>(rows.type());
   }
-
   RowVectorPtr
   slice(const RowVector& input, vector_size_t offset, vector_size_t count) {
     std::vector<VectorPtr> children;
@@ -283,23 +327,51 @@ class RadixSortRunTest : public testing::Test {
         runPool_.get(), input.type(), nullptr, count, std::move(children));
   }
 
+  struct RunDescriptor {
+    const RowVector& input;
+    std::vector<column_index_t> keyChannels;
+    std::vector<CompareFlags> keyFlags;
+    std::vector<bool> bitExactRequired;
+  };
   std::unique_ptr<RadixSortRun> createRun(
-      const RowTypePtr& outputType,
-      const RowTypePtr& keyType,
-      const std::vector<CompareFlags>& keyFlags,
-      const std::vector<column_index_t>& directKeyChannels,
-      const std::vector<bool>& bitExactRequired = {},
+      const RunDescriptor& desc,
       RadixSortRunOptions options = {}) {
+    const auto inputType = rowTypeOf(desc.input);
+    std::vector<std::string> names;
+    std::vector<TypePtr> types;
+    for (const auto channel : desc.keyChannels) {
+      names.push_back(inputType->nameOf(channel));
+      types.push_back(inputType->childAt(channel));
+    }
     auto run = RadixSortRun::create(
         runPool_.get(),
-        outputType,
-        keyType,
-        keyFlags,
-        directKeyChannels,
-        bitExactRequired,
+        inputType,
+        ROW(std::move(names), std::move(types)),
+        desc.keyFlags,
+        desc.keyChannels,
+        desc.bitExactRequired,
         std::move(options));
     EXPECT_NE(run, nullptr);
     return run;
+  }
+
+  std::unique_ptr<RadixSortRun> finalizedRun(
+      const RunDescriptor& desc,
+      RadixSortRunOptions options = {}) {
+    auto run = createRun(desc, std::move(options));
+    run->append(desc.input);
+    run->finalize();
+    return run;
+  }
+
+  RowVectorPtr finalizeAndCollect(
+      const RunDescriptor& desc,
+      RadixSortKeyLayoutKind layout) {
+    auto run = createRun(desc);
+    run->append(desc.input);
+    EXPECT_EQ(run->storage()->layout().kind(), layout);
+    run->finalize();
+    return collect(*run, 2);
   }
 
   RowVectorPtr collect(RadixSortRun& run, vector_size_t batchSize) {
@@ -311,19 +383,12 @@ class RadixSortRunTest : public testing::Test {
     }
 
     vector_size_t offset = 0;
-    while (true) {
-      auto batch = run.getOutput(batchSize, outputPool_.get());
-      if (batch == nullptr) {
-        break;
-      }
+    while (auto batch = run.getOutput(batchSize, outputPool_.get())) {
       if (offset + batch->size() > total) {
         ADD_FAILURE() << "RadixSortRun returned more rows than it accepted";
         return nullptr;
       }
-      for (uint32_t column = 0; column < children.size(); ++column) {
-        children[column]->copy(
-            batch->childAt(column).get(), offset, 0, batch->size());
-      }
+      copyBatch(*batch, children, offset);
       offset += batch->size();
     }
     EXPECT_EQ(offset, total);
@@ -333,6 +398,31 @@ class RadixSortRunTest : public testing::Test {
         nullptr,
         total,
         std::move(children));
+  }
+
+  RowVectorPtr collectAndVerify(
+      RadixSortRun& run,
+      const RowVector& input,
+      vector_size_t batchSize,
+      column_index_t idChannel,
+      const std::vector<column_index_t>& keyChannels =
+          std::vector<column_index_t>{0},
+      const std::vector<CompareFlags>& keyFlags = std::vector<CompareFlags>{
+          flags(true, true)}) {
+    auto output = collect(run, batchSize);
+    expectRowsMatchById(input, *output, idChannel);
+    expectSortedByOutput(*output, keyChannels, keyFlags);
+    return output;
+  }
+
+  static void copyBatch(
+      const RowVector& batch,
+      std::vector<VectorPtr>& children,
+      vector_size_t offset) {
+    for (uint32_t column = 0; column < children.size(); ++column) {
+      children[column]->copy(
+          batch.childAt(column).get(), offset, 0, batch.size());
+    }
   }
 
   static int64_t
@@ -348,6 +438,16 @@ class RadixSortRunTest : public testing::Test {
       column_index_t idChannel) {
     ASSERT_EQ(output.size(), input.size());
     std::vector<bool> seen(input.size(), false);
+    expectRowsMatchById(input, output, idChannel, seen);
+    EXPECT_TRUE(std::all_of(
+        seen.begin(), seen.end(), [](bool value) { return value; }));
+  }
+
+  static void expectRowsMatchById(
+      const RowVector& input,
+      const RowVector& output,
+      column_index_t idChannel,
+      std::vector<bool>& seen) {
     const auto compareFlags = flags(true, true);
     for (vector_size_t row = 0; row < output.size(); ++row) {
       const auto id = idAt(output, row, idChannel);
@@ -367,6 +467,16 @@ class RadixSortRunTest : public testing::Test {
             << "row=" << row << ", id=" << id << ", column=" << column;
       }
     }
+  }
+
+  static void expectRowsMatchById(
+      const RowVector& input,
+      const std::vector<RowVectorPtr>& batches,
+      column_index_t idChannel) {
+    std::vector<bool> seen(input.size(), false);
+    for (const auto& batch : batches) {
+      expectRowsMatchById(input, *batch, idChannel, seen);
+    }
     EXPECT_TRUE(std::all_of(
         seen.begin(), seen.end(), [](bool value) { return value; }));
   }
@@ -383,6 +493,56 @@ class RadixSortRunTest : public testing::Test {
           << "row=" << row;
     }
   }
+
+  static void expectSortedValues(
+      const RowVector& input,
+      const RowVector& output,
+      const std::vector<column_index_t>& keyChannels,
+      const std::vector<CompareFlags>& keyFlags) {
+    ASSERT_EQ(output.size(), input.size());
+    std::vector<vector_size_t> expectedRows(input.size());
+    std::iota(expectedRows.begin(), expectedRows.end(), 0);
+    std::sort(
+        expectedRows.begin(),
+        expectedRows.end(),
+        [&](vector_size_t left, vector_size_t right) {
+          return SortComparatorOracle::compareRows(
+                     input, left, input, right, keyChannels, keyFlags) < 0;
+        });
+    for (vector_size_t row = 0; row < output.size(); ++row) {
+      EXPECT_TRUE(input.equalValueAt(&output, expectedRows[row], row))
+          << "row=" << row;
+    }
+  }
+
+  using OutputBuffers = std::array<const Buffer*, 3>;
+  static OutputBuffers outputBuffers(
+      const RowVector& output,
+      bool includeString = false) {
+    const auto* key = output.childAt(0)->asUnchecked<FlatVector<int64_t>>();
+    if (!includeString) {
+      return {key->values().get(), nullptr, nullptr};
+    }
+    const auto* string =
+        output.childAt(1)->asUnchecked<FlatVector<StringView>>();
+    EXPECT_EQ(string->stringBuffers().size(), 1);
+    return {
+        key->values().get(),
+        string->values().get(),
+        string->stringBuffers().size() == 1
+            ? string->stringBuffers().front().get()
+            : nullptr};
+  }
+
+  void expectCleared(RadixSortRun& run) {
+    EXPECT_EQ(run.state(), RadixSortRunState::kConsumed);
+    EXPECT_EQ(run.storage(), nullptr);
+    EXPECT_EQ(run.retainedBytes(), 0);
+    EXPECT_EQ(run.getOutput(1, outputPool_.get()), nullptr);
+    std::array<const char*, 1> keys{};
+    std::array<char*, 1> payloads{};
+    EXPECT_EQ(run.collectRemainingRows(1, keys.data(), payloads.data()), 0);
+  }
 };
 
 TEST_F(RadixSortRunTest, directProjectionMultipleKeysAndBatchSizes) {
@@ -390,35 +550,27 @@ TEST_F(RadixSortRunTest, directProjectionMultipleKeysAndBatchSizes) {
   std::vector<std::optional<int64_t>> firstKey(kRows);
   std::vector<std::optional<int32_t>> secondKey(kRows);
   std::vector<std::optional<std::string>> payload(kRows);
-  std::vector<std::optional<int64_t>> ids(kRows);
   for (vector_size_t row = 0; row < kRows; ++row) {
-    if (row % 11 != 0) {
-      firstKey[row] = (row * 37) % 97;
-    }
-    if (row % 13 != 0) {
-      secondKey[row] = (row * 17) % 53;
-    }
+    firstKey[row] =
+        row % 11 == 0 ? std::nullopt : std::optional<int64_t>{(row * 37) % 97};
+    secondKey[row] = row % 13 == 0
+        ? std::nullopt
+        : std::optional<int32_t>{static_cast<int32_t>((row * 17) % 53)};
     payload[row] = row % 5 == 0
         ? std::string(80, static_cast<char>('a' + row % 20))
         : "value-" + std::to_string(row);
-    ids[row] = row;
   }
   auto input = makeRows(
-      runPool_.get(),
       {"first", "payload", "second", "id"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), firstKey),
-       makeStringVector(runPool_.get(), VARCHAR(), payload),
-       makeVector<int32_t>(runPool_.get(), INTEGER(), secondKey),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
+      {makeVector<int64_t>(BIGINT(), firstKey),
+       makeStringVector(payload),
+       makeVector<int32_t>(INTEGER(), secondKey),
+       makeIds(kRows)});
   const std::vector<CompareFlags> keyFlags{
       flags(true, false), flags(false, true)};
 
   for (const auto outputBatchSize : {1, 17, 2048}) {
-    auto run = createRun(
-        rowTypeOf(*input),
-        ROW({"first", "second"}, {BIGINT(), INTEGER()}),
-        keyFlags,
-        {0, 2});
+    auto run = createRun({*input, {0, 2}, keyFlags, {}});
     run->append(*slice(*input, 0, 73));
     run->append(*slice(*input, 73, 91));
     run->append(*slice(*input, 164, kRows - 164));
@@ -426,12 +578,10 @@ TEST_F(RadixSortRunTest, directProjectionMultipleKeysAndBatchSizes) {
     run->finalize();
     EXPECT_EQ(run->state(), RadixSortRunState::kSortedInMemory);
 
-    auto output = collect(*run, outputBatchSize);
+    collectAndVerify(*run, *input, outputBatchSize, 3, {0, 2}, keyFlags);
     EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
     EXPECT_EQ(run->metrics().inputRows, kRows);
     EXPECT_EQ(run->metrics().outputRows, kRows);
-    expectRowsMatchById(*input, *output, 3);
-    expectSortedByOutput(*output, {0, 2}, keyFlags);
     ASSERT_EQ(run->projection().columns().size(), 4);
     EXPECT_EQ(
         run->projection().columns()[0].source,
@@ -444,23 +594,110 @@ TEST_F(RadixSortRunTest, directProjectionMultipleKeysAndBatchSizes) {
   }
 }
 
+TEST_F(RadixSortRunTest, keyLayoutBoundariesKeepSortedOutput) {
+  auto ids = makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5});
+  auto payload = makeStringVector(
+      {"payload_d",
+       std::string(80, 'a'),
+       std::nullopt,
+       std::string(),
+       std::string(33, 'z'),
+       "payload_b"});
+  auto textKeys = makeStringVector(
+      {std::string(40, 'd'),
+       "a",
+       std::nullopt,
+       std::string(48, 'c'),
+       "b",
+       std::string("prefix_") + std::string(40, 'x')});
+  std::array<VectorPtr, 6> fixedKeys{
+      makeVector<int32_t>(INTEGER(), {4, 1, std::nullopt, 2, 4, -3}),
+      makeVector<int32_t>(INTEGER(), {0, 3, 1, std::nullopt, 2, 3}),
+      makeVector<int32_t>(INTEGER(), {8, 5, 7, 6, 5, std::nullopt}),
+      makeVector<int32_t>(INTEGER(), {9, 6, 8, 7, std::nullopt, 6}),
+      makeVector<int32_t>(INTEGER(), {13, 10, 12, 11, 10, 12}),
+      makeVector<int32_t>(INTEGER(), {17, 14, std::nullopt, 15, 14, 16})};
+  std::array<VectorPtr, 3> variableTies{
+      makeVector<int64_t>(BIGINT(), {0, 3, 1, std::nullopt, 2, 3}),
+      makeVector<int64_t>(BIGINT(), {8, 5, 7, 6, 5, std::nullopt}),
+      makeVector<int64_t>(BIGINT(), {9, 6, 8, 7, std::nullopt, 6})};
+  auto tinyKey = makeVector<int8_t>(TINYINT(), {4, 1, std::nullopt, 2, 4, -3});
+
+  struct LayoutCase {
+    std::vector<VectorPtr> keys;
+    RadixSortKeyLayoutKind withPayloadKind;
+    RadixSortKeyLayoutKind keyOnlyKind;
+  };
+  const std::vector<LayoutCase> cases{
+      {{tinyKey},
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
+       RadixSortKeyLayoutKind::kKeyOnlyFixed8},
+      {{fixedKeys.begin(), fixedKeys.begin() + 2},
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed24,
+       RadixSortKeyLayoutKind::kKeyOnlyFixed16},
+      {{fixedKeys.begin(), fixedKeys.begin() + 4},
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed32,
+       RadixSortKeyLayoutKind::kKeyOnlyFixed24},
+      {{fixedKeys.begin(), fixedKeys.end()},
+       RadixSortKeyLayoutKind::kKeyWithPayloadVariable64,
+       RadixSortKeyLayoutKind::kKeyOnlyFixed32},
+      {{textKeys},
+       RadixSortKeyLayoutKind::kKeyWithPayloadVariable32,
+       RadixSortKeyLayoutKind::kKeyOnlyVariable32},
+      {{textKeys, variableTies[0]},
+       RadixSortKeyLayoutKind::kKeyWithPayloadVariable56,
+       RadixSortKeyLayoutKind::kKeyOnlyVariable32},
+      {{textKeys, variableTies[0], variableTies[1]},
+       RadixSortKeyLayoutKind::kKeyWithPayloadVariable56,
+       RadixSortKeyLayoutKind::kKeyOnlyVariable32},
+      {{textKeys, variableTies[0], variableTies[1], variableTies[2]},
+       RadixSortKeyLayoutKind::kKeyWithPayloadVariable64,
+       RadixSortKeyLayoutKind::kKeyOnlyVariable32}};
+
+  for (const auto& testCase : cases) {
+    std::vector<std::string> keyNames;
+    std::vector<TypePtr> keyTypes;
+    for (uint32_t key = 0; key < testCase.keys.size(); ++key) {
+      keyNames.push_back("k" + std::to_string(key));
+      keyTypes.push_back(testCase.keys[key]->type());
+    }
+    auto keyType = ROW(std::vector<std::string>(keyNames), std::move(keyTypes));
+    std::vector<column_index_t> keyChannels(testCase.keys.size());
+    std::iota(keyChannels.begin(), keyChannels.end(), 0);
+    keyNames.insert(keyNames.end(), {"payload", "id"});
+    auto children = testCase.keys;
+    children.insert(children.end(), {payload, ids});
+    auto input = makeRows(std::move(keyNames), children);
+
+    SCOPED_TRACE(keyType->toString());
+    const std::vector<CompareFlags> keyFlags(
+        keyChannels.size(), flags(true, true));
+    auto output = finalizeAndCollect(
+        {*input, keyChannels, keyFlags, {}}, testCase.withPayloadKind);
+    expectRowsMatchById(*input, *output, input->childrenSize() - 1);
+    expectSortedByOutput(*output, keyChannels, keyFlags);
+
+    auto keyOnlyInput = std::make_shared<RowVector>(
+        runPool_.get(), keyType, nullptr, input->size(), testCase.keys);
+    auto keyOnlyOutput = finalizeAndCollect(
+        {*keyOnlyInput, keyChannels, keyFlags, {}}, testCase.keyOnlyKind);
+    expectSortedValues(*keyOnlyInput, *keyOnlyOutput, keyChannels, keyFlags);
+  }
+}
+
 TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
   auto rowType = ROW({"key"}, {BIGINT()});
-  {
-    auto run = createRun(rowType, rowType, {flags(true, true)}, {0});
-    EXPECT_FALSE(run->projection().hasPayload());
-    EXPECT_EQ(run->storage()->payloadLayout(), nullptr);
-    run->finalize();
-    auto output = run->getOutput(10, outputPool_.get());
-    EXPECT_EQ(output, nullptr);
-    EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
-  }
+  auto emptyRun = RadixSortRun::create(
+      runPool_.get(), rowType, rowType, {flags(true, true)}, {0}, {}, {});
+  ASSERT_NE(emptyRun, nullptr);
+  EXPECT_FALSE(emptyRun->projection().hasPayload());
+  EXPECT_EQ(emptyRun->storage()->payloadLayout(), nullptr);
+  emptyRun->finalize();
+  EXPECT_EQ(emptyRun->getOutput(10, outputPool_.get()), nullptr);
+  EXPECT_EQ(emptyRun->state(), RadixSortRunState::kConsumed);
 
-  auto input = makeRows(
-      runPool_.get(),
-      {"key"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), {42})});
-  auto run = createRun(rowType, rowType, {flags(true, true)}, {0});
+  auto input = makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {42})});
+  auto run = createRun({*input, {0}, {flags(true, true)}, {}});
   run->append(*input);
   EXPECT_EQ(run->storage()->payloadSize(), 0);
   run->finalize();
@@ -472,130 +709,54 @@ TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
 
 TEST_F(RadixSortRunTest, appendUpdatesKeyNullabilityStats) {
   auto input = makeRows(
-      runPool_.get(),
       {"key", "id"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), {2, std::nullopt, 1, 3}),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3})});
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"key"}, {BIGINT()}),
-      {flags(true, false)},
-      {0},
-      {});
+      {makeVector<int64_t>(BIGINT(), {2, std::nullopt, 1, 3}), makeIds(4)});
+  auto run = createRun({*input, {0}, {flags(true, false)}, {}});
   run->append(*input);
   EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{1}));
   run->finalize();
-
-  auto output = collect(*run, 2);
-  expectRowsMatchById(*input, *output, 1);
-  expectSortedByOutput(*output, {0}, {flags(true, false)});
+  collectAndVerify(*run, *input, 2, 1, {0}, {flags(true, false)});
 }
 
 TEST_F(RadixSortRunTest, duplicateDirectKeyStaysInPayload) {
   constexpr vector_size_t kRows = 64;
-  std::vector<std::optional<int64_t>> keys(kRows);
-  std::vector<std::optional<int64_t>> ids(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    keys[row] = row % 7;
-    ids[row] = row;
-  }
   auto input = makeRows(
-      runPool_.get(),
       {"key", "id"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), keys),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"key0", "key1"}, {BIGINT(), BIGINT()}),
-      {flags(true, true), flags(true, true)},
-      {0, 0});
+      {makeVector<int64_t>(
+           BIGINT(),
+           makeValues<int64_t>(
+               kRows, [](vector_size_t row) { return row % 7; })),
+       makeIds(kRows)});
+  auto run = finalizedRun(
+      {*input, {0, 0}, {flags(true, true), flags(true, true)}, {}});
   EXPECT_EQ(
       run->projection().columns()[0].source, RadixSortOutputSource::kPayload);
-  run->append(*input);
-  run->finalize();
-  auto output = collect(*run, 9);
-  expectRowsMatchById(*input, *output, 1);
-  expectSortedByOutput(*output, {0}, {flags(true, true)});
+  collectAndVerify(*run, *input, 9, 1);
 }
 
 TEST_F(RadixSortRunTest, bitExactFloatSpecialValues) {
-  const std::vector<uint64_t> bits{
-      0x0000000000000000ULL,
-      0x8000000000000000ULL,
-      0x7ff8000000000001ULL,
-      0x7ff8000000000011ULL,
-      0x7ff0000000000000ULL,
-      0xfff0000000000000ULL,
-      0x3ff0000000000000ULL,
-      0xbff0000000000000ULL};
-  std::vector<std::optional<double>> values;
-  std::vector<std::optional<int64_t>> ids;
-  values.reserve(bits.size());
-  ids.reserve(bits.size());
-  for (uint64_t index = 0; index < bits.size(); ++index) {
-    values.push_back(std::bit_cast<double>(bits[index]));
-    ids.push_back(index);
-  }
   auto input = makeRows(
-      runPool_.get(),
-      {"value", "id"},
-      {makeVector<double>(runPool_.get(), DOUBLE(), values),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"value"}, {DOUBLE()}),
-      {flags(true, true)},
-      {0},
-      {true, false});
+      {"value", "id"}, {specialDoubles(), makeIds(kDoubleBits.size())});
+  auto run = finalizedRun({*input, {0}, {flags(true, true)}, {true, false}});
   EXPECT_EQ(
       run->projection().columns()[0].source, RadixSortOutputSource::kPayload);
-  run->append(*input);
-  run->finalize();
   auto output = collect(*run, 3);
-  for (vector_size_t row = 0; row < output->size(); ++row) {
-    const auto id = idAt(*output, row, 1);
-    const auto value =
-        output->childAt(0)->asUnchecked<SimpleVector<double>>()->valueAt(row);
-    EXPECT_EQ(std::bit_cast<uint64_t>(value), bits[id]);
-  }
+  expectBitExactDoubles(*output, 0, 1);
   expectSortedByOutput(*output, {0}, {flags(true, true)});
 }
 
 TEST_F(RadixSortRunTest, selectiveDecodeKeepsBitExactPayloadKey) {
-  const std::vector<uint64_t> bits{
-      0x0000000000000000ULL,
-      0x8000000000000000ULL,
-      0x7ff8000000000001ULL,
-      0x7ff8000000000011ULL,
-      0x7ff0000000000000ULL,
-      0xfff0000000000000ULL,
-      0x3ff0000000000000ULL,
-      0xbff0000000000000ULL};
-  std::vector<std::optional<int64_t>> groups;
-  std::vector<std::optional<double>> values;
-  std::vector<std::optional<int64_t>> ids;
-  groups.reserve(bits.size());
-  values.reserve(bits.size());
-  ids.reserve(bits.size());
-  for (uint64_t index = 0; index < bits.size(); ++index) {
-    groups.push_back(index % 2);
-    values.push_back(std::bit_cast<double>(bits[index]));
-    ids.push_back(index);
-  }
   auto input = makeRows(
-      runPool_.get(),
       {"group", "value", "id"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), groups),
-       makeVector<double>(runPool_.get(), DOUBLE(), values),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
+      {makeVector<int64_t>(
+           BIGINT(),
+           makeValues<int64_t>(
+               kDoubleBits.size(), [](vector_size_t row) { return row % 2; })),
+       specialDoubles(),
+       makeIds(kDoubleBits.size())});
   const std::vector<CompareFlags> keyFlags{
       flags(true, true), flags(true, true)};
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"group", "value"}, {BIGINT(), DOUBLE()}),
-      keyFlags,
-      {0, 1},
-      {false, true, false});
+  auto run = finalizedRun({*input, {0, 1}, keyFlags, {false, true, false}});
   EXPECT_EQ(run->projection().decodedKeyMask(), (std::vector<uint8_t>{1, 0}));
   EXPECT_EQ(
       run->projection().columns()[0].source,
@@ -603,15 +764,8 @@ TEST_F(RadixSortRunTest, selectiveDecodeKeepsBitExactPayloadKey) {
   EXPECT_EQ(
       run->projection().columns()[1].source, RadixSortOutputSource::kPayload);
 
-  run->append(*input);
-  run->finalize();
   auto output = collect(*run, 3);
-  for (vector_size_t row = 0; row < output->size(); ++row) {
-    const auto id = idAt(*output, row, 2);
-    const auto value =
-        output->childAt(1)->asUnchecked<SimpleVector<double>>()->valueAt(row);
-    EXPECT_EQ(std::bit_cast<uint64_t>(value), bits[id]);
-  }
+  expectBitExactDoubles(*output, 1, 2);
   expectSortedByOutput(*output, {0, 1}, keyFlags);
 }
 
@@ -628,28 +782,15 @@ TEST_F(RadixSortRunTest, timestampNanosAndInvalidUtf8Keys) {
       std::string(40, 'z'),
       std::string(),
       std::string("null-ts")};
-  std::vector<std::optional<int64_t>> ids(timestamps.size());
-  for (uint64_t row = 0; row < ids.size(); ++row) {
-    ids[row] = row;
-  }
   auto input = makeRows(
-      runPool_.get(),
       {"timestamp", "string", "id"},
-      {makeVector<Timestamp>(runPool_.get(), TIMESTAMP(), timestamps),
-       makeStringVector(runPool_.get(), VARCHAR(), strings),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
+      {makeVector<Timestamp>(TIMESTAMP(), timestamps),
+       makeStringVector(strings),
+       makeIds(timestamps.size())});
   const std::vector<CompareFlags> keyFlags{
       flags(true, false), flags(false, true)};
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"timestamp", "string"}, {TIMESTAMP(), VARCHAR()}),
-      keyFlags,
-      {0, 1});
-  run->append(*input);
-  run->finalize();
-  auto output = collect(*run, 2);
-  expectRowsMatchById(*input, *output, 2);
-  expectSortedByOutput(*output, {0, 1}, keyFlags);
+  auto run = finalizedRun({*input, {0, 1}, keyFlags, {}});
+  collectAndVerify(*run, *input, 2, 2, {0, 1}, keyFlags);
 }
 
 TEST_F(RadixSortRunTest, complexDirectKeysRoundTripAndSort) {
@@ -657,61 +798,37 @@ TEST_F(RadixSortRunTest, complexDirectKeysRoundTripAndSort) {
   auto rows = makeNestedRows();
   auto maps = makeIntegerStringMaps();
   auto input = makeRows(
-      runPool_.get(),
       {"array", "row", "map", "id"},
-      {arrays,
-       rows,
-       maps,
-       makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3, 4, 5, 6})});
+      {arrays, rows, maps, makeIds(arrays->size())});
   const std::vector<CompareFlags> keyFlags{
       flags(true, false), flags(false, true), flags(true, true)};
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"array", "row", "map"},
-          {arrays->type(), rows->type(), maps->type()}),
-      keyFlags,
-      {0, 1, 2});
+  auto run = finalizedRun({*input, {0, 1, 2}, keyFlags, {}});
   EXPECT_EQ(
       run->projection().payloadChannels(), (std::vector<column_index_t>{3}));
-  run->append(*input);
-  run->finalize();
-  auto output = collect(*run, 2);
-  expectRowsMatchById(*input, *output, 3);
-  expectSortedByOutput(*output, {0, 1, 2}, keyFlags);
+  collectAndVerify(*run, *input, 2, 3, {0, 1, 2}, keyFlags);
 }
 
 TEST_F(RadixSortRunTest, complexPayloadRoundTripAndSort) {
   auto arrays = makeIntegerArrays();
   auto rows = makeNestedRows();
   auto maps = makeIntegerStringMaps();
-  auto keys =
-      makeVector<int64_t>(runPool_.get(), BIGINT(), {6, 5, 4, 3, 2, 1, 0});
-  auto ids =
-      makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3, 4, 5, 6});
+  auto keys = makeVector<int64_t>(BIGINT(), {6, 5, 4, 3, 2, 1, 0});
   auto input = makeRows(
-      runPool_.get(),
       {"array", "row", "map", "key", "id"},
-      {arrays, rows, maps, keys, ids});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"key"}, {BIGINT()}), {flags(true, true)}, {3});
+      {arrays, rows, maps, keys, makeIds(arrays->size())});
+  auto run = finalizedRun({*input, {3}, {flags(true, true)}, {}});
   EXPECT_EQ(
       run->projection().payloadChannels(),
       (std::vector<column_index_t>{0, 1, 2, 4}));
-  run->append(*input);
-  run->finalize();
-  auto output = collect(*run, 2);
-  expectRowsMatchById(*input, *output, 4);
-  expectSortedByOutput(*output, {3}, {flags(true, true)});
+  collectAndVerify(*run, *input, 2, 4, {3});
 }
 
 TEST_F(RadixSortRunTest, eventKeyMapPayloadMultipleBatches) {
   constexpr vector_size_t kRows = 64;
   std::vector<std::optional<std::string>> events;
-  std::vector<std::optional<int64_t>> ids;
   std::vector<std::optional<std::string>> enterFrom;
   std::vector<std::optional<std::string>> hours;
   events.reserve(kRows);
-  ids.reserve(kRows);
   enterFrom.reserve(kRows);
   hours.reserve(kRows);
   static constexpr std::array<const char*, 6> kEvents{
@@ -719,7 +836,6 @@ TEST_F(RadixSortRunTest, eventKeyMapPayloadMultipleBatches) {
   for (vector_size_t row = 0; row < kRows; ++row) {
     const auto eventIndex = row % 10 < 6 ? row % 3 : row % kEvents.size();
     events.push_back(kEvents[eventIndex]);
-    ids.push_back(row);
     enterFrom.push_back(
         row % 4 == 0
             ? std::optional<std::string>{}
@@ -728,16 +844,14 @@ TEST_F(RadixSortRunTest, eventKeyMapPayloadMultipleBatches) {
   }
   auto params = makeStringStringMaps(kRows);
   auto input = makeRows(
-      runPool_.get(),
       {"event", "id", "enter_from", "params", "hour"},
-      {makeStringVector(runPool_.get(), VARCHAR(), events),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids),
-       makeStringVector(runPool_.get(), VARCHAR(), enterFrom),
+      {makeStringVector(events),
+       makeIds(kRows),
+       makeStringVector(enterFrom),
        params,
-       makeStringVector(runPool_.get(), VARCHAR(), hours)});
+       makeStringVector(hours)});
 
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"event"}, {VARCHAR()}), {flags(true, true)}, {0});
+  auto run = createRun({*input, {0}, {flags(true, true)}, {}});
   EXPECT_EQ(
       run->projection().payloadChannels(),
       (std::vector<column_index_t>{1, 2, 3, 4}));
@@ -746,63 +860,45 @@ TEST_F(RadixSortRunTest, eventKeyMapPayloadMultipleBatches) {
   run->append(*slice(*input, 40, kRows - 40));
   run->finalize();
 
-  auto output = collect(*run, 13);
-  expectRowsMatchById(*input, *output, 1);
-  expectSortedByOutput(*output, {0}, {flags(true, true)});
+  collectAndVerify(*run, *input, 13, 1);
 }
 
 TEST_F(RadixSortRunTest, mapPayloadOutputOwnsDataAfterRunClear) {
   constexpr vector_size_t kRows = 48;
   auto sourcePool = rootPool_->addLeafChild("radix-sort-run-map-source-test");
-  std::vector<std::optional<std::string>> events;
-  std::vector<std::optional<int64_t>> ids;
-  events.reserve(kRows);
-  ids.reserve(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    events.push_back("event_" + std::to_string(row % 5));
-    ids.push_back(row);
-  }
   auto input = makeRows(
-      sourcePool.get(),
       {"event", "params", "id"},
-      {makeStringVector(sourcePool.get(), VARCHAR(), events),
-       makeStringStringMaps(sourcePool.get(), kRows),
-       makeVector<int64_t>(sourcePool.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"event"}, {VARCHAR()}), {flags(true, true)}, {0});
-  run->append(*input);
-  run->finalize();
+      {makeStringVector(
+           makeValues<std::string>(
+               kRows,
+               [](vector_size_t row) {
+                 return "event_" + std::to_string(row % 5);
+               }),
+           sourcePool.get()),
+       makeStringStringMaps(kRows, sourcePool.get()),
+       makeIds(kRows, sourcePool.get())},
+      sourcePool.get());
+  auto run = finalizedRun({*input, {0}, {flags(true, true)}, {}});
 
-  auto output = collect(*run, 11);
+  auto output = collectAndVerify(*run, *input, 11, 2);
   EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
   EXPECT_EQ(run->storage(), nullptr);
   EXPECT_EQ(runPool_->currentBytes(), 0);
-  expectRowsMatchById(*input, *output, 2);
-  expectSortedByOutput(*output, {0}, {flags(true, true)});
 }
 
 TEST_F(RadixSortRunTest, directKeyOutputDoesNotDuplicatePayloadForEvent) {
   auto input = makeRows(
-      runPool_.get(),
       {"event", "id"},
-      {makeStringVector(
-           runPool_.get(),
-           VARCHAR(),
-           {"play", "play", "click", "share", "click"}),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), {0, 1, 2, 3, 4})});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"event"}, {VARCHAR()}), {flags(true, true)}, {0});
+      {makeStringVector({"play", "play", "click", "share", "click"}),
+       makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4})});
+  auto run = finalizedRun({*input, {0}, {flags(true, true)}, {}});
   ASSERT_EQ(run->projection().columns().size(), 2);
   EXPECT_EQ(
       run->projection().columns()[0].source,
       RadixSortOutputSource::kDecodedKey);
   EXPECT_EQ(
       run->projection().payloadChannels(), (std::vector<column_index_t>{1}));
-  run->append(*input);
-  run->finalize();
-  auto output = collect(*run, 2);
-  expectRowsMatchById(*input, *output, 1);
-  expectSortedByOutput(*output, {0}, {flags(true, true)});
+  collectAndVerify(*run, *input, 2, 1);
 }
 
 TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
@@ -816,7 +912,6 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
   std::vector<std::optional<std::string>> firstStrings(kRows);
   std::vector<std::optional<std::string>> secondStrings(kRows);
   std::vector<std::optional<int64_t>> nullablePayload(kRows);
-  std::vector<std::optional<int64_t>> ids(kRows);
   for (vector_size_t row = 0; row < kRows; ++row) {
     textKeys[row] = "key-" + std::to_string(static_cast<int32_t>(kRows - row));
     if (row % 5 != 0) {
@@ -831,11 +926,9 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
     if (row % 4 != 1) {
       nullablePayload[row] = 1000 + row;
     }
-    ids[row] = row;
   }
   auto arrays = makeNonNullIntegerArrays(kRows);
   auto input = makeRows(
-      runPool_.get(),
       {"text_key",
        "nullable_key",
        "fixed_key",
@@ -847,28 +940,23 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
        "array_payload",
        "nullable_payload",
        "id"},
-      {makeStringVector(runPool_.get(), VARCHAR(), textKeys),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), nullableKeys),
-       makeVector<int32_t>(runPool_.get(), INTEGER(), fixedKeys),
-       makeVector<bool>(runPool_.get(), BOOLEAN(), boolKeys),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), fixedPayload),
-       makeVector<bool>(runPool_.get(), BOOLEAN(), boolPayload),
-       makeStringVector(runPool_.get(), VARCHAR(), firstStrings),
-       makeStringVector(runPool_.get(), VARCHAR(), secondStrings),
+      {makeStringVector(textKeys),
+       makeVector<int64_t>(BIGINT(), nullableKeys),
+       makeVector<int32_t>(INTEGER(), fixedKeys),
+       makeVector<bool>(BOOLEAN(), boolKeys),
+       makeVector<int64_t>(BIGINT(), fixedPayload),
+       makeVector<bool>(BOOLEAN(), boolPayload),
+       makeStringVector(firstStrings),
+       makeStringVector(secondStrings),
        arrays,
-       makeVector<int64_t>(runPool_.get(), BIGINT(), nullablePayload),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
+       makeVector<int64_t>(BIGINT(), nullablePayload),
+       makeIds(kRows)});
   const std::vector<CompareFlags> keyFlags{
       flags(true, true),
       flags(true, true),
       flags(true, true),
       flags(true, true)};
-  auto run = createRun(
-      rowTypeOf(*input),
-      ROW({"text_key", "nullable_key", "fixed_key", "bool_key"},
-          {VARCHAR(), BIGINT(), INTEGER(), BOOLEAN()}),
-      keyFlags,
-      {0, 1, 2, 3});
+  auto run = createRun({*input, {0, 1, 2, 3}, keyFlags, {}});
   run->append(*input);
   EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{0, 1, 0, 0}));
   EXPECT_EQ(
@@ -882,9 +970,7 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
   for (const auto& type : input->type()->as<TypeKind::ROW>().children()) {
     children.push_back(BaseVector::create(type, kRows, outputPool_.get()));
   }
-  for (uint32_t column = 0; column < children.size(); ++column) {
-    children[column]->copy(first->childAt(column).get(), 0, 0, first->size());
-  }
+  copyBatch(*first, children, 0);
   vector_size_t offset = first->size();
   for (const auto column : {0, 2, 3, 4, 5, 6, 7, 8, 10}) {
     ASSERT_EQ(first->childAt(column)->rawNulls(), nullptr) << column;
@@ -900,16 +986,10 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
     EXPECT_FALSE(second->childAt(column)->mayHaveNullsRecursive()) << column;
   }
 
-  for (uint32_t column = 0; column < children.size(); ++column) {
-    children[column]->copy(
-        second->childAt(column).get(), offset, 0, second->size());
-  }
+  copyBatch(*second, children, offset);
   offset += second->size();
   while (auto batch = run->getOutput(4, outputPool_.get())) {
-    for (uint32_t column = 0; column < children.size(); ++column) {
-      children[column]->copy(
-          batch->childAt(column).get(), offset, 0, batch->size());
-    }
+    copyBatch(*batch, children, offset);
     offset += batch->size();
   }
   ASSERT_EQ(offset, kRows);
@@ -921,22 +1001,12 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
 
 TEST_F(RadixSortRunTest, singleStringPayloadNullFreeReuseResetsNullBuffer) {
   constexpr vector_size_t kRows = 8;
-  std::vector<std::optional<int64_t>> keys(kRows);
-  std::vector<std::optional<std::string>> strings(kRows);
-  std::vector<std::optional<int64_t>> ids(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    keys[row] = kRows - row;
-    strings[row] = std::string(64 + row, static_cast<char>('a' + row));
-    ids[row] = row;
-  }
-  auto input = makeRows(
-      runPool_.get(),
-      {"key", "string", "id"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), keys),
-       makeStringVector(runPool_.get(), VARCHAR(), strings),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"key"}, {BIGINT()}), {flags(true, true)}, {0});
+  auto input = makeKeyStringRows(
+      makeValues<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }),
+      makeValues<std::string>(kRows, [](vector_size_t row) {
+        return std::string(64 + row, static_cast<char>('a' + row));
+      }));
+  auto run = createRun({*input, {0}, {flags(true, true)}, {}});
   run->append(*input);
   EXPECT_EQ(run->payloadMayHaveNulls(), (std::vector<uint8_t>{0, 0}));
   run->finalize();
@@ -956,27 +1026,20 @@ TEST_F(RadixSortRunTest, singleStringPayloadNullFreeReuseResetsNullBuffer) {
 
 TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {
   constexpr vector_size_t kRows = 7;
-  std::vector<std::optional<std::string>> keys;
-  std::vector<std::optional<std::string>> strings;
-  std::vector<std::optional<int64_t>> ids;
-  keys.reserve(kRows);
-  strings.reserve(kRows);
-  ids.reserve(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    keys.emplace_back(std::string(96 + row, static_cast<char>('a' + row)));
-    strings.emplace_back(std::string(80 + row, static_cast<char>('k' + row)));
-    ids.emplace_back(row);
-  }
+  auto keys = makeValues<std::string>(kRows, [](vector_size_t row) {
+    return std::string(96 + row, static_cast<char>('a' + row));
+  });
+  auto strings = makeValues<std::string>(kRows, [](vector_size_t row) {
+    return std::string(80 + row, static_cast<char>('k' + row));
+  });
   auto arrays = makeIntegerArrays();
   auto input = makeRows(
-      runPool_.get(),
       {"key", "string", "array", "id"},
-      {makeStringVector(runPool_.get(), VARCHAR(), keys),
-       makeStringVector(runPool_.get(), VARCHAR(), strings),
+      {makeStringVector(keys),
+       makeStringVector(strings),
        arrays,
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"key"}, {VARCHAR()}), {flags(true, true)}, {0});
+       makeIds(kRows)});
+  auto run = createRun({*input, {0}, {flags(true, true)}, {}});
   run->append(*input);
 
   const auto* arena = run->storage();
@@ -995,7 +1058,12 @@ TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {
     EXPECT_GE(arena->keyDataAt(row), keyBlockBegin);
     EXPECT_LT(arena->keyDataAt(row), keyBlockEnd);
     const auto key = arena->keyAt(row);
+    RadixSortInlineKeyBuffer inlineBuffer{};
+    EncodedKeyView encodedKey;
+    key.deconstruct(inlineBuffer, encodedKey);
     ASSERT_NE(key.fullKeyData(), nullptr);
+    EXPECT_EQ(key.heapSize(), encodedKey.bytes.size());
+    EXPECT_EQ(key.fullKeyData(), encodedKey.bytes.data());
 
     const auto* payload = key.payload();
     ASSERT_NE(payload, nullptr);
@@ -1017,24 +1085,8 @@ TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {
 TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
   constexpr vector_size_t kRows = 40;
   auto sourcePool = rootPool_->addLeafChild("radix-sort-run-source-test");
-  std::vector<std::optional<int64_t>> keys(kRows);
-  std::vector<std::optional<std::string>> strings(kRows);
-  std::vector<std::optional<int64_t>> ids(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    keys[row] = kRows - row;
-    strings[row] = std::string(80, static_cast<char>('a' + row % 20));
-    ids[row] = row;
-  }
-  auto input = makeRows(
-      sourcePool.get(),
-      {"key", "string", "id"},
-      {makeVector<int64_t>(sourcePool.get(), BIGINT(), keys),
-       makeStringVector(sourcePool.get(), VARCHAR(), strings),
-       makeVector<int64_t>(sourcePool.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"key"}, {BIGINT()}), {flags(true, true)}, {0});
-  run->append(*input);
-  run->finalize();
+  auto input = makeDescendingKeyStringRows(kRows, 80, sourcePool.get());
+  auto run = finalizedRun({*input, {0}, {flags(true, true)}, {}});
 
   const auto width = run->storage()->layout().width();
   std::vector<RadixSortInlineKeyBuffer> records(run->size());
@@ -1055,11 +1107,7 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
   }
 
   uint64_t drainedRows = firstBatch->size();
-  while (true) {
-    auto batch = run->getOutput(9, outputPool_.get());
-    if (batch == nullptr) {
-      break;
-    }
+  while (auto batch = run->getOutput(9, outputPool_.get())) {
     drainedRows += batch->size();
   }
   EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
@@ -1076,35 +1124,157 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
       80);
 }
 
+TEST_F(
+    RadixSortRunTest,
+    variable64RoundTripAcrossBlocksBatchesAndPointerMerge) {
+  constexpr vector_size_t kRows = 41;
+  constexpr uint32_t kKeys = 8;
+  std::vector<VectorPtr> children;
+  std::vector<std::string> names;
+  std::vector<TypePtr> keyTypes(kKeys, BIGINT());
+  std::vector<column_index_t> keyChannels(kKeys);
+  std::vector<CompareFlags> keyFlags(kKeys);
+  children.reserve(kKeys + 2);
+  for (uint32_t key = 0; key < kKeys - 1; ++key) {
+    names.push_back("key" + std::to_string(key));
+    children.push_back(makeVector<int64_t>(
+        BIGINT(), makeValues<int64_t>(kRows, [key](vector_size_t row) {
+          if (row % 18 == 0 ||
+              (row % 9 == 0 ? key >= 4 : (row + key * 3) % 11 == 0)) {
+            return std::optional<int64_t>{};
+          }
+          return std::optional<int64_t>{
+              key < 4 ? static_cast<int64_t>((row + key) % 3)
+                      : static_cast<int64_t>(
+                            ((row * (37 + key * 2)) ^ (key * 101)) % 29 - 14)};
+        })));
+    keyChannels[key] = key;
+    keyFlags[key] = flags(key % 3 != 1, key % 2 == 0);
+  }
+  keyTypes.back() = VARCHAR();
+  keyChannels.back() = kKeys - 1;
+  keyFlags.back() = flags(false, false);
+  names.insert(names.end(), {"key7", "payload", "id"});
+  children.push_back(makeStringVector(makeValues<std::string>(
+      kRows, [](vector_size_t row) -> std::optional<std::string> {
+        return row % 18 == 0 ? std::nullopt
+                             : std::optional{std::string(
+                                   row % 5 == 0 ? 64 : 3 + row % 7,
+                                   static_cast<char>('a' + row % 17))};
+      })));
+  children.push_back(makeStringVector(makeValues<std::string>(
+      kRows, [](vector_size_t row) -> std::optional<std::string> {
+        return row % 7 == 0
+            ? std::nullopt
+            : std::optional{
+                  std::string(48 + row % 9, static_cast<char>('a' + row % 17))};
+      })));
+  children.push_back(makeIds(kRows));
+  auto keyType =
+      ROW(std::vector<std::string>(names.begin(), names.begin() + kKeys),
+          std::move(keyTypes));
+  auto input = makeRows(std::move(names), children);
+
+  const auto makeRun = [&](const RowVector& rows) {
+    RadixSortRunOptions options;
+    options.keysPerBlock = 3;
+    options.preferredKeyHeapGroupBytes = 29;
+    options.payloadRowsPerBlock = 2;
+    auto run = createRun({*input, keyChannels, keyFlags, {}}, options);
+    const auto middle = (rows.size() - 6) / 2;
+    run->append(*slice(rows, 0, 5));
+    run->append(*slice(rows, 5, 1));
+    run->append(*slice(rows, 6, middle));
+    run->append(*slice(rows, 6 + middle, rows.size() - 6 - middle));
+    EXPECT_EQ(
+        run->keyLayout().kind(),
+        RadixSortKeyLayoutKind::kKeyWithPayloadVariable64);
+    EXPECT_GT(run->storage()->keyBlocks().size(), 1);
+    EXPECT_GT(run->storage()->keyHeapGroups().size(), 1);
+    EXPECT_GT(run->storage()->payloadFixedBlocks().size(), 1);
+    run->finalize();
+    return run;
+  };
+
+  auto inMemoryRun = makeRun(*input);
+  auto first = inMemoryRun->getOutput(6, outputPool_.get());
+  ASSERT_NE(first, nullptr);
+  auto firstCopy = slice(*first, 0, first->size());
+  const auto reusableBuffers = outputBuffers(*first);
+  first.reset();
+  auto second = inMemoryRun->getOutput(6, outputPool_.get());
+  ASSERT_NE(second, nullptr);
+  const auto retainedBuffers = outputBuffers(*second);
+  EXPECT_EQ(retainedBuffers[0], reusableBuffers[0]);
+  const auto retainedId = idAt(*second, 0, kKeys + 1);
+  const auto retainedPayload = second->childAt(kKeys)
+                                   ->asUnchecked<SimpleVector<StringView>>()
+                                   ->valueAt(0)
+                                   .str();
+  auto third = inMemoryRun->getOutput(6, outputPool_.get());
+  ASSERT_NE(third, nullptr);
+  EXPECT_NE(outputBuffers(*third)[0], retainedBuffers[0]);
+  EXPECT_EQ(idAt(*second, 0, kKeys + 1), retainedId);
+  EXPECT_EQ(
+      second->childAt(kKeys)
+          ->asUnchecked<SimpleVector<StringView>>()
+          ->valueAt(0)
+          .str(),
+      retainedPayload);
+  auto alternateOutputPool =
+      rootPool_->addLeafChild("radix-sort-run-alternate-output-test");
+  auto alternate = inMemoryRun->getOutput(6, alternateOutputPool.get());
+  ASSERT_NE(alternate, nullptr);
+  EXPECT_EQ(alternate->pool(), alternateOutputPool.get());
+  for (uint32_t column = 0; column < alternate->childrenSize(); ++column) {
+    EXPECT_EQ(alternate->childAt(column)->pool(), alternateOutputPool.get());
+  }
+  std::vector<RowVectorPtr> inMemoryBatches{
+      firstCopy, second, third, alternate};
+  while (auto batch = inMemoryRun->getOutput(7, outputPool_.get())) {
+    inMemoryBatches.push_back(std::move(batch));
+  }
+  expectRowsMatchById(*input, inMemoryBatches, kKeys + 1);
+
+  auto leftInput = slice(*input, 0, 20);
+  auto rightInput = slice(*input, 20, kRows - 20);
+  auto mergeRun = makeRun(*leftInput);
+  auto secondMergeRun = makeRun(*rightInput);
+  std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+  streams.push_back(
+      std::make_unique<RadixSortMemoryRunMergeStream>(*mergeRun->storage()));
+  streams.push_back(std::make_unique<RadixSortMemoryRunMergeStream>(
+      *secondMergeRun->storage()));
+  RadixSortMerger merger(mergeRun->keyLayout(), std::move(streams));
+  std::vector<RowVectorPtr> mergeBatches;
+  std::array<const char*, 9> keys{};
+  std::array<char*, 9> payloadRows{};
+  vector_size_t mergedRows = 0;
+  while (mergedRows < kRows) {
+    const auto requested = std::min<vector_size_t>(
+        keys.size(), static_cast<vector_size_t>(kRows - mergedRows));
+    const auto count =
+        merger.collectRows(requested, keys.data(), payloadRows.data());
+    ASSERT_EQ(count, requested);
+    mergeBatches.push_back(mergeRun->getOutput(
+        std::span<const char* const>(keys.data(), count),
+        std::span<char* const>(payloadRows.data(), count),
+        outputPool_.get()));
+    mergedRows += count;
+  }
+  ASSERT_GT(mergeBatches.size(), 2);
+  expectRowsMatchById(*input, mergeBatches, kKeys + 1);
+}
+
 TEST_F(RadixSortRunTest, outputReusesBuffersWithCopyOnWrite) {
   constexpr vector_size_t kRows = 16;
-  std::vector<std::optional<int64_t>> keys(kRows);
-  std::vector<std::optional<std::string>> strings(kRows);
-  std::vector<std::optional<int64_t>> ids(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    keys[row] = kRows - row;
-    strings[row] = std::string(48, static_cast<char>('a' + row));
-    ids[row] = row;
-  }
-  auto input = makeRows(
-      runPool_.get(),
-      {"key", "string", "id"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), keys),
-       makeStringVector(runPool_.get(), VARCHAR(), strings),
-       makeVector<int64_t>(runPool_.get(), BIGINT(), ids)});
-  auto run = createRun(
-      rowTypeOf(*input), ROW({"key"}, {BIGINT()}), {flags(true, true)}, {0});
-  run->append(*input);
-  run->finalize();
+  auto input = makeDescendingKeyStringRows(kRows, 48);
+  auto run = finalizedRun({*input, {0}, {flags(true, true)}, {}});
 
   auto first = run->getOutput(4, outputPool_.get());
   ASSERT_NE(first, nullptr);
-  auto* firstKey = first->childAt(0)->asUnchecked<FlatVector<int64_t>>();
-  auto* firstString = first->childAt(1)->asUnchecked<FlatVector<StringView>>();
-  const auto* keyValues = firstKey->values().get();
-  const auto* stringValues = firstString->values().get();
-  ASSERT_EQ(firstString->stringBuffers().size(), 1);
-  const auto* stringBuffer = firstString->stringBuffers().front().get();
+  const auto reusableBuffers = outputBuffers(*first, true);
+  ASSERT_NE(reusableBuffers[2], nullptr);
   first.reset();
 
   auto second = run->getOutput(4, outputPool_.get());
@@ -1112,42 +1282,45 @@ TEST_F(RadixSortRunTest, outputReusesBuffersWithCopyOnWrite) {
   auto* secondKey = second->childAt(0)->asUnchecked<FlatVector<int64_t>>();
   auto* secondString =
       second->childAt(1)->asUnchecked<FlatVector<StringView>>();
-  EXPECT_EQ(secondKey->values().get(), keyValues);
-  EXPECT_EQ(secondString->values().get(), stringValues);
-  ASSERT_EQ(secondString->stringBuffers().size(), 1);
-  EXPECT_EQ(secondString->stringBuffers().front().get(), stringBuffer);
+  const auto retainedBuffers = outputBuffers(*second, true);
+  ASSERT_NE(retainedBuffers[2], nullptr);
+  EXPECT_EQ(retainedBuffers[0], reusableBuffers[0]);
+  EXPECT_EQ(retainedBuffers[1], reusableBuffers[1]);
+  EXPECT_EQ(retainedBuffers[2], reusableBuffers[2]);
 
   const auto retainedKey = secondKey->valueAt(0);
   const auto retainedString = secondString->valueAt(0).getString();
-  const auto* secondKeyValues = secondKey->values().get();
-  const auto* secondStringValues = secondString->values().get();
-  const auto* secondStringBuffer = secondString->stringBuffers().front().get();
 
   auto third = run->getOutput(4, outputPool_.get());
   ASSERT_NE(third, nullptr);
-  auto* thirdKey = third->childAt(0)->asUnchecked<FlatVector<int64_t>>();
-  auto* thirdString = third->childAt(1)->asUnchecked<FlatVector<StringView>>();
-  EXPECT_NE(thirdKey->values().get(), secondKeyValues);
-  EXPECT_NE(thirdString->values().get(), secondStringValues);
-  ASSERT_EQ(thirdString->stringBuffers().size(), 1);
-  EXPECT_NE(thirdString->stringBuffers().front().get(), secondStringBuffer);
+  const auto thirdBuffers = outputBuffers(*third, true);
+  ASSERT_NE(thirdBuffers[2], nullptr);
+  EXPECT_NE(thirdBuffers[0], retainedBuffers[0]);
+  EXPECT_NE(thirdBuffers[1], retainedBuffers[1]);
+  EXPECT_NE(thirdBuffers[2], retainedBuffers[2]);
   EXPECT_EQ(secondKey->valueAt(0), retainedKey);
   EXPECT_EQ(secondString->valueAt(0).getString(), retainedString);
 }
 
-TEST_F(RadixSortRunTest, stateAndCapabilityValidation) {
-  auto rowType = ROW({"key"}, {BIGINT()});
+TEST_F(RadixSortRunTest, outputSurvivesExplicitRunClear) {
   auto input = makeRows(
-      runPool_.get(),
-      {"key"},
-      {makeVector<int64_t>(runPool_.get(), BIGINT(), {1, 2})});
-  auto run = createRun(rowType, rowType, {flags(true, true)}, {0});
-  RowVectorPtr output;
-  EXPECT_THROW(run->getOutput(1, outputPool_.get()), BoltException);
+      {"key", "payload"},
+      {makeVector<int64_t>(BIGINT(), {1, 2}),
+       makeStringVector({std::string(4096, 'x'), "y"})});
+  auto run = createRun({*input, {0}, {flags(true, true)}, {}});
   run->append(*input);
   run->finalize();
-  EXPECT_THROW(run->append(*input), BoltException);
-  EXPECT_THROW(run->finalize(), BoltException);
+  auto output = run->getOutput(1, outputPool_.get());
+  ASSERT_NE(output, nullptr);
+  ASSERT_EQ(output->size(), 1);
+  run->clear();
+  expectCleared(*run);
+  EXPECT_EQ(
+      output->childAt(1)
+          ->asUnchecked<SimpleVector<StringView>>()
+          ->valueAt(0)
+          .size(),
+      4096);
 }
 
 } // namespace
