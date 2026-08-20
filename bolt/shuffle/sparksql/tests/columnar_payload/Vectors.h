@@ -31,8 +31,8 @@
 #include <string>
 #include <vector>
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadGenerator.h"
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadValidator.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Generator.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Validator.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {

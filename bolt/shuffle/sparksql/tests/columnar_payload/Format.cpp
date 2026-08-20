@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadFormat.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Format.h"
 
 #include <cstring>
 #include <iterator>
