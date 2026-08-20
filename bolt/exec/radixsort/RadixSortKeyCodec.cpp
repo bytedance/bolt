@@ -3547,7 +3547,6 @@ void RadixSortKeyCodec::encodeSingleFixedFlat(
     const RowVector& input,
     memory::MemoryPool* pool,
     EncodedKeyBatch& result) const {
-  result = EncodedKeyBatch{};
   result.format_ = format_;
   result.size_ = input.size();
 
@@ -3555,13 +3554,13 @@ void RadixSortKeyCodec::encodeSingleFixedFlat(
   const uint64_t* offsets = nullptr;
   char* data = nullptr;
   if (format_ == EncodedKeyFormat::kFixed64) {
-    result.fixedKeys_ =
-        AlignedBuffer::allocate<uint64_t>(input.size(), pool, uint64_t{0});
-    words = result.fixedKeys_->asMutable<uint64_t>();
+    words =
+        prepareReusableBuffer<uint64_t>(result.fixedKeys_, input.size(), pool);
+    std::fill(words, words + input.size(), uint64_t{0});
   } else {
-    result.offsets_ =
-        AlignedBuffer::allocate<uint64_t>(input.size() + 1, pool, uint64_t{0});
-    auto* mutableOffsets = result.offsets_->asMutable<uint64_t>();
+    auto* mutableOffsets = prepareReusableBuffer<uint64_t>(
+        result.offsets_, input.size() + 1, pool);
+    mutableOffsets[0] = 0;
     const auto* nulls = input.childAt(0)->rawNulls();
     const auto bodySize = *fixedBodySize(*columns_[0].type);
     for (vector_size_t row = 0; row < input.size(); ++row) {
@@ -3591,11 +3590,16 @@ void RadixSortKeyCodec::encode(
     const RowVector& input,
     memory::MemoryPool* pool,
     EncodedKeyBatch& result) const {
-  result = EncodedKeyBatch{};
   BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
 
   result.format_ = format_;
   result.size_ = input.size();
+  result.data_.reset();
+  if (format_ == EncodedKeyFormat::kFixed64) {
+    result.offsets_.reset();
+  } else {
+    result.fixedKeys_.reset();
+  }
 
   if (canEncodeSingleFixedFlatVector(columns_, input)) {
     encodeSingleFixedFlat(input, pool, result);
@@ -3603,9 +3607,9 @@ void RadixSortKeyCodec::encode(
   }
 
   if (format_ == EncodedKeyFormat::kFixed64) {
-    result.fixedKeys_ =
-        AlignedBuffer::allocate<uint64_t>(input.size(), pool, uint64_t{0});
-    auto* words = result.fixedKeys_->asMutable<uint64_t>();
+    auto* words =
+        prepareReusableBuffer<uint64_t>(result.fixedKeys_, input.size(), pool);
+    std::fill(words, words + input.size(), uint64_t{0});
     encodeCursorScratch_.resize(input.size());
     auto* cursors = encodeCursorScratch_.data();
     for (vector_size_t row = 0; row < input.size(); ++row) {
@@ -3635,9 +3639,8 @@ void RadixSortKeyCodec::encode(
   }
 
   auto offsetCount = static_cast<uint64_t>(input.size()) + 1;
-  result.offsets_ =
-      AlignedBuffer::allocate<uint64_t>(static_cast<size_t>(offsetCount), pool);
-  auto* offsets = result.offsets_->asMutable<uint64_t>();
+  auto* offsets = prepareReusableBuffer<uint64_t>(
+      result.offsets_, static_cast<size_t>(offsetCount), pool);
   uint64_t flatFixedSize = 0;
   for (uint32_t column = 0; column < columns_.size(); ++column) {
     const auto bodySize = fixedBodySize(*columns_[column].type);

@@ -28,6 +28,7 @@
 namespace bytedance::bolt::exec::radixsort {
 
 class PayloadRowBatch;
+class RadixSortRun;
 class RadixSortRunStorage;
 
 struct PayloadVarlenRef {
@@ -111,10 +112,21 @@ class PayloadRowReader {
 
 class PayloadRowWriter {
  public:
-  static void append(
+  PayloadRowWriter();
+  ~PayloadRowWriter();
+
+  void append(
       const RowVector& input,
       RadixSortRunStorage& arena,
       PayloadRowBatch& batch);
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  void clear();
+
+  friend class RadixSortRun;
 };
 
 } // namespace bytedance::bolt::exec::radixsort

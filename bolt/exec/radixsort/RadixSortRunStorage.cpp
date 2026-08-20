@@ -28,6 +28,8 @@ namespace bytedance::bolt::exec::radixsort {
 
 namespace {
 
+constexpr uint64_t kMaxPayloadFixedBlockBytes = 64 * 1024;
+
 template <RadixSortKeyLayoutKind KIND>
 void appendInlineVariableKeys(
     const EncodedKeyBatch& encodedKeys,
@@ -365,22 +367,37 @@ void RadixSortRunStorage::appendBatch(
 void RadixSortRunStorage::allocatePayloadRowBatch(
     std::span<const uint64_t> heapSizes,
     PayloadRowBatch& batch) {
-  batch = PayloadRowBatch{};
+  allocatePayloadRowBatch(heapSizes, nullptr, batch);
+}
+
+void RadixSortRunStorage::allocatePayloadRowBatch(
+    std::span<const uint64_t> heapSizes,
+    const BufferPtr& sizeStorage,
+    PayloadRowBatch& batch) {
   const auto count = static_cast<vector_size_t>(heapSizes.size());
   batch.size_ = count;
   if (count == 0) {
+    if (batch.rows_ != nullptr && batch.rows_->isMutable()) {
+      batch.rows_->setSize(0);
+    }
+    if (batch.heaps_ != nullptr && batch.heaps_->isMutable()) {
+      batch.heaps_->setSize(0);
+    }
+    batch.heapSizes_ = sizeStorage;
     return;
   }
-  batch.rows_ = AlignedBuffer::allocate<char*>(count, pool_, nullptr);
-  batch.heaps_ = AlignedBuffer::allocate<char*>(count, pool_, nullptr);
-  batch.heapSizes_ =
-      AlignedBuffer::allocate<uint64_t>(count, pool_, uint64_t{0});
-  auto** rows = batch.rows_->asMutable<char*>();
-  auto** heaps = batch.heaps_->asMutable<char*>();
-  auto* sizes = batch.heapSizes_->asMutable<uint64_t>();
+  auto** rows = prepareReusableBuffer<char*>(batch.rows_, count, pool_);
+  auto** heaps = prepareReusableBuffer<char*>(batch.heaps_, count, pool_);
+  std::fill(heaps, heaps + count, nullptr);
+  batch.heapSizes_ = sizeStorage;
+  if (batch.heapSizes_ == nullptr) {
+    prepareReusableBuffer<uint64_t>(batch.heapSizes_, count, pool_);
+    std::memcpy(
+        batch.heapSizes_->asMutable<uint64_t>(),
+        heapSizes.data(),
+        count * sizeof(uint64_t));
+  }
   allocatePayloadRowPointers(count, rows);
-
-  std::memcpy(sizes, heapSizes.data(), count * sizeof(uint64_t));
 
   vector_size_t row = 0;
   while (row < count) {
@@ -429,13 +446,16 @@ void RadixSortRunStorage::allocatePayloadRowBatch(
 void RadixSortRunStorage::allocateFixedPayloadRowBatch(
     vector_size_t count,
     PayloadRowBatch& batch) {
-  batch = PayloadRowBatch{};
   batch.size_ = count;
+  batch.heaps_.reset();
+  batch.heapSizes_.reset();
   if (count == 0) {
+    if (batch.rows_ != nullptr && batch.rows_->isMutable()) {
+      batch.rows_->setSize(0);
+    }
     return;
   }
-  batch.rows_ = AlignedBuffer::allocate<char*>(count, pool_, nullptr);
-  auto** rows = batch.rows_->asMutable<char*>();
+  auto** rows = prepareReusableBuffer<char*>(batch.rows_, count, pool_);
   allocatePayloadRowPointers(count, rows);
 }
 
@@ -495,11 +515,14 @@ void RadixSortRunStorage::ensurePayloadFixedBlock() {
       payloadFixedBlocks_.back().count < payloadFixedBlocks_.back().capacity) {
     return;
   }
-  const auto bytes =
-      static_cast<uint64_t>(payloadRowsPerBlock_) * payloadLayout_->rowWidth();
+  const auto rowWidth = payloadLayout_->rowWidth();
+  const auto byteLimitedCapacity =
+      std::max<uint64_t>(1, kMaxPayloadFixedBlockBytes / rowWidth);
+  const auto capacity = static_cast<uint32_t>(
+      std::min<uint64_t>(payloadRowsPerBlock_, byteLimitedCapacity));
+  const auto bytes = static_cast<uint64_t>(capacity) * rowWidth;
   auto* base = allocationPool_.allocateFixed(bytes, alignof(uint64_t));
-  payloadFixedBlocks_.push_back(
-      PayloadRowFixedBlock{base, payloadRowsPerBlock_, 0});
+  payloadFixedBlocks_.push_back(PayloadRowFixedBlock{base, capacity, 0});
 }
 
 void RadixSortRunStorage::allocateOverflow(uint64_t size, char*& data) {

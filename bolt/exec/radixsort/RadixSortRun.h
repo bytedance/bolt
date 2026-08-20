@@ -271,6 +271,9 @@ class RadixSortRun {
   std::shared_ptr<const PayloadRowLayout> payloadLayout_;
   RadixSortKeyLayout keyLayout_;
   std::unique_ptr<RadixSortRunStorage> storage_;
+  EncodedKeyBatch encodeOutput_;
+  PayloadRowWriter payloadWriter_;
+  PayloadRowBatch payloadBatch_;
   RowVectorPtr decodedKeysOutput_;
   RowVectorPtr payloadOutput_;
   BufferPtr decodeCursorOutput_;

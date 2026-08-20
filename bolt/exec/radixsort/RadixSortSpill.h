@@ -29,12 +29,18 @@
 
 namespace bytedance::bolt::exec::radixsort {
 
+bool supportsRadixSortSpill(const common::SpillConfig& config);
+
 struct RadixSortSpillFile {
   uint32_t id;
   std::string path;
   uint64_t size{0};
   uint64_t rowCount{0};
   common::CompressionKind compressionKind{common::CompressionKind_NONE};
+};
+
+struct RadixSortSpillReadBufferCache {
+  BufferPtr rowBuffer;
 };
 
 class RadixSortSpillWriter {
@@ -44,6 +50,8 @@ class RadixSortSpillWriter {
       const common::SpillConfig::SpillIOConfig& ioConfig,
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* stats);
+
+  ~RadixSortSpillWriter();
 
   std::vector<RadixSortSpillFile> writeRun(
       const RadixSortRunStorage& storage,
@@ -58,12 +66,22 @@ class RadixSortSpillWriter {
 
   std::vector<RadixSortSpillFile> finishRows();
 
+  uint64_t inputBytes() const {
+    return inputBytes_;
+  }
+
  private:
+  void cleanupFilesNoThrow() noexcept;
+
   void resetWriteState();
 
   void prepareWriteBuffer();
 
   void ensureBuffer(uint64_t bytes);
+
+  void resetBuffer(uint64_t bytes);
+
+  void ensureRowFits(uint64_t rowSize);
 
   void appendRow(
       const RadixSortKeyLayout& keyLayout,
@@ -103,12 +121,14 @@ class RadixSortSpillWriter {
   folly::Synchronized<common::SpillStats>* const stats_;
   BufferPtr buffer_;
   BufferPtr compressedBuffer_;
+  uint64_t normalBufferSize_{0};
   char* current_{nullptr};
   char* end_{nullptr};
   uint32_t nextFileId_{0};
   std::unique_ptr<SpillWriteFile> currentFile_;
   std::vector<RadixSortSpillFile> files_;
   uint64_t currentFileRows_{0};
+  uint64_t inputBytes_{0};
 };
 
 class RadixSortSpillReader {
@@ -118,7 +138,8 @@ class RadixSortSpillReader {
       RadixSortSpillRunMeta meta,
       const PayloadRowLayout* payloadLayout,
       memory::MemoryPool* pool,
-      bool spillUringEnabled);
+      bool spillUringEnabled,
+      RadixSortSpillReadBufferCache* bufferCache = nullptr);
 
   bool nextBatch(std::vector<char*>& keys, std::vector<char*>& payloads);
 
@@ -132,18 +153,28 @@ class RadixSortSpillReader {
 
   uint64_t spillReadIOTimeUs() const;
 
+  void close();
+
   void releaseRetainedBuffers(bool releaseCurrentBuffer) {
-    retainedRowBuffers_.clear();
     if (releaseCurrentBuffer) {
-      rowBuffer_.reset();
+      if (rowBuffer_ != nullptr) {
+        retainedRowBuffers_.push_back(std::move(rowBuffer_));
+      }
+      recycleRetainedRowBuffer();
       compressedBuffer_.reset();
+      return;
     }
+    recycleRetainedRowBuffer();
   }
 
  private:
+  void acquireRowBuffer(int32_t size);
+
+  void recycleRetainedRowBuffer();
+
   bool nextFixedBatch(
       char* block,
-      uint32_t uncompressedSize,
+      int32_t uncompressedSize,
       std::vector<char*>& keys,
       std::vector<char*>& payloads);
 
@@ -151,12 +182,15 @@ class RadixSortSpillReader {
   RadixSortSpillRunMeta meta_;
   const PayloadRowLayout* const payloadLayout_;
   memory::MemoryPool* const pool_;
+  const uint64_t maxReusableRowBufferSize_;
   std::unique_ptr<SpillInputStream> input_;
+  RadixSortSpillReadBufferCache* const bufferCache_;
   BufferPtr rowBuffer_;
   std::vector<BufferPtr> retainedRowBuffers_;
   BufferPtr compressedBuffer_;
   uint64_t spillReadTimeUs_{0};
   uint64_t spillDecompressTimeUs_{0};
+  uint64_t spillReadIOTimeUs_{0};
 };
 
 class RadixSortMergeStream : public MergeStream {
@@ -220,7 +254,10 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
       RadixSortSpillRunMeta meta,
       const PayloadRowLayout* payloadLayout,
       memory::MemoryPool* pool,
-      bool spillUringEnabled);
+      bool spillUringEnabled,
+      RadixSortSpillReadBufferCache* bufferCache = nullptr);
+
+  ~RadixSortSpillFileMergeStream() override;
 
   bool hasData() const override;
 
@@ -243,8 +280,27 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
   }
 
  private:
+  class SpillFileGuard {
+   public:
+    explicit SpillFileGuard(std::string path) : path_(std::move(path)) {}
+
+    ~SpillFileGuard();
+
+    void remove();
+
+    void removeNoThrow() noexcept;
+
+   private:
+    std::string path_;
+  };
+
   void loadBatch();
 
+  void finishReading();
+
+  void closeNoThrow() noexcept;
+
+  SpillFileGuard fileGuard_;
   RadixSortSpillReader reader_;
   std::vector<char*> keys_;
   std::vector<char*> payloads_;
@@ -257,7 +313,8 @@ class RadixSortMerger {
 
   RadixSortMerger(
       RadixSortKeyLayout keyLayout,
-      std::vector<std::unique_ptr<RadixSortMergeStream>> streams);
+      std::vector<std::unique_ptr<RadixSortMergeStream>> streams,
+      std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache = nullptr);
 
   vector_size_t
   collectRows(vector_size_t count, const char** keys, char** payloads);
@@ -307,6 +364,7 @@ class RadixSortMerger {
 
   RadixSortKeyLayout keyLayout_;
   CompareKeys compareKeys_{nullptr};
+  std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache_;
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams_;
   std::vector<StreamIndex> losers_;
   StreamIndex lastIndex_{kEmpty};

@@ -290,13 +290,12 @@ void RadixSortRun::append(const RowVector& input) {
   }
 
   VectorPtr directFixedKey;
-  EncodedKeyBatch encodedKeys;
   const auto encodeBegin = std::chrono::steady_clock::now();
   if (keys.childrenSize() == 1 &&
       keyCodec_->canAppendSingleFixedFlat(*keys.childAt(0), *storage_)) {
     directFixedKey = keys.childAt(0);
   } else {
-    keyCodec_->encode(keys, pool_, encodedKeys);
+    keyCodec_->encode(keys, pool_, encodeOutput_);
   }
   const auto encodeTimeUs = elapsedUs(encodeBegin);
 
@@ -316,12 +315,11 @@ void RadixSortRun::append(const RowVector& input) {
           payloadInput.childAt(column)->mayHaveNulls();
     }
     const auto appendBegin = std::chrono::steady_clock::now();
-    PayloadRowBatch payloadBatch;
-    PayloadRowWriter::append(payloadInput, *storage_, payloadBatch);
+    payloadWriter_.append(payloadInput, *storage_, payloadBatch_);
     const auto payloads =
-        std::span<char* const>(payloadBatch.rows()->as<char*>(), input.size());
+        std::span<char* const>(payloadBatch_.rows()->as<char*>(), input.size());
     if (directFixedKey == nullptr) {
-      storage_->appendBatch(encodedKeys, payloads);
+      storage_->appendBatch(encodeOutput_, payloads);
     } else {
       keyCodec_->tryAppendSingleFixedFlat(
           *directFixedKey, input.size(), *storage_, payloads);
@@ -330,7 +328,7 @@ void RadixSortRun::append(const RowVector& input) {
   } else {
     const auto appendBegin = std::chrono::steady_clock::now();
     if (directFixedKey == nullptr) {
-      storage_->appendBatch(encodedKeys);
+      storage_->appendBatch(encodeOutput_);
     } else {
       keyCodec_->tryAppendSingleFixedFlat(
           *directFixedKey, input.size(), *storage_, {});
@@ -344,12 +342,16 @@ void RadixSortRun::append(const RowVector& input) {
   }
   metrics_.encodeTimeUs += encodeTimeUs;
   metrics_.inputRows = *nextInputRows;
+  encodeOutput_.resetData();
 }
 
 void RadixSortRun::finalize() {
   BOLT_CHECK(
       state_ == RadixSortRunState::kBuilding,
       "RadixSortRun can be finalized only once");
+  encodeOutput_ = EncodedKeyBatch{};
+  payloadBatch_ = PayloadRowBatch{};
+  payloadWriter_.clear();
   state_ = RadixSortRunState::kFinalizing;
   const auto begin = std::chrono::steady_clock::now();
   try {
@@ -469,6 +471,9 @@ vector_size_t RadixSortRun::collectRemainingRows(
 }
 
 void RadixSortRun::clear() {
+  encodeOutput_ = EncodedKeyBatch{};
+  payloadBatch_ = PayloadRowBatch{};
+  payloadWriter_.clear();
   decodedKeysOutput_.reset();
   payloadOutput_.reset();
   decodeCursorOutput_.reset();

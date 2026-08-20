@@ -74,6 +74,11 @@ class EncodedKeyBatch {
 
  private:
   friend class RadixSortKeyCodec;
+  friend class RadixSortRun;
+
+  void resetData() {
+    data_.reset();
+  }
 
   EncodedKeyFormat format_{EncodedKeyFormat::kVariableBinary};
   vector_size_t size_{0};

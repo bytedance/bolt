@@ -81,7 +81,10 @@ OrderBy::OrderBy(
     sortCompareFlags.push_back(
         fromSortOrderToCompareFlags(orderByNode->sortingOrders()[i]));
   }
-  const auto useRadixSort = driverCtx->queryConfig().orderByRadixSortEnabled();
+  const auto useRadixSort =
+      driverCtx->queryConfig().orderByRadixSortEnabled() &&
+      (!spillConfig_.has_value() ||
+       radixsort::supportsRadixSortSpill(*spillConfig_));
   if (useRadixSort) {
     sortBuffer_ = std::make_unique<radixsort::RadixSortBuffer>(
         outputType_,
@@ -134,6 +137,9 @@ void OrderBy::reclaim(
   // TODO: support fine-grain disk spilling based on 'targetBytes' after
   // having row container memory compaction support later.
   sortBuffer_->spill();
+  if (noMoreInput_) {
+    recordSpillStats();
+  }
 
   // Release the minimum reserved memory.
   pool()->release();
@@ -187,7 +193,8 @@ void OrderBy::recordSpillStats() {
   BOLT_CHECK_NOT_NULL(sortBuffer_);
   auto spillStats = sortBuffer_->spilledStats();
   if (spillStats.has_value()) {
-    Operator::recordSpillStats(spillStats.value());
+    Operator::recordSpillStats(spillStats.value() - recordedSpillStats_);
+    recordedSpillStats_ = spillStats.value();
   }
 }
 

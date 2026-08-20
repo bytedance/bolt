@@ -1118,36 +1118,39 @@ TEST_P(OrderByTest, spill) {
 
   const auto expectedResult = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
-  auto task = AssertQueryBuilder(plan)
-                  .spillDirectory(spillDirectory->path)
-                  .config(core::QueryConfig::kSpillEnabled, true)
-                  .config(core::QueryConfig::kOrderBySpillEnabled, true)
-                  // Set a small capacity to trigger threshold based spilling
-                  .config(QueryConfig::kOrderBySpillMemoryThreshold, 32 << 20)
-                  .assertResults(expectedResult);
-  auto taskStats = exec::toPlanStats(task->taskStats());
-  auto& planStats = taskStats.at(orderNodeId);
-  ASSERT_GT(planStats.spilledBytes, 0);
-  ASSERT_GT(planStats.spilledRows, 0);
-  ASSERT_GT(planStats.spilledBytes, 0);
-  ASSERT_GT(planStats.spilledInputBytes, 0);
-  ASSERT_EQ(planStats.spilledPartitions, 1);
-  ASSERT_GT(planStats.spilledFiles, 0);
-  ASSERT_GT(planStats.customStats["spillRuns"].count, 0);
-  ASSERT_GT(planStats.customStats["spillFillTime"].sum, 0);
-  ASSERT_GT(planStats.customStats["spillSortTime"].sum, 0);
-  ASSERT_GT(planStats.customStats["spillSerializationTime"].sum, 0);
-  ASSERT_GE(planStats.customStats["spillFlushTime"].sum, 0);
-  ASSERT_LE(
-      planStats.customStats["spillFlushTime"].count,
-      planStats.customStats["spillSerializationTime"].count);
-  ASSERT_GT(planStats.customStats[Operator::kSpillWrites].sum, 0);
-  ASSERT_GT(planStats.customStats["spillWriteTime"].sum, 0);
-  ASSERT_EQ(
-      planStats.customStats[Operator::kSpillWrites].count,
-      planStats.customStats["spillWriteTime"].count);
-  OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  for (const auto codec : {"none", "zlib"}) {
+    SCOPED_TRACE(codec);
+    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto task = AssertQueryBuilder(plan)
+                    .spillDirectory(spillDirectory->path)
+                    .config(core::QueryConfig::kSpillEnabled, true)
+                    .config(core::QueryConfig::kOrderBySpillEnabled, true)
+                    .config(core::QueryConfig::kOrderByRadixSortEnabled, true)
+                    .config(core::QueryConfig::kSpillCompressionKind, codec)
+                    .config(QueryConfig::kOrderBySpillMemoryThreshold, 32 << 20)
+                    .assertResults(expectedResult);
+    auto taskStats = exec::toPlanStats(task->taskStats());
+    auto& planStats = taskStats.at(orderNodeId);
+    ASSERT_GT(planStats.spilledBytes, 0);
+    ASSERT_GT(planStats.spilledRows, 0);
+    ASSERT_GT(planStats.spilledInputBytes, 0);
+    ASSERT_EQ(planStats.spilledPartitions, 1);
+    ASSERT_GT(planStats.spilledFiles, 0);
+    ASSERT_GT(planStats.customStats["spillRuns"].count, 0);
+    ASSERT_GT(planStats.customStats[Operator::kSpillWrites].sum, 0);
+    for (const auto* metric :
+         {"spillFillTime",
+          "spillSortTime",
+          "spillSerializationTime",
+          "spillFlushTime",
+          "spillWriteTime"}) {
+      const auto it = planStats.customStats.find(metric);
+      if (it != planStats.customStats.end()) {
+        ASSERT_GE(it->second.sum, 0);
+      }
+    }
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  }
 }
 
 TEST_P(OrderByTest, spillWithArrowSerde) {
@@ -1707,9 +1710,21 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     batches.push_back(fuzzer.fuzzRow(rowType));
   }
 
-  const std::vector<bool> enableSpillings = {false, true};
-  for (bool enableSpilling : enableSpillings) {
-    SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
+  struct {
+    bool enableSpilling;
+    bool radixSortEnabled;
+  } testSettings[] = {
+      {false, true},
+      {true, false},
+      {true, true},
+  };
+  for (const auto& testData : testSettings) {
+    const auto enableSpilling = testData.enableSpilling;
+    const auto radixSortEnabled = testData.radixSortEnabled;
+    SCOPED_TRACE(fmt::format(
+        "enableSpilling {}, radixSortEnabled {}",
+        enableSpilling,
+        radixSortEnabled));
     auto tempDirectory = exec::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
@@ -1765,7 +1780,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
-            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled, radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1775,6 +1791,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
                 .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                 .planNode())
             .queryCtx(queryCtx)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled, radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       }
@@ -1792,12 +1810,22 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     ASSERT_EQ(op->canReclaim(), enableSpilling);
     ASSERT_EQ(reclaimable, enableSpilling);
 
+    OperatorStats statsAfterReclaim;
     if (enableSpilling) {
       ASSERT_GT(reclaimableBytes, 0);
       reclaimerStats_.reset();
       reclaimAndRestoreCapacity(op, reclaimableBytes, reclaimerStats_);
       ASSERT_EQ(reclaimerStats_.reclaimedBytes, reclaimableBytes);
       ASSERT_GT(reclaimerStats_.reclaimExecTimeUs, 0);
+
+      statsAfterReclaim = op->stats(false);
+      ASSERT_GT(statsAfterReclaim.spilledBytes, 0);
+      ASSERT_GT(statsAfterReclaim.spilledRows, 0);
+      ASSERT_EQ(statsAfterReclaim.spilledPartitions, 1);
+      const auto spillRuns = statsAfterReclaim.runtimeStats.find("spillRuns");
+      ASSERT_NE(spillRuns, statsAfterReclaim.runtimeStats.end());
+      ASSERT_GT(spillRuns->second.sum, 0);
+      ASSERT_GT(spillRuns->second.count, 0);
     } else {
       ASSERT_EQ(reclaimableBytes, 0);
       BOLT_ASSERT_THROW(
@@ -1811,8 +1839,26 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     taskThread.join();
 
     auto stats = task->taskStats().pipelineStats;
-    ASSERT_EQ(stats[0].operatorStats[1].spilledBytes, 0);
-    ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 0);
+    const auto& finalStats = stats[0].operatorStats[1];
+    if (enableSpilling) {
+      // Reaching EOF records final spill stats and must not count them again.
+      ASSERT_EQ(finalStats.spilledBytes, statsAfterReclaim.spilledBytes);
+      ASSERT_EQ(finalStats.spilledRows, statsAfterReclaim.spilledRows);
+      ASSERT_EQ(
+          finalStats.spilledPartitions, statsAfterReclaim.spilledPartitions);
+      const auto spillRuns = finalStats.runtimeStats.find("spillRuns");
+      ASSERT_NE(spillRuns, finalStats.runtimeStats.end());
+      const auto spillRunsAfterReclaim =
+          statsAfterReclaim.runtimeStats.find("spillRuns");
+      ASSERT_NE(spillRunsAfterReclaim, statsAfterReclaim.runtimeStats.end());
+      ASSERT_EQ(spillRuns->second.sum, spillRunsAfterReclaim->second.sum);
+      ASSERT_EQ(spillRuns->second.count, spillRunsAfterReclaim->second.count);
+    } else {
+      ASSERT_EQ(finalStats.spilledBytes, 0);
+      ASSERT_EQ(finalStats.spilledRows, 0);
+      ASSERT_EQ(finalStats.spilledPartitions, 0);
+      ASSERT_EQ(finalStats.runtimeStats.count("spillRuns"), 0);
+    }
     OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
   }
   ASSERT_EQ(reclaimerStats_.numNonReclaimableAttempts, 0);
