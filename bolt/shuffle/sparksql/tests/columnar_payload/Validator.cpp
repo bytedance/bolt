@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/tests/ColumnarPayloadValidator.h"
+#include "bolt/shuffle/sparksql/tests/columnar_payload/Validator.h"
 
 #include <algorithm>
 #include <cstring>
