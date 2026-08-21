@@ -628,11 +628,10 @@ TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8AcrossPartitions) {
 
   std::vector<exec::Split> splits;
   for (const auto& file : listFiles(outputDirectory->path)) {
-    splits.emplace_back(
-        connector::hive::HiveConnectorSplitBuilder(file)
-            .connectorId(kHiveConnectorId)
-            .fileFormat(dwio::common::FileFormat::PARQUET)
-            .build());
+    splits.emplace_back(connector::hive::HiveConnectorSplitBuilder(file)
+                            .connectorId(kHiveConnectorId)
+                            .fileFormat(dwio::common::FileFormat::PARQUET)
+                            .build());
   }
   ASSERT_EQ(2, splits.size());
   const auto outputType = ROW({"v"}, {VARCHAR()});

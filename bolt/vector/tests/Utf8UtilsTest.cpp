@@ -72,6 +72,9 @@ TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
       {{"\x9C\xA9", 2}, replacement + replacement},
       {std::string(63, '\xD5') + std::string("\xD5\x80", 2),
        replacementRun(63) + std::string("\xD5\x80", 2)},
+      {{"\xE4\xB8\xAD\xE4\xB8\xD5\xE4\xB8\xAD", 9},
+       std::string("\xE4\xB8\xAD", 3) + replacement + replacement +
+           std::string("\xE4\xB8\xAD", 3)},
   };
 
   std::vector<std::string> inputs;
@@ -93,12 +96,19 @@ TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
 }
 
 TEST_F(Utf8UtilsTest, leavesValidInputsByteIdentical) {
+  std::string longThreeByte;
+  for (int32_t index = 0; index < 20; ++index) {
+    longThreeByte.append("\xE4\xB8\xAD", 3);
+  }
+  longThreeByte.append("tail");
+
   const std::vector<std::string> inputs = {
       "Spark ASCII",
       {"\xC2\xA2", 2},
       {"Spark \xE4\xB8\xAD \xF0\x9F\x98\x80", 14},
       {"\xE0\xA0\x80", 3},
       {"\xF4\x8F\xBF\xBF", 4},
+      longThreeByte,
   };
 
   auto input = makeRowVector({makeFlatVector<std::string>(inputs)});

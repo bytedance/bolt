@@ -111,6 +111,23 @@ inline std::pair<int32_t, int32_t> nextSegment(
   return {0, 1};
 }
 
+// Consumes a run of ordinary 3-byte code points without returning to the outer
+// malformed-input state machine for each code point. E0 and ED retain their
+// specialized checks in nextSegment().
+FOLLY_ALWAYS_INLINE int32_t
+regularThreeBytePrefixLength(const uint8_t* data, int32_t remaining) {
+  int32_t offset = 0;
+  while (offset <= remaining - 3) {
+    const auto lead = data[offset];
+    if (!((lead >= 0xE1 && lead <= 0xEC) || (lead >= 0xEE && lead <= 0xEF)) ||
+        !isCont(data[offset + 1]) || !isCont(data[offset + 2])) {
+      break;
+    }
+    offset += 3;
+  }
+  return offset;
+}
+
 // Returns the number of leading ASCII bytes. A SIMD comparison plus bit-mask
 // conversion locates the first high byte without a scalar rescan of the batch.
 // The UTF-8 state machine starts at that byte, so no successfully screened
@@ -231,10 +248,11 @@ FOLLY_ALWAYS_INLINE void appendMalformedRun(
   malformed.push_back({row, offset, size, replacements});
 }
 
-// Scans a string exactly once. ASCII runs are consumed using xsimd and only
-// high-bit bytes enter the scalar OpenJDK-compatible UTF-8 state machine.
-// Adjacent malformed units are coalesced so dense invalid input uses one run
-// per row instead of one record per byte.
+// Scans forward without a separate validation pass. ASCII runs use xsimd and
+// ordinary 3-byte runs stay in a tight loop; other high-bit bytes enter the
+// OpenJDK-compatible UTF-8 state machine. Adjacent malformed units are
+// coalesced so dense invalid input uses one run per row instead of one record
+// per byte.
 int32_t scanUtf8(
     vector_size_t row,
     const char* data,
@@ -264,6 +282,14 @@ int32_t scanUtf8(
           row, offset, malformedPrefix, malformedPrefix, malformed);
       offset += malformedPrefix;
       outputSize += replacementBytes;
+      continue;
+    }
+
+    const auto validPrefix =
+        regularThreeBytePrefixLength(bytes + offset, size - offset);
+    if (validPrefix > 0) {
+      offset += validPrefix;
+      outputSize += validPrefix;
       continue;
     }
 

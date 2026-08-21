@@ -34,10 +34,7 @@ target_link_libraries(
 )
 
 if(${BOLT_ENABLE_PARQUET})
-  add_executable(
-    bolt_hive_data_sink_utf8_benchmark
-    HiveDataSinkUtf8Benchmark.cpp
-  )
+  add_executable(bolt_hive_data_sink_utf8_benchmark HiveDataSinkUtf8Benchmark.cpp)
   target_link_libraries(
     bolt_hive_data_sink_utf8_benchmark
     bolt_testutils

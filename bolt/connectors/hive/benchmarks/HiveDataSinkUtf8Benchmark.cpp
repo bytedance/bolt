@@ -33,6 +33,7 @@
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/vector/Utf8Utils.h"
 
 namespace bytedance::bolt::connector::hive {
 namespace {
@@ -51,6 +52,7 @@ enum class InputKind {
   kAsciiKnown,
   kValidUtf8,
   kInvalidRare,
+  kInvalidComplex,
   kInvalidAll,
   kInlineOutput,
   kInlineToNonInline,
@@ -98,6 +100,7 @@ class HiveDataSinkUtf8Benchmark : public HiveConnectorTestBase {
     asciiKnown_ = makeInputBatches(InputKind::kAsciiKnown);
     validUtf8_ = makeInputBatches(InputKind::kValidUtf8);
     invalidRare_ = makeInputBatches(InputKind::kInvalidRare);
+    invalidComplex_ = makeInputBatches(InputKind::kInvalidComplex);
     invalidAll_ = makeInputBatches(InputKind::kInvalidAll);
     inlineOutput_ = makeInputBatches(InputKind::kInlineOutput);
     inlineToNonInline_ = makeInputBatches(InputKind::kInlineToNonInline);
@@ -112,6 +115,7 @@ class HiveDataSinkUtf8Benchmark : public HiveConnectorTestBase {
     inlineToNonInline_.clear();
     inlineOutput_.clear();
     invalidAll_.clear();
+    invalidComplex_.clear();
     invalidRare_.clear();
     validUtf8_.clear();
     asciiKnown_.clear();
@@ -142,6 +146,16 @@ class HiveDataSinkUtf8Benchmark : public HiveConnectorTestBase {
 
     suspender.rehire();
     reportOutputSizeOnce(benchmarkName, outputDirectory->path);
+    return static_cast<size_t>(kRowsPerBatch) * kNumBatches;
+  }
+
+  size_t runSanitizer(InputKind inputKind) {
+    const auto& inputs = inputsFor(inputKind);
+    for (const auto& input : inputs) {
+      auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(
+          input, connectorQueryCtx_->memoryPool());
+      folly::doNotOptimizeAway(output.get());
+    }
     return static_cast<size_t>(kRowsPerBatch) * kNumBatches;
   }
 
@@ -203,6 +217,11 @@ class HiveDataSinkUtf8Benchmark : public HiveConnectorTestBase {
             if (inputKind == InputKind::kValidUtf8) {
               return makeValidUtf8Value(globalRow);
             }
+            if (inputKind == InputKind::kInvalidComplex) {
+              auto value = makeValidUtf8Value(globalRow);
+              value[kStringBytes / 2] = '\xD5';
+              return value;
+            }
             if (inputKind == InputKind::kInvalidAll) {
               return std::string(kStringBytes, '\xD5');
             }
@@ -238,6 +257,8 @@ class HiveDataSinkUtf8Benchmark : public HiveConnectorTestBase {
         return validUtf8_;
       case InputKind::kInvalidRare:
         return invalidRare_;
+      case InputKind::kInvalidComplex:
+        return invalidComplex_;
       case InputKind::kInvalidAll:
         return invalidAll_;
       case InputKind::kInlineOutput:
@@ -324,6 +345,7 @@ class HiveDataSinkUtf8Benchmark : public HiveConnectorTestBase {
   std::vector<RowVectorPtr> asciiKnown_;
   std::vector<RowVectorPtr> validUtf8_;
   std::vector<RowVectorPtr> invalidRare_;
+  std::vector<RowVectorPtr> invalidComplex_;
   std::vector<RowVectorPtr> invalidAll_;
   std::vector<RowVectorPtr> inlineOutput_;
   std::vector<RowVectorPtr> inlineToNonInline_;
@@ -348,6 +370,8 @@ HIVE_DATA_SINK_UTF8_BENCHMARK(validUtf8Enabled, kValidUtf8, true);
 BENCHMARK_DRAW_LINE();
 HIVE_DATA_SINK_UTF8_BENCHMARK(invalidRareDisabled, kInvalidRare, false);
 HIVE_DATA_SINK_UTF8_BENCHMARK(invalidRareEnabled, kInvalidRare, true);
+HIVE_DATA_SINK_UTF8_BENCHMARK(invalidComplexDisabled, kInvalidComplex, false);
+HIVE_DATA_SINK_UTF8_BENCHMARK(invalidComplexEnabled, kInvalidComplex, true);
 HIVE_DATA_SINK_UTF8_BENCHMARK(invalidAllDisabled, kInvalidAll, false);
 HIVE_DATA_SINK_UTF8_BENCHMARK(invalidAllEnabled, kInvalidAll, true);
 BENCHMARK_DRAW_LINE();
@@ -372,6 +396,21 @@ HIVE_DATA_SINK_UTF8_BENCHMARK(
     dictionaryInvalidRareEnabled,
     kDictionaryInvalidRare,
     true);
+
+#define UTF8_SANITIZER_BENCHMARK(name, inputKind)         \
+  BENCHMARK_MULTI(name) {                                 \
+    return benchmark->runSanitizer(InputKind::inputKind); \
+  }
+
+BENCHMARK_DRAW_LINE();
+UTF8_SANITIZER_BENCHMARK(sanitizeAscii, kAscii);
+UTF8_SANITIZER_BENCHMARK(sanitizeValidUtf8, kValidUtf8);
+UTF8_SANITIZER_BENCHMARK(sanitizeInvalidRare, kInvalidRare);
+UTF8_SANITIZER_BENCHMARK(sanitizeInvalidComplex, kInvalidComplex);
+UTF8_SANITIZER_BENCHMARK(sanitizeInvalidAll, kInvalidAll);
+UTF8_SANITIZER_BENCHMARK(sanitizeInlineOutput, kInlineOutput);
+UTF8_SANITIZER_BENCHMARK(sanitizeDictionaryValid, kDictionaryValid);
+UTF8_SANITIZER_BENCHMARK(sanitizeDictionaryInvalidRare, kDictionaryInvalidRare);
 
 } // namespace
 } // namespace bytedance::bolt::connector::hive
