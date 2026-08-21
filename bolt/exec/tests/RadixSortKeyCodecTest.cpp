@@ -996,6 +996,33 @@ TEST_F(RadixSortKeyCodecTest, mapVarcharVarcharKeyCanonicalOrdering) {
   verifyAllFlags({makeStringStringMaps()});
 }
 
+TEST_F(RadixSortKeyCodecTest, nestedComplexVariableKeySizes) {
+  auto mapElements = makeMaps(
+      {2, std::nullopt, 0, 1},
+      makeStringVector(VARCHAR(), {"b", "a", std::string("\x00", 1)}),
+      makeVector<int64_t>(BIGINT(), {2, 1, std::nullopt}));
+  auto arrayMaps = makeArrays({2, 2, std::nullopt}, mapElements);
+  auto rowKey = makeRows(
+      {arrayMaps,
+       makeStringVector(
+           VARCHAR(),
+           {std::string("x"), std::nullopt, std::string("\x01z", 2)})});
+  auto input = makeRows({rowKey});
+  const std::vector<CompareFlags> compareFlags{flags(true, true)};
+
+  verifyProperty(input, compareFlags);
+
+  auto codec = bind({rowKey->type()}, compareFlags);
+  EncodedKeyBatch keys;
+  codec->encode(*input, pool_.get(), keys);
+
+  ASSERT_EQ(keys.format(), EncodedKeyFormat::kVariableBinary);
+  ASSERT_EQ(keys.size(), 3);
+  EXPECT_EQ(keys.variableKeyAt(0).size(), 34);
+  EXPECT_EQ(keys.variableKeyAt(1).size(), 15);
+  EXPECT_EQ(keys.variableKeyAt(2).size(), 7);
+}
+
 TEST_F(RadixSortKeyCodecTest, floatingPointRoundTrip) {
   verifyAllFlags(
       {makeVector<float>(REAL(), floatingValues<float>()),

@@ -46,6 +46,8 @@ bool supportsOrderKey(const Type& type) {
       }
       return true;
     case TypeKind::MAP:
+      return supportsOrderKey(*type.childAt(0)) &&
+          supportsOrderKey(*type.childAt(1));
     case TypeKind::VARIANT:
     case TypeKind::OPAQUE:
     case TypeKind::FUNCTION:

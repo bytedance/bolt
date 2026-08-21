@@ -29,6 +29,7 @@
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/exec/SortBuffer.h"
 #include "bolt/exec/radixsort/RadixSortBuffer.h"
+#include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/RadixSortComparatorOracle.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/prestosql/types/HyperLogLogType.h"
@@ -212,6 +213,45 @@ class RadixSortBufferTest : public testing::Test {
         sortAndCollect(input, keyChannels, keyFlags, batchSize, multipleInputs);
     expectRowsMatchById(*input, *output, idChannel);
     expectSorted(*output, keyChannels, keyFlags);
+  }
+
+  void sortAndVerifyWithDuckDb(
+      const RowVectorPtr& input,
+      const std::vector<column_index_t>& keyChannels,
+      const std::vector<CompareFlags>& keyFlags,
+      std::string_view duckDbSql,
+      vector_size_t batchSize = 2,
+      bool multipleInputs = true) {
+    ::bytedance::bolt::exec::test::DuckDbQueryRunner duckDbQueryRunner;
+    duckDbQueryRunner.createTable("tmp", {input});
+    const auto output =
+        sortAndCollect(input, keyChannels, keyFlags, batchSize, multipleInputs);
+    ::bytedance::bolt::exec::test::assertResultsOrdered(
+        {output},
+        std::static_pointer_cast<const RowType>(output->type()),
+        std::string(duckDbSql),
+        duckDbQueryRunner,
+        keyChannels);
+  }
+
+  void sortIdsAndVerifyWithDuckDb(
+      const RowVectorPtr& input,
+      const std::vector<column_index_t>& keyChannels,
+      const std::vector<CompareFlags>& keyFlags,
+      std::string_view duckDbSql,
+      vector_size_t batchSize = 2) {
+    ::bytedance::bolt::exec::test::DuckDbQueryRunner duckDbQueryRunner;
+    duckDbQueryRunner.createTable("tmp", {input});
+    auto output = sortAndCollect(input, keyChannels, keyFlags, batchSize);
+    auto ids = BaseVector::create(BIGINT(), output->size(), pool());
+    ids->copy(output->childAt("id").get(), 0, 0, output->size());
+    const auto idRows = makeRows({"id"}, {ids});
+    ::bytedance::bolt::exec::test::assertResultsOrdered(
+        {idRows},
+        std::static_pointer_cast<const RowType>(idRows->type()),
+        std::string(duckDbSql),
+        duckDbQueryRunner,
+        {0});
   }
 
   static int64_t
@@ -499,6 +539,100 @@ class RadixSortBufferTest : public testing::Test {
         makeStringVector(VARCHAR(), {"a", "b", "a", "a", "b", "c", "a", "z"}));
     maps->setNull(6, true);
     return maps;
+  }
+
+  MapVectorPtr makeStringBigintMaps() {
+    auto maps = std::make_shared<MapVector>(
+        pool(),
+        MAP(VARCHAR(), BIGINT()),
+        nullptr,
+        9,
+        makeBuffer<vector_size_t>({0, 2, 4, 6, 6, 6, 8, 9, 12}),
+        makeBuffer<vector_size_t>({2, 2, 2, 0, 0, 2, 1, 3, 1}),
+        makeStringVector(
+            VARCHAR(),
+            {"b",
+             "a",
+             "a",
+             "b",
+             "a",
+             "b",
+             "a",
+             "d",
+             "aa",
+             "a",
+             "aa",
+             "c",
+             "z"}),
+        makeVector<int64_t>(
+            BIGINT(), {2, 1, 1, 4, 1, 3, 7, 2, 10, 1, 10, 11, 0}));
+    maps->setNull(4, true);
+    return maps;
+  }
+
+  RowVectorPtr makeStringBigintMapKeyRows() {
+    return makeRows(
+        {"c0", "payload", "id"},
+        {makeStringBigintMaps(),
+         makeStringVector(
+             VARCHAR(),
+             {"payload_0",
+              "payload_1",
+              "payload_2",
+              "payload_3",
+              "payload_4",
+              "payload_5",
+              "payload_6",
+              "payload_7",
+              "payload_8"}),
+         generateVector<int64_t>(
+             BIGINT(), 9, [](vector_size_t row) { return row; })});
+  }
+
+  RowVectorPtr makeNestedComplexKeyRows() {
+    auto mapElements = std::make_shared<MapVector>(
+        pool(),
+        MAP(VARCHAR(), BIGINT()),
+        nullptr,
+        7,
+        makeBuffer<vector_size_t>({0, 2, 3, 5, 7, 8, 10}),
+        makeBuffer<vector_size_t>({2, 1, 2, 2, 1, 2, 2}),
+        makeStringVector(
+            VARCHAR(),
+            {"b", "a", "a", "a", "b", "aa", "a", "z", "a", "d", "a", "b"}),
+        makeVector<int64_t>(BIGINT(), {2, 1, 2, 1, 3, 10, 1, 0, 1, 2, 1, 3}));
+    auto maps = std::make_shared<ArrayVector>(
+        pool(),
+        ARRAY(MAP(VARCHAR(), BIGINT())),
+        nullptr,
+        6,
+        makeBuffer<vector_size_t>({0, 2, 2, 3, 5, 6}),
+        makeBuffer<vector_size_t>({2, 0, 1, 2, 1, 1}),
+        mapElements);
+    maps->setNull(1, true);
+    auto rowArrayValues = std::make_shared<ArrayVector>(
+        pool(),
+        ARRAY(INTEGER()),
+        nullptr,
+        6,
+        makeBuffer<vector_size_t>({0, 2, 2, 3, 5, 6}),
+        makeBuffer<vector_size_t>({2, 0, 1, 2, 1, 2}),
+        makeVector<int32_t>(INTEGER(), {2, 1, 1, 1, 2, 3, 1, 4}));
+    auto rows = std::make_shared<RowVector>(
+        pool(),
+        ROW({"a", "b"}, {INTEGER(), ARRAY(INTEGER())}),
+        nullptr,
+        6,
+        std::vector<VectorPtr>{
+            makeVector<int32_t>(INTEGER(), {2, 0, 1, 1, 3, 1}),
+            rowArrayValues});
+    rows->setNull(5, true);
+    return makeRows(
+        {"array_map", "row_key", "id"},
+        {maps,
+         rows,
+         generateVector<int64_t>(
+             BIGINT(), 6, [](vector_size_t row) { return row; })});
   }
 
   RowVectorPtr makeArrayRowMapIdRows() {
@@ -832,6 +966,64 @@ TEST_F(RadixSortBufferTest, arrayAndRowKeysWithComplexPayload) {
   const std::vector<CompareFlags> keyFlags{
       flags(true, false), flags(false, true)};
   sortAndVerify(input, keyChannels, keyFlags, 3);
+}
+
+TEST_F(RadixSortBufferTest, complexOrderKeysMatchDuckDb) {
+  const auto rows = makeArrayRowMapIdRows();
+  auto input = makeRows(
+      {"c0", "c1", "c2", "id"},
+      {rows->childAt(0), rows->childAt(1), rows->childAt(2), rows->childAt(3)});
+  sortAndVerifyWithDuckDb(
+      input,
+      {0, 1, 2},
+      {flags(true, false), flags(false, true), flags(true, true)},
+      "SELECT * FROM tmp ORDER BY "
+      "c0 ASC NULLS LAST, "
+      "c1 DESC NULLS FIRST, "
+      "list_transform(list_sort(map_entries(c2)), x -> x.k) "
+      "ASC NULLS FIRST, "
+      "list_transform(list_sort(map_entries(c2)), x -> x.v) "
+      "ASC NULLS FIRST",
+      2);
+}
+
+TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKey) {
+  auto input = makeStringBigintMapKeyRows();
+  sortAndVerifyWithDuckDb(
+      input,
+      {0},
+      {flags(true, true)},
+      "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
+      "x -> x.k) ASC NULLS FIRST, "
+      "list_transform(list_sort(map_entries(c0)), x -> x.v) ASC NULLS FIRST",
+      2);
+  sortAndVerifyWithDuckDb(
+      input,
+      {0},
+      {flags(false, false)},
+      "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
+      "x -> x.k) DESC NULLS LAST, "
+      "list_transform(list_sort(map_entries(c0)), x -> x.v) DESC NULLS LAST",
+      3,
+      false);
+}
+
+TEST_F(RadixSortBufferTest, nestedComplexOrderKeys) {
+  auto input = makeNestedComplexKeyRows();
+  const std::vector<column_index_t> keyChannels{0, 1};
+  const std::vector<CompareFlags> keyFlags{
+      flags(true, true), flags(false, false)};
+  sortIdsAndVerifyWithDuckDb(
+      input,
+      keyChannels,
+      keyFlags,
+      "SELECT id FROM tmp ORDER BY "
+      "list_transform(array_map, m -> struct_pack("
+      "k := list_transform(list_sort(map_entries(m)), x -> x.k), "
+      "v := list_transform(list_sort(map_entries(m)), x -> x.v))) "
+      "ASC NULLS FIRST, "
+      "row_key DESC NULLS LAST",
+      3);
 }
 
 TEST_F(RadixSortBufferTest, unknownAndNestedUnknownRemainSupported) {
@@ -1533,6 +1725,14 @@ TEST_F(RadixSortBufferTest, complexKeyAndPayloadSpillOutput) {
   expectSorted(*output, keyChannels, keyFlags);
 }
 
+TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKeySpillOutput) {
+  auto input = makeStringBigintMapKeyRows();
+  const auto stats =
+      runSpillPlanAndVerify(input, {{3, true}, {3, true}, {3, false}}, 2, 2);
+  EXPECT_GT(stats.spilledRows, 0);
+  EXPECT_GT(stats.spilledBytes, 0);
+}
+
 TEST_F(RadixSortBufferTest, eventStringKeyWideMapPayloadSpill) {
   struct Plan {
     const char* name;
@@ -1701,14 +1901,14 @@ TEST_F(RadixSortBufferTest, stateStatsAndEmptyInput) {
 TEST_F(RadixSortBufferTest, rejectsUnsupportedOrderKeysAndPayload) {
   const auto compareFlags = std::vector<CompareFlags>{flags(true, true)};
   for (const auto& keyType : std::vector<TypePtr>{
-           MAP(INTEGER(), BIGINT()),
-           ARRAY(MAP(INTEGER(), BIGINT())),
-           ROW({INTEGER(), MAP(INTEGER(), BIGINT())}),
            VARIANT(),
            ARRAY(VARIANT()),
            ROW({INTEGER(), VARIANT()}),
            OPAQUE<int32_t>(),
-           FUNCTION({BIGINT()}, BOOLEAN())}) {
+           FUNCTION({BIGINT()}, BOOLEAN()),
+           ARRAY(OPAQUE<int32_t>()),
+           ROW({INTEGER(), FUNCTION({BIGINT()}, BOOLEAN())}),
+           MAP(VARCHAR(), OPAQUE<int32_t>())}) {
     SCOPED_TRACE(keyType->toString());
     EXPECT_THROW(
         RadixSortBuffer(ROW({"key"}, {keyType}), {0}, compareFlags, pool()),

@@ -796,13 +796,264 @@ void stringEncodedSize(
   size = static_cast<uint64_t>(value.size()) + escaped + 1;
 }
 
+uint64_t encodedStringBodySize(StringView value);
+
+struct RangeSizeMetadata {
+  std::optional<uint64_t> fixedElementSize;
+  bool stringElement{false};
+  bool mayHaveNulls{true};
+};
+
+RangeSizeMetadata rangeSizeMetadata(
+    const RadixSortKeyColumn& column,
+    const BaseVector& elements) {
+  return RangeSizeMetadata{
+      isFixedScalarColumn(column) ? fixedBodySize(*column.type) : std::nullopt,
+      column.type->kind() == TypeKind::VARCHAR ||
+          column.type->kind() == TypeKind::VARBINARY,
+      elements.mayHaveNulls()};
+}
+
+void encodedSize(
+    const RadixSortKeyColumn& column,
+    const BaseVector& vector,
+    vector_size_t row,
+    uint64_t& size);
+
+void addVariableColumnSizes(
+    const RadixSortKeyColumn& column,
+    const BaseVector& vector,
+    vector_size_t size,
+    uint64_t* rowSizes);
+
+uint64_t encodedRangeSize(
+    const RadixSortKeyColumn& column,
+    const BaseVector& elements,
+    vector_size_t offset,
+    vector_size_t count,
+    const RangeSizeMetadata& metadata) {
+  uint64_t size = 0;
+  if (metadata.fixedElementSize.has_value()) {
+    const auto validSize = *metadata.fixedElementSize + 1;
+    if (!metadata.mayHaveNulls) {
+      return static_cast<uint64_t>(count) * validSize;
+    }
+    if (elements.encoding() == VectorEncoding::Simple::FLAT) {
+      const auto* nulls = elements.rawNulls();
+      if (nulls == nullptr) {
+        return static_cast<uint64_t>(count) * validSize;
+      }
+      for (vector_size_t index = offset; index < offset + count; ++index) {
+        size += bits::isBitNull(nulls, index) ? uint64_t{1} : validSize;
+      }
+      return size;
+    }
+    DecodedVector decoded(elements);
+    if (decoded.isConstantMapping()) {
+      const auto elementSize = decoded.isNullAt(0) ? uint64_t{1} : validSize;
+      return static_cast<uint64_t>(count) * elementSize;
+    }
+    for (vector_size_t index = offset; index < offset + count; ++index) {
+      size += decoded.isNullAt(index) ? uint64_t{1} : validSize;
+    }
+    return size;
+  }
+
+  if (metadata.stringElement) {
+    if (elements.encoding() == VectorEncoding::Simple::FLAT) {
+      const auto* flat = elements.asUnchecked<FlatVector<StringView>>();
+      const auto* values = flat->rawValues();
+      const auto* nulls = flat->rawNulls();
+      for (vector_size_t index = offset; index < offset + count; ++index) {
+        size += (nulls != nullptr && bits::isBitNull(nulls, index))
+            ? uint64_t{1}
+            : 1 + encodedStringBodySize(values[index]);
+      }
+      return size;
+    }
+    if (elements.encoding() == VectorEncoding::Simple::CONSTANT) {
+      const auto* constant = elements.asUnchecked<ConstantVector<StringView>>();
+      const auto elementSize = constant->isNullAt(0)
+          ? uint64_t{1}
+          : 1 + encodedStringBodySize(constant->valueAtFast(0));
+      return static_cast<uint64_t>(count) * elementSize;
+    }
+
+    DecodedVector decoded(elements);
+    if (decoded.isConstantMapping()) {
+      const auto elementSize = decoded.isNullAt(0)
+          ? uint64_t{1}
+          : 1 + encodedStringBodySize(decoded.valueAt<StringView>(0));
+      return static_cast<uint64_t>(count) * elementSize;
+    }
+    for (vector_size_t index = offset; index < offset + count; ++index) {
+      size += decoded.isNullAt(index)
+          ? uint64_t{1}
+          : 1 + encodedStringBodySize(decoded.valueAt<StringView>(index));
+    }
+    return size;
+  }
+
+  for (vector_size_t index = 0; index < count; ++index) {
+    uint64_t childSize;
+    encodedSize(column, elements, offset + index, childSize);
+    size += childSize;
+  }
+  return size;
+}
+
+uint64_t encodedArraySize(
+    const RadixSortKeyColumn& column,
+    const ArrayVector& array,
+    vector_size_t row,
+    const RangeSizeMetadata& elementMetadata) {
+  return 1 +
+      encodedRangeSize(
+             column.children[0],
+             *array.elements(),
+             array.offsetAt(row),
+             array.sizeAt(row),
+             elementMetadata) +
+      1;
+}
+
+uint64_t encodedMapSize(
+    const RadixSortKeyColumn& column,
+    const MapVector& map,
+    vector_size_t row,
+    const RangeSizeMetadata& keyMetadata,
+    const RangeSizeMetadata& valueMetadata) {
+  const auto offset = map.offsetAt(row);
+  const auto count = map.sizeAt(row);
+  const auto keysSize = encodedRangeSize(
+      column.children[0], *map.mapKeys(), offset, count, keyMetadata);
+  return 1 + keysSize + 1 +
+      encodedRangeSize(
+             column.children[1],
+             *map.mapValues(),
+             offset,
+             count,
+             valueMetadata) +
+      1;
+}
+
+uint64_t encodedRowSize(
+    const RadixSortKeyColumn& column,
+    const RowVector& rowVector,
+    vector_size_t row) {
+  uint64_t size = 1;
+  for (uint32_t child = 0; child < column.children.size(); ++child) {
+    uint64_t childSize;
+    encodedSize(
+        column.children[child], *rowVector.childAt(child), row, childSize);
+    size += childSize;
+  }
+  return size;
+}
+
+void addRowColumnSizes(
+    const RadixSortKeyColumn& column,
+    const DecodedVector& decoded,
+    vector_size_t size,
+    uint64_t* rowSizes) {
+  const auto* rowVector = decoded.base()->asUnchecked<RowVector>();
+  if (decoded.isIdentityMapping() && !decoded.mayHaveNulls()) {
+    for (uint32_t child = 0; child < column.children.size(); ++child) {
+      addVariableColumnSizes(
+          column.children[child], *rowVector->childAt(child), size, rowSizes);
+    }
+    return;
+  }
+
+  for (uint32_t child = 0; child < column.children.size(); ++child) {
+    const auto& childVector = rowVector->childAt(child);
+    for (vector_size_t row = 0; row < size; ++row) {
+      if (decoded.isNullAt(row)) {
+        continue;
+      }
+      uint64_t childSize;
+      encodedSize(
+          column.children[child], *childVector, decoded.index(row), childSize);
+      rowSizes[row] += childSize;
+    }
+  }
+}
+
+void addArrayColumnSizes(
+    const RadixSortKeyColumn& column,
+    const DecodedVector& decoded,
+    vector_size_t size,
+    uint64_t* rowSizes) {
+  const auto* array = decoded.base()->asUnchecked<ArrayVector>();
+  const auto elementMetadata =
+      rangeSizeMetadata(column.children[0], *array->elements());
+  for (vector_size_t row = 0; row < size; ++row) {
+    if (decoded.isNullAt(row)) {
+      continue;
+    }
+    rowSizes[row] +=
+        encodedArraySize(column, *array, decoded.index(row), elementMetadata) -
+        1;
+  }
+}
+
+void addMapColumnSizes(
+    const RadixSortKeyColumn& column,
+    const DecodedVector& decoded,
+    vector_size_t size,
+    uint64_t* rowSizes) {
+  const auto* map = decoded.base()->asUnchecked<MapVector>();
+  const auto keyMetadata =
+      rangeSizeMetadata(column.children[0], *map->mapKeys());
+  const auto valueMetadata =
+      rangeSizeMetadata(column.children[1], *map->mapValues());
+  for (vector_size_t row = 0; row < size; ++row) {
+    if (decoded.isNullAt(row)) {
+      continue;
+    }
+    rowSizes[row] +=
+        encodedMapSize(
+            column, *map, decoded.index(row), keyMetadata, valueMetadata) -
+        1;
+  }
+}
+
+void addComplexColumnSizes(
+    const RadixSortKeyColumn& column,
+    const BaseVector& vector,
+    vector_size_t size,
+    uint64_t* rowSizes) {
+  DecodedVector decoded(vector);
+
+  for (vector_size_t row = 0; row < size; ++row) {
+    rowSizes[row] += 1;
+  }
+  if (decoded.isConstantMapping() && decoded.isNullAt(0)) {
+    return;
+  }
+
+  switch (column.type->kind()) {
+    case TypeKind::ROW:
+      addRowColumnSizes(column, decoded, size, rowSizes);
+      return;
+    case TypeKind::ARRAY:
+      addArrayColumnSizes(column, decoded, size, rowSizes);
+      return;
+    case TypeKind::MAP:
+      addMapColumnSizes(column, decoded, size, rowSizes);
+      return;
+    default:
+      BOLT_UNREACHABLE();
+  }
+}
+
 void encodedSize(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t row,
     uint64_t& size) {
-  size = 1;
   if (vector.isNullAt(row)) {
+    size = 1;
     return;
   }
   if (column.type->kind() == TypeKind::UNKNOWN) {
@@ -810,85 +1061,40 @@ void encodedSize(
   }
   if (column.type->kind() == TypeKind::ROW) {
     const auto* rowVector = vector.wrappedVector()->as<RowVector>();
-    const auto wrappedRow = vector.wrappedIndex(row);
-    for (uint32_t child = 0; child < column.children.size(); ++child) {
-      const auto& childVector = rowVector->childAt(child);
-      uint64_t childSize;
-      encodedSize(column.children[child], *childVector, wrappedRow, childSize);
-      size += childSize;
-    }
+    size = encodedRowSize(column, *rowVector, vector.wrappedIndex(row));
     return;
   }
   if (column.type->kind() == TypeKind::ARRAY) {
     const auto* arrayVector = vector.wrappedVector()->as<ArrayVector>();
-    const auto wrappedRow = vector.wrappedIndex(row);
-    const auto offset = arrayVector->offsetAt(wrappedRow);
-    const auto count = arrayVector->sizeAt(wrappedRow);
-    const auto& elements = arrayVector->elements();
-    const auto& child = column.children[0];
-    if (isFixedScalarColumn(child)) {
-      const auto bodySize = *fixedBodySize(*child.type);
-      const auto validSize = bodySize + 1;
-      if (elements->encoding() == VectorEncoding::Simple::FLAT) {
-        const auto* nulls = elements->rawNulls();
-        if (nulls == nullptr) {
-          size += static_cast<uint64_t>(count) * validSize;
-        } else {
-          for (vector_size_t index = offset; index < offset + count; ++index) {
-            size += bits::isBitNull(nulls, index) ? uint64_t{1} : validSize;
-          }
-        }
-      } else {
-        DecodedVector decoded(*elements);
-        if (decoded.isConstantMapping()) {
-          const auto elementSize =
-              decoded.isNullAt(0) ? uint64_t{1} : validSize;
-          size += static_cast<uint64_t>(count) * elementSize;
-        } else {
-          for (vector_size_t index = offset; index < offset + count; ++index) {
-            size += decoded.isNullAt(index) ? uint64_t{1} : validSize;
-          }
-        }
-      }
-    } else {
-      for (vector_size_t index = 0; index < count; ++index) {
-        uint64_t childSize;
-        encodedSize(child, *elements, offset + index, childSize);
-        size += childSize;
-      }
-    }
-    ++size;
+    const auto elementMetadata =
+        rangeSizeMetadata(column.children[0], *arrayVector->elements());
+    size = encodedArraySize(
+        column, *arrayVector, vector.wrappedIndex(row), elementMetadata);
     return;
   }
   if (column.type->kind() == TypeKind::MAP) {
     const auto* mapVector = vector.wrappedVector()->as<MapVector>();
-    const auto wrappedRow = vector.wrappedIndex(row);
-    const auto indices = mapVector->sortedKeyIndices(wrappedRow);
-    const auto& keys = mapVector->mapKeys();
-    const auto& values = mapVector->mapValues();
-    for (const auto index : indices) {
-      uint64_t childSize;
-      encodedSize(column.children[0], *keys, index, childSize);
-      size += childSize;
-    }
-    ++size;
-    for (const auto index : indices) {
-      uint64_t childSize;
-      encodedSize(column.children[1], *values, index, childSize);
-      size += childSize;
-    }
-    ++size;
+    const auto keyMetadata =
+        rangeSizeMetadata(column.children[0], *mapVector->mapKeys());
+    const auto valueMetadata =
+        rangeSizeMetadata(column.children[1], *mapVector->mapValues());
+    size = encodedMapSize(
+        column,
+        *mapVector,
+        vector.wrappedIndex(row),
+        keyMetadata,
+        valueMetadata);
     return;
   }
   if (column.type->kind() == TypeKind::VARCHAR ||
       column.type->kind() == TypeKind::VARBINARY) {
     uint64_t bodySize;
     stringEncodedSize(vector, row, bodySize);
-    size += bodySize;
+    size = 1 + bodySize;
     return;
   }
   auto bodySize = fixedBodySize(*column.type);
-  size += *bodySize;
+  size = 1 + *bodySize;
 }
 
 uint64_t encodeStringValue(StringView value, char* output, bool descending) {
@@ -1328,7 +1534,6 @@ void addVariableColumnSizes(
   const auto bodySize = fixedBodySize(*column.type);
   if (bodySize.has_value()) {
     if (column.type->kind() == TypeKind::UNKNOWN) {
-      DecodedVector decoded(vector);
       for (vector_size_t row = 0; row < size; ++row) {
         rowSizes[row] += 1;
       }
@@ -1367,16 +1572,29 @@ void addVariableColumnSizes(
     return;
   }
 
+  if (column.type->kind() == TypeKind::ROW ||
+      column.type->kind() == TypeKind::ARRAY ||
+      column.type->kind() == TypeKind::MAP) {
+    addComplexColumnSizes(column, vector, size, rowSizes);
+    return;
+  }
+
   DecodedVector decoded(vector);
-  for (vector_size_t row = 0; row < size; ++row) {
+  if (decoded.isConstantMapping()) {
     uint64_t columnSize;
-    if (decoded.isNullAt(row)) {
+    if (decoded.isNullAt(0)) {
       columnSize = 1;
     } else {
-      encodedSize(column, *decoded.base(), decoded.index(row), columnSize);
+      encodedSize(column, *decoded.base(), decoded.index(0), columnSize);
     }
-    rowSizes[row] += columnSize;
+    for (vector_size_t row = 0; row < size; ++row) {
+      rowSizes[row] += columnSize;
+    }
+    return;
   }
+  BOLT_FAIL(
+      "Radix sort key size estimation is not implemented for {}",
+      column.type->toString());
 }
 
 template <
