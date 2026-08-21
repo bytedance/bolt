@@ -15,11 +15,53 @@
  */
 
 #include "bolt/expression/VectorFunction.h"
+#include "bolt/functions/prestosql/json/SIMDJsonWrapper.h"
 #include "bolt/functions/prestosql/types/JsonType.h"
 #include "bolt/vector/ConstantVector.h"
 #include "bolt/vector/FlatVector.h"
 namespace bytedance::bolt::functions::flinksql {
 namespace {
+bool isDigit(char c) {
+  return c >= '0' && c <= '9';
+}
+
+bool isValidJsonNumber(std::string_view number) {
+  size_t pos = number[0] == '-';
+  if (pos == number.size()) {
+    return false;
+  }
+  if (number[pos] == '0') {
+    ++pos;
+    if (pos < number.size() && isDigit(number[pos])) {
+      return false;
+    }
+  } else if (number[pos] >= '1' && number[pos] <= '9') {
+    while (++pos < number.size() && isDigit(number[pos])) {
+    }
+  } else {
+    return false;
+  }
+  if (pos < number.size() && number[pos] == '.') {
+    if (++pos == number.size() || !isDigit(number[pos])) {
+      return false;
+    }
+    while (++pos < number.size() && isDigit(number[pos])) {
+    }
+  }
+  if (pos < number.size() && (number[pos] == 'e' || number[pos] == 'E')) {
+    ++pos;
+    if (pos < number.size() && (number[pos] == '+' || number[pos] == '-')) {
+      ++pos;
+    }
+    if (pos == number.size() || !isDigit(number[pos])) {
+      return false;
+    }
+    while (++pos < number.size() && isDigit(number[pos])) {
+    }
+  }
+  return pos == number.size();
+}
+
 template <typename NativeType>
 VectorPtr checkAndFlatten(const SelectivityVector& rows, VectorPtr& input) {
   BOLT_CHECK_NOT_NULL(input);
@@ -68,18 +110,78 @@ class JsonStrToMapFunction : public bytedance::bolt::exec::VectorFunction {
       VectorPtr& result) const override {
     auto castFactory =
         dynamic_cast<const JsonCastOperator*>(JsonCastOperator::get().get());
+
+    auto input = checkAndFlatten<StringView>(rows, args[0]);
+    auto* inputVector = input->as<SimpleVector<StringView>>();
     VectorPtr logFailuresOnly;
+    SimpleVector<bool>* logFailuresOnlyVector{nullptr};
     if (args.size() == 2) {
       logFailuresOnly = checkAndFlatten<bool>(rows, args[1]);
+      logFailuresOnlyVector = logFailuresOnly->as<SimpleVector<bool>>();
     }
-    castFactory->castFrom(
-        *checkAndFlatten<StringView>(rows, args[0]),
-        context,
-        rows,
-        outputType,
-        result,
-        false,
-        std::move(logFailuresOnly));
+
+    exec::VectorWriter<Any> writer;
+    exec::LocalSelectivityVector remainingRowsHolder(context);
+    SelectivityVector* remainingRows = nullptr;
+
+    auto ensureWritable = [&]() {
+      if (remainingRows == nullptr) {
+        context.ensureWritable(rows, outputType, result);
+        writer.init(*result);
+        remainingRows = remainingRowsHolder.get(rows);
+      }
+    };
+
+    rows.applyToSelected([&](vector_size_t row) {
+      if (inputVector->isNullAt(row)) {
+        return;
+      }
+      auto value = inputVector->valueAt(row);
+      auto trimmedValue = folly::trimWhitespace(value);
+      if (trimmedValue.empty() || trimmedValue.front() == '{') {
+        return;
+      }
+      if (auto error = validateNonObjectJson(trimmedValue)) {
+        ensureWritable();
+        writer.setOffset(row);
+        writer.commitNull();
+        remainingRows->setValid(row, false);
+        if (logFailuresOnlyVector && logFailuresOnlyVector->valueAt(row)) {
+          LOG(WARNING) << "Failed to parse "
+                       << std::string_view(value.data(), value.size());
+        } else {
+          folly::call_once(initializeErrors_, [this] {
+            simdjsonErrorsToExceptions(errors_);
+          });
+          context.setBoltExceptionError(row, errors_[error]);
+        }
+      } else {
+        ensureWritable();
+        writer.setOffset(row);
+        writer.current().castTo<Map<Any, Any>>();
+        writer.commit(true);
+        remainingRows->setValid(row, false);
+      }
+    });
+
+    if (remainingRows == nullptr) {
+      castFactory->castFrom(
+          *input, context, rows, outputType, result, false, logFailuresOnly);
+      return;
+    }
+
+    writer.finish();
+    remainingRows->updateBounds();
+    if (remainingRows->hasSelections()) {
+      castFactory->castFrom(
+          *input,
+          context,
+          *remainingRows,
+          outputType,
+          result,
+          false,
+          logFailuresOnly);
+    }
   }
 
   static std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
@@ -94,6 +196,27 @@ class JsonStrToMapFunction : public bytedance::bolt::exec::VectorFunction {
             .argumentType("boolean")
             .build()};
   }
+
+ private:
+  static simdjson::error_code validateNonObjectJson(
+      std::string_view trimmedInput) {
+    if (trimmedInput == "true" || trimmedInput == "false" ||
+        trimmedInput == "null" || isValidJsonNumber(trimmedInput)) {
+      return simdjson::SUCCESS;
+    }
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (auto error = parser.parse(trimmedInput).get(doc)) {
+      return error;
+    }
+    return doc.type() == simdjson::dom::element_type::OBJECT
+        ? simdjson::INCORRECT_TYPE
+        : simdjson::SUCCESS;
+  }
+
+  mutable folly::once_flag initializeErrors_;
+  mutable std::exception_ptr errors_[simdjson::NUM_ERROR_CODES];
 };
 
 class JsonStrToArrayFunction : public bytedance::bolt::exec::VectorFunction {
