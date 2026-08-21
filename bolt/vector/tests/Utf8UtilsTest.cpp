@@ -45,6 +45,14 @@ class Utf8UtilsTest : public testing::Test, public VectorTestBase {
 
 TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
   const std::string replacement{"\xEF\xBF\xBD", 3};
+  auto replacementRun = [&](int32_t count) {
+    std::string result;
+    result.reserve(count * replacement.size());
+    for (int32_t index = 0; index < count; ++index) {
+      result.append(replacement);
+    }
+    return result;
+  };
   const std::vector<std::pair<std::string, std::string>> cases = {
       {{"\xD5\xE8\xD6\xC6\xEC", 5},
        replacement + replacement + replacement + replacement + replacement},
@@ -62,6 +70,8 @@ TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
       {{"\xF4\x90\x80\x80", 4},
        replacement + replacement + replacement + replacement},
       {{"\x9C\xA9", 2}, replacement + replacement},
+      {std::string(63, '\xD5') + std::string("\xD5\x80", 2),
+       replacementRun(63) + std::string("\xD5\x80", 2)},
   };
 
   std::vector<std::string> inputs;
@@ -95,6 +105,27 @@ TEST_F(Utf8UtilsTest, leavesValidInputsByteIdentical) {
   auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
 
   EXPECT_EQ(input.get(), output.get());
+}
+
+TEST_F(Utf8UtilsTest, denseMalformedInputUsesRowBoundedScratchMemory) {
+  constexpr vector_size_t kNumRows = 10'000;
+  constexpr int32_t kBytesPerRow = 64;
+  constexpr int64_t kMaxAdditionalBytes = 6L << 20;
+
+  auto densePool = rootPool_->addLeafChild("denseMalformedUtf8");
+  VectorMaker maker(densePool.get());
+  auto values = maker.flatVector<std::string>(kNumRows, [](vector_size_t) {
+    return std::string(kBytesPerRow, '\xD5');
+  });
+  auto input = maker.rowVector({values});
+  const auto bytesBefore = densePool->currentBytes();
+
+  auto output =
+      utf8::replaceInvalidUtf8InTopLevelVarchars(input, densePool.get());
+
+  ASSERT_NE(input.get(), output.get());
+  output->validate({});
+  EXPECT_LT(densePool->peakBytes() - bytesBefore, kMaxAdditionalBytes);
 }
 
 TEST_F(Utf8UtilsTest, trustsKnownAsciiMetadata) {
