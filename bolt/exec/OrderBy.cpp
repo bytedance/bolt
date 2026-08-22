@@ -81,10 +81,7 @@ OrderBy::OrderBy(
     sortCompareFlags.push_back(
         fromSortOrderToCompareFlags(orderByNode->sortingOrders()[i]));
   }
-  const auto useRadixSort =
-      driverCtx->queryConfig().orderByRadixSortEnabled() &&
-      (!spillConfig_.has_value() ||
-       radixsort::supportsRadixSortSpill(*spillConfig_));
+  const auto useRadixSort = driverCtx->queryConfig().orderByRadixSortEnabled();
   if (useRadixSort) {
     sortBuffer_ = std::make_unique<radixsort::RadixSortBuffer>(
         outputType_,

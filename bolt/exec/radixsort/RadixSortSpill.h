@@ -18,8 +18,6 @@
 
 #include <folly/Synchronized.h>
 
-#include <limits>
-
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/base/SpillStats.h"
 #include "bolt/exec/SpillFile.h"
@@ -28,8 +26,6 @@
 #include "bolt/exec/radixsort/RadixSortSpillRow.h"
 
 namespace bytedance::bolt::exec::radixsort {
-
-bool supportsRadixSortSpill(const common::SpillConfig& config);
 
 struct RadixSortSpillFile {
   uint32_t id;
@@ -47,7 +43,7 @@ class RadixSortSpillWriter {
  public:
   RadixSortSpillWriter(
       std::string pathPrefix,
-      const common::SpillConfig::SpillIOConfig& ioConfig,
+      const common::SpillConfig& ioConfig,
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* stats);
 
@@ -116,7 +112,7 @@ class RadixSortSpillWriter {
   SpillWriteFile* ensureFile();
 
   const std::string pathPrefix_;
-  const common::SpillConfig::SpillIOConfig ioConfig_;
+  const common::SpillConfig ioConfig_;
   memory::MemoryPool* const pool_;
   folly::Synchronized<common::SpillStats>* const stats_;
   BufferPtr buffer_;

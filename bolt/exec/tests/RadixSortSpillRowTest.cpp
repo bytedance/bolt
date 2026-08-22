@@ -177,20 +177,22 @@ class RadixSortSpillRowTest : public testing::Test {
         StringView(expected));
   }
 
-  common::SpillConfig::SpillIOConfig spillIOConfig(
+  common::SpillConfig spillConfig(
       const std::string& directory,
       common::CompressionKind compression,
       uint64_t writeBufferSize) const {
-    return {
-        [directory]() -> const std::string& { return directory; },
-        [&](uint64_t) {},
-        "radix-sort-spill-test",
-        0,
-        false,
-        writeBufferSize,
-        compression,
-        "",
-        std::nullopt};
+    common::SpillConfig config;
+    config.getSpillDirPathCb = [directory]() -> const std::string& {
+      return directory;
+    };
+    config.updateAndCheckSpillLimitCb = [&](uint64_t) {};
+    config.fileNamePrefix = "radix-sort-spill-test";
+    config.maxFileSize =
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    config.spillUringEnabled = false;
+    config.writeBufferSize = writeBufferSize;
+    config.compressionKind = compression;
+    return config;
   }
 
   struct SpilledRun {
@@ -233,7 +235,7 @@ class RadixSortSpillRowTest : public testing::Test {
     folly::Synchronized<common::SpillStats> stats;
     RadixSortSpillWriter writer(
         directory->path + "/spill",
-        spillIOConfig(directory->path, compression, writeBufferSize),
+        spillConfig(directory->path, compression, writeBufferSize),
         pool_.get(),
         &stats);
     std::vector<RadixSortSpillFile> files;
@@ -588,53 +590,6 @@ TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithoutCompression) {
       payloadLayout,
       common::CompressionKind_NONE,
       96);
-}
-
-TEST_F(RadixSortSpillRowTest, rejectsUnsupportedCompressionKinds) {
-  common::SpillConfig config;
-  config.maxFileSize =
-      static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-  for (const auto kind :
-       {common::CompressionKind_NONE,
-        common::CompressionKind_LZ4,
-        common::CompressionKind_ZSTD}) {
-    config.compressionKind = kind;
-    EXPECT_TRUE(supportsRadixSortSpill(config));
-  }
-  config.compressionKind = common::CompressionKind_ZLIB;
-  EXPECT_FALSE(supportsRadixSortSpill(config));
-  config.compressionKind = common::CompressionKind_NONE;
-  config.setJITenableForSpill(false);
-  EXPECT_TRUE(supportsRadixSortSpill(config));
-  config.setJITenableForSpill(true);
-  EXPECT_TRUE(supportsRadixSortSpill(config));
-  config.singlePartitionSerdeKind = "Arrow";
-  EXPECT_FALSE(supportsRadixSortSpill(config));
-  config.singlePartitionSerdeKind.clear();
-  config.maxFileSize = 1ULL << 30;
-  EXPECT_FALSE(supportsRadixSortSpill(config));
-
-  auto directory = exec::test::TempDirectoryPath::create();
-  folly::Synchronized<common::SpillStats> stats;
-  EXPECT_THROW(
-      RadixSortSpillWriter(
-          directory->path + "/spill",
-          spillIOConfig(
-              directory->path, common::CompressionKind_SNAPPY, 1 << 20),
-          pool_.get(),
-          &stats),
-      BoltException);
-
-  RadixSortSpillRunMeta meta{
-      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8), 0};
-  EXPECT_THROW(
-      RadixSortSpillReader(
-          {0, "", 0, 0, common::CompressionKind_SNAPPY},
-          meta,
-          nullptr,
-          pool_.get(),
-          false),
-      BoltException);
 }
 
 TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithCompression) {

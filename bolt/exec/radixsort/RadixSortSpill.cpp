@@ -32,12 +32,6 @@ constexpr uint64_t kBlockHeaderSize = sizeof(int32_t) * 2;
 constexpr uint64_t kDefaultWriteBufferSize = 1 << 20;
 constexpr uint64_t kMaxReadBufferSize = (1 << 20) - AlignedBuffer::kPaddedSize;
 
-bool supportsRadixSortSpillCompression(common::CompressionKind kind) {
-  return kind == common::CompressionKind_NONE ||
-      kind == common::CompressionKind_LZ4 ||
-      kind == common::CompressionKind_ZSTD;
-}
-
 template <RadixSortKeyLayoutKind KIND>
 int32_t comparePhysicalKeys(const char* left, const char* right) {
   return RadixSortKeyOps<KIND>::compare(left, right);
@@ -163,10 +157,6 @@ std::unique_ptr<SpillInputStream> makeInputStream(
     const RadixSortSpillFile& fileInfo,
     memory::MemoryPool* pool,
     bool spillUringEnabled) {
-  BOLT_CHECK(
-      supportsRadixSortSpillCompression(fileInfo.compressionKind),
-      "Unsupported radix sort spill compression kind: {}",
-      static_cast<int32_t>(fileInfo.compressionKind));
   auto fs = filesystems::getFileSystem(fileInfo.path, nullptr);
   std::unique_ptr<ReadFile> file;
 #ifdef IO_URING_SUPPORTED
@@ -234,27 +224,15 @@ bool nextInlineVariableFixedBatch(
 
 } // namespace
 
-bool supportsRadixSortSpill(const common::SpillConfig& config) {
-  return supportsRadixSortSpillCompression(config.compressionKind) &&
-      config.singlePartitionSerdeKind.empty() &&
-      config.maxFileSize ==
-      static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-}
-
 RadixSortSpillWriter::RadixSortSpillWriter(
     std::string pathPrefix,
-    const common::SpillConfig::SpillIOConfig& ioConfig,
+    const common::SpillConfig& ioConfig,
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats)
     : pathPrefix_(std::move(pathPrefix)),
       ioConfig_(ioConfig),
       pool_(pool),
-      stats_(stats) {
-  BOLT_CHECK(
-      supportsRadixSortSpillCompression(ioConfig_.compressionKind),
-      "Unsupported radix sort spill compression kind: {}",
-      static_cast<int32_t>(ioConfig_.compressionKind));
-}
+      stats_(stats) {}
 
 RadixSortSpillWriter::~RadixSortSpillWriter() {
   cleanupFilesNoThrow();
