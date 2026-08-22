@@ -980,9 +980,9 @@ TEST_F(RadixSortBufferTest, complexOrderKeysMatchDuckDb) {
       "SELECT * FROM tmp ORDER BY "
       "c0 ASC NULLS LAST, "
       "c1 DESC NULLS FIRST, "
-      "list_transform(list_sort(map_entries(c2)), x -> x.k) "
+      "list_transform(list_sort(map_entries(c2)), x -> x.key) "
       "ASC NULLS FIRST, "
-      "list_transform(list_sort(map_entries(c2)), x -> x.v) "
+      "list_transform(list_sort(map_entries(c2)), x -> x.value) "
       "ASC NULLS FIRST",
       2);
 }
@@ -994,16 +994,16 @@ TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKey) {
       {0},
       {flags(true, true)},
       "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
-      "x -> x.k) ASC NULLS FIRST, "
-      "list_transform(list_sort(map_entries(c0)), x -> x.v) ASC NULLS FIRST",
+      "x -> x.key) ASC NULLS FIRST, "
+      "list_transform(list_sort(map_entries(c0)), x -> x.value) ASC NULLS FIRST",
       2);
   sortAndVerifyWithDuckDb(
       input,
       {0},
       {flags(false, false)},
       "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
-      "x -> x.k) DESC NULLS LAST, "
-      "list_transform(list_sort(map_entries(c0)), x -> x.v) DESC NULLS LAST",
+      "x -> x.key) DESC NULLS LAST, "
+      "list_transform(list_sort(map_entries(c0)), x -> x.value) DESC NULLS LAST",
       3,
       false);
 }
@@ -1019,8 +1019,8 @@ TEST_F(RadixSortBufferTest, nestedComplexOrderKeys) {
       keyFlags,
       "SELECT id FROM tmp ORDER BY "
       "list_transform(array_map, m -> struct_pack("
-      "k := list_transform(list_sort(map_entries(m)), x -> x.k), "
-      "v := list_transform(list_sort(map_entries(m)), x -> x.v))) "
+      "k := list_transform(list_sort(map_entries(m)), x -> x.key), "
+      "v := list_transform(list_sort(map_entries(m)), x -> x.value))) "
       "ASC NULLS FIRST, "
       "row_key DESC NULLS LAST",
       3);
