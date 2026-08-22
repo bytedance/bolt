@@ -363,7 +363,7 @@ void RadixSortBuffer::spillBuildingRun() {
   const auto directory = spillConfig_->getSpillDirPathCb();
   RadixSortSpillWriter writer(
       fmt::format("{}/{}", directory, spillConfig_->fileNamePrefix),
-      spillConfig_->spillIOConfig(1),
+      *spillConfig_,
       memory::spillMemoryPool(),
       &stats_);
   const auto writeBegin = std::chrono::steady_clock::now();
@@ -432,7 +432,7 @@ void RadixSortBuffer::spillRemainingOutput() {
   const auto directory = spillConfig_->getSpillDirPathCb();
   RadixSortSpillWriter writer(
       fmt::format("{}/{}-output", directory, spillConfig_->fileNamePrefix),
-      spillConfig_->spillIOConfig(1),
+      *spillConfig_,
       memory::spillMemoryPool(),
       &stats_);
 
