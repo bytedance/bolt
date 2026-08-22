@@ -432,14 +432,35 @@ class AsyncThreadCtx {
     cv_.notify_one();
   }
 
+  /// Waits for every async preload to leave this context, up to kMaxWait.
+  ///
+  /// Giving up is survivable but not free: an in-flight preload owns the scan
+  /// memory pool, so it will outlive the manager that owns that pool. See
+  /// ~MemoryManager, which detaches such pools so their late release is a
+  /// deferred cleanup rather than a use-after-free (issue #931).
   void wait() {
-    // check timeout and output warninglogs
+    constexpr auto kMaxWait = std::chrono::seconds(600);
+    constexpr auto kLogInterval = std::chrono::seconds(60);
     std::unique_lock lock(mutex_);
     state_ = State::kClosed;
-    cv_.wait_until(
-        lock,
-        std::chrono::steady_clock::now() + std::chrono::seconds(600),
-        [this] { return numIn_ == 0; });
+    // Wake holders backing off in AsyncLoadHolder::canPreload(), which would
+    // otherwise keep this wait going for their full retry budget.
+    allowPreload_ = false;
+    cv_.notify_all();
+
+    auto waited = std::chrono::seconds(0);
+    while (waited < kMaxWait) {
+      if (cv_.wait_for(lock, kLogInterval, [this] { return numIn_ == 0; })) {
+        return;
+      }
+      waited += kLogInterval;
+      LOG(WARNING) << "Waiting for " << numIn_
+                   << " in-flight async preload(s) after " << waited.count()
+                   << "s; the storage read is most likely stuck.";
+    }
+    LOG(ERROR) << "Giving up after " << kMaxWait.count() << "s with " << numIn_
+               << " async preload(s) still in flight. They hold scan memory "
+                  "that will only be reclaimed when the storage read returns.";
   }
 
   std::mutex& getMutex() {

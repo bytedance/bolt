@@ -744,4 +744,22 @@ TEST_F(MemoryManagerTest, disableMemoryPoolTracking) {
     ASSERT_NO_THROW(root1.reset());
   }
 }
+
+// A pool can outlive its manager - a scan preload parked in a hung read holds
+// one while AsyncThreadCtx::wait() gives up and teardown proceeds. Releasing it
+// afterwards must not call back into the destroyed manager, which would run
+// dropPool() -> arbitrator_->removePool() on freed memory. See issue #931.
+TEST_F(MemoryManagerTest, poolOutlivingManagerIsSurvivable) {
+  MemoryManager::Options options;
+  options.allocatorCapacity = 1LL << 20;
+  options.checkUsageLeak = false;
+
+  auto manager = std::make_unique<MemoryManager>(options);
+  auto root = manager->addRootPool("straggler_root");
+  auto leaf = root->addLeafChild("straggler_leaf");
+
+  manager.reset();
+  ASSERT_NO_THROW(leaf.reset());
+  ASSERT_NO_THROW(root.reset());
+}
 } // namespace bytedance::bolt::memory

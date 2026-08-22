@@ -498,6 +498,7 @@ MemoryPoolImpl::MemoryPoolImpl(
     const Options& options)
     : MemoryPool{name, kind, parent, options},
       manager_{memoryManager},
+      allocatorHolder_{manager_->sharedAllocator()},
       allocator_{manager_->allocator()},
       arbitrator_{manager_->arbitrator()},
       reclaimer_(std::move(reclaimer)),
@@ -547,8 +548,16 @@ MemoryPoolImpl::~MemoryPoolImpl() {
         kMetricMemoryPoolCapacityGrowCount, numCapacityGrowths_);
   }
 
-  if (destructionCb_ != nullptr) {
-    destructionCb_(this);
+  // Read under the lock: the owning MemoryManager may be concurrently
+  // detaching the callback because it is being destroyed while 'this' is still
+  // alive. See MemoryPoolImpl::clearDestructionCallback().
+  DestructionCallback destructionCb;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    destructionCb = std::move(destructionCb_);
+  }
+  if (destructionCb != nullptr) {
+    destructionCb(this);
   }
 }
 
@@ -1443,6 +1452,11 @@ void MemoryPoolImpl::setDestructionCallback(
   std::lock_guard<std::mutex> l(mutex_);
   BOLT_CHECK_NULL(destructionCb_);
   destructionCb_ = callback;
+}
+
+void MemoryPoolImpl::clearDestructionCallback() {
+  std::lock_guard<std::mutex> l(mutex_);
+  destructionCb_ = nullptr;
 }
 
 void MemoryPoolImpl::testingSetCapacity(int64_t bytes) {

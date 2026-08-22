@@ -285,6 +285,13 @@ class MemoryManager {
 
   MemoryAllocator* allocator();
 
+  /// Returns the owning reference to the allocator. Memory pools hold one so
+  /// that a pool which outlives this manager cannot free through a dangling
+  /// allocator.
+  const std::shared_ptr<MemoryAllocator>& sharedAllocator() const {
+    return allocator_;
+  }
+
   MemoryArbitrator* arbitrator();
 
   /// Returns debug string of this memory manager. If 'detail' is true, it

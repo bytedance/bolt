@@ -730,6 +730,12 @@ class MemoryPoolImpl : public MemoryPool {
 
   void setDestructionCallback(const DestructionCallback& callback);
 
+  /// Detaches the destruction callback, if one was set. The callback points
+  /// back at the owning MemoryManager, so it must be dropped whenever this
+  /// pool is about to outlive that manager - otherwise ~MemoryPoolImpl calls
+  /// MemoryManager::dropPool() on freed memory.
+  void clearDestructionCallback();
+
   std::string toString(bool detail = false) const override;
 
   /// Detailed debug pool state printout by traversing the pool structure from
@@ -1015,6 +1021,12 @@ class MemoryPoolImpl : public MemoryPool {
   }
 
   MemoryManager* const manager_;
+  // Keeps the manager's allocator alive for as long as this pool is. A pool
+  // can outlive its MemoryManager - a straggling async IO thread holding the
+  // last reference is enough - and freeing its buffers through a dangling
+  // MemoryAllocator* is how such a straggler turns into
+  // "pure virtual method called".
+  const std::shared_ptr<MemoryAllocator> allocatorHolder_;
   MemoryAllocator* const allocator_;
   MemoryArbitrator* const arbitrator_;
 

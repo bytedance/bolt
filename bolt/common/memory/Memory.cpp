@@ -234,6 +234,16 @@ MemoryManager::~MemoryManager() {
   arbitrator_->shutdown();
 
   if (pools_.size() != 0) {
+    // These pools outlive us, so detach the destruction callback first: it
+    // would otherwise run dropPool() -> arbitrator_->removePool() on a
+    // destroyed manager and arbitrator. Do this before reporting, which may
+    // throw. See issue #931.
+    for (const auto& pool : getAlivePools()) {
+      if (auto* impl = dynamic_cast<MemoryPoolImpl*>(pool.get())) {
+        impl->clearDestructionCallback();
+      }
+    }
+
     const auto errMsg = fmt::format(
         "pools_.size() != 0 ({} vs {}). There are unexpected alive memory "
         "pools allocated by user on memory manager destruction:\n{}",
