@@ -21,6 +21,7 @@
 #include <string>
 
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/functions/prestosql/DateTimeImpl.h"
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/type/tz/TimeZoneMap.h"
@@ -1977,6 +1978,15 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimestampWithTimezone) {
       "year", "1972-05-20+23:01:02-03:00", "1972-01-01+00:00:00-03:00");
   evaluateDateTruncFromStrings(
       "year", "1968-05-20+23:01:02+05:30", "1968-01-01+00:00:00+05:30");
+}
+
+TEST_F(PrestoSqlDateTimeFunctionsTest, dateAddOverflow) {
+  BOLT_ASSERT_THROW(
+      functions::addToDate(0, functions::DateTimeUnit::kWeek, 306'783'379),
+      "integer overflow");
+  BOLT_ASSERT_THROW(
+      functions::addToDate(0, functions::DateTimeUnit::kQuarter, 715'827'883),
+      "integer overflow");
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, timestampdiff) {
