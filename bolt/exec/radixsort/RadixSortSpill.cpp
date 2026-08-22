@@ -67,12 +67,6 @@ RadixSortMerger::CompareKeys compareKeysForLayout(RadixSortKeyLayoutKind kind) {
     case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
       return comparePhysicalKeys<
           RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>;
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable56:
-      return comparePhysicalKeys<
-          RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>;
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable64:
-      return comparePhysicalKeys<
-          RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>;
     case RadixSortKeyLayoutKind::kInvalid:
       break;
   }
@@ -412,44 +406,6 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::writeRun(
           for (const auto& block : storage.keyBlocks()) {
             appendInlineVariableRows<
                 RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>(
-                payloadLayout, block.base, block.count);
-          }
-          flush();
-          closeFile();
-          return std::exchange(files_, {});
-        }
-        break;
-      }
-      case RadixSortKeyLayoutKind::kKeyWithPayloadVariable56: {
-        bool allInline = true;
-        for (const auto& block : storage.keyBlocks()) {
-          allInline &= allVariableRowsInline<
-              RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
-              block.base, block.count);
-        }
-        if (allInline) {
-          for (const auto& block : storage.keyBlocks()) {
-            appendInlineVariableRows<
-                RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
-                payloadLayout, block.base, block.count);
-          }
-          flush();
-          closeFile();
-          return std::exchange(files_, {});
-        }
-        break;
-      }
-      case RadixSortKeyLayoutKind::kKeyWithPayloadVariable64: {
-        bool allInline = true;
-        for (const auto& block : storage.keyBlocks()) {
-          allInline &= allVariableRowsInline<
-              RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
-              block.base, block.count);
-        }
-        if (allInline) {
-          for (const auto& block : storage.keyBlocks()) {
-            appendInlineVariableRows<
-                RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
                 payloadLayout, block.base, block.count);
           }
           flush();

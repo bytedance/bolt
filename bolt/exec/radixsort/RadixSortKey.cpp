@@ -64,29 +64,17 @@ RadixSortKeyLayout RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind kind) {
       return RadixSortKeyLayout(kind, 32, 24, false, true, {}, {}, 24);
     case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
       return RadixSortKeyLayout(kind, 32, 8, true, true, 8, 16, 24);
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable56:
-      return RadixSortKeyLayout(kind, 56, 32, true, true, 32, 40, 48);
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable64:
-      return RadixSortKeyLayout(kind, 64, 40, true, true, 40, 48, 56);
   }
   BOLT_FAIL("Unknown radix sort key layout");
 }
 
 RadixSortKeyLayout RadixSortKeyLayout::select(
     std::optional<uint64_t> maximumEncodedSize,
-    bool hasPayload,
-    uint32_t keyColumnCount) {
+    bool hasPayload) {
   RadixSortKeyLayoutKind kind;
   if (!maximumEncodedSize.has_value()) {
-    if (hasPayload) {
-      kind = keyColumnCount > 3
-          ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable64
-          : keyColumnCount > 1
-          ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable56
-          : RadixSortKeyLayoutKind::kKeyWithPayloadVariable32;
-    } else {
-      kind = RadixSortKeyLayoutKind::kKeyOnlyVariable32;
-    }
+    kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable32
+                      : RadixSortKeyLayoutKind::kKeyOnlyVariable32;
     return fromKind(kind);
   }
   auto physicalWidth = checkedAdd<uint64_t>(
@@ -104,15 +92,8 @@ RadixSortKeyLayout RadixSortKeyLayout::select(
     kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed32
                       : RadixSortKeyLayoutKind::kKeyOnlyFixed32;
   } else {
-    if (hasPayload) {
-      kind = keyColumnCount > 3
-          ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable64
-          : keyColumnCount > 1
-          ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable56
-          : RadixSortKeyLayoutKind::kKeyWithPayloadVariable32;
-    } else {
-      kind = RadixSortKeyLayoutKind::kKeyOnlyVariable32;
-    }
+    kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable32
+                      : RadixSortKeyLayoutKind::kKeyOnlyVariable32;
   }
   auto layout = fromKind(kind);
   layout.radixWidth_ = static_cast<uint32_t>(

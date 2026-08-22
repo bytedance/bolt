@@ -806,12 +806,6 @@ void dispatchRadixSortKeyLayout(
     case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
       return function.template
       operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>();
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable56:
-      return function.template
-      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>();
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable64:
-      return function.template
-      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>();
     case RadixSortKeyLayoutKind::kInvalid:
       BOLT_UNREACHABLE("Cannot sort an invalid radix sort key layout");
   }

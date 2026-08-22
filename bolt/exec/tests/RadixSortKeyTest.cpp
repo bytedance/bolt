@@ -55,7 +55,7 @@ struct LayoutDescriptor {
 #define LAYOUT(KIND, RECORD, CAPACITY, VARIABLE, PAYLOAD, SIZE, DATA, PAYLOAD_OFFSET) \
   {LayoutKind::KIND, sizeof(RECORD), CAPACITY, VARIABLE, PAYLOAD, SIZE, DATA, PAYLOAD_OFFSET, \
    &RadixSortKeyOps<LayoutKind::KIND>::compare, &RadixSortKeyOps<LayoutKind::KIND>::encodedByte}
-constexpr std::array<LayoutDescriptor, 11> kLayouts{{
+constexpr std::array<LayoutDescriptor, 9> kLayouts{{
     LAYOUT(kKeyOnlyFixed8, KeyOnlyFixed8Record, 8, false, false, {}, {}, {}),
     LAYOUT(kKeyOnlyFixed16, KeyOnlyFixed16Record, 16, false, false, {}, {}, {}),
     LAYOUT(kKeyOnlyFixed24, KeyOnlyFixed24Record, 24, false, false, {}, {}, {}),
@@ -65,8 +65,6 @@ constexpr std::array<LayoutDescriptor, 11> kLayouts{{
     LAYOUT(kKeyWithPayloadFixed24, KeyWithPayloadFixed24Record, 16, false, true, {}, {}, 16),
     LAYOUT(kKeyWithPayloadFixed32, KeyWithPayloadFixed32Record, 24, false, true, {}, {}, 24),
     LAYOUT(kKeyWithPayloadVariable32, KeyWithPayloadVariable32Record, 8, true, true, 8, 16, 24),
-    LAYOUT(kKeyWithPayloadVariable56, KeyWithPayloadVariable56Record, 32, true, true, 32, 40, 48),
-    LAYOUT(kKeyWithPayloadVariable64, KeyWithPayloadVariable64Record, 40, true, true, 40, 48, 56),
 }};
 #undef LAYOUT
 // clang-format on
@@ -405,12 +403,6 @@ TEST_F(RadixSortKeyTest, layoutAbiAndSelection) {
   for (const auto& [maximumSize, hasPayload, kind] : selections) {
     EXPECT_EQ(RadixSortKeyLayout::select(maximumSize, hasPayload).kind(), kind);
   }
-  EXPECT_EQ(
-      RadixSortKeyLayout::select(std::nullopt, true, 3).kind(),
-      RadixSortKeyLayoutKind::kKeyWithPayloadVariable56);
-  EXPECT_EQ(
-      RadixSortKeyLayout::select(std::nullopt, true, 4).kind(),
-      RadixSortKeyLayoutKind::kKeyWithPayloadVariable64);
 
   EXPECT_THROW(
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kInvalid),

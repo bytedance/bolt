@@ -500,7 +500,7 @@ TEST_F(RadixSortRunSorterTest, variablePrefixTiesAtInlineAndWordBoundaries) {
   std::reverse(keys.begin(), keys.end());
 
   verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32);
-  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyWithPayloadVariable64);
+  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
 }
 
 TEST_F(RadixSortRunSorterTest, lowCardinalityVariableStringKeyMatchesOracle) {
@@ -523,32 +523,27 @@ TEST_F(RadixSortRunSorterTest, lowCardinalityVariableStringKeyMatchesOracle) {
   verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
 }
 
-TEST_F(RadixSortRunSorterTest, variablePayload56And64MatchOracle) {
-  std::vector<std::string> threeKeyColumns;
-  std::vector<std::string> fourKeyColumns;
-  threeKeyColumns.reserve(1024);
-  fourKeyColumns.reserve(1024);
+TEST_F(RadixSortRunSorterTest, wideVariablePayloadKeysMatchOracle) {
+  std::vector<std::string> keys;
+  keys.reserve(2048);
   for (uint64_t row = 0; row < 1024; ++row) {
-    std::string key56(40 + row % 37, static_cast<char>('a' + row % 5));
-    key56[0] = static_cast<char>(row % 17);
-    key56[8] = static_cast<char>((1023 - row) % 251);
-    key56.back() = static_cast<char>(row % 251);
-    threeKeyColumns.push_back(std::move(key56));
+    std::string threeKeyColumns(
+        40 + row % 37, static_cast<char>('a' + row % 5));
+    threeKeyColumns[0] = static_cast<char>(row % 17);
+    threeKeyColumns[8] = static_cast<char>((1023 - row) % 251);
+    threeKeyColumns.back() = static_cast<char>(row % 251);
+    keys.push_back(std::move(threeKeyColumns));
 
-    std::string key64(48 + row % 41, static_cast<char>('k' + row % 7));
-    key64[0] = static_cast<char>(row % 19);
-    key64[16] = static_cast<char>((row * 13) % 251);
-    key64[32] = static_cast<char>((1023 - row) % 251);
-    key64.back() = static_cast<char>(row % 251);
-    fourKeyColumns.push_back(std::move(key64));
+    std::string fourKeyColumns(48 + row % 41, static_cast<char>('k' + row % 7));
+    fourKeyColumns[0] = static_cast<char>(row % 19);
+    fourKeyColumns[16] = static_cast<char>((row * 13) % 251);
+    fourKeyColumns[32] = static_cast<char>((1023 - row) % 251);
+    fourKeyColumns.back() = static_cast<char>(row % 251);
+    keys.push_back(std::move(fourKeyColumns));
   }
-  std::reverse(threeKeyColumns.begin(), threeKeyColumns.end());
-  std::reverse(fourKeyColumns.begin(), fourKeyColumns.end());
+  std::reverse(keys.begin(), keys.end());
 
-  verifyAgainstOracle(
-      threeKeyColumns, RadixSortKeyLayoutKind::kKeyWithPayloadVariable56);
-  verifyAgainstOracle(
-      fourKeyColumns, RadixSortKeyLayoutKind::kKeyWithPayloadVariable64);
+  verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
 }
 
 TEST_F(RadixSortRunSorterTest, fixedWideSuffixBytesSortBeforeFallback) {

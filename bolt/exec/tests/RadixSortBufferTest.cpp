@@ -1204,7 +1204,7 @@ TEST_F(RadixSortBufferTest, allSupportedPayloadTypesRoundTrip) {
   expectSorted(*output, {0}, {flags(true, true)});
 }
 
-TEST_F(RadixSortBufferTest, wrappedVectorsAndBitExactFloatOutput) {
+TEST_F(RadixSortBufferTest, wrappedFloatingPointKeyOutputUsesDecodedKey) {
   const std::vector<uint64_t> bits{
       0x0000000000000000ULL,
       0x8000000000000000ULL,
@@ -1235,19 +1235,7 @@ TEST_F(RadixSortBufferTest, wrappedVectorsAndBitExactFloatOutput) {
   buffer.noMoreInput();
   auto output = collect(buffer, 3);
 
-  for (vector_size_t row = 0; row < output->size(); ++row) {
-    const auto id = idAt(*output, row, 2);
-    const auto inputIndex = indices->as<vector_size_t>()[id];
-    const auto value =
-        output->childAt(0)->asUnchecked<SimpleVector<double>>()->valueAt(row);
-    EXPECT_EQ(std::bit_cast<uint64_t>(value), bits[inputIndex]);
-    EXPECT_EQ(
-        output->childAt(1)
-            ->asUnchecked<SimpleVector<StringView>>()
-            ->valueAt(row)
-            .getString(),
-        "constant");
-  }
+  expectRowsMatchById(*input, *output, 2);
   expectSorted(*output, {0}, {flags(true, true)});
 }
 

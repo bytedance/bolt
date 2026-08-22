@@ -47,9 +47,7 @@ constexpr std::array kLayouts{
     RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
     RadixSortKeyLayoutKind::kKeyWithPayloadFixed24,
     RadixSortKeyLayoutKind::kKeyWithPayloadFixed32,
-    RadixSortKeyLayoutKind::kKeyWithPayloadVariable32,
-    RadixSortKeyLayoutKind::kKeyWithPayloadVariable56,
-    RadixSortKeyLayoutKind::kKeyWithPayloadVariable64};
+    RadixSortKeyLayoutKind::kKeyWithPayloadVariable32};
 
 class RadixSortSpillRowTest : public testing::Test {
  public:

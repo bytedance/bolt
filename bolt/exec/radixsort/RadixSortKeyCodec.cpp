@@ -2473,8 +2473,6 @@ void dispatchFixedPhysicalLayout(RadixSortKeyLayoutKind kind, Decode decode) {
       return;
     case RadixSortKeyLayoutKind::kKeyOnlyVariable32:
     case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable56:
-    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable64:
     case RadixSortKeyLayoutKind::kInvalid:
       BOLT_FAIL("Single fixed sort key decode requires fixed layout");
   }
