@@ -18,7 +18,6 @@
 
 #include <array>
 #include <cstring>
-#include <limits>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
@@ -116,8 +115,7 @@ void materializeVariableKeyPointerViews(
 std::unique_ptr<RadixSortOutputProjection> RadixSortOutputProjection::create(
     const RowTypePtr& outputType,
     const RowTypePtr& keyType,
-    const std::vector<column_index_t>& directKeyChannels,
-    const std::vector<bool>& bitExactRequired) {
+    const std::vector<column_index_t>& directKeyChannels) {
   std::vector<int32_t> decodedKeyByOutput(outputType->size(), -1);
   std::vector<uint32_t> directOccurrences(outputType->size(), 0);
   for (uint32_t key = 0; key < keyType->size(); ++key) {
@@ -136,11 +134,8 @@ std::unique_ptr<RadixSortOutputProjection> RadixSortOutputProjection::create(
   payloadNames.reserve(outputType->size());
   payloadTypes.reserve(outputType->size());
   for (uint32_t output = 0; output < outputType->size(); ++output) {
-    const bool preserveBits =
-        !bitExactRequired.empty() && bitExactRequired[output];
     const auto decodedKey = decodedKeyByOutput[output];
-    if (decodedKeyByOutput[output] >= 0 && directOccurrences[output] == 1 &&
-        !preserveBits) {
+    if (decodedKeyByOutput[output] >= 0 && directOccurrences[output] == 1) {
       columns[output] = {
           RadixSortOutputSource::kDecodedKey,
           static_cast<uint32_t>(decodedKey)};
@@ -212,7 +207,6 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
     const RowTypePtr& keyType,
     const std::vector<CompareFlags>& keyFlags,
     const std::vector<column_index_t>& directKeyChannels,
-    const std::vector<bool>& bitExactRequired,
     RadixSortRunOptions options) {
   BOLT_CHECK_NOT_NULL(pool, "RadixSortRun memory pool must not be null");
   BOLT_CHECK_NOT_NULL(keyType, "RadixSortRun key type must not be null");
@@ -221,8 +215,8 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
       keyFlags.size(),
       "RadixSortRun key type and flag counts do not match");
 
-  auto projection = RadixSortOutputProjection::create(
-      outputType, keyType, directKeyChannels, bitExactRequired);
+  auto projection =
+      RadixSortOutputProjection::create(outputType, keyType, directKeyChannels);
 
   std::unique_ptr<RadixSortKeyCodec> keyCodec;
   RadixSortKeyCodec::bind(keyType->children(), keyFlags, keyCodec);
@@ -242,9 +236,7 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
   }
 
   auto keyLayout = RadixSortKeyLayout::select(
-      keyCodec->maximumEncodedSize(),
-      projection->hasPayload(),
-      keyType->size());
+      keyCodec->maximumEncodedSize(), projection->hasPayload());
   auto arena = std::make_unique<RadixSortRunStorage>(
       pool,
       keyLayout,
@@ -554,32 +546,6 @@ RowVectorPtr RadixSortRun::decodeKeys(
         decodedKeysOutput_);
     return decodedKeysOutput_;
   }
-  if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable56) {
-    materializeVariableKeyViews<
-        RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
-        *storage_, begin, count, rawInlineBuffers, rawViews);
-    keyCodec_->decode(
-        std::span<const EncodedKeyView>(rawViews, count),
-        projection_->decodedKeyMask(),
-        keyMayHaveNulls_,
-        outputPool,
-        decodeCursorOutput_,
-        decodedKeysOutput_);
-    return decodedKeysOutput_;
-  }
-  if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable64) {
-    materializeVariableKeyViews<
-        RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
-        *storage_, begin, count, rawInlineBuffers, rawViews);
-    keyCodec_->decode(
-        std::span<const EncodedKeyView>(rawViews, count),
-        projection_->decodedKeyMask(),
-        keyMayHaveNulls_,
-        outputPool,
-        decodeCursorOutput_,
-        decodedKeysOutput_);
-    return decodedKeysOutput_;
-  }
   vector_size_t outputRow = 0;
   while (outputRow < count) {
     const auto range =
@@ -646,34 +612,6 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
           decodedKeysOutput_);
       return decodedKeysOutput_;
     }
-  } else if (
-      keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable56) {
-    if (materializeExternalVariableKeyPointerViews<
-            RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
-            keys, rawViews)) {
-      keyCodec_->decode(
-          std::span<const EncodedKeyView>(rawViews, count),
-          projection_->decodedKeyMask(),
-          keyMayHaveNulls_,
-          outputPool,
-          decodeCursorOutput_,
-          decodedKeysOutput_);
-      return decodedKeysOutput_;
-    }
-  } else if (
-      keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable64) {
-    if (materializeExternalVariableKeyPointerViews<
-            RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
-            keys, rawViews)) {
-      keyCodec_->decode(
-          std::span<const EncodedKeyView>(rawViews, count),
-          projection_->decodedKeyMask(),
-          keyMayHaveNulls_,
-          outputPool,
-          decodeCursorOutput_,
-          decodedKeysOutput_);
-      return decodedKeysOutput_;
-    }
   } else if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyOnlyVariable32) {
     if (materializeExternalVariableKeyPointerViews<
             RadixSortKeyLayoutKind::kKeyOnlyVariable32>(keys, rawViews)) {
@@ -700,16 +638,6 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
   if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable32) {
     materializeVariableKeyPointerViews<
         RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>(
-        keys, rawInlineBuffers, rawViews);
-  } else if (
-      keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable56) {
-    materializeVariableKeyPointerViews<
-        RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>(
-        keys, rawInlineBuffers, rawViews);
-  } else if (
-      keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyWithPayloadVariable64) {
-    materializeVariableKeyPointerViews<
-        RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>(
         keys, rawInlineBuffers, rawViews);
   } else if (keyLayout_.kind() == RadixSortKeyLayoutKind::kKeyOnlyVariable32) {
     materializeVariableKeyPointerViews<

@@ -102,7 +102,6 @@ class RadixSortBuffer : public SortBufferBase {
   RowTypePtr keyType_;
   std::vector<CompareFlags> sortCompareFlags_;
   std::vector<column_index_t> directKeyChannels_;
-  std::vector<bool> bitExactRequired_;
   std::vector<uint8_t> keyMayHaveNulls_;
   std::vector<uint8_t> payloadMayHaveNulls_;
   RadixSortRunOptions runOptions_;

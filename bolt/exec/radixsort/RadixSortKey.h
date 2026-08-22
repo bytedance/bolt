@@ -41,11 +41,9 @@ enum class RadixSortKeyLayoutKind : uint8_t {
   kKeyWithPayloadFixed24 = 7,
   kKeyWithPayloadFixed32 = 8,
   kKeyWithPayloadVariable32 = 9,
-  kKeyWithPayloadVariable56 = 10,
-  kKeyWithPayloadVariable64 = 11,
 };
 
-using RadixSortInlineKeyBuffer = std::array<char, 64>;
+using RadixSortInlineKeyBuffer = std::array<char, 32>;
 
 class RadixSortKeyLayout {
  public:
@@ -55,8 +53,7 @@ class RadixSortKeyLayout {
 
   static RadixSortKeyLayout select(
       std::optional<uint64_t> maximumEncodedSize,
-      bool hasPayload,
-      uint32_t keyColumnCount = 1);
+      bool hasPayload);
 
   RadixSortKeyLayoutKind kind() const {
     return kind_;
@@ -193,27 +190,6 @@ struct KeyWithPayloadVariable32Record {
   PointerSlot payload;
 };
 
-struct KeyWithPayloadVariable56Record {
-  uint64_t part0;
-  uint64_t part1;
-  uint64_t part2;
-  uint64_t part3;
-  uint64_t size;
-  PointerSlot data;
-  PointerSlot payload;
-};
-
-struct KeyWithPayloadVariable64Record {
-  uint64_t part0;
-  uint64_t part1;
-  uint64_t part2;
-  uint64_t part3;
-  uint64_t part4;
-  uint64_t size;
-  PointerSlot data;
-  PointerSlot payload;
-};
-
 static_assert(sizeof(PointerSlot) == 8);
 
 #define BOLT_CHECK_RADIX_SORT_RECORD(type, width)    \
@@ -230,8 +206,6 @@ BOLT_CHECK_RADIX_SORT_RECORD(KeyWithPayloadFixed16Record, 16);
 BOLT_CHECK_RADIX_SORT_RECORD(KeyWithPayloadFixed24Record, 24);
 BOLT_CHECK_RADIX_SORT_RECORD(KeyWithPayloadFixed32Record, 32);
 BOLT_CHECK_RADIX_SORT_RECORD(KeyWithPayloadVariable32Record, 32);
-BOLT_CHECK_RADIX_SORT_RECORD(KeyWithPayloadVariable56Record, 56);
-BOLT_CHECK_RADIX_SORT_RECORD(KeyWithPayloadVariable64Record, 64);
 
 #undef BOLT_CHECK_RADIX_SORT_RECORD
 
@@ -246,12 +220,6 @@ BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadFixed32Record, payload, 24);
 BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable32Record, size, 8);
 BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable32Record, data, 16);
 BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable32Record, payload, 24);
-BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable56Record, size, 32);
-BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable56Record, data, 40);
-BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable56Record, payload, 48);
-BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable64Record, size, 40);
-BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable64Record, data, 48);
-BOLT_CHECK_RADIX_SORT_OFFSET(KeyWithPayloadVariable64Record, payload, 56);
 
 #undef BOLT_CHECK_RADIX_SORT_OFFSET
 
@@ -372,26 +340,6 @@ BOLT_DEFINE_PHYSICAL_SORT_KEY_TRAITS(
     8,
     16,
     24);
-BOLT_DEFINE_PHYSICAL_SORT_KEY_TRAITS(
-    kKeyWithPayloadVariable56,
-    KeyWithPayloadVariable56Record,
-    56,
-    32,
-    true,
-    true,
-    32,
-    40,
-    48);
-BOLT_DEFINE_PHYSICAL_SORT_KEY_TRAITS(
-    kKeyWithPayloadVariable64,
-    KeyWithPayloadVariable64Record,
-    64,
-    40,
-    true,
-    true,
-    40,
-    48,
-    56);
 
 #undef BOLT_DEFINE_PHYSICAL_SORT_KEY_TRAITS
 

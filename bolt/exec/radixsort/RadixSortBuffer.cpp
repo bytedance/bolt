@@ -57,25 +57,6 @@ bool supportsOrderKey(const Type& type) {
   }
 }
 
-bool requiresBitExactOutput(const Type& type) {
-  switch (type.kind()) {
-    case TypeKind::REAL:
-    case TypeKind::DOUBLE:
-      return true;
-    case TypeKind::ARRAY:
-    case TypeKind::MAP:
-    case TypeKind::ROW:
-      for (uint32_t child = 0; child < type.size(); ++child) {
-        if (requiresBitExactOutput(*type.childAt(child))) {
-          return true;
-        }
-      }
-      return false;
-    default:
-      return false;
-  }
-}
-
 void cleanupSpillFilesNoThrow(
     const std::vector<RadixSortSpillFile>& files) noexcept {
   for (const auto& file : files) {
@@ -142,12 +123,6 @@ RadixSortBuffer::RadixSortBuffer(
       supportedKeyTypes,
       "RadixSortBuffer does not support ORDER BY key type {}",
       unsupportedKeyType);
-
-  bitExactRequired_.resize(inputType_->size(), false);
-  for (const auto channel : sortColumnIndices) {
-    bitExactRequired_[channel] =
-        requiresBitExactOutput(*inputType_->childAt(channel));
-  }
 
   keyType_ = ROW(std::move(keyNames), std::move(keyTypes));
   keyMayHaveNulls_.resize(keyType_->size(), 0);
@@ -277,7 +252,6 @@ std::unique_ptr<RadixSortRun> RadixSortBuffer::makeRun() const {
       keyType_,
       sortCompareFlags_,
       directKeyChannels_,
-      bitExactRequired_,
       std::move(options));
 }
 

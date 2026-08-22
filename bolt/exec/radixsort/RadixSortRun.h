@@ -39,8 +39,7 @@ class RadixSortOutputProjection {
   static std::unique_ptr<RadixSortOutputProjection> create(
       const RowTypePtr& outputType,
       const RowTypePtr& keyType,
-      const std::vector<column_index_t>& directKeyChannels,
-      const std::vector<bool>& bitExactRequired);
+      const std::vector<column_index_t>& directKeyChannels);
 
   const RowTypePtr& outputType() const {
     return outputType_;
@@ -160,7 +159,6 @@ class RadixSortRun {
       const RowTypePtr& keyType,
       const std::vector<CompareFlags>& keyFlags,
       const std::vector<column_index_t>& directKeyChannels,
-      const std::vector<bool>& bitExactRequired,
       RadixSortRunOptions options);
 
   RadixSortRunState state() const {

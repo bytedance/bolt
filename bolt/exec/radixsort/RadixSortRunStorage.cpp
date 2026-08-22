@@ -336,12 +336,6 @@ void RadixSortRunStorage::appendBatch(
       case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
         return appendVariable.template
         operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>();
-      case RadixSortKeyLayoutKind::kKeyWithPayloadVariable56:
-        return appendVariable.template
-        operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable56>();
-      case RadixSortKeyLayoutKind::kKeyWithPayloadVariable64:
-        return appendVariable.template
-        operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable64>();
       default:
         BOLT_FAIL("Unsupported variable radix sort key layout");
     }
