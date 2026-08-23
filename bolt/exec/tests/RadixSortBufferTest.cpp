@@ -1320,6 +1320,21 @@ TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
       {flags(true, true), flags(true, false), flags(false, false)});
 }
 
+TEST_F(RadixSortBufferTest, longSpilledKeyKeepsHeapOutputForShortFinalRun) {
+  auto input = makeRows(
+      {"key", "id"},
+      {makeStringVector(
+           VARCHAR(), {std::string(40, 'z'), "k3", "k1", "k2", "k0"}),
+       makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(slice(*input, 0, 1));
+  buffer.spill();
+  buffer.addInput(slice(*input, 1, 4));
+  buffer.noMoreInput();
+  collectAndVerify(buffer, input, 2, 1);
+}
+
 TEST_F(RadixSortBufferTest, spillMergeNullFreeOutputResetsNullBuffers) {
   auto spillDirectory = exec::test::TempDirectoryPath::create();
   auto config = spillConfig(spillDirectory->path);

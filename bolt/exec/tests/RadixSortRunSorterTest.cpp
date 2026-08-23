@@ -450,6 +450,21 @@ TEST_F(RadixSortRunSorterTest, algorithmThresholdBoundaries) {
   }
 }
 
+TEST_F(RadixSortRunSorterTest, variableComparisonFallbackBoundaries) {
+  for (const uint64_t size : {127, 128, 129}) {
+    SCOPED_TRACE("size=" + std::to_string(size));
+    auto keys = makeKeys(size, [&](auto row) {
+      std::string key(8, 'p');
+      key += std::string(24, static_cast<char>('a' + row % 7));
+      key += static_cast<char>(size - row);
+      return key;
+    });
+    std::reverse(keys.begin(), keys.end());
+    verifyAgainstOracle(
+        keys, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
+  }
+}
+
 TEST_F(RadixSortRunSorterTest, blockSizeBoundariesSortAcrossSegments) {
   auto keys = makeKeys(
       257, [](auto row) { return fixedKey((row * 37) % 257, row % 5); });

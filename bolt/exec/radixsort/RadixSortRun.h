@@ -145,6 +145,7 @@ struct RadixSortRunStats {
 struct RadixSortRunOptions {
   std::vector<uint8_t> initialKeyMayHaveNulls;
   std::vector<uint8_t> initialPayloadMayHaveNulls;
+  bool initialVariableKeysFitRadixPrefix{true};
   uint32_t keysPerBlock{RadixSortRunStorage::kDefaultKeysPerBlock};
   uint64_t preferredKeyHeapGroupBytes{64 * 1024};
   uint32_t payloadRowsPerBlock{RadixSortRunStorage::kDefaultKeysPerBlock};
@@ -205,6 +206,14 @@ class RadixSortRun {
     return payloadMayHaveNulls_;
   }
 
+  bool variableKeysFitRadixPrefix() const {
+    return variableKeysFitRadixPrefix_;
+  }
+
+  bool decodesVariableKeysFromInline() const {
+    return decodeVariableKeysFromInline_;
+  }
+
   void append(const RowVector& input);
 
   void finalize();
@@ -232,7 +241,8 @@ class RadixSortRun {
       RadixSortKeyLayout keyLayout,
       std::unique_ptr<RadixSortRunStorage> arena,
       std::vector<uint8_t> keyMayHaveNulls,
-      std::vector<uint8_t> payloadMayHaveNulls)
+      std::vector<uint8_t> payloadMayHaveNulls,
+      bool initialVariableKeysFitRadixPrefix)
       : pool_(pool),
         projection_(std::move(projection)),
         keyCodec_(std::move(keyCodec)),
@@ -243,7 +253,9 @@ class RadixSortRun {
         storage_(std::move(arena)),
         keyMayHaveNulls_(std::move(keyMayHaveNulls)),
         currentRunKeyMayHaveNulls_(keyMayHaveNulls_.size(), 0),
-        payloadMayHaveNulls_(std::move(payloadMayHaveNulls)) {}
+        payloadMayHaveNulls_(std::move(payloadMayHaveNulls)),
+        variableKeysFitRadixPrefix_(
+            keyLayout_.isVariable() && initialVariableKeysFitRadixPrefix) {}
 
   RowVectorPtr decodeKeys(
       uint64_t begin,
@@ -286,6 +298,8 @@ class RadixSortRun {
   // Current in-memory run only; used by finalize radix pass skipping.
   std::vector<uint8_t> currentRunKeyMayHaveNulls_;
   std::vector<uint8_t> payloadMayHaveNulls_;
+  bool variableKeysFitRadixPrefix_{false};
+  bool decodeVariableKeysFromInline_{false};
   RadixSortRunState state_{RadixSortRunState::kBuilding};
   uint64_t outputPosition_{0};
   RadixSortRunStats metrics_;

@@ -322,11 +322,9 @@ class RadixSortRunSorterKernel {
     }
     auto first = Iterator(iteratorState_, begin);
     auto last = Iterator(iteratorState_, end);
-    if constexpr (!CompletePrefixRadix) {
-      if (last - first < static_cast<int64_t>(kComparisonFallbackCutoff)) {
-        fullSort(first, last);
-        return;
-      }
+    if (last - first < static_cast<int64_t>(kComparisonFallbackCutoff)) {
+      fullSort(first, last);
+      return;
     }
     sortRadixByte<0>(first, last);
   }
@@ -529,11 +527,9 @@ class RadixSortRunSorterKernel {
     if (end - begin < 2) {
       return;
     }
-    if constexpr (!CompletePrefixRadix) {
-      if (end - begin < static_cast<int64_t>(kComparisonFallbackCutoff)) {
-        fullSort(begin, end);
-        return;
-      }
+    if (end - begin < static_cast<int64_t>(kComparisonFallbackCutoff)) {
+      fullSort(begin, end);
+      return;
     }
     sortRadixByte<0>(begin, end);
   }
@@ -597,11 +593,9 @@ class RadixSortRunSorterKernel {
     if (count <= 1) {
       return;
     }
-    if constexpr (!CompletePrefixRadix) {
-      if (count < kComparisonFallbackCutoff) {
-        fullSort(begin, end);
-        return;
-      }
+    if (count < kComparisonFallbackCutoff) {
+      fullSort(begin, end);
+      return;
     }
     sortRadixByte<OFFSET>(begin, end, effectivePasses);
   }

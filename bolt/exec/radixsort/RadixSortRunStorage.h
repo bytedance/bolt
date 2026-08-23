@@ -217,18 +217,25 @@ class RadixSortRunStorage {
   friend class RadixSortKeyCodec;
 
   template <typename Encode>
-  void appendVariableKeyBatch(
+  bool appendVariableKeyBatch(
       std::span<const uint64_t> heapSizes,
       std::span<char* const> payloads,
       Encode encode) {
     BOLT_DCHECK(layout_.isVariable());
     BOLT_DCHECK(payloads.empty() || payloads.size() == heapSizes.size());
 
+    bool keysFitRadixPrefix = true;
+    const auto inlineSuffixCapacity =
+        layout_.radixWidth() - layout_.heapKeyOffset();
     appendKeyBlocks(
         heapSizes.size(),
         [&](vector_size_t source, vector_size_t count, char* destination) {
           for (vector_size_t row = 0; row < count; ++row) {
             const auto inputRow = source + row;
+            if (keysFitRadixPrefix &&
+                heapSizes[inputRow] > inlineSuffixCapacity) {
+              keysFitRadixPrefix = false;
+            }
             auto* record =
                 destination + static_cast<uint64_t>(row) * layout_.width();
             std::memset(record, 0, layout_.inlineCapacity());
@@ -248,6 +255,7 @@ class RadixSortRunStorage {
           }
           encode(source, count, destination);
         });
+    return keysFitRadixPrefix;
   }
 
   using BlockVector =
