@@ -121,6 +121,7 @@ class RadixSortBuffer : public SortBufferBase {
   uint64_t outputRows_{0};
   uint64_t storedRows_{0};
   uint64_t storedBytes_{0};
+  bool variableKeysFitRadixPrefix_{true};
   uint64_t encodeTimeUs_{0};
   uint64_t appendTimeUs_{0};
   uint64_t sortTimeUs_{0};

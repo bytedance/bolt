@@ -246,6 +246,7 @@ std::unique_ptr<RadixSortRun> RadixSortBuffer::makeRun() const {
   auto options = runOptions_;
   options.initialKeyMayHaveNulls = keyMayHaveNulls_;
   options.initialPayloadMayHaveNulls = payloadMayHaveNulls_;
+  options.initialVariableKeysFitRadixPrefix = variableKeysFitRadixPrefix_;
   return RadixSortRun::create(
       pool_,
       inputType_,
@@ -353,6 +354,9 @@ void RadixSortBuffer::spillBuildingRun() {
   };
   mergeNullability(keyMayHaveNulls_, run_->keyMayHaveNulls());
   mergeNullability(payloadMayHaveNulls_, run_->payloadMayHaveNulls());
+  if (run_->keyLayout().isVariable()) {
+    variableKeysFitRadixPrefix_ &= run_->variableKeysFitRadixPrefix();
+  }
   const auto* storage = run_->storage();
   const auto runRows = run_->size();
   const auto runBytes = run_->estimatedOutputBytes();

@@ -712,6 +712,81 @@ TEST_F(RadixSortRunTest, variableKeyHeapOffsetIsZeroWhenFirstKeyIsVariable) {
   collectAndVerify(*run, *input, 2, 2, {0, 1}, keyFlags);
 }
 
+TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
+  auto shortInput = makeRows(
+      {"text", "id"},
+      {makeStringVector(
+           {"k3", "k1", std::nullopt, std::string("\0", 1), "", "k0"}),
+       makeIds(6)});
+  auto shortRun = createRun({*shortInput, {0}, {flags(true, true)}});
+  shortRun->append(*slice(*shortInput, 0, 2));
+  shortRun->append(*slice(*shortInput, 2, 4));
+  EXPECT_TRUE(shortRun->variableKeysFitRadixPrefix());
+  EXPECT_FALSE(shortRun->decodesVariableKeysFromInline());
+  shortRun->finalize();
+  ASSERT_TRUE(shortRun->decodesVariableKeysFromInline());
+  for (uint64_t row = 0; row < shortRun->storage()->size(); ++row) {
+    auto key = shortRun->storage()->keyAt(row);
+    std::memset(key.heapKeyData(), 'x', key.heapSize());
+  }
+  collectAndVerify(*shortRun, *shortInput, 2, 1);
+
+  auto mixedInput = makeRows(
+      {"text", "id"},
+      {makeStringVector({"k3", std::string(32, 'a'), "k2", "k1", "k0"}),
+       makeIds(5)});
+  auto mixedRun = createRun({*mixedInput, {0}, {flags(true, true)}});
+  mixedRun->append(*slice(*mixedInput, 0, 1));
+  mixedRun->append(*slice(*mixedInput, 1, 4));
+  mixedRun->finalize();
+  ASSERT_FALSE(mixedRun->decodesVariableKeysFromInline());
+  for (uint64_t row = 0; row < mixedRun->storage()->size(); ++row) {
+    std::memset(
+        const_cast<char*>(mixedRun->storage()->keyDataAt(row)),
+        'x',
+        mixedRun->keyLayout().inlineCapacity());
+  }
+  collectAndVerify(*mixedRun, *mixedInput, 2, 1);
+}
+
+TEST_F(RadixSortRunTest, inheritedVariableKeySizeSelectsHeapOutput) {
+  auto input = makeRows(
+      {"text", "id"}, {makeStringVector({"k3", "k1", "k2", "k0"}), makeIds(4)});
+  RadixSortRunOptions options;
+  options.initialVariableKeysFitRadixPrefix = false;
+  auto run = createRun({*input, {0}, {flags(true, true)}}, options);
+  run->append(*input);
+  run->finalize();
+  ASSERT_FALSE(run->decodesVariableKeysFromInline());
+  for (uint64_t row = 0; row < run->storage()->size(); ++row) {
+    std::memset(
+        const_cast<char*>(run->storage()->keyDataAt(row)),
+        'x',
+        run->keyLayout().inlineCapacity());
+  }
+  collectAndVerify(*run, *input, 2, 1);
+}
+
+TEST_F(RadixSortRunTest, fixedPrefixAndVariableSuffixDecodeFromRecord) {
+  auto input = makeRows(
+      {"first", "second", "text"},
+      {makeVector<int32_t>(INTEGER(), {3, 1, 2, 1}),
+       makeVector<int32_t>(INTEGER(), {2, 3, 1, 1}),
+       makeStringVector({"c", "a", "b", ""})});
+  const std::vector<CompareFlags> keyFlags(3, flags(true, true));
+  auto run = createRun({*input, {0, 1, 2}, keyFlags});
+  run->append(*input);
+  run->finalize();
+  ASSERT_EQ(run->keyLayout().heapKeyOffset(), 10);
+  ASSERT_TRUE(run->decodesVariableKeysFromInline());
+  for (uint64_t row = 0; row < run->storage()->size(); ++row) {
+    auto key = run->storage()->keyAt(row);
+    std::memset(key.heapKeyData(), 'x', key.heapSize());
+  }
+  auto output = collect(*run, 2);
+  expectSortedValues(*input, *output, {0, 1, 2}, keyFlags);
+}
+
 TEST_F(RadixSortRunTest, keyLayoutBoundariesKeepSortedOutput) {
   auto ids = makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5});
   auto payload = makeStringVector(

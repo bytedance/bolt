@@ -4125,7 +4125,7 @@ void RadixSortKeyCodec::encode(
   offsets[0] = 0;
 }
 
-void RadixSortKeyCodec::encodeAndAppendVariable(
+bool RadixSortKeyCodec::encodeAndAppendVariable(
     const RowVector& input,
     RadixSortRunStorage& arena,
     std::span<char* const> payloads,
@@ -4141,7 +4141,7 @@ void RadixSortKeyCodec::encodeAndAppendVariable(
       prepareReusableBuffer<uint64_t>(sizeScratch, input.size(), arena.pool());
   initializeVariableKeySizes(columns_, input, firstSuffixColumn, heapSizes);
 
-  arena.appendVariableKeyBatch(
+  return arena.appendVariableKeyBatch(
       std::span<const uint64_t>(heapSizes, input.size()),
       payloads,
       [&](vector_size_t source, vector_size_t count, char* records) {
