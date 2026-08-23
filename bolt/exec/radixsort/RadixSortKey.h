@@ -53,7 +53,8 @@ class RadixSortKeyLayout {
 
   static RadixSortKeyLayout select(
       std::optional<uint64_t> maximumEncodedSize,
-      bool hasPayload);
+      bool hasPayload,
+      uint32_t heapKeyOffset = 0);
 
   RadixSortKeyLayoutKind kind() const {
     return kind_;
@@ -74,6 +75,14 @@ class RadixSortKeyLayout {
   uint32_t radixWidth() const {
     return radixWidth_;
   }
+
+  // First logical encoded-key byte stored in overflow heap. Earlier bytes are
+  // complete top-level fixed key columns already present in the inline record.
+  uint32_t heapKeyOffset() const {
+    return heapKeyOffset_;
+  }
+
+  uint64_t heapSize(uint64_t encodedSize) const;
 
   bool isVariable() const {
     return variable_;
@@ -104,11 +113,13 @@ class RadixSortKeyLayout {
       bool hasPayload,
       std::optional<uint32_t> sizeOffset,
       std::optional<uint32_t> dataOffset,
-      std::optional<uint32_t> payloadOffset)
+      std::optional<uint32_t> payloadOffset,
+      uint32_t heapKeyOffset = 0)
       : kind_(kind),
         width_(width),
         inlineCapacity_(inlineCapacity),
         radixWidth_(std::min<uint32_t>(inlineCapacity, sizeof(uint64_t))),
+        heapKeyOffset_(heapKeyOffset),
         variable_(variable),
         hasPayload_(hasPayload),
         sizeOffset_(sizeOffset),
@@ -119,6 +130,7 @@ class RadixSortKeyLayout {
   uint32_t width_{0};
   uint32_t inlineCapacity_{0};
   uint32_t radixWidth_{0};
+  uint32_t heapKeyOffset_{0};
   bool variable_{false};
   bool hasPayload_{false};
   std::optional<uint32_t> sizeOffset_;
@@ -128,8 +140,9 @@ class RadixSortKeyLayout {
 
 struct EncodedKeyView {
   std::string_view bytes;
-  bool zeroPadded{false};
 };
+
+static_assert(sizeof(EncodedKeyView) == 16);
 
 union PointerSlot {
   char* pointer;
@@ -349,23 +362,60 @@ class RadixSortKeyOps {
   using Traits = RadixSortKeyTraits<KIND>;
 
   static int32_t compare(const char* left, const char* right) {
-    for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
-      const auto leftWord =
-          loadUnaligned<uint64_t>(left + word * sizeof(uint64_t));
-      const auto rightWord =
-          loadUnaligned<uint64_t>(right + word * sizeof(uint64_t));
-      if (leftWord != rightWord) {
-        return (leftWord > rightWord) - (leftWord < rightWord);
-      }
-    }
-    if constexpr (!Traits::kVariable) {
-      return 0;
-    }
+    return compare(left, right, 0);
+  }
 
+  static int32_t
+  compare(const char* left, const char* right, uint32_t heapKeyOffset) {
+    if constexpr (!Traits::kVariable) {
+      BOLT_DCHECK_EQ(heapKeyOffset, 0);
+      for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
+        const auto leftWord =
+            loadUnaligned<uint64_t>(left + word * sizeof(uint64_t));
+        const auto rightWord =
+            loadUnaligned<uint64_t>(right + word * sizeof(uint64_t));
+        if (leftWord != rightWord) {
+          return (leftWord > rightWord) - (leftWord < rightWord);
+        }
+      }
+      return 0;
+    } else {
+      const auto leftSize = loadUnaligned<uint64_t>(left + Traits::kSizeOffset);
+      const auto rightSize =
+          loadUnaligned<uint64_t>(right + Traits::kSizeOffset);
+      for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
+        auto leftWord = loadUnaligned<uint64_t>(left + word * sizeof(uint64_t));
+        auto rightWord =
+            loadUnaligned<uint64_t>(right + word * sizeof(uint64_t));
+        if constexpr (std::endian::native == std::endian::little) {
+          leftWord = byteSwap(leftWord);
+          rightWord = byteSwap(rightWord);
+        }
+        if (leftWord != rightWord) {
+          return (leftWord > rightWord) - (leftWord < rightWord);
+        }
+      }
+      if (leftSize <= Traits::kInlineCapacity ||
+          rightSize <= Traits::kInlineCapacity) {
+        return (leftSize > rightSize) - (leftSize < rightSize);
+      }
+      return compareSuffix(left, right, heapKeyOffset, Traits::kInlineCapacity);
+    }
+  }
+
+  // Compares keys in a radix bucket after all record prefix bytes have been
+  // consumed. No record byte is read again.
+  static int32_t compareSuffix(
+      const char* left,
+      const char* right,
+      uint32_t heapKeyOffset,
+      uint32_t radixWidth) {
+    static_assert(Traits::kVariable);
+    BOLT_DCHECK_LE(heapKeyOffset, radixWidth);
+    BOLT_DCHECK_LE(radixWidth, Traits::kInlineCapacity);
     const auto leftSize = loadUnaligned<uint64_t>(left + Traits::kSizeOffset);
     const auto rightSize = loadUnaligned<uint64_t>(right + Traits::kSizeOffset);
-    if (leftSize <= Traits::kInlineCapacity ||
-        rightSize <= Traits::kInlineCapacity) {
+    if (leftSize <= radixWidth || rightSize <= radixWidth) {
       return (leftSize > rightSize) - (leftSize < rightSize);
     }
 
@@ -374,28 +424,13 @@ class RadixSortKeyOps {
     const auto* rightData =
         loadUnaligned<const char*>(right + Traits::kDataOffset);
     const auto result = std::memcmp(
-        leftData + Traits::kInlineCapacity,
-        rightData + Traits::kInlineCapacity,
-        std::min(leftSize, rightSize) - Traits::kInlineCapacity);
+        leftData + radixWidth - heapKeyOffset,
+        rightData + radixWidth - heapKeyOffset,
+        std::min(leftSize, rightSize) - radixWidth);
     if (result != 0) {
       return (result > 0) - (result < 0);
     }
     return (leftSize > rightSize) - (leftSize < rightSize);
-  }
-
-  static uint8_t encodedByte(const char* key, uint64_t offset) {
-    if constexpr (Traits::kVariable) {
-      const auto size = loadUnaligned<uint64_t>(key + Traits::kSizeOffset);
-      if (size > Traits::kInlineCapacity) {
-        const auto* data =
-            loadUnaligned<const char*>(key + Traits::kDataOffset);
-        return static_cast<uint8_t>(data[offset]);
-      }
-    }
-    const auto word = loadUnaligned<uint64_t>(
-        key + (offset / sizeof(uint64_t)) * sizeof(uint64_t));
-    const auto shift = (sizeof(uint64_t) - 1 - offset % sizeof(uint64_t)) * 8;
-    return static_cast<uint8_t>(word >> shift);
   }
 };
 
@@ -420,7 +455,9 @@ class RadixSortKey {
 
   uint64_t heapSize() const;
 
-  char* fullKeyData() const;
+  std::string_view heapKey() const;
+
+  char* heapKeyData() const;
 
   char* payload() const;
 

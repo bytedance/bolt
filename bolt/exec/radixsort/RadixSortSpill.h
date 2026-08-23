@@ -96,15 +96,6 @@ class RadixSortSpillWriter {
       const char* keys,
       vector_size_t count);
 
-  template <RadixSortKeyLayoutKind KIND>
-  bool allVariableRowsInline(const char* keys, vector_size_t count) const;
-
-  template <RadixSortKeyLayoutKind KIND>
-  void appendInlineVariableRows(
-      const PayloadRowLayout* payloadLayout,
-      const char* keys,
-      vector_size_t count);
-
   void flush();
 
   void closeFile();
@@ -305,7 +296,7 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
 
 class RadixSortMerger {
  public:
-  using CompareKeys = int32_t (*)(const char*, const char*);
+  using CompareKeys = int32_t (*)(const char*, const char*, uint32_t);
 
   RadixSortMerger(
       RadixSortKeyLayout keyLayout,
@@ -345,6 +336,10 @@ class RadixSortMerger {
   StreamIndex first(int32_t node);
 
   StreamIndex propagate(int32_t node, StreamIndex value);
+
+  int32_t compareKeys(const char* left, const char* right) const {
+    return compareKeys_(left, right, keyLayout_.heapKeyOffset());
+  }
 
   static int32_t parent(int32_t node) {
     return (node - 1) / 2;

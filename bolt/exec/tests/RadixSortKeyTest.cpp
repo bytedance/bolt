@@ -48,13 +48,12 @@ struct LayoutDescriptor {
   std::optional<uint32_t> dataOffset;
   std::optional<uint32_t> payloadOffset;
   int32_t (*compare)(const char*, const char*);
-  uint8_t (*encodedByte)(const char*, uint64_t);
 };
 
 // clang-format off
 #define LAYOUT(KIND, RECORD, CAPACITY, VARIABLE, PAYLOAD, SIZE, DATA, PAYLOAD_OFFSET) \
   {LayoutKind::KIND, sizeof(RECORD), CAPACITY, VARIABLE, PAYLOAD, SIZE, DATA, PAYLOAD_OFFSET, \
-   &RadixSortKeyOps<LayoutKind::KIND>::compare, &RadixSortKeyOps<LayoutKind::KIND>::encodedByte}
+   &RadixSortKeyOps<LayoutKind::KIND>::compare}
 constexpr std::array<LayoutDescriptor, 9> kLayouts{{
     LAYOUT(kKeyOnlyFixed8, KeyOnlyFixed8Record, 8, false, false, {}, {}, {}),
     LAYOUT(kKeyOnlyFixed16, KeyOnlyFixed16Record, 16, false, false, {}, {}, {}),
@@ -260,23 +259,24 @@ class RadixSortKeyTest : public testing::Test {
     });
   }
 
-  static void verifyDeconstructed(
+  static void verifyPhysicalStorage(
       const RadixSortKeyLayout& layout,
+      const char* record,
       const RadixSortKey& physical,
       std::string_view original) {
-    RadixSortInlineKeyBuffer buffer{};
-    EncodedKeyView deconstructed;
-    physical.deconstruct(buffer, deconstructed);
-    if (original.size() > layout.inlineCapacity()) {
-      EXPECT_EQ(deconstructed.bytes, original);
-      EXPECT_FALSE(deconstructed.zeroPadded);
+    if (layout.isVariable()) {
+      EXPECT_EQ(
+          std::string_view(record, layout.heapKeyOffset()),
+          original.substr(0, layout.heapKeyOffset()));
+      EXPECT_EQ(physical.heapKey(), original.substr(layout.heapKeyOffset()));
       return;
     }
-    ASSERT_EQ(deconstructed.bytes.size(), layout.inlineCapacity());
-    EXPECT_TRUE(deconstructed.zeroPadded);
-    EXPECT_EQ(deconstructed.bytes.substr(0, original.size()), original);
+    RadixSortInlineKeyBuffer buffer;
+    EncodedKeyView view;
+    physical.deconstruct(buffer, view);
+    EXPECT_EQ(view.bytes.substr(0, original.size()), original);
     EXPECT_EQ(
-        deconstructed.bytes.substr(original.size()),
+        view.bytes.substr(original.size()),
         std::string(layout.inlineCapacity() - original.size(), '\0'));
   }
 
@@ -287,17 +287,25 @@ class RadixSortKeyTest : public testing::Test {
       char* payload = nullptr) {
     const auto key = arena.keyAt(row);
     const auto& layout = arena.layout();
-    verifyDeconstructed(layout, key, original);
+    verifyPhysicalStorage(layout, arena.keyDataAt(row), key, original);
     EXPECT_EQ(key.payload(), payload);
   }
 
   RowVectorPtr decodeArena(
       const RadixSortKeyCodec& codec,
       const RadixSortRunStorage& arena) {
-    std::vector<RadixSortInlineKeyBuffer> buffers(arena.size());
+    std::vector<std::string> logicalKeys(arena.size());
+    std::vector<RadixSortInlineKeyBuffer> inlineBuffers(arena.size());
     std::vector<EncodedKeyView> views(arena.size());
     for (uint64_t row = 0; row < arena.size(); ++row) {
-      arena.keyAt(row).deconstruct(buffers[row], views[row]);
+      if (arena.layout().isVariable()) {
+        logicalKeys[row].assign(
+            arena.keyDataAt(row), arena.layout().heapKeyOffset());
+        logicalKeys[row].append(arena.keyAt(row).heapKey());
+        views[row] = {logicalKeys[row]};
+      } else {
+        arena.keyAt(row).deconstruct(inlineBuffers[row], views[row]);
+      }
     }
     RowVectorPtr decoded;
     BufferPtr cursorScratch;
@@ -410,6 +418,30 @@ TEST_F(RadixSortKeyTest, layoutAbiAndSelection) {
   EXPECT_THROW(RadixSortKeyLayout::select(0, true), BoltException);
 }
 
+TEST_F(RadixSortKeyTest, variableHeapKeyOffsetUsesTopLevelFixedBoundaries) {
+  const auto assertOffset = [&](const std::vector<TypePtr>& types,
+                                bool hasPayload,
+                                uint32_t expectedOffset) {
+    std::unique_ptr<RadixSortKeyCodec> codec;
+    RadixSortKeyCodec::bind(
+        types,
+        std::vector<CompareFlags>(types.size(), flags(true, true)),
+        codec);
+    auto layout =
+        RadixSortKeyLayout::select(codec->maximumEncodedSize(), hasPayload);
+    ASSERT_TRUE(layout.isVariable());
+    EXPECT_EQ(
+        codec->heapKeyOffsetForVariableLayout(layout.inlineCapacity()),
+        expectedOffset);
+  };
+
+  assertOffset({INTEGER(), VARCHAR()}, false, 5);
+  assertOffset({BIGINT(), BIGINT(), VARCHAR()}, false, 9);
+  assertOffset({VARCHAR(), INTEGER()}, false, 0);
+  assertOffset({INTEGER(), VARCHAR()}, true, 5);
+  assertOffset({BIGINT(), VARCHAR()}, true, 0);
+}
+
 TEST_F(RadixSortKeyTest, allLayoutsRoundTripAndCompare) {
   for (const auto& descriptor : kLayouts) {
     const auto layout = RadixSortKeyLayout::fromKind(descriptor.kind);
@@ -432,6 +464,57 @@ TEST_F(RadixSortKeyTest, allLayoutsRoundTripAndCompare) {
     }
     expectPhysicalCompare(arena, keys);
   }
+}
+
+TEST_F(RadixSortKeyTest, variableLayoutStoresHeapFromColumnBoundary) {
+  auto layout = RadixSortKeyLayout::select(std::nullopt, false, 5);
+  ASSERT_EQ(layout.kind(), LayoutKind::kKeyOnlyVariable32);
+  ASSERT_EQ(layout.heapKeyOffset(), 5);
+  const std::vector<std::string> keys{
+      std::string("abcdef"),
+      std::string("abcde") + std::string(32, 'x'),
+      std::string("abcdf") + std::string(32, 'x'),
+  };
+  RadixSortRunStorage arena(pool_.get(), layout, 2, 64);
+  for (const auto& key : keys) {
+    arena.append(key);
+  }
+  ASSERT_EQ(arena.size(), keys.size());
+  EXPECT_EQ(arena.keyAt(0).heapSize(), keys[0].size() - layout.heapKeyOffset());
+  EXPECT_EQ(arena.keyAt(0).heapKey(), "f");
+  ASSERT_NE(arena.keyAt(1).heapKeyData(), nullptr);
+  EXPECT_EQ(arena.keyAt(1).heapSize(), keys[1].size() - layout.heapKeyOffset());
+  EXPECT_EQ(
+      std::string_view(arena.keyAt(1).heapKeyData(), arena.keyAt(1).heapSize()),
+      std::string_view(keys[1]).substr(layout.heapKeyOffset()));
+  EXPECT_EQ(
+      arena.keyAt(0).compare(arena.keyAt(1)), encodedCompare(keys[0], keys[1]));
+  EXPECT_EQ(
+      arena.keyAt(1).compare(arena.keyAt(2)), encodedCompare(keys[1], keys[2]));
+  for (uint64_t row = 0; row < arena.size(); ++row) {
+    verifyStoredKey(arena, row, keys[row]);
+  }
+}
+
+TEST_F(RadixSortKeyTest, suffixCompareDoesNotReadRadixPrefix) {
+  auto layout = RadixSortKeyLayout::select(std::nullopt, false, 9);
+  std::string left(40, 's');
+  std::string right = left;
+  left[12] = 'a';
+  right[12] = 'z';
+
+  RadixSortRunStorage arena(pool_.get(), layout, 2, 64);
+  arena.append(left);
+  arena.append(right);
+
+  ASSERT_LT(arena.keyAt(0).compare(arena.keyAt(1)), 0);
+  EXPECT_EQ(
+      RadixSortKeyOps<LayoutKind::kKeyOnlyVariable32>::compareSuffix(
+          arena.keyDataAt(0),
+          arena.keyDataAt(1),
+          layout.heapKeyOffset(),
+          layout.radixWidth()),
+      0);
 }
 
 TEST_F(RadixSortKeyTest, radixSortUtilsBoundaryChecks) {
@@ -477,8 +560,11 @@ TEST_F(RadixSortKeyTest, knownPerWordByteSwap) {
   key.construct(std::string_view(encoded.data(), encoded.size()), nullptr);
   EXPECT_EQ(loadUnaligned<uint64_t>(storage.data()), 0x0102030405060708ULL);
   EXPECT_EQ(loadUnaligned<uint64_t>(storage.data() + 8), 0x1112131415161718ULL);
-  verifyDeconstructed(
-      layout, key, std::string_view(encoded.data(), encoded.size()));
+  verifyPhysicalStorage(
+      layout,
+      storage.data(),
+      key,
+      std::string_view(encoded.data(), encoded.size()));
 }
 
 TEST_F(RadixSortKeyTest, templatedCompareMatchesGenericCompare) {
@@ -663,20 +749,23 @@ TEST_F(RadixSortKeyTest, blockAndHeapGroups) {
   EXPECT_EQ(arena.keyBlocks()[0].count, 3);
   EXPECT_EQ(arena.keyBlocks()[1].capacity, 3);
   EXPECT_EQ(arena.keyBlocks()[1].count, 3);
-  ASSERT_EQ(arena.keyHeapGroups().size(), 3);
+  ASSERT_EQ(arena.keyHeapGroups().size(), 4);
   EXPECT_EQ(arena.keyHeapGroups()[0].capacity, 64);
-  EXPECT_EQ(arena.keyHeapGroups()[0].used, 64);
+  EXPECT_EQ(arena.keyHeapGroups()[0].used, 53);
   EXPECT_EQ(arena.keyHeapGroups()[0].keyCount, 3);
-  EXPECT_EQ(arena.keyHeapGroups()[1].capacity, 100);
-  EXPECT_EQ(arena.keyHeapGroups()[1].used, 100);
+  EXPECT_EQ(arena.keyHeapGroups()[1].capacity, 64);
+  EXPECT_EQ(arena.keyHeapGroups()[1].used, 27);
   EXPECT_EQ(arena.keyHeapGroups()[1].keyCount, 1);
-  EXPECT_EQ(arena.keyHeapGroups()[2].capacity, 64);
-  EXPECT_EQ(arena.keyHeapGroups()[2].used, 17);
+  EXPECT_EQ(arena.keyHeapGroups()[2].capacity, 100);
+  EXPECT_EQ(arena.keyHeapGroups()[2].used, 100);
   EXPECT_EQ(arena.keyHeapGroups()[2].keyCount, 1);
+  EXPECT_EQ(arena.keyHeapGroups()[3].capacity, 64);
+  EXPECT_EQ(arena.keyHeapGroups()[3].used, 17);
+  EXPECT_EQ(arena.keyHeapGroups()[3].keyCount, 1);
 
   const auto heapBytes = groupBytes(arena.keyHeapGroups());
   const auto keyBytes = keys.size() * layout.width();
-  EXPECT_EQ(heapBytes, 181);
+  EXPECT_EQ(heapBytes, 197);
   EXPECT_GE(
       static_cast<uint64_t>(arena.allocatedBytes()), keyBytes + heapBytes);
 }
@@ -735,7 +824,8 @@ TEST_F(RadixSortKeyTest, storageBlockAllocationAndAddressingBoundaries) {
           arena.payloadFixedBlocks()[block].base +
               static_cast<uint64_t>(indexInBlock) * payloadLayout->rowWidth());
       EXPECT_EQ(arena.keyAt(row).payload(), payloadBatch.rowAt(row));
-      verifyDeconstructed(keyLayout, arena.keyAt(row), keys[row]);
+      verifyPhysicalStorage(
+          keyLayout, arena.keyDataAt(row), arena.keyAt(row), keys[row]);
     }
 
     for (uint64_t begin = 0; begin < arena.size();) {
@@ -1014,8 +1104,7 @@ TEST_F(
   const auto keyHeapCapacity = groupBytes(arena.keyHeapGroups(), true);
   const auto expectedKeyHeapUsed = std::accumulate(
       keys.begin(), keys.end(), uint64_t{0}, [&](uint64_t sum, auto key) {
-        return sum +
-            (key.size() > layout.inlineCapacity() ? key.size() : uint64_t{0});
+        return sum + layout.heapSize(key.size());
       });
   const auto payloadHeapUsed = groupBytes(arena.payloadHeapGroups());
   const auto payloadHeapCapacity = groupBytes(arena.payloadHeapGroups(), true);

@@ -33,8 +33,11 @@ constexpr uint64_t kDefaultWriteBufferSize = 1 << 20;
 constexpr uint64_t kMaxReadBufferSize = (1 << 20) - AlignedBuffer::kPaddedSize;
 
 template <RadixSortKeyLayoutKind KIND>
-int32_t comparePhysicalKeys(const char* left, const char* right) {
-  return RadixSortKeyOps<KIND>::compare(left, right);
+int32_t comparePhysicalKeys(
+    const char* left,
+    const char* right,
+    uint32_t heapKeyOffset) {
+  return RadixSortKeyOps<KIND>::compare(left, right, heapKeyOffset);
 }
 
 RadixSortMerger::CompareKeys compareKeysForLayout(RadixSortKeyLayoutKind kind) {
@@ -174,54 +177,6 @@ std::unique_ptr<SpillInputStream> makeInputStream(
       std::move(file), std::move(buffers), spillUringEnabled);
 }
 
-bool nextInlineVariableFixedBatch(
-    const RadixSortSpillRunMeta& meta,
-    char* block,
-    int32_t uncompressedSize,
-    std::vector<char*>& keys,
-    std::vector<char*>& payloads) {
-  if (uncompressedSize < RadixSortSpillRow::kHeaderSize) {
-    return false;
-  }
-  const auto rowSize = loadUnaligned<uint32_t>(block);
-  const auto keySize = RadixSortSpillRow::keyFixedSize(meta.keyLayout);
-  const auto expectedRowSize =
-      RadixSortSpillRow::kHeaderSize + keySize + meta.payloadFixedSize;
-  if (rowSize != expectedRowSize || rowSize == 0 ||
-      uncompressedSize % rowSize != 0) {
-    return false;
-  }
-
-  const auto count = uncompressedSize / rowSize;
-  const auto initialKeyCount = keys.size();
-  const auto initialPayloadCount = payloads.size();
-  const auto keySizeOffset = *meta.keyLayout.sizeOffset();
-  const auto keyInlineCapacity = meta.keyLayout.inlineCapacity();
-  keys.reserve(count);
-  payloads.reserve(count);
-  auto* current = block;
-  for (uint32_t row = 0; row < count; ++row, current += rowSize) {
-    if (loadUnaligned<uint32_t>(current) != expectedRowSize) {
-      keys.resize(initialKeyCount);
-      payloads.resize(initialPayloadCount);
-      return false;
-    }
-    auto* key = current + RadixSortSpillRow::kHeaderSize;
-    const auto storedSize = loadUnaligned<uint64_t>(key + keySizeOffset);
-    if (storedSize > keyInlineCapacity) {
-      keys.resize(initialKeyCount);
-      payloads.resize(initialPayloadCount);
-      return false;
-    }
-    keys.push_back(key);
-    payloads.push_back(
-        meta.payloadFixedSize == 0
-            ? nullptr
-            : current + RadixSortSpillRow::kHeaderSize + keySize);
-  }
-  return true;
-}
-
 } // namespace
 
 RadixSortSpillWriter::RadixSortSpillWriter(
@@ -354,44 +309,6 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::writeRun(
         flush();
         closeFile();
         return std::exchange(files_, {});
-      case RadixSortKeyLayoutKind::kKeyOnlyVariable32: {
-        bool allInline = true;
-        for (const auto& block : storage.keyBlocks()) {
-          allInline &=
-              allVariableRowsInline<RadixSortKeyLayoutKind::kKeyOnlyVariable32>(
-                  block.base, block.count);
-        }
-        if (allInline) {
-          for (const auto& block : storage.keyBlocks()) {
-            appendInlineVariableRows<
-                RadixSortKeyLayoutKind::kKeyOnlyVariable32>(
-                payloadLayout, block.base, block.count);
-          }
-          flush();
-          closeFile();
-          return std::exchange(files_, {});
-        }
-        break;
-      }
-      case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32: {
-        bool allInline = true;
-        for (const auto& block : storage.keyBlocks()) {
-          allInline &= allVariableRowsInline<
-              RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>(
-              block.base, block.count);
-        }
-        if (allInline) {
-          for (const auto& block : storage.keyBlocks()) {
-            appendInlineVariableRows<
-                RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>(
-                payloadLayout, block.base, block.count);
-          }
-          flush();
-          closeFile();
-          return std::exchange(files_, {});
-        }
-        break;
-      }
       default:
         break;
     }
@@ -497,59 +414,6 @@ void RadixSortSpillWriter::appendFixedRows(
       RadixSortSpillRow::keyFixedSize(RadixSortKeyLayout::fromKind(KIND));
   const auto payloadFixedSize =
       payloadLayout == nullptr ? 0 : payloadLayout->rowWidth();
-  const auto rowSize = checkedFixedRowSize(keySize, payloadFixedSize);
-  RadixSortSpillRowHeader header{rowSize};
-  const auto* key = keys;
-  for (vector_size_t row = 0; row < count; ++row, key += Traits::kWidth) {
-    if (FOLLY_UNLIKELY(rowSize > static_cast<uint64_t>(end_ - current_))) {
-      if (current_ > buffer_->as<char>() + kBlockHeaderSize) {
-        flush();
-      }
-      if (rowSize > static_cast<uint64_t>(end_ - current_)) {
-        ensureRowFits(rowSize);
-      }
-    }
-    storeUnaligned<RadixSortSpillRowHeader>(current_, header);
-    auto* cursor = current_ + RadixSortSpillRow::kHeaderSize;
-    std::memcpy(cursor, key, keySize);
-    cursor += keySize;
-    if constexpr (Traits::kHasPayload) {
-      std::memcpy(
-          cursor,
-          loadUnaligned<char*>(key + Traits::kPayloadOffset),
-          payloadFixedSize);
-    }
-    current_ += rowSize;
-    ++currentFileRows_;
-  }
-}
-
-template <RadixSortKeyLayoutKind KIND>
-bool RadixSortSpillWriter::allVariableRowsInline(
-    const char* keys,
-    vector_size_t count) const {
-  using Traits = RadixSortKeyTraits<KIND>;
-  static_assert(Traits::kVariable);
-  const auto* key = keys;
-  for (vector_size_t row = 0; row < count; ++row, key += Traits::kWidth) {
-    if (loadUnaligned<uint64_t>(key + Traits::kSizeOffset) >
-        Traits::kInlineCapacity) {
-      return false;
-    }
-  }
-  return true;
-}
-
-template <RadixSortKeyLayoutKind KIND>
-void RadixSortSpillWriter::appendInlineVariableRows(
-    const PayloadRowLayout* payloadLayout,
-    const char* keys,
-    vector_size_t count) {
-  using Traits = RadixSortKeyTraits<KIND>;
-  static_assert(Traits::kVariable);
-  const auto payloadFixedSize =
-      payloadLayout == nullptr ? 0 : payloadLayout->rowWidth();
-  const auto keySize = Traits::kDataOffset;
   const auto rowSize = checkedFixedRowSize(keySize, payloadFixedSize);
   RadixSortSpillRowHeader header{rowSize};
   const auto* key = keys;
@@ -812,9 +676,6 @@ bool RadixSortSpillReader::nextBatch(
       if (nextFixedBatch(block, uncompressedSize, keys, payloads)) {
         return true;
       }
-    } else if (nextInlineVariableFixedBatch(
-                   meta_, block, uncompressedSize, keys, payloads)) {
-      return true;
     }
   }
   bool validRows = true;
@@ -1111,7 +972,7 @@ vector_size_t RadixSortMerger::collectTwoWayRows(
   vector_size_t row = 0;
   for (; row < count; ++row) {
     if (rightKey == nullptr ||
-        (leftKey != nullptr && compareKeys_(leftKey, rightKey) < 0)) {
+        (leftKey != nullptr && compareKeys(leftKey, rightKey) < 0)) {
       keys[row] = leftKey;
       payloads[row] = left->payload();
       left->pop();
@@ -1142,7 +1003,7 @@ vector_size_t RadixSortMerger::collectLoserTreeRows(
 }
 
 bool RadixSortMerger::less(StreamIndex left, StreamIndex right) const {
-  return compareKeys_(streams_[left]->key(), streams_[right]->key()) < 0;
+  return compareKeys(streams_[left]->key(), streams_[right]->key()) < 0;
 }
 
 RadixSortMerger::StreamIndex RadixSortMerger::nextLoserTreeStream() {

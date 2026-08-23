@@ -48,15 +48,13 @@ void appendInlineVariableKeys(
     const auto begin = offsets[inputRow];
     const auto size = offsets[inputRow + 1] - begin;
     auto* record = destination + static_cast<uint64_t>(row) * Traits::kWidth;
+    std::array<uint64_t, Traits::kInlineWords> inlineWords{};
+    std::memcpy(
+        inlineWords.data(),
+        data + begin,
+        std::min<uint64_t>(size, Traits::kInlineCapacity));
     for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
-      uint64_t encodedWord = 0;
-      const auto wordOffset = static_cast<uint64_t>(word) * sizeof(uint64_t);
-      if (wordOffset < size) {
-        std::memcpy(
-            &encodedWord,
-            data + begin + wordOffset,
-            std::min<uint64_t>(sizeof(uint64_t), size - wordOffset));
-      }
+      auto encodedWord = inlineWords[word];
       if constexpr (std::endian::native == std::endian::little) {
         encodedWord = byteSwap(encodedWord);
       }
@@ -170,8 +168,9 @@ void RadixSortRunStorage::append(
     uint64_t* index) {
   ensureKeyBlock();
   char* overflowData = nullptr;
-  if (layout_.isVariable() && encodedKey.size() > layout_.inlineCapacity()) {
-    allocateOverflow(encodedKey.size(), overflowData);
+  const auto heapSize = layout_.heapSize(encodedKey.size());
+  if (heapSize > 0) {
+    allocateOverflow(heapSize, overflowData);
   }
 
   auto& block = keyBlocks_.back();
@@ -295,28 +294,19 @@ void RadixSortRunStorage::appendBatch(
           const auto size = offsets[inputRow + 1] - begin;
           auto* record =
               destination + static_cast<uint64_t>(row) * Traits::kWidth;
-          std::array<uint64_t, Traits::kInlineWords> inlineWords{};
+          std::memset(record, 0, Traits::kInlineCapacity);
           std::memcpy(
-              inlineWords.data(),
+              record,
               data + begin,
               std::min<uint64_t>(size, Traits::kInlineCapacity));
-          for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
-            auto encodedWord = inlineWords[word];
-            if constexpr (std::endian::native == std::endian::little) {
-              encodedWord = byteSwap(encodedWord);
-            }
-            storeUnaligned<uint64_t>(
-                record + word * sizeof(uint64_t), encodedWord);
-          }
           storeUnaligned<uint64_t>(record + Traits::kSizeOffset, size);
-          if (size > Traits::kInlineCapacity) {
-            char* overflow;
-            allocateOverflow(size, overflow);
-            std::memcpy(overflow, data + begin, size);
-            storeUnaligned<char*>(record + Traits::kDataOffset, overflow);
-          } else {
-            storeUnaligned<char*>(record + Traits::kDataOffset, nullptr);
-          }
+          const auto heapSize = layout_.heapSize(size);
+          BOLT_DCHECK_GT(heapSize, 0);
+          char* overflow;
+          allocateOverflow(heapSize, overflow);
+          std::memcpy(
+              overflow, data + begin + layout_.heapKeyOffset(), heapSize);
+          storeUnaligned<char*>(record + Traits::kDataOffset, overflow);
           if constexpr (Traits::kHasPayload) {
             storeUnaligned<char*>(
                 record + Traits::kPayloadOffset,

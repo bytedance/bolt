@@ -42,6 +42,7 @@ struct RadixSortKeyColumn {
   TypePtr type;
   CompareFlags flags;
   std::optional<uint64_t> maximumEncodedSize;
+  std::optional<uint32_t> fixedPrefixOffset;
   bool encodeDecodeSupported;
   std::vector<RadixSortKeyColumn> children;
 };
@@ -107,7 +108,12 @@ class RadixSortKeyCodec {
   }
 
   std::vector<uint32_t> leadingSkippableValidityOffsets(
-      std::span<const uint8_t> keyMayHaveNulls) const;
+      std::span<const uint8_t> keyMayHaveNulls,
+      uint32_t radixWidth) const;
+
+  uint32_t heapKeyOffsetForVariableLayout(uint32_t inlineCapacity) const;
+
+  uint32_t fixedPrefixColumnCount(uint32_t heapKeyOffset) const;
 
   void encode(
       const RowVector& input,
@@ -120,7 +126,8 @@ class RadixSortKeyCodec {
       std::span<const uint8_t> mayHaveNulls,
       memory::MemoryPool* pool,
       BufferPtr& cursorScratch,
-      RowVectorPtr& result) const;
+      RowVectorPtr& result,
+      uint32_t firstColumn = 0) const;
 
  private:
   void encodeSingleFixedFlat(
@@ -160,6 +167,29 @@ class RadixSortKeyCodec {
       bool mayHaveNulls,
       memory::MemoryPool* pool,
       RowVectorPtr& result) const;
+
+  void encodeAndAppendVariable(
+      const RowVector& input,
+      RadixSortRunStorage& arena,
+      std::span<char* const> payloads,
+      uint32_t firstSuffixColumn,
+      BufferPtr& sizeScratch) const;
+
+  void decodeFixedPrefix(
+      const RadixSortRunStorage& arena,
+      uint64_t begin,
+      vector_size_t count,
+      std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
+      RowVectorPtr& result,
+      uint32_t prefixColumnCount) const;
+
+  void decodeFixedPrefix(
+      std::span<const char* const> keys,
+      std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
+      RowVectorPtr& result,
+      uint32_t prefixColumnCount) const;
 
   std::vector<RadixSortKeyColumn> columns_;
   RowTypePtr rowType_;

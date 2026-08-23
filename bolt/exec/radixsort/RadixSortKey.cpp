@@ -70,35 +70,61 @@ RadixSortKeyLayout RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind kind) {
 
 RadixSortKeyLayout RadixSortKeyLayout::select(
     std::optional<uint64_t> maximumEncodedSize,
-    bool hasPayload) {
+    bool hasPayload,
+    uint32_t heapKeyOffset) {
   RadixSortKeyLayoutKind kind;
   if (!maximumEncodedSize.has_value()) {
     kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable32
                       : RadixSortKeyLayoutKind::kKeyOnlyVariable32;
-    return fromKind(kind);
-  }
-  auto physicalWidth = checkedAdd<uint64_t>(
-      *maximumEncodedSize, hasPayload ? sizeof(uint64_t) : 0);
-  if (*physicalWidth <= 8) {
-    BOLT_CHECK(!hasPayload, "Payload radix sort key cannot fit in 8 bytes");
-    kind = RadixSortKeyLayoutKind::kKeyOnlyFixed8;
-  } else if (*physicalWidth <= 16) {
-    kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed16
-                      : RadixSortKeyLayoutKind::kKeyOnlyFixed16;
-  } else if (*physicalWidth <= 24) {
-    kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed24
-                      : RadixSortKeyLayoutKind::kKeyOnlyFixed24;
-  } else if (*physicalWidth <= 32) {
-    kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed32
-                      : RadixSortKeyLayoutKind::kKeyOnlyFixed32;
   } else {
-    kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable32
-                      : RadixSortKeyLayoutKind::kKeyOnlyVariable32;
+    auto physicalWidth = checkedAdd<uint64_t>(
+        *maximumEncodedSize, hasPayload ? sizeof(uint64_t) : 0);
+    if (*physicalWidth <= 8) {
+      BOLT_CHECK(!hasPayload, "Payload radix sort key cannot fit in 8 bytes");
+      kind = RadixSortKeyLayoutKind::kKeyOnlyFixed8;
+    } else if (*physicalWidth <= 16) {
+      kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed16
+                        : RadixSortKeyLayoutKind::kKeyOnlyFixed16;
+    } else if (*physicalWidth <= 24) {
+      kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed24
+                        : RadixSortKeyLayoutKind::kKeyOnlyFixed24;
+    } else if (*physicalWidth <= 32) {
+      kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed32
+                        : RadixSortKeyLayoutKind::kKeyOnlyFixed32;
+    } else {
+      kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable32
+                        : RadixSortKeyLayoutKind::kKeyOnlyVariable32;
+    }
   }
   auto layout = fromKind(kind);
-  layout.radixWidth_ = static_cast<uint32_t>(
-      std::min<uint64_t>(*maximumEncodedSize, sizeof(uint64_t)));
+  if (layout.isVariable()) {
+    layout.radixWidth_ = layout.inlineCapacity();
+  } else if (maximumEncodedSize.has_value()) {
+    layout.radixWidth_ = static_cast<uint32_t>(
+        std::min<uint64_t>(*maximumEncodedSize, sizeof(uint64_t)));
+  }
+  if (layout.isVariable()) {
+    BOLT_CHECK_LE(
+        heapKeyOffset,
+        layout.inlineCapacity(),
+        "Radix sort key heap offset must fit in the inline prefix");
+    layout.heapKeyOffset_ = heapKeyOffset;
+  } else {
+    BOLT_CHECK_EQ(
+        heapKeyOffset,
+        0,
+        "Fixed radix sort key layout cannot have a heap offset");
+  }
   return layout;
+}
+
+uint64_t RadixSortKeyLayout::heapSize(uint64_t encodedSize) const {
+  if (!isVariable()) {
+    return 0;
+  }
+  BOLT_DCHECK_LE(heapKeyOffset_, inlineCapacity_);
+  BOLT_DCHECK_LE(heapKeyOffset_, encodedSize);
+  return encodedSize - heapKeyOffset_;
 }
 
 void RadixSortKey::construct(
@@ -106,25 +132,37 @@ void RadixSortKey::construct(
     char* overflowData,
     char* payload) const {
   std::memset(mutableData_, 0, layout_->width());
-  RadixSortInlineKeyBuffer inlineBytes{};
-  std::memcpy(
-      inlineBytes.data(),
-      encodedKey.data(),
-      std::min<size_t>(encodedKey.size(), layout_->inlineCapacity()));
-  for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
-    storeUnaligned(
-        mutableData_ + word * sizeof(uint64_t),
-        fromEncodedWord(inlineBytes.data() + word * sizeof(uint64_t)));
+  if (layout_->isVariable()) {
+    std::memcpy(
+        mutableData_,
+        encodedKey.data(),
+        std::min<size_t>(encodedKey.size(), layout_->inlineCapacity()));
+  } else {
+    RadixSortInlineKeyBuffer inlineBytes{};
+    std::memcpy(
+        inlineBytes.data(),
+        encodedKey.data(),
+        std::min<size_t>(encodedKey.size(), layout_->inlineCapacity()));
+    for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
+      storeUnaligned(
+          mutableData_ + word * sizeof(uint64_t),
+          fromEncodedWord(inlineBytes.data() + word * sizeof(uint64_t)));
+    }
   }
 
   if (layout_->isVariable()) {
+    BOLT_DCHECK_GT(
+        encodedKey.size(),
+        layout_->heapKeyOffset(),
+        "Variable radix sort key must contain a suffix column");
     storeUnaligned<uint64_t>(
         mutableData_ + *layout_->sizeOffset(), encodedKey.size());
-    if (encodedKey.size() > layout_->inlineCapacity()) {
-      std::memcpy(overflowData, encodedKey.data(), encodedKey.size());
-      storeUnaligned<char*>(
-          mutableData_ + *layout_->dataOffset(), overflowData);
-    }
+    const auto heapSize = layout_->heapSize(encodedKey.size());
+    BOLT_DCHECK_GT(heapSize, 0);
+    BOLT_DCHECK_NOT_NULL(overflowData);
+    std::memcpy(
+        overflowData, encodedKey.data() + layout_->heapKeyOffset(), heapSize);
+    storeUnaligned<char*>(mutableData_ + *layout_->dataOffset(), overflowData);
   }
   if (layout_->hasPayload()) {
     storeUnaligned<char*>(mutableData_ + *layout_->payloadOffset(), payload);
@@ -134,12 +172,7 @@ void RadixSortKey::construct(
 void RadixSortKey::deconstruct(
     RadixSortInlineKeyBuffer& inlineBuffer,
     EncodedKeyView& encodedKey) const {
-  if (layout_->isVariable() && storedSize() > layout_->inlineCapacity()) {
-    const auto* fullKey = fullKeyData();
-    encodedKey = {std::string_view(fullKey, storedSize()), false};
-    return;
-  }
-
+  BOLT_DCHECK(!layout_->isVariable());
   inlineBuffer.fill(0);
   for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
     storeUnaligned(
@@ -147,37 +180,44 @@ void RadixSortKey::deconstruct(
         toEncodedWord(inlineWord(word)));
   }
   encodedKey = {
-      std::string_view(inlineBuffer.data(), layout_->inlineCapacity()), true};
+      std::string_view(inlineBuffer.data(), layout_->inlineCapacity())};
 }
 
 int32_t RadixSortKey::compare(const RadixSortKey& other) const {
-  for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
-    const auto left = inlineWord(word);
-    const auto right = other.inlineWord(word);
-    if (left != right) {
-      return (left > right) - (left < right);
-    }
-  }
   if (!layout_->isVariable()) {
+    for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
+      const auto left = inlineWord(word);
+      const auto right = other.inlineWord(word);
+      if (left != right) {
+        return (left > right) - (left < right);
+      }
+    }
     return 0;
   }
 
   const auto leftSize = storedSize();
   const auto rightSize = other.storedSize();
-  if (leftSize <= layout_->inlineCapacity() ||
-      rightSize <= layout_->inlineCapacity()) {
+  const auto prefixSize =
+      std::min<uint64_t>({leftSize, rightSize, layout_->inlineCapacity()});
+  const auto result = std::memcmp(data_, other.data_, prefixSize);
+  if (result != 0) {
+    return (result > 0) - (result < 0);
+  }
+  if (prefixSize < layout_->inlineCapacity()) {
     return (leftSize > rightSize) - (leftSize < rightSize);
   }
 
-  const auto commonSize = std::min(leftSize, rightSize);
-  const auto* leftData = fullKeyData();
-  const auto* rightData = other.fullKeyData();
-  const auto result = std::memcmp(
-      leftData + layout_->inlineCapacity(),
-      rightData + layout_->inlineCapacity(),
-      commonSize - layout_->inlineCapacity());
-  if (result != 0) {
-    return (result > 0) - (result < 0);
+  const auto heapOffset = layout_->heapKeyOffset();
+  BOLT_DCHECK_LE(heapOffset, layout_->inlineCapacity());
+  const auto* leftData = loadUnaligned<char*>(data_ + *layout_->dataOffset());
+  const auto* rightData =
+      loadUnaligned<char*>(other.data_ + *layout_->dataOffset());
+  const auto suffixResult = std::memcmp(
+      leftData + layout_->inlineCapacity() - heapOffset,
+      rightData + layout_->inlineCapacity() - heapOffset,
+      std::min(leftSize, rightSize) - layout_->inlineCapacity());
+  if (suffixResult != 0) {
+    return (suffixResult > 0) - (suffixResult < 0);
   }
   return (leftSize > rightSize) - (leftSize < rightSize);
 }
@@ -186,14 +226,19 @@ uint64_t RadixSortKey::heapSize() const {
   if (!layout_->isVariable()) {
     return 0;
   }
-  const auto size = storedSize();
-  return size > layout_->inlineCapacity() ? size : 0;
+  return layout_->heapSize(storedSize());
 }
 
-char* RadixSortKey::fullKeyData() const {
-  if (!layout_->isVariable() || storedSize() <= layout_->inlineCapacity()) {
-    return nullptr;
-  }
+std::string_view RadixSortKey::heapKey() const {
+  const auto size = heapSize();
+  return std::string_view(
+      size == 0 ? nullptr
+                : loadUnaligned<char*>(data_ + *layout_->dataOffset()),
+      size);
+}
+
+char* RadixSortKey::heapKeyData() const {
+  BOLT_DCHECK(layout_->isVariable());
   return loadUnaligned<char*>(data_ + *layout_->dataOffset());
 }
 

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -213,6 +214,42 @@ class RadixSortRunStorage {
   void clear();
 
  private:
+  friend class RadixSortKeyCodec;
+
+  template <typename Encode>
+  void appendVariableKeyBatch(
+      std::span<const uint64_t> heapSizes,
+      std::span<char* const> payloads,
+      Encode encode) {
+    BOLT_DCHECK(layout_.isVariable());
+    BOLT_DCHECK(payloads.empty() || payloads.size() == heapSizes.size());
+
+    appendKeyBlocks(
+        heapSizes.size(),
+        [&](vector_size_t source, vector_size_t count, char* destination) {
+          for (vector_size_t row = 0; row < count; ++row) {
+            const auto inputRow = source + row;
+            auto* record =
+                destination + static_cast<uint64_t>(row) * layout_.width();
+            std::memset(record, 0, layout_.inlineCapacity());
+
+            char* heap;
+            BOLT_DCHECK_GT(heapSizes[inputRow], 0);
+            allocateOverflow(heapSizes[inputRow], heap);
+            storeUnaligned<uint64_t>(
+                record + *layout_.sizeOffset(),
+                layout_.heapKeyOffset() + heapSizes[inputRow]);
+            storeUnaligned<char*>(record + *layout_.dataOffset(), heap);
+            if (layout_.hasPayload()) {
+              storeUnaligned<char*>(
+                  record + *layout_.payloadOffset(),
+                  payloads.empty() ? nullptr : payloads[inputRow]);
+            }
+          }
+          encode(source, count, destination);
+        });
+  }
+
   using BlockVector =
       std::vector<RadixSortKeyBlock, memory::StlAllocator<RadixSortKeyBlock>>;
   using HeapGroupVector = std::vector<

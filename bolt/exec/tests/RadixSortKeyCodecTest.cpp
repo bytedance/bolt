@@ -335,9 +335,11 @@ class RadixSortKeyCodecTest : public testing::Test {
       const EncodedKeyBatch& keys,
       RowVectorPtr& decoded,
       std::span<const uint8_t> decodedColumns = {},
-      std::span<const uint8_t> mayHaveNulls = {}) {
+      std::span<const uint8_t> mayHaveNulls = {},
+      uint32_t encodedPrefixSize = 0,
+      uint32_t firstColumn = 0) {
     std::vector<std::array<char, sizeof(uint64_t)>> fixedBytes;
-    auto views = makeViews(keys, fixedBytes);
+    auto views = makeViews(keys, fixedBytes, encodedPrefixSize);
     BufferPtr cursorScratch;
     codec.decode(
         std::span<const EncodedKeyView>(views.data(), views.size()),
@@ -345,7 +347,8 @@ class RadixSortKeyCodecTest : public testing::Test {
         mayHaveNulls,
         pool_.get(),
         cursorScratch,
-        decoded);
+        decoded,
+        firstColumn);
   }
 
   static void expectColumnEqual(
@@ -416,7 +419,8 @@ class RadixSortKeyCodecTest : public testing::Test {
 
   static std::vector<EncodedKeyView> makeViews(
       const EncodedKeyBatch& keys,
-      std::vector<std::array<char, sizeof(uint64_t)>>& fixedBytes) {
+      std::vector<std::array<char, sizeof(uint64_t)>>& fixedBytes,
+      uint32_t prefixSize = 0) {
     std::vector<EncodedKeyView> views(keys.size());
     if (keys.format() == EncodedKeyFormat::kFixed64) {
       fixedBytes.resize(keys.size());
@@ -426,14 +430,15 @@ class RadixSortKeyCodecTest : public testing::Test {
           word = byteSwap(word);
         }
         storeUnaligned(fixedBytes[row].data(), word);
-        views[row] = {
-            std::string_view(fixedBytes[row].data(), fixedBytes[row].size()),
-            true};
+        views[row] = EncodedKeyView(
+            std::string_view(fixedBytes[row].data(), fixedBytes[row].size()));
       }
       return views;
     }
     for (vector_size_t row = 0; row < keys.size(); ++row) {
-      views[row] = {keys.variableKeyAt(row), false};
+      const auto key = keys.variableKeyAt(row);
+      BOLT_CHECK_LE(prefixSize, key.size());
+      views[row] = {key.substr(prefixSize)};
     }
     return views;
   }
@@ -563,28 +568,44 @@ TEST_F(RadixSortKeyCodecTest, leadingSkippableValidityOffsets) {
     const char* name;
     std::vector<TypePtr> types;
     std::vector<uint8_t> mayHaveNulls;
+    uint32_t radixWidth;
     std::vector<uint32_t> expected;
   };
   const std::vector<Case> cases{
       {"mixedWidths",
        {TINYINT(), SMALLINT(), INTEGER(), TINYINT()},
        {0, 0, 0, 0},
+       8,
        {0, 2, 5}},
-      {"nullableSecond", {TINYINT(), SMALLINT(), TINYINT()}, {0, 1, 0}, {0}},
-      {"variableFirst", {VARCHAR(), TINYINT()}, {0, 0}, {}},
+      {"nullableSecond", {TINYINT(), SMALLINT(), TINYINT()}, {0, 1, 0}, 8, {0}},
+      {"variableFirst", {VARCHAR(), TINYINT()}, {0, 0}, 16, {0}},
+      {"nullableVariableFirst", {VARCHAR(), TINYINT()}, {1, 0}, 16, {}},
       {"wordBoundary",
        {TINYINT(), TINYINT(), TINYINT(), TINYINT(), TINYINT()},
        {0, 0, 0, 0, 0},
+       8,
        {0, 2, 4, 6}},
       {"nullableMiddle",
        {TINYINT(), TINYINT(), TINYINT(), TINYINT(), TINYINT()},
        {0, 0, 1, 0, 0},
+       8,
        {0, 2}},
       {"nullableFirst",
        {TINYINT(), TINYINT(), TINYINT(), TINYINT(), TINYINT()},
        {1, 0, 0, 0, 0},
+       8,
        {}},
-      {"secondMarkerInsideWord", {INTEGER(), INTEGER()}, {0, 0}, {0, 5}},
+      {"secondMarkerInsideWord", {INTEGER(), INTEGER()}, {0, 0}, 8, {0, 5}},
+      {"secondMarkerBeyondWord",
+       {BIGINT(), BIGINT(), VARCHAR()},
+       {0, 0, 0},
+       16,
+       {0, 9}},
+      {"fixedPrefixThenVariable",
+       {INTEGER(), INTEGER(), VARCHAR()},
+       {0, 0, 0},
+       16,
+       {0, 5, 10}},
   };
 
   for (const auto& testCase : cases) {
@@ -593,7 +614,8 @@ TEST_F(RadixSortKeyCodecTest, leadingSkippableValidityOffsets) {
         testCase.types,
         std::vector<CompareFlags>(testCase.types.size(), flags(true, true)));
     EXPECT_EQ(
-        codec->leadingSkippableValidityOffsets(testCase.mayHaveNulls),
+        codec->leadingSkippableValidityOffsets(
+            testCase.mayHaveNulls, testCase.radixWidth),
         testCase.expected);
   }
 }
