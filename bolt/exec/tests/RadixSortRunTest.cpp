@@ -579,6 +579,139 @@ TEST_F(RadixSortRunTest, directProjectionMultipleKeysAndBatchSizes) {
   }
 }
 
+TEST_F(RadixSortRunTest, variableKeyHeapOffsetSortsAndDecodes) {
+  auto input = makeRows(
+      {"i", "s", "id"},
+      {makeVector<int32_t>(INTEGER(), {3, std::nullopt, 1, 3, 2, std::nullopt}),
+       makeStringVector(
+           {std::string(),
+            std::string(80, 'a'),
+            std::string("b"),
+            std::string(96, 'a'),
+            std::nullopt,
+            std::string(40, 'z')}),
+       makeIds(6)});
+  const std::vector<CompareFlags> keyFlags{
+      flags(true, true), flags(false, false)};
+  auto run = finalizedRun({*input, {0, 1}, keyFlags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 5);
+  ASSERT_NE(run->storage(), nullptr);
+  for (uint64_t row = 0; row < run->storage()->size(); ++row) {
+    const auto key = run->storage()->keyAt(row);
+    EXPECT_EQ(key.heapKey().size(), key.heapSize());
+  }
+  collectAndVerify(*run, *input, 2, 2, {0, 1}, keyFlags);
+}
+
+TEST_F(RadixSortRunTest, variableKeyHeapOffsetStopsAtColumnBoundary) {
+  auto input = makeRows(
+      {"first", "second", "text"},
+      {makeVector<int64_t>(BIGINT(), {4, 1, 4, std::nullopt, 2}),
+       makeVector<int64_t>(BIGINT(), {3, std::nullopt, 1, 2, 9}),
+       makeStringVector(
+           {std::string(64, 'd'),
+            std::string(80, 'a'),
+            std::string(80, 'b'),
+            std::string(24, 'c'),
+            std::string(96, 'e')})});
+  const std::vector<CompareFlags> keyFlags{
+      flags(true, true), flags(true, false), flags(true, true)};
+  auto run = finalizedRun({*input, {0, 1, 2}, keyFlags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  EXPECT_EQ(run->keyLayout().inlineCapacity(), 16);
+  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 9);
+  auto output = collect(*run, 2);
+  expectSortedValues(*input, *output, {0, 1, 2}, keyFlags);
+}
+
+TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
+  auto input = makeRows(
+      {"first", "second", "text"},
+      {makeVector<int32_t>(INTEGER(), {1, std::nullopt, 3}),
+       makeVector<int32_t>(INTEGER(), {4, 5, std::nullopt}),
+       makeStringVector(
+           {std::string(), std::string("abc"), std::string(40, 'x')})});
+  const std::vector<CompareFlags> keyFlags{
+      flags(true, true), flags(true, true), flags(true, true)};
+
+  std::array<EncodedKeyBatch, 3> encodedColumns;
+  for (uint32_t column = 0; column < encodedColumns.size(); ++column) {
+    std::unique_ptr<RadixSortKeyCodec> codec;
+    RadixSortKeyCodec::bind(
+        {input->childAt(column)->type()}, {keyFlags[column]}, codec);
+    auto columnInput = makeRows({"key"}, {input->childAt(column)});
+    codec->encode(*columnInput, runPool_.get(), encodedColumns[column]);
+  }
+  const auto encodedFixedColumnAt = [&](uint32_t column, vector_size_t row) {
+    auto word = encodedColumns[column].fixedKeyAt(row);
+    if constexpr (std::endian::native == std::endian::little) {
+      word = byteSwap(word);
+    }
+    std::string encoded(sizeof(word), '\0');
+    storeUnaligned(encoded.data(), word);
+    encoded.resize(5);
+    return encoded;
+  };
+
+  auto run = createRun({*input, {0, 1, 2}, keyFlags});
+  ASSERT_EQ(
+      run->keyLayout().kind(), RadixSortKeyLayoutKind::kKeyOnlyVariable32);
+  ASSERT_EQ(run->keyLayout().inlineCapacity(), 16);
+  ASSERT_EQ(run->keyLayout().heapKeyOffset(), 10);
+  ASSERT_EQ(run->keyLayout().radixWidth(), 16);
+  run->append(*slice(*input, 0, 1));
+  run->append(*slice(*input, 1, 2));
+
+  const auto* storage = run->storage();
+  ASSERT_NE(storage, nullptr);
+  uint64_t expectedHeapBytes = 0;
+  for (vector_size_t row = 0; row < input->size(); ++row) {
+    const auto first = encodedFixedColumnAt(0, row);
+    const auto second = encodedFixedColumnAt(1, row);
+    const auto suffix = encodedColumns[2].variableKeyAt(row);
+    const auto* record = storage->keyDataAt(row);
+    const auto key = storage->keyAt(row);
+
+    EXPECT_EQ(std::string_view(record, 5), first);
+    EXPECT_EQ(std::string_view(record + 5, 5), second);
+    EXPECT_EQ(key.heapKey(), suffix);
+    EXPECT_EQ(
+        std::string_view(record + 10, std::min<size_t>(suffix.size(), 6)),
+        suffix.substr(0, 6));
+    if (suffix.size() < 6) {
+      EXPECT_EQ(
+          std::string_view(record + 10 + suffix.size(), 6 - suffix.size()),
+          std::string(6 - suffix.size(), '\0'));
+    }
+    expectedHeapBytes += suffix.size();
+  }
+  uint64_t actualHeapBytes = 0;
+  for (const auto& group : storage->keyHeapGroups()) {
+    actualHeapBytes += group.used;
+  }
+  EXPECT_EQ(actualHeapBytes, expectedHeapBytes);
+
+  run->finalize();
+  auto output = collect(*run, 2);
+  expectSortedValues(*input, *output, {0, 1, 2}, keyFlags);
+}
+
+TEST_F(RadixSortRunTest, variableKeyHeapOffsetIsZeroWhenFirstKeyIsVariable) {
+  auto input = makeRows(
+      {"text", "i", "id"},
+      {makeStringVector(
+           {std::string(64, 'c'), std::string(80, 'a'), std::string(24, 'b')}),
+       makeVector<int32_t>(INTEGER(), {3, 1, 2}),
+       makeIds(3)});
+  const std::vector<CompareFlags> keyFlags{
+      flags(true, true), flags(true, true)};
+  auto run = finalizedRun({*input, {0, 1}, keyFlags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 0);
+  collectAndVerify(*run, *input, 2, 2, {0, 1}, keyFlags);
+}
+
 TEST_F(RadixSortRunTest, keyLayoutBoundariesKeepSortedOutput) {
   auto ids = makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5});
   auto payload = makeStringVector(
@@ -782,6 +915,7 @@ TEST_F(RadixSortRunTest, mixedScalarStringFloatingKeysDoNotUsePayload) {
   EXPECT_EQ(run->payloadLayout(), nullptr);
   EXPECT_EQ(
       run->keyLayout().kind(), RadixSortKeyLayoutKind::kKeyOnlyVariable32);
+  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 9);
 
   run->append(*input);
   run->finalize();
@@ -1078,12 +1212,9 @@ TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {
     EXPECT_GE(arena->keyDataAt(row), keyBlockBegin);
     EXPECT_LT(arena->keyDataAt(row), keyBlockEnd);
     const auto key = arena->keyAt(row);
-    RadixSortInlineKeyBuffer inlineBuffer{};
-    EncodedKeyView encodedKey;
-    key.deconstruct(inlineBuffer, encodedKey);
-    ASSERT_NE(key.fullKeyData(), nullptr);
-    EXPECT_EQ(key.heapSize(), encodedKey.bytes.size());
-    EXPECT_EQ(key.fullKeyData(), encodedKey.bytes.data());
+    ASSERT_NE(key.heapKeyData(), nullptr);
+    EXPECT_EQ(key.heapSize(), key.heapKey().size());
+    EXPECT_EQ(key.heapKeyData(), key.heapKey().data());
 
     const auto* payload = key.payload();
     ASSERT_NE(payload, nullptr);
@@ -1109,7 +1240,7 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
   auto run = finalizedRun({*input, {0}, {flags(true, true)}});
 
   const auto width = run->storage()->layout().width();
-  std::vector<RadixSortInlineKeyBuffer> records(run->size());
+  std::vector<std::array<char, 32>> records(run->size());
   std::vector<char*> payloadPointers(run->size());
   for (uint64_t row = 0; row < run->size(); ++row) {
     std::memcpy(records[row].data(), run->storage()->keyDataAt(row), width);

@@ -238,6 +238,8 @@ class RadixSortRun {
         keyCodec_(std::move(keyCodec)),
         payloadLayout_(std::move(payloadLayout)),
         keyLayout_(std::move(keyLayout)),
+        firstSuffixColumn_(
+            keyCodec_->fixedPrefixColumnCount(keyLayout_.heapKeyOffset())),
         storage_(std::move(arena)),
         keyMayHaveNulls_(std::move(keyMayHaveNulls)),
         currentRunKeyMayHaveNulls_(keyMayHaveNulls_.size(), 0),
@@ -268,6 +270,7 @@ class RadixSortRun {
   std::unique_ptr<RadixSortKeyCodec> keyCodec_;
   std::shared_ptr<const PayloadRowLayout> payloadLayout_;
   RadixSortKeyLayout keyLayout_;
+  uint32_t firstSuffixColumn_;
   std::unique_ptr<RadixSortRunStorage> storage_;
   EncodedKeyBatch encodeOutput_;
   PayloadRowWriter payloadWriter_;

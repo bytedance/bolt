@@ -1269,6 +1269,57 @@ TEST_F(RadixSortBufferTest, spillPlansMergeCorrectly) {
   }
 }
 
+TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
+  constexpr vector_size_t kRows = 48;
+  auto input = makeRows(
+      {"first", "second", "text", "id"},
+      {generateVector<int32_t>(
+           INTEGER(),
+           kRows,
+           [](vector_size_t row) {
+             return row % 11 == 0
+                 ? std::optional<int32_t>{}
+                 : std::optional<int32_t>{static_cast<int32_t>(100 - row % 17)};
+           }),
+       generateVector<int64_t>(
+           BIGINT(),
+           kRows,
+           [](vector_size_t row) {
+             return row % 7 == 0 ? std::optional<int64_t>{}
+                                 : std::optional<int64_t>{row % 13};
+           }),
+       generateStringVector(
+           kRows,
+           [](vector_size_t row) {
+             return std::string(32 + row % 9, static_cast<char>('a' + row % 5));
+           }),
+       generateVector<int64_t>(
+           BIGINT(), kRows, [](vector_size_t row) { return row; })});
+  inputType_ = std::static_pointer_cast<const RowType>(input->type());
+  auto directory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(directory->path);
+  RadixSortBuffer buffer(
+      inputType_,
+      {0, 1, 2},
+      {flags(true, true), flags(true, false), flags(false, false)},
+      pool(),
+      &config);
+
+  buffer.addInput(slice(*input, 0, 16));
+  buffer.spill();
+  buffer.addInput(slice(*input, 16, 16));
+  buffer.spill();
+  buffer.addInput(slice(*input, 32, 16));
+  buffer.noMoreInput();
+
+  auto output = collect(buffer, 5);
+  expectRowsMatchById(*input, *output, 3);
+  expectSorted(
+      *output,
+      {0, 1, 2},
+      {flags(true, true), flags(true, false), flags(false, false)});
+}
+
 TEST_F(RadixSortBufferTest, spillMergeNullFreeOutputResetsNullBuffers) {
   auto spillDirectory = exec::test::TempDirectoryPath::create();
   auto config = spillConfig(spillDirectory->path);

@@ -45,11 +45,9 @@ uint64_t checkedTotalSize(
   return *total;
 }
 
-uint32_t spilledKeyFixedSize(
-    const RadixSortKeyLayout& layout,
-    uint64_t heapSize = 0) {
+uint32_t spilledKeyFixedSize(const RadixSortKeyLayout& layout) {
   if (layout.isVariable()) {
-    return *layout.dataOffset() + (heapSize == 0 ? 0 : sizeof(uint64_t));
+    return *layout.dataOffset() + sizeof(uint64_t);
   }
   return layout.hasPayload() ? *layout.payloadOffset() : layout.width();
 }
@@ -148,7 +146,7 @@ void trustedRestoreKeyDataPointerInRow(
   }
   auto* key = row + RadixSortSpillRow::kHeaderSize;
   const auto size = loadUnaligned<uint64_t>(key + *layout.sizeOffset());
-  if (size > layout.inlineCapacity()) {
+  if (layout.heapSize(size) > 0) {
     const auto offset = loadUnaligned<uint64_t>(key + *layout.dataOffset());
     storeUnaligned<char*>(key + *layout.dataOffset(), row + offset);
   }
@@ -176,8 +174,8 @@ RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
   const auto radixKey = RadixSortKey(keyLayout, key);
   RadixSortSpillRowSize result;
   result.keyHeapSize = radixKey.heapSize();
-  const auto keySize = checkedAdd<uint64_t>(
-      spilledKeyFixedSize(keyLayout, result.keyHeapSize), result.keyHeapSize);
+  const auto keySize =
+      checkedAdd<uint64_t>(spilledKeyFixedSize(keyLayout), result.keyHeapSize);
   result.keySize = static_cast<uint32_t>(*keySize);
   result.payload = payload;
   const auto payloadFixedSize =
@@ -198,10 +196,8 @@ uint32_t RadixSortSpillRow::trustedKeySize(
   const auto* key = row_ + kHeaderSize;
   const auto storedSize =
       loadUnaligned<uint64_t>(key + *meta.keyLayout.sizeOffset());
-  const auto heapSize =
-      storedSize > meta.keyLayout.inlineCapacity() ? storedSize : 0;
-  return static_cast<uint32_t>(
-      spilledKeyFixedSize(meta.keyLayout, heapSize) + heapSize);
+  const auto heapSize = meta.keyLayout.heapSize(storedSize);
+  return static_cast<uint32_t>(spilledKeyFixedSize(meta.keyLayout) + heapSize);
 }
 
 uint32_t RadixSortSpillRow::trustedPayloadHeapSize(
@@ -235,11 +231,11 @@ void RadixSortSpillRow::serialize(
   storeUnaligned<RadixSortSpillRowHeader>(destination, header);
 
   auto* current = destination + kHeaderSize;
-  const auto keyFixedSize = spilledKeyFixedSize(keyLayout, size.keyHeapSize);
+  const auto keyFixedSize = spilledKeyFixedSize(keyLayout);
   std::memcpy(current, key, keyFixedSize);
   if (size.keyHeapSize > 0) {
     auto* keyHeap = current + keyFixedSize;
-    std::memcpy(keyHeap, radixKey.fullKeyData(), size.keyHeapSize);
+    std::memcpy(keyHeap, radixKey.heapKeyData(), size.keyHeapSize);
     storeUnaligned<uint64_t>(
         current + *keyLayout.dataOffset(),
         static_cast<uint64_t>(keyHeap - destination));

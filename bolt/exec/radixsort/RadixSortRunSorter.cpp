@@ -17,7 +17,6 @@
 #include "bolt/exec/radixsort/RadixSortRunSorter.h"
 
 #include <algorithm>
-#include <cstring>
 #include <limits>
 #include <list>
 
@@ -25,6 +24,27 @@
 
 namespace bytedance::bolt::exec::radixsort {
 namespace {
+
+template <bool Variable>
+class RadixSortKeyLessState {
+ public:
+  explicit RadixSortKeyLessState(const RadixSortKeyLayout& /*layout*/) {}
+};
+
+template <>
+class RadixSortKeyLessState<true> {
+ public:
+  explicit RadixSortKeyLessState(const RadixSortKeyLayout& layout)
+      : heapKeyOffset_(layout.heapKeyOffset()) {}
+
+ protected:
+  uint32_t heapKeyOffset() const {
+    return heapKeyOffset_;
+  }
+
+ private:
+  uint32_t heapKeyOffset_;
+};
 
 constexpr uint64_t kRunDetectionCutoff = 128;
 constexpr uint64_t kComparisonFallbackCutoff = 128;
@@ -55,31 +75,23 @@ bool fixedSortKeyLess<1>(const uint64_t* left, const uint64_t* right) {
 }
 
 template <RadixSortKeyLayoutKind KIND>
-class RadixSortKeyLess {
+class RadixSortKeyLess
+    : private RadixSortKeyLessState<RadixSortKeyTraits<KIND>::kVariable> {
  public:
   using Type = typename RadixSortKeyTraits<KIND>::Type;
   using Traits = RadixSortKeyTraits<KIND>;
+  using State = RadixSortKeyLessState<Traits::kVariable>;
+
+  explicit RadixSortKeyLess(const RadixSortKeyLayout& layout) : State(layout) {}
 
   bool operator()(const Type& left, const Type& right) const {
-    if constexpr (!Traits::kVariable) {
-      return fixedSortKeyLess<Traits::kInlineWords>(&left.part0, &right.part0);
+    if constexpr (Traits::kVariable) {
+      return RadixSortKeyOps<KIND>::compare(
+                 reinterpret_cast<const char*>(&left),
+                 reinterpret_cast<const char*>(&right),
+                 this->heapKeyOffset()) < 0;
     } else {
-      const auto* leftWords = &left.part0;
-      const auto* rightWords = &right.part0;
-      for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
-        if (leftWords[word] != rightWords[word]) {
-          return leftWords[word] < rightWords[word];
-        }
-      }
-      if (left.size <= Traits::kInlineCapacity ||
-          right.size <= Traits::kInlineCapacity) {
-        return left.size < right.size;
-      }
-      const auto result = std::memcmp(
-          left.data.pointer + Traits::kInlineCapacity,
-          right.data.pointer + Traits::kInlineCapacity,
-          std::min(left.size, right.size) - Traits::kInlineCapacity);
-      return result < 0 || (result == 0 && left.size < right.size);
+      return fixedSortKeyLess<Traits::kInlineWords>(&left.part0, &right.part0);
     }
   }
 };
@@ -291,11 +303,14 @@ class SegmentedKeyIterator {
   uint64_t tupleIndex_{0};
 };
 
-template <RadixSortKeyLayoutKind KIND>
+template <RadixSortKeyLayoutKind KIND, bool CompletePrefixRadix>
 class RadixSortRunSorterKernel {
  public:
   explicit RadixSortRunSorterKernel(RadixSortRunStorage& arena)
-      : arena_(arena), iteratorState_(arena) {}
+      : arena_(arena), less_(arena.layout()), iteratorState_(arena) {
+    static_assert(!CompletePrefixRadix || Traits::kVariable);
+    BOLT_DCHECK_EQ(arena.layout().radixWidth(), kRadixByteLimit);
+  }
 
   void radixSort(
       uint64_t begin,
@@ -307,11 +322,13 @@ class RadixSortRunSorterKernel {
     }
     auto first = Iterator(iteratorState_, begin);
     auto last = Iterator(iteratorState_, end);
-    if (last - first < static_cast<int64_t>(kComparisonFallbackCutoff)) {
-      fullSort(first, last);
-      return;
+    if constexpr (!CompletePrefixRadix) {
+      if (last - first < static_cast<int64_t>(kComparisonFallbackCutoff)) {
+        fullSort(first, last);
+        return;
+      }
     }
-    sortRadixByte<0>(first, last, 0);
+    sortRadixByte<0>(first, last);
   }
 
   void adaptiveSort(std::span<const uint32_t> skippableByteOffsets = {}) {
@@ -335,20 +352,43 @@ class RadixSortRunSorterKernel {
     uint64_t nextOffset;
   };
 
+  static_assert(kLargeBucketCutoff <= std::numeric_limits<uint16_t>::max());
+
   using Iterator = SegmentedKeyIterator<KIND>;
   using Traits = RadixSortKeyTraits<KIND>;
   using Compare = RadixSortKeyLess<KIND>;
   using RunList = std::list<Iterator>;
   static constexpr bool kEnableSuffixRadix =
       !Traits::kVariable && !Traits::kHasPayload;
-  static constexpr uint32_t kRadixByteLimit = kEnableSuffixRadix
+  static constexpr uint32_t kRadixByteLimit = CompletePrefixRadix
       ? Traits::kInlineCapacity
-      : std::min<uint32_t>(Traits::kInlineCapacity, sizeof(uint64_t));
+      : (kEnableSuffixRadix
+             ? Traits::kInlineCapacity
+             : std::min<uint32_t>(Traits::kInlineCapacity, sizeof(uint64_t)));
   static constexpr bool kRequiresFullKeyFallback =
       Traits::kVariable || kRadixByteLimit < Traits::kInlineCapacity;
 
   void comparisonSort(Iterator begin, Iterator end) {
     boost::sort::pdqsort_branchless(begin, end, less_);
+  }
+
+  void finishRadixSort(Iterator begin, Iterator end) {
+    if constexpr (CompletePrefixRadix) {
+      const auto heapKeyOffset = arena_.layout().heapKeyOffset();
+      constexpr auto radixWidth = kRadixByteLimit;
+      auto less = [heapKeyOffset, radixWidth](
+                      const typename Traits::Type& left,
+                      const typename Traits::Type& right) {
+        return RadixSortKeyOps<KIND>::compareSuffix(
+                   reinterpret_cast<const char*>(&left),
+                   reinterpret_cast<const char*>(&right),
+                   heapKeyOffset,
+                   radixWidth) < 0;
+      };
+      boost::sort::pdqsort_branchless(begin, end, less);
+    } else if constexpr (kRequiresFullKeyFallback) {
+      fullSort(begin, end);
+    }
   }
 
   template <typename Fallback>
@@ -486,11 +526,16 @@ class RadixSortRunSorterKernel {
   }
 
   void radixSort(Iterator begin, Iterator end) {
-    if (end - begin < static_cast<int64_t>(kComparisonFallbackCutoff)) {
-      fullSort(begin, end);
-    } else {
-      sortRadixByte<0>(begin, end, 0);
+    if (end - begin < 2) {
+      return;
     }
+    if constexpr (!CompletePrefixRadix) {
+      if (end - begin < static_cast<int64_t>(kComparisonFallbackCutoff)) {
+        fullSort(begin, end);
+        return;
+      }
+    }
+    sortRadixByte<0>(begin, end);
   }
 
   inline __attribute__((always_inline)) void fullSort(
@@ -516,18 +561,18 @@ class RadixSortRunSorterKernel {
                byteOffset) != skippableByteOffsets_.end();
   }
 
-  bool requiresFullKeyFallback() const {
-    return kRequiresFullKeyFallback;
-  }
-
   template <uint32_t OFFSET>
   uint8_t radixByte(const typename Traits::Type& key) const {
     static_assert(OFFSET < Traits::kInlineCapacity);
-    const auto* words = &key.part0;
-    constexpr auto kWord = OFFSET / sizeof(uint64_t);
-    constexpr auto kByte = OFFSET % sizeof(uint64_t);
-    return static_cast<uint8_t>(
-        words[kWord] >> ((sizeof(uint64_t) - kByte - 1) * 8));
+    if constexpr (Traits::kVariable) {
+      return reinterpret_cast<const uint8_t*>(&key)[OFFSET];
+    } else {
+      const auto* words = &key.part0;
+      constexpr auto kWord = OFFSET / sizeof(uint64_t);
+      constexpr auto kByte = OFFSET % sizeof(uint64_t);
+      return static_cast<uint8_t>(
+          words[kWord] >> ((sizeof(uint64_t) - kByte - 1) * 8));
+    }
   }
 
   template <uint32_t OFFSET>
@@ -552,50 +597,82 @@ class RadixSortRunSorterKernel {
     if (count <= 1) {
       return;
     }
-    if (count < kComparisonFallbackCutoff) {
-      fullSort(begin, end);
-      return;
+    if constexpr (!CompletePrefixRadix) {
+      if (count < kComparisonFallbackCutoff) {
+        fullSort(begin, end);
+        return;
+      }
     }
     sortRadixByte<OFFSET>(begin, end, effectivePasses);
   }
 
   template <uint32_t OFFSET>
   void cycleBucketSort(Iterator begin, Iterator end, uint32_t effectivePasses) {
-    PartitionInfo partitions[256];
+    uint16_t counts[256];
+    uint16_t offsets[256];
+    uint16_t ends[256];
+    uint8_t remaining[256];
+    uint64_t occupied[4]{};
+    auto* remainingEnd = remaining;
+    if constexpr (!CompletePrefixRadix) {
+      std::fill(std::begin(counts), std::end(counts), uint16_t{0});
+    }
     for (auto iterator = begin; iterator != end; ++iterator) {
-      ++partitions[radixByte<OFFSET>(*iterator)].count;
+      const auto bucket = radixByte<OFFSET>(*iterator);
+      if constexpr (CompletePrefixRadix) {
+        const auto mask = uint64_t{1} << (bucket % 64);
+        auto& word = occupied[bucket / 64];
+        if ((word & mask) == 0) {
+          word |= mask;
+          counts[bucket] = 1;
+        } else {
+          ++counts[bucket];
+        }
+      } else {
+        ++counts[bucket];
+      }
     }
 
-    uint8_t remaining[256];
-    uint64_t total = 0;
-    auto* remainingEnd = remaining;
-    for (uint32_t bucket = 0; bucket < 256; ++bucket) {
-      auto& partition = partitions[bucket];
-      const auto count = partition.count;
-      if (count == 0) {
-        continue;
+    uint16_t total = 0;
+    if constexpr (CompletePrefixRadix) {
+      for (uint32_t wordIndex = 0; wordIndex < 4; ++wordIndex) {
+        auto word = occupied[wordIndex];
+        while (word != 0) {
+          const auto bit = static_cast<uint32_t>(__builtin_ctzll(word));
+          *remainingEnd++ = static_cast<uint8_t>(wordIndex * 64 + bit);
+          word &= word - 1;
+        }
       }
-      partition.offset = total;
-      total += count;
-      partition.nextOffset = total;
-      *remainingEnd++ = static_cast<uint8_t>(bucket);
+    } else {
+      for (uint32_t bucket = 0; bucket < 256; ++bucket) {
+        if (counts[bucket] != 0) {
+          *remainingEnd++ = static_cast<uint8_t>(bucket);
+        }
+      }
     }
-    const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
-    const auto nextPasses = effectivePasses + isEffectiveRadixPass(bucketCount);
-    if (nextPasses > kEffectiveRadixPassLimit) {
-      fullSort(begin, end);
-      return;
+    for (auto* bucket = remaining; bucket != remainingEnd; ++bucket) {
+      offsets[*bucket] = total;
+      total += counts[*bucket];
+      ends[*bucket] = total;
+    }
+    auto nextPasses = effectivePasses;
+    if constexpr (!CompletePrefixRadix) {
+      const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
+      nextPasses += isEffectiveRadixPass(bucketCount);
+      if (nextPasses > kEffectiveRadixPassLimit) {
+        fullSort(begin, end);
+        return;
+      }
     }
     if (remainingEnd - remaining > 1) {
       auto* currentBucket = remaining;
-      auto* currentPartition = partitions + *currentBucket;
       const auto* lastBucket = remainingEnd - 1;
-      auto iterator = begin;
-      auto blockEnd = begin + currentPartition->nextOffset;
+      auto iterator = begin + offsets[*currentBucket];
+      auto blockEnd = begin + ends[*currentBucket];
       const auto lastElement = end - 1;
       while (true) {
-        auto* destinationPartition = partitions + radixByte<OFFSET>(*iterator);
-        if (destinationPartition == currentPartition) {
+        const auto destinationBucket = radixByte<OFFSET>(*iterator);
+        if (destinationBucket == *currentBucket) {
           ++iterator;
           if (iterator == lastElement) {
             break;
@@ -605,30 +682,27 @@ class RadixSortRunSorterKernel {
               if (++currentBucket == lastBucket) {
                 goto recurse;
               }
-              currentPartition = partitions + *currentBucket;
-              if (currentPartition->offset != currentPartition->nextOffset) {
+              if (offsets[*currentBucket] != ends[*currentBucket]) {
                 break;
               }
             }
-            iterator = begin + currentPartition->offset;
-            blockEnd = begin + currentPartition->nextOffset;
+            iterator = begin + offsets[*currentBucket];
+            blockEnd = begin + ends[*currentBucket];
           }
         } else {
-          auto destination = begin + destinationPartition->offset++;
+          auto destination = begin + offsets[destinationBucket]++;
           std::iter_swap(iterator, destination);
         }
       }
     }
 
   recurse:
-    if constexpr (OFFSET + 1 == kRadixByteLimit) {
-      if constexpr (!kRequiresFullKeyFallback) {
-        return;
-      }
+    if constexpr (!kRequiresFullKeyFallback && OFFSET + 1 == kRadixByteLimit) {
+      return;
     }
     uint64_t startOffset = 0;
     for (auto* bucket = remaining; bucket != remainingEnd; ++bucket) {
-      const auto endOffset = partitions[*bucket].nextOffset;
+      const auto endOffset = ends[*bucket];
       sortBucket<OFFSET + 1>(
           begin + startOffset, begin + endOffset, nextPasses);
       startOffset = endOffset;
@@ -698,11 +772,14 @@ class RadixSortRunSorterKernel {
       }
       partition.nextOffset = total;
     }
-    const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
-    const auto nextPasses = effectivePasses + isEffectiveRadixPass(bucketCount);
-    if (nextPasses > kEffectiveRadixPassLimit) {
-      fullSort(begin, end);
-      return;
+    auto nextPasses = effectivePasses;
+    if constexpr (!CompletePrefixRadix) {
+      const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
+      nextPasses += bucketCount > kFreeRadixPassBucketLimit;
+      if (nextPasses > kEffectiveRadixPassLimit) {
+        fullSort(begin, end);
+        return;
+      }
     }
     auto* unfinished = remainingEnd;
     while (unfinished > remaining + 1) {
@@ -727,10 +804,8 @@ class RadixSortRunSorterKernel {
           });
     }
 
-    if constexpr (OFFSET + 1 == kRadixByteLimit) {
-      if constexpr (!kRequiresFullKeyFallback) {
-        return;
-      }
+    if constexpr (!kRequiresFullKeyFallback && OFFSET + 1 == kRadixByteLimit) {
+      return;
     }
     for (auto* bucketIterator = remainingEnd; bucketIterator != remaining;
          --bucketIterator) {
@@ -745,31 +820,38 @@ class RadixSortRunSorterKernel {
 
   template <uint32_t OFFSET>
   __attribute__((noinline)) void
-  sortRadixByte(Iterator begin, Iterator end, uint32_t effectivePasses) {
+  sortRadixByte(Iterator begin, Iterator end, uint32_t effectivePasses = 0) {
     if constexpr (OFFSET == kRadixByteLimit) {
-      if (requiresFullKeyFallback()) {
-        fullSort(begin, end);
-      }
+      finishRadixSort(begin, end);
       return;
     } else {
       if (byteIsSkippable(OFFSET)) {
         sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
         return;
       }
-      if (singleRadixBucket<OFFSET>(begin, end)) {
-        sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
+      if constexpr (CompletePrefixRadix) {
+        if (end - begin < kLargeBucketCutoff) {
+          cycleBucketSort<OFFSET>(begin, end, effectivePasses);
+        } else {
+          largeBucketSort<OFFSET>(begin, end, effectivePasses);
+        }
         return;
-      }
-      if (end - begin < kLargeBucketCutoff) {
-        cycleBucketSort<OFFSET>(begin, end, effectivePasses);
       } else {
-        largeBucketSort<OFFSET>(begin, end, effectivePasses);
+        if (singleRadixBucket<OFFSET>(begin, end)) {
+          sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
+          return;
+        }
+        if (end - begin < kLargeBucketCutoff) {
+          cycleBucketSort<OFFSET>(begin, end, effectivePasses);
+        } else {
+          largeBucketSort<OFFSET>(begin, end, effectivePasses);
+        }
       }
     }
   }
 
   RadixSortRunStorage& arena_;
-  RadixSortKeyLess<KIND> less_;
+  Compare less_;
   SegmentedKeyState<KIND> iteratorState_;
   std::span<const uint32_t> skippableByteOffsets_;
 };
@@ -820,7 +902,15 @@ RadixSortRunSorter::RadixSortRunSorter(RadixSortRunStorage& arena)
 void RadixSortRunSorter::sort(std::span<const uint32_t> skippableByteOffsets) {
   dispatchRadixSortKeyLayout(
       arena_.layout().kind(), [&]<RadixSortKeyLayoutKind KIND>() {
-        RadixSortRunSorterKernel<KIND> sorter(arena_);
+        using Traits = RadixSortKeyTraits<KIND>;
+        if constexpr (Traits::kVariable) {
+          if (arena_.layout().radixWidth() == Traits::kInlineCapacity) {
+            RadixSortRunSorterKernel<KIND, true> sorter(arena_);
+            sorter.adaptiveSort(skippableByteOffsets);
+            return;
+          }
+        }
+        RadixSortRunSorterKernel<KIND, false> sorter(arena_);
         sorter.adaptiveSort(skippableByteOffsets);
       });
 }
