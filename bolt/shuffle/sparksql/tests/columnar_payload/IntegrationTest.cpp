@@ -26,10 +26,16 @@
 ///   3. Delete DISABLED_ from the test names that now apply.
 ///
 /// A Reader can be built in two stages, and the tests are split to match.
-/// Stage one asks only for the simplest payload the format allows: every
-/// block PLAIN, no dictionary, nothing compressed, one Run. Stage two asks
-/// for everything. Passing stage one is worth having on its own, so it is a
-/// separate test rather than a comment about which failures to ignore.
+/// Stage one asks for one encoding and no dictionary: PLAIN blocks and RAW
+/// strings. Stage two adds narrowing, bit packing, frame of reference and the
+/// dictionary with its RAW fallback. Passing stage one is worth having on its
+/// own, so it is a separate test rather than a comment about which failures to
+/// ignore.
+///
+/// Compression and Run splitting are in both stages. Neither is an encoding:
+/// the codec is opaque to the format, and Runs are concatenated before parsing
+/// begins, so excluding them from stage one would misrepresent what a Reader
+/// needs rather than reduce it.
 ///
 /// The Writer direction is not staged, and the comment on its test explains
 /// why: the reference validator accepts any conforming payload, so a Writer
@@ -157,31 +163,46 @@ class EngineReader : public PayloadReader {
   Codec& codec_;
 };
 
-/// The narrowest payload the format allows. Every knob that adds a decode
-/// path is off: blocks are PLAIN so no narrowing, bit packing or frame of
-/// reference appears; strings are RAW so there is no dictionary sequence and
-/// no index segment; nothing is compressed so the codec is never called; and
-/// a single SEPARATE Run means one buffer per stream with no concatenation.
+/// The narrowest set of *encodings* the format allows: every block PLAIN, so
+/// no narrowing, bit packing or frame of reference, and RAW strings, so no
+/// dictionary sequence and no index segment.
 ///
-/// What is left is still not trivial, and cannot be: null bitmaps, the tail
-/// block at the end of a stream, and the string length stream are part of
-/// every payload the format can produce.
-GeneratorOptions plainOptions() {
-  GeneratorOptions options;
-  options.encodingPolicy = EncodingPolicy::kForcePlain;
-  options.useDictionary = false;
-  options.compress = false;
-  options.compressNullBody = false;
-  options.layout = CompressionLayout::kSeparate;
-  options.runCount = 1;
-  options.minimalEncodingWidth = true;
-  options.degenerateNullTags = true;
-  return options;
+/// Compression and Run splitting stay on. Neither is an encoding: the codec
+/// is opaque to the format, and Runs are concatenated before anything is
+/// parsed, so a payload that arrives in three Runs decodes through exactly the
+/// same code as one that arrives in one. Leaving them out would understate
+/// what a Reader needs on day one rather than simplify it.
+///
+/// What remains cannot be switched off either. Null bitmaps, the tail block at
+/// the end of a stream and the string length stream are in every payload the
+/// format can produce.
+std::vector<GeneratorOptions> plainOptions() {
+  std::vector<GeneratorOptions> all;
+  const auto add =
+      [&](CompressionLayout layout, bool compress, size_t runCount) {
+        GeneratorOptions options;
+        options.encodingPolicy = EncodingPolicy::kForcePlain;
+        options.useDictionary = false;
+        options.minimalEncodingWidth = true;
+        options.degenerateNullTags = true;
+        options.layout = layout;
+        options.compress = compress;
+        options.compressNullBody = compress;
+        options.runCount = runCount;
+        all.push_back(options);
+      };
+
+  add(CompressionLayout::kSeparate, false, 1);
+  add(CompressionLayout::kSeparate, true, 3);
+  add(CompressionLayout::kCombined, true, 3);
+  add(CompressionLayout::kCombinedStored, false, 3);
+  return all;
 }
 
-/// Configurations covering the paths plainOptions() leaves out. Together with
-/// it they reach every encoding the format defines, which the coverage test
-/// in PayloadTest.cpp asserts rather than assumes.
+/// The encodings plainOptions() leaves out: constant narrowing, bit packing,
+/// frame of reference, and dictionaries with their RAW fallback. Together the
+/// two reach every path the format defines, which the coverage test in
+/// PayloadTest.cpp asserts rather than assumes.
 std::vector<GeneratorOptions> everyEncodingOptions() {
   std::vector<GeneratorOptions> all;
   for (const auto layout :
@@ -235,15 +256,18 @@ TEST_F(
 }
 
 /// Reader, stage one. Enable as soon as read() handles PLAIN blocks and RAW
-/// strings; none of the other decode paths are exercised here.
+/// strings. None of the other encodings appear, but the compression envelope
+/// and Run concatenation do, because a Reader cannot avoid either.
 TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnPlainPayloads) {
   EngineCodec codec;
   EngineReader reader{codec};
-  auto writer = makeReferenceWriter(codec, plainOptions());
 
-  const auto report = runConformanceSuite(*writer, reader, pool());
-  EXPECT_TRUE(report.ok()) << report.describe();
-  EXPECT_GT(report.casesRun, 0u) << report.describe();
+  for (const auto& options : plainOptions()) {
+    auto writer = makeReferenceWriter(codec, options);
+    const auto report = runConformanceSuite(*writer, reader, pool());
+    EXPECT_TRUE(report.ok()) << report.describe();
+    EXPECT_GT(report.casesRun, 0u) << report.describe();
+  }
 }
 
 /// Reader, stage two. Adds constant narrowing, bit packing, frame of
@@ -265,7 +289,9 @@ TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnEveryEncoding) {
 /// Enable last. On its own this one cannot distinguish a correct pair from a
 /// pair that agrees on the same mistake, so it is worth little until the two
 /// above pass.
-TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineWriterAgainstEngineReader) {
+TEST_F(
+    ColumnarPayloadIntegrationTest,
+    DISABLED_engineWriterAgainstEngineReader) {
   EngineCodec codec;
   EngineWriter writer{codec};
   EngineReader reader{codec};
@@ -280,16 +306,18 @@ TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineWriterAgainstEngineReader)
 /// checked rather than trusted; a later change to the generator's defaults
 /// cannot quietly widen what stage one demands.
 TEST_F(ColumnarPayloadIntegrationTest, plainOptionsEmitOnlyPlainBlocks) {
-  IdentityCodec codec;
+  MaskCodec codec;
   GenerationStats total;
 
   for (const auto& entry : boundaryCorpus()) {
-    GeneratedPayload generated;
-    std::string error;
-    ColumnarPayloadGenerator generator(&codec, plainOptions());
-    ASSERT_TRUE(generator.generate(entry.table, generated, error))
-        << entry.name << ": " << error;
-    total.merge(generated.stats);
+    for (const auto& options : plainOptions()) {
+      GeneratedPayload generated;
+      std::string error;
+      ColumnarPayloadGenerator generator(&codec, options);
+      ASSERT_TRUE(generator.generate(entry.table, generated, error))
+          << entry.name << ": " << error;
+      total.merge(generated.stats);
+    }
   }
 
   const auto kind = [&](EncodingKind value) {
@@ -301,12 +329,16 @@ TEST_F(ColumnarPayloadIntegrationTest, plainOptionsEmitOnlyPlainBlocks) {
   EXPECT_GT(kind(EncodingKind::kPlain), 0u);
 
   EXPECT_EQ(total.dictionaries, 0u);
-  EXPECT_EQ(total.compressedBuffers, 0u);
-  EXPECT_EQ(
+
+  // Compression and Run splitting are part of stage one rather than excluded
+  // from it, so assert they are actually reached; a Reader that skips them
+  // has not passed this milestone.
+  EXPECT_GT(total.compressedBuffers, 0u);
+  EXPECT_GT(total.storedBuffers, 0u);
+  EXPECT_GT(
       total.runLayouts[static_cast<size_t>(CompressionLayout::kCombined)], 0u);
-  EXPECT_EQ(
-      total.runLayouts[static_cast<size_t>(
-          CompressionLayout::kCombinedStored)],
+  EXPECT_GT(
+      total.runLayouts[static_cast<size_t>(CompressionLayout::kCombinedStored)],
       0u);
 
   // Not everything can be switched off: these are in every payload the format
