@@ -1,9 +1,9 @@
 ---
 spec: ColumnarPayload
 format-version: 0
-doc-revision: 3
+doc-revision: 4
 status: Draft
-updated: 2026-08-20
+updated: 2026-08-24
 ---
 
 # ColumnarPayload Binary Format
@@ -608,7 +608,16 @@ tags / bitmap / bit-packed 的尾部未使用 bit 必须写 0，但对其校验�
 
 ### 11.5 与实现的同步
 
-- 实现位置：待补（Writer / Reader 落地后填写具体路径）；
+- 实现位置：Writer 与 Reader 尚未落地。参照实现与接入点已就位：
+
+  | 路径 | 作用 |
+  |---|---|
+  | `tests/columnar_payload/Format,Generator,Validator` | 参照编码器与校验器，不依赖引擎 |
+  | `tests/columnar_payload/Conformance.h` | Writer / Reader 接入的接缝，顶部有完整示例 |
+  | `tests/columnar_payload/IntegrationTest.cpp` | 已写好的接入用例，填两个函数体、去掉 `DISABLED_` 即生效 |
+  | `tests/columnar_payload/Standalone.cpp` | 只链参照实现，强制它不沾引擎依赖 |
+
+  实现落地后把本行改成真实路径；
 - Writer 与 Reader 必须始终位于同一构建单元中，这是 §11.1 的一致性前提，不得让
   其中一侧单独发布或单独回滚；
 - `format-version` 变更的 PR 必须一次性完成：改本文档、改 Writer、改 Reader、更新
@@ -782,6 +791,7 @@ Run 长度 = `1 + 24 + 24 + 17 = 66`。完整 Payload 共 93 bytes：
 
 | `doc-revision` | `format-version` | 日期 | 需改动 | 变更 |
 |---:|---:|---|---|---|
+| 4 | | 2026-08-24 | 仅文档 | §11.5 补入参照实现与接入点的实际路径，替换原先的占位。 |
 | 3 | | 2026-08-20 | 仅文档 | §10.2 补入校验 27–29：Run 边界结构、`run_count == 0` 的前提、`FOR_BIT_PACK` 结果值域。三条约束正文早有，校验清单漏列。 |
 | 2 | | 2026-08-20 | 仅文档 | §10.2 补入校验 26：字典容量约束。§8.1 早已规定，但校验清单漏列。 |
 | 1 | 0 | 2026-08-19 | 仅文档 | 初稿。线格式未冻结，Writer / Reader 尚未实现。 |
