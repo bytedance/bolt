@@ -58,6 +58,10 @@ add_executable(
   Vectors.cpp
   Conformance.cpp
   PayloadTest.cpp
+  # The form the engine's Writer and Reader are plugged into. Its tests are
+  # disabled until there is something to plug in, but it is kept compiling so
+  # that the form stays valid while nobody is using it.
+  IntegrationTest.cpp
 )
 
 target_link_libraries(
