@@ -98,8 +98,6 @@ CONAN_HOST_PROFILE_ARGS = \
 
 # Package-scoped settings only apply when the matching dependency is in the graph.
 CONAN_BUILD_SETTINGS = \
-	-s llvm-core/*:build_type=Release \
-	-s google-cloud-cpp/*:build_type=Release \
 	-s "&:build_type=${BUILD_TYPE}" \
 	-s build_type=${DEPENDENCY_BUILD_TYPE}
 
