@@ -48,20 +48,14 @@ void appendInlineVariableKeys(
     const auto begin = offsets[inputRow];
     const auto size = offsets[inputRow + 1] - begin;
     auto* record = destination + static_cast<uint64_t>(row) * Traits::kWidth;
-    std::array<uint64_t, Traits::kInlineWords> inlineWords{};
+    std::array<char, Traits::kInlineCapacity> inlineBytes{};
     std::memcpy(
-        inlineWords.data(),
+        inlineBytes.data(),
         data + begin,
         std::min<uint64_t>(size, Traits::kInlineCapacity));
-    for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
-      auto encodedWord = inlineWords[word];
-      if constexpr (std::endian::native == std::endian::little) {
-        encodedWord = byteSwap(encodedWord);
-      }
-      storeUnaligned<uint64_t>(record + word * sizeof(uint64_t), encodedWord);
-    }
+    storeFixedKeyPrefix<Traits>(inlineBytes.data(), record);
     if constexpr (Traits::kHasPayload) {
-      storeUnaligned<char*>(
+      storeCompactPointer(
           record + Traits::kPayloadOffset,
           payloads.empty() ? nullptr : payloads[inputRow]);
     }
@@ -218,9 +212,12 @@ void RadixSortRunStorage::appendBatch(
         auto* records =
             reinterpret_cast<KeyWithPayloadFixed16Record*>(destination);
         for (vector_size_t row = 0; row < count; ++row) {
-          records[row].part0 = keys[source + row];
-          records[row].payload.pointer =
-              payloads.empty() ? nullptr : payloads[source + row];
+          auto& record = records[row];
+          record.part0 = keys[source + row];
+          record.tail = {};
+          storeCompactPointer(
+              &record.payload,
+              payloads.empty() ? nullptr : payloads[source + row]);
         }
       }
       block.count += count;
@@ -250,6 +247,9 @@ void RadixSortRunStorage::appendBatch(
       }
     };
     switch (layout_.kind()) {
+      case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
+        return appendFixed.template
+        operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>();
       case RadixSortKeyLayoutKind::kKeyOnlyFixed16:
         return appendFixed
             .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed16>();
@@ -306,9 +306,9 @@ void RadixSortRunStorage::appendBatch(
           allocateOverflow(heapSize, overflow);
           std::memcpy(
               overflow, data + begin + layout_.heapKeyOffset(), heapSize);
-          storeUnaligned<char*>(record + Traits::kDataOffset, overflow);
+          storeCompactPointer(record + Traits::kDataOffset, overflow);
           if constexpr (Traits::kHasPayload) {
-            storeUnaligned<char*>(
+            storeCompactPointer(
                 record + Traits::kPayloadOffset,
                 payloads.empty() ? nullptr : payloads[inputRow]);
           }
@@ -491,6 +491,7 @@ void RadixSortRunStorage::ensureKeyBlock() {
   }
   const auto bytes = static_cast<uint64_t>(keysPerBlock_) * layout_.width();
   auto* base = allocationPool_.allocateFixed(bytes, alignof(uint64_t));
+  checkCompactPointerRange(base, bytes);
   keyBlocks_.push_back(RadixSortKeyBlock{base, keysPerBlock_, 0});
 }
 
@@ -506,6 +507,7 @@ void RadixSortRunStorage::ensurePayloadFixedBlock() {
       std::min<uint64_t>(payloadRowsPerBlock_, byteLimitedCapacity));
   const auto bytes = static_cast<uint64_t>(capacity) * rowWidth;
   auto* base = allocationPool_.allocateFixed(bytes, alignof(uint64_t));
+  checkCompactPointerRange(base, bytes);
   payloadFixedBlocks_.push_back(PayloadRowFixedBlock{base, capacity, 0});
 }
 
@@ -514,6 +516,7 @@ void RadixSortRunStorage::allocateOverflow(uint64_t size, char*& data) {
       keyHeapGroups_.back().capacity - keyHeapGroups_.back().used < size) {
     const auto capacity = std::max(preferredHeapGroupBytes_, size);
     auto* base = allocationPool_.allocateFixed(capacity, 1);
+    checkCompactPointerRange(base, capacity);
     keyHeapGroups_.push_back(RadixSortKeyOverflowBlock{base, capacity, 0, 0});
   }
   auto& group = keyHeapGroups_.back();

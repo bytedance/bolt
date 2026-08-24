@@ -510,22 +510,30 @@ TEST_F(RadixSortSpillRowTest, variableKeyAndPayloadRoundTrip) {
       keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
   row.validate(meta);
   const auto serializedKeyFixedSize =
-      *keyLayout.dataOffset() + sizeof(uint64_t);
-  EXPECT_EQ(serializedSize.keyHeapSize, longKey.size());
-  EXPECT_EQ(serializedSize.keySize, serializedKeyFixedSize + longKey.size());
+      *keyLayout.dataOffset() + kCompactPointerBytes;
+  EXPECT_EQ(
+      serializedSize.keyHeapSize, longKey.size() - keyLayout.heapKeyOffset());
+  EXPECT_EQ(
+      serializedSize.keySize,
+      serializedKeyFixedSize + longKey.size() - keyLayout.heapKeyOffset());
   EXPECT_EQ(
       rowSize,
-      RadixSortSpillRow::kHeaderSize + serializedKeyFixedSize + longKey.size() +
-          payloadLayout->rowWidth() + payloadBatch.heapSizeAt(0));
-  EXPECT_EQ(row.trustedKeySize(meta), serializedKeyFixedSize + longKey.size());
+      RadixSortSpillRow::kHeaderSize + serializedKeyFixedSize + longKey.size() -
+          keyLayout.heapKeyOffset() + payloadLayout->rowWidth() +
+          payloadBatch.heapSizeAt(0));
+  EXPECT_EQ(
+      row.trustedKeySize(meta),
+      serializedKeyFixedSize + longKey.size() - keyLayout.heapKeyOffset());
   EXPECT_EQ(row.trustedPayloadHeapSize(meta), payloadBatch.heapSizeAt(0));
 
   const auto* keyRecord = row.trustedKeyBytes(meta).data();
-  const auto keyOffset =
-      loadUnaligned<uint64_t>(keyRecord + *keyLayout.dataOffset());
+  const auto keyOffset = loadCompactUInt48(keyRecord + *keyLayout.dataOffset());
   EXPECT_EQ(keyOffset, RadixSortSpillRow::kHeaderSize + serializedKeyFixedSize);
   EXPECT_EQ(
-      std::string_view(buffer.data() + keyOffset, longKey.size()), longKey);
+      std::string_view(
+          buffer.data() + keyOffset,
+          longKey.size() - keyLayout.heapKeyOffset()),
+      std::string_view(longKey).substr(keyLayout.heapKeyOffset()));
 
   auto* fixed = row.trustedPayloadFixed(meta);
   EXPECT_EQ(
@@ -591,7 +599,7 @@ TEST_F(RadixSortSpillRowTest, variableKeyHeapOffsetRoundTrip) {
   const auto serializedSize = RadixSortSpillRow::sizeForSerialize(
       keyLayout, payloadLayout.get(), storedKey);
   const auto serializedKeyFixedSize =
-      *keyLayout.dataOffset() + sizeof(uint64_t);
+      *keyLayout.dataOffset() + kCompactPointerBytes;
   EXPECT_EQ(serializedSize.keyHeapSize, key.size() - keyLayout.heapKeyOffset());
   EXPECT_EQ(
       serializedSize.keySize,
@@ -605,8 +613,7 @@ TEST_F(RadixSortSpillRowTest, variableKeyHeapOffsetRoundTrip) {
       keyLayout, static_cast<uint32_t>(payloadLayout->rowWidth())};
   row.validate(meta);
   const auto* keyRecord = row.trustedKeyBytes(meta).data();
-  const auto keyOffset =
-      loadUnaligned<uint64_t>(keyRecord + *keyLayout.dataOffset());
+  const auto keyOffset = loadCompactUInt48(keyRecord + *keyLayout.dataOffset());
   EXPECT_EQ(
       std::string_view(
           buffer.data() + keyOffset, key.size() - keyLayout.heapKeyOffset()),
@@ -619,6 +626,35 @@ TEST_F(RadixSortSpillRowTest, variableKeyHeapOffsetRoundTrip) {
           std::string(restoredKey.heapKey()),
       key);
   EXPECT_EQ(restoredKey.heapKeyData(), buffer.data() + keyOffset);
+}
+
+TEST_F(RadixSortSpillRowTest, compactPointerAtRecordEndDoesNotOverwrite) {
+  const auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyVariable32);
+  RadixSortRunStorage arena(pool_.get(), keyLayout, 1, 64);
+  const std::string key(64, 'k');
+  arena.append(key);
+  const auto* storedKey = arena.keyDataAt(0);
+  const auto size =
+      RadixSortSpillRow::sizeForSerialize(keyLayout, nullptr, storedKey);
+
+  constexpr uint8_t kSentinel = 0xa5;
+  std::vector<uint8_t> storage(size.totalSize + 2, kSentinel);
+  auto* destination = reinterpret_cast<char*>(storage.data() + 1);
+  RadixSortSpillRow::serialize(
+      keyLayout, nullptr, storedKey, size, destination);
+
+  EXPECT_EQ(storage.front(), kSentinel);
+  EXPECT_EQ(storage.back(), kSentinel);
+  auto row = RadixSortSpillRow(destination);
+  const RadixSortSpillRunMeta meta{keyLayout, 0};
+  row.validate(meta);
+  row.trustedRestoreKeyDataPointer(meta);
+  const auto restored =
+      RadixSortKey(keyLayout, row.trustedKeyBytes(meta).data());
+  EXPECT_EQ(restored.heapKey(), std::string_view(key));
+  EXPECT_EQ(storage.front(), kSentinel);
+  EXPECT_EQ(storage.back(), kSentinel);
 }
 
 TEST_F(RadixSortSpillRowTest, writerReaderRoundTripWithoutCompression) {

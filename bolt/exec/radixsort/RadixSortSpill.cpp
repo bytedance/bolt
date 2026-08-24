@@ -433,7 +433,7 @@ void RadixSortSpillWriter::appendFixedRows(
     if constexpr (Traits::kHasPayload) {
       std::memcpy(
           cursor,
-          loadUnaligned<char*>(key + Traits::kPayloadOffset),
+          loadCompactPointer(key + Traits::kPayloadOffset),
           payloadFixedSize);
     }
     current_ += rowSize;
@@ -577,10 +577,12 @@ void RadixSortSpillReader::acquireRowBuffer(int32_t size) {
         reusable->capacity() >= size) {
       rowBuffer_ = std::move(reusable);
       rowBuffer_->setSize(size);
+      checkCompactPointerRange(rowBuffer_->as<char>(), rowBuffer_->capacity());
       return;
     }
   }
   rowBuffer_ = AlignedBuffer::allocate<char>(size, pool_);
+  checkCompactPointerRange(rowBuffer_->as<char>(), rowBuffer_->capacity());
 }
 
 void RadixSortSpillReader::recycleRetainedRowBuffer() {

@@ -50,6 +50,30 @@ struct LayoutDescriptor {
   int32_t (*compare)(const char*, const char*);
 };
 
+static_assert(sizeof(KeyOnlyVariable32Record) == 32);
+static_assert(alignof(KeyOnlyVariable32Record) == 8);
+static_assert(offsetof(KeyOnlyVariable32Record, size) == 18);
+static_assert(offsetof(KeyOnlyVariable32Record, data) == 26);
+static_assert(std::is_trivially_copyable_v<KeyOnlyVariable32Record>);
+static_assert(sizeof(KeyWithPayloadVariable32Record) == 32);
+static_assert(alignof(KeyWithPayloadVariable32Record) == 8);
+static_assert(offsetof(KeyWithPayloadVariable32Record, size) == 12);
+static_assert(offsetof(KeyWithPayloadVariable32Record, data) == 20);
+static_assert(offsetof(KeyWithPayloadVariable32Record, payload) == 26);
+static_assert(std::is_trivially_copyable_v<KeyWithPayloadVariable32Record>);
+static_assert(sizeof(KeyWithPayloadFixed16Record) == 16);
+static_assert(alignof(KeyWithPayloadFixed16Record) == 8);
+static_assert(offsetof(KeyWithPayloadFixed16Record, payload) == 10);
+static_assert(std::is_trivially_copyable_v<KeyWithPayloadFixed16Record>);
+static_assert(sizeof(KeyWithPayloadFixed24Record) == 24);
+static_assert(alignof(KeyWithPayloadFixed24Record) == 8);
+static_assert(offsetof(KeyWithPayloadFixed24Record, payload) == 18);
+static_assert(std::is_trivially_copyable_v<KeyWithPayloadFixed24Record>);
+static_assert(sizeof(KeyWithPayloadFixed32Record) == 32);
+static_assert(alignof(KeyWithPayloadFixed32Record) == 8);
+static_assert(offsetof(KeyWithPayloadFixed32Record, payload) == 26);
+static_assert(std::is_trivially_copyable_v<KeyWithPayloadFixed32Record>);
+
 // clang-format off
 #define LAYOUT(KIND, RECORD, CAPACITY, VARIABLE, PAYLOAD, SIZE, DATA, PAYLOAD_OFFSET) \
   {LayoutKind::KIND, sizeof(RECORD), CAPACITY, VARIABLE, PAYLOAD, SIZE, DATA, PAYLOAD_OFFSET, \
@@ -59,11 +83,11 @@ constexpr std::array<LayoutDescriptor, 9> kLayouts{{
     LAYOUT(kKeyOnlyFixed16, KeyOnlyFixed16Record, 16, false, false, {}, {}, {}),
     LAYOUT(kKeyOnlyFixed24, KeyOnlyFixed24Record, 24, false, false, {}, {}, {}),
     LAYOUT(kKeyOnlyFixed32, KeyOnlyFixed32Record, 32, false, false, {}, {}, {}),
-    LAYOUT(kKeyOnlyVariable32, KeyOnlyVariable32Record, 16, true, false, 16, 24, {}),
-    LAYOUT(kKeyWithPayloadFixed16, KeyWithPayloadFixed16Record, 8, false, true, {}, {}, 8),
-    LAYOUT(kKeyWithPayloadFixed24, KeyWithPayloadFixed24Record, 16, false, true, {}, {}, 16),
-    LAYOUT(kKeyWithPayloadFixed32, KeyWithPayloadFixed32Record, 24, false, true, {}, {}, 24),
-    LAYOUT(kKeyWithPayloadVariable32, KeyWithPayloadVariable32Record, 8, true, true, 8, 16, 24),
+    LAYOUT(kKeyOnlyVariable32, KeyOnlyVariable32Record, 18, true, false, 18, 26, {}),
+    LAYOUT(kKeyWithPayloadFixed16, KeyWithPayloadFixed16Record, 10, false, true, {}, {}, 10),
+    LAYOUT(kKeyWithPayloadFixed24, KeyWithPayloadFixed24Record, 18, false, true, {}, {}, 18),
+    LAYOUT(kKeyWithPayloadFixed32, KeyWithPayloadFixed32Record, 26, false, true, {}, {}, 26),
+    LAYOUT(kKeyWithPayloadVariable32, KeyWithPayloadVariable32Record, 12, true, true, 12, 20, 26),
 }};
 #undef LAYOUT
 // clang-format on
@@ -387,7 +411,7 @@ TEST_F(RadixSortKeyTest, layoutAbiAndSelection) {
 
   using Selection =
       std::tuple<std::optional<uint64_t>, bool, RadixSortKeyLayoutKind>;
-  const std::array<Selection, 19> selections{{
+  const std::array<Selection, 20> selections{{
       {8, false, RadixSortKeyLayoutKind::kKeyOnlyFixed8},
       {9, false, RadixSortKeyLayoutKind::kKeyOnlyFixed16},
       {16, false, RadixSortKeyLayoutKind::kKeyOnlyFixed16},
@@ -398,11 +422,12 @@ TEST_F(RadixSortKeyTest, layoutAbiAndSelection) {
       {33, false, RadixSortKeyLayoutKind::kKeyOnlyVariable32},
       {std::nullopt, false, RadixSortKeyLayoutKind::kKeyOnlyVariable32},
       {8, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed16},
-      {9, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed24},
-      {16, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed24},
-      {17, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32},
-      {24, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32},
-      {25, true, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32},
+      {10, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed16},
+      {11, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed24},
+      {18, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed24},
+      {19, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32},
+      {26, true, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32},
+      {27, true, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32},
       {32, true, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32},
       {33, true, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32},
       {73, true, RadixSortKeyLayoutKind::kKeyWithPayloadVariable32},
@@ -436,10 +461,10 @@ TEST_F(RadixSortKeyTest, variableHeapKeyOffsetUsesTopLevelFixedBoundaries) {
   };
 
   assertOffset({INTEGER(), VARCHAR()}, false, 5);
-  assertOffset({BIGINT(), BIGINT(), VARCHAR()}, false, 9);
+  assertOffset({BIGINT(), BIGINT(), VARCHAR()}, false, 18);
   assertOffset({VARCHAR(), INTEGER()}, false, 0);
   assertOffset({INTEGER(), VARCHAR()}, true, 5);
-  assertOffset({BIGINT(), VARCHAR()}, true, 0);
+  assertOffset({BIGINT(), VARCHAR()}, true, 9);
 }
 
 TEST_F(RadixSortKeyTest, allLayoutsRoundTripAndCompare) {
@@ -534,6 +559,92 @@ TEST_F(RadixSortKeyTest, radixSortUtilsBoundaryChecks) {
   EXPECT_FALSE(isValidRecordRelativeRange(16, 16, 0));
   EXPECT_FALSE(
       isValidRecordRelativeRange(16, std::numeric_limits<uint64_t>::max(), 2));
+}
+
+TEST_F(RadixSortKeyTest, compactPointerAccessIsExactAndRangeChecked) {
+  std::array<uint8_t, kCompactPointerBytes + 2> storage;
+  storage.fill(0xa5);
+  constexpr uint64_t value = 0xfedcba987654;
+  storeCompactUInt48(storage.data() + 1, value);
+  EXPECT_EQ(loadCompactUInt48(storage.data() + 1), value);
+  EXPECT_EQ(storage.front(), 0xa5);
+  EXPECT_EQ(storage.back(), 0xa5);
+
+  storeCompactUInt48(storage.data() + 1, kCompactPointerMask);
+  EXPECT_EQ(loadCompactUInt48(storage.data() + 1), kCompactPointerMask);
+  EXPECT_EQ(storage.front(), 0xa5);
+  EXPECT_EQ(storage.back(), 0xa5);
+
+  auto* pointer = reinterpret_cast<char*>(static_cast<uintptr_t>(value));
+  storeCompactPointer(storage.data() + 1, pointer);
+  EXPECT_EQ(loadCompactPointer(storage.data() + 1), pointer);
+  uint64_t stackValue = 0;
+  storeCompactPointer(storage.data() + 1, &stackValue);
+  EXPECT_EQ(
+      loadCompactPointer(storage.data() + 1),
+      reinterpret_cast<char*>(&stackValue));
+  storeCompactPointer(storage.data() + 1, nullptr);
+  EXPECT_EQ(loadCompactPointer(storage.data() + 1), nullptr);
+
+  std::array<uint8_t, kCompactPointerBytes + 2> invalidStorage;
+  invalidStorage.fill(0xa5);
+#ifndef NDEBUG
+  EXPECT_THROW(
+      storeCompactUInt48(
+          invalidStorage.data() + 1, kCompactPointerMask + uint64_t{1}),
+      BoltException);
+#endif
+  EXPECT_EQ(invalidStorage.front(), 0xa5);
+  EXPECT_EQ(invalidStorage.back(), 0xa5);
+
+  EXPECT_NO_THROW(checkCompactPointerRange(nullptr, 0));
+  EXPECT_NO_THROW(checkCompactPointerRange(
+      reinterpret_cast<void*>(static_cast<uintptr_t>(kCompactPointerMask)), 1));
+  EXPECT_THROW(
+      checkCompactPointerRange(
+          reinterpret_cast<void*>(static_cast<uintptr_t>(kCompactPointerMask)),
+          2),
+      BoltException);
+  EXPECT_THROW(
+      checkCompactPointerRange(
+          reinterpret_cast<void*>(
+              static_cast<uintptr_t>(kCompactPointerMask + 1)),
+          1),
+      BoltException);
+}
+
+TEST_F(RadixSortKeyTest, nonWordAlignedPrefixTailParticipatesInComparison) {
+  const std::array<std::pair<LayoutKind, std::vector<uint32_t>>, 5> cases{{
+      {LayoutKind::kKeyWithPayloadFixed16, {7, 8, 9}},
+      {LayoutKind::kKeyWithPayloadFixed24, {15, 16, 17}},
+      {LayoutKind::kKeyWithPayloadFixed32, {23, 24, 25}},
+      {LayoutKind::kKeyOnlyVariable32, {7, 8, 15, 16, 17}},
+      {LayoutKind::kKeyWithPayloadVariable32, {7, 8, 9, 10, 11}},
+  }};
+  for (const auto& [kind, offsets] : cases) {
+    const auto layout = RadixSortKeyLayout::fromKind(kind);
+    const auto descriptor = std::find_if(
+        kLayouts.begin(), kLayouts.end(), [&](const auto& candidate) {
+          return candidate.kind == kind;
+        });
+    ASSERT_NE(descriptor, kLayouts.end());
+    for (const auto offset : offsets) {
+      SCOPED_TRACE(
+          "kind=" + std::to_string(static_cast<uint8_t>(kind)) +
+          ", offset=" + std::to_string(offset));
+      std::string left(
+          layout.inlineCapacity() + (layout.isVariable() ? 8 : 0), 'p');
+      auto right = left;
+      left[offset] = '\x10';
+      right[offset] = '\x20';
+      PayloadPointers payloads(2);
+      RadixSortRunStorage arena(pool_.get(), layout, 2, 64);
+      arena.append(left, layout.hasPayload() ? payloads.pointers[0] : nullptr);
+      arena.append(right, layout.hasPayload() ? payloads.pointers[1] : nullptr);
+      EXPECT_LT(arena.keyAt(0).compare(arena.keyAt(1)), 0);
+      EXPECT_LT(descriptor->compare(arena.keyDataAt(0), arena.keyDataAt(1)), 0);
+    }
+  }
 }
 
 TEST_F(RadixSortKeyTest, knownPerWordByteSwap) {

@@ -619,10 +619,19 @@ TEST_F(RadixSortRunTest, variableKeyHeapOffsetStopsAtColumnBoundary) {
       flags(true, true), flags(true, false), flags(true, true)};
   auto run = finalizedRun({*input, {0, 1, 2}, keyFlags});
   ASSERT_TRUE(run->keyLayout().isVariable());
-  EXPECT_EQ(run->keyLayout().inlineCapacity(), 16);
-  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 9);
+  EXPECT_EQ(run->keyLayout().inlineCapacity(), 18);
+  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 18);
   auto output = collect(*run, 2);
   expectSortedValues(*input, *output, {0, 1, 2}, keyFlags);
+
+  auto inputWithPayload = makeRows(
+      {"first", "second", "text", "id"},
+      {input->childAt(0), input->childAt(1), input->childAt(2), makeIds(5)});
+  auto payloadRun = finalizedRun({*inputWithPayload, {0, 1, 2}, keyFlags});
+  ASSERT_TRUE(payloadRun->keyLayout().isVariable());
+  EXPECT_EQ(payloadRun->keyLayout().inlineCapacity(), 12);
+  EXPECT_EQ(payloadRun->keyLayout().heapKeyOffset(), 9);
+  collectAndVerify(*payloadRun, *inputWithPayload, 2, 3, {0, 1, 2}, keyFlags);
 }
 
 TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
@@ -657,9 +666,9 @@ TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
   auto run = createRun({*input, {0, 1, 2}, keyFlags});
   ASSERT_EQ(
       run->keyLayout().kind(), RadixSortKeyLayoutKind::kKeyOnlyVariable32);
-  ASSERT_EQ(run->keyLayout().inlineCapacity(), 16);
+  ASSERT_EQ(run->keyLayout().inlineCapacity(), 18);
   ASSERT_EQ(run->keyLayout().heapKeyOffset(), 10);
-  ASSERT_EQ(run->keyLayout().radixWidth(), 16);
+  ASSERT_EQ(run->keyLayout().radixWidth(), 18);
   run->append(*slice(*input, 0, 1));
   run->append(*slice(*input, 1, 2));
 
@@ -677,12 +686,12 @@ TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
     EXPECT_EQ(std::string_view(record + 5, 5), second);
     EXPECT_EQ(key.heapKey(), suffix);
     EXPECT_EQ(
-        std::string_view(record + 10, std::min<size_t>(suffix.size(), 6)),
-        suffix.substr(0, 6));
-    if (suffix.size() < 6) {
+        std::string_view(record + 10, std::min<size_t>(suffix.size(), 8)),
+        suffix.substr(0, 8));
+    if (suffix.size() < 8) {
       EXPECT_EQ(
-          std::string_view(record + 10 + suffix.size(), 6 - suffix.size()),
-          std::string(6 - suffix.size(), '\0'));
+          std::string_view(record + 10 + suffix.size(), 8 - suffix.size()),
+          std::string(8 - suffix.size(), '\0'));
     }
     expectedHeapBytes += suffix.size();
   }
@@ -721,7 +730,8 @@ TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
   auto shortRun = createRun({*shortInput, {0}, {flags(true, true)}});
   shortRun->append(*slice(*shortInput, 0, 2));
   shortRun->append(*slice(*shortInput, 2, 4));
-  EXPECT_TRUE(shortRun->variableKeysFitRadixPrefix());
+  EXPECT_EQ(shortRun->keyLayout().inlineCapacity(), 12);
+  EXPECT_EQ(shortRun->maximumEncodedKeySize(), 4);
   EXPECT_FALSE(shortRun->decodesVariableKeysFromInline());
   shortRun->finalize();
   ASSERT_TRUE(shortRun->decodesVariableKeysFromInline());
@@ -738,6 +748,7 @@ TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
   auto mixedRun = createRun({*mixedInput, {0}, {flags(true, true)}});
   mixedRun->append(*slice(*mixedInput, 0, 1));
   mixedRun->append(*slice(*mixedInput, 1, 4));
+  EXPECT_EQ(mixedRun->maximumEncodedKeySize(), 34);
   mixedRun->finalize();
   ASSERT_FALSE(mixedRun->decodesVariableKeysFromInline());
   for (uint64_t row = 0; row < mixedRun->storage()->size(); ++row) {
@@ -756,6 +767,7 @@ TEST_F(RadixSortRunTest, inheritedVariableKeySizeSelectsHeapOutput) {
   options.initialVariableKeysFitRadixPrefix = false;
   auto run = createRun({*input, {0}, {flags(true, true)}}, options);
   run->append(*input);
+  EXPECT_FALSE(run->variableKeysFitRadixPrefix());
   run->finalize();
   ASSERT_FALSE(run->decodesVariableKeysFromInline());
   for (uint64_t row = 0; row < run->storage()->size(); ++row) {
@@ -826,7 +838,7 @@ TEST_F(RadixSortRunTest, keyLayoutBoundariesKeepSortedOutput) {
        RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
        RadixSortKeyLayoutKind::kKeyOnlyFixed8},
       {{fixedKeys.begin(), fixedKeys.begin() + 2},
-       RadixSortKeyLayoutKind::kKeyWithPayloadFixed24,
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
        RadixSortKeyLayoutKind::kKeyOnlyFixed16},
       {{fixedKeys.begin(), fixedKeys.begin() + 4},
        RadixSortKeyLayoutKind::kKeyWithPayloadFixed32,
@@ -941,6 +953,48 @@ TEST_F(RadixSortRunTest, floatingPointKeyOutputUsesDecodedKey) {
   expectSortedByOutput(*output, {0}, {flags(true, true)});
 }
 
+TEST_F(RadixSortRunTest, directFixedTailLayoutsRoundTripWithPayload) {
+  struct Case {
+    VectorPtr key;
+    RadixSortKeyLayoutKind layout;
+  };
+  const std::vector<Case> cases{
+      {makeVector<int64_t>(BIGINT(), {7, std::nullopt, -4, 0, 9}),
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed16},
+      {makeVector<double>(DOUBLE(), {3.5, std::nullopt, -2.0, 0.0, 17.25}),
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed16},
+      {makeVector<Timestamp>(
+           TIMESTAMP(),
+           {Timestamp(3, 7),
+            std::nullopt,
+            Timestamp(-2, 999999999),
+            Timestamp(0, 0),
+            Timestamp(1, 42)}),
+       RadixSortKeyLayoutKind::kKeyWithPayloadFixed24}};
+
+  for (const auto& testCase : cases) {
+    for (const auto keyFlags :
+         {flags(true, true),
+          flags(true, false),
+          flags(false, true),
+          flags(false, false)}) {
+      SCOPED_TRACE(
+          testCase.key->type()->toString() +
+          (keyFlags.ascending ? " ASC" : " DESC"));
+      auto input = makeRows(
+          {"key", "payload", "id"},
+          {testCase.key,
+           makeStringVector({"p0", "p1", std::string(40, 'x'), "p3", "p4"}),
+           makeIds(testCase.key->size())});
+      auto run = finalizedRun({*input, {0}, {keyFlags}});
+      EXPECT_EQ(run->keyLayout().kind(), testCase.layout);
+      auto output = collect(*run, 2);
+      expectRowsMatchById(*input, *output, 2);
+      expectSortedByOutput(*output, {0}, {keyFlags});
+    }
+  }
+}
+
 TEST_F(RadixSortRunTest, selectiveDecodeIncludesFloatingPointKey) {
   auto input = makeRows(
       {"group", "value", "id"},
@@ -990,7 +1044,7 @@ TEST_F(RadixSortRunTest, mixedScalarStringFloatingKeysDoNotUsePayload) {
   EXPECT_EQ(run->payloadLayout(), nullptr);
   EXPECT_EQ(
       run->keyLayout().kind(), RadixSortKeyLayoutKind::kKeyOnlyVariable32);
-  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 9);
+  EXPECT_EQ(run->keyLayout().heapKeyOffset(), 18);
 
   run->append(*input);
   run->finalize();

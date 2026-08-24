@@ -42,6 +42,22 @@ uint64_t toEncodedWord(uint64_t word) {
 
 } // namespace
 
+void checkCompactPointerRange(const void* data, uint64_t size) {
+  if (size == 0) {
+    return;
+  }
+  BOLT_CHECK_NOT_NULL(data, "Radix sort allocation must not be null");
+  const auto begin = reinterpret_cast<uintptr_t>(data);
+  BOLT_CHECK_LE(
+      begin,
+      kCompactPointerMask,
+      "Radix sort allocation starts outside the 48-bit address range");
+  BOLT_CHECK_LE(
+      size - 1,
+      kCompactPointerMask - begin,
+      "Radix sort allocation ends outside the 48-bit address range");
+}
+
 RadixSortKeyLayout RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind kind) {
   switch (kind) {
     case RadixSortKeyLayoutKind::kInvalid:
@@ -55,15 +71,15 @@ RadixSortKeyLayout RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind kind) {
     case RadixSortKeyLayoutKind::kKeyOnlyFixed32:
       return RadixSortKeyLayout(kind, 32, 32, false, false, {}, {}, {});
     case RadixSortKeyLayoutKind::kKeyOnlyVariable32:
-      return RadixSortKeyLayout(kind, 32, 16, true, false, 16, 24, {});
+      return RadixSortKeyLayout(kind, 32, 18, true, false, 18, 26, {});
     case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
-      return RadixSortKeyLayout(kind, 16, 8, false, true, {}, {}, 8);
+      return RadixSortKeyLayout(kind, 16, 10, false, true, {}, {}, 10);
     case RadixSortKeyLayoutKind::kKeyWithPayloadFixed24:
-      return RadixSortKeyLayout(kind, 24, 16, false, true, {}, {}, 16);
+      return RadixSortKeyLayout(kind, 24, 18, false, true, {}, {}, 18);
     case RadixSortKeyLayoutKind::kKeyWithPayloadFixed32:
-      return RadixSortKeyLayout(kind, 32, 24, false, true, {}, {}, 24);
+      return RadixSortKeyLayout(kind, 32, 26, false, true, {}, {}, 26);
     case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
-      return RadixSortKeyLayout(kind, 32, 8, true, true, 8, 16, 24);
+      return RadixSortKeyLayout(kind, 32, 12, true, true, 12, 20, 26);
   }
   BOLT_FAIL("Unknown radix sort key layout");
 }
@@ -77,10 +93,14 @@ RadixSortKeyLayout RadixSortKeyLayout::select(
     kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadVariable32
                       : RadixSortKeyLayoutKind::kKeyOnlyVariable32;
   } else {
-    auto physicalWidth = checkedAdd<uint64_t>(
-        *maximumEncodedSize, hasPayload ? sizeof(uint64_t) : 0);
-    if (*physicalWidth <= 8) {
-      BOLT_CHECK(!hasPayload, "Payload radix sort key cannot fit in 8 bytes");
+    if (hasPayload) {
+      BOLT_CHECK_GT(
+          *maximumEncodedSize, 0, "Payload radix sort key cannot be empty");
+    }
+    const auto physicalWidth = checkedAdd<uint64_t>(
+        *maximumEncodedSize, hasPayload ? kCompactPointerBytes : 0);
+    BOLT_CHECK(physicalWidth.has_value(), "Radix sort key width overflows");
+    if (!hasPayload && *physicalWidth <= 8) {
       kind = RadixSortKeyLayoutKind::kKeyOnlyFixed8;
     } else if (*physicalWidth <= 16) {
       kind = hasPayload ? RadixSortKeyLayoutKind::kKeyWithPayloadFixed16
@@ -97,9 +117,7 @@ RadixSortKeyLayout RadixSortKeyLayout::select(
     }
   }
   auto layout = fromKind(kind);
-  if (layout.isVariable()) {
-    layout.radixWidth_ = layout.inlineCapacity();
-  } else if (maximumEncodedSize.has_value()) {
+  if (!layout.isVariable() && maximumEncodedSize.has_value()) {
     layout.radixWidth_ = static_cast<uint32_t>(
         std::min<uint64_t>(*maximumEncodedSize, sizeof(uint64_t)));
   }
@@ -131,8 +149,8 @@ void RadixSortKey::construct(
     std::string_view encodedKey,
     char* overflowData,
     char* payload) const {
-  std::memset(mutableData_, 0, layout_->width());
   if (layout_->isVariable()) {
+    std::memset(mutableData_, 0, layout_->inlineCapacity());
     std::memcpy(
         mutableData_,
         encodedKey.data(),
@@ -148,6 +166,10 @@ void RadixSortKey::construct(
           mutableData_ + word * sizeof(uint64_t),
           fromEncodedWord(inlineBytes.data() + word * sizeof(uint64_t)));
     }
+    std::memcpy(
+        mutableData_ + layout_->inlineWordBytes(),
+        inlineBytes.data() + layout_->inlineWordBytes(),
+        layout_->inlineTailBytes());
   }
 
   if (layout_->isVariable()) {
@@ -162,10 +184,10 @@ void RadixSortKey::construct(
     BOLT_DCHECK_NOT_NULL(overflowData);
     std::memcpy(
         overflowData, encodedKey.data() + layout_->heapKeyOffset(), heapSize);
-    storeUnaligned<char*>(mutableData_ + *layout_->dataOffset(), overflowData);
+    storeCompactPointer(mutableData_ + *layout_->dataOffset(), overflowData);
   }
   if (layout_->hasPayload()) {
-    storeUnaligned<char*>(mutableData_ + *layout_->payloadOffset(), payload);
+    storeCompactPointer(mutableData_ + *layout_->payloadOffset(), payload);
   }
 }
 
@@ -179,6 +201,10 @@ void RadixSortKey::deconstruct(
         inlineBuffer.data() + word * sizeof(uint64_t),
         toEncodedWord(inlineWord(word)));
   }
+  std::memcpy(
+      inlineBuffer.data() + layout_->inlineWordBytes(),
+      data_ + layout_->inlineWordBytes(),
+      layout_->inlineTailBytes());
   encodedKey = {
       std::string_view(inlineBuffer.data(), layout_->inlineCapacity())};
 }
@@ -191,6 +217,13 @@ int32_t RadixSortKey::compare(const RadixSortKey& other) const {
       if (left != right) {
         return (left > right) - (left < right);
       }
+    }
+    const auto tailResult = std::memcmp(
+        data_ + layout_->inlineWordBytes(),
+        other.data_ + layout_->inlineWordBytes(),
+        layout_->inlineTailBytes());
+    if (tailResult != 0) {
+      return (tailResult > 0) - (tailResult < 0);
     }
     return 0;
   }
@@ -209,9 +242,9 @@ int32_t RadixSortKey::compare(const RadixSortKey& other) const {
 
   const auto heapOffset = layout_->heapKeyOffset();
   BOLT_DCHECK_LE(heapOffset, layout_->inlineCapacity());
-  const auto* leftData = loadUnaligned<char*>(data_ + *layout_->dataOffset());
+  const auto* leftData = loadCompactPointer(data_ + *layout_->dataOffset());
   const auto* rightData =
-      loadUnaligned<char*>(other.data_ + *layout_->dataOffset());
+      loadCompactPointer(other.data_ + *layout_->dataOffset());
   const auto suffixResult = std::memcmp(
       leftData + layout_->inlineCapacity() - heapOffset,
       rightData + layout_->inlineCapacity() - heapOffset,
@@ -232,21 +265,20 @@ uint64_t RadixSortKey::heapSize() const {
 std::string_view RadixSortKey::heapKey() const {
   const auto size = heapSize();
   return std::string_view(
-      size == 0 ? nullptr
-                : loadUnaligned<char*>(data_ + *layout_->dataOffset()),
+      size == 0 ? nullptr : loadCompactPointer(data_ + *layout_->dataOffset()),
       size);
 }
 
 char* RadixSortKey::heapKeyData() const {
   BOLT_DCHECK(layout_->isVariable());
-  return loadUnaligned<char*>(data_ + *layout_->dataOffset());
+  return loadCompactPointer(data_ + *layout_->dataOffset());
 }
 
 char* RadixSortKey::payload() const {
   if (!layout_->hasPayload()) {
     return nullptr;
   }
-  return loadUnaligned<char*>(data_ + *layout_->payloadOffset());
+  return loadCompactPointer(data_ + *layout_->payloadOffset());
 }
 
 uint64_t RadixSortKey::inlineWord(uint32_t index) const {
