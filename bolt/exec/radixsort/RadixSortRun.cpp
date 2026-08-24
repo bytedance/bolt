@@ -24,19 +24,22 @@ namespace bytedance::bolt::exec::radixsort {
 namespace {
 
 template <bool Inline>
+EncodedKeyView materializeVariableKeyView(
+    const RadixSortKeyLayout& layout,
+    const char* key) {
+  const auto size = loadUnaligned<uint64_t>(key + *layout.sizeOffset());
+  const auto* data = Inline ? key + layout.heapKeyOffset()
+                            : loadCompactPointer(key + *layout.dataOffset());
+  return {std::string_view(data, size - layout.heapKeyOffset())};
+}
+
+template <bool Inline>
 void materializeVariableKeyPointerViews(
     const RadixSortKeyLayout& layout,
     std::span<const char* const> keys,
     EncodedKeyView* views) {
   for (vector_size_t row = 0; row < keys.size(); ++row) {
-    const auto* key = keys[row];
-    if constexpr (Inline) {
-      const auto size = loadUnaligned<uint64_t>(key + *layout.sizeOffset());
-      views[row] = {std::string_view(
-          key + layout.heapKeyOffset(), size - layout.heapKeyOffset())};
-    } else {
-      views[row] = {RadixSortKey(layout, key).heapKey()};
-    }
+    views[row] = materializeVariableKeyView<Inline>(layout, keys[row]);
   }
 }
 
@@ -53,15 +56,8 @@ void materializeVariableKeyViews(
     for (vector_size_t row = 0; row < range.count; ++row) {
       const auto* keyDataAtRow =
           range.data + static_cast<uint64_t>(row) * layout.width();
-      if constexpr (Inline) {
-        const auto size =
-            loadUnaligned<uint64_t>(keyDataAtRow + *layout.sizeOffset());
-        views[outputRow + row] = {std::string_view(
-            keyDataAtRow + layout.heapKeyOffset(),
-            size - layout.heapKeyOffset())};
-      } else {
-        views[outputRow + row] = {RadixSortKey(layout, keyDataAtRow).heapKey()};
-      }
+      views[outputRow + row] =
+          materializeVariableKeyView<Inline>(layout, keyDataAtRow);
     }
     outputRow += range.count;
   }
@@ -276,6 +272,14 @@ void RadixSortRun::append(const RowVector& input) {
 
   VectorPtr directFixedKey;
   const bool directVariableKey = keyLayout_.isVariable();
+  const auto appendVariableKeys = [&](std::span<char* const> payloads) {
+    const auto batchMaximumEncodedKeySize = keyCodec_->encodeAndAppendVariable(
+        keys, *storage_, payloads, firstSuffixColumn_, encodeOutput_.offsets_);
+    currentRunMaximumEncodedKeySize_ =
+        std::max(currentRunMaximumEncodedKeySize_, batchMaximumEncodedKeySize);
+    variableKeysFitRadixPrefix_ &=
+        batchMaximumEncodedKeySize <= keyLayout_.inlineCapacity();
+  };
   const auto encodeBegin = std::chrono::steady_clock::now();
   if (!directVariableKey) {
     if (keys.childrenSize() == 1 &&
@@ -307,12 +311,7 @@ void RadixSortRun::append(const RowVector& input) {
     const auto payloads =
         std::span<char* const>(payloadBatch_.rows()->as<char*>(), input.size());
     if (directVariableKey) {
-      variableKeysFitRadixPrefix_ &= keyCodec_->encodeAndAppendVariable(
-          keys,
-          *storage_,
-          payloads,
-          firstSuffixColumn_,
-          encodeOutput_.offsets_);
+      appendVariableKeys(payloads);
     } else if (directFixedKey == nullptr) {
       storage_->appendBatch(encodeOutput_, payloads);
     } else {
@@ -323,8 +322,7 @@ void RadixSortRun::append(const RowVector& input) {
   } else {
     const auto appendBegin = std::chrono::steady_clock::now();
     if (directVariableKey) {
-      variableKeysFitRadixPrefix_ &= keyCodec_->encodeAndAppendVariable(
-          keys, *storage_, {}, firstSuffixColumn_, encodeOutput_.offsets_);
+      appendVariableKeys({});
     } else if (directFixedKey == nullptr) {
       storage_->appendBatch(encodeOutput_);
     } else {
@@ -355,9 +353,16 @@ void RadixSortRun::finalize() {
   const auto begin = std::chrono::steady_clock::now();
   try {
     RadixSortRunSorter sorter(*storage_);
-    const auto skippableValidityOffsets =
-        keyCodec_->leadingSkippableValidityOffsets(
-            currentRunKeyMayHaveNulls_, keyLayout_.radixWidth());
+    auto skippableValidityOffsets = keyCodec_->leadingSkippableValidityOffsets(
+        currentRunKeyMayHaveNulls_, keyLayout_.radixWidth());
+    if (keyLayout_.isVariable()) {
+      for (auto offset = static_cast<uint32_t>(std::min<uint64_t>(
+               currentRunMaximumEncodedKeySize_, keyLayout_.radixWidth()));
+           offset < keyLayout_.radixWidth();
+           ++offset) {
+        skippableValidityOffsets.push_back(offset);
+      }
+    }
     sorter.sort(skippableValidityOffsets);
   } catch (...) {
     metrics_.sortTimeUs += elapsedUs(begin);
@@ -451,7 +456,7 @@ vector_size_t RadixSortRun::collectRemainingRows(
       for (vector_size_t row = 0; row < range.count; ++row) {
         auto* key = range.data + static_cast<uint64_t>(row) * keyWidth;
         keys[outputRow + row] = key;
-        payloads[outputRow + row] = loadUnaligned<char*>(key + payloadOffset);
+        payloads[outputRow + row] = loadCompactPointer(key + payloadOffset);
       }
       outputRow += range.count;
     }
@@ -519,9 +524,8 @@ RowVectorPtr RadixSortRun::decodeKeys(
     AlignedBuffer::reallocate<EncodedKeyView>(&decodeViewsOutput_, count);
   }
   auto* rawViews = decodeViewsOutput_->asMutable<EncodedKeyView>();
-  const auto decodeVariableFromInline = decodeVariableKeysFromInline_;
   if (keyLayout_.isVariable()) {
-    if (decodeVariableFromInline) {
+    if (decodeVariableKeysFromInline_) {
       materializeVariableKeyViews<true>(*storage_, begin, count, rawViews);
     } else {
       materializeVariableKeyViews<false>(*storage_, begin, count, rawViews);
@@ -593,9 +597,8 @@ RowVectorPtr RadixSortRun::decodeKeyPointers(
     AlignedBuffer::reallocate<EncodedKeyView>(&decodeViewsOutput_, count);
   }
   auto* rawViews = decodeViewsOutput_->asMutable<EncodedKeyView>();
-  const auto decodeVariableFromInline = decodeVariableKeysFromInline_;
   if (keyLayout_.isVariable()) {
-    if (decodeVariableFromInline) {
+    if (decodeVariableKeysFromInline_) {
       materializeVariableKeyPointerViews<true>(keyLayout_, keys, rawViews);
     } else {
       materializeVariableKeyPointerViews<false>(keyLayout_, keys, rawViews);
@@ -663,7 +666,7 @@ RowVectorPtr RadixSortRun::gatherPayload(
       const auto* key =
           range.data + static_cast<uint64_t>(row) * keyLayout_.width();
       rawRows[outputRow + row] =
-          loadUnaligned<char*>(key + *keyLayout_.payloadOffset());
+          loadCompactPointer(key + *keyLayout_.payloadOffset());
     }
     outputRow += range.count;
   }

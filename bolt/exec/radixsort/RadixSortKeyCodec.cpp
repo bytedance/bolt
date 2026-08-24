@@ -492,8 +492,8 @@ void appendSingleFixedFlatKernel(
         auto* record = destination;
         for (vector_size_t row = 0; row < count; ++row) {
           const auto inputRow = source + row;
-          std::array<uint64_t, 3> encodedWords{};
-          auto* bytes = reinterpret_cast<char*>(encodedWords.data());
+          std::array<char, Traits::kInlineCapacity> encodedBytes{};
+          auto* bytes = encodedBytes.data();
           if constexpr (HasNulls) {
             if (bits::isBitNull(nulls, inputRow)) {
               bytes[0] = static_cast<char>(nullMarker(column.flags));
@@ -505,15 +505,9 @@ void appendSingleFixedFlatKernel(
             bytes[0] = static_cast<char>(validMarker(column.flags));
             encodeBody(input, inputRow, bytes + 1, descending);
           }
-          for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
-            auto value = encodedWords[word];
-            if constexpr (std::endian::native == std::endian::little) {
-              value = byteSwap(value);
-            }
-            storeUnaligned<uint64_t>(record + word * sizeof(uint64_t), value);
-          }
+          storeFixedKeyPrefix<Traits>(bytes, record);
           if constexpr (Traits::kHasPayload) {
-            storeUnaligned<char*>(
+            storeCompactPointer(
                 record + Traits::kPayloadOffset, payloads[inputRow]);
           }
           record += Traits::kWidth;
@@ -578,7 +572,7 @@ void appendSingleFixed64FlatKernel(
     std::span<char* const> payloads,
     EncodeBody encodeBody) {
   using Traits = RadixSortKeyTraits<KIND>;
-  static_assert(Traits::kInlineWords == 2);
+  static_assert(Traits::kInlineCapacity >= 1 + sizeof(T));
   const auto* values = input.rawValues();
   const auto* nulls = input.rawNulls();
   const auto nullWord = static_cast<uint64_t>(nullMarker(column.flags)) << 56;
@@ -591,24 +585,28 @@ void appendSingleFixed64FlatKernel(
         auto* record = destination;
         for (vector_size_t row = 0; row < count; ++row) {
           const auto inputRow = source + row;
+          uint64_t encoded = 0;
+          auto firstWord = nullWord;
           if constexpr (HasNulls) {
-            if (bits::isBitNull(nulls, inputRow)) {
-              storeUnaligned<uint64_t>(record, nullWord);
-              storeUnaligned<uint64_t>(record + sizeof(uint64_t), 0);
-            } else {
-              const auto encoded =
-                  encodeBody(values[inputRow]) ^ descendingMask;
-              storeUnaligned<uint64_t>(record, validWord | (encoded >> 8));
-              storeUnaligned<uint64_t>(
-                  record + sizeof(uint64_t), encoded << 56);
+            if (!bits::isBitNull(nulls, inputRow)) {
+              encoded = encodeBody(values[inputRow]) ^ descendingMask;
+              firstWord = validWord | (encoded >> 8);
             }
           } else {
-            const auto encoded = encodeBody(values[inputRow]) ^ descendingMask;
-            storeUnaligned<uint64_t>(record, validWord | (encoded >> 8));
+            encoded = encodeBody(values[inputRow]) ^ descendingMask;
+            firstWord = validWord | (encoded >> 8);
+          }
+          storeUnaligned<uint64_t>(record, firstWord);
+          if constexpr (Traits::kInlineWords > 1) {
             storeUnaligned<uint64_t>(record + sizeof(uint64_t), encoded << 56);
+          } else {
+            static_assert(Traits::kInlineTailBytes > 0);
+            record[sizeof(uint64_t)] = static_cast<char>(encoded);
+            std::memset(
+                record + sizeof(uint64_t) + 1, 0, Traits::kInlineTailBytes - 1);
           }
           if constexpr (Traits::kHasPayload) {
-            storeUnaligned<char*>(
+            storeCompactPointer(
                 record + Traits::kPayloadOffset, payloads[inputRow]);
           }
           record += Traits::kWidth;
@@ -647,9 +645,9 @@ void appendSingleFixed64Flat(
       appendSingleFixed64FlatLayout<RadixSortKeyLayoutKind::kKeyOnlyFixed16>(
           column, input, size, arena, payloads, encodeBody);
       return;
-    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed24:
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
       appendSingleFixed64FlatLayout<
-          RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>(
+          RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>(
           column, input, size, arena, payloads, encodeBody);
       return;
     default:
@@ -679,7 +677,7 @@ void appendSingleFixedFlat(
       column.type->kind() == TypeKind::HUGEINT) {
     appendSingleFixedFlat<
         RadixSortKeyLayoutKind::kKeyOnlyFixed24,
-        RadixSortKeyLayoutKind::kKeyWithPayloadFixed32>(
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>(
         column,
         *input.asUnchecked<FlatVector<int128_t>>(),
         size,
@@ -769,7 +767,7 @@ void appendSingleFixedFlat(
           TIMESTAMP,
           Timestamp,
           kKeyOnlyFixed24,
-          kKeyWithPayloadFixed32,
+          kKeyWithPayloadFixed24,
           const auto value = values.rawValues()[row];
           encodeSignedWord<int64_t>(value.getSeconds(), output, descending);
           encodeUnsignedWord<uint64_t>(
@@ -1679,7 +1677,7 @@ class IndirectEncodeOutput {
 
   char* current(vector_size_t row) const {
     const auto* record = records_ + static_cast<uint64_t>(row) * stride_;
-    return loadUnaligned<char*>(record + dataOffset_) + cursors_[row];
+    return loadCompactPointer(record + dataOffset_) + cursors_[row];
   }
 
   void advance(vector_size_t row, uint64_t bytes) const {
@@ -2115,8 +2113,14 @@ void decodeSigned(EncodedKeyReader& reader, bool descending, T& value) {
 }
 
 template <bool HostOrderWords>
-uint8_t physicalEncodedByte(const char* key, uint32_t offset) {
+uint8_t physicalEncodedByte(
+    const char* key,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
   if constexpr (!HostOrderWords) {
+    return static_cast<uint8_t>(key[offset]);
+  }
+  if (offset >= inlineWordBytes) {
     return static_cast<uint8_t>(key[offset]);
   }
   const auto word = loadUnaligned<uint64_t>(
@@ -2126,26 +2130,48 @@ uint8_t physicalEncodedByte(const char* key, uint32_t offset) {
 }
 
 template <bool HostOrderWords, typename T>
-T decodePhysicalUnsigned(const char* key, bool descending, uint32_t offset) {
+T decodePhysicalUnsigned(
+    const char* key,
+    bool descending,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
   static_assert(std::is_unsigned_v<T>);
   T value;
   if constexpr (HostOrderWords) {
-    const auto wordIndex = offset / sizeof(uint64_t);
-    const auto byteOffset = offset % sizeof(uint64_t);
-    const auto first =
-        loadUnaligned<uint64_t>(key + wordIndex * sizeof(uint64_t));
-    uint64_t encoded;
-    if (byteOffset + sizeof(T) <= sizeof(uint64_t)) {
-      encoded = first >> ((sizeof(uint64_t) - byteOffset - sizeof(T)) * 8);
+    if (offset + sizeof(T) <= inlineWordBytes) {
+      const auto wordIndex = offset / sizeof(uint64_t);
+      const auto byteOffset = offset % sizeof(uint64_t);
+      const auto first =
+          loadUnaligned<uint64_t>(key + wordIndex * sizeof(uint64_t));
+      uint64_t encoded;
+      if (byteOffset + sizeof(T) <= sizeof(uint64_t)) {
+        encoded = first >> ((sizeof(uint64_t) - byteOffset - sizeof(T)) * 8);
+      } else {
+        const auto second =
+            loadUnaligned<uint64_t>(key + (wordIndex + 1) * sizeof(uint64_t));
+        const unsigned __int128 words =
+            (static_cast<unsigned __int128>(first) << 64) | second;
+        encoded = static_cast<uint64_t>(
+            words >> ((2 * sizeof(uint64_t) - byteOffset - sizeof(T)) * 8));
+      }
+      value = static_cast<T>(encoded);
     } else {
-      const auto second =
-          loadUnaligned<uint64_t>(key + (wordIndex + 1) * sizeof(uint64_t));
-      const unsigned __int128 words =
-          (static_cast<unsigned __int128>(first) << 64) | second;
-      encoded = static_cast<uint64_t>(
-          words >> ((2 * sizeof(uint64_t) - byteOffset - sizeof(T)) * 8));
+      BOLT_DCHECK_LT(offset, inlineWordBytes);
+      const auto byteOffset = offset % sizeof(uint64_t);
+      const auto wordBytes = sizeof(uint64_t) - byteOffset;
+      const auto tailBytes = sizeof(T) - wordBytes;
+      const auto first = loadUnaligned<uint64_t>(
+          key + (offset / sizeof(uint64_t)) * sizeof(uint64_t));
+      const auto firstMask =
+          std::numeric_limits<uint64_t>::max() >> (byteOffset * 8);
+      value = static_cast<T>((first & firstMask) << (tailBytes * 8));
+      for (uint32_t byte = 0; byte < tailBytes; ++byte) {
+        value = static_cast<T>(
+            value |
+            static_cast<T>(static_cast<uint8_t>(key[inlineWordBytes + byte]))
+                << ((tailBytes - byte - 1) * 8));
+      }
     }
-    value = static_cast<T>(encoded);
   } else {
     value = fromBigEndian(loadUnaligned<T>(key + offset));
   }
@@ -2153,11 +2179,15 @@ T decodePhysicalUnsigned(const char* key, bool descending, uint32_t offset) {
 }
 
 template <bool HostOrderWords, typename T>
-T decodePhysicalSigned(const char* key, bool descending, uint32_t offset) {
+T decodePhysicalSigned(
+    const char* key,
+    bool descending,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
   static_assert(std::is_signed_v<T>);
   using Unsigned = std::make_unsigned_t<T>;
-  auto bits =
-      decodePhysicalUnsigned<HostOrderWords, Unsigned>(key, descending, offset);
+  auto bits = decodePhysicalUnsigned<HostOrderWords, Unsigned>(
+      key, descending, offset, inlineWordBytes);
   bits ^= Unsigned{1} << (sizeof(T) * 8 - 1);
   T value;
   std::memcpy(&value, &bits, sizeof(value));
@@ -2207,6 +2237,7 @@ void decodeSinglePhysicalColumn(
     bool mayHaveNulls,
     const VectorPtr& result,
     uint32_t encodedOffset,
+    uint32_t inlineWordBytes,
     Decode decode) {
   auto* flat = result->asUnchecked<FlatVector<T>>();
   auto* values = flat->mutableRawValues();
@@ -2218,8 +2249,8 @@ void decodeSinglePhysicalColumn(
       for (vector_size_t row = 0; row < range.count; ++row) {
         const auto* key =
             range.data + static_cast<uint64_t>(row) * arena.layout().width();
-        values[outputRow + row] =
-            decode(key, !column.flags.ascending, encodedOffset + 1);
+        values[outputRow + row] = decode(
+            key, !column.flags.ascending, encodedOffset + 1, inlineWordBytes);
       }
       outputRow += range.count;
     }
@@ -2232,15 +2263,15 @@ void decodeSinglePhysicalColumn(
     for (vector_size_t row = 0; row < range.count; ++row) {
       const auto* key =
           range.data + static_cast<uint64_t>(row) * arena.layout().width();
-      const auto marker =
-          physicalEncodedByte<HostOrderWords>(key, encodedOffset);
+      const auto marker = physicalEncodedByte<HostOrderWords>(
+          key, encodedOffset, inlineWordBytes);
       if (marker == null) {
         flat->setNull(outputRow + row, true);
         continue;
       }
       flat->setNull(outputRow + row, false);
-      values[outputRow + row] =
-          decode(key, !column.flags.ascending, encodedOffset + 1);
+      values[outputRow + row] = decode(
+          key, !column.flags.ascending, encodedOffset + 1, inlineWordBytes);
     }
     outputRow += range.count;
   }
@@ -2253,27 +2284,33 @@ void decodeSinglePhysicalColumn(
     bool mayHaveNulls,
     const VectorPtr& result,
     uint32_t encodedOffset,
+    uint32_t inlineWordBytes,
     Decode decode) {
   auto* flat = result->asUnchecked<FlatVector<T>>();
   auto* values = flat->mutableRawValues();
   if (!mayHaveNulls) {
     result->resetNulls();
     for (vector_size_t row = 0; row < keys.size(); ++row) {
-      values[row] =
-          decode(keys[row], !column.flags.ascending, encodedOffset + 1);
+      values[row] = decode(
+          keys[row],
+          !column.flags.ascending,
+          encodedOffset + 1,
+          inlineWordBytes);
     }
     return;
   }
   const auto null = nullMarker(column.flags);
   for (vector_size_t row = 0; row < keys.size(); ++row) {
     const auto* key = keys[row];
-    const auto marker = physicalEncodedByte<HostOrderWords>(key, encodedOffset);
+    const auto marker = physicalEncodedByte<HostOrderWords>(
+        key, encodedOffset, inlineWordBytes);
     if (marker == null) {
       flat->setNull(row, true);
       continue;
     }
     flat->setNull(row, false);
-    values[row] = decode(key, !column.flags.ascending, encodedOffset + 1);
+    values[row] = decode(
+        key, !column.flags.ascending, encodedOffset + 1, inlineWordBytes);
   }
 }
 
@@ -2283,14 +2320,15 @@ void decodeSinglePhysicalBooleanColumn(
     std::span<const char* const> keys,
     bool mayHaveNulls,
     const VectorPtr& result,
-    uint32_t encodedOffset) {
+    uint32_t encodedOffset,
+    uint32_t inlineWordBytes) {
   auto* flat = result->asUnchecked<FlatVector<bool>>();
   auto* values = flat->template mutableRawValues<uint64_t>();
   if (!mayHaveNulls) {
     result->resetNulls();
     for (vector_size_t row = 0; row < keys.size(); ++row) {
-      auto value =
-          physicalEncodedByte<HostOrderWords>(keys[row], encodedOffset + 1);
+      auto value = physicalEncodedByte<HostOrderWords>(
+          keys[row], encodedOffset + 1, inlineWordBytes);
       if (!column.flags.ascending) {
         value = static_cast<uint8_t>(~value);
       }
@@ -2301,13 +2339,15 @@ void decodeSinglePhysicalBooleanColumn(
   const auto null = nullMarker(column.flags);
   for (vector_size_t row = 0; row < keys.size(); ++row) {
     const auto* key = keys[row];
-    const auto marker = physicalEncodedByte<HostOrderWords>(key, encodedOffset);
+    const auto marker = physicalEncodedByte<HostOrderWords>(
+        key, encodedOffset, inlineWordBytes);
     if (marker == null) {
       flat->setNull(row, true);
       continue;
     }
     flat->setNull(row, false);
-    auto value = physicalEncodedByte<HostOrderWords>(key, encodedOffset + 1);
+    auto value = physicalEncodedByte<HostOrderWords>(
+        key, encodedOffset + 1, inlineWordBytes);
     if (!column.flags.ascending) {
       value = static_cast<uint8_t>(~value);
     }
@@ -2323,7 +2363,8 @@ void decodeSinglePhysicalBooleanColumn(
     vector_size_t count,
     bool mayHaveNulls,
     const VectorPtr& result,
-    uint32_t encodedOffset) {
+    uint32_t encodedOffset,
+    uint32_t inlineWordBytes) {
   auto* flat = result->asUnchecked<FlatVector<bool>>();
   auto* values = flat->template mutableRawValues<uint64_t>();
   if (!mayHaveNulls) {
@@ -2334,8 +2375,8 @@ void decodeSinglePhysicalBooleanColumn(
       for (vector_size_t row = 0; row < range.count; ++row) {
         const auto* key =
             range.data + static_cast<uint64_t>(row) * arena.layout().width();
-        auto value =
-            physicalEncodedByte<HostOrderWords>(key, encodedOffset + 1);
+        auto value = physicalEncodedByte<HostOrderWords>(
+            key, encodedOffset + 1, inlineWordBytes);
         if (!column.flags.ascending) {
           value = static_cast<uint8_t>(~value);
         }
@@ -2352,14 +2393,15 @@ void decodeSinglePhysicalBooleanColumn(
     for (vector_size_t row = 0; row < range.count; ++row) {
       const auto* key =
           range.data + static_cast<uint64_t>(row) * arena.layout().width();
-      const auto marker =
-          physicalEncodedByte<HostOrderWords>(key, encodedOffset);
+      const auto marker = physicalEncodedByte<HostOrderWords>(
+          key, encodedOffset, inlineWordBytes);
       if (marker == null) {
         flat->setNull(outputRow + row, true);
         continue;
       }
       flat->setNull(outputRow + row, false);
-      auto value = physicalEncodedByte<HostOrderWords>(key, encodedOffset + 1);
+      auto value = physicalEncodedByte<HostOrderWords>(
+          key, encodedOffset + 1, inlineWordBytes);
       if (!column.flags.ascending) {
         value = static_cast<uint8_t>(~value);
       }
@@ -2375,6 +2417,7 @@ void decodeSinglePhysicalColumn(
     std::span<const char* const> keys,
     bool mayHaveNulls,
     const VectorPtr& result,
+    uint32_t inlineWordBytes,
     uint32_t encodedOffset = 0) {
   if (column.type->isShortDecimal()) {
     decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
@@ -2383,9 +2426,13 @@ void decodeSinglePhysicalColumn(
         mayHaveNulls,
         result,
         encodedOffset,
-        [](const char* key, bool descending, uint32_t bodyOffset) {
+        inlineWordBytes,
+        [](const char* key,
+           bool descending,
+           uint32_t bodyOffset,
+           uint32_t wordBytes) {
           return decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset);
+              key, descending, bodyOffset, wordBytes);
         });
     return;
   }
@@ -2397,11 +2444,15 @@ void decodeSinglePhysicalColumn(
         mayHaveNulls,
         result,
         encodedOffset,
-        [](const char* key, bool descending, uint32_t bodyOffset) {
+        inlineWordBytes,
+        [](const char* key,
+           bool descending,
+           uint32_t bodyOffset,
+           uint32_t wordBytes) {
           const auto upper = decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset);
+              key, descending, bodyOffset, wordBytes);
           const auto lower = decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-              key, descending, bodyOffset + sizeof(int64_t));
+              key, descending, bodyOffset + sizeof(int64_t), wordBytes);
           return HugeInt::build(static_cast<uint64_t>(upper), lower);
         });
     return;
@@ -2410,7 +2461,7 @@ void decodeSinglePhysicalColumn(
   switch (column.type->kind()) {
     case TypeKind::BOOLEAN:
       decodeSinglePhysicalBooleanColumn<HostOrderWords>(
-          column, keys, mayHaveNulls, result, encodedOffset);
+          column, keys, mayHaveNulls, result, encodedOffset, inlineWordBytes);
       return;
     case TypeKind::TINYINT:
       decodeSinglePhysicalColumn<HostOrderWords, int8_t>(
@@ -2419,9 +2470,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int8_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::SMALLINT:
@@ -2431,9 +2483,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int16_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::INTEGER:
@@ -2443,9 +2496,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int32_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::BIGINT:
@@ -2455,9 +2509,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int64_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::REAL:
@@ -2467,9 +2522,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodeFloat(decodePhysicalUnsigned<HostOrderWords, uint32_t>(
-                key, desc, offset));
+                key, desc, offset, wordBytes));
           });
       return;
     case TypeKind::DOUBLE:
@@ -2479,10 +2535,11 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodeDouble(
                 decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset));
+                    key, desc, offset, wordBytes));
           });
       return;
     case TypeKind::TIMESTAMP:
@@ -2492,12 +2549,13 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return Timestamp(
                 decodePhysicalSigned<HostOrderWords, int64_t>(
-                    key, desc, offset),
+                    key, desc, offset, wordBytes),
                 decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset + sizeof(int64_t)));
+                    key, desc, offset + sizeof(int64_t), wordBytes));
           });
       return;
     default:
@@ -2515,6 +2573,7 @@ void decodeSinglePhysicalColumn(
     vector_size_t count,
     bool mayHaveNulls,
     const VectorPtr& result,
+    uint32_t inlineWordBytes,
     uint32_t encodedOffset = 0) {
   if (column.type->isShortDecimal()) {
     decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
@@ -2525,9 +2584,13 @@ void decodeSinglePhysicalColumn(
         mayHaveNulls,
         result,
         encodedOffset,
-        [](const char* key, bool descending, uint32_t bodyOffset) {
+        inlineWordBytes,
+        [](const char* key,
+           bool descending,
+           uint32_t bodyOffset,
+           uint32_t wordBytes) {
           return decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset);
+              key, descending, bodyOffset, wordBytes);
         });
     return;
   }
@@ -2541,11 +2604,15 @@ void decodeSinglePhysicalColumn(
         mayHaveNulls,
         result,
         encodedOffset,
-        [](const char* key, bool descending, uint32_t bodyOffset) {
+        inlineWordBytes,
+        [](const char* key,
+           bool descending,
+           uint32_t bodyOffset,
+           uint32_t wordBytes) {
           const auto upper = decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset);
+              key, descending, bodyOffset, wordBytes);
           const auto lower = decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-              key, descending, bodyOffset + sizeof(int64_t));
+              key, descending, bodyOffset + sizeof(int64_t), wordBytes);
           return HugeInt::build(static_cast<uint64_t>(upper), lower);
         });
     return;
@@ -2554,7 +2621,14 @@ void decodeSinglePhysicalColumn(
   switch (column.type->kind()) {
     case TypeKind::BOOLEAN:
       decodeSinglePhysicalBooleanColumn<HostOrderWords>(
-          column, arena, begin, count, mayHaveNulls, result, encodedOffset);
+          column,
+          arena,
+          begin,
+          count,
+          mayHaveNulls,
+          result,
+          encodedOffset,
+          inlineWordBytes);
       return;
     case TypeKind::TINYINT:
       decodeSinglePhysicalColumn<HostOrderWords, int8_t>(
@@ -2565,9 +2639,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int8_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::SMALLINT:
@@ -2579,9 +2654,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int16_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::INTEGER:
@@ -2593,9 +2669,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int32_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::BIGINT:
@@ -2607,9 +2684,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int64_t>(
-                key, desc, offset);
+                key, desc, offset, wordBytes);
           });
       return;
     case TypeKind::REAL:
@@ -2621,9 +2699,10 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodeFloat(decodePhysicalUnsigned<HostOrderWords, uint32_t>(
-                key, desc, offset));
+                key, desc, offset, wordBytes));
           });
       return;
     case TypeKind::DOUBLE:
@@ -2635,10 +2714,11 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodeDouble(
                 decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset));
+                    key, desc, offset, wordBytes));
           });
       return;
     case TypeKind::TIMESTAMP:
@@ -2650,12 +2730,13 @@ void decodeSinglePhysicalColumn(
           mayHaveNulls,
           result,
           encodedOffset,
-          [](const char* key, bool desc, uint32_t offset) {
+          inlineWordBytes,
+          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return Timestamp(
                 decodePhysicalSigned<HostOrderWords, int64_t>(
-                    key, desc, offset),
+                    key, desc, offset, wordBytes),
                 decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset + sizeof(int64_t)));
+                    key, desc, offset + sizeof(int64_t), wordBytes));
           });
       return;
     default:
@@ -4125,7 +4206,7 @@ void RadixSortKeyCodec::encode(
   offsets[0] = 0;
 }
 
-bool RadixSortKeyCodec::encodeAndAppendVariable(
+uint64_t RadixSortKeyCodec::encodeAndAppendVariable(
     const RowVector& input,
     RadixSortRunStorage& arena,
     std::span<char* const> payloads,
@@ -4175,8 +4256,7 @@ bool RadixSortKeyCodec::encodeAndAppendVariable(
               cursors[row],
               loadUnaligned<uint64_t>(record + *layout.sizeOffset()) -
                   layout.heapKeyOffset());
-          const auto* heap =
-              loadUnaligned<const char*>(record + *layout.dataOffset());
+          const auto* heap = loadCompactPointer(record + *layout.dataOffset());
           std::memcpy(
               record + layout.heapKeyOffset(),
               heap,
@@ -4241,7 +4321,13 @@ bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
     child = BaseVector::create(columns_[0].type, count, pool);
   }
   decodeSinglePhysicalColumn<true>(
-      columns_[0], arena, begin, count, mayHaveNulls, child);
+      columns_[0],
+      arena,
+      begin,
+      count,
+      mayHaveNulls,
+      child,
+      arena.layout().inlineWordBytes());
   result = std::make_shared<RowVector>(
       pool, rowType_, nullptr, count, std::vector<VectorPtr>{std::move(child)});
   return true;
@@ -4253,8 +4339,8 @@ bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
     bool mayHaveNulls,
     memory::MemoryPool* pool,
     RowVectorPtr& result) const {
-  if (!canDecodeSingleFixedColumn() ||
-      RadixSortKeyLayout::fromKind(layoutKind).isVariable()) {
+  const auto layout = RadixSortKeyLayout::fromKind(layoutKind);
+  if (!canDecodeSingleFixedColumn() || layout.isVariable()) {
     return false;
   }
   const auto count = static_cast<vector_size_t>(keys.size());
@@ -4269,7 +4355,8 @@ bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
     result.reset();
     child = BaseVector::create(columns_[0].type, count, pool);
   }
-  decodeSinglePhysicalColumn<true>(columns_[0], keys, mayHaveNulls, child);
+  decodeSinglePhysicalColumn<true>(
+      columns_[0], keys, mayHaveNulls, child, layout.inlineWordBytes());
   result = std::make_shared<RowVector>(
       pool, rowType_, nullptr, count, std::vector<VectorPtr>{std::move(child)});
   return true;
@@ -4318,6 +4405,7 @@ void RadixSortKeyCodec::decodeFixedPrefix(
             count,
             mayHaveNulls,
             result->childAt(column),
+            0,
             encodedOffset);
       });
 }
@@ -4339,6 +4427,7 @@ void RadixSortKeyCodec::decodeFixedPrefix(
             keys,
             mayHaveNulls,
             result->childAt(column),
+            0,
             encodedOffset);
       });
 }

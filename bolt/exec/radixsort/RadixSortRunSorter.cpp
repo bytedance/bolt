@@ -62,18 +62,6 @@ uint64_t floorLog2(uint64_t value) {
   return result;
 }
 
-template <uint32_t REMAINING>
-bool fixedSortKeyLess(const uint64_t* left, const uint64_t* right) {
-  return (*left < *right) ||
-      ((*left == *right) &&
-       fixedSortKeyLess<REMAINING - 1>(left + 1, right + 1));
-}
-
-template <>
-bool fixedSortKeyLess<1>(const uint64_t* left, const uint64_t* right) {
-  return *left < *right;
-}
-
 template <RadixSortKeyLayoutKind KIND>
 class RadixSortKeyLess
     : private RadixSortKeyLessState<RadixSortKeyTraits<KIND>::kVariable> {
@@ -91,7 +79,9 @@ class RadixSortKeyLess
                  reinterpret_cast<const char*>(&right),
                  this->heapKeyOffset()) < 0;
     } else {
-      return fixedSortKeyLess<Traits::kInlineWords>(&left.part0, &right.part0);
+      return fixedKeyLess<Traits>(
+          reinterpret_cast<const char*>(&left),
+          reinterpret_cast<const char*>(&right));
     }
   }
 };
@@ -309,28 +299,18 @@ class RadixSortRunSorterKernel {
   explicit RadixSortRunSorterKernel(RadixSortRunStorage& arena)
       : arena_(arena), less_(arena.layout()), iteratorState_(arena) {
     static_assert(!CompletePrefixRadix || Traits::kVariable);
-    BOLT_DCHECK_EQ(arena.layout().radixWidth(), kRadixByteLimit);
-  }
-
-  void radixSort(
-      uint64_t begin,
-      uint64_t end,
-      std::span<const uint32_t> skippableByteOffsets = {}) {
-    skippableByteOffsets_ = skippableByteOffsets;
-    if (end - begin < 2) {
-      return;
+    if constexpr (CompletePrefixRadix) {
+      BOLT_DCHECK_EQ(arena.layout().radixWidth(), kRadixByteLimit);
+    } else {
+      BOLT_DCHECK_LE(arena.layout().radixWidth(), kRadixByteLimit);
     }
-    auto first = Iterator(iteratorState_, begin);
-    auto last = Iterator(iteratorState_, end);
-    if (last - first < static_cast<int64_t>(kComparisonFallbackCutoff)) {
-      fullSort(first, last);
-      return;
-    }
-    sortRadixByte<0>(first, last);
   }
 
   void adaptiveSort(std::span<const uint32_t> skippableByteOffsets = {}) {
-    skippableByteOffsets_ = skippableByteOffsets;
+    for (const auto offset : skippableByteOffsets) {
+      BOLT_DCHECK_LT(offset, kRadixByteLimit);
+      skippableByteMask_ |= uint32_t{1} << offset;
+    }
     auto first = Iterator(iteratorState_, 0);
     auto last = Iterator(iteratorState_, arena_.size());
     auto fallback = [&](Iterator begin, Iterator end) {
@@ -551,10 +531,7 @@ class RadixSortRunSorterKernel {
   }
 
   bool byteIsSkippable(uint32_t byteOffset) const {
-    return std::find(
-               skippableByteOffsets_.begin(),
-               skippableByteOffsets_.end(),
-               byteOffset) != skippableByteOffsets_.end();
+    return (skippableByteMask_ & (uint32_t{1} << byteOffset)) != 0;
   }
 
   template <uint32_t OFFSET>
@@ -563,11 +540,16 @@ class RadixSortRunSorterKernel {
     if constexpr (Traits::kVariable) {
       return reinterpret_cast<const uint8_t*>(&key)[OFFSET];
     } else {
-      const auto* words = &key.part0;
-      constexpr auto kWord = OFFSET / sizeof(uint64_t);
-      constexpr auto kByte = OFFSET % sizeof(uint64_t);
-      return static_cast<uint8_t>(
-          words[kWord] >> ((sizeof(uint64_t) - kByte - 1) * 8));
+      if constexpr (OFFSET < Traits::kInlineWordBytes) {
+        constexpr auto kWord = OFFSET / sizeof(uint64_t);
+        constexpr auto kByte = OFFSET % sizeof(uint64_t);
+        const auto word = loadUnaligned<uint64_t>(
+            reinterpret_cast<const char*>(&key) + kWord * sizeof(uint64_t));
+        return static_cast<uint8_t>(
+            word >> ((sizeof(uint64_t) - kByte - 1) * 8));
+      } else {
+        return reinterpret_cast<const uint8_t*>(&key)[OFFSET];
+      }
     }
   }
 
@@ -847,7 +829,7 @@ class RadixSortRunSorterKernel {
   RadixSortRunStorage& arena_;
   Compare less_;
   SegmentedKeyState<KIND> iteratorState_;
-  std::span<const uint32_t> skippableByteOffsets_;
+  uint32_t skippableByteMask_{0};
 };
 
 template <typename Function>

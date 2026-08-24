@@ -168,7 +168,7 @@ class RadixSortKeyCodec {
       memory::MemoryPool* pool,
       RowVectorPtr& result) const;
 
-  bool encodeAndAppendVariable(
+  uint64_t encodeAndAppendVariable(
       const RowVector& input,
       RadixSortRunStorage& arena,
       std::span<char* const> payloads,

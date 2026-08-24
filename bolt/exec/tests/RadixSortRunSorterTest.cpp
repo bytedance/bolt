@@ -541,16 +541,21 @@ TEST_F(RadixSortRunSorterTest, variableHeapOffsetSortsBySuffix) {
 }
 
 TEST_F(RadixSortRunSorterTest, variableRadixCoversEntireRecordPrefix) {
-  auto layout = RadixSortKeyLayout::select(std::nullopt, false, 9);
-  std::vector<std::string> keys;
-  keys.reserve(96);
-  for (uint32_t value = 96; value > 0; --value) {
-    std::string key(40, 's');
-    key[12] = static_cast<char>(value);
-    keys.push_back(std::move(key));
+  for (const auto kind :
+       {RadixSortKeyLayoutKind::kKeyOnlyVariable32,
+        RadixSortKeyLayoutKind::kKeyWithPayloadVariable32}) {
+    auto layout = RadixSortKeyLayout::select(
+        std::nullopt,
+        kind == RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
+    std::vector<std::string> keys;
+    keys.reserve(256);
+    for (uint32_t value = 256; value > 0; --value) {
+      std::string key(40, 's');
+      key[layout.inlineCapacity() - 1] = static_cast<char>(value);
+      keys.push_back(std::move(key));
+    }
+    verifyAgainstOracle(keys, kind, {}, 31, 4096, layout);
   }
-  verifyAgainstOracle(
-      keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32, {}, 31, 4096, layout);
 }
 
 TEST_F(RadixSortRunSorterTest, lowCardinalityVariableStringKeyMatchesOracle) {
@@ -601,12 +606,17 @@ TEST_F(RadixSortRunSorterTest, fixedWideSuffixBytesSortBeforeFallback) {
       4096, [](auto row) { return fixedWideKey((4096 - row) % 257, 32); });
   verifyAgainstOracle(keys, RadixSortKeyLayoutKind::kKeyOnlyFixed32);
 
-  auto payloadKeys = makeKeys(4096, [](auto row) {
-    const auto value = 4096 - row;
-    return fixedWideKey(value % 257, 24, static_cast<char>('a' + value % 4));
-  });
-  verifyAgainstOracle(
-      payloadKeys, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32);
+  for (const auto& [kind, width] :
+       {std::pair{RadixSortKeyLayoutKind::kKeyWithPayloadFixed16, 10U},
+        std::pair{RadixSortKeyLayoutKind::kKeyWithPayloadFixed24, 18U},
+        std::pair{RadixSortKeyLayoutKind::kKeyWithPayloadFixed32, 26U}}) {
+    auto payloadKeys = makeKeys(4096, [width](auto row) {
+      const auto value = 4096 - row;
+      return fixedWideKey(
+          value % 257, width, static_cast<char>('a' + value % 4));
+    });
+    verifyAgainstOracle(payloadKeys, kind);
+  }
 }
 
 TEST_F(RadixSortRunSorterTest, radixPrefixBeyondEightBytesSortsLateBytes) {

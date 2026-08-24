@@ -47,7 +47,7 @@ uint64_t checkedTotalSize(
 
 uint32_t spilledKeyFixedSize(const RadixSortKeyLayout& layout) {
   if (layout.isVariable()) {
-    return *layout.dataOffset() + sizeof(uint64_t);
+    return *layout.dataOffset() + kCompactPointerBytes;
   }
   return layout.hasPayload() ? *layout.payloadOffset() : layout.width();
 }
@@ -147,8 +147,8 @@ void trustedRestoreKeyDataPointerInRow(
   auto* key = row + RadixSortSpillRow::kHeaderSize;
   const auto size = loadUnaligned<uint64_t>(key + *layout.sizeOffset());
   if (layout.heapSize(size) > 0) {
-    const auto offset = loadUnaligned<uint64_t>(key + *layout.dataOffset());
-    storeUnaligned<char*>(key + *layout.dataOffset(), row + offset);
+    const auto offset = loadCompactUInt48(key + *layout.dataOffset());
+    storeCompactPointer(key + *layout.dataOffset(), row + offset);
   }
 }
 
@@ -236,7 +236,7 @@ void RadixSortSpillRow::serialize(
   if (size.keyHeapSize > 0) {
     auto* keyHeap = current + keyFixedSize;
     std::memcpy(keyHeap, radixKey.heapKeyData(), size.keyHeapSize);
-    storeUnaligned<uint64_t>(
+    storeCompactUInt48(
         current + *keyLayout.dataOffset(),
         static_cast<uint64_t>(keyHeap - destination));
   }

@@ -210,6 +210,10 @@ class RadixSortRun {
     return variableKeysFitRadixPrefix_;
   }
 
+  uint64_t maximumEncodedKeySize() const {
+    return currentRunMaximumEncodedKeySize_;
+  }
+
   bool decodesVariableKeysFromInline() const {
     return decodeVariableKeysFromInline_;
   }
@@ -298,6 +302,7 @@ class RadixSortRun {
   // Current in-memory run only; used by finalize radix pass skipping.
   std::vector<uint8_t> currentRunKeyMayHaveNulls_;
   std::vector<uint8_t> payloadMayHaveNulls_;
+  uint64_t currentRunMaximumEncodedKeySize_{0};
   bool variableKeysFitRadixPrefix_{false};
   bool decodeVariableKeysFromInline_{false};
   RadixSortRunState state_{RadixSortRunState::kBuilding};

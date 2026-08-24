@@ -217,28 +217,26 @@ class RadixSortRunStorage {
   friend class RadixSortKeyCodec;
 
   template <typename Encode>
-  bool appendVariableKeyBatch(
+  uint64_t appendVariableKeyBatch(
       std::span<const uint64_t> heapSizes,
       std::span<char* const> payloads,
       Encode encode) {
     BOLT_DCHECK(layout_.isVariable());
     BOLT_DCHECK(payloads.empty() || payloads.size() == heapSizes.size());
 
-    bool keysFitRadixPrefix = true;
-    const auto inlineSuffixCapacity =
-        layout_.radixWidth() - layout_.heapKeyOffset();
+    uint64_t maximumHeapSize = 0;
     appendKeyBlocks(
         heapSizes.size(),
         [&](vector_size_t source, vector_size_t count, char* destination) {
           for (vector_size_t row = 0; row < count; ++row) {
             const auto inputRow = source + row;
-            if (keysFitRadixPrefix &&
-                heapSizes[inputRow] > inlineSuffixCapacity) {
-              keysFitRadixPrefix = false;
-            }
+            maximumHeapSize = std::max(maximumHeapSize, heapSizes[inputRow]);
             auto* record =
                 destination + static_cast<uint64_t>(row) * layout_.width();
-            std::memset(record, 0, layout_.inlineCapacity());
+            std::memset(
+                record + layout_.heapKeyOffset(),
+                0,
+                layout_.inlineCapacity() - layout_.heapKeyOffset());
 
             char* heap;
             BOLT_DCHECK_GT(heapSizes[inputRow], 0);
@@ -246,16 +244,16 @@ class RadixSortRunStorage {
             storeUnaligned<uint64_t>(
                 record + *layout_.sizeOffset(),
                 layout_.heapKeyOffset() + heapSizes[inputRow]);
-            storeUnaligned<char*>(record + *layout_.dataOffset(), heap);
+            storeCompactPointer(record + *layout_.dataOffset(), heap);
             if (layout_.hasPayload()) {
-              storeUnaligned<char*>(
+              storeCompactPointer(
                   record + *layout_.payloadOffset(),
                   payloads.empty() ? nullptr : payloads[inputRow]);
             }
           }
           encode(source, count, destination);
         });
-    return keysFitRadixPrefix;
+    return layout_.heapKeyOffset() + maximumHeapSize;
   }
 
   using BlockVector =
