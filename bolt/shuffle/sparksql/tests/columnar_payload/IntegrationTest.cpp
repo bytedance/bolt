@@ -25,18 +25,24 @@
 ///   2. Fill in the write() or read() body you own.
 ///   3. Delete DISABLED_ from the test names that now apply.
 ///
+/// A Reader can be built in two stages, and the tests are split to match.
+/// Stage one asks only for the simplest payload the format allows: every
+/// block PLAIN, no dictionary, nothing compressed, one Run. Stage two asks
+/// for everything. Passing stage one is worth having on its own, so it is a
+/// separate test rather than a comment about which failures to ignore.
+///
+/// The Writer direction is not staged, and the comment on its test explains
+/// why: the reference validator accepts any conforming payload, so a Writer
+/// that only ever emits PLAIN passes exactly the same test as one that uses
+/// every encoding. Nothing needs relaxing for it. Types that are not done
+/// yet belong in supports().
+///
 /// Order matters. Write the two mixed tests before the engine-to-engine one:
 /// a Writer tested only against its own Reader, and a Reader tested only
 /// against its own Writer, agree on any misreading of the format they happen
 /// to share, and the engine-to-engine test alone cannot tell that apart from
 /// both being right. Breaking that symmetry is why the reference
 /// implementation exists.
-///
-/// While one side is still missing, vary the reference on the other to widen
-/// what is being asked of yours. A reference Writer built with
-/// `encodingPolicy = kRotate` or `minimalEncodingWidth = false` emits legal
-/// payloads the engine's Writer may never produce but a Reader still has to
-/// accept.
 ///
 /// Format: bolt/shuffle/sparksql/ColumnarPayloadFormat.md
 /// Seam:   bolt/shuffle/sparksql/tests/columnar_payload/Conformance.h
@@ -151,6 +157,58 @@ class EngineReader : public PayloadReader {
   Codec& codec_;
 };
 
+/// The narrowest payload the format allows. Every knob that adds a decode
+/// path is off: blocks are PLAIN so no narrowing, bit packing or frame of
+/// reference appears; strings are RAW so there is no dictionary sequence and
+/// no index segment; nothing is compressed so the codec is never called; and
+/// a single SEPARATE Run means one buffer per stream with no concatenation.
+///
+/// What is left is still not trivial, and cannot be: null bitmaps, the tail
+/// block at the end of a stream, and the string length stream are part of
+/// every payload the format can produce.
+GeneratorOptions plainOptions() {
+  GeneratorOptions options;
+  options.encodingPolicy = EncodingPolicy::kForcePlain;
+  options.useDictionary = false;
+  options.compress = false;
+  options.compressNullBody = false;
+  options.layout = CompressionLayout::kSeparate;
+  options.runCount = 1;
+  options.minimalEncodingWidth = true;
+  options.degenerateNullTags = true;
+  return options;
+}
+
+/// Configurations covering the paths plainOptions() leaves out. Together with
+/// it they reach every encoding the format defines, which the coverage test
+/// in PayloadTest.cpp asserts rather than assumes.
+std::vector<GeneratorOptions> everyEncodingOptions() {
+  std::vector<GeneratorOptions> all;
+  for (const auto layout :
+       {CompressionLayout::kCombined,
+        CompressionLayout::kSeparate,
+        CompressionLayout::kCombinedStored}) {
+    for (const bool useDictionary : {false, true}) {
+      for (const auto policy :
+           {EncodingPolicy::kAuto,
+            EncodingPolicy::kRotate,
+            EncodingPolicy::kForceConstNarrow}) {
+        GeneratorOptions options;
+        options.layout = layout;
+        options.compress = layout == CompressionLayout::kCombined;
+        options.runCount = 3;
+        options.useDictionary = useDictionary;
+        options.encodingPolicy = policy;
+        // Legal but not minimal, so a Reader cannot assume the Writer always
+        // picks the smallest body.
+        options.minimalEncodingWidth = policy != EncodingPolicy::kRotate;
+        all.push_back(options);
+      }
+    }
+  }
+  return all;
+}
+
 class ColumnarPayloadIntegrationTest : public testing::Test,
                                        public bolt::test::VectorTestBase {
  protected:
@@ -159,9 +217,11 @@ class ColumnarPayloadIntegrationTest : public testing::Test,
   }
 };
 
-/// Enable once EngineWriter::write is implemented. This is the test that says
-/// the Writer's output conforms and decodes to what went in, judged by an
-/// implementation that shares no code with it.
+/// Writer. Enable once write() is implemented; there is no staged version of
+/// this one. The reference validator accepts any conforming payload, so a
+/// Writer that only emits PLAIN blocks and RAW strings passes exactly the
+/// test a Writer using every encoding does. Types not implemented yet belong
+/// in supports(), which counts them as skipped rather than failed.
 TEST_F(
     ColumnarPayloadIntegrationTest,
     DISABLED_engineWriterAgainstReferenceReader) {
@@ -174,27 +234,27 @@ TEST_F(
   EXPECT_GT(report.casesRun, 0u) << report.describe();
 }
 
-/// Enable once EngineReader::read is implemented. The Reader is fed payloads
-/// it did not produce, including legal shapes the engine's own Writer may
-/// never emit.
-TEST_F(
-    ColumnarPayloadIntegrationTest,
-    DISABLED_referenceWriterAgainstEngineReader) {
+/// Reader, stage one. Enable as soon as read() handles PLAIN blocks and RAW
+/// strings; none of the other decode paths are exercised here.
+TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnPlainPayloads) {
+  EngineCodec codec;
+  EngineReader reader{codec};
+  auto writer = makeReferenceWriter(codec, plainOptions());
+
+  const auto report = runConformanceSuite(*writer, reader, pool());
+  EXPECT_TRUE(report.ok()) << report.describe();
+  EXPECT_GT(report.casesRun, 0u) << report.describe();
+}
+
+/// Reader, stage two. Adds constant narrowing, bit packing, frame of
+/// reference, dictionaries with their RAW fallback, compression, the combined
+/// layouts, several Runs, and legal but non-minimal encodings the engine's own
+/// Writer may never emit.
+TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnEveryEncoding) {
   EngineCodec codec;
   EngineReader reader{codec};
 
-  for (const auto& options :
-       {GeneratorOptions{},
-        [] {
-          GeneratorOptions rotated;
-          rotated.encodingPolicy = EncodingPolicy::kRotate;
-          return rotated;
-        }(),
-        [] {
-          GeneratorOptions padded;
-          padded.minimalEncodingWidth = false;
-          return padded;
-        }()}) {
+  for (const auto& options : everyEncodingOptions()) {
     auto writer = makeReferenceWriter(codec, options);
     const auto report = runConformanceSuite(*writer, reader, pool());
     EXPECT_TRUE(report.ok()) << report.describe();
@@ -213,6 +273,46 @@ TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineWriterAgainstEngineReader)
   const auto report = runConformanceSuite(writer, reader, pool());
   EXPECT_TRUE(report.ok()) << report.describe();
   EXPECT_GT(report.casesRun, 0u) << report.describe();
+}
+
+/// Keeps plainOptions() honest. It is the contract stage one rests on, so
+/// the claim that it emits nothing but PLAIN blocks and no dictionaries is
+/// checked rather than trusted; a later change to the generator's defaults
+/// cannot quietly widen what stage one demands.
+TEST_F(ColumnarPayloadIntegrationTest, plainOptionsEmitOnlyPlainBlocks) {
+  IdentityCodec codec;
+  GenerationStats total;
+
+  for (const auto& entry : boundaryCorpus()) {
+    GeneratedPayload generated;
+    std::string error;
+    ColumnarPayloadGenerator generator(&codec, plainOptions());
+    ASSERT_TRUE(generator.generate(entry.table, generated, error))
+        << entry.name << ": " << error;
+    total.merge(generated.stats);
+  }
+
+  const auto kind = [&](EncodingKind value) {
+    return total.encodingKindBlocks[static_cast<size_t>(value)];
+  };
+  EXPECT_EQ(kind(EncodingKind::kConstNarrow), 0u);
+  EXPECT_EQ(kind(EncodingKind::kBitPack), 0u);
+  EXPECT_EQ(kind(EncodingKind::kForBitPack), 0u);
+  EXPECT_GT(kind(EncodingKind::kPlain), 0u);
+
+  EXPECT_EQ(total.dictionaries, 0u);
+  EXPECT_EQ(total.compressedBuffers, 0u);
+  EXPECT_EQ(
+      total.runLayouts[static_cast<size_t>(CompressionLayout::kCombined)], 0u);
+  EXPECT_EQ(
+      total.runLayouts[static_cast<size_t>(
+          CompressionLayout::kCombinedStored)],
+      0u);
+
+  // Not everything can be switched off: these are in every payload the format
+  // can produce, so stage one has to cover them.
+  EXPECT_GT(total.tailBlocks, 0u);
+  EXPECT_GT(total.nullTags[static_cast<size_t>(NullTag::kRawNull)], 0u);
 }
 
 /// Fails if the adapters above stop compiling, which is the point of keeping
