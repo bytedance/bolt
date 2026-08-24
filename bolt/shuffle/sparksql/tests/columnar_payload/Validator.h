@@ -43,36 +43,36 @@ namespace bytedance::bolt::shuffle::sparksql::test {
 /// The rules of format spec section 10, as one list that both the enumerator
 /// and its name come from. Values 1..19 are the L1 rules a Reader must
 /// implement; 20 and above are the optional L2 ones.
-#define BOLT_COLUMNAR_PAYLOAD_CHECKS(X)                                  \
-  X(kStructural, 0, "structural")                                        \
-  X(kFixedHeaderBounds, 1, "L1.1 fixed header bounds")                   \
-  X(kNullStoredSizeBounds, 2, "L1.2 null_stored_size bounds")            \
-  X(kEncodingTagsBounds, 3, "L1.3 encoding_tags bounds")                 \
-  X(kPayloadSizeBounds, 4, "L1.4 payload_size bounds")                   \
-  X(kNullDecodedSize, 5, "L1.5 null decoded size")                       \
-  X(kNullBodyExpectedSize, 6, "L1.6 null body expected size")            \
-  X(kReservedNullTag, 7, "L1.7 reserved NullTag")                        \
-  X(kCompressionLayoutValue, 8, "L1.8 compression_layout value")         \
-  X(kRunSizeOverflow, 9, "L1.9 run size overflow")                       \
-  X(kEmptyStreamSizes, 10, "L1.10 empty stream sizes")                   \
-  X(kBufferDecodedSize, 11, "L1.11 buffer decoded size")                 \
-  X(kCombinedDecodedSize, 12, "L1.12 combined decoded size")             \
-  X(kPlainParam, 13, "L1.13 PLAIN param")                                \
-  X(kConstNarrowParam, 14, "L1.14 CONST_NARROW param")                   \
-  X(kBitPackParam, 15, "L1.15 BIT_PACK param")                           \
-  X(kForBitPackParam, 16, "L1.16 FOR_BIT_PACK param")                    \
-  X(kBlockBodyBounds, 17, "L1.17 block body bounds")                     \
-  X(kDictionaryEntryBounds, 18, "L1.18 dictionary entry bounds")         \
-  X(kDictionaryIndexRange, 19, "L1.19 dictionary index range")           \
-  X(kStreamExhausted, 20, "L2.20 stream exhausted")                      \
-  X(kRawDataLength, 21, "L2.21 raw data length")                         \
-  X(kMatchedRowCount, 22, "L2.22 matched_row_count")                     \
-  X(kFallbackLengthSum, 23, "L2.23 fallback length sum")                 \
-  X(kEncodingTagNonString, 24, "L2.24 encoding tag on non-string")       \
-  X(kUnusedBitsZero, 25, "L2.25 unused bits zero")                       \
-  X(kDictionaryCapacity, 26, "L2.26 dictionary capacity")                \
-  X(kRunBoundaryStructure, 27, "L2.27 run boundary structure")           \
-  X(kMissingRuns, 28, "L2.28 missing runs")                              \
+#define BOLT_COLUMNAR_PAYLOAD_CHECKS(X)                            \
+  X(kStructural, 0, "structural")                                  \
+  X(kFixedHeaderBounds, 1, "L1.1 fixed header bounds")             \
+  X(kNullStoredSizeBounds, 2, "L1.2 null_stored_size bounds")      \
+  X(kEncodingTagsBounds, 3, "L1.3 encoding_tags bounds")           \
+  X(kPayloadSizeBounds, 4, "L1.4 payload_size bounds")             \
+  X(kNullDecodedSize, 5, "L1.5 null decoded size")                 \
+  X(kNullBodyExpectedSize, 6, "L1.6 null body expected size")      \
+  X(kReservedNullTag, 7, "L1.7 reserved NullTag")                  \
+  X(kCompressionLayoutValue, 8, "L1.8 compression_layout value")   \
+  X(kRunSizeOverflow, 9, "L1.9 run size overflow")                 \
+  X(kEmptyStreamSizes, 10, "L1.10 empty stream sizes")             \
+  X(kBufferDecodedSize, 11, "L1.11 buffer decoded size")           \
+  X(kCombinedDecodedSize, 12, "L1.12 combined decoded size")       \
+  X(kPlainParam, 13, "L1.13 PLAIN param")                          \
+  X(kConstNarrowParam, 14, "L1.14 CONST_NARROW param")             \
+  X(kBitPackParam, 15, "L1.15 BIT_PACK param")                     \
+  X(kForBitPackParam, 16, "L1.16 FOR_BIT_PACK param")              \
+  X(kBlockBodyBounds, 17, "L1.17 block body bounds")               \
+  X(kDictionaryEntryBounds, 18, "L1.18 dictionary entry bounds")   \
+  X(kDictionaryIndexRange, 19, "L1.19 dictionary index range")     \
+  X(kStreamExhausted, 20, "L2.20 stream exhausted")                \
+  X(kRawDataLength, 21, "L2.21 raw data length")                   \
+  X(kMatchedRowCount, 22, "L2.22 matched_row_count")               \
+  X(kFallbackLengthSum, 23, "L2.23 fallback length sum")           \
+  X(kEncodingTagNonString, 24, "L2.24 encoding tag on non-string") \
+  X(kUnusedBitsZero, 25, "L2.25 unused bits zero")                 \
+  X(kDictionaryCapacity, 26, "L2.26 dictionary capacity")          \
+  X(kRunBoundaryStructure, 27, "L2.27 run boundary structure")     \
+  X(kMissingRuns, 28, "L2.28 missing runs")                        \
   X(kForBitPackRange, 29, "L2.29 FOR_BIT_PACK result range")
 
 enum class Check : int {

@@ -167,4 +167,3 @@ add_test(
 )
 
 add_subdirectory(columnar_payload)
-

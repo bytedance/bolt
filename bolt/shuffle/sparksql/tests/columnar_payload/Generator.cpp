@@ -44,15 +44,13 @@ void appendBitPacked(
 
   size_t bitPos = 0;
   for (const uint64_t value : values) {
-    const uint64_t mask = bitWidth >= 64
-        ? std::numeric_limits<uint64_t>::max()
-        : ((1ULL << bitWidth) - 1);
+    const uint64_t mask = bitWidth >= 64 ? std::numeric_limits<uint64_t>::max()
+                                         : ((1ULL << bitWidth) - 1);
     const uint64_t masked = value & mask;
     for (size_t bit = 0; bit < bitWidth; ++bit) {
       if ((masked >> bit) & 1ULL) {
         const size_t absolute = bitPos + bit;
-        out[start + absolute / 8] |=
-            static_cast<uint8_t>(1u << (absolute % 8));
+        out[start + absolute / 8] |= static_cast<uint8_t>(1u << (absolute % 8));
       }
     }
     bitPos += bitWidth;
@@ -126,10 +124,8 @@ void addFreeRange(size_t begin, size_t end, std::vector<size_t>& out) {
 
 /// Picks `runCount` chunk boundaries, snapping each target to a legal split.
 /// The result always starts at 0 and ends at `size`.
-std::vector<size_t> chooseSplits(
-    size_t size,
-    std::vector<size_t> legal,
-    size_t runCount) {
+std::vector<size_t>
+chooseSplits(size_t size, std::vector<size_t> legal, size_t runCount) {
   legal.push_back(0);
   legal.push_back(size);
   std::sort(legal.begin(), legal.end());
@@ -140,8 +136,7 @@ std::vector<size_t> chooseSplits(
   splits.push_back(0);
   for (size_t run = 1; run < runCount; ++run) {
     const size_t target = size * run / runCount;
-    const auto it =
-        std::lower_bound(legal.begin(), legal.end(), splits.back());
+    const auto it = std::lower_bound(legal.begin(), legal.end(), splits.back());
     auto best = it;
     for (auto candidate = it; candidate != legal.end(); ++candidate) {
       if (*candidate > target) {
@@ -246,8 +241,7 @@ void ColumnarPayloadGenerator::encodeBlock(
   }
 
   // Candidate bodies, sized per RFC section 7.3.
-  const size_t constBytes =
-      allEqual ? narrowBytesFor(values[begin], width) : 0;
+  const size_t constBytes = allEqual ? narrowBytesFor(values[begin], width) : 0;
   const size_t bitWidth =
       signedBitWidthFor(values, begin, count, std::min<size_t>(63, width * 8));
   const uint64_t maxDelta =
@@ -324,8 +318,7 @@ void ColumnarPayloadGenerator::encodeBlock(
   // The RFC lets a Writer emit any legal parameter, not only the smallest
   // one. Widening here keeps the payload conforming while breaking any
   // Reader that infers body sizes from the data instead of the header.
-  const size_t narrowBytes =
-      options_.minimalEncodingWidth ? constBytes : width;
+  const size_t narrowBytes = options_.minimalEncodingWidth ? constBytes : width;
   const size_t packBits = options_.minimalEncodingWidth
       ? bitWidth
       : std::min<size_t>(63, width * 8);
@@ -417,7 +410,8 @@ bool ColumnarPayloadGenerator::buildEncodingLoopStream(
   return true;
 }
 
-StringEncoding ColumnarPayloadGenerator::stringEncodingFor(size_t column) const {
+StringEncoding ColumnarPayloadGenerator::stringEncodingFor(
+    size_t column) const {
   if (column < options_.stringEncodings.size()) {
     return options_.stringEncodings[column];
   }
@@ -702,8 +696,8 @@ bool ColumnarPayloadGenerator::generate(
     }
     tags[column] = tag;
     stats_.nullTags[static_cast<size_t>(tag)]++;
-    nullBody[column / 4] |= static_cast<uint8_t>(
-        static_cast<uint8_t>(tag) << ((column % 4) * 2));
+    nullBody[column / 4] |=
+        static_cast<uint8_t>(static_cast<uint8_t>(tag) << ((column % 4) * 2));
   }
   for (size_t column = 0; column < columnCount; ++column) {
     if (tags[column] != NullTag::kRawNull) {
@@ -772,8 +766,8 @@ bool ColumnarPayloadGenerator::generate(
 
   // COMBINED needs the codec, so it is only reachable when compression is on;
   // COMBINED_STORED is its stored counterpart.
-  const CompressionLayout defaultLayout = options_.layout ==
-          CompressionLayout::kSeparate
+  const CompressionLayout defaultLayout =
+      options_.layout == CompressionLayout::kSeparate
       ? CompressionLayout::kSeparate
       : (options_.compress ? CompressionLayout::kCombined
                            : CompressionLayout::kCombinedStored);
@@ -1065,8 +1059,9 @@ std::vector<NamedTable> boundaryCorpus() {
   {
     std::vector<std::string> values;
     for (size_t i = 0; i < 60; ++i) {
-      values.push_back(std::string(20, static_cast<char>('a' + (i % 26))) +
-                       std::to_string(i));
+      values.push_back(
+          std::string(20, static_cast<char>('a' + (i % 26))) +
+          std::to_string(i));
     }
     add("highCardinality", oneColumn(stringColumn(std::move(values))));
   }

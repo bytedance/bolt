@@ -16,14 +16,15 @@
 
 /// Shared definitions for the Shuffle Payload binary format.
 ///
-/// Normative reference: bolt/shuffle/sparksql/ColumnarPayloadFormat.md. Every constant and
-/// enumerator here mirrors a value fixed by that document; changing one is a
-/// wire format change and must follow the update rules in its section 11.
+/// Normative reference: bolt/shuffle/sparksql/ColumnarPayloadFormat.md. Every
+/// constant and enumerator here mirrors a value fixed by that document;
+/// changing one is a wire format change and must follow the update rules in its
+/// section 11.
 ///
 /// This header and its two implementations (ColumnarPayloadGenerator,
-/// ColumnarPayloadValidator) deliberately depend on nothing but the standard library.
-/// They are the reference oracle used to test the real Writer / Reader, so
-/// they must not share code with them.
+/// ColumnarPayloadValidator) deliberately depend on nothing but the standard
+/// library. They are the reference oracle used to test the real Writer /
+/// Reader, so they must not share code with them.
 
 #pragma once
 
