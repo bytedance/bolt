@@ -35,10 +35,10 @@ void appendLe(std::vector<uint8_t>& out, uint64_t value, size_t bytes) {
   }
 }
 
-/// Appendix B of bolt/shuffle/sparksql/ColumnarPayloadFormat.md, byte for byte. The document
-/// declares that vector part of the specification, so it is spelled out here
-/// rather than produced by the generator: it pins the wire format itself, and
-/// a change here means the format changed.
+/// Appendix B of bolt/shuffle/sparksql/ColumnarPayloadFormat.md, byte for byte.
+/// The document declares that vector part of the specification, so it is
+/// spelled out here rather than produced by the generator: it pins the wire
+/// format itself, and a change here means the format changed.
 std::vector<uint8_t> appendixBPayload() {
   std::vector<uint8_t> payload;
   appendLe(payload, 3, 4); // row_count
@@ -183,8 +183,7 @@ TEST(ColumnarPayloadVariationTest, nonMinimalEncodingWidthsAreAccepted) {
   GeneratedPayload minimalPayload;
   std::string error;
   ColumnarPayloadGenerator minimalGenerator(&codec, minimal);
-  ASSERT_TRUE(minimalGenerator.generate(table, minimalPayload, error))
-      << error;
+  ASSERT_TRUE(minimalGenerator.generate(table, minimalPayload, error)) << error;
 
   GeneratorOptions padded;
   padded.minimalEncodingWidth = false;
@@ -216,8 +215,7 @@ TEST(ColumnarPayloadVariationTest, stringEncodingVariesPerColumn) {
   }
 
   GeneratorOptions options;
-  options.stringEncodings = {
-      StringEncoding::kRaw, StringEncoding::kDictionary};
+  options.stringEncodings = {StringEncoding::kRaw, StringEncoding::kDictionary};
 
   GeneratedPayload generated;
   std::string error;
@@ -442,8 +440,7 @@ TEST_F(ColumnarPayloadCorpusTest, boundaryVectorsRoundTrip) {
       EXPECT_TRUE(decoded.result.ok())
           << entry.name << ": " << decoded.result.describe();
       ASSERT_NE(decoded.decoded, nullptr) << entry.name;
-      bytedance::bolt::test::assertEqualVectors(
-          entry.vector, decoded.decoded);
+      bytedance::bolt::test::assertEqualVectors(entry.vector, decoded.decoded);
     }
   }
 }
@@ -902,7 +899,8 @@ TEST(ColumnarPayloadRuleTest, truncationNeverValidates) {
     ValidationOptions validationOptions;
     validationOptions.payloadSizeProvided = true;
     validationOptions.payloadSize = truncated.size();
-    ColumnarPayloadValidator validator(&codec, table.schema(), validationOptions);
+    ColumnarPayloadValidator validator(
+        &codec, table.schema(), validationOptions);
     // A short payload must be rejected rather than read past its end; the
     // sanitizer builds enforce the second half of that.
     EXPECT_FALSE(validator.validate(truncated).ok()) << "size " << size;

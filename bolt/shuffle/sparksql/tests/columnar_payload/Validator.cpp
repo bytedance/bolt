@@ -85,10 +85,7 @@ int64_t signExtend(uint64_t value, size_t bits) {
   return static_cast<int64_t>(masked);
 }
 
-uint64_t readBitPacked(
-    const uint8_t* data,
-    size_t bitOffset,
-    size_t bitWidth) {
+uint64_t readBitPacked(const uint8_t* data, size_t bitOffset, size_t bitWidth) {
   uint64_t value = 0;
   for (size_t bit = 0; bit < bitWidth; ++bit) {
     const size_t absolute = bitOffset + bit;
@@ -143,8 +140,7 @@ bool isLevelOne(Check check) {
 
 bool ValidationResult::okAtLevelOne() const {
   for (const auto& violation : violations) {
-    if (isLevelOne(violation.check) ||
-        violation.check == Check::kStructural) {
+    if (isLevelOne(violation.check) || violation.check == Check::kStructural) {
       return false;
     }
   }
@@ -268,9 +264,8 @@ bool ColumnarPayloadValidator::decodeEncodingLoop(
   out.reserve(valueCount);
 
   for (size_t block = 0; block < blockCount; ++block) {
-    const size_t sourceBytes = block < fullBlocks
-        ? kEncodingBlockSourceBytes
-        : tailSourceBytes;
+    const size_t sourceBytes =
+        block < fullBlocks ? kEncodingBlockSourceBytes : tailSourceBytes;
     const size_t blockValues = sourceBytes / width;
 
     const size_t blockBegin = offset;
@@ -431,8 +426,7 @@ bool ColumnarPayloadValidator::decodeEncodingLoop(
               result,
               Check::kPlainParam,
               offset - 1,
-              "PLAIN encoding_param must be 0, found " +
-                  std::to_string(param));
+              "PLAIN encoding_param must be 0, found " + std::to_string(param));
           consumed = stream.size();
           return false;
         }
@@ -517,8 +511,7 @@ void ColumnarPayloadValidator::decodeColumn(
     if (stream.size() != expected) {
       report(
           result,
-          options_.enableLevelTwo ? Check::kRawDataLength
-                                  : Check::kStructural,
+          options_.enableLevelTwo ? Check::kRawDataLength : Check::kStructural,
           0,
           "raw stream is " + std::to_string(stream.size()) +
               " bytes, expected " + std::to_string(expected));
@@ -682,8 +675,8 @@ void ColumnarPayloadValidator::decodeColumn(
             result,
             Check::kDictionaryCapacity,
             offset - 1,
-            "dictionary entry length " + std::to_string(length) +
-                " exceeds " + std::to_string(kMaxDictionaryEntryLength));
+            "dictionary entry length " + std::to_string(length) + " exceeds " +
+                std::to_string(kMaxDictionaryEntryLength));
       }
       serialized += 1 + length;
       if (length > dataStream.size() - offset) {
@@ -718,8 +711,7 @@ void ColumnarPayloadValidator::decodeColumn(
   if (matchedTotal > nonNull) {
     report(
         result,
-        options_.enableLevelTwo ? Check::kMatchedRowCount
-                                : Check::kStructural,
+        options_.enableLevelTwo ? Check::kMatchedRowCount : Check::kStructural,
         0,
         "matched_row_count sum " + std::to_string(matchedTotal) +
             " exceeds the non-null count " + std::to_string(nonNull));
@@ -748,7 +740,8 @@ void ColumnarPayloadValidator::decodeColumn(
             result,
             Check::kDictionaryIndexRange,
             indexOffset - 1,
-            "index " + std::to_string(index) + " is not below the entry count " +
+            "index " + std::to_string(index) +
+                " is not below the entry count " +
                 std::to_string(dictionary.entries.size()));
         return;
       }
@@ -959,8 +952,7 @@ ValidationResult ColumnarPayloadValidator::validate(
   // options_.maxRowCount above and rawNullColumnCount is bounded by the
   // schema, which is trusted external context.
   const size_t bitmapBytes = (static_cast<size_t>(rowCount) + 7) / 8;
-  const size_t expectedNullBody =
-      tagBytes + rawNullColumnCount * bitmapBytes;
+  const size_t expectedNullBody = tagBytes + rawNullColumnCount * bitmapBytes;
   if (nullBody.size() != expectedNullBody) {
     report(
         result,
@@ -1231,8 +1223,7 @@ ValidationResult ColumnarPayloadValidator::validate(
       size_t sliceOffset = 0;
       for (size_t i = 0; i < streamTotal; ++i) {
         const auto begin = static_cast<ptrdiff_t>(sliceOffset);
-        const auto end =
-            static_cast<ptrdiff_t>(sliceOffset + decodedSizes[i]);
+        const auto end = static_cast<ptrdiff_t>(sliceOffset + decodedSizes[i]);
         streams[i].insert(
             streams[i].end(), combined.begin() + begin, combined.begin() + end);
         runBoundaries[i].push_back(streams[i].size());

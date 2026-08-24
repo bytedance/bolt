@@ -34,10 +34,7 @@ newFlat(const TypePtr& type, vector_size_t size, memory::MemoryPool* pool) {
 
 /// Reads an integral child, widening to the int64_t the encoder works on.
 template <typename T>
-void readIntegral(
-    const VectorPtr& child,
-    vector_size_t size,
-    FlatColumn& out) {
+void readIntegral(const VectorPtr& child, vector_size_t size, FlatColumn& out) {
   const auto* flat = asFlat<T>(child);
   for (vector_size_t row = 0; row < size; ++row) {
     const bool isNull = flat->isNullAt(row);
@@ -49,10 +46,7 @@ void readIntegral(
 }
 
 template <typename T>
-void readFloating(
-    const VectorPtr& child,
-    vector_size_t size,
-    FlatColumn& out) {
+void readFloating(const VectorPtr& child, vector_size_t size, FlatColumn& out) {
   const auto* flat = asFlat<T>(child);
   for (vector_size_t row = 0; row < size; ++row) {
     const bool isNull = flat->isNullAt(row);
