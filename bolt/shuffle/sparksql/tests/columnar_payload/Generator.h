@@ -165,10 +165,8 @@ class ColumnarPayloadGenerator {
   /// Returns false and fills `error` when the table violates a constraint the
   /// format cannot express, for example a value outside its type's range or a
   /// column whose value count disagrees with its null bitmap.
-  bool generate(
-      const FlatTable& table,
-      GeneratedPayload& out,
-      std::string& error);
+  bool
+  generate(const FlatTable& table, GeneratedPayload& out, std::string& error);
 
  private:
   struct StreamSet;

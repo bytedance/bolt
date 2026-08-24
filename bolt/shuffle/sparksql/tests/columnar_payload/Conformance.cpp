@@ -16,7 +16,6 @@
 
 #include "bolt/shuffle/sparksql/tests/columnar_payload/Conformance.h"
 
-
 namespace bytedance::bolt::shuffle::sparksql::test {
 namespace {
 
@@ -236,8 +235,9 @@ ConformanceReport runConformanceSuite(
   // a different codec decodes garbage with nothing to flag it. Catch the
   // misconfiguration here, where it can be named.
   if (std::string(writer.codec().name()) != reader.codec().name()) {
-    fail(std::string("writer compresses with ") + writer.codec().name() +
-         " but reader decompresses with " + reader.codec().name());
+    fail(
+        std::string("writer compresses with ") + writer.codec().name() +
+        " but reader decompresses with " + reader.codec().name());
     return report;
   }
 
@@ -291,8 +291,9 @@ ConformanceReport runConformanceSuite(
       RowVectorPtr ignored;
       std::string readerError;
       if (reader.read(broken, rowType, ignored, readerError)) {
-        fail(where + ": accepted a payload with " +
-             std::string(corruption.name));
+        fail(
+            where + ": accepted a payload with " +
+            std::string(corruption.name));
       }
     }
   }
