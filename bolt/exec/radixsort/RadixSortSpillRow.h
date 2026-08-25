@@ -16,98 +16,131 @@
 
 #pragma once
 
-#include <span>
-#include <string_view>
+#include <cstdint>
+#include <optional>
+#include <vector>
 
 #include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortKey.h"
 
 namespace bytedance::bolt::exec::radixsort {
 
-struct RadixSortSpillRowHeader {
-  uint32_t totalSize;
+enum class RadixSortSpillKeyHeapMode : uint8_t {
+  kNone,
+  kVariableFixedSize,
+  kVariableRowSize,
 };
 
-static_assert(sizeof(RadixSortSpillRowHeader) == 4);
-static_assert(std::is_trivially_copyable_v<RadixSortSpillRowHeader>);
+enum class RadixSortSpillPayloadVariableKind : uint8_t {
+  kString,
+  kComplex,
+};
 
-struct RadixSortSpillRunMeta {
+struct RadixSortSpillPayloadVariableOp {
+  uint64_t offset{0};
+  uint32_t width{0};
+  uint32_t nullByte{0};
+  uint8_t nullMask{0};
+  RadixSortSpillPayloadVariableKind kind{
+      RadixSortSpillPayloadVariableKind::kString};
+};
+
+struct RadixRow2RowSerdeMeta {
   RadixSortKeyLayout keyLayout;
-  uint32_t payloadFixedSize{0};
+  uint64_t payloadFixedSize{0};
+
+  uint32_t spilledKeyRecordSize{0};
+  uint32_t runtimeKeyRecordSize{0};
+  uint32_t keyHeapOffset{0};
+  uint32_t keySizeOffset{0};
+  uint32_t keyDataOffset{0};
+  uint32_t keyPayloadOffset{0};
+  RadixSortSpillKeyHeapMode keyHeapMode{RadixSortSpillKeyHeapMode::kNone};
+  uint64_t fixedKeyHeapSize{0};
+
+  bool hasPayload{false};
+  std::vector<RadixSortSpillPayloadVariableOp> payloadVariableOps;
+
+  static RadixRow2RowSerdeMeta create(
+      RadixSortKeyLayout keyLayout,
+      const PayloadRowLayout* payloadLayout);
+
+  void initialize(const PayloadRowLayout* payloadLayout);
+
+  bool hasKeyHeap() const {
+    return keyHeapMode != RadixSortSpillKeyHeapMode::kNone;
+  }
+
+  bool hasVariablePayload() const {
+    return !payloadVariableOps.empty();
+  }
 };
+
+using RadixSortSpillRunMeta = RadixRow2RowSerdeMeta;
 
 struct RadixSortSpillRowSize {
-  uint32_t totalSize{0};
-  uint32_t keySize{0};
-  uint32_t payloadFixedSize{0};
+  uint64_t totalSize{0};
+  uint64_t keySize{0};
+  uint64_t payloadFixedSize{0};
   uint64_t payloadHeapSize{0};
   uint64_t keyHeapSize{0};
+  uint64_t runtimeSize{0};
+  const char* payload{nullptr};
+  const char* payloadHeap{nullptr};
+};
+
+struct RadixSortSpillDeserializedRow {
+  const char* nextInput{nullptr};
+  char* nextOutput{nullptr};
+  char* key{nullptr};
   char* payload{nullptr};
 };
 
 class RadixSortSpillRow {
  public:
   static constexpr uint16_t kVersion = 1;
-  static constexpr uint64_t kHeaderSize = sizeof(RadixSortSpillRowHeader);
 
-  static uint32_t keyFixedSize(const RadixSortKeyLayout& keyLayout);
+  static uint32_t keyRecordCopySize(const RadixSortKeyLayout& keyLayout);
+
+  static uint64_t fixedSerializedRowSize(const RadixRow2RowSerdeMeta& meta);
+
+  static uint64_t fixedRuntimeRowSize(const RadixRow2RowSerdeMeta& meta);
 
   static RadixSortSpillRowSize sizeForSerialize(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
+      const RadixRow2RowSerdeMeta& meta,
       const char* key);
 
   static RadixSortSpillRowSize sizeForSerialize(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
+      const RadixRow2RowSerdeMeta& meta,
       const char* key,
-      char* payload);
+      const char* payload);
+
+  static std::optional<RadixSortSpillRowSize> sizeFromDisk(
+      const RadixRow2RowSerdeMeta& meta,
+      const char* row,
+      uint64_t available);
+
+  static char* serializeRow(
+      const RadixRow2RowSerdeMeta& meta,
+      const char* key,
+      const char* payload,
+      char* out);
+
+  static RadixSortSpillDeserializedRow deserializeRow(
+      const RadixRow2RowSerdeMeta& meta,
+      const char* in,
+      const RadixSortSpillRowSize& size,
+      char* out);
+
+  static uint64_t maxRuntimeSizeForBlock(
+      const RadixRow2RowSerdeMeta& meta,
+      uint64_t serializedBlockSize);
 
   static void serialize(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
-      const char* key,
-      char* destination);
-
-  static void serialize(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
+      const RadixRow2RowSerdeMeta& meta,
       const char* key,
       const RadixSortSpillRowSize& size,
       char* destination);
-
-  explicit RadixSortSpillRow(char* row) : row_(row) {}
-
-  explicit RadixSortSpillRow(const char* row) : row_(const_cast<char*>(row)) {}
-
-  void validate(const RadixSortSpillRunMeta& meta) const;
-
-  RadixSortSpillRowHeader header() const;
-
-  uint32_t totalSize() const {
-    return header().totalSize;
-  }
-
-  uint32_t trustedKeySize(const RadixSortSpillRunMeta& meta) const;
-
-  uint32_t trustedPayloadHeapSize(const RadixSortSpillRunMeta& meta) const;
-
-  std::string_view trustedKeyBytes(const RadixSortSpillRunMeta& meta) const;
-
-  char* trustedPayloadFixed(const RadixSortSpillRunMeta& meta) const;
-
-  char* trustedPayloadHeap(const RadixSortSpillRunMeta& meta) const;
-
-  void trustedRestoreKeyDataPointer(const RadixSortSpillRunMeta& meta) const;
-
-  void trustedRestorePayloadPointers(
-      const RadixSortSpillRunMeta& meta,
-      const PayloadRowLayout& payloadLayout) const;
-
- private:
-  char* trustedPayloadFixedOrEnd(const RadixSortSpillRunMeta& meta) const;
-
-  char* row_;
 };
 
 } // namespace bytedance::bolt::exec::radixsort

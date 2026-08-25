@@ -2144,7 +2144,7 @@ TEST_P(OrderByTest, maxSpillBytes) {
     std::string debugString() const {
       return fmt::format("maxSpilledBytes {}", maxSpilledBytes);
     }
-  } testSettings[] = {{1 << 30, false}, {16 << 20, true}, {0, false}};
+  } testSettings[] = {{1 << 30, false}, {1 << 20, true}, {0, false}};
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
@@ -2164,7 +2164,7 @@ TEST_P(OrderByTest, maxSpillBytes) {
       ASSERT_TRUE(testData.expectedExceedLimit);
       ASSERT_NE(
           e.message().find(
-              "Query exceeded per-query local spill limit of 16.00MB"),
+              "Query exceeded per-query local spill limit of 1.00MB"),
           std::string::npos);
       ASSERT_EQ(
           e.errorCode(), bytedance::bolt::error_code::kSpillLimitExceeded);

@@ -36,6 +36,7 @@ struct RadixSortSpillFile {
 };
 
 struct RadixSortSpillReadBufferCache {
+  BufferPtr serializedBuffer;
   BufferPtr rowBuffer;
 };
 
@@ -79,20 +80,14 @@ class RadixSortSpillWriter {
 
   void ensureRowFits(uint64_t rowSize);
 
-  void appendRow(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
-      const char* key);
+  void appendRow(const RadixRow2RowSerdeMeta& meta, const char* key);
 
-  void appendRow(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
-      const char* key,
-      char* payload);
+  void
+  appendRow(const RadixRow2RowSerdeMeta& meta, const char* key, char* payload);
 
   template <RadixSortKeyLayoutKind KIND>
   void appendFixedRows(
-      const PayloadRowLayout* payloadLayout,
+      const RadixRow2RowSerdeMeta& meta,
       const char* keys,
       vector_size_t count);
 
@@ -148,6 +143,11 @@ class RadixSortSpillReader {
         retainedRowBuffers_.push_back(std::move(rowBuffer_));
       }
       recycleRetainedRowBuffer();
+      if (bufferCache_ == nullptr) {
+        serializedBuffer_.reset();
+      } else {
+        recycleSerializedBuffer();
+      }
       compressedBuffer_.reset();
       return;
     }
@@ -155,13 +155,18 @@ class RadixSortSpillReader {
   }
 
  private:
-  void acquireRowBuffer(int32_t size);
+  void acquireSerializedBuffer(uint64_t size);
+
+  void recycleSerializedBuffer();
+
+  void acquireRowBuffer(uint64_t size);
 
   void recycleRetainedRowBuffer();
 
   bool nextFixedBatch(
       char* block,
       int32_t uncompressedSize,
+      char* output,
       std::vector<char*>& keys,
       std::vector<char*>& payloads);
 
@@ -172,6 +177,7 @@ class RadixSortSpillReader {
   const uint64_t maxReusableRowBufferSize_;
   std::unique_ptr<SpillInputStream> input_;
   RadixSortSpillReadBufferCache* const bufferCache_;
+  BufferPtr serializedBuffer_;
   BufferPtr rowBuffer_;
   std::vector<BufferPtr> retainedRowBuffers_;
   BufferPtr compressedBuffer_;

@@ -526,12 +526,8 @@ void RadixSortBuffer::accumulateSpillReadStats() {
 void RadixSortBuffer::prepareMerge() {
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
   streams.reserve(spilledFiles_.size() + (run_->size() == 0 ? 0 : 1));
-  RadixSortSpillRunMeta meta{
-      run_->keyLayout(),
-      static_cast<uint32_t>(
-          run_->payloadLayout() == nullptr
-              ? 0
-              : run_->payloadLayout()->rowWidth())};
+  auto meta = RadixRow2RowSerdeMeta::create(
+      run_->keyLayout(), run_->payloadLayout().get());
   auto readBufferCache = std::make_unique<RadixSortSpillReadBufferCache>();
   for (const auto& file : spilledFiles_) {
     streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
