@@ -89,9 +89,7 @@ int32_t maxUncompressedBlockSize(common::CompressionKind kind) {
 }
 
 uint32_t checkedFixedRowSize(uint64_t keySize, uint64_t payloadFixedSize) {
-  auto rowSize = checkedAdd<uint64_t>(RadixSortSpillRow::kHeaderSize, keySize);
-  BOLT_CHECK(rowSize.has_value(), "Radix sort spill row size overflows");
-  rowSize = checkedAdd<uint64_t>(*rowSize, payloadFixedSize);
+  auto rowSize = checkedAdd<uint64_t>(keySize, payloadFixedSize);
   BOLT_CHECK(rowSize.has_value(), "Radix sort spill row size overflows");
   BOLT_CHECK_LE(
       *rowSize,
@@ -258,11 +256,12 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::writeRun(
   prepareWriteBuffer();
 
   const auto& keyLayout = storage.layout();
+  auto meta = RadixRow2RowSerdeMeta::create(keyLayout, payloadLayout);
   const auto payloadFixedOnly =
       payloadLayout == nullptr || !payloadLayout->hasVariableFields();
   const auto dispatchFixedRows = [&]<RadixSortKeyLayoutKind KIND>() {
     for (const auto& block : storage.keyBlocks()) {
-      appendFixedRows<KIND>(payloadLayout, block.base, block.count);
+      appendFixedRows<KIND>(meta, block.base, block.count);
     }
   };
   if (payloadFixedOnly) {
@@ -317,9 +316,7 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::writeRun(
   for (const auto& block : storage.keyBlocks()) {
     for (uint32_t row = 0; row < block.count; ++row) {
       appendRow(
-          keyLayout,
-          payloadLayout,
-          block.base + static_cast<uint64_t>(row) * keyLayout.width());
+          meta, block.base + static_cast<uint64_t>(row) * keyLayout.width());
     }
   }
   flush();
@@ -340,13 +337,14 @@ void RadixSortSpillWriter::writeRows(
     resetWriteState();
     prepareWriteBuffer();
   }
+  auto meta = RadixRow2RowSerdeMeta::create(keyLayout, payloadLayout);
   if (payloadLayout == nullptr) {
     for (vector_size_t row = 0; row < count; ++row) {
-      appendRow(keyLayout, nullptr, keys[row], nullptr);
+      appendRow(meta, keys[row], nullptr);
     }
   } else {
     for (vector_size_t row = 0; row < count; ++row) {
-      appendRow(keyLayout, payloadLayout, keys[row], payloads[row]);
+      appendRow(meta, keys[row], payloads[row]);
     }
   }
 }
@@ -374,20 +372,20 @@ void RadixSortSpillWriter::ensureRowFits(uint64_t rowSize) {
 }
 
 void RadixSortSpillWriter::appendRow(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* key) {
   appendRow(
-      keyLayout, payloadLayout, key, RadixSortKey(keyLayout, key).payload());
+      meta,
+      key,
+      meta.keyLayout.hasPayload() ? RadixSortKey(meta.keyLayout, key).payload()
+                                  : nullptr);
 }
 
 void RadixSortSpillWriter::appendRow(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* key,
     char* payload) {
-  const auto rowSize = RadixSortSpillRow::sizeForSerialize(
-      keyLayout, payloadLayout, key, payload);
+  const auto rowSize = RadixSortSpillRow::sizeForSerialize(meta, key, payload);
   if (FOLLY_UNLIKELY(
           rowSize.totalSize > static_cast<uint64_t>(end_ - current_))) {
     if (current_ > buffer_->as<char>() + kBlockHeaderSize) {
@@ -397,25 +395,20 @@ void RadixSortSpillWriter::appendRow(
       ensureRowFits(rowSize.totalSize);
     }
   }
-  RadixSortSpillRow::serialize(
-      keyLayout, payloadLayout, key, rowSize, current_);
+  RadixSortSpillRow::serialize(meta, key, rowSize, current_);
   current_ += rowSize.totalSize;
   ++currentFileRows_;
 }
 
 template <RadixSortKeyLayoutKind KIND>
 void RadixSortSpillWriter::appendFixedRows(
-    const PayloadRowLayout* payloadLayout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* keys,
     vector_size_t count) {
   using Traits = RadixSortKeyTraits<KIND>;
   static_assert(!Traits::kVariable);
-  const auto keySize =
-      RadixSortSpillRow::keyFixedSize(RadixSortKeyLayout::fromKind(KIND));
-  const auto payloadFixedSize =
-      payloadLayout == nullptr ? 0 : payloadLayout->rowWidth();
-  const auto rowSize = checkedFixedRowSize(keySize, payloadFixedSize);
-  RadixSortSpillRowHeader header{rowSize};
+  const auto rowSize =
+      checkedFixedRowSize(meta.spilledKeyRecordSize, meta.payloadFixedSize);
   const auto* key = keys;
   for (vector_size_t row = 0; row < count; ++row, key += Traits::kWidth) {
     if (FOLLY_UNLIKELY(rowSize > static_cast<uint64_t>(end_ - current_))) {
@@ -426,15 +419,14 @@ void RadixSortSpillWriter::appendFixedRows(
         ensureRowFits(rowSize);
       }
     }
-    storeUnaligned<RadixSortSpillRowHeader>(current_, header);
-    auto* cursor = current_ + RadixSortSpillRow::kHeaderSize;
-    std::memcpy(cursor, key, keySize);
-    cursor += keySize;
+    auto* cursor = current_;
+    std::memcpy(cursor, key, meta.spilledKeyRecordSize);
+    cursor += meta.spilledKeyRecordSize;
     if constexpr (Traits::kHasPayload) {
       std::memcpy(
           cursor,
           loadCompactPointer(key + Traits::kPayloadOffset),
-          payloadFixedSize);
+          meta.payloadFixedSize);
     }
     current_ += rowSize;
     ++currentFileRows_;
@@ -566,14 +558,48 @@ RadixSortSpillReader::RadixSortSpillReader(
           AlignedBuffer::kPaddedSize),
       input_(makeInputStream(file_, pool, spillUringEnabled)),
       bufferCache_(std::move(bufferCache)) {
-  if (payloadLayout_ != nullptr) {
-    BOLT_CHECK_EQ(meta_.payloadFixedSize, payloadLayout_->rowWidth());
-  } else {
-    BOLT_CHECK_EQ(meta_.payloadFixedSize, 0);
-  }
+  meta_.initialize(payloadLayout_);
 }
 
-void RadixSortSpillReader::acquireRowBuffer(int32_t size) {
+void RadixSortSpillReader::acquireSerializedBuffer(uint64_t size) {
+  if (serializedBuffer_ != nullptr && serializedBuffer_->capacity() >= size) {
+    serializedBuffer_->setSize(size);
+    return;
+  }
+  if (bufferCache_ != nullptr) {
+    auto& reusable = bufferCache_->serializedBuffer;
+    if (reusable != nullptr && reusable->isMutable() &&
+        reusable->capacity() >= size) {
+      serializedBuffer_ = std::move(reusable);
+      serializedBuffer_->setSize(size);
+      return;
+    }
+  }
+  serializedBuffer_ = AlignedBuffer::allocate<char>(size, pool_);
+}
+
+void RadixSortSpillReader::recycleSerializedBuffer() {
+  if (serializedBuffer_ == nullptr) {
+    return;
+  }
+  if (bufferCache_ == nullptr) {
+    return;
+  }
+  if (!serializedBuffer_->isMutable() ||
+      serializedBuffer_->size() > maxReusableRowBufferSize_) {
+    serializedBuffer_.reset();
+    return;
+  }
+  if (bufferCache_->serializedBuffer == nullptr ||
+      serializedBuffer_->capacity() >
+          bufferCache_->serializedBuffer->capacity()) {
+    bufferCache_->serializedBuffer = std::move(serializedBuffer_);
+    return;
+  }
+  serializedBuffer_.reset();
+}
+
+void RadixSortSpillReader::acquireRowBuffer(uint64_t size) {
   if (bufferCache_ != nullptr) {
     auto& reusable = bufferCache_->rowBuffer;
     if (reusable != nullptr && reusable->isMutable() &&
@@ -644,6 +670,21 @@ bool RadixSortSpillReader::nextBatch(
   if (rowBuffer_ != nullptr) {
     retainedRowBuffers_.push_back(std::move(rowBuffer_));
   }
+  const auto canUseDiskRowsAsRuntimeRows = meta_.payloadFixedSize == 0 &&
+      !meta_.keyLayout.hasPayload() && !meta_.hasKeyHeap();
+  const auto runtimeBufferBytes = canUseDiskRowsAsRuntimeRows
+      ? 0
+      : RadixSortSpillRow::maxRuntimeSizeForBlock(
+            meta_, static_cast<uint64_t>(uncompressedSize));
+  if (canUseDiskRowsAsRuntimeRows) {
+    acquireRowBuffer(uncompressedSize);
+  } else {
+    acquireSerializedBuffer(uncompressedSize);
+    acquireRowBuffer(runtimeBufferBytes);
+  }
+  auto* block = canUseDiskRowsAsRuntimeRows
+      ? rowBuffer_->asMutable<char>()
+      : serializedBuffer_->asMutable<char>();
   if (compressionEnabled(file_.compressionKind)) {
     if (file_.compressionKind == common::CompressionKind_LZ4) {
       BOLT_CHECK_LE(
@@ -656,8 +697,6 @@ bool RadixSortSpillReader::nextBatch(
       compressedBuffer_ = AlignedBuffer::allocate<char>(storedSize, pool_);
     }
     input_->readBytes(compressedBuffer_->asMutable<char>(), storedSize);
-    acquireRowBuffer(uncompressedSize);
-    auto* block = rowBuffer_->asMutable<char>();
     {
       MicrosecondTimer timer(&spillDecompressTimeUs_);
       decompressBlock(
@@ -668,95 +707,87 @@ bool RadixSortSpillReader::nextBatch(
           uncompressedSize);
     }
   } else {
-    acquireRowBuffer(uncompressedSize);
-    auto* block = rowBuffer_->asMutable<char>();
     input_->readBytes(block, uncompressedSize);
   }
 
-  auto* block = rowBuffer_->asMutable<char>();
-  auto* current = block;
-  auto* const end = block + uncompressedSize;
+  const char* current = block;
+  const char* const end = block + uncompressedSize;
+  auto* runtime = rowBuffer_->asMutable<char>();
   if (payloadLayout_ == nullptr || !payloadLayout_->hasVariableFields()) {
-    if (!meta_.keyLayout.isVariable()) {
-      if (nextFixedBatch(block, uncompressedSize, keys, payloads)) {
+    if (meta_.keyHeapMode != RadixSortSpillKeyHeapMode::kVariableRowSize) {
+      if (nextFixedBatch(block, uncompressedSize, runtime, keys, payloads)) {
+        if (!canUseDiskRowsAsRuntimeRows) {
+          recycleSerializedBuffer();
+        }
         return true;
       }
     }
   }
   bool validRows = true;
-  if (payloadLayout_ != nullptr) {
-    while (current < end) {
-      const auto remaining = static_cast<uint64_t>(end - current);
-      if (remaining < RadixSortSpillRow::kHeaderSize) {
-        validRows = false;
-        break;
-      }
-      auto row = RadixSortSpillRow(current);
-      const auto rowSize = row.totalSize();
-      const auto rowValid =
-          rowSize >= RadixSortSpillRow::kHeaderSize && rowSize <= remaining;
-      validRows &= rowValid;
-      if (!rowValid) {
-        break;
-      }
-      row.trustedRestoreKeyDataPointer(meta_);
-      row.trustedRestorePayloadPointers(meta_, *payloadLayout_);
-      keys.push_back(const_cast<char*>(row.trustedKeyBytes(meta_).data()));
-      payloads.push_back(row.trustedPayloadFixed(meta_));
-      current += rowSize;
+  while (current < end) {
+    const auto remaining = static_cast<uint64_t>(end - current);
+    const auto rowSize =
+        RadixSortSpillRow::sizeFromDisk(meta_, current, remaining);
+    validRows &= rowSize.has_value();
+    if (!rowSize.has_value()) {
+      break;
     }
-  } else {
-    while (current < end) {
-      const auto remaining = static_cast<uint64_t>(end - current);
-      if (remaining < RadixSortSpillRow::kHeaderSize) {
-        validRows = false;
-        break;
-      }
-      auto row = RadixSortSpillRow(current);
-      const auto rowSize = row.totalSize();
-      const auto rowValid =
-          rowSize >= RadixSortSpillRow::kHeaderSize && rowSize <= remaining;
-      validRows &= rowValid;
-      if (!rowValid) {
-        break;
-      }
-      row.trustedRestoreKeyDataPointer(meta_);
-      keys.push_back(const_cast<char*>(row.trustedKeyBytes(meta_).data()));
-      payloads.push_back(nullptr);
-      current += rowSize;
-    }
+    const auto row =
+        RadixSortSpillRow::deserializeRow(meta_, current, *rowSize, runtime);
+    keys.push_back(row.key);
+    payloads.push_back(row.payload);
+    current = row.nextInput;
+    runtime = row.nextOutput;
   }
   BOLT_CHECK(validRows, "Invalid radix sort spill row in block");
   BOLT_CHECK_EQ(current, end);
+  if (!canUseDiskRowsAsRuntimeRows) {
+    recycleSerializedBuffer();
+  }
   return true;
 }
 
 bool RadixSortSpillReader::nextFixedBatch(
     char* block,
     int32_t uncompressedSize,
+    char* output,
     std::vector<char*>& keys,
     std::vector<char*>& payloads) {
-  if (uncompressedSize < RadixSortSpillRow::kHeaderSize) {
-    return false;
-  }
-  const auto rowSize = loadUnaligned<uint32_t>(block);
-  const auto keySize = RadixSortSpillRow::keyFixedSize(meta_.keyLayout);
-  const auto expectedRowSize =
-      RadixSortSpillRow::kHeaderSize + keySize + meta_.payloadFixedSize;
-  if (rowSize != expectedRowSize || rowSize == 0 ||
-      uncompressedSize % rowSize != 0) {
+  const auto rowSize = RadixSortSpillRow::fixedSerializedRowSize(meta_);
+  if (rowSize == 0 || uncompressedSize % rowSize != 0) {
     return false;
   }
   const auto count = uncompressedSize / rowSize;
   keys.reserve(count);
   payloads.reserve(count);
-  auto* current = block;
-  for (uint32_t row = 0; row < count; ++row, current += rowSize) {
-    keys.push_back(current + RadixSortSpillRow::kHeaderSize);
-    payloads.push_back(
-        meta_.payloadFixedSize == 0
-            ? nullptr
-            : current + RadixSortSpillRow::kHeaderSize + keySize);
+  auto* current = static_cast<const char*>(block);
+  if (meta_.payloadFixedSize == 0 && !meta_.keyLayout.hasPayload() &&
+      !meta_.hasKeyHeap()) {
+    for (uint32_t row = 0; row < count; ++row) {
+      keys.push_back(const_cast<char*>(current));
+      payloads.push_back(nullptr);
+      current += rowSize;
+    }
+    return true;
+  }
+
+  auto* runtime = output;
+  RadixSortSpillRowSize size;
+  size.keyHeapSize =
+      meta_.keyHeapMode == RadixSortSpillKeyHeapMode::kVariableFixedSize
+      ? meta_.fixedKeyHeapSize
+      : 0;
+  size.keySize = meta_.spilledKeyRecordSize;
+  size.payloadFixedSize = meta_.payloadFixedSize;
+  size.totalSize = rowSize;
+  size.runtimeSize = RadixSortSpillRow::fixedRuntimeRowSize(meta_);
+  for (uint32_t row = 0; row < count; ++row) {
+    const auto deserialized =
+        RadixSortSpillRow::deserializeRow(meta_, current, size, runtime);
+    keys.push_back(deserialized.key);
+    payloads.push_back(deserialized.payload);
+    current = deserialized.nextInput;
+    runtime = deserialized.nextOutput;
   }
   return true;
 }

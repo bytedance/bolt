@@ -63,6 +63,10 @@ class PayloadRowLayout {
     return columns_;
   }
 
+  const std::vector<PayloadRowColumnLayout>& variableColumns() const {
+    return variableColumns_;
+  }
+
   uint32_t nullBytes() const {
     return nullBytes_;
   }
@@ -79,17 +83,20 @@ class PayloadRowLayout {
   PayloadRowLayout(
       RowTypePtr rowType,
       std::vector<PayloadRowColumnLayout> columns,
+      std::vector<PayloadRowColumnLayout> variableColumns,
       uint32_t nullBytes,
       bool hasVariableFields,
       uint64_t rowWidth)
       : rowType_(std::move(rowType)),
         columns_(std::move(columns)),
+        variableColumns_(std::move(variableColumns)),
         nullBytes_(nullBytes),
         hasVariableFields_(hasVariableFields),
         rowWidth_(rowWidth) {}
 
   RowTypePtr rowType_;
   std::vector<PayloadRowColumnLayout> columns_;
+  std::vector<PayloadRowColumnLayout> variableColumns_;
   uint32_t nullBytes_;
   bool hasVariableFields_;
   uint64_t rowWidth_;

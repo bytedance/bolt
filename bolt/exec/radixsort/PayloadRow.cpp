@@ -168,6 +168,7 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
   uint64_t rowWidth = nullBytes;
 
   std::vector<PayloadRowColumnLayout> columns;
+  std::vector<PayloadRowColumnLayout> variableColumns;
   columns.reserve(rowType->size());
   bool supportedSlots = true;
   std::string unsupportedSlotType;
@@ -180,7 +181,7 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
       unsupportedSlotType = type->toString();
       continue;
     }
-    columns.push_back(PayloadRowColumnLayout{
+    PayloadRowColumnLayout layout{
         type,
         rowWidth,
         *width,
@@ -188,7 +189,11 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
         static_cast<uint8_t>(uint8_t{1} << (column % 8)),
         type->kind() == TypeKind::VARCHAR ||
             type->kind() == TypeKind::VARBINARY || isComplex(*type),
-        isComplex(*type)});
+        isComplex(*type)};
+    if (layout.variable) {
+      variableColumns.push_back(layout);
+    }
+    columns.push_back(std::move(layout));
     auto next = checkedAdd<uint64_t>(rowWidth, *width);
     rowWidthValid &= next.has_value();
     if (next.has_value()) {
@@ -202,7 +207,12 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
   BOLT_CHECK(rowWidthValid, "Payload row row width overflows");
 
   return std::shared_ptr<const PayloadRowLayout>(new PayloadRowLayout(
-      rowType, std::move(columns), nullBytes, hasVariableFields, rowWidth));
+      rowType,
+      std::move(columns),
+      std::move(variableColumns),
+      nullBytes,
+      hasVariableFields,
+      rowWidth));
 }
 
 namespace {

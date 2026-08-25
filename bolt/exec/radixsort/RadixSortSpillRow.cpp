@@ -18,6 +18,7 @@
 
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
@@ -26,52 +27,58 @@
 namespace bytedance::bolt::exec::radixsort {
 namespace {
 
-bool isStringType(const Type& type) {
-  return type.kind() == TypeKind::VARCHAR || type.kind() == TypeKind::VARBINARY;
+RadixSortSpillPayloadVariableKind variableKind(
+    const PayloadRowColumnLayout& column) {
+  return column.complex ? RadixSortSpillPayloadVariableKind::kComplex
+                        : RadixSortSpillPayloadVariableKind::kString;
+}
+
+bool isNull(const char* row, const RadixSortSpillPayloadVariableOp& op) {
+  return (static_cast<uint8_t>(row[op.nullByte]) & op.nullMask) == 0;
+}
+
+uint64_t keyHeapSizeFromRecord(
+    const RadixRow2RowSerdeMeta& meta,
+    const char* key) {
+  switch (meta.keyHeapMode) {
+    case RadixSortSpillKeyHeapMode::kNone:
+      return 0;
+    case RadixSortSpillKeyHeapMode::kVariableFixedSize:
+      return meta.fixedKeyHeapSize;
+    case RadixSortSpillKeyHeapMode::kVariableRowSize: {
+      const auto encodedSize =
+          loadUnaligned<uint64_t>(key + meta.keySizeOffset);
+      return encodedSize < meta.keyHeapOffset
+          ? std::numeric_limits<uint64_t>::max()
+          : encodedSize - meta.keyHeapOffset;
+    }
+  }
+  return 0;
 }
 
 uint64_t payloadHeapSizeFromFixed(
-    const PayloadRowLayout* layout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* payloadFixed) {
-  if (layout == nullptr || !layout->hasVariableFields()) {
+  if (payloadFixed == nullptr || !meta.hasVariablePayload()) {
     return 0;
   }
 
   uint64_t heapSize = 0;
-  for (const auto& column : layout->columns()) {
-    if (!column.variable) {
+  for (const auto& op : meta.payloadVariableOps) {
+    if (isNull(payloadFixed, op)) {
       continue;
     }
-    const auto* slot = payloadFixed + column.offset;
+    const auto* slot = payloadFixed + op.offset;
     uint64_t fieldSize = 0;
-    if (isStringType(*column.type)) {
+    if (op.kind == RadixSortSpillPayloadVariableKind::kString) {
       const auto value = loadUnaligned<StringView>(slot);
       fieldSize = value.isInline() ? 0 : value.size();
     } else {
       fieldSize = loadUnaligned<PayloadVarlenRef>(slot).size;
     }
-    const auto next = checkedAdd<uint64_t>(heapSize, fieldSize);
-    BOLT_CHECK(next.has_value(), "Payload row heap size overflows");
-    heapSize = *next;
+    heapSize += fieldSize;
   }
   return heapSize;
-}
-
-uint64_t checkedTotalSize(
-    uint64_t keySize,
-    uint64_t payloadFixedSize,
-    uint64_t payloadHeapSize) {
-  auto total = checkedAdd<uint64_t>(RadixSortSpillRow::kHeaderSize, keySize);
-  total = checkedAdd<uint64_t>(*total, payloadFixedSize);
-  total = checkedAdd<uint64_t>(*total, payloadHeapSize);
-  return *total;
-}
-
-uint32_t spilledKeyFixedSize(const RadixSortKeyLayout& layout) {
-  if (layout.isVariable()) {
-    return *layout.dataOffset() + kCompactPointerBytes;
-  }
-  return layout.hasPayload() ? *layout.payloadOffset() : layout.width();
 }
 
 const char* stringPointer(const StringView& value) {
@@ -84,181 +91,292 @@ void storeStringPointer(void* slot, const char* data) {
       static_cast<char*>(slot) + sizeof(uint64_t), data);
 }
 
-void swizzlePayloadPointerFields(
-    const PayloadRowLayout& layout,
-    char* row,
-    char* fixed,
-    char* heapCursor,
-    uint64_t totalSize,
-    bool toOffset,
-    bool copyHeap,
-    bool checkRanges) {
-  bool validRanges = true;
-  for (const auto& column : layout.columns()) {
-    if (!column.variable) {
+struct PayloadHeapRange {
+  const char* begin{nullptr};
+  uint64_t size{0};
+};
+
+void addPayloadHeapRange(
+    PayloadHeapRange& range,
+    const char* data,
+    uint64_t size) {
+  if (size == 0) {
+    return;
+  }
+  BOLT_DCHECK_NOT_NULL(data);
+  if (range.begin == nullptr) {
+    range.begin = data;
+  } else {
+    BOLT_DCHECK_EQ(data, range.begin + range.size);
+  }
+  range.size += size;
+}
+
+PayloadHeapRange payloadHeapRangeFromFixed(
+    const RadixRow2RowSerdeMeta& meta,
+    const char* sourceFixed) {
+  if (sourceFixed == nullptr || !meta.hasVariablePayload()) {
+    return {};
+  }
+
+  PayloadHeapRange range;
+  for (const auto& op : meta.payloadVariableOps) {
+    if (isNull(sourceFixed, op)) {
       continue;
     }
-    auto* slot = fixed + column.offset;
-    if (isStringType(*column.type)) {
-      auto value = loadUnaligned<StringView>(slot);
-      if (value.isInline() || value.size() == 0) {
+    const auto* sourceSlot = sourceFixed + op.offset;
+    if (op.kind == RadixSortSpillPayloadVariableKind::kString) {
+      const auto value = loadUnaligned<StringView>(sourceSlot);
+      if (value.isInline()) {
         continue;
       }
-      if (toOffset) {
-        const auto* source = stringPointer(value);
-        if (copyHeap) {
-          std::memcpy(heapCursor, source, value.size());
-        }
-        const auto offset = reinterpret_cast<uintptr_t>(heapCursor) -
-            reinterpret_cast<uintptr_t>(row);
-        validRanges &= !checkRanges ||
-            isValidRecordRelativeRange(totalSize, offset, value.size());
-        storeStringPointer(slot, reinterpret_cast<const char*>(offset));
-        heapCursor += value.size();
-      } else {
-        const auto offset = reinterpret_cast<uint64_t>(stringPointer(value));
-        validRanges &= !checkRanges ||
-            isValidRecordRelativeRange(totalSize, offset, value.size());
-        storeStringPointer(slot, row + offset);
-      }
+      addPayloadHeapRange(range, stringPointer(value), value.size());
       continue;
     }
-    auto value = loadUnaligned<PayloadVarlenRef>(slot);
-    if (value.size == 0) {
-      continue;
-    }
-    if (toOffset) {
-      const auto offset = reinterpret_cast<uintptr_t>(heapCursor) -
-          reinterpret_cast<uintptr_t>(row);
-      if (copyHeap) {
-        std::memcpy(heapCursor, value.data, value.size);
-      }
-      validRanges &= !checkRanges ||
-          isValidRecordRelativeRange(totalSize, offset, value.size);
-      storeUnaligned<PayloadVarlenRef>(
-          slot, PayloadVarlenRef{value.size, reinterpret_cast<char*>(offset)});
-      heapCursor += value.size;
-    } else {
-      const auto offset = reinterpret_cast<uint64_t>(value.data);
-      validRanges &= !checkRanges ||
-          isValidRecordRelativeRange(totalSize, offset, value.size);
-      storeUnaligned<PayloadVarlenRef>(
-          slot, PayloadVarlenRef{value.size, row + offset});
+    const auto value = loadUnaligned<PayloadVarlenRef>(sourceSlot);
+    if (value.size > 0) {
+      addPayloadHeapRange(range, value.data, value.size);
     }
   }
-  BOLT_CHECK(validRanges, "Invalid radix sort spill row variable data range");
-  if (toOffset) {
-    BOLT_CHECK_EQ(heapCursor, row + totalSize);
+  return range;
+}
+
+void clearPayloadPointers(
+    const RadixRow2RowSerdeMeta& meta,
+    const char* sourceFixed,
+    char* destinationFixed) {
+  for (const auto& op : meta.payloadVariableOps) {
+    auto* destinationSlot = destinationFixed + op.offset;
+    if (isNull(sourceFixed, op)) {
+      std::memset(destinationSlot, 0, op.width);
+      continue;
+    }
+    const auto* sourceSlot = sourceFixed + op.offset;
+    if (op.kind == RadixSortSpillPayloadVariableKind::kString) {
+      const auto value = loadUnaligned<StringView>(sourceSlot);
+      if (!value.isInline()) {
+        storeStringPointer(destinationSlot, nullptr);
+      }
+      continue;
+    }
+    const auto value = loadUnaligned<PayloadVarlenRef>(sourceSlot);
+    storeUnaligned<PayloadVarlenRef>(
+        destinationSlot, PayloadVarlenRef{value.size, nullptr});
   }
 }
 
-void trustedRestoreKeyDataPointerInRow(
-    char* row,
-    const RadixSortKeyLayout& layout);
-
-void trustedRestoreKeyDataPointerInRow(
-    char* row,
-    const RadixSortKeyLayout& layout) {
-  if (!layout.isVariable()) {
-    return;
-  }
-  auto* key = row + RadixSortSpillRow::kHeaderSize;
-  const auto size = loadUnaligned<uint64_t>(key + *layout.sizeOffset());
-  if (layout.heapSize(size) > 0) {
-    const auto offset = loadCompactUInt48(key + *layout.dataOffset());
-    storeCompactPointer(key + *layout.dataOffset(), row + offset);
+void restorePayloadPointers(
+    const RadixRow2RowSerdeMeta& meta,
+    char* payloadFixed,
+    char* payloadHeap) {
+  auto* heapCursor = payloadHeap;
+  for (const auto& op : meta.payloadVariableOps) {
+    auto* slot = payloadFixed + op.offset;
+    if (isNull(payloadFixed, op)) {
+      continue;
+    }
+    if (op.kind == RadixSortSpillPayloadVariableKind::kString) {
+      const auto value = loadUnaligned<StringView>(slot);
+      if (value.isInline()) {
+        continue;
+      }
+      storeStringPointer(slot, heapCursor);
+      heapCursor += value.size();
+      continue;
+    }
+    const auto value = loadUnaligned<PayloadVarlenRef>(slot);
+    if (value.size == 0) {
+      continue;
+    }
+    storeUnaligned<PayloadVarlenRef>(
+        slot, PayloadVarlenRef{value.size, heapCursor});
+    heapCursor += value.size;
   }
 }
 
 } // namespace
 
-uint32_t RadixSortSpillRow::keyFixedSize(const RadixSortKeyLayout& keyLayout) {
-  return spilledKeyFixedSize(keyLayout);
+RadixRow2RowSerdeMeta RadixRow2RowSerdeMeta::create(
+    RadixSortKeyLayout keyLayout,
+    const PayloadRowLayout* payloadLayout) {
+  RadixRow2RowSerdeMeta meta;
+  meta.keyLayout = std::move(keyLayout);
+  meta.initialize(payloadLayout);
+  return meta;
+}
+
+void RadixRow2RowSerdeMeta::initialize(const PayloadRowLayout* payloadLayout) {
+  runtimeKeyRecordSize = keyLayout.width();
+  spilledKeyRecordSize = RadixSortSpillRow::keyRecordCopySize(keyLayout);
+  keyHeapOffset = 0;
+  keySizeOffset = 0;
+  keyDataOffset = 0;
+  keyPayloadOffset = 0;
+  fixedKeyHeapSize = 0;
+  if (keyLayout.isVariable()) {
+    keyHeapOffset = keyLayout.heapKeyOffset();
+    keySizeOffset = *keyLayout.sizeOffset();
+    keyDataOffset = *keyLayout.dataOffset();
+    keyHeapMode = RadixSortSpillKeyHeapMode::kVariableRowSize;
+  } else {
+    keyHeapMode = RadixSortSpillKeyHeapMode::kNone;
+  }
+  if (keyLayout.hasPayload()) {
+    keyPayloadOffset = *keyLayout.payloadOffset();
+  }
+  payloadFixedSize = payloadLayout == nullptr ? 0 : payloadLayout->rowWidth();
+  hasPayload = payloadFixedSize != 0;
+  payloadVariableOps.clear();
+  if (payloadLayout != nullptr) {
+    payloadVariableOps.reserve(payloadLayout->variableColumns().size());
+    for (const auto& column : payloadLayout->variableColumns()) {
+      payloadVariableOps.push_back(RadixSortSpillPayloadVariableOp{
+          column.offset,
+          column.width,
+          column.nullByte,
+          column.nullMask,
+          variableKind(column)});
+    }
+  }
+}
+
+uint32_t RadixSortSpillRow::keyRecordCopySize(
+    const RadixSortKeyLayout& keyLayout) {
+  if (keyLayout.isVariable()) {
+    return *keyLayout.dataOffset();
+  }
+  return keyLayout.hasPayload() ? *keyLayout.payloadOffset()
+                                : keyLayout.width();
+}
+
+uint64_t RadixSortSpillRow::fixedSerializedRowSize(
+    const RadixRow2RowSerdeMeta& meta) {
+  uint64_t total = meta.spilledKeyRecordSize;
+  if (meta.keyHeapMode == RadixSortSpillKeyHeapMode::kVariableFixedSize) {
+    total += meta.fixedKeyHeapSize;
+  }
+  total += meta.payloadFixedSize;
+  return total;
+}
+
+uint64_t RadixSortSpillRow::fixedRuntimeRowSize(
+    const RadixRow2RowSerdeMeta& meta) {
+  uint64_t total = meta.runtimeKeyRecordSize;
+  if (meta.keyHeapMode == RadixSortSpillKeyHeapMode::kVariableFixedSize) {
+    total += meta.fixedKeyHeapSize;
+  }
+  total += meta.payloadFixedSize;
+  return total;
 }
 
 RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* key) {
-  const auto radixKey = RadixSortKey(keyLayout, key);
-  return sizeForSerialize(keyLayout, payloadLayout, key, radixKey.payload());
+  return sizeForSerialize(
+      meta,
+      key,
+      meta.keyLayout.hasPayload() ? RadixSortKey(meta.keyLayout, key).payload()
+                                  : nullptr);
 }
 
 RadixSortSpillRowSize RadixSortSpillRow::sizeForSerialize(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* key,
-    char* payload) {
-  const auto radixKey = RadixSortKey(keyLayout, key);
+    const char* payload) {
   RadixSortSpillRowSize result;
-  result.keyHeapSize = radixKey.heapSize();
-  const auto keySize =
-      checkedAdd<uint64_t>(spilledKeyFixedSize(keyLayout), result.keyHeapSize);
-  result.keySize = static_cast<uint32_t>(*keySize);
+  result.keyHeapSize = keyHeapSizeFromRecord(meta, key);
+  uint64_t keySize = meta.spilledKeyRecordSize;
+  keySize += result.keyHeapSize;
+  result.keySize = keySize;
   result.payload = payload;
-  const auto payloadFixedSize =
-      payloadLayout == nullptr ? 0 : payloadLayout->rowWidth();
-  result.payloadHeapSize =
-      payloadHeapSizeFromFixed(payloadLayout, result.payload);
-  result.totalSize = static_cast<uint32_t>(checkedTotalSize(
-      result.keySize, payloadFixedSize, result.payloadHeapSize));
-  result.payloadFixedSize = static_cast<uint32_t>(payloadFixedSize);
+  result.payloadFixedSize = meta.payloadFixedSize;
+  const auto payloadHeap = payloadHeapRangeFromFixed(meta, result.payload);
+  result.payloadHeapSize = payloadHeap.size;
+  result.payloadHeap = payloadHeap.begin;
+  uint64_t total = result.keySize;
+  total += result.payloadFixedSize;
+  total += result.payloadHeapSize;
+  result.totalSize = total;
+  uint64_t runtimeSize = meta.runtimeKeyRecordSize;
+  runtimeSize += result.keyHeapSize;
+  runtimeSize += result.payloadFixedSize;
+  runtimeSize += result.payloadHeapSize;
+  result.runtimeSize = runtimeSize;
   return result;
 }
 
-uint32_t RadixSortSpillRow::trustedKeySize(
-    const RadixSortSpillRunMeta& meta) const {
-  if (!meta.keyLayout.isVariable()) {
-    return spilledKeyFixedSize(meta.keyLayout);
+std::optional<RadixSortSpillRowSize> RadixSortSpillRow::sizeFromDisk(
+    const RadixRow2RowSerdeMeta& meta,
+    const char* row,
+    uint64_t available) {
+  if (available < meta.spilledKeyRecordSize) {
+    return std::nullopt;
   }
-  const auto* key = row_ + kHeaderSize;
-  const auto storedSize =
-      loadUnaligned<uint64_t>(key + *meta.keyLayout.sizeOffset());
-  const auto heapSize = meta.keyLayout.heapSize(storedSize);
-  return static_cast<uint32_t>(spilledKeyFixedSize(meta.keyLayout) + heapSize);
+  const auto keyHeapSize = keyHeapSizeFromRecord(meta, row);
+  if (keyHeapSize == std::numeric_limits<uint64_t>::max()) {
+    return std::nullopt;
+  }
+  uint64_t cursor = meta.spilledKeyRecordSize;
+  auto next = checkedAdd<uint64_t>(cursor, keyHeapSize);
+  if (!next.has_value() || *next > available) {
+    return std::nullopt;
+  }
+  cursor = *next;
+  next = checkedAdd<uint64_t>(cursor, meta.payloadFixedSize);
+  if (!next.has_value() || *next > available) {
+    return std::nullopt;
+  }
+  cursor = *next;
+  const auto* payloadFixed =
+      meta.hasPayload ? row + cursor - meta.payloadFixedSize : nullptr;
+  const auto payloadHeapSize = payloadHeapSizeFromFixed(meta, payloadFixed);
+  next = checkedAdd<uint64_t>(cursor, payloadHeapSize);
+  if (!next.has_value() || *next > available) {
+    return std::nullopt;
+  }
+  RadixSortSpillRowSize size;
+  size.keyHeapSize = keyHeapSize;
+  uint64_t keySize = meta.spilledKeyRecordSize;
+  keySize += keyHeapSize;
+  size.keySize = keySize;
+  size.payloadFixedSize = meta.payloadFixedSize;
+  size.payloadHeapSize = payloadHeapSize;
+  size.payload = payloadFixed;
+  size.payloadHeap = payloadHeapSize == 0 ? nullptr : row + cursor;
+  size.totalSize = *next;
+  uint64_t runtimeSize = meta.runtimeKeyRecordSize;
+  runtimeSize += keyHeapSize;
+  runtimeSize += meta.payloadFixedSize;
+  runtimeSize += payloadHeapSize;
+  size.runtimeSize = runtimeSize;
+  return size;
 }
 
-uint32_t RadixSortSpillRow::trustedPayloadHeapSize(
-    const RadixSortSpillRunMeta& meta) const {
-  return static_cast<uint32_t>(
-      header().totalSize - kHeaderSize - trustedKeySize(meta) -
-      meta.payloadFixedSize);
-}
-
-void RadixSortSpillRow::serialize(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
+char* RadixSortSpillRow::serializeRow(
+    const RadixRow2RowSerdeMeta& meta,
     const char* key,
-    char* destination) {
-  serialize(
-      keyLayout,
-      payloadLayout,
-      key,
-      sizeForSerialize(keyLayout, payloadLayout, key),
-      destination);
+    const char* payload,
+    char* out) {
+  const auto size = sizeForSerialize(meta, key, payload);
+  serialize(meta, key, size, out);
+  return out + size.totalSize;
 }
 
 void RadixSortSpillRow::serialize(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
+    const RadixRow2RowSerdeMeta& meta,
     const char* key,
     const RadixSortSpillRowSize& size,
     char* destination) {
-  const auto radixKey = RadixSortKey(keyLayout, key);
-  RadixSortSpillRowHeader header{size.totalSize};
-  storeUnaligned<RadixSortSpillRowHeader>(destination, header);
-
-  auto* current = destination + kHeaderSize;
-  const auto keyFixedSize = spilledKeyFixedSize(keyLayout);
-  std::memcpy(current, key, keyFixedSize);
+  auto* current = destination;
+  std::memcpy(current, key, meta.spilledKeyRecordSize);
+  current += meta.spilledKeyRecordSize;
   if (size.keyHeapSize > 0) {
-    auto* keyHeap = current + keyFixedSize;
-    std::memcpy(keyHeap, radixKey.heapKeyData(), size.keyHeapSize);
-    storeCompactUInt48(
-        current + *keyLayout.dataOffset(),
-        static_cast<uint64_t>(keyHeap - destination));
+    std::memcpy(
+        current,
+        loadCompactPointer(key + meta.keyDataOffset),
+        size.keyHeapSize);
+    current += size.keyHeapSize;
   }
-  current += size.keySize;
 
   if (size.payloadFixedSize == 0) {
     return;
@@ -266,80 +384,64 @@ void RadixSortSpillRow::serialize(
   std::memcpy(current, size.payload, size.payloadFixedSize);
   auto* fixed = current;
   current += size.payloadFixedSize;
-  if (!payloadLayout->hasVariableFields()) {
+  if (!meta.hasVariablePayload()) {
     return;
   }
-  swizzlePayloadPointerFields(
-      *payloadLayout,
-      destination,
-      fixed,
-      current,
-      size.totalSize,
-      true,
-      true,
-      false);
-}
-
-RadixSortSpillRowHeader RadixSortSpillRow::header() const {
-  return loadUnaligned<RadixSortSpillRowHeader>(row_);
-}
-
-void RadixSortSpillRow::validate(const RadixSortSpillRunMeta& meta) const {
-  const auto h = header();
-  BOLT_CHECK_GE(h.totalSize, kHeaderSize);
-  const auto keyBytes = trustedKeySize(meta);
-  const auto heapBytes = trustedPayloadHeapSize(meta);
-  if (meta.payloadFixedSize == 0) {
-    BOLT_CHECK_EQ(heapBytes, 0);
+  clearPayloadPointers(meta, size.payload, fixed);
+  if (size.payloadHeapSize > 0) {
+    std::memcpy(current, size.payloadHeap, size.payloadHeapSize);
   }
-  const auto total =
-      checkedTotalSize(keyBytes, meta.payloadFixedSize, heapBytes);
-  BOLT_CHECK_EQ(h.totalSize, total);
 }
 
-std::string_view RadixSortSpillRow::trustedKeyBytes(
-    const RadixSortSpillRunMeta& meta) const {
-  return std::string_view(row_ + kHeaderSize, trustedKeySize(meta));
-}
+RadixSortSpillDeserializedRow RadixSortSpillRow::deserializeRow(
+    const RadixRow2RowSerdeMeta& meta,
+    const char* in,
+    const RadixSortSpillRowSize& size,
+    char* out) {
+  auto* const runtimeKey = out;
+  std::memcpy(runtimeKey, in, meta.spilledKeyRecordSize);
+  in += meta.spilledKeyRecordSize;
+  out += meta.runtimeKeyRecordSize;
 
-char* RadixSortSpillRow::trustedPayloadFixedOrEnd(
-    const RadixSortSpillRunMeta& meta) const {
-  return row_ + kHeaderSize + trustedKeySize(meta);
-}
-
-char* RadixSortSpillRow::trustedPayloadFixed(
-    const RadixSortSpillRunMeta& meta) const {
-  return meta.payloadFixedSize == 0 ? nullptr : trustedPayloadFixedOrEnd(meta);
-}
-
-char* RadixSortSpillRow::trustedPayloadHeap(
-    const RadixSortSpillRunMeta& meta) const {
-  return trustedPayloadHeapSize(meta) == 0
-      ? nullptr
-      : trustedPayloadFixedOrEnd(meta) + meta.payloadFixedSize;
-}
-
-void RadixSortSpillRow::trustedRestoreKeyDataPointer(
-    const RadixSortSpillRunMeta& meta) const {
-  trustedRestoreKeyDataPointerInRow(row_, meta.keyLayout);
-}
-
-void RadixSortSpillRow::trustedRestorePayloadPointers(
-    const RadixSortSpillRunMeta& meta,
-    const PayloadRowLayout& payloadLayout) const {
-  if (meta.payloadFixedSize == 0 || !payloadLayout.hasVariableFields()) {
-    return;
+  if (meta.hasKeyHeap()) {
+    std::memcpy(out, in, size.keyHeapSize);
+    storeCompactPointer(runtimeKey + meta.keyDataOffset, out);
+    in += size.keyHeapSize;
+    out += size.keyHeapSize;
   }
-  auto* fixed = trustedPayloadFixed(meta);
-  swizzlePayloadPointerFields(
-      payloadLayout,
-      row_,
-      fixed,
-      trustedPayloadHeap(meta),
-      header().totalSize,
-      false,
-      false,
-      false);
+
+  char* runtimePayload = nullptr;
+  if (meta.payloadFixedSize > 0) {
+    runtimePayload = out;
+    std::memcpy(runtimePayload, in, meta.payloadFixedSize);
+    in += meta.payloadFixedSize;
+    out += meta.payloadFixedSize;
+  }
+  if (meta.keyLayout.hasPayload()) {
+    storeCompactPointer(runtimeKey + meta.keyPayloadOffset, runtimePayload);
+  }
+
+  if (size.payloadHeapSize > 0) {
+    std::memcpy(out, in, size.payloadHeapSize);
+    restorePayloadPointers(meta, runtimePayload, out);
+    in += size.payloadHeapSize;
+    out += size.payloadHeapSize;
+  }
+  return {in, out, runtimeKey, runtimePayload};
+}
+
+uint64_t RadixSortSpillRow::maxRuntimeSizeForBlock(
+    const RadixRow2RowSerdeMeta& meta,
+    uint64_t serializedBlockSize) {
+  const auto fixedSerializedRowSize =
+      RadixSortSpillRow::fixedSerializedRowSize(meta);
+  if (fixedSerializedRowSize == 0) {
+    return serializedBlockSize;
+  }
+  const auto rowsUpperBound = serializedBlockSize / fixedSerializedRowSize;
+  const auto extraPerRow =
+      meta.runtimeKeyRecordSize - meta.spilledKeyRecordSize;
+  return serializedBlockSize + rowsUpperBound * extraPerRow;
 }
 
 } // namespace bytedance::bolt::exec::radixsort
