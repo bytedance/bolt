@@ -34,8 +34,8 @@
 #include <type/HugeInt.h>
 #include <type/Type.h>
 #include <vector/ComplexVector.h>
+#include <bit>
 #include <cstdint>
-#include <cstring>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/expression/DecodedArgs.h"
@@ -231,6 +231,11 @@ template <TypeKind kind>
 constexpr bool isIntegerType = (kind == TypeKind::BOOLEAN) ||
     (kind == TypeKind::TINYINT) || (kind == TypeKind::SMALLINT) ||
     (kind == TypeKind::INTEGER);
+
+template <TypeKind kind>
+constexpr bool supportsUnsignedIntegerVector = (kind == TypeKind::TINYINT) ||
+    (kind == TypeKind::SMALLINT) || (kind == TypeKind::INTEGER) ||
+    (kind == TypeKind::BIGINT);
 
 template <TypeKind kind>
 constexpr bool isStringType = (kind == TypeKind::VARCHAR) ||
@@ -632,6 +637,23 @@ class HiveHashBase {
 };
 
 template <TypeKind kind>
+class HiveHash;
+
+template <TypeKind kind>
+HiveHashBase::ResultType hashDecodedValue(
+    const DecodedVector& decoded,
+    vector_size_t index,
+    const HiveHash<kind>& hasher,
+    HiveHashBase::SeedType seed);
+
+template <TypeKind kind>
+HiveHashBase::ResultType hashVectorValue(
+    const VectorPtr& vector,
+    vector_size_t index,
+    const HiveHash<kind>& hasher,
+    HiveHashBase::SeedType seed);
+
+template <TypeKind kind>
 class HiveHash : public HiveHashBase {
  public:
   using NativeType = typename VectorValueType<kind>::type;
@@ -822,6 +844,20 @@ class HiveHash : public HiveHashBase {
     }
   }
 
+  template <typename T>
+  requires(
+      supportsUnsignedIntegerVector<kind>&& std::is_unsigned_v<T> &&
+      sizeof(T) == sizeof(NativeType)) inline ResultType
+      hash(T input, SeedType seed) const {
+    if constexpr (sizeof(T) < sizeof(int32_t)) {
+      return HiveHashBase::hashInt32(static_cast<int32_t>(input), seed);
+    } else {
+      // Spark reads UINT32 as LongType. hashLong() returns the low 32 bits for
+      // values that fit in uint32_t.
+      return HiveHashBase::hashInt32(std::bit_cast<int32_t>(input), seed);
+    }
+  }
+
  private:
   template <TypeKind elementKind>
   static ResultType
@@ -837,8 +873,8 @@ class HiveHash : public HiveHashBase {
       if (array->elements()->isNullAt(idx)) {
         result = HiveHashBase::hashNull(result);
       } else {
-        result = hasher.hash(
-            getValueFromVector<elementKind>(array->elements(), idx), result);
+        result = hashVectorValue<elementKind>(
+            array->elements(), idx, hasher, result);
       }
     }
     return result;
@@ -851,8 +887,7 @@ class HiveHash : public HiveHashBase {
     if (baseVector->isNullAt(index)) {
       return HiveHashBase::hashNull(seed);
     } else {
-      return hasher.hash(
-          getValueFromVector<elementKind>(baseVector, index), seed);
+      return hashVectorValue<elementKind>(baseVector, index, hasher, seed);
     }
   }
 };
@@ -881,9 +916,7 @@ class HiveHash<TypeKind::BIGINT> : HiveHashBase {
 
   ResultType hash(uint64_t input, SeedType seed) const {
     BOLT_DCHECK(!isDecimal_);
-    int64_t signedInput;
-    std::memcpy(&signedInput, &input, sizeof(input));
-    return HiveHashBase::hashInt64(signedInput, seed);
+    return HiveHashBase::hashInt64(std::bit_cast<int64_t>(input), seed);
   }
 
  private:
@@ -910,6 +943,38 @@ class HiveHash<TypeKind::HUGEINT> : HiveHashBase {
  private:
   int8_t scale_;
 };
+
+template <TypeKind kind>
+HiveHashBase::ResultType hashDecodedValue(
+    const DecodedVector& decoded,
+    vector_size_t index,
+    const HiveHash<kind>& hasher,
+    HiveHashBase::SeedType seed) {
+  if constexpr (supportsUnsignedIntegerVector<kind>) {
+    using SignedType = typename TypeTraits<kind>::NativeType;
+    using UnsignedType = std::make_unsigned_t<SignedType>;
+    if (decoded.base()->as<SimpleVector<UnsignedType>>()) {
+      return hasher.hash(decoded.valueAt<UnsignedType>(index), seed);
+    }
+  }
+  return hasher.hash(getValueFromVector<kind>(decoded, index), seed);
+}
+
+template <TypeKind kind>
+HiveHashBase::ResultType hashVectorValue(
+    const VectorPtr& vector,
+    vector_size_t index,
+    const HiveHash<kind>& hasher,
+    HiveHashBase::SeedType seed) {
+  if constexpr (supportsUnsignedIntegerVector<kind>) {
+    using SignedType = typename TypeTraits<kind>::NativeType;
+    using UnsignedType = std::make_unsigned_t<SignedType>;
+    if (auto unsignedVector = vector->as<SimpleVector<UnsignedType>>()) {
+      return hasher.hash(unsignedVector->valueAt(index), seed);
+    }
+  }
+  return hasher.hash(getValueFromVector<kind>(vector, index), seed);
+}
 
 // hash multiple values from input into result with seed, if seed is nullptr,
 // use default seed 0. this function is optimized for no null vector, so that
@@ -953,11 +1018,13 @@ __attribute__((noinline)) bool hiveHashMultiple(
           }
           return true;
         };
-        if constexpr (typeKind == TypeKind::BIGINT) {
-          if (auto flatVector = input->asFlatVector<int64_t>()) {
+        if constexpr (supportsUnsignedIntegerVector<typeKind>) {
+          using SignedType = typename TypeTraits<typeKind>::NativeType;
+          if (auto flatVector = input->asFlatVector<SignedType>()) {
             return hashFlatVector(flatVector);
           }
-          return hashFlatVector(input->asFlatVector<uint64_t>());
+          using UnsignedType = std::make_unsigned_t<SignedType>;
+          return hashFlatVector(input->asFlatVector<UnsignedType>());
         }
         return hashFlatVector(
             input->asFlatVector<typename TypeTraits<typeKind>::NativeType>());
@@ -970,9 +1037,7 @@ __attribute__((noinline)) bool hiveHashMultiple(
       if (decoded.isNullAt(i)) {
         hashValue = HiveHashBase::hashNull(seed);
       } else {
-        hashValue = hasher.hash(
-            decoded.valueAt<typename TypeTraits<typeKind>::NativeType>(i),
-            seed);
+        hashValue = hashDecodedValue<typeKind>(decoded, i, hasher, seed);
       }
       result[i] = hashValue;
     }
@@ -1115,8 +1180,13 @@ struct HashFunctionEvaluator {
       if (decoded.isNullAt(row)) {
         hashValue = HashClassBase::hashNull(rawValues[row]);
       } else {
-        hashValue =
-            hasher.hash(getValueFromVector<kind>(decoded, row), rawValues[row]);
+        if constexpr (std::is_same_v<HashClassBase, HiveHashBase>) {
+          hashValue =
+              hashDecodedValue<kind>(decoded, row, hasher, rawValues[row]);
+        } else {
+          hashValue = hasher.hash(
+              getValueFromVector<kind>(decoded, row), rawValues[row]);
+        }
       }
       rawValues[row] = hashValue;
     });
