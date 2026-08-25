@@ -33,7 +33,8 @@ bolt_add_library(
   dense/DenseRowGeneralEncode.cpp
   dense/DenseRowGeneralDecode.cpp
   dense/DenseRowScalarEncode.cpp
-  dense/DenseRowScalarDecode.cpp)
+  dense/DenseRowScalarDecode.cpp
+)
 
 target_link_libraries(bolt_row_fast PUBLIC bolt_vector)
 

@@ -26,7 +26,9 @@ add_executable(
 add_test(bolt_abfs_test bolt_abfs_test)
 target_link_libraries(
   bolt_abfs_test
-  PRIVATE bolt_abfs bolt_testutils GTest::gtest GTest::gtest_main
+  PRIVATE
+    bolt_abfs
+    bolt_gtest_main
 )
 
 target_compile_options(bolt_abfs_test PRIVATE -Wno-deprecated-declarations)

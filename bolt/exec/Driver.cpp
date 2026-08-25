@@ -29,13 +29,16 @@
  */
 
 #include "Driver.h"
+
 #include <folly/ScopeGuard.h>
 #include <folly/executors/QueuedImmediateExecutor.h>
 #include <folly/executors/thread_factory/InitThreadFactory.h>
 #include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <optional>
 #include "bolt/common/base/Counters.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/StatsReporter.h"
-#include "bolt/common/base/logging.h"
 #include "bolt/common/process/ThreadNameHolder.h"
 #include "bolt/common/process/TraceContext.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -772,8 +775,10 @@ StopReason Driver::runInternal(
                     kOpMethodIsFinished);
               });
               if (finished) {
-                LOG_SPARK(INFO) << "Operator " << op->name()
-                                << " finished. nextOp: " << nextOp->name();
+                if (::bytedance::bolt::kSparkCompatible) {
+                  LOG(INFO) << "Operator " << op->name()
+                            << " finished. nextOp: " << nextOp->name();
+                }
                 auto timer = createDeltaCpuWallTimer(
                     [nextOp, this](const CpuWallTiming& timing) {
                       auto selfDelta = processLazyTiming(*nextOp, timing);
@@ -788,12 +793,14 @@ StopReason Driver::runInternal(
                     curOperatorId_ + 1,
                     kOpMethodNoMoreInput);
                 auto* nextOpPool = nextOp->pool();
-                LOG_SPARK(INFO)
-                    << "Operator " << nextOp->name() << " no more input. "
-                    << nextOpPool->name() << "["
-                    << succinctBytes(nextOpPool->currentBytes()) << ", "
-                    << succinctBytes(nextOpPool->reservedBytes()) << ", "
-                    << succinctBytes(nextOpPool->capacity()) << "]";
+                if (::bytedance::bolt::kSparkCompatible) {
+                  LOG(INFO)
+                      << "Operator " << nextOp->name() << " no more input. "
+                      << nextOpPool->name() << "["
+                      << succinctBytes(nextOpPool->currentBytes()) << ", "
+                      << succinctBytes(nextOpPool->reservedBytes()) << ", "
+                      << succinctBytes(nextOpPool->capacity()) << "]";
+                }
                 break;
               }
             }
@@ -881,9 +888,10 @@ void Driver::recordYieldCount() {
 
 // static
 void Driver::run(std::shared_ptr<Driver> self) {
-#ifndef SPARK_COMPATIBLE
-  process::ThreadNameHolder holder(self->driverCtx()->task->taskId());
-#endif
+  std::optional<process::ThreadNameHolder> threadNameHolder;
+  if (!::bytedance::bolt::kSparkCompatible) {
+    threadNameHolder.emplace(self->driverCtx()->task->taskId());
+  }
   process::TraceContext trace("Driver::run");
   bytedance::bolt::process::ScopedThreadDebugInfo scopedInfo(
       self->driverCtx()->threadDebugInfo);

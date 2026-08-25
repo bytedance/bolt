@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 
 #include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
@@ -66,9 +65,3 @@ TEST_F(S3InsertTest, s3InsertTest) {
   runInsertTest(kOutputDirectory, kExpectedRows, pool());
 }
 } // namespace bytedance::bolt::filesystems
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  return RUN_ALL_TESTS();
-}

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -507,8 +508,8 @@ struct Timestamp {
     return tmToString(tm, nanos_, options);
   }
 
-  FOLLY_ALWAYS_INLINE
-  std::string toString(
+  template <bool SkipTrailingZeros>
+  FOLLY_ALWAYS_INLINE std::string toString(
       const TimestampToStringOptions::Precision& precision,
       const tz::TimeZone* tz) const {
     using namespace std::chrono;
@@ -519,13 +520,6 @@ struct Timestamp {
     const auto timeOfDay = duration_cast<seconds>(seconds(localSec) - days);
     const auto ymd = ::date::year_month_day(::date::sys_days(days));
     const auto hhmmss = ::date::time_of_day<seconds>(timeOfDay);
-#ifndef SPARK_COMPATIBLE
-    const auto fracWidth = static_cast<int>(precision);
-    const auto fracValue =
-        precision == TimestampToStringOptions::Precision::kMilliseconds
-        ? nanos_ / 1'000'000
-        : nanos_;
-#endif
     std::ostringstream oss;
     oss << std::setfill('0') << std::setw(4) << static_cast<int>(ymd.year())
         << "-" << std::setw(2) << static_cast<unsigned>(ymd.month()) << "-"
@@ -533,20 +527,29 @@ struct Timestamp {
         << std::setw(2) << hhmmss.hours().count() << ":" << std::setw(2)
         << hhmmss.minutes().count() << ":" << std::setw(2)
         << hhmmss.seconds().count();
-#ifndef SPARK_COMPATIBLE
-    oss << "." << std::setw(fracWidth) << fracValue;
-#else
-    if (nanos_ > 0) {
-      auto nanos = nanos_;
-      while (nanos % 10 == 0) {
-        nanos /= 10;
+    if constexpr (SkipTrailingZeros) {
+      if (nanos_ > 0) {
+        auto nanos = nanos_;
+        while (nanos % 10 == 0) {
+          nanos /= 10;
+        }
+        oss << "." << nanos;
       }
-      oss << "." << nanos;
+    } else {
+      const auto fracWidth = static_cast<int>(precision);
+      const auto fracValue =
+          precision == TimestampToStringOptions::Precision::kMilliseconds
+          ? nanos_ / 1'000'000
+          : nanos_;
+      oss << "." << std::setw(fracWidth) << fracValue;
     }
-#endif
 
     return oss.str();
   }
+
+  std::string toString(
+      const TimestampToStringOptions::Precision& precision,
+      const tz::TimeZone* tz) const;
 
   operator std::string() const {
     return toString();

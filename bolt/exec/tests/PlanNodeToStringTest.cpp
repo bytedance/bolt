@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
 #include "bolt/exec/WindowFunction.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -827,11 +829,9 @@ TEST_F(PlanNodeToStringTest, rowNumber) {
 
   ASSERT_EQ("-- RowNumber[1]\n", plan->toString(false, false, true));
   ASSERT_EQ(
-#ifndef SPARK_COMPATIBLE
-      "-- RowNumber[1][] -> a:VARCHAR, row_number:BIGINT\n",
-#else
-      "-- RowNumber[1][] -> a:VARCHAR, row_number:INTEGER\n",
-#endif
+      ::bytedance::bolt::kSparkCompatible
+          ? "-- RowNumber[1][] -> a:VARCHAR, row_number:INTEGER\n"
+          : "-- RowNumber[1][] -> a:VARCHAR, row_number:BIGINT\n",
       plan->toString(true, false, true));
 
   // Don't emit row number.
@@ -852,11 +852,9 @@ TEST_F(PlanNodeToStringTest, rowNumber) {
 
   ASSERT_EQ("-- RowNumber[1]\n", plan->toString(false, false, true));
   ASSERT_EQ(
-#ifndef SPARK_COMPATIBLE
-      "-- RowNumber[1][partition by (a, b)] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
-#else
-      "-- RowNumber[1][partition by (a, b)] -> a:BIGINT, b:VARCHAR, row_number:INTEGER\n",
-#endif
+      ::bytedance::bolt::kSparkCompatible
+          ? "-- RowNumber[1][partition by (a, b)] -> a:BIGINT, b:VARCHAR, row_number:INTEGER\n"
+          : "-- RowNumber[1][partition by (a, b)] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
       plan->toString(true, false, true));
 
   // Don't emit row number.
@@ -878,11 +876,9 @@ TEST_F(PlanNodeToStringTest, rowNumber) {
 
   ASSERT_EQ("-- RowNumber[1]\n", plan->toString(false, false, true));
   ASSERT_EQ(
-#ifndef SPARK_COMPATIBLE
-      "-- RowNumber[1][partition by (b) limit 10] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
-#else
-      "-- RowNumber[1][partition by (b) limit 10] -> a:BIGINT, b:VARCHAR, row_number:INTEGER\n",
-#endif
+      ::bytedance::bolt::kSparkCompatible
+          ? "-- RowNumber[1][partition by (b) limit 10] -> a:BIGINT, b:VARCHAR, row_number:INTEGER\n"
+          : "-- RowNumber[1][partition by (b) limit 10] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
       plan->toString(true, false, true));
 
   // Don't emit row number.
@@ -916,11 +912,9 @@ TEST_F(PlanNodeToStringTest, topNRowNumber) {
 
   ASSERT_EQ("-- TopNRowNumber[1]\n", plan->toString(false, false, true));
   ASSERT_EQ(
-#ifndef SPARK_COMPATIBLE
-      "-- TopNRowNumber[1][order by (a DESC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
-#else
-      "-- TopNRowNumber[1][order by (a DESC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR, row_number:INTEGER\n",
-#endif
+      ::bytedance::bolt::kSparkCompatible
+          ? "-- TopNRowNumber[1][order by (a DESC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR, row_number:INTEGER\n"
+          : "-- TopNRowNumber[1][order by (a DESC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
       plan->toString(true, false, true));
 
   plan = PlanBuilder()

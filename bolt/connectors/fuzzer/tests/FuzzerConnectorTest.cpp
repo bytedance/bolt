@@ -28,7 +28,6 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/connectors/fuzzer/tests/FuzzerConnectorTestBase.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -158,10 +157,3 @@ TEST_F(FuzzerConnectorTest, reproducible) {
 }
 
 } // namespace bytedance::bolt::connector::fuzzer::test
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

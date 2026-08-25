@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
@@ -138,8 +140,10 @@ TEST_F(TryExprTest, nestedTryParentErrors) {
       result);
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(TryExprTest, skipExecution) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   registerFunction<CountCallsFunction, int64_t, int64_t>({"count_calls"});
 
   std::vector<std::optional<int64_t>> expected{
@@ -154,11 +158,14 @@ TEST_F(TryExprTest, skipExecution) {
 }
 
 TEST_F(TryExprTest, skipExecutionEvalSimplified) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   registerFunction<CountCallsFunction, int64_t, int64_t>({"count_calls"});
 
-  // Test that when a subset of the inputs to a function wrapped in a TRY throw
-  // exceptions, that function is only evaluated on the inputs that did not
-  // throw exceptions.
+  // Test that when a subset of the inputs to a function wrapped in a TRY
+  // throw exceptions, that function is only evaluated on the inputs that did
+  // not throw exceptions.
   auto flatVector = makeFlatVector<StringView>({"1", "a", "1", "a", "1"});
   auto result = evaluateSimplified<FlatVector<int64_t>>(
       "try(count_calls(cast(c0 as integer)))", makeRowVector({flatVector}));
@@ -169,6 +176,9 @@ TEST_F(TryExprTest, skipExecutionEvalSimplified) {
 }
 
 TEST_F(TryExprTest, skipExecutionWholeBatchEvalSimplified) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   registerFunction<CountCallsFunction, int64_t, int64_t>({"count_calls"});
 
   // Test that when all the inputs to a function wrapped in a TRY throw
@@ -185,6 +195,9 @@ TEST_F(TryExprTest, skipExecutionWholeBatchEvalSimplified) {
 /// Verify that subsequent inputs to a non-default-null-behavior function are
 /// not evaluated if previous inputs generated errors.
 TEST_F(TryExprTest, skipExecutionOnInputErrors) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   // Fail all rows.
   auto input = makeRowVector({
       makeFlatVector<StringView>({"a"_sv, "b"_sv, "c"_sv}),
@@ -223,7 +236,6 @@ TEST_F(TryExprTest, skipExecutionOnInputErrors) {
   EXPECT_EQ(2, stats.at("array_constructor").numProcessedRows);
   EXPECT_EQ(2, stats.at("length").numProcessedRows);
 }
-#endif
 
 namespace {
 // A function that sets result to be a ConstantVector and then throws an

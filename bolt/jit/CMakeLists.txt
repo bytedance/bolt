@@ -20,10 +20,19 @@ bolt_add_library(
                  RowContainer/RowEqVectorsCodeGenerator.cpp
 )
 
-target_link_libraries(bolt_thrustjit PUBLIC llvm-core::llvm-core date::date fmt::fmt Folly::folly)
+target_link_libraries(
+  bolt_thrustjit
+  PUBLIC
+    llvm-core::llvm-core
+    date::date
+    fmt::fmt
+    Folly::folly
+)
 
 target_compile_options(
-  bolt_thrustjit PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-Werror=return-type>
+  bolt_thrustjit
+  PRIVATE
+    $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-Werror=return-type>
 )
 
 if(${BOLT_BUILD_TESTING})

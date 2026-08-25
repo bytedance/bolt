@@ -25,17 +25,15 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(BOLT_BENCHMARK_DEPS
-    bolt_vector_fuzzer
-    bolt_testutils
-    ${FOLLY_BENCHMARK}
-    GTest::gtest
+set(
+  BOLT_BENCHMARK_DEPS
+  bolt_testutils
+  ${FOLLY_BENCHMARK}
+  GTest::gtest
 )
 add_executable(bolt_vector_hash_all_benchmark SimpleVectorHashAllBenchmark.cpp)
 
-target_link_libraries(
-  bolt_vector_hash_all_benchmark PRIVATE ${BOLT_BENCHMARK_DEPS}
-)
+target_link_libraries(bolt_vector_hash_all_benchmark PRIVATE ${BOLT_BENCHMARK_DEPS})
 # This is a workaround for the use of VectorTestUtils.h which include gtest.h
 target_link_libraries(bolt_vector_hash_all_benchmark PRIVATE ${BOLT_BENCHMARK_DEPS})
 
@@ -48,7 +46,4 @@ add_executable(copy_benchmark CopyBenchmark.cpp)
 target_link_libraries(copy_benchmark PRIVATE ${BOLT_BENCHMARK_DEPS})
 
 add_executable(copy_vectors_opt_bench CopyVecOptBenchmark.cpp)
-target_link_libraries(
-  copy_vectors_opt_bench
-  PRIVATE ${BOLT_BENCHMARK_DEPS}
-)
+target_link_libraries(copy_vectors_opt_bench PRIVATE ${BOLT_BENCHMARK_DEPS})

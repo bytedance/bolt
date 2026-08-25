@@ -35,14 +35,27 @@ if(KERNEL_SUPPORTS_IO_URING)
   find_package(liburing REQUIRED)
   target_link_libraries(
     bolt_file
-    PUBLIC bolt_exception Folly::folly liburing::liburing
-    PRIVATE bolt_buffer bolt_common_base fmt::fmt glog::glog
+    PUBLIC
+      bolt_exception
+      Folly::folly
+      liburing::liburing
+    PRIVATE
+      bolt_buffer
+      bolt_common_base
+      fmt::fmt
+      glog::glog
   )
 else()
   target_link_libraries(
     bolt_file
-    PUBLIC bolt_exception Folly::folly
-    PRIVATE bolt_buffer bolt_common_base fmt::fmt glog::glog
+    PUBLIC
+      bolt_exception
+      Folly::folly
+    PRIVATE
+      bolt_buffer
+      bolt_common_base
+      fmt::fmt
+      glog::glog
   )
 endif()
 

@@ -67,7 +67,7 @@ if(NOT APPLE)
   include_directories(${JEMALLOC_INCLUDE_DIRS})
 endif()
 
-if (BOLT_BUILD_TEST_UTILS)
+if(BOLT_BUILD_TEST_UTILS)
   find_package(GTest CONFIG REQUIRED)
 endif()
 
@@ -75,16 +75,18 @@ find_package(Arrow CONFIG REQUIRED)
 
 target_link_libraries(
   bolt_memory
-  PUBLIC bolt_common_base
-         bolt_common_config
-         bolt_exception
-         bolt_common_flags
-         bolt_time
-         bolt_type_base
-         Folly::folly
-         fmt::fmt
-         gflags::gflags
-         glog::glog
-         arrow::arrow
-  PRIVATE re2::re2
+  PUBLIC
+    bolt_common_base
+    bolt_common_config
+    bolt_exception
+    bolt_common_flags
+    bolt_time
+    bolt_type_base
+    Folly::folly
+    fmt::fmt
+    gflags::gflags
+    glog::glog
+    arrow::arrow
+  PRIVATE
+    re2::re2
 )

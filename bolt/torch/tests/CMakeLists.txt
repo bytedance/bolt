@@ -14,12 +14,28 @@
 # limitations under the License.
 
 add_executable(
-  torch_test test_compatibility.cpp test_main.cpp test_operator.cpp test_plan_node.cpp utils.cpp
+  torch_test
+  test_compatibility.cpp
+  test_operator.cpp
+  test_plan_node.cpp
+  utils.cpp
 )
 target_link_libraries(
-  torch_test PRIVATE bolt_torch bolt_exec bolt_core bolt_exec_test_lib glog::glog GTest::gtest
+  torch_test
+  PRIVATE
+    bolt_torch
+    bolt_exec
+    bolt_core
+    glog::glog
+    bolt_gtest_main
 )
-target_include_directories(torch_test SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS} ${GTest_INCLUDE_DIRS})
+target_include_directories(
+  torch_test
+  SYSTEM
+  PRIVATE
+    ${TORCH_INCLUDE_DIRS}
+    ${GTest_INCLUDE_DIRS}
+)
 target_compile_definitions(torch_test PRIVATE BOLT_HAS_TORCH=1)
 
 add_test(torch_test torch_test)

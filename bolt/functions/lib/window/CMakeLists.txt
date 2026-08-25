@@ -27,7 +27,12 @@
 
 bolt_add_library(bolt_functions_window NthValue.cpp Ntile.cpp Rank.cpp RowNumber.cpp)
 
-target_link_libraries(bolt_functions_window bolt_buffer bolt_exec Folly::folly)
+target_link_libraries(
+  bolt_functions_window
+  bolt_buffer
+  bolt_exec
+  Folly::folly
+)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)

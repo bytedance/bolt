@@ -59,11 +59,10 @@ target_link_libraries(
 )
 
 install(
-  TARGETS bolt_dwio_dwrf_reader
-          ARCHIVE
-          DESTINATION
-          ${CMAKE_INSTALL_LIBDIR}
-          LIBRARY
-          DESTINATION
-          ${CMAKE_INSTALL_LIBDIR}
+  TARGETS
+    bolt_dwio_dwrf_reader
+  ARCHIVE
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )

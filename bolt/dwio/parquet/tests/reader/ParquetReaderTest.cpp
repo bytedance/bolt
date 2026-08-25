@@ -28,7 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <type/HugeInt.h>
 #include <type/Type.h>
 #include <cstdlib>
@@ -37,6 +38,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
+#include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 #include "bolt/dwio/parquet/writer/Writer.h"
@@ -794,23 +796,25 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
             2000000000000000000ULL,
             3000000000000000000ULL})});
 
-#ifdef SPARK_COMPATIBLE
-  const std::string sample(getExampleFilePath("uint.parquet"));
-  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
-  readerOptions.setFileSchema(rowType);
-  auto reader = createReader(sample, readerOptions);
+  if (::bytedance::bolt::kSparkCompatible) {
+    const std::string sample(getExampleFilePath("uint.parquet"));
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    readerOptions.setFileSchema(rowType);
+    auto reader = createReader(sample, readerOptions);
 
-  auto rowReaderOpts = getReaderOpts(rowType);
-  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
-  auto rowReader = reader->createRowReader(rowReaderOpts);
-  assertReadWithReaderAndExpected(rowType, *rowReader, expected, *pool_);
-#else
-  assertReadWithExpected("uint.parquet", rowType, expected);
-#endif
+    auto rowReaderOpts = getReaderOpts(rowType);
+    rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    assertReadWithReaderAndExpected(rowType, *rowReader, expected, *pool_);
+  } else {
+    assertReadWithExpected("uint.parquet", rowType, expected);
+  }
 }
 
-#ifdef SPARK_COMPATIBLE
 TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const std::vector<TypePtr> unsupportedTypes = {
       DECIMAL(18, 0), DECIMAL(19, 0), DECIMAL(20, 1), DECIMAL(21, 0)};
   const std::string sample(getExampleFilePath("uint.parquet"));
@@ -825,7 +829,6 @@ TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
         createReader(sample, readerOptions), kParquetTypeMappingErrorPrefix);
   }
 }
-#endif
 
 TEST_F(ParquetReaderTest, parseUnsignedInt5) {
   auto rowType =
@@ -2825,10 +2828,10 @@ TEST_F(ParquetReaderTest, varcharToBigintSchemaMismatchCast) {
   rowReaderOpts.setScanSpec(scanSpec);
 
   // In non-SPARK builds this is rejected by ParquetColumnReader::matchType.
-#ifndef SPARK_COMPATIBLE
-  EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
-  return;
-#endif
+  if (!::bytedance::bolt::kSparkCompatible) {
+    EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
+    return;
+  }
 
   // In SPARK-compatible builds, schema mismatch is allowed and cast is applied.
   auto rowReader = reader->createRowReader(rowReaderOpts);

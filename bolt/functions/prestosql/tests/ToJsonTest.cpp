@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "bolt/functions/prestosql/types/JsonType.h"
@@ -131,7 +133,6 @@ TEST_F(ToJsonTest, fromArray) {
         "to_json(c0)", {arrayVector}, expectedVector);
   }
 
-#ifdef SPARK_COMPATIBLE
   // Test array with short decimal column
   std::vector<std::vector<int64_t>> decimalArray{
       {0, 100}, {123456, 1234567890}, {84059812, 1234567800}};
@@ -150,13 +151,13 @@ TEST_F(ToJsonTest, fromArray) {
   auto longArrayVector =
       makeArrayVector<int128_t>(longDecimalArray, DECIMAL(30, 10));
   std::vector<std::optional<JsonNativeType>> longExpected{
-      R"([0E-10,1.00E-8])",
+      ::bytedance::bolt::kSparkCompatible ? R"([0E-10,1.00E-8])"
+                                          : R"([0.0000000000,0.0000000100])",
       R"([0.0000123456,12.3456789112])",
       R"([0.0084059812,1.2345678000])"};
   auto longExpectedVector =
       makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
   toJsonSimple("to_json(c0)", {longArrayVector}, longExpectedVector);
-#endif
 }
 
 TEST_F(ToJsonTest, fromMap) {
@@ -211,7 +212,6 @@ TEST_F(ToJsonTest, fromMap) {
     toJsonSimple("to_json(c0)", {mapVector}, expectedVector);
   }
 
-#ifdef SPARK_COMPATIBLE
   // Tests map with short decimal values.
   std::vector<std::vector<Pair<StringView, int64_t>>> maps{
       {{"a", 0}, {"b", 100}},
@@ -233,7 +233,9 @@ TEST_F(ToJsonTest, fromMap) {
       {{"c", 123456}, {"d", 123456789112LL}},
       {{"e", 84059812}, {"f", 12345678000}}};
   std::vector<std::optional<JsonNativeType>> longExpected{
-      R"({"a":0E-10,"b":1.00E-8})",
+      ::bytedance::bolt::kSparkCompatible
+          ? R"({"a":0E-10,"b":1.00E-8})"
+          : R"({"a":0.0000000000,"b":0.0000000100})",
       R"({"c":0.0000123456,"d":12.3456789112})",
       R"({"e":0.0084059812,"f":1.2345678000})"};
   auto longDecimalMapVector = makeMapVector<StringView, int128_t>(
@@ -241,7 +243,6 @@ TEST_F(ToJsonTest, fromMap) {
   auto longExpectedVector =
       makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
   toJsonSimple("to_json(c0)", {longDecimalMapVector}, longExpectedVector);
-#endif
 
   {
     // Tests map whose values are of unknown type.
@@ -395,7 +396,6 @@ TEST_F(ToJsonTest, fromRow) {
     toJsonSimple("to_json(c0)", {rowVector}, expectedVector);
   }
 
-#ifdef SPARK_COMPATIBLE
   // Test row with short decimal column
   auto child1 =
       makeFlatVector<StringView>({"a", "b", "c", "d", "e", "f"}, VARCHAR());
@@ -420,8 +420,10 @@ TEST_F(ToJsonTest, fromRow) {
       {0, 100, 123456, 123456789112LL, 84059812, 12345678000}, DECIMAL(30, 10));
   auto longRowVector = makeRowVector({longChild1, longChild2});
   std::vector<std::optional<JsonNativeType>> longExpected{
-      R"({"c0":"a","c1":0E-10})",
-      R"({"c0":"b","c1":1.00E-8})",
+      ::bytedance::bolt::kSparkCompatible ? R"({"c0":"a","c1":0E-10})"
+                                          : R"({"c0":"a","c1":0.0000000000})",
+      ::bytedance::bolt::kSparkCompatible ? R"({"c0":"b","c1":1.00E-8})"
+                                          : R"({"c0":"b","c1":0.0000000100})",
       R"({"c0":"c","c1":0.0000123456})",
       R"({"c0":"d","c1":12.3456789112})",
       R"({"c0":"e","c1":0.0084059812})",
@@ -429,7 +431,6 @@ TEST_F(ToJsonTest, fromRow) {
   auto longExpectedVector =
       makeNullableFlatVector<JsonNativeType>(longExpected, VARCHAR());
   toJsonSimple("to_json(c0)", {longRowVector}, longExpectedVector);
-#endif
 
   // dorado id 111899126, date = 20240106
   {

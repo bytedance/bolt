@@ -28,7 +28,13 @@
 bolt_add_library(bolt_function_registry FunctionRegistry.cpp)
 bolt_add_library(bolt_coverage_util CoverageUtil.cpp)
 
-target_link_libraries(bolt_function_registry bolt_expression bolt_type bolt_core bolt_exception)
+target_link_libraries(
+  bolt_function_registry
+  bolt_expression
+  bolt_type
+  bolt_core
+  bolt_exception
+)
 target_link_libraries(bolt_coverage_util bolt_function_registry)
 add_subdirectory(lib)
 if(${BOLT_ENABLE_PRESTO_FUNCTIONS})

@@ -26,7 +26,4 @@
 # --------------------------------------------------------------------------
 
 add_executable(bolt_gcsfile_example GcsFileSystemExample.cpp)
-target_link_libraries(
-  bolt_gcsfile_example
-  bolt_testutils
-)
+target_link_libraries(bolt_gcsfile_example bolt_testutils)

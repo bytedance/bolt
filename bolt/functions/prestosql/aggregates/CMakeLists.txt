@@ -25,21 +25,30 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(APAGG_TYPES "int8_t" "int16_t" "int32_t" "int64_t" "float" "double")
+set(
+  APAGG_TYPES
+  "int8_t"
+  "int16_t"
+  "int32_t"
+  "int64_t"
+  "float"
+  "double"
+)
 specialize_template(APAGG_GENERATED_FILES ApproxPercentileAggregate.cpp.in ${APAGG_TYPES})
 
-set(MIN_MAX_BY_VALUE_TYPES
-    "bool"
-    "int8_t"
-    "int16_t"
-    "int32_t"
-    "int64_t"
-    "int128_t"
-    "float"
-    "double"
-    "StringView"
-    "Timestamp"
-    "ComplexType"
+set(
+  MIN_MAX_BY_VALUE_TYPES
+  "bool"
+  "int8_t"
+  "int16_t"
+  "int32_t"
+  "int64_t"
+  "int128_t"
+  "float"
+  "double"
+  "StringView"
+  "Timestamp"
+  "ComplexType"
 )
 set(MIN_MAX_BY_NARG_VALUE_TYPES ${MIN_MAX_BY_VALUE_TYPES})
 list(REMOVE_ITEM MIN_MAX_BY_NARG_VALUE_TYPES "int128_t")

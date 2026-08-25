@@ -28,7 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/TableScan.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Fs.h"
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -44,6 +45,7 @@
 #include "bolt/dwio/paimon/deletionvectors/DeletionFileReader.h"
 #include "bolt/exec/OutputBufferManager.h"
 #include "bolt/exec/PlanNodeStats.h"
+#include "bolt/exec/TableScan.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
@@ -4333,9 +4335,9 @@ TEST_F(TableScanTest, timestampPartitionKey) {
               std::end(inputs) - std::begin(inputs),
               [&](auto i) {
                 auto t = util::fromTimestampString(inputs[i], nullptr);
-#ifndef SPARK_COMPATIBLE
-                t.toGMT(Timestamp::defaultTimezone());
-#endif
+                if (!::bytedance::bolt::kSparkCompatible) {
+                  t.toGMT(Timestamp::defaultTimezone());
+                }
                 return t;
               }),
       });

@@ -38,20 +38,17 @@ add_executable(
   CovarianceAggregatesTest.cpp
   FirstAggregateTest.cpp
   LastAggregateTest.cpp
-  Main.cpp
   MinMaxByAggregationTest.cpp
   ModeAggregateTest.cpp
-  PercentileAggregateTest.cpp
   PercentileApproxTest.cpp
   RegrReplacementAggregationTest.cpp
   SumAggregationTest.cpp
 )
 
+if(BOLT_ENABLE_SPARK_COMPATIBLE)
+  target_sources(bolt_functions_spark_aggregates_test PRIVATE PercentileAggregateTest.cpp)
+endif()
+
 add_test(bolt_functions_spark_aggregates_test bolt_functions_spark_aggregates_test)
 
-target_link_libraries(
-  bolt_functions_spark_aggregates_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_functions_spark_aggregates_test bolt_gtest_main)

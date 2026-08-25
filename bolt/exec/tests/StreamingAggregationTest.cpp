@@ -626,3 +626,40 @@ TEST_F(StreamingAggregationTest, noFlushWithLargePreferredOutputBatchBytes) {
   ASSERT_EQ(aggStats.outputVectors, 1);
   ASSERT_EQ(aggStats.outputRows, numRows);
 }
+
+TEST_F(StreamingAggregationTest, runtimeStatsTimers) {
+  // Keep all input in one group so aggregate evaluation dominates the cost of
+  // materializing the single output row. This makes function/output overlap
+  // directly observable in the runtime stats.
+  const vector_size_t numRows = 200'000;
+  auto keys = makeFlatVector<int64_t>(numRows, [](auto /*row*/) { return 0; });
+  auto payload =
+      makeFlatVector<int64_t>(numRows, [](auto row) { return row * 13; });
+  auto data = makeRowVector({keys, payload});
+  createDuckDbTable({data});
+
+  core::PlanNodeId aggrNodeId;
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .partialStreamingAggregation({"c0"}, {"sum(c1)", "count(1)"})
+                  .capturePlanNodeId(aggrNodeId)
+                  .finalAggregation()
+                  .planNode();
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config("max_drivers_per_task", 1)
+          .config(core::QueryConfig::kPreferredOutputBatchRows, "64")
+          .assertResults("SELECT c0, sum(c1), count(1) FROM tmp GROUP BY 1");
+
+  auto planStats = exec::toPlanStats(task->taskStats());
+  const auto& runtimeStats = planStats.at(aggrNodeId).customStats;
+  ASSERT_GT(runtimeStats.count("aggFunctionTimeNs"), 0);
+  ASSERT_GT(runtimeStats.count("aggOutputTimeNs"), 0);
+  EXPECT_GT(runtimeStats.at("aggFunctionTimeNs").sum, 0);
+  EXPECT_GT(runtimeStats.at("aggOutputTimeNs").sum, 0);
+  ASSERT_LT(
+      runtimeStats.at("aggOutputTimeNs").sum,
+      runtimeStats.at("aggFunctionTimeNs").sum);
+  EXPECT_EQ(runtimeStats.count("aggProbeTimeNs"), 0);
+}

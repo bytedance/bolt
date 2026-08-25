@@ -28,6 +28,7 @@
 add_executable(file_utils_test FileUtilsTests.cpp)
 add_test(file_utils_test file_utils_test)
 target_link_libraries(
-  file_utils_test bolt_testutils GTest::gtest
-  GTest::gtest_main GTest::gmock
+  file_utils_test
+  bolt_gtest_main
+  GTest::gmock
 )

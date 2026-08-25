@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
-#include "bolt/functions/lib/Sequence.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/expression/DecodedArgs.h"
+#include "bolt/functions/lib/Sequence.h"
 #include "bolt/functions/lib/TimeDiffUtils.h"
 #include "bolt/functions/prestosql/DateTimeImpl.h"
 
@@ -202,12 +204,10 @@ vector_size_t SequenceFunction<T, K>::checkArguments(
   T stop = stopVector->valueAt<T>(row);
   auto step = getStep(
       toInt64(start), toInt64(stop), stepVector, row, isDate, isYearMonth);
-#ifdef SPARK_COMPATIBLE
   // Unlike Presto, Spark permits a zero step when both bounds are equal.
-  if (step == 0 && start == stop) {
+  if (::bytedance::bolt::kSparkCompatible && step == 0 && start == stop) {
     return 1;
   }
-#endif
   BOLT_USER_CHECK_NE(step, 0, "step must not be zero");
   BOLT_USER_CHECK(
       step > 0 ? stop >= start : stop <= start,

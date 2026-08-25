@@ -29,21 +29,19 @@ add_subdirectory(utils)
 
 add_executable(
   aggregate_companion_functions_test
-  AggregateCompanionAdapterTest.cpp AggregateCompanionSignaturesTest.cpp DummyAggregateFunction.cpp
+  AggregateCompanionAdapterTest.cpp
+  AggregateCompanionSignaturesTest.cpp
+  DummyAggregateFunction.cpp
 )
 
 add_test(
   NAME aggregate_companion_functions_test
-  COMMAND aggregate_companion_functions_test
+  COMMAND
+    aggregate_companion_functions_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(
-  aggregate_companion_functions_test PRIVATE
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(aggregate_companion_functions_test PRIVATE bolt_gtest_main)
 
 add_executable(
   bolt_exec_test
@@ -63,7 +61,6 @@ add_executable(
   LimitTest.cpp
   LocalPartitionTest.cpp
   LocalShuffleTest.cpp
-  Main.cpp
   MarkDistinctTest.cpp
   MemoryReclaimerTest.cpp
   MergeTest.cpp
@@ -102,31 +99,45 @@ add_executable(
   WindowTest.cpp
 )
 
-add_executable(row_based_spill_test RowBasedCompareTest.cpp RowToColumnVectorTest.cpp)
+add_executable(
+  row_based_spill_test
+  RowBasedCompareTest.cpp
+  RowToColumnVectorTest.cpp
+)
 if(KERNEL_SUPPORTS_IO_URING)
   add_executable(iouring_spill_test AsyncSpillerTest.cpp)
 endif()
 
-add_executable(bolt_exec_aggregation_test AggregationTest.cpp Main.cpp)
+add_executable(bolt_exec_aggregation_test AggregationTest.cpp)
 
-add_executable(bolt_exec_spiller_test Main.cpp SpillerTest.cpp)
+add_executable(bolt_exec_spiller_test SpillerTest.cpp)
 
 add_executable(
-  bolt_exec_multifragment_window_test Main.cpp MultiFragmentTest.cpp SpillableWindowTest.cpp
+  bolt_exec_multifragment_window_test
+  MultiFragmentTest.cpp
+  SpillableWindowTest.cpp
 )
 
 add_executable(
-  bolt_exec_hash_join_test HashBitRangeTest.cpp HashJoinBridgeTest.cpp HashJoinTest.cpp
-                           HashPartitionFunctionTest.cpp HashTableTest.cpp Main.cpp
+  bolt_exec_hash_join_test
+  HashBitRangeTest.cpp
+  HashJoinBridgeTest.cpp
+  HashJoinTest.cpp
+  HashPartitionFunctionTest.cpp
+  HashTableTest.cpp
 )
 
-add_executable(bolt_exec_merge_join_test Main.cpp MergeJoinTest.cpp NestedLoopJoinTest.cpp)
+add_executable(
+  bolt_exec_merge_join_test
+  MergeJoinTest.cpp
+  NestedLoopJoinTest.cpp
+)
 
-add_executable(bolt_exec_scan_test Main.cpp TableScanTest.cpp)
+add_executable(bolt_exec_scan_test TableScanTest.cpp)
 
-add_executable(bolt_exec_unested_test Main.cpp UnnestTest.cpp)
+add_executable(bolt_exec_unested_test UnnestTest.cpp)
 
-add_executable(bolt_exec_table_writer_test Main.cpp TableWriteTest.cpp)
+add_executable(bolt_exec_table_writer_test TableWriteTest.cpp)
 
 add_executable(
   bolt_exec_infra_test
@@ -134,7 +145,6 @@ add_executable(
   DriverTest.cpp
   FunctionSignatureBuilderTest.cpp
   GroupedExecutionTest.cpp
-  Main.cpp
   OperatorUtilsTest.cpp
   PlanBuilderTest.cpp
   PrestoQueryRunnerTest.cpp
@@ -143,54 +153,80 @@ add_executable(
   TreeOfLosersTest.cpp
 )
 
-add_test(
-  NAME bolt_exec_test
-  COMMAND bolt_exec_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+add_test(NAME bolt_exec_test COMMAND bolt_exec_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(
+  bolt_exec_test
+  PROPERTIES
+    COST
+      1
+    TIMEOUT
+      3000
 )
-set_tests_properties(bolt_exec_test PROPERTIES COST 1 TIMEOUT 3000)
 
 add_test(
   NAME row_based_spill_test
-  COMMAND row_based_spill_test
+  COMMAND
+    row_based_spill_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 if(KERNEL_SUPPORTS_IO_URING)
   add_test(
     NAME iouring_spill_test
-    COMMAND iouring_spill_test
+    COMMAND
+      iouring_spill_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   )
-  set_tests_properties(iouring_spill_test PROPERTIES COST 1)
+  set_tests_properties(
+    iouring_spill_test
+    PROPERTIES
+      COST
+        1
+  )
 endif()
 
 add_test(
   NAME bolt_exec_infra_test
-  COMMAND bolt_exec_infra_test
+  COMMAND
+    bolt_exec_infra_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 add_test(
   NAME bolt_exec_aggregation_test
-  COMMAND bolt_exec_aggregation_test
+  COMMAND
+    bolt_exec_aggregation_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 add_test(
   NAME bolt_exec_spiller_test
-  COMMAND bolt_exec_spiller_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-set_tests_properties(bolt_exec_spiller_test PROPERTIES COST 1 TIMEOUT 3000)
-
-add_test(
-  NAME bolt_exec_multifragment_window_test
-  COMMAND bolt_exec_multifragment_window_test
+  COMMAND
+    bolt_exec_spiller_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 set_tests_properties(
-  bolt_exec_multifragment_window_test PROPERTIES COST 1 TIMEOUT 3000
+  bolt_exec_spiller_test
+  PROPERTIES
+    COST
+      1
+    TIMEOUT
+      3000
+)
+
+add_test(
+  NAME bolt_exec_multifragment_window_test
+  COMMAND
+    bolt_exec_multifragment_window_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(
+  bolt_exec_multifragment_window_test
+  PROPERTIES
+    COST
+      1
+    TIMEOUT
+      3000
 )
 
 bolt_add_sharded_gtest(bolt_exec_hash_join_test 5)
@@ -199,85 +235,78 @@ bolt_add_sharded_gtest(bolt_exec_scan_test 4)
 
 add_test(
   NAME bolt_exec_merge_join_test
-  COMMAND bolt_exec_merge_join_test
+  COMMAND
+    bolt_exec_merge_join_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 add_test(
   NAME bolt_exec_unested_test
-  COMMAND bolt_exec_unested_test
+  COMMAND
+    bolt_exec_unested_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 add_test(
   NAME bolt_exec_table_writer_test
-  COMMAND bolt_exec_table_writer_test
+  COMMAND
+    bolt_exec_table_writer_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-set(BOLT_EXEC_TEST_DEPENDENCIES
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
-    GTest::gmock
+set(
+  BOLT_EXEC_TEST_DEPENDENCIES
+  bolt_gtest_main
+  GTest::gmock
 )
 
-target_link_libraries(bolt_exec_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(
-  bolt_exec_infra_test bolt_presto_serializer bolt_fuzzer_util ${BOLT_EXEC_TEST_DEPENDENCIES}
-)
+target_link_libraries(bolt_exec_infra_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(row_based_spill_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(row_based_spill_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_aggregation_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_aggregation_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_spiller_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_spiller_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(
-  bolt_exec_multifragment_window_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES}
-)
+target_link_libraries(bolt_exec_multifragment_window_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_hash_join_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_hash_join_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
 if(KERNEL_SUPPORTS_IO_URING)
-  target_link_libraries(iouring_spill_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+  target_link_libraries(iouring_spill_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 endif()
 
-target_link_libraries(bolt_exec_scan_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_scan_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_merge_join_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_merge_join_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_unested_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_unested_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
-target_link_libraries(bolt_exec_table_writer_test bolt_aggregates ${BOLT_EXEC_TEST_DEPENDENCIES})
+target_link_libraries(bolt_exec_table_writer_test ${BOLT_EXEC_TEST_DEPENDENCIES})
 
 add_executable(bolt_in_10_min_demo BoltIn10MinDemo.cpp)
 
-target_link_libraries(
-  bolt_in_10_min_demo
-  bolt_tpch_connector
-  bolt_testutils
-)
+target_link_libraries(bolt_in_10_min_demo bolt_testutils)
 
 # Join Fuzzer.
 add_library(bolt_join_fuzzer STATIC JoinFuzzer.cpp)
 
 target_link_libraries(
   bolt_join_fuzzer
-  bolt_type
-  bolt_vector_fuzzer
-  bolt_exec_test_lib
-  bolt_expression_test_utility
+  bolt_testutils
   bolt_fuzzer_flags
 )
 
 add_executable(bolt_join_fuzzer_test JoinFuzzerTest.cpp)
 
-target_link_libraries(bolt_join_fuzzer_test PRIVATE
-  bolt_join_fuzzer
-  bolt_testutils
-  GTest::gtest
+target_link_libraries(
+  bolt_join_fuzzer_test
+  PRIVATE
+    bolt_join_fuzzer
+    bolt_testutils
+    GTest::gtest
 )
 
 add_executable(bolt_exchange_fuzzer_test ExchangeFuzzer.cpp)
@@ -303,9 +332,6 @@ add_executable(spark_aggregation_runner_test SparkAggregationRunnerTest.cpp)
 target_link_libraries(
   spark_aggregation_runner_test
   bolt_aggregation_fuzzer
-  bolt_fuzzer_util
-  bolt_aggregates
-  bolt_functions_spark_aggregates
   bolt_testutils
   GTest::gtest
 )
@@ -315,30 +341,32 @@ add_executable(spark_window_runner_test SparkWindowRunnerTest.cpp)
 target_link_libraries(
   spark_window_runner_test
   bolt_window_fuzzer
-  bolt_fuzzer_util
-  bolt_aggregates
-  bolt_functions_spark_aggregates
-  bolt_functions_spark_window
-  bolt_testutils
-  GTest::gtest
-)
-
-add_library(bolt_simple_aggregate SimpleArrayAggAggregate.cpp SimpleAverageAggregate.cpp)
-
-target_link_libraries(
-  bolt_simple_aggregate PUBLIC bolt_testutils
-)
-
-add_executable(bolt_simple_aggregate_test Main.cpp SimpleAggregateAdapterTest.cpp)
-
-target_link_libraries(
-  bolt_simple_aggregate_test bolt_simple_aggregate bolt_exec bolt_functions_aggregates_test_lib
   bolt_testutils
   GTest::gtest
 )
 
 add_library(
-  bolt_spiller_join_benchmark_base JoinSpillInputBenchmarkBase.cpp SpillerBenchmarkBase.cpp
+  bolt_simple_aggregate
+  STATIC
+  SimpleArrayAggAggregate.cpp
+  SimpleAverageAggregate.cpp
+)
+
+target_link_libraries(bolt_simple_aggregate PUBLIC bolt_testutils)
+
+add_executable(bolt_simple_aggregate_test SimpleAggregateAdapterTest.cpp)
+
+target_link_libraries(
+  bolt_simple_aggregate_test
+  bolt_simple_aggregate
+  bolt_gtest_main
+)
+
+add_library(
+  bolt_spiller_join_benchmark_base
+  STATIC
+  JoinSpillInputBenchmarkBase.cpp
+  SpillerBenchmarkBase.cpp
 )
 target_link_libraries(
   bolt_spiller_join_benchmark_base
@@ -348,13 +376,17 @@ target_link_libraries(
 
 add_executable(bolt_spiller_join_benchmark SpillerJoinInputBenchmarkTest.cpp)
 target_link_libraries(
-  bolt_spiller_join_benchmark PUBLIC
-  bolt_spiller_join_benchmark_base
-  bolt_testutils
+  bolt_spiller_join_benchmark
+  PUBLIC
+    bolt_spiller_join_benchmark_base
+    bolt_testutils
 )
 
 add_library(
-  bolt_spiller_aggregate_benchmark_base AggregateSpillBenchmarkBase.cpp SpillerBenchmarkBase.cpp
+  bolt_spiller_aggregate_benchmark_base
+  STATIC
+  AggregateSpillBenchmarkBase.cpp
+  SpillerBenchmarkBase.cpp
 )
 target_link_libraries(
   bolt_spiller_aggregate_benchmark_base
@@ -364,22 +396,19 @@ target_link_libraries(
 
 add_executable(bolt_spiller_aggregate_benchmark SpillerAggregateBenchmarkTest.cpp)
 target_link_libraries(
-  bolt_spiller_aggregate_benchmark bolt_exec bolt_exec_test_lib
+  bolt_spiller_aggregate_benchmark
+  bolt_testutils
   bolt_spiller_aggregate_benchmark_base
 )
 
 add_executable(cpr_http_client_test CprHttpClientTest.cpp)
 add_test(
   NAME cpr_http_client_test
-  COMMAND cpr_http_client_test
+  COMMAND
+    cpr_http_client_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(
-  cpr_http_client_test PRIVATE
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(cpr_http_client_test PRIVATE bolt_gtest_main)
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 

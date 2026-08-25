@@ -27,7 +27,6 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 
 #include "bolt/common/memory/Memory.h"
@@ -101,9 +100,3 @@ TEST_F(S3ReadTest, s3ReadTest) {
   assertEqualResults({expectedResults}, {copy});
 }
 } // namespace bytedance::bolt::filesystems
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  return RUN_ALL_TESTS();
-}

@@ -16,7 +16,6 @@
 
 #include "bolt/connectors/paimon/PaimonConnector.h"
 #include <folly/Subprocess.h>
-#include <folly/init/Init.h>
 #include <folly/json.h>
 #include <gtest/gtest.h>
 #include <paimon/defs.h>
@@ -1633,10 +1632,3 @@ TEST_F(PaimonConnectorTest, TimestampPrecisionEndToEnd) {
 }
 
 } // namespace bytedance::bolt::connector::paimon
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

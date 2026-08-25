@@ -28,10 +28,18 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/DateTimeFunctions.h"
 namespace bytedance::bolt::functions::sparksql {
+namespace {
+template <typename T>
+using BuildJodaDateFormatFunction =
+    JodaDateFormatFunction<T, ::bytedance::bolt::kSparkCompatible>;
+} // namespace
+
 void registerDatetimeFunctions(const std::string& prefix) {
   // Register date functions.
   registerFunction<Date2PDateFunction, Varchar, Varchar>(
@@ -182,10 +190,10 @@ void registerDatetimeFunctions(const std::string& prefix) {
   registerFunction<MillisecondFunction, int32_t, Timestamp>(
       {prefix + "millisecond"});
 
-  registerFunction<JodaDateFormatFunction, Varchar, Timestamp, Varchar>(
+  registerFunction<BuildJodaDateFormatFunction, Varchar, Timestamp, Varchar>(
       {prefix + "date_format"});
   registerFunction<
-      JodaDateFormatFunction,
+      BuildJodaDateFormatFunction,
       Varchar,
       TimestampWithTimezone,
       Varchar>({prefix + "date_format"});

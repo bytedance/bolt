@@ -118,21 +118,14 @@ add_executable(
 add_test(bolt_functions_test bolt_functions_test)
 
 target_link_libraries(
-  bolt_functions_test PRIVATE
-  bolt_functions_test_lib
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-  GTest::gmock
+  bolt_functions_test
+  PRIVATE
+    bolt_gtest_main
+    GTest::gmock
 )
 
 add_executable(bolt_functions_simple_test SimpleComparisonMatcherTest.cpp)
 
 add_test(bolt_functions_simple_test bolt_functions_simple_test)
 
-target_link_libraries(
-  bolt_functions_simple_test  PRIVATE
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_functions_simple_test PRIVATE bolt_gtest_main)

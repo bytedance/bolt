@@ -32,6 +32,7 @@
 
 #include "CheckedArithmeticImpl.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 namespace bytedance::bolt::functions {
 
 template <typename T>
@@ -70,19 +71,18 @@ struct CheckedDivideFunction {
   }
 };
 
-template <typename T>
+template <
+    typename T,
+    bool NullOnDivideByZero = ::bytedance::bolt::kSparkCompatible>
 struct CheckedModulusFunction {
   template <typename TInput>
   FOLLY_ALWAYS_INLINE bool
   call(TInput& result, const TInput& a, const TInput& b) {
     auto res = checkedModulus(a, b);
-    // When any number mod 0, spark's logic returns null, while presto's logic
-    // throws an exception, so using `SPARK_COMPATIBLE` macro to constrain the
-    // behavior of both
     if (UNLIKELY(!res.has_value())) {
-#ifdef SPARK_COMPATIBLE
-      return false;
-#endif
+      if constexpr (NullOnDivideByZero) {
+        return false;
+      }
       BOLT_ARITHMETIC_ERROR("Cannot divide by 0");
     }
     result = *res;

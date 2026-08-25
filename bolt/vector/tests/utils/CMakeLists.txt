@@ -27,4 +27,9 @@
 
 bolt_add_library(bolt_vector_test_lib VectorMaker.cpp VectorTestBase.cpp)
 
-target_link_libraries(bolt_vector_test_lib bolt_exec bolt_vector GTest::gtest GTest::gtest_main)
+target_link_libraries(
+  bolt_vector_test_lib
+  bolt_exec
+  bolt_vector
+  GTest::gtest
+)

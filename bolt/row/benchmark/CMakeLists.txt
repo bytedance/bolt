@@ -19,7 +19,6 @@ add_executable(dense_row_serialize_benchmark DenseRowSerializeBenchmark.cpp)
 target_link_libraries(
   unsafe_row_serialize_benchmark
   bolt_row_fast
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest
@@ -28,7 +27,6 @@ target_link_libraries(
 target_link_libraries(
   dense_row_serialize_benchmark
   bolt_row_fast
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
   GTest::gtest

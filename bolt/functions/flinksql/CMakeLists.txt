@@ -36,7 +36,13 @@ target_link_libraries(
   simdjson::simdjson
 )
 
-set_property(TARGET bolt_functions_flink_impl PROPERTY JOB_POOL_COMPILE high_memory_pool)
+set_property(
+  TARGET
+    bolt_functions_flink_impl
+  PROPERTY
+    JOB_POOL_COMPILE
+      high_memory_pool
+)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)

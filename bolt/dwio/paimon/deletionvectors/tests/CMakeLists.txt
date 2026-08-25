@@ -15,26 +15,22 @@
 
 set(PAIMON_DELETION_TESTS DeleteionVectorTest.cpp)
 if(BOLT_ENABLE_PARQUET)
-  set(PAIMON_DELETION_TESTS ${PAIMON_DELETION_TESTS} DeletionFileReaderTest.cpp)
+  set(
+    PAIMON_DELETION_TESTS
+    ${PAIMON_DELETION_TESTS}
+    DeletionFileReaderTest.cpp
+  )
 endif()
 
 add_executable(bolt_paimon_deletion_vector_reader_test ${PAIMON_DELETION_TESTS})
 
 add_test(
   NAME bolt_paimon_deletion_vector_reader_test
-  COMMAND bolt_paimon_deletion_vector_reader_test
+  COMMAND
+    bolt_paimon_deletion_vector_reader_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(
-  bolt_paimon_deletion_vector_reader_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
-
-if(BOLT_ENABLE_PARQUET)
-  target_link_libraries(bolt_paimon_deletion_vector_reader_test bolt_dwio_native_parquet_reader)
-endif()
+target_link_libraries(bolt_paimon_deletion_vector_reader_test bolt_gtest_main)
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/examples DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

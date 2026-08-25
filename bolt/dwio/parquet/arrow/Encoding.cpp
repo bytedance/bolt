@@ -30,6 +30,8 @@
 
 // Adapted from Apache Arrow.
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/dwio/parquet/arrow/Encoding.h"
 
 #include <algorithm>
@@ -135,13 +137,10 @@ class EncoderImpl : virtual public Encoder {
   template <typename SinkType>
   std::shared_ptr<::arrow::Buffer> FinishSink(SinkType& sink) {
     std::shared_ptr<Buffer> buffer;
-#ifdef SPARK_COMPATIBLE
-    // as customized ArrowMemoryPool can't resize 0, speciallly avoid shrinking
-    // to fit for length = 0, and the memory will be released soon
-    PARQUET_THROW_NOT_OK(sink.Finish(&buffer, sink.length() > 0));
-#else
-    PARQUET_THROW_NOT_OK(sink.Finish(&buffer));
-#endif
+    // The customized Spark ArrowMemoryPool can't resize an empty buffer. The
+    // buffer is released immediately, so skip shrinking in that case.
+    PARQUET_THROW_NOT_OK(sink.Finish(
+        &buffer, !::bytedance::bolt::kSparkCompatible || sink.length() > 0));
     return buffer;
   }
 

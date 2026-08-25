@@ -13,7 +13,12 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.30.4)
-project(test_package LANGUAGES CXX CUDA)
+project(
+  test_package
+  LANGUAGES
+    CXX
+    CUDA
+)
 
 find_package(cudf REQUIRED CONFIG)
 

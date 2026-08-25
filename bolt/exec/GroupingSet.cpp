@@ -579,6 +579,7 @@ void GroupingSet::initializeGlobalAggregation() {
 void GroupingSet::addGlobalAggregationInput(
     const RowVectorPtr& input,
     bool mayPushdown) {
+  NanosecondTimer funcTimer(&stats_.aggFunctionTimeNs);
   initializeGlobalAggregation();
 
   auto numRows = input->size();

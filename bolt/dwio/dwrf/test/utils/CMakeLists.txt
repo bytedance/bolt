@@ -39,5 +39,4 @@ target_link_libraries(
   bolt_type
   bolt_vector
   GTest::gtest
-  GTest::gtest_main
 )

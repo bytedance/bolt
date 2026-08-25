@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(
-    bolt_paimon_connector_benchmark
-    PaimonBenchmark.cpp
-)
+add_executable(bolt_paimon_connector_benchmark PaimonBenchmark.cpp)
 
 target_link_libraries(
-    bolt_paimon_connector_benchmark
-    PRIVATE
+  bolt_paimon_connector_benchmark
+  PRIVATE
+    bolt_testutils
     bolt_connector_paimon
     bolt_hive_connector
-    bolt_exec_test_lib
     bolt_query_benchmark
     bolt_benchmark_builder
     Paimon::core

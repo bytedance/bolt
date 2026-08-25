@@ -131,8 +131,6 @@ class SparkCastExprTest : public functions::test::CastBaseTest {
   }
 };
 
-#ifdef SPARK_COMPATIBLE
-
 TEST_F(SparkCastExprTest, date) {
   testTryCast<std::string, int32_t>(
       "date",
@@ -605,9 +603,7 @@ TEST_F(SparkCastExprTest, errorHandling) {
       {"-",
        "-0",
        " @w 123",
-#ifdef SPARK_COMPATIBLE
        "123 ",
-#endif
        "  122",
        "",
        "-12-3",
@@ -624,9 +620,7 @@ TEST_F(SparkCastExprTest, errorHandling) {
       {std::nullopt,
        0,
        std::nullopt,
-#ifdef SPARK_COMPATIBLE
        123,
-#endif
        122,
        std::nullopt,
        std::nullopt,
@@ -812,20 +806,9 @@ TEST_F(SparkCastExprTest, fromString) {
   // String with leading and trailing whitespaces.
   testCast(
       makeFlatVector<StringView>(
-          {" 9999999999.99",
-#ifdef SPARK_COMPATIBLE
-           "9999999999.99 ",
-           "-3E+2 ",
-#endif
-           " -3E+2"}),
+          {" 9999999999.99", "9999999999.99 ", "-3E+2 ", " -3E+2"}),
       makeFlatVector<int64_t>(
-          {999'999'999'999,
-#ifdef SPARK_COMPATIBLE
-           999'999'999'999,
-           -30000,
-#endif
-           -30000},
-          DECIMAL(12, 2)));
+          {999'999'999'999, 999'999'999'999, -30000, -30000}, DECIMAL(12, 2)));
 }
 
 TEST_F(SparkCastExprTest, testInvalidDate) {
@@ -923,7 +906,5 @@ TEST_F(SparkCastExprTest, bigintToBinary) {
        std::string("\x7F\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 8),
        std::string("\x80\x00\x00\x00\x00\x00\x00\x00", 8)});
 }
-
-#endif
 } // namespace
 } // namespace bytedance::bolt::test

@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/prestosql/Bitwise.h"
@@ -55,16 +57,17 @@ void registerBitwiseFunctions(const std::string& prefix) {
   registerBitwiseUnaryIntegral<BitwiseNotFunction>({prefix + "bitwise_not"});
   registerBitwiseBinaryIntegral<BitwiseOrFunction>({prefix + "bitwise_or"});
   registerBitwiseBinaryIntegral<BitwiseXorFunction>({prefix + "bitwise_xor"});
-#ifdef SPARK_COMPATIBLE
-  registerBitwiseBinaryIntegral<BitCountFunction>({prefix + "bit_count"});
-#else
-  // built-in bit_count(bigint, bigint) -> bigint
-  registerFunction<BitCountFunction, int64_t, int64_t, int64_t>(
-      {prefix + "bit_count"});
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
+    registerBitwiseBinaryIntegral<BitCountFunction>({prefix + "bit_count"});
+  } else {
+    // built-in bit_count(bigint, bigint) -> bigint
+    registerFunction<BitCountFunction, int64_t, int64_t, int64_t>(
+        {prefix + "bit_count"});
 
-  // hive.udf.bit_count(bigint) -> integer
-  registerFunction<BitCountFunction, int32_t, int64_t>({prefix + "bit_count"});
-#endif // SPARK_COMPATIBLE
+    // hive.udf.bit_count(bigint) -> integer
+    registerFunction<BitCountFunction, int32_t, int64_t>(
+        {prefix + "bit_count"});
+  }
 
   registerFunction<BitDaysCountFunction, int32_t, Array<int64_t>>(
       {prefix + "bit_days_count"});

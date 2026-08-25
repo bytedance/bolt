@@ -27,13 +27,21 @@
 
 bolt_add_library(bolt_functions_remote_thrift_client ThriftClient.cpp)
 target_link_libraries(
-  bolt_functions_remote_thrift_client PUBLIC bolt_remote_function_thrift FBThrift::thriftcpp2
+  bolt_functions_remote_thrift_client
+  PUBLIC
+    bolt_remote_function_thrift
+    FBThrift::thriftcpp2
 )
 
 bolt_add_library(bolt_functions_remote Remote.cpp)
 target_link_libraries(
-  bolt_functions_remote PUBLIC bolt_expression bolt_functions_remote_thrift_client
-                               bolt_functions_remote_get_serde bolt_type_fbhive Folly::folly
+  bolt_functions_remote
+  PUBLIC
+    bolt_expression
+    bolt_functions_remote_thrift_client
+    bolt_functions_remote_get_serde
+    bolt_type_fbhive
+    Folly::folly
 )
 
 if(${BOLT_BUILD_TESTING})

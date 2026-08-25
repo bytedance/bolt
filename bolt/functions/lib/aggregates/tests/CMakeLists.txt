@@ -31,9 +31,4 @@ add_executable(bolt_functions_aggregates_test ValueListTest.cpp)
 
 add_test(NAME bolt_functions_aggregates_test COMMAND bolt_functions_aggregates_test)
 
-target_link_libraries(
-  bolt_functions_aggregates_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_functions_aggregates_test bolt_gtest_main)

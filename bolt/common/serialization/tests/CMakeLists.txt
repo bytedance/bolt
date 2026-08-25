@@ -25,12 +25,11 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_serialization_test SerializableTest.cpp TestRegistry.cpp)
+add_executable(
+  bolt_serialization_test
+  SerializableTest.cpp
+  TestRegistry.cpp
+)
 add_test(bolt_serialization_test bolt_serialization_test)
 
-target_link_libraries(
-  bolt_serialization_test
-  PRIVATE bolt_testutils
-          GTest::gtest
-          GTest::gtest_main
-)
+target_link_libraries(bolt_serialization_test PRIVATE bolt_gtest_main)

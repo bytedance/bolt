@@ -28,10 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/exec/Aggregate.h"
 #include "bolt/functions/lib/aggregates/BitDaysOrAggregate.h"
 #include "bolt/functions/lib/aggregates/CollectSetAggregate.h"
+#include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 namespace bytedance::bolt::aggregate::prestosql {
 
 extern void registerApproxMostFrequentAggregate(const std::string& prefix);
@@ -159,10 +161,11 @@ void registerAllAggregateFunctions(
       prefix, withCompanionFunctions, overwrite);
   functions::aggregate::registerBitDaysOrAggregate(
       prefix + "bit_days_or", withCompanionFunctions, overwrite);
-#ifndef SPARK_COMPATIBLE
+  if (::bytedance::bolt::kSparkCompatible) {
+    return;
+  }
   // hive.udaf.percentile for presto.default.percentile
   registerHiveUDAFPercentileAggregate(prefix);
-#endif
 }
 
 extern void registerCountDistinctAggregate(const std::string& prefix);

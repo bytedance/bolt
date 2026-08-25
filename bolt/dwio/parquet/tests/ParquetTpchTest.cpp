@@ -28,7 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <vector>
 
 #include "bolt/common/file/FileSystems.h"
@@ -61,9 +62,9 @@ class ParquetTpchTest : public testing::Test {
 
     functions::prestosql::registerAllScalarFunctions();
     aggregate::prestosql::registerAllAggregateFunctions();
-#ifdef SPARK_COMPATIBLE
-    functions::sparksql::registerFunctions("");
-#endif
+    if (::bytedance::bolt::kSparkCompatible) {
+      functions::sparksql::registerFunctions("");
+    }
 
     parse::registerTypeResolver();
     filesystems::registerLocalFileSystem();
@@ -269,11 +270,4 @@ TEST_F(ParquetTpchTest, Q21) {
 TEST_F(ParquetTpchTest, Q22) {
   std::vector<uint32_t> sortingKeys{0};
   assertQuery(22, std::move(sortingKeys));
-}
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

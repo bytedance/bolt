@@ -1,8 +1,17 @@
 cmake_policy(SET CMP0063 NEW)
 
-project(dbgen CXX C)
+project(
+  dbgen
+  CXX
+  C
+)
 
-add_definitions(-DDBNAME=dss -DMAC -DORACLE -DTPCH)
+add_definitions(
+  -DDBNAME=dss
+  -DMAC
+  -DORACLE
+  -DTPCH
+)
 
 bolt_add_library(
   bolt_dbgen

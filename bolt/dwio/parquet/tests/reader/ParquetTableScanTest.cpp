@@ -28,7 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include <folly/init/Init.h>
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <simdjson.h>
 #include <thrift/protocol/TCompactProtocol.h> //@manual
 #include <thrift/transport/TBufferTransports.h>
@@ -1860,11 +1861,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"double_to_varchar",              DOUBLE(),        VARCHAR(),          false},
 
     // ---- Hive SerDe-compatible floating point -> BIGINT cast. ----
-#ifdef SPARK_COMPATIBLE
-    {"double_to_bigint",               DOUBLE(),        BIGINT(),           false},
-#else
-    {"double_to_bigint",               DOUBLE(),        BIGINT(),           true},
-#endif
+    {"double_to_bigint",               DOUBLE(),        BIGINT(),           !::bytedance::bolt::kSparkCompatible},
 
     // ---- Reject: float narrowing ----
     {"double_to_real",                 DOUBLE(),        REAL(),             true},
@@ -1920,14 +1917,10 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     //  extra matchType() check at ParquetColumnReader.cpp:95 then
     //  rejects VARCHAR-file -> INT-requested with its own message, so
     //  the case expectation flips per flavour.
-#ifdef SPARK_COMPATIBLE
-    {"varchar_to_tinyint", VARCHAR(), TINYINT(), false},
-    {"varchar_to_smallint",VARCHAR(), SMALLINT(),false},
-    {"varchar_to_integer", VARCHAR(), INTEGER(), false},
-    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  false},
-#else
-    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  true, "file schema type"},
-#endif
+    {"varchar_to_tinyint", VARCHAR(), TINYINT(), !::bytedance::bolt::kSparkCompatible, "file schema type"},
+    {"varchar_to_smallint",VARCHAR(), SMALLINT(),!::bytedance::bolt::kSparkCompatible, "file schema type"},
+    {"varchar_to_integer", VARCHAR(), INTEGER(), !::bytedance::bolt::kSparkCompatible, "file schema type"},
+    {"varchar_to_bigint",  VARCHAR(), BIGINT(),  !::bytedance::bolt::kSparkCompatible, "file schema type"},
   };
   // clang-format on
 
@@ -2093,28 +2086,28 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
   }
 
-#ifdef SPARK_COMPATIBLE
-  // 4. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
-  //    Skipped in non-Spark builds because matchType() at
-  //    ParquetColumnReader.cpp:95 rejects VARCHAR-file -> INT-requested
-  //    before the column-reader cast can run.
-  {
-    auto data = makeRowVector(
-        {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
-    auto file = exec::test::TempFilePath::create();
-    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+  if (::bytedance::bolt::kSparkCompatible) {
+    // 4. Auto-cast VARCHAR -> BIGINT: ["100","200","300"] -> [100,200,300].
+    //    Skipped in non-Spark builds because matchType() at
+    //    ParquetColumnReader.cpp:95 rejects VARCHAR-file -> INT-requested
+    //    before the column-reader cast can run.
+    {
+      auto data = makeRowVector(
+          {"c0"}, {makeFlatVector<StringView>({"100", "200", "300"})});
+      auto file = exec::test::TempFilePath::create();
+      writeToParquetFile(file->getPath(), {data}, WriterOptions{});
 
-    auto declared = ROW({"c0"}, {BIGINT()});
-    auto plan =
-        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
-    auto result = AssertQueryBuilder(plan)
-                      .split(makeSplit(file->getPath()))
-                      .copyResults(pool());
-    auto expected =
-        makeRowVector({"c0"}, {makeFlatVector<int64_t>({100, 200, 300})});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
+      auto declared = ROW({"c0"}, {BIGINT()});
+      auto plan =
+          PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+      auto result = AssertQueryBuilder(plan)
+                        .split(makeSplit(file->getPath()))
+                        .copyResults(pool());
+      auto expected =
+          makeRowVector({"c0"}, {makeFlatVector<int64_t>({100, 200, 300})});
+      EXPECT_TRUE(assertEqualResults({expected}, {result}));
+    }
   }
-#endif
 
   // DATE annotation read as INTEGER: file INT32(DATE) [1,2,3]
   // returns raw epoch-day integers when the Hive/Spark schema says INT.
@@ -2315,8 +2308,10 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharValueFilters) {
   EXPECT_EQ(alwaysFalseResult->size(), 0);
 }
 
-#ifdef SPARK_COMPATIBLE
 TEST_F(ParquetTableScanTest, doubleToBigintValueChecks) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto data = makeRowVector(
       {"c0"},
       {makeNullableFlatVector<double>({1.0, 1.2, -1.8, 0.0, std::nullopt})});
@@ -2352,7 +2347,6 @@ TEST_F(ParquetTableScanTest, doubleToBigintValueChecks) {
           .copyResults(pool()),
       "Cannot apply BIGINT filter to physical DOUBLE Parquet column c0");
 }
-#endif
 
 TEST_F(ParquetTableScanTest, integerToDoubleValueFilters) {
   auto declared = ROW({"c0"}, {DOUBLE()});
@@ -2690,8 +2684,10 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharMapMetadataFilter) {
       1);
 }
 
-#ifdef SPARK_COMPATIBLE
 TEST_F(ParquetTableScanTest, doubleToBigintMapMetadataFilter) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto data = makeRowVector(
       {"c0", "c1"},
       {makeMapVector<StringView, double>(
@@ -2739,7 +2735,6 @@ TEST_F(ParquetTableScanTest, doubleToBigintMapMetadataFilter) {
           .sum,
       1);
 }
-#endif
 
 TEST_F(ParquetTableScanTest, integerReaderCastMetadataFilters) {
   auto test = [&](const RowVectorPtr& data,
@@ -2887,11 +2882,4 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharMetadataFilter) {
             .sum,
         1);
   }
-}
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
 }

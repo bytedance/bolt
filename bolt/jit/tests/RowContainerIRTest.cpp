@@ -24,6 +24,7 @@
 #include "bolt/jit/ThrustJITv2.h"
 #include "bolt/jit/tests/JitTestBase.h"
 
+#include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <cmath>
@@ -40,16 +41,49 @@ namespace {
 
 class TestRowContainerCodeGenerator : public RowContainerCodeGenerator {
  public:
-  explicit TestRowContainerCodeGenerator(std::string funcName)
-      : funcName_(std::move(funcName)) {}
+  explicit TestRowContainerCodeGenerator(
+      std::string funcName,
+      std::atomic<const Type*>* generatedType = nullptr)
+      : funcName_(std::move(funcName)), generatedType_(generatedType) {}
 
   std::string GetCmpFuncName() override {
     return funcName_;
   }
 
+  bool GenCmpIR() override {
+    if (generatedType_ != nullptr) {
+      generatedType_->store(keysTypes.front().get(), std::memory_order_release);
+    }
+    return RowContainerCodeGenerator::GenCmpIR();
+  }
+
  private:
   std::string funcName_;
+  std::atomic<const Type*>* generatedType_;
 };
+
+template <typename T>
+void appendSerializedValue(std::string& serialized, const T& value) {
+  serialized.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+std::string serializeNestedRow(std::string_view mapValue) {
+  std::string serialized;
+  appendSerializedValue(serialized, uint64_t{0});
+
+  appendSerializedValue(serialized, int32_t{1});
+  appendSerializedValue(serialized, uint64_t{0});
+  appendSerializedValue(serialized, int32_t{11});
+
+  appendSerializedValue(serialized, int32_t{1});
+  appendSerializedValue(serialized, uint64_t{0});
+  appendSerializedValue(serialized, int32_t{7});
+  appendSerializedValue(serialized, int32_t{1});
+  appendSerializedValue(serialized, uint64_t{0});
+  appendSerializedValue(serialized, static_cast<int32_t>(mapValue.size()));
+  serialized.append(mapValue);
+  return serialized;
+}
 
 } // namespace
 
@@ -522,32 +556,30 @@ TEST_F(RowContainerJitTest, stringview) {
   rows.clear();
 }
 
-TEST_F(RowContainerJitTest, complex_types_cache_in_user_data) {
+TEST_F(RowContainerJitTest, complex_type_lifetime_in_cached_module) {
   jit->ClearCacheForTest();
-
-  auto bigintType = BIGINT();
-  auto arrayType = ARRAY(INTEGER());
-  auto mapType = MAP(INTEGER(), VARCHAR());
-  auto rowType = ROW({{"nested", BIGINT()}});
-
-  auto codegenModule = [&]() {
-    TestRowContainerCodeGenerator gen("row_container_user_data_complex_types");
-    gen.setOpType(CmpType::EQUAL)
-        .setHasNullKeys(false)
-        .setKeyTypes({bigintType, arrayType, mapType, rowType})
-        .setKeyOffsets({0, 8, 16, 24});
-    return gen.codegen();
-  };
 
   constexpr size_t kConcurrentCodegenCount = 32;
   std::barrier syncPoint(kConcurrentCodegenCount);
+  std::atomic<const Type*> generatedType{nullptr};
   std::vector<CompiledModuleSP> modules(kConcurrentCodegenCount);
+  std::vector<std::weak_ptr<const Type>> inputTypes(kConcurrentCodegenCount);
   std::vector<std::thread> threads;
   threads.reserve(kConcurrentCodegenCount);
   for (size_t i = 0; i < kConcurrentCodegenCount; ++i) {
     threads.emplace_back([&, i]() {
+      auto type = ROW(
+          {{"array", ARRAY(INTEGER())}, {"map", MAP(INTEGER(), VARCHAR())}});
+      inputTypes[i] = type;
+      TestRowContainerCodeGenerator gen(
+          "row_container_complex_type_lifetime", &generatedType);
+      gen.setOpType(CmpType::CMP_SPILL)
+          .setHasNullKeys(false)
+          .setKeyTypes({std::move(type)})
+          .setCompareFlags({{.nullsFirst = true, .ascending = true}})
+          .setKeyOffsets({0});
       syncPoint.arrive_and_wait();
-      modules[i] = codegenModule();
+      modules[i] = gen.codegen();
     });
   }
   for (auto& thread : threads) {
@@ -559,6 +591,37 @@ TEST_F(RowContainerJitTest, complex_types_cache_in_user_data) {
   for (const auto& concurrentModule : modules) {
     ASSERT_EQ(concurrentModule.get(), module.get());
   }
+
+  auto* cachedTypes = static_cast<std::vector<TypePtr>*>(module->getUserData());
+  ASSERT_NE(cachedTypes, nullptr);
+  ASSERT_EQ(cachedTypes->size(), 1);
+  EXPECT_EQ(
+      cachedTypes->front().get(),
+      generatedType.load(std::memory_order_acquire));
+  EXPECT_EQ(
+      std::count_if(
+          inputTypes.begin(),
+          inputTypes.end(),
+          [](const auto& type) { return !type.expired(); }),
+      1);
+
+  auto leftSerialized = serializeNestedRow("a");
+  auto rightSerialized = serializeNestedRow("b");
+  std::string_view left{leftSerialized};
+  std::string_view right{rightSerialized};
+  using Compare = int8_t (*)(char*, char*);
+  auto compare = reinterpret_cast<Compare>(
+      module->getFuncPtr("row_container_complex_type_lifetime"));
+  ASSERT_NE(compare, nullptr);
+  EXPECT_LT(
+      compare(reinterpret_cast<char*>(&left), reinterpret_cast<char*>(&right)),
+      0);
+  EXPECT_GT(
+      compare(reinterpret_cast<char*>(&right), reinterpret_cast<char*>(&left)),
+      0);
+  EXPECT_EQ(
+      compare(reinterpret_cast<char*>(&left), reinterpret_cast<char*>(&left)),
+      0);
 }
 
 } // namespace bytedance::bolt::jit::test

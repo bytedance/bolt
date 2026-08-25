@@ -28,20 +28,21 @@
 bolt_add_library(bolt_link_libs INTERFACE)
 target_link_libraries(
   bolt_link_libs
-  INTERFACE bolt_caching
-            bolt_dwio_catalog_fbhive
-            bolt_dwio_common
-            bolt_dwio_common_exception
-            bolt_encode
-            bolt_exception
-            bolt_memory
-            bolt_process
-            bolt_serialization
-            bolt_type
-            bolt_type_fbhive
-            bolt_vector
-            Folly::folly
-            fmt::fmt
+  INTERFACE
+    bolt_caching
+    bolt_dwio_catalog_fbhive
+    bolt_dwio_common
+    bolt_dwio_common_exception
+    bolt_encode
+    bolt_exception
+    bolt_memory
+    bolt_process
+    bolt_serialization
+    bolt_type
+    bolt_type_fbhive
+    bolt_vector
+    Folly::folly
+    fmt::fmt
 )
 
 add_subdirectory(common)

@@ -29,16 +29,23 @@
 # BISON_EXECUTABLE BISON_VERSION )
 
 bison_target(
-  TypeCalculationParser TypeCalculation.yy ${CMAKE_CURRENT_BINARY_DIR}/TypeCalculation.yy.cc
+  TypeCalculationParser
+  TypeCalculation.yy
+  ${CMAKE_CURRENT_BINARY_DIR}/TypeCalculation.yy.cc
   DEFINES_FILE ${CMAKE_CURRENT_BINARY_DIR}/TypeCalculation.yy.h
 )
 
 flex_target(
-  TypeCalculationScanner TypeCalculation.ll ${CMAKE_CURRENT_BINARY_DIR}/Scanner.cpp
+  TypeCalculationScanner
+  TypeCalculation.ll
+  ${CMAKE_CURRENT_BINARY_DIR}/Scanner.cpp
   COMPILE_FLAGS "-Cf --prefix=bolttc"
 )
 
-add_flex_bison_dependency(TypeCalculationScanner TypeCalculationParser)
+add_flex_bison_dependency(
+  TypeCalculationScanner
+  TypeCalculationParser
+)
 
 include_directories(${PROJECT_BINARY_DIR})
 include_directories(${FLEX_INCLUDE_DIRS})

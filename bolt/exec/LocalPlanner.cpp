@@ -28,7 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/exec/LocalPlanner.h"
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "RoundRobinPartitionFunction.h"
 #include "bolt/common/process/ExceptionTraceContext.h"
 #include "bolt/core/PlanFragment.h"
@@ -47,6 +48,7 @@
 #include "bolt/exec/HashProbe.h"
 #include "bolt/exec/IndexLookupJoin.h"
 #include "bolt/exec/Limit.h"
+#include "bolt/exec/LocalPlanner.h"
 #include "bolt/exec/LocalShuffle.h"
 #include "bolt/exec/MarkDistinct.h"
 #include "bolt/exec/Merge.h"
@@ -465,21 +467,14 @@ void LocalPlanner::plan(
     factory->maxDrivers = detail::maxDrivers(*factory, queryConfig);
     factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
 
-#ifndef SPARK_COMPATIBLE
-    bool flag = false;
-    for (auto& node : factory->planNodes) {
-      if (std::dynamic_pointer_cast<const core::TableScanNode>(node)) {
-        flag = true;
+    if (!::bytedance::bolt::kSparkCompatible && multiDriverOpen) {
+      for (auto& node : factory->planNodes) {
+        if (std::dynamic_pointer_cast<const core::TableScanNode>(node)) {
+          factory->numDrivers = std::min(factory->maxDrivers, maxDrivers * 10);
+          break;
+        }
       }
     }
-    if (flag && multiDriverOpen) {
-      factory->numDrivers = std::min(factory->maxDrivers, maxDrivers * 10);
-    } else {
-      factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
-    }
-#else
-    factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
-#endif
 
     // Pipelines running grouped/bucketed execution would have separate groups
     // of drivers dealing with separate split groups (one driver can access
@@ -663,9 +658,9 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
     else if (
         auto projectNode =
             std::dynamic_pointer_cast<const core::ProjectNode>(planNode)) {
-#ifdef SPARK_COMPATIBLE
       // partialagg + project + project
-      if (markSkipProject && (i == markSkipProjectAggIndex + 1)) {
+      if (::bytedance::bolt::kSparkCompatible && markSkipProject &&
+          i == markSkipProjectAggIndex + 1) {
         auto nextProject = std::dynamic_pointer_cast<const core::ProjectNode>(
             planNodes[markSkipProjectAggIndex + 2]);
         if (nextProject && nextProject->projections().size() > 0) {
@@ -696,7 +691,7 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
       }
 
       // (valuestream or shuffle reader) + project + agg
-      if (i == 1 &&
+      if (::bytedance::bolt::kSparkCompatible && i == 1 &&
           (planNodes[0]->name() == "ValueStream" ||
            planNodes[0]->name() == "SparkShuffleReader") &&
           planNodes.size() >= 3 &&
@@ -710,7 +705,6 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
             FilterProject::ProjectType::kSkipCompositeRowVector));
         continue;
       }
-#endif
       operators.push_back(
           std::make_unique<FilterProject>(id, ctx.get(), nullptr, projectNode));
     } else if (
@@ -782,15 +776,13 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         operators.push_back(std::make_unique<StreamingAggregation>(
             id, ctx.get(), aggregationNode));
       } else {
-#ifdef SPARK_COMPATIBLE
         // for function like avg/first, intermediate type is ROW<>, eg
         // ROW<double, bigint> for avg a ProjectNode is added by gluten to
         // project ROW<double, bigint> to 2 columns and row_contructor these 2
         // columns back to ROW after shuffle read for CompositeRowVector, skip
         // project and row_contructor execution
-        markSkipProject =
-            (aggregationNode->isPartial() && i == markSkipProjectAggIndex);
-#endif
+        markSkipProject = ::bytedance::bolt::kSparkCompatible &&
+            aggregationNode->isPartial() && i == markSkipProjectAggIndex;
 #if defined BOLT_HAS_CUDF && BOLT_HAS_CUDF == 1
         // Check if all aggregates are supported by cuDF Operator
         bool isCudfSupported =

@@ -38,18 +38,23 @@ add_executable(
 
 add_test(
   NAME bolt_tool_trace_test
-  COMMAND bolt_tool_trace_test
+  COMMAND
+    bolt_tool_trace_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-set_tests_properties(bolt_tool_trace_test PROPERTIES TIMEOUT 3000)
+set_tests_properties(
+  bolt_tool_trace_test
+  PROPERTIES
+    TIMEOUT
+      3000
+)
 
 target_link_libraries(
   bolt_tool_trace_test
   bolt_query_trace_replayer_base
   bolt_trace_file_tool_base
-  bolt_testutils
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
   Folly::folly
   gflags::gflags

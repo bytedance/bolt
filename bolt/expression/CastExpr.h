@@ -171,14 +171,7 @@ class CastExpr : public SpecialForm {
     return nullOnFailure_;
   }
 
-  bool setNullInResultAtError() const {
-#ifndef SPARK_COMPATIBLE
-    return nullOnFailure() && inTopLevel;
-#else
-    // For spark, set inner as null, not on in the top level
-    return nullOnFailure();
-#endif
-  }
+  bool setNullInResultAtError() const;
 
   CastOperatorPtr getCastOperator(const TypePtr& type);
 

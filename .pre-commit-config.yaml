@@ -31,7 +31,7 @@ repos:
     hooks:
     - id: gersemi
       name: Format CMake files
-      args: ["--no-warn-about-unknown-commands"]
+      args: ["-i", "--no-warn-about-unknown-commands"]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -85,7 +85,7 @@ repos:
         require_serial: true
       - id: license-header-check
         name: Check for license headers
-        entry: go run -C .github/license_check check_license.go
+        entry: go run -C .github/license_check .
         language: golang
         pass_filenames: true
         require_serial: true

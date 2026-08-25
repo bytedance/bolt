@@ -296,6 +296,19 @@ The Bolt project and all its contributors are governed by a [Code of Conduct.](h
 
 - **Location**: Place test files in the `tests` directory of the corresponding module, following existing naming and structure conventions.
 
+### Test Target Conventions
+
+- GoogleTest unit test targets must link `bolt_gtest_main`. It provides the
+  standard test entry point and the public `bolt_testutils` dependency.
+- Do not define `main()` in individual GoogleTest source files or compile a
+  second copy of the test entry point.
+- Consume test utilities through `bolt_gtest_main` or `bolt_testutils`. Do not
+  collect or link the object libraries that implement `bolt_testutils`
+  directly.
+- Select shared or static test linkage through `BOLT_TEST_LINKAGE`. Do not
+  hard-code a concrete engine or testutils implementation target in an
+  individual test.
+
 - **Execution**:
 
 

@@ -89,7 +89,6 @@ add_executable(
   SizeTest.cpp
   SortArrayTest.cpp
   SparkArraySortTest.cpp
-  SparkCastExprTest.cpp
   SparkPartitionIdTest.cpp
   SparkRoundTest.cpp
   SparkSqlDateTimeFunctionsTest.cpp
@@ -108,16 +107,19 @@ add_executable(
   XxHash64Test.cpp
 )
 
+if(BOLT_ENABLE_SPARK_COMPATIBLE)
+  target_sources(bolt_functions_spark_test PRIVATE SparkCastExprTest.cpp)
+endif()
+
 add_test(
   NAME bolt_functions_spark_test
-  COMMAND bolt_functions_spark_test
+  COMMAND
+    bolt_functions_spark_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(
   bolt_functions_spark_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
   GTest::gmock
 )

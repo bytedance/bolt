@@ -13,16 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set(TXT_TEST_LINK_LIBS
-    bolt_dwio_common_test_utils
-    bolt_vector_test_lib
-    bolt_exec_test_lib
-    bolt_temp_path
-    GTest::gtest
-    GTest::gtest_main
-    GTest::gmock
-    gflags::gflags
-    ${GLOG}
+set(
+  TXT_TEST_LINK_LIBS
+  bolt_gtest_main
+  GTest::gmock
 )
 
 add_subdirectory(reader)

@@ -495,8 +495,14 @@ class BoltShuffleWriter : public ShuffleWriter {
       auto end = partition2RowOffsetBase_[pid + 1];
       for (; pos < end; ++pos) {
         auto rowId = rowOffset2RowId_[pos];
-        memcpy(
-            dstPidBase, &reinterpret_cast<const T*>(srcAddr)[rowId], sizeof(T));
+        if constexpr (alignof(T) > 8) {
+          memcpy(
+              dstPidBase,
+              &reinterpret_cast<const T*>(srcAddr)[rowId],
+              sizeof(T));
+        } else {
+          *dstPidBase = reinterpret_cast<const T*>(srcAddr)[rowId];
+        }
         dstPidBase++;
       }
     }
@@ -515,8 +521,14 @@ class BoltShuffleWriter : public ShuffleWriter {
       auto end = partition2RowOffsetBase_[pid + 1];
       for (; pos < end; ++pos) {
         auto rowId = rowOffset2RowId_[pos];
-        memcpy(
-            dstPidBase, &reinterpret_cast<const T*>(srcAddr)[rowId], sizeof(T));
+        if constexpr (alignof(T) > 8) {
+          memcpy(
+              dstPidBase,
+              &reinterpret_cast<const T*>(srcAddr)[rowId],
+              sizeof(T));
+        } else {
+          *dstPidBase = reinterpret_cast<const T*>(srcAddr)[rowId];
+        }
         dstPidBase++;
       }
     }

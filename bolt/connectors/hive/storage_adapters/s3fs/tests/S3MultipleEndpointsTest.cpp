@@ -27,7 +27,6 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
-#include <folly/init/Init.h>
 
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
@@ -235,9 +234,3 @@ TEST_F(S3MultipleEndpoints, bucketEndpoints) {
 }
 
 } // namespace bytedance::bolt
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::Init init{&argc, &argv, false};
-  return RUN_ALL_TESTS();
-}

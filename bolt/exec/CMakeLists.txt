@@ -122,7 +122,12 @@ bolt_add_library(
   WindowPartition.cpp
 )
 
-set_target_properties(bolt_exec PROPERTIES ENABLE_EXPORTS ON)
+set_target_properties(
+  bolt_exec
+  PROPERTIES
+    ENABLE_EXPORTS
+      ON
+)
 
 if(${ENABLE_BOLT_JIT})
   find_package(LLVM REQUIRED CONFIG)
@@ -163,7 +168,11 @@ endif()
 if(${BOLT_ENABLE_CUDF})
   target_compile_definitions(bolt_exec PRIVATE BOLT_HAS_CUDF=1)
   target_include_directories(bolt_exec SYSTEM PRIVATE ${cudf_INCLUDE_DIRS})
-  target_link_libraries(bolt_exec bolt_cudf_exec cudf::cudf)
+  target_link_libraries(
+    bolt_exec
+    bolt_cudf_exec
+    cudf::cudf
+  )
 endif()
 
 if(${BOLT_BUILD_TESTING})

@@ -16,7 +16,8 @@
 bolt_add_library(
   bolt_dwio_parquet_encryption
         EncryptionInternal.cpp
-        InternalFileDecryptor.cpp)
+        InternalFileDecryptor.cpp
+)
 
 find_package(Arrow CONFIG REQUIRED)
 

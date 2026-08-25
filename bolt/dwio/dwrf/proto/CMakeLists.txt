@@ -27,41 +27,63 @@
 
 # Set up Proto file( GLOB PROTO_FILES RELATIVE ${PROJECT_SOURCE_DIR}
 # ${CMAKE_CURRENT_SOURCE_DIR}/*.proto)
-set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/dwrf_schema.proto
-                ${CMAKE_CURRENT_SOURCE_DIR}/orc_schema.proto
+set(
+  PROTO_FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/dwrf_schema.proto
+  ${CMAKE_CURRENT_SOURCE_DIR}/orc_schema.proto
 )
 
 set(PROTO_SRCS)
 set(PROTO_HDRS)
 foreach(proto ${PROTO_FILES})
-  protobuf_generate_cpp(BOLT_PROTO_SRCS BOLT_PROTO_HDRS ${proto})
+  protobuf_generate_cpp(
+    BOLT_PROTO_SRCS
+    BOLT_PROTO_HDRS
+    ${proto}
+  )
   list(APPEND PROTO_SRCS ${BOLT_PROTO_SRCS})
   list(APPEND PROTO_HDRS ${BOLT_PROTO_HDRS})
 endforeach()
-set(PROTO_OUTPUT_FILES ${PROTO_HDRS} ${PROTO_SRCS})
-set_source_files_properties(${PROTO_OUTPUT_FILES} PROPERTIES GENERATED TRUE)
+set(
+  PROTO_OUTPUT_FILES
+  ${PROTO_HDRS}
+  ${PROTO_SRCS}
+)
+set_source_files_properties(
+  ${PROTO_OUTPUT_FILES}
+  PROPERTIES
+    GENERATED
+      TRUE
+)
 
 # add_custom_command( OUTPUT ${PROTO_OUTPUT_FILES} COMMAND ${Protobuf_PROTOC_EXECUTABLE}
 # --proto_path ${CMAKE_SOURCE_DIR}/ --proto_path ${Protobuf_INCLUDE_DIRS} --cpp_out
 # ${CMAKE_BINARY_DIR} ${PROTO_FILES_FULL} DEPENDS ${Protobuf_PROTOC_EXECUTABLE} COMMENT "Running
 # proto compiler" VERBATIM) add_custom_target(dwio_proto ALL DEPENDS ${PROTO_OUTPUT_FILES})
 
-bolt_add_library(bolt_dwio_dwrf_proto ${PROTO_SRCS} ${PROTO_HDRS})
+bolt_add_library(
+  bolt_dwio_dwrf_proto
+  ../common/wrap/dwrf-proto-wrapper.cpp
+  ../common/wrap/orc-proto-wrapper.cpp
+  ${PROTO_HDRS}
+)
 
 target_link_libraries(bolt_dwio_dwrf_proto protobuf::libprotobuf)
 target_include_directories(bolt_dwio_dwrf_proto PUBLIC ${CMAKE_BINARY_DIR})
 
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/dwrf_schema.pb.h
-        ${CMAKE_CURRENT_BINARY_DIR}/orc_schema.pb.h DESTINATION "include/bolt/dwio/dwrf/proto/"
+install(
+  FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/dwrf_schema.pb.h
+    ${CMAKE_CURRENT_BINARY_DIR}/orc_schema.pb.h
+  DESTINATION "include/bolt/dwio/dwrf/proto/"
 )
 
 install(
-  TARGETS bolt_dwio_dwrf_proto
-          # PUBLIC_HEADER DESTINATION include/bolt/dwio/dwrf/proto/
-          ARCHIVE
-          DESTINATION
-          ${CMAKE_INSTALL_LIBDIR}
-          LIBRARY
-          DESTINATION
-          ${CMAKE_INSTALL_LIBDIR}
+  TARGETS
+    bolt_dwio_dwrf_proto
+  # PUBLIC_HEADER DESTINATION include/bolt/dwio/dwrf/proto/
+  ARCHIVE
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )

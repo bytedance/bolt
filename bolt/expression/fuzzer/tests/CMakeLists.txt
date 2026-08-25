@@ -26,13 +26,13 @@
 # --------------------------------------------------------------------------
 
 add_executable(
-  bolt_expression_fuzzer_unit_test ArgumentTypeFuzzerTest.cpp ExpressionFuzzerUnitTest.cpp
+  bolt_expression_fuzzer_unit_test
+  ArgumentTypeFuzzerTest.cpp
+  ExpressionFuzzerUnitTest.cpp
 )
 
 target_link_libraries(
   bolt_expression_fuzzer_unit_test
   bolt_expression_fuzzer
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
+  bolt_gtest_main
 )

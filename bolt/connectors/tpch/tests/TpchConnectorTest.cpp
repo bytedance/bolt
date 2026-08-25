@@ -29,7 +29,6 @@
  */
 
 #include "bolt/connectors/tpch/TpchConnector.h"
-#include <folly/init/Init.h>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
@@ -301,10 +300,3 @@ TEST_F(TpchConnectorTest, DISABLED_orderDateCount) {
 }
 
 } // namespace
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
-}

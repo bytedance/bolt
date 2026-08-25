@@ -17,14 +17,3 @@
 #pragma once
 
 #include <glog/logging.h>
-namespace bytedance {
-namespace bolt {
-
-#ifdef SPARK_COMPATIBLE
-#define LOG_SPARK(severtiy) LOG(severtiy)
-#else
-#define LOG_SPARK(severtiy) LOG_IF(severtiy, false)
-#endif
-
-} // namespace bolt
-} // namespace bytedance

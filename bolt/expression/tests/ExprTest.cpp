@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <cstdint>
 #include <exception>
 #include <fstream>
@@ -2461,8 +2463,10 @@ struct ThrowRuntimeError {
 };
 } // namespace
 
-#ifndef SPARK_COMPATIBLE
 TEST_P(ParameterizedExprTest, exceptionContext) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto data = makeRowVector({
       makeFlatVector<int32_t>({1, 2, 3}),
       makeFlatVector<int32_t>({1, 2, 3}),
@@ -2590,7 +2594,6 @@ TEST_P(ParameterizedExprTest, exceptionContext) {
     verifyDataAndSqlPaths(e, data);
   }
 }
-#endif
 
 namespace {
 

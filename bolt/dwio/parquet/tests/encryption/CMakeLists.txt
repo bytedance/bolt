@@ -16,17 +16,19 @@
 add_executable(
   bolt_dwio_parquet_encryption_test
   AesDecryptorTest.cpp
-  InternalFileDecryptorTest.cpp)
+  InternalFileDecryptorTest.cpp
+)
 
 add_test(
   NAME bolt_dwio_parquet_encryption_test
-  COMMAND bolt_dwio_parquet_encryption_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  COMMAND
+    bolt_dwio_parquet_encryption_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 target_link_libraries(
   bolt_dwio_parquet_encryption_test
   #bolt_dwio_parquet_encryption
   #bolt_dwio_parquet_arrow_lib
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main)
+  bolt_gtest_main
+)

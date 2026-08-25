@@ -30,7 +30,6 @@
 
 #include "bolt/common/base/StatsReporter.h"
 #include <folly/Singleton.h>
-#include <folly/init/Init.h>
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <unordered_map>
@@ -39,6 +38,11 @@ namespace bytedance::bolt {
 class StatsReporterTest : public testing::Test {
  protected:
   static folly::Singleton<BaseStatsReporter> reporter_registration;
+
+  static void SetUpTestSuite() {
+    BaseStatsReporter::registered = true;
+  }
+
   void SetUp() override {}
   void TearDown() override {}
 };
@@ -146,11 +150,3 @@ TEST_F(StatsReporterTest, trivialReporter) {
 };
 
 } // namespace bytedance::bolt
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  // todo: use folly::Init init after upgrade folly lib
-  folly::init(&argc, &argv, false);
-  bytedance::bolt::BaseStatsReporter::registered = true;
-  return RUN_ALL_TESTS();
-}

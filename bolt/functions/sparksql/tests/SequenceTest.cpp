@@ -27,6 +27,8 @@
  * This modified file is released under the same license.
  * --------------------------------------------------------------------------
  */
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <optional>
 
 #include <gtest/gtest.h>
@@ -84,8 +86,10 @@ TEST_F(SequenceTest, singleElement) {
   assertEqualVectors(expected, result);
 }
 
-#ifdef SPARK_COMPATIBLE
 TEST_F(SequenceTest, singleElementWithZeroStep) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto bigintResult = evaluate(
       "sequence(c0, c1, c2)",
       makeRowVector({
@@ -104,7 +108,6 @@ TEST_F(SequenceTest, singleElementWithZeroStep) {
       }));
   assertEqualVectors(makeArrayVector<int32_t>({{1}}), integerResult);
 }
-#endif
 
 TEST_F(SequenceTest, integerType) {
   auto result = evaluate(

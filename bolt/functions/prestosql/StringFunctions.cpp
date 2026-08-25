@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/functions/prestosql/StringFunctions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/expression/EvalCtx.h"
 #include "bolt/expression/Expr.h"
 #include "bolt/expression/StringWriter.h"
@@ -45,6 +47,10 @@
 namespace bytedance::bolt::functions {
 
 using namespace stringCore;
+
+bool locateEmptyStringsReturnZero() {
+  return !::bytedance::bolt::kSparkCompatible;
+}
 
 namespace {
 /**

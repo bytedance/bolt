@@ -49,8 +49,10 @@
 #include <folly/Conv.h>
 #include <folly/Range.h>
 #include <folly/String.h>
+#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SimdUtil.h"
 #include "bolt/functions/lib/string/RegexUtils.h"
 #include "bolt/type/StringView.h"
 
@@ -86,27 +88,47 @@ static utf8proc_bool utf8proc_char_first_byte(const char* u_input);
 static utf8proc_int32_t utf8proc_codepoint_length(utf8proc_int32_t uc);
 
 FOLLY_ALWAYS_INLINE bool isAscii(const char* str, size_t length) {
-#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
   size_t i = 0;
+#if defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
   const size_t sveVectorSize = svcntb();
   const svuint8_t v80 = svdup_u8(0x80);
-  while (i < length) {
-    svbool_t pgTail = svwhilelt_b8(i, length);
-    svuint8_t v = svld1_u8(pgTail, reinterpret_cast<const uint8_t*>(str) + i);
-    if (svptest_any(pgTail, svcmpge(pgTail, v, v80))) {
+  const svbool_t pg = svptrue_b8();
+  for (; i + sveVectorSize <= length; i += sveVectorSize) {
+    svuint8_t v = svld1_u8(pg, reinterpret_cast<const uint8_t*>(str) + i);
+    if (svptest_any(pg, svcmpge(pg, v, v80))) {
       return false;
     }
-    i += sveVectorSize;
   }
-  return true;
+#elif defined(__x86_64__) || defined(_M_X64)
+  const auto mask = xsimd::broadcast<uint8_t>(0x80);
+  for (; i + mask.size <= length; i += mask.size) {
+    const auto batch =
+        xsimd::load_unaligned(reinterpret_cast<const uint8_t*>(str) + i);
+#if XSIMD_WITH_AVX && !XSIMD_WITH_AVX512F && !XSIMD_WITH_AVX512CD && \
+    !XSIMD_WITH_AVX512DQ && !XSIMD_WITH_AVX512BW
+    // for avx, only one instruction
+    if (!_mm256_testz_si256(batch, mask)) {
 #else
-  for (auto i = 0; i < length; i++) {
+    // general impl for sse / avx512
+    if (xsimd::any(batch >= mask)) {
+#endif
+      return false;
+    }
+  }
+#endif
+  constexpr uint64_t kAsciiMask64 = 0x8080808080808080ULL;
+  for (; i + sizeof(uint64_t) <= length; i += sizeof(uint64_t)) {
+    const auto word = folly::loadUnaligned<uint64_t>(str + i);
+    if ((word & kAsciiMask64) != 0) {
+      return false;
+    }
+  }
+  for (; i < length; ++i) {
     if (str[i] & 0x80) {
       return false;
     }
   }
   return true;
-#endif
 }
 
 /// Perform reverse for ascii string input

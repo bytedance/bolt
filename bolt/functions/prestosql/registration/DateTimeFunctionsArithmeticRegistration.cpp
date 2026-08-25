@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
@@ -51,16 +53,16 @@ void registerArithmeticFunctionsInternal(const std::string& prefix) {
   registerFunction<DateDiffFunction, int64_t, Varchar, Timestamp, Timestamp>(
       {prefix + "timestampdiff"});
 
-#ifndef SPARK_COMPATIBLE
-  registerFunction<
-      DateDiffFunction,
-      int64_t,
-      Varchar,
-      TimestampWithTimezone,
-      TimestampWithTimezone>({prefix + "date_diff"});
-  registerFunction<DateFormatFunction, Varchar, Timestamp, Varchar>(
-      {prefix + "date_format"});
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    registerFunction<
+        DateDiffFunction,
+        int64_t,
+        Varchar,
+        TimestampWithTimezone,
+        TimestampWithTimezone>({prefix + "date_diff"});
+    registerFunction<DateFormatFunction, Varchar, Timestamp, Varchar>(
+        {prefix + "date_format"});
+  }
 
   registerFunction<DateAddFunction, Date, Varchar, int64_t, Date>(
       {prefix + "date_add"});
@@ -80,24 +82,27 @@ void registerArithmeticFunctionsInternal(const std::string& prefix) {
   registerFunction<DateAddFunction, Date, Date, int16_t>({prefix + "date_add"});
   registerFunction<DateAddFunction, Date, Date, int8_t>({prefix + "date_add"});
 
-#ifndef SPARK_COMPATIBLE
-  registerFunction<
-      DateDiffFunction,
-      int64_t,
-      Varchar,
-      TimestampWithTimezone,
-      TimestampWithTimezone>({prefix + "date_diff"});
-  registerFunction<DateDiffFunction, int64_t, Varchar, Timestamp, Timestamp>(
-      {prefix + "date_diff"});
-  registerFunction<DateDiffFunction, int64_t, Date, Date>(
-      {prefix + "date_diff"});
-  registerFunction<DateFormatFunction, Varchar, Timestamp, Varchar>(
-      {prefix + "date_format"});
-  registerFunction<DateFormatFunction, Varchar, TimestampWithTimezone, Varchar>(
-      {prefix + "date_format"});
-  registerFunction<sparksql::LastDayFunction, Varchar, Date>(
-      {prefix + "last_day"});
-#endif
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    registerFunction<
+        DateDiffFunction,
+        int64_t,
+        Varchar,
+        TimestampWithTimezone,
+        TimestampWithTimezone>({prefix + "date_diff"});
+    registerFunction<DateDiffFunction, int64_t, Varchar, Timestamp, Timestamp>(
+        {prefix + "date_diff"});
+    registerFunction<DateDiffFunction, int64_t, Date, Date>(
+        {prefix + "date_diff"});
+    registerFunction<DateFormatFunction, Varchar, Timestamp, Varchar>(
+        {prefix + "date_format"});
+    registerFunction<
+        DateFormatFunction,
+        Varchar,
+        TimestampWithTimezone,
+        Varchar>({prefix + "date_format"});
+    registerFunction<sparksql::LastDayFunction, Varchar, Date>(
+        {prefix + "last_day"});
+  }
   registerFunction<HiveDateDiffFunction, int32_t, Date, Date>(
       {prefix + "datediff"});
   registerFunction<DateDiffFunction, int64_t, Varchar, Timestamp, Timestamp>(

@@ -55,12 +55,7 @@ add_executable(
 
 add_test(bolt_vector_test bolt_vector_test)
 
-target_link_libraries(
-  bolt_vector_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_vector_test bolt_gtest_main)
 
 # add_executable(simple_vector_test SimpleVectorTest.cpp ToStringUtilityTest.cpp)
 
@@ -72,8 +67,8 @@ target_link_libraries(
 #   bolt_buffer
 #   bolt_type
 #   bolt_vector_test_lib
-#   GTest::gtest
-#   GTest::gtest_main
+#
+#   bolt_gtest_main
 #   Folly::folly
 #   gflags::gflags
 #   glog::glog
@@ -86,7 +81,7 @@ target_link_libraries(
 
 # target_link_libraries(
 #   bias_vector_test
-#   bolt_testutils
-#   GTest::gtest
-#   GTest::gtest_main
+#
+#
+#   bolt_gtest_main
 # )

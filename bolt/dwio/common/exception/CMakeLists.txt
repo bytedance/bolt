@@ -28,5 +28,8 @@
 bolt_add_library(bolt_dwio_common_exception Exception.cpp Exceptions.cpp)
 
 target_link_libraries(
-  bolt_dwio_common_exception bolt_exception Folly::folly glog::glog
+  bolt_dwio_common_exception
+  bolt_exception
+  Folly::folly
+  glog::glog
 )

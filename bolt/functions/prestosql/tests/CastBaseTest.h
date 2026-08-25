@@ -32,6 +32,7 @@
 
 #include <gtest/gtest.h>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/Expressions.h"
 #include "bolt/core/ITypedExpr.h"
@@ -197,23 +198,23 @@ class CastBaseTest : public FunctionBaseTest {
       const std::vector<std::optional<TFrom>>& input,
       const std::string& expectedErrorMessage,
       const TypePtr& fromType = CppToType<TFrom>::create()) {
-#ifdef SPARK_COMPATIBLE
-    auto result = evaluate(
-        fmt::format("cast(c0 as {})", typeString),
-        makeRowVector({makeNullableFlatVector(input, fromType)}));
-    for (vector_size_t i = 0; i < result->size(); ++i) {
-      ASSERT_TRUE(result->isNullAt(i));
+    if (::bytedance::bolt::kSparkCompatible) {
+      auto result = evaluate(
+          fmt::format("cast(c0 as {})", typeString),
+          makeRowVector({makeNullableFlatVector(input, fromType)}));
+      for (vector_size_t i = 0; i < result->size(); ++i) {
+        ASSERT_TRUE(result->isNullAt(i));
+      }
+    } else {
+      auto msg = queryCtx_->queryConfig().enableOptimizedCast()
+          ? "Cannot cast"
+          : expectedErrorMessage;
+      BOLT_ASSERT_THROW(
+          evaluate(
+              fmt::format("cast(c0 as {})", typeString),
+              makeRowVector({makeNullableFlatVector(input, fromType)})),
+          "");
     }
-#else
-    auto msg = queryCtx_->queryConfig().enableOptimizedCast()
-        ? "Cannot cast"
-        : expectedErrorMessage;
-    BOLT_ASSERT_THROW(
-        evaluate(
-            fmt::format("cast(c0 as {})", typeString),
-            makeRowVector({makeNullableFlatVector(input, fromType)})),
-        "");
-#endif
   }
 
   template <typename TFrom>
@@ -236,14 +237,14 @@ class CastBaseTest : public FunctionBaseTest {
       const VectorPtr& input,
       const VectorPtr& expected,
       const std::string& expectedErrorMessage) {
-#ifdef SPARK_COMPATIBLE
-    testCast(input, expected);
-#else
-    auto msg = queryCtx_->queryConfig().enableOptimizedCast()
-        ? "Cannot cast"
-        : expectedErrorMessage;
-    BOLT_ASSERT_THROW(testCast(input, expected), msg);
-#endif
+    if (::bytedance::bolt::kSparkCompatible) {
+      testCast(input, expected);
+    } else {
+      auto msg = queryCtx_->queryConfig().enableOptimizedCast()
+          ? "Cannot cast"
+          : expectedErrorMessage;
+      BOLT_ASSERT_THROW(testCast(input, expected), msg);
+    }
   }
 
   void testCast(
@@ -340,11 +341,8 @@ class CastBaseTest : public FunctionBaseTest {
       const TypePtr& toType,
       const std::vector<std::optional<TFrom>>& input,
       const std::string& expectedErrorMessage) {
-#ifdef SPARK_COMPATIBLE
-    bool expectException = std::string_view(fromType->name()) == "JSON";
-#else
-    bool expectException = true;
-#endif
+    const bool expectException = !::bytedance::bolt::kSparkCompatible ||
+        std::string_view(fromType->name()) == "JSON";
     if (expectException) {
       BOLT_ASSERT_THROW(
           evaluateCast(

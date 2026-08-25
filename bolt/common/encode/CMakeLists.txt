@@ -30,4 +30,9 @@ if(${BOLT_BUILD_TESTING})
 endif()
 
 bolt_add_library(bolt_encode Base64.cpp)
-target_link_libraries(bolt_encode PUBLIC Folly::folly bolt_exception)
+target_link_libraries(
+  bolt_encode
+  PUBLIC
+    Folly::folly
+    bolt_exception
+)

@@ -17,11 +17,7 @@ bolt_add_library(bolt_cudf_test_util CudfResource.cpp)
 
 target_include_directories(bolt_cudf_test_util PRIVATE ${cudf_INCLUDE_DIRS})
 
-target_link_libraries(
-  bolt_cudf_test_util
-  PUBLIC cudf::cudf
-  PRIVATE bolt_exception
-)
+target_link_libraries(bolt_cudf_test_util PUBLIC cudf::cudf PRIVATE bolt_exception)
 
 # The LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE macro enables the experimental
 # <cuda/memory_resource> header, a feature used by RMM and libcudf. This definition is necessary to
@@ -30,5 +26,8 @@ target_link_libraries(
 # References: - RMM Fix: https://github.com/rapidsai/rmm/pull/1852 - libcudacxx Docs:
 # https://nvidia.github.io/cccl/libcudacxx/extended_api/memory_resource.html
 target_compile_definitions(
-  bolt_cudf_test_util PUBLIC LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE BOLT_HAS_CUDF=1
+  bolt_cudf_test_util
+  PUBLIC
+    LIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE
+    BOLT_HAS_CUDF=1
 )

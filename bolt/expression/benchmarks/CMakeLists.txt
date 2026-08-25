@@ -25,37 +25,55 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(BENCHMARK_DEPENDENCIES bolt_functions_test_lib bolt_exec bolt_exec_test_lib gflags::gflags
-                           Folly::folly ${FOLLY_BENCHMARK}
+set(
+  BENCHMARK_DEPENDENCIES
+  bolt_testutils
+  bolt_exec
+  gflags::gflags
+  Folly::folly
+  ${FOLLY_BENCHMARK}
 )
 
 add_executable(bolt_benchmark_call_null_free_no_nulls CallNullFreeBenchmark.cpp)
 target_link_libraries(bolt_benchmark_call_null_free_no_nulls ${BENCHMARK_DEPENDENCIES})
 target_compile_definitions(
-  bolt_benchmark_call_null_free_no_nulls PUBLIC WITH_NULL_ARRAYS=false WITH_NULL_ELEMENTS=false
+  bolt_benchmark_call_null_free_no_nulls
+  PUBLIC
+    WITH_NULL_ARRAYS=false
+    WITH_NULL_ELEMENTS=false
 )
 
 add_executable(bolt_benchmark_call_null_free_null_arrays CallNullFreeBenchmark.cpp)
 target_link_libraries(bolt_benchmark_call_null_free_null_arrays ${BENCHMARK_DEPENDENCIES})
 target_compile_definitions(
-  bolt_benchmark_call_null_free_null_arrays PUBLIC WITH_NULL_ARRAYS=true WITH_NULL_ELEMENTS=false
+  bolt_benchmark_call_null_free_null_arrays
+  PUBLIC
+    WITH_NULL_ARRAYS=true
+    WITH_NULL_ELEMENTS=false
 )
 
 add_executable(bolt_benchmark_call_null_free_null_elements CallNullFreeBenchmark.cpp)
 target_link_libraries(bolt_benchmark_call_null_free_null_elements ${BENCHMARK_DEPENDENCIES})
 target_compile_definitions(
-  bolt_benchmark_call_null_free_null_elements PUBLIC WITH_NULL_ARRAYS=false WITH_NULL_ELEMENTS=true
+  bolt_benchmark_call_null_free_null_elements
+  PUBLIC
+    WITH_NULL_ARRAYS=false
+    WITH_NULL_ELEMENTS=true
 )
 
 add_executable(
-  bolt_benchmark_call_null_free_null_arrays_and_null_elements CallNullFreeBenchmark.cpp
+  bolt_benchmark_call_null_free_null_arrays_and_null_elements
+  CallNullFreeBenchmark.cpp
 )
 target_link_libraries(
-  bolt_benchmark_call_null_free_null_arrays_and_null_elements ${BENCHMARK_DEPENDENCIES}
+  bolt_benchmark_call_null_free_null_arrays_and_null_elements
+  ${BENCHMARK_DEPENDENCIES}
 )
 target_compile_definitions(
-  bolt_benchmark_call_null_free_null_arrays_and_null_elements PUBLIC WITH_NULL_ARRAYS=true
-                                                                     WITH_NULL_ELEMENTS=true
+  bolt_benchmark_call_null_free_null_arrays_and_null_elements
+  PUBLIC
+    WITH_NULL_ARRAYS=true
+    WITH_NULL_ELEMENTS=true
 )
 
 add_executable(bolt_benchmark_variadic VariadicBenchmark.cpp)

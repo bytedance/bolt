@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <re2/re2.h>
 
 #include "bolt/common/config/Config.h"
@@ -49,6 +51,12 @@ QueryConfig::QueryConfig(std::unordered_map<std::string, std::string>&& values)
   VLOG(1) << "Morsel-driven Bolt enabled: " << this->morselDrivenEnabled()
           << " (morselSize=" << this->morselSize()
           << ", queueSize=" << this->morselDrivenPrimedQueueSize() << ")";
+}
+
+uint64_t QueryConfig::maxSpillBytes() const {
+  static constexpr uint64_t kDefault =
+      ::bytedance::bolt::kSparkCompatible ? 0UL : 100UL << 30;
+  return get<uint64_t>(kMaxSpillBytes, kDefault);
 }
 
 void QueryConfig::testingOverrideConfigUnsafe(

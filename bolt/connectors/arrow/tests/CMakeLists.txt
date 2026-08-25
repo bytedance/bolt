@@ -17,8 +17,4 @@ add_executable(bolt_arrow_connector_test ArrowMemoryConnectorTest.cpp)
 
 add_test(bolt_arrow_connector_test bolt_arrow_connector_test)
 
-target_link_libraries(
-  bolt_arrow_connector_test
-  bolt_testutils
-  GTest::gtest
-)
+target_link_libraries(bolt_arrow_connector_test bolt_gtest_main)

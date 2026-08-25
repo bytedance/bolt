@@ -614,6 +614,8 @@ struct LevenshteinDistanceFunction {
 /// locate(substr, str[, pos]) -> int
 /// Returns the position of the first occurrence of substr in str after position
 /// pos. The given pos and return value are 1-based.
+bool locateEmptyStringsReturnZero();
+
 template <typename T>
 struct LocateFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
@@ -627,13 +629,12 @@ struct LocateFunction {
       result = 0;
       return;
     }
-#ifndef SPARK_COMPATIBLE
-    // follow presto semantics
-    if (UNLIKELY(substr.size() == 0 && str.size() == 0)) {
+    if (UNLIKELY(
+            substr.size() == 0 && str.size() == 0 &&
+            locateEmptyStringsReturnZero())) {
       result = 0;
       return;
     }
-#endif
     auto ans = stringCore::findNthInstanceByteIndexFromStart(
         std::string_view(str.data(), str.size()),
         std::string_view(substr.data(), substr.size()),

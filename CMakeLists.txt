@@ -36,10 +36,7 @@ if(POLICY CMP0177)
   set(CMAKE_POLICY_WARNING_CMP0177 OFF)
 endif()
 
-set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS
-    ON
-    CACHE BOOL "Suppress developer warnings"
-)
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "Suppress developer warnings")
 
 # Sets new behavior for CMP0135, which controls how timestamps are extracted when using
 # ExternalProject_Add(): https://cmake.org/cmake/help/latest/policy/CMP0135.html
@@ -83,10 +80,16 @@ endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   set(OS_LINUX 1)
-  add_definitions(-D OS_LINUX)
+  add_definitions(
+    -D
+    OS_LINUX
+  )
 elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
   set(OS_MACOSX 1)
-  add_definitions(-D OS_MACOSX)
+  add_definitions(
+    -D
+    OS_MACOSX
+  )
 endif()
 
 # Only use compiler-rt when building with Clang on Linux for ARM/AArch64
@@ -95,8 +98,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND OS_LINUX AND (ARCH_AARCH64 OR ARCH
   add_link_options(-rtlib=compiler-rt)
 endif()
 
-list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/CMake"
-     "${PROJECT_SOURCE_DIR}/CMake/third-party"
+list(
+  PREPEND CMAKE_MODULE_PATH
+  "${PROJECT_SOURCE_DIR}/CMake"
+  "${PROJECT_SOURCE_DIR}/CMake/third-party"
 )
 
 # Include our ThirdPartyToolchain dependencies macros include(ResolveDependency)
@@ -105,11 +110,15 @@ list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/CMake"
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # Add all options below
-option(BOLT_BUILD_TESTING
-       "Enable Bolt tests. This will enable all other build options automatically." OFF
+option(
+  BOLT_BUILD_TESTING
+  "Enable Bolt tests. This will enable all other build options automatically."
+  OFF
 )
-option(BOLT_BUILD_MINIMAL
-       "Build a minimal set of components only. This will override other build options." OFF
+option(
+  BOLT_BUILD_MINIMAL
+  "Build a minimal set of components only. This will override other build options."
+  OFF
 )
 option(BOLT_BUILD_TESTING_WITH_COVERAGE "Enable Bolt tests with coverage statistics." OFF)
 # option() always creates a BOOL variable so we have to use a normal cache variable with STRING type
@@ -121,8 +130,10 @@ option(BOLT_BUILD_TESTING_WITH_COVERAGE "Enable Bolt tests with coverage statist
 #   ${BOLT_DEPENDENCY_SOURCE_DEFAULT} CACHE STRING "Default source for all dependencies with source
 #   builds enabled: AUTO SYSTEM BUNDLED." )
 
-option(BOLT_ENABLE_ADDRESS_SANITIZER "Enable Address Sanitizer to check for memory related errors"
-       OFF
+option(
+  BOLT_ENABLE_ADDRESS_SANITIZER
+  "Enable Address Sanitizer to check for memory related errors"
+  OFF
 )
 option(BOLT_ENABLE_EXEC "Build exec." ON)
 option(BOLT_ENABLE_AGGREGATES "Build aggregates." ON)
@@ -137,8 +148,10 @@ option(BOLT_ENABLE_COLOCATE_FUNCTIONS "Enable colocate function support" OFF)
 option(ALLOW_REMOTE_COLOCATE_REGISTER "Enable remote colocate function register" OFF)
 option(BOLT_ENABLE_EXPRESSION "Build expression." ON)
 option(BOLT_ENABLE_PARSE "Build parser used for unit tests." OFF)
-option(BOLT_ENABLE_EXAMPLES
-       "Build examples. This will enable BOLT_ENABLE_EXPRESSION automatically." OFF
+option(
+  BOLT_ENABLE_EXAMPLES
+  "Build examples. This will enable BOLT_ENABLE_EXPRESSION automatically."
+  OFF
 )
 option(BOLT_ENABLE_SUBSTRAIT "Build Substrait-to-Bolt converter." OFF)
 option(BOLT_ENABLE_S3 "Build S3 Connector" OFF)
@@ -153,25 +166,62 @@ option(BOLT_ENABLE_TXT "Enable TXT read support" OFF)
 option(BOLT_ENABLE_ARROW "Enable Arrow support" OFF)
 option(BOLT_ENABLE_REMOTE_FUNCTIONS "Enable remote function support" OFF)
 option(BOLT_ENABLE_CCACHE "Use ccache if installed." ON)
-option(BOLT_ENABLE_FILE_PREFIX_MAP
-       "Hide absolute source and build paths embedded by the compiler." ON
+option(
+  BOLT_ENABLE_FILE_PREFIX_MAP
+  "Hide absolute source and build paths embedded by the compiler."
+  ON
 )
-set(BOLT_MAPPED_SOURCE_PREFIX
-    "."
-    CACHE STRING "Path used instead of the absolute Bolt source directory."
+set(
+  BOLT_MAPPED_SOURCE_PREFIX
+  "."
+  CACHE STRING
+  "Path used instead of the absolute Bolt source directory."
 )
-set(BOLT_MAPPED_BINARY_PREFIX
-    "./_build"
-    CACHE STRING "Path used instead of the absolute Bolt build directory."
+set(
+  BOLT_MAPPED_BINARY_PREFIX
+  "./_build"
+  CACHE STRING
+  "Path used instead of the absolute Bolt build directory."
 )
 
 option(BOLT_BUILD_TEST_UTILS "Builds Bolt test utilities" OFF)
+set(
+  BOLT_TEST_LINKAGE
+  "shared"
+  CACHE STRING
+  "How unit tests link the Bolt engine: static or shared."
+)
+set_property(
+  CACHE
+    BOLT_TEST_LINKAGE
+  PROPERTY
+    STRINGS
+      static
+      shared
+)
+if(NOT BOLT_TEST_LINKAGE STREQUAL "static" AND NOT BOLT_TEST_LINKAGE STREQUAL "shared")
+  message(
+    FATAL_ERROR
+    "Unsupported BOLT_TEST_LINKAGE='${BOLT_TEST_LINKAGE}'; expected static or shared"
+  )
+endif()
+if(BUILD_SHARED_LIBS)
+  set(BOLT_LIBRARY_LINKAGE shared)
+else()
+  set(BOLT_LIBRARY_LINKAGE static)
+endif()
+set(BOLT_NEEDS_SEPARATE_TEST_RUNTIME OFF)
+if(BOLT_BUILD_TEST_UTILS AND NOT "${BOLT_TEST_LINKAGE}" STREQUAL "${BOLT_LIBRARY_LINKAGE}")
+  set(BOLT_NEEDS_SEPARATE_TEST_RUNTIME ON)
+endif()
 option(BOLT_BUILD_PYTHON_PACKAGE "Builds Bolt Python bindings" OFF)
 
 # make buildPartitionBounds_ a vector int64 instead of int32 to avoid integer overflow when the
 # hashtable has billions of records
-option(BOLT_ENABLE_INT64_BUILD_PARTITION_BOUND
-       "Avoid integer overflow when the hashtable has billions of records" OFF
+option(
+  BOLT_ENABLE_INT64_BUILD_PARTITION_BOUND
+  "Avoid integer overflow when the hashtable has billions of records"
+  OFF
 )
 
 option(BOLT_ENABLE_SPARK_COMPATIBLE "Enable spark compatible setting" OFF)
@@ -186,17 +236,33 @@ option(BOLT_BUILD_BENCHMARKS "Builds Bolt benchmarks" OFF)
 option(BOLT_BUILD_BENCHMARKS_BASIC "Enable Bolt basic benchmarks." OFF)
 
 if(BOLT_ENABLE_SPARK_COMPATIBLE)
-  set(SPARK_VERSION
-      "3.5"
-      CACHE STRING "Spark major.minor version"
+  set(BOLT_SPARK_COMPATIBLE_VALUE true)
+  set(SPARK_VERSION "3.5" CACHE STRING "Spark major.minor version")
+  set_property(
+    CACHE
+      SPARK_VERSION
+    PROPERTY
+      STRINGS
+        "3.2"
+        "3.3"
+        "3.4"
+        "3.5"
   )
-  set_property(CACHE SPARK_VERSION PROPERTY STRINGS "3.2" "3.3" "3.4" "3.5")
   message("Build with SPARK_VERSION ${SPARK_VERSION}")
   string(REPLACE "." "_" SPARK_VERSION_ENUM ${SPARK_VERSION})
   set(BOLT_SPARK_VERSION "SPARK_${SPARK_VERSION_ENUM}")
 else()
+  set(BOLT_SPARK_COMPATIBLE_VALUE false)
   set(BOLT_SPARK_VERSION "UNDEFINED")
 endif()
+
+set(BOLT_GENERATED_BASE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/gen_cpp/bolt/common/base")
+file(MAKE_DIRECTORY "${BOLT_GENERATED_BASE_INCLUDE_DIR}")
+configure_file(
+  "${CMAKE_SOURCE_DIR}/bolt/common/base/SparkCompatibility.h.in"
+  "${BOLT_GENERATED_BASE_INCLUDE_DIR}/SparkCompatibility.h"
+  @ONLY
+)
 
 # Enable address sanitizer, this needs to precede the addition of all targets to be enabled for all
 # subdirectories
@@ -282,7 +348,7 @@ if(${BOLT_BUILD_BENCHMARKS})
   set(BOLT_CODEGEN_SUPPORT OFF)
 endif()
 
-if (${BOLT_ENABLE_TEST_UTILS})
+if(${BOLT_ENABLE_TEST_UTILS})
   set(BOLT_ENABLE_PARSE ON)
 endif()
 
@@ -290,7 +356,11 @@ endif()
 if(BOLT_BUILD_TESTING_WITH_COVERAGE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
-  add_compile_options(-fprofile-arcs -ftest-coverage -DGTEST_USE_OWN_TR1_TUPLE=0)
+  add_compile_options(
+    -fprofile-arcs
+    -ftest-coverage
+    -DGTEST_USE_OWN_TR1_TUPLE=0
+  )
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-arcs -ftest-coverage")
   if(NOT OS_MACOSX)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lgcov")
@@ -335,11 +405,7 @@ if(${BOLT_BUILD_PYTHON_PACKAGE})
   set(BOLT_ENABLE_HDFS ON)
 endif()
 
-if(BOLT_ENABLE_CCACHE
-   AND NOT CMAKE_C_COMPILER_LAUNCHER
-   AND NOT CMAKE_CXX_COMPILER_LAUNCHER
-)
-
+if(BOLT_ENABLE_CCACHE AND NOT CMAKE_C_COMPILER_LAUNCHER AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
   find_program(CCACHE_FOUND ccache)
 
   if(CCACHE_FOUND)
@@ -354,8 +420,14 @@ endif()
 if(${BOLT_FORCE_COLORED_OUTPUT})
   if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
     add_compile_options(-fdiagnostics-color=always)
-  elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" OR "${CMAKE_CXX_COMPILER_ID}" STREQUAL
-                                                        "AppleClang"
+  elseif(
+    "${CMAKE_CXX_COMPILER_ID}"
+      STREQUAL
+      "Clang"
+    OR
+      "${CMAKE_CXX_COMPILER_ID}"
+        STREQUAL
+        "AppleClang"
   )
     add_compile_options(-fcolor-diagnostics)
   endif()
@@ -363,7 +435,11 @@ endif()
 
 # At the moment we prefer static linking but by default cmake looks for shared libs first. This will
 # still fallback to shared libs when static ones are not found
-list(INSERT CMAKE_FIND_LIBRARY_SUFFIXES 0 a)
+list(
+  INSERT CMAKE_FIND_LIBRARY_SUFFIXES
+  0
+  a
+)
 if(BOLT_ENABLE_S3)
   # Set AWS_ROOT_DIR if you have a custom install location of AWS SDK CPP.
   if(AWSSDK_ROOT_DIR)
@@ -435,7 +511,10 @@ endif()
 # DeveloperTools/TwoLevelNamespaces.html Enables -flat_namespace so type_info can be deudplicated
 # across .so boundaries
 if(APPLE)
-  add_link_options("-Wl,-flat_namespace,-no_warn_duplicate_libraries" "-Wl,-export_dynamic")
+  add_link_options(
+    "-Wl,-flat_namespace,-no_warn_duplicate_libraries"
+    "-Wl,-export_dynamic"
+  )
 elseif(UNIX)
   add_link_options("-Wl,--export-dynamic")
 else()
@@ -454,37 +533,35 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 if(BOLT_ENABLE_FILE_PREFIX_MAP)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(BOLT_FILE_PREFIX_MAP_OPTIONS
-        "-ffile-prefix-map=${CMAKE_BINARY_DIR}=${BOLT_MAPPED_BINARY_PREFIX}"
-        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=${BOLT_MAPPED_SOURCE_PREFIX}"
+    set(
+      BOLT_FILE_PREFIX_MAP_OPTIONS
+      "-ffile-prefix-map=${CMAKE_BINARY_DIR}=${BOLT_MAPPED_BINARY_PREFIX}"
+      "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=${BOLT_MAPPED_SOURCE_PREFIX}"
     )
 
     # GCC's -ffile-prefix-map covers all individual -f*-prefix-map options.
     # Clang uses a separate option for coverage metadata.
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       list(
-        APPEND
-        BOLT_FILE_PREFIX_MAP_OPTIONS
+        APPEND BOLT_FILE_PREFIX_MAP_OPTIONS
         "-fcoverage-prefix-map=${CMAKE_BINARY_DIR}=${BOLT_MAPPED_BINARY_PREFIX}"
         "-fcoverage-prefix-map=${CMAKE_SOURCE_DIR}=${BOLT_MAPPED_SOURCE_PREFIX}"
       )
     endif()
 
     foreach(BOLT_FILE_PREFIX_MAP_OPTION IN LISTS BOLT_FILE_PREFIX_MAP_OPTIONS)
-      add_compile_options(
-        "$<$<COMPILE_LANGUAGE:C,CXX>:${BOLT_FILE_PREFIX_MAP_OPTION}>"
-      )
+      add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:${BOLT_FILE_PREFIX_MAP_OPTION}>")
     endforeach()
     message(
       STATUS
-        "Mapping Bolt source path to '${BOLT_MAPPED_SOURCE_PREFIX}' "
-        "and build path to '${BOLT_MAPPED_BINARY_PREFIX}'"
+      "Mapping Bolt source path to '${BOLT_MAPPED_SOURCE_PREFIX}' "
+      "and build path to '${BOLT_MAPPED_BINARY_PREFIX}'"
     )
   else()
     message(
       WARNING
-        "BOLT_ENABLE_FILE_PREFIX_MAP is enabled, but "
-        "${CMAKE_CXX_COMPILER_ID} does not support the configured path mapping"
+      "BOLT_ENABLE_FILE_PREFIX_MAP is enabled, but "
+      "${CMAKE_CXX_COMPILER_ID} does not support the configured path mapping"
     )
   endif()
 endif()
@@ -509,30 +586,45 @@ endif()
 # Under Ninja, we are able to designate certain targets large enough to require restricted
 # parallelism.
 if("${MAX_HIGH_MEM_JOBS}")
-  set_property(GLOBAL PROPERTY JOB_POOLS "high_memory_pool=${MAX_HIGH_MEM_JOBS}")
+  set_property(
+    GLOBAL
+    PROPERTY
+      JOB_POOLS
+        "high_memory_pool=${MAX_HIGH_MEM_JOBS}"
+  )
 else()
-  set_property(GLOBAL PROPERTY JOB_POOLS high_memory_pool=1000)
+  set_property(
+    GLOBAL
+    PROPERTY
+      JOB_POOLS
+        high_memory_pool=1000
+  )
 endif()
 
-set(MAX_LINK_JOBS
-    4
-    CACHE STRING ""
-)
+set(MAX_LINK_JOBS 4 CACHE STRING "")
 if("${MAX_LINK_JOBS}")
-  set_property(GLOBAL APPEND PROPERTY JOB_POOLS "link_job_pool=${MAX_LINK_JOBS}")
+  set_property(
+    GLOBAL
+    APPEND
+    PROPERTY
+      JOB_POOLS
+        "link_job_pool=${MAX_LINK_JOBS}"
+  )
   set(CMAKE_JOB_POOL_LINK link_job_pool)
 endif()
 
 if("${ENABLE_ALL_WARNINGS}")
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(KNOWN_COMPILER_SPECIFIC_WARNINGS
-        "-Wno-range-loop-analysis \
+    set(
+      KNOWN_COMPILER_SPECIFIC_WARNINGS
+      "-Wno-range-loop-analysis \
          -Wno-mismatched-tags \
          -Wno-nullability-completeness"
     )
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(KNOWN_COMPILER_SPECIFIC_WARNINGS
-        "-Wno-implicit-fallthrough \
+    set(
+      KNOWN_COMPILER_SPECIFIC_WARNINGS
+      "-Wno-implicit-fallthrough \
          -Wno-empty-body \
          -Wno-class-memaccess \
          -Wno-comment \
@@ -550,8 +642,9 @@ if("${ENABLE_ALL_WARNINGS}")
     )
   endif()
 
-  set(KNOWN_WARNINGS
-      "-Wno-unused \
+  set(
+    KNOWN_WARNINGS
+    "-Wno-unused \
        -Wno-unused-parameter \
        -Wno-sign-compare \
        -Wno-ignored-qualifiers \
@@ -615,20 +708,23 @@ if(BOLT_ENABLE_REMOTE_FUNCTIONS)
   find_package(FBThrift CONFIG REQUIRED)
 endif()
 
-if(BOLT_ENABLE_SPARK_COMPATIBLE)
-  message("Enable spark compatible setting.")
-  add_definitions(-DSPARK_COMPATIBLE)
-endif()
-
 if(KERNEL_SUPPORTS_IO_URING)
   message("IO_URING is supported by Linux kernel in building")
   add_definitions(-DIO_URING_SUPPORTED)
 endif()
 
 if(DEFINED FOLLY_BENCHMARK_STATIC_LIB)
-  set(FOLLY_BENCHMARK ${FOLLY_BENCHMARK_STATIC_LIB} GTest::gtest GTest::gtest_main)
+  set(
+    FOLLY_BENCHMARK
+    ${FOLLY_BENCHMARK_STATIC_LIB}
+    GTest::gtest
+  )
 else()
-  set(FOLLY_BENCHMARK Folly::follybenchmark GTest::gtest GTest::gtest_main)
+  set(
+    FOLLY_BENCHMARK
+    Folly::follybenchmark
+    GTest::gtest
+  )
 endif()
 
 find_package(Protobuf CONFIG REQUIRED)
@@ -641,12 +737,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 
   # Find Threads library
   find_package(Threads REQUIRED)
-endif()
-
-set(BOLT_DISABLE_GOOGLETEST OFF)
-if(NOT BOLT_BUILD_TEST_UTILS AND NOT BOLT_BUILD_TESTING)
-  set(BOLT_DISABLE_GOOGLETEST ON)
-  add_definitions(-DBOLT_DISABLE_GOOGLETEST)
 endif()
 
 find_package(ryu CONFIG REQUIRED)
@@ -665,13 +755,54 @@ find_package(xxHash CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(roaring REQUIRED)
 
-
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/bolt)
 include_directories(${CMAKE_BINARY_DIR}/gen_cpp)
 
-if(NOT BOLT_DISABLE_GOOGLETEST)
+if(BOLT_BUILD_TEST_UTILS OR BOLT_BUILD_TESTING)
   find_package(GTest CONFIG REQUIRED)
+endif()
+if(BOLT_NEEDS_SEPARATE_TEST_RUNTIME)
+  find_package(gflags CONFIG REQUIRED)
+  find_package(glog CONFIG REQUIRED)
+  find_package(gflags_test_runtime CONFIG REQUIRED)
+  find_package(glog_test_runtime CONFIG REQUIRED)
+
+  function(bolt_select_test_runtime host_target test_runtime_target)
+    get_target_property(host_link_libraries ${host_target} INTERFACE_LINK_LIBRARIES)
+    if(NOT host_link_libraries)
+      message(FATAL_ERROR "${host_target} has no link implementation")
+    endif()
+
+    # Conan dependency targets embed gflags::gflags and glog::glog in their
+    # transitive interfaces, so the implementation cannot be selected only at
+    # the direct bolt_engine link. Select it from Bolt's explicit public test
+    # entry targets instead. This does not infer test linkage from target type
+    # or walk the target graph.
+    set(
+      use_test_runtime
+      "$<OR:$<BOOL:$<TARGET_PROPERTY:BOLT_USE_SEPARATE_TEST_RUNTIME>>,$<IN_LIST:bolt_engine_for_tests,$<TARGET_PROPERTY:LINK_LIBRARIES>>,$<IN_LIST:bolt_testutils,$<TARGET_PROPERTY:LINK_LIBRARIES>>,$<IN_LIST:bolt_gtest_main,$<TARGET_PROPERTY:LINK_LIBRARIES>>>"
+    )
+
+    # Preserve the facade's compile usage requirements. Only its implementation
+    # link is selected per consuming target.
+    set_property(
+      TARGET
+        ${host_target}
+      PROPERTY
+        INTERFACE_LINK_LIBRARIES
+          "$<IF:${use_test_runtime},$<LINK_ONLY:${test_runtime_target}>,${host_link_libraries}>"
+    )
+  endfunction()
+
+  bolt_select_test_runtime(
+      gflags::gflags
+      gflags_test_runtime::gflags_test_runtime
+  )
+  bolt_select_test_runtime(
+      glog::glog
+      glog_test_runtime::glog_test_runtime
+  )
 endif()
 
 find_package(xsimd CONFIG REQUIRED)
@@ -689,19 +820,22 @@ function(bolt_add_sharded_gtest TEST_TARGET NUM_SHARDS)
   math(EXPR LAST_SHARD "${NUM_SHARDS} - 1")
   foreach(SHARD_INDEX RANGE ${LAST_SHARD})
     set(TEST_NAME "${TEST_TARGET}_shard_${SHARD_INDEX}")
-    add_test(
-      NAME ${TEST_NAME}
-      COMMAND ${TEST_TARGET}
-      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    )
+    add_test(NAME ${TEST_NAME} COMMAND ${TEST_TARGET} WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set_tests_properties(
       ${TEST_NAME}
-      PROPERTIES COST 1
-                 ENVIRONMENT
-                 "GTEST_TOTAL_SHARDS=${NUM_SHARDS};GTEST_SHARD_INDEX=${SHARD_INDEX}"
+      PROPERTIES
+        COST
+          1
+        ENVIRONMENT
+          "GTEST_TOTAL_SHARDS=${NUM_SHARDS};GTEST_SHARD_INDEX=${SHARD_INDEX}"
     )
     if(ARGC GREATER 2)
-      set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT ${ARGV2})
+      set_tests_properties(
+        ${TEST_NAME}
+        PROPERTIES
+          TIMEOUT
+            ${ARGV2}
+      )
     endif()
   endforeach()
 endfunction()
@@ -714,41 +848,37 @@ endif()
 # It would be better to only expose public headers Currently, just expose all the headers
 install(
   DIRECTORY
-  "${CMAKE_SOURCE_DIR}/bolt" # source directory
+    "${CMAKE_SOURCE_DIR}/bolt" # source directory
   DESTINATION
-  "include" # target directory
+    "include" # target directory
   FILES_MATCHING # install only matched files
   # PATTERN "test" EXCLUDE
+  PATTERN "benchmarks"
+    EXCLUDE
+  PATTERN "benchmark"
+    EXCLUDE
   PATTERN
-  "benchmarks"
-  EXCLUDE
+    "*.h" # select header files
   PATTERN
-  "benchmark"
-  EXCLUDE
-  PATTERN
-  "*.h" # select header files
-  PATTERN
-  "*.hpp" # select header files
+    "*.hpp" # select header files
 )
 
 if(${BOLT_ENABLE_SUBSTRAIT})
   install(
     DIRECTORY
-    "${CMAKE_BINARY_DIR}/gen_cpp/bolt" # source directory
+      "${CMAKE_BINARY_DIR}/gen_cpp/bolt" # source directory
     DESTINATION
-    "include" # target directory
+      "include" # target directory
     FILES_MATCHING # install only matched files
     # PATTERN "test" EXCLUDE
+    PATTERN "benchmarks"
+      EXCLUDE
+    PATTERN "benchmark"
+      EXCLUDE
     PATTERN
-    "benchmarks"
-    EXCLUDE
+      "*.h" # select header files
     PATTERN
-    "benchmark"
-    EXCLUDE
-    PATTERN
-    "*.h" # select header files
-    PATTERN
-    "*.hpp" # select header files
+      "*.hpp" # select header files
   )
 endif()
 
@@ -818,19 +948,12 @@ function(specialize_template output_var template_file)
     set(output_file "${output_dir}/${CLASS_NAME}_${SAFE_TYPE}.cpp")
 
     configure_file("${template_file}" "${output_file}.in" @ONLY)
-    file(
-      GENERATE
-      OUTPUT "${output_file}"
-      INPUT "${output_file}.in"
-    )
+    file(GENERATE OUTPUT "${output_file}" INPUT "${output_file}.in")
 
     list(APPEND generated_files "${output_file}")
   endforeach()
 
-  set(${output_var}
-      ${generated_files}
-      PARENT_SCOPE
-  )
+  set(${output_var} ${generated_files} PARENT_SCOPE)
 endfunction()
 
 add_subdirectory(bolt)

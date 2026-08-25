@@ -42,10 +42,22 @@ bolt_add_library(
 )
 
 target_include_directories(
-  bolt_sketch_aggregates PRIVATE ${FOLLY_INCLUDE_DIRS} ${DataSketches_INCLUDE_DIRS}
+  bolt_sketch_aggregates
+  PRIVATE
+    ${FOLLY_INCLUDE_DIRS}
+    ${DataSketches_INCLUDE_DIRS}
 )
 target_link_libraries(
-  bolt_sketch_aggregates bolt_exec DataSketches::DataSketches Folly::folly
+  bolt_sketch_aggregates
+  bolt_exec
+  DataSketches::DataSketches
+  Folly::folly
 )
 
-set_property(TARGET bolt_sketch_aggregates PROPERTY JOB_POOL_COMPILE high_memory_pool)
+set_property(
+  TARGET
+    bolt_sketch_aggregates
+  PROPERTY
+    JOB_POOL_COMPILE
+      high_memory_pool
+)

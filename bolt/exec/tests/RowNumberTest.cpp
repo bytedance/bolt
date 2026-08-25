@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -43,8 +45,10 @@ class RowNumberTest : public OperatorTestBase {
   }
 };
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(RowNumberTest, spill) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto spillDirectory = exec::test::TempDirectoryPath::create();
 
   auto test = [&](int32_t vectorSize) {
@@ -88,6 +92,9 @@ TEST_F(RowNumberTest, spill) {
 }
 
 TEST_F(RowNumberTest, basic) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto data = makeRowVector({
       makeFlatVector<int64_t>({1, 2, 1, 2, 1, 2, 1}),
       makeFlatVector<int64_t>({1, 2, 3, 4, 5, 6, 7}),
@@ -136,6 +143,9 @@ TEST_F(RowNumberTest, basic) {
 }
 
 TEST_F(RowNumberTest, noPartitionKeys) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto data = makeRowVector({
       makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
   });
@@ -183,6 +193,9 @@ TEST_F(RowNumberTest, noPartitionKeys) {
 }
 
 TEST_F(RowNumberTest, largeInput) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto data = makeRowVector({
       makeFlatVector<int64_t>(10'000, [](auto row) { return row % 7; }),
       makeFlatVector<int64_t>(10'000, [](auto row) { return row; }),
@@ -232,7 +245,6 @@ TEST_F(RowNumberTest, largeInput) {
   testLimit(2'000);
   testLimit(5'000);
 }
-#endif
 
 TEST_F(RowNumberTest, maxSpillBytes) {
   const auto rowType =

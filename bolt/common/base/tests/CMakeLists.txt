@@ -25,7 +25,6 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-
 add_executable(
   bolt_base_test
   AsyncSourceTest.cpp
@@ -53,18 +52,16 @@ add_test(bolt_base_test bolt_base_test)
 
 target_link_libraries(
   bolt_base_test
-  PRIVATE bolt_testutils
-          bolt_common_base
-          GTest::gtest
-          GTest::gmock
-          GTest::gtest_main
+  PRIVATE
+    GTest::gmock
+    bolt_gtest_main
 )
 
 add_executable(bolt_memcpy_meter MemcpyTest.cpp)
 target_link_libraries(
-  bolt_memcpy_meter PRIVATE
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-  pthread
+  bolt_memcpy_meter
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+    pthread
 )

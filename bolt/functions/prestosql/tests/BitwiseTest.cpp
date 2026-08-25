@@ -28,6 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <optional>
 
 #include "bolt/common/base/tests/GTestUtils.h"
@@ -75,15 +77,13 @@ class BitwiseTest : public functions::test::FunctionBaseTest {
     return evaluateOnce<int64_t>("bit_count(c0, c1)", num, bits);
   }
 
-#ifndef SPARK_COMPATIBLE
-  std::optional<int32_t> bitCount(std::optional<int64_t> num) {
-    return evaluateOnce<int32_t>("bit_count(c0)", num);
+  auto bitCount(std::optional<int64_t> num) {
+    if constexpr (!::bytedance::bolt::kSparkCompatible) {
+      return evaluateOnce<int32_t>("bit_count(c0)", num);
+    } else {
+      return evaluateOnce<int64_t>("bit_count(c0)", num);
+    }
   }
-#else
-  std::optional<int64_t> bitCount(std::optional<int64_t> num) {
-    return evaluateOnce<int64_t>("bit_count(c0)", num);
-  }
-#endif
 
   std::optional<int64_t> bitwiseArithmeticShiftRight(
       std::optional<int64_t> a,
@@ -158,13 +158,13 @@ TEST_F(BitwiseTest, bitCount) {
   EXPECT_EQ(bitCount(kMax64, kMaxBits), 63);
   EXPECT_EQ(bitCount(-2, 2), 1);
 
-#ifndef SPARK_COMPATIBLE
-  EXPECT_EQ(bitCount(9), 2);
-  EXPECT_EQ(bitCount(-7), 62);
-  EXPECT_EQ(bitCount(9), 2);
-  EXPECT_EQ(bitCount(kMin64), 1);
-  EXPECT_EQ(bitCount(kMax64), 63);
-#endif // SPARK_COMPATIBLE
+  if (!::bytedance::bolt::kSparkCompatible) {
+    EXPECT_EQ(bitCount(9), 2);
+    EXPECT_EQ(bitCount(-7), 62);
+    EXPECT_EQ(bitCount(9), 2);
+    EXPECT_EQ(bitCount(kMin64), 1);
+    EXPECT_EQ(bitCount(kMax64), 63);
+  }
 
   auto assertInvalidBits = [this](int64_t num, int64_t bits) {
     BOLT_ASSERT_THROW(

@@ -22,6 +22,5 @@ target_link_libraries(
   bolt_dwio_native_parquet_reader
   bolt_temp_path
   GTest::gtest
-  GTest::gtest_main
   fmt::fmt
 )

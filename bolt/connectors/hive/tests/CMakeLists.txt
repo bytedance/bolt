@@ -40,9 +40,4 @@ add_executable(
 )
 add_test(bolt_hive_connector_test bolt_hive_connector_test)
 
-target_link_libraries(
-  bolt_hive_connector_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_hive_connector_test bolt_gtest_main)

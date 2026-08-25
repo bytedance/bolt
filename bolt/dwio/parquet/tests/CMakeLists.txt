@@ -25,14 +25,10 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-set(TEST_LINK_LIBS
-    bolt_testutils
-    bolt_temp_path
-    GTest::gtest
-    GTest::gtest_main
-    GTest::gmock
-    gflags::gflags
-    ${GLOG}
+set(
+  TEST_LINK_LIBS
+  bolt_gtest_main
+  GTest::gmock
 )
 
 add_subdirectory(reader)
@@ -43,19 +39,10 @@ add_subdirectory(encryption)
 add_executable(bolt_dwio_parquet_tpch_test ParquetTpchTest.cpp)
 add_test(
   NAME bolt_dwio_parquet_tpch_test
-  COMMAND bolt_dwio_parquet_tpch_test
+  COMMAND
+    bolt_dwio_parquet_tpch_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(
-  bolt_dwio_parquet_tpch_test
-  bolt_dwio_parquet_reader
-  bolt_exec_test_lib
-  bolt_exec
-  bolt_hive_connector
-  bolt_tpch_connector
-  bolt_aggregates
-  bolt_tpch_gen
-  ${TEST_LINK_LIBS}
-)
+target_link_libraries(bolt_dwio_parquet_tpch_test ${TEST_LINK_LIBS})
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/examples DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

@@ -27,7 +27,11 @@
 
 bolt_add_library(bolt_connector Connector.cpp ConnectorObjectFactory.cpp)
 
-target_link_libraries(bolt_connector bolt_common_config bolt_vector)
+target_link_libraries(
+  bolt_connector
+  bolt_common_config
+  bolt_vector
+)
 
 add_subdirectory(fuzzer)
 

@@ -14,11 +14,22 @@
  * limitations under the License.
  */
 #include "bolt/connectors/hive/PaimonMetadataColumn.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/connectors/hive/HiveConnectorUtil.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 
 namespace bytedance::bolt::connector::paimon {
+namespace {
+
+template <TypeKind Kind>
+bolt::variant convertPartitionValueFromString(
+    const std::optional<std::string>& value) {
+  return hive::convertFromString<Kind>(
+      value, !::bytedance::bolt::kSparkCompatible);
+}
+
+} // namespace
 
 TypePtr MetadataColumnFilePath::type() const {
   return VARCHAR();
@@ -60,7 +71,7 @@ MetadataColumnPartition::MetadataColumnPartition(
 
     if (it != partitionKeys.end() && it->second.has_value()) {
       auto convertedValue = BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-          hive::convertFromString, fieldType->kind(), it->second);
+          convertPartitionValueFromString, fieldType->kind(), it->second);
       childVectors.push_back(
           BaseVector::createConstant(fieldType, convertedValue, 1, pool));
     } else {

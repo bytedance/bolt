@@ -45,16 +45,22 @@ set(GENERATED_CPP_FILE "${GENERATED_DIR}/parquet_types.cpp")
 message(STATUS "Running Thrift compiler for ${THRIFT_FILE}")
 
 add_custom_command(
-  OUTPUT ${GENERATED_H_FILE} ${GENERATED_CPP_FILE}
-  COMMAND ${THRIFT_COMPILER} --gen cpp -out ${GENERATED_DIR} ${THRIFT_FILE}
-  DEPENDS ${THRIFT_FILE}
+  OUTPUT
+    ${GENERATED_H_FILE}
+    ${GENERATED_CPP_FILE}
+  COMMAND
+    ${THRIFT_COMPILER} --gen cpp -out ${GENERATED_DIR} ${THRIFT_FILE}
+  DEPENDS
+    ${THRIFT_FILE}
   COMMENT "Generating Thrift files from ${THRIFT_FILE}"
   VERBATIM
 )
 
 add_custom_target(
   generate_parquet_thrift
-  DEPENDS ${GENERATED_H_FILE} ${GENERATED_CPP_FILE}
+  DEPENDS
+    ${GENERATED_H_FILE}
+    ${GENERATED_CPP_FILE}
   COMMENT "Generating Parquet Thrift files"
 )
 
@@ -62,4 +68,10 @@ bolt_add_library(bolt_dwio_parquet_thrift ${GENERATED_CPP_FILE})
 add_dependencies(bolt_dwio_parquet_thrift generate_parquet_thrift)
 target_include_directories(bolt_dwio_parquet_thrift PUBLIC ${GENERATED_DIR})
 
-target_link_libraries(bolt_dwio_parquet_thrift arrow::arrow thrift::thrift fmt::fmt Boost::headers)
+target_link_libraries(
+  bolt_dwio_parquet_thrift
+  arrow::arrow
+  thrift::thrift
+  fmt::fmt
+  Boost::headers
+)

@@ -111,6 +111,12 @@ class QueryConfig {
   /// If set, cast from float/double/decimal/string to integer truncates the
   /// decimal part, otherwise rounds.
   static constexpr const char* kCastToIntByTruncate = "cast_to_int_by_truncate";
+
+  /// If set, cast from string to REAL or DOUBLE trims leading and trailing
+  /// ASCII bytes in the inclusive range 0x00 through 0x20 before conversion.
+  static constexpr const char* kCastStringToFloatingPointTrimControlChars =
+      "cast_string_to_floating_point_trim_control_chars";
+
   static constexpr const char* kSpecTimezone = "spec_timezone";
 
   /// If set, cast from string to date allows only ISO 8601 formatted strings:
@@ -744,6 +750,10 @@ class QueryConfig {
 
   static constexpr const char* kEnableSonicJsonToMap = "sonic.json_to_map";
 
+  /// Whether json_to_map escapes raw control chars and retries parse.
+  static constexpr const char* kJsonToMapEscapeControlChars =
+      "json_to_map_escape_control_chars";
+
   static constexpr const char* kEnableSonicIsJsonScalar =
       "sonic.is_json_scalar";
 
@@ -899,14 +909,7 @@ class QueryConfig {
     return get<uint64_t>(kMaxSpillRunRows, kDefault);
   }
 
-  uint64_t maxSpillBytes() const {
-#ifdef SPARK_COMPATIBLE
-    static constexpr uint64_t kDefault = 0UL;
-#else
-    static constexpr uint64_t kDefault = 100UL << 30;
-#endif
-    return get<uint64_t>(kMaxSpillBytes, kDefault);
-  }
+  uint64_t maxSpillBytes() const;
 
   /// Returns the maximum number of bytes to buffer in PartitionedOutput
   /// operator to avoid creating tiny SerializedPages.
@@ -1011,6 +1014,14 @@ class QueryConfig {
 
   bool isCastToIntByTruncate() const {
     return get<bool>(kCastToIntByTruncate, false);
+  }
+
+  bool castStringToFloatingPointTrimControlChars() const {
+#ifdef SPARK_COMPATIBLE
+    return get<bool>(kCastStringToFloatingPointTrimControlChars, true);
+#else
+    return get<bool>(kCastStringToFloatingPointTrimControlChars, false);
+#endif
   }
 
   std::string specTimeZone() const {
@@ -1681,6 +1692,10 @@ class QueryConfig {
 
   bool enableSonicJsonToMap() const {
     return get<bool>(kEnableSonicJsonToMap, true);
+  }
+
+  bool jsonToMapEscapeControlChars() const {
+    return get<bool>(kJsonToMapEscapeControlChars, true);
   }
 
   bool enableSonicIsJsonScalar() const {

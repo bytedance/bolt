@@ -30,11 +30,8 @@ add_executable(spark_aggregation_fuzzer_test SparkAggregationFuzzerTest.cpp)
 target_link_libraries(
   spark_aggregation_fuzzer_test
   bolt_aggregation_fuzzer
-  bolt_functions_spark_aggregates
-  bolt_fuzzer_util
   bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )
 
 add_executable(spark_window_fuzzer_test SparkWindowFuzzerTest.cpp)
@@ -42,11 +39,6 @@ add_executable(spark_window_fuzzer_test SparkWindowFuzzerTest.cpp)
 target_link_libraries(
   spark_window_fuzzer_test
   bolt_window_fuzzer
-  bolt_functions_spark_aggregates
-  bolt_fuzzer_util
-  bolt_functions_spark_window
-  bolt_expression_test_utility
   bolt_testutils
   GTest::gtest
-  GTest::gtest_main
 )

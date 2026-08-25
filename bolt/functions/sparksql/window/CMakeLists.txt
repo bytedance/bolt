@@ -28,7 +28,10 @@
 bolt_add_library(bolt_functions_spark_window WindowFunctionsRegistration.cpp)
 
 target_link_libraries(
-  bolt_functions_spark_window bolt_buffer bolt_exec bolt_functions_window
+  bolt_functions_spark_window
+  bolt_buffer
+  bolt_exec
+  bolt_functions_window
   Folly::folly
 )
 

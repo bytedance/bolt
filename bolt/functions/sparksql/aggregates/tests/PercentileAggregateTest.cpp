@@ -26,7 +26,6 @@ using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::functions::aggregate::test;
 namespace bytedance::bolt::functions::aggregate::sparksql::test {
 
-#ifdef SPARK_COMPATIBLE
 namespace {
 
 // Return the argument types of an aggregation when the aggregation is
@@ -204,7 +203,8 @@ class PercentileTest : public AggregationTestBase {
           {expected});
 
       // Companion functions of percentile do not support test streaming
-      // because intermediate results are KLL that has non-deterministic shape.
+      // because intermediate results are KLL that has non-deterministic
+      // shape.
       disableTestStreaming();
       testAggregationsWithCompanion(
           {rows},
@@ -556,5 +556,4 @@ TEST_F(PercentileTest, nullPercentile) {
 }
 
 } // namespace
-#endif
 } // namespace bytedance::bolt::functions::aggregate::sparksql::test

@@ -92,6 +92,29 @@ class StringImplTest : public testing::Test {
   }
 };
 
+TEST_F(StringImplTest, isAscii) {
+  constexpr size_t kSimdWidth = xsimd::batch<uint8_t>::size;
+  constexpr size_t kMaxLength = 2 * kSimdWidth + 1;
+  std::string input(kMaxLength + 1, 'a');
+
+  // Start at an unaligned address and cover lengths around the first two SIMD
+  // boundaries. Deriving the range from the native batch width covers SSE,
+  // AVX/AVX2, and AVX-512 builds.
+  const char* data = input.data() + 1;
+  for (size_t length = 0; length <= kMaxLength; ++length) {
+    EXPECT_TRUE(isAscii(data, length));
+
+    for (size_t nonAsciiPosition = 0; nonAsciiPosition < length;
+         ++nonAsciiPosition) {
+      input[nonAsciiPosition + 1] = static_cast<char>(0x80);
+      EXPECT_FALSE(isAscii(data, length))
+          << "length: " << length
+          << ", non-ASCII position: " << nonAsciiPosition;
+      input[nonAsciiPosition + 1] = 'a';
+    }
+  }
+}
+
 TEST_F(StringImplTest, upperAscii) {
   for (auto& testCase : getUpperAsciiTestData()) {
     auto input = StringView(std::get<0>(testCase));

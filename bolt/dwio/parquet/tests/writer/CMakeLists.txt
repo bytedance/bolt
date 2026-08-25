@@ -25,23 +25,20 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
-add_executable(bolt_parquet_writer_sink_test
+add_executable(
+  bolt_parquet_writer_sink_test
   SinkTests.cpp
   ParquetWriterTest.cpp
 )
 
 add_test(
   NAME bolt_parquet_writer_sink_test
-  COMMAND bolt_parquet_writer_sink_test
+  COMMAND
+    bolt_parquet_writer_sink_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(
-  bolt_parquet_writer_sink_test
-  bolt_testutils
-  GTest::gtest
-  GTest::gtest_main
-)
+target_link_libraries(bolt_parquet_writer_sink_test bolt_gtest_main)
 
 add_executable(bolt_dwio_parquet_writer_benchmark ParquetWriterBenchmark.cpp)
 target_link_libraries(

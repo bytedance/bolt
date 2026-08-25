@@ -31,7 +31,7 @@
 
 # --- 2. Development Tools & Setup ---
 # Includes code formatting, Conan dependency installation/build, and compilation DB generation
-.PHONY: clang-format-check conan_install conan_build _compile_db compile_db_all
+.PHONY: clang-format-check _conan_prepare conan_install conan_build _compile_db compile_db_all
 
 # --- 3. Conan Package Export ---
 # Export the built package to the local Conan cache
@@ -78,6 +78,8 @@ CONAN_OVERRIDE ?=
 BUILD_VERSION ?= main
 PROFILE ?= default
 BUILD_TYPE=Release
+# Build third-party dependencies in Release unless explicitly overridden.
+DEPENDENCY_BUILD_TYPE ?= Release
 
 # TODO: remove `BUILD_USER` and `BUILD_CHANNEL`
 BUILD_USER ?=
@@ -96,10 +98,8 @@ CONAN_HOST_PROFILE_ARGS = \
 
 # Package-scoped settings only apply when the matching dependency is in the graph.
 CONAN_BUILD_SETTINGS = \
-	-s llvm-core/*:build_type=Release \
-	-s google-cloud-cpp/*:build_type=Release \
 	-s "&:build_type=${BUILD_TYPE}" \
-	-s build_type=$${DEPENDENCY_BUILD_TYPE:-${BUILD_TYPE}}
+	-s build_type=${DEPENDENCY_BUILD_TYPE}
 
 # Reusable Conan option fragments for public build targets.
 CONAN_TEST_CONFIG = -c bolt/*:tools.build:skip_test=False
@@ -107,6 +107,17 @@ CONAN_PRESTO_OPTIONS = -o bolt/*:spark_compatible=False
 CONAN_SPARK_OPTIONS = -o bolt/*:spark_compatible=True
 CONAN_TESTUTIL_OPTIONS = -o bolt/*:enable_testutil=True
 CONAN_PERF_OPTIONS = -o bolt/*:enable_perf=True
+
+# Controls the complete unit-test runtime linkage. If this differs from the
+# exported Bolt library, Conan provides the opposite gflags/glog variant while
+# CMake reuses the existing Bolt object files. Supported values: static, shared.
+BOLT_TEST_LINKAGE ?= shared
+ifneq ($(BOLT_TEST_LINKAGE),static)
+ifneq ($(BOLT_TEST_LINKAGE),shared)
+$(error Unsupported BOLT_TEST_LINKAGE '$(BOLT_TEST_LINKAGE)'; expected 'static' or 'shared')
+endif
+endif
+export BOLT_TEST_LINKAGE
 
 # BOLT_LINKER overrides profile-aware automatic linker selection. An explicitly
 # empty value disables automatic selection.
@@ -184,13 +195,9 @@ endif
 
 CONAN_BUILD_ENV = \
 	NUM_THREADS=$(NUM_THREADS) \
+	NUM_LINK_JOB=$(NUM_LINK_JOB) \
 	BOLT_BUILD_BENCHMARKS=${BOLT_BUILD_BENCHMARKS} \
 	BOLT_BUILD_BENCHMARKS_BASIC=${BOLT_BUILD_BENCHMARKS_BASIC}
-
-ifeq ($(IN_CI), 1)
-	export DEPENDENCY_BUILD_TYPE = Release
-endif
-
 
 CPU_TARGET ?= "avx"
 
@@ -210,7 +217,7 @@ clang-format-check:
 	if grep -q 'warning' log.txt; then false; fi
 	@rm -f files.txt log.txt
 
-conan_install:
+_conan_prepare:
 	if [ ! -d "_build" ]; then \
 		mkdir _build; \
 	fi; \
@@ -244,13 +251,19 @@ conan_install:
 	   $(CONAN_BUILD_SETTINGS) \
 	   $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing \
 	   --format=html > bolt.conan.graph.html && \
-	export NUM_LINK_JOB=$(NUM_LINK_JOB) && \
+	cd -
+
+conan_install: _conan_prepare
+	cd _build/${BUILD_TYPE} && \
+	set -f && \
+	read ALL_CONAN_OPTIONS < conan.options && \
+	NUM_LINK_JOB=$(NUM_LINK_JOB) \
 	conan install ../.. $(CONAN_PACKAGE_ARGS) \
 	   $(CONAN_BUILD_SETTINGS) \
 	$${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} --build=missing  &&\
 	cd -
 
-conan_build: conan_install
+conan_build: _conan_prepare
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \
@@ -261,7 +274,7 @@ conan_build: conan_install
 	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} && \
 	cd -
 
-_compile_db: conan_install
+_compile_db: _conan_prepare
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
 	read ALL_CONAN_OPTIONS < conan.options && \

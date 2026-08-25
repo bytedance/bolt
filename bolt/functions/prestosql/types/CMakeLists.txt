@@ -30,7 +30,12 @@ bolt_add_library(bolt_presto_types HyperLogLogType.cpp JsonType.cpp TimestampWit
 find_package(ryu CONFIG REQUIRED)
 
 target_link_libraries(
-  bolt_presto_types bolt_memory bolt_expression bolt_functions_util bolt_functions_json ryu::ryu
+  bolt_presto_types
+  bolt_memory
+  bolt_expression
+  bolt_functions_util
+  bolt_functions_json
+  ryu::ryu
 )
 
 if(${BOLT_BUILD_TESTING})

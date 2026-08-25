@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <date/tz.h>
 #include <optional>
 #include <string>
@@ -265,8 +267,10 @@ bool operator==(
   return a.milliSeconds_ == b.milliSeconds_ && a.timezoneId_ == b.timezoneId_;
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncSignatures) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   auto signatures = getSignatureStrings("date_trunc");
   ASSERT_EQ(3, signatures.size());
 
@@ -277,7 +281,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncSignatures) {
   ASSERT_EQ(1, signatures.count("(varchar,date) -> date"));
   ASSERT_EQ(1, signatures.count("(varchar,timestamp) -> timestamp"));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, parseDatetimeSignatures) {
   auto signatures = getSignatureStrings("parse_datetime");
@@ -327,11 +330,7 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, civilDateTimeMillisecondRange) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesPrestoParity) {
-#ifdef SPARK_COMPATIBLE
-  const std::string prefix = "+";
-#else
-  const std::string prefix;
-#endif
+  const std::string prefix = ::bytedance::bolt::kSparkCompatible ? "+" : "";
   auto fromUnixTime = [&](int64_t unixTime) {
     return evaluateOnce<std::string>(
                "format_datetime("
@@ -540,8 +539,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, fromUnixtime) {
   EXPECT_EQ(Timestamp(0, 0), fromUnixtime(kNan));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, year) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto year = [&](std::optional<Timestamp> date) {
     return evaluateOnce<int64_t>("year(c0)", date);
   };
@@ -565,6 +566,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, year) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, yearDate) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto year = [&](std::optional<int32_t> date) {
     return evaluateOnce<int64_t, int32_t>("year(c0)", {date}, {DATE()});
   };
@@ -574,7 +578,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, yearDate) {
   EXPECT_EQ(2020, year(DATE()->toDays("2020-01-01")));
   EXPECT_EQ(1920, year(DATE()->toDays("1920-12-31")));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, yearTimestampWithTimezone) {
   EXPECT_EQ(
@@ -605,8 +608,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, yearTimestampWithTimezone) {
           "year(c0)", std::nullopt, std::nullopt));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, weekDate) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto weekDate = [&](const char* dateString) {
     auto date = std::make_optional(parseDate(dateString));
     auto week =
@@ -633,6 +638,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, weekDate) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, week) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto weekTimestamp = [&](const char* time) {
     auto timestampInSeconds = util::fromTimeString(time, nullptr) / 1'000'000;
     auto timestamp =
@@ -652,7 +660,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, week) {
   EXPECT_EQ(27, weekTimestamp("12:00:01"));
   EXPECT_EQ(7, weekTimestamp("12:59:59"));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, weekTimestampWithTimezone) {
   const auto weekTimestampTimezone = [&](const char* time,
@@ -680,8 +687,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, weekTimestampWithTimezone) {
   EXPECT_EQ(47, weekTimestampTimezone("12:00:01", "+12:00"));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, quarter) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto quarter = [&](std::optional<Timestamp> date) {
     return evaluateOnce<int64_t>("quarter(c0)", date);
   };
@@ -705,6 +714,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, quarter) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, quarterDate) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto quarter = [&](std::optional<int32_t> date) {
     return evaluateOnce<int64_t, int32_t>("quarter(c0)", {date}, {DATE()});
   };
@@ -717,7 +729,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, quarterDate) {
   EXPECT_EQ(1, quarter(18262));
   EXPECT_EQ(1, quarter(-18262));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, quarterTimestampWithTimezone) {
   EXPECT_EQ(
@@ -748,8 +759,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, quarterTimestampWithTimezone) {
           "quarter(c0)", std::nullopt, std::nullopt));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, month) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto month = [&](std::optional<Timestamp> date) {
     return evaluateOnce<int64_t>("month(c0)", date);
   };
@@ -773,6 +786,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, month) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, monthDate) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto month = [&](std::optional<int32_t> date) {
     return evaluateOnce<int64_t, int32_t>("month(c0)", {date}, {DATE()});
   };
@@ -784,7 +800,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, monthDate) {
   EXPECT_EQ(1, month(18262));
   EXPECT_EQ(1, month(-18262));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, monthTimestampWithTimezone) {
   EXPECT_EQ(
@@ -813,8 +828,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, monthTimestampWithTimezone) {
           "month(c0)", std::nullopt, std::nullopt));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, hour) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto hour = [&](std::optional<Timestamp> date) {
     return evaluateOnce<int64_t>("hour(c0)", date);
   };
@@ -839,7 +856,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, hour) {
   EXPECT_EQ(23, hour(Timestamp(998474645, 321000000)));
   EXPECT_EQ(8, hour(Timestamp(998423705, 321000000)));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, hourTimestampWithTimezone) {
   EXPECT_EQ(
@@ -1316,8 +1332,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, yearOfWeekTimestampWithTimezone) {
           "year_of_week(c0)", std::nullopt, std::nullopt));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, minute) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto minute = [&](std::optional<Timestamp> date) {
     return evaluateOnce<int64_t>("minute(c0)", date);
   };
@@ -1345,7 +1363,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, minute) {
   EXPECT_EQ(34, minute(Timestamp(998474645, 321000000)));
   EXPECT_EQ(25, minute(Timestamp(998423705, 321000000)));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, minuteDate) {
   const auto minute = [&](std::optional<int32_t> date) {
@@ -1400,8 +1417,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, minuteTimestampWithTimezone) {
           "minute(c0)", -1000, "+05:30"));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, second) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto second = [&](std::optional<Timestamp> timestamp) {
     return evaluateOnce<int64_t>("second(c0)", timestamp);
   };
@@ -1411,7 +1430,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, second) {
   EXPECT_EQ(59, second(Timestamp(-1, 123000000)));
   EXPECT_EQ(59, second(Timestamp(-1, Timestamp::kMaxNanos)));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, secondDate) {
   const auto second = [&](std::optional<int32_t> date) {
@@ -1457,8 +1475,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, secondTimestampWithTimezone) {
           "second(c0)", -1000, "+05:30"));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, millisecond) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto millisecond = [&](std::optional<Timestamp> timestamp) {
     return evaluateOnce<int64_t>("millisecond(c0)", timestamp);
   };
@@ -1468,7 +1488,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, millisecond) {
   EXPECT_EQ(123, millisecond(Timestamp(-1, 123000000)));
   EXPECT_EQ(999, millisecond(Timestamp(-1, Timestamp::kMaxNanos)));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, millisecondDate) {
   const auto millisecond = [&](std::optional<int32_t> date) {
@@ -1519,8 +1538,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, millisecondTimestampWithTimezone) {
 }
 
 // date_trunc cannot be access in presto ut
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTrunc) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   std::string optimizationFlags[] = {"true", "false"};
   for (const std::string& flag : optimizationFlags) {
     setQueryDateTruncOptimization(flag);
@@ -1631,6 +1652,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTrunc) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, trunc) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const static auto trunc = [&](std::optional<int32_t> date,
                                 const std::string& unit) {
     return evaluateOnce<int32_t, int32_t>(
@@ -1658,6 +1682,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, trunc) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncDate) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto dateTrunc = [&](const std::string& unit,
                              std::optional<int32_t> date) {
     return evaluateOnce<int32_t, int32_t>(
@@ -1707,13 +1734,15 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncDate) {
 //   // Date(19579) is 2023-08-10, Thur, should return Monday
 //   EXPECT_EQ(Date(19576), dateTrunc("week", Date(19579)));
 
-//   // Date(19570) is 2023-08-01, A non-Monday(Tue) date at the beginning of a
+//   // Date(19570) is 2023-08-01, A non-Monday(Tue) date at the beginning of
+//   a
 //   // month when the preceding Monday falls in the previous month. should
 //   return
 //   // 2023-07-31(19569), which is previous Monday
 //   EXPECT_EQ(Date(19569), dateTrunc("week", Date(19570)));
 
-//   // Date(19358) is 2023-01-01, A non-Monday(Sunday) date at the beginning of
+//   // Date(19358) is 2023-01-01, A non-Monday(Sunday) date at the beginning
+//   of
 //   // January where the preceding Monday falls in the previous year. should
 //   // return 2022-12-26(19352), which is previous Monday
 //   EXPECT_EQ(Date(19352), dateTrunc("week", Date(19358)));
@@ -1722,6 +1751,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncDate) {
 
 // Reference dateTruncDateForWeek for test cases explanations
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampForWeek) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto dateTrunc = [&](const std::string& unit,
                              std::optional<Timestamp> timestamp) {
     return evaluateOnce<Timestamp>(
@@ -1756,6 +1788,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampForWeek) {
 // 4. Convert Back to UTC (remove Time Zone offset)
 // 5. Convert Back to Milliseconds Since the Unix Epoch
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampWithTimezoneForWeek) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto evaluateDateTrunc = [&](const std::string& truncUnit,
                                      int64_t inputTimestamp,
                                      const std::string& timeZone,
@@ -1773,16 +1808,16 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampWithTimezoneForWeek) {
   auto outputMilli = inputMilli - int64_t(1) * 60 * 60 * 1000;
   evaluateDateTrunc("week", inputMilli, "+01:00", outputMilli);
 
-  // Date(19579) is 2023-08-10, Thur, should return Monday UTC (previous Sunday
-  // in +03:00 timezone)
+  // Date(19579) is 2023-08-10, Thur, should return Monday UTC (previous
+  // Sunday in +03:00 timezone)
   inputMilli = int64_t(19579) * 24 * 60 * 60 * 1000;
   outputMilli = inputMilli - int64_t(3) * 24 * 60 * 60 * 1000 -
       int64_t(3) * 60 * 60 * 1000;
   evaluateDateTrunc("week", inputMilli, "+03:00", outputMilli);
 
   // Date(19570) is 2023-08-01, A non-Monday(Tue) date at the beginning of a
-  // month when the preceding Monday falls in the previous month. should return
-  // 2023-07-31(19569), which is previous Monday EXPECT_EQ(19569,
+  // month when the preceding Monday falls in the previous month. should
+  // return 2023-07-31(19569), which is previous Monday EXPECT_EQ(19569,
   // dateTrunc("week", 19570));
   inputMilli = int64_t(19570) * 24 * 60 * 60 * 1000;
   outputMilli = inputMilli - int64_t(1) * 24 * 60 * 60 * 1000 -
@@ -1790,8 +1825,8 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampWithTimezoneForWeek) {
   evaluateDateTrunc("week", inputMilli, "+03:00", outputMilli);
 
   // Date(19570) is 2023-08-01, which is Tuesday; TimeZone is -05:00, so input
-  // will become Monday. 2023-07-31 19:00:00, which will truncate to 2023-07-31
-  // 00:00:00
+  // will become Monday. 2023-07-31 19:00:00, which will truncate to
+  // 2023-07-31 00:00:00
   // TODO : Need to double-check with presto logic
   inputMilli = int64_t(19570) * 24 * 60 * 60 * 1000;
   outputMilli =
@@ -1802,6 +1837,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimeStampWithTimezoneForWeek) {
 TEST_F(
     PrestoSqlDateTimeFunctionsTest,
     dateTruncTimeStampWithTimezoneStringForWeek) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto evaluateDateTruncFromStrings = [&](const std::string& truncUnit,
                                                 const std::string&
                                                     inputTimestamp,
@@ -1828,8 +1866,8 @@ TEST_F(
       "week", "2023-08-10+23:01:02+14:00", "2023-08-07+00:00:00+14:00");
 
   // 2023-08-01, A non-Monday(Tue) date at the beginning of a
-  // month when the preceding Monday falls in the previous month. should return
-  // 2023-07-31, which is previous Monday
+  // month when the preceding Monday falls in the previous month. should
+  // return 2023-07-31, which is previous Monday
   evaluateDateTruncFromStrings(
       "week", "2023-08-01+23:01:02+14:00", "2023-07-31+00:00:00+14:00");
 
@@ -1846,6 +1884,9 @@ TEST_F(
       "week", "2024-03-01+23:01:02+14:00", "2024-02-26+00:00:00+14:00");
 }
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimestampWithTimezone) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto evaluateDateTrunc = [&](const std::string& truncUnit,
                                      int64_t inputTimestamp,
                                      const std::string& timeZone,
@@ -1937,7 +1978,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateTruncTimestampWithTimezone) {
   evaluateDateTruncFromStrings(
       "year", "1968-05-20+23:01:02+05:30", "1968-01-01+00:00:00+05:30");
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, timestampdiff) {
   const auto timestampdiff = [&](const std::string& unit,
@@ -2123,8 +2163,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, parseDatetime) {
       parseDatetime("1969-12-31+07:30+02:00", "YYYY-MM-dd+HH:mmZZ"));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTime) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   using util::fromTimestampString;
 
   // era test cases - 'G'
@@ -2531,7 +2573,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTime) {
       formatDatetime(fromTimestampString("1970-01-01", nullptr), "'abcd"),
       BoltUserError);
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTimeTimezone) {
   using util::fromTimestampString;
@@ -2565,8 +2606,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, formatDateTimeTimezone) {
       formatDatetimeWithTimezone(zeroTs, "+00:07", "YYYY-MM-dd HH:mm:ss"));
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormat) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto dateFormatOnce = [&](std::optional<Timestamp> timestamp,
                                   const std::string& formatString) {
     return evaluateOnce<std::string>(
@@ -2923,6 +2966,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormat) {
 }
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormatTimestampWithTimezone) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto testDateFormat =
       [&](const std::string& formatString,
           std::optional<int64_t> timestamp,
@@ -2954,7 +3000,6 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, dateFormatTimestampWithTimezone) {
       "69-May-11 20:04:45 PM",
       testDateFormat("%y-%M-%e %T %p", -20220915000, "-03:00"));
 }
-#endif
 
 TEST_F(PrestoSqlDateTimeFunctionsTest, dateParse) {
   // Check null behavior.
@@ -3313,11 +3358,9 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, timeZoneHour) {
       "Unable to parse timestamp value: \"invalid_date\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])");
   BOLT_ASSERT_THROW(
       timezone_hour("123456", "Canada/Atlantic"),
-#ifndef SPARK_COMPATIBLE
-      "Unable to parse timestamp value: \"123456\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])");
-#else
-      "Timestamp with timezone overflow: 3833727840000000 ms");
-#endif
+      ::bytedance::bolt::kSparkCompatible
+          ? "Timestamp with timezone overflow: 3833727840000000 ms"
+          : "Unable to parse timestamp value: \"123456\", expected format is (YYYY-MM-DD HH:MM:SS[.MS])");
   BOLT_ASSERT_THROW(
       timezone_hour("123456-01-01 00:00:00", "Canada/Atlantic"),
       "Timestamp with timezone overflow: 3833727840000000 ms");
@@ -3640,8 +3683,10 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, monthsBetween) {
           .value());
 }
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(PrestoSqlDateTimeFunctionsTest, lastDay) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   const auto lastDayFunc = [&](const std::optional<int32_t>& date) {
     return evaluateOnce<std::string, int32_t>("last_day(c0)", {date}, {DATE()});
   };
@@ -3665,4 +3710,3 @@ TEST_F(PrestoSqlDateTimeFunctionsTest, lastDay) {
   EXPECT_EQ(lastDay("2016-02-07"), "2016-02-29");
   EXPECT_EQ(lastDayFunc(std::nullopt), std::nullopt);
 }
-#endif

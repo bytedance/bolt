@@ -33,6 +33,7 @@
 #include <date/tz.h>
 #include "bolt/common/base/CountBits.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/core/CoreTypeSystem.h"
 #include "bolt/expression/PrestoCastHooks.h"
 #include "bolt/expression/StringWriter.h"
@@ -84,7 +85,10 @@ StringView convertToStringView(
     int32_t scale,
     int32_t maxVarcharSize,
     char* const startPosition) {
-  auto strSize = DecimalUtil::convertToString(
+  constexpr auto kDecimalStringFormat = ::bytedance::bolt::kSparkCompatible
+      ? DecimalUtil::DecimalStringFormat::kSpark
+      : DecimalUtil::DecimalStringFormat::kPlain;
+  auto strSize = DecimalUtil::convertToString<kDecimalStringFormat>(
       unscaledValue, scale, maxVarcharSize, startPosition);
   return StringView(startPosition, strSize);
 }
@@ -379,31 +383,31 @@ VectorPtr CastExpr::applyDecimalToFloatCast(
   auto resultBuffer = result->asUnchecked<FlatVector<To>>()->mutableRawValues();
   const auto precisionScale = getDecimalPrecisionScale(*fromType);
   const auto simpleInput = input.as<SimpleVector<FromNativeType>>();
-#ifndef SPARK_COMPATIBLE
-  const auto scaleFactor = DecimalUtil::getPowersOfTen(precisionScale.second);
-  applyToSelectedNoThrowLocal(context, rows, result, [&](int row) {
-    bool nullOutput = false;
-    auto output = util::Converter<ToKind, void, util::DefaultCastPolicy>::cast(
-        simpleInput->valueAt(row), &nullOutput);
-    if (nullOutput) {
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    const auto scaleFactor = DecimalUtil::getPowersOfTen(precisionScale.second);
+    applyToSelectedNoThrowLocal(context, rows, result, [&](int row) {
+      bool nullOutput = false;
+      auto output =
+          util::Converter<ToKind, void, util::DefaultCastPolicy>::cast(
+              simpleInput->valueAt(row), &nullOutput);
+      if (nullOutput) {
+        result->setNull(row, true);
+      } else {
+        resultBuffer[row] = output / scaleFactor;
+      }
+    });
+  } else {
+    const int32_t scale = precisionScale.second;
+    applyToSelectedNoThrowLocal(context, rows, result, [&](int row) {
+      auto inputValue = simpleInput->valueAt(row);
+      auto fValue = FloatingDecimal::toFloatFromValue(inputValue, scale);
+      if (fValue.has_value()) {
+        resultBuffer[row] = *fValue;
+        return;
+      }
       result->setNull(row, true);
-    } else {
-      resultBuffer[row] = output / scaleFactor;
-    }
-  });
-#else
-  const int32_t scale = precisionScale.second;
-  const int32_t precision = precisionScale.first;
-  applyToSelectedNoThrowLocal(context, rows, result, [&](int row) {
-    auto inputValue = simpleInput->valueAt(row);
-    auto fValue = FloatingDecimal::toFloatFromValue(inputValue, scale);
-    if (fValue.has_value()) {
-      resultBuffer[row] = *fValue;
-      return;
-    }
-    result->setNull(row, true);
-  });
-#endif
+    });
+  }
   return result;
 }
 
@@ -579,13 +583,13 @@ VectorPtr CastExpr::applyDecimalToPrimitiveCast(
       return applyDecimalToFloatCast<FromNativeType, TypeKind::REAL>(
           rows, input, context, fromType, toType);
     case TypeKind::DOUBLE:
-#ifndef SPARK_COMPATIBLE
-      return applyDecimalToFloatCast<FromNativeType, TypeKind::DOUBLE>(
-          rows, input, context, fromType, toType);
-#else
-      return applyDecimalToDoubleCast<FromNativeType, TypeKind::DOUBLE>(
-          rows, input, context, fromType, toType);
-#endif
+      if constexpr (!::bytedance::bolt::kSparkCompatible) {
+        return applyDecimalToFloatCast<FromNativeType, TypeKind::DOUBLE>(
+            rows, input, context, fromType, toType);
+      } else {
+        return applyDecimalToDoubleCast<FromNativeType, TypeKind::DOUBLE>(
+            rows, input, context, fromType, toType);
+      }
 
     default:
       BOLT_UNSUPPORTED(
@@ -616,7 +620,8 @@ struct CastWithTz<TypeKind::VARCHAR> {
 
   static std::string
   cast(const Timestamp& val, bool& nullOutput, const tz::TimeZone* tz) {
-    return val.toString(TimestampToStringOptions::Precision::kMilliseconds, tz);
+    return val.toString<::bytedance::bolt::kSparkCompatible>(
+        TimestampToStringOptions::Precision::kMilliseconds, tz);
   }
 };
 
@@ -669,8 +674,8 @@ void CastExpr::applyCastPrimitives(
     }
   };
 
-#ifndef SPARK_COMPATIABLE
   if constexpr (
+      !::bytedance::bolt::kSparkCompatible &&
       (FromKind == TypeKind::INTEGER || FromKind == TypeKind::BIGINT ||
        FromKind == TypeKind::REAL || FromKind == TypeKind::DOUBLE ||
        FromKind == TypeKind::BOOLEAN) &&
@@ -679,8 +684,6 @@ void CastExpr::applyCastPrimitives(
       BOLT_FAIL("Cannot cast {} to timestamp", mapTypeKindToName(FromKind));
     }
   }
-#endif
-
   if constexpr (
       CppToType<From>::typeKind == TypeKind::TIMESTAMP &&
       CppToType<To>::typeKind == TypeKind::VARCHAR) {
@@ -731,10 +734,10 @@ void CastExpr::applyCastPrimitives(
     }
   }
 
-#ifndef SPARK_COMPATIBLE
   // If we're converting to a TIMESTAMP, check if we need to adjust the
   // current GMT timezone to the user provided session timezone.
-  if constexpr (ToKind == TypeKind::TIMESTAMP) {
+  if constexpr (
+      !::bytedance::bolt::kSparkCompatible && ToKind == TypeKind::TIMESTAMP) {
     auto prestoHook = dynamic_cast<PrestoCastHooks*>(hooks_.get());
     if (FOLLY_LIKELY(prestoHook)) {
       const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
@@ -761,7 +764,6 @@ void CastExpr::applyCastPrimitives(
       }
     }
   }
-#endif
 }
 
 template <TypeKind ToKind>
@@ -924,8 +926,9 @@ void CastExpr::applyCastNonPromitiveToVarcharEval(
     auto* newInput =
         input->as<SimpleVector<typename TypeTraits<FromKind>::NativeType>>();
     auto inputRowValue = newInput->valueAt(row);
-#ifdef SPARK_COMPATIBLE
-    if constexpr (FromKind == TypeKind::TIMESTAMP) {
+    if constexpr (
+        ::bytedance::bolt::kSparkCompatible &&
+        FromKind == TypeKind::TIMESTAMP) {
       static constexpr TimestampToStringOptions options = {
           .precision = TimestampToStringOptions::Precision::kMicroseconds,
           .leadingPositiveSign = true,
@@ -936,7 +939,6 @@ void CastExpr::applyCastNonPromitiveToVarcharEval(
       result.append(inputRowValue.toString(options), flatResult);
       return;
     }
-#endif
     if constexpr (
         FromKind == TypeKind::HUGEINT || FromKind == TypeKind::BIGINT) {
       if (input->type()->isDecimal()) {

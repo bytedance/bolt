@@ -28,9 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
+
 #include <bolt/exec/Driver.h>
 #include <folly/Unit.h>
 #include <folly/init/Init.h>
+#include <folly/system/ThreadName.h>
 #include <memory>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -467,8 +470,10 @@ class DriverTest : public OperatorTestBase {
 #define EXPECT_WITH_DELAY(test) \
   expectWithDelay([&]() { return test; }, __FILE__, __LINE__, #test)
 
-#ifndef SPARK_COMPATIBLE
 TEST_F(DriverTest, error) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
   CursorParameters params;
   params.planNode =
       makeValuesFilterProject(rowType_, "m1 % 0 > 0", "", 100, 10);
@@ -489,7 +494,6 @@ TEST_F(DriverTest, error) {
                   .isReady());
   EXPECT_EQ(tasks_[0]->state(), TaskState::kFailed);
 }
-#endif
 
 TEST_F(DriverTest, cancel) {
   CursorParameters params;
@@ -1424,6 +1428,29 @@ DEBUG_ONLY_TEST_F(DriverTest, driverThreadContext) {
   auto task = AssertQueryBuilder(plan, duckDbQueryRunner_)
                   .assertResults("SELECT * FROM tmp");
   ASSERT_EQ(task.get(), capturedTask);
+}
+
+DEBUG_ONLY_TEST_F(DriverTest, driverThreadName) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
+
+  constexpr std::string_view kTaskId = "driver-thread";
+  std::atomic_bool observedExpectedName{false};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Driver::runInternal",
+      std::function<void(Driver*)>([&](Driver* /* driver */) {
+        observedExpectedName =
+            folly::getCurrentThreadName().value_or("") == kTaskId;
+      }));
+
+  auto plan = PlanBuilder()
+                  .values({makeRowVector({makeFlatVector<int32_t>({1, 2, 3})})})
+                  .planNode();
+  ASSERT_NO_THROW(AssertQueryBuilder(plan)
+                      .taskId(std::string(kTaskId))
+                      .copyResults(pool()));
+  EXPECT_TRUE(observedExpectedName);
 }
 
 DEBUG_ONLY_TEST_F(DriverTest, nonReclaimableSection) {

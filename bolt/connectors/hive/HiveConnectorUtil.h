@@ -95,8 +95,12 @@ void configureRowReaderOptions(
 
 bool isHiveNull(const std::string& source);
 
+bool shouldAdjustPartitionTimestampToTimezone();
+
 template <TypeKind ToKind>
-bolt::variant convertFromString(const std::optional<std::string>& value) {
+bolt::variant convertFromString(
+    const std::optional<std::string>& value,
+    bool adjustTimestampToTimezone) {
   if (value.has_value()) {
     if constexpr (ToKind == TypeKind::VARCHAR) {
       return bolt::variant(value.value());
@@ -105,14 +109,24 @@ bolt::variant convertFromString(const std::optional<std::string>& value) {
       return bolt::variant::binary((value.value()));
     }
     auto result = bolt::util::Converter<ToKind>::cast(value.value(), nullptr);
-#ifndef SPARK_COMPATIBLE
     if constexpr (ToKind == TypeKind::TIMESTAMP) {
-      result.toGMT(Timestamp::defaultTimezone());
+      if (adjustTimestampToTimezone) {
+        result.toGMT(Timestamp::defaultTimezone());
+      }
     }
-#endif
     return bolt::variant(result);
   }
   return bolt::variant(ToKind);
+}
+
+template <TypeKind ToKind>
+bolt::variant convertFromString(const std::optional<std::string>& value) {
+  if constexpr (ToKind == TypeKind::TIMESTAMP) {
+    return convertFromString<ToKind>(
+        value, shouldAdjustPartitionTimestampToTimezone());
+  } else {
+    return convertFromString<ToKind>(value, false);
+  }
 }
 
 bool testFilters(

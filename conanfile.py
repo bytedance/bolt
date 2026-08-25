@@ -17,6 +17,7 @@ import os
 import platform
 import re
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools import files, scm
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
@@ -25,6 +26,7 @@ from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
 postfix = "/*"
 folly = f"folly{postfix}"
 glog = f"glog{postfix}"
+gflags = f"gflags{postfix}"
 boost = f"boost{postfix}"
 arrow = f"arrow{postfix}"
 orc = f"orc{postfix}"
@@ -183,6 +185,20 @@ class BoltConan(ConanFile):
         self.output.info("OS is not Linux. io_uring is not supported.")
         return False
 
+    def _test_linkage(self):
+        linkage = os.getenv("BOLT_TEST_LINKAGE", "shared")
+        if linkage not in ("static", "shared"):
+            raise ConanInvalidConfiguration(
+                "BOLT_TEST_LINKAGE must be either 'static' or 'shared'"
+            )
+        return linkage
+
+    def _needs_test_runtime(self):
+        if not self.options.get_safe("enable_testutil"):
+            return False
+        library_linkage = "shared" if self.options.shared else "static"
+        return self._test_linkage() != library_linkage
+
     def requirements(self):
         protobuf_version = os.getenv("PROTOBUF_VERSION", "3.21.4")
         self.requires(
@@ -300,6 +316,28 @@ class BoltConan(ConanFile):
         self.tool_requires("ninja/1.11.1")
         self.tool_requires("protobuf/<host_version>")
         self.tool_requires("thrift/<host_version>")
+        if self._needs_test_runtime():
+            test_runtime_shared = self._test_linkage() == "shared"
+            # Keep the exported library's dependencies in the host context and
+            # provide the opposite linkage only for the test runtime.
+            self.requires(
+                "gflags/2.2.2",
+                build=True,
+                visible=False,
+                headers=True,
+                libs=True,
+                run=True,
+                options={"shared": test_runtime_shared},
+            )
+            self.requires(
+                "glog/0.7.1",
+                build=True,
+                visible=False,
+                headers=True,
+                libs=True,
+                run=True,
+                options={"shared": test_runtime_shared, "with_unwind": False},
+            )
         if not self.conf.get("tools.build:skip_test", default=True):
             self.test_requires("jemalloc/5.3.0")
 
@@ -312,6 +350,9 @@ class BoltConan(ConanFile):
     # Set default options of third parties here
     def configure(self):
         self.options[glog].with_unwind = False
+        if self.options.shared:
+            self.options[gflags].shared = True
+            self.options[glog].shared = True
         if self.options.get_safe("es_build"):
             self.options[glog].shared = True
 
@@ -430,6 +471,7 @@ class BoltConan(ConanFile):
         tc = CMakeToolchain(self, generator="Ninja")
 
         tc.cache_variables["MAX_LINK_JOBS"] = num_link_job
+        tc.cache_variables["BOLT_TEST_LINKAGE"] = self._test_linkage()
         if bolt_linker:
             use_ld = f"-fuse-ld={bolt_linker}"
             tc.cache_variables["CMAKE_EXE_LINKER_FLAGS"] = use_ld
@@ -535,8 +577,9 @@ class BoltConan(ConanFile):
         if self.options.enable_arrow_connector:
             tc.cache_variables["BOLT_ENABLE_ARROW_CONNECTOR"] = "ON"
 
-        if self.options.spark_compatible:
-            tc.cache_variables["BOLT_ENABLE_SPARK_COMPATIBLE"] = "ON"
+        tc.cache_variables["BOLT_ENABLE_SPARK_COMPATIBLE"] = (
+            "ON" if self.options.spark_compatible else "OFF"
+        )
 
         if self.options.get_safe("enable_testutil"):
             tc.cache_variables["BOLT_ENABLE_DUCKDB"] = "ON"
@@ -596,7 +639,32 @@ class BoltConan(ConanFile):
         tc.generate()
 
         # generate conantoolchain.cmake & xxx-config.cmake
-        CMakeDeps(self).generate()
+        cmake_deps = CMakeDeps(self)
+        if self._needs_test_runtime():
+            cmake_deps.build_context_activated = ["gflags", "glog"]
+            cmake_deps.build_context_suffix = {
+                "gflags": "_test_runtime",
+                "glog": "_test_runtime",
+            }
+            cmake_deps.set_property(
+                "gflags",
+                "cmake_target_name",
+                "gflags_test_runtime::gflags_test_runtime",
+                build_context=True,
+            )
+            cmake_deps.set_property(
+                "gflags", "cmake_target_aliases", [], build_context=True
+            )
+            cmake_deps.set_property(
+                "glog",
+                "cmake_target_name",
+                "glog_test_runtime::glog_test_runtime",
+                build_context=True,
+            )
+            cmake_deps.set_property(
+                "glog", "cmake_target_aliases", [], build_context=True
+            )
+        cmake_deps.generate()
 
     def build(self):
         num_threads = os.getenv("NUM_THREADS", "4")
@@ -720,7 +788,7 @@ class BoltConan(ConanFile):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "aws-c-common::aws-c-common"
             )
-        if self.options.get_safe("spark_compatible"):
+        if self.options.get_safe("spark_compatible") and not self.options.shared:
             self.cpp_info.components["bolt_engine"].requires.append(
                 "celeborn-cpp-client::celeborn-cpp-client"
             )

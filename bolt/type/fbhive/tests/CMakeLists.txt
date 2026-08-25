@@ -29,10 +29,13 @@ add_executable(bolt_type_fbhive_test HiveTypeParserTests.cpp)
 
 add_test(
   NAME bolt_type_fbhive_test
-  COMMAND bolt_type_fbhive_test
+  COMMAND
+    bolt_type_fbhive_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(
-  bolt_type_fbhive_test bolt_testutils GTest::gtest GTest::gtest_main GTest::gmock
+  bolt_type_fbhive_test
+  bolt_gtest_main
+  GTest::gmock
 )

@@ -38,7 +38,10 @@ bolt_add_library(
 )
 
 target_link_libraries(
-  bolt_functions_aggregates bolt_exec bolt_presto_serializer Folly::folly
+  bolt_functions_aggregates
+  bolt_exec
+  bolt_presto_serializer
+  Folly::folly
 )
 
 if(${BOLT_BUILD_TESTING})

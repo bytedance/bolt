@@ -28,5 +28,9 @@
 bolt_add_library(bolt_functions_test_lib FunctionBaseTest.cpp)
 
 target_link_libraries(
-  bolt_functions_test_lib bolt_exec bolt_exec_test_lib bolt_vector_test_lib bolt_parse_parser
+  bolt_functions_test_lib
+  bolt_exec
+  bolt_exec_test_lib
+  bolt_vector_test_lib
+  bolt_parse_parser
 )

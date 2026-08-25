@@ -264,29 +264,6 @@ class DecimalUtil {
     }
   }
 
-  /// @brief Convert the unscaled value of a decimal to varchar and write to raw
-  /// string buffer from start position.
-  /// @tparam T The type of input value.
-  /// @param unscaledValue The input unscaled value.
-  /// @param scale The scale of decimal.
-  /// @param maxVarcharSize The estimated max size of a varchar.
-  /// @param startPosition The start position to write from.
-  /// @return write size
-  template <typename T>
-  inline static size_t convertToString(
-      T unscaledValue,
-      int32_t scale,
-      int32_t maxVarcharSize,
-      char* const startPosition) {
-#ifdef SPARK_COMPATIBLE
-    return convertToString<DecimalStringFormat::kSpark>(
-        unscaledValue, scale, maxVarcharSize, startPosition);
-#else
-    return convertToString<DecimalStringFormat::kPlain>(
-        unscaledValue, scale, maxVarcharSize, startPosition);
-#endif
-  }
-
   template <typename T>
   inline static void fillDecimals(
       T* decimals,

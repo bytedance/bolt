@@ -30,7 +30,6 @@ add_executable(bolt_aggregates_simple_aggregates_bm SimpleAggregates.cpp)
 target_link_libraries(
   bolt_aggregates_simple_aggregates_bm
   bolt_testutils
-  bolt_vector_fuzzer
   ${FOLLY_BENCHMARK}
 )
 
@@ -38,7 +37,6 @@ add_executable(bolt_aggregates_string_keys_bm TwoStringKeys.cpp)
 
 target_link_libraries(
   bolt_aggregates_string_keys_bm
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
 )
@@ -47,7 +45,6 @@ add_executable(bolt_aggregates_reduce_agg_bm ReduceAgg.cpp)
 
 target_link_libraries(
   bolt_aggregates_reduce_agg_bm
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
 )
@@ -56,7 +53,6 @@ add_executable(bolt_various_aggregates_bm VariousAggregates.cpp)
 
 target_link_libraries(
   bolt_various_aggregates_bm
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
 )
@@ -65,7 +61,6 @@ add_executable(bolt_join_bm JoinBenchmarks.cpp)
 
 target_link_libraries(
   bolt_join_bm
-  bolt_vector_fuzzer
   bolt_testutils
   ${FOLLY_BENCHMARK}
 )
