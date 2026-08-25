@@ -519,6 +519,9 @@ void RadixSortSpillWriter::flush() {
   if (ioConfig_.updateAndCheckSpillLimitCb != nullptr) {
     ioConfig_.updateAndCheckSpillLimitCb(writtenBytes);
   }
+  if (ioConfig_.maxFileSize != 0 && file->size() > ioConfig_.maxFileSize) {
+    closeFile();
+  }
   resetBuffer(normalBufferSize_);
 }
 
