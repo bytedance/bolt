@@ -17,7 +17,6 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -69,11 +68,7 @@ class PayloadRowLayout {
   }
 
   bool hasVariableFields() const {
-    return variableSizeOffset_.has_value();
-  }
-
-  std::optional<uint64_t> variableSizeOffset() const {
-    return variableSizeOffset_;
+    return hasVariableFields_;
   }
 
   uint64_t rowWidth() const {
@@ -85,18 +80,18 @@ class PayloadRowLayout {
       RowTypePtr rowType,
       std::vector<PayloadRowColumnLayout> columns,
       uint32_t nullBytes,
-      std::optional<uint64_t> variableSizeOffset,
+      bool hasVariableFields,
       uint64_t rowWidth)
       : rowType_(std::move(rowType)),
         columns_(std::move(columns)),
         nullBytes_(nullBytes),
-        variableSizeOffset_(variableSizeOffset),
+        hasVariableFields_(hasVariableFields),
         rowWidth_(rowWidth) {}
 
   RowTypePtr rowType_;
   std::vector<PayloadRowColumnLayout> columns_;
   uint32_t nullBytes_;
-  std::optional<uint64_t> variableSizeOffset_;
+  bool hasVariableFields_;
   uint64_t rowWidth_;
 };
 

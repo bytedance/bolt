@@ -26,13 +26,35 @@
 namespace bytedance::bolt::exec::radixsort {
 namespace {
 
+bool isStringType(const Type& type) {
+  return type.kind() == TypeKind::VARCHAR || type.kind() == TypeKind::VARBINARY;
+}
+
 uint64_t payloadHeapSizeFromFixed(
     const PayloadRowLayout* layout,
     const char* payloadFixed) {
-  if (layout == nullptr || !layout->variableSizeOffset().has_value()) {
+  if (layout == nullptr || !layout->hasVariableFields()) {
     return 0;
   }
-  return loadUnaligned<uint64_t>(payloadFixed + *layout->variableSizeOffset());
+
+  uint64_t heapSize = 0;
+  for (const auto& column : layout->columns()) {
+    if (!column.variable) {
+      continue;
+    }
+    const auto* slot = payloadFixed + column.offset;
+    uint64_t fieldSize = 0;
+    if (isStringType(*column.type)) {
+      const auto value = loadUnaligned<StringView>(slot);
+      fieldSize = value.isInline() ? 0 : value.size();
+    } else {
+      fieldSize = loadUnaligned<PayloadVarlenRef>(slot).size;
+    }
+    const auto next = checkedAdd<uint64_t>(heapSize, fieldSize);
+    BOLT_CHECK(next.has_value(), "Payload row heap size overflows");
+    heapSize = *next;
+  }
+  return heapSize;
 }
 
 uint64_t checkedTotalSize(
@@ -50,10 +72,6 @@ uint32_t spilledKeyFixedSize(const RadixSortKeyLayout& layout) {
     return *layout.dataOffset() + kCompactPointerBytes;
   }
   return layout.hasPayload() ? *layout.payloadOffset() : layout.width();
-}
-
-bool isStringType(const Type& type) {
-  return type.kind() == TypeKind::VARCHAR || type.kind() == TypeKind::VARBINARY;
 }
 
 const char* stringPointer(const StringView& value) {

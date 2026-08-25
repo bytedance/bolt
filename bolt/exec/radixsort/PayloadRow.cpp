@@ -165,12 +165,7 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
       "Payload row layout is not implemented for ",
       unsupportedType);
 
-  std::optional<uint64_t> variableSizeOffset;
   uint64_t rowWidth = nullBytes;
-  if (hasVariableFields) {
-    variableSizeOffset = rowWidth;
-    rowWidth += sizeof(uint64_t);
-  }
 
   std::vector<PayloadRowColumnLayout> columns;
   columns.reserve(rowType->size());
@@ -207,7 +202,7 @@ std::shared_ptr<const PayloadRowLayout> PayloadRowLayout::create(
   BOLT_CHECK(rowWidthValid, "Payload row row width overflows");
 
   return std::shared_ptr<const PayloadRowLayout>(new PayloadRowLayout(
-      rowType, std::move(columns), nullBytes, variableSizeOffset, rowWidth));
+      rowType, std::move(columns), nullBytes, hasVariableFields, rowWidth));
 }
 
 namespace {
@@ -1510,10 +1505,6 @@ void appendRows(
       std::memset(fixed, 0, layout->rowWidth());
     }
     std::memset(fixed, 0xff, layout->nullBytes());
-    if (hasVariableFields) {
-      storeUnaligned<uint64_t>(
-          fixed + *layout->variableSizeOffset(), rawHeapSizes[row]);
-    }
   }
 
   decoded.resize(input.childrenSize());
