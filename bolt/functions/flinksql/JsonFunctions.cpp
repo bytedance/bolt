@@ -25,6 +25,10 @@ bool isDigit(char c) {
   return c >= '0' && c <= '9';
 }
 
+// Validate JSON numbers syntactically here because json_str_to_map only needs
+// to distinguish valid non-object JSON from malformed input. simdjson's DOM
+// parser materializes numbers and may reject out-of-range literals like 1e400,
+// even though they are valid JSON values for this purpose.
 bool isValidJsonNumber(std::string_view number) {
   size_t pos = number[0] == '-';
   if (pos == number.size()) {
