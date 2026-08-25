@@ -573,15 +573,15 @@ void TableScan::close() {
   }
 
   // wait all async threads to be finished
-  uint64_t waitMs;
+  uint64_t waitUs{0};
   {
-    MicrosecondTimer timer(&waitMs);
+    MicrosecondTimer timer(&waitUs);
     asyncThreadCtx_->wait();
   }
 
-  LOG_IF(INFO, waitMs > 60000)
-      << "TableScan close wait async thread ctx cost: " << waitMs << "ms, task "
-      << operatorCtx_->task()->taskId()
+  LOG_IF(INFO, waitUs > 60'000'000)
+      << "TableScan close wait async thread ctx cost: " << waitUs / 1000
+      << "ms, task " << operatorCtx_->task()->taskId()
       << " state = " << operatorCtx_->task()->state();
 
   SourceOperator::close();
