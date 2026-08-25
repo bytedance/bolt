@@ -576,11 +576,6 @@ class RadixPayloadRowTest : public testing::Test {
               ? nullptr
               : batch.heapAt(row) + batch.heapSizeAt(row));
       EXPECT_EQ(batch.heapAt(row) == nullptr, batch.heapSizeAt(row) == 0);
-      ASSERT_TRUE(layout.variableSizeOffset().has_value());
-      EXPECT_EQ(
-          loadUnaligned<uint64_t>(
-              batch.rowAt(row) + *layout.variableSizeOffset()),
-          batch.heapSizeAt(row));
     }
   }
 };
@@ -600,10 +595,8 @@ TEST_F(RadixPayloadRowTest, packedLayoutHasNoPadding) {
   auto layout = payloadLayout(rowType);
 
   EXPECT_EQ(layout->nullBytes(), 2);
-  ASSERT_TRUE(layout->variableSizeOffset().has_value());
-  EXPECT_EQ(*layout->variableSizeOffset(), 2);
   const std::array<uint64_t, 10> expectedOffsets{
-      10, 11, 19, 35, 39, 55, 71, 79, 95, 96};
+      2, 3, 11, 27, 31, 47, 63, 71, 87, 88};
   const std::array<uint32_t, 10> expectedWidths{
       1, 8, 16, 4, 16, 16, 8, 16, 1, 0};
   ASSERT_EQ(layout->columns().size(), expectedOffsets.size());
@@ -615,20 +608,19 @@ TEST_F(RadixPayloadRowTest, packedLayoutHasNoPadding) {
         layout->columns()[column].nullMask,
         static_cast<uint8_t>(1U << (column % 8)));
   }
-  EXPECT_EQ(layout->rowWidth(), 96);
+  EXPECT_EQ(layout->rowWidth(), 88);
   EXPECT_NE(layout->columns()[1].offset % alignof(int64_t), 0);
   EXPECT_NE(layout->columns()[2].offset % alignof(StringView), 0);
   EXPECT_NE(layout->columns()[4].offset % alignof(Timestamp), 0);
   EXPECT_NE(layout->columns()[5].offset % alignof(int128_t), 0);
   EXPECT_EQ(
       layout->rowWidth(),
-      layout->nullBytes() + sizeof(uint64_t) +
+      layout->nullBytes() +
           std::accumulate(
               expectedWidths.begin(), expectedWidths.end(), uint64_t{0}));
 
   auto fixedLayout = payloadLayout(ROW({TINYINT(), BIGINT(), TIMESTAMP()}));
   EXPECT_EQ(fixedLayout->nullBytes(), 1);
-  EXPECT_FALSE(fixedLayout->variableSizeOffset().has_value());
   EXPECT_EQ(fixedLayout->columns()[0].offset, 1);
   EXPECT_EQ(fixedLayout->columns()[1].offset, 2);
   EXPECT_EQ(fixedLayout->columns()[2].offset, 10);
