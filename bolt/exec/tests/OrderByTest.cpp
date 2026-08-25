@@ -1581,15 +1581,13 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
               if (!injectOnce.exchange(false)) {
                 return;
               }
-              ASSERT_EQ(op->canReclaim(), enableSpilling);
+              // Allocating rows mutates SortBuffer's RowContainer and must not
+              // race with reclaim(), which spills and clears the same state.
+              EXPECT_FALSE(op->canReclaim());
               uint64_t reclaimableBytes{0};
               const bool reclaimable = op->reclaimableBytes(reclaimableBytes);
-              ASSERT_EQ(reclaimable, enableSpilling);
-              if (enableSpilling) {
-                ASSERT_GE(reclaimableBytes, 0);
-              } else {
-                ASSERT_EQ(reclaimableBytes, 0);
-              }
+              EXPECT_FALSE(reclaimable);
+              EXPECT_EQ(reclaimableBytes, 0);
               auto* driver = op->testingOperatorCtx()->driver();
               SuspendedSection suspendedSection(driver);
               testWait.notify();

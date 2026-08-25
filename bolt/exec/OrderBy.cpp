@@ -104,8 +104,15 @@ OrderBy::OrderBy(
 }
 
 void OrderBy::addInput(RowVectorPtr input) {
-  ReclaimableSectionGuard guard(this);
-  input->loadedVector();
+  {
+    // Loading lazy input may need to arbitrate for memory. It is safe to
+    // reclaim the existing sort buffer here because addInput hasn't started
+    // mutating it yet. Keep the actual SortBuffer::addInput call in the
+    // driver's non-reclaimable section: concurrent spill clears RowContainer
+    // state, including allocator-backed row pointers.
+    ReclaimableSectionGuard guard(this);
+    input->loadedVector();
+  }
   sortBuffer_->addInput(input);
 }
 
