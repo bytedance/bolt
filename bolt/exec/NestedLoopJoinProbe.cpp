@@ -274,6 +274,7 @@ RowVectorPtr NestedLoopJoinProbe::generateOutput() {
   // If addToOutput() returns false, output_ is filled. Need to produce it.
   if (!addToOutput()) {
     BOLT_CHECK_GT(output_->size(), 0);
+    wrapProbeOutput();
     return std::move(output_);
   }
 
@@ -293,6 +294,7 @@ RowVectorPtr NestedLoopJoinProbe::generateOutput() {
   }
 
   output_->resize(numOutputRows_);
+  wrapProbeOutput();
   return std::move(output_);
 }
 
@@ -527,13 +529,9 @@ void NestedLoopJoinProbe::prepareOutput() {
   probeOutputIndices_ = allocateIndices(outputBatchSize_, pool());
   rawProbeOutputIndices_ = probeOutputIndices_->asMutable<vector_size_t>();
 
-  for (const auto& projection : identityProjections_) {
-    localColumns[projection.outputChannel] = BaseVector::wrapInDictionary(
-        {},
-        probeOutputIndices_,
-        outputBatchSize_,
-        input_->childAt(projection.inputChannel));
-  }
+  // Defer wrapping until all probe output indices are populated. This allows
+  // wrapIndirectChildren() to collapse dictionary-over-dictionary inputs.
+  outputProbeInput_ = input_;
 
   if (isLeftSemiProjectJoin(joinType_)) {
     // For LeftSemiProjectJoin, only add match column.
@@ -750,6 +748,28 @@ void NestedLoopJoinProbe::copyBuildValues(const RowVectorPtr& buildVector) {
     outputChild->copyRanges(buildChild.get(), buildCopyRanges_);
   }
   buildCopyRanges_.clear();
+}
+
+void NestedLoopJoinProbe::wrapProbeOutput() {
+  // Regular cross-product batches build probe columns directly without going
+  // through prepareOutput().
+  if (outputProbeInput_ == nullptr) {
+    return;
+  }
+  BOLT_CHECK_NOT_NULL(output_);
+
+  // wrapIndirectChildren() eagerly reads probeOutputIndices_ to collapse any
+  // dictionary layer already present on the probe input, producing a single
+  // dictionary layer over the probe base vectors. This is safe now because the
+  // batch is finalized: rawProbeOutputIndices_ holds the final row numbers for
+  // all output_->size() rows.
+  wrapIndirectChildren(
+      identityProjections_,
+      outputProbeInput_->children(),
+      output_->size(),
+      probeOutputIndices_,
+      output_->children());
+  outputProbeInput_.reset();
 }
 
 void NestedLoopJoinProbe::addProbeMismatchRow() {
