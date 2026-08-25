@@ -72,11 +72,13 @@ TEST_F(JsonFunctionsTest, jsonStrToMap) {
   testJsonStrToMap(evaluateExpr("true"), emptyArray);
   testJsonStrToMap(evaluateExpr("null"), emptyArray);
   testJsonStrToMap(evaluateExpr("[]"), emptyArray);
-  BOLT_ASSERT_THROW(evaluateExpr("[1e400, {\"a\": \"b\"}]"), "NUMBER_ERROR");
+  testJsonStrToMap(evaluateExpr("[1e400, {\"a\": \"b\"}]"), emptyArray);
+  BOLT_ASSERT_THROW(evaluateExpr("[{\"bad\\q\": 1}]"), "STRING_ERROR");
+  BOLT_ASSERT_THROW(evaluateExpr("[1e, {\"a\": \"b\"}]"), "NUMBER_ERROR");
   testJsonStrToMap(evaluateExpr("\"abc\""), emptyArray);
   BOLT_ASSERT_THROW(
       evaluateExpr("{\"a\": \"1}"), "A string is opened, but never closed");
-  BOLT_ASSERT_THROW(evaluateExpr("[1,"), "improper structure");
+  BOLT_ASSERT_THROW(evaluateExpr("[1,"), "INCOMPLETE_ARRAY_OR_OBJECT");
   BOLT_ASSERT_THROW(evaluateExpr("abc"), "improper structure");
   testJsonStrToMap(evaluateExpr("  "), std::nullopt);
   BOLT_ASSERT_THROW(evaluateExpr(std::nullopt), "input is null");
@@ -97,7 +99,9 @@ TEST_F(JsonFunctionsTest, jsonStrToMap) {
   testJsonStrToMap(evaluateExpr("true", true), emptyArray);
   testJsonStrToMap(evaluateExpr("null", true), emptyArray);
   testJsonStrToMap(evaluateExpr("[]", true), emptyArray);
-  testJsonStrToMap(evaluateExpr("[1e400, {\"a\": \"b\"}]", true), std::nullopt);
+  testJsonStrToMap(evaluateExpr("[1e400, {\"a\": \"b\"}]", true), emptyArray);
+  testJsonStrToMap(evaluateExpr("[{\"bad\\q\": 1}]", true), std::nullopt);
+  testJsonStrToMap(evaluateExpr("[1e, {\"a\": \"b\"}]", true), std::nullopt);
   testJsonStrToMap(evaluateExpr("\"abc\"", true), emptyArray);
   testJsonStrToMap(evaluateExpr("{\"a\": \"1}", true), std::nullopt);
   testJsonStrToMap(evaluateExpr("[1,", true), std::nullopt);

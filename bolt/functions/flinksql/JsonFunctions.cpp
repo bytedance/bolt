@@ -15,10 +15,13 @@
  */
 
 #include "bolt/expression/VectorFunction.h"
-#include "bolt/functions/prestosql/json/SIMDJsonWrapper.h"
+#include "bolt/functions/prestosql/json/SIMDJsonUtil.h"
 #include "bolt/functions/prestosql/types/JsonType.h"
 #include "bolt/vector/ConstantVector.h"
 #include "bolt/vector/FlatVector.h"
+
+#include <cstring>
+
 namespace bytedance::bolt::functions::flinksql {
 namespace {
 bool isDigit(char c) {
@@ -64,6 +67,67 @@ bool isValidJsonNumber(std::string_view number) {
     }
   }
   return pos == number.size();
+}
+
+simdjson::padded_string_view paddedJsonView(
+    std::string_view input,
+    BufferPtr& buffer,
+    memory::MemoryPool* pool) {
+  const auto paddedSize = input.size() + simdjson::SIMDJSON_PADDING;
+  if (buffer == nullptr) {
+    buffer = AlignedBuffer::allocate<char>(paddedSize, pool);
+  } else if (UNLIKELY(paddedSize > buffer->capacity())) {
+    AlignedBuffer::reallocate<char>(&buffer, paddedSize);
+  } else {
+    buffer->setSize(paddedSize);
+  }
+  auto* data = buffer->asMutable<char>();
+  std::memcpy(data, input.data(), input.size());
+  return simdjson::padded_string_view(data, input.size(), buffer->size());
+}
+
+template <typename T>
+simdjson::error_code validateJson(
+    T& value,
+    simdjson::ondemand::json_type type) {
+  switch (type) {
+    case simdjson::ondemand::json_type::array: {
+      SIMDJSON_ASSIGN_OR_RAISE(auto array, value.get_array());
+      for (auto elementOrError : array) {
+        SIMDJSON_ASSIGN_OR_RAISE(auto element, elementOrError);
+        SIMDJSON_ASSIGN_OR_RAISE(auto elementType, element.type());
+        SIMDJSON_TRY(validateJson(element, elementType));
+      }
+      return simdjson::SUCCESS;
+    }
+    case simdjson::ondemand::json_type::object: {
+      SIMDJSON_ASSIGN_OR_RAISE(auto object, value.get_object());
+      for (auto fieldOrError : object) {
+        SIMDJSON_ASSIGN_OR_RAISE(auto field, fieldOrError);
+        // On-Demand validates object keys lazily. Explicitly unescape the key
+        // so malformed escapes in nested object field names are rejected before
+        // moving on to the value.
+        SIMDJSON_ASSIGN_OR_RAISE(auto fieldName, field.unescaped_key(true));
+        (void)fieldName;
+        auto fieldValue = field.value();
+        SIMDJSON_ASSIGN_OR_RAISE(auto fieldType, fieldValue.type());
+        SIMDJSON_TRY(validateJson(fieldValue, fieldType));
+      }
+      return simdjson::SUCCESS;
+    }
+    case simdjson::ondemand::json_type::number:
+      return isValidJsonNumber(value.raw_json_token()) ? simdjson::SUCCESS
+                                                       : simdjson::NUMBER_ERROR;
+    case simdjson::ondemand::json_type::string:
+      return value.get_string(true).error();
+    case simdjson::ondemand::json_type::boolean:
+      return value.get_bool().error();
+    case simdjson::ondemand::json_type::null: {
+      SIMDJSON_ASSIGN_OR_RAISE(auto isNull, value.is_null());
+      return isNull ? simdjson::SUCCESS : simdjson::N_ATOM_ERROR;
+    }
+  }
+  BOLT_UNREACHABLE();
 }
 
 template <typename NativeType>
@@ -127,6 +191,7 @@ class JsonStrToMapFunction : public bytedance::bolt::exec::VectorFunction {
     exec::VectorWriter<Any> writer;
     exec::LocalSelectivityVector remainingRowsHolder(context);
     SelectivityVector* remainingRows = nullptr;
+    BufferPtr paddedBuffer;
 
     auto ensureWritable = [&]() {
       if (remainingRows == nullptr) {
@@ -145,7 +210,8 @@ class JsonStrToMapFunction : public bytedance::bolt::exec::VectorFunction {
       if (trimmedValue.empty() || trimmedValue.front() == '{') {
         return;
       }
-      if (auto error = validateNonObjectJson(trimmedValue)) {
+      if (auto error = validateNonObjectJson(
+              trimmedValue, paddedBuffer, context.pool())) {
         ensureWritable();
         writer.setOffset(row);
         writer.commitNull();
@@ -203,18 +269,27 @@ class JsonStrToMapFunction : public bytedance::bolt::exec::VectorFunction {
 
  private:
   static simdjson::error_code validateNonObjectJson(
-      std::string_view trimmedInput) {
+      std::string_view trimmedInput,
+      BufferPtr& paddedBuffer,
+      memory::MemoryPool* pool) {
     if (trimmedInput == "true" || trimmedInput == "false" ||
-        trimmedInput == "null" || isValidJsonNumber(trimmedInput)) {
+        trimmedInput == "null" || trimmedInput == "[]" ||
+        isValidJsonNumber(trimmedInput)) {
       return simdjson::SUCCESS;
     }
 
-    thread_local simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (auto error = parser.parse(trimmedInput).get(doc)) {
+    simdjson::ondemand::document doc;
+    if (auto error =
+            simdjsonParse(paddedJsonView(trimmedInput, paddedBuffer, pool))
+                .get(doc)) {
       return error;
     }
-    return doc.type() == simdjson::dom::element_type::OBJECT
+    SIMDJSON_ASSIGN_OR_RAISE(auto type, doc.type());
+    SIMDJSON_TRY(validateJson(doc, type));
+    if (!doc.at_end()) {
+      return simdjson::TRAILING_CONTENT;
+    }
+    return type == simdjson::ondemand::json_type::object
         ? simdjson::INCORRECT_TYPE
         : simdjson::SUCCESS;
   }
