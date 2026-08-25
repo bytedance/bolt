@@ -885,6 +885,44 @@ TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPool) {
   ASSERT_OK(reusedImported->ValidateFull());
 }
 
+TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolMovedChildLease) {
+  ReusableArrowBatchPool batchPool(1);
+  auto vector = vectorMaker_.rowVector({
+      vectorMaker_.flatVector<int64_t>({1, 2, 3}),
+      vectorMaker_.flatVector<int64_t>({4, 5, 6}),
+  });
+
+  ArrowSchema schema{};
+  ArrowArray array{};
+  EXPECT_TRUE(
+      batchPool.exportToArrow(vector, pool_.get(), options_, &schema, &array));
+  const auto* rootBuffers = array.buffers;
+
+  ArrowArray movedChild = *array.children[0];
+  array.children[0]->release = nullptr;
+  array.children[0]->private_data = nullptr;
+  array.release(&array);
+
+  ArrowSchema secondSchema{};
+  ArrowArray secondArray{};
+  batchPool.exportToArrow(
+      vector, pool_.get(), options_, &secondSchema, &secondArray);
+
+  EXPECT_NE(rootBuffers, secondArray.buffers)
+      << "the reusable slot must stay leased while a moved child is active";
+  ASSERT_NE(nullptr, movedChild.buffers);
+  EXPECT_NE(nullptr, movedChild.buffers[1])
+      << "parent release must not drop a moved child's buffers";
+  if (movedChild.buffers[1] != nullptr) {
+    validateArray<int64_t>({1, 2, 3}, movedChild);
+  }
+
+  secondArray.release(&secondArray);
+  secondSchema.release(&secondSchema);
+  schema.release(&schema);
+  movedChild.release(&movedChild);
+}
+
 TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolSchemaCache) {
   ReusableArrowBatchPool batchPool(1);
   auto vector =
@@ -920,6 +958,31 @@ TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolSchemaCache) {
   auto ipcOptions = options_;
   ipcOptions.exportToArrowIPC = true;
   EXPECT_TRUE(exportAndRelease(vector, ipcOptions, {"second"}));
+}
+
+TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolSchemaCacheRowNames) {
+  ReusableArrowBatchPool batchPool(1);
+  auto firstVector = vectorMaker_.rowVector(
+      {"first"}, {vectorMaker_.flatVector<int64_t>({1, 2, 3})});
+  auto secondVector = vectorMaker_.rowVector(
+      {"second"}, {vectorMaker_.flatVector<int64_t>({4, 5, 6})});
+  ASSERT_TRUE(firstVector->type()->equivalent(*secondVector->type()));
+  ASSERT_FALSE(*firstVector->type() == *secondVector->type());
+
+  auto exportAndRelease = [&](const VectorPtr& input,
+                              const char* expectedName) {
+    ArrowSchema schema{};
+    ArrowArray array{};
+    const bool rebuilt =
+        batchPool.exportToArrow(input, pool_.get(), options_, &schema, &array);
+    EXPECT_STREQ(expectedName, schema.children[0]->name);
+    array.release(&array);
+    schema.release(&schema);
+    return rebuilt;
+  };
+
+  EXPECT_TRUE(exportAndRelease(firstVector, "first"));
+  EXPECT_TRUE(exportAndRelease(secondVector, "second"));
 }
 
 TEST_F(

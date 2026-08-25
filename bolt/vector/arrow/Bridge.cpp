@@ -73,18 +73,10 @@ void appendArrowMetadataInt32(std::string& metadata, int32_t value) {
 class BoltToArrowBridgeHolder {
  public:
   struct ReusableReleaseState {
-    struct Entry {
-      ArrowArray* array;
-      BoltToArrowBridgeHolder* holder;
-    };
-
-    // Child nodes stay at stable addresses, but consumers may move the root
-    // ArrowArray before releasing it. Keep the stable tree here for flat reset.
-    std::vector<Entry> entries;
-
-    void add(ArrowArray& array, BoltToArrowBridgeHolder& holder) {
-      entries.push_back({&array, &holder});
-    }
+    // Child nodes stay at stable addresses, but consumers may move an
+    // ArrowArray before releasing it. Keep the stable tree here for reuse.
+    std::atomic_size_t activeCount{0};
+    std::atomic_bool inUse{false};
   };
 
   explicit BoltToArrowBridgeHolder(bool reusable = false)
@@ -120,17 +112,41 @@ class BoltToArrowBridgeHolder {
     return ownsReleaseState_;
   }
 
-  void markActive(ArrowArray& array) {
+  bool tryAcquireReusableSlot() {
+    BOLT_CHECK(reusable_);
+    BOLT_CHECK(ownsReleaseState_);
+    bool expected = false;
+    return releaseState_->inUse.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  size_t reusableActiveCount() const {
+    return releaseState_ == nullptr
+        ? 0
+        : releaseState_->activeCount.load(std::memory_order_acquire);
+  }
+
+  void registerArray(ArrowArray& array) {
     if (!releaseState_) {
       return;
     }
     array.private_data = this;
     if (registeredArray_ == nullptr) {
       registeredArray_ = &array;
-      releaseState_->add(array, *this);
       return;
     }
     BOLT_CHECK(registeredArray_ == &array);
+  }
+
+  void markActive(ArrowArray& array) {
+    if (!releaseState_) {
+      return;
+    }
+    registerArray(array);
+    if (!active_) {
+      active_ = true;
+      releaseState_->activeCount.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
   void reset() {
@@ -189,27 +205,34 @@ class BoltToArrowBridgeHolder {
       return;
     }
     BOLT_CHECK(ownsReleaseState_);
-    bool registeredArray = false;
-    for (auto [entryArray, holder] : releaseState_->entries) {
-      registeredArray |= entryArray == &releasedArray;
-      holder->resetLocalBuffers();
-      resetArrowArray(*entryArray, holder->getArrowBuffers());
-    }
-    if (!registeredArray) {
-      resetArrowArray(releasedArray, nullptr);
-      releasedArray.private_data = nullptr;
-    }
+    resetReusableRecursive(releasedArray);
   }
 
   void resetReusableChild(ArrowArray& releasedArray) {
     BOLT_CHECK(reusable_);
     BOLT_CHECK(!ownsReleaseState_);
-    resetLocalBuffers();
-    resetArrowArray(releasedArray, getArrowBuffers());
+    resetReusableRecursive(releasedArray);
+  }
+
+  void abortReusableArray(ArrowArray& releasedArray) {
+    if (!releaseState_) {
+      return;
+    }
+    resetRecursive();
+    active_ = false;
+    releaseState_->activeCount.store(0, std::memory_order_release);
+    if (registeredArray_ != &releasedArray) {
+      resetArrowArray(releasedArray, nullptr);
+      releasedArray.private_data = nullptr;
+    }
   }
 
   void releaseResources() {
     resetRecursive();
+    if (releaseState_) {
+      releaseState_->activeCount.store(0, std::memory_order_release);
+      releaseState_->inUse.store(false, std::memory_order_release);
+    }
     for (auto& child : childrenPtrs_) {
       if (!child) {
         continue;
@@ -306,8 +329,8 @@ class BoltToArrowBridgeHolder {
     if (reusable_) {
       for (size_t i = oldSize; i < numChildren; ++i) {
         childrenPtrs_[i] = std::make_unique<ArrowArray>();
-        childrenPtrs_[i]->private_data =
-            new BoltToArrowBridgeHolder(/*reusable=*/true, releaseState_);
+        childrenPtrs_[i]->private_data = new BoltToArrowBridgeHolder(
+            /*reusable=*/true, releaseState_);
       }
     }
     children_ = (numChildren > 0)
@@ -327,8 +350,8 @@ class BoltToArrowBridgeHolder {
     if (!childrenPtrs_[i]) {
       childrenPtrs_[i] = std::make_unique<ArrowArray>();
       if (reusable_) {
-        childrenPtrs_[i]->private_data =
-            new BoltToArrowBridgeHolder(/*reusable=*/true, releaseState_);
+        childrenPtrs_[i]->private_data = new BoltToArrowBridgeHolder(
+            /*reusable=*/true, releaseState_);
       }
       children_[i] = childrenPtrs_[i].get();
     }
@@ -344,14 +367,54 @@ class BoltToArrowBridgeHolder {
     if (!dictionary_) {
       dictionary_ = std::make_unique<ArrowArray>();
       if (reusable_) {
-        dictionary_->private_data =
-            new BoltToArrowBridgeHolder(/*reusable=*/true, releaseState_);
+        dictionary_->private_data = new BoltToArrowBridgeHolder(
+            /*reusable=*/true, releaseState_);
       }
     }
     return dictionary_.get();
   }
 
  private:
+  void resetReusableRecursive(ArrowArray& releasedArray) {
+    for (int64_t i = 0; i < releasedArray.n_children; ++i) {
+      auto* child = releasedArray.children[i];
+      if (child != nullptr && child->release != nullptr) {
+        child->release(child);
+        BOLT_CHECK_NULL(child->release);
+      }
+    }
+
+    auto* dictionary = releasedArray.dictionary;
+    if (dictionary != nullptr && dictionary->release != nullptr) {
+      dictionary->release(dictionary);
+      BOLT_CHECK_NULL(dictionary->release);
+    }
+
+    resetReusableNode(releasedArray);
+  }
+
+  void resetReusableNode(ArrowArray& releasedArray) {
+    if (active_) {
+      resetLocalBuffers();
+      active_ = false;
+      const auto previousActiveCount =
+          releaseState_->activeCount.fetch_sub(1, std::memory_order_acq_rel);
+      BOLT_CHECK_GT(previousActiveCount, 0);
+      if (previousActiveCount == 1) {
+        releaseState_->inUse.store(false, std::memory_order_release);
+      }
+    }
+
+    if (registeredArray_ != nullptr) {
+      resetArrowArray(*registeredArray_, getArrowBuffers());
+      registeredArray_->private_data = this;
+    }
+    if (registeredArray_ != &releasedArray) {
+      resetArrowArray(releasedArray, nullptr);
+      releasedArray.private_data = nullptr;
+    }
+  }
+
   // Holds the count of total buffers
   size_t numBuffers_ = kMaxBuffers;
 
@@ -377,6 +440,7 @@ class BoltToArrowBridgeHolder {
   const bool ownsReleaseState_;
   std::shared_ptr<ReusableReleaseState> releaseState_;
   ArrowArray* registeredArray_{nullptr};
+  bool active_{false};
 };
 
 // Structure that will hold buffers needed by ArrowSchema. This is opaquely
@@ -2535,8 +2599,8 @@ void initializeReusableArrowArray(ArrowArray& arrowArray) {
   arrowArray.n_children = 0;
   arrowArray.children = nullptr;
   arrowArray.dictionary = nullptr;
-  holder->markActive(arrowArray);
-  arrowArray.private_data = holder.release();
+  holder->registerArray(arrowArray);
+  holder.release();
 }
 
 void exportToReusableArrowArray(
@@ -2570,7 +2634,7 @@ void exportToReusableArrowArray(
     exportToArrowImpl(
         *vector, Selection(vector->size()), options, arrowArray, pool, true);
   } catch (...) {
-    holder->resetReusableArray(arrowArray);
+    holder->abortReusableArray(arrowArray);
     throw;
   }
 }
@@ -3607,12 +3671,9 @@ class ArraySlot {
       const ArrowOptions& options) {
     // The consumer's array release callback returns this lease. The source
     // ArrowArray may already look released after ownership is moved.
-    bool expected = false;
-    if (!inUse_.compare_exchange_strong(
-            expected,
-            true,
-            std::memory_order_acq_rel,
-            std::memory_order_acquire)) {
+    auto* holder = static_cast<BoltToArrowBridgeHolder*>(array_.private_data);
+    BOLT_CHECK_NOT_NULL(holder);
+    if (!holder->tryAcquireReusableSlot()) {
       return false;
     }
 
@@ -3622,7 +3683,6 @@ class ArraySlot {
     } catch (...) {
       releaseReusableArrowArray(array_);
       initializeReusableArrowArray(array_);
-      inUse_.store(false, std::memory_order_release);
       throw;
     }
   }
@@ -3635,12 +3695,10 @@ class ArraySlot {
     if (array_.release != nullptr) {
       array_.release(&array_);
     }
-    inUse_.store(false, std::memory_order_release);
   }
 
  private:
   ArrowArray array_{};
-  std::atomic_bool inUse_{false};
 };
 
 struct CachedSchema {
@@ -3669,11 +3727,11 @@ class SchemaCache {
       memory::MemoryPool* pool) {
     const auto signature = makeSchemaSignature(vector, options, fieldNames);
     std::lock_guard<std::mutex> lock(mutex_);
-    // The signature covers encoding and options; equivalent() validates the
-    // logical type and protects against hash collisions.
+    // The signature covers encoding and options; operator== validates the
+    // logical type, including RowType field names, and protects against hash
+    // collisions.
     if (schema_ != nullptr && signature_.has_value() &&
-        *signature_ == signature &&
-        schema_->type->equivalent(*vector->type())) {
+        *signature_ == signature && *schema_->type == *vector->type()) {
       return {schema_, false};
     }
 
