@@ -2472,7 +2472,7 @@ class IntegerToStringColumnReader : public ColumnReader {
         return folly::to<std::string>(
             integerValues_->as<SimpleVector<int64_t>>()->valueAt(row));
       default:
-        BOLT_UNREACHABLE();
+        VELOX_UNREACHABLE();
     }
   }
 
