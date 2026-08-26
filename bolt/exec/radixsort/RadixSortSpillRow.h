@@ -96,6 +96,12 @@ struct RadixSortSpillDeserializedRow {
   char* payload{nullptr};
 };
 
+struct RadixSortSpillSectionDeserializedRow {
+  char* nextOutput{nullptr};
+  char* key{nullptr};
+  char* payload{nullptr};
+};
+
 class RadixSortSpillRow {
  public:
   static constexpr uint16_t kVersion = 1;
@@ -132,9 +138,25 @@ class RadixSortSpillRow {
       const RadixSortSpillRowSize& size,
       char* out);
 
-  static uint64_t maxRuntimeSizeForBlock(
+  static void serializeRowToSections(
       const RadixRow2RowSerdeMeta& meta,
-      uint64_t serializedBlockSize);
+      const char* key,
+      const RadixSortSpillRowSize& size,
+      char* keyRecord,
+      char*& keyHeap,
+      char* payloadFixed,
+      char*& payloadHeap);
+
+  static std::optional<RadixSortSpillSectionDeserializedRow>
+  deserializeRowFromSections(
+      const RadixRow2RowSerdeMeta& meta,
+      char* keyRecord,
+      char*& keyHeap,
+      const char* keyHeapEnd,
+      char* payloadFixed,
+      char*& payloadHeap,
+      const char* payloadHeapEnd,
+      char* out);
 
   static void serialize(
       const RadixRow2RowSerdeMeta& meta,

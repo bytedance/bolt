@@ -80,16 +80,12 @@ class RadixSortSpillWriter {
 
   void ensureRowFits(uint64_t rowSize);
 
-  void appendRow(const RadixRow2RowSerdeMeta& meta, const char* key);
+  void appendRow(const char* key);
 
-  void
-  appendRow(const RadixRow2RowSerdeMeta& meta, const char* key, char* payload);
+  void appendRow(const char* key, char* payload);
 
   template <RadixSortKeyLayoutKind KIND>
-  void appendFixedRows(
-      const RadixRow2RowSerdeMeta& meta,
-      const char* keys,
-      vector_size_t count);
+  void appendFixedRows(const char* keys, vector_size_t count);
 
   void flush();
 
@@ -101,11 +97,21 @@ class RadixSortSpillWriter {
   const common::SpillConfig ioConfig_;
   memory::MemoryPool* const pool_;
   folly::Synchronized<common::SpillStats>* const stats_;
+
+  struct PendingRow {
+    const char* key;
+    RadixSortSpillRowSize size;
+  };
+
+  RadixRow2RowSerdeMeta meta_;
+  std::vector<PendingRow> pendingRows_;
   BufferPtr buffer_;
   BufferPtr compressedBuffer_;
   uint64_t normalBufferSize_{0};
-  char* current_{nullptr};
-  char* end_{nullptr};
+  uint64_t pendingBodyCapacity_{0};
+  uint64_t pendingBodyBytes_{0};
+  uint64_t pendingKeyHeapBytes_{0};
+  uint64_t pendingPayloadHeapBytes_{0};
   uint32_t nextFileId_{0};
   std::unique_ptr<SpillWriteFile> currentFile_;
   std::vector<RadixSortSpillFile> files_;
@@ -149,15 +155,19 @@ class RadixSortSpillReader {
         recycleSerializedBuffer();
       }
       compressedBuffer_.reset();
+      recycleRetainedSerializedBuffer();
       return;
     }
     recycleRetainedRowBuffer();
+    recycleRetainedSerializedBuffer();
   }
 
  private:
   void acquireSerializedBuffer(uint64_t size);
 
   void recycleSerializedBuffer();
+
+  void recycleRetainedSerializedBuffer();
 
   void acquireRowBuffer(uint64_t size);
 
@@ -179,6 +189,7 @@ class RadixSortSpillReader {
   RadixSortSpillReadBufferCache* const bufferCache_;
   BufferPtr serializedBuffer_;
   BufferPtr rowBuffer_;
+  std::vector<BufferPtr> retainedSerializedBuffers_;
   std::vector<BufferPtr> retainedRowBuffers_;
   BufferPtr compressedBuffer_;
   uint64_t spillReadTimeUs_{0};
