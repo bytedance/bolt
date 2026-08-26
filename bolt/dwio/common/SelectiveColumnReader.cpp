@@ -209,6 +209,24 @@ void SelectiveColumnReader::getIntValues(
     RowSet rows,
     const TypePtr& requestedType,
     VectorPtr* result) {
+  if (requestedType->isVarchar()) {
+    VectorPtr integerResult;
+    getIntValues(rows, BIGINT(), &integerResult);
+    auto stringResult = BaseVector::create<FlatVector<StringView>>(
+        VARCHAR(), integerResult->size(), &memoryPool_);
+    auto integers = integerResult->as<SimpleVector<int64_t>>();
+    for (vector_size_t i = 0; i < integerResult->size(); ++i) {
+      if (integerResult->isNullAt(i)) {
+        stringResult->setNull(i, true);
+      } else {
+        const auto value = folly::to<std::string>(integers->valueAt(i));
+        stringResult->set(i, StringView(value));
+      }
+    }
+    *result = std::move(stringResult);
+    return;
+  }
+
   switch (requestedType->kind()) {
     case TypeKind::SMALLINT:
       switch (valueSize_) {

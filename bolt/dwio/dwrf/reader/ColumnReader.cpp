@@ -2421,6 +2421,65 @@ std::unique_ptr<ColumnReader> buildTypedIntegerColumnReader(
   }
 }
 
+class IntegerToStringColumnReader : public ColumnReader {
+ public:
+  IntegerToStringColumnReader(
+      std::shared_ptr<const dwio::common::TypeWithId> fileType,
+      std::unique_ptr<ColumnReader> integerReader,
+      memory::MemoryPool& memoryPool)
+      : ColumnReader(memoryPool, fileType),
+        integerReader_(std::move(integerReader)) {}
+
+  uint64_t skip(uint64_t numValues) override {
+    return integerReader_->skip(numValues);
+  }
+
+  void next(
+      uint64_t numValues,
+      VectorPtr& result,
+      const uint64_t* incomingNulls) override {
+    integerReader_->next(numValues, integerValues_, incomingNulls);
+    auto stringValues = BaseVector::create<FlatVector<StringView>>(
+        VARCHAR(), numValues, &memoryPool_);
+    for (vector_size_t i = 0; i < numValues; ++i) {
+      if (integerValues_->isNullAt(i)) {
+        stringValues->setNull(i, true);
+      } else {
+        const auto value = integerValueToString(i);
+        stringValues->set(i, StringView(value));
+      }
+    }
+    result = std::move(stringValues);
+  }
+
+  void seekToRowGroup(uint32_t index) override {
+    integerReader_->seekToRowGroup(index);
+  }
+
+ private:
+  std::string integerValueToString(vector_size_t row) const {
+    switch (fileType_->type()->kind()) {
+      case TypeKind::TINYINT:
+        return folly::to<std::string>(
+            integerValues_->as<SimpleVector<int8_t>>()->valueAt(row));
+      case TypeKind::SMALLINT:
+        return folly::to<std::string>(
+            integerValues_->as<SimpleVector<int16_t>>()->valueAt(row));
+      case TypeKind::INTEGER:
+        return folly::to<std::string>(
+            integerValues_->as<SimpleVector<int32_t>>()->valueAt(row));
+      case TypeKind::BIGINT:
+        return folly::to<std::string>(
+            integerValues_->as<SimpleVector<int64_t>>()->valueAt(row));
+      default:
+        BOLT_UNREACHABLE();
+    }
+  }
+
+  std::unique_ptr<ColumnReader> integerReader_;
+  VectorPtr integerValues_;
+};
+
 std::unique_ptr<ColumnReader> buildIntegerReader(
     TypePtr requestedType,
     const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
@@ -2428,6 +2487,18 @@ std::unique_ptr<ColumnReader> buildIntegerReader(
     FlatMapContext flatMapContext,
     StripeStreams& stripe,
     const StreamLabels& streamLabels) {
+  if (requestedType->isVarchar()) {
+    auto integerReader = buildIntegerReader(
+        fileType->type(),
+        fileType,
+        numBytes,
+        flatMapContext,
+        stripe,
+        streamLabels);
+    return std::make_unique<IntegerToStringColumnReader>(
+        fileType, std::move(integerReader), stripe.getMemoryPool());
+  }
+
   EncodingKey ek{fileType->id(), flatMapContext.sequence};
   switch (static_cast<int64_t>(stripe.getEncoding(ek).kind())) {
     case proto::ColumnEncoding_Kind_DICTIONARY:
