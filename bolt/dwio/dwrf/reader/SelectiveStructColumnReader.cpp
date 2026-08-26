@@ -84,13 +84,12 @@ SelectiveStructColumnReader::SelectiveStructColumnReader(
             .inMapDecoder = nullptr,
             .keySelectionCallback = nullptr});
     BOLT_CHECK(cs.shouldReadNode(childRequestedType->id()));
-    addChild(
-        SelectiveDwrfReader::build(
-            columnReaderOptions,
-            childRequestedType,
-            childFileType,
-            childParams,
-            *childSpec));
+    addChild(SelectiveDwrfReader::build(
+        columnReaderOptions,
+        childRequestedType,
+        childFileType,
+        childParams,
+        *childSpec));
     childSpec->setSubscript(children_.size() - 1);
   }
 }
