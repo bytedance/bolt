@@ -17,7 +17,6 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 #include "bolt/exec/radixsort/PayloadRow.h"
@@ -70,47 +69,49 @@ struct RadixSortSpillSectionSize {
   uint64_t payloadHeapSize{0};
 };
 
+struct RadixSortSpillSectionBatchSize {
+  uint64_t rowCount{0};
+  uint64_t keyRecordBytes{0};
+  uint64_t keyHeapBytes{0};
+  uint64_t payloadFixedBytes{0};
+  uint64_t payloadHeapBytes{0};
+
+  uint64_t totalBytes() const {
+    return keyRecordBytes + keyHeapBytes + payloadFixedBytes + payloadHeapBytes;
+  }
+};
+
 class RadixSortSpillSections {
  public:
-  static RadixSortSpillSectionSize sizeForSerialize(
+  static RadixSortSpillSectionBatchSize sizeForSerializeRows(
       const RadixSortSpillSectionMeta& meta,
-      const char* key);
+      const char* keyBase,
+      uint64_t maxRowCount,
+      uint64_t maxBytes,
+      std::vector<RadixSortSpillSectionSize>& rowSizes);
 
-  static void copyKeyHeapToSection(
+  static void copyRowsToSections(
       const RadixSortSpillSectionMeta& meta,
-      const char* sourceKey,
-      uint64_t keyHeapSize,
-      char*& keyHeap);
-
-  static void copyPayloadFixedToSection(
-      const RadixSortSpillSectionMeta& meta,
-      const char* sourceKey,
-      char* payloadFixed);
-
-  static void copyPayloadHeapFromFixedToSection(
-      const RadixSortSpillSectionMeta& meta,
-      const char* payloadFixed,
-      uint64_t payloadHeapSize,
+      const char* keyBase,
+      const RadixSortSpillSectionSize* rowSizes,
+      uint64_t rowCount,
+      uint64_t keyHeapBytes,
+      uint64_t payloadHeapBytes,
+      char* keyRecords,
+      char*& keyHeap,
+      char* payloadFixedRows,
       char*& payloadHeap);
 
-  static void clearKeyPointers(
+  static bool restorePointersInSectionRows(
       const RadixSortSpillSectionMeta& meta,
       char* keyRecords,
-      uint64_t rowCount);
-
-  static void clearPayloadPointers(
-      const RadixSortSpillSectionMeta& meta,
-      char* payloadFixedRows,
-      uint64_t rowCount);
-
-  static std::optional<uint64_t> restorePointersInSections(
-      const RadixSortSpillSectionMeta& meta,
-      char* key,
+      uint64_t rowCount,
       char*& keyHeap,
       const char* keyHeapEnd,
-      char* payloadFixed,
+      char* payloadFixedRows,
       char*& payloadHeap,
-      const char* payloadHeapEnd);
+      const char* payloadHeapEnd,
+      std::vector<const char*>& keys);
 };
 
 } // namespace bytedance::bolt::exec::radixsort

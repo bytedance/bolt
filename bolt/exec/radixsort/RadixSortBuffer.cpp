@@ -370,14 +370,22 @@ void RadixSortBuffer::spillBuildingRun() {
       *spillConfig_,
       memory::spillMemoryPool(),
       &stats_);
+  const auto writeStatsBefore = stats_.copy();
   const auto writeBegin = std::chrono::steady_clock::now();
   auto files = writer.writeRun(*storage, run_->payloadLayout().get());
   auto cleanupUncommittedFiles =
       folly::makeGuard([&files]() { cleanupSpillFilesNoThrow(files); });
-  const auto serializationTimeUs =
+  auto serializationTimeUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - writeBegin)
           .count();
+  const auto writeStatsAfter = stats_.copy();
+  const auto writerTimeUs = writeStatsAfter.spillFlushTimeUs -
+      writeStatsBefore.spillFlushTimeUs + writeStatsAfter.spillWriteTimeUs -
+      writeStatsBefore.spillWriteTimeUs;
+  serializationTimeUs = serializationTimeUs > writerTimeUs
+      ? serializationTimeUs - writerTimeUs
+      : 0;
   const auto totalTimeUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - spillBegin)
@@ -450,6 +458,7 @@ void RadixSortBuffer::spillRemainingOutput() {
       static_cast<uint64_t>(kSpillBatchRows) * keyLayout.width(), pool_);
   auto* rawKeyRecords = keyRecordRows->asMutable<char>();
   auto writeKeyBatch = [&](vector_size_t count) {
+    const auto writeStatsBefore = stats_.copy();
     const auto writeBegin = std::chrono::steady_clock::now();
     const auto keyRecordBytes =
         static_cast<uint64_t>(count) * keyLayout.width();
@@ -461,10 +470,15 @@ void RadixSortBuffer::spillRemainingOutput() {
     }
     keyRecordRows->setSize(keyRecordBytes);
     writer.writeKeyRange(keyLayout, payloadLayout, rawKeyRecords, count);
+    auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - writeBegin)
+                         .count();
+    const auto writeStatsAfter = stats_.copy();
+    const auto writerTimeUs = writeStatsAfter.spillFlushTimeUs -
+        writeStatsBefore.spillFlushTimeUs + writeStatsAfter.spillWriteTimeUs -
+        writeStatsBefore.spillWriteTimeUs;
     serializationTimeUs +=
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - writeBegin)
-            .count();
+        elapsedUs > writerTimeUs ? elapsedUs - writerTimeUs : 0;
     spilledRows += count;
   };
   while (spilledRows < remainingRows) {

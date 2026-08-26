@@ -110,6 +110,7 @@ class RadixSortSpillWriter {
   RadixSortSpillSectionMeta meta_;
   PendingRange pendingRange_;
   std::vector<RadixSortSpillSectionSize> pendingSectionSizes_;
+  std::vector<RadixSortSpillSectionSize> sizingSectionSizes_;
   BufferPtr buffer_;
   BufferPtr compressedBuffer_;
   uint64_t normalBufferSize_{0};
