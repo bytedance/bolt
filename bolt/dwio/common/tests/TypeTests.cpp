@@ -208,6 +208,10 @@ TEST(TestType, typeCompatibility) {
   from = ROW({MAP(VARCHAR(), INTEGER())});
   to = ROW({MAP(VARCHAR(), DOUBLE())});
   EXPECT_THROW(checkTypeCompatibility(*from, *to, true), BoltUserError);
+
+  from = ROW({ROW({BIGINT(), BOOLEAN()})});
+  to = ROW({ROW({VARCHAR(), BOOLEAN()})});
+  checkTypeCompatibility(*from, *to, true);
 }
 
 TEST(TestType, typeCompatibilityWithErrorMessage) {

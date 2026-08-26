@@ -2867,6 +2867,63 @@ TEST_F(TestReader, missingSubfieldsNoResultReusing) {
   assertEqualVectors(expected, actual);
 }
 
+TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
+  auto fileSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {BIGINT(), BOOLEAN()})});
+  auto data = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeNullableFlatVector<int64_t>({11, std::nullopt, 33}),
+            makeFlatVector<bool>({true, false, true})})});
+  ASSERT_EQ(data->type()->toString(), fileSchema->toString());
+
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {VARCHAR(), BOOLEAN()})});
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+  auto expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeNullableFlatVector<StringView>({"11", std::nullopt, "33"}),
+            makeFlatVector<bool>({true, false, true})})});
+  assertEqualVectors(expected, actual);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("meta_details")
+      ->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+
+  rowReaderOpts = RowReaderOptions();
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReader = reader->createRowReader(rowReaderOpts);
+  actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+
+  expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeFlatVector<StringView>({"11", "33"}),
+            makeFlatVector<bool>({true, true})})});
+  assertEqualVectors(expected, actual);
+}
+
 // Ensure there is enough data before switching to fast path.
 TEST_F(TestReader, selectiveStringDirectFastPath) {
   auto genStr = [](auto i) {

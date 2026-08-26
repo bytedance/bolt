@@ -123,6 +123,7 @@ std::unordered_set<uint32_t> makeCompatibilityMap() {
   compat.insert(getKey(TypeKind::INTEGER, TypeKind::BIGINT));
   compat.insert(getKey(TypeKind::BIGINT, TypeKind::HUGEINT));
   compat.insert(getKey(TypeKind::REAL, TypeKind::DOUBLE));
+  compat.insert(getKey(TypeKind::BIGINT, TypeKind::VARCHAR));
   return compat;
 }
 
