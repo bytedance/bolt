@@ -39,6 +39,16 @@ class SelectiveStringDirectColumnReader
  public:
   using ValueType = StringView;
   SelectiveStringDirectColumnReader(
+      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
+      DwrfParams& params,
+      common::ScanSpec& scanSpec)
+      : SelectiveStringDirectColumnReader(
+            fileType,
+            fileType,
+            params,
+            scanSpec) {}
+
+  SelectiveStringDirectColumnReader(
       const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
       const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       DwrfParams& params,
