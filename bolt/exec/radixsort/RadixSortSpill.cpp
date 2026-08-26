@@ -16,10 +16,11 @@
 
 #include "bolt/exec/radixsort/RadixSortSpill.h"
 
-#include <lz4.h>
-#include <zstd.h>
 #include <cstring>
+#include <limits>
 #include <utility>
+
+#include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/file/FileSystems.h"
@@ -41,7 +42,6 @@ struct RadixSortSpillBlockHeader {
 
 constexpr uint64_t kBlockHeaderSize = sizeof(RadixSortSpillBlockHeader);
 constexpr uint64_t kDefaultWriteBufferSize = 1 << 20;
-constexpr uint64_t kMaxReadBufferSize = (1 << 20) - AlignedBuffer::kPaddedSize;
 static_assert(sizeof(RadixSortSpillBlockHeader) == 48);
 
 template <RadixSortKeyLayoutKind KIND>
@@ -82,24 +82,6 @@ RadixSortMerger::CompareKeys compareKeysForLayout(RadixSortKeyLayoutKind kind) {
   BOLT_FAIL("Invalid radix sort merge key layout");
 }
 
-bool compressionEnabled(common::CompressionKind kind) {
-  return kind == common::CompressionKind_LZ4 ||
-      kind == common::CompressionKind_ZSTD;
-}
-
-int32_t maxUncompressedBlockSize(common::CompressionKind kind) {
-  constexpr auto kMaxBlockSize = std::numeric_limits<int32_t>::max();
-  if (kind == common::CompressionKind_LZ4) {
-    return LZ4_MAX_INPUT_SIZE;
-  }
-  if (kind == common::CompressionKind_ZSTD) {
-    // For inputs above 128 KiB, ZSTD_compressBound(size) is size + size / 256.
-    // Keep both block sizes representable by ByteInputStream's int32_t API.
-    return kMaxBlockSize - (kMaxBlockSize >> 8) - 1;
-  }
-  return kMaxBlockSize;
-}
-
 uint64_t checkedSectionSize(uint64_t rows, uint64_t width) {
   const auto bytes = checkedMultiply<uint64_t>(rows, width);
   BOLT_CHECK(bytes.has_value(), "Radix sort spill block section overflows");
@@ -120,92 +102,24 @@ uint64_t checkedBlockBodySize(
   return *total;
 }
 
-int32_t compressionBound(common::CompressionKind kind, int32_t size) {
-  BOLT_CHECK_GT(size, 0, "Invalid radix sort spill block size");
-  if (kind == common::CompressionKind_ZSTD) {
-    const auto bound = ZSTD_compressBound(size);
-    BOLT_CHECK(!ZSTD_isError(bound), "Invalid ZSTD spill block size");
-    BOLT_CHECK_LE(
-        bound,
-        static_cast<size_t>(std::numeric_limits<int32_t>::max()),
-        "ZSTD spill block exceeds int32 range");
-    return static_cast<int32_t>(bound);
+void cleanupSpillFilesNoThrow(const SpillFiles& files) noexcept {
+  for (const auto& file : files) {
+    if (file.path.empty()) {
+      continue;
+    }
+    try {
+      auto fs = filesystems::getFileSystem(file.path, nullptr);
+      if (fs->exists(file.path)) {
+        fs->remove(file.path);
+      }
+    } catch (const std::exception& error) {
+      LOG(WARNING) << "Failed to remove radix sort spill file '" << file.path
+                   << "': " << error.what();
+    } catch (...) {
+      LOG(WARNING) << "Failed to remove radix sort spill file '" << file.path
+                   << "'";
+    }
   }
-  BOLT_CHECK_LE(
-      size,
-      static_cast<uint64_t>(LZ4_MAX_INPUT_SIZE),
-      "Radix sort LZ4 spill block exceeds codec input limit");
-  const auto bound = LZ4_compressBound(size);
-  BOLT_CHECK_GT(bound, 0, "Invalid LZ4 spill block size");
-  return bound;
-}
-
-int32_t compressionBoundForTrustedSize(
-    common::CompressionKind kind,
-    int32_t size) {
-  BOLT_DCHECK_GT(size, 0);
-  if (kind == common::CompressionKind_ZSTD) {
-    return static_cast<int32_t>(ZSTD_compressBound(size));
-  }
-  BOLT_DCHECK_LE(size, LZ4_MAX_INPUT_SIZE);
-  return LZ4_compressBound(size);
-}
-
-int32_t compressBlock(
-    common::CompressionKind kind,
-    const char* input,
-    int32_t inputSize,
-    char* output,
-    int32_t outputCapacity) {
-  if (kind == common::CompressionKind_ZSTD) {
-    const auto result =
-        ZSTD_compress(output, outputCapacity, input, inputSize, 3);
-    BOLT_DCHECK(!ZSTD_isError(result));
-    BOLT_DCHECK_LE(
-        result, static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-    return static_cast<int32_t>(result);
-  }
-  const auto result = LZ4_compress_default(
-      input, output, inputSize, static_cast<int>(outputCapacity));
-  BOLT_DCHECK_GT(result, 0);
-  return result;
-}
-
-void decompressBlock(
-    common::CompressionKind kind,
-    const char* input,
-    int32_t inputSize,
-    char* output,
-    int32_t outputSize) {
-  if (kind == common::CompressionKind_ZSTD) {
-    const auto result = ZSTD_decompress(output, outputSize, input, inputSize);
-    BOLT_CHECK(!ZSTD_isError(result));
-    BOLT_CHECK_EQ(result, outputSize);
-    return;
-  }
-  const auto result = LZ4_decompress_safe(input, output, inputSize, outputSize);
-  BOLT_CHECK_EQ(result, outputSize);
-}
-
-std::unique_ptr<SpillInputStream> makeInputStream(
-    const RadixSortSpillFile& fileInfo,
-    memory::MemoryPool* pool,
-    bool spillUringEnabled) {
-  auto fs = filesystems::getFileSystem(fileInfo.path, nullptr);
-  std::unique_ptr<ReadFile> file;
-#ifdef IO_URING_SUPPORTED
-  file = spillUringEnabled ? fs->openAsyncFileForRead(fileInfo.path)
-                           : fs->openFileForRead(fileInfo.path);
-#else
-  file = fs->openFileForRead(fileInfo.path);
-#endif
-  const auto bufferCount = spillUringEnabled && file->uringEnabled() ? 2 : 1;
-  std::vector<BufferPtr> buffers(bufferCount);
-  for (auto& buffer : buffers) {
-    buffer = AlignedBuffer::allocate<char>(kMaxReadBufferSize, pool);
-  }
-  return std::make_unique<SpillInputStream>(
-      std::move(file), std::move(buffers), spillUringEnabled);
 }
 
 } // namespace
@@ -215,63 +129,36 @@ RadixSortSpillWriter::RadixSortSpillWriter(
     const common::SpillConfig& ioConfig,
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats)
-    : pathPrefix_(std::move(pathPrefix)),
-      ioConfig_(ioConfig),
+    : compressionKind_(ioConfig.compressionKind),
+      writeBufferSize_(ioConfig.writeBufferSize),
       pool_(pool),
-      stats_(stats) {}
+      spillWriter_(std::make_unique<SpillWriter>(
+          std::move(pathPrefix),
+          ioConfig.maxFileSize == 0 ? std::numeric_limits<uint64_t>::max()
+                                    : ioConfig.maxFileSize,
+          ioConfig.spillIOConfig(1),
+          pool,
+          stats)) {}
 
 RadixSortSpillWriter::~RadixSortSpillWriter() {
-  cleanupFilesNoThrow();
-}
-
-void RadixSortSpillWriter::cleanupFilesNoThrow() noexcept {
-  const auto removeFileNoThrow = [](const std::string& path) noexcept {
-    try {
-      auto fs = filesystems::getFileSystem(path, nullptr);
-      if (fs->exists(path)) {
-        fs->remove(path);
-      }
-    } catch (const std::exception& error) {
-      LOG(WARNING) << "Failed to remove radix sort spill file '" << path
-                   << "': " << error.what();
-    } catch (...) {
-      LOG(WARNING) << "Failed to remove radix sort spill file '" << path << "'";
-    }
-  };
-
-  for (const auto& file : files_) {
-    removeFileNoThrow(file.path);
-  }
-  files_.clear();
-  if (currentFile_ != nullptr) {
-    try {
-      currentFile_->finish();
-    } catch (const std::exception& error) {
-      LOG(WARNING) << "Failed to finish radix sort spill file '"
-                   << currentFile_->path() << "': " << error.what();
-    } catch (...) {
-      LOG(WARNING) << "Failed to finish radix sort spill file '"
-                   << currentFile_->path() << "'";
-    }
-    removeFileNoThrow(currentFile_->path());
-    currentFile_.reset();
+  if (!finished_) {
+    spillWriter_->cleanupFilesNoThrow();
   }
 }
 
 void RadixSortSpillWriter::resetWriteState() {
-  cleanupFilesNoThrow();
-  currentFileRows_ = 0;
+  spillWriter_->cleanupFilesNoThrow();
+  finished_ = false;
   inputBytes_ = 0;
-  nextFileId_ = 0;
   clearPendingRange();
   pendingBodyCapacity_ = 0;
 }
 
 void RadixSortSpillWriter::prepareWriteBuffer() {
   const auto requested =
-      std::max<uint64_t>(ioConfig_.writeBufferSize, kDefaultWriteBufferSize);
+      std::max<uint64_t>(writeBufferSize_, kDefaultWriteBufferSize);
   const auto codecLimit =
-      maxUncompressedBlockSize(ioConfig_.compressionKind) + kBlockHeaderSize;
+      maxUncompressedSpillBlockSize(compressionKind_) + kBlockHeaderSize;
   ensureBuffer(std::min(requested, codecLimit));
   normalBufferSize_ = std::min<uint64_t>(buffer_->capacity(), codecLimit);
   resetBuffer(normalBufferSize_);
@@ -294,8 +181,7 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::writeRun(
     appendKeyRange(block.base, block.count);
     flush();
   }
-  closeFile();
-  return std::exchange(files_, {});
+  return finish();
 }
 
 void RadixSortSpillWriter::writeKeyRange(
@@ -306,7 +192,7 @@ void RadixSortSpillWriter::writeKeyRange(
   if (count == 0) {
     return;
   }
-  if (buffer_ == nullptr) {
+  if (buffer_ == nullptr || finished_) {
     resetWriteState();
     prepareWriteBuffer();
   }
@@ -316,9 +202,22 @@ void RadixSortSpillWriter::writeKeyRange(
 }
 
 std::vector<RadixSortSpillFile> RadixSortSpillWriter::finish() {
+  if (finished_) {
+    return {};
+  }
   flush();
-  closeFile();
-  return std::exchange(files_, {});
+  auto spillFiles = spillWriter_->finish();
+  auto cleanupFilesOnError = folly::makeGuard(
+      [&spillFiles]() { cleanupSpillFilesNoThrow(spillFiles); });
+  std::vector<RadixSortSpillFile> files;
+  files.reserve(spillFiles.size());
+  for (auto& file : spillFiles) {
+    files.push_back(RadixSortSpillFile{
+        file.id, file.path, file.size, file.rowCount, file.compressionKind});
+  }
+  cleanupFilesOnError.dismiss();
+  finished_ = true;
+  return files;
 }
 
 void RadixSortSpillWriter::ensureBuffer(uint64_t bytes) {
@@ -331,7 +230,7 @@ void RadixSortSpillWriter::ensureBuffer(uint64_t bytes) {
 void RadixSortSpillWriter::ensureRecordFits(uint64_t recordSize) {
   BOLT_CHECK_LE(
       recordSize,
-      maxUncompressedBlockSize(ioConfig_.compressionKind),
+      maxUncompressedSpillBlockSize(compressionKind_),
       "Radix sort spill record exceeds block or codec limit");
   ensureBuffer(kBlockHeaderSize + recordSize);
   resetBuffer(kBlockHeaderSize + recordSize);
@@ -392,20 +291,8 @@ void RadixSortSpillWriter::appendKeyRange(
         pendingSectionSizes_.end(),
         sizingSectionSizes_.begin(),
         sizingSectionSizes_.end());
-    currentFileRows_ += batchSize.rowCount;
     processed += static_cast<vector_size_t>(batchSize.rowCount);
   }
-}
-
-SpillWriteFile* RadixSortSpillWriter::ensureFile() {
-  if (currentFile_ == nullptr) {
-    currentFile_ = SpillWriteFile::create(
-        nextFileId_++,
-        pathPrefix_,
-        ioConfig_.fileCreateConfig,
-        ioConfig_.spillUringEnabled);
-  }
-  return currentFile_.get();
 }
 
 void RadixSortSpillWriter::flush() {
@@ -420,7 +307,7 @@ void RadixSortSpillWriter::flush() {
   BOLT_DCHECK_EQ(payloadFixedBytes, rowCount * meta_.payloadFixedSize);
   const auto uncompressedBytes = pendingRange_.totalBytes();
   BOLT_DCHECK_LE(
-      uncompressedBytes, maxUncompressedBlockSize(ioConfig_.compressionKind));
+      uncompressedBytes, maxUncompressedSpillBlockSize(compressionKind_));
   const auto uncompressedSize = static_cast<int32_t>(uncompressedBytes);
 
   auto* keyRecords = start + kBlockHeaderSize;
@@ -446,98 +333,19 @@ void RadixSortSpillWriter::flush() {
 
   inputBytes_ += uncompressedBytes;
 
-  auto* file = ensureFile();
-  const char* writeBuffer = start;
-  uint64_t writeSize = kBlockHeaderSize + uncompressedBytes;
-  uint64_t compressTimeUs = 0;
-  if (compressionEnabled(ioConfig_.compressionKind)) {
-    const auto compressedCapacity = compressionBoundForTrustedSize(
-        ioConfig_.compressionKind, uncompressedSize);
-    const auto bound = kBlockHeaderSize + compressedCapacity;
-    if (compressedBuffer_ == nullptr || compressedBuffer_->capacity() < bound) {
-      compressedBuffer_ = AlignedBuffer::allocate<char>(bound, pool_);
-    }
-    int32_t compressedSize;
-    {
-      MicrosecondTimer timer(&compressTimeUs);
-      compressedSize = compressBlock(
-          ioConfig_.compressionKind,
-          start + kBlockHeaderSize,
-          uncompressedSize,
-          compressedBuffer_->asMutable<char>() + kBlockHeaderSize,
-          compressedCapacity);
-    }
-    auto* header = compressedBuffer_->asMutable<RadixSortSpillBlockHeader>();
-    *header = RadixSortSpillBlockHeader{
-        uncompressedSize,
-        compressedSize,
-        static_cast<uint32_t>(rowCount),
-        0,
-        keyRecordBytes,
-        pendingRange_.keyHeapBytes,
-        payloadFixedBytes,
-        pendingRange_.payloadHeapBytes};
-    writeBuffer = compressedBuffer_->as<char>();
-    writeSize = kBlockHeaderSize + compressedSize;
-  } else {
-    auto* header = buffer_->asMutable<RadixSortSpillBlockHeader>();
-    *header = RadixSortSpillBlockHeader{
-        uncompressedSize,
-        uncompressedSize,
-        static_cast<uint32_t>(rowCount),
-        0,
-        keyRecordBytes,
-        pendingRange_.keyHeapBytes,
-        payloadFixedBytes,
-        pendingRange_.payloadHeapBytes};
-  }
-
-  uint64_t writeTimeUs = 0;
-  uint64_t writtenBytes;
-  {
-    MicrosecondTimer timer(&writeTimeUs);
-    writtenBytes = file->write(std::string_view(writeBuffer, writeSize));
-  }
-  {
-    auto locked = stats_->wlock();
-    locked->spilledBytes += writtenBytes;
-    locked->spillFlushTimeUs += compressTimeUs;
-    locked->spillWriteTimeUs += writeTimeUs;
-    ++locked->spillWrites;
-  }
-  common::updateGlobalSpillWriteStats(
-      writtenBytes, compressTimeUs, writeTimeUs);
-  if (ioConfig_.updateAndCheckSpillLimitCb != nullptr) {
-    ioConfig_.updateAndCheckSpillLimitCb(writtenBytes);
-  }
-  if (ioConfig_.maxFileSize != 0 && file->size() > ioConfig_.maxFileSize) {
-    closeFile();
-  }
+  auto* header = buffer_->asMutable<RadixSortSpillBlockHeader>();
+  *header = RadixSortSpillBlockHeader{
+      uncompressedSize,
+      uncompressedSize,
+      static_cast<uint32_t>(rowCount),
+      0,
+      keyRecordBytes,
+      pendingRange_.keyHeapBytes,
+      payloadFixedBytes,
+      pendingRange_.payloadHeapBytes};
+  spillWriter_->writeEncodedBlock(
+      start, kBlockHeaderSize, uncompressedSize, rowCount);
   resetBuffer(normalBufferSize_);
-}
-
-void RadixSortSpillWriter::closeFile() {
-  if (currentFile_ == nullptr) {
-    return;
-  }
-  uint64_t finishTimeUs = 0;
-  {
-    MicrosecondTimer timer(&finishTimeUs);
-    currentFile_->finish();
-  }
-  const auto fileSize = currentFile_->size();
-  files_.push_back(RadixSortSpillFile{
-      currentFile_->id(),
-      currentFile_->path(),
-      fileSize,
-      currentFileRows_,
-      ioConfig_.compressionKind});
-  {
-    auto locked = stats_->wlock();
-    locked->spillWriteTimeUs += finishTimeUs;
-  }
-  currentFile_.reset();
-  currentFileRows_ = 0;
 }
 
 RadixSortSpillReader::RadixSortSpillReader(
@@ -547,15 +355,14 @@ RadixSortSpillReader::RadixSortSpillReader(
     memory::MemoryPool* pool,
     bool spillUringEnabled,
     RadixSortSpillReadBufferCache* bufferCache)
-    : file_(std::move(file)),
+    : SpillReadFileInput(file.path, pool, spillUringEnabled),
+      file_(std::move(file)),
       meta_(std::move(meta)),
       payloadLayout_(payloadLayout),
-      pool_(pool),
       maxReusableSerializedBufferSize_(
           pool->preferredSize(
               kDefaultWriteBufferSize + AlignedBuffer::kPaddedSize) -
           AlignedBuffer::kPaddedSize),
-      input_(makeInputStream(file_, pool, spillUringEnabled)),
       bufferCache_(std::move(bufferCache)) {
   meta_.initialize(payloadLayout_);
 }
@@ -642,9 +449,9 @@ bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
   BOLT_CHECK_GT(header.rowCount, 0);
   BOLT_CHECK_LE(
       uncompressedSize,
-      maxUncompressedBlockSize(file_.compressionKind),
+      maxUncompressedSpillBlockSize(file_.compressionKind),
       "Radix sort spill block exceeds codec limit");
-  if (!compressionEnabled(file_.compressionKind)) {
+  if (!isSpillCompressionEnabled(file_.compressionKind)) {
     BOLT_CHECK_EQ(
         uncompressedSize,
         storedSize,
@@ -652,7 +459,7 @@ bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
   } else {
     BOLT_CHECK_LE(
         storedSize,
-        compressionBound(file_.compressionKind, uncompressedSize),
+        spillCompressionBound(file_.compressionKind, uncompressedSize),
         "Invalid compressed radix sort spill block size");
   }
   if (serializedBuffer_ != nullptr) {
@@ -673,30 +480,15 @@ bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
       static_cast<uint64_t>(uncompressedSize), expectedUncompressedSize);
   acquireSerializedBuffer(uncompressedSize);
   auto* block = serializedBuffer_->asMutable<char>();
-  if (compressionEnabled(file_.compressionKind)) {
-    if (file_.compressionKind == common::CompressionKind_LZ4) {
-      BOLT_CHECK_LE(
-          uncompressedSize,
-          LZ4_MAX_INPUT_SIZE,
-          "Invalid radix sort LZ4 spill block size");
-    }
-    if (compressedBuffer_ == nullptr ||
-        compressedBuffer_->capacity() < storedSize) {
-      compressedBuffer_ = AlignedBuffer::allocate<char>(storedSize, pool_);
-    }
-    input_->readBytes(compressedBuffer_->asMutable<char>(), storedSize);
-    {
-      MicrosecondTimer timer(&spillDecompressTimeUs_);
-      decompressBlock(
-          file_.compressionKind,
-          compressedBuffer_->as<char>(),
-          storedSize,
-          block,
-          uncompressedSize);
-    }
-  } else {
-    input_->readBytes(block, uncompressedSize);
-  }
+  readSpillBlockBody(
+      *input_,
+      file_.compressionKind,
+      uncompressedSize,
+      storedSize,
+      block,
+      compressedBuffer_,
+      pool_,
+      spillDecompressTimeUs_);
 
   keys.reserve(header.rowCount);
   char* keyRecords = block;
@@ -722,16 +514,11 @@ bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
 }
 
 uint64_t RadixSortSpillReader::spillReadIOTimeUs() const {
-  return spillReadIOTimeUs_ +
-      (input_ == nullptr ? 0 : input_->getSpillReadIOTime());
+  return inputSpillReadIOTimeUs();
 }
 
 void RadixSortSpillReader::close() {
-  if (input_ == nullptr) {
-    return;
-  }
-  spillReadIOTimeUs_ += input_->getSpillReadIOTime();
-  input_.reset();
+  closeInput();
 }
 
 int32_t RadixSortMergeStream::compare(const MergeStream& other) const {

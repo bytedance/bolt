@@ -66,8 +66,6 @@ class RadixSortSpillWriter {
   }
 
  private:
-  void cleanupFilesNoThrow() noexcept;
-
   void resetWriteState();
 
   void prepareWriteBuffer();
@@ -84,14 +82,10 @@ class RadixSortSpillWriter {
 
   void flush();
 
-  void closeFile();
-
-  SpillWriteFile* ensureFile();
-
-  const std::string pathPrefix_;
-  const common::SpillConfig ioConfig_;
+  const common::CompressionKind compressionKind_;
+  const uint64_t writeBufferSize_;
   memory::MemoryPool* const pool_;
-  folly::Synchronized<common::SpillStats>* const stats_;
+  std::unique_ptr<SpillWriter> spillWriter_;
 
   struct PendingRange {
     const char* keyBase{nullptr};
@@ -112,17 +106,13 @@ class RadixSortSpillWriter {
   std::vector<RadixSortSpillSectionSize> pendingSectionSizes_;
   std::vector<RadixSortSpillSectionSize> sizingSectionSizes_;
   BufferPtr buffer_;
-  BufferPtr compressedBuffer_;
   uint64_t normalBufferSize_{0};
   uint64_t pendingBodyCapacity_{0};
-  uint32_t nextFileId_{0};
-  std::unique_ptr<SpillWriteFile> currentFile_;
-  std::vector<RadixSortSpillFile> files_;
-  uint64_t currentFileRows_{0};
   uint64_t inputBytes_{0};
+  bool finished_{false};
 };
 
-class RadixSortSpillReader {
+class RadixSortSpillReader : protected SpillReadFileInput {
  public:
   RadixSortSpillReader(
       RadixSortSpillFile file,
@@ -170,16 +160,13 @@ class RadixSortSpillReader {
   RadixSortSpillFile file_;
   RadixSortSpillSectionMeta meta_;
   const PayloadRowLayout* const payloadLayout_;
-  memory::MemoryPool* const pool_;
   const uint64_t maxReusableSerializedBufferSize_;
-  std::unique_ptr<SpillInputStream> input_;
   RadixSortSpillReadBufferCache* const bufferCache_;
   BufferPtr serializedBuffer_;
   std::vector<BufferPtr> retainedSerializedBuffers_;
   BufferPtr compressedBuffer_;
   uint64_t spillReadTimeUs_{0};
   uint64_t spillDecompressTimeUs_{0};
-  uint64_t spillReadIOTimeUs_{0};
 };
 
 class RadixSortMergeStream : public MergeStream {

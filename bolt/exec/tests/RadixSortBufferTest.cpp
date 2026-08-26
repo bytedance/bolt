@@ -514,6 +514,15 @@ class RadixSortBufferTest : public testing::Test {
         stats.spillTotalTimeUs);
   }
 
+  auto spillFileWriteAccounting(const common::SpillStats& stats) {
+    return std::tie(
+        stats.spilledBytes,
+        stats.spilledFiles,
+        stats.spillWrites,
+        stats.spillFlushTimeUs,
+        stats.spillWriteTimeUs);
+  }
+
   ArrayVectorPtr makeIntegerArrays() {
     auto arrays = std::make_shared<ArrayVector>(
         pool(),
@@ -1537,6 +1546,9 @@ TEST_F(RadixSortBufferTest, spillStatsCoverInputAndOutputStageMetrics) {
   EXPECT_EQ(globalInputStats.spillRuns, 0);
   EXPECT_EQ(
       spillAccounting(globalInputStats), spillAccounting(*inputStageStats));
+  EXPECT_EQ(
+      spillFileWriteAccounting(globalInputStats),
+      spillFileWriteAccounting(*inputStageStats));
 
   buffer.addInput(slice(*input, 3, 3));
   buffer.addInput(slice(*input, 6, 3));
@@ -1573,6 +1585,9 @@ TEST_F(RadixSortBufferTest, spillStatsCoverInputAndOutputStageMetrics) {
       common::globalSpillStats() - globalStatsBeforeOutputSpill;
   EXPECT_EQ(globalOutputStats.spillRuns, 0);
   EXPECT_EQ(spillAccounting(globalOutputStats), spillAccounting(outputStats));
+  EXPECT_EQ(
+      spillFileWriteAccounting(globalOutputStats),
+      spillFileWriteAccounting(outputStats));
   const auto readStatsAfterOutputSpill = buffer.spillReadStats();
   ASSERT_TRUE(readStatsAfterOutputSpill);
   if (readStatsBeforeOutputSpill) {

@@ -390,7 +390,6 @@ void RadixSortBuffer::spillBuildingRun() {
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - spillBegin)
           .count();
-  const auto committedFileCount = files.size();
   spilledFiles_.insert(
       spilledFiles_.end(),
       std::make_move_iterator(files.begin()),
@@ -407,7 +406,6 @@ void RadixSortBuffer::spillBuildingRun() {
     locked->spilledInputBytes += spilledInputBytes;
     locked->spilledRows += runRows;
     locked->spilledPartitions = 1;
-    locked->spilledFiles += committedFileCount;
     locked->spillFillTimeUs += metrics.encodeTimeUs + metrics.appendTimeUs;
     locked->spillSortTimeUs += metrics.sortTimeUs;
     locked->spillSerializationTimeUs += serializationTimeUs;
@@ -417,9 +415,6 @@ void RadixSortBuffer::spillBuildingRun() {
   common::updateGlobalSpillAppendStats(runRows, serializationTimeUs);
   if (firstSpilledPartition) {
     common::incrementGlobalSpilledPartitionStats();
-  }
-  for (uint64_t file = 0; file < committedFileCount; ++file) {
-    common::incrementGlobalSpilledFiles();
   }
   common::updateGlobalSpillFillTime(
       metrics.encodeTimeUs + metrics.appendTimeUs);
@@ -494,7 +489,6 @@ void RadixSortBuffer::spillRemainingOutput() {
   }
   auto files = writer.finish();
   const auto spilledInputBytes = writer.inputBytes();
-  const auto committedFileCount = files.size();
 
   accumulateSpillReadStats();
   run_->clear();
@@ -518,7 +512,6 @@ void RadixSortBuffer::spillRemainingOutput() {
     locked->spilledInputBytes += spilledInputBytes;
     locked->spilledRows += spilledRows;
     locked->spilledPartitions = 1;
-    locked->spilledFiles += committedFileCount;
     locked->spillSerializationTimeUs += serializationTimeUs;
     locked->spillTotalTimeUs += totalTimeUs;
   }
@@ -526,9 +519,6 @@ void RadixSortBuffer::spillRemainingOutput() {
   common::updateGlobalSpillMemoryBytes(spilledInputBytes);
   if (firstSpilledPartition) {
     common::incrementGlobalSpilledPartitionStats();
-  }
-  for (uint64_t file = 0; file < committedFileCount; ++file) {
-    common::incrementGlobalSpilledFiles();
   }
   common::updateGlobalSpillTotalTime(totalTimeUs);
   prepareMerge();
