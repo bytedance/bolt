@@ -75,6 +75,14 @@ class RadixSortBuffer : public SortBufferBase {
                                 : std::make_optional(std::move(stats));
   }
 
+  size_t testingSpilledRunCount() const {
+    return spilledRuns_.size();
+  }
+
+  size_t testingMergeStreamCount() const {
+    return merger_ == nullptr ? 0 : merger_->testingNumStreams();
+  }
+
   std::optional<common::SpillReadStats> spillReadStats() const override;
 
   size_t numInputRows() const override;
@@ -109,7 +117,7 @@ class RadixSortBuffer : public SortBufferBase {
   uint64_t spillMemoryThreshold_{0};
   OperatorCtx* operatorCtx_{nullptr};
   std::unique_ptr<RadixSortRun> run_;
-  std::vector<RadixSortSpillFile> spilledFiles_;
+  std::vector<RadixSortSpillRun> spilledRuns_;
   folly::Synchronized<common::SpillStats> stats_;
   common::SpillReadStats completedSpillReadStats_;
   std::unique_ptr<RadixSortMerger> merger_;

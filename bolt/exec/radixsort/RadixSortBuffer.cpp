@@ -78,6 +78,23 @@ void cleanupSpillFilesNoThrow(
   }
 }
 
+void cleanupSpillRunsNoThrow(
+    const std::vector<RadixSortSpillRun>& runs) noexcept {
+  for (const auto& run : runs) {
+    cleanupSpillFilesNoThrow(run.files);
+  }
+}
+
+void appendSpillRun(
+    std::vector<RadixSortSpillRun>& spillRuns,
+    std::vector<RadixSortSpillFile>& files) {
+  if (files.empty()) {
+    return;
+  }
+  spillRuns.emplace_back();
+  spillRuns.back().files.swap(files);
+}
+
 } // namespace
 
 RadixSortBuffer::RadixSortBuffer(
@@ -132,7 +149,7 @@ RadixSortBuffer::RadixSortBuffer(
 RadixSortBuffer::~RadixSortBuffer() {
   merger_.reset();
   run_.reset();
-  cleanupSpillFilesNoThrow(spilledFiles_);
+  cleanupSpillRunsNoThrow(spilledRuns_);
   pool_->release();
 }
 
@@ -152,7 +169,7 @@ void RadixSortBuffer::noMoreInput() {
     run_->finalize();
   }
   noMoreInput_ = true;
-  if (!spilledFiles_.empty()) {
+  if (!spilledRuns_.empty()) {
     prepareMerge();
   }
   pool_->release();
@@ -390,10 +407,7 @@ void RadixSortBuffer::spillBuildingRun() {
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - spillBegin)
           .count();
-  spilledFiles_.insert(
-      spilledFiles_.end(),
-      std::make_move_iterator(files.begin()),
-      std::make_move_iterator(files.end()));
+  appendSpillRun(spilledRuns_, files);
   cleanupUncommittedFiles.dismiss();
   run_->clear();
   run_ = makeRun();
@@ -488,6 +502,8 @@ void RadixSortBuffer::spillRemainingOutput() {
     }
   }
   auto files = writer.finish();
+  auto cleanupUncommittedFiles =
+      folly::makeGuard([&files]() { cleanupSpillFilesNoThrow(files); });
   const auto spilledInputBytes = writer.inputBytes();
 
   accumulateSpillReadStats();
@@ -498,7 +514,9 @@ void RadixSortBuffer::spillRemainingOutput() {
   keyRows.reset();
   payloadRows.reset();
   keyRecordRows.reset();
-  spilledFiles_ = std::move(files);
+  spilledRuns_.clear();
+  appendSpillRun(spilledRuns_, files);
+  cleanupUncommittedFiles.dismiss();
   outputStageSpilled_ = true;
   const auto totalTimeUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
@@ -537,18 +555,31 @@ void RadixSortBuffer::accumulateSpillReadStats() {
 
 void RadixSortBuffer::prepareMerge() {
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
-  streams.reserve(spilledFiles_.size() + (run_->size() == 0 ? 0 : 1));
+  streams.reserve(spilledRuns_.size() + (run_->size() == 0 ? 0 : 1));
   auto meta = RadixSortSpillSectionMeta::create(
       run_->keyLayout(), run_->payloadLayout().get());
   auto readBufferCache = std::make_unique<RadixSortSpillReadBufferCache>();
-  for (const auto& file : spilledFiles_) {
-    streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
-        file,
-        meta,
-        run_->payloadLayout().get(),
-        memory::spillMemoryPool(),
-        spillConfig_->spillUringEnabled,
-        readBufferCache.get()));
+  for (const auto& spillRun : spilledRuns_) {
+    if (spillRun.files.empty()) {
+      continue;
+    }
+    if (spillRun.files.size() == 1) {
+      streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
+          spillRun.files.front(),
+          meta,
+          run_->payloadLayout().get(),
+          memory::spillMemoryPool(),
+          spillConfig_->spillUringEnabled,
+          readBufferCache.get()));
+    } else {
+      streams.push_back(std::make_unique<RadixSortConcatFilesSpillMergeStream>(
+          spillRun.files,
+          meta,
+          run_->payloadLayout().get(),
+          memory::spillMemoryPool(),
+          spillConfig_->spillUringEnabled,
+          readBufferCache.get()));
+    }
   }
   if (run_->size() > 0) {
     streams.push_back(
@@ -559,7 +590,7 @@ void RadixSortBuffer::prepareMerge() {
   // The merger streams own the spill files after successful construction.
   // Clear buffer-level metadata to avoid duplicate cleanup and filesystem
   // probes after each stream removes its file at EOF.
-  spilledFiles_.clear();
+  spilledRuns_.clear();
 }
 
 } // namespace bytedance::bolt::exec::radixsort

@@ -102,23 +102,26 @@ uint64_t checkedBlockBodySize(
   return *total;
 }
 
+void removeSpillFileNoThrow(const std::string& path) noexcept {
+  if (path.empty()) {
+    return;
+  }
+  try {
+    auto fs = filesystems::getFileSystem(path, nullptr);
+    if (fs->exists(path)) {
+      fs->remove(path);
+    }
+  } catch (const std::exception& error) {
+    LOG(WARNING) << "Failed to remove radix sort spill file '" << path
+                 << "': " << error.what();
+  } catch (...) {
+    LOG(WARNING) << "Failed to remove radix sort spill file '" << path << "'";
+  }
+}
+
 void cleanupSpillFilesNoThrow(const SpillFiles& files) noexcept {
   for (const auto& file : files) {
-    if (file.path.empty()) {
-      continue;
-    }
-    try {
-      auto fs = filesystems::getFileSystem(file.path, nullptr);
-      if (fs->exists(file.path)) {
-        fs->remove(file.path);
-      }
-    } catch (const std::exception& error) {
-      LOG(WARNING) << "Failed to remove radix sort spill file '" << file.path
-                   << "': " << error.what();
-    } catch (...) {
-      LOG(WARNING) << "Failed to remove radix sort spill file '" << file.path
-                   << "'";
-    }
+    removeSpillFileNoThrow(file.path);
   }
 }
 
@@ -651,6 +654,155 @@ void RadixSortSpillFileMergeStream::finishReading() {
 void RadixSortSpillFileMergeStream::closeNoThrow() noexcept {
   try {
     finishReading();
+  } catch (const std::exception& error) {
+    LOG(WARNING) << "Failed to close radix sort spill input: " << error.what();
+  } catch (...) {
+    LOG(WARNING) << "Failed to close radix sort spill input";
+  }
+}
+
+RadixSortConcatFilesSpillMergeStream::RadixSortConcatFilesSpillMergeStream(
+    std::vector<RadixSortSpillFile> files,
+    RadixSortSpillSectionMeta meta,
+    const PayloadRowLayout* payloadLayout,
+    memory::MemoryPool* pool,
+    bool spillUringEnabled,
+    RadixSortSpillReadBufferCache* bufferCache)
+    : RadixSortMergeStream(meta.keyLayout),
+      meta_(std::move(meta)),
+      payloadLayout_(payloadLayout),
+      pool_(pool),
+      spillUringEnabled_(spillUringEnabled),
+      bufferCache_(bufferCache),
+      files_(std::move(files)) {
+  BOLT_CHECK(
+      !files_.empty(), "Radix sort spill run must have at least one file");
+  try {
+    loadNextFile();
+  } catch (...) {
+    closeNoThrow();
+    throw;
+  }
+}
+
+RadixSortConcatFilesSpillMergeStream::~RadixSortConcatFilesSpillMergeStream() {
+  closeNoThrow();
+}
+
+bool RadixSortConcatFilesSpillMergeStream::hasData() const {
+  return key_ != nullptr;
+}
+
+void RadixSortConcatFilesSpillMergeStream::pop() {
+  BOLT_DCHECK_NOT_NULL(current_);
+  current_->pop();
+  if (current_->hasData()) {
+    updateCurrent();
+    return;
+  }
+  retainCurrentFileStream();
+  loadNextFile();
+}
+
+uint64_t RadixSortConcatFilesSpillMergeStream::getSpillReadTime() const {
+  uint64_t time = completedSpillReadTimeUs_;
+  for (const auto& stream : retainedFileStreams_) {
+    time += stream->getSpillReadTime();
+  }
+  if (current_ != nullptr) {
+    time += current_->getSpillReadTime();
+  }
+  return time;
+}
+
+uint64_t RadixSortConcatFilesSpillMergeStream::getSpillDecompressTime() const {
+  uint64_t time = completedSpillDecompressTimeUs_;
+  for (const auto& stream : retainedFileStreams_) {
+    time += stream->getSpillDecompressTime();
+  }
+  if (current_ != nullptr) {
+    time += current_->getSpillDecompressTime();
+  }
+  return time;
+}
+
+uint64_t RadixSortConcatFilesSpillMergeStream::getSpillReadIOTime() const {
+  uint64_t time = completedSpillReadIOTimeUs_;
+  for (const auto& stream : retainedFileStreams_) {
+    time += stream->getSpillReadIOTime();
+  }
+  if (current_ != nullptr) {
+    time += current_->getSpillReadIOTime();
+  }
+  return time;
+}
+
+void RadixSortConcatFilesSpillMergeStream::releaseRetainedBuffers() {
+  for (auto& stream : retainedFileStreams_) {
+    completedSpillReadTimeUs_ += stream->getSpillReadTime();
+    completedSpillDecompressTimeUs_ += stream->getSpillDecompressTime();
+    completedSpillReadIOTimeUs_ += stream->getSpillReadIOTime();
+    stream->releaseRetainedBuffers();
+  }
+  retainedFileStreams_.clear();
+  if (current_ != nullptr) {
+    current_->releaseRetainedBuffers();
+  }
+}
+
+void RadixSortConcatFilesSpillMergeStream::loadNextFile() {
+  while (nextFileIndex_ < files_.size()) {
+    auto current = std::make_unique<RadixSortSpillFileMergeStream>(
+        files_[nextFileIndex_],
+        meta_,
+        payloadLayout_,
+        pool_,
+        spillUringEnabled_,
+        bufferCache_);
+    files_[nextFileIndex_].path.clear();
+    ++nextFileIndex_;
+    current_ = std::move(current);
+    if (current_->hasData()) {
+      updateCurrent();
+      return;
+    }
+    retainCurrentFileStream();
+  }
+  key_ = nullptr;
+  payload_ = nullptr;
+}
+
+void RadixSortConcatFilesSpillMergeStream::updateCurrent() {
+  key_ = current_->key();
+  payload_ = current_->payload();
+}
+
+void RadixSortConcatFilesSpillMergeStream::retainCurrentFileStream() {
+  if (current_ != nullptr) {
+    retainedFileStreams_.push_back(std::move(current_));
+  }
+}
+
+void RadixSortConcatFilesSpillMergeStream::
+    cleanupUnreadFilesNoThrow() noexcept {
+  for (auto i = nextFileIndex_; i < files_.size(); ++i) {
+    removeSpillFileNoThrow(files_[i].path);
+    files_[i].path.clear();
+  }
+}
+
+void RadixSortConcatFilesSpillMergeStream::closeNoThrow() noexcept {
+  try {
+    releaseRetainedBuffers();
+    if (current_ != nullptr) {
+      completedSpillReadTimeUs_ += current_->getSpillReadTime();
+      completedSpillDecompressTimeUs_ += current_->getSpillDecompressTime();
+      completedSpillReadIOTimeUs_ += current_->getSpillReadIOTime();
+      current_.reset();
+    }
+    cleanupUnreadFilesNoThrow();
+    key_ = nullptr;
+    payload_ = nullptr;
   } catch (const std::exception& error) {
     LOG(WARNING) << "Failed to close radix sort spill input: " << error.what();
   } catch (...) {
