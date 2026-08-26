@@ -2924,6 +2924,78 @@ TEST_F(TestReader, readNestedSchemaEvolutionWithIsNotNullFilter) {
   assertEqualVectors(expected, actual);
 }
 
+TEST_F(TestReader, readVarcharAsBooleanWithSelectiveStringEncodings) {
+  constexpr vector_size_t kSize = 20'000;
+  auto batch = makeRowVector(
+      {"row_number", "value"},
+      {makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+       makeFlatVector<StringView>(kSize, [](auto row) {
+        switch (row % 4) {
+          case 0:
+            return StringView("true");
+          case 1:
+            return StringView("0");
+          case 2:
+            return StringView(" YES ");
+          default:
+            return StringView("invalid");
+        }
+       })});
+
+  for (const auto dictionaryThreshold : {0.0f, 1.0f}) {
+    auto config = std::make_shared<dwrf::Config>();
+    config->set(
+        dwrf::Config::DICTIONARY_STRING_KEY_SIZE_THRESHOLD,
+        dictionaryThreshold);
+    auto [writer, reader] = createWriterReader(
+        {batch},
+        pool(),
+        config,
+        E2EWriterTestUtil::simpleFlushPolicyFactory(false));
+
+    auto requestedSchema = ROW({"row_number", "value"}, {BIGINT(), BOOLEAN()});
+    auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*requestedSchema);
+    scanSpec->childByName("row_number")->setFilter(
+        common::createBigintRange(1, kSize - 2, false, false));
+
+    RowReaderOptions rowReaderOpts;
+    rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+    rowReaderOpts.setScanSpec(scanSpec);
+    rowReaderOpts.setReturnFlatVector(true);
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+
+    vector_size_t totalRows = 0;
+    while (rowReader->next(4'096, actual) > 0) {
+      const auto firstRow = totalRows + 1;
+      std::vector<std::optional<bool>> expectedValues(actual->size());
+      for (vector_size_t row = 0; row < actual->size(); ++row) {
+        switch ((firstRow + row) % 4) {
+          case 0:
+          case 2:
+            expectedValues[row] = true;
+            break;
+          case 1:
+            expectedValues[row] = false;
+            break;
+          default:
+            expectedValues[row] = std::nullopt;
+        }
+      }
+      auto expected = makeRowVector(
+          {"row_number", "value"},
+          {makeFlatVector<int64_t>(actual->size(), [firstRow](auto row) {
+             return firstRow + row;
+           }),
+           makeNullableFlatVector<bool>(expectedValues)});
+      assertEqualVectors(expected, actual);
+      totalRows += actual->size();
+    }
+    EXPECT_EQ(totalRows, kSize - 2);
+  }
+}
+
 // Ensure there is enough data before switching to fast path.
 TEST_F(TestReader, selectiveStringDirectFastPath) {
   auto genStr = [](auto i) {

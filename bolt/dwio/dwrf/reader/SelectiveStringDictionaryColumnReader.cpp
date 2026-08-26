@@ -319,7 +319,7 @@ void SelectiveStringDictionaryColumnReader::makeFlat(VectorPtr* result) {
   }
   *result = std::make_shared<FlatVector<StringView>>(
       &memoryPool_,
-      requestedType(),
+      fileType_->type(),
       std::move(nulls),
       numValues_,
       std::move(values),
