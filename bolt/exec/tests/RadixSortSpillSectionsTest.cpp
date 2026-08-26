@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/exec/SpillFile.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 #include "bolt/exec/radixsort/RadixSortSpill.h"
@@ -416,6 +417,35 @@ class RadixSortSpillSectionsTest : public testing::Test {
     return value;
   }
 
+  static std::vector<char> readSpillBytes(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    BOLT_CHECK(file.good(), path);
+    const auto size = std::filesystem::file_size(path);
+    std::vector<char> bytes(size);
+    file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    BOLT_CHECK(file.good(), path);
+    return bytes;
+  }
+
+  std::unique_ptr<SpillInputStream> makeSpillInputStream(
+      const std::string& path) {
+    auto fs = filesystems::getFileSystem(path, nullptr);
+    std::vector<BufferPtr> readBuffers;
+    readBuffers.push_back(AlignedBuffer::allocate<char>(
+        (1 << 20) - AlignedBuffer::kPaddedSize, pool_.get()));
+    return std::make_unique<SpillInputStream>(
+        fs->openFileForRead(path), std::move(readBuffers), false);
+  }
+
+  static std::vector<std::string> directoryFiles(const std::string& path) {
+    std::vector<std::string> files;
+    for (const auto& entry : std::filesystem::directory_iterator(path)) {
+      files.push_back(entry.path().string());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+  }
+
   struct UncompressedSpillBlock {
     TestRadixSortSpillBlockHeader header;
     std::vector<char> body;
@@ -456,6 +486,7 @@ class RadixSortSpillSectionsTest : public testing::Test {
       bool outputStage = false) {
     auto directory = exec::test::TempDirectoryPath::create();
     folly::Synchronized<common::SpillStats> stats;
+    const auto globalStatsBefore = common::globalSpillStats();
     RadixSortSpillWriter writer(
         directory->path + "/spill",
         spillConfig(directory->path, compression, writeBufferSize),
@@ -483,7 +514,16 @@ class RadixSortSpillSectionsTest : public testing::Test {
     EXPECT_GT(file.size, 0);
     const auto written = stats.copy();
     EXPECT_EQ(written.spilledBytes, file.size);
+    EXPECT_EQ(written.spilledRows, 0);
+    EXPECT_EQ(written.spilledFiles, 1);
+    EXPECT_EQ(written.spillSerializationTimeUs, 0);
     EXPECT_GT(written.spillWrites, 0);
+    const auto globalDelta = common::globalSpillStats() - globalStatsBefore;
+    EXPECT_EQ(globalDelta.spilledBytes, written.spilledBytes);
+    EXPECT_EQ(globalDelta.spilledRows, 0);
+    EXPECT_EQ(globalDelta.spilledFiles, written.spilledFiles);
+    EXPECT_EQ(globalDelta.spillSerializationTimeUs, 0);
+    EXPECT_EQ(globalDelta.spillWrites, written.spillWrites);
     EXPECT_TRUE(std::filesystem::exists(file.path));
     return {
         std::move(directory),
@@ -527,6 +567,7 @@ class RadixSortSpillSectionsTest : public testing::Test {
     auto directory = exec::test::TempDirectoryPath::create();
     spillDirectories_.push_back(std::move(directory));
     folly::Synchronized<common::SpillStats> stats;
+    const auto globalStatsBefore = common::globalSpillStats();
     RadixSortSpillWriter writer(
         spillDirectories_.back()->path + "/spill",
         spillConfig(
@@ -565,8 +606,17 @@ class RadixSortSpillSectionsTest : public testing::Test {
     }
     const auto written = stats.copy();
     EXPECT_EQ(written.spilledBytes, totalSize);
+    EXPECT_EQ(written.spilledRows, 0);
+    EXPECT_EQ(written.spilledFiles, files.size());
+    EXPECT_EQ(written.spillSerializationTimeUs, 0);
     EXPECT_EQ(totalRows, storage.size());
     EXPECT_GT(written.spillWrites, 0);
+    const auto globalDelta = common::globalSpillStats() - globalStatsBefore;
+    EXPECT_EQ(globalDelta.spilledBytes, written.spilledBytes);
+    EXPECT_EQ(globalDelta.spilledRows, 0);
+    EXPECT_EQ(globalDelta.spilledFiles, written.spilledFiles);
+    EXPECT_EQ(globalDelta.spillSerializationTimeUs, 0);
+    EXPECT_EQ(globalDelta.spillWrites, written.spillWrites);
     return files;
   }
 
@@ -1940,6 +1990,266 @@ TEST_F(
       payload,
       payloadLayout,
       common::CompressionKind_ZSTD);
+}
+
+TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterPreservesHeaderAndStats) {
+  struct TestHeader {
+    int32_t uncompressedSize;
+    int32_t storedSize;
+    uint32_t rowCount;
+    uint32_t marker;
+    uint64_t sectionBytes;
+  };
+  static_assert(sizeof(TestHeader) == 24);
+
+  for (const auto compression :
+       {common::CompressionKind_NONE,
+        common::CompressionKind_LZ4,
+        common::CompressionKind_ZSTD}) {
+    SCOPED_TRACE(compression);
+    auto directory = exec::test::TempDirectoryPath::create();
+    folly::Synchronized<common::SpillStats> stats;
+    uint64_t limitBytes = 0;
+    auto config = spillConfig(directory->path, compression, 1 << 20);
+    config.updateAndCheckSpillLimitCb = [&](uint64_t bytes) {
+      limitBytes += bytes;
+    };
+    SpillWriter writer(
+        directory->path + "/encoded",
+        std::numeric_limits<uint64_t>::max(),
+        config.spillIOConfig(1),
+        pool_.get(),
+        &stats);
+
+    constexpr int32_t kBodySize = 4096;
+    constexpr uint64_t kRows = 17;
+    TestHeader header{
+        -1,
+        -1,
+        static_cast<uint32_t>(kRows),
+        0xabcdefu,
+        static_cast<uint64_t>(kBodySize)};
+    std::vector<char> frame(sizeof(TestHeader) + kBodySize);
+    std::memcpy(frame.data(), &header, sizeof(header));
+    for (int32_t i = 0; i < kBodySize; ++i) {
+      frame[sizeof(TestHeader) + i] = static_cast<char>('a' + (i % 3));
+    }
+    const std::string expectedBody(
+        frame.data() + sizeof(TestHeader), kBodySize);
+
+    const auto globalStatsBefore = common::globalSpillStats();
+    const auto writtenBytes = writer.writeEncodedBlock(
+        frame.data(), sizeof(TestHeader), kBodySize, kRows);
+    const auto statsAfterWrite = stats.copy();
+    EXPECT_EQ(statsAfterWrite.spilledRows, 0);
+    EXPECT_EQ(statsAfterWrite.spillSerializationTimeUs, 0);
+    EXPECT_EQ(statsAfterWrite.spilledFiles, 0);
+    EXPECT_EQ(statsAfterWrite.spilledBytes, writtenBytes);
+    EXPECT_EQ(statsAfterWrite.spillWrites, 1);
+    EXPECT_EQ(limitBytes, writtenBytes);
+
+    TestHeader frameHeader;
+    std::memcpy(&frameHeader, frame.data(), sizeof(frameHeader));
+    EXPECT_EQ(frameHeader.uncompressedSize, kBodySize);
+    EXPECT_GT(frameHeader.storedSize, 0);
+    EXPECT_EQ(frameHeader.rowCount, kRows);
+    EXPECT_EQ(frameHeader.marker, header.marker);
+    EXPECT_EQ(frameHeader.sectionBytes, header.sectionBytes);
+    if (compression == common::CompressionKind_NONE) {
+      EXPECT_EQ(frameHeader.storedSize, kBodySize);
+    } else {
+      EXPECT_LE(
+          frameHeader.storedSize,
+          spillCompressionBound(compression, kBodySize));
+    }
+
+    auto files = writer.finish();
+    ASSERT_EQ(files.size(), 1);
+    EXPECT_EQ(files[0].rowCount, kRows);
+    EXPECT_EQ(files[0].compressionKind, compression);
+    EXPECT_EQ(files[0].size, writtenBytes);
+    EXPECT_TRUE(std::filesystem::exists(files[0].path));
+
+    const auto finalStats = stats.copy();
+    EXPECT_EQ(finalStats.spilledRows, 0);
+    EXPECT_EQ(finalStats.spillSerializationTimeUs, 0);
+    EXPECT_EQ(finalStats.spilledFiles, 1);
+    EXPECT_EQ(finalStats.spilledBytes, writtenBytes);
+    EXPECT_EQ(finalStats.spillWrites, 1);
+    const auto globalDelta = common::globalSpillStats() - globalStatsBefore;
+    EXPECT_EQ(globalDelta.spilledRows, 0);
+    EXPECT_EQ(globalDelta.spillSerializationTimeUs, 0);
+    EXPECT_EQ(globalDelta.spilledFiles, finalStats.spilledFiles);
+    EXPECT_EQ(globalDelta.spilledBytes, finalStats.spilledBytes);
+    EXPECT_EQ(globalDelta.spillWrites, finalStats.spillWrites);
+    EXPECT_EQ(globalDelta.spillFlushTimeUs, finalStats.spillFlushTimeUs);
+    EXPECT_EQ(globalDelta.spillWriteTimeUs, finalStats.spillWriteTimeUs);
+
+    const auto bytes = readSpillBytes(files[0].path);
+    ASSERT_EQ(bytes.size(), writtenBytes);
+    TestHeader diskHeader;
+    std::memcpy(&diskHeader, bytes.data(), sizeof(diskHeader));
+    EXPECT_EQ(diskHeader.uncompressedSize, frameHeader.uncompressedSize);
+    EXPECT_EQ(diskHeader.storedSize, frameHeader.storedSize);
+    EXPECT_EQ(diskHeader.rowCount, frameHeader.rowCount);
+    EXPECT_EQ(diskHeader.marker, frameHeader.marker);
+    EXPECT_EQ(diskHeader.sectionBytes, frameHeader.sectionBytes);
+
+    auto input = makeSpillInputStream(files[0].path);
+    TestHeader streamHeader;
+    input->readBytes(
+        reinterpret_cast<char*>(&streamHeader), sizeof(streamHeader));
+    EXPECT_EQ(streamHeader.uncompressedSize, diskHeader.uncompressedSize);
+    EXPECT_EQ(streamHeader.storedSize, diskHeader.storedSize);
+    EXPECT_EQ(streamHeader.rowCount, diskHeader.rowCount);
+    EXPECT_EQ(streamHeader.marker, diskHeader.marker);
+    EXPECT_EQ(streamHeader.sectionBytes, diskHeader.sectionBytes);
+    std::vector<char> decodedBody(kBodySize);
+    BufferPtr compressedBuffer;
+    uint64_t decompressTimeUs = 0;
+    readSpillBlockBody(
+        *input,
+        compression,
+        streamHeader.uncompressedSize,
+        streamHeader.storedSize,
+        decodedBody.data(),
+        compressedBuffer,
+        pool_.get(),
+        decompressTimeUs);
+    EXPECT_TRUE(input->atEnd());
+    if (compression == common::CompressionKind_NONE) {
+      EXPECT_EQ(compressedBuffer, nullptr);
+      EXPECT_EQ(decompressTimeUs, 0);
+    } else {
+      EXPECT_NE(compressedBuffer, nullptr);
+    }
+    EXPECT_EQ(
+        std::string_view(decodedBody.data(), decodedBody.size()),
+        std::string_view(expectedBody.data(), expectedBody.size()));
+  }
+}
+
+TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterValidatesWriteLifecycle) {
+  auto directory = exec::test::TempDirectoryPath::create();
+  folly::Synchronized<common::SpillStats> stats;
+  auto config = spillConfig(
+      directory->path, common::CompressionKind_NONE, /*writeBufferSize=*/1024);
+  SpillWriter writer(
+      directory->path + "/encoded",
+      std::numeric_limits<uint64_t>::max(),
+      config.spillIOConfig(1),
+      pool_.get(),
+      &stats);
+
+  std::array<char, 16> frame{};
+  EXPECT_THROW(writer.writeEncodedBlock(frame.data(), 4, 8, 1), BoltException);
+  EXPECT_THROW(writer.writeEncodedBlock(frame.data(), 8, 0, 1), BoltException);
+
+  auto files = writer.finish();
+  EXPECT_TRUE(files.empty());
+  EXPECT_THROW(writer.writeEncodedBlock(frame.data(), 8, 8, 1), BoltException);
+}
+
+TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterTracksRolledFileRows) {
+  auto directory = exec::test::TempDirectoryPath::create();
+  folly::Synchronized<common::SpillStats> stats;
+  uint64_t limitBytes = 0;
+  common::SpillConfig config = spillConfig(
+      directory->path,
+      common::CompressionKind_NONE,
+      1 << 20,
+      /*maxFileSize=*/150);
+  config.updateAndCheckSpillLimitCb = [&](uint64_t bytes) {
+    limitBytes += bytes;
+  };
+  SpillWriter writer(
+      directory->path + "/encoded",
+      config.maxFileSize,
+      config.spillIOConfig(1),
+      pool_.get(),
+      &stats);
+
+  struct TestHeader {
+    int32_t uncompressedSize;
+    int32_t storedSize;
+  };
+  auto writeBlock = [&](char fill, uint64_t rows) {
+    constexpr int32_t kBodySize = 96;
+    std::vector<char> frame(sizeof(TestHeader) + kBodySize, fill);
+    return writer.writeEncodedBlock(
+        frame.data(), sizeof(TestHeader), kBodySize, rows);
+  };
+
+  const auto globalStatsBefore = common::globalSpillStats();
+  const auto firstBytes = writeBlock('x', 3);
+  const auto secondBytes = writeBlock('y', 5);
+  const auto thirdBytes = writeBlock('z', 7);
+  auto files = writer.finish();
+
+  ASSERT_EQ(files.size(), 2);
+  EXPECT_EQ(files[0].id, 0);
+  EXPECT_EQ(files[1].id, 1);
+  EXPECT_EQ(files[0].rowCount, 8);
+  EXPECT_EQ(files[1].rowCount, 7);
+  EXPECT_EQ(files[0].size, firstBytes + secondBytes);
+  EXPECT_EQ(files[1].size, thirdBytes);
+  EXPECT_EQ(limitBytes, firstBytes + secondBytes + thirdBytes);
+  for (const auto& file : files) {
+    EXPECT_TRUE(std::filesystem::exists(file.path));
+  }
+
+  const auto finalStats = stats.copy();
+  EXPECT_EQ(finalStats.spilledRows, 0);
+  EXPECT_EQ(finalStats.spillSerializationTimeUs, 0);
+  EXPECT_EQ(finalStats.spilledBytes, firstBytes + secondBytes + thirdBytes);
+  EXPECT_EQ(finalStats.spillWrites, 3);
+  EXPECT_EQ(finalStats.spilledFiles, files.size());
+  const auto globalDelta = common::globalSpillStats() - globalStatsBefore;
+  EXPECT_EQ(globalDelta.spilledRows, 0);
+  EXPECT_EQ(globalDelta.spillSerializationTimeUs, 0);
+  EXPECT_EQ(globalDelta.spilledBytes, finalStats.spilledBytes);
+  EXPECT_EQ(globalDelta.spillWrites, finalStats.spillWrites);
+  EXPECT_EQ(globalDelta.spilledFiles, finalStats.spilledFiles);
+}
+
+TEST_F(RadixSortSpillSectionsTest, writerTransfersOwnershipOnlyAfterFinish) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage storage(pool_.get(), keyLayout, 4, 64);
+  storage.append(std::string_view("\x00\x00\x00\x00\x00\x00\x00\x01", 8));
+
+  {
+    auto directory = exec::test::TempDirectoryPath::create();
+    {
+      folly::Synchronized<common::SpillStats> stats;
+      RadixSortSpillWriter writer(
+          directory->path + "/spill",
+          spillConfig(directory->path, common::CompressionKind_NONE, 1 << 20),
+          pool_.get(),
+          &stats);
+      writer.writeKeyRange(keyLayout, nullptr, storage.keyDataAt(0), 1);
+      EXPECT_EQ(directoryFiles(directory->path).size(), 1);
+    }
+    EXPECT_TRUE(directoryFiles(directory->path).empty());
+  }
+
+  {
+    auto directory = exec::test::TempDirectoryPath::create();
+    std::vector<RadixSortSpillFile> files;
+    {
+      folly::Synchronized<common::SpillStats> stats;
+      RadixSortSpillWriter writer(
+          directory->path + "/spill",
+          spillConfig(directory->path, common::CompressionKind_NONE, 1 << 20),
+          pool_.get(),
+          &stats);
+      files = writer.writeRun(storage, nullptr);
+      ASSERT_EQ(files.size(), 1);
+      EXPECT_TRUE(std::filesystem::exists(files[0].path));
+    }
+    ASSERT_EQ(files.size(), 1);
+    EXPECT_TRUE(std::filesystem::exists(files[0].path));
+  }
 }
 
 TEST_F(RadixSortSpillSectionsTest, writerRollsFilesAtConfiguredMaxSize) {

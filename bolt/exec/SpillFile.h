@@ -149,6 +149,16 @@ class SpillWriter {
       uint32_t maxBatchRows = 0,
       std::optional<RowFormatInfo> rowInfo = std::nullopt);
 
+  /// Creates a writer for caller-defined spill formats. The caller provides
+  /// encoded blocks via writeEncodedBlock(); SpillWriter owns the file IO,
+  /// compression, and write accounting.
+  SpillWriter(
+      const std::string& pathPrefix,
+      uint64_t targetFileSize,
+      const common::SpillConfig::SpillIOConfig& ioConfig,
+      memory::MemoryPool* pool,
+      folly::Synchronized<common::SpillStats>* stats);
+
   /// Adds 'rows' for the positions in 'indices' into 'this'. The indices
   /// must produce a view where the rows are sorted if sorting is desired.
   /// Consecutive calls must have sorted data so that the first row of the
@@ -165,6 +175,16 @@ class SpillWriter {
   uint64_t write(
       const std::vector<char*, memory::StlAllocator<char*>>& rows,
       const RowFormatInfo& info);
+
+  /// Writes one caller-defined spill block. The caller owns the full header
+  /// layout, but the first two int32_t fields must be uncompressed body size
+  /// and stored body size. SpillWriter fills these fields after optional
+  /// compression.
+  uint64_t writeEncodedBlock(
+      char* frame,
+      uint32_t headerSize,
+      int32_t bodySize,
+      uint64_t numRows);
 
   /// Closes the current output file if any. Subsequent calls to write will
   /// start a new one.
@@ -185,6 +205,8 @@ class SpillWriter {
   uint64_t rowsInCurrentFile() const {
     return rowsInCurrentFile_;
   }
+
+  void cleanupFilesNoThrow() noexcept;
 
  private:
   FOLLY_ALWAYS_INLINE void checkNotFinished() const {
@@ -237,6 +259,7 @@ class SpillWriter {
   std::unique_ptr<VectorStreamGroup> batch_;
   std::unique_ptr<SpillWriteFile> currentFile_;
   SpillFiles finishedFiles_;
+  BufferPtr encodedBlockCompressBuffer_;
   uint32_t maxBatchRows_{0};
   uint32_t unflushedRows_{0};
   uint64_t unflushedSizeInRowVector_{0};
@@ -308,6 +331,54 @@ class SpillInputStream : public ByteInputStream {
   bool spillUringEnabled_;
 };
 
+bool isSpillCompressionEnabled(common::CompressionKind kind);
+
+int32_t maxUncompressedSpillBlockSize(common::CompressionKind kind);
+
+int32_t spillCompressionBound(common::CompressionKind kind, int32_t size);
+
+void readSpillBlockBody(
+    SpillInputStream& input,
+    common::CompressionKind compressionKind,
+    uint32_t uncompressedSize,
+    uint32_t storedSize,
+    char* output,
+    BufferPtr& compressedBuffer,
+    memory::MemoryPool* pool,
+    uint64_t& decompressTimeUs);
+
+class SpillReadFileInput {
+ protected:
+  SpillReadFileInput(
+      const std::string& path,
+      memory::MemoryPool* pool,
+      bool spillUringEnabled);
+
+  bool inputAtEnd() const {
+    return input_ == nullptr || input_->atEnd();
+  }
+
+  void prefetchInput() {
+    if (spillUringEnabled_ && input_ != nullptr) {
+      input_->prefetch(true);
+    }
+  }
+
+  uint64_t inputSpillReadIOTimeUs() const {
+    return completedSpillReadIOTimeUs_ +
+        (input_ == nullptr ? 0 : input_->getSpillReadIOTime());
+  }
+
+  void closeInput();
+
+  memory::MemoryPool* const pool_;
+  const bool spillUringEnabled_;
+  std::unique_ptr<SpillInputStream> input_;
+
+ private:
+  uint64_t completedSpillReadIOTimeUs_{0};
+};
+
 /// Represents a spill file for read which turns the serialized spilled data on
 /// disk back into a sequence of spilled row vectors.
 ///
@@ -315,7 +386,7 @@ class SpillInputStream : public ByteInputStream {
 /// needs to remove the unused spill files at some point later. For example, a
 /// query Task deletes all the generated spill files in one operation using
 /// rmdir() call.
-class SpillReadFileBase {
+class SpillReadFileBase : protected SpillReadFileInput {
  public:
   uint32_t id() const {
     return id_;
@@ -343,8 +414,7 @@ class SpillReadFileBase {
   }
 
   void prefetch() {
-    if (spillUringEnabled_)
-      input_->prefetch(true);
+    prefetchInput();
   }
 
  protected:
@@ -366,10 +436,6 @@ class SpillReadFileBase {
   const VectorSerde::Options readOptions_;
   const std::optional<VectorSerde::Kind> serdeKind_;
   VectorSerde* const serde_{nullptr};
-  bool spillUringEnabled_;
-  memory::MemoryPool* const pool_;
-
-  std::unique_ptr<SpillInputStream> input_;
   uint64_t spillReadIOTimeUs_{0};
 };
 
