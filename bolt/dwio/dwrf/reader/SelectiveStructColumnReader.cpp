@@ -69,9 +69,11 @@ SelectiveStructColumnReader::SelectiveStructColumnReader(
       childSpec->setSubscript(kConstantChildSpecSubscript);
       continue;
     }
-    auto childFileType = fileType_->childByName(childSpec->fieldName());
-    auto childRequestedType =
-        requestedType_->childByName(childSpec->fieldName());
+    const auto childIndex = childSpec->channel();
+    auto childFileType = columnReaderOptions.useColumnNamesForColumnMapping_
+        ? fileType_->childByName(childSpec->fieldName())
+        : fileType_->childAt(childIndex);
+    auto childRequestedType = requestedType_->childAt(childIndex);
     auto labels = params.streamLabels().append(folly::to<std::string>(i));
     auto childParams = DwrfParams(
         stripe,
@@ -82,12 +84,13 @@ SelectiveStructColumnReader::SelectiveStructColumnReader(
             .inMapDecoder = nullptr,
             .keySelectionCallback = nullptr});
     BOLT_CHECK(cs.shouldReadNode(childRequestedType->id()));
-    addChild(SelectiveDwrfReader::build(
-        columnReaderOptions,
-        childRequestedType,
-        childFileType,
-        childParams,
-        *childSpec));
+    addChild(
+        SelectiveDwrfReader::build(
+            columnReaderOptions,
+            childRequestedType,
+            childFileType,
+            childParams,
+            *childSpec));
     childSpec->setSubscript(children_.size() - 1);
   }
 }

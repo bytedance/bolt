@@ -2931,6 +2931,49 @@ TEST_F(TestReader, readNestedSchemaEvolutionWithIsNotNullFilter) {
   assertEqualVectors(expected, actual);
 }
 
+TEST_F(TestReader, readNestedSchemaEvolutionByPosition) {
+  constexpr vector_size_t kSize = 100;
+  auto fileSchema =
+      ROW({"chat_id", "meta_details"},
+          {BIGINT(), ROW({"group_id", "chatter_id"}, {BIGINT(), VARCHAR()})});
+  auto data = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>(kSize, folly::identity),
+       makeRowVector(
+           {"group_id", "chatter_id"},
+           {makeFlatVector<int64_t>(kSize, folly::identity),
+            makeFlatVector<std::string>(
+                kSize, [](auto row) { return row % 2 ? "true" : "false"; })})});
+  ASSERT_EQ(data->type()->toString(), fileSchema->toString());
+
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {VARCHAR(), BOOLEAN()})});
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("meta_details")
+      ->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(kSize, actual), kSize);
+  auto expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>(kSize, folly::identity),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeFlatVector<std::string>(
+                kSize, [](auto row) { return std::to_string(row); }),
+            makeFlatVector<bool>(kSize, [](auto row) { return row % 2; })})});
+  assertEqualVectors(expected, actual);
+}
+
 TEST_F(TestReader, readVarcharAsBooleanWithSelectiveStringEncodings) {
   constexpr vector_size_t kSize = 20'000;
   auto batch = makeRowVector(
