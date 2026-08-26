@@ -478,6 +478,12 @@ class RadixSortSpillSectionsTest : public testing::Test {
     return payloads;
   }
 
+  static std::string fixed8Key(uint8_t value) {
+    std::string key(sizeof(uint64_t), '\0');
+    key.back() = static_cast<char>(value);
+    return key;
+  }
+
   SpilledRun spillSingleRun(
       const RadixSortRunStorage& storage,
       const PayloadRowLayout* payloadLayout,
@@ -2584,6 +2590,154 @@ TEST_F(RadixSortSpillSectionsTest, fileMergeStreamRemovesOwnedFile) {
     if (failure == Failure::kMissing) {
       std::filesystem::rename(missingPath, spillPath);
     }
+  }
+}
+
+TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamReadsSplitRunInOrder) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage storage(pool_.get(), keyLayout, 1, 64);
+  for (uint8_t value = 1; value <= 4; ++value) {
+    storage.append(fixed8Key(value));
+  }
+
+  auto files =
+      spillRunFiles(storage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  ASSERT_GT(files.size(), 1);
+  std::vector<std::string> filePaths;
+  filePaths.reserve(files.size());
+  for (const auto& file : files) {
+    filePaths.push_back(file.path);
+  }
+
+  {
+    RadixSortConcatFilesSpillMergeStream stream(
+        std::move(files),
+        RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+        nullptr,
+        pool_.get(),
+        false);
+    ASSERT_TRUE(stream.hasData());
+    uint64_t row = 0;
+    while (stream.hasData()) {
+      ASSERT_LT(row, storage.size());
+      EXPECT_EQ(
+          RadixSortKey(keyLayout, stream.key())
+              .compare(RadixSortKey(keyLayout, storage.keyDataAt(row))),
+          0)
+          << "row=" << row;
+      stream.pop();
+      stream.releaseRetainedBuffers();
+      ++row;
+    }
+    EXPECT_EQ(row, storage.size());
+  }
+  for (const auto& path : filePaths) {
+    EXPECT_FALSE(std::filesystem::exists(path));
+  }
+}
+
+TEST_F(
+    RadixSortSpillSectionsTest,
+    concatFileMergeStreamRetainsExhaustedFileBuffersUntilReleased) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage storage(pool_.get(), keyLayout, 1, 64);
+  for (uint8_t value = 1; value <= 2; ++value) {
+    storage.append(fixed8Key(value));
+  }
+
+  auto files =
+      spillRunFiles(storage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  ASSERT_EQ(files.size(), 2);
+  RadixSortConcatFilesSpillMergeStream stream(
+      std::move(files),
+      RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+      nullptr,
+      pool_.get(),
+      false);
+  ASSERT_TRUE(stream.hasData());
+  const auto* firstKey = stream.key();
+  EXPECT_EQ(
+      RadixSortKey(keyLayout, firstKey)
+          .compare(RadixSortKey(keyLayout, storage.keyDataAt(0))),
+      0);
+
+  stream.pop();
+  ASSERT_TRUE(stream.hasData());
+  EXPECT_EQ(
+      RadixSortKey(keyLayout, stream.key())
+          .compare(RadixSortKey(keyLayout, storage.keyDataAt(1))),
+      0);
+  EXPECT_EQ(
+      RadixSortKey(keyLayout, firstKey)
+          .compare(RadixSortKey(keyLayout, storage.keyDataAt(0))),
+      0);
+  stream.releaseRetainedBuffers();
+}
+
+TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamsMergeByLogicalRun) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage oddStorage(pool_.get(), keyLayout, 1, 64);
+  RadixSortRunStorage evenStorage(pool_.get(), keyLayout, 1, 64);
+  for (const auto value : {uint8_t{1}, uint8_t{3}, uint8_t{5}}) {
+    oddStorage.append(fixed8Key(value));
+  }
+  for (const auto value : {uint8_t{2}, uint8_t{4}, uint8_t{6}}) {
+    evenStorage.append(fixed8Key(value));
+  }
+
+  auto oddFiles = spillRunFiles(
+      oddStorage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  auto evenFiles = spillRunFiles(
+      evenStorage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  ASSERT_GT(oddFiles.size(), 1);
+  ASSERT_GT(evenFiles.size(), 1);
+
+  std::vector<std::string> filePaths;
+  for (const auto& file : oddFiles) {
+    filePaths.push_back(file.path);
+  }
+  for (const auto& file : evenFiles) {
+    filePaths.push_back(file.path);
+  }
+  RadixSortRunStorage expectedStorage(pool_.get(), keyLayout, 1, 64);
+  for (uint8_t value = 1; value <= 6; ++value) {
+    expectedStorage.append(fixed8Key(value));
+  }
+
+  std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+  streams.push_back(std::make_unique<RadixSortConcatFilesSpillMergeStream>(
+      std::move(oddFiles),
+      RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+      nullptr,
+      pool_.get(),
+      false));
+  streams.push_back(std::make_unique<RadixSortConcatFilesSpillMergeStream>(
+      std::move(evenFiles),
+      RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+      nullptr,
+      pool_.get(),
+      false));
+  RadixSortMerger merger(keyLayout, std::move(streams));
+  EXPECT_EQ(merger.testingNumStreams(), 2);
+
+  std::array<const char*, 6> keys;
+  std::array<char*, 6> payloads;
+  const auto count =
+      merger.collectRows(keys.size(), keys.data(), payloads.data());
+  ASSERT_EQ(count, keys.size());
+  for (size_t i = 0; i < keys.size(); ++i) {
+    EXPECT_EQ(
+        RadixSortKey(keyLayout, keys[i])
+            .compare(RadixSortKey(keyLayout, expectedStorage.keyDataAt(i))),
+        0)
+        << "row=" << i;
+  }
+  merger.releaseRetainedBuffers();
+  for (const auto& path : filePaths) {
+    EXPECT_FALSE(std::filesystem::exists(path));
   }
 }
 

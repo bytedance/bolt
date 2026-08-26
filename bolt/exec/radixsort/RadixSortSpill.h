@@ -35,6 +35,10 @@ struct RadixSortSpillFile {
   common::CompressionKind compressionKind{common::CompressionKind_NONE};
 };
 
+struct RadixSortSpillRun {
+  std::vector<RadixSortSpillFile> files;
+};
+
 struct RadixSortSpillReadBufferCache {
   BufferPtr serializedBuffer;
 };
@@ -282,6 +286,56 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
   uint32_t index_{0};
 };
 
+class RadixSortConcatFilesSpillMergeStream final : public RadixSortMergeStream {
+ public:
+  RadixSortConcatFilesSpillMergeStream(
+      std::vector<RadixSortSpillFile> files,
+      RadixSortSpillSectionMeta meta,
+      const PayloadRowLayout* payloadLayout,
+      memory::MemoryPool* pool,
+      bool spillUringEnabled,
+      RadixSortSpillReadBufferCache* bufferCache = nullptr);
+
+  ~RadixSortConcatFilesSpillMergeStream() override;
+
+  bool hasData() const override;
+
+  void pop() override;
+
+  uint64_t getSpillReadTime() const override;
+
+  uint64_t getSpillDecompressTime() const override;
+
+  uint64_t getSpillReadIOTime() const override;
+
+  void releaseRetainedBuffers() override;
+
+ private:
+  void loadNextFile();
+
+  void updateCurrent();
+
+  void retainCurrentFileStream();
+
+  void cleanupUnreadFilesNoThrow() noexcept;
+
+  void closeNoThrow() noexcept;
+
+  RadixSortSpillSectionMeta meta_;
+  const PayloadRowLayout* const payloadLayout_;
+  memory::MemoryPool* const pool_;
+  const bool spillUringEnabled_;
+  RadixSortSpillReadBufferCache* const bufferCache_;
+  std::vector<RadixSortSpillFile> files_;
+  size_t nextFileIndex_{0};
+  std::unique_ptr<RadixSortSpillFileMergeStream> current_;
+  std::vector<std::unique_ptr<RadixSortSpillFileMergeStream>>
+      retainedFileStreams_;
+  uint64_t completedSpillReadTimeUs_{0};
+  uint64_t completedSpillDecompressTimeUs_{0};
+  uint64_t completedSpillReadIOTimeUs_{0};
+};
+
 class RadixSortMerger {
  public:
   using CompareKeys = int32_t (*)(const char*, const char*, uint32_t);
@@ -301,6 +355,10 @@ class RadixSortMerger {
   uint64_t getSpillReadIOTime() const;
 
   void releaseRetainedBuffers();
+
+  size_t testingNumStreams() const {
+    return streams_.size();
+  }
 
  private:
   using StreamIndex = uint16_t;

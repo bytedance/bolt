@@ -335,12 +335,13 @@ class RadixSortBufferTest : public testing::Test {
   common::SpillConfig spillConfig(
       const std::string& directory,
       const std::string& compressionKind = "none",
-      common::UpdateAndCheckSpillLimitCB spillLimit = [](uint64_t) {}) const {
+      common::UpdateAndCheckSpillLimitCB spillLimit = [](uint64_t) {},
+      uint64_t maxFileSize = 0) const {
     return common::SpillConfig(
         [directory]() -> const std::string& { return directory; },
         std::move(spillLimit),
         "radix-sort-buffer-spill",
-        0,
+        maxFileSize,
         false,
         0,
         nullptr,
@@ -366,9 +367,14 @@ class RadixSortBufferTest : public testing::Test {
         const RowVectorPtr& input,
         const std::string& compression = "none",
         uint64_t spillMemoryThreshold = 0,
-        column_index_t keyChannel = 0)
+        column_index_t keyChannel = 0,
+        uint64_t maxFileSize = 0)
         : directory(exec::test::TempDirectoryPath::create()),
-          config(test.spillConfig(directory->path, compression)),
+          config(test.spillConfig(
+              directory->path,
+              compression,
+              [](uint64_t) {},
+              maxFileSize)),
           buffer(
               std::static_pointer_cast<const RowType>(input->type()),
               {keyChannel},
@@ -460,6 +466,24 @@ class RadixSortBufferTest : public testing::Test {
               std::to_string(row % 5);
         });
     return makeKeyPayloadIdRows(keys, payloads, idBase);
+  }
+
+  RowVectorPtr makeLargeStringKeyIdRows(
+      const std::vector<int64_t>& keyRanks,
+      int64_t idBase = 0) {
+    std::vector<std::optional<std::string>> keys;
+    keys.reserve(keyRanks.size());
+    for (vector_size_t row = 0; row < keyRanks.size(); ++row) {
+      auto key = fmt::format("{:08d}_", keyRanks[row]);
+      key.append(700 * 1024, static_cast<char>('a' + ((idBase + row) % 26)));
+      keys.push_back(std::move(key));
+    }
+    auto ids = generate<std::optional<int64_t>>(
+        keyRanks.size(), [idBase](vector_size_t row) { return idBase + row; });
+    return makeRows(
+        {"key", "id"},
+        {makeStringVector(VARCHAR(), keys),
+         makeVector<int64_t>(BIGINT(), ids)});
   }
 
   common::SpillStats runSpillPlanAndVerify(
@@ -1276,6 +1300,95 @@ TEST_F(RadixSortBufferTest, spillPlansMergeCorrectly) {
     runSpillPlanAndVerify(
         makeKeyPayloadIdRows(plan.keys), plan.runs, plan.outputBatchSize, 2);
   }
+}
+
+TEST_F(RadixSortBufferTest, splitSpillFilesMergeAsSingleLogicalRun) {
+  constexpr vector_size_t kRows = 4;
+  constexpr uint64_t kMaxFileSize = 512 * 1024;
+  auto input = makeLargeStringKeyIdRows(
+      generate<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }));
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      kMaxFileSize);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.spill();
+
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 1);
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
+  ASSERT_GT(buffer.spilledStats()->spilledFiles, 1);
+
+  buffer.noMoreInput();
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+  collectAndVerify(buffer, input, 257, 1);
+}
+
+TEST_F(RadixSortBufferTest, splitSpillFilesPreserveRunMergeFanIn) {
+  constexpr vector_size_t kRowsPerRun = 4;
+  constexpr uint64_t kMaxFileSize = 512 * 1024;
+  std::vector<int64_t> keys;
+  keys.reserve(kRowsPerRun * 2);
+  for (vector_size_t row = 0; row < kRowsPerRun; ++row) {
+    keys.push_back(2 * row + 1);
+  }
+  for (vector_size_t row = 0; row < kRowsPerRun; ++row) {
+    keys.push_back(2 * row);
+  }
+  auto input = makeLargeStringKeyIdRows(keys);
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      kMaxFileSize);
+  auto& buffer = spill.buffer;
+  buffer.addInput(slice(*input, 0, kRowsPerRun));
+  buffer.spill();
+  buffer.addInput(slice(*input, kRowsPerRun, kRowsPerRun));
+  buffer.spill();
+
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 2);
+  ASSERT_GT(buffer.spilledStats()->spilledFiles, 2);
+
+  buffer.noMoreInput();
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+  collectAndVerify(buffer, input, 1024, 1);
+}
+
+TEST_F(RadixSortBufferTest, splitOutputStageSpillFilesMergeAsSingleRun) {
+  constexpr vector_size_t kRows = 4;
+  constexpr uint64_t kMaxFileSize = 512 * 1024;
+  auto input = makeLargeStringKeyIdRows(
+      generate<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }));
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      kMaxFileSize);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+  auto prefix = buffer.getOutput(1);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 1);
+
+  spillRemainingOutputAndCheckStats(buffer, input->size() - prefix->size());
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
+  ASSERT_TRUE(buffer.spilledStats());
+  ASSERT_GT(buffer.spilledStats()->spilledFiles, 1);
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+
+  collectAndVerify(buffer, input, 257, 1, 0, 0, prefix);
 }
 
 TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
