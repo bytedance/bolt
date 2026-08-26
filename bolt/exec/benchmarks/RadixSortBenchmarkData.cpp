@@ -33,6 +33,7 @@ constexpr uint32_t kStringPayloadColumns = 8;
 constexpr uint32_t kBucketMetricColumns = 108;
 constexpr uint32_t kLowCardinalityArrayOnlyPayloadColumns = 30;
 constexpr uint32_t kLogPatternBigintPayloadColumns = 106;
+constexpr uint32_t kVeryWideMixedPayloadColumns = 320;
 
 CompareFlags flags(bool ascending = true, bool nullsFirst = false) {
   return CompareFlags{
@@ -102,6 +103,14 @@ bool hasBucketWriteComplexPayload(ScenarioKind kind) {
 bool isLowCardinalityInt32ArrayPayloadScenario(ScenarioKind kind) {
   return kind == ScenarioKind::kLowCardinalityInt32LogPatternPayload ||
       kind == ScenarioKind::kLowCardinalityInt32ArrayPayload;
+}
+
+bool isVeryWideMixedArrayPayloadColumn(uint32_t column) {
+  return column == 0 || column == 8 || column == 16 || column == 24;
+}
+
+bool isVeryWideMixedStringPayloadColumn(uint32_t column) {
+  return column == 4 || column == 12 || column == 20 || column == 28;
 }
 
 template <typename ValueAt, typename IsNullAt>
@@ -301,6 +310,26 @@ RowTypePtr rowTypeFor(ScenarioKind kind, ScenarioProfile profile) {
       types.push_back(INTEGER());
       return ROW(std::move(names), std::move(types));
     }
+    case ScenarioKind::kSingleKeyVeryWideMixedPayload: {
+      std::vector<std::string> names{"is_2years_ord"};
+      std::vector<TypePtr> types{BIGINT()};
+      names.reserve(kVeryWideMixedPayloadColumns + 2);
+      types.reserve(kVeryWideMixedPayloadColumns + 2);
+      for (uint32_t column = 0; column < kVeryWideMixedPayloadColumns;
+           ++column) {
+        names.push_back("payload_" + std::to_string(column));
+        if (isVeryWideMixedArrayPayloadColumn(column)) {
+          types.push_back(ARRAY(BIGINT()));
+        } else if (isVeryWideMixedStringPayloadColumn(column)) {
+          types.push_back(VARCHAR());
+        } else {
+          types.push_back(BIGINT());
+        }
+      }
+      names.push_back("id");
+      types.push_back(BIGINT());
+      return ROW(std::move(names), std::move(types));
+    }
     case ScenarioKind::kInlineVarchar:
     case ScenarioKind::kLongVarchar:
     case ScenarioKind::kVarcharCommonPrefix:
@@ -354,6 +383,9 @@ void addKeyMetadata(
   } else if (isLowCardinalityInt32ArrayPayloadScenario(kind)) {
     fixture.keyChannels = {
         static_cast<column_index_t>(fixture.rowType->size() - 1)};
+    fixture.keyFlags = {flags(true, true)};
+  } else if (kind == ScenarioKind::kSingleKeyVeryWideMixedPayload) {
+    fixture.keyChannels = {0};
     fixture.keyFlags = {flags(true, true)};
   } else {
     fixture.keyChannels = {0};
@@ -1034,6 +1066,61 @@ void addLowCardinalityInt32ArrayPayload(
   }
 }
 
+void addSingleKeyVeryWideMixedPayload(
+    memory::MemoryPool* pool,
+    const ScenarioSpec& spec,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) {
+        const auto index = static_cast<uint64_t>(offset + row);
+        return static_cast<int64_t>(randomBits(index) % 2);
+      },
+      [&](vector_size_t row) {
+        return (static_cast<uint64_t>(offset + row) % 251) == 0;
+      }));
+
+  for (uint32_t column = 0; column < kVeryWideMixedPayloadColumns; ++column) {
+    if (isVeryWideMixedArrayPayloadColumn(column)) {
+      children.push_back(makeAverageLengthBigintArrayVector(
+          pool,
+          ARRAY(BIGINT()),
+          size,
+          column == 8 ? 18 : 6,
+          static_cast<uint64_t>(offset) + column * 131 + 17));
+    } else if (isVeryWideMixedStringPayloadColumn(column)) {
+      children.push_back(makeStringVector(
+          pool,
+          size,
+          [&](vector_size_t row) {
+            return "payload-" + std::to_string(column) + "-" +
+                std::to_string(randomBits(offset + row + column) % spec.rows);
+          },
+          [&](vector_size_t row) {
+            return (static_cast<uint64_t>(offset + row) + column) % 97 == 0;
+          }));
+    } else {
+      const auto nullable = column >= 160;
+      children.push_back(makeFlatVector<int64_t>(
+          pool,
+          BIGINT(),
+          size,
+          [&](vector_size_t row) {
+            return static_cast<int64_t>(
+                randomBits(offset + row + column * 997));
+          },
+          [=](vector_size_t row) {
+            return nullable &&
+                (static_cast<uint64_t>(offset + row) + column) % 29 == 0;
+          }));
+    }
+  }
+}
+
 } // namespace
 
 ScenarioFixture makeFixture(
@@ -1116,6 +1203,9 @@ ScenarioFixture makeFixture(
         break;
       case ScenarioKind::kLowCardinalityInt32ArrayPayload:
         addLowCardinalityInt32ArrayPayload(pool, offset, size, children);
+        break;
+      case ScenarioKind::kSingleKeyVeryWideMixedPayload:
+        addSingleKeyVeryWideMixedPayload(pool, spec, offset, size, children);
         break;
     }
     if (isLowCardinalityInt32ArrayPayloadScenario(spec.kind)) {

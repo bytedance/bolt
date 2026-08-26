@@ -58,6 +58,9 @@ struct Measurements {
   uint64_t spilledRows{0};
   uint64_t spilledBytes{0};
   uint64_t spillWrites{0};
+  uint64_t spillReadUs{0};
+  uint64_t spillDecompressUs{0};
+  uint64_t spillReadIOUs{0};
 };
 
 enum class Implementation : uint8_t {
@@ -127,6 +130,14 @@ double averageUs(uint64_t totalUs, uint64_t runs) {
   return runs == 0 ? 0 : static_cast<double>(totalUs) / runs;
 }
 
+double averageMs(uint64_t totalUs, uint64_t runs) {
+  return averageUs(totalUs, runs) / 1000;
+}
+
+double averageMiB(uint64_t totalBytes, uint64_t runs) {
+  return runs == 0 ? 0 : static_cast<double>(totalBytes) / runs / (1024 * 1024);
+}
+
 double ratio(
     uint64_t radixUs,
     uint64_t radixRuns,
@@ -137,6 +148,13 @@ double ratio(
     return 0;
   }
   return averageUs(radixUs, radixRuns) / legacyAverage;
+}
+
+uint32_t spillInputSplit(uint32_t scenario, uint32_t inputBatches) {
+  return kBenchmarkScenarioSpecs[scenario].kind ==
+          ScenarioKind::kSingleKeyVeryWideMixedPayload
+      ? inputBatches
+      : inputBatches / 2;
 }
 
 std::shared_ptr<memory::MemoryPool> makePool(
@@ -207,6 +225,7 @@ void record(
     uint32_t scenario,
     Implementation implementation,
     std::optional<common::SpillStats> spillStats,
+    std::optional<common::SpillReadStats> spillReadStats,
     uint64_t addBeforeSpillUs,
     uint64_t addAfterSpillUs,
     uint64_t spillUs,
@@ -223,6 +242,11 @@ void record(
     result.spilledRows += spillStats->spilledRows;
     result.spilledBytes += spillStats->spilledBytes;
     result.spillWrites += spillStats->spillWrites;
+  }
+  if (spillReadStats.has_value()) {
+    result.spillReadUs += spillReadStats->spillReadTimeUs;
+    result.spillDecompressUs += spillReadStats->spillDecompressTimeUs;
+    result.spillReadIOUs += spillReadStats->spillReadIOTimeUs;
   }
 }
 
@@ -250,7 +274,7 @@ void legacySpillE2E(unsigned iterations, uint32_t scenario) {
 
     suspender.dismiss();
     const auto addInputBegin = std::chrono::steady_clock::now();
-    const auto split = fixture.inputs.size() / 2;
+    const auto split = spillInputSplit(scenario, fixture.inputs.size());
     for (uint32_t index = 0; index < split; ++index) {
       buffer.addInput(fixture.inputs[index]);
     }
@@ -276,6 +300,7 @@ void legacySpillE2E(unsigned iterations, uint32_t scenario) {
         scenario,
         Implementation::kLegacy,
         buffer.spilledStats(),
+        buffer.spillReadStats(),
         addInputUs,
         addAfterSpillUs,
         spillUs,
@@ -305,7 +330,7 @@ void radixSpillE2E(unsigned iterations, uint32_t scenario) {
 
     suspender.dismiss();
     const auto addInputBegin = std::chrono::steady_clock::now();
-    const auto split = fixture.inputs.size() / 2;
+    const auto split = spillInputSplit(scenario, fixture.inputs.size());
     for (uint32_t index = 0; index < split; ++index) {
       buffer.addInput(fixture.inputs[index]);
     }
@@ -331,6 +356,7 @@ void radixSpillE2E(unsigned iterations, uint32_t scenario) {
         scenario,
         Implementation::kRadix,
         buffer.spilledStats(),
+        buffer.spillReadStats(),
         addInputUs,
         addAfterSpillUs,
         spillUs,
@@ -398,20 +424,53 @@ void printSummary() {
           static_cast<double>(result.spillUs) / result.runs / 1000,
           static_cast<double>(result.finalizeUs) / result.runs / 1000,
           static_cast<double>(result.outputUs) / result.runs / 1000,
-          static_cast<double>(result.spilledBytes) / result.runs /
-              (1024 * 1024),
+          averageMiB(result.spilledBytes, result.runs),
           static_cast<double>(result.spillWrites) / result.runs);
     }
   }
+
+  std::printf("\nSpill read breakdown\n");
+  std::printf(
+      "%-48s %-8s %12s %12s %12s %12s\n",
+      "scenario",
+      "impl",
+      "read ms",
+      "decomp ms",
+      "readIO ms",
+      "read MiB/s");
+  for (uint32_t scenario = 0; scenario < kBenchmarkScenarioSpecs.size();
+       ++scenario) {
+    for (uint32_t impl = 0; impl < 2; ++impl) {
+      const auto& result = measurements[scenario][impl];
+      if (result.runs == 0) {
+        continue;
+      }
+      const auto readSeconds =
+          averageUs(result.spillReadUs, result.runs) / 1'000'000;
+      const auto readMiBPerSecond = readSeconds == 0
+          ? 0
+          : averageMiB(result.spilledBytes, result.runs) / readSeconds;
+      std::printf(
+          "%-48s %-8s %12.2f %12.2f %12.2f %12.2f\n",
+          kBenchmarkScenarioSpecs[scenario].name,
+          impl == 0 ? "legacy" : "radix",
+          averageMs(result.spillReadUs, result.runs),
+          averageMs(result.spillDecompressUs, result.runs),
+          averageMs(result.spillReadIOUs, result.runs),
+          readMiBPerSecond);
+    }
+  }
+
   std::printf("\nRadix / legacy phase ratios\n");
   std::printf(
-      "%-36s %10s %10s %10s %10s %10s\n",
+      "%-48s %10s %10s %10s %10s %10s %10s\n",
       "scenario",
       "add1 x",
       "add2 x",
       "spill x",
       "final x",
-      "out x");
+      "out x",
+      "read x");
   for (uint32_t scenario = 0; scenario < kBenchmarkScenarioSpecs.size();
        ++scenario) {
     const auto& legacy =
@@ -422,7 +481,7 @@ void printSummary() {
       continue;
     }
     std::printf(
-        "%-36s %10.2f %10.2f %10.2f %10.2f %10.2f\n",
+        "%-48s %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f\n",
         kBenchmarkScenarioSpecs[scenario].name,
         ratio(
             radix.addBeforeSpillUs,
@@ -436,12 +495,13 @@ void printSummary() {
             legacy.runs),
         ratio(radix.spillUs, radix.runs, legacy.spillUs, legacy.runs),
         ratio(radix.finalizeUs, radix.runs, legacy.finalizeUs, legacy.runs),
-        ratio(radix.outputUs, radix.runs, legacy.outputUs, legacy.runs));
+        ratio(radix.outputUs, radix.runs, legacy.outputUs, legacy.runs),
+        ratio(radix.spillReadUs, radix.runs, legacy.spillReadUs, legacy.runs));
   }
   std::printf(
       "Legacy SortBuffer uses row-based %s spill with SpillConfig JIT enabled "
       "for spill-run sorting and row-based spill merge. Radix spill uses radix "
-      "row-format spill with compressionKind=%s.\n",
+      "section-format spill with compressionKind=%s.\n",
       legacyRowBasedSpillMode().c_str(),
       FLAGS_spill_compression_kind.c_str());
 }
@@ -494,6 +554,10 @@ BENCHMARK_DRAW_LINE();
 RADIX_SORT_SPILL_BENCHMARK_PAIR(bucket_write_string_payload_1m_spill, 18);
 BENCHMARK_DRAW_LINE();
 RADIX_SORT_SPILL_BENCHMARK_PAIR(bucket_write_complex_payload_1m_spill, 19);
+BENCHMARK_DRAW_LINE();
+RADIX_SORT_SPILL_BENCHMARK_PAIR(
+    single_key_very_wide_mixed_payload_256k_spill,
+    20);
 #else
 RADIX_SORT_SPILL_BENCHMARK_PAIR(random_i64_10m_spill, 0);
 BENCHMARK_DRAW_LINE();

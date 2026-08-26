@@ -21,7 +21,7 @@ target_sources(
     RadixSortKeyCodec.cpp
     RadixSortKey.cpp
     RadixSortSpill.cpp
-    RadixSortSpillRow.cpp
+    RadixSortSpillSections.cpp
     PayloadRow.cpp
     RadixSortRun.cpp
 )
@@ -34,7 +34,7 @@ if(BOLT_BUILD_TESTING OR BOLT_BUILD_RADIX_SORT_TEST)
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortKeyCodecTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortKeyTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixPayloadRowTest.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortSpillRowTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortSpillSectionsTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortRunSorterTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortBufferTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/RadixSortRunTest.cpp

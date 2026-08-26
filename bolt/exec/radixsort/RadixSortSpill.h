@@ -23,7 +23,7 @@
 #include "bolt/exec/SpillFile.h"
 #include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/radixsort/RadixSortRunStorage.h"
-#include "bolt/exec/radixsort/RadixSortSpillRow.h"
+#include "bolt/exec/radixsort/RadixSortSpillSections.h"
 
 namespace bytedance::bolt::exec::radixsort {
 
@@ -37,7 +37,6 @@ struct RadixSortSpillFile {
 
 struct RadixSortSpillReadBufferCache {
   BufferPtr serializedBuffer;
-  BufferPtr rowBuffer;
 };
 
 class RadixSortSpillWriter {
@@ -54,14 +53,13 @@ class RadixSortSpillWriter {
       const RadixSortRunStorage& storage,
       const PayloadRowLayout* payloadLayout);
 
-  void writeRows(
+  void writeKeyRange(
       const RadixSortKeyLayout& keyLayout,
       const PayloadRowLayout* payloadLayout,
-      const char* const* keys,
-      char* const* payloads,
+      const char* keyBase,
       vector_size_t count);
 
-  std::vector<RadixSortSpillFile> finishRows();
+  std::vector<RadixSortSpillFile> finish();
 
   uint64_t inputBytes() const {
     return inputBytes_;
@@ -78,14 +76,11 @@ class RadixSortSpillWriter {
 
   void resetBuffer(uint64_t bytes);
 
-  void ensureRowFits(uint64_t rowSize);
+  void ensureRecordFits(uint64_t recordSize);
 
-  void appendRow(const char* key);
+  void clearPendingRange();
 
-  void appendRow(const char* key, char* payload);
-
-  template <RadixSortKeyLayoutKind KIND>
-  void appendFixedRows(const char* keys, vector_size_t count);
+  void appendKeyRange(const char* keyBase, vector_size_t count);
 
   void flush();
 
@@ -98,20 +93,27 @@ class RadixSortSpillWriter {
   memory::MemoryPool* const pool_;
   folly::Synchronized<common::SpillStats>* const stats_;
 
-  struct PendingRow {
-    const char* key;
-    RadixSortSpillRowSize size;
+  struct PendingRange {
+    const char* keyBase{nullptr};
+    uint32_t rowCount{0};
+    uint64_t keyRecordBytes{0};
+    uint64_t keyHeapBytes{0};
+    uint64_t payloadFixedBytes{0};
+    uint64_t payloadHeapBytes{0};
+
+    uint64_t totalBytes() const {
+      return keyRecordBytes + keyHeapBytes + payloadFixedBytes +
+          payloadHeapBytes;
+    }
   };
 
-  RadixRow2RowSerdeMeta meta_;
-  std::vector<PendingRow> pendingRows_;
+  RadixSortSpillSectionMeta meta_;
+  PendingRange pendingRange_;
+  std::vector<RadixSortSpillSectionSize> pendingSectionSizes_;
   BufferPtr buffer_;
   BufferPtr compressedBuffer_;
   uint64_t normalBufferSize_{0};
   uint64_t pendingBodyCapacity_{0};
-  uint64_t pendingBodyBytes_{0};
-  uint64_t pendingKeyHeapBytes_{0};
-  uint64_t pendingPayloadHeapBytes_{0};
   uint32_t nextFileId_{0};
   std::unique_ptr<SpillWriteFile> currentFile_;
   std::vector<RadixSortSpillFile> files_;
@@ -123,13 +125,13 @@ class RadixSortSpillReader {
  public:
   RadixSortSpillReader(
       RadixSortSpillFile file,
-      RadixSortSpillRunMeta meta,
+      RadixSortSpillSectionMeta meta,
       const PayloadRowLayout* payloadLayout,
       memory::MemoryPool* pool,
       bool spillUringEnabled,
       RadixSortSpillReadBufferCache* bufferCache = nullptr);
 
-  bool nextBatch(std::vector<char*>& keys, std::vector<char*>& payloads);
+  bool nextBatch(std::vector<const char*>& keys);
 
   uint64_t spillReadTimeUs() const {
     return spillReadTimeUs_;
@@ -145,10 +147,6 @@ class RadixSortSpillReader {
 
   void releaseRetainedBuffers(bool releaseCurrentBuffer) {
     if (releaseCurrentBuffer) {
-      if (rowBuffer_ != nullptr) {
-        retainedRowBuffers_.push_back(std::move(rowBuffer_));
-      }
-      recycleRetainedRowBuffer();
       if (bufferCache_ == nullptr) {
         serializedBuffer_.reset();
       } else {
@@ -158,7 +156,6 @@ class RadixSortSpillReader {
       recycleRetainedSerializedBuffer();
       return;
     }
-    recycleRetainedRowBuffer();
     recycleRetainedSerializedBuffer();
   }
 
@@ -169,28 +166,15 @@ class RadixSortSpillReader {
 
   void recycleRetainedSerializedBuffer();
 
-  void acquireRowBuffer(uint64_t size);
-
-  void recycleRetainedRowBuffer();
-
-  bool nextFixedBatch(
-      char* block,
-      int32_t uncompressedSize,
-      char* output,
-      std::vector<char*>& keys,
-      std::vector<char*>& payloads);
-
   RadixSortSpillFile file_;
-  RadixSortSpillRunMeta meta_;
+  RadixSortSpillSectionMeta meta_;
   const PayloadRowLayout* const payloadLayout_;
   memory::MemoryPool* const pool_;
-  const uint64_t maxReusableRowBufferSize_;
+  const uint64_t maxReusableSerializedBufferSize_;
   std::unique_ptr<SpillInputStream> input_;
   RadixSortSpillReadBufferCache* const bufferCache_;
   BufferPtr serializedBuffer_;
-  BufferPtr rowBuffer_;
   std::vector<BufferPtr> retainedSerializedBuffers_;
-  std::vector<BufferPtr> retainedRowBuffers_;
   BufferPtr compressedBuffer_;
   uint64_t spillReadTimeUs_{0};
   uint64_t spillDecompressTimeUs_{0};
@@ -255,7 +239,7 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
  public:
   RadixSortSpillFileMergeStream(
       RadixSortSpillFile file,
-      RadixSortSpillRunMeta meta,
+      RadixSortSpillSectionMeta meta,
       const PayloadRowLayout* payloadLayout,
       memory::MemoryPool* pool,
       bool spillUringEnabled,
@@ -306,8 +290,7 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
 
   SpillFileGuard fileGuard_;
   RadixSortSpillReader reader_;
-  std::vector<char*> keys_;
-  std::vector<char*> payloads_;
+  std::vector<const char*> keys_;
   uint32_t index_{0};
 };
 

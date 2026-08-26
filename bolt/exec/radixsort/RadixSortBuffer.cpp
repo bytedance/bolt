@@ -446,14 +446,21 @@ void RadixSortBuffer::spillRemainingOutput() {
   const auto remainingRows = inputRows_ - outputRows_;
   const auto keyLayout = run_->keyLayout();
   const auto* payloadLayout = run_->payloadLayout().get();
-  auto writeRows = [&](vector_size_t count) {
+  BufferPtr keyRecordRows = AlignedBuffer::allocate<char>(
+      static_cast<uint64_t>(kSpillBatchRows) * keyLayout.width(), pool_);
+  auto* rawKeyRecords = keyRecordRows->asMutable<char>();
+  auto writeKeyBatch = [&](vector_size_t count) {
     const auto writeBegin = std::chrono::steady_clock::now();
-    writer.writeRows(
-        keyLayout,
-        payloadLayout,
-        rawKeys,
-        payloadLayout == nullptr ? nullptr : rawPayloads,
-        count);
+    const auto keyRecordBytes =
+        static_cast<uint64_t>(count) * keyLayout.width();
+    for (vector_size_t row = 0; row < count; ++row) {
+      std::memcpy(
+          rawKeyRecords + static_cast<uint64_t>(row) * keyLayout.width(),
+          rawKeys[row],
+          keyLayout.width());
+    }
+    keyRecordRows->setSize(keyRecordBytes);
+    writer.writeKeyRange(keyLayout, payloadLayout, rawKeyRecords, count);
     serializationTimeUs +=
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - writeBegin)
@@ -466,12 +473,12 @@ void RadixSortBuffer::spillRemainingOutput() {
     const auto count = merger_ != nullptr
         ? merger_->collectRows(requested, rawKeys, rawPayloads)
         : run_->collectRemainingRows(requested, rawKeys, rawPayloads);
-    writeRows(count);
+    writeKeyBatch(count);
     if (merger_ != nullptr) {
       merger_->releaseRetainedBuffers();
     }
   }
-  auto files = writer.finishRows();
+  auto files = writer.finish();
   const auto spilledInputBytes = writer.inputBytes();
   const auto committedFileCount = files.size();
 
@@ -482,6 +489,7 @@ void RadixSortBuffer::spillRemainingOutput() {
   mergePayloadRows_.reset();
   keyRows.reset();
   payloadRows.reset();
+  keyRecordRows.reset();
   spilledFiles_ = std::move(files);
   outputStageSpilled_ = true;
   const auto totalTimeUs =
@@ -526,7 +534,7 @@ void RadixSortBuffer::accumulateSpillReadStats() {
 void RadixSortBuffer::prepareMerge() {
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
   streams.reserve(spilledFiles_.size() + (run_->size() == 0 ? 0 : 1));
-  auto meta = RadixRow2RowSerdeMeta::create(
+  auto meta = RadixSortSpillSectionMeta::create(
       run_->keyLayout(), run_->payloadLayout().get());
   auto readBufferCache = std::make_unique<RadixSortSpillReadBufferCache>();
   for (const auto& file : spilledFiles_) {
