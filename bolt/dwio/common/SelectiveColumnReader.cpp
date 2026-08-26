@@ -29,6 +29,7 @@
  */
 #include <common/base/Exceptions.h>
 #include "bolt/dwio/common/SelectiveColumnReaderInternal.h"
+#include "bolt/dwio/common/TypeUtils.h"
 
 namespace bytedance::bolt::dwio::common {
 
@@ -315,6 +316,26 @@ void SelectiveColumnReader::getIntValues(
       BOLT_FAIL(
           "Not a valid type for integer reader: {}", requestedType->toString());
   }
+}
+
+void SelectiveColumnReader::convertStringValuesToBoolean(VectorPtr* result) {
+  auto strings = (*result)->as<SimpleVector<StringView>>();
+  auto booleans = BaseVector::create<FlatVector<bool>>(
+      BOOLEAN(), strings->size(), &memoryPool_);
+  for (vector_size_t i = 0; i < strings->size(); ++i) {
+    if (strings->isNullAt(i)) {
+      booleans->setNull(i, true);
+      continue;
+    }
+    const auto value = typeutils::sparkStringToBoolean(
+        folly::StringPiece(strings->valueAt(i)));
+    if (value.has_value()) {
+      booleans->set(i, value.value());
+    } else {
+      booleans->setNull(i, true);
+    }
+  }
+  *result = std::move(booleans);
 }
 
 void SelectiveColumnReader::getUnsignedIntValues(

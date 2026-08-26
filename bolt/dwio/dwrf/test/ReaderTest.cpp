@@ -2867,18 +2867,18 @@ TEST_F(TestReader, missingSubfieldsNoResultReusing) {
   assertEqualVectors(expected, actual);
 }
 
-TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
+TEST_F(TestReader, readNestedSchemaEvolutionWithIsNotNullFilter) {
   auto fileSchema = ROW(
       {"chat_id", "meta_details"},
       {BIGINT(),
-       ROW({"chatter_id", "is_manual_set_nickname"}, {BIGINT(), BOOLEAN()})});
+       ROW({"chatter_id", "is_manual_set_nickname"}, {BIGINT(), VARCHAR()})});
   auto data = makeRowVector(
       {"chat_id", "meta_details"},
       {makeFlatVector<int64_t>({1, 2, 3}),
        makeRowVector(
            {"chatter_id", "is_manual_set_nickname"},
            {makeNullableFlatVector<int64_t>({11, std::nullopt, 33}),
-            makeFlatVector<bool>({true, false, true})})});
+            makeNullableFlatVector<StringView>({"true", "0", "invalid"})})});
   ASSERT_EQ(data->type()->toString(), fileSchema->toString());
 
   auto [writer, reader] = createWriterReader({data}, pool());
@@ -2898,7 +2898,7 @@ TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
        makeRowVector(
            {"chatter_id", "is_manual_set_nickname"},
            {makeNullableFlatVector<StringView>({"11", std::nullopt, "33"}),
-            makeFlatVector<bool>({true, false, true})})});
+            makeNullableFlatVector<bool>({true, false, std::nullopt})})});
   assertEqualVectors(expected, actual);
 
   auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
@@ -2920,7 +2920,7 @@ TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
        makeRowVector(
            {"chatter_id", "is_manual_set_nickname"},
            {makeFlatVector<StringView>({"11", "33"}),
-            makeFlatVector<bool>({true, true})})});
+            makeNullableFlatVector<bool>({true, std::nullopt})})});
   assertEqualVectors(expected, actual);
 }
 

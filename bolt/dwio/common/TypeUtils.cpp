@@ -31,8 +31,24 @@
 #include "bolt/dwio/common/TypeUtils.h"
 #include "bolt/dwio/common/exception/Exception.h"
 
+#include <folly/String.h>
 #include <unordered_set>
 namespace bytedance::bolt::dwio::common::typeutils {
+
+std::optional<bool> sparkStringToBoolean(folly::StringPiece value) {
+  auto normalized = folly::trimWhitespace(value).str();
+  folly::toLowerAscii(normalized);
+  if (normalized == "true" || normalized == "t" || normalized == "y" ||
+      normalized == "yes" || normalized == "1") {
+    return true;
+  }
+  if (normalized == "false" || normalized == "f" || normalized == "n" ||
+      normalized == "no" || normalized == "0") {
+    return false;
+  }
+  return std::nullopt;
+}
+
 namespace {
 
 void checkChildrenSelected(
@@ -124,6 +140,7 @@ std::unordered_set<uint32_t> makeCompatibilityMap() {
   compat.insert(getKey(TypeKind::BIGINT, TypeKind::HUGEINT));
   compat.insert(getKey(TypeKind::REAL, TypeKind::DOUBLE));
   compat.insert(getKey(TypeKind::BIGINT, TypeKind::VARCHAR));
+  compat.insert(getKey(TypeKind::VARCHAR, TypeKind::BOOLEAN));
   return compat;
 }
 

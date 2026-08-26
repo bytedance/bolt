@@ -2480,6 +2480,52 @@ class IntegerToStringColumnReader : public ColumnReader {
   VectorPtr integerValues_;
 };
 
+class StringToBooleanColumnReader : public ColumnReader {
+ public:
+  StringToBooleanColumnReader(
+      std::shared_ptr<const dwio::common::TypeWithId> fileType,
+      std::unique_ptr<ColumnReader> stringReader,
+      memory::MemoryPool& memoryPool)
+      : ColumnReader(memoryPool, fileType),
+        stringReader_(std::move(stringReader)) {}
+
+  uint64_t skip(uint64_t numValues) override {
+    return stringReader_->skip(numValues);
+  }
+
+  void next(
+      uint64_t numValues,
+      VectorPtr& result,
+      const uint64_t* incomingNulls) override {
+    stringReader_->next(numValues, stringValues_, incomingNulls);
+    auto booleanValues = BaseVector::create<FlatVector<bool>>(
+        BOOLEAN(), numValues, &memoryPool_);
+    auto strings = stringValues_->as<SimpleVector<StringView>>();
+    for (vector_size_t i = 0; i < numValues; ++i) {
+      if (strings->isNullAt(i)) {
+        booleanValues->setNull(i, true);
+        continue;
+      }
+      const auto value = dwio::common::typeutils::sparkStringToBoolean(
+          folly::StringPiece(strings->valueAt(i)));
+      if (value.has_value()) {
+        booleanValues->set(i, value.value());
+      } else {
+        booleanValues->setNull(i, true);
+      }
+    }
+    result = std::move(booleanValues);
+  }
+
+  void seekToRowGroup(uint32_t index) override {
+    stringReader_->seekToRowGroup(index);
+  }
+
+ private:
+  std::unique_ptr<ColumnReader> stringReader_;
+  VectorPtr stringValues_;
+};
+
 std::unique_ptr<ColumnReader> buildIntegerReader(
     TypePtr requestedType,
     const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
@@ -2571,6 +2617,18 @@ std::unique_ptr<ColumnReader> ColumnReader::build(
           streamLabels);
     case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
+      if (requestedType->type()->isBoolean()) {
+        auto stringReader = ColumnReader::build(
+            fileType,
+            fileType,
+            stripe,
+            streamLabels,
+            executor,
+            decodingParallelismFactor,
+            flatMapContext);
+        return std::make_unique<StringToBooleanColumnReader>(
+            fileType, std::move(stringReader), stripe.getMemoryPool());
+      }
       switch (static_cast<int64_t>(stripe.getEncoding(ek).kind())) {
         case proto::ColumnEncoding_Kind_DICTIONARY:
         case proto::ColumnEncoding_Kind_DICTIONARY_V2: {

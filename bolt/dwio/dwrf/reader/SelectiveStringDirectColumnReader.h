@@ -39,6 +39,7 @@ class SelectiveStringDirectColumnReader
  public:
   using ValueType = StringView;
   SelectiveStringDirectColumnReader(
+      const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
       const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       DwrfParams& params,
       common::ScanSpec& scanSpec);
@@ -64,7 +65,10 @@ class SelectiveStringDirectColumnReader
     rawStringBuffer_ = nullptr;
     rawStringSize_ = 0;
     rawStringUsed_ = 0;
-    getFlatValues<StringView, StringView>(rows, result, requestedType());
+    getFlatValues<StringView, StringView>(rows, result, fileType_->type());
+    if (requestedType()->isBoolean()) {
+      convertStringValuesToBoolean(result);
+    }
   }
 
  private:
