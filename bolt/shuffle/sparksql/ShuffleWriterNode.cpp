@@ -76,8 +76,23 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
   BOLT_CHECK(
       freeMem.has_value(),
       "Expect ExecutionMemoryPool::getMinimumFreeMemoryForTask return value");
+  auto options = shuffleWriterOptions_;
+  if (options.forceShuffleWriterType ==
+      static_cast<int32_t>(ShuffleWriterType::Cell)) {
+    // Composite row vectors (HashAggregation composite output) switch the
+    // input layout mid-stream; the cell writer stays out of that entirely.
+    const bool compositePossible = RowVector::isComposite(rv) ||
+        operatorCtx_->driverCtx()->queryConfig().isHashAggregationCompositeOutputEnabled();
+    if (compositePossible) {
+      LOG(INFO) << "CellShuffleWriter does not support composite input; "
+                   "falling back to V1";
+      options.forceShuffleWriterType =
+          static_cast<int32_t>(ShuffleWriterType::V1);
+    }
+  }
   shuffleWriter_ = BoltShuffleWriter::create(
-      shuffleWriterOptions_,
+      options,
+      asRowType(rv->type()),
       rv->childrenSize() - 1,
       rv->size(),
       rv->estimateFlatSize(),

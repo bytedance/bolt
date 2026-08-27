@@ -49,6 +49,7 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltRowBasedSortShuffleWriter.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriterV2.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
 #include "common/memory/sparksql/ExecutionMemoryPool.h"
@@ -262,6 +263,7 @@ arrow::Status collectFlatVectorBuffer<bytedance::bolt::TypeKind::VARBINARY>(
 
 ShuffleWriterType decideBoltShuffleWriterType(
     const ShuffleWriterOptions& options,
+    const RowTypePtr& inputType,
     int32_t numColumnsExludePid,
     int64_t firstBatchRowNumber,
     int64_t firstBatchFlatSize,
@@ -282,7 +284,20 @@ ShuffleWriterType decideBoltShuffleWriterType(
   bool supportAdaptive = supportAdaptiveShuffleWriter(options.partitioning);
   // 0 is adaptive strategy, > 0 means shuffle type forced
   if (options.forceShuffleWriterType && supportAdaptive) {
-    return (ShuffleWriterType)options.forceShuffleWriterType;
+    const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
+    if (forced == ShuffleWriterType::Cell) {
+      // The cell writer covers the ColumnarPayload type table only; any
+      // other column type falls back to V1 (never a runtime error).
+      for (uint32_t i = 1; i < inputType->size(); ++i) {
+        if (!cell::CellLayout::isSupportedType(inputType->childAt(i))) {
+          LOG(INFO) << "CellShuffleWriter does not support "
+                    << inputType->childAt(i)->toString()
+                    << "; falling back to V1";
+          return ShuffleWriterType::V1;
+        }
+      }
+    }
+    return forced;
   }
   constexpr int32_t v1PartitionThreholdL1 = 10000;
   constexpr int32_t v1PartitionThreholdL2 = 50000;
@@ -356,8 +371,9 @@ ShuffleWriterType decideBoltShuffleWriterType(
   return type;
 }
 
-std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
+std::shared_ptr<ShuffleWriter> BoltShuffleWriter::create(
     const ShuffleWriterOptions& options,
+    const RowTypePtr& inputType,
     int32_t numColumnsExludePid,
     int64_t firstBatchRowNumber,
     int64_t firstBatchFlatSize,
@@ -366,12 +382,19 @@ std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
     arrow::MemoryPool* arrowPool) {
   ShuffleWriterType type = decideBoltShuffleWriterType(
       options,
+      inputType,
       numColumnsExludePid,
       firstBatchRowNumber,
       firstBatchFlatSize,
       memLimit,
       boltPool);
 
+  if (type == ShuffleWriterType::Cell) {
+    // The cell writer initializes its layout lazily on the first split and
+    // has no arrow-pool-based init step.
+    return std::make_shared<cell::CellShuffleWriter>(
+        options, boltPool, arrowPool);
+  }
   std::shared_ptr<BoltShuffleWriter> shuffle_writer;
   switch (type) {
     case ShuffleWriterType::V1: {
