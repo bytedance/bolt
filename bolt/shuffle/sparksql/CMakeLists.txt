@@ -33,6 +33,9 @@ bolt_add_library(
   BoltShuffleWriter.cpp
   BoltShuffleWriterV2.cpp
   CelebornReaderStreamIterator.cpp
+  cell/CellDirectory.cpp
+  cell/CellTypes.cpp
+  cell/ChunkAllocator.cpp
   compression/Compression.cpp
   compression/Codec.cpp
   compression/GzipCodec.cpp
