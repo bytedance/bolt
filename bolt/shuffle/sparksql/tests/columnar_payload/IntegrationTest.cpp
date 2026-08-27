@@ -58,10 +58,34 @@
 #include <gtest/gtest.h>
 
 #include "bolt/common/memory/Memory.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 namespace {
+
+/// Bridges the suite's Codec to the engine decoder's decompressor seam.
+class SuiteDecompressor : public cell::CellDecompressor {
+ public:
+  explicit SuiteDecompressor(Codec& codec) : codec_(codec) {}
+
+  bool decompress(
+      const uint8_t* data,
+      size_t size,
+      uint8_t* out,
+      size_t decodedSize) override {
+    std::vector<uint8_t> buffer;
+    if (!codec_.decompress(data, size, decodedSize, buffer) ||
+        buffer.size() != decodedSize) {
+      return false;
+    }
+    ::memcpy(out, buffer.data(), buffer.size());
+    return true;
+  }
+
+ private:
+  Codec& codec_;
+};
 
 /// Bridges the engine's compression stack to the reference Codec interface.
 ///
@@ -119,10 +143,12 @@ class EngineWriter : public PayloadWriter {
   Codec& codec_;
 };
 
-/// The engine's Reader, as the suite sees it.
+/// The engine's Reader, as the suite sees it: the Cell shuffle payload
+/// decoder (bolt/shuffle/sparksql/cell/CellPayload.h).
 class EngineReader : public PayloadReader {
  public:
-  explicit EngineReader(Codec& codec) : codec_(codec) {}
+  EngineReader(Codec& codec, memory::MemoryPool* pool)
+      : codec_(codec), pool_(pool) {}
 
   const char* name() const override {
     return "engine";
@@ -133,14 +159,11 @@ class EngineReader : public PayloadReader {
   }
 
   bool supports(const RowTypePtr& rowType) const override {
-    (void)rowType;
-    return true;
+    return cell::CellLayout::isSupportedRowType(rowType);
   }
 
-  /// A production Reader implements the L1 rules of format spec section 10;
-  /// the L2 ones are optional. Return false while the L1 rules are still
-  /// going in, and the suite stops requiring rejections not yet signed up
-  /// for.
+  /// The decoder implements every L1 rule of format spec section 10 (and
+  /// the cheap L2 ones that fall out of exact-consumption checks).
   bool rejectsMalformed() const override {
     return true;
   }
@@ -150,17 +173,29 @@ class EngineReader : public PayloadReader {
       const RowTypePtr& rowType,
       RowVectorPtr& out,
       std::string& error) override {
-    // TODO(reader): decode `payload` into `out`. `rowType` is supplied
-    // because the format carries no schema of its own (spec section 2).
-    (void)payload;
-    (void)rowType;
-    (void)out;
-    error = "the engine Reader is not implemented yet";
-    return false;
+    if (!cell::CellLayout::isSupportedRowType(rowType)) {
+      error = "unsupported row type";
+      return false;
+    }
+    cell::MemoryByteSource source(payload.data(), payload.size());
+    SuiteDecompressor decompressor(codec_);
+    cell::CellPayloadDecoder decoder(
+        cell::CellLayout::create(rowType), &decompressor, pool_);
+    RowVectorPtr result;
+    if (!decoder.decode(source, result, error)) {
+      return false;
+    }
+    if (!source.atEnd()) {
+      error = "trailing bytes after the payload";
+      return false;
+    }
+    out = std::move(result);
+    return true;
   }
 
  private:
   Codec& codec_;
+  memory::MemoryPool* pool_;
 };
 
 /// The narrowest set of *encodings* the format allows: every block PLAIN, so
@@ -258,9 +293,9 @@ TEST_F(
 /// Reader, stage one. Enable as soon as read() handles PLAIN blocks and RAW
 /// strings. None of the other encodings appear, but the compression envelope
 /// and Run concatenation do, because a Reader cannot avoid either.
-TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnPlainPayloads) {
+TEST_F(ColumnarPayloadIntegrationTest, engineReaderOnPlainPayloads) {
   EngineCodec codec;
-  EngineReader reader{codec};
+  EngineReader reader{codec, pool()};
 
   for (const auto& options : plainOptions()) {
     auto writer = makeReferenceWriter(codec, options);
@@ -274,9 +309,9 @@ TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnPlainPayloads) {
 /// reference, dictionaries with their RAW fallback, compression, the combined
 /// layouts, several Runs, and legal but non-minimal encodings the engine's own
 /// Writer may never emit.
-TEST_F(ColumnarPayloadIntegrationTest, DISABLED_engineReaderOnEveryEncoding) {
+TEST_F(ColumnarPayloadIntegrationTest, engineReaderOnEveryEncoding) {
   EngineCodec codec;
-  EngineReader reader{codec};
+  EngineReader reader{codec, pool()};
 
   for (const auto& options : everyEncodingOptions()) {
     auto writer = makeReferenceWriter(codec, options);
@@ -294,7 +329,7 @@ TEST_F(
     DISABLED_engineWriterAgainstEngineReader) {
   EngineCodec codec;
   EngineWriter writer{codec};
-  EngineReader reader{codec};
+  EngineReader reader{codec, pool()};
 
   const auto report = runConformanceSuite(writer, reader, pool());
   EXPECT_TRUE(report.ok()) << report.describe();
@@ -352,7 +387,7 @@ TEST_F(ColumnarPayloadIntegrationTest, plainOptionsEmitOnlyPlainBlocks) {
 TEST_F(ColumnarPayloadIntegrationTest, adaptersCompileAndReportThemselves) {
   EngineCodec codec;
   EngineWriter writer{codec};
-  EngineReader reader{codec};
+  EngineReader reader{codec, pool()};
 
   EXPECT_STREQ(writer.name(), "engine");
   EXPECT_STREQ(reader.name(), "engine");
