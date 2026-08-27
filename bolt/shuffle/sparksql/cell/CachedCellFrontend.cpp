@@ -221,6 +221,21 @@ void CachedCellFrontend::dispatchRaw(uint32_t col, const SplitBatch& batch) {
 void CachedCellFrontend::split(const SplitBatch& batch) {
   const auto& rowType = layout_->rowType();
   for (uint32_t col = 0; col < layout_->numColumns(); ++col) {
+    const auto& decodedCol = (*batch.decoded)[col];
+    if (decodedCol.isConstantMapping() && batch.numRows > 0 &&
+        decodedCol.isNullAt(0)) {
+      // The whole batch is null in this column: values contribute nothing
+      // (dense pack) and the nulls are a counted run per partition - an
+      // all-null column costs O(partitions) per batch and allocates no
+      // bitmap at all.
+      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+        const uint32_t count = batch.partition2RowCount[pid];
+        if (count > 0) {
+          nulls_->setNullRun(pid, col, batch.windowRowStart[pid], count);
+        }
+      }
+      continue;
+    }
     switch (rowType->childAt(col)->kind()) {
       case TypeKind::SMALLINT:
         dispatchEncoded<int16_t>(col, batch);
