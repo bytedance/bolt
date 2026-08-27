@@ -51,10 +51,22 @@ void CachedCellFrontend::flushEncoded(
     uint32_t stream,
     uint32_t pid,
     uint8_t* cur) {
-  uint8_t block[kMaxBlockBytes];
   const auto* line = reinterpret_cast<const T*>(cacheLine(stream, pid));
-  // The hot loop only flushes full lines; tails happen once per window.
-  const uint32_t bytes = cur[pid] == kBlockSourceBytes
+  const bool full = cur[pid] == kBlockSourceBytes;
+  // Common case: encode straight into the tail cell (reserve allocates
+  // nothing, so nothing can spill between reserve and commit).
+  if (auto* dst = reinterpret_cast<uint8_t*>(
+          cells_->tryReserve(pid, stream, kMaxBlockBytes))) {
+    const uint32_t bytes = full
+        ? encodeBlockFull<T>(line, dst)
+        : encodeBlock<T>(line, cur[pid] / sizeof(T), dst);
+    cells_->commit(pid, stream, bytes);
+    bumpPartitionBytes(pid, bytes);
+    cur[pid] = 0;
+    return;
+  }
+  uint8_t block[kMaxBlockBytes];
+  const uint32_t bytes = full
       ? encodeBlockFull<T>(line, block)
       : encodeBlock<T>(line, cur[pid] / sizeof(T), block);
   cells_->append(pid, stream, block, bytes, beforeGrow_);
