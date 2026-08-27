@@ -170,6 +170,11 @@ class EngineWriter : public PayloadWriter {
       options.partitioning = Partitioning::kHash;
       options.partitionWriterOptions.numPartitions = 1;
       options.partitionWriterOptions.dataFile = dataFile;
+      // The suite's codec seam is MaskCodec; keep the engine writer's
+      // payloads uncompressed so the reference reader needs no codec (a
+      // legal writer choice, spec section 5).
+      options.partitionWriterOptions.compressionType =
+          arrow::Compression::UNCOMPRESSED;
       cell::CellShuffleWriter writer(
           options, pool_, arrow::default_memory_pool());
       auto status = writer.split(withPid, 0);

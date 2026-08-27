@@ -115,6 +115,12 @@ struct CellShuffleOptions {
   // Rows per partition per window bound; keeps payloads under the reader's
   // row-count sanity limit.
   uint32_t maxWindowRows = 1u << 22;
+  // A payload run below this many bytes is stored uncompressed: codec
+  // overhead is not worth it. Compression itself is governed by the
+  // partition writer options' compressionType (UNCOMPRESSED disables it)
+  // and only happens at the final merge - spill files are transient and
+  // stay raw.
+  int64_t compressMinRunBytes = 1 << 10;
 };
 
 enum PartitionWriterType { kLocal, kCeleborn };
