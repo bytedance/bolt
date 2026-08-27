@@ -199,11 +199,14 @@ class BoltShuffleWriter : public ShuffleWriter {
     uint64_t valueOffset;
   };
 
-  // Factory method to create a BoltShuffleWriter instance depending on the
-  // options and input RowVector. May return
-  // BoltShuffleWriter/BoltShuffleWriterV2 or RowBasedSortShuffleWriter.
-  static std::shared_ptr<BoltShuffleWriter> create(
+  // Factory method to create a ShuffleWriter instance depending on the
+  // options and the first input RowVector. May return BoltShuffleWriter
+  // (V1), BoltShuffleWriterV2, RowBasedSortShuffleWriter or
+  // cell::CellShuffleWriter. `inputType` is the writer input row type, pid
+  // column included.
+  static std::shared_ptr<ShuffleWriter> create(
       const ShuffleWriterOptions& options,
+      const RowTypePtr& inputType,
       int32_t numColumnsExludePid,
       int64_t firstBatchRowNumber,
       int64_t firstBatchFlatSize,

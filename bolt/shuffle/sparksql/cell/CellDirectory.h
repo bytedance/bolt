@@ -43,12 +43,24 @@ class DataCells {
 
   /// Appends bytes to the (pid, stream) chain, allocating cells as needed.
   /// beforeGrow is forwarded to the allocator's chunk-grow choke point.
+  ///
+  /// Spill-safe by construction: every cell the append may need is allocated
+  /// (held unlinked) before a single byte is copied, so a spill fired from
+  /// beforeGrow — or from the pool's own arbitration inside a chunk grow —
+  /// sees only complete prior appends. The spill must release chains via
+  /// releaseAll()/releasePartition() (recycling), never the allocator's
+  /// resetAll(), so held ids stay valid.
   void append(
       uint32_t pid,
       uint32_t stream,
       const void* data,
       uint32_t bytes,
       const ChunkAllocator::GrowCallback& beforeGrow);
+
+  /// Recycles every chain's cells back to the allocator (the Run drain's
+  /// release step). Unlike ChunkAllocator::resetAll, ids not owned by any
+  /// chain survive.
+  void releaseAll();
 
   /// Total bytes buffered for (pid, stream).
   uint64_t bytes(uint32_t pid, uint32_t stream) const {
@@ -86,6 +98,14 @@ class DataCells {
     return totalBytes_;
   }
 
+  uint32_t numPartitions() const {
+    return numPartitions_;
+  }
+
+  uint32_t numStreams() const {
+    return numStreams_;
+  }
+
  private:
   struct ChainInfo {
     uint32_t firstCell{ChunkAllocator::kInvalidCell};
@@ -101,10 +121,8 @@ class DataCells {
     return static_cast<size_t>(stream) * numPartitions_ + pid;
   }
 
-  /// Appends a fresh cell to the chain and returns its id.
-  uint32_t appendCell(
-      ChainInfo& info,
-      const ChunkAllocator::GrowCallback& beforeGrow);
+  /// Links an already-allocated cell to the end of the chain.
+  void linkCell(ChainInfo& info, uint32_t id);
 
   memory::MemoryPool* const pool_;
   ChunkAllocator* const allocator_;
