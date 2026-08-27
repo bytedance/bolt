@@ -1,0 +1,124 @@
+/*
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include "bolt/common/memory/AllocationPool.h"
+#include "bolt/shuffle/sparksql/cell/SplitFrontend.h"
+
+namespace bytedance::bolt::shuffle::sparksql::cell {
+
+/// The CacheCell split front end: every (partition, stream) owns one 64-byte
+/// cache line; the row loop writes values into those lines and a full line
+/// becomes one Encoding Block (or a raw copy) appended to the DataCells.
+///
+/// Locality by construction: a column's cache lines are contiguous
+/// (64B * P, L2-resident), its cursors are a P-byte array (L1-resident), and
+/// the only scattered store of the hot loop lands inside that window.
+class CachedCellFrontend final : public SplitFrontend {
+ public:
+  CachedCellFrontend(
+      const CellLayout* layout,
+      DataCells* cells,
+      NullCells* nulls,
+      memory::MemoryPool* pool,
+      ChunkAllocator::GrowCallback beforeGrow);
+
+  void split(const SplitBatch& batch) override;
+  void flushAll() override;
+
+  uint64_t partitionBytes(uint32_t pid) const override {
+    return partitionBytes_[pid];
+  }
+
+  uint64_t maxPartitionBytes() const override {
+    return maxPartitionBytes_;
+  }
+
+  uint64_t variableBytes(uint32_t pid) const override {
+    return variableBytes_[pid];
+  }
+
+  const uint64_t* variableBytesArray() const override {
+    return variableBytes_.data();
+  }
+
+  void resetWindowStats() override;
+
+  int64_t residentBytes() const override {
+    return residentBytes_;
+  }
+
+ private:
+  char* cacheLine(uint32_t stream, uint32_t pid) const {
+    return cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_ + pid)
+                         << 6);
+  }
+
+  uint8_t* cursors(uint32_t stream) const {
+    return cursors_ + static_cast<size_t>(stream) * numPartitions_;
+  }
+
+  /// Encodes the full or partial cache line of an Encoding Loop stream into
+  /// the cells. Out of the hot loop by design.
+  template <typename T>
+  void flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur);
+
+  /// Flushes a raw stream's cache line bytes as they are.
+  void flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur);
+
+  void bumpPartitionBytes(uint32_t pid, uint64_t bytes) {
+    partitionBytes_[pid] += bytes;
+    if (partitionBytes_[pid] > maxPartitionBytes_) {
+      maxPartitionBytes_ = partitionBytes_[pid];
+    }
+  }
+
+  template <typename T, bool kHasNulls, bool kIndexed>
+  void splitFixed(uint32_t col, const SplitBatch& batch);
+
+  template <typename T, bool kHasNulls, bool kIndexed>
+  void splitRawFixed(uint32_t col, const SplitBatch& batch);
+
+  template <bool kHasNulls, bool kIndexed>
+  void splitString(uint32_t col, const SplitBatch& batch);
+
+  template <typename T>
+  void dispatchEncoded(uint32_t col, const SplitBatch& batch);
+
+  template <typename T>
+  void dispatchRaw(uint32_t col, const SplitBatch& batch);
+
+  const CellLayout* const layout_;
+  DataCells* const cells_;
+  NullCells* const nulls_;
+  const ChunkAllocator::GrowCallback beforeGrow_;
+  const uint32_t numPartitions_;
+  const uint32_t numStreams_;
+
+  /// Cache lines (64B * P * S) and cursors (P * S), one arena allocation,
+  /// huge-page backed above the threshold.
+  memory::AllocationPool arena_;
+  char* cacheBase_{nullptr};
+  uint8_t* cursors_{nullptr};
+  int64_t residentBytes_{0};
+
+  std::vector<uint64_t> partitionBytes_;
+  std::vector<uint64_t> variableBytes_;
+  uint64_t maxPartitionBytes_{0};
+};
+
+} // namespace bytedance::bolt::shuffle::sparksql::cell
