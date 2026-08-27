@@ -253,7 +253,19 @@ void SelectiveColumnReader::getIntValues(
       }
       break;
     case TypeKind::HUGEINT:
-      getFlatValues<int128_t, int128_t>(rows, result, requestedType);
+      switch (valueSize_) {
+        case 16:
+          getFlatValues<int128_t, int128_t>(rows, result, requestedType);
+          break;
+        case 8:
+          getFlatValues<int64_t, int128_t>(rows, result, requestedType);
+          break;
+        case 4:
+          getFlatValues<int32_t, int128_t>(rows, result, requestedType);
+          break;
+        default:
+          BOLT_FAIL("Unsupported value size: {}", valueSize_);
+      }
       break;
     case TypeKind::BIGINT:
       switch (valueSize_) {

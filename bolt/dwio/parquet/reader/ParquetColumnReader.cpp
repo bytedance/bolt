@@ -48,7 +48,64 @@
 #include "bolt/dwio/parquet/reader/TimestampColumnReader.h"
 #include "bolt/dwio/parquet/reader/VariantColumnReader.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
+#include "bolt/type/DecimalUtil.h"
 namespace bytedance::bolt::parquet {
+
+namespace {
+
+template <typename T>
+void applyDecimalScaleMultiplier(const VectorPtr& result, T multiplier) {
+  auto* flatResult = result->asUnchecked<FlatVector<T>>();
+  auto* rawValues = flatResult->mutableRawValues();
+  const auto* rawNulls = flatResult->rawNulls();
+  const auto size = flatResult->size();
+  if (!rawNulls) {
+    for (vector_size_t row = 0; row < size; ++row) {
+      rawValues[row] *= multiplier;
+    }
+  } else {
+    for (vector_size_t row = 0; row < size; ++row) {
+      if (!bits::isBitNull(rawNulls, row)) {
+        rawValues[row] *= multiplier;
+      }
+    }
+  }
+}
+
+void rescaleDecimalValues(
+    const TypePtr& fileType,
+    const TypePtr& requestedType,
+    const VectorPtr& result) {
+  BOLT_CHECK(fileType->isDecimal());
+  BOLT_CHECK(requestedType->isDecimal());
+
+  const auto fileScale = getDecimalPrecisionScale(*fileType).second;
+  const auto requestedScale = getDecimalPrecisionScale(*requestedType).second;
+  const auto scaleAdjust = requestedScale - fileScale;
+  BOLT_USER_CHECK_GE(
+      scaleAdjust,
+      0,
+      "Parquet does not support decimal scale narrowing: {}",
+      scaleAdjust);
+  BOLT_USER_CHECK_LE(
+      scaleAdjust,
+      LongDecimalType::kMaxPrecision,
+      "Decimal scale adjustment exceeds max precision: {}",
+      scaleAdjust);
+
+  // Schema validation guarantees enough target precision for scale widening.
+  if (scaleAdjust > 0) {
+    if (requestedType->isShortDecimal()) {
+      applyDecimalScaleMultiplier<int64_t>(
+          result, static_cast<int64_t>(DecimalUtil::kPowersOfTen[scaleAdjust]));
+    } else {
+      applyDecimalScaleMultiplier<int128_t>(
+          result, DecimalUtil::kPowersOfTen[scaleAdjust]);
+    }
+  }
+}
+
+} // namespace
 
 void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
   bool needConvertion = (castExprSet_ && castExprSet_->size() != 0);
@@ -74,6 +131,10 @@ void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
     getUnsignedIntValues(rows, requestedType, result);
   } else {
     getIntValues(rows, requestedType, result);
+  }
+
+  if (fileType.type()->isDecimal() && requestedType->isDecimal() && !allNull_) {
+    rescaleDecimalValues(fileType.type(), requestedType, *result);
   }
 
   if (needConvertion) {

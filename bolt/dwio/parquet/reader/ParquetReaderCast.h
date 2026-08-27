@@ -30,7 +30,9 @@ inline bool isReaderCastFilterMismatch(
       ((fileKind == TypeKind::TINYINT || fileKind == TypeKind::SMALLINT ||
         fileKind == TypeKind::INTEGER) &&
        requestedType->kind() == TypeKind::DOUBLE) ||
-      (fileType->isDate() && requestedType->isVarchar());
+      (fileType->isDate() && requestedType->isVarchar()) ||
+      (fileType->isDecimal() && requestedType->isDecimal() &&
+       !fileType->equivalent(*requestedType));
 }
 
 } // namespace bytedance::bolt::parquet
