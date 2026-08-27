@@ -75,7 +75,7 @@ class CachedCellFrontend final : public SplitFrontend {
   /// Encodes the full or partial cache line of an Encoding Loop stream into
   /// the cells. Out of the hot loop by design.
   template <typename T>
-  void flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur);
+  FOLLY_ALWAYS_INLINE void flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur);
 
   /// Flushes a raw stream's cache line bytes as they are.
   void flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur);
