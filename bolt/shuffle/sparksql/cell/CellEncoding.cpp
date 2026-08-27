@@ -20,54 +20,6 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
-/// Minimal two's-complement bit width of `value`: 1 for 0 and -1, up to 64.
-inline uint32_t signedBitWidth(int64_t value) {
-  return 64 - static_cast<uint32_t>(__builtin_clrsbll(value));
-}
-
-/// Bits needed for an unsigned delta; 0 for 0.
-inline uint32_t unsignedBitWidth(uint64_t value) {
-  return value == 0 ? 0 : 64 - static_cast<uint32_t>(__builtin_clzll(value));
-}
-
-/// Smallest byte count whose sign extension reproduces `value`, capped at
-/// maxBytes (always reachable: maxBytes bytes hold the full value).
-inline uint32_t narrowBytesFor(int64_t value, uint32_t maxBytes) {
-  const uint32_t bytes = (signedBitWidth(value) + 7) / 8;
-  return bytes < maxBytes ? bytes : maxBytes;
-}
-
-/// Packs `count` staged values, `bits` wide each (1..63), LSB-first into
-/// out. Writes ceil(count * bits / 8) bytes; trailing bits stay zero. The
-/// staging split is deliberate: masking / delta subtraction is data-parallel
-/// and auto-vectorizes, while this bit-stitch is a serial dependency chain
-/// the compiler can only unroll.
-inline uint8_t* packBits(
-    const uint64_t* staged,
-    uint32_t count,
-    uint32_t bits,
-    uint8_t* out) {
-  uint64_t acc = 0;
-  uint32_t accBits = 0;
-  for (uint32_t i = 0; i < count; ++i) {
-    const uint64_t v = staged[i];
-    acc |= v << accBits;
-    accBits += bits;
-    if (accBits >= 64) {
-      ::memcpy(out, &acc, 8);
-      out += 8;
-      accBits -= 64;
-      acc = accBits == 0 ? 0 : v >> (bits - accBits);
-    }
-  }
-  if (accBits > 0) {
-    const uint32_t bytes = (accBits + 7) / 8;
-    ::memcpy(out, &acc, bytes);
-    out += bytes;
-  }
-  return out;
-}
-
 /// Unpacks `count` values, `bits` wide each (1..63), LSB-first from `in`;
 /// the caller has verified in holds ceil(count * bits / 8) bytes. `put(i, v)`
 /// receives the raw unsigned bit pattern.
@@ -106,112 +58,6 @@ inline uint64_t loadLe(const uint8_t* in, uint32_t bytes) {
 }
 
 } // namespace
-
-template <typename T, typename Count>
-FOLLY_ALWAYS_INLINE uint32_t
-encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
-  constexpr uint32_t kWidth = sizeof(T);
-  constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
-  const uint32_t sourceBytes = count * kWidth;
-
-  // Two independent reductions vectorize; the equality test folds into
-  // them (all values equal iff min == max).
-  T minValue = values[0];
-  T maxValue = values[0];
-  for (uint32_t i = 1; i < count; ++i) {
-    const T value = values[i];
-    minValue = value < minValue ? value : minValue;
-    maxValue = value > maxValue ? value : maxValue;
-  }
-  const bool allEqual = minValue == maxValue;
-
-  // Candidate body sizes (spec section 7.3); selection mirrors the reference
-  // encoder: strict improvement in PLAIN, CONST, BIT_PACK, FOR order.
-  const uint32_t constBytes =
-      allEqual ? narrowBytesFor(static_cast<int64_t>(values[0]), kWidth) : 0;
-  const uint32_t packBitsNeeded = signedBitWidth(static_cast<int64_t>(minValue)) >
-          signedBitWidth(static_cast<int64_t>(maxValue))
-      ? signedBitWidth(static_cast<int64_t>(minValue))
-      : signedBitWidth(static_cast<int64_t>(maxValue));
-  const uint32_t bitWidth = packBitsNeeded <= kMaxPackBits ? packBitsNeeded : 0;
-  const uint64_t maxDelta = static_cast<uint64_t>(maxValue) -
-      static_cast<uint64_t>(minValue);
-  const uint32_t deltaBits = unsignedBitWidth(maxDelta);
-
-  uint32_t bestSize = sourceBytes;
-  EncodingKind bestKind = EncodingKind::kPlain;
-  if (constBytes != 0 && constBytes < bestSize) {
-    bestSize = constBytes;
-    bestKind = EncodingKind::kConstNarrow;
-  }
-  if (bitWidth != 0) {
-    const uint32_t size = (count * bitWidth + 7) / 8;
-    if (size < bestSize) {
-      bestSize = size;
-      bestKind = EncodingKind::kBitPack;
-    }
-  }
-  if (deltaBits <= 63) {
-    const uint32_t size = kWidth + (count * deltaBits + 7) / 8;
-    if (size < bestSize) {
-      bestSize = size;
-      bestKind = EncodingKind::kForBitPack;
-    }
-  }
-
-  uint8_t* pos = out;
-  switch (bestKind) {
-    case EncodingKind::kConstNarrow:
-      *pos++ = makeEncodingByte(EncodingKind::kConstNarrow, constBytes);
-      storeLe(pos, static_cast<uint64_t>(static_cast<int64_t>(values[0])), constBytes);
-      pos += constBytes;
-      break;
-    case EncodingKind::kBitPack: {
-      *pos++ = makeEncodingByte(EncodingKind::kBitPack, bitWidth);
-      const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
-      uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
-      for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
-        staged[i] = static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
-      }
-      pos = packBits(staged, count, bitWidth, pos);
-      break;
-    }
-    case EncodingKind::kForBitPack: {
-      *pos++ = makeEncodingByte(EncodingKind::kForBitPack, deltaBits);
-      storeLe(pos, static_cast<uint64_t>(static_cast<int64_t>(minValue)), kWidth);
-      pos += kWidth;
-      if (deltaBits > 0) {
-        const uint64_t base = static_cast<uint64_t>(minValue);
-        uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
-        for (uint32_t i = 0; i < count; ++i) { // widen + subtract: vectorizes
-          staged[i] = static_cast<uint64_t>(values[i]) - base;
-        }
-        pos = packBits(staged, count, deltaBits, pos);
-      }
-      break;
-    }
-    case EncodingKind::kPlain:
-      *pos++ = makeEncodingByte(EncodingKind::kPlain, 0);
-      ::memcpy(pos, values, sourceBytes);
-      pos += sourceBytes;
-      break;
-  }
-  return static_cast<uint32_t>(pos - out);
-}
-
-template <typename T>
-uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
-  return encodeBlockImpl(values, count, out);
-}
-
-template <typename T>
-uint32_t encodeBlockFull(const T* values, uint8_t* out) {
-  return encodeBlockImpl(
-      static_cast<const T*>(
-          __builtin_assume_aligned(values, kBlockSourceBytes)),
-      std::integral_constant<uint32_t, kBlockSourceBytes / sizeof(T)>{},
-      out);
-}
 
 template <typename T>
 uint32_t decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
@@ -330,12 +176,6 @@ bool decodeStream(
   return offset == inBytes;
 }
 
-template uint32_t encodeBlock<int16_t>(const int16_t*, uint32_t, uint8_t*);
-template uint32_t encodeBlock<int32_t>(const int32_t*, uint32_t, uint8_t*);
-template uint32_t encodeBlock<int64_t>(const int64_t*, uint32_t, uint8_t*);
-template uint32_t encodeBlockFull<int16_t>(const int16_t*, uint8_t*);
-template uint32_t encodeBlockFull<int32_t>(const int32_t*, uint8_t*);
-template uint32_t encodeBlockFull<int64_t>(const int64_t*, uint8_t*);
 template uint32_t
 decodeBlock<int16_t>(const uint8_t*, size_t, uint32_t, int16_t*);
 template uint32_t
