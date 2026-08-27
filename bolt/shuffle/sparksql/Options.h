@@ -158,6 +158,11 @@ struct ShuffleReaderOptions {
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 
+  // Which partition writer produced this shuffle. The cell writer falls
+  // back to V1 on remote shuffles for now, and the reader must mirror that
+  // decision.
+  PartitionWriterType partitionWriterType = PartitionWriterType::kLocal;
+
   /// Returns the options in a human readable form.
   std::string toString() const;
 };
