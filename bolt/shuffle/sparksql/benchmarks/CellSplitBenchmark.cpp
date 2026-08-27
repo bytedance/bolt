@@ -141,11 +141,16 @@ VectorPtr makePids(int32_t numPartitions, std::mt19937& rng) {
 }
 
 /// Frame-of-reference friendly bigints, bit-packable ints.
-Scenario makeFixedScenario(int32_t numPartitions) {
+Scenario makeFixedScenario(
+    int32_t numPartitions,
+    int32_t numBatches = kBatches,
+    const char* tag = "") {
   std::mt19937 rng(17);
   Scenario scenario{
-      "fixed4_P" + std::to_string(numPartitions), numPartitions, {}};
-  for (int b = 0; b < kBatches; ++b) {
+      "fixed4" + std::string(tag) + "_P" + std::to_string(numPartitions),
+      numPartitions,
+      {}};
+  for (int b = 0; b < numBatches; ++b) {
     std::vector<int64_t> ids(kRowsPerBatch);
     std::vector<int64_t> timestamps(kRowsPerBatch);
     std::vector<int32_t> smalls(kRowsPerBatch);
@@ -196,6 +201,11 @@ const std::vector<Scenario>& scenarios() {
     s.push_back(makeFixedScenario(1024));
     s.push_back(makeFixedScenario(4096));
     s.push_back(makeStringScenario(1024));
+    // Large-volume variants: ~100MB of raw column data per writer lifecycle,
+    // so the destinations blow past the LLC and the split loop's memory
+    // behavior, not per-lifecycle provisioning, dominates.
+    s.push_back(makeFixedScenario(1024, 1024, "big"));
+    s.push_back(makeFixedScenario(4096, 1024, "big"));
     return s;
   }();
   return all;
@@ -282,10 +292,10 @@ size_t runWriter(int32_t writerType, const Scenario& scenario) {
   BENCHMARK_MULTI(split_##suffix##_Cell) {                               \
     return runWriter(4, scenarios()[scenarioIndex]);                     \
   }                                                                      \
-  BENCHMARK_RELATIVE_MULTI(split_##suffix##_V1) {                        \
+  BENCHMARK_MULTI(split_##suffix##_V1) {                        \
     return runWriter(1, scenarios()[scenarioIndex]);                     \
   }                                                                      \
-  BENCHMARK_RELATIVE_MULTI(split_##suffix##_V2) {                        \
+  BENCHMARK_MULTI(split_##suffix##_V2) {                        \
     return runWriter(2, scenarios()[scenarioIndex]);                     \
   }                                                                      \
   BENCHMARK_DRAW_LINE();
@@ -294,6 +304,8 @@ CELL_SPLIT_BENCH(0, fixed4_P64)
 CELL_SPLIT_BENCH(1, fixed4_P1024)
 CELL_SPLIT_BENCH(2, fixed4_P4096)
 CELL_SPLIT_BENCH(3, strings_P1024)
+CELL_SPLIT_BENCH(4, fixed4big_P1024)
+CELL_SPLIT_BENCH(5, fixed4big_P4096)
 
 } // namespace
 
