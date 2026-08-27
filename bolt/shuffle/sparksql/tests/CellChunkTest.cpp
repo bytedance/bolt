@@ -307,6 +307,59 @@ TEST_F(CellChunkTest, nullCellsGrowthPreservesBitsAndImplicitTail) {
   EXPECT_EQ(nulls.summarize(0, 1, 6000).tag, NullTag::kNoNull);
 }
 
+TEST_F(CellChunkTest, nullCellsAllNullIsPureCounting) {
+  NullCells nulls(pool_.get(), 4, 2);
+  // Every row of the window null, in order: the prefix counter absorbs it
+  // and no bitmap storage is ever allocated.
+  for (uint32_t row = 0; row < 500; ++row) {
+    nulls.setNull(1, 0, row);
+  }
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
+  const auto summary = nulls.summarize(1, 0, 500);
+  EXPECT_EQ(summary.tag, NullTag::kAllNull);
+  EXPECT_EQ(summary.nonNullCount, 0);
+
+  // The bulk form does the same in O(1).
+  nulls.setNullRun(2, 1, 0, 1000);
+  nulls.setNullRun(2, 1, 1000, 500);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
+  EXPECT_EQ(nulls.summarize(2, 1, 1500).tag, NullTag::kAllNull);
+}
+
+TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
+  NullCells nulls(pool_.get(), 2, 1);
+  // Rows 0..9 null (prefix), 10..19 non-null, 20 null again: the late null
+  // must go to the bitmap while the prefix stays counted.
+  for (uint32_t row = 0; row < 10; ++row) {
+    nulls.setNull(0, 0, row);
+  }
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
+  nulls.setNull(0, 0, 20);
+  EXPECT_GT(nulls.allocatedBytes(), 0);
+
+  const auto summary = nulls.summarize(0, 0, 30);
+  EXPECT_EQ(summary.tag, NullTag::kRawNull);
+  EXPECT_EQ(summary.nonNullCount, 30 - 11);
+
+  std::vector<uint8_t> bitmap((30 + 7) / 8);
+  nulls.emitBitmap(0, 0, 30, bitmap.data());
+  for (uint32_t row = 0; row < 30; ++row) {
+    const bool nonNull = (bitmap[row / 8] >> (row % 8)) & 1;
+    const bool expectNull = row < 10 || row == 20;
+    EXPECT_EQ(nonNull, !expectNull) << "row " << row;
+  }
+
+  // A pure prefix with no bitmap at all still synthesizes correctly.
+  nulls.setNull(1, 0, 0);
+  nulls.setNull(1, 0, 1);
+  const auto prefixOnly = nulls.summarize(1, 0, 8);
+  EXPECT_EQ(prefixOnly.tag, NullTag::kRawNull);
+  EXPECT_EQ(prefixOnly.nonNullCount, 6);
+  uint8_t byte;
+  nulls.emitBitmap(1, 0, 8, &byte);
+  EXPECT_EQ(byte, 0b11111100);
+}
+
 TEST_F(CellChunkTest, cellLayoutStreams) {
   auto rowType = ROW(
       {"a", "b", "c", "d"}, {BIGINT(), VARCHAR(), REAL(), TINYINT()});
