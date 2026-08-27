@@ -83,6 +83,7 @@ class CellShuffleWriter final : public ShuffleWriter {
   std::vector<uint32_t> perPidCounter_;
   std::vector<int32_t> pidValues_;
   std::vector<DecodedVector> decoded_;
+  std::vector<BatchNullClass> nullClass_;
   DecodedVector pidDecoded_;
 
   uint64_t totalWindowRows_{0};
