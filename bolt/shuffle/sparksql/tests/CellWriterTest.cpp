@@ -21,11 +21,36 @@
 #include <random>
 
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
+
+/// Decompression seam over the engine codec, mirroring the reader node's
+/// wiring.
+class TestDecompressor : public cell::CellDecompressor {
+ public:
+  explicit TestDecompressor(Codec* codec) : codec_(codec) {}
+
+  bool decompress(
+      const uint8_t* data,
+      size_t size,
+      uint8_t* out,
+      size_t decodedSize) override {
+    return codec_->decompress(
+               data,
+               static_cast<int64_t>(size),
+               out,
+               static_cast<int64_t>(decodedSize)) ==
+        static_cast<int64_t>(decodedSize);
+  }
+
+ private:
+  Codec* const codec_;
+};
 
 class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
@@ -100,7 +125,12 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     std::vector<RowVectorPtr> payloads;
     MemoryByteSource source(
         reinterpret_cast<const uint8_t*>(file.data()) + offset, length);
-    CellPayloadDecoder decoder(layout, nullptr, pool());
+    // The writer compresses runs at the final merge with the default codec.
+    auto codec = createCodec(
+        arrow::Compression::LZ4_FRAME,
+        CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+    TestDecompressor decompressor(codec.get());
+    CellPayloadDecoder decoder(layout, &decompressor, pool());
     while (!source.atEnd()) {
       RowVectorPtr decoded;
       std::string error;
