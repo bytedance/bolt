@@ -22,7 +22,7 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
   std::vector<ShuffleTestParam> params;
   const std::vector<std::string> partitionings = {
       "single", "rr", "hash", "range"};
-  const std::vector<int32_t> shuffleModes = {0, 1, 2, 3};
+  const std::vector<int32_t> shuffleModes = {0, 1, 2, 3, 4};
   const std::vector<int32_t> partitionNumbers = {1, 4, 16};
   const std::vector<int32_t> mapperNumbers = {1, 4};
 
