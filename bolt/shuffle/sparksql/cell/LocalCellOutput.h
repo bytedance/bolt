@@ -19,6 +19,7 @@
 #include <cstdio>
 
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
+#include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -32,7 +33,10 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// and touches no temporary file at all.
 class LocalCellOutput final : public CellOutput {
  public:
-  LocalCellOutput(PartitionWriterOptions options, const CellLayout* layout);
+  LocalCellOutput(
+      PartitionWriterOptions options,
+      const CellLayout* layout,
+      int64_t compressMinRunBytes);
   ~LocalCellOutput() override;
 
   void spillRun(const CellWindowInput& in) override;
@@ -68,6 +72,17 @@ class LocalCellOutput final : public CellOutput {
   /// Appends one partition's payload assembled from a sealed window.
   void writeDiskPayload(std::FILE* out, const SealedWindow& w, uint32_t pid);
 
+  /// Writes one run to the data file, compressing it as a COMBINED run when
+  /// the codec shrinks it, else as COMBINED_STORED (spec section 5: a
+  /// writer should fall back to the uncompressed form when compression does
+  /// not pay). `data` is the concatenated stream bytes; sizes are the
+  /// per-stream decoded lengths.
+  void writeRun(
+      std::FILE* out,
+      const char* data,
+      uint64_t dataBytes,
+      const uint64_t* decodedSizes);
+
   /// Appends one partition's payload streamed from the live window.
   void writeLivePayload(std::FILE* out, const CellWindowInput& in, uint32_t pid);
 
@@ -75,6 +90,12 @@ class LocalCellOutput final : public CellOutput {
 
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
+  const int64_t compressMinRunBytes_;
+  /// Final-merge codec; null when compressionType is UNCOMPRESSED.
+  std::unique_ptr<Codec> codec_;
+  uint64_t compressTimeNs_{0};
+  std::string runScratch_;
+  std::string compressScratch_;
 
   std::FILE* spillFile_{nullptr};
   int spillFd_{-1};
@@ -87,6 +108,7 @@ class LocalCellOutput final : public CellOutput {
   std::vector<SealedWindow> sealed_;
 
   uint64_t finalBytes_{0};
+  uint64_t rawAccum_{0};
   uint64_t evictTimeNs_{0};
   uint64_t writeTimeNs_{0};
   std::string scratch_;

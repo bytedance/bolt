@@ -23,6 +23,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
+#include "bolt/shuffle/sparksql/compression/Compression.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -76,8 +77,20 @@ void buildNullBody(
 
 LocalCellOutput::LocalCellOutput(
     PartitionWriterOptions options,
-    const CellLayout* layout)
-    : options_(std::move(options)), layout_(layout) {}
+    const CellLayout* layout,
+    int64_t compressMinRunBytes)
+    : options_(std::move(options)),
+      layout_(layout),
+      compressMinRunBytes_(compressMinRunBytes) {
+  if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
+    codec_ = createCodec(
+        options_.compressionType,
+        CodecOptions{
+            getCodecBackend(options_.codecBackend),
+            options_.compressionLevel,
+            options_.checksumEnabled});
+  }
+}
 
 LocalCellOutput::~LocalCellOutput() {
   if (spillFile_ != nullptr) {
@@ -198,6 +211,47 @@ void LocalCellOutput::writeOut(std::FILE* out, const void* data, size_t bytes) {
   finalBytes_ += bytes;
 }
 
+void LocalCellOutput::writeRun(
+    std::FILE* out,
+    const char* data,
+    uint64_t dataBytes,
+    const uint64_t* decodedSizes) {
+  const uint32_t numStreams = layout_->numStreams();
+  const uint64_t headerBytes = 1 + 8 + 8ull * numStreams;
+  rawAccum_ += headerBytes + dataBytes;
+
+  const char* body = data;
+  uint64_t stored = dataBytes;
+  auto runLayout = RunLayout::kCombinedStored;
+  if (codec_ != nullptr &&
+      dataBytes >= static_cast<uint64_t>(compressMinRunBytes_)) {
+    const uint64_t start = nowNs();
+    compressScratch_.resize(codec_->maxCompressedLen(dataBytes));
+    const int64_t written = codec_->compress(
+        reinterpret_cast<const uint8_t*>(data),
+        static_cast<int64_t>(dataBytes),
+        reinterpret_cast<uint8_t*>(compressScratch_.data()),
+        static_cast<int64_t>(compressScratch_.size()));
+    compressTimeNs_ += nowNs() - start;
+    // Spec section 5: fall back to the stored form when compression does
+    // not pay.
+    if (written > 0 && static_cast<uint64_t>(written) < dataBytes) {
+      body = compressScratch_.data();
+      stored = static_cast<uint64_t>(written);
+      runLayout = RunLayout::kCombined;
+    }
+  }
+
+  scratch_.clear();
+  scratch_.push_back(static_cast<char>(static_cast<uint8_t>(runLayout)));
+  appendLe64(scratch_, stored);
+  for (uint32_t stream = 0; stream < numStreams; ++stream) {
+    appendLe64(scratch_, decodedSizes[stream]);
+  }
+  writeOut(out, scratch_.data(), scratch_.size());
+  writeOut(out, body, stored);
+}
+
 void LocalCellOutput::writeDiskPayload(
     std::FILE* out,
     const SealedWindow& w,
@@ -206,6 +260,8 @@ void LocalCellOutput::writeDiskPayload(
   if (rows == 0) {
     return;
   }
+  const uint32_t numStreams = layout_->numStreams();
+  const uint64_t runHeaderBytes = 1 + 8 + 8ull * numStreams;
   uint32_t runCount = 0;
   for (const auto& ends : w.runPidEnds) {
     runCount += ends[pid + 1] > ends[pid] ? 1 : 0;
@@ -220,20 +276,29 @@ void LocalCellOutput::writeDiskPayload(
   scratch_.resize(nullAt + w.nullLength[pid]);
   readSpill(w.nullOffset[pid], scratch_.data() + nullAt, w.nullLength[pid]);
   scratch_.append((layout_->numColumns() + 7) / 8, '\0'); // encoding tags
+  rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
 
-  char copyBuffer[64 << 10];
+  std::vector<uint64_t> decodedSizes(numStreams);
   for (const auto& ends : w.runPidEnds) {
-    uint64_t offset = ends[pid];
-    uint64_t left = ends[pid + 1] - ends[pid];
-    while (left > 0) {
-      const size_t chunk =
-          left < sizeof(copyBuffer) ? left : sizeof(copyBuffer);
-      readSpill(offset, copyBuffer, chunk);
-      writeOut(out, copyBuffer, chunk);
-      offset += chunk;
-      left -= chunk;
+    const uint64_t segmentBytes = ends[pid + 1] - ends[pid];
+    if (segmentBytes == 0) {
+      continue;
     }
+    // The spill segment is a COMBINED_STORED run body; lift its stream
+    // sizes and hand the data to the (possibly compressing) run writer.
+    BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
+    scratch_.resize(runHeaderBytes);
+    readSpill(ends[pid], scratch_.data(), runHeaderBytes);
+    BOLT_CHECK_EQ(
+        static_cast<uint8_t>(scratch_[0]),
+        static_cast<uint8_t>(RunLayout::kCombinedStored),
+        "corrupt cell spill segment");
+    ::memcpy(decodedSizes.data(), scratch_.data() + 9, 8ull * numStreams);
+    const uint64_t dataBytes = segmentBytes - runHeaderBytes;
+    runScratch_.resize(dataBytes);
+    readSpill(ends[pid] + runHeaderBytes, runScratch_.data(), dataBytes);
+    writeRun(out, runScratch_.data(), dataBytes, decodedSizes.data());
   }
 }
 
@@ -262,21 +327,19 @@ void LocalCellOutput::writeLivePayload(
       static_cast<uint32_t>(scratch_.size() - nullBodyAt);
   ::memcpy(scratch_.data() + nullSizeAt, &nullLength, 4);
   scratch_.append((layout_->numColumns() + 7) / 8, '\0'); // encoding tags
-  if (runCount > 0) {
-    scratch_.push_back(
-        static_cast<char>(static_cast<uint8_t>(RunLayout::kCombinedStored)));
-    appendLe64(scratch_, total);
-    for (uint32_t s = 0; s < numStreams; ++s) {
-      appendLe64(scratch_, in.cells->bytes(pid, s));
-    }
-  }
+  rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
   if (runCount > 0) {
+    std::vector<uint64_t> decodedSizes(numStreams);
+    runScratch_.clear();
+    runScratch_.reserve(total);
     for (uint32_t s = 0; s < numStreams; ++s) {
+      decodedSizes[s] = in.cells->bytes(pid, s);
       in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
-        writeOut(out, data, bytes);
+        runScratch_.append(data, bytes);
       });
     }
+    writeRun(out, runScratch_.data(), total, decodedSizes.data());
   }
 }
 
@@ -305,6 +368,7 @@ void LocalCellOutput::finalize(
   metrics.rawPartitionLengths.assign(in.numPartitions, 0);
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     const uint64_t partitionStart = finalBytes_;
+    const uint64_t rawStart = rawAccum_;
     for (const auto& window : sealed_) {
       writeDiskPayload(out, window, pid);
     }
@@ -313,8 +377,8 @@ void LocalCellOutput::finalize(
     }
     metrics.partitionLengths[pid] =
         static_cast<int64_t>(finalBytes_ - partitionStart);
-    // Nothing is compressed yet: the raw size is the written size.
-    metrics.rawPartitionLengths[pid] = metrics.partitionLengths[pid];
+    metrics.rawPartitionLengths[pid] =
+        static_cast<int64_t>(rawAccum_ - rawStart);
   }
   BOLT_CHECK_EQ(::fclose(out), 0, "shuffle data file close failed");
   writeTimeNs_ += nowNs() - start;
@@ -330,7 +394,7 @@ void LocalCellOutput::finalize(
   metrics.totalBytesEvicted = bytesEvicted_;
   metrics.totalWriteTime = static_cast<int64_t>(writeTimeNs_);
   metrics.totalEvictTime = static_cast<int64_t>(evictTimeNs_);
-  metrics.totalCompressTime = 0;
+  metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(sealed_.size());
 }
 
