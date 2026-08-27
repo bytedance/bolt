@@ -35,6 +35,7 @@ bolt_add_library(
   CelebornReaderStreamIterator.cpp
   cell/CellDirectory.cpp
   cell/CellEncoding.cpp
+  cell/CellPayload.cpp
   cell/CellTypes.cpp
   cell/ChunkAllocator.cpp
   compression/Compression.cpp
