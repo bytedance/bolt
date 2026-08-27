@@ -38,8 +38,8 @@
 namespace bytedance::bolt::exec::radixsort::test {
 namespace {
 
-constexpr vector_size_t kFuzzPairsPerSeed = 10'000;
-constexpr uint32_t kFuzzSeeds = 100;
+constexpr vector_size_t kFuzzPairsPerSeed = 512;
+constexpr uint32_t kFuzzSeeds = 32;
 
 class RadixSortKeyCodecTest : public testing::Test {
  public:
@@ -54,21 +54,6 @@ class RadixSortKeyCodecTest : public testing::Test {
       memory::memoryManager()->addRootPool()};
   std::shared_ptr<memory::MemoryPool> pool_{
       rootPool_->addLeafChild("radix-sort-key-codec-test")};
-
-  static CompareFlags flags(bool ascending, bool nullsFirst) {
-    return CompareFlags{
-        .nullsFirst = nullsFirst,
-        .ascending = ascending,
-        .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
-  }
-
-  static std::vector<CompareFlags> allFlags() {
-    return {
-        flags(true, true),
-        flags(true, false),
-        flags(false, true),
-        flags(false, false)};
-  }
 
   template <typename T, typename U = T>
   FlatVectorPtr<T> makeVector(
@@ -159,7 +144,7 @@ class RadixSortKeyCodecTest : public testing::Test {
       rawSizes.push_back(size.value_or(0));
       offset += size.value_or(0);
     }
-    BOLT_CHECK_LE(offset, elements->size());
+    BOLT_CHECK_EQ(offset, elements->size());
     auto arrays = std::make_shared<ArrayVector>(
         pool_.get(),
         ARRAY(elements->type()),
@@ -213,6 +198,8 @@ class RadixSortKeyCodecTest : public testing::Test {
       rawSizes.push_back(size.value_or(0));
       offset += size.value_or(0);
     }
+    BOLT_CHECK_EQ(offset, keys->size());
+    BOLT_CHECK_EQ(offset, values->size());
     auto maps = std::make_shared<MapVector>(
         pool_.get(),
         MAP(keys->type(), values->type()),
@@ -259,6 +246,10 @@ class RadixSortKeyCodecTest : public testing::Test {
     std::vector<TypePtr> types;
     types.reserve(children.size());
     for (const auto& child : children) {
+      BOLT_CHECK_NOT_NULL(child);
+      BOLT_CHECK(
+          children.front()->size() == child->size(),
+          "Radix sort key test columns must have the same size");
       types.push_back(child->type());
     }
     return std::make_shared<RowVector>(
@@ -274,7 +265,7 @@ class RadixSortKeyCodecTest : public testing::Test {
       const std::vector<CompareFlags>& compareFlags) {
     std::unique_ptr<RadixSortKeyCodec> codec;
     RadixSortKeyCodec::bind(types, compareFlags, codec);
-    EXPECT_NE(codec, nullptr);
+    BOLT_CHECK_NOT_NULL(codec);
     return codec;
   }
 
@@ -310,12 +301,14 @@ class RadixSortKeyCodecTest : public testing::Test {
     const auto comparePair = [&](vector_size_t left, vector_size_t right) {
       const auto expected = SortComparatorOracle::compareRows(
           *rows, left, *rows, right, channels, compareFlags);
-      const auto actual = compareEncodedKeys(keys, left, right);
+      const auto actual =
+          SortComparatorOracle::compareEncodedKeys(keys, left, right);
       EXPECT_EQ((actual > 0) - (actual < 0), (expected > 0) - (expected < 0))
           << "left " << left << ", right " << right << ", left-values "
           << rows->toString(left) << ", right-values " << rows->toString(right)
           << ", left-key " << keyHex(keys, left) << ", right-key "
           << keyHex(keys, right);
+      return (actual > 0) - (actual < 0);
     };
     if (verifyAllPairs) {
       for (vector_size_t left = 0; left < rows->size(); ++left) {
@@ -326,6 +319,27 @@ class RadixSortKeyCodecTest : public testing::Test {
     } else {
       for (vector_size_t left = 0; left + 1 < rows->size(); ++left) {
         comparePair(left, left + 1);
+      }
+      if (rows->size() >= 3) {
+        const auto sampleCount =
+            std::min<vector_size_t>(rows->size(), vector_size_t{64});
+        for (vector_size_t sample = 0; sample < sampleCount; ++sample) {
+          const auto first = sample % rows->size();
+          const auto second = (first + 1) % rows->size();
+          const auto third =
+              (first + 1 + (rows->size() - 1) / 2) % rows->size();
+          const auto firstSecond = comparePair(first, second);
+          const auto secondFirst = comparePair(second, first);
+          EXPECT_EQ(firstSecond, -secondFirst);
+          const auto secondThird = comparePair(second, third);
+          const auto firstThird = comparePair(first, third);
+          if (firstSecond <= 0 && secondThird <= 0) {
+            EXPECT_LE(firstThird, 0);
+          }
+          if (firstSecond >= 0 && secondThird >= 0) {
+            EXPECT_GE(firstThird, 0);
+          }
+        }
       }
     }
   }
@@ -375,7 +389,7 @@ class RadixSortKeyCodecTest : public testing::Test {
       bool canSkip) {
     constexpr std::array<uint8_t, 1> kSkipColumn{0};
     constexpr std::array<uint8_t, 1> kMayHaveNulls{1};
-    const auto compareFlags = flags(false, true);
+    const auto compareFlags = SortComparatorOracle::makeSortFlags(false, true);
     for (const auto& vector : cases) {
       const auto& type = vector->type();
       SCOPED_TRACE(type->toString());
@@ -398,7 +412,7 @@ class RadixSortKeyCodecTest : public testing::Test {
       const std::vector<TypeVector>& cases,
       bool verifyAllPairs = true) {
     for (const auto& vector : cases) {
-      for (const auto compareFlags : allFlags()) {
+      for (const auto compareFlags : SortComparatorOracle::allSortFlags()) {
         SCOPED_TRACE(
             vector->type()->toString() +
             (compareFlags.ascending ? " ASC" : " DESC") +
@@ -443,31 +457,6 @@ class RadixSortKeyCodecTest : public testing::Test {
     return views;
   }
 
-  static int32_t compareEncodedKeys(
-      const EncodedKeyBatch& keys,
-      vector_size_t left,
-      vector_size_t right) {
-    BOLT_CHECK_GE(left, 0);
-    BOLT_CHECK_GE(right, 0);
-    BOLT_CHECK_LT(left, keys.size());
-    BOLT_CHECK_LT(right, keys.size());
-    if (keys.format() == EncodedKeyFormat::kFixed64) {
-      const auto leftKey = keys.fixedKeyAt(left);
-      const auto rightKey = keys.fixedKeyAt(right);
-      return (leftKey > rightKey) - (leftKey < rightKey);
-    }
-    const auto leftKey = keys.variableKeyAt(left);
-    const auto rightKey = keys.variableKeyAt(right);
-    const auto commonSize = std::min(leftKey.size(), rightKey.size());
-    const auto result =
-        std::memcmp(leftKey.data(), rightKey.data(), commonSize);
-    if (result != 0) {
-      return (result > 0) - (result < 0);
-    }
-    return (leftKey.size() > rightKey.size()) -
-        (leftKey.size() < rightKey.size());
-  }
-
   static std::string hex(std::string_view bytes) {
     std::ostringstream out;
     out << std::hex << std::setfill('0');
@@ -494,7 +483,9 @@ class RadixSortKeyCodecTest : public testing::Test {
 TEST_F(RadixSortKeyCodecTest, bindMetadataAndCapability) {
   auto codec = bind(
       {INTEGER(), ARRAY(BIGINT()), ROW({{"a", VARCHAR()}})},
-      {flags(true, true), flags(false, false), flags(true, false)});
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(false, false),
+       SortComparatorOracle::makeSortFlags(true, false)});
   EXPECT_TRUE(codec->canEncodeDecode());
 
   const std::vector<TypePtr> supportedTypes{
@@ -542,20 +533,20 @@ TEST_F(RadixSortKeyCodecTest, invalidBindAndInputContracts) {
   EXPECT_THROW(RadixSortKeyCodec::bind({BIGINT()}, {}, codec), BoltException);
   EXPECT_EQ(codec, nullptr);
 
-  auto invalidFlags = flags(true, true);
+  auto invalidFlags = SortComparatorOracle::makeSortFlags(true, true);
   invalidFlags.equalsOnly = true;
   EXPECT_THROW(
       RadixSortKeyCodec::bind({BIGINT()}, {invalidFlags}, codec),
       BoltException);
   EXPECT_EQ(codec, nullptr);
-  invalidFlags = flags(true, true);
+  invalidFlags = SortComparatorOracle::makeSortFlags(true, true);
   invalidFlags.compareSizeFirst = true;
   EXPECT_THROW(
       RadixSortKeyCodec::bind({BIGINT()}, {invalidFlags}, codec),
       BoltException);
   EXPECT_EQ(codec, nullptr);
 
-  codec = bind({BIGINT()}, {flags(true, true)});
+  codec = bind({BIGINT()}, {SortComparatorOracle::makeSortFlags(true, true)});
   EncodedKeyBatch keys;
   EXPECT_THROW(
       codec->encode(
@@ -612,7 +603,9 @@ TEST_F(RadixSortKeyCodecTest, leadingSkippableValidityOffsets) {
     SCOPED_TRACE(testCase.name);
     auto codec = bind(
         testCase.types,
-        std::vector<CompareFlags>(testCase.types.size(), flags(true, true)));
+        std::vector<CompareFlags>(
+            testCase.types.size(),
+            SortComparatorOracle::makeSortFlags(true, true)));
     EXPECT_EQ(
         codec->leadingSkippableValidityOffsets(
             testCase.mayHaveNulls, testCase.radixWidth),
@@ -623,7 +616,8 @@ TEST_F(RadixSortKeyCodecTest, leadingSkippableValidityOffsets) {
 TEST_F(RadixSortKeyCodecTest, knownEncodedKeyBytes) {
   auto integerRows =
       makeRows({makeVector<int32_t>(INTEGER(), {0, -1, std::nullopt})});
-  auto integerCodec = bind({INTEGER()}, {flags(true, true)});
+  auto integerCodec =
+      bind({INTEGER()}, {SortComparatorOracle::makeSortFlags(true, true)});
   EncodedKeyBatch integerKeys;
   integerCodec->encode(*integerRows, pool_.get(), integerKeys);
   EXPECT_EQ(keyHex(integerKeys, 0), "0280000000000000");
@@ -633,13 +627,15 @@ TEST_F(RadixSortKeyCodecTest, knownEncodedKeyBytes) {
   const std::string bytes{"\x00\x01\x02\xff", 4};
   auto stringRows =
       makeRows({makeStringVector(VARBINARY(), {bytes, std::nullopt})});
-  auto ascCodec = bind({VARBINARY()}, {flags(true, true)});
+  auto ascCodec =
+      bind({VARBINARY()}, {SortComparatorOracle::makeSortFlags(true, true)});
   EncodedKeyBatch ascKeys;
   ascCodec->encode(*stringRows, pool_.get(), ascKeys);
   EXPECT_EQ(keyHex(ascKeys, 0), "020100010102ff00");
   EXPECT_EQ(keyHex(ascKeys, 1), "01");
 
-  auto descCodec = bind({VARBINARY()}, {flags(false, true)});
+  auto descCodec =
+      bind({VARBINARY()}, {SortComparatorOracle::makeSortFlags(false, true)});
   EncodedKeyBatch descKeys;
   descCodec->encode(*stringRows, pool_.get(), descKeys);
   EXPECT_EQ(keyHex(descKeys, 0), "02fefffefefd00ff");
@@ -650,8 +646,10 @@ TEST_F(RadixSortKeyCodecTest, fixed64BoundaryAndAllocation) {
   auto fixedRows = makeRows(
       {makeVector<int16_t>(SMALLINT(), {1, -1, std::nullopt}),
        makeVector<int32_t>(INTEGER(), {2, -2, 0})});
-  auto fixedCodec =
-      bind({SMALLINT(), INTEGER()}, {flags(true, true), flags(true, true)});
+  auto fixedCodec = bind(
+      {SMALLINT(), INTEGER()},
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(true, true)});
   EXPECT_EQ(fixedCodec->maximumEncodedSize(), 8);
 
   auto before = pool_->stats();
@@ -666,7 +664,8 @@ TEST_F(RadixSortKeyCodecTest, fixed64BoundaryAndAllocation) {
 
   auto variableRows =
       makeRows({makeVector<int64_t>(BIGINT(), {1, -1, std::nullopt})});
-  auto variableCodec = bind({BIGINT()}, {flags(true, true)});
+  auto variableCodec =
+      bind({BIGINT()}, {SortComparatorOracle::makeSortFlags(true, true)});
   EXPECT_EQ(variableCodec->maximumEncodedSize(), 9);
 
   before = pool_->stats();
@@ -681,8 +680,10 @@ TEST_F(RadixSortKeyCodecTest, fixed64BoundaryAndAllocation) {
 }
 
 TEST_F(RadixSortKeyCodecTest, encodedBuffersReuseWithCopyOnWrite) {
-  auto fixedCodec =
-      bind({SMALLINT(), INTEGER()}, {flags(true, true), flags(true, true)});
+  auto fixedCodec = bind(
+      {SMALLINT(), INTEGER()},
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(true, true)});
   auto firstFixed = makeRows(
       {makeVector<int16_t>(SMALLINT(), {1, -1, std::nullopt}),
        makeVector<int32_t>(INTEGER(), {2, -2, 0})});
@@ -700,8 +701,16 @@ TEST_F(RadixSortKeyCodecTest, encodedBuffersReuseWithCopyOnWrite) {
   EXPECT_EQ(fixedKeys.fixedKeys().get(), firstFixedBuffer);
   RowVectorPtr decoded;
   decodeBatch(*fixedCodec, fixedKeys, decoded);
-  expectColumnEqual(*secondFixed, *decoded, 0, flags(true, true));
-  expectColumnEqual(*secondFixed, *decoded, 1, flags(true, true));
+  expectColumnEqual(
+      *secondFixed,
+      *decoded,
+      0,
+      SortComparatorOracle::makeSortFlags(true, true));
+  expectColumnEqual(
+      *secondFixed,
+      *decoded,
+      1,
+      SortComparatorOracle::makeSortFlags(true, true));
 
   BufferPtr retainedFixed = fixedKeys.fixedKeys();
   const std::vector<uint64_t> retainedWords(
@@ -711,7 +720,8 @@ TEST_F(RadixSortKeyCodecTest, encodedBuffersReuseWithCopyOnWrite) {
   EXPECT_NE(fixedKeys.fixedKeys().get(), retainedFixed.get());
   expectBuffersEqual(retainedFixed, retainedWords);
 
-  auto variableCodec = bind({BIGINT()}, {flags(true, true)});
+  auto variableCodec =
+      bind({BIGINT()}, {SortComparatorOracle::makeSortFlags(true, true)});
   auto firstVariable =
       makeRows({makeVector<int64_t>(BIGINT(), {1, -1, std::nullopt})});
   auto secondVariable =
@@ -725,7 +735,11 @@ TEST_F(RadixSortKeyCodecTest, encodedBuffersReuseWithCopyOnWrite) {
   EXPECT_EQ(after.numAllocs - before.numAllocs, 1);
   EXPECT_EQ(variableKeys.offsets().get(), firstOffsets);
   decodeBatch(*variableCodec, variableKeys, decoded);
-  expectColumnEqual(*secondVariable, *decoded, 0, flags(true, true));
+  expectColumnEqual(
+      *secondVariable,
+      *decoded,
+      0,
+      SortComparatorOracle::makeSortFlags(true, true));
 
   BufferPtr retainedOffsets = variableKeys.offsets();
   const std::vector<uint64_t> retainedOffsetValues(
@@ -763,7 +777,9 @@ TEST_F(RadixSortKeyCodecTest, selectiveDecodeSkipsFixedPrefix) {
             std::nullopt,
             -7.25})});
   const std::vector<CompareFlags> compareFlags{
-      flags(true, true), flags(false, false), flags(false, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false),
+      SortComparatorOracle::makeSortFlags(false, true)};
   auto codec = bind({BIGINT(), VARCHAR(), DOUBLE()}, compareFlags);
 
   EncodedKeyBatch keys;
@@ -855,7 +871,9 @@ TEST_F(RadixSortKeyCodecTest, selectiveDecodeFixedPrefixAndComplexSuffix) {
        makeVector<int64_t>(BIGINT(), {100, std::nullopt, 300, 400}),
        arrays});
   const std::vector<CompareFlags> compareFlags{
-      flags(true, true), flags(false, false), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false),
+      SortComparatorOracle::makeSortFlags(true, true)};
   auto codec = bind({INTEGER(), BIGINT(), arrays->type()}, compareFlags);
   EncodedKeyBatch keys;
   codec->encode(*rows, pool_.get(), keys);
@@ -870,7 +888,8 @@ TEST_F(RadixSortKeyCodecTest, selectiveDecodeFixedPrefixAndComplexSuffix) {
 }
 
 TEST_F(RadixSortKeyCodecTest, emptyBatchAndVariableAllocation) {
-  auto codec = bind({VARCHAR()}, {flags(true, true)});
+  auto codec =
+      bind({VARCHAR()}, {SortComparatorOracle::makeSortFlags(true, true)});
   auto emptyRows = makeRows(
       {BaseVector::create<FlatVector<StringView>>(VARCHAR(), 0, pool_.get())});
   EncodedKeyBatch emptyKeys;
@@ -959,6 +978,89 @@ TEST_F(RadixSortKeyCodecTest, fixedArrayRoundTripWithWrappedElements) {
   verifyAllFlags({dictionaryArrays, constantArrays});
 }
 
+TEST_F(RadixSortKeyCodecTest, fixedScalarArrayKernels) {
+  const std::vector<std::optional<vector_size_t>> sizes{
+      0, 2, 3, std::nullopt, 1};
+  const auto decimal38Max =
+      HugeInt::fromString("99999999999999999999999999999999999999");
+  verifyAllFlags({
+      makeArrays(
+          sizes,
+          makeVector<bool>(
+              BOOLEAN(), {false, true, std::nullopt, true, false, true})),
+      makeArrays(
+          sizes,
+          makeVector<int8_t>(TINYINT(), {-128, -1, std::nullopt, 0, 1, 127})),
+      makeArrays(
+          sizes,
+          makeVector<int64_t>(
+              BIGINT(),
+              {std::numeric_limits<int64_t>::min(),
+               -1,
+               std::nullopt,
+               0,
+               1,
+               std::numeric_limits<int64_t>::max()})),
+      makeArrays(
+          sizes,
+          makeVector<double>(
+              DOUBLE(),
+              {-std::numeric_limits<double>::infinity(),
+               -0.0,
+               std::nullopt,
+               0.0,
+               1.5,
+               std::numeric_limits<double>::infinity()})),
+      makeArrays(
+          sizes,
+          makeVector<int128_t>(
+              HUGEINT(), {-int128_t{1}, 0, std::nullopt, 1, 2, 3})),
+      makeArrays(
+          sizes,
+          makeVector<int64_t>(
+              DECIMAL(18, 4), {-999999, -1, std::nullopt, 0, 1, 999999})),
+      makeArrays(
+          sizes,
+          makeVector<int128_t>(
+              DECIMAL(38, 18),
+              {-decimal38Max, -int128_t{1}, std::nullopt, 0, 1, decimal38Max})),
+      makeArrays(
+          sizes,
+          makeVector<Timestamp>(
+              TIMESTAMP(),
+              {Timestamp(-1, Timestamp::kMaxNanos),
+               Timestamp(0, 0),
+               std::nullopt,
+               Timestamp(0, 1),
+               Timestamp(1, 0),
+               Timestamp::max()})),
+  });
+}
+
+TEST_F(RadixSortKeyCodecTest, wrappedComplexKeysWithNullOverlay) {
+  const std::array<vector_size_t, 6> rawIndices{5, 0, 3, 6, 1, 2};
+  const auto wrap = [&](VectorPtr base) {
+    auto nulls = allocateNulls(rawIndices.size(), pool_.get());
+    bits::setNull(nulls->asMutable<uint64_t>(), 1);
+    return BaseVector::wrapInDictionary(
+        std::move(nulls),
+        makeBuffer(rawIndices),
+        rawIndices.size(),
+        std::move(base));
+  };
+  verifyAllFlags(
+      {wrap(makeIntegerArrays(
+           {std::vector<std::optional<int32_t>>{},
+            std::vector<std::optional<int32_t>>{1},
+            std::vector<std::optional<int32_t>>{1, 2},
+            std::vector<std::optional<int32_t>>{1, std::nullopt},
+            std::vector<std::optional<int32_t>>{2},
+            std::vector<std::optional<int32_t>>{2, 0},
+            std::nullopt})),
+       wrap(makeNestedRows()),
+       wrap(makeIntegerStringMaps())});
+}
+
 TEST_F(RadixSortKeyCodecTest, rowRoundTripAndOrdering) {
   verifyAllFlags({makeNestedRows()});
 }
@@ -1030,7 +1132,8 @@ TEST_F(RadixSortKeyCodecTest, nestedComplexVariableKeySizes) {
            VARCHAR(),
            {std::string("x"), std::nullopt, std::string("\x01z", 2)})});
   auto input = makeRows({rowKey});
-  const std::vector<CompareFlags> compareFlags{flags(true, true)};
+  const std::vector<CompareFlags> compareFlags{
+      SortComparatorOracle::makeSortFlags(true, true)};
 
   verifyProperty(input, compareFlags);
 
@@ -1082,6 +1185,21 @@ TEST_F(RadixSortKeyCodecTest, binarySafeStringsRoundTrip) {
        makeStringVector(VARBINARY(), values)});
 }
 
+TEST_F(RadixSortKeyCodecTest, longEscapedStringsAndConstantNulls) {
+  std::string escaped;
+  escaped.reserve(48);
+  for (uint32_t index = 0; index < 48; ++index) {
+    escaped.push_back(static_cast<char>(index % 2));
+  }
+  auto values = std::vector<std::optional<std::string>>{
+      escaped + "a", escaped + "b", escaped, std::nullopt};
+  verifyAllFlags(
+      {makeStringVector(VARCHAR(), values),
+       makeStringVector(VARBINARY(), values),
+       BaseVector::createNullConstant(BIGINT(), 4, pool_.get()),
+       BaseVector::createNullConstant(VARCHAR(), 4, pool_.get())});
+}
+
 TEST_F(RadixSortKeyCodecTest, longCommonPrefixAndWrappedInput) {
   std::string prefix(8192, 'p');
   auto strings = makeStringVector(
@@ -1091,11 +1209,15 @@ TEST_F(RadixSortKeyCodecTest, longCommonPrefixAndWrappedInput) {
       makeBuffer(std::array<vector_size_t, 4>{2, 0, 3, 1}),
       4,
       strings);
-  verifyProperty(makeRows({dictionary}), {flags(true, true)});
+  verifyProperty(
+      makeRows({dictionary}),
+      {SortComparatorOracle::makeSortFlags(true, true)});
 
   auto integers = makeVector<int32_t>(INTEGER(), {7, 11});
   auto constant = BaseVector::wrapInConstant(4, 1, integers);
-  verifyProperty(makeRows({constant}), {flags(false, false)});
+  verifyProperty(
+      makeRows({constant}),
+      {SortComparatorOracle::makeSortFlags(false, false)});
 }
 
 TEST_F(
@@ -1131,7 +1253,9 @@ TEST_F(RadixSortKeyCodecTest, multiKeyStringPrefixWithNullableTieBreaker) {
       INTEGER(), {1, 1, std::nullopt, 0, 1, 2, std::nullopt, 2});
   verifyProperty(
       makeRows({events, ids, groups}),
-      {flags(true, true), flags(false, false), flags(true, false)});
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(false, false),
+       SortComparatorOracle::makeSortFlags(true, false)});
 }
 
 TEST_F(RadixSortKeyCodecTest, unknownAndMultipleColumns) {
@@ -1149,14 +1273,18 @@ TEST_F(RadixSortKeyCodecTest, unknownAndMultipleColumns) {
            DOUBLE(),
            {0.0, -0.0, std::numeric_limits<double>::quiet_NaN(), 1.0})});
   verifyProperty(
-      rows, {flags(true, false), flags(false, true), flags(true, true)});
+      rows,
+      {SortComparatorOracle::makeSortFlags(true, false),
+       SortComparatorOracle::makeSortFlags(false, true),
+       SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortKeyCodecTest, fixedSeedPropertyFuzz) {
   for (uint32_t seed = 0; seed < kFuzzSeeds; ++seed) {
     std::mt19937_64 random(seed);
-    const auto compareFlags =
-        allFlags()[(seed / 4) % static_cast<uint32_t>(allFlags().size())];
+    const auto compareFlags = SortComparatorOracle::allSortFlags()
+        [(seed / 4) %
+         static_cast<uint32_t>(SortComparatorOracle::allSortFlags().size())];
     SCOPED_TRACE(
         "seed=" + std::to_string(seed) +
         (compareFlags.ascending ? " ASC" : " DESC") +

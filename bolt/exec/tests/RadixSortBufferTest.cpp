@@ -28,6 +28,7 @@
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/exec/SortBuffer.h"
+#include "bolt/exec/Spill.h"
 #include "bolt/exec/radixsort/RadixSortBuffer.h"
 #include "bolt/exec/tests/utils/QueryAssertions.h"
 #include "bolt/exec/tests/utils/RadixSortComparatorOracle.h"
@@ -55,13 +56,6 @@ class RadixSortBufferTest : public testing::Test {
       memory::memoryManager()->addRootPool()};
   std::shared_ptr<memory::MemoryPool> pool_{
       rootPool_->addLeafChild("radix-sort-buffer-test")};
-
-  static CompareFlags flags(bool ascending, bool nullsFirst) {
-    return CompareFlags{
-        .nullsFirst = nullsFirst,
-        .ascending = ascending,
-        .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
-  }
 
   template <typename T, typename U = T>
   FlatVectorPtr<T> makeVector(
@@ -166,10 +160,12 @@ class RadixSortBufferTest : public testing::Test {
       column_index_t keyChannel = 0,
       int64_t idBase = 0,
       const RowVectorPtr& prefix = nullptr,
-      const CompareFlags& keyFlags = flags(true, true)) {
+      const CompareFlags& keyFlags =
+          SortComparatorOracle::makeSortFlags(true, true)) {
     auto output = collect(buffer, batchSize, prefix);
-    expectRowsMatchById(*input, *output, idChannel, std::nullopt, idBase);
-    expectSorted(*output, {keyChannel}, {keyFlags});
+    SortComparatorOracle::expectRowsMatchById(
+        *input, *output, idChannel, {.idBase = idBase});
+    SortComparatorOracle::expectSorted(*output, {keyChannel}, {keyFlags});
     EXPECT_EQ(buffer.numOutputRows(), input->size());
   }
 
@@ -211,8 +207,8 @@ class RadixSortBufferTest : public testing::Test {
       bool multipleInputs = true) {
     auto output =
         sortAndCollect(input, keyChannels, keyFlags, batchSize, multipleInputs);
-    expectRowsMatchById(*input, *output, idChannel);
-    expectSorted(*output, keyChannels, keyFlags);
+    SortComparatorOracle::expectRowsMatchById(*input, *output, idChannel);
+    SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
   }
 
   void sortAndVerifyWithDuckDb(
@@ -261,54 +257,6 @@ class RadixSortBufferTest : public testing::Test {
         ->valueAt(row);
   }
 
-  static void expectRowsMatchById(
-      const RowVector& input,
-      const RowVector& output,
-      column_index_t idChannel,
-      std::optional<column_index_t> directlyCheckedColumn = std::nullopt,
-      int64_t idBase = 0) {
-    ASSERT_EQ(output.size(), input.size());
-    std::vector<bool> seen(input.size(), false);
-    for (vector_size_t row = 0; row < output.size(); ++row) {
-      const auto id = idAt(output, row, idChannel);
-      const auto inputRow = id - idBase;
-      ASSERT_GE(inputRow, 0);
-      ASSERT_LT(inputRow, input.size());
-      const auto inputIndex = static_cast<vector_size_t>(inputRow);
-      EXPECT_FALSE(seen[inputIndex]);
-      seen[inputIndex] = true;
-      for (uint32_t column = 0; column < input.childrenSize(); ++column) {
-        if (directlyCheckedColumn == column) {
-          continue;
-        }
-        EXPECT_EQ(
-            SortComparatorOracle::compare(
-                *input.childAt(column),
-                inputIndex,
-                *output.childAt(column),
-                row,
-                flags(true, true)),
-            0)
-            << "row=" << row << ", id=" << id << ", column=" << column;
-      }
-    }
-    EXPECT_TRUE(std::all_of(
-        seen.begin(), seen.end(), [](bool value) { return value; }));
-  }
-
-  static void expectSorted(
-      const RowVector& output,
-      const std::vector<column_index_t>& keyChannels,
-      const std::vector<CompareFlags>& keyFlags) {
-    for (vector_size_t row = 1; row < output.size(); ++row) {
-      EXPECT_LE(
-          SortComparatorOracle::compareRows(
-              output, row - 1, output, row, keyChannels, keyFlags),
-          0)
-          << "row=" << row;
-    }
-  }
-
   void spillRemainingOutputAndCheckStats(
       RadixSortBuffer& buffer,
       uint64_t expectedRows) {
@@ -326,6 +274,37 @@ class RadixSortBufferTest : public testing::Test {
     buffer.spill();
     EXPECT_EQ(buffer.spilledStats()->spilledRows, statsAfter.spilledRows);
     EXPECT_EQ(buffer.spilledStats()->spilledBytes, statsAfter.spilledBytes);
+  }
+
+  struct SpillRemainingOutputOptions {
+    vector_size_t prefixRows;
+    size_t expectedSpillRuns;
+  };
+
+  void spillRemainingOutputAndVerifyReplacement(
+      RadixSortBuffer& buffer,
+      const RowVectorPtr& input,
+      SpillRemainingOutputOptions options) {
+    auto prefix = buffer.getOutput(options.prefixRows);
+    ASSERT_NE(prefix, nullptr);
+    ASSERT_EQ(prefix->size(), options.prefixRows);
+
+    spillRemainingOutputAndCheckStats(
+        buffer, buffer.numInputRows() - prefix->size());
+    EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
+    EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+    ASSERT_TRUE(buffer.spilledStats());
+    EXPECT_EQ(buffer.spilledStats()->spillRuns, options.expectedSpillRuns);
+    EXPECT_GT(buffer.spilledStats()->spilledFiles, 1);
+
+    collectAndVerify(
+        buffer,
+        input,
+        /*batchSize=*/257,
+        /*idChannel=*/1,
+        /*keyChannel=*/0,
+        /*idBase=*/0,
+        prefix);
   }
 
   memory::MemoryPool* pool() const {
@@ -378,7 +357,7 @@ class RadixSortBufferTest : public testing::Test {
           buffer(
               std::static_pointer_cast<const RowType>(input->type()),
               {keyChannel},
-              {flags(true, true)},
+              {SortComparatorOracle::makeSortFlags(true, true)},
               test.pool(),
               &config,
               spillMemoryThreshold) {
@@ -851,7 +830,8 @@ TEST_F(RadixSortBufferTest, singleRunLifecycleAndMultipleKeys) {
        makeVector<int64_t>(BIGINT(), ids)});
   const std::vector<column_index_t> keyChannels{0, 2};
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(false, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true)};
 
   for (const auto batchSize : {1, 17, 2048}) {
     sortAndVerify(input, keyChannels, keyFlags, 3, batchSize);
@@ -863,7 +843,8 @@ TEST_F(RadixSortBufferTest, estimateOutputRowSizeMatchesLegacyForComplexRows) {
   auto input = makeEventMapPayloadRows(kRows);
   auto inputType = std::static_pointer_cast<const RowType>(input->type());
   const std::vector<column_index_t> keyChannels{9};
-  const std::vector<CompareFlags> keyFlags{flags(true, true)};
+  const std::vector<CompareFlags> keyFlags{
+      SortComparatorOracle::makeSortFlags(true, true)};
 
   tsan_atomic<bool> nonReclaimableSection{false};
   SortBuffer legacy(
@@ -895,7 +876,8 @@ TEST_F(RadixSortBufferTest, allOrderDirectionsAndNullPlacements) {
        makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5, 6})});
   for (const auto ascending : {false, true}) {
     for (const auto nullsFirst : {false, true}) {
-      const std::vector<CompareFlags> keyFlags{flags(ascending, nullsFirst)};
+      const std::vector<CompareFlags> keyFlags{
+          SortComparatorOracle::makeSortFlags(ascending, nullsFirst)};
       sortAndVerify(input, {0}, keyFlags, 1);
     }
   }
@@ -988,7 +970,8 @@ TEST_F(RadixSortBufferTest, scalarAndCustomOrderKeyTypes) {
     SCOPED_TRACE(key->type()->toString());
     auto input = makeRows({"key", "payload", "id"}, {key, payload, idVector});
     const std::vector<column_index_t> keyChannels{0};
-    const std::vector<CompareFlags> keyFlags{flags(true, false)};
+    const std::vector<CompareFlags> keyFlags{
+        SortComparatorOracle::makeSortFlags(true, false)};
     sortAndVerify(input, keyChannels, keyFlags, 2, 2, false);
   }
 }
@@ -997,7 +980,8 @@ TEST_F(RadixSortBufferTest, arrayAndRowKeysWithComplexPayload) {
   auto input = makeArrayRowMapIdRows();
   const std::vector<column_index_t> keyChannels{0, 1};
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(false, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true)};
   sortAndVerify(input, keyChannels, keyFlags, 3);
 }
 
@@ -1009,7 +993,9 @@ TEST_F(RadixSortBufferTest, complexOrderKeysMatchDuckDb) {
   sortAndVerifyWithDuckDb(
       input,
       {0, 1, 2},
-      {flags(true, false), flags(false, true), flags(true, true)},
+      {SortComparatorOracle::makeSortFlags(true, false),
+       SortComparatorOracle::makeSortFlags(false, true),
+       SortComparatorOracle::makeSortFlags(true, true)},
       "SELECT * FROM tmp ORDER BY "
       "c0 ASC NULLS LAST, "
       "c1 DESC NULLS FIRST, "
@@ -1025,7 +1011,7 @@ TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKey) {
   sortAndVerifyWithDuckDb(
       input,
       {0},
-      {flags(true, true)},
+      {SortComparatorOracle::makeSortFlags(true, true)},
       "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
       "x -> x.key) ASC NULLS FIRST, "
       "list_transform(list_sort(map_entries(c0)), x -> x.value) ASC NULLS FIRST",
@@ -1033,7 +1019,7 @@ TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKey) {
   sortAndVerifyWithDuckDb(
       input,
       {0},
-      {flags(false, false)},
+      {SortComparatorOracle::makeSortFlags(false, false)},
       "SELECT * FROM tmp ORDER BY list_transform(list_sort(map_entries(c0)), "
       "x -> x.key) DESC NULLS LAST, "
       "list_transform(list_sort(map_entries(c0)), x -> x.value) DESC NULLS LAST",
@@ -1045,7 +1031,8 @@ TEST_F(RadixSortBufferTest, nestedComplexOrderKeys) {
   auto input = makeNestedComplexKeyRows();
   const std::vector<column_index_t> keyChannels{0, 1};
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true), flags(false, false)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false)};
   sortIdsAndVerifyWithDuckDb(
       input,
       keyChannels,
@@ -1084,7 +1071,8 @@ TEST_F(RadixSortBufferTest, unknownAndNestedUnknownRemainSupported) {
        makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5, 6})});
   const std::vector<column_index_t> keyChannels{0, 1};
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(true, false)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(true, false)};
   sortAndVerify(input, keyChannels, keyFlags, 2);
 }
 
@@ -1208,7 +1196,12 @@ TEST_F(RadixSortBufferTest, allSupportedPayloadTypesRoundTrip) {
        rows,
        timestampWithTimeZone,
        makeVector<int64_t>(BIGINT(), {0, 1, 2})});
-  auto output = sortAndCollect(input, {0}, {flags(true, true)}, kRows, false);
+  auto output = sortAndCollect(
+      input,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      kRows,
+      false);
   const auto* outputVariantArrays =
       output->childAt(20)->asUnchecked<ArrayVector>();
   const auto* outputVariants =
@@ -1233,8 +1226,10 @@ TEST_F(RadixSortBufferTest, allSupportedPayloadTypesRoundTrip) {
           << "row=" << row << ", id=" << id;
     }
   }
-  expectRowsMatchById(*input, *output, 25, 20);
-  expectSorted(*output, {0}, {flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(
+      *input, *output, 25, {.directlyCheckedColumn = 20});
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortBufferTest, wrappedFloatingPointKeyOutputUsesDecodedKey) {
@@ -1263,13 +1258,18 @@ TEST_F(RadixSortBufferTest, wrappedFloatingPointKeyOutputUsesDecodedKey) {
       {"key", "constant", "id"},
       {dictionary, constant, makeVector<int64_t>(BIGINT(), ids)});
   inputType_ = std::static_pointer_cast<const RowType>(input->type());
-  RadixSortBuffer buffer(inputType_, {0}, {flags(true, true)}, pool());
+  RadixSortBuffer buffer(
+      inputType_,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      pool());
   buffer.addInput(input);
   buffer.noMoreInput();
   auto output = collect(buffer, 3);
 
-  expectRowsMatchById(*input, *output, 2);
-  expectSorted(*output, {0}, {flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortBufferTest, spillPlansMergeCorrectly) {
@@ -1300,6 +1300,34 @@ TEST_F(RadixSortBufferTest, spillPlansMergeCorrectly) {
     runSpillPlanAndVerify(
         makeKeyPayloadIdRows(plan.keys), plan.runs, plan.outputBatchSize, 2);
   }
+}
+
+TEST_F(RadixSortBufferTest, equalAndNullVariableKeysAcrossDiskStreams) {
+  const std::string equalKey(80, 'e');
+  auto input = makeRows(
+      {"key", "id"},
+      {makeStringVector(
+           VARCHAR(),
+           {equalKey,
+            std::nullopt,
+            std::string(80, 'z'),
+            std::nullopt,
+            equalKey,
+            std::string(80, 'a'),
+            equalKey,
+            std::nullopt,
+            std::string(80, 'm')}),
+       makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5, 6, 7, 8})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{3, true}, {3, true}, {3, false}});
+
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
+  EXPECT_EQ(buffer.spilledStats()->spilledRows, 6);
+  buffer.noMoreInput();
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 3);
+  collectAndVerify(buffer, input, 1, 1);
 }
 
 TEST_F(RadixSortBufferTest, splitSpillFilesMergeAsSingleLogicalRun) {
@@ -1378,17 +1406,46 @@ TEST_F(RadixSortBufferTest, splitOutputStageSpillFilesMergeAsSingleRun) {
   auto& buffer = spill.buffer;
   buffer.addInput(input);
   buffer.noMoreInput();
-  auto prefix = buffer.getOutput(1);
-  ASSERT_NE(prefix, nullptr);
-  ASSERT_EQ(prefix->size(), 1);
+  EXPECT_FALSE(buffer.spilledStats());
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 0);
 
-  spillRemainingOutputAndCheckStats(buffer, input->size() - prefix->size());
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
+  spillRemainingOutputAndVerifyReplacement(
+      buffer, input, {.prefixRows = 1, .expectedSpillRuns = 1});
+}
+
+TEST_F(RadixSortBufferTest, outputStageSpillReplacesMultiStreamMerge) {
+  constexpr vector_size_t kRowsPerRun = 4;
+  constexpr vector_size_t kInputSpillRuns = 2;
+  constexpr vector_size_t kRows = (kInputSpillRuns + 1) * kRowsPerRun;
+  constexpr uint64_t kMaxFileSize = 512 * 1024;
+  auto input = makeLargeStringKeyIdRows(
+      generate<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }));
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      kMaxFileSize);
+  auto& buffer = spill.buffer;
+  addInputRuns(
+      buffer,
+      input,
+      {{kRowsPerRun, true}, {kRowsPerRun, true}, {kRowsPerRun, false}});
+
   ASSERT_TRUE(buffer.spilledStats());
-  ASSERT_GT(buffer.spilledStats()->spilledFiles, 1);
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, kInputSpillRuns);
+  EXPECT_EQ(buffer.testingSpilledRunCount(), kInputSpillRuns);
+  ASSERT_GT(buffer.spilledStats()->spilledFiles, kInputSpillRuns);
 
-  collectAndVerify(buffer, input, 257, 1, 0, 0, prefix);
+  buffer.noMoreInput();
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
+  EXPECT_EQ(buffer.testingMergeStreamCount(), kInputSpillRuns + 1);
+
+  spillRemainingOutputAndVerifyReplacement(
+      buffer,
+      input,
+      {.prefixRows = 3, .expectedSpillRuns = kInputSpillRuns + 1});
 }
 
 TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
@@ -1423,7 +1480,9 @@ TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
   RadixSortBuffer buffer(
       inputType_,
       {0, 1, 2},
-      {flags(true, true), flags(true, false), flags(false, false)},
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(true, false),
+       SortComparatorOracle::makeSortFlags(false, false)},
       pool(),
       &config);
 
@@ -1435,11 +1494,13 @@ TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
   buffer.noMoreInput();
 
   auto output = collect(buffer, 5);
-  expectRowsMatchById(*input, *output, 3);
-  expectSorted(
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 3);
+  SortComparatorOracle::expectSorted(
       *output,
       {0, 1, 2},
-      {flags(true, true), flags(true, false), flags(false, false)});
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(true, false),
+       SortComparatorOracle::makeSortFlags(false, false)});
 }
 
 TEST_F(RadixSortBufferTest, longSpilledKeyKeepsHeapOutputForShortFinalRun) {
@@ -1484,7 +1545,8 @@ TEST_F(RadixSortBufferTest, spillMergeNullFreeOutputResetsNullBuffers) {
   RadixSortBuffer buffer(
       inputType_,
       {0, 1},
-      {flags(true, true), flags(true, true)},
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(true, true)},
       pool(),
       &config);
   buffer.addInput(slice(*input, 0, 3));
@@ -1518,8 +1580,12 @@ TEST_F(RadixSortBufferTest, spillMergeNullFreeOutputResetsNullBuffers) {
   ASSERT_EQ(buffer.getOutput(3), nullptr);
 
   auto output = concatenateBatches({firstOutputCopy, secondOutput}, 6);
-  expectRowsMatchById(*input, *output, 5);
-  expectSorted(*output, {0, 1}, {flags(true, true), flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 5);
+  SortComparatorOracle::expectSorted(
+      *output,
+      {0, 1},
+      {SortComparatorOracle::makeSortFlags(true, true),
+       SortComparatorOracle::makeSortFlags(true, true)});
   EXPECT_EQ(buffer.numOutputRows(), 6);
   EXPECT_TRUE(buffer.spillReadStats());
 }
@@ -1555,6 +1621,25 @@ TEST_F(RadixSortBufferTest, spillMemoryThresholdTriggersBeforeNextInput) {
   buffer.noMoreInput();
   ASSERT_TRUE(buffer.spilledStats());
   collectAndVerify(buffer, input, 2, 2);
+}
+
+TEST_F(RadixSortBufferTest, testSpillInjectionTriggersBeforeNextInput) {
+  auto input = makeKeyPayloadIdRows({6, 1, 5, 2, 4, 3});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(slice(*input, 0, 3));
+  {
+    TestScopedSpillInjection spillInjection(100, 1);
+    buffer.addInput(slice(*input, 3, 3));
+  }
+
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 1);
+  EXPECT_EQ(buffer.spilledStats()->spilledRows, 3);
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
+  buffer.noMoreInput();
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+  collectAndVerify(buffer, input, 1, 2);
 }
 
 TEST_F(RadixSortBufferTest, estimateOutputRowSizeIncludesSpilledAndMemoryRuns) {
@@ -1597,7 +1682,11 @@ TEST_F(RadixSortBufferTest, reservationFailureTriggersSpillWithZeroThreshold) {
   auto sortPool =
       rootPool->addLeafChild("radix-sort-buffer-reservation-failure");
   RadixSortBuffer buffer(
-      inputType, {0}, {flags(true, true)}, sortPool.get(), &config);
+      inputType,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      sortPool.get(),
+      &config);
 
   auto makeWideInput = [&](const std::vector<int64_t>& keys,
                            const std::vector<int64_t>& ids) {
@@ -1636,8 +1725,10 @@ TEST_F(RadixSortBufferTest, reservationFailureTriggersSpillWithZeroThreshold) {
       {makeWideInput(firstKeys, firstIds),
        makeWideInput(secondKeys, secondIds)},
       firstKeys.size() + secondKeys.size());
-  expectRowsMatchById(*expectedInput, *output, inputType->size() - 1);
-  expectSorted(*output, {0}, {flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(
+      *expectedInput, *output, inputType->size() - 1);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortBufferTest, spillStatsCoverInputAndOutputStageMetrics) {
@@ -1734,19 +1825,29 @@ TEST_F(RadixSortBufferTest, spillBatchOutputSizes) {
   }
   EXPECT_EQ(batchSizes, std::vector<vector_size_t>({3, 3, 2}));
   auto output = concatenateBatches(batches, input->size());
-  expectRowsMatchById(*input, *output, 2);
-  expectSorted(*output, {0}, {flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortBufferTest, spillDisabledAndEmptySpill) {
   inputType_ = ROW({"key", "id"}, {BIGINT(), BIGINT()});
-  RadixSortBuffer disabled(inputType_, {0}, {flags(true, true)}, pool());
+  RadixSortBuffer disabled(
+      inputType_,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      pool());
   EXPECT_FALSE(disabled.canSpill());
   EXPECT_THROW(disabled.spill(), BoltException);
 
   auto spillDirectory = exec::test::TempDirectoryPath::create();
   auto config = spillConfig(spillDirectory->path);
-  RadixSortBuffer empty(inputType_, {0}, {flags(true, true)}, pool(), &config);
+  RadixSortBuffer empty(
+      inputType_,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      pool(),
+      &config);
   EXPECT_TRUE(empty.canSpill());
   empty.spill();
   empty.noMoreInput();
@@ -1754,7 +1855,11 @@ TEST_F(RadixSortBufferTest, spillDisabledAndEmptySpill) {
   EXPECT_EQ(empty.getOutput(1), nullptr);
 
   RadixSortBuffer postSpillInput(
-      inputType_, {0}, {flags(true, true)}, pool(), &config);
+      inputType_,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      pool(),
+      &config);
   postSpillInput.spill();
   postSpillInput.addInput(makeRows(
       {"key", "id"},
@@ -1763,7 +1868,8 @@ TEST_F(RadixSortBufferTest, spillDisabledAndEmptySpill) {
   postSpillInput.noMoreInput();
   EXPECT_FALSE(postSpillInput.spilledStats());
   auto output = collect(postSpillInput, 1);
-  expectSorted(*output, {0}, {flags(true, true)});
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortBufferTest, spillOrderDirectionsAndNullPlacements) {
@@ -1775,7 +1881,8 @@ TEST_F(RadixSortBufferTest, spillOrderDirectionsAndNullPlacements) {
   inputType_ = std::static_pointer_cast<const RowType>(input->type());
   for (const auto ascending : {false, true}) {
     for (const auto nullsFirst : {false, true}) {
-      const std::vector<CompareFlags> keyFlags{flags(ascending, nullsFirst)};
+      const std::vector<CompareFlags> keyFlags{
+          SortComparatorOracle::makeSortFlags(ascending, nullsFirst)};
       SpillContext spill(*this, input);
       RadixSortBuffer buffer(inputType_, {0}, keyFlags, pool(), &spill.config);
       addInputRuns(buffer, input, {{3, true}, {input->size() - 3, false}});
@@ -1846,7 +1953,11 @@ TEST_F(RadixSortBufferTest, prepareMergeFailureCleansAllFiles) {
     auto input = makeKeyPayloadIdRows({6, 1, 5, 2, 4, 3});
     inputType_ = std::static_pointer_cast<const RowType>(input->type());
     RadixSortBuffer buffer(
-        inputType_, {0}, {flags(true, true)}, pool(), &config);
+        inputType_,
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool(),
+        &config);
     addInputRuns(buffer, slice(*input, 0, 3), {{3, true}});
     auto files = std::filesystem::directory_iterator(spillDirectory->path);
     ASSERT_NE(files, std::filesystem::directory_iterator{});
@@ -1864,6 +1975,72 @@ TEST_F(RadixSortBufferTest, prepareMergeFailureCleansAllFiles) {
   EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
 }
 
+TEST_F(RadixSortBufferTest, spillWriteFailureCleansFiles) {
+  auto input = makeKeyPayloadIdRows({4, 1, 3, 2});
+  for (const auto outputStage : {false, true}) {
+    SCOPED_TRACE(outputStage ? "output stage" : "input stage");
+    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    {
+      uint64_t callbackBytes = 0;
+      auto config =
+          spillConfig(spillDirectory->path, "none", [&](uint64_t bytes) {
+            callbackBytes += bytes;
+            BOLT_FAIL("injected spill limit failure");
+          });
+      RadixSortBuffer buffer(
+          std::static_pointer_cast<const RowType>(input->type()),
+          {0},
+          {SortComparatorOracle::makeSortFlags(true, true)},
+          pool(),
+          &config);
+      buffer.addInput(input);
+      if (outputStage) {
+        buffer.noMoreInput();
+      }
+      EXPECT_THROW(buffer.spill(), BoltException);
+      EXPECT_GT(callbackBytes, 0);
+      EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
+    }
+    EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
+  }
+}
+
+TEST_F(RadixSortBufferTest, destructionCleansOwnedAndMergeStreamFiles) {
+  auto input = makeKeyPayloadIdRows({6, 1, 5, 2, 4, 3});
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(spillDirectory->path);
+
+  {
+    RadixSortBuffer buffer(
+        std::static_pointer_cast<const RowType>(input->type()),
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool(),
+        &config);
+    buffer.addInput(input);
+    buffer.spill();
+    EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
+    EXPECT_FALSE(std::filesystem::is_empty(spillDirectory->path));
+  }
+  EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
+
+  {
+    RadixSortBuffer buffer(
+        std::static_pointer_cast<const RowType>(input->type()),
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool(),
+        &config);
+    buffer.addInput(input);
+    buffer.spill();
+    buffer.noMoreInput();
+    EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
+    EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+    EXPECT_FALSE(std::filesystem::is_empty(spillDirectory->path));
+  }
+  EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
+}
+
 TEST_F(RadixSortBufferTest, outputStageSpillWithoutPayload) {
   auto input = makeRows(
       {"key"}, {makeVector<int64_t>(BIGINT(), {4, 1, std::nullopt, 3, 2})});
@@ -1871,13 +2048,18 @@ TEST_F(RadixSortBufferTest, outputStageSpillWithoutPayload) {
   auto spillDirectory = exec::test::TempDirectoryPath::create();
   auto config = spillConfig(spillDirectory->path);
   RadixSortBuffer buffer(
-      inputType_, {0}, {flags(true, false)}, pool(), &config);
+      inputType_,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, false)},
+      pool(),
+      &config);
   buffer.addInput(input);
   buffer.noMoreInput();
 
   spillRemainingOutputAndCheckStats(buffer, input->size());
   auto output = collect(buffer, 2);
-  expectSorted(*output, {0}, {flags(true, false)});
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, false)});
   auto* keys = output->childAt(0)->asUnchecked<SimpleVector<int64_t>>();
   ASSERT_EQ(output->size(), input->size());
   EXPECT_EQ(keys->valueAt(0), 1);
@@ -1895,7 +2077,8 @@ TEST_F(RadixSortBufferTest, complexKeyAndPayloadSpillOutput) {
   SpillContext spill(*this, input);
   const std::vector<column_index_t> keyChannels{0, 1};
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(false, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true)};
   RadixSortBuffer buffer(
       inputType_, keyChannels, keyFlags, pool(), &spill.config);
   buffer.addInput(slice(*input, 0, 3));
@@ -1903,8 +2086,8 @@ TEST_F(RadixSortBufferTest, complexKeyAndPayloadSpillOutput) {
   buffer.addInput(slice(*input, 3, 4));
   buffer.noMoreInput();
   auto output = collect(buffer, 2);
-  expectRowsMatchById(*input, *output, 3);
-  expectSorted(*output, keyChannels, keyFlags);
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 3);
+  SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
 }
 
 TEST_F(RadixSortBufferTest, mapVarcharBigintOrderKeySpillOutput) {
@@ -2029,9 +2212,10 @@ TEST_F(
   auto churn = makeEventMapPayloadRows(kRows, "churn_");
   (void)churn;
   auto output = concatenateBatches(batches, kRows);
-  expectRowsMatchById(
-      *makeEventMapPayloadRows(kRows), *output, 0, std::nullopt, 10'000);
-  expectSorted(*output, {9}, {flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(
+      *makeEventMapPayloadRows(kRows), *output, 0, {.idBase = 10'000});
+  SortComparatorOracle::expectSorted(
+      *output, {9}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortBufferTest, outputOwnsVariableDataAfterBufferDestruction) {
@@ -2046,7 +2230,11 @@ TEST_F(RadixSortBufferTest, outputOwnsVariableDataAfterBufferDestruction) {
               std::string(128, 'a'),
               std::string(128, 'b')})});
     auto inputType = std::static_pointer_cast<const RowType>(input->type());
-    RadixSortBuffer buffer(inputType, {0}, {flags(true, true)}, pool());
+    RadixSortBuffer buffer(
+        inputType,
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool());
     buffer.addInput(input);
     buffer.noMoreInput();
     output = buffer.getOutput(3);
@@ -2063,7 +2251,15 @@ TEST_F(RadixSortBufferTest, outputOwnsVariableDataAfterBufferDestruction) {
 
 TEST_F(RadixSortBufferTest, stateStatsAndEmptyInput) {
   auto inputType = ROW({"key"}, {BIGINT()});
-  RadixSortBuffer buffer(inputType, {0}, {flags(true, true)}, pool());
+  RadixSortBuffer buffer(
+      inputType,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      pool());
+  EXPECT_FALSE(buffer.canSpill());
+  EXPECT_FALSE(buffer.canReclaim());
+  EXPECT_FALSE(buffer.spilledStats());
+  EXPECT_FALSE(buffer.spillReadStats());
   EXPECT_THROW(buffer.getOutput(1), BoltException);
 
   auto empty = makeRows({"key"}, {BaseVector::create(BIGINT(), 0, pool())});
@@ -2075,13 +2271,28 @@ TEST_F(RadixSortBufferTest, stateStatsAndEmptyInput) {
   ASSERT_TRUE(buffer.sortStats());
   EXPECT_THROW(buffer.addInput(empty), BoltException);
 
-  RadixSortBuffer nonEmpty(inputType, {0}, {flags(true, true)}, pool());
+  RadixSortBuffer nonEmpty(
+      inputType,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      pool());
   nonEmpty.addInput(makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {1})}));
+  EXPECT_EQ(nonEmpty.numInputRows(), 1);
+  EXPECT_FALSE(nonEmpty.canReclaim());
+  EXPECT_FALSE(nonEmpty.spilledStats());
+  EXPECT_FALSE(nonEmpty.spillReadStats());
   nonEmpty.noMoreInput();
+  ASSERT_NE(nonEmpty.getOutput(1), nullptr);
+  EXPECT_EQ(nonEmpty.numOutputRows(), 1);
+  EXPECT_EQ(nonEmpty.getOutput(1), nullptr);
+  EXPECT_FALSE(nonEmpty.spilledStats());
+  EXPECT_FALSE(nonEmpty.spillReadStats());
+  EXPECT_TRUE(nonEmpty.sortStats());
 }
 
 TEST_F(RadixSortBufferTest, rejectsUnsupportedOrderKeysAndPayload) {
-  const auto compareFlags = std::vector<CompareFlags>{flags(true, true)};
+  const auto compareFlags = std::vector<CompareFlags>{
+      SortComparatorOracle::makeSortFlags(true, true)};
   for (const auto& keyType : std::vector<TypePtr>{
            VARIANT(),
            ARRAY(VARIANT()),
@@ -2110,10 +2321,13 @@ TEST_F(RadixSortBufferTest, validatesConstructionAndInputContracts) {
   auto inputType = ROW({"key", "value"}, {BIGINT(), VARCHAR()});
   EXPECT_THROW(
       RadixSortBuffer(
-          inputType, {inputType->size()}, {flags(true, true)}, pool()),
+          inputType,
+          {inputType->size()},
+          {SortComparatorOracle::makeSortFlags(true, true)},
+          pool()),
       BoltException);
 
-  auto invalidFlags = flags(true, true);
+  auto invalidFlags = SortComparatorOracle::makeSortFlags(true, true);
   invalidFlags.equalsOnly = true;
   EXPECT_THROW(
       RadixSortBuffer(inputType, {0}, {invalidFlags}, pool()), BoltException);

@@ -90,15 +90,8 @@ void abortPool(memory::MemoryPool* pool) {
 
 class RecordingLazyLoader : public VectorLoader {
  public:
-  RecordingLazyLoader(
-      VectorPtr vector,
-      std::atomic_bool& loaded,
-      std::atomic_bool& loadedAfterMarker,
-      std::atomic_bool& marker)
-      : vector_(std::move(vector)),
-        loaded_(loaded),
-        loadedAfterMarker_(loadedAfterMarker),
-        marker_(marker) {}
+  RecordingLazyLoader(VectorPtr vector, std::atomic_bool& loaded)
+      : vector_(std::move(vector)), loaded_(loaded) {}
 
  private:
   void loadInternal(
@@ -108,7 +101,6 @@ class RecordingLazyLoader : public VectorLoader {
       VectorPtr* result) override {
     BOLT_CHECK(!hook, "RecordingLazyLoader doesn't support ValueHook");
     loaded_ = true;
-    loadedAfterMarker_ = loadedAfterMarker_ || marker_.load();
 
     BOLT_CHECK_EQ(rows.size(), vector_->size());
     *result = BaseVector::copy(*vector_);
@@ -116,8 +108,6 @@ class RecordingLazyLoader : public VectorLoader {
 
   const VectorPtr vector_;
   std::atomic_bool& loaded_;
-  std::atomic_bool& loadedAfterMarker_;
-  std::atomic_bool& marker_;
 };
 } // namespace
 
@@ -454,16 +444,28 @@ TEST_P(OrderByTest, sortBufferConfig) {
                   .values(vectors)
                   .orderBy({"c0 ASC NULLS LAST", "c2 DESC NULLS FIRST"}, false)
                   .planNode();
+  bool legacySortBufferUsed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput",
+      std::function<void(void*)>(
+          [&](void* /*unused*/) { legacySortBufferUsed = true; }));
   AssertQueryBuilder(duckDbQueryRunner_)
+      .config(core::QueryConfig::kOrderByRadixSortEnabled, true)
       .plan(plan)
       .assertResults(
           "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    ASSERT_FALSE(legacySortBufferUsed);
+  }
 
   AssertQueryBuilder(duckDbQueryRunner_)
       .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
       .plan(plan)
       .assertResults(
           "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    ASSERT_TRUE(legacySortBufferUsed);
+  }
 }
 
 TEST_P(OrderByTest, multipleKeys) {
@@ -1302,17 +1304,26 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
     // 1: trigger reclaim after all the inputs processed.
     int triggerCondition;
     bool spillEnabled;
+    bool radixSortEnabled;
     bool expectedReclaimable;
 
     std::string debugString() const {
       return fmt::format(
-          "triggerCondition {}, spillEnabled {}, expectedReclaimable {}",
+          "triggerCondition {}, spillEnabled {}, radixSortEnabled {}, expectedReclaimable {}",
           triggerCondition,
           spillEnabled,
+          radixSortEnabled,
           expectedReclaimable);
     }
   } testSettings[] = {
-      {0, true, true}, {1, true, true}, {0, false, false}, {1, false, false}};
+      {0, true, false, true},
+      {1, true, false, true},
+      {0, true, true, true},
+      {1, true, true, true},
+      {0, false, false, false},
+      {1, false, false, false},
+      {0, false, true, false},
+      {1, false, true, false}};
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
@@ -1379,7 +1390,9 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
-            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled,
+                testData.radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1389,6 +1402,9 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
                 .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                 .planNode())
             .queryCtx(queryCtx)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled,
+                testData.radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       }
@@ -1523,7 +1539,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringReserve) {
         .spillDirectory(tempDirectory->path)
         .config(core::QueryConfig::kSpillEnabled, true)
         .config(core::QueryConfig::kOrderBySpillEnabled, true)
-        .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
+        .config(core::QueryConfig::kOrderByRadixSortEnabled, true)
         .maxDrivers(1)
         .assertResults(expectedResult);
   });
@@ -2259,10 +2275,10 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
     GTEST_SKIP() << "GPU OrderBy is not used by this lazy input test\n";
   }
 
-  auto nonLazyVector = createVectors(1, rowType_, fuzzerOpts_)[0];
-  std::atomic_bool sortBufferAddInputEntered{false};
+  const auto nonLazyVector = createVectors(1, rowType_, fuzzerOpts_)[0];
+  createDuckDbTable({nonLazyVector});
+
   std::atomic_bool lazyLoaded{false};
-  std::atomic_bool lazyLoadedInSortBufferAddInput{false};
 
   std::vector<VectorPtr> lazyChildren;
   for (const auto& child : nonLazyVector->children()) {
@@ -2270,11 +2286,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
         pool(),
         child->type(),
         child->size(),
-        std::make_unique<RecordingLazyLoader>(
-            child,
-            lazyLoaded,
-            lazyLoadedInSortBufferAddInput,
-            sortBufferAddInputEntered)));
+        std::make_unique<RecordingLazyLoader>(child, lazyLoaded)));
   }
   auto lazyInput = std::make_shared<RowVector>(
       pool(),
@@ -2283,18 +2295,12 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
       nonLazyVector->size(),
       std::move(lazyChildren));
 
-  createDuckDbTable({nonLazyVector});
-
-  SCOPED_TESTVALUE_SET(
-      "bytedance::bolt::exec::SortBuffer::addInput",
-      std::function<void(void*)>(
-          ([&](void* /*unused*/) { sortBufferAddInputEntered = true; })));
-
   const auto spillDirectory = exec::test::TempDirectoryPath::create();
   AssertQueryBuilder(duckDbQueryRunner_)
       .spillDirectory(spillDirectory->path)
       .config(core::QueryConfig::kSpillEnabled, true)
       .config(core::QueryConfig::kOrderBySpillEnabled, true)
+      .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
       .plan(PlanBuilder()
                 .values({lazyInput})
                 .orderBy({"c0 ASC NULLS LAST"}, false)
@@ -2302,7 +2308,6 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
       .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
 
   ASSERT_TRUE(lazyLoaded);
-  ASSERT_FALSE(lazyLoadedInSortBufferAddInput);
 }
 
 INSTANTIATE_GPU_TEST_SUITE_P(OrderByTestOnCPUOrGPU, OrderByTest);

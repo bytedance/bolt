@@ -95,7 +95,9 @@ class SegmentedKeyState {
   explicit SegmentedKeyState(RadixSortRunStorage& arena)
       : divisor_(arena.keysPerBlock()),
         multiplier_(
-            std::numeric_limits<uint64_t>::max() / divisor_ + uint64_t{1}) {
+            divisor_ == 1 ? 0
+                          : std::numeric_limits<uint64_t>::max() / divisor_ +
+                    uint64_t{1}) {
     blockPointers_.reserve(arena.keyBlocks().size());
     for (const auto& block : arena.keyBlocks()) {
       blockPointers_.push_back(block.base);
@@ -104,6 +106,11 @@ class SegmentedKeyState {
 
   void randomAccess(uint64_t& blockIndex, uint64_t& tupleIndex, uint64_t index)
       const {
+    if (divisor_ == 1) {
+      blockIndex = index;
+      tupleIndex = 0;
+      return;
+    }
     blockIndex = static_cast<uint64_t>(
         (static_cast<__uint128_t>(index) * multiplier_) >> 64);
     tupleIndex = index - blockIndex * divisor_;
