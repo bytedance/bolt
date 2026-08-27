@@ -251,6 +251,8 @@ void CellShuffleWriter::checkpoint() {
   totalWindowRows_ = 0;
   maxWindowRows_ = 0;
   checkpointRequested_ = false;
+  // A sealed window is a batch boundary: drop reservation slack.
+  boltPool_->release();
 }
 
 void CellShuffleWriter::maybeCheckpoint() {
@@ -281,6 +283,10 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   }
   spillRunNow();
   *actual = allocator_->shrink();
+  // Freed chunks alone are not enough: the reservation built up by the
+  // chunk-grow choke point must go back too, or the arbitrator's requester
+  // still sees no room (the standard spill-then-release() pattern).
+  boltPool_->release();
   // Close the window at the next batch boundary so the resident null and
   // row-count state goes too.
   checkpointRequested_ = true;
