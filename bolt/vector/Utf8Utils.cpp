@@ -17,6 +17,7 @@
 #include "bolt/vector/Utf8Utils.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -26,7 +27,6 @@
 
 #include <folly/lang/Bits.h>
 
-#include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/vector/ConstantVector.h"
 #include "bolt/vector/DictionaryVector.h"
@@ -39,10 +39,29 @@ namespace {
 // subpart emits a single U+FFFD replacement (3 bytes).
 constexpr char kReplacement[3] = {'\xEF', '\xBF', '\xBD'};
 constexpr int32_t kReplacementSize = 3;
+constexpr int32_t kReplacementsPerBlock = 64;
+alignas(64) constexpr auto kReplacementBlock = [] {
+  std::array<char, kReplacementSize * kReplacementsPerBlock> block{};
+  for (int32_t index = 0; index < kReplacementsPerBlock; ++index) {
+    for (int32_t byte = 0; byte < kReplacementSize; ++byte) {
+      block[index * kReplacementSize + byte] = kReplacement[byte];
+    }
+  }
+  return block;
+}();
 constexpr int32_t kMaxStringSize = std::numeric_limits<int32_t>::max();
+// vector_size_t and per-row VARCHAR sizes are both bounded by INT32_MAX, so
+// their vector-wide byte product fits in the required 64-bit size_t.
+static_assert(
+    sizeof(size_t) >= sizeof(uint64_t),
+    "Vector-wide VARCHAR byte counts require 64-bit size_t");
 
 inline bool isCont(uint8_t b) {
   return (b & 0xC0) == 0x80;
+}
+
+inline bool isRegularThreeByteLead(uint8_t b) {
+  return b >= 0xE1 && b <= 0xEF && b != 0xED;
 }
 
 // Returns (validBytes, malformedBytes) for the UTF-8 code unit at p[0].
@@ -66,42 +85,39 @@ inline std::pair<int32_t, int32_t> nextSegment(
     return {2, 0};
   }
   if (c >= 0xE0 && c <= 0xEF) {
-    const bool overlong = (c == 0xE0);
-    const bool surrogate = (c == 0xED);
-    if (remaining < 3) {
-      if (remaining > 1 && ((overlong && p[1] < 0xA0) || !isCont(p[1]))) {
-        return {0, 1};
-      }
-      return {0, remaining};
-    }
-    if ((overlong && p[1] < 0xA0) || !isCont(p[1])) {
+    if (remaining == 1) {
       return {0, 1};
+    }
+    if (!isCont(p[1]) || (c == 0xE0 && p[1] < 0xA0)) {
+      return {0, 1};
+    }
+    if (remaining == 2) {
+      return {0, 2};
     }
     if (!isCont(p[2])) {
       return {0, 2};
     }
-    if (surrogate && p[1] >= 0xA0) {
+    if (c == 0xED && p[1] >= 0xA0) {
       return {0, 3};
     }
     return {3, 0};
   }
   if (c >= 0xF0 && c <= 0xF4) {
-    auto bad2nd = [&]() {
-      if (!isCont(p[1]))
-        return true;
-      return (c == 0xF0 && p[1] < 0x90) || (c == 0xF4 && p[1] > 0x8F);
-    };
-    if (remaining < 4) {
-      if (remaining > 1 && bad2nd())
-        return {0, 1};
-      if (remaining > 2 && !isCont(p[2]))
-        return {0, 2};
-      return {0, remaining};
-    }
-    if (bad2nd())
+    if (remaining == 1) {
       return {0, 1};
+    }
+    if (!isCont(p[1]) || (c == 0xF0 && p[1] < 0x90) ||
+        (c == 0xF4 && p[1] > 0x8F)) {
+      return {0, 1};
+    }
+    if (remaining == 2) {
+      return {0, 2};
+    }
     if (!isCont(p[2]))
       return {0, 2};
+    if (remaining == 3) {
+      return {0, 3};
+    }
     if (!isCont(p[3]))
       return {0, 3};
     return {4, 0};
@@ -119,12 +135,55 @@ regularThreeBytePrefixLength(const uint8_t* data, int32_t remaining) {
   int32_t offset = 0;
   while (offset <= remaining - 3) {
     const auto lead = data[offset];
-    if (!((lead >= 0xE1 && lead <= 0xEC) || (lead >= 0xEE && lead <= 0xEF)) ||
-        !isCont(data[offset + 1]) || !isCont(data[offset + 2])) {
+    if (!isRegularThreeByteLead(lead) || !isCont(data[offset + 1]) ||
+        !isCont(data[offset + 2])) {
       break;
     }
     offset += 3;
   }
+  return offset;
+}
+
+// Validates several ordinary 3-byte code points per SIMD batch. Kept out of
+// scanUtf8 so binary-heavy inputs retain the compact scalar state machine.
+FOLLY_NOINLINE int32_t
+regularThreeBytePrefixLengthSimd(const uint8_t* data, int32_t remaining) {
+  using Batch = xsimd::batch<uint8_t>;
+  constexpr int32_t kBatchSize = Batch::size;
+  constexpr int32_t kTripletsPerBatch = (kBatchSize - 2) / 3;
+  constexpr int32_t kBytesPerBatch = kTripletsPerBatch * 3;
+  static_assert(kBatchSize <= sizeof(uint32_t) * 8);
+  constexpr uint32_t kTripletStarts = [] {
+    uint32_t mask = 0;
+    for (int32_t index = 0; index < kBytesPerBatch; index += 3) {
+      mask |= uint32_t{1} << index;
+    }
+    return mask;
+  }();
+  const auto leadLow = Batch::broadcast(0xE1);
+  const auto leadHigh = Batch::broadcast(0xEF);
+  const auto surrogateLead = Batch::broadcast(0xED);
+  const auto continuationLow = Batch::broadcast(0x80);
+  const auto continuationHigh = Batch::broadcast(0xBF);
+
+  int32_t offset = 0;
+  for (; offset <= remaining - kBatchSize; offset += kBytesPerBatch) {
+    const auto bytes = Batch::load_unaligned(data + offset);
+    const auto ordinaryLead =
+        (bytes >= leadLow) & (bytes <= leadHigh) & (bytes != surrogateLead);
+    const auto continuation =
+        (bytes >= continuationLow) & (bytes <= continuationHigh);
+    const auto leadMask = static_cast<uint32_t>(simd::toBitMask(ordinaryLead));
+    const auto continuationMask =
+        static_cast<uint32_t>(simd::toBitMask(continuation));
+    const auto validTriplets =
+        leadMask & (continuationMask >> 1) & (continuationMask >> 2);
+    if (FOLLY_UNLIKELY((validTriplets & kTripletStarts) != kTripletStarts)) {
+      break;
+    }
+  }
+
+  offset += regularThreeBytePrefixLength(data + offset, remaining - offset);
   return offset;
 }
 
@@ -165,6 +224,21 @@ FOLLY_ALWAYS_INLINE int32_t asciiPrefixLength(const char* data, int32_t size) {
   return offset;
 }
 
+// Fast validator for the common text shape of ordinary 3-byte code points
+// followed by an ASCII suffix. Other valid UTF-8 shapes fall back to scanUtf8.
+FOLLY_NOINLINE bool isValidThreeBytePrefixWithAsciiTail(
+    const char* data,
+    int32_t size) {
+  const auto threeByteSize = regularThreeBytePrefixLengthSimd(
+      reinterpret_cast<const uint8_t*>(data), size);
+  if (threeByteSize == 0) {
+    return false;
+  }
+  return threeByteSize +
+      asciiPrefixLength(data + threeByteSize, size - threeByteSize) ==
+      size;
+}
+
 struct MalformedRun {
   vector_size_t row;
   int32_t offset;
@@ -186,14 +260,65 @@ FOLLY_ALWAYS_INLINE bool isSingleByteMalformed(
       (remaining == 1 || !isCont(data[1]));
 }
 
-// Returns the number of consecutive bytes that each form a one-byte malformed
-// unit. Looking at the following byte is sufficient for 2-byte leading bytes;
-// all other qualifying byte ranges are unconditionally malformed. The SIMD
-// loop is especially useful for binary data containing dense high-byte runs.
+// Returns a prefix where every byte is a UTF-8 lead byte and therefore makes
+// the preceding lead malformed. This is the common shape of binary payloads
+// such as repeated 0xD5. The final lead is included only when its following
+// byte cannot be a continuation (or the input ends), preserving valid tails
+// such as D5 80.
+FOLLY_ALWAYS_INLINE int32_t
+denseLeadMalformedPrefixLength(const uint8_t* data, int32_t remaining) {
+  if (data[0] < 0xC0 || (remaining > 1 && isCont(data[1]))) {
+    return 0;
+  }
+
+  using Batch = xsimd::batch<uint8_t>;
+  constexpr int32_t kBatchSize = Batch::size;
+  static_assert(kBatchSize <= sizeof(uint32_t) * 8);
+  const auto leadLow = Batch::broadcast(0xC0);
+  const auto kAllLanes = simd::allSetBitMask<uint8_t>();
+
+  int32_t offset = 0;
+  for (; offset <= remaining - kBatchSize; offset += kBatchSize) {
+    const auto bytes = Batch::load_unaligned(data + offset);
+    const auto mask = static_cast<uint32_t>(simd::toBitMask(bytes >= leadLow));
+    if (FOLLY_UNLIKELY(mask != kAllLanes)) {
+      const auto leadBytes = static_cast<int32_t>(std::countr_one(mask));
+      BOLT_DCHECK_LT(leadBytes, kBatchSize);
+      return offset + leadBytes -
+          (leadBytes > 0 && isCont(data[offset + leadBytes]));
+    }
+    if (offset + kBatchSize == remaining) {
+      return remaining;
+    }
+    if (FOLLY_UNLIKELY(isCont(data[offset + kBatchSize]))) {
+      return offset + kBatchSize - 1;
+    }
+  }
+
+  while (offset < remaining && data[offset] >= 0xC0 &&
+         (offset + 1 == remaining || !isCont(data[offset + 1]))) {
+    ++offset;
+  }
+  return offset;
+}
+
+// Coalesces consecutive one-byte malformed units, using SIMD for mixed binary
+// payloads and the cheaper lead-only scan when possible.
 FOLLY_ALWAYS_INLINE int32_t
 singleByteMalformedPrefixLength(const uint8_t* data, int32_t remaining) {
   if (!isSingleByteMalformed(data, remaining)) {
     return 0;
+  }
+
+  constexpr uint32_t kFourLeadBytes = 0xC0C0C0C0U;
+  if (remaining >= static_cast<int32_t>(sizeof(uint32_t)) &&
+      (folly::loadUnaligned<uint32_t>(data) & kFourLeadBytes) ==
+          kFourLeadBytes) {
+    const auto denseLeadPrefix =
+        denseLeadMalformedPrefixLength(data, remaining);
+    if (denseLeadPrefix > 0) {
+      return denseLeadPrefix;
+    }
   }
 
   using Batch = xsimd::batch<uint8_t>;
@@ -274,10 +399,6 @@ int32_t scanUtf8(
     if (malformedPrefix > 0) {
       const int64_t replacementBytes =
           static_cast<int64_t>(malformedPrefix) * kReplacementSize;
-      BOLT_USER_CHECK_LE(
-          outputSize,
-          static_cast<int64_t>(kMaxStringSize) - replacementBytes,
-          "UTF-8 replacement result exceeds the maximum VARCHAR size");
       appendMalformedRun(
           row, offset, malformedPrefix, malformedPrefix, malformed);
       offset += malformedPrefix;
@@ -296,10 +417,6 @@ int32_t scanUtf8(
     const auto [validSize, malformedSize] =
         nextSegment(bytes + offset, size - offset);
     if (malformedSize > 0) {
-      BOLT_USER_CHECK_LE(
-          outputSize,
-          kMaxStringSize - kReplacementSize,
-          "UTF-8 replacement result exceeds the maximum VARCHAR size");
       appendMalformedRun(row, offset, malformedSize, 1, malformed);
       offset += malformedSize;
       outputSize += kReplacementSize;
@@ -320,8 +437,9 @@ FOLLY_ALWAYS_INLINE void writeReplacementRun(
     char* output,
     int32_t replacements) {
   BOLT_DCHECK_GT(replacements, 0);
-  std::memcpy(output, kReplacement, kReplacementSize);
-  int32_t written = 1;
+  const auto seedCount = std::min(replacements, kReplacementsPerBlock);
+  std::memcpy(output, kReplacementBlock.data(), seedCount * kReplacementSize);
+  int32_t written = seedCount;
   while (written < replacements) {
     const auto copyCount = std::min(written, replacements - written);
     std::memcpy(
@@ -330,6 +448,63 @@ FOLLY_ALWAYS_INLINE void writeReplacementRun(
         copyCount * kReplacementSize);
     written += copyCount;
   }
+}
+
+VectorPtr buildReplacementOnlyVector(
+    const MalformedRuns& malformed,
+    vector_size_t numRows,
+    bool uniformReplacementCount,
+    size_t totalStringBytes,
+    uint64_t maxStringLength,
+    memory::MemoryPool* pool) {
+  const auto maxOutputSize = static_cast<int32_t>(maxStringLength);
+  auto newValues = AlignedBuffer::allocate<StringView>(numRows, pool);
+  auto* outputValues = newValues->asMutable<StringView>();
+
+  BufferPtr newStrings;
+  const char* replacementData;
+  if (StringView::isInline(maxOutputSize)) {
+    replacementData = kReplacementBlock.data();
+  } else {
+    newStrings = AlignedBuffer::allocate<char>(maxOutputSize, pool);
+    newStrings->setSize(maxOutputSize);
+    auto* mutableReplacementData = newStrings->asMutable<char>();
+    writeReplacementRun(
+        mutableReplacementData, maxOutputSize / kReplacementSize);
+    replacementData = mutableReplacementData;
+  }
+
+  if (uniformReplacementCount) {
+    std::fill_n(
+        outputValues,
+        numRows,
+        StringView(
+            replacementData,
+            malformed.front().replacements * kReplacementSize));
+  } else {
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      outputValues[row] = StringView(
+          replacementData, malformed[row].replacements * kReplacementSize);
+    }
+  }
+
+  std::vector<BufferPtr> stringBuffers;
+  if (newStrings) {
+    stringBuffers.push_back(std::move(newStrings));
+  }
+  auto result = std::make_shared<FlatVector<StringView>>(
+      pool,
+      VARCHAR(),
+      nullptr,
+      numRows,
+      std::move(newValues),
+      std::move(stringBuffers),
+      SimpleVectorStats<StringView>{},
+      std::nullopt,
+      0);
+  result->setStringViewStats(
+      StringViewStats{totalStringBytes, maxStringLength});
+  return result;
 }
 
 // Constructs output using runs produced by scanUtf8. This performs memcpy and
@@ -427,26 +602,114 @@ VectorPtr buildSanitizedFlat(
 
   vector_size_t nullCount = 0;
   size_t totalStringBytes = 0;
+  size_t changedStringBytes = 0;
   uint64_t maxStringLength = 0;
   MalformedRuns malformed{memory::StlAllocator<MalformedRun>(pool)};
+  constexpr vector_size_t kSampleRows = 8;
+  constexpr vector_size_t kMaxSampledRunReserve = 16 * 1024;
 
-  auto probeString = [&](vector_size_t row, const char* data, int32_t size) {
-    const auto outputSize = scanUtf8(row, data, size, malformed);
+  auto recordString = [&](int32_t outputSize, bool changed) {
     maxStringLength = std::max<uint64_t>(maxStringLength, outputSize);
     if (!StringView::isInline(outputSize)) {
-      totalStringBytes = checkedPlus(
-          totalStringBytes,
-          static_cast<size_t>(outputSize),
-          "VARCHAR buffer size");
+      totalStringBytes += static_cast<size_t>(outputSize);
+      if (changed) {
+        changedStringBytes += static_cast<size_t>(outputSize);
+      }
     }
+  };
+
+  auto probeScalar = [&](vector_size_t row, const char* data, int32_t size) {
+    const auto malformedCount = malformed.size();
+    const auto outputSize = scanUtf8(row, data, size, malformed);
+    const bool changed = malformed.size() != malformedCount;
+    recordString(outputSize, changed);
+    return changed;
+  };
+
+  auto probeDenseLead = [&](vector_size_t row, const char* data, int32_t size) {
+    if (size == 0) {
+      probeScalar(row, data, size);
+      return false;
+    }
+    const auto malformedSize = denseLeadMalformedPrefixLength(
+        reinterpret_cast<const uint8_t*>(data), size);
+    if (malformedSize != size) {
+      probeScalar(row, data, size);
+      return false;
+    }
+    BOLT_USER_CHECK_LE(
+        size,
+        kMaxStringSize / kReplacementSize,
+        "UTF-8 replacement result exceeds the maximum VARCHAR size");
+    malformed.push_back({row, 0, size, size});
+    recordString(size * kReplacementSize, true);
+    return true;
+  };
+
+  auto probeThreeByte = [&](vector_size_t row, const char* data, int32_t size) {
+    if (isValidThreeBytePrefixWithAsciiTail(data, size)) {
+      recordString(size, false);
+      return true;
+    }
+    probeScalar(row, data, size);
+    return false;
   };
 
   if (plainFlatNoNulls) {
     const auto* flat = child->asUnchecked<FlatVector<StringView>>();
     const StringView* __restrict__ svs = flat->rawValues();
-    for (vector_size_t row = 0; row < numRows; ++row) {
+    const auto sampleRows = std::min(numRows, kSampleRows);
+    bool useThreeByteFastValidator = numRows > kSampleRows;
+    bool useDenseLeadFastScanner = numRows > kSampleRows;
+    bool reserveOneRunPerRow = numRows > kSampleRows;
+    vector_size_t row = 0;
+    for (; row < sampleRows; ++row) {
       const StringView& sv = svs[row];
-      probeString(row, sv.data(), static_cast<int32_t>(sv.size()));
+      const auto* data = sv.data();
+      const auto size = static_cast<int32_t>(sv.size());
+      const auto malformedCount = malformed.size();
+      const bool changed = probeScalar(row, data, size);
+      if (changed && malformed.capacity() < sampleRows) {
+        malformed.reserve(sampleRows);
+      }
+      reserveOneRunPerRow &= changed && malformed.size() == malformedCount + 1;
+      if (useThreeByteFastValidator &&
+          (changed || !isValidThreeBytePrefixWithAsciiTail(data, size))) {
+        useThreeByteFastValidator = false;
+      }
+      if (useDenseLeadFastScanner &&
+          (!changed || malformed.size() != malformedCount + 1 ||
+           malformed.back().offset != 0 || malformed.back().size != size ||
+           malformed.back().replacements != size)) {
+        useDenseLeadFastScanner = false;
+      }
+    }
+    if (reserveOneRunPerRow) {
+      // Bound speculative capacity for batches whose first rows are not
+      // representative. This still covers common writer batch sizes.
+      malformed.reserve(std::min(numRows, kMaxSampledRunReserve));
+    }
+    if (useDenseLeadFastScanner) {
+      for (; row < numRows; ++row) {
+        const StringView& sv = svs[row];
+        if (!probeDenseLead(row, sv.data(), static_cast<int32_t>(sv.size()))) {
+          ++row;
+          break;
+        }
+      }
+    }
+    if (useThreeByteFastValidator) {
+      for (; row < numRows; ++row) {
+        const StringView& sv = svs[row];
+        if (!probeThreeByte(row, sv.data(), static_cast<int32_t>(sv.size()))) {
+          ++row;
+          break;
+        }
+      }
+    }
+    for (; row < numRows; ++row) {
+      const StringView& sv = svs[row];
+      probeScalar(row, sv.data(), static_cast<int32_t>(sv.size()));
     }
   } else {
     PeeledVarchar pv = peelVarchar(*child);
@@ -461,13 +724,51 @@ VectorPtr buildSanitizedFlat(
         ++nullCount;
         continue;
       }
-      probeString(row, rs.data, rs.size);
+      probeScalar(row, rs.data, rs.size);
     }
   }
 
   if (malformed.empty()) {
     return nullptr;
   }
+
+  // A fully malformed row materializes as a prefix of the same repeated
+  // replacement sequence. When every row has this shape, build the sequence
+  // once instead of allocating and filling one copy per row.
+  if (plainFlatNoNulls && malformed.size() == numRows) {
+    const auto* sourceValues =
+        child->asUnchecked<FlatVector<StringView>>()->rawValues();
+    bool allReplacementOnly = true;
+    bool uniformReplacementCount = true;
+    const auto firstReplacementCount = malformed.front().replacements;
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      const auto& run = malformed[row];
+      if (run.row != row || run.offset != 0 ||
+          run.size != sourceValues[row].size()) {
+        allReplacementOnly = false;
+        break;
+      }
+      uniformReplacementCount &= run.replacements == firstReplacementCount;
+    }
+
+    if (allReplacementOnly) {
+      return buildReplacementOnlyVector(
+          malformed,
+          numRows,
+          uniformReplacementCount,
+          totalStringBytes,
+          maxStringLength,
+          pool);
+    }
+  }
+
+  // Retaining the source buffers avoids copying unchanged strings, but can
+  // increase peak memory when most values changed. Share only when doing so
+  // reduces the newly allocated non-inline bytes by at least half.
+  const bool shareUnchangedStrings =
+      totalStringBytes > 0 && changedStringBytes <= totalStringBytes / 2;
+  const auto allocatedStringBytes =
+      shareUnchangedStrings ? changedStringBytes : totalStringBytes;
 
   const bool hasAnyNull = (nullCount > 0);
   BufferPtr newNulls;
@@ -484,9 +785,9 @@ VectorPtr buildSanitizedFlat(
 
   BufferPtr newStrings;
   char* cur = nullptr;
-  if (totalStringBytes > 0) {
-    newStrings = AlignedBuffer::allocate<char>(totalStringBytes, pool);
-    newStrings->setSize(totalStringBytes);
+  if (allocatedStringBytes > 0) {
+    newStrings = AlignedBuffer::allocate<char>(allocatedStringBytes, pool);
+    newStrings->setSize(allocatedStringBytes);
     cur = newStrings->asMutable<char>();
   }
 
@@ -511,6 +812,11 @@ VectorPtr buildSanitizedFlat(
         writeFromRuns(data, size, malformed, begin, malformedIndex, inlineData);
         rnv[row] = StringView(inlineData, outputSize32);
       }
+      return;
+    }
+
+    if (shareUnchangedStrings && begin == malformedIndex) {
+      rnv[row] = StringView(data, size);
       return;
     }
 
@@ -560,7 +866,8 @@ VectorPtr buildSanitizedFlat(
   BOLT_DCHECK_EQ(malformedIndex, malformed.size());
   BOLT_DCHECK_EQ(
       cur,
-      newStrings ? newStrings->asMutable<char>() + totalStringBytes : nullptr);
+      newStrings ? newStrings->asMutable<char>() + allocatedStringBytes
+                 : nullptr);
 
   std::vector<BufferPtr> sbs;
   if (newStrings) {
@@ -578,6 +885,9 @@ VectorPtr buildSanitizedFlat(
       nullCount);
   result->setStringViewStats(
       StringViewStats{totalStringBytes, maxStringLength});
+  if (shareUnchangedStrings) {
+    result->acquireSharedStringBuffers(child.get());
+  }
   return result;
 }
 
@@ -636,10 +946,7 @@ std::optional<VectorPtr> buildSanitizedDictionary(
     const auto outputSize = scanUtf8(
         baseRow, value.data(), static_cast<int32_t>(value.size()), malformed);
     if (malformed.size() != begin && !StringView::isInline(outputSize)) {
-      changedStringBytes = checkedPlus(
-          changedStringBytes,
-          static_cast<size_t>(outputSize),
-          "VARCHAR buffer size");
+      changedStringBytes += static_cast<size_t>(outputSize);
     }
   });
 

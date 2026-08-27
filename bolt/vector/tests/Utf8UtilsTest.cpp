@@ -41,18 +41,20 @@ class Utf8UtilsTest : public testing::Test, public VectorTestBase {
     DecodedVector decoded(*vector);
     return decoded.valueAt<StringView>(row).str();
   }
-};
 
-TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
-  const std::string replacement{"\xEF\xBF\xBD", 3};
-  auto replacementRun = [&](int32_t count) {
+  static std::string replacementRun(int32_t count) {
+    const std::string replacement{"\xEF\xBF\xBD", 3};
     std::string result;
     result.reserve(count * replacement.size());
     for (int32_t index = 0; index < count; ++index) {
       result.append(replacement);
     }
     return result;
-  };
+  }
+};
+
+TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
+  const std::string replacement{"\xEF\xBF\xBD", 3};
   const std::vector<std::pair<std::string, std::string>> cases = {
       {{"\xD5\xE8\xD6\xC6\xEC", 5},
        replacement + replacement + replacement + replacement + replacement},
@@ -70,6 +72,14 @@ TEST_F(Utf8UtilsTest, replacesInvalidSequencesWithOpenJdkGrouping) {
       {{"\xF4\x90\x80\x80", 4},
        replacement + replacement + replacement + replacement},
       {{"\x9C\xA9", 2}, replacement + replacement},
+      {{"\x20\x02\x0F\x00\x01\x00\x00\x00\x9C\xA9\x06\x60\x00\x00"
+        "\x00\x00\x02\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x00",
+        28},
+       std::string(
+           "\x20\x02\x0F\x00\x01\x00\x00\x00\xEF\xBF\xBD\xEF\xBF"
+           "\xBD\x06\x60\x00\x00\x00\x00\x02\x00\x00\x00\x05\x00"
+           "\x00\x00\x01\x00\x00\x00",
+           32)},
       {std::string(63, '\xD5') + std::string("\xD5\x80", 2),
        replacementRun(63) + std::string("\xD5\x80", 2)},
       {{"\xE4\xB8\xAD\xE4\xB8\xD5\xE4\xB8\xAD", 9},
@@ -117,6 +127,41 @@ TEST_F(Utf8UtilsTest, leavesValidInputsByteIdentical) {
   EXPECT_EQ(input.get(), output.get());
 }
 
+TEST_F(Utf8UtilsTest, fallsBackAfterThreeByteFastValidation) {
+  std::string valid;
+  for (int32_t index = 0; index < 20; ++index) {
+    valid.append("\xE4\xB8\xAD", 3);
+  }
+  std::vector<std::string> inputs(10, valid);
+  inputs[8] = valid + std::string("\xD5", 1);
+  inputs[9] = valid + std::string("\xF0\x9F\x98\x80", 4);
+
+  auto input = makeRowVector({makeFlatVector<std::string>(inputs)});
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  EXPECT_EQ(
+      valid + std::string("\xEF\xBF\xBD", 3),
+      decodedStringAt(output->childAt(0), 8));
+  EXPECT_EQ(inputs[9], decodedStringAt(output->childAt(0), 9));
+}
+
+TEST_F(Utf8UtilsTest, fallsBackAfterDenseLeadFastScan) {
+  constexpr int32_t kMalformedBytes = 64;
+  std::vector<std::string> inputs(10, std::string(kMalformedBytes, '\xD5'));
+  inputs[8] = std::string(63, '\xD5') + std::string("\xD5\x80", 2);
+
+  auto input = makeRowVector({makeFlatVector<std::string>(inputs)});
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  EXPECT_EQ(
+      replacementRun(63) + std::string("\xD5\x80", 2),
+      decodedStringAt(output->childAt(0), 8));
+  EXPECT_EQ(
+      replacementRun(kMalformedBytes), decodedStringAt(output->childAt(0), 9));
+}
+
 TEST_F(Utf8UtilsTest, denseMalformedInputUsesRowBoundedScratchMemory) {
   constexpr vector_size_t kNumRows = 10'000;
   constexpr int32_t kBytesPerRow = 64;
@@ -136,6 +181,72 @@ TEST_F(Utf8UtilsTest, denseMalformedInputUsesRowBoundedScratchMemory) {
   ASSERT_NE(input.get(), output.get());
   output->validate({});
   EXPECT_LT(densePool->peakBytes() - bytesBefore, kMaxAdditionalBytes);
+}
+
+TEST_F(Utf8UtilsTest, sharesUniformReplacementOnlyOutputBuffer) {
+  constexpr vector_size_t kNumRows = 100;
+  constexpr int32_t kBytesPerRow = 65;
+  const auto expected = replacementRun(kBytesPerRow);
+
+  auto input = makeRowVector({makeFlatVector<std::string>(
+      std::vector<std::string>(kNumRows, std::string(kBytesPerRow, '\xD5')))});
+
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  ASSERT_EQ(VectorEncoding::Simple::FLAT, output->childAt(0)->encoding());
+  auto* outputValues =
+      output->childAt(0)->asUnchecked<FlatVector<StringView>>();
+  EXPECT_EQ(outputValues->valueAt(0).data(), outputValues->valueAt(1).data());
+  EXPECT_EQ(
+      outputValues->valueAt(0).data(),
+      outputValues->valueAt(kNumRows - 1).data());
+  input.reset();
+  output->validate({});
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), kNumRows - 1));
+}
+
+TEST_F(Utf8UtilsTest, sharesReplacementOnlyOutputBuffer) {
+  auto values = makeFlatVector<std::string>(
+      {std::string(64, '\xD5'),
+       std::string(64, '\xF5'),
+       std::string(63, '\xD5')});
+  auto input = makeRowVector({values});
+
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  ASSERT_EQ(VectorEncoding::Simple::FLAT, output->childAt(0)->encoding());
+  auto* outputValues =
+      output->childAt(0)->asUnchecked<FlatVector<StringView>>();
+  EXPECT_EQ(outputValues->valueAt(0).data(), outputValues->valueAt(1).data());
+  EXPECT_EQ(outputValues->valueAt(0).data(), outputValues->valueAt(2).data());
+  EXPECT_NE(outputValues->valueAt(0).size(), outputValues->valueAt(2).size());
+  input.reset();
+  values.reset();
+  output->validate({});
+  EXPECT_EQ(replacementRun(64), decodedStringAt(output->childAt(0), 0));
+  EXPECT_EQ(replacementRun(64), decodedStringAt(output->childAt(0), 1));
+  EXPECT_EQ(replacementRun(63), decodedStringAt(output->childAt(0), 2));
+}
+
+TEST_F(Utf8UtilsTest, keepsVaryingInlineReplacementOnlyOutputInline) {
+  auto input = makeRowVector({makeFlatVector<std::string>(
+      {std::string(1, '\xD5'),
+       std::string(2, '\xD5'),
+       std::string(3, '\xD5')})});
+
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  ASSERT_EQ(VectorEncoding::Simple::FLAT, output->childAt(0)->encoding());
+  auto* outputValues =
+      output->childAt(0)->asUnchecked<FlatVector<StringView>>();
+  EXPECT_TRUE(outputValues->stringBuffers().empty());
+  EXPECT_EQ(replacementRun(1), decodedStringAt(output->childAt(0), 0));
+  EXPECT_EQ(replacementRun(2), decodedStringAt(output->childAt(0), 1));
+  EXPECT_EQ(replacementRun(3), decodedStringAt(output->childAt(0), 2));
 }
 
 TEST_F(Utf8UtilsTest, trustsKnownAsciiMetadata) {
@@ -183,6 +294,35 @@ TEST_F(Utf8UtilsTest, preservesDictionaryEncodingWhenReplacing) {
   EXPECT_EQ(replacement, decodedStringAt(output->childAt(0), 0));
   EXPECT_EQ(valid, decodedStringAt(output->childAt(0), 1));
   EXPECT_EQ(invalid, decodedStringAt(outputDictionary->valueVector(), 2));
+}
+
+TEST_F(Utf8UtilsTest, sharesUnchangedFlatStringsWhenReplacementIsSparse) {
+  constexpr vector_size_t kNumRows = 100;
+  const std::string valid(64, 'v');
+  std::string invalid = valid;
+  invalid[32] = '\xD5';
+  const std::string expected =
+      valid.substr(0, 32) + std::string("\xEF\xBF\xBD", 3) + valid.substr(33);
+
+  std::vector<std::string> inputs(kNumRows, valid);
+  inputs[0] = invalid;
+  auto values = makeFlatVector<std::string>(inputs);
+  const auto unchangedValue =
+      values->asUnchecked<FlatVector<StringView>>()->valueAt(1);
+  const auto* unchangedData = unchangedValue.data();
+  auto input = makeRowVector({values});
+
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  auto* outputValues =
+      output->childAt(0)->asUnchecked<FlatVector<StringView>>();
+  EXPECT_EQ(unchangedData, outputValues->valueAt(1).data());
+  input.reset();
+  values.reset();
+  output->validate({});
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
+  EXPECT_EQ(valid, decodedStringAt(output->childAt(0), 1));
 }
 
 TEST_F(Utf8UtilsTest, handlesSequenceAndDictionaryNulls) {

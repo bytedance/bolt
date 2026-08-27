@@ -217,8 +217,8 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
 
   RowVectorPtr writeAndReadInvalidUtf8(
       dwio::common::FileFormat fileFormat,
-      const std::unordered_map<std::string, std::string>& serdeParameters) {
-    const std::string invalid{"\xD5", 1};
+      const std::unordered_map<std::string, std::string>& serdeParameters,
+      const std::string& invalid = std::string{"\xD5", 1}) {
     const auto rowType = ROW({"invalid_varchar"}, {VARCHAR()});
     const auto input = makeRowVector({makeFlatVector<std::string>({invalid})});
     const auto outputDirectory = TempDirectoryPath::create();
@@ -595,6 +595,24 @@ TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8Enabled) {
       dwio::common::FileFormat::PARQUET, {{kParquetSerdeMarker, "true"}});
 
   EXPECT_EQ(replacement, decodedStringAt(output->childAt(0), 0));
+}
+
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8BinaryPayload) {
+  const std::string input{
+      "\x20\x02\x0F\x00\x01\x00\x00\x00\x9C\xA9\x06\x60\x00\x00"
+      "\x00\x00\x02\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x00",
+      28};
+  const std::string expected{
+      "\x20\x02\x0F\x00\x01\x00\x00\x00\xEF\xBF\xBD\xEF\xBF"
+      "\xBD\x06\x60\x00\x00\x00\x00\x02\x00\x00\x00\x05\x00"
+      "\x00\x00\x01\x00\x00\x00",
+      32};
+  const auto output = writeAndReadInvalidUtf8(
+      dwio::common::FileFormat::PARQUET,
+      {{kParquetSerdeMarker, "true"}},
+      input);
+
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
 }
 
 TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8Disabled) {
