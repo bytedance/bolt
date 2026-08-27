@@ -49,6 +49,12 @@ inline uint8_t makeEncodingByte(EncodingKind kind, uint32_t param) {
 template <typename T>
 uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out);
 
+/// encodeBlock for a full 64-source-byte block: the count is a compile-time
+/// constant (8/16/32), so the scan and pack loops fully unroll. The split
+/// hot path only ever flushes full blocks; tails appear at window close.
+template <typename T>
+uint32_t encodeBlockFull(const T* values, uint8_t* out);
+
 /// Decodes one Encoding Block holding `count` values. Applies the L1 header
 /// and bounds rules (spec section 10.1, rules 13-17): on any violation
 /// returns 0 and writes nothing. Otherwise fills dst[0, count) and returns

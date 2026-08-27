@@ -84,6 +84,19 @@ void DataCells::append(
     return;
   }
   const uint32_t cellBytes = allocator_->cellBytes();
+  {
+    // Fast path: the bytes fit the current tail cell. Nothing is allocated,
+    // so no spill can fire mid-append and the chain cannot move under us.
+    // With blocks of at most kMaxBlockBytes and cells of >= 256 bytes this
+    // is the overwhelmingly common case.
+    auto& info = infos_[chainIndex(pid, stream)];
+    if (info.numCells != 0 && info.tailUsed + bytes <= cellBytes) {
+      ::memcpy(allocator_->cellData(info.lastCell) + info.tailUsed, data, bytes);
+      info.tailUsed += bytes;
+      totalBytes_ += bytes;
+      return;
+    }
+  }
   // Phase 1: allocate every cell this append could need, before touching the
   // chain or copying a byte. beforeGrow (or pool arbitration inside a chunk
   // grow) may spill and release all chains here; the held ids are unlinked
