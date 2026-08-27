@@ -336,5 +336,20 @@ TEST_F(CellWriterTest, dictionaryInputAndLongStrings) {
       {makeRowVector({"d", "s"}, {dictionary, strings})});
 }
 
+TEST_F(CellWriterTest, constantNullColumnRoundTrip) {
+  constexpr int32_t kPartitions = 4;
+  const int n = 700;
+  std::vector<int32_t> batchPids(n);
+  for (int i = 0; i < n; ++i) {
+    batchPids[i] = i % kPartitions;
+  }
+  auto values = makeFlatVector<int64_t>(n, [](auto row) { return row * 3; });
+  auto allNull = BaseVector::createNullConstant(BIGINT(), n, pool());
+  roundTrip(
+      makeOptions(kPartitions),
+      {batchPids},
+      {makeRowVector({"v", "dead"}, {values, allNull})});
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell

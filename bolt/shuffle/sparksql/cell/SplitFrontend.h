@@ -28,6 +28,9 @@ struct SplitBatch {
   /// One DecodedVector per logical column of the layout.
   std::vector<DecodedVector>* decoded;
   const uint32_t* row2Partition;
+  /// Rows this batch adds per partition (the partitioner's output); lets a
+  /// whole-batch fast path work per partition instead of per row.
+  const uint32_t* partition2RowCount;
   uint32_t numRows;
   /// Null-bit position of row r in its partition's window:
   /// windowRowStart[pid] + rowIndexInPid[r]. rowIndexInPid may be null when

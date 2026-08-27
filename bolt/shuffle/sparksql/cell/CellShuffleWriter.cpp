@@ -165,7 +165,11 @@ arrow::Status CellShuffleWriter::split(
   bool anyNullable = false;
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     decoded_[col].decode(*rv->childAt(col + 1));
-    anyNullable = anyNullable || decoded_[col].mayHaveNulls();
+    // A constant-null column takes the whole-batch counting path in the
+    // front end and needs no per-row null indexes.
+    const bool constantNull =
+        decoded_[col].isConstantMapping() && decoded_[col].isNullAt(0);
+    anyNullable = anyNullable || (decoded_[col].mayHaveNulls() && !constantNull);
   }
   if (anyNullable) {
     // One shared pass gives every nullable column its per-partition row
@@ -180,6 +184,7 @@ arrow::Status CellShuffleWriter::split(
   SplitBatch batch;
   batch.decoded = &decoded_;
   batch.row2Partition = row2Partition_.data();
+  batch.partition2RowCount = partition2RowCount_.data();
   batch.numRows = numRows;
   batch.rowIndexInPid = anyNullable ? rowIndexInPid_.data() : nullptr;
   batch.windowRowStart = windowRowStart_.data();
