@@ -336,6 +336,31 @@ TEST_F(CellWriterTest, dictionaryInputAndLongStrings) {
       {makeRowVector({"d", "s"}, {dictionary, strings})});
 }
 
+TEST_F(CellWriterTest, staleNullsBufferAndFlatAllNull) {
+  constexpr int32_t kPartitions = 4;
+  const int n = 600;
+  std::vector<int32_t> batchPids(n);
+  for (int i = 0; i < n; ++i) {
+    batchPids[i] = i % kPartitions;
+  }
+  // Column a: a defensively allocated, all-set nulls buffer - mayHaveNulls()
+  // is stale and the batch scan must classify it as no-nulls.
+  auto stale = makeFlatVector<int64_t>(n, [](auto row) { return row * 7; });
+  auto allSet = AlignedBuffer::allocate<bool>(n, pool());
+  ::memset(allSet->asMutable<uint8_t>(), 0xFF, (n + 7) / 8);
+  stale->setNulls(allSet);
+  ASSERT_TRUE(stale->mayHaveNulls());
+  // Column b: a flat vector whose every row is null (values are garbage).
+  auto flatNull = makeFlatVector<int32_t>(n, [](auto row) { return row; });
+  auto allClear = AlignedBuffer::allocate<bool>(n, pool());
+  ::memset(allClear->asMutable<uint8_t>(), 0, (n + 7) / 8);
+  flatNull->setNulls(allClear);
+  roundTrip(
+      makeOptions(kPartitions),
+      {batchPids},
+      {makeRowVector({"a", "b"}, {stale, flatNull})});
+}
+
 TEST_F(CellWriterTest, constantNullColumnRoundTrip) {
   constexpr int32_t kPartitions = 4;
   const int n = 700;
