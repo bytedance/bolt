@@ -466,10 +466,58 @@ void HiveDataSink::appendData(RowVectorPtr input) {
   auto dataInput = makeDataInput(dataChannels_, input);
 
   auto sanitizeDataInput = [&]() {
-    if (replaceInvalidUtf8ForParquetSerde(insertTableHandle_)) {
+    const bool enabled = replaceInvalidUtf8ForParquetSerde(insertTableHandle_);
+    const bool logDiagnostic = !utf8DiagnosticLogged_;
+    if (logDiagnostic) {
+      constexpr const char* kParquetSerdeMarker =
+          "spark.gluten.sql.native.writer.hive.parquet.serde";
+      const auto& serdeParameters = insertTableHandle_->serdeParameters();
+      const auto marker = serdeParameters.find(kParquetSerdeMarker);
+      LOG(WARNING) << "[invalid-utf8-debug] parquet="
+                   << (insertTableHandle_->storageFormat() ==
+                       dwio::common::FileFormat::PARQUET)
+                   << " markerPresent=" << (marker != serdeParameters.end())
+                   << " markerValue="
+                   << (marker == serdeParameters.end() ? "<missing>"
+                                                       : marker->second)
+                   << " enabled=" << enabled;
+      for (auto column = 0; column < dataInput->childrenSize(); ++column) {
+        const auto& child = dataInput->childAt(column);
+        if (!child || child->typeKind() != TypeKind::VARCHAR) {
+          continue;
+        }
+        const auto* simple = child->asUnchecked<SimpleVector<StringView>>();
+        const auto isAscii = simple->isAscii();
+        LOG(WARNING) << "[invalid-utf8-debug] column=" << column << " encoding="
+                     << VectorEncoding::mapSimpleToName(child->encoding())
+                     << " wrappedEncoding="
+                     << VectorEncoding::mapSimpleToName(
+                            child->wrappedVector()->encoding())
+                     << " rows=" << child->size()
+                     << " allIsAscii=" << simple->getAllIsAscii()
+                     << " isAsciiKnown=" << isAscii.has_value()
+                     << " isAscii=" << isAscii.value_or(false);
+      }
+    }
+
+    if (enabled) {
+      auto original = dataInput;
       dataInput = utf8::replaceInvalidUtf8InTopLevelVarchars(
           dataInput, dataInput->pool());
+      if (logDiagnostic) {
+        LOG(WARNING) << "[invalid-utf8-debug] rowVectorChanged="
+                     << (dataInput.get() != original.get());
+        for (auto column = 0; column < dataInput->childrenSize(); ++column) {
+          const auto& child = dataInput->childAt(column);
+          if (child && child->typeKind() == TypeKind::VARCHAR) {
+            LOG(WARNING) << "[invalid-utf8-debug] column=" << column
+                         << " childChanged="
+                         << (child.get() != original->childAt(column).get());
+          }
+        }
+      }
     }
+    utf8DiagnosticLogged_ = true;
   };
 
   // Write to unpartitioned (and unbucketed) table.

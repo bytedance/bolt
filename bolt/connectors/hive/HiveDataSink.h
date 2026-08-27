@@ -587,6 +587,7 @@ class HiveDataSink : public DataSink {
   std::vector<CompareFlags> sortCompareFlags_;
 
   State state_{State::kRunning};
+  bool utf8DiagnosticLogged_{false};
 
   tsan_atomic<bool> nonReclaimableSection_{false};
 
