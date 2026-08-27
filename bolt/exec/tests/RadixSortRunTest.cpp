@@ -65,13 +65,6 @@ class RadixSortRunTest : public testing::Test {
   std::shared_ptr<memory::MemoryPool> outputPool_{
       rootPool_->addLeafChild("radix-sort-run-output-test")};
 
-  static CompareFlags flags(bool ascending, bool nullsFirst) {
-    return CompareFlags{
-        .nullsFirst = nullsFirst,
-        .ascending = ascending,
-        .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
-  }
-
   template <typename T, typename Input = T>
   FlatVectorPtr<T> makeVector(
       const TypePtr& type,
@@ -302,6 +295,10 @@ class RadixSortRunTest : public testing::Test {
   }
   RowVectorPtr
   slice(const RowVector& input, vector_size_t offset, vector_size_t count) {
+    BOLT_CHECK_GE(offset, 0);
+    BOLT_CHECK_GE(count, 0);
+    BOLT_CHECK_LE(offset, input.size());
+    BOLT_CHECK_LE(count, input.size() - offset);
     std::vector<VectorPtr> children;
     children.reserve(input.childrenSize());
     for (uint32_t column = 0; column < input.childrenSize(); ++column) {
@@ -323,9 +320,11 @@ class RadixSortRunTest : public testing::Test {
       const RunDescriptor& desc,
       RadixSortRunOptions options = {}) {
     const auto inputType = rowTypeOf(desc.input);
+    BOLT_CHECK_EQ(desc.keyChannels.size(), desc.keyFlags.size());
     std::vector<std::string> names;
     std::vector<TypePtr> types;
     for (const auto channel : desc.keyChannels) {
+      BOLT_CHECK_LT(channel, inputType->size());
       names.push_back(inputType->nameOf(channel));
       types.push_back(inputType->childAt(channel));
     }
@@ -336,7 +335,7 @@ class RadixSortRunTest : public testing::Test {
         desc.keyFlags,
         desc.keyChannels,
         std::move(options));
-    EXPECT_NE(run, nullptr);
+    BOLT_CHECK_NOT_NULL(run);
     return run;
   }
 
@@ -360,6 +359,7 @@ class RadixSortRunTest : public testing::Test {
   }
 
   RowVectorPtr collect(RadixSortRun& run, vector_size_t batchSize) {
+    BOLT_CHECK_GT(batchSize, 0);
     const auto total = static_cast<vector_size_t>(run.metrics().inputRows);
     std::vector<VectorPtr> children;
     children.reserve(run.projection().outputType()->size());
@@ -393,10 +393,10 @@ class RadixSortRunTest : public testing::Test {
       const std::vector<column_index_t>& keyChannels =
           std::vector<column_index_t>{0},
       const std::vector<CompareFlags>& keyFlags = std::vector<CompareFlags>{
-          flags(true, true)}) {
+          SortComparatorOracle::makeSortFlags(true, true)}) {
     auto output = collect(run, batchSize);
-    expectRowsMatchById(input, *output, idChannel);
-    expectSortedByOutput(*output, keyChannels, keyFlags);
+    SortComparatorOracle::expectRowsMatchById(input, *output, idChannel);
+    SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
     return output;
   }
 
@@ -417,66 +417,29 @@ class RadixSortRunTest : public testing::Test {
         ->valueAt(row);
   }
 
-  static void expectRowsMatchById(
-      const RowVector& input,
-      const RowVector& output,
-      column_index_t idChannel) {
-    ASSERT_EQ(output.size(), input.size());
-    std::vector<bool> seen(input.size(), false);
-    expectRowsMatchById(input, output, idChannel, seen);
-    EXPECT_TRUE(std::all_of(
-        seen.begin(), seen.end(), [](bool value) { return value; }));
-  }
-
-  static void expectRowsMatchById(
-      const RowVector& input,
-      const RowVector& output,
-      column_index_t idChannel,
-      std::vector<bool>& seen) {
-    const auto compareFlags = flags(true, true);
-    for (vector_size_t row = 0; row < output.size(); ++row) {
-      const auto id = idAt(output, row, idChannel);
-      ASSERT_GE(id, 0);
-      ASSERT_LT(id, input.size());
-      EXPECT_FALSE(seen[id]);
-      seen[id] = true;
-      for (uint32_t column = 0; column < input.childrenSize(); ++column) {
-        EXPECT_EQ(
-            SortComparatorOracle::compare(
-                *input.childAt(column),
-                id,
-                *output.childAt(column),
-                row,
-                compareFlags),
-            0)
-            << "row=" << row << ", id=" << id << ", column=" << column;
-      }
-    }
-  }
-
-  static void expectRowsMatchById(
-      const RowVector& input,
-      const std::vector<RowVectorPtr>& batches,
-      column_index_t idChannel) {
-    std::vector<bool> seen(input.size(), false);
+  RowVectorPtr concatenate(const std::vector<RowVectorPtr>& batches) {
+    BOLT_CHECK(!batches.empty());
+    BOLT_CHECK_NOT_NULL(batches.front());
+    const auto outputType = rowTypeOf(*batches.front());
+    vector_size_t totalRows = 0;
     for (const auto& batch : batches) {
-      expectRowsMatchById(input, *batch, idChannel, seen);
+      BOLT_CHECK_NOT_NULL(batch);
+      BOLT_CHECK(batch->type()->equivalent(*outputType));
+      totalRows += batch->size();
     }
-    EXPECT_TRUE(std::all_of(
-        seen.begin(), seen.end(), [](bool value) { return value; }));
-  }
-
-  static void expectSortedByOutput(
-      const RowVector& output,
-      const std::vector<column_index_t>& keyChannels,
-      const std::vector<CompareFlags>& keyFlags) {
-    for (vector_size_t row = 1; row < output.size(); ++row) {
-      EXPECT_LE(
-          SortComparatorOracle::compareRows(
-              output, row - 1, output, row, keyChannels, keyFlags),
-          0)
-          << "row=" << row;
+    std::vector<VectorPtr> children;
+    children.reserve(outputType->size());
+    for (const auto& type : outputType->children()) {
+      children.push_back(
+          BaseVector::create(type, totalRows, outputPool_.get()));
     }
+    vector_size_t offset = 0;
+    for (const auto& batch : batches) {
+      copyBatch(*batch, children, offset);
+      offset += batch->size();
+    }
+    return std::make_shared<RowVector>(
+        outputPool_.get(), outputType, nullptr, totalRows, std::move(children));
   }
 
   static void expectSortedValues(
@@ -504,19 +467,21 @@ class RadixSortRunTest : public testing::Test {
   static OutputBuffers outputBuffers(
       const RowVector& output,
       bool includeString = false) {
+    BOLT_CHECK_GT(output.childrenSize(), 0);
+    BOLT_CHECK_NOT_NULL(output.childAt(0));
     const auto* key = output.childAt(0)->asUnchecked<FlatVector<int64_t>>();
     if (!includeString) {
       return {key->values().get(), nullptr, nullptr};
     }
+    BOLT_CHECK_GE(output.childrenSize(), 2);
+    BOLT_CHECK_NOT_NULL(output.childAt(1));
     const auto* string =
         output.childAt(1)->asUnchecked<FlatVector<StringView>>();
-    EXPECT_EQ(string->stringBuffers().size(), 1);
+    BOLT_CHECK_EQ(string->stringBuffers().size(), 1);
     return {
         key->values().get(),
         string->values().get(),
-        string->stringBuffers().size() == 1
-            ? string->stringBuffers().front().get()
-            : nullptr};
+        string->stringBuffers().front().get()};
   }
 
   void expectCleared(RadixSortRun& run) {
@@ -552,7 +517,8 @@ TEST_F(RadixSortRunTest, directProjectionMultipleKeysAndBatchSizes) {
        makeVector<int32_t>(INTEGER(), secondKey),
        makeIds(kRows)});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(false, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true)};
 
   for (const auto outputBatchSize : {1, 17, 2048}) {
     auto run = createRun({*input, {0, 2}, keyFlags});
@@ -592,7 +558,8 @@ TEST_F(RadixSortRunTest, variableKeyHeapOffsetSortsAndDecodes) {
             std::string(40, 'z')}),
        makeIds(6)});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true), flags(false, false)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false)};
   auto run = finalizedRun({*input, {0, 1}, keyFlags});
   ASSERT_TRUE(run->keyLayout().isVariable());
   EXPECT_EQ(run->keyLayout().heapKeyOffset(), 5);
@@ -616,7 +583,9 @@ TEST_F(RadixSortRunTest, variableKeyHeapOffsetStopsAtColumnBoundary) {
             std::string(24, 'c'),
             std::string(96, 'e')})});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true), flags(true, false), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(true, true)};
   auto run = finalizedRun({*input, {0, 1, 2}, keyFlags});
   ASSERT_TRUE(run->keyLayout().isVariable());
   EXPECT_EQ(run->keyLayout().inlineCapacity(), 18);
@@ -642,7 +611,9 @@ TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
        makeStringVector(
            {std::string(), std::string("abc"), std::string(40, 'x')})});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true), flags(true, true), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
 
   std::array<EncodedKeyBatch, 3> encodedColumns;
   for (uint32_t column = 0; column < encodedColumns.size(); ++column) {
@@ -714,7 +685,8 @@ TEST_F(RadixSortRunTest, variableKeyHeapOffsetIsZeroWhenFirstKeyIsVariable) {
        makeVector<int32_t>(INTEGER(), {3, 1, 2}),
        makeIds(3)});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
   auto run = finalizedRun({*input, {0, 1}, keyFlags});
   ASSERT_TRUE(run->keyLayout().isVariable());
   EXPECT_EQ(run->keyLayout().heapKeyOffset(), 0);
@@ -727,7 +699,8 @@ TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
       {makeStringVector(
            {"k3", "k1", std::nullopt, std::string("\0", 1), "", "k0"}),
        makeIds(6)});
-  auto shortRun = createRun({*shortInput, {0}, {flags(true, true)}});
+  auto shortRun = createRun(
+      {*shortInput, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   shortRun->append(*slice(*shortInput, 0, 2));
   shortRun->append(*slice(*shortInput, 2, 4));
   EXPECT_EQ(shortRun->keyLayout().inlineCapacity(), 12);
@@ -745,7 +718,8 @@ TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
       {"text", "id"},
       {makeStringVector({"k3", std::string(32, 'a'), "k2", "k1", "k0"}),
        makeIds(5)});
-  auto mixedRun = createRun({*mixedInput, {0}, {flags(true, true)}});
+  auto mixedRun = createRun(
+      {*mixedInput, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   mixedRun->append(*slice(*mixedInput, 0, 1));
   mixedRun->append(*slice(*mixedInput, 1, 4));
   EXPECT_EQ(mixedRun->maximumEncodedKeySize(), 34);
@@ -765,7 +739,9 @@ TEST_F(RadixSortRunTest, inheritedVariableKeySizeSelectsHeapOutput) {
       {"text", "id"}, {makeStringVector({"k3", "k1", "k2", "k0"}), makeIds(4)});
   RadixSortRunOptions options;
   options.initialVariableKeysFitRadixPrefix = false;
-  auto run = createRun({*input, {0}, {flags(true, true)}}, options);
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}},
+      options);
   run->append(*input);
   EXPECT_FALSE(run->variableKeysFitRadixPrefix());
   run->finalize();
@@ -785,7 +761,8 @@ TEST_F(RadixSortRunTest, fixedPrefixAndVariableSuffixDecodeFromRecord) {
       {makeVector<int32_t>(INTEGER(), {3, 1, 2, 1}),
        makeVector<int32_t>(INTEGER(), {2, 3, 1, 1}),
        makeStringVector({"c", "a", "b", ""})});
-  const std::vector<CompareFlags> keyFlags(3, flags(true, true));
+  const std::vector<CompareFlags> keyFlags(
+      3, SortComparatorOracle::makeSortFlags(true, true));
   auto run = createRun({*input, {0, 1, 2}, keyFlags});
   run->append(*input);
   run->finalize();
@@ -876,11 +853,12 @@ TEST_F(RadixSortRunTest, keyLayoutBoundariesKeepSortedOutput) {
 
     SCOPED_TRACE(keyType->toString());
     const std::vector<CompareFlags> keyFlags(
-        keyChannels.size(), flags(true, true));
+        keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
     auto output = finalizeAndCollect(
         {*input, keyChannels, keyFlags}, testCase.withPayloadKind);
-    expectRowsMatchById(*input, *output, input->childrenSize() - 1);
-    expectSortedByOutput(*output, keyChannels, keyFlags);
+    SortComparatorOracle::expectRowsMatchById(
+        *input, *output, input->childrenSize() - 1);
+    SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
 
     auto keyOnlyInput = std::make_shared<RowVector>(
         runPool_.get(), keyType, nullptr, input->size(), testCase.keys);
@@ -893,7 +871,12 @@ TEST_F(RadixSortRunTest, keyLayoutBoundariesKeepSortedOutput) {
 TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
   auto rowType = ROW({"key"}, {BIGINT()});
   auto emptyRun = RadixSortRun::create(
-      runPool_.get(), rowType, rowType, {flags(true, true)}, {0}, {});
+      runPool_.get(),
+      rowType,
+      rowType,
+      {SortComparatorOracle::makeSortFlags(true, true)},
+      {0},
+      {});
   ASSERT_NE(emptyRun, nullptr);
   EXPECT_FALSE(emptyRun->projection().hasPayload());
   EXPECT_EQ(emptyRun->storage()->payloadLayout(), nullptr);
@@ -902,7 +885,8 @@ TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
   EXPECT_EQ(emptyRun->state(), RadixSortRunState::kConsumed);
 
   auto input = makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {42})});
-  auto run = createRun({*input, {0}, {flags(true, true)}});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   run->append(*input);
   EXPECT_EQ(run->storage()->payloadSize(), 0);
   run->finalize();
@@ -912,15 +896,173 @@ TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
       output->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(0), 42);
 }
 
+TEST_F(RadixSortRunTest, lifecycleAndOutputValidation) {
+  auto input =
+      makeKeyStringRows({2, 1}, {std::string(32, 'b'), std::string(32, 'a')});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
+  std::array<const char*, 2> keys{};
+  std::array<char*, 2> payloads{};
+
+  EXPECT_THROW(run->getOutput(1, outputPool_.get()), BoltException);
+  EXPECT_THROW(
+      run->collectRemainingRows(1, keys.data(), payloads.data()),
+      BoltException);
+  EXPECT_EQ(run->getOutput({}, {}, nullptr), nullptr);
+
+  run->append(*input);
+  run->finalize();
+  EXPECT_EQ(run->getOutput({}, {}, nullptr), nullptr);
+  EXPECT_THROW(run->append(*input), BoltException);
+  EXPECT_THROW(run->finalize(), BoltException);
+  EXPECT_EQ(run->collectRemainingRows(0, keys.data(), payloads.data()), 0);
+
+  run->clear();
+  run->clear();
+  expectCleared(*run);
+  EXPECT_EQ(run->getOutput({}, {}, nullptr), nullptr);
+  EXPECT_THROW(run->append(*input), BoltException);
+  EXPECT_THROW(run->finalize(), BoltException);
+}
+
+TEST_F(RadixSortRunTest, collectRemainingRowsAcrossCalls) {
+  constexpr vector_size_t kRows = 9;
+  auto input = makeKeyStringRows(
+      makeValues<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }),
+      makeValues<std::string>(kRows, [](vector_size_t row) {
+        return "payload-" + std::to_string(row) +
+            std::string(24 + row, static_cast<char>('a' + row));
+      }));
+  RadixSortRunOptions options;
+  options.keysPerBlock = 2;
+  options.payloadRowsPerBlock = 2;
+  auto run = finalizedRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}},
+      options);
+
+  std::array<const char*, kRows> keys{};
+  std::array<char*, kRows> payloads{};
+  std::vector<RowVectorPtr> batches;
+  vector_size_t collectedRows = 0;
+  for (const auto requested : {2, 3, 10}) {
+    const auto count =
+        run->collectRemainingRows(requested, keys.data(), payloads.data());
+    ASSERT_EQ(count, std::min<vector_size_t>(requested, kRows - collectedRows));
+    auto batch = run->getOutput(
+        std::span<const char* const>(keys.data(), count),
+        std::span<char* const>(payloads.data(), count),
+        outputPool_.get());
+    ASSERT_NE(batch, nullptr);
+    batches.push_back(std::move(batch));
+    collectedRows += count;
+  }
+  EXPECT_EQ(run->collectRemainingRows(1, keys.data(), payloads.data()), 0);
+  EXPECT_EQ(run->metrics().outputRows, kRows);
+  EXPECT_EQ(run->state(), RadixSortRunState::kSortedInMemory);
+  auto output = concatenate(batches);
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
+  run->clear();
+  expectCleared(*run);
+
+  auto keyOnlyInput =
+      makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {7, 6, 5, 4, 3, 2, 1})});
+  options = {};
+  options.keysPerBlock = 2;
+  auto keyOnlyRun = finalizedRun(
+      {*keyOnlyInput, {0}, {SortComparatorOracle::makeSortFlags(true, true)}},
+      options);
+  vector_size_t expected = 1;
+  for (const auto requested : {1, 2, 8}) {
+    const auto count =
+        keyOnlyRun->collectRemainingRows(requested, keys.data(), nullptr);
+    ASSERT_GT(count, 0);
+    auto batch = keyOnlyRun->getOutput(
+        std::span<const char* const>(keys.data(), count),
+        {},
+        outputPool_.get());
+    ASSERT_NE(batch, nullptr);
+    for (vector_size_t row = 0; row < count; ++row) {
+      EXPECT_EQ(
+          batch->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(row),
+          expected++);
+    }
+  }
+  EXPECT_EQ(expected, 8);
+  EXPECT_EQ(keyOnlyRun->collectRemainingRows(1, keys.data(), nullptr), 0);
+  EXPECT_EQ(keyOnlyRun->metrics().outputRows, 7);
+  keyOnlyRun->clear();
+  expectCleared(*keyOnlyRun);
+}
+
+TEST_F(RadixSortRunTest, outputScratchGrowsAndShrinksAcrossCalls) {
+  constexpr vector_size_t kRows = 433;
+  auto input = makeRows(
+      {"first", "second", "payload", "id"},
+      {makeVector<int64_t>(
+           BIGINT(),
+           makeValues<int64_t>(
+               kRows, [](vector_size_t row) { return (row * 11) % kRows; })),
+       makeStringVector(makeValues<std::string>(
+           kRows,
+           [](vector_size_t row) {
+             return std::string(40 + row, static_cast<char>('a' + row));
+           })),
+       makeStringVector(makeValues<std::string>(
+           kRows,
+           [](vector_size_t row) {
+             return "payload-" + std::to_string(row) + std::string(row, 'x');
+           })),
+       makeIds(kRows)});
+  const std::vector<column_index_t> keyChannels{0, 1};
+  const std::vector<CompareFlags> keyFlags{
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false)};
+  auto run = finalizedRun({*input, keyChannels, keyFlags});
+
+  std::vector<VectorPtr> outputChildren;
+  outputChildren.reserve(input->childrenSize());
+  for (const auto& type : input->type()->as<TypeKind::ROW>().children()) {
+    outputChildren.push_back(
+        BaseVector::create(type, kRows, outputPool_.get()));
+  }
+  vector_size_t offset = 0;
+  for (const auto batchSize : {1, 129, 2, 301}) {
+    auto batch = run->getOutput(batchSize, outputPool_.get());
+    ASSERT_NE(batch, nullptr);
+    EXPECT_EQ(batch->size(), batchSize);
+    copyBatch(*batch, outputChildren, offset);
+    offset += batch->size();
+  }
+  ASSERT_EQ(offset, kRows);
+  EXPECT_EQ(run->getOutput(1, outputPool_.get()), nullptr);
+  auto output = std::make_shared<RowVector>(
+      outputPool_.get(),
+      input->type(),
+      nullptr,
+      kRows,
+      std::move(outputChildren));
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 3);
+  SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
+}
+
 TEST_F(RadixSortRunTest, appendUpdatesKeyNullabilityStats) {
   auto input = makeRows(
       {"key", "id"},
       {makeVector<int64_t>(BIGINT(), {2, std::nullopt, 1, 3}), makeIds(4)});
-  auto run = createRun({*input, {0}, {flags(true, false)}});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, false)}});
   run->append(*input);
   EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{1}));
   run->finalize();
-  collectAndVerify(*run, *input, 2, 1, {0}, {flags(true, false)});
+  collectAndVerify(
+      *run,
+      *input,
+      2,
+      1,
+      {0},
+      {SortComparatorOracle::makeSortFlags(true, false)});
 }
 
 TEST_F(RadixSortRunTest, duplicateDirectKeyStaysInPayload) {
@@ -932,8 +1074,11 @@ TEST_F(RadixSortRunTest, duplicateDirectKeyStaysInPayload) {
            makeValues<int64_t>(
                kRows, [](vector_size_t row) { return row % 7; })),
        makeIds(kRows)});
-  auto run =
-      finalizedRun({*input, {0, 0}, {flags(true, true), flags(true, true)}});
+  auto run = finalizedRun(
+      {*input,
+       {0, 0},
+       {SortComparatorOracle::makeSortFlags(true, true),
+        SortComparatorOracle::makeSortFlags(true, true)}});
   EXPECT_EQ(
       run->projection().columns()[0].source, RadixSortOutputSource::kPayload);
   collectAndVerify(*run, *input, 9, 1);
@@ -942,15 +1087,17 @@ TEST_F(RadixSortRunTest, duplicateDirectKeyStaysInPayload) {
 TEST_F(RadixSortRunTest, floatingPointKeyOutputUsesDecodedKey) {
   auto input = makeRows(
       {"value", "id"}, {specialDoubles(), makeIds(kDoubleBits.size())});
-  auto run = finalizedRun({*input, {0}, {flags(true, true)}});
+  auto run = finalizedRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   EXPECT_EQ(
       run->projection().columns()[0].source,
       RadixSortOutputSource::kDecodedKey);
   EXPECT_EQ(
       run->projection().payloadChannels(), (std::vector<column_index_t>{1}));
   auto output = collect(*run, 3);
-  expectRowsMatchById(*input, *output, 1);
-  expectSortedByOutput(*output, {0}, {flags(true, true)});
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 1);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
 TEST_F(RadixSortRunTest, directFixedTailLayoutsRoundTripWithPayload) {
@@ -974,10 +1121,10 @@ TEST_F(RadixSortRunTest, directFixedTailLayoutsRoundTripWithPayload) {
 
   for (const auto& testCase : cases) {
     for (const auto keyFlags :
-         {flags(true, true),
-          flags(true, false),
-          flags(false, true),
-          flags(false, false)}) {
+         {SortComparatorOracle::makeSortFlags(true, true),
+          SortComparatorOracle::makeSortFlags(true, false),
+          SortComparatorOracle::makeSortFlags(false, true),
+          SortComparatorOracle::makeSortFlags(false, false)}) {
       SCOPED_TRACE(
           testCase.key->type()->toString() +
           (keyFlags.ascending ? " ASC" : " DESC"));
@@ -989,8 +1136,8 @@ TEST_F(RadixSortRunTest, directFixedTailLayoutsRoundTripWithPayload) {
       auto run = finalizedRun({*input, {0}, {keyFlags}});
       EXPECT_EQ(run->keyLayout().kind(), testCase.layout);
       auto output = collect(*run, 2);
-      expectRowsMatchById(*input, *output, 2);
-      expectSortedByOutput(*output, {0}, {keyFlags});
+      SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+      SortComparatorOracle::expectSorted(*output, {0}, {keyFlags});
     }
   }
 }
@@ -1005,7 +1152,8 @@ TEST_F(RadixSortRunTest, selectiveDecodeIncludesFloatingPointKey) {
        specialDoubles(),
        makeIds(kDoubleBits.size())});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
   auto run = finalizedRun({*input, {0, 1}, keyFlags});
   EXPECT_EQ(run->projection().decodedKeyMask(), (std::vector<uint8_t>{1, 1}));
   EXPECT_EQ(
@@ -1018,8 +1166,8 @@ TEST_F(RadixSortRunTest, selectiveDecodeIncludesFloatingPointKey) {
       run->projection().payloadChannels(), (std::vector<column_index_t>{2}));
 
   auto output = collect(*run, 3);
-  expectRowsMatchById(*input, *output, 2);
-  expectSortedByOutput(*output, {0, 1}, keyFlags);
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+  SortComparatorOracle::expectSorted(*output, {0, 1}, keyFlags);
 }
 
 TEST_F(RadixSortRunTest, mixedScalarStringFloatingKeysDoNotUsePayload) {
@@ -1032,11 +1180,11 @@ TEST_F(RadixSortRunTest, mixedScalarStringFloatingKeysDoNotUsePayload) {
        makeVector<float>(REAL(), {2.5F, 1.5F, 3.5F, -4.0F, 0.5F, 9.0F})});
   const std::vector<column_index_t> keyChannels{0, 1, 2, 3, 4};
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true),
-      flags(true, true),
-      flags(true, true),
-      flags(false, false),
-      flags(false, false)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false),
+      SortComparatorOracle::makeSortFlags(false, false)};
 
   auto run = createRun({*input, keyChannels, keyFlags});
   EXPECT_FALSE(run->projection().hasPayload());
@@ -1071,7 +1219,8 @@ TEST_F(RadixSortRunTest, timestampNanosAndInvalidUtf8Keys) {
        makeStringVector(strings),
        makeIds(timestamps.size())});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(false, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true)};
   auto run = finalizedRun({*input, {0, 1}, keyFlags});
   collectAndVerify(*run, *input, 2, 2, {0, 1}, keyFlags);
 }
@@ -1084,7 +1233,9 @@ TEST_F(RadixSortRunTest, complexDirectKeysRoundTripAndSort) {
       {"array", "row", "map", "id"},
       {arrays, rows, maps, makeIds(arrays->size())});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, false), flags(false, true), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
   auto run = finalizedRun({*input, {0, 1, 2}, keyFlags});
   EXPECT_EQ(
       run->projection().payloadChannels(), (std::vector<column_index_t>{3}));
@@ -1099,7 +1250,8 @@ TEST_F(RadixSortRunTest, complexPayloadRoundTripAndSort) {
   auto input = makeRows(
       {"array", "row", "map", "key", "id"},
       {arrays, rows, maps, keys, makeIds(arrays->size())});
-  auto run = finalizedRun({*input, {3}, {flags(true, true)}});
+  auto run = finalizedRun(
+      {*input, {3}, {SortComparatorOracle::makeSortFlags(true, true)}});
   EXPECT_EQ(
       run->projection().payloadChannels(),
       (std::vector<column_index_t>{0, 1, 2, 4}));
@@ -1134,7 +1286,8 @@ TEST_F(RadixSortRunTest, eventKeyMapPayloadMultipleBatches) {
        params,
        makeStringVector(hours)});
 
-  auto run = createRun({*input, {0}, {flags(true, true)}});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   EXPECT_EQ(
       run->projection().payloadChannels(),
       (std::vector<column_index_t>{1, 2, 3, 4}));
@@ -1161,7 +1314,8 @@ TEST_F(RadixSortRunTest, mapPayloadOutputOwnsDataAfterRunClear) {
        makeStringStringMaps(kRows, sourcePool.get()),
        makeIds(kRows, sourcePool.get())},
       sourcePool.get());
-  auto run = finalizedRun({*input, {0}, {flags(true, true)}});
+  auto run = finalizedRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
 
   auto output = collectAndVerify(*run, *input, 11, 2);
   EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
@@ -1174,7 +1328,8 @@ TEST_F(RadixSortRunTest, directKeyOutputDoesNotDuplicatePayloadForEvent) {
       {"event", "id"},
       {makeStringVector({"play", "play", "click", "share", "click"}),
        makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4})});
-  auto run = finalizedRun({*input, {0}, {flags(true, true)}});
+  auto run = finalizedRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   ASSERT_EQ(run->projection().columns().size(), 2);
   EXPECT_EQ(
       run->projection().columns()[0].source,
@@ -1235,10 +1390,10 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
        makeVector<int64_t>(BIGINT(), nullablePayload),
        makeIds(kRows)});
   const std::vector<CompareFlags> keyFlags{
-      flags(true, true),
-      flags(true, true),
-      flags(true, true),
-      flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
   auto run = createRun({*input, {0, 1, 2, 3}, keyFlags});
   run->append(*input);
   EXPECT_EQ(run->keyMayHaveNulls(), (std::vector<uint8_t>{0, 1, 0, 0}));
@@ -1278,8 +1433,8 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
   ASSERT_EQ(offset, kRows);
   auto output = std::make_shared<RowVector>(
       outputPool_.get(), input->type(), nullptr, kRows, std::move(children));
-  expectRowsMatchById(*input, *output, 10);
-  expectSortedByOutput(*output, {0, 1, 2, 3}, keyFlags);
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 10);
+  SortComparatorOracle::expectSorted(*output, {0, 1, 2, 3}, keyFlags);
 }
 
 TEST_F(RadixSortRunTest, singleStringPayloadNullFreeReuseResetsNullBuffer) {
@@ -1289,7 +1444,8 @@ TEST_F(RadixSortRunTest, singleStringPayloadNullFreeReuseResetsNullBuffer) {
       makeValues<std::string>(kRows, [](vector_size_t row) {
         return std::string(64 + row, static_cast<char>('a' + row));
       }));
-  auto run = createRun({*input, {0}, {flags(true, true)}});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   run->append(*input);
   EXPECT_EQ(run->payloadMayHaveNulls(), (std::vector<uint8_t>{0, 0}));
   run->finalize();
@@ -1322,7 +1478,8 @@ TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {
        makeStringVector(strings),
        arrays,
        makeIds(kRows)});
-  auto run = createRun({*input, {0}, {flags(true, true)}});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   run->append(*input);
 
   const auto* arena = run->storage();
@@ -1366,7 +1523,8 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
   constexpr vector_size_t kRows = 40;
   auto sourcePool = rootPool_->addLeafChild("radix-sort-run-source-test");
   auto input = makeDescendingKeyStringRows(kRows, 80, sourcePool.get());
-  auto run = finalizedRun({*input, {0}, {flags(true, true)}});
+  auto run = finalizedRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
 
   const auto width = run->storage()->layout().width();
   std::vector<std::array<char, 32>> records(run->size());
@@ -1396,12 +1554,19 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
   EXPECT_EQ(runPool_->currentBytes(), 0);
   EXPECT_EQ(drainedRows, kRows);
   ASSERT_GT(firstBatch->size(), 0);
-  EXPECT_EQ(
-      firstBatch->childAt(1)
-          ->asUnchecked<SimpleVector<StringView>>()
-          ->valueAt(0)
-          .size(),
-      80);
+  for (vector_size_t row = 0; row < firstBatch->size(); ++row) {
+    const auto id = idAt(*firstBatch, row, 2);
+    EXPECT_EQ(
+        firstBatch->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(
+            row),
+        kRows - id);
+    EXPECT_EQ(
+        firstBatch->childAt(1)
+            ->asUnchecked<SimpleVector<StringView>>()
+            ->valueAt(row)
+            .str(),
+        std::string(80, static_cast<char>('a' + id % 20)));
+  }
 }
 
 TEST_F(
@@ -1429,11 +1594,12 @@ TEST_F(
                             ((row * (37 + key * 2)) ^ (key * 101)) % 29 - 14)};
         })));
     keyChannels[key] = key;
-    keyFlags[key] = flags(key % 3 != 1, key % 2 == 0);
+    keyFlags[key] =
+        SortComparatorOracle::makeSortFlags(key % 3 != 1, key % 2 == 0);
   }
   keyTypes.back() = VARCHAR();
   keyChannels.back() = kKeys - 1;
-  keyFlags.back() = flags(false, false);
+  keyFlags.back() = SortComparatorOracle::makeSortFlags(false, false);
   names.insert(names.end(), {"key7", "payload", "id"});
   children.push_back(makeStringVector(makeValues<std::string>(
       kRows, [](vector_size_t row) -> std::optional<std::string> {
@@ -1514,7 +1680,9 @@ TEST_F(
   while (auto batch = inMemoryRun->getOutput(7, outputPool_.get())) {
     inMemoryBatches.push_back(std::move(batch));
   }
-  expectRowsMatchById(*input, inMemoryBatches, kKeys + 1);
+  auto inMemoryOutput = concatenate(inMemoryBatches);
+  SortComparatorOracle::expectRowsMatchById(*input, *inMemoryOutput, kKeys + 1);
+  SortComparatorOracle::expectSorted(*inMemoryOutput, keyChannels, keyFlags);
 
   auto leftInput = slice(*input, 0, 20);
   auto rightInput = slice(*input, 20, kRows - 20);
@@ -1543,13 +1711,16 @@ TEST_F(
     mergedRows += count;
   }
   ASSERT_GT(mergeBatches.size(), 2);
-  expectRowsMatchById(*input, mergeBatches, kKeys + 1);
+  auto mergeOutput = concatenate(mergeBatches);
+  SortComparatorOracle::expectRowsMatchById(*input, *mergeOutput, kKeys + 1);
+  SortComparatorOracle::expectSorted(*mergeOutput, keyChannels, keyFlags);
 }
 
 TEST_F(RadixSortRunTest, outputReusesBuffersWithCopyOnWrite) {
   constexpr vector_size_t kRows = 16;
   auto input = makeDescendingKeyStringRows(kRows, 48);
-  auto run = finalizedRun({*input, {0}, {flags(true, true)}});
+  auto run = finalizedRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
 
   auto first = run->getOutput(4, outputPool_.get());
   ASSERT_NE(first, nullptr);
@@ -1580,6 +1751,9 @@ TEST_F(RadixSortRunTest, outputReusesBuffersWithCopyOnWrite) {
   EXPECT_NE(thirdBuffers[2], retainedBuffers[2]);
   EXPECT_EQ(secondKey->valueAt(0), retainedKey);
   EXPECT_EQ(secondString->valueAt(0).getString(), retainedString);
+  std::vector<bool> seen(kRows, false);
+  SortComparatorOracle::expectRowsMatchById(
+      *input, *second, 2, {.seen = &seen});
 }
 
 TEST_F(RadixSortRunTest, outputSurvivesExplicitRunClear) {
@@ -1587,7 +1761,8 @@ TEST_F(RadixSortRunTest, outputSurvivesExplicitRunClear) {
       {"key", "payload"},
       {makeVector<int64_t>(BIGINT(), {1, 2}),
        makeStringVector({std::string(4096, 'x'), "y"})});
-  auto run = createRun({*input, {0}, {flags(true, true)}});
+  auto run = createRun(
+      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   run->append(*input);
   run->finalize();
   auto output = run->getOutput(1, outputPool_.get());
@@ -1596,11 +1771,13 @@ TEST_F(RadixSortRunTest, outputSurvivesExplicitRunClear) {
   run->clear();
   expectCleared(*run);
   EXPECT_EQ(
+      output->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(0), 1);
+  EXPECT_EQ(
       output->childAt(1)
           ->asUnchecked<SimpleVector<StringView>>()
           ->valueAt(0)
-          .size(),
-      4096);
+          .str(),
+      std::string(4096, 'x'));
 }
 
 } // namespace

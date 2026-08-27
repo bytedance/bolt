@@ -127,20 +127,6 @@ class RadixSortKeyTest : public testing::Test {
   std::shared_ptr<memory::MemoryPool> pool_{
       rootPool_->addLeafChild("radix-physical-sort-key-test")};
 
-  static CompareFlags flags(bool ascending, bool nullsFirst) {
-    return CompareFlags{
-        .nullsFirst = nullsFirst,
-        .ascending = ascending,
-        .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
-  }
-
-  static std::vector<CompareFlags> allFlags() {
-    return {
-        flags(true, true),
-        flags(true, false),
-        flags(false, true),
-        flags(false, false)};
-  }
   template <typename T>
   FlatVectorPtr<T> makeMinMaxVector(const TypePtr& type) {
     const auto limits = std::numeric_limits<T>{};
@@ -236,30 +222,6 @@ class RadixSortKeyTest : public testing::Test {
     return result;
   }
 
-  static int32_t encodedCompare(std::string_view left, std::string_view right) {
-    const auto commonSize = std::min(left.size(), right.size());
-    const auto result = std::memcmp(left.data(), right.data(), commonSize);
-    if (result != 0) {
-      return (result > 0) - (result < 0);
-    }
-    return (left.size() > right.size()) - (left.size() < right.size());
-  }
-
-  static int32_t compareEncodedKeys(
-      const EncodedKeyBatch& keys,
-      vector_size_t left,
-      vector_size_t right) {
-    BOLT_CHECK_GE(left, 0);
-    BOLT_CHECK_GE(right, 0);
-    BOLT_CHECK_LT(left, keys.size());
-    BOLT_CHECK_LT(right, keys.size());
-    if (keys.format() == EncodedKeyFormat::kFixed64) {
-      return (keys.fixedKeyAt(left) > keys.fixedKeyAt(right)) -
-          (keys.fixedKeyAt(left) < keys.fixedKeyAt(right));
-    }
-    return encodedCompare(keys.variableKeyAt(left), keys.variableKeyAt(right));
-  }
-
   template <typename Expected>
   static void expectPairwiseCompare(
       const RadixSortRunStorage& arena,
@@ -279,7 +241,8 @@ class RadixSortKeyTest : public testing::Test {
       const RadixSortRunStorage& arena,
       const std::vector<std::string>& keys) {
     expectPairwiseCompare(arena, keys.size(), [&](auto left, auto right) {
-      return encodedCompare(keys[left], keys[right]);
+      return SortComparatorOracle::compareUnsignedBytes(
+          keys[left], keys[right]);
     });
   }
 
@@ -441,6 +404,18 @@ TEST_F(RadixSortKeyTest, layoutAbiAndSelection) {
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kInvalid),
       BoltException);
   EXPECT_THROW(RadixSortKeyLayout::select(0, true), BoltException);
+  EXPECT_THROW(
+      RadixSortKeyLayout::select(std::numeric_limits<uint64_t>::max(), true),
+      BoltException);
+  EXPECT_THROW(RadixSortKeyLayout::select(8, false, 1), BoltException);
+  EXPECT_THROW(
+      RadixSortKeyLayout::select(std::nullopt, false, 19), BoltException);
+  EXPECT_THROW(
+      RadixSortKeyLayout::select(std::nullopt, true, 13), BoltException);
+  EXPECT_EQ(
+      RadixSortKeyLayout::select(std::nullopt, false, 18).heapKeyOffset(), 18);
+  EXPECT_EQ(
+      RadixSortKeyLayout::select(std::nullopt, true, 12).heapKeyOffset(), 12);
 }
 
 TEST_F(RadixSortKeyTest, variableHeapKeyOffsetUsesTopLevelFixedBoundaries) {
@@ -450,7 +425,8 @@ TEST_F(RadixSortKeyTest, variableHeapKeyOffsetUsesTopLevelFixedBoundaries) {
     std::unique_ptr<RadixSortKeyCodec> codec;
     RadixSortKeyCodec::bind(
         types,
-        std::vector<CompareFlags>(types.size(), flags(true, true)),
+        std::vector<CompareFlags>(
+            types.size(), SortComparatorOracle::makeSortFlags(true, true)),
         codec);
     auto layout =
         RadixSortKeyLayout::select(codec->maximumEncodedSize(), hasPayload);
@@ -513,9 +489,11 @@ TEST_F(RadixSortKeyTest, variableLayoutStoresHeapFromColumnBoundary) {
       std::string_view(arena.keyAt(1).heapKeyData(), arena.keyAt(1).heapSize()),
       std::string_view(keys[1]).substr(layout.heapKeyOffset()));
   EXPECT_EQ(
-      arena.keyAt(0).compare(arena.keyAt(1)), encodedCompare(keys[0], keys[1]));
+      arena.keyAt(0).compare(arena.keyAt(1)),
+      SortComparatorOracle::compareUnsignedBytes(keys[0], keys[1]));
   EXPECT_EQ(
-      arena.keyAt(1).compare(arena.keyAt(2)), encodedCompare(keys[1], keys[2]));
+      arena.keyAt(1).compare(arena.keyAt(2)),
+      SortComparatorOracle::compareUnsignedBytes(keys[1], keys[2]));
   for (uint64_t row = 0; row < arena.size(); ++row) {
     verifyStoredKey(arena, row, keys[row]);
   }
@@ -540,6 +518,54 @@ TEST_F(RadixSortKeyTest, suffixCompareDoesNotReadRadixPrefix) {
           layout.heapKeyOffset(),
           layout.radixWidth()),
       0);
+}
+
+TEST_F(RadixSortKeyTest, suffixCompareCoversLengthDataAndEquality) {
+  using CompareSuffix =
+      int32_t (*)(const char*, const char*, uint32_t, uint32_t);
+  const std::array<std::tuple<LayoutKind, uint32_t, CompareSuffix>, 2> cases{{
+      {LayoutKind::kKeyOnlyVariable32,
+       5,
+       &RadixSortKeyOps<LayoutKind::kKeyOnlyVariable32>::compareSuffix},
+      {LayoutKind::kKeyWithPayloadVariable32,
+       0,
+       &RadixSortKeyOps<LayoutKind::kKeyWithPayloadVariable32>::compareSuffix},
+  }};
+  for (const auto& [kind, heapOffset, compareSuffix] : cases) {
+    const auto layout = RadixSortKeyLayout::select(
+        std::nullopt,
+        kind == LayoutKind::kKeyWithPayloadVariable32,
+        heapOffset);
+    const auto radixWidth = layout.radixWidth();
+    std::vector<std::string> keys{
+        std::string(radixWidth - 1, 'a'),
+        std::string(radixWidth + 1, 'a'),
+        std::string(radixWidth + 3, 'p'),
+        std::string(radixWidth + 3, 'p'),
+        std::string(radixWidth + 2, 'q'),
+        std::string(radixWidth + 3, 'q'),
+        std::string(radixWidth + 3, 'z'),
+        std::string(radixWidth + 3, 'z'),
+    };
+    keys[2][radixWidth + 1] = 'a';
+    keys[3][radixWidth + 1] = 'z';
+    PayloadPointers payloads(keys.size());
+    RadixSortRunStorage arena(pool_.get(), layout, 3, 64);
+    std::vector<std::string_view> views(keys.begin(), keys.end());
+    arena.appendBatch(views, payloads.span(layout.hasPayload()));
+
+    const auto compare = [&](uint64_t left, uint64_t right) {
+      return compareSuffix(
+          arena.keyDataAt(left),
+          arena.keyDataAt(right),
+          layout.heapKeyOffset(),
+          radixWidth);
+    };
+    EXPECT_LT(compare(0, 1), 0);
+    EXPECT_LT(compare(2, 3), 0);
+    EXPECT_LT(compare(4, 5), 0);
+    EXPECT_EQ(compare(6, 7), 0);
+  }
 }
 
 TEST_F(RadixSortKeyTest, radixSortUtilsBoundaryChecks) {
@@ -746,7 +772,7 @@ TEST_F(RadixSortKeyTest, codecPhysicalCompareProperty) {
            {}})};
 
   for (const auto& input : cases) {
-    for (const auto compareFlags : allFlags()) {
+    for (const auto compareFlags : SortComparatorOracle::allSortFlags()) {
       SCOPED_TRACE(
           input->type()->toString() +
           (compareFlags.ascending ? " ASC" : " DESC") +
@@ -759,7 +785,8 @@ TEST_F(RadixSortKeyTest, codecPhysicalCompareProperty) {
           true,
           false,
           [](const auto& encoded, auto left, auto right) {
-            return compareEncodedKeys(encoded, left, right);
+            return SortComparatorOracle::compareEncodedKeys(
+                encoded, left, right);
           },
           [&](const RowVector& decoded, auto row) {
             return SortComparatorOracle::compare(
@@ -782,7 +809,9 @@ TEST_F(RadixSortKeyTest, multipleColumnCodecPhysicalCompare) {
            DOUBLE(),
            {0.0, -0.0, std::numeric_limits<double>::quiet_NaN(), 1.0})});
   const std::vector<CompareFlags> compareFlags{
-      flags(true, false), flags(false, true), flags(true, true)};
+      SortComparatorOracle::makeSortFlags(true, false),
+      SortComparatorOracle::makeSortFlags(false, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
   const std::vector<column_index_t> channels{0, 1, 2};
   verifyCodecStorage(
       rows,
@@ -791,7 +820,7 @@ TEST_F(RadixSortKeyTest, multipleColumnCodecPhysicalCompare) {
       true,
       false,
       [](const auto& encoded, auto left, auto right) {
-        return compareEncodedKeys(encoded, left, right);
+        return SortComparatorOracle::compareEncodedKeys(encoded, left, right);
       },
       [&](const RowVector& decoded, auto row) {
         return SortComparatorOracle::compareRows(
@@ -823,7 +852,8 @@ TEST_F(RadixSortKeyTest, nestedCodecPhysicalCompare) {
   auto rows = makeRows(
       {arrays, makeVector<int64_t>(BIGINT(), {5, 4, 3, 2, 1, std::nullopt})});
   const std::vector<CompareFlags> compareFlags{
-      flags(true, true), flags(false, false)};
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(false, false)};
   const std::vector<column_index_t> channels{0, 1};
   verifyCodecStorage(
       rows,
@@ -948,12 +978,39 @@ TEST_F(RadixSortKeyTest, storageBlockAllocationAndAddressingBoundaries) {
       begin += range.count;
     }
     EXPECT_EQ(arena.keyRangeAt(arena.size(), rowCount).count, 0);
+
+    const std::array<uint64_t, 6> starts{
+        0,
+        rowsPerBlock - 1,
+        rowsPerBlock,
+        rowsPerBlock * 2 - 1,
+        rowsPerBlock * 2,
+        static_cast<uint64_t>(rowCount)};
+    const std::array<vector_size_t, 4> requested{
+        1,
+        static_cast<vector_size_t>(rowsPerBlock - 1),
+        static_cast<vector_size_t>(rowsPerBlock),
+        static_cast<vector_size_t>(rowsPerBlock + 1)};
+    for (const auto start : starts) {
+      for (const auto maxCount : requested) {
+        const auto range = arena.keyRangeAt(start, maxCount);
+        const auto expectedCount = start == arena.size() || maxCount == 0
+            ? 0
+            : std::min<vector_size_t>(
+                  maxCount,
+                  blockCounts[start / rowsPerBlock] - start % rowsPerBlock);
+        EXPECT_EQ(range.count, expectedCount);
+        EXPECT_EQ(
+            range.data, expectedCount == 0 ? nullptr : arena.keyDataAt(start));
+      }
+    }
   }
 }
 
 TEST_F(RadixSortKeyTest, storageKeyRangeConstAccessAndEncodedAppend) {
   auto rows = makeRows(makeVector<int32_t>(INTEGER(), {5, 1, 7, 3, 9}));
-  auto [codec, encoded] = bindAndEncode(rows, {flags(true, true)});
+  auto [codec, encoded] =
+      bindAndEncode(rows, {SortComparatorOracle::makeSortFlags(true, true)});
 
   auto layout = RadixSortKeyLayout::select(codec->maximumEncodedSize(), true);
   PayloadPointers payloads(rows->size());
@@ -990,6 +1047,8 @@ TEST_F(RadixSortKeyTest, storageAppendsInlineVariableKeysToFixedLayouts) {
   auto strings = makeStringVector(VARCHAR(), {"a", "bb", "ccc"});
   auto integers = makeVector<int32_t>(INTEGER(), {3, 2, 1});
   const std::vector<Case> cases{
+      {{strings}, RadixSortKeyLayoutKind::kKeyWithPayloadFixed16},
+      {{strings}, RadixSortKeyLayoutKind::kKeyOnlyFixed16},
       {{strings}, RadixSortKeyLayoutKind::kKeyWithPayloadFixed24},
       {{strings, integers}, RadixSortKeyLayoutKind::kKeyWithPayloadFixed32},
       {{strings, integers}, RadixSortKeyLayoutKind::kKeyOnlyFixed24},
@@ -1002,7 +1061,9 @@ TEST_F(RadixSortKeyTest, storageAppendsInlineVariableKeysToFixedLayouts) {
     auto rows = makeRows(testCase.columns);
     auto [codec, encoded] = bindAndEncode(
         rows,
-        std::vector<CompareFlags>(rows->childrenSize(), flags(true, true)));
+        std::vector<CompareFlags>(
+            rows->childrenSize(),
+            SortComparatorOracle::makeSortFlags(true, true)));
     ASSERT_EQ(encoded.format(), EncodedKeyFormat::kVariableBinary);
     std::vector<std::string> expectedKeys;
     expectedKeys.reserve(rows->size());
@@ -1057,7 +1118,8 @@ TEST_F(RadixSortKeyTest, fixedSeedPhysicalCompareProperty) {
     arena.appendBatch(keys, payloads.span(layout.hasPayload()));
 
     for (uint32_t index = 0; index < kPairsPerSeed; ++index) {
-      const auto expected = encodedCompare(keys[index], keys[index + 1]);
+      const auto expected = SortComparatorOracle::compareUnsignedBytes(
+          keys[index], keys[index + 1]);
       const auto actual = arena.keyAt(index).compare(arena.keyAt(index + 1));
       EXPECT_EQ((actual > 0) - (actual < 0), expected)
           << "left=" << index << ", right=" << index + 1;
@@ -1094,6 +1156,20 @@ TEST_F(RadixSortKeyTest, allocationRangeBoundaryAndClear) {
   EXPECT_TRUE(arena.keyHeapGroups().empty());
   EXPECT_EQ(arena.allocatedBytes(), 0);
   EXPECT_EQ(arena.numRanges(), 0);
+  EXPECT_EQ(leaf->currentBytes(), 0);
+
+  uint64_t index = std::numeric_limits<uint64_t>::max();
+  arena.append(key, nullptr, &index);
+  EXPECT_EQ(index, 0);
+  arena.append(key, nullptr, &index);
+  EXPECT_EQ(index, 1);
+  EXPECT_EQ(arena.size(), 2);
+  verifyStoredKey(arena, 0, key);
+  verifyStoredKey(arena, 1, key);
+  EXPECT_GT(arena.allocatedBytes(), 0);
+  arena.clear();
+  EXPECT_EQ(arena.size(), 0);
+  EXPECT_EQ(arena.allocatedBytes(), 0);
   EXPECT_EQ(leaf->currentBytes(), 0);
 }
 
