@@ -532,6 +532,13 @@ DataSink::Stats HiveDataSink::stats() const {
 
   stats.numWrittenFiles = writers_.size();
   for (int i = 0; i < writerInfo_.size(); ++i) {
+    const auto writerMetrics = writers_.at(i)->metrics();
+    stats.writeRecodeWallNanos += writerMetrics.writeRecodeWallNanos;
+    stats.writeEncodeWallNanos += writerMetrics.writeEncodeWallNanos;
+    stats.writeCompressionWallNanos += writerMetrics.writeCompressionWallNanos;
+    stats.writeIOWallNanos += writerMetrics.writeIOWallNanos;
+    stats.writeFinalizeWallNanos += writerMetrics.writeFinalizeWallNanos;
+
     const auto& info = writerInfo_.at(i);
     BOLT_CHECK_NOT_NULL(info);
     if (!info->spillStats->empty()) {
