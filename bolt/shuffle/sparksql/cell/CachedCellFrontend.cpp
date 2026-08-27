@@ -191,9 +191,11 @@ void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
 }
 
 template <typename T>
-void CachedCellFrontend::dispatchEncoded(uint32_t col, const SplitBatch& batch) {
+void CachedCellFrontend::dispatchEncoded(
+    uint32_t col,
+    const SplitBatch& batch,
+    bool hasNulls) {
   const auto& decoded = (*batch.decoded)[col];
-  const bool hasNulls = decoded.mayHaveNulls();
   const bool indexed = !decoded.isIdentityMapping();
   if (hasNulls) {
     indexed ? splitFixed<T, true, true>(col, batch)
@@ -205,9 +207,11 @@ void CachedCellFrontend::dispatchEncoded(uint32_t col, const SplitBatch& batch) 
 }
 
 template <typename T>
-void CachedCellFrontend::dispatchRaw(uint32_t col, const SplitBatch& batch) {
+void CachedCellFrontend::dispatchRaw(
+    uint32_t col,
+    const SplitBatch& batch,
+    bool hasNulls) {
   const auto& decoded = (*batch.decoded)[col];
-  const bool hasNulls = decoded.mayHaveNulls();
   const bool indexed = !decoded.isIdentityMapping();
   if (hasNulls) {
     indexed ? splitRawFixed<T, true, true>(col, batch)
@@ -221,13 +225,12 @@ void CachedCellFrontend::dispatchRaw(uint32_t col, const SplitBatch& batch) {
 void CachedCellFrontend::split(const SplitBatch& batch) {
   const auto& rowType = layout_->rowType();
   for (uint32_t col = 0; col < layout_->numColumns(); ++col) {
-    const auto& decodedCol = (*batch.decoded)[col];
-    if (decodedCol.isConstantMapping() && batch.numRows > 0 &&
-        decodedCol.isNullAt(0)) {
-      // The whole batch is null in this column: values contribute nothing
-      // (dense pack) and the nulls are a counted run per partition - an
-      // all-null column costs O(partitions) per batch and allocates no
-      // bitmap at all.
+    const auto klass = batch.nullClass[col];
+    if (klass == BatchNullClass::kAllNull) {
+      // The whole batch is null in this column (constant null, or a flat
+      // vector whose scan came back all-null): values contribute nothing
+      // (dense pack) and the nulls are a counted run per partition - the
+      // column costs O(partitions) per batch and allocates no bitmap.
       for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
         const uint32_t count = batch.partition2RowCount[pid];
         if (count > 0) {
@@ -236,30 +239,29 @@ void CachedCellFrontend::split(const SplitBatch& batch) {
       }
       continue;
     }
+    const bool hasNulls = klass == BatchNullClass::kSomeNulls;
     switch (rowType->childAt(col)->kind()) {
       case TypeKind::SMALLINT:
-        dispatchEncoded<int16_t>(col, batch);
+        dispatchEncoded<int16_t>(col, batch, hasNulls);
         break;
       case TypeKind::INTEGER:
-        dispatchEncoded<int32_t>(col, batch);
+        dispatchEncoded<int32_t>(col, batch, hasNulls);
         break;
       case TypeKind::BIGINT:
-        dispatchEncoded<int64_t>(col, batch);
+        dispatchEncoded<int64_t>(col, batch, hasNulls);
         break;
       case TypeKind::TINYINT:
-        dispatchRaw<int8_t>(col, batch);
+        dispatchRaw<int8_t>(col, batch, hasNulls);
         break;
       case TypeKind::REAL:
-        dispatchRaw<float>(col, batch);
+        dispatchRaw<float>(col, batch, hasNulls);
         break;
       case TypeKind::DOUBLE:
-        dispatchRaw<double>(col, batch);
+        dispatchRaw<double>(col, batch, hasNulls);
         break;
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
-        const auto& decoded = (*batch.decoded)[col];
-        const bool hasNulls = decoded.mayHaveNulls();
-        const bool indexed = !decoded.isIdentityMapping();
+        const bool indexed = !(*batch.decoded)[col].isIdentityMapping();
         if (hasNulls) {
           indexed ? splitString<true, true>(col, batch)
                   : splitString<true, false>(col, batch);

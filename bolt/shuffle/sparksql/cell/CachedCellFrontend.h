@@ -97,10 +97,10 @@ class CachedCellFrontend final : public SplitFrontend {
   void splitString(uint32_t col, const SplitBatch& batch);
 
   template <typename T>
-  void dispatchEncoded(uint32_t col, const SplitBatch& batch);
+  void dispatchEncoded(uint32_t col, const SplitBatch& batch, bool hasNulls);
 
   template <typename T>
-  void dispatchRaw(uint32_t col, const SplitBatch& batch);
+  void dispatchRaw(uint32_t col, const SplitBatch& batch, bool hasNulls);
 
   const CellLayout* const layout_;
   DataCells* const cells_;

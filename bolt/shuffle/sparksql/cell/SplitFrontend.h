@@ -22,6 +22,17 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
+/// Per-column null shape of one batch. Resolved by the writer with a
+/// word-level scan of the decoded nulls, because mayHaveNulls() only says a
+/// nulls buffer EXISTS - upstream operators routinely attach defensively
+/// allocated, all-set buffers, and trusting them would tax every row of the
+/// loop for nulls that are not there.
+enum class BatchNullClass : uint8_t {
+  kNoNulls = 0, // buffer absent, all-set, or constant non-null
+  kSomeNulls = 1, // genuinely mixed: the per-row null path applies
+  kAllNull = 2, // every batch row null: one counted run per partition
+};
+
 /// One decoded input batch, pid column already excluded. Borrowed for the
 /// duration of a split call.
 struct SplitBatch {
@@ -31,6 +42,8 @@ struct SplitBatch {
   /// Rows this batch adds per partition (the partitioner's output); lets a
   /// whole-batch fast path work per partition instead of per row.
   const uint32_t* partition2RowCount;
+  /// Per column, see BatchNullClass.
+  const BatchNullClass* nullClass;
   uint32_t numRows;
   /// Null-bit position of row r in its partition's window:
   /// windowRowStart[pid] + rowIndexInPid[r]. rowIndexInPid may be null when
