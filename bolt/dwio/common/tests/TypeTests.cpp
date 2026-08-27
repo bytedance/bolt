@@ -212,6 +212,12 @@ TEST(TestType, typeCompatibility) {
   from = ROW({ROW({BIGINT(), BOOLEAN()})});
   to = ROW({ROW({VARCHAR(), BOOLEAN()})});
   checkTypeCompatibility(*from, *to, true);
+
+  // Short decimals use BIGINT as their physical kind, but must not be routed
+  // through the integer-to-string reader.
+  from = ROW({DECIMAL(10, 2)});
+  to = ROW({VARCHAR()});
+  EXPECT_THROW(checkTypeCompatibility(*from, *to, true), BoltUserError);
 }
 
 TEST(TestType, typeCompatibilityWithErrorMessage) {
