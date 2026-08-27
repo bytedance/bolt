@@ -581,43 +581,47 @@ void gatherStringColumns(
   }
 }
 
+template <bool MayHaveNulls>
 void gatherStringColumn(
     const PayloadRowColumnLayout& column,
     std::span<char* const> rows,
     FlatVector<StringView>* flat) {
   uint64_t stringBytes = 0;
-  bool hasNulls = false;
-  for (const auto* row : rows) {
-    if (isNull(row, column)) {
-      hasNulls = true;
-      continue;
-    }
-    const auto value = loadUnaligned<StringView>(row + column.offset);
-    if (!value.isInline()) {
-      stringBytes += value.size();
-    }
-  }
-
   auto* values = flat->mutableRawValues();
-  auto* nulls = hasNulls || flat->rawNulls() != nullptr
+  auto* nulls = MayHaveNulls || flat->rawNulls() != nullptr
       ? flat->mutableRawNulls()
       : nullptr;
   if (nulls != nullptr) {
     bits::clearAllNull(nulls, rows.size());
   }
+
+  for (vector_size_t row = 0; row < rows.size(); ++row) {
+    if constexpr (MayHaveNulls) {
+      if (isNull(rows[row], column)) {
+        bits::setNull(nulls, row, true);
+        continue;
+      }
+    }
+    const auto value = loadUnaligned<StringView>(rows[row] + column.offset);
+    values[row] = value;
+    if (!value.isInline()) {
+      stringBytes += value.size();
+    }
+  }
+
   char* output = stringBytes == 0
       ? nullptr
       : flat->getRawStringBufferWithSpace(stringBytes, true);
   const auto* outputEnd = output == nullptr ? nullptr : output + stringBytes;
 
   for (vector_size_t row = 0; row < rows.size(); ++row) {
-    if (hasNulls && isNull(rows[row], column)) {
-      bits::setNull(nulls, row, true);
-      continue;
+    if constexpr (MayHaveNulls) {
+      if (bits::isBitNull(nulls, row)) {
+        continue;
+      }
     }
-    const auto value = loadUnaligned<StringView>(rows[row] + column.offset);
+    const auto value = values[row];
     if (value.isInline()) {
-      values[row] = value;
       continue;
     }
     std::memcpy(output, value.data(), value.size());
@@ -626,11 +630,22 @@ void gatherStringColumn(
   }
 }
 
+class SingleRangeByteInputStream final : public ByteInputStream {
+ public:
+  SingleRangeByteInputStream()
+      : ByteInputStream(std::vector<ByteRange>{{nullptr, 0, 0}}) {}
+
+  void reset(ByteRange range) {
+    setRange(range);
+  }
+};
+
 void gatherComplexColumn(
     const PayloadRowColumnLayout& column,
     std::span<char* const> rows,
     const VectorPtr& result) {
   BOLT_DCHECK(column.complex);
+  SingleRangeByteInputStream input;
   for (vector_size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
     const auto* row = rows[rowIndex];
     if (isNull(row, column)) {
@@ -642,11 +657,10 @@ void gatherComplexColumn(
       result->setNull(rowIndex, false);
       continue;
     }
-    std::vector<ByteRange> ranges{ByteRange{
+    input.reset(ByteRange{
         reinterpret_cast<uint8_t*>(value.data),
         static_cast<int32_t>(value.size),
-        0}};
-    ByteInputStream input(std::move(ranges));
+        0});
     exec::ContainerRowSerde::deserialize(input, rowIndex, result.get(), true);
   }
 }
@@ -743,8 +757,13 @@ void gatherImpl(
     if (!column.complex) {
       if (column.variable) {
         if (stringColumnCount == 1) {
-          gatherStringColumn(
-              column, rows, child->asUnchecked<FlatVector<StringView>>());
+          if (mayHaveNulls[columnIndex]) {
+            gatherStringColumn<true>(
+                column, rows, child->asUnchecked<FlatVector<StringView>>());
+          } else {
+            gatherStringColumn<false>(
+                column, rows, child->asUnchecked<FlatVector<StringView>>());
+          }
           continue;
         }
         auto& states = mayHaveNulls[columnIndex] ? nullableStringColumns
@@ -985,6 +1004,7 @@ void measurePayloadRows(
     const RowVector& input,
     const PayloadRowLayout& layout,
     memory::MemoryPool* pool,
+    const std::vector<std::optional<DecodedVector>>& decoded,
     BufferPtr reusableHeapSizes,
     BufferPtr& complexSizeScratch,
     RowSizes& sizes) {
@@ -1119,12 +1139,40 @@ void measurePayloadRows(
       continue;
     }
 
-    DecodedVector decoded(vector);
-    for (vector_size_t row = 0; row < rowCount; ++row) {
-      if (decoded.isNullAt(row)) {
+    if (!decoded[column].has_value()) {
+      const auto* flat = vector.asUnchecked<FlatVector<StringView>>();
+      const auto* values = flat->rawValues();
+      const auto* nulls = flat->rawNulls();
+      for (vector_size_t row = 0; row < rowCount; ++row) {
+        if (nulls != nullptr && bits::isBitNull(nulls, row)) {
+          continue;
+        }
+        const auto value = values[row];
+        if (!value.isInline()) {
+          addVariableBytes(row, value.size());
+        }
+      }
+      continue;
+    }
+
+    const auto& decodedVector = *decoded[column];
+    if (decodedVector.isConstantMapping()) {
+      if (decodedVector.isNullAt(0)) {
         continue;
       }
-      const auto value = decoded.valueAt<StringView>(row);
+      const auto value = decodedVector.valueAt<StringView>(0);
+      if (!value.isInline()) {
+        for (vector_size_t row = 0; row < rowCount; ++row) {
+          addVariableBytes(row, value.size());
+        }
+      }
+      continue;
+    }
+    for (vector_size_t row = 0; row < rowCount; ++row) {
+      if (decodedVector.isNullAt(row)) {
+        continue;
+      }
+      const auto value = decodedVector.valueAt<StringView>(row);
       if (!value.isInline()) {
         addVariableBytes(row, value.size());
       }
@@ -1302,11 +1350,10 @@ void writeFixedDecodedColumn(
 
 void writeFixedDecodedColumn(
     const PayloadRowColumnLayout& column,
-    const BaseVector& vector,
+    const DecodedVector& decoded,
     char* const* rows,
     vector_size_t begin,
     vector_size_t end) {
-  DecodedVector decoded(vector);
   if (column.type->isShortDecimal()) {
     writeFixedDecodedColumn<int64_t>(column, decoded, rows, begin, end);
     return;
@@ -1363,10 +1410,10 @@ void writeFixedDecodedColumn(
 
 void writeFixedDecodedColumn(
     const PayloadRowColumnLayout& column,
-    const BaseVector& vector,
+    const DecodedVector& decoded,
     char* const* rows,
     vector_size_t size) {
-  writeFixedDecodedColumn(column, vector, rows, 0, size);
+  writeFixedDecodedColumn(column, decoded, rows, 0, size);
 }
 
 void writeStringDecodedValue(
@@ -1445,7 +1492,7 @@ void writeFixedColumn(
   if (decoded == nullptr) {
     writeFixedFlatColumn(column, vector, rows, 0, size);
   } else {
-    writeFixedDecodedColumn(column, vector, rows, size);
+    writeFixedDecodedColumn(column, *decoded, rows, size);
   }
 }
 
@@ -1517,19 +1564,6 @@ void appendRows(
     std::memset(fixed, 0xff, layout->nullBytes());
   }
 
-  decoded.resize(input.childrenSize());
-  for (uint32_t column = 0; column < input.childrenSize(); ++column) {
-    if (input.childAt(column)->encoding() != VectorEncoding::Simple::FLAT) {
-      if (decoded[column].has_value()) {
-        decoded[column]->decode(*input.childAt(column));
-      } else {
-        decoded[column].emplace(*input.childAt(column));
-      }
-    } else {
-      decoded[column].reset();
-    }
-  }
-
   variableColumns.clear();
   uint32_t complexOrdinal = 0;
   for (uint32_t column = 0; column < layout->columns().size(); ++column) {
@@ -1575,6 +1609,23 @@ void appendRows(
   }
 }
 
+void prepareDecodedColumns(
+    const RowVector& input,
+    std::vector<std::optional<DecodedVector>>& decoded) {
+  decoded.resize(input.childrenSize());
+  for (uint32_t column = 0; column < input.childrenSize(); ++column) {
+    if (input.childAt(column)->encoding() != VectorEncoding::Simple::FLAT) {
+      if (decoded[column].has_value()) {
+        decoded[column]->decode(*input.childAt(column));
+      } else {
+        decoded[column].emplace(*input.childAt(column));
+      }
+    } else {
+      decoded[column].reset();
+    }
+  }
+}
+
 } // namespace
 
 PayloadRowWriter::PayloadRowWriter() : impl_(std::make_unique<Impl>()) {}
@@ -1592,6 +1643,7 @@ void PayloadRowWriter::append(
     RadixSortRunStorage& arena,
     PayloadRowBatch& batch) {
   const auto& layout = arena.payloadLayout();
+  prepareDecodedColumns(input, impl_->decoded);
   if (!layout->hasVariableFields()) {
     return appendRows(
         input, arena, nullptr, impl_->decoded, impl_->variableColumns, batch);
@@ -1602,6 +1654,7 @@ void PayloadRowWriter::append(
       input,
       *layout,
       arena.pool(),
+      impl_->decoded,
       std::move(reusableHeapSizes),
       impl_->complexSizes,
       sizes);

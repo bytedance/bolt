@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <span>
+
 #include <folly/Synchronized.h>
 
 #include "bolt/common/base/SpillConfig.h"
@@ -63,11 +65,24 @@ class RadixSortSpillWriter {
       const char* keyBase,
       vector_size_t count);
 
+  vector_size_t writePresizedKeyRange(
+      const RadixSortKeyLayout& keyLayout,
+      const PayloadRowLayout* payloadLayout,
+      const char* keyBase,
+      vector_size_t count,
+      std::span<const RadixSortSpillSectionSize> rowSizes);
+
   std::vector<RadixSortSpillFile> finish();
 
   uint64_t inputBytes() const {
     return inputBytes_;
   }
+
+  uint64_t bodyCapacity() const;
+
+  vector_size_t estimatedRowsPerBlock(
+      const RadixSortKeyLayout& keyLayout,
+      const PayloadRowLayout* payloadLayout) const;
 
  private:
   void resetWriteState();
@@ -80,9 +95,14 @@ class RadixSortSpillWriter {
 
   void ensureRecordFits(uint64_t recordSize);
 
-  void clearPendingRange();
+  void clearPendingBlock();
 
   void appendKeyRange(const char* keyBase, vector_size_t count);
+
+  void appendSizedKeyRange(
+      const char* keyBase,
+      const RadixSortSpillSectionBatchSize& batchSize,
+      std::span<const RadixSortSpillSectionSize> rowSizes);
 
   void flush();
 
@@ -98,6 +118,7 @@ class RadixSortSpillWriter {
     uint64_t keyHeapBytes{0};
     uint64_t payloadFixedBytes{0};
     uint64_t payloadHeapBytes{0};
+    size_t rowSizeOffset{0};
 
     uint64_t totalBytes() const {
       return keyRecordBytes + keyHeapBytes + payloadFixedBytes +
@@ -105,9 +126,14 @@ class RadixSortSpillWriter {
     }
   };
 
+  struct PendingBlock {
+    std::vector<PendingRange> ranges;
+    std::vector<RadixSortSpillSectionSize> rowSizes;
+    uint64_t totalBytes{0};
+  };
+
   RadixSortSpillSectionMeta meta_;
-  PendingRange pendingRange_;
-  std::vector<RadixSortSpillSectionSize> pendingSectionSizes_;
+  PendingBlock pendingBlock_;
   std::vector<RadixSortSpillSectionSize> sizingSectionSizes_;
   BufferPtr buffer_;
   uint64_t normalBufferSize_{0};
@@ -364,14 +390,17 @@ class RadixSortMerger {
   using StreamIndex = uint16_t;
   static constexpr StreamIndex kEmpty = std::numeric_limits<StreamIndex>::max();
 
+  template <bool HasPayload>
   vector_size_t collectSingleStreamRows(
       vector_size_t count,
       const char** keys,
       char** payloads);
 
+  template <bool HasPayload>
   vector_size_t
   collectTwoWayRows(vector_size_t count, const char** keys, char** payloads);
 
+  template <bool HasPayload>
   vector_size_t
   collectLoserTreeRows(vector_size_t count, const char** keys, char** payloads);
 

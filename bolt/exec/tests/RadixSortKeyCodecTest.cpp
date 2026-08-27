@@ -34,6 +34,7 @@
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/type/HugeInt.h"
 #include "bolt/vector/FlatVector.h"
+#include "bolt/vector/SimpleVector.h"
 
 namespace bytedance::bolt::exec::radixsort::test {
 namespace {
@@ -1118,6 +1119,80 @@ TEST_F(RadixSortKeyCodecTest, mapRoundTripAndCanonicalOrdering) {
 
 TEST_F(RadixSortKeyCodecTest, mapVarcharVarcharKeyCanonicalOrdering) {
   verifyAllFlags({makeStringStringMaps()});
+}
+
+TEST_F(RadixSortKeyCodecTest, mapKeyEncodingDoesNotCanonicalizeInput) {
+  const std::array<vector_size_t, 3> offsets{0, 3, 6};
+  const std::array<vector_size_t, 3> sizes{3, 3, 2};
+  auto keys = makeVector<int32_t>(INTEGER(), {3, 1, 2, 6, 4, 5, 7, 8});
+  auto values = makeStringVector(
+      VARCHAR(),
+      {"three", "one", "two", "six", "four", "five", "seven", "eight"});
+  auto maps = std::make_shared<MapVector>(
+      pool_.get(),
+      MAP(INTEGER(), VARCHAR()),
+      nullptr,
+      offsets.size(),
+      makeBuffer(offsets),
+      makeBuffer(sizes),
+      keys,
+      values);
+  ASSERT_FALSE(maps->hasSortedKeys());
+  auto* rawKeys = keys->asUnchecked<SimpleVector<int32_t>>();
+  ASSERT_EQ(rawKeys->valueAt(0), 3);
+  ASSERT_EQ(rawKeys->valueAt(1), 1);
+  ASSERT_EQ(rawKeys->valueAt(2), 2);
+
+  const auto compareFlags = SortComparatorOracle::makeSortFlags(true, true);
+  auto codec = bind({maps->type()}, {compareFlags});
+  EncodedKeyBatch encoded;
+  codec->encode(*makeRows({maps}), pool_.get(), encoded);
+  RowVectorPtr decoded;
+  decodeBatch(*codec, encoded, decoded);
+  expectColumnEqual(*makeRows({maps}), *decoded, 0, compareFlags);
+
+  auto sortedMaps = std::make_shared<MapVector>(
+      pool_.get(),
+      MAP(INTEGER(), VARCHAR()),
+      nullptr,
+      offsets.size(),
+      makeBuffer(offsets),
+      makeBuffer(sizes),
+      makeVector<int32_t>(INTEGER(), {1, 2, 3, 4, 5, 6, 7, 8}),
+      makeStringVector(
+          VARCHAR(),
+          {"one", "two", "three", "four", "five", "six", "seven", "eight"}),
+      std::nullopt,
+      true);
+  ASSERT_TRUE(sortedMaps->hasSortedKeys());
+  EncodedKeyBatch sortedEncoded;
+  codec->encode(*makeRows({sortedMaps}), pool_.get(), sortedEncoded);
+  ASSERT_EQ(encoded.size(), sortedEncoded.size());
+  for (vector_size_t row = 0; row < encoded.size(); ++row) {
+    EXPECT_EQ(encoded.variableKeyAt(row), sortedEncoded.variableKeyAt(row))
+        << "row=" << row;
+  }
+
+  EXPECT_FALSE(maps->hasSortedKeys());
+  EXPECT_EQ(rawKeys->valueAt(0), 3);
+  EXPECT_EQ(rawKeys->valueAt(1), 1);
+  EXPECT_EQ(rawKeys->valueAt(2), 2);
+}
+
+TEST_F(RadixSortKeyCodecTest, repeatedPhysicalNestedMapKeysRoundTrip) {
+  auto innerMaps = makeMaps(
+      {2, 1, 0, 2, 1, 1, 0},
+      makeVector<int32_t>(INTEGER(), {2, 1, 3, 5, 4, 6, 7}),
+      makeStringVector(VARCHAR(), {"b", "a", "c", "e", "d", "f", "g"}));
+  auto outerMaps = makeMaps(
+      {2, 2, 2, 1},
+      makeVector<int32_t>(INTEGER(), {20, 10, 12, 11, 30, 25, 5}),
+      innerMaps);
+  const std::array<vector_size_t, 9> indices{2, 0, 2, 1, 3, 0, 1, 2, 0};
+  auto repeatedOuterMaps = BaseVector::wrapInDictionary(
+      nullptr, makeBuffer(indices), indices.size(), outerMaps);
+
+  verifyAllFlags({repeatedOuterMaps}, false);
 }
 
 TEST_F(RadixSortKeyCodecTest, nestedComplexVariableKeySizes) {

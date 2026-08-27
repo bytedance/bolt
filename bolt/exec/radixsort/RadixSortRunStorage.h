@@ -97,16 +97,19 @@ class PayloadRowBatch {
 
 class RadixSortRunStorage {
  public:
-  static constexpr uint32_t kDefaultKeysPerBlock = 2048;
+  static constexpr uint32_t kAutoRowsPerBlock = 0;
+  static constexpr uint32_t kTestingRowsPerBlock = 2048;
+  static constexpr uint64_t kDefaultKeyBlockBytes = 64 * 1024;
+  static constexpr uint64_t kDefaultHeapGroupBytes = 64 * 1024;
 
   RadixSortRunStorage(
       memory::MemoryPool* pool,
       RadixSortKeyLayout layout,
-      uint32_t keysPerBlock = kDefaultKeysPerBlock,
-      uint64_t preferredHeapGroupBytes = 64 * 1024,
+      uint32_t keysPerBlock = kAutoRowsPerBlock,
+      uint64_t preferredHeapGroupBytes = kDefaultHeapGroupBytes,
       std::shared_ptr<const PayloadRowLayout> payloadLayout = nullptr,
-      uint32_t payloadRowsPerBlock = kDefaultKeysPerBlock,
-      uint64_t preferredPayloadHeapGroupBytes = 64 * 1024);
+      uint32_t payloadRowsPerBlock = kAutoRowsPerBlock,
+      uint64_t preferredPayloadHeapGroupBytes = kDefaultHeapGroupBytes);
 
   const RadixSortKeyLayout& layout() const {
     return layout_;
@@ -269,6 +272,10 @@ class RadixSortRunStorage {
   void ensureKeyBlock();
 
   void ensurePayloadFixedBlock();
+
+  static uint32_t normalizeKeysPerBlock(
+      uint32_t keysPerBlock,
+      const RadixSortKeyLayout& layout);
 
   void allocatePayloadRowPointers(vector_size_t count, char** rows);
 

@@ -17,7 +17,9 @@
 #include "bolt/exec/radixsort/RadixSortBuffer.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
+#include <span>
 
 #include <folly/ScopeGuard.h>
 
@@ -192,19 +194,28 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
             static_cast<uint64_t>(count) * sizeof(char*)) {
       mergeKeyRows_ =
           AlignedBuffer::allocate<const char*>(count, pool_, nullptr);
-      mergePayloadRows_ = AlignedBuffer::allocate<char*>(count, pool_, nullptr);
+      if (run_->payloadLayout() != nullptr) {
+        mergePayloadRows_ =
+            AlignedBuffer::allocate<char*>(count, pool_, nullptr);
+      }
     } else {
       mergeKeyRows_->setSize(static_cast<uint64_t>(count) * sizeof(char*));
-      mergePayloadRows_->setSize(static_cast<uint64_t>(count) * sizeof(char*));
+      if (mergePayloadRows_ != nullptr) {
+        mergePayloadRows_->setSize(
+            static_cast<uint64_t>(count) * sizeof(char*));
+      }
     }
     auto** rawKeys = mergeKeyRows_->asMutable<const char*>();
-    auto** rawPayloads = mergePayloadRows_->asMutable<char*>();
+    auto** rawPayloads = mergePayloadRows_ == nullptr
+        ? nullptr
+        : mergePayloadRows_->asMutable<char*>();
     const auto outputCount = merger_->collectRows(count, rawKeys, rawPayloads);
     if (outputCount > 0) {
+      const auto payloads = rawPayloads == nullptr
+          ? std::span<char* const>{}
+          : std::span<char* const>(rawPayloads, outputCount);
       result = run_->getOutput(
-          std::span<const char* const>(rawKeys, outputCount),
-          std::span<char* const>(rawPayloads, outputCount),
-          pool_);
+          std::span<const char* const>(rawKeys, outputCount), payloads, pool_);
       merger_->releaseRetainedBuffers();
     }
     outputTimeUs_ += std::chrono::duration_cast<std::chrono::microseconds>(
@@ -442,13 +453,8 @@ void RadixSortBuffer::spillRemainingOutput() {
     return;
   }
 
-  constexpr vector_size_t kSpillBatchRows = 2048;
-  BufferPtr keyRows =
-      AlignedBuffer::allocate<const char*>(kSpillBatchRows, pool_, nullptr);
-  BufferPtr payloadRows =
-      AlignedBuffer::allocate<char*>(kSpillBatchRows, pool_, nullptr);
-  auto** rawKeys = keyRows->asMutable<const char*>();
-  auto** rawPayloads = payloadRows->asMutable<char*>();
+  const auto keyLayout = run_->keyLayout();
+  const auto* payloadLayout = run_->payloadLayout().get();
 
   const auto directory = spillConfig_->getSpillDirPathCb();
   RadixSortSpillWriter writer(
@@ -457,28 +463,91 @@ void RadixSortBuffer::spillRemainingOutput() {
       memory::spillMemoryPool(),
       &stats_);
 
+  const auto remainingRows = inputRows_ - outputRows_;
+  const auto maxBufferedRows = static_cast<vector_size_t>(std::min<uint64_t>(
+      remainingRows, writer.estimatedRowsPerBlock(keyLayout, payloadLayout)));
+  BufferPtr keyRows =
+      AlignedBuffer::allocate<const char*>(maxBufferedRows, pool_, nullptr);
+  BufferPtr payloadRows = payloadLayout == nullptr
+      ? nullptr
+      : AlignedBuffer::allocate<char*>(maxBufferedRows, pool_, nullptr);
+  auto** rawKeys = keyRows->asMutable<const char*>();
+  auto** rawPayloads =
+      payloadRows == nullptr ? nullptr : payloadRows->asMutable<char*>();
+
   const auto spillBegin = std::chrono::steady_clock::now();
   uint64_t spilledRows = 0;
+  uint64_t collectedRows = 0;
   uint64_t serializationTimeUs = 0;
-  const auto remainingRows = inputRows_ - outputRows_;
-  const auto keyLayout = run_->keyLayout();
-  const auto* payloadLayout = run_->payloadLayout().get();
   BufferPtr keyRecordRows = AlignedBuffer::allocate<char>(
-      static_cast<uint64_t>(kSpillBatchRows) * keyLayout.width(), pool_);
+      static_cast<uint64_t>(maxBufferedRows) * keyLayout.width(), pool_);
   auto* rawKeyRecords = keyRecordRows->asMutable<char>();
-  auto writeKeyBatch = [&](vector_size_t count) {
+  std::vector<RadixSortSpillSectionSize> rowSizes;
+  std::vector<RadixSortSpillSectionSize> bufferedRowSizes;
+  const auto meta = RadixSortSpillSectionMeta::create(keyLayout, payloadLayout);
+  vector_size_t bufferedRows = 0;
+  while (spilledRows < remainingRows) {
+    if (bufferedRows < maxBufferedRows && collectedRows < remainingRows) {
+      const auto requested = static_cast<vector_size_t>(std::min<uint64_t>(
+          remainingRows - collectedRows, maxBufferedRows - bufferedRows));
+      const auto count = merger_ != nullptr
+          ? merger_->collectRows(
+                requested, rawKeys + bufferedRows, rawPayloads + bufferedRows)
+          : run_->collectRemainingRows(
+                requested, rawKeys + bufferedRows, rawPayloads + bufferedRows);
+      BOLT_CHECK_GT(count, 0, "Radix sort output spill made no progress");
+      for (vector_size_t row = 0; row < count; ++row) {
+        std::memcpy(
+            rawKeyRecords +
+                static_cast<uint64_t>(bufferedRows + row) * keyLayout.width(),
+            rawKeys[bufferedRows + row],
+            keyLayout.width());
+      }
+      bufferedRows += count;
+      collectedRows += count;
+      rowSizes.clear();
+      const auto sizedRows = RadixSortSpillSections::sizeForSerializeRows(
+          meta,
+          rawKeyRecords +
+              static_cast<uint64_t>(bufferedRows - count) * keyLayout.width(),
+          count,
+          std::numeric_limits<uint64_t>::max(),
+          rowSizes);
+      BOLT_DCHECK_EQ(sizedRows.rowCount, count);
+      if (!rowSizes.empty()) {
+        bufferedRowSizes.insert(
+            bufferedRowSizes.end(), rowSizes.begin(), rowSizes.end());
+      }
+    }
+
+    BOLT_DCHECK_GT(bufferedRows, 0);
     const auto writeStatsBefore = stats_.copy();
     const auto writeBegin = std::chrono::steady_clock::now();
-    const auto keyRecordBytes =
-        static_cast<uint64_t>(count) * keyLayout.width();
-    for (vector_size_t row = 0; row < count; ++row) {
-      std::memcpy(
-          rawKeyRecords + static_cast<uint64_t>(row) * keyLayout.width(),
-          rawKeys[row],
-          keyLayout.width());
+    std::span<const RadixSortSpillSectionSize> sizes;
+    if (!bufferedRowSizes.empty()) {
+      sizes = std::span<const RadixSortSpillSectionSize>(
+          bufferedRowSizes.data(), bufferedRows);
     }
-    keyRecordRows->setSize(keyRecordBytes);
-    writer.writeKeyRange(keyLayout, payloadLayout, rawKeyRecords, count);
+    const auto writeRows = writer.writePresizedKeyRange(
+        keyLayout, payloadLayout, rawKeyRecords, bufferedRows, sizes);
+    BOLT_CHECK_GT(writeRows, 0, "Radix sort output spill made no progress");
+    BOLT_CHECK_LE(writeRows, bufferedRows);
+    const auto remainingBufferedRows = bufferedRows - writeRows;
+    if (writeRows < bufferedRows) {
+      std::memmove(
+          rawKeyRecords,
+          rawKeyRecords + static_cast<uint64_t>(writeRows) * keyLayout.width(),
+          static_cast<uint64_t>(remainingBufferedRows) * keyLayout.width());
+      if (!bufferedRowSizes.empty()) {
+        std::move(
+            bufferedRowSizes.begin() + writeRows,
+            bufferedRowSizes.begin() + bufferedRows,
+            bufferedRowSizes.begin());
+        bufferedRowSizes.resize(remainingBufferedRows);
+      }
+    } else {
+      bufferedRowSizes.clear();
+    }
     auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
                          std::chrono::steady_clock::now() - writeBegin)
                          .count();
@@ -488,16 +557,9 @@ void RadixSortBuffer::spillRemainingOutput() {
         writeStatsBefore.spillWriteTimeUs;
     serializationTimeUs +=
         elapsedUs > writerTimeUs ? elapsedUs - writerTimeUs : 0;
-    spilledRows += count;
-  };
-  while (spilledRows < remainingRows) {
-    const auto requested = static_cast<vector_size_t>(std::min<uint64_t>(
-        remainingRows - spilledRows, static_cast<uint64_t>(kSpillBatchRows)));
-    const auto count = merger_ != nullptr
-        ? merger_->collectRows(requested, rawKeys, rawPayloads)
-        : run_->collectRemainingRows(requested, rawKeys, rawPayloads);
-    writeKeyBatch(count);
-    if (merger_ != nullptr) {
+    spilledRows += writeRows;
+    bufferedRows = remainingBufferedRows;
+    if (merger_ != nullptr && bufferedRows == 0) {
       merger_->releaseRetainedBuffers();
     }
   }
