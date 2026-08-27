@@ -57,6 +57,24 @@ class DataCells {
       uint32_t bytes,
       const ChunkAllocator::GrowCallback& beforeGrow);
 
+  /// Contiguous scratch inside the current tail cell, or nullptr when the
+  /// tail cannot hold maxBytes. Allocates nothing, so no spill can fire
+  /// between a reserve and its commit; the caller writes up to maxBytes and
+  /// commits the actual size.
+  char* tryReserve(uint32_t pid, uint32_t stream, uint32_t maxBytes) {
+    auto& info = infos_[chainIndex(pid, stream)];
+    if (info.numCells == 0 ||
+        info.tailUsed + maxBytes > allocator_->cellBytes()) {
+      return nullptr;
+    }
+    return allocator_->cellData(info.lastCell) + info.tailUsed;
+  }
+
+  void commit(uint32_t pid, uint32_t stream, uint32_t bytes) {
+    infos_[chainIndex(pid, stream)].tailUsed += bytes;
+    totalBytes_ += bytes;
+  }
+
   /// Recycles every chain's cells back to the allocator (the Run drain's
   /// release step). Unlike ChunkAllocator::resetAll, ids not owned by any
   /// chain survive.
