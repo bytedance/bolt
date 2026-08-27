@@ -2922,6 +2922,27 @@ TEST_F(TestReader, readNestedSchemaEvolutionWithIsNotNullFilter) {
            {makeFlatVector<StringView>({"11", "33"}),
             makeNullableFlatVector<bool>({true, std::nullopt})})});
   assertEqualVectors(expected, actual);
+
+  // Output channels are independent of positions in the requested schema.
+  // Exercise a sparse projection where meta_details (schema index 1) is
+  // assigned output channel 0.
+  scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* metaSpec = scanSpec->addField("meta_details", 0);
+  metaSpec->addAllChildFields(*requestedSchema->childAt(1));
+  metaSpec->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReader = reader->createRowReader(rowReaderOpts);
+  auto projectedSchema = ROW({"meta_details"}, {requestedSchema->childAt(1)});
+  actual = BaseVector::create(projectedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+  expected = makeRowVector(
+      {"meta_details"},
+      {makeRowVector(
+          {"chatter_id", "is_manual_set_nickname"},
+          {makeFlatVector<StringView>({"11", "33"}),
+           makeNullableFlatVector<bool>({true, std::nullopt})})});
+  assertEqualVectors(expected, actual);
 }
 
 TEST_F(TestReader, readNestedSchemaEvolutionByPosition) {

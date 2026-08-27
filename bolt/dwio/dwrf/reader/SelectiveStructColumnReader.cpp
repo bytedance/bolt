@@ -69,7 +69,8 @@ SelectiveStructColumnReader::SelectiveStructColumnReader(
       childSpec->setSubscript(kConstantChildSpecSubscript);
       continue;
     }
-    const auto childIndex = childSpec->channel();
+    const auto childIndex =
+        requestedType_->type()->asRow().getChildIdx(childSpec->fieldName());
     auto childFileType = columnReaderOptions.useColumnNamesForColumnMapping_
         ? fileType_->childByName(childSpec->fieldName())
         : fileType_->childAt(childIndex);
