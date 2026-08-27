@@ -36,6 +36,7 @@
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "bolt/type/HugeInt.h"
 #include "bolt/vector/ComplexVector.h"
+#include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/VariantVector.h"
 
@@ -1096,6 +1097,91 @@ TEST_F(RadixPayloadRowTest, decodedStringNullInlineAndHeap) {
   expectEquivalent(*input, *output);
 }
 
+TEST_F(RadixPayloadRowTest, multiLayerDictionaryStringPayload) {
+  constexpr vector_size_t kRows = 9;
+  const std::string longA(64, 'a');
+  const std::string longB(80, 'b');
+  const std::string longC(96, 'c');
+  auto base = makeStringVector(
+      VARCHAR(), {longA, "inline", std::nullopt, longB, longC});
+  auto innerNulls =
+      AlignedBuffer::allocate<bool>(5, pool_.get(), bits::kNotNull);
+  bits::setNull(innerNulls->asMutable<uint64_t>(), 3, true);
+  const std::vector<vector_size_t> innerIndices{3, 0, 1, 2, 4};
+  auto inner = BaseVector::wrapInDictionary(
+      innerNulls, makeBuffer(pool_.get(), innerIndices), 5, base);
+  const std::vector<vector_size_t> outerIndices{1, 4, 2, 0, 3, 4, 1, 2, 0};
+  auto outer = BaseVector::wrapInDictionary(
+      nullptr, makeBuffer(pool_.get(), outerIndices), kRows, inner);
+  auto input = makeRows(std::vector<VectorPtr>{outer});
+  auto layout = payloadLayout(asRowType(input->type()));
+  RadixSortRunStorage arena(
+      pool_.get(), keyLayout(), 8, 64, layout, 2 * kRows, 1024);
+  PayloadRowBatch batch;
+  PayloadRowWriter writer;
+
+  writer.append(*input, arena, batch);
+  writer.append(*input, arena, batch);
+
+  DecodedVector decoded(*outer);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    if (decoded.isNullAt(row)) {
+      EXPECT_EQ(batch.heapSizeAt(row), 0);
+      continue;
+    }
+    const auto value = decoded.valueAt<StringView>(row);
+    EXPECT_EQ(batch.heapSizeAt(row), value.isInline() ? 0 : value.size())
+        << "row=" << row;
+    const auto stored = loadUnaligned<StringView>(
+        batch.rowAt(row) + layout->columns()[0].offset);
+    EXPECT_EQ(stored.str(), value.str());
+    if (!stored.isInline()) {
+      EXPECT_EQ(stored.data(), batch.heapAt(row));
+    }
+  }
+
+  RowVectorPtr output;
+  gatherPayloadBatch(*layout, batch, pool_.get(), output);
+  expectEquivalent(*input, *output);
+}
+
+TEST_F(RadixPayloadRowTest, singleStringNullFreeGatherClearsReusedOutput) {
+  auto nullableInput = makeRows({makeStringVector(
+      VARCHAR(), {std::string(80, 'n'), std::nullopt, std::string("short")})});
+  auto layout = payloadLayout(asRowType(nullableInput->type()));
+  RadixSortRunStorage nullableArena(
+      pool_.get(), keyLayout(), 8, 64, layout, 8, 1024);
+  PayloadRowBatch nullableBatch;
+  PayloadRowWriter writer;
+  writer.append(*nullableInput, nullableArena, nullableBatch);
+
+  RowVectorPtr output;
+  gatherPayloadBatch(*layout, nullableBatch, pool_.get(), output);
+  ASSERT_NE(output->childAt(0)->rawNulls(), nullptr);
+  EXPECT_TRUE(output->childAt(0)->isNullAt(1));
+
+  auto nullFreeInput = makeRows({makeStringVector(
+      VARCHAR(), {std::string(96, 'a'), "inline", std::string(72, 'b')})});
+  RadixSortRunStorage nullFreeArena(
+      pool_.get(), keyLayout(), 8, 64, layout, 8, 1024);
+  PayloadRowBatch nullFreeBatch;
+  writer.append(*nullFreeInput, nullFreeArena, nullFreeBatch);
+  gatherPayloadBatch(*layout, nullFreeBatch, pool_.get(), output);
+
+  expectEquivalent(*nullFreeInput, *output);
+  for (vector_size_t row = 0; row < output->size(); ++row) {
+    EXPECT_FALSE(output->childAt(0)->isNullAt(row));
+  }
+  auto* outputValues =
+      output->childAt(0)->asUnchecked<FlatVector<StringView>>()->rawValues();
+  for (vector_size_t row = 0; row < output->size(); ++row) {
+    if (!outputValues[row].isInline()) {
+      EXPECT_NE(outputValues[row].data(), nullableBatch.heapAt(row));
+      EXPECT_NE(outputValues[row].data(), nullFreeBatch.heapAt(row));
+    }
+  }
+}
+
 TEST_F(RadixPayloadRowTest, wrappedComplexPayloads) {
   constexpr vector_size_t kRows = 4;
   auto arrays = makeArrays();
@@ -1175,6 +1261,32 @@ TEST_F(RadixPayloadRowTest, wrappedComplexPayloads) {
     EXPECT_EQ(allNullBatch.heapSizeAt(row), 0);
     EXPECT_EQ(allNullBatch.heapAt(row), nullptr);
   }
+}
+
+TEST_F(RadixPayloadRowTest, complexGatherReusesOutputAcrossRows) {
+  auto arrays = makeArrays();
+  auto maps = makeMaps();
+  auto rows = makeNestedRows();
+  auto input = makeRows({arrays, maps, rows});
+  auto layout = payloadLayout(asRowType(input->type()));
+  RadixSortRunStorage arena(
+      pool_.get(), keyLayout(), 8, 64, layout, 8, 16 * 1024);
+  PayloadRowBatch batch;
+  PayloadRowWriter writer;
+  writer.append(*input, arena, batch);
+
+  auto firstRows = rowPointers(batch);
+  RowVectorPtr output;
+  PayloadRowReader::gather(*layout, firstRows, pool_.get(), output);
+  expectEquivalent(*input, *output);
+
+  const std::vector<vector_size_t> rawIndices{2, 0, 1};
+  auto indices = makeBuffer(pool_.get(), rawIndices);
+  auto expected = makeRows(wrapDictionaries({arrays, maps, rows}, indices, 3));
+  std::vector<char*> subsetRows{batch.rowAt(2), batch.rowAt(0), batch.rowAt(1)};
+  PayloadRowReader::gather(
+      *layout, std::span<char* const>(subsetRows), pool_.get(), output);
+  expectEquivalent(*expected, *output);
 }
 
 TEST_F(RadixPayloadRowTest, writerReuseAndBatchCopyOnWrite) {
@@ -1627,10 +1739,10 @@ TEST_F(RadixPayloadRowTest, fixedPayloadBlockCapacityIsByteBounded) {
     RadixSortRunStorage arena(
         pool_.get(),
         keyLayout(),
-        RadixSortRunStorage::kDefaultKeysPerBlock,
+        RadixSortRunStorage::kTestingRowsPerBlock,
         64 * 1024,
         layout,
-        RadixSortRunStorage::kDefaultKeysPerBlock,
+        RadixSortRunStorage::kTestingRowsPerBlock,
         64 * 1024);
     PayloadRowBatch batch;
     arena.allocateFixedPayloadRowBatch(1, batch);
@@ -1640,7 +1752,7 @@ TEST_F(RadixPayloadRowTest, fixedPayloadBlockCapacityIsByteBounded) {
     const auto byteBoundedCapacity =
         kMaxPayloadFixedBlockBytes / layout->rowWidth();
     const auto expectedCapacity = static_cast<uint32_t>(std::min<uint64_t>(
-        RadixSortRunStorage::kDefaultKeysPerBlock,
+        RadixSortRunStorage::kTestingRowsPerBlock,
         std::max<uint64_t>(1, byteBoundedCapacity)));
     EXPECT_EQ(block.capacity, expectedCapacity) << "columns=" << columnCount;
     EXPECT_EQ(block.count, 1);
@@ -1652,6 +1764,20 @@ TEST_F(RadixPayloadRowTest, fixedPayloadBlockCapacityIsByteBounded) {
       EXPECT_EQ(block.capacity, 1);
     }
   }
+}
+
+TEST_F(RadixPayloadRowTest, defaultFixedPayloadBlockUsesByteCapacity) {
+  constexpr uint64_t kMaxPayloadFixedBlockBytes = 64 * 1024;
+  auto layout = payloadLayout(ROW({"value"}, {BIGINT()}));
+  RadixSortRunStorage arena(pool_.get(), keyLayout(), 4, 64, layout);
+  PayloadRowBatch batch;
+  arena.allocateFixedPayloadRowBatch(1, batch);
+
+  ASSERT_EQ(arena.payloadFixedBlocks().size(), 1);
+  const auto expectedCapacity = static_cast<uint32_t>(
+      std::max<uint64_t>(1, kMaxPayloadFixedBlockBytes / layout->rowWidth()));
+  EXPECT_EQ(arena.payloadFixedBlocks().front().capacity, expectedCapacity);
+  EXPECT_GT(expectedCapacity, RadixSortRunStorage::kTestingRowsPerBlock);
 }
 
 TEST_F(RadixPayloadRowTest, heapGroupsAndOversizedRows) {
@@ -1733,10 +1859,10 @@ TEST_F(RadixPayloadRowTest, fixedKeyAndPayloadShareAllocationPoolRange) {
   RadixSortRunStorage arena(
       leaf.get(),
       physicalLayout,
-      RadixSortRunStorage::kDefaultKeysPerBlock,
+      RadixSortRunStorage::kTestingRowsPerBlock,
       64 * 1024,
       layout,
-      RadixSortRunStorage::kDefaultKeysPerBlock,
+      RadixSortRunStorage::kTestingRowsPerBlock,
       64 * 1024);
   const std::array<uint64_t, 2048> heapSizes{};
   PayloadRowBatch batch;

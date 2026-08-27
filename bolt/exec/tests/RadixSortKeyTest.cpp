@@ -17,7 +17,6 @@
 #include <gtest/gtest.h>
 
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -909,6 +908,31 @@ TEST_F(RadixSortKeyTest, blockAndHeapGroups) {
   EXPECT_EQ(heapBytes, 197);
   EXPECT_GE(
       static_cast<uint64_t>(arena.allocatedBytes()), keyBytes + heapBytes);
+}
+
+TEST_F(RadixSortKeyTest, defaultKeyBlocksUseDefaultByteStorageTarget) {
+  for (const auto kind :
+       {LayoutKind::kKeyOnlyFixed8,
+        LayoutKind::kKeyOnlyFixed16,
+        LayoutKind::kKeyWithPayloadVariable32}) {
+    SCOPED_TRACE(static_cast<uint8_t>(kind));
+    auto layout = RadixSortKeyLayout::fromKind(kind);
+    RadixSortRunStorage arena(pool_.get(), layout);
+    const auto expectedRows = static_cast<uint32_t>(
+        (RadixSortRunStorage::kDefaultKeyBlockBytes + layout.width() - 1) /
+        layout.width());
+    EXPECT_EQ(arena.keysPerBlock(), expectedRows);
+
+    const auto rows = expectedRows + 1;
+    for (uint32_t row = 0; row < rows; ++row) {
+      arena.append(std::string(layout.inlineCapacity(), 'a'));
+    }
+    ASSERT_EQ(arena.keyBlocks().size(), 2);
+    EXPECT_EQ(arena.keyBlocks()[0].capacity, expectedRows);
+    EXPECT_EQ(arena.keyBlocks()[0].count, expectedRows);
+    EXPECT_EQ(arena.keyBlocks()[1].capacity, expectedRows);
+    EXPECT_EQ(arena.keyBlocks()[1].count, 1);
+  }
 }
 
 TEST_F(RadixSortKeyTest, storageBlockAllocationAndAddressingBoundaries) {

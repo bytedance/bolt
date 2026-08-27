@@ -21,6 +21,7 @@
 #include <limits>
 #include <utility>
 
+#include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 
@@ -86,7 +87,7 @@ RadixSortRunStorage::RadixSortRunStorage(
     uint64_t preferredPayloadHeapGroupBytes)
     : pool_(pool),
       layout_(std::move(layout)),
-      keysPerBlock_(keysPerBlock),
+      keysPerBlock_(normalizeKeysPerBlock(keysPerBlock, layout_)),
       preferredHeapGroupBytes_(preferredHeapGroupBytes),
       payloadLayout_(std::move(payloadLayout)),
       payloadRowsPerBlock_(payloadRowsPerBlock),
@@ -96,6 +97,16 @@ RadixSortRunStorage::RadixSortRunStorage(
       keyHeapGroups_(memory::StlAllocator<RadixSortKeyOverflowBlock>(pool_)),
       payloadFixedBlocks_(memory::StlAllocator<PayloadRowFixedBlock>(pool_)),
       payloadHeapGroups_(memory::StlAllocator<PayloadRowHeapBlock>(pool_)) {}
+
+uint32_t RadixSortRunStorage::normalizeKeysPerBlock(
+    uint32_t keysPerBlock,
+    const RadixSortKeyLayout& layout) {
+  if (keysPerBlock != kAutoRowsPerBlock) {
+    return keysPerBlock;
+  }
+  return static_cast<uint32_t>(std::max<uint64_t>(
+      1, bits::divRoundUp(kDefaultKeyBlockBytes, layout.width())));
+}
 
 RadixSortKey RadixSortRunStorage::keyAt(uint64_t index) {
   return RadixSortKey(layout_, keyDataAt(index));
@@ -503,8 +514,11 @@ void RadixSortRunStorage::ensurePayloadFixedBlock() {
   const auto rowWidth = payloadLayout_->rowWidth();
   const auto byteLimitedCapacity =
       std::max<uint64_t>(1, kMaxPayloadFixedBlockBytes / rowWidth);
+  const auto rowLimitedCapacity = payloadRowsPerBlock_ == kAutoRowsPerBlock
+      ? byteLimitedCapacity
+      : payloadRowsPerBlock_;
   const auto capacity = static_cast<uint32_t>(
-      std::min<uint64_t>(payloadRowsPerBlock_, byteLimitedCapacity));
+      std::min<uint64_t>(rowLimitedCapacity, byteLimitedCapacity));
   const auto bytes = static_cast<uint64_t>(capacity) * rowWidth;
   auto* base = allocationPool_.allocateFixed(bytes, alignof(uint64_t));
   checkCompactPointerRange(base, bytes);

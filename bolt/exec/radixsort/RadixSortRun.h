@@ -146,10 +146,12 @@ struct RadixSortRunOptions {
   std::vector<uint8_t> initialKeyMayHaveNulls;
   std::vector<uint8_t> initialPayloadMayHaveNulls;
   bool initialVariableKeysFitRadixPrefix{true};
-  uint32_t keysPerBlock{RadixSortRunStorage::kDefaultKeysPerBlock};
-  uint64_t preferredKeyHeapGroupBytes{64 * 1024};
-  uint32_t payloadRowsPerBlock{RadixSortRunStorage::kDefaultKeysPerBlock};
-  uint64_t preferredPayloadHeapGroupBytes{64 * 1024};
+  uint32_t keysPerBlock{RadixSortRunStorage::kAutoRowsPerBlock};
+  uint64_t preferredKeyHeapGroupBytes{
+      RadixSortRunStorage::kDefaultHeapGroupBytes};
+  uint32_t payloadRowsPerBlock{RadixSortRunStorage::kAutoRowsPerBlock};
+  uint64_t preferredPayloadHeapGroupBytes{
+      RadixSortRunStorage::kDefaultHeapGroupBytes};
 };
 
 class RadixSortRun {

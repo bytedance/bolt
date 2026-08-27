@@ -492,6 +492,27 @@ class RadixSortSpillSectionsTest : public testing::Test {
     return result;
   }
 
+  std::vector<UncompressedSpillBlock> readUncompressedBlocks(
+      const RadixSortSpillFile& fileInfo) {
+    std::ifstream file(fileInfo.path, std::ios::binary);
+    EXPECT_TRUE(file.good());
+    std::vector<UncompressedSpillBlock> blocks;
+    uint64_t offset = 0;
+    while (offset < fileInfo.size) {
+      UncompressedSpillBlock block;
+      file.read(reinterpret_cast<char*>(&block.header), sizeof(block.header));
+      EXPECT_TRUE(file.good()) << "offset=" << offset;
+      EXPECT_EQ(block.header.storedSize, block.header.uncompressedSize);
+      block.body.resize(block.header.uncompressedSize);
+      file.read(block.body.data(), block.body.size());
+      EXPECT_TRUE(file.good()) << "offset=" << offset;
+      offset += kBlockHeaderSize + block.header.storedSize;
+      blocks.push_back(std::move(block));
+    }
+    EXPECT_EQ(offset, fileInfo.size);
+    return blocks;
+  }
+
   static std::vector<char*> payloadsFromKeys(
       const RadixSortKeyLayout& keyLayout,
       const std::vector<const char*>& keys) {
@@ -596,7 +617,8 @@ class RadixSortSpillSectionsTest : public testing::Test {
       const RadixSortRunStorage& storage,
       const PayloadRowLayout* payloadLayout,
       uint64_t maxFileSize,
-      bool outputStage) {
+      bool outputStage,
+      uint64_t writeBufferSize = 1 << 20) {
     auto directory = exec::test::TempDirectoryPath::create();
     spillDirectories_.push_back(std::move(directory));
     folly::Synchronized<common::SpillStats> stats;
@@ -606,7 +628,7 @@ class RadixSortSpillSectionsTest : public testing::Test {
         spillConfig(
             spillDirectories_.back()->path,
             common::CompressionKind_NONE,
-            1 << 20,
+            writeBufferSize,
             maxFileSize),
         pool_.get(),
         &stats);
@@ -1549,6 +1571,73 @@ TEST_F(RadixSortSpillSectionsTest, writerUsesBatchSectionBlockLayout) {
   }
   EXPECT_EQ(keyHeapCursor, keyHeap + keyHeapBytes);
   EXPECT_EQ(payloadHeapCursor, payloadHeap + payloadHeapBytes);
+}
+
+TEST_F(RadixSortSpillSectionsTest, writerDoesNotFlushAtStorageBlockBoundary) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  constexpr uint32_t kRowsPerBlock = RadixSortRunStorage::kTestingRowsPerBlock;
+  RadixSortRunStorage storage(pool_.get(), keyLayout, kRowsPerBlock, 64);
+  for (uint32_t row = 0; row <= kRowsPerBlock; ++row) {
+    storage.append(fixed8Key(static_cast<uint8_t>(row + 1)));
+  }
+  ASSERT_EQ(storage.keyBlocks().size(), 2);
+
+  auto spill = spillSingleRun(
+      storage,
+      nullptr,
+      common::CompressionKind_NONE,
+      /*writeBufferSize=*/kBlockHeaderSize +
+          storage.size() * keyLayout.width());
+  const auto blocks = readUncompressedBlocks(spill.file);
+  ASSERT_EQ(blocks.size(), 1);
+  EXPECT_EQ(blocks[0].header.rowCount, storage.size());
+  EXPECT_EQ(
+      blocks[0].header.keyRecordBytes, storage.size() * keyLayout.width());
+}
+
+TEST_F(RadixSortSpillSectionsTest, writerBodyCapacityHonorsSpillConfig) {
+  auto directory = exec::test::TempDirectoryPath::create();
+  folly::Synchronized<common::SpillStats> stats;
+  RadixSortSpillWriter smallWriter(
+      directory->path + "/small",
+      spillConfig(
+          directory->path,
+          common::CompressionKind_NONE,
+          /*writeBufferSize=*/kBlockHeaderSize + 17),
+      pool_.get(),
+      &stats);
+  EXPECT_EQ(smallWriter.bodyCapacity(), 17);
+
+  RadixSortSpillWriter defaultWriter(
+      directory->path + "/default",
+      spillConfig(
+          directory->path,
+          common::CompressionKind_NONE,
+          /*writeBufferSize=*/0),
+      pool_.get(),
+      &stats);
+  EXPECT_EQ(defaultWriter.bodyCapacity(), (1 << 20) - kBlockHeaderSize);
+}
+
+TEST_F(RadixSortSpillSectionsTest, writerHonorsSmallWriteBufferSize) {
+  auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage storage(pool_.get(), keyLayout, 1024, 64);
+  for (uint8_t row = 1; row <= 5; ++row) {
+    storage.append(fixed8Key(row));
+  }
+
+  auto spill = spillSingleRun(
+      storage,
+      nullptr,
+      common::CompressionKind_NONE,
+      /*writeBufferSize=*/kBlockHeaderSize + 2 * keyLayout.width());
+  const auto blocks = readUncompressedBlocks(spill.file);
+  ASSERT_EQ(blocks.size(), 3);
+  EXPECT_EQ(blocks[0].header.rowCount, 2);
+  EXPECT_EQ(blocks[1].header.rowCount, 2);
+  EXPECT_EQ(blocks[2].header.rowCount, 1);
 }
 
 TEST_F(
@@ -2726,6 +2815,38 @@ TEST_F(
   }
 }
 
+TEST_F(RadixSortSpillSectionsTest, oversizedRowGetsDedicatedBlock) {
+  auto payloadLayout =
+      PayloadRowLayout::create(ROW({"payload_string"}, {VARCHAR()}));
+  auto keyLayout = RadixSortKeyLayout::fromKind(
+      RadixSortKeyLayoutKind::kKeyWithPayloadFixed16);
+  RadixSortRunStorage storage(
+      pool_.get(), keyLayout, 1024, 64, payloadLayout, 1024, 2 << 20);
+  auto payload = makeRows(
+      {"payload_string"},
+      {makeStringVector(
+          {std::string(16, 'a'),
+           std::string(512, 'b'),
+           std::string(16, 'c')})});
+  PayloadRowBatch payloadBatch;
+  PayloadRowWriter{}.append(*payload, storage, payloadBatch);
+  for (vector_size_t row = 0; row < payload->size(); ++row) {
+    storage.append(fixed8Key(row + 1), payloadBatch.rowAt(row));
+  }
+
+  auto spill = spillSingleRun(
+      storage,
+      payloadLayout.get(),
+      common::CompressionKind_NONE,
+      /*writeBufferSize=*/kBlockHeaderSize + 128);
+  const auto blocks = readUncompressedBlocks(spill.file);
+  ASSERT_EQ(blocks.size(), 3);
+  EXPECT_EQ(blocks[0].header.rowCount, 1);
+  EXPECT_EQ(blocks[1].header.rowCount, 1);
+  EXPECT_EQ(blocks[2].header.rowCount, 1);
+  EXPECT_GT(blocks[1].header.uncompressedSize, 128);
+}
+
 TEST_F(RadixSortSpillSectionsTest, mixedInlineAndHeapVariableBlockRoundTrip) {
   const auto payload = makeRows(
       {"payload_bigint", "payload_double"},
@@ -2920,8 +3041,13 @@ TEST_F(
   for (uint8_t value = 1; value <= 3; ++value) {
     storage.append(fixed8Key(value));
   }
-  auto files =
-      spillRunFiles(storage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  const auto writeBufferSize = kBlockHeaderSize + keyLayout.width();
+  auto files = spillRunFiles(
+      storage,
+      nullptr,
+      /*maxFileSize=*/1,
+      /*outputStage=*/false,
+      writeBufferSize);
   ASSERT_EQ(files.size(), 3);
   std::vector<std::string> paths;
   for (const auto& file : files) {
@@ -2953,8 +3079,13 @@ TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamReadsSplitRunInOrder) {
     storage.append(fixed8Key(value));
   }
 
-  auto files =
-      spillRunFiles(storage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  const auto writeBufferSize = kBlockHeaderSize + keyLayout.width();
+  auto files = spillRunFiles(
+      storage,
+      nullptr,
+      /*maxFileSize=*/1,
+      /*outputStage=*/false,
+      writeBufferSize);
   ASSERT_GT(files.size(), 1);
   std::vector<std::string> filePaths;
   filePaths.reserve(files.size());
@@ -2999,8 +3130,13 @@ TEST_F(
     storage.append(fixed8Key(value));
   }
 
-  auto files =
-      spillRunFiles(storage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+  const auto writeBufferSize = kBlockHeaderSize + keyLayout.width();
+  auto files = spillRunFiles(
+      storage,
+      nullptr,
+      /*maxFileSize=*/1,
+      /*outputStage=*/false,
+      writeBufferSize);
   ASSERT_EQ(files.size(), 2);
   RadixSortConcatFilesSpillMergeStream stream(
       std::move(files),
@@ -3040,10 +3176,19 @@ TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamsMergeByLogicalRun) {
     evenStorage.append(fixed8Key(value));
   }
 
+  const auto writeBufferSize = kBlockHeaderSize + keyLayout.width();
   auto oddFiles = spillRunFiles(
-      oddStorage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+      oddStorage,
+      nullptr,
+      /*maxFileSize=*/1,
+      /*outputStage=*/false,
+      writeBufferSize);
   auto evenFiles = spillRunFiles(
-      evenStorage, nullptr, /*maxFileSize=*/1, /*outputStage=*/false);
+      evenStorage,
+      nullptr,
+      /*maxFileSize=*/1,
+      /*outputStage=*/false,
+      writeBufferSize);
   ASSERT_GT(oddFiles.size(), 1);
   ASSERT_GT(evenFiles.size(), 1);
 

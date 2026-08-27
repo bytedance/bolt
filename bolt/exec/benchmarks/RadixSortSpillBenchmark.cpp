@@ -38,6 +38,23 @@ DEFINE_string(
     "none",
     "Compression kind for radix sort spill benchmark: none, lz4, or zstd.");
 
+DEFINE_uint64(
+    bolt_benchmark_spill_max_file_size,
+    0,
+    "Max spill file size for radix sort spill benchmark. 0 keeps the default "
+    "unlimited SpillConfig behavior.");
+
+DEFINE_uint64(
+    bolt_benchmark_spill_write_buffer_size,
+    1 << 20,
+    "Write buffer size for both legacy and radix spill benchmark writers.");
+
+DEFINE_uint32(
+    bolt_benchmark_spill_runs,
+    1,
+    "Number of input-stage sorted runs to spill before adding the remaining "
+    "input. 1 keeps the default benchmark behavior.");
+
 namespace bytedance::bolt::exec::radixsort::benchmark {
 namespace {
 
@@ -55,8 +72,10 @@ struct Measurements {
   uint64_t spillUs{0};
   uint64_t finalizeUs{0};
   uint64_t outputUs{0};
+  uint64_t spillRuns{0};
   uint64_t spilledRows{0};
   uint64_t spilledBytes{0};
+  uint64_t spilledFiles{0};
   uint64_t spillWrites{0};
   uint64_t spillReadUs{0};
   uint64_t spillDecompressUs{0};
@@ -175,9 +194,9 @@ common::SpillConfig spillConfig(
       [directory]() -> const std::string& { return directory; },
       [&](uint64_t) {},
       prefix,
-      0,
+      FLAGS_bolt_benchmark_spill_max_file_size,
       false,
-      1 << 20,
+      FLAGS_bolt_benchmark_spill_write_buffer_size,
       nullptr,
       5,
       10,
@@ -192,6 +211,14 @@ common::SpillConfig spillConfig(
       rowBasedSpillMode);
 }
 
+uint32_t normalizedSpillRuns(uint32_t inputBatches) {
+  return std::max<uint32_t>(
+      1,
+      std::min<uint32_t>(
+          FLAGS_bolt_benchmark_spill_runs,
+          inputBatches == 0 ? 1 : inputBatches));
+}
+
 std::string legacyRowBasedSpillMode() {
   return FLAGS_spill_compression_kind == "none" ? "raw" : "compression";
 }
@@ -203,6 +230,10 @@ void validateSpillCompressionKind() {
           FLAGS_spill_compression_kind == "zstd",
       "Unsupported spill_compression_kind '{}'. Expected none, lz4, or zstd.",
       FLAGS_spill_compression_kind);
+  BOLT_CHECK_GT(
+      FLAGS_bolt_benchmark_spill_runs,
+      0,
+      "bolt_benchmark_spill_runs must be positive");
 }
 
 uint64_t elapsedUs(const std::chrono::steady_clock::time_point& begin) {
@@ -219,6 +250,41 @@ uint64_t drain(Buffer& buffer) {
     folly::doNotOptimizeAway(output);
   }
   return rows;
+}
+
+struct InputStageResult {
+  uint32_t split;
+  uint64_t addInputUs{0};
+  uint64_t spillUs{0};
+};
+
+template <typename Buffer>
+InputStageResult addAndSpillInputStage(
+    Buffer& buffer,
+    const std::vector<RowVectorPtr>& inputs,
+    uint32_t split,
+    uint32_t runs) {
+  BOLT_CHECK_GT(runs, 0);
+  BOLT_CHECK_GE(split, runs);
+  InputStageResult result{0, 0, 0};
+  uint32_t nextInput = 0;
+  for (uint32_t run = 0; run < runs; ++run) {
+    const auto end =
+        static_cast<uint32_t>((static_cast<uint64_t>(run + 1) * split) / runs);
+    BOLT_CHECK_GT(end, nextInput);
+    const auto addInputBegin = std::chrono::steady_clock::now();
+    for (; nextInput < end; ++nextInput) {
+      buffer.addInput(inputs[nextInput]);
+    }
+    const auto addInputUs = elapsedUs(addInputBegin);
+    const auto spillBegin = std::chrono::steady_clock::now();
+    buffer.spill();
+    const auto spillUs = elapsedUs(spillBegin);
+    result.addInputUs += addInputUs;
+    result.spillUs += spillUs;
+  }
+  result.split = nextInput;
+  return result;
 }
 
 void record(
@@ -239,8 +305,10 @@ void record(
   result.finalizeUs += finalizeUs;
   result.outputUs += outputUs;
   if (spillStats.has_value()) {
+    result.spillRuns += spillStats->spillRuns;
     result.spilledRows += spillStats->spilledRows;
     result.spilledBytes += spillStats->spilledBytes;
+    result.spilledFiles += spillStats->spilledFiles;
     result.spillWrites += spillStats->spillWrites;
   }
   if (spillReadStats.has_value()) {
@@ -273,17 +341,13 @@ void legacySpillE2E(unsigned iterations, uint32_t scenario) {
         &config);
 
     suspender.dismiss();
-    const auto addInputBegin = std::chrono::steady_clock::now();
     const auto split = spillInputSplit(scenario, fixture.inputs.size());
-    for (uint32_t index = 0; index < split; ++index) {
-      buffer.addInput(fixture.inputs[index]);
-    }
-    const auto addInputUs = elapsedUs(addInputBegin);
-    const auto spillBegin = std::chrono::steady_clock::now();
-    buffer.spill();
-    const auto spillUs = elapsedUs(spillBegin);
+    const auto runs = normalizedSpillRuns(split);
+    const auto inputStage =
+        addAndSpillInputStage(buffer, fixture.inputs, split, runs);
     const auto addAfterSpillBegin = std::chrono::steady_clock::now();
-    for (uint32_t index = split; index < fixture.inputs.size(); ++index) {
+    for (uint32_t index = inputStage.split; index < fixture.inputs.size();
+         ++index) {
       buffer.addInput(fixture.inputs[index]);
     }
     const auto addAfterSpillUs = elapsedUs(addAfterSpillBegin);
@@ -301,9 +365,9 @@ void legacySpillE2E(unsigned iterations, uint32_t scenario) {
         Implementation::kLegacy,
         buffer.spilledStats(),
         buffer.spillReadStats(),
-        addInputUs,
+        inputStage.addInputUs,
         addAfterSpillUs,
-        spillUs,
+        inputStage.spillUs,
         finalizeUs,
         outputUs);
   }
@@ -329,17 +393,13 @@ void radixSpillE2E(unsigned iterations, uint32_t scenario) {
         &config);
 
     suspender.dismiss();
-    const auto addInputBegin = std::chrono::steady_clock::now();
     const auto split = spillInputSplit(scenario, fixture.inputs.size());
-    for (uint32_t index = 0; index < split; ++index) {
-      buffer.addInput(fixture.inputs[index]);
-    }
-    const auto addInputUs = elapsedUs(addInputBegin);
-    const auto spillBegin = std::chrono::steady_clock::now();
-    buffer.spill();
-    const auto spillUs = elapsedUs(spillBegin);
+    const auto runs = normalizedSpillRuns(split);
+    const auto inputStage =
+        addAndSpillInputStage(buffer, fixture.inputs, split, runs);
     const auto addAfterSpillBegin = std::chrono::steady_clock::now();
-    for (uint32_t index = split; index < fixture.inputs.size(); ++index) {
+    for (uint32_t index = inputStage.split; index < fixture.inputs.size();
+         ++index) {
       buffer.addInput(fixture.inputs[index]);
     }
     const auto addAfterSpillUs = elapsedUs(addAfterSpillBegin);
@@ -357,9 +417,9 @@ void radixSpillE2E(unsigned iterations, uint32_t scenario) {
         Implementation::kRadix,
         buffer.spilledStats(),
         buffer.spillReadStats(),
-        addInputUs,
+        inputStage.addInputUs,
         addAfterSpillUs,
-        spillUs,
+        inputStage.spillUs,
         finalizeUs,
         outputUs);
   }
@@ -368,6 +428,12 @@ void radixSpillE2E(unsigned iterations, uint32_t scenario) {
 void printSummary() {
   std::printf(
       "\nRadix sort spill benchmark summary (input generation excluded)\n");
+  std::printf(
+      "Benchmark spill parameters: compressionKind=%s maxFileSize=%llu "
+      "inputStageRuns=%u\n",
+      FLAGS_spill_compression_kind.c_str(),
+      static_cast<unsigned long long>(FLAGS_bolt_benchmark_spill_max_file_size),
+      FLAGS_bolt_benchmark_spill_runs);
   std::printf("\nExecuted scenario schema shape\n");
   std::printf(
       "%-48s %10s %6s %8s %12s %12s %10s\n",
@@ -398,7 +464,7 @@ void printSummary() {
 
   std::printf("\nPer-implementation phase timings\n");
   std::printf(
-      "%-36s %-8s %10s %10s %10s %10s %10s %12s %10s\n",
+      "%-36s %-8s %10s %10s %10s %10s %10s %12s %8s %8s %10s\n",
       "scenario",
       "impl",
       "add1 ms",
@@ -407,6 +473,8 @@ void printSummary() {
       "final ms",
       "out ms",
       "spill MiB",
+      "runs",
+      "files",
       "writes");
   for (uint32_t scenario = 0; scenario < kBenchmarkScenarioSpecs.size();
        ++scenario) {
@@ -416,7 +484,7 @@ void printSummary() {
         continue;
       }
       std::printf(
-          "%-36s %-8s %10.2f %10.2f %10.2f %10.2f %10.2f %12.2f %10.2f\n",
+          "%-36s %-8s %10.2f %10.2f %10.2f %10.2f %10.2f %12.2f %8.2f %8.2f %10.2f\n",
           kBenchmarkScenarioSpecs[scenario].name,
           impl == 0 ? "legacy" : "radix",
           static_cast<double>(result.addBeforeSpillUs) / result.runs / 1000,
@@ -425,6 +493,8 @@ void printSummary() {
           static_cast<double>(result.finalizeUs) / result.runs / 1000,
           static_cast<double>(result.outputUs) / result.runs / 1000,
           averageMiB(result.spilledBytes, result.runs),
+          static_cast<double>(result.spillRuns) / result.runs,
+          static_cast<double>(result.spilledFiles) / result.runs,
           static_cast<double>(result.spillWrites) / result.runs);
     }
   }

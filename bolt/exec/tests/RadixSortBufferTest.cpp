@@ -315,14 +315,15 @@ class RadixSortBufferTest : public testing::Test {
       const std::string& directory,
       const std::string& compressionKind = "none",
       common::UpdateAndCheckSpillLimitCB spillLimit = [](uint64_t) {},
-      uint64_t maxFileSize = 0) const {
+      uint64_t maxFileSize = 0,
+      uint64_t writeBufferSize = 0) const {
     return common::SpillConfig(
         [directory]() -> const std::string& { return directory; },
         std::move(spillLimit),
         "radix-sort-buffer-spill",
         maxFileSize,
         false,
-        0,
+        writeBufferSize,
         nullptr,
         5,
         10,
@@ -347,13 +348,15 @@ class RadixSortBufferTest : public testing::Test {
         const std::string& compression = "none",
         uint64_t spillMemoryThreshold = 0,
         column_index_t keyChannel = 0,
-        uint64_t maxFileSize = 0)
+        uint64_t maxFileSize = 0,
+        uint64_t writeBufferSize = 0)
         : directory(exec::test::TempDirectoryPath::create()),
           config(test.spillConfig(
               directory->path,
               compression,
               [](uint64_t) {},
-              maxFileSize)),
+              maxFileSize,
+              writeBufferSize)),
           buffer(
               std::static_pointer_cast<const RowType>(input->type()),
               {keyChannel},
@@ -1448,6 +1451,91 @@ TEST_F(RadixSortBufferTest, outputStageSpillReplacesMultiStreamMerge) {
       {.prefixRows = 3, .expectedSpillRuns = kInputSpillRuns + 1});
 }
 
+TEST_F(RadixSortBufferTest, outputStageSpillKeepsSuffixReaderBuffers) {
+  constexpr vector_size_t kRowsPerRun = 4;
+  constexpr vector_size_t kRows = kRowsPerRun * 3;
+  constexpr uint64_t kWriteBufferSize = 48 + 384;
+  auto input = makeLargeStringKeyIdRows(
+      generate<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }));
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      /*maxFileSize=*/0,
+      kWriteBufferSize);
+  auto& buffer = spill.buffer;
+  addInputRuns(
+      buffer,
+      input,
+      {{kRowsPerRun, true}, {kRowsPerRun, true}, {kRowsPerRun, false}});
+  buffer.noMoreInput();
+
+  auto prefix = buffer.getOutput(1);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 1);
+  spillRemainingOutputAndCheckStats(buffer, kRows - prefix->size());
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_GT(buffer.spilledStats()->spillWrites, 1);
+
+  collectAndVerify(
+      buffer,
+      input,
+      /*batchSize=*/2,
+      /*idChannel=*/1,
+      /*keyChannel=*/0,
+      /*idBase=*/0,
+      prefix);
+}
+
+TEST_F(RadixSortBufferTest, outputStageSpillKeepsSuffixPayloadHeapBuffers) {
+  constexpr vector_size_t kRowsPerRun = 4;
+  constexpr vector_size_t kRows = kRowsPerRun * 3;
+  constexpr uint64_t kWriteBufferSize = 48 + 128;
+  std::vector<std::optional<int64_t>> keys;
+  std::vector<std::optional<std::string>> payloads;
+  keys.reserve(kRows);
+  payloads.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    keys.push_back(kRows - row);
+    payloads.push_back(
+        "payload_" + std::to_string(row) + "_" +
+        std::string(256 + row * 7, static_cast<char>('a' + row % 26)));
+  }
+  auto input = makeKeyPayloadIdRows(keys, payloads);
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      /*maxFileSize=*/0,
+      kWriteBufferSize);
+  auto& buffer = spill.buffer;
+  addInputRuns(
+      buffer,
+      input,
+      {{kRowsPerRun, true}, {kRowsPerRun, true}, {kRowsPerRun, false}});
+  buffer.noMoreInput();
+
+  auto prefix = buffer.getOutput(1);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 1);
+  spillRemainingOutputAndCheckStats(buffer, kRows - prefix->size());
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_GT(buffer.spilledStats()->spillWrites, 1);
+
+  collectAndVerify(
+      buffer,
+      input,
+      /*batchSize=*/2,
+      /*idChannel=*/2,
+      /*keyChannel=*/0,
+      /*idBase=*/0,
+      prefix);
+}
+
 TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
   constexpr vector_size_t kRows = 48;
   auto input = makeRows(
@@ -1678,7 +1766,7 @@ TEST_F(RadixSortBufferTest, reservationFailureTriggersSpillWithZeroThreshold) {
   auto inputType = ROW(std::move(names), std::move(types));
   inputType_ = inputType;
   auto rootPool = memory::memoryManager()->addRootPool(
-      "radix-sort-buffer-reservation-failure-root", 2 << 20);
+      "radix-sort-buffer-reservation-failure-root", 4 << 20);
   auto sortPool =
       rootPool->addLeafChild("radix-sort-buffer-reservation-failure");
   RadixSortBuffer buffer(

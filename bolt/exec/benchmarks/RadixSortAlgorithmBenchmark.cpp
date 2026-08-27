@@ -234,7 +234,7 @@ void radixRunSort(unsigned iterations, uint32_t scenarioIndex) {
     RadixSortRunStorage storage(
         sortPool.get(),
         layoutForWords(scenario.words),
-        RadixSortRunStorage::kDefaultKeysPerBlock,
+        RadixSortRunStorage::kTestingRowsPerBlock,
         64 * 1024);
     auto data = makeInput(scenario);
     appendToStorage(storage, data.data(), scenario);

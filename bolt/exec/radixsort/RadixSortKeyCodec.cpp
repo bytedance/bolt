@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <type_traits>
 
 #include "bolt/common/base/Exceptions.h"
@@ -1288,13 +1289,139 @@ uint64_t encodeFixedScalarArrayElements(
 #undef BOLT_ENCODE_ARRAY_FIXED_SCALAR
 }
 
+bool mapKeysAreSorted(const MapVector& map, vector_size_t row) {
+  const auto offset = map.offsetAt(row);
+  const auto count = map.sizeAt(row);
+  const auto& keys = *map.mapKeys();
+  for (vector_size_t index = 1; index < count; ++index) {
+    if (keys.compare(&keys, offset + index - 1, offset + index) >= 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+class MapKeyIndexScratch {
+ public:
+  MapKeyIndexScratch() {
+    cached_.reserve(kMaxCachedRows);
+  }
+
+  template <typename Func>
+  void withSortedIndices(const MapVector& map, vector_size_t row, Func&& func) {
+    const auto offset = map.offsetAt(row);
+    const auto count = map.sizeAt(row);
+    if (count == 0 || count == 1 || map.hasSortedKeys()) {
+      func(offset, count, nullptr);
+      return;
+    }
+
+    for (const auto& entry : cached_) {
+      if (entry.map == &map && entry.row == row) {
+        const auto* indices =
+            entry.indices.empty() ? nullptr : entry.indices.data();
+        func(entry.offset, entry.count, indices);
+        return;
+      }
+    }
+
+    if (mapKeysAreSorted(map, row)) {
+      cacheSortedRange(map, row, offset, count);
+      func(offset, count, nullptr);
+      return;
+    }
+
+    if (canCache(count)) {
+      auto& indices = cacheSortedIndices(map, row, count);
+      std::iota(indices.begin(), indices.end(), offset);
+      map.mapKeys()->sortIndices(indices, CompareFlags());
+      func(0, count, indices.data());
+      return;
+    }
+
+    auto& indices = acquireScratch();
+    auto guard = ScratchGuard(*this);
+    indices.resize(count);
+    std::iota(indices.begin(), indices.end(), offset);
+    map.mapKeys()->sortIndices(indices, CompareFlags());
+    func(0, count, indices.data());
+  }
+
+ private:
+  struct CacheEntry {
+    const MapVector* map;
+    vector_size_t row;
+    vector_size_t offset;
+    vector_size_t count;
+    std::vector<vector_size_t> indices;
+  };
+
+  class ScratchGuard {
+   public:
+    explicit ScratchGuard(MapKeyIndexScratch& scratch) : scratch_(scratch) {}
+
+    ~ScratchGuard() {
+      --scratch_.depth_;
+    }
+
+   private:
+    MapKeyIndexScratch& scratch_;
+  };
+
+  std::vector<vector_size_t>& acquireScratch() {
+    if (depth_ == scratch_.size()) {
+      scratch_.emplace_back();
+    }
+    return scratch_[depth_++];
+  }
+
+  bool canCache(size_t count) const {
+    if (cached_.empty()) {
+      return true;
+    }
+    return cached_.size() < kMaxCachedRows &&
+        cachedIndexCount_ + count <= kMaxCachedIndices;
+  }
+
+  std::vector<vector_size_t>& cacheSortedIndices(
+      const MapVector& map,
+      vector_size_t row,
+      vector_size_t count) {
+    cachedIndexCount_ += count;
+    cached_.push_back(CacheEntry{&map, row, 0, count, {}});
+    auto& indices = cached_.back().indices;
+    indices.resize(count);
+    return indices;
+  }
+
+  void cacheSortedRange(
+      const MapVector& map,
+      vector_size_t row,
+      vector_size_t offset,
+      vector_size_t count) {
+    if (!canCache(0)) {
+      return;
+    }
+    cached_.push_back(CacheEntry{&map, row, offset, count, {}});
+  }
+
+  static constexpr size_t kMaxCachedRows = 32;
+  static constexpr size_t kMaxCachedIndices = 1 << 20;
+
+  std::vector<std::vector<vector_size_t>> scratch_;
+  std::vector<CacheEntry> cached_;
+  size_t cachedIndexCount_{0};
+  size_t depth_{0};
+};
+
 void encodeValue(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t row,
     char* output,
     uint64_t /*outputSize*/,
-    uint64_t& written) {
+    uint64_t& written,
+    MapKeyIndexScratch& mapIndices) {
   const bool isNull = vector.isNullAt(row);
   output[0] = static_cast<char>(
       isNull ? nullMarker(column.flags) : validMarker(column.flags));
@@ -1320,7 +1447,8 @@ void encodeValue(
           wrappedRow,
           output + offset,
           0,
-          childWritten);
+          childWritten,
+          mapIndices);
       addWritten(offset, childWritten);
     }
     written = offset;
@@ -1346,7 +1474,8 @@ void encodeValue(
             arrayOffset + index,
             output + offset,
             0,
-            childWritten);
+            childWritten,
+            mapIndices);
         addWritten(offset, childWritten);
       }
     }
@@ -1358,35 +1487,46 @@ void encodeValue(
   } else if (column.type->kind() == TypeKind::MAP) {
     const auto* mapVector = vector.wrappedVector()->as<MapVector>();
     const auto wrappedRow = vector.wrappedIndex(row);
-    const auto indices = mapVector->sortedKeyIndices(wrappedRow);
     uint64_t offset = 1;
-    for (const auto index : indices) {
-      uint64_t childWritten;
-      encodeValue(
-          column.children[0],
-          *mapVector->mapKeys(),
-          index,
-          output + offset,
-          0,
-          childWritten);
-      addWritten(offset, childWritten);
-    }
     const auto delimiter = static_cast<char>(
         descending ? static_cast<uint8_t>(~kStringDelimiter)
                    : kStringDelimiter);
-    output[offset++] = delimiter;
-    for (const auto index : indices) {
-      uint64_t childWritten;
-      encodeValue(
-          column.children[1],
-          *mapVector->mapValues(),
-          index,
-          output + offset,
-          0,
-          childWritten);
-      addWritten(offset, childWritten);
-    }
-    output[offset++] = delimiter;
+    mapIndices.withSortedIndices(
+        *mapVector,
+        wrappedRow,
+        [&](vector_size_t first,
+            vector_size_t count,
+            const vector_size_t* indices) {
+          const auto indexAt = [&](vector_size_t entry) {
+            return indices == nullptr ? first + entry : indices[entry];
+          };
+          for (vector_size_t entry = 0; entry < count; ++entry) {
+            uint64_t childWritten;
+            encodeValue(
+                column.children[0],
+                *mapVector->mapKeys(),
+                indexAt(entry),
+                output + offset,
+                0,
+                childWritten,
+                mapIndices);
+            addWritten(offset, childWritten);
+          }
+          output[offset++] = delimiter;
+          for (vector_size_t entry = 0; entry < count; ++entry) {
+            uint64_t childWritten;
+            encodeValue(
+                column.children[1],
+                *mapVector->mapValues(),
+                indexAt(entry),
+                output + offset,
+                0,
+                childWritten,
+                mapIndices);
+            addWritten(offset, childWritten);
+          }
+          output[offset++] = delimiter;
+        });
     written = offset;
     return;
   } else if (column.type->isShortDecimal()) {
@@ -2029,6 +2169,7 @@ void encodeVariableColumn(
   }
 
   DecodedVector decoded(vector);
+  MapKeyIndexScratch mapIndices;
   for (vector_size_t row = 0; row < size; ++row) {
     const auto inputRow = source + row;
     auto* destination = output.current(row);
@@ -2044,7 +2185,8 @@ void encodeVariableColumn(
         decoded.index(inputRow),
         destination,
         0,
-        written);
+        written,
+        mapIndices);
     output.advance(row, written);
   }
 }
