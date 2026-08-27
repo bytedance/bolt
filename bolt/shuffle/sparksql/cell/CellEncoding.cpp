@@ -102,8 +102,9 @@ inline uint64_t loadLe(const uint8_t* in, uint32_t bytes) {
 
 } // namespace
 
-template <typename T>
-uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
+template <typename T, typename Count>
+FOLLY_ALWAYS_INLINE uint32_t
+encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
   const uint32_t sourceBytes = count * kWidth;
@@ -194,6 +195,19 @@ uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
       break;
   }
   return static_cast<uint32_t>(pos - out);
+}
+
+template <typename T>
+uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
+  return encodeBlockImpl(values, count, out);
+}
+
+template <typename T>
+uint32_t encodeBlockFull(const T* values, uint8_t* out) {
+  return encodeBlockImpl(
+      values,
+      std::integral_constant<uint32_t, kBlockSourceBytes / sizeof(T)>{},
+      out);
 }
 
 template <typename T>
@@ -316,6 +330,9 @@ bool decodeStream(
 template uint32_t encodeBlock<int16_t>(const int16_t*, uint32_t, uint8_t*);
 template uint32_t encodeBlock<int32_t>(const int32_t*, uint32_t, uint8_t*);
 template uint32_t encodeBlock<int64_t>(const int64_t*, uint32_t, uint8_t*);
+template uint32_t encodeBlockFull<int16_t>(const int16_t*, uint8_t*);
+template uint32_t encodeBlockFull<int32_t>(const int32_t*, uint8_t*);
+template uint32_t encodeBlockFull<int64_t>(const int64_t*, uint8_t*);
 template uint32_t
 decodeBlock<int16_t>(const uint8_t*, size_t, uint32_t, int16_t*);
 template uint32_t
