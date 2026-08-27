@@ -304,6 +304,11 @@ class BoltColumnarBatchDeserializerFactory {
       case 3:
         shuffleWriterType_ = ShuffleWriterType::RowBased;
         break;
+      case 4:
+        // Cell shuffles are read by cell::CellShuffleReader through the
+        // reader operator; this factory never sees their payloads.
+        shuffleWriterType_ = ShuffleWriterType::Cell;
+        break;
       default:
         BOLT_CHECK(
             false,
