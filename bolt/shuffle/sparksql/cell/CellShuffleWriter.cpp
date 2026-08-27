@@ -163,13 +163,36 @@ arrow::Status CellShuffleWriter::split(
   }
 
   bool anyNullable = false;
+  nullClass_.resize(layout_.numColumns());
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    decoded_[col].decode(*rv->childAt(col + 1));
-    // A constant-null column takes the whole-batch counting path in the
-    // front end and needs no per-row null indexes.
-    const bool constantNull =
-        decoded_[col].isConstantMapping() && decoded_[col].isNullAt(0);
-    anyNullable = anyNullable || (decoded_[col].mayHaveNulls() && !constantNull);
+    auto& decoded = decoded_[col];
+    decoded.decode(*rv->childAt(col + 1));
+    // Classify the batch's nulls up front: mayHaveNulls() only means a
+    // buffer exists, and defensively allocated all-set buffers are common.
+    // A word-level scan (~n/64 compares, early exit) is far cheaper than
+    // taxing every row of the loop with a bit test for absent nulls.
+    auto klass = BatchNullClass::kNoNulls;
+    if (decoded.mayHaveNulls()) {
+      if (decoded.isConstantMapping()) {
+        klass = decoded.isNullAt(0) ? BatchNullClass::kAllNull
+                                    : BatchNullClass::kNoNulls;
+      } else if (decoded.isIdentityMapping()) {
+        const uint64_t* nulls = decoded.nulls();
+        if (nulls == nullptr || bits::isAllSet(nulls, 0, numRows, true)) {
+          klass = BatchNullClass::kNoNulls; // stale buffer, no actual null
+        } else if (bits::isAllSet(nulls, 0, numRows, false)) {
+          klass = BatchNullClass::kAllNull;
+        } else {
+          klass = BatchNullClass::kSomeNulls;
+        }
+      } else {
+        // Wrapped nulls: take the per-row path rather than materializing
+        // a combined bitmap here.
+        klass = BatchNullClass::kSomeNulls;
+      }
+    }
+    nullClass_[col] = klass;
+    anyNullable = anyNullable || klass == BatchNullClass::kSomeNulls;
   }
   if (anyNullable) {
     // One shared pass gives every nullable column its per-partition row
@@ -185,6 +208,7 @@ arrow::Status CellShuffleWriter::split(
   batch.decoded = &decoded_;
   batch.row2Partition = row2Partition_.data();
   batch.partition2RowCount = partition2RowCount_.data();
+  batch.nullClass = nullClass_.data();
   batch.numRows = numRows;
   batch.rowIndexInPid = anyNullable ? rowIndexInPid_.data() : nullptr;
   batch.windowRowStart = windowRowStart_.data();
