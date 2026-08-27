@@ -246,15 +246,25 @@ TEST_F(CellWriterTest, reclaimMidStreamReleasesMemory) {
   std::mt19937 rng(13);
   std::vector<std::vector<int32_t>> pids;
   std::vector<RowVectorPtr> batches;
+  // Enough volume that the writer holds several chunks by the trigger
+  // point; a tiny writer legitimately declines to reclaim (anti-churn
+  // guard) and would make this test meaningless.
   for (int batch = 0; batch < 6; ++batch) {
-    const int n = 4096;
+    const int n = 8192;
     std::vector<int32_t> batchPids(n);
     for (int i = 0; i < n; ++i) {
       batchPids[i] = rng() % kPartitions;
     }
     auto values = makeFlatVector<int64_t>(
         n, [&](auto /*row*/) { return static_cast<int64_t>(rng()); });
-    batches.push_back(makeRowVector({"v"}, {values}));
+    std::vector<std::string> storage(n);
+    std::vector<std::optional<StringView>> views(n);
+    for (int i = 0; i < n; ++i) {
+      storage[i].assign(1024, static_cast<char>('a' + rng() % 26));
+      views[i] = StringView(storage[i]);
+    }
+    auto strings = makeNullableFlatVector<StringView>(views);
+    batches.push_back(makeRowVector({"v", "s"}, {values, strings}));
     pids.push_back(std::move(batchPids));
   }
 
