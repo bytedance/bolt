@@ -92,6 +92,18 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
+  // Mirror of the writer-side fallback gate: the cell writer is only ever
+  // used for hash/range partitioning, supported column types and
+  // non-composite plans, so the reader picks the cell chain exactly when
+  // the writer did.
+  useCellReader_ = shuffleWriterType_ == ShuffleWriterType::Cell &&
+      supportAdaptiveShuffleWriter(partitioning) &&
+      cell::CellLayout::isSupportedRowType(outputType_) &&
+      !operatorCtx_->driverCtx()
+           ->queryConfig()
+           .isHashAggregationCompositeOutputEnabled() &&
+      // The cell writer falls back to V1 on remote shuffles for now.
+      shuffleReaderOptions_.partitionWriterType == PartitionWriterType::kLocal;
 }
 
 void SparkShuffleReader::init() {
@@ -107,6 +119,25 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
   if (finished_) {
     return nullptr;
+  }
+
+  if (useCellReader_) {
+    if (!cellShuffleReader_) {
+      NanosecondTimer timer(&deserializerCreateTime_);
+      cellShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
+          readerStreamIterator_,
+          cell::CellLayout::create(outputType_),
+          codec_.get(),
+          arrowPool_.get(),
+          pool(),
+          batchSize_,
+          shuffleBatchByteSize_);
+    }
+    auto output = cellShuffleReader_->next();
+    if (!output) {
+      finished_ = true;
+    }
+    return output;
   }
 
   if (reuseBufferedInputStream_) {
@@ -202,6 +233,9 @@ void SparkShuffleReader::close() {
     columnBufferPool_->release();
   }
 
+  if (cellShuffleReader_) {
+    deserializeTime_ += cellShuffleReader_->decodeTimeNs();
+  }
   {
     auto stats = this->stats().rlock();
     readerStreamIterator_->updateMetrics(
