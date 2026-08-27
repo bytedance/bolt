@@ -68,6 +68,9 @@ target_link_libraries(
   bolt_columnar_payload_test
   PRIVATE
     bolt_columnar_payload_ref
+    # The engine side of the seam: IntegrationTest plugs the Cell shuffle
+    # decoder (and later its writer) into the conformance suite.
+    bolt_shuffle_spark_impl
     bolt_exec
     bolt_vector
     bolt_vector_test_lib
