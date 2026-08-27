@@ -87,8 +87,17 @@ template <typename T>
 VectorPtr makeFlatNullable(
     const std::vector<T>& values,
     int32_t nullPercent,
-    std::mt19937& rng) {
+    std::mt19937& rng,
+    bool defensiveNulls = false) {
   auto vector = makeFlat(values);
+  if (nullPercent == 0 && defensiveNulls) {
+    // An all-set buffer: mayHaveNulls() true, zero actual nulls.
+    auto nulls = AlignedBuffer::allocate<bool>(values.size(), leafPool());
+    ::memset(
+        nulls->template asMutable<uint8_t>(), 0xFF, (values.size() + 7) / 8);
+    vector->setNulls(nulls);
+    return vector;
+  }
   if (nullPercent == 0) {
     return vector;
   }
@@ -174,7 +183,8 @@ Scenario makeFixedScenario(
     int32_t numBatches = kBatches,
     const char* tag = "",
     int32_t nullPercent = 0,
-    bool addAllNullColumn = false) {
+    bool addAllNullColumn = false,
+    bool defensiveNulls = false) {
   std::mt19937 rng(17);
   Scenario scenario{
       "fixed4" + std::string(tag) + "_P" + std::to_string(numPartitions),
@@ -194,10 +204,10 @@ Scenario makeFixedScenario(
     std::vector<std::string> names{"id", "ts", "small", "rnd"};
     std::vector<VectorPtr> children{
         makePids(numPartitions, rng),
-        makeFlatNullable(ids, nullPercent, rng),
-        makeFlatNullable(timestamps, nullPercent, rng),
-        makeFlatNullable(smalls, nullPercent, rng),
-        makeFlatNullable(randoms, nullPercent, rng)};
+        makeFlatNullable(ids, nullPercent, rng, defensiveNulls),
+        makeFlatNullable(timestamps, nullPercent, rng, defensiveNulls),
+        makeFlatNullable(smalls, nullPercent, rng, defensiveNulls),
+        makeFlatNullable(randoms, nullPercent, rng, defensiveNulls)};
     if (addAllNullColumn) {
       names.push_back("dead");
       children.push_back(
@@ -249,6 +259,9 @@ const std::vector<Scenario>& scenarios() {
     // fixed4big plus one all-null constant column: its cost should be near
     // zero (whole-batch counted nulls, no bitmap, no values).
     s.push_back(makeFixedScenario(1024, 1024, "deadcolbig", 0, true));
+    // Stale nulls buffers on every column (all-set, zero actual nulls): the
+    // batch classification must keep the no-null row loop.
+    s.push_back(makeFixedScenario(1024, 1024, "stalenullsbig", 0, false, true));
     return s;
   }();
   return all;
@@ -352,6 +365,7 @@ CELL_SPLIT_BENCH(5, fixed4big_P4096)
 CELL_SPLIT_BENCH(6, fixed4nulls10big_P1024)
 CELL_SPLIT_BENCH(7, fixed4nulls40big_P1024)
 CELL_SPLIT_BENCH(8, fixed4deadcolbig_P1024)
+CELL_SPLIT_BENCH(9, fixed4stalenullsbig_P1024)
 
 } // namespace
 
