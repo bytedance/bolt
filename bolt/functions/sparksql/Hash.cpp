@@ -35,6 +35,9 @@
 #include <type/Type.h>
 #include <vector/ComplexVector.h>
 #include <cstdint>
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
+#include <arm_sve.h>
+#endif
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/expression/DecodedArgs.h"
@@ -60,7 +63,57 @@ void applyWithType(
   SeedType hashSeed = seed ? *seed : kDefaultSeed;
 
   auto& result = *resultRef->as<FlatVector<ReturnType>>();
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
+  ReturnType* rawValues = result.mutableRawValues();
+  const auto begin = rows.begin();
+  const auto end = rows.end();
+
+  if (rows.isAllSelected()) {
+    VELOX_DCHECK_LT(end - 1, result.size());
+    vector_size_t row = begin;
+    result.mutableNulls(end);
+    uint64_t* nulls = result.nulls()->template asMutable<uint64_t>();
+    size_t numWords = bits::nwords(end);
+    std::fill(nulls, nulls + numWords, UINT64_MAX);
+    if constexpr (std::is_same_v<SeedType, int32_t>) {
+      svbool_t pg = svptrue_b32();
+      svuint32_t hashSeedVec = svdup_u32(static_cast<uint32_t>(hashSeed));
+      for (; row + 8 <= end; row += 8) {
+        svst1_u32(
+            pg, reinterpret_cast<uint32_t*>(&rawValues[row]), hashSeedVec);
+      }
+      if (row < end) {
+        svbool_t pg = svwhilelt_b32(
+            static_cast<uint32_t>(row), static_cast<uint32_t>(end));
+        svst1_u32(
+            pg, reinterpret_cast<uint32_t*>(&rawValues[row]), hashSeedVec);
+      }
+    } else if constexpr (std::is_same_v<SeedType, int64_t>) {
+      svbool_t pg = svptrue_b64();
+      svuint64_t hashSeedVec = svdup_u64(static_cast<uint64_t>(hashSeed));
+      for (; row + 4 <= end; row += 4) {
+        svst1_u64(
+            pg, reinterpret_cast<uint64_t*>(&rawValues[row]), hashSeedVec);
+      }
+      if (row < end) {
+        svbool_t pg = svwhilelt_b64(
+            static_cast<uint64_t>(row), static_cast<uint64_t>(end));
+        svst1_u64(
+            pg, reinterpret_cast<uint64_t*>(&rawValues[row]), hashSeedVec);
+      }
+    } else {
+      for (; row < end; ++row) {
+        rawValues[row] = hashSeed;
+        result.nullSet(row);
+      }
+    }
+  } else {
+    auto func = [&](vector_size_t row) { result.set(row, hashSeed); };
+    bits::forEachSetBit(rows.allBits(), begin, end, func);
+  }
+#else
   rows.applyToSelected([&](int row) { result.set(row, hashSeed); });
+#endif
 
   exec::LocalSelectivityVector selectedMinusNulls(context);
 
@@ -227,12 +280,15 @@ typename VectorValueType<kind>::type getValueFromFlatVector(
 }
 
 template <TypeKind kind>
-constexpr bool isIntegerType = (kind == TypeKind::BOOLEAN) ||
-    (kind == TypeKind::TINYINT) || (kind == TypeKind::SMALLINT) ||
+constexpr bool isIntegerType =
+    (kind == TypeKind::BOOLEAN) ||
+    (kind == TypeKind::TINYINT) ||
+    (kind == TypeKind::SMALLINT) ||
     (kind == TypeKind::INTEGER);
 
 template <TypeKind kind>
-constexpr bool isStringType = (kind == TypeKind::VARCHAR) ||
+constexpr bool isStringType =
+    (kind == TypeKind::VARCHAR) ||
     (kind == TypeKind::VARBINARY);
 
 class MurMur3HashBase {
