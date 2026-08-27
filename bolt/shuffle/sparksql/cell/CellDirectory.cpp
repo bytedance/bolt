@@ -182,7 +182,8 @@ NullCells::NullCells(
       numColumns_(numColumns),
       base_(numPartitions, nullptr),
       capBytes_(numPartitions, 0),
-      hasNull_(static_cast<size_t>(numPartitions) * numColumns, 0) {}
+      hasNull_(static_cast<size_t>(numPartitions) * numColumns, 0),
+      nullPrefix_(static_cast<size_t>(numPartitions) * numColumns, 0) {}
 
 NullCells::~NullCells() {
   reset();
@@ -217,30 +218,54 @@ NullCells::Summary NullCells::summarize(
     uint32_t pid,
     uint32_t col,
     uint32_t rowCount) const {
-  if (rowCount == 0 ||
-      hasNull_[static_cast<size_t>(pid) * numColumns_ + col] == 0) {
+  const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
+  if (rowCount == 0 || hasNull_[slot] == 0) {
     return {NullTag::kNoNull, rowCount};
   }
+  const uint32_t prefix = std::min(nullPrefix_[slot], rowCount);
+  if (prefix == rowCount) {
+    return {NullTag::kAllNull, 0}; // pure counting, no storage was touched
+  }
+  uint32_t nonNull = rowCount - prefix;
   const uint32_t cap = capBytes_[pid];
-  const char* bits = base_[pid] + static_cast<size_t>(col) * cap;
-  // Count non-null (set) bits over the first rowCount rows; rows past the
-  // allocated capacity are implicitly non-null.
-  const uint32_t coveredRows = std::min<uint64_t>(rowCount, uint64_t(cap) * 8);
-  uint32_t nonNull = rowCount - coveredRows;
-  uint32_t i = 0;
-  for (; i + 8 <= (coveredRows >> 3); i += 8) {
-    uint64_t word;
-    ::memcpy(&word, bits + i, 8);
-    nonNull += static_cast<uint32_t>(__builtin_popcountll(word));
-  }
-  for (; i < (coveredRows >> 3); ++i) {
-    nonNull += static_cast<uint32_t>(
-        __builtin_popcount(static_cast<uint8_t>(bits[i])));
-  }
-  if ((coveredRows & 7) != 0) {
-    const uint8_t mask = static_cast<uint8_t>((1u << (coveredRows & 7)) - 1);
-    nonNull += static_cast<uint32_t>(
-        __builtin_popcount(static_cast<uint8_t>(bits[i]) & mask));
+  if (base_[pid] != nullptr) {
+    const auto* bits = reinterpret_cast<const uint8_t*>(
+        base_[pid] + static_cast<size_t>(col) * cap);
+    // Count set (non-null) bits in [prefix, coveredRows); rows past the
+    // allocated capacity are implicitly non-null. Bits below the prefix are
+    // untouched defaults, so counting from the prefix is exact.
+    const uint32_t coveredRows =
+        std::min<uint64_t>(rowCount, uint64_t(cap) * 8);
+    if (prefix < coveredRows) {
+      uint32_t setBits = 0;
+      uint32_t byte = prefix >> 3;
+      const uint32_t lastByte = (coveredRows - 1) >> 3;
+      uint8_t first = bits[byte] &
+          static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
+      if (byte == lastByte) {
+        if ((coveredRows & 7) != 0) {
+          first &= static_cast<uint8_t>((1u << (coveredRows & 7)) - 1);
+        }
+        setBits = __builtin_popcount(first);
+      } else {
+        setBits = __builtin_popcount(first);
+        ++byte;
+        for (; byte + 8 <= lastByte; byte += 8) {
+          uint64_t word;
+          ::memcpy(&word, bits + byte, 8);
+          setBits += static_cast<uint32_t>(__builtin_popcountll(word));
+        }
+        for (; byte < lastByte; ++byte) {
+          setBits += __builtin_popcount(bits[byte]);
+        }
+        uint8_t last = bits[lastByte];
+        if ((coveredRows & 7) != 0) {
+          last &= static_cast<uint8_t>((1u << (coveredRows & 7)) - 1);
+        }
+        setBits += __builtin_popcount(last);
+      }
+      nonNull = (rowCount - coveredRows) + setBits;
+    }
   }
   if (nonNull == 0) {
     return {NullTag::kAllNull, 0};
@@ -258,12 +283,20 @@ void NullCells::emitBitmap(
     uint8_t* out) const {
   const uint32_t outBytes = (rowCount + 7) >> 3;
   const uint32_t cap = capBytes_[pid];
-  const uint32_t covered = std::min(outBytes, cap);
+  const uint32_t covered =
+      base_[pid] == nullptr ? 0 : std::min(outBytes, cap);
   if (covered > 0) {
     ::memcpy(out, base_[pid] + static_cast<size_t>(col) * cap, covered);
   }
   if (covered < outBytes) {
     ::memset(out + covered, 0xFF, outBytes - covered);
+  }
+  // The counted null prefix is not in the storage: overlay it as zeros.
+  const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
+  const uint32_t prefix = std::min(nullPrefix_[slot], rowCount);
+  ::memset(out, 0, prefix >> 3);
+  if ((prefix & 7) != 0) {
+    out[prefix >> 3] &= static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
   }
   if ((rowCount & 7) != 0) {
     // Unused bits of the last byte must be zero (spec section 4.2).
@@ -281,6 +314,7 @@ void NullCells::reset() {
     }
   }
   std::fill(hasNull_.begin(), hasNull_.end(), 0);
+  std::fill(nullPrefix_.begin(), nullPrefix_.end(), 0);
   allocatedBytes_ = 0;
 }
 
@@ -293,6 +327,10 @@ void NullCells::releasePartition(uint32_t pid) {
   }
   std::fill_n(hasNull_.begin() + static_cast<size_t>(pid) * numColumns_,
               numColumns_, 0);
+  std::fill_n(
+      nullPrefix_.begin() + static_cast<size_t>(pid) * numColumns_,
+      numColumns_,
+      0);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
