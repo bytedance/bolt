@@ -73,35 +73,15 @@ void applyDecimalScaleMultiplier(const VectorPtr& result, T multiplier) {
 }
 
 void rescaleDecimalValues(
-    const TypePtr& fileType,
     const TypePtr& requestedType,
-    const VectorPtr& result) {
-  BOLT_CHECK(fileType->isDecimal());
-  BOLT_CHECK(requestedType->isDecimal());
-
-  const auto fileScale = getDecimalPrecisionScale(*fileType).second;
-  const auto requestedScale = getDecimalPrecisionScale(*requestedType).second;
-  const auto scaleAdjust = requestedScale - fileScale;
-  BOLT_USER_CHECK_GE(
-      scaleAdjust,
-      0,
-      "Parquet does not support decimal scale narrowing: {}",
-      scaleAdjust);
-  BOLT_USER_CHECK_LE(
-      scaleAdjust,
-      LongDecimalType::kMaxPrecision,
-      "Decimal scale adjustment exceeds max precision: {}",
-      scaleAdjust);
-
-  // Schema validation guarantees enough target precision for scale widening.
-  if (scaleAdjust > 0) {
-    if (requestedType->isShortDecimal()) {
-      applyDecimalScaleMultiplier<int64_t>(
-          result, static_cast<int64_t>(DecimalUtil::kPowersOfTen[scaleAdjust]));
-    } else {
-      applyDecimalScaleMultiplier<int128_t>(
-          result, DecimalUtil::kPowersOfTen[scaleAdjust]);
-    }
+    const VectorPtr& result,
+    int32_t scaleAdjust) {
+  if (requestedType->isShortDecimal()) {
+    applyDecimalScaleMultiplier<int64_t>(
+        result, static_cast<int64_t>(DecimalUtil::kPowersOfTen[scaleAdjust]));
+  } else {
+    applyDecimalScaleMultiplier<int128_t>(
+        result, DecimalUtil::kPowersOfTen[scaleAdjust]);
   }
 }
 
@@ -133,8 +113,15 @@ void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
     getIntValues(rows, requestedType, result);
   }
 
-  if (fileType.type()->isDecimal() && requestedType->isDecimal() && !allNull_) {
-    rescaleDecimalValues(fileType.type(), requestedType, *result);
+  if (!allNull_ && fileType.type()->isDecimal() && requestedType->isDecimal()) {
+    const auto fileScale = getDecimalPrecisionScale(*fileType.type()).second;
+    const auto requestedScale = getDecimalPrecisionScale(*requestedType).second;
+
+    // Schema validation rejects scale narrowing and guarantees enough target
+    // precision for scale widening.
+    if (fileScale < requestedScale) {
+      rescaleDecimalValues(requestedType, *result, requestedScale - fileScale);
+    }
   }
 
   if (needConvertion) {
