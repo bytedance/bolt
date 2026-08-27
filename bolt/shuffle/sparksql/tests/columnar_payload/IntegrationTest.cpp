@@ -59,6 +59,8 @@
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/cell/CellEncoding.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
@@ -101,10 +103,12 @@ class SuiteDecompressor : public cell::CellDecompressor {
 /// accidentally correct ones.
 using EngineCodec = MaskCodec;
 
-/// The engine's Writer, as the suite sees it.
+/// The engine's Writer, as the suite sees it: a real CellShuffleWriter run
+/// with a single partition, its data file read back as the payload.
 class EngineWriter : public PayloadWriter {
  public:
-  explicit EngineWriter(Codec& codec) : codec_(codec) {}
+  EngineWriter(Codec& codec, memory::MemoryPool* pool)
+      : codec_(codec), pool_(pool) {}
 
   const char* name() const override {
     return "engine";
@@ -114,33 +118,111 @@ class EngineWriter : public PayloadWriter {
     return codec_;
   }
 
-  /// Narrow this while types are still being implemented. A shape declined
-  /// here is counted as skipped rather than failed, which is what makes the
-  /// suite usable from the first day rather than the last.
   bool supports(const RowTypePtr& rowType) const override {
-    (void)rowType;
-    return true;
+    return cell::CellLayout::isSupportedRowType(rowType);
   }
 
   bool write(
       const RowVectorPtr& input,
       std::vector<uint8_t>& out,
       std::string& error) override {
-    // TODO(writer): drive the engine's Writer over `input` and hand back the
-    // single payload it produced.
-    //
-    // Partitioning stays on this side of the line. The format says nothing
-    // about how rows are distributed, so the suite deliberately knows nothing
-    // about it either; configure a single partition here, or take one
-    // partition's payload back out.
-    (void)input;
-    (void)out;
-    error = "the engine Writer is not implemented yet";
-    return false;
+    try {
+      if (input->size() == 0) {
+        // The production writer emits nothing for an empty partition; the
+        // canonical empty payload stands in for the suite (spec section 9).
+        writeEmptyPayload(input, out);
+        return true;
+      }
+      // Prepend the pid column the shuffle writer expects: one partition.
+      auto pids = std::make_shared<FlatVector<int32_t>>(
+          pool_,
+          INTEGER(),
+          nullptr,
+          input->size(),
+          AlignedBuffer::allocate<int32_t>(input->size(), pool_, 0),
+          std::vector<BufferPtr>{});
+      const auto& inRow = input->type()->asRow();
+      std::vector<std::string> names{"pid"};
+      std::vector<TypePtr> types{INTEGER()};
+      std::vector<VectorPtr> children{pids};
+      for (uint32_t i = 0; i < inRow.size(); ++i) {
+        names.push_back(inRow.nameOf(i));
+        types.push_back(inRow.childAt(i));
+        children.push_back(input->childAt(i));
+      }
+      auto withPid = std::make_shared<RowVector>(
+          pool_,
+          ROW(std::move(names), std::move(types)),
+          BufferPtr(nullptr),
+          input->size(),
+          std::move(children));
+
+      char pathTemplate[] = "/tmp/bolt_cell_writer_XXXXXX";
+      const int fd = ::mkstemp(pathTemplate);
+      if (fd < 0) {
+        error = "mkstemp failed";
+        return false;
+      }
+      ::close(fd);
+      const std::string dataFile = pathTemplate;
+
+      ShuffleWriterOptions options;
+      options.partitioning = Partitioning::kHash;
+      options.partitionWriterOptions.numPartitions = 1;
+      options.partitionWriterOptions.dataFile = dataFile;
+      cell::CellShuffleWriter writer(
+          options, pool_, arrow::default_memory_pool());
+      auto status = writer.split(withPid, 0);
+      if (status.ok()) {
+        status = writer.stop();
+      }
+      if (!status.ok()) {
+        ::unlink(dataFile.c_str());
+        error = status.ToString();
+        return false;
+      }
+
+      std::FILE* file = ::fopen(dataFile.c_str(), "rb");
+      if (file == nullptr) {
+        error = "failed to reopen the data file";
+        return false;
+      }
+      ::fseek(file, 0, SEEK_END);
+      out.resize(::ftell(file));
+      ::fseek(file, 0, SEEK_SET);
+      const auto read = ::fread(out.data(), 1, out.size(), file);
+      ::fclose(file);
+      ::unlink(dataFile.c_str());
+      ::unlink((dataFile + ".cellspill").c_str());
+      if (read != out.size()) {
+        error = "failed to read the data file back";
+        return false;
+      }
+      return true;
+    } catch (const std::exception& e) {
+      error = e.what();
+      return false;
+    }
   }
 
  private:
+  void writeEmptyPayload(const RowVectorPtr& input, std::vector<uint8_t>& out) {
+    const uint32_t numColumns = input->type()->size();
+    const uint32_t tagBytes = cell::nullTagBytes(numColumns);
+    out.assign(cell::kPayloadFixedHeaderBytes, 0);
+    // row_count, run_count, variable_size stay zero.
+    const uint32_t nullStored = tagBytes;
+    ::memcpy(out.data() + 16, &nullStored, 4);
+    std::vector<uint8_t> tags(tagBytes, 0);
+    for (uint32_t col = 0; col < numColumns; ++col) {
+      cell::setNullTag(tags.data(), col, cell::NullTag::kNoNull);
+    }
+    out.insert(out.end(), tags.begin(), tags.end());
+    out.insert(out.end(), (numColumns + 7) / 8, 0); // encoding tags
+  }
+
   Codec& codec_;
+  memory::MemoryPool* pool_;
 };
 
 /// The engine's Reader, as the suite sees it: the Cell shuffle payload
@@ -280,9 +362,9 @@ class ColumnarPayloadIntegrationTest : public testing::Test,
 /// in supports(), which counts them as skipped rather than failed.
 TEST_F(
     ColumnarPayloadIntegrationTest,
-    DISABLED_engineWriterAgainstReferenceReader) {
+    engineWriterAgainstReferenceReader) {
   EngineCodec codec;
-  EngineWriter writer{codec};
+  EngineWriter writer{codec, pool()};
   auto reader = makeReferenceReader(codec, pool());
 
   const auto report = runConformanceSuite(writer, *reader, pool());
@@ -326,9 +408,9 @@ TEST_F(ColumnarPayloadIntegrationTest, engineReaderOnEveryEncoding) {
 /// above pass.
 TEST_F(
     ColumnarPayloadIntegrationTest,
-    DISABLED_engineWriterAgainstEngineReader) {
+    engineWriterAgainstEngineReader) {
   EngineCodec codec;
-  EngineWriter writer{codec};
+  EngineWriter writer{codec, pool()};
   EngineReader reader{codec, pool()};
 
   const auto report = runConformanceSuite(writer, reader, pool());
@@ -386,21 +468,18 @@ TEST_F(ColumnarPayloadIntegrationTest, plainOptionsEmitOnlyPlainBlocks) {
 /// them filled in: the form stays valid while nobody is using it.
 TEST_F(ColumnarPayloadIntegrationTest, adaptersCompileAndReportThemselves) {
   EngineCodec codec;
-  EngineWriter writer{codec};
+  EngineWriter writer{codec, pool()};
   EngineReader reader{codec, pool()};
 
   EXPECT_STREQ(writer.name(), "engine");
   EXPECT_STREQ(reader.name(), "engine");
   EXPECT_STREQ(writer.codec().name(), reader.codec().name());
 
-  // Until the bodies are filled in they must fail rather than quietly claim
-  // success, so that enabling a test above cannot pass by accident.
-  std::vector<uint8_t> payload;
+  // Both bodies are implemented now: garbage in must still fail loudly
+  // rather than decode into something.
+  std::vector<uint8_t> payload{0x00, 0x01, 0x02};
   std::string error;
   const auto rowType = ROW({"c0"}, {BIGINT()});
-  EXPECT_FALSE(writer.write(nullptr, payload, error));
-  EXPECT_FALSE(error.empty());
-
   RowVectorPtr decoded;
   EXPECT_FALSE(reader.read(payload, rowType, decoded, error));
   EXPECT_FALSE(error.empty());

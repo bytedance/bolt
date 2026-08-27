@@ -82,7 +82,36 @@ static constexpr bool kDefaultReuseColumnBuffer = false;
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
 
-enum class ShuffleWriterType { Adaptive = 0, V1 = 1, V2 = 2, RowBased = 3 };
+enum class ShuffleWriterType {
+  Adaptive = 0,
+  V1 = 1,
+  V2 = 2,
+  RowBased = 3,
+  Cell = 4
+};
+
+// CellShuffleWriter knobs. Memory decisions are made purely from the pool
+// and these values; the legacy memLimit plays no part.
+struct CellShuffleOptions {
+  // Unit of real allocation and return; matches the pool's reservation
+  // quantum. Power of two.
+  int32_t chunkBytes = 4 << 20;
+  // Lower bound of the adaptive DataCell size. Power of two.
+  int32_t minDataCellBytes = 256;
+  // Sizing budget for the cell size formula; 0 derives it from the pool's
+  // max capacity. A sizing hint, not a reservation.
+  int64_t cellMemoryBudgetBytes = 0;
+  // Optional hard self-cap on chunk memory; 0 disables it.
+  int64_t cellMemoryCapBytes = 0;
+  // A partition whose window exceeds this many appended bytes closes the
+  // window at the next batch boundary (reader-side payload bound).
+  int64_t checkpointPartitionBytes = 40LL << 20;
+  // Null bitmap memory that forces a window close.
+  int64_t nullMemLimitBytes = 16LL << 20;
+  // Rows per partition per window bound; keeps payloads under the reader's
+  // row-count sanity limit.
+  uint32_t maxWindowRows = 1u << 22;
+};
 
 enum PartitionWriterType { kLocal, kCeleborn };
 
@@ -195,6 +224,7 @@ struct ShuffleWriterOptions {
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
+  CellShuffleOptions cellOptions{};
   PartitionWriterOptions partitionWriterOptions{};
 
   /// Returns the options in a human readable form.
@@ -204,6 +234,8 @@ struct ShuffleWriterOptions {
 struct ShuffleWriterMetrics {
   int64_t totalInputRowNumber{0};
   int64_t totalInputBatches{0};
+  // CellShuffleWriter: sealed checkpoint windows.
+  int64_t spillCount{0};
   int64_t totalBytesWritten{0};
   int64_t totalBytesEvicted{0};
   int64_t totalWriteTime{0};

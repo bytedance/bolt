@@ -36,6 +36,9 @@ bolt_add_library(
   cell/CellDirectory.cpp
   cell/CellEncoding.cpp
   cell/CellPayload.cpp
+  cell/CachedCellFrontend.cpp
+  cell/CellShuffleWriter.cpp
+  cell/LocalCellOutput.cpp
   cell/CellTypes.cpp
   cell/ChunkAllocator.cpp
   compression/Compression.cpp

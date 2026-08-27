@@ -48,10 +48,7 @@ DataCells::~DataCells() {
   }
 }
 
-uint32_t DataCells::appendCell(
-    ChainInfo& info,
-    const ChunkAllocator::GrowCallback& beforeGrow) {
-  const uint32_t id = allocator_->allocCell(beforeGrow);
+void DataCells::linkCell(ChainInfo& info, uint32_t id) {
   if (FOLLY_UNLIKELY(id >= nextCapacity_)) {
     const uint32_t newCapacity = allocator_->cellIdCapacity();
     BOLT_CHECK_LT(id, newCapacity);
@@ -75,7 +72,6 @@ uint32_t DataCells::appendCell(
   info.lastCell = id;
   info.tailUsed = 0;
   ++info.numCells;
-  return id;
 }
 
 void DataCells::append(
@@ -84,13 +80,43 @@ void DataCells::append(
     const void* data,
     uint32_t bytes,
     const ChunkAllocator::GrowCallback& beforeGrow) {
-  auto& info = infos_[chainIndex(pid, stream)];
+  if (bytes == 0) {
+    return;
+  }
   const uint32_t cellBytes = allocator_->cellBytes();
+  // Phase 1: allocate every cell this append could need, before touching the
+  // chain or copying a byte. beforeGrow (or pool arbitration inside a chunk
+  // grow) may spill and release all chains here; the held ids are unlinked
+  // and survive. One spare covers the tail the spill may have taken away.
+  const uint32_t maxNeeded = bytes / cellBytes + 2;
+  uint32_t held[2];
+  std::vector<uint32_t> heldOverflow;
+  uint32_t heldCount = 0;
+  const auto holdCell = [&](uint32_t id) {
+    if (heldCount < 2) {
+      held[heldCount] = id;
+    } else {
+      heldOverflow.push_back(id);
+    }
+    ++heldCount;
+  };
+  for (uint32_t i = 0; i < maxNeeded; ++i) {
+    holdCell(allocator_->allocCell(beforeGrow));
+  }
+  const auto heldAt = [&](uint32_t i) {
+    return i < 2 ? held[i] : heldOverflow[i - 2];
+  };
+
+  // Phase 2: re-read the chain (a spill may have emptied it), link held
+  // cells as needed, copy, and recycle the surplus.
+  auto& info = infos_[chainIndex(pid, stream)];
   const char* src = reinterpret_cast<const char*>(data);
   totalBytes_ += bytes;
+  uint32_t nextHeld = 0;
   while (bytes > 0) {
     if (info.numCells == 0 || info.tailUsed == cellBytes) {
-      appendCell(info, beforeGrow);
+      const uint32_t id = heldAt(nextHeld++);
+      linkCell(info, id);
     }
     const uint32_t space = cellBytes - info.tailUsed;
     const uint32_t copy = bytes < space ? bytes : space;
@@ -98,6 +124,15 @@ void DataCells::append(
     info.tailUsed += copy;
     src += copy;
     bytes -= copy;
+  }
+  for (uint32_t i = nextHeld; i < heldCount; ++i) {
+    allocator_->recycle(heldAt(i));
+  }
+}
+
+void DataCells::releaseAll() {
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    releasePartition(pid);
   }
 }
 
