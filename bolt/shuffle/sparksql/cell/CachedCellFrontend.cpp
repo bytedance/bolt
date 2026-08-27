@@ -52,9 +52,11 @@ void CachedCellFrontend::flushEncoded(
     uint32_t pid,
     uint8_t* cur) {
   uint8_t block[kMaxBlockBytes];
-  const uint32_t count = cur[pid] / sizeof(T);
-  const uint32_t bytes = encodeBlock(
-      reinterpret_cast<const T*>(cacheLine(stream, pid)), count, block);
+  const auto* line = reinterpret_cast<const T*>(cacheLine(stream, pid));
+  // The hot loop only flushes full lines; tails happen once per window.
+  const uint32_t bytes = cur[pid] == kBlockSourceBytes
+      ? encodeBlockFull<T>(line, block)
+      : encodeBlock<T>(line, cur[pid] / sizeof(T), block);
   cells_->append(pid, stream, block, bytes, beforeGrow_);
   bumpPartitionBytes(pid, bytes);
   cur[pid] = 0;
