@@ -37,15 +37,20 @@ inline uint32_t narrowBytesFor(int64_t value, uint32_t maxBytes) {
   return bytes < maxBytes ? bytes : maxBytes;
 }
 
-/// Packs `count` masked values, `bits` wide each (1..63), LSB-first into
-/// out. Writes ceil(count * bits / 8) bytes; trailing bits stay zero.
-/// `get(i)` returns the already-masked low bits of value i.
-template <typename Get>
-inline uint8_t* packBits(uint32_t count, uint32_t bits, const Get& get, uint8_t* out) {
+/// Packs `count` staged values, `bits` wide each (1..63), LSB-first into
+/// out. Writes ceil(count * bits / 8) bytes; trailing bits stay zero. The
+/// staging split is deliberate: masking / delta subtraction is data-parallel
+/// and auto-vectorizes, while this bit-stitch is a serial dependency chain
+/// the compiler can only unroll.
+inline uint8_t* packBits(
+    const uint64_t* staged,
+    uint32_t count,
+    uint32_t bits,
+    uint8_t* out) {
   uint64_t acc = 0;
   uint32_t accBits = 0;
   for (uint32_t i = 0; i < count; ++i) {
-    const uint64_t v = get(i);
+    const uint64_t v = staged[i];
     acc |= v << accBits;
     accBits += bits;
     if (accBits >= 64) {
@@ -109,15 +114,16 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
   const uint32_t sourceBytes = count * kWidth;
 
+  // Two independent reductions vectorize; the equality test folds into
+  // them (all values equal iff min == max).
   T minValue = values[0];
   T maxValue = values[0];
-  bool allEqual = true;
   for (uint32_t i = 1; i < count; ++i) {
     const T value = values[i];
     minValue = value < minValue ? value : minValue;
     maxValue = value > maxValue ? value : maxValue;
-    allEqual = allEqual && value == values[0];
   }
+  const bool allEqual = minValue == maxValue;
 
   // Candidate body sizes (spec section 7.3); selection mirrors the reference
   // encoder: strict improvement in PLAIN, CONST, BIT_PACK, FOR order.
@@ -163,13 +169,11 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
     case EncodingKind::kBitPack: {
       *pos++ = makeEncodingByte(EncodingKind::kBitPack, bitWidth);
       const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
-      pos = packBits(
-          count,
-          bitWidth,
-          [&](uint32_t i) {
-            return static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
-          },
-          pos);
+      uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
+      for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
+        staged[i] = static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
+      }
+      pos = packBits(staged, count, bitWidth, pos);
       break;
     }
     case EncodingKind::kForBitPack: {
@@ -178,13 +182,11 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       pos += kWidth;
       if (deltaBits > 0) {
         const uint64_t base = static_cast<uint64_t>(minValue);
-        pos = packBits(
-            count,
-            deltaBits,
-            [&](uint32_t i) {
-              return static_cast<uint64_t>(values[i]) - base;
-            },
-            pos);
+        uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
+        for (uint32_t i = 0; i < count; ++i) { // widen + subtract: vectorizes
+          staged[i] = static_cast<uint64_t>(values[i]) - base;
+        }
+        pos = packBits(staged, count, deltaBits, pos);
       }
       break;
     }
@@ -205,7 +207,8 @@ uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
 template <typename T>
 uint32_t encodeBlockFull(const T* values, uint8_t* out) {
   return encodeBlockImpl(
-      values,
+      static_cast<const T*>(
+          __builtin_assume_aligned(values, kBlockSourceBytes)),
       std::integral_constant<uint32_t, kBlockSourceBytes / sizeof(T)>{},
       out);
 }
