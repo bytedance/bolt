@@ -3835,8 +3835,6 @@ class ReusableArrowBatchPool::Impl {
       const std::vector<std::string>& fieldNames) {
     BOLT_CHECK_NOT_NULL(schema);
     BOLT_CHECK_NOT_NULL(array);
-    BOLT_CHECK_NULL(schema->release);
-    BOLT_CHECK_NULL(array->release);
 
     auto loadedVector = vector->encoding() == VectorEncoding::Simple::LAZY
         ? BaseVector::loadedVectorShared(vector)

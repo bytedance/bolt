@@ -811,6 +811,22 @@ TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolRecoversFromFailure) {
   schema.release(&schema);
 }
 
+TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolOverwritesOutputs) {
+  auto vector = vectorMaker_.flatVector<int64_t>({1, 2, 3});
+  ReusableArrowBatchPool batchPool(1);
+
+  ArrowSchema schema;
+  schema.release = mockSchemaRelease;
+  ArrowArray array;
+  array.release = mockArrayRelease;
+
+  EXPECT_TRUE(
+      batchPool.exportToArrow(vector, pool_.get(), options_, &schema, &array));
+  validateArray<int64_t>({1, 2, 3}, array);
+  array.release(&array);
+  schema.release(&schema);
+}
+
 TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolChangesShape) {
   auto flatVector = vectorMaker_.flatVector<int64_t>({1, 2, 3});
   auto arrayVector =
