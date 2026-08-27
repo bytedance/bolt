@@ -87,12 +87,13 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
     // An unlimited pool reports kMaxMemory; fall back to a sane default.
     budget = (capacity <= 0 || capacity > (int64_t{1} << 40))
         ? (int64_t{1} << 30)
-        : capacity / 4;
+        : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
   }
   const int64_t perStream = budget / 8 / numPartitions_ / numStreams;
+  const int64_t cellCap =
+      std::min<int64_t>(cellOpts.maxDataCellBytes, cellOpts.chunkBytes / 4);
   const uint32_t cellBytes = prevPowerOfTwo(std::max<int64_t>(
-      cellOpts.minDataCellBytes,
-      std::min<int64_t>(perStream, cellOpts.chunkBytes / 4)));
+      cellOpts.minDataCellBytes, std::min<int64_t>(perStream, cellCap)));
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, cellOpts.chunkBytes, cellBytes);
