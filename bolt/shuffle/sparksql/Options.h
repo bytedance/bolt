@@ -96,8 +96,12 @@ struct CellShuffleOptions {
   // Unit of real allocation and return; matches the pool's reservation
   // quantum. Power of two.
   int32_t chunkBytes = 4 << 20;
-  // Lower bound of the adaptive DataCell size. Power of two.
+  // Bounds of the adaptive DataCell size. Powers of two. The upper bound
+  // keeps a small-partition-count writer from pinning huge tail cells per
+  // (partition, stream) chain (and from faulting in far more fresh pages
+  // than it has data).
   int32_t minDataCellBytes = 256;
+  int32_t maxDataCellBytes = 64 << 10;
   // Sizing budget for the cell size formula; 0 derives it from the pool's
   // max capacity. A sizing hint, not a reservation.
   int64_t cellMemoryBudgetBytes = 0;

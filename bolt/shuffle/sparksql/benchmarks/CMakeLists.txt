@@ -33,3 +33,15 @@ target_link_libraries(
     ${FOLLY_BENCHMARK}
     glog::glog
 )
+
+add_executable(bolt_cell_split_benchmark CellSplitBenchmark.cpp)
+
+target_link_libraries(
+    bolt_cell_split_benchmark
+    PRIVATE
+        bolt_shuffle_spark_impl
+        bolt_testutils
+        Folly::folly
+        ${FOLLY_BENCHMARK}
+        glog::glog
+)
