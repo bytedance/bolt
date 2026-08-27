@@ -56,6 +56,12 @@ memory::MemoryPool* leafPool() {
 }
 
 template <typename T>
+VectorPtr makeFlatNullable(
+    const std::vector<T>& values,
+    int32_t nullPercent,
+    std::mt19937& rng);
+
+template <typename T>
 VectorPtr makeFlat(const std::vector<T>& values) {
   auto buffer = AlignedBuffer::allocate<T>(values.size(), leafPool());
   ::memcpy(buffer->template asMutable<T>(), values.data(), values.size() * sizeof(T));
@@ -74,6 +80,27 @@ VectorPtr makeFlat(const std::vector<T>& values) {
       values.size(),
       std::move(buffer),
       std::vector<BufferPtr>{});
+}
+
+template <typename T>
+VectorPtr makeFlatNullable(
+    const std::vector<T>& values,
+    int32_t nullPercent,
+    std::mt19937& rng) {
+  auto vector = makeFlat(values);
+  if (nullPercent == 0) {
+    return vector;
+  }
+  auto nulls = AlignedBuffer::allocate<bool>(values.size(), leafPool());
+  auto* rawNulls = nulls->template asMutable<uint8_t>();
+  ::memset(rawNulls, 0xFF, (values.size() + 7) / 8);
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (static_cast<int32_t>(rng() % 100) < nullPercent) {
+      rawNulls[i / 8] &= static_cast<uint8_t>(~(1u << (i % 8)));
+    }
+  }
+  vector->setNulls(nulls);
+  return vector;
 }
 
 VectorPtr makeStrings(
@@ -144,7 +171,8 @@ VectorPtr makePids(int32_t numPartitions, std::mt19937& rng) {
 Scenario makeFixedScenario(
     int32_t numPartitions,
     int32_t numBatches = kBatches,
-    const char* tag = "") {
+    const char* tag = "",
+    int32_t nullPercent = 0) {
   std::mt19937 rng(17);
   Scenario scenario{
       "fixed4" + std::string(tag) + "_P" + std::to_string(numPartitions),
@@ -164,10 +192,10 @@ Scenario makeFixedScenario(
     scenario.batches.push_back(makeBatch(
         {"id", "ts", "small", "rnd"},
         {makePids(numPartitions, rng),
-         makeFlat(ids),
-         makeFlat(timestamps),
-         makeFlat(smalls),
-         makeFlat(randoms)}));
+         makeFlatNullable(ids, nullPercent, rng),
+         makeFlatNullable(timestamps, nullPercent, rng),
+         makeFlatNullable(smalls, nullPercent, rng),
+         makeFlatNullable(randoms, nullPercent, rng)}));
   }
   return scenario;
 }
@@ -206,6 +234,10 @@ const std::vector<Scenario>& scenarios() {
     // behavior, not per-lifecycle provisioning, dominates.
     s.push_back(makeFixedScenario(1024, 1024, "big"));
     s.push_back(makeFixedScenario(4096, 1024, "big"));
+    // Null-cost isolation: identical shape to fixed4big_P1024 with nulls on
+    // every column.
+    s.push_back(makeFixedScenario(1024, 1024, "nulls10big", 10));
+    s.push_back(makeFixedScenario(1024, 1024, "nulls40big", 40));
     return s;
   }();
   return all;
@@ -306,6 +338,8 @@ CELL_SPLIT_BENCH(2, fixed4_P4096)
 CELL_SPLIT_BENCH(3, strings_P1024)
 CELL_SPLIT_BENCH(4, fixed4big_P1024)
 CELL_SPLIT_BENCH(5, fixed4big_P4096)
+CELL_SPLIT_BENCH(6, fixed4nulls10big_P1024)
+CELL_SPLIT_BENCH(7, fixed4nulls40big_P1024)
 
 } // namespace
 
