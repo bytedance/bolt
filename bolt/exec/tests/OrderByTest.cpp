@@ -1583,11 +1583,14 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
               }
               // Allocating rows mutates SortBuffer's RowContainer and must not
               // race with reclaim(), which spills and clears the same state.
-              EXPECT_FALSE(op->canReclaim());
+              EXPECT_TRUE(op->testingNonReclaimable());
+              EXPECT_EQ(op->canReclaim(), enableSpilling);
               uint64_t reclaimableBytes{0};
               const bool reclaimable = op->reclaimableBytes(reclaimableBytes);
-              EXPECT_FALSE(reclaimable);
-              EXPECT_EQ(reclaimableBytes, 0);
+              EXPECT_EQ(reclaimable, enableSpilling);
+              if (!enableSpilling) {
+                EXPECT_EQ(reclaimableBytes, 0);
+              }
               auto* driver = op->testingOperatorCtx()->driver();
               SuspendedSection suspendedSection(driver);
               testWait.notify();
@@ -1635,11 +1638,14 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
       ASSERT_EQ(reclaimableBytes, 0);
     }
 
-    BOLT_ASSERT_THROW(
-        op->reclaim(
-            folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
-            reclaimerStats_),
-        "");
+    reclaimerStats_.reset();
+    reclaimAndRestoreCapacity(
+        op,
+        folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
+        reclaimerStats_);
+    ASSERT_EQ(reclaimerStats_.reclaimedBytes, 0);
+    ASSERT_EQ(
+        reclaimerStats_.numNonReclaimableAttempts, enableSpilling ? 1 : 0);
 
     driverWait.notify();
     Task::resume(task);
@@ -1651,7 +1657,6 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
     ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 0);
     OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
   }
-  ASSERT_EQ(reclaimerStats_, memory::MemoryReclaimer::Stats{0});
 }
 
 DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
