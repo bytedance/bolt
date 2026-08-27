@@ -32,6 +32,7 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
+#include "bolt/vector/BaseVector.h"
 #include "bolt/vector/FlatVector.h"
 
 using namespace bytedance::bolt;
@@ -172,7 +173,8 @@ Scenario makeFixedScenario(
     int32_t numPartitions,
     int32_t numBatches = kBatches,
     const char* tag = "",
-    int32_t nullPercent = 0) {
+    int32_t nullPercent = 0,
+    bool addAllNullColumn = false) {
   std::mt19937 rng(17);
   Scenario scenario{
       "fixed4" + std::string(tag) + "_P" + std::to_string(numPartitions),
@@ -189,13 +191,19 @@ Scenario makeFixedScenario(
       smalls[i] = rng() % 1000;
       randoms[i] = static_cast<int32_t>(rng());
     }
-    scenario.batches.push_back(makeBatch(
-        {"id", "ts", "small", "rnd"},
-        {makePids(numPartitions, rng),
-         makeFlatNullable(ids, nullPercent, rng),
-         makeFlatNullable(timestamps, nullPercent, rng),
-         makeFlatNullable(smalls, nullPercent, rng),
-         makeFlatNullable(randoms, nullPercent, rng)}));
+    std::vector<std::string> names{"id", "ts", "small", "rnd"};
+    std::vector<VectorPtr> children{
+        makePids(numPartitions, rng),
+        makeFlatNullable(ids, nullPercent, rng),
+        makeFlatNullable(timestamps, nullPercent, rng),
+        makeFlatNullable(smalls, nullPercent, rng),
+        makeFlatNullable(randoms, nullPercent, rng)};
+    if (addAllNullColumn) {
+      names.push_back("dead");
+      children.push_back(
+          BaseVector::createNullConstant(BIGINT(), kRowsPerBatch, leafPool()));
+    }
+    scenario.batches.push_back(makeBatch(std::move(names), std::move(children)));
   }
   return scenario;
 }
@@ -238,6 +246,9 @@ const std::vector<Scenario>& scenarios() {
     // every column.
     s.push_back(makeFixedScenario(1024, 1024, "nulls10big", 10));
     s.push_back(makeFixedScenario(1024, 1024, "nulls40big", 40));
+    // fixed4big plus one all-null constant column: its cost should be near
+    // zero (whole-batch counted nulls, no bitmap, no values).
+    s.push_back(makeFixedScenario(1024, 1024, "deadcolbig", 0, true));
     return s;
   }();
   return all;
@@ -340,6 +351,7 @@ CELL_SPLIT_BENCH(4, fixed4big_P1024)
 CELL_SPLIT_BENCH(5, fixed4big_P4096)
 CELL_SPLIT_BENCH(6, fixed4nulls10big_P1024)
 CELL_SPLIT_BENCH(7, fixed4nulls40big_P1024)
+CELL_SPLIT_BENCH(8, fixed4deadcolbig_P1024)
 
 } // namespace
 

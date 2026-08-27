@@ -176,9 +176,20 @@ class NullCells {
   NullCells& operator=(const NullCells&) = delete;
 
   /// Marks rowInWindow (0-based since the checkpoint window opened) of
-  /// column col in partition pid as null. Rows are visited in non-decreasing
-  /// order per partition; capacity grows on demand.
+  /// column col in partition pid as null. Rows are visited in strictly
+  /// increasing order per partition; capacity grows on demand.
+  ///
+  /// An all-null-so-far column is pure counting: while every row of the
+  /// window has been null, only nullPrefix_ advances and no bitmap storage
+  /// exists. The first non-null row freezes the prefix (it simply never
+  /// calls in), and later nulls fall through to the bitmap.
   inline void setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
+    const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
+    if (rowInWindow == nullPrefix_[slot]) {
+      ++nullPrefix_[slot];
+      hasNull_[slot] = 1;
+      return;
+    }
     uint32_t cap = capBytes_[pid];
     if (FOLLY_UNLIKELY((rowInWindow >> 3) >= cap)) {
       grow(pid, rowInWindow);
@@ -186,7 +197,23 @@ class NullCells {
     }
     base_[pid][static_cast<size_t>(col) * cap + (rowInWindow >> 3)] &=
         static_cast<char>(~(1u << (rowInWindow & 7)));
-    hasNull_[static_cast<size_t>(pid) * numColumns_ + col] = 1;
+    hasNull_[slot] = 1;
+  }
+
+  /// Bulk form for a run of consecutive window rows that are all null in
+  /// this column (a constant-null input batch): O(1) while the column is
+  /// still all-null in this partition, per-row otherwise.
+  inline void
+  setNullRun(uint32_t pid, uint32_t col, uint32_t startRow, uint32_t count) {
+    const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
+    if (startRow == nullPrefix_[slot]) {
+      nullPrefix_[slot] += count;
+      hasNull_[slot] = 1;
+      return;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+      setNull(pid, col, startRow + i);
+    }
   }
 
   struct Summary {
@@ -228,6 +255,10 @@ class NullCells {
   std::vector<uint32_t> capBytes_;
   /// Per (pid, col): 1 once a null was recorded in this window.
   std::vector<uint8_t> hasNull_;
+  /// Per (pid, col): rows [0, prefix) of the window are null with no bitmap
+  /// backing. Frozen once a non-null row appears (rows arrive in order, so
+  /// a later null misses the prefix match).
+  std::vector<uint32_t> nullPrefix_;
   int64_t allocatedBytes_{0};
 };
 
