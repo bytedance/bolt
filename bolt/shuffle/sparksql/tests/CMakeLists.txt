@@ -162,7 +162,7 @@ add_test(
     bolt_shuffle_local_partition_writer_test
 )
 
-add_executable(bolt_shuffle_cell_test CellChunkTest.cpp)
+add_executable(bolt_shuffle_cell_test CellChunkTest.cpp CellEncodingTest.cpp)
 
 target_link_libraries(
     bolt_shuffle_cell_test
