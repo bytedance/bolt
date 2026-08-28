@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "bolt/common/io/IoStatistics.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/connectors/Connector.h"
@@ -128,6 +130,24 @@ class HiveDataSource : public DataSource {
   memory::MemoryPool* pool_;
   std::shared_ptr<common::ScanSpec> scanSpec_;
   VectorPtr output_;
+  struct ReusableOutputSlot {
+    VectorPtr output;
+    bool inUse{false};
+  };
+  struct ReusableOutputPool {
+    explicit ReusableOutputPool(size_t size) : slots(size) {}
+    std::vector<ReusableOutputSlot> slots;
+  };
+  struct ReusableOutputLease {
+    ReusableOutputLease(std::shared_ptr<ReusableOutputPool> pool, size_t index)
+        : pool(std::move(pool)), index(index) {}
+    ~ReusableOutputLease() {
+      pool->slots[index].inUse = false;
+    }
+    std::shared_ptr<ReusableOutputPool> pool;
+    size_t index;
+  };
+  std::shared_ptr<ReusableOutputPool> reusableOutputPool_;
   std::unique_ptr<HiveSplitReaderBase> splitReader_;
 
   // Output type from file reader.  This is different from outputType_ that it
@@ -147,7 +167,23 @@ class HiveDataSource : public DataSource {
   std::shared_ptr<io::IoStatistics> ioStats_;
 
  private:
-  void prepareReaderOutputForNextRead();
+  std::shared_ptr<ReusableOutputLease> prepareReaderOutputForNextRead();
+  template <typename T>
+  std::shared_ptr<T> retainReusableOutputLease(
+      std::shared_ptr<T> vector,
+      const std::shared_ptr<ReusableOutputLease>& lease) {
+    if (!lease) {
+      return vector;
+    }
+
+    struct LeasedVector {
+      std::shared_ptr<T> vector;
+      std::shared_ptr<ReusableOutputLease> lease;
+    };
+    auto leased =
+        std::make_shared<LeasedVector>(LeasedVector{std::move(vector), lease});
+    return std::shared_ptr<T>(leased, leased->vector.get());
+  }
 
   // Evaluates remainingFilter_ on the specified vector. Returns number of
   // rows passed. Populates filterEvalCtx_.selectedIndices and selectedBits

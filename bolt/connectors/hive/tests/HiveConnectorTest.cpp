@@ -64,7 +64,8 @@ class HiveConnectorTest : public exec::test::HiveConnectorTestBase {
   }
 
   std::unique_ptr<TestingHiveDataSource> makeTestingDataSource(
-      const RowTypePtr& rowType);
+      const RowTypePtr& rowType,
+      std::unordered_map<std::string, std::string> queryConfig = {});
 };
 
 class FailingVectorLoader : public VectorLoader {
@@ -444,6 +445,63 @@ class TrackingSplitReader : public HiveSplitReaderBase {
   int32_t createdMapShells_{0};
 };
 
+class SequentialSplitReader : public HiveSplitReaderBase {
+ public:
+  SequentialSplitReader(RowTypePtr rowType, memory::MemoryPool* pool)
+      : rowType_(std::move(rowType)), pool_(pool) {}
+
+  uint64_t next(int64_t /*size*/, VectorPtr& output) override {
+    if (calls_ >= 2) {
+      return 0;
+    }
+
+    auto rowOutput = std::dynamic_pointer_cast<RowVector>(output);
+    EXPECT_NE(rowOutput, nullptr);
+    if (rowOutput == nullptr) {
+      return 0;
+    }
+    readerOutputs_.push_back(output.get());
+    rowOutput->unsafeResize(1);
+
+    auto values = AlignedBuffer::allocate<int64_t>(1, pool_);
+    values->asMutable<int64_t>()[0] = calls_ + 1;
+    values->setSize(sizeof(int64_t));
+    rowOutput->childAt(0) = std::make_shared<FlatVector<int64_t>>(
+        pool_, BIGINT(), nullptr, 1, values, std::vector<BufferPtr>{});
+
+    ++calls_;
+    return 1;
+  }
+
+  bool allPrefetchIssued() const override {
+    return true;
+  }
+
+  bool emptySplit() const override {
+    return false;
+  }
+
+  void resetFilterCaches() override {}
+
+  int64_t estimatedRowSize() const override {
+    return sizeof(int64_t);
+  }
+
+  void updateRuntimeStats(dwio::common::RuntimeStatistics&) const override {}
+
+  void resetSplit() override {}
+
+  const std::vector<BaseVector*>& readerOutputs() const {
+    return readerOutputs_;
+  }
+
+ private:
+  RowTypePtr rowType_;
+  memory::MemoryPool* pool_;
+  int32_t calls_{0};
+  std::vector<BaseVector*> readerOutputs_;
+};
+
 class TestingHiveDataSource : public HiveDataSource {
  public:
   TestingHiveDataSource(
@@ -477,7 +535,8 @@ class TestingHiveDataSource : public HiveDataSource {
 };
 
 std::unique_ptr<TestingHiveDataSource> HiveConnectorTest::makeTestingDataSource(
-    const RowTypePtr& rowType) {
+    const RowTypePtr& rowType,
+    std::unordered_map<std::string, std::string> queryConfig) {
   auto tableHandle = makeTableHandle({}, nullptr, "test_table", rowType);
   ColumnHandleMap assignments;
   for (const auto& name : rowType->names()) {
@@ -504,7 +563,7 @@ std::unique_ptr<TestingHiveDataSource> HiveConnectorTest::makeTestingDataSource(
       tableHandle,
       assignments,
       nullptr,
-      core::QueryConfig(std::unordered_map<std::string, std::string>{}),
+      core::QueryConfig(std::move(queryConfig)),
       nullptr,
       connectorQueryCtx,
       hiveConfig);
@@ -641,6 +700,59 @@ TEST_F(HiveConnectorTest, emptyOutputDoesNotExposeReaderOutput) {
   EXPECT_EQ(second.value()->childrenSize(), 0);
   EXPECT_EQ(second.value()->size(), 3);
   EXPECT_EQ(first.value()->size(), 2);
+}
+
+TEST_F(HiveConnectorTest, tableScanReusableOutputDoesNotOverwriteHeldChild) {
+  auto rowType = ROW({"c0"}, {BIGINT()});
+  auto dataSource = makeTestingDataSource(
+      rowType, {{core::QueryConfig::kTableScanReusableOutputCount, "1"}});
+  dataSource->setSplitReader(
+      std::make_unique<SequentialSplitReader>(rowType, pool_.get()));
+
+  ContinueFuture future;
+  auto first = dataSource->next(1, future);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_NE(first.value(), nullptr);
+  ASSERT_EQ(first.value()->childrenSize(), 1);
+  auto heldChild = first.value()->childAt(0);
+  ASSERT_NE(heldChild, nullptr);
+  auto* heldFlat = heldChild->as<FlatVector<int64_t>>();
+  ASSERT_NE(heldFlat, nullptr);
+  EXPECT_EQ(heldFlat->valueAt(0), 1);
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+  ASSERT_EQ(second.value()->childrenSize(), 1);
+  auto* secondFlat = second.value()->childAt(0)->as<FlatVector<int64_t>>();
+  ASSERT_NE(secondFlat, nullptr);
+  EXPECT_EQ(secondFlat->valueAt(0), 2);
+  EXPECT_EQ(heldFlat->valueAt(0), 1);
+}
+
+TEST_F(HiveConnectorTest, tableScanReusableOutputReusesReleasedRoot) {
+  auto rowType = ROW({"c0"}, {BIGINT()});
+  auto dataSource = makeTestingDataSource(
+      rowType, {{core::QueryConfig::kTableScanReusableOutputCount, "1"}});
+  auto splitReader =
+      std::make_unique<SequentialSplitReader>(rowType, pool_.get());
+  auto* rawSplitReader = splitReader.get();
+  dataSource->setSplitReader(std::move(splitReader));
+
+  ContinueFuture future;
+  {
+    auto first = dataSource->next(1, future);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_NE(first.value(), nullptr);
+  }
+  ASSERT_EQ(rawSplitReader->readerOutputs().size(), 1);
+  auto* firstReaderOutput = rawSplitReader->readerOutputs()[0];
+
+  auto second = dataSource->next(1, future);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_NE(second.value(), nullptr);
+  ASSERT_EQ(rawSplitReader->readerOutputs().size(), 2);
+  EXPECT_EQ(rawSplitReader->readerOutputs()[1], firstReaderOutput);
 }
 
 TEST_F(HiveConnectorTest, makeScanSpec_requiredSubfields_multilevel) {

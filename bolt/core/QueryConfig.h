@@ -225,6 +225,9 @@ class QueryConfig {
 
   static constexpr const char* kMinOutputBatchRows = "min_output_batch_rows";
 
+  static constexpr const char* kTableScanReusableOutputCount =
+      "table_scan_reusable_output_count";
+
   /// TableScan operator will exit getOutput() method after this many
   /// milliseconds even if it has no data to return yet. Zero means 'no time
   /// limit'.
@@ -975,6 +978,10 @@ class QueryConfig {
 
   uint32_t minOutputBatchRows() const {
     return get<uint32_t>(kMinOutputBatchRows, 1);
+  }
+
+  uint32_t tableScanReusableOutputCount() const {
+    return get<uint32_t>(kTableScanReusableOutputCount, 0);
   }
 
   uint32_t tableScanGetOutputTimeLimitMs() const {
