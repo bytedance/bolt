@@ -458,6 +458,16 @@ TEST_P(OrderByTest, sortBufferConfig) {
     ASSERT_FALSE(legacySortBufferUsed);
   }
 
+  legacySortBufferUsed = false;
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .plan(plan)
+      .assertResults(
+          "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    ASSERT_TRUE(legacySortBufferUsed);
+  }
+
+  legacySortBufferUsed = false;
   AssertQueryBuilder(duckDbQueryRunner_)
       .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
       .plan(plan)
