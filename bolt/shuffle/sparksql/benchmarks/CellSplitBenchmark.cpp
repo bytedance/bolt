@@ -270,6 +270,9 @@ const std::vector<Scenario>& scenarios() {
 struct Written {
   int64_t bytes{0};
   int64_t rawBytes{0};
+  int64_t compressNs{0};
+  int64_t writeNs{0};
+  int64_t rows{0};
 };
 
 std::map<std::string, Written>& results() {
@@ -336,6 +339,9 @@ size_t runWriter(int32_t writerType, const Scenario& scenario) {
       raw += length;
     }
     slot.rawBytes = raw;
+    slot.compressNs = metrics.totalCompressTime;
+    slot.writeNs = metrics.totalWriteTime;
+    slot.rows = static_cast<int64_t>(rows);
     writer.reset();
     arrowPool.reset();
     ::unlink(dataFile.c_str());
@@ -376,13 +382,24 @@ int main(int argc, char** argv) {
   memory::MemoryManager::initialize(options);
   folly::runBenchmarks();
 
-  printf("\n%-28s %14s %14s\n", "scenario/writer", "bytesWritten", "rawBytes");
+  printf(
+      "\n%-32s %12s %12s %11s %11s %11s\n",
+      "scenario/writer",
+      "bytesWritten",
+      "rawBytes",
+      "compressMs",
+      "cmpNsPerRow",
+      "writeMs");
   for (const auto& [name, written] : results()) {
     printf(
-        "%-28s %14ld %14ld\n",
+        "%-32s %12ld %12ld %11.2f %11.2f %11.2f\n",
         name.c_str(),
         static_cast<long>(written.bytes),
-        static_cast<long>(written.rawBytes));
+        static_cast<long>(written.rawBytes),
+        written.compressNs / 1e6,
+        written.rows > 0 ? static_cast<double>(written.compressNs) / written.rows
+                         : 0.0,
+        written.writeNs / 1e6);
   }
   return 0;
 }
