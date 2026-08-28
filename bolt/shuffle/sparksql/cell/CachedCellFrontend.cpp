@@ -178,7 +178,19 @@ void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
       if (dataCur[pid] > 0) {
         flushRaw(dataStream, pid, dataCur);
       }
-      cells_->append(pid, dataStream, view.data(), size, beforeGrow_);
+      // Raw stream bytes may split anywhere (spec section 5.4), so a huge
+      // value is appended in bounded pieces: each append then pre-holds at
+      // most a couple of cells and a spill can reclaim between pieces,
+      // keeping the memory cap meaningful.
+      constexpr uint32_t kDirectAppendPiece = 256 << 10;
+      const char* src = view.data();
+      uint32_t left = size;
+      while (left > 0) {
+        const uint32_t piece = left < kDirectAppendPiece ? left : kDirectAppendPiece;
+        cells_->append(pid, dataStream, src, piece, beforeGrow_);
+        src += piece;
+        left -= piece;
+      }
       bumpPartitionBytes(pid, size);
       continue;
     }
