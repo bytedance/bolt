@@ -308,52 +308,59 @@ void LocalCellOutput::writeDiskPayload(
   rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
 
-  std::vector<uint64_t> decodedSizes(numStreams);
   for (const auto& ends : w.runPidEnds) {
-    const uint64_t segmentBytes = ends[pid + 1] - ends[pid];
-    if (segmentBytes == 0) {
-      continue;
+    if (ends[pid + 1] > ends[pid]) {
+      writeSpilledSegment(out, ends[pid], ends[pid + 1]);
     }
-    // The spill segment is a run body in wire form.
-    BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
-    scratch_.resize(runHeaderBytes);
-    readSpill(ends[pid], scratch_.data(), runHeaderBytes);
-    const auto segmentLayout = static_cast<RunLayout>(
-        static_cast<uint8_t>(scratch_[0]));
-    ::memcpy(decodedSizes.data(), scratch_.data() + 9, 8ull * numStreams);
-    if (segmentLayout == RunLayout::kCombined) {
-      // Compressed at spill time: already the final form, copy verbatim.
-      uint64_t decodedSum = 0;
-      for (const auto size : decodedSizes) {
-        decodedSum += size;
-      }
-      rawAccum_ += runHeaderBytes + decodedSum;
-      writeOut(out, scratch_.data(), runHeaderBytes);
-      char copyBuffer[64 << 10];
-      uint64_t offset = ends[pid] + runHeaderBytes;
-      uint64_t left = segmentBytes - runHeaderBytes;
-      while (left > 0) {
-        const size_t chunk =
-            left < sizeof(copyBuffer) ? left : sizeof(copyBuffer);
-        readSpill(offset, copyBuffer, chunk);
-        writeOut(out, copyBuffer, chunk);
-        offset += chunk;
-        left -= chunk;
-      }
-      continue;
-    }
-    BOLT_CHECK_EQ(
-        static_cast<uint8_t>(segmentLayout),
-        static_cast<uint8_t>(RunLayout::kCombinedStored),
-        "corrupt cell spill segment");
-    const uint64_t dataBytes = segmentBytes - runHeaderBytes;
-    runScratch_.resize(dataBytes);
-    readSpill(ends[pid] + runHeaderBytes, runScratch_.data(), dataBytes);
-    writeRun(out, runScratch_.data(), dataBytes, decodedSizes.data());
   }
 }
 
-void LocalCellOutput::writeLivePayload(
+void LocalCellOutput::writeSpilledSegment(
+    std::FILE* out,
+    uint64_t begin,
+    uint64_t end) {
+  const uint32_t numStreams = layout_->numStreams();
+  const uint64_t runHeaderBytes = 1 + 8 + 8ull * numStreams;
+  const uint64_t segmentBytes = end - begin;
+  // The spill segment is a run body in wire form.
+  BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
+  scratch_.resize(runHeaderBytes);
+  readSpill(begin, scratch_.data(), runHeaderBytes);
+  const auto segmentLayout =
+      static_cast<RunLayout>(static_cast<uint8_t>(scratch_[0]));
+  std::vector<uint64_t> decodedSizes(numStreams);
+  ::memcpy(decodedSizes.data(), scratch_.data() + 9, 8ull * numStreams);
+  if (segmentLayout == RunLayout::kCombined) {
+    // Compressed at spill time: already the final form, copy verbatim.
+    uint64_t decodedSum = 0;
+    for (const auto size : decodedSizes) {
+      decodedSum += size;
+    }
+    rawAccum_ += runHeaderBytes + decodedSum;
+    writeOut(out, scratch_.data(), runHeaderBytes);
+    char copyBuffer[64 << 10];
+    uint64_t offset = begin + runHeaderBytes;
+    uint64_t left = segmentBytes - runHeaderBytes;
+    while (left > 0) {
+      const size_t chunk = left < sizeof(copyBuffer) ? left : sizeof(copyBuffer);
+      readSpill(offset, copyBuffer, chunk);
+      writeOut(out, copyBuffer, chunk);
+      offset += chunk;
+      left -= chunk;
+    }
+    return;
+  }
+  BOLT_CHECK_EQ(
+      static_cast<uint8_t>(segmentLayout),
+      static_cast<uint8_t>(RunLayout::kCombinedStored),
+      "corrupt cell spill segment");
+  const uint64_t dataBytes = segmentBytes - runHeaderBytes;
+  runScratch_.resize(dataBytes);
+  readSpill(begin + runHeaderBytes, runScratch_.data(), dataBytes);
+  writeRun(out, runScratch_.data(), dataBytes, decodedSizes.data());
+}
+
+void LocalCellOutput::writeCurrentWindowPayload(
     std::FILE* out,
     const CellWindowInput& in,
     uint32_t pid) {
@@ -363,7 +370,10 @@ void LocalCellOutput::writeLivePayload(
   for (uint32_t s = 0; s < numStreams; ++s) {
     total += in.cells->bytes(pid, s);
   }
-  const uint32_t runCount = total > 0 ? 1 : 0;
+  uint32_t runCount = total > 0 ? 1 : 0;
+  for (const auto& ends : openWindowRuns_) {
+    runCount += ends[pid + 1] > ends[pid] ? 1 : 0;
+  }
 
   scratch_.clear();
   appendLe32(scratch_, rows);
@@ -380,7 +390,14 @@ void LocalCellOutput::writeLivePayload(
   scratch_.append((layout_->numColumns() + 7) / 8, '\0'); // encoding tags
   rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
-  if (runCount > 0) {
+  // Mid-window spilled runs come first (they hold the older blocks), the
+  // still-resident cells form the final run.
+  for (const auto& ends : openWindowRuns_) {
+    if (ends[pid + 1] > ends[pid]) {
+      writeSpilledSegment(out, ends[pid], ends[pid + 1]);
+    }
+  }
+  if (total > 0) {
     std::vector<uint64_t> decodedSizes(numStreams);
     runScratch_.clear();
     runScratch_.reserve(total);
@@ -398,16 +415,9 @@ void LocalCellOutput::finalize(
     const CellWindowInput& in,
     bool windowHasData,
     ShuffleWriterMetrics& metrics) {
-  bool liveWindow = false;
-  if (windowHasData) {
-    if (hasDiskState()) {
-      spillRun(in);
-      in.cells->releaseAll();
-      sealWindow(in);
-    } else {
-      liveWindow = true;
-    }
-  }
+  // The residual window never takes a spill round-trip: whatever is still
+  // in memory is written straight into the data file, alongside any runs
+  // the window already spilled mid-stream.
 
   const uint64_t start = nowNs();
   std::FILE* out = ::fopen(options_.dataFile.c_str(), "wb");
@@ -423,8 +433,8 @@ void LocalCellOutput::finalize(
     for (const auto& window : sealed_) {
       writeDiskPayload(out, window, pid);
     }
-    if (liveWindow && in.rowCounts[pid] > 0) {
-      writeLivePayload(out, in, pid);
+    if (windowHasData && in.rowCounts[pid] > 0) {
+      writeCurrentWindowPayload(out, in, pid);
     }
     metrics.partitionLengths[pid] =
         static_cast<int64_t>(finalBytes_ - partitionStart);

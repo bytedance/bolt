@@ -72,6 +72,10 @@ class LocalCellOutput final : public CellOutput {
   /// Appends one partition's payload assembled from a sealed window.
   void writeDiskPayload(std::FILE* out, const SealedWindow& w, uint32_t pid);
 
+  /// Copies one spilled run segment into the data file: verbatim when it
+  /// was compressed at spill time, else through the compressing run writer.
+  void writeSpilledSegment(std::FILE* out, uint64_t begin, uint64_t end);
+
   /// Compression policy shared by spill and merge: points `body`/`stored`
   /// at the COMBINED form when the codec shrinks the bytes, else at the
   /// input (spec section 5: fall back to the stored form when compression
@@ -91,8 +95,14 @@ class LocalCellOutput final : public CellOutput {
       uint64_t dataBytes,
       const uint64_t* decodedSizes);
 
-  /// Appends one partition's payload streamed from the live window.
-  void writeLivePayload(std::FILE* out, const CellWindowInput& in, uint32_t pid);
+  /// Appends one partition's payload for the current (unsealed) window:
+  /// header, null body and row counts straight from memory, any mid-window
+  /// spilled runs copied from the spill file, and the still-resident cells
+  /// as the final run. The residual never takes a spill round-trip.
+  void writeCurrentWindowPayload(
+      std::FILE* out,
+      const CellWindowInput& in,
+      uint32_t pid);
 
   void writeOut(std::FILE* out, const void* data, size_t bytes);
 
