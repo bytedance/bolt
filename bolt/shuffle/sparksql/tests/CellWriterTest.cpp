@@ -270,6 +270,52 @@ TEST_F(CellWriterTest, spillsAndCheckpointsStillRoundTrip) {
   EXPECT_GT(writer.metrics().totalBytesEvicted, 0);
 }
 
+TEST_F(CellWriterTest, uncompressedSpillStillRoundTripsAndWritesMore) {
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(29);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 6; ++batch) {
+    const int n = 2048;
+    std::vector<int32_t> batchPids(n);
+    for (int i = 0; i < n; ++i) {
+      batchPids[i] = rng() % kPartitions;
+    }
+    auto values = makeFlatVector<int64_t>(
+        n, [&](auto row) { return 5'000'000'000LL + row % 977; });
+    std::vector<std::string> storage(n);
+    std::vector<std::optional<StringView>> views(n);
+    for (int i = 0; i < n; ++i) {
+      storage[i].assign(256, static_cast<char>('a' + i % 4));
+      views[i] = StringView(storage[i]);
+    }
+    auto strings = makeNullableFlatVector<StringView>(views);
+    batches.push_back(makeRowVector({"v", "s"}, {values, strings}));
+    pids.push_back(std::move(batchPids));
+  }
+
+  const auto runOnce = [&](bool compressSpill) {
+    auto options = makeOptions(kPartitions);
+    options.cellOptions.cellMemoryCapBytes =
+        2 * options.cellOptions.chunkBytes; // force spills
+    options.cellOptions.checkpointPartitionBytes = 64 << 10;
+    options.cellOptions.compressSpill = compressSpill;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    EXPECT_GT(writer.metrics().spillCount, 0);
+    return writer.metrics().totalBytesEvicted;
+  };
+
+  const auto compressedSpillBytes = runOnce(true);
+  ::unlink(dataFile_.c_str());
+  const auto rawSpillBytes = runOnce(false);
+  // The whole point of spill compression: fewer bytes hit the disk on the
+  // spill pass (the compressible strings dominate this data set).
+  EXPECT_LT(compressedSpillBytes * 2, rawSpillBytes)
+      << "compressed spill " << compressedSpillBytes << " vs raw "
+      << rawSpillBytes;
+}
+
 TEST_F(CellWriterTest, reclaimMidStreamReleasesMemory) {
   constexpr int32_t kPartitions = 4;
   auto options = makeOptions(kPartitions);

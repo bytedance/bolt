@@ -106,9 +106,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
         onBeforeChunkGrow();
       });
   output_ = std::make_unique<LocalCellOutput>(
-      options_.partitionWriterOptions,
-      &layout_,
-      cellOpts.compressMinRunBytes);
+      options_.partitionWriterOptions, &layout_, cellOpts);
 
   windowRowStart_.assign(numPartitions_, 0);
   perPidCounter_.assign(numPartitions_, 0);

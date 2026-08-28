@@ -116,11 +116,15 @@ struct CellShuffleOptions {
   // row-count sanity limit.
   uint32_t maxWindowRows = 1u << 22;
   // A payload run below this many bytes is stored uncompressed: codec
-  // overhead is not worth it. Compression itself is governed by the
-  // partition writer options' compressionType (UNCOMPRESSED disables it)
-  // and only happens at the final merge - spill files are transient and
-  // stay raw.
+  // overhead is not worth it. Compression is governed by the partition
+  // writer options' compressionType (UNCOMPRESSED disables it everywhere).
   int64_t compressMinRunBytes = 1 << 10;
+  // Compress runs when they spill, in the final wire form, so the merge
+  // copies them verbatim. Both disk passes then write compressed bytes -
+  // this is an SSD-endurance knob as much as a space one (spilled data is
+  // written twice), at the price of codec time at the spill point instead
+  // of at stop.
+  bool compressSpill = true;
 };
 
 enum PartitionWriterType { kLocal, kCeleborn };
