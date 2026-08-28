@@ -286,6 +286,12 @@ ShuffleWriterType decideBoltShuffleWriterType(
   if (options.forceShuffleWriterType && supportAdaptive) {
     const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
     if (forced == ShuffleWriterType::Cell) {
+      if (inputType->size() < 2) {
+        // pid column only: nothing for the cell writer to lay out.
+        LOG(INFO) << "CellShuffleWriter needs at least one data column; "
+                     "falling back to V1";
+        return ShuffleWriterType::V1;
+      }
       if (options.partitionWriterOptions.partitionWriterType ==
           PartitionWriterType::kCeleborn) {
         // The RSS backend of the cell writer is a later phase; remote
