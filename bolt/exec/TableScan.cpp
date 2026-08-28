@@ -579,7 +579,7 @@ void TableScan::close() {
     asyncThreadCtx_->wait();
   }
 
-  LOG_IF(INFO, waitUs > 60'000'000)
+  LOG_IF(INFO, waitUs > 60'000)
       << "TableScan close wait async thread ctx cost: " << waitUs / 1000
       << "ms, task " << operatorCtx_->task()->taskId()
       << " state = " << operatorCtx_->task()->state();
