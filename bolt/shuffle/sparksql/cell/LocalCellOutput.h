@@ -19,6 +19,7 @@
 #include <cstdio>
 
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
+#include "bolt/shuffle/sparksql/cell/PoolBytes.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -33,10 +34,13 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// and touches no temporary file at all.
 class LocalCellOutput final : public CellOutput {
  public:
+  /// `pool` backs the gather/compress workspaces so they stay inside task
+  /// memory accounting; it must outlive this object.
   LocalCellOutput(
       PartitionWriterOptions options,
       const CellLayout* layout,
-      CellShuffleOptions cellOptions);
+      CellShuffleOptions cellOptions,
+      memory::MemoryPool* pool);
   ~LocalCellOutput() override;
 
   void spillRun(const CellWindowInput& in) override;
@@ -112,8 +116,12 @@ class LocalCellOutput final : public CellOutput {
   /// Final-merge codec; null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
   uint64_t compressTimeNs_{0};
-  std::string runScratch_;
-  std::string compressScratch_;
+  /// Pool-backed workspaces, released after every spill and after finalize
+  /// so their capacity never sits on the reservation between uses. When the
+  /// pool cannot fund them during a pressure spill, spillRun degrades to
+  /// streaming the run out uncompressed instead of failing.
+  PoolBytes runScratch_;
+  PoolBytes compressScratch_;
 
   std::FILE* spillFile_{nullptr};
   int spillFd_{-1};
@@ -129,7 +137,7 @@ class LocalCellOutput final : public CellOutput {
   uint64_t rawAccum_{0};
   uint64_t evictTimeNs_{0};
   uint64_t writeTimeNs_{0};
-  std::string scratch_;
+  PoolBytes scratch_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

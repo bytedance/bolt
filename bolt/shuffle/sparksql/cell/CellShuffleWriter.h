@@ -53,6 +53,7 @@ class CellShuffleWriter final : public ShuffleWriter {
 
  private:
   void initOnFirstBatch(const RowVector& rv);
+  arrow::Status splitBatch(RowVectorPtr rv);
   const int32_t* pidArray(const RowVector& rv);
   void onBeforeChunkGrow();
   void spillRunNow();

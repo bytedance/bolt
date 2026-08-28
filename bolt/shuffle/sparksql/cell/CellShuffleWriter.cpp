@@ -106,7 +106,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
         onBeforeChunkGrow();
       });
   output_ = std::make_unique<LocalCellOutput>(
-      options_.partitionWriterOptions, &layout_, cellOpts);
+      options_.partitionWriterOptions, &layout_, cellOpts, boltPool_);
 
   windowRowStart_.assign(numPartitions_, 0);
   perPidCounter_.assign(numPartitions_, 0);
@@ -142,12 +142,42 @@ const int32_t* CellShuffleWriter::pidArray(const RowVector& rv) {
 arrow::Status CellShuffleWriter::split(
     RowVectorPtr rv,
     int64_t /*memLimitIgnored: cell memory decisions never use it*/) {
-  const uint64_t start = nowNs();
   BOLT_CHECK(!stopped_, "split after stop");
-  inSplit_ = true;
+  // The factory keeps composite plans on V1 via the query config; a
+  // composite vector arriving anyway must fail loudly rather than be
+  // written as bytes the reader cannot interpret.
+  BOLT_CHECK(
+      !RowVector::isComposite(rv),
+      "CellShuffleWriter cannot split a CompositeRowVector");
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
+  // Oversized inputs are sliced so a checkpoint boundary exists inside
+  // them: one giant batch must not inflate a single payload window past
+  // the reader-side bounds (the legacy writers slice the same way).
+  const int64_t flatSize = rv->estimateFlatSize();
+  if (flatSize > kMaxShuffleWriterBatchBytes && rv->size() > 1) {
+    const int32_t pieces = static_cast<int32_t>(std::min<int64_t>(
+        rv->size(),
+        (flatSize + kMaxShuffleWriterBatchBytes - 1) /
+            kMaxShuffleWriterBatchBytes));
+    const int32_t rowsPerPiece = (rv->size() + pieces - 1) / pieces;
+    for (int32_t begin = 0; begin < rv->size(); begin += rowsPerPiece) {
+      const int32_t length =
+          std::min<int32_t>(rowsPerPiece, rv->size() - begin);
+      auto piece = std::dynamic_pointer_cast<RowVector>(
+          rv->slice(begin, length));
+      BOLT_CHECK_NOT_NULL(piece);
+      RETURN_NOT_OK(splitBatch(std::move(piece)));
+    }
+    return arrow::Status::OK();
+  }
+  return splitBatch(std::move(rv));
+}
+
+arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
+  const uint64_t start = nowNs();
+  inSplit_ = true;
   const uint32_t numRows = rv->size();
   if (numRows == 0) {
     inSplit_ = false;

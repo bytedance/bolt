@@ -68,8 +68,14 @@ CellPayloadDecoder::CellPayloadDecoder(
     : layout_(std::move(layout)),
       decompressor_(decompressor),
       pool_(pool),
-      limits_(limits) {
-  streamBytes_.resize(layout_.numStreams());
+      limits_(limits),
+      nullBody_(pool),
+      scratch_(pool),
+      scratch2_(pool) {
+  streamBytes_.reserve(layout_.numStreams());
+  for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
+    streamBytes_.emplace_back(pool);
+  }
   tags_.resize(layout_.numColumns());
   nonNullCount_.resize(layout_.numColumns());
   bitmaps_.resize(layout_.numColumns());
@@ -105,7 +111,7 @@ bool CellPayloadDecoder::parseNullRegion(
     if (!decompressor_->decompress(
             reinterpret_cast<const uint8_t*>(scratch_.data()),
             nullStoredSize,
-            nullBody_.data(),
+            nullBody_.udata(),
             nullDecodedSize)) {
       // Rule 5: the decompressed length must match exactly.
       return fail(error, "null body decompression failed");
@@ -119,7 +125,7 @@ bool CellPayloadDecoder::parseNullRegion(
   }
   uint32_t rawNullColumns = 0;
   for (uint32_t col = 0; col < numColumns; ++col) {
-    const auto tag = getNullTag(nullBody_.data(), col);
+    const auto tag = getNullTag(nullBody_.udata(), col);
     if (tag == NullTag::kReserved) {
       return fail(error, "reserved null tag"); // rule 7
     }
@@ -128,7 +134,7 @@ bool CellPayloadDecoder::parseNullRegion(
   }
   // Unused high bits of the last tags byte must be zero.
   if ((numColumns % 4) != 0) {
-    const uint8_t tail = nullBody_[tagBytes - 1];
+    const uint8_t tail = nullBody_.udata()[tagBytes - 1];
     if ((tail >> ((numColumns % 4) * 2)) != 0) {
       return fail(error, "non-zero unused null tag bits");
     }
@@ -141,7 +147,7 @@ bool CellPayloadDecoder::parseNullRegion(
     return fail(error, "null body length mismatch"); // rule 6
   }
 
-  const uint8_t* cursor = nullBody_.data() + tagBytes;
+  const uint8_t* cursor = nullBody_.udata() + tagBytes;
   for (uint32_t col = 0; col < numColumns; ++col) {
     switch (tags_[col]) {
       case NullTag::kAllNull:
