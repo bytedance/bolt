@@ -78,10 +78,10 @@ void buildNullBody(
 LocalCellOutput::LocalCellOutput(
     PartitionWriterOptions options,
     const CellLayout* layout,
-    int64_t compressMinRunBytes)
+    CellShuffleOptions cellOptions)
     : options_(std::move(options)),
       layout_(layout),
-      compressMinRunBytes_(compressMinRunBytes) {
+      cellOptions_(cellOptions) {
   if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
     codec_ = createCodec(
         options_.compressionType,
@@ -149,27 +149,46 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   ends.resize(in.numPartitions + 1);
   ends[0] = spillOffset_;
 
-  scratch_.clear();
+  const bool compressHere = cellOptions_.compressSpill && codec_ != nullptr;
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     uint64_t total = 0;
     for (uint32_t s = 0; s < numStreams; ++s) {
       total += in.cells->bytes(pid, s);
     }
     if (total > 0) {
-      // Run body, COMBINED_STORED (spec section 5): layout byte, the single
-      // stored size, the decoded size of every stream, then the bytes.
+      // Run body (spec section 5): layout byte, the single stored size, the
+      // decoded size of every stream, then the bytes. With spill
+      // compression on, the segment is already the final COMBINED wire form
+      // and the merge copies it verbatim - both disk passes write the
+      // compressed bytes (the SSD-endurance path).
+      const char* body = nullptr;
+      uint64_t stored = total;
+      auto runLayout = RunLayout::kCombinedStored;
+      if (compressHere) {
+        runScratch_.clear();
+        runScratch_.reserve(total);
+        for (uint32_t s = 0; s < numStreams; ++s) {
+          in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
+            runScratch_.append(data, bytes);
+          });
+        }
+        runLayout = maybeCompressRun(runScratch_.data(), total, body, stored);
+      }
       scratch_.clear();
-      scratch_.push_back(
-          static_cast<char>(static_cast<uint8_t>(RunLayout::kCombinedStored)));
-      appendLe64(scratch_, total);
+      scratch_.push_back(static_cast<char>(static_cast<uint8_t>(runLayout)));
+      appendLe64(scratch_, stored);
       for (uint32_t s = 0; s < numStreams; ++s) {
         appendLe64(scratch_, in.cells->bytes(pid, s));
       }
       spillWrite(scratch_.data(), scratch_.size());
-      for (uint32_t s = 0; s < numStreams; ++s) {
-        in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
-          spillWrite(data, bytes);
-        });
+      if (compressHere) {
+        spillWrite(body, stored);
+      } else {
+        for (uint32_t s = 0; s < numStreams; ++s) {
+          in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
+            spillWrite(data, bytes);
+          });
+        }
       }
     }
     ends[pid + 1] = spillOffset_;
@@ -211,20 +230,15 @@ void LocalCellOutput::writeOut(std::FILE* out, const void* data, size_t bytes) {
   finalBytes_ += bytes;
 }
 
-void LocalCellOutput::writeRun(
-    std::FILE* out,
+RunLayout LocalCellOutput::maybeCompressRun(
     const char* data,
     uint64_t dataBytes,
-    const uint64_t* decodedSizes) {
-  const uint32_t numStreams = layout_->numStreams();
-  const uint64_t headerBytes = 1 + 8 + 8ull * numStreams;
-  rawAccum_ += headerBytes + dataBytes;
-
-  const char* body = data;
-  uint64_t stored = dataBytes;
-  auto runLayout = RunLayout::kCombinedStored;
+    const char*& body,
+    uint64_t& stored) {
+  body = data;
+  stored = dataBytes;
   if (codec_ != nullptr &&
-      dataBytes >= static_cast<uint64_t>(compressMinRunBytes_)) {
+      dataBytes >= static_cast<uint64_t>(cellOptions_.compressMinRunBytes)) {
     const uint64_t start = nowNs();
     compressScratch_.resize(codec_->maxCompressedLen(dataBytes));
     const int64_t written = codec_->compress(
@@ -238,9 +252,24 @@ void LocalCellOutput::writeRun(
     if (written > 0 && static_cast<uint64_t>(written) < dataBytes) {
       body = compressScratch_.data();
       stored = static_cast<uint64_t>(written);
-      runLayout = RunLayout::kCombined;
+      return RunLayout::kCombined;
     }
   }
+  return RunLayout::kCombinedStored;
+}
+
+void LocalCellOutput::writeRun(
+    std::FILE* out,
+    const char* data,
+    uint64_t dataBytes,
+    const uint64_t* decodedSizes) {
+  const uint32_t numStreams = layout_->numStreams();
+  const uint64_t headerBytes = 1 + 8 + 8ull * numStreams;
+  rawAccum_ += headerBytes + dataBytes;
+
+  const char* body = nullptr;
+  uint64_t stored = 0;
+  const auto runLayout = maybeCompressRun(data, dataBytes, body, stored);
 
   scratch_.clear();
   scratch_.push_back(static_cast<char>(static_cast<uint8_t>(runLayout)));
@@ -285,16 +314,38 @@ void LocalCellOutput::writeDiskPayload(
     if (segmentBytes == 0) {
       continue;
     }
-    // The spill segment is a COMBINED_STORED run body; lift its stream
-    // sizes and hand the data to the (possibly compressing) run writer.
+    // The spill segment is a run body in wire form.
     BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
     scratch_.resize(runHeaderBytes);
     readSpill(ends[pid], scratch_.data(), runHeaderBytes);
+    const auto segmentLayout = static_cast<RunLayout>(
+        static_cast<uint8_t>(scratch_[0]));
+    ::memcpy(decodedSizes.data(), scratch_.data() + 9, 8ull * numStreams);
+    if (segmentLayout == RunLayout::kCombined) {
+      // Compressed at spill time: already the final form, copy verbatim.
+      uint64_t decodedSum = 0;
+      for (const auto size : decodedSizes) {
+        decodedSum += size;
+      }
+      rawAccum_ += runHeaderBytes + decodedSum;
+      writeOut(out, scratch_.data(), runHeaderBytes);
+      char copyBuffer[64 << 10];
+      uint64_t offset = ends[pid] + runHeaderBytes;
+      uint64_t left = segmentBytes - runHeaderBytes;
+      while (left > 0) {
+        const size_t chunk =
+            left < sizeof(copyBuffer) ? left : sizeof(copyBuffer);
+        readSpill(offset, copyBuffer, chunk);
+        writeOut(out, copyBuffer, chunk);
+        offset += chunk;
+        left -= chunk;
+      }
+      continue;
+    }
     BOLT_CHECK_EQ(
-        static_cast<uint8_t>(scratch_[0]),
+        static_cast<uint8_t>(segmentLayout),
         static_cast<uint8_t>(RunLayout::kCombinedStored),
         "corrupt cell spill segment");
-    ::memcpy(decodedSizes.data(), scratch_.data() + 9, 8ull * numStreams);
     const uint64_t dataBytes = segmentBytes - runHeaderBytes;
     runScratch_.resize(dataBytes);
     readSpill(ends[pid] + runHeaderBytes, runScratch_.data(), dataBytes);

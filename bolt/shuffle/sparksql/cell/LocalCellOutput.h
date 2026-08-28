@@ -36,7 +36,7 @@ class LocalCellOutput final : public CellOutput {
   LocalCellOutput(
       PartitionWriterOptions options,
       const CellLayout* layout,
-      int64_t compressMinRunBytes);
+      CellShuffleOptions cellOptions);
   ~LocalCellOutput() override;
 
   void spillRun(const CellWindowInput& in) override;
@@ -72,11 +72,19 @@ class LocalCellOutput final : public CellOutput {
   /// Appends one partition's payload assembled from a sealed window.
   void writeDiskPayload(std::FILE* out, const SealedWindow& w, uint32_t pid);
 
-  /// Writes one run to the data file, compressing it as a COMBINED run when
-  /// the codec shrinks it, else as COMBINED_STORED (spec section 5: a
-  /// writer should fall back to the uncompressed form when compression does
-  /// not pay). `data` is the concatenated stream bytes; sizes are the
-  /// per-stream decoded lengths.
+  /// Compression policy shared by spill and merge: points `body`/`stored`
+  /// at the COMBINED form when the codec shrinks the bytes, else at the
+  /// input (spec section 5: fall back to the stored form when compression
+  /// does not pay). Returns the layout to declare.
+  RunLayout maybeCompressRun(
+      const char* data,
+      uint64_t dataBytes,
+      const char*& body,
+      uint64_t& stored);
+
+  /// Writes one run to the data file, compressed per the policy above.
+  /// `data` is the concatenated stream bytes; sizes are the per-stream
+  /// decoded lengths.
   void writeRun(
       std::FILE* out,
       const char* data,
@@ -90,7 +98,7 @@ class LocalCellOutput final : public CellOutput {
 
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
-  const int64_t compressMinRunBytes_;
+  const CellShuffleOptions cellOptions_;
   /// Final-merge codec; null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
   uint64_t compressTimeNs_{0};
