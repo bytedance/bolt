@@ -81,9 +81,13 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
       static_cast<int32_t>(ShuffleWriterType::Cell)) {
     // Composite row vectors (HashAggregation composite output) switch the
     // input layout mid-stream; the cell writer stays out of that entirely.
-    const bool compositePossible = RowVector::isComposite(rv) ||
-        operatorCtx_->driverCtx()->queryConfig().isHashAggregationCompositeOutputEnabled();
-    if (compositePossible) {
+    // Only the query config gates this: the reader mirrors the same check,
+    // and a data-dependent downgrade here would be invisible to it. Should
+    // a composite vector ever arrive with the config off, the cell writer
+    // fails loudly instead of writing bytes the reader cannot read.
+    if (operatorCtx_->driverCtx()
+            ->queryConfig()
+            .isHashAggregationCompositeOutputEnabled()) {
       LOG(INFO) << "CellShuffleWriter does not support composite input; "
                    "falling back to V1";
       options.forceShuffleWriterType =
