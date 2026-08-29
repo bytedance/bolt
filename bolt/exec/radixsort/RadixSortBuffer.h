@@ -96,6 +96,12 @@ class RadixSortBuffer : public SortBufferBase {
 
   void ensureInputFits(const VectorPtr& input);
 
+  void ensureMergeFits();
+
+  void ensureOutputFits(vector_size_t batchSize);
+
+  bool canReuseOutput(vector_size_t batchSize) const;
+
   void spillBuildingRun();
 
   void spillRemainingOutput();
@@ -103,6 +109,8 @@ class RadixSortBuffer : public SortBufferBase {
   void prepareMerge();
 
   void accumulateSpillReadStats();
+
+  void prepareOutputVector(vector_size_t outputBatchSize);
 
   const RowTypePtr inputType_;
   memory::MemoryPool* const pool_;
@@ -123,6 +131,7 @@ class RadixSortBuffer : public SortBufferBase {
   std::unique_ptr<RadixSortMerger> merger_;
   BufferPtr mergeKeyRows_;
   BufferPtr mergePayloadRows_;
+  RowVectorPtr output_;
   bool noMoreInput_{false};
   bool outputStageSpilled_{false};
   uint64_t inputRows_{0};

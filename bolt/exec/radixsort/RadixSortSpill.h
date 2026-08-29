@@ -20,6 +20,7 @@
 
 #include <folly/Synchronized.h>
 
+#include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/base/SpillStats.h"
 #include "bolt/exec/SpillFile.h"
@@ -28,6 +29,9 @@
 #include "bolt/exec/radixsort/RadixSortSpillSections.h"
 
 namespace bytedance::bolt::exec::radixsort {
+
+constexpr uint64_t kRadixSortSpillBufferSize =
+    (1UL << 20) - AlignedBuffer::kPaddedSize;
 
 struct RadixSortSpillFile {
   uint32_t id;

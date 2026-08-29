@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <span>
 
 #include <folly/ScopeGuard.h>
@@ -97,6 +98,25 @@ void appendSpillRun(
   spillRuns.back().files.swap(files);
 }
 
+uint64_t spillReadBytesPerRun(common::CompressionKind compressionKind) {
+  uint64_t bytes = 2 * kRadixSortSpillBufferSize;
+  if (isSpillCompressionEnabled(compressionKind)) {
+    bytes += kRadixSortSpillBufferSize / 10;
+  }
+  return bytes;
+}
+
+bool maybeReserve(
+    memory::MemoryPool* pool,
+    uint64_t bytes,
+    tsan_atomic<bool>* nonReclaimableSection) {
+  if (nonReclaimableSection == nullptr) {
+    return pool->maybeReserve(bytes);
+  }
+  memory::ReclaimableSectionGuard guard(nonReclaimableSection);
+  return pool->maybeReserve(bytes);
+}
+
 } // namespace
 
 RadixSortBuffer::RadixSortBuffer(
@@ -167,6 +187,7 @@ void RadixSortBuffer::addInput(const VectorPtr& input) {
 }
 
 void RadixSortBuffer::noMoreInput() {
+  ensureMergeFits();
   if (run_->state() == RadixSortRunState::kBuilding) {
     run_->finalize();
   }
@@ -182,13 +203,16 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
   if (outputRows_ == inputRows_) {
     return nullptr;
   }
+  const auto count = static_cast<vector_size_t>(std::min<uint64_t>(
+      inputRows_ - outputRows_, static_cast<uint64_t>(maxOutputRows)));
+
   RowVectorPtr result;
+  ensureOutputFits(count);
   if (merger_ == nullptr) {
-    result = run_->getOutput(maxOutputRows, pool_);
+    prepareOutputVector(count);
+    result = run_->getOutput(count, pool_, output_);
   } else {
     const auto begin = std::chrono::steady_clock::now();
-    const auto count = static_cast<vector_size_t>(std::min<uint64_t>(
-        inputRows_ - outputRows_, static_cast<uint64_t>(maxOutputRows)));
     if (mergeKeyRows_ == nullptr ||
         mergeKeyRows_->capacity() <
             static_cast<uint64_t>(count) * sizeof(char*)) {
@@ -211,11 +235,15 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
         : mergePayloadRows_->asMutable<char*>();
     const auto outputCount = merger_->collectRows(count, rawKeys, rawPayloads);
     if (outputCount > 0) {
+      prepareOutputVector(outputCount);
       const auto payloads = rawPayloads == nullptr
           ? std::span<char* const>{}
           : std::span<char* const>(rawPayloads, outputCount);
       result = run_->getOutput(
-          std::span<const char* const>(rawKeys, outputCount), payloads, pool_);
+          std::span<const char* const>(rawKeys, outputCount),
+          payloads,
+          pool_,
+          output_);
       merger_->releaseRetainedBuffers();
     }
     outputTimeUs_ += std::chrono::duration_cast<std::chrono::microseconds>(
@@ -226,6 +254,33 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
     outputRows_ += result->size();
   }
   return result;
+}
+
+bool RadixSortBuffer::canReuseOutput(vector_size_t batchSize) const {
+  if (output_ == nullptr || output_.use_count() != 1 ||
+      !output_->type()->kindEquals(inputType_) ||
+      output_->encoding() != VectorEncoding::Simple::ROW) {
+    return false;
+  }
+  const auto rowSize = estimateOutputRowSize();
+  if (!rowSize.has_value()) {
+    return false;
+  }
+  const auto outputBytes = checkedMultiply<uint64_t>(*rowSize, batchSize);
+  if (!outputBytes.has_value()) {
+    return false;
+  }
+  return output_->estimateFlatSize() >= *outputBytes;
+}
+
+void RadixSortBuffer::prepareOutputVector(vector_size_t outputBatchSize) {
+  if (output_ != nullptr) {
+    VectorPtr output = std::move(output_);
+    BaseVector::prepareForReuse(output, outputBatchSize);
+    output_ = std::static_pointer_cast<RowVector>(output);
+  } else {
+    output_ = BaseVector::create<RowVector>(inputType_, outputBatchSize, pool_);
+  }
 }
 
 std::optional<common::SortStats> RadixSortBuffer::sortStats() const {
@@ -268,6 +323,90 @@ std::optional<uint64_t> RadixSortBuffer::estimateOutputRowSize() const {
     return std::nullopt;
   }
   return std::max<uint64_t>(bytes / rows, 1);
+}
+
+void RadixSortBuffer::ensureMergeFits() {
+  if (spillConfig_ == nullptr || spilledRuns_.empty()) {
+    return;
+  }
+
+  uint64_t spillRunCount = 0;
+  for (const auto& spillRun : spilledRuns_) {
+    if (!spillRun.files.empty()) {
+      ++spillRunCount;
+    }
+  }
+  if (spillRunCount == 0) {
+    return;
+  }
+
+  const auto incrementBytes = checkedMultiply<uint64_t>(
+      spillRunCount, spillReadBytesPerRun(spillConfig_->compressionKind));
+  if (!incrementBytes.has_value() || *incrementBytes == 0) {
+    return;
+  }
+  const auto targetIncrementBytes =
+      checkedMultiply<uint64_t>(*incrementBytes, uint64_t{2});
+  if (!targetIncrementBytes.has_value() || *targetIncrementBytes == 0) {
+    return;
+  }
+
+  const auto availableReservationBytes = static_cast<uint64_t>(
+      std::max<int64_t>(pool_->availableReservation(), 0));
+  if (availableReservationBytes > *targetIncrementBytes) {
+    return;
+  }
+
+  if (maybeReserve(pool_, *targetIncrementBytes, nonReclaimableSection_)) {
+    return;
+  }
+
+  LOG(WARNING) << "Failed to reserve " << succinctBytes(*targetIncrementBytes)
+               << " before preparing radix sort merge, spill runs: "
+               << spillRunCount << ", pool: " << pool_->name()
+               << ", usage: " << succinctBytes(pool_->currentBytes())
+               << ", reservation: " << succinctBytes(pool_->reservedBytes());
+}
+
+void RadixSortBuffer::ensureOutputFits(vector_size_t batchSize) {
+  if (batchSize <= 0 || spillConfig_ == nullptr || canReuseOutput(batchSize)) {
+    return;
+  }
+
+  const auto rowSize = estimateOutputRowSize();
+  if (!rowSize.has_value()) {
+    return;
+  }
+  const auto outputBytes = checkedMultiply<uint64_t>(*rowSize, batchSize);
+  if (!outputBytes.has_value()) {
+    return;
+  }
+  const auto outputPaddingBytes = *outputBytes / 5;
+  if (*outputBytes >
+      std::numeric_limits<uint64_t>::max() - outputPaddingBytes) {
+    return;
+  }
+  const auto incrementBytes = *outputBytes + outputPaddingBytes;
+  const auto targetIncrementBytes =
+      checkedMultiply<uint64_t>(incrementBytes, uint64_t{2});
+  if (!targetIncrementBytes.has_value() || *targetIncrementBytes == 0) {
+    return;
+  }
+
+  const auto availableReservationBytes = static_cast<uint64_t>(
+      std::max<int64_t>(pool_->availableReservation(), 0));
+  if (availableReservationBytes > *targetIncrementBytes) {
+    return;
+  }
+
+  if (maybeReserve(pool_, *targetIncrementBytes, nonReclaimableSection_)) {
+    return;
+  }
+
+  LOG(WARNING) << "Failed to reserve " << succinctBytes(*targetIncrementBytes)
+               << " before producing radix sort output, pool: " << pool_->name()
+               << ", usage: " << succinctBytes(pool_->currentBytes())
+               << ", reservation: " << succinctBytes(pool_->reservedBytes());
 }
 
 std::unique_ptr<RadixSortRun> RadixSortBuffer::makeRun() const {
@@ -630,7 +769,7 @@ void RadixSortBuffer::prepareMerge() {
           spillRun.files.front(),
           meta,
           run_->payloadLayout().get(),
-          memory::spillMemoryPool(),
+          pool_,
           spillConfig_->spillUringEnabled,
           readBufferCache.get()));
     } else {
@@ -638,7 +777,7 @@ void RadixSortBuffer::prepareMerge() {
           spillRun.files,
           meta,
           run_->payloadLayout().get(),
-          memory::spillMemoryPool(),
+          pool_,
           spillConfig_->spillUringEnabled,
           readBufferCache.get()));
     }

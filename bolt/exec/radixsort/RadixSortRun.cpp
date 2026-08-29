@@ -167,20 +167,28 @@ void RadixSortOutputProjection::projectPayload(
 RowVectorPtr RadixSortOutputProjection::reconstruct(
     const RowVectorPtr& decodedKeys,
     const RowVectorPtr& payload,
-    memory::MemoryPool* pool) const {
-  std::vector<VectorPtr> children(outputType_->size());
-  for (uint32_t output = 0; output < columns_.size(); ++output) {
-    const auto& column = columns_[output];
-    if (column.source == RadixSortOutputSource::kDecodedKey) {
-      children[output] = decodedKeys->childAt(column.sourceIndex);
-    } else {
-      children[output] = payload->childAt(column.sourceIndex);
-    }
-  }
+    memory::MemoryPool* pool,
+    RowVectorPtr& output) const {
   const auto size =
       decodedKeys != nullptr ? decodedKeys->size() : payload->size();
-  return std::make_shared<RowVector>(
-      pool, outputType_, nullptr, size, std::move(children));
+  if (output == nullptr) {
+    output = std::make_shared<RowVector>(
+        pool,
+        outputType_,
+        nullptr,
+        size,
+        std::vector<VectorPtr>(outputType_->size()));
+  }
+  for (uint32_t outputChannel = 0; outputChannel < columns_.size();
+       ++outputChannel) {
+    const auto& column = columns_[outputChannel];
+    if (column.source == RadixSortOutputSource::kDecodedKey) {
+      output->childAt(outputChannel) = decodedKeys->childAt(column.sourceIndex);
+    } else {
+      output->childAt(outputChannel) = payload->childAt(column.sourceIndex);
+    }
+  }
+  return output;
 }
 
 std::unique_ptr<RadixSortRun> RadixSortRun::create(
@@ -375,6 +383,14 @@ void RadixSortRun::finalize() {
 RowVectorPtr RadixSortRun::getOutput(
     vector_size_t maxRows,
     memory::MemoryPool* outputPool) {
+  RowVectorPtr output;
+  return getOutput(maxRows, outputPool, output);
+}
+
+RowVectorPtr RadixSortRun::getOutput(
+    vector_size_t maxRows,
+    memory::MemoryPool* outputPool,
+    RowVectorPtr& output) {
   if (state_ == RadixSortRunState::kConsumed) {
     return nullptr;
   }
@@ -399,7 +415,8 @@ RowVectorPtr RadixSortRun::getOutput(
   auto result = projection_->reconstruct(
       projection_->needsDecodedKeys() ? decodedKeys : nullptr,
       projection_->hasPayload() ? payload : nullptr,
-      outputPool);
+      outputPool,
+      output);
 
   outputPosition_ += count;
   metrics_.outputRows = *nextOutputRows;
@@ -414,6 +431,15 @@ RowVectorPtr RadixSortRun::getOutput(
     std::span<const char* const> keys,
     std::span<char* const> payloads,
     memory::MemoryPool* outputPool) {
+  RowVectorPtr output;
+  return getOutput(keys, payloads, outputPool, output);
+}
+
+RowVectorPtr RadixSortRun::getOutput(
+    std::span<const char* const> keys,
+    std::span<char* const> payloads,
+    memory::MemoryPool* outputPool,
+    RowVectorPtr& output) {
   const auto count = static_cast<vector_size_t>(keys.size());
   if (count == 0) {
     return nullptr;
@@ -426,7 +452,8 @@ RowVectorPtr RadixSortRun::getOutput(
   auto result = projection_->reconstruct(
       projection_->needsDecodedKeys() ? decodedKeys : nullptr,
       projection_->hasPayload() ? payload : nullptr,
-      outputPool);
+      outputPool,
+      output);
   metrics_.outputRows += count;
   return result;
 }

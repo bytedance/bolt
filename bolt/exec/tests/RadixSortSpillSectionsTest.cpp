@@ -77,6 +77,8 @@ class RadixSortSpillSectionsTest : public testing::Test {
  protected:
   static constexpr uint64_t kBlockHeaderSize =
       sizeof(TestRadixSortSpillBlockHeader);
+  static constexpr uint64_t kFixedWriteBufferSize =
+      (1UL << 20) - AlignedBuffer::kPaddedSize;
   std::shared_ptr<memory::MemoryPool> rootPool_{
       memory::memoryManager()->addRootPool()};
   std::shared_ptr<memory::MemoryPool> pool_{
@@ -618,7 +620,8 @@ class RadixSortSpillSectionsTest : public testing::Test {
       const PayloadRowLayout* payloadLayout,
       uint64_t maxFileSize,
       bool outputStage,
-      uint64_t writeBufferSize = 1 << 20) {
+      uint64_t writeBufferSize = 1 << 20,
+      bool writeOneRowPerBlock = false) {
     auto directory = exec::test::TempDirectoryPath::create();
     spillDirectories_.push_back(std::move(directory));
     folly::Synchronized<common::SpillStats> stats;
@@ -634,7 +637,13 @@ class RadixSortSpillSectionsTest : public testing::Test {
         &stats);
 
     std::vector<RadixSortSpillFile> files;
-    if (outputStage) {
+    if (writeOneRowPerBlock) {
+      for (uint64_t row = 0; row < storage.size(); ++row) {
+        writer.writeKeyRange(
+            storage.layout(), payloadLayout, storage.keyDataAt(row), 1);
+      }
+      files = writer.finish();
+    } else if (outputStage) {
       std::vector<char> keyRecords(storage.size() * storage.layout().width());
       for (uint64_t row = 0; row < storage.size(); ++row) {
         std::memcpy(
@@ -1596,7 +1605,7 @@ TEST_F(RadixSortSpillSectionsTest, writerDoesNotFlushAtStorageBlockBoundary) {
       blocks[0].header.keyRecordBytes, storage.size() * keyLayout.width());
 }
 
-TEST_F(RadixSortSpillSectionsTest, writerBodyCapacityHonorsSpillConfig) {
+TEST_F(RadixSortSpillSectionsTest, writerBodyCapacityIgnoresSpillConfig) {
   auto directory = exec::test::TempDirectoryPath::create();
   folly::Synchronized<common::SpillStats> stats;
   RadixSortSpillWriter smallWriter(
@@ -1607,7 +1616,8 @@ TEST_F(RadixSortSpillSectionsTest, writerBodyCapacityHonorsSpillConfig) {
           /*writeBufferSize=*/kBlockHeaderSize + 17),
       pool_.get(),
       &stats);
-  EXPECT_EQ(smallWriter.bodyCapacity(), 17);
+  EXPECT_EQ(
+      smallWriter.bodyCapacity(), kFixedWriteBufferSize - kBlockHeaderSize);
 
   RadixSortSpillWriter defaultWriter(
       directory->path + "/default",
@@ -1617,10 +1627,11 @@ TEST_F(RadixSortSpillSectionsTest, writerBodyCapacityHonorsSpillConfig) {
           /*writeBufferSize=*/0),
       pool_.get(),
       &stats);
-  EXPECT_EQ(defaultWriter.bodyCapacity(), (1 << 20) - kBlockHeaderSize);
+  EXPECT_EQ(
+      defaultWriter.bodyCapacity(), kFixedWriteBufferSize - kBlockHeaderSize);
 }
 
-TEST_F(RadixSortSpillSectionsTest, writerHonorsSmallWriteBufferSize) {
+TEST_F(RadixSortSpillSectionsTest, writerIgnoresSmallWriteBufferSize) {
   auto keyLayout =
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
   RadixSortRunStorage storage(pool_.get(), keyLayout, 1024, 64);
@@ -1634,10 +1645,8 @@ TEST_F(RadixSortSpillSectionsTest, writerHonorsSmallWriteBufferSize) {
       common::CompressionKind_NONE,
       /*writeBufferSize=*/kBlockHeaderSize + 2 * keyLayout.width());
   const auto blocks = readUncompressedBlocks(spill.file);
-  ASSERT_EQ(blocks.size(), 3);
-  EXPECT_EQ(blocks[0].header.rowCount, 2);
-  EXPECT_EQ(blocks[1].header.rowCount, 2);
-  EXPECT_EQ(blocks[2].header.rowCount, 1);
+  ASSERT_EQ(blocks.size(), 1);
+  EXPECT_EQ(blocks[0].header.rowCount, storage.size());
 }
 
 TEST_F(
@@ -2826,7 +2835,7 @@ TEST_F(RadixSortSpillSectionsTest, oversizedRowGetsDedicatedBlock) {
       {"payload_string"},
       {makeStringVector(
           {std::string(16, 'a'),
-           std::string(512, 'b'),
+           std::string(kFixedWriteBufferSize, 'b'),
            std::string(16, 'c')})});
   PayloadRowBatch payloadBatch;
   PayloadRowWriter{}.append(*payload, storage, payloadBatch);
@@ -2844,7 +2853,9 @@ TEST_F(RadixSortSpillSectionsTest, oversizedRowGetsDedicatedBlock) {
   EXPECT_EQ(blocks[0].header.rowCount, 1);
   EXPECT_EQ(blocks[1].header.rowCount, 1);
   EXPECT_EQ(blocks[2].header.rowCount, 1);
-  EXPECT_GT(blocks[1].header.uncompressedSize, 128);
+  EXPECT_GT(
+      blocks[1].header.uncompressedSize,
+      kFixedWriteBufferSize - kBlockHeaderSize);
 }
 
 TEST_F(RadixSortSpillSectionsTest, mixedInlineAndHeapVariableBlockRoundTrip) {
@@ -2912,10 +2923,12 @@ TEST_F(
 }
 
 TEST_F(RadixSortSpillSectionsTest, readerReusesReleasedSerializedBuffer) {
+  const auto reusablePayloadBytes =
+      static_cast<size_t>(kFixedWriteBufferSize / 2 + 4096);
   const std::vector<std::string> values{
-      "first_" + std::string((1 << 20) - 1, 'q'),
-      "second_" + std::string((1 << 20) - 2, 'r'),
-      "third_" + std::string((1 << 20) - 3, 's')};
+      "first_" + std::string(reusablePayloadBytes, 'q'),
+      "second_" + std::string(reusablePayloadBytes - 1, 'r'),
+      "third_" + std::string(reusablePayloadBytes - 2, 's')};
   std::shared_ptr<const PayloadRowLayout> payloadLayout;
   auto spill = writeLargePayloadSpill(values, payloadLayout);
   RadixSortSpillReadBufferCache bufferCache;
@@ -3047,7 +3060,8 @@ TEST_F(
       nullptr,
       /*maxFileSize=*/1,
       /*outputStage=*/false,
-      writeBufferSize);
+      writeBufferSize,
+      /*writeOneRowPerBlock=*/true);
   ASSERT_EQ(files.size(), 3);
   std::vector<std::string> paths;
   for (const auto& file : files) {
@@ -3085,7 +3099,8 @@ TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamReadsSplitRunInOrder) {
       nullptr,
       /*maxFileSize=*/1,
       /*outputStage=*/false,
-      writeBufferSize);
+      writeBufferSize,
+      /*writeOneRowPerBlock=*/true);
   ASSERT_GT(files.size(), 1);
   std::vector<std::string> filePaths;
   filePaths.reserve(files.size());
@@ -3136,7 +3151,8 @@ TEST_F(
       nullptr,
       /*maxFileSize=*/1,
       /*outputStage=*/false,
-      writeBufferSize);
+      writeBufferSize,
+      /*writeOneRowPerBlock=*/true);
   ASSERT_EQ(files.size(), 2);
   RadixSortConcatFilesSpillMergeStream stream(
       std::move(files),
@@ -3182,13 +3198,15 @@ TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamsMergeByLogicalRun) {
       nullptr,
       /*maxFileSize=*/1,
       /*outputStage=*/false,
-      writeBufferSize);
+      writeBufferSize,
+      /*writeOneRowPerBlock=*/true);
   auto evenFiles = spillRunFiles(
       evenStorage,
       nullptr,
       /*maxFileSize=*/1,
       /*outputStage=*/false,
-      writeBufferSize);
+      writeBufferSize,
+      /*writeOneRowPerBlock=*/true);
   ASSERT_GT(oddFiles.size(), 1);
   ASSERT_GT(evenFiles.size(), 1);
 

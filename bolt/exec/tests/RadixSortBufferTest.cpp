@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <filesystem>
 #include <limits>
@@ -25,8 +26,10 @@
 #include <utility>
 #include <vector>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/SortBuffer.h"
 #include "bolt/exec/Spill.h"
 #include "bolt/exec/radixsort/RadixSortBuffer.h"
@@ -49,6 +52,7 @@ class RadixSortBufferTest : public testing::Test {
   static void SetUpTestSuite() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
     filesystems::registerLocalFileSystem();
+    BOLT_TEST_VALUE_ENABLE();
   }
 
  protected:
@@ -56,6 +60,7 @@ class RadixSortBufferTest : public testing::Test {
       memory::memoryManager()->addRootPool()};
   std::shared_ptr<memory::MemoryPool> pool_{
       rootPool_->addLeafChild("radix-sort-buffer-test")};
+  tsan_atomic<bool> nonReclaimableSection_{true};
 
   template <typename T, typename U = T>
   FlatVectorPtr<T> makeVector(
@@ -363,7 +368,9 @@ class RadixSortBufferTest : public testing::Test {
               {SortComparatorOracle::makeSortFlags(true, true)},
               test.pool(),
               &config,
-              spillMemoryThreshold) {
+              spillMemoryThreshold,
+              nullptr,
+              &test.nonReclaimableSection_) {
       test.inputType_ = std::static_pointer_cast<const RowType>(input->type());
     }
 
@@ -1275,6 +1282,63 @@ TEST_F(RadixSortBufferTest, wrappedFloatingPointKeyOutputUsesDecodedKey) {
       *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
 }
 
+TEST_F(RadixSortBufferTest, outputVectorReuse) {
+  auto verify = [&](RadixSortBuffer& buffer, const char* mode) {
+    SCOPED_TRACE(mode);
+    auto first = buffer.getOutput(2);
+    ASSERT_NE(first, nullptr);
+    ASSERT_EQ(first->size(), 2);
+    const auto firstOutput = first.get();
+    const std::vector<int64_t> firstIds{idAt(*first, 0, 2), idAt(*first, 1, 2)};
+
+    auto second = buffer.getOutput(2);
+    ASSERT_NE(second, nullptr);
+    ASSERT_EQ(second->size(), 2);
+    EXPECT_NE(second.get(), firstOutput);
+    EXPECT_EQ(idAt(*first, 0, 2), firstIds[0]);
+    EXPECT_EQ(idAt(*first, 1, 2), firstIds[1]);
+
+    const auto secondOutput = second.get();
+    std::vector<int64_t> ids = firstIds;
+    ids.push_back(idAt(*second, 0, 2));
+    ids.push_back(idAt(*second, 1, 2));
+    first.reset();
+    second.reset();
+
+    auto third = buffer.getOutput(2);
+    ASSERT_NE(third, nullptr);
+    ASSERT_EQ(third->size(), 2);
+    EXPECT_EQ(third.get(), secondOutput);
+    ids.push_back(idAt(*third, 0, 2));
+    ids.push_back(idAt(*third, 1, 2));
+
+    EXPECT_EQ(buffer.getOutput(2), nullptr);
+    EXPECT_EQ(ids, (std::vector<int64_t>{1, 3, 5, 4, 2, 0}));
+  };
+
+  auto input = makeKeyPayloadIdRows({6, 1, 5, 2, 4, 3});
+  const auto inputType = std::static_pointer_cast<const RowType>(input->type());
+  {
+    RadixSortBuffer buffer(
+        inputType,
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool());
+    buffer.addInput(input);
+    buffer.noMoreInput();
+    verify(buffer, "in-memory");
+  }
+
+  {
+    SpillContext spill(*this, input);
+    auto& buffer = spill.buffer;
+    buffer.addInput(input);
+    buffer.spill();
+    buffer.noMoreInput();
+    verify(buffer, "spill-merge");
+  }
+}
+
 TEST_F(RadixSortBufferTest, spillPlansMergeCorrectly) {
   struct SpillPlan {
     const char* name;
@@ -1392,6 +1456,133 @@ TEST_F(RadixSortBufferTest, splitSpillFilesPreserveRunMergeFanIn) {
   buffer.noMoreInput();
   EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   collectAndVerify(buffer, input, 1024, 1);
+}
+
+TEST_F(RadixSortBufferTest, spillMergeReadersUseOperatorPool) {
+  auto verify = [&](const RowVectorPtr& input,
+                    uint64_t maxFileSize,
+                    bool expectSplitFiles,
+                    column_index_t idChannel) {
+    SpillContext spill(
+        *this,
+        input,
+        "none",
+        /*spillMemoryThreshold=*/0,
+        /*keyChannel=*/0,
+        maxFileSize);
+    auto& buffer = spill.buffer;
+    buffer.addInput(input);
+    buffer.spill();
+
+    ASSERT_TRUE(buffer.spilledStats());
+    if (expectSplitFiles) {
+      ASSERT_GT(buffer.spilledStats()->spilledFiles, 1);
+    } else {
+      ASSERT_EQ(buffer.spilledStats()->spilledFiles, 1);
+    }
+
+    const auto spillPoolBytesBefore =
+        memory::spillMemoryPool()->stats().currentBytes;
+    const auto operatorPoolBytesBefore = pool()->currentBytes();
+    buffer.noMoreInput();
+
+    EXPECT_EQ(
+        memory::spillMemoryPool()->stats().currentBytes, spillPoolBytesBefore);
+    EXPECT_GT(pool()->currentBytes(), operatorPoolBytesBefore);
+    EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+
+    collectAndVerify(
+        buffer,
+        input,
+        /*batchSize=*/257,
+        idChannel,
+        /*keyChannel=*/0);
+  };
+
+  verify(makeKeyPayloadIdRows({4, 1, 3, 2}), 0, false, 2);
+
+  constexpr vector_size_t kRows = 4;
+  verify(
+      makeLargeStringKeyIdRows(generate<int64_t>(
+          kRows, [](vector_size_t row) { return kRows - row; })),
+      512 * 1024,
+      true,
+      1);
+}
+
+DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureMergeFitsCanTriggerReclaimSpill) {
+  auto input = makeKeyPayloadIdRows({9, 1, 8, 2, 7, 3});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(slice(*input, 0, 3));
+  buffer.spill();
+  buffer.addInput(slice(*input, 3, 3));
+
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 1);
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
+  pool()->release();
+
+  std::atomic<bool> injected{false};
+  std::atomic<bool> spilling{false};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve",
+      std::function<void(memory::MemoryPoolImpl*)>(
+          ([&](memory::MemoryPoolImpl* pool) {
+            if (pool != this->pool() || injected.exchange(true) || spilling) {
+              return;
+            }
+            EXPECT_FALSE(nonReclaimableSection_);
+            spilling = true;
+            buffer.spill();
+            spilling = false;
+          })));
+
+  buffer.noMoreInput();
+
+  EXPECT_TRUE(injected);
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
+  EXPECT_EQ(buffer.spilledStats()->spilledRows, input->size());
+  EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+  collectAndVerify(buffer, input, 2, 2);
+}
+
+DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureOutputFitsCanTriggerReclaimSpill) {
+  auto input = makeLargeStringKeyIdRows({9, 1, 8, 2, 7, 3});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{3, true}, {3, false}});
+  buffer.noMoreInput();
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+  pool()->release();
+
+  std::atomic<bool> injected{false};
+  std::atomic<bool> spilling{false};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve",
+      std::function<void(memory::MemoryPoolImpl*)>(
+          ([&](memory::MemoryPoolImpl* pool) {
+            if (pool != this->pool() || injected.exchange(true) || spilling) {
+              return;
+            }
+            EXPECT_FALSE(nonReclaimableSection_);
+            spilling = true;
+            buffer.spill();
+            spilling = false;
+          })));
+
+  auto output = collect(buffer, 2);
+
+  EXPECT_TRUE(injected);
+  ASSERT_TRUE(buffer.spilledStats());
+  EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 1);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
+  EXPECT_EQ(buffer.numOutputRows(), input->size());
 }
 
 TEST_F(RadixSortBufferTest, splitOutputStageSpillFilesMergeAsSingleRun) {
