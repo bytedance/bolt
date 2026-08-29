@@ -86,7 +86,8 @@ class RadixSortOutputProjection {
   RowVectorPtr reconstruct(
       const RowVectorPtr& decodedKeys,
       const RowVectorPtr& payload,
-      memory::MemoryPool* pool) const;
+      memory::MemoryPool* pool,
+      RowVectorPtr& output) const;
 
  private:
   RadixSortOutputProjection(
@@ -227,9 +228,20 @@ class RadixSortRun {
   RowVectorPtr getOutput(vector_size_t maxRows, memory::MemoryPool* outputPool);
 
   RowVectorPtr getOutput(
+      vector_size_t maxRows,
+      memory::MemoryPool* outputPool,
+      RowVectorPtr& output);
+
+  RowVectorPtr getOutput(
       std::span<const char* const> keys,
       std::span<char* const> payloads,
       memory::MemoryPool* outputPool);
+
+  RowVectorPtr getOutput(
+      std::span<const char* const> keys,
+      std::span<char* const> payloads,
+      memory::MemoryPool* outputPool,
+      RowVectorPtr& output);
 
   vector_size_t collectRemainingRows(
       vector_size_t maxRows,

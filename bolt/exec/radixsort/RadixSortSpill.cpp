@@ -43,7 +43,6 @@ struct RadixSortSpillBlockHeader {
 };
 
 constexpr uint64_t kBlockHeaderSize = sizeof(RadixSortSpillBlockHeader);
-constexpr uint64_t kDefaultWriteBufferSize = 1 << 20;
 static_assert(sizeof(RadixSortSpillBlockHeader) == 48);
 
 template <RadixSortKeyLayoutKind KIND>
@@ -179,7 +178,7 @@ RadixSortSpillWriter::RadixSortSpillWriter(
     memory::MemoryPool* pool,
     folly::Synchronized<common::SpillStats>* stats)
     : compressionKind_(ioConfig.compressionKind),
-      writeBufferSize_(ioConfig.writeBufferSize),
+      writeBufferSize_(kRadixSortSpillBufferSize),
       pool_(pool),
       spillWriter_(std::make_unique<SpillWriter>(
           std::move(pathPrefix),
@@ -204,8 +203,7 @@ void RadixSortSpillWriter::resetWriteState() {
 }
 
 void RadixSortSpillWriter::prepareWriteBuffer() {
-  const auto requested =
-      writeBufferSize_ == 0 ? kDefaultWriteBufferSize : writeBufferSize_;
+  const auto requested = writeBufferSize_;
   BOLT_CHECK_GT(
       requested,
       kBlockHeaderSize,
@@ -318,8 +316,7 @@ void RadixSortSpillWriter::ensureBuffer(uint64_t bytes) {
 }
 
 uint64_t RadixSortSpillWriter::bodyCapacity() const {
-  const auto requested =
-      writeBufferSize_ == 0 ? kDefaultWriteBufferSize : writeBufferSize_;
+  const auto requested = writeBufferSize_;
   BOLT_CHECK_GT(
       requested,
       kBlockHeaderSize,
@@ -515,10 +512,7 @@ RadixSortSpillReader::RadixSortSpillReader(
       file_(std::move(file)),
       meta_(std::move(meta)),
       payloadLayout_(payloadLayout),
-      maxReusableSerializedBufferSize_(
-          pool->preferredSize(
-              kDefaultWriteBufferSize + AlignedBuffer::kPaddedSize) -
-          AlignedBuffer::kPaddedSize),
+      maxReusableSerializedBufferSize_(kRadixSortSpillBufferSize),
       bufferCache_(std::move(bufferCache)) {
   meta_.initialize(payloadLayout_);
 }
