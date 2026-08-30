@@ -18,11 +18,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 
 #include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortRunSorter.h"
 
 namespace bytedance::bolt::exec::radixsort {
+namespace test {
+class RadixSortRunOffsetOutputTest;
+}
 
 enum class RadixSortOutputSource : uint8_t {
   kDecodedKey = 0,
@@ -251,6 +255,14 @@ class RadixSortRun {
   void clear();
 
  private:
+  friend class RadixSortBuffer;
+  friend class test::RadixSortRunOffsetOutputTest;
+
+  struct MergeDecodePlan {
+    std::optional<uint32_t> singleFixedWordBytes;
+    uint64_t scratchWords{0};
+  };
+
   RadixSortRun(
       memory::MemoryPool* pool,
       std::unique_ptr<RadixSortOutputProjection> projection,
@@ -293,6 +305,27 @@ class RadixSortRun {
       std::span<char* const> payloads,
       memory::MemoryPool* outputPool);
 
+  void writeMergeOutput(
+      std::span<const char* const> keys,
+      std::span<char* const> payloads,
+      vector_size_t outputOffset,
+      RowVector& output);
+
+  void prepareMergeOutput(RowVector& output);
+
+  void finishMergeOutput(RowVector& output, vector_size_t writtenRows);
+
+  void decodeKeysAt(
+      std::span<const char* const> keys,
+      vector_size_t outputOffset,
+      memory::MemoryPool* outputPool,
+      RowVector& output);
+
+  void gatherPayloadAt(
+      std::span<char* const> payloads,
+      vector_size_t outputOffset,
+      RowVector& output);
+
   static uint64_t elapsedUs(const std::chrono::steady_clock::time_point& begin);
 
   memory::MemoryPool* pool_;
@@ -302,7 +335,7 @@ class RadixSortRun {
   RadixSortKeyLayout keyLayout_;
   uint32_t firstSuffixColumn_;
   std::unique_ptr<RadixSortRunStorage> storage_;
-  EncodedKeyBatch encodeOutput_;
+  BufferPtr keySizeScratch_;
   PayloadRowWriter payloadWriter_;
   PayloadRowBatch payloadBatch_;
   RowVectorPtr decodedKeysOutput_;
@@ -311,6 +344,8 @@ class RadixSortRun {
   BufferPtr decodeInlineOutput_;
   BufferPtr decodeViewsOutput_;
   BufferPtr payloadRowsOutput_;
+  std::optional<MergeDecodePlan> mergeDecodePlan_;
+  std::optional<PayloadRowReader::Plan> mergePayloadGatherPlan_;
   // Global across spilled and in-memory runs; used by output decode.
   std::vector<uint8_t> keyMayHaveNulls_;
   // Current in-memory run only; used by finalize radix pass skipping.

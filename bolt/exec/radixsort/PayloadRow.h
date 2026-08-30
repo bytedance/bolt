@@ -29,6 +29,9 @@ namespace bytedance::bolt::exec::radixsort {
 class PayloadRowBatch;
 class RadixSortRun;
 class RadixSortRunStorage;
+namespace test {
+class PayloadRowReaderTestHelper;
+}
 
 struct PayloadVarlenRef {
   uint64_t size;
@@ -103,6 +106,9 @@ class PayloadRowLayout {
 };
 
 class PayloadRowReader {
+  friend class test::PayloadRowReaderTestHelper;
+  friend class RadixSortRun;
+
  public:
   static void gather(
       const PayloadRowLayout& layout,
@@ -110,6 +116,38 @@ class PayloadRowReader {
       memory::MemoryPool* pool,
       RowVectorPtr& result,
       std::span<const uint8_t> mayHaveNulls = {});
+
+ private:
+  class Plan {
+   public:
+    Plan(Plan&&) noexcept;
+    Plan& operator=(Plan&&) noexcept;
+    ~Plan();
+
+    Plan(const Plan&) = delete;
+    Plan& operator=(const Plan&) = delete;
+
+   private:
+    struct Impl;
+
+    explicit Plan(std::unique_ptr<Impl> impl);
+
+    std::unique_ptr<Impl> impl_;
+
+    friend class PayloadRowReader;
+  };
+
+  static Plan makePlan(
+      const PayloadRowLayout& layout,
+      std::span<const column_index_t> payloadChannels,
+      std::span<const uint8_t> mayHaveNulls);
+
+  static void bind(Plan& plan, RowVector& output);
+
+  static void
+  gather(Plan& plan, std::span<char* const> rows, vector_size_t outputOffset);
+
+  static void finish(Plan& plan);
 };
 
 class PayloadRowWriter {

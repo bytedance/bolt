@@ -25,6 +25,8 @@
 #include <string_view>
 #include <type_traits>
 
+#include <folly/CPortability.h>
+
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 
@@ -569,9 +571,28 @@ class RadixSortKey {
       char* overflowData,
       char* payload = nullptr) const;
 
-  void deconstruct(
+  FOLLY_ALWAYS_INLINE void deconstruct(
       RadixSortInlineKeyBuffer& inlineBuffer,
-      EncodedKeyView& encodedKey) const;
+      EncodedKeyView& encodedKey) const {
+    BOLT_DCHECK(!layout_->isVariable());
+    inlineBuffer.fill(0);
+    for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
+      auto value = loadUnaligned<uint64_t>(
+          data_ + static_cast<uint64_t>(word) * sizeof(uint64_t));
+      if constexpr (std::endian::native == std::endian::little) {
+        value = byteSwap(value);
+      }
+      storeUnaligned(
+          inlineBuffer.data() + static_cast<uint64_t>(word) * sizeof(uint64_t),
+          value);
+    }
+    std::memcpy(
+        inlineBuffer.data() + layout_->inlineWordBytes(),
+        data_ + layout_->inlineWordBytes(),
+        layout_->inlineTailBytes());
+    encodedKey = {
+        std::string_view(inlineBuffer.data(), layout_->inlineCapacity())};
+  }
 
   int32_t compare(const RadixSortKey& other) const;
 

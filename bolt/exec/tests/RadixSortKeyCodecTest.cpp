@@ -22,6 +22,7 @@
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <sstream>
 
@@ -37,6 +38,34 @@
 #include "bolt/vector/SimpleVector.h"
 
 namespace bytedance::bolt::exec::radixsort::test {
+
+class RadixSortKeyCodecTestHelper {
+ public:
+  static void decodeWithMaskedPrefix(
+      const RadixSortKeyCodec& codec,
+      std::string_view key,
+      std::span<const uint8_t> decodedColumns,
+      memory::MemoryPool* pool,
+      RowVector& output) {
+    std::vector<uint8_t> mayHaveNulls(decodedColumns.size(), 0);
+    std::vector<column_index_t> directKeyChannels(decodedColumns.size());
+    std::iota(directKeyChannels.begin(), directKeyChannels.end(), 0);
+    const std::array<EncodedKeyView, 1> keys{{EncodedKeyView{key}}};
+    BufferPtr cursorScratch;
+    codec.decodeSuffixAt(
+        keys,
+        decodedColumns,
+        mayHaveNulls,
+        0,
+        pool,
+        cursorScratch,
+        output,
+        directKeyChannels,
+        codec.decodeScratchWordsPerRowWithMask(decodedColumns, mayHaveNulls, 0),
+        0);
+  }
+};
+
 namespace {
 
 constexpr vector_size_t kFuzzPairsPerSeed = 512;
@@ -813,6 +842,74 @@ TEST_F(RadixSortKeyCodecTest, selectiveDecodeSkipsFixedTypes) {
        makeVector<Timestamp>(TIMESTAMP(), {Timestamp(1, 2), std::nullopt}),
        makeUnknownVector(2)},
       true);
+}
+
+TEST_F(RadixSortKeyCodecTest, maskedDecodeRejectsTruncatedKeys) {
+  const auto flags = SortComparatorOracle::makeSortFlags(true, true);
+  const auto validMarker = static_cast<char>(2);
+  const auto delimiter = static_cast<char>(0);
+  const auto escape = static_cast<char>(1);
+  const std::array<uint8_t, 2> decodedColumns{0, 1};
+
+  const auto expectRejected = [&](const TypePtr& maskedType, std::string key) {
+    SCOPED_TRACE(maskedType->toString() + " key=" + hex(key));
+    auto codec = bind({maskedType, UNKNOWN()}, {flags, flags});
+    auto output = BaseVector::create<RowVector>(
+        ROW({maskedType, UNKNOWN()}), 1, pool_.get());
+    EXPECT_THROW(
+        RadixSortKeyCodecTestHelper::decodeWithMaskedPrefix(
+            *codec, key, decodedColumns, pool_.get(), *output),
+        BoltException);
+  };
+
+  expectRejected(BIGINT(), {});
+  expectRejected(BIGINT(), std::string(1, static_cast<char>(3)));
+  expectRejected(BIGINT(), validMarker + std::string(7, '\0'));
+  expectRejected(VARCHAR(), std::string{validMarker, 'x'});
+  expectRejected(VARCHAR(), std::string{validMarker, escape});
+  expectRejected(
+      ARRAY(INTEGER()),
+      std::string{validMarker, validMarker} + std::string(4, '\0'));
+  expectRejected(
+      ARRAY(INTEGER()),
+      std::string{validMarker, validMarker} + std::string(3, '\0'));
+
+  const auto mapType = MAP(INTEGER(), BIGINT());
+  const auto encodedKey =
+      std::string{validMarker, validMarker} + std::string(4, '\0');
+  expectRejected(mapType, encodedKey);
+  expectRejected(
+      mapType, encodedKey + delimiter + validMarker + std::string(7, '\0'));
+  expectRejected(
+      mapType, encodedKey + delimiter + validMarker + std::string(8, '\0'));
+}
+
+TEST_F(RadixSortKeyCodecTest, maskedDecodeRejectsMissingFollowingMarker) {
+  const auto flags = SortComparatorOracle::makeSortFlags(true, true);
+  auto codec = bind({TINYINT(), BIGINT(), UNKNOWN()}, {flags, flags, flags});
+  auto output = BaseVector::create<RowVector>(
+      ROW({TINYINT(), BIGINT(), UNKNOWN()}), 1, pool_.get());
+  const std::array<uint8_t, 3> decodedColumns{0, 0, 1};
+  const std::string key{static_cast<char>(2), '\0'};
+  EXPECT_THROW(
+      RadixSortKeyCodecTestHelper::decodeWithMaskedPrefix(
+          *codec, key, decodedColumns, pool_.get(), *output),
+      BoltException);
+}
+
+TEST_F(RadixSortKeyCodecTest, offsetDecodeRejectsInvalidUnknownMarker) {
+  const auto flags = SortComparatorOracle::makeSortFlags(true, true);
+  auto codec = bind({UNKNOWN()}, {flags});
+  auto output = BaseVector::create<RowVector>(ROW({UNKNOWN()}), 1, pool_.get());
+  const std::array<uint8_t, 1> decodedColumns{1};
+  EXPECT_THROW(
+      RadixSortKeyCodecTestHelper::decodeWithMaskedPrefix(
+          *codec,
+          std::string(1, static_cast<char>(2)),
+          decodedColumns,
+          pool_.get(),
+          *output),
+      BoltException);
 }
 
 TEST_F(

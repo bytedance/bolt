@@ -212,43 +212,7 @@ RowVectorPtr RadixSortBuffer::getOutput(vector_size_t maxOutputRows) {
     prepareOutputVector(count);
     result = run_->getOutput(count, pool_, output_);
   } else {
-    const auto begin = std::chrono::steady_clock::now();
-    if (mergeKeyRows_ == nullptr ||
-        mergeKeyRows_->capacity() <
-            static_cast<uint64_t>(count) * sizeof(char*)) {
-      mergeKeyRows_ =
-          AlignedBuffer::allocate<const char*>(count, pool_, nullptr);
-      if (run_->payloadLayout() != nullptr) {
-        mergePayloadRows_ =
-            AlignedBuffer::allocate<char*>(count, pool_, nullptr);
-      }
-    } else {
-      mergeKeyRows_->setSize(static_cast<uint64_t>(count) * sizeof(char*));
-      if (mergePayloadRows_ != nullptr) {
-        mergePayloadRows_->setSize(
-            static_cast<uint64_t>(count) * sizeof(char*));
-      }
-    }
-    auto** rawKeys = mergeKeyRows_->asMutable<const char*>();
-    auto** rawPayloads = mergePayloadRows_ == nullptr
-        ? nullptr
-        : mergePayloadRows_->asMutable<char*>();
-    const auto outputCount = merger_->collectRows(count, rawKeys, rawPayloads);
-    if (outputCount > 0) {
-      prepareOutputVector(outputCount);
-      const auto payloads = rawPayloads == nullptr
-          ? std::span<char* const>{}
-          : std::span<char* const>(rawPayloads, outputCount);
-      result = run_->getOutput(
-          std::span<const char* const>(rawKeys, outputCount),
-          payloads,
-          pool_,
-          output_);
-      merger_->releaseRetainedBuffers();
-    }
-    outputTimeUs_ += std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - begin)
-                         .count();
+    result = getMergedOutput(count);
   }
   if (result != nullptr) {
     outputRows_ += result->size();
@@ -273,13 +237,75 @@ bool RadixSortBuffer::canReuseOutput(vector_size_t batchSize) const {
   return output_->estimateFlatSize() >= *outputBytes;
 }
 
-void RadixSortBuffer::prepareOutputVector(vector_size_t outputBatchSize) {
+void RadixSortBuffer::prepareOutputVector(
+    vector_size_t outputBatchSize,
+    bool resizeChildren) {
+  bool reused = false;
   if (output_ != nullptr) {
     VectorPtr output = std::move(output_);
     BaseVector::prepareForReuse(output, outputBatchSize);
     output_ = std::static_pointer_cast<RowVector>(output);
+    reused = true;
   } else {
     output_ = BaseVector::create<RowVector>(inputType_, outputBatchSize, pool_);
+  }
+  if (resizeChildren && reused) {
+    for (auto& child : output_->children()) {
+      BOLT_CHECK_NOT_NULL(child);
+      child->resize(outputBatchSize);
+    }
+  }
+}
+
+RowVectorPtr RadixSortBuffer::getMergedOutput(vector_size_t count) {
+  const auto begin = std::chrono::steady_clock::now();
+  prepareOutputVector(count, /*resizeChildren=*/true);
+  run_->prepareMergeOutput(*output_);
+  ensureMergeRowPointerBuffers(count);
+
+  auto** rawKeys = mergeKeyRows_->asMutable<const char*>();
+  auto** rawPayloads = mergePayloadRows_ == nullptr
+      ? nullptr
+      : mergePayloadRows_->asMutable<char*>();
+  vector_size_t outputOffset = 0;
+  const auto outputCount = merger_->collectRows(
+      count, rawKeys, rawPayloads, [&](vector_size_t segmentSize) {
+        BOLT_DCHECK_GT(segmentSize, 0);
+        const auto payloads = rawPayloads == nullptr
+            ? std::span<char* const>{}
+            : std::span<char* const>(rawPayloads, segmentSize);
+        run_->writeMergeOutput(
+            std::span<const char* const>(rawKeys, segmentSize),
+            payloads,
+            outputOffset,
+            *output_);
+        outputOffset += segmentSize;
+      });
+  BOLT_CHECK_EQ(outputCount, count);
+  BOLT_CHECK_EQ(outputOffset, count);
+  run_->finishMergeOutput(*output_, count);
+  outputTimeUs_ += std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - begin)
+                       .count();
+  return output_;
+}
+
+void RadixSortBuffer::ensureMergeRowPointerBuffers(vector_size_t count) {
+  const auto bytes = static_cast<uint64_t>(count) * sizeof(char*);
+  if (mergeKeyRows_ == nullptr || mergeKeyRows_->capacity() < bytes) {
+    mergeKeyRows_ = AlignedBuffer::allocate<const char*>(count, pool_, nullptr);
+  } else {
+    mergeKeyRows_->setSize(bytes);
+  }
+
+  if (run_->payloadLayout() == nullptr) {
+    mergePayloadRows_.reset();
+    return;
+  }
+  if (mergePayloadRows_ == nullptr || mergePayloadRows_->capacity() < bytes) {
+    mergePayloadRows_ = AlignedBuffer::allocate<char*>(count, pool_, nullptr);
+  } else {
+    mergePayloadRows_->setSize(bytes);
   }
 }
 
@@ -616,91 +642,78 @@ void RadixSortBuffer::spillRemainingOutput() {
 
   const auto spillBegin = std::chrono::steady_clock::now();
   uint64_t spilledRows = 0;
-  uint64_t collectedRows = 0;
   uint64_t serializationTimeUs = 0;
   BufferPtr keyRecordRows = AlignedBuffer::allocate<char>(
       static_cast<uint64_t>(maxBufferedRows) * keyLayout.width(), pool_);
   auto* rawKeyRecords = keyRecordRows->asMutable<char>();
   std::vector<RadixSortSpillSectionSize> rowSizes;
-  std::vector<RadixSortSpillSectionSize> bufferedRowSizes;
   const auto meta = RadixSortSpillSectionMeta::create(keyLayout, payloadLayout);
-  vector_size_t bufferedRows = 0;
+  const auto serializeRows = [&](vector_size_t count) {
+    BOLT_CHECK_GT(count, 0, "Radix sort output spill made no progress");
+    for (vector_size_t row = 0; row < count; ++row) {
+      std::memcpy(
+          rawKeyRecords + static_cast<uint64_t>(row) * keyLayout.width(),
+          rawKeys[row],
+          keyLayout.width());
+    }
+    rowSizes.clear();
+    const auto sizedRows = RadixSortSpillSections::sizeForSerializeRows(
+        meta,
+        rawKeyRecords,
+        count,
+        std::numeric_limits<uint64_t>::max(),
+        rowSizes);
+    BOLT_DCHECK_EQ(sizedRows.rowCount, count);
+
+    vector_size_t serialized = 0;
+    while (serialized < count) {
+      const auto writeStatsBefore = stats_.copy();
+      const auto writeBegin = std::chrono::steady_clock::now();
+      const auto sizes = rowSizes.empty()
+          ? std::span<const RadixSortSpillSectionSize>{}
+          : std::span<const RadixSortSpillSectionSize>(
+                rowSizes.data() + serialized, count - serialized);
+      const auto written = writer.writePresizedKeyRange(
+          keyLayout,
+          payloadLayout,
+          rawKeyRecords + static_cast<uint64_t>(serialized) * keyLayout.width(),
+          count - serialized,
+          sizes);
+      BOLT_CHECK_GT(written, 0, "Radix sort output spill made no progress");
+      const auto elapsedUs =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - writeBegin)
+              .count();
+      const auto writeStatsAfter = stats_.copy();
+      const auto writerTimeUs = writeStatsAfter.spillFlushTimeUs -
+          writeStatsBefore.spillFlushTimeUs + writeStatsAfter.spillWriteTimeUs -
+          writeStatsBefore.spillWriteTimeUs;
+      serializationTimeUs +=
+          elapsedUs > writerTimeUs ? elapsedUs - writerTimeUs : 0;
+      serialized += written;
+    }
+    spilledRows += count;
+  };
+
   while (spilledRows < remainingRows) {
-    if (bufferedRows < maxBufferedRows && collectedRows < remainingRows) {
-      const auto requested = static_cast<vector_size_t>(std::min<uint64_t>(
-          remainingRows - collectedRows, maxBufferedRows - bufferedRows));
-      const auto count = merger_ != nullptr
-          ? merger_->collectRows(
-                requested, rawKeys + bufferedRows, rawPayloads + bufferedRows)
-          : run_->collectRemainingRows(
-                requested, rawKeys + bufferedRows, rawPayloads + bufferedRows);
-      BOLT_CHECK_GT(count, 0, "Radix sort output spill made no progress");
-      for (vector_size_t row = 0; row < count; ++row) {
-        std::memcpy(
-            rawKeyRecords +
-                static_cast<uint64_t>(bufferedRows + row) * keyLayout.width(),
-            rawKeys[bufferedRows + row],
-            keyLayout.width());
-      }
-      bufferedRows += count;
-      collectedRows += count;
-      rowSizes.clear();
-      const auto sizedRows = RadixSortSpillSections::sizeForSerializeRows(
-          meta,
-          rawKeyRecords +
-              static_cast<uint64_t>(bufferedRows - count) * keyLayout.width(),
-          count,
-          std::numeric_limits<uint64_t>::max(),
-          rowSizes);
-      BOLT_DCHECK_EQ(sizedRows.rowCount, count);
-      if (!rowSizes.empty()) {
-        bufferedRowSizes.insert(
-            bufferedRowSizes.end(), rowSizes.begin(), rowSizes.end());
-      }
+    const auto requested = static_cast<vector_size_t>(
+        std::min<uint64_t>(remainingRows - spilledRows, maxBufferedRows));
+    if (merger_ == nullptr) {
+      const auto count =
+          run_->collectRemainingRows(requested, rawKeys, rawPayloads);
+      BOLT_CHECK_EQ(count, requested);
+      serializeRows(count);
+      continue;
     }
 
-    BOLT_DCHECK_GT(bufferedRows, 0);
-    const auto writeStatsBefore = stats_.copy();
-    const auto writeBegin = std::chrono::steady_clock::now();
-    std::span<const RadixSortSpillSectionSize> sizes;
-    if (!bufferedRowSizes.empty()) {
-      sizes = std::span<const RadixSortSpillSectionSize>(
-          bufferedRowSizes.data(), bufferedRows);
-    }
-    const auto writeRows = writer.writePresizedKeyRange(
-        keyLayout, payloadLayout, rawKeyRecords, bufferedRows, sizes);
-    BOLT_CHECK_GT(writeRows, 0, "Radix sort output spill made no progress");
-    BOLT_CHECK_LE(writeRows, bufferedRows);
-    const auto remainingBufferedRows = bufferedRows - writeRows;
-    if (writeRows < bufferedRows) {
-      std::memmove(
-          rawKeyRecords,
-          rawKeyRecords + static_cast<uint64_t>(writeRows) * keyLayout.width(),
-          static_cast<uint64_t>(remainingBufferedRows) * keyLayout.width());
-      if (!bufferedRowSizes.empty()) {
-        std::move(
-            bufferedRowSizes.begin() + writeRows,
-            bufferedRowSizes.begin() + bufferedRows,
-            bufferedRowSizes.begin());
-        bufferedRowSizes.resize(remainingBufferedRows);
-      }
-    } else {
-      bufferedRowSizes.clear();
-    }
-    auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::steady_clock::now() - writeBegin)
-                         .count();
-    const auto writeStatsAfter = stats_.copy();
-    const auto writerTimeUs = writeStatsAfter.spillFlushTimeUs -
-        writeStatsBefore.spillFlushTimeUs + writeStatsAfter.spillWriteTimeUs -
-        writeStatsBefore.spillWriteTimeUs;
-    serializationTimeUs +=
-        elapsedUs > writerTimeUs ? elapsedUs - writerTimeUs : 0;
-    spilledRows += writeRows;
-    bufferedRows = remainingBufferedRows;
-    if (merger_ != nullptr && bufferedRows == 0) {
-      merger_->releaseRetainedBuffers();
-    }
+    vector_size_t flushedInCall = 0;
+    const auto collected = merger_->collectRows(
+        requested, rawKeys, rawPayloads, [&](vector_size_t segmentSize) {
+          serializeRows(segmentSize);
+          flushedInCall += segmentSize;
+        });
+    BOLT_CHECK_EQ(collected, requested);
+    BOLT_CHECK_EQ(flushedInCall, collected);
   }
   auto files = writer.finish();
   auto cleanupUncommittedFiles =
@@ -755,11 +768,11 @@ void RadixSortBuffer::accumulateSpillReadStats() {
 }
 
 void RadixSortBuffer::prepareMerge() {
+  auto readBufferCache = std::make_unique<RadixSortSpillReadBufferCache>();
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
   streams.reserve(spilledRuns_.size() + (run_->size() == 0 ? 0 : 1));
   auto meta = RadixSortSpillSectionMeta::create(
       run_->keyLayout(), run_->payloadLayout().get());
-  auto readBufferCache = std::make_unique<RadixSortSpillReadBufferCache>();
   for (const auto& spillRun : spilledRuns_) {
     if (spillRun.files.empty()) {
       continue;
