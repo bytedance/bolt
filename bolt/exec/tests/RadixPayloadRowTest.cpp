@@ -41,6 +41,48 @@
 #include "bolt/vector/VariantVector.h"
 
 namespace bytedance::bolt::exec::radixsort::test {
+
+class PayloadRowReaderTestHelper {
+ public:
+  class GatherBatch {
+   public:
+    GatherBatch(
+        const PayloadRowLayout& layout,
+        RowVector& output,
+        std::span<const column_index_t> payloadChannels,
+        std::span<const uint8_t> mayHaveNulls)
+        : plan_(PayloadRowReader::makePlan(
+              layout,
+              payloadChannels,
+              mayHaveNulls)) {
+      PayloadRowReader::bind(plan_, output);
+    }
+
+    void gather(std::span<char* const> rows, vector_size_t outputOffset) {
+      PayloadRowReader::gather(plan_, rows, outputOffset);
+    }
+
+    void finalize() {
+      PayloadRowReader::finish(plan_);
+    }
+
+   private:
+    PayloadRowReader::Plan plan_;
+  };
+
+  static void gather(
+      const PayloadRowLayout& layout,
+      std::span<char* const> rows,
+      vector_size_t outputOffset,
+      RowVector& output,
+      std::span<const column_index_t> payloadChannels,
+      std::span<const uint8_t> mayHaveNulls) {
+    GatherBatch batch(layout, output, payloadChannels, mayHaveNulls);
+    batch.gather(rows, outputOffset);
+    batch.finalize();
+  }
+};
+
 namespace {
 
 class FixedSizeStreamArena final : public StreamArena {
@@ -1885,6 +1927,312 @@ TEST_F(RadixPayloadRowTest, fixedKeyAndPayloadShareAllocationPoolRange) {
       arena.size() * arena.layout().width() +
           arena.payloadSize() * layout->rowWidth(),
       2048 * (arena.layout().width() + layout->rowWidth()));
+}
+
+TEST_F(RadixPayloadRowTest, segmentedGatherPreservesBitmapBoundaries) {
+  constexpr vector_size_t kInputRows = 64;
+  constexpr vector_size_t kOutputRows = 194;
+  const std::array<column_index_t, 2> payloadChannels{1, 0};
+  const std::array<uint8_t, 2> nullable{1, 1};
+
+  const auto nullableIntegers = generate<std::optional<int64_t>>(
+      kInputRows, [](vector_size_t row) -> std::optional<int64_t> {
+        return row % 3 == 0 ? std::nullopt : std::optional<int64_t>(1000 + row);
+      });
+  const auto nullableBooleans = generate<std::optional<bool>>(
+      kInputRows, [](vector_size_t row) -> std::optional<bool> {
+        return row % 5 == 0 ? std::nullopt : std::optional<bool>(row % 2 == 0);
+      });
+  const auto validIntegers = generate<std::optional<int64_t>>(
+      kInputRows, [](vector_size_t row) { return 2000 + row; });
+  const auto validBooleans = generate<std::optional<bool>>(
+      kInputRows, [](vector_size_t row) { return row % 2 != 0; });
+  auto nullableInput = makeRows(
+      {makeVector<int64_t>(BIGINT(), nullableIntegers),
+       makeVector<bool>(BOOLEAN(), nullableBooleans)});
+  auto nullFreeInput = makeRows(
+      {makeVector<int64_t>(BIGINT(), validIntegers),
+       makeVector<bool>(BOOLEAN(), validBooleans)});
+  auto layout = payloadLayout(asRowType(nullableInput->type()));
+  RadixSortRunStorage nullableArena(
+      pool_.get(), keyLayout(), 8, 64, layout, 8, 64);
+  RadixSortRunStorage nullFreeArena(
+      pool_.get(), keyLayout(), 8, 64, layout, 8, 64);
+  PayloadRowWriter writer;
+  PayloadRowBatch nullableBatch;
+  PayloadRowBatch nullFreeBatch;
+  writer.append(*nullableInput, nullableArena, nullableBatch);
+  writer.append(*nullFreeInput, nullFreeArena, nullFreeBatch);
+  const auto nullableRows = rowPointers(nullableBatch);
+  const auto nullFreeRows = rowPointers(nullFreeBatch);
+
+  struct Segment {
+    vector_size_t offset;
+    vector_size_t count;
+  };
+  for (const auto [offset, count] : std::array<Segment, 5>{
+           Segment{1, 1},
+           Segment{1, 63},
+           Segment{63, 2},
+           Segment{64, 64},
+           Segment{65, 63}}) {
+    for (const auto nullableLast : {false, true}) {
+      SCOPED_TRACE(
+          "offset=" + std::to_string(offset) +
+          ", count=" + std::to_string(count) +
+          ", nullableLast=" + std::to_string(nullableLast));
+      auto sentinelBooleans = generate<std::optional<bool>>(
+          kOutputRows, [](vector_size_t row) -> std::optional<bool> {
+            return row % 5 == 0 ? std::nullopt
+                                : std::optional<bool>(row % 2 == 0);
+          });
+      auto sentinelIntegers = generate<std::optional<int64_t>>(
+          kOutputRows, [](vector_size_t row) -> std::optional<int64_t> {
+            return row % 7 == 0 ? std::nullopt
+                                : std::optional<int64_t>(10'000 + row);
+          });
+      auto output = makeRows(
+          {makeVector<bool>(BOOLEAN(), sentinelBooleans),
+           makeVector<int64_t>(BIGINT(), sentinelIntegers)});
+      auto* outputBooleans =
+          output->childAt(0)->asUnchecked<FlatVector<bool>>();
+      auto* outputIntegers =
+          output->childAt(1)->asUnchecked<FlatVector<int64_t>>();
+
+      PayloadRowReaderTestHelper::GatherBatch gatherBatch(
+          *layout, *output, payloadChannels, nullable);
+      const auto nullFreeSpan = std::span<char* const>(nullFreeRows);
+      const auto nullableSpan = std::span<char* const>(nullableRows);
+      if (nullableLast) {
+        gatherBatch.gather(nullFreeSpan.subspan(0, count), offset);
+        gatherBatch.gather(nullableSpan.subspan(0, count), offset + count);
+      } else {
+        gatherBatch.gather(nullableSpan.subspan(0, count), offset);
+        gatherBatch.gather(nullFreeSpan.subspan(0, count), offset + count);
+      }
+      gatherBatch.finalize();
+
+      auto expectedBooleans = sentinelBooleans;
+      auto expectedIntegers = sentinelIntegers;
+      for (vector_size_t row = 0; row < count; ++row) {
+        expectedIntegers[offset + row] =
+            nullableLast ? validIntegers[row] : nullableIntegers[row];
+        expectedBooleans[offset + row] =
+            nullableLast ? validBooleans[row] : nullableBooleans[row];
+        expectedIntegers[offset + count + row] =
+            nullableLast ? nullableIntegers[row] : validIntegers[row];
+        expectedBooleans[offset + count + row] =
+            nullableLast ? nullableBooleans[row] : validBooleans[row];
+      }
+
+      for (vector_size_t row = 0; row < kOutputRows; ++row) {
+        ASSERT_EQ(
+            outputBooleans->isNullAt(row), !expectedBooleans[row].has_value())
+            << "row=" << row;
+        if (expectedBooleans[row].has_value()) {
+          EXPECT_EQ(outputBooleans->valueAt(row), *expectedBooleans[row])
+              << "row=" << row;
+        }
+        ASSERT_EQ(
+            outputIntegers->isNullAt(row), !expectedIntegers[row].has_value())
+            << "row=" << row;
+        if (expectedIntegers[row].has_value()) {
+          EXPECT_EQ(outputIntegers->valueAt(row), *expectedIntegers[row])
+              << "row=" << row;
+        }
+      }
+    }
+  }
+}
+
+TEST_F(RadixPayloadRowTest, segmentedGatherInvalidatesFullRangeNullCount) {
+  auto input = makeRows(
+      {makeVector<int64_t>(BIGINT(), {std::nullopt, 12}),
+       makeVector<bool>(BOOLEAN(), {std::nullopt, true})});
+  auto layout = payloadLayout(asRowType(input->type()));
+  RadixSortRunStorage arena(pool_.get(), keyLayout(), 8, 64, layout, 8, 64);
+  PayloadRowBatch batch;
+  PayloadRowWriter{}.append(*input, arena, batch);
+  const auto rows = rowPointers(batch);
+
+  auto output = makeRows(
+      {makeVector<int64_t>(BIGINT(), {1, 2}),
+       makeVector<bool>(BOOLEAN(), {false, false})});
+  output->childAt(0)->setNullCount(0);
+  output->childAt(1)->setNullCount(0);
+  ASSERT_EQ(output->childAt(0)->getNullCount(), 0);
+  ASSERT_EQ(output->childAt(1)->getNullCount(), 0);
+  const std::array<column_index_t, 2> payloadChannels{0, 1};
+  const std::array<uint8_t, 2> mayHaveNulls{1, 1};
+  PayloadRowReaderTestHelper::gather(
+      *layout, rows, 0, *output, payloadChannels, mayHaveNulls);
+
+  EXPECT_FALSE(output->childAt(0)->getNullCount().has_value());
+  EXPECT_FALSE(output->childAt(1)->getNullCount().has_value());
+  EXPECT_TRUE(output->childAt(0)->isNullAt(0));
+  EXPECT_TRUE(output->childAt(1)->isNullAt(0));
+}
+
+TEST_F(RadixPayloadRowTest, gatherBatchFinalizesMetadataOnce) {
+  auto input = makeRows({makeStringVector(
+      VARCHAR(), {std::string{"left"}, std::string{"\xc3\xa9"}})});
+  auto layout = payloadLayout(asRowType(input->type()));
+  RadixSortRunStorage arena(pool_.get(), keyLayout(), 8, 64, layout, 8, 64);
+  PayloadRowBatch batch;
+  PayloadRowWriter{}.append(*input, arena, batch);
+  const auto rows = rowPointers(batch);
+
+  auto output = makeRows({makeStringVector(
+      VARCHAR(),
+      {std::string{"first"}, std::string{"middle"}, std::string{"last"}})});
+  auto* strings = output->childAt(0)->asUnchecked<SimpleVector<StringView>>();
+  SelectivityVector allRows(output->size());
+  ASSERT_TRUE(strings->computeAndSetIsAscii(allRows));
+  ASSERT_EQ(strings->isAscii(allRows), std::optional<bool>{true});
+  output->childAt(0)->setNullCount(0);
+
+  const std::array<column_index_t, 1> payloadChannels{0};
+  const std::array<uint8_t, 1> mayHaveNulls{0};
+  PayloadRowReaderTestHelper::GatherBatch gatherBatch(
+      *layout, *output, payloadChannels, mayHaveNulls);
+  const auto rowSpan = std::span<char* const>(rows);
+  gatherBatch.gather(rowSpan.subspan(0, 1), 0);
+  gatherBatch.gather(rowSpan.subspan(1, 1), 1);
+  EXPECT_EQ(strings->isAscii(allRows), std::optional<bool>{true});
+  EXPECT_EQ(output->childAt(0)->getNullCount(), 0);
+
+  gatherBatch.finalize();
+  EXPECT_FALSE(strings->isAscii(allRows).has_value());
+  EXPECT_FALSE(output->childAt(0)->getNullCount().has_value());
+  EXPECT_EQ(strings->valueAt(0).str(), "left");
+  EXPECT_EQ(strings->valueAt(1).str(), "\xc3\xa9");
+  EXPECT_EQ(strings->valueAt(2).str(), "last");
+}
+
+TEST_F(RadixPayloadRowTest, segmentedGatherMapsStringsAndGrowingComplexValues) {
+  constexpr vector_size_t kFirstRows = 4;
+  constexpr vector_size_t kSecondRows = 20;
+  constexpr vector_size_t kFirstOffset = 1;
+  constexpr vector_size_t kSecondOffset = kFirstOffset + kFirstRows;
+  constexpr vector_size_t kOutputRows = kSecondOffset + kSecondRows + 1;
+  auto first = makeRows(
+      {makeStringVector(
+           VARCHAR(), {"first", std::string(80, 'a'), std::nullopt, "fourth"}),
+       makeMaps()});
+  std::vector<vector_size_t> mapOffsets;
+  std::vector<vector_size_t> mapSizes;
+  std::vector<std::optional<int32_t>> mapKeys;
+  std::vector<std::optional<std::string>> mapValues;
+  vector_size_t mapOffset = 0;
+  for (vector_size_t row = 0; row < kSecondRows; ++row) {
+    mapOffsets.push_back(mapOffset);
+    const auto entries = row % 5 == 0 ? 0 : 12 + row;
+    mapSizes.push_back(entries);
+    for (vector_size_t entry = 0; entry < entries; ++entry) {
+      mapKeys.push_back(entry);
+      mapValues.push_back(
+          std::string(48 + row, static_cast<char>('a' + entry % 26)));
+    }
+    mapOffset += entries;
+  }
+  auto growingMaps = std::make_shared<MapVector>(
+      pool_.get(),
+      MAP(INTEGER(), VARCHAR()),
+      nullptr,
+      kSecondRows,
+      makeBuffer(pool_.get(), mapOffsets),
+      makeBuffer(pool_.get(), mapSizes),
+      makeVector<int32_t>(INTEGER(), mapKeys),
+      makeStringVector(VARCHAR(), mapValues));
+  growingMaps->setNull(0, true);
+  auto second = makeRows(
+      {makeStringVector(
+           VARCHAR(),
+           generate<std::optional<std::string>>(
+               kSecondRows,
+               [](vector_size_t row) {
+                 return row % 6 == 0
+                     ? std::optional<std::string>{}
+                     : std::optional<std::string>{std::string(
+                           64 + row * 7, static_cast<char>('a' + row % 26))};
+               })),
+       growingMaps});
+  auto layout = payloadLayout(asRowType(first->type()));
+  RadixSortRunStorage firstArena(
+      pool_.get(), keyLayout(), 8, 64, layout, 8, 1024);
+  RadixSortRunStorage secondArena(
+      pool_.get(), keyLayout(), 32, 64, layout, 32, 32 * 1024);
+  PayloadRowWriter writer;
+  PayloadRowBatch firstBatch;
+  PayloadRowBatch secondBatch;
+  writer.append(*first, firstArena, firstBatch);
+  writer.append(*second, secondArena, secondBatch);
+
+  auto output = makeRows(
+      {BaseVector::create(first->childAt(1)->type(), kOutputRows, pool_.get()),
+       makeVector<int64_t>(
+           BIGINT(),
+           generate<std::optional<int64_t>>(
+               kOutputRows, [](vector_size_t row) { return 20'000 + row; })),
+       makeStringVector(
+           VARCHAR(),
+           generate<std::optional<std::string>>(
+               kOutputRows, [](vector_size_t row) {
+                 return "sentinel_" + std::to_string(row);
+               }))});
+  output->childAt(0)->setNull(0, true);
+  output->childAt(0)->setNull(kOutputRows - 1, true);
+  const auto untouchedMiddle = output->childAt(1);
+  const std::array<column_index_t, 2> payloadChannels{2, 0};
+  const std::array<uint8_t, 2> mayHaveNulls{1, 1};
+  auto firstRows = rowPointers(firstBatch);
+  auto secondRows = rowPointers(secondBatch);
+  PayloadRowReaderTestHelper::GatherBatch gatherBatch(
+      *layout, *output, payloadChannels, mayHaveNulls);
+  gatherBatch.gather(firstRows, kFirstOffset);
+  gatherBatch.gather(secondRows, kSecondOffset);
+  gatherBatch.finalize();
+
+  const CompareFlags flags{
+      .nullsFirst = true,
+      .ascending = true,
+      .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
+  const auto expectSegment = [&](const RowVector& expected,
+                                 vector_size_t outputOffset) {
+    for (vector_size_t row = 0; row < expected.size(); ++row) {
+      for (uint32_t column = 0; column < payloadChannels.size(); ++column) {
+        const auto result = expected.childAt(column)->compare(
+            output->childAt(payloadChannels[column]).get(),
+            row,
+            outputOffset + row,
+            flags);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(*result, 0) << "column=" << column << ", row=" << row;
+      }
+    }
+  };
+  expectSegment(*first, kFirstOffset);
+  expectSegment(*second, kSecondOffset);
+  EXPECT_EQ(
+      output->childAt(2)
+          ->asUnchecked<SimpleVector<StringView>>()
+          ->valueAt(0)
+          .str(),
+      "sentinel_0");
+  EXPECT_EQ(
+      output->childAt(2)
+          ->asUnchecked<SimpleVector<StringView>>()
+          ->valueAt(kOutputRows - 1)
+          .str(),
+      "sentinel_" + std::to_string(kOutputRows - 1));
+  EXPECT_TRUE(output->childAt(0)->isNullAt(0));
+  EXPECT_TRUE(output->childAt(0)->isNullAt(kOutputRows - 1));
+  EXPECT_EQ(output->childAt(1), untouchedMiddle);
+  for (vector_size_t row = 0; row < kOutputRows; ++row) {
+    EXPECT_EQ(
+        output->childAt(1)->asUnchecked<SimpleVector<int64_t>>()->valueAt(row),
+        20'000 + row);
+  }
 }
 
 TEST_F(RadixPayloadRowTest, invalidInputs) {

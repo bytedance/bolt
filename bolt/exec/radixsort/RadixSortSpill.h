@@ -16,15 +16,16 @@
 
 #pragma once
 
+#include <limits>
 #include <span>
 
+#include <folly/Function.h>
 #include <folly/Synchronized.h>
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/SpillConfig.h"
 #include "bolt/common/base/SpillStats.h"
 #include "bolt/exec/SpillFile.h"
-#include "bolt/exec/TreeOfLosers.h"
 #include "bolt/exec/radixsort/RadixSortRunStorage.h"
 #include "bolt/exec/radixsort/RadixSortSpillSections.h"
 
@@ -62,12 +63,6 @@ class RadixSortSpillWriter {
   std::vector<RadixSortSpillFile> writeRun(
       const RadixSortRunStorage& storage,
       const PayloadRowLayout* payloadLayout);
-
-  void writeKeyRange(
-      const RadixSortKeyLayout& keyLayout,
-      const PayloadRowLayout* payloadLayout,
-      const char* keyBase,
-      vector_size_t count);
 
   vector_size_t writePresizedKeyRange(
       const RadixSortKeyLayout& keyLayout,
@@ -170,26 +165,12 @@ class RadixSortSpillReader : protected SpillReadFileInput {
 
   void close();
 
-  void releaseRetainedBuffers(bool releaseCurrentBuffer) {
-    if (releaseCurrentBuffer) {
-      if (bufferCache_ == nullptr) {
-        serializedBuffer_.reset();
-      } else {
-        recycleSerializedBuffer();
-      }
-      compressedBuffer_.reset();
-      recycleRetainedSerializedBuffer();
-      return;
-    }
-    recycleRetainedSerializedBuffer();
-  }
-
  private:
   void acquireSerializedBuffer(uint64_t size);
 
   void recycleSerializedBuffer();
 
-  void recycleRetainedSerializedBuffer();
+  void finishReading();
 
   RadixSortSpillFile file_;
   RadixSortSpillSectionMeta meta_;
@@ -197,16 +178,19 @@ class RadixSortSpillReader : protected SpillReadFileInput {
   const uint64_t maxReusableSerializedBufferSize_;
   RadixSortSpillReadBufferCache* const bufferCache_;
   BufferPtr serializedBuffer_;
-  std::vector<BufferPtr> retainedSerializedBuffers_;
   BufferPtr compressedBuffer_;
   uint64_t spillReadTimeUs_{0};
   uint64_t spillDecompressTimeUs_{0};
 };
 
-class RadixSortMergeStream : public MergeStream {
+class RadixSortMergeStream {
  public:
   explicit RadixSortMergeStream(const RadixSortKeyLayout& keyLayout)
-      : keyLayout_(keyLayout) {}
+      : keyWidth_(keyLayout.width()),
+        hasPayload_(keyLayout.hasPayload()),
+        payloadOffset_(keyLayout.payloadOffset().value_or(0)) {}
+
+  virtual ~RadixSortMergeStream() = default;
 
   const char* key() const {
     return key_;
@@ -216,9 +200,16 @@ class RadixSortMergeStream : public MergeStream {
     return payload_;
   }
 
-  int32_t compare(const MergeStream& other) const override;
+  virtual bool hasData() const = 0;
 
-  virtual void pop() = 0;
+  /// Advances past the current row when the next row has the same backing
+  /// storage. Returns false without changing state if advancing could
+  /// invalidate the current key or payload.
+  virtual bool tryAdvance() = 0;
+
+  virtual void advanceAfterFlush() {
+    BOLT_UNREACHABLE("advanceAfterFlush called without a spill boundary");
+  }
 
   virtual uint64_t getSpillReadTime() const {
     return 0;
@@ -232,10 +223,10 @@ class RadixSortMergeStream : public MergeStream {
     return 0;
   }
 
-  virtual void releaseRetainedBuffers() {}
-
  protected:
-  RadixSortKeyLayout keyLayout_;
+  const uint32_t keyWidth_;
+  const bool hasPayload_;
+  const uint32_t payloadOffset_;
   const char* key_{nullptr};
   char* payload_{nullptr};
 };
@@ -246,7 +237,7 @@ class RadixSortMemoryRunMergeStream : public RadixSortMergeStream {
 
   bool hasData() const override;
 
-  void pop() override;
+  bool tryAdvance() override;
 
  private:
   void loadCurrent();
@@ -257,7 +248,7 @@ class RadixSortMemoryRunMergeStream : public RadixSortMergeStream {
   vector_size_t rangeIndex_{0};
 };
 
-class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
+class RadixSortSpillFileMergeStream final : public RadixSortMergeStream {
  public:
   RadixSortSpillFileMergeStream(
       RadixSortSpillFile file,
@@ -271,7 +262,9 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
 
   bool hasData() const override;
 
-  void pop() override;
+  bool tryAdvance() override;
+
+  void advanceAfterFlush() override;
 
   uint64_t getSpillReadTime() const {
     return reader_.spillReadTimeUs();
@@ -283,10 +276,6 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
 
   uint64_t getSpillReadIOTime() const {
     return reader_.spillReadIOTimeUs();
-  }
-
-  void releaseRetainedBuffers() override {
-    reader_.releaseRetainedBuffers(key_ == nullptr);
   }
 
  private:
@@ -305,6 +294,8 @@ class RadixSortSpillFileMergeStream : public RadixSortMergeStream {
   };
 
   void loadBatch();
+
+  void updateCurrent();
 
   void finishReading();
 
@@ -330,7 +321,9 @@ class RadixSortConcatFilesSpillMergeStream final : public RadixSortMergeStream {
 
   bool hasData() const override;
 
-  void pop() override;
+  bool tryAdvance() override;
+
+  void advanceAfterFlush() override;
 
   uint64_t getSpillReadTime() const override;
 
@@ -338,14 +331,12 @@ class RadixSortConcatFilesSpillMergeStream final : public RadixSortMergeStream {
 
   uint64_t getSpillReadIOTime() const override;
 
-  void releaseRetainedBuffers() override;
-
  private:
   void loadNextFile();
 
   void updateCurrent();
 
-  void retainCurrentFileStream();
+  void retireCurrentFileStream();
 
   void cleanupUnreadFilesNoThrow() noexcept;
 
@@ -359,8 +350,6 @@ class RadixSortConcatFilesSpillMergeStream final : public RadixSortMergeStream {
   std::vector<RadixSortSpillFile> files_;
   size_t nextFileIndex_{0};
   std::unique_ptr<RadixSortSpillFileMergeStream> current_;
-  std::vector<std::unique_ptr<RadixSortSpillFileMergeStream>>
-      retainedFileStreams_;
   uint64_t completedSpillReadTimeUs_{0};
   uint64_t completedSpillDecompressTimeUs_{0};
   uint64_t completedSpillReadIOTimeUs_{0};
@@ -369,22 +358,24 @@ class RadixSortConcatFilesSpillMergeStream final : public RadixSortMergeStream {
 class RadixSortMerger {
  public:
   using CompareKeys = int32_t (*)(const char*, const char*, uint32_t);
+  using FlushRows = folly::FunctionRef<void(vector_size_t)>;
 
   RadixSortMerger(
       RadixSortKeyLayout keyLayout,
       std::vector<std::unique_ptr<RadixSortMergeStream>> streams,
       std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache = nullptr);
 
-  vector_size_t
-  collectRows(vector_size_t count, const char** keys, char** payloads);
+  vector_size_t collectRows(
+      vector_size_t count,
+      const char** keys,
+      char** payloads,
+      FlushRows flushRows);
 
   uint64_t getSpillReadTime() const;
 
   uint64_t getSpillDecompressTime() const;
 
   uint64_t getSpillReadIOTime() const;
-
-  void releaseRetainedBuffers();
 
   size_t testingNumStreams() const {
     return streams_.size();
@@ -398,15 +389,22 @@ class RadixSortMerger {
   vector_size_t collectSingleStreamRows(
       vector_size_t count,
       const char** keys,
-      char** payloads);
+      char** payloads,
+      FlushRows flushRows);
 
   template <bool HasPayload>
-  vector_size_t
-  collectTwoWayRows(vector_size_t count, const char** keys, char** payloads);
+  vector_size_t collectTwoWayRows(
+      vector_size_t count,
+      const char** keys,
+      char** payloads,
+      FlushRows flushRows);
 
   template <bool HasPayload>
-  vector_size_t
-  collectLoserTreeRows(vector_size_t count, const char** keys, char** payloads);
+  vector_size_t collectLoserTreeRows(
+      vector_size_t count,
+      const char** keys,
+      char** payloads,
+      FlushRows flushRows);
 
   bool less(StreamIndex left, StreamIndex right) const;
 

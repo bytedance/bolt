@@ -852,8 +852,12 @@ uint64_t encodedRangeSize(
       const auto elementSize = decoded.isNullAt(0) ? uint64_t{1} : validSize;
       return static_cast<uint64_t>(count) * elementSize;
     }
+    const auto* nulls = decoded.nulls();
+    if (nulls == nullptr) {
+      return static_cast<uint64_t>(count) * validSize;
+    }
     for (vector_size_t index = offset; index < offset + count; ++index) {
-      size += decoded.isNullAt(index) ? uint64_t{1} : validSize;
+      size += bits::isBitNull(nulls, index) ? uint64_t{1} : validSize;
     }
     return size;
   }
@@ -885,10 +889,13 @@ uint64_t encodedRangeSize(
           : 1 + encodedStringBodySize(decoded.valueAt<StringView>(0));
       return static_cast<uint64_t>(count) * elementSize;
     }
+    const auto* values = decoded.data<StringView>();
+    const auto* indices = decoded.indices();
+    const auto* nulls = decoded.nulls();
     for (vector_size_t index = offset; index < offset + count; ++index) {
-      size += decoded.isNullAt(index)
+      size += nulls != nullptr && bits::isBitNull(nulls, index)
           ? uint64_t{1}
-          : 1 + encodedStringBodySize(decoded.valueAt<StringView>(index));
+          : 1 + encodedStringBodySize(values[indices[index]]);
     }
     return size;
   }
@@ -1198,11 +1205,24 @@ uint64_t encodeFixedScalarArrayElements(
   }
 
   DecodedVector decoded(elements);
+  const auto* values = decoded.data<T>();
+  const auto* indices = decoded.indices();
+  const auto* nulls = decoded.nulls();
+  const auto valueAt = [&](vector_size_t row) {
+    const auto index = indices[row];
+    if constexpr (std::is_same_v<T, bool>) {
+      return bits::isBitSet(reinterpret_cast<const uint64_t*>(values), index);
+    } else if constexpr (std::is_same_v<T, int128_t>) {
+      return HugeInt::deserialize(
+          reinterpret_cast<const char*>(values) + sizeof(T) * index);
+    } else {
+      return values[index];
+    }
+  };
   for (vector_size_t index = offset; index < offset + count; ++index) {
-    writeElement(
-        index,
-        [&](vector_size_t row) { return decoded.valueAt<T>(row); },
-        [&](vector_size_t row) { return decoded.isNullAt(row); });
+    writeElement(index, valueAt, [&](vector_size_t row) {
+      return nulls != nullptr && bits::isBitNull(nulls, row);
+    });
   }
   return written;
 }
@@ -1652,11 +1672,16 @@ void addStringColumnSizes(
   }
 
   DecodedVector decoded(vector);
+  const auto* values = decoded.data<StringView>();
+  const auto* indices = decoded.indices();
+  const auto* nulls = decoded.nulls();
   addStringColumnSizes(
       size,
       rowSizes,
-      [&](vector_size_t row) { return decoded.valueAt<StringView>(row); },
-      [&](vector_size_t row) { return decoded.isNullAt(row); });
+      [&](vector_size_t row) { return values[indices[row]]; },
+      [&](vector_size_t row) {
+        return nulls != nullptr && bits::isBitNull(nulls, row);
+      });
 }
 
 void addVariableColumnSizes(
@@ -1703,8 +1728,16 @@ void addVariableColumnSizes(
       }
       return;
     }
+    const auto* nulls = decoded.nulls();
+    if (nulls == nullptr) {
+      for (vector_size_t row = 0; row < size; ++row) {
+        rowSizes[row] += validSize;
+      }
+      return;
+    }
     for (vector_size_t row = 0; row < size; ++row) {
-      const auto columnSize = decoded.isNullAt(row) ? uint64_t{1} : validSize;
+      const auto columnSize =
+          bits::isBitNull(nulls, row) ? uint64_t{1} : validSize;
       rowSizes[row] += columnSize;
     }
     return;
@@ -1801,6 +1834,25 @@ class StridedEncodeOutput {
   char* data_;
   uint32_t stride_;
   uint32_t offset_;
+};
+
+class StridedCursorEncodeOutput {
+ public:
+  StridedCursorEncodeOutput(char* data, uint32_t stride, uint64_t* cursors)
+      : data_(data), stride_(stride), cursors_(cursors) {}
+
+  char* current(vector_size_t row) const {
+    return data_ + static_cast<uint64_t>(row) * stride_ + cursors_[row];
+  }
+
+  void advance(vector_size_t row, uint64_t bytes) const {
+    cursors_[row] += bytes;
+  }
+
+ private:
+  char* data_;
+  uint32_t stride_;
+  uint64_t* cursors_;
 };
 
 class IndirectEncodeOutput {
@@ -1975,13 +2027,39 @@ void encodeFixedColumn(
   }
 
   DecodedVector decoded(vector);
+  const auto* values = decoded.data<T>();
+  const auto* indices = decoded.indices();
+  const auto* nulls = decoded.nulls();
+  const auto valueAt = [&](vector_size_t row) {
+    const auto index = indices[row];
+    if constexpr (std::is_same_v<T, bool>) {
+      return bits::isBitSet(reinterpret_cast<const uint64_t*>(values), index);
+    } else if constexpr (std::is_same_v<T, int128_t>) {
+      return HugeInt::deserialize(
+          reinterpret_cast<const char*>(values) + sizeof(T) * index);
+    } else {
+      return values[index];
+    }
+  };
+  if (nulls == nullptr) {
+    encodeFixedColumn<false, T>(
+        column,
+        source,
+        size,
+        output,
+        valueAt,
+        [](vector_size_t) { return false; },
+        encodeBody,
+        fixedWidthNulls);
+    return;
+  }
   encodeFixedColumn<true, T>(
       column,
       source,
       size,
       output,
-      [&](vector_size_t row) { return decoded.valueAt<T>(row); },
-      [&](vector_size_t row) { return decoded.isNullAt(row); },
+      valueAt,
+      [&](vector_size_t row) { return bits::isBitNull(nulls, row); },
       encodeBody,
       fixedWidthNulls);
 }
@@ -2141,13 +2219,18 @@ void encodeStringColumn(
   }
 
   DecodedVector decoded(vector);
+  const auto* values = decoded.data<StringView>();
+  const auto* indices = decoded.indices();
+  const auto* nulls = decoded.nulls();
   encodeStringColumn(
       column,
       source,
       size,
       output,
-      [&](vector_size_t row) { return decoded.valueAt<StringView>(row); },
-      [&](vector_size_t row) { return decoded.isNullAt(row); });
+      [&](vector_size_t row) { return values[indices[row]]; },
+      [&](vector_size_t row) {
+        return nulls != nullptr && bits::isBitNull(nulls, row);
+      });
 }
 
 template <typename Output>
@@ -2191,10 +2274,60 @@ void encodeVariableColumn(
   }
 }
 
+template <RadixSortKeyLayoutKind KIND>
+void encodeAndAppendInlineLayout(
+    const std::vector<RadixSortKeyColumn>& columns,
+    const RowVector& input,
+    RadixSortRunStorage& storage,
+    std::span<char* const> payloads,
+    std::vector<uint64_t>& cursors) {
+  using Traits = RadixSortKeyTraits<KIND>;
+  static_assert(!Traits::kVariable);
+
+  storage.appendKeyBlocks(
+      input.size(),
+      [&](vector_size_t source, vector_size_t count, char* records) {
+        std::memset(records, 0, static_cast<uint64_t>(count) * Traits::kWidth);
+        cursors.resize(count);
+        std::fill(cursors.begin(), cursors.end(), uint64_t{0});
+        StridedCursorEncodeOutput output(
+            records, Traits::kWidth, cursors.data());
+        for (uint32_t column = 0; column < columns.size(); ++column) {
+          encodeVariableColumn(
+              columns[column], *input.childAt(column), source, count, output);
+        }
+
+        for (vector_size_t row = 0; row < count; ++row) {
+          BOLT_DCHECK_LE(cursors[row], Traits::kInlineCapacity);
+          auto* record = records + static_cast<uint64_t>(row) * Traits::kWidth;
+          if constexpr (std::endian::native == std::endian::little) {
+            for (uint32_t word = 0; word < Traits::kInlineWords; ++word) {
+              auto value = loadUnaligned<uint64_t>(
+                  record + static_cast<uint64_t>(word) * sizeof(uint64_t));
+              storeUnaligned<uint64_t>(
+                  record + static_cast<uint64_t>(word) * sizeof(uint64_t),
+                  byteSwap(value));
+            }
+          }
+          if constexpr (Traits::kHasPayload) {
+            storeCompactPointer(
+                record + Traits::kPayloadOffset, payloads[source + row]);
+          }
+        }
+      });
+}
+
 class EncodedKeyReader {
  public:
   EncodedKeyReader(const char* data, uint64_t size)
       : data_(data), size_(size) {}
+
+  static EncodedKeyReader checkedAt(std::string_view bytes, uint64_t position) {
+    BOLT_CHECK_LE(position, bytes.size(), "Radix sort key input is truncated");
+    EncodedKeyReader reader(bytes.data(), bytes.size());
+    reader.position_ = position;
+    return reader;
+  }
 
   void readByte(uint8_t& value) {
     value = static_cast<uint8_t>(data_[position_++]);
@@ -2202,6 +2335,16 @@ class EncodedKeyReader {
 
   void peekByte(uint8_t& value) const {
     value = static_cast<uint8_t>(data_[position_]);
+  }
+
+  void checkedReadByte(uint8_t& value) {
+    require(1);
+    readByte(value);
+  }
+
+  void checkedPeekByte(uint8_t& value) const {
+    require(1);
+    peekByte(value);
   }
 
   void readBodyByte(bool descending, uint8_t& value) {
@@ -2215,19 +2358,23 @@ class EncodedKeyReader {
     position_ += bytes;
   }
 
+  void checkedSkip(uint64_t bytes) {
+    require(bytes);
+    skip(bytes);
+  }
+
   uint64_t position() const {
     return position_;
   }
 
-  uint64_t remaining() const {
-    return size_ - position_;
-  }
-
-  const char* current() const {
-    return data_ + position_;
-  }
-
  private:
+  void require(uint64_t bytes) const {
+    BOLT_CHECK_LE(
+        position_, size_, "Radix sort key reader position is out of bounds");
+    BOLT_CHECK_LE(
+        bytes, size_ - position_, "Radix sort key input is truncated");
+  }
+
   const char* data_;
   uint64_t size_;
   uint64_t position_{0};
@@ -2399,6 +2546,11 @@ void decodeSinglePhysicalColumn(
     return;
   }
   const auto null = nullMarker(column.flags);
+  auto* nulls =
+      result->rawNulls() == nullptr ? nullptr : result->mutableRawNulls();
+  if (nulls != nullptr) {
+    bits::fillBits(nulls, 0, count, bits::kNotNull);
+  }
   vector_size_t outputRow = 0;
   while (outputRow < count) {
     const auto range = arena.keyRangeAt(begin + outputRow, count - outputRow);
@@ -2408,10 +2560,12 @@ void decodeSinglePhysicalColumn(
       const auto marker = physicalEncodedByte<HostOrderWords>(
           key, encodedOffset, inlineWordBytes);
       if (marker == null) {
-        flat->setNull(outputRow + row, true);
+        if (nulls == nullptr) {
+          nulls = result->mutableRawNulls();
+        }
+        bits::setNull(nulls, outputRow + row, true);
         continue;
       }
-      flat->setNull(outputRow + row, false);
       values[outputRow + row] = decode(
           key, !column.flags.ascending, encodedOffset + 1, inlineWordBytes);
     }
@@ -2427,11 +2581,18 @@ void decodeSinglePhysicalColumn(
     const VectorPtr& result,
     uint32_t encodedOffset,
     uint32_t inlineWordBytes,
+    vector_size_t outputOffset,
+    bool offsetWrite,
     Decode decode) {
   auto* flat = result->asUnchecked<FlatVector<T>>();
   auto* values = flat->mutableRawValues();
+  values += outputOffset;
   if (!mayHaveNulls) {
-    result->resetNulls();
+    if (offsetWrite) {
+      result->clearNulls(outputOffset, outputOffset + keys.size());
+    } else {
+      result->resetNulls();
+    }
     for (vector_size_t row = 0; row < keys.size(); ++row) {
       values[row] = decode(
           keys[row],
@@ -2442,15 +2603,23 @@ void decodeSinglePhysicalColumn(
     return;
   }
   const auto null = nullMarker(column.flags);
+  auto* nulls =
+      result->rawNulls() == nullptr ? nullptr : result->mutableRawNulls();
+  if (nulls != nullptr) {
+    bits::fillBits(
+        nulls, outputOffset, outputOffset + keys.size(), bits::kNotNull);
+  }
   for (vector_size_t row = 0; row < keys.size(); ++row) {
     const auto* key = keys[row];
     const auto marker = physicalEncodedByte<HostOrderWords>(
         key, encodedOffset, inlineWordBytes);
     if (marker == null) {
-      flat->setNull(row, true);
+      if (nulls == nullptr) {
+        nulls = result->mutableRawNulls();
+      }
+      bits::setNull(nulls, outputOffset + row, true);
       continue;
     }
-    flat->setNull(row, false);
     values[row] = decode(
         key, !column.flags.ascending, encodedOffset + 1, inlineWordBytes);
   }
@@ -2463,37 +2632,51 @@ void decodeSinglePhysicalBooleanColumn(
     bool mayHaveNulls,
     const VectorPtr& result,
     uint32_t encodedOffset,
-    uint32_t inlineWordBytes) {
+    uint32_t inlineWordBytes,
+    vector_size_t outputOffset,
+    bool offsetWrite) {
   auto* flat = result->asUnchecked<FlatVector<bool>>();
   auto* values = flat->template mutableRawValues<uint64_t>();
   if (!mayHaveNulls) {
-    result->resetNulls();
+    if (offsetWrite) {
+      result->clearNulls(outputOffset, outputOffset + keys.size());
+    } else {
+      result->resetNulls();
+    }
     for (vector_size_t row = 0; row < keys.size(); ++row) {
       auto value = physicalEncodedByte<HostOrderWords>(
           keys[row], encodedOffset + 1, inlineWordBytes);
       if (!column.flags.ascending) {
         value = static_cast<uint8_t>(~value);
       }
-      bits::setBit(values, row, value != 0);
+      bits::setBit(values, outputOffset + row, value != 0);
     }
     return;
   }
   const auto null = nullMarker(column.flags);
+  auto* nulls =
+      result->rawNulls() == nullptr ? nullptr : result->mutableRawNulls();
+  if (nulls != nullptr) {
+    bits::fillBits(
+        nulls, outputOffset, outputOffset + keys.size(), bits::kNotNull);
+  }
   for (vector_size_t row = 0; row < keys.size(); ++row) {
     const auto* key = keys[row];
     const auto marker = physicalEncodedByte<HostOrderWords>(
         key, encodedOffset, inlineWordBytes);
     if (marker == null) {
-      flat->setNull(row, true);
+      if (nulls == nullptr) {
+        nulls = result->mutableRawNulls();
+      }
+      bits::setNull(nulls, outputOffset + row, true);
       continue;
     }
-    flat->setNull(row, false);
     auto value = physicalEncodedByte<HostOrderWords>(
         key, encodedOffset + 1, inlineWordBytes);
     if (!column.flags.ascending) {
       value = static_cast<uint8_t>(~value);
     }
-    bits::setBit(values, row, value != 0);
+    bits::setBit(values, outputOffset + row, value != 0);
   }
 }
 
@@ -2529,6 +2712,11 @@ void decodeSinglePhysicalBooleanColumn(
     return;
   }
   const auto null = nullMarker(column.flags);
+  auto* nulls =
+      result->rawNulls() == nullptr ? nullptr : result->mutableRawNulls();
+  if (nulls != nullptr) {
+    bits::fillBits(nulls, 0, count, bits::kNotNull);
+  }
   vector_size_t outputRow = 0;
   while (outputRow < count) {
     const auto range = arena.keyRangeAt(begin + outputRow, count - outputRow);
@@ -2538,10 +2726,12 @@ void decodeSinglePhysicalBooleanColumn(
       const auto marker = physicalEncodedByte<HostOrderWords>(
           key, encodedOffset, inlineWordBytes);
       if (marker == null) {
-        flat->setNull(outputRow + row, true);
+        if (nulls == nullptr) {
+          nulls = result->mutableRawNulls();
+        }
+        bits::setNull(nulls, outputRow + row, true);
         continue;
       }
-      flat->setNull(outputRow + row, false);
       auto value = physicalEncodedByte<HostOrderWords>(
           key, encodedOffset + 1, inlineWordBytes);
       if (!column.flags.ascending) {
@@ -2560,7 +2750,9 @@ void decodeSinglePhysicalColumn(
     bool mayHaveNulls,
     const VectorPtr& result,
     uint32_t inlineWordBytes,
-    uint32_t encodedOffset = 0) {
+    uint32_t encodedOffset = 0,
+    vector_size_t outputOffset = 0,
+    bool offsetWrite = false) {
   if (column.type->isShortDecimal()) {
     decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
         column,
@@ -2569,6 +2761,8 @@ void decodeSinglePhysicalColumn(
         result,
         encodedOffset,
         inlineWordBytes,
+        outputOffset,
+        offsetWrite,
         [](const char* key,
            bool descending,
            uint32_t bodyOffset,
@@ -2587,6 +2781,8 @@ void decodeSinglePhysicalColumn(
         result,
         encodedOffset,
         inlineWordBytes,
+        outputOffset,
+        offsetWrite,
         [](const char* key,
            bool descending,
            uint32_t bodyOffset,
@@ -2603,7 +2799,14 @@ void decodeSinglePhysicalColumn(
   switch (column.type->kind()) {
     case TypeKind::BOOLEAN:
       decodeSinglePhysicalBooleanColumn<HostOrderWords>(
-          column, keys, mayHaveNulls, result, encodedOffset, inlineWordBytes);
+          column,
+          keys,
+          mayHaveNulls,
+          result,
+          encodedOffset,
+          inlineWordBytes,
+          outputOffset,
+          offsetWrite);
       return;
     case TypeKind::TINYINT:
       decodeSinglePhysicalColumn<HostOrderWords, int8_t>(
@@ -2613,6 +2816,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int8_t>(
                 key, desc, offset, wordBytes);
@@ -2626,6 +2831,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int16_t>(
                 key, desc, offset, wordBytes);
@@ -2639,6 +2846,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int32_t>(
                 key, desc, offset, wordBytes);
@@ -2652,6 +2861,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodePhysicalSigned<HostOrderWords, int64_t>(
                 key, desc, offset, wordBytes);
@@ -2665,6 +2876,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodeFloat(decodePhysicalUnsigned<HostOrderWords, uint32_t>(
                 key, desc, offset, wordBytes));
@@ -2678,6 +2891,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return decodeDouble(
                 decodePhysicalUnsigned<HostOrderWords, uint64_t>(
@@ -2692,6 +2907,8 @@ void decodeSinglePhysicalColumn(
           result,
           encodedOffset,
           inlineWordBytes,
+          outputOffset,
+          offsetWrite,
           [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
             return Timestamp(
                 decodePhysicalSigned<HostOrderWords, int64_t>(
@@ -3326,20 +3543,35 @@ struct DecodeScratch {
   }
 };
 
+void clearDestinationNulls(
+    const VectorPtr& result,
+    vector_size_t outputOffset,
+    vector_size_t size) {
+  if (outputOffset == 0 && size == result->size()) {
+    result->resetNulls();
+  } else {
+    result->clearNulls(outputOffset, outputOffset + size);
+  }
+}
+
 void prepareDecodeScratch(
     vector_size_t size,
     memory::MemoryPool* pool,
     uint64_t wordsPerRow,
     BufferPtr& cursorScratch,
     DecodeScratch& scratch) {
-  auto wordCount = checkedMultiply<uint64_t>(size, wordsPerRow);
-  auto bytes = wordCount.has_value()
-      ? checkedMultiply<uint64_t>(*wordCount, sizeof(uint64_t))
-      : std::nullopt;
+  const auto wordCount = checkedMultiply<uint64_t>(size, wordsPerRow);
+  BOLT_CHECK(
+      wordCount.has_value(), "Radix sort decode scratch word count overflows");
+  const auto bytes = checkedMultiply<uint64_t>(*wordCount, sizeof(uint64_t));
+  BOLT_CHECK(
+      bytes.has_value(), "Radix sort decode scratch byte size overflows");
   if (cursorScratch == nullptr || cursorScratch->pool() != pool) {
+    cursorScratch.reset();
     cursorScratch = AlignedBuffer::allocate<uint64_t>(*wordCount, pool);
   } else if (cursorScratch->capacity() < *bytes) {
-    AlignedBuffer::reallocate<uint64_t>(&cursorScratch, *wordCount);
+    cursorScratch.reset();
+    cursorScratch = AlignedBuffer::allocate<uint64_t>(*wordCount, pool);
   } else {
     cursorScratch->setSize(*bytes);
   }
@@ -3358,22 +3590,18 @@ bool isStringColumn(const RadixSortKeyColumn& column) {
       column.type->kind() == TypeKind::VARBINARY;
 }
 
-bool shouldDecodeColumn(
-    const std::vector<RadixSortKeyColumn>& columns,
-    std::span<const uint8_t> decodedColumns,
-    uint32_t column) {
-  return decodedColumns.empty() || decodedColumns[column] != 0 ||
-      !fixedBodySize(*columns[column].type).has_value();
-}
-
-uint64_t decodeScratchWordsPerRow(
+uint64_t calculateDecodeScratchWordsPerRow(
     const std::vector<RadixSortKeyColumn>& columns,
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
-    uint32_t firstColumn) {
+    uint32_t firstColumn,
+    bool skipMaskedVariableColumns) {
   uint64_t extraBlocks = 0;
   for (uint32_t column = firstColumn; column < columns.size(); ++column) {
-    if (!shouldDecodeColumn(columns, decodedColumns, column)) {
+    const bool masked = !decodedColumns.empty() && decodedColumns[column] == 0;
+    if (masked &&
+        (skipMaskedVariableColumns ||
+         fixedBodySize(*columns[column].type).has_value())) {
       continue;
     }
     const bool columnMayHaveNulls =
@@ -3388,6 +3616,15 @@ uint64_t decodeScratchWordsPerRow(
     }
   }
   return 1 + extraBlocks;
+}
+
+uint64_t decodeScratchWordsPerRow(
+    const std::vector<RadixSortKeyColumn>& columns,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    uint32_t firstColumn) {
+  return calculateDecodeScratchWordsPerRow(
+      columns, decodedColumns, mayHaveNulls, firstColumn, false);
 }
 
 FOLLY_ALWAYS_INLINE void readMarker(
@@ -3461,7 +3698,8 @@ uint64_t prepareFixedBodyPointers(
     const VectorPtr& result,
     DecodeScratch& scratch,
     uint64_t*& validRows,
-    uint64_t*& bodyPointers) {
+    uint64_t*& bodyPointers,
+    vector_size_t outputOffset) {
   const auto size = static_cast<vector_size_t>(keys.size());
   auto* cursors = scratch.cursors;
   validRows = MayHaveNulls ? scratch.block(0) : nullptr;
@@ -3469,12 +3707,12 @@ uint64_t prepareFixedBodyPointers(
 
   uint64_t validCount = 0;
   if constexpr (!MayHaveNulls) {
-    result->resetNulls();
+    clearDestinationNulls(result, outputOffset, size);
   } else {
     auto* nulls =
         result->rawNulls() == nullptr ? nullptr : result->mutableRawNulls();
     if (nulls != nullptr) {
-      bits::clearAllNull(nulls, size);
+      bits::fillBits(nulls, outputOffset, outputOffset + size, bits::kNotNull);
     }
     const auto null = nullMarker(column.flags);
     for (vector_size_t row = 0; row < size; ++row) {
@@ -3485,7 +3723,7 @@ uint64_t prepareFixedBodyPointers(
         if (nulls == nullptr) {
           nulls = result->mutableRawNulls();
         }
-        bits::setNull(nulls, row, true);
+        bits::setNull(nulls, outputOffset + row, true);
         cursors[row] = cursor;
         continue;
       }
@@ -3533,6 +3771,14 @@ outputRow(uint64_t index, uint64_t* validRows) {
   return static_cast<vector_size_t>(index);
 }
 
+template <bool MayHaveNulls>
+FOLLY_ALWAYS_INLINE vector_size_t outputRowWithOffset(
+    uint64_t index,
+    uint64_t* validRows,
+    vector_size_t outputOffset) {
+  return outputOffset + outputRow<MayHaveNulls>(index, validRows);
+}
+
 template <typename Decode>
 FOLLY_ALWAYS_INLINE void dispatchDescending(
     const RadixSortKeyColumn& column,
@@ -3554,14 +3800,25 @@ __attribute__((noinline)) void decodeWordLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
   using Encoded = typename Decoder::Encoded;
   auto* flat = result->asUnchecked<FlatVector<T>>();
   auto* values = flat->mutableRawValues();
+  if (outputOffset != 0) {
+    values += outputOffset;
+  }
   uint64_t* validRows;
   uint64_t* encoded;
   const auto count = prepareFixedBodyPointers<FirstColumn, MayHaveNulls>(
-      column, keys, sizeof(Encoded), result, scratch, validRows, encoded);
+      column,
+      keys,
+      sizeof(Encoded),
+      result,
+      scratch,
+      validRows,
+      encoded,
+      outputOffset);
   compilerMemoryBarrier();
   loadFixedBodyWord<Encoded>(count, encoded);
   compilerMemoryBarrier();
@@ -3577,20 +3834,24 @@ __attribute__((noinline)) void decodeBooleanLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
   auto* flat = result->asUnchecked<FlatVector<bool>>();
   auto* values = flat->template mutableRawValues<uint64_t>();
   uint64_t* validRows;
   uint64_t* encoded;
   const auto count = prepareFixedBodyPointers<FirstColumn, MayHaveNulls>(
-      column, keys, 1, result, scratch, validRows, encoded);
+      column, keys, 1, result, scratch, validRows, encoded, outputOffset);
   compilerMemoryBarrier();
   loadFixedBodyWord<uint8_t>(count, encoded);
   compilerMemoryBarrier();
   for (uint64_t index = 0; index < count; ++index) {
     const auto value = decodeUnsignedEncoded<Descending, uint8_t>(
         static_cast<uint8_t>(encoded[index]));
-    bits::setBit(values, outputRow<MayHaveNulls>(index, validRows), value != 0);
+    bits::setBit(
+        values,
+        outputRowWithOffset<MayHaveNulls>(index, validRows, outputOffset),
+        value != 0);
   }
 }
 
@@ -3599,13 +3860,24 @@ __attribute__((noinline)) void decodeInt128Layered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
   auto* flat = result->asUnchecked<FlatVector<int128_t>>();
   auto* values = flat->mutableRawValues();
+  if (outputOffset != 0) {
+    values += outputOffset;
+  }
   uint64_t* validRows;
   uint64_t* upperEncoded;
   const auto count = prepareFixedBodyPointers<FirstColumn, MayHaveNulls>(
-      column, keys, sizeof(int128_t), result, scratch, validRows, upperEncoded);
+      column,
+      keys,
+      sizeof(int128_t),
+      result,
+      scratch,
+      validRows,
+      upperEncoded,
+      outputOffset);
   auto* lowerEncoded = scratch.block(MayHaveNulls ? 2 : 1);
   compilerMemoryBarrier();
   loadFixedBodyWords(count, upperEncoded, lowerEncoded);
@@ -3625,9 +3897,13 @@ __attribute__((noinline)) void decodeTimestampLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
   auto* flat = result->asUnchecked<FlatVector<Timestamp>>();
   auto* values = flat->mutableRawValues();
+  if (outputOffset != 0) {
+    values += outputOffset;
+  }
   uint64_t* validRows;
   uint64_t* secondsEncoded;
   const auto count = prepareFixedBodyPointers<FirstColumn, MayHaveNulls>(
@@ -3637,7 +3913,8 @@ __attribute__((noinline)) void decodeTimestampLayered(
       result,
       scratch,
       validRows,
-      secondsEncoded);
+      secondsEncoded,
+      outputOffset);
   auto* nanosEncoded = scratch.block(MayHaveNulls ? 2 : 1);
   compilerMemoryBarrier();
   loadFixedBodyWords(count, secondsEncoded, nanosEncoded);
@@ -3656,14 +3933,15 @@ void decodeSignedFixedLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeWordLayered<
         FirstColumn,
         MayHaveNulls,
         Descending,
         T,
-        SignedFixedDecoder<T>>(column, keys, scratch, result);
+        SignedFixedDecoder<T>>(column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3672,10 +3950,11 @@ void decodeBooleanLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeBooleanLayered<FirstColumn, MayHaveNulls, Descending>(
-        column, keys, scratch, result);
+        column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3684,14 +3963,15 @@ void decodeFloatLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeWordLayered<
         FirstColumn,
         MayHaveNulls,
         Descending,
         float,
-        FloatFixedDecoder>(column, keys, scratch, result);
+        FloatFixedDecoder>(column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3700,14 +3980,15 @@ void decodeDoubleLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeWordLayered<
         FirstColumn,
         MayHaveNulls,
         Descending,
         double,
-        DoubleFixedDecoder>(column, keys, scratch, result);
+        DoubleFixedDecoder>(column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3716,10 +3997,11 @@ void decodeInt128Layered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeInt128Layered<FirstColumn, MayHaveNulls, Descending>(
-        column, keys, scratch, result);
+        column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3728,10 +4010,11 @@ void decodeTimestampLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeTimestampLayered<FirstColumn, MayHaveNulls, Descending>(
-        column, keys, scratch, result);
+        column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3746,6 +4029,163 @@ void skipFixedColumn(
     auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
     const auto marker = static_cast<uint8_t>(keys[row].bytes[cursor++]);
     cursors[row] = cursor + static_cast<uint64_t>(marker != null) * bodySize;
+  }
+}
+
+template <bool FirstColumn>
+void skipCheckedFixedColumn(
+    const RadixSortKeyColumn& column,
+    std::span<const EncodedKeyView> keys,
+    uint64_t* cursors) {
+  const auto bodySize = *fixedBodySize(*column.type);
+  const auto null = nullMarker(column.flags);
+  const auto valid = validMarker(column.flags);
+  for (vector_size_t row = 0; row < keys.size(); ++row) {
+    const auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
+    auto reader = EncodedKeyReader::checkedAt(keys[row].bytes, cursor);
+    uint8_t marker;
+    reader.checkedReadByte(marker);
+    BOLT_CHECK(
+        marker == null || marker == valid,
+        "Invalid radix sort key marker while skipping fixed column");
+    if (marker == valid) {
+      reader.checkedSkip(bodySize);
+    }
+    cursors[row] = reader.position();
+  }
+}
+
+void skipStringBody(EncodedKeyReader& reader, bool descending) {
+  const auto delimiter =
+      descending ? static_cast<uint8_t>(~kStringDelimiter) : kStringDelimiter;
+  const auto escape =
+      descending ? static_cast<uint8_t>(~kBlobEscape) : kBlobEscape;
+  while (true) {
+    uint8_t byte;
+    reader.checkedReadByte(byte);
+    if (byte == delimiter) {
+      return;
+    }
+    if (byte == escape) {
+      reader.checkedReadByte(byte);
+    }
+  }
+}
+
+void skipValue(const RadixSortKeyColumn& column, EncodedKeyReader& reader) {
+  uint8_t marker;
+  reader.checkedReadByte(marker);
+  const auto null = nullMarker(column.flags);
+  const auto valid = validMarker(column.flags);
+  BOLT_CHECK(
+      marker == null || marker == valid,
+      "Invalid radix sort key marker while skipping {}",
+      column.type->toString());
+  if (marker == null) {
+    return;
+  }
+  BOLT_CHECK_NE(
+      column.type->kind(),
+      TypeKind::UNKNOWN,
+      "UNKNOWN radix sort key must use the null marker");
+
+  const bool descending = !column.flags.ascending;
+  if (const auto bodySize = fixedBodySize(*column.type)) {
+    reader.checkedSkip(*bodySize);
+    return;
+  }
+  switch (column.type->kind()) {
+    case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
+      skipStringBody(reader, descending);
+      return;
+    case TypeKind::ROW:
+      for (const auto& child : column.children) {
+        skipValue(child, reader);
+      }
+      return;
+    case TypeKind::ARRAY: {
+      const auto delimiter = descending
+          ? static_cast<uint8_t>(~kStringDelimiter)
+          : kStringDelimiter;
+      while (true) {
+        uint8_t next;
+        reader.checkedPeekByte(next);
+        if (next == delimiter) {
+          reader.checkedReadByte(next);
+          return;
+        }
+        skipValue(column.children[0], reader);
+      }
+    }
+    case TypeKind::MAP: {
+      const auto delimiter = descending
+          ? static_cast<uint8_t>(~kStringDelimiter)
+          : kStringDelimiter;
+      uint64_t count = 0;
+      while (true) {
+        uint8_t next;
+        reader.checkedPeekByte(next);
+        if (next == delimiter) {
+          reader.checkedReadByte(next);
+          break;
+        }
+        skipValue(column.children[0], reader);
+        BOLT_CHECK_LT(
+            count,
+            std::numeric_limits<uint64_t>::max(),
+            "Radix sort encoded map entry count overflows");
+        ++count;
+      }
+      for (uint64_t index = 0; index < count; ++index) {
+        skipValue(column.children[1], reader);
+      }
+      uint8_t finalDelimiter;
+      reader.checkedReadByte(finalDelimiter);
+      BOLT_CHECK_EQ(
+          finalDelimiter,
+          delimiter,
+          "Invalid radix sort encoded map delimiter");
+      return;
+    }
+    case TypeKind::UNKNOWN:
+      BOLT_UNREACHABLE();
+    default:
+      BOLT_FAIL(
+          "Radix sort key skip is not implemented for {}",
+          column.type->toString());
+  }
+}
+
+template <bool FirstColumn>
+void skipColumn(
+    const RadixSortKeyColumn& column,
+    std::span<const EncodedKeyView> keys,
+    uint64_t* cursors) {
+  for (vector_size_t row = 0; row < keys.size(); ++row) {
+    const auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
+    auto reader = EncodedKeyReader::checkedAt(keys[row].bytes, cursor);
+    skipValue(column, reader);
+    cursors[row] = reader.position();
+  }
+}
+
+template <bool FirstColumn>
+void decodeCheckedUnknownColumn(
+    const RadixSortKeyColumn& column,
+    std::span<const EncodedKeyView> keys,
+    uint64_t* cursors,
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
+  const auto null = nullMarker(column.flags);
+  for (vector_size_t row = 0; row < keys.size(); ++row) {
+    const auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
+    auto reader = EncodedKeyReader::checkedAt(keys[row].bytes, cursor);
+    uint8_t marker;
+    reader.checkedReadByte(marker);
+    BOLT_CHECK_EQ(marker, null, "UNKNOWN radix sort key must use null marker");
+    cursors[row] = reader.position();
+    result->setNull(outputOffset + row, true);
   }
 }
 
@@ -3833,7 +4273,8 @@ uint64_t prepareStringBodies(
     DecodeScratch& scratch,
     uint64_t*& validRows,
     uint64_t*& bodyPointers,
-    uint64_t*& remainingSizes) {
+    uint64_t*& remainingSizes,
+    vector_size_t outputOffset) {
   const auto size = static_cast<vector_size_t>(keys.size());
   auto* cursors = scratch.cursors;
   validRows = MayHaveNulls ? scratch.block(0) : nullptr;
@@ -3841,12 +4282,12 @@ uint64_t prepareStringBodies(
   remainingSizes = scratch.block(MayHaveNulls ? 2 : 1);
   uint64_t validCount = 0;
   if constexpr (!MayHaveNulls) {
-    result->resetNulls();
+    clearDestinationNulls(result, outputOffset, size);
   } else {
     auto* nulls =
         result->rawNulls() == nullptr ? nullptr : result->mutableRawNulls();
     if (nulls != nullptr) {
-      bits::clearAllNull(nulls, size);
+      bits::fillBits(nulls, outputOffset, outputOffset + size, bits::kNotNull);
     }
     const auto null = nullMarker(column.flags);
     for (vector_size_t row = 0; row < size; ++row) {
@@ -3857,7 +4298,7 @@ uint64_t prepareStringBodies(
         if (nulls == nullptr) {
           nulls = result->mutableRawNulls();
         }
-        bits::setNull(nulls, row, true);
+        bits::setNull(nulls, outputOffset + row, true);
         cursors[row] = cursor;
         continue;
       }
@@ -3884,14 +4325,25 @@ __attribute__((noinline)) void decodeStringColumnLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
   auto* flat = result->asUnchecked<FlatVector<StringView>>();
   auto* values = flat->mutableRawValues();
+  if (outputOffset != 0) {
+    values += outputOffset;
+  }
   uint64_t* validRows;
   uint64_t* bodyPointers;
   uint64_t* decodedSizes;
   const auto count = prepareStringBodies<FirstColumn, MayHaveNulls>(
-      column, keys, result, scratch, validRows, bodyPointers, decodedSizes);
+      column,
+      keys,
+      result,
+      scratch,
+      validRows,
+      bodyPointers,
+      decodedSizes,
+      outputOffset);
   auto* encodedSizes = scratch.block(MayHaveNulls ? 3 : 2);
   compilerMemoryBarrier();
 
@@ -3939,10 +4391,11 @@ void decodeStringColumnLayered(
     const RadixSortKeyColumn& column,
     std::span<const EncodedKeyView> keys,
     DecodeScratch& scratch,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    vector_size_t outputOffset = 0) {
   dispatchDescending(column, [&]<bool Descending>() {
     decodeStringColumnLayered<FirstColumn, MayHaveNulls, Descending>(
-        column, keys, scratch, result);
+        column, keys, scratch, result, outputOffset);
   });
 }
 
@@ -3952,53 +4405,54 @@ void decodeColumn(
     std::span<const EncodedKeyView> keys,
     uint64_t* cursors,
     const VectorPtr& result,
-    DecodeScratch& scratch) {
+    DecodeScratch& scratch,
+    vector_size_t outputOffset = 0) {
   if (column.type->isShortDecimal()) {
     decodeSignedFixedLayered<FirstColumn, MayHaveNulls, int64_t>(
-        column, keys, scratch, result);
+        column, keys, scratch, result, outputOffset);
     return;
   }
   if (column.type->isLongDecimal() ||
       column.type->kind() == TypeKind::HUGEINT) {
     decodeInt128Layered<FirstColumn, MayHaveNulls>(
-        column, keys, scratch, result);
+        column, keys, scratch, result, outputOffset);
     return;
   }
 
   switch (column.type->kind()) {
     case TypeKind::BOOLEAN:
       decodeBooleanLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result);
+          column, keys, scratch, result, outputOffset);
       return;
 #define BOLT_DECODE_SIGNED_COLUMN(kind, cppType)                  \
   case TypeKind::kind:                                            \
     decodeSignedFixedLayered<FirstColumn, MayHaveNulls, cppType>( \
-        column, keys, scratch, result);                           \
+        column, keys, scratch, result, outputOffset);             \
     return
       BOLT_DECODE_SIGNED_COLUMN(TINYINT, int8_t);
       BOLT_DECODE_SIGNED_COLUMN(SMALLINT, int16_t);
       BOLT_DECODE_SIGNED_COLUMN(INTEGER, int32_t);
     case TypeKind::BIGINT:
       decodeSignedFixedLayered<FirstColumn, MayHaveNulls, int64_t>(
-          column, keys, scratch, result);
+          column, keys, scratch, result, outputOffset);
       return;
 #undef BOLT_DECODE_SIGNED_COLUMN
     case TypeKind::REAL:
       decodeFloatLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result);
+          column, keys, scratch, result, outputOffset);
       return;
     case TypeKind::DOUBLE:
       decodeDoubleLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result);
+          column, keys, scratch, result, outputOffset);
       return;
     case TypeKind::TIMESTAMP:
       decodeTimestampLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result);
+          column, keys, scratch, result, outputOffset);
       return;
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY:
       decodeStringColumnLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result);
+          column, keys, scratch, result, outputOffset);
       return;
     case TypeKind::UNKNOWN: {
       const auto null = nullMarker(column.flags);
@@ -4007,7 +4461,7 @@ void decodeColumn(
         bool isNull;
         readMarker(keys[row], cursor, null, isNull);
         cursors[row] = cursor;
-        result->setNull(row, true);
+        result->setNull(outputOffset + row, true);
       }
       return;
     }
@@ -4016,7 +4470,7 @@ void decodeColumn(
         auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
         EncodedKeyReader reader(
             keys[row].bytes.data() + cursor, keys[row].bytes.size() - cursor);
-        decodeValue(column, reader, result, row);
+        decodeValue(column, reader, result, outputOffset + row);
         cursors[row] = cursor + reader.position();
       }
       return;
@@ -4081,6 +4535,73 @@ void decodeColumns(
       skipFixedColumn<false>(columns[column], keys, cursors);
     } else {
       decodeNextColumn(column);
+    }
+  }
+}
+
+void decodeColumnsWithOffset(
+    const std::vector<RadixSortKeyColumn>& columns,
+    std::span<const EncodedKeyView> keys,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    vector_size_t outputOffset,
+    memory::MemoryPool* pool,
+    BufferPtr& cursorScratch,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels,
+    uint64_t scratchWordsPerRow,
+    uint32_t firstColumn) {
+  DecodeScratch scratch;
+  prepareDecodeScratch(
+      static_cast<vector_size_t>(keys.size()),
+      pool,
+      scratchWordsPerRow,
+      cursorScratch,
+      scratch);
+  auto* cursors = scratch.cursors;
+  const auto decode = [&](uint32_t column, bool first) {
+    auto& child = output.childAt(directKeyChannels[column]);
+    if (columns[column].type->kind() == TypeKind::UNKNOWN) {
+      if (first) {
+        decodeCheckedUnknownColumn<true>(
+            columns[column], keys, cursors, child, outputOffset);
+      } else {
+        decodeCheckedUnknownColumn<false>(
+            columns[column], keys, cursors, child, outputOffset);
+      }
+      return;
+    }
+    if (first) {
+      if (mayHaveNulls[column] != 0) {
+        decodeColumn<true, true>(
+            columns[column], keys, cursors, child, scratch, outputOffset);
+      } else {
+        decodeColumn<true, false>(
+            columns[column], keys, cursors, child, scratch, outputOffset);
+      }
+    } else if (mayHaveNulls[column] != 0) {
+      decodeColumn<false, true>(
+          columns[column], keys, cursors, child, scratch, outputOffset);
+    } else {
+      decodeColumn<false, false>(
+          columns[column], keys, cursors, child, scratch, outputOffset);
+    }
+  };
+
+  if (decodedColumns[firstColumn] != 0) {
+    decode(firstColumn, true);
+  } else if (isLayeredFixedColumn(columns[firstColumn])) {
+    skipCheckedFixedColumn<true>(columns[firstColumn], keys, cursors);
+  } else {
+    skipColumn<true>(columns[firstColumn], keys, cursors);
+  }
+  for (uint32_t column = firstColumn + 1; column < columns.size(); ++column) {
+    if (decodedColumns[column] != 0) {
+      decode(column, false);
+    } else if (isLayeredFixedColumn(columns[column])) {
+      skipCheckedFixedColumn<false>(columns[column], keys, cursors);
+    } else {
+      skipColumn<false>(columns[column], keys, cursors);
     }
   }
 }
@@ -4432,6 +4953,57 @@ bool RadixSortKeyCodec::tryAppendSingleFixedFlat(
   return true;
 }
 
+void RadixSortKeyCodec::encodeAndAppendInline(
+    const RowVector& input,
+    RadixSortRunStorage& storage,
+    std::span<char* const> payloads) const {
+  BOLT_DCHECK(!storage.layout().isVariable());
+  BOLT_DCHECK_EQ(input.childrenSize(), columns_.size());
+  BOLT_DCHECK(
+      storage.layout().hasPayload()
+          ? payloads.size() == static_cast<size_t>(input.size())
+          : payloads.empty());
+
+  if (input.childrenSize() == 1 &&
+      tryAppendSingleFixedFlat(
+          *input.childAt(0), input.size(), storage, payloads)) {
+    return;
+  }
+
+  const auto append = [&]<RadixSortKeyLayoutKind KIND>() {
+    encodeAndAppendInlineLayout<KIND>(
+        columns_, input, storage, payloads, encodeCursorScratch_);
+  };
+  switch (storage.layout().kind()) {
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed8:
+      return append
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed8>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed16:
+      return append
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed16>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed24:
+      return append
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed24>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed32:
+      return append
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed32>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
+      return append.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed24:
+      return append.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed32:
+      return append.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed32>();
+    case RadixSortKeyLayoutKind::kInvalid:
+    case RadixSortKeyLayoutKind::kKeyOnlyVariable32:
+    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
+      BOLT_FAIL("Unsupported inline radix sort key layout");
+  }
+  BOLT_UNREACHABLE();
+}
+
 bool RadixSortKeyCodec::canDecodeSingleFixedColumn() const {
   return columns_.size() == 1 &&
       columns_[0].type->kind() != TypeKind::UNKNOWN &&
@@ -4473,6 +5045,40 @@ bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
   result = std::make_shared<RowVector>(
       pool, rowType_, nullptr, count, std::vector<VectorPtr>{std::move(child)});
   return true;
+}
+
+std::optional<uint32_t> RadixSortKeyCodec::singleFixedWordBytes(
+    RadixSortKeyLayoutKind layoutKind) const {
+  if (!canDecodeSingleFixedColumn()) {
+    return std::nullopt;
+  }
+  const auto layout = RadixSortKeyLayout::fromKind(layoutKind);
+  if (layout.isVariable()) {
+    return std::nullopt;
+  }
+  return layout.inlineWordBytes();
+}
+
+void RadixSortKeyCodec::decodeSingleFixedAt(
+    std::span<const char* const> keys,
+    bool mayHaveNulls,
+    vector_size_t outputOffset,
+    uint32_t inlineWordBytes,
+    const VectorPtr& destination) const {
+  BOLT_DCHECK_NOT_NULL(destination);
+  BOLT_DCHECK_GE(outputOffset, 0);
+  BOLT_DCHECK_LE(outputOffset, destination->size());
+  BOLT_DCHECK_LE(
+      keys.size(), static_cast<size_t>(destination->size() - outputOffset));
+  decodeSinglePhysicalColumn<true>(
+      columns_[0],
+      keys,
+      mayHaveNulls,
+      destination,
+      inlineWordBytes,
+      0,
+      outputOffset,
+      true);
 }
 
 bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
@@ -4526,6 +5132,47 @@ void RadixSortKeyCodec::decode(
       firstColumn);
 }
 
+uint64_t RadixSortKeyCodec::decodeScratchWordsPerRowWithMask(
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    uint32_t firstColumn) const {
+  BOLT_DCHECK_EQ(decodedColumns.size(), columns_.size());
+  BOLT_DCHECK_EQ(mayHaveNulls.size(), columns_.size());
+  BOLT_DCHECK_LT(firstColumn, columns_.size());
+  return calculateDecodeScratchWordsPerRow(
+      columns_, decodedColumns, mayHaveNulls, firstColumn, true);
+}
+
+void RadixSortKeyCodec::decodeSuffixAt(
+    std::span<const EncodedKeyView> keys,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    vector_size_t outputOffset,
+    memory::MemoryPool* scratchPool,
+    BufferPtr& cursorScratch,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels,
+    uint64_t scratchWordsPerRow,
+    uint32_t firstColumn) const {
+  BOLT_DCHECK_NOT_NULL(scratchPool);
+  BOLT_DCHECK_GE(outputOffset, 0);
+  BOLT_DCHECK_LE(outputOffset, output.size());
+  BOLT_DCHECK_LE(
+      keys.size(), static_cast<size_t>(output.size() - outputOffset));
+  decodeColumnsWithOffset(
+      columns_,
+      keys,
+      decodedColumns,
+      mayHaveNulls,
+      outputOffset,
+      scratchPool,
+      cursorScratch,
+      output,
+      directKeyChannels,
+      scratchWordsPerRow,
+      firstColumn);
+}
+
 void RadixSortKeyCodec::decodeFixedPrefix(
     const RadixSortRunStorage& arena,
     uint64_t begin,
@@ -4550,6 +5197,50 @@ void RadixSortKeyCodec::decodeFixedPrefix(
             0,
             encodedOffset);
       });
+}
+
+void RadixSortKeyCodec::decodePrefixAt(
+    std::span<const char* const> keys,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    vector_size_t outputOffset,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels,
+    uint32_t prefixColumnCount) const {
+  BOLT_DCHECK_GE(outputOffset, 0);
+  BOLT_DCHECK_LE(outputOffset, output.size());
+  BOLT_DCHECK_LE(
+      keys.size(), static_cast<size_t>(output.size() - outputOffset));
+  decodeFixedPrefixColumns(
+      columns_,
+      prefixColumnCount,
+      decodedColumns,
+      mayHaveNulls,
+      [&](uint32_t column, uint32_t encodedOffset, bool columnMayHaveNulls) {
+        decodeSinglePhysicalColumn<false>(
+            columns_[column],
+            keys,
+            columnMayHaveNulls,
+            output.childAt(directKeyChannels[column]),
+            0,
+            encodedOffset,
+            outputOffset,
+            true);
+      });
+}
+
+void RadixSortKeyCodec::finishDecode(
+    std::span<const uint8_t> decodedColumns,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels) const {
+  BOLT_DCHECK_EQ(decodedColumns.size(), columns_.size());
+  BOLT_DCHECK_EQ(directKeyChannels.size(), columns_.size());
+  for (uint32_t column = 0; column < columns_.size(); ++column) {
+    if (decodedColumns[column] == 0) {
+      continue;
+    }
+    output.childAt(directKeyChannels[column])->resetDataDependentFlags(nullptr);
+  }
 }
 
 void RadixSortKeyCodec::decodeFixedPrefix(

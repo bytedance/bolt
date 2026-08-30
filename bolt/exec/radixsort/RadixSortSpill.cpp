@@ -234,23 +234,6 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::writeRun(
   return finish();
 }
 
-void RadixSortSpillWriter::writeKeyRange(
-    const RadixSortKeyLayout& keyLayout,
-    const PayloadRowLayout* payloadLayout,
-    const char* keyBase,
-    vector_size_t count) {
-  if (count == 0) {
-    return;
-  }
-  if (buffer_ == nullptr || finished_) {
-    resetWriteState();
-    prepareWriteBuffer();
-  }
-  meta_ = RadixSortSpillSectionMeta::create(keyLayout, payloadLayout);
-  appendKeyRange(keyBase, count);
-  flush();
-}
-
 vector_size_t RadixSortSpillWriter::writePresizedKeyRange(
     const RadixSortKeyLayout& keyLayout,
     const PayloadRowLayout* payloadLayout,
@@ -534,6 +517,7 @@ void RadixSortSpillReader::acquireSerializedBuffer(uint64_t size) {
           serializedBuffer_->as<char>(), serializedBuffer_->capacity());
       return;
     }
+    reusable.reset();
   }
   serializedBuffer_ = AlignedBuffer::allocate<char>(size, pool_);
   checkCompactPointerRange(
@@ -545,6 +529,7 @@ void RadixSortSpillReader::recycleSerializedBuffer() {
     return;
   }
   if (bufferCache_ == nullptr) {
+    serializedBuffer_.reset();
     return;
   }
   if (!serializedBuffer_->isMutable() ||
@@ -561,31 +546,10 @@ void RadixSortSpillReader::recycleSerializedBuffer() {
   serializedBuffer_.reset();
 }
 
-void RadixSortSpillReader::recycleRetainedSerializedBuffer() {
-  BufferPtr candidate;
-  for (auto& buffer : retainedSerializedBuffers_) {
-    if (buffer == nullptr || !buffer->isMutable() ||
-        buffer->size() > maxReusableSerializedBufferSize_) {
-      continue;
-    }
-    if (candidate == nullptr || buffer->capacity() > candidate->capacity()) {
-      candidate = std::move(buffer);
-    }
-  }
-  retainedSerializedBuffers_.clear();
-  if (bufferCache_ != nullptr && candidate != nullptr &&
-      (bufferCache_->serializedBuffer == nullptr ||
-       candidate->capacity() > bufferCache_->serializedBuffer->capacity())) {
-    bufferCache_->serializedBuffer = std::move(candidate);
-  }
-}
-
 bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
   keys.clear();
-  if (input_ == nullptr) {
-    return false;
-  }
-  if (input_->atEnd()) {
+  if (inputAtEnd()) {
+    finishReading();
     return false;
   }
 
@@ -612,9 +576,6 @@ bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
         spillCompressionBound(file_.compressionKind, uncompressedSize),
         "Invalid compressed radix sort spill block size");
   }
-  if (serializedBuffer_ != nullptr) {
-    retainedSerializedBuffers_.push_back(std::move(serializedBuffer_));
-  }
   const auto keyRecordBytes =
       checkedSectionSize(header.rowCount, meta_.runtimeKeyRecordSize);
   const auto payloadFixedBytes =
@@ -628,6 +589,13 @@ bool RadixSortSpillReader::nextBatch(std::vector<const char*>& keys) {
       header.payloadHeapBytes);
   BOLT_CHECK_EQ(
       static_cast<uint64_t>(uncompressedSize), expectedUncompressedSize);
+  if (serializedBuffer_ != nullptr &&
+      (serializedBuffer_->size() > maxReusableSerializedBufferSize_ ||
+       serializedBuffer_->capacity() < uncompressedSize)) {
+    // The current block has already been materialized. Drop it before growing
+    // to avoid reserving the full new allocation while the old one is live.
+    serializedBuffer_.reset();
+  }
   acquireSerializedBuffer(uncompressedSize);
   auto* block = serializedBuffer_->asMutable<char>();
   readSpillBlockBody(
@@ -668,13 +636,13 @@ uint64_t RadixSortSpillReader::spillReadIOTimeUs() const {
 }
 
 void RadixSortSpillReader::close() {
-  closeInput();
+  finishReading();
 }
 
-int32_t RadixSortMergeStream::compare(const MergeStream& other) const {
-  const auto& typed = static_cast<const RadixSortMergeStream&>(other);
-  return RadixSortKey(keyLayout_, key_)
-      .compare(RadixSortKey(keyLayout_, typed.key_));
+void RadixSortSpillReader::finishReading() {
+  recycleSerializedBuffer();
+  compressedBuffer_.reset();
+  closeInput();
 }
 
 RadixSortMemoryRunMergeStream::RadixSortMemoryRunMergeStream(
@@ -687,9 +655,10 @@ bool RadixSortMemoryRunMergeStream::hasData() const {
   return key_ != nullptr;
 }
 
-void RadixSortMemoryRunMergeStream::pop() {
+bool RadixSortMemoryRunMergeStream::tryAdvance() {
   ++index_;
   loadCurrent();
+  return true;
 }
 
 void RadixSortMemoryRunMergeStream::loadCurrent() {
@@ -702,9 +671,8 @@ void RadixSortMemoryRunMergeStream::loadCurrent() {
     range_ = storage_.keyRangeAt(index_, storage_.keysPerBlock());
     rangeIndex_ = 0;
   }
-  key_ =
-      range_.data + static_cast<uint64_t>(rangeIndex_++) * keyLayout_.width();
-  payload_ = RadixSortKey(keyLayout_, key_).payload();
+  key_ = range_.data + static_cast<uint64_t>(rangeIndex_++) * keyWidth_;
+  payload_ = hasPayload_ ? loadCompactPointer(key_ + payloadOffset_) : nullptr;
 }
 
 RadixSortSpillFileMergeStream::RadixSortSpillFileMergeStream(
@@ -763,15 +731,21 @@ bool RadixSortSpillFileMergeStream::hasData() const {
   return key_ != nullptr;
 }
 
-void RadixSortSpillFileMergeStream::pop() {
-  ++index_;
-  if (index_ >= keys_.size()) {
-    loadBatch();
-    return;
+bool RadixSortSpillFileMergeStream::tryAdvance() {
+  BOLT_DCHECK_NOT_NULL(key_);
+  if (index_ + 1 >= keys_.size()) {
+    return false;
   }
-  key_ = keys_[index_];
-  payload_ = keyLayout_.hasPayload() ? RadixSortKey(keyLayout_, key_).payload()
-                                     : nullptr;
+  ++index_;
+  updateCurrent();
+  return true;
+}
+
+void RadixSortSpillFileMergeStream::advanceAfterFlush() {
+  BOLT_DCHECK_NOT_NULL(key_);
+  BOLT_DCHECK_EQ(index_ + 1, keys_.size());
+  ++index_;
+  loadBatch();
 }
 
 void RadixSortSpillFileMergeStream::loadBatch() {
@@ -785,9 +759,12 @@ void RadixSortSpillFileMergeStream::loadBatch() {
     throw;
   }
   index_ = 0;
-  key_ = keys_[0];
-  payload_ = keyLayout_.hasPayload() ? RadixSortKey(keyLayout_, key_).payload()
-                                     : nullptr;
+  updateCurrent();
+}
+
+void RadixSortSpillFileMergeStream::updateCurrent() {
+  key_ = keys_[index_];
+  payload_ = hasPayload_ ? loadCompactPointer(key_ + payloadOffset_) : nullptr;
 }
 
 void RadixSortSpillFileMergeStream::finishReading() {
@@ -840,22 +817,33 @@ bool RadixSortConcatFilesSpillMergeStream::hasData() const {
   return key_ != nullptr;
 }
 
-void RadixSortConcatFilesSpillMergeStream::pop() {
+bool RadixSortConcatFilesSpillMergeStream::tryAdvance() {
   BOLT_DCHECK_NOT_NULL(current_);
-  current_->pop();
-  if (current_->hasData()) {
-    updateCurrent();
-    return;
+  if (!current_->RadixSortSpillFileMergeStream::tryAdvance()) {
+    return false;
   }
-  retainCurrentFileStream();
-  loadNextFile();
+  updateCurrent();
+  return true;
+}
+
+void RadixSortConcatFilesSpillMergeStream::advanceAfterFlush() {
+  try {
+    BOLT_DCHECK_NOT_NULL(current_);
+    current_->RadixSortSpillFileMergeStream::advanceAfterFlush();
+    if (current_->hasData()) {
+      updateCurrent();
+      return;
+    }
+    retireCurrentFileStream();
+    loadNextFile();
+  } catch (...) {
+    closeNoThrow();
+    throw;
+  }
 }
 
 uint64_t RadixSortConcatFilesSpillMergeStream::getSpillReadTime() const {
   uint64_t time = completedSpillReadTimeUs_;
-  for (const auto& stream : retainedFileStreams_) {
-    time += stream->getSpillReadTime();
-  }
   if (current_ != nullptr) {
     time += current_->getSpillReadTime();
   }
@@ -864,9 +852,6 @@ uint64_t RadixSortConcatFilesSpillMergeStream::getSpillReadTime() const {
 
 uint64_t RadixSortConcatFilesSpillMergeStream::getSpillDecompressTime() const {
   uint64_t time = completedSpillDecompressTimeUs_;
-  for (const auto& stream : retainedFileStreams_) {
-    time += stream->getSpillDecompressTime();
-  }
   if (current_ != nullptr) {
     time += current_->getSpillDecompressTime();
   }
@@ -875,26 +860,10 @@ uint64_t RadixSortConcatFilesSpillMergeStream::getSpillDecompressTime() const {
 
 uint64_t RadixSortConcatFilesSpillMergeStream::getSpillReadIOTime() const {
   uint64_t time = completedSpillReadIOTimeUs_;
-  for (const auto& stream : retainedFileStreams_) {
-    time += stream->getSpillReadIOTime();
-  }
   if (current_ != nullptr) {
     time += current_->getSpillReadIOTime();
   }
   return time;
-}
-
-void RadixSortConcatFilesSpillMergeStream::releaseRetainedBuffers() {
-  for (auto& stream : retainedFileStreams_) {
-    completedSpillReadTimeUs_ += stream->getSpillReadTime();
-    completedSpillDecompressTimeUs_ += stream->getSpillDecompressTime();
-    completedSpillReadIOTimeUs_ += stream->getSpillReadIOTime();
-    stream->releaseRetainedBuffers();
-  }
-  retainedFileStreams_.clear();
-  if (current_ != nullptr) {
-    current_->releaseRetainedBuffers();
-  }
 }
 
 void RadixSortConcatFilesSpillMergeStream::loadNextFile() {
@@ -913,7 +882,7 @@ void RadixSortConcatFilesSpillMergeStream::loadNextFile() {
       updateCurrent();
       return;
     }
-    retainCurrentFileStream();
+    retireCurrentFileStream();
   }
   key_ = nullptr;
   payload_ = nullptr;
@@ -924,10 +893,14 @@ void RadixSortConcatFilesSpillMergeStream::updateCurrent() {
   payload_ = current_->payload();
 }
 
-void RadixSortConcatFilesSpillMergeStream::retainCurrentFileStream() {
-  if (current_ != nullptr) {
-    retainedFileStreams_.push_back(std::move(current_));
+void RadixSortConcatFilesSpillMergeStream::retireCurrentFileStream() {
+  if (current_ == nullptr) {
+    return;
   }
+  completedSpillReadTimeUs_ += current_->getSpillReadTime();
+  completedSpillDecompressTimeUs_ += current_->getSpillDecompressTime();
+  completedSpillReadIOTimeUs_ += current_->getSpillReadIOTime();
+  current_.reset();
 }
 
 void RadixSortConcatFilesSpillMergeStream::
@@ -940,13 +913,7 @@ void RadixSortConcatFilesSpillMergeStream::
 
 void RadixSortConcatFilesSpillMergeStream::closeNoThrow() noexcept {
   try {
-    releaseRetainedBuffers();
-    if (current_ != nullptr) {
-      completedSpillReadTimeUs_ += current_->getSpillReadTime();
-      completedSpillDecompressTimeUs_ += current_->getSpillDecompressTime();
-      completedSpillReadIOTimeUs_ += current_->getSpillReadIOTime();
-      current_.reset();
-    }
+    retireCurrentFileStream();
     cleanupUnreadFilesNoThrow();
     key_ = nullptr;
     payload_ = nullptr;
@@ -989,89 +956,132 @@ RadixSortMerger::RadixSortMerger(
 vector_size_t RadixSortMerger::collectRows(
     vector_size_t count,
     const char** keys,
-    char** payloads) {
+    char** payloads,
+    FlushRows flushRows) {
+  if (count == 0) {
+    return 0;
+  }
+  BOLT_CHECK(
+      !streams_.empty(), "Radix sort merger exhausted before requested rows");
   if (keyLayout_.hasPayload()) {
     if (streams_.size() == 1) {
-      return collectSingleStreamRows<true>(count, keys, payloads);
+      return collectSingleStreamRows<true>(count, keys, payloads, flushRows);
     }
     if (streams_.size() == 2) {
-      return collectTwoWayRows<true>(count, keys, payloads);
+      return collectTwoWayRows<true>(count, keys, payloads, flushRows);
     }
-    return collectLoserTreeRows<true>(count, keys, payloads);
+    return collectLoserTreeRows<true>(count, keys, payloads, flushRows);
   }
   if (streams_.size() == 1) {
-    return collectSingleStreamRows<false>(count, keys, payloads);
+    return collectSingleStreamRows<false>(count, keys, payloads, flushRows);
   }
   if (streams_.size() == 2) {
-    return collectTwoWayRows<false>(count, keys, payloads);
+    return collectTwoWayRows<false>(count, keys, payloads, flushRows);
   }
-  return collectLoserTreeRows<false>(count, keys, payloads);
+  return collectLoserTreeRows<false>(count, keys, payloads, flushRows);
 }
 
 template <bool HasPayload>
 vector_size_t RadixSortMerger::collectSingleStreamRows(
     vector_size_t count,
     const char** keys,
-    char** payloads) {
+    char** payloads,
+    FlushRows flushRows) {
   auto* stream = streams_[0].get();
-  vector_size_t row = 0;
-  for (; row < count; ++row) {
-    keys[row] = stream->key();
+  vector_size_t totalCollected = 0;
+  vector_size_t segmentSize = 0;
+  while (totalCollected < count) {
+    BOLT_CHECK_NOT_NULL(
+        stream->key(), "Radix sort merger exhausted before requested rows");
+    keys[segmentSize] = stream->key();
     if constexpr (HasPayload) {
-      payloads[row] = stream->payload();
+      payloads[segmentSize] = stream->payload();
     }
-    stream->pop();
+    ++segmentSize;
+    ++totalCollected;
+    if (!stream->tryAdvance()) {
+      flushRows(segmentSize);
+      segmentSize = 0;
+      stream->advanceAfterFlush();
+    }
   }
-  return row;
+  if (segmentSize != 0) {
+    flushRows(segmentSize);
+  }
+  return totalCollected;
 }
 
 template <bool HasPayload>
 vector_size_t RadixSortMerger::collectTwoWayRows(
     vector_size_t count,
     const char** keys,
-    char** payloads) {
+    char** payloads,
+    FlushRows flushRows) {
   auto* left = streams_[0].get();
   auto* right = streams_[1].get();
   auto* leftKey = left->key();
   auto* rightKey = right->key();
-  vector_size_t row = 0;
-  for (; row < count; ++row) {
-    if (rightKey == nullptr ||
-        (leftKey != nullptr && compareKeys(leftKey, rightKey) < 0)) {
-      keys[row] = leftKey;
-      if constexpr (HasPayload) {
-        payloads[row] = left->payload();
-      }
-      left->pop();
+  vector_size_t totalCollected = 0;
+  vector_size_t segmentSize = 0;
+  while (totalCollected < count) {
+    BOLT_CHECK(
+        leftKey != nullptr || rightKey != nullptr,
+        "Radix sort merger exhausted before requested rows");
+    const bool selectLeft = rightKey == nullptr ||
+        (leftKey != nullptr && compareKeys(leftKey, rightKey) < 0);
+    auto* stream = selectLeft ? left : right;
+    keys[segmentSize] = selectLeft ? leftKey : rightKey;
+    if constexpr (HasPayload) {
+      payloads[segmentSize] = stream->payload();
+    }
+    ++segmentSize;
+    ++totalCollected;
+    if (!stream->tryAdvance()) {
+      flushRows(segmentSize);
+      segmentSize = 0;
+      stream->advanceAfterFlush();
+    }
+    if (selectLeft) {
       leftKey = left->key();
     } else {
-      keys[row] = rightKey;
-      if constexpr (HasPayload) {
-        payloads[row] = right->payload();
-      }
-      right->pop();
       rightKey = right->key();
     }
   }
-  return row;
+  if (segmentSize != 0) {
+    flushRows(segmentSize);
+  }
+  return totalCollected;
 }
 
 template <bool HasPayload>
 vector_size_t RadixSortMerger::collectLoserTreeRows(
     vector_size_t count,
     const char** keys,
-    char** payloads) {
-  vector_size_t row = 0;
-  for (; row < count; ++row) {
+    char** payloads,
+    FlushRows flushRows) {
+  vector_size_t totalCollected = 0;
+  vector_size_t segmentSize = 0;
+  while (totalCollected < count) {
     const auto index = nextLoserTreeStream();
+    BOLT_CHECK_NE(
+        index, kEmpty, "Radix sort merger exhausted before requested rows");
     auto* stream = streams_[index].get();
-    keys[row] = stream->key();
+    keys[segmentSize] = stream->key();
     if constexpr (HasPayload) {
-      payloads[row] = stream->payload();
+      payloads[segmentSize] = stream->payload();
     }
-    stream->pop();
+    ++segmentSize;
+    ++totalCollected;
+    if (!stream->tryAdvance()) {
+      flushRows(segmentSize);
+      segmentSize = 0;
+      stream->advanceAfterFlush();
+    }
   }
-  return row;
+  if (segmentSize != 0) {
+    flushRows(segmentSize);
+  }
+  return totalCollected;
 }
 
 bool RadixSortMerger::less(StreamIndex left, StreamIndex right) const {
@@ -1156,12 +1166,6 @@ uint64_t RadixSortMerger::getSpillReadIOTime() const {
     time += stream->getSpillReadIOTime();
   }
   return time;
-}
-
-void RadixSortMerger::releaseRetainedBuffers() {
-  for (auto& stream : streams_) {
-    stream->releaseRetainedBuffers();
-  }
 }
 
 } // namespace bytedance::bolt::exec::radixsort

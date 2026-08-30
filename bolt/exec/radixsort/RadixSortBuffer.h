@@ -110,7 +110,13 @@ class RadixSortBuffer : public SortBufferBase {
 
   void accumulateSpillReadStats();
 
-  void prepareOutputVector(vector_size_t outputBatchSize);
+  void prepareOutputVector(
+      vector_size_t outputBatchSize,
+      bool resizeChildren = false);
+
+  RowVectorPtr getMergedOutput(vector_size_t count);
+
+  void ensureMergeRowPointerBuffers(vector_size_t count);
 
   const RowTypePtr inputType_;
   memory::MemoryPool* const pool_;

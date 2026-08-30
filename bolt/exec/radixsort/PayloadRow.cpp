@@ -43,11 +43,25 @@
 namespace bytedance::bolt::exec::radixsort {
 
 namespace {
+enum class VariableWriterKind : uint8_t {
+  kComplex,
+  kFlatString,
+  kConstantString,
+  kDecodedString,
+};
+
 struct VariableColumnWriter {
   const PayloadRowColumnLayout* column;
-  const BaseVector* vector;
   const DecodedVector* decoded;
+  const StringView* flatStringValues;
+  const uint64_t* flatStringNulls;
+  const StringView* decodedStringValues;
+  const vector_size_t* decodedStringIndices;
+  const uint64_t* decodedStringNulls;
   const uint64_t* complexSizes;
+  VariableWriterKind kind;
+  StringView constantStringValue;
+  bool constantStringNull;
 };
 } // namespace
 
@@ -242,52 +256,103 @@ void prepareResult(
       pool, layout.rowType(), nullptr, size, std::move(children));
 }
 
-bool isNull(const char* row, const PayloadRowColumnLayout& column) {
-  return (static_cast<uint8_t>(row[column.nullByte]) & column.nullMask) == 0;
+FOLLY_ALWAYS_INLINE bool
+isNull(const char* row, uint32_t nullByte, uint8_t nullMask) {
+  return (static_cast<uint8_t>(row[nullByte]) & nullMask) == 0;
+}
+
+void writeValidityBits(
+    uint32_t nullByte,
+    uint8_t nullMask,
+    std::span<char* const> rows,
+    vector_size_t outputOffset,
+    uint64_t* nulls) {
+  constexpr vector_size_t kRowsPerWord = 64;
+  vector_size_t row = 0;
+  while (row < rows.size() && (outputOffset + row) % kRowsPerWord != 0) {
+    bits::setNull(
+        nulls, outputOffset + row, isNull(rows[row], nullByte, nullMask));
+    ++row;
+  }
+  while (row + kRowsPerWord <= rows.size()) {
+    uint64_t validityWord = 0;
+    for (vector_size_t lane = 0; lane < kRowsPerWord; ++lane) {
+      validityWord |=
+          static_cast<uint64_t>(!isNull(rows[row + lane], nullByte, nullMask))
+          << lane;
+    }
+    nulls[(outputOffset + row) / kRowsPerWord] = validityWord;
+    row += kRowsPerWord;
+  }
+  for (; row < rows.size(); ++row) {
+    bits::setNull(
+        nulls, outputOffset + row, isNull(rows[row], nullByte, nullMask));
+  }
 }
 
 template <typename T, bool MayHaveNulls>
 void gatherFixedColumn(
-    const PayloadRowColumnLayout& column,
+    uint64_t offset,
+    uint32_t nullByte,
+    uint8_t nullMask,
     std::span<char* const> rows,
-    const VectorPtr& result) {
-  auto* flat = result->asUnchecked<FlatVector<T>>();
-  auto* values = flat->mutableRawValues();
-  auto* nulls = MayHaveNulls || flat->rawNulls() != nullptr
-      ? flat->mutableRawNulls()
-      : nullptr;
-  if (nulls != nullptr) {
-    bits::clearAllNull(nulls, rows.size());
+    vector_size_t outputOffset,
+    BaseVector* result,
+    T* values,
+    uint64_t* nulls,
+    bool hasAvx2) {
+  values += outputOffset;
+  if constexpr (!MayHaveNulls) {
+    if (result->rawNulls() != nullptr) {
+      result->clearNulls(outputOffset, outputOffset + rows.size());
+    }
+  }
+  if constexpr (MayHaveNulls) {
+    BOLT_DCHECK_NOT_NULL(nulls);
+  } else {
+    BOLT_DCHECK(nulls == nullptr);
   }
   if constexpr (MayHaveNulls) {
     constexpr vector_size_t kRowsPerWord = 64;
-    const auto size = static_cast<vector_size_t>(rows.size());
-    for (vector_size_t begin = 0; begin < size; begin += kRowsPerWord) {
-      const auto end = std::min(size, begin + kRowsPerWord);
+    vector_size_t row = 0;
+    while (row < rows.size() && (outputOffset + row) % kRowsPerWord != 0) {
+      bits::setNull(
+          nulls, outputOffset + row, isNull(rows[row], nullByte, nullMask));
+      values[row] = loadUnaligned<T>(rows[row] + offset);
+      ++row;
+    }
+    while (row + kRowsPerWord <= rows.size()) {
       uint64_t validityWord = 0;
-      for (vector_size_t row = begin; row < end; ++row) {
-        const bool null = isNull(rows[row], column);
-        validityWord |= static_cast<uint64_t>(!null) << (row - begin);
-        values[row] = loadUnaligned<T>(rows[row] + column.offset);
+      for (vector_size_t lane = 0; lane < kRowsPerWord; ++lane) {
+        validityWord |=
+            static_cast<uint64_t>(!isNull(rows[row + lane], nullByte, nullMask))
+            << lane;
+        values[row + lane] = loadUnaligned<T>(rows[row + lane] + offset);
       }
-      nulls[begin / kRowsPerWord] = validityWord;
+      nulls[(outputOffset + row) / kRowsPerWord] = validityWord;
+      row += kRowsPerWord;
+    }
+    for (; row < rows.size(); ++row) {
+      bits::setNull(
+          nulls, outputOffset + row, isNull(rows[row], nullByte, nullMask));
+      values[row] = loadUnaligned<T>(rows[row] + offset);
     }
     return;
   }
   if constexpr (std::is_same_v<T, int64_t>) {
     constexpr vector_size_t kBatchSize = xsimd::batch<int64_t>::size;
-    if (rows.size() >= kBatchSize && process::hasAvx2()) {
+    if (rows.size() >= kBatchSize && hasAvx2) {
       const auto baseAddress =
-          reinterpret_cast<intptr_t>(rows.front() + column.offset);
+          reinterpret_cast<intptr_t>(rows.front() + offset);
       const auto* base =
-          reinterpret_cast<const int64_t*>(rows.front() + column.offset);
+          reinterpret_cast<const int64_t*>(rows.front() + offset);
       vector_size_t row = 0;
       constexpr vector_size_t kStep = 4 * kBatchSize;
       for (; row + kStep <= rows.size(); row += kStep) {
         int64_t indices[kStep];
         for (vector_size_t lane = 0; lane < kStep; ++lane) {
           const auto address =
-              reinterpret_cast<intptr_t>(rows[row + lane] + column.offset);
+              reinterpret_cast<intptr_t>(rows[row + lane] + offset);
           indices[lane] = address - baseAddress;
         }
         simd::gather<int64_t, int64_t, 1>(base, indices)
@@ -306,29 +371,47 @@ void gatherFixedColumn(
         int64_t indices[kBatchSize];
         for (vector_size_t lane = 0; lane < kBatchSize; ++lane) {
           const auto address =
-              reinterpret_cast<intptr_t>(rows[row + lane] + column.offset);
+              reinterpret_cast<intptr_t>(rows[row + lane] + offset);
           indices[lane] = address - baseAddress;
         }
         simd::gather<int64_t, int64_t, 1>(base, indices)
             .store_unaligned(reinterpret_cast<int64_t*>(values + row));
       }
       for (; row < rows.size(); ++row) {
-        values[row] = loadUnaligned<T>(rows[row] + column.offset);
+        values[row] = loadUnaligned<T>(rows[row] + offset);
       }
       return;
     }
   }
   for (vector_size_t row = 0; row < rows.size(); ++row) {
-    values[row] = loadUnaligned<T>(rows[row] + column.offset);
+    values[row] = loadUnaligned<T>(rows[row] + offset);
   }
 }
 
-struct Fixed64GatherState {
-  const PayloadRowColumnLayout* column;
-  void* values;
-  uint64_t* nulls;
-  bool isDouble;
+enum class FixedGatherKind : uint8_t {
+  kBoolean,
+  kInt8,
+  kInt16,
+  kInt32,
+  kInt64,
+  kInt128,
+  kFloat,
+  kDouble,
+  kTimestamp,
+  kUnknown,
+};
+
+struct FixedGatherState {
+  uint64_t offset;
+  uint32_t nullByte;
+  uint8_t nullMask;
+  column_index_t outputChannel;
+  FixedGatherKind kind;
   bool mayHaveNulls;
+  bool grouped64;
+  BaseVector* result{nullptr};
+  void* values{nullptr};
+  uint64_t* nulls{nullptr};
 };
 
 bool isFixed64Column(const PayloadRowColumnLayout& column) {
@@ -337,9 +420,19 @@ bool isFixed64Column(const PayloadRowColumnLayout& column) {
       column.type->kind() == TypeKind::DOUBLE;
 }
 
+const FixedGatherState& asFixedGatherState(const FixedGatherState& state) {
+  return state;
+}
+
+const FixedGatherState& asFixedGatherState(const FixedGatherState* state) {
+  return *state;
+}
+
+template <typename States>
 void gatherFixed64Columns(
     std::span<char* const> rows,
-    folly::small_vector<Fixed64GatherState, 32>& states) {
+    vector_size_t outputOffset,
+    const States& states) {
   constexpr vector_size_t kBatchSize = xsimd::batch<int64_t>::size;
   constexpr vector_size_t kStep = 4 * kBatchSize;
   const auto rowBaseAddress = reinterpret_cast<intptr_t>(rows.front());
@@ -350,11 +443,12 @@ void gatherFixed64Columns(
       indices[lane] =
           reinterpret_cast<intptr_t>(rows[row + lane]) - rowBaseAddress;
     }
-    for (const auto& state : states) {
-      if (state.isDouble) {
-        const auto* base = reinterpret_cast<const double*>(
-            rows.front() + state.column->offset);
-        auto* values = static_cast<double*>(state.values);
+    for (const auto& stateEntry : states) {
+      const auto& state = asFixedGatherState(stateEntry);
+      if (state.kind == FixedGatherKind::kDouble) {
+        const auto* base =
+            reinterpret_cast<const double*>(rows.front() + state.offset);
+        auto* values = static_cast<double*>(state.values) + outputOffset;
         simd::gather<double, int64_t, 1>(base, indices)
             .store_unaligned(values + row);
         simd::gather<double, int64_t, 1>(base, indices + kBatchSize)
@@ -364,9 +458,9 @@ void gatherFixed64Columns(
         simd::gather<double, int64_t, 1>(base, indices + 3 * kBatchSize)
             .store_unaligned(values + row + 3 * kBatchSize);
       } else {
-        const auto* base = reinterpret_cast<const int64_t*>(
-            rows.front() + state.column->offset);
-        auto* values = static_cast<int64_t*>(state.values);
+        const auto* base =
+            reinterpret_cast<const int64_t*>(rows.front() + state.offset);
+        auto* values = static_cast<int64_t*>(state.values) + outputOffset;
         simd::gather<int64_t, int64_t, 1>(base, indices)
             .store_unaligned(values + row);
         simd::gather<int64_t, int64_t, 1>(base, indices + kBatchSize)
@@ -378,172 +472,270 @@ void gatherFixed64Columns(
       }
     }
   }
-  for (const auto& state : states) {
-    if (state.isDouble) {
-      auto* values = static_cast<double*>(state.values);
+  for (const auto& stateEntry : states) {
+    const auto& state = asFixedGatherState(stateEntry);
+    if (!state.mayHaveNulls && state.result->rawNulls() != nullptr) {
+      state.result->clearNulls(outputOffset, outputOffset + rows.size());
+    }
+    if (state.kind == FixedGatherKind::kDouble) {
+      auto* values = static_cast<double*>(state.values) + outputOffset;
       for (auto tail = row; tail < rows.size(); ++tail) {
-        values[tail] = loadUnaligned<double>(rows[tail] + state.column->offset);
+        values[tail] = loadUnaligned<double>(rows[tail] + state.offset);
       }
     } else {
-      auto* values = static_cast<int64_t*>(state.values);
+      auto* values = static_cast<int64_t*>(state.values) + outputOffset;
       for (auto tail = row; tail < rows.size(); ++tail) {
-        values[tail] =
-            loadUnaligned<int64_t>(rows[tail] + state.column->offset);
+        values[tail] = loadUnaligned<int64_t>(rows[tail] + state.offset);
       }
     }
     if (!state.mayHaveNulls) {
       continue;
     }
-    constexpr vector_size_t kRowsPerWord = 64;
-    for (vector_size_t begin = 0; begin < rows.size(); begin += kRowsPerWord) {
-      const auto end =
-          std::min<vector_size_t>(rows.size(), begin + kRowsPerWord);
-      uint64_t validityWord = 0;
-      for (vector_size_t nullRow = begin; nullRow < end; ++nullRow) {
-        validityWord |=
-            static_cast<uint64_t>(!isNull(rows[nullRow], *state.column))
-            << (nullRow - begin);
-      }
-      state.nulls[begin / kRowsPerWord] = validityWord;
-    }
+    writeValidityBits(
+        state.nullByte, state.nullMask, rows, outputOffset, state.nulls);
   }
 }
 
 template <bool MayHaveNulls>
 void gatherFixedBooleanColumn(
-    const PayloadRowColumnLayout& column,
+    uint64_t offset,
+    uint32_t nullByte,
+    uint8_t nullMask,
     std::span<char* const> rows,
-    const VectorPtr& result) {
-  auto* flat = result->asUnchecked<FlatVector<bool>>();
-  auto* values = flat->template mutableRawValues<uint64_t>();
-  auto* nulls = MayHaveNulls || flat->rawNulls() != nullptr
-      ? flat->mutableRawNulls()
-      : nullptr;
-  if (nulls != nullptr) {
-    bits::clearAllNull(nulls, rows.size());
+    vector_size_t outputOffset,
+    BaseVector* result,
+    uint64_t* values,
+    uint64_t* nulls) {
+  if constexpr (!MayHaveNulls) {
+    if (result->rawNulls() != nullptr) {
+      result->clearNulls(outputOffset, outputOffset + rows.size());
+    }
+  } else {
+    BOLT_DCHECK_NOT_NULL(nulls);
+  }
+  if constexpr (!MayHaveNulls) {
+    BOLT_DCHECK(nulls == nullptr);
   }
   for (vector_size_t row = 0; row < rows.size(); ++row) {
     if constexpr (MayHaveNulls) {
-      bits::setNull(nulls, row, isNull(rows[row], column));
+      bits::setNull(
+          nulls, outputOffset + row, isNull(rows[row], nullByte, nullMask));
     }
-    const auto value = loadUnaligned<uint8_t>(rows[row] + column.offset);
-    bits::setBit(values, row, value != 0);
+    const auto value = loadUnaligned<uint8_t>(rows[row] + offset);
+    bits::setBit(values, outputOffset + row, value != 0);
   }
 }
 
 template <bool MayHaveNulls>
 void gatherFixedTimestampColumn(
-    const PayloadRowColumnLayout& column,
+    uint64_t offset,
+    uint32_t nullByte,
+    uint8_t nullMask,
     std::span<char* const> rows,
-    const VectorPtr& result) {
-  auto* flat = result->asUnchecked<FlatVector<Timestamp>>();
-  auto* values = flat->mutableRawValues();
-  auto* nulls = MayHaveNulls || flat->rawNulls() != nullptr
-      ? flat->mutableRawNulls()
-      : nullptr;
-  if (nulls != nullptr) {
-    bits::clearAllNull(nulls, rows.size());
+    vector_size_t outputOffset,
+    BaseVector* result,
+    Timestamp* values,
+    uint64_t* nulls) {
+  values += outputOffset;
+  if constexpr (!MayHaveNulls) {
+    if (result->rawNulls() != nullptr) {
+      result->clearNulls(outputOffset, outputOffset + rows.size());
+    }
+  } else {
+    BOLT_DCHECK_NOT_NULL(nulls);
+  }
+  if constexpr (!MayHaveNulls) {
+    BOLT_DCHECK(nulls == nullptr);
   }
   for (vector_size_t row = 0; row < rows.size(); ++row) {
     if constexpr (MayHaveNulls) {
-      bits::setNull(nulls, row, isNull(rows[row], column));
+      bits::setNull(
+          nulls, outputOffset + row, isNull(rows[row], nullByte, nullMask));
     }
-    const auto seconds = loadUnaligned<int64_t>(rows[row] + column.offset);
+    const auto seconds = loadUnaligned<int64_t>(rows[row] + offset);
     const auto nanos =
-        loadUnaligned<uint64_t>(rows[row] + column.offset + sizeof(int64_t));
+        loadUnaligned<uint64_t>(rows[row] + offset + sizeof(int64_t));
     values[row] = Timestamp(seconds, nanos);
   }
 }
 
 template <bool MayHaveNulls>
-void gatherFixedColumn(
-    const PayloadRowColumnLayout& column,
+void gatherFixedState(
+    const FixedGatherState& state,
     std::span<char* const> rows,
-    const VectorPtr& result) {
-  if (column.type->isShortDecimal()) {
-    gatherFixedColumn<int64_t, MayHaveNulls>(column, rows, result);
-    return;
+    vector_size_t outputOffset,
+    bool hasAvx2) {
+  switch (state.kind) {
+    case FixedGatherKind::kBoolean:
+      gatherFixedBooleanColumn<MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<uint64_t*>(state.values),
+          state.nulls);
+      return;
+    case FixedGatherKind::kInt8:
+      gatherFixedColumn<int8_t, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<int8_t*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kInt16:
+      gatherFixedColumn<int16_t, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<int16_t*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kInt32:
+      gatherFixedColumn<int32_t, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<int32_t*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kInt64:
+      gatherFixedColumn<int64_t, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<int64_t*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kInt128:
+      gatherFixedColumn<int128_t, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<int128_t*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kFloat:
+      gatherFixedColumn<float, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<float*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kDouble:
+      gatherFixedColumn<double, MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<double*>(state.values),
+          state.nulls,
+          hasAvx2);
+      return;
+    case FixedGatherKind::kTimestamp:
+      gatherFixedTimestampColumn<MayHaveNulls>(
+          state.offset,
+          state.nullByte,
+          state.nullMask,
+          rows,
+          outputOffset,
+          state.result,
+          static_cast<Timestamp*>(state.values),
+          state.nulls);
+      return;
+    case FixedGatherKind::kUnknown:
+      bits::fillBits(
+          state.nulls, outputOffset, outputOffset + rows.size(), bits::kNull);
+      return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
-    gatherFixedColumn<int128_t, MayHaveNulls>(column, rows, result);
-    return;
-  }
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
-      gatherFixedBooleanColumn<MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::TINYINT:
-      gatherFixedColumn<int8_t, MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::SMALLINT:
-      gatherFixedColumn<int16_t, MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::INTEGER:
-      gatherFixedColumn<int32_t, MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::BIGINT:
-      gatherFixedColumn<int64_t, MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::REAL:
-      gatherFixedColumn<float, MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::DOUBLE:
-      gatherFixedColumn<double, MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::TIMESTAMP:
-      gatherFixedTimestampColumn<MayHaveNulls>(column, rows, result);
-      return;
-    case TypeKind::UNKNOWN:
-      for (vector_size_t row = 0; row < rows.size(); ++row) {
-        result->setNull(row, true);
-      }
-      return;
-    default:
-      BOLT_FAIL(
-          "Sort fixed payload gather is not implemented for {}",
-          column.type->toString());
-  }
+  BOLT_UNREACHABLE();
 }
 
 struct StringGatherState {
-  const PayloadRowColumnLayout* column;
-  FlatVector<StringView>* result;
-  StringView* values;
-  uint64_t* nulls;
+  uint64_t offset;
+  uint32_t nullByte;
+  uint8_t nullMask;
+  column_index_t outputChannel;
+  bool mayHaveNulls;
+  FlatVector<StringView>* result{nullptr};
+  StringView* values{nullptr};
+  uint64_t* nulls{nullptr};
   uint64_t stringBytes{0};
   char* output{nullptr};
-  char* outputEnd{nullptr};
 };
 
-template <bool MayHaveNulls>
+StringGatherState& asStringGatherState(StringGatherState& state) {
+  return state;
+}
+
+StringGatherState& asStringGatherState(StringGatherState* state) {
+  return *state;
+}
+
+template <bool MayHaveNulls, typename States>
 void gatherStringColumns(
     std::span<char* const> rows,
-    std::vector<StringGatherState>& states) {
-  for (auto& state : states) {
-    state.values = state.result->mutableRawValues();
-    state.nulls = MayHaveNulls || state.result->rawNulls() != nullptr
-        ? state.result->mutableRawNulls()
-        : nullptr;
-    if (state.nulls != nullptr) {
-      bits::clearAllNull(state.nulls, rows.size());
+    vector_size_t outputOffset,
+    States& states) {
+  for (auto& stateEntry : states) {
+    auto& state = asStringGatherState(stateEntry);
+    state.stringBytes = 0;
+    state.output = nullptr;
+    if constexpr (MayHaveNulls) {
+      bits::fillBits(
+          state.nulls,
+          outputOffset,
+          outputOffset + rows.size(),
+          bits::kNotNull);
+    } else if (state.result->rawNulls() != nullptr) {
+      state.result->clearNulls(outputOffset, outputOffset + rows.size());
     }
   }
 
   constexpr vector_size_t kRowsPerTile = 32;
   for (vector_size_t begin = 0; begin < rows.size(); begin += kRowsPerTile) {
     const auto end = std::min<vector_size_t>(rows.size(), begin + kRowsPerTile);
-    for (auto& state : states) {
-      const auto& column = *state.column;
+    for (auto& stateEntry : states) {
+      auto& state = asStringGatherState(stateEntry);
       for (vector_size_t row = begin; row < end; ++row) {
+        const auto target = outputOffset + row;
         if constexpr (MayHaveNulls) {
-          if (isNull(rows[row], column)) {
-            bits::setNull(state.nulls, row, true);
+          if (isNull(rows[row], state.nullByte, state.nullMask)) {
+            bits::setNull(state.nulls, target, true);
             continue;
           }
         }
-        const auto value = loadUnaligned<StringView>(rows[row] + column.offset);
-        state.values[row] = value;
+        const auto value = loadUnaligned<StringView>(rows[row] + state.offset);
+        state.values[target] = value;
         if (!value.isInline()) {
           state.stringBytes += value.size();
         }
@@ -551,29 +743,30 @@ void gatherStringColumns(
     }
   }
 
-  for (auto& state : states) {
+  for (auto& stateEntry : states) {
+    auto& state = asStringGatherState(stateEntry);
     state.output = state.stringBytes == 0
         ? nullptr
         : state.result->getRawStringBufferWithSpace(state.stringBytes, true);
-    state.outputEnd =
-        state.output == nullptr ? nullptr : state.output + state.stringBytes;
   }
 
   for (vector_size_t begin = 0; begin < rows.size(); begin += kRowsPerTile) {
     const auto end = std::min<vector_size_t>(rows.size(), begin + kRowsPerTile);
-    for (auto& state : states) {
+    for (auto& stateEntry : states) {
+      auto& state = asStringGatherState(stateEntry);
       for (vector_size_t row = begin; row < end; ++row) {
+        const auto target = outputOffset + row;
         if constexpr (MayHaveNulls) {
-          if (bits::isBitNull(state.nulls, row)) {
+          if (bits::isBitNull(state.nulls, target)) {
             continue;
           }
         }
-        const auto value = state.values[row];
+        const auto value = state.values[target];
         if (value.isInline()) {
           continue;
         }
         std::memcpy(state.output, value.data(), value.size());
-        state.values[row] =
+        state.values[target] =
             StringView(state.output, static_cast<int32_t>(value.size()));
         state.output += value.size();
       }
@@ -583,27 +776,29 @@ void gatherStringColumns(
 
 template <bool MayHaveNulls>
 void gatherStringColumn(
-    const PayloadRowColumnLayout& column,
+    StringGatherState& state,
     std::span<char* const> rows,
-    FlatVector<StringView>* flat) {
+    vector_size_t outputOffset) {
   uint64_t stringBytes = 0;
-  auto* values = flat->mutableRawValues();
-  auto* nulls = MayHaveNulls || flat->rawNulls() != nullptr
-      ? flat->mutableRawNulls()
-      : nullptr;
-  if (nulls != nullptr) {
-    bits::clearAllNull(nulls, rows.size());
+  auto* values = state.values;
+  auto* nulls = state.nulls;
+  if constexpr (MayHaveNulls) {
+    bits::fillBits(
+        nulls, outputOffset, outputOffset + rows.size(), bits::kNotNull);
+  } else if (state.result->rawNulls() != nullptr) {
+    state.result->clearNulls(outputOffset, outputOffset + rows.size());
   }
 
   for (vector_size_t row = 0; row < rows.size(); ++row) {
+    const auto target = outputOffset + row;
     if constexpr (MayHaveNulls) {
-      if (isNull(rows[row], column)) {
-        bits::setNull(nulls, row, true);
+      if (isNull(rows[row], state.nullByte, state.nullMask)) {
+        bits::setNull(nulls, target, true);
         continue;
       }
     }
-    const auto value = loadUnaligned<StringView>(rows[row] + column.offset);
-    values[row] = value;
+    const auto value = loadUnaligned<StringView>(rows[row] + state.offset);
+    values[target] = value;
     if (!value.isInline()) {
       stringBytes += value.size();
     }
@@ -611,21 +806,21 @@ void gatherStringColumn(
 
   char* output = stringBytes == 0
       ? nullptr
-      : flat->getRawStringBufferWithSpace(stringBytes, true);
-  const auto* outputEnd = output == nullptr ? nullptr : output + stringBytes;
+      : state.result->getRawStringBufferWithSpace(stringBytes, true);
 
   for (vector_size_t row = 0; row < rows.size(); ++row) {
+    const auto target = outputOffset + row;
     if constexpr (MayHaveNulls) {
-      if (bits::isBitNull(nulls, row)) {
+      if (bits::isBitNull(nulls, target)) {
         continue;
       }
     }
-    const auto value = values[row];
+    const auto value = values[target];
     if (value.isInline()) {
       continue;
     }
     std::memcpy(output, value.data(), value.size());
-    values[row] = StringView(output, static_cast<int32_t>(value.size()));
+    values[target] = StringView(output, static_cast<int32_t>(value.size()));
     output += value.size();
   }
 }
@@ -640,158 +835,434 @@ class SingleRangeByteInputStream final : public ByteInputStream {
   }
 };
 
+struct ComplexGatherState {
+  uint64_t offset;
+  uint32_t nullByte;
+  uint8_t nullMask;
+  column_index_t outputChannel;
+  BaseVector* result{nullptr};
+  uint64_t* nulls{nullptr};
+};
+
 void gatherComplexColumn(
-    const PayloadRowColumnLayout& column,
+    ComplexGatherState& state,
     std::span<char* const> rows,
-    const VectorPtr& result) {
-  BOLT_DCHECK(column.complex);
+    vector_size_t outputOffset) {
   SingleRangeByteInputStream input;
   for (vector_size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
     const auto* row = rows[rowIndex];
-    if (isNull(row, column)) {
-      result->setNull(rowIndex, true);
+    const auto target = outputOffset + rowIndex;
+    if (isNull(row, state.nullByte, state.nullMask)) {
+      if (state.nulls == nullptr) {
+        state.nulls = state.result->mutableRawNulls();
+      }
+      bits::setNull(state.nulls, target, true);
       continue;
     }
-    const auto value = loadUnaligned<PayloadVarlenRef>(row + column.offset);
+    const auto value = loadUnaligned<PayloadVarlenRef>(row + state.offset);
     if (value.size == 0) {
-      result->setNull(rowIndex, false);
+      if (state.nulls != nullptr) {
+        bits::setNull(state.nulls, target, false);
+      }
       continue;
     }
     input.reset(ByteRange{
         reinterpret_cast<uint8_t*>(value.data),
         static_cast<int32_t>(value.size),
         0});
-    exec::ContainerRowSerde::deserialize(input, rowIndex, result.get(), true);
+    exec::ContainerRowSerde::deserialize(input, target, state.result, true);
   }
 }
 
-void gatherImpl(
+} // namespace
+
+struct PayloadRowReader::Plan::Impl {
+  explicit Impl(const PayloadRowLayout& rowLayout) : layout(&rowLayout) {}
+
+  void gather(std::span<char* const> rows, vector_size_t outputOffset);
+
+  const PayloadRowLayout* layout;
+  std::vector<column_index_t> outputChannels;
+  std::vector<FixedGatherState> fixedColumns;
+  std::vector<FixedGatherState*> groupedFixed64Columns;
+  std::vector<StringGatherState> stringColumns;
+  std::vector<StringGatherState*> nonNullStringColumns;
+  std::vector<StringGatherState*> nullableStringColumns;
+  std::vector<ComplexGatherState> complexColumns;
+  bool hasAvx2{false};
+  RowVector* output{nullptr};
+};
+
+namespace {
+
+FixedGatherKind fixedGatherKind(const Type& type) {
+  if (type.isShortDecimal()) {
+    return FixedGatherKind::kInt64;
+  }
+  if (type.isLongDecimal() || type.kind() == TypeKind::HUGEINT) {
+    return FixedGatherKind::kInt128;
+  }
+  switch (type.kind()) {
+    case TypeKind::BOOLEAN:
+      return FixedGatherKind::kBoolean;
+    case TypeKind::TINYINT:
+      return FixedGatherKind::kInt8;
+    case TypeKind::SMALLINT:
+      return FixedGatherKind::kInt16;
+    case TypeKind::INTEGER:
+      return FixedGatherKind::kInt32;
+    case TypeKind::BIGINT:
+      return FixedGatherKind::kInt64;
+    case TypeKind::REAL:
+      return FixedGatherKind::kFloat;
+    case TypeKind::DOUBLE:
+      return FixedGatherKind::kDouble;
+    case TypeKind::TIMESTAMP:
+      return FixedGatherKind::kTimestamp;
+    case TypeKind::UNKNOWN:
+      return FixedGatherKind::kUnknown;
+    default:
+      BOLT_FAIL(
+          "Sort fixed payload gather is not implemented for {}",
+          type.toString());
+  }
+}
+
+void* mutableFixedValues(BaseVector* result, FixedGatherKind kind) {
+  switch (kind) {
+    case FixedGatherKind::kBoolean:
+      return result->asUnchecked<FlatVector<bool>>()
+          ->mutableRawValues<uint64_t>();
+    case FixedGatherKind::kInt8:
+      return result->asUnchecked<FlatVector<int8_t>>()->mutableRawValues();
+    case FixedGatherKind::kInt16:
+      return result->asUnchecked<FlatVector<int16_t>>()->mutableRawValues();
+    case FixedGatherKind::kInt32:
+      return result->asUnchecked<FlatVector<int32_t>>()->mutableRawValues();
+    case FixedGatherKind::kInt64:
+      return result->asUnchecked<FlatVector<int64_t>>()->mutableRawValues();
+    case FixedGatherKind::kInt128:
+      return result->asUnchecked<FlatVector<int128_t>>()->mutableRawValues();
+    case FixedGatherKind::kFloat:
+      return result->asUnchecked<FlatVector<float>>()->mutableRawValues();
+    case FixedGatherKind::kDouble:
+      return result->asUnchecked<FlatVector<double>>()->mutableRawValues();
+    case FixedGatherKind::kTimestamp:
+      return result->asUnchecked<FlatVector<Timestamp>>()->mutableRawValues();
+    case FixedGatherKind::kUnknown:
+      return nullptr;
+  }
+  BOLT_UNREACHABLE();
+}
+
+FixedGatherState makeBoundFixedState(
+    const PayloadRowColumnLayout& column,
+    column_index_t outputChannel,
+    bool mayHaveNulls,
+    BaseVector* result) {
+  const auto kind = fixedGatherKind(*column.type);
+  return FixedGatherState{
+      column.offset,
+      column.nullByte,
+      column.nullMask,
+      outputChannel,
+      kind,
+      mayHaveNulls,
+      isFixed64Column(column),
+      result,
+      mutableFixedValues(result, kind),
+      mayHaveNulls || kind == FixedGatherKind::kUnknown
+          ? result->mutableRawNulls()
+          : nullptr};
+}
+
+StringGatherState makeBoundStringState(
+    const PayloadRowColumnLayout& column,
+    column_index_t outputChannel,
+    bool mayHaveNulls,
+    BaseVector* result) {
+  auto* flat = result->asUnchecked<FlatVector<StringView>>();
+  return StringGatherState{
+      column.offset,
+      column.nullByte,
+      column.nullMask,
+      outputChannel,
+      mayHaveNulls,
+      flat,
+      flat->mutableRawValues(),
+      mayHaveNulls ? flat->mutableRawNulls() : nullptr};
+}
+
+void gatherStandalone(
     const PayloadRowLayout& layout,
     std::span<char* const> rows,
     std::span<const uint8_t> mayHaveNulls,
     memory::MemoryPool* pool,
     RowVectorPtr& result) {
   BOLT_CHECK_NOT_NULL(pool, "Payload row output memory pool must not be null");
-  const auto size = static_cast<vector_size_t>(rows.size());
-  prepareResult(layout, size, pool, result);
+  prepareResult(layout, static_cast<vector_size_t>(rows.size()), pool, result);
+  const bool hasAvx2 = process::hasAvx2();
 
   if (!layout.hasVariableFields()) {
-    folly::small_vector<Fixed64GatherState, 32> fixed64Columns;
-    if (process::hasAvx2() && rows.size() >= xsimd::batch<int64_t>::size) {
+    folly::small_vector<FixedGatherState, 32> groupedFixed64Columns;
+    if (hasAvx2 && rows.size() >= xsimd::batch<int64_t>::size) {
       for (uint32_t columnIndex = 0; columnIndex < layout.columns().size();
            ++columnIndex) {
         const auto& column = layout.columns()[columnIndex];
-        if (!isFixed64Column(column)) {
-          continue;
-        }
-        auto* child = result->childAt(columnIndex).get();
-        uint64_t* nulls = nullptr;
-        if (mayHaveNulls[columnIndex] || child->rawNulls() != nullptr) {
-          nulls = child->mutableRawNulls();
-          bits::clearAllNull(nulls, rows.size());
-        }
-        if (column.type->kind() == TypeKind::DOUBLE) {
-          fixed64Columns.push_back(Fixed64GatherState{
-              &column,
-              child->asUnchecked<FlatVector<double>>()->mutableRawValues(),
-              nulls,
-              true,
-              mayHaveNulls[columnIndex] != 0});
-        } else {
-          fixed64Columns.push_back(Fixed64GatherState{
-              &column,
-              child->asUnchecked<FlatVector<int64_t>>()->mutableRawValues(),
-              nulls,
-              false,
-              mayHaveNulls[columnIndex] != 0});
+        if (isFixed64Column(column)) {
+          groupedFixed64Columns.push_back(makeBoundFixedState(
+              column,
+              columnIndex,
+              mayHaveNulls[columnIndex] != 0,
+              result->childAt(columnIndex).get()));
         }
       }
     }
-    if (fixed64Columns.size() > 1) {
-      gatherFixed64Columns(rows, fixed64Columns);
+    if (groupedFixed64Columns.size() > 1) {
+      gatherFixed64Columns(rows, 0, groupedFixed64Columns);
     } else {
-      fixed64Columns.clear();
+      groupedFixed64Columns.clear();
     }
     for (uint32_t columnIndex = 0; columnIndex < layout.columns().size();
          ++columnIndex) {
-      if (!fixed64Columns.empty() &&
-          isFixed64Column(layout.columns()[columnIndex])) {
+      const auto& column = layout.columns()[columnIndex];
+      if (!groupedFixed64Columns.empty() && isFixed64Column(column)) {
         continue;
       }
-      if (mayHaveNulls[columnIndex]) {
-        gatherFixedColumn<true>(
-            layout.columns()[columnIndex], rows, result->childAt(columnIndex));
+      const auto state = makeBoundFixedState(
+          column,
+          columnIndex,
+          mayHaveNulls[columnIndex] != 0,
+          result->childAt(columnIndex).get());
+      if (state.mayHaveNulls) {
+        gatherFixedState<true>(state, rows, 0, hasAvx2);
       } else {
-        gatherFixedColumn<false>(
-            layout.columns()[columnIndex], rows, result->childAt(columnIndex));
+        gatherFixedState<false>(state, rows, 0, hasAvx2);
       }
     }
     return;
   }
 
-  uint32_t nonNullStringColumnCount = 0;
-  uint32_t nullableStringColumnCount = 0;
+  folly::small_vector<StringGatherState, 32> stringColumns;
   for (uint32_t columnIndex = 0; columnIndex < layout.columns().size();
        ++columnIndex) {
     const auto& column = layout.columns()[columnIndex];
-    if (column.variable && !column.complex) {
-      if (mayHaveNulls[columnIndex]) {
-        ++nullableStringColumnCount;
+    auto* child = result->childAt(columnIndex).get();
+    if (column.complex) {
+      ComplexGatherState state{
+          column.offset,
+          column.nullByte,
+          column.nullMask,
+          static_cast<column_index_t>(columnIndex),
+          child,
+          child->rawNulls() == nullptr ? nullptr : child->mutableRawNulls()};
+      gatherComplexColumn(state, rows, 0);
+    } else if (column.variable) {
+      stringColumns.push_back(makeBoundStringState(
+          column, columnIndex, mayHaveNulls[columnIndex] != 0, child));
+    } else {
+      const auto state = makeBoundFixedState(
+          column, columnIndex, mayHaveNulls[columnIndex] != 0, child);
+      if (state.mayHaveNulls) {
+        gatherFixedState<true>(state, rows, 0, hasAvx2);
       } else {
-        ++nonNullStringColumnCount;
+        gatherFixedState<false>(state, rows, 0, hasAvx2);
       }
     }
   }
-  const auto stringColumnCount =
-      nonNullStringColumnCount + nullableStringColumnCount;
-  std::vector<StringGatherState> nonNullStringColumns;
-  std::vector<StringGatherState> nullableStringColumns;
-  if (stringColumnCount > 1) {
-    nonNullStringColumns.reserve(nonNullStringColumnCount);
-    nullableStringColumns.reserve(nullableStringColumnCount);
-  }
-  for (uint32_t columnIndex = 0; columnIndex < layout.columns().size();
-       ++columnIndex) {
-    const auto& column = layout.columns()[columnIndex];
-    auto& child = result->childAt(columnIndex);
-    if (!column.complex) {
-      if (column.variable) {
-        if (stringColumnCount == 1) {
-          if (mayHaveNulls[columnIndex]) {
-            gatherStringColumn<true>(
-                column, rows, child->asUnchecked<FlatVector<StringView>>());
-          } else {
-            gatherStringColumn<false>(
-                column, rows, child->asUnchecked<FlatVector<StringView>>());
-          }
-          continue;
-        }
-        auto& states = mayHaveNulls[columnIndex] ? nullableStringColumns
-                                                 : nonNullStringColumns;
-        states.push_back(StringGatherState{
-            &column,
-            child->asUnchecked<FlatVector<StringView>>(),
-            nullptr,
-            nullptr});
-        continue;
-      }
-      if (mayHaveNulls[columnIndex]) {
-        gatherFixedColumn<true>(column, rows, child);
-      } else {
-        gatherFixedColumn<false>(column, rows, child);
-      }
-      continue;
+  if (stringColumns.size() == 1) {
+    auto& state = stringColumns.front();
+    if (state.mayHaveNulls) {
+      gatherStringColumn<true>(state, rows, 0);
+    } else {
+      gatherStringColumn<false>(state, rows, 0);
     }
-
-    gatherComplexColumn(column, rows, child);
+    return;
   }
-  if (stringColumnCount > 1) {
-    gatherStringColumns<false>(rows, nonNullStringColumns);
-    gatherStringColumns<true>(rows, nullableStringColumns);
+  folly::small_vector<StringGatherState*, 32> nonNullStringColumns;
+  folly::small_vector<StringGatherState*, 32> nullableStringColumns;
+  for (auto& state : stringColumns) {
+    auto& states =
+        state.mayHaveNulls ? nullableStringColumns : nonNullStringColumns;
+    states.push_back(&state);
   }
+  gatherStringColumns<false>(rows, 0, nonNullStringColumns);
+  gatherStringColumns<true>(rows, 0, nullableStringColumns);
 }
 
 } // namespace
+
+void PayloadRowReader::Plan::Impl::gather(
+    std::span<char* const> rows,
+    vector_size_t outputOffset) {
+  const bool useGroupedFixed64 = hasAvx2 &&
+      rows.size() >= xsimd::batch<int64_t>::size &&
+      groupedFixed64Columns.size() > 1;
+  if (useGroupedFixed64) {
+    gatherFixed64Columns(rows, outputOffset, groupedFixed64Columns);
+  }
+  for (const auto& state : fixedColumns) {
+    if (useGroupedFixed64 && state.grouped64) {
+      continue;
+    }
+    if (state.mayHaveNulls) {
+      gatherFixedState<true>(state, rows, outputOffset, hasAvx2);
+    } else {
+      gatherFixedState<false>(state, rows, outputOffset, hasAvx2);
+    }
+  }
+
+  if (stringColumns.size() == 1) {
+    auto& state = stringColumns.front();
+    if (state.mayHaveNulls) {
+      gatherStringColumn<true>(state, rows, outputOffset);
+    } else {
+      gatherStringColumn<false>(state, rows, outputOffset);
+    }
+  } else if (!stringColumns.empty()) {
+    gatherStringColumns<false>(rows, outputOffset, nonNullStringColumns);
+    gatherStringColumns<true>(rows, outputOffset, nullableStringColumns);
+  }
+
+  for (auto& state : complexColumns) {
+    gatherComplexColumn(state, rows, outputOffset);
+  }
+}
+
+PayloadRowReader::Plan::Plan(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
+PayloadRowReader::Plan::Plan(Plan&&) noexcept = default;
+
+PayloadRowReader::Plan& PayloadRowReader::Plan::operator=(Plan&&) noexcept =
+    default;
+
+PayloadRowReader::Plan::~Plan() = default;
+
+PayloadRowReader::Plan PayloadRowReader::makePlan(
+    const PayloadRowLayout& layout,
+    std::span<const column_index_t> payloadChannels,
+    std::span<const uint8_t> mayHaveNulls) {
+#ifndef NDEBUG
+  BOLT_DCHECK_EQ(mayHaveNulls.size(), layout.columns().size());
+  BOLT_DCHECK(
+      payloadChannels.empty() ||
+      payloadChannels.size() == layout.columns().size());
+#endif
+  auto impl = std::make_unique<Plan::Impl>(layout);
+  impl->outputChannels.reserve(layout.columns().size());
+  impl->fixedColumns.reserve(layout.columns().size());
+  impl->stringColumns.reserve(layout.variableColumns().size());
+  impl->complexColumns.reserve(layout.variableColumns().size());
+  for (uint32_t index = 0; index < layout.columns().size(); ++index) {
+    const auto& column = layout.columns()[index];
+    const auto outputChannel = payloadChannels.empty()
+        ? static_cast<column_index_t>(index)
+        : payloadChannels[index];
+    impl->outputChannels.push_back(outputChannel);
+    if (column.complex) {
+      impl->complexColumns.push_back(ComplexGatherState{
+          column.offset, column.nullByte, column.nullMask, outputChannel});
+    } else if (column.variable) {
+      impl->stringColumns.push_back(StringGatherState{
+          column.offset,
+          column.nullByte,
+          column.nullMask,
+          outputChannel,
+          mayHaveNulls[index] != 0});
+    } else {
+      const auto kind = fixedGatherKind(*column.type);
+      impl->fixedColumns.push_back(FixedGatherState{
+          column.offset,
+          column.nullByte,
+          column.nullMask,
+          outputChannel,
+          kind,
+          mayHaveNulls[index] != 0,
+          isFixed64Column(column)});
+    }
+  }
+  if (!layout.hasVariableFields()) {
+    impl->groupedFixed64Columns.reserve(impl->fixedColumns.size());
+    for (auto& state : impl->fixedColumns) {
+      if (state.grouped64) {
+        impl->groupedFixed64Columns.push_back(&state);
+      }
+    }
+  }
+  impl->nonNullStringColumns.reserve(impl->stringColumns.size());
+  impl->nullableStringColumns.reserve(impl->stringColumns.size());
+  for (auto& state : impl->stringColumns) {
+    auto& states = state.mayHaveNulls ? impl->nullableStringColumns
+                                      : impl->nonNullStringColumns;
+    states.push_back(&state);
+  }
+  return Plan(std::move(impl));
+}
+
+void PayloadRowReader::bind(Plan& plan, RowVector& output) {
+  auto& impl = *plan.impl_;
+#ifndef NDEBUG
+  BOLT_DCHECK(impl.output == nullptr);
+  BOLT_DCHECK_NOT_NULL(output.pool());
+  for (uint32_t index = 0; index < impl.outputChannels.size(); ++index) {
+    const auto channel = impl.outputChannels[index];
+    BOLT_DCHECK_LT(channel, output.childrenSize());
+    const auto& child = output.childAt(channel);
+    BOLT_DCHECK_NOT_NULL(child);
+    BOLT_DCHECK(child->type()->equivalent(*impl.layout->columns()[index].type));
+    BOLT_DCHECK_GE(child->size(), output.size());
+  }
+#endif
+  for (auto& state : impl.fixedColumns) {
+    state.result = output.childAt(state.outputChannel).get();
+    state.values = mutableFixedValues(state.result, state.kind);
+    state.nulls = state.mayHaveNulls || state.kind == FixedGatherKind::kUnknown
+        ? state.result->mutableRawNulls()
+        : nullptr;
+  }
+  for (auto& state : impl.stringColumns) {
+    state.result = output.childAt(state.outputChannel)
+                       ->asUnchecked<FlatVector<StringView>>();
+    state.values = state.result->mutableRawValues();
+    state.nulls =
+        state.mayHaveNulls ? state.result->mutableRawNulls() : nullptr;
+  }
+  for (auto& state : impl.complexColumns) {
+    state.result = output.childAt(state.outputChannel).get();
+    state.nulls = state.result->rawNulls() == nullptr
+        ? nullptr
+        : state.result->mutableRawNulls();
+  }
+  impl.hasAvx2 = process::hasAvx2();
+  impl.output = &output;
+}
+
+void PayloadRowReader::gather(
+    Plan& plan,
+    std::span<char* const> rows,
+    vector_size_t outputOffset) {
+  auto& impl = *plan.impl_;
+  BOLT_DCHECK_NOT_NULL(impl.output);
+  BOLT_DCHECK_GE(outputOffset, 0);
+  BOLT_DCHECK_LE(outputOffset, impl.output->size());
+  BOLT_DCHECK_LE(
+      rows.size(), static_cast<size_t>(impl.output->size() - outputOffset));
+  if (rows.empty()) {
+    return;
+  }
+  impl.gather(rows, outputOffset);
+}
+
+void PayloadRowReader::finish(Plan& plan) {
+  auto& impl = *plan.impl_;
+  auto* output = impl.output;
+  BOLT_DCHECK_NOT_NULL(output);
+  impl.output = nullptr;
+  for (const auto channel : impl.outputChannels) {
+    output->childAt(channel)->resetDataDependentFlags(nullptr);
+  }
+}
 
 void PayloadRowReader::gather(
     const PayloadRowLayout& layout,
@@ -800,18 +1271,27 @@ void PayloadRowReader::gather(
     RowVectorPtr& result,
     std::span<const uint8_t> mayHaveNulls) {
   if (!mayHaveNulls.empty()) {
-    gatherImpl(layout, rows, mayHaveNulls, pool, result);
+    gatherStandalone(layout, rows, mayHaveNulls, pool, result);
     return;
   }
-  std::vector<uint8_t> inferredMayHaveNulls(layout.columns().size(), 0);
+  folly::small_vector<uint8_t, 32> inferredMayHaveNulls(
+      layout.columns().size(), 0);
   for (uint32_t column = 0; column < layout.columns().size(); ++column) {
     uint8_t hasNull = 0;
     for (const auto* row : rows) {
-      hasNull |= static_cast<uint8_t>(isNull(row, layout.columns()[column]));
+      const auto& metadata = layout.columns()[column];
+      hasNull |= static_cast<uint8_t>(
+          isNull(row, metadata.nullByte, metadata.nullMask));
     }
     inferredMayHaveNulls[column] = hasNull;
   }
-  gatherImpl(layout, rows, inferredMayHaveNulls, pool, result);
+  gatherStandalone(
+      layout,
+      rows,
+      std::span<const uint8_t>(
+          inferredMayHaveNulls.data(), inferredMayHaveNulls.size()),
+      pool,
+      result);
 }
 
 namespace {
@@ -1004,7 +1484,7 @@ void measurePayloadRows(
     const RowVector& input,
     const PayloadRowLayout& layout,
     memory::MemoryPool* pool,
-    const std::vector<std::optional<DecodedVector>>& decoded,
+    std::vector<std::optional<DecodedVector>>& decoded,
     BufferPtr reusableHeapSizes,
     BufferPtr& complexSizeScratch,
     RowSizes& sizes) {
@@ -1155,7 +1635,7 @@ void measurePayloadRows(
       continue;
     }
 
-    const auto& decodedVector = *decoded[column];
+    auto& decodedVector = *decoded[column];
     if (decodedVector.isConstantMapping()) {
       if (decodedVector.isNullAt(0)) {
         continue;
@@ -1168,11 +1648,14 @@ void measurePayloadRows(
       }
       continue;
     }
+    const auto* values = decodedVector.data<StringView>();
+    const auto* indices = decodedVector.indices();
+    const auto* nulls = decodedVector.nulls();
     for (vector_size_t row = 0; row < rowCount; ++row) {
-      if (decodedVector.isNullAt(row)) {
+      if (nulls != nullptr && bits::isBitNull(nulls, row)) {
         continue;
       }
-      const auto value = decodedVector.valueAt<StringView>(row);
+      const auto value = values[indices[row]];
       if (!value.isInline()) {
         addVariableBytes(row, value.size());
       }
@@ -1292,14 +1775,12 @@ void writeFixedFlatColumn(
 
 void writeFlatStringValue(
     const PayloadRowColumnLayout& column,
-    const BaseVector& vector,
+    const StringView* values,
+    const uint64_t* nulls,
     vector_size_t row,
     char* payloadRow,
     char*& heapCursor,
     uint64_t* heapRemaining) {
-  const auto* flat = vector.asUnchecked<FlatVector<StringView>>();
-  const auto* values = flat->rawValues();
-  const auto* nulls = flat->rawNulls();
   if (nulls != nullptr && bits::isBitNull(nulls, row)) {
     setNull(payloadRow, column);
     return;
@@ -1322,7 +1803,7 @@ void writeFlatStringValue(
 template <typename T>
 void writeFixedDecodedColumn(
     const PayloadRowColumnLayout& column,
-    const DecodedVector& decoded,
+    DecodedVector& decoded,
     char* const* rows,
     vector_size_t begin,
     vector_size_t end) {
@@ -1339,18 +1820,29 @@ void writeFixedDecodedColumn(
     }
     return;
   }
+  const auto* values = decoded.data<T>();
+  const auto* indices = decoded.indices();
+  const auto* nulls = decoded.nulls();
   for (vector_size_t row = begin; row < end; ++row) {
-    if (decoded.isNullAt(row)) {
+    if (nulls != nullptr && bits::isBitNull(nulls, row)) {
       setNull(rows[row], column);
     } else {
-      storeUnaligned<T>(rows[row] + column.offset, decoded.valueAt<T>(row));
+      const auto index = indices[row];
+      if constexpr (std::is_same_v<T, int128_t>) {
+        storeUnaligned<T>(
+            rows[row] + column.offset,
+            HugeInt::deserialize(
+                reinterpret_cast<const char*>(values) + sizeof(T) * index));
+      } else {
+        storeUnaligned<T>(rows[row] + column.offset, values[index]);
+      }
     }
   }
 }
 
 void writeFixedDecodedColumn(
     const PayloadRowColumnLayout& column,
-    const DecodedVector& decoded,
+    DecodedVector& decoded,
     char* const* rows,
     vector_size_t begin,
     vector_size_t end) {
@@ -1364,17 +1856,35 @@ void writeFixedDecodedColumn(
     return;
   }
   switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
+    case TypeKind::BOOLEAN: {
+      if (decoded.isConstantMapping()) {
+        const bool isNull = decoded.isNullAt(0);
+        const auto value = isNull
+            ? uint8_t{0}
+            : static_cast<uint8_t>(decoded.valueAt<bool>(0));
+        for (vector_size_t row = begin; row < end; ++row) {
+          if (isNull) {
+            setNull(rows[row], column);
+          } else {
+            storeUnaligned<uint8_t>(rows[row] + column.offset, value);
+          }
+        }
+        return;
+      }
+      const auto* values = decoded.data<uint64_t>();
+      const auto* indices = decoded.indices();
+      const auto* nulls = decoded.nulls();
       for (vector_size_t row = begin; row < end; ++row) {
-        if (decoded.isNullAt(row)) {
+        if (nulls != nullptr && bits::isBitNull(nulls, row)) {
           setNull(rows[row], column);
         } else {
           storeUnaligned<uint8_t>(
               rows[row] + column.offset,
-              static_cast<uint8_t>(decoded.valueAt<bool>(row)));
+              static_cast<uint8_t>(bits::isBitSet(values, indices[row])));
         }
       }
       return;
+    }
     case TypeKind::TINYINT:
       writeFixedDecodedColumn<int8_t>(column, decoded, rows, begin, end);
       return;
@@ -1410,24 +1920,51 @@ void writeFixedDecodedColumn(
 
 void writeFixedDecodedColumn(
     const PayloadRowColumnLayout& column,
-    const DecodedVector& decoded,
+    DecodedVector& decoded,
     char* const* rows,
     vector_size_t size) {
   writeFixedDecodedColumn(column, decoded, rows, 0, size);
 }
 
+void writeConstantStringValue(
+    const PayloadRowColumnLayout& column,
+    StringView value,
+    bool isNull,
+    char* payloadRow,
+    char*& heapCursor,
+    uint64_t* heapRemaining) {
+  if (isNull) {
+    setNull(payloadRow, column);
+    return;
+  }
+  auto* slot = payloadRow + column.offset;
+  if (value.isInline()) {
+    storeUnaligned<StringView>(slot, value);
+    return;
+  }
+  std::memcpy(heapCursor, value.data(), value.size());
+  storeUnaligned<StringView>(
+      slot, StringView(heapCursor, static_cast<int32_t>(value.size())));
+  heapCursor += value.size();
+  if (heapRemaining != nullptr) {
+    *heapRemaining -= value.size();
+  }
+}
+
 void writeStringDecodedValue(
     const PayloadRowColumnLayout& column,
-    const DecodedVector& decoded,
+    const StringView* values,
+    const vector_size_t* indices,
+    const uint64_t* nulls,
     vector_size_t row,
     char* payloadRow,
     char*& heapCursor,
     uint64_t* heapRemaining) {
-  if (decoded.isNullAt(row)) {
+  if (nulls != nullptr && bits::isBitNull(nulls, row)) {
     setNull(payloadRow, column);
     return;
   }
-  const auto value = decoded.valueAt<StringView>(row);
+  const auto value = values[indices[row]];
   auto* slot = payloadRow + column.offset;
   if (value.isInline()) {
     storeUnaligned<StringView>(slot, value);
@@ -1486,7 +2023,7 @@ void writeComplexDecodedValue(
 void writeFixedColumn(
     const PayloadRowColumnLayout& column,
     const BaseVector& vector,
-    const DecodedVector* decoded,
+    DecodedVector* decoded,
     char* const* rows,
     vector_size_t size) {
   if (decoded == nullptr) {
@@ -1497,34 +2034,56 @@ void writeFixedColumn(
 }
 
 void writeVariableValue(
-    const PayloadRowColumnLayout& column,
-    const BaseVector& vector,
-    const DecodedVector* decoded,
+    const VariableColumnWriter& writer,
     vector_size_t row,
     char* payloadRow,
     char*& heapCursor,
     uint64_t& heapRemaining,
-    uint64_t complexSize,
     ByteOutputStream& stream) {
-  if (column.complex) {
-    writeComplexDecodedValue(
-        column,
-        *decoded,
-        row,
-        payloadRow,
-        heapCursor,
-        heapRemaining,
-        complexSize,
-        stream);
-    return;
+  switch (writer.kind) {
+    case VariableWriterKind::kComplex:
+      writeComplexDecodedValue(
+          *writer.column,
+          *writer.decoded,
+          row,
+          payloadRow,
+          heapCursor,
+          heapRemaining,
+          writer.complexSizes[row],
+          stream);
+      return;
+    case VariableWriterKind::kFlatString:
+      writeFlatStringValue(
+          *writer.column,
+          writer.flatStringValues,
+          writer.flatStringNulls,
+          row,
+          payloadRow,
+          heapCursor,
+          &heapRemaining);
+      return;
+    case VariableWriterKind::kConstantString:
+      writeConstantStringValue(
+          *writer.column,
+          writer.constantStringValue,
+          writer.constantStringNull,
+          payloadRow,
+          heapCursor,
+          &heapRemaining);
+      return;
+    case VariableWriterKind::kDecodedString:
+      writeStringDecodedValue(
+          *writer.column,
+          writer.decodedStringValues,
+          writer.decodedStringIndices,
+          writer.decodedStringNulls,
+          row,
+          payloadRow,
+          heapCursor,
+          &heapRemaining);
+      return;
   }
-  if (vector.encoding() == VectorEncoding::Simple::FLAT) {
-    writeFlatStringValue(
-        column, vector, row, payloadRow, heapCursor, &heapRemaining);
-  } else {
-    writeStringDecodedValue(
-        column, *decoded, row, payloadRow, heapCursor, &heapRemaining);
-  }
+  BOLT_UNREACHABLE();
 }
 
 void appendRows(
@@ -1576,11 +2135,39 @@ void appendRows(
           rows,
           input.size());
     } else {
+      auto* decodedVector =
+          decoded[column].has_value() ? &*decoded[column] : nullptr;
+      const auto* flatString = decodedVector == nullptr
+          ? input.childAt(column)->asUnchecked<FlatVector<StringView>>()
+          : nullptr;
+      const auto kind = metadata.complex ? VariableWriterKind::kComplex
+          : decodedVector == nullptr     ? VariableWriterKind::kFlatString
+          : decodedVector->isConstantMapping()
+          ? VariableWriterKind::kConstantString
+          : VariableWriterKind::kDecodedString;
+      const bool constantStringNull =
+          kind == VariableWriterKind::kConstantString &&
+          decodedVector->isNullAt(0);
+      const auto constantStringValue =
+          kind == VariableWriterKind::kConstantString && !constantStringNull
+          ? decodedVector->valueAt<StringView>(0)
+          : StringView();
       variableColumns.push_back(VariableColumnWriter{
           &metadata,
-          input.childAt(column).get(),
-          decoded[column].has_value() ? &*decoded[column] : nullptr,
-          metadata.complex ? sizes->complexSizes(complexOrdinal++) : nullptr});
+          decodedVector,
+          flatString == nullptr ? nullptr : flatString->rawValues(),
+          flatString == nullptr ? nullptr : flatString->rawNulls(),
+          kind == VariableWriterKind::kDecodedString
+              ? decodedVector->data<StringView>()
+              : nullptr,
+          kind == VariableWriterKind::kDecodedString ? decodedVector->indices()
+                                                     : nullptr,
+          kind == VariableWriterKind::kDecodedString ? decodedVector->nulls()
+                                                     : nullptr,
+          metadata.complex ? sizes->complexSizes(complexOrdinal++) : nullptr,
+          kind,
+          constantStringValue,
+          constantStringNull});
     }
   }
 
@@ -1596,15 +2183,7 @@ void appendRows(
     uint64_t heapRemaining = rawHeapSizes[row];
     for (const auto& writer : variableColumns) {
       writeVariableValue(
-          *writer.column,
-          *writer.vector,
-          writer.decoded,
-          row,
-          payloadRow,
-          heapCursor,
-          heapRemaining,
-          writer.complexSizes == nullptr ? 0 : writer.complexSizes[row],
-          stream);
+          writer, row, payloadRow, heapCursor, heapRemaining, stream);
     }
   }
 }

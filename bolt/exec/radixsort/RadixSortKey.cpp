@@ -33,13 +33,6 @@ uint64_t fromEncodedWord(const char* data) {
   return word;
 }
 
-uint64_t toEncodedWord(uint64_t word) {
-  if constexpr (std::endian::native == std::endian::little) {
-    word = byteSwap(word);
-  }
-  return word;
-}
-
 } // namespace
 
 void checkCompactPointerRange(const void* data, uint64_t size) {
@@ -189,24 +182,6 @@ void RadixSortKey::construct(
   if (layout_->hasPayload()) {
     storeCompactPointer(mutableData_ + *layout_->payloadOffset(), payload);
   }
-}
-
-void RadixSortKey::deconstruct(
-    RadixSortInlineKeyBuffer& inlineBuffer,
-    EncodedKeyView& encodedKey) const {
-  BOLT_DCHECK(!layout_->isVariable());
-  inlineBuffer.fill(0);
-  for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
-    storeUnaligned(
-        inlineBuffer.data() + word * sizeof(uint64_t),
-        toEncodedWord(inlineWord(word)));
-  }
-  std::memcpy(
-      inlineBuffer.data() + layout_->inlineWordBytes(),
-      data_ + layout_->inlineWordBytes(),
-      layout_->inlineTailBytes());
-  encodedKey = {
-      std::string_view(inlineBuffer.data(), layout_->inlineCapacity())};
 }
 
 int32_t RadixSortKey::compare(const RadixSortKey& other) const {

@@ -27,6 +27,9 @@
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::exec::radixsort {
+namespace test {
+class RadixSortKeyCodecTestHelper;
+}
 
 class RadixSortRun;
 class RadixSortRunStorage;
@@ -75,11 +78,6 @@ class EncodedKeyBatch {
 
  private:
   friend class RadixSortKeyCodec;
-  friend class RadixSortRun;
-
-  void resetData() {
-    data_.reset();
-  }
 
   EncodedKeyFormat format_{EncodedKeyFormat::kVariableBinary};
   vector_size_t size_{0};
@@ -90,6 +88,7 @@ class EncodedKeyBatch {
 
 class RadixSortKeyCodec {
   friend class RadixSortRun;
+  friend class test::RadixSortKeyCodecTestHelper;
 
  public:
   static bool supportsEncodeDecode(const Type& type);
@@ -151,6 +150,11 @@ class RadixSortKeyCodec {
       RadixSortRunStorage& arena,
       std::span<char* const> payloads) const;
 
+  void encodeAndAppendInline(
+      const RowVector& input,
+      RadixSortRunStorage& storage,
+      std::span<char* const> payloads) const;
+
   bool canDecodeSingleFixedColumn() const;
 
   bool tryDecodeSingleFixedColumn(
@@ -160,6 +164,47 @@ class RadixSortKeyCodec {
       bool mayHaveNulls,
       memory::MemoryPool* pool,
       RowVectorPtr& result) const;
+
+  std::optional<uint32_t> singleFixedWordBytes(
+      RadixSortKeyLayoutKind layoutKind) const;
+
+  void decodeSingleFixedAt(
+      std::span<const char* const> keys,
+      bool mayHaveNulls,
+      vector_size_t outputOffset,
+      uint32_t inlineWordBytes,
+      const VectorPtr& destination) const;
+
+  uint64_t decodeScratchWordsPerRowWithMask(
+      std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
+      uint32_t firstColumn) const;
+
+  void decodeSuffixAt(
+      std::span<const EncodedKeyView> keys,
+      std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
+      vector_size_t outputOffset,
+      memory::MemoryPool* scratchPool,
+      BufferPtr& cursorScratch,
+      RowVector& output,
+      std::span<const column_index_t> directKeyChannels,
+      uint64_t scratchWordsPerRow,
+      uint32_t firstColumn) const;
+
+  void decodePrefixAt(
+      std::span<const char* const> keys,
+      std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
+      vector_size_t outputOffset,
+      RowVector& output,
+      std::span<const column_index_t> directKeyChannels,
+      uint32_t prefixColumnCount) const;
+
+  void finishDecode(
+      std::span<const uint8_t> decodedColumns,
+      RowVector& output,
+      std::span<const column_index_t> directKeyChannels) const;
 
   bool tryDecodeSingleFixedColumn(
       std::span<const char* const> keys,
