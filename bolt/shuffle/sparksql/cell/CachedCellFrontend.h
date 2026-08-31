@@ -105,23 +105,30 @@ class CachedCellFrontend final : public SplitFrontend {
   /// spill between two closes must not split a dictionary across Runs
   /// (spec section 5.4). While `mode` is dictionary, the column's length
   /// cache stages raw index bytes and its data cache stays empty.
-  struct DictState {
+  /// 256 bytes, power-of-two stride: the per-row state address is a shift,
+  /// and the probe touches the two leading cache lines (header plus all
+  /// sixteen scan keys).
+  struct alignas(256) DictState {
     static constexpr uint8_t kModeDict = 0;
     static constexpr uint8_t kModeFallback = 1;
-    /// Writer-side cap on entries per segment (the serialized budget allows
-    /// up to 63 one-byte entries; past this cap the segment just closes).
-    static constexpr uint32_t kMaxEntries = 32;
+    /// Writer-side cap on entries per segment, matching the fixed 16-slot
+    /// probe exactly (the serialized budget would allow up to 63 one-byte
+    /// entries; past the cap the segment just closes, which only costs a
+    /// few framing bytes on degenerate vocabularies).
+    static constexpr uint32_t kMaxEntries = 16;
     uint32_t matched{0}; // rows indexed by the open segment
     uint8_t mode{kModeDict};
     uint8_t entryCount{0};
     uint8_t entryBytes{0}; // serialized [len][bytes] total, <= 63
-    /// Fixed-stride scan keys, (first-4-bytes << 8) | length: the row loop
-    /// scans independent words instead of chasing variable-length entries;
-    /// the serialized form is touched only to confirm a long match or add.
+    /// Fixed-stride scan keys - the first 8 StringView bytes of each entry,
+    /// (size u32)(4-byte zero-padded prefix): the row loop compares
+    /// independent words instead of chasing variable-length entries; the
+    /// serialized form is touched only to confirm a long match or to add.
     uint64_t scanKey[kMaxEntries];
     uint8_t entryOff[kMaxEntries]; // offset of each entry's length byte
     char entries[kDictSerializedBudget + 1];
   };
+  static_assert(sizeof(DictState) == 256, "keep the stride a shift");
 
   /// Writes the open segment as [entries][terminator][matched u32] into the
   /// data stream and clears the open-segment fields. A segment with no
@@ -133,15 +140,21 @@ class CachedCellFrontend final : public SplitFrontend {
       DictState& st,
       bool last);
 
-  /// Appends one non-null value of a dictionary-mode partition. Returns
-  /// false when the partition just demoted to the fallback tail (the value
-  /// was not appended; the caller routes it through the fallback path).
-  bool appendDictValue(
+  /// Appends one non-null value of a dictionary-mode partition. `key` is
+  /// the value's first 8 StringView bytes - (size u32)(4-byte zero-padded
+  /// prefix) - loaded once by the caller; equal keys mean equal length and
+  /// prefix, so values up to 4 chars compare exactly by key. Returns false
+  /// when the partition just demoted to the fallback tail (the value was
+  /// not appended; the caller routes it through the fallback path).
+  /// Always inlined into the row loop: a per-row call was 13% of the
+  /// dictionary split profile.
+  FOLLY_ALWAYS_INLINE bool appendDictValue(
       uint32_t lengthStream,
       uint32_t dataStream,
       uint32_t pid,
       DictState& st,
       const StringView& view,
+      uint64_t key,
       uint8_t* lengthCur);
 
   template <typename T>
