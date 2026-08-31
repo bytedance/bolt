@@ -16,6 +16,10 @@
 
 #include "bolt/shuffle/sparksql/cell/CachedCellFrontend.h"
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -113,35 +117,64 @@ void CachedCellFrontend::closeDictSegment(
   st.entryBytes = 0;
 }
 
-bool CachedCellFrontend::appendDictValue(
+FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
     uint32_t lengthStream,
     uint32_t dataStream,
     uint32_t pid,
     DictState& st,
     const StringView& view,
+    uint64_t key,
     uint8_t* lengthCur) {
-  const uint32_t size = view.size();
+  const uint32_t size = static_cast<uint32_t>(key);
   // An entry costs 1 + size serialized bytes and one dictionary is capped
   // at 63 (reader L1 rule): a value that can never fit alone can never be
   // an entry, and the format only allows a fallback tail after that.
   if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
-    const char* data = view.data();
-    uint32_t prefix = 0;
-    if (FOLLY_LIKELY(size >= 4)) {
-      ::memcpy(&prefix, data, 4);
-    } else {
-      ::memcpy(&prefix, data, size);
-    }
-    const uint64_t key = (static_cast<uint64_t>(prefix) << 8) | size;
-    uint32_t i = 0;
     const uint32_t count = st.entryCount;
-    for (; i < count; ++i) {
-      if (st.scanKey[i] != key) {
-        continue;
+    uint32_t i;
+#if defined(__AVX2__)
+    // Fixed 16-slot probe: four independent compares folded into one mask,
+    // no loop-carried dependency and one branch for the whole probe.
+    // Slots at or past `count` hold stale keys, and a phantom lane there
+    // cannot shadow a real hit (real hits own lower lanes), so an
+    // out-of-range find just clamps to a miss - no sentinel maintenance.
+    const __m256i needle = _mm256_set1_epi64x(static_cast<int64_t>(key));
+    const auto* keys = reinterpret_cast<const __m256i*>(st.scanKey);
+    const int mask = _mm256_movemask_pd(_mm256_castsi256_pd(
+                         _mm256_cmpeq_epi64(_mm256_loadu_si256(keys), needle))) |
+        _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+            _mm256_loadu_si256(keys + 1), needle)))
+            << 4 |
+        _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+            _mm256_loadu_si256(keys + 2), needle)))
+            << 8 |
+        _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+            _mm256_loadu_si256(keys + 3), needle)))
+            << 12;
+    if (FOLLY_LIKELY(mask != 0)) {
+      i = static_cast<uint32_t>(__builtin_ctz(static_cast<unsigned>(mask)));
+      if (i > count) {
+        i = count;
       }
-      if (size <= 4 ||
-          ::memcmp(st.entries + st.entryOff[i] + 1, data, size) == 0) {
+    } else {
+      i = count;
+    }
+#else
+    for (i = 0; i < count; ++i) {
+      if (st.scanKey[i] == key) {
         break;
+      }
+    }
+#endif
+    if (i < count && size > 4 &&
+        ::memcmp(st.entries + st.entryOff[i] + 1, view.data(), size) != 0) {
+      // Rare: same length and 4-byte prefix, different suffix.
+      for (++i; i < count; ++i) {
+        if (st.scanKey[i] == key &&
+            ::memcmp(st.entries + st.entryOff[i] + 1, view.data(), size) ==
+                0) {
+          break;
+        }
       }
     }
     if (FOLLY_UNLIKELY(i == count)) {
@@ -166,7 +199,7 @@ bool CachedCellFrontend::appendDictValue(
       st.scanKey[st.entryCount] = key;
       st.entryOff[st.entryCount] = st.entryBytes;
       st.entries[st.entryBytes] = static_cast<char>(size);
-      ::memcpy(st.entries + st.entryBytes + 1, data, size);
+      ::memcpy(st.entries + st.entryBytes + 1, view.data(), size);
       st.entryBytes += static_cast<uint8_t>(1 + size);
       i = st.entryCount++;
     }
@@ -314,7 +347,7 @@ template <bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitStringDict(
     uint32_t col,
     const SplitBatch& batch) {
-  const auto& decoded = (*batch.decoded)[col];
+  auto& decoded = (*batch.decoded)[col]; // nulls() may materialize lazily
   const StringView* __restrict views = decoded.data<StringView>();
   const uint32_t lengthStream = layout_->columnStream(col);
   const uint32_t dataStream = lengthStream + 1;
@@ -322,21 +355,36 @@ void CachedCellFrontend::splitStringDict(
   uint8_t* __restrict dataCur = cursors(dataStream);
   DictState* __restrict states = dictStates_[col].data();
   const uint32_t* __restrict row2pid = batch.row2Partition;
+  // Identity mapping indexes the null bitmap by row: one bit test beats
+  // the isNullAt call the compiler declines to inline into this loop.
+  const uint64_t* __restrict rawNulls =
+      kHasNulls && !kIndexed ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
-      if (decoded.isNullAt(row)) {
+      const bool isNull =
+          kIndexed ? decoded.isNullAt(row) : bits::isBitNull(rawNulls, row);
+      if (isNull) {
         nulls_->setNull(
             pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
       }
     }
-    const StringView view = kIndexed ? views[decoded.index(row)] : views[row];
-    variableBytes_[pid] += view.size();
+    const StringView& view =
+        kIndexed ? views[decoded.index(row)] : views[row];
+    // The first 8 StringView bytes are (size u32)(zero-padded 4-byte
+    // prefix) for inline and heap values alike: one load feeds the size,
+    // the byte accounting and the whole dictionary probe, and view.data()
+    // with its inline-or-pointer branch stays off the hit path.
+    static_assert(StringView::kPrefixSize == 4, "prefix layout assumed");
+    uint64_t key;
+    ::memcpy(&key, &view, sizeof(uint64_t));
+    variableBytes_[pid] += static_cast<uint32_t>(key);
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
-        appendDictValue(lengthStream, dataStream, pid, st, view, lengthCur)) {
+        appendDictValue(
+            lengthStream, dataStream, pid, st, view, key, lengthCur)) {
       continue;
     }
 
