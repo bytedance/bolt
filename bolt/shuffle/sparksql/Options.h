@@ -125,6 +125,16 @@ struct CellShuffleOptions {
   // written twice), at the price of codec time at the spill point instead
   // of at stop.
   bool compressSpill = true;
+  // String dictionary writing (spec section 8). One probe over the first
+  // batch decides per string column, for the writer's lifetime, whether to
+  // write dictionary form; a wrongly enabled column self-heals per
+  // partition through the fallback tail, a disabled one stays raw forever.
+  bool enableStringDictionary = true;
+  // Probe gates: the first batch must have at least this many rows (a tiny
+  // batch is a weak signal and a tiny task is not worth a dictionary) ...
+  int32_t dictMinProbeRows = 1024;
+  // ... and average at least this many rows per distinct value.
+  int32_t dictMinRepeatRatio = 4;
 };
 
 enum PartitionWriterType { kLocal, kCeleborn };

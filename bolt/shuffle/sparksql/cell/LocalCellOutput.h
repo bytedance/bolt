@@ -74,7 +74,11 @@ class LocalCellOutput final : public CellOutput {
   void readSpill(uint64_t offset, void* out, size_t bytes) const;
 
   /// Appends one partition's payload assembled from a sealed window.
-  void writeDiskPayload(std::FILE* out, const SealedWindow& w, uint32_t pid);
+  void writeDiskPayload(
+      std::FILE* out,
+      const SealedWindow& w,
+      const uint8_t* encodingTags,
+      uint32_t pid);
 
   /// Copies one spilled run segment into the data file: verbatim when it
   /// was compressed at spill time, else through the compressing run writer.

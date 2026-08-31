@@ -34,7 +34,9 @@ CachedCellFrontend::CachedCellFrontend(
       numStreams_(layout->numStreams()),
       arena_(pool),
       partitionBytes_(numPartitions_, 0),
-      variableBytes_(numPartitions_, 0) {
+      variableBytes_(numPartitions_, 0),
+      dictEnabled_(layout->numColumns(), 0),
+      dictStates_(layout->numColumns()) {
   const size_t cacheBytes =
       static_cast<size_t>(numPartitions_) * numStreams_ * kBlockSourceBytes;
   const size_t cursorBytes =
@@ -78,6 +80,112 @@ void CachedCellFrontend::flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur) {
   cells_->append(pid, stream, cacheLine(stream, pid), cur[pid], beforeGrow_);
   bumpPartitionBytes(pid, cur[pid]);
   cur[pid] = 0;
+}
+
+void CachedCellFrontend::enableDictionary(uint32_t col) {
+  BOLT_CHECK(
+      layout_->isStringColumn(col),
+      "dictionary form is defined for string columns only");
+  dictEnabled_[col] = 1;
+  dictStates_[col].assign(numPartitions_, DictState{});
+  residentBytes_ +=
+      static_cast<int64_t>(numPartitions_) * sizeof(DictState);
+}
+
+void CachedCellFrontend::closeDictSegment(
+    uint32_t dataStream,
+    uint32_t pid,
+    DictState& st,
+    bool last) {
+  // The whole framing lands in one append: DataCells::append copies only
+  // after every needed cell is held, so a spill fired inside the grow sees
+  // none of these bytes and the dictionary never crosses a Run boundary
+  // (spec section 5.4).
+  uint8_t buf[kDictSerializedBudget + 1 + 1 + 4];
+  ::memcpy(buf, st.entries, st.entryBytes);
+  buf[st.entryBytes] = last ? kDictLastMarker : kDictMoreMarker;
+  ::memcpy(buf + st.entryBytes + 1, &st.matched, 4);
+  const uint32_t bytes = st.entryBytes + 5;
+  cells_->append(pid, dataStream, buf, bytes, beforeGrow_);
+  bumpPartitionBytes(pid, bytes);
+  st.matched = 0;
+  st.entryCount = 0;
+  st.entryBytes = 0;
+}
+
+bool CachedCellFrontend::appendDictValue(
+    uint32_t lengthStream,
+    uint32_t dataStream,
+    uint32_t pid,
+    DictState& st,
+    const StringView& view,
+    uint8_t* lengthCur) {
+  const uint32_t size = view.size();
+  // An entry costs 1 + size serialized bytes and one dictionary is capped
+  // at 63 (reader L1 rule): a value that can never fit alone can never be
+  // an entry, and the format only allows a fallback tail after that.
+  if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
+    const char* data = view.data();
+    uint32_t prefix = 0;
+    if (FOLLY_LIKELY(size >= 4)) {
+      ::memcpy(&prefix, data, 4);
+    } else {
+      ::memcpy(&prefix, data, size);
+    }
+    const uint64_t key = (static_cast<uint64_t>(prefix) << 8) | size;
+    uint32_t i = 0;
+    const uint32_t count = st.entryCount;
+    for (; i < count; ++i) {
+      if (st.scanKey[i] != key) {
+        continue;
+      }
+      if (size <= 4 ||
+          ::memcmp(st.entries + st.entryOff[i] + 1, data, size) == 0) {
+        break;
+      }
+    }
+    if (FOLLY_UNLIKELY(i == count)) {
+      // New value. Room left: it becomes an entry. No room: the segment
+      // closes, and its hit rate decides between a successor segment
+      // seeded with this value and the permanent fallback tail.
+      if (count == DictState::kMaxEntries ||
+          st.entryBytes + 1 + size > kDictSerializedBudget) {
+        if (st.matched >= kDictSegmentContinueFactor * count) {
+          closeDictSegment(dataStream, pid, st, /*last=*/false);
+        } else {
+          closeDictSegment(dataStream, pid, st, /*last=*/true);
+          st.mode = DictState::kModeFallback;
+          // Pending index bytes flush raw before the first staged
+          // fallback length reuses the cache line.
+          if (lengthCur[pid] > 0) {
+            flushRaw(lengthStream, pid, lengthCur);
+          }
+          return false;
+        }
+      }
+      st.scanKey[st.entryCount] = key;
+      st.entryOff[st.entryCount] = st.entryBytes;
+      st.entries[st.entryBytes] = static_cast<char>(size);
+      ::memcpy(st.entries + st.entryBytes + 1, data, size);
+      st.entryBytes += static_cast<uint8_t>(1 + size);
+      i = st.entryCount++;
+    }
+    ++st.matched;
+    cacheLine(lengthStream, pid)[lengthCur[pid]] = static_cast<char>(i);
+    if (FOLLY_UNLIKELY(++lengthCur[pid] == kBlockSourceBytes)) {
+      flushRaw(lengthStream, pid, lengthCur);
+    }
+    return true;
+  }
+  // A value too long for any entry: the format only allows a fallback
+  // tail, so this partition demotes now (an empty sequence is still owed
+  // when no segment was ever written).
+  closeDictSegment(dataStream, pid, st, /*last=*/true);
+  st.mode = DictState::kModeFallback;
+  if (lengthCur[pid] > 0) {
+    flushRaw(lengthStream, pid, lengthCur);
+  }
+  return false;
 }
 
 template <typename T, bool kHasNulls, bool kIndexed>
@@ -202,6 +310,73 @@ void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
   }
 }
 
+template <bool kHasNulls, bool kIndexed>
+void CachedCellFrontend::splitStringDict(
+    uint32_t col,
+    const SplitBatch& batch) {
+  const auto& decoded = (*batch.decoded)[col];
+  const StringView* __restrict views = decoded.data<StringView>();
+  const uint32_t lengthStream = layout_->columnStream(col);
+  const uint32_t dataStream = lengthStream + 1;
+  uint8_t* __restrict lengthCur = cursors(lengthStream);
+  uint8_t* __restrict dataCur = cursors(dataStream);
+  DictState* __restrict states = dictStates_[col].data();
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (decoded.isNullAt(row)) {
+        nulls_->setNull(
+            pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const StringView view = kIndexed ? views[decoded.index(row)] : views[row];
+    variableBytes_[pid] += view.size();
+    DictState& st = states[pid];
+    if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
+        appendDictValue(lengthStream, dataStream, pid, st, view, lengthCur)) {
+      continue;
+    }
+
+    // The fallback tail of a demoted partition: byte-identical to the raw
+    // string path of splitString.
+    {
+      char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
+      const int64_t length = view.size();
+      ::memcpy(slot, &length, sizeof(int64_t));
+      lengthCur[pid] += sizeof(int64_t);
+      if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockSourceBytes)) {
+        flushEncoded<int64_t>(lengthStream, pid, lengthCur);
+      }
+    }
+    const uint32_t size = view.size();
+    if (FOLLY_UNLIKELY(size >= kBlockSourceBytes)) {
+      if (dataCur[pid] > 0) {
+        flushRaw(dataStream, pid, dataCur);
+      }
+      constexpr uint32_t kDirectAppendPiece = 256 << 10;
+      const char* src = view.data();
+      uint32_t left = size;
+      while (left > 0) {
+        const uint32_t piece =
+            left < kDirectAppendPiece ? left : kDirectAppendPiece;
+        cells_->append(pid, dataStream, src, piece, beforeGrow_);
+        src += piece;
+        left -= piece;
+      }
+      bumpPartitionBytes(pid, size);
+      continue;
+    }
+    if (dataCur[pid] + size > kBlockSourceBytes) {
+      flushRaw(dataStream, pid, dataCur);
+    }
+    ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
+    dataCur[pid] += static_cast<uint8_t>(size);
+  }
+}
+
 template <typename T>
 void CachedCellFrontend::dispatchEncoded(
     uint32_t col,
@@ -274,7 +449,15 @@ void CachedCellFrontend::split(const SplitBatch& batch) {
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
         const bool indexed = !(*batch.decoded)[col].isIdentityMapping();
-        if (hasNulls) {
+        if (dictEnabled_[col] != 0) {
+          if (hasNulls) {
+            indexed ? splitStringDict<true, true>(col, batch)
+                    : splitStringDict<true, false>(col, batch);
+          } else {
+            indexed ? splitStringDict<false, true>(col, batch)
+                    : splitStringDict<false, false>(col, batch);
+          }
+        } else if (hasNulls) {
           indexed ? splitString<true, true>(col, batch)
                   : splitString<true, false>(col, batch);
         } else {
@@ -290,6 +473,33 @@ void CachedCellFrontend::split(const SplitBatch& batch) {
 }
 
 void CachedCellFrontend::flushAll() {
+  // Dictionary columns first: a partition still in dictionary mode has raw
+  // index bytes in its length cache (flushed raw, so the generic loop below
+  // sees an empty cursor and cannot re-encode them) and owes the closing
+  // 0xFF framing to its data stream. A partition with no indexed row wrote
+  // nothing and gets no framing (an empty-stream column, spec section 9).
+  for (uint32_t col = 0; col < layout_->numColumns(); ++col) {
+    if (dictEnabled_[col] == 0) {
+      continue;
+    }
+    const uint32_t lengthStream = layout_->columnStream(col);
+    const uint32_t dataStream = lengthStream + 1;
+    uint8_t* lengthCur = cursors(lengthStream);
+    auto* states = dictStates_[col].data();
+    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      DictState& st = states[pid];
+      if (st.mode != DictState::kModeDict) {
+        continue; // demoted: framing closed at demote time
+      }
+      if (st.matched == 0) {
+        continue; // no value this window
+      }
+      if (lengthCur[pid] > 0) {
+        flushRaw(lengthStream, pid, lengthCur);
+      }
+      closeDictSegment(dataStream, pid, st, /*last=*/true);
+    }
+  }
   for (uint32_t stream = 0; stream < numStreams_; ++stream) {
     const auto& info = layout_->stream(stream);
     uint8_t* cur = cursors(stream);
@@ -322,6 +532,19 @@ void CachedCellFrontend::resetWindowStats() {
   std::fill(partitionBytes_.begin(), partitionBytes_.end(), 0);
   std::fill(variableBytes_.begin(), variableBytes_.end(), 0);
   maxPartitionBytes_ = 0;
+  // A payload is self-contained: every partition re-enters dictionary mode
+  // with an empty open segment for the next window.
+  for (uint32_t col = 0; col < layout_->numColumns(); ++col) {
+    if (dictEnabled_[col] == 0) {
+      continue;
+    }
+    for (auto& st : dictStates_[col]) {
+      st.matched = 0;
+      st.mode = DictState::kModeDict;
+      st.entryCount = 0;
+      st.entryBytes = 0;
+    }
+  }
 }
 
 // The fixed-width split templates are only referenced from this translation

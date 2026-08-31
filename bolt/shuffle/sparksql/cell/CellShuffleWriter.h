@@ -54,6 +54,8 @@ class CellShuffleWriter final : public ShuffleWriter {
  private:
   void initOnFirstBatch(const RowVector& rv);
   arrow::Status splitBatch(RowVectorPtr rv);
+  /// The single dictionary probe (first batch, lifetime decision).
+  void probeDictionary(uint32_t numRows);
   const int32_t* pidArray(const RowVector& rv);
   void onBeforeChunkGrow();
   void spillRunNow();
@@ -68,6 +70,7 @@ class CellShuffleWriter final : public ShuffleWriter {
   bool spilling_{false};
   bool stopped_{false};
   bool checkpointRequested_{false};
+  bool dictProbed_{false};
 
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
@@ -85,6 +88,9 @@ class CellShuffleWriter final : public ShuffleWriter {
   std::vector<int32_t> pidValues_;
   std::vector<DecodedVector> decoded_;
   std::vector<BatchNullClass> nullClass_;
+  /// Payload encoding tags, one bit per column; set by the probe, constant
+  /// afterwards.
+  std::vector<uint8_t> encodingTags_;
   DecodedVector pidDecoded_;
 
   uint64_t totalWindowRows_{0};

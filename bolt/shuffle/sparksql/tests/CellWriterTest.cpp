@@ -452,5 +452,120 @@ TEST_F(CellWriterTest, constantNullColumnRoundTrip) {
       {makeRowVector({"v", "dead"}, {values, allNull})});
 }
 
+TEST_F(CellWriterTest, stringDictionaryRoundTripAndShrinksBytes) {
+  constexpr int32_t kPartitions = 8;
+  constexpr int kRows = 2000;
+  // 12 distinct values, 54 serialized bytes: fits one 64-byte dictionary,
+  // so the probe turns the column on. The second string column is
+  // high-cardinality and must stay raw.
+  const std::vector<std::string> vocab = {
+      "aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff",
+      "gggg", "hhhh", "iiii", "jjjj", "", "kk"};
+  std::mt19937 rng(42);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int b = 0; b < 4; ++b) {
+    std::vector<int32_t> batchPids(kRows);
+    std::vector<std::optional<StringView>> lowCard(kRows);
+    std::vector<std::string> storage(kRows);
+    std::vector<std::optional<StringView>> highCard(kRows);
+    std::vector<int64_t> ids(kRows);
+    for (int i = 0; i < kRows; ++i) {
+      batchPids[i] = rng() % kPartitions;
+      ids[i] = static_cast<int64_t>(rng());
+      if (rng() % 7 == 0) {
+        lowCard[i] = std::nullopt;
+      } else {
+        lowCard[i] = StringView(vocab[rng() % vocab.size()]);
+      }
+      storage[i] = "value-" + std::to_string(b) + "-" + std::to_string(rng());
+      highCard[i] = StringView(storage[i]);
+    }
+    pids.push_back(std::move(batchPids));
+    batches.push_back(makeRowVector(
+        {"low", "id", "high"},
+        {makeNullableFlatVector<StringView>(lowCard),
+         makeFlatVector<int64_t>(ids),
+         makeNullableFlatVector<StringView>(highCard)}));
+  }
+
+  // Uncompressed merge so the wire sizes compare byte for byte.
+  int64_t bytesWith = 0;
+  int64_t bytesWithout = 0;
+  for (const bool enable : {true, false}) {
+    auto options = makeOptions(kPartitions);
+    options.partitionWriterOptions.compressionType =
+        arrow::Compression::UNCOMPRESSED;
+    options.cellOptions.enableStringDictionary = enable;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    (enable ? bytesWith : bytesWithout) = writer.metrics().totalBytesWritten;
+  }
+  EXPECT_LT(bytesWith, bytesWithout);
+}
+
+TEST_F(CellWriterTest, dictionarySegmentsChainDemoteAndResetAcrossWindows) {
+  constexpr int32_t kPartitions = 4;
+  constexpr int kRows = 1500;
+  // Both vocabularies serialize to 48 bytes (8 entries of 5 chars).
+  const std::vector<std::string> vocabA = {
+      "north", "south", "east!", "west!", "up---", "down-", "left-", "right"};
+  const std::vector<std::string> vocabB = {
+      "ocean", "river", "lake!", "pond!", "sea--", "bay--", "gulf-", "creek"};
+  std::mt19937 rng(7);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  const auto addBatch =
+      [&](const std::function<std::optional<std::string>(int)>& gen) {
+        std::vector<int32_t> batchPids(kRows);
+        std::vector<std::optional<StringView>> col(kRows);
+        std::vector<std::string> storage(kRows);
+        for (int i = 0; i < kRows; ++i) {
+          batchPids[i] = rng() % kPartitions;
+          auto value = gen(i);
+          if (!value.has_value()) {
+            col[i] = std::nullopt;
+          } else {
+            storage[i] = std::move(*value);
+            col[i] = StringView(storage[i]);
+          }
+        }
+        pids.push_back(std::move(batchPids));
+        batches.push_back(
+            makeRowVector({"s"}, {makeNullableFlatVector<StringView>(col)}));
+      };
+
+  // Probe batch: vocabulary A with nulls -> dictionary on.
+  addBatch([&](int) -> std::optional<std::string> {
+    return rng() % 9 == 0 ? std::nullopt
+                          : std::make_optional(vocabA[rng() % vocabA.size()]);
+  });
+  // Mid-batch vocabulary shift: the A segment closes with a high hit rate
+  // and a successor segment chains (0xFE framing).
+  addBatch([&](int i) -> std::optional<std::string> {
+    return i < kRows / 2 ? vocabA[rng() % vocabA.size()]
+                         : vocabB[rng() % vocabB.size()];
+  });
+  // Values too long for any entry force the per-partition fallback tail.
+  addBatch([&](int i) -> std::optional<std::string> {
+    return i % 5 == 0 ? std::string(80, 'x') : vocabB[rng() % vocabB.size()];
+  });
+  // High cardinality after a window reset: segments fill with no reuse and
+  // the hit-rate rule demotes.
+  addBatch([&](int) -> std::optional<std::string> {
+    return "uid-" + std::to_string(rng());
+  });
+  // Back to a friendly vocabulary in a later window: dictionary re-engages.
+  addBatch([&](int) -> std::optional<std::string> {
+    return vocabA[rng() % vocabA.size()];
+  });
+
+  auto options = makeOptions(kPartitions);
+  // Tiny window bound: several checkpoints, so per-window framing and the
+  // dictionary state reset are exercised.
+  options.cellOptions.checkpointPartitionBytes = 2 << 10;
+  roundTrip(options, pids, batches);
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell

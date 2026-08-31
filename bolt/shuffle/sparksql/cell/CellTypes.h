@@ -39,6 +39,23 @@ inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 /// 8 bytes FOR base, 64 bytes body (spec section 7.3).
 inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kBlockSourceBytes;
 
+/// String dictionary limits (spec section 8): an entry's length byte is at
+/// most 63, and the serialized entries of one dictionary must stay under 64
+/// bytes in total, terminator excluded.
+inline constexpr uint32_t kDictEntryMaxLen = 63;
+inline constexpr uint32_t kDictSerializedBudget = 63;
+
+/// Dictionary sequence markers ending an entry list (spec section 8):
+/// another dictionary follows, or the fallback tail begins.
+inline constexpr uint8_t kDictMoreMarker = 0xFE;
+inline constexpr uint8_t kDictLastMarker = 0xFF;
+
+/// A closing dictionary segment must have indexed at least this many rows
+/// per entry for a successor segment to open; otherwise the partition
+/// demotes to the fallback tail (hit rate below 1 - 1/factor is not worth
+/// per-row lookups).
+inline constexpr uint32_t kDictSegmentContinueFactor = 4;
+
 /// Spec section 7.3, low 2 bits of the EncodingByte.
 enum class EncodingKind : uint8_t {
   kConstNarrow = 0,

@@ -43,12 +43,6 @@ void appendLe64(PoolBytes& out, uint64_t value) {
   out.append(&value, 8);
 }
 
-void appendZeros(PoolBytes& out, size_t n) {
-  const size_t at = out.size();
-  out.resize(at + n);
-  ::memset(out.data() + at, 0, n);
-}
-
 /// Builds the spec section 4.2 null body of one partition.
 void buildNullBody(
     const CellWindowInput& in,
@@ -307,6 +301,7 @@ void LocalCellOutput::writeRun(
 void LocalCellOutput::writeDiskPayload(
     std::FILE* out,
     const SealedWindow& w,
+    const uint8_t* encodingTags,
     uint32_t pid) {
   const uint32_t rows = w.rowCounts[pid];
   if (rows == 0) {
@@ -327,7 +322,7 @@ void LocalCellOutput::writeDiskPayload(
   const size_t nullAt = scratch_.size();
   scratch_.resize(nullAt + w.nullLength[pid]);
   readSpill(w.nullOffset[pid], scratch_.data() + nullAt, w.nullLength[pid]);
-  appendZeros(scratch_, (layout_->numColumns() + 7) / 8); // encoding tags
+  scratch_.append(encodingTags, (layout_->numColumns() + 7) / 8);
   rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
 
@@ -410,7 +405,7 @@ void LocalCellOutput::writeCurrentWindowPayload(
   const uint32_t nullLength =
       static_cast<uint32_t>(scratch_.size() - nullBodyAt);
   ::memcpy(scratch_.data() + nullSizeAt, &nullLength, 4);
-  appendZeros(scratch_, (layout_->numColumns() + 7) / 8); // encoding tags
+  scratch_.append(in.encodingTags, (layout_->numColumns() + 7) / 8);
   rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
   // Mid-window spilled runs come first (they hold the older blocks), the
@@ -454,7 +449,7 @@ void LocalCellOutput::finalize(
     const uint64_t partitionStart = finalBytes_;
     const uint64_t rawStart = rawAccum_;
     for (const auto& window : sealed_) {
-      writeDiskPayload(out, window, pid);
+      writeDiskPayload(out, window, in.encodingTags, pid);
     }
     if (windowHasData && in.rowCounts[pid] > 0) {
       writeCurrentWindowPayload(out, in, pid);
