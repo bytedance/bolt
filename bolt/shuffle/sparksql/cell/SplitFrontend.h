@@ -65,6 +65,11 @@ class SplitFrontend {
 
   virtual void split(const SplitBatch& batch) = 0;
 
+  /// Switches one string column to dictionary form (spec section 8) for the
+  /// writer's lifetime. Called by the probe before the first split; the
+  /// caller owns the matching encoding_tags bit.
+  virtual void enableDictionary(uint32_t col) = 0;
+
   /// Encodes cache residues into DataCells as stream tail blocks. Only legal
   /// right before the window closes (a tail block must be the last block of
   /// its payload stream, spec section 7.2).

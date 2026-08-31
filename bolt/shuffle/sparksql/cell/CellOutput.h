@@ -30,6 +30,10 @@ struct CellWindowInput {
   /// Per partition: rows and raw variable bytes of the current window.
   const uint32_t* rowCounts;
   const uint64_t* variableBytes;
+  /// Payload encoding tags (spec section 3.2): ceil(C/8) bytes, one bit per
+  /// column, set when the column is written in dictionary form. Constant
+  /// for the writer's lifetime (the probe decides once).
+  const uint8_t* encodingTags;
   uint32_t numPartitions;
 };
 

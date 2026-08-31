@@ -240,6 +240,51 @@ Scenario makeStringScenario(int32_t numPartitions) {
   return scenario;
 }
 
+/// Low-cardinality strings: 12 distinct 4-char values (60 serialized
+/// bytes, inside the single-dictionary probe criterion). `clustered` feeds
+/// the values in runs of 64, the shape the MRU check is built for.
+Scenario makeDictStringScenario(
+    int32_t numPartitions,
+    int32_t numBatches,
+    const char* tag,
+    bool clustered) {
+  std::mt19937 rng(31);
+  static const std::vector<std::string> vocab = {
+      "aaaa",
+      "bbbb",
+      "cccc",
+      "dddd",
+      "eeee",
+      "ffff",
+      "gggg",
+      "hhhh",
+      "iiii",
+      "jjjj",
+      "kkkk",
+      "llll"};
+  Scenario scenario{
+      std::string("strdict") + tag + "_P" + std::to_string(numPartitions),
+      numPartitions,
+      {}};
+  for (int b = 0; b < numBatches; ++b) {
+    std::vector<int64_t> keys(kRowsPerBatch);
+    std::vector<std::string> values(kRowsPerBatch);
+    std::vector<bool> nulls(kRowsPerBatch);
+    for (int i = 0; i < kRowsPerBatch; ++i) {
+      keys[i] = static_cast<int64_t>(rng());
+      nulls[i] = rng() % 10 == 0;
+      values[i] = clustered ? vocab[(i / 64) % vocab.size()]
+                            : vocab[rng() % vocab.size()];
+    }
+    scenario.batches.push_back(makeBatch(
+        {"key", "value"},
+        {makePids(numPartitions, rng),
+         makeFlat(keys),
+         makeStrings(values, nulls)}));
+  }
+  return scenario;
+}
+
 const std::vector<Scenario>& scenarios() {
   static std::vector<Scenario> all = [] {
     std::vector<Scenario> s;
@@ -262,6 +307,9 @@ const std::vector<Scenario>& scenarios() {
     // Stale nulls buffers on every column (all-set, zero actual nulls): the
     // batch classification must keep the no-null row loop.
     s.push_back(makeFixedScenario(1024, 1024, "stalenullsbig", 0, false, true));
+    // Dictionary-friendly strings, random and clustered order.
+    s.push_back(makeDictStringScenario(1024, 1024, "big", false));
+    s.push_back(makeDictStringScenario(1024, 1024, "clusbig", true));
     return s;
   }();
   return all;
@@ -281,7 +329,10 @@ std::map<std::string, Written>& results() {
 }
 
 /// One writer lifecycle over a scenario; returns rows split.
-size_t runWriter(int32_t writerType, const Scenario& scenario) {
+size_t runWriter(
+    int32_t writerType,
+    const Scenario& scenario,
+    bool disableDict = false) {
   std::shared_ptr<ShuffleWriter> writer;
   std::string dataFile;
   std::unique_ptr<BoltArrowMemoryPool> arrowPool;
@@ -308,6 +359,7 @@ size_t runWriter(int32_t writerType, const Scenario& scenario) {
     // A production-typical sizing budget; the benchmark pool's capacity is
     // not a meaningful signal for it.
     options.cellOptions.cellMemoryBudgetBytes = 512LL << 20;
+    options.cellOptions.enableStringDictionary = !disableDict;
     arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
     const auto& first = scenario.batches[0];
     writer = BoltShuffleWriter::create(
@@ -332,7 +384,8 @@ size_t runWriter(int32_t writerType, const Scenario& scenario) {
     const auto& metrics = writer->metrics();
     auto& slot = results()
         [scenario.name + "/" +
-         (writerType == 4 ? "Cell" : writerType == 2 ? "V2" : "V1")];
+         (writerType == 4 ? (disableDict ? "Cell-nodict" : "Cell")
+                          : writerType == 2 ? "V2" : "V1")];
     slot.bytes = metrics.totalBytesWritten;
     int64_t raw = 0;
     for (const auto length : metrics.rawPartitionLengths) {
@@ -372,6 +425,27 @@ CELL_SPLIT_BENCH(6, fixed4nulls10big_P1024)
 CELL_SPLIT_BENCH(7, fixed4nulls40big_P1024)
 CELL_SPLIT_BENCH(8, fixed4deadcolbig_P1024)
 CELL_SPLIT_BENCH(9, fixed4stalenullsbig_P1024)
+
+BENCHMARK_MULTI(split_strdictbig_P1024_Cell) {
+  return runWriter(4, scenarios()[10]);
+}
+BENCHMARK_MULTI(split_strdictbig_P1024_CellNoDict) {
+  return runWriter(4, scenarios()[10], /*disableDict=*/true);
+}
+BENCHMARK_MULTI(split_strdictbig_P1024_V1) {
+  return runWriter(1, scenarios()[10]);
+}
+BENCHMARK_DRAW_LINE();
+BENCHMARK_MULTI(split_strdictclusbig_P1024_Cell) {
+  return runWriter(4, scenarios()[11]);
+}
+BENCHMARK_MULTI(split_strdictclusbig_P1024_CellNoDict) {
+  return runWriter(4, scenarios()[11], /*disableDict=*/true);
+}
+BENCHMARK_MULTI(split_strdictclusbig_P1024_V1) {
+  return runWriter(1, scenarios()[11]);
+}
+BENCHMARK_DRAW_LINE();
 
 } // namespace
 
