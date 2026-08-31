@@ -57,7 +57,7 @@ namespace {
  * Upper and Lower functions have a fast path for ascii where the functions
  * can be applied in place.
  * */
-template <bool isLower /*instantiate for upper or lower*/>
+template <bool isLower /*instantiate for upper or lower*/, bool turkishCasing = false, bool greekFinalSigma = false>
 class UpperLowerTemplateFunction : public exec::VectorFunction {
  private:
   /// String encoding wrappable function
@@ -70,10 +70,10 @@ class UpperLowerTemplateFunction : public exec::VectorFunction {
       rows.applyToSelected([&](int row) {
         auto proxy = exec::StringWriter<>(results, row);
         if constexpr (isLower) {
-          stringImpl::lower<isAscii>(
+          stringImpl::lower<isAscii, turkishCasing, greekFinalSigma>(
               proxy, decodedInput->valueAt<StringView>(row));
         } else {
-          stringImpl::upper<isAscii>(
+          stringImpl::upper<isAscii, turkishCasing, greekFinalSigma>(
               proxy, decodedInput->valueAt<StringView>(row));
         }
         proxy.finalize();
@@ -803,15 +803,32 @@ class PrintfFunction : public exec::VectorFunction {
   }
 };
 
+// Using declarations to avoid commas in macro arguments
+using UpperFunction = UpperLowerTemplateFunction<false /*isLower*/, false /*turkishCasing*/, false /*greekFinalSigma*/>;
+using LowerFunction = UpperLowerTemplateFunction<true /*isLower*/, false /*turkishCasing*/, false /*greekFinalSigma*/>;
+using UpperSparkFunction = UpperLowerTemplateFunction<false /*isLower*/, true /*turkishCasing*/, true /*greekFinalSigma*/>;
+using LowerSparkFunction = UpperLowerTemplateFunction<true /*isLower*/, true /*turkishCasing*/, true /*greekFinalSigma*/>;
+
 BOLT_DECLARE_VECTOR_FUNCTION(
     udf_upper,
-    UpperLowerTemplateFunction<false /*isLower*/>::signatures(),
-    std::make_unique<UpperLowerTemplateFunction<false /*isLower*/>>());
+    UpperFunction::signatures(),
+    std::make_unique<UpperFunction>());
 
 BOLT_DECLARE_VECTOR_FUNCTION(
     udf_lower,
-    UpperLowerTemplateFunction<true /*isLower*/>::signatures(),
-    std::make_unique<UpperLowerTemplateFunction<true /*isLower*/>>());
+    LowerFunction::signatures(),
+    std::make_unique<LowerFunction>());
+
+// Spark-specific versions with turkishCasing=true and greekFinalSigma=true
+BOLT_DECLARE_VECTOR_FUNCTION(
+    udf_upper_spark,
+    UpperSparkFunction::signatures(),
+    std::make_unique<UpperSparkFunction>());
+
+BOLT_DECLARE_VECTOR_FUNCTION(
+    udf_lower_spark,
+    LowerSparkFunction::signatures(),
+    std::make_unique<LowerSparkFunction>());
 
 BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION_WITH_METADATA(
     udf_concat,

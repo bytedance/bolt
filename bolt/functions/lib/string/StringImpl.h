@@ -50,7 +50,7 @@ namespace bytedance::bolt::functions::stringImpl {
 using namespace stringCore;
 
 /// Perform upper for a UTF8 string
-template <bool ascii, typename TOutString, typename TInString>
+template <bool ascii, bool turkishCasing = false, bool greekFinalSigma = false, typename TOutString, typename TInString>
 FOLLY_ALWAYS_INLINE bool upper(TOutString& output, const TInString& input) {
   if constexpr (ascii) {
     output.resize(input.size());
@@ -69,7 +69,7 @@ FOLLY_ALWAYS_INLINE bool upper(TOutString& output, const TInString& input) {
 }
 
 /// Perform lower for a UTF8 string
-template <bool ascii, typename TOutString, typename TInString>
+template <bool ascii, bool turkishCasing = false, bool greekFinalSigma = false, typename TOutString, typename TInString>
 FOLLY_ALWAYS_INLINE bool lower(TOutString& output, const TInString& input) {
   if constexpr (ascii) {
     output.resize(input.size());
@@ -77,10 +77,10 @@ FOLLY_ALWAYS_INLINE bool lower(TOutString& output, const TInString& input) {
   } else {
     // output.resize(input.size() * 4);
     // auto size =
-    //     lowerUnicode(output.data(), output.size(), input.data(),
+    //     lowerUnicode<turkishCasing, greekFinalSigma>(output.data(), output.size(), input.data(),
     //     input.size());
     // output.resize(size);
-    std::string lowerStr = toLower<ascii>(input);
+    std::string lowerStr = toLower<ascii, turkishCasing, greekFinalSigma>(input);
     output.resize(lowerStr.size());
     std::memcpy(output.data(), lowerStr.data(), lowerStr.size());
   }

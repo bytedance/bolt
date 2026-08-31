@@ -40,8 +40,8 @@
 namespace bytedance::bolt::functions {
 void registerSparkStringFunctions(const std::string& prefix) {
   BOLT_REGISTER_VECTOR_FUNCTION(udf_concat, prefix + "concat");
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_lower, prefix + "lower");
-  BOLT_REGISTER_VECTOR_FUNCTION(udf_upper, prefix + "upper");
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_lower_spark, prefix + "lower");
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_upper_spark, prefix + "upper");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_str_to_map, prefix + "str_to_map");
 }
 

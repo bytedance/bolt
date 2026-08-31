@@ -75,6 +75,30 @@
 #define VECTORIZE_LOOP_IF_POSSIBLE
 #endif
 namespace bytedance::bolt::functions {
+namespace detail {
+
+// Helper function to check if a character is cased. Compatible with the
+// 'isCased' implementation in 'ConditionalSpecialCasting.java' of JDK, which is
+// used by 'toLowerCase' function in Spark SQL.
+FOLLY_ALWAYS_INLINE bool isCased(UChar32 ch) {
+  auto type = u_charType(ch);
+  // Lowercase letter, uppercase letter or titlecase letter.
+  if (type == U_LOWERCASE_LETTER || type == U_UPPERCASE_LETTER ||
+      type == U_TITLECASE_LETTER) {
+    return true;
+  }
+  // Modifier letters and special cases.
+  if ((ch >= 0x02B0 && ch <= 0x02B8) || (ch >= 0x02C0 && ch <= 0x02C1) ||
+      (ch >= 0x02E0 && ch <= 0x02E4) || ch == 0x0345 || ch == 0x037A ||
+      (ch >= 0x1D2C && ch <= 0x1D61) || (ch >= 0x2160 && ch <= 0x217F) ||
+      (ch >= 0x24B6 && ch <= 0x24E9)) {
+    return true;
+  }
+  return false;
+}
+
+} // namespace detail
+
 namespace stringCore {
 
 /// Check if a given string is ascii
@@ -1027,7 +1051,10 @@ FOLLY_ALWAYS_INLINE static const icu::Locale& getDefaultLocale() {
   return locale;
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toLower(
     const char* str,
     size_t length,
@@ -1053,34 +1080,64 @@ FOLLY_ALWAYS_INLINE static std::string toLower(
   }
   icu::UnicodeString unicodeStr =
       icu::UnicodeString::fromUTF8({str, static_cast<int32_t>(length)});
-  unicodeStr.toLower(locale);
+
+  // Rely on ICU's default conditional casing for Greek sigma.
+  // ICU implements Unicode SpecialCasing rules for final sigma, so we do not
+  // override it here. The previous manual implementation caused incorrect
+  // handling for single-letter words like "Σ".
+
+  // Handle Turkish-related expectations (Spark behavior): do NOT use Turkish
+  // locale-specific casing. Spark expects one-to-many mapping for 'İ' to
+  // "i\u0307" based on general Unicode SpecialCasing, so use root/default
+  // locale here.
+  if constexpr (turkishCasing) {
+    unicodeStr.toLower(getDefaultLocale());
+  } else {
+    unicodeStr.toLower(locale);
+  }
+
   result.clear();
   unicodeStr.toUTF8String(result);
   return result;
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toLower(
     const std::string& str,
     const icu::Locale& locale = getDefaultLocale()) {
-  return toLower<isAscii>(str.data(), str.size(), locale);
+  return toLower<isAscii, turkishCasing, greekFinalSigma>(
+      str.data(), str.size(), locale);
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toLower(
     const std::string_view& str,
     const icu::Locale& locale = getDefaultLocale()) {
-  return toLower<isAscii>(str.data(), str.size(), locale);
+  return toLower<isAscii, turkishCasing, greekFinalSigma>(
+      str.data(), str.size(), locale);
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toLower(
     const StringView& str,
     const icu::Locale& locale = getDefaultLocale()) {
-  return toLower<isAscii>(str.data(), str.size(), locale);
+  return toLower<isAscii, turkishCasing, greekFinalSigma>(
+      str.data(), str.size(), locale);
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toUpper(
     const char* str,
     size_t length,
@@ -1106,31 +1163,51 @@ FOLLY_ALWAYS_INLINE static std::string toUpper(
   }
   icu::UnicodeString unicodeStr =
       icu::UnicodeString::fromUTF8({str, static_cast<int32_t>(length)});
-  unicodeStr.toUpper(locale);
+
+  // Spark behavior: avoid Turkish locale-specific casing so that 'i\u0307'
+  // uppercases to 'I\u0307' (one-to-many) per Unicode SpecialCasing.
+  if constexpr (turkishCasing) {
+    unicodeStr.toUpper(getDefaultLocale());
+  } else {
+    unicodeStr.toUpper(locale);
+  }
+
   result.clear();
   unicodeStr.toUTF8String(result);
   return result;
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toUpper(
     const std::string& str,
     const icu::Locale& locale = getDefaultLocale()) {
-  return toUpper<isAscii>(str.data(), str.size(), locale);
+  return toUpper<isAscii, turkishCasing, greekFinalSigma>(
+      str.data(), str.size(), locale);
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toUpper(
     const std::string_view& str,
     const icu::Locale& locale = getDefaultLocale()) {
-  return toUpper<isAscii>(str.data(), str.size(), locale);
+  return toUpper<isAscii, turkishCasing, greekFinalSigma>(
+      str.data(), str.size(), locale);
 }
 
-template <bool isAscii = true>
+template <
+    bool isAscii = true,
+    bool turkishCasing = false,
+    bool greekFinalSigma = false>
 FOLLY_ALWAYS_INLINE static std::string toUpper(
     const StringView& str,
     const icu::Locale& locale = getDefaultLocale()) {
-  return toUpper<isAscii>(str.data(), str.size(), locale);
+  return toUpper<isAscii, turkishCasing, greekFinalSigma>(
+      str.data(), str.size(), locale);
 }
 
 FOLLY_ALWAYS_INLINE static std::string toTitle(
