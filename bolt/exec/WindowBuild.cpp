@@ -360,6 +360,7 @@ void WindowBuild::sortSpill() {
   }
 
   sortSpiller_->spill();
+  clearStateBeforeSortSpill();
   data_->clear();
   data_->pool()->release();
 }

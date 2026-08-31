@@ -39,7 +39,6 @@ DECLARE_bool(bolt_use_ws_vread);
 
 DECLARE_int32(bolt_exception_system_stacktrace_rate_limit_ms);
 DECLARE_int32(bolt_exception_user_stacktrace_rate_limit_ms);
-DECLARE_int32(bolt_memory_num_shared_leaf_pools);
 DECLARE_int32(cache_prefetch_min_pct);
 DECLARE_int32(bolt_shuffle_zstd_compression_level);
 

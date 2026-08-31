@@ -46,6 +46,10 @@ namespace bytedance::bolt::memory {
 namespace {
 constexpr folly::StringPiece kSysRootName{"__sys_root__"};
 
+MemoryPool& systemRootPool(MemoryManager& manager) {
+  return *manager.spillPool()->parent();
+}
+
 } // namespace
 
 class MemoryManagerTest : public testing::Test {
@@ -64,18 +68,18 @@ TEST_F(MemoryManagerTest, ctor) {
     ASSERT_EQ(manager.capacity(), kMaxMemory);
     ASSERT_EQ(0, manager.getTotalBytes());
     ASSERT_EQ(manager.alignment(), MemoryAllocator::kMaxAlignment);
-    ASSERT_EQ(manager.deprecatedSysRootPool().alignment(), manager.alignment());
-    ASSERT_EQ(manager.deprecatedSysRootPool().capacity(), kMaxMemory);
-    ASSERT_EQ(manager.deprecatedSysRootPool().maxCapacity(), kMaxMemory);
+    ASSERT_EQ(systemRootPool(manager).alignment(), manager.alignment());
+    ASSERT_EQ(systemRootPool(manager).capacity(), kMaxMemory);
+    ASSERT_EQ(systemRootPool(manager).maxCapacity(), kMaxMemory);
     ASSERT_EQ(manager.arbitrator()->kind(), "NOOP");
-    auto sysPool = manager.deprecatedSysRootPool().shared_from_this();
+    auto sysPool = systemRootPool(manager).shared_from_this();
     ASSERT_NE(sysPool->reclaimer(), nullptr);
     try {
       BOLT_FAIL("Trigger Error");
     } catch (const bolt::BoltRuntimeError&) {
       BOLT_ASSERT_THROW(
           sysPool->reclaimer()->abort(
-              &manager.deprecatedSysRootPool(), std::current_exception()),
+              &systemRootPool(manager), std::current_exception()),
           "SysMemoryReclaimer::abort is not supported");
     }
     ASSERT_EQ(sysPool->reclaimer()->priority(), 0);
@@ -95,7 +99,7 @@ TEST_F(MemoryManagerTest, ctor) {
     MemoryManager manager{options};
     ASSERT_EQ(kCapacity, manager.capacity());
     ASSERT_EQ(manager.numPools(), 3);
-    ASSERT_EQ(manager.deprecatedSysRootPool().alignment(), manager.alignment());
+    ASSERT_EQ(systemRootPool(manager).alignment(), manager.alignment());
   }
   {
     const auto kCapacity = 8L * 1024 * 1024;
@@ -106,9 +110,9 @@ TEST_F(MemoryManagerTest, ctor) {
     MemoryManager manager{options};
 
     ASSERT_EQ(manager.alignment(), MemoryAllocator::kMinAlignment);
-    ASSERT_EQ(manager.deprecatedSysRootPool().alignment(), manager.alignment());
+    ASSERT_EQ(systemRootPool(manager).alignment(), manager.alignment());
     // TODO: replace with root pool memory tracker quota check.
-    ASSERT_EQ(3, manager.deprecatedSysRootPool().getChildCount());
+    ASSERT_EQ(3, systemRootPool(manager).getChildCount());
     ASSERT_EQ(kCapacity, manager.capacity());
     ASSERT_EQ(0, manager.getTotalBytes());
   }
@@ -376,7 +380,7 @@ TEST_F(MemoryManagerTest, memoryPoolManagement) {
     if (i % 2) {
       ASSERT_EQ(pool->kind(), MemoryPool::Kind::kLeaf);
       userLeafPools.push_back(pool);
-      ASSERT_EQ(pool->parent()->name(), manager.deprecatedSysRootPool().name());
+      ASSERT_EQ(pool->parent()->name(), systemRootPool(manager).name());
     } else {
       ASSERT_EQ(pool->kind(), MemoryPool::Kind::kAggregate);
       ASSERT_EQ(pool->parent(), nullptr);
@@ -416,12 +420,12 @@ TEST_F(MemoryManagerTest, globalMemoryManager) {
   auto* managerII = memoryManager();
   constexpr int32_t kSystemPoolCount = 3;
   {
-    auto& rootI = manager->deprecatedSysRootPool();
+    auto& rootI = systemRootPool(*manager);
     const std::string childIName("some_child");
     auto childI = rootI.addLeafChild(childIName);
     ASSERT_EQ(rootI.getChildCount(), kSystemPoolCount + 1);
 
-    auto& rootII = managerII->deprecatedSysRootPool();
+    auto& rootII = systemRootPool(*managerII);
     ASSERT_EQ(kSystemPoolCount + 1, rootII.getChildCount());
     std::vector<MemoryPool*> pools{};
     rootII.visitChildren([&pools](MemoryPool* child) {
@@ -485,7 +489,7 @@ TEST_F(MemoryManagerTest, alignmentOptionCheck) {
         manager.alignment(),
         std::max(testData.alignment, MemoryAllocator::kMinAlignment));
     ASSERT_EQ(
-        manager.deprecatedSysRootPool().alignment(),
+        systemRootPool(manager).alignment(),
         std::max(testData.alignment, MemoryAllocator::kMinAlignment));
     auto leafPool = manager.addLeafPool("leafPool");
     ASSERT_EQ(

@@ -697,6 +697,70 @@ TEST_P(AggregationTest, global) {
   EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
 }
 
+TEST_P(AggregationTest, globalAggFunctionTimeNs) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support statistics yet\n";
+  }
+
+  // Use a large enough workload to make the timer reliably non-zero.
+  auto vectors = makeVectors(rowType_, 20, 1000);
+  createDuckDbTable(vectors);
+
+  core::PlanNodeId aggNodeId;
+  auto plan =
+      PlanBuilder()
+          .values(vectors)
+          .singleAggregation(
+              {},
+              {"sum(c1)", "count(distinct c0)", "array_agg(c0 order by c0)"},
+              {},
+              GetParam().useGPU)
+          .capturePlanNodeId(aggNodeId)
+          .planNode();
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config("max_drivers_per_task", 1)
+          .assertResults(
+              "SELECT sum(c1), count(distinct c0), array_agg(c0 order by c0) "
+              "FROM tmp");
+
+  auto planStats = toPlanStats(task->taskStats());
+  const auto& runtimeStats = planStats.at(aggNodeId).customStats;
+  ASSERT_GT(runtimeStats.count("aggFunctionTimeNs"), 0);
+  EXPECT_GT(runtimeStats.at("aggFunctionTimeNs").sum, 0);
+}
+
+TEST_P(AggregationTest, emptyGlobalAggDoesNotRecordFunctionTime) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support statistics yet\n";
+  }
+
+  auto vectors = makeVectors(rowType_, 20, 10);
+  createDuckDbTable(vectors);
+
+  core::PlanNodeId aggNodeId;
+  auto plan =
+      PlanBuilder()
+          .values(vectors)
+          .filter("c0 != c0")
+          .singleAggregation(
+              {}, {"sum(c1)", "count(distinct c0)"}, {}, GetParam().useGPU)
+          .capturePlanNodeId(aggNodeId)
+          .planNode();
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config("max_drivers_per_task", 1)
+          .assertResults(
+              "SELECT sum(c1), count(distinct c0) FROM tmp WHERE c0 != c0");
+
+  auto planStats = toPlanStats(task->taskStats());
+  const auto& aggStats = planStats.at(aggNodeId);
+  EXPECT_EQ(aggStats.outputRows, 1);
+  EXPECT_EQ(aggStats.customStats.count("aggFunctionTimeNs"), 0);
+}
+
 TEST_F(AggregationTest, manyGlobalAggregations) {
   // Test a query with a large number of global aggregations.
   // Global aggregations have a separate code path that does not use a

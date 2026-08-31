@@ -16,11 +16,6 @@
 
 #include "bolt/common/flags/BoltFlags.h"
 
-DEFINE_int32(
-    bolt_memory_num_shared_leaf_pools,
-    32,
-    "Deprecated compatibility flag; no longer used");
-
 DEFINE_bool(
     bolt_time_allocations,
     true,
