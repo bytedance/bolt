@@ -41,6 +41,7 @@
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
 #include "bolt/dwio/parquet/reader/ParquetFooterCache.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/dwio/parquet/reader/ParquetReaderCast.h"
 #include "bolt/dwio/parquet/reader/SchemaHelper.h"
 #include "bolt/dwio/parquet/reader/StructColumnReader.h"
 #include "bolt/dwio/parquet/thrift/FmtParquetFormatters.h"
@@ -1607,6 +1608,8 @@ class ParquetRowReader::Impl {
       requestedType_ = readerBase_->schema();
     }
 
+    validateReaderCastFilter();
+
     auto requestedTypeWithId = ReaderBase::createTypeWithId(
         dwio::common::TypeWithId::create(requestedType_),
         asRowType(requestedType_),
@@ -1950,6 +1953,7 @@ class ParquetRowReader::Impl {
   }
 
   void resetFilterCaches() {
+    validateReaderCastFilter();
     columnReader_->resetFilterCaches();
   }
 
@@ -1958,6 +1962,11 @@ class ParquetRowReader::Impl {
   }
 
  private:
+  void validateReaderCastFilter() const {
+    parquet::validateReaderCastFilter(
+        readerBase_->schema(), requestedType_, *options_.getScanSpec(), "");
+  }
+
   // Walk the ScanSpec children against schemaWithId() and collect the
   // matched top-level Parquet subtrees. We deliberately do NOT wrap them
   // in a synthetic TypeWithId root: the TypeWithId constructor rewrites

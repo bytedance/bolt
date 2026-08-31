@@ -16,39 +16,24 @@
 
 #pragma once
 
+#include <string>
+
 #include "bolt/type/Type.h"
+
+namespace bytedance::bolt::common {
+class ScanSpec;
+}
 
 namespace bytedance::bolt::parquet {
 
-inline bool isReaderCastFilterMismatch(
+bool isReaderCastFilterMismatch(
     const TypePtr& fileType,
-    const TypePtr& requestedType) {
-  const auto requestedKind = requestedType->kind();
-  switch (fileType->kind()) {
-    case TypeKind::REAL:
-      // VARCHAR filters cannot be evaluated against REAL statistics.
-      return requestedType->isVarchar();
-    case TypeKind::DOUBLE:
-      // VARCHAR and BIGINT filters cannot be evaluated against DOUBLE
-      // statistics.
-      return requestedType->isVarchar() || requestedKind == TypeKind::BIGINT;
-    case TypeKind::TINYINT:
-    case TypeKind::SMALLINT:
-      // DOUBLE filters cannot be evaluated against integer statistics.
-      return requestedKind == TypeKind::DOUBLE;
-    case TypeKind::INTEGER:
-      // Reader casts change the interpretation of DATE-to-VARCHAR and
-      // integer-to-DOUBLE filters.
-      return requestedKind == TypeKind::DOUBLE ||
-          (fileType->isDate() && requestedType->isVarchar());
-    case TypeKind::BIGINT:
-    case TypeKind::HUGEINT:
-      // Decimal type changes can alter the scale or native storage width.
-      return fileType->isDecimal() && requestedType->isDecimal() &&
-          !fileType->equivalent(*requestedType);
-    default:
-      return false;
-  }
-}
+    const TypePtr& requestedType);
+
+void validateReaderCastFilter(
+    const TypePtr& fileType,
+    const TypePtr& requestedType,
+    const common::ScanSpec& scanSpec,
+    const std::string& path);
 
 } // namespace bytedance::bolt::parquet
