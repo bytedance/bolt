@@ -124,10 +124,12 @@ void LocalCellOutput::ensureSpillFile() {
 }
 
 void LocalCellOutput::spillWrite(const void* data, size_t bytes) {
+  const uint64_t start = nowNs();
   BOLT_CHECK_EQ(
       ::fwrite(data, 1, bytes, spillFile_),
       bytes,
       "cell spill write failed");
+  evictTimeNs_ += nowNs() - start;
   spillOffset_ += bytes;
   bytesEvicted_ += bytes;
 }
@@ -144,7 +146,6 @@ void LocalCellOutput::readSpill(uint64_t offset, void* out, size_t bytes)
 }
 
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
-  const uint64_t start = nowNs();
   ensureSpillFile();
   const uint32_t numStreams = layout_->numStreams();
   auto& ends = openWindowRuns_.emplace_back();
@@ -210,12 +211,12 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   runScratch_.reset();
   compressScratch_.reset();
   scratch_.reset();
+  const uint64_t flushStart = nowNs();
   BOLT_CHECK_EQ(::fflush(spillFile_), 0, "cell spill flush failed");
-  evictTimeNs_ += nowNs() - start;
+  evictTimeNs_ += nowNs() - flushStart;
 }
 
 void LocalCellOutput::sealWindow(const CellWindowInput& in) {
-  const uint64_t start = nowNs();
   ensureSpillFile();
   SealedWindow window;
   window.runPidEnds = std::move(openWindowRuns_);
@@ -236,14 +237,17 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
     window.nullLength[pid] = static_cast<uint32_t>(scratch_.size());
     spillWrite(scratch_.data(), scratch_.size());
   }
+  const uint64_t flushStart = nowNs();
   BOLT_CHECK_EQ(::fflush(spillFile_), 0, "cell spill flush failed");
+  evictTimeNs_ += nowNs() - flushStart;
   sealed_.push_back(std::move(window));
-  evictTimeNs_ += nowNs() - start;
 }
 
 void LocalCellOutput::writeOut(std::FILE* out, const void* data, size_t bytes) {
+  const uint64_t start = nowNs();
   BOLT_CHECK_EQ(
       ::fwrite(data, 1, bytes, out), bytes, "shuffle data file write failed");
+  writeTimeNs_ += nowNs() - start;
   finalBytes_ += bytes;
 }
 
@@ -437,7 +441,6 @@ void LocalCellOutput::finalize(
   // in memory is written straight into the data file, alongside any runs
   // the window already spilled mid-stream.
 
-  const uint64_t start = nowNs();
   std::FILE* out = ::fopen(options_.dataFile.c_str(), "wb");
   BOLT_CHECK_NOT_NULL(
       out, "Failed to open shuffle data file {}", options_.dataFile);
@@ -459,8 +462,10 @@ void LocalCellOutput::finalize(
     metrics.rawPartitionLengths[pid] =
         static_cast<int64_t>(rawAccum_ - rawStart);
   }
+  const uint64_t flushStart = nowNs();
+  BOLT_CHECK_EQ(::fflush(out), 0, "shuffle data file flush failed");
+  writeTimeNs_ += nowNs() - flushStart;
   BOLT_CHECK_EQ(::fclose(out), 0, "shuffle data file close failed");
-  writeTimeNs_ += nowNs() - start;
 
   if (spillFile_ != nullptr) {
     ::fclose(spillFile_);
