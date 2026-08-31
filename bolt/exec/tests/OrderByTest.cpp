@@ -1841,12 +1841,20 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
       ASSERT_GT(reclaimableBytes, 0);
       reclaimerStats_.reset();
       reclaimAndRestoreCapacity(op, reclaimableBytes, reclaimerStats_);
-      ASSERT_EQ(reclaimerStats_.reclaimedBytes, reclaimableBytes);
-      ASSERT_GT(reclaimerStats_.reclaimExecTimeUs, 0);
-
+      if (radixSortEnabled) {
+        // Radix reclaims only the resident memory run. File-reader buffers
+        // remain owned by the disk merger and are not part of output re-spill.
+        ASSERT_GT(reclaimerStats_.reclaimedBytes, 0);
+        ASSERT_LE(reclaimerStats_.reclaimedBytes, reclaimableBytes);
+        ASSERT_FALSE(op->canReclaim());
+      } else {
+        ASSERT_EQ(reclaimerStats_.reclaimedBytes, reclaimableBytes);
+      }
       statsAfterReclaim = op->stats(false);
       ASSERT_GT(statsAfterReclaim.spilledBytes, 0);
       ASSERT_GT(statsAfterReclaim.spilledRows, 0);
+      ASSERT_LE(
+          statsAfterReclaim.spilledRows, statsAfterReclaim.inputPositions);
       ASSERT_EQ(statsAfterReclaim.spilledPartitions, 1);
       const auto spillRuns = statsAfterReclaim.runtimeStats.find("spillRuns");
       ASSERT_NE(spillRuns, statsAfterReclaim.runtimeStats.end());

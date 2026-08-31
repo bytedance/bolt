@@ -178,7 +178,8 @@ class RadixSortKeyCodec {
   uint64_t decodeScratchWordsPerRowWithMask(
       std::span<const uint8_t> decodedColumns,
       std::span<const uint8_t> mayHaveNulls,
-      uint32_t firstColumn) const;
+      uint32_t firstColumn,
+      bool skipMaskedVariableColumns) const;
 
   void decodeSuffixAt(
       std::span<const EncodedKeyView> keys,
@@ -206,13 +207,6 @@ class RadixSortKeyCodec {
       RowVector& output,
       std::span<const column_index_t> directKeyChannels) const;
 
-  bool tryDecodeSingleFixedColumn(
-      std::span<const char* const> keys,
-      RadixSortKeyLayoutKind layoutKind,
-      bool mayHaveNulls,
-      memory::MemoryPool* pool,
-      RowVectorPtr& result) const;
-
   uint64_t encodeAndAppendVariable(
       const RowVector& input,
       RadixSortRunStorage& arena,
@@ -224,13 +218,6 @@ class RadixSortKeyCodec {
       const RadixSortRunStorage& arena,
       uint64_t begin,
       vector_size_t count,
-      std::span<const uint8_t> decodedColumns,
-      std::span<const uint8_t> mayHaveNulls,
-      RowVectorPtr& result,
-      uint32_t prefixColumnCount) const;
-
-  void decodeFixedPrefix(
-      std::span<const char* const> keys,
       std::span<const uint8_t> decodedColumns,
       std::span<const uint8_t> mayHaveNulls,
       RowVectorPtr& result,

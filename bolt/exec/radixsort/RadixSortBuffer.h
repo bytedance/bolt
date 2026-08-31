@@ -31,6 +31,10 @@
 
 namespace bytedance::bolt::exec::radixsort {
 
+namespace test {
+class RadixSortBufferTestHelper;
+}
+
 class RadixSortBuffer : public SortBufferBase {
  public:
   RadixSortBuffer(
@@ -64,7 +68,7 @@ class RadixSortBuffer : public SortBufferBase {
     if (!noMoreInput_) {
       return run_->size() > 0;
     }
-    return outputRows_ < inputRows_ && !outputStageSpilled_;
+    return run_->retainedBytes() > 0;
   }
 
   void spill() override;
@@ -92,6 +96,15 @@ class RadixSortBuffer : public SortBufferBase {
   std::optional<uint64_t> estimateOutputRowSize() const override;
 
  private:
+  friend class test::RadixSortBufferTestHelper;
+
+  struct OutputAdmissionEstimate {
+    uint64_t outputGrowth{0};
+    uint64_t scratchGrowth{0};
+
+    uint64_t total() const;
+  };
+
   std::unique_ptr<RadixSortRun> makeRun() const;
 
   void ensureInputFits(const VectorPtr& input);
@@ -100,19 +113,21 @@ class RadixSortBuffer : public SortBufferBase {
 
   void ensureOutputFits(vector_size_t batchSize);
 
+  void reserveOutputForCurrentState(vector_size_t batchSize);
+
+  OutputAdmissionEstimate outputAdmissionEstimate(vector_size_t batchSize);
+
   bool canReuseOutput(vector_size_t batchSize) const;
 
   void spillBuildingRun();
 
-  void spillRemainingOutput();
+  void spillMemoryRun();
 
   void prepareMerge();
 
-  void accumulateSpillReadStats();
+  void prepareOutputShell(vector_size_t outputBatchSize);
 
-  void prepareOutputVector(
-      vector_size_t outputBatchSize,
-      bool resizeChildren = false);
+  void prepareMergeOutputVector(vector_size_t outputBatchSize);
 
   RowVectorPtr getMergedOutput(vector_size_t count);
 
@@ -133,13 +148,12 @@ class RadixSortBuffer : public SortBufferBase {
   std::unique_ptr<RadixSortRun> run_;
   std::vector<RadixSortSpillRun> spilledRuns_;
   folly::Synchronized<common::SpillStats> stats_;
-  common::SpillReadStats completedSpillReadStats_;
   std::unique_ptr<RadixSortMerger> merger_;
   BufferPtr mergeKeyRows_;
   BufferPtr mergePayloadRows_;
   RowVectorPtr output_;
+  std::optional<uint64_t> estimatedOutputRowSize_;
   bool noMoreInput_{false};
-  bool outputStageSpilled_{false};
   uint64_t inputRows_{0};
   uint64_t outputRows_{0};
   uint64_t storedRows_{0};

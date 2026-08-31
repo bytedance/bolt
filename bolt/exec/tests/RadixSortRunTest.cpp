@@ -575,9 +575,6 @@ class RadixSortRunTest : public testing::Test {
     EXPECT_EQ(run.storage(), nullptr);
     EXPECT_EQ(run.retainedBytes(), 0);
     EXPECT_EQ(run.getOutput(1, outputPool_.get()), nullptr);
-    std::array<const char*, 1> keys{};
-    std::array<char*, 1> payloads{};
-    EXPECT_EQ(run.collectRemainingRows(1, keys.data(), payloads.data()), 0);
   }
 };
 
@@ -987,99 +984,17 @@ TEST_F(RadixSortRunTest, lifecycleAndOutputValidation) {
       makeKeyStringRows({2, 1}, {std::string(32, 'b'), std::string(32, 'a')});
   auto run = createRun(
       {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
-  std::array<const char*, 2> keys{};
-  std::array<char*, 2> payloads{};
-
   EXPECT_THROW(run->getOutput(1, outputPool_.get()), BoltException);
-  EXPECT_THROW(
-      run->collectRemainingRows(1, keys.data(), payloads.data()),
-      BoltException);
-  EXPECT_EQ(run->getOutput({}, {}, nullptr), nullptr);
 
   run->append(*input);
   run->finalize();
-  EXPECT_EQ(run->getOutput({}, {}, nullptr), nullptr);
   EXPECT_THROW(run->append(*input), BoltException);
   EXPECT_THROW(run->finalize(), BoltException);
-  EXPECT_EQ(run->collectRemainingRows(0, keys.data(), payloads.data()), 0);
-
   run->clear();
   run->clear();
   expectCleared(*run);
-  EXPECT_EQ(run->getOutput({}, {}, nullptr), nullptr);
   EXPECT_THROW(run->append(*input), BoltException);
   EXPECT_THROW(run->finalize(), BoltException);
-}
-
-TEST_F(RadixSortRunTest, collectRemainingRowsAcrossCalls) {
-  constexpr vector_size_t kRows = 9;
-  auto input = makeKeyStringRows(
-      makeValues<int64_t>(kRows, [](vector_size_t row) { return kRows - row; }),
-      makeValues<std::string>(kRows, [](vector_size_t row) {
-        return "payload-" + std::to_string(row) +
-            std::string(24 + row, static_cast<char>('a' + row));
-      }));
-  RadixSortRunOptions options;
-  options.keysPerBlock = 2;
-  options.payloadRowsPerBlock = 2;
-  auto run = finalizedRun(
-      {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}},
-      options);
-
-  std::array<const char*, kRows> keys{};
-  std::array<char*, kRows> payloads{};
-  std::vector<RowVectorPtr> batches;
-  vector_size_t collectedRows = 0;
-  for (const auto requested : {2, 3, 10}) {
-    const auto count =
-        run->collectRemainingRows(requested, keys.data(), payloads.data());
-    ASSERT_EQ(count, std::min<vector_size_t>(requested, kRows - collectedRows));
-    auto batch = run->getOutput(
-        std::span<const char* const>(keys.data(), count),
-        std::span<char* const>(payloads.data(), count),
-        outputPool_.get());
-    ASSERT_NE(batch, nullptr);
-    batches.push_back(std::move(batch));
-    collectedRows += count;
-  }
-  EXPECT_EQ(run->collectRemainingRows(1, keys.data(), payloads.data()), 0);
-  EXPECT_EQ(run->metrics().outputRows, kRows);
-  EXPECT_EQ(run->state(), RadixSortRunState::kSortedInMemory);
-  auto output = concatenate(batches);
-  SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
-  SortComparatorOracle::expectSorted(
-      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
-  run->clear();
-  expectCleared(*run);
-
-  auto keyOnlyInput =
-      makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {7, 6, 5, 4, 3, 2, 1})});
-  options = {};
-  options.keysPerBlock = 2;
-  auto keyOnlyRun = finalizedRun(
-      {*keyOnlyInput, {0}, {SortComparatorOracle::makeSortFlags(true, true)}},
-      options);
-  vector_size_t expected = 1;
-  for (const auto requested : {1, 2, 8}) {
-    const auto count =
-        keyOnlyRun->collectRemainingRows(requested, keys.data(), nullptr);
-    ASSERT_GT(count, 0);
-    auto batch = keyOnlyRun->getOutput(
-        std::span<const char* const>(keys.data(), count),
-        {},
-        outputPool_.get());
-    ASSERT_NE(batch, nullptr);
-    for (vector_size_t row = 0; row < count; ++row) {
-      EXPECT_EQ(
-          batch->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(row),
-          expected++);
-    }
-  }
-  EXPECT_EQ(expected, 8);
-  EXPECT_EQ(keyOnlyRun->collectRemainingRows(1, keys.data(), nullptr), 0);
-  EXPECT_EQ(keyOnlyRun->metrics().outputRows, 7);
-  keyOnlyRun->clear();
-  expectCleared(*keyOnlyRun);
 }
 
 TEST_F(RadixSortRunTest, outputScratchGrowsAndShrinksAcrossCalls) {
@@ -1793,10 +1708,16 @@ TEST_F(
         keys.data(),
         payloadRows.data(),
         [&](vector_size_t segmentSize) {
-          mergeBatches.push_back(mergeRun->getOutput(
+          auto output = makePreparedOutput(*mergeRun, segmentSize);
+          RadixSortRunOffsetOutputTest::write(
+              *mergeRun,
               std::span<const char* const>(keys.data(), segmentSize),
               std::span<char* const>(payloadRows.data(), segmentSize),
-              outputPool_.get()));
+              0,
+              segmentSize,
+              outputPool_.get(),
+              output);
+          mergeBatches.push_back(std::move(output));
           flushedRows += segmentSize;
         });
     ASSERT_EQ(count, requested);

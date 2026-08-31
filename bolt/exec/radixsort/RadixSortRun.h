@@ -26,7 +26,7 @@
 namespace bytedance::bolt::exec::radixsort {
 namespace test {
 class RadixSortRunOffsetOutputTest;
-}
+} // namespace test
 
 enum class RadixSortOutputSource : uint8_t {
   kDecodedKey = 0,
@@ -236,31 +236,24 @@ class RadixSortRun {
       memory::MemoryPool* outputPool,
       RowVectorPtr& output);
 
-  RowVectorPtr getOutput(
-      std::span<const char* const> keys,
-      std::span<char* const> payloads,
-      memory::MemoryPool* outputPool);
-
-  RowVectorPtr getOutput(
-      std::span<const char* const> keys,
-      std::span<char* const> payloads,
-      memory::MemoryPool* outputPool,
-      RowVectorPtr& output);
-
-  vector_size_t collectRemainingRows(
-      vector_size_t maxRows,
-      const char** keys,
-      char** payloads);
-
   void clear();
 
  private:
   friend class RadixSortBuffer;
   friend class test::RadixSortRunOffsetOutputTest;
 
+  uint64_t outputPosition() const {
+    return outputPosition_;
+  }
+
+  uint64_t directOutputScratchAllocationBytes(vector_size_t rows);
+
+  uint64_t mergeOutputScratchAllocationBytes(vector_size_t rows);
+
   struct MergeDecodePlan {
     std::optional<uint32_t> singleFixedWordBytes;
     uint64_t scratchWords{0};
+    uint64_t directScratchWords{0};
   };
 
   RadixSortRun(
@@ -297,14 +290,6 @@ class RadixSortRun {
       vector_size_t count,
       memory::MemoryPool* outputPool);
 
-  RowVectorPtr decodeKeyPointers(
-      std::span<const char* const> keys,
-      memory::MemoryPool* outputPool);
-
-  RowVectorPtr gatherPayloadPointers(
-      std::span<char* const> payloads,
-      memory::MemoryPool* outputPool);
-
   void writeMergeOutput(
       std::span<const char* const> keys,
       std::span<char* const> payloads,
@@ -314,6 +299,12 @@ class RadixSortRun {
   void prepareMergeOutput(RowVector& output);
 
   void finishMergeOutput(RowVector& output, vector_size_t writtenRows);
+
+  void ensureMergeDecodePlan();
+
+  uint64_t decodeScratchAllocationBytes(
+      vector_size_t rows,
+      uint64_t scratchWordsPerRow) const;
 
   void decodeKeysAt(
       std::span<const char* const> keys,

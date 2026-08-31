@@ -5081,35 +5081,6 @@ void RadixSortKeyCodec::decodeSingleFixedAt(
       true);
 }
 
-bool RadixSortKeyCodec::tryDecodeSingleFixedColumn(
-    std::span<const char* const> keys,
-    RadixSortKeyLayoutKind layoutKind,
-    bool mayHaveNulls,
-    memory::MemoryPool* pool,
-    RowVectorPtr& result) const {
-  const auto layout = RadixSortKeyLayout::fromKind(layoutKind);
-  if (!canDecodeSingleFixedColumn() || layout.isVariable()) {
-    return false;
-  }
-  const auto count = static_cast<vector_size_t>(keys.size());
-
-  VectorPtr child;
-  if (result != nullptr && result->pool() == pool &&
-      result->type()->equivalent(*rowType_) && result->childrenSize() == 1) {
-    child = std::move(result->children()[0]);
-    result.reset();
-    BaseVector::prepareForReuse(child, count);
-  } else {
-    result.reset();
-    child = BaseVector::create(columns_[0].type, count, pool);
-  }
-  decodeSinglePhysicalColumn<true>(
-      columns_[0], keys, mayHaveNulls, child, layout.inlineWordBytes());
-  result = std::make_shared<RowVector>(
-      pool, rowType_, nullptr, count, std::vector<VectorPtr>{std::move(child)});
-  return true;
-}
-
 void RadixSortKeyCodec::decode(
     std::span<const EncodedKeyView> keys,
     std::span<const uint8_t> decodedColumns,
@@ -5135,12 +5106,17 @@ void RadixSortKeyCodec::decode(
 uint64_t RadixSortKeyCodec::decodeScratchWordsPerRowWithMask(
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
-    uint32_t firstColumn) const {
+    uint32_t firstColumn,
+    bool skipMaskedVariableColumns) const {
   BOLT_DCHECK_EQ(decodedColumns.size(), columns_.size());
   BOLT_DCHECK_EQ(mayHaveNulls.size(), columns_.size());
   BOLT_DCHECK_LT(firstColumn, columns_.size());
   return calculateDecodeScratchWordsPerRow(
-      columns_, decodedColumns, mayHaveNulls, firstColumn, true);
+      columns_,
+      decodedColumns,
+      mayHaveNulls,
+      firstColumn,
+      skipMaskedVariableColumns);
 }
 
 void RadixSortKeyCodec::decodeSuffixAt(
@@ -5241,28 +5217,6 @@ void RadixSortKeyCodec::finishDecode(
     }
     output.childAt(directKeyChannels[column])->resetDataDependentFlags(nullptr);
   }
-}
-
-void RadixSortKeyCodec::decodeFixedPrefix(
-    std::span<const char* const> keys,
-    std::span<const uint8_t> decodedColumns,
-    std::span<const uint8_t> mayHaveNulls,
-    RowVectorPtr& result,
-    uint32_t prefixColumnCount) const {
-  decodeFixedPrefixColumns(
-      columns_,
-      prefixColumnCount,
-      decodedColumns,
-      mayHaveNulls,
-      [&](uint32_t column, uint32_t encodedOffset, bool mayHaveNulls) {
-        decodeSinglePhysicalColumn<false>(
-            columns_[column],
-            keys,
-            mayHaveNulls,
-            result->childAt(column),
-            0,
-            encodedOffset);
-      });
 }
 
 } // namespace bytedance::bolt::exec::radixsort
