@@ -38,6 +38,7 @@ class CachedCellFrontend final : public SplitFrontend {
       ChunkAllocator::GrowCallback beforeGrow);
 
   void split(const SplitBatch& batch) override;
+  void enableDictionary(uint32_t col) override;
   void flushAll() override;
 
   uint64_t partitionBytes(uint32_t pid) const override {
@@ -96,6 +97,53 @@ class CachedCellFrontend final : public SplitFrontend {
   template <bool kHasNulls, bool kIndexed>
   void splitString(uint32_t col, const SplitBatch& batch);
 
+  template <bool kHasNulls, bool kIndexed>
+  void splitStringDict(uint32_t col, const SplitBatch& batch);
+
+  /// Per (partition, dictionary column): the open dictionary segment. Its
+  /// entries live here, never in the cells, until the segment closes - a
+  /// spill between two closes must not split a dictionary across Runs
+  /// (spec section 5.4). While `mode` is dictionary, the column's length
+  /// cache stages raw index bytes and its data cache stays empty.
+  struct DictState {
+    static constexpr uint8_t kModeDict = 0;
+    static constexpr uint8_t kModeFallback = 1;
+    /// Writer-side cap on entries per segment (the serialized budget allows
+    /// up to 63 one-byte entries; past this cap the segment just closes).
+    static constexpr uint32_t kMaxEntries = 32;
+    uint32_t matched{0}; // rows indexed by the open segment
+    uint8_t mode{kModeDict};
+    uint8_t entryCount{0};
+    uint8_t entryBytes{0}; // serialized [len][bytes] total, <= 63
+    /// Fixed-stride scan keys, (first-4-bytes << 8) | length: the row loop
+    /// scans independent words instead of chasing variable-length entries;
+    /// the serialized form is touched only to confirm a long match or add.
+    uint64_t scanKey[kMaxEntries];
+    uint8_t entryOff[kMaxEntries]; // offset of each entry's length byte
+    char entries[kDictSerializedBudget + 1];
+  };
+
+  /// Writes the open segment as [entries][terminator][matched u32] into the
+  /// data stream and clears the open-segment fields. A segment with no
+  /// indexed row is written only when `last` requires the framing (a
+  /// demote before any hit still owes the empty sequence).
+  void closeDictSegment(
+      uint32_t dataStream,
+      uint32_t pid,
+      DictState& st,
+      bool last);
+
+  /// Appends one non-null value of a dictionary-mode partition. Returns
+  /// false when the partition just demoted to the fallback tail (the value
+  /// was not appended; the caller routes it through the fallback path).
+  bool appendDictValue(
+      uint32_t lengthStream,
+      uint32_t dataStream,
+      uint32_t pid,
+      DictState& st,
+      const StringView& view,
+      uint8_t* lengthCur);
+
   template <typename T>
   void dispatchEncoded(uint32_t col, const SplitBatch& batch, bool hasNulls);
 
@@ -119,6 +167,11 @@ class CachedCellFrontend final : public SplitFrontend {
   std::vector<uint64_t> partitionBytes_;
   std::vector<uint64_t> variableBytes_;
   uint64_t maxPartitionBytes_{0};
+
+  /// Per column: dictionary form on/off (lifetime), and if on, one
+  /// DictState per partition.
+  std::vector<uint8_t> dictEnabled_;
+  std::vector<std::vector<DictState>> dictStates_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
