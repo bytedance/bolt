@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <filesystem>
@@ -46,6 +47,37 @@
 #include "bolt/vector/VariantVector.h"
 
 namespace bytedance::bolt::exec::radixsort::test {
+
+class RadixSortBufferTestHelper {
+ public:
+  struct AdmissionEstimate {
+    uint64_t outputGrowth;
+    uint64_t scratchGrowth;
+    uint64_t total;
+  };
+
+  static AdmissionEstimate outputAdmissionEstimate(
+      RadixSortBuffer& buffer,
+      vector_size_t rows) {
+    const auto estimate = buffer.outputAdmissionEstimate(rows);
+    return {estimate.outputGrowth, estimate.scratchGrowth, estimate.total()};
+  }
+
+  static void dropMergePointerScratch(RadixSortBuffer& buffer) {
+    buffer.mergeKeyRows_.reset();
+    buffer.mergePayloadRows_.reset();
+  }
+
+  static void ensureOutputFits(RadixSortBuffer& buffer, vector_size_t rows) {
+    buffer.ensureOutputFits(rows);
+  }
+
+  static void shareOutputChild(RadixSortBuffer& buffer, VectorPtr& child) {
+    BOLT_CHECK_NOT_NULL(buffer.output_);
+    child = buffer.output_->childAt(0);
+  }
+};
+
 namespace {
 
 class RadixSortBufferTest : public testing::Test {
@@ -135,6 +167,44 @@ class RadixSortBufferTest : public testing::Test {
     EXPECT_EQ(offset, total);
     return std::make_shared<RowVector>(
         pool(), inputType, nullptr, total, std::move(children));
+  }
+
+  static void expectRowsEqual(
+      const RowVector& expected,
+      const RowVector& actual) {
+    ASSERT_EQ(expected.size(), actual.size());
+    ASSERT_EQ(expected.childrenSize(), actual.childrenSize());
+    for (uint32_t column = 0; column < expected.childrenSize(); ++column) {
+      for (vector_size_t row = 0; row < expected.size(); ++row) {
+        EXPECT_TRUE(expected.childAt(column)->equalValueAt(
+            actual.childAt(column).get(), row, row))
+            << "column=" << column << ", row=" << row;
+      }
+    }
+  }
+
+  static void expectSpillReadStatsEqual(
+      const std::optional<common::SpillReadStats>& expected,
+      const std::optional<common::SpillReadStats>& actual) {
+    ASSERT_EQ(expected.has_value(), actual.has_value());
+    if (!expected.has_value()) {
+      return;
+    }
+    EXPECT_EQ(expected->spillReadTimeUs, actual->spillReadTimeUs);
+    EXPECT_EQ(expected->spillDecompressTimeUs, actual->spillDecompressTimeUs);
+    EXPECT_EQ(expected->spillReadIOTimeUs, actual->spillReadIOTimeUs);
+  }
+
+  static void expectSpillReadStatsNotDecreased(
+      const std::optional<common::SpillReadStats>& before,
+      const std::optional<common::SpillReadStats>& after) {
+    ASSERT_EQ(before.has_value(), after.has_value());
+    if (!before.has_value()) {
+      return;
+    }
+    EXPECT_GE(after->spillReadTimeUs, before->spillReadTimeUs);
+    EXPECT_GE(after->spillDecompressTimeUs, before->spillDecompressTimeUs);
+    EXPECT_GE(after->spillReadIOTimeUs, before->spillReadIOTimeUs);
   }
 
   RowVectorPtr collect(
@@ -263,7 +333,7 @@ class RadixSortBufferTest : public testing::Test {
         ->valueAt(row);
   }
 
-  void spillRemainingOutputAndCheckStats(
+  void spillMemoryRunAndCheckStats(
       RadixSortBuffer& buffer,
       uint64_t expectedRows) {
     EXPECT_TRUE(buffer.canReclaim());
@@ -275,30 +345,31 @@ class RadixSortBufferTest : public testing::Test {
     EXPECT_EQ(
         buffer.spilledStats()->spilledRows,
         statsBefore.spilledRows + expectedRows);
+    EXPECT_LE(buffer.spilledStats()->spilledRows, buffer.numInputRows());
     EXPECT_GT(buffer.spilledStats()->spilledBytes, statsBefore.spilledBytes);
     const auto statsAfter = *buffer.spilledStats();
     buffer.spill();
-    EXPECT_EQ(buffer.spilledStats()->spilledRows, statsAfter.spilledRows);
-    EXPECT_EQ(buffer.spilledStats()->spilledBytes, statsAfter.spilledBytes);
+    EXPECT_EQ(*buffer.spilledStats(), statsAfter);
   }
 
-  struct SpillRemainingOutputOptions {
+  struct SpillMemoryRunOptions {
     vector_size_t prefixRows;
     size_t expectedSpillRuns;
+    size_t expectedMergeStreams;
+    uint64_t expectedSpilledRows;
   };
 
-  void spillRemainingOutputAndVerifyReplacement(
+  void spillMemoryRunAndVerifyReplacement(
       RadixSortBuffer& buffer,
       const RowVectorPtr& input,
-      SpillRemainingOutputOptions options) {
+      SpillMemoryRunOptions options) {
     auto prefix = buffer.getOutput(options.prefixRows);
     ASSERT_NE(prefix, nullptr);
     ASSERT_EQ(prefix->size(), options.prefixRows);
 
-    spillRemainingOutputAndCheckStats(
-        buffer, buffer.numInputRows() - prefix->size());
+    spillMemoryRunAndCheckStats(buffer, options.expectedSpilledRows);
     EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
-    EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+    EXPECT_EQ(buffer.testingMergeStreamCount(), options.expectedMergeStreams);
     ASSERT_TRUE(buffer.spilledStats());
     EXPECT_EQ(buffer.spilledStats()->spillRuns, options.expectedSpillRuns);
     EXPECT_GT(buffer.spilledStats()->spilledFiles, 1);
@@ -484,7 +555,8 @@ class RadixSortBufferTest : public testing::Test {
       column_index_t keyChannel = 0,
       int64_t idBase = 0,
       std::string_view compression = "none",
-      std::optional<vector_size_t> prefixRows = std::nullopt) {
+      std::optional<vector_size_t> prefixRows = std::nullopt,
+      std::optional<uint64_t> expectedOutputSpillRows = std::nullopt) {
     SpillContext spill(*this, input, std::string(compression), 0, keyChannel);
     auto& buffer = spill.buffer;
     const auto [spilledRows, spilledRuns] = addInputRuns(buffer, input, runs);
@@ -498,8 +570,10 @@ class RadixSortBufferTest : public testing::Test {
         return {};
       }
       EXPECT_EQ(prefix->size(), *prefixRows);
-      spillRemainingOutputAndCheckStats(
-          buffer, buffer.numInputRows() - prefix->size());
+      spillMemoryRunAndCheckStats(
+          buffer,
+          expectedOutputSpillRows.value_or(
+              buffer.numInputRows() - prefix->size()));
     }
     collectAndVerify(
         buffer, input, outputBatchSize, idChannel, keyChannel, idBase, prefix);
@@ -1370,6 +1444,52 @@ TEST_F(RadixSortBufferTest, outputVectorReuse) {
   }
 }
 
+TEST_F(RadixSortBufferTest, directOutputReusesMaterialization) {
+  auto input = makeRows(
+      {"key", "payload"},
+      {makeVector<int64_t>(BIGINT(), {6, 5, 4, 3, 2, 1}),
+       makeVector<int64_t>(BIGINT(), {60, 50, 40, 30, 20, 10})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+  const auto expectBatch = [](const RowVectorPtr& batch, int64_t firstKey) {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->size(), 2);
+    const auto* keys = batch->childAt(0)->asUnchecked<SimpleVector<int64_t>>();
+    const auto* payloads =
+        batch->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+    for (vector_size_t row = 0; row < 2; ++row) {
+      EXPECT_EQ(keys->valueAt(row), firstKey + row);
+      EXPECT_EQ(payloads->valueAt(row), (firstKey + row) * 10);
+    }
+  };
+
+  auto first = buffer.getOutput(2);
+  expectBatch(first, 1);
+  std::vector<const BaseVector*> firstChildren;
+  for (const auto& child : first->children()) {
+    firstChildren.push_back(child.get());
+  }
+  first.reset();
+
+  auto second = buffer.getOutput(2);
+  expectBatch(second, 3);
+  ASSERT_EQ(second->childrenSize(), firstChildren.size());
+  for (uint32_t channel = 0; channel < second->childrenSize(); ++channel) {
+    EXPECT_EQ(second->childAt(channel).get(), firstChildren[channel]);
+  }
+  second.reset();
+  const auto reused =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 2);
+  EXPECT_EQ(reused.outputGrowth, 0);
+  EXPECT_EQ(reused.scratchGrowth, 0);
+  EXPECT_EQ(reused.total, 0);
+  auto third = buffer.getOutput(2);
+  expectBatch(third, 5);
+  EXPECT_EQ(buffer.getOutput(2), nullptr);
+}
+
 TEST_F(RadixSortBufferTest, spillPlansMergeCorrectly) {
   struct SpillPlan {
     const char* name;
@@ -1601,6 +1721,396 @@ TEST_F(RadixSortBufferTest, spillMergeWidePayloadStaysWithinOperatorCap) {
   EXPECT_LE(sortRoot->peakBytes(), kSortCapacity);
 }
 
+TEST_F(RadixSortBufferTest, outputAdmissionUsesIncrementalEstimate) {
+  constexpr vector_size_t kRows = 8;
+  auto input = makeKeyPayloadIdRows(
+      generate<std::optional<int64_t>>(
+          kRows, [](vector_size_t row) { return kRows - row; }),
+      generate<std::optional<std::string>>(kRows, [](vector_size_t row) {
+        return std::string(64 + row, static_cast<char>('a' + row));
+      }));
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+
+  const auto before =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 4);
+  EXPECT_GT(before.outputGrowth, 0);
+  EXPECT_EQ(
+      before.total,
+      before.outputGrowth + before.outputGrowth / 5 + before.scratchGrowth);
+  EXPECT_LT(before.total, before.outputGrowth * 2);
+
+  auto first = buffer.getOutput(4);
+  ASSERT_NE(first, nullptr);
+  first.reset();
+  const auto after =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 4);
+  // String backing capacity is data-dependent, so the cheap estimator
+  // conservatively reserves output growth even when the RowVector is writable.
+  EXPECT_EQ(after.outputGrowth, before.outputGrowth);
+  EXPECT_EQ(
+      after.total,
+      after.outputGrowth + after.outputGrowth / 5 + after.scratchGrowth);
+  EXPECT_LT(after.scratchGrowth, before.scratchGrowth);
+}
+
+TEST_F(RadixSortBufferTest, reusableFixedOutputStillAccountsForScratch) {
+  auto input = makeRows(
+      {"key", "payload"},
+      {makeVector<int64_t>(BIGINT(), {4, 3, 2, 1}),
+       makeVector<int64_t>(BIGINT(), {40, 30, 20, 10})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(slice(*input, 0, 2));
+  buffer.spill();
+  buffer.addInput(slice(*input, 2, 2));
+  buffer.spill();
+  buffer.noMoreInput();
+
+  auto first = buffer.getOutput(2);
+  ASSERT_NE(first, nullptr);
+  const auto reusedOutputSize = first->size();
+  std::vector<uint64_t> childValueCapacities;
+  childValueCapacities.reserve(first->childrenSize());
+  for (const auto& child : first->children()) {
+    ASSERT_NE(child, nullptr);
+    ASSERT_NE(child->values(), nullptr);
+    childValueCapacities.push_back(child->values()->capacity());
+  }
+  first.reset();
+  const auto warmEstimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 2);
+  EXPECT_EQ(warmEstimate.outputGrowth, 0);
+  EXPECT_EQ(warmEstimate.scratchGrowth, 0);
+  EXPECT_EQ(warmEstimate.total, 0);
+  ASSERT_EQ(reusedOutputSize, 2);
+  for (const auto capacity : childValueCapacities) {
+    EXPECT_GE(capacity, 3 * sizeof(int64_t));
+  }
+  const auto largerBatch =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 3);
+  EXPECT_EQ(largerBatch.outputGrowth, 0);
+  EXPECT_EQ(largerBatch.total, 0);
+
+  RadixSortBufferTestHelper::dropMergePointerScratch(buffer);
+  const auto missingScratch =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 2);
+  EXPECT_EQ(missingScratch.outputGrowth, 0);
+  EXPECT_GT(missingScratch.scratchGrowth, 0);
+  EXPECT_EQ(missingScratch.total, missingScratch.scratchGrowth);
+  auto second = buffer.getOutput(2);
+  ASSERT_NE(second, nullptr);
+  const auto* keys = second->childAt(0)->asUnchecked<SimpleVector<int64_t>>();
+  const auto* payloads =
+      second->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+  EXPECT_EQ(keys->valueAt(0), 3);
+  EXPECT_EQ(keys->valueAt(1), 4);
+  EXPECT_EQ(payloads->valueAt(0), 30);
+  EXPECT_EQ(payloads->valueAt(1), 40);
+  EXPECT_EQ(buffer.getOutput(2), nullptr);
+}
+
+TEST_F(RadixSortBufferTest, sharedOutputChildRequiresOutputAdmission) {
+  auto input = makeRows(
+      {"key", "payload"},
+      {makeVector<int64_t>(BIGINT(), {4, 3, 2, 1}),
+       makeVector<int64_t>(BIGINT(), {40, 30, 20, 10})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+
+  auto first = buffer.getOutput(2);
+  ASSERT_NE(first, nullptr);
+  VectorPtr heldChild;
+  RadixSortBufferTestHelper::shareOutputChild(buffer, heldChild);
+  first.reset();
+  const auto estimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 2);
+  EXPECT_GT(estimate.outputGrowth, 0);
+  EXPECT_EQ(
+      estimate.total,
+      estimate.outputGrowth + estimate.outputGrowth / 5 +
+          estimate.scratchGrowth);
+  auto second = buffer.getOutput(2);
+  ASSERT_NE(second, nullptr);
+  const auto* heldKeys = heldChild->asUnchecked<SimpleVector<int64_t>>();
+  EXPECT_EQ(heldKeys->valueAt(0), 1);
+  EXPECT_EQ(heldKeys->valueAt(1), 2);
+  EXPECT_EQ(
+      second->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(0), 3);
+  EXPECT_EQ(
+      second->childAt(0)->asUnchecked<SimpleVector<int64_t>>()->valueAt(1), 4);
+  EXPECT_EQ(buffer.getOutput(2), nullptr);
+}
+
+TEST_F(RadixSortBufferTest, nullableFixedOutputRequiresOutputAdmission) {
+  auto input = makeRows(
+      {"key", "payload"},
+      {makeVector<int64_t>(BIGINT(), {1, 2, 3, 4}),
+       makeVector<int64_t>(BIGINT(), {10, 20, std::nullopt, 40})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{2, true}, {2, true}});
+  buffer.noMoreInput();
+
+  auto first = buffer.getOutput(2);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(first->childAt(1)->nulls(), nullptr);
+  EXPECT_FALSE(first->childAt(1)->isNullAt(0));
+  EXPECT_FALSE(first->childAt(1)->isNullAt(1));
+  first.reset();
+  const auto estimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 2);
+  EXPECT_GT(estimate.outputGrowth, 0);
+  EXPECT_EQ(
+      estimate.total,
+      estimate.outputGrowth + estimate.outputGrowth / 5 +
+          estimate.scratchGrowth);
+  auto second = buffer.getOutput(2);
+  ASSERT_NE(second, nullptr);
+  const auto* payloads =
+      second->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+  EXPECT_TRUE(payloads->isNullAt(0));
+  EXPECT_FALSE(payloads->isNullAt(1));
+  EXPECT_EQ(payloads->valueAt(1), 40);
+  EXPECT_EQ(buffer.getOutput(2), nullptr);
+}
+
+TEST_F(RadixSortBufferTest, nullableFixedOutputReusesCachedNullBitmap) {
+  auto input = makeRows(
+      {"key", "payload"},
+      {makeVector<int64_t>(BIGINT(), {1, 2, 3, 4}),
+       makeVector<int64_t>(BIGINT(), {10, std::nullopt, 30, 40})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{2, true}, {2, true}});
+  buffer.noMoreInput();
+
+  auto first = buffer.getOutput(2);
+  ASSERT_NE(first, nullptr);
+  EXPECT_TRUE(first->childAt(1)->isNullAt(1));
+  first->childAt(1)->setNullCount(1);
+  first.reset();
+  const auto estimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 2);
+  EXPECT_EQ(estimate.outputGrowth, 0);
+  EXPECT_EQ(estimate.total, estimate.scratchGrowth);
+  auto second = buffer.getOutput(2);
+  ASSERT_NE(second, nullptr);
+  const auto* payloads =
+      second->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+  EXPECT_FALSE(payloads->isNullAt(0));
+  EXPECT_FALSE(payloads->isNullAt(1));
+  EXPECT_EQ(payloads->valueAt(0), 30);
+  EXPECT_EQ(payloads->valueAt(1), 40);
+  EXPECT_EQ(buffer.getOutput(2), nullptr);
+}
+
+DEBUG_ONLY_TEST_F(
+    RadixSortBufferTest,
+    outputAdmissionWithEnoughReservationSkipsMaybeReserve) {
+  constexpr vector_size_t kBatchRows = 80;
+  auto input = makeRows(
+      {"key"},
+      {generateVector<int64_t>(BIGINT(), kBatchRows, [](vector_size_t row) {
+        return kBatchRows - row;
+      })});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+
+  const auto estimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, kBatchRows);
+  const auto need = estimate.total;
+  ASSERT_GT(need, 0);
+  ASSERT_TRUE(pool()->maybeReserve(need));
+  ASSERT_GE(pool()->availableReservation(), need);
+  const auto alignment = static_cast<uint64_t>(pool()->alignment());
+  const auto targetReservation =
+      ((need + alignment - 1) / alignment) * alignment;
+  ASSERT_EQ(targetReservation, need);
+  ASSERT_GE(pool()->availableReservation(), targetReservation);
+  const auto excessReservation =
+      static_cast<uint64_t>(pool()->availableReservation() - targetReservation);
+  void* reservationPadding = nullptr;
+  if (excessReservation > 0) {
+    ASSERT_EQ(excessReservation % alignment, 0);
+    reservationPadding = pool()->allocate(excessReservation);
+  }
+  ASSERT_EQ(pool()->availableReservation(), targetReservation);
+  ASSERT_GE(pool()->availableReservation(), need);
+
+  uint32_t maybeReserveCalls = 0;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve",
+      std::function<void(memory::MemoryPoolImpl*)>(
+          [&](memory::MemoryPoolImpl* candidate) {
+            if (candidate == pool()) {
+              ++maybeReserveCalls;
+            }
+          }));
+  RadixSortBufferTestHelper::ensureOutputFits(buffer, kBatchRows);
+  EXPECT_EQ(maybeReserveCalls, 0);
+
+  if (reservationPadding != nullptr) {
+    pool()->free(reservationPadding, excessReservation);
+  }
+}
+
+DEBUG_ONLY_TEST_F(
+    RadixSortBufferTest,
+    outputAdmissionBelowLegacyMultiplierDoesNotReclaim) {
+  constexpr vector_size_t kBatchRows = 80;
+  auto input = makeRows(
+      {"key"},
+      {generateVector<int64_t>(BIGINT(), kBatchRows, [](vector_size_t row) {
+        return kBatchRows - row;
+      })});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+
+  const auto estimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, kBatchRows);
+  const auto need = estimate.total;
+  const auto outputBytes = estimate.outputGrowth;
+  const auto legacyEstimate = outputBytes * 2 + (outputBytes * 2) / 5;
+  ASSERT_GT(outputBytes, 0);
+  ASSERT_LT(need, legacyEstimate);
+  ASSERT_TRUE(pool()->maybeReserve(legacyEstimate));
+  const auto alignment = static_cast<uint64_t>(pool()->alignment());
+  const auto targetReservation =
+      need + ((legacyEstimate - need) / 2 / alignment) * alignment;
+  ASSERT_GE(targetReservation, need);
+  ASSERT_LT(targetReservation, legacyEstimate);
+  ASSERT_GE(pool()->availableReservation(), targetReservation);
+  const auto excessReservation =
+      static_cast<uint64_t>(pool()->availableReservation()) - targetReservation;
+  void* reservationPadding = nullptr;
+  if (excessReservation > 0) {
+    ASSERT_EQ(excessReservation % alignment, 0);
+    reservationPadding = pool()->allocate(excessReservation);
+  }
+  ASSERT_EQ(pool()->availableReservation(), targetReservation);
+
+  uint32_t maybeReserveCalls = 0;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve",
+      std::function<void(memory::MemoryPoolImpl*)>(
+          [&](memory::MemoryPoolImpl* candidate) {
+            if (candidate == pool()) {
+              ++maybeReserveCalls;
+            }
+          }));
+  RadixSortBufferTestHelper::ensureOutputFits(buffer, kBatchRows);
+  EXPECT_EQ(maybeReserveCalls, 0);
+  EXPECT_FALSE(buffer.spilledStats());
+  EXPECT_TRUE(buffer.canReclaim());
+
+  if (reservationPadding != nullptr) {
+    pool()->free(reservationPadding, excessReservation);
+  }
+}
+
+DEBUG_ONLY_TEST_F(
+    RadixSortBufferTest,
+    outputAdmissionReestimatesAfterReclaimChangesToMerge) {
+  constexpr vector_size_t kAdmissionRows = 1'100'000;
+  auto input = makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {3, 1, 2})});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+  pool()->release();
+
+  const auto directEstimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(
+          buffer, kAdmissionRows);
+  const auto directNeed = directEstimate.total;
+  ASSERT_GT(directNeed, 0);
+  ASSERT_LT(directNeed, 24UL << 20);
+
+  uint32_t maybeReserveCalls = 0;
+  std::atomic<bool> spilling{false};
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve",
+      std::function<void(memory::MemoryPoolImpl*)>(
+          [&](memory::MemoryPoolImpl* candidate) {
+            if (candidate != pool() || spilling) {
+              return;
+            }
+            ++maybeReserveCalls;
+            if (maybeReserveCalls == 1) {
+              spilling = true;
+              buffer.spill();
+              spilling = false;
+            }
+          }));
+
+  RadixSortBufferTestHelper::ensureOutputFits(buffer, kAdmissionRows);
+  EXPECT_EQ(maybeReserveCalls, 2);
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+  const auto mergeEstimate = RadixSortBufferTestHelper::outputAdmissionEstimate(
+      buffer, kAdmissionRows);
+  const auto mergeNeed = mergeEstimate.total;
+  EXPECT_GT(mergeNeed, directNeed);
+  EXPECT_GT(mergeNeed, 24UL << 20);
+}
+
+TEST_F(RadixSortBufferTest, outputAdmissionCoversRepresentativeShapes) {
+  constexpr vector_size_t kRows = 8;
+  const auto estimate = [&](const RowVectorPtr& input,
+                            std::vector<column_index_t> keyChannels) {
+    auto directory = exec::test::TempDirectoryPath::create();
+    auto config = spillConfig(directory->path);
+    std::vector<CompareFlags> flags(
+        keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
+    RadixSortBuffer buffer(
+        std::static_pointer_cast<const RowType>(input->type()),
+        keyChannels,
+        flags,
+        pool(),
+        &config,
+        /*spillMemoryThreshold=*/0,
+        /*operatorCtx=*/nullptr,
+        &nonReclaimableSection_);
+    buffer.addInput(input);
+    buffer.noMoreInput();
+    return RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, kRows);
+  };
+
+  const auto keyOnly = estimate(
+      makeRows(
+          {"key"},
+          {generateVector<int64_t>(
+              BIGINT(), kRows, [](vector_size_t row) { return row; })}),
+      {0});
+  EXPECT_GT(keyOnly.outputGrowth, 0);
+  EXPECT_EQ(keyOnly.scratchGrowth, 0);
+
+  const auto fixedMultiKey = estimate(
+      makeRows(
+          {"first", "second"},
+          {generateVector<int64_t>(
+               BIGINT(), kRows, [](vector_size_t row) { return row; }),
+           generateVector<int64_t>(
+               BIGINT(),
+               kRows,
+               [](vector_size_t row) { return kRows - row; })}),
+      {0, 1});
+  EXPECT_GT(fixedMultiKey.scratchGrowth, keyOnly.scratchGrowth);
+  const auto complex = estimate(makeEventMapPayloadRows(kRows), {9});
+  EXPECT_GT(complex.outputGrowth, fixedMultiKey.outputGrowth);
+  EXPECT_EQ(
+      complex.total,
+      complex.outputGrowth + complex.outputGrowth / 5 + complex.scratchGrowth);
+}
+
 DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureMergeFitsCanTriggerReclaimSpill) {
   auto input = makeKeyPayloadIdRows({9, 1, 8, 2, 7, 3});
   SpillContext spill(*this, input);
@@ -1669,7 +2179,9 @@ DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureOutputFitsCanTriggerReclaimSpill) {
   EXPECT_TRUE(injected);
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+  // The reclaimed memory suffix replaces its slot with one disk stream.
+  // Existing disk streams are preserved, so fan-in stays unchanged.
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   SortComparatorOracle::expectRowsMatchById(*input, *output, 1);
   SortComparatorOracle::expectSorted(
       *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
@@ -1694,8 +2206,55 @@ TEST_F(RadixSortBufferTest, splitOutputStageSpillFilesMergeAsSingleRun) {
   EXPECT_FALSE(buffer.spilledStats());
   EXPECT_EQ(buffer.testingMergeStreamCount(), 0);
 
-  spillRemainingOutputAndVerifyReplacement(
-      buffer, input, {.prefixRows = 1, .expectedSpillRuns = 1});
+  spillMemoryRunAndVerifyReplacement(
+      buffer,
+      input,
+      {.prefixRows = 1,
+       .expectedSpillRuns = 1,
+       .expectedMergeStreams = 1,
+       .expectedSpilledRows = kRows - 1});
+}
+
+TEST_F(RadixSortBufferTest, keyOnlyConcatOutputReplacement) {
+  constexpr vector_size_t kRows = 6;
+  constexpr uint64_t kMaxFileSize = 512 * 1024;
+  auto keyAndId = makeLargeStringKeyIdRows({1, 3, 5, 2, 4, 6});
+  auto input = makeRows({"key"}, {keyAndId->childAt(0)});
+  SpillContext spill(
+      *this,
+      input,
+      "none",
+      /*spillMemoryThreshold=*/0,
+      /*keyChannel=*/0,
+      kMaxFileSize);
+  auto& buffer = spill.buffer;
+  buffer.addInput(slice(*input, 0, 3));
+  buffer.spill();
+  buffer.addInput(slice(*input, 3, 3));
+  buffer.noMoreInput();
+
+  auto prefix = buffer.getOutput(2);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 2);
+  const auto filesBefore = buffer.spilledStats()->spilledFiles;
+  spillMemoryRunAndCheckStats(buffer, 2);
+  EXPECT_GT(buffer.spilledStats()->spilledFiles - filesBefore, 1);
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+
+  auto output = collect(buffer, 2, prefix);
+  ASSERT_EQ(output->size(), kRows);
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
+  const auto* inputKeys =
+      input->childAt(0)->asUnchecked<SimpleVector<StringView>>();
+  const auto* outputKeys =
+      output->childAt(0)->asUnchecked<SimpleVector<StringView>>();
+  constexpr std::array<vector_size_t, kRows> expectedRows{0, 3, 1, 4, 2, 5};
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    EXPECT_EQ(
+        outputKeys->valueAt(row).getString(),
+        inputKeys->valueAt(expectedRows[row]).getString());
+  }
 }
 
 TEST_F(RadixSortBufferTest, outputStageSpillReplacesMultiStreamMerge) {
@@ -1727,10 +2286,133 @@ TEST_F(RadixSortBufferTest, outputStageSpillReplacesMultiStreamMerge) {
   EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
   EXPECT_EQ(buffer.testingMergeStreamCount(), kInputSpillRuns + 1);
 
-  spillRemainingOutputAndVerifyReplacement(
+  spillMemoryRunAndVerifyReplacement(
       buffer,
       input,
-      {.prefixRows = 3, .expectedSpillRuns = kInputSpillRuns + 1});
+      {.prefixRows = 3,
+       .expectedSpillRuns = kInputSpillRuns + 1,
+       .expectedMergeStreams = kInputSpillRuns + 1,
+       .expectedSpilledRows = 1});
+}
+
+TEST_F(RadixSortBufferTest, outputStageSpillUsesMemoryCursor) {
+  struct TestCase {
+    const char* name;
+    std::vector<std::optional<int64_t>> diskKeys;
+    std::vector<std::optional<int64_t>> memoryKeys;
+    vector_size_t prefixRows;
+    uint64_t expectedMemoryPosition;
+  };
+
+  for (const auto& test : std::vector<TestCase>{
+           {"memory exhausted", {10, 11, 12}, {1, 2, 3}, 3, 3},
+           {"memory keys last", {1, 2, 3}, {10, 11, 12}, 2, 0},
+           {"interleaved keys", {1, 3, 5}, {2, 4, 6}, 3, 1},
+       }) {
+    SCOPED_TRACE(test.name);
+    std::vector<std::optional<int64_t>> keys = test.diskKeys;
+    keys.insert(keys.end(), test.memoryKeys.begin(), test.memoryKeys.end());
+    auto input = makeKeyPayloadIdRows(keys);
+    SpillContext spill(*this, input);
+    auto& buffer = spill.buffer;
+    buffer.addInput(slice(*input, 0, test.diskKeys.size()));
+    buffer.spill();
+    buffer.addInput(
+        slice(*input, test.diskKeys.size(), test.memoryKeys.size()));
+    buffer.noMoreInput();
+
+    ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
+    auto prefix = buffer.getOutput(test.prefixRows);
+    ASSERT_NE(prefix, nullptr);
+    ASSERT_EQ(prefix->size(), test.prefixRows);
+    const auto statsBefore = *buffer.spilledStats();
+    const auto readStatsBefore = buffer.spillReadStats();
+    const auto remainingMemoryRows =
+        test.memoryKeys.size() - test.expectedMemoryPosition;
+
+    if (remainingMemoryRows == 0) {
+      EXPECT_FALSE(buffer.canReclaim());
+      buffer.spill();
+      EXPECT_EQ(*buffer.spilledStats(), statsBefore);
+      EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
+      expectSpillReadStatsEqual(readStatsBefore, buffer.spillReadStats());
+    } else {
+      spillMemoryRunAndCheckStats(buffer, remainingMemoryRows);
+      ASSERT_TRUE(buffer.spilledStats());
+      EXPECT_EQ(buffer.spilledStats()->spillRuns, statsBefore.spillRuns + 1);
+      EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+      // Constructing the replacement stream eagerly loads its first block,
+      // so aggregate read counters can legitimately increase here.
+      expectSpillReadStatsNotDecreased(
+          readStatsBefore, buffer.spillReadStats());
+    }
+
+    collectAndVerify(buffer, input, 2, 2, 0, 0, prefix);
+    ASSERT_TRUE(buffer.spilledStats());
+    EXPECT_LE(buffer.spilledStats()->spilledRows, input->size());
+  }
+}
+
+TEST_F(RadixSortBufferTest, unknownColumnsSurviveMixedOutputReclaim) {
+  constexpr vector_size_t kRows = 6;
+  auto unknownKey = BaseVector::createNullConstant(UNKNOWN(), kRows, pool());
+  auto unknownPayload =
+      BaseVector::createNullConstant(UNKNOWN(), kRows, pool());
+  auto input = makeRows(
+      {"unknown_key", "key", "unknown_payload", "id"},
+      {unknownKey,
+       makeVector<int64_t>(BIGINT(), {1, 3, 5, 2, 4, 6}),
+       unknownPayload,
+       makeVector<int64_t>(BIGINT(), {0, 1, 2, 3, 4, 5})});
+  auto directory = exec::test::TempDirectoryPath::create();
+  auto config = spillConfig(directory->path);
+  const std::vector<column_index_t> keyChannels{0, 1};
+  const std::vector<CompareFlags> keyFlags{
+      SortComparatorOracle::makeSortFlags(true, true),
+      SortComparatorOracle::makeSortFlags(true, true)};
+  RadixSortBuffer buffer(
+      std::static_pointer_cast<const RowType>(input->type()),
+      keyChannels,
+      keyFlags,
+      pool(),
+      &config);
+  buffer.addInput(slice(*input, 0, 3));
+  buffer.spill();
+  buffer.addInput(slice(*input, 3, 3));
+  buffer.noMoreInput();
+
+  auto prefix = buffer.getOutput(2);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 2);
+  spillMemoryRunAndCheckStats(buffer, 2);
+
+  auto output = collect(buffer, 2, prefix);
+  SortComparatorOracle::expectRowsMatchById(*input, *output, 3);
+  SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
+  for (const auto channel : {0, 2}) {
+    for (vector_size_t row = 0; row < output->size(); ++row) {
+      EXPECT_TRUE(output->childAt(channel)->isNullAt(row));
+    }
+  }
+}
+
+TEST_F(RadixSortBufferTest, diskOnlyMergeIsNotReclaimable) {
+  auto input = makeKeyPayloadIdRows({1, 3, 5, 2, 4, 6});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{3, true}, {3, true}});
+  buffer.noMoreInput();
+
+  ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
+  ASSERT_TRUE(buffer.spilledStats());
+  const auto statsBefore = *buffer.spilledStats();
+  const auto readStatsBefore = buffer.spillReadStats();
+  EXPECT_FALSE(buffer.canReclaim());
+  buffer.spill();
+  EXPECT_EQ(*buffer.spilledStats(), statsBefore);
+  expectSpillReadStatsEqual(readStatsBefore, buffer.spillReadStats());
+  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+  collectAndVerify(buffer, input, 2, 2);
 }
 
 TEST_F(RadixSortBufferTest, outputStageSpillPreservesSuffixKeys) {
@@ -1751,7 +2433,7 @@ TEST_F(RadixSortBufferTest, outputStageSpillPreservesSuffixKeys) {
   ASSERT_EQ(prefix->size(), 1);
   ASSERT_TRUE(buffer.spilledStats());
   const auto spillWritesBefore = buffer.spilledStats()->spillWrites;
-  spillRemainingOutputAndCheckStats(buffer, kRows - prefix->size());
+  spillMemoryRunAndCheckStats(buffer, kRowsPerRun - 1);
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_GT(buffer.spilledStats()->spillWrites - spillWritesBefore, 1);
 
@@ -1794,7 +2476,7 @@ TEST_F(RadixSortBufferTest, outputStageSpillPreservesSuffixPayload) {
   ASSERT_EQ(prefix->size(), 1);
   ASSERT_TRUE(buffer.spilledStats());
   const auto spillWritesBefore = buffer.spilledStats()->spillWrites;
-  spillRemainingOutputAndCheckStats(buffer, kRows - prefix->size());
+  spillMemoryRunAndCheckStats(buffer, kRowsPerRun - 1);
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_GT(buffer.spilledStats()->spillWrites - spillWritesBefore, 1);
 
@@ -1806,6 +2488,59 @@ TEST_F(RadixSortBufferTest, outputStageSpillPreservesSuffixPayload) {
       /*keyChannel=*/0,
       /*idBase=*/0,
       prefix);
+}
+
+TEST_F(RadixSortBufferTest, returnedOutputSurvivesMemoryStreamReplacement) {
+  constexpr vector_size_t kRows = 9;
+  std::vector<std::optional<int64_t>> keys{1, 4, 7, 2, 5, 8, 3, 6, 9};
+  std::vector<std::optional<std::string>> payloads;
+  payloads.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    payloads.push_back(
+        fmt::format("payload_{:02d}_", row) +
+        std::string(96 + row, static_cast<char>('a' + row)));
+  }
+  auto input = makeKeyPayloadIdRows(keys, payloads);
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{3, true}, {3, true}, {3, false}});
+  buffer.noMoreInput();
+
+  auto heldOutput = buffer.getOutput(4);
+  ASSERT_NE(heldOutput, nullptr);
+  auto expectedHeldOutput = slice(*heldOutput, 0, heldOutput->size());
+  spillMemoryRunAndCheckStats(buffer, 2);
+  pool()->release();
+  auto churn = makeStringVector(
+      VARCHAR(),
+      generate<std::optional<std::string>>(kRows, [](vector_size_t row) {
+        return std::string(256 + row, 'x');
+      }));
+  (void)churn;
+  expectRowsEqual(*expectedHeldOutput, *heldOutput);
+
+  collectAndVerify(buffer, input, 2, 2, 0, 0, heldOutput);
+}
+
+TEST_F(
+    RadixSortBufferTest,
+    returnedComplexOutputSurvivesMemoryStreamReplacement) {
+  auto input = makeEventMapPayloadRows(12);
+  SpillContext spill(*this, input, "lz4", 0, 9);
+  auto& buffer = spill.buffer;
+  addInputRuns(buffer, input, {{4, true}, {4, true}, {4, false}});
+  buffer.noMoreInput();
+
+  auto heldOutput = buffer.getOutput(3);
+  ASSERT_NE(heldOutput, nullptr);
+  auto expectedHeldOutput = slice(*heldOutput, 0, heldOutput->size());
+  spillMemoryRunAndCheckStats(buffer, 4);
+  pool()->release();
+  auto churn = makeEventMapPayloadRows(12, "churn_");
+  (void)churn;
+  expectRowsEqual(*expectedHeldOutput, *heldOutput);
+
+  collectAndVerify(buffer, input, 2, 0, 9, 10'000, heldOutput);
 }
 
 TEST_F(RadixSortBufferTest, variableKeyHeapOffsetSpillMerge) {
@@ -2121,13 +2856,13 @@ TEST_F(RadixSortBufferTest, spillStatsCoverInputAndOutputStageMetrics) {
   ASSERT_NE(prefix, nullptr);
   const auto readStatsBeforeOutputSpill = buffer.spillReadStats();
   const auto globalStatsBeforeOutputSpill = common::globalSpillStats();
-  spillRemainingOutputAndCheckStats(buffer, input->size() - prefix->size());
+  spillMemoryRunAndCheckStats(buffer, 3);
   const auto allStats = buffer.spilledStats();
   ASSERT_TRUE(allStats);
   const auto outputStats = *allStats - *inputStageStats;
   EXPECT_EQ(allStats->spillRuns, 2);
   EXPECT_EQ(outputStats.spillRuns, 1);
-  EXPECT_EQ(outputStats.spilledRows, input->size() - prefix->size());
+  EXPECT_EQ(outputStats.spilledRows, 3);
   EXPECT_GT(outputStats.spilledInputBytes, 0);
   EXPECT_EQ(outputStats.spilledPartitions, 0);
   EXPECT_EQ(outputStats.spillFillTimeUs, 0);
@@ -2362,7 +3097,7 @@ TEST_F(RadixSortBufferTest, outputStageSpillAfterPartialOutput) {
 TEST_F(RadixSortBufferTest, outputStageSpillAfterInputSpill) {
   auto input = makeKeyPayloadIdRows({9, 1, 8, 2, 7, 3, 6, 4, 5});
   runSpillPlanAndVerify(
-      input, {{3, true}, {3, true}, {3, false}}, 2, 2, 0, 0, "none", 4);
+      input, {{3, true}, {3, true}, {3, false}}, 2, 2, 0, 0, "none", 4, 2);
 }
 
 TEST_F(RadixSortBufferTest, mixedEncodingsAcrossInputAndOutputSpills) {
@@ -2392,7 +3127,7 @@ TEST_F(RadixSortBufferTest, mixedEncodingsAcrossInputAndOutputSpills) {
   auto prefix = buffer.getOutput(5);
   ASSERT_NE(prefix, nullptr);
   ASSERT_EQ(prefix->size(), 5);
-  spillRemainingOutputAndCheckStats(buffer, input->size() - prefix->size());
+  spillMemoryRunAndCheckStats(buffer, 2);
 
   collectAndVerify(buffer, expected, 3, 2, 0, 0, prefix);
   ASSERT_TRUE(buffer.spilledStats());
@@ -2460,16 +3195,17 @@ TEST_F(RadixSortBufferTest, spillWriteFailureCleansFiles) {
 
 TEST_F(
     RadixSortBufferTest,
-    outputStageSpillFailureDoesNotAdvanceSourceBlockBoundary) {
+    outputStageWriterFailurePropagatesAndCleansNewFiles) {
   constexpr vector_size_t kRowsPerRun = 15;
-  constexpr size_t kPayloadBytes = 64 * 1024;
+  constexpr size_t kPayloadBytes = 128 * 1024;
   std::vector<std::optional<int64_t>> keys;
   std::vector<std::optional<std::string>> payloads;
-  keys.reserve(2 * kRowsPerRun);
-  payloads.reserve(2 * kRowsPerRun);
-  for (vector_size_t run = 0; run < 2; ++run) {
+  keys.reserve(3 * kRowsPerRun);
+  payloads.reserve(3 * kRowsPerRun);
+  for (vector_size_t run = 0; run < 3; ++run) {
     for (vector_size_t row = 0; row < kRowsPerRun; ++row) {
-      keys.push_back(2 * row + run);
+      keys.push_back(
+          run == 2 ? 100 + row : 2 * row + static_cast<int64_t>(run));
       payloads.push_back(std::string(
           kPayloadBytes, static_cast<char>('a' + (run + row) % 26)));
     }
@@ -2478,20 +3214,20 @@ TEST_F(
   auto spillDirectory = exec::test::TempDirectoryPath::create();
   bool outputStage = false;
   uint32_t outputWrites = 0;
-  std::vector<std::filesystem::path> filesAtFailure;
-  auto config = spillConfig(spillDirectory->path, "none", [&](uint64_t) {
-    if (!outputStage) {
-      return;
-    }
-    ++outputWrites;
-    if (outputWrites == 2) {
-      for (const auto& file :
-           std::filesystem::directory_iterator(spillDirectory->path)) {
-        filesAtFailure.push_back(file.path());
-      }
-      BOLT_FAIL("injected second output spill write failure");
-    }
-  });
+  auto config = spillConfig(
+      spillDirectory->path,
+      "none",
+      [&](uint64_t) {
+        if (!outputStage) {
+          return;
+        }
+        ++outputWrites;
+        if (outputWrites == 2) {
+          BOLT_FAIL("injected second output spill write failure");
+        }
+      },
+      /*maxFileSize=*/0,
+      /*writeBufferSize=*/256 << 10);
 
   std::vector<std::filesystem::path> sourceFiles;
   {
@@ -2501,10 +3237,13 @@ TEST_F(
         {SortComparatorOracle::makeSortFlags(true, true)},
         pool(),
         &config);
-    addInputRuns(buffer, input, {{kRowsPerRun, true}, {kRowsPerRun, true}});
+    addInputRuns(
+        buffer,
+        input,
+        {{kRowsPerRun, true}, {kRowsPerRun, true}, {kRowsPerRun, false}});
     ASSERT_TRUE(buffer.spilledStats());
     EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
-    EXPECT_EQ(buffer.spilledStats()->spillWrites, 2);
+    EXPECT_GT(buffer.spilledStats()->spillWrites, 0);
     EXPECT_EQ(buffer.testingSpilledRunCount(), 2);
     for (const auto& file :
          std::filesystem::directory_iterator(spillDirectory->path)) {
@@ -2513,26 +3252,81 @@ TEST_F(
     ASSERT_EQ(sourceFiles.size(), 2);
 
     buffer.noMoreInput();
-    ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
+    ASSERT_EQ(buffer.testingMergeStreamCount(), 3);
     auto prefix = buffer.getOutput(1);
     ASSERT_NE(prefix, nullptr);
     ASSERT_EQ(prefix->size(), 1);
     EXPECT_EQ(idAt(*prefix, 0, 2), 0);
-    EXPECT_EQ(buffer.numOutputRows(), 1);
-    const auto outputTimeBeforeFailure = buffer.sortStats()->sortOutputTimeUs;
     outputStage = true;
     EXPECT_THROW(buffer.spill(), BoltException);
     EXPECT_EQ(outputWrites, 2);
-    EXPECT_EQ(buffer.numOutputRows(), 1);
-    EXPECT_EQ(buffer.sortStats()->sortOutputTimeUs, outputTimeBeforeFailure);
-    ASSERT_EQ(filesAtFailure.size(), sourceFiles.size() + 1);
+    const auto filesAfterFailure = [&]() {
+      std::vector<std::filesystem::path> paths;
+      for (const auto& file :
+           std::filesystem::directory_iterator(spillDirectory->path)) {
+        paths.push_back(file.path());
+      }
+      return paths;
+    }();
+    EXPECT_EQ(filesAfterFailure.size(), sourceFiles.size());
     for (const auto& file : sourceFiles) {
       EXPECT_TRUE(std::filesystem::exists(file));
     }
   }
 
-  for (const auto& file : filesAtFailure) {
-    EXPECT_FALSE(std::filesystem::exists(file));
+  EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
+}
+
+TEST_F(
+    RadixSortBufferTest,
+    outputStageReplacementReaderFailurePropagatesAndCleansNewFile) {
+  auto input = makeKeyPayloadIdRows({1, 3, 5, 2, 4, 6});
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  bool corruptOutputFile = false;
+  std::filesystem::path outputFile;
+  auto config = spillConfig(
+      spillDirectory->path,
+      "none",
+      [&](uint64_t) {
+        if (!corruptOutputFile || !outputFile.empty()) {
+          return;
+        }
+        for (const auto& file :
+             std::filesystem::directory_iterator(spillDirectory->path)) {
+          if (file.path().filename().string().find("-output") !=
+              std::string::npos) {
+            outputFile = file.path();
+            std::filesystem::resize_file(outputFile, 1);
+            return;
+          }
+        }
+      },
+      /*maxFileSize=*/0,
+      /*writeBufferSize=*/64);
+
+  std::vector<std::filesystem::path> diskFiles;
+  {
+    RadixSortBuffer buffer(
+        std::static_pointer_cast<const RowType>(input->type()),
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool(),
+        &config);
+    addInputRuns(buffer, input, {{3, true}, {3, false}});
+    ASSERT_TRUE(buffer.spilledStats());
+    for (const auto& file :
+         std::filesystem::directory_iterator(spillDirectory->path)) {
+      diskFiles.push_back(file.path());
+    }
+    ASSERT_EQ(diskFiles.size(), 1);
+    buffer.noMoreInput();
+    ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
+
+    corruptOutputFile = true;
+    EXPECT_THROW(buffer.spill(), BoltException);
+    EXPECT_FALSE(outputFile.empty());
+    EXPECT_FALSE(std::filesystem::exists(outputFile));
+    EXPECT_TRUE(std::filesystem::exists(diskFiles.front()));
   }
   EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
 }
@@ -2588,7 +3382,7 @@ TEST_F(RadixSortBufferTest, outputStageSpillWithoutPayload) {
   buffer.addInput(input);
   buffer.noMoreInput();
 
-  spillRemainingOutputAndCheckStats(buffer, input->size());
+  spillMemoryRunAndCheckStats(buffer, input->size());
   auto output = collect(buffer, 2);
   SortComparatorOracle::expectSorted(
       *output, {0}, {SortComparatorOracle::makeSortFlags(true, false)});
@@ -2705,7 +3499,8 @@ TEST_F(RadixSortBufferTest, mixedWrappedVectorInputWithMapPayloadSpill) {
       0,
       0,
       "zstd",
-      7);
+      7,
+      kRows - 36);
   EXPECT_GT(stats.spilledRows, kRows / 2);
   EXPECT_GT(stats.spilledFiles, 0);
   EXPECT_GT(stats.spillWrites, 0);
@@ -2840,6 +3635,20 @@ TEST_F(RadixSortBufferTest, stateStatsAndEmptyInput) {
   EXPECT_FALSE(nonEmpty.spilledStats());
   EXPECT_FALSE(nonEmpty.spillReadStats());
   EXPECT_TRUE(nonEmpty.sortStats());
+}
+
+TEST_F(RadixSortBufferTest, rejectsNonPositiveOutputBatchSize) {
+  auto input = makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {1})});
+  for (const auto maxOutputRows : {0, -1}) {
+    RadixSortBuffer buffer(
+        std::static_pointer_cast<const RowType>(input->type()),
+        {0},
+        {SortComparatorOracle::makeSortFlags(true, true)},
+        pool());
+    buffer.addInput(input);
+    buffer.noMoreInput();
+    EXPECT_THROW(buffer.getOutput(maxOutputRows), BoltException);
+  }
 }
 
 TEST_F(RadixSortBufferTest, rejectsUnsupportedOrderKeysAndPayload) {

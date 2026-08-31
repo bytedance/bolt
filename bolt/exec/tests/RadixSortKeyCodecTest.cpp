@@ -61,7 +61,11 @@ class RadixSortKeyCodecTestHelper {
         cursorScratch,
         output,
         directKeyChannels,
-        codec.decodeScratchWordsPerRowWithMask(decodedColumns, mayHaveNulls, 0),
+        codec.decodeScratchWordsPerRowWithMask(
+            decodedColumns,
+            mayHaveNulls,
+            0,
+            /*skipMaskedVariableColumns=*/true),
         0);
   }
 };

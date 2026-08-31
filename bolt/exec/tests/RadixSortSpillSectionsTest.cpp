@@ -31,6 +31,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/exec/SpillFile.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
@@ -152,6 +153,43 @@ class BoundaryTestMergeStream final : public RadixSortMergeStream {
   size_t index_{0};
   size_t safeAdvances_{0};
   size_t ordinaryAdvances_{0};
+};
+
+class TrackingStorageMergeStream final : public RadixSortMergeStream {
+ public:
+  explicit TrackingStorageMergeStream(const RadixSortRunStorage& storage)
+      : RadixSortMergeStream(storage.layout()), storage_(storage) {
+    loadCurrent();
+  }
+
+  bool hasData() const override {
+    return key_ != nullptr;
+  }
+
+  bool tryAdvance() override {
+    ++position_;
+    loadCurrent();
+    return true;
+  }
+
+  uint64_t position() const {
+    return position_;
+  }
+
+ private:
+  void loadCurrent() {
+    if (position_ == storage_.size()) {
+      key_ = nullptr;
+      payload_ = nullptr;
+      return;
+    }
+    key_ = storage_.keyDataAt(position_);
+    payload_ =
+        hasPayload_ ? RadixSortKey(storage_.layout(), key_).payload() : nullptr;
+  }
+
+  const RadixSortRunStorage& storage_;
+  uint64_t position_{0};
 };
 
 class RadixSortSpillSectionsTest : public testing::Test {
@@ -672,39 +710,45 @@ class RadixSortSpillSectionsTest : public testing::Test {
       const PayloadRowLayout* payloadLayout,
       uint64_t maxFileSize,
       uint64_t writeBufferSize = 1 << 20,
-      bool writeOneRowPerBlock = false) {
+      bool oneFilePerRow = false) {
     auto directory = exec::test::TempDirectoryPath::create();
     spillDirectories_.push_back(std::move(directory));
     folly::Synchronized<common::SpillStats> stats;
     const auto globalStatsBefore = common::globalSpillStats();
-    RadixSortSpillWriter writer(
-        spillDirectories_.back()->path + "/spill",
-        spillConfig(
-            spillDirectories_.back()->path,
-            common::CompressionKind_NONE,
-            writeBufferSize,
-            maxFileSize),
-        pool_.get(),
-        &stats);
 
     std::vector<RadixSortSpillFile> files;
-    if (writeOneRowPerBlock) {
-      const auto meta =
-          RadixSortSpillSectionMeta::create(storage.layout(), payloadLayout);
+    if (oneFilePerRow) {
+      BOLT_CHECK(
+          storage.layout().kind() == RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+      BOLT_CHECK_NULL(payloadLayout);
       for (uint64_t row = 0; row < storage.size(); ++row) {
-        const std::array rowSizes{
-            sizeForSingleRow(meta, storage.keyDataAt(row))};
-        EXPECT_EQ(
-            writer.writePresizedKeyRange(
-                storage.layout(),
-                payloadLayout,
-                storage.keyDataAt(row),
-                1,
-                rowSizes),
-            1);
+        const auto value = loadUnaligned<uint64_t>(storage.keyDataAt(row));
+        BOLT_CHECK_LE(value, std::numeric_limits<uint8_t>::max());
+        RadixSortRunStorage oneRowStorage(pool_.get(), storage.layout(), 1, 64);
+        oneRowStorage.append(fixed8Key(static_cast<uint8_t>(value)));
+        RadixSortSpillWriter rowWriter(
+            fmt::format("{}/spill-{}", spillDirectories_.back()->path, row),
+            spillConfig(
+                spillDirectories_.back()->path,
+                common::CompressionKind_NONE,
+                writeBufferSize,
+                maxFileSize),
+            pool_.get(),
+            &stats);
+        auto rowFiles = rowWriter.writeRun(oneRowStorage, nullptr);
+        BOLT_CHECK_EQ(rowFiles.size(), 1);
+        files.push_back(std::move(rowFiles.front()));
       }
-      files = writer.finish();
     } else {
+      RadixSortSpillWriter writer(
+          spillDirectories_.back()->path + "/spill",
+          spillConfig(
+              spillDirectories_.back()->path,
+              common::CompressionKind_NONE,
+              writeBufferSize,
+              maxFileSize),
+          pool_.get(),
+          &stats);
       files = writer.writeRun(storage, payloadLayout);
     }
 
@@ -1197,7 +1241,7 @@ TEST_F(
   const std::vector<std::string> keys{
       std::string("pre") + std::string(64, 'a'),
       std::string("pre") + std::string(72, 'b')};
-  const std::vector<std::string> values{
+  const std::vector<std::optional<std::string>> values{
       std::string(80, 'x'), std::string(96, 'y')};
   auto payload =
       makeRows({"payload_string"}, {makeStringVector({values[0], values[1]})});
@@ -1680,32 +1724,6 @@ TEST_F(RadixSortSpillSectionsTest, writerDoesNotFlushAtStorageBlockBoundary) {
   EXPECT_EQ(blocks[0].header.rowCount, storage.size());
   EXPECT_EQ(
       blocks[0].header.keyRecordBytes, storage.size() * keyLayout.width());
-}
-
-TEST_F(RadixSortSpillSectionsTest, writerBodyCapacityIgnoresSpillConfig) {
-  auto directory = exec::test::TempDirectoryPath::create();
-  folly::Synchronized<common::SpillStats> stats;
-  RadixSortSpillWriter smallWriter(
-      directory->path + "/small",
-      spillConfig(
-          directory->path,
-          common::CompressionKind_NONE,
-          /*writeBufferSize=*/kBlockHeaderSize + 17),
-      pool_.get(),
-      &stats);
-  EXPECT_EQ(
-      smallWriter.bodyCapacity(), kFixedWriteBufferSize - kBlockHeaderSize);
-
-  RadixSortSpillWriter defaultWriter(
-      directory->path + "/default",
-      spillConfig(
-          directory->path,
-          common::CompressionKind_NONE,
-          /*writeBufferSize=*/0),
-      pool_.get(),
-      &stats);
-  EXPECT_EQ(
-      defaultWriter.bodyCapacity(), kFixedWriteBufferSize - kBlockHeaderSize);
 }
 
 TEST_F(RadixSortSpillSectionsTest, writerIgnoresSmallWriteBufferSize) {
@@ -2498,31 +2516,11 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterTracksRolledFileRows) {
   EXPECT_EQ(globalDelta.spilledFiles, finalStats.spilledFiles);
 }
 
-TEST_F(RadixSortSpillSectionsTest, writerTransfersOwnershipOnlyAfterFinish) {
+TEST_F(RadixSortSpillSectionsTest, writerReturnedFilesOutliveWriter) {
   auto keyLayout =
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
   RadixSortRunStorage storage(pool_.get(), keyLayout, 4, 64);
   storage.append(std::string_view("\x00\x00\x00\x00\x00\x00\x00\x01", 8));
-
-  {
-    auto directory = exec::test::TempDirectoryPath::create();
-    {
-      folly::Synchronized<common::SpillStats> stats;
-      RadixSortSpillWriter writer(
-          directory->path + "/spill",
-          spillConfig(directory->path, common::CompressionKind_NONE, 1 << 20),
-          pool_.get(),
-          &stats);
-      const auto meta = RadixSortSpillSectionMeta::create(keyLayout, nullptr);
-      const std::array rowSizes{sizeForSingleRow(meta, storage.keyDataAt(0))};
-      EXPECT_EQ(
-          writer.writePresizedKeyRange(
-              keyLayout, nullptr, storage.keyDataAt(0), 1, rowSizes),
-          1);
-      EXPECT_EQ(directoryFiles(directory->path).size(), 1);
-    }
-    EXPECT_TRUE(directoryFiles(directory->path).empty());
-  }
 
   {
     auto directory = exec::test::TempDirectoryPath::create();
@@ -2939,19 +2937,18 @@ TEST_F(RadixSortSpillSectionsTest, mixedInlineAndHeapVariableBlockRoundTrip) {
   }
 }
 
-TEST_F(RadixSortSpillSectionsTest, readerReusesGrowsAndDropsBuffers) {
+TEST_F(RadixSortSpillSectionsTest, readerReusesBuffersAcrossBlocks) {
   auto payloadLayout = PayloadRowLayout::create(ROW({"payload"}, {VARCHAR()}));
   auto keyLayout = RadixSortKeyLayout::fromKind(
       RadixSortKeyLayoutKind::kKeyWithPayloadFixed16);
   RadixSortRunStorage storage(
-      pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 512 << 10);
-  auto payload = makeRows(
-      {"payload"},
-      {makeStringVector(
-          {std::string(64 << 10, 'a'),
-           std::string(32 << 10, 'b'),
-           std::string(192 << 10, 'c'),
-           std::string((1 << 20) + 257, 'd')})});
+      pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 2 << 20);
+  const std::vector<std::optional<std::string>> values{
+      std::string(700 << 10, 'a'),
+      std::string(400 << 10, 'b'),
+      std::string(800 << 10, 'c'),
+      std::string((1 << 20) + 257, 'd')};
+  auto payload = makeRows({"payload"}, {makeStringVector(values)});
   PayloadRowBatch payloadBatch;
   PayloadRowWriter{}.append(*payload, storage, payloadBatch);
   for (vector_size_t row = 0; row < payload->size(); ++row) {
@@ -2961,9 +2958,9 @@ TEST_F(RadixSortSpillSectionsTest, readerReusesGrowsAndDropsBuffers) {
       storage,
       payloadLayout.get(),
       std::numeric_limits<uint64_t>::max(),
-      512 << 10,
-      true);
+      1 << 20);
   ASSERT_EQ(files.size(), 1);
+  ASSERT_EQ(readUncompressedBlocks(files.front()).size(), values.size());
 
   RadixSortSpillReadBufferCache bufferCache;
   RadixSortSpillReader reader(
@@ -2977,7 +2974,7 @@ TEST_F(RadixSortSpillSectionsTest, readerReusesGrowsAndDropsBuffers) {
   ASSERT_TRUE(reader.nextBatch(keys));
   EXPECT_EQ(
       readStringPayloads(*payloadLayout, payloadsFromKeys(keyLayout, keys)),
-      std::vector<std::string>{std::string(64 << 10, 'a')});
+      std::vector<std::string>{*values[0]});
 
   const auto statsBeforeReuse = pool_->stats();
   ASSERT_TRUE(reader.nextBatch(keys));
@@ -2986,7 +2983,7 @@ TEST_F(RadixSortSpillSectionsTest, readerReusesGrowsAndDropsBuffers) {
   EXPECT_EQ(statsAfterReuse.numFrees, statsBeforeReuse.numFrees);
   EXPECT_EQ(
       readStringPayloads(*payloadLayout, payloadsFromKeys(keyLayout, keys)),
-      std::vector<std::string>{std::string(32 << 10, 'b')});
+      std::vector<std::string>{*values[1]});
 
   const auto statsBeforeGrowth = pool_->stats();
   ASSERT_TRUE(reader.nextBatch(keys));
@@ -2995,8 +2992,7 @@ TEST_F(RadixSortSpillSectionsTest, readerReusesGrowsAndDropsBuffers) {
   EXPECT_EQ(statsAfterGrowth.numFrees, statsBeforeGrowth.numFrees + 1);
   EXPECT_EQ(
       readStringPayloads(*payloadLayout, payloadsFromKeys(keyLayout, keys)),
-      std::vector<std::string>{std::string(192 << 10, 'c')});
-  EXPECT_EQ(bufferCache.serializedBuffer, nullptr);
+      std::vector<std::string>{*values[2]});
 
   const auto statsBeforeOversized = pool_->stats();
   ASSERT_TRUE(reader.nextBatch(keys));
@@ -3005,29 +3001,95 @@ TEST_F(RadixSortSpillSectionsTest, readerReusesGrowsAndDropsBuffers) {
   EXPECT_EQ(statsAfterOversized.numFrees, statsBeforeOversized.numFrees + 1);
   EXPECT_EQ(
       readStringPayloads(*payloadLayout, payloadsFromKeys(keyLayout, keys)),
-      std::vector<std::string>{std::string((1 << 20) + 257, 'd')});
-  const auto statsBeforeEof = pool_->stats();
+      std::vector<std::string>{*values[3]});
   EXPECT_FALSE(reader.nextBatch(keys));
-  EXPECT_GT(pool_->stats().numFrees, statsBeforeEof.numFrees);
   EXPECT_EQ(bufferCache.serializedBuffer, nullptr);
 }
 
-TEST_F(RadixSortSpillSectionsTest, presizedWriterDeepCopiesBeforeReturning) {
-  const std::string expectedKey(96, 'k');
-  const std::string expectedPayload(80, 'p');
+TEST_F(RadixSortSpillSectionsTest, readerCacheReusesAcrossFiles) {
+  auto payloadLayout = PayloadRowLayout::create(ROW({"payload"}, {VARCHAR()}));
+  auto keyLayout = RadixSortKeyLayout::fromKind(
+      RadixSortKeyLayoutKind::kKeyWithPayloadFixed16);
+  RadixSortSpillReadBufferCache bufferCache;
+  const auto runReader = [&](const std::string& value,
+                             uint8_t key,
+                             Buffer* expectedReusableBuffer = nullptr) {
+    RadixSortRunStorage storage(
+        pool_.get(), keyLayout, 1, 64, payloadLayout, 1, value.size());
+    auto payload = makeRows({"payload"}, {makeStringVector({value})});
+    PayloadRowBatch payloadBatch;
+    PayloadRowWriter{}.append(*payload, storage, payloadBatch);
+    storage.append(fixed8Key(key), payloadBatch.rowAt(0));
+    auto files = spillRunFiles(
+        storage,
+        payloadLayout.get(),
+        std::numeric_limits<uint64_t>::max(),
+        512 << 10);
+    ASSERT_EQ(files.size(), 1);
+    if (expectedReusableBuffer != nullptr) {
+      ASSERT_EQ(bufferCache.serializedBuffer.get(), expectedReusableBuffer);
+    }
+    RadixSortSpillReader reader(
+        files.front(),
+        RadixSortSpillSectionMeta::create(keyLayout, payloadLayout.get()),
+        payloadLayout.get(),
+        pool_.get(),
+        false,
+        &bufferCache);
+    std::vector<const char*> keys;
+    ASSERT_TRUE(reader.nextBatch(keys));
+    EXPECT_EQ(bufferCache.serializedBuffer, nullptr);
+    EXPECT_EQ(
+        readStringPayloads(*payloadLayout, payloadsFromKeys(keyLayout, keys)),
+        std::vector<std::string>{value});
+    EXPECT_FALSE(reader.nextBatch(keys));
+    if (expectedReusableBuffer != nullptr) {
+      ASSERT_NE(bufferCache.serializedBuffer, nullptr);
+      EXPECT_EQ(bufferCache.serializedBuffer.get(), expectedReusableBuffer);
+    }
+  };
+
+  runReader(std::string(64 << 10, 'a'), 1);
+  ASSERT_NE(bufferCache.serializedBuffer, nullptr);
+  auto* const firstBuffer = bufferCache.serializedBuffer.get();
+  const auto firstCapacity = bufferCache.serializedBuffer->capacity();
+  runReader(std::string(32 << 10, 'b'), 2, firstBuffer);
+  ASSERT_NE(bufferCache.serializedBuffer, nullptr);
+  EXPECT_EQ(bufferCache.serializedBuffer.get(), firstBuffer);
+  EXPECT_EQ(bufferCache.serializedBuffer->capacity(), firstCapacity);
+
+  runReader(std::string(192 << 10, 'c'), 3);
+  ASSERT_NE(bufferCache.serializedBuffer, nullptr);
+  EXPECT_GT(bufferCache.serializedBuffer->capacity(), firstCapacity);
+
+  const auto statsBeforeOversized = pool_->stats();
+  runReader(std::string((1 << 20) + 257, 'd'), 4);
+  EXPECT_GT(pool_->stats().numFrees, statsBeforeOversized.numFrees);
+  EXPECT_EQ(bufferCache.serializedBuffer, nullptr);
+}
+
+TEST_F(RadixSortSpillSectionsTest, writerWritesOnlyRequestedStorageSuffix) {
   auto payloadLayout = PayloadRowLayout::create(ROW({"payload"}, {VARCHAR()}));
   auto keyLayout = RadixSortKeyLayout::fromKind(
       RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
   RadixSortRunStorage storage(
       pool_.get(), keyLayout, 4, 64, payloadLayout, 4, 1024);
-  auto payload =
-      makeRows({"payload"}, {makeStringVector({std::string(expectedPayload)})});
+  auto payload = makeRows(
+      {"payload"},
+      {makeStringVector(
+          {std::string(80, 'a'),
+           std::string(81, 'b'),
+           std::string(82, 'c'),
+           std::string(83, 'd')})});
   PayloadRowBatch payloadBatch;
   PayloadRowWriter{}.append(*payload, storage, payloadBatch);
-  storage.append(expectedKey, payloadBatch.rowAt(0));
+  for (uint8_t row = 0; row < 4; ++row) {
+    storage.append(
+        std::string(48 + row, static_cast<char>('k' + row)),
+        payloadBatch.rowAt(row));
+  }
 
   auto directory = exec::test::TempDirectoryPath::create();
-  spillDirectories_.push_back(directory);
   folly::Synchronized<common::SpillStats> stats;
   RadixSortSpillWriter writer(
       directory->path + "/spill",
@@ -3035,41 +3097,50 @@ TEST_F(RadixSortSpillSectionsTest, presizedWriterDeepCopiesBeforeReturning) {
           directory->path, common::CompressionKind_NONE, kFixedWriteBufferSize),
       pool_.get(),
       &stats);
-  const auto meta =
-      RadixSortSpillSectionMeta::create(keyLayout, payloadLayout.get());
-  const auto rowSize = sizeForSingleRow(meta, storage.keyDataAt(0));
-  const std::array rowSizes{rowSize};
-  EXPECT_EQ(
-      writer.writePresizedKeyRange(
-          keyLayout, payloadLayout.get(), storage.keyDataAt(0), 1, rowSizes),
-      1);
-
-  auto key = storage.keyAt(0);
-  auto* keyHeap = key.heapKeyData();
-  auto* payloadFixed = key.payload();
-  auto payloadValue = loadUnaligned<StringView>(
-      payloadFixed + payloadLayout->columns()[0].offset);
-  ASSERT_FALSE(payloadValue.isInline());
-  std::memset(keyHeap, 'x', key.heapSize());
-  std::memset(const_cast<char*>(payloadValue.data()), 'y', payloadValue.size());
-  std::memset(storage.keyDataAt(0), 0, keyLayout.width());
-  std::memset(payloadFixed, 0, payloadLayout->rowWidth());
-
-  auto files = writer.finish();
+  auto files = writer.writeRun(storage, payloadLayout.get(), 2);
   ASSERT_EQ(files.size(), 1);
+  EXPECT_EQ(files.front().rowCount, 2);
+
   RadixSortSpillReader reader(
-      files.front(), meta, payloadLayout.get(), pool_.get(), false);
+      files.front(),
+      RadixSortSpillSectionMeta::create(keyLayout, payloadLayout.get()),
+      payloadLayout.get(),
+      pool_.get(),
+      false);
   std::vector<const char*> keys;
   ASSERT_TRUE(reader.nextBatch(keys));
-  ASSERT_EQ(keys.size(), 1);
-  const auto restored = RadixSortKey(keyLayout, keys.front());
-  std::string restoredKey(
-      std::string_view(keys.front(), keyLayout.heapKeyOffset()));
-  restoredKey.append(restored.heapKey());
-  EXPECT_EQ(restoredKey, expectedKey);
+  ASSERT_EQ(keys.size(), 2);
+  for (vector_size_t row = 0; row < keys.size(); ++row) {
+    EXPECT_EQ(
+        RadixSortKey(keyLayout, keys[row])
+            .compare(RadixSortKey(keyLayout, storage.keyDataAt(row + 2))),
+        0);
+  }
   EXPECT_EQ(
-      readStringPayloads(*payloadLayout, {restored.payload()}),
-      std::vector<std::string>{expectedPayload});
+      readStringPayloads(*payloadLayout, payloadsFromKeys(keyLayout, keys)),
+      (std::vector<std::string>{std::string(82, 'c'), std::string(83, 'd')}));
+  EXPECT_FALSE(reader.nextBatch(keys));
+
+  const auto statsBeforeEmptySuffix = stats.copy();
+  RadixSortSpillWriter emptyWriter(
+      directory->path + "/empty",
+      spillConfig(
+          directory->path, common::CompressionKind_NONE, kFixedWriteBufferSize),
+      pool_.get(),
+      &stats);
+  EXPECT_TRUE(emptyWriter.writeRun(storage, payloadLayout.get(), storage.size())
+                  .empty());
+  EXPECT_EQ(stats.copy(), statsBeforeEmptySuffix);
+
+  RadixSortSpillWriter invalidWriter(
+      directory->path + "/invalid",
+      spillConfig(
+          directory->path, common::CompressionKind_NONE, kFixedWriteBufferSize),
+      pool_.get(),
+      &stats);
+  EXPECT_THROW(
+      invalidWriter.writeRun(storage, payloadLayout.get(), storage.size() + 1),
+      BoltException);
 }
 
 TEST_F(RadixSortSpillSectionsTest, mergerFlushesBoundarySegmentsForAllShapes) {
@@ -3170,41 +3241,259 @@ TEST_F(RadixSortSpillSectionsTest, mergerFlushesBoundarySegmentsForAllShapes) {
       {3});
 }
 
-TEST_F(
-    RadixSortSpillSectionsTest,
-    mergerCallbackThrowLeavesBoundaryRowUnadvanced) {
+TEST_F(RadixSortSpillSectionsTest, mergerRejectsStreamIndexSentinelCollision) {
   const auto layout =
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
-  auto stream = std::make_unique<BoundaryTestMergeStream>(
-      layout, std::vector<uint8_t>{1, 2}, std::vector<size_t>{0, 1});
-  auto* streamPtr = stream.get();
+  constexpr size_t kMaxStreams = std::numeric_limits<uint16_t>::max();
+  {
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams(kMaxStreams);
+    EXPECT_NO_THROW(RadixSortMerger(layout, std::move(streams)));
+  }
+  {
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams(kMaxStreams + 1);
+    BOLT_ASSERT_THROW(
+        RadixSortMerger(layout, std::move(streams)),
+        "Radix sort merger supports at most 65535 streams");
+  }
+}
+
+TEST_F(RadixSortSpillSectionsTest, mergerRejectsInvalidMemoryOperations) {
+  const auto layout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  const auto makeMergerWithoutMemory = [&]() {
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+    streams.push_back(std::make_unique<BoundaryTestMergeStream>(
+        layout, std::vector<uint8_t>{1}, std::vector<size_t>{}));
+    return std::make_unique<RadixSortMerger>(layout, std::move(streams));
+  };
+  {
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+    streams.push_back(std::make_unique<BoundaryTestMergeStream>(
+        layout, std::vector<uint8_t>{1}, std::vector<size_t>{}));
+    EXPECT_THROW(RadixSortMerger(layout, std::move(streams), 1), BoltException);
+  }
+  {
+    auto merger = makeMergerWithoutMemory();
+    EXPECT_THROW(merger->removeMemory(), BoltException);
+  }
+  {
+    auto merger = makeMergerWithoutMemory();
+    EXPECT_THROW(
+        merger->replaceMemory(
+            {},
+            RadixSortSpillSectionMeta::create(layout, nullptr),
+            nullptr,
+            pool_.get(),
+            false),
+        BoltException);
+  }
+  {
+    RadixSortRunStorage storage(pool_.get(), layout, 1, 64);
+    storage.append(fixed8Key(1));
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+    streams.push_back(std::make_unique<RadixSortMemoryRunMergeStream>(storage));
+    RadixSortMerger merger(layout, std::move(streams), 0);
+    EXPECT_THROW(merger.removeMemory(), BoltException);
+  }
+  {
+    RadixSortRunStorage storage(pool_.get(), layout, 1, 64);
+    storage.append(fixed8Key(1));
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+    streams.push_back(std::make_unique<RadixSortMemoryRunMergeStream>(storage));
+    RadixSortMerger merger(layout, std::move(streams), 0);
+    EXPECT_THROW(
+        merger.replaceMemory(
+            {},
+            RadixSortSpillSectionMeta::create(layout, nullptr),
+            nullptr,
+            pool_.get(),
+            false),
+        BoltException);
+  }
+}
+
+TEST_F(RadixSortSpillSectionsTest, mergerReplacesMemoryAndResetsSelection) {
+  const auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage memoryStorage(pool_.get(), keyLayout, 1, 64);
+  for (const auto key : {uint8_t{2}, uint8_t{5}, uint8_t{8}}) {
+    memoryStorage.append(fixed8Key(key));
+  }
+
+  RadixSortRunStorage leftStorage(pool_.get(), keyLayout, 1, 64);
+  RadixSortRunStorage rightStorage(pool_.get(), keyLayout, 1, 64);
+  for (const auto key : {uint8_t{1}, uint8_t{4}, uint8_t{7}}) {
+    leftStorage.append(fixed8Key(key));
+  }
+  for (const auto key : {uint8_t{3}, uint8_t{6}, uint8_t{9}}) {
+    rightStorage.append(fixed8Key(key));
+  }
+
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
-  streams.push_back(std::move(stream));
-  RadixSortMerger merger(layout, std::move(streams));
-  std::array<const char*, 2> keys{};
-  size_t callbacks = 0;
-  EXPECT_THROW(
-      merger.collectRows(
-          2,
-          keys.data(),
-          nullptr,
-          [&](vector_size_t size) {
-            EXPECT_EQ(size, 1);
-            if (++callbacks == 2) {
-              BOLT_FAIL("injected flush failure");
-            }
-          }),
-      BoltException);
-  EXPECT_EQ(callbacks, 2);
-  EXPECT_EQ(streamPtr->index(), 1);
-  EXPECT_EQ(streamPtr->safeAdvances(), 1);
-  EXPECT_EQ(static_cast<uint8_t>(streamPtr->key()[layout.width() - 1]), 2);
+  auto left = std::make_unique<TrackingStorageMergeStream>(leftStorage);
+  auto* leftPtr = left.get();
+  streams.push_back(std::move(left));
+  streams.push_back(
+      std::make_unique<RadixSortMemoryRunMergeStream>(memoryStorage));
+  auto right = std::make_unique<TrackingStorageMergeStream>(rightStorage);
+  auto* rightPtr = right.get();
+  streams.push_back(std::move(right));
+  RadixSortMerger merger(keyLayout, std::move(streams), 1);
+
+  std::array<const char*, 9> keyPointers{};
+  vector_size_t outputRows = 0;
+  auto collect = [&](vector_size_t count) {
+    return merger.collectRows(
+        count, keyPointers.data(), nullptr, [&](vector_size_t size) {
+          for (vector_size_t row = 0; row < size; ++row) {
+            ASSERT_LT(outputRows, 9);
+            EXPECT_EQ(
+                loadUnaligned<uint64_t>(keyPointers[row]), outputRows + 1);
+            ++outputRows;
+          }
+        });
+  };
+
+  EXPECT_EQ(collect(4), 4);
+  EXPECT_EQ(outputRows, 4);
+  ASSERT_TRUE(merger.memoryPosition());
+  EXPECT_EQ(*merger.memoryPosition(), 1);
+  const auto leftPosition = leftPtr->position();
+  const auto rightPosition = rightPtr->position();
+
+  RadixSortRunStorage suffixStorage(pool_.get(), keyLayout, 1, 64);
+  for (const auto key : {uint8_t{5}, uint8_t{8}}) {
+    suffixStorage.append(fixed8Key(key));
+  }
+  auto suffixFiles = spillRunFiles(
+      suffixStorage,
+      nullptr,
+      /*maxFileSize=*/1,
+      kBlockHeaderSize + keyLayout.width(),
+      /*oneFilePerRow=*/true);
+  ASSERT_GT(suffixFiles.size(), 1);
+  merger.replaceMemory(
+      RadixSortSpillRun{std::move(suffixFiles)},
+      RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+      nullptr,
+      pool_.get(),
+      false);
+
+  EXPECT_FALSE(merger.memoryPosition());
+  EXPECT_EQ(merger.testingNumStreams(), 3);
+  EXPECT_EQ(leftPtr->position(), leftPosition);
+  EXPECT_EQ(rightPtr->position(), rightPosition);
+  EXPECT_EQ(collect(5), 5);
+  EXPECT_EQ(outputRows, 9);
+}
+
+TEST_F(RadixSortSpillSectionsTest, mergerRemovesExhaustedMemoryStream) {
+  const auto keyLayout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  RadixSortRunStorage leftStorage(pool_.get(), keyLayout, 1, 64);
+  RadixSortRunStorage rightStorage(pool_.get(), keyLayout, 1, 64);
+  RadixSortRunStorage memoryStorage(pool_.get(), keyLayout, 1, 64);
+  for (const auto key : {uint8_t{3}, uint8_t{5}}) {
+    leftStorage.append(fixed8Key(key));
+  }
+  for (const auto key : {uint8_t{4}, uint8_t{6}}) {
+    rightStorage.append(fixed8Key(key));
+  }
+  for (const auto key : {uint8_t{1}, uint8_t{2}}) {
+    memoryStorage.append(fixed8Key(key));
+  }
+  auto leftFiles = spillRunFiles(leftStorage, nullptr, 1 << 20);
+  auto rightFiles = spillRunFiles(rightStorage, nullptr, 1 << 20);
+  ASSERT_EQ(leftFiles.size(), 1);
+  ASSERT_EQ(rightFiles.size(), 1);
+  std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+  streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
+      leftFiles.front(),
+      RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+      nullptr,
+      pool_.get(),
+      false));
+  streams.push_back(
+      std::make_unique<RadixSortMemoryRunMergeStream>(memoryStorage));
+  streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
+      rightFiles.front(),
+      RadixSortSpillSectionMeta::create(keyLayout, nullptr),
+      nullptr,
+      pool_.get(),
+      false));
+  RadixSortMerger merger(keyLayout, std::move(streams), 1);
+
+  std::array<const char*, 6> keyPointers{};
+  vector_size_t outputRows = 0;
+  const auto collect = [&](vector_size_t count) {
+    return merger.collectRows(
+        count, keyPointers.data(), nullptr, [&](vector_size_t size) {
+          for (vector_size_t row = 0; row < size; ++row) {
+            ASSERT_LT(outputRows, 6);
+            EXPECT_EQ(
+                loadUnaligned<uint64_t>(keyPointers[row]), outputRows + 1);
+            ++outputRows;
+          }
+        });
+  };
+
+  EXPECT_EQ(collect(2), 2);
+  ASSERT_TRUE(merger.memoryPosition());
+  EXPECT_EQ(*merger.memoryPosition(), memoryStorage.size());
+
+  merger.removeMemory();
+  EXPECT_FALSE(merger.memoryPosition());
+  EXPECT_EQ(merger.testingNumStreams(), 2);
+  EXPECT_EQ(collect(4), 4);
+  EXPECT_EQ(outputRows, 6);
+}
+
+TEST_F(
+    RadixSortSpillSectionsTest,
+    mergerCallbackFailurePropagatesForAllShapes) {
+  const auto layout =
+      RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
+  const auto runCase = [&](size_t numStreams) {
+    SCOPED_TRACE(fmt::format("{} stream(s)", numStreams));
+    std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+    auto boundaryStream = std::make_unique<BoundaryTestMergeStream>(
+        layout, std::vector<uint8_t>{1, 2}, std::vector<size_t>{0, 1});
+    streams.push_back(std::move(boundaryStream));
+    for (size_t stream = 1; stream < numStreams; ++stream) {
+      streams.push_back(std::make_unique<BoundaryTestMergeStream>(
+          layout,
+          std::vector<uint8_t>{static_cast<uint8_t>(10 + stream)},
+          std::vector<size_t>{}));
+    }
+
+    RadixSortMerger merger(layout, std::move(streams));
+    std::array<const char*, 2> keys{};
+    size_t callbacks = 0;
+    EXPECT_THROW(
+        merger.collectRows(
+            2,
+            keys.data(),
+            nullptr,
+            [&](vector_size_t size) {
+              EXPECT_EQ(size, 1);
+              if (++callbacks == 2) {
+                BOLT_FAIL("injected flush failure");
+              }
+            }),
+        BoltException);
+  };
+
+  // Exercise all three collectRows dispatches: single-stream, two-way and
+  // loser-tree merge.
+  for (const auto numStreams : {1, 2, 3}) {
+    runCase(numStreams);
+  }
 }
 
 TEST_F(RadixSortSpillSectionsTest, emptyMergerRejectsNonEmptyCollection) {
   const auto layout =
       RadixSortKeyLayout::fromKind(RadixSortKeyLayoutKind::kKeyOnlyFixed8);
-  RadixSortMerger merger(layout, {});
+  RadixSortMerger merger(layout, {}, std::nullopt);
   std::array<const char*, 1> keys{};
   bool flushed = false;
   EXPECT_EQ(
@@ -3348,7 +3637,7 @@ TEST_F(
       nullptr,
       /*maxFileSize=*/1,
       writeBufferSize,
-      /*writeOneRowPerBlock=*/true);
+      /*oneFilePerRow=*/true);
   ASSERT_EQ(files.size(), 3);
   std::vector<std::string> paths;
   for (const auto& file : files) {
@@ -3391,7 +3680,7 @@ TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamReadsSplitRunInOrder) {
       nullptr,
       /*maxFileSize=*/1,
       writeBufferSize,
-      /*writeOneRowPerBlock=*/true);
+      /*oneFilePerRow=*/true);
   ASSERT_GT(files.size(), 1);
   std::vector<std::string> filePaths;
   filePaths.reserve(files.size());
@@ -3443,7 +3732,7 @@ TEST_F(
       nullptr,
       /*maxFileSize=*/1,
       writeBufferSize,
-      /*writeOneRowPerBlock=*/true);
+      /*oneFilePerRow=*/true);
   ASSERT_EQ(files.size(), 3);
   std::vector<std::string> paths;
   for (const auto& file : files) {
@@ -3493,13 +3782,13 @@ TEST_F(RadixSortSpillSectionsTest, concatFileMergeStreamsMergeByLogicalRun) {
       nullptr,
       /*maxFileSize=*/1,
       writeBufferSize,
-      /*writeOneRowPerBlock=*/true);
+      /*oneFilePerRow=*/true);
   auto evenFiles = spillRunFiles(
       evenStorage,
       nullptr,
       /*maxFileSize=*/1,
       writeBufferSize,
-      /*writeOneRowPerBlock=*/true);
+      /*oneFilePerRow=*/true);
   ASSERT_GT(oddFiles.size(), 1);
   ASSERT_GT(evenFiles.size(), 1);
 
