@@ -87,8 +87,7 @@ SparkShuffleReader::SparkShuffleReader(
              shuffleReaderOptions_.rowBasedShuffleThreshold)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
   reuseBufferedInputStream_ = shuffleReaderOptions_.reuseBufferedInputStream;
-  reuseColumnBuffer_ = shuffleReaderOptions_.reuseColumnBuffer;
-  if (reuseColumnBuffer_) {
+  if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
 }

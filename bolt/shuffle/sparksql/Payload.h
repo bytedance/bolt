@@ -95,7 +95,9 @@ class ColumnBufferPool final {
         return status;
       }
     }
-    buffers_.push_back(buffer);
+    if (buffers_.size() < kMaxPooledBuffers) {
+      buffers_.push_back(buffer);
+    }
     return buffer;
   }
 
@@ -127,6 +129,7 @@ class ColumnBufferPool final {
   }
 
   std::vector<std::shared_ptr<arrow::ResizableBuffer>> buffers_;
+  static constexpr size_t kMaxPooledBuffers = 5000;
   // Indices into buffers_ that are known to be solely owned by the pool and
   // thus reusable. Refilled lazily by refillFreeList() when exhausted.
   std::vector<size_t> freeList_;

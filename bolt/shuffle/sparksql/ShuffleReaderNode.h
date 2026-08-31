@@ -151,8 +151,6 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
 
   bool reuseBufferedInputStream_ = false;
 
-  bool reuseColumnBuffer_ = false;
-
   bool finished_ = false;
 };
 
