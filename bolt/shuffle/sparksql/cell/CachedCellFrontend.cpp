@@ -16,10 +16,6 @@
 
 #include "bolt/shuffle/sparksql/cell/CachedCellFrontend.h"
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
-
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -131,50 +127,50 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
   // an entry, and the format only allows a fallback tail after that.
   if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
     const uint32_t count = st.entryCount;
-    uint32_t i;
-#if defined(__AVX2__)
-    // Fixed 16-slot probe: four independent compares folded into one mask,
-    // no loop-carried dependency and one branch for the whole probe.
-    // Slots at or past `count` hold stale keys, and a phantom lane there
-    // cannot shadow a real hit (real hits own lower lanes), so an
-    // out-of-range find just clamps to a miss - no sentinel maintenance.
-    const __m256i needle = _mm256_set1_epi64x(static_cast<int64_t>(key));
-    const auto* keys = reinterpret_cast<const __m256i*>(st.scanKey);
-    const int mask = _mm256_movemask_pd(_mm256_castsi256_pd(
-                         _mm256_cmpeq_epi64(_mm256_loadu_si256(keys), needle))) |
-        _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
-            _mm256_loadu_si256(keys + 1), needle)))
-            << 4 |
-        _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
-            _mm256_loadu_si256(keys + 2), needle)))
-            << 8 |
-        _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
-            _mm256_loadu_si256(keys + 3), needle)))
-            << 12;
-    if (FOLLY_LIKELY(mask != 0)) {
-      i = static_cast<uint32_t>(__builtin_ctz(static_cast<unsigned>(mask)));
-      if (i > count) {
-        i = count;
+    uint32_t i = 0;
+    uint32_t off = 0;
+    // The dictionary is stored only in its serialized [len][bytes]... form;
+    // the walk over entry boundaries is inherent, so each step is made as
+    // cheap as the form allows: one 8-byte window load per entry yields the
+    // length byte AND up to seven content bytes, so a short value - the
+    // common dictionary shape - compares whole in the same register, and
+    // the walk issues exactly one load per entry.
+    if (FOLLY_LIKELY(size <= 7)) {
+      // Values up to 7 chars are always inline in the StringView, whose
+      // bytes 4..11 hold the zero-padded characters: the whole value in
+      // one register, no data() branch.
+      //
+      // Branchless full walk. An early-exit walk mispredicts once per row
+      // (the hit position is data-dependent); walking all entries with a
+      // fixed, perfectly predicted trip count and accumulating the hit
+      // with a conditional move is cheaper. Entries are unique by
+      // construction, so at most one step matches and a plain cmov
+      // accumulation is exact. Length byte and content compare as one
+      // masked word: needle = [size][chars...].
+      uint64_t value;
+      ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+      const uint64_t needle = (value << 8) | size;
+      const uint64_t needleMask =
+          (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
+      uint32_t hit = count;
+      for (uint32_t k = 0; k < count; ++k) {
+        uint64_t window;
+        ::memcpy(&window, st.entries + off, 8);
+        if ((window & needleMask) == needle) {
+          hit = k; // at most once; compiles to a flag-carrying select
+        }
+        off += 1 + static_cast<uint32_t>(window & 0xFF);
       }
+      i = hit;
     } else {
-      i = count;
-    }
-#else
-    for (i = 0; i < count; ++i) {
-      if (st.scanKey[i] == key) {
-        break;
-      }
-    }
-#endif
-    if (i < count && size > 4 &&
-        ::memcmp(st.entries + st.entryOff[i] + 1, view.data(), size) != 0) {
-      // Rare: same length and 4-byte prefix, different suffix.
-      for (++i; i < count; ++i) {
-        if (st.scanKey[i] == key &&
-            ::memcmp(st.entries + st.entryOff[i] + 1, view.data(), size) ==
-                0) {
+      for (; i < count; ++i) {
+        const uint32_t len =
+            static_cast<uint8_t>(st.entries[off]);
+        if (len == size &&
+            ::memcmp(st.entries + off + 1, view.data(), size) == 0) {
           break;
         }
+        off += 1 + len;
       }
     }
     if (FOLLY_UNLIKELY(i == count)) {
@@ -196,8 +192,6 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
           return false;
         }
       }
-      st.scanKey[st.entryCount] = key;
-      st.entryOff[st.entryCount] = st.entryBytes;
       st.entries[st.entryBytes] = static_cast<char>(size);
       ::memcpy(st.entries + st.entryBytes + 1, view.data(), size);
       st.entryBytes += static_cast<uint8_t>(1 + size);
