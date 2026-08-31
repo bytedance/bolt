@@ -508,8 +508,10 @@ TEST_F(CellWriterTest, dictionarySegmentsChainDemoteAndResetAcrossWindows) {
   constexpr int32_t kPartitions = 4;
   constexpr int kRows = 1500;
   // Both vocabularies serialize to 48 bytes (8 entries of 5 chars).
+  // "same1"/"same2" share length and 4-byte prefix: the scan-key collision
+  // path (prefix hit, suffix mismatch, rescan) is exercised.
   const std::vector<std::string> vocabA = {
-      "north", "south", "east!", "west!", "up---", "down-", "left-", "right"};
+      "north", "south", "east!", "west!", "same1", "same2", "left-", "right"};
   const std::vector<std::string> vocabB = {
       "ocean", "river", "lake!", "pond!", "sea--", "bay--", "gulf-", "creek"};
   std::mt19937 rng(7);
