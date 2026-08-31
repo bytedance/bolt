@@ -113,6 +113,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   // Partitioner::compute fills but does not size this.
   partition2RowCount_.resize(numPartitions_);
   decoded_.resize(layout_.numColumns());
+  encodingTags_.assign((layout_.numColumns() + 7) / 8, 0);
 
   // Warm the reservation for the resident structures and the first chunks;
   // failure is not fatal, allocation will arbitrate.
@@ -234,6 +235,15 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     }
   }
 
+  if (FOLLY_UNLIKELY(!dictProbed_)) {
+    // The single probe of the dictionary design: the first batch decides,
+    // per string column and for the writer's lifetime, before its first
+    // byte is split (cell bytes are final wire form; a payload's form
+    // cannot change once written).
+    probeDictionary(numRows);
+    dictProbed_ = true;
+  }
+
   SplitBatch batch;
   batch.decoded = &decoded_;
   batch.row2Partition = row2Partition_.data();
@@ -264,6 +274,67 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   return arrow::Status::OK();
 }
 
+void CellShuffleWriter::probeDictionary(uint32_t numRows) {
+  const auto& cellOpts = options_.cellOptions;
+  if (!cellOpts.enableStringDictionary ||
+      numRows < static_cast<uint32_t>(cellOpts.dictMinProbeRows)) {
+    return;
+  }
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (!layout_.isStringColumn(col) ||
+        nullClass_[col] == BatchNullClass::kAllNull) {
+      continue;
+    }
+    const auto& decoded = decoded_[col];
+    const bool hasNulls = nullClass_[col] == BatchNullClass::kSomeNulls;
+    // Distinct scan with early exit: once past the 64-byte serialization
+    // budget the column can never meet the conservative criterion, so a
+    // high-cardinality column costs only a handful of rows here.
+    std::vector<StringView> seen;
+    uint32_t serialized = 0;
+    uint64_t nonNull = 0;
+    bool fits = true;
+    for (uint32_t row = 0; row < numRows; ++row) {
+      if (hasNulls && decoded.isNullAt(row)) {
+        continue;
+      }
+      const auto view = decoded.valueAt<StringView>(row);
+      ++nonNull;
+      if (view.size() > kDictEntryMaxLen) {
+        fits = false;
+        break;
+      }
+      bool found = false;
+      for (const auto& entry : seen) {
+        if (entry.size() == view.size() &&
+            ::memcmp(entry.data(), view.data(), view.size()) == 0) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        serialized += 1 + view.size();
+        if (serialized > kDictSerializedBudget) {
+          fits = false;
+          break;
+        }
+        seen.push_back(view);
+      }
+    }
+    const bool enable = fits && !seen.empty() &&
+        nonNull >= static_cast<uint64_t>(cellOpts.dictMinRepeatRatio) *
+            seen.size();
+    if (enable) {
+      frontend_->enableDictionary(col);
+      encodingTags_[col / 8] |= static_cast<uint8_t>(1u << (col % 8));
+    }
+    LOG(INFO) << "CellShuffleWriter dictionary probe: column " << col
+              << (enable ? " ON" : " OFF") << " (ndv=" << seen.size()
+              << (fits ? "" : "+") << ", serializedBytes=" << serialized
+              << ", nonNull=" << nonNull << " of " << numRows << " rows)";
+  }
+}
+
 CellWindowInput CellShuffleWriter::windowInput() {
   CellWindowInput in;
   in.cells = cells_.get();
@@ -271,6 +342,7 @@ CellWindowInput CellShuffleWriter::windowInput() {
   in.layout = &layout_;
   in.rowCounts = windowRowStart_.data();
   in.variableBytes = frontend_->variableBytesArray();
+  in.encodingTags = encodingTags_.data();
   in.numPartitions = static_cast<uint32_t>(numPartitions_);
   return in;
 }
