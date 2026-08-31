@@ -387,6 +387,21 @@ TEST_F(ParquetReaderTest, decimalReaderCastValueFilters) {
   EXPECT_EQ(rowReader->next(10, result), 3);
   ASSERT_EQ(result->size(), 1);
   EXPECT_TRUE(result->as<RowVector>()->childAt(0)->isNullAt(0));
+
+  // Filters added after construction are validated when caches are reset.
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(file->getPath(), readerOptions);
+  auto requestedSchema = ROW({"c0"}, {DECIMAL(15, 4)});
+  auto rowReaderOptions = getReaderOpts(requestedSchema);
+  rowReaderOptions.setDisableFloatingPointToVarcharMetadataFilter(true);
+  auto scanSpec = makeScanSpec(requestedSchema);
+  rowReaderOptions.setScanSpec(scanSpec);
+  rowReader = reader->createRowReader(rowReaderOptions);
+  scanSpec->getOrCreateChild(Subfield("c0"))
+      ->setFilter(exec::equal(int64_t{10'000}));
+  BOLT_ASSERT_THROW(
+      rowReader->resetFilterCaches(),
+      "Cannot apply BIGINT filter to physical BIGINT Parquet column c0");
 }
 
 TEST_F(ParquetReaderTest, varcharFilterAppliedOnlyForStringLogicalType) {
