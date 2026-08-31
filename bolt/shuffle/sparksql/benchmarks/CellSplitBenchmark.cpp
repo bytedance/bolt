@@ -28,12 +28,24 @@
 #include <map>
 #include <random>
 
+#include <arrow/io/memory.h>
+
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
+#include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
+#include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
+#include "bolt/shuffle/sparksql/Utils.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/FlatVector.h"
+
+DEFINE_bool(
+    phases,
+    false,
+    "Skip the folly benchmarks; print a writer/reader phase breakdown for "
+    "the dictionary string scenario across Cell(dict on/off)/V1/V2.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -447,6 +459,353 @@ BENCHMARK_MULTI(split_strdictclusbig_P1024_V1) {
 }
 BENCHMARK_DRAW_LINE();
 
+// ---- Phase breakdown (--phases) -------------------------------------------
+
+uint64_t phaseNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+RowTypePtr dataRowType(const Scenario& scenario) {
+  const auto& row = scenario.batches[0]->type()->asRow();
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  for (uint32_t i = 1; i < row.size(); ++i) {
+    names.push_back(row.nameOf(i));
+    types.push_back(row.childAt(i));
+  }
+  return ROW(std::move(names), std::move(types));
+}
+
+/// One arrow stream per partition slice of the in-memory data file.
+class BufferStreamIterator final : public ReaderStreamIterator {
+ public:
+  BufferStreamIterator(
+      const std::string* file,
+      const std::vector<int64_t>& lengths)
+      : file_(file), lengths_(lengths) {}
+
+  std::shared_ptr<arrow::io::InputStream> nextStream(
+      arrow::MemoryPool* /*pool*/) override {
+    while (next_ < lengths_.size() && lengths_[next_] == 0) {
+      offset_ += lengths_[next_++];
+    }
+    if (next_ == lengths_.size()) {
+      return nullptr;
+    }
+    auto stream = std::make_shared<arrow::io::BufferReader>(
+        reinterpret_cast<const uint8_t*>(file_->data()) + offset_,
+        lengths_[next_]);
+    offset_ += lengths_[next_++];
+    return stream;
+  }
+
+  void close() override {}
+  void updateMetrics(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                     int64_t, int64_t) override {}
+
+ private:
+  const std::string* const file_;
+  const std::vector<int64_t>& lengths_;
+  size_t next_{0};
+  int64_t offset_{0};
+};
+
+/// Delegating codec that meters decompression, the seam the cell reader
+/// cannot meter itself.
+class TimingCodec final : public Codec {
+ public:
+  explicit TimingCodec(Codec* inner)
+      : Codec(CodecType::LZ4_FRAME, CodecOptions{CodecBackend::NONE}),
+        inner_(inner) {}
+
+  int64_t compress(const uint8_t* in, int64_t n, uint8_t* out, int64_t cap)
+      override {
+    return inner_->compress(in, n, out, cap);
+  }
+
+  int64_t decompress(const uint8_t* in, int64_t n, uint8_t* out, int64_t cap)
+      override {
+    const uint64_t start = phaseNowNs();
+    const auto result = inner_->decompress(in, n, out, cap);
+    decompressNs += phaseNowNs() - start;
+    return result;
+  }
+
+  int64_t maxCompressedLen(int64_t n) const override {
+    return inner_->maxCompressedLen(n);
+  }
+
+  int32_t defaultCompressionLevel() const override {
+    return inner_->defaultCompressionLevel();
+  }
+
+  uint64_t decompressNs{0};
+
+ private:
+  Codec* const inner_;
+};
+
+struct WriterPhases {
+  double splitMs{0};
+  double stopMs{0};
+  double compressMs{0};
+  double writeMs{0};
+  double evictMs{0};
+  int64_t bytes{0};
+  int64_t rows{0};
+  std::vector<int64_t> partitionLengths;
+  std::string file; // the data file, read back for the reader phase
+};
+
+struct ReaderPhases {
+  double wallMs{0};
+  double decompressMs{0};
+  double decodeMs{0}; // payload -> vectors (cell decode / legacy deserialize)
+  double mergeMs{0}; // legacy payload merge; zero for cell
+  double glueMs{0}; // wall minus the metered parts
+  int64_t rows{0};
+};
+
+WriterPhases runWriterPhases(
+    int32_t writerType,
+    bool disableDict,
+    const Scenario& scenario) {
+  WriterPhases result;
+  char pathTemplate[] = "/tmp/bolt_cell_phase_bench_XXXXXX";
+  const int fd = ::mkstemp(pathTemplate);
+  BOLT_CHECK_GE(fd, 0);
+  ::close(fd);
+  const std::string dataFile = pathTemplate;
+
+  static const std::string spillDir = [] {
+    char dirTemplate[] = "/tmp/bolt_cell_phase_bench_dir_XXXXXX";
+    const char* dir = ::mkdtemp(dirTemplate);
+    BOLT_CHECK_NOT_NULL(dir);
+    return std::string(dir);
+  }();
+  ShuffleWriterOptions options;
+  options.partitioning = Partitioning::kHash;
+  options.forceShuffleWriterType = writerType;
+  options.partitionWriterOptions.numPartitions = scenario.numPartitions;
+  options.partitionWriterOptions.dataFile = dataFile;
+  options.partitionWriterOptions.configuredDirs = {spillDir};
+  options.partitionWriterOptions.numSubDirs = 1;
+  options.cellOptions.cellMemoryBudgetBytes = 512LL << 20;
+  options.cellOptions.enableStringDictionary = !disableDict;
+  auto arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
+  const auto& first = scenario.batches[0];
+  auto writer = BoltShuffleWriter::create(
+      options,
+      asRowType(first->type()),
+      first->type()->size() - 1,
+      first->size(),
+      first->estimateFlatSize(),
+      kMemLimit,
+      leafPool(),
+      arrowPool.get());
+
+  uint64_t splitNs = 0;
+  for (const auto& batch : scenario.batches) {
+    const uint64_t start = phaseNowNs();
+    const auto status = writer->split(batch, kMemLimit);
+    splitNs += phaseNowNs() - start;
+    BOLT_CHECK(status.ok(), "{}", status.ToString());
+    result.rows += batch->size();
+  }
+  const uint64_t stopStart = phaseNowNs();
+  const auto status = writer->stop();
+  const uint64_t stopNs = phaseNowNs() - stopStart;
+  BOLT_CHECK(status.ok(), "{}", status.ToString());
+
+  const auto& metrics = writer->metrics();
+  result.splitMs = splitNs / 1e6;
+  result.stopMs = stopNs / 1e6;
+  result.compressMs = metrics.totalCompressTime / 1e6;
+  result.writeMs = metrics.totalWriteTime / 1e6;
+  result.evictMs = metrics.totalEvictTime / 1e6;
+  result.bytes = metrics.totalBytesWritten;
+  result.partitionLengths = metrics.partitionLengths;
+  {
+    std::ifstream in(dataFile, std::ios::binary);
+    result.file.assign(
+        std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  writer.reset();
+  arrowPool.reset();
+  ::unlink(dataFile.c_str());
+  ::unlink((dataFile + ".cellspill").c_str());
+  return result;
+}
+
+ReaderPhases runCellReaderPhases(
+    const Scenario& scenario,
+    const WriterPhases& written) {
+  ReaderPhases result;
+  const auto rowType = dataRowType(scenario);
+  auto codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  TimingCodec timing(codec.get());
+  auto streams = std::make_shared<BufferStreamIterator>(
+      &written.file, written.partitionLengths);
+  cell::CellShuffleReader reader(
+      streams,
+      cell::CellLayout::create(rowType),
+      &timing,
+      arrow::default_memory_pool(),
+      leafPool(),
+      /*batchSize=*/4096,
+      /*batchByteSize=*/1 << 20);
+  const uint64_t start = phaseNowNs();
+  while (auto batch = reader.next()) {
+    result.rows += batch->size();
+  }
+  result.wallMs = (phaseNowNs() - start) / 1e6;
+  result.decompressMs = timing.decompressNs / 1e6;
+  result.decodeMs = (reader.decodeTimeNs() - timing.decompressNs) / 1e6;
+  result.glueMs = result.wallMs - reader.decodeTimeNs() / 1e6;
+  return result;
+}
+
+ReaderPhases runLegacyReaderPhases(
+    int32_t writerType,
+    const Scenario& scenario,
+    const WriterPhases& written) {
+  ReaderPhases result;
+  const auto rowType = dataRowType(scenario);
+  auto schema = boltTypeToArrowSchema(rowType, leafPool());
+  std::shared_ptr<Codec> codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  BoltColumnarBatchDeserializerFactory factory(
+      schema,
+      codec,
+      rowType,
+      /*batchSize=*/4096,
+      /*shuffleBatchByteSize=*/1 << 20,
+      arrow::default_memory_pool(),
+      leafPool());
+  factory.setShuffleWriterType(writerType);
+  factory.setNumPartitions(scenario.numPartitions);
+  factory.setpartitioningShortName("hash");
+
+  const uint64_t start = phaseNowNs();
+  int64_t offset = 0;
+  for (const auto length : written.partitionLengths) {
+    if (length == 0) {
+      continue;
+    }
+    auto in = std::make_shared<arrow::io::BufferReader>(
+        reinterpret_cast<const uint8_t*>(written.file.data()) + offset,
+        length);
+    offset += length;
+    auto deserializer = factory.createDeserializer(std::move(in));
+    while (auto batch = deserializer->next()) {
+      result.rows += batch->size();
+    }
+  }
+  result.wallMs = (phaseNowNs() - start) / 1e6;
+  result.decompressMs = factory.getDecompressTime() / 1e6;
+  result.decodeMs = factory.getDeserializeTime() / 1e6;
+  result.mergeMs = factory.getMergeTime() / 1e6;
+  result.glueMs =
+      result.wallMs - result.decompressMs - result.decodeMs - result.mergeMs;
+  return result;
+}
+
+void runPhaseTable() {
+  const auto& scenario = scenarios()[10]; // strdictbig_P1024
+  struct Variant {
+    const char* name;
+    int32_t writerType;
+    bool disableDict;
+  };
+  const Variant variants[] = {
+      {"Cell-dict", 4, false},
+      {"Cell-nodict", 4, true},
+      {"V1", 1, false},
+      {"V2", 2, false}};
+
+  printf(
+      "\nscenario %s: %d batches x %d rows, P=%d\n\n",
+      scenario.name.c_str(),
+      static_cast<int>(scenario.batches.size()),
+      kRowsPerBatch,
+      scenario.numPartitions);
+  printf(
+      "%-12s %9s %9s | %9s %9s %9s %9s | %12s\n",
+      "writer",
+      "splitMs",
+      "stopMs",
+      "cmprsMs",
+      "writeMs",
+      "evictMs",
+      "glueMs",
+      "bytesWritten");
+  std::vector<std::pair<Variant, WriterPhases>> writes;
+  for (const auto& variant : variants) {
+    // Best of three lifecycles, chosen by split+stop.
+    WriterPhases best;
+    for (int rep = 0; rep < 3; ++rep) {
+      auto phases =
+          runWriterPhases(variant.writerType, variant.disableDict, scenario);
+      if (rep == 0 ||
+          phases.splitMs + phases.stopMs < best.splitMs + best.stopMs) {
+        best = std::move(phases);
+      }
+    }
+    // Glue: lifecycle time not metered by any bucket (assembly, scans).
+    const double glue = best.splitMs + best.stopMs - best.compressMs -
+        best.writeMs - best.evictMs;
+    printf(
+        "%-12s %9.2f %9.2f | %9.2f %9.2f %9.2f %9.2f | %12ld\n",
+        variant.name,
+        best.splitMs,
+        best.stopMs,
+        best.compressMs,
+        best.writeMs,
+        best.evictMs,
+        glue,
+        static_cast<long>(best.bytes));
+    writes.emplace_back(variant, std::move(best));
+  }
+
+  printf(
+      "\n%-12s %9s | %9s %9s %9s %9s | %10s %9s\n",
+      "reader",
+      "wallMs",
+      "dcmpMs",
+      "decodeMs",
+      "mergeMs",
+      "glueMs",
+      "rows",
+      "nsPerRow");
+  for (const auto& [variant, written] : writes) {
+    ReaderPhases best;
+    for (int rep = 0; rep < 3; ++rep) {
+      auto phases = variant.writerType == 4
+          ? runCellReaderPhases(scenario, written)
+          : runLegacyReaderPhases(variant.writerType, scenario, written);
+      BOLT_CHECK_EQ(phases.rows, written.rows, "reader dropped rows");
+      if (rep == 0 || phases.wallMs < best.wallMs) {
+        best = std::move(phases);
+      }
+    }
+    printf(
+        "%-12s %9.2f | %9.2f %9.2f %9.2f %9.2f | %10ld %9.2f\n",
+        variant.name,
+        best.wallMs,
+        best.decompressMs,
+        best.decodeMs,
+        best.mergeMs,
+        best.glueMs,
+        static_cast<long>(best.rows),
+        best.rows > 0 ? best.wallMs * 1e6 / best.rows : 0.0);
+  }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -454,6 +813,10 @@ int main(int argc, char** argv) {
   memory::MemoryManager::Options options;
   options.allocatorCapacity = 16LL << 30;
   memory::MemoryManager::initialize(options);
+  if (FLAGS_phases) {
+    runPhaseTable();
+    return 0;
+  }
   folly::runBenchmarks();
 
   printf(
