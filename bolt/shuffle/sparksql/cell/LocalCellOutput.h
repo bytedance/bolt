@@ -119,6 +119,11 @@ class LocalCellOutput final : public CellOutput {
   const CellShuffleOptions cellOptions_;
   /// Final-merge codec; null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
+  /// Time metrics align with the V1/V2 partition writers and never
+  /// overlap: compress = codec calls only; write = fwrite/fflush moments
+  /// on the data file; evict = fwrite/fflush moments on the spill file.
+  /// Assembly glue (chain scans, null bodies, spill read-back) is counted
+  /// nowhere, as in V1 where it rides inside split.
   uint64_t compressTimeNs_{0};
   /// Pool-backed workspaces, released after every spill and after finalize
   /// so their capacity never sits on the reservation between uses. When the
