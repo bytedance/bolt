@@ -33,6 +33,7 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/AggregationHook.h"
 #include "bolt/vector/DecodedVector.h"
+#include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/LazyVector.h"
 namespace bytedance::bolt::functions::aggregate {
@@ -107,6 +108,29 @@ class SimpleNumericAggregate : public exec::Aggregate {
       const VectorPtr& arg,
       UpdateSingleValue updateSingleValue,
       bool mayPushdown) {
+    if (arg->encoding() == VectorEncoding::Simple::DICTIONARY &&
+        arg->valueVector()->encoding() != VectorEncoding::Simple::DICTIONARY &&
+        !isLazyNotLoaded(*arg)) {
+      auto dictionary = arg->template as<DictionaryVector<TValue>>();
+      BOLT_DCHECK_NOT_NULL(dictionary);
+      if (dictionary->mayHaveNulls()) {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!dictionary->isNullAt(i)) {
+            updateNonNullValue<tableHasNulls, TData>(
+                groups[i],
+                TData(dictionary->valueAtFast(i)),
+                updateSingleValue);
+          }
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<tableHasNulls, TData>(
+              groups[i], TData(dictionary->valueAtFast(i)), updateSingleValue);
+        });
+      }
+      return;
+    }
+
     DecodedVector decoded(*arg, rows, !mayPushdown);
     auto encoding = decoded.base()->encoding();
     if (UNLIKELY(encoding == VectorEncoding::Simple::LAZY)) {
@@ -184,6 +208,27 @@ class SimpleNumericAggregate : public exec::Aggregate {
       UpdateDuplicate updateDuplicateValues,
       bool /*mayPushdown*/,
       TData initialValue) {
+    if (arg->encoding() == VectorEncoding::Simple::DICTIONARY &&
+        arg->valueVector()->encoding() != VectorEncoding::Simple::DICTIONARY &&
+        !isLazyNotLoaded(*arg)) {
+      auto dictionary = arg->template as<DictionaryVector<TValue>>();
+      BOLT_DCHECK_NOT_NULL(dictionary);
+      if (dictionary->mayHaveNulls()) {
+        rows.applyToSelected([&](vector_size_t i) {
+          if (!dictionary->isNullAt(i)) {
+            updateNonNullValue<true, TData>(
+                group, TData(dictionary->valueAtFast(i)), updateSingleValue);
+          }
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t i) {
+          updateNonNullValue<true, TData>(
+              group, TData(dictionary->valueAtFast(i)), updateSingleValue);
+        });
+      }
+      return;
+    }
+
     DecodedVector decoded(*arg, rows);
 
     // Do row by row if not all rows are selected.

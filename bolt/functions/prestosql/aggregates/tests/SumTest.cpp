@@ -100,6 +100,55 @@ TEST_F(SumTest, sumFloat) {
       "SELECT sum(c0) FROM tmp");
 }
 
+TEST_F(SumTest, dictionaryInput) {
+  bytedance::bolt::test::VectorMaker maker{pool()};
+  auto nonNullValues =
+      maker.dictionaryVector<int64_t>({10, 20, 10, 30, 20, 10});
+  testAggregations(
+      {makeRowVector({nonNullValues})},
+      {},
+      {"sum(c0)"},
+      {makeRowVector({makeFlatVector<int64_t>({100})})});
+  auto nestedNonNullValues =
+      wrapInDictionary(makeIndices({5, 4, 3, 2, 1, 0}), nonNullValues);
+  ASSERT_EQ(
+      nestedNonNullValues->valueVector()->encoding(),
+      VectorEncoding::Simple::DICTIONARY);
+  testAggregations(
+      {makeRowVector({nestedNonNullValues})},
+      {},
+      {"sum(c0)"},
+      {makeRowVector({makeFlatVector<int64_t>({100})})});
+
+  auto values = maker.dictionaryVector<int64_t>(
+      {10, 20, 10, std::nullopt, 30, 20, std::nullopt, 10});
+  auto groups = makeFlatVector<int64_t>({0, 0, 1, 1, 0, 1, 0, 1});
+  auto data = makeRowVector({groups, values});
+
+  testAggregations(
+      {data},
+      {},
+      {"sum(c1)"},
+      {makeRowVector({makeFlatVector<int64_t>({100})})});
+  testAggregations(
+      {data},
+      {"c0"},
+      {"sum(c1)"},
+      {makeRowVector(
+          {makeFlatVector<int64_t>({0, 1}),
+           makeFlatVector<int64_t>({60, 40})})});
+
+  auto nestedValues =
+      wrapInDictionary(makeIndices({0, 1, 2, 3, 4, 5, 6, 7}), values);
+  testAggregations(
+      {makeRowVector({groups, nestedValues})},
+      {"c0"},
+      {"sum(c1)"},
+      {makeRowVector(
+          {makeFlatVector<int64_t>({0, 1}),
+           makeFlatVector<int64_t>({60, 40})})});
+}
+
 TEST_F(SumTest, groupByNan) {
   auto data = {makeRowVector({
       makeFlatVector<double>({std::nan(""), std::nan("")}, DOUBLE()),

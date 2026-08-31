@@ -165,6 +165,55 @@ TEST_F(AverageAggregationTest, avgConstNull) {
   testFunction("simple_avg");
 }
 
+TEST_F(AverageAggregationTest, dictionaryInput) {
+  bytedance::bolt::test::VectorMaker maker{pool()};
+  auto nonNullValues =
+      maker.dictionaryVector<int64_t>({10, 20, 10, 30, 20, 10});
+  testAggregations(
+      {makeRowVector({nonNullValues})},
+      {},
+      {"avg(c0)"},
+      {makeRowVector({makeFlatVector<double>({100.0 / 6})})});
+  auto nestedNonNullValues =
+      wrapInDictionary(makeIndices({5, 4, 3, 2, 1, 0}), nonNullValues);
+  ASSERT_EQ(
+      nestedNonNullValues->valueVector()->encoding(),
+      VectorEncoding::Simple::DICTIONARY);
+  testAggregations(
+      {makeRowVector({nestedNonNullValues})},
+      {},
+      {"avg(c0)"},
+      {makeRowVector({makeFlatVector<double>({100.0 / 6})})});
+
+  auto values = maker.dictionaryVector<int64_t>(
+      {10, 20, 10, std::nullopt, 30, 20, std::nullopt, 10});
+  auto groups = makeFlatVector<int64_t>({0, 0, 1, 1, 0, 1, 0, 1});
+  auto data = makeRowVector({groups, values});
+
+  testAggregations(
+      {data},
+      {},
+      {"avg(c1)"},
+      {makeRowVector({makeFlatVector<double>({100.0 / 6})})});
+  testAggregations(
+      {data},
+      {"c0"},
+      {"avg(c1)"},
+      {makeRowVector(
+          {makeFlatVector<int64_t>({0, 1}),
+           makeFlatVector<double>({20, 40.0 / 3})})});
+
+  auto nestedValues =
+      wrapInDictionary(makeIndices({0, 1, 2, 3, 4, 5, 6, 7}), values);
+  testAggregations(
+      {makeRowVector({groups, nestedValues})},
+      {"c0"},
+      {"avg(c1)"},
+      {makeRowVector(
+          {makeFlatVector<int64_t>({0, 1}),
+           makeFlatVector<double>({20, 40.0 / 3})})});
+}
+
 TEST_F(AverageAggregationTest, avgNulls) {
   auto testFunction = [this](const std::string& functionName) {
     // Have two row vectors a lest as it triggers different code paths.

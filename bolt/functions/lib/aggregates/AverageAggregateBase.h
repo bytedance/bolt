@@ -36,6 +36,7 @@
 #include "bolt/type/DecimalUtil.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
+#include "bolt/vector/DictionaryVector.h"
 #include "bolt/vector/FlatVector.h"
 namespace bytedance::bolt::functions::aggregate {
 
@@ -188,6 +189,13 @@ class AverageAggregateBase : public exec::Aggregate {
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       bool /*mayPushdown*/) override final {
+    if (args[0]->encoding() == VectorEncoding::Simple::DICTIONARY &&
+        args[0]->valueVector()->encoding() !=
+            VectorEncoding::Simple::DICTIONARY &&
+        !isLazyNotLoaded(*args[0])) {
+      addDictionaryRawInput(groups, rows, *args[0]);
+      return;
+    }
     decodedRaw_.decode(*args[0], rows);
     if (decodedRaw_.isConstantMapping()) {
       if (!decodedRaw_.isNullAt(0)) {
@@ -231,6 +239,13 @@ class AverageAggregateBase : public exec::Aggregate {
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       bool /*mayPushdown*/) override {
+    if (args[0]->encoding() == VectorEncoding::Simple::DICTIONARY &&
+        args[0]->valueVector()->encoding() !=
+            VectorEncoding::Simple::DICTIONARY &&
+        !isLazyNotLoaded(*args[0])) {
+      addSingleGroupDictionaryRawInput(group, rows, *args[0]);
+      return;
+    }
     decodedRaw_.decode(*args[0], rows);
 
     if (decodedRaw_.isConstantMapping()) {
@@ -304,6 +319,52 @@ class AverageAggregateBase : public exec::Aggregate {
   }
 
  protected:
+  FLATTEN void addDictionaryRawInput(
+      char** groups,
+      const SelectivityVector& rows,
+      const BaseVector& arg) {
+    auto dictionary = arg.as<DictionaryVector<TInput>>();
+    BOLT_DCHECK_NOT_NULL(dictionary);
+    if (dictionary->mayHaveNulls()) {
+      rows.applyToSelected([&](vector_size_t i) {
+        if (!dictionary->isNullAt(i)) {
+          updateNonNullValue(
+              groups[i], TAccumulator(dictionary->valueAtFast(i)));
+        }
+      });
+    } else {
+      rows.applyToSelected([&](vector_size_t i) {
+        updateNonNullValue(groups[i], TAccumulator(dictionary->valueAtFast(i)));
+      });
+    }
+  }
+
+  void addSingleGroupDictionaryRawInput(
+      char* group,
+      const SelectivityVector& rows,
+      const BaseVector& arg) {
+    auto dictionary = arg.as<DictionaryVector<TInput>>();
+    BOLT_DCHECK_NOT_NULL(dictionary);
+    int64_t count = 0;
+    TAccumulator sum = 0;
+    if (dictionary->mayHaveNulls()) {
+      rows.applyToSelected([&](vector_size_t i) {
+        if (!dictionary->isNullAt(i)) {
+          sum += TAccumulator(dictionary->valueAtFast(i));
+          ++count;
+        }
+      });
+    } else {
+      rows.applyToSelected([&](vector_size_t i) {
+        sum += TAccumulator(dictionary->valueAtFast(i));
+      });
+      count = rows.countSelected();
+    }
+    if (count > 0) {
+      updateNonNullValue(group, count, sum);
+    }
+  }
+
   /// Partial.
   template <bool tableHasNulls = true>
   inline void updateNonNullValue(char* group, TAccumulator value) {
