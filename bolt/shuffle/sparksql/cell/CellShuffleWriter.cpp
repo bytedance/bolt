@@ -17,6 +17,7 @@
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 
 #include <chrono>
+#include <numeric>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
@@ -439,7 +440,13 @@ arrow::Status CellShuffleWriter::stop() {
     frontend_->flushAll();
   }
   output_->finalize(windowInput(), windowHasData, metrics_);
-  metrics_.dataSize = metrics_.totalBytesWritten;
+  // Data size is the pre-compression payload volume (what the raw lengths
+  // account); bytes written is the compressed file. Reporting them as the
+  // same number would hide the compression ratio from the engine metrics.
+  metrics_.dataSize = std::accumulate(
+      metrics_.rawPartitionLengths.begin(),
+      metrics_.rawPartitionLengths.end(),
+      int64_t{0});
   metrics_.peakBytes = boltPool_->peakBytes();
 
   // Return everything: drop chains, chunks and the reservation.
