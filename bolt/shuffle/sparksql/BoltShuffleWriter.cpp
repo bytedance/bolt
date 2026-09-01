@@ -286,6 +286,13 @@ ShuffleWriterType decideBoltShuffleWriterType(
   if (options.forceShuffleWriterType && supportAdaptive) {
     const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
     if (forced == ShuffleWriterType::Cell) {
+      // The type-less legacy create() cannot enable the cell writer: the
+      // type-based fallback decision must run, and its outcome must be
+      // derivable on the reader side from the same static information.
+      BOLT_CHECK_NOT_NULL(
+          inputType,
+          "forceShuffleWriterType=Cell requires the create() overload "
+          "taking the input row type");
       if (inputType->size() < 2) {
         // pid column only: nothing for the cell writer to lay out.
         LOG(INFO) << "CellShuffleWriter needs at least one data column; "
