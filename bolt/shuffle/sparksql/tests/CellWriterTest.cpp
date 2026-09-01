@@ -569,5 +569,48 @@ TEST_F(CellWriterTest, dictionarySegmentsChainDemoteAndResetAcrossWindows) {
   roundTrip(options, pids, batches);
 }
 
+TEST_F(CellWriterTest, coalescedMergeShrinksManyRunPayloads) {
+  // Wide schema (many streams) plus a tiny memory cap: runs spill every
+  // few batches, so without coalescing every payload carries many runs
+  // whose per-run headers (1 + 8 + 8 x streams bytes) and tiny
+  // compression contexts dominate the file.
+  constexpr int32_t kPartitions = 64;
+  constexpr int kColumns = 12;
+  std::mt19937 rng(11);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 24; ++batch) {
+    const int n = 1024;
+    std::vector<int32_t> batchPids(n);
+    for (int i = 0; i < n; ++i) {
+      batchPids[i] = static_cast<int32_t>(rng() % kPartitions);
+    }
+    std::vector<std::string> names;
+    std::vector<VectorPtr> columns;
+    for (int c = 0; c < kColumns; ++c) {
+      names.push_back("c" + std::to_string(c));
+      columns.push_back(makeFlatVector<int64_t>(
+          n, [&](auto /*row*/) { return static_cast<int64_t>(rng()); }));
+    }
+    batches.push_back(makeRowVector(names, columns));
+    pids.push_back(std::move(batchPids));
+  }
+
+  int64_t bytesCoalesced = 0;
+  int64_t bytesPerSpill = 0;
+  for (const bool coalesce : {true, false}) {
+    auto options = makeOptions(kPartitions);
+    options.cellOptions.cellMemoryCapBytes =
+        2 * options.cellOptions.chunkBytes;
+    options.cellOptions.coalesceMergedRuns = coalesce;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    EXPECT_GT(writer.metrics().totalBytesEvicted, 0) << "expected spills";
+    (coalesce ? bytesCoalesced : bytesPerSpill) =
+        writer.metrics().totalBytesWritten;
+  }
+  EXPECT_LT(bytesCoalesced, bytesPerSpill);
+}
+
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell
