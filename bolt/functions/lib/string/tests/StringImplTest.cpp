@@ -1311,6 +1311,14 @@ TEST_F(StringImplTest, toLower) {
   EXPECT_EQ(
       toLower<true>(std::string_view("ΕΠΕΙΔΗ Η ΑΝΑΓΝΩΡΙΣΗ ΤΗΣ ΑΞΙΟΠΡΕΠΕΙΑΣ")),
       "επειδη η αναγνωριση της αξιοπρεπειας");
+#ifdef SPARK_COMPATIBLE
+  // Exercise repeated reuse of the thread-local BreakIterator, including more
+  // Sigma replacements than fit in the inline replacement buffer.
+  EXPECT_EQ(toLower<false>(std::string_view("AΣ8B")), "aσ8b");
+  EXPECT_EQ(
+      toLower<false>(std::string_view("AΣ AΣ AΣ AΣ AΣ")), "aς aς aς aς aς");
+  EXPECT_EQ(toLower<false>(std::string_view("AΣ")), "aς");
+#endif
   // Surrogate pairs.
   EXPECT_EQ(toLower<true>(std::string_view("a🙃b🙃c")), "a🙃b🙃c");
   EXPECT_EQ(toLower<true>(std::string_view("😀😆😃😄😄😆")), "😀😆😃😄😄😆");

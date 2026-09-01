@@ -53,6 +53,7 @@ bool locateEmptyStringsReturnZero() {
 }
 
 namespace {
+
 /**
  * Upper and Lower functions have a fast path for ascii where the functions
  * can be applied in place.
@@ -69,12 +70,17 @@ class UpperLowerTemplateFunction : public exec::VectorFunction {
         FlatVector<StringView>* results) {
       rows.applyToSelected([&](int row) {
         auto proxy = exec::StringWriter<>(results, row);
+        const auto input = decodedInput->valueAt<StringView>(row);
         if constexpr (isLower) {
-          stringImpl::lower<isAscii>(
-              proxy, decodedInput->valueAt<StringView>(row));
+          if constexpr (isAscii) {
+            stringImpl::lower<true>(proxy, input);
+          } else if (stringCore::isAscii(input.data(), input.size())) {
+            stringImpl::lower<true>(proxy, input);
+          } else {
+            stringImpl::lower<false>(proxy, input);
+          }
         } else {
-          stringImpl::upper<isAscii>(
-              proxy, decodedInput->valueAt<StringView>(row));
+          stringImpl::upper<isAscii>(proxy, input);
         }
         proxy.finalize();
       });
