@@ -273,18 +273,24 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
 
 template <typename T, bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitFixed(uint32_t col, const SplitBatch& batch) {
-  const auto& decoded = (*batch.decoded)[col];
+  auto& decoded = (*batch.decoded)[col];
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_->columnStream(col);
   uint8_t* __restrict cur = cursors(stream);
   char* __restrict base = cacheBase_ +
       ((static_cast<size_t>(stream) * numPartitions_) << 6);
   const uint32_t* __restrict row2pid = batch.row2Partition;
+  // nulls() merges wrapping nulls into a bitmap indexed by top-level row
+  // (materialized once per batch): one bit test replaces the isNullAt
+  // call - which the compiler declines to inline here - for identity and
+  // dictionary inputs alike.
+  const uint64_t* __restrict rawNulls =
+      kHasNulls ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
-      if (decoded.isNullAt(row)) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
             pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
@@ -302,18 +308,24 @@ void CachedCellFrontend::splitFixed(uint32_t col, const SplitBatch& batch) {
 
 template <typename T, bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitRawFixed(uint32_t col, const SplitBatch& batch) {
-  const auto& decoded = (*batch.decoded)[col];
+  auto& decoded = (*batch.decoded)[col];
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_->columnStream(col);
   uint8_t* __restrict cur = cursors(stream);
   char* __restrict base = cacheBase_ +
       ((static_cast<size_t>(stream) * numPartitions_) << 6);
   const uint32_t* __restrict row2pid = batch.row2Partition;
+  // nulls() merges wrapping nulls into a bitmap indexed by top-level row
+  // (materialized once per batch): one bit test replaces the isNullAt
+  // call - which the compiler declines to inline here - for identity and
+  // dictionary inputs alike.
+  const uint64_t* __restrict rawNulls =
+      kHasNulls ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
-      if (decoded.isNullAt(row)) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
             pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
@@ -331,18 +343,20 @@ void CachedCellFrontend::splitRawFixed(uint32_t col, const SplitBatch& batch) {
 
 template <bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
-  const auto& decoded = (*batch.decoded)[col];
+  auto& decoded = (*batch.decoded)[col];
   const StringView* __restrict views = decoded.data<StringView>();
   const uint32_t lengthStream = layout_->columnStream(col);
   const uint32_t dataStream = lengthStream + 1;
   uint8_t* __restrict lengthCur = cursors(lengthStream);
   uint8_t* __restrict dataCur = cursors(dataStream);
   const uint32_t* __restrict row2pid = batch.row2Partition;
+  const uint64_t* __restrict rawNulls =
+      kHasNulls ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
-      if (decoded.isNullAt(row)) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
             pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
@@ -405,17 +419,25 @@ void CachedCellFrontend::splitStringDict(
   uint8_t* __restrict dataCur = cursors(dataStream);
   DictState* __restrict states = dictStates_[col].data();
   const uint32_t* __restrict row2pid = batch.row2Partition;
-  // Identity mapping indexes the null bitmap by row: one bit test beats
-  // the isNullAt call the compiler declines to inline into this loop.
+  // nulls() merges wrapping nulls into a bitmap indexed by top-level row
+  // (materialized once per batch): one bit test replaces the isNullAt
+  // call for identity and dictionary inputs alike.
   const uint64_t* __restrict rawNulls =
-      kHasNulls && !kIndexed ? decoded.nulls() : nullptr;
+      kHasNulls ? decoded.nulls() : nullptr;
+  char* __restrict dictLineBase = cacheBase_ +
+      ((static_cast<size_t>(dataStream) * numPartitions_) << 6);
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
+    if (FOLLY_LIKELY(row + 8 < batch.numRows)) {
+      // With tens of thousands of partitions the dictionary lines
+      // (64B x P) blow past the caches and the probe's first load eats
+      // memory latency; the pid stream is known well ahead.
+      __builtin_prefetch(
+          dictLineBase + (static_cast<size_t>(row2pid[row + 8]) << 6));
+    }
     if constexpr (kHasNulls) {
-      const bool isNull =
-          kIndexed ? decoded.isNullAt(row) : bits::isBitNull(rawNulls, row);
-      if (isNull) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
             pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
