@@ -89,7 +89,13 @@ class BigDecimal {
     compactVal();
   }
 
-  void setScale(int newScale);
+  // Mirrors java.math.RoundingMode for the two modes Spark's round/bround use.
+  enum class RoundingMode {
+    kHalfUp, // ties away from zero
+    kHalfEven, // ties to the even neighbor
+  };
+
+  void setScale(int newScale, RoundingMode mode = RoundingMode::kHalfUp);
 
   int getScale() {
     return scale;
