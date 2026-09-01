@@ -105,15 +105,19 @@ class CachedCellFrontend final : public SplitFrontend {
   /// spill between two closes must not split a dictionary across Runs
   /// (spec section 5.4). While `mode` is dictionary, the column's length
   /// cache stages raw index bytes and its data cache stays empty.
-  /// 128 bytes, power-of-two stride: the per-row state address is a shift.
-  /// The dictionary is stored ONLY in its wire serialization,
-  /// [len][bytes][len][bytes]... - no unpacked lengths, offsets or key
-  /// shadows (a hard design constraint). The probe walks the boundary
-  /// chain, but each step is one 8-byte load that yields the length byte
-  /// and up to seven content bytes together, so a short value compares
-  /// whole in the same register and the walk never touches a second
-  /// stream of loads.
-  struct alignas(128) DictState {
+  /// Per (partition, dictionary column) bookkeeping only - 8 bytes. The
+  /// dictionary bytes themselves live in the column's DATA-stream cache
+  /// line, which is idle while the partition is in dictionary mode (hits
+  /// write nothing but an index byte to the length stream), in the wire
+  /// serialization [len][bytes][len][bytes]... with no unpacked lengths,
+  /// offsets or key shadows (a hard design constraint). The line's cursor
+  /// doubles as the serialized byte count. Only what the wire framing
+  /// needs (matched) plus mode and entry count lives here, an
+  /// L1-resident array. The probe walks the boundary chain in the line;
+  /// each step is one 8-byte load yielding the length byte and up to
+  /// seven content bytes together, so a short value compares whole in the
+  /// same register.
+  struct DictState {
     static constexpr uint8_t kModeDict = 0;
     static constexpr uint8_t kModeFallback = 1;
     /// Writer-side cap on entries per segment (the serialized budget would
@@ -124,22 +128,21 @@ class CachedCellFrontend final : public SplitFrontend {
     uint32_t matched{0}; // rows indexed by the open segment
     uint8_t mode{kModeDict};
     uint8_t entryCount{0};
-    uint8_t entryBytes{0}; // serialized [len][bytes] total, <= 63
-    /// Wire-form entries; close is a straight copy. Eight slack bytes at
-    /// the end keep the walk's 8-byte window load inside the array when it
-    /// anchors on the last boundary.
-    char entries[kDictSerializedBudget + 1 + 8];
+    uint8_t pad_[2]{};
   };
-  static_assert(sizeof(DictState) == 128, "keep the stride a shift");
+  static_assert(sizeof(DictState) == 8, "keep the sidecar a shift");
 
-  /// Writes the open segment as [entries][terminator][matched u32] into the
-  /// data stream and clears the open-segment fields. A segment with no
-  /// indexed row is written only when `last` requires the framing (a
-  /// demote before any hit still owes the empty sequence).
+  /// Writes the open segment - the data-stream cache line's dataCur[pid]
+  /// serialized bytes - as [entries][terminator][matched u32] into the
+  /// data stream cells, then clears the open-segment fields and the
+  /// cursor. A segment with no indexed row is written only when `last`
+  /// requires the framing (a demote before any hit still owes the empty
+  /// sequence).
   void closeDictSegment(
       uint32_t dataStream,
       uint32_t pid,
       DictState& st,
+      uint8_t* dataCur,
       bool last);
 
   /// Appends one non-null value of a dictionary-mode partition. `key` is
@@ -155,7 +158,8 @@ class CachedCellFrontend final : public SplitFrontend {
       DictState& st,
       const StringView& view,
       uint64_t key,
-      uint8_t* lengthCur);
+      uint8_t* lengthCur,
+      uint8_t* dataCur);
 
   template <typename T>
   void dispatchEncoded(uint32_t col, const SplitBatch& batch, bool hasNulls);
