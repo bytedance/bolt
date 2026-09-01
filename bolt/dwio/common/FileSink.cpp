@@ -79,13 +79,20 @@ void FileSink::writeImpl(
     std::vector<DataBuffer<char>>& buffers,
     const std::function<uint64_t(const DataBuffer<char>&)>& callback) {
   DWIO_ENSURE(!isClosed(), "Cannot write to closed sink.");
-  uint64_t size = 0;
-  for (auto& buf : buffers) {
-    size += callback(buf);
+  const uint64_t oldSize = size_;
+  uint64_t writeTimeUs{0};
+  {
+    MicrosecondTimer timer(&writeTimeUs);
+    for (auto& buf : buffers) {
+      // NOTE: we need to update 'size_' after each 'callback' invocation as
+      // some file sink implementation like MemorySink depends on the updated
+      // 'size_' for new write.
+      size_ += callback(buf);
+    }
   }
-  size_ += size;
   if (stats_ != nullptr) {
-    stats_->incRawBytesWritten(size);
+    stats_->incRawBytesWritten(size_ - oldSize);
+    stats_->incWriteIOTimeUs(writeTimeUs);
   }
   // Writing buffer is treated as transferring ownership. So clearing the
   // buffers after all buffers are written.
