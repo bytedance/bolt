@@ -65,7 +65,8 @@ class ThrustJITv2 {
 
   CompiledModuleSP CompileModule(
       std::function<bool(llvm::Module&)> irGenerator,
-      const std::string& funcName);
+      const std::string& funcName,
+      std::shared_ptr<void> userData = nullptr);
 
   CompiledModuleSP LookupSymbolsInCache(const std::string& funcName);
 

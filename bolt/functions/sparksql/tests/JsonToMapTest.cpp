@@ -27,6 +27,13 @@ class JsonToMapTest : public SparkFunctionBaseTest {
         expr, makeRowVector({makeFlatVector<StringView>({inputs[0]})}));
   }
 
+  void setJsonToMapEscapeControlChars(bool escapeControlChars) {
+    auto config = queryCtx_->queryConfig().rawConfigsCopy();
+    config[core::QueryConfig::kJsonToMapEscapeControlChars] =
+        std::to_string(escapeControlChars);
+    queryCtx_->testingOverrideConfigUnsafe(std::move(config));
+  }
+
   void testJsonToMap(
       const std::vector<StringView>& inputs,
       const std::vector<std::pair<StringView, std::optional<StringView>>>&
@@ -147,6 +154,7 @@ TEST_F(JsonToMapTest, unescapedControlChars) {
   // escaped, but the reference Hive UDF (backed by com.jsoniter) accepts raw
   // control chars and keeps them verbatim in the values. json_to_map must
   // match that lenient behavior instead of returning SQL NULL.
+  setJsonToMapEscapeControlChars(true);
   {
     // Raw newlines embedded in several values; they must be preserved.
     StringView json =
@@ -176,6 +184,17 @@ TEST_F(JsonToMapTest, unescapedControlChars) {
     StringView json = StringView("{\"key\nname\":\"v\"}");
     testJsonToMap({json}, {{StringView("key\nname"), "v"}});
   }
+}
+
+TEST_F(JsonToMapTest, unescapedControlCharsRetryConfig) {
+  const StringView json = StringView("{\"k\":\"a\nb\"}");
+  setJsonToMapEscapeControlChars(false);
+  auto result = evaluateJsonToMap({json});
+  auto expected = makeNullableMapVector<StringView, StringView>({std::nullopt});
+  assertEqualVectors(expected, result);
+
+  setJsonToMapEscapeControlChars(true);
+  testJsonToMap({json}, {{"k", StringView("a\nb")}});
 }
 
 TEST_F(JsonToMapTest, numericValuesPreserveOriginalText) {

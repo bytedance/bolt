@@ -225,6 +225,9 @@ class QueryConfig {
 
   static constexpr const char* kMinOutputBatchRows = "min_output_batch_rows";
 
+  static constexpr const char* kTableScanReusableOutputCount =
+      "table_scan_reusable_output_count";
+
   /// TableScan operator will exit getOutput() method after this many
   /// milliseconds even if it has no data to return yet. Zero means 'no time
   /// limit'.
@@ -753,6 +756,10 @@ class QueryConfig {
 
   static constexpr const char* kEnableSonicJsonToMap = "sonic.json_to_map";
 
+  /// Whether json_to_map escapes raw control chars and retries parse.
+  static constexpr const char* kJsonToMapEscapeControlChars =
+      "json_to_map_escape_control_chars";
+
   static constexpr const char* kEnableSonicIsJsonScalar =
       "sonic.is_json_scalar";
 
@@ -974,6 +981,10 @@ class QueryConfig {
 
   uint32_t minOutputBatchRows() const {
     return get<uint32_t>(kMinOutputBatchRows, 1);
+  }
+
+  uint32_t tableScanReusableOutputCount() const {
+    return get<uint32_t>(kTableScanReusableOutputCount, 0);
   }
 
   uint32_t tableScanGetOutputTimeLimitMs() const {
@@ -1691,6 +1702,10 @@ class QueryConfig {
 
   bool enableSonicJsonToMap() const {
     return get<bool>(kEnableSonicJsonToMap, true);
+  }
+
+  bool jsonToMapEscapeControlChars() const {
+    return get<bool>(kJsonToMapEscapeControlChars, true);
   }
 
   bool enableSonicIsJsonScalar() const {

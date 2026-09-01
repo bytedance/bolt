@@ -40,6 +40,12 @@ using namespace bytedance::bolt::memory;
 constexpr int64_t kMemoryFootprintIncrement = MemoryAllocator::kMaxAlignment;
 namespace bytedance::bolt::memory {
 
+namespace {
+MemoryPool& systemRootPool(MemoryManager& manager) {
+  return *manager.spillPool()->parent();
+}
+} // namespace
+
 class BenchmarkHelper {
  public:
   explicit BenchmarkHelper(MemoryManager& manager)
@@ -47,7 +53,7 @@ class BenchmarkHelper {
 
   std::vector<MemoryPool*> findLeaves() {
     std::vector<MemoryPool*> leaves;
-    findLeavesOf(manager_.testingDefaultRoot(), leaves);
+    findLeavesOf(systemRootPool(manager_), leaves);
     return leaves;
   }
 
@@ -170,7 +176,7 @@ void addNLeaves(MemoryPool& pool, size_t n) {
 BENCHMARK(FlatTree, iters) {
   folly::BenchmarkSuspender suspender;
   MemoryManager manager{};
-  addNLeaves(manager.deprecatedSysRootPool(), 10 * 20);
+  addNLeaves(systemRootPool(manager), 10 * 20);
   BenchmarkHelper helper{manager};
   suspender.dismiss();
   helper.runForEachPool([iters](MemoryPool& pool) {
