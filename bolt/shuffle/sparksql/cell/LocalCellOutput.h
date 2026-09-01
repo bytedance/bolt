@@ -84,6 +84,17 @@ class LocalCellOutput final : public CellOutput {
   /// was compressed at spill time, else through the compressing run writer.
   void writeSpilledSegment(std::FILE* out, uint64_t begin, uint64_t end);
 
+  /// Coalesced merge: reads every spilled segment of one partition
+  /// (decompressing the ones compressed at spill time), lays their bytes
+  /// out stream-major in gather_, and appends the still-resident cells -
+  /// when `resident` is set - as the chronologically last piece of every
+  /// stream. Fills the per-stream sizes and returns the total.
+  uint64_t gatherPartitionRuns(
+      const std::vector<std::pair<uint64_t, uint64_t>>& segments,
+      const CellWindowInput* resident,
+      uint32_t pid,
+      std::vector<uint64_t>& streamSizes);
+
   /// Compression policy shared by spill and merge: points `body`/`stored`
   /// at the COMBINED form when the codec shrinks the bytes, else at the
   /// input (spec section 5: fall back to the stored form when compression
@@ -131,6 +142,7 @@ class LocalCellOutput final : public CellOutput {
   /// streaming the run out uncompressed instead of failing.
   PoolBytes runScratch_;
   PoolBytes compressScratch_;
+  PoolBytes gather_;
 
   std::FILE* spillFile_{nullptr};
   int spillFd_{-1};
