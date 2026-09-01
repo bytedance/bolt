@@ -41,7 +41,9 @@ CachedCellFrontend::CachedCellFrontend(
       static_cast<size_t>(numPartitions_) * numStreams_ * kBlockSourceBytes;
   const size_t cursorBytes =
       static_cast<size_t>(numPartitions_) * numStreams_;
-  cacheBase_ = arena_.allocateFixed(cacheBytes, kBlockSourceBytes);
+  // + 8: the dictionary walk's 8-byte window may anchor near the end of
+  // the very last cache line.
+  cacheBase_ = arena_.allocateFixed(cacheBytes + 8, kBlockSourceBytes);
   cursors_ = reinterpret_cast<uint8_t*>(arena_.allocateFixed(cursorBytes, 64));
   ::memset(cursors_, 0, cursorBytes);
   residentBytes_ = static_cast<int64_t>(cacheBytes + cursorBytes) +
@@ -96,21 +98,23 @@ void CachedCellFrontend::closeDictSegment(
     uint32_t dataStream,
     uint32_t pid,
     DictState& st,
+    uint8_t* dataCur,
     bool last) {
   // The whole framing lands in one append: DataCells::append copies only
   // after every needed cell is held, so a spill fired inside the grow sees
   // none of these bytes and the dictionary never crosses a Run boundary
   // (spec section 5.4).
+  const uint32_t serialized = dataCur[pid];
   uint8_t buf[kDictSerializedBudget + 1 + 1 + 4];
-  ::memcpy(buf, st.entries, st.entryBytes);
-  buf[st.entryBytes] = last ? kDictLastMarker : kDictMoreMarker;
-  ::memcpy(buf + st.entryBytes + 1, &st.matched, 4);
-  const uint32_t bytes = st.entryBytes + 5;
+  ::memcpy(buf, cacheLine(dataStream, pid), serialized);
+  buf[serialized] = last ? kDictLastMarker : kDictMoreMarker;
+  ::memcpy(buf + serialized + 1, &st.matched, 4);
+  const uint32_t bytes = serialized + 5;
   cells_->append(pid, dataStream, buf, bytes, beforeGrow_);
   bumpPartitionBytes(pid, bytes);
   st.matched = 0;
   st.entryCount = 0;
-  st.entryBytes = 0;
+  dataCur[pid] = 0;
 }
 
 FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
@@ -120,21 +124,28 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
     DictState& st,
     const StringView& view,
     uint64_t key,
-    uint8_t* lengthCur) {
+    uint8_t* lengthCur,
+    uint8_t* dataCur) {
   const uint32_t size = static_cast<uint32_t>(key);
   // An entry costs 1 + size serialized bytes and one dictionary is capped
   // at 63 (reader L1 rule): a value that can never fit alone can never be
   // an entry, and the format only allows a fallback tail after that.
   if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
     const uint32_t count = st.entryCount;
+    // The dictionary lives in the column's idle data-stream cache line in
+    // its serialized [len][bytes]... form, the cursor holding the
+    // serialized byte count; the walk over entry boundaries is inherent,
+    // so each step is made as cheap as the form allows: one 8-byte window
+    // load per entry yields the length byte AND up to seven content
+    // bytes, so a short value - the common dictionary shape - compares
+    // whole in the same register, and the walk issues exactly one load
+    // per entry. A window anchored at the last boundary may read past the
+    // line into the neighbour's staged bytes (the arena leaves tail
+    // slack); the needle's leading length byte makes a match impossible
+    // outside a real entry, so the garbage is inert.
+    const char* entries = cacheLine(dataStream, pid);
     uint32_t i = 0;
     uint32_t off = 0;
-    // The dictionary is stored only in its serialized [len][bytes]... form;
-    // the walk over entry boundaries is inherent, so each step is made as
-    // cheap as the form allows: one 8-byte window load per entry yields the
-    // length byte AND up to seven content bytes, so a short value - the
-    // common dictionary shape - compares whole in the same register, and
-    // the walk issues exactly one load per entry.
     if (FOLLY_LIKELY(size <= 7)) {
       // Values up to 7 chars are always inline in the StringView, whose
       // bytes 4..11 hold the zero-padded characters: the whole value in
@@ -155,7 +166,7 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
       uint32_t hit = count;
       for (uint32_t k = 0; k < count; ++k) {
         uint64_t window;
-        ::memcpy(&window, st.entries + off, 8);
+        ::memcpy(&window, entries + off, 8);
         if ((window & needleMask) == needle) {
           hit = k; // at most once; compiles to a flag-carrying select
         }
@@ -164,10 +175,9 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
       i = hit;
     } else {
       for (; i < count; ++i) {
-        const uint32_t len =
-            static_cast<uint8_t>(st.entries[off]);
+        const uint32_t len = static_cast<uint8_t>(entries[off]);
         if (len == size &&
-            ::memcmp(st.entries + off + 1, view.data(), size) == 0) {
+            ::memcmp(entries + off + 1, view.data(), size) == 0) {
           break;
         }
         off += 1 + len;
@@ -178,11 +188,11 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
       // closes, and its hit rate decides between a successor segment
       // seeded with this value and the permanent fallback tail.
       if (count == DictState::kMaxEntries ||
-          st.entryBytes + 1 + size > kDictSerializedBudget) {
+          dataCur[pid] + 1 + size > kDictSerializedBudget) {
         if (st.matched >= kDictSegmentContinueFactor * count) {
-          closeDictSegment(dataStream, pid, st, /*last=*/false);
+          closeDictSegment(dataStream, pid, st, dataCur, /*last=*/false);
         } else {
-          closeDictSegment(dataStream, pid, st, /*last=*/true);
+          closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
           st.mode = DictState::kModeFallback;
           // Pending index bytes flush raw before the first staged
           // fallback length reuses the cache line.
@@ -192,9 +202,10 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
           return false;
         }
       }
-      st.entries[st.entryBytes] = static_cast<char>(size);
-      ::memcpy(st.entries + st.entryBytes + 1, view.data(), size);
-      st.entryBytes += static_cast<uint8_t>(1 + size);
+      char* line = cacheLine(dataStream, pid);
+      line[dataCur[pid]] = static_cast<char>(size);
+      ::memcpy(line + dataCur[pid] + 1, view.data(), size);
+      dataCur[pid] += static_cast<uint8_t>(1 + size);
       i = st.entryCount++;
     }
     ++st.matched;
@@ -207,7 +218,7 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
   // A value too long for any entry: the format only allows a fallback
   // tail, so this partition demotes now (an empty sequence is still owed
   // when no segment was ever written).
-  closeDictSegment(dataStream, pid, st, /*last=*/true);
+  closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
   st.mode = DictState::kModeFallback;
   if (lengthCur[pid] > 0) {
     flushRaw(lengthStream, pid, lengthCur);
@@ -378,7 +389,8 @@ void CachedCellFrontend::splitStringDict(
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
         appendDictValue(
-            lengthStream, dataStream, pid, st, view, key, lengthCur)) {
+            lengthStream, dataStream, pid, st, view, key, lengthCur,
+            dataCur)) {
       continue;
     }
 
@@ -527,6 +539,7 @@ void CachedCellFrontend::flushAll() {
     const uint32_t lengthStream = layout_->columnStream(col);
     const uint32_t dataStream = lengthStream + 1;
     uint8_t* lengthCur = cursors(lengthStream);
+    uint8_t* dataCur = cursors(dataStream);
     auto* states = dictStates_[col].data();
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
       DictState& st = states[pid];
@@ -539,7 +552,9 @@ void CachedCellFrontend::flushAll() {
       if (lengthCur[pid] > 0) {
         flushRaw(lengthStream, pid, lengthCur);
       }
-      closeDictSegment(dataStream, pid, st, /*last=*/true);
+      // Also zeroes the data cursor, so the generic loop below cannot
+      // mistake the dictionary bytes for staged fallback chars.
+      closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
     }
   }
   for (uint32_t stream = 0; stream < numStreams_; ++stream) {
@@ -584,7 +599,6 @@ void CachedCellFrontend::resetWindowStats() {
       st.matched = 0;
       st.mode = DictState::kModeDict;
       st.entryCount = 0;
-      st.entryBytes = 0;
     }
   }
 }
