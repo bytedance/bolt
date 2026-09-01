@@ -297,6 +297,56 @@ Scenario makeDictStringScenario(
   return scenario;
 }
 
+/// Production shape: tens of thousands of partitions, dictionary-wrapped
+/// inputs (the scan-side norm, forcing the indexed row loop), a
+/// mixed-length dictionary vocabulary and nulls. With so many partitions
+/// every destination line and tail cell goes cold between touches.
+Scenario makeProdScenario(int32_t numPartitions, int32_t numBatches) {
+  std::mt19937 rng(41);
+  const std::vector<std::string> vocab = {
+      "us",
+      "euro",
+      "yuan",
+      "franc",
+      "krona",
+      "peso",
+      "real",
+      "rupee",
+      "won",
+      "zloty",
+      "baht",
+      "lira"};
+  Scenario scenario{
+      "prod_P" + std::to_string(numPartitions), numPartitions, {}};
+  for (int b = 0; b < numBatches; ++b) {
+    std::vector<int64_t> keys(kRowsPerBatch);
+    std::vector<std::string> values(kRowsPerBatch);
+    std::vector<bool> nulls(kRowsPerBatch);
+    for (int i = 0; i < kRowsPerBatch; ++i) {
+      keys[i] = static_cast<int64_t>(rng());
+      nulls[i] = rng() % 10 == 0;
+      values[i] = vocab[rng() % vocab.size()];
+    }
+    auto indices =
+        AlignedBuffer::allocate<vector_size_t>(kRowsPerBatch, leafPool());
+    auto* rawIndices = indices->asMutable<vector_size_t>();
+    for (int i = 0; i < kRowsPerBatch; ++i) {
+      rawIndices[i] = i;
+    }
+    std::shuffle(rawIndices, rawIndices + kRowsPerBatch, rng);
+    const auto wrap = [&](VectorPtr base) {
+      return BaseVector::wrapInDictionary(
+          nullptr, indices, kRowsPerBatch, std::move(base));
+    };
+    scenario.batches.push_back(makeBatch(
+        {"key", "cur"},
+        {makePids(numPartitions, rng),
+         wrap(makeFlat(keys)),
+         wrap(makeStrings(values, nulls))}));
+  }
+  return scenario;
+}
+
 const std::vector<Scenario>& scenarios() {
   static std::vector<Scenario> all = [] {
     std::vector<Scenario> s;
@@ -322,6 +372,8 @@ const std::vector<Scenario>& scenarios() {
     // Dictionary-friendly strings, random and clustered order.
     s.push_back(makeDictStringScenario(1024, 1024, "big", false));
     s.push_back(makeDictStringScenario(1024, 1024, "clusbig", true));
+    // Production shape: huge P, indexed inputs, mixed-length vocabulary.
+    s.push_back(makeProdScenario(30000, 256));
     return s;
   }();
   return all;
@@ -456,6 +508,16 @@ BENCHMARK_MULTI(split_strdictclusbig_P1024_CellNoDict) {
 }
 BENCHMARK_MULTI(split_strdictclusbig_P1024_V1) {
   return runWriter(1, scenarios()[11]);
+}
+BENCHMARK_DRAW_LINE();
+BENCHMARK_MULTI(split_prod_P30000_Cell) {
+  return runWriter(4, scenarios()[12]);
+}
+BENCHMARK_MULTI(split_prod_P30000_CellNoDict) {
+  return runWriter(4, scenarios()[12], /*disableDict=*/true);
+}
+BENCHMARK_MULTI(split_prod_P30000_V1) {
+  return runWriter(1, scenarios()[12]);
 }
 BENCHMARK_DRAW_LINE();
 
