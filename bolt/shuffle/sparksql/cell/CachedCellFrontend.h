@@ -125,10 +125,17 @@ class CachedCellFrontend final : public SplitFrontend {
     /// closes, which only costs a few framing bytes on degenerate
     /// vocabularies). Also bounds the boundary walk.
     static constexpr uint32_t kMaxEntries = 16;
+    /// uniformLen values: every entry so far has this length (dictionary
+    /// vocabularies usually do), so boundaries are arithmetic and the
+    /// probe's loads are independent - and a value of any other length
+    /// cannot match at all. kUniformMixed disables the shortcut.
+    static constexpr uint8_t kUniformUnset = 0xFF;
+    static constexpr uint8_t kUniformMixed = 0xFE;
     uint32_t matched{0}; // rows indexed by the open segment
     uint8_t mode{kModeDict};
     uint8_t entryCount{0};
-    uint8_t pad_[2]{};
+    uint8_t uniformLen{kUniformUnset};
+    uint8_t pad_{0};
   };
   static_assert(sizeof(DictState) == 8, "keep the sidecar a shift");
 
