@@ -340,6 +340,26 @@ TEST_F(ParquetWriterTest, defaultCreatedBy) {
   EXPECT_EQ(::bytedance::bolt::BuildInfo::shortHash, version.build_);
 }
 
+TEST_F(ParquetWriterTest, optionallyReplacesInvalidUtf8) {
+  auto schema = ROW({"value"}, {VARCHAR()});
+  auto input = makeRowVector({makeFlatVector<std::string>(
+      {std::string("\xD5", 1), std::string("\xC2\xA2", 2), "ascii"})});
+
+  auto defaultPath = tempPath_->path + "/invalidUtf8Default.parquet";
+  assertWrite(defaultPath, input->size(), schema, input);
+
+  auto sanitizedPath = tempPath_->path + "/invalidUtf8Sanitized.parquet";
+  vp::WriterOptions writerOptions;
+  writerOptions.replaceInvalidUtf8 = true;
+  auto writer = createLocalWriter(sanitizedPath, schema, writerOptions);
+  writer->write(input);
+  writer->close();
+
+  auto expected = makeRowVector({makeFlatVector<std::string>(
+      {std::string("\xEF\xBF\xBD", 3), std::string("\xC2\xA2", 2), "ascii"})});
+  assertRead(sanitizedPath, input->size(), schema, expected);
+}
+
 TEST_F(ParquetWriterTest, lz4Hadoop) {
   const int64_t kRows = 10'000'000;
   bytedance::bolt::type::fbhive::HiveTypeParser parser;

@@ -29,6 +29,7 @@
  */
 
 #include "bolt/dwio/parquet/writer/Writer.h"
+
 #include <arrow/array.h>
 #include <arrow/c/bridge.h>
 #include <arrow/io/interfaces.h>
@@ -45,6 +46,7 @@
 #include "bolt/dwio/parquet/arrow/Writer.h"
 #include "bolt/dwio/parquet/writer/ArrowDataBufferSink.h"
 #include "bolt/exec/MemoryReclaimer.h"
+#include "bolt/vector/Utf8Utils.h"
 #include "bolt/vector/arrow/Bridge.h"
 
 #include <iostream>
@@ -212,6 +214,8 @@ std::string WriterOptionsToString(const WriterOptions& options) {
   oss << "WriterOptions:" << std::endl;
   oss << "  enableDictionary: " << (options.enableDictionary ? "true" : "false")
       << std::endl;
+  oss << "  replaceInvalidUtf8: "
+      << (options.replaceInvalidUtf8 ? "true" : "false") << std::endl;
   oss << "  columnEnableDictionaryMap: {";
   for (const auto& [key, value] : options.columnEnableDictionaryMap) {
     oss << key << ": " << (value ? "true" : "false") << ", ";
@@ -457,6 +461,7 @@ Writer::Writer(
       arrowSchemaFromHive_(std::move(arrowSchema)),
       bufferGrowRatio_(options.bufferGrowRatio),
       bufferReserveRatio_(options.bufferReserveRatio),
+      replaceInvalidUtf8_(options.replaceInvalidUtf8),
       enableRowGroupAlignedWrite_(options.enableRowGroupAlignedWrite),
       expectedRowsInEachBlock_(options.expectedRowsInEachBlock),
       enableFlushBasedOnBlockSize_(options.enableFlushBasedOnBlockSize),
@@ -666,26 +671,32 @@ void Writer::write(const VectorPtr& data) {
       data->type()->equivalent(*schema_),
       "The file schema type should be equal with the input rowvector type.");
 
+  VectorPtr writeData = data;
+  if (replaceInvalidUtf8_) {
+    writeData = utf8::replaceInvalidUtf8InTopLevelVarchars(
+        std::static_pointer_cast<RowVector>(data), generalPool_.get());
+  }
+
   if (!arrowContext_->schema) {
-    initializeArrowSchema(data);
+    initializeArrowSchema(writeData);
     if (enableRowGroupAlignedWrite_ || !enableFlushBasedOnBlockSize_) {
       arrowContext_->stagingChunks.resize(arrowContext_->schema->num_fields());
     }
   }
 
   if (!enableRowGroupAlignedWrite_ && enableFlushBasedOnBlockSize_) {
-    splitWriteRecordBatch(data);
+    splitWriteRecordBatch(writeData);
     return;
   }
 
   ArrowArray array;
-  exportToArrow(data, array, exportPool_.get(), options_);
+  exportToArrow(writeData, array, exportPool_.get(), options_);
   PARQUET_ASSIGN_OR_THROW(
       auto recordBatch,
       ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
 
-  auto bytes = data->estimateFlatSize();
-  auto numRows = data->size();
+  auto bytes = writeData->estimateFlatSize();
+  auto numRows = writeData->size();
   if (enableRowGroupAlignedWrite_) {
     rowGroupAlignedFlush(numRows, bytes, recordBatch);
     return;

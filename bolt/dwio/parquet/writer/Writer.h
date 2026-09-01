@@ -208,6 +208,9 @@ struct WriterOptions {
   // and a global static thread pool with this number of threads is created.
   // If 0 or less, threading is disabled (`set_use_threads` is set to false).
   int32_t threadPoolSize = 0;
+  // Replaces malformed UTF-8 in top-level VARCHAR columns before writing.
+  // Disabled by default so regular Parquet writes preserve their input bytes.
+  bool replaceInvalidUtf8 = false;
 
   std::shared_ptr<arrow::WriterProperties::Builder> getWriterPropertiesBuilder(
       arrow::MemoryPool* arrowPool) const;
@@ -306,6 +309,7 @@ class Writer : public dwio::common::Writer {
 
   const double bufferGrowRatio_;
   const double bufferReserveRatio_;
+  const bool replaceInvalidUtf8_;
   const bool enableRowGroupAlignedWrite_;
   const std::vector<int32_t> expectedRowsInEachBlock_;
   const bool enableFlushBasedOnBlockSize_;
