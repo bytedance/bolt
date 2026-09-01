@@ -114,6 +114,7 @@ void CachedCellFrontend::closeDictSegment(
   bumpPartitionBytes(pid, bytes);
   st.matched = 0;
   st.entryCount = 0;
+  st.uniformLen = DictState::kUniformUnset;
   dataCur[pid] = 0;
 }
 
@@ -144,43 +145,82 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
     // slack); the needle's leading length byte makes a match impossible
     // outside a real entry, so the garbage is inert.
     const char* entries = cacheLine(dataStream, pid);
-    uint32_t i = 0;
-    uint32_t off = 0;
-    if (FOLLY_LIKELY(size <= 7)) {
-      // Values up to 7 chars are always inline in the StringView, whose
-      // bytes 4..11 hold the zero-padded characters: the whole value in
-      // one register, no data() branch.
+    const uint32_t uniform = st.uniformLen;
+    uint32_t i;
+    if (FOLLY_LIKELY(uniform == size)) {
+      // Every entry has exactly the value's length (the usual dictionary
+      // vocabulary shape): boundaries are arithmetic, stride 1 + size, so
+      // the probe's window loads carry no boundary chain and all issue in
+      // parallel. Values up to 7 chars are always inline in the
+      // StringView, whose bytes 4..11 hold the zero-padded characters:
+      // the whole value in one register, no data() branch; length byte
+      // and content compare as one masked word, needle = [size][chars].
       //
-      // Branchless full walk. An early-exit walk mispredicts once per row
-      // (the hit position is data-dependent); walking all entries with a
-      // fixed, perfectly predicted trip count and accumulating the hit
-      // with a conditional move is cheaper. Entries are unique by
-      // construction, so at most one step matches and a plain cmov
-      // accumulation is exact. Length byte and content compare as one
-      // masked word: needle = [size][chars...].
-      uint64_t value;
-      ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
-      const uint64_t needle = (value << 8) | size;
-      const uint64_t needleMask =
-          (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
+      // The walk is branchless with a fixed trip count: an early-exit
+      // loop mispredicts once per row on the data-dependent hit position;
+      // entries are unique by construction, so at most one step matches
+      // and a plain conditional-move accumulation is exact.
+      const uint32_t stride = 1 + size;
       uint32_t hit = count;
-      for (uint32_t k = 0; k < count; ++k) {
-        uint64_t window;
-        ::memcpy(&window, entries + off, 8);
-        if ((window & needleMask) == needle) {
-          hit = k; // at most once; compiles to a flag-carrying select
+      if (FOLLY_LIKELY(size <= 7)) {
+        uint64_t value;
+        ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+        const uint64_t needle = (value << 8) | size;
+        const uint64_t needleMask =
+            (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
+        uint32_t off = 0;
+        for (uint32_t k = 0; k < count; ++k) {
+          uint64_t window;
+          ::memcpy(&window, entries + off, 8);
+          if ((window & needleMask) == needle) {
+            hit = k;
+          }
+          off += stride;
         }
-        off += 1 + static_cast<uint32_t>(window & 0xFF);
+      } else {
+        const char* data = view.data();
+        for (uint32_t k = 0; k < count; ++k) {
+          if (::memcmp(entries + k * stride + 1, data, size) == 0) {
+            hit = k;
+            break;
+          }
+        }
       }
       i = hit;
+    } else if (uniform != DictState::kUniformMixed) {
+      // A uniform dictionary of a different length (or an empty one): no
+      // entry can match this value, no walk at all.
+      i = count;
     } else {
-      for (; i < count; ++i) {
-        const uint32_t len = static_cast<uint8_t>(entries[off]);
-        if (len == size &&
-            ::memcmp(entries + off + 1, view.data(), size) == 0) {
-          break;
+      // Mixed lengths: the serial boundary walk, one 8-byte window load
+      // per entry yielding the length byte and up to seven content bytes.
+      uint32_t off = 0;
+      i = 0;
+      if (FOLLY_LIKELY(size <= 7)) {
+        uint64_t value;
+        ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+        const uint64_t needle = (value << 8) | size;
+        const uint64_t needleMask =
+            (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
+        uint32_t hit = count;
+        for (uint32_t k = 0; k < count; ++k) {
+          uint64_t window;
+          ::memcpy(&window, entries + off, 8);
+          if ((window & needleMask) == needle) {
+            hit = k; // at most once; compiles to a flag-carrying select
+          }
+          off += 1 + static_cast<uint32_t>(window & 0xFF);
         }
-        off += 1 + len;
+        i = hit;
+      } else {
+        for (; i < count; ++i) {
+          const uint32_t len = static_cast<uint8_t>(entries[off]);
+          if (len == size &&
+              ::memcmp(entries + off + 1, view.data(), size) == 0) {
+            break;
+          }
+          off += 1 + len;
+        }
       }
     }
     if (FOLLY_UNLIKELY(i == count)) {
@@ -206,6 +246,11 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
       line[dataCur[pid]] = static_cast<char>(size);
       ::memcpy(line + dataCur[pid] + 1, view.data(), size);
       dataCur[pid] += static_cast<uint8_t>(1 + size);
+      if (st.entryCount == 0) {
+        st.uniformLen = static_cast<uint8_t>(size);
+      } else if (st.uniformLen != size) {
+        st.uniformLen = DictState::kUniformMixed;
+      }
       i = st.entryCount++;
     }
     ++st.matched;
@@ -599,6 +644,7 @@ void CachedCellFrontend::resetWindowStats() {
       st.matched = 0;
       st.mode = DictState::kModeDict;
       st.entryCount = 0;
+      st.uniformLen = DictState::kUniformUnset;
     }
   }
 }
