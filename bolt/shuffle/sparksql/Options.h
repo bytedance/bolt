@@ -125,6 +125,13 @@ struct CellShuffleOptions {
   // written twice), at the price of codec time at the spill point instead
   // of at stop.
   bool compressSpill = true;
+  // Merge every spilled run of a payload into a single run at finalize:
+  // one run header (1 + 8 + 8 x streams bytes) and one compression
+  // context per partition instead of one per spill. With tens of
+  // thousands of partitions, many columns and frequent spills the
+  // per-run costs dominate the file otherwise; the price is
+  // decompressing spilled segments once during the merge.
+  bool coalesceMergedRuns = true;
   // String dictionary writing (spec section 8). One probe over the first
   // batch decides per string column, for the writer's lifetime, whether to
   // write dictionary form; a wrongly enabled column self-heals per

@@ -83,6 +83,7 @@ LocalCellOutput::LocalCellOutput(
       cellOptions_(cellOptions),
       runScratch_(pool),
       compressScratch_(pool),
+      gather_(pool),
       scratch_(pool) {
   if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
     codec_ = createCodec(
@@ -302,6 +303,102 @@ void LocalCellOutput::writeRun(
   writeOut(out, body, stored);
 }
 
+uint64_t LocalCellOutput::gatherPartitionRuns(
+    const std::vector<std::pair<uint64_t, uint64_t>>& segments,
+    const CellWindowInput* resident,
+    uint32_t pid,
+    std::vector<uint64_t>& streamSizes) {
+  const uint32_t numStreams = layout_->numStreams();
+  const uint64_t runHeaderBytes = 1 + 8 + 8ull * numStreams;
+  streamSizes.assign(numStreams, 0);
+
+  // Pass 1: per-stream totals from the segment headers and the cells.
+  std::vector<uint8_t> layouts(segments.size());
+  std::vector<uint64_t> storedSizes(segments.size());
+  std::vector<uint64_t> segSizes(segments.size() * numStreams);
+  for (size_t i = 0; i < segments.size(); ++i) {
+    uint8_t head[9];
+    readSpill(segments[i].first, head, sizeof(head));
+    layouts[i] = head[0];
+    ::memcpy(&storedSizes[i], head + 1, 8);
+    readSpill(
+        segments[i].first + sizeof(head),
+        segSizes.data() + i * numStreams,
+        8ull * numStreams);
+    for (uint32_t s = 0; s < numStreams; ++s) {
+      streamSizes[s] += segSizes[i * numStreams + s];
+    }
+  }
+  if (resident != nullptr) {
+    for (uint32_t s = 0; s < numStreams; ++s) {
+      streamSizes[s] += resident->cells->bytes(pid, s);
+    }
+  }
+  uint64_t total = 0;
+  std::vector<uint64_t> cursor(numStreams);
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    cursor[s] = total;
+    total += streamSizes[s];
+  }
+  gather_.clear();
+  gather_.resize(total);
+
+  // Pass 2: one sequential read per segment, then scatter per stream.
+  for (size_t i = 0; i < segments.size(); ++i) {
+    uint64_t dataBytes = 0;
+    for (uint32_t s = 0; s < numStreams; ++s) {
+      dataBytes += segSizes[i * numStreams + s];
+    }
+    const char* body;
+    if (layouts[i] == static_cast<uint8_t>(RunLayout::kCombined)) {
+      runScratch_.clear();
+      runScratch_.resize(storedSizes[i]);
+      readSpill(
+          segments[i].first + runHeaderBytes,
+          runScratch_.data(),
+          storedSizes[i]);
+      compressScratch_.clear();
+      compressScratch_.resize(dataBytes);
+      const int64_t decoded = codec_->decompress(
+          reinterpret_cast<const uint8_t*>(runScratch_.data()),
+          static_cast<int64_t>(storedSizes[i]),
+          reinterpret_cast<uint8_t*>(compressScratch_.data()),
+          static_cast<int64_t>(dataBytes));
+      BOLT_CHECK_EQ(
+          decoded,
+          static_cast<int64_t>(dataBytes),
+          "corrupt cell spill segment");
+      body = compressScratch_.data();
+    } else {
+      BOLT_CHECK_EQ(
+          layouts[i],
+          static_cast<uint8_t>(RunLayout::kCombinedStored),
+          "corrupt cell spill segment");
+      runScratch_.clear();
+      runScratch_.resize(dataBytes);
+      readSpill(segments[i].first + runHeaderBytes, runScratch_.data(),
+                dataBytes);
+      body = runScratch_.data();
+    }
+    uint64_t off = 0;
+    for (uint32_t s = 0; s < numStreams; ++s) {
+      const uint64_t bytes = segSizes[i * numStreams + s];
+      ::memcpy(gather_.data() + cursor[s], body + off, bytes);
+      cursor[s] += bytes;
+      off += bytes;
+    }
+  }
+  if (resident != nullptr) {
+    for (uint32_t s = 0; s < numStreams; ++s) {
+      resident->cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
+        ::memcpy(gather_.data() + cursor[s], data, bytes);
+        cursor[s] += bytes;
+      });
+    }
+  }
+  return total;
+}
+
 void LocalCellOutput::writeDiskPayload(
     std::FILE* out,
     const SealedWindow& w,
@@ -311,12 +408,17 @@ void LocalCellOutput::writeDiskPayload(
   if (rows == 0) {
     return;
   }
-  const uint32_t numStreams = layout_->numStreams();
-  const uint64_t runHeaderBytes = 1 + 8 + 8ull * numStreams;
-  uint32_t runCount = 0;
+  std::vector<std::pair<uint64_t, uint64_t>> segments;
+  segments.reserve(w.runPidEnds.size());
   for (const auto& ends : w.runPidEnds) {
-    runCount += ends[pid + 1] > ends[pid] ? 1 : 0;
+    if (ends[pid + 1] > ends[pid]) {
+      segments.emplace_back(ends[pid], ends[pid + 1]);
+    }
   }
+  const bool coalesce = cellOptions_.coalesceMergedRuns;
+  const uint32_t runCount = coalesce
+      ? (segments.empty() ? 0 : 1)
+      : static_cast<uint32_t>(segments.size());
   scratch_.clear();
   appendLe32(scratch_, rows);
   appendLe32(scratch_, runCount);
@@ -330,10 +432,17 @@ void LocalCellOutput::writeDiskPayload(
   rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
 
-  for (const auto& ends : w.runPidEnds) {
-    if (ends[pid + 1] > ends[pid]) {
-      writeSpilledSegment(out, ends[pid], ends[pid + 1]);
+  if (coalesce) {
+    if (!segments.empty()) {
+      std::vector<uint64_t> streamSizes;
+      const uint64_t total =
+          gatherPartitionRuns(segments, nullptr, pid, streamSizes);
+      writeRun(out, gather_.data(), total, streamSizes.data());
     }
+    return;
+  }
+  for (const auto& segment : segments) {
+    writeSpilledSegment(out, segment.first, segment.second);
   }
 }
 
@@ -392,9 +501,20 @@ void LocalCellOutput::writeCurrentWindowPayload(
   for (uint32_t s = 0; s < numStreams; ++s) {
     total += in.cells->bytes(pid, s);
   }
-  uint32_t runCount = total > 0 ? 1 : 0;
+  std::vector<std::pair<uint64_t, uint64_t>> segments;
+  segments.reserve(openWindowRuns_.size());
   for (const auto& ends : openWindowRuns_) {
-    runCount += ends[pid + 1] > ends[pid] ? 1 : 0;
+    if (ends[pid + 1] > ends[pid]) {
+      segments.emplace_back(ends[pid], ends[pid + 1]);
+    }
+  }
+  const bool coalesce = cellOptions_.coalesceMergedRuns;
+  uint32_t runCount;
+  if (coalesce) {
+    runCount = (total > 0 || !segments.empty()) ? 1 : 0;
+  } else {
+    runCount =
+        (total > 0 ? 1 : 0) + static_cast<uint32_t>(segments.size());
   }
 
   scratch_.clear();
@@ -412,12 +532,19 @@ void LocalCellOutput::writeCurrentWindowPayload(
   scratch_.append(in.encodingTags, (layout_->numColumns() + 7) / 8);
   rawAccum_ += scratch_.size();
   writeOut(out, scratch_.data(), scratch_.size());
+  if (coalesce) {
+    if (runCount != 0) {
+      std::vector<uint64_t> streamSizes;
+      const uint64_t gathered =
+          gatherPartitionRuns(segments, &in, pid, streamSizes);
+      writeRun(out, gather_.data(), gathered, streamSizes.data());
+    }
+    return;
+  }
   // Mid-window spilled runs come first (they hold the older blocks), the
   // still-resident cells form the final run.
-  for (const auto& ends : openWindowRuns_) {
-    if (ends[pid + 1] > ends[pid]) {
-      writeSpilledSegment(out, ends[pid], ends[pid + 1]);
-    }
+  for (const auto& segment : segments) {
+    writeSpilledSegment(out, segment.first, segment.second);
   }
   if (total > 0) {
     std::vector<uint64_t> decodedSizes(numStreams);
@@ -475,6 +602,7 @@ void LocalCellOutput::finalize(
   }
   runScratch_.reset();
   compressScratch_.reset();
+  gather_.reset();
   scratch_.reset();
 
   metrics.totalBytesWritten = static_cast<int64_t>(finalBytes_);
