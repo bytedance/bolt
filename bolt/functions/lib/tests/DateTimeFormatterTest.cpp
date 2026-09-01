@@ -1492,21 +1492,21 @@ TEST_F(JodaDateTimeFormatterTest, parseConsecutiveSpecifiers) {
 TEST_F(JodaDateTimeFormatterTest, formatResultSize) {
   auto* timezone = tz::locateZone("GMT");
 
+  // Year can have up to 9 digits (+/-292278994) plus a leading sign.
   EXPECT_EQ(
-      buildJodaDateTimeFormatter("yyyy-MM-dd")->maxResultSize(timezone), 12);
-  EXPECT_EQ(buildJodaDateTimeFormatter("yyyy-MM")->maxResultSize(timezone), 9);
-  EXPECT_EQ(buildJodaDateTimeFormatter("y")->maxResultSize(timezone), 6);
+      buildJodaDateTimeFormatter("yyyy-MM-dd")->maxResultSize(timezone), 16);
+  EXPECT_EQ(buildJodaDateTimeFormatter("yyyy-MM")->maxResultSize(timezone), 13);
+  EXPECT_EQ(buildJodaDateTimeFormatter("y")->maxResultSize(timezone), 10);
   EXPECT_EQ(
       buildJodaDateTimeFormatter("yyyy////MM////dd")->maxResultSize(timezone),
-      18);
+      22);
   EXPECT_EQ(
       buildJodaDateTimeFormatter("yyyy-MM-dd HH:mm:ss.SSS")
           ->maxResultSize(timezone),
-      31);
-  // No padding. CENTURY_OF_ERA can be at most 3 digits.
-  EXPECT_EQ(buildJodaDateTimeFormatter("C")->maxResultSize(timezone), 3);
-  // Needs to pad to make result contain 4 digits.
-  EXPECT_EQ(buildJodaDateTimeFormatter("CCCC")->maxResultSize(timezone), 4);
+      35);
+  // No padding. CENTURY_OF_ERA can be at most 7 digits.
+  EXPECT_EQ(buildJodaDateTimeFormatter("C")->maxResultSize(timezone), 7);
+  EXPECT_EQ(buildJodaDateTimeFormatter("CCCC")->maxResultSize(timezone), 7);
 }
 
 class MysqlDateTimeTest : public DateTimeFormatterTest {};

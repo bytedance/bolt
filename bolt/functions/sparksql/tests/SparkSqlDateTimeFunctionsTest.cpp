@@ -2202,7 +2202,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, CastStringToLargeTimestamp) {
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
-  const std::string prefix = ::bytedance::bolt::kSparkCompatible ? "+" : "";
+  const std::string correctedPrefix =
+      ::bytedance::bolt::kSparkCompatible ? "+" : "";
   auto fromUnixTime = [&](int64_t unixTime) {
     return evaluateOnce<std::string>(
                "from_unixtime(c0, 'yyyy-MM-dd HH:mm:ss')",
@@ -2211,34 +2212,88 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
   };
 
   std::vector<std::pair<int64_t, std::string>> cases = {
-      {1764593923251, prefix + "57887-10-03 18:40:51"},
-      {1764592804143, prefix + "57887-09-20 19:49:03"},
-      {1764593758503, prefix + "57887-10-01 20:55:03"},
-      {1764590772393, prefix + "57887-08-28 07:26:33"},
-      {1764593528791, prefix + "57887-09-29 05:06:31"},
-      {1764593955077, prefix + "57887-10-04 03:31:17"},
-      {1764593666320, prefix + "57887-09-30 19:18:40"},
-      {1764593144444, prefix + "57887-09-24 18:20:44"},
-      {1764594190546, prefix + "57887-10-06 20:55:46"},
-      {1764593098611, prefix + "57887-09-24 05:36:51"},
-      {1764592074551, prefix + "57887-09-12 09:09:11"},
-      {1764590721621, prefix + "57887-08-27 17:20:21"},
-      {1764590914524, prefix + "57887-08-29 22:55:24"},
-      {1764592158681, prefix + "57887-09-13 08:31:21"},
-      {1764590816700, prefix + "57887-08-28 19:45:00"},
-      {1764591795161, prefix + "57887-09-09 03:32:41"},
-      {1764594152392, prefix + "57887-10-06 10:19:52"},
-      {1764593373289, prefix + "57887-09-27 09:54:49"},
-      {1764591622807, prefix + "57887-09-07 03:40:07"},
-      {1764592069089, prefix + "57887-09-12 07:38:09"},
+      {1764593923251, "57887-10-03 18:40:51"},
+      {1764592804143, "57887-09-20 19:49:03"},
+      {1764593758503, "57887-10-01 20:55:03"},
+      {1764590772393, "57887-08-28 07:26:33"},
+      {1764593528791, "57887-09-29 05:06:31"},
+      {1764593955077, "57887-10-04 03:31:17"},
+      {1764593666320, "57887-09-30 19:18:40"},
+      {1764593144444, "57887-09-24 18:20:44"},
+      {1764594190546, "57887-10-06 20:55:46"},
+      {1764593098611, "57887-09-24 05:36:51"},
+      {1764592074551, "57887-09-12 09:09:11"},
+      {1764590721621, "57887-08-27 17:20:21"},
+      {1764590914524, "57887-08-29 22:55:24"},
+      {1764592158681, "57887-09-13 08:31:21"},
+      {1764590816700, "57887-08-28 19:45:00"},
+      {1764591795161, "57887-09-09 03:32:41"},
+      {1764594152392, "57887-10-06 10:19:52"},
+      {1764593373289, "57887-09-27 09:54:49"},
+      {1764591622807, "57887-09-07 03:40:07"},
+      {1764592069089, "57887-09-12 07:38:09"},
   };
 
+  // Corrected policy is Spark's default formatting path (java.time), which
+  // prints a leading '+' for years beyond the pattern width. Bolt's default
+  // policy is legacy, so set it explicitly.
+  setTimeParserPolicy("corrected");
+  for (const auto& [input, expected] : cases) {
+    EXPECT_EQ(fromUnixTime(input), correctedPrefix + expected) << input;
+  }
+
+  // Legacy policy uses SimpleDateFormat, which never prints a leading '+'
+  // for years beyond 9999.
+  setTimeParserPolicy("legacy");
   for (const auto& [input, expected] : cases) {
     EXPECT_EQ(fromUnixTime(input), expected) << input;
   }
+  resetQueryConfig();
+}
+
+// Expected values below were produced by the Java classes Spark formats
+// with: java.time.format.DateTimeFormatter (corrected policy, with Spark's
+// y->u pattern rewrite) and java.text.SimpleDateFormat (legacy policy).
+TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYearSignEdgeCases) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
+  auto fromUnixTime = [&](int64_t unixTime, const std::string& format) {
+    return evaluateOnce<std::string>(
+               fmt::format("from_unixtime(c0, '{}')", format),
+               std::optional<int64_t>{unixTime})
+        .value();
+  };
+
+  setTimeParserPolicy("corrected");
+  // Six-digit year: sign plus all digits. Used to be truncated because
+  // maxResultSize still assumed the pre-CivilDateTime +/-32767 year range.
+  EXPECT_EQ(
+      fromUnixTime(3093527980800, "yyyy-MM-dd HH:mm:ss"),
+      "+100000-01-01 00:00:00");
+  // Java SignStyle.EXCEEDS_PAD prints '+' only when the year has more
+  // digits than the pattern width, not for any year > 9999.
+  EXPECT_EQ(fromUnixTime(1764570096000, "yyyyy"), "57887");
+  // Negative year keeps its sign in addition to zero padding.
+  EXPECT_EQ(fromUnixTime(-62198784344, "yyyyyy"), "-000002");
+  // Proleptic year 0 is year-of-era 1 BC.
+  EXPECT_EQ(fromUnixTime(-62167219200, "yyyy G"), "0001 BC");
+  // Large BC year-of-era also gets the EXCEEDS_PAD sign; used to throw
+  // because the '+' overflowed the undersized result buffer.
+  EXPECT_EQ(fromUnixTime(-3217862448344, "yyyy G"), "+100002 BC");
+
+  setTimeParserPolicy("legacy");
+  // SimpleDateFormat never prints a leading '+'.
+  EXPECT_EQ(
+      fromUnixTime(3093527980800, "yyyy-MM-dd HH:mm:ss"),
+      "100000-01-01 00:00:00");
+  resetQueryConfig();
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
+  // Expected values follow Spark's default (corrected) formatting; Bolt's
+  // default policy is legacy, which never prints a leading '+'.
+  setTimeParserPolicy("corrected");
   auto fromUnixTime = [&](int64_t unixTime, std::string timeZone) {
     return evaluateOnce<std::string>(
                fmt::format(
