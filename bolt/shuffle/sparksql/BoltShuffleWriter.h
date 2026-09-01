@@ -214,6 +214,34 @@ class BoltShuffleWriter : public ShuffleWriter {
       bytedance::bolt::memory::MemoryPool* boltPool,
       arrow::MemoryPool* arrowPool);
 
+  // Legacy overload, kept - signature and return type - so existing
+  // integrations compile unchanged. It carries no input type, which the
+  // cell writer's fallback decision needs: every writer type except Cell
+  // behaves exactly as before, and forcing Cell through this overload
+  // fails loudly at creation (a silent V1 downgrade would desync from a
+  // reader configured for Cell). The cast below is sound for the same
+  // reason: everything this overload can return - V1, V2, RowBased -
+  // derives from BoltShuffleWriter; only the cell writer does not, and it
+  // cannot come out of this overload.
+  static std::shared_ptr<BoltShuffleWriter> create(
+      const ShuffleWriterOptions& options,
+      int32_t numColumnsExludePid,
+      int64_t firstBatchRowNumber,
+      int64_t firstBatchFlatSize,
+      int64_t memLimit,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      arrow::MemoryPool* arrowPool) {
+    return std::static_pointer_cast<BoltShuffleWriter>(create(
+        options,
+        /*inputType=*/nullptr,
+        numColumnsExludePid,
+        firstBatchRowNumber,
+        firstBatchFlatSize,
+        memLimit,
+        boltPool,
+        arrowPool));
+  }
+
   // create a BoltShuffleWriter instance
   static std::shared_ptr<BoltShuffleWriter> createDefault(
       const ShuffleWriterOptions& options,
