@@ -130,6 +130,18 @@ std::vector<std::string> collectFieldNames(
   return fieldNames;
 }
 
+template <typename T, typename F>
+T queryOptionOrElse(
+    const core::QueryConfig& queryConfig,
+    const std::unordered_map<std::string, std::string>& queryConfigs,
+    const std::string& key,
+    F&& fallback) {
+  if (queryConfigs.contains(key)) {
+    return queryConfig.get<T>(key, T{});
+  }
+  return std::forward<F>(fallback)();
+}
+
 std::pair<std::shared_ptr<::paimon::Predicate>, core::TypedExprPtr> planFilter(
     const core::TypedExprPtr& expression,
     const RowTypePtr& rowType,
@@ -167,6 +179,66 @@ std::pair<std::shared_ptr<::paimon::Predicate>, core::TypedExprPtr> planFilter(
 }
 
 } // namespace
+
+PaimonDataSourceReadOptions resolvePaimonDataSourceReadOptions(
+    const core::QueryConfig& queryConfig,
+    const PaimonConfig& paimonConfig) {
+  const auto queryConfigs = queryConfig.rawConfigsCopy();
+  return {
+      .naturalReadSize = queryOptionOrElse<uint64_t>(
+          queryConfig,
+          queryConfigs,
+          PaimonConfig::kNaturalReadSize,
+          [&] { return paimonConfig.naturalReadSize(); }),
+      .coalesceReads = queryOptionOrElse<bool>(
+          queryConfig,
+          queryConfigs,
+          PaimonConfig::kCoalesceReads,
+          [&] { return paimonConfig.coalesceReads(); }),
+      .readTimestampUnit = queryOptionOrElse<uint8_t>(
+          queryConfig,
+          queryConfigs,
+          PaimonConfig::kReadTimestampUnit,
+          [&] { return paimonConfig.readTimestampUnit(); }),
+  };
+}
+
+std::map<std::string, std::string> resolvePaimonDataSourceOptions(
+    const std::unordered_map<std::string, std::string>& tableProperties,
+    const core::QueryConfig& queryConfig,
+    const PaimonConfig& paimonConfig) {
+  std::map<std::string, std::string> options;
+
+  // Connector configuration supplies filesystem defaults (credentials,
+  // endpoints and backend-specific settings). Table properties may override
+  // these defaults for a particular Paimon table.
+  for (const auto& [key, value] : paimonConfig.config()->rawConfigsCopy()) {
+    options.insert_or_assign(key, value);
+  }
+  for (const auto& [key, value] : tableProperties) {
+    options.insert_or_assign(key, value);
+  }
+
+  // Paimon's filesystem must always delegate to Bolt. Reader options are
+  // resolved last so query-level values take precedence over connector/table
+  // defaults.
+  options.insert_or_assign(::paimon::Options::FILE_SYSTEM, "bolt");
+  options.insert_or_assign(
+      ::paimon::Options::READ_BATCH_SIZE,
+      std::to_string(paimonConfig.readBatchSize()));
+  const auto readOptions =
+      resolvePaimonDataSourceReadOptions(queryConfig, paimonConfig);
+  options.insert_or_assign(
+      PaimonConfig::kNaturalReadSize,
+      std::to_string(readOptions.naturalReadSize));
+  options.insert_or_assign(
+      PaimonConfig::kCoalesceReads,
+      readOptions.coalesceReads ? "true" : "false");
+  options.insert_or_assign(
+      PaimonConfig::kReadTimestampUnit,
+      std::to_string(readOptions.readTimestampUnit));
+  return options;
+}
 
 PaimonDataSource::PaimonDataSource(
     const std::shared_ptr<const RowType>& outputType,
@@ -228,48 +300,13 @@ PaimonDataSource::PaimonDataSource(
         paimonConfig->rowToBatchThreadNumber());
   }
   ctxBuilder.WithMemoryPool(paimonPool_);
-  ctxBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local");
-
-#ifdef BOLT_ENABLE_HDFS
-  // Enable hdfs:// scheme resolution to Bolt-backed paimon filesystem.
-  ctxBuilder.WithFileSystemSchemeToIdentifierMap(
-      std::map<std::string, std::string>{{"hdfs", "bolt_hdfs"}});
-#endif
   for (const auto& [key, value] : tableHandle_->tableProperties()) {
-    ctxBuilder.AddOption(key, value);
     VLOG(1) << "Added table option <" << key << "=" << value << ">";
   }
-
-  // Pass read.batch-size through the options map so the paimon library uses
-  // it when creating FileBatchReaders.
-  ctxBuilder.AddOption(
-      ::paimon::Options::READ_BATCH_SIZE,
-      std::to_string(paimonConfig->readBatchSize()));
-
-  // Propagate I/O tuning options through paimon's options map so they reach
-  // PaimonReadFile (constructed deep inside paimon's internal reader pipeline).
-  // Query config overrides connector config; connector config provides
-  // defaults.
-  ctxBuilder.AddOption(
-      PaimonConfig::kNaturalReadSize,
-      std::to_string(queryConfig.get<uint64_t>(
-          PaimonConfig::kNaturalReadSize, paimonConfig->naturalReadSize())));
-  ctxBuilder.AddOption(
-      PaimonConfig::kCoalesceReads,
-      queryConfig.get<bool>(
-          PaimonConfig::kCoalesceReads, paimonConfig->coalesceReads())
-          ? "true"
-          : "false");
-
-  // Propagate timestamp read precision so PaimonParquetReader can set it on
-  // bolt's ParquetReader (ReaderOptions::setTimestampPrecision). This ensures
-  // the paimon connector truncates timestamps to the same precision as the hive
-  // connector for a given session property value.
-  ctxBuilder.AddOption(
-      PaimonConfig::kReadTimestampUnit,
-      std::to_string(queryConfig.get<uint8_t>(
-          PaimonConfig::kReadTimestampUnit,
-          paimonConfig->readTimestampUnit())));
+  for (const auto& [key, value] : resolvePaimonDataSourceOptions(
+           tableHandle_->tableProperties(), queryConfig, *paimonConfig)) {
+    ctxBuilder.AddOption(key, value);
+  }
 
   ctxBuilder.EnablePredicateFilter(paimonConfig->predicateFilterEnabled());
 
@@ -318,10 +355,9 @@ void PaimonDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
   BOLT_CHECK_NOT_NULL(
       paimonConnectorSplit, "Split was not paimon connector split");
 
-  // Deserialize the split bytes into a ::paimon::Split
   auto paimonSplit = ::paimon::Split::Deserialize(
       paimonConnectorSplit->splitBytes_.data(),
-      paimonConnectorSplit->splitBytes_.length(),
+      paimonConnectorSplit->splitBytes_.size(),
       paimonPool_);
   BOLT_CHECK(
       paimonSplit.ok(),

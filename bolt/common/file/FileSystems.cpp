@@ -32,6 +32,7 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/thread_factory/NamedThreadFactory.h>
 #include <folly/synchronization/CallOnce.h>
+#include <sys/stat.h>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/config/Config.h"
 #include "bolt/common/file/File.h"
@@ -72,6 +73,10 @@ void copyOpenFileOptionsFromConfig(
       options.values[key] = value;
     }
   }
+}
+
+FileInfo FileSystem::fileInfo(std::string_view /* path */) {
+  BOLT_UNSUPPORTED("fileInfo not implemented");
 }
 
 std::map<std::string, std::string> getConfFromString(
@@ -239,7 +244,28 @@ class LocalFileSystem : public FileSystem {
     return std::filesystem::is_directory(file);
   }
 
-  virtual std::vector<std::string> list(std::string_view path) override {
+  FileInfo fileInfo(std::string_view path) override {
+    const std::string localPath{extractPath(path)};
+    struct stat fileStat {};
+    BOLT_CHECK_EQ(
+        ::stat(localPath.c_str(), &fileStat),
+        0,
+        "Cannot stat local path {}: {}",
+        localPath,
+        folly::errnoStr(errno));
+
+    const auto status = std::filesystem::status(localPath);
+    FileInfo info;
+    info.isDirectory = std::filesystem::is_directory(status);
+    info.modificationTimeMs = static_cast<int64_t>(fileStat.st_mtime) * 1000;
+    if (info.isDirectory) {
+      return info;
+    }
+    info.size = std::filesystem::file_size(localPath);
+    return info;
+  }
+
+  std::vector<std::string> list(std::string_view path) override {
     auto directoryPath = extractPath(path);
     const std::filesystem::path folder{directoryPath};
     std::vector<std::string> filePaths;
@@ -250,8 +276,9 @@ class LocalFileSystem : public FileSystem {
   }
 
   void mkdir(std::string_view path) override {
+    const auto localPath = extractPath(path);
     std::error_code ec;
-    std::filesystem::create_directories(path, ec);
+    std::filesystem::create_directories(localPath, ec);
     BOLT_CHECK_EQ(
         0,
         ec.value(),
@@ -263,8 +290,9 @@ class LocalFileSystem : public FileSystem {
   }
 
   void rmdir(std::string_view path) override {
+    const auto localPath = extractPath(path);
     std::error_code ec;
-    std::filesystem::remove_all(path, ec);
+    std::filesystem::remove_all(localPath, ec);
     BOLT_CHECK_EQ(
         0,
         ec.value(),

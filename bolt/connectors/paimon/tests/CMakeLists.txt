@@ -50,6 +50,7 @@ set(
   PaimonConfigTest.cpp
   PaimonFilterPushdownTest.cpp
   PaimonFilterTranslatorTest.cpp
+  PaimonFileSystemTest.cpp
   PaimonParquetReaderTest.cpp
 )
 
@@ -80,7 +81,6 @@ if(NOT BUILD_SHARED_LIBS AND BOLT_TEST_LINKAGE STREQUAL "static")
   list(
     APPEND PAIMON_CONNECTOR_TEST_REGISTRATION_LIBRARIES
     $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_avro_file_format>
-    $<LINK_LIBRARY:WHOLE_ARCHIVE,paimon_local_file_system>
   )
 endif()
 
@@ -105,3 +105,7 @@ target_link_libraries(
     Paimon::tbb
     Paimon::libavrocpp
 )
+
+if(BOLT_ENABLE_HDFS)
+  target_link_libraries(bolt_paimon_connector_test PRIVATE bolt_hdfs)
+endif()

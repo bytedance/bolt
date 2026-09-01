@@ -15,12 +15,14 @@
  */
 
 #include "bolt/connectors/paimon/PaimonConnector.h"
+
+#include <algorithm>
+#include <mutex>
+
 #include <paimon/factories/factory.h>
 #include <paimon/factories/factory_creator.h>
 #include <paimon/format/file_format_factory.h>
-#include <paimon/fs/file_system_factory.h>
-#include <algorithm>
-#include "bolt/connectors/paimon/PaimonBoltHdfsFileSystem.h"
+#include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonDataSource.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
@@ -39,20 +41,6 @@ class AvroFileFormatFactory : public ::paimon::FileFormatFactory {
       const std::map<std::string, std::string>& options) const override;
 };
 } // namespace paimon::avro
-
-namespace paimon {
-
-class LocalFileSystemFactory : public ::paimon::FileSystemFactory {
- public:
-  static const char IDENTIFIER[];
-
-  const char* Identifier() const override;
-
-  ::paimon::Result<std::unique_ptr<::paimon::FileSystem>> Create(
-      const std::string& path,
-      const std::map<std::string, std::string>& options) const override;
-};
-} // namespace paimon
 
 namespace bytedance::bolt::connector::paimon {
 
@@ -73,20 +61,6 @@ void ensureAvroFormatFactoryRegistered() {
   });
 }
 
-void ensureLocalFileSystemFactoryRegistered() {
-  static std::once_flag flag;
-  std::call_once(flag, []() {
-    auto* factory = new ::paimon::LocalFileSystemFactory;
-    const auto& items =
-        ::paimon::FactoryCreator::GetInstance()->GetRegisteredType();
-    if (std::find(items.begin(), items.end(), factory->Identifier()) ==
-        items.end()) {
-      ::paimon::FactoryCreator::GetInstance()->Register(
-          factory->Identifier(), factory);
-    }
-  });
-}
-
 } // namespace
 
 std::unique_ptr<DataSource> PaimonConnector::createDataSource(
@@ -96,7 +70,15 @@ std::unique_ptr<DataSource> PaimonConnector::createDataSource(
         columnHandles,
     std::shared_ptr<ConnectorQueryCtx> queryCtx,
     const core::QueryConfig& queryConfig) {
-  auto paimonConfig = std::make_shared<PaimonConfig>(config_);
+  auto configs = config_ == nullptr
+      ? std::unordered_map<std::string, std::string>{}
+      : config_->rawConfigsCopy();
+  for (const auto& [key, value] :
+       queryCtx->sessionProperties()->rawConfigsCopy()) {
+    configs[key] = value;
+  }
+  auto mergedConfig = std::make_shared<config::ConfigBase>(std::move(configs));
+  auto paimonConfig = std::make_shared<PaimonConfig>(mergedConfig);
   return std::make_unique<PaimonDataSource>(
       outputType,
       tableHandle,
@@ -110,17 +92,13 @@ PaimonConnectorFactory::PaimonConnectorFactory()
     : ConnectorFactory(kPaimonConnectorName) {
   LOG(INFO)
       << "[PAIMON] PaimonConnectorFactory constructed, registering factories";
-  // Register paimon factories (parquet format, avro format, local filesystem,
-  // HDFS filesystem) so they are available when paimon-cpp resolves
-  // format identifiers. Using explicit calls rather than relying on
-  // REGISTER_PAIMON_FACTORY's static constructors, which the linker may strip
-  // from paimon's format libraries.
+  // Register paimon factories (parquet format, avro format, Bolt filesystem)
+  // so they are available when paimon-cpp resolves format identifiers. Using
+  // explicit calls avoids linker stripping of REGISTER_PAIMON_FACTORY's static
+  // constructors from paimon's format libraries.
   EnsurePaimonParquetFormatRegistered();
   ensureAvroFormatFactoryRegistered();
-  ensureLocalFileSystemFactoryRegistered();
-#ifdef BOLT_ENABLE_HDFS
-  EnsurePaimonBoltHdfsFileSystemRegistered();
-#endif
+  EnsurePaimonBoltFileSystemRegistered();
 }
 
 } // namespace bytedance::bolt::connector::paimon

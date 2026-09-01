@@ -34,7 +34,7 @@
 #include <sys/socket.h>
 
 #include "bolt/common/memory/Memory.h"
-#include "bolt/connectors/paimon/PaimonBoltHdfsFileSystem.h"
+#include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/tests/HdfsContainerMiniCluster.h"
 
 #include "bolt/connectors/hive/storage_adapters/hdfs/HdfsFileSystem.h"
@@ -104,6 +104,9 @@ class PaimonHdfsFileSystemTest : public testing::Test {
       options.allocatorCapacity = 8L << 30;
       ::bytedance::bolt::memory::MemoryManager::testingSetInstance(options);
     }
+
+    filesystems::registerHdfsFileSystem();
+    EnsurePaimonBoltFileSystemRegistered();
 
     // Validate environment prerequisites.
     try {
@@ -186,7 +189,7 @@ TEST_F(PaimonHdfsFileSystemTest, CreateOpenGetStatusListAndDelete) {
   //   GTEST_SKIP() << "HDFS NameNode port 7878 not reachable on localhost";
   // }
 
-  EnsurePaimonBoltHdfsFileSystemRegistered();
+  EnsurePaimonBoltFileSystemRegistered();
 
   const std::string base = cluster_->namenodeUri() +
       std::string("/paimon_bolt_hdfs_fs_test_") + std::to_string(::getpid());
@@ -195,7 +198,7 @@ TEST_F(PaimonHdfsFileSystemTest, CreateOpenGetStatusListAndDelete) {
   const std::string renamed = dir + "/file2.txt";
 
   auto fsRes = ::paimon::FileSystemFactory::Get(
-      "bolt_hdfs", file, std::map<std::string, std::string>{});
+      "bolt", file, std::map<std::string, std::string>{});
   ASSERT_TRUE(fsRes.ok()) << fsRes.status().ToString();
   auto fs = std::move(fsRes).value();
 
@@ -242,7 +245,7 @@ TEST_F(PaimonHdfsFileSystemTest, RenameFile) {
   if (!clusterAvailable_) {
     GTEST_SKIP() << "CLASSPATH missing; libhdfs JNI cannot initialize";
   }
-  EnsurePaimonBoltHdfsFileSystemRegistered();
+  EnsurePaimonBoltFileSystemRegistered();
 
   const std::string base = cluster_->namenodeUri() +
       std::string("/paimon_bolt_hdfs_rename_test_") +
@@ -252,7 +255,7 @@ TEST_F(PaimonHdfsFileSystemTest, RenameFile) {
   const std::string renamed = dir + "/file2.txt";
 
   auto fsRes = ::paimon::FileSystemFactory::Get(
-      "bolt_hdfs", file, std::map<std::string, std::string>{});
+      "bolt", file, std::map<std::string, std::string>{});
   ASSERT_TRUE(fsRes.ok()) << fsRes.status().ToString();
   auto fs = std::move(fsRes).value();
 
@@ -303,7 +306,7 @@ TEST_F(PaimonHdfsFileSystemTest, WriteReadSeek) {
   if (!clusterAvailable_) {
     GTEST_SKIP() << "CLASSPATH missing; libhdfs JNI cannot initialize";
   }
-  EnsurePaimonBoltHdfsFileSystemRegistered();
+  EnsurePaimonBoltFileSystemRegistered();
 
   const std::string base = cluster_->namenodeUri() +
       std::string("/paimon_bolt_hdfs_rw_test_") + std::to_string(::getpid());
@@ -311,7 +314,7 @@ TEST_F(PaimonHdfsFileSystemTest, WriteReadSeek) {
   const std::string file = dir + "/data.bin";
 
   auto fsRes = ::paimon::FileSystemFactory::Get(
-      "bolt_hdfs", file, std::map<std::string, std::string>{});
+      "bolt", file, std::map<std::string, std::string>{});
   ASSERT_TRUE(fsRes.ok()) << fsRes.status().ToString();
   auto fs = std::move(fsRes).value();
 
@@ -376,7 +379,7 @@ TEST_F(PaimonHdfsFileSystemTest, OverwriteExistingFile) {
   if (!clusterAvailable_) {
     GTEST_SKIP() << "CLASSPATH missing; libhdfs JNI cannot initialize";
   }
-  EnsurePaimonBoltHdfsFileSystemRegistered();
+  EnsurePaimonBoltFileSystemRegistered();
 
   const std::string base = cluster_->namenodeUri() +
       std::string("/paimon_bolt_hdfs_overwrite_test_") +
@@ -385,7 +388,7 @@ TEST_F(PaimonHdfsFileSystemTest, OverwriteExistingFile) {
   const std::string file = dir + "/data.bin";
 
   auto fsRes = ::paimon::FileSystemFactory::Get(
-      "bolt_hdfs", file, std::map<std::string, std::string>{});
+      "bolt", file, std::map<std::string, std::string>{});
   ASSERT_TRUE(fsRes.ok()) << fsRes.status().ToString();
   auto fs = std::move(fsRes).value();
 
@@ -433,7 +436,7 @@ TEST_F(PaimonHdfsFileSystemTest, ListDirReturnsChildren) {
   if (!clusterAvailable_) {
     GTEST_SKIP() << "CLASSPATH missing; libhdfs JNI cannot initialize";
   }
-  EnsurePaimonBoltHdfsFileSystemRegistered();
+  EnsurePaimonBoltFileSystemRegistered();
 
   const std::string base = cluster_->namenodeUri() +
       std::string("/paimon_bolt_hdfs_list_test_") + std::to_string(::getpid());
@@ -442,7 +445,7 @@ TEST_F(PaimonHdfsFileSystemTest, ListDirReturnsChildren) {
   const std::string f2 = dir + "/b.txt";
 
   auto fsRes = ::paimon::FileSystemFactory::Get(
-      "bolt_hdfs", dir, std::map<std::string, std::string>{});
+      "bolt", dir, std::map<std::string, std::string>{});
   ASSERT_TRUE(fsRes.ok()) << fsRes.status().ToString();
   auto fs = std::move(fsRes).value();
 

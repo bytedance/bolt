@@ -101,6 +101,8 @@ class HdfsFileSystem : public FileSystem {
 
   void rmdir(std::string_view path) override;
 
+  FileInfo fileInfo(std::string_view path) override;
+
   // Returns metadata for the given HDFS path
   //
   // Throws a bolt exception on error.

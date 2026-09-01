@@ -26,16 +26,11 @@
 
 namespace bytedance::bolt::connector::paimon {
 
-// Paimon filesystem implementation backed by Bolt's registered hdfs://
-// filesystem.
-//
-// This class expects hdfs:// URIs. It resolves the underlying Bolt filesystem
-// via `bytedance::bolt::filesystems::getFileSystem(hdfsUri,
-// connectorProperties)`.
-class PaimonBoltHdfsFileSystem final : public ::paimon::FileSystem {
+// Paimon filesystem implementation backed by Bolt's registered filesystems.
+class PaimonBoltFileSystem final : public ::paimon::FileSystem {
  public:
-  explicit PaimonBoltHdfsFileSystem(std::map<std::string, std::string> options);
-  ~PaimonBoltHdfsFileSystem() override;
+  explicit PaimonBoltFileSystem(std::map<std::string, std::string> options);
+  ~PaimonBoltFileSystem() override;
 
   ::paimon::Result<std::unique_ptr<::paimon::InputStream>> Open(
       const std::string& path) const override;
@@ -70,10 +65,9 @@ class PaimonBoltHdfsFileSystem final : public ::paimon::FileSystem {
       connectorProperties_;
 };
 
-class PaimonBoltHdfsFileSystemFactory final
-    : public ::paimon::FileSystemFactory {
+class PaimonBoltFileSystemFactory final : public ::paimon::FileSystemFactory {
  public:
-  ~PaimonBoltHdfsFileSystemFactory() override = default;
+  ~PaimonBoltFileSystemFactory() override = default;
 
   const char* Identifier() const override;
 
@@ -82,12 +76,8 @@ class PaimonBoltHdfsFileSystemFactory final
       const std::map<std::string, std::string>& options) const override;
 };
 
-// Ensures that:
-// 1) Bolt HDFS filesystem backend is registered (so bolt can resolve hdfs://
-// URIs), and 2) paimon-cpp FileSystemFactory identifier "bolt_hdfs" is
-// registered.
-//
-// Safe to call multiple times.
-void EnsurePaimonBoltHdfsFileSystemRegistered();
+// Registers the paimon-cpp FileSystemFactory identifier "bolt". Safe to call
+// multiple times.
+void EnsurePaimonBoltFileSystemRegistered();
 
 } // namespace bytedance::bolt::connector::paimon

@@ -323,6 +323,15 @@ void HdfsFileSystem::rmdir(std::string_view path) {
       impl_->hdfsShim()->GetLastExceptionRootCause());
 }
 
+FileInfo HdfsFileSystem::fileInfo(std::string_view path) {
+  const auto hdfsInfo = stat(path);
+  FileInfo info;
+  info.isDirectory = hdfsInfo.isDir;
+  info.size = hdfsInfo.isDir ? 0 : hdfsInfo.size;
+  info.modificationTimeMs = hdfsInfo.modificationTimeMs;
+  return info;
+}
+
 HdfsFileSystem::HdfsFileInfo HdfsFileSystem::stat(std::string_view path) const {
   // Only remove the scheme for hdfs path.
   if (path.find(kScheme) == 0) {

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <map>
+
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
@@ -33,6 +35,21 @@ class MemoryPool;
 } // namespace paimon
 
 namespace bytedance::bolt::connector::paimon {
+
+struct PaimonDataSourceReadOptions {
+  uint64_t naturalReadSize;
+  bool coalesceReads;
+  uint8_t readTimestampUnit;
+};
+
+PaimonDataSourceReadOptions resolvePaimonDataSourceReadOptions(
+    const core::QueryConfig& queryConfig,
+    const PaimonConfig& paimonConfig);
+
+std::map<std::string, std::string> resolvePaimonDataSourceOptions(
+    const std::unordered_map<std::string, std::string>& tableProperties,
+    const core::QueryConfig& queryConfig,
+    const PaimonConfig& paimonConfig);
 
 class PaimonDataSource : public DataSource {
  public:

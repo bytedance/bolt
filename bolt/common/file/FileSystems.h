@@ -106,6 +106,13 @@ struct FileSystemOptions {
   bool readAheadEnabled{false};
 };
 
+struct FileInfo {
+  bool isDirectory{false};
+  uint64_t size{0};
+  // Milliseconds since unix epoch.
+  int64_t modificationTimeMs{0};
+};
+
 /// An abstract FileSystem
 class FileSystem {
  public:
@@ -166,6 +173,8 @@ class FileSystem {
   virtual bool isDirectory(std::string_view path) const {
     BOLT_UNSUPPORTED("isDirectory not implemented");
   }
+
+  virtual FileInfo fileInfo(std::string_view path);
 
   /// Returns the list of files or folders in a path. Currently, this method
   /// will be used for testing, but we will need change this to an iterator
