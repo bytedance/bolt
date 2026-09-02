@@ -234,7 +234,11 @@ void SparkShuffleReader::close() {
   }
 
   if (cellShuffleReader_) {
-    deserializeTime_ += cellShuffleReader_->decodeTimeNs();
+    // Report decompression and deserialization disjointly, matching the
+    // legacy reader's accounting.
+    const uint64_t decompressNs = cellShuffleReader_->decompressTimeNs();
+    decompressTime_ += decompressNs;
+    deserializeTime_ += cellShuffleReader_->decodeTimeNs() - decompressNs;
   }
   {
     auto stats = this->stats().rlock();
