@@ -500,6 +500,11 @@ TEST_F(CellWriterTest, stringDictionaryRoundTripAndShrinksBytes) {
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
     roundTrip(options, pids, batches, &writer);
     (enable ? bytesWith : bytesWithout) = writer.metrics().totalBytesWritten;
+    if (enable) {
+      EXPECT_GT(writer.metrics().dictionaryMatchedRows, 0);
+    } else {
+      EXPECT_EQ(writer.metrics().dictionaryMatchedRows, 0);
+    }
   }
   EXPECT_LT(bytesWith, bytesWithout);
 }
@@ -566,7 +571,12 @@ TEST_F(CellWriterTest, dictionarySegmentsChainDemoteAndResetAcrossWindows) {
   // Tiny window bound: several checkpoints, so per-window framing and the
   // dictionary state reset are exercised.
   options.cellOptions.checkpointPartitionBytes = 2 << 10;
-  roundTrip(options, pids, batches);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  roundTrip(options, pids, batches, &writer);
+  // The vocabulary batches index through dictionaries; the long values
+  // and the high-cardinality batch demote partitions into the tail.
+  EXPECT_GT(writer.metrics().dictionaryMatchedRows, 0);
+  EXPECT_GT(writer.metrics().dictionaryFallbackRows, 0);
 }
 
 TEST_F(CellWriterTest, coalescedMergeShrinksManyRunPayloads) {
