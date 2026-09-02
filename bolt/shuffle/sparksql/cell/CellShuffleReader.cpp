@@ -73,6 +73,22 @@ bool CellShuffleReader::StreamSource::atEnd() const {
   return false;
 }
 
+bool CellShuffleReader::CodecDecompressor::decompress(
+    const uint8_t* data,
+    size_t size,
+    uint8_t* out,
+    size_t decodedSize) {
+  const uint64_t start = nowNs();
+  const bool ok = codec_->decompress(
+                      data,
+                      static_cast<int64_t>(size),
+                      out,
+                      static_cast<int64_t>(decodedSize)) ==
+      static_cast<int64_t>(decodedSize);
+  decompressTimeNs_ += nowNs() - start;
+  return ok;
+}
+
 CellShuffleReader::CellShuffleReader(
     std::shared_ptr<ReaderStreamIterator> streams,
     CellLayout layout,
