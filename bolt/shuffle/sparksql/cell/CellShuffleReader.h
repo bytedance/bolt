@@ -44,8 +44,17 @@ class CellShuffleReader {
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();
 
+  /// Total decode time: payload parsing, decompression and vector
+  /// building together.
   uint64_t decodeTimeNs() const {
     return decodeTimeNs_;
+  }
+
+  /// The decompression share of decodeTimeNs(), metered at the codec
+  /// seam so the reader node can report decompress and deserialize as
+  /// disjoint metrics, matching the legacy reader's accounting.
+  uint64_t decompressTimeNs() const {
+    return decompressor_ == nullptr ? 0 : decompressor_->decompressTimeNs();
   }
 
  private:
@@ -74,17 +83,15 @@ class CellShuffleReader {
         const uint8_t* data,
         size_t size,
         uint8_t* out,
-        size_t decodedSize) override {
-      return codec_->decompress(
-                 data,
-                 static_cast<int64_t>(size),
-                 out,
-                 static_cast<int64_t>(decodedSize)) ==
-          static_cast<int64_t>(decodedSize);
+        size_t decodedSize) override;
+
+    uint64_t decompressTimeNs() const {
+      return decompressTimeNs_;
     }
 
    private:
     Codec* const codec_;
+    uint64_t decompressTimeNs_{0};
   };
 
   /// Decodes the next payload across streams; false at the end of input.
