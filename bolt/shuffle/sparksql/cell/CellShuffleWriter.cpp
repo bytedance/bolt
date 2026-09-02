@@ -440,6 +440,22 @@ arrow::Status CellShuffleWriter::stop() {
     frontend_->flushAll();
   }
   output_->finalize(windowInput(), windowHasData, metrics_);
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if ((encodingTags_[col / 8] >> (col % 8)) & 1) {
+      const auto stats = frontend_->dictionaryStats(col);
+      metrics_.dictionaryMatchedRows +=
+          static_cast<int64_t>(stats.matchedRows);
+      metrics_.dictionaryFallbackRows +=
+          static_cast<int64_t>(stats.fallbackRows);
+      const uint64_t rows = stats.matchedRows + stats.fallbackRows;
+      LOG(INFO) << "CellShuffleWriter dictionary column " << col
+                << ": matched " << stats.matchedRows << " of " << rows
+                << " rows ("
+                << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0)
+                << "%), " << stats.segments << " segments, " << stats.demotes
+                << " demotes";
+    }
+  }
   // Data size is the pre-compression payload volume (what the raw lengths
   // account); bytes written is the compressed file. Reporting them as the
   // same number would hide the compression ratio from the engine metrics.

@@ -272,6 +272,10 @@ struct ShuffleWriterMetrics {
   int64_t totalInputBatches{0};
   // CellShuffleWriter: sealed checkpoint windows.
   int64_t spillCount{0};
+  // CellShuffleWriter: rows written as dictionary indexes vs through the
+  // fallback tail, aggregated over dictionary-enabled string columns.
+  int64_t dictionaryMatchedRows{0};
+  int64_t dictionaryFallbackRows{0};
   int64_t totalBytesWritten{0};
   int64_t totalBytesEvicted{0};
   int64_t totalWriteTime{0};

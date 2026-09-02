@@ -88,6 +88,19 @@ class SplitFrontend {
   /// Clears per-window statistics after a seal.
   virtual void resetWindowStats() = 0;
 
+  /// Lifetime dictionary effectiveness counters of one string column, all
+  /// maintained off the hit path (segment closes, demotes, the fallback
+  /// row loop).
+  struct DictColumnStats {
+    uint64_t matchedRows{0}; // rows written as dictionary indexes
+    uint64_t fallbackRows{0}; // rows written through the fallback tail
+    uint64_t segments{0}; // dictionary segments closed
+    uint64_t demotes{0}; // partition-window demotions to the tail
+  };
+
+  /// Stats for `col`; zeros when the column is not dictionary-enabled.
+  virtual DictColumnStats dictionaryStats(uint32_t col) const = 0;
+
   /// Fixed memory held by the front end (caches, cursors).
   virtual int64_t residentBytes() const = 0;
 };

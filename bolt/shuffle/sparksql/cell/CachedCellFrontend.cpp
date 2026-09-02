@@ -36,7 +36,8 @@ CachedCellFrontend::CachedCellFrontend(
       partitionBytes_(numPartitions_, 0),
       variableBytes_(numPartitions_, 0),
       dictEnabled_(layout->numColumns(), 0),
-      dictStates_(layout->numColumns()) {
+      dictStates_(layout->numColumns()),
+      dictStats_(layout->numColumns()) {
   const size_t cacheBytes =
       static_cast<size_t>(numPartitions_) * numStreams_ * kBlockSourceBytes;
   const size_t cursorBytes =
@@ -112,6 +113,9 @@ void CachedCellFrontend::closeDictSegment(
   const uint32_t bytes = serialized + 5;
   cells_->append(pid, dataStream, buf, bytes, beforeGrow_);
   bumpPartitionBytes(pid, bytes);
+  auto& stats = dictStats_[layout_->stream(dataStream).column];
+  stats.matchedRows += st.matched;
+  ++stats.segments;
   st.matched = 0;
   st.entryCount = 0;
   st.uniformLen = DictState::kUniformUnset;
@@ -234,6 +238,7 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
         } else {
           closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
           st.mode = DictState::kModeFallback;
+          ++dictStats_[layout_->stream(dataStream).column].demotes;
           // Pending index bytes flush raw before the first staged
           // fallback length reuses the cache line.
           if (lengthCur[pid] > 0) {
@@ -265,6 +270,7 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
   // when no segment was ever written).
   closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
   st.mode = DictState::kModeFallback;
+  ++dictStats_[layout_->stream(dataStream).column].demotes;
   if (lengthCur[pid] > 0) {
     flushRaw(lengthStream, pid, lengthCur);
   }
@@ -463,6 +469,7 @@ void CachedCellFrontend::splitStringDict(
 
     // The fallback tail of a demoted partition: byte-identical to the raw
     // string path of splitString.
+    ++dictStats_[col].fallbackRows;
     {
       char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
       const int64_t length = view.size();
