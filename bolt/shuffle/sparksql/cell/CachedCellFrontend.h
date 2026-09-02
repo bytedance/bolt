@@ -59,6 +59,10 @@ class CachedCellFrontend final : public SplitFrontend {
 
   void resetWindowStats() override;
 
+  DictColumnStats dictionaryStats(uint32_t col) const override {
+    return dictStats_.empty() ? DictColumnStats{} : dictStats_[col];
+  }
+
   int64_t residentBytes() const override {
     return residentBytes_;
   }
@@ -196,6 +200,7 @@ class CachedCellFrontend final : public SplitFrontend {
   /// DictState per partition.
   std::vector<uint8_t> dictEnabled_;
   std::vector<std::vector<DictState>> dictStates_;
+  std::vector<DictColumnStats> dictStats_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
