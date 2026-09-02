@@ -120,6 +120,16 @@ struct BitLengthFunction {
   }
 };
 
+template <typename T>
+struct OctetLengthFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  template <typename TInput>
+  FOLLY_ALWAYS_INLINE void call(int32_t& result, TInput& input) {
+    result = input.size();
+  }
+};
+
 /// chr function
 /// chr(n) -> string
 /// Returns the Unicode code point ``n`` as a single character string.

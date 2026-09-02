@@ -186,6 +186,10 @@ void registerStringFunctions(const std::string& prefix) {
       {prefix + "bit_length"});
   registerFunction<sparksql::BitLengthFunction, int32_t, Varbinary>(
       {prefix + "bit_length"});
+  registerFunction<sparksql::OctetLengthFunction, int32_t, Varchar>(
+      {prefix + "octet_length"});
+  registerFunction<sparksql::OctetLengthFunction, int32_t, Varbinary>(
+      {prefix + "octet_length"});
   registerFunction<Empty2NullFunction, Varchar, Varchar>(
       {prefix + "empty2null"});
 

@@ -353,6 +353,45 @@ TEST_F(StringTest, bitLengthVarbinary) {
   EXPECT_EQ(bitLength("\U0001F408"), 32);
 }
 
+TEST_F(StringTest, octetLength) {
+  auto octetLength = [&](std::optional<std::string> arg) {
+    return evaluateOnce<int32_t>("octet_length(c0)", arg);
+  };
+
+  EXPECT_EQ(octetLength(""), 0);
+  EXPECT_EQ(octetLength(std::string("\0", 1)), 1);
+  EXPECT_EQ(octetLength("1"), 1);
+  EXPECT_EQ(octetLength("123"), 3);
+  // Consists of four codepoints.
+  EXPECT_EQ(octetLength("café"), 5);
+  EXPECT_EQ(octetLength("日本"), 6);
+  EXPECT_EQ(octetLength("😋"), 4);
+  // Consists of five codepoints.
+  EXPECT_EQ(octetLength(kWomanFacepalmingLightSkinTone), 17);
+  EXPECT_EQ(octetLength("\U0001F408"), 4);
+  EXPECT_EQ(octetLength(std::nullopt), std::nullopt);
+}
+
+TEST_F(StringTest, octetLengthVarbinary) {
+  auto octetLength = [&](std::optional<std::string> arg) {
+    return evaluateOnce<int32_t, std::string>(
+        "octet_length(c0)", {arg}, {VARBINARY()});
+  };
+
+  EXPECT_EQ(octetLength(""), 0);
+  EXPECT_EQ(octetLength(std::string("\0", 1)), 1);
+  EXPECT_EQ(octetLength("1"), 1);
+  EXPECT_EQ(octetLength("123"), 3);
+  // Consists of four codepoints.
+  EXPECT_EQ(octetLength("café"), 5);
+  EXPECT_EQ(octetLength("日本"), 6);
+  EXPECT_EQ(octetLength("😋"), 4);
+  // Consists of five codepoints.
+  EXPECT_EQ(octetLength(kWomanFacepalmingLightSkinTone), 17);
+  EXPECT_EQ(octetLength("\U0001F408"), 4);
+  EXPECT_EQ(octetLength(std::nullopt), std::nullopt);
+}
+
 TEST_F(StringTest, chr) {
   EXPECT_EQ(chr(-16), "");
   EXPECT_EQ(chr(0), std::string("\0", 1));
