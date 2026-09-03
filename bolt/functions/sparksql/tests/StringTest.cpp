@@ -1139,6 +1139,9 @@ TEST_F(StringTest, rpad) {
   // Invalid UTF-8 chars
   EXPECT_EQ(invalidString + "x", rpad(invalidString, 8, "x"));
   EXPECT_EQ("abc" + invalidPadString, rpad("abc", 6, invalidPadString));
+
+  BOLT_ASSERT_THROW(rpad("abc", -1, "x"), "pad size must be in the range");
+  BOLT_ASSERT_THROW(rpad("abc", 5, ""), "padString must not be empty");
 }
 
 TEST_F(StringTest, lpad) {
@@ -1172,6 +1175,9 @@ TEST_F(StringTest, lpad) {
   // Invalid UTF-8 chars
   EXPECT_EQ("x" + invalidString, lpad(invalidString, 8, "x"));
   EXPECT_EQ(invalidPadString + "abc", lpad("abc", 6, invalidPadString));
+
+  BOLT_ASSERT_THROW(lpad("abc", -1, "x"), "pad size must be in the range");
+  BOLT_ASSERT_THROW(lpad("abc", 5, ""), "padString must not be empty");
 }
 
 TEST_F(StringTest, left) {
