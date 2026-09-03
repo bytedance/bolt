@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <chrono>
+#include <sstream>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/Utils.h"
@@ -560,6 +561,101 @@ void LocalCellOutput::writeCurrentWindowPayload(
   }
 }
 
+namespace {
+
+/// "12.3MB"-style size for the diagnostics log.
+std::string mb(uint64_t bytes) {
+  char buf[32];
+  ::snprintf(buf, sizeof(buf), "%.2fMB", bytes / (1024.0 * 1024.0));
+  return buf;
+}
+
+/// Appends "N runs [a, b, ...]" for one window's run offset tables and
+/// returns the runs' total spill bytes.
+uint64_t describeRuns(
+    const std::vector<std::vector<uint64_t>>& runPidEnds,
+    uint32_t numPartitions,
+    std::ostringstream& os) {
+  constexpr size_t kMaxListedRuns = 16;
+  uint64_t total = 0;
+  os << runPidEnds.size() << " runs [";
+  for (size_t i = 0; i < runPidEnds.size(); ++i) {
+    const uint64_t bytes =
+        runPidEnds[i][numPartitions] - runPidEnds[i][0];
+    total += bytes;
+    if (i < kMaxListedRuns) {
+      os << (i > 0 ? ", " : "") << mb(bytes);
+    } else if (i == kMaxListedRuns) {
+      os << ", +" << (runPidEnds.size() - kMaxListedRuns) << " more";
+    }
+  }
+  os << "]";
+  return total;
+}
+
+} // namespace
+
+void LocalCellOutput::logWindowDiagnostics(
+    const CellWindowInput& in,
+    bool windowHasData) {
+  constexpr size_t kMaxListedWindows = 64;
+  uint64_t totalRuns = 0;
+  uint64_t totalRunBytes = 0;
+  for (size_t w = 0; w < sealed_.size(); ++w) {
+    const auto& window = sealed_[w];
+    uint64_t rows = 0;
+    uint32_t nonEmpty = 0;
+    for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
+      rows += window.rowCounts[pid];
+      nonEmpty += window.rowCounts[pid] > 0 ? 1 : 0;
+    }
+    uint64_t nullBytes = 0;
+    for (const auto length : window.nullLength) {
+      nullBytes += length;
+    }
+    std::ostringstream os;
+    os << "CellShuffleWriter window " << w << ": rows=" << rows
+       << ", partitions=" << nonEmpty << "/" << in.numPartitions
+       << ", nullBytes=" << mb(nullBytes) << ", ";
+    const uint64_t runBytes =
+        describeRuns(window.runPidEnds, in.numPartitions, os);
+    totalRuns += window.runPidEnds.size();
+    totalRunBytes += runBytes;
+    if (w < kMaxListedWindows) {
+      LOG(INFO) << os.str();
+    } else if (w == kMaxListedWindows) {
+      LOG(INFO) << "CellShuffleWriter ... " << (sealed_.size() - w)
+                << " more sealed windows elided";
+    }
+  }
+  {
+    uint64_t rows = 0;
+    uint64_t resident = 0;
+    if (windowHasData) {
+      for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
+        rows += in.rowCounts[pid];
+      }
+      const uint32_t numStreams = layout_->numStreams();
+      for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
+        for (uint32_t s = 0; s < numStreams; ++s) {
+          resident += in.cells->bytes(pid, s);
+        }
+      }
+    }
+    std::ostringstream os;
+    os << "CellShuffleWriter residual window: rows=" << rows
+       << ", resident=" << mb(resident) << ", spilled ";
+    const uint64_t runBytes =
+        describeRuns(openWindowRuns_, in.numPartitions, os);
+    totalRuns += openWindowRuns_.size();
+    totalRunBytes += runBytes;
+    LOG(INFO) << os.str();
+  }
+  LOG(INFO) << "CellShuffleWriter totals: " << sealed_.size()
+            << " sealed windows, " << totalRuns << " runs, "
+            << mb(totalRunBytes) << " spilled";
+}
+
 void LocalCellOutput::finalize(
     const CellWindowInput& in,
     bool windowHasData,
@@ -568,6 +664,7 @@ void LocalCellOutput::finalize(
   // in memory is written straight into the data file, alongside any runs
   // the window already spilled mid-stream.
 
+  logWindowDiagnostics(in, windowHasData);
   std::FILE* out = ::fopen(options_.dataFile.c_str(), "wb");
   BOLT_CHECK_NOT_NULL(
       out, "Failed to open shuffle data file {}", options_.dataFile);
