@@ -73,6 +73,12 @@ class LocalCellOutput final : public CellOutput {
   void spillWrite(const void* data, size_t bytes);
   void readSpill(uint64_t offset, void* out, size_t bytes) const;
 
+  /// One INFO line per checkpoint window at finalize - rows, non-empty
+  /// partitions, null bytes and every run's spill-file span - plus the
+  /// residual window and a summary. Diagnostic output, capped so a
+  /// checkpoint-heavy task cannot flood the log.
+  void logWindowDiagnostics(const CellWindowInput& in, bool windowHasData);
+
   /// Appends one partition's payload assembled from a sealed window.
   void writeDiskPayload(
       std::FILE* out,
