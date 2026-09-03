@@ -75,6 +75,8 @@ HiveDataSource::HiveDataSource(
     reusableOutputPool_ =
         std::make_shared<ReusableOutputPool>(reusableOutputCount);
   }
+  parquetRepDefStreamingWindowSize_ =
+      queryConfig.parquetRepDefStreamingWindowSize();
   for (const auto& key : HiveConfig::hms_session_key) {
     std::optional<std::string> value = queryConfig.get<std::string>(key);
     if (value.has_value()) {
@@ -386,6 +388,8 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
 
   splitReader->rowReaderOptions().setDecodeRepDefPageCount(
       decodeRepDefPageCount_);
+  splitReader->rowReaderOptions().setParquetRepDefStreamingWindowSize(
+      parquetRepDefStreamingWindowSize_);
   splitReader->rowReaderOptions().setParquetRepDefMemoryLimit(
       parquetRepDefMemoryLimit_);
   splitReader->rowReaderOptions().setParquetReaderImplicitCastMask(

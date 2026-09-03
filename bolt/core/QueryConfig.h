@@ -631,6 +631,11 @@ class QueryConfig {
 
   static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
 
+  /// Number of levels per Parquet rep/def streaming window. Zero disables
+  /// streaming and uses the legacy preload path.
+  static constexpr const char* kParquetRepDefStreamingWindowSize =
+      "parquet_repdef_streaming_window_size";
+
   /// If true, reorder rows by containerId during hybrid join extraction for
   /// better cache locality. Can be disabled for testing to get deterministic
   /// output order.
@@ -1742,6 +1747,10 @@ class QueryConfig {
 
   int64_t parquetReaderImplicitCastMask() const {
     return get<int64_t>(kParquetReaderImplicitCastMask, 0);
+  }
+
+  int32_t parquetRepDefStreamingWindowSize() const {
+    return get<int32_t>(kParquetRepDefStreamingWindowSize, 2 * 1024);
   }
 
   bool enableDynamicConcurrencyAdjustment() const {
