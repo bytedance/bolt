@@ -411,6 +411,149 @@ class CacheTest : public testing::Test {
   bool testRandomSeek_{true};
 };
 
+TEST_F(CacheTest, enqueuePairReadsStorageOnce) {
+  constexpr int32_t kMB = 1 << 20;
+  constexpr int32_t kLength = 64 << 10;
+  initializeCache(16 * kMB);
+  auto tracker = std::make_shared<ScanTracker>(
+      "testTracker",
+      nullptr,
+      io::ReaderOptions::kDefaultLoadQuantum,
+      groupStats_);
+  uint64_t fileId;
+  uint64_t groupId;
+  auto file = inputByPath("shared_streams", fileId, groupId);
+  auto input = std::make_unique<CachedBufferedInput>(
+      file,
+      MetricsLog::voidLog(),
+      fileId,
+      cache_.get(),
+      tracker,
+      groupId,
+      ioStats_,
+      executor_.get(),
+      io::ReaderOptions(pool_.get()));
+  auto streamId = StreamIdentifier::sequentialFile();
+  auto [first, second] = input->enqueuePair({100, kLength}, &streamId);
+  const auto previous = file->numIos();
+  input->load(LogType::FILE);
+
+  auto readAll = [&](SeekableInputStream& stream) {
+    const void* data;
+    int32_t size;
+    int32_t bytesRead = 0;
+    while (stream.Next(&data, &size)) {
+      file->checkData(data, 100 + bytesRead, size);
+      bytesRead += size;
+    }
+    EXPECT_EQ(kLength, bytesRead);
+  };
+
+  readAll(*second);
+  readAll(*first);
+  EXPECT_EQ(1, file->numIos() - previous);
+}
+
+TEST_F(CacheTest, enqueuePairTriggersCoalescedLoad) {
+  constexpr int32_t kMB = 1 << 20;
+  constexpr int32_t kLength = 64 << 10;
+  constexpr int32_t kGap = 100;
+  gflags::FlagSaver flagSaver;
+  FLAGS_cache_prefetch_min_pct = 101;
+  initializeCache(16 * kMB);
+  auto tracker = std::make_shared<ScanTracker>(
+      "testTracker",
+      nullptr,
+      io::ReaderOptions::kDefaultLoadQuantum,
+      groupStats_);
+  uint64_t fileId;
+  uint64_t groupId;
+  auto file = inputByPath("shared_streams", fileId, groupId);
+  auto input = std::make_unique<CachedBufferedInput>(
+      file,
+      MetricsLog::voidLog(),
+      fileId,
+      cache_.get(),
+      tracker,
+      groupId,
+      ioStats_,
+      nullptr,
+      io::ReaderOptions(pool_.get()));
+  const Region pairRegion{100, kLength};
+  const Region adjacentRegion{
+      pairRegion.offset + pairRegion.length + kGap, kLength};
+  auto [first, second] = input->enqueuePair(pairRegion, streamIds_[0].get());
+  auto adjacent = input->enqueue(adjacentRegion, streamIds_[1].get());
+  first.reset();
+
+  const auto previous = file->numIos();
+  input->load(LogType::FILE);
+  EXPECT_EQ(previous, file->numIos());
+
+  auto readAll = [&](SeekableInputStream& stream, const Region& region) {
+    const void* data;
+    int32_t size;
+    int32_t bytesRead = 0;
+    while (stream.Next(&data, &size)) {
+      file->checkData(data, region.offset + bytesRead, size);
+      bytesRead += size;
+    }
+    EXPECT_EQ(region.length, bytesRead);
+  };
+
+  readAll(*second, pairRegion);
+  EXPECT_EQ(1, file->numIos() - previous);
+  readAll(*adjacent, adjacentRegion);
+  EXPECT_EQ(1, file->numIos() - previous);
+}
+
+TEST_F(CacheTest, enqueueLargePairTriggersAllSplitCoalescedLoads) {
+  constexpr int32_t kMB = 1 << 20;
+  constexpr int32_t kQuantum = 64 << 10;
+  constexpr int32_t kLength = 4 * kQuantum;
+  gflags::FlagSaver flagSaver;
+  FLAGS_cache_prefetch_min_pct = 50;
+  initializeCache(16 * kMB);
+  auto tracker = std::make_shared<ScanTracker>(
+      "testTracker", nullptr, kQuantum, groupStats_);
+  uint64_t fileId;
+  uint64_t groupId;
+  auto file = inputByPath("large_shared_streams", fileId, groupId);
+  io::ReaderOptions options(pool_.get());
+  options.setLoadQuantum(kQuantum).setMaxCoalesceBytes(2 * kQuantum);
+  auto input = std::make_unique<CachedBufferedInput>(
+      file,
+      MetricsLog::voidLog(),
+      fileId,
+      cache_.get(),
+      tracker,
+      groupId,
+      ioStats_,
+      nullptr,
+      options);
+
+  const auto trackingId = TrackingId(streamIds_[1]->getId());
+  tracker->recordReference(trackingId, 4 * kLength, fileId, groupId);
+  tracker->recordRead(trackingId, 5 * kLength, fileId, groupId);
+  const Region region{100, kLength};
+  auto [first, second] = input->enqueuePair(region, streamIds_[1].get());
+  first.reset();
+
+  const auto previous = file->numIos();
+  input->load(LogType::FILE);
+  EXPECT_EQ(previous, file->numIos());
+
+  const void* data;
+  int32_t size;
+  int32_t bytesRead = 0;
+  while (second->Next(&data, &size)) {
+    file->checkData(data, region.offset + bytesRead, size);
+    bytesRead += size;
+  }
+  EXPECT_EQ(region.length, bytesRead);
+  EXPECT_EQ(2, file->numIos() - previous);
+}
+
 TEST_F(CacheTest, window) {
   constexpr int32_t kMB = 1 << 20;
   initializeCache(64 * kMB);

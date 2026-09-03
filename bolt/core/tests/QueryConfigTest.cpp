@@ -67,6 +67,16 @@ TEST_F(QueryConfigTest, setConfig) {
   ASSERT_TRUE(config.isLegacyCast());
 }
 
+TEST_F(QueryConfigTest, parquetRepDefStreamingWindowSize) {
+  auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+  EXPECT_EQ(queryCtx->queryConfig().parquetRepDefStreamingWindowSize(), 2'048);
+
+  std::unordered_map<std::string, std::string> configData(
+      {{QueryConfig::kParquetRepDefStreamingWindowSize, "0"}});
+  queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+  EXPECT_EQ(queryCtx->queryConfig().parquetRepDefStreamingWindowSize(), 0);
+}
+
 TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {
   auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
   ASSERT_TRUE(queryCtx->queryConfig()
