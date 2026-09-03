@@ -420,9 +420,18 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // chunk-grow choke point must go back too, or the arbitrator's requester
   // still sees no room (the standard spill-then-release() pattern).
   boltPool_->release();
-  // Close the window at the next batch boundary so the resident null and
-  // row-count state goes too.
-  checkpointRequested_ = true;
+  // Close the window at the next batch boundary only when the resident
+  // null-bitmap state is actually worth returning. Requesting a seal on
+  // EVERY reclaim turns memory-pressure churn into a checkpoint storm:
+  // each seal walks every (partition, stream) cache and writes a payload
+  // header and null region per partition, which at tens of thousands of
+  // partitions costs seconds of work and megabytes of file overhead per
+  // window - while the data cells were already freed by the spill above.
+  // Large null state still seals through maybeCheckpoint's own
+  // nullMemLimitBytes trigger regardless of this request.
+  if (nulls_->allocatedBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
+    checkpointRequested_ = true;
+  }
   metrics_.totalBytesEvicted = output_->bytesEvicted();
   return arrow::Status::OK();
 }
