@@ -31,6 +31,7 @@
 #include <arrow/api.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <arrow/type_traits.h>
 #include <gtest/gtest.h>
 
 #include "bolt/common/base/Nulls.h"
@@ -57,10 +58,89 @@ struct BoltToArrowType<Timestamp> {
   using type = int64_t;
 };
 
+std::shared_ptr<arrow::Array> toArrow(
+    const VectorPtr& vec,
+    const ArrowOptions& options,
+    memory::MemoryPool* pool);
+
 class ArrowBridgeArrayExportTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+  }
+
+  template <typename T>
+  void testConstantPrimitiveArrayAsDictionary(const std::vector<T>& expected) {
+    auto arrays = vectorMaker_.arrayVector<T>({expected});
+    auto constant = BaseVector::wrapInConstant(32, 0, arrays);
+
+    ArrowOptions options;
+    options.arrayConstantAsDictionary = true;
+    auto exported = toArrow(constant, options, pool_.get());
+
+    ASSERT_OK(exported->ValidateFull());
+    ASSERT_EQ(exported->type_id(), arrow::Type::DICTIONARY);
+    const auto& dictionary =
+        static_cast<const arrow::DictionaryArray&>(*exported);
+    ASSERT_EQ(dictionary.length(), 32);
+    ASSERT_EQ(dictionary.null_count(), 0);
+
+    const auto& indices =
+        static_cast<const arrow::Int32Array&>(*dictionary.indices());
+    for (int64_t row = 0; row < indices.length(); ++row) {
+      ASSERT_FALSE(indices.IsNull(row));
+      EXPECT_EQ(indices.Value(row), 0);
+    }
+
+    const auto& list =
+        static_cast<const arrow::ListArray&>(*dictionary.dictionary());
+    ASSERT_EQ(list.length(), 1);
+    ASSERT_EQ(list.value_offset(0), 0);
+    ASSERT_EQ(list.value_length(0), expected.size());
+
+    using ArrowType = typename arrow::CTypeTraits<T>::ArrowType;
+    using ArrowArray = typename arrow::TypeTraits<ArrowType>::ArrayType;
+    const auto& values = static_cast<const ArrowArray&>(*list.values());
+    ASSERT_EQ(values.length(), expected.size());
+    for (int64_t i = 0; i < values.length(); ++i) {
+      EXPECT_EQ(values.Value(i), expected[i]);
+    }
+  }
+
+  void testConstantStringLikeArrayAsDictionary(
+      const std::vector<StringView>& expected,
+      const TypePtr& elementType,
+      arrow::Type::type expectedArrowType) {
+    auto arrays = vectorMaker_.arrayVector<StringView>({expected}, elementType);
+    auto constant = BaseVector::wrapInConstant(32, 0, arrays);
+
+    ArrowOptions options;
+    options.arrayConstantAsDictionary = true;
+    auto exported = toArrow(constant, options, pool_.get());
+
+    ASSERT_OK(exported->ValidateFull());
+    ASSERT_EQ(exported->type_id(), arrow::Type::DICTIONARY);
+    const auto& dictionary =
+        static_cast<const arrow::DictionaryArray&>(*exported);
+    const auto& list =
+        static_cast<const arrow::ListArray&>(*dictionary.dictionary());
+    ASSERT_EQ(list.length(), 1);
+    ASSERT_EQ(list.value_length(0), expected.size());
+    ASSERT_EQ(list.values()->type_id(), expectedArrowType);
+    if (expectedArrowType == arrow::Type::BINARY) {
+      const auto& values =
+          static_cast<const arrow::BinaryArray&>(*list.values());
+      ASSERT_EQ(values.length(), expected.size());
+      for (int64_t i = 0; i < values.length(); ++i) {
+        EXPECT_EQ(values.GetString(i), expected[i].str());
+      }
+      return;
+    }
+    const auto& values = static_cast<const arrow::StringArray&>(*list.values());
+    ASSERT_EQ(values.length(), expected.size());
+    for (int64_t i = 0; i < values.length(); ++i) {
+      EXPECT_EQ(values.GetString(i), expected[i].str());
+    }
   }
 
   template <typename T>
@@ -1648,7 +1728,9 @@ TEST_F(ArrowBridgeArrayExportTest, constantArrayRowNestedVector) {
       std::dynamic_pointer_cast<ConstantVector<ComplexType>>(
           BaseVector::wrapInConstant(size, 22, constBaseVector));
 
-  auto array = toArrow(constArrayVector, {}, pool_.get());
+  ArrowOptions options;
+  options.arrayConstantAsDictionary = true;
+  auto array = toArrow(constArrayVector, options, pool_.get());
 
   ASSERT_OK(array->ValidateFull());
   EXPECT_EQ(array->null_count(), 0);
@@ -2860,5 +2942,228 @@ TEST_F(ArrowBridgeArrayExportTest, complexTimestampTest) {
 //     BOLT_CHECK_EQ(timestamp.getNanos(), expectedRes[i].getNanos());
 //   }
 // }
+
+TEST_F(ArrowBridgeArrayExportTest, constantArrayAsDictionary) {
+  // Build an ARRAY constant: all rows reference the same list.
+  auto elements = vectorMaker_.flatVector<int64_t>({10, 20, 30, 40});
+  auto offsets = AlignedBuffer::allocate<vector_size_t>(2, pool_.get());
+  auto* rawOffsets = offsets->asMutable<vector_size_t>();
+  rawOffsets[0] = 0;
+  rawOffsets[1] = 4;
+  auto sizes = AlignedBuffer::allocate<vector_size_t>(1, pool_.get());
+  sizes->asMutable<vector_size_t>()[0] = 4;
+  auto innerArray = std::make_shared<ArrayVector>(
+      pool_.get(),
+      ARRAY(BIGINT()),
+      BufferPtr(nullptr),
+      1,
+      offsets,
+      sizes,
+      elements,
+      0);
+
+  const vector_size_t numRows = 100;
+  VectorPtr constant = BaseVector::wrapInConstant(numRows, 0, innerArray);
+
+  ArrowOptions opts;
+  opts.arrayConstantAsDictionary = true;
+  auto array = toArrow(constant, opts, pool_.get());
+
+  // Must validate as a dictionary-encoded array.
+  ASSERT_OK(array->ValidateFull());
+  ASSERT_EQ(array->type_id(), arrow::Type::DICTIONARY);
+
+  auto dictArray = static_cast<const arrow::DictionaryArray*>(array.get());
+  ASSERT_EQ(dictArray->length(), numRows);
+  ASSERT_EQ(dictArray->null_count(), 0);
+
+  // All indices must be 0.
+  auto typedIndices =
+      static_cast<const arrow::Int32Array*>(dictArray->indices().get());
+  for (int64_t i = 0; i < numRows; ++i) {
+    EXPECT_FALSE(typedIndices->IsNull(i));
+    EXPECT_EQ(typedIndices->Value(i), 0);
+  }
+
+  // Dictionary must be a ListArray with exactly 1 entry containing
+  // [10, 20, 30, 40].
+  auto dict = dictArray->dictionary();
+  ASSERT_EQ(dict->type_id(), arrow::Type::LIST);
+  auto dictList = static_cast<const arrow::ListArray*>(dict.get());
+  ASSERT_EQ(dictList->length(), 1);
+  EXPECT_EQ(dictList->value_offset(0), 0);
+  EXPECT_EQ(dictList->value_length(0), 4);
+  auto dictValues =
+      static_cast<const arrow::Int64Array*>(dictList->values().get());
+  EXPECT_EQ(dictValues->Value(0), 10);
+  EXPECT_EQ(dictValues->Value(1), 20);
+  EXPECT_EQ(dictValues->Value(2), 30);
+  EXPECT_EQ(dictValues->Value(3), 40);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, constantPrimitiveArraysAsDictionary) {
+  testConstantPrimitiveArrayAsDictionary<bool>({true, false, true});
+  testConstantPrimitiveArrayAsDictionary<int8_t>({-7, 0, 12});
+  testConstantPrimitiveArrayAsDictionary<int16_t>({-1024, 0, 2048});
+  testConstantPrimitiveArrayAsDictionary<int32_t>({-100000, 0, 200000});
+  testConstantPrimitiveArrayAsDictionary<int64_t>(
+      {-10000000000LL, 0, 20000000000LL});
+  testConstantPrimitiveArrayAsDictionary<float>({-1.5F, 0.0F, 2.25F});
+  testConstantPrimitiveArrayAsDictionary<double>({-1.5, 0.0, 2.25});
+}
+
+TEST_F(ArrowBridgeArrayExportTest, constantStringArrayAsDictionary) {
+  testConstantStringLikeArrayAsDictionary(
+      {StringView(""), StringView("alpha"), StringView("longer string value")},
+      VARCHAR(),
+      arrow::Type::STRING);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, constantVarbinaryArrayAsDictionary) {
+  const std::string binaryWithZero{"A\0B", 3};
+  testConstantStringLikeArrayAsDictionary(
+      {StringView(""),
+       StringView("binary"),
+       StringView(binaryWithZero.data(), binaryWithZero.size())},
+      VARBINARY(),
+      arrow::Type::BINARY);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, constantArrayAsDictionaryWithIndex) {
+  // Constant wraps index=1 of a 3-element inner array.
+  auto elements = vectorMaker_.flatVector<int64_t>({1, 2, 3, 4, 5, 6});
+  auto offsets = AlignedBuffer::allocate<vector_size_t>(4, pool_.get());
+  auto* rawOffsets = offsets->asMutable<vector_size_t>();
+  rawOffsets[0] = 0;
+  rawOffsets[1] = 2;
+  rawOffsets[2] = 4;
+  rawOffsets[3] = 6;
+  auto sizes = AlignedBuffer::allocate<vector_size_t>(3, pool_.get());
+  auto* rawSizes = sizes->asMutable<vector_size_t>();
+  rawSizes[0] = 2;
+  rawSizes[1] = 2;
+  rawSizes[2] = 2;
+  auto innerArray = std::make_shared<ArrayVector>(
+      pool_.get(),
+      ARRAY(BIGINT()),
+      BufferPtr(nullptr),
+      3,
+      offsets,
+      sizes,
+      elements,
+      0);
+
+  const vector_size_t numRows = 50;
+  // Wrap the second element ([3, 4]).
+  VectorPtr constant = BaseVector::wrapInConstant(numRows, 1, innerArray);
+
+  ArrowOptions opts;
+  opts.arrayConstantAsDictionary = true;
+  auto array = toArrow(constant, opts, pool_.get());
+  ASSERT_OK(array->ValidateFull());
+
+  auto dictArray = static_cast<const arrow::DictionaryArray*>(array.get());
+  auto dictList =
+      static_cast<const arrow::ListArray*>(dictArray->dictionary().get());
+  ASSERT_EQ(dictList->length(), 1);
+  EXPECT_EQ(dictList->value_length(0), 2);
+  auto dictValues =
+      static_cast<const arrow::Int64Array*>(dictList->values().get());
+  EXPECT_EQ(dictValues->Value(0), 3);
+  EXPECT_EQ(dictValues->Value(1), 4);
+}
+
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    constantArrayDictionaryFlattensDictionaryElements) {
+  // ARRAY_DISTINCT produces an ArrayVector whose elements are Dictionary
+  // encoded. When a CROSS JOIN wraps this array in a ConstantVector, the
+  // Dictionary export must retain only the outer Constant<Array> encoding.
+  auto indices = makeBuffer<vector_size_t>({2, 1, 0});
+  auto encodedElements = BaseVector::wrapInDictionary(
+      nullptr,
+      indices,
+      3,
+      vectorMaker_.flatVector<StringView>({"alpha", "beta", "gamma"}));
+  auto innerArray = std::make_shared<ArrayVector>(
+      pool_.get(),
+      ARRAY(VARCHAR()),
+      nullptr,
+      1,
+      makeBuffer<vector_size_t>({0}),
+      makeBuffer<vector_size_t>({3}),
+      encodedElements);
+  auto constant = BaseVector::wrapInConstant(100, 0, innerArray);
+
+  ArrowOptions opts;
+  opts.arrayConstantAsDictionary = true;
+  ArrowSchema schema;
+  ::bytedance::bolt::exportToArrow(constant, schema, opts);
+  ASSERT_NE(schema.dictionary, nullptr);
+  EXPECT_STREQ(schema.format, "i");
+  EXPECT_STREQ(schema.dictionary->format, "+l");
+  ASSERT_EQ(schema.dictionary->n_children, 1);
+  EXPECT_STREQ(schema.dictionary->children[0]->format, "u");
+  EXPECT_EQ(schema.dictionary->children[0]->dictionary, nullptr);
+
+  auto array = toArrow(constant, opts, pool_.get());
+  ASSERT_OK(array->ValidateFull());
+  auto dictArray = static_cast<const arrow::DictionaryArray*>(array.get());
+  auto dictList =
+      static_cast<const arrow::ListArray*>(dictArray->dictionary().get());
+  ASSERT_EQ(dictList->values()->type_id(), arrow::Type::STRING);
+  auto values =
+      static_cast<const arrow::StringArray*>(dictList->values().get());
+  EXPECT_EQ(values->GetString(0), "gamma");
+  EXPECT_EQ(values->GetString(1), "beta");
+  EXPECT_EQ(values->GetString(2), "alpha");
+
+  schema.release(&schema);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, constantArrayDictionaryFlagOffUsesRee) {
+  // When flag is off (default), ARRAY constant should use REE (+r).
+  auto elements = vectorMaker_.flatVector<int64_t>({1, 2});
+  auto offsets = AlignedBuffer::allocate<vector_size_t>(2, pool_.get());
+  offsets->asMutable<vector_size_t>()[0] = 0;
+  offsets->asMutable<vector_size_t>()[1] = 2;
+  auto sizes = AlignedBuffer::allocate<vector_size_t>(1, pool_.get());
+  sizes->asMutable<vector_size_t>()[0] = 2;
+  auto innerArray = std::make_shared<ArrayVector>(
+      pool_.get(),
+      ARRAY(BIGINT()),
+      BufferPtr(nullptr),
+      1,
+      offsets,
+      sizes,
+      elements,
+      0);
+  VectorPtr constant = BaseVector::wrapInConstant(10, 0, innerArray);
+
+  ArrowSchema schema;
+  ::bytedance::bolt::exportToArrow(constant, schema, ArrowOptions{});
+  std::string format(schema.format);
+  EXPECT_EQ(format, "+r");
+  schema.release(&schema);
+}
+
+TEST_F(ArrowBridgeArrayExportTest, unsupportedLogicalTypeArrayConstantsUseRee) {
+  ArrowOptions options;
+  options.arrayConstantAsDictionary = true;
+
+  auto dateArray = vectorMaker_.arrayVector<int32_t>({{0, 1}}, DATE());
+  auto dateConstant = BaseVector::wrapInConstant(10, 0, dateArray);
+  auto exportedDate = toArrow(dateConstant, options, pool_.get());
+  ASSERT_OK(exportedDate->ValidateFull());
+  EXPECT_EQ(exportedDate->type_id(), arrow::Type::RUN_END_ENCODED);
+
+  auto timestampArray = vectorMaker_.arrayVector<Timestamp>(
+      {{Timestamp(1, 100), Timestamp(2, 200)}}, TIMESTAMP());
+  auto timestampConstant = BaseVector::wrapInConstant(10, 0, timestampArray);
+  auto exportedTimestamp = toArrow(timestampConstant, options, pool_.get());
+  ASSERT_OK(exportedTimestamp->ValidateFull());
+  EXPECT_EQ(exportedTimestamp->type_id(), arrow::Type::RUN_END_ENCODED);
+}
+
 } // namespace
 } // namespace bytedance::bolt::test

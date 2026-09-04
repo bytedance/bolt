@@ -60,8 +60,21 @@ struct ArrowOptions {
   // be modified.
   bool stringViewCopyValues{false};
   bool exportToArrowIPC{false};
+  // When true, export ARRAY-type CONSTANT vectors as Arrow Dictionary
+  // (1 value + N zero indices) instead of Run-End Encoded. Needed for
+  // consumers that don't support REE (e.g. Arrow Java < 19). Other types
+  // (scalar, map, struct) are unaffected and use REE.
+  bool arrayConstantAsDictionary{false};
 };
 namespace bytedance::bolt {
+/// Returns true when the vector will use the experimental
+/// Dictionary<List<T>> export path for ARRAY constants. Callers that prepare
+/// or size an export must use this predicate to stay aligned with the actual
+/// ArrowSchema and ArrowArray exporters.
+bool shouldExportArrayConstantAsDictionary(
+    const BaseVector& vector,
+    const ArrowOptions& options);
+
 /// Export a generic Bolt Vector to an ArrowArray, as defined by Arrow's C data
 /// interface:
 ///
