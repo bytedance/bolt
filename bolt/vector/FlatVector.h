@@ -322,6 +322,8 @@ class FlatVector final : public SimpleVector<T> {
       const BaseVector* source,
       const folly::Range<const BaseVector::CopyRange*>& ranges) override;
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override;
+
   void resize(vector_size_t newSize, bool setNotNull = true) override;
 
   VectorPtr slice(vector_size_t offset, vector_size_t length) const override;
@@ -621,6 +623,11 @@ class FlatVector final : public SimpleVector<T> {
       clearStringBuffers();
     }
   }
+
+  // Transfer or copy string buffers to 'pool'. Update StringViews in values_ to
+  // reference addresses in the new buffers. Non-StringView-typed FlatVector
+  // should not have string buffers.
+  void transferAndUpdateStringBuffers(bolt::memory::MemoryPool* pool);
 
   // Contiguous values.
   // If strings, these are bolt::StringViews into memory held by
