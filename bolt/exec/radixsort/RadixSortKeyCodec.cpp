@@ -3588,7 +3588,7 @@ void bindPreparedDecodeScratch(
     DecodeScratch& scratch) {
   BOLT_DCHECK_NOT_NULL(pool);
   BOLT_DCHECK_NOT_NULL(cursorScratch);
-  BOLT_DCHECK_EQ(cursorScratch->pool(), pool);
+  BOLT_DCHECK(cursorScratch->pool() == pool);
   BOLT_DCHECK_GT(wordsPerRow, 0);
   BOLT_DCHECK_LE(
       static_cast<uint64_t>(size),
