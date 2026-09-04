@@ -130,6 +130,21 @@ class ParquetWriterTest : public ParquetTestBase {
         readerOptions);
   }
 
+  bool hasPageEncoding(
+      const std::string& parquetPath,
+      int32_t column,
+      thrift::PageType::type pageType,
+      thrift::Encoding::type encoding) {
+    const auto stats = createLocalParquetReader(parquetPath)
+                           ->fileMetaData()
+                           .rowGroup(0)
+                           .columnChunk(column)
+                           .pageEncodingStats();
+    return std::find_if(stats.begin(), stats.end(), [&](const auto& stat) {
+             return stat.page_type == pageType && stat.encoding == encoding;
+           }) != stats.end();
+  }
+
   template <typename Callback>
   int64_t forEachDataPage(
       const std::string& parquetPath,
@@ -185,6 +200,17 @@ class ParquetWriterTest : public ParquetTestBase {
     writer->write(data);
     writer->close();
     assertRead(parquetPath, rows, schema, data);
+  }
+
+  VectorPtr repeatDictionary(
+      VectorPtr values,
+      vector_size_t size,
+      BufferPtr nulls = nullptr) {
+    BOLT_CHECK_GT(values->size(), 0);
+    auto indices = makeIndices(
+        size, [&](vector_size_t row) { return row % values->size(); });
+    return BaseVector::wrapInDictionary(
+        std::move(nulls), std::move(indices), size, std::move(values));
   }
 
   std::shared_ptr<const Type> getType() {
@@ -407,6 +433,469 @@ TEST_F(ParquetWriterTest, dictToArrow) {
   std::string parquetPath = tempPath_->path + "/dictToArrow.parquet";
   assertWrite(parquetPath, kRows, schema, data);
 };
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughDuplicateValues) {
+  const vector_size_t kRows = 10'000;
+  auto dictionary = makeFlatVector<std::string>(
+      64, [](auto /*row*/) { return std::string(256, 'a'); });
+  auto data = makeRowVector({repeatDictionary(dictionary, kRows)});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughDuplicateValues.parquet";
+
+  vp::WriterOptions writerOptions{};
+  writerOptions.dictionaryPageSizeLimit = 64 * 1024;
+  writerOptions.dataPageSize = 1024;
+  writerOptions.compression = CompressionKind_NONE;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  const auto stats = createLocalParquetReader(parquetPath)
+                         ->fileMetaData()
+                         .rowGroup(0)
+                         .columnChunk(0)
+                         .pageEncodingStats();
+  const auto hasPage = [&](thrift::PageType::type pageType,
+                           thrift::Encoding::type encoding) {
+    return std::find_if(stats.begin(), stats.end(), [&](const auto& stat) {
+             return stat.page_type == pageType && stat.encoding == encoding;
+           }) != stats.end();
+  };
+  EXPECT_TRUE(
+      hasPage(thrift::PageType::DICTIONARY_PAGE, thrift::Encoding::PLAIN));
+  EXPECT_TRUE(hasPage(thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN));
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughAfterEmptyBatch) {
+  const vector_size_t kRows = 10'000;
+  auto data = makeRowVector({repeatDictionary(
+      makeFlatVector<std::string>(
+          16, [](auto /*row*/) { return std::string("value"); }),
+      kRows)});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughAfterEmptyBatch.parquet";
+
+  vp::WriterOptions writerOptions{};
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(BaseVector::create(schema, 0, leafPool_.get()));
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  const auto stats = createLocalParquetReader(parquetPath)
+                         ->fileMetaData()
+                         .rowGroup(0)
+                         .columnChunk(0)
+                         .pageEncodingStats();
+  EXPECT_NE(
+      std::find_if(
+          stats.begin(),
+          stats.end(),
+          [](const auto& stat) {
+            return stat.page_type == thrift::PageType::DATA_PAGE &&
+                stat.encoding == thrift::Encoding::PLAIN;
+          }),
+      stats.end());
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughStringTypesAndMetrics) {
+  const vector_size_t kRows = 4 * 1024;
+  auto varchar = repeatDictionary(
+      makeFlatVector<std::string>(
+          16, [](auto row) { return fmt::format("varchar_{:02}", row); }),
+      kRows,
+      makeNulls(kRows, [](auto row) { return row % 17 == 0; }));
+  auto varbinary = repeatDictionary(
+      makeFlatVector<std::string>(
+          32,
+          [](auto row) { return fmt::format("binary_{:02}", row); },
+          nullptr,
+          VARBINARY()),
+      kRows,
+      makeNulls(kRows, [](auto row) { return row % 23 == 0; }));
+  auto allNull = repeatDictionary(
+      makeFlatVector<std::string>({"unused_0", "unused_1"}),
+      kRows,
+      makeNulls(kRows, [](auto /*row*/) { return true; }));
+  auto data = makeRowVector({varchar, varbinary, allNull});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughStringTypes.parquet";
+
+  ArrowSchema cArrowSchema;
+  exportToArrow(
+      BaseVector::create(schema, 0, leafPool_.get()),
+      cArrowSchema,
+      ArrowOptions{
+          .flattenDictionary = true,
+          .flattenConstant = true,
+          .useLargeString = true});
+  auto flatArrowSchema = ::arrow::ImportSchema(&cArrowSchema).ValueOrDie();
+  std::vector<std::shared_ptr<::arrow::Field>> nullableFields;
+  nullableFields.reserve(flatArrowSchema->num_fields());
+  for (const auto& field : flatArrowSchema->fields()) {
+    nullableFields.push_back(field->WithNullable(true));
+  }
+
+  vp::WriterOptions writerOptions{};
+  writerOptions.writeBatchBytes = 1024;
+  writerOptions.minBatchSize = 128;
+  writerOptions.compression = CompressionKind_SNAPPY;
+  writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V2;
+  auto writer = createLocalWriter(
+      parquetPath,
+      schema,
+      writerOptions,
+      ::arrow::schema(std::move(nullableFields)),
+      nullptr);
+  writer->write(data);
+  const auto firstWriteMetrics = writer->metrics();
+  EXPECT_GT(firstWriteMetrics.writeRecodeWallNanos, 0);
+  EXPECT_GT(firstWriteMetrics.writeEncodeWallNanos, 0);
+  EXPECT_GT(firstWriteMetrics.writeIOWallNanos, 0);
+  EXPECT_EQ(firstWriteMetrics.writeFinalizeWallNanos, 0);
+
+  writer->write(data);
+  const auto secondWriteMetrics = writer->metrics();
+  EXPECT_GT(
+      secondWriteMetrics.writeRecodeWallNanos,
+      firstWriteMetrics.writeRecodeWallNanos);
+  EXPECT_GT(
+      secondWriteMetrics.writeEncodeWallNanos,
+      firstWriteMetrics.writeEncodeWallNanos);
+  writer->close();
+  const auto closedMetrics = writer->metrics();
+  EXPECT_GT(closedMetrics.writeCompressionWallNanos, 0);
+  EXPECT_GT(closedMetrics.writeFinalizeWallNanos, 0);
+
+  auto expected = BaseVector::create(schema, 2 * kRows, pool_.get());
+  expected->copy(data.get(), 0, 0, kRows);
+  expected->copy(data.get(), kRows, 0, kRows);
+  assertRead(parquetPath, 2 * kRows, schema, expected);
+
+  auto reader = createLocalParquetReader(parquetPath);
+  for (int32_t column = 0; column < 2; ++column) {
+    const auto stats = reader->fileMetaData()
+                           .rowGroup(0)
+                           .columnChunk(column)
+                           .pageEncodingStats();
+    EXPECT_NE(
+        std::find_if(
+            stats.begin(),
+            stats.end(),
+            [](const auto& stat) {
+              return stat.page_type == thrift::PageType::DICTIONARY_PAGE;
+            }),
+        stats.end());
+  }
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughSelectiveFlatten) {
+  const vector_size_t kRows = 1024;
+  auto integer = repeatDictionary(
+      makeFlatVector<int32_t>(8, [](auto row) { return row * 7; }), kRows);
+  auto innerDictionary = repeatDictionary(
+      makeFlatVector<std::string>(
+          16, [](auto row) { return fmt::format("nested_{:02}", row); }),
+      kRows);
+  auto nestedDictionary = repeatDictionary(innerDictionary, kRows);
+  auto nullableDictionary = repeatDictionary(
+      makeFlatVector<std::string>(
+          8,
+          [](auto row) { return fmt::format("nullable_{:02}", row); },
+          [](auto row) { return row == 3; }),
+      kRows);
+
+  auto array = makeArrayVector<std::string>(
+      kRows,
+      [](auto /*row*/) { return 2; },
+      [](auto index) { return fmt::format("element_{:02}", index % 11); });
+  auto* arrayVector = array->asUnchecked<ArrayVector>();
+  arrayVector->elements() = repeatDictionary(
+      arrayVector->elements(), arrayVector->elements()->size());
+
+  auto passthrough = repeatDictionary(
+      makeFlatVector<std::string>(
+          8, [](auto /*row*/) { return std::string("passthrough"); }),
+      kRows);
+  auto data = makeRowVector(
+      {integer, nestedDictionary, nullableDictionary, array, passthrough});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughSelectiveFlatten.parquet";
+
+  vp::WriterOptions writerOptions{};
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  EXPECT_EQ(VectorEncoding::Simple::DICTIONARY, integer->encoding());
+  EXPECT_EQ(VectorEncoding::Simple::DICTIONARY, nestedDictionary->encoding());
+  EXPECT_EQ(VectorEncoding::Simple::DICTIONARY, nullableDictionary->encoding());
+  EXPECT_EQ(
+      VectorEncoding::Simple::DICTIONARY, arrayVector->elements()->encoding());
+  EXPECT_EQ(VectorEncoding::Simple::DICTIONARY, passthrough->encoding());
+  assertRead(parquetPath, kRows, schema, data);
+
+  const auto stats = createLocalParquetReader(parquetPath)
+                         ->fileMetaData()
+                         .rowGroup(0)
+                         .columnChunk(4)
+                         .pageEncodingStats();
+  EXPECT_NE(
+      std::find_if(
+          stats.begin(),
+          stats.end(),
+          [](const auto& stat) {
+            return stat.page_type == thrift::PageType::DATA_PAGE &&
+                stat.encoding == thrift::Encoding::PLAIN;
+          }),
+      stats.end());
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughSchemaTransitions) {
+  const vector_size_t kRows = 2048;
+  auto firstDictionary = repeatDictionary(
+      makeFlatVector<std::string>(
+          16, [](auto row) { return fmt::format("first_{:02}", row); }),
+      kRows);
+  auto secondDictionary = repeatDictionary(
+      makeFlatVector<std::string>(
+          8, [](auto row) { return fmt::format("second_{:02}", row); }),
+      kRows);
+  auto nestedDictionary = repeatDictionary(firstDictionary, kRows);
+  auto nullableDictionary = repeatDictionary(
+      makeFlatVector<std::string>(
+          8,
+          [](auto row) { return fmt::format("nullable_{:02}", row); },
+          [](auto row) { return row == 3; }),
+      kRows);
+  auto flat = makeFlatVector<std::string>(
+      kRows,
+      [](auto row) { return fmt::format("flat_{:04}", row); },
+      [](auto row) { return row % 29 == 0; });
+  std::vector<RowVectorPtr> batches = {
+      makeRowVector({firstDictionary}),
+      makeRowVector({secondDictionary}),
+      makeRowVector({nestedDictionary}),
+      makeRowVector({nullableDictionary}),
+      makeRowVector({flat}),
+      makeRowVector({firstDictionary})};
+  auto schema = std::static_pointer_cast<const RowType>(batches[0]->type());
+  auto expected = BaseVector::create(
+      schema, batches.size() * static_cast<size_t>(kRows), pool_.get());
+  for (size_t i = 0; i < batches.size(); ++i) {
+    expected->copy(batches[i].get(), i * kRows, 0, kRows);
+  }
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughSchemaTransitions.parquet";
+
+  ArrowSchema cArrowSchema;
+  exportToArrow(
+      BaseVector::create(schema, 0, leafPool_.get()),
+      cArrowSchema,
+      ArrowOptions{
+          .flattenDictionary = true,
+          .flattenConstant = true,
+          .useLargeString = true});
+  auto nullableSchema = ::arrow::ImportSchema(&cArrowSchema).ValueOrDie();
+
+  vp::WriterOptions writerOptions{};
+  auto writer =
+      createLocalWriter(parquetPath, schema, writerOptions, nullableSchema);
+  for (size_t i = 0; i < batches.size(); ++i) {
+    writer->write(batches[i]);
+    if (i == 1) {
+      writer->flush();
+    }
+  }
+  writer->close();
+
+  assertRead(parquetPath, batches.size() * kRows, schema, expected);
+  const auto metadata =
+      vp::arrow::ParquetFileReader::OpenFile(parquetPath)->metadata();
+  EXPECT_TRUE(metadata->schema()->group_node()->field(0)->is_optional());
+}
+
+TEST_F(ParquetWriterTest, dictionaryInputRespectsOutputDictionaryOptions) {
+  const vector_size_t kRows = 1024;
+  const auto makeColumn = [&]() {
+    return repeatDictionary(
+        makeFlatVector<std::string>(
+            8, [](auto row) { return fmt::format("value_{:02}", row); }),
+        kRows);
+  };
+  auto data =
+      makeRowVector({"enabled", "disabled"}, {makeColumn(), makeColumn()});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+
+  const auto writeAndCheck = [&](const std::string& name,
+                                 vp::WriterOptions writerOptions,
+                                 const std::vector<bool>& expectedPages) {
+    const auto parquetPath = tempPath_->path + "/" + name + ".parquet";
+    auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+    writer->write(data);
+    writer->close();
+    assertRead(parquetPath, kRows, schema, data);
+
+    auto reader = createLocalParquetReader(parquetPath);
+    for (int32_t column = 0; column < expectedPages.size(); ++column) {
+      const auto stats = reader->fileMetaData()
+                             .rowGroup(0)
+                             .columnChunk(column)
+                             .pageEncodingStats();
+      const bool hasDictionaryPage =
+          std::find_if(stats.begin(), stats.end(), [](const auto& stat) {
+            return stat.page_type == thrift::PageType::DICTIONARY_PAGE;
+          }) != stats.end();
+      EXPECT_EQ(expectedPages[column], hasDictionaryPage);
+    }
+  };
+
+  vp::WriterOptions globallyDisabled{};
+  globallyDisabled.enableDictionary = false;
+  writeAndCheck(
+      "inputDictionaryGloballyDisabled", globallyDisabled, {false, false});
+
+  vp::WriterOptions columnDisabled{};
+  columnDisabled.columnEnableDictionaryMap["disabled"] = false;
+  writeAndCheck("inputDictionaryColumnDisabled", columnDisabled, {true, false});
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughUsesWholeInputForReuse) {
+  constexpr vector_size_t kRows = 16 * 100;
+  const auto makeColumn = [&](vector_size_t dictionarySize) {
+    return repeatDictionary(
+        makeFlatVector<std::string>(
+            dictionarySize, [](auto /*row*/) { return std::string(64, 'a'); }),
+        kRows);
+  };
+  auto data = makeRowVector(
+      {"at_threshold", "over_threshold"}, {makeColumn(16), makeColumn(17)});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughReuseThreshold.parquet";
+
+  vp::WriterOptions writerOptions{};
+  writerOptions.writeBatchBytes = 1;
+  writerOptions.minBatchSize = 128;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  EXPECT_TRUE(hasPageEncoding(
+      parquetPath, 0, thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN));
+  EXPECT_FALSE(hasPageEncoding(
+      parquetPath, 1, thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN));
+  EXPECT_TRUE(hasPageEncoding(
+      parquetPath,
+      1,
+      thrift::PageType::DATA_PAGE,
+      thrift::Encoding::RLE_DICTIONARY));
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughHonorsColumnOptions) {
+  constexpr vector_size_t kRows = 16 * 100;
+  const auto makeColumn = [&]() {
+    return repeatDictionary(
+        makeFlatVector<std::string>(
+            16, [](auto /*row*/) { return std::string(64, 'a'); }),
+        kRows);
+  };
+  auto globalLimit = makeColumn();
+  const auto dictionaryBytes = globalLimit->valueVector()->estimateFlatSize();
+  auto data = makeRowVector(
+      {"global_limit", "column_limit", "disabled"},
+      {globalLimit, makeColumn(), makeColumn()});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto parquetPath =
+      tempPath_->path + "/dictionaryPassthroughColumnOptions.parquet";
+
+  vp::WriterOptions writerOptions{};
+  writerOptions.dictionaryPageSizeLimit = dictionaryBytes - 1;
+  writerOptions.columnDictionaryPageSizeLimitMap["column_limit"] =
+      dictionaryBytes;
+  writerOptions.columnEnableDictionaryMap["disabled"] = false;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(data);
+  writer->close();
+
+  assertRead(parquetPath, kRows, schema, data);
+  EXPECT_FALSE(hasPageEncoding(
+      parquetPath, 0, thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN));
+  EXPECT_TRUE(hasPageEncoding(
+      parquetPath,
+      0,
+      thrift::PageType::DATA_PAGE,
+      thrift::Encoding::RLE_DICTIONARY));
+  EXPECT_TRUE(hasPageEncoding(
+      parquetPath, 1, thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN));
+  EXPECT_FALSE(hasPageEncoding(
+      parquetPath,
+      2,
+      thrift::PageType::DICTIONARY_PAGE,
+      thrift::Encoding::PLAIN));
+  EXPECT_TRUE(hasPageEncoding(
+      parquetPath, 2, thrift::PageType::DATA_PAGE, thrift::Encoding::PLAIN));
+}
+
+TEST_F(ParquetWriterTest, dictionaryPassthroughOnlyUsesDirectWritePath) {
+  constexpr vector_size_t kRows = 16 * 100;
+  auto data = makeRowVector({repeatDictionary(
+      makeFlatVector<std::string>(
+          16, [](auto /*row*/) { return std::string(64, 'a'); }),
+      kRows)});
+  auto schema = std::static_pointer_cast<const RowType>(data->type());
+  const auto writeAndCheck = [&](const std::string& name,
+                                 std::unique_ptr<vp::Writer> writer,
+                                 bool expectPlainDataPage) {
+    const auto parquetPath = tempPath_->path + "/" + name + ".parquet";
+    writer->write(data);
+    writer->close();
+    assertRead(parquetPath, kRows, schema, data);
+    EXPECT_EQ(
+        expectPlainDataPage,
+        hasPageEncoding(
+            parquetPath,
+            0,
+            thrift::PageType::DATA_PAGE,
+            thrift::Encoding::PLAIN));
+  };
+
+  vp::WriterOptions directOptions{};
+  const auto directPath =
+      tempPath_->path + "/dictionaryPassthroughDirect.parquet";
+  writeAndCheck(
+      "dictionaryPassthroughDirect",
+      createLocalWriter(directPath, schema, directOptions),
+      true);
+
+  const auto stagingPath =
+      tempPath_->path + "/dictionaryPassthroughStaging.parquet";
+  auto stagingWriter = createWriter(
+      createSink(stagingPath),
+      [&]() {
+        return std::make_unique<LambdaFlushPolicy>(
+            kRowsInRowGroup, kBytesInRowGroup, []() { return false; });
+      },
+      schema);
+  writeAndCheck(
+      "dictionaryPassthroughStaging", std::move(stagingWriter), false);
+
+  vp::WriterOptions alignedOptions{};
+  alignedOptions.enableRowGroupAlignedWrite = true;
+  alignedOptions.expectedRowsInEachBlock = {kRows + 1};
+  const auto alignedPath =
+      tempPath_->path + "/dictionaryPassthroughAligned.parquet";
+  writeAndCheck(
+      "dictionaryPassthroughAligned",
+      createLocalWriter(alignedPath, schema, alignedOptions),
+      false);
+}
 
 TEST_F(ParquetWriterTest, reuseArrowSchemaAcrossEncodings) {
   const vector_size_t kRows = 64;

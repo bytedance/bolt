@@ -67,6 +67,8 @@ struct ArrowContext {
   int64_t stagingBytes = 0;
   // columns, Arrays
   std::vector<std::vector<std::shared_ptr<::arrow::Array>>> stagingChunks;
+  std::vector<bool> dictionaryPassthroughColumns;
+  std::vector<int64_t> dictionaryPassthroughByteLimits;
 };
 
 Compression::type getArrowParquetCompression(
@@ -143,6 +145,7 @@ std::shared_ptr<FileEncryptionProperties> getEncryptionProperties(
 namespace {
 
 constexpr int64_t DEFAULT_PARQUET_BLOCK_SIZE = 128 * 1024 * 1024; // 128M
+constexpr int64_t kMinRowsPerDictionaryValue = 100;
 
 std::shared_ptr<WriterProperties::Builder> getArrowParquetWriterOptionsBuilder(
     const parquet::WriterOptions& options,
@@ -319,8 +322,19 @@ std::shared_ptr<::arrow::Field> updateFieldNameRecursive(
     const Type& type,
     const std::shared_ptr<::arrow::Field>& fieldNullable,
     const std::string& name = "") {
+  auto fieldType = field->type();
+  if (fieldType->id() == ::arrow::Type::DICTIONARY) {
+    fieldType = std::static_pointer_cast<::arrow::DictionaryType>(fieldType)
+                    ->value_type();
+  }
+  auto nullableType = fieldNullable->type();
+  if (nullableType->id() == ::arrow::Type::DICTIONARY) {
+    nullableType =
+        std::static_pointer_cast<::arrow::DictionaryType>(nullableType)
+            ->value_type();
+  }
   BOLT_DCHECK(
-      field->type()->Equals(fieldNullable->type()),
+      fieldType->Equals(nullableType),
       "field name: {}, type: {}; fieldNullable name: {}, type: {}.",
       name,
       field->type()->ToString(),
@@ -379,6 +393,78 @@ std::shared_ptr<::arrow::Field> updateFieldNameRecursive(
   } else {
     return field->WithNullable(fieldNullable->nullable());
   }
+}
+
+bool hasDictionaryDescendant(const VectorPtr& vector) {
+  if (!vector) {
+    return false;
+  }
+
+  auto loaded = BaseVector::loadedVectorShared(vector);
+  switch (loaded->encoding()) {
+    case VectorEncoding::Simple::DICTIONARY:
+      return true;
+    case VectorEncoding::Simple::ROW:
+      for (const auto& child : loaded->asUnchecked<RowVector>()->children()) {
+        if (hasDictionaryDescendant(child)) {
+          return true;
+        }
+      }
+      return false;
+    case VectorEncoding::Simple::ARRAY:
+      return hasDictionaryDescendant(
+          loaded->asUnchecked<ArrayVector>()->elements());
+    case VectorEncoding::Simple::MAP: {
+      const auto* map = loaded->asUnchecked<MapVector>();
+      return hasDictionaryDescendant(map->mapKeys()) ||
+          hasDictionaryDescendant(map->mapValues());
+    }
+    default:
+      return false;
+  }
+}
+
+bool needsFlatten(
+    const VectorPtr& vector,
+    vector_size_t dictionaryDecisionRows,
+    int64_t dictionaryByteLimit) {
+  auto loaded = BaseVector::loadedVectorShared(vector);
+  if (loaded->encoding() == VectorEncoding::Simple::DICTIONARY) {
+    auto values = BaseVector::loadedVectorShared(loaded->valueVector());
+    if (!values->type()->isPrimitiveType() || !values->isFlatEncoding()) {
+      return true;
+    }
+    const auto kind = values->typeKind();
+    if ((kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) ||
+        values->mayHaveNulls()) {
+      return true;
+    }
+    if (dictionaryByteLimit <= 0 ||
+        values->estimateFlatSize() >
+            static_cast<uint64_t>(dictionaryByteLimit)) {
+      return true;
+    }
+    return static_cast<int64_t>(values->size()) * kMinRowsPerDictionaryValue >
+        dictionaryDecisionRows;
+  }
+
+  if (loaded->encoding() == VectorEncoding::Simple::CONSTANT) {
+    return loaded->valueVector() && !loaded->wrappedVector()->isFlatEncoding();
+  }
+
+  return !loaded->type()->isPrimitiveType() && hasDictionaryDescendant(loaded);
+}
+
+bool hasVariantType(const TypePtr& type) {
+  if (type->isVariant()) {
+    return true;
+  }
+  for (uint32_t i = 0; i < type->size(); ++i) {
+    if (hasVariantType(type->childAt(i))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace
@@ -446,7 +532,7 @@ Writer::Writer(
     : pool_(std::move(pool)),
       generalPool_{pool_->addLeafChild(".general")},
       exportPool_{pool_->addLeafChild(".exportArrow")},
-      arrowPool_(arrowPool),
+      arrowPool_(arrowPool ? arrowPool : ::arrow::default_memory_pool()),
       metrics_(std::make_shared<WriterMetricsCollector>()),
       stream_(std::make_shared<ArrowDataBufferSink>(
           std::move(sink),
@@ -475,6 +561,31 @@ Writer::Writer(
       options.parquetWriteTimestampUnit.value_or(TimestampUnit::kNano);
   options_.timestampTimeZone =
       options.parquetWriteTimestampTimeZone.value_or("UTC");
+  options_.flattenDictionary = !options.enableDictionary ||
+      enableRowGroupAlignedWrite_ || !enableFlushBasedOnBlockSize_ ||
+      hasVariantType(schema_);
+  arrowContext_->dictionaryPassthroughColumns.resize(schema_->size(), true);
+  arrowContext_->dictionaryPassthroughByteLimits.resize(
+      schema_->size(), options.dictionaryPageSizeLimit);
+  bool hasPassthroughColumn = false;
+  for (size_t i = 0; i < schema_->size(); ++i) {
+    const auto enableIt =
+        options.columnEnableDictionaryMap.find(schema_->nameOf(i));
+    if (enableIt != options.columnEnableDictionaryMap.end() &&
+        !enableIt->second) {
+      arrowContext_->dictionaryPassthroughColumns[i] = false;
+    }
+    const auto limitIt =
+        options.columnDictionaryPageSizeLimitMap.find(schema_->nameOf(i));
+    if (limitIt != options.columnDictionaryPageSizeLimitMap.end()) {
+      arrowContext_->dictionaryPassthroughByteLimits[i] = limitIt->second;
+    }
+    const auto kind = schema_->childAt(i)->kind();
+    hasPassthroughColumn |= arrowContext_->dictionaryPassthroughColumns[i] &&
+        arrowContext_->dictionaryPassthroughByteLimits[i] > 0 &&
+        (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY);
+  }
+  options_.flattenDictionary |= !hasPassthroughColumn;
   arrowContext_->properties =
       getArrowParquetWriterOptionsBuilder(options, flushPolicy_, arrowPool_)
           ->writer_metrics(metrics_)
@@ -485,6 +596,100 @@ Writer::Writer(
 
   VLOG(1) << "WriteOption values of ParquetWriter: "
           << WriterOptionsToString(options);
+}
+
+VectorPtr Writer::flattenIfNeeded(
+    const VectorPtr& data,
+    ArrowOptions& exportOptions,
+    vector_size_t dictionaryDecisionRows) {
+  if (options_.flattenDictionary) {
+    return data;
+  }
+
+  auto loadedData = BaseVector::loadedVectorShared(data);
+  auto rowVector = std::dynamic_pointer_cast<RowVector>(loadedData);
+  BOLT_CHECK_NOT_NULL(rowVector, "Arrow export expects a RowVector.");
+
+  const auto& children = rowVector->children();
+  std::vector<VectorPtr> loadedChildren(children.size());
+  std::vector<bool> flatten(children.size(), false);
+  bool anyFlatten = false;
+  bool anyPassthrough = false;
+  for (size_t i = 0; i < children.size(); ++i) {
+    loadedChildren[i] = BaseVector::loadedVectorShared(children[i]);
+    if (loadedChildren[i]->encoding() != VectorEncoding::Simple::DICTIONARY) {
+      continue;
+    }
+    flatten[i] = !arrowContext_->dictionaryPassthroughColumns[i] ||
+        needsFlatten(
+            loadedChildren[i],
+            dictionaryDecisionRows,
+            arrowContext_->dictionaryPassthroughByteLimits[i]);
+    if (!flatten[i] && arrowContext_->schema &&
+        arrowContext_->schema->field(i)->type()->id() !=
+            ::arrow::Type::DICTIONARY) {
+      flatten[i] = true;
+    }
+    anyFlatten |= flatten[i];
+    anyPassthrough |= !flatten[i];
+  }
+
+  if (arrowContext_->schema) {
+    for (size_t i = 0; i < children.size(); ++i) {
+      const bool exportsDictionary =
+          loadedChildren[i]->encoding() == VectorEncoding::Simple::DICTIONARY &&
+          !flatten[i];
+      const auto& field = arrowContext_->schema->field(i);
+      if (!exportsDictionary &&
+          field->type()->id() == ::arrow::Type::DICTIONARY) {
+        const auto dictionaryType =
+            std::static_pointer_cast<::arrow::DictionaryType>(field->type());
+        arrowContext_->schema =
+            arrowContext_->schema
+                ->SetField(i, field->WithType(dictionaryType->value_type()))
+                .ValueOrDie();
+      }
+    }
+  }
+
+  if (!anyPassthrough) {
+    exportOptions.flattenDictionary = true;
+    return data;
+  }
+
+  for (size_t i = 0; i < children.size(); ++i) {
+    if (loadedChildren[i]->encoding() != VectorEncoding::Simple::DICTIONARY) {
+      flatten[i] = needsFlatten(
+          loadedChildren[i],
+          dictionaryDecisionRows,
+          arrowContext_->dictionaryPassthroughByteLimits[i]);
+      anyFlatten |= flatten[i];
+    }
+  }
+
+  if (!anyFlatten) {
+    return data;
+  }
+
+  std::vector<VectorPtr> newChildren(children);
+  for (size_t i = 0; i < children.size(); ++i) {
+    if (flatten[i]) {
+      newChildren[i] = BaseVector::create(
+          loadedChildren[i]->type(),
+          loadedChildren[i]->size(),
+          exportPool_.get());
+      newChildren[i]->copy(
+          loadedChildren[i].get(), 0, 0, loadedChildren[i]->size());
+    }
+  }
+
+  return std::make_shared<RowVector>(
+      rowVector->pool(),
+      rowVector->type(),
+      rowVector->nulls(),
+      rowVector->size(),
+      std::move(newChildren),
+      rowVector->getNullCount());
 }
 
 Writer::Writer(
@@ -592,12 +797,13 @@ void Writer::createFileWriterIfNotExist() {
   }
 }
 
-void Writer::initializeArrowSchema(const VectorPtr& data) {
+void Writer::initializeArrowSchema(
+    const VectorPtr& data,
+    const ArrowOptions& exportOptions) {
   BOLT_CHECK_NULL(arrowContext_->schema);
 
-  WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
   ArrowSchema schema;
-  exportToArrow(data, schema, options_, {}, exportPool_.get());
+  exportToArrow(data, schema, exportOptions, {}, exportPool_.get());
   auto arrowSchema = ::arrow::ImportSchema(&schema).ValueOrDie();
 
   std::vector<std::shared_ptr<::arrow::Field>> fields;
@@ -637,18 +843,30 @@ void Writer::splitWriteRecordBatch(const VectorPtr& data) {
 
   vector_size_t offset = 0;
   auto dataSize = data->size();
+  if (dataSize == 0) {
+    if (options_.flattenDictionary && !arrowContext_->schema) {
+      WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
+      initializeArrowSchema(data, options_);
+    }
+    return;
+  }
+
   while (offset < dataSize) {
     auto size = std::min<vector_size_t>(dataSize - offset, rowNumPerBatch);
 
     std::shared_ptr<::arrow::RecordBatch> recordBatch;
     {
       WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
+      const auto batch =
+          offset == 0 && size == dataSize ? data : data->slice(offset, size);
+      auto exportOptions = options_;
+      auto exportData = flattenIfNeeded(batch, exportOptions, dataSize);
+      if (!arrowContext_->schema) {
+        initializeArrowSchema(exportData, exportOptions);
+      }
+
       ArrowArray array;
-      exportToArrow(
-          offset == 0 && size == dataSize ? data : data->slice(offset, size),
-          array,
-          exportPool_.get(),
-          options_);
+      exportToArrow(exportData, array, exportPool_.get(), exportOptions);
 
       PARQUET_ASSIGN_OR_THROW(
           recordBatch,
@@ -674,16 +892,19 @@ void Writer::write(const VectorPtr& data) {
       data->type()->equivalent(*schema_),
       "The file schema type should be equal with the input rowvector type.");
 
-  if (!arrowContext_->schema) {
-    initializeArrowSchema(data);
-    if (enableRowGroupAlignedWrite_ || !enableFlushBasedOnBlockSize_) {
-      arrowContext_->stagingChunks.resize(arrowContext_->schema->num_fields());
-    }
-  }
-
   if (!enableRowGroupAlignedWrite_ && enableFlushBasedOnBlockSize_) {
     splitWriteRecordBatch(data);
     return;
+  }
+
+  if (!arrowContext_->schema) {
+    {
+      WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
+      initializeArrowSchema(data, options_);
+    }
+    if (enableRowGroupAlignedWrite_ || !enableFlushBasedOnBlockSize_) {
+      arrowContext_->stagingChunks.resize(arrowContext_->schema->num_fields());
+    }
   }
 
   std::shared_ptr<::arrow::RecordBatch> recordBatch;
@@ -758,8 +979,13 @@ dwio::common::WriterMetrics Writer::metrics() const {
 void Writer::createEmptyFile() {
   BOLT_CHECK_NULL(arrowContext_->writer);
   if (!arrowContext_->schema) {
-    initializeArrowSchema(BaseVector::create(
-        std::static_pointer_cast<const Type>(schema_), 0, exportPool_.get()));
+    WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
+    initializeArrowSchema(
+        BaseVector::create(
+            std::static_pointer_cast<const Type>(schema_),
+            0,
+            exportPool_.get()),
+        options_);
   }
   createFileWriterIfNotExist();
 }

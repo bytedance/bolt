@@ -269,7 +269,14 @@ class Writer : public dwio::common::Writer {
       std::shared_ptr<::arrow::RecordBatch>& recordBatch);
 
  private:
-  void initializeArrowSchema(const VectorPtr& data);
+  VectorPtr flattenIfNeeded(
+      const VectorPtr& data,
+      ArrowOptions& exportOptions,
+      vector_size_t dictionaryDecisionRows);
+
+  void initializeArrowSchema(
+      const VectorPtr& data,
+      const ArrowOptions& exportOptions);
 
   void splitWriteRecordBatch(const VectorPtr& data);
 

@@ -796,16 +796,23 @@ class DictEncoderImpl : public EncoderImpl, virtual public DictEncoder<DType> {
   template <typename ArrayType>
   void PutBinaryDictionaryArray(const ArrayType& array) {
     DCHECK_EQ(array.null_count(), 0);
+    auto on_found = [](int32_t memo_index) {};
     for (int64_t i = 0; i < array.length(); i++) {
       auto v = array.GetView(i);
       if (ARROW_PREDICT_FALSE(v.size() > kMaxByteArraySize)) {
         throw ParquetException(
             "Parquet cannot store strings with size 2GB or more");
       }
-      dict_encoded_size_ += static_cast<int64_t>(v.size()) + sizeof(uint32_t);
+      auto on_not_found = [this, &v](int32_t memo_index) {
+        dict_encoded_size_ += static_cast<int64_t>(v.size()) + sizeof(uint32_t);
+      };
       int32_t unused_memo_index;
       PARQUET_THROW_NOT_OK(memo_table_.GetOrInsert(
-          v.data(), static_cast<int32_t>(v.size()), &unused_memo_index));
+          v.data(),
+          static_cast<int32_t>(v.size()),
+          on_found,
+          on_not_found,
+          &unused_memo_index));
     }
   }
 
