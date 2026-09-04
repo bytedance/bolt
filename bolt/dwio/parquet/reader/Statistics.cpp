@@ -42,16 +42,20 @@ std::unique_ptr<dwio::common::ColumnStatistics> buildColumnStatisticsFromThrift(
         std::unique_ptr<NGramBloomFilter>>> nGramStats,
     const bolt::Type& type,
     uint64_t numRowsInRowGroup) {
-  std::optional<uint64_t> nullCount = columnChunkStats.__isset.null_count
-      ? std::optional<uint64_t>(columnChunkStats.null_count)
-      : std::nullopt;
-  std::optional<uint64_t> valueCount = nullCount.has_value()
-      ? std::optional<uint64_t>(numRowsInRowGroup - nullCount.value())
-      : std::nullopt;
-  std::optional<bool> hasNull = columnChunkStats.__isset.null_count
-      ? std::optional<bool>(columnChunkStats.null_count > 0)
-      : std::nullopt;
+  const int64_t rawNullCount = columnChunkStats.null_count;
+  const bool validNullCount = columnChunkStats.__isset.null_count &&
+      rawNullCount >= 0 &&
+      static_cast<uint64_t>(rawNullCount) <= numRowsInRowGroup;
 
+  std::optional<uint64_t> nullCount = validNullCount
+      ? std::optional<uint64_t>(static_cast<uint64_t>(rawNullCount))
+      : std::nullopt;
+  std::optional<uint64_t> valueCount = validNullCount
+      ? std::optional<uint64_t>(
+            numRowsInRowGroup - static_cast<uint64_t>(rawNullCount))
+      : std::nullopt;
+  std::optional<bool> hasNull =
+      validNullCount ? std::optional<bool>(rawNullCount > 0) : std::nullopt;
   switch (type.kind()) {
     case TypeKind::BOOLEAN:
       return std::make_unique<dwio::common::BooleanColumnStatistics>(
