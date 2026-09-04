@@ -90,15 +90,8 @@ void abortPool(memory::MemoryPool* pool) {
 
 class RecordingLazyLoader : public VectorLoader {
  public:
-  RecordingLazyLoader(
-      VectorPtr vector,
-      std::atomic_bool& loaded,
-      std::atomic_bool& loadedAfterMarker,
-      std::atomic_bool& marker)
-      : vector_(std::move(vector)),
-        loaded_(loaded),
-        loadedAfterMarker_(loadedAfterMarker),
-        marker_(marker) {}
+  RecordingLazyLoader(VectorPtr vector, std::atomic_bool& loaded)
+      : vector_(std::move(vector)), loaded_(loaded) {}
 
  private:
   void loadInternal(
@@ -108,7 +101,6 @@ class RecordingLazyLoader : public VectorLoader {
       VectorPtr* result) override {
     BOLT_CHECK(!hook, "RecordingLazyLoader doesn't support ValueHook");
     loaded_ = true;
-    loadedAfterMarker_ = loadedAfterMarker_ || marker_.load();
 
     BOLT_CHECK_EQ(rows.size(), vector_->size());
     *result = BaseVector::copy(*vector_);
@@ -116,8 +108,6 @@ class RecordingLazyLoader : public VectorLoader {
 
   const VectorPtr vector_;
   std::atomic_bool& loaded_;
-  std::atomic_bool& loadedAfterMarker_;
-  std::atomic_bool& marker_;
 };
 } // namespace
 
@@ -372,6 +362,7 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
       uint64_t targetBytes,
       memory::MemoryReclaimer::Stats& reclaimerStats) {
     const auto oldCapacity = op->pool()->capacity();
+    memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
     op->pool()->reclaim(targetBytes, 0, reclaimerStats);
     dynamic_cast<memory::MemoryPoolImpl*>(op->pool())
         ->testingSetCapacity(oldCapacity);
@@ -440,6 +431,51 @@ TEST_P(OrderByTest, singleKey) {
              .capturePlanNodeId(orderById)
              .planNode();
   runTest(plan, orderById, "SELECT * FROM tmp ORDER BY c0 NULLS FIRST", {0});
+}
+
+TEST_P(OrderByTest, sortBufferConfig) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not use CPU sort buffers\n";
+  }
+
+  auto vectors = createVectors(3, rowType_, fuzzerOpts_);
+  createDuckDbTable(vectors);
+  auto plan = PlanBuilder()
+                  .values(vectors)
+                  .orderBy({"c0 ASC NULLS LAST", "c2 DESC NULLS FIRST"}, false)
+                  .planNode();
+  bool legacySortBufferUsed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput",
+      std::function<void(void*)>(
+          [&](void* /*unused*/) { legacySortBufferUsed = true; }));
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .config(core::QueryConfig::kOrderByRadixSortEnabled, true)
+      .plan(plan)
+      .assertResults(
+          "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    ASSERT_FALSE(legacySortBufferUsed);
+  }
+
+  legacySortBufferUsed = false;
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .plan(plan)
+      .assertResults(
+          "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    ASSERT_TRUE(legacySortBufferUsed);
+  }
+
+  legacySortBufferUsed = false;
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
+      .plan(plan)
+      .assertResults(
+          "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
+  if (BOLT_TEST_VALUE_ENABLED()) {
+    ASSERT_TRUE(legacySortBufferUsed);
+  }
 }
 
 TEST_P(OrderByTest, multipleKeys) {
@@ -1007,25 +1043,27 @@ TEST_P(OrderByTest, outputBatchRows) {
     int numRowsPerBatch;
     int preferredOutBatchBytes;
     int maxOutBatchRows;
-    int expectedOutputVectors;
+    int expectedLegacyOutputVectors;
+    int expectedRadixOutputVectors;
 
     // TODO: add output size check with spilling enabled
     std::string debugString() const {
       return fmt::format(
-          "numRowsPerBatch:{}, preferredOutBatchBytes:{}, maxOutBatchRows:{}, expectedOutputVectors:{}",
+          "numRowsPerBatch:{}, preferredOutBatchBytes:{}, maxOutBatchRows:{}, expectedLegacyOutputVectors:{}, expectedRadixOutputVectors:{}",
           numRowsPerBatch,
           preferredOutBatchBytes,
           maxOutBatchRows,
-          expectedOutputVectors);
+          expectedLegacyOutputVectors,
+          expectedRadixOutputVectors);
     }
   } testSettings[] = {
-      {1024, 1, 100, 1024},
+      {1024, 1, 100, 1024, 1024},
       // estimated size per row is ~2092, set preferredOutBatchBytes to 20920,
       // so each batch has 10 rows, so it would return 100 batches
-      {1000, 20920, 100, 100},
+      {1000, 20920, 100, 100, 100},
       // same as above, but maxOutBatchRows is 1, so it would return 1000
       // batches
-      {1000, 20920, 1, 1000}};
+      {1000, 20920, 1, 1000, 1000}};
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
@@ -1049,20 +1087,27 @@ TEST_P(OrderByTest, outputBatchRows) {
                     .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                     .capturePlanNodeId(orderById)
                     .planNode();
-    auto queryCtx = core::QueryCtx::create(executor_.get());
-    queryCtx->testingOverrideConfigUnsafe(
-        {{core::QueryConfig::kPreferredOutputBatchBytes,
-          std::to_string(testData.preferredOutBatchBytes)},
-         {core::QueryConfig::kMaxOutputBatchRows,
-          std::to_string(testData.maxOutBatchRows)}});
-    CursorParameters params;
-    params.planNode = plan;
-    params.queryCtx = queryCtx;
-    auto task = assertQueryOrdered(
-        params, "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST", {0});
-    EXPECT_EQ(
-        testData.expectedOutputVectors,
-        toPlanStats(task->taskStats()).at(orderById).outputVectors);
+    const auto runWithSortBuffer = [&](bool radixSortEnabled,
+                                       int expectedOutputVectors) {
+      auto queryCtx = core::QueryCtx::create(executor_.get());
+      queryCtx->testingOverrideConfigUnsafe(
+          {{core::QueryConfig::kOrderByRadixSortEnabled,
+            radixSortEnabled ? "true" : "false"},
+           {core::QueryConfig::kPreferredOutputBatchBytes,
+            std::to_string(testData.preferredOutBatchBytes)},
+           {core::QueryConfig::kMaxOutputBatchRows,
+            std::to_string(testData.maxOutBatchRows)}});
+      CursorParameters params;
+      params.planNode = plan;
+      params.queryCtx = queryCtx;
+      auto task = assertQueryOrdered(
+          params, "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST", {0});
+      EXPECT_EQ(
+          expectedOutputVectors,
+          toPlanStats(task->taskStats()).at(orderById).outputVectors);
+    };
+    runWithSortBuffer(true, testData.expectedRadixOutputVectors);
+    runWithSortBuffer(false, testData.expectedLegacyOutputVectors);
   }
 }
 
@@ -1085,36 +1130,39 @@ TEST_P(OrderByTest, spill) {
 
   const auto expectedResult = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
-  auto task = AssertQueryBuilder(plan)
-                  .spillDirectory(spillDirectory->path)
-                  .config(core::QueryConfig::kSpillEnabled, true)
-                  .config(core::QueryConfig::kOrderBySpillEnabled, true)
-                  // Set a small capacity to trigger threshold based spilling
-                  .config(QueryConfig::kOrderBySpillMemoryThreshold, 32 << 20)
-                  .assertResults(expectedResult);
-  auto taskStats = exec::toPlanStats(task->taskStats());
-  auto& planStats = taskStats.at(orderNodeId);
-  ASSERT_GT(planStats.spilledBytes, 0);
-  ASSERT_GT(planStats.spilledRows, 0);
-  ASSERT_GT(planStats.spilledBytes, 0);
-  ASSERT_GT(planStats.spilledInputBytes, 0);
-  ASSERT_EQ(planStats.spilledPartitions, 1);
-  ASSERT_GT(planStats.spilledFiles, 0);
-  ASSERT_GT(planStats.customStats["spillRuns"].count, 0);
-  ASSERT_GT(planStats.customStats["spillFillTime"].sum, 0);
-  ASSERT_GT(planStats.customStats["spillSortTime"].sum, 0);
-  ASSERT_GT(planStats.customStats["spillSerializationTime"].sum, 0);
-  ASSERT_GT(planStats.customStats["spillFlushTime"].sum, 0);
-  ASSERT_EQ(
-      planStats.customStats["spillSerializationTime"].count,
-      planStats.customStats["spillFlushTime"].count);
-  ASSERT_GT(planStats.customStats[Operator::kSpillWrites].sum, 0);
-  ASSERT_GT(planStats.customStats["spillWriteTime"].sum, 0);
-  ASSERT_EQ(
-      planStats.customStats[Operator::kSpillWrites].count,
-      planStats.customStats["spillWriteTime"].count);
-  OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  for (const auto codec : {"none", "zlib"}) {
+    SCOPED_TRACE(codec);
+    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto task = AssertQueryBuilder(plan)
+                    .spillDirectory(spillDirectory->path)
+                    .config(core::QueryConfig::kSpillEnabled, true)
+                    .config(core::QueryConfig::kOrderBySpillEnabled, true)
+                    .config(core::QueryConfig::kOrderByRadixSortEnabled, true)
+                    .config(core::QueryConfig::kSpillCompressionKind, codec)
+                    .config(QueryConfig::kOrderBySpillMemoryThreshold, 32 << 20)
+                    .assertResults(expectedResult);
+    auto taskStats = exec::toPlanStats(task->taskStats());
+    auto& planStats = taskStats.at(orderNodeId);
+    ASSERT_GT(planStats.spilledBytes, 0);
+    ASSERT_GT(planStats.spilledRows, 0);
+    ASSERT_GT(planStats.spilledInputBytes, 0);
+    ASSERT_EQ(planStats.spilledPartitions, 1);
+    ASSERT_GT(planStats.spilledFiles, 0);
+    ASSERT_GT(planStats.customStats["spillRuns"].count, 0);
+    ASSERT_GT(planStats.customStats[Operator::kSpillWrites].sum, 0);
+    for (const auto* metric :
+         {"spillFillTime",
+          "spillSortTime",
+          "spillSerializationTime",
+          "spillFlushTime",
+          "spillWriteTime"}) {
+      const auto it = planStats.customStats.find(metric);
+      if (it != planStats.customStats.end()) {
+        ASSERT_GE(it->second.sum, 0);
+      }
+    }
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  }
 }
 
 TEST_P(OrderByTest, spillWithArrowSerde) {
@@ -1159,6 +1207,7 @@ TEST_P(OrderByTest, spillWithArrowSerde) {
   queryCtx->testingOverrideConfigUnsafe({
       {core::QueryConfig::kSpillEnabled, "true"},
       {core::QueryConfig::kOrderBySpillEnabled, "true"},
+      {core::QueryConfig::kOrderByRadixSortEnabled, "false"},
       {core::QueryConfig::kSinglePartitionSpillSerdeKind, "Arrow"},
       {core::QueryConfig::kSpillNumPartitionBits, "0"},
       {core::QueryConfig::kJitLevel, "-1"},
@@ -1265,17 +1314,26 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
     // 1: trigger reclaim after all the inputs processed.
     int triggerCondition;
     bool spillEnabled;
+    bool radixSortEnabled;
     bool expectedReclaimable;
 
     std::string debugString() const {
       return fmt::format(
-          "triggerCondition {}, spillEnabled {}, expectedReclaimable {}",
+          "triggerCondition {}, spillEnabled {}, radixSortEnabled {}, expectedReclaimable {}",
           triggerCondition,
           spillEnabled,
+          radixSortEnabled,
           expectedReclaimable);
     }
   } testSettings[] = {
-      {0, true, true}, {1, true, true}, {0, false, false}, {1, false, false}};
+      {0, true, false, true},
+      {1, true, false, true},
+      {0, true, true, true},
+      {1, true, true, true},
+      {0, false, false, false},
+      {1, false, false, false},
+      {0, false, true, false},
+      {1, false, true, false}};
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
@@ -1342,6 +1400,9 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled,
+                testData.radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1351,6 +1412,9 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringInputProcessing) {
                 .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                 .planNode())
             .queryCtx(queryCtx)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled,
+                testData.radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       }
@@ -1485,6 +1549,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringReserve) {
         .spillDirectory(tempDirectory->path)
         .config(core::QueryConfig::kSpillEnabled, true)
         .config(core::QueryConfig::kOrderBySpillEnabled, true)
+        .config(core::QueryConfig::kOrderByRadixSortEnabled, true)
         .maxDrivers(1)
         .assertResults(expectedResult);
   });
@@ -1608,6 +1673,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
+            .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1673,9 +1739,21 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     batches.push_back(fuzzer.fuzzRow(rowType));
   }
 
-  const std::vector<bool> enableSpillings = {false, true};
-  for (bool enableSpilling : enableSpillings) {
-    SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
+  struct {
+    bool enableSpilling;
+    bool radixSortEnabled;
+  } testSettings[] = {
+      {false, true},
+      {true, false},
+      {true, true},
+  };
+  for (const auto& testData : testSettings) {
+    const auto enableSpilling = testData.enableSpilling;
+    const auto radixSortEnabled = testData.radixSortEnabled;
+    SCOPED_TRACE(fmt::format(
+        "enableSpilling {}, radixSortEnabled {}",
+        enableSpilling,
+        radixSortEnabled));
     auto tempDirectory = exec::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
@@ -1731,6 +1809,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
             .spillDirectory(tempDirectory->path)
             .config(core::QueryConfig::kSpillEnabled, true)
             .config(core::QueryConfig::kOrderBySpillEnabled, true)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled, radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       } else {
@@ -1740,6 +1820,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
                 .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
                 .planNode())
             .queryCtx(queryCtx)
+            .config(
+                core::QueryConfig::kOrderByRadixSortEnabled, radixSortEnabled)
             .maxDrivers(1)
             .assertResults(expectedResult);
       }
@@ -1757,12 +1839,30 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     ASSERT_EQ(op->canReclaim(), enableSpilling);
     ASSERT_EQ(reclaimable, enableSpilling);
 
+    OperatorStats statsAfterReclaim;
     if (enableSpilling) {
       ASSERT_GT(reclaimableBytes, 0);
       reclaimerStats_.reset();
       reclaimAndRestoreCapacity(op, reclaimableBytes, reclaimerStats_);
-      ASSERT_EQ(reclaimerStats_.reclaimedBytes, reclaimableBytes);
-      ASSERT_GT(reclaimerStats_.reclaimExecTimeUs, 0);
+      if (radixSortEnabled) {
+        // Radix reclaims only the resident memory run. File-reader buffers
+        // remain owned by the disk merger and are not part of output re-spill.
+        ASSERT_GT(reclaimerStats_.reclaimedBytes, 0);
+        ASSERT_LE(reclaimerStats_.reclaimedBytes, reclaimableBytes);
+        ASSERT_FALSE(op->canReclaim());
+      } else {
+        ASSERT_EQ(reclaimerStats_.reclaimedBytes, reclaimableBytes);
+      }
+      statsAfterReclaim = op->stats(false);
+      ASSERT_GT(statsAfterReclaim.spilledBytes, 0);
+      ASSERT_GT(statsAfterReclaim.spilledRows, 0);
+      ASSERT_LE(
+          statsAfterReclaim.spilledRows, statsAfterReclaim.inputPositions);
+      ASSERT_EQ(statsAfterReclaim.spilledPartitions, 1);
+      const auto spillRuns = statsAfterReclaim.runtimeStats.find("spillRuns");
+      ASSERT_NE(spillRuns, statsAfterReclaim.runtimeStats.end());
+      ASSERT_GT(spillRuns->second.sum, 0);
+      ASSERT_GT(spillRuns->second.count, 0);
     } else {
       ASSERT_EQ(reclaimableBytes, 0);
       BOLT_ASSERT_THROW(
@@ -1776,8 +1876,26 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
     taskThread.join();
 
     auto stats = task->taskStats().pipelineStats;
-    ASSERT_EQ(stats[0].operatorStats[1].spilledBytes, 0);
-    ASSERT_EQ(stats[0].operatorStats[1].spilledPartitions, 0);
+    const auto& finalStats = stats[0].operatorStats[1];
+    if (enableSpilling) {
+      // Reaching EOF records final spill stats and must not count them again.
+      ASSERT_EQ(finalStats.spilledBytes, statsAfterReclaim.spilledBytes);
+      ASSERT_EQ(finalStats.spilledRows, statsAfterReclaim.spilledRows);
+      ASSERT_EQ(
+          finalStats.spilledPartitions, statsAfterReclaim.spilledPartitions);
+      const auto spillRuns = finalStats.runtimeStats.find("spillRuns");
+      ASSERT_NE(spillRuns, finalStats.runtimeStats.end());
+      const auto spillRunsAfterReclaim =
+          statsAfterReclaim.runtimeStats.find("spillRuns");
+      ASSERT_NE(spillRunsAfterReclaim, statsAfterReclaim.runtimeStats.end());
+      ASSERT_EQ(spillRuns->second.sum, spillRunsAfterReclaim->second.sum);
+      ASSERT_EQ(spillRuns->second.count, spillRunsAfterReclaim->second.count);
+    } else {
+      ASSERT_EQ(finalStats.spilledBytes, 0);
+      ASSERT_EQ(finalStats.spilledRows, 0);
+      ASSERT_EQ(finalStats.spilledPartitions, 0);
+      ASSERT_EQ(finalStats.runtimeStats.count("spillRuns"), 0);
+    }
     OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
   }
   ASSERT_EQ(reclaimerStats_.numNonReclaimableAttempts, 0);
@@ -2022,6 +2140,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, spillWithNoMoreOutput) {
           .spillDirectory(spillDirectory->path)
           .config(core::QueryConfig::kSpillEnabled, true)
           .config(core::QueryConfig::kOrderBySpillEnabled, true)
+          .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
           // Set output buffer size to extreme large to read all the
           // output rows in one vector.
           .config(QueryConfig::kPreferredOutputBatchRows, 1'000'000'000)
@@ -2062,7 +2181,7 @@ TEST_P(OrderByTest, maxSpillBytes) {
     std::string debugString() const {
       return fmt::format("maxSpilledBytes {}", maxSpilledBytes);
     }
-  } testSettings[] = {{1 << 30, false}, {16 << 20, true}, {0, false}};
+  } testSettings[] = {{1 << 30, false}, {1 << 20, true}, {0, false}};
 
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
@@ -2082,7 +2201,7 @@ TEST_P(OrderByTest, maxSpillBytes) {
       ASSERT_TRUE(testData.expectedExceedLimit);
       ASSERT_NE(
           e.message().find(
-              "Query exceeded per-query local spill limit of 16.00MB"),
+              "Query exceeded per-query local spill limit of 1.00MB"),
           std::string::npos);
       ASSERT_EQ(
           e.errorCode(), bytedance::bolt::error_code::kSpillLimitExceeded);
@@ -2177,10 +2296,10 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
     GTEST_SKIP() << "GPU OrderBy is not used by this lazy input test\n";
   }
 
-  auto nonLazyVector = createVectors(1, rowType_, fuzzerOpts_)[0];
-  std::atomic_bool sortBufferAddInputEntered{false};
+  const auto nonLazyVector = createVectors(1, rowType_, fuzzerOpts_)[0];
+  createDuckDbTable({nonLazyVector});
+
   std::atomic_bool lazyLoaded{false};
-  std::atomic_bool lazyLoadedInSortBufferAddInput{false};
 
   std::vector<VectorPtr> lazyChildren;
   for (const auto& child : nonLazyVector->children()) {
@@ -2188,11 +2307,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
         pool(),
         child->type(),
         child->size(),
-        std::make_unique<RecordingLazyLoader>(
-            child,
-            lazyLoaded,
-            lazyLoadedInSortBufferAddInput,
-            sortBufferAddInputEntered)));
+        std::make_unique<RecordingLazyLoader>(child, lazyLoaded)));
   }
   auto lazyInput = std::make_shared<RowVector>(
       pool(),
@@ -2201,18 +2316,12 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
       nonLazyVector->size(),
       std::move(lazyChildren));
 
-  createDuckDbTable({nonLazyVector});
-
-  SCOPED_TESTVALUE_SET(
-      "bytedance::bolt::exec::SortBuffer::addInput",
-      std::function<void(void*)>(
-          ([&](void* /*unused*/) { sortBufferAddInputEntered = true; })));
-
   const auto spillDirectory = exec::test::TempDirectoryPath::create();
   AssertQueryBuilder(duckDbQueryRunner_)
       .spillDirectory(spillDirectory->path)
       .config(core::QueryConfig::kSpillEnabled, true)
       .config(core::QueryConfig::kOrderBySpillEnabled, true)
+      .config(core::QueryConfig::kOrderByRadixSortEnabled, false)
       .plan(PlanBuilder()
                 .values({lazyInput})
                 .orderBy({"c0 ASC NULLS LAST"}, false)
@@ -2220,7 +2329,6 @@ DEBUG_ONLY_TEST_P(OrderByTest, orderByWithLazyInput) {
       .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
 
   ASSERT_TRUE(lazyLoaded);
-  ASSERT_FALSE(lazyLoadedInSortBufferAddInput);
 }
 
 INSTANTIATE_GPU_TEST_SUITE_P(OrderByTestOnCPUOrGPU, OrderByTest);

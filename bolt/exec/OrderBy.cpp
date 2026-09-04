@@ -31,7 +31,9 @@
 #include "bolt/exec/OrderBy.h"
 
 #include "bolt/exec/OperatorUtils.h"
+#include "bolt/exec/SortBuffer.h"
 #include "bolt/exec/Task.h"
+#include "bolt/exec/radixsort/RadixSortBuffer.h"
 #include "bolt/vector/FlatVector.h"
 #include "exec/OperatorMetric.h"
 namespace bytedance::bolt::exec {
@@ -79,20 +81,33 @@ OrderBy::OrderBy(
     sortCompareFlags.push_back(
         fromSortOrderToCompareFlags(orderByNode->sortingOrders()[i]));
   }
-  auto hybridSortEnabled = driverCtx->queryConfig().hybridSortEnabled();
-  auto scatteredModeEnabled =
-      driverCtx->queryConfig().hybridSortScatteredModeEnabled();
-  sortBuffer_ = std::make_unique<SortBuffer>(
-      outputType_,
-      sortColumnIndices,
-      sortCompareFlags,
-      pool(),
-      &nonReclaimableSection_,
-      spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr,
-      operatorCtx_->driverCtx()->queryConfig().orderBySpillMemoryThreshold(),
-      operatorCtx_.get(),
-      hybridSortEnabled,
-      scatteredModeEnabled);
+  const auto useRadixSort = driverCtx->queryConfig().orderByRadixSortEnabled();
+  if (useRadixSort) {
+    sortBuffer_ = std::make_unique<radixsort::RadixSortBuffer>(
+        outputType_,
+        sortColumnIndices,
+        sortCompareFlags,
+        pool(),
+        spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr,
+        operatorCtx_->driverCtx()->queryConfig().orderBySpillMemoryThreshold(),
+        operatorCtx_.get(),
+        &nonReclaimableSection_);
+  } else {
+    auto hybridSortEnabled = driverCtx->queryConfig().hybridSortEnabled();
+    auto scatteredModeEnabled =
+        driverCtx->queryConfig().hybridSortScatteredModeEnabled();
+    sortBuffer_ = std::make_unique<SortBuffer>(
+        outputType_,
+        sortColumnIndices,
+        sortCompareFlags,
+        pool(),
+        &nonReclaimableSection_,
+        spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr,
+        operatorCtx_->driverCtx()->queryConfig().orderBySpillMemoryThreshold(),
+        operatorCtx_.get(),
+        hybridSortEnabled,
+        scatteredModeEnabled);
+  }
 
   this->setRuntimeMetric(
       OperatorMetricKey::kCanUsedToEstimateHashBuildPartitionNum, "true");
@@ -100,7 +115,8 @@ OrderBy::OrderBy(
       OperatorMetricKey::kTotalRowCount, folly::to<std::string>(0));
   this->setRuntimeMetric(
       OperatorMetricKey::kHasBeenProcessedRowCount, folly::to<std::string>(0));
-  LOG(INFO) << name() << " construct, output type: " << outputType_->toString();
+  LOG(INFO) << name() << " construct, output type: " << outputType_->toString()
+            << ", sort buffer: " << (useRadixSort ? "radix" : "legacy");
 }
 
 void OrderBy::addInput(RowVectorPtr input) {
@@ -125,6 +141,9 @@ void OrderBy::reclaim(
   // TODO: support fine-grain disk spilling based on 'targetBytes' after
   // having row container memory compaction support later.
   sortBuffer_->spill();
+  if (noMoreInput_) {
+    recordSpillStats();
+  }
 
   // Release the minimum reserved memory.
   pool()->release();
@@ -178,7 +197,8 @@ void OrderBy::recordSpillStats() {
   BOLT_CHECK_NOT_NULL(sortBuffer_);
   auto spillStats = sortBuffer_->spilledStats();
   if (spillStats.has_value()) {
-    Operator::recordSpillStats(spillStats.value());
+    Operator::recordSpillStats(spillStats.value() - recordedSpillStats_);
+    recordedSpillStats_ = spillStats.value();
   }
 }
 

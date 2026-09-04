@@ -60,6 +60,11 @@ template <TypeKind kind>
   return ::duckdb::Value(vector->as<SimpleVector<T>>()->valueAt(index));
 }
 
+::duckdb::Value duckValueAtRecursive(
+    const VectorPtr& vector,
+    vector_size_t index,
+    const TypePtr& type);
+
 template <>
 ::duckdb::Value duckValueAt<TypeKind::TINYINT>(
     const VectorPtr& vector,
@@ -190,8 +195,8 @@ template <>
       array.emplace_back(
           ::duckdb::Value(duckdb::fromBoltType(elements->type())));
     } else {
-      array.emplace_back(BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-          duckValueAt, elements->typeKind(), elements, innerRow));
+      array.emplace_back(duckValueAtRecursive(
+          elements, innerRow, arrayVector->elements()->type()));
     }
   }
 
@@ -211,13 +216,11 @@ template <>
     if (rowVector->childAt(i)->isNullAt(rowRow)) {
       fields.push_back({rowType->nameOf(i), ::duckdb::Value(nullptr)});
     } else {
-      fields.push_back(
-          {rowType->nameOf(i),
-           BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-               duckValueAt,
-               rowType->childAt(i)->kind(),
-               rowVector->childAt(i),
-               rowRow)});
+      fields.push_back({
+          rowType->nameOf(i),
+          duckValueAtRecursive(
+              rowVector->childAt(i), rowRow, rowType->childAt(i)),
+      });
     }
   }
 
@@ -244,14 +247,12 @@ template <>
   ::duckdb::vector<::duckdb::Value> duckMap;
   for (auto i = 0; i < size; i++) {
     auto innerRow = offset + i;
-    auto key = BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-        duckValueAt, mapKeys->typeKind(), mapKeys, innerRow);
+    auto key = duckValueAtRecursive(mapKeys, innerRow, mapKeys->type());
     ::duckdb::Value value;
     if (mapValues->isNullAt(innerRow)) {
       value = ::duckdb::Value(duckdb::fromBoltType(mapValues->type()));
     } else {
-      value = BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
-          duckValueAt, mapValues->typeKind(), mapValues, innerRow);
+      value = duckValueAtRecursive(mapValues, innerRow, mapValues->type());
     }
     ::duckdb::child_list_t<::duckdb::Value> mapStruct;
     mapStruct.push_back(make_pair("key", key));
@@ -259,6 +260,29 @@ template <>
     duckMap.push_back(::duckdb::Value::STRUCT(mapStruct));
   }
   return ::duckdb::Value::MAP(mapType, duckMap);
+}
+
+::duckdb::Value duckValueAtRecursive(
+    const VectorPtr& vector,
+    vector_size_t index,
+    const TypePtr& type) {
+  if (type->isArray()) {
+    return duckValueAt<TypeKind::ARRAY>(vector, index);
+  }
+  if (type->isMap()) {
+    return duckValueAt<TypeKind::MAP>(vector, index);
+  }
+  if (type->isRow()) {
+    return duckValueAt<TypeKind::ROW>(vector, index);
+  }
+  if (type->isShortDecimal()) {
+    return duckValueAt<TypeKind::BIGINT>(vector, index);
+  }
+  if (type->isLongDecimal()) {
+    return duckValueAt<TypeKind::HUGEINT>(vector, index);
+  }
+  return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      duckValueAt, type->kind(), vector, index);
 }
 
 template <TypeKind kind>
