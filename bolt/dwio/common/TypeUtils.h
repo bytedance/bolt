@@ -30,9 +30,14 @@
 
 #pragma once
 
+#include <optional>
+
 #include "bolt/dwio/common/ColumnSelector.h"
 #include "bolt/dwio/common/TypeWithId.h"
 namespace bytedance::bolt::dwio::common::typeutils {
+
+// Converts strings using Spark's boolean cast semantics.
+std::optional<bool> sparkStringToBoolean(folly::StringPiece value);
 
 // Build selected type based on input schema and selection
 std::shared_ptr<const TypeWithId> buildSelectedType(

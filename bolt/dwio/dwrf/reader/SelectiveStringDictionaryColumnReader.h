@@ -43,6 +43,17 @@ class SelectiveStringDictionaryColumnReader
   SelectiveStringDictionaryColumnReader(
       const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       DwrfParams& params,
+      common::ScanSpec& scanSpec)
+      : SelectiveStringDictionaryColumnReader(
+            fileType,
+            fileType,
+            params,
+            scanSpec) {}
+
+  SelectiveStringDictionaryColumnReader(
+      const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
+      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
+      DwrfParams& params,
       common::ScanSpec& scanSpec);
 
   void seekToRowGroup(int64_t index) override {

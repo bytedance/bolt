@@ -2867,6 +2867,198 @@ TEST_F(TestReader, missingSubfieldsNoResultReusing) {
   assertEqualVectors(expected, actual);
 }
 
+TEST_F(TestReader, readNestedSchemaEvolutionWithIsNotNullFilter) {
+  auto fileSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {BIGINT(), VARCHAR()})});
+  auto data = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeNullableFlatVector<int64_t>({11, std::nullopt, 33}),
+            makeNullableFlatVector<StringView>({"true", "0", "invalid"})})});
+  ASSERT_EQ(data->type()->toString(), fileSchema->toString());
+
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {VARCHAR(), BOOLEAN()})});
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+  auto expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeNullableFlatVector<StringView>({"11", std::nullopt, "33"}),
+            makeNullableFlatVector<bool>({true, false, std::nullopt})})});
+  assertEqualVectors(expected, actual);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("meta_details")
+      ->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+
+  rowReaderOpts = RowReaderOptions();
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReader = reader->createRowReader(rowReaderOpts);
+  actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+
+  expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>({1, 3}),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeFlatVector<StringView>({"11", "33"}),
+            makeNullableFlatVector<bool>({true, std::nullopt})})});
+  assertEqualVectors(expected, actual);
+
+  // Output channels are independent of positions in the requested schema.
+  // Exercise a sparse projection where meta_details (schema index 1) is
+  // assigned output channel 0.
+  scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* metaSpec = scanSpec->addField("meta_details", 0);
+  metaSpec->addAllChildFields(*requestedSchema->childAt(1));
+  metaSpec->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+  rowReaderOpts.setScanSpec(scanSpec);
+  rowReader = reader->createRowReader(rowReaderOpts);
+  auto projectedSchema = ROW({"meta_details"}, {requestedSchema->childAt(1)});
+  actual = BaseVector::create(projectedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, actual), 3);
+  expected = makeRowVector(
+      {"meta_details"},
+      {makeRowVector(
+          {"chatter_id", "is_manual_set_nickname"},
+          {makeFlatVector<StringView>({"11", "33"}),
+           makeNullableFlatVector<bool>({true, std::nullopt})})});
+  assertEqualVectors(expected, actual);
+}
+
+TEST_F(TestReader, readNestedSchemaEvolutionByPosition) {
+  constexpr vector_size_t kSize = 100;
+  auto fileSchema =
+      ROW({"chat_id", "meta_details"},
+          {BIGINT(), ROW({"group_id", "chatter_id"}, {BIGINT(), VARCHAR()})});
+  auto data = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>(kSize, folly::identity),
+       makeRowVector(
+           {"group_id", "chatter_id"},
+           {makeFlatVector<int64_t>(kSize, folly::identity),
+            makeFlatVector<std::string>(
+                kSize, [](auto row) { return row % 2 ? "true" : "false"; })})});
+  ASSERT_EQ(data->type()->toString(), fileSchema->toString());
+
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW(
+      {"chat_id", "meta_details"},
+      {BIGINT(),
+       ROW({"chatter_id", "is_manual_set_nickname"}, {VARCHAR(), BOOLEAN()})});
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("meta_details")
+      ->childByName("chatter_id")
+      ->setFilter(std::make_unique<common::IsNotNull>());
+
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(kSize, actual), kSize);
+  auto expected = makeRowVector(
+      {"chat_id", "meta_details"},
+      {makeFlatVector<int64_t>(kSize, folly::identity),
+       makeRowVector(
+           {"chatter_id", "is_manual_set_nickname"},
+           {makeFlatVector<std::string>(
+                kSize, [](auto row) { return std::to_string(row); }),
+            makeFlatVector<bool>(kSize, [](auto row) { return row % 2; })})});
+  assertEqualVectors(expected, actual);
+}
+
+TEST_F(TestReader, readVarcharAsBooleanWithSelectiveStringEncodings) {
+  constexpr vector_size_t kSize = 20'000;
+  auto batch = makeRowVector(
+      {"row_number", "value"},
+      {makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+       makeFlatVector<StringView>(kSize, [](auto row) {
+         switch (row % 4) {
+           case 0:
+             return StringView("true");
+           case 1:
+             return StringView("0");
+           case 2:
+             return StringView(" YES ");
+           default:
+             return StringView("invalid");
+         }
+       })});
+
+  for (const auto dictionaryThreshold : {0.0f, 1.0f}) {
+    auto config = std::make_shared<dwrf::Config>();
+    config->set(
+        dwrf::Config::DICTIONARY_STRING_KEY_SIZE_THRESHOLD,
+        dictionaryThreshold);
+    auto [writer, reader] = createWriterReader(
+        {batch},
+        pool(),
+        config,
+        E2EWriterTestUtil::simpleFlushPolicyFactory(false));
+
+    auto requestedSchema = ROW({"row_number", "value"}, {BIGINT(), BOOLEAN()});
+    auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*requestedSchema);
+    scanSpec->childByName("row_number")
+        ->setFilter(common::createBigintRange(1, kSize - 2, false, false));
+
+    RowReaderOptions rowReaderOpts;
+    rowReaderOpts.select(std::make_shared<ColumnSelector>(requestedSchema));
+    rowReaderOpts.setScanSpec(scanSpec);
+    rowReaderOpts.setReturnFlatVector(true);
+    auto rowReader = reader->createRowReader(rowReaderOpts);
+    VectorPtr actual = BaseVector::create(requestedSchema, 0, pool());
+
+    vector_size_t totalRows = 0;
+    while (rowReader->next(4'096, actual) > 0) {
+      const auto firstRow = totalRows + 1;
+      std::vector<std::optional<bool>> expectedValues(actual->size());
+      for (vector_size_t row = 0; row < actual->size(); ++row) {
+        switch ((firstRow + row) % 4) {
+          case 0:
+          case 2:
+            expectedValues[row] = true;
+            break;
+          case 1:
+            expectedValues[row] = false;
+            break;
+          default:
+            expectedValues[row] = std::nullopt;
+        }
+      }
+      auto expected = makeRowVector(
+          {"row_number", "value"},
+          {makeFlatVector<int64_t>(
+               actual->size(), [firstRow](auto row) { return firstRow + row; }),
+           makeNullableFlatVector<bool>(expectedValues)});
+      assertEqualVectors(expected, actual);
+      totalRows += actual->size();
+    }
+    EXPECT_EQ(totalRows, kSize - 2);
+  }
+}
+
 // Ensure there is enough data before switching to fast path.
 TEST_F(TestReader, selectiveStringDirectFastPath) {
   auto genStr = [](auto i) {

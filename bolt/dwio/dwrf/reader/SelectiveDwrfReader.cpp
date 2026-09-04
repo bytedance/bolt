@@ -142,11 +142,11 @@ std::unique_ptr<SelectiveColumnReader> SelectiveDwrfReader::build(
         case proto::ColumnEncoding_Kind_DIRECT:
         case proto::ColumnEncoding_Kind_DIRECT_V2:
           return std::make_unique<SelectiveStringDirectColumnReader>(
-              fileType, params, scanSpec);
+              requestedType, fileType, params, scanSpec);
         case proto::ColumnEncoding_Kind_DICTIONARY:
         case proto::ColumnEncoding_Kind_DICTIONARY_V2:
           return std::make_unique<SelectiveStringDictionaryColumnReader>(
-              fileType, params, scanSpec);
+              requestedType, fileType, params, scanSpec);
         default:
           DWIO_RAISE("buildReader string unknown encoding");
       }

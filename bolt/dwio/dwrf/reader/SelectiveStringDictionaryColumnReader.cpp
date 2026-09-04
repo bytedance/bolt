@@ -36,10 +36,11 @@ namespace bytedance::bolt::dwrf {
 using namespace dwio::common;
 
 SelectiveStringDictionaryColumnReader::SelectiveStringDictionaryColumnReader(
+    const std::shared_ptr<const TypeWithId>& requestedType,
     const std::shared_ptr<const TypeWithId>& fileType,
     DwrfParams& params,
     common::ScanSpec& scanSpec)
-    : SelectiveColumnReader(fileType->type(), fileType, params, scanSpec),
+    : SelectiveColumnReader(requestedType->type(), fileType, params, scanSpec),
       lastStrideIndex_(-1),
       provider_(params.stripeStreams().getStrideIndexProvider()),
       statistics_(params.runtimeStatistics()) {
@@ -318,7 +319,7 @@ void SelectiveStringDictionaryColumnReader::makeFlat(VectorPtr* result) {
   }
   *result = std::make_shared<FlatVector<StringView>>(
       &memoryPool_,
-      requestedType(),
+      fileType_->type(),
       std::move(nulls),
       numValues_,
       std::move(values),
@@ -341,6 +342,9 @@ void SelectiveStringDictionaryColumnReader::getValues(
       scanState_.dictionary.numValues + scanState_.dictionary2.numValues;
   if (scanSpec_->makeFlat() || (!dictionaryValues_ && flatSize < dictSize)) {
     makeFlat(result);
+    if (requestedType()->isBoolean()) {
+      convertStringValuesToBoolean(result);
+    }
     return;
   }
   if (!dictionaryValues_) {
@@ -348,6 +352,9 @@ void SelectiveStringDictionaryColumnReader::getValues(
   }
   *result = std::make_shared<DictionaryVector<StringView>>(
       &memoryPool_, resultNulls(), numValues_, dictionaryValues_, values_);
+  if (requestedType()->isBoolean()) {
+    convertStringValuesToBoolean(result);
+  }
 }
 
 void SelectiveStringDictionaryColumnReader::ensureInitialized() {

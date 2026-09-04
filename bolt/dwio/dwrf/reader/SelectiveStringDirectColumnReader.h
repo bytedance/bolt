@@ -41,6 +41,17 @@ class SelectiveStringDirectColumnReader
   SelectiveStringDirectColumnReader(
       const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
       DwrfParams& params,
+      common::ScanSpec& scanSpec)
+      : SelectiveStringDirectColumnReader(
+            fileType,
+            fileType,
+            params,
+            scanSpec) {}
+
+  SelectiveStringDirectColumnReader(
+      const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
+      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
+      DwrfParams& params,
       common::ScanSpec& scanSpec);
 
   void seekToRowGroup(int64_t index) override {
@@ -64,7 +75,10 @@ class SelectiveStringDirectColumnReader
     rawStringBuffer_ = nullptr;
     rawStringSize_ = 0;
     rawStringUsed_ = 0;
-    getFlatValues<StringView, StringView>(rows, result, requestedType());
+    getFlatValues<StringView, StringView>(rows, result, fileType_->type());
+    if (requestedType()->isBoolean()) {
+      convertStringValuesToBoolean(result);
+    }
   }
 
  private:

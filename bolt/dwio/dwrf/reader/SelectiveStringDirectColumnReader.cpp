@@ -36,10 +36,11 @@
 namespace bytedance::bolt::dwrf {
 
 SelectiveStringDirectColumnReader::SelectiveStringDirectColumnReader(
+    const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
     const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
     DwrfParams& params,
     common::ScanSpec& scanSpec)
-    : SelectiveColumnReader(fileType->type(), fileType, params, scanSpec) {
+    : SelectiveColumnReader(requestedType->type(), fileType, params, scanSpec) {
   EncodingKey encodingKey{fileType->id(), params.flatMapContext().sequence};
   auto& stripe = params.stripeStreams();
   RleVersion rleVersion =

@@ -514,6 +514,8 @@ class SelectiveColumnReader {
       const TypePtr& requestedType,
       VectorPtr* FOLLY_NONNULL result);
 
+  void convertStringValuesToBoolean(VectorPtr* FOLLY_NONNULL result);
+
   // Returns integer values for 'rows' cast to the width of
   // 'requestedType' in '*result', the related fileDataType is unsigned int
   // type.
