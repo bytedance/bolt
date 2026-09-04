@@ -65,8 +65,42 @@ class RadixSortKeyCodecTestHelper {
             decodedColumns,
             mayHaveNulls,
             0,
+            static_cast<uint32_t>(decodedColumns.size()),
             /*skipMaskedVariableColumns=*/true),
         0);
+  }
+
+  static void decodeWithColumnRange(
+      const RadixSortKeyCodec& codec,
+      std::string_view key,
+      std::span<const uint8_t> decodedColumns,
+      uint32_t firstColumn,
+      uint32_t endColumn,
+      memory::MemoryPool* pool,
+      RowVector& output) {
+    std::vector<uint8_t> mayHaveNulls(decodedColumns.size(), 0);
+    std::vector<column_index_t> directKeyChannels(decodedColumns.size());
+    std::iota(directKeyChannels.begin(), directKeyChannels.end(), 0);
+    const std::array<EncodedKeyView, 1> keys{{EncodedKeyView{key}}};
+    const auto scratchWords = codec.decodeScratchWordsPerRowWithMask(
+        decodedColumns,
+        mayHaveNulls,
+        firstColumn,
+        endColumn,
+        /*skipMaskedVariableColumns=*/true);
+    auto cursorScratch = AlignedBuffer::allocate<uint64_t>(scratchWords, pool);
+    codec.decodeSuffixAtWithPreparedScratch(
+        keys,
+        decodedColumns,
+        mayHaveNulls,
+        0,
+        pool,
+        cursorScratch,
+        output,
+        directKeyChannels,
+        scratchWords,
+        firstColumn,
+        endColumn);
   }
 };
 
@@ -899,6 +933,36 @@ TEST_F(RadixSortKeyCodecTest, maskedDecodeRejectsMissingFollowingMarker) {
       RadixSortKeyCodecTestHelper::decodeWithMaskedPrefix(
           *codec, key, decodedColumns, pool_.get(), *output),
       BoltException);
+}
+
+TEST_F(RadixSortKeyCodecTest, offsetDecodeStopsAfterLastSelectedColumn) {
+  const auto flags = SortComparatorOracle::makeSortFlags(true, true);
+  const std::array<uint8_t, 3> decodedColumns{0, 1, 0};
+  const std::string key = std::string{static_cast<char>(2)} +
+      std::string(8, '\0') +
+      std::string{static_cast<char>(2), 'o', 'k', static_cast<char>(0)};
+
+  const std::array<TypePtr, 2> trailingTypes{
+      ARRAY(INTEGER()), MAP(INTEGER(), BIGINT())};
+  for (const auto& trailingType : trailingTypes) {
+    SCOPED_TRACE(trailingType->toString());
+    auto codec =
+        bind({BIGINT(), VARCHAR(), trailingType}, {flags, flags, flags});
+    auto output = BaseVector::create<RowVector>(
+        ROW({BIGINT(), VARCHAR(), trailingType}), 1, pool_.get());
+
+    // The encoded key ends after VARCHAR. A decoder that attempts to skip the
+    // trailing masked complex column will read past this view and fail.
+    RadixSortKeyCodecTestHelper::decodeWithColumnRange(
+        *codec, key, decodedColumns, 0, 2, pool_.get(), *output);
+
+    EXPECT_EQ(
+        output->childAt(1)
+            ->asUnchecked<SimpleVector<StringView>>()
+            ->valueAt(0)
+            .getString(),
+        "ok");
+  }
 }
 
 TEST_F(RadixSortKeyCodecTest, offsetDecodeRejectsInvalidUnknownMarker) {

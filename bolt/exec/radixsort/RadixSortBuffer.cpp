@@ -355,7 +355,9 @@ void RadixSortBuffer::prepareMergeOutputVector(vector_size_t outputBatchSize) {
 RowVectorPtr RadixSortBuffer::getMergedOutput(vector_size_t count) {
   const auto begin = std::chrono::steady_clock::now();
   prepareMergeOutputVector(count);
-  run_->prepareMergeOutput(*output_);
+  const auto selectedViews = run_->prepareMergeOutput(*output_);
+  auto abortMergeOutput =
+      folly::makeGuard([this]() noexcept { run_->abortMergeOutput(); });
   ensureMergeRowPointerBuffers(count);
 
   auto** rawKeys = mergeKeyRows_->asMutable<const char*>();
@@ -364,14 +366,23 @@ RowVectorPtr RadixSortBuffer::getMergedOutput(vector_size_t count) {
       : mergePayloadRows_->asMutable<char*>();
   vector_size_t outputOffset = 0;
   const auto outputCount = merger_->collectRows(
-      count, rawKeys, rawPayloads, [&](vector_size_t segmentSize) {
+      count,
+      rawKeys,
+      rawPayloads,
+      selectedViews,
+      [&](vector_size_t segmentSize) {
         BOLT_DCHECK_GT(segmentSize, 0);
         const auto payloads = rawPayloads == nullptr
             ? std::span<char* const>{}
             : std::span<char* const>(rawPayloads, segmentSize);
+        std::span<const EncodedKeyView> externalViews;
+        if (!selectedViews.empty()) {
+          externalViews = selectedViews.first(segmentSize);
+        }
         run_->writeMergeOutput(
             std::span<const char* const>(rawKeys, segmentSize),
             payloads,
+            externalViews,
             outputOffset,
             *output_);
         outputOffset += segmentSize;
@@ -379,6 +390,7 @@ RowVectorPtr RadixSortBuffer::getMergedOutput(vector_size_t count) {
   BOLT_CHECK_EQ(outputCount, count);
   BOLT_CHECK_EQ(outputOffset, count);
   run_->finishMergeOutput(*output_, count);
+  abortMergeOutput.dismiss();
   const auto memoryPosition = merger_->memoryPosition();
   if (memoryPosition.has_value() && *memoryPosition == run_->size()) {
     merger_->removeMemory();
@@ -824,7 +836,6 @@ void RadixSortBuffer::spillMemoryRun() {
     merger_->replaceMemory(
         RadixSortSpillRun{std::move(files)},
         RadixSortSpillSectionMeta::create(keyLayout, payloadLayout.get()),
-        payloadLayout.get(),
         pool_,
         spillConfig_->spillUringEnabled);
     cleanupUncommittedFiles.dismiss();
@@ -862,32 +873,20 @@ void RadixSortBuffer::prepareMerge() {
   streams.reserve(spilledRuns_.size() + (run_->size() == 0 ? 0 : 1));
   auto meta = RadixSortSpillSectionMeta::create(
       run_->keyLayout(), run_->payloadLayout().get());
-  for (const auto& spillRun : spilledRuns_) {
+  for (auto& spillRun : spilledRuns_) {
     if (spillRun.files.empty()) {
       continue;
     }
-    if (spillRun.files.size() == 1) {
-      streams.push_back(std::make_unique<RadixSortSpillFileMergeStream>(
-          spillRun.files.front(),
-          meta,
-          run_->payloadLayout().get(),
-          pool_,
-          spillConfig_->spillUringEnabled,
-          readBufferCache.get()));
-    } else {
-      streams.push_back(std::make_unique<RadixSortConcatFilesSpillMergeStream>(
-          spillRun.files,
-          meta,
-          run_->payloadLayout().get(),
-          pool_,
-          spillConfig_->spillUringEnabled,
-          readBufferCache.get()));
-    }
+    streams.push_back(makeRadixSortSpillMergeStream(
+        std::move(spillRun),
+        meta,
+        pool_,
+        spillConfig_->spillUringEnabled,
+        readBufferCache.get()));
   }
   if (run_->size() > 0) {
     memoryIndex = streams.size();
-    streams.push_back(
-        std::make_unique<RadixSortMemoryRunMergeStream>(*run_->storage()));
+    streams.push_back(makeRadixSortMemoryRunMergeStream(*run_->storage()));
   }
   merger_ = std::make_unique<RadixSortMerger>(
       run_->keyLayout(),

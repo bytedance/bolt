@@ -254,6 +254,7 @@ class RadixSortRun {
     std::optional<uint32_t> singleFixedWordBytes;
     uint64_t scratchWords{0};
     uint64_t directScratchWords{0};
+    uint32_t decodeEndColumn{0};
   };
 
   RadixSortRun(
@@ -293,12 +294,15 @@ class RadixSortRun {
   void writeMergeOutput(
       std::span<const char* const> keys,
       std::span<char* const> payloads,
+      std::span<const EncodedKeyView> externalViews,
       vector_size_t outputOffset,
       RowVector& output);
 
-  void prepareMergeOutput(RowVector& output);
+  std::span<EncodedKeyView> prepareMergeOutput(RowVector& output);
 
   void finishMergeOutput(RowVector& output, vector_size_t writtenRows);
+
+  void abortMergeOutput() noexcept;
 
   void ensureMergeDecodePlan();
 
@@ -308,6 +312,7 @@ class RadixSortRun {
 
   void decodeKeysAt(
       std::span<const char* const> keys,
+      std::span<const EncodedKeyView> externalViews,
       vector_size_t outputOffset,
       memory::MemoryPool* outputPool,
       RowVector& output);
@@ -337,6 +342,9 @@ class RadixSortRun {
   BufferPtr payloadRowsOutput_;
   std::optional<MergeDecodePlan> mergeDecodePlan_;
   std::optional<PayloadRowReader::Plan> mergePayloadGatherPlan_;
+  RowVector* activeMergeOutput_{nullptr};
+  bool mergeKeyDecodeActive_{false};
+  bool mergePayloadGatherActive_{false};
   // Global across spilled and in-memory runs; used by output decode.
   std::vector<uint8_t> keyMayHaveNulls_;
   // Current in-memory run only; used by finalize radix pass skipping.

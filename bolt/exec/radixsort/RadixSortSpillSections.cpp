@@ -48,10 +48,6 @@ FOLLY_ALWAYS_INLINE void storeStringPointer(void* slot, const char* data) {
       static_cast<char*>(slot) + sizeof(uint64_t), data);
 }
 
-FOLLY_ALWAYS_INLINE void clearCompactPointer(void* slot) {
-  storeCompactPointer(slot, nullptr);
-}
-
 FOLLY_ALWAYS_INLINE
 std::optional<uint64_t> restorePayloadPointersAndGetHeapSize(
     const RadixSortSpillSectionMeta& meta,
@@ -59,13 +55,87 @@ std::optional<uint64_t> restorePayloadPointersAndGetHeapSize(
     char* payloadHeap,
     uint64_t availablePayloadHeapBytes);
 
+template <RadixSortKeyLayoutKind KIND>
+constexpr uint32_t wireKeyRecordSizeForLayout() {
+  using Traits = RadixSortKeyTraits<KIND>;
+  if constexpr (Traits::kVariable) {
+    return Traits::kDataOffset;
+  } else if constexpr (Traits::kHasPayload) {
+    return Traits::kPayloadOffset;
+  } else {
+    return Traits::kWidth;
+  }
+}
+
+uint32_t wireKeyRecordSizeForLayout(RadixSortKeyLayoutKind kind) {
+  switch (kind) {
+    case RadixSortKeyLayoutKind::kInvalid:
+      BOLT_FAIL("Invalid radix sort key layout");
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed8:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyOnlyFixed8>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed16:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyOnlyFixed16>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed24:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyOnlyFixed24>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed32:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyOnlyFixed32>();
+    case RadixSortKeyLayoutKind::kKeyOnlyVariable32:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyOnlyVariable32>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed24:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed32:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyWithPayloadFixed32>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
+      return wireKeyRecordSizeForLayout<
+          RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>();
+  }
+  BOLT_FAIL("Unknown radix sort key layout");
+}
+
+static_assert(
+    wireKeyRecordSizeForLayout<RadixSortKeyLayoutKind::kKeyOnlyFixed8>() == 8);
+static_assert(
+    wireKeyRecordSizeForLayout<RadixSortKeyLayoutKind::kKeyOnlyFixed16>() ==
+    16);
+static_assert(
+    wireKeyRecordSizeForLayout<RadixSortKeyLayoutKind::kKeyOnlyFixed24>() ==
+    24);
+static_assert(
+    wireKeyRecordSizeForLayout<RadixSortKeyLayoutKind::kKeyOnlyFixed32>() ==
+    32);
+static_assert(
+    wireKeyRecordSizeForLayout<RadixSortKeyLayoutKind::kKeyOnlyVariable32>() ==
+    26);
+static_assert(
+    wireKeyRecordSizeForLayout<
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>() == 10);
+static_assert(
+    wireKeyRecordSizeForLayout<
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>() == 18);
+static_assert(
+    wireKeyRecordSizeForLayout<
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed32>() == 26);
+static_assert(
+    wireKeyRecordSizeForLayout<
+        RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>() == 20);
+
 template <bool HasKeyHeap>
 FOLLY_ALWAYS_INLINE uint64_t keyHeapSizeFromRecordForLayout(
     const RadixSortSpillSectionMeta& meta,
     const char* key) {
   if constexpr (HasKeyHeap) {
     const auto encodedSize = loadUnaligned<uint64_t>(key + meta.keySizeOffset);
-    return encodedSize < meta.keyHeapOffset
+    return encodedSize <= meta.keyHeapOffset
         ? std::numeric_limits<uint64_t>::max()
         : encodedSize - meta.keyHeapOffset;
   }
@@ -91,6 +161,9 @@ FOLLY_ALWAYS_INLINE uint64_t payloadHeapSizeFromFixedForLayout(
       } else {
         fieldSize = loadUnaligned<PayloadVarlenRef>(slot).size;
       }
+      if (fieldSize > std::numeric_limits<uint64_t>::max() - heapSize) {
+        return std::numeric_limits<uint64_t>::max();
+      }
       heapSize += fieldSize;
     }
     return heapSize;
@@ -104,47 +177,48 @@ sizeForSerializeRowsForLayout(
     const RadixSortSpillSectionMeta& meta,
     const char* keyBase,
     uint64_t maxRowCount,
-    uint64_t maxBytes,
-    std::vector<RadixSortSpillSectionSize>& rowSizes) {
+    uint64_t maxBytes) {
   static_assert(!HasVariablePayload || HasPayload);
-  rowSizes.clear();
 
   RadixSortSpillSectionBatchSize result;
-  const auto fixedRowSize = meta.runtimeKeyRecordSize + meta.payloadFixedSize;
+  const auto fixedRowSize = meta.fixedWireBytesPerRow();
   if constexpr (!HasKeyHeap && !HasVariablePayload) {
     result.rowCount = std::min(maxRowCount, maxBytes / fixedRowSize);
-    result.keyRecordBytes = result.rowCount * meta.runtimeKeyRecordSize;
-    result.payloadFixedBytes = result.rowCount * meta.payloadFixedSize;
     return result;
   }
 
-  rowSizes.reserve(maxRowCount);
+  const auto maxFittingRows = std::min(maxRowCount, maxBytes / fixedRowSize);
+  uint64_t rowCount = 0;
   uint64_t totalBytes = 0;
   uint64_t keyHeapBytes = 0;
   uint64_t payloadHeapBytes = 0;
-  for (uint64_t row = 0; row < maxRowCount; ++row) {
-    const auto* key = keyBase + row * meta.runtimeKeyRecordSize;
+  for (; rowCount < maxFittingRows; ++rowCount) {
+    auto remainingBytes = maxBytes - totalBytes;
+    if (fixedRowSize > remainingBytes) {
+      break;
+    }
+    remainingBytes -= fixedRowSize;
+    const auto* key = keyBase + rowCount * meta.runtimeKeyRecordSize;
     const auto keyHeapSize =
         keyHeapSizeFromRecordForLayout<HasKeyHeap>(meta, key);
+    if (keyHeapSize > remainingBytes) {
+      break;
+    }
+    remainingBytes -= keyHeapSize;
     uint64_t payloadHeapSize = 0;
     if constexpr (HasVariablePayload) {
       payloadHeapSize = payloadHeapSizeFromFixedForLayout<true>(
           meta, loadCompactPointer(key + meta.keyPayloadOffset));
     }
-    const auto rowBytes = fixedRowSize + keyHeapSize + payloadHeapSize;
-    if (rowBytes > maxBytes - totalBytes) {
+    if (payloadHeapSize > remainingBytes) {
       break;
     }
-    totalBytes += rowBytes;
+    totalBytes += fixedRowSize + keyHeapSize + payloadHeapSize;
     keyHeapBytes += keyHeapSize;
     payloadHeapBytes += payloadHeapSize;
-    rowSizes.push_back(
-        RadixSortSpillSectionSize{rowBytes, keyHeapSize, payloadHeapSize});
   }
-  result.rowCount = rowSizes.size();
-  result.keyRecordBytes = result.rowCount * meta.runtimeKeyRecordSize;
+  result.rowCount = rowCount;
   result.keyHeapBytes = keyHeapBytes;
-  result.payloadFixedBytes = result.rowCount * meta.payloadFixedSize;
   result.payloadHeapBytes = payloadHeapBytes;
   return result;
 }
@@ -152,9 +226,7 @@ sizeForSerializeRowsForLayout(
 FOLLY_ALWAYS_INLINE void copyPayloadVariableFieldsToHeapAndClear(
     const RadixSortSpillSectionMeta& meta,
     char* payloadFixed,
-    uint64_t payloadHeapSize,
     char*& payloadHeap) {
-  auto* const start = payloadHeap;
   for (const auto& op : meta.payloadVariableOps) {
     auto* const slot = payloadFixed + op.offset;
     if (isNull(payloadFixed, op)) {
@@ -179,18 +251,12 @@ FOLLY_ALWAYS_INLINE void copyPayloadVariableFieldsToHeapAndClear(
     storeUnaligned<PayloadVarlenRef>(
         slot, PayloadVarlenRef{value.size, nullptr});
   }
-  BOLT_DCHECK_EQ(payloadHeap, start + payloadHeapSize);
 }
 
-template <
-    bool HasKeyHeap,
-    bool HasPayload,
-    bool HasVariablePayload,
-    bool HasPayloadHeap>
+template <RadixSortKeyLayoutKind KIND, bool HasPayloadHeap>
 void copyRowsToSectionsForLayout(
     const RadixSortSpillSectionMeta& meta,
     const char* keyBase,
-    const RadixSortSpillSectionSize* rowSizes,
     uint64_t rowCount,
     uint64_t keyHeapBytes,
     uint64_t payloadHeapBytes,
@@ -198,111 +264,106 @@ void copyRowsToSectionsForLayout(
     char*& keyHeap,
     char* payloadFixedRows,
     char*& payloadHeap) {
-  static_assert(!HasVariablePayload || HasPayload);
-  static_assert(!HasPayloadHeap || HasVariablePayload);
-
-  std::memcpy(
-      keyRecords,
-      keyBase,
-      rowCount * static_cast<uint64_t>(meta.runtimeKeyRecordSize));
+  using Traits = RadixSortKeyTraits<KIND>;
+  constexpr bool kHasKeyHeap = Traits::kVariable;
+  constexpr bool kHasPayload = Traits::kHasPayload;
+  constexpr auto kWireKeyRecordSize = wireKeyRecordSizeForLayout<KIND>();
+  static_assert(!HasPayloadHeap || kHasPayload);
+  static_assert(kWireKeyRecordSize <= Traits::kWidth);
+  BOLT_DCHECK_EQ(meta.runtimeKeyRecordSize, Traits::kWidth);
+  BOLT_DCHECK_EQ(meta.wireKeyRecordSize, kWireKeyRecordSize);
 
   auto* const keyHeapStart = keyHeap;
+  auto* const keyHeapEnd = keyHeapStart + keyHeapBytes;
   auto* const payloadHeapStart = payloadHeap;
-  if constexpr (!HasKeyHeap && !HasPayload) {
+  if constexpr (!kHasKeyHeap && !kHasPayload) {
+    static_assert(!HasPayloadHeap);
+    std::memcpy(
+        keyRecords, keyBase, rowCount * static_cast<uint64_t>(Traits::kWidth));
     return;
   }
+
+  const auto* sourceKey = keyBase;
+  auto* destinationKey = keyRecords;
+  auto* payloadFixed = payloadFixedRows;
   for (uint64_t row = 0; row < rowCount; ++row) {
-    const auto* sourceKey = keyBase + row * meta.runtimeKeyRecordSize;
-    auto* key = keyRecords + row * meta.runtimeKeyRecordSize;
-    if constexpr (HasKeyHeap) {
-      const auto keyHeapSize = rowSizes[row].keyHeapSize;
+    std::memcpy(destinationKey, sourceKey, kWireKeyRecordSize);
+    if constexpr (kHasKeyHeap) {
+      const auto encodedSize =
+          loadUnaligned<uint64_t>(sourceKey + Traits::kSizeOffset);
+      BOLT_DCHECK_GT(encodedSize, meta.keyHeapOffset);
+      const auto keyHeapSize = encodedSize - meta.keyHeapOffset;
+      // keyHeapBytes is the sizing snapshot for this range. Source records
+      // must remain immutable until this delayed copy completes.
+      BOLT_DCHECK_LE(keyHeap, keyHeapEnd);
+      BOLT_DCHECK_LE(keyHeapSize, static_cast<uint64_t>(keyHeapEnd - keyHeap));
       std::memcpy(
           keyHeap,
-          loadCompactPointer(sourceKey + meta.keyDataOffset),
+          loadCompactPointer(sourceKey + Traits::kDataOffset),
           keyHeapSize);
       keyHeap += keyHeapSize;
-      clearCompactPointer(key + meta.keyDataOffset);
     }
-    if constexpr (HasPayload) {
-      auto* payloadFixed =
-          payloadFixedRows + row * static_cast<uint64_t>(meta.payloadFixedSize);
+    if constexpr (kHasPayload) {
       const auto* sourcePayload =
-          loadCompactPointer(sourceKey + meta.keyPayloadOffset);
+          loadCompactPointer(sourceKey + Traits::kPayloadOffset);
       std::memcpy(payloadFixed, sourcePayload, meta.payloadFixedSize);
       if constexpr (HasPayloadHeap) {
         copyPayloadVariableFieldsToHeapAndClear(
-            meta, payloadFixed, rowSizes[row].payloadHeapSize, payloadHeap);
+            meta, payloadFixed, payloadHeap);
       }
-      clearCompactPointer(key + meta.keyPayloadOffset);
+      payloadFixed += meta.payloadFixedSize;
     }
+    sourceKey += Traits::kWidth;
+    destinationKey += kWireKeyRecordSize;
   }
-  if constexpr (HasKeyHeap) {
-    BOLT_DCHECK_EQ(keyHeap, keyHeapStart + keyHeapBytes);
+  if constexpr (kHasKeyHeap) {
+    BOLT_DCHECK_EQ(keyHeap, keyHeapEnd);
   }
   if constexpr (HasPayloadHeap) {
     BOLT_DCHECK_EQ(payloadHeap, payloadHeapStart + payloadHeapBytes);
   }
 }
 
-template <bool HasKeyHeap>
-FOLLY_ALWAYS_INLINE bool restoreKeyHeapPointer(
+template <RadixSortKeyLayoutKind KIND>
+void copyRowsToSectionsForLayout(
     const RadixSortSpillSectionMeta& meta,
-    char* key,
-    char*& keyHeap,
-    const char* keyHeapEnd) {
-  if constexpr (HasKeyHeap) {
-    const auto keyHeapSize = keyHeapSizeFromRecordForLayout<true>(meta, key);
-    if (keyHeapSize == std::numeric_limits<uint64_t>::max() ||
-        keyHeapSize > static_cast<uint64_t>(keyHeapEnd - keyHeap)) {
-      return false;
-    }
-    storeCompactPointer(key + meta.keyDataOffset, keyHeap);
-    keyHeap += keyHeapSize;
-  }
-  return true;
-}
-
-template <
-    bool HasKeyHeap,
-    bool HasPayload,
-    bool HasVariablePayload,
-    bool HasPayloadHeap>
-bool restorePointersInSectionRowsForLayout(
-    const RadixSortSpillSectionMeta& meta,
-    char* keyRecords,
+    const char* keyBase,
     uint64_t rowCount,
+    uint64_t keyHeapBytes,
+    uint64_t payloadHeapBytes,
+    char* keyRecords,
     char*& keyHeap,
-    const char* keyHeapEnd,
     char* payloadFixedRows,
-    char*& payloadHeap,
-    const char* payloadHeapEnd,
-    std::vector<const char*>& keys) {
-  static_assert(!HasVariablePayload || HasPayload);
-  static_assert(!HasPayloadHeap || HasVariablePayload);
-  keys.reserve(keys.size() + rowCount);
-  for (uint64_t row = 0; row < rowCount; ++row) {
-    auto* key = keyRecords + row * meta.runtimeKeyRecordSize;
-    if (!restoreKeyHeapPointer<HasKeyHeap>(meta, key, keyHeap, keyHeapEnd)) {
-      return false;
+    char*& payloadHeap) {
+  using Traits = RadixSortKeyTraits<KIND>;
+  if constexpr (Traits::kHasPayload) {
+    // Variable slots must be canonicalized even when this batch contributes
+    // no heap bytes. In particular, null and empty complex values must never
+    // leak process-local pointers into the wire image.
+    if (!meta.payloadVariableOps.empty()) {
+      copyRowsToSectionsForLayout<KIND, true>(
+          meta,
+          keyBase,
+          rowCount,
+          keyHeapBytes,
+          payloadHeapBytes,
+          keyRecords,
+          keyHeap,
+          payloadFixedRows,
+          payloadHeap);
+      return;
     }
-    if constexpr (HasPayload) {
-      auto* payloadFixed =
-          payloadFixedRows + row * static_cast<uint64_t>(meta.payloadFixedSize);
-      storeCompactPointer(key + meta.keyPayloadOffset, payloadFixed);
-      if constexpr (HasPayloadHeap) {
-        const auto availablePayloadHeapBytes =
-            static_cast<uint64_t>(payloadHeapEnd - payloadHeap);
-        const auto payloadHeapSize = restorePayloadPointersAndGetHeapSize(
-            meta, payloadFixed, payloadHeap, availablePayloadHeapBytes);
-        if (!payloadHeapSize.has_value()) {
-          return false;
-        }
-        payloadHeap += *payloadHeapSize;
-      }
-    }
-    keys.push_back(key);
   }
-  return true;
+  copyRowsToSectionsForLayout<KIND, false>(
+      meta,
+      keyBase,
+      rowCount,
+      keyHeapBytes,
+      payloadHeapBytes,
+      keyRecords,
+      keyHeap,
+      payloadFixedRows,
+      payloadHeap);
 }
 
 FOLLY_ALWAYS_INLINE
@@ -357,25 +418,28 @@ RadixSortSpillSectionMeta RadixSortSpillSectionMeta::create(
 void RadixSortSpillSectionMeta::initialize(
     const PayloadRowLayout* payloadLayout) {
   runtimeKeyRecordSize = keyLayout.width();
+  wireKeyRecordSize = wireKeyRecordSizeForLayout(keyLayout.kind());
+  BOLT_CHECK_LE(wireKeyRecordSize, runtimeKeyRecordSize);
   keyHeapOffset = 0;
   keySizeOffset = 0;
-  keyDataOffset = 0;
   keyPayloadOffset = 0;
   hasKeyHeap = false;
+  hasPayload = keyLayout.hasPayload();
   if (keyLayout.isVariable()) {
     keyHeapOffset = keyLayout.heapKeyOffset();
     keySizeOffset = *keyLayout.sizeOffset();
-    keyDataOffset = *keyLayout.dataOffset();
     hasKeyHeap = true;
   }
-  if (keyLayout.hasPayload()) {
+  if (hasPayload) {
     keyPayloadOffset = *keyLayout.payloadOffset();
   }
-  hasPayload = keyLayout.hasPayload();
   if (hasPayload) {
     BOLT_CHECK_NOT_NULL(payloadLayout);
   }
   payloadFixedSize = hasPayload ? payloadLayout->rowWidth() : 0;
+  BOLT_CHECK(
+      checkedAdd<uint64_t>(wireKeyRecordSize, payloadFixedSize).has_value(),
+      "Radix sort spill fixed wire row size overflows");
   payloadVariableOps.clear();
   if (hasPayload) {
     payloadVariableOps.reserve(payloadLayout->variableColumns().size());
@@ -394,37 +458,35 @@ RadixSortSpillSectionBatchSize RadixSortSpillSections::sizeForSerializeRows(
     const RadixSortSpillSectionMeta& meta,
     const char* keyBase,
     uint64_t maxRowCount,
-    uint64_t maxBytes,
-    std::vector<RadixSortSpillSectionSize>& rowSizes) {
+    uint64_t maxBytes) {
   const auto hasVariablePayload = meta.hasVariablePayload();
   if (meta.hasKeyHeap) {
     if (meta.hasPayload) {
       if (hasVariablePayload) {
         return sizeForSerializeRowsForLayout<true, true, true>(
-            meta, keyBase, maxRowCount, maxBytes, rowSizes);
+            meta, keyBase, maxRowCount, maxBytes);
       }
       return sizeForSerializeRowsForLayout<true, true, false>(
-          meta, keyBase, maxRowCount, maxBytes, rowSizes);
+          meta, keyBase, maxRowCount, maxBytes);
     }
     return sizeForSerializeRowsForLayout<true, false, false>(
-        meta, keyBase, maxRowCount, maxBytes, rowSizes);
+        meta, keyBase, maxRowCount, maxBytes);
   }
   if (meta.hasPayload) {
     if (hasVariablePayload) {
       return sizeForSerializeRowsForLayout<false, true, true>(
-          meta, keyBase, maxRowCount, maxBytes, rowSizes);
+          meta, keyBase, maxRowCount, maxBytes);
     }
     return sizeForSerializeRowsForLayout<false, true, false>(
-        meta, keyBase, maxRowCount, maxBytes, rowSizes);
+        meta, keyBase, maxRowCount, maxBytes);
   }
   return sizeForSerializeRowsForLayout<false, false, false>(
-      meta, keyBase, maxRowCount, maxBytes, rowSizes);
+      meta, keyBase, maxRowCount, maxBytes);
 }
 
 void RadixSortSpillSections::copyRowsToSections(
     const RadixSortSpillSectionMeta& meta,
     const char* keyBase,
-    const RadixSortSpillSectionSize* rowSizes,
     uint64_t rowCount,
     uint64_t keyHeapBytes,
     uint64_t payloadHeapBytes,
@@ -432,53 +494,10 @@ void RadixSortSpillSections::copyRowsToSections(
     char*& keyHeap,
     char* payloadFixedRows,
     char*& payloadHeap) {
-  const auto hasVariablePayload = meta.hasVariablePayload();
-  const auto hasPayloadHeap = hasVariablePayload && payloadHeapBytes > 0;
-  if (meta.hasKeyHeap) {
-    if (meta.hasPayload) {
-      if (hasPayloadHeap) {
-        copyRowsToSectionsForLayout<true, true, true, true>(
-            meta,
-            keyBase,
-            rowSizes,
-            rowCount,
-            keyHeapBytes,
-            payloadHeapBytes,
-            keyRecords,
-            keyHeap,
-            payloadFixedRows,
-            payloadHeap);
-      } else if (hasVariablePayload) {
-        copyRowsToSectionsForLayout<true, true, true, false>(
-            meta,
-            keyBase,
-            rowSizes,
-            rowCount,
-            keyHeapBytes,
-            payloadHeapBytes,
-            keyRecords,
-            keyHeap,
-            payloadFixedRows,
-            payloadHeap);
-      } else {
-        copyRowsToSectionsForLayout<true, true, false, false>(
-            meta,
-            keyBase,
-            rowSizes,
-            rowCount,
-            keyHeapBytes,
-            payloadHeapBytes,
-            keyRecords,
-            keyHeap,
-            payloadFixedRows,
-            payloadHeap);
-      }
-      return;
-    }
-    copyRowsToSectionsForLayout<true, false, false, false>(
+  const auto copy = [&]<RadixSortKeyLayoutKind KIND>() {
+    copyRowsToSectionsForLayout<KIND>(
         meta,
         keyBase,
-        rowSizes,
         rowCount,
         keyHeapBytes,
         payloadHeapBytes,
@@ -486,166 +505,66 @@ void RadixSortSpillSections::copyRowsToSections(
         keyHeap,
         payloadFixedRows,
         payloadHeap);
-    return;
+  };
+  switch (meta.keyLayout.kind()) {
+    case RadixSortKeyLayoutKind::kInvalid:
+      BOLT_FAIL("Invalid radix sort key layout");
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed8:
+      return copy.template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed8>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed16:
+      return copy
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed16>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed24:
+      return copy
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed24>();
+    case RadixSortKeyLayoutKind::kKeyOnlyFixed32:
+      return copy
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed32>();
+    case RadixSortKeyLayoutKind::kKeyOnlyVariable32:
+      return copy
+          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyVariable32>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
+      return copy.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed24:
+      return copy.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadFixed32:
+      return copy.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed32>();
+    case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
+      return copy.template
+      operator()<RadixSortKeyLayoutKind::kKeyWithPayloadVariable32>();
   }
-  if (meta.hasPayload) {
-    if (hasPayloadHeap) {
-      copyRowsToSectionsForLayout<false, true, true, true>(
-          meta,
-          keyBase,
-          rowSizes,
-          rowCount,
-          keyHeapBytes,
-          payloadHeapBytes,
-          keyRecords,
-          keyHeap,
-          payloadFixedRows,
-          payloadHeap);
-    } else if (hasVariablePayload) {
-      copyRowsToSectionsForLayout<false, true, true, false>(
-          meta,
-          keyBase,
-          rowSizes,
-          rowCount,
-          keyHeapBytes,
-          payloadHeapBytes,
-          keyRecords,
-          keyHeap,
-          payloadFixedRows,
-          payloadHeap);
-    } else {
-      copyRowsToSectionsForLayout<false, true, false, false>(
-          meta,
-          keyBase,
-          rowSizes,
-          rowCount,
-          keyHeapBytes,
-          payloadHeapBytes,
-          keyRecords,
-          keyHeap,
-          payloadFixedRows,
-          payloadHeap);
-    }
-    return;
-  }
-  copyRowsToSectionsForLayout<false, false, false, false>(
-      meta,
-      keyBase,
-      rowSizes,
-      rowCount,
-      keyHeapBytes,
-      payloadHeapBytes,
-      keyRecords,
-      keyHeap,
-      payloadFixedRows,
-      payloadHeap);
+  BOLT_FAIL("Unknown radix sort key layout");
 }
 
-bool RadixSortSpillSections::restorePointersInSectionRows(
+bool RadixSortSpillSections::restorePayloadPointersInSectionRows(
     const RadixSortSpillSectionMeta& meta,
-    char* keyRecords,
     uint64_t rowCount,
-    char*& keyHeap,
-    const char* keyHeapEnd,
     char* payloadFixedRows,
     char*& payloadHeap,
-    const char* payloadHeapEnd,
-    std::vector<const char*>& keys) {
-  const auto hasVariablePayload = meta.hasVariablePayload();
-  const auto hasPayloadHeap =
-      hasVariablePayload && payloadHeapEnd > payloadHeap;
-  if (!meta.hasKeyHeap && !meta.hasPayload) {
-    keys.reserve(keys.size() + rowCount);
-    for (uint64_t row = 0; row < rowCount; ++row) {
-      keys.push_back(keyRecords + row * meta.runtimeKeyRecordSize);
-    }
-    return true;
+    const char* payloadHeapEnd) {
+  if (payloadHeap > payloadHeapEnd) {
+    return false;
   }
-  if (meta.hasKeyHeap) {
-    if (meta.hasPayload) {
-      if (hasPayloadHeap) {
-        return restorePointersInSectionRowsForLayout<true, true, true, true>(
-            meta,
-            keyRecords,
-            rowCount,
-            keyHeap,
-            keyHeapEnd,
-            payloadFixedRows,
-            payloadHeap,
-            payloadHeapEnd,
-            keys);
-      }
-      if (hasVariablePayload) {
-        return restorePointersInSectionRowsForLayout<true, true, true, false>(
-            meta,
-            keyRecords,
-            rowCount,
-            keyHeap,
-            keyHeapEnd,
-            payloadFixedRows,
-            payloadHeap,
-            payloadHeapEnd,
-            keys);
-      }
-      return restorePointersInSectionRowsForLayout<true, true, false, false>(
-          meta,
-          keyRecords,
-          rowCount,
-          keyHeap,
-          keyHeapEnd,
-          payloadFixedRows,
-          payloadHeap,
-          payloadHeapEnd,
-          keys);
-    }
-    return restorePointersInSectionRowsForLayout<true, false, false, false>(
-        meta,
-        keyRecords,
-        rowCount,
-        keyHeap,
-        keyHeapEnd,
-        payloadFixedRows,
-        payloadHeap,
-        payloadHeapEnd,
-        keys);
+  if (!meta.hasPayload || !meta.hasVariablePayload()) {
+    return payloadHeap == payloadHeapEnd;
   }
-  if (meta.hasPayload) {
-    if (hasPayloadHeap) {
-      return restorePointersInSectionRowsForLayout<false, true, true, true>(
-          meta,
-          keyRecords,
-          rowCount,
-          keyHeap,
-          keyHeapEnd,
-          payloadFixedRows,
-          payloadHeap,
-          payloadHeapEnd,
-          keys);
+
+  auto* payloadFixed = payloadFixedRows;
+  for (uint64_t row = 0; row < rowCount; ++row) {
+    const auto availablePayloadHeapBytes =
+        static_cast<uint64_t>(payloadHeapEnd - payloadHeap);
+    const auto payloadHeapSize = restorePayloadPointersAndGetHeapSize(
+        meta, payloadFixed, payloadHeap, availablePayloadHeapBytes);
+    if (!payloadHeapSize.has_value()) {
+      return false;
     }
-    if (hasVariablePayload) {
-      return restorePointersInSectionRowsForLayout<false, true, true, false>(
-          meta,
-          keyRecords,
-          rowCount,
-          keyHeap,
-          keyHeapEnd,
-          payloadFixedRows,
-          payloadHeap,
-          payloadHeapEnd,
-          keys);
-    }
-    return restorePointersInSectionRowsForLayout<false, true, false, false>(
-        meta,
-        keyRecords,
-        rowCount,
-        keyHeap,
-        keyHeapEnd,
-        payloadFixedRows,
-        payloadHeap,
-        payloadHeapEnd,
-        keys);
+    payloadHeap += *payloadHeapSize;
+    payloadFixed += meta.payloadFixedSize;
   }
-  return true;
+  return payloadHeap == payloadHeapEnd;
 }
 
 } // namespace bytedance::bolt::exec::radixsort

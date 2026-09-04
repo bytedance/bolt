@@ -43,9 +43,9 @@ struct RadixSortSpillSectionMeta {
   uint64_t payloadFixedSize{0};
 
   uint32_t runtimeKeyRecordSize{0};
+  uint32_t wireKeyRecordSize{0};
   uint32_t keyHeapOffset{0};
   uint32_t keySizeOffset{0};
-  uint32_t keyDataOffset{0};
   uint32_t keyPayloadOffset{0};
 
   bool hasKeyHeap{false};
@@ -61,23 +61,19 @@ struct RadixSortSpillSectionMeta {
   bool hasVariablePayload() const {
     return !payloadVariableOps.empty();
   }
-};
 
-struct RadixSortSpillSectionSize {
-  uint64_t totalSize{0};
-  uint64_t keyHeapSize{0};
-  uint64_t payloadHeapSize{0};
+  uint64_t fixedWireBytesPerRow() const {
+    return wireKeyRecordSize + payloadFixedSize;
+  }
 };
 
 struct RadixSortSpillSectionBatchSize {
   uint64_t rowCount{0};
-  uint64_t keyRecordBytes{0};
   uint64_t keyHeapBytes{0};
-  uint64_t payloadFixedBytes{0};
   uint64_t payloadHeapBytes{0};
 
-  uint64_t totalBytes() const {
-    return keyRecordBytes + keyHeapBytes + payloadFixedBytes + payloadHeapBytes;
+  uint64_t totalBytes(uint64_t fixedWireBytesPerRow) const {
+    return rowCount * fixedWireBytesPerRow + keyHeapBytes + payloadHeapBytes;
   }
 };
 
@@ -87,13 +83,11 @@ class RadixSortSpillSections {
       const RadixSortSpillSectionMeta& meta,
       const char* keyBase,
       uint64_t maxRowCount,
-      uint64_t maxBytes,
-      std::vector<RadixSortSpillSectionSize>& rowSizes);
+      uint64_t maxBytes);
 
   static void copyRowsToSections(
       const RadixSortSpillSectionMeta& meta,
       const char* keyBase,
-      const RadixSortSpillSectionSize* rowSizes,
       uint64_t rowCount,
       uint64_t keyHeapBytes,
       uint64_t payloadHeapBytes,
@@ -102,16 +96,12 @@ class RadixSortSpillSections {
       char* payloadFixedRows,
       char*& payloadHeap);
 
-  static bool restorePointersInSectionRows(
+  static bool restorePayloadPointersInSectionRows(
       const RadixSortSpillSectionMeta& meta,
-      char* keyRecords,
       uint64_t rowCount,
-      char*& keyHeap,
-      const char* keyHeapEnd,
       char* payloadFixedRows,
       char*& payloadHeap,
-      const char* payloadHeapEnd,
-      std::vector<const char*>& keys);
+      const char* payloadHeapEnd);
 };
 
 } // namespace bytedance::bolt::exec::radixsort
