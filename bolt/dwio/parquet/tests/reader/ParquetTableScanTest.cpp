@@ -1872,6 +1872,8 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"boolean_to_varchar",             BOOLEAN(),       VARCHAR(),          true},
 
     // ---- Reject: DECIMAL widening violations ----
+    // Scale-changing casts used to pass schema validation without rescaling
+    // decoded values. Reject them until rescaling is supported end to end.
     {"decimal_scale_shrink",           DECIMAL(10, 2),  DECIMAL(10, 0),     true},
     {"decimal_scale_grew_prec_same",   DECIMAL(10, 2),  DECIMAL(10, 5),     true},
     {"decimal_both_shrink",            DECIMAL(38, 18), DECIMAL(10, 2),     true},
@@ -1900,6 +1902,9 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"real_to_double",      REAL(),    DOUBLE(),   false},
 
     // ---- Accept: DECIMAL widening ----
+    // Same-scale short-to-long widening only changes the native storage width;
+    // the reader upcasts raw values from int64_t to int128_t without changing
+    // their decimal representation.
     {"decimal_identity",              DECIMAL(10, 2),  DECIMAL(10, 2),     false},
     {"decimal_widen_precision_only",  DECIMAL(10, 2),  DECIMAL(15, 2),     false},
     {"decimal_short_to_long_same_scale", DECIMAL(13, 10), DECIMAL(28, 10), false},

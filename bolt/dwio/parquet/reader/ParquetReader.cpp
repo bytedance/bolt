@@ -1175,8 +1175,10 @@ TypePtr ReaderBase::convertType(
         BOLT_CHECK(
             schemaElement.__isset.precision && schemaElement.__isset.scale,
             "DECIMAL requires a length and scale specifier!");
-        // Decimal reader casts only support precision widening. Rescaling is
-        // intentionally rejected until filters can be handled consistently.
+        // Decimal reader casts currently support precision widening at a
+        // fixed scale. A scale change also requires rescaling decoded values
+        // and coordinating filter pushdown, so reject it until that path is
+        // implemented end to end.
         const auto filePrecision = schemaElement.precision;
         const auto fileScale = schemaElement.scale;
         checkRequested([&](const TypePtr& t) {
