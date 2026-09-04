@@ -60,6 +60,58 @@ static constexpr size_t kMaxReusableScratchBufferBytes{32UL << 10};
 constexpr const char kArrowExtensionNameKey[] = "ARROW:extension:name";
 constexpr const char kSparkVariantExtensionName[] = "spark.variant";
 
+bool isSupportedArrayConstantElementType(const Type& type) {
+  if (type.isDate() || type.isDecimal()) {
+    return false;
+  }
+
+  switch (type.kind()) {
+    case TypeKind::BOOLEAN:
+    case TypeKind::TINYINT:
+    case TypeKind::SMALLINT:
+    case TypeKind::INTEGER:
+    case TypeKind::BIGINT:
+    case TypeKind::REAL:
+    case TypeKind::DOUBLE:
+    case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
+      return true;
+    default:
+      return false;
+  }
+}
+} // namespace
+
+bool shouldExportArrayConstantAsDictionary(
+    const BaseVector& vector,
+    const ArrowOptions& options) {
+  if (vector.encoding() != VectorEncoding::Simple::CONSTANT ||
+      options.flattenConstant || !options.arrayConstantAsDictionary ||
+      vector.typeKind() != TypeKind::ARRAY || vector.size() == 0 ||
+      (vector.mayHaveNulls() && vector.isNullAt(0))) {
+    return false;
+  }
+  return isSupportedArrayConstantElementType(*vector.type()->childAt(0));
+}
+
+namespace {
+
+void normalizeArrayConstantForDictionaryExport(
+    const VectorPtr& vector,
+    const ArrowOptions& options) {
+  if (!shouldExportArrayConstantAsDictionary(*vector, options)) {
+    return;
+  }
+
+  // Preserve the outer Constant<Array<T>>, but flatten encoded elements such
+  // as those produced by ARRAY_DISTINCT. Consumers of this path support only
+  // a top-level Dictionary<List<T>>, not Dictionary<List<Dictionary<T>>>.
+  auto* array = vector->valueVector()->as<ArrayVector>();
+  BOLT_CHECK_NOT_NULL(
+      array, "Expected Constant<Array> backing vector to be ArrayVector");
+  BaseVector::flattenVector(array->elements());
+}
+
 void clearNullableFlag(int64_t& flags) {
   flags = flags & (~ARROW_FLAG_NULLABLE);
 }
@@ -2149,6 +2201,37 @@ void exportConstant(
   runEnds->release = releaseArrowArray;
 }
 
+void exportArrayConstantAsDictionary(
+    const BaseVector& vector,
+    const Selection& rows,
+    const ArrowOptions& options,
+    ArrowArray& out,
+    memory::MemoryPool* pool,
+    BoltToArrowBridgeHolder& holder) {
+  const auto numRows = rows.count();
+  auto& values = *vector.valueVector();
+  auto* constant = vector.as<ConstantVector<ComplexType>>();
+
+  out.n_buffers = 2;
+  out.n_children = 0;
+  out.length = numRows;
+
+  auto* dictionary = holder.allocateDictionary();
+  std::memset(dictionary, 0, sizeof(ArrowArray));
+
+  Selection selectedValue(values.size());
+  selectedValue.clearAll();
+  selectedValue.addRange(constant->index(), 1);
+  exportToArrowImpl(values, selectedValue, options, *dictionary, pool);
+  out.dictionary = dictionary;
+
+  auto indices = AlignedBuffer::allocate<vector_size_t>(numRows, pool);
+  std::memset(indices->asMutable<void>(), 0, numRows * sizeof(vector_size_t));
+  holder.setBuffer(1, indices);
+  out.buffers[0] = nullptr;
+  out.buffers[1] = indices->as<void>();
+}
+
 void exportToArrowImpl(
     const BaseVector& vec,
     const Selection& rows,
@@ -2199,9 +2282,13 @@ void exportToArrowImpl(
           : exportDictionary(vec, rows, options, out, pool, *holder);
       break;
     case VectorEncoding::Simple::CONSTANT:
-      options.flattenConstant
-          ? exportFlattenedVector(vec, rows, options, out, pool, *holder)
-          : exportConstant(vec, rows, options, out, pool, *holder);
+      if (options.flattenConstant) {
+        exportFlattenedVector(vec, rows, options, out, pool, *holder);
+      } else if (shouldExportArrayConstantAsDictionary(vec, options)) {
+        exportArrayConstantAsDictionary(vec, rows, options, out, pool, *holder);
+      } else {
+        exportConstant(vec, rows, options, out, pool, *holder);
+      }
       break;
     default:
       BOLT_NYI("{} cannot be exported to Arrow yet.", vec.encoding());
@@ -2572,6 +2659,7 @@ void exportToArrow(
         BaseVector::loadedVectorShared(vector), arrowArray, pool, options);
     return;
   }
+  normalizeArrayConstantForDictionaryExport(vector, options);
   if (vector->encoding() == VectorEncoding::Simple::CONSTANT &&
       options.flattenConstant && vector->valueVector() != nullptr &&
       !vector->wrappedVector()->isFlatEncoding()) {
@@ -2672,6 +2760,8 @@ void exportToArrow(
     return;
   }
 
+  normalizeArrayConstantForDictionaryExport(vec, options);
+
   auto& type = vec->type();
 
   arrowSchema.name = nullptr;
@@ -2762,6 +2852,18 @@ void exportToArrow(
       exportToArrow(
           vec->valueVector(), *arrowSchema.dictionary, options, {}, pool);
     }
+  } else if (shouldExportArrayConstantAsDictionary(*vec, options)) {
+    arrowSchema.n_children = 0;
+    arrowSchema.children = nullptr;
+    arrowSchema.format = "i";
+    bridgeHolder->dictionary = std::make_unique<ArrowSchema>();
+    arrowSchema.dictionary = bridgeHolder->dictionary.get();
+    exportToArrow(
+        vec->valueVector(), *arrowSchema.dictionary, options, {}, pool);
+
+    arrowSchema.release = releaseArrowSchema;
+    arrowSchema.private_data = bridgeHolder.release();
+    return;
   } else if (
       vec->encoding() == VectorEncoding::Simple::CONSTANT &&
       !options.flattenConstant) {
