@@ -41,6 +41,19 @@ void registerMathMiscFunctions(const std::string& prefix) {
       {prefix + "round"});
   registerFunction<RoundFunction, double, double, int32_t>({prefix + "round"});
   registerFunction<RoundFunction, float, float, int32_t>({prefix + "round"});
+
+  registerUnaryNumeric<BRoundFunction>({prefix + "bround"});
+  registerFunction<BRoundFunction, int8_t, int8_t, int32_t>(
+      {prefix + "bround"});
+  registerFunction<BRoundFunction, int16_t, int16_t, int32_t>(
+      {prefix + "bround"});
+  registerFunction<BRoundFunction, int32_t, int32_t, int32_t>(
+      {prefix + "bround"});
+  registerFunction<BRoundFunction, int64_t, int64_t, int32_t>(
+      {prefix + "bround"});
+  registerFunction<BRoundFunction, double, double, int32_t>(
+      {prefix + "bround"});
+  registerFunction<BRoundFunction, float, float, int32_t>({prefix + "bround"});
   registerFunction<RIntFunction, double, double>({prefix + "rint"});
 
   // Ceil and Floor functions
