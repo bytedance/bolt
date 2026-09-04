@@ -323,6 +323,29 @@ struct Converter<
   struct LimitType {
     static constexpr bool kByteOrSmallInt =
         std::is_same_v<T, int8_t> || std::is_same_v<T, int16_t>;
+    using FirstStageType = std::conditional_t<kByteOrSmallInt, int32_t, T>;
+
+    // Floating point to signed integer conversion is defined only when the
+    // truncated value is representable. Use the exclusive limits of that
+    // range so the conversion itself never relies on undefined behavior.
+    template <typename FP>
+    static constexpr bool isPositiveOverflow(const FP& value) {
+      constexpr FP kFirstPositiveOverflow =
+          -static_cast<FP>(std::numeric_limits<FirstStageType>::min());
+      return value >= kFirstPositiveOverflow;
+    }
+
+    template <typename FP>
+    static constexpr bool isNegativeOverflow(const FP& value) {
+      constexpr FP kMin =
+          static_cast<FP>(std::numeric_limits<FirstStageType>::min());
+      constexpr FP kFirstNegativeOverflow = kMin - FP{1};
+      if constexpr (kFirstNegativeOverflow == kMin) {
+        return value < kMin;
+      }
+      return value <= kFirstNegativeOverflow;
+    }
+
     static int64_t minLimit() {
       if (kByteOrSmallInt) {
         return std::numeric_limits<int32_t>::min();
@@ -349,10 +372,7 @@ struct Converter<
     }
     template <typename FP>
     static T cast(const FP& v) {
-      if (kByteOrSmallInt) {
-        return T(int32_t(v));
-      }
-      return T(v);
+      return static_cast<T>(static_cast<FirstStageType>(v));
     }
   };
 
@@ -363,12 +383,12 @@ struct Converter<
       }
       if constexpr (std::is_same_v<T, int128_t>) {
         return std::numeric_limits<int128_t>::max();
-      } else if (v > LimitType::maxLimit()) {
+      } else if (LimitType::isPositiveOverflow(v)) {
         return LimitType::max();
       }
       if constexpr (std::is_same_v<T, int128_t>) {
         return std::numeric_limits<int128_t>::min();
-      } else if (v < LimitType::minLimit()) {
+      } else if (LimitType::isNegativeOverflow(v)) {
         return LimitType::min();
       }
       return LimitType::cast(v);
@@ -392,12 +412,12 @@ struct Converter<
       }
       if constexpr (std::is_same_v<T, int128_t>) {
         return std::numeric_limits<int128_t>::max();
-      } else if (v > LimitType::maxLimit()) {
+      } else if (LimitType::isPositiveOverflow(v)) {
         return LimitType::max();
       }
       if constexpr (std::is_same_v<T, int128_t>) {
         return std::numeric_limits<int128_t>::min();
-      } else if (v < LimitType::minLimit()) {
+      } else if (LimitType::isNegativeOverflow(v)) {
         return LimitType::min();
       }
       return LimitType::cast(v);
