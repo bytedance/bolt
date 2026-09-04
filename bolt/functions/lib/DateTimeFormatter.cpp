@@ -1301,23 +1301,12 @@ int32_t DateTimeFormatter::format(
             // spark compatibility: Java DateTimeFormatter uses
             // SignStyle.EXCEEDS_PAD for 4+ pattern letters, printing '+'
             // when the year has more digits than the pattern width; legacy
-            // SimpleDateFormat never prints '+'.
-            // However, if a timezone is applied and the same instant in UTC
-            // has year-of-era <= 9999 (e.g., Asia/Shanghai at
-            // 10000-01-01 07:59:59 equals 9999-12-31 23:59:59 UTC), suppress
-            // the leading '+'.
+            // SimpleDateFormat never prints '+'. Like Java, the decision is
+            // based on the local (timezone-adjusted) year only.
             bool addPlus = ::bytedance::bolt::kSparkCompatible &&
                 timePolicy != TimePolicy::LEGACY &&
                 token.pattern.minRepresentDigits >= 4 && year > 0 &&
                 countDigits(year) > token.pattern.minRepresentDigits;
-            if (addPlus && timezone != nullptr) {
-              const auto civilDateTimeUtc =
-                  util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
-              const auto utcYearEra = civilDateTimeUtc.date.year <= 0
-                  ? std::abs(civilDateTimeUtc.date.year - 1)
-                  : civilDateTimeUtc.date.year;
-              addPlus = utcYearEra > 9999;
-            }
             if (addPlus) {
               *result++ = '+';
             }
@@ -1397,23 +1386,12 @@ int32_t DateTimeFormatter::format(
             // spark compatibility: Java DateTimeFormatter uses
             // SignStyle.EXCEEDS_PAD for 4+ pattern letters, printing '+'
             // when the year has more digits than the pattern width; legacy
-            // SimpleDateFormat never prints '+'.
-            // If a timezone is applied and the same instant in UTC has
-            // (adjusted) year <= 9999, suppress the leading '+'.
+            // SimpleDateFormat never prints '+'. Like Java, the decision is
+            // based on the local (timezone-adjusted) year only.
             bool addPlus = ::bytedance::bolt::kSparkCompatible &&
                 timePolicy != TimePolicy::LEGACY &&
                 token.pattern.minRepresentDigits >= 4 && year > 0 &&
                 countDigits(year) > token.pattern.minRepresentDigits;
-            if (addPlus && timezone != nullptr) {
-              const auto civilDateTimeUtc =
-                  util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
-              auto utcYear = civilDateTimeUtc.date.year;
-              if (utcYear <= 0 &&
-                  (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
-                utcYear = std::abs(utcYear) + 1;
-              }
-              addPlus = utcYear > 9999;
-            }
             if (addPlus) {
               *result++ = '+';
             }
