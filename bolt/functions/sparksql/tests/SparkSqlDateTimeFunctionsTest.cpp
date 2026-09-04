@@ -2282,19 +2282,33 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYearSignEdgeCases) {
   // because the '+' overflowed the undersized result buffer.
   EXPECT_EQ(fromUnixTime(-3217862448344, "yyyy G"), "+100002 BC");
 
+  // With a timezone, the sign still follows the local year only (Java
+  // semantics): UTC 99999-12-31 16:00:00 is Shanghai 100000-01-01
+  // 00:00:00, whose 6 digits exceed both widths below.
+  auto fromUnixTimeTz = [&](int64_t unixTime, const std::string& format) {
+    return evaluateOnce<std::string>(
+               fmt::format("from_unixtime(c0, '{}', 'Asia/Shanghai')", format),
+               std::optional<int64_t>{unixTime})
+        .value();
+  };
+  EXPECT_EQ(fromUnixTimeTz(3093527952000, "yyyyy"), "+100000");
+  EXPECT_EQ(fromUnixTimeTz(3093527952000, "yyyy"), "+100000");
+
+  // Legacy policy (SimpleDateFormat) never prints a leading '+', for both
+  // the same instants and the same widths as above.
   setTimeParserPolicy("legacy");
-  // SimpleDateFormat never prints a leading '+'.
   EXPECT_EQ(
       fromUnixTime(3093527980800, "yyyy-MM-dd HH:mm:ss"),
       "100000-01-01 00:00:00");
+  // Width equal to the digit count still has no sign, matching corrected.
+  EXPECT_EQ(fromUnixTime(1764570096000, "yyyyy"), "57887");
+  EXPECT_EQ(fromUnixTimeTz(3093527952000, "yyyyy"), "100000");
+  EXPECT_EQ(fromUnixTimeTz(3093527952000, "yyyy"), "100000");
   resetQueryConfig();
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
-  // Expected values follow Spark's default (corrected) formatting; Bolt's
-  // default policy is legacy, which never prints a leading '+'.
-  setTimeParserPolicy("corrected");
-  auto fromUnixTime = [&](int64_t unixTime, std::string timeZone) {
+  auto fromUnixTime = [&](int64_t unixTime, const std::string& timeZone) {
     return evaluateOnce<std::string>(
                fmt::format(
                    "from_unixtime(c0, 'yyyy-MM-dd HH:mm:ss', '{}')", timeZone),
@@ -2302,14 +2316,47 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
         .value();
   };
 
-  EXPECT_EQ(
-      fromUnixTime(253402300799, "Asia/Shanghai"), "10000-01-01 07:59:59");
-  EXPECT_EQ(
-      fromUnixTime(253402300801, "Asia/Shanghai"),
-      ::bytedance::bolt::kSparkCompatible ? "+10000-01-01 08:00:01"
-                                          : "10000-01-01 08:00:01");
-  EXPECT_EQ(
-      fromUnixTime(253402300801, "America/Los_Angeles"), "9999-12-31 16:00:01");
+  // Expected values verified against Spark 3.2.4/3.5.9. The '+' is decided by
+  // the local (timezone-adjusted) year only, never by UTC: UTC
+  // 9999-12-31 23:59:59 is Shanghai 10000-01-01 07:59:59, which prints '+'
+  // under corrected but not under legacy (SimpleDateFormat).
+  struct Case {
+    int64_t unixTime;
+    const char* timeZone;
+    const char* corrected;
+    const char* legacy;
+  };
+  const std::vector<Case> cases = {
+      {253402300799,
+       "Asia/Shanghai",
+       "+10000-01-01 07:59:59",
+       "10000-01-01 07:59:59"},
+      {253402300801,
+       "Asia/Shanghai",
+       "+10000-01-01 08:00:01",
+       "10000-01-01 08:00:01"},
+      // Local year in Los Angeles is 9999, so no sign under either policy.
+      {253402300801,
+       "America/Los_Angeles",
+       "9999-12-31 16:00:01",
+       "9999-12-31 16:00:01"},
+  };
+
+  setTimeParserPolicy("corrected");
+  for (const auto& c : cases) {
+    // Non-SPARK_COMPATIBLE builds never print '+', matching the legacy text.
+    EXPECT_EQ(
+        fromUnixTime(c.unixTime, c.timeZone),
+        ::bytedance::bolt::kSparkCompatible ? c.corrected : c.legacy)
+        << c.unixTime << " @ " << c.timeZone;
+  }
+
+  setTimeParserPolicy("legacy");
+  for (const auto& c : cases) {
+    EXPECT_EQ(fromUnixTime(c.unixTime, c.timeZone), c.legacy)
+        << c.unixTime << " @ " << c.timeZone;
+  }
+  resetQueryConfig();
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
