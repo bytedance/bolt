@@ -40,7 +40,10 @@
 #include "bolt/dwio/dwrf/test/TestReadFile.h"
 
 #include <gtest/gtest.h>
+#include <atomic>
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::dwio;
 using namespace bytedance::bolt::dwio::common;
@@ -56,6 +59,53 @@ struct TestRegion {
   int32_t length;
   bool read = true;
 };
+
+namespace {
+
+class FailOnceReadFile final : public TestReadFile {
+ public:
+  enum class FailureMode {
+    kThrow,
+    kShortRead,
+  };
+
+  FailOnceReadFile(
+      uint64_t seed,
+      uint64_t length,
+      std::shared_ptr<IoStatistics> ioStats,
+      FailureMode failureMode)
+      : TestReadFile(seed, length, std::move(ioStats)),
+        failureMode_(failureMode) {}
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers) const override {
+    if (readAttempts_++ > 0) {
+      return TestReadFile::preadv(offset, buffers);
+    }
+
+    if (failureMode_ == FailureMode::kThrow) {
+      throw std::runtime_error("injected read failure");
+    }
+
+    auto shortBuffers = buffers;
+    BOLT_CHECK(!shortBuffers.empty());
+    auto& last = shortBuffers.back();
+    BOLT_CHECK_GT(last.size(), 0);
+    last = {last.data(), last.size() - 1};
+    return TestReadFile::preadv(offset, shortBuffers);
+  }
+
+  int32_t readAttempts() const {
+    return readAttempts_;
+  }
+
+ private:
+  const FailureMode failureMode_;
+  mutable std::atomic<int32_t> readAttempts_{0};
+};
+
+} // namespace
 
 class DirectBufferedInputTest : public testing::Test {
  protected:
@@ -216,6 +266,152 @@ TEST_F(DirectBufferedInputTest, noRedownloadCoalescedPrefetch) {
   testLoads({{100, 100}, {201, 1, true}, {202, 100}}, 1);
 }
 
+TEST_F(DirectBufferedInputTest, enqueuePairSharesLockstepReads) {
+  const int32_t quantum = 64 << 10;
+  const int32_t length = 3 * quantum + 123;
+  opts_->setLoadQuantum(quantum);
+  const Region region{100, static_cast<uint64_t>(length)};
+  auto previous = file_->numIos();
+  auto input = makeInput();
+  StreamIdentifier streamId(0);
+  auto [first, second] = input->enqueuePair(region, &streamId);
+  input->load(LogType::FILE);
+
+  int32_t offset = 0;
+  while (offset < length) {
+    const void* firstData;
+    const void* secondData;
+    int32_t firstSize;
+    int32_t secondSize;
+    ASSERT_TRUE(first->Next(&firstData, &firstSize));
+    ASSERT_TRUE(second->Next(&secondData, &secondSize));
+    EXPECT_EQ(firstSize, secondSize);
+    file_->checkData(firstData, region.offset + offset, firstSize);
+    file_->checkData(secondData, region.offset + offset, secondSize);
+    offset += firstSize;
+  }
+
+  EXPECT_EQ(4, file_->numIos() - previous);
+}
+
+TEST_F(DirectBufferedInputTest, enqueuePairSharesReadFailure) {
+  constexpr int32_t kQuantum = 4 << 10;
+  constexpr int32_t kLength = 2 * kQuantum;
+  opts_->setLoadQuantum(kQuantum);
+
+  for (const auto failureMode :
+       {FailOnceReadFile::FailureMode::kThrow,
+        FailOnceReadFile::FailureMode::kShortRead}) {
+    SCOPED_TRACE(static_cast<int32_t>(failureMode));
+    auto failOnceFile = std::make_shared<FailOnceReadFile>(
+        11, kLength, fileIoStats_, failureMode);
+    file_ = failOnceFile;
+    auto input = makeInput();
+    StreamIdentifier streamId(0);
+    auto [first, second] = input->enqueuePair({0, kLength}, &streamId);
+
+    const void* data;
+    int32_t size;
+    EXPECT_ANY_THROW(first->Next(&data, &size));
+    EXPECT_ANY_THROW(second->Next(&data, &size));
+    EXPECT_EQ(failOnceFile->readAttempts(), 1);
+  }
+}
+
+TEST_F(DirectBufferedInputTest, enqueuePairBoundsMemory) {
+  const int32_t quantum = 64 << 10;
+  const int32_t length = 32 * quantum;
+  opts_->setLoadQuantum(quantum);
+  file_ = std::make_shared<TestReadFile>(11, length, fileIoStats_);
+  auto pairPool = pool_;
+  const auto baseline = pairPool->currentBytes();
+  const auto chunkBytes =
+      pairPool->preferredSize(quantum + AlignedBuffer::kPaddedSize);
+  auto input = makeInput();
+  StreamIdentifier streamId(0);
+  auto [first, second] = input->enqueuePair({0, length}, &streamId);
+
+  const void* data;
+  int32_t size;
+  int32_t offset = 0;
+  while (first->Next(&data, &size)) {
+    file_->checkData(data, offset, size);
+    offset += size;
+    EXPECT_LE(pairPool->currentBytes() - baseline, 3 * chunkBytes);
+  }
+
+  checkRead(second.get(), {0, length});
+  EXPECT_LE(pairPool->currentBytes() - baseline, 3 * chunkBytes);
+  EXPECT_LE(pairPool->peakBytes() - baseline, 4 * chunkBytes);
+
+  first.reset();
+  second.reset();
+  input.reset();
+  EXPECT_EQ(baseline, pairPool->currentBytes());
+}
+
+TEST_F(DirectBufferedInputTest, enqueuePairInterleavesIndependentCursors) {
+  const int32_t quantum = 64 << 10;
+  const int32_t length = 5 * quantum;
+  opts_->setLoadQuantum(quantum);
+  file_ = std::make_shared<TestReadFile>(11, length, fileIoStats_);
+  auto input = makeInput();
+  StreamIdentifier streamId(0);
+  auto [first, second] = input->enqueuePair({0, length}, &streamId);
+
+  const void* firstData;
+  int32_t firstSize;
+  ASSERT_TRUE(first->Next(&firstData, &firstSize));
+  ASSERT_EQ(firstSize, quantum);
+  const auto* retained = static_cast<const char*>(firstData);
+
+  EXPECT_TRUE(second->SkipInt64(2 * quantum + 17));
+  const void* secondData;
+  int32_t secondSize;
+  ASSERT_TRUE(second->Next(&secondData, &secondSize));
+  file_->checkData(secondData, 2 * quantum + 17, secondSize);
+  EXPECT_EQ(second->ByteCount(), 3 * quantum);
+
+  EXPECT_TRUE(second->SkipInt64(quantum));
+  ASSERT_TRUE(second->Next(&secondData, &secondSize));
+  file_->checkData(secondData, 4 * quantum, secondSize);
+  file_->checkData(retained, 0, firstSize);
+
+  first->BackUp(23);
+  EXPECT_EQ(first->ByteCount(), quantum - 23);
+  ASSERT_TRUE(first->Next(&firstData, &firstSize));
+  file_->checkData(firstData, quantum - 23, firstSize);
+
+  const std::vector<uint64_t> positions{quantum + 11};
+  PositionProvider position(positions);
+  first->seekToPosition(position);
+  ASSERT_TRUE(first->Next(&firstData, &firstSize));
+  file_->checkData(firstData, quantum + 11, firstSize);
+  EXPECT_EQ(first->positionSize(), 1);
+  EXPECT_EQ(first->ByteCount(), 2 * quantum);
+  EXPECT_EQ(file_->numIos(), 5);
+}
+
+TEST_F(DirectBufferedInputTest, enqueuePairSupportsLargeRegion) {
+  constexpr uint64_t kLength =
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  file_ = std::make_shared<TestReadFile>(11, kLength, fileIoStats_);
+  opts_->setLoadQuantum(64 << 10);
+  auto input = makeInput();
+  StreamIdentifier streamId(0);
+
+  auto [first, second] = input->enqueuePair({0, kLength}, &streamId);
+
+  EXPECT_TRUE(first->SkipInt64(kLength - 1));
+  const void* data;
+  int32_t size;
+  ASSERT_TRUE(first->Next(&data, &size));
+  ASSERT_EQ(size, 1);
+  file_->checkData(data, kLength - 1, size);
+  EXPECT_EQ(first->ByteCount(), kLength);
+  EXPECT_EQ(second->ByteCount(), 0);
+}
+
 TEST_F(DirectBufferedInputTest, coalesedPrefetchOverlap) {
   testLoads({{100, 100}, {201, 1, false}, {201, 2, false}, {203, 100}}, 2);
   testLoads({{100, 100}, {201, 1, true}, {201, 2, true}, {203, 100}}, 2);
@@ -263,6 +459,14 @@ TEST_F(DirectBufferedInputTest, preload) {
          static_cast<uint64_t>(testData.length)},
         nullptr);
     checkRead(stream.get(), {testData.offset, testData.length});
+    EXPECT_EQ(file_->numIos() - iosBeforePreload, 1);
+
+    auto [first, second] = input->enqueuePair(
+        {static_cast<uint64_t>(testData.offset),
+         static_cast<uint64_t>(testData.length)},
+        nullptr);
+    checkRead(first.get(), {testData.offset, testData.length});
+    checkRead(second.get(), {testData.offset, testData.length});
     EXPECT_EQ(file_->numIos() - iosBeforePreload, 1);
   }
 }

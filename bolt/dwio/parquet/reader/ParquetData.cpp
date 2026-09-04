@@ -50,7 +50,8 @@ std::unique_ptr<dwio::common::FormatData> ParquetParams::toFormatData(
       enableMetadataFilter_,
       enableDictionaryFilter_,
       decodeRepDefPageCount_,
-      parquetRepDefMemoryLimit_);
+      parquetRepDefMemoryLimit_,
+      parquetRepDefStreamingWindowSize_);
 }
 
 void ParquetData::filterRowGroups(
@@ -357,6 +358,7 @@ void ParquetData::enqueueRowGroup(
     dwio::common::BufferedInput& input) {
   auto& chunk = rowGroups_[index].columns[type_->column()];
   streams_.resize(rowGroups_.size());
+  repDefStreams_.resize(rowGroups_.size());
   BOLT_CHECK(
       chunk.__isset.meta_data,
       "ColumnMetaData does not exist for schema Id ",
@@ -376,7 +378,16 @@ void ParquetData::enqueueRowGroup(
       : metaData.total_compressed_size;
 
   auto id = dwio::common::StreamIdentifier(type_->column());
-  streams_[index] = input.enqueue({chunkReadOffset, readSize}, &id);
+  const auto region = common::Region{chunkReadOffset, readSize};
+  const bool useStreamingRepDefs = parquetRepDefStreamingWindowSize_ != 0 &&
+      maxRepeat_ > 0 && maxDefine_ > 0 && !chunk.__isset.crypto_metadata;
+  if (useStreamingRepDefs) {
+    auto [dataStream, repDefStream] = input.enqueuePair(region, &id);
+    streams_[index] = std::move(dataStream);
+    repDefStreams_[index] = std::move(repDefStream);
+  } else {
+    streams_[index] = input.enqueue(region, &id);
+  }
 }
 
 dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
@@ -393,9 +404,12 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
       type_,
       metadata.codec,
       metadata.total_compressed_size,
-      statis_);
+      statis_,
+      std::move(repDefStreams_[index]));
   reader_->setDecodeRepDefPageCount(decodeRepDefPageCount_);
   reader_->setParquetRepDefMemoryLimit(parquetRepDefMemoryLimit_);
+  reader_->setParquetRepDefStreamingWindowSize(
+      parquetRepDefStreamingWindowSize_);
 
   if (columnChunkMeta.__isset.crypto_metadata) {
     std::shared_ptr<Decryptor> metaDecryptor;
@@ -443,20 +457,28 @@ void ParquetData::releaseRowGroupReader() {
 
 std::pair<int64_t, int64_t> ParquetData::getRowGroupRegion(
     uint32_t index) const {
-  auto& rowGroup = rowGroups_[index];
-
+  const auto& rowGroup = rowGroups_[index];
   BOLT_CHECK_GT(rowGroup.columns.size(), 0);
-  auto fileOffset = rowGroup.__isset.file_offset ? rowGroup.file_offset
-      : rowGroup.columns[0].meta_data.__isset.dictionary_page_offset
-      ? rowGroup.columns[0].meta_data.dictionary_page_offset
-      : rowGroup.columns[0].meta_data.data_page_offset;
-  BOLT_CHECK_GT(fileOffset, 0);
 
-  auto length = rowGroup.__isset.total_compressed_size
-      ? rowGroup.total_compressed_size
-      : rowGroup.total_byte_size;
-
-  return {fileOffset, length};
+  int64_t begin = std::numeric_limits<int64_t>::max();
+  int64_t end = 0;
+  for (const auto& column : rowGroup.columns) {
+    BOLT_CHECK(column.__isset.meta_data);
+    const auto& metadata = column.meta_data;
+    const auto offset = metadata.__isset.dictionary_page_offset
+        ? metadata.dictionary_page_offset
+        : metadata.data_page_offset;
+    BOLT_CHECK_GE(offset, 0);
+    BOLT_CHECK_GE(metadata.total_compressed_size, 0);
+    BOLT_CHECK_LE(
+        offset,
+        std::numeric_limits<int64_t>::max() - metadata.total_compressed_size,
+        "Column chunk region overflows int64_t");
+    begin = std::min(begin, offset);
+    end = std::max(end, offset + metadata.total_compressed_size);
+  }
+  BOLT_CHECK_GT(end, begin);
+  return {begin, end - begin};
 }
 
 bool ParquetData::checkColumnFilter(

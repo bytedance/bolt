@@ -185,6 +185,9 @@ class RowReaderOptions {
 
   int32_t decodeRepDefPageCount_{10};
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
+  // Number of levels per Parquet rep/def streaming window. Zero disables
+  // streaming and uses the legacy preload path.
+  int32_t parquetRepDefStreamingWindowSize_{2 * 1024};
   bool useColumnNamesForColumnMapping_{false};
 
   // Hard upper bound on the in-memory bytes a single batch is allowed to
@@ -516,6 +519,14 @@ class RowReaderOptions {
     return parquetRepDefMemoryLimit_;
   }
 
+  void setParquetRepDefStreamingWindowSize(int32_t size) {
+    parquetRepDefStreamingWindowSize_ = size;
+  }
+
+  int32_t getParquetRepDefStreamingWindowSize() const {
+    return parquetRepDefStreamingWindowSize_;
+  }
+
   RowReaderOptions& setUseColumnNamesForColumnMapping(bool flag) {
     useColumnNamesForColumnMapping_ = flag;
     return *this;
@@ -586,8 +597,10 @@ class RowReaderOptions {
        << disableFloatingPointToVarcharMetadataFilter_ << ", ";
     ss << "parquetReaderImplicitCastMask_=" << parquetReaderImplicitCastMask_
        << ", ";
-    ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_;
+    ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_ << ", ";
     ss << "parquetRepDefMemoryLimit_=" << parquetRepDefMemoryLimit_ << ", ";
+    ss << "parquetRepDefStreamingWindowSize_="
+       << parquetRepDefStreamingWindowSize_ << ", ";
     ss << "maxBatchBytes_=" << maxBatchBytes_ << ", ";
     ss << "useColumnNamesForColumnMapping_="
        << (useColumnNamesForColumnMapping_ ? "true" : "false");

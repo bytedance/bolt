@@ -30,6 +30,9 @@
 
 #pragma once
 
+#include <folly/lang/Bits.h>
+#include <deque>
+
 #include "bolt/common/compression/Compression.h"
 #include "bolt/dwio/common/BitConcatenation.h"
 #include "bolt/dwio/common/DirectDecoder.h"
@@ -76,15 +79,19 @@ struct CryptoContext {
 /// continuous stream accessible via readWithVisitor().
 class PageReader {
  public:
+  ~PageReader();
+
   PageReader(
       std::unique_ptr<dwio::common::SeekableInputStream> stream,
       memory::MemoryPool& pool,
       ParquetTypeWithIdPtr fileType,
       thrift::CompressionCodec::type codec,
       int64_t chunkSize,
-      dwio::common::RuntimeStatistics* statis)
+      dwio::common::RuntimeStatistics* statis,
+      std::unique_ptr<dwio::common::SeekableInputStream> repDefStream = nullptr)
       : pool_(pool),
         inputStream_(std::move(stream)),
+        repDefInputStream_(std::move(repDefStream)),
         type_(std::move(fileType)),
         maxRepeat_(type_->maxRepeat_),
         maxDefine_(type_->maxDefine_),
@@ -195,6 +202,8 @@ class PageReader {
     return {repDefBegin_, repDefEnd_};
   }
 
+  int32_t repDefOutputSize(LevelMode mode, const arrow::LevelInfo& info) const;
+
   // Parses the PageHeader at 'inputStream_', and move the bufferStart_ and
   // bufferEnd_ to the corresponding positions.
   thrift::PageHeader readPageHeader();
@@ -261,6 +270,10 @@ class PageReader {
     repDefMemoryLimit_ = memlimit;
   }
 
+  void setParquetRepDefStreamingWindowSize(int32_t size) {
+    repDefStreamingWindowSize_ = size == 0 ? 0 : std::max(size, 1);
+  }
+
  private:
   // Indicates that we only want the repdefs for the next page. Used when
   // prereading repdefs with seekToPage.
@@ -311,6 +324,12 @@ class PageReader {
       const thrift::PageHeader& pageHeader,
       int32_t compressedLen,
       const bool keepRepDefRawData);
+  bool tryDecompressDataPageV1RepDefPrefix(
+      const char* FOLLY_NONNULL compressedData,
+      uint32_t compressedSize,
+      uint32_t uncompressedSize,
+      BufferPtr& decompressedData,
+      const char* FOLLY_NONNULL& pageData);
   void prepareDataPageV2(
       const thrift::PageHeader& pageHeader,
       int64_t row,
@@ -340,7 +359,7 @@ class PageReader {
 
   template <typename T>
   T readField(const char* FOLLY_NONNULL& ptr) {
-    T data = *reinterpret_cast<const T*>(ptr);
+    T data = folly::loadUnaligned<T>(ptr);
     ptr += sizeof(T);
     return data;
   }
@@ -489,11 +508,45 @@ class PageReader {
 
   void preloadPageRepDefs(const bool keepRepDefRawData);
   void loadMoreRepDefs();
+  void decodeStreamingRepDefs(int32_t numTopLevelRows);
+  bool loadNextStreamingRepDefPage();
+  bool consumeStreamingRepDefScratch(
+      int32_t topLevelRowsNeeded,
+      int32_t& topLevelRowsSeen);
+  thrift::PageHeader readStreamingPageHeader();
+  const char* FOLLY_NONNULL readStreamingBytes(int32_t size, BufferPtr& copy);
+  void skipStreamingBytes(uint64_t size);
+  void initializeStreamingOutputs();
+  void resetStreamingOutputs();
+  void appendStreamingLevels(
+      const int16_t* FOLLY_NONNULL definitionLevels,
+      const int16_t* FOLLY_NONNULL repetitionLevels,
+      int32_t numLevels);
+  void finishStreamingOutputs();
+  bool usesStreamingRepDefs() const {
+    return repDefStreamingWindowSize_ > 0 && repDefInputStream_ != nullptr;
+  }
+  int32_t streamingOutputIndex(LevelMode mode, const arrow::LevelInfo& info)
+      const;
+  int32_t countLeavesInDefinitionLevels(
+      const uint8_t* FOLLY_NONNULL definitionLevels,
+      int32_t definitionLevelsSize,
+      int32_t numLevels) const;
+  void compactConsumedLeafNulls();
   void decodeRepDefsFromBuffer();
+  int32_t appendLeafNulls(
+      const int16_t* FOLLY_NONNULL definitionLevels,
+      int32_t numLevels);
+
+  struct StreamingRepDefState;
+  struct StreamingRepDefStateDeleter {
+    void operator()(StreamingRepDefState* state) const;
+  };
 
   memory::MemoryPool& pool_;
 
   std::unique_ptr<dwio::common::SeekableInputStream> inputStream_;
+  std::unique_ptr<dwio::common::SeekableInputStream> repDefInputStream_;
   ParquetTypeWithIdPtr type_;
   const int32_t maxRepeat_;
   const int32_t maxDefine_;
@@ -522,7 +575,8 @@ class PageReader {
   int32_t pageIndex_{-1};
 
   // Number of leaf values in each data page of column chunk.
-  std::vector<int32_t> numLeavesInPage_;
+  std::deque<int32_t> numLeavesInPage_;
+  int32_t numLeavesInPageBase_{0};
 
   // First position in '*levels_' for the range of last decodeRepDefs().
   int32_t repDefBegin_{0};
@@ -646,11 +700,13 @@ class PageReader {
   BufferPtr decryptionBuffer_;
   int32_t pageOrdinal_;
 
-  // preload undecoded RepDefs
   std::list<raw_vector<char>> preloadedRepDefs_;
   int32_t repDefMemoryLimit_{16L << 20};
   int64_t totalRefDefBytes_{0};
   int32_t decodeRepDefPageCount_{10};
+  int32_t repDefStreamingWindowSize_{2 * 1024};
+  std::unique_ptr<StreamingRepDefState, StreamingRepDefStateDeleter>
+      streamingRepDef_;
 
   dwio::common::RuntimeStatistics* statis_{nullptr};
   // Tracks output count for the current physical page. -1 means there is no

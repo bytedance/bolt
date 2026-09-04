@@ -42,6 +42,7 @@
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/Connector.h"
 #include "bolt/connectors/hive/HiveConnector.h"
+#include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/common/tests/utils/BatchMaker.h"
 #include "bolt/dwio/parquet/RegisterParquetWriter.h"
 #include "bolt/dwio/parquet/arrow/ColumnPage.h"
@@ -390,6 +391,255 @@ TEST_F(ParquetWriterTest, comparison) {
   vp::WriterOptions writerOptions{};
   assertWrite(parquetPath, kRows, schema, data, writerOptions);
 };
+
+TEST_F(ParquetWriterTest, streamingRepDefsAcrossPages) {
+  constexpr vector_size_t kRows = 257;
+  constexpr vector_size_t kLongSize = 32 * 1024;
+  auto arrays = makeArrayVector<int32_t>(
+      kRows,
+      [](vector_size_t row) {
+        return row == 0 ? kLongSize : row % 11 == 0 ? 0 : row % 7 + 1;
+      },
+      [](vector_size_t index) { return index; },
+      [](vector_size_t row) { return row % 29 == 0 && row != 0; },
+      [](vector_size_t index) { return index % 37 == 0; });
+  auto maps = makeMapVector<int32_t, int64_t>(
+      kRows,
+      [](vector_size_t row) {
+        return row == 0 ? kLongSize : row % 13 == 0 ? 0 : row % 5 + 1;
+      },
+      [](vector_size_t index) { return index; },
+      [](vector_size_t index) { return index * 17; },
+      [](vector_size_t row) { return row % 31 == 0 && row != 0; },
+      [](vector_size_t index) { return index % 41 == 0; });
+  auto structArrayItems = makeArrayVector<int32_t>(
+      kRows,
+      [](vector_size_t row) {
+        return row == 0 ? kLongSize : row % 23 == 0 ? 0 : row % 7 + 1;
+      },
+      [](vector_size_t index) { return index * 3; },
+      nullptr,
+      [](vector_size_t index) { return index % 43 == 0; });
+  auto structArrays = makeRowVector({"items"}, {structArrayItems});
+  using InnerArray = std::vector<std::optional<int32_t>>;
+  using OuterArray = std::vector<std::optional<InnerArray>>;
+  std::vector<std::optional<OuterArray>> nestedData;
+  nestedData.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    if (row == 0) {
+      InnerArray first(kLongSize / 2);
+      InnerArray second(kLongSize / 2);
+      for (vector_size_t i = 0; i < first.size(); ++i) {
+        first[i] = i % 47 == 0 ? std::nullopt : std::optional<int32_t>(i);
+        second[i] = i % 53 == 0 ? std::nullopt
+                                : std::optional<int32_t>(i + first.size());
+      }
+      nestedData.emplace_back(
+          OuterArray{{std::move(first)}, {std::move(second)}});
+    } else if (row % 17 == 0) {
+      nestedData.emplace_back(OuterArray{});
+    } else {
+      nestedData.emplace_back(
+          OuterArray{{InnerArray{row, std::nullopt, row + 1}}, std::nullopt});
+    }
+  }
+  auto nestedArrays = makeNullableNestedArrayVector<int32_t>(nestedData);
+  auto expected = makeRowVector(
+      {"arrays", "maps", "struct_arrays", "nested_arrays"},
+      {arrays, maps, structArrays, nestedArrays});
+  auto schema = asRowType(expected->type());
+
+  for (const auto pageVersion :
+       {vp::arrow::ParquetDataPageVersion::V1,
+        vp::arrow::ParquetDataPageVersion::V2}) {
+    for (const int64_t pageSize : {int64_t{1024}, int64_t{64} << 20}) {
+      const auto parquetPath = fmt::format(
+          "{}/streamingRepDefs-{}-{}.parquet",
+          tempPath_->path,
+          static_cast<int32_t>(pageVersion),
+          pageSize);
+      vp::WriterOptions writerOptions;
+      writerOptions.enableDictionary = false;
+      writerOptions.dataPageSize = pageSize;
+      writerOptions.dataPageVersion = pageVersion;
+      writerOptions.compression = CompressionKind::CompressionKind_ZSTD;
+      auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+      writer->write(expected);
+      writer->close();
+
+      for (const vector_size_t batchSize : {1, 17, 128}) {
+        SCOPED_TRACE(fmt::format(
+            "pageVersion={} pageSize={} batchSize={}",
+            static_cast<int32_t>(pageVersion),
+            pageSize,
+            batchSize));
+        dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+        auto reader = std::make_unique<vp::ParquetReader>(
+            std::make_unique<dwio::common::DirectBufferedInput>(
+                std::make_shared<LocalReadFile>(parquetPath),
+                MetricsLog::voidLog(),
+                1,
+                nullptr,
+                1,
+                std::make_shared<io::IoStatistics>(),
+                nullptr,
+                readerOptions,
+                nullptr),
+            readerOptions);
+        auto rowReaderOptions = getReaderOpts(schema);
+        rowReaderOptions.setScanSpec(makeScanSpec(schema));
+        rowReaderOptions.setParquetRepDefMemoryLimit(64 << 10);
+        rowReaderOptions.setParquetRepDefStreamingWindowSize(7);
+        auto rowReader = reader->createRowReader(rowReaderOptions);
+
+        vector_size_t offset = 0;
+        VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+        while (rowReader->next(batchSize, result) > 0) {
+          assertEqualVectorPart(expected, result, offset);
+          offset += result->size();
+        }
+        EXPECT_EQ(offset, kRows);
+      }
+    }
+  }
+}
+
+TEST_F(ParquetWriterTest, streamingRepDefsV1CompressionCodecs) {
+  constexpr vector_size_t kRows = 64;
+  auto arrays = makeArrayVector<int32_t>(
+      kRows,
+      [](vector_size_t row) { return row % 9 == 0 ? 0 : row % 7 + 1; },
+      [](vector_size_t index) { return index % 13; },
+      [](vector_size_t row) { return row % 17 == 0; });
+  auto maps = makeMapVector<int32_t, int64_t>(
+      kRows,
+      [](vector_size_t row) { return row % 11 == 0 ? 0 : row % 5 + 1; },
+      [](vector_size_t index) { return index % 11; },
+      [](vector_size_t index) { return index % 17; },
+      [](vector_size_t row) { return row % 19 == 0; });
+  auto expected = makeRowVector({"arrays", "maps"}, {arrays, maps});
+  auto schema = asRowType(expected->type());
+
+  for (const auto compression : params) {
+    SCOPED_TRACE(fmt::format("compression={}", compression));
+    const auto parquetPath = fmt::format(
+        "{}/streamingRepDefsV1-{}.parquet",
+        tempPath_->path,
+        static_cast<int32_t>(compression));
+    vp::WriterOptions writerOptions;
+    writerOptions.enableDictionary = true;
+    writerOptions.dataPageSize = 1'024;
+    writerOptions.maxRowsPerDataPage = 16;
+    writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V1;
+    writerOptions.compression = compression;
+    auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+    writer->write(expected);
+    writer->close();
+
+    auto metadataReader = createLocalParquetReader(parquetPath);
+    const auto rowGroup = metadataReader->fileMetaData().rowGroup(0);
+    for (int32_t column = 0; column < rowGroup.numColumns(); ++column) {
+      EXPECT_EQ(rowGroup.columnChunk(column).compression(), compression);
+      const auto& encodingStats =
+          rowGroup.columnChunk(column).pageEncodingStats();
+      EXPECT_NE(
+          std::find_if(
+              encodingStats.begin(),
+              encodingStats.end(),
+              [](const auto& stats) {
+                return stats.page_type == thrift::PageType::DICTIONARY_PAGE &&
+                    stats.count > 0;
+              }),
+          encodingStats.end());
+      EXPECT_GT(
+          forEachDataPage(
+              parquetPath,
+              column,
+              [](const auto& page) {
+                EXPECT_EQ(page->type(), vp::arrow::PageType::DATA_PAGE);
+              }),
+          1);
+    }
+
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    auto reader = std::make_unique<vp::ParquetReader>(
+        std::make_unique<dwio::common::DirectBufferedInput>(
+            std::make_shared<LocalReadFile>(parquetPath),
+            MetricsLog::voidLog(),
+            1,
+            nullptr,
+            1,
+            std::make_shared<io::IoStatistics>(),
+            nullptr,
+            readerOptions,
+            nullptr),
+        readerOptions);
+    auto rowReaderOptions = getReaderOpts(schema);
+    rowReaderOptions.setScanSpec(makeScanSpec(schema));
+    rowReaderOptions.setParquetRepDefMemoryLimit(0);
+    rowReaderOptions.setParquetRepDefStreamingWindowSize(7);
+    auto rowReader = reader->createRowReader(rowReaderOptions);
+
+    vector_size_t offset = 0;
+    VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+    while (rowReader->next(5, result) > 0) {
+      assertEqualVectorPart(expected, result, offset);
+      offset += result->size();
+    }
+    EXPECT_EQ(offset, kRows);
+  }
+}
+
+TEST_F(ParquetWriterTest, streamingRepDefsSkipAtLeafPageEnd) {
+  using NullableArray = std::optional<std::vector<std::optional<int32_t>>>;
+  const std::vector<NullableArray> data{
+      std::vector<std::optional<int32_t>>{10},
+      std::vector<std::optional<int32_t>>{},
+      std::nullopt,
+      std::vector<std::optional<int32_t>>{40},
+  };
+  auto arrays = makeNullableArrayVector<int32_t>(data);
+  auto expected = makeRowVector({"arrays"}, {arrays});
+  auto schema = asRowType(expected->type());
+  const auto parquetPath = fmt::format(
+      "{}/streamingRepDefsSkipAtLeafPageEnd.parquet", tempPath_->path);
+
+  vp::WriterOptions writerOptions;
+  writerOptions.enableDictionary = false;
+  writerOptions.compression = CompressionKind::CompressionKind_NONE;
+  writerOptions.dataPageSize = 64 << 20;
+  writerOptions.maxRowsPerDataPage = 3;
+  writerOptions.dataPageVersion = vp::arrow::ParquetDataPageVersion::V2;
+  auto writer = createLocalWriter(parquetPath, schema, writerOptions);
+  writer->write(expected);
+  writer->close();
+
+  std::vector<int64_t> levelsPerPage;
+  EXPECT_EQ(
+      forEachDataPage(
+          parquetPath,
+          0,
+          [&](const auto& page) {
+            levelsPerPage.push_back(
+                std::static_pointer_cast<vp::arrow::DataPage>(page)
+                    ->num_values());
+          }),
+      2);
+  EXPECT_EQ(levelsPerPage, (std::vector<int64_t>{3, 1}));
+
+  auto reader = createLocalParquetReader(parquetPath);
+  auto rowReaderOptions = getReaderOpts(schema);
+  rowReaderOptions.setScanSpec(makeScanSpec(schema));
+  auto rowReader = reader->createRowReader(rowReaderOptions);
+  EXPECT_EQ(rowReader->skip(1), 1);
+
+  VectorPtr result = BaseVector::create(schema, 0, leafPool_.get());
+  EXPECT_EQ(rowReader->next(2, result), 2);
+  assertEqualVectorPart(expected, result, 1);
+  EXPECT_EQ(rowReader->next(1, result), 1);
+  assertEqualVectorPart(expected, result, 3);
+  EXPECT_EQ(rowReader->next(1, result), 0);
+}
 
 TEST_F(ParquetWriterTest, dictToArrow) {
   const size_t kRows = 1100;
