@@ -95,6 +95,24 @@ the skipped check has been validated separately.
 - Do not add AI attribution, generated-by text, or an agent as a co-author.
 - Review the staged diff and run the relevant hooks and tests before committing.
 
+## Issues
+
+- Pick the matching form under
+  [.github/ISSUE_TEMPLATE/](.github/ISSUE_TEMPLATE/) (bug report, build issue,
+  compatibility report, documentation issue, feature request, performance
+  issue, chore) and mirror its fields as the issue body headings. Fill every
+  required field; a compatibility report needs a minimal self-contained
+  reproduction plus an explicit expected-vs-actual comparison.
+- Keep the template's title prefix (e.g. `[Compatibility] `) and make the rest
+  a short one-line summary, not a full sentence describing the whole finding.
+- Apply the labels the template declares; skip any label that does not exist in
+  the repository instead of failing or inventing new ones.
+- Sanitize issue content before posting: no internal application IDs, cluster
+  or dashboard URLs, table or column names, business keys, or internal build
+  numbers. Reproduce with self-contained literals instead.
+- Do not create, edit, or close issues unless the user authorizes that
+  external action.
+
 ## Pull Requests
 
 - Push topic branches to the contributor fork and open PRs against the intended
