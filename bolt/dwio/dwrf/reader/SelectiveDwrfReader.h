@@ -69,32 +69,4 @@ class SelectiveDwrfReader {
   }
 };
 
-class SelectiveColumnReaderFactory : public ColumnReaderFactory {
- public:
-  explicit SelectiveColumnReaderFactory(
-      std::shared_ptr<common::ScanSpec> scanSpec)
-      : scanSpec_(scanSpec) {}
-
-  std::unique_ptr<dwio::common::SelectiveColumnReader> buildSelective(
-      const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
-      const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
-      StripeStreams& stripe,
-      const StreamLabels& streamLabels,
-      dwio::common::ColumnReaderStatistics& stats,
-      FlatMapContext flatMapContext = {}) {
-    auto params =
-        DwrfParams(stripe, streamLabels, stats, std::move(flatMapContext));
-    auto reader = SelectiveDwrfReader::build(
-        dwio::common::ColumnReaderOptions{},
-        requestedType,
-        fileType,
-        params,
-        *scanSpec_);
-    reader->setIsTopLevel();
-    return reader;
-  }
-
- private:
-  std::shared_ptr<common::ScanSpec> const scanSpec_;
-};
 } // namespace bytedance::bolt::dwrf
