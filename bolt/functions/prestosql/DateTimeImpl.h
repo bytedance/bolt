@@ -111,10 +111,10 @@ addToDate(const int32_t input, const DateTimeUnit unit, const int32_t value) {
     outDate = inDate + ::date::days(value);
   } else if (unit == DateTimeUnit::kWeek) {
     const int64_t days = 7LL * value;
-    BOLT_UNSUPPORTED(
-        days >= std::numeric_limits<int32_t>::min() &&
-            days <= std::numeric_limits<int32_t>::max(),
-        "integer overflow");
+    if (days < std::numeric_limits<int32_t>::min() ||
+        days > std::numeric_limits<int32_t>::max()) {
+      BOLT_UNSUPPORTED("integer overflow");
+    }
     outDate = inDate + ::date::days(static_cast<int32_t>(days));
   } else {
     const ::date::year_month_day inCalDate(inDate);
@@ -124,10 +124,10 @@ addToDate(const int32_t input, const DateTimeUnit unit, const int32_t value) {
       outCalDate = inCalDate + ::date::months(value);
     } else if (unit == DateTimeUnit::kQuarter) {
       const int64_t months = 3LL * value;
-      BOLT_UNSUPPORTED(
-          months >= std::numeric_limits<int32_t>::min() &&
-              months <= std::numeric_limits<int32_t>::max(),
-          "integer overflow");
+      if (months < std::numeric_limits<int32_t>::min() ||
+          months > std::numeric_limits<int32_t>::max()) {
+        BOLT_UNSUPPORTED("integer overflow");
+      }
       outCalDate = inCalDate + ::date::months(static_cast<int32_t>(months));
     } else if (unit == DateTimeUnit::kYear) {
       outCalDate = inCalDate + ::date::years(value);
