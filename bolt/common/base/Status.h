@@ -495,6 +495,19 @@ void Status::moveFrom(Status& s) {
     BOLT_RETURN_IF(!__s.ok(), __s);                           \
   } while (false)
 
+#define BOLT_USER_RETURN(condition, ...)     \
+  do {                                       \
+    if (UNLIKELY(condition)) {               \
+      if (threadSkipErrorDetails()) {        \
+        return Status::UserError();          \
+      }                                      \
+      return Status::UserError(__VA_ARGS__); \
+    }                                        \
+  } while (false)
+
+#define BOLT_USER_RETURN_EQ(lhs, rhs, ...) \
+  BOLT_USER_RETURN((lhs) == (rhs), __VA_ARGS__)
+
 namespace internal {
 
 /// Common API for extracting Status from either Status or Result<T> (the latter
