@@ -809,6 +809,13 @@ void Operator::recordGroupingSetStats(const common::AggregationStats& stats) {
         RuntimeCounter{
             (int64_t)stats.aggOutputTimeNs, RuntimeCounter::Unit::kNanos});
   }
+  if (stats.aggOutputReleasedBytes) {
+    lockedStats->addRuntimeStat(
+        "aggOutputReleasedBytes",
+        RuntimeCounter{
+            (int64_t)stats.aggOutputReleasedBytes,
+            RuntimeCounter::Unit::kBytes});
+  }
   if (stats.aggProbeTimeNs) {
     lockedStats->addRuntimeStat(
         "aggProbeTimeNs",

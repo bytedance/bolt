@@ -1079,6 +1079,48 @@ TEST_F(RowContainerTest, erase) {
   data->checkConsistency();
 }
 
+TEST_F(RowContainerTest, releaseOutputRangesBefore) {
+  auto data = makeRowContainer({BIGINT()}, {BIGINT()});
+  ASSERT_TRUE(data->supportsOutputRangeRelease());
+
+  constexpr int32_t kNumRows = 4096;
+  std::vector<char*> rows;
+  rows.reserve(kNumRows);
+  for (auto i = 0; i < kNumRows; ++i) {
+    auto* row = data->newRow();
+    RowContainer::valueAt<int64_t>(row, data->columnAt(0).offset()) = i;
+    RowContainer::valueAt<int64_t>(row, data->columnAt(1).offset()) = i * 10;
+    rows.push_back(row);
+  }
+  ASSERT_GT(data->numRows(), 0);
+
+  RowContainerIterator iter;
+  std::vector<char*> output(kNumRows);
+  ASSERT_GT(data->listRows(&iter, kNumRows / 2, output.data()), 0);
+  auto releasedBytes = data->releaseOutputRangesBefore(iter);
+  EXPECT_GT(releasedBytes, 0);
+  EXPECT_LT(data->numRows(), kNumRows);
+
+  auto remainingRows = data->numRows();
+  iter.reset();
+  ASSERT_EQ(remainingRows, data->listRows(&iter, remainingRows, output.data()));
+  for (auto i = 0; i < remainingRows; ++i) {
+    EXPECT_EQ(
+        RowContainer::valueAt<int64_t>(output[i], data->columnAt(1).offset()),
+        RowContainer::valueAt<int64_t>(output[i], data->columnAt(0).offset()) *
+            10);
+  }
+
+  releasedBytes = data->releaseOutputRangesBefore(iter);
+  EXPECT_GT(releasedBytes, 0);
+  ASSERT_EQ(0, data->listRows(&iter, 1, output.data()));
+  releasedBytes = data->releaseOutputRangesBefore(iter);
+  EXPECT_GT(releasedBytes, 0);
+  EXPECT_EQ(0, data->numRows());
+  data->clear();
+  EXPECT_EQ(0, data->numRows());
+}
+
 TEST_P(RowContainerTest, initialNulls) {
   std::vector<TypePtr> keys{INTEGER()};
   std::vector<TypePtr> dependent{INTEGER()};

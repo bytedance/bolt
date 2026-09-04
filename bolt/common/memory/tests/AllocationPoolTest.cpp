@@ -121,3 +121,30 @@ TEST_F(AllocationPoolTest, hugePages) {
   // Should be empty after destruction.
   EXPECT_EQ(0, pool_->currentBytes());
 }
+
+TEST_F(AllocationPoolTest, releaseRangesBefore) {
+  auto allocationPool = std::make_unique<memory::AllocationPool>(pool_.get());
+  allocationPool->setHugePageThreshold(1 << 20);
+
+  allocationPool->allocateFixed(64 << 10);
+  allocationPool->allocateFixed(1);
+  ASSERT_EQ(2, allocationPool->numRanges());
+
+  const auto bytesBeforeRelease = pool_->currentBytes();
+  auto released = allocationPool->releaseRangesBefore(1);
+  EXPECT_EQ(1, released.allocations);
+  EXPECT_GT(released.bytes, 0);
+  EXPECT_LT(pool_->currentBytes(), bytesBeforeRelease);
+
+  released = allocationPool->releaseRangesBefore(1);
+  EXPECT_EQ(0, released.allocations);
+  EXPECT_EQ(0, released.bytes);
+
+  released = allocationPool->releaseRangesBefore(allocationPool->numRanges());
+  EXPECT_EQ(1, released.allocations);
+  EXPECT_GT(released.bytes, 0);
+  EXPECT_EQ(0, pool_->currentBytes());
+
+  allocationPool->clear();
+  EXPECT_EQ(0, pool_->currentBytes());
+}
