@@ -353,6 +353,35 @@ TEST_F(StringTest, bitLengthVarbinary) {
   EXPECT_EQ(bitLength("\U0001F408"), 32);
 }
 
+TEST_F(StringTest, octetLength) {
+  const auto octetLength = [&](const std::optional<std::string>& arg) {
+    return evaluateOnce<int32_t>("octet_length(c0)", arg);
+  };
+
+  EXPECT_EQ(octetLength(std::nullopt), std::nullopt);
+  EXPECT_EQ(octetLength(""), 0);
+  EXPECT_EQ(octetLength(std::string("\0", 1)), 1);
+  EXPECT_EQ(octetLength("123"), 3);
+  EXPECT_EQ(octetLength("😋"), 4);
+  EXPECT_EQ(octetLength(kWomanFacepalmingLightSkinTone), 17);
+
+  const std::string largeInput(1'048'576, 'a');
+  EXPECT_EQ(octetLength(largeInput), 1'048'576);
+}
+
+TEST_F(StringTest, octetLengthVarbinary) {
+  const auto octetLength = [&](const std::optional<std::string>& arg) {
+    return evaluateOnce<int32_t, std::string>(
+        "octet_length(c0)", {arg}, {VARBINARY()});
+  };
+
+  EXPECT_EQ(octetLength(std::nullopt), std::nullopt);
+  EXPECT_EQ(octetLength(""), 0);
+  EXPECT_EQ(octetLength("123"), 3);
+  EXPECT_EQ(octetLength(std::string("\0\xff", 2)), 2);
+  EXPECT_EQ(octetLength("😋"), 4);
+}
+
 TEST_F(StringTest, chr) {
   EXPECT_EQ(chr(-16), "");
   EXPECT_EQ(chr(0), std::string("\0", 1));
