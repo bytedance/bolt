@@ -740,8 +740,21 @@ TEST_F(SparkCastExprTest, floatingPointToIntegralBoundaries) {
        std::nullopt});
   testTryCast<double, int64_t>(
       "bigint",
-      {0x1.fffffffffffffp62, 0x1p63, -0x1p63, -0x1.0000000000001p63},
+      {0x1.fffffffffffffp62,
+       0x1p63,
+       0x1.0000000000001p63,
+       -0x1p63,
+       -0x1.0000000000001p63},
       {9'223'372'036'854'774'784LL,
+       std::numeric_limits<int64_t>::max(),
+       std::nullopt,
+       std::numeric_limits<int64_t>::min(),
+       std::nullopt});
+  testTryCast<float, int64_t>(
+      "bigint",
+      {0x1.fffffep62f, 0x1p63f, 0x1.000002p63f, -0x1p63f, -0x1.000002p63f},
+      {9'223'371'487'098'961'920LL,
+       std::numeric_limits<int64_t>::max(),
        std::nullopt,
        std::numeric_limits<int64_t>::min(),
        std::nullopt});

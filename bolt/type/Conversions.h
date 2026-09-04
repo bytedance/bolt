@@ -64,6 +64,32 @@ struct TruncateLegacyCastPolicy {
   static constexpr bool legacyCast = true;
 };
 
+// Floating point to signed integer conversion is defined only when the
+// truncated value is representable. These limits identify the first values
+// outside that range without converting the floating point input first.
+template <typename T>
+struct FloatingPointToIntegralLimits {
+  template <typename FP>
+  static constexpr FP firstPositiveOverflow() {
+    return -static_cast<FP>(std::numeric_limits<T>::min());
+  }
+
+  template <typename FP>
+  static constexpr bool isPositiveOverflow(const FP& value) {
+    return value >= firstPositiveOverflow<FP>();
+  }
+
+  template <typename FP>
+  static constexpr bool isNegativeOverflow(const FP& value) {
+    constexpr FP kMin = static_cast<FP>(std::numeric_limits<T>::min());
+    constexpr FP kFirstNegativeOverflow = kMin - FP{1};
+    if constexpr (kFirstNegativeOverflow == kMin) {
+      return value < kMin;
+    }
+    return value <= kFirstNegativeOverflow;
+  }
+};
+
 template <TypeKind KIND, typename = void, typename TPolicy = DefaultCastPolicy>
 struct Converter {
   template <typename T>
@@ -324,26 +350,21 @@ struct Converter<
     static constexpr bool kByteOrSmallInt =
         std::is_same_v<T, int8_t> || std::is_same_v<T, int16_t>;
     using FirstStageType = std::conditional_t<kByteOrSmallInt, int32_t, T>;
+    using FirstStageLimits = FloatingPointToIntegralLimits<FirstStageType>;
 
-    // Floating point to signed integer conversion is defined only when the
-    // truncated value is representable. Use the exclusive limits of that
-    // range so the conversion itself never relies on undefined behavior.
+    template <typename FP>
+    static constexpr FP firstPositiveOverflow() {
+      return FirstStageLimits::template firstPositiveOverflow<FP>();
+    }
+
     template <typename FP>
     static constexpr bool isPositiveOverflow(const FP& value) {
-      constexpr FP kFirstPositiveOverflow =
-          -static_cast<FP>(std::numeric_limits<FirstStageType>::min());
-      return value >= kFirstPositiveOverflow;
+      return FirstStageLimits::template isPositiveOverflow<FP>(value);
     }
 
     template <typename FP>
     static constexpr bool isNegativeOverflow(const FP& value) {
-      constexpr FP kMin =
-          static_cast<FP>(std::numeric_limits<FirstStageType>::min());
-      constexpr FP kFirstNegativeOverflow = kMin - FP{1};
-      if constexpr (kFirstNegativeOverflow == kMin) {
-        return value < kMin;
-      }
-      return value <= kFirstNegativeOverflow;
+      return FirstStageLimits::template isNegativeOverflow<FP>(value);
     }
 
     static int64_t minLimit() {

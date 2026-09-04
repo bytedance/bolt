@@ -1280,6 +1280,55 @@ TEST_F(CastExprTest, primitiveInvalidCornerCases) {
   }
 }
 
+TEST_F(CastExprTest, floatingPointToIntegralBoundaries) {
+  if (::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
+
+  const auto testBoundaries = [&]() {
+    testCast<float, int32_t>(
+        "integer",
+        {0x1.fffffep30f, -0x1p31f},
+        {2'147'483'520, std::numeric_limits<int32_t>::min()});
+    testTryCast<float, int32_t>(
+        "integer",
+        {0x1.fffffep30f, 0x1p31f, -0x1p31f, -0x1.000002p31f},
+        {2'147'483'520,
+         std::nullopt,
+         std::numeric_limits<int32_t>::min(),
+         std::nullopt});
+    testInvalidCast<float>("integer", {0x1p31f}, "Cannot cast");
+
+    testCast<double, int64_t>(
+        "bigint",
+        {0x1.fffffffffffffp62, -0x1p63},
+        {9'223'372'036'854'774'784LL, std::numeric_limits<int64_t>::min()});
+    testTryCast<double, int64_t>(
+        "bigint",
+        {0x1.fffffffffffffp62, 0x1p63, -0x1p63, -0x1.0000000000001p63},
+        {9'223'372'036'854'774'784LL,
+         std::nullopt,
+         std::numeric_limits<int64_t>::min(),
+         std::nullopt});
+    testInvalidCast<double>("bigint", {0x1p63}, "Cannot cast");
+
+    testTryCast<float, int64_t>(
+        "bigint",
+        {0x1.fffffep62f, 0x1p63f, -0x1p63f, -0x1.000002p63f},
+        {9'223'371'487'098'961'920LL,
+         std::nullopt,
+         std::numeric_limits<int64_t>::min(),
+         std::nullopt});
+    testInvalidCast<float>("bigint", {0x1p63f}, "Cannot cast");
+  };
+
+  setCastIntByTruncate(false);
+  testBoundaries();
+
+  setCastIntByTruncate(true);
+  testBoundaries();
+}
+
 TEST_F(CastExprTest, primitiveValidCornerCases) {
   // To integer.
   {
