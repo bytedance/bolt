@@ -607,7 +607,7 @@ void RadixSortRun::finishMergeOutput(
     vector_size_t writtenRows) {
   BOLT_DCHECK_GE(writtenRows, 0);
   BOLT_DCHECK_LE(writtenRows, output.size());
-  BOLT_DCHECK_EQ(activeMergeOutput_, &output);
+  BOLT_DCHECK(activeMergeOutput_ == &output);
   const auto nextOutputRows =
       checkedAdd<uint64_t>(metrics_.outputRows, writtenRows);
   BOLT_CHECK(nextOutputRows.has_value(), "Radix sort output rows overflow");
@@ -840,7 +840,7 @@ void RadixSortRun::decodeKeysAt(
   }
 
   BOLT_DCHECK_NOT_NULL(decodeCursorOutput_);
-  BOLT_DCHECK_EQ(decodeCursorOutput_->pool(), outputPool);
+  BOLT_DCHECK(decodeCursorOutput_->pool() == outputPool);
   keyCodec_->decodeSuffixAtWithPreparedScratch(
       views,
       projection_->decodedKeyMask(),
