@@ -163,12 +163,12 @@ bool CompanionSignatures::hasSameIntermediateTypesAcrossSignatures(
     const std::vector<AggregateFunctionSignaturePtr>& signatures) {
   std::unordered_set<TypeSignature> seenTypes;
   for (const auto& signature : signatures) {
-    auto normalizdType =
+    auto normalizedType =
         normalizeType(signature->intermediateType(), signature->variables());
-    if (seenTypes.count(normalizdType)) {
+    if (seenTypes.count(normalizedType)) {
       return true;
     }
-    seenTypes.insert(normalizdType);
+    seenTypes.insert(normalizedType);
   }
   return false;
 }
