@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <cstring>
 #include "bolt/dwio/parquet/reader/PageReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
 
@@ -136,6 +137,117 @@ ParquetTypeWithIdPtr makeNestedInt64Type() {
 } // namespace
 
 class ParquetPageReaderTest : public ParquetTestBase {};
+
+namespace bytedance::bolt::parquet {
+
+class PageReaderTestPeer {
+ public:
+  static raw_vector<char> makeRepDefBatch(
+      int32_t numRepDefs,
+      int16_t repetitionLevel,
+      int16_t definitionLevel,
+      int32_t maxRepeat,
+      int32_t maxDefine) {
+    raw_vector<char> batch;
+    append<int32_t>(batch, numRepDefs);
+    appendLevels(batch, numRepDefs, repetitionLevel, maxRepeat);
+    appendLevels(batch, numRepDefs, definitionLevel, maxDefine);
+    return batch;
+  }
+
+  static void initializeForPendingRepDefs(PageReader& pageReader) {
+    pageReader.hasChunkRepDefs_ = true;
+    pageReader.pageIndex_ = 0;
+    pageReader.numLeavesInPage_ = {1};
+    pageReader.preloadedRepDefs_.push_back(makeRepDefBatch(
+        1,
+        0,
+        pageReader.maxDefine_,
+        pageReader.maxRepeat_,
+        pageReader.maxDefine_));
+  }
+
+  static void setPageRowInfo(PageReader& pageReader) {
+    pageReader.setPageRowInfo(false);
+  }
+
+  static int32_t pageIndex(const PageReader& pageReader) {
+    return pageReader.pageIndex_;
+  }
+
+  static int32_t numRowsInPage(const PageReader& pageReader) {
+    return pageReader.numRowsInPage_;
+  }
+
+  static size_t numKnownRepDefPages(const PageReader& pageReader) {
+    return pageReader.numLeavesInPage_.size();
+  }
+
+  static size_t numPendingRepDefBatches(const PageReader& pageReader) {
+    return pageReader.preloadedRepDefs_.size();
+  }
+
+ private:
+  template <typename T>
+  static void append(raw_vector<char>& out, T value) {
+    const auto offset = out.size();
+    out.resize(offset + sizeof(T));
+    std::memcpy(out.data() + offset, &value, sizeof(T));
+  }
+
+  static void appendLevels(
+      raw_vector<char>& out,
+      int32_t numLevels,
+      int16_t level,
+      int32_t maxLevel) {
+    const auto bitWidth = ::arrow::bit_util::NumRequiredBits(maxLevel);
+    std::vector<uint8_t> encoded(
+        ::arrow::util::RleEncoder::MaxBufferSize(bitWidth, numLevels) +
+        ::arrow::util::RleEncoder::MinBufferSize(bitWidth));
+    ::arrow::util::RleEncoder encoder(encoded.data(), encoded.size(), bitWidth);
+    for (auto i = 0; i < numLevels; ++i) {
+      encoder.Put(level);
+    }
+    const auto encodedSize = encoder.Flush();
+    append<uint32_t>(out, encodedSize);
+    const auto offset = out.size();
+    out.resize(offset + encodedSize);
+    std::memcpy(out.data() + offset, encoded.data(), encodedSize);
+  }
+};
+
+} // namespace bytedance::bolt::parquet
+
+TEST_F(ParquetPageReaderTest, loadsPendingRepDefsBeforePageRowInfoCheck) {
+  auto fileType = std::make_shared<ParquetTypeWithId>(
+      VARCHAR(),
+      std::vector<std::shared_ptr<const dwio::common::TypeWithId>>{},
+      0,
+      0,
+      0,
+      "items.list.element",
+      thrift::Type::BYTE_ARRAY,
+      std::nullopt,
+      thrift::ConvertedType::UTF8,
+      1,
+      2,
+      true,
+      false);
+  PageReader pageReader(
+      nullptr,
+      *leafPool_,
+      fileType,
+      thrift::CompressionCodec::UNCOMPRESSED,
+      0,
+      nullptr);
+  PageReaderTestPeer::initializeForPendingRepDefs(pageReader);
+
+  ASSERT_NO_THROW(PageReaderTestPeer::setPageRowInfo(pageReader));
+  EXPECT_EQ(PageReaderTestPeer::pageIndex(pageReader), 1);
+  EXPECT_EQ(PageReaderTestPeer::numRowsInPage(pageReader), 1);
+  EXPECT_EQ(PageReaderTestPeer::numKnownRepDefPages(pageReader), 2);
+  EXPECT_EQ(PageReaderTestPeer::numPendingRepDefBatches(pageReader), 0);
+}
 
 TEST_F(ParquetPageReaderTest, smallPage) {
   auto readFile =
