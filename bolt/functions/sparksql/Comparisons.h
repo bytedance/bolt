@@ -30,7 +30,10 @@
 
 #pragma once
 
+#include "bolt/common/base/CompareFlags.h"
 #include "bolt/expression/VectorFunction.h"
+#include "bolt/functions/Macros.h"
+
 namespace bytedance::bolt::functions::sparksql {
 
 // Comparison functions that implement SparkSQL semantics.
@@ -242,5 +245,44 @@ std::shared_ptr<exec::VectorFunction> makeEqualToNullSafe(
     const std::string& name,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config);
+
+template <typename T>
+struct EqualToFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+  // For arbitrary nested complex types.
+  FOLLY_ALWAYS_INLINE bool call(
+      bool& out,
+      const arg_type<Generic<T1>>& lhs,
+      const arg_type<Generic<T1>>& rhs) {
+    static constexpr CompareFlags kFlags =
+        CompareFlags::equality(CompareFlags::NullHandlingMode::kNullAsValue);
+
+    auto result = lhs.compare(rhs, kFlags);
+    out = (result.value() == 0);
+    return true;
+  }
+};
+
+template <typename T>
+struct EqualNullSafeFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+  // For arbitrary nested complex types.
+  FOLLY_ALWAYS_INLINE bool callNullable(
+      bool& out,
+      const arg_type<Generic<T1>>* lhs,
+      const arg_type<Generic<T1>>* rhs) {
+    static constexpr CompareFlags kFlags =
+        CompareFlags::equality(CompareFlags::NullHandlingMode::kNullAsValue);
+    if (!lhs && !rhs) {
+      out = true;
+    } else if (!lhs || !rhs) {
+      out = false;
+    } else {
+      auto result = lhs->compare(*rhs, kFlags);
+      out = (result.value() == 0);
+    }
+    return true;
+  }
+};
 
 } // namespace bytedance::bolt::functions::sparksql
