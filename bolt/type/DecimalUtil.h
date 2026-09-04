@@ -869,7 +869,7 @@ class DecimalUtil {
     if (auto status =
             parseDecimalComponents(s.data(), s.size(), decimalComponents);
         !status.ok()) {
-      return Status::UserError("Value is not a number. " + status.message());
+      return Status::UserError("Value is not a number. {}", status.message());
     }
 
     // Count number of significant digits (without leading zeros).
