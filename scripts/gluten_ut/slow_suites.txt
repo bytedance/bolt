@@ -1,0 +1,13 @@
+org.apache.spark.sql.GlutenSQLQueryTestSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetRowIndexSuite
+org.apache.spark.sql.catalyst.expressions.GlutenCastSuite
+org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite
+org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite
+org.apache.spark.sql.execution.datasources.orc.GlutenOrcV2SchemaPruningSuite
+org.apache.spark.sql.execution.datasources.orc.GlutenOrcV1SchemaPruningSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2SchemaPruningSuite
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1SchemaPruningSuite
+org.apache.spark.sql.connector.GlutenWriteDistributionAndOrderingSuite
+org.apache.spark.sql.catalyst.expressions.GlutenPredicateSuite

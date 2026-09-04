@@ -1,0 +1,17 @@
+org.apache.gluten.config.AllBoltConfiguration#Check bolt backend configs
+org.apache.gluten.execution.BoltExplodeExpressionSuite#(aborted)
+org.apache.gluten.execution.BoltScanSuite#Test file scheme validation
+org.apache.gluten.execution.BoltScanSuite#parquet index based schema evolution
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with preprojection
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with unrelated projection
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: without projection
+org.apache.gluten.extension.columnar.transition.BoltTransitionSuite#(aborted)
+org.apache.gluten.functions.JsonFunctionsValidateSuite#json_object_keys
+org.apache.spark.sql.GlutenJsonFunctionsSuite#roundtrip in to_json and from_json - array
+org.apache.spark.sql.GlutenSQLQueryTestSuite#datetime-parsing-invalid.sql
+org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
+org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
+org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-34817: Read UINT_64 as Decimal from parquet
