@@ -410,7 +410,8 @@ class SerializedPageWriter : public PageWriter {
       std::shared_ptr<Encryptor> data_encryptor = nullptr,
       ColumnIndexBuilder* column_index_builder = nullptr,
       OffsetIndexBuilder* offset_index_builder = nullptr,
-      const CodecOptions& codec_options = CodecOptions{})
+      const CodecOptions& codec_options = CodecOptions{},
+      std::shared_ptr<WriterMetricsCollector> writerMetrics = nullptr)
       : sink_(std::move(sink)),
         metadata_(metadata),
         pool_(pool),
@@ -427,7 +428,8 @@ class SerializedPageWriter : public PageWriter {
         data_encryptor_(std::move(data_encryptor)),
         encryption_buffer_(AllocateBuffer(pool, 0)),
         column_index_builder_(column_index_builder),
-        offset_index_builder_(offset_index_builder) {
+        offset_index_builder_(offset_index_builder),
+        writerMetrics_(std::move(writerMetrics)) {
     if (data_encryptor_ != nullptr || meta_encryptor_ != nullptr) {
       InitEncryption();
     }
@@ -549,13 +551,19 @@ class SerializedPageWriter : public PageWriter {
     // reallocate.
     PARQUET_THROW_NOT_OK(dest_buffer->Resize(max_compressed_size, false));
 
-    PARQUET_ASSIGN_OR_THROW(
-        int64_t compressed_size,
-        compressor_->Compress(
-            src_buffer.size(),
-            src_buffer.data(),
-            max_compressed_size,
-            dest_buffer->mutable_data()));
+    int64_t compressed_size;
+    {
+      WriterMetricTimer timer(
+          writerMetrics_ ? &writerMetrics_->writeCompressionWallNanos : nullptr,
+          true);
+      PARQUET_ASSIGN_OR_THROW(
+          compressed_size,
+          compressor_->Compress(
+              src_buffer.size(),
+              src_buffer.data(),
+              max_compressed_size,
+              dest_buffer->mutable_data()));
+    }
     PARQUET_THROW_NOT_OK(dest_buffer->Resize(compressed_size, false));
   }
 
@@ -846,6 +854,7 @@ class SerializedPageWriter : public PageWriter {
 
   ColumnIndexBuilder* column_index_builder_;
   OffsetIndexBuilder* offset_index_builder_;
+  const std::shared_ptr<WriterMetricsCollector> writerMetrics_;
 };
 
 // This implementation of the PageWriter writes to the final sink on Close .
@@ -864,7 +873,8 @@ class BufferedPageWriter : public PageWriter {
       std::shared_ptr<Encryptor> data_encryptor = nullptr,
       ColumnIndexBuilder* column_index_builder = nullptr,
       OffsetIndexBuilder* offset_index_builder = nullptr,
-      const CodecOptions& codec_options = CodecOptions{})
+      const CodecOptions& codec_options = CodecOptions{},
+      std::shared_ptr<WriterMetricsCollector> writerMetrics = nullptr)
       : final_sink_(std::move(sink)),
         metadata_(metadata),
         has_dictionary_pages_(false),
@@ -881,7 +891,8 @@ class BufferedPageWriter : public PageWriter {
         std::move(data_encryptor),
         column_index_builder,
         offset_index_builder,
-        codec_options);
+        codec_options,
+        std::move(writerMetrics));
   }
 
   int64_t WriteDictionaryPage(std::unique_ptr<DictionaryPage> page) override {
@@ -1018,7 +1029,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
     ColumnIndexBuilder* column_index_builder,
     OffsetIndexBuilder* offset_index_builder,
     const CodecOptions& codec_options,
-    std::shared_ptr<PageBufferArena> page_buffer_arena) {
+    std::shared_ptr<PageBufferArena> page_buffer_arena,
+    std::shared_ptr<WriterMetricsCollector> writer_metrics) {
   if (buffered_row_group) {
     return std::unique_ptr<PageWriter>(new BufferedPageWriter(
         std::move(sink),
@@ -1033,7 +1045,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
         std::move(data_encryptor),
         column_index_builder,
         offset_index_builder,
-        codec_options));
+        codec_options,
+        std::move(writer_metrics)));
   } else {
     return std::unique_ptr<PageWriter>(new SerializedPageWriter(
         std::move(sink),
@@ -1047,7 +1060,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
         std::move(data_encryptor),
         column_index_builder,
         offset_index_builder,
-        codec_options));
+        codec_options,
+        std::move(writer_metrics)));
   }
 }
 
@@ -1065,7 +1079,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
     bool page_write_checksum_enabled,
     ColumnIndexBuilder* column_index_builder,
     OffsetIndexBuilder* offset_index_builder,
-    std::shared_ptr<PageBufferArena> page_buffer_arena) {
+    std::shared_ptr<PageBufferArena> page_buffer_arena,
+    std::shared_ptr<WriterMetricsCollector> writer_metrics) {
   return PageWriter::Open(
       sink,
       codec,
@@ -1080,7 +1095,8 @@ std::unique_ptr<PageWriter> PageWriter::Open(
       column_index_builder,
       offset_index_builder,
       CodecOptions{compression_level},
-      std::move(page_buffer_arena));
+      std::move(page_buffer_arena),
+      std::move(writer_metrics));
 }
 // ----------------------------------------------------------------------
 // ColumnWriter
@@ -1573,6 +1589,9 @@ void ColumnWriterImpl::BuildDataPageV2(
 
 int64_t ColumnWriterImpl::Close() {
   if (!closed_) {
+    const auto& writerMetrics = properties_->writer_metrics();
+    WriterEncodeMetricTimer timer(
+        writerMetrics ? &writerMetrics->writeEncodeWallNanos : nullptr);
     closed_ = true;
     if (has_dictionary_ && !fallback_) {
       WriteDictionaryPage();

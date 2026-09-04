@@ -27,6 +27,17 @@
 
 bolt_add_library(bolt_functions_string INTERFACE)
 
+if(BOLT_ENABLE_SPARK_COMPATIBLE)
+  bolt_add_library(bolt_functions_spark_lower SparkLower.cpp)
+  target_link_libraries(
+    bolt_functions_spark_lower
+    PUBLIC
+      Folly::folly
+      ${ICU_LIBRARIES}
+  )
+  target_link_libraries(bolt_functions_string INTERFACE bolt_functions_spark_lower)
+endif()
+
 target_link_libraries(
   bolt_functions_string
   INTERFACE

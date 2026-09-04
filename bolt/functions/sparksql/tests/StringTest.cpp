@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 #include "bolt/type/Type.h"
@@ -350,6 +351,35 @@ TEST_F(StringTest, bitLengthVarbinary) {
   // Consists of five codepoints.
   EXPECT_EQ(bitLength(kWomanFacepalmingLightSkinTone), 136);
   EXPECT_EQ(bitLength("\U0001F408"), 32);
+}
+
+TEST_F(StringTest, octetLength) {
+  const auto octetLength = [&](const std::optional<std::string>& arg) {
+    return evaluateOnce<int32_t>("octet_length(c0)", arg);
+  };
+
+  EXPECT_EQ(octetLength(std::nullopt), std::nullopt);
+  EXPECT_EQ(octetLength(""), 0);
+  EXPECT_EQ(octetLength(std::string("\0", 1)), 1);
+  EXPECT_EQ(octetLength("123"), 3);
+  EXPECT_EQ(octetLength("😋"), 4);
+  EXPECT_EQ(octetLength(kWomanFacepalmingLightSkinTone), 17);
+
+  const std::string largeInput(1'048'576, 'a');
+  EXPECT_EQ(octetLength(largeInput), 1'048'576);
+}
+
+TEST_F(StringTest, octetLengthVarbinary) {
+  const auto octetLength = [&](const std::optional<std::string>& arg) {
+    return evaluateOnce<int32_t, std::string>(
+        "octet_length(c0)", {arg}, {VARBINARY()});
+  };
+
+  EXPECT_EQ(octetLength(std::nullopt), std::nullopt);
+  EXPECT_EQ(octetLength(""), 0);
+  EXPECT_EQ(octetLength("123"), 3);
+  EXPECT_EQ(octetLength(std::string("\0\xff", 2)), 2);
+  EXPECT_EQ(octetLength("😋"), 4);
 }
 
 TEST_F(StringTest, chr) {
@@ -1138,6 +1168,9 @@ TEST_F(StringTest, rpad) {
   // Invalid UTF-8 chars
   EXPECT_EQ(invalidString + "x", rpad(invalidString, 8, "x"));
   EXPECT_EQ("abc" + invalidPadString, rpad("abc", 6, invalidPadString));
+
+  BOLT_ASSERT_THROW(rpad("abc", -1, "x"), "pad size must be in the range");
+  BOLT_ASSERT_THROW(rpad("abc", 5, ""), "padString must not be empty");
 }
 
 TEST_F(StringTest, lpad) {
@@ -1171,6 +1204,9 @@ TEST_F(StringTest, lpad) {
   // Invalid UTF-8 chars
   EXPECT_EQ("x" + invalidString, lpad(invalidString, 8, "x"));
   EXPECT_EQ(invalidPadString + "abc", lpad("abc", 6, invalidPadString));
+
+  BOLT_ASSERT_THROW(lpad("abc", -1, "x"), "pad size must be in the range");
+  BOLT_ASSERT_THROW(lpad("abc", 5, ""), "padString must not be empty");
 }
 
 TEST_F(StringTest, left) {
@@ -1582,6 +1618,80 @@ TEST_F(StringTest, lower) {
   // Ligatures.
   EXPECT_EQ(lower("ß ﬁ ﬃ ﬀ ﬆ ῗ"), "ß ﬁ ﬃ ﬀ ﬆ ῗ");
 }
+
+TEST_F(StringTest, lowerGreekSigmaCompatibility) {
+  struct TestCase {
+    int32_t id;
+    std::string input;
+    std::string defaultExpected;
+    std::string sparkExpected;
+  };
+
+  const std::vector<TestCase> testCases = {
+      {1, "Σ", "σ", "σ"},
+      {2, "ΣΣ", "σς", "σς"},
+      {3, "ΣΣ8", "σς8", "σς8"},
+      {4, "ΣΣ8I", "σς8i", "σσ8i"},
+      {5, "ΣΣI", "σσi", "σσi"},
+      {6, "AΣ", "aς", "aς"},
+      {7, "AΣ8", "aς8", "aς8"},
+      {8, "AΣ8B", "aς8b", "aσ8b"},
+      {9, "ΣA", "σa", "σa"},
+      {10, "8Σ", "8σ", "8σ"},
+      {11, "8Σ8", "8σ8", "8σ8"},
+      {12, "AΣ.", "aς.", "aς."},
+      {13, "AΣ-B", "aς-b", "aσ-b"},
+      {14, "AΣ_B", "aς_b", "aσ_b"},
+      {15,
+       "prefix ΣΣ46URZHBLJJ8",
+       "prefix σς46urzhbljj8",
+       "prefix σσ46urzhbljj8"},
+      {16,
+       "ΣΣ8IBLMR5OIM8 suffix",
+       "σς8iblmr5oim8 suffix",
+       "σσ8iblmr5oim8 suffix"},
+      {17, "ΣΑΛΑΤΑ", "σαλατα", "σαλατα"},
+      {18, "ΘΑΛΑΣΣΙΝΟΣ", "θαλασσινος", "θαλασσινος"},
+      {19, "ΟΣ", "ος", "ος"},
+      {20, "ΟΣ8", "ος8", "ος8"},
+      {21, "ΟΣΑ", "οσα", "οσα"},
+      {22, "σςΣ", "σςς", "σςς"},
+      {23, "Σ Σ", "σ σ", "σ σ"},
+      {24, "Σ-Σ", "σ-σ", "σ-ς"},
+      {25, "Σ.Σ", "σ.ς", "σ.ς"},
+      {26, "AΣ1B", "aς1b", "aσ1b"},
+      {27, "AΣ1", "aς1", "aς1"},
+      {28, "σς", "σς", "σς"},
+      {29, "AΣ@b", "aς@b", "aς@b"},
+      {30, "A@Σ", "a@σ", "a@σ"},
+      {31, "AΣ AΣ AΣ AΣ AΣ", "aς aς aς aς aς", "aς aς aς aς aς"},
+      {32, "AΣ²B", "aς²b", "aσ²b"},
+      {33, "AΣ·B", "aσ·b", "aς·b"},
+      {34, "AΣ가B", "aς가b", "aσ가b"},
+      {35, "AΣ㐀B", "aς㐀b", "aσ㐀b"},
+      {36, "AΣ\u200BB", "aσ\u200Bb", "aσ\u200Bb"},
+      {37, "AΣ\u202FB", "aς\u202Fb", "aς\u202Fb"},
+      {38, "A1-Σ", "a1-σ", "a1-σ"},
+      // Georgian Mkhedruli letters are cased in both ICU 74 and ByteOpenJDK
+      // 17.0.9.
+      {39, "AΣა", "aσა", "aσა"},
+      // Supplementary cased characters must be recognized without truncation.
+      {40, "AΣ𐐅", "aσ𐐭", "aσ𐐭"},
+  };
+
+  for (const auto& testCase : testCases) {
+    SCOPED_TRACE(testing::Message() << "id=" << testCase.id);
+    const auto& expected =
+        kSparkCompatible ? testCase.sparkExpected : testCase.defaultExpected;
+    EXPECT_EQ(lower(testCase.input), expected);
+  }
+
+  // The common production shape is a long word containing a sparse sigma.
+  const auto longInput = std::string(32'768, 'A') + "ΣB";
+  const auto longExpected = std::string(32'768, 'a') + "σb";
+  EXPECT_EQ(lower(longInput), longExpected);
+}
+
 TEST_F(StringTest, upper) {
   // Empty strings.
   EXPECT_EQ(upper(""), "");

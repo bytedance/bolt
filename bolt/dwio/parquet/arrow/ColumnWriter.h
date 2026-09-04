@@ -41,6 +41,7 @@
 #include "bolt/dwio/parquet/arrow/Types.h"
 #include "bolt/dwio/parquet/arrow/WriterMemoryStats.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
+#include "bolt/dwio/parquet/writer/WriterMetrics.h"
 
 namespace arrow {
 
@@ -164,7 +165,8 @@ class PARQUET_EXPORT PageWriter {
       // offset_index_builder MUST outlive the PageWriter
       OffsetIndexBuilder* offset_index_builder = NULLPTR,
       const util::CodecOptions& codec_options = util::CodecOptions{},
-      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr);
+      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr,
+      std::shared_ptr<WriterMetricsCollector> writer_metrics = nullptr);
 
   // TODO: remove this and port to new signature.
   // ARROW_DEPRECATED(
@@ -185,7 +187,8 @@ class PARQUET_EXPORT PageWriter {
       ColumnIndexBuilder* column_index_builder = NULLPTR,
       // offset_index_builder MUST outlive the PageWriter
       OffsetIndexBuilder* offset_index_builder = NULLPTR,
-      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr);
+      std::shared_ptr<PageBufferArena> page_buffer_arena = nullptr,
+      std::shared_ptr<WriterMetricsCollector> writer_metrics = nullptr);
 
   // The Column Writer decides if dictionary encoding is used if set and
   // if the dictionary encoding has fallen back to default encoding on reaching

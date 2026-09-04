@@ -30,9 +30,12 @@
 
 #include "bolt/vector/arrow/Bridge.h"
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <string_view>
+#include <utility>
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -53,6 +56,7 @@ namespace {
 // The supported conversions use one buffer for nulls (0), one for values (1),
 // and one for offsets (2).
 static constexpr size_t kMaxBuffers{3};
+static constexpr size_t kMaxReusableScratchBufferBytes{32UL << 10};
 constexpr const char kArrowExtensionNameKey[] = "ARROW:extension:name";
 constexpr const char kSparkVariantExtensionName[] = "spark.variant";
 
@@ -68,12 +72,199 @@ void appendArrowMetadataInt32(std::string& metadata, int32_t value) {
 // carried by ArrowArray.private_data
 class BoltToArrowBridgeHolder {
  public:
-  BoltToArrowBridgeHolder() {
+  struct ReusableReleaseState {
+    // Child nodes stay at stable addresses, but consumers may move an
+    // ArrowArray before releasing it. Keep the stable tree here for reuse.
+    std::atomic_size_t activeCount{0};
+    std::atomic_bool inUse{false};
+  };
+
+  explicit BoltToArrowBridgeHolder(bool reusable = false)
+      : reusable_(reusable),
+        ownsReleaseState_(reusable),
+        releaseState_(
+            reusable ? std::make_shared<ReusableReleaseState>() : nullptr) {
     buffers_.resize(numBuffers_);
     bufferPtrs_.resize(numBuffers_);
     for (size_t i = 0; i < numBuffers_; ++i) {
       buffers_[i] = nullptr;
     }
+  }
+
+  BoltToArrowBridgeHolder(
+      bool reusable,
+      std::shared_ptr<ReusableReleaseState> releaseState)
+      : reusable_(reusable),
+        ownsReleaseState_(false),
+        releaseState_(std::move(releaseState)) {
+    buffers_.resize(numBuffers_);
+    bufferPtrs_.resize(numBuffers_);
+    for (size_t i = 0; i < numBuffers_; ++i) {
+      buffers_[i] = nullptr;
+    }
+  }
+
+  bool reusable() const {
+    return reusable_;
+  }
+
+  bool ownsReleaseState() const {
+    return ownsReleaseState_;
+  }
+
+  bool tryAcquireReusableSlot() {
+    BOLT_CHECK(reusable_);
+    BOLT_CHECK(ownsReleaseState_);
+    bool expected = false;
+    return releaseState_->inUse.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  size_t reusableActiveCount() const {
+    return releaseState_ == nullptr
+        ? 0
+        : releaseState_->activeCount.load(std::memory_order_acquire);
+  }
+
+  void registerArray(ArrowArray& array) {
+    if (!releaseState_) {
+      return;
+    }
+    array.private_data = this;
+    if (registeredArray_ == nullptr) {
+      registeredArray_ = &array;
+      return;
+    }
+    BOLT_CHECK(registeredArray_ == &array);
+  }
+
+  void markActive(ArrowArray& array) {
+    if (!releaseState_) {
+      return;
+    }
+    registerArray(array);
+    if (!active_) {
+      active_ = true;
+      releaseState_->activeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  void reset() {
+    if (reusable_) {
+      resetLocalBuffers();
+      return;
+    }
+    resetRecursive();
+  }
+
+  void resetLocalBuffers() {
+    for (size_t i = 0; i < bufferPtrs_.size(); ++i) {
+      bufferPtrs_[i].reset();
+      buffers_[i] = nullptr;
+    }
+    // Arrow offsets contain rows + 1 entries. Allow the final sentinel so an
+    // 8192-row batch fits the 32 KiB retention limit.
+    if (offsetsScratch_ &&
+        offsetsScratch_->size() >
+            kMaxReusableScratchBufferBytes + sizeof(vector_size_t)) {
+      offsetsScratch_.reset();
+    }
+  }
+
+  void resetRecursive() {
+    for (auto& child : childrenPtrs_) {
+      if (child && child->release != nullptr) {
+        child->release(child.get());
+      }
+    }
+    if (dictionary_ && dictionary_->release != nullptr) {
+      dictionary_->release(dictionary_.get());
+    }
+    if (!reusable_) {
+      childrenPtrs_.clear();
+      children_.reset();
+      dictionary_.reset();
+    }
+    resetLocalBuffers();
+  }
+
+  static void resetArrowArray(ArrowArray& array, const void** buffers) {
+    array.buffers = buffers;
+    array.length = 0;
+    array.null_count = 0;
+    array.offset = 0;
+    array.n_buffers = 0;
+    array.n_children = 0;
+    array.children = nullptr;
+    array.dictionary = nullptr;
+    array.release = nullptr;
+  }
+
+  void resetReusableArray(ArrowArray& releasedArray) {
+    if (!releaseState_) {
+      return;
+    }
+    BOLT_CHECK(ownsReleaseState_);
+    resetReusableRecursive(releasedArray);
+  }
+
+  void resetReusableChild(ArrowArray& releasedArray) {
+    BOLT_CHECK(reusable_);
+    BOLT_CHECK(!ownsReleaseState_);
+    resetReusableRecursive(releasedArray);
+  }
+
+  void abortReusableArray(ArrowArray& releasedArray) {
+    if (!releaseState_) {
+      return;
+    }
+    resetRecursive();
+    active_ = false;
+    releaseState_->activeCount.store(0, std::memory_order_release);
+    if (registeredArray_ != &releasedArray) {
+      resetArrowArray(releasedArray, nullptr);
+      releasedArray.private_data = nullptr;
+    }
+  }
+
+  void releaseResources() {
+    resetRecursive();
+    if (releaseState_) {
+      releaseState_->activeCount.store(0, std::memory_order_release);
+      releaseState_->inUse.store(false, std::memory_order_release);
+    }
+    for (auto& child : childrenPtrs_) {
+      if (!child) {
+        continue;
+      }
+      if (child->release != nullptr) {
+        child->release(child.get());
+      }
+      auto* childHolder =
+          static_cast<BoltToArrowBridgeHolder*>(child->private_data);
+      if (childHolder) {
+        childHolder->releaseResources();
+        delete childHolder;
+        child->private_data = nullptr;
+      }
+      child->release = nullptr;
+    }
+    if (dictionary_) {
+      if (dictionary_->release != nullptr) {
+        dictionary_->release(dictionary_.get());
+      }
+      auto* dictionaryHolder =
+          static_cast<BoltToArrowBridgeHolder*>(dictionary_->private_data);
+      if (dictionaryHolder) {
+        dictionaryHolder->releaseResources();
+        delete dictionaryHolder;
+        dictionary_->private_data = nullptr;
+      }
+      dictionary_->release = nullptr;
+    }
+    childrenPtrs_.clear();
+    children_.reset();
+    dictionary_.reset();
   }
 
   void resizeBuffers(size_t bufferCount) {
@@ -110,19 +301,60 @@ class BoltToArrowBridgeHolder {
     return bufferPtrs_[idx];
   }
 
+  BufferPtr getMutableOffsetsBuffer(size_t bytes, memory::MemoryPool* pool) {
+    if (!reusable_) {
+      return nullptr;
+    }
+    if (offsetsScratch_ && offsetsScratch_->pool() == pool &&
+        offsetsScratch_->isMutable()) {
+      if (offsetsScratch_->capacity() < bytes) {
+        AlignedBuffer::reallocate<uint8_t>(&offsetsScratch_, bytes);
+      } else {
+        offsetsScratch_->setSize(bytes);
+      }
+      return offsetsScratch_;
+    }
+    offsetsScratch_ = AlignedBuffer::allocate<uint8_t>(bytes, pool);
+    return offsetsScratch_;
+  }
+
   // Allocates space for `numChildren` ArrowArray pointers.
   void resizeChildren(size_t numChildren) {
-    childrenPtrs_.resize(numChildren);
+    const auto oldSize = childrenPtrs_.size();
+    // Reusable nodes only grow: registered addresses must remain stable. The
+    // current batch shape is represented by ArrowArray::n_children.
+    if (!reusable_ || oldSize < numChildren) {
+      childrenPtrs_.resize(numChildren);
+    }
+    if (reusable_) {
+      for (size_t i = oldSize; i < numChildren; ++i) {
+        childrenPtrs_[i] = std::make_unique<ArrowArray>();
+        childrenPtrs_[i]->private_data = new BoltToArrowBridgeHolder(
+            /*reusable=*/true, releaseState_);
+      }
+    }
     children_ = (numChildren > 0)
         ? std::make_unique<ArrowArray*[]>(sizeof(ArrowArray*) * numChildren)
         : nullptr;
+    for (size_t i = 0; i < numChildren; ++i) {
+      if (!childrenPtrs_[i]) {
+        childrenPtrs_[i] = std::make_unique<ArrowArray>();
+      }
+      children_[i] = childrenPtrs_[i].get();
+    }
   }
 
   // Allocates and properly acquires buffers for a child ArrowArray structure.
   ArrowArray* allocateChild(size_t i) {
     BOLT_CHECK_LT(i, childrenPtrs_.size());
-    childrenPtrs_[i] = std::make_unique<ArrowArray>();
-    children_[i] = childrenPtrs_[i].get();
+    if (!childrenPtrs_[i]) {
+      childrenPtrs_[i] = std::make_unique<ArrowArray>();
+      if (reusable_) {
+        childrenPtrs_[i]->private_data = new BoltToArrowBridgeHolder(
+            /*reusable=*/true, releaseState_);
+      }
+      children_[i] = childrenPtrs_[i].get();
+    }
     return children_[i];
   }
 
@@ -132,11 +364,57 @@ class BoltToArrowBridgeHolder {
   }
 
   ArrowArray* allocateDictionary() {
-    dictionary_ = std::make_unique<ArrowArray>();
+    if (!dictionary_) {
+      dictionary_ = std::make_unique<ArrowArray>();
+      if (reusable_) {
+        dictionary_->private_data = new BoltToArrowBridgeHolder(
+            /*reusable=*/true, releaseState_);
+      }
+    }
     return dictionary_.get();
   }
 
  private:
+  void resetReusableRecursive(ArrowArray& releasedArray) {
+    for (int64_t i = 0; i < releasedArray.n_children; ++i) {
+      auto* child = releasedArray.children[i];
+      if (child != nullptr && child->release != nullptr) {
+        child->release(child);
+        BOLT_CHECK_NULL(child->release);
+      }
+    }
+
+    auto* dictionary = releasedArray.dictionary;
+    if (dictionary != nullptr && dictionary->release != nullptr) {
+      dictionary->release(dictionary);
+      BOLT_CHECK_NULL(dictionary->release);
+    }
+
+    resetReusableNode(releasedArray);
+  }
+
+  void resetReusableNode(ArrowArray& releasedArray) {
+    if (active_) {
+      resetLocalBuffers();
+      active_ = false;
+      const auto previousActiveCount =
+          releaseState_->activeCount.fetch_sub(1, std::memory_order_acq_rel);
+      BOLT_CHECK_GT(previousActiveCount, 0);
+      if (previousActiveCount == 1) {
+        releaseState_->inUse.store(false, std::memory_order_release);
+      }
+    }
+
+    if (registeredArray_ != nullptr) {
+      resetArrowArray(*registeredArray_, getArrowBuffers());
+      registeredArray_->private_data = this;
+    }
+    if (registeredArray_ != &releasedArray) {
+      resetArrowArray(releasedArray, nullptr);
+      releasedArray.private_data = nullptr;
+    }
+  }
+
   // Holds the count of total buffers
   size_t numBuffers_ = kMaxBuffers;
 
@@ -147,6 +425,8 @@ class BoltToArrowBridgeHolder {
   // above.
   std::vector<BufferPtr> bufferPtrs_{numBuffers_};
 
+  BufferPtr offsetsScratch_;
+
   // Auxiliary buffers to hold ownership over ArrowArray children structures.
   std::vector<std::unique_ptr<ArrowArray>> childrenPtrs_;
 
@@ -155,6 +435,12 @@ class BoltToArrowBridgeHolder {
   std::unique_ptr<ArrowArray*[]> children_;
 
   std::unique_ptr<ArrowArray> dictionary_;
+
+  const bool reusable_;
+  const bool ownsReleaseState_;
+  std::shared_ptr<ReusableReleaseState> releaseState_;
+  ArrowArray* registeredArray_{nullptr};
+  bool active_{false};
 };
 
 // Structure that will hold buffers needed by ArrowSchema. This is opaquely
@@ -224,6 +510,17 @@ static void releaseArrowArray(ArrowArray* arrowArray) {
     return;
   }
 
+  auto* bridgeHolder =
+      static_cast<BoltToArrowBridgeHolder*>(arrowArray->private_data);
+  if (bridgeHolder && bridgeHolder->reusable()) {
+    if (bridgeHolder->ownsReleaseState()) {
+      bridgeHolder->resetReusableArray(*arrowArray);
+    } else {
+      bridgeHolder->resetReusableChild(*arrowArray);
+    }
+    return;
+  }
+
   // Recurse down to release children arrays.
   for (int64_t i = 0; i < arrowArray->n_children; ++i) {
     ArrowArray* child = arrowArray->children[i];
@@ -241,8 +538,6 @@ static void releaseArrowArray(ArrowArray* arrowArray) {
   }
 
   // Destroy the current holder.
-  auto* bridgeHolder =
-      static_cast<BoltToArrowBridgeHolder*>(arrowArray->private_data);
   delete bridgeHolder;
 
   // Finally, mark the array as released.
@@ -1176,7 +1471,8 @@ void exportToArrowImpl(
     const Selection&,
     const ArrowOptions& options,
     ArrowArray&,
-    memory::MemoryPool*);
+    memory::MemoryPool*,
+    bool allowReuse = false);
 
 template <typename T>
 void exportRowsImpl(
@@ -1198,11 +1494,14 @@ void exportRowsImpl(
           rows,
           options,
           *holder.allocateChild(i),
-          pool);
+          pool,
+          holder.reusable());
     } catch (const BoltException&) {
-      for (column_index_t j = 0; j < i; ++j) {
-        // When exception is thrown, i th child is guaranteed unset.
-        out.children[j]->release(out.children[j]);
+      if (!holder.reusable()) {
+        for (column_index_t j = 0; j < i; ++j) {
+          // When exception is thrown, i th child is guaranteed unset.
+          out.children[j]->release(out.children[j]);
+        }
       }
       throw;
     }
@@ -1251,8 +1550,13 @@ void exportOffsets(
     memory::MemoryPool* pool,
     BoltToArrowBridgeHolder& holder,
     Selection& childRows) {
-  auto offsets = AlignedBuffer::allocate<vector_size_t>(
-      checkedPlus<size_t>(out.length, 1), pool);
+  const auto offsetsBytes = checkedMultiply<size_t>(
+      checkedPlus<size_t>(out.length, 1), sizeof(vector_size_t));
+  auto offsets = holder.getMutableOffsetsBuffer(offsetsBytes, pool);
+  if (!offsets) {
+    offsets = AlignedBuffer::allocate<vector_size_t>(
+        checkedPlus<size_t>(out.length, 1), pool);
+  }
   auto rawOffsets = offsets->asMutable<vector_size_t>();
   if (!rows.changed() && !hasNulls(vec, out.length) && isCompact(vec)) {
     auto copiedSize = vec.size() > out.length ? out.length : vec.size();
@@ -1315,8 +1619,13 @@ void exportOffsetsIPC(
     memory::MemoryPool* pool,
     BoltToArrowBridgeHolder& holder,
     Selection& childRows) {
-  auto offsets = AlignedBuffer::allocate<vector_size_t>(
-      checkedPlus<size_t>(out.length, 1), pool);
+  const auto offsetsBytes = checkedMultiply<size_t>(
+      checkedPlus<size_t>(out.length, 1), sizeof(vector_size_t));
+  auto offsets = holder.getMutableOffsetsBuffer(offsetsBytes, pool);
+  if (!offsets) {
+    offsets = AlignedBuffer::allocate<vector_size_t>(
+        checkedPlus<size_t>(out.length, 1), pool);
+  }
   auto rawOffsets = offsets->asMutable<vector_size_t>();
   if (!rows.changed() && !hasNulls(vec, out.length) && isCompact(vec)) {
     const vector_size_t m = out.length;
@@ -1390,7 +1699,8 @@ void exportArrays(
       childRows,
       options,
       *holder.allocateChild(0),
-      pool);
+      pool,
+      holder.reusable());
   out.n_children = 1;
   out.children = holder.getChildrenArrays();
 }
@@ -1416,7 +1726,13 @@ void exportMaps(
   }
 
   holder.resizeChildren(1);
-  exportToArrowImpl(child, childRows, options, *holder.allocateChild(0), pool);
+  exportToArrowImpl(
+      child,
+      childRows,
+      options,
+      *holder.allocateChild(0),
+      pool,
+      holder.reusable());
   out.n_children = 1;
   out.children = holder.getChildrenArrays();
 }
@@ -1597,7 +1913,12 @@ void exportDictionary(
       holder.setBuffer(1, composed);
       out.dictionary = holder.allocateDictionary();
       exportToArrowImpl(
-          *cur, Selection(cur->size()), options, *out.dictionary, pool);
+          *cur,
+          Selection(cur->size()),
+          options,
+          *out.dictionary,
+          pool,
+          holder.reusable());
       return;
     }
   }
@@ -1612,7 +1933,12 @@ void exportDictionary(
   auto& values = *vec.valueVector()->loadedVector();
   out.dictionary = holder.allocateDictionary();
   exportToArrowImpl(
-      values, Selection(values.size()), options, *out.dictionary, pool);
+      values,
+      Selection(values.size()),
+      options,
+      *out.dictionary,
+      pool,
+      holder.reusable());
 }
 
 void exportFlattenedVector(
@@ -1705,7 +2031,8 @@ void exportConstantValue(
     const BaseVector& vec,
     const ArrowOptions& options,
     ArrowArray& out,
-    memory::MemoryPool* pool) {
+    memory::MemoryPool* pool,
+    const BoltToArrowBridgeHolder& parentHolder) {
   VectorPtr valuesVector;
   Selection selection(1);
 
@@ -1760,7 +2087,8 @@ void exportConstantValue(
           vec.mayHaveNulls() ? 1 : 0);
     }
   }
-  exportToArrowImpl(*valuesVector, selection, options, out, pool);
+  exportToArrowImpl(
+      *valuesVector, selection, options, out, pool, parentHolder.reusable());
 }
 
 // Bolt constant vectors are exported as Arrow REE containing a single run
@@ -1780,11 +2108,26 @@ void exportConstant(
   out.n_children = 2;
   holder.resizeChildren(2);
   out.children = holder.getChildrenArrays();
-  exportConstantValue(vec, options, *holder.allocateChild(1), pool);
+  exportConstantValue(vec, options, *holder.allocateChild(1), pool, holder);
 
   // Create the run ends child.
   auto* runEnds = holder.allocateChild(0);
-  auto runEndsHolder = std::make_unique<BoltToArrowBridgeHolder>();
+  std::unique_ptr<BoltToArrowBridgeHolder> runEndsHolderOwner;
+  auto* runEndsHolder =
+      static_cast<BoltToArrowBridgeHolder*>(runEnds->private_data);
+  if (holder.reusable()) {
+    BOLT_CHECK_NOT_NULL(runEndsHolder);
+    BOLT_CHECK(runEndsHolder->reusable());
+    if (runEnds->release != nullptr) {
+      runEnds->release(runEnds);
+    } else {
+      runEndsHolder->reset();
+    }
+  } else {
+    runEndsHolderOwner = std::make_unique<BoltToArrowBridgeHolder>();
+    runEndsHolder = runEndsHolderOwner.get();
+  }
+  runEndsHolder->markActive(*runEnds);
 
   runEnds->buffers = runEndsHolder->getArrowBuffers();
   runEnds->length = 1;
@@ -1800,7 +2143,9 @@ void exportConstant(
   runsBuffer->asMutable<int32_t>()[0] = vec.size();
   runEndsHolder->setBuffer(1, runsBuffer);
 
-  runEnds->private_data = runEndsHolder.release();
+  if (runEndsHolderOwner) {
+    runEnds->private_data = runEndsHolderOwner.release();
+  }
   runEnds->release = releaseArrowArray;
 }
 
@@ -1809,8 +2154,19 @@ void exportToArrowImpl(
     const Selection& rows,
     const ArrowOptions& options,
     ArrowArray& out,
-    memory::MemoryPool* pool) {
-  auto holder = std::make_unique<BoltToArrowBridgeHolder>();
+    memory::MemoryPool* pool,
+    bool allowReuse) {
+  BoltToArrowBridgeHolder* holder = nullptr;
+  std::unique_ptr<BoltToArrowBridgeHolder> holderOwner;
+  if (allowReuse && out.private_data != nullptr) {
+    holder = static_cast<BoltToArrowBridgeHolder*>(out.private_data);
+    BOLT_CHECK(holder->reusable());
+    holder->reset();
+  } else {
+    holderOwner = std::make_unique<BoltToArrowBridgeHolder>();
+    holder = holderOwner.get();
+  }
+  holder->markActive(out);
   out.buffers = holder->getArrowBuffers();
   out.length = rows.count();
   out.offset = 0;
@@ -1850,7 +2206,9 @@ void exportToArrowImpl(
     default:
       BOLT_NYI("{} cannot be exported to Arrow yet.", vec.encoding());
   }
-  out.private_data = holder.release();
+  if (holderOwner) {
+    out.private_data = holderOwner.release();
+  }
   out.release = releaseArrowArray;
 }
 
@@ -2226,6 +2584,77 @@ void exportToArrow(
   exportToArrowImpl(
       *vector, Selection(vector->size()), options, arrowArray, pool);
 }
+
+namespace {
+
+void initializeReusableArrowArray(ArrowArray& arrowArray) {
+  BOLT_CHECK_NULL(arrowArray.release);
+  BOLT_CHECK_NULL(arrowArray.private_data);
+  auto holder = std::make_unique<BoltToArrowBridgeHolder>(true);
+  arrowArray.buffers = holder->getArrowBuffers();
+  arrowArray.length = 0;
+  arrowArray.null_count = 0;
+  arrowArray.offset = 0;
+  arrowArray.n_buffers = 0;
+  arrowArray.n_children = 0;
+  arrowArray.children = nullptr;
+  arrowArray.dictionary = nullptr;
+  holder->registerArray(arrowArray);
+  holder.release();
+}
+
+void exportToReusableArrowArray(
+    const VectorPtr& vector,
+    ArrowArray& arrowArray,
+    memory::MemoryPool* pool,
+    const ArrowOptions& options) {
+  BOLT_CHECK_NOT_NULL(arrowArray.private_data);
+  if (vector->encoding() == VectorEncoding::Simple::LAZY) {
+    exportToReusableArrowArray(
+        BaseVector::loadedVectorShared(vector), arrowArray, pool, options);
+    return;
+  }
+  auto* holder = static_cast<BoltToArrowBridgeHolder*>(arrowArray.private_data);
+  BOLT_CHECK(holder->reusable());
+  BOLT_CHECK(holder->ownsReleaseState());
+  try {
+    if (vector->encoding() == VectorEncoding::Simple::CONSTANT &&
+        options.flattenConstant && vector->valueVector() != nullptr &&
+        !vector->wrappedVector()->isFlatEncoding()) {
+      auto copiedVector = BaseVector::copy(*vector);
+      exportToArrowImpl(
+          *copiedVector,
+          Selection(vector->size()),
+          options,
+          arrowArray,
+          pool,
+          true);
+      return;
+    }
+    exportToArrowImpl(
+        *vector, Selection(vector->size()), options, arrowArray, pool, true);
+  } catch (...) {
+    holder->abortReusableArray(arrowArray);
+    throw;
+  }
+}
+
+void releaseReusableArrowArray(ArrowArray& arrowArray) {
+  auto* holder = static_cast<BoltToArrowBridgeHolder*>(arrowArray.private_data);
+  BOLT_CHECK(holder == nullptr || holder->reusable());
+  BOLT_CHECK(holder == nullptr || holder->ownsReleaseState());
+  if (arrowArray.release != nullptr) {
+    arrowArray.release(&arrowArray);
+  }
+  if (holder != nullptr) {
+    holder->releaseResources();
+    delete holder;
+  }
+  arrowArray.private_data = nullptr;
+  arrowArray.release = nullptr;
+}
+
+} // namespace
 
 void exportToArrow(
     const VectorPtr& vec,
@@ -3124,5 +3553,352 @@ VectorPtr importFromArrowAsOwner(
     memory::MemoryPool* pool) {
   return importFromArrowImplWithMeasure(
       options, arrowSchema, arrowArray, pool, false);
+}
+
+namespace {
+
+struct SchemaSignature {
+  uint64_t hash{1469598103934665603ULL};
+  uint32_t nodes{0};
+  uint32_t fields{0};
+
+  bool operator==(const SchemaSignature& other) const {
+    return hash == other.hash && nodes == other.nodes && fields == other.fields;
+  }
+};
+
+void mixSignature(SchemaSignature& signature, uint64_t value) {
+  signature.hash ^= value;
+  signature.hash *= 1099511628211ULL;
+}
+
+void mixBytes(SchemaSignature& signature, const char* data, size_t size) {
+  for (size_t i = 0; i < size; ++i) {
+    mixSignature(signature, static_cast<uint8_t>(data[i]));
+  }
+  mixSignature(signature, size);
+}
+
+void mixStringView(SchemaSignature& signature, std::string_view value) {
+  mixBytes(signature, value.data(), value.size());
+}
+
+void mixEncodingSignature(
+    const BaseVector& vector,
+    SchemaSignature& signature) {
+  ++signature.nodes;
+  mixSignature(signature, static_cast<uint64_t>(vector.encoding()));
+
+  switch (vector.encoding()) {
+    case VectorEncoding::Simple::ROW: {
+      const auto& rows = *vector.asUnchecked<RowVector>();
+      for (size_t i = 0; i < rows.childrenSize(); ++i) {
+        mixEncodingSignature(*rows.childAt(i)->loadedVector(), signature);
+      }
+      break;
+    }
+    case VectorEncoding::Simple::VARIANT: {
+      const auto& variant = *vector.asUnchecked<VariantVector>();
+      for (size_t i = 0; i < variant.childrenSize(); ++i) {
+        mixEncodingSignature(*variant.childAt(i)->loadedVector(), signature);
+      }
+      break;
+    }
+    case VectorEncoding::Simple::ARRAY: {
+      const auto& arrays = *vector.asUnchecked<ArrayVector>();
+      mixEncodingSignature(*arrays.elements()->loadedVector(), signature);
+      break;
+    }
+    case VectorEncoding::Simple::MAP: {
+      const auto& maps = *vector.asUnchecked<MapVector>();
+      mixEncodingSignature(*maps.mapKeys()->loadedVector(), signature);
+      mixEncodingSignature(*maps.mapValues()->loadedVector(), signature);
+      break;
+    }
+    case VectorEncoding::Simple::DICTIONARY:
+    case VectorEncoding::Simple::CONSTANT:
+      if (vector.valueVector() != nullptr) {
+        mixEncodingSignature(*vector.valueVector()->loadedVector(), signature);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+SchemaSignature makeSchemaSignature(
+    const VectorPtr& vector,
+    const ArrowOptions& options,
+    const std::vector<std::string>& fieldNames) {
+  SchemaSignature signature;
+  mixSignature(signature, static_cast<uint64_t>(vector->type()->kind()));
+  mixSignature(signature, vector->type()->size());
+  mixSignature(signature, options.flattenDictionary ? 1 : 0);
+  mixSignature(signature, options.flattenConstant ? 1 : 0);
+  mixSignature(signature, static_cast<uint64_t>(options.timestampUnit));
+  mixSignature(signature, options.timestampTimeZone.has_value() ? 1 : 0);
+  if (options.timestampTimeZone.has_value()) {
+    mixStringView(signature, *options.timestampTimeZone);
+  }
+  mixSignature(signature, options.exportToView ? 1 : 0);
+  mixSignature(signature, options.useLargeString ? 1 : 0);
+  mixSignature(signature, options.stringViewCopyValues ? 1 : 0);
+  mixSignature(signature, options.exportToArrowIPC ? 1 : 0);
+  for (const auto& fieldName : fieldNames) {
+    ++signature.fields;
+    mixStringView(signature, fieldName);
+  }
+  mixEncodingSignature(*vector, signature);
+  return signature;
+}
+
+class ArraySlot {
+ public:
+  ArraySlot() {
+    initializeReusableArrowArray(array_);
+  }
+
+  ArraySlot(const ArraySlot&) = delete;
+  ArraySlot& operator=(const ArraySlot&) = delete;
+
+  ~ArraySlot() {
+    releaseReusableArrowArray(array_);
+  }
+
+  bool tryExport(
+      const VectorPtr& vector,
+      memory::MemoryPool* pool,
+      const ArrowOptions& options) {
+    // The consumer's array release callback returns this lease. The source
+    // ArrowArray may already look released after ownership is moved.
+    auto* holder = static_cast<BoltToArrowBridgeHolder*>(array_.private_data);
+    BOLT_CHECK_NOT_NULL(holder);
+    if (!holder->tryAcquireReusableSlot()) {
+      return false;
+    }
+
+    try {
+      exportToReusableArrowArray(vector, array_, pool, options);
+      return true;
+    } catch (...) {
+      releaseReusableArrowArray(array_);
+      initializeReusableArrowArray(array_);
+      throw;
+    }
+  }
+
+  ArrowArray& array() {
+    return array_;
+  }
+
+  void release() {
+    if (array_.release != nullptr) {
+      array_.release(&array_);
+    }
+  }
+
+ private:
+  ArrowArray array_{};
+};
+
+struct CachedSchema {
+  CachedSchema() = default;
+  CachedSchema(const CachedSchema&) = delete;
+  CachedSchema& operator=(const CachedSchema&) = delete;
+
+  ~CachedSchema() {
+    if (schema.release != nullptr) {
+      schema.release(&schema);
+    }
+  }
+
+  ArrowSchema schema{};
+  TypePtr type;
+  // ArrowSchema::name points into these strings.
+  std::vector<std::string> fieldNames;
+};
+
+class SchemaCache {
+ public:
+  std::pair<std::shared_ptr<CachedSchema>, bool> get(
+      const VectorPtr& vector,
+      const ArrowOptions& options,
+      const std::vector<std::string>& fieldNames,
+      memory::MemoryPool* pool) {
+    const auto signature = makeSchemaSignature(vector, options, fieldNames);
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The signature covers encoding and options; operator== validates the
+    // logical type, including RowType field names, and protects against hash
+    // collisions.
+    if (schema_ != nullptr && signature_.has_value() &&
+        *signature_ == signature && *schema_->type == *vector->type()) {
+      return {schema_, false};
+    }
+
+    auto schema = std::make_shared<CachedSchema>();
+    schema->type = vector->type();
+    schema->fieldNames = fieldNames;
+    try {
+      bytedance::bolt::exportToArrow(
+          vector, schema->schema, options, schema->fieldNames, pool);
+    } catch (...) {
+      if (schema->schema.release != nullptr) {
+        schema->schema.release(&schema->schema);
+      }
+      throw;
+    }
+
+    schema_ = std::move(schema);
+    signature_ = signature;
+    return {schema_, true};
+  }
+
+ private:
+  std::mutex mutex_;
+  std::shared_ptr<CachedSchema> schema_;
+  std::optional<SchemaSignature> signature_;
+};
+
+struct ExportHolder {
+  std::shared_ptr<ArraySlot> slot;
+  std::unique_ptr<ArrowArray> fallbackArray;
+  std::shared_ptr<CachedSchema> schema;
+  // Schema and array may be released independently and on different threads.
+  // Keep shared state until both release callbacks have run.
+  std::atomic_uint8_t releaseCount{0};
+
+  ArrowArray& sourceArray() {
+    return slot != nullptr ? slot->array() : *fallbackArray;
+  }
+
+  void releaseArray() {
+    if (slot != nullptr) {
+      slot->release();
+      slot.reset();
+      return;
+    }
+    if (fallbackArray != nullptr && fallbackArray->release != nullptr) {
+      fallbackArray->release(fallbackArray.get());
+    }
+    fallbackArray.reset();
+  }
+};
+
+void releaseArrowArrayBatchView(ArrowArray* array) {
+  if (array == nullptr || array->release == nullptr) {
+    return;
+  }
+  auto* holder = static_cast<ExportHolder*>(array->private_data);
+  array->release = nullptr;
+  array->private_data = nullptr;
+  if (holder != nullptr) {
+    holder->releaseArray();
+    if (holder->releaseCount.fetch_add(1) == 1) {
+      delete holder;
+    }
+  }
+}
+
+void releaseArrowSchemaBatchView(ArrowSchema* schema) {
+  if (schema == nullptr || schema->release == nullptr) {
+    return;
+  }
+  auto* holder = static_cast<ExportHolder*>(schema->private_data);
+  schema->release = nullptr;
+  schema->private_data = nullptr;
+  if (holder != nullptr && holder->releaseCount.fetch_add(1) == 1) {
+    delete holder;
+  }
+}
+
+} // namespace
+
+class ReusableArrowBatchPool::Impl {
+ public:
+  explicit Impl(size_t numSlots) {
+    slots_.reserve(numSlots);
+    for (size_t i = 0; i < numSlots; ++i) {
+      slots_.push_back(std::make_shared<ArraySlot>());
+    }
+  }
+
+  size_t size() const {
+    return slots_.size();
+  }
+
+  bool exportToArrow(
+      const VectorPtr& vector,
+      memory::MemoryPool* pool,
+      const ArrowOptions& options,
+      ArrowSchema* schema,
+      ArrowArray* array,
+      const std::vector<std::string>& fieldNames) {
+    BOLT_CHECK_NOT_NULL(schema);
+    BOLT_CHECK_NOT_NULL(array);
+
+    auto loadedVector = vector->encoding() == VectorEncoding::Simple::LAZY
+        ? BaseVector::loadedVectorShared(vector)
+        : vector;
+    auto holder = std::make_unique<ExportHolder>();
+    for (auto& slot : slots_) {
+      if (slot->tryExport(loadedVector, pool, options)) {
+        holder->slot = slot;
+        break;
+      }
+    }
+    if (holder->slot == nullptr) {
+      holder->fallbackArray = std::make_unique<ArrowArray>();
+      bytedance::bolt::exportToArrow(
+          loadedVector, *holder->fallbackArray, pool, options);
+    }
+
+    bool schemaExported = false;
+    try {
+      std::tie(holder->schema, schemaExported) =
+          schemaCache_.get(loadedVector, options, fieldNames, pool);
+    } catch (...) {
+      holder->releaseArray();
+      throw;
+    }
+
+    auto* rawHolder = holder.release();
+    *schema = rawHolder->schema->schema;
+    schema->release = releaseArrowSchemaBatchView;
+    schema->private_data = rawHolder;
+
+    *array = rawHolder->sourceArray();
+    array->release = releaseArrowArrayBatchView;
+    array->private_data = rawHolder;
+    return schemaExported;
+  }
+
+ private:
+  std::vector<std::shared_ptr<ArraySlot>> slots_;
+  SchemaCache schemaCache_;
+};
+
+ReusableArrowBatchPool::ReusableArrowBatchPool(size_t numSlots)
+    : impl_(std::make_unique<Impl>(numSlots)) {}
+
+ReusableArrowBatchPool::ReusableArrowBatchPool(
+    ReusableArrowBatchPool&& other) noexcept = default;
+
+ReusableArrowBatchPool& ReusableArrowBatchPool::operator=(
+    ReusableArrowBatchPool&& other) noexcept = default;
+
+ReusableArrowBatchPool::~ReusableArrowBatchPool() = default;
+
+size_t ReusableArrowBatchPool::size() const {
+  return impl_->size();
+}
+
+bool ReusableArrowBatchPool::exportToArrow(
+    const VectorPtr& vector,
+    memory::MemoryPool* pool,
+    const ArrowOptions& options,
+    ArrowSchema* schema,
+    ArrowArray* array,
+    const std::vector<std::string>& fieldNames) {
+  return impl_->exportToArrow(vector, pool, options, schema, array, fieldNames);
 }
 } // namespace bytedance::bolt

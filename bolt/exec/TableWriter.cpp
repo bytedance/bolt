@@ -267,6 +267,25 @@ void TableWriter::updateStats(const connector::DataSink::Stats& stats) {
     }
     lockedStats->addRuntimeStat(
         "numWrittenFiles", RuntimeCounter(stats.numWrittenFiles));
+    lockedStats->addRuntimeStat(
+        "writeRecodeWallNanos",
+        RuntimeCounter(
+            stats.writeRecodeWallNanos, RuntimeCounter::Unit::kNanos));
+    lockedStats->addRuntimeStat(
+        "writeEncodeWallNanos",
+        RuntimeCounter(
+            stats.writeEncodeWallNanos, RuntimeCounter::Unit::kNanos));
+    lockedStats->addRuntimeStat(
+        "writeCompressionWallNanos",
+        RuntimeCounter(
+            stats.writeCompressionWallNanos, RuntimeCounter::Unit::kNanos));
+    lockedStats->addRuntimeStat(
+        "writeIOWallNanos",
+        RuntimeCounter(stats.writeIOWallNanos, RuntimeCounter::Unit::kNanos));
+    lockedStats->addRuntimeStat(
+        "writeFinalizeWallNanos",
+        RuntimeCounter(
+            stats.writeFinalizeWallNanos, RuntimeCounter::Unit::kNanos));
   }
   if (!stats.spillStats.empty()) {
     recordSpillStats(stats.spillStats);

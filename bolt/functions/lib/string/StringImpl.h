@@ -69,7 +69,11 @@ FOLLY_ALWAYS_INLINE bool upper(TOutString& output, const TInString& input) {
 }
 
 /// Perform lower for a UTF8 string
-template <bool ascii, typename TOutString, typename TInString>
+template <
+    bool ascii,
+    bool sparkCompatible = false,
+    typename TOutString,
+    typename TInString>
 FOLLY_ALWAYS_INLINE bool lower(TOutString& output, const TInString& input) {
   if constexpr (ascii) {
     output.resize(input.size());
@@ -80,7 +84,7 @@ FOLLY_ALWAYS_INLINE bool lower(TOutString& output, const TInString& input) {
     //     lowerUnicode(output.data(), output.size(), input.data(),
     //     input.size());
     // output.resize(size);
-    std::string lowerStr = toLower<ascii>(input);
+    std::string lowerStr = toLower<ascii, sparkCompatible>(input);
     output.resize(lowerStr.size());
     std::memcpy(output.data(), lowerStr.data(), lowerStr.size());
   }

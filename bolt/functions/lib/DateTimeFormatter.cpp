@@ -1151,8 +1151,9 @@ uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
         size += 2;
         break;
       case DateTimeFormatSpecifier::YEAR_OF_ERA:
-        // Timestamp is in [-32767-01-01, 32767-12-31] range.
-        size += std::max((int)token.pattern.minRepresentDigits, 6);
+        // Timestamp covers years up to +/-292278994 (9 digits), plus one
+        // char for a leading sign.
+        size += std::max((int)token.pattern.minRepresentDigits, 9) + 1;
         break;
       case DateTimeFormatSpecifier::DAY_OF_WEEK_0_BASED:
       case DateTimeFormatSpecifier::DAY_OF_WEEK_1_BASED:
@@ -1166,12 +1167,16 @@ uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
       case DateTimeFormatSpecifier::WEEK_YEAR:
         [[fallthrough]];
       case DateTimeFormatSpecifier::YEAR:
-        // Timestamp is in [-32767-01-01, 32767-12-31] range.
+        // Timestamp covers years up to +/-292278994 (9 digits), plus one
+        // char for a leading sign.
         size += token.pattern.minRepresentDigits == 2
             ? 2
-            : std::max((int)token.pattern.minRepresentDigits, 6);
+            : std::max((int)token.pattern.minRepresentDigits, 9) + 1;
         break;
       case DateTimeFormatSpecifier::CENTURY_OF_ERA:
+        // Century of +/-292278994 has up to 7 digits.
+        size += std::max((int)token.pattern.minRepresentDigits, 7);
+        break;
       case DateTimeFormatSpecifier::DAY_OF_YEAR:
         size += std::max((int)token.pattern.minRepresentDigits, 3);
         break;
@@ -1293,21 +1298,15 @@ int32_t DateTimeFormatter::format(
                 padContent(std::abs(year) % 100, '0', 2, maxResultEnd, result);
           } else {
             year = year <= 0 ? std::abs(year - 1) : year;
-            // spark compatibility: year should contain sign if > 9999.
-            // However, if a timezone is applied and the same instant in UTC
-            // has year-of-era <= 9999 (e.g., Asia/Shanghai at
-            // 10000-01-01 07:59:59 equals 9999-12-31 23:59:59 UTC), suppress
-            // the leading '+'.
-            bool addPlus = ::bytedance::bolt::kSparkCompatible && year > 9999 &&
-                token.pattern.minRepresentDigits >= 4;
-            if (addPlus && timezone != nullptr) {
-              const auto civilDateTimeUtc =
-                  util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
-              const auto utcYearEra = civilDateTimeUtc.date.year <= 0
-                  ? std::abs(civilDateTimeUtc.date.year - 1)
-                  : civilDateTimeUtc.date.year;
-              addPlus = utcYearEra > 9999;
-            }
+            // spark compatibility: Java DateTimeFormatter uses
+            // SignStyle.EXCEEDS_PAD for 4+ pattern letters, printing '+'
+            // when the year has more digits than the pattern width; legacy
+            // SimpleDateFormat never prints '+'. Like Java, the decision is
+            // based on the local (timezone-adjusted) year only.
+            bool addPlus = ::bytedance::bolt::kSparkCompatible &&
+                timePolicy != TimePolicy::LEGACY &&
+                token.pattern.minRepresentDigits >= 4 && year > 0 &&
+                countDigits(year) > token.pattern.minRepresentDigits;
             if (addPlus) {
               *result++ = '+';
             }
@@ -1367,10 +1366,11 @@ int32_t DateTimeFormatter::format(
             }
             year = weekYear;
           }
-          if (::bytedance::bolt::kSparkCompatible && year < 0 &&
+          if (::bytedance::bolt::kSparkCompatible && year <= 0 &&
               (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
-            // for spark compatibility, year should be positive for LEGACY
-            // policy or has Era
+            // for spark compatibility, year should be the positive
+            // year-of-era for LEGACY policy or when the pattern has an Era:
+            // proleptic year 0 is 1 BC, -1 is 2 BC, etc.
             year = abs(year) + 1;
           }
           if (token.pattern.minRepresentDigits == 2) {
@@ -1383,21 +1383,15 @@ int32_t DateTimeFormatter::format(
                 maxResultEnd,
                 result);
           } else {
-            // spark compatibility: year should contain sign if > 9999.
-            // If a timezone is applied and the same instant in UTC has
-            // (adjusted) year <= 9999, suppress the leading '+'.
-            bool addPlus = ::bytedance::bolt::kSparkCompatible && year > 9999 &&
-                token.pattern.minRepresentDigits >= 4;
-            if (addPlus && timezone != nullptr) {
-              const auto civilDateTimeUtc =
-                  util::toCivilDateTime(timestamp, allowOverflow, isPrecision);
-              auto utcYear = civilDateTimeUtc.date.year;
-              if (utcYear < 0 &&
-                  (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
-                utcYear = std::abs(utcYear) + 1;
-              }
-              addPlus = utcYear > 9999;
-            }
+            // spark compatibility: Java DateTimeFormatter uses
+            // SignStyle.EXCEEDS_PAD for 4+ pattern letters, printing '+'
+            // when the year has more digits than the pattern width; legacy
+            // SimpleDateFormat never prints '+'. Like Java, the decision is
+            // based on the local (timezone-adjusted) year only.
+            bool addPlus = ::bytedance::bolt::kSparkCompatible &&
+                timePolicy != TimePolicy::LEGACY &&
+                token.pattern.minRepresentDigits >= 4 && year > 0 &&
+                countDigits(year) > token.pattern.minRepresentDigits;
             if (addPlus) {
               *result++ = '+';
             }

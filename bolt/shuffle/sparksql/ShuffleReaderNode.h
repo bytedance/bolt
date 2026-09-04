@@ -143,6 +143,8 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   std::shared_ptr<RowBufferPool> rowBufferPool_{nullptr};
   std::shared_ptr<ShuffleRowToColumnarConverter> row2ColConverter_{nullptr};
 
+  std::shared_ptr<ColumnBufferPool> columnBufferPool_{nullptr};
+
   std::unique_ptr<BoltColumnarBatchDeserializer> columnarBatchDeserializer_;
 
   bool isRowBased_ = false;

@@ -796,7 +796,7 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
             2000000000000000000ULL,
             3000000000000000000ULL})});
 
-  if (::bytedance::bolt::kSparkCompatible) {
+  if constexpr (::bytedance::bolt::kSparkCompatible) {
     const std::string sample(getExampleFilePath("uint.parquet"));
     dwio::common::ReaderOptions readerOptions{leafPool_.get()};
     readerOptions.setFileSchema(rowType);
@@ -812,7 +812,7 @@ TEST_F(ParquetReaderTest, parseUnsignedInt4) {
 }
 
 TEST_F(ParquetReaderTest, rejectUnsupportedUInt64DecimalTypes) {
-  if (!::bytedance::bolt::kSparkCompatible) {
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();
   }
   const std::vector<TypePtr> unsupportedTypes = {
@@ -874,6 +874,87 @@ TEST_F(ParquetReaderTest, parseDate) {
       dateSchema(), *rowReader, expected, *leafPool_);
 }
 
+TEST_F(ParquetReaderTest, dateToVarcharWithVarcharIntegerCastBlocked) {
+  functions::prestosql::registerAllScalarFunctions();
+
+  const std::string sample(getExampleFilePath("date.parquet"));
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+
+  auto readSchema = ROW({"date"}, {VARCHAR()});
+  auto queryCtx = core::QueryCtx::create();
+  exec::SimpleExpressionEvaluator evaluator(queryCtx.get(), leafPool_.get());
+  auto scanSpec = std::make_shared<ScanSpec>("");
+  scanSpec->setExpressionEvaluator(&evaluator);
+  scanSpec->addAllChildFields(*readSchema);
+
+  auto rowReaderOpts = getReaderOpts(readSchema);
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto createRowReader = [&]() {
+    return createReader(sample, readerOptions)->createRowReader(rowReaderOpts);
+  };
+
+  if (::bytedance::bolt::kSparkCompatible) {
+    using CastMask = dwio::common::ParquetReaderImplicitCastMask;
+    rowReaderOpts.setParquetReaderImplicitCastMask(
+        static_cast<int64_t>(CastMask::kVarcharInteger));
+    EXPECT_NO_THROW(createRowReader());
+    rowReaderOpts.setParquetReaderImplicitCastMask(
+        static_cast<int64_t>(CastMask::kVarcharDate));
+    EXPECT_THROW(createRowReader(), BoltRuntimeError);
+    rowReaderOpts.setParquetReaderImplicitCastMask(
+        static_cast<int64_t>(CastMask::kAll));
+    EXPECT_THROW(createRowReader(), BoltRuntimeError);
+  }
+
+  rowReaderOpts.setParquetReaderImplicitCastMask(static_cast<int64_t>(
+      dwio::common::ParquetReaderImplicitCastMask::kVarcharInteger));
+  auto rowReader = createRowReader();
+
+  VectorPtr result = BaseVector::create(readSchema, 0, leafPool_.get());
+  ASSERT_EQ(rowReader->next(25, result), 25);
+  auto dates = loadedFlatChildAt<StringView>(result->as<RowVector>(), 0);
+  ASSERT_NE(dates, nullptr);
+  // DATE is stored as epoch days and this reader cast preserves the raw value.
+  EXPECT_EQ(dates->valueAt(0), "-5");
+  EXPECT_EQ(dates->valueAt(5), "0");
+  EXPECT_EQ(dates->valueAt(24), "19");
+}
+
+TEST_F(ParquetReaderTest, varcharToDateWithVarcharDateCastBlocked) {
+  if constexpr (!::bytedance::bolt::kSparkCompatible) {
+    return;
+  }
+
+  auto data = makeRowVector(
+      {makeFlatVector<StringView>({"1969-12-27", "1970-01-01", "1970-01-20"})});
+  auto file = writeTempParquet({data});
+
+  auto readSchema = ROW({"c0"}, {DATE()});
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto queryCtx = core::QueryCtx::create();
+  exec::SimpleExpressionEvaluator evaluator(queryCtx.get(), leafPool_.get());
+  auto scanSpec = std::make_shared<ScanSpec>("");
+  scanSpec->setExpressionEvaluator(&evaluator);
+  scanSpec->addAllChildFields(*readSchema);
+  auto rowReaderOpts = getReaderOpts(readSchema);
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto createRowReader = [&]() {
+    return createReader(file->getPath(), readerOptions)
+        ->createRowReader(rowReaderOpts);
+  };
+
+  using CastMask = dwio::common::ParquetReaderImplicitCastMask;
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(CastMask::kVarcharInteger));
+  EXPECT_NO_THROW(createRowReader());
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(CastMask::kVarcharDate));
+  EXPECT_THROW(createRowReader(), BoltRuntimeError);
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(CastMask::kAll));
+  EXPECT_THROW(createRowReader(), BoltRuntimeError);
+}
+
 TEST_F(ParquetReaderTest, parseRowMapArray) {
   // sample.parquet holds one row of type (ROW(BIGINT c0, MAP(VARCHAR,
   // ARRAY(INTEGER)) c1) c)
@@ -924,6 +1005,56 @@ TEST_F(ParquetReaderTest, projectNoColumns) {
   ASSERT_TRUE(rowReader->next(kBatchSize, result));
   EXPECT_EQ(result->size(), 10);
   ASSERT_FALSE(rowReader->next(kBatchSize, result));
+}
+
+TEST_F(ParquetReaderTest, projectNoColumnsWithAllImplicitCastsBlocked) {
+  // A count(*) projection doesn't read any columns and therefore doesn't need
+  // any implicit casts, even when all of them are blocked.
+  auto rowType = ROW({}, {});
+  bytedance::bolt::dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  auto reader = createReader(getExampleFilePath("sample.parquet"), readerOpts);
+  RowReaderOptions rowReaderOpts;
+  rowReaderOpts.setScanSpec(makeScanSpec(rowType));
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(dwio::common::ParquetReaderImplicitCastMask::kAll));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+  auto result = BaseVector::create(rowType, 1, leafPool_.get());
+  constexpr int kBatchSize = 100;
+  ASSERT_TRUE(rowReader->next(kBatchSize, result));
+  EXPECT_EQ(result->size(), 10);
+  ASSERT_TRUE(rowReader->next(kBatchSize, result));
+  EXPECT_EQ(result->size(), 10);
+  ASSERT_FALSE(rowReader->next(kBatchSize, result));
+}
+
+TEST_F(ParquetReaderTest, projectStructSubsetWithAllImplicitCastsBlocked) {
+  auto nested = makeRowVector(
+      {"a", "b", "c"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeFlatVector<StringView>({"x", "y", "z"}),
+       makeFlatVector<double>({1.5, 2.5, 3.5})});
+  auto data = makeRowVector(
+      {"id", "nested"}, {makeFlatVector<int32_t>({10, 20, 30}), nested});
+  auto file = writeTempParquet({data});
+
+  // Scan the nested struct, but project only a subset of its children.
+  auto projectedType = ROW({"nested"}, {ROW({"a", "c"}, {BIGINT(), DOUBLE()})});
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(file->getPath(), readerOptions);
+  auto rowReaderOpts = getReaderOpts(projectedType);
+  rowReaderOpts.setScanSpec(makeScanSpec(projectedType));
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(dwio::common::ParquetReaderImplicitCastMask::kAll));
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  auto expected = makeRowVector(
+      {"nested"},
+      {makeRowVector(
+          {"a", "c"},
+          {makeFlatVector<int64_t>({1, 2, 3}),
+           makeFlatVector<double>({1.5, 2.5, 3.5})})});
+  assertReadWithReaderAndExpected(
+      projectedType, *rowReader, expected, *leafPool_);
 }
 
 TEST_F(ParquetReaderTest, producesLazyVectorsForProjectedColumns) {
@@ -2768,6 +2899,18 @@ TEST_F(ParquetReaderTest, integerToVarcharSchemaMismatchCast) {
   auto rowReaderOpts = getReaderOpts(readSchema);
   rowReaderOpts.setScanSpec(scanSpec);
 
+  if (::bytedance::bolt::kSparkCompatible) {
+    using CastMask = dwio::common::ParquetReaderImplicitCastMask;
+    rowReaderOpts.setParquetReaderImplicitCastMask(
+        static_cast<int64_t>(CastMask::kVarcharInteger));
+    EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
+    rowReaderOpts.setParquetReaderImplicitCastMask(
+        static_cast<int64_t>(CastMask::kAll));
+    EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
+    rowReaderOpts.setParquetReaderImplicitCastMask(
+        static_cast<int64_t>(CastMask::kNone));
+  }
+
   // IntegerColumnReader's constructor calls makeCastExpr(), which
   // accesses scanSpec_->getExpressionEvaluator() on a child ScanSpec.
   auto rowReader = reader->createRowReader(rowReaderOpts);
@@ -2827,11 +2970,21 @@ TEST_F(ParquetReaderTest, varcharToBigintSchemaMismatchCast) {
   auto rowReaderOpts = getReaderOpts(readSchema);
   rowReaderOpts.setScanSpec(scanSpec);
 
-  // In non-SPARK builds this is rejected by ParquetColumnReader::matchType.
   if (!::bytedance::bolt::kSparkCompatible) {
     EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
     return;
   }
+
+  // Spark allows this implicit cast by default, but callers can opt out.
+  using CastMask = dwio::common::ParquetReaderImplicitCastMask;
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(CastMask::kVarcharInteger));
+  EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(CastMask::kAll));
+  EXPECT_THROW(reader->createRowReader(rowReaderOpts), BoltRuntimeError);
+  rowReaderOpts.setParquetReaderImplicitCastMask(
+      static_cast<int64_t>(CastMask::kNone));
 
   // In SPARK-compatible builds, schema mismatch is allowed and cast is applied.
   auto rowReader = reader->createRowReader(rowReaderOpts);

@@ -85,6 +85,7 @@ target_link_libraries(
   bolt_common_hyperloglog
   bolt_functions_json
   bolt_functions_lib
+  bolt_functions_string
   bolt_expression
   bolt_type_tz
   bolt_presto_types

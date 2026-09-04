@@ -122,6 +122,13 @@ struct RowNumberColumnInfo {
   std::string name;
 };
 
+enum class ParquetReaderImplicitCastMask : int64_t {
+  kNone = 0,
+  kVarcharInteger = 1,
+  kVarcharDate = 1 << 1,
+  kAll = -1,
+};
+
 /**
  * Options for creating a RowReader.
  */
@@ -174,6 +181,7 @@ class RowReaderOptions {
   /// selective queries. Defaults to true.
   bool enableDictionaryFilter_ = false;
   bool disableFloatingPointToVarcharMetadataFilter_{false};
+  int64_t parquetReaderImplicitCastMask_{0};
 
   int32_t decodeRepDefPageCount_{10};
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
@@ -484,6 +492,14 @@ class RowReaderOptions {
     return disableFloatingPointToVarcharMetadataFilter_;
   }
 
+  void setParquetReaderImplicitCastMask(int64_t parquetReaderImplicitCastMask) {
+    parquetReaderImplicitCastMask_ = parquetReaderImplicitCastMask;
+  }
+
+  int64_t parquetReaderImplicitCastMask() const {
+    return parquetReaderImplicitCastMask_;
+  }
+
   void setDecodeRepDefPageCount(int32_t pageCount) {
     decodeRepDefPageCount_ = pageCount;
   }
@@ -568,6 +584,8 @@ class RowReaderOptions {
     ss << "enableDictionaryFilter_=" << enableDictionaryFilter_ << ", ";
     ss << "disableFloatingPointToVarcharMetadataFilter_="
        << disableFloatingPointToVarcharMetadataFilter_ << ", ";
+    ss << "parquetReaderImplicitCastMask_=" << parquetReaderImplicitCastMask_
+       << ", ";
     ss << "decodeRepDefPageCount_=" << decodeRepDefPageCount_;
     ss << "parquetRepDefMemoryLimit_=" << parquetRepDefMemoryLimit_ << ", ";
     ss << "maxBatchBytes_=" << maxBatchBytes_ << ", ";

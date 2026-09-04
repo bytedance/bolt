@@ -95,7 +95,8 @@ ThrustJITv2* ThrustJITv2::getInstance() {
 
 CompiledModuleSP ThrustJITv2::CompileModule(
     std::function<bool(llvm::Module&)> irGenerator,
-    const std::string& funcName) {
+    const std::string& funcName,
+    std::shared_ptr<void> userData) {
   {
     std::unique_lock lock(mutex_);
     if (auto cached = compiledModuleCache_.get(funcName); cached != nullptr) {
@@ -159,6 +160,7 @@ CompiledModuleSP ThrustJITv2::CompileModule(
 
   auto compiledModule = std::make_shared<CompiledModule>();
   compiledModule->setKey(funcName);
+  compiledModule->setUserData(std::move(userData));
   for (const auto& fn : funcNames) {
     auto symbol = jit_->lookup(fn);
     if (!symbol) {
