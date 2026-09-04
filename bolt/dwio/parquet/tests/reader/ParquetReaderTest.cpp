@@ -38,6 +38,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/QueryCtx.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
+#include "bolt/dwio/common/MetadataFilter.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/dwio/parquet/reader/RepeatedColumnReader.h"
 #include "bolt/dwio/parquet/tests/ParquetTestBase.h"
@@ -401,6 +402,72 @@ TEST_F(ParquetReaderTest, decimalReaderCastValueFilters) {
       ->setFilter(exec::equal(int64_t{10'000}));
   BOLT_ASSERT_THROW(
       rowReader->resetFilterCaches(),
+      "Cannot apply BIGINT filter to physical BIGINT Parquet column c0");
+}
+
+TEST_F(ParquetReaderTest, decimalReaderCastMetadataFilter) {
+  constexpr vector_size_t kSize = 1'000;
+  auto data = makeRowVector(
+      {"c0"},
+      {makeFlatVector<int64_t>(
+          kSize, [](vector_size_t) { return 100; }, nullptr, DECIMAL(10, 2))});
+  auto file = writeTempParquet({data});
+
+  auto requestedSchema = ROW({"c0"}, {DECIMAL(15, 4)});
+  auto scanSpec = makeScanSpec(requestedSchema);
+  auto queryCtx = core::QueryCtx::create();
+  exec::SimpleExpressionEvaluator evaluator(queryCtx.get(), leafPool_.get());
+  const auto requestedType = DECIMAL(15, 4);
+  auto offsets = allocateOffsets(1, pool());
+  offsets->asMutable<vector_size_t>()[0] = 0;
+  auto sizes = allocateSizes(1, pool());
+  sizes->asMutable<vector_size_t>()[0] = 2;
+  auto filterValues = makeFlatVector<int64_t>({10'000, 30'000}, requestedType);
+  auto filterArray = std::make_shared<ArrayVector>(
+      pool(), ARRAY(requestedType), nullptr, 1, offsets, sizes, filterValues);
+  auto typedExpr = std::make_shared<core::CallTypedExpr>(
+      BOOLEAN(),
+      std::vector<core::TypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(requestedType, "c0"),
+          std::make_shared<core::ConstantTypedExpr>(filterArray)},
+      "in");
+  auto metadataFilter =
+      std::make_shared<MetadataFilter>(*scanSpec, *typedExpr, &evaluator, true);
+  ASSERT_EQ(scanSpec->childByName("c0")->numMetadataFilters(), 1);
+
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(file->getPath(), readerOptions);
+  auto rowReaderOptions = getReaderOpts(requestedSchema);
+  rowReaderOptions.setScanSpec(scanSpec);
+  rowReaderOptions.setMetadataFilter(metadataFilter);
+  rowReaderOptions.setEnableDictionaryFilter(true);
+  auto rowReader = reader->createRowReader(rowReaderOptions);
+
+  auto result = BaseVector::create(requestedSchema, 0, pool());
+  EXPECT_EQ(rowReader->next(kSize, result), kSize);
+  ASSERT_EQ(result->size(), kSize);
+  EXPECT_EQ(
+      loadedFlatChildAt<int64_t>(result->as<RowVector>(), 0)->valueAt(0),
+      10'000);
+}
+
+TEST_F(ParquetReaderTest, decimalReaderCastFilterOnEmptyFile) {
+  auto fileSchema = ROW({"c0"}, {DECIMAL(10, 2)});
+  auto emptyData = std::static_pointer_cast<RowVector>(
+      BaseVector::create(fileSchema, 0, pool()));
+  auto file = writeTempParquet({emptyData});
+
+  dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  auto reader = createReader(file->getPath(), readerOptions);
+  auto requestedSchema = ROW({"c0"}, {DECIMAL(15, 4)});
+  auto rowReaderOptions = getReaderOpts(requestedSchema);
+  auto scanSpec = makeScanSpec(requestedSchema);
+  scanSpec->getOrCreateChild(Subfield("c0"))
+      ->setFilter(exec::equal(int64_t{10'000}));
+  rowReaderOptions.setScanSpec(scanSpec);
+
+  BOLT_ASSERT_THROW(
+      reader->createRowReader(rowReaderOptions),
       "Cannot apply BIGINT filter to physical BIGINT Parquet column c0");
 }
 

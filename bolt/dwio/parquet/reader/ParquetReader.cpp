@@ -1573,6 +1573,12 @@ class ParquetRowReader::Impl {
         currentRowInGroup_(0),
         schemaHelper_(readerBase_->thriftFileMetaData().schema),
         maxBatchBytes_(options.getMaxBatchBytes()) {
+    if (auto selector = options_.getSelector()) {
+      requestedType_ = selector->getSchema();
+    } else {
+      requestedType_ = readerBase_->schema();
+    }
+
     // Validate the requested type is compatible with what's in the file
     std::function<std::string()> createExceptionContext = [&]() {
       std::string exceptionMessageContext = fmt::format(
@@ -1585,6 +1591,8 @@ class ParquetRowReader::Impl {
           requestedType_->toString());
       return exceptionMessageContext;
     };
+
+    validateReaderCastFilter();
 
     if (rowGroups_.empty()) {
       return; // TODO
@@ -1601,14 +1609,6 @@ class ParquetRowReader::Impl {
         options_.isDictionaryFilterEnabled(),
         options_.getDecodeRepDefPageCount(),
         options_.getParquetRepDefMemoryLimit());
-
-    if (auto selector = options_.getSelector()) {
-      requestedType_ = selector->getSchema();
-    } else {
-      requestedType_ = readerBase_->schema();
-    }
-
-    validateReaderCastFilter();
 
     auto requestedTypeWithId = ReaderBase::createTypeWithId(
         dwio::common::TypeWithId::create(requestedType_),
@@ -1963,6 +1963,9 @@ class ParquetRowReader::Impl {
 
  private:
   void validateReaderCastFilter() const {
+    if (!options_.getScanSpec()) {
+      return;
+    }
     parquet::validateReaderCastFilter(
         readerBase_->schema(), requestedType_, *options_.getScanSpec(), "");
   }

@@ -58,8 +58,15 @@ class IntegerColumnReader : public dwio::common::SelectiveIntegerColumnReader {
       default:
         break;
     }
-    if (params.disableFloatingPointToVarcharMetadataFilter() &&
-        isReaderCastFilterMismatch(fileType_->type(), requestedType->type())) {
+    const auto& physicalType = fileType_->type();
+    const auto& outputType = requestedType->type();
+    const auto readerCastFilterMismatch =
+        isReaderCastFilterMismatch(physicalType, outputType);
+    // Requested-type metadata filters cannot be evaluated against physical
+    // decimal values when the scale or native storage width changes.
+    if (requiresDecimalValueConversion(physicalType, outputType) ||
+        (params.disableFloatingPointToVarcharMetadataFilter() &&
+         readerCastFilterMismatch)) {
       formatData_->as<ParquetData>().disableTypeDependentMetadataFilters();
     }
   }
