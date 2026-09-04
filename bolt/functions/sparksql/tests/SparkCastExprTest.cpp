@@ -704,6 +704,70 @@ TEST_F(SparkCastExprTest, overflow) {
       false);
 }
 
+TEST_F(SparkCastExprTest, floatingPointToIntegralBoundaries) {
+  testCast<float, int32_t>(
+      "integer",
+      {0x1.fffffep30f, 0x1p31f, -0x1p31f},
+      {2'147'483'520,
+       std::numeric_limits<int32_t>::max(),
+       std::numeric_limits<int32_t>::min()});
+  testCast<double, int64_t>(
+      "bigint",
+      {0x1.fffffffffffffp62, 0x1p63, -0x1p63},
+      {9'223'372'036'854'774'784LL,
+       std::numeric_limits<int64_t>::max(),
+       std::numeric_limits<int64_t>::min()});
+
+  testTryCast<double, int32_t>(
+      "integer",
+      {2'147'483'647.0,
+       0x1.fffffffffffffp30,
+       0x1p31,
+       -0x1p31,
+       -2'147'483'648.5,
+       -2'147'483'649.0,
+       std::numeric_limits<double>::quiet_NaN(),
+       std::numeric_limits<double>::infinity(),
+       -std::numeric_limits<double>::infinity()},
+      {std::numeric_limits<int32_t>::max(),
+       std::numeric_limits<int32_t>::max(),
+       std::nullopt,
+       std::numeric_limits<int32_t>::min(),
+       std::numeric_limits<int32_t>::min(),
+       std::nullopt,
+       std::nullopt,
+       std::nullopt,
+       std::nullopt});
+  testTryCast<double, int64_t>(
+      "bigint",
+      {0x1.fffffffffffffp62, 0x1p63, -0x1p63, -0x1.0000000000001p63},
+      {9'223'372'036'854'774'784LL,
+       std::nullopt,
+       std::numeric_limits<int64_t>::min(),
+       std::nullopt});
+  testTryCast<float, int32_t>(
+      "integer",
+      {0x1.fffffep30f, 0x1p31f, -0x1p31f, -0x1.000002p31f},
+      {2'147'483'520,
+       std::nullopt,
+       std::numeric_limits<int32_t>::min(),
+       std::nullopt});
+  testTryCast<double, int16_t>(
+      "smallint",
+      {32'767.75, 32'768.0, -32'768.75, -32'769.0},
+      {std::numeric_limits<int16_t>::max(),
+       std::nullopt,
+       std::numeric_limits<int16_t>::min(),
+       std::nullopt});
+  testTryCast<double, int8_t>(
+      "tinyint",
+      {127.75, 128.0, -128.75, -129.0},
+      {std::numeric_limits<int8_t>::max(),
+       std::nullopt,
+       std::numeric_limits<int8_t>::min(),
+       std::nullopt});
+}
+
 TEST_F(SparkCastExprTest, timestampToString) {
   testCast<Timestamp, std::string>(
       "string",

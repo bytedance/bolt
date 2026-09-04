@@ -364,29 +364,57 @@ class Converter {
       }
     } else if constexpr (fromFloat) {
       if constexpr (truncate) {
-        if (std::isnan(from)) {
-          to = 0;
-          return ConvertStatus::SUCCESS;
-        }
         constexpr TypeKind originKind = ToKind::storage;
         using LimitType = typename util::
             Converter<originKind, void, util::TruncateCastPolicy>::LimitType;
-        if (from > LimitType::maxLimit()) {
-          to = LimitType::max();
-          return ConvertStatus::INTEGER_OVERFLOW;
-        }
-        if (from < LimitType::minLimit()) {
-          to = LimitType::min();
-          return ConvertStatus::INTEGER_OVERFLOW;
-        }
-        if (FOLLY_UNLIKELY(
-                (from > std::numeric_limits<ToType>::max()) ||
-                (from < std::numeric_limits<ToType>::min()))) {
+
+        if constexpr (kIsInSpark) {
+          if (std::isnan(from)) {
+            to = 0;
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
+          if (LimitType::isPositiveOverflow(from)) {
+            to = LimitType::max();
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
+          if (LimitType::isNegativeOverflow(from)) {
+            to = LimitType::min();
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
+
+          using FirstStageType = typename LimitType::FirstStageType;
+          const auto integral = static_cast<FirstStageType>(from);
+          to = static_cast<ToType>(integral);
+          if constexpr (LimitType::kByteOrSmallInt) {
+            if (FOLLY_UNLIKELY(
+                    integral > std::numeric_limits<ToType>::max() ||
+                    integral < std::numeric_limits<ToType>::min())) {
+              return ConvertStatus::INTEGER_OVERFLOW;
+            }
+          }
+          return ConvertStatus::SUCCESS;
+        } else {
+          if (std::isnan(from)) {
+            to = 0;
+            return ConvertStatus::SUCCESS;
+          }
+          if (from > LimitType::maxLimit()) {
+            to = LimitType::max();
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
+          if (from < LimitType::minLimit()) {
+            to = LimitType::min();
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
+          if (FOLLY_UNLIKELY(
+                  (from > std::numeric_limits<ToType>::max()) ||
+                  (from < std::numeric_limits<ToType>::min()))) {
+            to = LimitType::cast(from);
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
           to = LimitType::cast(from);
-          return ConvertStatus::INTEGER_OVERFLOW;
+          return ConvertStatus::SUCCESS;
         }
-        to = LimitType::cast(from);
-        return ConvertStatus::SUCCESS;
       } else {
         if (std::isnan(from)) {
           return ConvertStatus::OTHER_FAILURE;
