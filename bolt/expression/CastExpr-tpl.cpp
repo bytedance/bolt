@@ -48,8 +48,8 @@ constexpr auto kDecimalStringFormat = kIsInSpark
     ? DecimalUtil::DecimalStringFormat::kSpark
     : DecimalUtil::DecimalStringFormat::kPlain;
 
-// convert status to indicate whether conversion behaviors.
-// Note: for INTEGER_OVERFLOW, the output value should save a wrapped value.
+// Conversion status used by the cast policy to decide whether to keep the
+// produced value, throw, or return null.
 enum class ConvertStatus : int8_t {
   SUCCESS,
   INTEGER_OVERFLOW,
@@ -197,6 +197,22 @@ tryIntegerToInteger(const From& from, To& to) {
     // save wrapped value and return overflow status, will handle it in caller
     // function
     to = static_cast<To>(from);
+    return ConvertStatus::INTEGER_OVERFLOW;
+  }
+  to = static_cast<To>(from);
+  return ConvertStatus::SUCCESS;
+}
+
+template <typename From, typename To>
+FOLLY_ALWAYS_INLINE ConvertStatus
+tryFloatingPointToInteger(const From& from, To& to) {
+  using Limits = util::FloatingPointToIntegralLimits<To>;
+  if (FOLLY_UNLIKELY(Limits::isPositiveOverflow(from))) {
+    to = std::numeric_limits<To>::max();
+    return ConvertStatus::INTEGER_OVERFLOW;
+  }
+  if (FOLLY_UNLIKELY(Limits::isNegativeOverflow(from))) {
+    to = std::numeric_limits<To>::min();
     return ConvertStatus::INTEGER_OVERFLOW;
   }
   to = static_cast<To>(from);
@@ -368,58 +384,44 @@ class Converter {
         using LimitType = typename util::
             Converter<originKind, void, util::TruncateCastPolicy>::LimitType;
 
-        if constexpr (kIsInSpark) {
-          if (std::isnan(from)) {
-            to = 0;
-            return ConvertStatus::INTEGER_OVERFLOW;
-          }
-          if (LimitType::isPositiveOverflow(from)) {
-            to = LimitType::max();
-            return ConvertStatus::INTEGER_OVERFLOW;
-          }
-          if (LimitType::isNegativeOverflow(from)) {
-            to = LimitType::min();
-            return ConvertStatus::INTEGER_OVERFLOW;
-          }
-
-          using FirstStageType = typename LimitType::FirstStageType;
-          const auto integral = static_cast<FirstStageType>(from);
-          to = static_cast<ToType>(integral);
-          if constexpr (LimitType::kByteOrSmallInt) {
-            if (FOLLY_UNLIKELY(
-                    integral > std::numeric_limits<ToType>::max() ||
-                    integral < std::numeric_limits<ToType>::min())) {
-              return ConvertStatus::INTEGER_OVERFLOW;
+        if (std::isnan(from)) {
+          to = 0;
+          return kIsInSpark ? ConvertStatus::INTEGER_OVERFLOW
+                            : ConvertStatus::SUCCESS;
+        }
+        if (LimitType::isPositiveOverflow(from)) {
+          to = LimitType::max();
+          if constexpr (kIsInSpark && std::is_same_v<ToType, int64_t>) {
+            // Spark accepts the double-rounded Long.MaxValue boundary and
+            // saturates it using JVM floating point conversion semantics.
+            if (from == LimitType::template firstPositiveOverflow<FromType>()) {
+              return ConvertStatus::SUCCESS;
             }
           }
-          return ConvertStatus::SUCCESS;
-        } else {
-          if (std::isnan(from)) {
-            to = 0;
-            return ConvertStatus::SUCCESS;
-          }
-          if (from > LimitType::maxLimit()) {
-            to = LimitType::max();
-            return ConvertStatus::INTEGER_OVERFLOW;
-          }
-          if (from < LimitType::minLimit()) {
-            to = LimitType::min();
-            return ConvertStatus::INTEGER_OVERFLOW;
-          }
-          if (FOLLY_UNLIKELY(
-                  (from > std::numeric_limits<ToType>::max()) ||
-                  (from < std::numeric_limits<ToType>::min()))) {
-            to = LimitType::cast(from);
-            return ConvertStatus::INTEGER_OVERFLOW;
-          }
-          to = LimitType::cast(from);
-          return ConvertStatus::SUCCESS;
+          return ConvertStatus::INTEGER_OVERFLOW;
         }
+        if (LimitType::isNegativeOverflow(from)) {
+          to = LimitType::min();
+          return ConvertStatus::INTEGER_OVERFLOW;
+        }
+
+        using FirstStageType = typename LimitType::FirstStageType;
+        const auto integral = static_cast<FirstStageType>(from);
+        to = static_cast<ToType>(integral);
+        if constexpr (LimitType::kByteOrSmallInt) {
+          if (FOLLY_UNLIKELY(
+                  integral > std::numeric_limits<ToType>::max() ||
+                  integral < std::numeric_limits<ToType>::min())) {
+            return ConvertStatus::INTEGER_OVERFLOW;
+          }
+        }
+        return ConvertStatus::SUCCESS;
       } else {
         if (std::isnan(from)) {
           return ConvertStatus::OTHER_FAILURE;
         }
-        return tryIntegerToInteger<FromType, ToType>(std::round(from), to);
+        return tryFloatingPointToInteger<FromType, ToType>(
+            std::round(from), to);
       }
     } else if constexpr (fromDecimal) {
       const auto scaleFactor = DecimalUtil::getPowersOfTen(fromScale_);
