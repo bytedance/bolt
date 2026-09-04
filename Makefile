@@ -428,6 +428,9 @@ else
 endif
 	@echo "----------------------------------------------------------------"
 
+check_license:
+	@python3 scripts/check_license.py 
+
 help:					#: Show the help messages
 	@cat $(firstword $(MAKEFILE_LIST)) | \
 	awk '/^[-a-z]+:/' | \
