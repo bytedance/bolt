@@ -1194,10 +1194,20 @@ TypePtr ReaderBase::convertType(
         switch (schemaElement.type) {
           case thrift::Type::BYTE_ARRAY:
           case thrift::Type::FIXED_LEN_BYTE_ARRAY:
-            checkRequested([](const TypePtr& t) {
+            checkRequested([&](const TypePtr& t) {
+              if (::bytedance::bolt::kSparkCompatible &&
+                  schemaElement.type == thrift::Type::BYTE_ARRAY &&
+                  t->kind() == TypeKind::VARBINARY) {
+                return true;
+              }
               return t->kind() == TypeKind::VARCHAR ||
                   acceptsVarcharFileForReaderCast(t);
             });
+            if (::bytedance::bolt::kSparkCompatible &&
+                schemaElement.type == thrift::Type::BYTE_ARRAY &&
+                requestedType && requestedType->isVarbinary()) {
+              return VARBINARY();
+            }
             return VARCHAR();
           default:
             BOLT_FAIL(

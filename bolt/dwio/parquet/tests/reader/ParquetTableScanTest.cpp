@@ -2237,6 +2237,39 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
   }
 }
 
+TEST_F(ParquetTableScanTest, readUtf8AnnotatedByteArrayAsVarbinary) {
+  if (!::bytedance::bolt::kSparkCompatible) {
+    GTEST_SKIP();
+  }
+
+  const std::vector<std::string> expectedValues = {
+      "127.0.0.1", "2001:db8::1", "spark-compatible"};
+  auto data = makeRowVector(
+      {"c0"}, {makeFlatVector<StringView>(expectedValues.size(), [&](auto row) {
+        return StringView(expectedValues[row]);
+      })});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  // VARCHAR is written as Parquet BYTE_ARRAY with UTF8/string annotation.
+  // Spark's Parquet reader accepts these bytes when the requested Spark type
+  // is BinaryType, so the Spark-compatible Bolt reader must do the same.
+  auto declared = ROW({"c0"}, {VARBINARY()});
+  auto plan =
+      PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .copyResults(pool());
+
+  ASSERT_NE(result, nullptr);
+  ASSERT_EQ(result->size(), expectedValues.size());
+  ASSERT_TRUE(result->type()->equivalent(*declared));
+  auto actualValues = result->childAt(0)->asFlatVector<StringView>();
+  for (auto row = 0; row < result->size(); ++row) {
+    EXPECT_EQ(actualValues->valueAt(row), StringView(expectedValues[row]));
+  }
+}
+
 TEST_F(ParquetTableScanTest, floatingPointToVarcharValueFilters) {
   // Floating point -> VARCHAR follows Spark's vectorized Parquet reader
   // conversion. Value filters cannot run against the physical floating-point
