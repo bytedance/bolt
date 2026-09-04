@@ -414,6 +414,24 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
     // Not enough to be worth a spill; avoids reclaim churn.
     return arrow::Status::OK();
   }
+  // Run-density guard. A reclaim-driven run drains every (partition,
+  // stream) chain and writes a segment - each with a 1 + 8 + 8 x streams
+  // header and its own spill compression context - per non-empty
+  // partition. When other operators allocate frequently, honoring every
+  // arbitration with little resident data would shred the spill file
+  // into near-empty runs whose fixed costs dwarf the memory returned.
+  // The floor scales with the partition count (about 256 bytes per
+  // partition keeps the header share near ten percent); below it the
+  // arbitrator is told there is nothing worth reclaiming here. The
+  // writer's own growth path (a failed reserve before a chunk grab)
+  // stays unguarded: that one must spill to make progress. The pinned
+  // near-empty chains this declines to return stay bounded by the chain
+  // floor itself, and fill into a dense run as data arrives.
+  const int64_t minRunBytes = std::max<int64_t>(
+      2 * cellOpts.chunkBytes, int64_t{256} * numPartitions_);
+  if (static_cast<int64_t>(cells_->totalBytes()) < minRunBytes) {
+    return arrow::Status::OK();
+  }
   spillRunNow();
   *actual = allocator_->shrink();
   // Freed chunks alone are not enough: the reservation built up by the
