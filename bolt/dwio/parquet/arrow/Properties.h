@@ -49,6 +49,7 @@
 #include "bolt/dwio/parquet/arrow/Schema.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
+#include "bolt/dwio/parquet/writer/WriterMetrics.h"
 #include "bolt/version/version.h"
 
 // Define the parquet created_by value. Keep this compatible with parquet-mr's
@@ -852,6 +853,12 @@ class PARQUET_EXPORT WriterProperties {
       return this;
     }
 
+    Builder* writer_metrics(
+        std::shared_ptr<WriterMetricsCollector> writerMetrics) {
+      writerMetrics_ = std::move(writerMetrics);
+      return this;
+    }
+
     /// \brief Build the WriterProperties with the builder parameters.
     /// \return The WriterProperties defined by the builder.
     std::shared_ptr<WriterProperties> build() {
@@ -895,7 +902,8 @@ class PARQUET_EXPORT WriterProperties {
           column_properties,
           data_page_version_,
           store_decimal_as_integer_,
-          std::move(sorting_columns_)));
+          std::move(sorting_columns_),
+          std::move(writerMetrics_)));
     }
 
    private:
@@ -926,6 +934,7 @@ class PARQUET_EXPORT WriterProperties {
     std::unordered_map<std::string, bool> page_index_enabled_;
     std::unordered_map<std::string, int64_t> dictionary_pagesize_limit_;
     std::unordered_map<std::string, int64_t> pagesize_;
+    std::shared_ptr<WriterMetricsCollector> writerMetrics_;
   };
 
   inline MemoryPool* memory_pool() const {
@@ -1068,6 +1077,10 @@ class PARQUET_EXPORT WriterProperties {
     return file_encryption_properties_.get();
   }
 
+  const std::shared_ptr<WriterMetricsCollector>& writer_metrics() const {
+    return writerMetrics_;
+  }
+
   std::shared_ptr<ColumnEncryptionProperties> column_encryption_properties(
       const std::string& path) const {
     if (file_encryption_properties_) {
@@ -1093,7 +1106,8 @@ class PARQUET_EXPORT WriterProperties {
           column_properties,
       ParquetDataPageVersion data_page_version,
       bool store_short_decimal_as_integer,
-      std::vector<SortingColumn> sorting_columns)
+      std::vector<SortingColumn> sorting_columns,
+      std::shared_ptr<WriterMetricsCollector> writerMetrics)
       : pool_(pool),
         write_batch_size_(write_batch_size),
         max_row_group_length_(max_row_group_length),
@@ -1107,7 +1121,8 @@ class PARQUET_EXPORT WriterProperties {
         file_encryption_properties_(file_encryption_properties),
         sorting_columns_(std::move(sorting_columns)),
         default_column_properties_(default_column_properties),
-        column_properties_(column_properties) {}
+        column_properties_(column_properties),
+        writerMetrics_(std::move(writerMetrics)) {}
 
   MemoryPool* pool_;
   int64_t dictionary_pagesize_limit_;
@@ -1128,6 +1143,7 @@ class PARQUET_EXPORT WriterProperties {
 
   ColumnProperties default_column_properties_;
   std::unordered_map<std::string, ColumnProperties> column_properties_;
+  std::shared_ptr<WriterMetricsCollector> writerMetrics_;
 };
 
 PARQUET_EXPORT const std::shared_ptr<WriterProperties>&

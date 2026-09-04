@@ -79,6 +79,24 @@ TEST(OptionsTests, testRowNumberColumnInfoInCopy) {
   ASSERT_EQ(rowNumberColumnInfo.name, readBack->name);
 }
 
+TEST(OptionsTests, parquetReaderImplicitCastMask) {
+  using CastMask = ParquetReaderImplicitCastMask;
+  EXPECT_EQ(static_cast<int64_t>(CastMask::kNone), 0);
+  EXPECT_EQ(static_cast<int64_t>(CastMask::kVarcharInteger), 1);
+  EXPECT_EQ(static_cast<int64_t>(CastMask::kVarcharDate), 2);
+  EXPECT_EQ(static_cast<int64_t>(CastMask::kAll), -1);
+
+  RowReaderOptions options;
+  EXPECT_EQ(options.parquetReaderImplicitCastMask(), 0);
+
+  constexpr int64_t kCastMask = static_cast<int64_t>(CastMask::kVarcharInteger);
+  options.setParquetReaderImplicitCastMask(kCastMask);
+  EXPECT_EQ(options.parquetReaderImplicitCastMask(), kCastMask);
+
+  RowReaderOptions optionsCopy{options};
+  EXPECT_EQ(optionsCopy.parquetReaderImplicitCastMask(), kCastMask);
+}
+
 TEST_F(WriterOptionsSerDeTest, writerOptionsSerializeDeserializeRoundTrip) {
   WriterOptions opts;
 

@@ -42,6 +42,7 @@
 #include "bolt/dwio/parquet/arrow/Properties.h"
 #include "bolt/dwio/parquet/arrow/Types.h"
 #include "bolt/dwio/parquet/arrow/util/Compression.h"
+#include "bolt/dwio/parquet/writer/WriterMetrics.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/arrow/Bridge.h"
 namespace bytedance::bolt::parquet {
@@ -258,6 +259,8 @@ class Writer : public dwio::common::Writer {
 
   void abort() override;
 
+  dwio::common::WriterMetrics metrics() const override;
+
   // Used in data retention scenario. Write parquet with specific row numbers in
   // each row group.
   void rowGroupAlignedFlush(
@@ -288,6 +291,8 @@ class Writer : public dwio::common::Writer {
   std::shared_ptr<memory::MemoryPool> generalPool_;
   std::shared_ptr<memory::MemoryPool> exportPool_;
   arrow::MemoryPool* arrowPool_{nullptr};
+
+  const std::shared_ptr<WriterMetricsCollector> metrics_;
 
   // Temporary Arrow stream for capturing the output.
   std::shared_ptr<ArrowDataBufferSink> stream_;

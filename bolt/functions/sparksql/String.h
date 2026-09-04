@@ -45,41 +45,67 @@
 #include "bolt/functions/lib/string/StringImpl.h"
 namespace bytedance::bolt::functions::sparksql {
 
-template <typename T, bool lpad>
+// Controls the dialect-specific behavior for negative sizes and empty pads.
+enum class PadInvalidInputPolicy {
+  kThrow,
+  kReturnNull,
+};
+
+template <
+    typename T,
+    bool lpad,
+    PadInvalidInputPolicy invalidInputPolicy = PadInvalidInputPolicy::kThrow>
 struct PadFunctionBase {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
   // ASCII input always produces ASCII result.
   static constexpr bool is_default_ascii_behavior = true;
 
-  FOLLY_ALWAYS_INLINE void call(
+  FOLLY_ALWAYS_INLINE bool call(
       out_type<Varchar>& result,
       const arg_type<Varchar>& string,
       const arg_type<int64_t>& size,
       const arg_type<Varchar>& padString) {
-    stringImpl::pad<lpad, false /*isAscii*/>(result, string, size, padString);
+    return applyPad<false /*isAscii*/>(result, string, size, padString);
   }
 
-  FOLLY_ALWAYS_INLINE void call(
+  FOLLY_ALWAYS_INLINE bool call(
       out_type<Varchar>& result,
       const arg_type<Varchar>& string,
       const arg_type<int64_t>& size) {
-    stringImpl::pad<lpad, false /*isAscii*/>(result, string, size, {" "});
+    return applyPad<false /*isAscii*/>(result, string, size, {" "});
   }
 
-  FOLLY_ALWAYS_INLINE void callAscii(
+  FOLLY_ALWAYS_INLINE bool callAscii(
       out_type<Varchar>& result,
       const arg_type<Varchar>& string,
       const arg_type<int64_t>& size,
       const arg_type<Varchar>& padString) {
-    stringImpl::pad<lpad, true /*isAscii*/>(result, string, size, padString);
+    return applyPad<true /*isAscii*/>(result, string, size, padString);
   }
 
-  FOLLY_ALWAYS_INLINE void callAscii(
+  FOLLY_ALWAYS_INLINE bool callAscii(
       out_type<Varchar>& result,
       const arg_type<Varchar>& string,
       const arg_type<int64_t>& size) {
-    stringImpl::pad<lpad, true /*isAscii*/>(result, string, size, {" "});
+    return applyPad<true /*isAscii*/>(result, string, size, {" "});
+  }
+
+ private:
+  template <bool isAscii>
+  FOLLY_ALWAYS_INLINE bool applyPad(
+      out_type<Varchar>& result,
+      const arg_type<Varchar>& string,
+      const arg_type<int64_t>& size,
+      const arg_type<Varchar>& padString) {
+    if constexpr (invalidInputPolicy == PadInvalidInputPolicy::kReturnNull) {
+      if (size < 0 || padString.empty()) {
+        return false;
+      }
+    }
+
+    stringImpl::pad<lpad, isAscii>(result, string, size, padString);
+    return true;
   }
 };
 
@@ -117,6 +143,17 @@ struct BitLengthFunction {
   template <typename TInput>
   FOLLY_ALWAYS_INLINE void call(int32_t& result, TInput& input) {
     result = input.size() * 8;
+  }
+};
+
+/// Returns the number of bytes in a string or binary value.
+template <typename T>
+struct OctetLengthFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  template <typename TInput>
+  FOLLY_ALWAYS_INLINE void call(int32_t& result, const TInput& input) {
+    result = input.size();
   }
 };
 

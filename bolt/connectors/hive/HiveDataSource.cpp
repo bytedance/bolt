@@ -70,6 +70,11 @@ HiveDataSource::HiveDataSource(
       outputType_(outputType),
       expressionEvaluator_(connectorQueryCtx->expressionEvaluator()),
       runtimeStats_(std::make_unique<dwio::common::RuntimeStatistics>()) {
+  const auto reusableOutputCount = queryConfig.tableScanReusableOutputCount();
+  if (reusableOutputCount > 0) {
+    reusableOutputPool_ =
+        std::make_shared<ReusableOutputPool>(reusableOutputCount);
+  }
   for (const auto& key : HiveConfig::hms_session_key) {
     std::optional<std::string> value = queryConfig.get<std::string>(key);
     if (value.has_value()) {
@@ -234,6 +239,7 @@ HiveDataSource::HiveDataSource(
   }
 
   recalculateRepDefConf(readerOutputType_, queryConfig);
+  parquetReaderImplicitCastMask_ = queryConfig.parquetReaderImplicitCastMask();
   parquetMaxBatchBytes_ =
       static_cast<int64_t>(queryConfig.preferredOutputBatchBytes());
   ioStats_ = std::make_shared<io::IoStatistics>();
@@ -382,6 +388,8 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
       decodeRepDefPageCount_);
   splitReader->rowReaderOptions().setParquetRepDefMemoryLimit(
       parquetRepDefMemoryLimit_);
+  splitReader->rowReaderOptions().setParquetReaderImplicitCastMask(
+      parquetReaderImplicitCastMask_);
   splitReader->rowReaderOptions().setMaxBatchBytes(parquetMaxBatchBytes_);
 
   TRY_WITH_IGNORE(
@@ -624,13 +632,36 @@ vector_size_t getLength(std::shared_ptr<ConnectorSplit>& split) {
   BOLT_FAIL("Unsupported split type for getting length");
 }
 
-void HiveDataSource::prepareReaderOutputForNextRead() {
-  if (!output_ || *output_->type() != *readerOutputType_) {
-    output_ = BaseVector::create(readerOutputType_, 0, pool_);
-    return;
+std::shared_ptr<HiveDataSource::ReusableOutputLease>
+HiveDataSource::prepareReaderOutputForNextRead() {
+  if (!reusableOutputPool_) {
+    if (!output_ || *output_->type() != *readerOutputType_) {
+      output_ = BaseVector::create(readerOutputType_, 0, pool_);
+      return nullptr;
+    }
+
+    BaseVector::prepareForReuse(output_, 0);
+    return nullptr;
   }
 
-  BaseVector::prepareForReuse(output_, 0);
+  output_.reset();
+  for (auto i = 0; i < reusableOutputPool_->slots.size(); ++i) {
+    auto& slot = reusableOutputPool_->slots[i];
+    if (slot.inUse) {
+      continue;
+    }
+    slot.inUse = true;
+    if (!slot.output || *slot.output->type() != *readerOutputType_) {
+      slot.output = BaseVector::create(readerOutputType_, 0, pool_);
+    } else {
+      BaseVector::prepareForReuse(slot.output, 0);
+    }
+    output_ = slot.output;
+    return std::make_shared<ReusableOutputLease>(reusableOutputPool_, i);
+  }
+
+  output_ = BaseVector::create(readerOutputType_, 0, pool_);
+  return nullptr;
 }
 
 std::optional<RowVectorPtr> HiveDataSource::next(
@@ -652,7 +683,7 @@ std::optional<RowVectorPtr> HiveDataSource::next(
     return nullptr;
   }
 
-  prepareReaderOutputForNextRead();
+  auto outputLease = prepareReaderOutputForNextRead();
 
   // TODO Check if remaining filter has a conjunct that doesn't depend on
   // any column, e.g. rand() < 0.1. Evaluate that conjunct first, then scan
@@ -702,8 +733,9 @@ std::optional<RowVectorPtr> HiveDataSource::next(
     }
 
     if (outputType_->size() == 0) {
-      return exec::wrapAndCombineDict(
-          rowsRemaining, remainingIndices, rowVector);
+      return retainReusableOutputLease(
+          exec::wrapAndCombineDict(rowsRemaining, remainingIndices, rowVector),
+          outputLease);
     }
 
     std::vector<VectorPtr> outputColumns;
@@ -715,12 +747,14 @@ std::optional<RowVectorPtr> HiveDataSource::next(
         // don't need to reallocate the result for every batch.
         child->disableMemo();
       }
-      outputColumns.emplace_back(
-          exec::wrapChild(rowsRemaining, remainingIndices, child));
+      outputColumns.emplace_back(retainReusableOutputLease(
+          exec::wrapChild(rowsRemaining, remainingIndices, child),
+          outputLease));
     }
 
-    return std::make_shared<RowVector>(
+    auto result = std::make_shared<RowVector>(
         pool_, outputType_, BufferPtr(nullptr), rowsRemaining, outputColumns);
+    return result;
   }
 
   resetSplit();

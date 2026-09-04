@@ -87,6 +87,9 @@ SparkShuffleReader::SparkShuffleReader(
              shuffleReaderOptions_.rowBasedShuffleThreshold)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
   reuseBufferedInputStream_ = shuffleReaderOptions_.reuseBufferedInputStream;
+  if (shuffleReaderOptions_.reuseColumnBuffer) {
+    columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
+  }
 }
 
 void SparkShuffleReader::init() {
@@ -130,7 +133,8 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
               isRowBased_,
               zstdCodec_.get(),
               rowBufferPool_.get(),
-              row2ColConverter_.get());
+              row2ColConverter_.get(),
+              columnBufferPool_.get());
     }
 
     auto output = columnarBatchDeserializer_->next();
@@ -166,7 +170,8 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
                 isRowBased_,
                 zstdCodec_.get(),
                 rowBufferPool_.get(),
-                row2ColConverter_.get());
+                row2ColConverter_.get(),
+                columnBufferPool_.get());
       } else {
         finished_ = true;
         return nullptr;
@@ -189,6 +194,10 @@ void SparkShuffleReader::close() {
   if (columnarBatchDeserializer_) {
     NanosecondTimer timer(&deserializerDestroyTime_);
     columnarBatchDeserializer_ = nullptr;
+  }
+
+  if (columnBufferPool_) {
+    columnBufferPool_->release();
   }
 
   {

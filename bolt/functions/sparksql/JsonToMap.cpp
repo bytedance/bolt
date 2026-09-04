@@ -68,15 +68,17 @@ class JsonToMapFunction : public exec::VectorFunction {
       const TypePtr& outputType,
       exec::EvalCtx& context,
       VectorPtr& result) const override {
-    folly::call_once(initUseSonic_, [&] {
-      useSonic_ =
-          context.execCtx()->queryCtx()->queryConfig().enableSonicJsonParse();
-    });
+    const auto& queryConfig = context.execCtx()->queryCtx()->queryConfig();
+    folly::call_once(
+        initUseSonic_, [&] { useSonic_ = queryConfig.enableSonicJsonParse(); });
+
+    const auto escapeControlChars = queryConfig.jsonToMapEscapeControlChars();
 
     if (useSonic_) {
-      applySonic(rows, args, outputType, context, result);
+      applySonic(rows, args, outputType, escapeControlChars, context, result);
     } else {
-      applySimdJson(rows, args, outputType, context, result);
+      applySimdJson(
+          rows, args, outputType, escapeControlChars, context, result);
     }
   }
 
@@ -84,6 +86,7 @@ class JsonToMapFunction : public exec::VectorFunction {
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
       const TypePtr& outputType,
+      bool escapeControlChars,
       exec::EvalCtx& context,
       VectorPtr& result) const {
     BaseVector::ensureWritable(
@@ -141,7 +144,7 @@ class JsonToMapFunction : public exec::VectorFunction {
 
         padded_data = current;
         bool ok = parseInto(padded_data);
-        if (!ok) {
+        if (!ok && escapeControlChars) {
           // On failure, escape raw control chars and retry (only the rare
           // failure path; valid JSON is unaffected).
           padded_data = escapeUnescapedControlChars(current);
@@ -166,6 +169,7 @@ class JsonToMapFunction : public exec::VectorFunction {
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
       const TypePtr& outputType,
+      bool escapeControlChars,
       exec::EvalCtx& context,
       VectorPtr& result) const {
     BaseVector::ensureWritable(
@@ -191,7 +195,7 @@ class JsonToMapFunction : public exec::VectorFunction {
             kParseIntegerAsRaw | kParseOverflowNumAsNumStr;
         doc.Parse<kParseFlags>(current);
         std::string escaped;
-        if (doc.HasParseError()) {
+        if (doc.HasParseError() && escapeControlChars) {
           // On failure, escape raw control chars and retry (matching jsoniter);
           // `escaped` must outlive the member iteration below.
           escaped = escapeUnescapedControlChars(current);

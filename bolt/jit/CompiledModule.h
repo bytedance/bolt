@@ -18,7 +18,6 @@
 
 #ifdef ENABLE_BOLT_JIT
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -39,10 +38,9 @@ struct CompiledModule {
   void setCodeSize(size_t codeSize);
   void appendCleanCallback(std::function<void()> cleanCallback);
 
-  // type-erasured user data, CompiledModule does not own the data and won't
-  // manage its lifetime. The caller should make sure the data is valid during
-  // the module's lifetime.
-  bool compareExchangeUserData(void* expected, void* desired) noexcept;
+  /// Sets type-erased data owned by this module. This must be called before
+  /// the module is published to the JIT cache.
+  void setUserData(std::shared_ptr<void> userData);
   void* getUserData() const noexcept;
 
   ~CompiledModule();
@@ -53,7 +51,8 @@ struct CompiledModule {
   size_t codeSize_{0};
   std::vector<std::function<void()>> cleanCallbacks_;
 
-  std::atomic<void*> userData_{nullptr};
+  // It will hold the `deleter` of the typed user data.
+  std::shared_ptr<void> userData_;
 };
 
 using CompiledModuleSP = std::shared_ptr<CompiledModule>;
