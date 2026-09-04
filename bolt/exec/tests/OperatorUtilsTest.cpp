@@ -504,6 +504,30 @@ TEST_F(OperatorUtilsTest, projectDuplicateChildren) {
   }
 }
 
+TEST_F(OperatorUtilsTest, wrapDictionaryWithNulls) {
+  constexpr vector_size_t kInnerSize = 5;
+  auto flatVector = makeFlatVector<int64_t>(
+      kInnerSize, [](vector_size_t row) { return row; });
+  auto innerNulls = allocateNulls(kInnerSize, pool());
+  bits::setNull(innerNulls->asMutable<uint64_t>(), 1);
+  bits::setNull(innerNulls->asMutable<uint64_t>(), 3);
+  auto innerDictionary = BaseVector::wrapInDictionary(
+      innerNulls,
+      makeIndices(
+          kInnerSize, [](vector_size_t row) { return kInnerSize - row - 1; }),
+      kInnerSize,
+      flatVector);
+
+  auto wrapped =
+      wrapChildren(4, makeIndices({4, 3, 1, 0}), {innerDictionary}).front();
+
+  ASSERT_EQ(wrapped->encoding(), VectorEncoding::Simple::DICTIONARY);
+  ASSERT_EQ(wrapped->valueVector(), flatVector);
+  assertEqualVectors(
+      makeNullableFlatVector<int64_t>({0, std::nullopt, std::nullopt, 4}),
+      wrapped);
+}
+
 TEST_F(OperatorUtilsTest, projectDictionaryOverLazyKeepsExistingLazyWrapper) {
   auto flatVector =
       makeFlatVector<int64_t>(5, [](vector_size_t row) { return 10 + row; });
