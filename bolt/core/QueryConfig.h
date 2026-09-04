@@ -415,6 +415,13 @@ class QueryConfig {
   static constexpr const char* kPrestoArrayAggIgnoreNulls =
       "presto.array_agg.ignore_nulls";
 
+  /// If false, size function returns null for null input.
+  static constexpr const char* kSparkLegacySizeOfNull =
+      "spark.sql.legacy.sizeOfNull";
+
+  /// If true, Spark SQL ANSI mode is enabled.
+  static constexpr const char* kSparkAnsiEnabled = "spark.sql.ansi.enabled";
+
   /// If true, array_agg() aggregation function will ignore nulls in the input.
   static constexpr const char* kPrestoSetAggIgnoreNulls =
       "presto.set_agg.ignore_nulls";
@@ -1352,6 +1359,8 @@ class QueryConfig {
   bool prestoArrayAggIgnoreNulls() const {
     return get<bool>(kPrestoArrayAggIgnoreNulls, false);
   }
+
+  bool sparkLegacySizeOfNull() const;
 
   bool prestoSetAggIgnoreNulls() const {
     return get<bool>(kPrestoSetAggIgnoreNulls, false);
