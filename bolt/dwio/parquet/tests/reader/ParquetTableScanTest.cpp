@@ -2306,8 +2306,7 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(
         assertEqualResults({sameScaleExpected}, {readAs(DECIMAL(28, 10))}));
 
-    BOLT_ASSERT_THROW(
-        readAs(DECIMAL(28, 12)), kParquetTypeMappingErrorPrefix);
+    BOLT_ASSERT_THROW(readAs(DECIMAL(28, 12)), kParquetTypeMappingErrorPrefix);
 
     BOLT_ASSERT_THROW(
         readAs(DECIMAL(28, 10), {"c0 >= cast(0 as DECIMAL(28, 10))"}),

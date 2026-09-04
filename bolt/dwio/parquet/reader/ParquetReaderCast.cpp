@@ -44,8 +44,7 @@ void validateDecimalReaderCast(
   if (!fileType->isDecimal() || !requestedType->isDecimal()) {
     return;
   }
-  const auto [filePrecision, fileScale] =
-      getDecimalPrecisionScale(*fileType);
+  const auto [filePrecision, fileScale] = getDecimalPrecisionScale(*fileType);
   const auto [requestedPrecision, requestedScale] =
       getDecimalPrecisionScale(*requestedType);
   if (requestedScale != fileScale || requestedPrecision < filePrecision) {
