@@ -37,6 +37,26 @@ void checkReaderCastFilter(
   }
 }
 
+void validateDecimalReaderCast(
+    const TypePtr& fileType,
+    const TypePtr& requestedType,
+    const std::string& path) {
+  if (!fileType->isDecimal() || !requestedType->isDecimal()) {
+    return;
+  }
+  const auto [filePrecision, fileScale] =
+      getDecimalPrecisionScale(*fileType);
+  const auto [requestedPrecision, requestedScale] =
+      getDecimalPrecisionScale(*requestedType);
+  if (requestedScale != fileScale || requestedPrecision < filePrecision) {
+    BOLT_USER_FAIL(
+        "Parquet reader cannot convert {} to {} for column {}. Only same-scale decimal precision widening is supported",
+        fileType->toString(),
+        requestedType->toString(),
+        path);
+  }
+}
+
 } // namespace
 
 void validateReaderCastFilter(
@@ -44,6 +64,7 @@ void validateReaderCastFilter(
     const TypePtr& requestedType,
     const common::ScanSpec& scanSpec,
     const std::string& path) {
+  validateDecimalReaderCast(fileType, requestedType, path);
   auto* filter = scanSpec.filter();
   checkReaderCastFilter(fileType, requestedType, filter, path);
   if (isReaderCastFilterMismatch(fileType, requestedType) ||

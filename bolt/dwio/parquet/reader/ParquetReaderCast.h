@@ -26,19 +26,6 @@ class ScanSpec;
 
 namespace bytedance::bolt::parquet {
 
-inline bool requiresDecimalValueConversion(
-    const TypePtr& fileType,
-    const TypePtr& requestedType) {
-  if (!fileType->isDecimal() || !requestedType->isDecimal()) {
-    return false;
-  }
-  const auto fileScale = getDecimalPrecisionScale(*fileType).second;
-  const auto requestedScale = getDecimalPrecisionScale(*requestedType).second;
-  // Precision-only widening preserves both raw values and storage width.
-  return fileScale != requestedScale ||
-      fileType->isShortDecimal() != requestedType->isShortDecimal();
-}
-
 inline bool isReaderCastFilterMismatch(
     const TypePtr& fileType,
     const TypePtr& requestedType) {
@@ -62,7 +49,8 @@ inline bool isReaderCastFilterMismatch(
           (fileType->isDate() && requestedType->isVarchar());
     case TypeKind::BIGINT:
     case TypeKind::HUGEINT:
-      return requiresDecimalValueConversion(fileType, requestedType);
+      return fileType->isDecimal() && requestedType->isDecimal() &&
+          fileType->isShortDecimal() != requestedType->isShortDecimal();
     default:
       return false;
   }

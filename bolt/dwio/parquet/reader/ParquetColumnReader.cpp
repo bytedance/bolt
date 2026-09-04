@@ -48,44 +48,7 @@
 #include "bolt/dwio/parquet/reader/TimestampColumnReader.h"
 #include "bolt/dwio/parquet/reader/VariantColumnReader.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
-#include "bolt/type/DecimalUtil.h"
 namespace bytedance::bolt::parquet {
-
-namespace {
-
-template <typename T>
-void applyDecimalScaleMultiplier(const VectorPtr& result, T multiplier) {
-  auto* flatResult = result->asUnchecked<FlatVector<T>>();
-  auto* rawValues = flatResult->mutableRawValues();
-  const auto* rawNulls = flatResult->rawNulls();
-  const auto size = flatResult->size();
-  if (!rawNulls) {
-    for (vector_size_t row = 0; row < size; ++row) {
-      rawValues[row] *= multiplier;
-    }
-  } else {
-    for (vector_size_t row = 0; row < size; ++row) {
-      if (!bits::isBitNull(rawNulls, row)) {
-        rawValues[row] *= multiplier;
-      }
-    }
-  }
-}
-
-void rescaleDecimalValues(
-    const TypePtr& requestedType,
-    const VectorPtr& result,
-    int32_t scaleAdjust) {
-  if (requestedType->isShortDecimal()) {
-    applyDecimalScaleMultiplier<int64_t>(
-        result, static_cast<int64_t>(DecimalUtil::kPowersOfTen[scaleAdjust]));
-  } else {
-    applyDecimalScaleMultiplier<int128_t>(
-        result, DecimalUtil::kPowersOfTen[scaleAdjust]);
-  }
-}
-
-} // namespace
 
 void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
   bool needConvertion = (castExprSet_ && castExprSet_->size() != 0);
@@ -111,17 +74,6 @@ void IntegerColumnReader::getValues(const RowSet& rows, VectorPtr* result) {
     getUnsignedIntValues(rows, requestedType, result);
   } else {
     getIntValues(rows, requestedType, result);
-  }
-
-  if (!allNull_ && fileType.type()->isDecimal() && requestedType->isDecimal()) {
-    const auto fileScale = getDecimalPrecisionScale(*fileType.type()).second;
-    const auto requestedScale = getDecimalPrecisionScale(*requestedType).second;
-
-    // Schema validation rejects scale narrowing and guarantees enough target
-    // precision for scale widening.
-    if (fileScale < requestedScale) {
-      rescaleDecimalValues(requestedType, *result, requestedScale - fileScale);
-    }
   }
 
   if (needConvertion) {

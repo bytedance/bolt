@@ -1175,8 +1175,8 @@ TypePtr ReaderBase::convertType(
         BOLT_CHECK(
             schemaElement.__isset.precision && schemaElement.__isset.scale,
             "DECIMAL requires a length and scale specifier!");
-        // Decimal widening: scale must not shrink and precision must grow
-        // at least as fast as scale
+        // Decimal reader casts only support precision widening. Rescaling is
+        // intentionally rejected until filters can be handled consistently.
         const auto filePrecision = schemaElement.precision;
         const auto fileScale = schemaElement.scale;
         checkRequested([&](const TypePtr& t) {
@@ -1184,8 +1184,7 @@ TypePtr ReaderBase::convertType(
             return false;
           }
           auto [precision, scale] = getDecimalPrecisionScale(*t);
-          return scale >= fileScale &&
-              (precision - filePrecision) >= (scale - fileScale);
+          return scale == fileScale && precision >= filePrecision;
         });
         return DECIMAL(schemaElement.precision, schemaElement.scale);
       }

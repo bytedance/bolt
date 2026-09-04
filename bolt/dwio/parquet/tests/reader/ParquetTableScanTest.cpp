@@ -1875,6 +1875,8 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"decimal_scale_shrink",           DECIMAL(10, 2),  DECIMAL(10, 0),     true},
     {"decimal_scale_grew_prec_same",   DECIMAL(10, 2),  DECIMAL(10, 5),     true},
     {"decimal_both_shrink",            DECIMAL(38, 18), DECIMAL(10, 2),     true},
+    {"decimal_widen_scale",            DECIMAL(10, 2),  DECIMAL(20, 5),     true},
+    {"decimal_widen_scale_to_long",    DECIMAL(10, 2),  DECIMAL(28, 5),     true},
 
     // ---- Reject: DECIMAL cross-family ----
     {"decimal_to_bigint",              DECIMAL(10, 2),  BIGINT(),           true},
@@ -1901,8 +1903,6 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"decimal_identity",              DECIMAL(10, 2),  DECIMAL(10, 2),     false},
     {"decimal_widen_precision_only",  DECIMAL(10, 2),  DECIMAL(15, 2),     false},
     {"decimal_short_to_long_same_scale", DECIMAL(13, 10), DECIMAL(28, 10), false},
-    {"decimal_widen_both",            DECIMAL(10, 2),  DECIMAL(20, 5),     false},
-    {"decimal_widen_to_long_decimal", DECIMAL(10, 2),  DECIMAL(28, 5),     false},
 
     // ---- Accept: column-reader auto-cast int family -> VARCHAR ----
     //  (IntegerColumnReader::makeCastExpr; the cast path compiles in
@@ -2291,16 +2291,12 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     };
 
     std::vector<std::optional<int128_t>> sameScaleValues;
-    std::vector<std::optional<int128_t>> largerScaleValues;
     sameScaleValues.reserve(kSize);
-    largerScaleValues.reserve(kSize);
     for (const auto& value : shortValues) {
       if (!value.has_value()) {
         sameScaleValues.push_back(std::nullopt);
-        largerScaleValues.push_back(std::nullopt);
       } else {
         sameScaleValues.push_back(static_cast<int128_t>(*value));
-        largerScaleValues.push_back(static_cast<int128_t>(*value) * 100);
       }
     }
 
@@ -2310,11 +2306,8 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     EXPECT_TRUE(
         assertEqualResults({sameScaleExpected}, {readAs(DECIMAL(28, 10))}));
 
-    auto largerScaleExpected = makeRowVector(
-        {"c0"},
-        {makeNullableFlatVector<int128_t>(largerScaleValues, DECIMAL(28, 12))});
-    EXPECT_TRUE(
-        assertEqualResults({largerScaleExpected}, {readAs(DECIMAL(28, 12))}));
+    BOLT_ASSERT_THROW(
+        readAs(DECIMAL(28, 12)), kParquetTypeMappingErrorPrefix);
 
     BOLT_ASSERT_THROW(
         readAs(DECIMAL(28, 10), {"c0 >= cast(0 as DECIMAL(28, 10))"}),
@@ -2327,57 +2320,6 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
             DECIMAL(28, 10))});
     EXPECT_TRUE(assertEqualResults(
         {nullExpected}, {readAs(DECIMAL(28, 10), {"c0 IS NULL"})}));
-  }
-
-  // Rescale within the short-decimal representation.
-  {
-    std::vector<std::optional<int64_t>> values = {
-        -12345, 0, 12345, std::nullopt};
-    auto data = makeRowVector(
-        {"c0"}, {makeNullableFlatVector<int64_t>(values, DECIMAL(10, 2))});
-    auto file = exec::test::TempFilePath::create();
-    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
-
-    auto declared = ROW({"c0"}, {DECIMAL(15, 4)});
-    auto plan =
-        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
-    auto result = AssertQueryBuilder(plan)
-                      .split(makeSplit(file->getPath()))
-                      .copyResults(pool());
-    auto expected = makeRowVector(
-        {"c0"},
-        {makeNullableFlatVector<int64_t>(
-            {-1'234'500, 0, 1'234'500, std::nullopt}, DECIMAL(15, 4))});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
-  }
-
-  // Rescale within the long-decimal representation.
-  {
-    std::vector<std::optional<int128_t>> values = {
-        static_cast<int128_t>(-12345),
-        static_cast<int128_t>(0),
-        static_cast<int128_t>(12345),
-        std::nullopt};
-    auto data = makeRowVector(
-        {"c0"}, {makeNullableFlatVector<int128_t>(values, DECIMAL(20, 2))});
-    auto file = exec::test::TempFilePath::create();
-    writeToParquetFile(file->getPath(), {data}, WriterOptions{});
-
-    auto declared = ROW({"c0"}, {DECIMAL(24, 4)});
-    auto plan =
-        PlanBuilder(pool()).tableScan(declared, {}, "", declared).planNode();
-    auto result = AssertQueryBuilder(plan)
-                      .split(makeSplit(file->getPath()))
-                      .copyResults(pool());
-    auto expected = makeRowVector(
-        {"c0"},
-        {makeNullableFlatVector<int128_t>(
-            {static_cast<int128_t>(-1'234'500),
-             static_cast<int128_t>(0),
-             static_cast<int128_t>(1'234'500),
-             std::nullopt},
-            DECIMAL(24, 4))});
-    EXPECT_TRUE(assertEqualResults({expected}, {result}));
   }
 }
 
@@ -2884,8 +2826,7 @@ TEST_F(ParquetTableScanTest, integerReaderCastMetadataFilters) {
   auto test = [&](const RowVectorPtr& data,
                   const RowTypePtr& declared,
                   const std::string& filter,
-                  const RowVectorPtr& expected,
-                  int64_t expectedSkippedStrides = 1) {
+                  const RowVectorPtr& expected) {
     auto file = exec::test::TempFilePath::create();
     WriterOptions writerOptions;
     writerOptions.flushPolicyFactory = [] {
@@ -2910,7 +2851,7 @@ TEST_F(ParquetTableScanTest, integerReaderCastMetadataFilters) {
             .at(scanNodeId)
             .customStats.at("skippedStrides")
             .sum,
-        expectedSkippedStrides);
+        1);
   };
 
   test(
@@ -2934,33 +2875,6 @@ TEST_F(ParquetTableScanTest, integerReaderCastMetadataFilters) {
       makeRowVector(
           {"c0", "c1"},
           {makeFlatVector<StringView>({"1"}), makeFlatVector<int64_t>({100})}));
-
-  // Decimal metadata filtering is unsafe before rescaling, so neither row
-  // group can be skipped.
-  test(
-      makeRowVector(
-          {"c0", "c1"},
-          {makeFlatVector<int64_t>({100, 200, 100, 200}, DECIMAL(10, 2)),
-           makeFlatVector<int64_t>({0, 0, 100, 100})}),
-      ROW({"c0", "c1"}, {DECIMAL(15, 4), BIGINT()}),
-      "c0 = cast(1 as DECIMAL(15, 4))",
-      makeRowVector(
-          {"c0", "c1"},
-          {makeFlatVector<int64_t>({10'000, 10'000}, DECIMAL(15, 4)),
-           makeFlatVector<int64_t>({0, 100})}),
-      0);
-
-  test(
-      makeRowVector(
-          {"c0", "c1"},
-          {makeFlatVector<int64_t>({100, 200, 100, 200}, DECIMAL(10, 2)),
-           makeFlatVector<int64_t>({0, 0, 100, 100})}),
-      ROW({"c0", "c1"}, {DECIMAL(15, 4), BIGINT()}),
-      "c0 = cast(1 as DECIMAL(15, 4)) AND c1 >= 100",
-      makeRowVector(
-          {"c0", "c1"},
-          {makeFlatVector<int64_t>({10'000}, DECIMAL(15, 4)),
-           makeFlatVector<int64_t>({100})}));
 }
 
 TEST_F(ParquetTableScanTest, floatingPointToVarcharMetadataFilter) {
