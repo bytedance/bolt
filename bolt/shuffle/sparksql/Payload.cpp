@@ -205,11 +205,33 @@ arrow::Status compressAndFlush(
   return arrow::Status::OK();
 }
 
+// Allocates a resizable buffer of logical size `size` with `paddedSize` extra
+// SIMD over-read capacity. When `bufferPool` is provided, the buffer is
+// borrowed from the pool (and reused across batches); otherwise it falls back
+// to a fresh arrow::AllocateResizableBuffer, preserving the original behavior.
+arrow::Result<std::shared_ptr<arrow::Buffer>> allocateColumnBuffer(
+    arrow::MemoryPool* pool,
+    ColumnBufferPool* bufferPool,
+    int64_t size,
+    uint32_t paddedSize) {
+  if (bufferPool != nullptr) {
+    ARROW_ASSIGN_OR_RAISE(auto buffer, bufferPool->allocate(size, paddedSize));
+    return buffer;
+  }
+  ARROW_ASSIGN_OR_RAISE(
+      auto buffer, arrow::AllocateResizableBuffer(size + paddedSize, pool));
+  if (paddedSize > 0) {
+    RETURN_NOT_OK(buffer->Resize(size, false));
+  }
+  return buffer;
+}
+
 arrow::Result<std::shared_ptr<arrow::Buffer>> readUncompressedBuffer(
     arrow::io::InputStream* inputStream,
     ByteBuffer** readAheadBuffer,
     arrow::MemoryPool* pool,
-    const uint32_t paddedSize = 0) {
+    const uint32_t paddedSize = 0,
+    ColumnBufferPool* bufferPool = nullptr) {
   int64_t bufferLength;
   if (*readAheadBuffer) {
     RETURN_NOT_OK(internalReadFromCacheOrStream(
@@ -220,30 +242,20 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readUncompressedBuffer(
   if (bufferLength == kNullBuffer) {
     return nullptr;
   }
+  ARROW_ASSIGN_OR_RAISE(
+      auto buffer,
+      allocateColumnBuffer(pool, bufferPool, bufferLength, paddedSize));
   if (*readAheadBuffer) {
-    ARROW_ASSIGN_OR_RAISE(
-        auto buffer,
-        arrow::AllocateResizableBuffer(bufferLength + paddedSize, pool));
-    if (paddedSize > 0) {
-      RETURN_NOT_OK(buffer->Resize(bufferLength, false));
-    }
     RETURN_NOT_OK(internalReadFromCacheOrStream(
         inputStream,
         readAheadBuffer,
         bufferLength,
         const_cast<uint8_t*>(buffer->data())));
-    return buffer;
   } else {
-    ARROW_ASSIGN_OR_RAISE(
-        auto buffer,
-        arrow::AllocateResizableBuffer(bufferLength + paddedSize, pool));
-    if (paddedSize > 0) {
-      RETURN_NOT_OK(buffer->Resize(bufferLength, false));
-    }
     RETURN_NOT_OK(
         inputStream->Read(bufferLength, const_cast<uint8_t*>(buffer->data())));
-    return buffer;
   }
+  return buffer;
 }
 
 arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
@@ -252,7 +264,8 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
     arrow::MemoryPool* pool,
     uint64_t& decompressTime,
     ByteBuffer** readAheadBuffer,
-    const uint32_t paddedSize = 0) { // align to bytedance::bolt::simd::kPadding
+    const uint32_t paddedSize = 0, // align to bytedance::bolt::simd::kPadding
+    ColumnBufferPool* bufferPool = nullptr) {
   int64_t compressedLength;
   if (*readAheadBuffer) {
     RETURN_NOT_OK(internalReadFromCacheOrStream(
@@ -277,10 +290,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
   if (compressedLength == kUncompressedBuffer) {
     ARROW_ASSIGN_OR_RAISE(
         auto uncompressed,
-        arrow::AllocateResizableBuffer(uncompressedLength + paddedSize, pool));
-    if (paddedSize > 0) {
-      RETURN_NOT_OK(uncompressed->Resize(uncompressedLength, false));
-    }
+        allocateColumnBuffer(pool, bufferPool, uncompressedLength, paddedSize));
     if (*readAheadBuffer) {
       RETURN_NOT_OK(internalReadFromCacheOrStream(
           inputStream,
@@ -294,7 +304,8 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
     return uncompressed;
   }
   ARROW_ASSIGN_OR_RAISE(
-      auto compressed, arrow::AllocateBuffer(compressedLength, pool));
+      auto compressed,
+      allocateColumnBuffer(pool, bufferPool, compressedLength, paddedSize));
   if (*readAheadBuffer) {
     RETURN_NOT_OK(internalReadFromCacheOrStream(
         inputStream,
@@ -309,10 +320,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
   bytedance::bolt::NanosecondTimer timer(&decompressTime);
   ARROW_ASSIGN_OR_RAISE(
       auto output,
-      arrow::AllocateResizableBuffer(uncompressedLength + paddedSize, pool));
-  if (paddedSize > 0) {
-    RETURN_NOT_OK(output->Resize(uncompressedLength, false));
-  }
+      allocateColumnBuffer(pool, bufferPool, uncompressedLength, paddedSize));
   codec->decompress(
       compressed->data(),
       compressedLength,
@@ -560,7 +568,8 @@ BlockPayload::deserialize(
     uint32_t& numRows,
     uint64_t& decompressTime,
     std::optional<uint8_t>& payloadType,
-    ByteBuffer* readAheadBuffer) {
+    ByteBuffer* readAheadBuffer,
+    ColumnBufferPool* bufferPool) {
   static const std::vector<std::shared_ptr<arrow::Buffer>> kEmptyBuffers{};
   std::tuple<uint32_t, uint8_t> rowsAndMode;
   uint8_t type = payloadType.value();
@@ -578,7 +587,13 @@ BlockPayload::deserialize(
         type != Type::kCompressed,
         arrow::Status::Invalid("RowVector mode payload must be compressed"));
     return deserializeRowVectorModeBuffers(
-        inputStream, codec, pool, numRows, decompressTime, &readAheadBuffer);
+        inputStream,
+        codec,
+        pool,
+        numRows,
+        decompressTime,
+        &readAheadBuffer,
+        bufferPool);
   }
 
   auto fields = schema->fields();
@@ -592,10 +607,15 @@ BlockPayload::deserialize(
           pool,
           decompressTime,
           &readAheadBuffer,
-          bytedance::bolt::simd::kPadding);
+          bytedance::bolt::simd::kPadding,
+          bufferPool);
     } else {
       return readUncompressedBuffer(
-          inputStream, &readAheadBuffer, pool, bytedance::bolt::simd::kPadding);
+          inputStream,
+          &readAheadBuffer,
+          pool,
+          bytedance::bolt::simd::kPadding,
+          bufferPool);
     }
   };
 
@@ -647,7 +667,8 @@ BlockPayload::deserializeRowVectorModeBuffers(
     arrow::MemoryPool* pool,
     uint32_t& numRows,
     uint64_t& decompressTime,
-    ByteBuffer** readAheadBuffer) {
+    ByteBuffer** readAheadBuffer,
+    ColumnBufferPool* bufferPool) {
   // lengthBuffer
   std::shared_ptr<arrow::Buffer> lengthBuffer, valueBuffer;
   ARROW_ASSIGN_OR_RAISE(
@@ -667,7 +688,8 @@ BlockPayload::deserializeRowVectorModeBuffers(
           pool,
           decompressTime,
           readAheadBuffer,
-          bytedance::bolt::simd::kPadding));
+          bytedance::bolt::simd::kPadding,
+          bufferPool));
   ARROW_RETURN_IF(
       valueBuffer == nullptr,
       arrow::Status::Invalid(

@@ -43,6 +43,10 @@ static void registerPrestoMathFunctionAliases(const std::string& prefix) {
 namespace flinksql {
 
 static void registerStringFunctions(const std::string& prefix) {
+  registerFunction<FlinkLPadFunction, Varchar, Varchar, int32_t, Varchar>(
+      {prefix + "lpad"});
+  registerFunction<FlinkRPadFunction, Varchar, Varchar, int32_t, Varchar>(
+      {prefix + "rpad"});
   registerFunction<IsAlphaFunction, bool, Varchar>({prefix + "is_alpha"});
   registerFunction<IsDecimalFunction, bool, Varchar>({prefix + "is_decimal"});
   registerFunction<IsDigitFunction, bool, Varchar>({prefix + "is_digit"});

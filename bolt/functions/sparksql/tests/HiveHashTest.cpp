@@ -114,6 +114,85 @@ TEST_F(HiveHashTest, Int64) {
   EXPECT_EQ(HiveHash<int64_t>(std::nullopt), 0);
 }
 
+TEST_F(HiveHashTest, unsignedIntegralVectors) {
+  const auto testFlat = [&](const VectorPtr& input,
+                            const std::vector<int32_t>& expected) {
+    auto result = evaluate<SimpleVector<int32_t>>(
+        "hive_hash(c0)", makeRowVector({input}));
+    assertEqualVectors(makeFlatVector<int32_t>(expected), result);
+  };
+
+  testFlat(
+      makeNullableFlatVector<uint8_t>(
+          {11, std::nullopt, 128, std::numeric_limits<uint8_t>::max()},
+          TINYINT()),
+      {11, 0, 128, 255});
+  testFlat(
+      makeNullableFlatVector<uint16_t>(
+          {11, std::nullopt, 32768, std::numeric_limits<uint16_t>::max()},
+          SMALLINT()),
+      {11, 0, 32768, 65535});
+  testFlat(
+      makeNullableFlatVector<uint32_t>(
+          {11,
+           std::nullopt,
+           uint32_t{1} << 31,
+           std::numeric_limits<uint32_t>::max()},
+          INTEGER()),
+      {11, 0, 0, std::numeric_limits<int32_t>::max()});
+  testFlat(
+      makeNullableFlatVector<uint64_t>(
+          {11,
+           std::nullopt,
+           std::numeric_limits<uint64_t>::max(),
+           std::numeric_limits<uint64_t>::max() - 2022},
+          BIGINT()),
+      {11, 0, 0, 2022});
+
+  const auto testDictionary = [&](const VectorPtr& values,
+                                  const std::vector<int32_t>& expected) {
+    auto input = wrapInDictionary(makeIndices({1, 0}), values);
+    auto result = evaluate<SimpleVector<int32_t>>(
+        "hive_hash(c0)", makeRowVector({input}));
+    assertEqualVectors(makeFlatVector<int32_t>(expected), result);
+  };
+
+  testDictionary(makeFlatVector<uint8_t>({11, 255}, TINYINT()), {255, 11});
+  testDictionary(
+      makeFlatVector<uint16_t>({11, 65535}, SMALLINT()), {65535, 11});
+  testDictionary(
+      makeFlatVector<uint32_t>(
+          {11, std::numeric_limits<uint32_t>::max()}, INTEGER()),
+      {std::numeric_limits<int32_t>::max(), 11});
+  testDictionary(
+      makeFlatVector<uint64_t>(
+          {11, std::numeric_limits<uint64_t>::max()}, BIGINT()),
+      {0, 11});
+
+  auto input = makeFlatVector<uint16_t>({11, 65535}, SMALLINT());
+  SelectivityVector rows(input->size());
+  rows.setValid(0, false);
+  rows.updateBounds();
+  auto result = evaluate<SimpleVector<int32_t>>(
+      "hive_hash(c0)", makeRowVector({input}), rows);
+  assertEqualVectors(makeFlatVector<int32_t>({0, 65535}), result, rows);
+
+  auto array =
+      makeArrayVector({0}, makeFlatVector<uint16_t>({11, 65535}, SMALLINT()));
+  result =
+      evaluate<SimpleVector<int32_t>>("hive_hash(c0)", makeRowVector({array}));
+  assertEqualVectors(makeFlatVector<int32_t>({65876}), result);
+}
+
+TEST_F(HiveHashTest, bigintDictionaryUsesDecodedPath) {
+  auto flat = makeFlatVector<int64_t>({11, 12});
+  auto dictionary = wrapInDictionary(makeIndices({1, 0}), flat);
+  auto result = evaluate<SimpleVector<int32_t>>(
+      "hive_hash(c0)", makeRowVector({dictionary}));
+
+  assertEqualVectors(makeFlatVector<int32_t>({12, 11}), result);
+}
+
 TEST_F(HiveHashTest, Int32) {
   EXPECT_EQ(HiveHash<int32_t>(INT32_MAX), INT32_MAX);
   // INT32_MIN from hive shell

@@ -206,7 +206,8 @@ class BoltColumnarBatchDeserializer {
       bool isRowFormat = false,
       AdaptiveParallelZstdCodec* zstdCodec = nullptr,
       RowBufferPool* rowBufferPool = nullptr,
-      ShuffleRowToColumnarConverter* row2ColConverter = nullptr);
+      ShuffleRowToColumnarConverter* row2ColConverter = nullptr,
+      ColumnBufferPool* columnBufferPool = nullptr);
 
   bytedance::bolt::RowVectorPtr next();
 
@@ -253,6 +254,8 @@ class BoltColumnarBatchDeserializer {
   int32_t partialRowSize_{0};
   ShuffleRowToColumnarConverter* row2ColConverter_{nullptr};
   std::unique_ptr<arrow::ResizableBuffer> tailBuffer_{nullptr};
+
+  ColumnBufferPool* columnBufferPool_{nullptr};
 
   // for CompositeRowVector shuffle reader
   RowVectorLayout vectorLayout_{RowVectorLayout::kInvalid};

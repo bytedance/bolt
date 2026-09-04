@@ -447,11 +447,13 @@ Writer::Writer(
       generalPool_{pool_->addLeafChild(".general")},
       exportPool_{pool_->addLeafChild(".exportArrow")},
       arrowPool_(arrowPool),
+      metrics_(std::make_shared<WriterMetricsCollector>()),
       stream_(std::make_shared<ArrowDataBufferSink>(
           std::move(sink),
           *generalPool_,
           options.bufferFlushThresholdBytes,
-          options.bufferGrowRatio)),
+          options.bufferGrowRatio,
+          metrics_)),
       arrowContext_(std::make_shared<ArrowContext>()),
       schema_(std::move(schema)),
       arrowSchemaFromHive_(std::move(arrowSchema)),
@@ -475,6 +477,7 @@ Writer::Writer(
       options.parquetWriteTimestampTimeZone.value_or("UTC");
   arrowContext_->properties =
       getArrowParquetWriterOptionsBuilder(options, flushPolicy_, arrowPool_)
+          ->writer_metrics(metrics_)
           ->build();
   arrowContext_->arrowWriterProperties =
       options.getArrowWriterPropertiesBuilder()->build();
@@ -592,6 +595,7 @@ void Writer::createFileWriterIfNotExist() {
 void Writer::initializeArrowSchema(const VectorPtr& data) {
   BOLT_CHECK_NULL(arrowContext_->schema);
 
+  WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
   ArrowSchema schema;
   exportToArrow(data, schema, options_, {}, exportPool_.get());
   auto arrowSchema = ::arrow::ImportSchema(&schema).ValueOrDie();
@@ -636,16 +640,20 @@ void Writer::splitWriteRecordBatch(const VectorPtr& data) {
   while (offset < dataSize) {
     auto size = std::min<vector_size_t>(dataSize - offset, rowNumPerBatch);
 
-    ArrowArray array;
-    exportToArrow(
-        offset == 0 && size == dataSize ? data : data->slice(offset, size),
-        array,
-        exportPool_.get(),
-        options_);
+    std::shared_ptr<::arrow::RecordBatch> recordBatch;
+    {
+      WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
+      ArrowArray array;
+      exportToArrow(
+          offset == 0 && size == dataSize ? data : data->slice(offset, size),
+          array,
+          exportPool_.get(),
+          options_);
 
-    PARQUET_ASSIGN_OR_THROW(
-        auto recordBatch,
-        ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
+      PARQUET_ASSIGN_OR_THROW(
+          recordBatch,
+          ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
+    }
     writeRecordBatch(recordBatch);
     offset += size;
   }
@@ -678,11 +686,14 @@ void Writer::write(const VectorPtr& data) {
     return;
   }
 
-  ArrowArray array;
-  exportToArrow(data, array, exportPool_.get(), options_);
-  PARQUET_ASSIGN_OR_THROW(
-      auto recordBatch,
-      ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
+  std::shared_ptr<::arrow::RecordBatch> recordBatch;
+  {
+    WriterMetricTimer timer(&metrics_->writeRecodeWallNanos);
+    ArrowArray array;
+    exportToArrow(data, array, exportPool_.get(), options_);
+    PARQUET_ASSIGN_OR_THROW(
+        recordBatch, ::arrow::ImportRecordBatch(&array, arrowContext_->schema));
+  }
 
   auto bytes = data->estimateFlatSize();
   auto numRows = data->size();
@@ -727,6 +738,7 @@ void Writer::close() {
     return;
   }
 
+  WriterMetricTimer timer(&metrics_->writeFinalizeWallNanos);
   flush();
   if (!arrowContext_->writer) {
     createEmptyFile();
@@ -737,6 +749,10 @@ void Writer::close() {
   PARQUET_THROW_NOT_OK(stream_->Close());
   arrowContext_->stagingChunks.clear();
   closed_ = true;
+}
+
+dwio::common::WriterMetrics Writer::metrics() const {
+  return metrics_->snapshot();
 }
 
 void Writer::createEmptyFile() {

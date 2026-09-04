@@ -29,4 +29,8 @@ add_executable(bolt_functions_string_test StringImplTest.cpp)
 
 add_test(bolt_functions_string_test bolt_functions_string_test)
 
-target_link_libraries(bolt_functions_string_test bolt_gtest_main)
+target_link_libraries(
+  bolt_functions_string_test
+  bolt_gtest_main
+  bolt_functions_string
+)

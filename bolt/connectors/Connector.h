@@ -222,6 +222,11 @@ class DataSink {
   struct Stats {
     uint64_t numWrittenBytes{0};
     uint32_t numWrittenFiles{0};
+    uint64_t writeRecodeWallNanos{0};
+    uint64_t writeEncodeWallNanos{0};
+    uint64_t writeCompressionWallNanos{0};
+    uint64_t writeIOWallNanos{0};
+    uint64_t writeFinalizeWallNanos{0};
     common::SpillStats spillStats;
 
     bool empty() const;

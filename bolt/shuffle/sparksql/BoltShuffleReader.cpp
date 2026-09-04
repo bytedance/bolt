@@ -436,7 +436,8 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
     bool isRowFormat,
     AdaptiveParallelZstdCodec* zstdCodec,
     RowBufferPool* rowBufferPool,
-    ShuffleRowToColumnarConverter* row2ColConverter)
+    ShuffleRowToColumnarConverter* row2ColConverter,
+    ColumnBufferPool* columnBufferPool)
     : schema_(schema),
       codec_(codec),
       rowType_(rowType),
@@ -452,7 +453,8 @@ BoltColumnarBatchDeserializer::BoltColumnarBatchDeserializer(
       isRowFormat_(isRowFormat),
       zstdCodec_(zstdCodec),
       rowBufferPool_(rowBufferPool),
-      row2ColConverter_(row2ColConverter) {
+      row2ColConverter_(row2ColConverter),
+      columnBufferPool_(columnBufferPool) {
   auto result = arrow::io::BufferedInputStream::Create(
       shuffleBufferSize, memoryPool, std::move(in));
   BOLT_CHECK(
@@ -512,7 +514,8 @@ RowVectorPtr BoltColumnarBatchDeserializer::next() {
         numRows,
         decompressTime_,
         payloadType_,
-        readAheadBuffer_.size > 0 ? &readAheadBuffer_ : nullptr);
+        readAheadBuffer_.size > 0 ? &readAheadBuffer_ : nullptr,
+        columnBufferPool_);
     BOLT_CHECK(arrowBuffers.ok());
 
     return makeColumnarBatch(
@@ -563,7 +566,8 @@ RowVectorPtr BoltColumnarBatchDeserializer::next() {
         numRows,
         decompressTime_,
         payloadType_,
-        readAheadBuffer_.size > 0 ? &readAheadBuffer_ : nullptr);
+        readAheadBuffer_.size > 0 ? &readAheadBuffer_ : nullptr,
+        columnBufferPool_);
     BOLT_CHECK(
         result.ok(),
         "Failed to deserialize BlockPayload: " + result.status().message());

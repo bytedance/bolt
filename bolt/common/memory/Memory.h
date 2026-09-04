@@ -298,12 +298,6 @@ class MemoryManager {
 
   std::string treeMemoryUsage() const;
 
-  /// Returns the memory manger's internal default root memory pool for testing
-  /// purpose and legacy use cases.
-  MemoryPool& deprecatedSysRootPool() const {
-    return *sysRoot_;
-  }
-
   /// Returns the process wide leaf memory pool used for disk spilling.
   MemoryPool* spillPool() {
     return spillPool_.get();

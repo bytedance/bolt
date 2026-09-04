@@ -240,7 +240,8 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
           CodecOptions(),
           buffered_resources_ != nullptr
               ? buffered_resources_->page_buffer_arena()
-              : nullptr);
+              : nullptr,
+          properties_->writer_metrics());
     } else {
       pager = PageWriter::Open(
           sink_,
@@ -258,7 +259,8 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
           *codec_options,
           buffered_resources_ != nullptr
               ? buffered_resources_->page_buffer_arena()
-              : nullptr);
+              : nullptr,
+          properties_->writer_metrics());
     }
     column_writers_[0] = ColumnWriter::Make(
         col_meta, std::move(pager), properties_, buffered_resources_);
@@ -474,7 +476,8 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
             CodecOptions(),
             buffered_resources_ != nullptr
                 ? buffered_resources_->page_buffer_arena()
-                : nullptr);
+                : nullptr,
+            properties_->writer_metrics());
       } else {
         pager = PageWriter::Open(
             sink_,
@@ -492,7 +495,8 @@ class RowGroupSerializer : public RowGroupWriter::Contents {
             *codec_options,
             buffered_resources_ != nullptr
                 ? buffered_resources_->page_buffer_arena()
-                : nullptr);
+                : nullptr,
+            properties_->writer_metrics());
       }
       column_writers_.push_back(ColumnWriter::Make(
           col_meta, std::move(pager), properties_, buffered_resources_));

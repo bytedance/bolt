@@ -295,6 +295,13 @@ TEST_F(ParquetWriterTest, compression) {
   writer->write(data);
   writer->close();
 
+  const auto metrics = writer->metrics();
+  EXPECT_GT(metrics.writeRecodeWallNanos, 0);
+  EXPECT_GT(metrics.writeEncodeWallNanos, 0);
+  EXPECT_GT(metrics.writeCompressionWallNanos, 0);
+  EXPECT_GT(metrics.writeIOWallNanos, 0);
+  EXPECT_GT(metrics.writeFinalizeWallNanos, 0);
+
   dwio::common::ReaderOptions readerOptions{leafPool_.get()};
   auto reader = createReaderInMemory(*sinkPtr, readerOptions);
 

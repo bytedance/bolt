@@ -49,6 +49,14 @@ TEST_F(QueryConfigTest, emptyConfig) {
   ASSERT_FALSE(config.isLegacyCast());
 }
 
+TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
+  QueryConfig defaultConfig{{}};
+  EXPECT_EQ(defaultConfig.parquetReaderImplicitCastMask(), 0);
+
+  QueryConfig configured{{{QueryConfig::kParquetReaderImplicitCastMask, "-1"}}};
+  EXPECT_EQ(configured.parquetReaderImplicitCastMask(), -1);
+}
+
 TEST_F(QueryConfigTest, setConfig) {
   std::string path = "/tmp/setConfig";
   std::unordered_map<std::string, std::string> configData(

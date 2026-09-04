@@ -45,7 +45,10 @@ std::unordered_map<std::string, std::shared_ptr<Connector>>& connectors() {
 } // namespace
 
 bool DataSink::Stats::empty() const {
-  return numWrittenBytes == 0 && numWrittenFiles == 0 && spillStats.empty();
+  return numWrittenBytes == 0 && numWrittenFiles == 0 &&
+      writeRecodeWallNanos == 0 && writeEncodeWallNanos == 0 &&
+      writeCompressionWallNanos == 0 && writeIOWallNanos == 0 &&
+      writeFinalizeWallNanos == 0 && spillStats.empty();
 }
 
 std::string DataSink::Stats::toString() const {

@@ -123,9 +123,8 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
     return this->GenCmpIR();
   };
 
-  auto module = jit->CompileModule(genIR, fn);
+  auto cacheTypes = std::make_shared<std::vector<bytedance::bolt::TypePtr>>();
   if (isEqualOp() || !flags.empty()) { // only for row cmp/= row
-    auto cacheTypes = std::make_unique<std::vector<bytedance::bolt::TypePtr>>();
     for (auto& t : keysTypes) {
       switch (t->kind()) {
         case bytedance::bolt::TypeKind::ARRAY:
@@ -137,22 +136,9 @@ CompiledModuleSP RowContainerCodeGenerator::codegen() {
           break;
       }
     }
-
-    if (cacheTypes->size() > 0) {
-      auto* userData = static_cast<void*>(cacheTypes.get());
-      if (module->compareExchangeUserData(nullptr, userData)) {
-        cacheTypes.release();
-        module->appendCleanCallback([mod = module.get()] {
-          auto* raw = mod->getUserData();
-          mod->compareExchangeUserData(raw, nullptr);
-          auto* cacheTypes =
-              static_cast<std::vector<bytedance::bolt::TypePtr>*>(raw);
-          delete cacheTypes;
-        });
-      }
-    }
   }
-  return module;
+  return jit->CompileModule(
+      genIR, fn, cacheTypes->empty() ? nullptr : std::move(cacheTypes));
 }
 
 /// util functions

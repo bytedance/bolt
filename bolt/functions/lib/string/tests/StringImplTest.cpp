@@ -29,6 +29,7 @@
  */
 
 #include "bolt/functions/lib/string/StringImpl.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/core/CoreTypeSystem.h"
 #include "bolt/functions/lib/string/JavaStyleSplit.h"
@@ -1311,6 +1312,16 @@ TEST_F(StringImplTest, toLower) {
   EXPECT_EQ(
       toLower<true>(std::string_view("ΕΠΕΙΔΗ Η ΑΝΑΓΝΩΡΙΣΗ ΤΗΣ ΑΞΙΟΠΡΕΠΕΙΑΣ")),
       "επειδη η αναγνωριση της αξιοπρεπειας");
+  if constexpr (kSparkCompatible) {
+    // Exercise sparse and repeated Sigma adjustments, including more offsets
+    // than fit in the inline small-vector buffer.
+    EXPECT_EQ(
+        (toLower<false, kSparkCompatible>(std::string_view("AΣ8B"))), "aσ8b");
+    EXPECT_EQ(
+        (toLower<false, kSparkCompatible>(std::string_view("AΣ AΣ AΣ AΣ AΣ"))),
+        "aς aς aς aς aς");
+    EXPECT_EQ((toLower<false, kSparkCompatible>(std::string_view("AΣ"))), "aς");
+  }
   // Surrogate pairs.
   EXPECT_EQ(toLower<true>(std::string_view("a🙃b🙃c")), "a🙃b🙃c");
   EXPECT_EQ(toLower<true>(std::string_view("😀😆😃😄😄😆")), "😀😆😃😄😄😆");

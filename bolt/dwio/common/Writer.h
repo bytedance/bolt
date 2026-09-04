@@ -35,6 +35,7 @@
 #include <optional>
 #include <string>
 
+#include "bolt/dwio/common/WriterMetrics.h"
 #include "bolt/vector/ComplexVector.h"
 namespace bytedance::bolt::dwio::common {
 
@@ -86,6 +87,10 @@ class Writer {
    *  Data can no longer be written.
    */
   virtual void abort() = 0;
+
+  virtual WriterMetrics metrics() const {
+    return {};
+  }
 
  protected:
   bool isRunning() const;

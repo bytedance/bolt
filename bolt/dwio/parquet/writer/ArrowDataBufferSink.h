@@ -20,6 +20,7 @@
 #include <memory>
 
 #include "bolt/dwio/common/DataBuffer.h"
+#include "bolt/dwio/parquet/writer/WriterMetrics.h"
 namespace bytedance::bolt {
 namespace memory {
 class MemoryPool;
@@ -38,7 +39,8 @@ class ArrowDataBufferSink : public ::arrow::io::OutputStream {
       std::unique_ptr<dwio::common::FileSink> sink,
       memory::MemoryPool& pool,
       int64_t flushThresholdBytes,
-      double growRatio);
+      double growRatio,
+      std::shared_ptr<WriterMetricsCollector> metrics);
 
   ::arrow::Status Write(const std::shared_ptr<::arrow::Buffer>& data) override;
 
@@ -67,6 +69,7 @@ class ArrowDataBufferSink : public ::arrow::io::OutputStream {
   const double growRatio_;
   BufferPtr buffer_;
   int64_t bytesFlushed_ = 0;
+  const std::shared_ptr<WriterMetricsCollector> metrics_;
 };
 } // namespace parquet
 } // namespace bytedance::bolt

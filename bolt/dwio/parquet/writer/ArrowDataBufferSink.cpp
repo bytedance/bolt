@@ -25,11 +25,13 @@ ArrowDataBufferSink::ArrowDataBufferSink(
     std::unique_ptr<dwio::common::FileSink> sink,
     memory::MemoryPool& pool,
     int64_t flushThresholdBytes,
-    double growRatio)
+    double growRatio,
+    std::shared_ptr<WriterMetricsCollector> metrics)
     : pool_(&pool),
       sink_(std::move(sink)),
       flushThresholdBytes_(flushThresholdBytes),
-      growRatio_(growRatio) {}
+      growRatio_(growRatio),
+      metrics_(std::move(metrics)) {}
 
 ::arrow::Status ArrowDataBufferSink::Write(
     const std::shared_ptr<::arrow::Buffer>& data) {
@@ -90,6 +92,7 @@ struct BufferReleaser {
     dwio::common::DataBuffer<char>& buffer) {
   if (buffer.size() > 0) {
     bytesFlushed_ += buffer.size();
+    WriterMetricTimer timer(&metrics_->writeIOWallNanos, true);
     sink_->write(std::move(buffer));
   }
   return ::arrow::Status::OK();
@@ -101,6 +104,7 @@ struct BufferReleaser {
 
 ::arrow::Status ArrowDataBufferSink::Close() {
   ARROW_RETURN_NOT_OK(Flush());
+  WriterMetricTimer timer(&metrics_->writeIOWallNanos, true);
   sink_->close();
   return ::arrow::Status::OK();
 }
