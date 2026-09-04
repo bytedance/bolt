@@ -180,6 +180,8 @@ class QueryConfig {
   static constexpr const char* kHashAggregationCompositeOutputEnabled =
       "hashaggregation_composite_output_enabled";
 
+  static constexpr const char* kUseMonoAlloc = "use_mono_alloc";
+
   static constexpr const char* kHashAggregationUniqueRowOpt =
       "hashaggregation_unique_row_opt";
 
@@ -859,6 +861,10 @@ class QueryConfig {
 
   bool isHashAggregationCompositeOutputEnabled() const {
     return get<bool>(kHashAggregationCompositeOutputEnabled, false);
+  }
+
+  bool useMonoAlloc() const {
+    return get<bool>(kUseMonoAlloc, true);
   }
 
   bool isUniqueRowOptimizationEnabled() const {

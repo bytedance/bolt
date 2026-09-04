@@ -67,7 +67,8 @@ class LookupTable : public LookupTableBase {
  public:
   LookupTable(memory::MemoryPool& pool)
       : pool_(pool),
-        map_(std::make_unique<outer_map_t>(outer_allocator_t(pool))) {}
+        resource_(pool),
+        map_(std::make_unique<outer_map_t>(outer_allocator_t(&resource_))) {}
 
   auto& map() {
     return map_;
@@ -78,7 +79,7 @@ class LookupTable : public LookupTableBase {
   }
 
   void ensureMapAtIndex(vector_size_t rowIndex) const {
-    map_->emplace(rowIndex, pool_);
+    map_->emplace(rowIndex, inner_allocator_t(&resource_));
   }
 
   auto& getMapAtIndex(vector_size_t rowIndex) {
@@ -88,7 +89,7 @@ class LookupTable : public LookupTableBase {
 
  private:
   using inner_allocator_t =
-      memory::StlAllocator<std::pair<key_t const, vector_size_t>>;
+      memory::SlabAllocator<std::pair<key_t const, vector_size_t>>;
 
   using inner_map_t = folly::F14FastMap<
       key_t,
@@ -98,7 +99,7 @@ class LookupTable : public LookupTableBase {
       inner_allocator_t>;
 
   using outer_allocator_t =
-      memory::StlAllocator<std::pair<vector_size_t const, inner_map_t>>;
+      memory::SlabAllocator<std::pair<vector_size_t const, inner_map_t>>;
 
   // [rowindex][key] -> offset of value.
   using outer_map_t = folly::F14FastMap<
@@ -109,6 +110,7 @@ class LookupTable : public LookupTableBase {
       outer_allocator_t>;
 
   memory::MemoryPool& pool_;
+  mutable memory::SlabMemoryResource resource_;
   std::unique_ptr<outer_map_t> map_;
 };
 

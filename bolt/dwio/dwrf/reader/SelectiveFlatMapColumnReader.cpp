@@ -317,10 +317,14 @@ class SelectiveFlatMapReader : public SelectiveStructColumnReaderBase {
       children_[k]->getValues(rows, &childValues_[k]);
       copyRanges_[k].clear();
     }
-    auto offsets =
-        AlignedBuffer::allocate<vector_size_t>(rows.size(), &memoryPool_);
-    auto sizes =
-        AlignedBuffer::allocate<vector_size_t>(rows.size(), &memoryPool_);
+    auto offsets = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        rows.size(), &memoryPool_);
+    auto sizes = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        rows.size(), &memoryPool_);
     auto* nulls =
         nullsInReadRange_ ? nullsInReadRange_->as<uint64_t>() : nullptr;
 
@@ -480,7 +484,9 @@ class SelectiveFlatMapReader : public SelectiveStructColumnReaderBase {
     auto rawOffsets = offsets->asMutable<int32_t>();
     auto rawSizes = sizes->asMutable<int32_t>();
     int32_t pitch = children_.size();
-    auto values = AlignedBuffer::allocate<V>(totalChildValues, &memoryPool_);
+    auto values = AlignedBuffer::
+        allocate<V, AlignedBuffer::AllocationStrategy::kConservative>(
+            totalChildValues, &memoryPool_);
     auto rawValues = values->template asMutable<V>();
     BufferPtr valueNulls;
     uint64_t* valueRawNulls = nullptr;
@@ -635,8 +641,9 @@ class SelectiveFlatMapReader : public SelectiveStructColumnReaderBase {
       totalChildValues += countInMap(
           inMap_[i], selectedInMap.asRange().bits(), selectedInMap.size(), i);
     }
-    BufferPtr keyBuffer =
-        AlignedBuffer::allocate<T>(totalChildValues, &memoryPool_);
+    BufferPtr keyBuffer = AlignedBuffer::
+        allocate<T, AlignedBuffer::AllocationStrategy::kConservative>(
+            totalChildValues, &memoryPool_);
     BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
         fillValues,
         valueKind,

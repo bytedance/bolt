@@ -40,7 +40,9 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/init/Init.h>
 #include <gtest/gtest.h>
+#include <exception>
 #include <memory>
+#include <thread>
 
 DEFINE_int64(bolt_benchmark_custom_size, 0, "Custom number of entries");
 DEFINE_int32(
@@ -51,13 +53,51 @@ DEFINE_int32(
     bolt_benchmark_custom_key_spacing,
     1,
     "Spacing between key values");
-
 DEFINE_int32(bolt_benchmark_custom_num_ways, 10, "Number of build threads");
+DEFINE_string(
+    bolt_benchmark_f14_allocator,
+    "both",
+    "F14 allocator to benchmark: stl, slab, or both");
+DEFINE_int32(
+    bolt_benchmark_threads,
+    1,
+    "Number of concurrent benchmark threads");
+
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
 
 namespace {
+enum class F14AllocatorMode {
+  kStl,
+  kSlab,
+  kBoth,
+};
+
+F14AllocatorMode parseF14AllocatorMode() {
+  if (FLAGS_bolt_benchmark_f14_allocator == "stl") {
+    return F14AllocatorMode::kStl;
+  }
+  if (FLAGS_bolt_benchmark_f14_allocator == "slab") {
+    return F14AllocatorMode::kSlab;
+  }
+  if (FLAGS_bolt_benchmark_f14_allocator == "both") {
+    return F14AllocatorMode::kBoth;
+  }
+  BOLT_FAIL(
+      "Unsupported --bolt_benchmark_f14_allocator value '{}'. Expected stl, "
+      "slab, or both.",
+      FLAGS_bolt_benchmark_f14_allocator);
+}
+
+bool useStlAllocator(F14AllocatorMode mode) {
+  return mode == F14AllocatorMode::kStl || mode == F14AllocatorMode::kBoth;
+}
+
+bool useSlabAllocator(F14AllocatorMode mode) {
+  return mode == F14AllocatorMode::kSlab || mode == F14AllocatorMode::kBoth;
+}
+
 struct HashTableBenchmarkParams {
   HashTableBenchmarkParams() = default;
 
@@ -132,15 +172,24 @@ struct HashTableBenchmarkRun {
   BaseHashTable::HashMode hashMode;
 
   // Clocks for same operation with F14FastSet if applicable.
-  float f14ProbeClocks{-1};
+  float f14StlProbeClocks{-1};
+  float f14SlabProbeClocks{-1};
 
   std::string toString() const {
     std::stringstream out;
     out << params.toString();
     out << " hash/row=" << hashClocks << " probe clocks=" << probeClocks;
-    if (f14ProbeClocks != -1) {
-      out << " f14Probe=" << f14ProbeClocks << " ("
-          << (100 * f14ProbeClocks / probeClocks) << "%)";
+    if (f14StlProbeClocks != -1) {
+      out << " f14StlProbe=" << f14StlProbeClocks << " ("
+          << (100 * f14StlProbeClocks / probeClocks) << "%)";
+    }
+    if (f14SlabProbeClocks != -1) {
+      out << " f14SlabProbe=" << f14SlabProbeClocks << " ("
+          << (100 * f14SlabProbeClocks / probeClocks) << "%)";
+    }
+    if (f14StlProbeClocks != -1 && f14SlabProbeClocks != -1) {
+      out << " slab/stl=" << (100 * f14SlabProbeClocks / f14StlProbeClocks)
+          << "%";
     }
     std::string modeString = hashMode == BaseHashTable::HashMode::kArray
         ? "array"
@@ -161,8 +210,13 @@ struct HashTableBenchmarkRun {
 // modes.
 class HashTableBenchmark : public VectorTestBase {
  public:
+  explicit HashTableBenchmark(F14AllocatorMode f14AllocatorMode)
+      : f14AllocatorMode_{f14AllocatorMode} {}
+
   void makeData(HashTableBenchmarkParams params) {
     topTable_.reset();
+    f14StlTable_.reset();
+    f14SlabTable_.reset();
     batches_.clear();
     rowOfKey_.clear();
     isInTable_.clear();
@@ -218,11 +272,20 @@ class HashTableBenchmark : public VectorTestBase {
     LOG(INFO) << "Made table " << topTable_->toString();
 
     if (topTable_->hashMode() == BaseHashTable::HashMode::kNormalizedKey) {
-      f14Table_ = std::make_unique<F14TestTable>(
-          1024,
-          F14TestHasher(),
-          F14TestComparer(),
-          memory::StlAllocator<uint64_t*>(*pool_));
+      if (useStlAllocator(f14AllocatorMode_)) {
+        f14StlTable_ = std::make_unique<F14StlTestTable>(
+            1024,
+            F14TestHasher(),
+            F14TestComparer(),
+            memory::StlAllocator<uint64_t*>(pool_.get()));
+      }
+      if (useSlabAllocator(f14AllocatorMode_)) {
+        f14SlabTable_ = std::make_unique<F14SlabTestTable>(
+            1024,
+            F14TestHasher(),
+            F14TestComparer(),
+            memory::SlabAllocator<uint64_t*>(&f14TableResource_));
+      }
       constexpr int32_t kInsertBatch = 1000;
       char* insertRows[kInsertBatch];
       auto& otherTables = topTable_->testingOtherTables();
@@ -232,7 +295,13 @@ class HashTableBenchmark : public VectorTestBase {
         while (auto numRows = subtable->rows()->listRows(
                    &iter, kInsertBatch, RowContainer::kUnlimited, insertRows)) {
           for (auto row = 0; row < numRows; ++row) {
-            f14Table_->insert(reinterpret_cast<uint64_t*>(insertRows[row]));
+            auto normalizedKey = reinterpret_cast<uint64_t*>(insertRows[row]);
+            if (f14StlTable_) {
+              f14StlTable_->insert(normalizedKey);
+            }
+            if (f14SlabTable_) {
+              f14SlabTable_->insert(normalizedKey);
+            }
           }
         }
       }
@@ -248,8 +317,14 @@ class HashTableBenchmark : public VectorTestBase {
     result.hashMode = topTable_->hashMode();
     result.numDistinct = topTable_->numDistinct();
     if (topTable_->hashMode() == BaseHashTable::HashMode::kNormalizedKey) {
-      testF14Probe();
-      result.f14ProbeClocks = clocksPerRow_;
+      if (f14StlTable_) {
+        testF14Probe("F14set(StlAllocator)", *f14StlTable_);
+        result.f14StlProbeClocks = clocksPerRow_;
+      }
+      if (f14SlabTable_) {
+        testF14Probe("F14set(SlabAllocator)", *f14SlabTable_);
+        result.f14SlabProbeClocks = clocksPerRow_;
+      }
     }
     return result;
   }
@@ -509,7 +584,8 @@ class HashTableBenchmark : public VectorTestBase {
   }
 
   // Same as testProbe for normalized keys, uses F14Set instead.
-  void testF14Probe() {
+  template <typename F14Table>
+  void testF14Probe(const char* label, const F14Table& f14Table) {
     auto lookup = std::make_unique<HashLookup>(topTable_->hashers());
 
     auto batchSize = batches_[0]->size();
@@ -559,9 +635,9 @@ class HashTableBenchmark : public VectorTestBase {
             auto index = lookup->rows[row];
             uint64_t key = lookup->hashes[index];
             uint64_t* keyPtr = &key + 1;
-            auto it = f14Table_->find(keyPtr);
+            auto it = f14Table.find(keyPtr);
             lookup->hits[index] =
-                it == f14Table_->end() ? nullptr : reinterpret_cast<char*>(*it);
+                it == f14Table.end() ? nullptr : reinterpret_cast<char*>(*it);
           }
         }
         for (auto i = 0; i < lookup->rows.size(); ++i) {
@@ -576,7 +652,8 @@ class HashTableBenchmark : public VectorTestBase {
 
     std::cout
         << fmt::format(
-               "F14set: Hashed: {} Probed: {} Hit: {} Hash time/row {} probe time/row {}",
+               "{}: Hashed: {} Probed: {} Hit: {} Hash time/row {} probe time/row {}",
+               label,
                numHashed,
                numProbed,
                numHit,
@@ -603,6 +680,7 @@ class HashTableBenchmark : public VectorTestBase {
   // Timing set by test*Probe().
   float hashClocksPerRow_{0};
   float clocksPerRow_{0};
+  F14AllocatorMode f14AllocatorMode_;
 
   // hasher and comparer for F14 comparison test.
   struct F14TestHasher {
@@ -618,12 +696,14 @@ class HashTableBenchmark : public VectorTestBase {
     }
   };
 
-  using F14TestTable = folly::F14FastSet<
-      uint64_t*,
-      F14TestHasher,
-      F14TestComparer,
-      memory::StlAllocator<uint64_t*>>;
-  std::unique_ptr<F14TestTable> f14Table_;
+  template <typename Allocator>
+  using F14TestTable =
+      folly::F14FastSet<uint64_t*, F14TestHasher, F14TestComparer, Allocator>;
+  using F14StlTestTable = F14TestTable<memory::StlAllocator<uint64_t*>>;
+  using F14SlabTestTable = F14TestTable<memory::SlabAllocator<uint64_t*>>;
+  memory::SlabMemoryResource f14TableResource_{pool_.get()};
+  std::unique_ptr<F14StlTestTable> f14StlTable_;
+  std::unique_ptr<F14SlabTestTable> f14SlabTable_;
 };
 
 void combineResults(
@@ -634,20 +714,107 @@ void combineResults(
   }
   results.push_back(run);
 }
+
+HashTableBenchmarkRun averageRuns(
+    const std::vector<HashTableBenchmarkRun>& runs) {
+  BOLT_CHECK(!runs.empty());
+  auto average = runs.front();
+  average.hashClocks = 0;
+  average.probeClocks = 0;
+  average.f14StlProbeClocks = -1;
+  average.f14SlabProbeClocks = -1;
+
+  float f14StlProbeClocks = 0;
+  float f14SlabProbeClocks = 0;
+  int32_t f14StlCount = 0;
+  int32_t f14SlabCount = 0;
+  int64_t numDistinct = 0;
+  for (const auto& run : runs) {
+    average.hashClocks += run.hashClocks;
+    average.probeClocks += run.probeClocks;
+    numDistinct += run.numDistinct;
+    if (run.f14StlProbeClocks != -1) {
+      f14StlProbeClocks += run.f14StlProbeClocks;
+      ++f14StlCount;
+    }
+    if (run.f14SlabProbeClocks != -1) {
+      f14SlabProbeClocks += run.f14SlabProbeClocks;
+      ++f14SlabCount;
+    }
+  }
+
+  average.hashClocks /= runs.size();
+  average.probeClocks /= runs.size();
+  average.numDistinct = numDistinct / runs.size();
+  if (f14StlCount > 0) {
+    average.f14StlProbeClocks = f14StlProbeClocks / f14StlCount;
+  }
+  if (f14SlabCount > 0) {
+    average.f14SlabProbeClocks = f14SlabProbeClocks / f14SlabCount;
+  }
+  return average;
+}
+
+std::vector<std::unique_ptr<HashTableBenchmark>> makeBenchmarks(
+    const HashTableBenchmarkParams& param,
+    F14AllocatorMode f14AllocatorMode) {
+  BOLT_CHECK_GT(FLAGS_bolt_benchmark_threads, 0);
+  std::vector<std::unique_ptr<HashTableBenchmark>> benchmarks;
+  benchmarks.reserve(FLAGS_bolt_benchmark_threads);
+  for (auto i = 0; i < FLAGS_bolt_benchmark_threads; ++i) {
+    auto bm = std::make_unique<HashTableBenchmark>(f14AllocatorMode);
+    bm->makeData(param);
+    benchmarks.push_back(std::move(bm));
+  }
+  return benchmarks;
+}
+
+HashTableBenchmarkRun runBenchmarks(
+    std::vector<std::unique_ptr<HashTableBenchmark>>& benchmarks) {
+  BOLT_CHECK(!benchmarks.empty());
+  if (FLAGS_bolt_benchmark_threads <= 1) {
+    return benchmarks.front()->run();
+  }
+
+  std::vector<HashTableBenchmarkRun> runs(benchmarks.size());
+  std::vector<std::exception_ptr> exceptions(benchmarks.size());
+  std::vector<std::thread> threads;
+  threads.reserve(benchmarks.size());
+  for (auto i = 0; i < benchmarks.size(); ++i) {
+    threads.emplace_back([&, i]() {
+      try {
+        runs[i] = benchmarks[i]->run();
+      } catch (...) {
+        exceptions[i] = std::current_exception();
+      }
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  for (const auto& exception : exceptions) {
+    if (exception) {
+      std::rethrow_exception(exception);
+    }
+  }
+  return averageRuns(runs);
+}
 } // namespace
 
 int main(int argc, char** argv) {
   // todo: use folly::Init init after upgrade folly lib
   folly::init(&argc, &argv);
   memory::MemoryManager::Options options;
-  options.useMmapAllocator = true;
+  options.useMmapAllocator = false;
   options.allocatorCapacity = 10UL << 30;
-  options.useMmapArena = true;
+  options.useMmapArena = false;
   options.mmapArenaCapacityRatio = 1;
   memory::MemoryManager::initialize(options);
 
-  auto bm = std::make_unique<HashTableBenchmark>();
+  auto f14AllocatorMode = parseF14AllocatorMode();
   std::vector<HashTableBenchmarkRun> results;
+  std::vector<std::unique_ptr<std::vector<std::unique_ptr<HashTableBenchmark>>>>
+      benchmarkStates;
 
   std::vector<HashTableBenchmarkParams> params = {
       HashTableBenchmarkParams("Hit10K", 10000, 100),
@@ -675,17 +842,19 @@ int main(int argc, char** argv) {
   for (auto& param : params) {
     for (bool enableJit : {false, true}) {
       param.enableJitRowEqVectors = enableJit;
+      benchmarkStates.push_back(
+          std::make_unique<std::vector<std::unique_ptr<HashTableBenchmark>>>());
+      auto* benchmarks = benchmarkStates.back().get();
       folly::addBenchmark(
           __FILE__,
           param.title + (enableJit ? "-jit" : ""),
-          [param, &bm, &results]() {
-            std::string lastCase;
-            if (lastCase != param.title) {
-              lastCase = param.title;
+          [param, f14AllocatorMode, &results, benchmarks]() {
+            if (benchmarks->empty()) {
               folly::BenchmarkSuspender suspender;
-              bm->makeData(param);
+              *benchmarks = makeBenchmarks(param, f14AllocatorMode);
             }
-            combineResults(results, bm->run());
+            auto run = runBenchmarks(*benchmarks);
+            combineResults(results, run);
             return 1;
           });
     }
@@ -695,5 +864,6 @@ int main(int argc, char** argv) {
   for (auto& result : results) {
     std::cout << result.toString() << std::endl;
   }
+  benchmarkStates.clear();
   return 0;
 }

@@ -56,7 +56,7 @@ struct MetaRowsSorterWraper {
 };
 
 /// For Spill
-using SpillRows = std::vector<char*, memory::StlAllocator<char*>>;
+using SpillRows = std::vector<char*, memory::SlabAllocator<char*>>;
 
 /// For SortBuffer
 using BufferRows = std::vector<char*>;

@@ -140,6 +140,7 @@ MemoryManager::MemoryManager(const MemoryManager::Options& options)
       coreOnAllocationFailureEnabled_(options.coreOnAllocationFailureEnabled),
       disableMemoryPoolTracking_(options.disableMemoryPoolTracking),
       getPreferredSize_(options.getPreferredSize),
+      enableAlignedBufAllocStrategy_(options.enableAlignedBufAllocStrategy),
       poolRegex_(options.poolRegex),
       singleAllocationThreshold_(options.singleAllocationThreshold),
       accumulativeAllocationThreshold_(options.accumulativeAllocationThreshold),
@@ -164,6 +165,8 @@ MemoryManager::MemoryManager(const MemoryManager::Options& options)
                         .coreOnAllocationFailureEnabled =
                             options.coreOnAllocationFailureEnabled,
                         .getPreferredSize = getPreferredSize_,
+                        .enableAlignedBufAllocStrategy =
+                            enableAlignedBufAllocStrategy_,
                         .poolRegex = options.poolRegex,
                         .singleAllocationThreshold =
                             options.singleAllocationThreshold,
@@ -187,6 +190,8 @@ MemoryManager::MemoryManager(const MemoryManager::Options& options)
                         .coreOnAllocationFailureEnabled =
                             options.coreOnAllocationFailureEnabled,
                         .getPreferredSize = getPreferredSize_,
+                        .enableAlignedBufAllocStrategy =
+                            enableAlignedBufAllocStrategy_,
                         .poolRegex = options.poolRegex,
                         .singleAllocationThreshold =
                             options.singleAllocationThreshold,
@@ -323,6 +328,7 @@ std::shared_ptr<MemoryPool> MemoryManager::addRootPool(
   options.trackUsage = true;
   options.coreOnAllocationFailureEnabled = coreOnAllocationFailureEnabled_;
   options.getPreferredSize = getPreferredSize_;
+  options.enableAlignedBufAllocStrategy = enableAlignedBufAllocStrategy_;
   options.debugOptions = poolDebugOpts;
 
   options.poolRegex = poolRegex_;

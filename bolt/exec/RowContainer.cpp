@@ -207,7 +207,7 @@ RowContainer::RowContainer(
     bool hasNormalizedKeys,
     bool useListRowIndex,
     memory::MemoryPool* pool,
-    std::shared_ptr<HashStringAllocator> stringAllocator)
+    RowContainerParam rowContainerParam)
     : keyTypes_(keyTypes),
       nullableKeys_(nullableKeys),
       isJoinBuild_(isJoinBuild),
@@ -215,10 +215,22 @@ RowContainer::RowContainer(
       hasNormalizedKeys_(hasNormalizedKeys),
       useListRowIndex_(useListRowIndex),
       rows_(pool),
+      slabMemoryResource_(std::make_unique<memory::SlabMemoryResource>(pool)),
+      monotonicMemoryResource_(
+          rowContainerParam.useMonotonicStringAllocation
+              ? std::make_unique<memory::MonotonicMemoryResource>(pool)
+              : nullptr),
       stringAllocator_(
-          stringAllocator ? stringAllocator
-                          : std::make_shared<HashStringAllocator>(pool)),
+          rowContainerParam.hsaAllocator
+              ? rowContainerParam.hsaAllocator
+              : std::make_shared<HashStringAllocator>(pool)),
+      useMonotonicStringAllocation_(
+          rowContainerParam.useMonotonicStringAllocation),
       rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {
+  if (monotonicMemoryResource_) {
+    monotonicAllocator_.emplace(*monotonicMemoryResource_);
+  }
+
   // Compute the layout of the payload row.  The row has keys, null flags,
   // accumulators, dependent fields. All fields are fixed width. If variable
   // width data is referenced, this is done with StringView(for VARCHAR) and
@@ -382,11 +394,38 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
         initialNulls_.data(),
         initialNulls_.size());
   }
-  if (rowSizeOffset_) {
-    variableRowSize(row) = 0;
+  bool clean = !reuse && rowSizeOffset_ != 0;
+  if (!clean) {
+    if (rowSizeOffset_) {
+      variableRowSize(row) = 0;
+    }
+    bits::clearBit(row, freeFlagOffset_);
   }
-  bits::clearBit(row, freeFlagOffset_);
   return row;
+}
+
+void RowContainer::storeString(StringView value, char* row, int32_t offset) {
+  if (value.size() == 0) {
+    valueAt<StringView>(row, offset) = StringView();
+    return;
+  }
+
+  if (value.isInline()) {
+    valueAt<StringView>(row, offset) = value;
+    return;
+  }
+
+  if (useMonotonicStringAllocation_) {
+    BOLT_DCHECK(monotonicAllocator_.has_value());
+    auto* data = monotonicAllocator_->allocate(value.size());
+    simd::memcpy(data, value.data(), value.size());
+    valueAt<StringView>(row, offset) = StringView(data, value.size());
+    addVariableRowSize(row, value.size());
+  } else {
+    RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
+    stringAllocator_->copyMultipart(value, row, offset);
+    return;
+  }
 }
 
 void RowContainer::eraseRows(folly::Range<char**> rows) {
@@ -460,7 +499,7 @@ void RowContainer::eraseRowsSkippingKeys(folly::Range<char**> rows) {
         for (auto row : rows) {
           if (!isNullAt(row, column.nullByte(), column.nullMask())) {
             StringView view = valueAt<StringView>(row, column.offset());
-            if (!view.isInline()) {
+            if (!view.isInline() && !useMonotonicStringAllocation_) {
               stringAllocator_->free(
                   HashStringAllocator::headerOf(view.data()));
             }
@@ -611,7 +650,7 @@ int32_t RowContainer::extractVariableSizeAt(
     const auto size = value.size();
     memcpy(output, &size, 4);
 
-    if (value.isInline() ||
+    if (useMonotonicStringAllocation_ || value.isInline() ||
         reinterpret_cast<const HashStringAllocator::Header*>(value.data())[-1]
                 .size() >= value.size()) {
       memcpy(output + 4, value.data(), size);
@@ -645,13 +684,7 @@ int32_t RowContainer::storeVariableSizeAt(
   const auto size = *reinterpret_cast<const int32_t*>(data);
 
   if (typeKind == TypeKind::VARCHAR || typeKind == TypeKind::VARBINARY) {
-    valueAt<StringView>(row, rowColumn.offset()) = StringView(data + 4, size);
-    if (size > 0) {
-      stringAllocator_->copyMultipart(
-          StringView(data + 4, size), row, rowColumn.offset());
-    } else {
-      valueAt<StringView>(row, rowColumn.offset()) = StringView();
-    }
+    storeString(StringView(data + 4, size), row, rowColumn.offset());
   } else {
     if (size > 0) {
       ByteOutputStream stream(stringAllocator_.get(), false, false);
@@ -772,13 +805,7 @@ void RowContainer::copySerializedRow(
       StringView& sv =
           *reinterpret_cast<StringView*>(serializedRow + rowColumn.offset());
       if (!sv.isInline()) {
-        *(int32_t*)(newRow + rowSizeOffset_) += sv.size();
-        ByteOutputStream stream(stringAllocator_.get(), false, false);
-        const auto position = stringAllocator_->newWrite(stream);
-        stream.appendStringView(sv);
-        stringAllocator_->finishWrite(stream, 0);
-        valueAt<StringView>(newRow, rowColumn.offset()) =
-            StringView(reinterpret_cast<char*>(position.position), sv.size());
+        storeString(sv, newRow, rowColumn.offset());
       }
     } else {
       auto& sv = *reinterpret_cast<std::string_view*>(
@@ -827,7 +854,7 @@ void RowContainer::extractString(
     bool exactSize) {
   if (value.isInline() ||
       reinterpret_cast<const HashStringAllocator::Header*>(value.data())[-1]
-              .size() >= value.size()) {
+              .usableSize() >= value.size()) {
     // The string is inline or all in one piece out of line.
     values->setStringViewValue(index, value, exactSize);
     return;
@@ -884,6 +911,9 @@ int32_t RowContainer::compareStringAsc(
     StringView left,
     const DecodedVector& decoded,
     vector_size_t index) {
+  if (useMonotonicStringAllocation_) {
+    return compareContiguousStringAsc(left, decoded, index);
+  }
   StringView right = decoded.valueAt<StringView>(index);
   uint32_t leftPrefix{0};
   uint32_t rightPrefix{0};
@@ -900,9 +930,15 @@ int32_t RowContainer::compareStringAsc(
     return 1;
   } else {
     std::string storage;
-    return HashStringAllocator::contiguousString(left, storage)
-        .compare(decoded.valueAt<StringView>(index));
+    return HashStringAllocator::contiguousString(left, storage).compare(right);
   }
+}
+
+int32_t RowContainer::compareContiguousStringAsc(
+    StringView left,
+    const DecodedVector& decoded,
+    vector_size_t index) {
+  return left.compare(decoded.valueAt<StringView>(index));
 }
 
 // static
@@ -918,7 +954,11 @@ int RowContainer::compareComplexType(
   return ContainerRowSerde::compare(*stream, decoded, index, flags);
 }
 
-int32_t RowContainer::compareStringAsc(StringView left, StringView right) {
+int32_t RowContainer::compareStringAsc(StringView left, StringView right)
+    const {
+  if (useMonotonicStringAllocation_) {
+    return compareContiguousStringAsc(left, right);
+  }
   // Depends on StringView's layout
   uint32_t leftPrefix{0};
   uint32_t rightPrefix{0};
@@ -959,6 +999,12 @@ int32_t RowContainer::compareStringAsc(StringView left, StringView right) {
   }
 }
 
+int32_t RowContainer::compareContiguousStringAsc(
+    StringView left,
+    StringView right) {
+  return left.compare(right);
+}
+
 int32_t RowContainer::compareComplexType(
     const char* left,
     const char* right,
@@ -993,7 +1039,6 @@ void RowContainer::hashTyped(
   using T = typename KindToFlatVector<Kind>::HashRowType;
 
   auto offset = column.offset();
-  std::string storage;
   auto numRows = rows.size();
   for (int32_t i = 0; i < numRows; ++i) {
     char* row = rows[i];
@@ -1003,9 +1048,12 @@ void RowContainer::hashTyped(
     } else {
       uint64_t hash;
       if (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-        hash =
-            folly::hasher<StringView>()(HashStringAllocator::contiguousString(
-                valueAt<StringView>(row, offset), storage));
+        auto value = valueAt<StringView>(row, offset);
+        std::string storage;
+        if (!useMonotonicStringAllocation_) {
+          value = HashStringAllocator::contiguousString(value, storage);
+        }
+        hash = folly::hasher<StringView>()(value);
       } else if (
           Kind == TypeKind::ROW || Kind == TypeKind::ARRAY ||
           Kind == TypeKind::MAP) {
@@ -1077,6 +1125,12 @@ void RowContainer::clear() {
   normalizedKeySize_ = originalNormalizedKeySize_;
   numFreeRows_ = 0;
   firstFreeRow_ = nullptr;
+  if (useMonotonicStringAllocation_) {
+    monotonicAllocator_.reset();
+    monotonicMemoryResource_ =
+        std::make_unique<memory::MonotonicMemoryResource>(pool());
+    monotonicAllocator_.emplace(*monotonicMemoryResource_);
+  }
 }
 
 void RowContainer::setProbedFlag(char** rows, int32_t numRows) {
@@ -1131,6 +1185,9 @@ std::optional<int64_t> RowContainer::estimateRowSize() const {
   int64_t usedSize = rows_.allocatedBytes() - freeBytes +
       stringAllocator_->retainedSize() - stringAllocator_->freeSpace() -
       rowPointers_.capacity() * sizeof(char*);
+  if (monotonicMemoryResource_) {
+    usedSize += monotonicMemoryResource_->usedBytes();
+  }
   int64_t rowSize = usedSize / numRows_;
   BOLT_CHECK_GT(
       rowSize, 0, "Estimated row size of the RowContainer must be positive.");
@@ -1144,8 +1201,10 @@ int64_t RowContainer::sizeIncrement(
   // minimum increment is a huge page.
   constexpr int32_t kAllocUnit = memory::AllocationTraits::kHugePageSize;
   int32_t needRows = std::max<int64_t>(0, numRows - numFreeRows_);
-  int64_t needBytes =
-      std::max<int64_t>(0, variableLengthBytes - stringAllocator_->freeSpace());
+  int64_t needBytes = useMonotonicStringAllocation_
+      ? variableLengthBytes
+      : std::max<int64_t>(
+            0, variableLengthBytes - stringAllocator_->freeSpace());
   return bits::roundUp(needRows * fixedRowSize_, kAllocUnit) +
       bits::roundUp(needBytes, kAllocUnit);
 }
@@ -1365,6 +1424,7 @@ RowContainer::codegenCompare(
         .setNullByteOffsets(std::move(nullByteOffsets))
         .setNullMasks(std::move(nullByteMasks))
         .setHasNullKeys(hasNullKeys)
+        .setStringsAreContiguous(useMonotonicStringAllocation_)
         .setOpType(cmpType);
   }
   auto fnName = codeGenerator.GetCmpFuncName();
@@ -1395,6 +1455,7 @@ RowContainer::codegenRowEqVectors(
         .setKeyOffsets(std::move(keyOffsets))
         .setNullByteOffsets(std::move(nullByteOffsets))
         .setNullMasks(std::move(nullByteMasks))
+        .setStringsAreContiguous(useMonotonicStringAllocation_)
         .setHasNullKeys(haveNulls);
   }
 
@@ -1605,8 +1666,8 @@ extern "C" {
 __attribute__((__visibility__("default"))) int32_t jit_StringViewCompareWrapper(
     char* l,
     char* r) {
-  bytedance::bolt::StringView left = *(bytedance::bolt::StringView*)l;
-  bytedance::bolt::StringView right = *(bytedance::bolt::StringView*)r;
+  auto left = *reinterpret_cast<bytedance::bolt::StringView*>(l);
+  auto right = *reinterpret_cast<bytedance::bolt::StringView*>(r);
 
   // Note that, in the IR generation, prefix has been compared.
   // Here, assume that the prefix are equal
@@ -1616,15 +1677,20 @@ __attribute__((__visibility__("default"))) int32_t jit_StringViewCompareWrapper(
     // One ends within the prefix.
     return left.size() - right.size();
   }
+  std::string leftStorage;
+  std::string rightStorage;
+  auto contiguousLeft =
+      bytedance::bolt::HashStringAllocator::contiguousString(left, leftStorage);
+  auto contiguousRight = bytedance::bolt::HashStringAllocator::contiguousString(
+      right, rightStorage);
+  return contiguousLeft.compare(contiguousRight);
+}
 
-  {
-    std::string leftStorage;
-    std::string rightStorage;
-    return bytedance::bolt::HashStringAllocator::contiguousString(
-               left, leftStorage)
-        .compare(bytedance::bolt::HashStringAllocator::contiguousString(
-            right, rightStorage));
-  }
+__attribute__((__visibility__("default"))) int32_t
+jit_StringViewCompareWrapperContiguous(char* l, char* r) {
+  auto left = *reinterpret_cast<bytedance::bolt::StringView*>(l);
+  auto right = *reinterpret_cast<bytedance::bolt::StringView*>(r);
+  return left.compare(right);
 }
 
 __attribute__((__visibility__("default"))) int32_t
@@ -1687,12 +1753,20 @@ jit_RowBased_ComplexTypeRowCmpRow(
 __attribute__((__visibility__("default"))) int8_t jit_StringViewRowEqVectors(
     char* l,
     char* r) {
-  bytedance::bolt::StringView left = *(bytedance::bolt::StringView*)l;
-  bytedance::bolt::StringView right = *(bytedance::bolt::StringView*)r;
+  auto left = *reinterpret_cast<bytedance::bolt::StringView*>(l);
+  auto right = *reinterpret_cast<bytedance::bolt::StringView*>(r);
 
   std::string storage;
-  return bytedance::bolt::HashStringAllocator::contiguousString(left, storage)
-             .compare(right) == 0;
+  auto contiguousLeft =
+      bytedance::bolt::HashStringAllocator::contiguousString(left, storage);
+  return contiguousLeft.compare(right) == 0;
+}
+
+__attribute__((__visibility__("default"))) int8_t
+jit_StringViewRowEqVectorsContiguous(char* l, char* r) {
+  auto left = *reinterpret_cast<bytedance::bolt::StringView*>(l);
+  auto right = *reinterpret_cast<bytedance::bolt::StringView*>(r);
+  return left.compare(right) == 0;
 }
 
 __attribute__((__visibility__("default"))) int8_t jit_GetDecodedValueBool(

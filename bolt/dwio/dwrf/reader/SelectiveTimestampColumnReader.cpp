@@ -144,7 +144,9 @@ void SelectiveTimestampColumnReader::readHelper(
   const auto rawNulls = nullsInReadRange_
       ? (isDense ? nullsInReadRange_->as<uint64_t>() : rawResultNulls_)
       : nullptr;
-  auto tsValues = AlignedBuffer::allocate<Timestamp>(numValues_, &memoryPool_);
+  auto tsValues = AlignedBuffer::
+      allocate<Timestamp, AlignedBuffer::AllocationStrategy::kConservative>(
+          numValues_, &memoryPool_);
   auto rawTs = tsValues->asMutable<Timestamp>();
 
   for (vector_size_t i = 0; i < numValues_; i++) {

@@ -195,6 +195,80 @@ TEST_F(BitUtilTest, isAllSet) {
   EXPECT_EQ(findLastBit(word, 381, 600), 383);
 }
 
+TEST_F(BitUtilTest, findFirstBit) {
+  constexpr int32_t kNumBits = 17 * 64;
+  std::vector<uint64_t> words(nwords(kNumBits), 0);
+
+  const std::vector<int32_t> setBits = {
+      0, 11, 63, 64, 191, 256, 319, 511, 767, 1000, kNumBits - 1};
+  for (const auto bit : setBits) {
+    setBit(words.data(), bit);
+  }
+
+  const auto expected = [&](int32_t begin, int32_t end) {
+    for (auto bit = begin; bit < end; ++bit) {
+      if (isBitSet(words.data(), bit)) {
+        return bit;
+      }
+    }
+    return -1;
+  };
+
+  // Exercise partial first and last words, exact word boundaries, multiple
+  // AVX2 vectors and SVE/RVV runtime-dependent vector lengths.
+  for (int32_t begin = 0; begin <= kNumBits; begin += 7) {
+    for (int32_t end = begin; end <= kNumBits; end += 31) {
+      EXPECT_EQ(findFirstBit(words.data(), begin, end), expected(begin, end))
+          << "begin=" << begin << ", end=" << end;
+    }
+  }
+
+  std::fill(words.begin(), words.end(), 0);
+  EXPECT_EQ(findFirstBit(words.data(), 3, kNumBits - 5), -1);
+}
+
+TEST_F(BitUtilTest, simdBitRangeQueries) {
+  constexpr int32_t kNumBits = 19 * 64;
+  std::vector<uint64_t> words(nwords(kNumBits));
+  for (int32_t i = 0; i < words.size(); ++i) {
+    words[i] = i % 5 == 0
+        ? 0
+        : (i % 7 == 0 ? ~uint64_t{0} : 0x8102040810204081ULL << (i % 3));
+  }
+
+  const auto expectedLast = [&](int32_t begin, int32_t end, bool value) {
+    for (auto bit = end - 1; bit >= begin; --bit) {
+      if (isBitSet(words.data(), bit) == value) {
+        return bit;
+      }
+    }
+    return -1;
+  };
+  const auto expectedAll = [&](int32_t begin, int32_t end, bool value) {
+    for (auto bit = begin; bit < end; ++bit) {
+      if (isBitSet(words.data(), bit) != value) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  for (int32_t begin = 0; begin <= kNumBits; begin += 7) {
+    for (int32_t end = begin; end <= kNumBits; end += 29) {
+      for (const bool value : {false, true}) {
+        EXPECT_EQ(
+            findLastBit(words.data(), begin, end, value),
+            expectedLast(begin, end, value))
+            << "begin=" << begin << ", end=" << end << ", value=" << value;
+        EXPECT_EQ(
+            isAllSet(words.data(), begin, end, value),
+            expectedAll(begin, end, value))
+            << "begin=" << begin << ", end=" << end << ", value=" << value;
+      }
+    }
+  }
+}
+
 TEST_F(BitUtilTest, findLastUnsetBit) {
   uint64_t allOnes = static_cast<uint64_t>(-1);
 

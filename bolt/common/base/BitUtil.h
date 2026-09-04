@@ -38,6 +38,18 @@
 #include <cstring>
 #include <string>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
+#ifdef __ARM_FEATURE_SVE
+#include <arm_sve.h>
+#endif
+
+#ifdef __riscv_vector
+#include <riscv_vector.h>
+#endif
+
 #ifdef __BMI2__
 #include <x86intrin.h>
 #endif
@@ -383,38 +395,150 @@ isAllSet(const uint64_t* bits, int32_t begin, int32_t end, bool value = true) {
   if (begin >= end) {
     return true;
   }
-  uint64_t word = value ? -1 : 0;
-  return testWords(
-      begin,
-      end,
-      [bits, word](int32_t idx, uint64_t mask) {
-        return (word & mask) == (bits[idx] & mask);
-      },
-      [bits, word](int32_t idx) { return word == bits[idx]; });
+  const uint64_t expected = value ? ~uint64_t{0} : 0;
+  auto wordIndex = begin >> 6;
+  const auto beginOffset = begin & 63;
+  if (beginOffset != 0) {
+    auto mask = ~uint64_t{0} << beginOffset;
+    const bool isLastWord = (wordIndex << 6) + 64 > end;
+    if (isLastWord) {
+      mask &= lowMask(end - (wordIndex << 6));
+    }
+    if ((bits[wordIndex] & mask) != (expected & mask)) {
+      return false;
+    }
+    if (isLastWord) {
+      return true;
+    }
+    ++wordIndex;
+  }
+
+  const auto fullWordEnd = end >> 6;
+#ifdef __AVX2__
+  const auto expectedWords = _mm256_set1_epi64x(expected);
+  for (; wordIndex + 4 <= fullWordEnd; wordIndex += 4) {
+    const auto words =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bits + wordIndex));
+    const auto matches = _mm256_cmpeq_epi64(words, expectedWords);
+    if (_mm256_movemask_pd(_mm256_castsi256_pd(matches)) != 0xf) {
+      return false;
+    }
+  }
+#elif defined(__ARM_FEATURE_SVE)
+  while (wordIndex < fullWordEnd) {
+    const auto active = svwhilelt_b64(wordIndex, fullWordEnd);
+    const auto words = svld1_u64(active, bits + wordIndex);
+    const auto matches = svcmpeq_n_u64(active, words, expected);
+    if (svptest_any(active, svnot_b_z(active, matches))) {
+      return false;
+    }
+    wordIndex += svcntd();
+  }
+#elif defined(__riscv_vector)
+  while (wordIndex < fullWordEnd) {
+    const auto vl = __riscv_vsetvl_e64m1(fullWordEnd - wordIndex);
+    const auto words = __riscv_vle64_v_u64m1(bits + wordIndex, vl);
+    const auto matches = __riscv_vmseq_vx_u64m1_b64(words, expected, vl);
+    if (__riscv_vcpop_m_b64(matches, vl) != vl) {
+      return false;
+    }
+    wordIndex += vl;
+  }
+#endif
+  for (; wordIndex < fullWordEnd; ++wordIndex) {
+    if (bits[wordIndex] != expected) {
+      return false;
+    }
+  }
+  if ((end & 63) != 0) {
+    const auto mask = lowMask(end & 63);
+    return (bits[wordIndex] & mask) == (expected & mask);
+  }
+  return true;
 }
 
 inline int32_t findFirstBit(const uint64_t* bits, int32_t begin, int32_t end) {
-  int32_t found = -1;
-  testWords(
-      begin,
-      end,
-      [bits, &found](int32_t idx, uint64_t mask) {
-        uint64_t word = bits[idx] & mask;
-        if (word) {
-          found = idx * 64 + __builtin_ctzll(word);
-          return false;
-        }
-        return true;
-      },
-      [bits, &found](int32_t idx) {
-        uint64_t word = bits[idx];
-        if (word) {
-          found = idx * 64 + __builtin_ctzll(word);
-          return false;
-        }
-        return true;
-      });
-  return found;
+  if (begin >= end) {
+    return -1;
+  }
+
+  auto wordIndex = begin >> 6;
+  const auto beginOffset = begin & 63;
+  if (beginOffset != 0) {
+    auto word = bits[wordIndex] & (~uint64_t{0} << beginOffset);
+    const bool isLastWord = (wordIndex << 6) + 64 > end;
+    if (isLastWord) {
+      word &= lowMask(end - (wordIndex << 6));
+    }
+    if (word != 0) {
+      return (wordIndex << 6) + __builtin_ctzll(word);
+    }
+    if (isLastWord) {
+      return -1;
+    }
+    ++wordIndex;
+  }
+
+  // Only words wholly contained in [begin, end) are handled by SIMD. This
+  // keeps the loads in bounds and leaves the final partial word to the scalar
+  // path below.
+  const auto fullWordEnd = end >> 6;
+
+#ifdef __AVX2__
+  const auto zero = _mm256_setzero_si256();
+  for (; wordIndex + 4 <= fullWordEnd; wordIndex += 4) {
+    const auto words =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bits + wordIndex));
+    const auto isZero = _mm256_cmpeq_epi64(words, zero);
+    const auto nonZeroLanes =
+        (~_mm256_movemask_pd(_mm256_castsi256_pd(isZero))) & 0xf;
+    if (nonZeroLanes != 0) {
+      const auto lane = __builtin_ctz(nonZeroLanes);
+      const auto word = bits[wordIndex + lane];
+      return ((wordIndex + lane) << 6) + __builtin_ctzll(word);
+    }
+  }
+#elif defined(__ARM_FEATURE_SVE)
+  while (wordIndex < fullWordEnd) {
+    const auto active = svwhilelt_b64(wordIndex, fullWordEnd);
+    const auto words = svld1_u64(active, bits + wordIndex);
+    const auto nonZero = svcmpne_n_u64(active, words, 0);
+    if (svptest_any(active, nonZero)) {
+      const auto beforeFirst = svbrkb_z(active, nonZero);
+      const auto lane = svcntp_b64(active, beforeFirst);
+      const auto word = bits[wordIndex + lane];
+      return ((wordIndex + lane) << 6) + __builtin_ctzll(word);
+    }
+    wordIndex += svcntd();
+  }
+#elif defined(__riscv_vector)
+  while (wordIndex < fullWordEnd) {
+    const auto vl = __riscv_vsetvl_e64m1(fullWordEnd - wordIndex);
+    const auto words = __riscv_vle64_v_u64m1(bits + wordIndex, vl);
+    const auto nonZero = __riscv_vmsne_vx_u64m1_b64(words, 0, vl);
+    const auto lane = __riscv_vfirst_m_b64(nonZero, vl);
+    if (lane >= 0) {
+      const auto word = bits[wordIndex + lane];
+      return ((wordIndex + lane) << 6) + __builtin_ctzll(word);
+    }
+    wordIndex += vl;
+  }
+#endif
+
+  for (; wordIndex < fullWordEnd; ++wordIndex) {
+    const auto word = bits[wordIndex];
+    if (word != 0) {
+      return (wordIndex << 6) + __builtin_ctzll(word);
+    }
+  }
+
+  if ((end & 63) != 0) {
+    const auto word = bits[wordIndex] & lowMask(end & 63);
+    if (word != 0) {
+      return (wordIndex << 6) + __builtin_ctzll(word);
+    }
+  }
+  return -1;
 }
 
 /**
@@ -585,27 +709,95 @@ inline int32_t findLastBit(
     int32_t begin,
     int32_t end,
     bool value = true) {
-  int32_t found = -1;
-  testWordsReverse(
-      begin,
-      end,
-      [bits, &found, value](int32_t idx, uint64_t mask) {
-        uint64_t word = (value ? bits[idx] : ~bits[idx]) & mask;
-        if (word) {
-          found = idx * 64 + 63 - __builtin_clzll(word);
-          return false;
-        }
-        return true;
-      },
-      [bits, &found, value](int32_t idx) {
-        uint64_t word = value ? bits[idx] : ~bits[idx];
-        if (word) {
-          found = idx * 64 + 63 - __builtin_clzll(word);
-          return false;
-        }
-        return true;
-      });
-  return found;
+  if (begin >= end) {
+    return -1;
+  }
+  const auto select = [value](uint64_t word) { return value ? word : ~word; };
+  auto wordIndex = end >> 6;
+  const auto endOffset = end & 63;
+  const auto beginWord = begin >> 6;
+  const auto beginOffset = begin & 63;
+  if (endOffset != 0) {
+    auto mask = lowMask(endOffset);
+    if (wordIndex == beginWord) {
+      mask &= ~uint64_t{0} << beginOffset;
+    }
+    const auto word = select(bits[wordIndex]) & mask;
+    if (word != 0) {
+      return (wordIndex << 6) + 63 - __builtin_clzll(word);
+    }
+    if (wordIndex == beginWord) {
+      return -1;
+    }
+  }
+
+  const auto fullWordBegin = (begin + 63) >> 6;
+#ifdef __AVX2__
+  const auto invert = _mm256_set1_epi64x(value ? 0 : -1);
+  while (wordIndex >= fullWordBegin + 4) {
+    wordIndex -= 4;
+    auto words =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bits + wordIndex));
+    words = _mm256_xor_si256(words, invert);
+    const auto isZero = _mm256_cmpeq_epi64(words, _mm256_setzero_si256());
+    const auto nonZeroLanes =
+        (~_mm256_movemask_pd(_mm256_castsi256_pd(isZero))) & 0xf;
+    if (nonZeroLanes != 0) {
+      const auto lane = 31 - __builtin_clz(nonZeroLanes);
+      const auto word = select(bits[wordIndex + lane]);
+      return ((wordIndex + lane) << 6) + 63 - __builtin_clzll(word);
+    }
+  }
+#elif defined(__ARM_FEATURE_SVE)
+  while (wordIndex > fullWordBegin) {
+    const auto numWords =
+        std::min<int32_t>(svcntd(), wordIndex - fullWordBegin);
+    wordIndex -= numWords;
+    const auto active = svwhilelt_b64(uint64_t{0}, numWords);
+    auto words = svld1_u64(active, bits + wordIndex);
+    if (!value) {
+      words = svnot_u64_z(active, words);
+    }
+    const auto nonZero = svcmpne_n_u64(active, words, 0);
+    if (svptest_any(active, nonZero)) {
+      const auto lane = svlastb_u64(nonZero, svindex_u64(0, 1));
+      const auto word = select(bits[wordIndex + lane]);
+      return ((wordIndex + lane) << 6) + 63 - __builtin_clzll(word);
+    }
+  }
+#elif defined(__riscv_vector)
+  while (wordIndex > fullWordBegin) {
+    const auto vl = __riscv_vsetvl_e64m1(wordIndex - fullWordBegin);
+    wordIndex -= vl;
+    auto words = __riscv_vle64_v_u64m1(bits + wordIndex, vl);
+    if (!value) {
+      words = __riscv_vnot_v_u64m1(words, vl);
+    }
+    const auto indices = __riscv_vid_v_u64m1(vl);
+    const auto reverseIndices = __riscv_vrsub_vx_u64m1(indices, vl - 1, vl);
+    const auto reversed = __riscv_vrgather_vv_u64m1(words, reverseIndices, vl);
+    const auto nonZero = __riscv_vmsne_vx_u64m1_b64(reversed, 0, vl);
+    const auto reverseLane = __riscv_vfirst_m_b64(nonZero, vl);
+    if (reverseLane >= 0) {
+      const auto lane = vl - 1 - reverseLane;
+      const auto word = select(bits[wordIndex + lane]);
+      return ((wordIndex + lane) << 6) + 63 - __builtin_clzll(word);
+    }
+  }
+#endif
+  while (wordIndex > fullWordBegin) {
+    const auto word = select(bits[--wordIndex]);
+    if (word != 0) {
+      return (wordIndex << 6) + 63 - __builtin_clzll(word);
+    }
+  }
+  if (beginOffset != 0) {
+    const auto word = select(bits[beginWord]) & (~uint64_t{0} << beginOffset);
+    if (word != 0) {
+      return (beginWord << 6) + 63 - __builtin_clzll(word);
+    }
+  }
+  return -1;
 }
 
 inline int32_t

@@ -433,8 +433,9 @@ class LeadLagFunction : public exec::WindowFunction {
       auto rawNulls = nulls->asMutable<uint64_t>();
       bits::clearAllNull(rawNulls, numRows);
 
-      BufferPtr indices =
-          AlignedBuffer::allocate<vector_size_t>(numRows, pool());
+      BufferPtr indices = AlignedBuffer::allocate<
+          vector_size_t,
+          AlignedBuffer::AllocationStrategy::kConservative>(numRows, pool());
       auto rawIndices = indices->asMutable<vector_size_t>();
       for (auto i = 0; i < numRows; i++) {
         rawIndices[i] = rowNumbers_[i] >= 0 ? 0 : 1;

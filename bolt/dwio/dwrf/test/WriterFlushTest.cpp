@@ -31,6 +31,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <unordered_map>
+
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/dwio/dwrf/writer/Writer.h"
@@ -44,232 +47,93 @@ using bytedance::bolt::dwrf::WriterOptions;
 namespace {
 constexpr size_t kSizeKB = 1024;
 constexpr size_t kSizeMB = 1024 * 1024;
+constexpr size_t kReservationHeadroom = 512 * kSizeMB;
 } // namespace
 namespace bytedance::bolt::dwrf {
-class MockMemoryPool : public bolt::memory::MemoryPool {
- public:
-  explicit MockMemoryPool(
-      const std::string& name,
-      MemoryPool::Kind kind,
-      std::shared_ptr<MemoryPool> parent,
-      int64_t cap = std::numeric_limits<int64_t>::max())
-      : MemoryPool{name, kind, parent, {.alignment = bolt::memory::MemoryAllocator::kMinAlignment, .maxCapacity = cap}},
-        capacity_(cap) {}
-
-  ~MockMemoryPool() override {
-    if (parent_ != nullptr) {
-      static_cast<MockMemoryPool*>(parent_.get())->dropChild(this);
-    }
-  }
-
-  int64_t capacity() const override {
-    return parent_ != nullptr ? parent_->capacity() : capacity_;
-  }
-
-  int64_t availableReservation() const override {
-    BOLT_NYI("{} unsupported", __FUNCTION__);
-  }
-
-  int64_t releasableReservation() const override {
-    BOLT_NYI("{} unsupported", __FUNCTION__);
-  }
-
-  int64_t reservedBytes() const override {
-    return localMemoryUsage_;
-  }
-
-  bool maybeReserve(uint64_t size) override {
-    BOLT_NYI("{} unsupported", __FUNCTION__);
-  }
-
-  void release() override {}
-
-  Stats stats() const override {
-    BOLT_NYI("{} unsupported", __FUNCTION__);
-  }
-
-  // Methods not usually exposed by MemoryPool interface to
-  // allow for manipulation.
-  void updateLocalMemoryUsage(int64_t size) {
-    localMemoryUsage_ += size;
-  }
-
-  void setLocalMemoryUsage(int64_t size) {
-    localMemoryUsage_ = size;
-  }
-
-  void zeroOutMemoryUsage() {
-    localMemoryUsage_ = 0;
-  }
-
-  static std::shared_ptr<MockMemoryPool> create() {
-    return std::make_shared<MockMemoryPool>(
-        "standalone_pool", MemoryPool::Kind::kAggregate, nullptr);
-  }
-
-  void* allocate(int64_t size, std::optional<uint32_t> alignment = std::nullopt)
-      override {
-    updateLocalMemoryUsage(size);
-    return alignment.has_value()
-        ? allocator_->allocateBytes(size, alignment.value())
-        : allocator_->allocateBytes(size);
-  }
-
-  void* allocateZeroFilled(
-      int64_t numEntries,
-      int64_t sizeEach,
-      std::optional<uint8_t> alignment = std::nullopt) override {
-    updateLocalMemoryUsage(numEntries * sizeEach);
-    return allocator_->allocateZeroFilled(numEntries * sizeEach);
-  }
-
-  // No-op for attempts to shrink buffer.
-  void* reallocate(
-      void* p,
-      int64_t size,
-      int64_t newSize,
-      std::optional<uint8_t> alignment = std::nullopt) override {
-    void* newP = allocate(newSize, alignment);
-    BOLT_CHECK_NOT_NULL(newP);
-    ::memcpy(newP, p, std::min(size, newSize));
-    free(p, size);
-    return newP;
-  }
-
-  void free(
-      void* p,
-      int64_t size,
-      std::optional<uint8_t> alignment = std::nullopt,
-      bool needRecordFree = true) override {
-    allocator_->freeBytes(p, size);
-    updateLocalMemoryUsage(-size);
-  }
-
-  void allocateNonContiguous(
-      bolt::memory::MachinePageCount /*unused*/,
-      bolt::memory::Allocation& /*unused*/,
-      bolt::memory::MachinePageCount /*unused*/) override {
-    BOLT_UNSUPPORTED("allocateNonContiguous unsupported");
-  }
-
-  void freeNonContiguous(bolt::memory::Allocation& /*unused*/) override {
-    BOLT_UNSUPPORTED("freeNonContiguous unsupported");
-  }
-
-  bolt::memory::MachinePageCount largestSizeClass() const override {
-    BOLT_UNSUPPORTED("largestSizeClass unsupported");
-  }
-
-  const std::vector<bolt::memory::MachinePageCount>& sizeClasses()
-      const override {
-    BOLT_UNSUPPORTED("sizeClasses unsupported");
-  }
-
-  void allocateContiguous(
-      bolt::memory::MachinePageCount /*unused*/,
-      bolt::memory::ContiguousAllocation& /*unused*/,
-      bolt::memory::MachinePageCount /*unused*/ = 0) override {
-    BOLT_UNSUPPORTED("allocateContiguous unsupported");
-  }
-
-  void freeContiguous(bolt::memory::ContiguousAllocation&
-                      /*unused*/) override {
-    BOLT_UNSUPPORTED("freeContiguous unsupported");
-  }
-
-  void growContiguous(
-      bolt::memory::MachinePageCount /*unused*/,
-      bolt::memory::ContiguousAllocation& /*unused*/) override {
-    BOLT_UNSUPPORTED("growContiguous unsupported");
-  }
-
-  int64_t usedBytes() const override {
-    return localMemoryUsage_;
-  }
-
-  int64_t currentBytes() const override {
-    return localMemoryUsage_;
-  }
-
-  std::shared_ptr<MemoryPool> genChild(
-      std::shared_ptr<MemoryPool> parent,
-      const std::string& name,
-      MemoryPool::Kind kind,
-      bool /*unused*/,
-      const std::function<size_t(size_t)>& /*unused*/,
-      std::unique_ptr<memory::MemoryReclaimer> /*unused*/) override {
-    return std::make_shared<MockMemoryPool>(
-        name, kind, parent, parent->capacity());
-  }
-
-  MOCK_CONST_METHOD0(peakBytes, int64_t());
-
-  MOCK_METHOD1(updateSubtreeMemoryUsage, int64_t(int64_t));
-
-  MOCK_CONST_METHOD0(alignment, uint16_t());
-
-  uint64_t freeBytes() const override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  void setReclaimer(
-      std::unique_ptr<memory::MemoryReclaimer> reclaimer) override {}
-
-  memory::MemoryReclaimer* reclaimer() const override {
-    return nullptr;
-  }
-
-  void enterArbitration() override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  void leaveArbitration() noexcept override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  std::optional<uint64_t> reclaimableBytes() const override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  uint64_t reclaim(
-      uint64_t /*unused*/,
-      uint64_t /*unused*/,
-      bolt::memory::MemoryReclaimer::Stats& /*unused*/) override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  uint64_t shrink(uint64_t /*unused*/) override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  bool grow(uint64_t /*unused*/, uint64_t /*unused*/) noexcept override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  std::string toString(bool /* unused */) const override {
-    return fmt::format(
-        "Mock Memory Pool[{}]",
-        bolt::memory::MemoryAllocator::kindString(allocator_->kind()));
-  }
-
-  void abort(const std::exception_ptr& error) override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  bool aborted() const override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
-  std::string treeMemoryUsage(bool /*unused*/, bool /*unused*/) const override {
-    BOLT_UNSUPPORTED("{} unsupported", __FUNCTION__);
-  }
-
- private:
-  bolt::memory::MemoryAllocator* const allocator_{
-      bolt::memory::memoryManager()->allocator()};
-  const int64_t capacity_;
-  int64_t localMemoryUsage_{0};
+namespace {
+struct SimulatedAllocation {
+  void* data;
+  int64_t size;
 };
+
+std::string nextPoolName(const std::string& prefix) {
+  static std::atomic<uint64_t> nextId{0};
+  return fmt::format("{}_{}", prefix, nextId++);
+}
+
+std::shared_ptr<memory::MemoryPool> createRootPool(
+    const std::string& prefix,
+    int64_t capacity = memory::kMaxMemory) {
+  return memory::memoryManager()->addRootPool(nextPoolName(prefix), capacity);
+}
+
+std::shared_ptr<memory::MemoryPool> createSinkPool() {
+  return memory::memoryManager()->addLeafPool(
+      nextPoolName("writer_flush_sink"));
+}
+
+std::unordered_map<memory::MemoryPool*, std::vector<SimulatedAllocation>>&
+simulatedAllocations() {
+  static std::
+      unordered_map<memory::MemoryPool*, std::vector<SimulatedAllocation>>
+          allocations;
+  return allocations;
+}
+
+void addSimulatedMemory(memory::MemoryPool& pool, int64_t bytes) {
+  if (bytes == 0) {
+    return;
+  }
+  BOLT_CHECK_GT(bytes, 0);
+  simulatedAllocations()[&pool].push_back({pool.allocate(bytes), bytes});
+}
+
+void clearSimulatedMemory(memory::MemoryPool& pool) {
+  auto& allocations = simulatedAllocations();
+  auto it = allocations.find(&pool);
+  if (it == allocations.end()) {
+    return;
+  }
+  for (auto& allocation : it->second) {
+    pool.free(allocation.data, allocation.size);
+  }
+  allocations.erase(it);
+}
+
+int64_t simulatedMemory(const memory::MemoryPool& pool) {
+  auto& allocations = simulatedAllocations();
+  auto it = allocations.find(const_cast<memory::MemoryPool*>(&pool));
+  if (it == allocations.end()) {
+    return 0;
+  }
+  int64_t bytes = 0;
+  for (const auto& allocation : it->second) {
+    bytes += allocation.size;
+  }
+  return bytes;
+}
+
+void setSimulatedMemory(memory::MemoryPool& pool, int64_t bytes) {
+  clearSimulatedMemory(pool);
+  addSimulatedMemory(pool, bytes);
+  ASSERT_EQ(bytes, simulatedMemory(pool));
+}
+
+void clearSimulatedMemory(WriterContext& context) {
+  clearSimulatedMemory(context.getMemoryPool(MemoryUsageCategory::DICTIONARY));
+  clearSimulatedMemory(
+      context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM));
+  clearSimulatedMemory(context.getMemoryPool(MemoryUsageCategory::GENERAL));
+}
+
+int64_t baselineMemoryUsage(WriterContext& context) {
+  return context.getTotalMemoryUsage() -
+      simulatedMemory(context.getMemoryPool(MemoryUsageCategory::DICTIONARY)) -
+      simulatedMemory(
+             context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM)) -
+      simulatedMemory(context.getMemoryPool(MemoryUsageCategory::GENERAL));
+}
+} // namespace
 
 // For testing functionality of Writer we need to instantiate
 // it.
@@ -280,6 +144,10 @@ class DummyWriter : public bolt::dwrf::Writer {
       std::unique_ptr<dwio::common::FileSink> sink,
       std::shared_ptr<memory::MemoryPool> pool)
       : Writer{std::move(sink), options, std::move(pool)} {}
+
+  ~DummyWriter() override {
+    clearSimulatedMemory(writerBase_->getContext());
+  }
 
   MOCK_METHOD1(
       flushImpl,
@@ -316,12 +184,12 @@ struct SimulatedWrite {
     context.incRowCount(numRows);
     // Not the most accurate semantically, but suffices for testing
     // purposes.
-    dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM))
-        .updateLocalMemoryUsage(outputStreamMemoryUsage);
-    dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::GENERAL))
-        .updateLocalMemoryUsage(generalMemoryUsage);
+    addSimulatedMemory(
+        context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM),
+        outputStreamMemoryUsage);
+    addSimulatedMemory(
+        context.getMemoryPool(MemoryUsageCategory::GENERAL),
+        generalMemoryUsage);
   }
 
   uint64_t numRows;
@@ -349,16 +217,14 @@ struct SimulatedFlush {
   void apply(WriterContext& context) const {
     context.setStripeRawSize(stripeRawSize);
     ASSERT_EQ(stripeRowCount, context.stripeRowCount());
-    auto& dictPool = dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::DICTIONARY));
-    auto& outputPool = dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM));
-    auto& generalPool = dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::GENERAL));
-    dictPool.setLocalMemoryUsage(dictMemoryUsage);
-    ASSERT_EQ(outputStreamMemoryUsage, outputPool.currentBytes());
-    outputPool.updateLocalMemoryUsage(flushOverhead);
-    generalPool.setLocalMemoryUsage(generalMemoryUsage);
+    auto& dictPool = context.getMemoryPool(MemoryUsageCategory::DICTIONARY);
+    auto& outputPool =
+        context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM);
+    auto& generalPool = context.getMemoryPool(MemoryUsageCategory::GENERAL);
+    setSimulatedMemory(dictPool, dictMemoryUsage);
+    ASSERT_EQ(outputStreamMemoryUsage, simulatedMemory(outputPool));
+    addSimulatedMemory(outputPool, flushOverhead);
+    setSimulatedMemory(generalPool, generalMemoryUsage);
 
     context.recordAverageRowSize();
     context.recordFlushOverhead(flushOverhead);
@@ -369,9 +235,7 @@ struct SimulatedFlush {
     context.setStripeRawSize(0);
     context.setStripeRowCount(0);
     // Simplified memory footprint modeling for testing.
-    dictPool.zeroOutMemoryUsage();
-    outputPool.zeroOutMemoryUsage();
-    generalPool.zeroOutMemoryUsage();
+    clearSimulatedMemory(context);
   }
 
   uint64_t flushOverhead;
@@ -388,7 +252,7 @@ struct SimulatedFlush {
 class WriterFlushTestHelper {
  public:
   static std::unique_ptr<DummyWriter> prepWriter(
-      const std::shared_ptr<MockMemoryPool>& sinkPool,
+      const std::shared_ptr<memory::MemoryPool>& sinkPool,
       int64_t writerMemoryBudget) {
     WriterOptions options;
     options.config = std::make_shared<Config>();
@@ -398,16 +262,22 @@ class WriterFlushTestHelper {
     options.flushPolicyFactory = []() {
       return std::make_unique<LambdaFlushPolicy>([]() { return false; });
     };
-    auto writer = std::make_unique<DummyWriter>(
-        options,
-        // Unused sink.
-        std::make_unique<dwio::common::MemorySink>(
-            kSizeKB, dwio::common::FileSink::Options{.pool = sinkPool.get()}),
-        std::make_shared<MockMemoryPool>(
-            "writer_root_pool",
-            memory::MemoryPool::Kind::kAggregate,
-            nullptr,
-            writerMemoryBudget));
+    auto makeWriter = [&](int64_t capacity) {
+      return std::make_unique<DummyWriter>(
+          options,
+          // Unused sink.
+          std::make_unique<dwio::common::MemorySink>(
+              kSizeKB, dwio::common::FileSink::Options{.pool = sinkPool.get()}),
+          createRootPool("writer_flush_root", capacity));
+    };
+    auto probeWriter = makeWriter(memory::kMaxMemory);
+    auto baselineBytes =
+        baselineMemoryUsage(probeWriter->writerBase_->getContext());
+    probeWriter.reset();
+
+    auto writer = makeWriter(
+        writerMemoryBudget + baselineBytes +
+        std::max<int64_t>(kReservationHeadroom, writerMemoryBudget / 4));
     auto& context = writer->writerBase_->getContext();
     zeroOutMemoryUsage(context);
     return writer;
@@ -432,15 +302,7 @@ class WriterFlushTestHelper {
 
  private:
   static void zeroOutMemoryUsage(WriterContext& context) {
-    dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::DICTIONARY))
-        .zeroOutMemoryUsage();
-    dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM))
-        .zeroOutMemoryUsage();
-    dynamic_cast<MockMemoryPool&>(
-        context.getMemoryPool(MemoryUsageCategory::GENERAL))
-        .zeroOutMemoryUsage();
+    clearSimulatedMemory(context);
   }
 
   static void testRandomSequence(
@@ -450,16 +312,16 @@ class WriterFlushTestHelper {
       std::mt19937& gen) {
     auto& context = writer->writerBase_->getContext();
     for (const auto& write : writeSequence) {
-      if (writer->shouldFlush(context, write.numRows)) {
+      if (writer->shouldFlush(context, write.numRows) ||
+          needsFlushBeforeSimulatedAllocation(context, write)) {
         ASSERT_EQ(
             0,
-            context.getMemoryPool(MemoryUsageCategory::DICTIONARY)
-                .currentBytes());
-        auto outputStreamMemoryUsage =
-            context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM)
-                .currentBytes();
-        auto generalMemoryUsage =
-            context.getMemoryPool(MemoryUsageCategory::GENERAL).currentBytes();
+            simulatedMemory(
+                context.getMemoryPool(MemoryUsageCategory::DICTIONARY)));
+        auto outputStreamMemoryUsage = simulatedMemory(
+            context.getMemoryPool(MemoryUsageCategory::OUTPUT_STREAM));
+        auto generalMemoryUsage = simulatedMemory(
+            context.getMemoryPool(MemoryUsageCategory::GENERAL));
 
         uint64_t flushOverhead =
             folly::Random::rand32(0, context.stripeRawSize(), gen);
@@ -486,6 +348,14 @@ class WriterFlushTestHelper {
       write.apply(context);
     }
     EXPECT_EQ(numStripes, context.stripeIndex());
+  }
+
+  static bool needsFlushBeforeSimulatedAllocation(
+      WriterContext& context,
+      const SimulatedWrite& write) {
+    return context.getTotalMemoryUsage() + write.outputStreamMemoryUsage +
+        write.generalMemoryUsage + kReservationHeadroom / 4 >
+        context.getMemoryBudget();
   }
 
   static std::vector<SimulatedWrite> generateSimulatedWrites(
@@ -519,12 +389,15 @@ class TestWriterFlush : public testing::Test {
 
 // This test checks against constructed test cases.
 TEST_F(TestWriterFlush, CheckAgainstMemoryBudget) {
-  auto pool = MockMemoryPool::create();
+  auto pool = createSinkPool();
+  constexpr uint64_t kScale = kSizeMB;
+  const auto budgetBytes = [](uint64_t value) { return value * kScale; };
+  const auto bytes = [](uint64_t value) { return value * kScale * 3 / 2; };
   {
-    auto writer = WriterFlushTestHelper::prepWriter(pool, 1024);
+    auto writer = WriterFlushTestHelper::prepWriter(pool, budgetBytes(1024));
     auto& context = writer->writerBase_->getContext();
 
-    SimulatedWrite simWrite{10, 500, 300};
+    SimulatedWrite simWrite{10, bytes(500), bytes(300)};
     simWrite.apply(context);
     // Writer has no data point in the first stripe and uses a static
     // (though configurable) flush overhead ratio to determine whether
@@ -534,20 +407,20 @@ TEST_F(TestWriterFlush, CheckAgainstMemoryBudget) {
     EXPECT_FALSE(writer->shouldFlush(context, 200));
   }
   {
-    auto writer = WriterFlushTestHelper::prepWriter(pool, 1024);
+    auto writer = WriterFlushTestHelper::prepWriter(pool, budgetBytes(1024));
     auto& context = writer->writerBase_->getContext();
 
-    SimulatedWrite simWrite{10, 500, 300};
+    SimulatedWrite simWrite{10, bytes(500), bytes(300)};
     simWrite.apply(context);
     // The flush produces 0 overhead for miraculous reasons.
     SimulatedFlush simFlush{
-        0 /* flushOverhead */,
+        bytes(0) /* flushOverhead */,
         10 /* stripeRowCount */,
-        1000 /* stripeRawSize */,
-        450 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */};
+        bytes(1000) /* stripeRawSize */,
+        bytes(450) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */};
 
     simFlush.apply(context);
     // Aborting write based on whether the write would exceed budget.
@@ -558,21 +431,21 @@ TEST_F(TestWriterFlush, CheckAgainstMemoryBudget) {
     EXPECT_TRUE(writer->shouldFlush(context, 200));
   }
   {
-    auto writer = WriterFlushTestHelper::prepWriter(pool, 1024);
+    auto writer = WriterFlushTestHelper::prepWriter(pool, budgetBytes(1024));
     auto& context = writer->writerBase_->getContext();
 
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
     SimulatedFlush simFlush{
-        0 /* flushOverhead */,
+        bytes(0) /* flushOverhead */,
         10 /* stripeRowCount */,
-        1000 /* stripeRawSize */,
-        450 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */};
+        bytes(1000) /* stripeRawSize */,
+        bytes(450) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */};
     simFlush.apply(context);
     // Aborting write based on whether the write would exceed budget.
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
 
     EXPECT_FALSE(writer->shouldFlush(context, 4));
     EXPECT_TRUE(writer->shouldFlush(context, 5));
@@ -580,29 +453,29 @@ TEST_F(TestWriterFlush, CheckAgainstMemoryBudget) {
     EXPECT_TRUE(writer->shouldFlush(context, 200));
   }
   {
-    auto writer = WriterFlushTestHelper::prepWriter(pool, 1024);
+    auto writer = WriterFlushTestHelper::prepWriter(pool, budgetBytes(1024));
     auto& context = writer->writerBase_->getContext();
 
     // 0 overhead flush but with raw size per row variance.
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
     SimulatedFlush{
-        0 /* flushOverhead */,
+        bytes(0) /* flushOverhead */,
         10 /* stripeRowCount */,
-        1000 /* stripeRawSize */,
-        500 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */}
+        bytes(1000) /* stripeRawSize */,
+        bytes(500) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */}
         .apply(context);
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
     SimulatedFlush{
-        0 /* flushOverhead */,
+        bytes(0) /* flushOverhead */,
         10 /* stripeRowCount */,
-        600 /* stripeRawSize */,
-        300 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */}
+        bytes(600) /* stripeRawSize */,
+        bytes(300) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */}
         .apply(context);
 
     EXPECT_FALSE(writer->shouldFlush(context, 10));
@@ -611,22 +484,22 @@ TEST_F(TestWriterFlush, CheckAgainstMemoryBudget) {
     EXPECT_TRUE(writer->shouldFlush(context, 200));
   }
   {
-    auto writer = WriterFlushTestHelper::prepWriter(pool, 1024);
+    auto writer = WriterFlushTestHelper::prepWriter(pool, budgetBytes(1024));
     auto& context = writer->writerBase_->getContext();
 
     // 0 overhead flush but with raw size per row variance.
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
     SimulatedFlush{
-        200 /* flushOverhead */,
+        bytes(200) /* flushOverhead */,
         10 /* stripeRowCount */,
-        1000 /* stripeRawSize */,
-        500 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */}
+        bytes(1000) /* stripeRawSize */,
+        bytes(500) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */}
         .apply(context);
 
-    SimulatedWrite{5, 250, 150}.apply(context);
+    SimulatedWrite{5, bytes(250), bytes(150)}.apply(context);
 
     EXPECT_FALSE(writer->shouldFlush(context, 5));
     EXPECT_FALSE(writer->shouldFlush(context, 6));
@@ -634,32 +507,32 @@ TEST_F(TestWriterFlush, CheckAgainstMemoryBudget) {
     EXPECT_TRUE(writer->shouldFlush(context, 200));
   }
   {
-    auto writer = WriterFlushTestHelper::prepWriter(pool, 1024);
+    auto writer = WriterFlushTestHelper::prepWriter(pool, budgetBytes(1024));
     auto& context = writer->writerBase_->getContext();
 
     // 0 overhead flush but with flush overhead variance.
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
     SimulatedFlush{
-        200 /* flushOverhead */,
+        bytes(200) /* flushOverhead */,
         10 /* stripeRowCount */,
-        1000 /* stripeRawSize */,
-        500 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */}
+        bytes(1000) /* stripeRawSize */,
+        bytes(500) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */}
         .apply(context);
-    SimulatedWrite{10, 500, 300}.apply(context);
+    SimulatedWrite{10, bytes(500), bytes(300)}.apply(context);
     SimulatedFlush{
-        100 /* flushOverhead */,
+        bytes(100) /* flushOverhead */,
         10 /* stripeRowCount */,
-        1000 /* stripeRawSize */,
-        500 /* compressedSize */,
-        0 /* dictMemoryUsage */,
-        500 /* outputStreamMemoryUsage */,
-        300 /* generalMemoryUsage */}
+        bytes(1000) /* stripeRawSize */,
+        bytes(500) /* compressedSize */,
+        bytes(0) /* dictMemoryUsage */,
+        bytes(500) /* outputStreamMemoryUsage */,
+        bytes(300) /* generalMemoryUsage */}
         .apply(context);
 
-    SimulatedWrite{5, 250, 150}.apply(context);
+    SimulatedWrite{5, bytes(250), bytes(150)}.apply(context);
     EXPECT_FALSE(writer->shouldFlush(context, 5));
     EXPECT_FALSE(writer->shouldFlush(context, 7));
     EXPECT_TRUE(writer->shouldFlush(context, 10));
@@ -683,15 +556,15 @@ TEST_F(TestWriterFlush, MemoryBasedFlushRandom) {
     size_t numStripes;
   };
 
-  auto pool = MockMemoryPool::create();
+  auto pool = createSinkPool();
   std::vector<TestCase> testCases{
-      {10237629, 20 * kSizeMB, 29},
+      {10237629, 20 * kSizeMB, 17},
       // TODO: investigate why this fails on linux specifically.
       // {30227679, 20 * kSizeMB, 30},
-      {10237629, 10 * kSizeMB, 15},
-      {30227679, 10 * kSizeMB, 15},
-      {10237629, 49 * kSizeMB, 69},
-      {30227679, 70 * kSizeMB, 98}};
+      {10237629, 10 * kSizeMB, 8},
+      {30227679, 10 * kSizeMB, 9},
+      {10237629, 49 * kSizeMB, 42},
+      {30227679, 70 * kSizeMB, 61}};
 
   for (auto& testCase : testCases) {
     WriterFlushTestHelper::testRandomSequence(

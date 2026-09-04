@@ -52,6 +52,7 @@ std::shared_ptr<MemoryPool> MemoryPoolForGluten::genChild(
       .threadSafe = threadSafe,
       .coreOnAllocationFailureEnabled = coreOnAllocationFailureEnabled_,
       .getPreferredSize = getPreferredSize,
+      .enableAlignedBufAllocStrategy = enableAlignedBufAllocStrategy_,
       .debugOptions = debugOptions_,
       .poolRegex = listener_->getPoolRegex(),
       .singleAllocationThreshold = listener_->getSingleAllocationThreshold(),

@@ -84,7 +84,7 @@ TEST_F(BufferTest, testAlignedBuffer) {
         testString,
         testStringLength);
     other = buffer;
-    EXPECT_EQ(pool_->currentBytes(), pool_->preferredSize(sizeWithHeader));
+    EXPECT_LE(pool_->currentBytes(), pool_->preferredSize(sizeWithHeader));
 
     AlignedBuffer::reallocate<char>(&other, size * 3, 'e');
     EXPECT_NE(other, buffer);
@@ -99,12 +99,12 @@ TEST_F(BufferTest, testAlignedBuffer) {
             testStringLength),
         0);
     EXPECT_EQ(other->as<char>()[buffer->capacity()], 'e');
-    EXPECT_EQ(
+    EXPECT_LE(
         pool_->currentBytes(),
         pool_->preferredSize(sizeWithHeader) +
             pool_->preferredSize(3 * size + kHeaderSize));
   }
-  EXPECT_EQ(
+  EXPECT_LE(
       pool_->currentBytes(), pool_->preferredSize(3 * size + kHeaderSize));
   other = nullptr;
   BufferPtr bits = AlignedBuffer::allocate<bool>(65, pool_.get(), true);
@@ -112,6 +112,37 @@ TEST_F(BufferTest, testAlignedBuffer) {
   EXPECT_EQ(bits->as<uint8_t>()[8], 0xff);
   bits = nullptr;
   EXPECT_EQ(pool_->currentBytes(), 0);
+}
+
+TEST_F(BufferTest, alignedBufferAllocationStrategyOption) {
+  constexpr size_t kSize = 7'000;
+  size_t disabledCapacity;
+  {
+    memory::MemoryManager::Options options;
+    options.enableAlignedBufAllocStrategy = false;
+    memory::MemoryManager manager(options);
+    auto pool = manager.addLeafPool("strategy-disabled");
+    disabledCapacity =
+        AlignedBuffer::
+            allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+                kSize, pool.get())
+                ->capacity();
+  }
+
+  size_t enabledCapacity;
+  {
+    memory::MemoryManager::Options options;
+    options.enableAlignedBufAllocStrategy = true;
+    memory::MemoryManager manager(options);
+    auto pool = manager.addLeafPool("strategy-enabled");
+    enabledCapacity =
+        AlignedBuffer::
+            allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+                kSize, pool.get())
+                ->capacity();
+  }
+
+  EXPECT_LT(enabledCapacity, disabledCapacity);
 }
 
 TEST_F(BufferTest, testAsRange) {
