@@ -33,13 +33,12 @@ EncodedKeyView materializeVariableKeyView(
   return {std::string_view(data, size - layout.heapKeyOffset())};
 }
 
-template <bool Inline>
-void materializeVariableKeyPointerViews(
+void materializeInlineVariableKeyPointerViews(
     const RadixSortKeyLayout& layout,
     std::span<const char* const> keys,
     EncodedKeyView* views) {
   for (vector_size_t row = 0; row < keys.size(); ++row) {
-    views[row] = materializeVariableKeyView<Inline>(layout, keys[row]);
+    views[row] = materializeVariableKeyView<true>(layout, keys[row]);
   }
 }
 
@@ -95,15 +94,15 @@ void materializeKeyViews(
 template <typename T>
 void prepareReusableDecodeBuffer(
     BufferPtr& buffer,
-    vector_size_t count,
+    uint64_t count,
     memory::MemoryPool* pool) {
   const auto bytes = checkedByteSize(count, sizeof(T), "decode scratch");
   if (buffer == nullptr || buffer->pool() != pool || !buffer->isMutable()) {
     buffer.reset();
-    buffer = AlignedBuffer::allocate<T>(count, pool);
+    buffer = AlignedBuffer::allocate<T>(static_cast<size_t>(count), pool);
   } else if (buffer->capacity() < bytes) {
     buffer.reset();
-    buffer = AlignedBuffer::allocate<T>(count, pool);
+    buffer = AlignedBuffer::allocate<T>(static_cast<size_t>(count), pool);
   } else {
     buffer->setSize(bytes);
   }
@@ -310,7 +309,6 @@ void RadixSortRun::append(const RowVector& input) {
     keyCodec_->encodeAndAppendInline(keys, *storage_, payloads);
   };
 
-  std::vector<uint8_t> payloadMayHaveNulls;
   if (projection_->hasPayload()) {
     std::vector<VectorPtr> payloadInputChildren;
     projection_->projectPayload(input, payloadInputChildren);
@@ -320,26 +318,20 @@ void RadixSortRun::append(const RowVector& input) {
         nullptr,
         input.size(),
         std::move(payloadInputChildren));
-    payloadMayHaveNulls.resize(payloadInput.childrenSize(), 0);
-    for (uint32_t column = 0; column < payloadInput.childrenSize(); ++column) {
-      payloadMayHaveNulls[column] =
-          payloadInput.childAt(column)->mayHaveNulls();
-    }
     const auto appendBegin = std::chrono::steady_clock::now();
     payloadWriter_.append(payloadInput, *storage_, payloadBatch_);
     const auto payloads =
         std::span<char* const>(payloadBatch_.rows()->as<char*>(), input.size());
     appendKeys(payloads);
     metrics_.appendTimeUs += elapsedUs(appendBegin);
+    for (uint32_t column = 0; column < payloadInput.childrenSize(); ++column) {
+      payloadMayHaveNulls_[column] |=
+          payloadInput.childAt(column)->mayHaveNulls();
+    }
   } else {
     const auto appendBegin = std::chrono::steady_clock::now();
     appendKeys({});
     metrics_.appendTimeUs += elapsedUs(appendBegin);
-  }
-  if (projection_->hasPayload()) {
-    for (uint32_t column = 0; column < payloadMayHaveNulls_.size(); ++column) {
-      payloadMayHaveNulls_[column] |= payloadMayHaveNulls[column];
-    }
   }
   metrics_.inputRows = *nextInputRows;
 }
@@ -425,6 +417,7 @@ RowVectorPtr RadixSortRun::getOutput(
 void RadixSortRun::writeMergeOutput(
     std::span<const char* const> keys,
     std::span<char* const> payloads,
+    std::span<const EncodedKeyView> externalViews,
     vector_size_t outputOffset,
     RowVector& output) {
   BOLT_DCHECK_GE(outputOffset, 0);
@@ -432,12 +425,13 @@ void RadixSortRun::writeMergeOutput(
   BOLT_DCHECK_LE(
       keys.size(), static_cast<size_t>(output.size() - outputOffset));
   BOLT_DCHECK_EQ(payloads.size(), projection_->hasPayload() ? keys.size() : 0);
+  BOLT_DCHECK(externalViews.empty() || externalViews.size() == keys.size());
 
   if (keys.empty()) {
     return;
   }
   if (projection_->needsDecodedKeys()) {
-    decodeKeysAt(keys, outputOffset, output.pool(), output);
+    decodeKeysAt(keys, externalViews, outputOffset, output.pool(), output);
   }
   if (projection_->hasPayload()) {
     gatherPayloadAt(payloads, outputOffset, output);
@@ -452,18 +446,30 @@ void RadixSortRun::ensureMergeDecodePlan() {
   MergeDecodePlan plan;
   plan.singleFixedWordBytes =
       keyCodec_->singleFixedWordBytes(keyLayout_.kind());
+  const auto& decodedKeyMask = projection_->decodedKeyMask();
+  const auto firstColumn = keyLayout_.isVariable() ? firstSuffixColumn_ : 0;
+  plan.decodeEndColumn = static_cast<uint32_t>(decodedKeyMask.size());
+  while (plan.decodeEndColumn > firstColumn &&
+         decodedKeyMask[plan.decodeEndColumn - 1] == 0) {
+    --plan.decodeEndColumn;
+  }
+  BOLT_DCHECK(
+      !keyLayout_.isVariable() || firstSuffixColumn_ <= decodedKeyMask.size());
   if (!plan.singleFixedWordBytes.has_value()) {
-    const auto firstSuffix = keyLayout_.isVariable() ? firstSuffixColumn_ : 0;
-    plan.scratchWords = keyCodec_->decodeScratchWordsPerRowWithMask(
-        projection_->decodedKeyMask(),
-        keyMayHaveNulls_,
-        firstSuffix,
-        /*skipMaskedVariableColumns=*/true);
+    if (!keyLayout_.isVariable() || plan.decodeEndColumn > firstSuffixColumn_) {
+      plan.scratchWords = keyCodec_->decodeScratchWordsPerRowWithMask(
+          decodedKeyMask,
+          keyMayHaveNulls_,
+          firstColumn,
+          plan.decodeEndColumn,
+          /*skipMaskedVariableColumns=*/true);
+    }
 
     plan.directScratchWords = keyCodec_->decodeScratchWordsPerRowWithMask(
-        projection_->decodedKeyMask(),
+        decodedKeyMask,
         keyMayHaveNulls_,
-        firstSuffix,
+        firstColumn,
+        static_cast<uint32_t>(decodedKeyMask.size()),
         /*skipMaskedVariableColumns=*/false);
   }
   mergeDecodePlan_.emplace(std::move(plan));
@@ -541,14 +547,46 @@ uint64_t RadixSortRun::mergeOutputScratchAllocationBytes(vector_size_t rows) {
     return 0;
   }
   ensureMergeDecodePlan();
+  if (mergeDecodePlan_.has_value() && keyLayout_.isVariable() &&
+      mergeDecodePlan_->decodeEndColumn == firstSuffixColumn_) {
+    return 0;
+  }
   return mergeDecodePlan_.has_value()
       ? decodeScratchAllocationBytes(rows, mergeDecodePlan_->scratchWords)
       : 0;
 }
 
-void RadixSortRun::prepareMergeOutput(RowVector& output) {
+std::span<EncodedKeyView> RadixSortRun::prepareMergeOutput(RowVector& output) {
   BOLT_DCHECK_NOT_NULL(output.pool());
+  BOLT_DCHECK(activeMergeOutput_ == nullptr);
+  BOLT_DCHECK(!mergeKeyDecodeActive_);
+  BOLT_DCHECK(!mergePayloadGatherActive_);
   ensureMergeDecodePlan();
+  std::span<EncodedKeyView> selectedViews;
+  if (mergeDecodePlan_.has_value() && output.size() > 0 &&
+      !mergeDecodePlan_->singleFixedWordBytes.has_value() &&
+      (!keyLayout_.isVariable() ||
+       mergeDecodePlan_->decodeEndColumn > firstSuffixColumn_)) {
+    prepareReusableDecodeBuffer<EncodedKeyView>(
+        decodeViewsOutput_, output.size(), output.pool());
+    if (!keyLayout_.isVariable()) {
+      prepareReusableDecodeBuffer<RadixSortInlineKeyBuffer>(
+          decodeInlineOutput_, output.size(), output.pool());
+    }
+    const auto cursorWords = checkedByteSize(
+        static_cast<uint64_t>(output.size()),
+        mergeDecodePlan_->scratchWords,
+        "decode cursor word");
+    if (cursorWords > 0) {
+      prepareReusableDecodeBuffer<uint64_t>(
+          decodeCursorOutput_, cursorWords, output.pool());
+    }
+    if (keyLayout_.isVariable() && !decodeVariableKeysFromInline_) {
+      selectedViews = {
+          decodeViewsOutput_->asMutable<EncodedKeyView>(),
+          static_cast<size_t>(output.size())};
+    }
+  }
   if (projection_->hasPayload()) {
     if (!mergePayloadGatherPlan_.has_value()) {
       mergePayloadGatherPlan_.emplace(PayloadRowReader::makePlan(
@@ -558,6 +596,10 @@ void RadixSortRun::prepareMergeOutput(RowVector& output) {
     }
     PayloadRowReader::bind(*mergePayloadGatherPlan_, output);
   }
+  mergeKeyDecodeActive_ = projection_->needsDecodedKeys();
+  mergePayloadGatherActive_ = projection_->hasPayload();
+  activeMergeOutput_ = &output;
+  return selectedViews;
 }
 
 void RadixSortRun::finishMergeOutput(
@@ -565,22 +607,59 @@ void RadixSortRun::finishMergeOutput(
     vector_size_t writtenRows) {
   BOLT_DCHECK_GE(writtenRows, 0);
   BOLT_DCHECK_LE(writtenRows, output.size());
-  if (projection_->needsDecodedKeys()) {
+  BOLT_DCHECK_EQ(activeMergeOutput_, &output);
+  const auto nextOutputRows =
+      checkedAdd<uint64_t>(metrics_.outputRows, writtenRows);
+  BOLT_CHECK(nextOutputRows.has_value(), "Radix sort output rows overflow");
+  if (mergeKeyDecodeActive_) {
+    mergeKeyDecodeActive_ = false;
     keyCodec_->finishDecode(
         projection_->decodedKeyMask(),
         output,
         projection_->directKeyChannels());
   }
-  if (mergePayloadGatherPlan_.has_value()) {
+  if (mergePayloadGatherActive_) {
+    mergePayloadGatherActive_ = false;
     PayloadRowReader::finish(*mergePayloadGatherPlan_);
   }
-  const auto nextOutputRows =
-      checkedAdd<uint64_t>(metrics_.outputRows, writtenRows);
-  BOLT_CHECK(nextOutputRows.has_value(), "Radix sort output rows overflow");
   metrics_.outputRows = *nextOutputRows;
+  activeMergeOutput_ = nullptr;
+}
+
+void RadixSortRun::abortMergeOutput() noexcept {
+  auto* output = activeMergeOutput_;
+  activeMergeOutput_ = nullptr;
+  const auto finishKeyDecode = mergeKeyDecodeActive_;
+  const auto finishPayloadGather = mergePayloadGatherActive_;
+  mergeKeyDecodeActive_ = false;
+  mergePayloadGatherActive_ = false;
+  if (output == nullptr) {
+    return;
+  }
+
+  if (finishKeyDecode) {
+    try {
+      keyCodec_->finishDecode(
+          projection_->decodedKeyMask(),
+          *output,
+          projection_->directKeyChannels());
+    } catch (...) {
+      LOG(ERROR) << "Failed to clean up radix merge key output";
+    }
+  }
+  if (finishPayloadGather) {
+    try {
+      PayloadRowReader::finish(*mergePayloadGatherPlan_);
+    } catch (...) {
+      LOG(ERROR) << "Failed to clean up radix merge payload output";
+    }
+  }
 }
 
 void RadixSortRun::clear() {
+  activeMergeOutput_ = nullptr;
+  mergeKeyDecodeActive_ = false;
+  mergePayloadGatherActive_ = false;
   mergePayloadGatherPlan_.reset();
   keySizeScratch_.reset();
   payloadBatch_ = PayloadRowBatch{};
@@ -696,6 +775,7 @@ RowVectorPtr RadixSortRun::gatherPayload(
 
 void RadixSortRun::decodeKeysAt(
     std::span<const char* const> keys,
+    std::span<const EncodedKeyView> externalViews,
     vector_size_t outputOffset,
     memory::MemoryPool* outputPool,
     RowVector& output) {
@@ -712,27 +792,57 @@ void RadixSortRun::decodeKeysAt(
     return;
   }
 
-  prepareReusableDecodeBuffer<EncodedKeyView>(
-      decodeViewsOutput_, count, outputPool);
-  auto* rawViews = decodeViewsOutput_->asMutable<EncodedKeyView>();
+  std::span<const EncodedKeyView> views;
   if (keyLayout_.isVariable()) {
-    if (decodeVariableKeysFromInline_) {
-      materializeVariableKeyPointerViews<true>(keyLayout_, keys, rawViews);
+    if (plan.decodeEndColumn == firstSuffixColumn_) {
+      BOLT_DCHECK(externalViews.empty());
+      keyCodec_->decodePrefixAt(
+          keys,
+          projection_->decodedKeyMask(),
+          keyMayHaveNulls_,
+          outputOffset,
+          output,
+          projection_->directKeyChannels(),
+          firstSuffixColumn_);
+      return;
+    }
+    if (!decodeVariableKeysFromInline_) {
+      BOLT_DCHECK_EQ(externalViews.size(), keys.size());
+      views = externalViews;
     } else {
-      materializeVariableKeyPointerViews<false>(keyLayout_, keys, rawViews);
+      BOLT_DCHECK(externalViews.empty());
+      BOLT_DCHECK_NOT_NULL(decodeViewsOutput_);
+      BOLT_DCHECK_GE(
+          decodeViewsOutput_->size(),
+          checkedByteSize(count, sizeof(EncodedKeyView), "decode view"));
+      auto* rawViews = decodeViewsOutput_->asMutable<EncodedKeyView>();
+      materializeInlineVariableKeyPointerViews(keyLayout_, keys, rawViews);
+      views = {rawViews, keys.size()};
     }
   } else {
-    prepareReusableDecodeBuffer<RadixSortInlineKeyBuffer>(
-        decodeInlineOutput_, count, outputPool);
+    BOLT_DCHECK(externalViews.empty());
+    BOLT_DCHECK_NOT_NULL(decodeViewsOutput_);
+    BOLT_DCHECK_GE(
+        decodeViewsOutput_->size(),
+        checkedByteSize(count, sizeof(EncodedKeyView), "decode view"));
+    auto* rawViews = decodeViewsOutput_->asMutable<EncodedKeyView>();
+    BOLT_DCHECK_NOT_NULL(decodeInlineOutput_);
+    BOLT_DCHECK_GE(
+        decodeInlineOutput_->size(),
+        checkedByteSize(
+            count, sizeof(RadixSortInlineKeyBuffer), "inline decode key"));
     materializeKeyPointerViews(
         keyLayout_,
         keys,
         decodeInlineOutput_->asMutable<RadixSortInlineKeyBuffer>(),
         rawViews);
+    views = {rawViews, keys.size()};
   }
 
-  keyCodec_->decodeSuffixAt(
-      std::span<const EncodedKeyView>(rawViews, count),
+  BOLT_DCHECK_NOT_NULL(decodeCursorOutput_);
+  BOLT_DCHECK_EQ(decodeCursorOutput_->pool(), outputPool);
+  keyCodec_->decodeSuffixAtWithPreparedScratch(
+      views,
       projection_->decodedKeyMask(),
       keyMayHaveNulls_,
       outputOffset,
@@ -741,7 +851,8 @@ void RadixSortRun::decodeKeysAt(
       output,
       projection_->directKeyChannels(),
       plan.scratchWords,
-      keyLayout_.isVariable() ? firstSuffixColumn_ : 0);
+      keyLayout_.isVariable() ? firstSuffixColumn_ : 0,
+      plan.decodeEndColumn);
   if (keyLayout_.isVariable()) {
     keyCodec_->decodePrefixAt(
         keys,

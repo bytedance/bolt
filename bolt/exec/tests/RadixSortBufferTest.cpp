@@ -3596,6 +3596,374 @@ TEST_F(
   }
 }
 
+TEST_F(RadixSortBufferTest, pointerFreeSpillMergeLayoutAndTopologyMatrix) {
+  enum class Topology {
+    kSingleSpill,
+    kMemorySpill,
+    kTwoSpills,
+    kLoserTree,
+  };
+  struct TopologyCase {
+    const char* name;
+    Topology topology;
+    size_t expectedStreams;
+  };
+
+  constexpr vector_size_t kRows = 16;
+  const std::array<int64_t, kRows> ranks{
+      15, 3, 11, 7, 14, 2, 10, 6, 13, 1, 9, 5, 12, 0, 8, 4};
+  const std::string commonPrefix(80, 'p');
+  const std::array<TopologyCase, 4> topologies{{
+      {"single spill", Topology::kSingleSpill, 1},
+      {"memory-spill", Topology::kMemorySpill, 2},
+      {"spill-spill two-way", Topology::kTwoSpills, 2},
+      {"spill-spill loser tree", Topology::kLoserTree, 3},
+  }};
+
+  const auto makeInput = [&](bool variableKey, bool hasPayload) {
+    VectorPtr keys;
+    if (variableKey) {
+      std::vector<std::optional<std::string>> values;
+      values.reserve(kRows);
+      for (const auto rank : ranks) {
+        values.push_back(commonPrefix + fmt::format("{:04d}", rank));
+      }
+      keys = makeStringVector(VARCHAR(), values);
+    } else {
+      keys = makeVector<int64_t>(
+          BIGINT(),
+          std::vector<std::optional<int64_t>>(ranks.begin(), ranks.end()));
+    }
+
+    std::vector<std::string> names{"key"};
+    std::vector<VectorPtr> children{std::move(keys)};
+    if (hasPayload) {
+      names.insert(names.end(), {"payload", "id"});
+      children.push_back(makeStringVector(
+          VARCHAR(),
+          generate<std::optional<std::string>>(
+              kRows, [](vector_size_t row) -> std::optional<std::string> {
+                switch (row % 5) {
+                  case 0:
+                    return std::nullopt;
+                  case 1:
+                    return std::string{};
+                  case 2:
+                    return std::string(12, 'i');
+                  case 3:
+                    return std::string(13, 'b');
+                  default:
+                    return std::string(80 + row, 'l');
+                }
+              })));
+      children.push_back(generateVector<int64_t>(
+          BIGINT(), kRows, [](vector_size_t row) { return row; }));
+    }
+    return makeRows(std::move(names), children);
+  };
+
+  const auto addRuns = [&](RadixSortBuffer& buffer,
+                           const RowVectorPtr& input,
+                           Topology topology) {
+    switch (topology) {
+      case Topology::kSingleSpill:
+        buffer.addInput(input);
+        buffer.spill();
+        return;
+      case Topology::kMemorySpill:
+        addInputRuns(buffer, input, {{8, true}, {8, false}});
+        return;
+      case Topology::kTwoSpills:
+        addInputRuns(buffer, input, {{8, true}, {8, true}});
+        return;
+      case Topology::kLoserTree:
+        addInputRuns(buffer, input, {{5, true}, {5, true}, {6, true}});
+        return;
+    }
+  };
+
+  for (const auto variableKey : {false, true}) {
+    for (const auto hasPayload : {false, true}) {
+      for (const auto& topology : topologies) {
+        SCOPED_TRACE(fmt::format(
+            "key={}, payload={}, topology={}",
+            variableKey ? "variable" : "fixed",
+            hasPayload,
+            topology.name));
+        auto input = makeInput(variableKey, hasPayload);
+        auto directory = exec::test::TempDirectoryPath::create();
+        auto config = spillConfig(directory->path);
+        RadixSortBuffer buffer(
+            std::static_pointer_cast<const RowType>(input->type()),
+            {0},
+            {SortComparatorOracle::makeSortFlags(true, true)},
+            pool(),
+            &config);
+        addRuns(buffer, input, topology.topology);
+        buffer.noMoreInput();
+        EXPECT_EQ(buffer.testingMergeStreamCount(), topology.expectedStreams);
+
+        auto output = collect(buffer, 3);
+        ASSERT_NE(output, nullptr);
+        ASSERT_EQ(output->size(), kRows);
+        SortComparatorOracle::expectSorted(
+            *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
+        if (hasPayload) {
+          SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+        } else if (variableKey) {
+          const auto* values =
+              output->childAt(0)->asUnchecked<SimpleVector<StringView>>();
+          for (vector_size_t row = 0; row < kRows; ++row) {
+            EXPECT_EQ(
+                values->valueAt(row).getString(),
+                commonPrefix + fmt::format("{:04d}", row));
+          }
+        } else {
+          const auto* values =
+              output->childAt(0)->asUnchecked<SimpleVector<int64_t>>();
+          for (vector_size_t row = 0; row < kRows; ++row) {
+            EXPECT_EQ(values->valueAt(row), row);
+          }
+        }
+        EXPECT_EQ(buffer.numOutputRows(), kRows);
+      }
+    }
+  }
+}
+
+TEST_F(RadixSortBufferTest, variableMergeCommonPrefixEqualAndNullOrdering) {
+  const std::string commonPrefix(96, 'c');
+  const std::string equalKey = commonPrefix + "equal";
+  auto input = makeRows(
+      {"key", "payload", "id"},
+      {makeStringVector(
+           VARCHAR(),
+           {equalKey,
+            std::nullopt,
+            commonPrefix + "z",
+            commonPrefix + "a",
+            equalKey,
+            commonPrefix + "b",
+            equalKey,
+            std::nullopt,
+            commonPrefix + "y",
+            commonPrefix + "c",
+            std::nullopt,
+            commonPrefix + "d",
+            equalKey,
+            commonPrefix + "x",
+            commonPrefix + "a"}),
+       makeStringVector(
+           VARCHAR(),
+           {std::nullopt,
+            "",
+            std::string(12, 'a'),
+            std::string(13, 'b'),
+            std::string(80, 'c'),
+            "p5",
+            std::nullopt,
+            "p7",
+            std::string(64, 'd'),
+            "p9",
+            std::string(13, 'e'),
+            std::string(12, 'f'),
+            "p12",
+            std::nullopt,
+            std::string(96, 'g')}),
+       generateVector<int64_t>(
+           BIGINT(), 15, [](vector_size_t row) { return row; })});
+  struct Plan {
+    const char* name;
+    std::vector<InputRun> runs;
+    size_t expectedStreams;
+  };
+  const std::array<Plan, 4> plans{{
+      {"memory-spill two-way", {{8, true}, {7, false}}, 2},
+      {"spill-spill two-way", {{8, true}, {7, true}}, 2},
+      {"memory-spill loser tree", {{5, true}, {5, true}, {5, false}}, 3},
+      {"spill-spill loser tree", {{5, true}, {5, true}, {5, true}}, 3},
+  }};
+
+  for (const auto ascending : {false, true}) {
+    for (const auto nullsFirst : {false, true}) {
+      const auto flags =
+          SortComparatorOracle::makeSortFlags(ascending, nullsFirst);
+      for (const auto& plan : plans) {
+        SCOPED_TRACE(fmt::format(
+            "topology={}, ascending={}, nullsFirst={}",
+            plan.name,
+            ascending,
+            nullsFirst));
+        auto directory = exec::test::TempDirectoryPath::create();
+        auto config = spillConfig(directory->path);
+        RadixSortBuffer buffer(
+            std::static_pointer_cast<const RowType>(input->type()),
+            {0},
+            {flags},
+            pool(),
+            &config);
+        addInputRuns(buffer, input, plan.runs);
+        buffer.noMoreInput();
+        EXPECT_EQ(buffer.testingMergeStreamCount(), plan.expectedStreams);
+        auto output = collect(buffer, 1);
+        SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+        SortComparatorOracle::expectSorted(*output, {0}, {flags});
+      }
+    }
+  }
+}
+
+TEST_F(RadixSortBufferTest, variableMergeOutputProjectionModes) {
+  constexpr vector_size_t kRows = 18;
+  const std::array<int64_t, kRows> ranks{
+      17, 5, 11, 2, 14, 8, 16, 4, 10, 1, 13, 7, 15, 3, 9, 0, 12, 6};
+  const std::string commonPrefix(96, 's');
+  auto input = makeRows(
+      {"prefix", "suffix", "id"},
+      {generateVector<int64_t>(
+           BIGINT(), kRows, [](vector_size_t row) { return row % 3; }),
+       makeStringVector(
+           VARCHAR(),
+           generate<std::optional<std::string>>(
+               kRows,
+               [&](vector_size_t row) {
+                 return commonPrefix + fmt::format("{:04d}", ranks[row]);
+               })),
+       generateVector<int64_t>(
+           BIGINT(), kRows, [](vector_size_t row) { return row; })});
+
+  const auto runMode = [&](const char* name,
+                           const std::vector<column_index_t>& keyChannels,
+                           uint64_t& scratchGrowth) {
+    SCOPED_TRACE(name);
+    auto directory = exec::test::TempDirectoryPath::create();
+    auto config = spillConfig(directory->path);
+    std::vector<CompareFlags> keyFlags(
+        keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
+    RadixSortBuffer buffer(
+        std::static_pointer_cast<const RowType>(input->type()),
+        keyChannels,
+        keyFlags,
+        pool(),
+        &config);
+    addInputRuns(buffer, input, {{6, true}, {6, true}, {6, false}});
+    buffer.noMoreInput();
+    ASSERT_EQ(buffer.testingMergeStreamCount(), 3);
+    scratchGrowth =
+        RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 5)
+            .scratchGrowth;
+
+    std::vector<RowVectorPtr> batches;
+    while (auto batch = buffer.getOutput(5)) {
+      EXPECT_LE(batch->size(), 5);
+      batches.push_back(std::move(batch));
+    }
+    EXPECT_EQ(batches.size(), 4);
+    auto output = concatenateBatches(batches, kRows);
+    SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
+    SortComparatorOracle::expectSorted(*output, keyChannels, keyFlags);
+  };
+
+  uint64_t noDecodedKeyScratch = 0;
+  uint64_t prefixOnlyScratch = 0;
+  uint64_t prefixPayloadSuffixDecodedScratch = 0;
+  uint64_t externalSuffixScratch = 0;
+  // Duplicating every key channel makes all output columns payload-backed.
+  runMode("no decoded key", {0, 0, 1, 1}, noDecodedKeyScratch);
+  // The fixed prefix remains decoded, while the duplicated suffix is payload.
+  runMode("fixed prefix only", {0, 1, 1}, prefixOnlyScratch);
+  // Duplicating only the fixed prefix leaves the variable suffix decoded.
+  runMode(
+      "prefix payload-backed, suffix decoded",
+      {0, 0, 1},
+      prefixPayloadSuffixDecodedScratch);
+  runMode("external suffix", {0, 1}, externalSuffixScratch);
+
+  // The payload-backed modes reserve merge key/payload pointer arrays. When the
+  // variable suffix still has to be decoded, merge output also needs the same
+  // selected-view and decode scratch as the external-suffix path.
+  EXPECT_GT(noDecodedKeyScratch, 0);
+  EXPECT_EQ(prefixOnlyScratch, noDecodedKeyScratch);
+  EXPECT_EQ(prefixPayloadSuffixDecodedScratch, externalSuffixScratch);
+  EXPECT_GT(prefixPayloadSuffixDecodedScratch, prefixOnlyScratch);
+  EXPECT_GT(externalSuffixScratch, prefixOnlyScratch);
+}
+
+TEST_F(
+    RadixSortBufferTest,
+    externalSuffixOutputSurvivesBlockRetirementAndFileRollover) {
+  constexpr vector_size_t kRowsPerRun = 5'000;
+  constexpr vector_size_t kRows = 2 * kRowsPerRun;
+  constexpr size_t kSuffixPaddingBytes = 400;
+  const std::string commonPrefix(220, 'v');
+  std::vector<std::optional<std::string>> keys;
+  keys.reserve(kRows);
+  for (vector_size_t row = 0; row < kRowsPerRun; ++row) {
+    const auto rank = 2 * (kRowsPerRun - row - 1);
+    keys.push_back(
+        commonPrefix + fmt::format("{:010d}_", rank) +
+        std::string(kSuffixPaddingBytes, static_cast<char>('a' + rank % 26)));
+  }
+  for (vector_size_t row = 0; row < kRowsPerRun; ++row) {
+    const auto rank = 2 * (kRowsPerRun - row - 1) + 1;
+    keys.push_back(
+        commonPrefix + fmt::format("{:010d}_", rank) +
+        std::string(kSuffixPaddingBytes, static_cast<char>('a' + rank % 26)));
+  }
+  RowVectorPtr input = makeRows({"key"}, {makeStringVector(VARCHAR(), keys)});
+  std::vector<RowVectorPtr> batches;
+  {
+    SpillContext spill(
+        *this,
+        input,
+        "none",
+        /*spillMemoryThreshold=*/0,
+        /*keyChannel=*/0,
+        /*maxFileSize=*/1,
+        /*writeBufferSize=*/0);
+    auto& buffer = spill.buffer;
+    buffer.addInput(slice(*input, 0, kRowsPerRun));
+    buffer.spill();
+    buffer.addInput(slice(*input, kRowsPerRun, kRowsPerRun));
+    buffer.spill();
+    ASSERT_TRUE(buffer.spilledStats());
+    EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
+    EXPECT_GT(
+        buffer.spilledStats()->spilledFiles, buffer.spilledStats()->spillRuns);
+    EXPECT_GE(
+        buffer.spilledStats()->spillWrites,
+        buffer.spilledStats()->spilledFiles);
+
+    buffer.noMoreInput();
+    EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
+    while (auto batch = buffer.getOutput(257)) {
+      batches.push_back(std::move(batch));
+    }
+    EXPECT_GT(batches.size(), 2);
+    EXPECT_EQ(buffer.numOutputRows(), kRows);
+  }
+
+  input.reset();
+  pool()->release();
+  auto churn = generateStringVector(kRows, [&](vector_size_t row) {
+    return std::string(300 + row % 17, static_cast<char>('a' + row % 26));
+  });
+  (void)churn;
+
+  auto output = concatenateBatches(batches, kRows);
+  const auto* outputKeys =
+      output->childAt(0)->asUnchecked<SimpleVector<StringView>>();
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    EXPECT_EQ(
+        outputKeys->valueAt(row).getString(),
+        commonPrefix + fmt::format("{:010d}_", row) +
+            std::string(
+                kSuffixPaddingBytes, static_cast<char>('a' + row % 26)));
+  }
+  SortComparatorOracle::expectSorted(
+      *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
+}
+
 TEST_F(RadixSortBufferTest, stateStatsAndEmptyInput) {
   auto inputType = ROW({"key"}, {BIGINT()});
   RadixSortBuffer buffer(

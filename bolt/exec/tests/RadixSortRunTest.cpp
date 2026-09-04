@@ -40,15 +40,36 @@ class RadixSortRunOffsetOutputTest {
    public:
     OutputBatch(RadixSortRun& run, RowVectorPtr& output)
         : run_(run), output_(output) {
-      run_.prepareMergeOutput(*output_);
+      selectedViews_ = run_.prepareMergeOutput(*output_);
     }
 
     void write(
         std::span<const char* const> keys,
         std::span<char* const> payloads,
         vector_size_t outputOffset) {
-      run_.writeMergeOutput(keys, payloads, outputOffset, *output_);
+      auto externalViews = selectedViewsFor(keys.size());
+      for (size_t row = 0; row < externalViews.size(); ++row) {
+        externalViews[row] = {
+            RadixSortKey(run_.keyLayout(), keys[row]).heapKey()};
+      }
+      writeSelected(keys, payloads, outputOffset);
+    }
+
+    void writeSelected(
+        std::span<const char* const> keys,
+        std::span<char* const> payloads,
+        vector_size_t outputOffset) {
+      run_.writeMergeOutput(
+          keys,
+          payloads,
+          selectedViewsFor(keys.size()),
+          outputOffset,
+          *output_);
       writtenRows_ += static_cast<vector_size_t>(keys.size());
+    }
+
+    std::span<EncodedKeyView> selectedViews() {
+      return selectedViews_;
     }
 
     void finalize() {
@@ -58,7 +79,16 @@ class RadixSortRunOffsetOutputTest {
    private:
     RadixSortRun& run_;
     RowVectorPtr& output_;
+    std::span<EncodedKeyView> selectedViews_;
     vector_size_t writtenRows_{0};
+
+    std::span<EncodedKeyView> selectedViewsFor(size_t count) {
+      if (selectedViews_.empty()) {
+        return {};
+      }
+      BOLT_CHECK_LE(count, selectedViews_.size());
+      return selectedViews_.first(count);
+    }
   };
 
   static RowVectorPtr write(
@@ -76,9 +106,108 @@ class RadixSortRunOffsetOutputTest {
     batch.finalize();
     return output;
   }
+
+  static uint64_t mergeOutputScratchAllocationBytes(
+      RadixSortRun& run,
+      vector_size_t rows) {
+    return run.mergeOutputScratchAllocationBytes(rows);
+  }
+
+  static void abortMergeOutput(RadixSortRun& run) {
+    run.abortMergeOutput();
+  }
+
+  static void setOutputRows(RadixSortRun& run, uint64_t outputRows) {
+    run.metrics_.outputRows = outputRows;
+  }
+
+  static const Buffer* decodeViews(const RadixSortRun& run) {
+    return run.decodeViewsOutput_.get();
+  }
+
+  static const Buffer* decodeInline(const RadixSortRun& run) {
+    return run.decodeInlineOutput_.get();
+  }
+
+  static const Buffer* decodeCursor(const RadixSortRun& run) {
+    return run.decodeCursorOutput_.get();
+  }
+
+  static uint64_t mergeDecodeScratchWords(RadixSortRun& run) {
+    run.ensureMergeDecodePlan();
+    BOLT_CHECK(run.mergeDecodePlan_.has_value());
+    return run.mergeDecodePlan_->scratchWords;
+  }
 };
 
 namespace {
+
+class BoundaryVariableMemoryMergeStream final
+    : public RadixSortVariableMergeStream {
+ public:
+  BoundaryVariableMemoryMergeStream(
+      const RadixSortRunStorage& storage,
+      std::vector<uint64_t> boundaryRows)
+      : RadixSortVariableMergeStream(
+            storage.layout(),
+            storage.layout().width()),
+        storage_(storage),
+        boundaryRows_(std::move(boundaryRows)) {
+    BOLT_CHECK(storage.layout().isVariable());
+    loadCurrent();
+  }
+
+  bool hasData() const override {
+    return key_ != nullptr;
+  }
+
+  bool tryAdvance() override {
+    if (isBoundary()) {
+      return false;
+    }
+    ++index_;
+    loadCurrent();
+    return true;
+  }
+
+  void advanceAfterFlush() override {
+    BOLT_CHECK(isBoundary());
+    ++safeAdvances_;
+    ++index_;
+    loadCurrent();
+  }
+
+  uint64_t safeAdvances() const {
+    return safeAdvances_;
+  }
+
+ private:
+  bool isBoundary() const {
+    return key_ != nullptr &&
+        std::find(boundaryRows_.begin(), boundaryRows_.end(), index_) !=
+        boundaryRows_.end();
+  }
+
+  void loadCurrent() {
+    if (index_ == storage_.size()) {
+      key_ = nullptr;
+      payload_ = nullptr;
+      encodedSuffix_ = {};
+      return;
+    }
+    key_ = storage_.keyDataAt(index_);
+    payload_ = storage_.layout().hasPayload()
+        ? RadixSortKey(storage_.layout(), key_).payload()
+        : nullptr;
+    encodedSuffix_ =
+        EncodedKeyView{RadixSortKey(storage_.layout(), key_).heapKey()};
+  }
+
+  const RadixSortRunStorage& storage_;
+  const std::vector<uint64_t> boundaryRows_;
+  uint64_t index_{0};
+  uint64_t safeAdvances_{0};
+};
 
 class RadixSortRunTest : public testing::Test {
  public:
@@ -1690,10 +1819,9 @@ TEST_F(
   auto mergeRun = makeRun(*leftInput);
   auto secondMergeRun = makeRun(*rightInput);
   std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+  streams.push_back(makeRadixSortMemoryRunMergeStream(*mergeRun->storage()));
   streams.push_back(
-      std::make_unique<RadixSortMemoryRunMergeStream>(*mergeRun->storage()));
-  streams.push_back(std::make_unique<RadixSortMemoryRunMergeStream>(
-      *secondMergeRun->storage()));
+      makeRadixSortMemoryRunMergeStream(*secondMergeRun->storage()));
   RadixSortMerger merger(mergeRun->keyLayout(), std::move(streams));
   std::vector<RowVectorPtr> mergeBatches;
   std::array<const char*, 9> keys{};
@@ -1702,26 +1830,26 @@ TEST_F(
   while (mergedRows < kRows) {
     const auto requested = std::min<vector_size_t>(
         keys.size(), static_cast<vector_size_t>(kRows - mergedRows));
+    auto output = makePreparedOutput(*mergeRun, requested);
+    RadixSortRunOffsetOutputTest::OutputBatch batch(*mergeRun, output);
+    ASSERT_EQ(batch.selectedViews().size(), requested);
     vector_size_t flushedRows = 0;
     const auto count = merger.collectRows(
         requested,
         keys.data(),
         payloadRows.data(),
+        batch.selectedViews(),
         [&](vector_size_t segmentSize) {
-          auto output = makePreparedOutput(*mergeRun, segmentSize);
-          RadixSortRunOffsetOutputTest::write(
-              *mergeRun,
+          batch.writeSelected(
               std::span<const char* const>(keys.data(), segmentSize),
               std::span<char* const>(payloadRows.data(), segmentSize),
-              0,
-              segmentSize,
-              outputPool_.get(),
-              output);
-          mergeBatches.push_back(std::move(output));
+              flushedRows);
           flushedRows += segmentSize;
         });
     ASSERT_EQ(count, requested);
     ASSERT_EQ(flushedRows, requested);
+    batch.finalize();
+    mergeBatches.push_back(std::move(output));
     mergedRows += count;
   }
   ASSERT_GT(mergeBatches.size(), 2);
@@ -1812,8 +1940,10 @@ TEST_F(RadixSortRunTest, spillOffsetSingleFixedPreservesSentinels) {
       values->set(row, -777);
     }
     const auto* child = output->childAt(0).get();
-    RadixSortRunOffsetOutputTest::write(
-        *run, keys, {}, offset, outputSize, outputPool_.get(), output);
+    RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+    ASSERT_TRUE(batch.selectedViews().empty());
+    batch.write(keys, {}, offset);
+    batch.finalize();
     EXPECT_EQ(output->childAt(0).get(), child);
     for (vector_size_t row = 0; row < offset; ++row) {
       EXPECT_EQ(values->valueAt(row), -777);
@@ -1897,6 +2027,7 @@ TEST_F(RadixSortRunTest, spillOffsetLayeredVariableSegmentsAndChildIdentity) {
   auto run = finalizedRun({*input, keyChannels, flags});
   ASSERT_TRUE(run->keyLayout().isVariable());
   ASSERT_GT(run->keyLayout().heapKeyOffset(), 0);
+  ASSERT_FALSE(run->decodesVariableKeysFromInline());
   auto expectedRun = finalizedRun({*input, keyChannels, flags});
   auto expected = collect(*expectedRun, input->size());
   auto [keys, payloads] = rowPointers(*run);
@@ -1911,6 +2042,7 @@ TEST_F(RadixSortRunTest, spillOffsetLayeredVariableSegmentsAndChildIdentity) {
   const std::array<vector_size_t, 3> segments{1, 2, 4};
   vector_size_t source = 0;
   RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+  ASSERT_EQ(batch.selectedViews().size(), outputSize);
   for (const auto count : segments) {
     EXPECT_EQ(run->metrics().outputRows, 0);
     batch.write(
@@ -1927,6 +2059,336 @@ TEST_F(RadixSortRunTest, spillOffsetLayeredVariableSegmentsAndChildIdentity) {
   for (uint32_t column = 0; column < children.size(); ++column) {
     EXPECT_EQ(output->childAt(column).get(), children[column]);
   }
+}
+
+TEST_F(
+    RadixSortRunTest,
+    spillOffsetExternalVariableViewsComeFromMemoryStreamSelection) {
+  constexpr vector_size_t kRows = 7;
+  auto input = makeRows(
+      {"fixed", "text", "id"},
+      {makeVector<int64_t>(BIGINT(), {7, 1, 6, 2, 5, 3, 4}),
+       makeStringVector(
+           {std::string(96, 'g'),
+            std::string(96, 'a'),
+            std::string(96, 'f'),
+            std::string(96, 'b'),
+            std::string(96, 'e'),
+            std::string(96, 'c'),
+            std::string(96, 'd')}),
+       makeIds(kRows)});
+  const std::vector<column_index_t> keyChannels{0, 1};
+  const std::vector<CompareFlags> flags(
+      keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
+  auto run = finalizedRun({*input, keyChannels, flags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  ASSERT_FALSE(run->decodesVariableKeysFromInline());
+  auto expectedRun = finalizedRun({*input, keyChannels, flags});
+  auto expected = collect(*expectedRun, kRows);
+
+  auto stream = std::make_unique<BoundaryVariableMemoryMergeStream>(
+      *run->storage(), std::vector<uint64_t>{1, 3});
+  auto* streamPtr = stream.get();
+  std::vector<std::unique_ptr<RadixSortMergeStream>> streams;
+  streams.push_back(std::move(stream));
+  RadixSortMerger merger(run->keyLayout(), std::move(streams));
+
+  constexpr vector_size_t kOffset = 65;
+  auto output = makePreparedOutput(*run, kOffset + kRows + 1);
+  RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+  ASSERT_EQ(batch.selectedViews().size(), output->size());
+  constexpr std::string_view kUnselected = "unselected";
+  for (auto& view : batch.selectedViews()) {
+    view = {kUnselected};
+  }
+  std::array<const char*, kRows> keys{};
+  std::array<char*, kRows> payloads{};
+  std::vector<vector_size_t> segmentSizes;
+  vector_size_t outputOffset = kOffset;
+  const auto count = merger.collectRows(
+      kRows,
+      keys.data(),
+      payloads.data(),
+      batch.selectedViews(),
+      [&](vector_size_t segmentSize) {
+        segmentSizes.push_back(segmentSize);
+        for (vector_size_t row = 0; row < segmentSize; ++row) {
+          const auto expectedView =
+              RadixSortKey(run->keyLayout(), keys[row]).heapKey();
+          EXPECT_EQ(batch.selectedViews()[row].bytes, expectedView);
+          EXPECT_NE(batch.selectedViews()[row].bytes, kUnselected);
+        }
+        batch.writeSelected(
+            std::span<const char* const>(keys.data(), segmentSize),
+            std::span<char* const>(payloads.data(), segmentSize),
+            outputOffset);
+        outputOffset += segmentSize;
+      });
+  EXPECT_EQ(count, kRows);
+  EXPECT_EQ(outputOffset, kOffset + kRows);
+  EXPECT_EQ(segmentSizes, (std::vector<vector_size_t>{2, 2, 3}));
+  EXPECT_EQ(streamPtr->safeAdvances(), 2);
+  batch.finalize();
+  expectRangeEqual(*expected, *output, kOffset);
+}
+
+TEST_F(RadixSortRunTest, spillOffsetInlineVariableNeedsNoExternalViews) {
+  auto input = makeRows(
+      {"text", "id"},
+      {makeStringVector({"k3", "k1", std::nullopt, "k2", ""}), makeIds(5)});
+  const std::vector<column_index_t> keyChannels{0};
+  const std::vector<CompareFlags> flags{
+      SortComparatorOracle::makeSortFlags(true, true)};
+  auto run = finalizedRun({*input, keyChannels, flags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  ASSERT_TRUE(run->decodesVariableKeysFromInline());
+  auto expectedRun = finalizedRun({*input, keyChannels, flags});
+  auto expected = collect(*expectedRun, input->size());
+  auto [keys, payloads] = rowPointers(*run);
+
+  constexpr vector_size_t kOffset = 3;
+  auto output = makePreparedOutput(*run, kOffset + input->size() + 1);
+  RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+  ASSERT_TRUE(batch.selectedViews().empty());
+  const auto* views = RadixSortRunOffsetOutputTest::decodeViews(*run);
+  const auto* cursor = RadixSortRunOffsetOutputTest::decodeCursor(*run);
+  ASSERT_NE(views, nullptr);
+  ASSERT_NE(cursor, nullptr);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeInline(*run), nullptr);
+  batch.write(
+      std::span<const char* const>(keys.data(), 2),
+      std::span<char* const>(payloads.data(), 2),
+      kOffset);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), views);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), cursor);
+  batch.write(
+      std::span<const char* const>(keys.data() + 2, input->size() - 2),
+      std::span<char* const>(payloads.data() + 2, input->size() - 2),
+      kOffset + 2);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), views);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), cursor);
+  batch.finalize();
+  expectRangeEqual(*expected, *output, kOffset);
+}
+
+TEST_F(RadixSortRunTest, spillOffsetVariablePrefixOnlyNeedsNoExternalViews) {
+  constexpr vector_size_t kRows = 7;
+  auto input = makeRows(
+      {"fixed", "text", "id"},
+      {makeVector<int64_t>(BIGINT(), {7, 1, 6, 2, 5, 3, 4}),
+       makeStringVector(
+           {std::string(96, 'g'),
+            std::string(96, 'a'),
+            std::string(96, 'f'),
+            std::string(96, 'b'),
+            std::string(96, 'e'),
+            std::string(96, 'c'),
+            std::string(96, 'd')}),
+       makeIds(kRows)});
+  // Repeating the variable key channel keeps it in the payload. Only the
+  // fixed prefix is decoded into the output.
+  const std::vector<column_index_t> keyChannels{0, 1, 1};
+  const std::vector<CompareFlags> flags(
+      keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
+  auto run = finalizedRun({*input, keyChannels, flags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  ASSERT_FALSE(run->decodesVariableKeysFromInline());
+  EXPECT_EQ(
+      run->projection().decodedKeyMask(), (std::vector<uint8_t>{1, 0, 0}));
+  EXPECT_EQ(
+      RadixSortRunOffsetOutputTest::mergeOutputScratchAllocationBytes(
+          *run, kRows),
+      0);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), nullptr);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeInline(*run), nullptr);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), nullptr);
+  auto expectedRun = finalizedRun({*input, keyChannels, flags});
+  auto expected = collect(*expectedRun, kRows);
+  auto [keys, payloads] = rowPointers(*run);
+
+  constexpr vector_size_t kOffset = 65;
+  auto output = makePreparedOutput(*run, kOffset + kRows + 1);
+  RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+  ASSERT_TRUE(batch.selectedViews().empty());
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), nullptr);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeInline(*run), nullptr);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), nullptr);
+  for (vector_size_t source = 0; source < kRows;) {
+    const auto count = std::min<vector_size_t>(3, kRows - source);
+    batch.write(
+        std::span<const char* const>(keys.data() + source, count),
+        std::span<char* const>(payloads.data() + source, count),
+        kOffset + source);
+    source += count;
+    EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), nullptr);
+    EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeInline(*run), nullptr);
+    EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), nullptr);
+  }
+  batch.finalize();
+  expectRangeEqual(*expected, *output, kOffset);
+}
+
+TEST_F(RadixSortRunTest, prepareMergeOutputPreSizesDecodeScratch) {
+  constexpr vector_size_t kRows = 7;
+  auto input = makeRows(
+      {"fixed", "text", "id"},
+      {makeVector<int64_t>(BIGINT(), {7, 1, 6, 2, 5, 3, 4}),
+       makeStringVector(
+           {std::string(96, 'g'),
+            std::string(96, 'a'),
+            std::string(96, 'f'),
+            std::string(96, 'b'),
+            std::string(96, 'e'),
+            std::string(96, 'c'),
+            std::string(96, 'd')}),
+       makeIds(kRows)});
+  const std::vector<column_index_t> keyChannels{0, 1};
+  const std::vector<CompareFlags> flags(
+      keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
+  auto run = finalizedRun({*input, keyChannels, flags});
+  ASSERT_TRUE(run->keyLayout().isVariable());
+  ASSERT_FALSE(run->decodesVariableKeysFromInline());
+  auto expectedRun = finalizedRun({*input, keyChannels, flags});
+  auto expected = collect(*expectedRun, kRows);
+  auto [keys, payloads] = rowPointers(*run);
+
+  constexpr vector_size_t kOffset = 2;
+  const auto outputSize = kOffset + kRows + 1;
+  auto output = makePreparedOutput(*run, outputSize);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), nullptr);
+  EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), nullptr);
+  RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+  ASSERT_EQ(batch.selectedViews().size(), outputSize);
+  const auto* views = RadixSortRunOffsetOutputTest::decodeViews(*run);
+  const auto* cursor = RadixSortRunOffsetOutputTest::decodeCursor(*run);
+  ASSERT_NE(views, nullptr);
+  ASSERT_NE(cursor, nullptr);
+  EXPECT_GE(views->capacity(), outputSize * sizeof(EncodedKeyView));
+  const auto preparedCursorSize = cursor->size();
+  EXPECT_GE(
+      cursor->capacity(),
+      outputSize * RadixSortRunOffsetOutputTest::mergeDecodeScratchWords(*run) *
+          sizeof(uint64_t));
+
+  const std::array<vector_size_t, 3> segments{1, 2, 4};
+  vector_size_t source = 0;
+  for (const auto count : segments) {
+    batch.write(
+        std::span<const char* const>(keys.data() + source, count),
+        std::span<char* const>(payloads.data() + source, count),
+        kOffset + source);
+    source += count;
+    EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeViews(*run), views);
+    EXPECT_EQ(RadixSortRunOffsetOutputTest::decodeCursor(*run), cursor);
+    EXPECT_EQ(cursor->size(), preparedCursorSize);
+  }
+  batch.finalize();
+  expectRangeEqual(*expected, *output, kOffset);
+}
+
+TEST_F(RadixSortRunTest, abortMergeOutputAllowsReprepare) {
+  constexpr vector_size_t kRows = 4;
+  auto input = makeRows(
+      {"key", "payload", "id"},
+      {makeVector<int64_t>(BIGINT(), {4, 1, 3, 2}),
+       makeStringVector({"four", "one", "three", "two"}),
+       makeIds(kRows)});
+  const std::vector<column_index_t> keyChannels{0};
+  const std::vector<CompareFlags> flags{
+      SortComparatorOracle::makeSortFlags(true, true)};
+  auto run = finalizedRun({*input, keyChannels, flags});
+  auto expectedRun = finalizedRun({*input, keyChannels, flags});
+  auto expected = collect(*expectedRun, kRows);
+  auto [keys, payloads] = rowPointers(*run);
+  auto output = makePreparedOutput(*run, kRows);
+
+  auto* keyOutput = output->childAt(0)->asUnchecked<FlatVector<int64_t>>();
+  auto* payloadOutput =
+      output->childAt(1)->asUnchecked<SimpleVector<StringView>>();
+  SelectivityVector allRows(kRows);
+  keyOutput->setNullCount(0);
+  payloadOutput->setNullCount(0);
+  ASSERT_TRUE(payloadOutput->computeAndSetIsAscii(allRows));
+
+  {
+    RadixSortRunOffsetOutputTest::OutputBatch batch(*run, output);
+    batch.write(
+        std::span<const char* const>(keys.data(), 1),
+        std::span<char* const>(payloads.data(), 1),
+        0);
+    RadixSortRunOffsetOutputTest::abortMergeOutput(*run);
+  }
+
+  EXPECT_FALSE(keyOutput->getNullCount().has_value());
+  EXPECT_FALSE(payloadOutput->getNullCount().has_value());
+  EXPECT_FALSE(payloadOutput->isAscii(allRows).has_value());
+  EXPECT_EQ(run->metrics().outputRows, 0);
+
+  // Aborting is idempotent, and the cached payload plan can bind again.
+  RadixSortRunOffsetOutputTest::abortMergeOutput(*run);
+  auto retryOutput = makePreparedOutput(*run, kRows);
+  RadixSortRunOffsetOutputTest::OutputBatch retry(*run, retryOutput);
+  retry.write(keys, payloads, 0);
+  retry.finalize();
+
+  expectRangeEqual(*expected, *retryOutput, 0);
+  EXPECT_EQ(run->metrics().outputRows, kRows);
+}
+
+TEST_F(RadixSortRunTest, mergeOutputOverflowCanAbortAndReprepare) {
+  constexpr vector_size_t kRows = 4;
+  auto input = makeRows(
+      {"key", "payload", "id"},
+      {makeVector<int64_t>(BIGINT(), {4, 1, 3, 2}),
+       makeVector<int64_t>(BIGINT(), {40, 10, 30, 20}),
+       makeIds(kRows)});
+  const std::vector<column_index_t> keyChannels{0};
+  const std::vector<CompareFlags> flags{
+      SortComparatorOracle::makeSortFlags(true, true)};
+  auto run = finalizedRun({*input, keyChannels, flags});
+  auto expectedRun = finalizedRun({*input, keyChannels, flags});
+  auto expected = collect(*expectedRun, kRows);
+  auto [keys, payloads] = rowPointers(*run);
+
+  auto overflowOutput = makePreparedOutput(*run, kRows);
+  auto* keyOutput =
+      overflowOutput->childAt(0)->asUnchecked<FlatVector<int64_t>>();
+  auto* payloadOutput =
+      overflowOutput->childAt(1)->asUnchecked<FlatVector<int64_t>>();
+  keyOutput->setNullCount(0);
+  payloadOutput->setNullCount(0);
+  RadixSortRunOffsetOutputTest::setOutputRows(
+      *run, std::numeric_limits<uint64_t>::max());
+
+  {
+    RadixSortRunOffsetOutputTest::OutputBatch batch(*run, overflowOutput);
+    batch.write(
+        std::span<const char* const>(keys.data(), 1),
+        std::span<char* const>(payloads.data(), 1),
+        0);
+    try {
+      batch.finalize();
+      FAIL() << "Expected merge output overflow";
+    } catch (const BoltException& e) {
+      EXPECT_EQ(e.message(), "Radix sort output rows overflow");
+    }
+    EXPECT_EQ(keyOutput->valueAt(0), 1);
+    EXPECT_EQ(payloadOutput->valueAt(0), 10);
+    RadixSortRunOffsetOutputTest::abortMergeOutput(*run);
+  }
+
+  EXPECT_FALSE(keyOutput->getNullCount().has_value());
+  EXPECT_FALSE(payloadOutput->getNullCount().has_value());
+  EXPECT_EQ(run->metrics().outputRows, std::numeric_limits<uint64_t>::max());
+
+  RadixSortRunOffsetOutputTest::setOutputRows(*run, 0);
+  auto retryOutput = makePreparedOutput(*run, kRows);
+  RadixSortRunOffsetOutputTest::OutputBatch retry(*run, retryOutput);
+  retry.write(keys, payloads, 0);
+  retry.finalize();
+
+  expectRangeEqual(*expected, *retryOutput, 0);
+  EXPECT_EQ(run->metrics().outputRows, kRows);
 }
 
 TEST_F(RadixSortRunTest, spillOffsetSkipsMaskedKeysAndAppendsNestedOutput) {

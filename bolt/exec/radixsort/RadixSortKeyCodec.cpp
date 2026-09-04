@@ -3580,6 +3580,24 @@ void prepareDecodeScratch(
   scratch.cursors = scratch.words;
 }
 
+void bindPreparedDecodeScratch(
+    vector_size_t size,
+    memory::MemoryPool* pool,
+    uint64_t wordsPerRow,
+    const BufferPtr& cursorScratch,
+    DecodeScratch& scratch) {
+  BOLT_DCHECK_NOT_NULL(pool);
+  BOLT_DCHECK_NOT_NULL(cursorScratch);
+  BOLT_DCHECK_EQ(cursorScratch->pool(), pool);
+  BOLT_DCHECK_GT(wordsPerRow, 0);
+  BOLT_DCHECK_LE(
+      static_cast<uint64_t>(size),
+      cursorScratch->size() / sizeof(uint64_t) / wordsPerRow);
+  scratch.size = size;
+  scratch.words = cursorScratch->asMutable<uint64_t>();
+  scratch.cursors = scratch.words;
+}
+
 bool isLayeredFixedColumn(const RadixSortKeyColumn& column) {
   return column.type->kind() != TypeKind::UNKNOWN &&
       fixedBodySize(*column.type).has_value();
@@ -3595,9 +3613,12 @@ uint64_t calculateDecodeScratchWordsPerRow(
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
     uint32_t firstColumn,
+    uint32_t endColumn,
     bool skipMaskedVariableColumns) {
+  BOLT_DCHECK_LT(firstColumn, endColumn);
+  BOLT_DCHECK_LE(endColumn, columns.size());
   uint64_t extraBlocks = 0;
-  for (uint32_t column = firstColumn; column < columns.size(); ++column) {
+  for (uint32_t column = firstColumn; column < endColumn; ++column) {
     const bool masked = !decodedColumns.empty() && decodedColumns[column] == 0;
     if (masked &&
         (skipMaskedVariableColumns ||
@@ -3624,7 +3645,12 @@ uint64_t decodeScratchWordsPerRow(
     std::span<const uint8_t> mayHaveNulls,
     uint32_t firstColumn) {
   return calculateDecodeScratchWordsPerRow(
-      columns, decodedColumns, mayHaveNulls, firstColumn, false);
+      columns,
+      decodedColumns,
+      mayHaveNulls,
+      firstColumn,
+      columns.size(),
+      false);
 }
 
 FOLLY_ALWAYS_INLINE void readMarker(
@@ -4539,25 +4565,22 @@ void decodeColumns(
   }
 }
 
-void decodeColumnsWithOffset(
+template <typename BindScratch>
+void decodeColumnsWithOffsetImpl(
     const std::vector<RadixSortKeyColumn>& columns,
     std::span<const EncodedKeyView> keys,
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
     vector_size_t outputOffset,
-    memory::MemoryPool* pool,
-    BufferPtr& cursorScratch,
     RowVector& output,
     std::span<const column_index_t> directKeyChannels,
-    uint64_t scratchWordsPerRow,
-    uint32_t firstColumn) {
+    uint32_t firstColumn,
+    uint32_t endColumn,
+    BindScratch&& bindScratch) {
+  BOLT_DCHECK_LT(firstColumn, endColumn);
+  BOLT_DCHECK_LE(endColumn, columns.size());
   DecodeScratch scratch;
-  prepareDecodeScratch(
-      static_cast<vector_size_t>(keys.size()),
-      pool,
-      scratchWordsPerRow,
-      cursorScratch,
-      scratch);
+  bindScratch(scratch);
   auto* cursors = scratch.cursors;
   const auto decode = [&](uint32_t column, bool first) {
     auto& child = output.childAt(directKeyChannels[column]);
@@ -4595,7 +4618,7 @@ void decodeColumnsWithOffset(
   } else {
     skipColumn<true>(columns[firstColumn], keys, cursors);
   }
-  for (uint32_t column = firstColumn + 1; column < columns.size(); ++column) {
+  for (uint32_t column = firstColumn + 1; column < endColumn; ++column) {
     if (decodedColumns[column] != 0) {
       decode(column, false);
     } else if (isLayeredFixedColumn(columns[column])) {
@@ -4604,6 +4627,73 @@ void decodeColumnsWithOffset(
       skipColumn<false>(columns[column], keys, cursors);
     }
   }
+}
+
+void decodeColumnsWithOffset(
+    const std::vector<RadixSortKeyColumn>& columns,
+    std::span<const EncodedKeyView> keys,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    vector_size_t outputOffset,
+    memory::MemoryPool* pool,
+    BufferPtr& cursorScratch,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels,
+    uint64_t scratchWordsPerRow,
+    uint32_t firstColumn) {
+  auto bindScratch = [&](DecodeScratch& scratch) {
+    prepareDecodeScratch(
+        static_cast<vector_size_t>(keys.size()),
+        pool,
+        scratchWordsPerRow,
+        cursorScratch,
+        scratch);
+  };
+  decodeColumnsWithOffsetImpl(
+      columns,
+      keys,
+      decodedColumns,
+      mayHaveNulls,
+      outputOffset,
+      output,
+      directKeyChannels,
+      firstColumn,
+      columns.size(),
+      bindScratch);
+}
+
+void decodeColumnsWithOffsetAndPreparedScratch(
+    const std::vector<RadixSortKeyColumn>& columns,
+    std::span<const EncodedKeyView> keys,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    vector_size_t outputOffset,
+    memory::MemoryPool* pool,
+    const BufferPtr& cursorScratch,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels,
+    uint64_t scratchWordsPerRow,
+    uint32_t firstColumn,
+    uint32_t endColumn) {
+  auto bindScratch = [&](DecodeScratch& scratch) {
+    bindPreparedDecodeScratch(
+        static_cast<vector_size_t>(keys.size()),
+        pool,
+        scratchWordsPerRow,
+        cursorScratch,
+        scratch);
+  };
+  decodeColumnsWithOffsetImpl(
+      columns,
+      keys,
+      decodedColumns,
+      mayHaveNulls,
+      outputOffset,
+      output,
+      directKeyChannels,
+      firstColumn,
+      endColumn,
+      bindScratch);
 }
 
 template <typename CanSkipColumn>
@@ -5107,15 +5197,18 @@ uint64_t RadixSortKeyCodec::decodeScratchWordsPerRowWithMask(
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
     uint32_t firstColumn,
+    uint32_t endColumn,
     bool skipMaskedVariableColumns) const {
   BOLT_DCHECK_EQ(decodedColumns.size(), columns_.size());
   BOLT_DCHECK_EQ(mayHaveNulls.size(), columns_.size());
   BOLT_DCHECK_LT(firstColumn, columns_.size());
+  BOLT_DCHECK_LE(endColumn, columns_.size());
   return calculateDecodeScratchWordsPerRow(
       columns_,
       decodedColumns,
       mayHaveNulls,
       firstColumn,
+      endColumn,
       skipMaskedVariableColumns);
 }
 
@@ -5147,6 +5240,39 @@ void RadixSortKeyCodec::decodeSuffixAt(
       directKeyChannels,
       scratchWordsPerRow,
       firstColumn);
+}
+
+void RadixSortKeyCodec::decodeSuffixAtWithPreparedScratch(
+    std::span<const EncodedKeyView> keys,
+    std::span<const uint8_t> decodedColumns,
+    std::span<const uint8_t> mayHaveNulls,
+    vector_size_t outputOffset,
+    memory::MemoryPool* scratchPool,
+    const BufferPtr& cursorScratch,
+    RowVector& output,
+    std::span<const column_index_t> directKeyChannels,
+    uint64_t scratchWordsPerRow,
+    uint32_t firstColumn,
+    uint32_t endColumn) const {
+  BOLT_DCHECK_NOT_NULL(scratchPool);
+  BOLT_DCHECK_NOT_NULL(cursorScratch);
+  BOLT_DCHECK_GE(outputOffset, 0);
+  BOLT_DCHECK_LE(outputOffset, output.size());
+  BOLT_DCHECK_LE(
+      keys.size(), static_cast<size_t>(output.size() - outputOffset));
+  decodeColumnsWithOffsetAndPreparedScratch(
+      columns_,
+      keys,
+      decodedColumns,
+      mayHaveNulls,
+      outputOffset,
+      scratchPool,
+      cursorScratch,
+      output,
+      directKeyChannels,
+      scratchWordsPerRow,
+      firstColumn,
+      endColumn);
 }
 
 void RadixSortKeyCodec::decodeFixedPrefix(

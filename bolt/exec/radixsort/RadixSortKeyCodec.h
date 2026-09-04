@@ -179,6 +179,7 @@ class RadixSortKeyCodec {
       std::span<const uint8_t> decodedColumns,
       std::span<const uint8_t> mayHaveNulls,
       uint32_t firstColumn,
+      uint32_t endColumn,
       bool skipMaskedVariableColumns) const;
 
   void decodeSuffixAt(
@@ -192,6 +193,19 @@ class RadixSortKeyCodec {
       std::span<const column_index_t> directKeyChannels,
       uint64_t scratchWordsPerRow,
       uint32_t firstColumn) const;
+
+  void decodeSuffixAtWithPreparedScratch(
+      std::span<const EncodedKeyView> keys,
+      std::span<const uint8_t> decodedColumns,
+      std::span<const uint8_t> mayHaveNulls,
+      vector_size_t outputOffset,
+      memory::MemoryPool* scratchPool,
+      const BufferPtr& cursorScratch,
+      RowVector& output,
+      std::span<const column_index_t> directKeyChannels,
+      uint64_t scratchWordsPerRow,
+      uint32_t firstColumn,
+      uint32_t endColumn) const;
 
   void decodePrefixAt(
       std::span<const char* const> keys,
