@@ -15,7 +15,9 @@
  */
 
 #include <vector/ComplexVector.h>
+#include <cstring>
 #include <filesystem>
+#include <limits>
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/memory/sparksql/tests/MemoryTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -23,6 +25,7 @@
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/MemoryHogOperator.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
@@ -51,6 +54,50 @@ class ShuffleMemoryTest : public ShuffleTestBase {
   // makes large splits lets the per-partition repeats deduplicate (small
   // compressed output); one that fragments into tiny splits re-stores them.
   ShuffleWriterMetrics runReclaimableHogScenario(int32_t writerType);
+
+  std::shared_ptr<CompositeRowVector> createCompositeInput(
+      const RowVectorPtr& input,
+      row::RowFormat rowFormat) {
+    ShuffleColumnarToRowConverter converter(
+        std::dynamic_pointer_cast<const RowType>(input->type()),
+        pool(),
+        rowFormat);
+    auto stats =
+        converter.getWithStats(input, std::numeric_limits<int64_t>::max());
+    std::vector<std::vector<uint8_t*>> rows(1);
+    std::vector<uint32_t> partitions(input->size(), 0);
+    std::vector<int64_t> partitionBytes(1, 0);
+    converter.convert(stats, partitions, rows, partitionBytes);
+
+    auto names = input->type()->asRow().names();
+    auto types = input->type()->asRow().children();
+    names.insert(names.begin(), "pid");
+    types.insert(types.begin(), INTEGER());
+    auto rowType = ROW(std::move(names), std::move(types));
+    auto validColumns =
+        std::make_unique<SelectivityVector>(rowType->size(), true);
+    auto children = input->children();
+    children.insert(
+        children.begin(),
+        makeFlatVector<int32_t>(input->size(), [](auto) { return 0; }));
+    auto composite = std::make_shared<CompositeRowVector>(
+        rowType,
+        input->size(),
+        pool(),
+        std::move(validColumns),
+        std::move(children));
+    composite->allocateRows(partitionBytes[0]);
+    RowInfoTracker tracker(composite.get(), 0, input->size());
+    for (auto i = 0; i < input->size(); ++i) {
+      const auto rowSize =
+          *reinterpret_cast<int32_t*>(rows[0][i]) + kSizeOfRowHeader;
+      auto* row = composite->newRow();
+      std::memcpy(row, rows[0][i], rowSize);
+      composite->store(i, row);
+      composite->advance(rowSize);
+    }
+    return composite;
+  }
 
   // Asserts the shuffle output compressed far below the raw size, i.e. the
   // writer made splits large enough for the per-partition repeats to dedup.
@@ -152,6 +199,130 @@ TEST_F(ShuffleMemoryTest, testMinMemLimit) {
   inputData.inputsPerMapper.emplace_back(20, rowVector);
 
   executeTestWithCustomInput(param, inputData);
+}
+
+TEST_F(ShuffleMemoryTest, testV2StopWritesRemainingDataDirectly) {
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 2;
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 4;
+  param.numMappers = 1;
+  param.memoryLimit = 256 * 1024 * 1024;
+
+  auto input = makeRowVector(
+      {"c0", "c1"},
+      {makeFlatVector<int32_t>({10, 20, 30, 40, 50, 60, 70, 80}),
+       makeFlatVector<std::string>(
+           {"a", "bb", "ccc", "dddd", "e", "ff", "ggg", "hhhh"})});
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.push_back({input});
+
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, inputData, &result);
+  EXPECT_EQ(result.metrics.totalBytesEvicted, 0);
+  EXPECT_GT(result.metrics.totalBytesWritten, 0);
+}
+
+TEST_F(ShuffleMemoryTest, testRowBasedStopWritesRemainingDataDirectly) {
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 3;
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 4;
+  param.numMappers = 1;
+  param.memoryLimit = 256 * 1024 * 1024;
+
+  auto input = makeRowVector(
+      {"c0"},
+      {makeFlatVector<std::string>(
+          {"row0", "row1", "row2", "row3", "row4", "row5"})});
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.push_back({input});
+
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, inputData, &result);
+  EXPECT_EQ(result.metrics.totalBytesEvicted, 0);
+  EXPECT_GT(result.metrics.totalBytesWritten, 0);
+}
+
+TEST_F(ShuffleMemoryTest, testCelebornRowBasedStopReportsEvictTime) {
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 3;
+  param.writerType = PartitionWriterType::kCeleborn;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 4;
+  param.numMappers = 1;
+  param.memoryLimit = 256 * 1024 * 1024;
+
+  auto input = makeRowVector(
+      {"c0"},
+      {makeFlatVector<std::string>(
+          {"row0", "row1", "row2", "row3", "row4", "row5"})});
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.push_back({input});
+
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, inputData, &result);
+  EXPECT_GT(result.metrics.totalBytesWritten, 0);
+  EXPECT_GT(result.metrics.totalEvictTime, 0);
+}
+
+TEST_F(ShuffleMemoryTest, testV1CompositeStopWritesRemainingDataDirectly) {
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 1;
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 4;
+  param.numMappers = 1;
+  param.memoryLimit = 256 * 1024 * 1024;
+
+  auto compositeInput = createCompositeInput(
+      makeRowVector(
+          {"c0", "c1"},
+          {makeFlatVector<int32_t>({10, 20, 30, 40, 50, 60, 70, 80}),
+           makeFlatVector<std::string>(
+               {"a", "bb", "ccc", "dddd", "e", "ff", "ggg", "hhhh"})}),
+      param.rowFormat);
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.push_back({compositeInput});
+
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, inputData, &result);
+  EXPECT_EQ(result.metrics.totalBytesEvicted, 0);
+  EXPECT_GT(result.metrics.totalBytesWritten, 0);
+  EXPECT_EQ(result.metrics.dataSize, compositeInput->totalRowSize());
+}
+
+TEST_F(ShuffleMemoryTest, testV2CompositeStopWritesRemainingDataDirectly) {
+  ShuffleTestParam param;
+  param.partitioning = "hash";
+  param.shuffleMode = 2;
+  param.writerType = PartitionWriterType::kLocal;
+  param.dataTypeGroup = DataTypeGroup::kString;
+  param.numPartitions = 4;
+  param.numMappers = 1;
+  param.memoryLimit = 256 * 1024 * 1024;
+
+  auto compositeInput = createCompositeInput(
+      makeRowVector(
+          {"c0", "c1"},
+          {makeFlatVector<int32_t>({10, 20, 30, 40, 50, 60, 70, 80}),
+           makeFlatVector<std::string>(
+               {"a", "bb", "ccc", "dddd", "e", "ff", "ggg", "hhhh"})}),
+      param.rowFormat);
+  ShuffleInputData inputData;
+  inputData.inputsPerMapper.push_back({compositeInput});
+
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, inputData, &result);
+  EXPECT_EQ(result.metrics.totalBytesEvicted, 0);
+  EXPECT_GT(result.metrics.totalBytesWritten, 0);
+  EXPECT_EQ(result.metrics.dataSize, compositeInput->totalRowSize());
 }
 
 TEST_F(ShuffleMemoryTest, testExtrameLargeRowVector) {

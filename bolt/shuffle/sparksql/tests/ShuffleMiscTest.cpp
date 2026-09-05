@@ -21,6 +21,7 @@
 #include "bolt/row/CompactRow.h"
 #include "bolt/row/dense/DenseRow.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/shuffle/sparksql/Utils.h"
 
 namespace bytedance::bolt::shuffle::sparksql::test {
 
@@ -64,6 +65,15 @@ std::vector<std::string_view> rowBodies(const std::vector<uint8_t*>& rows) {
 }
 
 } // namespace
+
+TEST_F(ShuffleMiscTest, TotalRowBytesIncludesHeadersAndUsesInt64) {
+  int32_t rowSize = std::numeric_limits<int32_t>::max();
+  std::vector<uint8_t*> rows(2, reinterpret_cast<uint8_t*>(&rowSize));
+
+  EXPECT_EQ(
+      getTotalRowBytes(rows),
+      2LL * (std::numeric_limits<int32_t>::max() + kSizeOfRowHeader));
+}
 
 // End-to-end test: RoundRobin with Adaptive mode, >=8000 partitions and >=5
 // columns should use V1 consistently on both writer and reader side.
