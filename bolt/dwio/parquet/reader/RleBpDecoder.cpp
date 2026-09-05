@@ -43,6 +43,7 @@ void RleBpDecoder::skip(uint64_t numValues) {
     uint64_t count = std::min<int>(numValues, remainingValues_);
     remainingValues_ -= count;
     numValues -= count;
+    consumedValues_ += count;
     if (!repeating_) {
       auto numBits = bitWidth_ * count + bitOffset_;
       bufferStart_ += numBits >> 3;
@@ -74,6 +75,7 @@ void RleBpDecoder::readBits(
         // The whole read is covered by a RLE of ones and 'allOnes' is
         // provided, so we can shortcut the read.
         remainingValues_ -= toRead;
+        consumedValues_ += toRead;
         *allOnes = true;
         return;
       }
@@ -94,6 +96,7 @@ void RleBpDecoder::readBits(
     numWritten += consumed;
     toRead -= consumed;
     remainingValues_ -= consumed;
+    consumedValues_ += consumed;
   }
 }
 
@@ -109,6 +112,23 @@ void RleBpDecoder::readHeader(uint64_t requestedValues) {
   try {
     indicator = folly::decodeVarint(headerRange);
   } catch (const std::exception& error) {
+    if (expectedValues_ >= 0 && bufferStart_ == bufferEnd_ &&
+        consumedValues_ < static_cast<uint64_t>(expectedValues_)) {
+      BOLT_FAIL(
+          "PARQUET_INVALID_LEVEL_COUNT role={} row_group={} column={} "
+          "page={} encoded_values={} expected_values={} missing_values={} "
+          "buffer_offset={} requested_values={} bit_width={}",
+          role_,
+          rowGroupOrdinal_,
+          columnOrdinal_,
+          pageOrdinal_,
+          consumedValues_,
+          expectedValues_,
+          static_cast<uint64_t>(expectedValues_) - consumedValues_,
+          bufferStart_ - bufferBegin_,
+          requestedValues,
+          bitWidth_);
+    }
     BOLT_FAIL(
         "Parquet RLE/bit-pack decoder header failure: role={} "
         "row_group={} column={} page={} buffer_offset={} "

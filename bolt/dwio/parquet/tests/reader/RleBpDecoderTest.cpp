@@ -80,6 +80,31 @@ TEST(RleBpDecoderDiagnosticTest, TruncatedHeaderIncludesDictionaryRole) {
   }
 }
 
+TEST(RleBpDecoderDiagnosticTest, ReportsTruncatedDefinitionLevelCount) {
+  // Two RLE runs encode 8 + 803 zero definition levels. The page header
+  // claims 827 values, so the final request exposes a 16-level shortfall.
+  const char input[] = {
+      0x10, 0x00, static_cast<char>(0xc6), 0x0c, 0x00};
+  RleBpDecoder decoder(
+      input, input + sizeof(input), 1, "definition-level", 0, 124, 1, 827);
+  std::vector<uint64_t> output(bits::nwords(827));
+
+  try {
+    decoder.readBits(827, output.data());
+    FAIL() << "Expected a short definition-level stream to fail";
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    EXPECT_NE(
+        message.find("PARQUET_INVALID_LEVEL_COUNT"), std::string::npos);
+    EXPECT_NE(message.find("role=definition-level"), std::string::npos);
+    EXPECT_NE(message.find("column=124"), std::string::npos);
+    EXPECT_NE(message.find("page=1"), std::string::npos);
+    EXPECT_NE(message.find("encoded_values=811"), std::string::npos);
+    EXPECT_NE(message.find("expected_values=827"), std::string::npos);
+    EXPECT_NE(message.find("missing_values=16"), std::string::npos);
+  }
+}
+
 template <typename T>
 class RleBpDecoderTest {
  public:

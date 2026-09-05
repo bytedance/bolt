@@ -44,7 +44,8 @@ class RleBpDecoder {
       const char* FOLLY_NONNULL role = "unspecified",
       int32_t rowGroupOrdinal = -1,
       int32_t columnOrdinal = -1,
-      int32_t pageOrdinal = -1)
+      int32_t pageOrdinal = -1,
+      int64_t expectedValues = -1)
       : bufferStart_(start),
         bufferBegin_(start),
         bufferEnd_(end),
@@ -56,7 +57,8 @@ class RleBpDecoder {
         role_(role),
         rowGroupOrdinal_(rowGroupOrdinal),
         columnOrdinal_(columnOrdinal),
-        pageOrdinal_(pageOrdinal) {}
+        pageOrdinal_(pageOrdinal),
+        expectedValues_(expectedValues) {}
 
   void skip(uint64_t numValues);
 
@@ -157,6 +159,8 @@ class RleBpDecoder {
   const int32_t rowGroupOrdinal_;
   const int32_t columnOrdinal_;
   const int32_t pageOrdinal_;
+  const int64_t expectedValues_;
+  uint64_t consumedValues_{0};
   uint64_t remainingValues_{0};
   int64_t value_;
   int8_t bitOffset_{0};

@@ -181,6 +181,7 @@ void copyRawDataPageV1RepDefs(
 
 void makeDataPageV1RepDefDecoders(
     DataPageV1RepDefs repDefs,
+    int32_t numValues,
     int32_t maxRepeat,
     int32_t maxDefine,
     int32_t rowGroupOrdinal,
@@ -205,7 +206,8 @@ void makeDataPageV1RepDefDecoders(
           "definition-level",
           rowGroupOrdinal,
           columnOrdinal,
-          pageOrdinal);
+          pageOrdinal,
+          numValues);
     }
     wideDefineDecoder = std::make_unique<::arrow::util::RleDecoder>(
         reinterpret_cast<const uint8_t*>(repDefs.defineData),
@@ -543,6 +545,7 @@ void PageReader::prepareDataPageV1(
   } else {
     makeDataPageV1RepDefDecoders(
         repDefs,
+        numRepDefsInPage_,
         maxRepeat_,
         maxDefine_,
         cryptoCtx_.rowGroupOrdinal,
@@ -626,6 +629,7 @@ bool PageReader::tryPrepareDataPageV1RepDefOnly(
   } else {
     makeDataPageV1RepDefDecoders(
         repDefs,
+        numRepDefsInPage_,
         maxRepeat_,
         maxDefine_,
         cryptoCtx_.rowGroupOrdinal,
@@ -719,7 +723,8 @@ void PageReader::prepareDataPageV2(
         "definition-level",
         cryptoCtx_.rowGroupOrdinal,
         type_ ? static_cast<int32_t>(type_->column()) : -1,
-        pageOrdinal_);
+        pageOrdinal_,
+        numRepDefsInPage_);
     wideDefineDecoder_ = std::make_unique<::arrow::util::RleDecoder>(
         reinterpret_cast<const uint8_t*>(pageData_ + repeatLength),
         defineLength,
