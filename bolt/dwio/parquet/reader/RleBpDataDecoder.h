@@ -47,8 +47,18 @@ class RleBpDataDecoder : public bytedance::bolt::parquet::RleBpDecoder {
   RleBpDataDecoder(
       const char* FOLLY_NONNULL start,
       const char* FOLLY_NONNULL end,
-      uint8_t bitWidth)
-      : super::RleBpDecoder{start, end, bitWidth} {}
+      uint8_t bitWidth,
+      int32_t rowGroupOrdinal = -1,
+      int32_t columnOrdinal = -1,
+      int32_t pageOrdinal = -1)
+      : super::RleBpDecoder{
+            start,
+            end,
+            bitWidth,
+            "dictionary-id",
+            rowGroupOrdinal,
+            columnOrdinal,
+            pageOrdinal} {}
 
   template <bool hasNulls>
   inline void skip(
@@ -93,7 +103,7 @@ class RleBpDataDecoder : public bytedance::bolt::parquet::RleBpDecoder {
 
         // We are at a non-null value on a row to visit.
         if (!remainingValues_) {
-          readHeader();
+          readHeader(1);
         }
         if (repeating_) {
           toSkip = visitor.process(value_, atEnd);
@@ -295,7 +305,7 @@ class RleBpDataDecoder : public bytedance::bolt::parquet::RleBpDecoder {
           skip<false>(remainingValues_, -1, nullptr);
         }
       }
-      readHeader();
+      readHeader(numRows - rowIndex);
     }
   }
 

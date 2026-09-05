@@ -183,6 +183,9 @@ void makeDataPageV1RepDefDecoders(
     DataPageV1RepDefs repDefs,
     int32_t maxRepeat,
     int32_t maxDefine,
+    int32_t rowGroupOrdinal,
+    int32_t columnOrdinal,
+    int32_t pageOrdinal,
     std::unique_ptr<::arrow::util::RleDecoder>& repeatDecoder,
     std::unique_ptr<RleBpDecoder>& defineDecoder,
     std::unique_ptr<::arrow::util::RleDecoder>& wideDefineDecoder) {
@@ -198,7 +201,11 @@ void makeDataPageV1RepDefDecoders(
       defineDecoder = std::make_unique<RleBpDecoder>(
           repDefs.defineData,
           repDefs.defineData + repDefs.defineSize,
-          ::arrow::bit_util::NumRequiredBits(maxDefine));
+          ::arrow::bit_util::NumRequiredBits(maxDefine),
+          "definition-level",
+          rowGroupOrdinal,
+          columnOrdinal,
+          pageOrdinal);
     }
     wideDefineDecoder = std::make_unique<::arrow::util::RleDecoder>(
         reinterpret_cast<const uint8_t*>(repDefs.defineData),
@@ -538,6 +545,9 @@ void PageReader::prepareDataPageV1(
         repDefs,
         maxRepeat_,
         maxDefine_,
+        cryptoCtx_.rowGroupOrdinal,
+        type_ ? static_cast<int32_t>(type_->column()) : -1,
+        pageOrdinal_,
         repeatDecoder_,
         defineDecoder_,
         wideDefineDecoder_);
@@ -618,6 +628,9 @@ bool PageReader::tryPrepareDataPageV1RepDefOnly(
         repDefs,
         maxRepeat_,
         maxDefine_,
+        cryptoCtx_.rowGroupOrdinal,
+        type_ ? static_cast<int32_t>(type_->column()) : -1,
+        pageOrdinal_,
         repeatDecoder_,
         defineDecoder_,
         wideDefineDecoder_);
@@ -702,7 +715,11 @@ void PageReader::prepareDataPageV2(
     defineDecoder_ = std::make_unique<RleBpDecoder>(
         pageData_ + repeatLength,
         pageData_ + repeatLength + defineLength,
-        ::arrow::bit_util::NumRequiredBits(maxDefine_));
+        ::arrow::bit_util::NumRequiredBits(maxDefine_),
+        "definition-level",
+        cryptoCtx_.rowGroupOrdinal,
+        type_ ? static_cast<int32_t>(type_->column()) : -1,
+        pageOrdinal_);
     wideDefineDecoder_ = std::make_unique<::arrow::util::RleDecoder>(
         reinterpret_cast<const uint8_t*>(pageData_ + repeatLength),
         defineLength,
@@ -1390,7 +1407,12 @@ void PageReader::makeDecoder() {
     case Encoding::RLE_DICTIONARY:
     case Encoding::PLAIN_DICTIONARY:
       dictionaryIdDecoder_ = std::make_unique<RleBpDataDecoder>(
-          pageData_ + 1, pageData_ + encodedDataSize_, pageData_[0]);
+          pageData_ + 1,
+          pageData_ + encodedDataSize_,
+          pageData_[0],
+          cryptoCtx_.rowGroupOrdinal,
+          type_ ? static_cast<int32_t>(type_->column()) : -1,
+          pageOrdinal_);
       decoderSet_ = true;
       break;
     case Encoding::PLAIN:

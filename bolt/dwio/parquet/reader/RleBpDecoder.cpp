@@ -30,13 +30,15 @@
 
 #include "bolt/dwio/parquet/reader/RleBpDecoder.h"
 
+#include <exception>
+
 #include <folly/Varint.h>
 namespace bytedance::bolt::parquet {
 
 void RleBpDecoder::skip(uint64_t numValues) {
   while (numValues > 0) {
     if (!remainingValues_) {
-      readHeader();
+      readHeader(numValues);
     }
     uint64_t count = std::min<int>(numValues, remainingValues_);
     remainingValues_ -= count;
@@ -62,7 +64,7 @@ void RleBpDecoder::readBits(
   }
   while (toRead) {
     if (!remainingValues_) {
-      readHeader();
+      readHeader(toRead);
     }
     auto consumed = std::min<int32_t>(toRead, remainingValues_);
 
@@ -95,7 +97,7 @@ void RleBpDecoder::readBits(
   }
 }
 
-void RleBpDecoder::readHeader() {
+void RleBpDecoder::readHeader(uint64_t requestedValues) {
   bitOffset_ = 0;
   auto maxVarIntLen = std::min<uint64_t>(
       (uint64_t)folly::kMaxVarintLength64, bufferEnd_ - bufferStart_);
@@ -103,7 +105,26 @@ void RleBpDecoder::readHeader() {
       reinterpret_cast<const unsigned char*>(bufferStart_),
       reinterpret_cast<const unsigned char*>(bufferStart_ + maxVarIntLen));
   // decodeVarint() would advance headerRange's begin pointer.
-  auto indicator = folly::decodeVarint(headerRange);
+  uint64_t indicator;
+  try {
+    indicator = folly::decodeVarint(headerRange);
+  } catch (const std::exception& error) {
+    BOLT_FAIL(
+        "Parquet RLE/bit-pack decoder header failure: role={} "
+        "row_group={} column={} page={} buffer_offset={} "
+        "buffer_remaining={} requested_values={} remaining_run_values={} "
+        "bit_width={} cause={}",
+        role_,
+        rowGroupOrdinal_,
+        columnOrdinal_,
+        pageOrdinal_,
+        bufferStart_ - bufferBegin_,
+        bufferEnd_ - bufferStart_,
+        requestedValues,
+        remainingValues_,
+        bitWidth_,
+        error.what());
+  }
   // Advance bufferStart_ to the position after where the varint is read
   bufferStart_ = reinterpret_cast<const char*>(headerRange.begin());
 

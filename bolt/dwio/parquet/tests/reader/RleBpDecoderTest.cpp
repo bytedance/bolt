@@ -29,6 +29,7 @@
  */
 
 #include "bolt/dwio/common/BitPackDecoder.h"
+#include "bolt/dwio/parquet/reader/RleBpDecoder.h"
 
 #include <arrow/util/rle_encoding.h> // @manual
 #include <gtest/gtest.h>
@@ -36,6 +37,48 @@
 #include <random>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::dwio::common;
+using bytedance::bolt::parquet::RleBpDecoder;
+
+TEST(RleBpDecoderDiagnosticTest, EmptyHeaderIncludesRoleAndBounds) {
+  const char input[] = {0};
+  RleBpDecoder decoder(
+      input, input, 1, "definition-level", 7, 11, 13);
+  uint64_t output = 0;
+
+  try {
+    decoder.readBits(1, &output);
+    FAIL() << "Expected an empty RLE header to fail";
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("role=definition-level"), std::string::npos);
+    EXPECT_NE(message.find("row_group=7"), std::string::npos);
+    EXPECT_NE(message.find("column=11"), std::string::npos);
+    EXPECT_NE(message.find("page=13"), std::string::npos);
+    EXPECT_NE(message.find("buffer_offset=0"), std::string::npos);
+    EXPECT_NE(message.find("buffer_remaining=0"), std::string::npos);
+    EXPECT_NE(message.find("requested_values=1"), std::string::npos);
+    EXPECT_NE(
+        message.find("Invalid varint value: too few bytes"),
+        std::string::npos);
+  }
+}
+
+TEST(RleBpDecoderDiagnosticTest, TruncatedHeaderIncludesDictionaryRole) {
+  const char input[] = {static_cast<char>(0x80)};
+  RleBpDecoder decoder(input, input + 1, 1, "dictionary-id", 2, 3, 5);
+  uint8_t output = 0;
+  auto* outputPtr = &output;
+
+  try {
+    decoder.next(outputPtr, 4);
+    FAIL() << "Expected a truncated RLE header to fail";
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("role=dictionary-id"), std::string::npos);
+    EXPECT_NE(message.find("buffer_remaining=1"), std::string::npos);
+    EXPECT_NE(message.find("requested_values=4"), std::string::npos);
+  }
+}
 
 template <typename T>
 class RleBpDecoderTest {

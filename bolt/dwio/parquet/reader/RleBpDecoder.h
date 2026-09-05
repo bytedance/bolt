@@ -40,13 +40,23 @@ class RleBpDecoder {
   RleBpDecoder(
       const char* FOLLY_NONNULL start,
       const char* FOLLY_NONNULL end,
-      uint8_t bitWidth)
+      uint8_t bitWidth,
+      const char* FOLLY_NONNULL role = "unspecified",
+      int32_t rowGroupOrdinal = -1,
+      int32_t columnOrdinal = -1,
+      int32_t pageOrdinal = -1)
       : bufferStart_(start),
+        bufferBegin_(start),
         bufferEnd_(end),
         bitWidth_(bitWidth),
         byteWidth_(bits::roundUp(bitWidth, 8) / 8),
         bitMask_(bits::lowMask(bitWidth)),
-        lastSafeWord_(end - sizeof(uint64_t)) {}
+        lastSafeWord_(
+            end - start >= sizeof(uint64_t) ? end - sizeof(uint64_t) : start),
+        role_(role),
+        rowGroupOrdinal_(rowGroupOrdinal),
+        columnOrdinal_(columnOrdinal),
+        pageOrdinal_(pageOrdinal) {}
 
   void skip(uint64_t numValues);
 
@@ -63,7 +73,7 @@ class RleBpDecoder {
         numValues -= numValuesToRead;
       } else {
         if (remainingValues_ == 0) {
-          readHeader();
+          readHeader(numValues);
         }
 
         auto numValuesToRead = std::min<uint32_t>(numValues, remainingValues_);
@@ -117,7 +127,7 @@ class RleBpDecoder {
       bool* FOLLY_NULLABLE allOnes = nullptr);
 
  protected:
-  void readHeader();
+  void readHeader(uint64_t requestedValues);
 
   template <typename T>
   inline void copyRemainingUnpackedValues(
@@ -137,11 +147,16 @@ class RleBpDecoder {
   }
 
   const char* FOLLY_NULLABLE bufferStart_;
+  const char* FOLLY_NULLABLE const bufferBegin_;
   const char* FOLLY_NULLABLE bufferEnd_;
   const int8_t bitWidth_;
   const int8_t byteWidth_;
   const uint64_t bitMask_;
   const char* FOLLY_NONNULL const lastSafeWord_;
+  const char* FOLLY_NONNULL const role_;
+  const int32_t rowGroupOrdinal_;
+  const int32_t columnOrdinal_;
+  const int32_t pageOrdinal_;
   uint64_t remainingValues_{0};
   int64_t value_;
   int8_t bitOffset_{0};
