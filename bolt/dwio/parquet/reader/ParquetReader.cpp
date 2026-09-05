@@ -1059,7 +1059,10 @@ TypePtr ReaderBase::convertType(
   // requested type (caller is only inferring the file's declared schema).
   auto checkRequested =
       [&](const std::function<bool(const TypePtr&)>& isCompatibleFunc) {
-        if (requestedType == nullptr) {
+        // An empty file cannot supply a value that violates the requested
+        // schema. Keep deriving its physical schema, but don't reject a
+        // requested type mismatch before the reader can return zero rows.
+        if (requestedType == nullptr || fileMetaData_->num_rows == 0) {
           return;
         }
         const bool strictMatch = isCompatibleFunc(requestedType);
