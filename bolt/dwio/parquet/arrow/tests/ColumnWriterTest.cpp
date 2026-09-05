@@ -597,6 +597,25 @@ TYPED_TEST(TestPrimitiveWriter, RequiredDictionary) {
   this->TestRequiredWithEncoding(Encoding::PLAIN_DICTIONARY);
 }
 
+TEST_F(TestByteArrayValuesWriter, DictionaryArraySizeCountsDistinctValues) {
+  ::arrow::StringBuilder builder;
+  ASSERT_OK(builder.Append("a"));
+  ASSERT_OK(builder.Append("a"));
+  ASSERT_OK(builder.Append("bb"));
+  ASSERT_OK_AND_ASSIGN(auto dictionary, builder.Finish());
+
+  auto encoder = MakeTypedEncoder<ByteArrayType>(
+      Encoding::PLAIN, /*use_dictionary=*/true, this->descr_);
+  auto* dictionaryEncoder =
+      dynamic_cast<DictEncoder<ByteArrayType>*>(encoder.get());
+  ASSERT_NE(nullptr, dictionaryEncoder);
+
+  dictionaryEncoder->PutDictionary(*dictionary);
+
+  EXPECT_EQ(2, dictionaryEncoder->num_entries());
+  EXPECT_EQ(2 * sizeof(uint32_t) + 3, dictionaryEncoder->dict_encoded_size());
+}
+
 /*
 TYPED_TEST(TestPrimitiveWriter, RequiredRLE) {
   this->TestRequiredWithEncoding(Encoding::RLE);
