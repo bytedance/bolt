@@ -151,6 +151,24 @@ TEST(DecimalTest, decimalToString) {
   ASSERT_EQ(maxLongDecimal.length(), 38);
 }
 
+TEST(DecimalTest, toDecimalValueErrorMessage) {
+  const std::vector<std::pair<std::string, std::string>> testCases = {
+      {"1{", "Value is not a number. Chars '{' are invalid."},
+      {"1{}", "Value is not a number. Chars '{}' are invalid."},
+      {"1{0x}", "Value is not a number. Chars '{0x}' are invalid."},
+      {"1{{", "Value is not a number. Chars '{{' are invalid."},
+  };
+
+  for (const auto& [input, expectedMessage] : testCases) {
+    SCOPED_TRACE(input);
+    int64_t decimalValue{0};
+    const auto status = DecimalUtil::toDecimalValue<int64_t>(
+        StringView(input), 18, 2, decimalValue);
+    EXPECT_EQ(status.code(), StatusCode::kUserError);
+    EXPECT_EQ(status.message(), expectedMessage);
+  }
+}
+
 TEST(DecimalTest, unsignedDecimalToString) {
   std::string result(32, '\0');
   const auto size =
