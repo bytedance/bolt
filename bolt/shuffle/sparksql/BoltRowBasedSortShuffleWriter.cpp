@@ -212,9 +212,28 @@ arrow::Status BoltRowBasedSortShuffleWriter::reclaimFixedSize(
 
 arrow::Status BoltRowBasedSortShuffleWriter::stop() {
   setSplitState(SplitState::kStop);
-  RETURN_NOT_OK(tryEvict());
   {
-    RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+    const auto isCompositeVector = vectorLayout_ == RowVectorLayout::kComposite;
+    RETURN_NOT_OK(partitionWriter_->stop(
+        &metrics_,
+        [this, isCompositeVector](uint32_t partitionId) -> arrow::Status {
+          if (partitionId >= sortedRows_.size()) {
+            return arrow::Status::OK();
+          }
+          auto& rows = sortedRows_[partitionId];
+          const auto rawSize = isCompositeVector ? getTotalRowBytes(rows)
+                                                 : partitionBytes_[partitionId];
+          RETURN_NOT_OK(partitionWriter_->writeFinal(
+              partitionId, rows, rawSize, isCompositeVector));
+          partitionBytes_[partitionId] = 0;
+          return arrow::Status::OK();
+        }));
+    if (vectorLayout_ == RowVectorLayout::kColumnar) {
+      rowConverter_->reset();
+    } else if (compositeRowVectorConverter_) {
+      compositeRowVectorConverter_->reset();
+    }
+    boltPool_->release();
     metrics_.useRowBased = 1;
     combinedVectorNumber_ = combineVectorTimes_ > 0
         ? (combinedVectorNumber_ / combineVectorTimes_)

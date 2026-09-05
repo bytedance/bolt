@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <functional>
 #include <iostream>
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/Payload.h"
@@ -45,6 +46,8 @@ struct Evict {
 
 class PartitionWriter {
  public:
+  using StopCallback = std::function<arrow::Status(uint32_t)>;
+
   PartitionWriter(
       uint32_t numPartitions,
       PartitionWriterOptions options,
@@ -70,6 +73,15 @@ class PartitionWriter {
   virtual arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) = 0;
 
   virtual arrow::Status stop(ShuffleWriterMetrics* metrics) = 0;
+
+  virtual arrow::Status stop(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback) {
+    for (auto partitionId = 0; partitionId < numPartitions_; ++partitionId) {
+      RETURN_NOT_OK(callback(partitionId));
+    }
+    return stop(metrics);
+  }
 
   /// Evict buffers for `partitionId` partition.
   virtual arrow::Status evict(
@@ -103,12 +115,36 @@ class PartitionWriter {
     return false;
   }
 
+  virtual arrow::Status writeFinal(
+      uint32_t partitionId,
+      std::unique_ptr<InMemoryPayload> inMemoryPayload,
+      bool hasComplexType) {
+    return evict(
+        partitionId,
+        std::move(inMemoryPayload),
+        Evict::kCacheNoMerge,
+        false,
+        hasComplexType);
+  }
+
   // for BoltRowBasedSortShuffleWriter
   virtual arrow::Status evict(
       std::vector<std::vector<uint8_t*>>& rows,
       std::vector<int64_t>& partitionBytes,
       const bool isCompositeVector) {
     return arrow::Status::OK();
+  }
+
+  virtual arrow::Status writeFinal(
+      uint32_t partitionId,
+      std::vector<uint8_t*>& rows,
+      int64_t rawSize,
+      bool isCompositeVector) {
+    std::vector<std::vector<uint8_t*>> partitionRows(numPartitions_);
+    partitionRows[partitionId].swap(rows);
+    std::vector<int64_t> partitionBytes(numPartitions_, 0);
+    partitionBytes[partitionId] = rawSize;
+    return evict(partitionRows, partitionBytes, isCompositeVector);
   }
   FLATTEN void setRowFormat(bool isRow) {
     isRowFormat_ = isRow;

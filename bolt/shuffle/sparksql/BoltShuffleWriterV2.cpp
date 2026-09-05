@@ -265,12 +265,32 @@ arrow::Status BoltShuffleWriterV2::stop() {
     }
     setSplitState(SplitState::kStop);
     shrinkBufferPoolMemory();
-    ARROW_ASSIGN_OR_RAISE(auto ret, sequentialEvictAllPartitions());
-    (void)ret;
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
       setSplitState(SplitState::kStop);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      RETURN_NOT_OK(partitionWriter_->stop(
+          &metrics_, [this](uint32_t partitionId) -> arrow::Status {
+            auto numRows = partitionBufferBase_[partitionId];
+            if (numRows == 0) {
+              return arrow::Status::OK();
+            }
+            bool mayUseRowVectorMode = true;
+            ARROW_ASSIGN_OR_RAISE(
+                auto buffers,
+                assembleBuffersGeneral(partitionId, mayUseRowVectorMode));
+            if (buffers.empty()) {
+              return arrow::Status::OK();
+            }
+            auto payload = std::make_unique<InMemoryPayload>(
+                numRows,
+                mayUseRowVectorMode ? &isValidityBufferRowVectorMode_
+                                    : &isValidityBuffer_,
+                std::move(buffers),
+                mayUseRowVectorMode);
+            RETURN_NOT_OK(partitionWriter_->writeFinal(
+                partitionId, std::move(payload), hasComplexType_));
+            return resetValidityBuffer(partitionId);
+          }));
       metrics_.rowVectorModeCompress = rowVectorModeCompress_;
       releaseBufferPoolMemory();
     }
@@ -278,10 +298,19 @@ arrow::Status BoltShuffleWriterV2::stop() {
     stat();
   } else {
     setSplitState(SplitState::kStop);
-    RETURN_NOT_OK(tryEvict());
+    partitionWriter_->setRowFormat(true);
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      RETURN_NOT_OK(partitionWriter_->stop(
+          &metrics_, [this](uint32_t partitionId) -> arrow::Status {
+            if (partitionId >= sortedRows_.size()) {
+              return arrow::Status::OK();
+            }
+            auto& rows = sortedRows_[partitionId];
+            return partitionWriter_->writeFinal(
+                partitionId, rows, getTotalRowBytes(rows), true);
+          }));
+      compositeRowVectorConverter_->reset();
     }
   }
   metrics_.useV2 = 1;

@@ -100,7 +100,8 @@ class ShuffleTestBase : public bytedance::bolt::exec::test::OperatorTestBase {
   // writer with custom input data and then shuffle reader and verify output
   void executeTestWithCustomInput(
       const ShuffleTestParam& param,
-      ShuffleInputData& inputData);
+      ShuffleInputData& inputData,
+      ShuffleRunResult* resultOut = nullptr);
 
   // execute test with param, generating input data internally
   void executeTest(const ShuffleTestParam& param);
