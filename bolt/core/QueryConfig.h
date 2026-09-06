@@ -549,6 +549,15 @@ class QueryConfig {
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
 
+  /// If true, base64() chunks its output into 76-character lines separated by
+  /// CRLF; if false, it returns a single unchunked string. Mirrors
+  /// spark.sql.chunkBase64String.enabled (added in Spark 3.5.2, default true
+  /// there). Spark <= 3.2 always returns unchunked output and Spark
+  /// 3.3.0-3.5.1 always chunks. Bolt defaults to false, matching
+  /// Spark <= 3.2.
+  static constexpr const char* kSparkChunkBase64StringEnabled =
+      "spark.chunk_base64_string_enabled";
+
   static constexpr const char* kThrowExceptionWhenEncounterBadJson =
       "throw_exception_when_encounter_bad_json";
 
@@ -1778,6 +1787,10 @@ class QueryConfig {
 
   bool sparkLegacyStatisticalAggregate() const {
     return get<bool>(kSparkLegacyStatisticalAggregate, false);
+  }
+
+  bool sparkChunkBase64StringEnabled() const {
+    return get<bool>(kSparkChunkBase64StringEnabled, false);
   }
 
   /// Test-only method to override the current query config properties.
