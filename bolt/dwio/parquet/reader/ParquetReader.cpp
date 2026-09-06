@@ -41,6 +41,7 @@
 #include "bolt/dwio/parquet/reader/ParquetColumnReader.h"
 #include "bolt/dwio/parquet/reader/ParquetFooterCache.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/dwio/parquet/reader/ParquetReaderCast.h"
 #include "bolt/dwio/parquet/reader/SchemaHelper.h"
 #include "bolt/dwio/parquet/reader/StructColumnReader.h"
 #include "bolt/dwio/parquet/thrift/FmtParquetFormatters.h"
@@ -1174,8 +1175,10 @@ TypePtr ReaderBase::convertType(
         BOLT_CHECK(
             schemaElement.__isset.precision && schemaElement.__isset.scale,
             "DECIMAL requires a length and scale specifier!");
-        // Decimal widening: scale must not shrink and precision must grow
-        // at least as fast as scale
+        // Decimal reader casts currently support precision widening at a
+        // fixed scale. A scale change also requires rescaling decoded values
+        // and coordinating filter pushdown, so reject it until that path is
+        // implemented end to end.
         const auto filePrecision = schemaElement.precision;
         const auto fileScale = schemaElement.scale;
         checkRequested([&](const TypePtr& t) {
@@ -1183,8 +1186,7 @@ TypePtr ReaderBase::convertType(
             return false;
           }
           auto [precision, scale] = getDecimalPrecisionScale(*t);
-          return scale >= fileScale &&
-              (precision - filePrecision) >= (scale - fileScale);
+          return scale == fileScale && precision >= filePrecision;
         });
         return DECIMAL(schemaElement.precision, schemaElement.scale);
       }
@@ -1582,6 +1584,12 @@ class ParquetRowReader::Impl {
         currentRowInGroup_(0),
         schemaHelper_(readerBase_->thriftFileMetaData().schema),
         maxBatchBytes_(options.getMaxBatchBytes()) {
+    if (auto selector = options_.getSelector()) {
+      requestedType_ = selector->getSchema();
+    } else {
+      requestedType_ = readerBase_->schema();
+    }
+
     // Validate the requested type is compatible with what's in the file
     std::function<std::string()> createExceptionContext = [&]() {
       std::string exceptionMessageContext = fmt::format(
@@ -1594,6 +1602,8 @@ class ParquetRowReader::Impl {
           requestedType_->toString());
       return exceptionMessageContext;
     };
+
+    validateReaderCastFilter();
 
     if (rowGroups_.empty()) {
       return; // TODO
@@ -1611,12 +1621,6 @@ class ParquetRowReader::Impl {
         options_.getDecodeRepDefPageCount(),
         options_.getParquetRepDefMemoryLimit(),
         options_.parquetReaderImplicitCastMask());
-
-    if (auto selector = options_.getSelector()) {
-      requestedType_ = selector->getSchema();
-    } else {
-      requestedType_ = readerBase_->schema();
-    }
 
     auto requestedTypeWithId = ReaderBase::createTypeWithId(
         dwio::common::TypeWithId::create(requestedType_),
@@ -1961,6 +1965,7 @@ class ParquetRowReader::Impl {
   }
 
   void resetFilterCaches() {
+    validateReaderCastFilter();
     columnReader_->resetFilterCaches();
   }
 
@@ -1969,6 +1974,14 @@ class ParquetRowReader::Impl {
   }
 
  private:
+  void validateReaderCastFilter() const {
+    if (!options_.getScanSpec()) {
+      return;
+    }
+    parquet::validateReaderCastFilter(
+        readerBase_->schema(), requestedType_, *options_.getScanSpec(), "");
+  }
+
   // Walk the ScanSpec children against schemaWithId() and collect the
   // matched top-level Parquet subtrees. We deliberately do NOT wrap them
   // in a synthetic TypeWithId root: the TypeWithId constructor rewrites

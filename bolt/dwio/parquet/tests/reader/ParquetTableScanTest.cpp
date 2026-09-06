@@ -42,6 +42,7 @@
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
 #include "bolt/dwio/parquet/RegisterParquetReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/dwio/parquet/reader/ParquetTypeWithId.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
 #include "bolt/exec/PlanNodeStats.h"
 #include "bolt/exec/tests/utils/AssertQueryBuilder.h"
@@ -1871,9 +1872,13 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"boolean_to_varchar",             BOOLEAN(),       VARCHAR(),          true},
 
     // ---- Reject: DECIMAL widening violations ----
+    // Scale-changing casts used to pass schema validation without rescaling
+    // decoded values. Reject them until rescaling is supported end to end.
     {"decimal_scale_shrink",           DECIMAL(10, 2),  DECIMAL(10, 0),     true},
     {"decimal_scale_grew_prec_same",   DECIMAL(10, 2),  DECIMAL(10, 5),     true},
     {"decimal_both_shrink",            DECIMAL(38, 18), DECIMAL(10, 2),     true},
+    {"decimal_widen_scale",            DECIMAL(10, 2),  DECIMAL(20, 5),     true},
+    {"decimal_widen_scale_to_long",    DECIMAL(10, 2),  DECIMAL(28, 5),     true},
 
     // ---- Reject: DECIMAL cross-family ----
     {"decimal_to_bigint",              DECIMAL(10, 2),  BIGINT(),           true},
@@ -1897,10 +1902,12 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
     {"real_to_double",      REAL(),    DOUBLE(),   false},
 
     // ---- Accept: DECIMAL widening ----
+    // Same-scale short-to-long widening only changes the native storage width;
+    // the reader upcasts raw values from int64_t to int128_t without changing
+    // their decimal representation.
     {"decimal_identity",              DECIMAL(10, 2),  DECIMAL(10, 2),     false},
     {"decimal_widen_precision_only",  DECIMAL(10, 2),  DECIMAL(15, 2),     false},
-    {"decimal_widen_both",            DECIMAL(10, 2),  DECIMAL(20, 5),     false},
-    {"decimal_widen_to_long_decimal", DECIMAL(10, 2),  DECIMAL(28, 5),     false},
+    {"decimal_short_to_long_same_scale", DECIMAL(13, 10), DECIMAL(28, 10), false},
 
     // ---- Accept: column-reader auto-cast int family -> VARCHAR ----
     //  (IntegerColumnReader::makeCastExpr; the cast path compiles in
@@ -2234,6 +2241,89 @@ TEST_F(ParquetTableScanTest, convertTypePolicyValueChecks) {
     auto expected =
         makeRowVector({"c0"}, {makeFlatVector<StringView>({"1", "2", "3"})});
     EXPECT_TRUE(assertEqualResults({expected}, {result}));
+  }
+
+  // Verify widening DECIMAL(13, 10), stored as FIXED_LEN_BYTE_ARRAY(6), to
+  // DECIMAL(28, 10).
+  {
+    constexpr vector_size_t kSize = 1024;
+    constexpr vector_size_t kNumNulls = 268;
+    std::vector<std::optional<int64_t>> shortValues;
+    shortValues.reserve(kSize);
+    for (vector_size_t row = 0; row < kSize; ++row) {
+      if (row < kNumNulls) {
+        shortValues.push_back(std::nullopt);
+      } else {
+        shortValues.push_back(
+            (static_cast<int64_t>(row) - kSize / 2) * 1'000'000'000LL +
+            123'456'789LL);
+      }
+    }
+    shortValues[kNumNulls] = 9'999'999'999'999LL;
+    shortValues[kNumNulls + 1] = -9'999'999'999'999LL;
+
+    const auto fileType = DECIMAL(13, 10);
+    auto data = makeRowVector(
+        {"c0"}, {makeNullableFlatVector<int64_t>(shortValues, fileType)});
+    auto file = exec::test::TempFilePath::create();
+    WriterOptions writerOptions;
+    writerOptions.storeDecimalAsInteger = false;
+    writeToParquetFile(file->getPath(), {data}, writerOptions);
+
+    dwio::common::ReaderOptions readerOptions{pool()};
+    auto reader = std::make_unique<ParquetReader>(
+        std::make_unique<dwio::common::BufferedInput>(
+            std::make_shared<LocalReadFile>(file->getPath()),
+            readerOptions.getMemoryPool()),
+        readerOptions);
+    const auto parquetType = std::dynamic_pointer_cast<const ParquetTypeWithId>(
+        reader->typeWithId()->childAt(0));
+    ASSERT_NE(parquetType, nullptr);
+    EXPECT_EQ(
+        parquetType->parquetType_, thrift::Type::type::FIXED_LEN_BYTE_ARRAY);
+    EXPECT_EQ(parquetType->precision_, 13);
+    EXPECT_EQ(parquetType->scale_, 10);
+    EXPECT_EQ(parquetType->typeLength_, 6);
+    auto readAs = [&](const TypePtr& requestedType,
+                      const std::vector<std::string>& filters = {}) {
+      auto declared = ROW({"c0"}, {requestedType});
+      auto plan = PlanBuilder(pool())
+                      .tableScan(declared, filters, "", declared)
+                      .planNode();
+      return AssertQueryBuilder(plan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool());
+    };
+
+    std::vector<std::optional<int128_t>> sameScaleValues;
+    sameScaleValues.reserve(kSize);
+    for (const auto& value : shortValues) {
+      if (!value.has_value()) {
+        sameScaleValues.push_back(std::nullopt);
+      } else {
+        sameScaleValues.push_back(static_cast<int128_t>(*value));
+      }
+    }
+
+    auto sameScaleExpected = makeRowVector(
+        {"c0"},
+        {makeNullableFlatVector<int128_t>(sameScaleValues, DECIMAL(28, 10))});
+    EXPECT_TRUE(
+        assertEqualResults({sameScaleExpected}, {readAs(DECIMAL(28, 10))}));
+
+    BOLT_ASSERT_THROW(readAs(DECIMAL(28, 12)), kParquetTypeMappingErrorPrefix);
+
+    BOLT_ASSERT_THROW(
+        readAs(DECIMAL(28, 10), {"c0 >= cast(0 as DECIMAL(28, 10))"}),
+        "Cannot apply HUGEINT filter to physical BIGINT Parquet column c0");
+
+    auto nullExpected = makeRowVector(
+        {"c0"},
+        {makeNullableFlatVector<int128_t>(
+            std::vector<std::optional<int128_t>>(kNumNulls, std::nullopt),
+            DECIMAL(28, 10))});
+    EXPECT_TRUE(assertEqualResults(
+        {nullExpected}, {readAs(DECIMAL(28, 10), {"c0 IS NULL"})}));
   }
 }
 
