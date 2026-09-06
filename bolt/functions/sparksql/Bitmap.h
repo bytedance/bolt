@@ -22,6 +22,21 @@
 
 namespace bytedance::bolt::functions::sparksql {
 
+/// Spark-compatible bitmap_bucket_number(BIGINT) -> BIGINT.
+/// Matches Spark 3.5 BitmapExpressionUtils.bitmapBucketNumber.
+template <typename T>
+struct BitmapBucketNumberFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void call(int64_t& result, int64_t value) {
+    if (value > 0) {
+      result = 1 + (value - 1) / kBitmapNumBits;
+      return;
+    }
+    result = value / kBitmapNumBits;
+  }
+};
+
 /// Spark-compatible bitmap_count(BINARY) -> BIGINT.
 /// Matches Spark 3.5 BitmapExpressionUtils.bitmapCount.
 template <typename T>
