@@ -368,6 +368,7 @@ void CellShuffleWriter::spillRunNow() {
   if (spilling_ || !initialized_ || cells_->totalBytes() == 0) {
     return;
   }
+  reclaimRefusals_ = 0;
   spilling_ = true;
   output_->spillRun(windowInput());
   cells_->releaseAll();
@@ -411,7 +412,10 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   }
   const auto& cellOpts = options_.cellOptions;
   if (allocator_->allocatedBytes() < 2 * cellOpts.chunkBytes) {
-    // Not enough to be worth a spill; avoids reclaim churn.
+    // Below two chunks the return could never be worth a run. Still hand
+    // back what is free: empty chunks and reservation slack.
+    *actual = allocator_->shrink();
+    boltPool_->release();
     return arrow::Status::OK();
   }
   // Run-density guard. A reclaim-driven run drains every (partition,
@@ -421,15 +425,22 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // arbitration with little resident data would shred the spill file
   // into near-empty runs whose fixed costs dwarf the memory returned.
   // The floor scales with the partition count (about 256 bytes per
-  // partition keeps the header share near ten percent); below it the
-  // arbitrator is told there is nothing worth reclaiming here. The
-  // writer's own growth path (a failed reserve before a chunk grab)
-  // stays unguarded: that one must spill to make progress. The pinned
-  // near-empty chains this declines to return stay bounded by the chain
-  // floor itself, and fill into a dense run as data arrives.
+  // partition keeps the header share near ten percent). The guard is
+  // self-limiting in time - a writer ingests continuously, so the floor
+  // is crossed within fractions of a second of active splitting - and
+  // an escalation valve keeps it from ever starving a genuinely stuck
+  // requester: a refusal still returns free chunks and reservation
+  // slack, and sustained pressure (a third consecutive ask while still
+  // below the floor) is honored regardless, one fragmented run being a
+  // far lesser evil than an OOM. The writer's own growth path (a failed
+  // reserve before a chunk grab) stays unguarded: that one must spill
+  // to make progress.
   const int64_t minRunBytes = std::max<int64_t>(
       2 * cellOpts.chunkBytes, int64_t{256} * numPartitions_);
-  if (static_cast<int64_t>(cells_->totalBytes()) < minRunBytes) {
+  if (static_cast<int64_t>(cells_->totalBytes()) < minRunBytes &&
+      ++reclaimRefusals_ <= kMaxReclaimRefusals) {
+    *actual = allocator_->shrink();
+    boltPool_->release();
     return arrow::Status::OK();
   }
   spillRunNow();
