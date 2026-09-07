@@ -367,6 +367,33 @@ TEST_F(Utf8UtilsTest, skipsConstantVectors) {
   EXPECT_EQ(invalid, decodedStringAt(constant, 0));
 }
 
+TEST_F(Utf8UtilsTest, replacesLazyVarchars) {
+  const std::string invalid = std::string(32, 'v') + "\xD5";
+  const std::string expected = std::string(32, 'v') + "\xEF\xBF\xBD";
+  auto values =
+      makeNullableFlatVector<std::string>({invalid, "valid", std::nullopt});
+  auto lazy = std::make_shared<LazyVector>(
+      pool(),
+      VARCHAR(),
+      values->size(),
+      std::make_unique<SimpleVectorLoader>([&](RowSet) { return values; }));
+  auto input = makeRowVector({lazy});
+
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+
+  ASSERT_NE(input.get(), output.get());
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
+  EXPECT_EQ("valid", decodedStringAt(output->childAt(0), 1));
+  EXPECT_TRUE(output->childAt(0)->isNullAt(2));
+  EXPECT_EQ(lazy.get(), input->childAt(0).get());
+  EXPECT_EQ(invalid, decodedStringAt(values, 0));
+  input.reset();
+  lazy.reset();
+  values.reset();
+  output->validate({});
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
+}
+
 TEST_F(Utf8UtilsTest, replacesOnlyTopLevelVarcharsAcrossEncodings) {
   const std::string invalid{"\xD5", 1};
   const std::string valid(64, 'v');

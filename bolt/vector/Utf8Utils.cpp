@@ -1038,10 +1038,13 @@ RowVectorPtr replaceInvalidUtf8InTopLevelVarchars(
   const uint64_t* outerRaw = outerNulls ? outerNulls->as<uint64_t>() : nullptr;
 
   for (auto c = 0; c < input->childrenSize(); ++c) {
-    const auto& child = input->childAt(c);
-    if (!child || child->typeKind() != TypeKind::VARCHAR) {
+    const auto& source = input->childAt(c);
+    if (!source || source->typeKind() != TypeKind::VARCHAR) {
       continue;
     }
+    // LazyVector is not a SimpleVector; inspect its loaded values instead.
+    const auto& child =
+        source->isLazy() ? BaseVector::loadedVectorShared(source) : source;
     if (child->encoding() == VectorEncoding::Simple::CONSTANT) {
       continue;
     }
