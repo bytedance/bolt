@@ -69,6 +69,11 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
   declareFunction(
       module, "jit_StringViewCompareWrapper", i32Ty, {i8PtrTy, i8PtrTy});
   declareFunction(
+      module,
+      "jit_StringViewCompareWrapperContiguous",
+      i32Ty,
+      {i8PtrTy, i8PtrTy});
+  declareFunction(
       module, "jit_RowBasedStringViewCompare", i32Ty, {i8PtrTy, i8PtrTy});
   declareFunction(
       module,
@@ -83,6 +88,8 @@ void ensureBuiltinDeclarations(llvm::Module& module) {
 
   declareFunction(
       module, "jit_StringViewRowEqVectors", i8Ty, {i8PtrTy, i8PtrTy});
+  declareFunction(
+      module, "jit_StringViewRowEqVectorsContiguous", i8Ty, {i8PtrTy, i8PtrTy});
   declareFunction(module, "jit_GetDecodedValueBool", i8Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_GetDecodedValueI8", i8Ty, {i8PtrTy, i32Ty});
   declareFunction(module, "jit_GetDecodedValueI16", i16Ty, {i8PtrTy, i32Ty});
@@ -159,8 +166,13 @@ std::string RowContainerCodeGenerator::GetCmpFuncName() {
       break;
   }
   fn.append(hasNullKeys ? "N" : "");
+  bool hasStringView = false;
   for (auto i = 0; i < keysTypes.size(); ++i) {
     fn.append(keysTypes[i]->jitName());
+    if (keysTypes[i]->kind() == bytedance::bolt::TypeKind::VARCHAR ||
+        keysTypes[i]->kind() == bytedance::bolt::TypeKind::VARBINARY) {
+      hasStringView = true;
+    }
     if (!isEqualOp()) {
       fn.append(flags[i].nullsFirst ? "F" : "L"); // nulls first / nulls last
       fn.append(flags[i].ascending ? "A" : "D"); // asc / desc
@@ -168,6 +180,9 @@ std::string RowContainerCodeGenerator::GetCmpFuncName() {
   }
   for (auto i = 0; i < keyOffsets.size(); ++i) {
     fn.append(std::to_string(keyOffsets[i]));
+  }
+  if (hasStringView && stringsAreContiguous_) {
+    fn.append("c");
   }
 
   return fn;
@@ -1259,12 +1274,18 @@ RowContainerCodeGenerator& RowContainerCodeGenerator::setOpType(CmpType type) {
 
 extern "C" {
 extern int jit_StringViewCompareWrapper(char* l, char* r);
+extern int jit_StringViewCompareWrapperContiguous(char* l, char* r);
+extern int8_t jit_StringViewRowEqVectors(char* l, char* r);
+extern int8_t jit_StringViewRowEqVectorsContiguous(char* l, char* r);
 
 // This dummy function will never be called in fact.
 // It is just a trick to make sure that the linker will not skip the functions
 // in RowContainer.cpp, which will be called by JIT.
 __attribute__((used)) void dummyImportFuctionsJitCalled(void) {
   jit_StringViewCompareWrapper(nullptr, nullptr);
+  jit_StringViewCompareWrapperContiguous(nullptr, nullptr);
+  jit_StringViewRowEqVectors(nullptr, nullptr);
+  jit_StringViewRowEqVectorsContiguous(nullptr, nullptr);
 }
 }
 

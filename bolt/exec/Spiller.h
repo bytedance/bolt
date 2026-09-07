@@ -66,7 +66,7 @@ class Spiller {
 
   static std::string typeName(Type);
 
-  using SpillRows = std::vector<char*, memory::StlAllocator<char*>>;
+  using SpillRows = std::vector<char*, memory::SlabAllocator<char*>>;
 
   enum class Mode : int8_t {
     kRowVector = 0,
@@ -344,7 +344,10 @@ class Spiller {
   // spill run from the same partition.
   struct SpillRun {
     explicit SpillRun(memory::MemoryPool& pool)
-        : rows(0, memory::StlAllocator<char*>(pool)) {}
+        : rowsResource(std::make_unique<memory::SlabMemoryResource>(pool)),
+          rows(0, memory::SlabAllocator<char*>(rowsResource.get())) {}
+
+    std::unique_ptr<memory::SlabMemoryResource> rowsResource;
     // Spillable rows from the RowContainer.
     SpillRows rows;
     // The total byte size of rows referenced from 'rows'.

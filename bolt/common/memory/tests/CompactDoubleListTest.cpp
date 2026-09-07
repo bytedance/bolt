@@ -56,7 +56,27 @@ TEST(CompactDoubleListTest, basic) {
   }
   for (auto i = 0; i < kNumElements; ++i) {
     EXPECT_EQ(kNumElements - i, listSize(list));
-    elements[i].remove();
+    EXPECT_EQ(i == kNumElements - 1, elements[i].remove());
   }
   EXPECT_TRUE(list.empty());
+}
+
+TEST(CompactDoubleListTest, popFront) {
+  CompactDoubleList list;
+  CompactDoubleList first;
+  CompactDoubleList second;
+  list.insert(&second);
+  list.insert(&first);
+
+  bool listIsEmpty = true;
+  EXPECT_EQ(&first, list.popFront(listIsEmpty));
+  EXPECT_FALSE(listIsEmpty);
+  EXPECT_EQ(&second, list.next());
+
+  EXPECT_EQ(&second, list.popFront(listIsEmpty));
+  EXPECT_TRUE(listIsEmpty);
+  EXPECT_TRUE(list.empty());
+
+  EXPECT_EQ(nullptr, list.popFront(listIsEmpty));
+  EXPECT_TRUE(listIsEmpty);
 }

@@ -75,6 +75,14 @@ class RowContainerCodeGenerator {
   RowContainerCodeGenerator& setModule(llvm::Module* m);
   RowContainerCodeGenerator& setHasNullKeys(bool hasNullKeys);
   RowContainerCodeGenerator& setOpType(CmpType cmpType);
+  RowContainerCodeGenerator& setStringsAreContiguous(bool value) {
+    stringsAreContiguous_ = value;
+    rowStringViewCompareAsc = value ? "jit_StringViewCompareWrapperContiguous"
+                                    : "jit_StringViewCompareWrapper";
+    StringViewRowEqVectors = value ? "jit_StringViewRowEqVectorsContiguous"
+                                   : "jit_StringViewRowEqVectors";
+    return *this;
+  }
   bool isEqualOp() const {
     return cmpType == CmpType::EQUAL;
   }
@@ -93,12 +101,13 @@ class RowContainerCodeGenerator {
 
   // For compare non-contiguous stringview, which allocated by
   // HashStringAllocator,  in the RowContainer
-  const std::string rowStringViewCompareAsc = "jit_StringViewCompareWrapper";
+  std::string rowStringViewCompareAsc = "jit_StringViewCompareWrapper";
   const std::string RowBasedStringViewCompare = "jit_RowBasedStringViewCompare";
   const std::string ComplexTypeRowCmpRow = "jit_ComplexTypeRowCmpRow";
   const std::string RowBased_ComplexTypeRowCmpRow =
       "jit_RowBased_ComplexTypeRowCmpRow";
-  const std::string StringViewRowEqVectors = "jit_StringViewRowEqVectors";
+  std::string StringViewRowEqVectors = "jit_StringViewRowEqVectors";
+  bool stringsAreContiguous_{false};
   const std::string GetDecodedValueBool = "jit_GetDecodedValueBool";
   const std::string GetDecodedValueI8 = "jit_GetDecodedValueI8";
   const std::string GetDecodedValueI16 = "jit_GetDecodedValueI16";

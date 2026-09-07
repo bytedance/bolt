@@ -115,7 +115,11 @@ SortBuffer::SortBuffer(
   if (hybridSortEnabled_) {
     std::vector<TypePtr> rowIdType = {BIGINT()};
     data_ = std::make_unique<RowContainer>(
-        sortedColumnTypes, rowIdType, true /*useListRowIndex*/, pool_);
+        sortedColumnTypes,
+        rowIdType,
+        true /*useListRowIndex*/,
+        pool_,
+        RowContainer::RowContainerParam{nullptr, true});
     hybridData_ = std::make_unique<HybridContainer>(
         sortedColumnTypes, nonSortedColumnTypes, data_.get());
     // Set allContainer
@@ -132,7 +136,8 @@ SortBuffer::SortBuffer(
         sortedColumnTypes,
         nonSortedColumnTypes,
         true /*useListRowIndex*/,
-        pool_);
+        pool_,
+        RowContainer::RowContainerParam{nullptr, true});
   }
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));

@@ -163,7 +163,7 @@ class SpillWriter {
       const folly::Range<IndexRange*>& indices);
 
   uint64_t write(
-      const std::vector<char*, memory::StlAllocator<char*>>& rows,
+      const std::vector<char*, memory::SlabAllocator<char*>>& rows,
       const RowFormatInfo& info);
 
   /// Closes the current output file if any. Subsequent calls to write will

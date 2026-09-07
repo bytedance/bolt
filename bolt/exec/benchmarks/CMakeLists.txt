@@ -70,6 +70,88 @@ target_link_libraries(
     ${FOLLY_BENCHMARK}
 )
 
+add_executable(bolt_hash_join_string_allocation_benchmark HashJoinStringAllocationBenchmark.cpp)
+
+target_link_libraries(
+  bolt_hash_join_string_allocation_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
+add_executable(
+  bolt_hash_aggregation_string_allocation_benchmark
+  HashAggregationStringAllocationBenchmark.cpp
+)
+
+add_executable(bolt_hash_sort_string_allocation_benchmark SortStringAllocationBenchmark.cpp)
+target_link_libraries(
+  bolt_hash_sort_string_allocation_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
+target_link_libraries(
+  bolt_hash_aggregation_string_allocation_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
+target_compile_definitions(
+  bolt_hash_aggregation_string_allocation_benchmark
+  PRIVATE
+    BOLT_AGG_BENCHMARK_HAS_ALIGNED_BUF_ALLOC_STRATEGY
+)
+
+add_executable(
+  bolt_hash_string_monotonic_allocator_benchmark
+  HashStringMonotonicAllocatorBenchmark.cpp
+)
+
+target_link_libraries(
+  bolt_hash_string_monotonic_allocator_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
+add_executable(bolt_row_container_varchar_orderby_benchmark RowContainerVarcharOrderByBenchmark.cpp)
+
+target_link_libraries(
+  bolt_row_container_varchar_orderby_benchmark
+  PRIVATE
+    bolt_testutils
+    $<TARGET_NAME_IF_EXISTS:bolt_test_util_gperf>
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
+add_executable(bolt_row_container_store_string_benchmark RowContainerStoreStringBenchmark.cpp)
+
+target_link_libraries(
+  bolt_row_container_store_string_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
+add_executable(bolt_stl_container_allocator_benchmark StlContainerAllocatorBenchmark.cpp)
+
+target_link_libraries(
+  bolt_stl_container_allocator_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+    GTest::gtest_main
+)
+
 add_executable(bolt_sort_random_data_benchmark SortRandomDataBenchmark.cpp)
 
 add_executable(bolt_sort_window_benchmark SortWindowBenchmark.cpp)

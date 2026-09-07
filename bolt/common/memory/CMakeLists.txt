@@ -50,6 +50,7 @@ bolt_add_library(
   MmapArena.cpp
   RawVector.cpp
   SharedArbitrator.cpp
+  MemoryResource.cpp
   sparksql/AllocationListener.cpp
   sparksql/ExecutionMemoryPool.cpp
   sparksql/MemoryConsumer.cpp

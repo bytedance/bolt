@@ -778,14 +778,18 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
           parquetType == thrift::Type::INT32) {
         auto boltTypeLength = type_->type()->cppSizeInBytes();
         auto numBoltBytes = dictionary_.numValues * boltTypeLength;
-        dictionary_.values =
-            AlignedBuffer::allocate<char>(numBoltBytes, &pool_);
+        dictionary_.values = AlignedBuffer::
+            allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+                numBoltBytes, &pool_);
       } else if (type_->type()->isTimestamp()) {
         const auto numBoltBytes = dictionary_.numValues * sizeof(int128_t);
-        dictionary_.values =
-            AlignedBuffer::allocate<char>(numBoltBytes, &pool_);
+        dictionary_.values = AlignedBuffer::
+            allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+                numBoltBytes, &pool_);
       } else {
-        dictionary_.values = AlignedBuffer::allocate<char>(numBytes, &pool_);
+        dictionary_.values = AlignedBuffer::
+            allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+                numBytes, &pool_);
       }
       if (pageData_) {
         memcpy(dictionary_.values->asMutable<char>(), pageData_, numBytes);
@@ -820,7 +824,9 @@ void PageReader::prepareDictionary(const PageHeader& pageHeader) {
     }
     case thrift::Type::INT96: {
       auto numBoltBytes = dictionary_.numValues * sizeof(Timestamp);
-      dictionary_.values = AlignedBuffer::allocate<char>(numBoltBytes, &pool_);
+      dictionary_.values = AlignedBuffer::
+          allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+              numBoltBytes, &pool_);
       auto numBytes = dictionary_.numValues * sizeof(Int96Timestamp);
       if (pageData_) {
         memcpy(dictionary_.values->asMutable<char>(), pageData_, numBytes);

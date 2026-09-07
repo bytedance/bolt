@@ -356,6 +356,10 @@ void* MallocAllocator::reallocateBytes(
   return result;
 }
 
+bool MallocAllocator::incrementUsageBytes(uint64_t bytes) noexcept {
+  return incrementUsage(bytes);
+}
+
 void MallocAllocator::decrementUsageBytes(uint64_t bytes) noexcept {
   decrementUsage(bytes);
 }

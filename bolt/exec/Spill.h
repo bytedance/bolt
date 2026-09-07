@@ -897,7 +897,7 @@ class SpillState {
   // append row based data to partition
   uint64_t appendToPartition(
       uint32_t partition,
-      const std::vector<char*, memory::StlAllocator<char*>>& rows,
+      const std::vector<char*, memory::SlabAllocator<char*>>& rows,
       RowTypePtr type,
       const RowFormatInfo& info);
 

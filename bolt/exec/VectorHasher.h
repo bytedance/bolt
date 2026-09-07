@@ -228,7 +228,8 @@ class VectorHasher {
       int32_t offset,
       int32_t nullByte,
       uint8_t nullMask,
-      raw_vector<uint64_t>& result);
+      raw_vector<uint64_t>& result,
+      bool stringsAreContiguous = false);
 
   struct ScratchMemory {
     DecodedVector decoded;
@@ -379,7 +380,8 @@ class VectorHasher {
       int32_t offset,
       int32_t nullByte,
       uint8_t nullMask,
-      uint64_t* result) {
+      uint64_t* result,
+      bool /*stringsAreContiguous*/) {
     using T = typename TypeTraits<Kind>::NativeType;
     for (int32_t i = 0; i < numGroups; ++i) {
       if (isNullAt(groups[i], nullByte, nullMask)) {
@@ -605,7 +607,8 @@ bool VectorHasher::makeValueIdsForRows<TypeKind::VARCHAR>(
     int32_t offset,
     int32_t nullByte,
     uint8_t nullMask,
-    uint64_t* result);
+    uint64_t* result,
+    bool stringsAreContiguous);
 
 template <>
 void VectorHasher::analyzeValue(StringView value);

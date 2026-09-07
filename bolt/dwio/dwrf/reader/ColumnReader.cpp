@@ -292,7 +292,10 @@ void ByteRleColumnReader<FileType, RequestedType>::next(
     detail::resetIfNotWritable(result, values);
   }
   if (!values) {
-    values = AlignedBuffer::allocate<RequestedType>(numValues, &memoryPool_);
+    values = AlignedBuffer::allocate<
+        RequestedType,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
   values->setSize(BaseVector::byteSize<RequestedType>(numValues));
 
@@ -578,7 +581,9 @@ void IntegerDirectColumnReader<ReqT>::next(
     detail::resetIfNotWritable(result, values);
   }
   if (!values) {
-    values = AlignedBuffer::allocate<ReqT>(numValues, &memoryPool_);
+    values = AlignedBuffer::
+        allocate<ReqT, AlignedBuffer::AllocationStrategy::kConservative>(
+            numValues, &memoryPool_);
   }
 
   if (result) {
@@ -733,7 +738,9 @@ void IntegerDictionaryColumnReader<ReqT>::next(
     detail::resetIfNotWritable(result, values);
   }
   if (!values) {
-    values = AlignedBuffer::allocate<ReqT>(numValues, &memoryPool_);
+    values = AlignedBuffer::
+        allocate<ReqT, AlignedBuffer::AllocationStrategy::kConservative>(
+            numValues, &memoryPool_);
   }
 
   if (result) {
@@ -1001,7 +1008,9 @@ void FloatingPointColumnReader<DataT, ReqT>::next(
     detail::resetIfNotWritable(result, values);
   }
   if (!values) {
-    values = AlignedBuffer::allocate<ReqT>(numValues, &memoryPool_);
+    values = AlignedBuffer::
+        allocate<ReqT, AlignedBuffer::AllocationStrategy::kConservative>(
+            numValues, &memoryPool_);
   }
 
   if (result) {
@@ -1242,7 +1251,9 @@ BufferPtr StringDictionaryColumnReader::loadDictionary(
 
   // read bytes from underlying string
   int64_t blobSize = offsetsPtr[count];
-  BufferPtr dictionary = AlignedBuffer::allocate<char>(blobSize, &memoryPool_);
+  BufferPtr dictionary = AlignedBuffer::
+      allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+          blobSize, &memoryPool_);
   data.readFully(dictionary->asMutable<char>(), blobSize);
   return dictionary;
 }
@@ -1419,7 +1430,9 @@ void StringDictionaryColumnReader::readDictionaryVector(
   if (hasStrideDict) {
     if (!combinedDictionaryValues_) {
       // TODO Reuse memory
-      BufferPtr values = AlignedBuffer::allocate<StringView>(
+      BufferPtr values = AlignedBuffer::allocate<
+          StringView,
+          AlignedBuffer::AllocationStrategy::kConservative>(
           dictionaryCount_ + strideDictCount_, &memoryPool_);
       auto* valuesPtr = values->asMutable<StringView>();
       for (size_t i = 0; i < dictionaryCount_; i++) {
@@ -1449,8 +1462,10 @@ void StringDictionaryColumnReader::readDictionaryVector(
   } else {
     if (!dictionaryValues_) {
       // TODO Reuse memory
-      BufferPtr values =
-          AlignedBuffer::allocate<StringView>(dictionaryCount_, &memoryPool_);
+      BufferPtr values = AlignedBuffer::allocate<
+          StringView,
+          AlignedBuffer::AllocationStrategy::kConservative>(
+          dictionaryCount_, &memoryPool_);
       auto* valuesPtr = values->asMutable<StringView>();
       for (size_t i = 0; i < dictionaryCount_; i++) {
         valuesPtr[i] = StringView(
@@ -1723,12 +1738,16 @@ void StringDirectColumnReader::next(
     detail::resetIfNotWritable(result, values);
   }
   if (!values) {
-    values = AlignedBuffer::allocate<StringView>(numValues, &memoryPool_);
+    values = AlignedBuffer::
+        allocate<StringView, AlignedBuffer::AllocationStrategy::kConservative>(
+            numValues, &memoryPool_);
   }
 
   // TODO Reuse memory
   // read the length vector
-  BufferPtr lengths = AlignedBuffer::allocate<int64_t>(numValues, &memoryPool_);
+  BufferPtr lengths = AlignedBuffer::
+      allocate<int64_t, AlignedBuffer::AllocationStrategy::kConservative>(
+          numValues, &memoryPool_);
   length->next(lengths->asMutable<int64_t>(), numValues, nullsPtr);
 
   // figure out the total length of data we need from the blob stream
@@ -1738,7 +1757,9 @@ void StringDirectColumnReader::next(
   // TODO Reuse memory
   // Load data from the blob stream into our buffer until we have enough
   // to get the rest directly out of the stream's buffer.
-  BufferPtr data = AlignedBuffer::allocate<char>(totalLength, &memoryPool_);
+  BufferPtr data = AlignedBuffer::
+      allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+          totalLength, &memoryPool_);
   blobStream->readFully(data->asMutable<char>(), totalLength);
 
   auto* valuesPtr = values->asMutable<StringView>();
@@ -2058,10 +2079,16 @@ void ListColumnReader::next(
   }
 
   if (!offsets) {
-    offsets = AlignedBuffer::allocate<vector_size_t>(numValues, &memoryPool_);
+    offsets = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
   if (!lengths) {
-    lengths = AlignedBuffer::allocate<vector_size_t>(numValues, &memoryPool_);
+    lengths = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
 
   // Hack. Cast vector_size_t to signed so integer reader can handle it. This
@@ -2236,10 +2263,16 @@ void MapColumnReader::next(
   }
 
   if (!offsets) {
-    offsets = AlignedBuffer::allocate<vector_size_t>(numValues, &memoryPool_);
+    offsets = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
   if (!lengths) {
-    lengths = AlignedBuffer::allocate<vector_size_t>(numValues, &memoryPool_);
+    lengths = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
 
   // Hack. Cast vector_size_t to signed so integer reader can handle it. This

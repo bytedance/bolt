@@ -1025,6 +1025,55 @@ TEST_P(MultiThreadedHashJoinTest, bigintArray) {
       .run();
 }
 
+TEST_F(HashJoinTest, nonInlineStringKeysWithSpill) {
+  constexpr int32_t kStringSize = 100'000;
+  const auto makeKey = [](int32_t id) {
+    std::string key(kStringSize, 'x');
+    key.replace(0, StringView::kPrefixSize, StringView::kPrefixSize, 'p');
+    key.replace(StringView::kPrefixSize, 10, fmt::format("{:010}", id));
+    return key;
+  };
+
+  // All join keys have the same length and prefix. Comparisons must therefore
+  // inspect the out-of-line part. kStringSize is larger than a
+  // HashStringAllocator range, which forces non-contiguous storage.
+  std::vector<RowVectorPtr> probeVectors;
+  std::vector<RowVectorPtr> buildVectors;
+  for (int32_t batch = 0; batch < 32; ++batch) {
+    std::vector<std::string> key1;
+    std::vector<std::string> key2;
+    std::vector<int64_t> values;
+    for (int32_t row = 0; row < 4; ++row) {
+      const auto id = batch * 4 + row;
+      key1.push_back(makeKey(2 * id));
+      key2.push_back(makeKey(2 * id + 1));
+      values.push_back(id);
+    }
+    probeVectors.push_back(makeRowVector(
+        {"t_key1", "t_key2"},
+        {makeFlatVector<std::string>(key1),
+         makeFlatVector<std::string>(key2)}));
+    buildVectors.push_back(makeRowVector(
+        {"u_key1", "u_key2", "u_value"},
+        {makeFlatVector<std::string>(key1),
+         makeFlatVector<std::string>(key2),
+         makeFlatVector<int64_t>(values)}));
+  }
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .numDrivers(1)
+      .probeVectors(std::move(probeVectors))
+      .probeKeys({"t_key1", "t_key2"})
+      .buildVectors(std::move(buildVectors))
+      .buildKeys({"u_key1", "u_key2"})
+      .joinOutputLayout({"t_key1", "t_key2", "u_value"})
+      .referenceQuery(
+          "SELECT t_key1, t_key2, u_value FROM t JOIN u "
+          "ON t_key1 = u_key1 AND t_key2 = u_key2")
+      .maxSpillLevel(0)
+      .run();
+}
+
 TEST_P(MultiThreadedHashJoinTest, outOfJoinKeyColumnOrder) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
@@ -4307,6 +4356,92 @@ BOLT_INSTANTIATE_TEST_SUITE_P(
     HashJoinTest,
     MultiThreadedHashJoinTest,
     testing::ValuesIn(MultiThreadedHashJoinTest::getTestParams()));
+
+TEST_F(HashJoinTest, varcharInnerJoinTwoBatches) {
+  const std::vector<RowVectorPtr> users = {
+      makeRowVector(
+          {"name", "info"},
+          {makeFlatVector<std::string>(
+               {"user_name_alice",
+                "user_name_bob",
+                "user_name_carol",
+                "user_name_dave",
+                "user_name_erin"}),
+           makeFlatVector<std::string>(
+               {"alice_profile_info",
+                "bob_profile_info",
+                "carol_profile_info",
+                "dave_profile_info",
+                "erin_profile_info"})}),
+      makeRowVector(
+          {"name", "info"},
+          {makeFlatVector<std::string>(
+               {"user_name_frank",
+                "user_name_grace",
+                "user_name_heidi",
+                "user_name_ivan",
+                "user_name_judy"}),
+           makeFlatVector<std::string>(
+               {"frank_profile_info",
+                "grace_profile_info",
+                "heidi_profile_info",
+                "ivan_profile_info",
+                "judy_profile_info"})})};
+  const std::vector<RowVectorPtr> addresses = {
+      makeRowVector(
+          {"name", "addr"},
+          {makeFlatVector<std::string>(
+               {"user_name_carol",
+                "user_name_alice",
+                "user_name_erin",
+                "missing_user_one",
+                "user_name_bob"}),
+           makeFlatVector<std::string>(
+               {"carol_street_addr",
+                "alice_street_addr",
+                "erin_street_addr",
+                "missing_one_addr",
+                "bob_street_addr"})}),
+      makeRowVector(
+          {"name", "addr"},
+          {makeFlatVector<std::string>(
+               {"user_name_judy",
+                "user_name_frank",
+                "missing_user_two",
+                "user_name_heidi",
+                "user_name_grace"}),
+           makeFlatVector<std::string>(
+               {"judy_street_addr",
+                "frank_street_addr",
+                "missing_two_addr",
+                "heidi_street_addr",
+                "grace_street_addr"})})};
+
+  createDuckDbTable("t", users);
+  createDuckDbTable("u", addresses);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(users, true)
+                  .hashJoin(
+                      {"name"},
+                      {"address_name"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(addresses, true)
+                          .project({"name AS address_name", "addr"})
+                          .planNode(),
+                      "",
+                      {"name", "info", "addr"},
+                      core::JoinType::kInner)
+                  .planNode();
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(plan)
+      .checkSpillStats(false)
+      .referenceQuery(
+          "SELECT t.name, t.info, u.addr FROM t INNER JOIN u ON t.name = u.name")
+      .run();
+}
 
 // TODO: try to parallelize the following test cases if possible.
 TEST_F(HashJoinTest, memory) {

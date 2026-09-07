@@ -56,8 +56,10 @@ class GetArrayStructFieldsFunction : public exec::VectorFunction {
     VectorPtr fieldResult = fieldVector;
     if (elements->mayHaveNulls()) {
       auto size = elements->size();
-      auto indices =
-          AlignedBuffer::allocate<vector_size_t>(size, context.pool());
+      auto indices = AlignedBuffer::allocate<
+          vector_size_t,
+          AlignedBuffer::AllocationStrategy::kConservative>(
+          size, context.pool());
       std::iota(
           indices->asMutable<vector_size_t>(),
           indices->asMutable<vector_size_t>() + size,

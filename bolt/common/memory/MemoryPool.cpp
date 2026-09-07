@@ -282,7 +282,8 @@ MemoryPool::MemoryPool(
       getPreferredSize_(
           options.getPreferredSize == nullptr
               ? [](size_t size) { return MemoryPool::getPreferredSize(size); }
-              : options.getPreferredSize) {
+              : options.getPreferredSize),
+      enableAlignedBufAllocStrategy_(options.enableAlignedBufAllocStrategy) {
   BOLT_CHECK(!isRoot() || !isLeaf());
   BOLT_CHECK_GT(
       maxCapacity_, 0, "Memory pool {} max capacity can't be zero", name_);
@@ -899,6 +900,7 @@ std::shared_ptr<MemoryPool> MemoryPoolImpl::genChild(
           .threadSafe = threadSafe,
           .coreOnAllocationFailureEnabled = coreOnAllocationFailureEnabled_,
           .getPreferredSize = getPreferredSize,
+          .enableAlignedBufAllocStrategy = enableAlignedBufAllocStrategy_,
           .debugOptions = debugOptions_,
           .poolRegex = listener_->getPoolRegex(),
           .singleAllocationThreshold =

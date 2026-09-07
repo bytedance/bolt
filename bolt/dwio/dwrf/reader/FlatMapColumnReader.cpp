@@ -337,10 +337,16 @@ void FlatMapColumnReader<T>::next(
   result.reset();
 
   if (!offsets) {
-    offsets = AlignedBuffer::allocate<vector_size_t>(numValues, &memoryPool_);
+    offsets = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
   if (!lengths) {
-    lengths = AlignedBuffer::allocate<vector_size_t>(numValues, &memoryPool_);
+    lengths = AlignedBuffer::allocate<
+        vector_size_t,
+        AlignedBuffer::AllocationStrategy::kConservative>(
+        numValues, &memoryPool_);
   }
 
   auto nonNullMaps = numValues - nullCount;
@@ -414,7 +420,9 @@ void FlatMapColumnReader<T>::next(
   BufferPtr indices;
   vector_size_t* indicesPtr = nullptr;
   if (!returnFlatVector_) {
-    indices = AlignedBuffer::allocate<int32_t>(totalChildren, &memoryPool_);
+    indices = AlignedBuffer::
+        allocate<int32_t, AlignedBuffer::AllocationStrategy::kConservative>(
+            totalChildren, &memoryPool_);
     indices->setSize(totalChildren * sizeof(vector_size_t));
     indicesPtr = indices->asMutable<vector_size_t>();
   }

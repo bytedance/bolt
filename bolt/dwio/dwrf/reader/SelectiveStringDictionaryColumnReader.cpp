@@ -193,9 +193,10 @@ void SelectiveStringDictionaryColumnReader::loadStrideDictionary() {
 
 void SelectiveStringDictionaryColumnReader::makeDictionaryBaseVector() {
   if (scanState_.dictionary2.numValues) {
-    BufferPtr values = AlignedBuffer::allocate<StringView>(
-        scanState_.dictionary.numValues + scanState_.dictionary2.numValues,
-        &memoryPool_);
+    BufferPtr values = AlignedBuffer::
+        allocate<StringView, AlignedBuffer::AllocationStrategy::kConservative>(
+            scanState_.dictionary.numValues + scanState_.dictionary2.numValues,
+            &memoryPool_);
     auto* valuesPtr = values->asMutable<StringView>();
     memcpy(
         valuesPtr,
@@ -292,7 +293,9 @@ void SelectiveStringDictionaryColumnReader::read(
 
 void SelectiveStringDictionaryColumnReader::makeFlat(VectorPtr* result) {
   auto* indices = reinterpret_cast<const vector_size_t*>(rawValues_);
-  auto values = AlignedBuffer::allocate<StringView>(numValues_, &memoryPool_);
+  auto values = AlignedBuffer::
+      allocate<StringView, AlignedBuffer::AllocationStrategy::kConservative>(
+          numValues_, &memoryPool_);
   auto* stringViews = values->asMutable<StringView>();
   std::vector<BufferPtr> stringBuffers;
   auto* stripeDict = scanState_.dictionary.values->as<StringView>();

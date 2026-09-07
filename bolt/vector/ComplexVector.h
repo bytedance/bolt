@@ -338,8 +338,9 @@ class CompositeRowVector : public RowVector {
       std::unique_ptr<SelectivityVector> validColumns,
       std::vector<VectorPtr>&& children)
       : RowVector(pool, type, nullptr, size, std::move(children)),
-        rows_(size, memory::StlAllocator<char*>(pool)),
-        rawRows_(0, memory::StlAllocator<char*>(pool)),
+        rowsResource_(std::make_unique<memory::SlabMemoryResource>(pool)),
+        rows_(size, memory::SlabAllocator<char*>(rowsResource_.get())),
+        rawRows_(0, memory::SlabAllocator<char*>(rowsResource_.get())),
         validChildren_(std::move(validColumns)) {
     childrenLoaded_ = true;
     containsLazyNotLoaded_ = false;
@@ -357,6 +358,7 @@ class CompositeRowVector : public RowVector {
   void moveto(std::shared_ptr<CompositeRowVector>& destination) {
     destination->rows_ = std::move(rows_);
     destination->rawRows_ = std::move(rawRows_);
+    destination->rowsResource_ = std::move(rowsResource_);
     destination->validChildren_ = std::move(validChildren_);
     destination->rowBuffer_ = std::move(rowBuffer_);
     destination->rowToBufferMapping_ = std::move(rowToBufferMapping_);
@@ -416,11 +418,11 @@ class CompositeRowVector : public RowVector {
     alignment_ = alignment;
   }
 
-  const std::vector<char*, memory::StlAllocator<char*>>& rows() {
+  const std::vector<char*, memory::SlabAllocator<char*>>& rows() {
     return rows_;
   }
 
-  const std::vector<char*, memory::StlAllocator<char*>>& rawRows() {
+  const std::vector<char*, memory::SlabAllocator<char*>>& rawRows() {
     if (rowOffset_ == 0) {
       return rows_;
     } else {
@@ -516,10 +518,11 @@ class CompositeRowVector : public RowVector {
 
   // data in row format
   // first 4 bytes maybe rowSize
-  std::vector<char*, memory::StlAllocator<char*>> rows_;
+  std::unique_ptr<memory::SlabMemoryResource> rowsResource_;
+  std::vector<char*, memory::SlabAllocator<char*>> rows_;
 
   // no rowSize header
-  std::vector<char*, memory::StlAllocator<char*>> rawRows_;
+  std::vector<char*, memory::SlabAllocator<char*>> rawRows_;
 
   // columns stored in columnar format
   std::unique_ptr<SelectivityVector> validChildren_;

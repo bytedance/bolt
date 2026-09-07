@@ -494,6 +494,11 @@ void* MmapAllocator::reallocateBytes(
   return nullptr;
 }
 
+bool MmapAllocator::incrementUsageBytes(uint64_t bytes) noexcept {
+  BOLT_CHECK(false, "MmapAllocator::incrementUsageBytes not implemented");
+  return false;
+}
+
 void MmapAllocator::decrementUsageBytes(uint64_t bytes) noexcept {
   BOLT_CHECK(false, "MmapAllocator::decrementUsageBytes not implemented");
 }

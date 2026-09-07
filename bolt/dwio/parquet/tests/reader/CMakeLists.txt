@@ -44,6 +44,18 @@ add_test(
 target_link_libraries(bolt_dwio_parquet_reader_test PRIVATE bolt_gtest_main)
 
 add_executable(
+  bolt_dwio_parquet_export_to_arrow_test
+  AlignedBufferParquetReadExportToArrowBenchmark.cpp
+)
+add_test(NAME bolt_dwio_parquet_export_to_arrow_test COMMAND bolt_dwio_parquet_export_to_arrow_test)
+target_link_libraries(
+  bolt_dwio_parquet_export_to_arrow_test
+  PRIVATE
+    bolt_testutils
+    GTest::gtest
+)
+
+add_executable(
   bolt_parquet_filter_test
   E2EFilterTest.cpp
   ParquetDictionaryFilterTest.cpp

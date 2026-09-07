@@ -54,7 +54,7 @@ void WindowPartition::extractColumn(
     vector_size_t resultOffset,
     const VectorPtr& result,
     bool exactSize) const {
-  RowContainer::extractColumn(
+  data_->extractColumn(
       partition_.data(),
       rowNumbers,
       columns_[columnIndex],
@@ -70,7 +70,7 @@ void WindowPartition::extractColumn(
     vector_size_t resultOffset,
     const VectorPtr& result,
     bool exactSize) const {
-  RowContainer::extractColumn(
+  data_->extractColumn(
       partition_.data() + partitionOffset - offsetInPartition(),
       numRows,
       columns_[columnIndex],
@@ -334,7 +334,7 @@ void WindowPartitionImpl<T>::extractColumn(
     const VectorPtr& result,
     bool exactSize) const {
   if constexpr (T == RowFormat::kRowContainer) {
-    RowContainer::extractColumn(
+    data_->extractColumn(
         partition_.data(),
         rowNumbers,
         columns_[columnIndex],
@@ -363,7 +363,7 @@ void WindowPartitionImpl<T>::extractColumn(
     const VectorPtr& result,
     bool exactSize) const {
   if constexpr (T == RowFormat::kRowContainer) {
-    RowContainer::extractColumn(
+    data_->extractColumn(
         partition_.data() + partitionOffset - offsetInPartition(),
         numRows,
         columns_[columnIndex],

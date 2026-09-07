@@ -106,8 +106,9 @@ class TxtRowReader::Impl {
     }
 
     auto colNames = getColumnNamesAndTypes();
-    auto buffer = AlignedBuffer::allocate<char>(
-        nextReadByteSize(nextReadSizeInByte_), &pool_);
+    auto buffer = AlignedBuffer::
+        allocate<char, AlignedBuffer::AllocationStrategy::kConservative>(
+            nextReadByteSize(nextReadSizeInByte_), &pool_);
     auto totalBytesRead = readDataIntoBuffer(size, buffer);
 
     if (totalBytesRead == 0) {

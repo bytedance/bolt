@@ -148,8 +148,9 @@ std::unique_ptr<SimpleVector<uint64_t>> DictionaryVector<T>::hashAll() const {
     return nullptr;
   }
   // If there is at least one value, then indices_ is set and has a pool.
-  BufferPtr hashes =
-      AlignedBuffer::allocate<uint64_t>(BaseVector::length_, indices_->pool());
+  BufferPtr hashes = AlignedBuffer::
+      allocate<uint64_t, AlignedBuffer::AllocationStrategy::kConservative>(
+          BaseVector::length_, indices_->pool());
   uint64_t* rawHashes = hashes->asMutable<uint64_t>();
   for (vector_size_t i = 0; i < BaseVector::length_; ++i) {
     if (BaseVector::isNullAt(i)) {

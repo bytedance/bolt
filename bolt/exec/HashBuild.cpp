@@ -250,7 +250,8 @@ void HashBuild::setupTable() {
         queryConfig.minTableRowsForParallelJoinBuild(),
         pool(),
         queryConfig.enableJitRowEqVectors(),
-        hybridJoin_);
+        hybridJoin_,
+        queryConfig.useMonoAlloc());
   } else {
     // Right semi join needs to tag build rows that were probed.
     const bool needProbedFlag = joinNode_->isRightSemiFilterJoin();
@@ -267,7 +268,8 @@ void HashBuild::setupTable() {
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
           queryConfig.enableJitRowEqVectors(),
-          hybridJoin_);
+          hybridJoin_,
+          queryConfig.useMonoAlloc());
     } else {
       // Ignore null keys
       table_ = HashTable<true>::createForJoin(
@@ -280,7 +282,8 @@ void HashBuild::setupTable() {
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
           queryConfig.enableJitRowEqVectors(),
-          hybridJoin_);
+          hybridJoin_,
+          queryConfig.useMonoAlloc());
     }
   }
   lookup_ = std::make_unique<HashLookup>(
@@ -765,8 +768,7 @@ bool HashBuild::reserveMemory(
   const auto numRows = rows->numRows();
 
   auto [freeRows, outOfLineFreeBytes] = rows->freeSpace();
-  const auto outOfLineBytes =
-      rows->stringAllocator().retainedSize() - outOfLineFreeBytes;
+  const auto outOfLineBytes = rows->variableWidthUsedBytes();
   const auto outOfLineBytesPerRow =
       std::max<uint64_t>(1, numRows == 0 ? 0 : outOfLineBytes / numRows);
   const auto currentUsage = pool()->currentBytes();

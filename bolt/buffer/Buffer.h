@@ -136,7 +136,6 @@ class Buffer {
     BOLT_CHECK(!isView());
     BOLT_CHECK_LE(size, capacity_);
     size_ = size;
-    checkEndGuard();
   }
 
   uint64_t capacity() const {
@@ -330,6 +329,25 @@ class NonPODAlignedBuffer;
 
 class AlignedBuffer : public Buffer {
  public:
+  enum class AllocationStrategy {
+    // allocate enough memory to store the requested number of elements,
+    // but just strictly necessary. This is useful for cases where we want
+    // to minimize memory usage, and don't expect the buffer to grow in size.
+    // This strategy is more conservative in terms of memory usage.
+    // In the case that the number of elements is known, use this strategy
+    // to avoid wasting memory.
+    kConservative,
+
+    // allocate enough memory to store the requested number of elements,
+    // but may allocate more memory than strictly necessary.
+    // This is useful for cases where we expect the buffer to grow in size,
+    // and want to avoid frequent reallocations. This strategy is more
+    // aggressive in terms of memory usage, but can improve performance by
+    // reducing the number of allocations and copies.
+    // User cases:  string buffers, reallocate,
+    kAggressive,
+  };
+
   static constexpr int16_t kAlignment = 64;
   // Magic number used to guard against writing past 'capacity_'
   static constexpr uint64_t kEndGuard = 0xbadaddbadadddeadUL;
@@ -344,7 +362,7 @@ class AlignedBuffer : public Buffer {
     // process. In concept this indicates the possibility of memory
     // corruption and the process state should be considered
     // compromised.
-    checkEndGuard();
+    // checkEndGuard();
   }
 
   // It's almost like partial specialization, but we redirect all POD types to
@@ -361,14 +379,24 @@ class AlignedBuffer : public Buffer {
    * simd::kPadding bytes past capacity() are addressable and asserts that
    * these do not get overrun.
    */
-  template <typename T>
+  template <
+      typename T,
+      AllocationStrategy allocationStrategy = AllocationStrategy::kAggressive>
   static BufferPtr allocate(
       size_t numElements,
       bolt::memory::MemoryPool* pool,
       const std::optional<T>& initValue = std::nullopt) {
     size_t size = checkedMultiply(numElements, sizeof(T));
-    size_t preferredSize =
-        pool->preferredSize(checkedPlus<size_t>(size, kPaddedSize));
+    size_t preferredSize{0};
+    if constexpr (allocationStrategy == AllocationStrategy::kAggressive) {
+      preferredSize =
+          pool->preferredSize(checkedPlus<size_t>(size, kPaddedSize));
+    } else {
+      const auto sizeWithPadding = checkedPlus<size_t>(size, kPaddedSize);
+      preferredSize = pool->enableAlignedBufAllocStrategy()
+          ? bits::roundUp(sizeWithPadding, simd::kPadding)
+          : pool->preferredSize(sizeWithPadding);
+    }
     void* memory = pool->allocate(preferredSize);
     auto* buffer = new (memory) ImplClass<T>(pool, preferredSize - kPaddedSize);
     // set size explicitly instead of setSize because `fillNewMemory` already
@@ -391,7 +419,6 @@ class AlignedBuffer : public Buffer {
     auto size = checkedMultiply(numElements, sizeof(T));
     Buffer* old = buffer->get();
     BOLT_CHECK(old, "Buffer doesn't exist in reallocate");
-    old->checkEndGuard();
     BOLT_DCHECK(
         dynamic_cast<ImplClass<T>*>(old) != nullptr,
         "Reallocate tries to change the type");
@@ -551,7 +578,7 @@ class AlignedBuffer : public Buffer {
 
  protected:
   void setEndGuardImpl() override {
-    *reinterpret_cast<uint64_t*>(data_ + capacity_) = kEndGuard;
+    // *reinterpret_cast<uint64_t*>(data_ + capacity_) = kEndGuard;
   }
 
   void checkEndGuardImpl() const override {

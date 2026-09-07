@@ -63,8 +63,9 @@ void DeletionFileReader::initDeletionVector() {
   auto readLength = options_.size + LengthOfSizeAndCrc;
   auto stream = input_->read(
       options_.offset, readLength, dwio::common::LogType::PAIMON_DELETION_BIN);
-  auto buffer =
-      AlignedBuffer::allocate<uint8_t>(readLength, options_.memoryPool);
+  auto buffer = AlignedBuffer::
+      allocate<uint8_t, AlignedBuffer::AllocationStrategy::kConservative>(
+          readLength, options_.memoryPool);
   const char* bufferStart = nullptr;
   const char* bufferEnd = nullptr;
   dwio::common::readBytes(
