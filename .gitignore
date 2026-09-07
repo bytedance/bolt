@@ -338,3 +338,5 @@ files.txt
 log.txt
 
 bolt/version/version.h
+
+log/*
