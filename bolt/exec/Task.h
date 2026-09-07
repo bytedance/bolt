@@ -48,6 +48,11 @@
 #include "bolt/exec/TaskStructs.h"
 #include "bolt/exec/TraceConfig.h"
 #include "bolt/vector/ComplexVector.h"
+
+namespace bytedance::bolt::memory::bm {
+class BufferManager;
+}
+
 namespace bytedance::bolt::exec {
 
 class OutputBufferManager;
@@ -163,6 +168,10 @@ class Task : public std::enable_shared_from_this<Task> {
   /// is a child of the MemoryPool passed in the constructor.
   memory::MemoryPool* pool() const {
     return pool_.get();
+  }
+
+  std::shared_ptr<memory::bm::BufferManager> bufferManager() const {
+    return bmBufferManager_;
   }
 
   /// Returns query trace config if specified.
@@ -805,6 +814,8 @@ class Task : public std::enable_shared_from_this<Task> {
   void setSpillDiskConfig(
       std::optional<common::SpillDiskOptions>&& spillDiskOpts);
 
+  void maybeCreateBufferManager();
+
   // Consistency check of the task execution to make sure the execution mode
   // stays the same.
   void checkExecutionMode(ExecutionMode mode);
@@ -1340,6 +1351,8 @@ class Task : public std::enable_shared_from_this<Task> {
 
   // Indicates whether the spill directory has been created.
   std::atomic<bool> spillDirectoryCreated_{false};
+
+  std::shared_ptr<memory::bm::BufferManager> bmBufferManager_;
 
   // Stores unconsumed preloading splits to ensure they are closed promptly.
   folly::F14FastSet<std::shared_ptr<connector::ConnectorSplit>>

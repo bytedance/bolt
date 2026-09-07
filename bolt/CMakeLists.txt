@@ -319,6 +319,7 @@ function(bolt_configure_engine target_name)
       Folly::folly
       gflags::gflags
       gfx::timsort
+      bolt_memory_bm
       date::date
       re2::re2
       ryu::ryu
