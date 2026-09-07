@@ -16,6 +16,9 @@
 
 #include "bolt/shuffle/sparksql/cell/ChunkAllocator.h"
 
+#include <algorithm>
+#include <functional>
+
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/Allocation.h"
@@ -92,6 +95,12 @@ uint32_t ChunkAllocator::allocCell(const GrowCallback& beforeGrow) {
     bumpChunk_ = kNoChunk;
   }
   return id;
+}
+
+void ChunkAllocator::packFreelist() {
+  // Descending ids: allocation pops from the back, so the lowest chunks
+  // are consumed first and refills stay dense.
+  std::sort(freeList_.begin(), freeList_.end(), std::greater<uint32_t>());
 }
 
 void ChunkAllocator::recycle(uint32_t cellId) {
