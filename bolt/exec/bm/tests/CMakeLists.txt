@@ -2,6 +2,7 @@ include(GoogleTest)
 
 add_executable(
   bolt_exec_bm_test
+  ../benchmarks/BmRowContainerBenchmarkCommon.cpp
   ../benchmarks/BmRowContainerBenchmarkProfiles.cpp
   BmRowContainerBenchmarkProfileTest.cpp
   BmMergeReadSessionTest.cpp

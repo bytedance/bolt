@@ -26,11 +26,15 @@
 namespace bytedance::bolt::memory::bm {
 
 class BufferManagerStatsCollector;
+struct BlockDescriptor;
 
 class SpillWriteDriver {
  public:
-  using SubmitWrite =
-      std::function<SpillWriteFuture(IoBuffer&, size_t, IoPriority)>;
+  using SubmitWrite = std::function<SpillWriteFuture(
+      IoBuffer&,
+      size_t,
+      IoPriority,
+      std::shared_ptr<const BlockDescriptor>)>;
 
   SpillWriteDriver(
       uint32_t maxInflight,

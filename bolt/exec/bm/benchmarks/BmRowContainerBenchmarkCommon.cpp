@@ -133,6 +133,8 @@ common::CompressionKind oldCompressionKind(SpillCompressionKind compression) {
       return common::CompressionKind_LZ4;
     case SpillCompressionKind::kZstd:
       return common::CompressionKind_ZSTD;
+    case SpillCompressionKind::kOpenZl:
+      BOLT_FAIL("Old RowContainer benchmarks do not support OpenZL");
   }
   BOLT_UNREACHABLE();
 }
@@ -142,19 +144,6 @@ common::RowBasedSpillMode oldRowBasedSpillMode(
   return compression == SpillCompressionKind::kRaw
       ? common::RowBasedSpillMode::RAW
       : common::RowBasedSpillMode::COMPRESSION;
-}
-
-memory::bm::compress::CompressionKind bmCompressionKind(
-    SpillCompressionKind compression) {
-  switch (compression) {
-    case SpillCompressionKind::kRaw:
-      return memory::bm::compress::CompressionKind::kNone;
-    case SpillCompressionKind::kLz4:
-      return memory::bm::compress::CompressionKind::kLz4Block;
-    case SpillCompressionKind::kZstd:
-      return memory::bm::compress::CompressionKind::kZstdFrame;
-  }
-  BOLT_UNREACHABLE();
 }
 
 void decodeBatch(
@@ -241,6 +230,23 @@ const char* spillCompressionName(SpillCompressionKind compression) {
       return "lz4";
     case SpillCompressionKind::kZstd:
       return "zstd";
+    case SpillCompressionKind::kOpenZl:
+      return "openzl";
+  }
+  BOLT_UNREACHABLE();
+}
+
+memory::bm::compress::CompressionKind bmCompressionKind(
+    SpillCompressionKind compression) {
+  switch (compression) {
+    case SpillCompressionKind::kRaw:
+      return memory::bm::compress::CompressionKind::kNone;
+    case SpillCompressionKind::kLz4:
+      return memory::bm::compress::CompressionKind::kLz4Block;
+    case SpillCompressionKind::kZstd:
+      return memory::bm::compress::CompressionKind::kZstdFrame;
+    case SpillCompressionKind::kOpenZl:
+      return memory::bm::compress::CompressionKind::kOpenZlFrame;
   }
   BOLT_UNREACHABLE();
 }
@@ -361,6 +367,9 @@ uint64_t rowCount(const BenchmarkOptions& options) {
 }
 
 void checkOldRowBasedSpillBenchmarkSupported(const BenchmarkOptions& options) {
+  BOLT_CHECK(
+      options.compression != SpillCompressionKind::kOpenZl,
+      "Old RowContainer benchmarks do not support OpenZL");
   constexpr uint64_t kMaxOldRowBasedSpillRows =
       static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
   const auto rows = rowCount(options);

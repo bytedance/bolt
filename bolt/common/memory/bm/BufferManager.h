@@ -18,6 +18,7 @@
 
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/memory/bm/AllocateSize.h"
+#include "bolt/common/memory/bm/BlockDescriptor.h"
 #include "bolt/common/memory/bm/BufferHandle.h"
 #include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
@@ -64,6 +65,9 @@ class BufferManager : public std::enable_shared_from_this<BufferManager> {
   bool HasSpillBacking(const std::shared_ptr<BlockHandle>& block) const;
   bool IsDirty(const std::shared_ptr<BlockHandle>& block) const;
   void MarkDirty(const std::shared_ptr<BlockHandle>& block);
+  void SetBlockDescriptor(
+      const std::shared_ptr<BlockHandle>& block,
+      std::shared_ptr<const BlockDescriptor> descriptor);
   uint64_t DiscardCleanResidentBlocks(
       std::span<const std::shared_ptr<BlockHandle>> blocks);
 

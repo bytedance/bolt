@@ -97,6 +97,44 @@ TEST_F(BmRowContainerTest, RowLayoutMatchesOldRowContainerPacking) {
   EXPECT_EQ(13, layout.rowSize());
 }
 
+TEST_F(BmRowContainerTest, RowLayoutBuildsTypedFixedRowBlockDescriptor) {
+  BmRowLayout layout(
+      {BOOLEAN(),
+       TINYINT(),
+       SMALLINT(),
+       INTEGER(),
+       BIGINT(),
+       REAL(),
+       DOUBLE(),
+       VARCHAR(),
+       HUGEINT()},
+      {true, false, false, false, false, false, false, false, false},
+      4 << 20);
+
+  auto descriptor = layout.makeBlockDescriptor(17);
+
+  ASSERT_NE(nullptr, descriptor);
+  EXPECT_EQ(memory::bm::BlockSchemaKind::kFixedRow, descriptor->schemaKind);
+  EXPECT_EQ(17, descriptor->elementCount);
+  const auto& schema =
+      std::get<memory::bm::FixedRowBlockSchema>(descriptor->schema);
+  EXPECT_EQ(layout.rowSize(), schema.rowStride);
+  ASSERT_EQ(10, schema.fields.size());
+  EXPECT_EQ(memory::bm::BlockFieldKind::kOpaque, schema.fields[0].kind);
+  EXPECT_EQ(0, schema.fields[0].offset);
+  EXPECT_EQ(1, schema.fields[0].width);
+  EXPECT_EQ(
+      memory::bm::BlockFieldKind::kUnsignedInteger, schema.fields[1].kind);
+  for (size_t i = 2; i <= 5; ++i) {
+    EXPECT_EQ(memory::bm::BlockFieldKind::kSignedInteger, schema.fields[i].kind)
+        << "field=" << i;
+  }
+  EXPECT_EQ(memory::bm::BlockFieldKind::kFloatingPoint, schema.fields[6].kind);
+  EXPECT_EQ(memory::bm::BlockFieldKind::kFloatingPoint, schema.fields[7].kind);
+  EXPECT_EQ(memory::bm::BlockFieldKind::kOpaque, schema.fields[8].kind);
+  EXPECT_EQ(memory::bm::BlockFieldKind::kOpaque, schema.fields[9].kind);
+}
+
 TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyNulls) {
   {
     BmRowLayout layout({BIGINT(), INTEGER()}, {false, false}, 4 << 20);

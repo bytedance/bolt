@@ -16,9 +16,14 @@
 
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
 #include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
+#include "bolt/common/memory/bm/compress/CompressionRecord.h"
+#include "bolt/common/memory/bm/compress/OpenZlCompression.h"
 #include "bolt/common/memory/bm/compress/SpillRecordHeader.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <span>
 #include <string>
@@ -69,10 +74,60 @@ CompressionKind recordKind(const IoBuffer& record, size_t expectedRawSize) {
           .compressionKind);
 }
 
+BlockDescriptor mixedFixedRowDescriptor(uint32_t elementCount) {
+  return BlockDescriptor{
+      .schemaKind = BlockSchemaKind::kFixedRow,
+      .elementCount = elementCount,
+      .schema =
+          FixedRowBlockSchema{
+              .rowStride = 24,
+              .fields =
+                  {
+                      {BlockFieldKind::kSignedInteger, 0, 4},
+                      {BlockFieldKind::kUnsignedInteger, 6, 2},
+                      {BlockFieldKind::kFloatingPoint, 8, 8},
+                      {BlockFieldKind::kOpaque, 16, 4},
+                  },
+          },
+  };
+}
+
+std::string mixedFixedRowPayload(uint32_t elementCount, size_t tailBytes) {
+  constexpr size_t kRowStride = 24;
+  std::string payload(elementCount * kRowStride + tailBytes, '\0');
+  for (uint32_t row = 0; row < elementCount; ++row) {
+    auto* rowData = payload.data() + row * kRowStride;
+    for (size_t byte = 0; byte < kRowStride; ++byte) {
+      rowData[byte] = static_cast<char>((row * 13 + byte * 7) & 0xff);
+    }
+    const int32_t signedValue = -static_cast<int32_t>(row % 19);
+    const uint16_t unsignedValue = static_cast<uint16_t>(row % 23);
+    const double floatingValue = static_cast<double>(row % 11) * 0.25;
+    std::memcpy(rowData, &signedValue, sizeof(signedValue));
+    std::memcpy(rowData + 6, &unsignedValue, sizeof(unsignedValue));
+    std::memcpy(rowData + 8, &floatingValue, sizeof(floatingValue));
+  }
+  for (size_t byte = 0; byte < tailBytes; ++byte) {
+    payload[elementCount * kRowStride + byte] =
+        static_cast<char>((byte * 29) & 0xff);
+  }
+  return payload;
+}
+
 uint64_t recordStoredSize(const IoBuffer& record, size_t expectedRawSize) {
   return DecodeSpillRecordHeader(
              record.data(), record.length(), expectedRawSize)
       .storedSize;
+}
+
+TEST(CompressionConfigTest, DefaultsToZstdLevelThree) {
+  CompressionConfig config;
+
+  EXPECT_EQ(CompressionKind::kZstdFrame, config.kind);
+  EXPECT_EQ(ZstdStrategy::kOneShot, config.zstd.strategy);
+  EXPECT_EQ(3, config.zstd.compressionLevel);
+  EXPECT_EQ(256, config.openZl.graphCacheCapacity);
+  EXPECT_EQ(0, config.openZl.maxOutputBytes);
 }
 
 TEST_F(CompressionManagerTest, NoneBuildsUncompressedMallocBackedRecord) {
@@ -193,6 +248,282 @@ TEST_F(CompressionManagerTest, ZstdStrategiesWriteStableZstdFrameKind) {
         recordKind(result.record, original.size()));
     auto decoded = decodeRecord(manager, result.record, original.size());
     EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
+}
+
+TEST_F(
+    CompressionManagerTest,
+    OpenZlFallsBackToZstdWithoutSupportedDescriptor) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  CompressionManager manager(config);
+  const auto original = compressiblePayload(64 * 1024);
+  auto payload = makePayload(original);
+  const BlockDescriptor opaque{
+      .schemaKind = BlockSchemaKind::kOpaque,
+      .elementCount = 0,
+      .schema = OpaqueBlockSchema{},
+  };
+
+  for (const BlockDescriptor* descriptor : {
+           static_cast<const BlockDescriptor*>(nullptr),
+           &opaque,
+       }) {
+    auto result = manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()), descriptor);
+    EXPECT_EQ(CompressionKind::kZstdFrame, result.storedKind);
+    EXPECT_EQ(
+        CompressionKind::kZstdFrame,
+        recordKind(result.record, original.size()));
+    auto decoded = decodeRecord(manager, result.record, original.size());
+    EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
+
+  auto unsupported = BlockDescriptor{
+      .schemaKind = BlockSchemaKind::kFixedRow,
+      .elementCount = 128,
+      .schema =
+          FixedRowBlockSchema{
+              .rowStride = 3,
+              .fields = {{BlockFieldKind::kSignedInteger, 0, 3}},
+          },
+  };
+  auto result = manager.BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()), &unsupported);
+  EXPECT_EQ(CompressionKind::kZstdFrame, result.storedKind);
+}
+
+TEST_F(CompressionManagerTest, OpenZlFixedRowRoundTripsMixedFieldsGapsAndTail) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  CompressionManager manager(config);
+  constexpr uint32_t kElementCount = 2048;
+  const auto original = mixedFixedRowPayload(kElementCount, 19);
+  const auto descriptor = mixedFixedRowDescriptor(kElementCount);
+  auto payload = makePayload(original);
+
+  auto result = manager.BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()), &descriptor);
+
+  ASSERT_TRUE(result.compressed);
+  EXPECT_EQ(CompressionKind::kOpenZlFrame, result.storedKind);
+  EXPECT_EQ(
+      CompressionKind::kOpenZlFrame,
+      recordKind(result.record, original.size()));
+  auto decoded = decodeRecord(manager, result.record, original.size());
+  EXPECT_EQ(original, readPayload(decoded, original.size()));
+}
+
+TEST_F(
+    CompressionManagerTest,
+    OpenZlReportsCapacityShortageAndNormalCapacityRoundTrips) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  CompressionManager manager(config);
+  constexpr uint32_t kRows = 64;
+  const auto descriptor = mixedFixedRowDescriptor(kRows);
+  const auto original = mixedFixedRowPayload(kRows, 5);
+  auto payload = makePayload(original);
+
+  const auto fingerprint =
+      OpenZlDescriptorFingerprint(descriptor, original.size());
+  const auto compressor =
+      BuildOpenZlCompressor(descriptor, original.size(), fingerprint);
+  OpenZlCompressionContext context;
+  std::array<char, 1> undersizedOutput{};
+  const auto firstAttempt = OpenZlCompress(
+      context,
+      *compressor,
+      original.data(),
+      original.size(),
+      undersizedOutput.data(),
+      undersizedOutput.size());
+  EXPECT_TRUE(firstAttempt.capacityTooSmall);
+
+  auto result = manager.BuildSpillRecord(
+      std::span<const char>(payload.data(), payload.length()), &descriptor);
+
+  EXPECT_EQ(CompressionKind::kOpenZlFrame, result.storedKind);
+  auto decoded = decodeRecord(manager, result.record, original.size());
+  EXPECT_EQ(original, readPayload(decoded, original.size()));
+}
+
+TEST_F(CompressionManagerTest, OpenZlRespectsConfiguredOutputLimit) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  config.openZl.maxOutputBytes = 1;
+  CompressionManager manager(config);
+  constexpr uint32_t kRows = 64;
+  const auto descriptor = mixedFixedRowDescriptor(kRows);
+  const auto original = mixedFixedRowPayload(kRows, 5);
+  auto payload = makePayload(original);
+
+  try {
+    (void)manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()), &descriptor);
+    FAIL() << "expected the configured OpenZL output limit to fail";
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    EXPECT_NE(
+        message.find("openzl_error=dstCapacity_tooSmall"), std::string::npos);
+    EXPECT_NE(message.find("schema=fixed-row:"), std::string::npos);
+    EXPECT_NE(
+        message.find("raw_size=" + std::to_string(original.size())),
+        std::string::npos);
+    EXPECT_NE(message.find("capacity=1"), std::string::npos);
+    EXPECT_NE(message.find("max_output_bytes=1"), std::string::npos);
+  }
+}
+
+TEST_F(CompressionManagerTest, OpenZlGraphCacheReusesAndEvictsByFullShape) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  config.openZl.graphCacheCapacity = 1;
+  CompressionManager manager(config);
+
+  auto compress = [&](uint32_t rows, size_t tail) {
+    const auto original = mixedFixedRowPayload(rows, tail);
+    const auto descriptor = mixedFixedRowDescriptor(rows);
+    auto payload = makePayload(original);
+    auto result = manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()), &descriptor);
+    EXPECT_EQ(CompressionKind::kOpenZlFrame, result.storedKind);
+    auto decoded = decodeRecord(manager, result.record, original.size());
+    EXPECT_EQ(original, readPayload(decoded, original.size()));
+  };
+
+  compress(64, 5);
+  compress(64, 5);
+  compress(65, 5);
+  compress(64, 5);
+}
+
+TEST_F(CompressionManagerTest, OpenZlZeroCapacityDisablesGraphCache) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  config.openZl.graphCacheCapacity = 0;
+  CompressionManager manager(config);
+  const auto original = mixedFixedRowPayload(64, 0);
+  const auto descriptor = mixedFixedRowDescriptor(64);
+  auto payload = makePayload(original);
+
+  for (size_t i = 0; i < 2; ++i) {
+    auto result = manager.BuildSpillRecord(
+        std::span<const char>(payload.data(), payload.length()), &descriptor);
+    auto decoded = decodeRecord(manager, result.record, original.size());
+    EXPECT_EQ(original, readPayload(decoded, original.size()));
+  }
+}
+
+TEST_F(CompressionManagerTest, OpenZlGraphAndContextsSupportConcurrentUse) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  CompressionManager manager(config);
+  constexpr uint32_t kRows = 512;
+  constexpr size_t kThreads = 8;
+  constexpr size_t kIterations = 10;
+  const auto original = mixedFixedRowPayload(kRows, 11);
+  const auto descriptor = mixedFixedRowDescriptor(kRows);
+
+  std::vector<std::future<bool>> futures;
+  for (size_t thread = 0; thread < kThreads; ++thread) {
+    futures.push_back(std::async(std::launch::async, [&] {
+      for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+        auto payload = makePayload(original);
+        auto result = manager.BuildSpillRecord(
+            std::span<const char>(payload.data(), payload.length()),
+            &descriptor);
+        auto decoded = decodeRecord(manager, result.record, original.size());
+        if (readPayload(decoded, original.size()) != original) {
+          return false;
+        }
+      }
+      return true;
+    }));
+  }
+  for (auto& future : futures) {
+    EXPECT_TRUE(future.get());
+  }
+}
+
+TEST_F(
+    CompressionManagerTest,
+    OpenZlFrameUsesUniversalDecoderAndRejectsDamage) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  const auto original = mixedFixedRowPayload(256, 7);
+  const auto descriptor = mixedFixedRowDescriptor(256);
+  auto payload = makePayload(original);
+  IoBuffer record;
+  {
+    CompressionManager writer(config);
+    record = writer
+                 .BuildSpillRecord(
+                     std::span<const char>(payload.data(), payload.length()),
+                     &descriptor)
+                 .record;
+  }
+
+  CompressionManager reader(CompressionConfig{});
+  auto decoded = decodeRecord(reader, record, original.size());
+  EXPECT_EQ(original, readPayload(decoded, original.size()));
+  EXPECT_THROW(
+      decodeRecord(reader, record, original.size() + 1), std::exception);
+
+  const auto header =
+      DecodeSpillRecordHeader(record.data(), record.length(), original.size());
+  std::memset(
+      SpillRecordBody(record), 0, std::min<uint64_t>(header.storedSize, 32));
+  try {
+    reader.DecodeSpillRecord(
+        std::span<const char>(record.data(), record.length()),
+        original.size(),
+        nullptr,
+        nullptr,
+        123);
+    FAIL() << "expected damaged OpenZL frame to fail";
+  } catch (const std::exception& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("block_id=123"), std::string::npos);
+  }
+}
+
+TEST_F(
+    CompressionManagerTest,
+    OpenZlEvictedFramesSurviveWriterManagerDestruction) {
+  CompressionConfig config;
+  config.kind = CompressionKind::kOpenZlFrame;
+  config.minCompressBytes = 1;
+  config.openZl.graphCacheCapacity = 1;
+
+  std::vector<std::string> originals;
+  std::vector<IoBuffer> records;
+  {
+    CompressionManager writer(config);
+    for (const uint32_t rows : {64, 65}) {
+      originals.push_back(mixedFixedRowPayload(rows, 5));
+      const auto descriptor = mixedFixedRowDescriptor(rows);
+      auto payload = makePayload(originals.back());
+      auto result = writer.BuildSpillRecord(
+          std::span<const char>(payload.data(), payload.length()), &descriptor);
+      ASSERT_EQ(CompressionKind::kOpenZlFrame, result.storedKind);
+      records.push_back(std::move(result.record));
+    }
+  }
+
+  CompressionManager reader(CompressionConfig{});
+  ASSERT_EQ(originals.size(), records.size());
+  for (size_t i = 0; i < records.size(); ++i) {
+    auto decoded = decodeRecord(reader, records[i], originals[i].size());
+    EXPECT_EQ(originals[i], readPayload(decoded, originals[i].size()));
   }
 }
 

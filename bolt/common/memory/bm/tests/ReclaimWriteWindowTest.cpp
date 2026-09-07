@@ -70,7 +70,10 @@ TEST(ReclaimWriteWindowTest, SubmitAndHarvestCompletesSpillLifecycle) {
   ReclaimWriteWindow window{
       2,
       IoPriority::Medium,
-      [](IoBuffer& payload, size_t rawSize, IoPriority priority) {
+      [](IoBuffer& payload,
+         size_t rawSize,
+         IoPriority priority,
+         std::shared_ptr<const BlockDescriptor>) {
         EXPECT_TRUE(payload.valid());
         EXPECT_EQ(4096, rawSize);
         EXPECT_EQ(IoPriority::Medium, priority);
@@ -94,6 +97,34 @@ TEST(ReclaimWriteWindowTest, SubmitAndHarvestCompletesSpillLifecycle) {
   EXPECT_EQ(0, window.pendingCount());
 }
 
+TEST(ReclaimWriteWindowTest, SubmitPassesDescriptor) {
+  BufferManagerStatsCollector accounting;
+  auto block = makeUnpinnedResidentBlock(4096);
+  auto descriptor = std::make_shared<const BlockDescriptor>(BlockDescriptor{
+      .schemaKind = BlockSchemaKind::kFixedRow,
+      .elementCount = 64,
+      .schema = FixedRowBlockSchema{.rowStride = 16, .fields = {}},
+  });
+  block->descriptor = descriptor;
+  accounting.RecordAllocate(*block);
+  accounting.OnResidentUnpinned(*block);
+
+  ReclaimWriteWindow window{
+      1,
+      IoPriority::Medium,
+      [&](IoBuffer&,
+          size_t rawSize,
+          IoPriority,
+          std::shared_ptr<const BlockDescriptor> submittedDescriptor) {
+        EXPECT_EQ(descriptor, submittedDescriptor);
+        return makeCompletedWrite(rawSize);
+      },
+      accounting};
+
+  window.Submit(block);
+  EXPECT_TRUE(window.HarvestNext().ok());
+}
+
 TEST(ReclaimWriteWindowTest, SubmitFailurePropagatesWithoutRollback) {
   BufferManagerStatsCollector accounting;
   auto block = makeUnpinnedResidentBlock(4096);
@@ -103,9 +134,8 @@ TEST(ReclaimWriteWindowTest, SubmitFailurePropagatesWithoutRollback) {
   ReclaimWriteWindow window{
       2,
       IoPriority::Medium,
-      [](IoBuffer&, size_t, IoPriority) -> SpillWriteFuture {
-        throw std::runtime_error("submit failed");
-      },
+      [](IoBuffer&, size_t, IoPriority, std::shared_ptr<const BlockDescriptor>)
+          -> SpillWriteFuture { throw std::runtime_error("submit failed"); },
       accounting};
 
   EXPECT_THROW(window.Submit(block), std::runtime_error);
@@ -128,7 +158,11 @@ TEST(ReclaimWriteWindowTest, HarvestIoFailurePropagatesWithoutRollback) {
   ReclaimWriteWindow window{
       2,
       IoPriority::Medium,
-      [&submitCount](IoBuffer&, size_t rawSize, IoPriority) {
+      [&submitCount](
+          IoBuffer&,
+          size_t rawSize,
+          IoPriority,
+          std::shared_ptr<const BlockDescriptor>) {
         ++submitCount;
         if (submitCount == 1) {
           return makeFailedWrite();
@@ -184,7 +218,11 @@ TEST(SpillWriteDriverTest, SpillsCandidatesWithFakeWrites) {
   SpillWriteDriver driver{
       1,
       IoPriority::Medium,
-      [&submitCount](IoBuffer& payload, size_t rawSize, IoPriority priority) {
+      [&submitCount](
+          IoBuffer& payload,
+          size_t rawSize,
+          IoPriority priority,
+          std::shared_ptr<const BlockDescriptor>) {
         EXPECT_TRUE(payload.valid());
         EXPECT_EQ(IoPriority::Medium, priority);
         ++submitCount;

@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/memory/bm/BlockDescriptor.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 
@@ -43,13 +44,17 @@ class CompressionManager {
   CompressionManager(const CompressionManager&) = delete;
   CompressionManager& operator=(const CompressionManager&) = delete;
 
-  CompressionRecordResult BuildSpillRecord(std::span<const char> payload);
+  CompressionRecordResult BuildSpillRecord(
+      std::span<const char> payload,
+      const BlockDescriptor* descriptor = nullptr);
 
   IoBuffer DecodeSpillRecord(
       std::span<const char> record,
       uint64_t expectedRawSize,
       MemoryPool* outputPool,
-      uint64_t* decompressionTimeUs);
+      uint64_t* decompressionTimeUs,
+      uint64_t blockId = 0,
+      CompressionKind* storedKindOut = nullptr);
 
  private:
   struct Impl;

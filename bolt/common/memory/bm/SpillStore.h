@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/common/memory/MemoryPool.h"
+#include "bolt/common/memory/bm/BlockDescriptor.h"
 #include "bolt/common/memory/bm/SpillStoreConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionConfig.h"
 #include "bolt/common/memory/bm/compress/CompressionManager.h"
@@ -35,6 +36,8 @@ struct SpillWriteResult {
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
   uint64_t compressionTimeUs{0};
+  uint64_t futureWaitTimeUs{0};
+  compress::CompressionKind storedKind{compress::CompressionKind::kNone};
   bool compressed{false};
 
   bool ok() const {
@@ -46,6 +49,7 @@ struct SpillWriteMetadata {
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
   uint64_t compressionTimeUs{0};
+  compress::CompressionKind storedKind{compress::CompressionKind::kNone};
   bool compressed{false};
 };
 
@@ -70,6 +74,8 @@ struct SpillReadResult {
   uint64_t rawBytes{0};
   uint64_t physicalBytes{0};
   uint64_t decompressionTimeUs{0};
+  uint64_t futureWaitTimeUs{0};
+  compress::CompressionKind storedKind{compress::CompressionKind::kNone};
 
   bool ok() const {
     return io.ok();
@@ -83,7 +89,8 @@ class SpillReadFuture {
       std::future<IoResult> rawFuture,
       std::shared_ptr<compress::CompressionManager> compression,
       MemoryPool* pool,
-      size_t expectedRawSize);
+      size_t expectedRawSize,
+      uint64_t blockId = 0);
 
   SpillReadResult get();
 
@@ -92,6 +99,7 @@ class SpillReadFuture {
   std::shared_ptr<compress::CompressionManager> compression_;
   MemoryPool* pool_{nullptr};
   size_t expectedRawSize_{0};
+  uint64_t blockId_{0};
 };
 
 class SpillStore {
@@ -99,13 +107,17 @@ class SpillStore {
   SpillStore(SpillStoreConfig config, MemoryPool* pool);
   ~SpillStore();
 
-  SpillWriteFuture
-  SubmitWriteBlock(IoBuffer& payload, size_t rawSize, IoPriority priority);
+  SpillWriteFuture SubmitWriteBlock(
+      IoBuffer& payload,
+      size_t rawSize,
+      IoPriority priority,
+      std::shared_ptr<const BlockDescriptor> descriptor);
 
   SpillReadFuture SubmitReadBlock(
       const ManagedFileSegment& segment,
       size_t expectedRawSize,
-      IoPriority priority);
+      IoPriority priority,
+      uint64_t blockId = 0);
 
  private:
   FileAllocateResult AllocateSegment(size_t size);

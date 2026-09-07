@@ -70,6 +70,25 @@ void SubtractOrSaturate(
   value -= delta;
 }
 
+BufferManagerCodecStats& CodecStats(
+    BufferManagerStats& stats,
+    compress::CompressionKind kind) {
+  switch (kind) {
+    case compress::CompressionKind::kNone:
+      return stats.spillNone;
+    case compress::CompressionKind::kLz4Block:
+      return stats.spillLz4;
+    case compress::CompressionKind::kZstdFrame:
+      return stats.spillZstd;
+    case compress::CompressionKind::kSnappyRaw:
+      return stats.spillSnappy;
+    case compress::CompressionKind::kOpenZlFrame:
+      return stats.spillOpenZl;
+  }
+  BOLT_UNREACHABLE(
+      "Unsupported BM compression kind {}", static_cast<int>(kind));
+}
+
 } // namespace
 
 std::vector<BufferManagerTagStats> nonEmptyTagStats(
@@ -114,8 +133,16 @@ std::string toDebugString(
       << ", spill_physical_write_bytes=" << stats.spillPhysicalWriteBytes
       << ", spill_physical_read_bytes=" << stats.spillPhysicalReadBytes
       << ", spill_compressed_blocks=" << stats.spillCompressedBlocks
+      << ", spill_uncompressed_blocks=" << stats.spillUncompressedBlocks
+      << ", spill_lz4_blocks=" << stats.spillLz4Blocks
+      << ", spill_zstd_blocks=" << stats.spillZstdBlocks
+      << ", spill_snappy_blocks=" << stats.spillSnappyBlocks
+      << ", spill_openzl_blocks=" << stats.spillOpenZlBlocks
       << ", spill_compression_time_us=" << stats.spillCompressionTimeUs
       << ", spill_decompression_time_us=" << stats.spillDecompressionTimeUs
+      << ", spill_write_future_wait_time_us="
+      << stats.spillWriteFutureWaitTimeUs
+      << ", spill_read_future_wait_time_us=" << stats.spillReadFutureWaitTimeUs
       << ", file_allocate_failures=" << stats.fileAllocateFailures
       << ", file_free_failures=" << stats.fileFreeFailures
       << ", read_io_failures=" << stats.readIoFailures
@@ -290,6 +317,13 @@ void BufferManagerStatsCollector::OnReadCompleted(
   stats_.spillReadBytes += memory.size;
   stats_.spillPhysicalReadBytes += read.physicalBytes;
   stats_.spillDecompressionTimeUs += read.decompressionTimeUs;
+  stats_.spillReadFutureWaitTimeUs += read.futureWaitTimeUs;
+  auto& codec = CodecStats(stats_, read.storedKind);
+  ++codec.readCount;
+  codec.logicalReadBytes += memory.size;
+  codec.physicalReadBytes += read.physicalBytes;
+  codec.decompressionTimeUs += read.decompressionTimeUs;
+  codec.readFutureWaitTimeUs += read.futureWaitTimeUs;
 
   auto& tagStats = MutableTagStats(memory.tag);
   SubtractOrSaturate(
@@ -335,8 +369,32 @@ void BufferManagerStatsCollector::OnSpillCompleted(
     const SpillWriteResult& write) {
   stats_.spillPhysicalWriteBytes += write.physicalBytes;
   stats_.spillCompressionTimeUs += write.compressionTimeUs;
+  stats_.spillWriteFutureWaitTimeUs += write.futureWaitTimeUs;
+  auto& codec = CodecStats(stats_, write.storedKind);
+  ++codec.writeCount;
+  codec.logicalWriteBytes += write.rawBytes;
+  codec.physicalWriteBytes += write.physicalBytes;
+  codec.compressionTimeUs += write.compressionTimeUs;
+  codec.writeFutureWaitTimeUs += write.futureWaitTimeUs;
   if (write.compressed) {
     ++stats_.spillCompressedBlocks;
+  }
+  switch (write.storedKind) {
+    case compress::CompressionKind::kNone:
+      ++stats_.spillUncompressedBlocks;
+      break;
+    case compress::CompressionKind::kLz4Block:
+      ++stats_.spillLz4Blocks;
+      break;
+    case compress::CompressionKind::kZstdFrame:
+      ++stats_.spillZstdBlocks;
+      break;
+    case compress::CompressionKind::kSnappyRaw:
+      ++stats_.spillSnappyBlocks;
+      break;
+    case compress::CompressionKind::kOpenZlFrame:
+      ++stats_.spillOpenZlBlocks;
+      break;
   }
 
   SubtractOrSaturate(

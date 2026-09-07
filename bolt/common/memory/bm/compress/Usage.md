@@ -25,10 +25,11 @@ config.spillStoreConfig.compressionConfig.zstd.compressionLevel = 3;
 auto bm = BufferManager::Create(parentPool, std::move(config));
 ```
 
-Compression is enabled by default with `compress::CompressionKind::kLz4Block`.
-Blocks smaller than `minCompressBytes` are stored uncompressed. First-version
-BM spill compression does not perform compression-ratio probing; if compression
-is attempted and succeeds, the compressed payload is written.
+Compression is enabled by default with `compress::CompressionKind::kZstdFrame`
+at compression level 3 using `ZstdStrategy::kOneShot`. Blocks smaller than
+`minCompressBytes` are stored uncompressed. First-version BM spill compression
+does not perform compression-ratio probing; if compression is attempted and
+succeeds, the compressed payload is written.
 
 ## Compression Kinds
 

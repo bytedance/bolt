@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/bm/BlockDescriptor.h"
 #include "bolt/type/StringView.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/TypeAliases.h"
@@ -25,6 +26,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace bytedance::bolt {
@@ -113,6 +115,9 @@ class BmRowLayout {
   FOLLY_ALWAYS_INLINE uint32_t rowSize() const {
     return fixedRowSize_;
   }
+
+  std::shared_ptr<const memory::bm::BlockDescriptor> makeBlockDescriptor(
+      uint32_t elementCount) const;
 
   // BM owns variable-width payloads at chunk/block granularity, so nullable
   // null cells leave their fixed payload bytes undefined. Readers must check

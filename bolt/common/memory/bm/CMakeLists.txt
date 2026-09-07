@@ -1,3 +1,16 @@
+add_library(bolt_memory_bm_descriptor STATIC BlockDescriptor.cpp)
+
+target_compile_features(bolt_memory_bm_descriptor PUBLIC cxx_std_20)
+
+target_include_directories(bolt_memory_bm_descriptor PUBLIC ${PROJECT_SOURCE_DIR})
+
+target_link_libraries(
+  bolt_memory_bm_descriptor
+  PUBLIC
+    bolt_common_base
+    bolt_exception
+)
+
 add_subdirectory(base)
 add_subdirectory(io)
 add_subdirectory(file)
@@ -26,6 +39,7 @@ target_link_libraries(
   bolt_memory_bm
   PUBLIC
     bolt_memory_bm_base
+    bolt_memory_bm_descriptor
     bolt_memory_bm_file
     bolt_memory_bm_io
     bolt_memory_bm_compress

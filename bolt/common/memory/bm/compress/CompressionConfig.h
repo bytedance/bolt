@@ -26,6 +26,7 @@ enum class CompressionKind : uint32_t {
   kLz4Block = 1,
   kZstdFrame = 2,
   kSnappyRaw = 3,
+  kOpenZlFrame = 4,
 };
 
 enum class Lz4Strategy : uint8_t {
@@ -59,12 +60,19 @@ struct SnappyOptions {
   int compressionLevel{0};
 };
 
+struct OpenZlOptions {
+  size_t graphCacheCapacity{256};
+  // Zero means that the compressed output size is unlimited.
+  size_t maxOutputBytes{0};
+};
+
 struct CompressionConfig {
-  CompressionKind kind{CompressionKind::kLz4Block};
+  CompressionKind kind{CompressionKind::kZstdFrame};
   size_t minCompressBytes{256 * 1024};
   Lz4Options lz4;
   ZstdOptions zstd;
   SnappyOptions snappy;
+  OpenZlOptions openZl;
 };
 
 } // namespace bytedance::bolt::memory::bm::compress

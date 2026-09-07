@@ -4,6 +4,7 @@ add_library(
   CompressionManager.cpp
   CompressionRecord.cpp
   Lz4Compression.cpp
+  OpenZlCompression.cpp
   SnappyCompression.cpp
   SpillRecordHeader.cpp
   ZstdCompression.cpp
@@ -16,10 +17,12 @@ target_include_directories(bolt_memory_bm_compress PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(
   bolt_memory_bm_compress
   PUBLIC
+    bolt_memory_bm_descriptor
     bolt_common_base
     bolt_common_compression
     bolt_exception
     lz4::lz4
+    OpenZL::openzl
     zstd::libzstd_static
     Snappy::snappy
     glog::glog

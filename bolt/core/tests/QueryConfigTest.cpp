@@ -57,6 +57,19 @@ TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
   EXPECT_EQ(configured.parquetReaderImplicitCastMask(), -1);
 }
 
+TEST_F(QueryConfigTest, bufferManagerSpillCompressionKind) {
+  auto defaultConfig = QueryCtx::create(nullptr, QueryConfig{{}});
+  EXPECT_TRUE(
+      defaultConfig->queryConfig().bufferManagerSpillCompressionKind().empty());
+
+  auto configured = QueryCtx::create(
+      nullptr,
+      QueryConfig{
+          {{QueryConfig::kBufferManagerSpillCompressionKind, "openzl"}}});
+  EXPECT_EQ(
+      "openzl", configured->queryConfig().bufferManagerSpillCompressionKind());
+}
+
 TEST_F(QueryConfigTest, setConfig) {
   std::string path = "/tmp/setConfig";
   std::unordered_map<std::string, std::string> configData(
