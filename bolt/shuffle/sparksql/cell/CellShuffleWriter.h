@@ -78,6 +78,9 @@ class CellShuffleWriter final : public ShuffleWriter {
   /// The sizing budget resolved at init; scales the reclaim run-density
   /// floor.
   int64_t budgetBytes_{0};
+  /// Data bytes required before a reclaim is honored with a run: an
+  /// eighth of the pool capacity (budget-derived when unlimited).
+  int64_t reclaimDataFloorBytes_{0};
 
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
