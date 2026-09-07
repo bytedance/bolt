@@ -28,8 +28,8 @@
  * --------------------------------------------------------------------------
  */
 
-#include "bolt/dwio/common/BitPackDecoder.h"
 #include "bolt/dwio/parquet/reader/RleBpDecoder.h"
+#include "bolt/dwio/common/BitPackDecoder.h"
 
 #include <arrow/util/rle_encoding.h> // @manual
 #include <gtest/gtest.h>
@@ -41,8 +41,7 @@ using bytedance::bolt::parquet::RleBpDecoder;
 
 TEST(RleBpDecoderDiagnosticTest, EmptyHeaderIncludesRoleAndBounds) {
   const char input[] = {0};
-  RleBpDecoder decoder(
-      input, input, 1, "definition-level", 7, 11, 13);
+  RleBpDecoder decoder(input, input, 1, "definition-level", 7, 11, 13);
   uint64_t output = 0;
 
   try {
@@ -58,8 +57,7 @@ TEST(RleBpDecoderDiagnosticTest, EmptyHeaderIncludesRoleAndBounds) {
     EXPECT_NE(message.find("buffer_remaining=0"), std::string::npos);
     EXPECT_NE(message.find("requested_values=1"), std::string::npos);
     EXPECT_NE(
-        message.find("Invalid varint value: too few bytes"),
-        std::string::npos);
+        message.find("Invalid varint value: too few bytes"), std::string::npos);
   }
 }
 
@@ -83,8 +81,7 @@ TEST(RleBpDecoderDiagnosticTest, TruncatedHeaderIncludesDictionaryRole) {
 TEST(RleBpDecoderDiagnosticTest, ReportsTruncatedDefinitionLevelCount) {
   // Two RLE runs encode 8 + 803 zero definition levels. The page header
   // claims 827 values, so the final request exposes a 16-level shortfall.
-  const char input[] = {
-      0x10, 0x00, static_cast<char>(0xc6), 0x0c, 0x00};
+  const char input[] = {0x10, 0x00, static_cast<char>(0xc6), 0x0c, 0x00};
   RleBpDecoder decoder(
       input, input + sizeof(input), 1, "definition-level", 0, 124, 1, 827);
   std::vector<uint64_t> output(bits::nwords(827));
@@ -94,8 +91,7 @@ TEST(RleBpDecoderDiagnosticTest, ReportsTruncatedDefinitionLevelCount) {
     FAIL() << "Expected a short definition-level stream to fail";
   } catch (const std::exception& error) {
     const std::string message = error.what();
-    EXPECT_NE(
-        message.find("PARQUET_INVALID_LEVEL_COUNT"), std::string::npos);
+    EXPECT_NE(message.find("PARQUET_INVALID_LEVEL_COUNT"), std::string::npos);
     EXPECT_NE(message.find("role=definition-level"), std::string::npos);
     EXPECT_NE(message.find("column=124"), std::string::npos);
     EXPECT_NE(message.find("page=1"), std::string::npos);
