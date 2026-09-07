@@ -90,19 +90,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
         ? (int64_t{1} << 30)
         : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
   }
-  budgetBytes_ = budget;
-  {
-    const int64_t capacity = boltPool_->maxCapacity();
-    const bool capacityKnown = capacity > 0 && capacity <= (int64_t{1} << 40);
-    reclaimDataFloorBytes_ = (capacityKnown ? capacity : budget) / 8;
-    if (cellOpts.cellMemoryCapBytes > 0) {
-      // A tight self-cap is the working-set ceiling; the floor must stay
-      // below it or the guard would refuse until the escalation valve on
-      // every single reclaim.
-      reclaimDataFloorBytes_ =
-          std::min(reclaimDataFloorBytes_, cellOpts.cellMemoryCapBytes / 2);
-    }
-  }
   const int64_t perStream = budget / 8 / numPartitions_ / numStreams;
   const int64_t cellCap =
       std::min<int64_t>(cellOpts.maxDataCellBytes, cellOpts.chunkBytes / 4);
@@ -381,10 +368,13 @@ void CellShuffleWriter::spillRunNow() {
   if (spilling_ || !initialized_ || cells_->totalBytes() == 0) {
     return;
   }
-  reclaimRefusals_ = 0;
   spilling_ = true;
   output_->spillRun(windowInput());
   cells_->releaseAll();
+  // Chunk-packed freelist: the refill after this spill fills the lowest
+  // chunks first, so a reclaim landing mid-refill can shrink the
+  // untouched tail chunks away instead of finding everything scattered.
+  allocator_->packFreelist();
   spilling_ = false;
 }
 
@@ -417,63 +407,39 @@ void CellShuffleWriter::maybeCheckpoint() {
 }
 
 arrow::Status CellShuffleWriter::reclaimFixedSize(
-    int64_t /*size*/,
+    int64_t size,
     int64_t* actual) {
   *actual = 0;
   if (!initialized_ || spilling_ || stopped_) {
     return arrow::Status::OK();
   }
-  const auto& cellOpts = options_.cellOptions;
-  if (allocator_->allocatedBytes() < 2 * cellOpts.chunkBytes) {
-    // Below two chunks the return could never be worth a run. Still hand
-    // back what is free: empty chunks and reservation slack.
-    *actual = allocator_->shrink();
-    boltPool_->release();
-    return arrow::Status::OK();
-  }
-  // Run-quality guard. A reclaim-driven run drains every (partition,
-  // stream) chain and writes a segment - each with a 1 + 8 + 8 x streams
-  // header and its own spill compression context - per non-empty
-  // partition. When other operators allocate frequently, honoring every
-  // arbitration with little resident data would shred the spill file
-  // into near-empty runs whose fixed costs dwarf the memory returned.
-  // A voluntary run therefore requires BOTH: enough real data (an eighth
-  // of the pool capacity - neighbours must not be able to trim the
-  // writer's working set to a sliver) AND at least half of the chunk
-  // memory actually holding data (a low fill means the cells are about
-  // to fill anyway; spilling now would write a small run and re-grow
-  // immediately). The guard is self-limiting in time - a writer ingests
-  // continuously - and an escalation valve keeps it from ever starving
-  // a genuinely stuck requester: a refusal still returns free chunks
-  // and reservation slack, and sustained pressure (a third consecutive
-  // ask while still refused) is honored regardless, one fragmented run
-  // being a far lesser evil than an OOM. The writer's own growth path
-  // (a failed reserve before a chunk grab) stays unguarded: that one
-  // must spill to make progress.
-  const int64_t dataBytes = static_cast<int64_t>(cells_->totalBytes());
-  const bool enoughData = dataBytes >= reclaimDataFloorBytes_;
-  const bool denseEnough = 2 * dataBytes >= allocator_->allocatedBytes();
-  if (!(enoughData && denseEnough) &&
-      ++reclaimRefusals_ <= kMaxReclaimRefusals) {
-    *actual = allocator_->shrink();
-    boltPool_->release();
+  // Free memory first, without touching data: chunks that hold no live
+  // cell (the freelist is chunk-packed after every spill, so mid-refill
+  // the untouched tail chunks are all returnable) and reservation slack.
+  *actual = allocator_->shrink();
+  boltPool_->release();
+  // A run costs an O(partitions x streams) drain and a segment with its
+  // own header and spill compression context per non-empty partition, so
+  // it is produced only when actually needed: when the free memory above
+  // already covers the request, or the writer holds nothing meaningful,
+  // no run is written. Anything beyond that means the requester's need
+  // is real and unmet - a small run is a far lesser evil than an OOM,
+  // and the allocation churn case never reaches here (its small asks are
+  // satisfied by the idle memory).
+  if ((size > 0 && *actual >= size) ||
+      allocator_->allocatedBytes() <
+          2 * options_.cellOptions.chunkBytes) {
     return arrow::Status::OK();
   }
   spillRunNow();
-  *actual = allocator_->shrink();
+  *actual += allocator_->shrink();
   // Freed chunks alone are not enough: the reservation built up by the
   // chunk-grow choke point must go back too, or the arbitrator's requester
   // still sees no room (the standard spill-then-release() pattern).
   boltPool_->release();
   // Close the window at the next batch boundary only when the resident
-  // null-bitmap state is actually worth returning. Requesting a seal on
-  // EVERY reclaim turns memory-pressure churn into a checkpoint storm:
-  // each seal walks every (partition, stream) cache and writes a payload
-  // header and null region per partition, which at tens of thousands of
-  // partitions costs seconds of work and megabytes of file overhead per
-  // window - while the data cells were already freed by the spill above.
-  // Large null state still seals through maybeCheckpoint's own
-  // nullMemLimitBytes trigger regardless of this request.
+  // null-bitmap state is actually worth returning; requesting a seal on
+  // every reclaim turns pressure churn into a checkpoint storm.
   if (nulls_->allocatedBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
     checkpointRequested_ = true;
   }
