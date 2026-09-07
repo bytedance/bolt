@@ -126,7 +126,7 @@ endif
 
 # Note that, `benchmarks` and `test coverage` shouldn't  be included in conan's options/configs,
 # Control whether to build benchmarks
-BOLT_BUILD_BENCHMARKS ?= "OFF"
+BOLT_BUILD_BENCHMARKS ?= "ON"
 # Control whether to build only basic benchmarks
 BOLT_BUILD_BENCHMARKS_BASIC ?= "OFF"
 # Control whether to build tests with coverage instrumentation

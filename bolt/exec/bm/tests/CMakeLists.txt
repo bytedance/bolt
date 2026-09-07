@@ -2,6 +2,8 @@ include(GoogleTest)
 
 add_executable(
   bolt_exec_bm_test
+  ../benchmarks/BmRowContainerBenchmarkProfiles.cpp
+  BmRowContainerBenchmarkProfileTest.cpp
   BmMergeReadSessionTest.cpp
   BmPartitionTest.cpp
   BmRowContainerBatchTest.cpp
