@@ -15,7 +15,10 @@ This guide explains how to build and configure the Bolt devcontainer.
 
 ```bash
 # From the project root directory
-cd .github/runners && docker build -f .github/runners/Dockerfile.ci -t bolt-devcontainer:latest .
+docker build \
+  -f .github/runners/Dockerfile.ci \
+  -t bolt-devcontainer:latest \
+  .github/runners
 ```
 
 ## Building Worldwide and in Corporate Networks
@@ -47,12 +50,16 @@ download of debian packages is too slow.
 
 **Usage with Docker CLI:**
 ```bash
-docker build -f .github/runners/Dockerfile.ci --build-arg DEB_REGION="us" -t bolt-devcontainer:latest .
+docker build \
+  -f .github/runners/Dockerfile.ci \
+  --build-arg DEB_REGION="us" \
+  -t bolt-devcontainer:latest \
+  .github/runners
 ```
 
-### HTTPS_PROXY
+### `https_proxy`
 
-The `HTTPS_PROXY` argument allows you to specify an HTTPS proxy for
+The `https_proxy` argument allows you to specify an HTTPS proxy for
 network connections if you're behind a firewall.
 
 **Example value:**
@@ -64,12 +71,16 @@ network connections if you're behind a firewall.
    ```json
    "build": {
      "args": {
-       "HTTPS_PROXY": "http://proxy.company.com:8080"
+       "https_proxy": "http://proxy.company.com:8080"
      }
    }
    ```
 
 **Usage with Docker CLI:**
 ```bash
-docker build -f .github/runners/Dockerfile.ci --build-arg HTTPS_PROXY="http://proxy.company.com:8080" -t bolt-devcontainer:latest .
+docker build \
+  -f .github/runners/Dockerfile.ci \
+  --build-arg https_proxy="http://proxy.company.com:8080" \
+  -t bolt-devcontainer:latest \
+  .github/runners
 ```
