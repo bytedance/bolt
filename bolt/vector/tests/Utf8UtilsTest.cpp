@@ -183,6 +183,122 @@ TEST_F(Utf8UtilsTest, denseMalformedInputUsesRowBoundedScratchMemory) {
   EXPECT_LT(densePool->peakBytes() - bytesBefore, kMaxAdditionalBytes);
 }
 
+TEST_F(Utf8UtilsTest, fragmentedMalformedInputUsesBoundedScratchMemory) {
+  constexpr vector_size_t kNumRows = 10'000;
+  std::string value;
+  std::string expected;
+  for (int32_t i = 0; i < 32; ++i) {
+    value.append(
+        "\xD5"
+        "a",
+        2);
+    expected.append(
+        "\xEF\xBF\xBD"
+        "a",
+        4);
+  }
+
+  for (bool dictionary : {false, true}) {
+    SCOPED_TRACE(dictionary);
+    auto boundedPool = rootPool_->addLeafChild("fragmentedUtf8");
+    VectorMaker maker(boundedPool.get());
+    VectorPtr values = maker.flatVector<std::string>(
+        kNumRows, [&](vector_size_t) { return value; });
+    if (dictionary) {
+      auto indices = AlignedBuffer::allocate<vector_size_t>(
+          2 * kNumRows, boundedPool.get());
+      auto* rawIndices = indices->asMutable<vector_size_t>();
+      for (vector_size_t row = 0; row < 2 * kNumRows; ++row) {
+        rawIndices[row] = row % kNumRows;
+      }
+      values =
+          BaseVector::wrapInDictionary(nullptr, indices, 2 * kNumRows, values);
+    }
+    auto input = maker.rowVector({values});
+    const auto bytesBefore = boundedPool->currentBytes();
+
+    auto output =
+        utf8::replaceInvalidUtf8InTopLevelVarchars(input, boundedPool.get());
+
+    output->validate({});
+    EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
+    EXPECT_EQ(
+        expected, decodedStringAt(output->childAt(0), output->size() - 1));
+    EXPECT_LT(boundedPool->peakBytes() - bytesBefore, 4L << 20);
+  }
+}
+
+TEST_F(Utf8UtilsTest, longMixedMalformedStringsPreserveGroupingAndLifetime) {
+  const auto replacement = replacementRun(1);
+  const std::vector<std::pair<std::string, std::string>> fragments = {
+      {"\xD5", replacement},
+      {"\xE2\x82", replacement},
+      {"\xED\xA0\x80", replacement},
+      {"\xF0\x9F\x92", replacement},
+      {"\xE0\x80\x80", replacementRun(3)},
+      {"\xC2\xA2", "\xC2\xA2"},
+      {"\xE4\xB8\xAD", "\xE4\xB8\xAD"},
+      {"\xF0\x9F\x99\x82", "\xF0\x9F\x99\x82"},
+  };
+  std::vector<std::string> inputs;
+  std::vector<std::string> expected;
+  for (int32_t row = 0; row < 128; ++row) {
+    inputs.emplace_back(row, 'p');
+    expected.emplace_back(row, 'p');
+    for (int32_t part = 0; part < 512 + row; ++part) {
+      const auto& fragment = fragments[(part * 5 + row) % fragments.size()];
+      inputs.back().append(fragment.first).append("a");
+      expected.back().append(fragment.second).append("a");
+    }
+  }
+  auto input = makeRowVector({makeFlatVector<std::string>(inputs)});
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+  input.reset();
+  output->validate({});
+  for (vector_size_t row = 0; row < expected.size(); ++row) {
+    EXPECT_EQ(expected[row], decodedStringAt(output->childAt(0), row)) << row;
+  }
+}
+
+TEST_F(Utf8UtilsTest, sharesReplacementOnlyStringsWithNulls) {
+  constexpr vector_size_t kNumRows = 10'000;
+  auto boundedPool = rootPool_->addLeafChild("nullableMalformedUtf8");
+  VectorMaker maker(boundedPool.get());
+  auto values = maker.flatVector<std::string>(
+      kNumRows, [](vector_size_t) { return std::string(64, '\xD5'); });
+  values->setNull(0, true);
+  auto input = maker.rowVector({values});
+  const auto bytesBefore = boundedPool->currentBytes();
+
+  auto output =
+      utf8::replaceInvalidUtf8InTopLevelVarchars(input, boundedPool.get());
+
+  output->validate({});
+  EXPECT_TRUE(output->childAt(0)->isNullAt(0));
+  EXPECT_EQ(replacementRun(64), decodedStringAt(output->childAt(0), 1));
+  EXPECT_LT(boundedPool->peakBytes() - bytesBefore, 1L << 20);
+}
+
+TEST_F(Utf8UtilsTest, growingReplacementOnlyStringsUseBoundedMemory) {
+  constexpr vector_size_t kNumRows = 512;
+  auto boundedPool = rootPool_->addLeafChild("growingMalformedUtf8");
+  VectorMaker maker(boundedPool.get());
+  auto input = maker.rowVector(
+      {maker.flatVector<std::string>(kNumRows, [](vector_size_t row) {
+        return std::string(64 + row, '\xD5');
+      })});
+  const auto bytesBefore = boundedPool->currentBytes();
+  auto output =
+      utf8::replaceInvalidUtf8InTopLevelVarchars(input, boundedPool.get());
+  EXPECT_LT(boundedPool->peakBytes() - bytesBefore, 64L << 10);
+  input.reset();
+  output->validate({});
+  for (vector_size_t row = 0; row < kNumRows; ++row) {
+    EXPECT_EQ(
+        replacementRun(64 + row), decodedStringAt(output->childAt(0), row));
+  }
+}
+
 TEST_F(Utf8UtilsTest, sharesUniformReplacementOnlyOutputBuffer) {
   constexpr vector_size_t kNumRows = 100;
   constexpr int32_t kBytesPerRow = 65;
@@ -323,6 +439,21 @@ TEST_F(Utf8UtilsTest, sharesUnchangedFlatStringsWhenReplacementIsSparse) {
   output->validate({});
   EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
   EXPECT_EQ(valid, decodedStringAt(output->childAt(0), 1));
+}
+
+TEST_F(Utf8UtilsTest, releasesSourceBuffersWhenReplacementIsDense) {
+  const std::string valid(64, 'v');
+  std::vector<std::string> inputs(100, std::string(64, '\xD5'));
+  inputs.back() = valid;
+  auto input = makeRowVector({makeFlatVector<std::string>(inputs)});
+  auto sourceBuffer =
+      input->childAt(0)->as<FlatVector<StringView>>()->stringBuffers().front();
+  auto output = utf8::replaceInvalidUtf8InTopLevelVarchars(input, pool());
+  input.reset();
+  EXPECT_EQ(1, sourceBuffer->refCount());
+  output->validate({});
+  EXPECT_EQ(valid, decodedStringAt(output->childAt(0), 99));
+  EXPECT_EQ(replacementRun(64), decodedStringAt(output->childAt(0), 0));
 }
 
 TEST_F(Utf8UtilsTest, handlesSequenceAndDictionaryNulls) {

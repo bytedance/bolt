@@ -569,6 +569,7 @@ class HiveDataSink : public DataSink {
 
   const RowTypePtr inputType_;
   const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle_;
+  const bool replaceInvalidUtf8ForParquetSerde_;
   const ConnectorQueryCtx* const connectorQueryCtx_;
   const CommitStrategy commitStrategy_;
   const std::shared_ptr<const HiveConfig> hiveConfig_;

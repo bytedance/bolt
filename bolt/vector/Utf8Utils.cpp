@@ -224,31 +224,6 @@ FOLLY_ALWAYS_INLINE int32_t asciiPrefixLength(const char* data, int32_t size) {
   return offset;
 }
 
-// Fast validator for the common text shape of ordinary 3-byte code points
-// followed by an ASCII suffix. Other valid UTF-8 shapes fall back to scanUtf8.
-FOLLY_NOINLINE bool isValidThreeBytePrefixWithAsciiTail(
-    const char* data,
-    int32_t size) {
-  const auto threeByteSize = regularThreeBytePrefixLengthSimd(
-      reinterpret_cast<const uint8_t*>(data), size);
-  if (threeByteSize == 0) {
-    return false;
-  }
-  return threeByteSize +
-      asciiPrefixLength(data + threeByteSize, size - threeByteSize) ==
-      size;
-}
-
-struct MalformedRun {
-  vector_size_t row;
-  int32_t offset;
-  int32_t size;
-  int32_t replacements;
-};
-
-using MalformedRuns =
-    std::vector<MalformedRun, memory::StlAllocator<MalformedRun>>;
-
 FOLLY_ALWAYS_INLINE bool isSingleByteMalformed(
     const uint8_t* data,
     int32_t remaining) {
@@ -309,6 +284,9 @@ singleByteMalformedPrefixLength(const uint8_t* data, int32_t remaining) {
   if (!isSingleByteMalformed(data, remaining)) {
     return 0;
   }
+  if (remaining == 1 || data[1] <= 0x7F) {
+    return 1;
+  }
 
   constexpr uint32_t kFourLeadBytes = 0xC0C0C0C0U;
   if (remaining >= static_cast<int32_t>(sizeof(uint32_t)) &&
@@ -356,87 +334,14 @@ singleByteMalformedPrefixLength(const uint8_t* data, int32_t remaining) {
   return offset;
 }
 
-FOLLY_ALWAYS_INLINE void appendMalformedRun(
-    vector_size_t row,
-    int32_t offset,
-    int32_t size,
-    int32_t replacements,
-    MalformedRuns& malformed) {
-  if (!malformed.empty()) {
-    auto& previous = malformed.back();
-    if (previous.row == row && previous.offset + previous.size == offset) {
-      previous.size += size;
-      previous.replacements += replacements;
-      return;
-    }
-  }
-  malformed.push_back({row, offset, size, replacements});
-}
-
-// Scans forward without a separate validation pass. ASCII runs use xsimd and
-// ordinary 3-byte runs stay in a tight loop; other high-bit bytes enter the
-// OpenJDK-compatible UTF-8 state machine. Adjacent malformed units are
-// coalesced so dense invalid input uses one run per row instead of one record
-// per byte.
-int32_t scanUtf8(
-    vector_size_t row,
-    const char* data,
-    int32_t size,
-    MalformedRuns& malformed) {
-  const auto* bytes = reinterpret_cast<const uint8_t*>(data);
-  int32_t offset = 0;
-  int64_t outputSize = 0;
-  while (offset < size) {
-    if (bytes[offset] <= 0x7F) {
-      const auto asciiSize = asciiPrefixLength(data + offset, size - offset);
-      offset += asciiSize;
-      outputSize += asciiSize;
-      continue;
-    }
-
-    const auto malformedPrefix =
-        singleByteMalformedPrefixLength(bytes + offset, size - offset);
-    if (malformedPrefix > 0) {
-      const int64_t replacementBytes =
-          static_cast<int64_t>(malformedPrefix) * kReplacementSize;
-      appendMalformedRun(
-          row, offset, malformedPrefix, malformedPrefix, malformed);
-      offset += malformedPrefix;
-      outputSize += replacementBytes;
-      continue;
-    }
-
-    const auto validPrefix =
-        regularThreeBytePrefixLength(bytes + offset, size - offset);
-    if (validPrefix > 0) {
-      offset += validPrefix;
-      outputSize += validPrefix;
-      continue;
-    }
-
-    const auto [validSize, malformedSize] =
-        nextSegment(bytes + offset, size - offset);
-    if (malformedSize > 0) {
-      appendMalformedRun(row, offset, malformedSize, 1, malformed);
-      offset += malformedSize;
-      outputSize += kReplacementSize;
-    } else {
-      offset += validSize;
-      outputSize += validSize;
-    }
-  }
-
-  BOLT_USER_CHECK_LE(
-      outputSize,
-      kMaxStringSize,
-      "UTF-8 replacement result exceeds the maximum VARCHAR size");
-  return static_cast<int32_t>(outputSize);
-}
-
 FOLLY_ALWAYS_INLINE void writeReplacementRun(
     char* output,
     int32_t replacements) {
   BOLT_DCHECK_GT(replacements, 0);
+  if (replacements == 1) {
+    std::memcpy(output, kReplacement, kReplacementSize);
+    return;
+  }
   const auto seedCount = std::min(replacements, kReplacementsPerBlock);
   std::memcpy(output, kReplacementBlock.data(), seedCount * kReplacementSize);
   int32_t written = seedCount;
@@ -450,452 +355,415 @@ FOLLY_ALWAYS_INLINE void writeReplacementRun(
   }
 }
 
-VectorPtr buildReplacementOnlyVector(
-    const MalformedRuns& malformed,
-    vector_size_t numRows,
-    bool uniformReplacementCount,
-    size_t totalStringBytes,
-    uint64_t maxStringLength,
-    memory::MemoryPool* pool) {
-  const auto maxOutputSize = static_cast<int32_t>(maxStringLength);
-  auto newValues = AlignedBuffer::allocate<StringView>(numRows, pool);
-  auto* outputValues = newValues->asMutable<StringView>();
-
-  BufferPtr newStrings;
-  const char* replacementData;
-  if (StringView::isInline(maxOutputSize)) {
-    replacementData = kReplacementBlock.data();
-  } else {
-    newStrings = AlignedBuffer::allocate<char>(maxOutputSize, pool);
-    newStrings->setSize(maxOutputSize);
-    auto* mutableReplacementData = newStrings->asMutable<char>();
-    writeReplacementRun(
-        mutableReplacementData, maxOutputSize / kReplacementSize);
-    replacementData = mutableReplacementData;
-  }
-
-  if (uniformReplacementCount) {
-    std::fill_n(
-        outputValues,
-        numRows,
-        StringView(
-            replacementData,
-            malformed.front().replacements * kReplacementSize));
-  } else {
-    for (vector_size_t row = 0; row < numRows; ++row) {
-      outputValues[row] = StringView(
-          replacementData, malformed[row].replacements * kReplacementSize);
-    }
-  }
-
-  std::vector<BufferPtr> stringBuffers;
-  if (newStrings) {
-    stringBuffers.push_back(std::move(newStrings));
-  }
-  auto result = std::make_shared<FlatVector<StringView>>(
-      pool,
-      VARCHAR(),
-      nullptr,
-      numRows,
-      std::move(newValues),
-      std::move(stringBuffers),
-      SimpleVectorStats<StringView>{},
-      std::nullopt,
-      0);
-  result->setStringViewStats(
-      StringViewStats{totalStringBytes, maxStringLength});
-  return result;
-}
-
-// Constructs output using runs produced by scanUtf8. This performs memcpy and
-// replacement only; it does not inspect or decode UTF-8 bytes.
-FOLLY_ALWAYS_INLINE void writeFromRuns(
+// Enumerates malformed runs without retaining per-byte metadata. Analysis and
+// materialization share the same scanner and OpenJDK grouping rules.
+template <typename Consumer>
+void forEachMalformedRun(
     const char* data,
     int32_t size,
-    const MalformedRuns& malformed,
-    size_t begin,
-    size_t end,
-    char* output) {
-  int32_t inputOffset = 0;
-  int32_t outputOffset = 0;
-  for (auto index = begin; index < end; ++index) {
-    const auto& run = malformed[index];
-    BOLT_DCHECK_GE(run.offset, inputOffset);
-    BOLT_DCHECK_LE(run.offset + run.size, size);
-    const auto validSize = run.offset - inputOffset;
-    if (validSize > 0) {
-      std::memcpy(output + outputOffset, data + inputOffset, validSize);
-      outputOffset += validSize;
+    int32_t offset,
+    Consumer&& consume) {
+  const auto* bytes = reinterpret_cast<const uint8_t*>(data);
+  while (offset < size) {
+    if (bytes[offset] <= 0x7F) {
+      if (offset + 1 == size || bytes[offset + 1] > 0x7F) {
+        ++offset;
+      } else {
+        offset += asciiPrefixLength(data + offset, size - offset);
+      }
+      continue;
     }
-    writeReplacementRun(output + outputOffset, run.replacements);
-    outputOffset += run.replacements * kReplacementSize;
-    inputOffset = run.offset + run.size;
-  }
-  if (inputOffset < size) {
-    std::memcpy(output + outputOffset, data + inputOffset, size - inputOffset);
-  }
-}
-
-struct RowStr {
-  const char* data;
-  int32_t size;
-};
-
-// Unified reader across FLAT / CONSTANT / DICTIONARY / SEQUENCE wrappers.
-// BaseVector::wrappedVector() peels through any nesting of wrappers to the
-// underlying scalar storage; wrappedIndex() translates an outer row index
-// through dict indirection, sequence offsets, and constant mappings into a
-// position in the peeled base's raw values array. The peeled base for a
-// VARCHAR is either a FLAT<StringView> or a CONSTANT<StringView> holding a
-// raw value (valueVector_ = nullptr).
-struct PeeledVarchar {
-  const BaseVector* outer; // original (wrapped) vector, for isNullAt
-  const StringView* values; // rawValues on peeled FLAT, or &value_ on CONSTANT
-};
-
-inline PeeledVarchar peelVarchar(const BaseVector& v) {
-  // One wrappedVector() call recurses through all DICT / SEQUENCE /
-  // CONSTANT(valueVector_) / LAZY wrappers to the underlying scalar storage,
-  // which for VARCHAR must be a FLAT<StringView> or a "bare"
-  // CONSTANT<StringView> (valueVector_ == nullptr).
-  const BaseVector* base = v.wrappedVector();
-  const StringView* values;
-  if (base->encoding() == VectorEncoding::Simple::CONSTANT) {
-    values = base->asUnchecked<ConstantVector<StringView>>()->rawValues();
-  } else {
-    BOLT_CHECK_EQ(
-        base->encoding(),
-        VectorEncoding::Simple::FLAT,
-        "replaceInvalidUtf8InTopLevelVarchars: unexpected VARCHAR encoding {}",
-        static_cast<int>(base->encoding()));
-    values = base->asUnchecked<FlatVector<StringView>>()->rawValues();
-  }
-  return {&v, values};
-}
-
-inline RowStr
-readPeeled(const PeeledVarchar& pv, vector_size_t row, bool& isNull) {
-  isNull = pv.outer->isNullAt(row);
-  if (isNull)
-    return {nullptr, 0};
-  const vector_size_t idx = pv.outer->wrappedIndex(row);
-  const StringView& sv = pv.values[idx];
-  return {sv.data(), static_cast<int32_t>(sv.size())};
-}
-
-// Single-function FLAT builder.
-// The probe pass decodes every byte at most once and records coalesced
-// malformed runs. Returns nullptr without allocating output when no
-// replacement is needed. The construction pass uses these runs to copy into
-// one exactly-sized, contiguous buffer without decoding UTF-8 again.
-//
-// A non-virtual FLAT fast path covers the common case (plain FLAT child, no
-// outer nulls) used by Hive/Parquet writer for top-level varchar columns.
-VectorPtr buildSanitizedFlat(
-    const VectorPtr& child,
-    vector_size_t numRows,
-    const uint64_t* outerNulls,
-    memory::MemoryPool* pool) {
-  const bool plainFlatNoNulls = !outerNulls &&
-      child->encoding() == VectorEncoding::Simple::FLAT &&
-      !child->mayHaveNulls();
-
-  vector_size_t nullCount = 0;
-  size_t totalStringBytes = 0;
-  size_t changedStringBytes = 0;
-  uint64_t maxStringLength = 0;
-  MalformedRuns malformed{memory::StlAllocator<MalformedRun>(pool)};
-  constexpr vector_size_t kSampleRows = 8;
-  constexpr vector_size_t kMaxSampledRunReserve = 16 * 1024;
-
-  auto recordString = [&](int32_t outputSize, bool changed) {
-    maxStringLength = std::max<uint64_t>(maxStringLength, outputSize);
-    if (!StringView::isInline(outputSize)) {
-      totalStringBytes += static_cast<size_t>(outputSize);
-      if (changed) {
-        changedStringBytes += static_cast<size_t>(outputSize);
+    const auto malformedPrefix =
+        singleByteMalformedPrefixLength(bytes + offset, size - offset);
+    if (malformedPrefix > 0) {
+      consume(offset, malformedPrefix, malformedPrefix);
+      offset += malformedPrefix;
+      continue;
+    }
+    if (isRegularThreeByteLead(bytes[offset])) {
+      const auto remaining = size - offset;
+      // Short or interleaved code points do not amortize a SIMD call.
+      const auto validPrefix = remaining >= xsimd::batch<uint8_t>::size &&
+              isCont(bytes[offset + 1]) && isCont(bytes[offset + 2]) &&
+              isRegularThreeByteLead(bytes[offset + 3])
+          ? regularThreeBytePrefixLengthSimd(bytes + offset, remaining)
+          : regularThreeBytePrefixLength(bytes + offset, remaining);
+      if (validPrefix > 0) {
+        offset += validPrefix;
+        continue;
       }
     }
-  };
-
-  auto probeScalar = [&](vector_size_t row, const char* data, int32_t size) {
-    const auto malformedCount = malformed.size();
-    const auto outputSize = scanUtf8(row, data, size, malformed);
-    const bool changed = malformed.size() != malformedCount;
-    recordString(outputSize, changed);
-    return changed;
-  };
-
-  auto probeDenseLead = [&](vector_size_t row, const char* data, int32_t size) {
-    if (size == 0) {
-      probeScalar(row, data, size);
-      return false;
+    const auto [validSize, malformedSize] =
+        nextSegment(bytes + offset, size - offset);
+    if (malformedSize > 0) {
+      consume(offset, malformedSize, 1);
+      offset += malformedSize;
+    } else {
+      offset += validSize;
     }
-    const auto malformedSize = denseLeadMalformedPrefixLength(
-        reinterpret_cast<const uint8_t*>(data), size);
-    if (malformedSize != size) {
-      probeScalar(row, data, size);
-      return false;
-    }
+  }
+}
+
+struct MalformedRun {
+  int32_t offset;
+  int32_t length;
+  int32_t replacements;
+};
+
+constexpr int32_t kMaxCachedMalformedRuns = 64;
+using MalformedRuns = std::array<MalformedRun, kMaxCachedMalformedRuns>;
+
+struct StringAnalysis {
+  StringAnalysis(int32_t size, int32_t runs, bool onlyReplacement)
+      : outputSize(size), replacementOnly(onlyReplacement), runCount(runs) {}
+
+  // VARCHAR sizes fit in 31 bits. Keep the complete result in one register.
+  uint32_t outputSize : 31;
+  uint32_t replacementOnly : 1;
+  int32_t runCount;
+};
+static_assert(sizeof(StringAnalysis) == sizeof(uint64_t));
+
+FOLLY_NOINLINE StringAnalysis
+analyzeStringSuffix(StringView value, MalformedRuns& runs, int32_t prefix) {
+  const auto size = static_cast<int32_t>(value.size());
+  int64_t outputSize = size;
+  int32_t malformedBytes = 0;
+  int32_t runCount = 0;
+  forEachMalformedRun(
+      value.data(),
+      size,
+      prefix,
+      [&](int32_t offset, int32_t length, int32_t count) {
+        if (runCount < kMaxCachedMalformedRuns) {
+          runs[runCount] = {offset, length, count};
+        }
+        ++runCount;
+        malformedBytes += length;
+        outputSize += static_cast<int64_t>(count) * kReplacementSize - length;
+      });
+  BOLT_USER_CHECK_LE(
+      outputSize,
+      kMaxStringSize,
+      "UTF-8 replacement result exceeds the maximum VARCHAR size");
+  return {
+      static_cast<int32_t>(outputSize),
+      runCount,
+      runCount > 0 && malformedBytes == size};
+}
+
+// Keep common complete strings out of the malformed-run state machine.
+FOLLY_ALWAYS_INLINE StringAnalysis
+analyzeString(const StringView& value, MalformedRuns& runs) {
+  const auto size = static_cast<int32_t>(value.size());
+  const auto* data = reinterpret_cast<const uint8_t*>(value.data());
+  int32_t prefix = 0;
+  if (size > 0 && data[0] <= 0x7F) {
+    prefix = asciiPrefixLength(value.data(), size);
+  } else if (
+      size >= sizeof(uint32_t) &&
+      (folly::loadUnaligned<uint32_t>(data) & 0xC0C0C0C0U) == 0xC0C0C0C0U &&
+      denseLeadMalformedPrefixLength(data, size) == size) {
     BOLT_USER_CHECK_LE(
         size,
         kMaxStringSize / kReplacementSize,
         "UTF-8 replacement result exceeds the maximum VARCHAR size");
-    malformed.push_back({row, 0, size, size});
-    recordString(size * kReplacementSize, true);
-    return true;
-  };
-
-  auto probeThreeByte = [&](vector_size_t row, const char* data, int32_t size) {
-    if (isValidThreeBytePrefixWithAsciiTail(data, size)) {
-      recordString(size, false);
-      return true;
-    }
-    probeScalar(row, data, size);
-    return false;
-  };
-
-  if (plainFlatNoNulls) {
-    const auto* flat = child->asUnchecked<FlatVector<StringView>>();
-    const StringView* __restrict__ svs = flat->rawValues();
-    const auto sampleRows = std::min(numRows, kSampleRows);
-    bool useThreeByteFastValidator = numRows > kSampleRows;
-    bool useDenseLeadFastScanner = numRows > kSampleRows;
-    bool reserveOneRunPerRow = numRows > kSampleRows;
-    vector_size_t row = 0;
-    for (; row < sampleRows; ++row) {
-      const StringView& sv = svs[row];
-      const auto* data = sv.data();
-      const auto size = static_cast<int32_t>(sv.size());
-      const auto malformedCount = malformed.size();
-      const bool changed = probeScalar(row, data, size);
-      if (changed && malformed.capacity() < sampleRows) {
-        malformed.reserve(sampleRows);
-      }
-      reserveOneRunPerRow &= changed && malformed.size() == malformedCount + 1;
-      if (useThreeByteFastValidator &&
-          (changed || !isValidThreeBytePrefixWithAsciiTail(data, size))) {
-        useThreeByteFastValidator = false;
-      }
-      if (useDenseLeadFastScanner &&
-          (!changed || malformed.size() != malformedCount + 1 ||
-           malformed.back().offset != 0 || malformed.back().size != size ||
-           malformed.back().replacements != size)) {
-        useDenseLeadFastScanner = false;
-      }
-    }
-    if (reserveOneRunPerRow) {
-      // Bound speculative capacity for batches whose first rows are not
-      // representative. This still covers common writer batch sizes.
-      malformed.reserve(std::min(numRows, kMaxSampledRunReserve));
-    }
-    if (useDenseLeadFastScanner) {
-      for (; row < numRows; ++row) {
-        const StringView& sv = svs[row];
-        if (!probeDenseLead(row, sv.data(), static_cast<int32_t>(sv.size()))) {
-          ++row;
-          break;
-        }
-      }
-    }
-    if (useThreeByteFastValidator) {
-      for (; row < numRows; ++row) {
-        const StringView& sv = svs[row];
-        if (!probeThreeByte(row, sv.data(), static_cast<int32_t>(sv.size()))) {
-          ++row;
-          break;
-        }
-      }
-    }
-    for (; row < numRows; ++row) {
-      const StringView& sv = svs[row];
-      probeScalar(row, sv.data(), static_cast<int32_t>(sv.size()));
-    }
-  } else {
-    PeeledVarchar pv = peelVarchar(*child);
-    for (vector_size_t row = 0; row < numRows; ++row) {
-      if (outerNulls && bits::isBitNull(outerNulls, row)) {
-        ++nullCount;
-        continue;
-      }
-      bool isN = false;
-      const auto rs = readPeeled(pv, row, isN);
-      if (isN) {
-        ++nullCount;
-        continue;
-      }
-      probeScalar(row, rs.data, rs.size);
+    runs[0] = {0, size, size};
+    return {size * kReplacementSize, 1, true};
+  } else if (size > 0 && isRegularThreeByteLead(data[0])) {
+    prefix = regularThreeBytePrefixLengthSimd(data, size);
+    if (prefix < size && data[prefix] <= 0x7F) {
+      prefix += asciiPrefixLength(value.data() + prefix, size - prefix);
     }
   }
+  if (prefix == size) {
+    return {size, 0, false};
+  }
+  return analyzeStringSuffix(value, runs, prefix);
+}
 
-  if (malformed.empty()) {
+struct StringWriter {
+  StringView source;
+  char* output;
+  int32_t copied{0};
+
+  void append(int32_t offset, int32_t length, int32_t replacements) {
+    const auto validSize = offset - copied;
+    if (validSize > 0) {
+      std::memcpy(output, source.data() + copied, validSize);
+      output += validSize;
+    }
+    writeReplacementRun(output, replacements);
+    output += replacements * kReplacementSize;
+    copied = offset + length;
+  }
+
+  void finish() {
+    if (copied < source.size()) {
+      std::memcpy(output, source.data() + copied, source.size() - copied);
+    }
+  }
+};
+
+// Keep the rare cache-overflow scanner out of the cached materialization path.
+FOLLY_NOINLINE void writeFromScan(StringWriter& writer, int32_t offset) {
+  forEachMalformedRun(
+      writer.source.data(),
+      writer.source.size(),
+      offset,
+      [&](int32_t start, int32_t length, int32_t count) {
+        writer.append(start, length, count);
+      });
+}
+
+FOLLY_ALWAYS_INLINE void writeSanitizedString(
+    StringView source,
+    const StringAnalysis& analysis,
+    const MalformedRuns& runs,
+    char* output) {
+  StringWriter writer{source, output};
+  if (analysis.runCount > kMaxCachedMalformedRuns) {
+    writeFromScan(writer, runs[0].offset);
+  } else {
+    for (int32_t index = 0; index < analysis.runCount; ++index) {
+      const auto& run = runs[index];
+      writer.append(run.offset, run.length, run.replacements);
+    }
+  }
+  writer.finish();
+}
+
+// Inline inputs need at most 3 * kInlineSize output bytes. Materialize them
+// directly on the stack instead of caching and replaying malformed runs.
+StringAnalysis analyzeInlineString(const StringView& value, char* output) {
+  const auto size = static_cast<int32_t>(value.size());
+  const auto prefix = asciiPrefixLength(value.data(), size);
+  if (prefix == size) {
+    return {size, 0, false};
+  }
+  StringWriter writer{value, output};
+  int32_t runCount = 0;
+  int32_t malformedBytes = 0;
+  forEachMalformedRun(
+      value.data(),
+      size,
+      prefix,
+      [&](int32_t offset, int32_t length, int32_t count) {
+        writer.append(offset, length, count);
+        malformedBytes += length;
+        ++runCount;
+      });
+  const auto outputSize = writer.output - output + size - writer.copied;
+  if (runCount > 0) {
+    writer.finish();
+  }
+  return {static_cast<int32_t>(outputSize), runCount, malformedBytes == size};
+}
+
+// Returns nullptr for unchanged input. 'selected' is only used for a dictionary
+// base: unreferenced values must survive unchanged, without being scanned.
+VectorPtr buildSanitizedFlat(
+    const VectorPtr& child,
+    vector_size_t numRows,
+    const uint64_t* outerNulls,
+    memory::MemoryPool* pool,
+    const SelectivityVector* selected = nullptr) {
+  const auto* flat = child->isFlatEncoding()
+      ? child->asUnchecked<FlatVector<StringView>>()
+      : nullptr;
+  const StringView* flatValues = flat ? flat->rawValues() : nullptr;
+  const auto* childNulls = flat ? flat->rawNulls() : nullptr;
+  const auto* base = flat ? child.get() : child->wrappedVector();
+  const auto* baseValues = base->isConstantEncoding()
+      ? base->asUnchecked<ConstantVector<StringView>>()->rawValues()
+      : base->asUnchecked<FlatVector<StringView>>()->rawValues();
+
+  auto isNull = [&](vector_size_t row) {
+    return (outerNulls && bits::isBitNull(outerNulls, row)) ||
+        (flat ? childNulls && bits::isBitNull(childNulls, row)
+              : child->isNullAt(row));
+  };
+  auto valueAt = [&](vector_size_t row) -> const StringView& {
+    return flat ? flatValues[row] : baseValues[child->wrappedIndex(row)];
+  };
+
+  vector_size_t nullCount = 0;
+  size_t totalStringBytes = 0;
+  size_t unchangedStringBytes = 0;
+  uint64_t maxStringLength = 0;
+  std::shared_ptr<FlatVector<StringView>> result;
+  StringView* outputValues = nullptr;
+  const char* replacementData = kReplacementBlock.data();
+  static_assert(StringView::kInlineSize % kReplacementSize == 0);
+  int32_t replacementCapacity = StringView::kInlineSize;
+
+  auto initializeOutput = [&](vector_size_t firstChanged) FOLLY_NOINLINE {
+    BufferPtr nulls;
+    const bool combineNulls = outerNulls || !flat;
+    if (combineNulls) {
+      bool hasNull = false;
+      for (vector_size_t row = 0; row < numRows; ++row) {
+        if (isNull(row)) {
+          hasNull = true;
+          break;
+        }
+      }
+      if (hasNull) {
+        nulls = AlignedBuffer::allocate<uint64_t>(bits::nwords(numRows), pool);
+        auto* rawNulls = nulls->asMutable<uint64_t>();
+        std::memset(rawNulls, bits::kNotNullByte, nulls->size());
+        for (vector_size_t row = 0; row < numRows; ++row) {
+          if (isNull(row)) {
+            bits::setNull(rawNulls, row);
+          }
+        }
+      }
+    } else {
+      nulls = child->nulls();
+    }
+
+    auto values = AlignedBuffer::allocate<StringView>(numRows, pool);
+    outputValues = values->asMutable<StringView>();
+    if (flat) {
+      const auto copyRows = selected ? numRows : firstChanged;
+      std::memcpy(outputValues, flatValues, copyRows * sizeof(StringView));
+    } else {
+      for (vector_size_t row = 0; row < firstChanged; ++row) {
+        outputValues[row] = isNull(row) ? StringView() : valueAt(row);
+      }
+    }
+    result = std::make_shared<FlatVector<StringView>>(
+        pool,
+        child->type(),
+        std::move(nulls),
+        numRows,
+        std::move(values),
+        std::vector<BufferPtr>{},
+        SimpleVectorStats<StringView>{});
+  };
+
+  auto writeChanged = [&](vector_size_t row,
+                          StringView value,
+                          StringAnalysis analysis,
+                          const MalformedRuns& runs,
+                          const char* inlineOutput) {
+    if (!result) {
+      initializeOutput(row);
+    }
+    if (analysis.replacementOnly) {
+      if (analysis.outputSize > replacementCapacity) {
+        constexpr int32_t kMaxReplacementBufferSize =
+            kMaxStringSize - kMaxStringSize % kReplacementSize;
+        const auto grownSize = std::min<int64_t>(
+            kMaxReplacementBufferSize,
+            std::max<int64_t>(
+                analysis.outputSize,
+                static_cast<int64_t>(replacementCapacity) * 2));
+        auto* grown = result->getRawStringBufferWithSpace(grownSize, true);
+        writeReplacementRun(grown, grownSize / kReplacementSize);
+        replacementData = grown;
+        replacementCapacity = static_cast<int32_t>(grownSize);
+      }
+      outputValues[row] = StringView(replacementData, analysis.outputSize);
+      return;
+    }
+    if (StringView::isInline(analysis.outputSize)) {
+      if (value.isInline()) {
+        outputValues[row] = StringView(inlineOutput, analysis.outputSize);
+        return;
+      }
+      char inlineData[StringView::kInlineSize];
+      writeSanitizedString(value, analysis, runs, inlineData);
+      outputValues[row] = StringView(inlineData, analysis.outputSize);
+      return;
+    }
+    auto* output = result->getRawStringBufferWithSpace(analysis.outputSize);
+    if (value.isInline()) {
+      std::memcpy(output, inlineOutput, analysis.outputSize);
+    } else {
+      writeSanitizedString(value, analysis, runs, output);
+    }
+    outputValues[row] = StringView(output, analysis.outputSize);
+  };
+
+  auto probe = [&](vector_size_t row, const StringView& value)
+      __attribute__((always_inline)) {
+    MalformedRuns runs;
+    char inlineOutput[StringView::kInlineSize * kReplacementSize];
+    const auto analysis = value.isInline()
+        ? analyzeInlineString(value, inlineOutput)
+        : analyzeString(value, runs);
+    maxStringLength = std::max<uint64_t>(maxStringLength, analysis.outputSize);
+    if (!StringView::isInline(analysis.outputSize)) {
+      totalStringBytes += analysis.outputSize;
+    }
+    if (analysis.runCount > 0) {
+      if (analysis.replacementOnly && outputValues &&
+          analysis.outputSize <= replacementCapacity) {
+        outputValues[row] = StringView(replacementData, analysis.outputSize);
+      } else {
+        writeChanged(row, value, analysis, runs, inlineOutput);
+      }
+    } else {
+      if (outputValues) {
+        outputValues[row] = value;
+      }
+      if (!value.isInline()) {
+        unchangedStringBytes += value.size();
+      }
+    }
+  };
+  if (selected) {
+    selected->applyToSelected(
+        [&](vector_size_t row) { probe(row, flatValues[row]); });
+  } else if (flat && !childNulls && !outerNulls) {
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      probe(row, flatValues[row]);
+    }
+  } else {
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      if (isNull(row)) {
+        ++nullCount;
+        if (outputValues) {
+          outputValues[row] = StringView();
+        }
+      } else {
+        probe(row, valueAt(row));
+      }
+    }
+  }
+  if (!result) {
     return nullptr;
   }
-
-  // A fully malformed row materializes as a prefix of the same repeated
-  // replacement sequence. When every row has this shape, build the sequence
-  // once instead of allocating and filling one copy per row.
-  if (plainFlatNoNulls && malformed.size() == numRows) {
-    const auto* sourceValues =
-        child->asUnchecked<FlatVector<StringView>>()->rawValues();
-    bool allReplacementOnly = true;
-    bool uniformReplacementCount = true;
-    const auto firstReplacementCount = malformed.front().replacements;
-    for (vector_size_t row = 0; row < numRows; ++row) {
-      const auto& run = malformed[row];
-      if (run.row != row || run.offset != 0 ||
-          run.size != sourceValues[row].size()) {
-        allReplacementOnly = false;
-        break;
-      }
-      uniformReplacementCount &= run.replacements == firstReplacementCount;
-    }
-
-    if (allReplacementOnly) {
-      return buildReplacementOnlyVector(
-          malformed,
-          numRows,
-          uniformReplacementCount,
-          totalStringBytes,
-          maxStringLength,
-          pool);
-    }
+  if (!selected) {
+    result->setNullCount(nullCount);
+    result->setStringViewStats(
+        StringViewStats{totalStringBytes, maxStringLength});
+  } else if (const auto sourceNullCount = child->getNullCount()) {
+    result->setNullCount(sourceNullCount.value());
   }
-
-  // Retaining the source buffers avoids copying unchanged strings, but can
-  // increase peak memory when most values changed. Share only when doing so
-  // reduces the newly allocated non-inline bytes by at least half.
-  const bool shareUnchangedStrings =
-      totalStringBytes > 0 && changedStringBytes <= totalStringBytes / 2;
-  const auto allocatedStringBytes =
-      shareUnchangedStrings ? changedStringBytes : totalStringBytes;
-
-  const bool hasAnyNull = (nullCount > 0);
-  BufferPtr newNulls;
-  uint64_t* dstNulls = nullptr;
-  if (hasAnyNull) {
-    const auto nBytes = bits::nbytes(numRows);
-    newNulls = AlignedBuffer::allocate<char>(nBytes, pool);
-    dstNulls = newNulls->asMutable<uint64_t>();
-    std::memset(dstNulls, bits::kNotNullByte, newNulls->capacity());
-  }
-
-  BufferPtr newValues = AlignedBuffer::allocate<StringView>(numRows, pool);
-  auto* rnv = newValues->asMutable<StringView>();
-
-  BufferPtr newStrings;
-  char* cur = nullptr;
-  if (allocatedStringBytes > 0) {
-    newStrings = AlignedBuffer::allocate<char>(allocatedStringBytes, pool);
-    newStrings->setSize(allocatedStringBytes);
-    cur = newStrings->asMutable<char>();
-  }
-
-  size_t malformedIndex = 0;
-  auto writeString = [&](vector_size_t row, const char* data, int32_t size) {
-    const auto begin = malformedIndex;
-    int64_t outputSize = size;
-    while (malformedIndex < malformed.size() &&
-           malformed[malformedIndex].row == row) {
-      outputSize += malformed[malformedIndex].replacements * kReplacementSize -
-          malformed[malformedIndex].size;
-      ++malformedIndex;
-    }
-    BOLT_DCHECK_LE(outputSize, kMaxStringSize);
-    const auto outputSize32 = static_cast<int32_t>(outputSize);
-
-    if (StringView::isInline(outputSize32)) {
-      if (begin == malformedIndex) {
-        rnv[row] = StringView(data, size);
-      } else {
-        char inlineData[StringView::kInlineSize];
-        writeFromRuns(data, size, malformed, begin, malformedIndex, inlineData);
-        rnv[row] = StringView(inlineData, outputSize32);
-      }
-      return;
-    }
-
-    if (shareUnchangedStrings && begin == malformedIndex) {
-      rnv[row] = StringView(data, size);
-      return;
-    }
-
-    char* output = cur;
-    if (begin == malformedIndex) {
-      std::memcpy(output, data, size);
-    } else {
-      writeFromRuns(data, size, malformed, begin, malformedIndex, output);
-    }
-    cur += outputSize32;
-    rnv[row] = StringView(output, outputSize32);
-  };
-
-  if (plainFlatNoNulls) {
-    const auto* flat = child->asUnchecked<FlatVector<StringView>>();
-    const StringView* __restrict__ svs = flat->rawValues();
+  // Avoid retaining the whole input for a few unchanged strings in a densely
+  // modified batch. Dictionary bases also retain unreferenced source values.
+  if (!selected && unchangedStringBytes > 0 &&
+      unchangedStringBytes < totalStringBytes - unchangedStringBytes) {
     for (vector_size_t row = 0; row < numRows; ++row) {
-      const StringView& sv = svs[row];
-      writeString(row, sv.data(), static_cast<int32_t>(sv.size()));
-    }
-  } else {
-    PeeledVarchar pv = peelVarchar(*child);
-    for (vector_size_t row = 0; row < numRows; ++row) {
-      if (outerNulls && bits::isBitNull(outerNulls, row)) {
-        if (dstNulls) {
-          bits::setNull(dstNulls, row);
-        }
-        rnv[row] = StringView();
+      if (isNull(row) || outputValues[row].isInline()) {
         continue;
       }
-      bool isN = false;
-      const auto rs = readPeeled(pv, row, isN);
-      if (isN) {
-        if (dstNulls) {
-          bits::setNull(dstNulls, row);
-        }
-        rnv[row] = StringView();
-        continue;
+      const auto value = valueAt(row);
+      if (outputValues[row].data() == value.data()) {
+        auto* output = result->getRawStringBufferWithSpace(value.size());
+        std::memcpy(output, value.data(), value.size());
+        outputValues[row] = StringView(output, value.size());
       }
-      if (dstNulls) {
-        bits::clearNull(dstNulls, row);
-      }
-      writeString(row, rs.data, rs.size);
     }
-  }
-
-  BOLT_DCHECK_EQ(malformedIndex, malformed.size());
-  BOLT_DCHECK_EQ(
-      cur,
-      newStrings ? newStrings->asMutable<char>() + allocatedStringBytes
-                 : nullptr);
-
-  std::vector<BufferPtr> sbs;
-  if (newStrings) {
-    sbs.push_back(std::move(newStrings));
-  }
-  auto result = std::make_shared<FlatVector<StringView>>(
-      pool,
-      VARCHAR(),
-      std::move(newNulls),
-      numRows,
-      std::move(newValues),
-      std::move(sbs),
-      SimpleVectorStats<StringView>{},
-      std::nullopt,
-      nullCount);
-  result->setStringViewStats(
-      StringViewStats{totalStringBytes, maxStringLength});
-  if (shareUnchangedStrings) {
+  } else if (selected || unchangedStringBytes > 0) {
     result->acquireSharedStringBuffers(child.get());
   }
   return result;
 }
 
-// Sanitizes a single-layer DICTIONARY over a FLAT VARCHAR without decoding
-// the same base value once per logical row. Only referenced, logically
-// non-null base rows are scanned. When replacement is needed, the original
-// indices and nulls are retained and unchanged StringViews keep sharing the
-// source FlatVector's string buffers.
+// Analyze each referenced base value once and reuse the flat materializer.
 std::optional<VectorPtr> buildSanitizedDictionary(
     const VectorPtr& child,
     vector_size_t numRows,
@@ -904,127 +772,33 @@ std::optional<VectorPtr> buildSanitizedDictionary(
   if (child->encoding() != VectorEncoding::Simple::DICTIONARY) {
     return std::nullopt;
   }
-
   const auto* dictionary = child->asUnchecked<DictionaryVector<StringView>>();
   const auto& base = dictionary->valueVector();
-  if (base->encoding() != VectorEncoding::Simple::FLAT) {
+  if (!base->isFlatEncoding() || base->size() > numRows / 2) {
     return std::nullopt;
   }
-
-  const auto baseSize = base->size();
-  if (baseSize == 0 || numRows == 0) {
-    return VectorPtr{};
-  }
-  // Preserving the dictionary requires a bitmap and, when replacement is
-  // needed, a StringView array sized to the full base. Fall back to the
-  // logical-row path unless the base is known to be substantially reused.
-  if (baseSize > numRows / 2) {
-    return std::nullopt;
-  }
-
-  SelectivityVector referenced(baseSize, false);
-  const auto* rawIndices = dictionary->indices()->as<vector_size_t>();
-  for (vector_size_t row = 0; row < numRows; ++row) {
-    if ((outerNulls && bits::isBitNull(outerNulls, row)) ||
-        dictionary->isNullAt(row)) {
-      continue;
+  SelectivityVector referenced(base->size(), false);
+  const auto* indices = dictionary->indices()->as<vector_size_t>();
+  if (!outerNulls && !dictionary->mayHaveNulls()) {
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      referenced.setValid(indices[row], true);
     }
-    referenced.setValid(rawIndices[row], true);
+  } else {
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      if ((!outerNulls || !bits::isBitNull(outerNulls, row)) &&
+          !dictionary->isNullAt(row)) {
+        referenced.setValid(indices[row], true);
+      }
+    }
   }
   referenced.updateBounds();
-  if (!referenced.hasSelections()) {
+  auto sanitized =
+      buildSanitizedFlat(base, base->size(), nullptr, pool, &referenced);
+  if (!sanitized) {
     return VectorPtr{};
   }
-
-  const auto* flat = base->asUnchecked<FlatVector<StringView>>();
-  const auto* sourceValues = flat->rawValues();
-  MalformedRuns malformed{memory::StlAllocator<MalformedRun>(pool)};
-  size_t changedStringBytes = 0;
-  referenced.applyToSelected([&](vector_size_t baseRow) {
-    const auto& value = sourceValues[baseRow];
-    const auto begin = malformed.size();
-    const auto outputSize = scanUtf8(
-        baseRow, value.data(), static_cast<int32_t>(value.size()), malformed);
-    if (malformed.size() != begin && !StringView::isInline(outputSize)) {
-      changedStringBytes += static_cast<size_t>(outputSize);
-    }
-  });
-
-  if (malformed.empty()) {
-    return VectorPtr{};
-  }
-
-  auto newValues = AlignedBuffer::allocate<StringView>(baseSize, pool);
-  auto* outputValues = newValues->asMutable<StringView>();
-  std::memcpy(outputValues, sourceValues, baseSize * sizeof(StringView));
-
-  BufferPtr newStrings;
-  char* currentString = nullptr;
-  if (changedStringBytes > 0) {
-    newStrings = AlignedBuffer::allocate<char>(changedStringBytes, pool);
-    newStrings->setSize(changedStringBytes);
-    currentString = newStrings->asMutable<char>();
-  }
-
-  size_t malformedIndex = 0;
-  while (malformedIndex < malformed.size()) {
-    const auto baseRow = malformed[malformedIndex].row;
-    const auto& source = sourceValues[baseRow];
-    const auto begin = malformedIndex;
-    int64_t outputSize = source.size();
-    while (malformedIndex < malformed.size() &&
-           malformed[malformedIndex].row == baseRow) {
-      outputSize += malformed[malformedIndex].replacements * kReplacementSize -
-          malformed[malformedIndex].size;
-      ++malformedIndex;
-    }
-    BOLT_DCHECK_LE(outputSize, kMaxStringSize);
-    const auto outputSize32 = static_cast<int32_t>(outputSize);
-    if (StringView::isInline(outputSize32)) {
-      char inlineData[StringView::kInlineSize];
-      writeFromRuns(
-          source.data(),
-          source.size(),
-          malformed,
-          begin,
-          malformedIndex,
-          inlineData);
-      outputValues[baseRow] = StringView(inlineData, outputSize32);
-    } else {
-      writeFromRuns(
-          source.data(),
-          source.size(),
-          malformed,
-          begin,
-          malformedIndex,
-          currentString);
-      outputValues[baseRow] = StringView(currentString, outputSize32);
-      currentString += outputSize32;
-    }
-  }
-
-  BOLT_DCHECK_EQ(
-      currentString,
-      newStrings ? newStrings->asMutable<char>() + changedStringBytes
-                 : nullptr);
-  std::vector<BufferPtr> stringBuffers;
-  if (newStrings) {
-    stringBuffers.push_back(std::move(newStrings));
-  }
-  auto sanitizedBase = std::make_shared<FlatVector<StringView>>(
-      pool,
-      base->type(),
-      base->nulls(),
-      baseSize,
-      std::move(newValues),
-      std::move(stringBuffers),
-      SimpleVectorStats<StringView>{},
-      std::nullopt,
-      base->getNullCount());
-  sanitizedBase->acquireSharedStringBuffers(base.get());
-
   return BaseVector::wrapInDictionary(
-      child->nulls(), dictionary->indices(), numRows, std::move(sanitizedBase));
+      child->nulls(), dictionary->indices(), numRows, std::move(sanitized));
 }
 
 } // namespace

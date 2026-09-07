@@ -89,14 +89,16 @@ RowVectorPtr makeDataInput(
 }
 
 bool replaceInvalidUtf8ForParquetSerde(
-    const std::shared_ptr<const HiveInsertTableHandle>& insertTableHandle) {
+    const HiveInsertTableHandle& insertTableHandle) {
+  if (insertTableHandle.storageFormat() != dwio::common::FileFormat::PARQUET) {
+    return false;
+  }
+
   constexpr const char* kParquetSerdeMarker =
       "spark.gluten.sql.native.writer.hive.parquet.serde";
-  const auto& serdeParameters = insertTableHandle->serdeParameters();
+  const auto& serdeParameters = insertTableHandle.serdeParameters();
   const auto marker = serdeParameters.find(kParquetSerdeMarker);
-  return insertTableHandle->storageFormat() ==
-      dwio::common::FileFormat::PARQUET &&
-      marker != serdeParameters.end() &&
+  return marker != serdeParameters.end() &&
       boost::algorithm::iequals(marker->second, "true");
 }
 
@@ -380,6 +382,8 @@ HiveDataSink::HiveDataSink(
     const core::QueryConfig& queryConfig)
     : inputType_(std::move(inputType)),
       insertTableHandle_(std::move(insertTableHandle)),
+      replaceInvalidUtf8ForParquetSerde_(
+          replaceInvalidUtf8ForParquetSerde(*insertTableHandle_)),
       connectorQueryCtx_(connectorQueryCtx),
       commitStrategy_(commitStrategy),
       hiveConfig_(hiveConfig),
@@ -466,7 +470,7 @@ void HiveDataSink::appendData(RowVectorPtr input) {
   auto dataInput = makeDataInput(dataChannels_, input);
 
   auto sanitizeDataInput = [&]() {
-    if (replaceInvalidUtf8ForParquetSerde(insertTableHandle_)) {
+    if (replaceInvalidUtf8ForParquetSerde_) {
       dataInput = utf8::replaceInvalidUtf8InTopLevelVarchars(
           dataInput, dataInput->pool());
     }
@@ -494,24 +498,24 @@ void HiveDataSink::appendData(RowVectorPtr input) {
 
   splitInputRowsAndEnsureWriters();
 
-  // wrapAndCombineDict drops top-level row nulls when it slices a batch. The
-  // old per-writer sanitizer therefore visited the backing child values of
-  // these rows. Use a null-free view only when this batch is actually sliced
-  // to preserve that behavior while sanitizing the batch once.
-  const bool needsSlice = std::any_of(
-      partitionSizes_.begin(),
-      partitionSizes_.end(),
-      [&](vector_size_t partitionSize) {
-        return partitionSize != 0 && partitionSize != dataInput->size();
-      });
-  if (needsSlice && dataInput->nulls()) {
-    dataInput = std::make_shared<RowVector>(
-        dataInput->pool(),
-        dataInput->type(),
-        nullptr,
-        dataInput->size(),
-        dataInput->children(),
-        0);
+  if (replaceInvalidUtf8ForParquetSerde_ && dataInput->nulls()) {
+    // wrapAndCombineDict drops top-level row nulls when it slices a batch. Use
+    // a null-free view to sanitize the same backing values before slicing.
+    const bool needsSlice = std::any_of(
+        partitionSizes_.begin(),
+        partitionSizes_.end(),
+        [&](vector_size_t partitionSize) {
+          return partitionSize != 0 && partitionSize != dataInput->size();
+        });
+    if (needsSlice) {
+      dataInput = std::make_shared<RowVector>(
+          dataInput->pool(),
+          dataInput->type(),
+          nullptr,
+          dataInput->size(),
+          dataInput->children(),
+          0);
+    }
   }
   sanitizeDataInput();
 
