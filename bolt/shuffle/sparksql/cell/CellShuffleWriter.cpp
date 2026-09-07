@@ -488,6 +488,23 @@ arrow::Status CellShuffleWriter::stop() {
   if (windowHasData) {
     frontend_->flushAll();
   }
+  // Memory accounting picture at the end of input: how much of the chunk
+  // memory actually held data (the rest is tail-cell slack, recycled
+  // cells and unissued chunk tails), alongside the resident structures
+  // and the pool's own view.
+  {
+    const int64_t chunkBytes = allocator_->allocatedBytes();
+    const int64_t dataBytes = static_cast<int64_t>(cells_->totalBytes());
+    LOG(INFO) << "CellShuffleWriter memory: chunks="
+              << (chunkBytes >> 20) << "MB, data=" << (dataBytes >> 20)
+              << "MB ("
+              << (chunkBytes > 0 ? 100.0 * dataBytes / chunkBytes : 0.0)
+              << "% utilization), resident="
+              << (frontend_->residentBytes() >> 20) << "MB, nulls="
+              << (nulls_->allocatedBytes() >> 20) << "MB, pool used="
+              << (boltPool_->usedBytes() >> 20) << "MB, pool peak="
+              << (boltPool_->peakBytes() >> 20) << "MB";
+  }
   output_->finalize(windowInput(), windowHasData, metrics_);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if ((encodingTags_[col / 8] >> (col % 8)) & 1) {
