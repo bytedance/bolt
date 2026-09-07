@@ -1,0 +1,5 @@
+add_library(bolt_memory_bm_base INTERFACE)
+
+target_compile_features(bolt_memory_bm_base INTERFACE cxx_std_20)
+
+target_include_directories(bolt_memory_bm_base INTERFACE ${PROJECT_SOURCE_DIR})

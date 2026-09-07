@@ -90,3 +90,5 @@ target_link_libraries(
   PRIVATE
     re2::re2
 )
+
+add_subdirectory(bm)
