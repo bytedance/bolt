@@ -71,6 +71,10 @@ class CellShuffleWriter final : public ShuffleWriter {
   bool stopped_{false};
   bool checkpointRequested_{false};
   bool dictProbed_{false};
+  /// Consecutive reclaims declined by the run-density guard; sustained
+  /// pressure pierces the guard (see reclaimFixedSize).
+  static constexpr int32_t kMaxReclaimRefusals = 2;
+  int32_t reclaimRefusals_{0};
 
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
