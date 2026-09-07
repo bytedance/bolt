@@ -80,6 +80,13 @@ class ChunkAllocator {
     return static_cast<uint32_t>(chunks_.size()) << cellsPerChunkShift_;
   }
 
+  /// Sorts the freelist so reuse consumes cells chunk by chunk (lowest
+  /// chunk first). Called after a full recycle: refilling then packs the
+  /// leading chunks and leaves trailing chunks untouched, so shrink()
+  /// can hand idle memory back without a spill - the property that makes
+  /// declining a reclaim an honest, materially compliant answer.
+  void packFreelist();
+
   /// Returns a cell to the freelist for reuse. The chunk stays with the
   /// allocator until shrink().
   void recycle(uint32_t cellId);
