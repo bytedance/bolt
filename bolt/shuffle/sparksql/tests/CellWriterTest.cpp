@@ -319,6 +319,11 @@ TEST_F(CellWriterTest, uncompressedSpillStillRoundTripsAndWritesMore) {
 TEST_F(CellWriterTest, reclaimMidStreamReleasesMemory) {
   constexpr int32_t kPartitions = 4;
   auto options = makeOptions(kPartitions);
+  // The run-density floor scales with the sizing budget; size the budget
+  // to the test volume so the ~32MB resident at the trigger point is
+  // above it (a writer holding a sliver of its budget legitimately
+  // declines to reclaim).
+  options.cellOptions.cellMemoryBudgetBytes = 64 << 20;
   std::mt19937 rng(13);
   std::vector<std::vector<int32_t>> pids;
   std::vector<RowVectorPtr> batches;
