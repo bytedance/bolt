@@ -32,6 +32,7 @@
 
 #include <type/HugeInt.h>
 #include <type/Type.h>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <random>
@@ -136,6 +137,7 @@ template <typename T>
 FlatVector<T>* loadedFlatChildAt(RowVector* row, vector_size_t index) {
   return loadedChildAt(row, index)->asFlatVector<T>();
 }
+
 } // namespace
 
 namespace bytedance::bolt::parquet {
@@ -179,6 +181,111 @@ struct PageReaderTestPeer {
   }
 };
 } // namespace bytedance::bolt::parquet
+
+namespace {
+class CountingReadFile final : public ReadFile {
+ public:
+  explicit CountingReadFile(std::shared_ptr<ReadFile> file)
+      : file_(std::move(file)) {}
+
+  std::string_view pread(uint64_t offset, uint64_t length, void* buffer)
+      const override {
+    ++readCalls_;
+    readBytes_ += length;
+    return file_->pread(offset, length, buffer);
+  }
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers) const override {
+    ++readCalls_;
+    for (const auto& buffer : buffers) {
+      readBytes_ += buffer.size();
+    }
+    return file_->preadv(offset, buffers);
+  }
+
+  void preadv(
+      folly::Range<const common::Region*> regions,
+      folly::Range<folly::IOBuf*> iobufs) const override {
+    ++readCalls_;
+    for (const auto& region : regions) {
+      readBytes_ += region.length;
+    }
+    file_->preadv(regions, iobufs);
+  }
+
+  uint64_t size() const override {
+    return file_->size();
+  }
+
+  uint64_t memoryUsage() const override {
+    return file_->memoryUsage();
+  }
+
+  bool shouldCoalesce() const override {
+    return file_->shouldCoalesce();
+  }
+
+  std::string getName() const override {
+    return file_->getName();
+  }
+
+  uint64_t getNaturalReadSize() const override {
+    return file_->getNaturalReadSize();
+  }
+
+  void resetCounts() {
+    readCalls_ = 0;
+    readBytes_ = 0;
+  }
+
+  uint64_t readCalls() const {
+    return readCalls_;
+  }
+
+  uint64_t readBytes() const {
+    return readBytes_;
+  }
+
+ private:
+  const std::shared_ptr<ReadFile> file_;
+  mutable std::atomic<uint64_t> readCalls_{0};
+  mutable std::atomic<uint64_t> readBytes_{0};
+};
+
+class CountingBufferedInput final : public BufferedInput {
+ public:
+  CountingBufferedInput(
+      std::shared_ptr<ReadFile> file,
+      memory::MemoryPool& pool,
+      std::shared_ptr<std::atomic<uint64_t>> pairCalls)
+      : BufferedInput(std::move(file), pool),
+        pairCalls_(std::move(pairCalls)) {}
+
+  CountingBufferedInput(
+      std::shared_ptr<ReadFileInputStream> input,
+      memory::MemoryPool& pool,
+      std::shared_ptr<std::atomic<uint64_t>> pairCalls)
+      : BufferedInput(std::move(input), pool),
+        pairCalls_(std::move(pairCalls)) {}
+
+  SeekableInputStreamPair enqueuePair(
+      Region region,
+      const StreamIdentifier* streamId = nullptr) override {
+    ++*pairCalls_;
+    return BufferedInput::enqueuePair(region, streamId);
+  }
+
+  std::unique_ptr<BufferedInput> clone() const override {
+    return std::make_unique<CountingBufferedInput>(input_, pool_, pairCalls_);
+  }
+
+ private:
+  const std::shared_ptr<std::atomic<uint64_t>> pairCalls_;
+};
+
+} // namespace
 
 class ParquetReaderTest : public ParquetTestBase {
  public:
@@ -323,6 +430,49 @@ class ParquetReaderTest : public ParquetTestBase {
     rowReaderOptions.setScanSpec(
         scanSpec ? std::move(scanSpec) : makeScanSpec(asRowType(data->type())));
     return reader->createRowReader(rowReaderOptions);
+  }
+
+  void testNestedRowsOverMap(int32_t streamingWindowSize) {
+    constexpr vector_size_t kSize = 5;
+    auto maps = vectorMaker_.mapVector<int32_t, int64_t>(
+        kSize,
+        [](auto row) {
+          if (row == 3) {
+            return 0;
+          }
+          return row == 4 ? 2 : 1;
+        },
+        [](auto row, auto index) { return row * 10 + index; },
+        [](auto row, auto index) { return row * 100 + index; },
+        [](auto row) { return row == 2; });
+    auto inner =
+        makeRowVector({"entries"}, {maps}, [](auto row) { return row == 1; });
+    auto outer =
+        makeRowVector({"inner"}, {inner}, [](auto row) { return row == 0; });
+    auto data = makeRowVector({"outer"}, {outer});
+    auto rowType = asRowType(data->type());
+
+    for (const auto pageVersion :
+         {bytedance::bolt::parquet::arrow::ParquetDataPageVersion::V1,
+          bytedance::bolt::parquet::arrow::ParquetDataPageVersion::V2}) {
+      SCOPED_TRACE(fmt::format(
+          "windowSize={} pageVersion={}",
+          streamingWindowSize,
+          static_cast<int32_t>(pageVersion)));
+      bytedance::bolt::parquet::WriterOptions writerOptions;
+      writerOptions.enableDictionary = false;
+      writerOptions.dataPageVersion = pageVersion;
+      auto file = writeTempParquet({data}, writerOptions);
+
+      dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+      auto reader = createReader(file->getPath(), readerOptions);
+      auto rowReaderOptions = getReaderOpts(rowType);
+      rowReaderOptions.setScanSpec(makeScanSpec(rowType));
+      rowReaderOptions.setParquetRepDefStreamingWindowSize(streamingWindowSize);
+      auto rowReader = reader->createRowReader(rowReaderOptions);
+
+      assertReadWithReaderAndExpected(rowType, *rowReader, data, *leafPool_);
+    }
   }
 };
 
@@ -3808,6 +3958,126 @@ TEST_F(ParquetReaderTest, readNestedMap) {
   EXPECT_FALSE(rowReader->next(100, result));
 }
 
+TEST_F(ParquetReaderTest, projectedChunkDataAndRepDefsShareRead) {
+  const auto path = getExampleFilePath("row_map_array.parquet");
+  const auto fullStructType =
+      ROW({"c0", "c1"}, {BIGINT(), MAP(VARCHAR(), ARRAY(INTEGER()))});
+  const auto fullType = ROW({"c"}, {fullStructType});
+  const auto primitiveProjection = ROW({"c"}, {ROW({"c0"}, {BIGINT()})});
+  const auto complexProjection =
+      ROW({"c"}, {ROW({"c1"}, {MAP(VARCHAR(), ARRAY(INTEGER()))})});
+
+  auto scan = [&](const RowTypePtr& rowType) {
+    auto file = std::make_shared<CountingReadFile>(
+        std::make_shared<LocalReadFile>(path));
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    readerOptions.setFilePreloadThreshold(0);
+    readerOptions.setFooterEstimatedSize(8);
+    auto input = std::make_unique<DirectBufferedInput>(
+        file,
+        MetricsLog::voidLog(),
+        1,
+        nullptr,
+        1,
+        std::make_shared<io::IoStatistics>(),
+        nullptr,
+        readerOptions,
+        nullptr);
+    auto reader =
+        std::make_unique<ParquetReader>(std::move(input), readerOptions);
+    EXPECT_EQ(reader->fileMetaData().numRowGroups(), 1);
+    file->resetCounts();
+
+    auto rowReaderOptions = getReaderOpts(rowType);
+    rowReaderOptions.setScanSpec(makeScanSpec(rowType));
+    auto rowReader = reader->createRowReader(rowReaderOptions);
+    VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+    uint64_t rows = 0;
+    while (rowReader->next(1024, result) > 0) {
+      rows += result->size();
+      EXPECT_FALSE(result->toString(0).empty());
+    }
+    EXPECT_EQ(rows, 1);
+    return std::pair{file->readCalls(), file->readBytes()};
+  };
+
+  const auto fullScan = scan(fullType);
+  const auto primitiveScan = scan(primitiveProjection);
+  const auto complexScan = scan(complexProjection);
+  EXPECT_EQ(fullScan.first, 1);
+  EXPECT_EQ(primitiveScan.first, 1);
+  EXPECT_EQ(complexScan.first, 1);
+  EXPECT_LT(primitiveScan.second, fullScan.second);
+  EXPECT_LT(complexScan.second, fullScan.second);
+}
+
+TEST_F(ParquetReaderTest, streamingWindowControlsRepDefPath) {
+  constexpr vector_size_t kSize = 32;
+  auto arrays = makeArrayVector<int64_t>(
+      kSize,
+      [](auto row) { return row % 5; },
+      [](auto row, auto index) { return row * 100 + index; });
+  auto maps = vectorMaker_.mapVector<int32_t, int64_t>(
+      kSize,
+      [](auto row) { return row % 4; },
+      [](auto row, auto index) { return index; },
+      [](auto row, auto index) { return row * 1'000 + index; });
+  auto data = makeRowVector(
+      {"id", "array_values", "map_values"},
+      {makeFlatVector<int64_t>(kSize, [](auto row) { return row; }),
+       arrays,
+       maps});
+  auto file = writeTempParquet({data});
+  auto rowType = asRowType(data->type());
+
+  for (const auto& [windowSize, expectedPairCalls] :
+       std::vector<std::pair<int32_t, uint64_t>>{{0, 0}, {2'048, 3}}) {
+    SCOPED_TRACE(windowSize);
+    auto pairCalls = std::make_shared<std::atomic<uint64_t>>(0);
+    dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+    auto input = std::make_unique<CountingBufferedInput>(
+        std::make_shared<LocalReadFile>(file->getPath()),
+        readerOptions.getMemoryPool(),
+        pairCalls);
+    auto reader =
+        std::make_unique<ParquetReader>(std::move(input), readerOptions);
+
+    auto rowReaderOptions = getReaderOpts(rowType);
+    rowReaderOptions.setParquetRepDefStreamingWindowSize(windowSize);
+    auto scanSpec = makeScanSpec(rowType);
+    scanSpec->getOrCreateChild("id")->setFilter(
+        exec::bigintOr(exec::between(3, 7), exec::between(20, 23)));
+    rowReaderOptions.setScanSpec(scanSpec);
+    auto rowReader = reader->createRowReader(rowReaderOptions);
+
+    VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+    vector_size_t outputRows = 0;
+    while (rowReader->next(7, result)) {
+      auto* rows = result->as<RowVector>();
+      auto* ids = rows->childAt(0)->as<FlatVector<int64_t>>();
+      for (vector_size_t row = 0; row < rows->size(); ++row) {
+        const auto originalRow = static_cast<vector_size_t>(ids->valueAt(row));
+        EXPECT_TRUE(
+            (originalRow >= 3 && originalRow <= 7) ||
+            (originalRow >= 20 && originalRow <= 23));
+        EXPECT_TRUE(data->equalValueAt(result.get(), originalRow, row))
+            << "original row " << originalRow;
+      }
+      outputRows += rows->size();
+    }
+    EXPECT_EQ(outputRows, 9);
+    EXPECT_EQ(pairCalls->load(), expectedPairCalls);
+  }
+}
+
+TEST_F(ParquetReaderTest, nestedRowsOverMapLegacyRepDefs) {
+  testNestedRowsOverMap(0);
+}
+
+TEST_F(ParquetReaderTest, nestedRowsOverMapStreamingRepDefs) {
+  testNestedRowsOverMap(1);
+}
+
 // Regression test for the parquet writer-defect tolerance fix in
 // RepeatedLengths::readLengths. When the underlying lengths buffer holds
 // fewer entries than the parent reader requests (which can happen if a
@@ -4206,6 +4476,8 @@ TEST_F(ParquetReaderTest, lazyRepDefSanitizedCustomTagRepro) {
   VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
   uint64_t totalRows = 0;
   uint64_t totalCustomTagEntries = 0;
+  uint64_t totalNullMaps = 0;
+  uint64_t totalEmptyMaps = 0;
   for (;;) {
     const auto got = rowReader->next(kBatchRows, result);
     if (got == 0) {
@@ -4220,13 +4492,19 @@ TEST_F(ParquetReaderTest, lazyRepDefSanitizedCustomTagRepro) {
     auto* map = customTag->as<MapVector>();
     ASSERT_NE(map, nullptr);
     for (vector_size_t i = 0; i < map->size(); ++i) {
-      if (!map->isNullAt(i)) {
-        totalCustomTagEntries += map->sizeAt(i);
+      if (map->isNullAt(i)) {
+        ++totalNullMaps;
+      } else {
+        const auto size = map->sizeAt(i);
+        totalCustomTagEntries += size;
+        totalEmptyMaps += size == 0;
       }
     }
     totalRows += result->size();
   }
 
-  EXPECT_GT(totalRows, 0);
-  EXPECT_GT(totalCustomTagEntries, 0);
+  EXPECT_EQ(totalRows, 248'349);
+  EXPECT_EQ(totalCustomTagEntries, 199'598);
+  EXPECT_EQ(totalNullMaps, 144'426);
+  EXPECT_EQ(totalEmptyMaps, 28'521);
 }

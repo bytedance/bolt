@@ -30,8 +30,11 @@
 
 #include <folly/GLog.h>
 #include <folly/ScopeGuard.h>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <limits>
 #include <stdexcept>
 
 #include "bolt/common/base/GlobalParameters.h"
@@ -51,6 +54,166 @@ namespace bytedance::bolt::dwio::common {
 using cache::CoalescedLoad;
 using cache::ScanTracker;
 using cache::TrackingId;
+
+namespace {
+
+struct SharedSeekableInputChunk {
+  uint64_t offset;
+  BufferPtr data;
+};
+
+class SharedSeekableInputData {
+ public:
+  SharedSeekableInputData(
+      std::unique_ptr<SeekableInputStream> input,
+      Region region,
+      std::shared_ptr<memory::MemoryPool> pool,
+      uint64_t loadQuantum)
+      : input_(std::move(input)),
+        region_(region),
+        pool_(std::move(pool)),
+        loadQuantum_(loadQuantum) {
+    BOLT_CHECK_GT(loadQuantum_, 0);
+  }
+
+  std::shared_ptr<const SharedSeekableInputChunk> load(uint64_t position) {
+    BOLT_CHECK_LT(position, region_.length);
+    const auto offset = position / loadQuantum_ * loadQuantum_;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (failure_) {
+      std::rethrow_exception(failure_);
+    }
+    for (auto i = 0; i < chunks_.size(); ++i) {
+      if (chunks_[i] && chunks_[i]->offset == offset) {
+        auto chunk = chunks_[i];
+        if (i == 0) {
+          std::swap(chunks_[0], chunks_[1]);
+        }
+        return chunk;
+      }
+    }
+
+    const auto size = std::min(loadQuantum_, region_.length - offset);
+    auto buffer = AlignedBuffer::allocate<char>(size, pool_.get());
+    const std::vector<uint64_t> positions{offset};
+    PositionProvider positionProvider(positions);
+    try {
+      input_->seekToPosition(positionProvider);
+      input_->readFully(buffer->asMutable<char>(), size);
+    } catch (...) {
+      failure_ = std::current_exception();
+      throw;
+    }
+
+    auto chunk = std::make_shared<SharedSeekableInputChunk>(
+        SharedSeekableInputChunk{offset, std::move(buffer)});
+    chunks_[0] = std::move(chunks_[1]);
+    chunks_[1] = chunk;
+    return chunk;
+  }
+
+ private:
+  const std::unique_ptr<SeekableInputStream> input_;
+  const Region region_;
+  const std::shared_ptr<memory::MemoryPool> pool_;
+  const uint64_t loadQuantum_;
+  std::mutex mutex_;
+  std::exception_ptr failure_;
+  std::array<std::shared_ptr<const SharedSeekableInputChunk>, 2> chunks_;
+};
+
+class SharedSeekableInputStream final : public SeekableInputStream {
+ public:
+  explicit SharedSeekableInputStream(
+      std::shared_ptr<SharedSeekableInputData> data,
+      uint64_t size)
+      : data_(std::move(data)), size_(size) {}
+
+  bool Next(const void** buffer, int32_t* size) override {
+    currentChunk_.reset();
+    lastNextSize_ = 0;
+    if (position_ >= size_) {
+      *size = 0;
+      return false;
+    }
+
+    currentChunk_ = data_->load(position_);
+    const auto offsetInChunk = position_ - currentChunk_->offset;
+    const auto available = currentChunk_->data->size() - offsetInChunk;
+    BOLT_CHECK_LE(available, std::numeric_limits<int32_t>::max());
+    *buffer = currentChunk_->data->as<char>() + offsetInChunk;
+    *size = static_cast<int32_t>(available);
+    position_ += available;
+    lastNextSize_ = *size;
+    return true;
+  }
+
+  void BackUp(int32_t count) override {
+    BOLT_CHECK_GE(count, 0, "can't backup negative distances");
+    BOLT_CHECK_LE(count, lastNextSize_, "Can't backup that much!");
+    currentChunk_.reset();
+    position_ -= count;
+    lastNextSize_ = 0;
+  }
+
+  bool SkipInt64(int64_t count) override {
+    currentChunk_.reset();
+    lastNextSize_ = 0;
+    if (count < 0) {
+      return false;
+    }
+    const auto unsignedCount = static_cast<uint64_t>(count);
+    if (unsignedCount <= size_ - position_) {
+      position_ += unsignedCount;
+      return true;
+    }
+    position_ = size_;
+    return false;
+  }
+
+  google::protobuf::int64 ByteCount() const override {
+    return static_cast<google::protobuf::int64>(position_);
+  }
+
+  void seekToPosition(PositionProvider& position) override {
+    const auto newPosition = position.next();
+    BOLT_CHECK_LE(newPosition, size_);
+    currentChunk_.reset();
+    lastNextSize_ = 0;
+    position_ = newPosition;
+  }
+
+  std::string getName() const override {
+    return fmt::format("SharedSeekableInputStream {} of {}", position_, size_);
+  }
+
+  size_t positionSize() override {
+    return 1;
+  }
+
+ private:
+  const std::shared_ptr<SharedSeekableInputData> data_;
+  const uint64_t size_;
+  uint64_t position_{0};
+  int32_t lastNextSize_{0};
+  std::shared_ptr<const SharedSeekableInputChunk> currentChunk_;
+};
+
+SeekableInputStreamPair makeSharedSeekableInputStreamPair(
+    std::unique_ptr<SeekableInputStream> input,
+    Region region,
+    std::shared_ptr<memory::MemoryPool> pool,
+    uint64_t loadQuantum) {
+  auto data = std::make_shared<SharedSeekableInputData>(
+      std::move(input), region, std::move(pool), loadQuantum);
+  auto makeStream = [&]() {
+    return std::make_unique<SharedSeekableInputStream>(data, region.length);
+  };
+  return {makeStream(), makeStream()};
+}
+
+} // namespace
 
 std::unique_ptr<SeekableInputStream> DirectBufferedInput::enqueue(
     Region region,
@@ -88,6 +251,29 @@ std::unique_ptr<SeekableInputStream> DirectBufferedInput::enqueue(
     requests_.back().stream = stream.get();
   }
   return stream;
+}
+
+SeekableInputStreamPair DirectBufferedInput::enqueuePair(
+    Region region,
+    const StreamIdentifier* sid) {
+  if (region.length == 0 || preloaded()) {
+    return BufferedInput::enqueuePair(region, sid);
+  }
+
+  BOLT_CHECK_LE(region.offset, fileSize_);
+  BOLT_CHECK_LE(region.length, fileSize_ - region.offset);
+  BOLT_CHECK_GT(options_.loadQuantum(), 0);
+  auto input = enqueue(region, sid);
+  BOLT_CHECK(!requests_.empty());
+  // Only preload the first quantum. Subsequent chunks are fetched on demand,
+  // keeping the shared pair bounded while retaining initial coalescing.
+  requests_.back().region.length =
+      std::min<uint64_t>(region.length, options_.loadQuantum());
+  return makeSharedSeekableInputStreamPair(
+      std::move(input),
+      region,
+      pool_.shared_from_this(),
+      options_.loadQuantum());
 }
 
 bool DirectBufferedInput::isBuffered(uint64_t /*offset*/, uint64_t /*length*/)

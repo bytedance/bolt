@@ -272,6 +272,7 @@ class HiveDataSource : public DataSource {
   int64_t ignoredFileSizes_{0};
 
   int32_t parquetRepDefMemoryLimit_{16UL << 20};
+  int32_t parquetRepDefStreamingWindowSize_{2 * 1024};
   int32_t decodeRepDefPageCount_{10};
   int64_t parquetReaderImplicitCastMask_{0};
   int64_t parquetMaxBatchBytes_{0};

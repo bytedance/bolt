@@ -1610,6 +1610,7 @@ class ParquetRowReader::Impl {
         options_.isDictionaryFilterEnabled(),
         options_.getDecodeRepDefPageCount(),
         options_.getParquetRepDefMemoryLimit(),
+        options_.getParquetRepDefStreamingWindowSize(),
         options_.parquetReaderImplicitCastMask());
 
     if (auto selector = options_.getSelector()) {
