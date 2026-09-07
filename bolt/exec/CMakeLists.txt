@@ -178,6 +178,8 @@ if(${BOLT_ENABLE_CUDF})
   )
 endif()
 
+add_subdirectory(bm)
+
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(fuzzer)
   add_subdirectory(tests)
