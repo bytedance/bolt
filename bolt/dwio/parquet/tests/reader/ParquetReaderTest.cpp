@@ -2602,6 +2602,66 @@ TEST_F(ParquetReaderTest, skip) {
   EXPECT_EQ(0, rowReader->next(1000, result));
 }
 
+TEST_F(ParquetReaderTest, sparseSkipAcrossRepeatedPagesWithBatchedRepDefs) {
+  constexpr int32_t kNumRows = 6'000;
+  constexpr int32_t kTargetRow = 5'000;
+  const std::string payload(256, 'x');
+
+  auto ids = makeFlatVector<int64_t>(
+      kNumRows, [](auto row) { return static_cast<int64_t>(row); });
+  std::vector<std::string> values;
+  values.reserve(kNumRows);
+  std::vector<std::vector<StringView>> arrays;
+  arrays.reserve(kNumRows);
+  for (auto i = 0; i < kNumRows; ++i) {
+    values.push_back(fmt::format("{}-{}", i, payload));
+    arrays.push_back({StringView(values.back())});
+  }
+
+  auto rowType = ROW({"id", "items"}, {BIGINT(), ARRAY(VARCHAR())});
+  auto data = makeRowVector({ids, makeArrayVector<StringView>(arrays)});
+
+  auto tempFile = exec::test::TempFilePath::create();
+  auto writeFile =
+      std::make_unique<LocalWriteFile>(tempFile->path, true, false);
+  auto sink = std::make_unique<dwio::common::WriteFileSink>(
+      std::move(writeFile), tempFile->path);
+
+  bytedance::bolt::parquet::WriterOptions writerOptions;
+  writerOptions.memoryPool = rootPool_.get();
+  writerOptions.enableDictionary = false;
+  writerOptions.dataPageSize = 1024;
+  writerOptions.columnDataPageSizeMap["items.list.element"] = 1024;
+  writerOptions.writeBatchBytes = 1ULL << 30;
+  writerOptions.minBatchSize = 1;
+  auto writer = std::make_unique<bytedance::bolt::parquet::Writer>(
+      std::move(sink), writerOptions, rowType);
+  writer->write(data);
+  writer->close();
+
+  bytedance::bolt::dwio::common::ReaderOptions readerOptions{leafPool_.get()};
+  readerOptions.setFileSchema(rowType);
+  readerOptions.setFileFormat(dwio::common::FileFormat::PARQUET);
+  auto reader = createReader(tempFile->path, readerOptions);
+
+  auto rowReaderOpts = getReaderOpts(rowType);
+  rowReaderOpts.setDecodeRepDefPageCount(1);
+  rowReaderOpts.setParquetRepDefMemoryLimit(1);
+  auto scanSpec = makeScanSpec(rowType);
+  scanSpec->getOrCreateChild(Subfield("id"))
+      ->setFilter(exec::equal(kTargetRow));
+  rowReaderOpts.setScanSpec(scanSpec);
+  auto rowReader = reader->createRowReader(rowReaderOpts);
+
+  VectorPtr result = BaseVector::create(rowType, 0, leafPool_.get());
+  ASSERT_NO_THROW({
+    auto rowsRead = rowReader->next(1, result);
+    ASSERT_EQ(rowsRead, 1);
+  });
+
+  assertEqualVectorPart(data, result, kTargetRow);
+}
+
 TEST_F(ParquetReaderTest, readVarbinaryFromFLBA) {
   const std::string filename("varbinary_flba.parquet");
   const std::string sample(getExampleFilePath(filename));

@@ -458,6 +458,18 @@ void PageReader::setPageRowInfo(bool forRepDef) {
     numRowsInPage_ = numRepDefsInPage_;
   } else if (hasChunkRepDefs_) {
     ++pageIndex_;
+
+    // The repeated reader normally decodes rep/def metadata far enough before
+    // the value reader seeks into a non-top-level data page. However, sparse
+    // selective reads can make the value path reach the next physical page
+    // exactly when only the already-consumed rep/def page counts are present in
+    // numLeavesInPage_. If more preloaded rep/def batches are available, decode
+    // them here instead of failing the scan immediately.
+    while (pageIndex_ >= static_cast<int32_t>(numLeavesInPage_.size()) &&
+           !preloadedRepDefs_.empty()) {
+      loadMoreRepDefs();
+    }
+
     BOLT_CHECK_LT(
         pageIndex_,
         numLeavesInPage_.size(),
