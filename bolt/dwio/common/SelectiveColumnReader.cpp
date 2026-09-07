@@ -71,7 +71,20 @@ SelectiveColumnReader::SelectiveColumnReader(
       requestedType_(requestedType),
       fileType_(fileType),
       formatData_(params.toFormatData(fileType, scanSpec)),
-      scanSpec_(&scanSpec) {}
+      scanSpec_(&scanSpec) {
+  validateReaderCastFilter();
+}
+
+void SelectiveColumnReader::validateReaderCastFilter() const {
+  const auto* filter = scanSpec_->filter();
+  if (fileType_->type()->kind() == TypeKind::BIGINT &&
+      !fileType_->type()->isDecimal() && requestedType_->isVarchar() &&
+      filter && !filter->isValueIndependent()) {
+    BOLT_USER_FAIL(
+        "Cannot apply VARCHAR filter to physical BIGINT column {}",
+        scanSpec_->fieldName());
+  }
+}
 
 void SelectiveColumnReader::filterRowGroups(
     uint64_t rowGroupSize,
@@ -557,6 +570,7 @@ void SelectiveColumnReader::setNulls(BufferPtr resultNulls) {
 }
 
 void SelectiveColumnReader::resetFilterCaches() {
+  validateReaderCastFilter();
   if (scanState_.filterCache.empty() && scanSpec_->hasFilter()) {
     scanState_.filterCache.resize(std::max<int32_t>(
         1, scanState_.dictionary.numValues + scanState_.dictionary2.numValues));

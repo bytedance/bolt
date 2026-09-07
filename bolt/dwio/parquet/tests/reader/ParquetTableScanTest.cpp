@@ -2431,6 +2431,42 @@ TEST_F(ParquetTableScanTest, floatingPointToVarcharValueFilters) {
   EXPECT_EQ(alwaysFalseResult->size(), 0);
 }
 
+TEST_F(ParquetTableScanTest, bigintToVarcharValueFilters) {
+  auto data = makeRowVector(
+      {"c0"}, {makeNullableFlatVector<int64_t>({11, 22, std::nullopt})});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {data}, WriterOptions{});
+
+  auto declared = ROW({"c0"}, {VARCHAR()});
+  auto pushdownOnlyPlan = PlanBuilder(pool())
+                              .tableScan(declared, {"c0 = '11'"}, "", declared)
+                              .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(pushdownOnlyPlan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply VARCHAR filter to physical BIGINT Parquet column c0");
+
+  auto extractedFilterPlan = PlanBuilder(pool())
+                                 .tableScan(declared, {}, "c0 = '11'", declared)
+                                 .planNode();
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(extractedFilterPlan)
+          .split(makeSplit(file->getPath()))
+          .copyResults(pool()),
+      "Cannot apply VARCHAR filter to physical BIGINT Parquet column c0");
+
+  auto isNullPlan = PlanBuilder(pool())
+                        .tableScan(declared, {"c0 IS NULL"}, "", declared)
+                        .planNode();
+  auto isNullResult = AssertQueryBuilder(isNullPlan)
+                          .split(makeSplit(file->getPath()))
+                          .copyResults(pool());
+  auto expected = makeRowVector(
+      {"c0"}, {makeNullableFlatVector<StringView>({std::nullopt})});
+  EXPECT_TRUE(assertEqualResults({expected}, {isNullResult}));
+}
+
 TEST_F(ParquetTableScanTest, doubleToBigintValueChecks) {
   if (!::bytedance::bolt::kSparkCompatible) {
     GTEST_SKIP();

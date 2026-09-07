@@ -39,6 +39,7 @@
 #include "bolt/dwio/dwrf/test/OrcTest.h"
 #include "bolt/dwio/dwrf/test/utils/E2EWriterTestUtil.h"
 #include "bolt/type/fbhive/HiveTypeParser.h"
+#include "bolt/type/filter/FilterUtil.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -2922,6 +2923,27 @@ TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
            {makeFlatVector<StringView>({"11", "33"}),
             makeFlatVector<bool>({true, true})})});
   assertEqualVectors(expected, actual);
+
+  auto assertValueFilterRejected = [&](bool extractValues) {
+    auto valueFilterSpec = std::make_shared<common::ScanSpec>("<root>");
+    valueFilterSpec->addAllChildFields(*requestedSchema);
+    auto* chatterIdSpec =
+        valueFilterSpec->childByName("meta_details")->childByName("chatter_id");
+    chatterIdSpec->setProjectOut(!extractValues);
+    chatterIdSpec->setExtractValues(extractValues);
+    chatterIdSpec->setFilter(
+        common::createBytesRange("11", true, "11", true, false));
+
+    RowReaderOptions valueFilterOptions;
+    valueFilterOptions.select(
+        std::make_shared<ColumnSelector>(requestedSchema));
+    valueFilterOptions.setScanSpec(valueFilterSpec);
+    BOLT_ASSERT_THROW(
+        reader->createRowReader(valueFilterOptions),
+        "Cannot apply VARCHAR filter to physical BIGINT column chatter_id");
+  };
+  assertValueFilterRejected(false);
+  assertValueFilterRejected(true);
 }
 
 // Ensure there is enough data before switching to fast path.
