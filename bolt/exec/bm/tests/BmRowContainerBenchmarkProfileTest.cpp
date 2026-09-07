@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkProfiles.h"
+#include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkCommon.h"
 
 #include <gtest/gtest.h>
 
@@ -25,6 +25,17 @@ TEST(BmRowContainerBenchmarkProfileTest, DatasetNamesDescribeProfiles) {
   EXPECT_STREQ("fixed", datasetName(DatasetKind::kFixed));
   EXPECT_STREQ("variable_small", datasetName(DatasetKind::kVariableSmall));
   EXPECT_STREQ("variable_large", datasetName(DatasetKind::kVariableLarge));
+}
+
+TEST(BmRowContainerBenchmarkProfileTest, OpenZlIsBmOnlyCompressionKind) {
+  EXPECT_STREQ("openzl", spillCompressionName(SpillCompressionKind::kOpenZl));
+  EXPECT_EQ(
+      memory::bm::compress::CompressionKind::kOpenZlFrame,
+      bmCompressionKind(SpillCompressionKind::kOpenZl));
+  EXPECT_THROW(
+      checkOldRowBasedSpillBenchmarkSupported(
+          options(DatasetKind::kFixed, 1024, SpillCompressionKind::kOpenZl)),
+      std::exception);
 }
 
 TEST(BmRowContainerBenchmarkProfileTest, VariableColumnPresence) {

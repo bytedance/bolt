@@ -20,6 +20,7 @@
 #include "bolt/common/memory/bm/io/DiskIoScheduler.h"
 #include "bolt/common/memory/bm/io/IoRequest.h"
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -77,11 +78,17 @@ SpillWriteFuture::SpillWriteFuture(
 
 SpillWriteResult SpillWriteFuture::get() {
   SpillWriteResult result;
+  const auto waitStart = std::chrono::steady_clock::now();
   result.io = rawFuture_.get();
+  result.futureWaitTimeUs =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - waitStart)
+          .count();
   result.segment = std::move(segment_);
   result.rawBytes = metadata_.rawBytes;
   result.physicalBytes = metadata_.physicalBytes;
   result.compressionTimeUs = metadata_.compressionTimeUs;
+  result.storedKind = metadata_.storedKind;
   result.compressed = metadata_.compressed;
   return result;
 }
@@ -90,18 +97,25 @@ SpillReadFuture::SpillReadFuture(
     std::future<IoResult> rawFuture,
     std::shared_ptr<compress::CompressionManager> compression,
     MemoryPool* pool,
-    size_t expectedRawSize)
+    size_t expectedRawSize,
+    uint64_t blockId)
     : rawFuture_(std::move(rawFuture)),
       compression_(std::move(compression)),
       pool_(pool),
-      expectedRawSize_(expectedRawSize) {
+      expectedRawSize_(expectedRawSize),
+      blockId_(blockId) {
   BOLT_CHECK_NOT_NULL(compression_);
   BOLT_CHECK_NOT_NULL(pool_);
 }
 
 SpillReadResult SpillReadFuture::get() {
+  const auto waitStart = std::chrono::steady_clock::now();
   auto raw = rawFuture_.get();
   SpillReadResult result;
+  result.futureWaitTimeUs =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - waitStart)
+          .count();
   result.physicalBytes = raw.bytes;
   if (!raw.ok()) {
     result.io = std::move(raw);
@@ -112,7 +126,9 @@ SpillReadResult SpillReadFuture::get() {
       std::span<const char>(raw.buffer.data(), raw.buffer.length()),
       expectedRawSize_,
       pool_,
-      &result.decompressionTimeUs);
+      &result.decompressionTimeUs,
+      blockId_,
+      &result.storedKind);
   result.rawBytes = decoded.length();
   result.io.bytes = decoded.length();
   result.io.buffer = std::move(decoded);
@@ -146,12 +162,14 @@ ManagedFileSegment SpillStore::OwnSegment(FileSegment segment) const {
 SpillWriteFuture SpillStore::SubmitWriteBlock(
     IoBuffer& payload,
     size_t rawSize,
-    IoPriority priority) {
+    IoPriority priority,
+    std::shared_ptr<const BlockDescriptor> descriptor) {
   BOLT_CHECK(payload.valid());
   BOLT_CHECK_EQ(payload.length(), rawSize);
 
   auto record = compression_->BuildSpillRecord(
-      std::span<const char>(payload.data(), payload.length()));
+      std::span<const char>(payload.data(), payload.length()),
+      descriptor.get());
 
   auto allocation = AllocateSegment(record.physicalSize);
   if (!allocation.ok()) {
@@ -166,6 +184,7 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
   metadata.rawBytes = rawSize;
   metadata.physicalBytes = record.physicalSize;
   metadata.compressionTimeUs = record.compressionTimeUs;
+  metadata.storedKind = record.storedKind;
   metadata.compressed = record.compressed;
 
   auto ownedSegment = OwnSegment(allocation.segment);
@@ -179,12 +198,14 @@ SpillWriteFuture SpillStore::SubmitWriteBlock(
 SpillReadFuture SpillStore::SubmitReadBlock(
     const ManagedFileSegment& segment,
     size_t expectedRawSize,
-    IoPriority priority) {
+    IoPriority priority,
+    uint64_t blockId) {
   return SpillReadFuture{
       SubmitReadRaw(segment, segment.segment().requested_size, priority),
       compression_,
       pool_,
-      expectedRawSize};
+      expectedRawSize,
+      blockId};
 }
 
 } // namespace bytedance::bolt::memory::bm

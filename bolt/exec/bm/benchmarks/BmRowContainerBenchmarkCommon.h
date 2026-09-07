@@ -33,6 +33,7 @@ enum class SpillCompressionKind {
   kRaw,
   kLz4,
   kZstd,
+  kOpenZl,
 };
 
 struct BenchmarkOptions {
@@ -128,6 +129,9 @@ double nsToMs(uint64_t ns);
 uint64_t counterDelta(uint64_t before, uint64_t after);
 
 const char* spillCompressionName(SpillCompressionKind compression);
+
+memory::bm::compress::CompressionKind bmCompressionKind(
+    SpillCompressionKind compression);
 
 bool shouldPrintSpillMetrics(
     const char* benchmark,

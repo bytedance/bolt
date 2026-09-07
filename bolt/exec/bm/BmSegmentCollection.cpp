@@ -201,6 +201,9 @@ SegmentId BmSegmentCollection::finalizeAndFlushSegment(SegmentData& segment) {
     }
     blocks.reserve(blocks.size() + 1 + chunk.heapBlocks.size());
     zeroUnusedHeapTail(chunk);
+    bufferManager_->SetBlockDescriptor(
+        chunk.rowBlock.block,
+        layout().makeBlockDescriptor(chunk.meta.rowCount));
     chunk.rowBlock.handle = memory::bm::BufferHandle{};
     chunk.rowBlock.ptr = nullptr;
     blocks.push_back(chunk.rowBlock.block);

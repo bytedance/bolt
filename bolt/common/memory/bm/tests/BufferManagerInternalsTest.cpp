@@ -173,7 +173,9 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   write.rawBytes = memory.size;
   write.physicalBytes = 1024;
   write.compressionTimeUs = 77;
+  write.futureWaitTimeUs = 33;
   write.compressed = true;
+  write.storedKind = compress::CompressionKind::kOpenZlFrame;
   accounting.OnSpillCompleted(memory, write);
 
   auto stats = accounting.stats();
@@ -183,13 +185,23 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   EXPECT_EQ(8192, stats.spillWriteBytes);
   EXPECT_EQ(1024, stats.spillPhysicalWriteBytes);
   EXPECT_EQ(1, stats.spillCompressedBlocks);
+  EXPECT_EQ(1, stats.spillOpenZlBlocks);
+  EXPECT_EQ(0, stats.spillZstdBlocks);
   EXPECT_EQ(77, stats.spillCompressionTimeUs);
+  EXPECT_EQ(33, stats.spillWriteFutureWaitTimeUs);
+  EXPECT_EQ(1, stats.spillOpenZl.writeCount);
+  EXPECT_EQ(8192, stats.spillOpenZl.logicalWriteBytes);
+  EXPECT_EQ(1024, stats.spillOpenZl.physicalWriteBytes);
+  EXPECT_EQ(77, stats.spillOpenZl.compressionTimeUs);
+  EXPECT_EQ(33, stats.spillOpenZl.writeFutureWaitTimeUs);
 
   accounting.OnReadSubmitted(memory);
   accounting.OnReadFutureConsumed(memory);
   SpillReadResult read;
   read.physicalBytes = 2048;
   read.decompressionTimeUs = 88;
+  read.futureWaitTimeUs = 44;
+  read.storedKind = compress::CompressionKind::kOpenZlFrame;
   accounting.OnReadCompleted(memory, read);
 
   stats = accounting.stats();
@@ -200,6 +212,12 @@ TEST_F(BufferManagerInternalsTest, AccountingRecordsSpillReadLifecycle) {
   EXPECT_EQ(8192, stats.spillReadBytes);
   EXPECT_EQ(2048, stats.spillPhysicalReadBytes);
   EXPECT_EQ(88, stats.spillDecompressionTimeUs);
+  EXPECT_EQ(44, stats.spillReadFutureWaitTimeUs);
+  EXPECT_EQ(1, stats.spillOpenZl.readCount);
+  EXPECT_EQ(8192, stats.spillOpenZl.logicalReadBytes);
+  EXPECT_EQ(2048, stats.spillOpenZl.physicalReadBytes);
+  EXPECT_EQ(88, stats.spillOpenZl.decompressionTimeUs);
+  EXPECT_EQ(44, stats.spillOpenZl.readFutureWaitTimeUs);
 
   const auto& tag = findTag(accounting.tagStats(), MemoryTag::kAggregation);
   EXPECT_EQ(8192, tag.residentBytes);

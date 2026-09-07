@@ -31,6 +31,7 @@
 #include "bolt/exec/Task.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/future/BoltPromise.h"
+#include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/connectors/hive/HiveConnector.h"
 #include "bolt/connectors/hive/HiveConnectorSplit.h"
@@ -1883,6 +1884,105 @@ TEST_F(TaskTest, taskCreatesBufferManagerWhenEnabled) {
   ASSERT_NE(nullptr, task->bufferManager());
   DriverCtx ctx(task, 0, 0, 0, 0);
   ASSERT_EQ(task->bufferManager().get(), ctx.bufferManager().get());
+}
+
+DEBUG_ONLY_TEST_F(TaskTest, taskMapsZstdSpillCodecToBufferManagerConfig) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  memory::bm::BufferManagerConfig observedConfig;
+  bool observed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Task::maybeCreateBufferManager",
+      std::function<void(memory::bm::BufferManagerConfig*)>(
+          [&](memory::bm::BufferManagerConfig* config) {
+            observedConfig = *config;
+            observed = true;
+          }));
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{
+          {{core::QueryConfig::kBufferManagerEnabled, "true"},
+           {core::QueryConfig::kSpillCompressionKind, "zstd"}}});
+
+  auto task = Task::create(
+      "task.buffer.manager.zstd",
+      std::move(plan),
+      0,
+      std::move(queryCtx),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{},
+      0,
+      common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(), .spillDirCreated = true});
+
+  ASSERT_NE(nullptr, task->bufferManager());
+  ASSERT_TRUE(observed);
+  EXPECT_EQ(
+      memory::bm::compress::CompressionKind::kZstdFrame,
+      observedConfig.spillStoreConfig.compressionConfig.kind);
+}
+
+DEBUG_ONLY_TEST_F(TaskTest, taskSelectsOpenZlBufferManagerCodec) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  memory::bm::BufferManagerConfig observedConfig;
+  bool observed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Task::maybeCreateBufferManager",
+      std::function<void(memory::bm::BufferManagerConfig*)>(
+          [&](memory::bm::BufferManagerConfig* config) {
+            observedConfig = *config;
+            observed = true;
+          }));
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{
+          {{core::QueryConfig::kBufferManagerEnabled, "true"},
+           {core::QueryConfig::kBufferManagerSpillCompressionKind, "openzl"}}});
+
+  auto task = Task::create(
+      "task.buffer.manager.openzl",
+      std::move(plan),
+      0,
+      std::move(queryCtx),
+      Task::ExecutionMode::kParallel,
+      exec::Consumer{},
+      0,
+      common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(), .spillDirCreated = true});
+
+  ASSERT_NE(nullptr, task->bufferManager());
+  ASSERT_TRUE(observed);
+  EXPECT_EQ(
+      memory::bm::compress::CompressionKind::kOpenZlFrame,
+      observedConfig.spillStoreConfig.compressionConfig.kind);
+}
+
+TEST_F(TaskTest, taskRejectsUnsupportedBufferManagerSpillCodec) {
+  auto data = makeRowVector({makeFlatVector<int64_t>({1})});
+  auto plan = PlanBuilder().values({data}).planFragment();
+  auto spillDirectory = TempDirectoryPath::create();
+  auto queryCtx = core::QueryCtx::create(
+      driverExecutor_.get(),
+      core::QueryConfig{
+          {{core::QueryConfig::kBufferManagerEnabled, "true"},
+           {core::QueryConfig::kBufferManagerSpillCompressionKind, "lz4"}}});
+
+  BOLT_ASSERT_THROW(
+      Task::create(
+          "task.buffer.manager.invalid.codec",
+          std::move(plan),
+          0,
+          std::move(queryCtx),
+          Task::ExecutionMode::kParallel,
+          exec::Consumer{},
+          0,
+          common::SpillDiskOptions{
+              .spillDirPath = spillDirectory->getPath(),
+              .spillDirCreated = true}),
+      "Unsupported BufferManager spill compression kind 'lz4'");
 }
 
 TEST_F(TaskTest, taskBufferManagerEnabledRequiresSpillDirectory) {

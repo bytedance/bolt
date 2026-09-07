@@ -25,6 +25,19 @@
 
 namespace bytedance::bolt::memory::bm {
 
+struct BufferManagerCodecStats {
+  uint64_t writeCount{0};
+  uint64_t readCount{0};
+  uint64_t logicalWriteBytes{0};
+  uint64_t physicalWriteBytes{0};
+  uint64_t logicalReadBytes{0};
+  uint64_t physicalReadBytes{0};
+  uint64_t compressionTimeUs{0};
+  uint64_t decompressionTimeUs{0};
+  uint64_t writeFutureWaitTimeUs{0};
+  uint64_t readFutureWaitTimeUs{0};
+};
+
 struct BufferManagerStats {
   uint64_t allocatedBlocks{0};
   uint64_t liveBlocks{0};
@@ -53,8 +66,20 @@ struct BufferManagerStats {
   uint64_t spillPhysicalWriteBytes{0};
   uint64_t spillPhysicalReadBytes{0};
   uint64_t spillCompressedBlocks{0};
+  uint64_t spillUncompressedBlocks{0};
+  uint64_t spillLz4Blocks{0};
+  uint64_t spillZstdBlocks{0};
+  uint64_t spillSnappyBlocks{0};
+  uint64_t spillOpenZlBlocks{0};
   uint64_t spillCompressionTimeUs{0};
   uint64_t spillDecompressionTimeUs{0};
+  uint64_t spillWriteFutureWaitTimeUs{0};
+  uint64_t spillReadFutureWaitTimeUs{0};
+  BufferManagerCodecStats spillNone;
+  BufferManagerCodecStats spillLz4;
+  BufferManagerCodecStats spillZstd;
+  BufferManagerCodecStats spillSnappy;
+  BufferManagerCodecStats spillOpenZl;
 
   uint64_t fileAllocateFailures{0};
   uint64_t fileFreeFailures{0};

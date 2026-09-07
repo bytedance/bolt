@@ -40,6 +40,23 @@ uint32_t typeWidth(const TypePtr& type) {
   return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(scalarTypeWidth, type->kind(), type);
 }
 
+memory::bm::BlockFieldKind blockFieldKind(TypeKind kind) {
+  switch (kind) {
+    case TypeKind::BOOLEAN:
+      return memory::bm::BlockFieldKind::kUnsignedInteger;
+    case TypeKind::TINYINT:
+    case TypeKind::SMALLINT:
+    case TypeKind::INTEGER:
+    case TypeKind::BIGINT:
+      return memory::bm::BlockFieldKind::kSignedInteger;
+    case TypeKind::REAL:
+    case TypeKind::DOUBLE:
+      return memory::bm::BlockFieldKind::kFloatingPoint;
+    default:
+      return memory::bm::BlockFieldKind::kOpaque;
+  }
+}
+
 } // namespace
 
 BmRowLayout::BmRowLayout(
@@ -95,6 +112,29 @@ BmRowLayout::BmRowLayout(
     fixedRowSize_ += width;
   }
   BOLT_CHECK_LE(fixedRowSize_, rowBlockSize);
+}
+
+std::shared_ptr<const memory::bm::BlockDescriptor>
+BmRowLayout::makeBlockDescriptor(uint32_t elementCount) const {
+  std::vector<memory::bm::BlockFieldSchema> fields;
+  fields.reserve(columns_.size() + (nullBytes_ == 0 ? 0 : 1));
+  if (nullBytes_ != 0) {
+    fields.push_back({memory::bm::BlockFieldKind::kOpaque, 0, nullBytes_});
+  }
+  for (const auto& column : columns_) {
+    fields.push_back(
+        {blockFieldKind(column.type->kind()), column.offset, column.width});
+  }
+  return std::make_shared<const memory::bm::BlockDescriptor>(
+      memory::bm::BlockDescriptor{
+          .schemaKind = memory::bm::BlockSchemaKind::kFixedRow,
+          .elementCount = elementCount,
+          .schema =
+              memory::bm::FixedRowBlockSchema{
+                  .rowStride = fixedRowSize_,
+                  .fields = std::move(fields),
+              },
+      });
 }
 
 } // namespace bytedance::bolt::exec::bm

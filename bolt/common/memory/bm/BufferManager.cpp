@@ -182,6 +182,34 @@ void BufferManager::MarkDirty(const std::shared_ptr<BlockHandle>& block) {
   memory.dirty = true;
 }
 
+void BufferManager::SetBlockDescriptor(
+    const std::shared_ptr<BlockHandle>& block,
+    std::shared_ptr<const BlockDescriptor> descriptor) {
+  BOLT_CHECK_NOT_NULL(block);
+  BOLT_CHECK_NOT_NULL(block->memory_);
+  BOLT_CHECK_NOT_NULL(descriptor);
+  auto& memory = *block->memory_;
+  BOLT_CHECK(
+      memory.owner.lock().get() == this,
+      "BM cannot set a descriptor through a different manager, block_id={}",
+      memory.id);
+  BOLT_CHECK(
+      memory.state == BlockMemoryState::kInMemory,
+      "BM can only set a descriptor on a resident block, block_id={}",
+      memory.id);
+  BOLT_CHECK_GT(
+      memory.pinCount,
+      0,
+      "BM can only set a descriptor while the block is pinned, block_id={}",
+      memory.id);
+  BOLT_CHECK(
+      !memory.descriptor,
+      "BM block descriptor is immutable once set, block_id={}",
+      memory.id);
+  ValidateBlockDescriptor(*descriptor, memory.size);
+  memory.descriptor = std::move(descriptor);
+}
+
 uint64_t BufferManager::DiscardCleanResidentBlocks(
     std::span<const std::shared_ptr<BlockHandle>> blocks) {
   uint64_t reclaimed = 0;
@@ -298,8 +326,8 @@ void BufferManager::SubmitRead(
       "BM read submission expects a spilled block");
   BOLT_CHECK(memory.segment.has_value());
 
-  auto future =
-      spillStore_->SubmitReadBlock(*memory.segment, memory.size, priority);
+  auto future = spillStore_->SubmitReadBlock(
+      *memory.segment, memory.size, priority, memory.id);
   BlockStateMachine::SubmitRead(memory, std::move(future));
   accounting_->OnReadSubmitted(memory);
 }
@@ -308,8 +336,13 @@ SpillWriteDriver BufferManager::MakeSpillWriteDriver() {
   return SpillWriteDriver{
       config_.maxReclaimWriteInflight,
       config_.writePriority,
-      [this](IoBuffer& payload, size_t rawSize, IoPriority priority) {
-        return spillStore_->SubmitWriteBlock(payload, rawSize, priority);
+      [this](
+          IoBuffer& payload,
+          size_t rawSize,
+          IoPriority priority,
+          std::shared_ptr<const BlockDescriptor> descriptor) {
+        return spillStore_->SubmitWriteBlock(
+            payload, rawSize, priority, std::move(descriptor));
       },
       *accounting_};
 }

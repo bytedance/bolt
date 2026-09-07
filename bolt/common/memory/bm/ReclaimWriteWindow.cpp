@@ -53,9 +53,11 @@ void ReclaimWriteWindow::Submit(std::shared_ptr<BlockMemory> memory) {
   BOLT_CHECK_NOT_NULL(memory);
   BOLT_CHECK(canSubmit());
 
+  auto descriptor = memory->descriptor;
   auto payload = BlockStateMachine::BeginSpill(*memory);
   accounting_.OnSpillStarted(*memory);
-  auto write = submitWrite_(payload, memory->size, priority_);
+  auto write =
+      submitWrite_(payload, memory->size, priority_, std::move(descriptor));
   pending_.push_back(
       PendingWrite{std::move(memory), std::move(payload), std::move(write)});
 }

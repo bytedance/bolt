@@ -20,6 +20,7 @@
 
 #include <fmt/format.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,71 @@ namespace bytedance::bolt::exec::bm {
 namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
+
+TEST_F(BmRowContainerTest, OpenZlSpillRoundTripsFixedAndVariableRows) {
+  resetBufferManagerCompression(
+      memory::bm::compress::CompressionKind::kOpenZlFrame);
+  constexpr vector_size_t kRows = 2048;
+  std::vector<std::optional<int64_t>> integers;
+  std::vector<std::optional<std::string>> strings;
+  integers.reserve(kRows);
+  strings.reserve(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    if (row % 17 == 0) {
+      integers.push_back(std::nullopt);
+    } else {
+      integers.push_back(static_cast<int64_t>(row) * 101 - 7);
+    }
+    if (row % 19 == 0) {
+      strings.push_back(std::nullopt);
+    } else {
+      strings.push_back(fmt::format(
+          "openzl-row-{}-{}",
+          row,
+          std::string(row % 2 == 0 ? 8 : 512, 'a' + row % 23)));
+    }
+  }
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>(integers),
+      makeFlatVector<int32_t>(kRows, [](auto row) { return row * 3; }),
+      makeFlatVector<double>(
+          kRows, [](auto row) { return static_cast<double>(row) / 7.0; }),
+      makeNullableFlatVector<std::string>(strings),
+  });
+  BmRowContainer container(
+      {BIGINT(), INTEGER(), DOUBLE(), VARCHAR()},
+      {true, false, false, true},
+      bufferManager_,
+      MemoryTag::kTesting,
+      64 << 10,
+      64 << 10);
+  storeAll(container, input);
+
+  const auto segment = container.spillActiveSegment();
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  auto rows = session.loadRows();
+  ASSERT_EQ(kRows, rows.size());
+
+  auto integerResult = BaseVector::create(BIGINT(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, integerResult);
+  auto integerFlat = integerResult->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, integerFlat);
+  EXPECT_TRUE(integerFlat->isNullAt(0));
+  EXPECT_EQ(101 * 18 - 7, integerFlat->valueAt(18));
+  EXPECT_EQ(101 * 2047 - 7, integerFlat->valueAt(2047));
+
+  auto stringResult = BaseVector::create(VARCHAR(), kRows, pool());
+  container.extractColumnResident(rows.data(), rows.size(), 3, stringResult);
+  auto stringFlat = stringResult->asFlatVector<StringView>();
+  ASSERT_NE(nullptr, stringFlat);
+  EXPECT_TRUE(stringFlat->isNullAt(0));
+  EXPECT_EQ(strings[17]->size(), stringFlat->valueAt(17).size());
+  EXPECT_EQ(*strings[1024], stringFlat->valueAt(1024).str());
+  EXPECT_EQ(*strings[2047], stringFlat->valueAt(2047).str());
+
+  const auto stats = bufferManager_->stats();
+  EXPECT_GT(stats.spillCompressedBlocks, 0);
+}
 
 TEST_F(BmRowContainerTest, BulkReadSessionLoadsStablePointersWhenResident) {
   BmRowContainer container(

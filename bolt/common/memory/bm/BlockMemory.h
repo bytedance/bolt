@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "bolt/common/memory/bm/BlockDescriptor.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/file/ManagedFileSegment.h"
@@ -52,6 +53,7 @@ struct BlockMemory {
   // Generation token for lazy eviction queue entries. It changes whenever an
   // older queued entry should no longer represent this block's evictability.
   uint64_t evictionSequence{0};
+  std::shared_ptr<const BlockDescriptor> descriptor;
   std::optional<IoBuffer> payload;
   std::optional<ManagedFileSegment> segment;
   std::optional<SpillReadFuture> prefetchFuture;

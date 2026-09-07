@@ -29,12 +29,16 @@
 namespace bytedance::bolt::memory::bm {
 
 class BufferManagerStatsCollector;
+struct BlockDescriptor;
 struct BlockMemory;
 
 class ReclaimWriteWindow {
  public:
-  using SubmitWrite =
-      std::function<SpillWriteFuture(IoBuffer&, size_t, IoPriority)>;
+  using SubmitWrite = std::function<SpillWriteFuture(
+      IoBuffer&,
+      size_t,
+      IoPriority,
+      std::shared_ptr<const BlockDescriptor>)>;
 
   struct HarvestResult {
     std::shared_ptr<BlockMemory> memory;

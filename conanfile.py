@@ -257,6 +257,8 @@ class BoltConan(ConanFile):
             self.requires("cpr/1.10.5")
         self.requires("zlib/[>=1.3.1 <2]", force=True)
         self.requires("zstd/1.5.7", override=True)
+        self.requires("lz4/1.10.0", override=True)
+        self.requires("openzl/0.2.0", transitive_headers=True, transitive_libs=True)
         self.requires(
             "flex/2.6.4",
             visible=False,
@@ -758,6 +760,7 @@ class BoltConan(ConanFile):
                 "liburing::liburing",
                 "zlib::zlib",
                 "libbacktrace::libbacktrace",
+                "openzl::openzl",
             ]
         )
         if self.options.get_safe("enable_testutil"):

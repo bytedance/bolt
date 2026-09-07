@@ -55,6 +55,20 @@ class BmRowContainerTest : public testing::Test,
         memory::bm::BufferManager::Create(*root_, std::move(config));
   }
 
+  void resetBufferManagerCompression(
+      memory::bm::compress::CompressionKind kind) {
+    bufferManager_.reset();
+    memory::bm::BufferManagerConfig config;
+    config.poolName = root_->name();
+    config.spillStoreConfig.fileAllocatorConfig =
+        memory::bm::test::ValidConfigWithDirectory(
+            memory::bm::test::UniqueTempDir(root_->name()));
+    config.spillStoreConfig.compressionConfig.kind = kind;
+    config.spillStoreConfig.compressionConfig.minCompressBytes = 1;
+    bufferManager_ =
+        memory::bm::BufferManager::Create(*root_, std::move(config));
+  }
+
   RowVectorPtr makeInput() {
     return makeRowVector({
         makeFlatVector<int64_t>({10, 3, 7, 3}),

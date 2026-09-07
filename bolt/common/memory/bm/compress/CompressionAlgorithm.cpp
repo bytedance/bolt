@@ -17,13 +17,13 @@
 #include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 
 #include "bolt/common/base/Exceptions.h"
-
 namespace bytedance::bolt::memory::bm::compress {
 
 bool SupportedCompressionKind(CompressionKind kind) {
   return kind == CompressionKind::kNone || kind == CompressionKind::kLz4Block ||
       kind == CompressionKind::kZstdFrame ||
-      kind == CompressionKind::kSnappyRaw;
+      kind == CompressionKind::kSnappyRaw ||
+      kind == CompressionKind::kOpenZlFrame;
 }
 
 size_t MaxCompressedLength(CompressionKind kind, size_t rawSize) {
