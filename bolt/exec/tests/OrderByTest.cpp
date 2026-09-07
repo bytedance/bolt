@@ -35,9 +35,12 @@
 #include <re2/re2.h>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <cstdlib>
+#include <numeric>
 #include <ranges>
+#include <type_traits>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
@@ -64,6 +67,37 @@ using namespace bytedance::bolt::core;
 using namespace bytedance::bolt::exec::test;
 namespace bytedance::bolt::exec::test {
 namespace {
+const std::vector<uint32_t> kSpecialRealBits{
+    0x00000000U,
+    0x80000000U,
+    0x7fc00001U,
+    0x7fc00011U,
+    0x7f800000U,
+    0xff800000U};
+const std::vector<uint64_t> kSpecialDoubleBits{
+    0x0000000000000000ULL,
+    0x8000000000000000ULL,
+    0x7ff8000000000001ULL,
+    0x7ff8000000000011ULL,
+    0x7ff0000000000000ULL,
+    0xfff0000000000000ULL};
+
+template <typename Value, typename Bits>
+std::vector<Value> valuesFromBits(const std::vector<Bits>& bits) {
+  std::vector<Value> values;
+  values.reserve(bits.size());
+  for (const auto value : bits) {
+    values.push_back(std::bit_cast<Value>(value));
+  }
+  return values;
+}
+
+std::vector<int64_t> rowIds(size_t size) {
+  std::vector<int64_t> ids(size);
+  std::iota(ids.begin(), ids.end(), 0);
+  return ids;
+}
+
 // Returns aggregated spilled stats by 'task'.
 common::SpillStats spilledStats(const exec::Task& task) {
   common::SpillStats spilledStats;
@@ -86,6 +120,26 @@ void abortPool(memory::MemoryPool* pool) {
   } catch (const BoltException& error) {
     pool->abort(std::current_exception());
   }
+}
+
+template <typename Bits>
+void expectFloatingPointBits(
+    const std::vector<Bits>& actual,
+    const std::vector<Bits>& expected,
+    bool preserved) {
+  ASSERT_EQ(actual.size(), expected.size());
+  if (preserved) {
+    EXPECT_EQ(actual, expected);
+    return;
+  }
+
+  EXPECT_EQ(actual[0], actual[1]);
+  EXPECT_EQ(actual[2], actual[3]);
+  EXPECT_NE(actual[1], expected[1]);
+  EXPECT_NE(actual[2], expected[2]);
+  EXPECT_NE(actual[3], expected[3]);
+  EXPECT_EQ(actual[4], expected[4]);
+  EXPECT_EQ(actual[5], expected[5]);
 }
 
 class RecordingLazyLoader : public VectorLoader {
@@ -150,6 +204,37 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
       bolt::cudf::test::CudfResource::getInstance().finalize();
     }
 #endif
+  }
+
+  RowVectorPtr runOrderByWithRadixEnabled(
+      const RowVectorPtr& input,
+      const std::vector<std::string>& keys,
+      bool spill,
+      std::optional<bool> floatingPointKeyFallback = std::nullopt) {
+    auto plan =
+        PlanBuilder().values(split(input, 2)).orderBy(keys, false).planNode();
+    AssertQueryBuilder query(plan);
+    query.config(core::QueryConfig::kOrderByRadixSortEnabled, true);
+    if (floatingPointKeyFallback.has_value()) {
+      query.config(
+          core::QueryConfig::
+              kOrderByRadixSortFallbackForFloatingPointKeysEnabled,
+          *floatingPointKeyFallback);
+    }
+    if (!spill) {
+      return query.copyResults(pool());
+    }
+
+    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    TestScopedSpillInjection spillInjection(100);
+    std::shared_ptr<Task> task;
+    auto result = query.spillDirectory(spillDirectory->path)
+                      .config(core::QueryConfig::kSpillEnabled, true)
+                      .config(core::QueryConfig::kOrderBySpillEnabled, true)
+                      .copyResults(pool(), task);
+    EXPECT_GT(spilledStats(*task).spilledRows, 0);
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+    return result;
   }
 
   void testSingleKey(
@@ -475,6 +560,232 @@ TEST_P(OrderByTest, sortBufferConfig) {
           "SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST, c2 DESC NULLS FIRST");
   if (BOLT_TEST_VALUE_ENABLED()) {
     ASSERT_TRUE(legacySortBufferUsed);
+  }
+}
+
+TEST_P(OrderByTest, radixSortFloatingPointKeyFallback) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not use CPU sort buffers\n";
+  }
+
+  VectorFuzzer::Options options;
+  options.vectorSize = 32;
+  options.nullRatio = 0.1;
+  options.containerLength = 3;
+  options.allowLazyVector = false;
+  options.enableDictionary = false;
+  VectorFuzzer fuzzer(options, pool());
+
+  struct TestCase {
+    std::string name;
+    TypePtr keyType;
+    bool expectFallback;
+  };
+  const std::vector<TestCase> testCases{
+      {"REAL", REAL(), true},
+      {"DOUBLE", DOUBLE(), true},
+      {"ARRAY(REAL)", ARRAY(REAL()), true},
+      {"MAP(DOUBLE, BIGINT)", MAP(DOUBLE(), BIGINT()), true},
+      {"ROW(INTEGER, REAL)", ROW({INTEGER(), REAL()}), true},
+      {"ROW(ARRAY(MAP(BIGINT, DOUBLE)))",
+       ROW({ARRAY(MAP(BIGINT(), DOUBLE()))}),
+       true},
+      {"ARRAY(BIGINT)", ARRAY(BIGINT()), false},
+  };
+
+  bool legacySortBufferUsed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput",
+      std::function<void(void*)>(
+          [&](void* /*unused*/) { legacySortBufferUsed = true; }));
+
+  const auto run = [&](const RowVectorPtr& input,
+                       std::optional<bool> fallbackEnabled,
+                       bool expectLegacy) {
+    legacySortBufferUsed = false;
+    auto result = runOrderByWithRadixEnabled(
+        input, {"key ASC NULLS LAST"}, false, fallbackEnabled);
+    ASSERT_EQ(result->size(), options.vectorSize);
+    if (BOLT_TEST_VALUE_ENABLED()) {
+      EXPECT_EQ(legacySortBufferUsed, expectLegacy);
+    }
+  };
+
+  for (const auto& testCase : testCases) {
+    SCOPED_TRACE(testCase.name);
+    auto input = makeRowVector({"key"}, {fuzzer.fuzzFlat(testCase.keyType)});
+
+    run(input, std::nullopt, testCase.expectFallback);
+    run(input, true, testCase.expectFallback);
+    run(input, false, false);
+  }
+}
+
+TEST_P(OrderByTest, floatingPointKeyFallbackPreservesBits) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not use CPU sort buffers\n";
+  }
+
+  const auto verify = [&](const auto& inputBits, const TypePtr& type) {
+    using Bits = typename std::decay_t<decltype(inputBits)>::value_type;
+    using Value =
+        std::conditional_t<std::is_same_v<Bits, uint32_t>, float, double>;
+
+    const auto values = valuesFromBits<Value>(inputBits);
+    const auto ids = rowIds(inputBits.size());
+    auto input = makeRowVector(
+        {"key", "id"},
+        {makeFlatVector<Value>(values, type), makeFlatVector<int64_t>(ids)});
+    for (const bool fallbackEnabled : {true, false}) {
+      SCOPED_TRACE(fallbackEnabled ? "fallback" : "radix");
+      for (const bool spill : {false, true}) {
+        SCOPED_TRACE(spill ? "spill" : "in-memory");
+        auto result = runOrderByWithRadixEnabled(
+            input,
+            {"id ASC NULLS LAST", "key ASC NULLS LAST"},
+            spill,
+            fallbackEnabled);
+        auto* keys =
+            result->childAt(0)->template asUnchecked<SimpleVector<Value>>();
+        auto* outputIds =
+            result->childAt(1)->template asUnchecked<SimpleVector<int64_t>>();
+        std::vector<Bits> actual(inputBits.size());
+        for (vector_size_t row = 0; row < result->size(); ++row) {
+          actual.at(outputIds->valueAt(row)) =
+              std::bit_cast<Bits>(keys->valueAt(row));
+        }
+        expectFloatingPointBits(actual, inputBits, fallbackEnabled);
+      }
+    }
+  };
+
+  verify(kSpecialRealBits, REAL());
+  verify(kSpecialDoubleBits, DOUBLE());
+}
+
+TEST_P(OrderByTest, complexFloatingPointKeyFallbackPreservesBits) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not use CPU sort buffers\n";
+  }
+
+  const auto realValues = valuesFromBits<float>(kSpecialRealBits);
+  const auto doubleValues = valuesFromBits<double>(kSpecialDoubleBits);
+  const auto ids = rowIds(kSpecialRealBits.size());
+
+  std::vector<std::vector<float>> arrays;
+  std::vector<std::vector<std::pair<double, std::optional<int64_t>>>>
+      mapsWithFloatingPointKeys;
+  std::vector<std::vector<std::pair<int64_t, std::optional<double>>>>
+      mapsWithFloatingPointValues;
+  for (size_t i = 0; i < realValues.size(); ++i) {
+    arrays.push_back({realValues[i]});
+    mapsWithFloatingPointKeys.push_back(
+        {{doubleValues[i], static_cast<int64_t>(i)}});
+    mapsWithFloatingPointValues.push_back(
+        {{static_cast<int64_t>(i), doubleValues[i]}});
+  }
+  auto rowKeys = makeRowVector(
+      {"array", "map_key", "map_value"},
+      {makeArrayVector<float>(arrays),
+       makeMapVector<double, int64_t>(mapsWithFloatingPointKeys),
+       makeMapVector<int64_t, double>(mapsWithFloatingPointValues)});
+  auto input =
+      makeRowVector({"key", "id"}, {rowKeys, makeFlatVector<int64_t>(ids)});
+
+  for (const bool fallbackEnabled : {true, false}) {
+    SCOPED_TRACE(fallbackEnabled ? "fallback" : "radix");
+    for (const bool spill : {false, true}) {
+      SCOPED_TRACE(spill ? "spill" : "in-memory");
+      auto result = runOrderByWithRadixEnabled(
+          input,
+          {"key ASC NULLS LAST", "id ASC NULLS LAST"},
+          spill,
+          fallbackEnabled);
+      const auto* outputRows = result->childAt(0)->asUnchecked<RowVector>();
+      const auto* outputArrays =
+          outputRows->childAt(0)->asUnchecked<ArrayVector>();
+      const auto* outputReals =
+          outputArrays->elements()->asUnchecked<SimpleVector<float>>();
+      const auto* outputMapsWithFloatingPointKeys =
+          outputRows->childAt(1)->asUnchecked<MapVector>();
+      const auto* outputMapKeys = outputMapsWithFloatingPointKeys->mapKeys()
+                                      ->asUnchecked<SimpleVector<double>>();
+      const auto* outputMapsWithFloatingPointValues =
+          outputRows->childAt(2)->asUnchecked<MapVector>();
+      const auto* outputDoubles = outputMapsWithFloatingPointValues->mapValues()
+                                      ->asUnchecked<SimpleVector<double>>();
+      const auto* outputIds =
+          result->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+      std::vector<uint32_t> actualRealBits(kSpecialRealBits.size());
+      std::vector<uint64_t> actualMapKeyBits(kSpecialDoubleBits.size());
+      std::vector<uint64_t> actualDoubleBits(kSpecialDoubleBits.size());
+      for (vector_size_t row = 0; row < result->size(); ++row) {
+        ASSERT_EQ(outputArrays->sizeAt(row), 1);
+        ASSERT_EQ(outputMapsWithFloatingPointKeys->sizeAt(row), 1);
+        ASSERT_EQ(outputMapsWithFloatingPointValues->sizeAt(row), 1);
+        const auto id = outputIds->valueAt(row);
+        actualRealBits.at(id) = std::bit_cast<uint32_t>(
+            outputReals->valueAt(outputArrays->offsetAt(row)));
+        actualMapKeyBits.at(id) =
+            std::bit_cast<uint64_t>(outputMapKeys->valueAt(
+                outputMapsWithFloatingPointKeys->offsetAt(row)));
+        actualDoubleBits.at(id) =
+            std::bit_cast<uint64_t>(outputDoubles->valueAt(
+                outputMapsWithFloatingPointValues->offsetAt(row)));
+      }
+      expectFloatingPointBits(
+          actualRealBits, kSpecialRealBits, fallbackEnabled);
+      expectFloatingPointBits(
+          actualMapKeyBits, kSpecialDoubleBits, fallbackEnabled);
+      expectFloatingPointBits(
+          actualDoubleBits, kSpecialDoubleBits, fallbackEnabled);
+    }
+  }
+}
+
+TEST_P(OrderByTest, radixSortFloatingPointPayloadPreservesBits) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not use CPU sort buffers\n";
+  }
+
+  const auto realValues = valuesFromBits<float>(kSpecialRealBits);
+  const auto doubleValues = valuesFromBits<double>(kSpecialDoubleBits);
+  const auto ids = rowIds(kSpecialRealBits.size());
+  auto input = makeRowVector(
+      {"key", "real_payload", "double_payload", "id"},
+      {makeFlatVector<int64_t>({3, 0, 5, 2, 1, 4}),
+       makeFlatVector<float>(realValues),
+       makeFlatVector<double>(doubleValues),
+       makeFlatVector<int64_t>(ids)});
+  bool legacySortBufferUsed = false;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::SortBuffer::noMoreInput",
+      std::function<void(void*)>(
+          [&](void* /*unused*/) { legacySortBufferUsed = true; }));
+
+  for (const bool spill : {false, true}) {
+    SCOPED_TRACE(spill ? "spill" : "in-memory");
+    legacySortBufferUsed = false;
+    auto result =
+        runOrderByWithRadixEnabled(input, {"key ASC NULLS LAST"}, spill);
+
+    if (BOLT_TEST_VALUE_ENABLED()) {
+      EXPECT_FALSE(legacySortBufferUsed);
+    }
+    auto* outputReals = result->childAt(1)->asUnchecked<SimpleVector<float>>();
+    auto* outputDoubles =
+        result->childAt(2)->asUnchecked<SimpleVector<double>>();
+    auto* outputIds = result->childAt(3)->asUnchecked<SimpleVector<int64_t>>();
+    ASSERT_EQ(result->size(), kSpecialRealBits.size());
+    for (vector_size_t row = 0; row < result->size(); ++row) {
+      const auto id = outputIds->valueAt(row);
+      EXPECT_EQ(
+          std::bit_cast<uint32_t>(outputReals->valueAt(row)),
+          kSpecialRealBits[id]);
+      EXPECT_EQ(
+          std::bit_cast<uint64_t>(outputDoubles->valueAt(row)),
+          kSpecialDoubleBits[id]);
+    }
   }
 }
 

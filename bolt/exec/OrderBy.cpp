@@ -46,6 +46,25 @@ CompareFlags fromSortOrderToCompareFlags(const core::SortOrder& sortOrder) {
       false,
       CompareFlags::NullHandlingMode::kNullAsValue};
 }
+
+bool containsFloatingPointType(const Type& type) {
+  switch (type.kind()) {
+    case TypeKind::REAL:
+    case TypeKind::DOUBLE:
+      return true;
+    case TypeKind::ARRAY:
+    case TypeKind::MAP:
+    case TypeKind::ROW:
+      for (uint32_t child = 0; child < type.size(); ++child) {
+        if (containsFloatingPointType(*type.childAt(child))) {
+          return true;
+        }
+      }
+      return false;
+    default:
+      return false;
+  }
+}
 } // namespace
 
 OrderBy::OrderBy(
@@ -81,7 +100,17 @@ OrderBy::OrderBy(
     sortCompareFlags.push_back(
         fromSortOrderToCompareFlags(orderByNode->sortingOrders()[i]));
   }
-  const auto useRadixSort = driverCtx->queryConfig().orderByRadixSortEnabled();
+  const auto& queryConfig = driverCtx->queryConfig();
+  auto useRadixSort = queryConfig.orderByRadixSortEnabled();
+  if (useRadixSort &&
+      queryConfig.orderByRadixSortFallbackForFloatingPointKeysEnabled()) {
+    for (const auto channel : sortColumnIndices) {
+      if (containsFloatingPointType(*outputType_->childAt(channel))) {
+        useRadixSort = false;
+        break;
+      }
+    }
+  }
   if (useRadixSort) {
     sortBuffer_ = std::make_unique<radixsort::RadixSortBuffer>(
         outputType_,
