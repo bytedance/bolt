@@ -75,6 +75,9 @@ class CellShuffleWriter final : public ShuffleWriter {
   /// pressure pierces the guard (see reclaimFixedSize).
   static constexpr int32_t kMaxReclaimRefusals = 2;
   int32_t reclaimRefusals_{0};
+  /// The sizing budget resolved at init; scales the reclaim run-density
+  /// floor.
+  int64_t budgetBytes_{0};
 
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
