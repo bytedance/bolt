@@ -3746,6 +3746,7 @@ SchemaSignature makeSchemaSignature(
   mixSignature(signature, options.useLargeString ? 1 : 0);
   mixSignature(signature, options.stringViewCopyValues ? 1 : 0);
   mixSignature(signature, options.exportToArrowIPC ? 1 : 0);
+  mixSignature(signature, options.arrayConstantAsDictionary ? 1 : 0);
   for (const auto& fieldName : fieldNames) {
     ++signature.fields;
     mixStringView(signature, fieldName);
@@ -3941,6 +3942,10 @@ class ReusableArrowBatchPool::Impl {
     auto loadedVector = vector->encoding() == VectorEncoding::Simple::LAZY
         ? BaseVector::loadedVectorShared(vector)
         : vector;
+    // Normalize before both ArrowArray export and schema cache lookup so they
+    // observe the same vector encoding. This is a no-op unless the opt-in
+    // constant-array Dictionary export applies.
+    normalizeArrayConstantForDictionaryExport(loadedVector, options);
     auto holder = std::make_unique<ExportHolder>();
     for (auto& slot : slots_) {
       if (slot->tryExport(loadedVector, pool, options)) {

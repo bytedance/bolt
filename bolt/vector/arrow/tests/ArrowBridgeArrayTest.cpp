@@ -1120,6 +1120,76 @@ TEST_F(
       std::make_pair(true, false), exportAndRelease(flatVector, options_));
 }
 
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    reusableArrowBatchPoolInvalidatesSchemaForArrayConstantDictionaryOption) {
+  auto arrays = vectorMaker_.arrayVector<int64_t>({{10, 20, 30}});
+  auto constant = BaseVector::wrapInConstant(16, 0, arrays);
+  ReusableArrowBatchPool batchPool(1);
+
+  auto exportAndValidate = [&](const ArrowOptions& options,
+                               bool expectedSchemaRebuilt,
+                               arrow::Type::type expectedType) {
+    ArrowSchema schema{};
+    ArrowArray array{};
+    EXPECT_EQ(
+        expectedSchemaRebuilt,
+        batchPool.exportToArrow(
+            constant, pool_.get(), options, &schema, &array));
+    EXPECT_OK_AND_ASSIGN(auto type, arrow::ImportType(&schema));
+    EXPECT_OK_AND_ASSIGN(auto imported, arrow::ImportArray(&array, type));
+    ASSERT_OK(imported->ValidateFull());
+    EXPECT_EQ(expectedType, imported->type_id());
+  };
+
+  exportAndValidate(options_, true, arrow::Type::RUN_END_ENCODED);
+
+  auto dictionaryOptions = options_;
+  dictionaryOptions.arrayConstantAsDictionary = true;
+  exportAndValidate(dictionaryOptions, true, arrow::Type::DICTIONARY);
+  exportAndValidate(dictionaryOptions, false, arrow::Type::DICTIONARY);
+  exportAndValidate(options_, true, arrow::Type::RUN_END_ENCODED);
+}
+
+TEST_F(
+    ArrowBridgeArrayExportTest,
+    reusableArrowBatchPoolNormalizesArrayConstantDictionaryElements) {
+  auto indices = makeBuffer<vector_size_t>({2, 1, 0});
+  auto encodedElements = BaseVector::wrapInDictionary(
+      nullptr, indices, 3, vectorMaker_.flatVector<int64_t>({10, 20, 30}));
+  auto arrays = std::make_shared<ArrayVector>(
+      pool_.get(),
+      ARRAY(BIGINT()),
+      nullptr,
+      1,
+      makeBuffer<vector_size_t>({0}),
+      makeBuffer<vector_size_t>({3}),
+      encodedElements);
+  auto constant = BaseVector::wrapInConstant(16, 0, arrays);
+
+  ArrowOptions options;
+  options.arrayConstantAsDictionary = true;
+  ReusableArrowBatchPool batchPool(1);
+  ArrowSchema schema{};
+  ArrowArray array{};
+  EXPECT_TRUE(
+      batchPool.exportToArrow(constant, pool_.get(), options, &schema, &array));
+
+  EXPECT_OK_AND_ASSIGN(auto type, arrow::ImportType(&schema));
+  EXPECT_OK_AND_ASSIGN(auto imported, arrow::ImportArray(&array, type));
+  ASSERT_OK(imported->ValidateFull());
+  ASSERT_EQ(arrow::Type::DICTIONARY, imported->type_id());
+  const auto& dictionary =
+      static_cast<const arrow::DictionaryArray&>(*imported);
+  const auto& list =
+      static_cast<const arrow::ListArray&>(*dictionary.dictionary());
+  ASSERT_EQ(arrow::Type::INT64, list.values()->type_id());
+  const auto& values = static_cast<const arrow::Int64Array&>(*list.values());
+  EXPECT_EQ(30, values.Value(0));
+  EXPECT_EQ(20, values.Value(1));
+  EXPECT_EQ(10, values.Value(2));
+}
+
 TEST_F(ArrowBridgeArrayExportTest, reusableArrowBatchPoolZeroSlots) {
   ReusableArrowBatchPool batchPool(0);
   EXPECT_EQ(0, batchPool.size());
