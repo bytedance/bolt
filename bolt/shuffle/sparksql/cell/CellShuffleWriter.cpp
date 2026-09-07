@@ -90,6 +90,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
         ? (int64_t{1} << 30)
         : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
   }
+  budgetBytes_ = budget;
   const int64_t perStream = budget / 8 / numPartitions_ / numStreams;
   const int64_t cellCap =
       std::min<int64_t>(cellOpts.maxDataCellBytes, cellOpts.chunkBytes / 4);
@@ -424,7 +425,9 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // partition. When other operators allocate frequently, honoring every
   // arbitration with little resident data would shred the spill file
   // into near-empty runs whose fixed costs dwarf the memory returned.
-  // The floor scales with the partition count (about 256 bytes per
+  // The floor scales with the sizing budget (an eighth: neighbours must
+  // not be able to trim the writer's working set to a sliver of what it
+  // was sized for) and with the partition count (about 256 bytes per
   // partition keeps the header share near ten percent). The guard is
   // self-limiting in time - a writer ingests continuously, so the floor
   // is crossed within fractions of a second of active splitting - and
@@ -435,8 +438,16 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // far lesser evil than an OOM. The writer's own growth path (a failed
   // reserve before a chunk grab) stays unguarded: that one must spill
   // to make progress.
-  const int64_t minRunBytes = std::max<int64_t>(
-      2 * cellOpts.chunkBytes, int64_t{256} * numPartitions_);
+  int64_t minRunBytes = std::max<int64_t>(
+      {int64_t{2} * cellOpts.chunkBytes,
+       budgetBytes_ / 8,
+       int64_t{256} * numPartitions_});
+  if (cellOpts.cellMemoryCapBytes > 0) {
+    // A tight self-cap is the working-set ceiling; the floor must stay
+    // below it or the guard would refuse until the escalation valve on
+    // every single reclaim.
+    minRunBytes = std::min(minRunBytes, cellOpts.cellMemoryCapBytes / 2);
+  }
   if (static_cast<int64_t>(cells_->totalBytes()) < minRunBytes &&
       ++reclaimRefusals_ <= kMaxReclaimRefusals) {
     *actual = allocator_->shrink();
