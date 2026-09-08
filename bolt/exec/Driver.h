@@ -36,7 +36,6 @@
 
 #include <folly/Random.h>
 #include "bolt/common/future/BoltPromise.h"
-#include "bolt/common/memory/bm/BufferManager.h"
 #include "bolt/common/process/ThreadDebugInfo.h"
 #include "bolt/common/time/CpuWallTimer.h"
 #include "bolt/connectors/Connector.h"
@@ -45,6 +44,11 @@
 #include "bolt/core/QueryCtx.h"
 #include "bolt/exec/Spiller.h"
 #include "bolt/exec/TraceConfig.h"
+
+namespace bytedance::bolt::memory::bm {
+class BufferManager;
+}
+
 namespace bytedance::bolt::exec {
 
 class Driver;

@@ -1,4 +1,4 @@
-add_library(bolt_memory_bm_descriptor STATIC BlockDescriptor.cpp)
+bolt_add_library(bolt_memory_bm_descriptor BlockDescriptor.cpp)
 
 target_compile_features(bolt_memory_bm_descriptor PUBLIC cxx_std_20)
 
@@ -16,7 +16,7 @@ add_subdirectory(io)
 add_subdirectory(file)
 add_subdirectory(compress)
 
-add_library(
+bolt_add_library(
   bolt_memory_bm
   BlockHandle.cpp
   BlockStateMachine.cpp
