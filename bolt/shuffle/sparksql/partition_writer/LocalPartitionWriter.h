@@ -77,6 +77,15 @@ class LocalPartitionWriter : public PartitionWriter {
   /// more memory.
   arrow::Status stop(ShuffleWriterMetrics* metrics) override;
 
+  arrow::Status stop(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback) override;
+
+  arrow::Status writeFinal(
+      uint32_t partitionId,
+      std::unique_ptr<InMemoryPayload> inMemoryPayload,
+      bool hasComplexType) override;
+
   // Spill source:
   // 1. Other op.
   // 2. PayloadMerger merging payloads or compressing merged payload.
@@ -99,9 +108,16 @@ class LocalPartitionWriter : public PartitionWriter {
       std::vector<std::vector<uint8_t*>>& rows,
       std::vector<int64_t>& partitionBytes,
       const bool isCompositeVector) override;
+  arrow::Status writeFinal(
+      uint32_t partitionId,
+      std::vector<uint8_t*>& rows,
+      int64_t rawSize,
+      bool isCompositeVector) override;
   arrow::Status startEvictRowsSequential();
   arrow::Status stopEvictRowsSequential();
-  arrow::Status stopInRowFormat(ShuffleWriterMetrics* metrics);
+  arrow::Status stopInRowFormat(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback);
   arrow::Status mergeRowSpills(uint32_t partitionId);
 
   bool canSpill() override;
@@ -124,6 +140,10 @@ class LocalPartitionWriter : public PartitionWriter {
   std::string nextSpilledFileDir();
 
   arrow::Status openDataFile();
+
+  arrow::Status stopInternal(
+      ShuffleWriterMetrics* metrics,
+      const StopCallback& callback);
 
   arrow::Status mergeSpills(uint32_t partitionId);
 

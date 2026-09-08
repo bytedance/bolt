@@ -308,6 +308,13 @@ int64_t getBufferSize(const std::shared_ptr<arrow::Array>& array) {
   return getBufferSize(array->data()->buffers);
 }
 
+int64_t getTotalRowBytes(const std::vector<uint8_t*>& rows) {
+  return std::accumulate(
+      rows.begin(), rows.end(), int64_t{0}, [](int64_t sum, uint8_t* row) {
+        return sum + *reinterpret_cast<int32_t*>(row) + sizeof(int32_t);
+      });
+}
+
 int64_t getMaxCompressedBufferSize(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
     Codec* codec) {

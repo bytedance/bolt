@@ -30,6 +30,7 @@
 #include "bolt/shuffle/sparksql/CelebornReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
+#include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/NativeCelebornClient.h"
 #include "bolt/shuffle/sparksql/tests/CelebornTestUtils.h"
@@ -666,6 +667,24 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
       auto curBatch = readerCursor->current();
       // deep copy to avoid hold shuffle reader memory
       if (param.verifyOutput) {
+        if (RowVector::isComposite(curBatch)) {
+          auto composite =
+              std::dynamic_pointer_cast<CompositeRowVector>(curBatch);
+          std::vector<std::string_view> rows;
+          rows.reserve(composite->size());
+          for (auto row = 0; row < composite->size(); ++row) {
+            auto* data = composite->rowAt(row);
+            auto* end = row + 1 < composite->size()
+                ? composite->rowAt(row + 1)
+                : composite->rowAt(0) + composite->totalRowSize();
+            rows.emplace_back(data, end - data);
+          }
+          ShuffleRowToColumnarConverter converter(
+              outputType, pool(), param.rowFormat);
+          result.partitionOutputs[i].push_back(converter.convert(rows));
+          readerCursor->current().reset();
+          continue;
+        }
         VectorPtr copy =
             BaseVector::create(curBatch->type(), curBatch->size(), pool());
         copy->copy(curBatch.get(), 0, 0, curBatch->size());
@@ -719,7 +738,8 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
 
 void ShuffleTestBase::executeTestWithCustomInput(
     const ShuffleTestParam& param,
-    ShuffleInputData& inputData) {
+    ShuffleInputData& inputData,
+    ShuffleRunResult* resultOut) {
   const bool needsPid =
       (param.partitioning == "hash" || param.partitioning == "range");
 
@@ -738,6 +758,13 @@ void ShuffleTestBase::executeTestWithCustomInput(
   BOLT_CHECK(!allBaseBatches.empty(), "Input batches should not be empty");
   auto outputType =
       std::dynamic_pointer_cast<const RowType>(allBaseBatches[0]->type());
+  if (needsPid && RowVector::isComposite(allBaseBatches[0])) {
+    auto names = outputType->names();
+    auto types = outputType->children();
+    names.erase(names.begin());
+    types.erase(types.begin());
+    outputType = ROW(std::move(names), std::move(types));
+  }
 
   auto result = runShuffle(writerInputs, outputType, param);
 
@@ -752,6 +779,9 @@ void ShuffleTestBase::executeTestWithCustomInput(
   }
 
   if (!param.verifyOutput) {
+    if (resultOut != nullptr) {
+      *resultOut = std::move(result);
+    }
     return;
   }
 
@@ -788,6 +818,9 @@ void ShuffleTestBase::executeTestWithCustomInput(
   }
 
   result.partitionOutputs.clear();
+  if (resultOut != nullptr) {
+    *resultOut = std::move(result);
+  }
 }
 
 void ShuffleTestBase::executeTest(const ShuffleTestParam& param) {

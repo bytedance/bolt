@@ -660,12 +660,24 @@ arrow::Status LocalPartitionWriter::mergeSpills(uint32_t partitionId) {
 }
 
 arrow::Status LocalPartitionWriter::stop(ShuffleWriterMetrics* metrics) {
+  return stopInternal(metrics, {});
+}
+
+arrow::Status LocalPartitionWriter::stop(
+    ShuffleWriterMetrics* metrics,
+    const StopCallback& callback) {
+  return stopInternal(metrics, callback);
+}
+
+arrow::Status LocalPartitionWriter::stopInternal(
+    ShuffleWriterMetrics* metrics,
+    const StopCallback& callback) {
   if (stopped_) {
     return arrow::Status::OK();
   }
   stopped_ = true;
   if (isRowFormat_) {
-    return stopInRowFormat(metrics);
+    return stopInRowFormat(metrics, callback);
   }
 
   RETURN_NOT_OK(finishSpill());
@@ -686,6 +698,9 @@ arrow::Status LocalPartitionWriter::stop(ShuffleWriterMetrics* metrics) {
     RETURN_NOT_OK(mergeSpills(pid));
     if (payloadCache_ && payloadCache_->hasCachedPayloads(pid)) {
       RETURN_NOT_OK(payloadCache_->write(pid, dataFileOs_.get()));
+    }
+    if (callback) {
+      RETURN_NOT_OK(callback(pid));
     }
     if (merger_) {
       ARROW_ASSIGN_OR_RAISE(auto merged, merger_->finish(pid));
@@ -715,6 +730,23 @@ arrow::Status LocalPartitionWriter::stop(ShuffleWriterMetrics* metrics) {
   // Populate shuffle writer metrics.
   RETURN_NOT_OK(populateMetrics(metrics));
 
+  return arrow::Status::OK();
+}
+
+arrow::Status LocalPartitionWriter::writeFinal(
+    uint32_t partitionId,
+    std::unique_ptr<InMemoryPayload> inMemoryPayload,
+    bool hasComplexType) {
+  rawPartitionLengths_[partitionId] += inMemoryPayload->getBufferSize();
+  auto payloadType =
+      codec_ ? Payload::Type::kCompressed : Payload::Type::kUncompressed;
+  ARROW_ASSIGN_OR_RAISE(
+      auto payload,
+      inMemoryPayload->toBlockPayload(
+          payloadType, payloadPool_.get(), codec_.get(), hasComplexType));
+  RETURN_NOT_OK(payload->serialize(dataFileOs_.get()));
+  compressTime_ += payload->getCompressTime();
+  writeTime_ += payload->getWriteTime();
   return arrow::Status::OK();
 }
 
@@ -958,11 +990,7 @@ arrow::Status LocalPartitionWriter::evict(
   // compress and flush
   for (auto pid = 0; pid < rows.size(); ++pid) {
     if (isCompositeVector) {
-      pBytes = std::accumulate(
-          rows[pid].begin(),
-          rows[pid].end(),
-          0,
-          [](uint64_t sum, uint8_t* row) { return sum + *(int32_t*)row; });
+      pBytes = getTotalRowBytes(rows[pid]);
     } else {
       pBytes = partitionBytes[pid];
       partitionBytes[pid] = 0;
@@ -1003,34 +1031,70 @@ arrow::Status LocalPartitionWriter::stopEvictRowsSequential() {
 }
 
 arrow::Status LocalPartitionWriter::stopInRowFormat(
-    ShuffleWriterMetrics* metrics) {
+    ShuffleWriterMetrics* metrics,
+    const StopCallback& callback) {
   // Open final data file.
   // If options_.bufferedWrite is set, it will acquire 16KB memory that can
   // trigger spill.
   RETURN_NOT_OK(openDataFile());
 
   int64_t endInFinalFile = 0;
+  auto writeTimeBeforeStop = zstdCodec_ ? zstdCodec_->getWriteTime() : 0;
   LOG(INFO) << "LocalPartitionWriter stopped. Total spills: " << spills_.size();
   // Iterator over pid.
-  {
-    bytedance::bolt::NanosecondTimer timer(&writeTime_);
-    for (auto pid = 0; pid < numPartitions_; ++pid) {
-      // Record start offset.
-      auto startInFinalFile = endInFinalFile;
+  for (auto pid = 0; pid < numPartitions_; ++pid) {
+    // Record start offset.
+    auto startInFinalFile = endInFinalFile;
+    {
+      bytedance::bolt::NanosecondTimer timer(&writeTime_);
       RETURN_NOT_OK(mergeRowSpills(pid));
-      ARROW_ASSIGN_OR_RAISE(endInFinalFile, dataFileOs_->Tell());
-      partitionLengths_[pid] = endInFinalFile - startInFinalFile;
     }
+    if (callback) {
+      RETURN_NOT_OK(callback(pid));
+    }
+    ARROW_ASSIGN_OR_RAISE(endInFinalFile, dataFileOs_->Tell());
+    partitionLengths_[pid] = endInFinalFile - startInFinalFile;
   }
 
   ARROW_ASSIGN_OR_RAISE(totalBytesWritten_, dataFileOs_->Tell());
 
   // Close Final file. Clear buffered resources.
   RETURN_NOT_OK(clearResource());
-  compressTime_ += zstdCodec_->getCompressTime();
-  writeTime_ += zstdCodec_->getWriteTime();
+  if (zstdCodec_) {
+    compressTime_ += zstdCodec_->getCompressTime();
+    spillTime_ += writeTimeBeforeStop;
+    writeTime_ += zstdCodec_->getWriteTime() - writeTimeBeforeStop;
+  }
   // Populate shuffle writer metrics.
   RETURN_NOT_OK(populateMetrics(metrics));
+  return arrow::Status::OK();
+}
+
+arrow::Status LocalPartitionWriter::writeFinal(
+    uint32_t partitionId,
+    std::vector<uint8_t*>& rows,
+    int64_t rawSize,
+    bool isCompositeVector) {
+  if (rows.empty()) {
+    return arrow::Status::OK();
+  }
+  if (!zstdCodec_) {
+    zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
+        options_.compressionLevel,
+        true,
+        payloadPool_.get(),
+        options_.checksumEnabled);
+  }
+  RowBlockPayload payload(
+      folly::Range<uint8_t**>(rows.data(), rows.size()),
+      rawSize,
+      payloadPool_.get(),
+      zstdCodec_.get(),
+      isCompositeVector ? RowVectorLayout::kComposite
+                        : RowVectorLayout::kColumnar);
+  RETURN_NOT_OK(payload.serialize(dataFileOs_.get()));
+  rawPartitionLengths_[partitionId] += rawSize;
+  rows.clear();
   return arrow::Status::OK();
 }
 
