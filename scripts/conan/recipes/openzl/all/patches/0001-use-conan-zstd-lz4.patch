@@ -1,0 +1,21 @@
+diff --git a/build-scripts/cmake/openzl-config.cmake.in b/build-scripts/cmake/openzl-config.cmake.in
+index e6d691d..9bc514d 100644
+--- a/build-scripts/cmake/openzl-config.cmake.in
++++ b/build-scripts/cmake/openzl-config.cmake.in
+@@ -15,0 +16,3 @@ include(CMakeFindDependencyMacro)
++find_dependency(zstd CONFIG)
++find_dependency(lz4 CONFIG)
++find_dependency(Threads)
+diff --git a/build-scripts/cmake/openzl-deps.cmake b/build-scripts/cmake/openzl-deps.cmake
+index 34f81af..7a93e82 100644
+--- a/build-scripts/cmake/openzl-deps.cmake
++++ b/build-scripts/cmake/openzl-deps.cmake
+@@ -19,0 +20,5 @@ set(ZSTD_LEGACY_SUPPORT OFF)
++if (OPENZL_USE_CONAN_DEPS)
++    find_package(zstd CONFIG REQUIRED)
++    find_package(lz4 CONFIG REQUIRED)
++    list(APPEND OPENZL_LINK_LIBRARIES zstd::libzstd_static lz4::lz4)
++else()
+@@ -190,0 +196,2 @@ list(APPEND OPENZL_INCLUDE_DIRECTORIES
++endif()
++
