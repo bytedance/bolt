@@ -67,6 +67,7 @@ TEST_F(MemoryManagerTest, ctor) {
     ASSERT_EQ(manager.numPools(), 3);
     ASSERT_EQ(manager.capacity(), kMaxMemory);
     ASSERT_EQ(0, manager.getTotalBytes());
+    ASSERT_EQ(&manager.deprecatedSysRootPool(), &systemRootPool(manager));
     ASSERT_EQ(manager.alignment(), MemoryAllocator::kMaxAlignment);
     ASSERT_EQ(systemRootPool(manager).alignment(), manager.alignment());
     ASSERT_EQ(systemRootPool(manager).capacity(), kMaxMemory);
