@@ -129,7 +129,7 @@ uint64_t fixedWidthValueBytes(const Type& type, vector_size_t rows) {
 
 uint64_t spillReadBytesPerRun(common::CompressionKind compressionKind) {
   uint64_t bytes = 2 * kRadixSortSpillBufferSize;
-  if (isSpillCompressionEnabled(compressionKind)) {
+  if (compressionKind != common::CompressionKind_NONE) {
     bytes += kRadixSortSpillBufferSize / 10;
   }
   return bytes;

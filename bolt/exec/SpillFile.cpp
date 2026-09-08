@@ -30,6 +30,8 @@
 
 #include "bolt/exec/SpillFile.h"
 #include <lz4.h>
+#include <snappy.h>
+#include <zlib.h>
 #include <zstd.h>
 #include <cstdint>
 #include <cstring>
@@ -50,24 +52,46 @@ static const bool kDefaultUseLosslessTimestamp = true;
 constexpr uint64_t kDefaultSpillReadBufferSize =
     (1 << 20) - AlignedBuffer::kPaddedSize;
 
-int32_t checkedCompressionBound(common::CompressionKind kind, int32_t size) {
+} // namespace
+
+// Encoded spill blocks use caller-provided buffers for all supported codecs.
+// NONE bypasses compression, while LZ4 and ZSTD retain their native fast paths.
+int32_t spillCompressionBound(common::CompressionKind kind, int32_t size) {
   BOLT_CHECK_GT(size, 0, "Invalid spill block size");
-  if (kind == common::CompressionKind_ZSTD) {
-    const auto bound = ZSTD_compressBound(size);
-    BOLT_CHECK(!ZSTD_isError(bound), "Invalid ZSTD spill block size");
-    BOLT_CHECK_LE(
-        bound,
-        static_cast<size_t>(std::numeric_limits<int32_t>::max()),
-        "ZSTD spill block exceeds int32 range");
-    return static_cast<int32_t>(bound);
+  uint64_t bound;
+  switch (kind) {
+    case common::CompressionKind_ZLIB:
+    case common::CompressionKind_GZIP:
+      // GZIP uses the same default deflate settings as ZLIB, with 12 more
+      // bytes of wrapper overhead.
+      bound =
+          compressBound(size) + (kind == common::CompressionKind_GZIP ? 12 : 0);
+      break;
+    case common::CompressionKind_SNAPPY:
+      bound = snappy::MaxCompressedLength(size);
+      break;
+    case common::CompressionKind_ZSTD:
+      bound = ZSTD_compressBound(size);
+      BOLT_CHECK(!ZSTD_isError(bound), "Invalid ZSTD spill block size");
+      break;
+    case common::CompressionKind_LZ4:
+      BOLT_CHECK_LE(
+          size,
+          static_cast<int32_t>(LZ4_MAX_INPUT_SIZE),
+          "LZ4 spill block exceeds codec input limit");
+      bound = LZ4_compressBound(size);
+      break;
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported spill compression kind {}",
+          common::compressionKindToString(kind));
   }
   BOLT_CHECK_LE(
-      size,
-      static_cast<int32_t>(LZ4_MAX_INPUT_SIZE),
-      "LZ4 spill block exceeds codec input limit");
-  const auto bound = LZ4_compressBound(size);
-  BOLT_CHECK_GT(bound, 0, "Invalid LZ4 spill block size");
-  return bound;
+      bound,
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+      "{} spill block exceeds int32 range",
+      kind);
+  return static_cast<int32_t>(bound);
 }
 
 int32_t compressSpillBlock(
@@ -76,18 +100,54 @@ int32_t compressSpillBlock(
     int32_t inputSize,
     char* output,
     int32_t outputCapacity) {
-  if (kind == common::CompressionKind_ZSTD) {
-    const auto result =
-        ZSTD_compress(output, outputCapacity, input, inputSize, 3);
-    BOLT_CHECK(!ZSTD_isError(result));
-    BOLT_CHECK_LE(
-        result, static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-    return static_cast<int32_t>(result);
+  switch (kind) {
+    case common::CompressionKind_ZLIB:
+    case common::CompressionKind_GZIP: {
+      // Match the ZLIB and GZIP formats used by the general spill codecs while
+      // writing directly into the reusable caller-provided buffer.
+      const auto windowBits =
+          kind == common::CompressionKind_GZIP ? MAX_WBITS + 16 : MAX_WBITS;
+      z_stream stream{};
+      BOLT_CHECK_EQ(
+          deflateInit2(
+              &stream,
+              Z_DEFAULT_COMPRESSION,
+              Z_DEFLATED,
+              windowBits,
+              8,
+              Z_DEFAULT_STRATEGY),
+          Z_OK);
+      auto cleanup = folly::makeGuard([&]() { deflateEnd(&stream); });
+      stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input));
+      stream.avail_in = inputSize;
+      stream.next_out = reinterpret_cast<Bytef*>(output);
+      stream.avail_out = outputCapacity;
+      BOLT_CHECK_EQ(deflate(&stream, Z_FINISH), Z_STREAM_END);
+      return static_cast<int32_t>(stream.total_out);
+    }
+    case common::CompressionKind_SNAPPY: {
+      BOLT_CHECK_GE(outputCapacity, snappy::MaxCompressedLength(inputSize));
+      size_t compressedSize;
+      snappy::RawCompress(input, inputSize, output, &compressedSize);
+      return static_cast<int32_t>(compressedSize);
+    }
+    case common::CompressionKind_ZSTD: {
+      const auto result =
+          ZSTD_compress(output, outputCapacity, input, inputSize, 3);
+      BOLT_CHECK(!ZSTD_isError(result));
+      return static_cast<int32_t>(result);
+    }
+    case common::CompressionKind_LZ4: {
+      const auto result = LZ4_compress_default(
+          input, output, inputSize, static_cast<int>(outputCapacity));
+      BOLT_CHECK_GT(result, 0);
+      return result;
+    }
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported spill compression kind {}",
+          common::compressionKindToString(kind));
   }
-  const auto result = LZ4_compress_default(
-      input, output, inputSize, static_cast<int>(outputCapacity));
-  BOLT_CHECK_GT(result, 0);
-  return result;
 }
 
 void decompressSpillBlock(
@@ -96,39 +156,50 @@ void decompressSpillBlock(
     int32_t inputSize,
     char* output,
     int32_t outputSize) {
-  if (kind == common::CompressionKind_ZSTD) {
-    const auto result = ZSTD_decompress(output, outputSize, input, inputSize);
-    BOLT_CHECK(!ZSTD_isError(result));
-    BOLT_CHECK_EQ(result, outputSize);
-    return;
+  switch (kind) {
+    case common::CompressionKind_ZLIB:
+    case common::CompressionKind_GZIP: {
+      const auto windowBits =
+          kind == common::CompressionKind_GZIP ? MAX_WBITS + 16 : MAX_WBITS;
+      z_stream stream{};
+      BOLT_CHECK_EQ(inflateInit2(&stream, windowBits), Z_OK);
+      auto cleanup = folly::makeGuard([&]() { inflateEnd(&stream); });
+      stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input));
+      stream.avail_in = inputSize;
+      stream.next_out = reinterpret_cast<Bytef*>(output);
+      stream.avail_out = outputSize;
+      BOLT_CHECK_EQ(inflate(&stream, Z_FINISH), Z_STREAM_END);
+      BOLT_CHECK_EQ(stream.total_out, outputSize);
+      return;
+    }
+    case common::CompressionKind_SNAPPY: {
+      size_t uncompressedSize;
+      BOLT_CHECK(
+          snappy::GetUncompressedLength(input, inputSize, &uncompressedSize));
+      BOLT_CHECK_EQ(uncompressedSize, outputSize);
+      BOLT_CHECK(snappy::RawUncompress(input, inputSize, output));
+      return;
+    }
+    case common::CompressionKind_ZSTD: {
+      const auto result = ZSTD_decompress(output, outputSize, input, inputSize);
+      BOLT_CHECK(!ZSTD_isError(result));
+      BOLT_CHECK_EQ(result, outputSize);
+      return;
+    }
+    case common::CompressionKind_LZ4: {
+      const auto result =
+          LZ4_decompress_safe(input, output, inputSize, outputSize);
+      BOLT_CHECK_EQ(result, outputSize);
+      return;
+    }
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported spill compression kind {}",
+          common::compressionKindToString(kind));
   }
-  const auto result = LZ4_decompress_safe(input, output, inputSize, outputSize);
-  BOLT_CHECK_EQ(result, outputSize);
 }
 
-} // namespace
-
-bool isSpillCompressionEnabled(common::CompressionKind kind) {
-  return kind == common::CompressionKind_LZ4 ||
-      kind == common::CompressionKind_ZSTD;
-}
-
-int32_t maxUncompressedSpillBlockSize(common::CompressionKind kind) {
-  constexpr auto kMaxBlockSize = std::numeric_limits<int32_t>::max();
-  if (kind == common::CompressionKind_LZ4) {
-    return LZ4_MAX_INPUT_SIZE;
-  }
-  if (kind == common::CompressionKind_ZSTD) {
-    // Keep both the uncompressed and ZSTD bound sizes representable by the
-    // int32_t sizes used in spill block headers.
-    return kMaxBlockSize - (kMaxBlockSize >> 8) - 1;
-  }
-  return kMaxBlockSize;
-}
-
-int32_t spillCompressionBound(common::CompressionKind kind, int32_t size) {
-  return checkedCompressionBound(kind, size);
-}
+namespace {
 
 void readSpillBlockBody(
     SpillInputStream& input,
@@ -139,7 +210,7 @@ void readSpillBlockBody(
     BufferPtr& compressedBuffer,
     memory::MemoryPool* pool,
     uint64_t& decompressTimeUs) {
-  if (isSpillCompressionEnabled(compressionKind)) {
+  if (compressionKind != common::CompressionKind_NONE) {
     if (compressedBuffer == nullptr ||
         compressedBuffer->capacity() < storedSize) {
       compressedBuffer = AlignedBuffer::allocate<char>(storedSize, pool);
@@ -158,6 +229,8 @@ void readSpillBlockBody(
     input.readBytes(output, uncompressedSize);
   }
 }
+
+} // namespace
 
 void SpillInputStream::next(bool /*throwIfPastEnd*/) {
   MicrosecondTimer timer(&spillReadIOTimeUs_);
@@ -700,7 +773,12 @@ uint64_t SpillWriter::writeEncodedBlock(
   BOLT_CHECK_NOT_NULL(frame);
   BOLT_CHECK_GE(headerSize, sizeof(int32_t) * 2);
   BOLT_CHECK_GT(bodySize, 0);
-  BOLT_CHECK_LE(bodySize, maxUncompressedSpillBlockSize(compressionKind_));
+  const auto compressedCapacity =
+      compressionKind_ == common::CompressionKind_NONE
+      ? bodySize
+      : spillCompressionBound(compressionKind_, bodySize);
+  const bool compressionEnabled =
+      compressionKind_ != common::CompressionKind_NONE;
 
   auto* file = ensureFile();
   BOLT_CHECK_NOT_NULL(file);
@@ -709,9 +787,7 @@ uint64_t SpillWriter::writeEncodedBlock(
   uint64_t writeSize = headerSize + static_cast<uint64_t>(bodySize);
   uint64_t compressTimeUs = 0;
   int32_t storedSize = bodySize;
-  if (isSpillCompressionEnabled(compressionKind_)) {
-    const auto compressedCapacity =
-        checkedCompressionBound(compressionKind_, bodySize);
+  if (compressionEnabled) {
     const auto required =
         headerSize + static_cast<uint64_t>(compressedCapacity);
     if (encodedBlockCompressBuffer_ == nullptr ||
@@ -736,7 +812,7 @@ uint64_t SpillWriter::writeEncodedBlock(
 
   std::memcpy(frame, &bodySize, sizeof(bodySize));
   std::memcpy(frame + sizeof(bodySize), &storedSize, sizeof(storedSize));
-  if (isSpillCompressionEnabled(compressionKind_)) {
+  if (compressionEnabled) {
     std::memcpy(
         encodedBlockCompressBuffer_->asMutable<char>(),
         frame,

@@ -207,10 +207,8 @@ void RadixSortSpillWriter::prepareWriteBuffer() {
       requested,
       kBlockHeaderSize,
       "Radix sort spill write buffer must fit block header");
-  const auto codecLimit =
-      maxUncompressedSpillBlockSize(compressionKind_) + kBlockHeaderSize;
-  ensureBuffer(std::min(requested, codecLimit));
-  normalBufferSize_ = std::min<uint64_t>(requested, codecLimit);
+  ensureBuffer(requested);
+  normalBufferSize_ = requested;
   resetBuffer(normalBufferSize_);
 }
 
@@ -272,8 +270,11 @@ void RadixSortSpillWriter::ensureBuffer(uint64_t bytes) {
 void RadixSortSpillWriter::ensureRecordFits(uint64_t recordSize) {
   BOLT_CHECK_LE(
       recordSize,
-      maxUncompressedSpillBlockSize(compressionKind_),
+      std::numeric_limits<int32_t>::max(),
       "Radix sort spill record exceeds block or codec limit");
+  if (compressionKind_ != common::CompressionKind_NONE) {
+    spillCompressionBound(compressionKind_, static_cast<int32_t>(recordSize));
+  }
   ensureBuffer(kBlockHeaderSize + recordSize);
   BOLT_DCHECK(pendingBlock_.ranges.empty());
   BOLT_DCHECK_EQ(pendingBlock_.totalBytes(meta_.fixedWireBytesPerRow()), 0);
@@ -352,8 +353,7 @@ void RadixSortSpillWriter::flush() {
   BOLT_DCHECK_EQ(
       uncompressedBytes,
       keyRecordBytes + keyHeapBytes + payloadFixedBytes + payloadHeapBytes);
-  BOLT_DCHECK_LE(
-      uncompressedBytes, maxUncompressedSpillBlockSize(compressionKind_));
+  BOLT_DCHECK_LE(uncompressedBytes, std::numeric_limits<int32_t>::max());
   const auto uncompressedSize = static_cast<int32_t>(uncompressedBytes);
 
   auto* keyRecords = start + kBlockHeaderSize;
@@ -471,11 +471,7 @@ std::optional<RadixSortSpillBlockView> RadixSortSpillReader::nextBatch() {
   BOLT_CHECK_GT(uncompressedSize, 0);
   BOLT_CHECK_GT(storedSize, 0);
   BOLT_CHECK_GT(header.rowCount, 0);
-  BOLT_CHECK_LE(
-      uncompressedSize,
-      maxUncompressedSpillBlockSize(compressionKind_),
-      "Radix sort spill block exceeds codec limit");
-  if (!isSpillCompressionEnabled(compressionKind_)) {
+  if (compressionKind_ == common::CompressionKind_NONE) {
     BOLT_CHECK_EQ(
         uncompressedSize,
         storedSize,
@@ -530,15 +526,22 @@ std::optional<RadixSortSpillBlockView> RadixSortSpillReader::nextBatch() {
   }
   acquireSerializedBuffer(uncompressedSize);
   auto* block = serializedBuffer_->asMutable<char>();
-  readSpillBlockBody(
-      *input_,
-      compressionKind_,
-      uncompressedSize,
-      storedSize,
-      block,
-      compressedBuffer_,
-      pool_,
-      spillDecompressTimeUs_);
+  if (compressionKind_ == common::CompressionKind_NONE) {
+    input_->readBytes(block, uncompressedSize);
+  } else {
+    if (compressedBuffer_ == nullptr ||
+        compressedBuffer_->capacity() < storedSize) {
+      compressedBuffer_ = AlignedBuffer::allocate<char>(storedSize, pool_);
+    }
+    input_->readBytes(compressedBuffer_->asMutable<char>(), storedSize);
+    MicrosecondTimer timer(&spillDecompressTimeUs_);
+    decompressSpillBlock(
+        compressionKind_,
+        compressedBuffer_->as<char>(),
+        storedSize,
+        block,
+        uncompressedSize);
+  }
 
   char* keyRecords = block;
   char* keyHeap = keyRecords + header.keyRecordBytes;

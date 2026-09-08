@@ -78,6 +78,14 @@ constexpr std::array<uint32_t, kLayouts.size()>
 constexpr std::array<uint32_t, kLayouts.size()>
     kWireKeyRecordWidths{8, 16, 24, 32, 26, 10, 18, 26, 20};
 
+constexpr std::array kSupportedSpillCompressionKinds{
+    common::CompressionKind_NONE,
+    common::CompressionKind_ZLIB,
+    common::CompressionKind_SNAPPY,
+    common::CompressionKind_LZ4,
+    common::CompressionKind_ZSTD,
+    common::CompressionKind_GZIP};
+
 class BoundaryTestMergeStream final : public RadixSortMergeStream {
  public:
   BoundaryTestMergeStream(
@@ -933,6 +941,19 @@ class RadixSortSpillSectionsTest : public testing::Test {
     }
     auto spill =
         spillSingleRun(storage, layout.get(), compression, writeBufferSize);
+    if (compression != common::CompressionKind_NONE) {
+      const auto header =
+          readSpillValue<TestRadixSortSpillBlockHeader>(spill.file.path, 0);
+      EXPECT_LT(header.storedSize, header.uncompressedSize);
+      const auto bytes = readSpillBytes(spill.file.path);
+      ASSERT_EQ(bytes.size(), kBlockHeaderSize + header.storedSize);
+      const auto compressedBody = folly::IOBuf::wrapBufferAsValue(
+          bytes.data() + kBlockHeaderSize, header.storedSize);
+      const auto decoded =
+          common::compressionKindToCodec(compression)
+              ->uncompress(&compressedBody, header.uncompressedSize);
+      EXPECT_EQ(decoded->computeChainDataLength(), header.uncompressedSize);
+    }
     auto stream = makeRadixSortSpillMergeStream(
         RadixSortSpillRun{{spill.file}}, spill.meta, pool_.get(), false);
     vector_size_t outputOffset = 0;
@@ -2848,8 +2869,10 @@ TEST_F(RadixSortSpillSectionsTest, writerReaderRoundTripWithoutCompression) {
 }
 
 TEST_F(RadixSortSpillSectionsTest, writerReaderRoundTripWithCompression) {
-  for (const auto compression :
-       {common::CompressionKind_LZ4, common::CompressionKind_ZSTD}) {
+  for (const auto compression : kSupportedSpillCompressionKinds) {
+    if (compression == common::CompressionKind_NONE) {
+      continue;
+    }
     SCOPED_TRACE(compression);
     auto payload = makeRows(
         {"payload_string"},
@@ -2909,10 +2932,7 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterPreservesHeaderAndStats) {
   };
   static_assert(sizeof(TestHeader) == 24);
 
-  for (const auto compression :
-       {common::CompressionKind_NONE,
-        common::CompressionKind_LZ4,
-        common::CompressionKind_ZSTD}) {
+  for (const auto compression : kSupportedSpillCompressionKinds) {
     SCOPED_TRACE(compression);
     auto directory = exec::test::TempDirectoryPath::create();
     folly::Synchronized<common::SpillStats> stats;
@@ -2965,6 +2985,7 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterPreservesHeaderAndStats) {
     if (compression == common::CompressionKind_NONE) {
       EXPECT_EQ(frameHeader.storedSize, kBodySize);
     } else {
+      EXPECT_LT(frameHeader.storedSize, kBodySize);
       EXPECT_LE(
           frameHeader.storedSize,
           spillCompressionBound(compression, kBodySize));
@@ -3001,34 +3022,28 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterPreservesHeaderAndStats) {
     EXPECT_EQ(diskHeader.rowCount, frameHeader.rowCount);
     EXPECT_EQ(diskHeader.marker, frameHeader.marker);
     EXPECT_EQ(diskHeader.sectionBytes, frameHeader.sectionBytes);
+    if (compression != common::CompressionKind_NONE) {
+      auto codec = common::compressionKindToCodec(compression);
+      const auto compressedBody = folly::IOBuf::wrapBufferAsValue(
+          bytes.data() + sizeof(TestHeader), diskHeader.storedSize);
+      const auto decoded =
+          codec->uncompress(&compressedBody, diskHeader.uncompressedSize);
+      EXPECT_EQ(
+          decoded->to<std::string>(),
+          std::string(expectedBody.data(), expectedBody.size()));
+    }
 
-    auto input = makeSpillInputStream(files[0].path);
-    TestHeader streamHeader;
-    input->readBytes(
-        reinterpret_cast<char*>(&streamHeader), sizeof(streamHeader));
-    EXPECT_EQ(streamHeader.uncompressedSize, diskHeader.uncompressedSize);
-    EXPECT_EQ(streamHeader.storedSize, diskHeader.storedSize);
-    EXPECT_EQ(streamHeader.rowCount, diskHeader.rowCount);
-    EXPECT_EQ(streamHeader.marker, diskHeader.marker);
-    EXPECT_EQ(streamHeader.sectionBytes, diskHeader.sectionBytes);
     std::vector<char> decodedBody(kBodySize);
-    BufferPtr compressedBuffer;
-    uint64_t decompressTimeUs = 0;
-    readSpillBlockBody(
-        *input,
-        compression,
-        streamHeader.uncompressedSize,
-        streamHeader.storedSize,
-        decodedBody.data(),
-        compressedBuffer,
-        pool_.get(),
-        decompressTimeUs);
-    EXPECT_TRUE(input->atEnd());
     if (compression == common::CompressionKind_NONE) {
-      EXPECT_EQ(compressedBuffer, nullptr);
-      EXPECT_EQ(decompressTimeUs, 0);
+      std::memcpy(
+          decodedBody.data(), bytes.data() + sizeof(TestHeader), kBodySize);
     } else {
-      EXPECT_NE(compressedBuffer, nullptr);
+      decompressSpillBlock(
+          compression,
+          bytes.data() + sizeof(TestHeader),
+          diskHeader.storedSize,
+          decodedBody.data(),
+          diskHeader.uncompressedSize);
     }
     EXPECT_EQ(
         std::string_view(decodedBody.data(), decodedBody.size()),
@@ -3055,6 +3070,25 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterValidatesWriteLifecycle) {
   auto files = writer.finish();
   EXPECT_TRUE(files.empty());
   EXPECT_THROW(writer.writeEncodedBlock(frame.data(), 8, 8, 1), BoltException);
+}
+
+TEST_F(
+    RadixSortSpillSectionsTest,
+    encodedBlockWriterRejectsUnsupportedCompression) {
+  auto directory = exec::test::TempDirectoryPath::create();
+  folly::Synchronized<common::SpillStats> stats;
+  auto config = spillConfig(
+      directory->path, common::CompressionKind_LZO, /*writeBufferSize=*/1024);
+  SpillWriter writer(
+      directory->path + "/encoded",
+      std::numeric_limits<uint64_t>::max(),
+      config.spillIOConfig(1),
+      pool_.get(),
+      &stats);
+  std::array<char, 16> frame{};
+  BOLT_ASSERT_THROW(
+      writer.writeEncodedBlock(frame.data(), 8, 8, 1),
+      "Unsupported spill compression kind lzo");
 }
 
 TEST_F(
@@ -3406,8 +3440,7 @@ TEST_F(RadixSortSpillSectionsTest, rejectsInvalidScalarHeaderFields) {
   }
 
   auto spill = writeInlineKeySpill(RadixSortKeyLayoutKind::kKeyOnlyFixed8, 1);
-  const auto oversized =
-      maxUncompressedSpillBlockSize(common::CompressionKind_ZSTD) + 1;
+  constexpr auto oversized = std::numeric_limits<int32_t>::max();
   overwriteSpillValue<int32_t>(
       spill.file.path,
       offsetof(TestRadixSortSpillBlockHeader, uncompressedSize),

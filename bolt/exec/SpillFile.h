@@ -331,21 +331,25 @@ class SpillInputStream : public ByteInputStream {
   bool spillUringEnabled_;
 };
 
-bool isSpillCompressionEnabled(common::CompressionKind kind);
-
-int32_t maxUncompressedSpillBlockSize(common::CompressionKind kind);
-
+/// Returns the caller-provided output capacity required to compress a spill
+/// block using 'kind'.
 int32_t spillCompressionBound(common::CompressionKind kind, int32_t size);
 
-void readSpillBlockBody(
-    SpillInputStream& input,
-    common::CompressionKind compressionKind,
-    uint32_t uncompressedSize,
-    uint32_t storedSize,
+/// Compresses one spill block directly into caller-provided storage.
+int32_t compressSpillBlock(
+    common::CompressionKind kind,
+    const char* input,
+    int32_t inputSize,
     char* output,
-    BufferPtr& compressedBuffer,
-    memory::MemoryPool* pool,
-    uint64_t& decompressTimeUs);
+    int32_t outputCapacity);
+
+/// Decompresses one spill block directly into caller-provided storage.
+void decompressSpillBlock(
+    common::CompressionKind kind,
+    const char* input,
+    int32_t inputSize,
+    char* output,
+    int32_t outputSize);
 
 class SpillReadFileInput {
  protected:

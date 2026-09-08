@@ -1441,7 +1441,7 @@ TEST_P(OrderByTest, spill) {
 
   const auto expectedResult = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  for (const auto codec : {"none", "zlib"}) {
+  for (const auto codec : {"none", "zlib", "snappy", "zstd", "lz4", "gzip"}) {
     SCOPED_TRACE(codec);
     auto spillDirectory = exec::test::TempDirectoryPath::create();
     auto task = AssertQueryBuilder(plan)
