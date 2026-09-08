@@ -435,9 +435,10 @@ class BoltConan(ConanFile):
             self.options[onetbb].tbbmalloc = False
             # self.options[onetbb].tbbproxy = False
 
+        self.options[folly].no_exception_tracer = True
+
         openssl = f"openssl{postfix}"
         if self.options.get_safe("ldb_build"):
-            self.options[folly].no_exception_tracer = True
             self.options[openssl].rand_seed = "devrandom"
             self.options[boost].filesystem_disable_statx = True
             self.options[boost].without_stacktrace = True
@@ -474,21 +475,32 @@ class BoltConan(ConanFile):
         tc.cache_variables["BOLT_TEST_LINKAGE"] = self._test_linkage()
         if bolt_linker:
             use_ld = f"-fuse-ld={bolt_linker}"
-            tc.cache_variables["CMAKE_EXE_LINKER_FLAGS"] = use_ld
-            tc.cache_variables["CMAKE_SHARED_LINKER_FLAGS"] = use_ld
+            tc.extra_exelinkflags.append(use_ld)
+            tc.extra_sharedlinkflags.append(use_ld)
             tc.cache_variables["CMAKE_MODULE_LINKER_FLAGS"] = use_ld
 
         if str(self.settings.arch) in ["x86", "x86_64"]:
             flags = (
                 f"{self.BOLT_GLOBAL_FLAGS} -mavx2 -mfma -mavx -mf16c -mlzcnt -mbmi2 "
             )
-            tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
-            tc.cache_variables["CMAKE_C_FLAGS"] = flags
+            tc.extra_cxxflags.append(flags)
+            tc.extra_cflags.append(flags)
 
         if str(self.settings.arch) in ["armv8", "arm", "armv9"]:
             flags = self._get_arm_cpu_flags()
-            tc.cache_variables["CMAKE_CXX_FLAGS"] = flags
-            tc.cache_variables["CMAKE_C_FLAGS"] = flags
+            tc.extra_cxxflags.append(flags)
+            tc.extra_cflags.append(flags)
+
+        if str(self.settings.compiler) == "clang":
+            # ThinLTO needs bitcode inputs as well as the linker flag.
+            tc.extra_cflags.append("-flto=thin")
+            tc.extra_cxxflags.append("-flto=thin")
+            tc.extra_exelinkflags.append("-flto=thin")
+            tc.extra_sharedlinkflags.append("-flto=thin")
+            # Avoid incorrect dynamic_cast results across ThinLTO shared libraries.
+            # https://github.com/llvm/llvm-project/issues/71196
+            tc.extra_cxxflags.append("-fno-assume-unique-vtables")
+
         if (
             self.options.enable_torch is not None
             and self.options.enable_torch.value is not None
@@ -502,15 +514,15 @@ class BoltConan(ConanFile):
         )
 
         if self.options.enable_asan:
-            tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fsanitize=address "
-            tc.cache_variables["CMAKE_C_FLAGS"] += " -fsanitize=address"
+            tc.extra_cxxflags.append("-fsanitize=address")
+            tc.extra_cflags.append("-fsanitize=address")
 
         if (
             str(self.settings.build_type) == "RelWithDebInfo"
             or self.options.enable_asan
         ):
-            tc.cache_variables["CMAKE_CXX_FLAGS"] += " -fno-omit-frame-pointer "
-            tc.cache_variables["CMAKE_C_FLAGS"] += " -fno-omit-frame-pointer "
+            tc.extra_cxxflags.append("-fno-omit-frame-pointer")
+            tc.extra_cflags.append("-fno-omit-frame-pointer")
 
         tc.cache_variables["TREAT_WARNINGS_AS_ERRORS"] = "OFF"
         tc.cache_variables["ENABLE_ALL_WARNINGS"] = "ON"
