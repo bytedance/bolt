@@ -1,4 +1,4 @@
-add_library(
+bolt_add_library(
   bolt_memory_bm_file
   BucketPlacer.cpp
   DedicatedPlacer.cpp
