@@ -44,7 +44,6 @@
 #include "bolt/dwio/paimon/deletionvectors/DeletionFileReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReaderCast.h"
 #include "bolt/type/Conversions.h"
-#include "bolt/type/filter/MapSubscriptFilter.h"
 
 namespace bytedance::bolt::connector::hive {
 
@@ -114,89 +113,6 @@ bool applyPartitionFilter(
     default:
       BOLT_FAIL("Bad type {} for partition value: {}", kind, partitionValue);
       break;
-  }
-}
-
-void checkReaderCastFilter(
-    const TypePtr& fileType,
-    const TypePtr& requestedType,
-    const common::Filter* filter,
-    const std::string& path) {
-  if (parquet::isReaderCastFilterMismatch(fileType, requestedType)) {
-    if (filter && !filter->isValueIndependent()) {
-      BOLT_USER_FAIL(
-          "Cannot apply {} filter to physical {} Parquet column {}",
-          requestedType->kindName(),
-          fileType->kindName(),
-          path);
-    }
-  }
-}
-
-void validateReaderCastFilterRecursive(
-    const TypePtr& fileType,
-    const TypePtr& requestedType,
-    const common::ScanSpec& scanSpec,
-    const std::string& path) {
-  auto* filter = scanSpec.filter();
-  checkReaderCastFilter(fileType, requestedType, filter, path);
-  if (parquet::isReaderCastFilterMismatch(fileType, requestedType)) {
-    return;
-  }
-  if (fileType->kind() != requestedType->kind()) {
-    return;
-  }
-
-  if (fileType->isMap() && filter &&
-      filter->kind() == common::FilterKind::kMapSubscript) {
-    const auto* mapFilter =
-        dynamic_cast<const common::MapSubscriptFilter*>(filter);
-    BOLT_CHECK_NOT_NULL(mapFilter);
-    const auto keyPath = path.empty()
-        ? common::ScanSpec::kMapKeysFieldName
-        : path + "." + common::ScanSpec::kMapKeysFieldName;
-    checkReaderCastFilter(
-        fileType->childAt(0),
-        requestedType->childAt(0),
-        mapFilter->keyFilter(),
-        keyPath);
-    const auto valuePath = path.empty()
-        ? common::ScanSpec::kMapValuesFieldName
-        : path + "." + common::ScanSpec::kMapValuesFieldName;
-    checkReaderCastFilter(
-        fileType->childAt(1),
-        requestedType->childAt(1),
-        mapFilter->valueFilter(),
-        valuePath);
-  }
-
-  for (const auto& child : scanSpec.children()) {
-    std::optional<uint32_t> fileChildIndex;
-    std::optional<uint32_t> requestedChildIndex;
-    if (fileType->isRow()) {
-      fileChildIndex =
-          fileType->asRow().getChildIdxIfExists(child->fieldName());
-      requestedChildIndex =
-          requestedType->asRow().getChildIdxIfExists(child->fieldName());
-      if (!fileChildIndex || !requestedChildIndex) {
-        continue;
-      }
-    } else if (fileType->isArray()) {
-      fileChildIndex = requestedChildIndex = 0;
-    } else if (fileType->isMap()) {
-      fileChildIndex = requestedChildIndex =
-          child->fieldName() == common::ScanSpec::kMapKeysFieldName ? 0 : 1;
-    } else {
-      continue;
-    }
-
-    const auto childPath =
-        path.empty() ? child->fieldName() : path + "." + child->fieldName();
-    validateReaderCastFilterRecursive(
-        fileType->childAt(*fileChildIndex),
-        requestedType->childAt(*requestedChildIndex),
-        *child,
-        childPath);
   }
 }
 
@@ -665,7 +581,7 @@ void SplitReader::validateReaderCastFilter() const {
   const auto requestedType = hiveTableHandle_->dataColumns()
       ? hiveTableHandle_->dataColumns()
       : readerOutputType_;
-  validateReaderCastFilterRecursive(
+  parquet::validateReaderCastFilter(
       baseReader_->rowType(), requestedType, *scanSpec_, "");
 }
 
