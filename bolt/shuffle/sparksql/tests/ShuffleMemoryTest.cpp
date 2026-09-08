@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
+#include <arrow/buffer.h>
 #include <vector/ComplexVector.h>
 #include <filesystem>
+#include <memory>
 #include "bolt/common/caching/AsyncDataCache.h"
 #include "bolt/common/memory/sparksql/tests/MemoryTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -23,6 +25,8 @@
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/MemoryHogOperator.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
+#include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
@@ -33,6 +37,99 @@ using namespace bytedance::bolt::memory::sparksql::test;
 namespace bytedance::bolt::shuffle::sparksql::test {
 
 using bytedance::bolt::exec::test::MemoryHogNode;
+
+namespace {
+
+struct SpillPoolDestructionState {
+  bool partitionWriterDestructorRan{false};
+  bool poolAliveBeforeBufferRelease{false};
+  bool poolAliveAfterBufferRelease{false};
+  int64_t bytesBeforeBufferRelease{0};
+  int64_t bytesAfterBufferRelease{-1};
+};
+
+class SpillPoolLifetimePartitionWriter final : public PartitionWriter {
+ public:
+  SpillPoolLifetimePartitionWriter(
+      PartitionWriterOptions options,
+      arrow::MemoryPool* pool,
+      std::weak_ptr<BoltArrowMemoryPool> spillPool,
+      SpillPoolDestructionState* state)
+      : PartitionWriter(options.numPartitions, std::move(options), pool),
+        spillPool_(std::move(spillPool)),
+        state_(state),
+        buffer_(arrow::AllocateResizableBuffer(64, pool).ValueOrDie()) {
+    BOLT_CHECK(buffer_->Resize(4096).ok());
+  }
+
+  ~SpillPoolLifetimePartitionWriter() override {
+    auto spillPool = spillPool_.lock();
+    state_->poolAliveBeforeBufferRelease = spillPool != nullptr;
+    if (spillPool == nullptr) {
+      // Avoid dereferencing the dangling raw pool in a broken implementation;
+      // the state assertion below will report the ownership regression.
+      buffer_.release();
+      state_->partitionWriterDestructorRan = true;
+      return;
+    }
+    state_->bytesBeforeBufferRelease = spillPool->bytes_allocated();
+    spillPool.reset();
+
+    // ResizableBuffer retains only the raw MemoryPool pointer. Its release
+    // must therefore happen while ShuffleWriter still owns the spill pool.
+    buffer_.reset();
+
+    state_->poolAliveAfterBufferRelease = !spillPool_.expired();
+    if (auto pool = spillPool_.lock()) {
+      state_->bytesAfterBufferRelease = pool->bytes_allocated();
+    }
+    state_->partitionWriterDestructorRan = true;
+  }
+
+  arrow::Status reclaimFixedSize(int64_t, int64_t*) override {
+    return arrow::Status::OK();
+  }
+
+  arrow::Status stop(ShuffleWriterMetrics*) override {
+    return arrow::Status::OK();
+  }
+
+  arrow::Status evict(
+      uint32_t,
+      std::unique_ptr<InMemoryPayload>,
+      Evict::type,
+      bool,
+      bool) override {
+    return arrow::Status::OK();
+  }
+
+ private:
+  std::weak_ptr<BoltArrowMemoryPool> spillPool_;
+  SpillPoolDestructionState* state_;
+  std::unique_ptr<arrow::ResizableBuffer> buffer_;
+};
+
+class SpillPoolLifetimeTestWriter final : public BoltShuffleWriter {
+ public:
+  using BoltShuffleWriter::BoltShuffleWriter;
+
+  std::weak_ptr<BoltArrowMemoryPool> spillPoolWeakPtr() const {
+    auto* spillPool = dynamic_cast<BoltArrowMemoryPool*>(spillArrowPool_);
+    BOLT_CHECK_NOT_NULL(spillPool);
+    return spillPool->weak_from_this();
+  }
+
+  void installLifetimeCheckingPartitionWriter(
+      SpillPoolDestructionState* state) {
+    partitionWriter_ = std::make_unique<SpillPoolLifetimePartitionWriter>(
+        options_.partitionWriterOptions,
+        spillArrowPool_,
+        spillPoolWeakPtr(),
+        state);
+  }
+};
+
+} // namespace
 
 // A test suite for shuffle memory related tests
 class ShuffleMemoryTest : public ShuffleTestBase {
@@ -68,6 +165,30 @@ class ShuffleMemoryTest : public ShuffleTestBase {
         << ":1); splits are too small, hurting compression (issue #662)";
   }
 };
+
+TEST_F(ShuffleMemoryTest, testSpillPoolOutlivesPartitionWriterBuffer) {
+  BoltArrowMemoryPool inputPool(pool());
+  ShuffleWriterOptions options;
+  options.partitionWriterOptions.numPartitions = 1;
+
+  SpillPoolDestructionState destructionState;
+  std::weak_ptr<BoltArrowMemoryPool> spillPool;
+  {
+    SpillPoolLifetimeTestWriter writer(options, pool(), &inputPool);
+    spillPool = writer.spillPoolWeakPtr();
+    writer.installLifetimeCheckingPartitionWriter(&destructionState);
+
+    ASSERT_FALSE(spillPool.expired());
+    EXPECT_NE(spillPool.lock().get(), &inputPool);
+  }
+
+  EXPECT_TRUE(destructionState.partitionWriterDestructorRan);
+  EXPECT_TRUE(destructionState.poolAliveBeforeBufferRelease);
+  EXPECT_TRUE(destructionState.poolAliveAfterBufferRelease);
+  EXPECT_GT(destructionState.bytesBeforeBufferRelease, 0);
+  EXPECT_EQ(destructionState.bytesAfterBufferRelease, 0);
+  EXPECT_TRUE(spillPool.expired());
+}
 
 TEST_F(ShuffleMemoryTest, testRowBasedShuffleEstimateLowerThanActual) {
   std::string str(10 * 1024, 'x');
