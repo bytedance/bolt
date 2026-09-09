@@ -52,6 +52,12 @@ endif()
 
 if(BOLT_BUILD_BENCHMARKS OR BOLT_BUILD_RADIX_SORT_BENCHMARK)
   add_executable(
+    bolt_radix_sort_wide_key_benchmark
+    ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/RadixSortWideKeyBenchmark.cpp
+  )
+  target_link_libraries(bolt_radix_sort_wide_key_benchmark PRIVATE bolt_engine)
+
+  add_executable(
     bolt_radix_sort_buffer_benchmark
     ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/RadixSortBenchmarkData.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/RadixSortBufferBenchmark.cpp

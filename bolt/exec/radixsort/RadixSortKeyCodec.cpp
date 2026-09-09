@@ -23,6 +23,7 @@
 #include <limits>
 #include <numeric>
 #include <type_traits>
+#include <unordered_map>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
@@ -48,12 +49,7 @@ bool validFlags(const CompareFlags& flags) {
 }
 
 std::optional<uint64_t> fixedBodySize(const Type& type) {
-  if (type.isShortDecimal()) {
-    return sizeof(int64_t);
-  }
-  if (type.isLongDecimal()) {
-    return sizeof(int128_t);
-  }
+  // Decimal types use BIGINT/HUGEINT's physical representation.
   switch (type.kind()) {
     case TypeKind::BOOLEAN:
     case TypeKind::TINYINT:
@@ -79,9 +75,6 @@ std::optional<uint64_t> fixedBodySize(const Type& type) {
 
 bool supportsType(const Type& type) {
   if (type.kind() == TypeKind::UNKNOWN) {
-    return true;
-  }
-  if (type.isDecimal()) {
     return true;
   }
   switch (type.kind()) {
@@ -319,7 +312,7 @@ void encodeSingleFixedFlat(
     uint64_t* words,
     const uint64_t* offsets,
     char* data) {
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     const auto* flat = input.asUnchecked<FlatVector<int64_t>>();
     if (format == EncodedKeyFormat::kVariableBinary) {
       encodeSingleVariableFixedFlat(
@@ -347,8 +340,7 @@ void encodeSingleFixedFlat(
         });
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     const auto* flat = input.asUnchecked<FlatVector<int128_t>>();
     encodeSingleFixedFlat(
         column,
@@ -364,21 +356,6 @@ void encodeSingleFixedFlat(
               static_cast<int64_t>(HugeInt::upper(value)), output, descending);
           encodeUnsigned<uint64_t>(
               HugeInt::lower(value), output + sizeof(int64_t), descending);
-        });
-    return;
-  }
-  if (format == EncodedKeyFormat::kVariableBinary &&
-      column.type->kind() == TypeKind::BIGINT) {
-    const auto* flat = input.asUnchecked<FlatVector<int64_t>>();
-    encodeSingleVariableFixedFlat(
-        column,
-        *flat,
-        size,
-        offsets,
-        data,
-        [](const auto& values, auto row, auto* output, bool descending) {
-          encodeSignedWord<int64_t>(
-              values.rawValues()[row], output, descending);
         });
     return;
   }
@@ -662,7 +639,7 @@ void appendSingleFixedFlat(
     vector_size_t size,
     RadixSortRunStorage& arena,
     std::span<char* const> payloads) {
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     appendSingleFixed64Flat(
         column,
         *input.asUnchecked<FlatVector<int64_t>>(),
@@ -674,8 +651,7 @@ void appendSingleFixedFlat(
         });
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     appendSingleFixedFlat<
         RadixSortKeyLayoutKind::kKeyOnlyFixed24,
         RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>(
@@ -797,6 +773,23 @@ void stringEncodedSize(
 
 uint64_t encodedStringBodySize(StringView value);
 
+// A complex column can visit the same child vector once for every parent row.
+// Keep wrapper decoding scoped to the column batch, not to each child range.
+class DecodedKeyVectors {
+ public:
+  DecodedVector& get(const BaseVector& vector) {
+    auto& decoded = vectors_[&vector];
+    if (decoded == nullptr) {
+      decoded = std::make_unique<DecodedVector>(vector);
+    }
+    return *decoded;
+  }
+
+ private:
+  std::unordered_map<const BaseVector*, std::unique_ptr<DecodedVector>>
+      vectors_;
+};
+
 struct RangeSizeMetadata {
   std::optional<uint64_t> fixedElementSize;
   bool stringElement{false};
@@ -817,20 +810,23 @@ void encodedSize(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t row,
-    uint64_t& size);
+    uint64_t& size,
+    DecodedKeyVectors& decodedVectors);
 
 void addVariableColumnSizes(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t size,
-    uint64_t* rowSizes);
+    uint64_t* rowSizes,
+    DecodedKeyVectors& decodedVectors);
 
 uint64_t encodedRangeSize(
     const RadixSortKeyColumn& column,
     const BaseVector& elements,
     vector_size_t offset,
     vector_size_t count,
-    const RangeSizeMetadata& metadata) {
+    const RangeSizeMetadata& metadata,
+    DecodedKeyVectors& decodedVectors) {
   uint64_t size = 0;
   if (metadata.fixedElementSize.has_value()) {
     const auto validSize = *metadata.fixedElementSize + 1;
@@ -847,7 +843,7 @@ uint64_t encodedRangeSize(
       }
       return size;
     }
-    DecodedVector decoded(elements);
+    auto& decoded = decodedVectors.get(elements);
     if (decoded.isConstantMapping()) {
       const auto elementSize = decoded.isNullAt(0) ? uint64_t{1} : validSize;
       return static_cast<uint64_t>(count) * elementSize;
@@ -882,7 +878,7 @@ uint64_t encodedRangeSize(
       return static_cast<uint64_t>(count) * elementSize;
     }
 
-    DecodedVector decoded(elements);
+    auto& decoded = decodedVectors.get(elements);
     if (decoded.isConstantMapping()) {
       const auto elementSize = decoded.isNullAt(0)
           ? uint64_t{1}
@@ -902,7 +898,7 @@ uint64_t encodedRangeSize(
 
   for (vector_size_t index = 0; index < count; ++index) {
     uint64_t childSize;
-    encodedSize(column, elements, offset + index, childSize);
+    encodedSize(column, elements, offset + index, childSize, decodedVectors);
     size += childSize;
   }
   return size;
@@ -912,14 +908,16 @@ uint64_t encodedArraySize(
     const RadixSortKeyColumn& column,
     const ArrayVector& array,
     vector_size_t row,
-    const RangeSizeMetadata& elementMetadata) {
+    const RangeSizeMetadata& elementMetadata,
+    DecodedKeyVectors& decodedVectors) {
   return 1 +
       encodedRangeSize(
              column.children[0],
              *array.elements(),
              array.offsetAt(row),
              array.sizeAt(row),
-             elementMetadata) +
+             elementMetadata,
+             decodedVectors) +
       1;
 }
 
@@ -928,30 +926,42 @@ uint64_t encodedMapSize(
     const MapVector& map,
     vector_size_t row,
     const RangeSizeMetadata& keyMetadata,
-    const RangeSizeMetadata& valueMetadata) {
+    const RangeSizeMetadata& valueMetadata,
+    DecodedKeyVectors& decodedVectors) {
   const auto offset = map.offsetAt(row);
   const auto count = map.sizeAt(row);
   const auto keysSize = encodedRangeSize(
-      column.children[0], *map.mapKeys(), offset, count, keyMetadata);
+      column.children[0],
+      *map.mapKeys(),
+      offset,
+      count,
+      keyMetadata,
+      decodedVectors);
   return 1 + keysSize + 1 +
       encodedRangeSize(
              column.children[1],
              *map.mapValues(),
              offset,
              count,
-             valueMetadata) +
+             valueMetadata,
+             decodedVectors) +
       1;
 }
 
 uint64_t encodedRowSize(
     const RadixSortKeyColumn& column,
     const RowVector& rowVector,
-    vector_size_t row) {
+    vector_size_t row,
+    DecodedKeyVectors& decodedVectors) {
   uint64_t size = 1;
   for (uint32_t child = 0; child < column.children.size(); ++child) {
     uint64_t childSize;
     encodedSize(
-        column.children[child], *rowVector.childAt(child), row, childSize);
+        column.children[child],
+        *rowVector.childAt(child),
+        row,
+        childSize,
+        decodedVectors);
     size += childSize;
   }
   return size;
@@ -961,12 +971,17 @@ void addRowColumnSizes(
     const RadixSortKeyColumn& column,
     const DecodedVector& decoded,
     vector_size_t size,
-    uint64_t* rowSizes) {
+    uint64_t* rowSizes,
+    DecodedKeyVectors& decodedVectors) {
   const auto* rowVector = decoded.base()->asUnchecked<RowVector>();
   if (decoded.isIdentityMapping() && !decoded.mayHaveNulls()) {
     for (uint32_t child = 0; child < column.children.size(); ++child) {
       addVariableColumnSizes(
-          column.children[child], *rowVector->childAt(child), size, rowSizes);
+          column.children[child],
+          *rowVector->childAt(child),
+          size,
+          rowSizes,
+          decodedVectors);
     }
     return;
   }
@@ -979,7 +994,11 @@ void addRowColumnSizes(
       }
       uint64_t childSize;
       encodedSize(
-          column.children[child], *childVector, decoded.index(row), childSize);
+          column.children[child],
+          *childVector,
+          decoded.index(row),
+          childSize,
+          decodedVectors);
       rowSizes[row] += childSize;
     }
   }
@@ -989,7 +1008,8 @@ void addArrayColumnSizes(
     const RadixSortKeyColumn& column,
     const DecodedVector& decoded,
     vector_size_t size,
-    uint64_t* rowSizes) {
+    uint64_t* rowSizes,
+    DecodedKeyVectors& decodedVectors) {
   const auto* array = decoded.base()->asUnchecked<ArrayVector>();
   const auto elementMetadata =
       rangeSizeMetadata(column.children[0], *array->elements());
@@ -997,8 +1017,12 @@ void addArrayColumnSizes(
     if (decoded.isNullAt(row)) {
       continue;
     }
-    rowSizes[row] +=
-        encodedArraySize(column, *array, decoded.index(row), elementMetadata) -
+    rowSizes[row] += encodedArraySize(
+                         column,
+                         *array,
+                         decoded.index(row),
+                         elementMetadata,
+                         decodedVectors) -
         1;
   }
 }
@@ -1007,7 +1031,8 @@ void addMapColumnSizes(
     const RadixSortKeyColumn& column,
     const DecodedVector& decoded,
     vector_size_t size,
-    uint64_t* rowSizes) {
+    uint64_t* rowSizes,
+    DecodedKeyVectors& decodedVectors) {
   const auto* map = decoded.base()->asUnchecked<MapVector>();
   const auto keyMetadata =
       rangeSizeMetadata(column.children[0], *map->mapKeys());
@@ -1017,9 +1042,13 @@ void addMapColumnSizes(
     if (decoded.isNullAt(row)) {
       continue;
     }
-    rowSizes[row] +=
-        encodedMapSize(
-            column, *map, decoded.index(row), keyMetadata, valueMetadata) -
+    rowSizes[row] += encodedMapSize(
+                         column,
+                         *map,
+                         decoded.index(row),
+                         keyMetadata,
+                         valueMetadata,
+                         decodedVectors) -
         1;
   }
 }
@@ -1028,7 +1057,8 @@ void addComplexColumnSizes(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t size,
-    uint64_t* rowSizes) {
+    uint64_t* rowSizes,
+    DecodedKeyVectors& decodedVectors) {
   DecodedVector decoded(vector);
 
   for (vector_size_t row = 0; row < size; ++row) {
@@ -1040,13 +1070,13 @@ void addComplexColumnSizes(
 
   switch (column.type->kind()) {
     case TypeKind::ROW:
-      addRowColumnSizes(column, decoded, size, rowSizes);
+      addRowColumnSizes(column, decoded, size, rowSizes, decodedVectors);
       return;
     case TypeKind::ARRAY:
-      addArrayColumnSizes(column, decoded, size, rowSizes);
+      addArrayColumnSizes(column, decoded, size, rowSizes, decodedVectors);
       return;
     case TypeKind::MAP:
-      addMapColumnSizes(column, decoded, size, rowSizes);
+      addMapColumnSizes(column, decoded, size, rowSizes, decodedVectors);
       return;
     default:
       BOLT_UNREACHABLE();
@@ -1057,7 +1087,8 @@ void encodedSize(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t row,
-    uint64_t& size) {
+    uint64_t& size,
+    DecodedKeyVectors& decodedVectors) {
   if (vector.isNullAt(row)) {
     size = 1;
     return;
@@ -1067,7 +1098,8 @@ void encodedSize(
   }
   if (column.type->kind() == TypeKind::ROW) {
     const auto* rowVector = vector.wrappedVector()->as<RowVector>();
-    size = encodedRowSize(column, *rowVector, vector.wrappedIndex(row));
+    size = encodedRowSize(
+        column, *rowVector, vector.wrappedIndex(row), decodedVectors);
     return;
   }
   if (column.type->kind() == TypeKind::ARRAY) {
@@ -1075,7 +1107,11 @@ void encodedSize(
     const auto elementMetadata =
         rangeSizeMetadata(column.children[0], *arrayVector->elements());
     size = encodedArraySize(
-        column, *arrayVector, vector.wrappedIndex(row), elementMetadata);
+        column,
+        *arrayVector,
+        vector.wrappedIndex(row),
+        elementMetadata,
+        decodedVectors);
     return;
   }
   if (column.type->kind() == TypeKind::MAP) {
@@ -1089,7 +1125,8 @@ void encodedSize(
         *mapVector,
         vector.wrappedIndex(row),
         keyMetadata,
-        valueMetadata);
+        valueMetadata,
+        decodedVectors);
     return;
   }
   if (column.type->kind() == TypeKind::VARCHAR ||
@@ -1104,11 +1141,24 @@ void encodedSize(
 }
 
 uint64_t encodeStringValue(StringView value, char* output, bool descending) {
-  if (!descending &&
-      std::memchr(value.data(), kStringDelimiter, value.size()) == nullptr &&
+  if (std::memchr(value.data(), kStringDelimiter, value.size()) == nullptr &&
       std::memchr(value.data(), kBlobEscape, value.size()) == nullptr) {
-    std::memcpy(output, value.data(), value.size());
-    output[value.size()] = static_cast<char>(kStringDelimiter);
+    if (!descending) {
+      std::memcpy(output, value.data(), value.size());
+    } else {
+      uint32_t index = 0;
+      for (; index + sizeof(uint64_t) <= value.size();
+           index += sizeof(uint64_t)) {
+        storeUnaligned<uint64_t>(
+            output + index, ~loadUnaligned<uint64_t>(value.data() + index));
+      }
+      for (; index < value.size(); ++index) {
+        output[index] =
+            static_cast<char>(~static_cast<uint8_t>(value.data()[index]));
+      }
+    }
+    output[value.size()] =
+        static_cast<char>(descending ? ~kStringDelimiter : kStringDelimiter);
     return value.size() + 1;
   }
 
@@ -1161,7 +1211,8 @@ uint64_t encodeFixedScalarArrayElements(
     vector_size_t count,
     char* output,
     uint64_t /*outputSize*/,
-    EncodeBody encodeBody) {
+    EncodeBody encodeBody,
+    DecodedKeyVectors& decodedVectors) {
   const auto bodySize = *fixedBodySize(*column.type);
   const bool descending = !column.flags.ascending;
   const auto null = static_cast<char>(nullMarker(column.flags));
@@ -1204,7 +1255,7 @@ uint64_t encodeFixedScalarArrayElements(
     return written;
   }
 
-  DecodedVector decoded(elements);
+  auto& decoded = decodedVectors.get(elements);
   const auto* values = decoded.data<T>();
   const auto* indices = decoded.indices();
   const auto* nulls = decoded.nulls();
@@ -1233,8 +1284,9 @@ uint64_t encodeFixedScalarArrayElements(
     vector_size_t offset,
     vector_size_t count,
     char* output,
-    uint64_t outputSize) {
-  if (column.type->isShortDecimal()) {
+    uint64_t outputSize,
+    DecodedKeyVectors& decodedVectors) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     return encodeFixedScalarArrayElements<int64_t>(
         column,
         elements,
@@ -1244,10 +1296,10 @@ uint64_t encodeFixedScalarArrayElements(
         outputSize,
         [](auto value, auto* out, bool descending) {
           encodeSigned<int64_t>(value, out, descending);
-        });
+        },
+        decodedVectors);
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     return encodeFixedScalarArrayElements<int128_t>(
         column,
         elements,
@@ -1260,19 +1312,21 @@ uint64_t encodeFixedScalarArrayElements(
               static_cast<int64_t>(HugeInt::upper(value)), out, descending);
           encodeUnsigned<uint64_t>(
               HugeInt::lower(value), out + sizeof(int64_t), descending);
-        });
+        },
+        decodedVectors);
   }
 
-#define BOLT_ENCODE_ARRAY_FIXED_SCALAR(kind, cppType, expression) \
-  case TypeKind::kind:                                            \
-    return encodeFixedScalarArrayElements<cppType>(               \
-        column,                                                   \
-        elements,                                                 \
-        offset,                                                   \
-        count,                                                    \
-        output,                                                   \
-        outputSize,                                               \
-        [](cppType value, char* out, bool descending) { expression; })
+#define BOLT_ENCODE_ARRAY_FIXED_SCALAR(kind, cppType, expression)      \
+  case TypeKind::kind:                                                 \
+    return encodeFixedScalarArrayElements<cppType>(                    \
+        column,                                                        \
+        elements,                                                      \
+        offset,                                                        \
+        count,                                                         \
+        output,                                                        \
+        outputSize,                                                    \
+        [](cppType value, char* out, bool descending) { expression; }, \
+        decodedVectors)
 
   switch (column.type->kind()) {
     BOLT_ENCODE_ARRAY_FIXED_SCALAR(
@@ -1309,24 +1363,8 @@ uint64_t encodeFixedScalarArrayElements(
 #undef BOLT_ENCODE_ARRAY_FIXED_SCALAR
 }
 
-bool mapKeysAreSorted(const MapVector& map, vector_size_t row) {
-  const auto offset = map.offsetAt(row);
-  const auto count = map.sizeAt(row);
-  const auto& keys = *map.mapKeys();
-  for (vector_size_t index = 1; index < count; ++index) {
-    if (keys.compare(&keys, offset + index - 1, offset + index) >= 0) {
-      return false;
-    }
-  }
-  return true;
-}
-
 class MapKeyIndexScratch {
  public:
-  MapKeyIndexScratch() {
-    cached_.reserve(kMaxCachedRows);
-  }
-
   template <typename Func>
   void withSortedIndices(const MapVector& map, vector_size_t row, Func&& func) {
     const auto offset = map.offsetAt(row);
@@ -1336,26 +1374,31 @@ class MapKeyIndexScratch {
       return;
     }
 
-    for (const auto& entry : cached_) {
-      if (entry.map == &map && entry.row == row) {
-        const auto* indices =
-            entry.indices.empty() ? nullptr : entry.indices.data();
-        func(entry.offset, entry.count, indices);
+    auto& entry = entries_[entryIndex(map, row)];
+    if (entry.map == &map && entry.row == row) {
+      if (entry.sorted) {
+        func(offset, count, nullptr);
         return;
       }
-    }
-
-    if (mapKeysAreSorted(map, row)) {
-      cacheSortedRange(map, row, offset, count);
+      if (!entry.indices.empty()) {
+        func(0, count, entry.indices.data());
+        return;
+      }
+      if (canCache(count)) {
+        cacheSortedIndices(map, row, entry.indices);
+        func(0, count, entry.indices.data());
+        return;
+      }
+    } else if (entry.map == nullptr) {
+      entry.map = &map;
+      entry.row = row;
+      entry.sorted = map.isSorted(row);
+      if (entry.sorted) {
+        func(offset, count, nullptr);
+        return;
+      }
+    } else if (map.isSorted(row)) {
       func(offset, count, nullptr);
-      return;
-    }
-
-    if (canCache(count)) {
-      auto& indices = cacheSortedIndices(map, row, count);
-      std::iota(indices.begin(), indices.end(), offset);
-      map.mapKeys()->sortIndices(indices, CompareFlags());
-      func(0, count, indices.data());
       return;
     }
 
@@ -1368,11 +1411,10 @@ class MapKeyIndexScratch {
   }
 
  private:
-  struct CacheEntry {
-    const MapVector* map;
-    vector_size_t row;
-    vector_size_t offset;
-    vector_size_t count;
+  struct Entry {
+    const MapVector* map{nullptr};
+    vector_size_t row{0};
+    bool sorted{false};
     std::vector<vector_size_t> indices;
   };
 
@@ -1396,40 +1438,32 @@ class MapKeyIndexScratch {
   }
 
   bool canCache(size_t count) const {
-    if (cached_.empty()) {
-      return true;
-    }
-    return cached_.size() < kMaxCachedRows &&
-        cachedIndexCount_ + count <= kMaxCachedIndices;
+    return cachedIndexCount_ + count <= kMaxCachedIndices;
   }
 
-  std::vector<vector_size_t>& cacheSortedIndices(
+  void cacheSortedIndices(
       const MapVector& map,
       vector_size_t row,
-      vector_size_t count) {
+      std::vector<vector_size_t>& indices) {
+    const auto count = map.sizeAt(row);
     cachedIndexCount_ += count;
-    cached_.push_back(CacheEntry{&map, row, 0, count, {}});
-    auto& indices = cached_.back().indices;
     indices.resize(count);
-    return indices;
+    const auto offset = map.offsetAt(row);
+    std::iota(indices.begin(), indices.end(), offset);
+    map.mapKeys()->sortIndices(indices, CompareFlags());
   }
 
-  void cacheSortedRange(
-      const MapVector& map,
-      vector_size_t row,
-      vector_size_t offset,
-      vector_size_t count) {
-    if (!canCache(0)) {
-      return;
-    }
-    cached_.push_back(CacheEntry{&map, row, offset, count, {}});
+  static size_t entryIndex(const MapVector& map, vector_size_t row) {
+    const auto address = reinterpret_cast<uintptr_t>(&map);
+    return ((address >> 4) ^ static_cast<uint32_t>(row)) & (kCacheSlots - 1);
   }
 
-  static constexpr size_t kMaxCachedRows = 32;
+  static constexpr size_t kCacheSlots = 32;
   static constexpr size_t kMaxCachedIndices = 1 << 20;
+  static_assert((kCacheSlots & (kCacheSlots - 1)) == 0);
 
   std::vector<std::vector<vector_size_t>> scratch_;
-  std::vector<CacheEntry> cached_;
+  std::array<Entry, kCacheSlots> entries_;
   size_t cachedIndexCount_{0};
   size_t depth_{0};
 };
@@ -1441,7 +1475,8 @@ void encodeValue(
     char* output,
     uint64_t /*outputSize*/,
     uint64_t& written,
-    MapKeyIndexScratch& mapIndices) {
+    MapKeyIndexScratch& mapIndices,
+    DecodedKeyVectors& decodedVectors) {
   const bool isNull = vector.isNullAt(row);
   output[0] = static_cast<char>(
       isNull ? nullMarker(column.flags) : validMarker(column.flags));
@@ -1468,7 +1503,8 @@ void encodeValue(
           output + offset,
           0,
           childWritten,
-          mapIndices);
+          mapIndices,
+          decodedVectors);
       addWritten(offset, childWritten);
     }
     written = offset;
@@ -1483,7 +1519,13 @@ void encodeValue(
     const auto& elements = *arrayVector->elements();
     if (isFixedScalarColumn(child)) {
       const auto childWritten = encodeFixedScalarArrayElements(
-          child, elements, arrayOffset, count, output + offset, 0);
+          child,
+          elements,
+          arrayOffset,
+          count,
+          output + offset,
+          0,
+          decodedVectors);
       addWritten(offset, childWritten);
     } else {
       for (vector_size_t index = 0; index < count; ++index) {
@@ -1495,7 +1537,8 @@ void encodeValue(
             output + offset,
             0,
             childWritten,
-            mapIndices);
+            mapIndices,
+            decodedVectors);
         addWritten(offset, childWritten);
       }
     }
@@ -1529,7 +1572,8 @@ void encodeValue(
                 output + offset,
                 0,
                 childWritten,
-                mapIndices);
+                mapIndices,
+                decodedVectors);
             addWritten(offset, childWritten);
           }
           output[offset++] = delimiter;
@@ -1542,21 +1586,20 @@ void encodeValue(
                 output + offset,
                 0,
                 childWritten,
-                mapIndices);
+                mapIndices,
+                decodedVectors);
             addWritten(offset, childWritten);
           }
           output[offset++] = delimiter;
         });
     written = offset;
     return;
-  } else if (column.type->isShortDecimal()) {
+  } else if (column.type->kind() == TypeKind::BIGINT) {
     encodeSigned<int64_t>(
         scalarValueAt<int64_t>(vector, row), body, descending);
     written = 1 + sizeof(int64_t);
     return;
-  } else if (
-      column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  } else if (column.type->kind() == TypeKind::HUGEINT) {
     const auto value = scalarValueAt<int128_t>(vector, row);
     encodeSigned<int64_t>(
         static_cast<int64_t>(HugeInt::upper(value)), body, descending);
@@ -1614,7 +1657,6 @@ void encodeValue(
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
         const auto value = valueAt<StringView>(vector, row);
-        const auto bodySize = encodedStringBodySize(value);
         written = 1 + encodeStringValue(value, body, descending);
         return;
       }
@@ -1688,7 +1730,8 @@ void addVariableColumnSizes(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t size,
-    uint64_t* rowSizes) {
+    uint64_t* rowSizes,
+    DecodedKeyVectors& decodedVectors) {
   if (column.type->kind() == TypeKind::VARCHAR ||
       column.type->kind() == TypeKind::VARBINARY) {
     addStringColumnSizes(vector, size, rowSizes);
@@ -1746,7 +1789,7 @@ void addVariableColumnSizes(
   if (column.type->kind() == TypeKind::ROW ||
       column.type->kind() == TypeKind::ARRAY ||
       column.type->kind() == TypeKind::MAP) {
-    addComplexColumnSizes(column, vector, size, rowSizes);
+    addComplexColumnSizes(column, vector, size, rowSizes, decodedVectors);
     return;
   }
 
@@ -1756,7 +1799,12 @@ void addVariableColumnSizes(
     if (decoded.isNullAt(0)) {
       columnSize = 1;
     } else {
-      encodedSize(column, *decoded.base(), decoded.index(0), columnSize);
+      encodedSize(
+          column,
+          *decoded.base(),
+          decoded.index(0),
+          columnSize,
+          decodedVectors);
     }
     for (vector_size_t row = 0; row < size; ++row) {
       rowSizes[row] += columnSize;
@@ -1797,7 +1845,9 @@ void initializeVariableKeySizes(
       }
       continue;
     }
-    addVariableColumnSizes(columns[column], vector, input.size(), rowSizes);
+    DecodedKeyVectors decodedVectors;
+    addVariableColumnSizes(
+        columns[column], vector, input.size(), rowSizes, decodedVectors);
   }
 }
 
@@ -2080,7 +2130,7 @@ void encodeFixedColumn(
     }
     return;
   }
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     encodeFixedColumn<int64_t>(
         column,
         vector,
@@ -2093,8 +2143,7 @@ void encodeFixedColumn(
         fixedWidthNulls);
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     encodeFixedColumn<int128_t>(
         column,
         vector,
@@ -2253,6 +2302,7 @@ void encodeVariableColumn(
 
   DecodedVector decoded(vector);
   MapKeyIndexScratch mapIndices;
+  DecodedKeyVectors decodedVectors;
   for (vector_size_t row = 0; row < size; ++row) {
     const auto inputRow = source + row;
     auto* destination = output.current(row);
@@ -2269,7 +2319,8 @@ void encodeVariableColumn(
         destination,
         0,
         written,
-        mapIndices);
+        mapIndices,
+        decodedVectors);
     output.advance(row, written);
   }
 }
@@ -2367,6 +2418,14 @@ class EncodedKeyReader {
     return position_;
   }
 
+  const char* currentData() const {
+    return data_ + position_;
+  }
+
+  uint64_t remaining() const {
+    return size_ - position_;
+  }
+
  private:
   void require(uint64_t bytes) const {
     BOLT_CHECK_LE(
@@ -2383,12 +2442,12 @@ class EncodedKeyReader {
 template <typename T>
 void decodeUnsigned(EncodedKeyReader& reader, bool descending, T& value) {
   static_assert(std::is_unsigned_v<T>);
-  value = 0;
-  for (uint32_t byte = 0; byte < sizeof(T); ++byte) {
-    uint8_t input;
-    reader.readBodyByte(descending, input);
-    value = static_cast<T>((value << 8) | input);
+  auto encoded = loadUnaligned<T>(reader.currentData());
+  reader.skip(sizeof(T));
+  if (descending) {
+    encoded = static_cast<T>(~encoded);
   }
+  value = fromBigEndian(encoded);
 }
 
 template <typename T>
@@ -2753,7 +2812,7 @@ void decodeSinglePhysicalColumn(
     uint32_t encodedOffset = 0,
     vector_size_t outputOffset = 0,
     bool offsetWrite = false) {
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
         column,
         keys,
@@ -2772,8 +2831,7 @@ void decodeSinglePhysicalColumn(
         });
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     decodeSinglePhysicalColumn<HostOrderWords, int128_t>(
         column,
         keys,
@@ -2934,7 +2992,7 @@ void decodeSinglePhysicalColumn(
     const VectorPtr& result,
     uint32_t inlineWordBytes,
     uint32_t encodedOffset = 0) {
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
         column,
         arena,
@@ -2953,8 +3011,7 @@ void decodeSinglePhysicalColumn(
         });
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     decodeSinglePhysicalColumn<HostOrderWords, int128_t>(
         column,
         arena,
@@ -3141,39 +3198,72 @@ void setScalarValue(const VectorPtr& vector, vector_size_t row, T value) {
   }
 }
 
+void scanStringBody(
+    const char* body,
+    uint64_t remaining,
+    bool descending,
+    uint64_t& decodedSize,
+    uint64_t& encodedSize);
+
+template <bool Descending>
+void writeDecodedString(
+    const char* body,
+    uint64_t encodedSize,
+    uint64_t decodedSize,
+    char* destination);
+
+char* reserveNestedStringBytes(
+    FlatVector<StringView>& result,
+    uint64_t bytes,
+    vector_size_t remainingRows) {
+  const auto& buffers = result.stringBuffers();
+  auto* buffer = buffers.empty() ? nullptr : buffers.back().get();
+  if (buffer == nullptr || !buffer->unique() ||
+      bytes > buffer->capacity() - buffer->size()) {
+    // Start small for sparse/wide schemas. Grow only when the previous buffer
+    // fills, with a bounded tail and no allocator-bucket padding overflow.
+    constexpr uint64_t kInitialBytes = 256 - AlignedBuffer::kPaddedSize;
+    constexpr uint64_t kMaxBytes = 32 * 1024 - AlignedBuffer::kPaddedSize;
+    const auto previous = buffer == nullptr
+        ? uint64_t{0}
+        : std::min<uint64_t>(buffer->capacity(), kMaxBytes);
+    auto growth = std::min(kMaxBytes, std::max(kInitialBytes, 2 * previous));
+    if (remainingRows > 0) {
+      // ROW children have a known final size. Avoid a large last buffer when
+      // only a few rows remain; unknown-length ARRAY/MAP children keep growing.
+      const auto estimate = checkedMultiply<uint64_t>(bytes, remainingRows);
+      growth = std::min(growth, estimate.value_or(kMaxBytes));
+    }
+    buffer = result.getBufferWithSpace(std::max(bytes, growth), true);
+  }
+  auto* data = buffer->asMutable<char>() + buffer->size();
+  buffer->setSize(buffer->size() + bytes);
+  return data;
+}
+
 void decodeString(
     EncodedKeyReader& reader,
     bool descending,
     const VectorPtr& result,
-    vector_size_t row) {
-  auto scan = reader;
-  uint64_t decodedSize = 0;
-  while (true) {
-    uint8_t byte;
-    scan.readBodyByte(descending, byte);
-    if (byte == kStringDelimiter) {
-      break;
-    }
-    if (byte == kBlobEscape) {
-      scan.readBodyByte(descending, byte);
-    }
-    ++decodedSize;
-  }
+    vector_size_t row,
+    vector_size_t endRow) {
+  const auto* body = reader.currentData();
+  uint64_t decodedSize;
+  uint64_t encodedSize;
+  scanStringBody(
+      body, reader.remaining(), descending, decodedSize, encodedSize);
   auto* flatResult = result->asUnchecked<FlatVector<StringView>>();
   std::array<char, StringView::kInlineSize> inlineData{};
   char* output = decodedSize <= inlineData.size()
       ? inlineData.data()
-      : flatResult->getRawStringBufferWithSpace(decodedSize, true);
-  for (uint64_t index = 0; index < decodedSize; ++index) {
-    uint8_t byte;
-    reader.readBodyByte(descending, byte);
-    if (byte == kBlobEscape) {
-      reader.readBodyByte(descending, byte);
-    }
-    output[index] = static_cast<char>(byte);
+      : reserveNestedStringBytes(
+            *flatResult, decodedSize, endRow == 0 ? 0 : endRow - row);
+  if (descending) {
+    writeDecodedString<true>(body, encodedSize, decodedSize, output);
+  } else {
+    writeDecodedString<false>(body, encodedSize, decodedSize, output);
   }
-  uint8_t delimiter;
-  reader.readBodyByte(descending, delimiter);
+  reader.skip(encodedSize);
   flatResult->setNoCopy(
       row, StringView(output, static_cast<int32_t>(decodedSize)));
 }
@@ -3189,17 +3279,18 @@ void decodeFixedScalarArrayElements(
   const auto null = nullMarker(column.flags);
   const auto encodedDelimiter =
       descending ? static_cast<uint8_t>(~kStringDelimiter) : kStringDelimiter;
+  const auto bodySize = *fixedBodySize(*column.type);
   auto scan = reader;
   vector_size_t count = 0;
   while (true) {
     uint8_t next;
-    scan.peekByte(next);
+    scan.checkedPeekByte(next);
     if (next == encodedDelimiter) {
       break;
     }
-    scan.readByte(next);
+    scan.checkedReadByte(next);
     if (next != null) {
-      scan.skip(*fixedBodySize(*column.type));
+      scan.checkedSkip(bodySize);
     }
     ++count;
   }
@@ -3215,7 +3306,7 @@ void decodeFixedScalarArrayElements(
     setScalarValue<T>(result, row, decode(reader, descending));
   }
   uint8_t delimiter;
-  reader.readByte(delimiter);
+  reader.checkedReadByte(delimiter);
 }
 
 void decodeFixedScalarArrayElements(
@@ -3223,7 +3314,7 @@ void decodeFixedScalarArrayElements(
     EncodedKeyReader& reader,
     const VectorPtr& result,
     vector_size_t start) {
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     decodeFixedScalarArrayElements<int64_t>(
         column, reader, result, start, [](auto& input, bool descending) {
           int64_t value;
@@ -3232,8 +3323,7 @@ void decodeFixedScalarArrayElements(
         });
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     decodeFixedScalarArrayElements<int128_t>(
         column, reader, result, start, [](auto& input, bool descending) {
           int64_t upper;
@@ -3325,7 +3415,8 @@ void decodeValue(
     const RadixSortKeyColumn& column,
     EncodedKeyReader& reader,
     const VectorPtr& result,
-    vector_size_t row) {
+    vector_size_t row,
+    vector_size_t endRow = 0) {
   uint8_t marker;
   reader.readByte(marker);
   if (marker == nullMarker(column.flags)) {
@@ -3346,7 +3437,11 @@ void decodeValue(
     result->setNull(row, false);
     for (uint32_t child = 0; child < column.children.size(); ++child) {
       decodeValue(
-          column.children[child], reader, rowResult->childAt(child), row);
+          column.children[child],
+          reader,
+          rowResult->childAt(child),
+          row,
+          endRow);
     }
     return;
   }
@@ -3357,6 +3452,7 @@ void decodeValue(
     vector_size_t count = 0;
     const auto encodedDelimiter =
         descending ? static_cast<uint8_t>(~kStringDelimiter) : kStringDelimiter;
+    const bool fixedElements = isFixedScalarColumn(column.children[0]);
     while (true) {
       uint8_t next;
       reader.peekByte(next);
@@ -3364,7 +3460,7 @@ void decodeValue(
         reader.readByte(next);
         break;
       }
-      if (isFixedScalarColumn(column.children[0])) {
+      if (fixedElements) {
         decodeFixedScalarArrayElements(
             column.children[0], reader, arrayResult->elements(), start);
         count = arrayResult->elements()->size() - start;
@@ -3386,36 +3482,50 @@ void decodeValue(
     vector_size_t count = 0;
     const auto encodedDelimiter =
         descending ? static_cast<uint8_t>(~kStringDelimiter) : kStringDelimiter;
-    while (true) {
-      uint8_t next;
-      reader.peekByte(next);
-      if (next == encodedDelimiter) {
-        reader.readByte(next);
-        break;
+    if (isFixedScalarColumn(column.children[0])) {
+      decodeFixedScalarArrayElements(
+          column.children[0], reader, mapResult->mapKeys(), start);
+      count = mapResult->mapKeys()->size() - start;
+    } else {
+      while (true) {
+        uint8_t next;
+        reader.peekByte(next);
+        if (next == encodedDelimiter) {
+          reader.readByte(next);
+          break;
+        }
+        mapResult->mapKeys()->resize(start + count + 1);
+        decodeValue(
+            column.children[0], reader, mapResult->mapKeys(), start + count);
+        ++count;
       }
-      mapResult->mapKeys()->resize(start + count + 1);
-      decodeValue(
-          column.children[0], reader, mapResult->mapKeys(), start + count);
-      ++count;
     }
-    mapResult->mapValues()->resize(start + count);
-    for (vector_size_t index = 0; index < count; ++index) {
-      decodeValue(
-          column.children[1], reader, mapResult->mapValues(), start + index);
+    if (isFixedScalarColumn(column.children[1])) {
+      decodeFixedScalarArrayElements(
+          column.children[1], reader, mapResult->mapValues(), start);
+      BOLT_CHECK_EQ(
+          mapResult->mapValues()->size(),
+          start + count,
+          "Radix sort encoded map key and value counts differ");
+    } else {
+      mapResult->mapValues()->resize(start + count);
+      for (vector_size_t index = 0; index < count; ++index) {
+        decodeValue(
+            column.children[1], reader, mapResult->mapValues(), start + index);
+      }
+      uint8_t delimiter;
+      reader.readByte(delimiter);
     }
-    uint8_t delimiter;
-    reader.readByte(delimiter);
     mapResult->setOffsetAndSize(row, start, count);
     return;
   }
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     int64_t value;
     decodeSigned(reader, descending, value);
     setValue<int64_t>(result, row, value);
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     int64_t upper;
     uint64_t lower;
     decodeSigned(reader, descending, upper);
@@ -3480,7 +3590,7 @@ void decodeValue(
     }
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY:
-      decodeString(reader, descending, result, row);
+      decodeString(reader, descending, result, row, endRow);
       return;
     default:
       BOLT_FAIL(
@@ -4232,13 +4342,16 @@ void scanStringBody(
   if (remaining >= kMemchrThreshold) {
     const auto* delimiter = static_cast<const uint8_t*>(
         std::memchr(data, encodedDelimiter, remaining));
-    if (delimiter != nullptr) {
-      const auto bytesBeforeDelimiter = static_cast<uint64_t>(delimiter - data);
-      if (std::memchr(data, encodedEscape, bytesBeforeDelimiter) == nullptr) {
-        decodedSize = bytesBeforeDelimiter;
-        encodedSize = bytesBeforeDelimiter + 1;
-        return;
-      }
+    const auto* escape = static_cast<const uint8_t*>(
+        std::memchr(data, encodedEscape, remaining));
+    if (delimiter != nullptr && (escape == nullptr || delimiter < escape)) {
+      decodedSize = static_cast<uint64_t>(delimiter - data);
+      encodedSize = decodedSize + 1;
+      return;
+    }
+    if (escape != nullptr) {
+      cursor = static_cast<uint64_t>(escape - data);
+      decodedSize = cursor;
     }
   }
 
@@ -4252,6 +4365,7 @@ void scanStringBody(
       return;
     }
     if (byte == kBlobEscape) {
+      BOLT_CHECK_LT(cursor, remaining, "Radix sort key input is truncated");
       byte = static_cast<uint8_t>(body[cursor++]);
       if (descending) {
         byte = static_cast<uint8_t>(~byte);
@@ -4273,6 +4387,16 @@ void writeDecodedString(
       std::memcpy(destination, body, decodedSize);
       return;
     }
+    uint64_t index = 0;
+    for (; index + sizeof(uint64_t) <= decodedSize; index += sizeof(uint64_t)) {
+      storeUnaligned<uint64_t>(
+          destination + index, ~loadUnaligned<uint64_t>(body + index));
+    }
+    for (; index < decodedSize; ++index) {
+      destination[index] =
+          static_cast<char>(~static_cast<uint8_t>(body[index]));
+    }
+    return;
   }
   uint64_t cursor = 0;
   uint64_t written = 0;
@@ -4433,13 +4557,12 @@ void decodeColumn(
     const VectorPtr& result,
     DecodeScratch& scratch,
     vector_size_t outputOffset = 0) {
-  if (column.type->isShortDecimal()) {
+  if (column.type->kind() == TypeKind::BIGINT) {
     decodeSignedFixedLayered<FirstColumn, MayHaveNulls, int64_t>(
         column, keys, scratch, result, outputOffset);
     return;
   }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
+  if (column.type->kind() == TypeKind::HUGEINT) {
     decodeInt128Layered<FirstColumn, MayHaveNulls>(
         column, keys, scratch, result, outputOffset);
     return;
@@ -4496,7 +4619,12 @@ void decodeColumn(
         auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
         EncodedKeyReader reader(
             keys[row].bytes.data() + cursor, keys[row].bytes.size() - cursor);
-        decodeValue(column, reader, result, outputOffset + row);
+        decodeValue(
+            column,
+            reader,
+            result,
+            outputOffset + row,
+            outputOffset + keys.size());
         cursors[row] = cursor + reader.position();
       }
       return;
