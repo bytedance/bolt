@@ -227,7 +227,9 @@ TypedExprPtr CastTypedExpr::create(const folly::dynamic& obj, void* context) {
   auto inputs = deserializeInputs(obj, context);
 
   return std::make_shared<CastTypedExpr>(
-      std::move(type), std::move(inputs), obj["nullOnFailure"].asBool());
+      std::move(type),
+      std::move(inputs),
+      obj.count("nullOnFailure") && obj["nullOnFailure"].asBool());
 }
 
 } // namespace bytedance::bolt::core
