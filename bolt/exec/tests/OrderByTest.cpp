@@ -476,6 +476,61 @@ TEST_P(OrderByTest, multipleKeys) {
   }
 }
 
+TEST_P(OrderByTest, complexTypeKeys) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU OrderBy does not support map sorting keys\n";
+  }
+
+  auto arrayKey =
+      makeArrayVector<int32_t>({{1}, {1}, {2}, {2}, {3}, {4}, {1}, {2}});
+  arrayKey->setNull(5, true);
+  auto mapKey = makeMapVector<int32_t, int32_t>({
+      {{1, 10}},
+      {{2, 20}},
+      {{3, 30}},
+      {{3, 30}},
+      {{4, 40}},
+      {{5, 50}},
+      {{2, 20}},
+      {{3, 30}},
+  });
+  mapKey->setNull(6, true);
+  auto structKey = makeRowVector(
+      {"field"}, {makeFlatVector<int32_t>({1, 2, 2, 3, 4, 5, 3, 4})});
+  structKey->setNull(7, true);
+
+  auto input = makeRowVector(
+      {"array_key", "map_key", "struct_key", "value"},
+      {arrayKey,
+       mapKey,
+       structKey,
+       makeFlatVector<int32_t>({0, 1, 2, 3, 4, 5, 6, 7})});
+  std::vector<RowVectorPtr> vectors{input};
+  createDuckDbTable(vectors);
+
+  const std::vector<SortOrder> orders{
+      kAscNullsFirst, kAscNullsLast, kDescNullsFirst, kDescNullsLast};
+  for (const auto arrayOrder : orders) {
+    for (const auto mapOrder : orders) {
+      for (const auto structOrder : orders) {
+        const std::vector<std::string> orderKeys{
+            fmt::format("array_key {}", arrayOrder.toString()),
+            fmt::format("map_key {}", mapOrder.toString()),
+            fmt::format("struct_key {}", structOrder.toString())};
+        auto plan =
+            PlanBuilder().values(vectors).orderBy(orderKeys, false).planNode();
+        assertQueryOrdered(
+            plan,
+            fmt::format(
+                "SELECT array_key, map_key, struct_key, value FROM tmp "
+                "ORDER BY {}",
+                boost::algorithm::join(orderKeys, ", ")),
+            {0, 1, 2});
+      }
+    }
+  }
+}
+
 TEST_P(OrderByTest, DISABLED_moreThan3Keys) {
   constexpr vector_size_t batchSize = 8192;
   std::vector<RowVectorPtr> vectors;
