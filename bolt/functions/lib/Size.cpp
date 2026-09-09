@@ -30,6 +30,14 @@ struct Size {
   template <typename TInput>
   FOLLY_ALWAYS_INLINE void initialize(
       const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const TInput* /*input*/) {
+    legacySizeOfNull_ = config.sparkLegacySizeOfNull();
+  }
+
+  template <typename TInput>
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
       const core::QueryConfig& /*config*/,
       const TInput* /*input*/,
       const bool* legacySizeOfNull) {
@@ -40,10 +48,7 @@ struct Size {
   }
 
   template <typename TInput>
-  FOLLY_ALWAYS_INLINE bool callNullable(
-      int32_t& out,
-      const TInput* input,
-      const bool* /*legacySizeOfNull*/) {
+  FOLLY_ALWAYS_INLINE bool callNullable(int32_t& out, const TInput* input) {
     if (input == nullptr) {
       if (legacySizeOfNull_) {
         out = -1;
@@ -55,6 +60,14 @@ struct Size {
     return true;
   }
 
+  template <typename TInput>
+  FOLLY_ALWAYS_INLINE bool callNullable(
+      int32_t& out,
+      const TInput* input,
+      const bool* /*legacySizeOfNull*/) {
+    return callNullable(out, input);
+  }
+
  private:
   // If true, returns -1 for null input. Otherwise, returns null.
   bool legacySizeOfNull_;
@@ -62,6 +75,8 @@ struct Size {
 } // namespace
 
 void registerSize(const std::string& prefix) {
+  registerFunction<Size, int32_t, Array<Any>>({prefix});
+  registerFunction<Size, int32_t, Map<Any, Any>>({prefix});
   registerFunction<Size, int32_t, Array<Any>, bool>({prefix});
   registerFunction<Size, int32_t, Map<Any, Any>, bool>({prefix});
 }
