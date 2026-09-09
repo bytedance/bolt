@@ -166,7 +166,8 @@ class PartitionWriter {
   PartitionWriterOptions options_;
   arrow::MemoryPool* pool_;
 
-  // Memory pool used for spill scratch and, by default, retained payloads.
+  // Memory Pool used to track memory allocation of partition payloads.
+  // The actual allocation is delegated to options_.memoryPool.
   std::unique_ptr<ShuffleMemoryPool> payloadPool_;
 
   // Optional task-accounted pool for retained payloads.
