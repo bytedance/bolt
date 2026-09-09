@@ -262,6 +262,16 @@ class QueryConfig {
   /// OrderBy spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kOrderBySpillEnabled = "order_by_spill_enabled";
 
+  static constexpr const char* kOrderByRadixSortEnabled =
+      "order_by_radix_sort_enabled";
+
+  /// If true, use the legacy SortBuffer when an OrderBy sorting key is REAL or
+  /// DOUBLE, or contains either type in an ARRAY, MAP, or ROW, because radix
+  /// key encoding does not preserve their exact bit representation.
+  static constexpr const char*
+      kOrderByRadixSortFallbackForFloatingPointKeysEnabled =
+          "order_by_radix_sort_fallback_for_floating_point_keys_enabled";
+
   /// Support orderBy spilling in output stage
   static constexpr const char* kOrderBySpillInOutputStageEnabled =
       "order_by_spill_output_stage_enabled";
@@ -1175,6 +1185,15 @@ class QueryConfig {
   /// spillEnabled()!
   bool orderBySpillEnabled() const {
     return get<bool>(kOrderBySpillEnabled, true);
+  }
+
+  bool orderByRadixSortEnabled() const {
+    return get<bool>(kOrderByRadixSortEnabled, false);
+  }
+
+  bool orderByRadixSortFallbackForFloatingPointKeysEnabled() const {
+    return get<bool>(
+        kOrderByRadixSortFallbackForFloatingPointKeysEnabled, true);
   }
 
   bool orderBySpillInOutputStageEnabled() const {

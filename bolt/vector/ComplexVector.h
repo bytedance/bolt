@@ -904,6 +904,9 @@ class MapVector : public ArrayVectorBase {
   // that keys[indices[i]] < keys[indices[i + 1]].
   std::vector<vector_size_t> sortedKeyIndices(vector_size_t index) const;
 
+  /// Returns true if the keys at 'index' are already in canonical order.
+  bool isSorted(vector_size_t index) const;
+
   void ensureWritable(const SelectivityVector& rows) override;
 
   bool isWritable() const override;
@@ -930,10 +933,6 @@ class MapVector : public ArrayVectorBase {
   }
 
  private:
-  // Returns true if the keys for map at 'index' are sorted from first
-  // to last in the type's collation order.
-  bool isSorted(vector_size_t index) const;
-
   // makes a Buffer with 0, 1, 2,... size-1. This is later sorted to
   // get elements in key order in each map.
   BufferPtr elementIndices() const;

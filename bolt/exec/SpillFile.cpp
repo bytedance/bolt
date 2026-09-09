@@ -30,8 +30,12 @@
 
 #include "bolt/exec/SpillFile.h"
 #include <lz4.h>
+#include <snappy.h>
+#include <zlib.h>
 #include <zstd.h>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <vector>
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/file/FileSystems.h"
@@ -44,6 +48,188 @@ namespace {
 // nanosecond precision, we use this serde option to ensure the serializer
 // preserves precision.
 static const bool kDefaultUseLosslessTimestamp = true;
+
+constexpr uint64_t kDefaultSpillReadBufferSize =
+    (1 << 20) - AlignedBuffer::kPaddedSize;
+
+} // namespace
+
+// Encoded spill blocks use caller-provided buffers for all supported codecs.
+// NONE bypasses compression, while LZ4 and ZSTD retain their native fast paths.
+int32_t spillCompressionBound(common::CompressionKind kind, int32_t size) {
+  BOLT_CHECK_GT(size, 0, "Invalid spill block size");
+  uint64_t bound;
+  switch (kind) {
+    case common::CompressionKind_ZLIB:
+    case common::CompressionKind_GZIP:
+      // GZIP uses the same default deflate settings as ZLIB, with 12 more
+      // bytes of wrapper overhead.
+      bound =
+          compressBound(size) + (kind == common::CompressionKind_GZIP ? 12 : 0);
+      break;
+    case common::CompressionKind_SNAPPY:
+      bound = snappy::MaxCompressedLength(size);
+      break;
+    case common::CompressionKind_ZSTD:
+      bound = ZSTD_compressBound(size);
+      BOLT_CHECK(!ZSTD_isError(bound), "Invalid ZSTD spill block size");
+      break;
+    case common::CompressionKind_LZ4:
+      BOLT_CHECK_LE(
+          size,
+          static_cast<int32_t>(LZ4_MAX_INPUT_SIZE),
+          "LZ4 spill block exceeds codec input limit");
+      bound = LZ4_compressBound(size);
+      break;
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported spill compression kind {}",
+          common::compressionKindToString(kind));
+  }
+  BOLT_CHECK_LE(
+      bound,
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+      "{} spill block exceeds int32 range",
+      kind);
+  return static_cast<int32_t>(bound);
+}
+
+int32_t compressSpillBlock(
+    common::CompressionKind kind,
+    const char* input,
+    int32_t inputSize,
+    char* output,
+    int32_t outputCapacity) {
+  switch (kind) {
+    case common::CompressionKind_ZLIB:
+    case common::CompressionKind_GZIP: {
+      // Match the ZLIB and GZIP formats used by the general spill codecs while
+      // writing directly into the reusable caller-provided buffer.
+      const auto windowBits =
+          kind == common::CompressionKind_GZIP ? MAX_WBITS + 16 : MAX_WBITS;
+      z_stream stream{};
+      BOLT_CHECK_EQ(
+          deflateInit2(
+              &stream,
+              Z_DEFAULT_COMPRESSION,
+              Z_DEFLATED,
+              windowBits,
+              8,
+              Z_DEFAULT_STRATEGY),
+          Z_OK);
+      auto cleanup = folly::makeGuard([&]() { deflateEnd(&stream); });
+      stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input));
+      stream.avail_in = inputSize;
+      stream.next_out = reinterpret_cast<Bytef*>(output);
+      stream.avail_out = outputCapacity;
+      BOLT_CHECK_EQ(deflate(&stream, Z_FINISH), Z_STREAM_END);
+      return static_cast<int32_t>(stream.total_out);
+    }
+    case common::CompressionKind_SNAPPY: {
+      BOLT_CHECK_GE(outputCapacity, snappy::MaxCompressedLength(inputSize));
+      size_t compressedSize;
+      snappy::RawCompress(input, inputSize, output, &compressedSize);
+      return static_cast<int32_t>(compressedSize);
+    }
+    case common::CompressionKind_ZSTD: {
+      const auto result =
+          ZSTD_compress(output, outputCapacity, input, inputSize, 3);
+      BOLT_CHECK(!ZSTD_isError(result));
+      return static_cast<int32_t>(result);
+    }
+    case common::CompressionKind_LZ4: {
+      const auto result = LZ4_compress_default(
+          input, output, inputSize, static_cast<int>(outputCapacity));
+      BOLT_CHECK_GT(result, 0);
+      return result;
+    }
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported spill compression kind {}",
+          common::compressionKindToString(kind));
+  }
+}
+
+void decompressSpillBlock(
+    common::CompressionKind kind,
+    const char* input,
+    int32_t inputSize,
+    char* output,
+    int32_t outputSize) {
+  switch (kind) {
+    case common::CompressionKind_ZLIB:
+    case common::CompressionKind_GZIP: {
+      const auto windowBits =
+          kind == common::CompressionKind_GZIP ? MAX_WBITS + 16 : MAX_WBITS;
+      z_stream stream{};
+      BOLT_CHECK_EQ(inflateInit2(&stream, windowBits), Z_OK);
+      auto cleanup = folly::makeGuard([&]() { inflateEnd(&stream); });
+      stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input));
+      stream.avail_in = inputSize;
+      stream.next_out = reinterpret_cast<Bytef*>(output);
+      stream.avail_out = outputSize;
+      BOLT_CHECK_EQ(inflate(&stream, Z_FINISH), Z_STREAM_END);
+      BOLT_CHECK_EQ(stream.total_out, outputSize);
+      return;
+    }
+    case common::CompressionKind_SNAPPY: {
+      size_t uncompressedSize;
+      BOLT_CHECK(
+          snappy::GetUncompressedLength(input, inputSize, &uncompressedSize));
+      BOLT_CHECK_EQ(uncompressedSize, outputSize);
+      BOLT_CHECK(snappy::RawUncompress(input, inputSize, output));
+      return;
+    }
+    case common::CompressionKind_ZSTD: {
+      const auto result = ZSTD_decompress(output, outputSize, input, inputSize);
+      BOLT_CHECK(!ZSTD_isError(result));
+      BOLT_CHECK_EQ(result, outputSize);
+      return;
+    }
+    case common::CompressionKind_LZ4: {
+      const auto result =
+          LZ4_decompress_safe(input, output, inputSize, outputSize);
+      BOLT_CHECK_EQ(result, outputSize);
+      return;
+    }
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported spill compression kind {}",
+          common::compressionKindToString(kind));
+  }
+}
+
+namespace {
+
+void readSpillBlockBody(
+    SpillInputStream& input,
+    common::CompressionKind compressionKind,
+    uint32_t uncompressedSize,
+    uint32_t storedSize,
+    char* output,
+    BufferPtr& compressedBuffer,
+    memory::MemoryPool* pool,
+    uint64_t& decompressTimeUs) {
+  if (compressionKind != common::CompressionKind_NONE) {
+    if (compressedBuffer == nullptr ||
+        compressedBuffer->capacity() < storedSize) {
+      compressedBuffer = AlignedBuffer::allocate<char>(storedSize, pool);
+    }
+    input.readBytes(compressedBuffer->asMutable<char>(), storedSize);
+    MicrosecondTimer timer(&decompressTimeUs);
+    decompressSpillBlock(
+        compressionKind,
+        compressedBuffer->as<char>(),
+        static_cast<int32_t>(storedSize),
+        output,
+        static_cast<int32_t>(uncompressedSize));
+  } else {
+    BOLT_CHECK_EQ(
+        uncompressedSize, storedSize, "Invalid uncompressed spill block size");
+    input.readBytes(output, uncompressedSize);
+  }
+}
+
 } // namespace
 
 void SpillInputStream::next(bool /*throwIfPastEnd*/) {
@@ -226,6 +412,25 @@ SpillWriter::SpillWriter(
   }
 }
 
+SpillWriter::SpillWriter(
+    const std::string& pathPrefix,
+    uint64_t targetFileSize,
+    const common::SpillConfig::SpillIOConfig& ioConfig,
+    memory::MemoryPool* pool,
+    folly::Synchronized<common::SpillStats>* stats)
+    : type_(nullptr),
+      sortingKeys_(),
+      compressionKind_(ioConfig.compressionKind),
+      pathPrefix_(pathPrefix),
+      targetFileSize_(targetFileSize),
+      spillUringEnabled_(ioConfig.spillUringEnabled),
+      writeBufferSize_(ioConfig.writeBufferSize),
+      fileCreateConfig_(ioConfig.fileCreateConfig),
+      updateAndCheckSpillLimitCb_(ioConfig.updateAndCheckSpillLimitCb),
+      pool_(pool),
+      stats_(stats),
+      spillSerdeKind_(std::nullopt) {}
+
 SpillWriteFile* SpillWriter::ensureFile() {
   if ((currentFile_ != nullptr) && (currentFile_->size() > targetFileSize_)) {
     closeFile();
@@ -238,6 +443,47 @@ SpillWriteFile* SpillWriter::ensureFile() {
         spillUringEnabled_);
   }
   return currentFile_.get();
+}
+
+void SpillWriter::cleanupFilesNoThrow() noexcept {
+  const auto removeFileNoThrow = [](const std::string& path) noexcept {
+    try {
+      auto fs = filesystems::getFileSystem(path, nullptr);
+      if (fs->exists(path)) {
+        fs->remove(path);
+      }
+    } catch (const std::exception& error) {
+      LOG(WARNING) << "Failed to remove spill file '" << path
+                   << "': " << error.what();
+    } catch (...) {
+      LOG(WARNING) << "Failed to remove spill file '" << path << "'";
+    }
+  };
+
+  for (const auto& file : finishedFiles_) {
+    removeFileNoThrow(file.path);
+  }
+  finishedFiles_.clear();
+  if (currentFile_ != nullptr) {
+    try {
+      currentFile_->finish();
+    } catch (const std::exception& error) {
+      LOG(WARNING) << "Failed to finish spill file '" << currentFile_->path()
+                   << "': " << error.what();
+    } catch (...) {
+      LOG(WARNING) << "Failed to finish spill file '" << currentFile_->path()
+                   << "'";
+    }
+    removeFileNoThrow(currentFile_->path());
+    currentFile_.reset();
+  }
+  rowsInCurrentFile_ = 0;
+  nextFileId_ = 0;
+  batch_.reset();
+  encodedBlockCompressBuffer_.reset();
+  unflushedRows_ = 0;
+  unflushedSizeInRowVector_ = 0;
+  finished_ = false;
 }
 
 void SpillWriter::closeFile() {
@@ -518,6 +764,76 @@ uint64_t SpillWriter::write(
   return totalSize;
 }
 
+uint64_t SpillWriter::writeEncodedBlock(
+    char* frame,
+    uint32_t headerSize,
+    int32_t bodySize,
+    uint64_t numRows) {
+  checkNotFinished();
+  BOLT_CHECK_NOT_NULL(frame);
+  BOLT_CHECK_GE(headerSize, sizeof(int32_t) * 2);
+  BOLT_CHECK_GT(bodySize, 0);
+  const auto compressedCapacity =
+      compressionKind_ == common::CompressionKind_NONE
+      ? bodySize
+      : spillCompressionBound(compressionKind_, bodySize);
+  const bool compressionEnabled =
+      compressionKind_ != common::CompressionKind_NONE;
+
+  auto* file = ensureFile();
+  BOLT_CHECK_NOT_NULL(file);
+
+  const char* writeBuffer = frame;
+  uint64_t writeSize = headerSize + static_cast<uint64_t>(bodySize);
+  uint64_t compressTimeUs = 0;
+  int32_t storedSize = bodySize;
+  if (compressionEnabled) {
+    const auto required =
+        headerSize + static_cast<uint64_t>(compressedCapacity);
+    if (encodedBlockCompressBuffer_ == nullptr ||
+        encodedBlockCompressBuffer_->capacity() < required) {
+      encodedBlockCompressBuffer_ =
+          AlignedBuffer::allocate<char>(required, pool_);
+    }
+    std::memcpy(
+        encodedBlockCompressBuffer_->asMutable<char>(), frame, headerSize);
+    {
+      MicrosecondTimer timer(&compressTimeUs);
+      storedSize = compressSpillBlock(
+          compressionKind_,
+          frame + headerSize,
+          bodySize,
+          encodedBlockCompressBuffer_->asMutable<char>() + headerSize,
+          compressedCapacity);
+    }
+    writeBuffer = encodedBlockCompressBuffer_->as<char>();
+    writeSize = headerSize + static_cast<uint64_t>(storedSize);
+  }
+
+  std::memcpy(frame, &bodySize, sizeof(bodySize));
+  std::memcpy(frame + sizeof(bodySize), &storedSize, sizeof(storedSize));
+  if (compressionEnabled) {
+    std::memcpy(
+        encodedBlockCompressBuffer_->asMutable<char>(),
+        frame,
+        sizeof(bodySize) + sizeof(storedSize));
+  }
+
+  uint64_t writeTimeUs = 0;
+  uint64_t writtenBytes = 0;
+  {
+    MicrosecondTimer timer(&writeTimeUs);
+    writtenBytes = file->write(std::string_view(writeBuffer, writeSize));
+  }
+  rowsInCurrentFile_ += numRows;
+  updateWriteStats(writtenBytes, compressTimeUs, writeTimeUs);
+  updateAndCheckSpillLimitCb_(writtenBytes);
+  if (currentFile_ != nullptr && currentFile_->size() > targetFileSize_) {
+    closeFile();
+  }
+  return writtenBytes;
+}
+
 void SpillWriter::updateAppendStats(
     uint64_t numRows,
     uint64_t serializationTimeUs) {
@@ -588,31 +904,18 @@ std::vector<uint32_t> SpillWriter::testingSpilledFileIds() const {
   return fileIds;
 }
 
-SpillReadFileBase::SpillReadFileBase(
-    const SpillFileInfo& fileInfo,
+SpillReadFileInput::SpillReadFileInput(
+    const std::string& path,
     memory::MemoryPool* pool,
-    const bool spillUringEnabled)
-    : id_(fileInfo.id),
-      path_(fileInfo.path),
-      size_(fileInfo.size),
-      type_(fileInfo.type),
-      sortingKeys_(fileInfo.sortingKeys),
-      compressionKind_(fileInfo.compressionKind),
-      readOptions_{kDefaultUseLosslessTimestamp, compressionKind_},
-      serdeKind_(fileInfo.serdeKind),
-      serde_(
-          serdeKind_.has_value() ? getNamedVectorSerde(*serdeKind_) : nullptr),
-      spillUringEnabled_(spillUringEnabled),
-      pool_(pool) {
-  constexpr uint64_t kMaxReadBufferSize =
-      (1 << 20) - AlignedBuffer::kPaddedSize; // 1MB - padding.
-  auto fs = filesystems::getFileSystem(path_, nullptr);
+    bool spillUringEnabled)
+    : pool_(pool), spillUringEnabled_(spillUringEnabled) {
+  auto fs = filesystems::getFileSystem(path, nullptr);
   std::unique_ptr<ReadFile> file;
 #ifdef IO_URING_SUPPORTED
-  file = spillUringEnabled_ ? fs->openAsyncFileForRead(path_)
-                            : fs->openFileForRead(path_);
+  file = spillUringEnabled_ ? fs->openAsyncFileForRead(path)
+                            : fs->openFileForRead(path);
 #else
-  file = fs->openFileForRead(path_);
+  file = fs->openFileForRead(path);
 #endif
 
   // For io_uring enabled spill read, maintain two read buffers, one for storing
@@ -622,16 +925,42 @@ SpillReadFileBase::SpillReadFileBase(
   std::vector<BufferPtr> readBuffers;
   readBuffers.resize(bufferLength);
   for (int i = 0; i < bufferLength; i++) {
-    readBuffers[i] = AlignedBuffer::allocate<char>(kMaxReadBufferSize, pool_);
+    readBuffers[i] =
+        AlignedBuffer::allocate<char>(kDefaultSpillReadBufferSize, pool_);
   }
 
   input_ = std::make_unique<SpillInputStream>(
       std::move(file), readBuffers, spillUringEnabled);
 }
 
+void SpillReadFileInput::closeInput() {
+  if (input_ == nullptr) {
+    return;
+  }
+  completedSpillReadIOTimeUs_ += input_->getSpillReadIOTime();
+  input_.reset();
+}
+
+SpillReadFileBase::SpillReadFileBase(
+    const SpillFileInfo& fileInfo,
+    memory::MemoryPool* pool,
+    const bool spillUringEnabled)
+    : SpillReadFileInput(fileInfo.path, pool, spillUringEnabled),
+      id_(fileInfo.id),
+      path_(fileInfo.path),
+      size_(fileInfo.size),
+      type_(fileInfo.type),
+      sortingKeys_(fileInfo.sortingKeys),
+      compressionKind_(fileInfo.compressionKind),
+      readOptions_{kDefaultUseLosslessTimestamp, compressionKind_},
+      serdeKind_(fileInfo.serdeKind),
+      serde_(
+          serdeKind_.has_value() ? getNamedVectorSerde(*serdeKind_) : nullptr) {
+}
+
 bool SpillReadFile::nextBatch(RowVectorPtr& rowVector) {
   if (input_->atEnd()) {
-    spillReadIOTimeUs_ = input_->getSpillReadIOTime();
+    spillReadIOTimeUs_ = inputSpillReadIOTimeUs();
     return false;
   }
   if (serde_ != nullptr) {
@@ -650,7 +979,7 @@ void SpillReadFile::reuse() {
 uint32_t RowBasedSpillReadFile::nextBatch(std::vector<char*>& rows) {
   rows.clear();
   if (input_->atEnd()) {
-    spillReadIOTimeUs_ = input_->getSpillReadIOTime();
+    spillReadIOTimeUs_ = inputSpillReadIOTimeUs();
     return 0;
   }
   uint32_t bufferSize = input_->read<uint32_t>();
@@ -660,31 +989,20 @@ uint32_t RowBasedSpillReadFile::nextBatch(std::vector<char*>& rows) {
     rowBuffer_ = AlignedBuffer::allocate<char>(alignedBufferSize, pool_);
   }
   char* current = alignUp(rowBuffer_->asMutable<char>(), info_.alignment);
-  if (info_.enableCompression) {
-    if (!compressedBuffer_ || compressedBuffer_->capacity() < compressedSize) {
-      compressedBuffer_ = AlignedBuffer::allocate<char>(compressedSize, pool_);
-    }
-    input_->readBytes(compressedBuffer_->asMutable<char>(), compressedSize);
-    MicrosecondTimer timer(&spillDecompressTimeUs_);
-    if (compressionKind_ == common::CompressionKind::CompressionKind_ZSTD) {
-      auto ret = ZSTD_decompress(
-          current,
-          rowBuffer_->capacity(),
-          compressedBuffer_->as<char>(),
-          compressedSize);
-      BOLT_CHECK_EQ(ret, bufferSize);
-    } else {
-      int ret = LZ4_decompress_safe(
-          compressedBuffer_->as<char>(),
-          current,
-          compressedSize,
-          rowBuffer_->capacity());
-      BOLT_CHECK_EQ(ret, bufferSize);
-    }
-  } else {
-    BOLT_CHECK_EQ(bufferSize, compressedSize);
-    input_->readBytes(current, bufferSize);
-  }
+  const auto blockCompressionKind = info_.enableCompression
+      ? (compressionKind_ == common::CompressionKind::CompressionKind_ZSTD
+             ? common::CompressionKind::CompressionKind_ZSTD
+             : common::CompressionKind::CompressionKind_LZ4)
+      : common::CompressionKind::CompressionKind_NONE;
+  readSpillBlockBody(
+      *input_,
+      blockCompressionKind,
+      bufferSize,
+      compressedSize,
+      current,
+      compressedBuffer_,
+      pool_,
+      spillDecompressTimeUs_);
   char* bufferEnd = current + bufferSize;
   while (current < bufferEnd) {
     rows.push_back(current);
@@ -716,31 +1034,20 @@ bool RowBasedSpillReadFile::nextBatch(
     rowBuffer_ = AlignedBuffer::allocate<char>(bufferSize, pool_);
   }
   char* current = rowBuffer_->asMutable<char>();
-  if (info_.enableCompression) {
-    if (!compressedBuffer_ || compressedBuffer_->capacity() < compressedSize) {
-      compressedBuffer_ = AlignedBuffer::allocate<char>(compressedSize, pool_);
-    }
-    input_->readBytes(compressedBuffer_->asMutable<char>(), compressedSize);
-    MicrosecondTimer timer(&spillDecompressTimeUs_);
-    if (compressionKind_ == common::CompressionKind::CompressionKind_ZSTD) {
-      auto ret = ZSTD_decompress(
-          current,
-          rowBuffer_->capacity(),
-          compressedBuffer_->as<char>(),
-          compressedSize);
-      BOLT_CHECK_EQ(ret, bufferSize);
-    } else {
-      int ret = LZ4_decompress_safe(
-          compressedBuffer_->as<char>(),
-          current,
-          compressedSize,
-          rowBuffer_->capacity());
-      BOLT_CHECK_EQ(ret, bufferSize);
-    }
-  } else {
-    BOLT_CHECK_EQ(bufferSize, compressedSize);
-    input_->readBytes(current, bufferSize);
-  }
+  const auto blockCompressionKind = info_.enableCompression
+      ? (compressionKind_ == common::CompressionKind::CompressionKind_ZSTD
+             ? common::CompressionKind::CompressionKind_ZSTD
+             : common::CompressionKind::CompressionKind_LZ4)
+      : common::CompressionKind::CompressionKind_NONE;
+  readSpillBlockBody(
+      *input_,
+      blockCompressionKind,
+      bufferSize,
+      compressedSize,
+      current,
+      compressedBuffer_,
+      pool_,
+      spillDecompressTimeUs_);
   char* bufferEnd = current + bufferSize;
   while (current < bufferEnd) {
     rows.push_back(current);

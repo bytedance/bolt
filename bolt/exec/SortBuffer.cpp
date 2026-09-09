@@ -539,7 +539,7 @@ void SortBuffer::spillOutput() {
   } else {
     data_->clear();
   }
-  sortedRows_.clear();
+  std::vector<char*>{}.swap(sortedRows_);
   // Finish right after spilling as the output spiller only spills at most
   // once.
   finishSpill();
@@ -560,6 +560,7 @@ void SortBuffer::prepareOutput(vector_size_t batchSize) {
   }
 
   if (spiller_ != nullptr) {
+    prepareOutputWithSpill();
     spillSources_.resize(batchSize);
     spillSourceRows_.resize(batchSize);
   }
@@ -686,17 +687,29 @@ void SortBuffer::getOutputWithSpill() {
 
 void SortBuffer::finishSpill() {
   BOLT_CHECK_NULL(spillMerger_);
-  auto spillPartition = spiller_->finishSpill();
+  BOLT_CHECK_NULL(rowBasedSpillMerger_);
+  BOLT_CHECK_NULL(pendingSpillPartition_);
+  pendingSpillPartition_ =
+      std::make_unique<SpillPartition>(spiller_->finishSpill());
+}
+
+void SortBuffer::prepareOutputWithSpill() {
+  if (spillMerger_ != nullptr || rowBasedSpillMerger_ != nullptr) {
+    BOLT_CHECK_NULL(pendingSpillPartition_);
+    return;
+  }
+  BOLT_CHECK_NOT_NULL(pendingSpillPartition_);
   if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
-    spillMerger_ = spillPartition.createOrderedReader(
+    spillMerger_ = pendingSpillPartition_->createOrderedReader(
         pool(), spillConfig_->spillUringEnabled);
   } else {
-    rowBasedSpillMerger_ = spillPartition.createRowBasedOrderedReader(
+    rowBasedSpillMerger_ = pendingSpillPartition_->createRowBasedOrderedReader(
         pool(),
         data_.get(),
         spillConfig_->getJITenabledForSpill(),
         spillConfig_->spillUringEnabled);
   }
+  pendingSpillPartition_.reset();
 }
 
 } // namespace bytedance::bolt::exec
