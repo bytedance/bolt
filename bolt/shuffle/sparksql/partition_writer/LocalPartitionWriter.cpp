@@ -36,6 +36,7 @@
 
 #include <bolt/common/time/Timer.h>
 #include <glog/logging.h>
+#include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/CompressionStream.h"
 #include "bolt/shuffle/sparksql/Payload.h"
 #include "bolt/shuffle/sparksql/Spill.h"
@@ -156,9 +157,11 @@ class LocalPartitionWriter::PayloadMerger {
   PayloadMerger(
       const PartitionWriterOptions& options,
       arrow::MemoryPool* pool,
+      arrow::MemoryPool* spillPool,
       Codec* codec,
       bool hasComplexType)
       : pool_(pool),
+        spillPool_(spillPool),
         codec_(codec),
         hasComplexType_(hasComplexType),
         compressionThreshold_(options.compressionThreshold),
@@ -269,7 +272,7 @@ class LocalPartitionWriter::PayloadMerger {
     }
     auto payload = std::move(partitionMergePayload_[partitionId]);
     return payload->toBlockPayload(
-        Payload::kUncompressed, pool_, codec_, hasComplexType_);
+        Payload::kUncompressed, spillPool_, codec_, hasComplexType_);
   }
 
   arrow::Result<std::optional<std::unique_ptr<BlockPayload>>> finish(
@@ -284,7 +287,8 @@ class LocalPartitionWriter::PayloadMerger {
         ? Payload::kToBeCompressed
         : Payload::kUncompressed;
     auto payload = std::move(partitionMergePayload_[partitionId]);
-    return payload->toBlockPayload(payloadType, pool_, codec_, hasComplexType_);
+    return payload->toBlockPayload(
+        payloadType, spillPool_, codec_, hasComplexType_);
   }
 
   bool hasMerged(uint32_t partitionId) {
@@ -295,6 +299,7 @@ class LocalPartitionWriter::PayloadMerger {
 
  private:
   arrow::MemoryPool* pool_;
+  arrow::MemoryPool* spillPool_;
   Codec* codec_;
   bool hasComplexType_;
   int32_t compressionThreshold_;
@@ -575,10 +580,12 @@ LocalPartitionWriter::LocalPartitionWriter(
     PartitionWriterOptions options,
     arrow::MemoryPool* pool,
     const std::string& dataFile,
-    const std::vector<std::string>& localDirs)
+    const std::vector<std::string>& localDirs,
+    bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool)
     : PartitionWriter(numPartitions, std::move(options), pool),
       dataFile_(dataFile),
-      localDirs_(localDirs) {
+      localDirs_(localDirs),
+      retainedPayloadBoltPool_(retainedPayloadBoltPool) {
   init();
 }
 
@@ -814,8 +821,13 @@ arrow::Status LocalPartitionWriter::evict(
   }
 
   if (!merger_) {
+    if (retainedPayloadBoltPool_ && !hasComplexType) {
+      retainedPayloadPool_ =
+          std::make_unique<BoltArrowMemoryPool>(retainedPayloadBoltPool_);
+    }
     merger_ = std::make_shared<PayloadMerger>(
         options_,
+        retainedPayloadPool(),
         payloadPool_.get(),
         codec_ ? codec_.get() : nullptr,
         hasComplexType);
@@ -845,14 +857,14 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
   int64_t reclaimed = 0;
   // Reclaim memory from payloadCache.
   if (payloadCache_ && payloadCache_->canSpill()) {
-    auto beforeSpill = payloadPool_->bytes_allocated();
+    auto beforeSpill = retainedPayloadPool()->bytes_allocated();
     ARROW_ASSIGN_OR_RAISE(
         auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
     spills_.emplace_back();
     ARROW_ASSIGN_OR_RAISE(
         spills_.back(),
         payloadCache_->spill(spillFile, payloadPool_.get(), codec_.get()));
-    reclaimed += beforeSpill - payloadPool_->bytes_allocated();
+    reclaimed += beforeSpill - retainedPayloadPool()->bytes_allocated();
     if (reclaimed >= size) {
       *actual = reclaimed;
       return arrow::Status::OK();
@@ -860,7 +872,7 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
   }
   // Then spill payloads from merger. Create uncompressed payloads.
   if (merger_) {
-    auto beforeSpill = payloadPool_->bytes_allocated();
+    auto beforeSpill = retainedPayloadPool()->bytes_allocated();
     for (auto pid = 0; pid < numPartitions_; ++pid) {
       ARROW_ASSIGN_OR_RAISE(auto merged, merger_->finishForSpill(pid));
       if (merged.has_value()) {
@@ -871,7 +883,7 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
     // This is not accurate. When the evicted partition buffers are not copied,
     // the merged ones are resized from the original buffers thus allocated from
     // partitionBufferPool.
-    reclaimed += beforeSpill - payloadPool_->bytes_allocated();
+    reclaimed += beforeSpill - retainedPayloadPool()->bytes_allocated();
     RETURN_NOT_OK(finishSpill());
   }
   *actual = reclaimed;

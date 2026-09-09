@@ -15,16 +15,20 @@
  */
 
 #include <vector/ComplexVector.h>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <limits>
 #include "bolt/common/caching/AsyncDataCache.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/sparksql/tests/MemoryTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/core/PlanNode.h"
 #include "bolt/exec/tests/utils/Cursor.h"
 #include "bolt/exec/tests/utils/MemoryHogOperator.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
+#include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
@@ -53,7 +57,11 @@ class ShuffleMemoryTest : public ShuffleTestBase {
   // within a partition but incompressible across partitions. A writer that
   // makes large splits lets the per-partition repeats deduplicate (small
   // compressed output); one that fragments into tiny splits re-stores them.
-  ShuffleWriterMetrics runReclaimableHogScenario(int32_t writerType);
+  ShuffleWriterMetrics runReclaimableHogScenario(
+      int32_t writerType,
+      int32_t compressionThreshold = kDefaultCompressionThreshold);
+
+  void verifyRetainedPayloadPool();
 
   std::shared_ptr<CompositeRowVector> createCompositeInput(
       const RowVectorPtr& input,
@@ -402,6 +410,135 @@ TEST_F(ShuffleMemoryTest, testCompositeRowEvictBeforeInit) {
   EXPECT_THROW(executeTestWithCustomInput(param, inputData), BoltRuntimeError);
 }
 
+void ShuffleMemoryTest::verifyRetainedPayloadPool() {
+  constexpr int32_t kRowCount = 32;
+  constexpr int64_t kMemoryLimit = 512 * 1024 * 1024;
+
+  auto rowType = ROW({"c1"}, {VARCHAR()});
+  auto composite = createCompositeRowVectorWithPid(rowType, /*rowCount=*/0);
+
+  auto columnarPid = makeFlatVector<int32_t>(kRowCount, [](auto) { return 0; });
+  auto values = makeFlatVector<StringView>(
+      kRowCount, [](auto) { return StringView("payload"); });
+  auto columnar = makeRowVector({"c0", "c1"}, {columnarPid, values});
+
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(kMemoryLimit);
+  auto writerPool =
+      memoryManagerHolder->rootPool()->addLeafChild("shuffle-writer");
+  BoltArrowMemoryPool arrowPool(writerPool.get());
+  auto tempDir = bytedance::bolt::exec::test::TempDirectoryPath::create();
+  auto localDir = tempDir->path + "/local_dir";
+  std::filesystem::create_directories(localDir);
+
+  ShuffleWriterOptions writerOptions;
+  writerOptions.partitioning = Partitioning::kHash;
+  writerOptions.enableVectorCombination = false;
+  writerOptions.partitionWriterOptions.numPartitions = 1;
+  writerOptions.partitionWriterOptions.partitionWriterType =
+      PartitionWriterType::kLocal;
+  writerOptions.partitionWriterOptions.dataFile =
+      tempDir->path + "/shuffle_data.bin";
+  writerOptions.partitionWriterOptions.configuredDirs = {localDir};
+  writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.partitionWriterOptions.mergeBufferSize = 1;
+  writerOptions.partitionWriterOptions.compressionThreshold = 1;
+  writerOptions.shuffleBatchSize = 1;
+  writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
+
+  auto writer = BoltShuffleWriter::createDefault(
+      writerOptions, writerPool.get(), &arrowPool);
+  ASSERT_TRUE(writer->split(composite, kMemoryLimit).ok());
+  ASSERT_TRUE(writer->split(columnar, kMemoryLimit).ok());
+  ASSERT_TRUE(
+      writer->evictPartitionBuffers(/*partitionId=*/0, /*reuseBuffers=*/false)
+          .ok());
+  const auto cachedPayloadSize = writer->cachedPayloadSize();
+  ASSERT_GT(cachedPayloadSize, 0);
+  auto countSpillFiles = [&]() {
+    return std::count_if(
+        std::filesystem::recursive_directory_iterator(localDir),
+        std::filesystem::recursive_directory_iterator(),
+        [](const auto& entry) { return entry.is_regular_file(); });
+  };
+  const auto spillFiles = countSpillFiles();
+  ASSERT_TRUE(writer->split(columnar, kMemoryLimit).ok());
+  EXPECT_EQ(countSpillFiles(), spillFiles);
+  EXPECT_GE(writer->cachedPayloadSize(), cachedPayloadSize);
+  ASSERT_TRUE(writer->split(columnar, /*memLimit=*/0).ok());
+  EXPECT_GE(writer->cachedPayloadSize(), cachedPayloadSize);
+  int64_t reclaimed = 0;
+  ASSERT_TRUE(
+      writer->reclaimFixedSize(std::numeric_limits<int64_t>::max(), &reclaimed)
+          .ok());
+  EXPECT_GT(reclaimed, 0);
+  EXPECT_EQ(writer->cachedPayloadSize(), 0);
+  ASSERT_TRUE(writer->stop().ok());
+}
+
+TEST_F(ShuffleMemoryTest, testCompositeThenColumnarUsesRetainedPayloadPool) {
+  verifyRetainedPayloadPool();
+}
+
+TEST_F(ShuffleMemoryTest, testComplexPayloadKeepsLegacyBatchDrain) {
+  constexpr int32_t kRowCount = 32;
+  constexpr int64_t kMemoryLimit = 512 * 1024 * 1024;
+
+  auto columnarPid = makeFlatVector<int32_t>(kRowCount, [](auto) { return 0; });
+  std::vector<std::vector<int64_t>> arrays(
+      kRowCount, std::vector<int64_t>{1, 2, 3});
+  auto columnar = makeRowVector(
+      {"c0", "c1"}, {columnarPid, makeArrayVector<int64_t>(arrays)});
+
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(kMemoryLimit);
+  auto writerPool =
+      memoryManagerHolder->rootPool()->addLeafChild("shuffle-writer");
+  BoltArrowMemoryPool arrowPool(writerPool.get());
+  auto tempDir = bytedance::bolt::exec::test::TempDirectoryPath::create();
+  auto localDir = tempDir->path + "/local_dir";
+  std::filesystem::create_directories(localDir);
+
+  ShuffleWriterOptions writerOptions;
+  writerOptions.partitioning = Partitioning::kHash;
+  writerOptions.enableVectorCombination = false;
+  writerOptions.partitionWriterOptions.numPartitions = 1;
+  writerOptions.partitionWriterOptions.partitionWriterType =
+      PartitionWriterType::kLocal;
+  writerOptions.partitionWriterOptions.dataFile =
+      tempDir->path + "/shuffle_data.bin";
+  writerOptions.partitionWriterOptions.configuredDirs = {localDir};
+  writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.partitionWriterOptions.mergeBufferSize = 1;
+  writerOptions.partitionWriterOptions.compressionThreshold = kRowCount + 1;
+  writerOptions.shuffleBatchSize = 1;
+  writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
+
+  const auto spillBytesBefore =
+      bytedance::bolt::memory::spillMemoryPool()->stats().currentBytes;
+  auto writer = BoltShuffleWriter::createDefault(
+      writerOptions, writerPool.get(), &arrowPool);
+  ASSERT_TRUE(writer->split(columnar, kMemoryLimit).ok());
+  ASSERT_TRUE(
+      writer->evictPartitionBuffers(/*partitionId=*/0, /*reuseBuffers=*/false)
+          .ok());
+  EXPECT_GT(
+      bytedance::bolt::memory::spillMemoryPool()->stats().currentBytes,
+      spillBytesBefore);
+
+  auto countSpillFiles = [&]() {
+    return std::count_if(
+        std::filesystem::recursive_directory_iterator(localDir),
+        std::filesystem::recursive_directory_iterator(),
+        [](const auto& entry) { return entry.is_regular_file(); });
+  };
+  const auto spillFiles = countSpillFiles();
+  ASSERT_TRUE(writer->split(columnar, kMemoryLimit).ok());
+  EXPECT_GT(countSpillFiles(), spillFiles);
+  EXPECT_EQ(
+      bytedance::bolt::memory::spillMemoryPool()->stats().currentBytes,
+      spillBytesBefore);
+  ASSERT_TRUE(writer->stop().ok());
+}
+
 TEST_F(ShuffleMemoryTest, testRowBasedReclaimViaMemoryPressure) {
   using namespace bytedance::bolt::exec::test;
 
@@ -482,7 +619,8 @@ TEST_F(ShuffleMemoryTest, testRowBasedReclaimViaMemoryPressure) {
 }
 
 ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
-    int32_t writerType) {
+    int32_t writerType,
+    int32_t compressionThreshold) {
   using namespace bytedance::bolt::exec::test;
 
   constexpr int32_t kNumPartitions = 256;
@@ -536,6 +674,8 @@ ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
       tempDir->path + "/shuffle_data.bin";
   writerOptions.partitionWriterOptions.configuredDirs = {localDir};
   writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.partitionWriterOptions.compressionThreshold =
+      compressionThreshold;
   writerOptions.shuffleBatchSize = 128 * 1024 * 1024;
   writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
 
@@ -578,6 +718,14 @@ ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(
 TEST_F(ShuffleMemoryTest, testMinMemLimitAvoidsSpillingEveryBatch) {
   expectWellCompressed(
       runReclaimableHogScenario(static_cast<int32_t>(ShuffleWriterType::V2)));
+}
+
+// With shuffle offload, V1 keeps retained payloads in task-accounted memory so
+// pressure triggers reclamation instead of draining them after every batch.
+TEST_F(ShuffleMemoryTest, testV1KeepsLargeSplitsUnderMemoryPressure) {
+  expectWellCompressed(runReclaimableHogScenario(
+      static_cast<int32_t>(ShuffleWriterType::V1),
+      /*compressionThreshold=*/1));
 }
 
 // The row-based writer spills via pool reservation failure (which triggers
