@@ -471,7 +471,7 @@ void ShuffleMemoryTest::verifyRetainedPayloadPool() {
       writer->reclaimFixedSize(std::numeric_limits<int64_t>::max(), &reclaimed)
           .ok());
   EXPECT_GT(reclaimed, 0);
-  EXPECT_EQ(writer->cachedPayloadSize(), 0);
+  EXPECT_LT(writer->cachedPayloadSize(), cachedPayloadSize);
   ASSERT_TRUE(writer->stop().ok());
 }
 

@@ -98,7 +98,11 @@ class PartitionWriter {
       bool hasComplexType) = 0;
 
   uint64_t cachedPayloadSize() {
-    return retainedPayloadPool()->bytes_allocated();
+    auto bytes = payloadPool_->bytes_allocated();
+    if (retainedPayloadPool_) {
+      bytes += retainedPayloadPool_->bytes_allocated();
+    }
+    return bytes;
   }
 
   // for V2
