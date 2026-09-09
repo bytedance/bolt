@@ -857,14 +857,14 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
   int64_t reclaimed = 0;
   // Reclaim memory from payloadCache.
   if (payloadCache_ && payloadCache_->canSpill()) {
-    auto beforeSpill = retainedPayloadPool()->bytes_allocated();
+    const auto beforeSpill = static_cast<int64_t>(cachedPayloadSize());
     ARROW_ASSIGN_OR_RAISE(
         auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
     spills_.emplace_back();
     ARROW_ASSIGN_OR_RAISE(
         spills_.back(),
         payloadCache_->spill(spillFile, payloadPool_.get(), codec_.get()));
-    reclaimed += beforeSpill - retainedPayloadPool()->bytes_allocated();
+    reclaimed += beforeSpill - static_cast<int64_t>(cachedPayloadSize());
     if (reclaimed >= size) {
       *actual = reclaimed;
       return arrow::Status::OK();
@@ -872,7 +872,7 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
   }
   // Then spill payloads from merger. Create uncompressed payloads.
   if (merger_) {
-    auto beforeSpill = retainedPayloadPool()->bytes_allocated();
+    const auto beforeSpill = static_cast<int64_t>(cachedPayloadSize());
     for (auto pid = 0; pid < numPartitions_; ++pid) {
       ARROW_ASSIGN_OR_RAISE(auto merged, merger_->finishForSpill(pid));
       if (merged.has_value()) {
@@ -883,7 +883,7 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
     // This is not accurate. When the evicted partition buffers are not copied,
     // the merged ones are resized from the original buffers thus allocated from
     // partitionBufferPool.
-    reclaimed += beforeSpill - retainedPayloadPool()->bytes_allocated();
+    reclaimed += beforeSpill - static_cast<int64_t>(cachedPayloadSize());
     RETURN_NOT_OK(finishSpill());
   }
   *actual = reclaimed;
