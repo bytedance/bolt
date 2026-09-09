@@ -1,4 +1,4 @@
-conan==2.22.2
+conan==2.32.0
 pydot==2.0.0
 pre-commit==4.5.0
 clang-format==14.0.6

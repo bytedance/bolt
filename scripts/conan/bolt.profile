@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[tool_requires]
-cmake/3.31.10
+[replace_tool_requires]
+cmake/*: cmake/3.31.10

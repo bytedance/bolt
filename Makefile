@@ -119,8 +119,7 @@ endif
 endif
 export BOLT_TEST_LINKAGE
 
-# BOLT_LINKER overrides profile-aware automatic linker selection. An explicitly
-# empty value disables automatic selection.
+# Pass an explicitly selected linker to the Conan recipe.
 ifneq ($(origin BOLT_LINKER), undefined)
 export BOLT_LINKER
 endif
@@ -225,18 +224,9 @@ _conan_prepare:
 	mkdir -p _build/${BUILD_TYPE} && \
 	cd _build/${BUILD_TYPE} && \
 	set -f && \
-	$(PYTHON_EXECUTABLE) ../../scripts/select-conan-linker.py \
-	   --output conan-linker.options -- \
-	   conan profile show \
-	   $(CONAN_HOST_PROFILE_ARGS) \
-	   $(CONAN_BUILD_SETTINGS) \
-	   ${CONAN_OPTIONS} ${CONAN_OVERRIDE} ${CONAN_CONFIG} \
-	   --format=json && \
-	read CONAN_LINKER_OPTIONS < conan-linker.options && \
 	echo " \
 	$(CONAN_HOST_PROFILE_ARGS) \
-	${CONAN_OPTIONS} ${CONAN_OVERRIDE} \
-	$${CONAN_LINKER_OPTIONS}" > new_conan.options && \
+	${CONAN_OPTIONS} ${CONAN_OVERRIDE}" > new_conan.options && \
 	set -x && \
 	if [ -f conan.options ] && [ -f ../.build_type ] && cmp -s new_conan.options conan.options && [ "`cat ../.build_type`" = "${BUILD_TYPE}" ]; then \
 	  echo "Conan options and build type unchanged; preserving CMakeCache.txt"; \
