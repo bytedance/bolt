@@ -821,7 +821,7 @@ arrow::Status LocalPartitionWriter::evict(
   }
 
   if (!merger_) {
-    if (retainedPayloadBoltPool_ && !hasComplexType) {
+    if (retainedPayloadBoltPool_) {
       retainedPayloadPool_ =
           std::make_unique<BoltArrowMemoryPool>(retainedPayloadBoltPool_);
     }
