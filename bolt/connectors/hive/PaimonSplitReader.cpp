@@ -111,7 +111,11 @@ PaimonRowIteratorPtr PaimonSplitReader::getIterator(SplitReader* rowReader) {
   VectorPtr result =
       BaseVector::create(readerOutputType_, 0, rowReader->pool());
 
-  if (rowReader->next(paimon::kMAX_BATCH_SIZE, result)) {
+  while (rowReader->next(paimon::kMAX_BATCH_SIZE, result)) {
+    // next() reports scanned rows, even if all rows are filtered out.
+    if (result->size() == 0) {
+      continue;
+    }
     RowVectorPtr resultAsRowVect = std::static_pointer_cast<RowVector>(result);
     resultAsRowVect->loadedVector();
     auto primaryKeys = projectVector(resultAsRowVect, primaryKeyIndices_);
@@ -148,9 +152,8 @@ PaimonRowIteratorPtr PaimonSplitReader::getIterator(SplitReader* rowReader) {
         values,
         sequenceGroups,
         rowReader);
-  } else {
-    return nullptr;
   }
+  return nullptr;
 }
 
 PaimonMergeEngineType PaimonSplitReader::getMergeEngineType() {
