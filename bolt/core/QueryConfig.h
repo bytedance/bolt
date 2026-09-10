@@ -455,6 +455,9 @@ class QueryConfig {
   static constexpr const char* kSparkMapKeyDedupPolicy =
       "spark.mapKeyDedupPolicy";
 
+  /// If true, Spark functions follow Spark ANSI mode behavior.
+  static constexpr const char* kSparkAnsiEnabled = "spark.sql.ansi.enabled";
+
   /// The current spark partition id.
   static constexpr const char* kSparkPartitionId = "spark.partition_id";
 
@@ -1428,6 +1431,10 @@ class QueryConfig {
       c = std::toupper(static_cast<unsigned char>(c));
     }
     return res;
+  }
+
+  bool sparkAnsiEnabled() const {
+    return get<bool>(kSparkAnsiEnabled, false);
   }
 
   int32_t sparkPartitionId() const {
