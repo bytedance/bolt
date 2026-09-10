@@ -19,8 +19,9 @@ on:
         default: ''
 
 env:
-  GLUTEN_REPO: ${{ inputs.gluten_repo || 'taiyang-li/incubator-gluten' }}
-  GLUTEN_REF: ${{ inputs.gluten_ref || 'add_bolt_backend_new' }}
+  # The Bolt backend (backends-bolt / cpp/bolt) lives in upstream Gluten main.
+  GLUTEN_REPO: ${{ inputs.gluten_repo || 'apache/incubator-gluten' }}
+  GLUTEN_REF: ${{ inputs.gluten_ref || 'main' }}
   # Matches build-test.yml — ccache + conan cache live under /data on the host.
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
@@ -86,13 +87,19 @@ jobs:
         run: make release
 
       - name: Build gluten-arrow if jars missing or patches changed
+        # dev/build_bolt_arrow.sh builds the arrow Java/JNI jars from the arrow
+        # source that bolt's conan build left in the cache, i.e. the source as
+        # patched by the arrow recipe in bytedance/conan-center-index (checked
+        # out by scripts/install-bolt-deps.sh). Key the cache on that recipe +
+        # the build script so a recipe/patch bump triggers a rebuild.
         working-directory: ${{ github.workspace }}/gluten
         run: |
           ARROW_DIR=/root/.m2/repository/org/apache/arrow
           STAMP=$ARROW_DIR/.gluten-15.0.0.stamp
-          KEY=$(sha256sum ep/build-velox/src/modify_arrow*.patch \
-                          ep/build-velox/src/cmake-compatibility.patch \
-                          dev/build_bolt_arrow.sh 2>/dev/null \
+          CCI_ARROW=${CONAN_HOME:-$HOME/.conan2}/conan-center-index/recipes/arrow/all
+          KEY=$(cat dev/build_bolt_arrow.sh \
+                    "$CCI_ARROW/conanfile.py" "$CCI_ARROW/conandata.yml" \
+                    "$CCI_ARROW"/patches/15.* \
                 | sha256sum | cut -d' ' -f1)
           mkdir -p "$ARROW_DIR"
           (
