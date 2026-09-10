@@ -323,6 +323,17 @@ struct Converter<
   struct LimitType {
     static constexpr bool kByteOrSmallInt =
         std::is_same_v<T, int8_t> || std::is_same_v<T, int16_t>;
+    using FirstStageType = std::conditional_t<kByteOrSmallInt, int32_t, T>;
+
+    template <typename FP>
+    static bool isPositiveOverflow(const FP& value) {
+      // Integer max may round up to the first out-of-range value when it is
+      // converted to FP. The negative minimum is a power of two, so its
+      // negation gives an exact exclusive upper bound.
+      return value >=
+          -static_cast<FP>(std::numeric_limits<FirstStageType>::min());
+    }
+
     static int64_t minLimit() {
       if (kByteOrSmallInt) {
         return std::numeric_limits<int32_t>::min();
@@ -363,7 +374,7 @@ struct Converter<
       }
       if constexpr (std::is_same_v<T, int128_t>) {
         return std::numeric_limits<int128_t>::max();
-      } else if (v > LimitType::maxLimit()) {
+      } else if (LimitType::isPositiveOverflow(v)) {
         return LimitType::max();
       }
       if constexpr (std::is_same_v<T, int128_t>) {
@@ -392,7 +403,7 @@ struct Converter<
       }
       if constexpr (std::is_same_v<T, int128_t>) {
         return std::numeric_limits<int128_t>::max();
-      } else if (v > LimitType::maxLimit()) {
+      } else if (LimitType::isPositiveOverflow(v)) {
         return LimitType::max();
       }
       if constexpr (std::is_same_v<T, int128_t>) {

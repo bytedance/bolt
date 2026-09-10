@@ -369,6 +369,12 @@ TEST_F(ConversionsTest, toIntegeralTypes) {
             12345,
         },
         /*truncate*/ true);
+    testConversion<double, int64_t>(
+        {0x1.fffffffffffffp62, 0x1p63, -0x1p63},
+        {9'223'372'036'854'774'784LL,
+         std::numeric_limits<int64_t>::max(),
+         std::numeric_limits<int64_t>::min()},
+        /*truncate*/ true);
     testConversion<double, int32_t>(
         {
             1.888,
@@ -385,6 +391,16 @@ TEST_F(ConversionsTest, toIntegeralTypes) {
             -100,
         },
         /*truncate*/ true);
+    testConversion<double, int32_t>(
+        {0x1.fffffffffffffp30, 0x1p31, -0x1p31},
+        {std::numeric_limits<int32_t>::max(),
+         std::numeric_limits<int32_t>::max(),
+         std::numeric_limits<int32_t>::min()},
+        /*truncate*/ true);
+    testConversion<double, int16_t>(
+        {0x1.fffffffffffffp30, 0x1p31, -0x1p31},
+        {-1, -1, 0},
+        /*truncate*/ true);
     testConversion<double, int8_t>(
         {
             12345.67,
@@ -396,6 +412,10 @@ TEST_F(ConversionsTest, toIntegeralTypes) {
             -57,
             127,
         },
+        /*truncate*/ true);
+    testConversion<double, int8_t>(
+        {0x1.fffffffffffffp30, 0x1p31, -0x1p31},
+        {-1, -1, 0},
         /*truncate*/ true);
     testConversion<double, int8_t>(
         {
@@ -440,9 +460,27 @@ TEST_F(ConversionsTest, toIntegeralTypes) {
     // When TRUNCATE = true.
     testConversion<float, int64_t>(
         {kInf, kNan}, {9223372036854775807, 0}, /*truncate*/ true);
-    testConversion<float, int32_t>({kNan}, {0}, /*truncate*/ true);
-    testConversion<float, int16_t>({kNan}, {0}, /*truncate*/ true);
-    testConversion<float, int8_t>({kNan}, {0}, /*truncate*/ true);
+    testConversion<float, int64_t>(
+        {0x1.fffffep62f, 0x1p63f, -0x1p63f},
+        {9'223'371'487'098'961'920LL,
+         std::numeric_limits<int64_t>::max(),
+         std::numeric_limits<int64_t>::min()},
+        /*truncate*/ true);
+    testConversion<float, int32_t>(
+        {kNan, 0x1.fffffep30f, 0x1p31f, -0x1p31f},
+        {0,
+         2'147'483'520,
+         std::numeric_limits<int32_t>::max(),
+         std::numeric_limits<int32_t>::min()},
+        /*truncate*/ true);
+    testConversion<float, int16_t>(
+        {kNan, 0x1.fffffep30f, 0x1p31f, -0x1p31f},
+        {0, -128, -1, 0},
+        /*truncate*/ true);
+    testConversion<float, int8_t>(
+        {kNan, 0x1.fffffep30f, 0x1p31f, -0x1p31f},
+        {0, -128, -1, 0},
+        /*truncate*/ true);
   }
 
   // From string.
