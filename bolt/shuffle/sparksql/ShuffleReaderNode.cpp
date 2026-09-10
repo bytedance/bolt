@@ -50,6 +50,8 @@ SparkShuffleReader::SparkShuffleReader(
           outputType_,
           pool(),
           shuffleReaderOptions_.rowFormat)) {
+  VLOG(1) << "Spark shuffle reader options: "
+          << shuffleReaderOptions_.toString();
   isValidityBuffer_.reserve(outputType_->size());
   for (size_t i = 0; i < outputType_->size(); ++i) {
     switch (outputType_->childAt(i)->kind()) {
