@@ -673,7 +673,6 @@ void RowVector::unsafeResize(vector_size_t newSize, bool setNotNull) {
 }
 
 void RowVector::resize(vector_size_t newSize, bool setNotNull) {
-  const auto oldSize = size();
   BaseVector::resize(newSize, setNotNull);
 
   // Resize all the children.
@@ -686,7 +685,8 @@ void RowVector::resize(vector_size_t newSize, bool setNotNull) {
       // If we are just reducing the size of the vector, its safe
       // to skip uniqueness check since effectively we are just changing
       // the length.
-      if (newSize > oldSize) {
+      const auto oldChildSize = child->size();
+      if (newSize > oldChildSize) {
         BOLT_CHECK(child.use_count() == 1, "Resizing shared child vector");
         child->resize(newSize, setNotNull);
       }
