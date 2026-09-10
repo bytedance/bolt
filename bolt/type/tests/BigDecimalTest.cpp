@@ -98,6 +98,33 @@ TEST(BigDecimalTest, setScale) {
   }
 }
 
+TEST(BigDecimalTest, setScaleHalfEven) {
+  // (input, newScale, expected). All ties except the last two.
+  std::vector<std::tuple<double, int, double>> testData = {
+      {2.5, 0, 2.0},
+      {3.5, 0, 4.0},
+      {-2.5, 0, -2.0},
+      {-3.5, 0, -4.0},
+      {0.125, 2, 0.12},
+      {0.135, 2, 0.14},
+      {2.675, 2, 2.68},
+      {1250.0, -2, 1200.0},
+      {1350.0, -2, 1400.0},
+      {2.674, 2, 2.67},
+      {2.676, 2, 2.68}};
+  for (const auto& data : testData) {
+    BigDecimal decimal(std::get<0>(data));
+    decimal.setScale(std::get<1>(data), BigDecimal::RoundingMode::kHalfEven);
+    EXPECT_EQ(decimal.getScale(), std::get<1>(data));
+    EXPECT_EQ(decimal.doubleValue(), std::get<2>(data));
+  }
+
+  // The default mode is still HALF_UP.
+  BigDecimal decimal(2.5);
+  decimal.setScale(0);
+  EXPECT_EQ(decimal.doubleValue(), 3.0);
+}
+
 } // namespace
 
 } // namespace bytedance::bolt
