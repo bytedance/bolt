@@ -193,6 +193,9 @@ done < <(cut -f1 "$SUITE_MAP" | sort -u)
 
 export MVN_BIN GLUTEN_HOME SPARK_HOME LOG_DIR WORK_ROOT REPORTS_ROOT
 export MVN_PROFILES MVN_AM
+# Same as gluten's own UT jobs (velox_backend_x86.yml) and `make test_spark35`:
+# Utils.isTesting must be true, e.g. HiveClientImpl.runSqlHive asserts on it.
+export SPARK_TESTING=true
 
 run_one_suite() {
   local module="$1" suite="$2"
