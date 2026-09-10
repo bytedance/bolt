@@ -2977,8 +2977,13 @@ TEST_F(TestReader, readBigintAsVarcharWithValueHook) {
   auto [writer, reader] = createWriterReader({data}, pool());
   auto requestedSchema = ROW({VARCHAR()});
 
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addAllChildFields(*requestedSchema);
+  scanSpec->childByName("c0")->setProjectOut(true);
+
   RowReaderOptions options;
   options.select(std::make_shared<ColumnSelector>(requestedSchema));
+  options.setScanSpec(scanSpec);
   auto rowReader = reader->createRowReader(options);
   VectorPtr result = BaseVector::create(requestedSchema, 0, pool());
   ASSERT_EQ(rowReader->next(1024, result), 3);
