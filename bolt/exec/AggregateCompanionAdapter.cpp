@@ -397,7 +397,7 @@ bool CompanionFunctionsRegistrar::registerMergeExtractFunctionWithSuffix(
               const auto& [originalResultType, _] =
                   resolveAggregateFunction(mergeExtractFunctionName, argTypes);
               if (!originalResultType) {
-                // TODO: limitation -- result type must be resolveable given
+                // TODO: limitation -- result type must be resolvable given
                 // intermediate type of the original UDAF.
                 BOLT_UNREACHABLE(
                     "Signatures whose result types are not resolvable given intermediate types should have been excluded.");
@@ -504,7 +504,7 @@ bool CompanionFunctionsRegistrar::registerExtractFunctionWithSuffix(
 
       auto resultType = resolveVectorFunction(name, argTypes);
       if (!resultType) {
-        // TODO: limitation -- result type must be resolveable given
+        // TODO: limitation -- result type must be resolvable given
         // intermediate type of the original UDAF.
         BOLT_UNREACHABLE(
             "Signatures whose result types are not resolvable given intermediate types should have been excluded.");
@@ -561,7 +561,7 @@ bool CompanionFunctionsRegistrar::registerExtractFunction(
 
     auto resultType = resolveVectorFunction(name, argTypes);
     if (!resultType) {
-      // TODO: limitation -- result type must be resolveable given
+      // TODO: limitation -- result type must be resolvable given
       // intermediate type of the original UDAF.
       BOLT_UNREACHABLE(
           "Signatures whose result types are not resolvable given intermediate types should have been excluded.");

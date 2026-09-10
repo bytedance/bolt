@@ -340,7 +340,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
   auto groupingKeysWithPartialKey = groupingKeys;
   groupingKeysWithPartialKey.push_back("k0");
 
-  std::vector<std::string> paritialAggregates;
+  std::vector<std::string> partialAggregates;
   std::vector<std::string> mergeAggregates;
   std::vector<std::string> extractExpressions;
   extractExpressions.insert(
@@ -352,14 +352,14 @@ void AggregationTestBase::testAggregationsWithCompanion(
         exec::getCompanionFunctionSignatures(functionNames[i]);
     BOLT_CHECK(companionSignatures.has_value());
 
-    const auto& [paritialAggregate, mergeAggregate, extractAggregate] =
+    const auto& [partialAggregate, mergeAggregate, extractAggregate] =
         getCompanionAggregates(
             i,
             *companionSignatures,
             functionNames[i],
             aggregateArgs[i],
             aggregatesArgTypes[i]);
-    paritialAggregates.push_back(paritialAggregate);
+    partialAggregates.push_back(partialAggregate);
     mergeAggregates.push_back(mergeAggregate);
     extractExpressions.push_back(extractAggregate);
   }
@@ -369,7 +369,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
     PlanBuilder builder(pool());
     builder.values(dataWithExtraGroupingKey);
     preAggregationProcessing(builder);
-    builder.partialAggregation(groupingKeysWithPartialKey, paritialAggregates)
+    builder.partialAggregation(groupingKeysWithPartialKey, partialAggregates)
         .finalAggregation()
         .partialAggregation(groupingKeys, mergeAggregates)
         .finalAggregation()
@@ -394,7 +394,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
     // repartitioning to split input into multiple batches.
     core::PlanNodeId partialNodeId;
     builder.localPartitionRoundRobinRow()
-        .partialAggregation(groupingKeysWithPartialKey, paritialAggregates)
+        .partialAggregation(groupingKeysWithPartialKey, partialAggregates)
         .capturePlanNodeId(partialNodeId)
         .localPartition(groupingKeysWithPartialKey)
         .finalAggregation()
@@ -434,7 +434,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
     PlanBuilder builder(pool());
     builder.values(dataWithExtraGroupingKey);
     preAggregationProcessing(builder);
-    builder.singleAggregation(groupingKeysWithPartialKey, paritialAggregates)
+    builder.singleAggregation(groupingKeysWithPartialKey, partialAggregates)
         .singleAggregation(groupingKeys, mergeAggregates)
         .project(extractExpressions);
 
@@ -452,7 +452,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
     PlanBuilder builder(pool());
     builder.values(dataWithExtraGroupingKey);
     preAggregationProcessing(builder);
-    builder.partialAggregation(groupingKeysWithPartialKey, paritialAggregates)
+    builder.partialAggregation(groupingKeysWithPartialKey, partialAggregates)
         .intermediateAggregation()
         .finalAggregation()
         .partialAggregation(groupingKeys, mergeAggregates)
@@ -474,7 +474,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
     PlanBuilder builder(pool());
     builder.values(dataWithExtraGroupingKey);
     preAggregationProcessing(builder);
-    builder.partialAggregation(groupingKeysWithPartialKey, paritialAggregates)
+    builder.partialAggregation(groupingKeysWithPartialKey, partialAggregates)
         .localPartition(groupingKeysWithPartialKey)
         .finalAggregation()
         .partialAggregation(groupingKeys, mergeAggregates)
@@ -497,7 +497,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
     PlanBuilder builder(pool());
     builder.values(dataWithExtraGroupingKey);
     preAggregationProcessing(builder);
-    builder.partialAggregation(groupingKeysWithPartialKey, paritialAggregates)
+    builder.partialAggregation(groupingKeysWithPartialKey, partialAggregates)
         .localPartition(groupingKeysWithPartialKey)
         .intermediateAggregation()
         .localPartition(groupingKeysWithPartialKey)
@@ -530,7 +530,7 @@ void AggregationTestBase::testAggregationsWithCompanion(
       SCOPED_TRACE("Streaming partial");
       auto partialResult = validateStreamingInTestAggregations(
           [&](auto& builder) { builder.values(dataWithExtraGroupingKey); },
-          paritialAggregates,
+          partialAggregates,
           config);
 
       validateStreamingInTestAggregations(
