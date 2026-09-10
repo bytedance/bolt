@@ -33,6 +33,7 @@
 #include <fmt/format.h>
 
 #include "bolt/dwio/common/exception/Exception.h"
+#include "bolt/functions/lib/string/StringImpl.h"
 namespace bytedance::bolt::dwrf {
 
 using dwio::common::ColumnStatistics;
@@ -352,7 +353,7 @@ std::shared_ptr<const Type> ReaderBase::convertType(
             footer, type.subtypes(i), fileColumnNamesReadAsLowerCase);
         auto childName = type.fieldNames(i);
         if (fileColumnNamesReadAsLowerCase) {
-          folly::toLowerAscii(childName);
+          childName = functions::stringImpl::utf8StrToLowerCopy(childName);
         }
         names.push_back(std::move(childName));
         tl.push_back(std::move(child));

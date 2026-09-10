@@ -48,6 +48,7 @@
 #include "bolt/dwio/parquet/thrift/ThriftInternal.h"
 #include "bolt/dwio/parquet/thrift/ThriftTransport.h"
 #include "bolt/dwio/parquet/thrift/codegen/parquet_types.h"
+#include "bolt/functions/lib/string/StringImpl.h"
 
 namespace bytedance::bolt::parquet {
 
@@ -554,7 +555,7 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
 
   auto name = schemaElement.name;
   if (isFileColumnNamesReadAsLowerCase()) {
-    folly::toLowerAscii(name);
+    name = functions::stringImpl::utf8StrToLowerCopy(name);
   }
   if (!schemaElement.__isset.type) { // inner node
     BOLT_CHECK(
@@ -571,7 +572,7 @@ std::shared_ptr<const ParquetTypeWithId> ReaderBase::getParquetColumnInfo(
       ++schemaIdx;
       auto childName = schema[schemaIdx].name;
       if (isFileColumnNamesReadAsLowerCase()) {
-        folly::toLowerAscii(childName);
+        childName = functions::stringImpl::utf8StrToLowerCopy(childName);
       }
 
       TypePtr childRequestedType = nullptr;
@@ -1335,7 +1336,7 @@ std::shared_ptr<const RowType> ReaderBase::createRowType(
     auto childName =
         std::static_pointer_cast<const ParquetTypeWithId>(child)->name_;
     if (fileColumnNamesReadAsLowerCase) {
-      folly::toLowerAscii(childName);
+      childName = functions::stringImpl::utf8StrToLowerCopy(childName);
     }
     childNames.push_back(std::move(childName));
     childTypes.push_back(child->type());
