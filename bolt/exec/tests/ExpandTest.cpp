@@ -130,6 +130,30 @@ TEST_F(ExpandTest, rollup) {
       "SELECT k1, k2, count(1), sum(a), max(b) FROM tmp GROUP BY ROLLUP (k1, k2)");
 }
 
+TEST_F(ExpandTest, rollupOptimized) {
+  auto data = makeRowVectorData(1'000);
+
+  createDuckDbTable({data});
+
+  // Rollup.
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .expand(
+              {{"k1 as foo", "k2", "a", "b", "0 as gid"},
+               {"k1", "null", "a", "b", "1"},
+               {"null", "null", "a", "b", "3"}})
+          .singleAggregation(
+              {"foo", "k2", "gid"},
+              {"count(1) as count_1", "sum(a) as sum_a", "max(b) as max_b"})
+          .project({"foo", "k2", "count_1", "sum_a", "max_b"})
+          .planNode();
+
+  assertQuery(
+      plan,
+      "SELECT k1, k2, count(1), sum(a), max(b) FROM tmp GROUP BY ROLLUP (k1, k2)");
+}
+
 TEST_F(ExpandTest, countDistinct) {
   auto data = makeRowVectorData(1'000);
 
