@@ -1205,6 +1205,7 @@ void Expr::evalWithMemo(
 
   if (baseOfDictionaryRepeats_ == 1) {
     evalWithNulls(rows, context, result);
+    context.exprSet()->addToMemo(this);
     baseOfDictionary_ = base;
     dictionaryCache_ = result;
     dictionaryCacheSize_ = dictionaryCache_->retainedSize();
