@@ -36,6 +36,7 @@ bolt_add_library(
   SelectivityVector.cpp
   SequenceVector.cpp
   SimpleVector.cpp
+  Utf8Utils.cpp
   VariantToVector.cpp
   VariantVector.cpp
   VectorEncoding.cpp
