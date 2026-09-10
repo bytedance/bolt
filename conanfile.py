@@ -329,6 +329,9 @@ class BoltConan(ConanFile):
                 run=True,
                 options={"shared": test_runtime_shared},
             )
+            glog_options = {"shared": test_runtime_shared}
+            if self.settings.os in ["Linux", "FreeBSD"]:
+                glog_options["with_unwind"] = False
             self.requires(
                 "glog/0.7.1",
                 build=True,
@@ -336,7 +339,7 @@ class BoltConan(ConanFile):
                 headers=True,
                 libs=True,
                 run=True,
-                options={"shared": test_runtime_shared, "with_unwind": False},
+                options=glog_options,
             )
         if not self.conf.get("tools.build:skip_test", default=True):
             self.test_requires("jemalloc/5.3.0")
@@ -349,7 +352,8 @@ class BoltConan(ConanFile):
 
     # Set default options of third parties here
     def configure(self):
-        self.options[glog].with_unwind = False
+        if self.settings.os in ["Linux", "FreeBSD"]:
+            self.options[glog].with_unwind = False
         if self.options.shared:
             self.options[gflags].shared = True
             self.options[glog].shared = True
