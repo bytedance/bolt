@@ -20,7 +20,6 @@
 #include <gflags/gflags.h>
 #include <time.h>
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -37,8 +36,7 @@
 #include "bolt/exec/SortBuffer.h"
 #include "bolt/exec/Task.h"
 #include "bolt/exec/radixsort/RadixSortBuffer.h"
-#include "bolt/exec/radixsort/RadixSortKey.h"
-#include "bolt/exec/radixsort/RadixSortUtils.h"
+#include "bolt/exec/radixsort/RadixSortRun.h"
 #include "bolt/functions/prestosql/types/HyperLogLogType.h"
 #include "bolt/functions/prestosql/types/JsonType.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -96,15 +94,10 @@ DEFINE_uint32(
     4,
     "In-process repetitions including a warmup.");
 DEFINE_bool(bolt_benchmark_wide_jit, true, "Enable legacy comparator JIT.");
-DEFINE_bool(
-    bolt_benchmark_wide_known_nulls,
-    true,
-    "Pass observed top-level nullability to the decoder.");
-DEFINE_bool(
-    bolt_benchmark_wide_mask_alternate,
-    false,
-    "Skip alternate columns where codec supports selective decode.");
-DEFINE_string(bolt_benchmark_wide_mode, "codec", "codec or buffer.");
+DEFINE_string(
+    bolt_benchmark_wide_mode,
+    "run",
+    "Production in-memory run or complete sort buffer.");
 DEFINE_uint32(
     bolt_benchmark_wide_spill_every,
     0,
@@ -492,116 +485,146 @@ void addStringStorage(const VectorPtr& vector, StringStorage& storage) {
   }
 }
 
-void runCodec(
-    uint32_t trial,
-    const RowTypePtr& type,
+int32_t compareInputRows(
     const std::vector<RowVectorPtr>& inputs,
-    const std::vector<CompareFlags>& flags) {
-  auto root = memory::memoryManager()->addRootPool();
-  auto pool = root->addLeafChild("codec");
-  std::unique_ptr<RadixSortKeyCodec> codec;
-  RadixSortKeyCodec::bind(type->children(), flags, codec);
-  EncodedKeyBatch keys;
-  BufferPtr cursorScratch;
-  RowVectorPtr output;
-  uint64_t encodeUs = 0;
-  uint64_t decodeUs = 0;
-  uint64_t encodeAllocs = 0;
-  uint64_t decodeAllocs = 0;
-  uint64_t encodedBytes = 0;
-  StringStorage strings;
-  for (const auto& input : inputs) {
-    auto before = pool->stats().numAllocs;
-    auto start = cpuUs();
-    codec->encode(*input, pool.get(), keys);
-    encodeUs += cpuUs() - start;
-    encodeAllocs += pool->stats().numAllocs - before;
-
-    std::vector<std::array<char, sizeof(uint64_t)>> fixed;
-    std::vector<EncodedKeyView> views(input->size());
-    if (keys.format() == EncodedKeyFormat::kFixed64) {
-      fixed.resize(input->size());
-      for (vector_size_t row = 0; row < input->size(); ++row) {
-        storeUnaligned<uint64_t>(
-            fixed[row].data(), toBigEndian(keys.fixedKeyAt(row)));
-        views[row] = {std::string_view(fixed[row].data(), sizeof(uint64_t))};
-      }
-      encodedBytes += input->size() * sizeof(uint64_t);
-    } else {
-      for (vector_size_t row = 0; row < input->size(); ++row) {
-        views[row] = {keys.variableKeyAt(row)};
-        encodedBytes += views[row].bytes.size();
-      }
-    }
-    before = pool->stats().numAllocs;
-    std::vector<uint8_t> decodedColumns;
-    if (FLAGS_bolt_benchmark_wide_mask_alternate) {
-      decodedColumns.resize(type->size());
-      for (uint32_t column = 0; column < type->size(); ++column)
-        decodedColumns[column] = column % 2 == 0;
-    }
-    std::vector<uint8_t> mayHaveNulls;
-    if (FLAGS_bolt_benchmark_wide_known_nulls) {
-      for (const auto& child : input->children())
-        mayHaveNulls.push_back(child->mayHaveNulls());
-    }
-    start = cpuUs();
-    codec->decode(
-        views, decodedColumns, mayHaveNulls, pool.get(), cursorScratch, output);
-    decodeUs += cpuUs() - start;
-    decodeAllocs += pool->stats().numAllocs - before;
-    addStringStorage(output, strings);
-    if (FLAGS_bolt_benchmark_wide_verify) {
-      for (column_index_t column = 0; column < type->size(); ++column) {
-        if (output->childAt(column) == nullptr)
-          continue;
-        for (vector_size_t row = 0; row < input->size(); ++row) {
-          BOLT_CHECK(
-              output->childAt(column)->equalValueAt(
-                  input->childAt(column).get(), row, row),
-              "Codec mismatch column {} row {}",
-              column,
-              row);
-        }
-      }
-      auto compareRows = [&](vector_size_t left, vector_size_t right) {
-        for (column_index_t column = 0; column < type->size(); ++column) {
-          const auto result =
-              input->childAt(column)
-                  ->compare(
-                      input->childAt(column).get(), left, right, flags[column])
-                  .value();
-          if (result != 0)
-            return result;
-        }
-        return 0;
-      };
-      for (vector_size_t row = 1; row < input->size(); ++row) {
-        const auto expected = compareRows(row - 1, row);
-        const auto actual = keys.format() == EncodedKeyFormat::kFixed64
-            ? (keys.fixedKeyAt(row - 1) > keys.fixedKeyAt(row)) -
-                (keys.fixedKeyAt(row - 1) < keys.fixedKeyAt(row))
-            : views[row - 1].bytes.compare(views[row].bytes);
-        BOLT_CHECK_EQ(
-            (actual > 0) - (actual < 0), (expected > 0) - (expected < 0));
-      }
+    const std::vector<CompareFlags>& flags,
+    uint64_t left,
+    uint64_t right) {
+  const auto& leftInput = inputs[left / FLAGS_bolt_benchmark_wide_batch];
+  const auto& rightInput = inputs[right / FLAGS_bolt_benchmark_wide_batch];
+  for (column_index_t column = 0; column < flags.size(); ++column) {
+    const auto result = leftInput->childAt(column)
+                            ->compare(
+                                rightInput->childAt(column).get(),
+                                left % FLAGS_bolt_benchmark_wide_batch,
+                                right % FLAGS_bolt_benchmark_wide_batch,
+                                flags[column])
+                            .value();
+    if (result != 0) {
+      return result;
     }
   }
+  return 0;
+}
+
+void runRadixRun(
+    uint32_t trial,
+    const RowTypePtr& keyType,
+    const RowTypePtr& outputType,
+    const std::vector<RowVectorPtr>& sourceInputs,
+    const std::vector<RowVectorPtr>& inputs,
+    const std::vector<CompareFlags>& flags,
+    const std::vector<column_index_t>& channels) {
+  auto root = memory::memoryManager()->addRootPool();
+  auto pool = root->addLeafChild("radix-run");
+
+  const auto before = pool->stats();
+  auto start = cpuUs();
+  auto run = RadixSortRun::create(
+      pool.get(), outputType, keyType, flags, channels, RadixSortRunOptions{});
+  const auto createUs = cpuUs() - start;
+  const auto afterCreate = pool->stats();
+
+  start = cpuUs();
+  for (const auto& input : inputs) {
+    run->append(*input);
+  }
+  const auto appendUs = cpuUs() - start;
+  const auto afterAppend = pool->stats();
+  const auto retainedBytes = run->retainedBytes();
+  const auto estimatedOutputBytes = run->estimatedOutputBytes();
+
+  start = cpuUs();
+  run->finalize();
+  const auto finalizeUs = cpuUs() - start;
+  const auto afterFinalize = pool->stats();
+
+  uint64_t outputUs = 0;
+  uint64_t rows = 0;
+  uint64_t previousRowId = 0;
+  bool hasPreviousRow = false;
+  std::vector<uint8_t> seen;
+  if (FLAGS_bolt_benchmark_wide_verify) {
+    seen.resize(FLAGS_bolt_benchmark_wide_rows, 0);
+  }
+  StringStorage strings;
+  RowVectorPtr output;
+  while (true) {
+    start = cpuUs();
+    auto result =
+        run->getOutput(FLAGS_bolt_benchmark_wide_output, pool.get(), output);
+    outputUs += cpuUs() - start;
+    if (result == nullptr) {
+      break;
+    }
+    addStringStorage(result, strings);
+    if (FLAGS_bolt_benchmark_wide_verify) {
+      auto* rowIds =
+          result->childAt(keyType->size())->as<SimpleVector<int64_t>>();
+      BOLT_CHECK_NOT_NULL(rowIds);
+      for (vector_size_t row = 0; row < result->size(); ++row) {
+        const auto signedRowId = rowIds->valueAt(row);
+        BOLT_CHECK_GE(signedRowId, 0);
+        const auto rowId = static_cast<uint64_t>(signedRowId);
+        BOLT_CHECK_LT(rowId, FLAGS_bolt_benchmark_wide_rows);
+        BOLT_CHECK_EQ(
+            seen[rowId], 0, "Duplicate output row identity {}", rowId);
+        seen[rowId] = 1;
+        if (hasPreviousRow) {
+          BOLT_CHECK_LE(
+              compareInputRows(sourceInputs, flags, previousRowId, rowId),
+              0,
+              "Output order mismatch at row {}",
+              rows + row);
+        }
+        previousRowId = rowId;
+        hasPreviousRow = true;
+        const auto& source =
+            sourceInputs[rowId / FLAGS_bolt_benchmark_wide_batch];
+        const auto sourceRow = rowId % FLAGS_bolt_benchmark_wide_batch;
+        for (column_index_t column = 0; column < keyType->size(); ++column) {
+          BOLT_CHECK(
+              result->childAt(column)->equalValueAt(
+                  source->childAt(column).get(), row, sourceRow),
+              "Output value mismatch at row {} column {} for identity {}",
+              rows + row,
+              column,
+              rowId);
+        }
+      }
+    }
+    rows += result->size();
+  }
+  BOLT_CHECK_EQ(rows, FLAGS_bolt_benchmark_wide_rows);
+  if (FLAGS_bolt_benchmark_wide_verify) {
+    BOLT_CHECK(
+        std::all_of(
+            seen.begin(), seen.end(), [](uint8_t value) { return value != 0; }),
+        "Missing output row identity");
+  }
+  const auto afterOutput = pool->stats();
   std::printf(
-      "RESULT impl=codec trial=%u type=%s columns=%u rows=%u encode=%.3f decode=%.3f "
-      "total=%.3f encodeAllocs=%llu decodeAllocs=%llu peak=%lld encodedBytes=%llu "
+      "RESULT impl=run trial=%u type=%s columns=%u rows=%llu create=%.3f append=%.3f "
+      "finalize=%.3f output=%.3f total=%.3f createAllocs=%llu appendAllocs=%llu "
+      "finalizeAllocs=%llu outputAllocs=%llu peak=%lld retainedBytes=%lld "
+      "estimatedOutputBytes=%llu "
       "stringUsed=%llu stringCapacity=%llu verified=%d\n",
       trial,
       FLAGS_bolt_benchmark_wide_type.c_str(),
       FLAGS_bolt_benchmark_wide_columns,
-      FLAGS_bolt_benchmark_wide_rows,
-      encodeUs / 1000.0,
-      decodeUs / 1000.0,
-      (encodeUs + decodeUs) / 1000.0,
-      (unsigned long long)encodeAllocs,
-      (unsigned long long)decodeAllocs,
-      (long long)pool->peakBytes(),
-      (unsigned long long)encodedBytes,
+      (unsigned long long)rows,
+      createUs / 1000.0,
+      appendUs / 1000.0,
+      finalizeUs / 1000.0,
+      outputUs / 1000.0,
+      (createUs + appendUs + finalizeUs + outputUs) / 1000.0,
+      (unsigned long long)(afterCreate.numAllocs - before.numAllocs),
+      (unsigned long long)(afterAppend.numAllocs - afterCreate.numAllocs),
+      (unsigned long long)(afterFinalize.numAllocs - afterAppend.numAllocs),
+      (unsigned long long)(afterOutput.numAllocs - afterFinalize.numAllocs),
+      (long long)afterOutput.peakBytes,
+      (long long)retainedBytes,
+      (unsigned long long)estimatedOutputBytes,
       (unsigned long long)strings.used,
       (unsigned long long)strings.capacity,
       FLAGS_bolt_benchmark_wide_verify);
@@ -812,9 +835,33 @@ void mainBenchmark() {
     inputs.push_back(std::make_shared<RowVector>(
         source.get(), type, nullptr, count, std::move(children)));
   }
-  if (FLAGS_bolt_benchmark_wide_mode == "codec") {
+  if (FLAGS_bolt_benchmark_wide_mode == "run") {
+    auto outputNames = type->names();
+    outputNames.push_back("__row_id");
+    auto outputTypes = type->children();
+    outputTypes.push_back(BIGINT());
+    const auto outputType = ROW(std::move(outputNames), std::move(outputTypes));
+    std::vector<RowVectorPtr> runInputs;
+    runInputs.reserve(inputs.size());
+    uint64_t offset = 0;
+    for (const auto& input : inputs) {
+      auto children = input->children();
+      auto rowIds = BaseVector::create<FlatVector<int64_t>>(
+          BIGINT(), input->size(), source.get());
+      for (vector_size_t row = 0; row < input->size(); ++row) {
+        rowIds->set(row, offset + row);
+      }
+      children.push_back(std::move(rowIds));
+      runInputs.push_back(std::make_shared<RowVector>(
+          source.get(),
+          outputType,
+          nullptr,
+          input->size(),
+          std::move(children)));
+      offset += input->size();
+    }
     for (uint32_t trial = 0; trial < FLAGS_bolt_benchmark_wide_runs; ++trial) {
-      runCodec(trial, type, inputs, flags);
+      runRadixRun(trial, type, outputType, inputs, runInputs, flags, channels);
     }
     return;
   }

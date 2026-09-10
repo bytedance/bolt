@@ -117,7 +117,6 @@ void buildMetadata(
 
   metadata.type = type;
   metadata.flags = flags;
-  metadata.encodeDecodeSupported = supportsType(*type);
   auto bodySize = fixedBodySize(*type);
   if (bodySize.has_value()) {
     metadata.maximumEncodedSize = *bodySize + 1;
@@ -229,6 +228,54 @@ uint64_t encodeDouble(double value) {
   return (bits & (uint64_t{1} << 63)) == 0 ? bits | (uint64_t{1} << 63) : ~bits;
 }
 
+template <TypeKind KIND>
+FOLLY_ALWAYS_INLINE void encodeFixedScalarValue(
+    typename TypeTraits<KIND>::NativeType value,
+    char* output,
+    bool descending) {
+  using T = typename TypeTraits<KIND>::NativeType;
+  if constexpr (KIND == TypeKind::BOOLEAN) {
+    const auto byte = static_cast<uint8_t>(value);
+    output[0] =
+        static_cast<char>(descending ? static_cast<uint8_t>(~byte) : byte);
+  } else if constexpr (
+      KIND == TypeKind::TINYINT || KIND == TypeKind::SMALLINT ||
+      KIND == TypeKind::INTEGER || KIND == TypeKind::BIGINT) {
+    encodeSignedWord<T>(value, output, descending);
+  } else if constexpr (KIND == TypeKind::HUGEINT) {
+    encodeSignedWord<int64_t>(
+        static_cast<int64_t>(HugeInt::upper(value)), output, descending);
+    encodeUnsignedWord<uint64_t>(
+        HugeInt::lower(value), output + sizeof(int64_t), descending);
+  } else if constexpr (KIND == TypeKind::REAL) {
+    encodeUnsignedWord<uint32_t>(encodeFloat(value), output, descending);
+  } else if constexpr (KIND == TypeKind::DOUBLE) {
+    encodeUnsignedWord<uint64_t>(encodeDouble(value), output, descending);
+  } else if constexpr (KIND == TypeKind::TIMESTAMP) {
+    encodeSignedWord<int64_t>(value.getSeconds(), output, descending);
+    encodeUnsignedWord<uint64_t>(
+        value.getNanos(), output + sizeof(int64_t), descending);
+  } else {
+    BOLT_FAIL(
+        "Fixed radix sort key encoding is not implemented for {}",
+        TypeTraits<KIND>::name);
+  }
+}
+
+template <TypeKind KIND>
+FOLLY_ALWAYS_INLINE uint64_t
+encodeFixed64Value(typename TypeTraits<KIND>::NativeType value) {
+  if constexpr (KIND == TypeKind::BIGINT) {
+    return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
+  } else if constexpr (KIND == TypeKind::DOUBLE) {
+    return encodeDouble(value);
+  } else {
+    BOLT_FAIL(
+        "64-bit radix sort key encoding is not implemented for {}",
+        TypeTraits<KIND>::name);
+  }
+}
+
 template <typename T>
 T valueAt(const BaseVector& vector, vector_size_t row) {
   const auto* base = vector.wrappedVector();
@@ -239,212 +286,6 @@ T valueAt(const BaseVector& vector, vector_size_t row) {
 bool isFixedScalarColumn(const RadixSortKeyColumn& column) {
   return column.type->kind() != TypeKind::UNKNOWN &&
       fixedBodySize(*column.type).has_value();
-}
-
-template <typename T, typename EncodeBody>
-void encodeSingleFixedFlat(
-    const RadixSortKeyColumn& column,
-    const FlatVector<T>& input,
-    vector_size_t size,
-    EncodedKeyFormat format,
-    uint64_t* words,
-    const uint64_t* offsets,
-    char* data,
-    EncodeBody encodeBody) {
-  const auto* nulls = input.rawNulls();
-  const bool descending = !column.flags.ascending;
-
-  if (format == EncodedKeyFormat::kFixed64) {
-    for (vector_size_t row = 0; row < size; ++row) {
-      std::array<char, sizeof(uint64_t)> bytes{};
-      if (nulls != nullptr && bits::isBitNull(nulls, row)) {
-        bytes[0] = static_cast<char>(nullMarker(column.flags));
-      } else {
-        bytes[0] = static_cast<char>(validMarker(column.flags));
-        encodeBody(input, row, bytes.data() + 1, descending);
-      }
-      auto word = loadUnaligned<uint64_t>(bytes.data());
-      if constexpr (std::endian::native == std::endian::little) {
-        word = byteSwap(word);
-      }
-      words[row] = word;
-    }
-    return;
-  }
-
-  for (vector_size_t row = 0; row < size; ++row) {
-    auto* output = data + offsets[row];
-    if (nulls != nullptr && bits::isBitNull(nulls, row)) {
-      output[0] = static_cast<char>(nullMarker(column.flags));
-    } else {
-      output[0] = static_cast<char>(validMarker(column.flags));
-      encodeBody(input, row, output + 1, descending);
-    }
-  }
-}
-
-template <typename T, typename EncodeBody>
-void encodeSingleVariableFixedFlat(
-    const RadixSortKeyColumn& column,
-    const FlatVector<T>& input,
-    vector_size_t size,
-    const uint64_t* offsets,
-    char* data,
-    EncodeBody encodeBody) {
-  const auto* nulls = input.rawNulls();
-  const bool descending = !column.flags.ascending;
-  for (vector_size_t row = 0; row < size; ++row) {
-    auto* output = data + offsets[row];
-    if (nulls != nullptr && bits::isBitNull(nulls, row)) {
-      output[0] = static_cast<char>(nullMarker(column.flags));
-    } else {
-      output[0] = static_cast<char>(validMarker(column.flags));
-      encodeBody(input, row, output + 1, descending);
-    }
-  }
-}
-
-void encodeSingleFixedFlat(
-    const RadixSortKeyColumn& column,
-    const BaseVector& input,
-    vector_size_t size,
-    EncodedKeyFormat format,
-    uint64_t* words,
-    const uint64_t* offsets,
-    char* data) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    const auto* flat = input.asUnchecked<FlatVector<int64_t>>();
-    if (format == EncodedKeyFormat::kVariableBinary) {
-      encodeSingleVariableFixedFlat(
-          column,
-          *flat,
-          size,
-          offsets,
-          data,
-          [](const auto& values, auto row, auto* output, bool descending) {
-            encodeSignedWord<int64_t>(
-                values.rawValues()[row], output, descending);
-          });
-      return;
-    }
-    encodeSingleFixedFlat(
-        column,
-        *flat,
-        size,
-        format,
-        words,
-        offsets,
-        data,
-        [](const auto& values, auto row, auto* output, bool descending) {
-          encodeSigned<int64_t>(values.rawValues()[row], output, descending);
-        });
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    const auto* flat = input.asUnchecked<FlatVector<int128_t>>();
-    encodeSingleFixedFlat(
-        column,
-        *flat,
-        size,
-        format,
-        words,
-        offsets,
-        data,
-        [](const auto& values, auto row, auto* output, bool descending) {
-          const auto value = values.rawValues()[row];
-          encodeSigned<int64_t>(
-              static_cast<int64_t>(HugeInt::upper(value)), output, descending);
-          encodeUnsigned<uint64_t>(
-              HugeInt::lower(value), output + sizeof(int64_t), descending);
-        });
-    return;
-  }
-  if (format == EncodedKeyFormat::kVariableBinary &&
-      column.type->kind() == TypeKind::DOUBLE) {
-    const auto* flat = input.asUnchecked<FlatVector<double>>();
-    encodeSingleVariableFixedFlat(
-        column,
-        *flat,
-        size,
-        offsets,
-        data,
-        [](const auto& values, auto row, auto* output, bool descending) {
-          encodeUnsignedWord<uint64_t>(
-              encodeDouble(values.rawValues()[row]), output, descending);
-        });
-    return;
-  }
-
-#define BOLT_ENCODE_FIXED_FLAT(kind, cppType, expression)                 \
-  case TypeKind::kind: {                                                  \
-    const auto* flat = input.asUnchecked<FlatVector<cppType>>();          \
-    encodeSingleFixedFlat(                                                \
-        column,                                                           \
-        *flat,                                                            \
-        size,                                                             \
-        format,                                                           \
-        words,                                                            \
-        offsets,                                                          \
-        data,                                                             \
-        [](const auto& values, auto row, auto* output, bool descending) { \
-          expression;                                                     \
-        });                                                               \
-    return;                                                               \
-  }
-
-  switch (column.type->kind()) {
-    BOLT_ENCODE_FIXED_FLAT(
-        BOOLEAN,
-        bool,
-        const auto value = static_cast<uint8_t>(values.valueAtFast(row));
-        output[0] = static_cast<char>(
-            descending ? static_cast<uint8_t>(~value) : value))
-    BOLT_ENCODE_FIXED_FLAT(
-        TINYINT,
-        int8_t,
-        encodeSignedWord<int8_t>(values.rawValues()[row], output, descending))
-    BOLT_ENCODE_FIXED_FLAT(
-        SMALLINT,
-        int16_t,
-        encodeSignedWord<int16_t>(values.rawValues()[row], output, descending))
-    BOLT_ENCODE_FIXED_FLAT(
-        INTEGER,
-        int32_t,
-        encodeSignedWord<int32_t>(values.rawValues()[row], output, descending))
-    BOLT_ENCODE_FIXED_FLAT(
-        BIGINT,
-        int64_t,
-        encodeSigned<int64_t>(values.rawValues()[row], output, descending))
-    BOLT_ENCODE_FIXED_FLAT(
-        REAL,
-        float,
-        encodeUnsignedWord<uint32_t>(
-            encodeFloat(values.rawValues()[row]), output, descending))
-    BOLT_ENCODE_FIXED_FLAT(
-        DOUBLE,
-        double,
-        encodeUnsigned<uint64_t>(
-            encodeDouble(values.rawValues()[row]), output, descending))
-    BOLT_ENCODE_FIXED_FLAT(
-        TIMESTAMP, Timestamp, const auto value = values.rawValues()[row];
-        encodeSigned<int64_t>(value.getSeconds(), output, descending);
-        encodeUnsigned<uint64_t>(
-            value.getNanos(), output + sizeof(int64_t), descending))
-    default:
-      BOLT_FAIL(
-          "Single fixed sort key fast path is not implemented for {}",
-          column.type->toString());
-  }
-#undef BOLT_ENCODE_FIXED_FLAT
-}
-
-bool canEncodeSingleFixedFlatVector(
-    const std::vector<RadixSortKeyColumn>& columns,
-    const RowVector& input) {
-  return columns.size() == 1 && input.childAt(0) != nullptr &&
-      input.childAt(0)->encoding() == VectorEncoding::Simple::FLAT &&
-      input.childAt(0)->type()->kind() != TypeKind::UNKNOWN &&
-      fixedBodySize(*input.childAt(0)->type()).has_value();
 }
 
 template <
@@ -633,142 +474,78 @@ void appendSingleFixed64Flat(
   }
 }
 
+template <TypeKind KIND>
+void appendSingleFixedFlatByKind(
+    const RadixSortKeyColumn& column,
+    const BaseVector& input,
+    vector_size_t size,
+    RadixSortRunStorage& arena,
+    std::span<char* const> payloads) {
+  using T = typename TypeTraits<KIND>::NativeType;
+  if constexpr (KIND == TypeKind::BIGINT || KIND == TypeKind::DOUBLE) {
+    appendSingleFixed64Flat(
+        column,
+        *input.asUnchecked<FlatVector<T>>(),
+        size,
+        arena,
+        payloads,
+        [](T value) { return encodeFixed64Value<KIND>(value); });
+  } else if constexpr (
+      KIND == TypeKind::HUGEINT || KIND == TypeKind::TIMESTAMP) {
+    appendSingleFixedFlat<
+        RadixSortKeyLayoutKind::kKeyOnlyFixed24,
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>(
+        column,
+        *input.asUnchecked<FlatVector<T>>(),
+        size,
+        arena,
+        payloads,
+        [](const auto& values, auto row, auto* output, bool descending) {
+          encodeFixedScalarValue<KIND>(
+              values.rawValues()[row], output, descending);
+        });
+  } else if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::REAL) {
+    appendSingleFixedFlat<
+        RadixSortKeyLayoutKind::kKeyOnlyFixed8,
+        RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>(
+        column,
+        *input.asUnchecked<FlatVector<T>>(),
+        size,
+        arena,
+        payloads,
+        [](const auto& values, auto row, auto* output, bool descending) {
+          if constexpr (KIND == TypeKind::BOOLEAN) {
+            encodeFixedScalarValue<KIND>(
+                values.valueAtFast(row), output, descending);
+          } else {
+            encodeFixedScalarValue<KIND>(
+                values.rawValues()[row], output, descending);
+          }
+        });
+  } else {
+    BOLT_FAIL(
+        "Direct fixed sort key encoder is not implemented for {}",
+        column.type->toString());
+  }
+}
+
 void appendSingleFixedFlat(
     const RadixSortKeyColumn& column,
     const BaseVector& input,
     vector_size_t size,
     RadixSortRunStorage& arena,
     std::span<char* const> payloads) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    appendSingleFixed64Flat(
-        column,
-        *input.asUnchecked<FlatVector<int64_t>>(),
-        size,
-        arena,
-        payloads,
-        [](int64_t value) {
-          return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
-        });
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    appendSingleFixedFlat<
-        RadixSortKeyLayoutKind::kKeyOnlyFixed24,
-        RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>(
-        column,
-        *input.asUnchecked<FlatVector<int128_t>>(),
-        size,
-        arena,
-        payloads,
-        [](const auto& values, auto row, auto* output, bool descending) {
-          const auto value = values.rawValues()[row];
-          encodeSignedWord<int64_t>(
-              static_cast<int64_t>(HugeInt::upper(value)), output, descending);
-          encodeUnsignedWord<uint64_t>(
-              HugeInt::lower(value), output + sizeof(int64_t), descending);
-        });
-    return;
-  }
-
-#define BOLT_APPEND_FIXED_FLAT(                                           \
-    kind, cppType, noPayloadKind, payloadKind, expression)                \
-  case TypeKind::kind:                                                    \
-    appendSingleFixedFlat<                                                \
-        RadixSortKeyLayoutKind::noPayloadKind,                            \
-        RadixSortKeyLayoutKind::payloadKind>(                             \
-        column,                                                           \
-        *input.asUnchecked<FlatVector<cppType>>(),                        \
-        size,                                                             \
-        arena,                                                            \
-        payloads,                                                         \
-        [](const auto& values, auto row, auto* output, bool descending) { \
-          expression;                                                     \
-        });                                                               \
-    return;
-
-  switch (column.type->kind()) {
-    BOLT_APPEND_FIXED_FLAT(
-        BOOLEAN,
-        bool,
-        kKeyOnlyFixed8,
-        kKeyWithPayloadFixed16,
-        const auto value = static_cast<uint8_t>(values.valueAtFast(row));
-        output[0] = static_cast<char>(
-            descending ? static_cast<uint8_t>(~value) : value))
-    BOLT_APPEND_FIXED_FLAT(
-        TINYINT,
-        int8_t,
-        kKeyOnlyFixed8,
-        kKeyWithPayloadFixed16,
-        encodeSignedWord<int8_t>(values.rawValues()[row], output, descending))
-    BOLT_APPEND_FIXED_FLAT(
-        SMALLINT,
-        int16_t,
-        kKeyOnlyFixed8,
-        kKeyWithPayloadFixed16,
-        encodeSignedWord<int16_t>(values.rawValues()[row], output, descending))
-    BOLT_APPEND_FIXED_FLAT(
-        INTEGER,
-        int32_t,
-        kKeyOnlyFixed8,
-        kKeyWithPayloadFixed16,
-        encodeSignedWord<int32_t>(values.rawValues()[row], output, descending))
-    case TypeKind::BIGINT:
-      appendSingleFixed64Flat(
-          column,
-          *input.asUnchecked<FlatVector<int64_t>>(),
-          size,
-          arena,
-          payloads,
-          [](int64_t value) {
-            return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
-          });
-      return;
-      BOLT_APPEND_FIXED_FLAT(
-          REAL,
-          float,
-          kKeyOnlyFixed8,
-          kKeyWithPayloadFixed16,
-          encodeUnsignedWord<uint32_t>(
-              encodeFloat(values.rawValues()[row]), output, descending))
-    case TypeKind::DOUBLE:
-      appendSingleFixed64Flat(
-          column,
-          *input.asUnchecked<FlatVector<double>>(),
-          size,
-          arena,
-          payloads,
-          [](double value) { return encodeDouble(value); });
-      return;
-      BOLT_APPEND_FIXED_FLAT(
-          TIMESTAMP,
-          Timestamp,
-          kKeyOnlyFixed24,
-          kKeyWithPayloadFixed24,
-          const auto value = values.rawValues()[row];
-          encodeSignedWord<int64_t>(value.getSeconds(), output, descending);
-          encodeUnsignedWord<uint64_t>(
-              value.getNanos(), output + sizeof(int64_t), descending))
-    default:
-      BOLT_FAIL(
-          "Direct fixed sort key encoder is not implemented for {}",
-          column.type->toString());
-  }
-#undef BOLT_APPEND_FIXED_FLAT
-}
-
-void stringEncodedSize(
-    const BaseVector& vector,
-    vector_size_t row,
-    uint64_t& size) {
-  const auto value = valueAt<StringView>(vector, row);
-  uint64_t escaped = 0;
-  for (uint32_t index = 0; index < value.size(); ++index) {
-    if (static_cast<uint8_t>(value.data()[index]) <= kBlobEscape) {
-      ++escaped;
-    }
-  }
-  size = static_cast<uint64_t>(value.size()) + escaped + 1;
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      appendSingleFixedFlatByKind,
+      column.type->kind(),
+      column,
+      input,
+      size,
+      arena,
+      payloads);
 }
 
 uint64_t encodedStringBodySize(StringView value);
@@ -789,6 +566,17 @@ class DecodedKeyVectors {
   std::unordered_map<const BaseVector*, std::unique_ptr<DecodedVector>>
       vectors_;
 };
+
+DecodedVector& decodeInput(
+    const BaseVector& vector,
+    DecodedVector& local,
+    DecodedKeyVectors* cache) {
+  if (cache != nullptr) {
+    return cache->get(vector);
+  }
+  local.decode(vector);
+  return local;
+}
 
 struct RangeSizeMetadata {
   std::optional<uint64_t> fixedElementSize;
@@ -1131,9 +919,7 @@ void encodedSize(
   }
   if (column.type->kind() == TypeKind::VARCHAR ||
       column.type->kind() == TypeKind::VARBINARY) {
-    uint64_t bodySize;
-    stringEncodedSize(vector, row, bodySize);
-    size = 1 + bodySize;
+    size = 1 + encodedStringBodySize(valueAt<StringView>(vector, row));
     return;
   }
   auto bodySize = fixedBodySize(*column.type);
@@ -1203,6 +989,40 @@ scalarValueAt(const BaseVector& vector, vector_size_t row) {
   return valueAt<T>(vector, row);
 }
 
+template <TypeKind KIND>
+FOLLY_ALWAYS_INLINE void encodeBytesFixedScalarValue(
+    typename TypeTraits<KIND>::NativeType value,
+    char* output,
+    bool descending) {
+  using T = typename TypeTraits<KIND>::NativeType;
+  if constexpr (KIND == TypeKind::BOOLEAN) {
+    const auto byte = static_cast<uint8_t>(value);
+    output[0] =
+        static_cast<char>(descending ? static_cast<uint8_t>(~byte) : byte);
+  } else if constexpr (
+      KIND == TypeKind::TINYINT || KIND == TypeKind::SMALLINT ||
+      KIND == TypeKind::INTEGER || KIND == TypeKind::BIGINT) {
+    encodeSigned<T>(value, output, descending);
+  } else if constexpr (KIND == TypeKind::HUGEINT) {
+    encodeSigned<int64_t>(
+        static_cast<int64_t>(HugeInt::upper(value)), output, descending);
+    encodeUnsigned<uint64_t>(
+        HugeInt::lower(value), output + sizeof(int64_t), descending);
+  } else if constexpr (KIND == TypeKind::REAL) {
+    encodeUnsigned<uint32_t>(encodeFloat(value), output, descending);
+  } else if constexpr (KIND == TypeKind::DOUBLE) {
+    encodeUnsigned<uint64_t>(encodeDouble(value), output, descending);
+  } else if constexpr (KIND == TypeKind::TIMESTAMP) {
+    encodeSigned<int64_t>(value.getSeconds(), output, descending);
+    encodeUnsigned<uint64_t>(
+        value.getNanos(), output + sizeof(int64_t), descending);
+  } else {
+    BOLT_FAIL(
+        "Fixed radix sort key byte encoding is not implemented for {}",
+        TypeTraits<KIND>::name);
+  }
+}
+
 template <typename T, typename EncodeBody>
 uint64_t encodeFixedScalarArrayElements(
     const RadixSortKeyColumn& column,
@@ -1210,7 +1030,6 @@ uint64_t encodeFixedScalarArrayElements(
     vector_size_t offset,
     vector_size_t count,
     char* output,
-    uint64_t /*outputSize*/,
     EncodeBody encodeBody,
     DecodedKeyVectors& decodedVectors) {
   const auto bodySize = *fixedBodySize(*column.type);
@@ -1278,89 +1097,54 @@ uint64_t encodeFixedScalarArrayElements(
   return written;
 }
 
+template <TypeKind KIND>
+uint64_t encodeFixedScalarArrayElementsByKind(
+    const RadixSortKeyColumn& column,
+    const BaseVector& elements,
+    vector_size_t offset,
+    vector_size_t count,
+    char* output,
+    DecodedKeyVectors& decodedVectors) {
+  if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT ||
+      KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
+      KIND == TypeKind::TIMESTAMP) {
+    using T = typename TypeTraits<KIND>::NativeType;
+    return encodeFixedScalarArrayElements<T>(
+        column,
+        elements,
+        offset,
+        count,
+        output,
+        [](T value, char* out, bool descending) {
+          encodeBytesFixedScalarValue<KIND>(value, out, descending);
+        },
+        decodedVectors);
+  } else {
+    BOLT_FAIL(
+        "Radix sort fixed array element encoding is not implemented for {}",
+        column.type->toString());
+  }
+}
+
 uint64_t encodeFixedScalarArrayElements(
     const RadixSortKeyColumn& column,
     const BaseVector& elements,
     vector_size_t offset,
     vector_size_t count,
     char* output,
-    uint64_t outputSize,
     DecodedKeyVectors& decodedVectors) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    return encodeFixedScalarArrayElements<int64_t>(
-        column,
-        elements,
-        offset,
-        count,
-        output,
-        outputSize,
-        [](auto value, auto* out, bool descending) {
-          encodeSigned<int64_t>(value, out, descending);
-        },
-        decodedVectors);
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    return encodeFixedScalarArrayElements<int128_t>(
-        column,
-        elements,
-        offset,
-        count,
-        output,
-        outputSize,
-        [](auto value, auto* out, bool descending) {
-          encodeSigned<int64_t>(
-              static_cast<int64_t>(HugeInt::upper(value)), out, descending);
-          encodeUnsigned<uint64_t>(
-              HugeInt::lower(value), out + sizeof(int64_t), descending);
-        },
-        decodedVectors);
-  }
-
-#define BOLT_ENCODE_ARRAY_FIXED_SCALAR(kind, cppType, expression)      \
-  case TypeKind::kind:                                                 \
-    return encodeFixedScalarArrayElements<cppType>(                    \
-        column,                                                        \
-        elements,                                                      \
-        offset,                                                        \
-        count,                                                         \
-        output,                                                        \
-        outputSize,                                                    \
-        [](cppType value, char* out, bool descending) { expression; }, \
-        decodedVectors)
-
-  switch (column.type->kind()) {
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        BOOLEAN, bool, const auto byte = static_cast<uint8_t>(value);
-        out[0] =
-            static_cast<char>(descending ? static_cast<uint8_t>(~byte) : byte));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        TINYINT, int8_t, encodeSigned<int8_t>(value, out, descending));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        SMALLINT, int16_t, encodeSigned<int16_t>(value, out, descending));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        INTEGER, int32_t, encodeSigned<int32_t>(value, out, descending));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        BIGINT, int64_t, encodeSigned<int64_t>(value, out, descending));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        REAL,
-        float,
-        encodeUnsigned<uint32_t>(encodeFloat(value), out, descending));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        DOUBLE,
-        double,
-        encodeUnsigned<uint64_t>(encodeDouble(value), out, descending));
-    BOLT_ENCODE_ARRAY_FIXED_SCALAR(
-        TIMESTAMP,
-        Timestamp,
-        encodeSigned<int64_t>(value.getSeconds(), out, descending);
-        encodeUnsigned<uint64_t>(
-            value.getNanos(), out + sizeof(int64_t), descending));
-    default:
-      BOLT_FAIL(
-          "Radix sort fixed array element encoding is not implemented for {}",
-          column.type->toString());
-  }
-#undef BOLT_ENCODE_ARRAY_FIXED_SCALAR
+  return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      encodeFixedScalarArrayElementsByKind,
+      column.type->kind(),
+      column,
+      elements,
+      offset,
+      count,
+      output,
+      decodedVectors);
 }
 
 class MapKeyIndexScratch {
@@ -1468,12 +1252,39 @@ class MapKeyIndexScratch {
   size_t depth_{0};
 };
 
+template <TypeKind KIND>
+void encodeScalarValue(
+    const BaseVector& vector,
+    vector_size_t row,
+    char* output,
+    bool descending,
+    uint64_t& written) {
+  using T = typename TypeTraits<KIND>::NativeType;
+  if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT ||
+      KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
+      KIND == TypeKind::TIMESTAMP) {
+    encodeBytesFixedScalarValue<KIND>(
+        scalarValueAt<T>(vector, row), output, descending);
+    written = 1 + sizeof(T);
+  } else if constexpr (
+      KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
+    written = 1 +
+        encodeStringValue(valueAt<StringView>(vector, row), output, descending);
+  } else {
+    BOLT_FAIL(
+        "Radix sort key encoding is not implemented for {}",
+        TypeTraits<KIND>::name);
+  }
+}
+
 void encodeValue(
     const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t row,
     char* output,
-    uint64_t /*outputSize*/,
     uint64_t& written,
     MapKeyIndexScratch& mapIndices,
     DecodedKeyVectors& decodedVectors) {
@@ -1501,7 +1312,6 @@ void encodeValue(
           *rowVector->childAt(child),
           wrappedRow,
           output + offset,
-          0,
           childWritten,
           mapIndices,
           decodedVectors);
@@ -1519,13 +1329,7 @@ void encodeValue(
     const auto& elements = *arrayVector->elements();
     if (isFixedScalarColumn(child)) {
       const auto childWritten = encodeFixedScalarArrayElements(
-          child,
-          elements,
-          arrayOffset,
-          count,
-          output + offset,
-          0,
-          decodedVectors);
+          child, elements, arrayOffset, count, output + offset, decodedVectors);
       addWritten(offset, childWritten);
     } else {
       for (vector_size_t index = 0; index < count; ++index) {
@@ -1535,7 +1339,6 @@ void encodeValue(
             elements,
             arrayOffset + index,
             output + offset,
-            0,
             childWritten,
             mapIndices,
             decodedVectors);
@@ -1570,7 +1373,6 @@ void encodeValue(
                 *mapVector->mapKeys(),
                 indexAt(entry),
                 output + offset,
-                0,
                 childWritten,
                 mapIndices,
                 decodedVectors);
@@ -1584,7 +1386,6 @@ void encodeValue(
                 *mapVector->mapValues(),
                 indexAt(entry),
                 output + offset,
-                0,
                 childWritten,
                 mapIndices,
                 decodedVectors);
@@ -1594,78 +1395,22 @@ void encodeValue(
         });
     written = offset;
     return;
-  } else if (column.type->kind() == TypeKind::BIGINT) {
-    encodeSigned<int64_t>(
-        scalarValueAt<int64_t>(vector, row), body, descending);
-    written = 1 + sizeof(int64_t);
+  } else if (
+      column.type->isPrimitiveType() &&
+      column.type->kind() != TypeKind::UNKNOWN) {
+    BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+        encodeScalarValue,
+        column.type->kind(),
+        vector,
+        row,
+        body,
+        descending,
+        written);
     return;
-  } else if (column.type->kind() == TypeKind::HUGEINT) {
-    const auto value = scalarValueAt<int128_t>(vector, row);
-    encodeSigned<int64_t>(
-        static_cast<int64_t>(HugeInt::upper(value)), body, descending);
-    encodeUnsigned<uint64_t>(
-        HugeInt::lower(value), body + sizeof(int64_t), descending);
-    written = 1 + sizeof(int128_t);
-    return;
-  } else {
-    switch (column.type->kind()) {
-      case TypeKind::BOOLEAN: {
-        auto value = static_cast<uint8_t>(scalarValueAt<bool>(vector, row));
-        body[0] = static_cast<char>(
-            descending ? static_cast<uint8_t>(~value) : value);
-        written = 2;
-        return;
-      }
-      case TypeKind::TINYINT:
-        encodeSigned<int8_t>(
-            scalarValueAt<int8_t>(vector, row), body, descending);
-        written = 2;
-        return;
-      case TypeKind::SMALLINT:
-        encodeSigned<int16_t>(
-            scalarValueAt<int16_t>(vector, row), body, descending);
-        written = 1 + sizeof(int16_t);
-        return;
-      case TypeKind::INTEGER:
-        encodeSigned<int32_t>(
-            scalarValueAt<int32_t>(vector, row), body, descending);
-        written = 1 + sizeof(int32_t);
-        return;
-      case TypeKind::BIGINT:
-        encodeSigned<int64_t>(
-            scalarValueAt<int64_t>(vector, row), body, descending);
-        written = 1 + sizeof(int64_t);
-        return;
-      case TypeKind::REAL:
-        encodeUnsigned<uint32_t>(
-            encodeFloat(scalarValueAt<float>(vector, row)), body, descending);
-        written = 1 + sizeof(uint32_t);
-        return;
-      case TypeKind::DOUBLE:
-        encodeUnsigned<uint64_t>(
-            encodeDouble(scalarValueAt<double>(vector, row)), body, descending);
-        written = 1 + sizeof(uint64_t);
-        return;
-      case TypeKind::TIMESTAMP: {
-        const auto value = scalarValueAt<Timestamp>(vector, row);
-        encodeSigned<int64_t>(value.getSeconds(), body, descending);
-        encodeUnsigned<uint64_t>(
-            value.getNanos(), body + sizeof(int64_t), descending);
-        written = 1 + sizeof(int64_t) + sizeof(uint64_t);
-        return;
-      }
-      case TypeKind::VARCHAR:
-      case TypeKind::VARBINARY: {
-        const auto value = valueAt<StringView>(vector, row);
-        written = 1 + encodeStringValue(value, body, descending);
-        return;
-      }
-      default:
-        BOLT_FAIL(
-            "Radix sort key encoding is not implemented for {}",
-            column.type->toString());
-    }
   }
+  BOLT_FAIL(
+      "Radix sort key encoding is not implemented for {}",
+      column.type->toString());
 }
 
 template <typename ValueAt, typename IsNullAt>
@@ -1851,24 +1596,6 @@ void initializeVariableKeySizes(
   }
 }
 
-class ContiguousEncodeOutput {
- public:
-  ContiguousEncodeOutput(char* data, uint64_t* cursors)
-      : data_(data), cursors_(cursors) {}
-
-  char* current(vector_size_t row) const {
-    return data_ + cursors_[row];
-  }
-
-  void advance(vector_size_t row, uint64_t bytes) const {
-    cursors_[row] += bytes;
-  }
-
- private:
-  char* data_;
-  uint64_t* cursors_;
-};
-
 class StridedEncodeOutput {
  public:
   StridedEncodeOutput(char* data, uint32_t stride, uint32_t offset)
@@ -2000,7 +1727,8 @@ void encodeFixedColumn(
     vector_size_t size,
     const Output& output,
     EncodeBody encodeBody,
-    bool fixedWidthNulls) {
+    bool fixedWidthNulls,
+    DecodedKeyVectors* decodedInputs) {
   if (vector.encoding() == VectorEncoding::Simple::FLAT) {
     const auto* flat = vector.asUnchecked<FlatVector<T>>();
     const auto* nulls = flat->rawNulls();
@@ -2076,7 +1804,8 @@ void encodeFixedColumn(
     return;
   }
 
-  DecodedVector decoded(vector);
+  DecodedVector local;
+  auto& decoded = decodeInput(vector, local, decodedInputs);
   const auto* values = decoded.data<T>();
   const auto* indices = decoded.indices();
   const auto* nulls = decoded.nulls();
@@ -2114,6 +1843,45 @@ void encodeFixedColumn(
       fixedWidthNulls);
 }
 
+template <TypeKind KIND, typename Output>
+void encodeFixedColumnByKind(
+    const RadixSortKeyColumn& column,
+    const BaseVector& vector,
+    vector_size_t source,
+    vector_size_t size,
+    const Output& output,
+    DecodedKeyVectors* decodedInputs = nullptr,
+    bool fixedWidthNulls = false) {
+  if constexpr (KIND == TypeKind::UNKNOWN) {
+    for (vector_size_t row = 0; row < size; ++row) {
+      output.current(row)[0] = static_cast<char>(nullMarker(column.flags));
+      output.advance(row, 1);
+    }
+  } else if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT ||
+      KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
+      KIND == TypeKind::TIMESTAMP) {
+    using T = typename TypeTraits<KIND>::NativeType;
+    encodeFixedColumn<T>(
+        column,
+        vector,
+        source,
+        size,
+        output,
+        [](T value, char* output, bool descending) {
+          encodeFixedScalarValue<KIND>(value, output, descending);
+        },
+        fixedWidthNulls,
+        decodedInputs);
+  } else {
+    BOLT_FAIL(
+        "Sort fixed key column is not implemented for {}",
+        column.type->toString());
+  }
+}
+
 template <typename Output>
 void encodeFixedColumn(
     const RadixSortKeyColumn& column,
@@ -2121,90 +1889,14 @@ void encodeFixedColumn(
     vector_size_t source,
     vector_size_t size,
     const Output& output,
+    DecodedKeyVectors* decodedInputs = nullptr,
     bool fixedWidthNulls = false) {
-  if (column.type->kind() == TypeKind::UNKNOWN) {
-    DecodedVector decoded(vector);
-    for (vector_size_t row = 0; row < size; ++row) {
-      output.current(row)[0] = static_cast<char>(nullMarker(column.flags));
-      output.advance(row, 1);
-    }
-    return;
-  }
-  if (column.type->kind() == TypeKind::BIGINT) {
-    encodeFixedColumn<int64_t>(
-        column,
-        vector,
-        source,
-        size,
-        output,
-        [](int64_t value, char* output, bool descending) {
-          encodeSignedWord<int64_t>(value, output, descending);
-        },
-        fixedWidthNulls);
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    encodeFixedColumn<int128_t>(
-        column,
-        vector,
-        source,
-        size,
-        output,
-        [](int128_t value, char* output, bool descending) {
-          encodeSignedWord<int64_t>(
-              static_cast<int64_t>(HugeInt::upper(value)), output, descending);
-          encodeUnsignedWord<uint64_t>(
-              HugeInt::lower(value), output + sizeof(int64_t), descending);
-        },
-        fixedWidthNulls);
-    return;
-  }
-
-#define BOLT_ENCODE_COLUMN(kind, cppType, expression)                     \
-  case TypeKind::kind:                                                    \
-    encodeFixedColumn<cppType>(                                           \
-        column,                                                           \
-        vector,                                                           \
-        source,                                                           \
-        size,                                                             \
-        output,                                                           \
-        [](cppType value, char* output, bool descending) { expression; }, \
-        fixedWidthNulls);                                                 \
-    return;
-
-  switch (column.type->kind()) {
-    BOLT_ENCODE_COLUMN(
-        BOOLEAN, bool, const auto byte = static_cast<uint8_t>(value);
-        output[0] =
-            static_cast<char>(descending ? static_cast<uint8_t>(~byte) : byte))
-    BOLT_ENCODE_COLUMN(
-        TINYINT, int8_t, encodeSignedWord<int8_t>(value, output, descending))
-    BOLT_ENCODE_COLUMN(
-        SMALLINT, int16_t, encodeSignedWord<int16_t>(value, output, descending))
-    BOLT_ENCODE_COLUMN(
-        INTEGER, int32_t, encodeSignedWord<int32_t>(value, output, descending))
-    BOLT_ENCODE_COLUMN(
-        BIGINT, int64_t, encodeSignedWord<int64_t>(value, output, descending))
-    BOLT_ENCODE_COLUMN(
-        REAL,
-        float,
-        encodeUnsignedWord<uint32_t>(encodeFloat(value), output, descending))
-    BOLT_ENCODE_COLUMN(
-        DOUBLE,
-        double,
-        encodeUnsignedWord<uint64_t>(encodeDouble(value), output, descending))
-    BOLT_ENCODE_COLUMN(
-        TIMESTAMP,
-        Timestamp,
-        encodeSignedWord<int64_t>(value.getSeconds(), output, descending);
-        encodeUnsignedWord<uint64_t>(
-            value.getNanos(), output + sizeof(int64_t), descending))
-    default:
-      BOLT_FAIL(
-          "Sort fixed key column is not implemented for {}",
-          column.type->toString());
-  }
-#undef BOLT_ENCODE_COLUMN
+  const auto dispatch = [&]<TypeKind KIND>() {
+    encodeFixedColumnByKind<KIND>(
+        column, vector, source, size, output, decodedInputs, fixedWidthNulls);
+  };
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      dispatch.template operator(), column.type->kind());
 }
 
 template <typename Output, typename ValueAt, typename IsNullAt>
@@ -2237,7 +1929,8 @@ void encodeStringColumn(
     const BaseVector& vector,
     vector_size_t source,
     vector_size_t size,
-    const Output& output) {
+    const Output& output,
+    DecodedKeyVectors* decodedInputs) {
   if (vector.encoding() == VectorEncoding::Simple::FLAT) {
     const auto* flat = vector.asUnchecked<FlatVector<StringView>>();
     const auto* values = flat->rawValues();
@@ -2267,7 +1960,8 @@ void encodeStringColumn(
     return;
   }
 
-  DecodedVector decoded(vector);
+  DecodedVector local;
+  auto& decoded = decodeInput(vector, local, decodedInputs);
   const auto* values = decoded.data<StringView>();
   const auto* indices = decoded.indices();
   const auto* nulls = decoded.nulls();
@@ -2289,20 +1983,25 @@ void encodeVariableColumn(
     vector_size_t source,
     vector_size_t size,
     const Output& output,
+    DecodedKeyVectors* decodedInputs = nullptr,
     bool fixedWidthNulls = false) {
   if (column.type->kind() == TypeKind::VARCHAR ||
       column.type->kind() == TypeKind::VARBINARY) {
-    encodeStringColumn(column, vector, source, size, output);
+    encodeStringColumn(column, vector, source, size, output, decodedInputs);
     return;
   }
   if (fixedBodySize(*column.type).has_value()) {
-    encodeFixedColumn(column, vector, source, size, output, fixedWidthNulls);
+    encodeFixedColumn(
+        column, vector, source, size, output, decodedInputs, fixedWidthNulls);
     return;
   }
 
-  DecodedVector decoded(vector);
+  DecodedVector local;
+  auto& decoded = decodeInput(vector, local, decodedInputs);
   MapKeyIndexScratch mapIndices;
-  DecodedKeyVectors decodedVectors;
+  DecodedKeyVectors localDecodedInputs;
+  auto& decodedVectors =
+      decodedInputs == nullptr ? localDecodedInputs : *decodedInputs;
   for (vector_size_t row = 0; row < size; ++row) {
     const auto inputRow = source + row;
     auto* destination = output.current(row);
@@ -2317,7 +2016,6 @@ void encodeVariableColumn(
         *decoded.base(),
         decoded.index(inputRow),
         destination,
-        0,
         written,
         mapIndices,
         decodedVectors);
@@ -2335,6 +2033,7 @@ void encodeAndAppendInlineLayout(
   using Traits = RadixSortKeyTraits<KIND>;
   static_assert(!Traits::kVariable);
 
+  DecodedKeyVectors decodedInputs;
   storage.appendKeyBlocks(
       input.size(),
       [&](vector_size_t source, vector_size_t count, char* records) {
@@ -2345,7 +2044,12 @@ void encodeAndAppendInlineLayout(
             records, Traits::kWidth, cursors.data());
         for (uint32_t column = 0; column < columns.size(); ++column) {
           encodeVariableColumn(
-              columns[column], *input.childAt(column), source, count, output);
+              columns[column],
+              *input.childAt(column),
+              source,
+              count,
+              output,
+              &decodedInputs);
         }
 
         for (vector_size_t row = 0; row < count; ++row) {
@@ -2478,7 +2182,7 @@ uint8_t physicalEncodedByte(
 }
 
 template <bool HostOrderWords, typename T>
-T decodePhysicalUnsigned(
+FOLLY_ALWAYS_INLINE T decodePhysicalUnsigned(
     const char* key,
     bool descending,
     uint32_t offset,
@@ -2527,7 +2231,7 @@ T decodePhysicalUnsigned(
 }
 
 template <bool HostOrderWords, typename T>
-T decodePhysicalSigned(
+FOLLY_ALWAYS_INLINE T decodePhysicalSigned(
     const char* key,
     bool descending,
     uint32_t offset,
@@ -2802,6 +2506,107 @@ void decodeSinglePhysicalBooleanColumn(
   }
 }
 
+template <bool HostOrderWords, TypeKind KIND, typename Source, typename... Args>
+void decodeSinglePhysicalColumnByKind(
+    const RadixSortKeyColumn& column,
+    const Source& source,
+    bool mayHaveNulls,
+    const VectorPtr& result,
+    uint32_t encodedOffset,
+    uint32_t inlineWordBytes,
+    Args... args) {
+  using T = typename TypeTraits<KIND>::NativeType;
+  using SourceType = std::remove_cv_t<std::remove_reference_t<Source>>;
+  constexpr bool kPointerSpan =
+      std::is_same_v<SourceType, std::span<const char* const>>;
+  const auto decode = [&](auto decodeValue) {
+    if constexpr (kPointerSpan) {
+      decodeSinglePhysicalColumn<HostOrderWords, T>(
+          column,
+          source,
+          mayHaveNulls,
+          result,
+          encodedOffset,
+          inlineWordBytes,
+          args...,
+          decodeValue);
+    } else {
+      decodeSinglePhysicalColumn<HostOrderWords, T>(
+          column,
+          source,
+          args...,
+          mayHaveNulls,
+          result,
+          encodedOffset,
+          inlineWordBytes,
+          decodeValue);
+    }
+  };
+  if constexpr (KIND == TypeKind::BOOLEAN) {
+    if constexpr (kPointerSpan) {
+      decodeSinglePhysicalBooleanColumn<HostOrderWords>(
+          column,
+          source,
+          mayHaveNulls,
+          result,
+          encodedOffset,
+          inlineWordBytes,
+          args...);
+    } else {
+      decodeSinglePhysicalBooleanColumn<HostOrderWords>(
+          column,
+          source,
+          args...,
+          mayHaveNulls,
+          result,
+          encodedOffset,
+          inlineWordBytes);
+    }
+  } else if constexpr (
+      KIND == TypeKind::TINYINT || KIND == TypeKind::SMALLINT ||
+      KIND == TypeKind::INTEGER || KIND == TypeKind::BIGINT) {
+    decode(
+        [](const char* key, bool descending, uint32_t offset, uint32_t words) {
+          return decodePhysicalSigned<HostOrderWords, T>(
+              key, descending, offset, words);
+        });
+  } else if constexpr (KIND == TypeKind::HUGEINT) {
+    decode(
+        [](const char* key, bool descending, uint32_t offset, uint32_t words) {
+          const auto upper = decodePhysicalSigned<HostOrderWords, int64_t>(
+              key, descending, offset, words);
+          const auto lower = decodePhysicalUnsigned<HostOrderWords, uint64_t>(
+              key, descending, offset + sizeof(int64_t), words);
+          return HugeInt::build(static_cast<uint64_t>(upper), lower);
+        });
+  } else if constexpr (KIND == TypeKind::REAL) {
+    decode(
+        [](const char* key, bool descending, uint32_t offset, uint32_t words) {
+          return decodeFloat(decodePhysicalUnsigned<HostOrderWords, uint32_t>(
+              key, descending, offset, words));
+        });
+  } else if constexpr (KIND == TypeKind::DOUBLE) {
+    decode(
+        [](const char* key, bool descending, uint32_t offset, uint32_t words) {
+          return decodeDouble(decodePhysicalUnsigned<HostOrderWords, uint64_t>(
+              key, descending, offset, words));
+        });
+  } else if constexpr (KIND == TypeKind::TIMESTAMP) {
+    decode(
+        [](const char* key, bool descending, uint32_t offset, uint32_t words) {
+          return Timestamp(
+              decodePhysicalSigned<HostOrderWords, int64_t>(
+                  key, descending, offset, words),
+              decodePhysicalUnsigned<HostOrderWords, uint64_t>(
+                  key, descending, offset + sizeof(int64_t), words));
+        });
+  } else {
+    BOLT_FAIL(
+        "Single fixed radix sort key decode is not implemented for {}",
+        column.type->toString());
+  }
+}
+
 template <bool HostOrderWords>
 void decodeSinglePhysicalColumn(
     const RadixSortKeyColumn& column,
@@ -2812,8 +2617,8 @@ void decodeSinglePhysicalColumn(
     uint32_t encodedOffset = 0,
     vector_size_t outputOffset = 0,
     bool offsetWrite = false) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
+  const auto dispatch = [&]<TypeKind KIND>() {
+    decodeSinglePhysicalColumnByKind<HostOrderWords, KIND>(
         column,
         keys,
         mayHaveNulls,
@@ -2821,165 +2626,10 @@ void decodeSinglePhysicalColumn(
         encodedOffset,
         inlineWordBytes,
         outputOffset,
-        offsetWrite,
-        [](const char* key,
-           bool descending,
-           uint32_t bodyOffset,
-           uint32_t wordBytes) {
-          return decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset, wordBytes);
-        });
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    decodeSinglePhysicalColumn<HostOrderWords, int128_t>(
-        column,
-        keys,
-        mayHaveNulls,
-        result,
-        encodedOffset,
-        inlineWordBytes,
-        outputOffset,
-        offsetWrite,
-        [](const char* key,
-           bool descending,
-           uint32_t bodyOffset,
-           uint32_t wordBytes) {
-          const auto upper = decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset, wordBytes);
-          const auto lower = decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-              key, descending, bodyOffset + sizeof(int64_t), wordBytes);
-          return HugeInt::build(static_cast<uint64_t>(upper), lower);
-        });
-    return;
-  }
-
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
-      decodeSinglePhysicalBooleanColumn<HostOrderWords>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite);
-      return;
-    case TypeKind::TINYINT:
-      decodeSinglePhysicalColumn<HostOrderWords, int8_t>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int8_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::SMALLINT:
-      decodeSinglePhysicalColumn<HostOrderWords, int16_t>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int16_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::INTEGER:
-      decodeSinglePhysicalColumn<HostOrderWords, int32_t>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int32_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::BIGINT:
-      decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int64_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::REAL:
-      decodeSinglePhysicalColumn<HostOrderWords, float>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodeFloat(decodePhysicalUnsigned<HostOrderWords, uint32_t>(
-                key, desc, offset, wordBytes));
-          });
-      return;
-    case TypeKind::DOUBLE:
-      decodeSinglePhysicalColumn<HostOrderWords, double>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodeDouble(
-                decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset, wordBytes));
-          });
-      return;
-    case TypeKind::TIMESTAMP:
-      decodeSinglePhysicalColumn<HostOrderWords, Timestamp>(
-          column,
-          keys,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          outputOffset,
-          offsetWrite,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return Timestamp(
-                decodePhysicalSigned<HostOrderWords, int64_t>(
-                    key, desc, offset, wordBytes),
-                decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset + sizeof(int64_t), wordBytes));
-          });
-      return;
-    default:
-      BOLT_FAIL(
-          "Single fixed radix sort key decode is not implemented for {}",
-          column.type->toString());
-  }
+        offsetWrite);
+  };
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      dispatch.template operator(), column.type->kind());
 }
 
 template <bool HostOrderWords>
@@ -2992,174 +2642,19 @@ void decodeSinglePhysicalColumn(
     const VectorPtr& result,
     uint32_t inlineWordBytes,
     uint32_t encodedOffset = 0) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
+  const auto dispatch = [&]<TypeKind KIND>() {
+    decodeSinglePhysicalColumnByKind<HostOrderWords, KIND>(
         column,
         arena,
-        begin,
-        count,
         mayHaveNulls,
         result,
         encodedOffset,
         inlineWordBytes,
-        [](const char* key,
-           bool descending,
-           uint32_t bodyOffset,
-           uint32_t wordBytes) {
-          return decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset, wordBytes);
-        });
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    decodeSinglePhysicalColumn<HostOrderWords, int128_t>(
-        column,
-        arena,
         begin,
-        count,
-        mayHaveNulls,
-        result,
-        encodedOffset,
-        inlineWordBytes,
-        [](const char* key,
-           bool descending,
-           uint32_t bodyOffset,
-           uint32_t wordBytes) {
-          const auto upper = decodePhysicalSigned<HostOrderWords, int64_t>(
-              key, descending, bodyOffset, wordBytes);
-          const auto lower = decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-              key, descending, bodyOffset + sizeof(int64_t), wordBytes);
-          return HugeInt::build(static_cast<uint64_t>(upper), lower);
-        });
-    return;
-  }
-
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
-      decodeSinglePhysicalBooleanColumn<HostOrderWords>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes);
-      return;
-    case TypeKind::TINYINT:
-      decodeSinglePhysicalColumn<HostOrderWords, int8_t>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int8_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::SMALLINT:
-      decodeSinglePhysicalColumn<HostOrderWords, int16_t>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int16_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::INTEGER:
-      decodeSinglePhysicalColumn<HostOrderWords, int32_t>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int32_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::BIGINT:
-      decodeSinglePhysicalColumn<HostOrderWords, int64_t>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodePhysicalSigned<HostOrderWords, int64_t>(
-                key, desc, offset, wordBytes);
-          });
-      return;
-    case TypeKind::REAL:
-      decodeSinglePhysicalColumn<HostOrderWords, float>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodeFloat(decodePhysicalUnsigned<HostOrderWords, uint32_t>(
-                key, desc, offset, wordBytes));
-          });
-      return;
-    case TypeKind::DOUBLE:
-      decodeSinglePhysicalColumn<HostOrderWords, double>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return decodeDouble(
-                decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset, wordBytes));
-          });
-      return;
-    case TypeKind::TIMESTAMP:
-      decodeSinglePhysicalColumn<HostOrderWords, Timestamp>(
-          column,
-          arena,
-          begin,
-          count,
-          mayHaveNulls,
-          result,
-          encodedOffset,
-          inlineWordBytes,
-          [](const char* key, bool desc, uint32_t offset, uint32_t wordBytes) {
-            return Timestamp(
-                decodePhysicalSigned<HostOrderWords, int64_t>(
-                    key, desc, offset, wordBytes),
-                decodePhysicalUnsigned<HostOrderWords, uint64_t>(
-                    key, desc, offset + sizeof(int64_t), wordBytes));
-          });
-      return;
-    default:
-      BOLT_FAIL(
-          "Single fixed radix sort key decode is not implemented for {}",
-          column.type->toString());
-  }
+        count);
+  };
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      dispatch.template operator(), column.type->kind());
 }
 
 template <typename DecodeColumn>
@@ -3268,6 +2763,47 @@ void decodeString(
       row, StringView(output, static_cast<int32_t>(decodedSize)));
 }
 
+template <TypeKind KIND>
+FOLLY_ALWAYS_INLINE typename TypeTraits<KIND>::NativeType
+decodeFixedScalarValue(EncodedKeyReader& input, bool descending) {
+  using T = typename TypeTraits<KIND>::NativeType;
+  if constexpr (KIND == TypeKind::BOOLEAN) {
+    uint8_t value;
+    input.readBodyByte(descending, value);
+    return value != 0;
+  } else if constexpr (
+      KIND == TypeKind::TINYINT || KIND == TypeKind::SMALLINT ||
+      KIND == TypeKind::INTEGER || KIND == TypeKind::BIGINT) {
+    T value;
+    decodeSigned(input, descending, value);
+    return value;
+  } else if constexpr (KIND == TypeKind::HUGEINT) {
+    int64_t upper;
+    uint64_t lower;
+    decodeSigned(input, descending, upper);
+    decodeUnsigned(input, descending, lower);
+    return HugeInt::build(static_cast<uint64_t>(upper), lower);
+  } else if constexpr (KIND == TypeKind::REAL) {
+    uint32_t value;
+    decodeUnsigned(input, descending, value);
+    return decodeFloat(value);
+  } else if constexpr (KIND == TypeKind::DOUBLE) {
+    uint64_t value;
+    decodeUnsigned(input, descending, value);
+    return decodeDouble(value);
+  } else if constexpr (KIND == TypeKind::TIMESTAMP) {
+    int64_t seconds;
+    uint64_t nanos;
+    decodeSigned(input, descending, seconds);
+    decodeUnsigned(input, descending, nanos);
+    return Timestamp(seconds, nanos);
+  } else {
+    BOLT_FAIL(
+        "Fixed radix sort key decoding is not implemented for {}",
+        TypeTraits<KIND>::name);
+  }
+}
+
 template <typename T, typename Decode>
 void decodeFixedScalarArrayElements(
     const RadixSortKeyColumn& column,
@@ -3309,105 +2845,64 @@ void decodeFixedScalarArrayElements(
   reader.checkedReadByte(delimiter);
 }
 
+template <TypeKind KIND>
+void decodeFixedScalarArrayElementsByKind(
+    const RadixSortKeyColumn& column,
+    EncodedKeyReader& reader,
+    const VectorPtr& result,
+    vector_size_t start) {
+  if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT ||
+      KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
+      KIND == TypeKind::TIMESTAMP) {
+    using T = typename TypeTraits<KIND>::NativeType;
+    decodeFixedScalarArrayElements<T>(
+        column, reader, result, start, decodeFixedScalarValue<KIND>);
+  } else {
+    BOLT_FAIL(
+        "Radix sort fixed array element decoding is not implemented for {}",
+        column.type->toString());
+  }
+}
+
 void decodeFixedScalarArrayElements(
     const RadixSortKeyColumn& column,
     EncodedKeyReader& reader,
     const VectorPtr& result,
     vector_size_t start) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    decodeFixedScalarArrayElements<int64_t>(
-        column, reader, result, start, [](auto& input, bool descending) {
-          int64_t value;
-          decodeSigned(input, descending, value);
-          return value;
-        });
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    decodeFixedScalarArrayElements<int128_t>(
-        column, reader, result, start, [](auto& input, bool descending) {
-          int64_t upper;
-          uint64_t lower;
-          decodeSigned(input, descending, upper);
-          decodeUnsigned(input, descending, lower);
-          return HugeInt::build(static_cast<uint64_t>(upper), lower);
-        });
-    return;
-  }
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      decodeFixedScalarArrayElementsByKind,
+      column.type->kind(),
+      column,
+      reader,
+      result,
+      start);
+}
 
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
-      decodeFixedScalarArrayElements<bool>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            uint8_t value;
-            input.readBodyByte(descending, value);
-            return value != 0;
-          });
-      return;
-    case TypeKind::TINYINT:
-      decodeFixedScalarArrayElements<int8_t>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            int8_t value;
-            decodeSigned(input, descending, value);
-            return value;
-          });
-      return;
-    case TypeKind::SMALLINT:
-      decodeFixedScalarArrayElements<int16_t>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            int16_t value;
-            decodeSigned(input, descending, value);
-            return value;
-          });
-      return;
-    case TypeKind::INTEGER:
-      decodeFixedScalarArrayElements<int32_t>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            int32_t value;
-            decodeSigned(input, descending, value);
-            return value;
-          });
-      return;
-    case TypeKind::BIGINT:
-      decodeFixedScalarArrayElements<int64_t>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            int64_t value;
-            decodeSigned(input, descending, value);
-            return value;
-          });
-      return;
-    case TypeKind::REAL:
-      decodeFixedScalarArrayElements<float>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            uint32_t value;
-            decodeUnsigned(input, descending, value);
-            const auto decoded = decodeFloat(value);
-            return decoded;
-          });
-      return;
-    case TypeKind::DOUBLE:
-      decodeFixedScalarArrayElements<double>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            uint64_t value;
-            decodeUnsigned(input, descending, value);
-            const auto decoded = decodeDouble(value);
-            return decoded;
-          });
-      return;
-    case TypeKind::TIMESTAMP:
-      decodeFixedScalarArrayElements<Timestamp>(
-          column, reader, result, start, [](auto& input, bool descending) {
-            int64_t seconds;
-            uint64_t nanos;
-            decodeSigned(input, descending, seconds);
-            decodeUnsigned(input, descending, nanos);
-            return Timestamp(seconds, nanos);
-          });
-      return;
-    default:
-      BOLT_FAIL(
-          "Radix sort fixed array element decoding is not implemented for {}",
-          column.type->toString());
+template <TypeKind KIND>
+void decodeScalarValue(
+    EncodedKeyReader& reader,
+    bool descending,
+    const VectorPtr& result,
+    vector_size_t row,
+    vector_size_t endRow) {
+  if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT ||
+      KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
+      KIND == TypeKind::TIMESTAMP) {
+    using T = typename TypeTraits<KIND>::NativeType;
+    setValue<T>(result, row, decodeFixedScalarValue<KIND>(reader, descending));
+  } else if constexpr (
+      KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
+    decodeString(reader, descending, result, row, endRow);
+  } else {
+    BOLT_FAIL(
+        "Radix sort key decoding is not implemented for {}",
+        TypeTraits<KIND>::name);
   }
 }
 
@@ -3519,84 +3014,21 @@ void decodeValue(
     mapResult->setOffsetAndSize(row, start, count);
     return;
   }
-  if (column.type->kind() == TypeKind::BIGINT) {
-    int64_t value;
-    decodeSigned(reader, descending, value);
-    setValue<int64_t>(result, row, value);
+  if (column.type->isPrimitiveType() &&
+      column.type->kind() != TypeKind::UNKNOWN) {
+    BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+        decodeScalarValue,
+        column.type->kind(),
+        reader,
+        descending,
+        result,
+        row,
+        endRow);
     return;
   }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    int64_t upper;
-    uint64_t lower;
-    decodeSigned(reader, descending, upper);
-    decodeUnsigned(reader, descending, lower);
-    setValue<int128_t>(
-        result, row, HugeInt::build(static_cast<uint64_t>(upper), lower));
-    return;
-  }
-
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN: {
-      uint8_t value;
-      reader.readBodyByte(descending, value);
-      setValue<bool>(result, row, value != 0);
-      return;
-    }
-    case TypeKind::TINYINT: {
-      int8_t value;
-      decodeSigned(reader, descending, value);
-      setValue<int8_t>(result, row, value);
-      return;
-    }
-    case TypeKind::SMALLINT: {
-      int16_t value;
-      decodeSigned(reader, descending, value);
-      setValue<int16_t>(result, row, value);
-      return;
-    }
-    case TypeKind::INTEGER: {
-      int32_t value;
-      decodeSigned(reader, descending, value);
-      setValue<int32_t>(result, row, value);
-      return;
-    }
-    case TypeKind::BIGINT: {
-      int64_t value;
-      decodeSigned(reader, descending, value);
-      setValue<int64_t>(result, row, value);
-      return;
-    }
-    case TypeKind::REAL: {
-      uint32_t value;
-      decodeUnsigned(reader, descending, value);
-      const auto decoded = decodeFloat(value);
-      setValue<float>(result, row, decoded);
-      return;
-    }
-    case TypeKind::DOUBLE: {
-      uint64_t value;
-      decodeUnsigned(reader, descending, value);
-      const auto decoded = decodeDouble(value);
-      setValue<double>(result, row, decoded);
-      return;
-    }
-    case TypeKind::TIMESTAMP: {
-      int64_t seconds;
-      uint64_t nanos;
-      decodeSigned(reader, descending, seconds);
-      decodeUnsigned(reader, descending, nanos);
-      setValue<Timestamp>(result, row, Timestamp(seconds, nanos));
-      return;
-    }
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
-      decodeString(reader, descending, result, row, endRow);
-      return;
-    default:
-      BOLT_FAIL(
-          "Radix sort key decoding is not implemented for {}",
-          column.type->toString());
-  }
+  BOLT_FAIL(
+      "Radix sort key decoding is not implemented for {}",
+      column.type->toString());
 }
 
 void prepareDecodedResult(
@@ -3608,8 +3040,7 @@ void prepareDecodedResult(
     std::span<const uint8_t> mayHaveNulls,
     RowVectorPtr& result) {
   const auto shouldDecode = [&](uint32_t column) {
-    return decodedColumns.empty() || decodedColumns[column] != 0 ||
-        !fixedBodySize(*columns[column].type).has_value();
+    return decodedColumns.empty() || decodedColumns[column] != 0;
   };
   if (result != nullptr && result->pool() == pool &&
       result->type()->equivalent(*rowType)) {
@@ -3708,11 +3139,6 @@ void bindPreparedDecodeScratch(
   scratch.cursors = scratch.words;
 }
 
-bool isLayeredFixedColumn(const RadixSortKeyColumn& column) {
-  return column.type->kind() != TypeKind::UNKNOWN &&
-      fixedBodySize(*column.type).has_value();
-}
-
 bool isStringColumn(const RadixSortKeyColumn& column) {
   return column.type->kind() == TypeKind::VARCHAR ||
       column.type->kind() == TypeKind::VARBINARY;
@@ -3723,21 +3149,18 @@ uint64_t calculateDecodeScratchWordsPerRow(
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
     uint32_t firstColumn,
-    uint32_t endColumn,
-    bool skipMaskedVariableColumns) {
+    uint32_t endColumn) {
   BOLT_DCHECK_LT(firstColumn, endColumn);
   BOLT_DCHECK_LE(endColumn, columns.size());
   uint64_t extraBlocks = 0;
   for (uint32_t column = firstColumn; column < endColumn; ++column) {
     const bool masked = !decodedColumns.empty() && decodedColumns[column] == 0;
-    if (masked &&
-        (skipMaskedVariableColumns ||
-         fixedBodySize(*columns[column].type).has_value())) {
+    if (masked) {
       continue;
     }
     const bool columnMayHaveNulls =
         mayHaveNulls.empty() || mayHaveNulls[column] != 0;
-    if (isLayeredFixedColumn(columns[column])) {
+    if (isFixedScalarColumn(columns[column])) {
       const auto bodyWords = (*fixedBodySize(*columns[column].type) + 7) / 8;
       extraBlocks =
           std::max<uint64_t>(extraBlocks, bodyWords + columnMayHaveNulls);
@@ -3747,20 +3170,6 @@ uint64_t calculateDecodeScratchWordsPerRow(
     }
   }
   return 1 + extraBlocks;
-}
-
-uint64_t decodeScratchWordsPerRow(
-    const std::vector<RadixSortKeyColumn>& columns,
-    std::span<const uint8_t> decodedColumns,
-    std::span<const uint8_t> mayHaveNulls,
-    uint32_t firstColumn) {
-  return calculateDecodeScratchWordsPerRow(
-      columns,
-      decodedColumns,
-      mayHaveNulls,
-      firstColumn,
-      columns.size(),
-      false);
 }
 
 FOLLY_ALWAYS_INLINE void readMarker(
@@ -4549,6 +3958,77 @@ void decodeStringColumnLayered(
   });
 }
 
+template <TypeKind KIND, bool FirstColumn, bool MayHaveNulls>
+void decodeScalarColumnLayered(
+    const RadixSortKeyColumn& column,
+    std::span<const EncodedKeyView> keys,
+    DecodeScratch& scratch,
+    const VectorPtr& result,
+    vector_size_t outputOffset) {
+  if constexpr (KIND == TypeKind::BOOLEAN) {
+    decodeBooleanLayered<FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (
+      KIND == TypeKind::TINYINT || KIND == TypeKind::SMALLINT ||
+      KIND == TypeKind::INTEGER || KIND == TypeKind::BIGINT) {
+    using T = typename TypeTraits<KIND>::NativeType;
+    decodeSignedFixedLayered<FirstColumn, MayHaveNulls, T>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (KIND == TypeKind::HUGEINT) {
+    decodeInt128Layered<FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (KIND == TypeKind::REAL) {
+    decodeFloatLayered<FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (KIND == TypeKind::DOUBLE) {
+    decodeDoubleLayered<FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (KIND == TypeKind::TIMESTAMP) {
+    decodeTimestampLayered<FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else {
+    BOLT_FAIL(
+        "Layered radix sort key decoding is not implemented for {}",
+        column.type->toString());
+  }
+}
+
+template <TypeKind KIND, bool FirstColumn, bool MayHaveNulls>
+void decodePrimitiveColumnLayered(
+    const RadixSortKeyColumn& column,
+    std::span<const EncodedKeyView> keys,
+    uint64_t* cursors,
+    const VectorPtr& result,
+    DecodeScratch& scratch,
+    vector_size_t outputOffset) {
+  if constexpr (
+      KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
+      KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
+      KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT ||
+      KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
+      KIND == TypeKind::TIMESTAMP) {
+    decodeScalarColumnLayered<KIND, FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (
+      KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
+    decodeStringColumnLayered<FirstColumn, MayHaveNulls>(
+        column, keys, scratch, result, outputOffset);
+  } else if constexpr (KIND == TypeKind::UNKNOWN) {
+    const auto null = nullMarker(column.flags);
+    for (vector_size_t row = 0; row < keys.size(); ++row) {
+      auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
+      bool isNull;
+      readMarker(keys[row], cursor, null, isNull);
+      cursors[row] = cursor;
+      result->setNull(outputOffset + row, true);
+    }
+  } else {
+    BOLT_FAIL(
+        "Layered radix sort key decoding is not implemented for {}",
+        column.type->toString());
+  }
+}
+
 template <bool FirstColumn, bool MayHaveNulls>
 void decodeColumn(
     const RadixSortKeyColumn& column,
@@ -4557,77 +4037,23 @@ void decodeColumn(
     const VectorPtr& result,
     DecodeScratch& scratch,
     vector_size_t outputOffset = 0) {
-  if (column.type->kind() == TypeKind::BIGINT) {
-    decodeSignedFixedLayered<FirstColumn, MayHaveNulls, int64_t>(
-        column, keys, scratch, result, outputOffset);
-    return;
-  }
-  if (column.type->kind() == TypeKind::HUGEINT) {
-    decodeInt128Layered<FirstColumn, MayHaveNulls>(
-        column, keys, scratch, result, outputOffset);
+  if (column.type->isPrimitiveType()) {
+    const auto dispatch = [&]<TypeKind KIND>() {
+      decodePrimitiveColumnLayered<KIND, FirstColumn, MayHaveNulls>(
+          column, keys, cursors, result, scratch, outputOffset);
+    };
+    BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+        dispatch.template operator(), column.type->kind());
     return;
   }
 
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
-      decodeBooleanLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result, outputOffset);
-      return;
-#define BOLT_DECODE_SIGNED_COLUMN(kind, cppType)                  \
-  case TypeKind::kind:                                            \
-    decodeSignedFixedLayered<FirstColumn, MayHaveNulls, cppType>( \
-        column, keys, scratch, result, outputOffset);             \
-    return
-      BOLT_DECODE_SIGNED_COLUMN(TINYINT, int8_t);
-      BOLT_DECODE_SIGNED_COLUMN(SMALLINT, int16_t);
-      BOLT_DECODE_SIGNED_COLUMN(INTEGER, int32_t);
-    case TypeKind::BIGINT:
-      decodeSignedFixedLayered<FirstColumn, MayHaveNulls, int64_t>(
-          column, keys, scratch, result, outputOffset);
-      return;
-#undef BOLT_DECODE_SIGNED_COLUMN
-    case TypeKind::REAL:
-      decodeFloatLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result, outputOffset);
-      return;
-    case TypeKind::DOUBLE:
-      decodeDoubleLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result, outputOffset);
-      return;
-    case TypeKind::TIMESTAMP:
-      decodeTimestampLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result, outputOffset);
-      return;
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
-      decodeStringColumnLayered<FirstColumn, MayHaveNulls>(
-          column, keys, scratch, result, outputOffset);
-      return;
-    case TypeKind::UNKNOWN: {
-      const auto null = nullMarker(column.flags);
-      for (vector_size_t row = 0; row < keys.size(); ++row) {
-        auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
-        bool isNull;
-        readMarker(keys[row], cursor, null, isNull);
-        cursors[row] = cursor;
-        result->setNull(outputOffset + row, true);
-      }
-      return;
-    }
-    default:
-      for (vector_size_t row = 0; row < keys.size(); ++row) {
-        auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
-        EncodedKeyReader reader(
-            keys[row].bytes.data() + cursor, keys[row].bytes.size() - cursor);
-        decodeValue(
-            column,
-            reader,
-            result,
-            outputOffset + row,
-            outputOffset + keys.size());
-        cursors[row] = cursor + reader.position();
-      }
-      return;
+  for (vector_size_t row = 0; row < keys.size(); ++row) {
+    auto cursor = FirstColumn ? uint64_t{0} : cursors[row];
+    EncodedKeyReader reader(
+        keys[row].bytes.data() + cursor, keys[row].bytes.size() - cursor);
+    decodeValue(
+        column, reader, result, outputOffset + row, outputOffset + keys.size());
+    cursors[row] = cursor + reader.position();
   }
 }
 
@@ -4653,8 +4079,8 @@ void decodeColumns(
   prepareDecodeScratch(
       static_cast<vector_size_t>(keys.size()),
       pool,
-      decodeScratchWordsPerRow(
-          columns, decodedColumns, mayHaveNulls, firstColumn),
+      calculateDecodeScratchWordsPerRow(
+          columns, decodedColumns, mayHaveNulls, firstColumn, columns.size()),
       cursorScratch,
       scratch);
   auto* cursors = scratch.cursors;
@@ -4677,16 +4103,22 @@ void decodeColumns(
     }
   };
 
-  if (!decodedColumns.empty() && decodedColumns[firstColumn] == 0 &&
-      fixedBodySize(*columns[firstColumn].type).has_value()) {
-    skipFixedColumn<true>(columns[firstColumn], keys, cursors);
+  if (!decodedColumns.empty() && decodedColumns[firstColumn] == 0) {
+    if (fixedBodySize(*columns[firstColumn].type).has_value()) {
+      skipFixedColumn<true>(columns[firstColumn], keys, cursors);
+    } else {
+      skipColumn<true>(columns[firstColumn], keys, cursors);
+    }
   } else {
     decodeFirstColumn(firstColumn);
   }
   for (uint32_t column = firstColumn + 1; column < columns.size(); ++column) {
-    if (!decodedColumns.empty() && decodedColumns[column] == 0 &&
-        fixedBodySize(*columns[column].type).has_value()) {
-      skipFixedColumn<false>(columns[column], keys, cursors);
+    if (!decodedColumns.empty() && decodedColumns[column] == 0) {
+      if (fixedBodySize(*columns[column].type).has_value()) {
+        skipFixedColumn<false>(columns[column], keys, cursors);
+      } else {
+        skipColumn<false>(columns[column], keys, cursors);
+      }
     } else {
       decodeNextColumn(column);
     }
@@ -4741,7 +4173,7 @@ void decodeColumnsWithOffsetImpl(
 
   if (decodedColumns[firstColumn] != 0) {
     decode(firstColumn, true);
-  } else if (isLayeredFixedColumn(columns[firstColumn])) {
+  } else if (isFixedScalarColumn(columns[firstColumn])) {
     skipCheckedFixedColumn<true>(columns[firstColumn], keys, cursors);
   } else {
     skipColumn<true>(columns[firstColumn], keys, cursors);
@@ -4749,45 +4181,12 @@ void decodeColumnsWithOffsetImpl(
   for (uint32_t column = firstColumn + 1; column < endColumn; ++column) {
     if (decodedColumns[column] != 0) {
       decode(column, false);
-    } else if (isLayeredFixedColumn(columns[column])) {
+    } else if (isFixedScalarColumn(columns[column])) {
       skipCheckedFixedColumn<false>(columns[column], keys, cursors);
     } else {
       skipColumn<false>(columns[column], keys, cursors);
     }
   }
-}
-
-void decodeColumnsWithOffset(
-    const std::vector<RadixSortKeyColumn>& columns,
-    std::span<const EncodedKeyView> keys,
-    std::span<const uint8_t> decodedColumns,
-    std::span<const uint8_t> mayHaveNulls,
-    vector_size_t outputOffset,
-    memory::MemoryPool* pool,
-    BufferPtr& cursorScratch,
-    RowVector& output,
-    std::span<const column_index_t> directKeyChannels,
-    uint64_t scratchWordsPerRow,
-    uint32_t firstColumn) {
-  auto bindScratch = [&](DecodeScratch& scratch) {
-    prepareDecodeScratch(
-        static_cast<vector_size_t>(keys.size()),
-        pool,
-        scratchWordsPerRow,
-        cursorScratch,
-        scratch);
-  };
-  decodeColumnsWithOffsetImpl(
-      columns,
-      keys,
-      decodedColumns,
-      mayHaveNulls,
-      outputOffset,
-      output,
-      directKeyChannels,
-      firstColumn,
-      columns.size(),
-      bindScratch);
 }
 
 void decodeColumnsWithOffsetAndPreparedScratch(
@@ -4847,18 +4246,6 @@ std::vector<uint32_t> makeLeadingSkippableValidityOffsets(
 
 } // namespace
 
-uint64_t EncodedKeyBatch::fixedKeyAt(vector_size_t row) const {
-  return fixedKeys_->as<uint64_t>()[row];
-}
-
-std::string_view EncodedKeyBatch::variableKeyAt(vector_size_t row) const {
-  const auto* offsets = offsets_->as<uint64_t>();
-  const auto begin = offsets[row];
-  const auto end = offsets[row + 1];
-  return std::string_view(
-      data_ == nullptr ? nullptr : data_->as<char>() + begin, end - begin);
-}
-
 bool RadixSortKeyCodec::supportsEncodeDecode(const Type& type) {
   return supportsType(type);
 }
@@ -4877,13 +4264,16 @@ void RadixSortKeyCodec::bind(
 
   std::vector<RadixSortKeyColumn> columns;
   columns.reserve(types.size());
-  bool canEncodeDecode = true;
   std::optional<uint64_t> maximumEncodedSize = 0;
   bool maximumEncodedSizeValid = true;
   std::optional<uint64_t> fixedPrefixSize = 0;
   for (uint32_t column = 0; column < types.size(); ++column) {
     RadixSortKeyColumn metadata;
     buildMetadata(types[column], flags[column], metadata);
+    BOLT_CHECK(
+        supportsType(*types[column]),
+        "Radix sort key type is not supported: {}",
+        types[column]->toString());
     if (fixedPrefixSize.has_value() && isFixedScalarColumn(metadata)) {
       metadata.fixedPrefixOffset = static_cast<uint32_t>(*fixedPrefixSize);
       fixedPrefixSize =
@@ -4891,7 +4281,6 @@ void RadixSortKeyCodec::bind(
     } else {
       fixedPrefixSize = std::nullopt;
     }
-    canEncodeDecode &= metadata.encodeDecodeSupported;
     if (maximumEncodedSize.has_value() &&
         metadata.maximumEncodedSize.has_value()) {
       auto total =
@@ -4906,19 +4295,13 @@ void RadixSortKeyCodec::bind(
   BOLT_CHECK(
       maximumEncodedSizeValid, "Radix sort key maximum encoded size overflows");
 
-  const auto format =
-      maximumEncodedSize.has_value() && *maximumEncodedSize <= sizeof(uint64_t)
-      ? EncodedKeyFormat::kFixed64
-      : EncodedKeyFormat::kVariableBinary;
-  codec = std::unique_ptr<RadixSortKeyCodec>(new RadixSortKeyCodec(
-      std::move(columns), format, maximumEncodedSize, canEncodeDecode));
+  codec = std::unique_ptr<RadixSortKeyCodec>(
+      new RadixSortKeyCodec(std::move(columns), maximumEncodedSize));
 }
 
 RadixSortKeyCodec::RadixSortKeyCodec(
     std::vector<RadixSortKeyColumn> columns,
-    EncodedKeyFormat format,
-    std::optional<uint64_t> maximumEncodedSize,
-    bool canEncodeDecode)
+    std::optional<uint64_t> maximumEncodedSize)
     : columns_(std::move(columns)),
       rowType_([&]() {
         std::vector<TypePtr> types;
@@ -4928,9 +4311,7 @@ RadixSortKeyCodec::RadixSortKeyCodec(
         }
         return ROW(std::move(types));
       }()),
-      format_(format),
-      maximumEncodedSize_(maximumEncodedSize),
-      canEncodeDecode_(canEncodeDecode) {}
+      maximumEncodedSize_(maximumEncodedSize) {}
 
 std::vector<uint32_t> RadixSortKeyCodec::leadingSkippableValidityOffsets(
     std::span<const uint8_t> keyMayHaveNulls,
@@ -4968,126 +4349,7 @@ uint32_t RadixSortKeyCodec::fixedPrefixColumnCount(
   return count;
 }
 
-void RadixSortKeyCodec::encodeSingleFixedFlat(
-    const RowVector& input,
-    memory::MemoryPool* pool,
-    EncodedKeyBatch& result) const {
-  result.format_ = format_;
-  result.size_ = input.size();
-
-  uint64_t* words = nullptr;
-  const uint64_t* offsets = nullptr;
-  char* data = nullptr;
-  if (format_ == EncodedKeyFormat::kFixed64) {
-    words =
-        prepareReusableBuffer<uint64_t>(result.fixedKeys_, input.size(), pool);
-    std::fill(words, words + input.size(), uint64_t{0});
-  } else {
-    auto* mutableOffsets = prepareReusableBuffer<uint64_t>(
-        result.offsets_, input.size() + 1, pool);
-    mutableOffsets[0] = 0;
-    const auto* nulls = input.childAt(0)->rawNulls();
-    const auto bodySize = *fixedBodySize(*columns_[0].type);
-    for (vector_size_t row = 0; row < input.size(); ++row) {
-      mutableOffsets[row + 1] = mutableOffsets[row] +
-          ((nulls != nullptr && bits::isBitNull(nulls, row)) ? 1
-                                                             : bodySize + 1);
-    }
-    offsets = mutableOffsets;
-    if (mutableOffsets[input.size()] > 0) {
-      result.data_ =
-          AlignedBuffer::allocate<char>(mutableOffsets[input.size()], pool);
-      data = result.data_->asMutable<char>();
-    }
-  }
-
-  radixsort::encodeSingleFixedFlat(
-      columns_[0],
-      *input.childAt(0),
-      input.size(),
-      format_,
-      words,
-      offsets,
-      data);
-}
-
-void RadixSortKeyCodec::encode(
-    const RowVector& input,
-    memory::MemoryPool* pool,
-    EncodedKeyBatch& result) const {
-  BOLT_CHECK_NOT_NULL(pool, "Radix sort key memory pool must not be null");
-
-  result.format_ = format_;
-  result.size_ = input.size();
-  result.data_.reset();
-  if (format_ == EncodedKeyFormat::kFixed64) {
-    result.offsets_.reset();
-  } else {
-    result.fixedKeys_.reset();
-  }
-
-  if (canEncodeSingleFixedFlatVector(columns_, input)) {
-    encodeSingleFixedFlat(input, pool, result);
-    return;
-  }
-
-  if (format_ == EncodedKeyFormat::kFixed64) {
-    auto* words =
-        prepareReusableBuffer<uint64_t>(result.fixedKeys_, input.size(), pool);
-    std::fill(words, words + input.size(), uint64_t{0});
-    encodeCursorScratch_.resize(input.size());
-    auto* cursors = encodeCursorScratch_.data();
-    for (vector_size_t row = 0; row < input.size(); ++row) {
-      cursors[row] = static_cast<uint64_t>(row) * sizeof(uint64_t);
-    }
-    auto* data = reinterpret_cast<char*>(words);
-    ContiguousEncodeOutput output(data, cursors);
-    for (uint32_t column = 0; column < columns_.size(); ++column) {
-      encodeVariableColumn(
-          columns_[column], *input.childAt(column), 0, input.size(), output);
-    }
-    for (vector_size_t row = 0; row < input.size(); ++row) {
-      const auto rowEnd = static_cast<uint64_t>(row + 1) * sizeof(uint64_t);
-      auto word = words[row];
-      if constexpr (std::endian::native == std::endian::little) {
-        word = byteSwap(word);
-      }
-      words[row] = word;
-    }
-    return;
-  }
-
-  auto offsetCount = static_cast<uint64_t>(input.size()) + 1;
-  auto* offsets = prepareReusableBuffer<uint64_t>(
-      result.offsets_, static_cast<size_t>(offsetCount), pool);
-  initializeVariableKeySizes(columns_, input, 0, offsets);
-
-  uint64_t totalBytes = 0;
-  for (vector_size_t row = 0; row < input.size(); ++row) {
-    const auto rowSize = offsets[row];
-    offsets[row] = totalBytes;
-    totalBytes += rowSize;
-  }
-  offsets[input.size()] = totalBytes;
-
-  if (totalBytes > 0) {
-    result.data_ = AlignedBuffer::allocate<char>(totalBytes, pool);
-  }
-  auto* data =
-      result.data_ == nullptr ? nullptr : result.data_->asMutable<char>();
-  ContiguousEncodeOutput output(data, offsets);
-  for (uint32_t column = 0; column < columns_.size(); ++column) {
-    encodeVariableColumn(
-        columns_[column], *input.childAt(column), 0, input.size(), output);
-  }
-
-  for (vector_size_t row = input.size(); row > 0; --row) {
-    offsets[row] = offsets[row - 1];
-  }
-  offsets[0] = 0;
-}
-
-uint64_t RadixSortKeyCodec::encodeAndAppendVariable(
+uint64_t RadixSortKeyCodec::appendVariable(
     const RowVector& input,
     RadixSortRunStorage& arena,
     std::span<char* const> payloads,
@@ -5103,6 +4365,7 @@ uint64_t RadixSortKeyCodec::encodeAndAppendVariable(
       prepareReusableBuffer<uint64_t>(sizeScratch, input.size(), arena.pool());
   initializeVariableKeySizes(columns_, input, firstSuffixColumn, heapSizes);
 
+  DecodedKeyVectors decodedInputs;
   return arena.appendVariableKeyBatch(
       std::span<const uint64_t>(heapSizes, input.size()),
       payloads,
@@ -5116,6 +4379,7 @@ uint64_t RadixSortKeyCodec::encodeAndAppendVariable(
               source,
               count,
               output,
+              &decodedInputs,
               true);
         }
 
@@ -5126,7 +4390,12 @@ uint64_t RadixSortKeyCodec::encodeAndAppendVariable(
         for (uint32_t column = firstSuffixColumn; column < columns_.size();
              ++column) {
           encodeVariableColumn(
-              columns_[column], *input.childAt(column), source, count, output);
+              columns_[column],
+              *input.childAt(column),
+              source,
+              count,
+              output,
+              &decodedInputs);
         }
 
         const auto crossingPrefixSize =
@@ -5171,21 +4440,29 @@ bool RadixSortKeyCodec::tryAppendSingleFixedFlat(
   return true;
 }
 
-void RadixSortKeyCodec::encodeAndAppendInline(
+uint64_t RadixSortKeyCodec::append(
     const RowVector& input,
     RadixSortRunStorage& storage,
-    std::span<char* const> payloads) const {
-  BOLT_DCHECK(!storage.layout().isVariable());
+    std::span<char* const> payloads,
+    BufferPtr& sizeScratch) const {
   BOLT_DCHECK_EQ(input.childrenSize(), columns_.size());
   BOLT_DCHECK(
       storage.layout().hasPayload()
           ? payloads.size() == static_cast<size_t>(input.size())
           : payloads.empty());
+  if (storage.layout().isVariable()) {
+    return appendVariable(
+        input,
+        storage,
+        payloads,
+        fixedPrefixColumnCount(storage.layout().heapKeyOffset()),
+        sizeScratch);
+  }
 
   if (input.childrenSize() == 1 &&
       tryAppendSingleFixedFlat(
           *input.childAt(0), input.size(), storage, payloads)) {
-    return;
+    return *maximumEncodedSize_;
   }
 
   const auto append = [&]<RadixSortKeyLayoutKind KIND>() {
@@ -5194,32 +4471,35 @@ void RadixSortKeyCodec::encodeAndAppendInline(
   };
   switch (storage.layout().kind()) {
     case RadixSortKeyLayoutKind::kKeyOnlyFixed8:
-      return append
-          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed8>();
+      append.template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed8>();
+      break;
     case RadixSortKeyLayoutKind::kKeyOnlyFixed16:
-      return append
-          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed16>();
+      append.template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed16>();
+      break;
     case RadixSortKeyLayoutKind::kKeyOnlyFixed24:
-      return append
-          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed24>();
+      append.template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed24>();
+      break;
     case RadixSortKeyLayoutKind::kKeyOnlyFixed32:
-      return append
-          .template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed32>();
+      append.template operator()<RadixSortKeyLayoutKind::kKeyOnlyFixed32>();
+      break;
     case RadixSortKeyLayoutKind::kKeyWithPayloadFixed16:
-      return append.template
+      append.template
       operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>();
+      break;
     case RadixSortKeyLayoutKind::kKeyWithPayloadFixed24:
-      return append.template
+      append.template
       operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed24>();
+      break;
     case RadixSortKeyLayoutKind::kKeyWithPayloadFixed32:
-      return append.template
+      append.template
       operator()<RadixSortKeyLayoutKind::kKeyWithPayloadFixed32>();
+      break;
     case RadixSortKeyLayoutKind::kInvalid:
     case RadixSortKeyLayoutKind::kKeyOnlyVariable32:
     case RadixSortKeyLayoutKind::kKeyWithPayloadVariable32:
       BOLT_FAIL("Unsupported inline radix sort key layout");
   }
-  BOLT_UNREACHABLE();
+  return *maximumEncodedSize_;
 }
 
 bool RadixSortKeyCodec::canDecodeSingleFixedColumn() const {
@@ -5325,49 +4605,13 @@ uint64_t RadixSortKeyCodec::decodeScratchWordsPerRowWithMask(
     std::span<const uint8_t> decodedColumns,
     std::span<const uint8_t> mayHaveNulls,
     uint32_t firstColumn,
-    uint32_t endColumn,
-    bool skipMaskedVariableColumns) const {
+    uint32_t endColumn) const {
   BOLT_DCHECK_EQ(decodedColumns.size(), columns_.size());
   BOLT_DCHECK_EQ(mayHaveNulls.size(), columns_.size());
   BOLT_DCHECK_LT(firstColumn, columns_.size());
   BOLT_DCHECK_LE(endColumn, columns_.size());
   return calculateDecodeScratchWordsPerRow(
-      columns_,
-      decodedColumns,
-      mayHaveNulls,
-      firstColumn,
-      endColumn,
-      skipMaskedVariableColumns);
-}
-
-void RadixSortKeyCodec::decodeSuffixAt(
-    std::span<const EncodedKeyView> keys,
-    std::span<const uint8_t> decodedColumns,
-    std::span<const uint8_t> mayHaveNulls,
-    vector_size_t outputOffset,
-    memory::MemoryPool* scratchPool,
-    BufferPtr& cursorScratch,
-    RowVector& output,
-    std::span<const column_index_t> directKeyChannels,
-    uint64_t scratchWordsPerRow,
-    uint32_t firstColumn) const {
-  BOLT_DCHECK_NOT_NULL(scratchPool);
-  BOLT_DCHECK_GE(outputOffset, 0);
-  BOLT_DCHECK_LE(outputOffset, output.size());
-  BOLT_DCHECK_LE(
-      keys.size(), static_cast<size_t>(output.size() - outputOffset));
-  decodeColumnsWithOffset(
-      columns_,
-      keys,
-      decodedColumns,
-      mayHaveNulls,
-      outputOffset,
-      scratchPool,
-      cursorScratch,
-      output,
-      directKeyChannels,
-      scratchWordsPerRow,
-      firstColumn);
+      columns_, decodedColumns, mayHaveNulls, firstColumn, endColumn);
 }
 
 void RadixSortKeyCodec::decodeSuffixAtWithPreparedScratch(

@@ -303,6 +303,13 @@ class SpillInputStream : public ByteInputStream {
     }
   }
 
+  uint64_t remainingFileBytes() const {
+    const auto& range = ranges()[0];
+    const auto provided =
+        spillUringEnabled_ && file_->uringEnabled() ? completed_ : offset_;
+    return size_ - provided + range.size - range.position;
+  }
+
   void reuse() {
     offset_ = 0;
   }
@@ -360,6 +367,10 @@ class SpillReadFileInput {
 
   bool inputAtEnd() const {
     return input_ == nullptr || input_->atEnd();
+  }
+
+  uint64_t inputRemainingFileBytes() const {
+    return input_ == nullptr ? 0 : input_->remainingFileBytes();
   }
 
   void prefetchInput() {
