@@ -26,6 +26,7 @@ struct AggregationStats {
   uint64_t aggExtractGroupsTimeNs{0};
   uint64_t aggOutputUniqueRows{0};
   uint64_t aggOutputTimeNs{0};
+  uint64_t aggOutputReleasedBytes{0};
   uint64_t aggProbeBypassTimeNs{0};
   uint64_t aggProbeBypassCount{0};
 };
