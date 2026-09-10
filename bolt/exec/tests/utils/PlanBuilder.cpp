@@ -783,14 +783,11 @@ PlanBuilder& PlanBuilder::finalAggregation(const bool useGPU) {
   if (!exec::isRawInput(aggNode->step())) {
     // If aggregation node is not the partial aggregation, keep looking again.
     aggNode = findPartialAggregation(aggNode->sources()[0].get());
-    if (!exec::isRawInput(aggNode->step())) {
-      BOLT_CHECK_NOT_NULL(
-          aggNode,
-          "Plan node before current plan node must be a partial aggregation.");
-      BOLT_CHECK(exec::isRawInput(aggNode->step()));
-      BOLT_CHECK(exec::isPartialOutput(aggNode->step()));
-    }
+    BOLT_CHECK_NOT_NULL(aggNode);
   }
+
+  BOLT_CHECK(exec::isRawInput(aggNode->step()));
+  BOLT_CHECK(exec::isPartialOutput(aggNode->step()));
 
   auto step = core::AggregationNode::Step::kFinal;
 
