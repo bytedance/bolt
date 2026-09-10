@@ -43,6 +43,9 @@ void registerMathDecimalFunctions(const std::string& prefix) {
   BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_sub, prefix + "subtract");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_mul, prefix + "multiply");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_div, prefix + "divide");
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_integral_div, prefix + "div");
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      udf_decimal_checked_integral_div, prefix + "checked_div");
 
   BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_ceil, prefix + "ceil");
   BOLT_REGISTER_VECTOR_FUNCTION(udf_decimal_floor, prefix + "floor");
