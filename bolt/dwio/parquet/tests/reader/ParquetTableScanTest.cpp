@@ -956,7 +956,6 @@ TEST_F(ParquetTableScanTest, decimalSubfieldFilter) {
       "Scalar function signature is not supported: eq(DECIMAL(5, 2), DECIMAL(5, 1))");
 }
 
-// Core dump is fixed.
 TEST_F(ParquetTableScanTest, map) {
   auto vector = makeMapVector<StringView, StringView>({{{"name", "gluten"}}});
 
@@ -1048,7 +1047,6 @@ TEST_F(ParquetTableScanTest, nullMap) {
   assertSelectWithFilter({"i", "c"}, {}, "", "SELECT i, c FROM tmp");
 }
 
-// Core dump is fixed.
 TEST_F(ParquetTableScanTest, singleRowStruct) {
   auto vector = makeArrayVector<int32_t>({{}});
   loadData(
@@ -1175,6 +1173,21 @@ TEST_F(ParquetTableScanTest, reqArrayLegacy) {
       {},
       "",
       "SELECT UNNEST(array[array['a', 'b'], array[], array['c', 'd']])");
+}
+
+TEST_F(ParquetTableScanTest, filterOnNestedArray) {
+  loadData(
+      getExampleFilePath("struct_of_array.parquet"),
+      ROW({"struct"},
+          {ROW({"a0", "a1"}, {ARRAY(VARCHAR()), ARRAY(INTEGER())})}),
+      makeRowVector(
+          {"unused"},
+          {
+              makeFlatVector<int32_t>({}),
+          }));
+
+  assertSelectWithFilter(
+      {"struct"}, {}, "struct.a0 is null", "SELECT ROW(NULL, NULL)");
 }
 
 TEST_F(ParquetTableScanTest, readAsLowerCase) {
