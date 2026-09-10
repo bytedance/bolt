@@ -202,6 +202,9 @@ struct Timestamp {
     return Timestamp(second, nano);
   }
 
+  // date is the number of days since unix epoch.
+  static Timestamp fromDate(int32_t date);
+
   // Returns the current unix timestamp (ms precision).
   static Timestamp now();
 
