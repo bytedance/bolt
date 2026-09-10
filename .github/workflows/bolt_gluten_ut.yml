@@ -1,0 +1,152 @@
+# Run the full Gluten UT matrix against the Bolt backend via
+# scripts/gluten_ut/run.sh (parallel dispatcher with bwrap per-suite isolation,
+# slow-suites priority dispatch, case-level blacklist).
+
+name: Bolt Gluten UT
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      gluten_repo:
+        description: 'Gluten repo to check out; leave blank to use the hardcoded default below.'
+        required: false
+        default: ''
+      gluten_ref:
+        description: 'Gluten branch/tag/sha to check out; leave blank to use the hardcoded default below.'
+        required: false
+        default: ''
+
+env:
+  GLUTEN_REPO: ${{ inputs.gluten_repo || 'taiyang-li/incubator-gluten' }}
+  GLUTEN_REF: ${{ inputs.gluten_ref || 'add_bolt_backend_new' }}
+  # Matches build-test.yml — ccache + conan cache live under /data on the host.
+  CCACHE_DIR: /data/ccache-data
+  CCACHE_MAX_SIZE: '100G'
+  CI_NUM_THREADS: "16"
+  IN_CI: '1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spark-ut:
+    runs-on: [ self-hosted, medium ]
+    container:
+      image: bolt-registry:5000/bolt-ci:20260114
+      options: --user root --init --privileged
+      volumes:
+        - /data/ccache-data:/data/ccache-data
+        - /data/bolt-gluten-ut-arrow:/root/.m2/repository/org/apache/arrow
+        - /data/bolt-gluten-ut-spark:/data/bolt-gluten-ut-spark
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    timeout-minutes: 240
+    steps:
+      - name: Checkout bolt (this repo)
+        uses: actions/checkout@v6
+
+      - name: Checkout gluten at ${{ env.GLUTEN_REF }}
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GLUTEN_REPO }}
+          ref: ${{ env.GLUTEN_REF }}
+          path: gluten
+
+      - name: Install JDK 17 + bubblewrap
+        # Full JDK (not -headless) is required: arrow's cmake JNI detection
+        # needs AWT, which is only present in the full openjdk-17-jdk package.
+        # bubblewrap is used to run each suite in a isolated environment.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends openjdk-17-jdk bubblewrap
+          bwrap --version
+          bwrap --dev-bind / / --tmpfs /tmp true
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+
+      - name: Set up bolt build environment (conan)
+        uses: ./.github/actions/bolt-build-base
+
+      - name: Align conan default profile with bolt.profile
+        # bolt's Makefile installs with `-pr default -pr scripts/conan/bolt.profile`,
+        # but gluten's Makefile only uses `-pr default`. merge to default so that gluten build
+        # with same profile with bolt.
+        run: cat scripts/conan/bolt.profile >> ~/.conan2/profiles/default
+
+      - name: Build local bolt (make release_spark)
+        run: make release_spark && make export_release
+
+      - name: Build gluten native libs (make release)
+        working-directory: ${{ github.workspace }}/gluten
+        run: make release
+
+      - name: Build gluten-arrow if jars missing or patches changed
+        working-directory: ${{ github.workspace }}/gluten
+        run: |
+          ARROW_DIR=/root/.m2/repository/org/apache/arrow
+          STAMP=$ARROW_DIR/.gluten-15.0.0.stamp
+          KEY=$(sha256sum ep/build-velox/src/modify_arrow*.patch \
+                          ep/build-velox/src/cmake-compatibility.patch \
+                          dev/build_bolt_arrow.sh 2>/dev/null \
+                | sha256sum | cut -d' ' -f1)
+          mkdir -p "$ARROW_DIR"
+          (
+            flock -x 200
+            if [[ -f $STAMP && "$(cat $STAMP)" == "$KEY" ]] \
+               && ls $ARROW_DIR/arrow-dataset/15.0.0-gluten/*.jar > /dev/null 2>&1; then
+              echo "arrow jars match stamp $KEY — skip rebuild"
+            else
+              bash dev/build_bolt_arrow.sh
+              echo "$KEY" > "$STAMP"
+            fi
+          ) 200> "$ARROW_DIR/.lock"
+
+      - name: Populate Spark binary + source SQL test resources on /data
+        # Layout under /data/bolt-gluten-ut-spark/:
+        #   spark_home/             — Spark 3.5.5 binary dist. SPARK_HOME points here.
+        #   spark_src/              — full Spark 3.5.5 source tree.
+        #   spark_home/sql → ../spark_src/sql — gluten tests read source sql/ from here.
+        run: |
+          set -e
+          BASE=/data/bolt-gluten-ut-spark
+          [[ -d "$BASE/spark_home/jars" && -d "$BASE/spark_src/sql" && -L "$BASE/spark_home/sql" ]] && exit 0
+          mkdir -p "$BASE"
+          # flock guards against concurrent CI jobs
+          (
+            flock -x 200
+            [[ -d "$BASE/spark_home/jars" && -d "$BASE/spark_src/sql" && -L "$BASE/spark_home/sql" ]] && exit 0
+            command -v aria2c > /dev/null \
+              || { apt-get update -qq && apt-get install -y --no-install-recommends aria2; }
+            URL=https://archive.apache.org/dist/spark/spark-3.5.5
+            cd "$BASE"
+            aria2c --quiet -x16 -s16 -k1M -o bin.tgz "$URL/spark-3.5.5-bin-hadoop3.tgz"
+            aria2c --quiet -x16 -s16 -k1M -o src.tgz "$URL/spark-3.5.5.tgz"
+            mkdir -p spark_home spark_src
+            tar -xzf bin.tgz --strip-components=1 -C spark_home
+            tar -xzf src.tgz --strip-components=1 -C spark_src
+            ln -sfn ../spark_src/sql spark_home/sql
+            rm -f bin.tgz src.tgz
+          ) 200> "$BASE/.lock"
+
+      - name: Run Gluten UT (parallel, blacklist-aware)
+        env:
+          GLUTEN_HOME: ${{ github.workspace }}/gluten
+          SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
+          JOBS: '8'
+        run: bash scripts/gluten_ut/run.sh
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolt-gluten-ut-reports
+          path: |
+            scripts/gluten_ut/logs/*.log
+            scripts/gluten_ut/logs/*.tsv
+            scripts/gluten_ut/logs/reports/**/TEST-*.xml
+          if-no-files-found: warn
