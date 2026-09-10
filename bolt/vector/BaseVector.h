@@ -502,9 +502,11 @@ class BaseVector {
       bool canCopyAll);
 
   // Utility for making a deep copy of a whole vector.
-  static VectorPtr copy(const BaseVector& vector) {
-    auto result =
-        BaseVector::create(vector.type(), vector.size(), vector.pool());
+  static VectorPtr copy(
+      const BaseVector& vector,
+      bolt::memory::MemoryPool* pool = nullptr) {
+    auto result = BaseVector::create(
+        vector.type(), vector.size(), pool ? pool : vector.pool());
     result->copy(&vector, 0, 0, vector.size());
     return result;
   }
@@ -534,8 +536,15 @@ class BaseVector {
     BOLT_UNSUPPORTED("Can only copy into flat or complex vectors");
   }
 
-  // Construct a zero-copy slice of the vector with the indicated offset and
-  // length.
+  /// Transfer or copy this vector and all its buffers recursively to 'pool'.
+  /// The transfer of a buffer is allowed if its original pool and 'pool' are
+  /// from the same MemoryAllocator and the buffer is not a BufferView. If a
+  /// buffer is not allowed to be transferred, it is copied to pool. After this
+  /// call, this vector and all its buffers are owned by 'pool'.
+  virtual void transferOrCopyTo(bolt::memory::MemoryPool* pool);
+
+  /// Construct a zero-copy slice of the vector with the indicated offset and
+  /// length.
   virtual VectorPtr slice(vector_size_t offset, vector_size_t length) const = 0;
 
   // Returns a vector of the type of 'source' where 'indices' contains

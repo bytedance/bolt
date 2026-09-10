@@ -258,6 +258,15 @@ class DictionaryVector : public SimpleVector<T> {
 
   void validate(const VectorValidateOptions& options) const override;
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* pool) override {
+    BaseVector::transferOrCopyTo(pool);
+    dictionaryValues_->transferOrCopyTo(pool);
+    if (!indices_->transferTo(pool)) {
+      indices_ = AlignedBuffer::copy<vector_size_t>(indices_, pool);
+      rawIndices_ = indices_->as<vector_size_t>();
+    }
+  }
+
  private:
   // return the dictionary index for the specified vector index.
   inline vector_size_t getDictionaryIndex(vector_size_t idx) const {

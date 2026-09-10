@@ -311,6 +311,9 @@ class VectorFuzzer {
       const std::vector<TypePtr>& scalarTypes,
       int maxDepth = 5);
 
+  /// Returns a random integer between min and max inclusive
+  size_t randInRange(size_t min, size_t max);
+
   // Generates short decimal TypePtr with random precision and scale.
   TypePtr randShortDecimalType();
 
