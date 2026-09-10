@@ -114,6 +114,32 @@ struct ShiftRightFunction {
 };
 
 template <typename T>
+struct ShiftRightUnsignedFunction {
+  template <typename TInput1, typename TInput2>
+  FOLLY_ALWAYS_INLINE void call(TInput1& result, TInput1 a, TInput2 b) {
+    if constexpr (std::is_same_v<TInput1, int32_t>) {
+      if (b < 0) {
+        b = b % 32 + 32;
+      }
+      if (b >= 32) {
+        b = b % 32;
+      }
+    }
+    if constexpr (std::is_same_v<TInput1, int64_t>) {
+      if (b < 0) {
+        b = b % 64 + 64;
+      }
+      if (b >= 64) {
+        b = b % 64;
+      }
+    }
+    // Java's >>> : shift the bit pattern, not the signed value.
+    using TUnsigned = std::make_unsigned_t<TInput1>;
+    result = static_cast<TInput1>(static_cast<TUnsigned>(a) >> b);
+  }
+};
+
+template <typename T>
 struct BitCountFunction {
   template <typename TInput>
   FOLLY_ALWAYS_INLINE void call(int32_t& result, TInput num) {

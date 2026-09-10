@@ -109,6 +109,18 @@ class BitwiseTest : public SparkFunctionBaseTest {
       std::optional<T2> b) {
     return evaluateOnce<T1>("shiftright(c0, c1)", a, b);
   }
+
+  template <typename T>
+  std::optional<T> shiftRightUnsigned(std::optional<T> a, std::optional<T> b) {
+    return evaluateOnce<T>("shiftrightunsigned(c0, c1)", a, b);
+  }
+
+  template <typename T1, typename T2>
+  std::optional<T1> shiftRightUnsigned_twoTypes(
+      std::optional<T1> a,
+      std::optional<T2> b) {
+    return evaluateOnce<T1>("shiftrightunsigned(c0, c1)", a, b);
+  }
 };
 
 TEST_F(BitwiseTest, bitwiseAnd) {
@@ -298,6 +310,37 @@ TEST_F(BitwiseTest, shiftRight) {
   EXPECT_EQ((shiftRight_twoTypes<int64_t, int32_t>(kMax64, 1)), kMax64 >> 1);
   EXPECT_EQ(
       (shiftRight_twoTypes<int64_t, int32_t>(kMin64, 1)), -4611686018427387904);
+}
+
+TEST_F(BitwiseTest, shiftRightUnsigned) {
+  // Logical shift: vacated high bits are zero-filled, as with Java's >>>.
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(-1, 1), kMax32);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(-3, 1), 2147483646);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(kMin32, 1), 1073741824);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(kMin32, 31), 1);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(kMax32, 1), kMax32 >> 1);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(kMax32, kMax32), 0);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(0, 5), 0);
+
+  // Shift count is reduced modulo the type width, as in Java.
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(-1, 32), -1);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(-1, 33), kMax32);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(-1, -1), 1);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(-1, kMin32), -1);
+
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(std::nullopt, 1), std::nullopt);
+  EXPECT_EQ(shiftRightUnsigned<int32_t>(1, std::nullopt), std::nullopt);
+
+  EXPECT_EQ((shiftRightUnsigned_twoTypes<int64_t, int32_t>(-1, 1)), kMax64);
+  EXPECT_EQ(
+      (shiftRightUnsigned_twoTypes<int64_t, int32_t>(kMin64, 1)),
+      4611686018427387904);
+  EXPECT_EQ((shiftRightUnsigned_twoTypes<int64_t, int32_t>(kMin64, 63)), 1);
+  EXPECT_EQ(
+      (shiftRightUnsigned_twoTypes<int64_t, int32_t>(kMax64, 1)), kMax64 >> 1);
+  EXPECT_EQ((shiftRightUnsigned_twoTypes<int64_t, int32_t>(-1, 64)), -1);
+  EXPECT_EQ((shiftRightUnsigned_twoTypes<int64_t, int32_t>(-1, 65)), kMax64);
+  EXPECT_EQ((shiftRightUnsigned_twoTypes<int64_t, int32_t>(-1, -1)), 1);
 }
 
 } // namespace
