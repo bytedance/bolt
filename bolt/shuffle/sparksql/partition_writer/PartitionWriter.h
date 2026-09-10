@@ -38,6 +38,11 @@
 #include "bolt/shuffle/sparksql/ShuffleMemoryPool.h"
 #include "bolt/shuffle/sparksql/Spill.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+
+namespace bytedance::bolt::memory {
+class MemoryPool;
+}
+
 namespace bytedance::bolt::shuffle::sparksql {
 
 struct Evict {
@@ -66,7 +71,8 @@ class PartitionWriter {
 
   static std::unique_ptr<PartitionWriter> create(
       PartitionWriterOptions options,
-      arrow::MemoryPool* pool);
+      arrow::MemoryPool* pool,
+      bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool = nullptr);
 
   virtual ~PartitionWriter() = default;
 
@@ -92,7 +98,11 @@ class PartitionWriter {
       bool hasComplexType) = 0;
 
   uint64_t cachedPayloadSize() {
-    return payloadPool_->bytes_allocated();
+    auto bytes = payloadPool_->bytes_allocated();
+    if (retainedPayloadPool_) {
+      bytes += retainedPayloadPool_->bytes_allocated();
+    }
+    return bytes;
   }
 
   // for V2
@@ -151,6 +161,11 @@ class PartitionWriter {
   };
 
  protected:
+  arrow::MemoryPool* retainedPayloadPool() const {
+    return retainedPayloadPool_ ? retainedPayloadPool_.get()
+                                : payloadPool_.get();
+  }
+
   uint32_t numPartitions_;
   PartitionWriterOptions options_;
   arrow::MemoryPool* pool_;
@@ -158,6 +173,9 @@ class PartitionWriter {
   // Memory Pool used to track memory allocation of partition payloads.
   // The actual allocation is delegated to options_.memoryPool.
   std::unique_ptr<ShuffleMemoryPool> payloadPool_;
+
+  // Optional task-accounted pool for retained payloads.
+  std::unique_ptr<arrow::MemoryPool> retainedPayloadPool_;
 
   std::unique_ptr<Codec> codec_;
 
