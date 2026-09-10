@@ -21,19 +21,16 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <cstring>
 #include <numeric>
 #include <vector>
 
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/exec/HybridSorter.h"
 #include "bolt/exec/RowContainer.h"
-#include "bolt/exec/radixsort/RadixSortKey.h"
-#include "bolt/exec/radixsort/RadixSortRunSorter.h"
-#include "bolt/exec/radixsort/RadixSortRunStorage.h"
-#include "bolt/exec/radixsort/RadixSortUtils.h"
+#include "bolt/exec/radixsort/RadixSortRun.h"
 #include "bolt/jit/CompiledModule.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
+#include "bolt/vector/FlatVector.h"
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -70,7 +67,6 @@ constexpr std::array<Scenario, 14> kScenarios{{
     {"low_cardinality_w8_10m", 10'000'000, 8, DataPattern::kLowCardinality},
 }};
 
-std::shared_ptr<memory::MemoryPool> pool;
 std::atomic<uint64_t> adaptivePoolSequence{0};
 
 uint64_t randomBits(uint64_t value) {
@@ -88,19 +84,6 @@ uint64_t keyWord(const Scenario& scenario, uint64_t row, uint32_t word) {
       return randomBits(row + word * 257);
   }
   BOLT_UNREACHABLE("Unsupported radix sort benchmark data pattern");
-}
-
-std::vector<uint64_t> makeInput(const Scenario& scenario) {
-  std::vector<uint64_t> data(
-      static_cast<uint64_t>(scenario.rows) * scenario.words);
-  for (uint32_t row = 0; row < scenario.rows; ++row) {
-    for (uint32_t word = 0; word < scenario.words; ++word) {
-      const auto value = keyWord(scenario, row, word);
-      data[static_cast<uint64_t>(row) * scenario.words + word] =
-          byteSwap<uint64_t>(value);
-    }
-  }
-  return data;
 }
 
 uint64_t unsignedKeyWordForSignedCompare(const uint64_t word) {
@@ -182,47 +165,28 @@ void legacyAdaptiveSort(unsigned iterations, uint32_t scenarioIndex) {
   }
 }
 
-RadixSortKeyLayout layoutForWords(uint32_t words) {
-  switch (words) {
-    case 1:
-      return RadixSortKeyLayout::fromKind(
-          RadixSortKeyLayoutKind::kKeyOnlyFixed8);
-    case 2:
-      return RadixSortKeyLayout::fromKind(
-          RadixSortKeyLayoutKind::kKeyOnlyFixed16);
-    case 3:
-      return RadixSortKeyLayout::fromKind(
-          RadixSortKeyLayoutKind::kKeyOnlyFixed24);
-    case 4:
-      return RadixSortKeyLayout::fromKind(
-          RadixSortKeyLayoutKind::kKeyOnlyFixed32);
-    default:
-      return RadixSortKeyLayout::fromKind(
-          RadixSortKeyLayoutKind::kKeyOnlyVariable32);
+RowVectorPtr makeRadixInput(
+    const Scenario& scenario,
+    memory::MemoryPool* sortPool) {
+  std::vector<VectorPtr> children;
+  children.reserve(scenario.words);
+  for (uint32_t word = 0; word < scenario.words; ++word) {
+    auto values = BaseVector::create<FlatVector<int64_t>>(
+        BIGINT(), scenario.rows, sortPool);
+    for (uint32_t row = 0; row < scenario.rows; ++row) {
+      values->set(
+          row,
+          static_cast<int64_t>(
+              unsignedKeyWordForSignedCompare(keyWord(scenario, row, word))));
+    }
+    children.push_back(std::move(values));
   }
-}
-
-void appendToStorage(
-    RadixSortRunStorage& storage,
-    const uint64_t* data,
-    const Scenario& scenario) {
-  if (scenario.words <= 4) {
-    storage.appendKeyBlocks(
-        scenario.rows,
-        [&](vector_size_t source, vector_size_t count, char* out) {
-          std::memcpy(
-              out,
-              data + static_cast<uint64_t>(source) * scenario.words,
-              static_cast<size_t>(count) * scenario.words * sizeof(uint64_t));
-        });
-    return;
-  }
-  for (uint32_t row = 0; row < scenario.rows; ++row) {
-    storage.append(std::string_view(
-        reinterpret_cast<const char*>(
-            data + static_cast<uint64_t>(row) * scenario.words),
-        static_cast<size_t>(scenario.words) * sizeof(uint64_t)));
-  }
+  return std::make_shared<RowVector>(
+      sortPool,
+      ROW(bigintKeyTypes(scenario.words)),
+      nullptr,
+      scenario.rows,
+      std::move(children));
 }
 
 void radixRunSort(unsigned iterations, uint32_t scenarioIndex) {
@@ -231,17 +195,22 @@ void radixRunSort(unsigned iterations, uint32_t scenarioIndex) {
   for (unsigned iteration = 0; iteration < iterations; ++iteration) {
     auto sortPool = memory::memoryManager()->addLeafPool(fmt::format(
         "radix-sort-algorithm-benchmark-{}-{}", scenarioIndex, iteration));
-    RadixSortRunStorage storage(
-        sortPool.get(),
-        layoutForWords(scenario.words),
-        RadixSortRunStorage::kTestingRowsPerBlock,
-        64 * 1024);
-    auto data = makeInput(scenario);
-    appendToStorage(storage, data.data(), scenario);
-    RadixSortRunSorter sorter(storage);
+    auto input = makeRadixInput(scenario, sortPool.get());
+    const auto rowType = std::static_pointer_cast<const RowType>(input->type());
+    std::vector<column_index_t> keyChannels(scenario.words);
+    std::iota(keyChannels.begin(), keyChannels.end(), 0);
+    const std::vector<CompareFlags> flags(
+        scenario.words,
+        CompareFlags{
+            .nullsFirst = true,
+            .ascending = true,
+            .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue});
+    auto run = RadixSortRun::create(
+        sortPool.get(), rowType, rowType, flags, keyChannels, {});
+    run->append(*input);
     suspender.dismiss();
-    sorter.sort();
-    folly::doNotOptimizeAway(storage.keyDataAt(0));
+    run->finalize();
+    folly::doNotOptimizeAway(run->storage()->keyRangeAt(0, 1).data);
     suspender.rehire();
   }
 }
@@ -273,7 +242,6 @@ SORT_ALGORITHM_BENCHMARKS(low_cardinality_w8_10m, 13);
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
   memory::MemoryManager::initialize(memory::MemoryManager::Options{});
-  pool = memory::memoryManager()->addLeafPool("sort-algorithm-inputs");
   folly::runBenchmarks();
   return 0;
 }

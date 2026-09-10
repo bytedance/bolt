@@ -18,6 +18,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
+#include "bolt/exec/radixsort/RadixSortRunSorter.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 
 namespace bytedance::bolt::exec::radixsort {
@@ -249,14 +250,8 @@ std::unique_ptr<RadixSortRun> RadixSortRun::create(
         projection->hasPayload(),
         keyCodec->heapKeyOffsetForVariableLayout(keyLayout.inlineCapacity()));
   }
-  auto arena = std::make_unique<RadixSortRunStorage>(
-      pool,
-      keyLayout,
-      options.keysPerBlock,
-      options.preferredKeyHeapGroupBytes,
-      payloadLayout,
-      options.payloadRowsPerBlock,
-      options.preferredPayloadHeapGroupBytes);
+  auto arena =
+      std::make_unique<RadixSortRunStorage>(pool, keyLayout, payloadLayout);
   return std::unique_ptr<RadixSortRun>(new RadixSortRun(
       pool,
       std::move(projection),
@@ -294,19 +289,15 @@ void RadixSortRun::append(const RowVector& input) {
     currentRunKeyMayHaveNulls_[column] |= mayHaveNulls;
   }
 
-  const bool directVariableKey = keyLayout_.isVariable();
   const auto appendKeys = [&](std::span<char* const> payloads) {
-    if (directVariableKey) {
-      const auto batchMaximumEncodedKeySize =
-          keyCodec_->encodeAndAppendVariable(
-              keys, *storage_, payloads, firstSuffixColumn_, keySizeScratch_);
+    const auto batchMaximumEncodedKeySize =
+        keyCodec_->append(keys, *storage_, payloads, keySizeScratch_);
+    if (keyLayout_.isVariable()) {
       currentRunMaximumEncodedKeySize_ = std::max(
           currentRunMaximumEncodedKeySize_, batchMaximumEncodedKeySize);
       variableKeysFitRadixPrefix_ &=
           batchMaximumEncodedKeySize <= keyLayout_.inlineCapacity();
-      return;
     }
-    keyCodec_->encodeAndAppendInline(keys, *storage_, payloads);
   };
 
   if (projection_->hasPayload()) {
@@ -365,13 +356,6 @@ void RadixSortRun::finalize() {
   }
   metrics_.sortTimeUs += elapsedUs(begin);
   state_ = RadixSortRunState::kSortedInMemory;
-}
-
-RowVectorPtr RadixSortRun::getOutput(
-    vector_size_t maxRows,
-    memory::MemoryPool* outputPool) {
-  RowVectorPtr output;
-  return getOutput(maxRows, outputPool, output);
 }
 
 RowVectorPtr RadixSortRun::getOutput(
@@ -458,19 +442,14 @@ void RadixSortRun::ensureMergeDecodePlan() {
   if (!plan.singleFixedWordBytes.has_value()) {
     if (!keyLayout_.isVariable() || plan.decodeEndColumn > firstSuffixColumn_) {
       plan.scratchWords = keyCodec_->decodeScratchWordsPerRowWithMask(
-          decodedKeyMask,
-          keyMayHaveNulls_,
-          firstColumn,
-          plan.decodeEndColumn,
-          /*skipMaskedVariableColumns=*/true);
+          decodedKeyMask, keyMayHaveNulls_, firstColumn, plan.decodeEndColumn);
     }
 
     plan.directScratchWords = keyCodec_->decodeScratchWordsPerRowWithMask(
         decodedKeyMask,
         keyMayHaveNulls_,
         firstColumn,
-        static_cast<uint32_t>(decodedKeyMask.size()),
-        /*skipMaskedVariableColumns=*/false);
+        static_cast<uint32_t>(decodedKeyMask.size()));
   }
   mergeDecodePlan_.emplace(std::move(plan));
 }

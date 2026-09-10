@@ -26,7 +26,6 @@
 #include "bolt/common/memory/AllocationPool.h"
 #include "bolt/exec/radixsort/PayloadRow.h"
 #include "bolt/exec/radixsort/RadixSortKey.h"
-#include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 
 namespace bytedance::bolt::exec::radixsort {
 
@@ -40,7 +39,6 @@ struct RadixSortKeyOverflowBlock {
   char* base;
   uint64_t capacity;
   uint64_t used;
-  uint64_t keyCount;
 };
 
 struct PayloadRowFixedBlock {
@@ -50,10 +48,7 @@ struct PayloadRowFixedBlock {
 };
 
 struct PayloadRowHeapBlock {
-  char* base;
-  uint64_t capacity;
   uint64_t used;
-  uint64_t rowCount;
 };
 
 struct RadixSortKeyRange {
@@ -63,33 +58,16 @@ struct RadixSortKeyRange {
 
 class PayloadRowBatch {
  public:
-  vector_size_t size() const {
-    return size_;
-  }
-
-  char* rowAt(vector_size_t row) const;
-
   char* heapAt(vector_size_t row) const;
-
-  uint64_t heapSizeAt(vector_size_t row) const;
 
   const BufferPtr& rows() const {
     return rows_;
-  }
-
-  const BufferPtr& heaps() const {
-    return heaps_;
-  }
-
-  const BufferPtr& heapSizes() const {
-    return heapSizes_;
   }
 
  private:
   friend class RadixSortRunStorage;
   friend class PayloadRowWriter;
 
-  vector_size_t size_{0};
   BufferPtr rows_;
   BufferPtr heaps_;
   BufferPtr heapSizes_;
@@ -97,19 +75,10 @@ class PayloadRowBatch {
 
 class RadixSortRunStorage {
  public:
-  static constexpr uint32_t kAutoRowsPerBlock = 0;
-  static constexpr uint32_t kTestingRowsPerBlock = 2048;
-  static constexpr uint64_t kDefaultKeyBlockBytes = 64 * 1024;
-  static constexpr uint64_t kDefaultHeapGroupBytes = 64 * 1024;
-
   RadixSortRunStorage(
       memory::MemoryPool* pool,
       RadixSortKeyLayout layout,
-      uint32_t keysPerBlock = kAutoRowsPerBlock,
-      uint64_t preferredHeapGroupBytes = kDefaultHeapGroupBytes,
-      std::shared_ptr<const PayloadRowLayout> payloadLayout = nullptr,
-      uint32_t payloadRowsPerBlock = kAutoRowsPerBlock,
-      uint64_t preferredPayloadHeapGroupBytes = kDefaultHeapGroupBytes);
+      std::shared_ptr<const PayloadRowLayout> payloadLayout = nullptr);
 
   const RadixSortKeyLayout& layout() const {
     return layout_;
@@ -131,24 +100,8 @@ class RadixSortRunStorage {
     return keyBlocks_;
   }
 
-  const auto& keyHeapGroups() const {
-    return keyHeapGroups_;
-  }
-
   const std::shared_ptr<const PayloadRowLayout>& payloadLayout() const {
     return payloadLayout_;
-  }
-
-  uint64_t payloadSize() const {
-    return payloadSize_;
-  }
-
-  const auto& payloadFixedBlocks() const {
-    return payloadFixedBlocks_;
-  }
-
-  const auto& payloadHeapGroups() const {
-    return payloadHeapGroups_;
   }
 
   int64_t allocatedBytes() const {
@@ -157,32 +110,7 @@ class RadixSortRunStorage {
 
   uint64_t estimatedOutputBytes() const;
 
-  int32_t numRanges() const {
-    return allocationPool_.numRanges();
-  }
-
-  RadixSortKey keyAt(uint64_t index);
-
-  RadixSortKey keyAt(uint64_t index) const;
-
-  char* keyDataAt(uint64_t index);
-
-  const char* keyDataAt(uint64_t index) const;
-
   RadixSortKeyRange keyRangeAt(uint64_t index, vector_size_t maxCount) const;
-
-  void append(
-      std::string_view encodedKey,
-      char* payload = nullptr,
-      uint64_t* index = nullptr);
-
-  void appendBatch(
-      std::span<const std::string_view> encodedKeys,
-      std::span<char* const> payloads = {});
-
-  void appendBatch(
-      const EncodedKeyBatch& encodedKeys,
-      std::span<char* const> payloads = {});
 
   template <typename Append>
   void appendKeyBlocks(vector_size_t count, Append append) {
@@ -203,10 +131,6 @@ class RadixSortRunStorage {
 
   void allocatePayloadRowBatch(
       std::span<const uint64_t> heapSizes,
-      PayloadRowBatch& batch);
-
-  void allocatePayloadRowBatch(
-      std::span<const uint64_t> heapSizes,
       const BufferPtr& sizeStorage,
       PayloadRowBatch& batch);
 
@@ -218,6 +142,8 @@ class RadixSortRunStorage {
 
  private:
   friend class RadixSortKeyCodec;
+
+  static constexpr uint64_t kDefaultBlockBytes = 64 * 1024;
 
   template <typename Encode>
   uint64_t appendVariableKeyBatch(
@@ -273,10 +199,6 @@ class RadixSortRunStorage {
 
   void ensurePayloadFixedBlock();
 
-  static uint32_t normalizeKeysPerBlock(
-      uint32_t keysPerBlock,
-      const RadixSortKeyLayout& layout);
-
   void allocatePayloadRowPointers(vector_size_t count, char** rows);
 
   void allocateOverflow(uint64_t size, char*& data);
@@ -284,17 +206,13 @@ class RadixSortRunStorage {
   memory::MemoryPool* pool_;
   RadixSortKeyLayout layout_;
   uint32_t keysPerBlock_;
-  uint64_t preferredHeapGroupBytes_;
   std::shared_ptr<const PayloadRowLayout> payloadLayout_;
-  uint32_t payloadRowsPerBlock_;
-  uint64_t preferredPayloadHeapGroupBytes_;
   memory::AllocationPool allocationPool_;
   BlockVector keyBlocks_;
   HeapGroupVector keyHeapGroups_;
   PayloadFixedBlockVector payloadFixedBlocks_;
   PayloadHeapGroupVector payloadHeapGroups_;
   uint64_t size_{0};
-  uint64_t payloadSize_{0};
 };
 
 } // namespace bytedance::bolt::exec::radixsort

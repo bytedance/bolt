@@ -1683,7 +1683,7 @@ bool shouldClearPayloadSlots(const RowVector& input) {
 }
 
 template <typename T>
-void writeFixedFlatColumn(
+void writeFixedFlatColumnTyped(
     const PayloadRowColumnLayout& column,
     const BaseVector& vector,
     char* const* rows,
@@ -1702,7 +1702,7 @@ void writeFixedFlatColumn(
 }
 
 template <>
-void writeFixedFlatColumn<bool>(
+void writeFixedFlatColumnTyped<bool>(
     const PayloadRowColumnLayout& column,
     const BaseVector& vector,
     char* const* rows,
@@ -1721,56 +1721,42 @@ void writeFixedFlatColumn<bool>(
   }
 }
 
+template <TypeKind Kind>
+void writeFixedFlatColumnByKind(
+    const PayloadRowColumnLayout& column,
+    const BaseVector& vector,
+    char* const* rows,
+    vector_size_t begin,
+    vector_size_t end) {
+  if constexpr (Kind == TypeKind::UNKNOWN) {
+    for (vector_size_t row = begin; row < end; ++row) {
+      setNull(rows[row], column);
+    }
+  } else if constexpr (
+      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    BOLT_FAIL(
+        "Sort fixed payload fast path is not implemented for ",
+        column.type->toString());
+  } else {
+    using T = typename TypeTraits<Kind>::NativeType;
+    writeFixedFlatColumnTyped<T>(column, vector, rows, begin, end);
+  }
+}
+
 void writeFixedFlatColumn(
     const PayloadRowColumnLayout& column,
     const BaseVector& vector,
     char* const* rows,
     vector_size_t begin,
     vector_size_t end) {
-  if (column.type->isShortDecimal()) {
-    writeFixedFlatColumn<int64_t>(column, vector, rows, begin, end);
-    return;
-  }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
-    writeFixedFlatColumn<int128_t>(column, vector, rows, begin, end);
-    return;
-  }
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN:
-      writeFixedFlatColumn<bool>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::TINYINT:
-      writeFixedFlatColumn<int8_t>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::SMALLINT:
-      writeFixedFlatColumn<int16_t>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::INTEGER:
-      writeFixedFlatColumn<int32_t>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::BIGINT:
-      writeFixedFlatColumn<int64_t>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::REAL:
-      writeFixedFlatColumn<float>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::DOUBLE:
-      writeFixedFlatColumn<double>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::TIMESTAMP:
-      writeFixedFlatColumn<Timestamp>(column, vector, rows, begin, end);
-      return;
-    case TypeKind::UNKNOWN:
-      for (vector_size_t row = begin; row < end; ++row) {
-        setNull(rows[row], column);
-      }
-      return;
-    default:
-      BOLT_FAIL(
-          "Sort fixed payload fast path is not implemented for ",
-          column.type->toString());
-  }
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      writeFixedFlatColumnByKind,
+      column.type->kind(),
+      column,
+      vector,
+      rows,
+      begin,
+      end);
 }
 
 void writeFlatStringValue(
@@ -1801,7 +1787,7 @@ void writeFlatStringValue(
 }
 
 template <typename T>
-void writeFixedDecodedColumn(
+void writeFixedDecodedColumnTyped(
     const PayloadRowColumnLayout& column,
     DecodedVector& decoded,
     char* const* rows,
@@ -1840,82 +1826,68 @@ void writeFixedDecodedColumn(
   }
 }
 
+template <TypeKind Kind>
+void writeFixedDecodedColumnByKind(
+    const PayloadRowColumnLayout& column,
+    DecodedVector& decoded,
+    char* const* rows,
+    vector_size_t begin,
+    vector_size_t end) {
+  if constexpr (Kind == TypeKind::BOOLEAN) {
+    if (decoded.isConstantMapping()) {
+      const bool isNull = decoded.isNullAt(0);
+      const auto value =
+          isNull ? uint8_t{0} : static_cast<uint8_t>(decoded.valueAt<bool>(0));
+      for (vector_size_t row = begin; row < end; ++row) {
+        if (isNull) {
+          setNull(rows[row], column);
+        } else {
+          storeUnaligned<uint8_t>(rows[row] + column.offset, value);
+        }
+      }
+      return;
+    }
+    const auto* values = decoded.data<uint64_t>();
+    const auto* indices = decoded.indices();
+    const auto* nulls = decoded.nulls();
+    for (vector_size_t row = begin; row < end; ++row) {
+      if (nulls != nullptr && bits::isBitNull(nulls, row)) {
+        setNull(rows[row], column);
+      } else {
+        storeUnaligned<uint8_t>(
+            rows[row] + column.offset,
+            static_cast<uint8_t>(bits::isBitSet(values, indices[row])));
+      }
+    }
+  } else if constexpr (Kind == TypeKind::UNKNOWN) {
+    for (vector_size_t row = begin; row < end; ++row) {
+      setNull(rows[row], column);
+    }
+  } else if constexpr (
+      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    BOLT_FAIL(
+        "Sort fixed payload column is not implemented for ",
+        column.type->toString());
+  } else {
+    using T = typename TypeTraits<Kind>::NativeType;
+    writeFixedDecodedColumnTyped<T>(column, decoded, rows, begin, end);
+  }
+}
+
 void writeFixedDecodedColumn(
     const PayloadRowColumnLayout& column,
     DecodedVector& decoded,
     char* const* rows,
     vector_size_t begin,
     vector_size_t end) {
-  if (column.type->isShortDecimal()) {
-    writeFixedDecodedColumn<int64_t>(column, decoded, rows, begin, end);
-    return;
-  }
-  if (column.type->isLongDecimal() ||
-      column.type->kind() == TypeKind::HUGEINT) {
-    writeFixedDecodedColumn<int128_t>(column, decoded, rows, begin, end);
-    return;
-  }
-  switch (column.type->kind()) {
-    case TypeKind::BOOLEAN: {
-      if (decoded.isConstantMapping()) {
-        const bool isNull = decoded.isNullAt(0);
-        const auto value = isNull
-            ? uint8_t{0}
-            : static_cast<uint8_t>(decoded.valueAt<bool>(0));
-        for (vector_size_t row = begin; row < end; ++row) {
-          if (isNull) {
-            setNull(rows[row], column);
-          } else {
-            storeUnaligned<uint8_t>(rows[row] + column.offset, value);
-          }
-        }
-        return;
-      }
-      const auto* values = decoded.data<uint64_t>();
-      const auto* indices = decoded.indices();
-      const auto* nulls = decoded.nulls();
-      for (vector_size_t row = begin; row < end; ++row) {
-        if (nulls != nullptr && bits::isBitNull(nulls, row)) {
-          setNull(rows[row], column);
-        } else {
-          storeUnaligned<uint8_t>(
-              rows[row] + column.offset,
-              static_cast<uint8_t>(bits::isBitSet(values, indices[row])));
-        }
-      }
-      return;
-    }
-    case TypeKind::TINYINT:
-      writeFixedDecodedColumn<int8_t>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::SMALLINT:
-      writeFixedDecodedColumn<int16_t>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::INTEGER:
-      writeFixedDecodedColumn<int32_t>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::BIGINT:
-      writeFixedDecodedColumn<int64_t>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::REAL:
-      writeFixedDecodedColumn<float>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::DOUBLE:
-      writeFixedDecodedColumn<double>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::TIMESTAMP:
-      writeFixedDecodedColumn<Timestamp>(column, decoded, rows, begin, end);
-      return;
-    case TypeKind::UNKNOWN:
-      for (vector_size_t row = begin; row < end; ++row) {
-        setNull(rows[row], column);
-      }
-      return;
-    default:
-      BOLT_FAIL(
-          "Sort fixed payload column is not implemented for ",
-          column.type->toString());
-  }
+  BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      writeFixedDecodedColumnByKind,
+      column.type->kind(),
+      column,
+      decoded,
+      rows,
+      begin,
+      end);
 }
 
 void writeFixedDecodedColumn(

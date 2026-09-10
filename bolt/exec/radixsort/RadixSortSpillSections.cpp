@@ -295,7 +295,7 @@ void copyRowsToSectionsForLayout(
       const auto keyHeapSize = encodedSize - meta.keyHeapOffset;
       // keyHeapBytes is the sizing snapshot for this range. Source records
       // must remain immutable until this delayed copy completes.
-      BOLT_DCHECK_LE(keyHeap, keyHeapEnd);
+      BOLT_DCHECK(keyHeap <= keyHeapEnd);
       BOLT_DCHECK_LE(keyHeapSize, static_cast<uint64_t>(keyHeapEnd - keyHeap));
       std::memcpy(
           keyHeap,
@@ -317,10 +317,10 @@ void copyRowsToSectionsForLayout(
     destinationKey += kWireKeyRecordSize;
   }
   if constexpr (kHasKeyHeap) {
-    BOLT_DCHECK_EQ(keyHeap, keyHeapEnd);
+    BOLT_DCHECK(keyHeap == keyHeapEnd);
   }
   if constexpr (HasPayloadHeap) {
-    BOLT_DCHECK_EQ(payloadHeap, payloadHeapStart + payloadHeapBytes);
+    BOLT_DCHECK(payloadHeap == payloadHeapStart + payloadHeapBytes);
   }
 }
 

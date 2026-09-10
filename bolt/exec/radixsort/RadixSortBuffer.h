@@ -79,14 +79,6 @@ class RadixSortBuffer : public SortBufferBase {
                                 : std::make_optional(std::move(stats));
   }
 
-  size_t testingSpilledRunCount() const {
-    return spilledRuns_.size();
-  }
-
-  size_t testingMergeStreamCount() const {
-    return merger_ == nullptr ? 0 : merger_->testingNumStreams();
-  }
-
   std::optional<common::SpillReadStats> spillReadStats() const override;
 
   size_t numInputRows() const override;
@@ -141,7 +133,6 @@ class RadixSortBuffer : public SortBufferBase {
   std::vector<column_index_t> directKeyChannels_;
   std::vector<uint8_t> keyMayHaveNulls_;
   std::vector<uint8_t> payloadMayHaveNulls_;
-  RadixSortRunOptions runOptions_;
   const common::SpillConfig* spillConfig_{nullptr};
   uint64_t spillMemoryThreshold_{0};
   OperatorCtx* operatorCtx_{nullptr};
@@ -159,7 +150,6 @@ class RadixSortBuffer : public SortBufferBase {
   uint64_t storedRows_{0};
   uint64_t storedBytes_{0};
   bool variableKeysFitRadixPrefix_{true};
-  uint64_t encodeTimeUs_{0};
   uint64_t appendTimeUs_{0};
   uint64_t sortTimeUs_{0};
   uint64_t outputTimeUs_{0};

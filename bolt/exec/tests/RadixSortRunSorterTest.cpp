@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "bolt/exec/radixsort/RadixSortRun.h"
 #include "bolt/exec/radixsort/RadixSortRunSorter.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -54,6 +55,49 @@ class RadixSortRunSorterTest : public testing::Test {
     return RadixSortKeyLayout::fromKind(kind);
   }
 
+  static void constructPhysicalKey(
+      const RadixSortKeyLayout& layout,
+      std::string_view encodedKey,
+      char* heap,
+      char* payload,
+      char* record) {
+    if (layout.isVariable()) {
+      std::memset(record, 0, layout.inlineCapacity());
+      std::memcpy(
+          record,
+          encodedKey.data(),
+          std::min<size_t>(encodedKey.size(), layout.inlineCapacity()));
+      storeUnaligned<uint64_t>(
+          record + *layout.sizeOffset(), encodedKey.size());
+      std::memcpy(
+          heap,
+          encodedKey.data() + layout.heapKeyOffset(),
+          encodedKey.size() - layout.heapKeyOffset());
+      storeCompactPointer(record + *layout.dataOffset(), heap);
+    } else {
+      RadixSortInlineKeyBuffer bytes{};
+      std::memcpy(
+          bytes.data(),
+          encodedKey.data(),
+          std::min<size_t>(encodedKey.size(), layout.inlineCapacity()));
+      for (uint32_t word = 0; word < layout.inlineWordCount(); ++word) {
+        auto value =
+            loadUnaligned<uint64_t>(bytes.data() + word * sizeof(uint64_t));
+        if constexpr (std::endian::native == std::endian::little) {
+          value = byteSwap(value);
+        }
+        storeUnaligned<uint64_t>(record + word * sizeof(uint64_t), value);
+      }
+      std::memcpy(
+          record + layout.inlineWordBytes(),
+          bytes.data() + layout.inlineWordBytes(),
+          layout.inlineTailBytes());
+    }
+    if (layout.hasPayload()) {
+      storeCompactPointer(record + *layout.payloadOffset(), payload);
+    }
+  }
+
   static std::string fixedKey(uint64_t value, uint8_t prefix = 0) {
     std::string key(8, '\0');
     key[0] = static_cast<char>(prefix);
@@ -61,21 +105,6 @@ class RadixSortRunSorterTest : public testing::Test {
       key[byte] = static_cast<char>(value >> ((key.size() - byte - 1) * 8));
     }
     return key;
-  }
-
-  static std::string encodedKeyAt(
-      const EncodedKeyBatch& keys,
-      vector_size_t row) {
-    if (keys.format() == EncodedKeyFormat::kVariableBinary) {
-      return std::string(keys.variableKeyAt(row));
-    }
-    auto word = keys.fixedKeyAt(row);
-    if constexpr (std::endian::native == std::endian::little) {
-      word = byteSwap(word);
-    }
-    std::string result(sizeof(word), '\0');
-    storeUnaligned(result.data(), word);
-    return result;
   }
 
   static std::string
@@ -106,19 +135,32 @@ class RadixSortRunSorterTest : public testing::Test {
       RadixSortRunStorage& arena,
       const std::vector<std::string>& keys,
       std::vector<PayloadIdentity>* payloads = nullptr) {
-    auto keyViews = views(keys);
-    if (payloads == nullptr) {
-      arena.appendBatch(keyViews);
-      return;
+    if (payloads != nullptr) {
+      payloads->resize(keys.size());
+      for (uint64_t index = 0; index < keys.size(); ++index) {
+        (*payloads)[index].index = index;
+      }
     }
-
-    payloads->resize(keys.size());
-    std::vector<char*> pointers(keys.size());
-    for (uint64_t index = 0; index < keys.size(); ++index) {
-      (*payloads)[index].index = index;
-      pointers[index] = reinterpret_cast<char*>(&(*payloads)[index]);
-    }
-    arena.appendBatch(keyViews, pointers);
+    arena.appendKeyBlocks(
+        keys.size(),
+        [&](vector_size_t source, vector_size_t count, char* records) {
+          for (vector_size_t row = 0; row < count; ++row) {
+            const auto inputRow = source + row;
+            auto* heap = keys[inputRow].size() == arena.layout().heapKeyOffset()
+                ? nullptr
+                : const_cast<char*>(
+                      keys[inputRow].data() + arena.layout().heapKeyOffset());
+            auto* payload = payloads == nullptr
+                ? nullptr
+                : reinterpret_cast<char*>(&(*payloads)[inputRow]);
+            constructPhysicalKey(
+                arena.layout(),
+                keys[inputRow],
+                heap,
+                payload,
+                records + static_cast<uint64_t>(row) * arena.layout().width());
+          }
+        });
   }
 
   static int32_t unsignedByteCompare(
@@ -150,17 +192,27 @@ class RadixSortRunSorterTest : public testing::Test {
   }
 
   static std::string logicalKey(
-      const RadixSortKey& key,
       const RadixSortKeyLayout& layout,
       const char* record) {
     if (layout.isVariable()) {
+      const auto size = loadUnaligned<uint64_t>(record + *layout.sizeOffset());
       return std::string(record, layout.heapKeyOffset()) +
-          std::string(key.heapKey());
+          std::string(
+                 loadCompactPointer(record + *layout.dataOffset()),
+                 size - layout.heapKeyOffset());
     }
     RadixSortInlineKeyBuffer buffer;
     EncodedKeyView view;
-    key.deconstruct(buffer, view);
+    RadixSortKey(layout, record).deconstruct(buffer, view);
     return std::string(view.bytes);
+  }
+
+  static const char* recordAt(
+      const RadixSortRunStorage& storage,
+      uint64_t row) {
+    const auto range = storage.keyRangeAt(row, 1);
+    BOLT_CHECK_EQ(range.count, 1);
+    return range.data;
   }
 
   static void expectMatchesIndependentOracle(
@@ -181,8 +233,8 @@ class RadixSortRunSorterTest : public testing::Test {
     std::vector<std::string> actualKeys;
     actualKeys.reserve(actual.size());
     for (uint64_t index = 0; index < actual.size(); ++index) {
-      actualKeys.emplace_back(logicalKey(
-          actual.keyAt(index), actual.layout(), actual.keyDataAt(index)));
+      const auto* record = recordAt(actual, index);
+      actualKeys.emplace_back(logicalKey(actual.layout(), record));
     }
     EXPECT_EQ(actualKeys, expected);
   }
@@ -193,15 +245,15 @@ class RadixSortRunSorterTest : public testing::Test {
     ASSERT_TRUE(arena.layout().hasPayload());
     std::vector<bool> seen(originalKeys.size(), false);
     for (uint64_t index = 0; index < arena.size(); ++index) {
+      const auto* record = recordAt(arena, index);
       const auto* identity = reinterpret_cast<const PayloadIdentity*>(
-          arena.keyAt(index).payload());
+          loadCompactPointer(record + *arena.layout().payloadOffset()));
       ASSERT_NE(identity, nullptr);
       ASSERT_LT(identity->index, originalKeys.size());
       EXPECT_FALSE(seen[identity->index])
           << "duplicate payload identity=" << identity->index;
       seen[identity->index] = true;
-      const auto key = logicalKey(
-          arena.keyAt(index), arena.layout(), arena.keyDataAt(index));
+      const auto key = logicalKey(arena.layout(), record);
       const auto expected =
           normalizedKeyForLayout(arena.layout(), originalKeys[identity->index]);
       EXPECT_EQ(unsignedByteCompare(key, expected), 0)
@@ -215,13 +267,10 @@ class RadixSortRunSorterTest : public testing::Test {
       const std::vector<std::string>& keys,
       RadixSortKeyLayoutKind kind,
       std::span<const uint32_t> skippableByteOffsets = {},
-      uint32_t keysPerBlock = 31,
-      uint64_t keyHeapGroupBytes = 4096,
       std::optional<RadixSortKeyLayout> layoutOverride = std::nullopt) {
     auto selectedLayout = layoutOverride.value_or(layout(kind));
     std::vector<PayloadIdentity> payloads;
-    RadixSortRunStorage actual(
-        pool_.get(), selectedLayout, keysPerBlock, keyHeapGroupBytes);
+    RadixSortRunStorage actual(pool_.get(), selectedLayout);
     append(actual, keys, selectedLayout.hasPayload() ? &payloads : nullptr);
     RadixSortRunSorter sorter(actual);
     sorter.sort(skippableByteOffsets);
@@ -394,59 +443,62 @@ TEST_F(RadixSortRunSorterTest, codecKeysWithManyNullsMatchBoltComparator) {
       values->set(row, static_cast<int32_t>(random() % 257));
     }
   }
+  auto rowIds =
+      BaseVector::create<FlatVector<int64_t>>(BIGINT(), kRows, pool_.get());
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    rowIds->set(row, row);
+  }
   auto rows = std::make_shared<RowVector>(
       pool_.get(),
-      ROW({INTEGER()}),
+      ROW({"key", "id"}, {INTEGER(), BIGINT()}),
       nullptr,
       kRows,
-      std::vector<VectorPtr>{values});
+      std::vector<VectorPtr>{values, rowIds});
   const CompareFlags compareFlags{
       .nullsFirst = false,
       .ascending = true,
       .nullHandlingMode = CompareFlags::NullHandlingMode::kNullAsValue};
-  std::unique_ptr<RadixSortKeyCodec> codec;
-  RadixSortKeyCodec::bind({INTEGER()}, {compareFlags}, codec);
-  EncodedKeyBatch encodedKeys;
-  codec->encode(*rows, pool_.get(), encodedKeys);
-
-  auto selectedLayout =
-      RadixSortKeyLayout::select(codec->maximumEncodedSize(), true);
-  RadixSortRunStorage arena(pool_.get(), selectedLayout, 31, 4096);
-  std::vector<uint64_t> rowIds(kRows);
-  std::vector<char*> payloads(kRows);
-  for (uint64_t row = 0; row < kRows; ++row) {
-    rowIds[row] = row;
-    payloads[row] = reinterpret_cast<char*>(&rowIds[row]);
+  auto run = RadixSortRun::create(
+      pool_.get(),
+      std::static_pointer_cast<const RowType>(rows->type()),
+      ROW({"key"}, {INTEGER()}),
+      {compareFlags},
+      {0},
+      {});
+  run->append(*rows);
+  run->finalize();
+  const auto* storage = run->storage();
+  ASSERT_NE(storage, nullptr);
+  for (uint64_t index = 1; index < storage->size(); ++index) {
+    const auto left = storage->keyRangeAt(index - 1, 1);
+    const auto right = storage->keyRangeAt(index, 1);
+    ASSERT_EQ(left.count, 1);
+    ASSERT_EQ(right.count, 1);
+    EXPECT_LE(
+        RadixSortKeyOps<RadixSortKeyLayoutKind::kKeyWithPayloadFixed16>::
+            compare(left.data, right.data, 0),
+        0);
   }
-  arena.appendBatch(encodedKeys, payloads);
-
-  RadixSortRunSorter sorter(arena);
-  const std::vector<uint8_t> keyMayHaveNulls{1};
-  sorter.sort(codec->leadingSkippableValidityOffsets(
-      keyMayHaveNulls, selectedLayout.radixWidth()));
-
+  RowVectorPtr output;
+  output = run->getOutput(kRows, pool_.get(), output);
+  ASSERT_NE(output, nullptr);
+  auto* outputValues = output->childAt(0)->asUnchecked<SimpleVector<int32_t>>();
+  auto* outputIds = output->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
   std::vector<bool> seen(kRows, false);
-  for (uint64_t index = 1; index < arena.size(); ++index) {
-    const auto left =
-        *reinterpret_cast<const uint64_t*>(arena.keyAt(index - 1).payload());
-    const auto right =
-        *reinterpret_cast<const uint64_t*>(arena.keyAt(index).payload());
+  for (vector_size_t index = 1; index < output->size(); ++index) {
     const auto result =
-        values->compare(values.get(), left, right, compareFlags);
+        outputValues->compare(outputValues, index - 1, index, compareFlags);
     ASSERT_TRUE(result.has_value());
     EXPECT_LE(*result, 0);
   }
-  for (uint64_t index = 0; index < arena.size(); ++index) {
-    const auto row =
-        *reinterpret_cast<const uint64_t*>(arena.keyAt(index).payload());
+  for (vector_size_t index = 0; index < output->size(); ++index) {
+    const auto row = outputIds->valueAt(index);
     ASSERT_LT(row, kRows);
     EXPECT_FALSE(seen[row]) << "duplicate row=" << row;
     seen[row] = true;
-    const auto encoded =
-        normalizedKeyForLayout(arena.layout(), encodedKeyAt(encodedKeys, row));
-    const auto stored =
-        logicalKey(arena.keyAt(index), arena.layout(), arena.keyDataAt(index));
-    EXPECT_EQ(unsignedByteCompare(stored, encoded), 0) << "row=" << row;
+    EXPECT_EQ(
+        values->compare(outputValues, row, index, compareFlags).value_or(1), 0)
+        << "row=" << row;
   }
   EXPECT_TRUE(
       std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }));
@@ -568,36 +620,30 @@ TEST_F(RadixSortRunSorterTest, variableComparisonFallbackBoundaries) {
 TEST_F(
     RadixSortRunSorterTest,
     blockSizeKMinusOneKAndKPlusOnePreservePayloadCoupling) {
-  for (const uint32_t keysPerBlock : {1, 31, 32, 33}) {
-    for (const uint64_t size :
-         {static_cast<uint64_t>(keysPerBlock) - 1,
-          static_cast<uint64_t>(keysPerBlock),
-          static_cast<uint64_t>(keysPerBlock) + 1}) {
-      SCOPED_TRACE(
-          "keysPerBlock=" + std::to_string(keysPerBlock) +
-          ", size=" + std::to_string(size));
-      auto keys = makeKeys(size, [size](auto row) {
-        return fixedKey((row * 37 + 11) % std::max<uint64_t>(size, 1), row % 5);
-      });
-      avoidNaturalRuns(keys);
-      verifyAgainstOracle(
-          keys,
-          RadixSortKeyLayoutKind::kKeyWithPayloadFixed16,
-          {},
-          keysPerBlock);
-    }
+  const auto kind = RadixSortKeyLayoutKind::kKeyWithPayloadFixed16;
+  RadixSortRunStorage probe(pool_.get(), layout(kind));
+  const auto keysPerBlock = static_cast<uint64_t>(probe.keysPerBlock());
+  for (const uint64_t size :
+       {keysPerBlock - 1, keysPerBlock, keysPerBlock + 1}) {
+    SCOPED_TRACE(
+        "keysPerBlock=" + std::to_string(keysPerBlock) +
+        ", size=" + std::to_string(size));
+    auto keys = makeKeys(size, [size](auto row) {
+      return fixedKey((row * 37 + 11) % size, row % 5);
+    });
+    avoidNaturalRuns(keys);
+    verifyAgainstOracle(keys, kind);
   }
 }
 
 TEST_F(RadixSortRunSorterTest, sortsAcrossManyStorageBlocks) {
+  const auto kind = RadixSortKeyLayoutKind::kKeyWithPayloadFixed16;
+  RadixSortRunStorage probe(pool_.get(), layout(kind));
+  const auto size = static_cast<uint64_t>(probe.keysPerBlock()) * 2 + 17;
   auto keys = makeKeys(
-      257, [](auto row) { return fixedKey((row * 37) % 257, row % 5); });
+      size, [size](auto row) { return fixedKey((row * 37) % size, row % 5); });
   avoidNaturalRuns(keys);
-  for (const uint32_t keysPerBlock : {1, 31, 32, 33}) {
-    SCOPED_TRACE("keysPerBlock=" + std::to_string(keysPerBlock));
-    verifyAgainstOracle(
-        keys, RadixSortKeyLayoutKind::kKeyWithPayloadFixed16, {}, keysPerBlock);
-  }
+  verifyAgainstOracle(keys, kind);
 }
 
 TEST_F(RadixSortRunSorterTest, exactLargeBucketBoundaryInputsMatchOracle) {
@@ -770,7 +816,7 @@ TEST_F(RadixSortRunSorterTest, variableHeapOffsetSortsBySuffix) {
   }
   std::reverse(keys.begin(), keys.end());
   verifyAgainstOracle(
-      keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32, {}, 31, 4096, layout);
+      keys, RadixSortKeyLayoutKind::kKeyOnlyVariable32, {}, layout);
 }
 
 TEST_F(RadixSortRunSorterTest, variableRadixCoversEntireRecordPrefix) {
@@ -787,7 +833,7 @@ TEST_F(RadixSortRunSorterTest, variableRadixCoversEntireRecordPrefix) {
       key[layout.inlineCapacity() - 1] = static_cast<char>(value);
       keys.push_back(std::move(key));
     }
-    verifyAgainstOracle(keys, kind, {}, 31, 4096, layout);
+    verifyAgainstOracle(keys, kind, {}, layout);
   }
 }
 

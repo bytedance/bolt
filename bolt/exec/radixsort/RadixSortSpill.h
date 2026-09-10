@@ -37,10 +37,7 @@ constexpr uint64_t kRadixSortSpillBufferSize =
 constexpr uint32_t kCurrentRadixSortSpillFormat = 2;
 
 struct RadixSortSpillFile {
-  uint32_t id;
   std::string path;
-  uint64_t size{0};
-  uint64_t rowCount{0};
   common::CompressionKind compressionKind{common::CompressionKind_NONE};
 };
 
@@ -362,13 +359,10 @@ class RadixSortMerger {
       RadixSortSpillRun run,
       RadixSortSpillSectionMeta meta,
       memory::MemoryPool* pool,
-      bool spillUringEnabled);
+      bool spillUringEnabled,
+      folly::FunctionRef<void()> releaseMemory);
 
   void removeMemory();
-
-  size_t testingNumStreams() const {
-    return streams_.size();
-  }
 
  private:
   using StreamIndex = uint16_t;

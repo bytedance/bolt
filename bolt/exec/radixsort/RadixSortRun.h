@@ -21,7 +21,8 @@
 #include <optional>
 
 #include "bolt/exec/radixsort/PayloadRow.h"
-#include "bolt/exec/radixsort/RadixSortRunSorter.h"
+#include "bolt/exec/radixsort/RadixSortKeyCodec.h"
+#include "bolt/exec/radixsort/RadixSortRunStorage.h"
 
 namespace bytedance::bolt::exec::radixsort {
 namespace test {
@@ -44,10 +45,6 @@ class RadixSortOutputProjection {
       const RowTypePtr& outputType,
       const RowTypePtr& keyType,
       const std::vector<column_index_t>& directKeyChannels);
-
-  const RowTypePtr& outputType() const {
-    return outputType_;
-  }
 
   const RowTypePtr& keyType() const {
     return keyType_;
@@ -141,7 +138,6 @@ enum class RadixSortRunState : uint8_t {
 struct RadixSortRunStats {
   uint64_t inputRows{0};
   uint64_t outputRows{0};
-  uint64_t encodeTimeUs{0};
   uint64_t appendTimeUs{0};
   uint64_t sortTimeUs{0};
   uint64_t outputTimeUs{0};
@@ -151,12 +147,6 @@ struct RadixSortRunOptions {
   std::vector<uint8_t> initialKeyMayHaveNulls;
   std::vector<uint8_t> initialPayloadMayHaveNulls;
   bool initialVariableKeysFitRadixPrefix{true};
-  uint32_t keysPerBlock{RadixSortRunStorage::kAutoRowsPerBlock};
-  uint64_t preferredKeyHeapGroupBytes{
-      RadixSortRunStorage::kDefaultHeapGroupBytes};
-  uint32_t payloadRowsPerBlock{RadixSortRunStorage::kAutoRowsPerBlock};
-  uint64_t preferredPayloadHeapGroupBytes{
-      RadixSortRunStorage::kDefaultHeapGroupBytes};
 };
 
 class RadixSortRun {
@@ -217,19 +207,9 @@ class RadixSortRun {
     return variableKeysFitRadixPrefix_;
   }
 
-  uint64_t maximumEncodedKeySize() const {
-    return currentRunMaximumEncodedKeySize_;
-  }
-
-  bool decodesVariableKeysFromInline() const {
-    return decodeVariableKeysFromInline_;
-  }
-
   void append(const RowVector& input);
 
   void finalize();
-
-  RowVectorPtr getOutput(vector_size_t maxRows, memory::MemoryPool* outputPool);
 
   RowVectorPtr getOutput(
       vector_size_t maxRows,

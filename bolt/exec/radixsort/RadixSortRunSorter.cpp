@@ -758,7 +758,7 @@ class RadixSortRunSorterKernel {
     auto nextPasses = effectivePasses;
     if constexpr (!CompletePrefixRadix) {
       const auto bucketCount = static_cast<uint32_t>(remainingEnd - remaining);
-      nextPasses += bucketCount > kFreeRadixPassBucketLimit;
+      nextPasses += isEffectiveRadixPass(bucketCount);
       if (nextPasses > kEffectiveRadixPassLimit) {
         fullSort(begin, end);
         return;
