@@ -61,6 +61,31 @@ using namespace bytedance::bolt::dwrf;
 using namespace bytedance::bolt::test;
 
 namespace {
+class CollectStringHook : public ValueHook {
+ public:
+  explicit CollectStringHook(vector_size_t size) : values_(size) {}
+
+  bool acceptsNulls() const override {
+    return true;
+  }
+
+  void addNull(vector_size_t row) override {
+    values_[row] = std::nullopt;
+  }
+
+  void addValue(vector_size_t row, const void* value) override {
+    values_[row] =
+        std::string(*reinterpret_cast<const folly::StringPiece*>(value));
+  }
+
+  const std::vector<std::optional<std::string>>& values() const {
+    return values_;
+  }
+
+ private:
+  std::vector<std::optional<std::string>> values_;
+};
+
 const std::string& getStructFile() {
   static const std::string structFile_ = getExampleFilePath("struct.orc");
   return structFile_;
@@ -2944,6 +2969,30 @@ TEST_F(TestReader, readNestedBigintAsVarcharWithIsNotNullFilter) {
   };
   assertValueFilterRejected(false);
   assertValueFilterRejected(true);
+}
+
+TEST_F(TestReader, readBigintAsVarcharWithValueHook) {
+  auto data = makeRowVector({makeNullableFlatVector<int64_t>(
+      {-42, std::nullopt, 1234567890123456789})});
+  auto [writer, reader] = createWriterReader({data}, pool());
+  auto requestedSchema = ROW({VARCHAR()});
+
+  RowReaderOptions options;
+  options.select(std::make_shared<ColumnSelector>(requestedSchema));
+  auto rowReader = reader->createRowReader(options);
+  VectorPtr result = BaseVector::create(requestedSchema, 0, pool());
+  ASSERT_EQ(rowReader->next(1024, result), 3);
+
+  auto lazy = result->as<RowVector>()->childAt(0);
+  ASSERT_EQ(lazy->encoding(), VectorEncoding::Simple::LAZY);
+  CollectStringHook hook(3);
+  const std::array<vector_size_t, 3> rows = {0, 1, 2};
+  lazy->as<LazyVector>()->load(RowSet(rows), &hook);
+
+  EXPECT_EQ(
+      hook.values(),
+      (std::vector<std::optional<std::string>>{
+          "-42", std::nullopt, "1234567890123456789"}));
 }
 
 // Ensure there is enough data before switching to fast path.

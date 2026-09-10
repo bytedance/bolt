@@ -132,6 +132,14 @@ bool isCompatible(TypeKind from, TypeKind to) {
   return from == to || compat.find(getKey(from, to)) != compat.end();
 }
 
+bool isConcreteVarchar(const Type& type) {
+  return type.equivalent(*VARCHAR());
+}
+
+bool isConcreteVarchar(const TypeWithId& type) {
+  return type.type()->equivalent(*VARCHAR());
+}
+
 template <typename T, typename FKind, typename FShouldRead>
 void checkTypeCompatibility(
     const Type& from,
@@ -143,8 +151,12 @@ void checkTypeCompatibility(
   const auto toKind = kind(to);
   const bool unsupportedDecimalToVarchar =
       from.isDecimal() && toKind == TypeKind::VARCHAR;
+  const bool unsupportedBigintToVarcharLogicalType =
+      from.kind() == TypeKind::BIGINT && !from.isDecimal() &&
+      toKind == TypeKind::VARCHAR && !isConcreteVarchar(to);
   if (shouldRead(to) &&
-      (!isCompatible(from.kind(), toKind) || unsupportedDecimalToVarchar)) {
+      (!isCompatible(from.kind(), toKind) || unsupportedDecimalToVarchar ||
+       unsupportedBigintToVarcharLogicalType)) {
     BOLT_SCHEMA_MISMATCH_ERROR(fmt::format(
         "{}, From Kind: {}, To Kind: {}",
         exceptionMessageCreator ? exceptionMessageCreator() : "Schema mismatch",

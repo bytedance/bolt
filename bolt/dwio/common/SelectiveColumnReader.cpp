@@ -78,8 +78,9 @@ SelectiveColumnReader::SelectiveColumnReader(
 void SelectiveColumnReader::validateReaderCastFilter() const {
   const auto* filter = scanSpec_->filter();
   if (fileType_->type()->kind() == TypeKind::BIGINT &&
-      !fileType_->type()->isDecimal() && requestedType_->isVarchar() &&
-      filter && !filter->isValueIndependent()) {
+      !fileType_->type()->isDecimal() &&
+      requestedType_->equivalent(*VARCHAR()) && filter &&
+      !filter->isValueIndependent()) {
     BOLT_USER_FAIL(
         "Cannot apply VARCHAR filter to physical BIGINT column {}",
         scanSpec_->fieldName());
@@ -222,7 +223,7 @@ void SelectiveColumnReader::getIntValues(
     RowSet rows,
     const TypePtr& requestedType,
     VectorPtr* result) {
-  if (requestedType->isVarchar()) {
+  if (requestedType->equivalent(*VARCHAR())) {
     VectorPtr integerResult;
     getIntValues(rows, BIGINT(), &integerResult);
     auto stringResult = BaseVector::create<FlatVector<StringView>>(

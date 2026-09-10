@@ -2487,7 +2487,7 @@ std::unique_ptr<ColumnReader> buildIntegerReader(
     FlatMapContext flatMapContext,
     StripeStreams& stripe,
     const StreamLabels& streamLabels) {
-  if (requestedType->isVarchar()) {
+  if (requestedType->equivalent(*VARCHAR())) {
     auto integerReader = buildIntegerReader(
         fileType->type(),
         fileType,
