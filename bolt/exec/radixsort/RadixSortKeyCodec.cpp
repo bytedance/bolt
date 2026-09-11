@@ -241,9 +241,11 @@ FOLLY_ALWAYS_INLINE void encodeFixedScalarValue(
     encodeUnsignedWord<uint64_t>(
         HugeInt::lower(value), output + sizeof(int64_t), descending);
   } else if constexpr (KIND == TypeKind::REAL) {
-    encodeUnsignedWord<uint32_t>(encodeFloat(value, column), output, descending);
+    encodeUnsignedWord<uint32_t>(
+        encodeFloat(value, column), output, descending);
   } else if constexpr (KIND == TypeKind::DOUBLE) {
-    encodeUnsignedWord<uint64_t>(encodeDouble(value, column), output, descending);
+    encodeUnsignedWord<uint64_t>(
+        encodeDouble(value, column), output, descending);
   } else if constexpr (KIND == TypeKind::TIMESTAMP) {
     encodeSignedWord<int64_t>(value.getSeconds(), output, descending);
     encodeUnsignedWord<uint64_t>(
@@ -256,8 +258,7 @@ FOLLY_ALWAYS_INLINE void encodeFixedScalarValue(
 }
 
 template <TypeKind KIND>
-FOLLY_ALWAYS_INLINE uint64_t
-encodeFixed64Value(
+FOLLY_ALWAYS_INLINE uint64_t encodeFixed64Value(
     typename TypeTraits<KIND>::NativeType value,
     const RadixSortKeyColumn& column) {
   if constexpr (KIND == TypeKind::BIGINT) {
@@ -3931,8 +3932,7 @@ int32_t compareEncodedArray(
     return 0;
   }
   BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
-  const uint8_t delimiter =
-      column.flags.ascending ? uint8_t{0} : uint8_t{255};
+  const uint8_t delimiter = column.flags.ascending ? uint8_t{0} : uint8_t{255};
   const auto& child = column.children[0];
   while (true) {
     left.checkedPeekByte(a);
@@ -3967,8 +3967,7 @@ int32_t compareEncodedMap(
     return 0;
   }
   BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
-  const uint8_t delimiter =
-      column.flags.ascending ? uint8_t{0} : uint8_t{255};
+  const uint8_t delimiter = column.flags.ascending ? uint8_t{0} : uint8_t{255};
   uint64_t count = 0;
   const auto& key = column.children[0];
   const auto& value = column.children[1];
@@ -4768,7 +4767,8 @@ int32_t RadixSortKeyCodec::compareEncoded(
     uint32_t firstColumn) const {
   auto a = EncodedKeyReader::checkedAt(left, 0);
   auto b = EncodedKeyReader::checkedAt(right, 0);
-  for (uint32_t column = firstColumn; column < specialComparisonEnd_; ++column) {
+  for (uint32_t column = firstColumn; column < specialComparisonEnd_;
+       ++column) {
     const auto& metadata = columns_[column];
     const auto result = metadata.encodedComparator(metadata, a, b);
     if (result != 0) {
@@ -4841,10 +4841,8 @@ int32_t RadixSortKeyCodec::comparePhysical(
         loadUnaligned<uint64_t>(left + *layout.sizeOffset()) - heapOffset;
     const auto rightSize =
         loadUnaligned<uint64_t>(right + *layout.sizeOffset()) - heapOffset;
-    leftSuffix = {
-        loadCompactPointer(left + *layout.dataOffset()), leftSize};
-    rightSuffix = {
-        loadCompactPointer(right + *layout.dataOffset()), rightSize};
+    leftSuffix = {loadCompactPointer(left + *layout.dataOffset()), leftSize};
+    rightSuffix = {loadCompactPointer(right + *layout.dataOffset()), rightSize};
   }
   return compareEncoded(leftSuffix, rightSuffix, column);
 }
