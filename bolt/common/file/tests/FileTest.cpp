@@ -235,6 +235,26 @@ TEST(LocalFile, viaRegistry) {
   lfs->remove(filename);
 }
 
+TEST(LocalFile, fileInfo) {
+  filesystems::registerLocalFileSystem();
+  auto temp = exec::test::TempDirectoryPath::create();
+  const auto directory = "file:" + temp->getPath() + "/metadata";
+  const auto file = directory + "/metadata.txt";
+  auto fs = filesystems::getFileSystem(file, nullptr);
+  fs->mkdir(directory);
+  auto out = fs->openFileForWrite(file);
+  out->append("bolt");
+  out->close();
+
+  const auto fileMetadata = fs->fileInfo(file);
+  EXPECT_FALSE(fileMetadata.isDirectory);
+  EXPECT_EQ(fileMetadata.size, 4);
+
+  const auto directoryMetadata = fs->fileInfo(directory);
+  EXPECT_TRUE(directoryMetadata.isDirectory);
+  EXPECT_EQ(directoryMetadata.size, 0);
+}
+
 TEST(LocalFile, rename) {
   filesystems::registerLocalFileSystem();
   auto tempFolder = ::exec::test::TempDirectoryPath::create();

@@ -92,6 +92,9 @@ class GcsFileSystem : public FileSystem {
   /// google::cloud::storage::Client::GetObjectMetadata
   bool exists(std::string_view path) override;
 
+  /// Prefix-only directories have no modification time and report zero.
+  FileInfo fileInfo(std::string_view path) override;
+
   /// List the objects associated to a path using
   /// google::cloud::storage::Client::ListObjects
   std::vector<std::string> list(std::string_view path) override;

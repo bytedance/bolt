@@ -87,6 +87,9 @@ class S3FileSystem : public FileSystem {
   /// Checks that the path exists.
   bool exists(std::string_view path) override;
 
+  /// Prefix-only directories have no modification time and report zero.
+  FileInfo fileInfo(std::string_view path) override;
+
   /// List the objects associated to a path.
   std::vector<std::string> list(std::string_view path) override;
 

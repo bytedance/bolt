@@ -15,6 +15,7 @@
  */
 
 #include "bolt/connectors/paimon/PaimonConnector.h"
+#include <folly/Conv.h>
 #include <folly/Subprocess.h>
 #include <folly/json.h>
 #include <gtest/gtest.h>
@@ -25,8 +26,10 @@
 #include <paimon/table/source/table_scan.h>
 #include <cstdlib>
 #include "bolt/common/config/Config.h"
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonConnectorSplit.h"
 #include "bolt/connectors/paimon/PaimonDataSource.h"
@@ -54,6 +57,8 @@ class PaimonConnectorTest
     : public bytedance::bolt::exec::test::OperatorTestBase {
  protected:
   static void SetUpTestCase() {
+    filesystems::registerLocalFileSystem();
+
     // Create a temporary directory for the test
     tempDir_ = exec::test::TempDirectoryPath::create();
     LOG(INFO) << "Test using temporary directory: " << tempDir_->path;
@@ -148,7 +153,7 @@ TEST_F(PaimonConnectorTest, TestTableScanBasic) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   std::unique_ptr<::paimon::TableScan> tableScan =
@@ -198,6 +203,8 @@ TEST_F(PaimonConnectorTest, TestTableScanBasic) {
 }
 
 TEST_F(PaimonConnectorTest, ReturnedVectorsCanOutliveReaderEof) {
+  EnsurePaimonBoltFileSystemRegistered();
+
   auto rootPool =
       memory::memoryManager()->addRootPool("PaimonDataSourceLifetimeTest");
   auto leafPool = rootPool->addLeafChild("leaf");
@@ -207,7 +214,7 @@ TEST_F(PaimonConnectorTest, ReturnedVectorsCanOutliveReaderEof) {
   std::string tablePath = "file:" + tempDir_->path + "/test_db.db/basic";
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
   auto scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   auto tableScan = ::paimon::TableScan::Create(std::move(scanContext)).value();
@@ -264,6 +271,129 @@ TEST_F(PaimonConnectorTest, ReturnedVectorsCanOutliveReaderEof) {
   outputs.clear();
 }
 
+TEST_F(
+    PaimonConnectorTest,
+    SessionPropertiesOverrideConnectorConfigWithBaseFallback) {
+  EnsurePaimonBoltFileSystemRegistered();
+
+  auto rootPool =
+      memory::memoryManager()->addRootPool("PaimonConnectorSessionConfigTest");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto connectorPool = rootPool->addAggregateChild("connector");
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_session_config_test",
+      "test_table",
+      "file:" + tempDir_->path + "/test_db.db/basic",
+      std::unordered_map<std::string, std::string>{});
+
+  auto baseConfig = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kReadBatchSize, "invalid-base-value"}});
+  PaimonConnector paimonConnector(
+      "paimon_session_config_test", baseConfig, driverExecutor_.get());
+
+  auto overriddenSession = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kReadBatchSize, "1024"}});
+  auto overriddenQueryCtx = std::make_shared<connector::ConnectorQueryCtx>(
+      leafPool.get(),
+      connectorPool.get(),
+      overriddenSession.get(),
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      "query.PaimonConnectorSessionConfigTest.override",
+      "task.PaimonConnectorSessionConfigTest.override",
+      "planNodeId.PaimonConnectorSessionConfigTest.override",
+      0);
+  EXPECT_NO_THROW(paimonConnector.createDataSource(
+      rowType,
+      tableHandle,
+      columnHandles,
+      overriddenQueryCtx,
+      core::QueryConfig({})));
+
+  auto emptySession = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{});
+  auto fallbackQueryCtx = std::make_shared<connector::ConnectorQueryCtx>(
+      leafPool.get(),
+      connectorPool.get(),
+      emptySession.get(),
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      "query.PaimonConnectorSessionConfigTest.fallback",
+      "task.PaimonConnectorSessionConfigTest.fallback",
+      "planNodeId.PaimonConnectorSessionConfigTest.fallback",
+      0);
+  EXPECT_THROW(
+      paimonConnector.createDataSource(
+          rowType,
+          tableHandle,
+          columnHandles,
+          fallbackQueryCtx,
+          core::QueryConfig({})),
+      folly::ConversionError);
+}
+
+TEST_F(PaimonConnectorTest, QueryConfigOverridesPaimonDataSourceReadDefaults) {
+  const auto mergedConnectorConfig = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kNaturalReadSize, "10485760"},
+          {PaimonConfig::kCoalesceReads, "true"},
+          {PaimonConfig::kReadTimestampUnit, "3"}});
+  const PaimonConfig paimonConfig(mergedConnectorConfig);
+  const core::QueryConfig queryConfig({
+      {PaimonConfig::kNaturalReadSize, "20971520"},
+      {PaimonConfig::kCoalesceReads, "false"},
+      {PaimonConfig::kReadTimestampUnit, "6"},
+  });
+
+  const auto readOptions =
+      resolvePaimonDataSourceReadOptions(queryConfig, paimonConfig);
+
+  EXPECT_EQ(readOptions.naturalReadSize, 20971520);
+  EXPECT_FALSE(readOptions.coalesceReads);
+  EXPECT_EQ(readOptions.readTimestampUnit, 6);
+
+  const auto fallbackOptions =
+      resolvePaimonDataSourceReadOptions(core::QueryConfig({}), paimonConfig);
+  EXPECT_EQ(fallbackOptions.naturalReadSize, 10485760);
+  EXPECT_TRUE(fallbackOptions.coalesceReads);
+  EXPECT_EQ(fallbackOptions.readTimestampUnit, 3);
+}
+
+TEST_F(
+    PaimonConnectorTest,
+    QueryConfigOverrideDoesNotParseMalformedConnectorFallback) {
+  const auto malformedConnectorConfig = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kNaturalReadSize, "invalid-size"},
+          {PaimonConfig::kCoalesceReads, "invalid-bool"},
+          {PaimonConfig::kReadTimestampUnit, "invalid-unit"}});
+  const PaimonConfig paimonConfig(malformedConnectorConfig);
+  const core::QueryConfig queryConfig({
+      {PaimonConfig::kNaturalReadSize, "20971520"},
+      {PaimonConfig::kCoalesceReads, "false"},
+      {PaimonConfig::kReadTimestampUnit, "6"},
+  });
+
+  PaimonDataSourceReadOptions readOptions;
+  EXPECT_NO_THROW(
+      readOptions =
+          resolvePaimonDataSourceReadOptions(queryConfig, paimonConfig));
+  EXPECT_EQ(readOptions.naturalReadSize, 20971520);
+  EXPECT_FALSE(readOptions.coalesceReads);
+  EXPECT_EQ(readOptions.readTimestampUnit, 6);
+}
+
 TEST_F(PaimonConnectorTest, TestTableScanAppendOnlyMultipleAppend) {
   // Create Parquet data with unique id
   auto rootPool = memory::memoryManager()->addRootPool("PaimonConnectorTest");
@@ -286,7 +416,7 @@ TEST_F(PaimonConnectorTest, TestTableScanAppendOnlyMultipleAppend) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   std::unique_ptr<::paimon::TableScan> tableScan =
@@ -357,7 +487,7 @@ TEST_F(PaimonConnectorTest, TestTableScanPkNoOverwrite) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   std::unique_ptr<::paimon::TableScan> tableScan =
@@ -436,7 +566,7 @@ TEST_F(PaimonConnectorTest, TestTableScanPkWithOverwrite) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   std::unique_ptr<::paimon::TableScan> tableScan =
@@ -513,7 +643,7 @@ TEST_F(PaimonConnectorTest, TestTableScanDataEvolution) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .AddOption(::paimon::Options::ROW_TRACKING_ENABLED, "true")
           .AddOption(::paimon::Options::DATA_EVOLUTION_ENABLED, "true")
           .Finish()
@@ -603,7 +733,7 @@ TEST_F(PaimonConnectorTest, TestTableScanPartialUpdate) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   std::unique_ptr<::paimon::TableScan> tableScan =
@@ -682,7 +812,7 @@ TEST_F(PaimonConnectorTest, TestTableScanAggregate) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
   auto tableScanResult = ::paimon::TableScan::Create(std::move(scanContext));
@@ -770,7 +900,7 @@ TEST_F(PaimonConnectorTest, TestTableScanDeduplicate) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
 
   std::unique_ptr<::paimon::ScanContext> scanContext =
-      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local")
+      contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt")
           .Finish()
           .value();
 
@@ -847,7 +977,7 @@ static std::vector<std::shared_ptr<connector::ConnectorSplit>> makePaimonSplits(
     const std::shared_ptr<BoltPaimonMemoryPool>& paimonPool,
     const std::unordered_map<std::string, std::string>& extraOptions = {}) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
-  contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "local");
+  contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt");
   for (const auto& [key, value] : extraOptions) {
     contextBuilder.AddOption(key, value);
   }
@@ -865,6 +995,35 @@ static std::vector<std::shared_ptr<connector::ConnectorSplit>> makePaimonSplits(
         "paimon_test", serialized.data(), serialized.length()));
   }
   return result;
+}
+
+TEST_F(PaimonConnectorTest, TablePropertyCannotOverrideBoltFileSystem) {
+  auto rootPool = memory::memoryManager()->addRootPool("Test");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+
+  auto rowType = ROW({"id"}, {BIGINT()});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      columnHandles;
+  columnHandles["id"] = std::make_shared<PaimonColumnHandle>("id", BIGINT());
+
+  std::string tablePath = "file:" + tempDir_->path + "/test_db.db/basic";
+  auto tableHandle = std::make_shared<PaimonTableHandle>(
+      "paimon_test",
+      "test_table",
+      tablePath,
+      std::unordered_map<std::string, std::string>{
+          {::paimon::Options::FILE_SYSTEM, "local"}});
+  auto plan = exec::test::PlanBuilder()
+                  .tableScan(rowType, tableHandle, columnHandles)
+                  .planNode();
+
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+  auto allRows = mk.rowVector({mk.flatVector<int64_t>({1, 2, 3})});
+  createDuckDbTable("tmp", {allRows});
+
+  auto connectorSplits = makePaimonSplits(tablePath, paimonPool);
+  assertQuery(plan, connectorSplits, "SELECT c0 FROM tmp");
 }
 
 TEST_F(PaimonConnectorTest, FilterPushdownIntEquality) {
