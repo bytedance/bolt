@@ -29,6 +29,7 @@
  */
 
 #include "bolt/dwio/common/CachedBufferedInput.h"
+#include <folly/executors/QueuedImmediateExecutor.h>
 #include "bolt/common/memory/Allocation.h"
 #include "bolt/common/process/ThreadNameHolder.h"
 #include "bolt/common/process/TraceContext.h"
@@ -78,6 +79,20 @@ std::unique_ptr<SeekableInputStream> CachedBufferedInput::enqueue(
       options_.loadQuantum());
   requests_.back().stream = stream.get();
   return stream;
+}
+
+SeekableInputStreamPair CachedBufferedInput::enqueuePair(
+    Region region,
+    const StreamIdentifier* si) {
+  if (region.length == 0) {
+    return BufferedInput::enqueuePair(region, si);
+  }
+  auto first = enqueue(region, si);
+  auto* cacheStream = dynamic_cast<CacheInputStream*>(first.get());
+  BOLT_CHECK_NOT_NULL(cacheStream);
+  auto second = cacheStream->clone();
+  requests_.back().pairedStream = second.get();
+  return {std::move(first), std::move(second)};
 }
 
 bool CachedBufferedInput::isBuffered(uint64_t /*offset*/, uint64_t /*length*/)
@@ -147,6 +162,8 @@ std::vector<CacheRequest*> makeRequestParts(
         request.trackingId));
     parts.push_back(extraRequests.back().get());
     parts.back()->coalesces = prefetch;
+    parts.back()->stream = request.stream;
+    parts.back()->pairedStream = request.pairedStream;
     if (prefetchOne) {
       break;
     }
@@ -368,6 +385,54 @@ class DwioCoalescedLoadBase : public cache::CoalescedLoad {
   int64_t size_{0};
 };
 
+class CompositeCoalescedLoad final : public cache::CoalescedLoad {
+ public:
+  explicit CompositeCoalescedLoad(
+      std::vector<std::shared_ptr<cache::CoalescedLoad>> loads)
+      : cache::CoalescedLoad({}, {}), loads_(std::move(loads)) {}
+
+  int64_t size() const override {
+    int64_t size = 0;
+    for (const auto& load : loads_) {
+      size += load->size();
+    }
+    return size;
+  }
+
+  void cancel() override {
+    cache::CoalescedLoad::cancel();
+    for (const auto& load : loads_) {
+      load->cancel();
+    }
+  }
+
+ protected:
+  std::vector<cache::CachePin> loadData(bool /*isPrefetch*/) override {
+    for (const auto& load : loads_) {
+      for (;;) {
+        folly::SemiFuture<bool> wait(false);
+        if (!load->loadOrFuture(&wait)) {
+          auto& exec = folly::QueuedImmediateExecutor::instance();
+          std::move(wait).via(&exec).wait();
+        }
+        const auto state = load->state();
+        if (state == cache::CoalescedLoad::State::kLoaded ||
+            state == cache::CoalescedLoad::State::kCancelled) {
+          break;
+        }
+        if (isAsyncPreloadThread()) {
+          throw std::runtime_error(
+              "Child coalesced load failed during asynchronous preload");
+        }
+      }
+    }
+    return {};
+  }
+
+ private:
+  std::vector<std::shared_ptr<cache::CoalescedLoad>> loads_;
+};
+
 // Represents a CoalescedLoad from ReadFile, e.g. disagg disk.
 class DwioCoalescedLoad : public DwioCoalescedLoadBase {
  public:
@@ -475,7 +540,16 @@ void CachedBufferedInput::readRegion(
   allCoalescedLoads_.push_back(load);
   coalescedLoads_.withWLock([&](auto& loads) {
     for (auto& request : requests) {
-      loads[request->stream] = load;
+      auto addLoad = [&](const SeekableInputStream* stream) {
+        auto& streamLoads = loads[stream];
+        if (streamLoads.empty() || streamLoads.back() != load) {
+          streamLoads.push_back(load);
+        }
+      };
+      addLoad(request->stream);
+      if (request->pairedStream != nullptr) {
+        addLoad(request->pairedStream);
+      }
     }
   });
 }
@@ -527,12 +601,38 @@ std::shared_ptr<cache::CoalescedLoad> CachedBufferedInput::coalescedLoad(
         if (it == loads.end()) {
           return nullptr;
         }
-        auto load = std::move(it->second);
-        auto* dwioLoad = static_cast<DwioCoalescedLoadBase*>(load.get());
-        for (auto& request : dwioLoad->requests()) {
-          loads.erase(request.stream);
+        auto streamLoads = std::move(it->second);
+        loads.erase(it);
+        for (const auto& load : streamLoads) {
+          auto* dwioLoad = static_cast<DwioCoalescedLoadBase*>(load.get());
+          for (auto& request : dwioLoad->requests()) {
+            auto removeLoad = [&](const SeekableInputStream* requestStream) {
+              auto requestIt = loads.find(requestStream);
+              if (requestIt == loads.end()) {
+                return;
+              }
+              auto& loadsForRequest = requestIt->second;
+              loadsForRequest.erase(
+                  std::remove(
+                      loadsForRequest.begin(), loadsForRequest.end(), load),
+                  loadsForRequest.end());
+              if (loadsForRequest.empty()) {
+                loads.erase(requestIt);
+              }
+            };
+            if (request.stream != stream) {
+              removeLoad(request.stream);
+            }
+            if (request.pairedStream != nullptr &&
+                request.pairedStream != stream) {
+              removeLoad(request.pairedStream);
+            }
+          }
         }
-        return load;
+        if (streamLoads.size() == 1) {
+          return std::move(streamLoads.front());
+        }
+        return std::make_shared<CompositeCoalescedLoad>(std::move(streamLoads));
       });
 }
 

@@ -92,7 +92,8 @@ bool trySetFusedStructAndRepeatedRepDefs(
   }
 
   const auto repDefRange = pageReader.repDefRange();
-  const int32_t numRepDefs = repDefRange.second - repDefRange.first;
+  const int32_t numRepDefs =
+      pageReader.repDefOutputSize(LevelMode::kList, repeatedReader.levelInfo());
   auto lengths = repeatedReader.prepareRepDefLengths(numRepDefs);
   auto repeatedBits = repeatedReader.prepareRepDefNulls(numRepDefs);
   auto structBits = structReader.prepareRepDefNulls(numRepDefs);
@@ -164,7 +165,9 @@ PageReader* FOLLY_NULLABLE readLeafRepDefs(
     if (repDefChild == nullptr) {
       return nullptr;
     }
-    const bool fuseStructAndRepeated = isArrayOrMap(*repDefChild);
+    const bool fuseStructAndRepeated =
+        structReader->fileType().type()->kind() == TypeKind::ROW &&
+        isArrayOrMap(*repDefChild);
     pageReader =
         readLeafRepDefs(repDefChild, numTop, true, !fuseStructAndRepeated);
     assert(pageReader);
@@ -349,7 +352,8 @@ void MapColumnReader::setLengthsFromRepDefOutput(
 
 void MapColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
   auto repDefRange = pageReader.repDefRange();
-  int32_t numRepDefs = repDefRange.second - repDefRange.first;
+  int32_t numRepDefs =
+      pageReader.repDefOutputSize(LevelMode::kList, levelInfo_);
   BufferPtr lengths = std::move(lengths_.lengths());
   dwio::common::ensureCapacity<int32_t>(lengths, numRepDefs + 1, &memoryPool_);
   dwio::common::ensureCapacity<uint64_t>(
@@ -479,7 +483,8 @@ void ListColumnReader::setLengthsFromRepDefOutput(
 
 void ListColumnReader::setLengthsFromRepDefs(PageReader& pageReader) {
   auto repDefRange = pageReader.repDefRange();
-  int32_t numRepDefs = repDefRange.second - repDefRange.first;
+  int32_t numRepDefs =
+      pageReader.repDefOutputSize(LevelMode::kList, levelInfo_);
   BufferPtr lengths = std::move(lengths_.lengths());
   dwio::common::ensureCapacity<int32_t>(lengths, numRepDefs + 1, &memoryPool_);
   dwio::common::ensureCapacity<uint64_t>(

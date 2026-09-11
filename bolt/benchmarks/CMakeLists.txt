@@ -40,6 +40,7 @@ target_link_libraries(bolt_benchmark_builder ${BOLT_BENCHMARK_DEPS})
 
 if(${BOLT_BUILD_BENCHMARKS})
   add_subdirectory(tpch)
+  add_subdirectory(tpcds)
   add_subdirectory(paimon)
 endif()
 

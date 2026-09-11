@@ -268,7 +268,7 @@ void StructColumnReader::setNullsFromRepDefs(PageReader& pageReader) {
     return;
   }
   auto repDefRange = pageReader.repDefRange();
-  int32_t numRepDefs = repDefRange.second - repDefRange.first;
+  int32_t numRepDefs = pageReader.repDefOutputSize(levelMode_, levelInfo_);
   auto bits = prepareRepDefNulls(numRepDefs);
   bits.values_read = pageReader.getLengthsAndNulls(
       levelMode_,

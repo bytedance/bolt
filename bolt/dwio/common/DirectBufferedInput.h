@@ -196,6 +196,10 @@ class DirectBufferedInput : public BufferedInput {
       bolt::common::Region region,
       const StreamIdentifier* sid) override;
 
+  SeekableInputStreamPair enqueuePair(
+      bolt::common::Region region,
+      const StreamIdentifier* sid) override;
+
   bool supportSyncLoad() const override {
     return false;
   }

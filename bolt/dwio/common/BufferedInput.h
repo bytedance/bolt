@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <utility>
+
 #include "bolt/common/caching/ScanTracker.h"
 #include "bolt/common/flags/BoltFlags.h"
 #include "bolt/common/memory/AllocationPool.h"
@@ -37,6 +39,10 @@
 #include "bolt/dwio/common/StreamIdentifier.h"
 
 namespace bytedance::bolt::dwio::common {
+
+using SeekableInputStreamPair = std::pair<
+    std::unique_ptr<SeekableInputStream>,
+    std::unique_ptr<SeekableInputStream>>;
 
 class BufferedInput {
  public:
@@ -89,6 +95,16 @@ class BufferedInput {
   virtual std::unique_ptr<SeekableInputStream> enqueue(
       bolt::common::Region region,
       const StreamIdentifier* FOLLY_NULLABLE si = nullptr);
+
+  /// Returns two independently positioned streams for 'region'. Implementations
+  /// may share the underlying read.
+  virtual SeekableInputStreamPair enqueuePair(
+      bolt::common::Region region,
+      const StreamIdentifier* FOLLY_NULLABLE si = nullptr) {
+    auto first = enqueue(region, si);
+    auto second = enqueue(region, si);
+    return {std::move(first), std::move(second)};
+  }
 
   /// Returns true if load synchronously.
   virtual bool supportSyncLoad() const {

@@ -736,10 +736,20 @@ arrow::Status BoltShuffleWriter::stop() {
     stat();
   } else {
     setSplitState(SplitState::kStop);
-    RETURN_NOT_OK(tryEvict());
+    partitionWriter_->setRowFormat(true);
     {
       SCOPED_TIMER(cpuWallTimingList_[CpuWallTimingStop]);
-      RETURN_NOT_OK(partitionWriter_->stop(&metrics_));
+      RETURN_NOT_OK(partitionWriter_->stop(
+          &metrics_, [this](uint32_t partitionId) -> arrow::Status {
+            if (partitionId >= sortedRows_.size()) {
+              return arrow::Status::OK();
+            }
+            auto& rows = sortedRows_[partitionId];
+            return partitionWriter_->writeFinal(
+                partitionId, rows, getTotalRowBytes(rows), true);
+          }));
+      compositeRowVectorConverter_->reset();
+      boltPool_->release();
     }
   }
   metrics_.useV2 = 0;

@@ -113,7 +113,15 @@ void SelectiveRepeatedColumnReader::makeNestedRowSet(
   // Reads the lengths, leaves an uninitialized gap for a null
   // map/list. Reading these checks the null mask.
   readLengths(allLengths_, maxRow + 1, nulls);
-  vector_size_t nestedLength = 0;
+  vector_size_t nestedLength;
+  if (nestedRowsAllSelected_) {
+    nestedLength = sumLengths(allLengths_, nulls, 0, maxRow + 1);
+    childTargetReadOffset_ += nestedLength;
+    nestedRows_ = RowSet(iota(nestedLength, nestedRowsHolder_), nestedLength);
+    return;
+  }
+
+  nestedLength = 0;
   for (auto row : rows) {
     if (!nulls || !bits::isBitNull(nulls, row)) {
       nestedLength +=
@@ -154,8 +162,24 @@ void SelectiveRepeatedColumnReader::makeOffsetsAndSizes(
       result.mutableOffsets(rows.size())->asMutable<vector_size_t>();
   auto* rawSizes = result.mutableSizes(rows.size())->asMutable<vector_size_t>();
   auto* nulls = nullsInReadRange_ ? nullsInReadRange_->as<uint64_t>() : nullptr;
-  vector_size_t currentRow = 0;
+  numValues_ = rows.size();
   vector_size_t currentOffset = 0;
+  if (nestedRowsAllSelected_ && rows.size() == outputRows().size()) {
+    for (int i = 0; i < rows.size(); ++i) {
+      BOLT_DCHECK_EQ(i, rows[i]);
+      rawOffsets[i] = currentOffset;
+      if (nulls && bits::isBitNull(nulls, i)) {
+        rawSizes[i] = 0;
+        bits::setNull(rawResultNulls_, i);
+        anyNulls_ = true;
+      } else {
+        rawSizes[i] = allLengths_[i];
+        currentOffset += allLengths_[i];
+      }
+    }
+    return;
+  }
+  vector_size_t currentRow = 0;
   vector_size_t nestedRowIndex = 0;
   for (int i = 0; i < rows.size(); ++i) {
     auto row = rows[i];
@@ -176,7 +200,6 @@ void SelectiveRepeatedColumnReader::makeOffsetsAndSizes(
       nestedRowIndex = newNestedRowIndex;
     }
   }
-  numValues_ = rows.size();
 }
 
 RowSet SelectiveRepeatedColumnReader::applyFilter(const RowSet& rows) {
@@ -251,6 +274,9 @@ void SelectiveListColumnReader::read(
   child_->seekTo(childTargetReadOffset_, false);
   prepareRead<char>(offset, rows, incomingNulls);
   auto activeRows = applyFilter(rows);
+  nestedRowsAllSelected_ = activeRows.size() == rows.back() + 1 &&
+      scanSpec_->maxArrayElementsCount() ==
+          std::numeric_limits<vector_size_t>::max();
   makeNestedRowSet(activeRows, rows.back());
   if (child_ && !nestedRows_.empty()) {
     child_->read(child_->readOffset(), nestedRows_, nullptr);
@@ -329,10 +355,15 @@ void SelectiveMapColumnReader::read(
   }
 
   prepareRead<char>(offset, rows, incomingNulls);
-  auto activeRows = applyFilter(rows);
+  const auto activeRows = applyFilter(rows);
+  nestedRowsAllSelected_ = activeRows.size() == rows.back() + 1 &&
+      scanSpec_->maxArrayElementsCount() ==
+          std::numeric_limits<vector_size_t>::max();
   makeNestedRowSet(activeRows, rows.back());
   if (keyReader_ && elementReader_ && !nestedRows_.empty()) {
     keyReader_->read(keyReader_->readOffset(), nestedRows_, nullptr);
+    nestedRowsAllSelected_ = nestedRowsAllSelected_ &&
+        nestedRows_.size() == keyReader_->outputRows().size();
     nestedRows_ = keyReader_->outputRows();
     if (!nestedRows_.empty()) {
       elementReader_->read(elementReader_->readOffset(), nestedRows_, nullptr);

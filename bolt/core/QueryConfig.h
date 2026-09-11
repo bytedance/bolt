@@ -262,6 +262,16 @@ class QueryConfig {
   /// OrderBy spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kOrderBySpillEnabled = "order_by_spill_enabled";
 
+  static constexpr const char* kOrderByRadixSortEnabled =
+      "order_by_radix_sort_enabled";
+
+  /// If true, use the legacy SortBuffer when an OrderBy sorting key is REAL or
+  /// DOUBLE, or contains either type in an ARRAY, MAP, or ROW, because radix
+  /// key encoding does not preserve their exact bit representation.
+  static constexpr const char*
+      kOrderByRadixSortFallbackForFloatingPointKeysEnabled =
+          "order_by_radix_sort_fallback_for_floating_point_keys_enabled";
+
   /// Support orderBy spilling in output stage
   static constexpr const char* kOrderBySpillInOutputStageEnabled =
       "order_by_spill_output_stage_enabled";
@@ -415,6 +425,13 @@ class QueryConfig {
   static constexpr const char* kPrestoArrayAggIgnoreNulls =
       "presto.array_agg.ignore_nulls";
 
+  /// If false, size function returns null for null input.
+  static constexpr const char* kSparkLegacySizeOfNull =
+      "spark.sql.legacy.sizeOfNull";
+
+  /// If true, Spark SQL ANSI mode is enabled.
+  static constexpr const char* kSparkAnsiEnabled = "spark.sql.ansi.enabled";
+
   /// If true, array_agg() aggregation function will ignore nulls in the input.
   static constexpr const char* kPrestoSetAggIgnoreNulls =
       "presto.set_agg.ignore_nulls";
@@ -549,6 +566,15 @@ class QueryConfig {
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
 
+  /// If true, base64() chunks its output into 76-character lines separated by
+  /// CRLF; if false, it returns a single unchunked string. Mirrors
+  /// spark.sql.chunkBase64String.enabled (added in Spark 3.5.2, default true
+  /// there). Spark <= 3.2 always returns unchunked output and Spark
+  /// 3.3.0-3.5.1 always chunks. Bolt defaults to false, matching
+  /// Spark <= 3.2.
+  static constexpr const char* kSparkChunkBase64StringEnabled =
+      "spark.chunk_base64_string_enabled";
+
   static constexpr const char* kThrowExceptionWhenEncounterBadJson =
       "throw_exception_when_encounter_bad_json";
 
@@ -630,6 +656,11 @@ class QueryConfig {
       "parquet_reader_implicit_cast_mask";
 
   static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
+
+  /// Number of levels per Parquet rep/def streaming window. Zero disables
+  /// streaming and uses the legacy preload path.
+  static constexpr const char* kParquetRepDefStreamingWindowSize =
+      "parquet_repdef_streaming_window_size";
 
   /// If true, reorder rows by containerId during hybrid join extraction for
   /// better cache locality. Can be disabled for testing to get deterministic
@@ -1156,6 +1187,15 @@ class QueryConfig {
     return get<bool>(kOrderBySpillEnabled, true);
   }
 
+  bool orderByRadixSortEnabled() const {
+    return get<bool>(kOrderByRadixSortEnabled, false);
+  }
+
+  bool orderByRadixSortFallbackForFloatingPointKeysEnabled() const {
+    return get<bool>(
+        kOrderByRadixSortFallbackForFloatingPointKeysEnabled, true);
+  }
+
   bool orderBySpillInOutputStageEnabled() const {
     return get<bool>(kOrderBySpillInOutputStageEnabled, true);
   }
@@ -1352,6 +1392,8 @@ class QueryConfig {
   bool prestoArrayAggIgnoreNulls() const {
     return get<bool>(kPrestoArrayAggIgnoreNulls, false);
   }
+
+  bool sparkLegacySizeOfNull() const;
 
   bool prestoSetAggIgnoreNulls() const {
     return get<bool>(kPrestoSetAggIgnoreNulls, false);
@@ -1744,6 +1786,10 @@ class QueryConfig {
     return get<int64_t>(kParquetReaderImplicitCastMask, 0);
   }
 
+  int32_t parquetRepDefStreamingWindowSize() const {
+    return get<int32_t>(kParquetRepDefStreamingWindowSize, 2 * 1024);
+  }
+
   bool enableDynamicConcurrencyAdjustment() const {
     return get<bool>(kDynamicConcurrencyAdjustmentEnabled, false);
   }
@@ -1778,6 +1824,10 @@ class QueryConfig {
 
   bool sparkLegacyStatisticalAggregate() const {
     return get<bool>(kSparkLegacyStatisticalAggregate, false);
+  }
+
+  bool sparkChunkBase64StringEnabled() const {
+    return get<bool>(kSparkChunkBase64StringEnabled, false);
   }
 
   /// Test-only method to override the current query config properties.

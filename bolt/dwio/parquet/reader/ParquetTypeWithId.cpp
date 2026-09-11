@@ -31,13 +31,14 @@
 #include "bolt/dwio/parquet/reader/ParquetTypeWithId.h"
 namespace bytedance::bolt::parquet {
 namespace {
-bool containsList(const ParquetTypeWithId& type) {
-  if (type.type()->kind() == TypeKind::ARRAY) {
+bool containsRepeatedType(const ParquetTypeWithId& type) {
+  if (type.type()->kind() == TypeKind::ARRAY ||
+      type.type()->kind() == TypeKind::MAP) {
     return true;
   }
   if (type.type()->kind() == TypeKind::ROW) {
     for (auto i = 0; i < type.getChildren().size(); ++i) {
-      if (containsList(type.parquetChildAt(i))) {
+      if (containsRepeatedType(type.parquetChildAt(i))) {
         return true;
       }
     }
@@ -83,7 +84,7 @@ LevelMode ParquetTypeWithId::makeLevelInfo(LevelInfo& info) const {
       if (child.type()->kind() != TypeKind ::ARRAY) {
         isAllLists = false;
       }
-      hasList |= hasList || containsList(child);
+      hasList |= containsRepeatedType(child);
     }
   }
   if (isList) {
