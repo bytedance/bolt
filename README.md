@@ -21,7 +21,7 @@ This will ensure the smooth & credible experience for code contribution
 Bolt focuses on the physical execution layer of DBMS while providing first-class and high performance support for popular frameworks and storage formats.
 
 Frameworks:
-* [Apache Gluten](https://github.com/apache/incubator-gluten/discussions/10929#discussioncomment-15037342) for Spark
+* [Apache Gluten](https://github.com/apache/gluten#bolt-backend) for Apache Spark
 * RFC for [PrestoDB](https://github.com/prestodb/rfcs/pull/59)  
 * [OpenSearch](https://github.com/opensearch-project/sql/issues/4812?open_in_browser=true) for ElasticSearch
 * Flink (Coming Soon)
@@ -78,23 +78,32 @@ make release
 make release BUILD_VERSION=main
 ```
 
-#### Building Bolt for [Gluten](https://gluten.apache.org/)
-Before you begin, please ensure that the following software is present in your environment: JDK (currently only JDK 11 and JDK 17 are supported), Maven, and curl.
+#### Building Bolt as an [Apache Gluten](https://gluten.apache.org/) Backend
 
-First, you need to compile Bolt, and then export Bolt as a library.
+Bolt is now available as a backend in Apache Gluten. The integration was merged via [apache/gluten#12454](https://github.com/apache/gluten/pull/12454).
+
+For the latest prerequisites and standard build instructions, see the [Bolt Backend](https://github.com/apache/gluten#bolt-backend) section in the Apache Gluten repository.
+
+To validate local Bolt changes with Gluten, first build Bolt in Spark-compatible mode and export it to the local Conan cache:
+
 ```shell
-cd bolt
+# In the Bolt repository
 make release_spark
 make export_release
 ```
 
-Then you can compile Gluten that supports Bolt.
+Then clone the official Apache Gluten repository and build the Bolt backend and Gluten JAR:
+
 ```shell
-git clone -b add_bolt_backend https://github.com/WangGuangxin/gluten.git
+git clone https://github.com/apache/gluten.git
 cd gluten
-make arrow
+
 make release
-make jar
+make arrow
+
+# Select the target matching your Spark version.
+# For example, build the Spark 3.5 package:
+make jar_spark35
 ```
 
 #### Building Bolt for other system
