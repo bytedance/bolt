@@ -72,6 +72,12 @@ struct CodePointFunction {
 ///     absolute value of start is greater then length of the string.
 
 ///
+/// Controls how negative length is handled across dialects.
+enum class SubstrInvalidInputPolicy {
+  kReturnEmpty, // length <= 0 returns empty string (Presto, Spark)
+  kReturnNull, // length < 0 returns NULL (Flink)
+};
+
 /// substr(string, start, length) -> varchar
 ///
 ///     Returns a substring from string of length length from the
@@ -79,7 +85,11 @@ struct CodePointFunction {
 ///     position is interpreted as being relative to the end of the string.
 ///     Returns empty string if absolute value of start is greater then length
 ///     of the string.
-template <typename T, bool supportZeroIndex = false>
+template <
+    typename T,
+    bool supportZeroIndex = false,
+    SubstrInvalidInputPolicy invalidInputPolicy =
+        SubstrInvalidInputPolicy::kReturnEmpty>
 struct SubstrFunctionBase {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
@@ -90,33 +100,38 @@ struct SubstrFunctionBase {
   static constexpr bool is_default_ascii_behavior = true;
 
   template <typename I>
-  FOLLY_ALWAYS_INLINE void call(
+  FOLLY_ALWAYS_INLINE bool call(
       out_type<Varchar>& result,
       const arg_type<Varchar>& input,
       I start,
       I length = std::numeric_limits<I>::max()) {
-    doCall<false>(result, input, start, length);
+    return doCall<false>(result, input, start, length);
   }
 
   template <typename I>
-  FOLLY_ALWAYS_INLINE void callAscii(
+  FOLLY_ALWAYS_INLINE bool callAscii(
       out_type<Varchar>& result,
       const arg_type<Varchar>& input,
       I start,
       I length = std::numeric_limits<I>::max()) {
-    doCall<true>(result, input, start, length);
+    return doCall<true>(result, input, start, length);
   }
 
   template <bool isAscii, typename I>
-  FOLLY_ALWAYS_INLINE void doCall(
+  FOLLY_ALWAYS_INLINE bool doCall(
       out_type<Varchar>& result,
       const arg_type<Varchar>& input,
       I start,
       I length = std::numeric_limits<I>::max()) {
-    // Following Presto semantics
+    // Handle length-based early returns per dialect policy.
+    if constexpr (invalidInputPolicy == SubstrInvalidInputPolicy::kReturnNull) {
+      if (length < 0) {
+        return false;
+      }
+    }
     if (length <= 0) {
       result.setEmpty();
-      return;
+      return true;
     }
 
     if (start == 0) {
@@ -124,7 +139,7 @@ struct SubstrFunctionBase {
         start = 1;
       } else {
         result.setEmpty();
-        return;
+        return true;
       }
     }
 
@@ -138,7 +153,7 @@ struct SubstrFunctionBase {
     // Following Presto semantics
     if (start <= 0 || start > numCharacters) {
       result.setEmpty();
-      return;
+      return true;
     }
 
     // Adjusting length
@@ -153,6 +168,7 @@ struct SubstrFunctionBase {
     // Generating output string
     result.setNoCopy(StringView(
         input.data() + byteRange.first, byteRange.second - byteRange.first));
+    return true;
   }
 };
 

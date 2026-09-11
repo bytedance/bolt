@@ -47,6 +47,10 @@ static void registerStringFunctions(const std::string& prefix) {
       {prefix + "lpad"});
   registerFunction<FlinkRPadFunction, Varchar, Varchar, int32_t, Varchar>(
       {prefix + "rpad"});
+  registerFunction<FlinkSubstrFunction, Varchar, Varchar, int32_t>(
+      {prefix + "substr", prefix + "substring"});
+  registerFunction<FlinkSubstrFunction, Varchar, Varchar, int32_t, int32_t>(
+      {prefix + "substr", prefix + "substring"});
   registerFunction<IsAlphaFunction, bool, Varchar>({prefix + "is_alpha"});
   registerFunction<IsDecimalFunction, bool, Varchar>({prefix + "is_decimal"});
   registerFunction<IsDigitFunction, bool, Varchar>({prefix + "is_digit"});
