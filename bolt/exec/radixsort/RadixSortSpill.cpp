@@ -252,8 +252,7 @@ std::vector<RadixSortSpillFile> RadixSortSpillWriter::finish() {
   std::vector<RadixSortSpillFile> files;
   files.reserve(spillFiles.size());
   for (auto& file : spillFiles) {
-    files.push_back(RadixSortSpillFile{
-        file.id, file.path, file.size, file.rowCount, file.compressionKind});
+    files.push_back(RadixSortSpillFile{file.path, file.compressionKind});
   }
   cleanupFilesOnError.dismiss();
   finished_ = true;
@@ -380,10 +379,10 @@ void RadixSortSpillWriter::flush() {
     payloadFixedCursor +=
         static_cast<uint64_t>(range.rowCount) * meta_.payloadFixedSize;
   }
-  BOLT_DCHECK_EQ(keyRecordsCursor, keyRecords + keyRecordBytes);
-  BOLT_DCHECK_EQ(keyHeapCursor, keyHeap + keyHeapBytes);
-  BOLT_DCHECK_EQ(payloadFixedCursor, payloadFixed + payloadFixedBytes);
-  BOLT_DCHECK_EQ(payloadHeapCursor, payloadHeap + payloadHeapBytes);
+  BOLT_DCHECK(keyRecordsCursor == keyRecords + keyRecordBytes);
+  BOLT_DCHECK(keyHeapCursor == keyHeap + keyHeapBytes);
+  BOLT_DCHECK(payloadFixedCursor == payloadFixed + payloadFixedBytes);
+  BOLT_DCHECK(payloadHeapCursor == payloadHeap + payloadHeapBytes);
 
   inputBytes_ += uncompressedBytes;
 
@@ -460,6 +459,10 @@ std::optional<RadixSortSpillBlockView> RadixSortSpillReader::nextBatch() {
   }
 
   MicrosecondTimer readTimer(&spillReadTimeUs_);
+  BOLT_CHECK_GE(
+      inputRemainingFileBytes(),
+      kBlockHeaderSize,
+      "Radix sort spill header is truncated");
   RadixSortSpillBlockHeader header;
   input_->readBytes(reinterpret_cast<char*>(&header), sizeof(header));
   BOLT_CHECK_EQ(
@@ -517,6 +520,10 @@ std::optional<RadixSortSpillBlockView> RadixSortSpillReader::nextBatch() {
       header.payloadHeapBytes);
   BOLT_CHECK_EQ(
       static_cast<uint64_t>(uncompressedSize), expectedUncompressedSize);
+  BOLT_CHECK_LE(
+      static_cast<uint64_t>(storedSize),
+      inputRemainingFileBytes(),
+      "Radix sort spill body is truncated");
   if (serializedBuffer_ != nullptr &&
       (serializedBuffer_->size() > kRadixSortSpillBufferSize ||
        serializedBuffer_->capacity() < uncompressedSize)) {
@@ -816,7 +823,7 @@ class RadixSortFixedSpillMergeStream final
   bool tryAdvance() override {
     BOLT_DCHECK_NOT_NULL(key_);
     const auto* nextKey = key_ + recordStride_;
-    BOLT_DCHECK_LE(nextKey, keyRecordsEnd_);
+    BOLT_DCHECK(nextKey <= keyRecordsEnd_);
     if (nextKey == keyRecordsEnd_) {
       return false;
     }
@@ -829,7 +836,7 @@ class RadixSortFixedSpillMergeStream final
 
   void advanceAfterFlush() override {
     BOLT_DCHECK_NOT_NULL(key_);
-    BOLT_DCHECK_EQ(key_ + recordStride_, keyRecordsEnd_);
+    BOLT_DCHECK(key_ + recordStride_ == keyRecordsEnd_);
     loadBatch();
   }
 
@@ -859,7 +866,7 @@ class RadixSortFixedSpillMergeStream final
         clearCursor();
         return;
       }
-      BOLT_DCHECK_LT(block->keyRecordsBegin, block->keyHeapBegin);
+      BOLT_DCHECK(block->keyRecordsBegin < block->keyHeapBegin);
       keyRecordsEnd_ = block->keyHeapBegin;
       if constexpr (HasPayload) {
         payload_ = block->payloadFixedBegin;
@@ -915,7 +922,7 @@ class RadixSortVariableSpillMergeStream final
   bool tryAdvance() override {
     BOLT_DCHECK_NOT_NULL(key_);
     const auto* nextKey = key_ + recordStride_;
-    BOLT_DCHECK_LE(nextKey, keyRecordsEnd_);
+    BOLT_DCHECK(nextKey <= keyRecordsEnd_);
     if (nextKey == keyRecordsEnd_) {
       return false;
     }
@@ -931,10 +938,10 @@ class RadixSortVariableSpillMergeStream final
 
   void advanceAfterFlush() override {
     BOLT_DCHECK_NOT_NULL(key_);
-    BOLT_DCHECK_EQ(key_ + recordStride_, keyRecordsEnd_);
-    BOLT_CHECK_EQ(
-        encodedSuffix_.bytes.data() + encodedSuffix_.bytes.size(),
-        keyHeapEnd_,
+    BOLT_DCHECK(key_ + recordStride_ == keyRecordsEnd_);
+    BOLT_CHECK(
+        encodedSuffix_.bytes.data() + encodedSuffix_.bytes.size() ==
+            keyHeapEnd_,
         "Radix sort spill key heap is not consumed exactly");
     loadBatch();
   }
@@ -953,7 +960,7 @@ class RadixSortVariableSpillMergeStream final
 
  private:
   void prepareCurrent(const char* record, const char* keyHeap, char* payload) {
-    BOLT_DCHECK_LE(keyHeap, keyHeapEnd_);
+    BOLT_DCHECK(keyHeap <= keyHeapEnd_);
     const auto encodedSize =
         loadUnaligned<uint64_t>(record + Traits::kSizeOffset);
     BOLT_CHECK_GT(
@@ -1126,22 +1133,35 @@ void RadixSortMerger::replaceMemory(
     RadixSortSpillRun run,
     RadixSortSpillSectionMeta meta,
     memory::MemoryPool* pool,
-    bool spillUringEnabled) {
+    bool spillUringEnabled,
+    folly::FunctionRef<void()> releaseMemory) {
+  auto cleanupFilesOnError =
+      folly::makeGuard([&run]() { cleanupSpillFilesNoThrow(run.files); });
   BOLT_CHECK(memoryIndex_.has_value(), "Missing radix memory merge stream");
   BOLT_CHECK(!run.files.empty(), "Radix sort spill run has no files");
   BOLT_CHECK(
       meta.keyLayout.kind() == keyLayout_.kind(),
       "Radix sort replacement stream layout mismatch");
 
-  auto replacement = makeRadixSortSpillMergeStream(
-      std::move(run),
-      std::move(meta),
-      pool,
-      spillUringEnabled,
-      bufferCache_.get());
-  streams_[*memoryIndex_] = std::move(replacement);
+  const auto index = *memoryIndex_;
+  streams_[index].reset();
   memoryIndex_.reset();
-  resetSelection();
+  try {
+    releaseMemory();
+    streams_[index] = makeRadixSortSpillMergeStream(
+        std::move(run),
+        std::move(meta),
+        pool,
+        spillUringEnabled,
+        bufferCache_.get());
+    resetSelection();
+  } catch (...) {
+    streams_.clear();
+    losers_.clear();
+    lastIndex_ = kEmpty;
+    throw;
+  }
+  cleanupFilesOnError.dismiss();
 }
 
 void RadixSortMerger::removeMemory() {

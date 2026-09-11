@@ -22,7 +22,6 @@
 #include <gtest/gtest.h>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 #include "bolt/vector/SimpleVector.h"
 
 namespace bytedance::bolt::exec::radixsort::test {
@@ -53,23 +52,6 @@ int32_t SortComparatorOracle::compareUnsignedBytes(
     return (result > 0) - (result < 0);
   }
   return (left.size() > right.size()) - (left.size() < right.size());
-}
-
-int32_t SortComparatorOracle::compareEncodedKeys(
-    const EncodedKeyBatch& keys,
-    vector_size_t left,
-    vector_size_t right) {
-  BOLT_CHECK_GE(left, 0);
-  BOLT_CHECK_GE(right, 0);
-  BOLT_CHECK_LT(left, keys.size());
-  BOLT_CHECK_LT(right, keys.size());
-  if (keys.format() == EncodedKeyFormat::kFixed64) {
-    const auto leftKey = keys.fixedKeyAt(left);
-    const auto rightKey = keys.fixedKeyAt(right);
-    return (leftKey > rightKey) - (leftKey < rightKey);
-  }
-  return compareUnsignedBytes(
-      keys.variableKeyAt(left), keys.variableKeyAt(right));
 }
 
 int32_t SortComparatorOracle::compare(

@@ -131,8 +131,6 @@ class RadixSortKeyLayout {
     return heapKeyOffset_;
   }
 
-  uint64_t heapSize(uint64_t encodedSize) const;
-
   bool isVariable() const {
     return variable_;
   }
@@ -486,10 +484,6 @@ class RadixSortKeyOps {
  public:
   using Traits = RadixSortKeyTraits<KIND>;
 
-  static int32_t compare(const char* left, const char* right) {
-    return compare(left, right, 0);
-  }
-
   static int32_t
   compare(const char* left, const char* right, uint32_t heapKeyOffset) {
     if constexpr (!Traits::kVariable) {
@@ -560,16 +554,8 @@ class RadixSortKeyOps {
 
 class RadixSortKey {
  public:
-  RadixSortKey(const RadixSortKeyLayout& layout, char* data)
-      : layout_(&layout), data_(data), mutableData_(data) {}
-
   RadixSortKey(const RadixSortKeyLayout& layout, const char* data)
       : layout_(&layout), data_(data) {}
-
-  void construct(
-      std::string_view encodedKey,
-      char* overflowData,
-      char* payload = nullptr) const;
 
   FOLLY_ALWAYS_INLINE void deconstruct(
       RadixSortInlineKeyBuffer& inlineBuffer,
@@ -594,24 +580,9 @@ class RadixSortKey {
         std::string_view(inlineBuffer.data(), layout_->inlineCapacity())};
   }
 
-  int32_t compare(const RadixSortKey& other) const;
-
-  uint64_t heapSize() const;
-
-  std::string_view heapKey() const;
-
-  char* heapKeyData() const;
-
-  char* payload() const;
-
  private:
-  uint64_t inlineWord(uint32_t index) const;
-
-  uint64_t storedSize() const;
-
   const RadixSortKeyLayout* layout_;
   const char* data_;
-  char* mutableData_{nullptr};
 };
 
 } // namespace bytedance::bolt::exec::radixsort

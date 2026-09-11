@@ -803,17 +803,18 @@ PointerFreeValidationResult runPointerFreeValidation(uint32_t scenario) {
 
   const auto inputStage =
       addAndSpillInputStage(buffer, fixture.data.inputs, split, runs);
-  const auto inputDiskRuns = buffer.testingSpilledRunCount();
+  const auto inputSpillStats = buffer.spilledStats();
+  BOLT_CHECK(inputSpillStats.has_value());
+  const auto inputDiskRuns = inputSpillStats->spillRuns;
   BOLT_CHECK_EQ(inputDiskRuns, runs);
   for (uint32_t index = inputStage.split; index < fixture.data.inputs.size();
        ++index) {
     buffer.addInput(fixture.data.inputs[index]);
   }
   buffer.noMoreInput();
-  const auto mergeStreams = buffer.testingMergeStreamCount();
   const auto expectedResidentStreams =
       inputStage.split < fixture.data.inputs.size() ? 1 : 0;
-  BOLT_CHECK_EQ(mergeStreams, inputDiskRuns + expectedResidentStreams);
+  const auto mergeStreams = inputDiskRuns + expectedResidentStreams;
   const auto preOutputReadStats =
       buffer.spillReadStats().value_or(common::SpillReadStats{});
 

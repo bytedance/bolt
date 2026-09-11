@@ -479,6 +479,9 @@ TEST_F(ShuffleMemoryTest, testRowBasedReclaimViaMemoryPressure) {
     while (cursor->moveNext()) {
     }
   });
+  // The hog reclaims the idle writer outside the timed sections.
+  EXPECT_GT(metrics.externalReclaimTime, 0);
+  EXPECT_GT(metrics.shuffleWriteTime, 0);
 }
 
 ShuffleWriterMetrics ShuffleMemoryTest::runReclaimableHogScenario(

@@ -17,24 +17,10 @@
 #include "bolt/exec/radixsort/RadixSortKey.h"
 
 #include <algorithm>
-#include <cstring>
-
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/radixsort/RadixSortUtils.h"
 
 namespace bytedance::bolt::exec::radixsort {
-namespace {
-
-uint64_t fromEncodedWord(const char* data) {
-  auto word = loadUnaligned<uint64_t>(data);
-  if constexpr (std::endian::native == std::endian::little) {
-    word = byteSwap(word);
-  }
-  return word;
-}
-
-} // namespace
-
 void checkCompactPointerRange(const void* data, uint64_t size) {
   if (size == 0) {
     return;
@@ -127,144 +113,6 @@ RadixSortKeyLayout RadixSortKeyLayout::select(
         "Fixed radix sort key layout cannot have a heap offset");
   }
   return layout;
-}
-
-uint64_t RadixSortKeyLayout::heapSize(uint64_t encodedSize) const {
-  if (!isVariable()) {
-    return 0;
-  }
-  BOLT_DCHECK_LE(heapKeyOffset_, inlineCapacity_);
-  BOLT_DCHECK_LE(heapKeyOffset_, encodedSize);
-  return encodedSize - heapKeyOffset_;
-}
-
-void RadixSortKey::construct(
-    std::string_view encodedKey,
-    char* overflowData,
-    char* payload) const {
-  if (layout_->isVariable()) {
-    std::memset(mutableData_, 0, layout_->inlineCapacity());
-    std::memcpy(
-        mutableData_,
-        encodedKey.data(),
-        std::min<size_t>(encodedKey.size(), layout_->inlineCapacity()));
-  } else {
-    RadixSortInlineKeyBuffer inlineBytes{};
-    std::memcpy(
-        inlineBytes.data(),
-        encodedKey.data(),
-        std::min<size_t>(encodedKey.size(), layout_->inlineCapacity()));
-    for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
-      storeUnaligned(
-          mutableData_ + word * sizeof(uint64_t),
-          fromEncodedWord(inlineBytes.data() + word * sizeof(uint64_t)));
-    }
-    std::memcpy(
-        mutableData_ + layout_->inlineWordBytes(),
-        inlineBytes.data() + layout_->inlineWordBytes(),
-        layout_->inlineTailBytes());
-  }
-
-  if (layout_->isVariable()) {
-    BOLT_DCHECK_GT(
-        encodedKey.size(),
-        layout_->heapKeyOffset(),
-        "Variable radix sort key must contain a suffix column");
-    storeUnaligned<uint64_t>(
-        mutableData_ + *layout_->sizeOffset(), encodedKey.size());
-    const auto heapSize = layout_->heapSize(encodedKey.size());
-    BOLT_DCHECK_GT(heapSize, 0);
-    BOLT_DCHECK_NOT_NULL(overflowData);
-    std::memcpy(
-        overflowData, encodedKey.data() + layout_->heapKeyOffset(), heapSize);
-    storeCompactPointer(mutableData_ + *layout_->dataOffset(), overflowData);
-  }
-  if (layout_->hasPayload()) {
-    storeCompactPointer(mutableData_ + *layout_->payloadOffset(), payload);
-  }
-}
-
-int32_t RadixSortKey::compare(const RadixSortKey& other) const {
-  if (!layout_->isVariable()) {
-    for (uint32_t word = 0; word < layout_->inlineWordCount(); ++word) {
-      const auto left = inlineWord(word);
-      const auto right = other.inlineWord(word);
-      if (left != right) {
-        return (left > right) - (left < right);
-      }
-    }
-    const auto tailResult = std::memcmp(
-        data_ + layout_->inlineWordBytes(),
-        other.data_ + layout_->inlineWordBytes(),
-        layout_->inlineTailBytes());
-    if (tailResult != 0) {
-      return (tailResult > 0) - (tailResult < 0);
-    }
-    return 0;
-  }
-
-  const auto leftSize = storedSize();
-  const auto rightSize = other.storedSize();
-  const auto prefixSize =
-      std::min<uint64_t>({leftSize, rightSize, layout_->inlineCapacity()});
-  const auto result = std::memcmp(data_, other.data_, prefixSize);
-  if (result != 0) {
-    return (result > 0) - (result < 0);
-  }
-  if (prefixSize < layout_->inlineCapacity()) {
-    return (leftSize > rightSize) - (leftSize < rightSize);
-  }
-
-  const auto heapOffset = layout_->heapKeyOffset();
-  BOLT_DCHECK_LE(heapOffset, layout_->inlineCapacity());
-  const auto* leftData = loadCompactPointer(data_ + *layout_->dataOffset());
-  const auto* rightData =
-      loadCompactPointer(other.data_ + *layout_->dataOffset());
-  const auto suffixResult = std::memcmp(
-      leftData + layout_->inlineCapacity() - heapOffset,
-      rightData + layout_->inlineCapacity() - heapOffset,
-      std::min(leftSize, rightSize) - layout_->inlineCapacity());
-  if (suffixResult != 0) {
-    return (suffixResult > 0) - (suffixResult < 0);
-  }
-  return (leftSize > rightSize) - (leftSize < rightSize);
-}
-
-uint64_t RadixSortKey::heapSize() const {
-  if (!layout_->isVariable()) {
-    return 0;
-  }
-  return layout_->heapSize(storedSize());
-}
-
-std::string_view RadixSortKey::heapKey() const {
-  const auto size = heapSize();
-  return std::string_view(
-      size == 0 ? nullptr : loadCompactPointer(data_ + *layout_->dataOffset()),
-      size);
-}
-
-char* RadixSortKey::heapKeyData() const {
-  BOLT_DCHECK(layout_->isVariable());
-  return loadCompactPointer(data_ + *layout_->dataOffset());
-}
-
-char* RadixSortKey::payload() const {
-  if (!layout_->hasPayload()) {
-    return nullptr;
-  }
-  return loadCompactPointer(data_ + *layout_->payloadOffset());
-}
-
-uint64_t RadixSortKey::inlineWord(uint32_t index) const {
-  return loadUnaligned<uint64_t>(data_ + index * sizeof(uint64_t));
-}
-
-uint64_t RadixSortKey::storedSize() const {
-  if (!layout_->isVariable()) {
-    return 0;
-  }
-  return loadUnaligned<uint64_t>(data_ + *layout_->sizeOffset());
 }
 
 } // namespace bytedance::bolt::exec::radixsort

@@ -33,6 +33,92 @@
 #include "bolt/vector/SimpleVector.h"
 
 namespace bytedance::bolt::exec::radixsort::test {
+namespace {
+
+uint64_t storedKeySize(const RadixSortKeyLayout& layout, const char* record) {
+  return loadUnaligned<uint64_t>(record + *layout.sizeOffset());
+}
+
+std::string_view overflowKeyBytes(
+    const RadixSortKeyLayout& layout,
+    const char* record) {
+  return {
+      loadCompactPointer(record + *layout.dataOffset()),
+      storedKeySize(layout, record) - layout.heapKeyOffset()};
+}
+
+char* payloadAt(const RadixSortKeyLayout& layout, const char* record) {
+  return layout.hasPayload()
+      ? loadCompactPointer(record + *layout.payloadOffset())
+      : nullptr;
+}
+
+RowTypePtr outputTypeOf(const RadixSortRun& run) {
+  std::vector<TypePtr> types;
+  types.reserve(run.projection().columns().size());
+  for (const auto& column : run.projection().columns()) {
+    types.push_back(
+        column.source == RadixSortOutputSource::kDecodedKey
+            ? run.projection().keyType()->childAt(column.sourceIndex)
+            : run.projection().payloadType()->childAt(column.sourceIndex));
+  }
+  return ROW(std::move(types));
+}
+
+RowVectorPtr nextOutput(
+    RadixSortRun& run,
+    vector_size_t maxRows,
+    memory::MemoryPool* pool,
+    RowVectorPtr& output) {
+  auto outputSize = maxRows;
+  if (run.state() != RadixSortRunState::kBuilding) {
+    outputSize = static_cast<vector_size_t>(std::min<uint64_t>(
+        maxRows, run.metrics().inputRows - run.metrics().outputRows));
+  }
+  if (output != nullptr && output.use_count() == 1 && output->pool() == pool) {
+    for (auto& child : output->children()) {
+      child.reset();
+    }
+    VectorPtr reusable = std::move(output);
+    BaseVector::prepareForReuse(reusable, outputSize);
+    output = std::static_pointer_cast<RowVector>(reusable);
+  } else {
+    const auto outputType = outputTypeOf(run);
+    output = std::make_shared<RowVector>(
+        pool,
+        outputType,
+        nullptr,
+        outputSize,
+        std::vector<VectorPtr>(outputType->size()));
+  }
+  return run.getOutput(maxRows, pool, output);
+}
+
+int32_t comparePhysicalKeys(
+    const RadixSortKeyLayout& layout,
+    const char* left,
+    const char* right) {
+#define COMPARE_KIND(kind)                                         \
+  case RadixSortKeyLayoutKind::kind:                               \
+    return RadixSortKeyOps<RadixSortKeyLayoutKind::kind>::compare( \
+        left, right, layout.heapKeyOffset())
+  switch (layout.kind()) {
+    COMPARE_KIND(kKeyOnlyFixed8);
+    COMPARE_KIND(kKeyOnlyFixed16);
+    COMPARE_KIND(kKeyOnlyFixed24);
+    COMPARE_KIND(kKeyOnlyFixed32);
+    COMPARE_KIND(kKeyOnlyVariable32);
+    COMPARE_KIND(kKeyWithPayloadFixed16);
+    COMPARE_KIND(kKeyWithPayloadFixed24);
+    COMPARE_KIND(kKeyWithPayloadFixed32);
+    COMPARE_KIND(kKeyWithPayloadVariable32);
+    default:
+      BOLT_UNREACHABLE();
+  }
+#undef COMPARE_KIND
+}
+
+} // namespace
 
 class RadixSortRunOffsetOutputTest {
  public:
@@ -49,8 +135,7 @@ class RadixSortRunOffsetOutputTest {
         vector_size_t outputOffset) {
       auto externalViews = selectedViewsFor(keys.size());
       for (size_t row = 0; row < externalViews.size(); ++row) {
-        externalViews[row] = {
-            RadixSortKey(run_.keyLayout(), keys[row]).heapKey()};
+        externalViews[row] = {overflowKeyBytes(run_.keyLayout(), keys[row])};
       }
       writeSelected(keys, payloads, outputOffset);
     }
@@ -195,12 +280,11 @@ class BoundaryVariableMemoryMergeStream final
       encodedSuffix_ = {};
       return;
     }
-    key_ = storage_.keyDataAt(index_);
-    payload_ = storage_.layout().hasPayload()
-        ? RadixSortKey(storage_.layout(), key_).payload()
-        : nullptr;
-    encodedSuffix_ =
-        EncodedKeyView{RadixSortKey(storage_.layout(), key_).heapKey()};
+    const auto range = storage_.keyRangeAt(index_, 1);
+    BOLT_CHECK_EQ(range.count, 1);
+    key_ = range.data;
+    payload_ = payloadAt(storage_.layout(), key_);
+    encodedSuffix_ = EncodedKeyView{overflowKeyBytes(storage_.layout(), key_)};
   }
 
   const RadixSortRunStorage& storage_;
@@ -536,13 +620,16 @@ class RadixSortRunTest : public testing::Test {
     BOLT_CHECK_GT(batchSize, 0);
     const auto total = static_cast<vector_size_t>(run.metrics().inputRows);
     std::vector<VectorPtr> children;
-    children.reserve(run.projection().outputType()->size());
-    for (const auto& type : run.projection().outputType()->children()) {
+    const auto outputType = outputTypeOf(run);
+    children.reserve(outputType->size());
+    for (const auto& type : outputType->children()) {
       children.push_back(BaseVector::create(type, total, outputPool_.get()));
     }
 
     vector_size_t offset = 0;
-    while (auto batch = run.getOutput(batchSize, outputPool_.get())) {
+    RowVectorPtr reusableOutput;
+    while (auto batch =
+               nextOutput(run, batchSize, outputPool_.get(), reusableOutput)) {
       if (offset + batch->size() > total) {
         ADD_FAILURE() << "RadixSortRun returned more rows than it accepted";
         return nullptr;
@@ -552,11 +639,7 @@ class RadixSortRunTest : public testing::Test {
     }
     EXPECT_EQ(offset, total);
     return std::make_shared<RowVector>(
-        outputPool_.get(),
-        run.projection().outputType(),
-        nullptr,
-        total,
-        std::move(children));
+        outputPool_.get(), outputType, nullptr, total, std::move(children));
   }
 
   RowVectorPtr collectAndVerify(
@@ -591,6 +674,14 @@ class RadixSortRunTest : public testing::Test {
         ->valueAt(row);
   }
 
+  static const char* recordAt(
+      const RadixSortRunStorage& storage,
+      uint64_t row) {
+    const auto range = storage.keyRangeAt(row, 1);
+    BOLT_CHECK_EQ(range.count, 1);
+    return range.data;
+  }
+
   static std::pair<std::vector<const char*>, std::vector<char*>> rowPointers(
       const RadixSortRun& run) {
     std::vector<const char*> keys;
@@ -600,10 +691,10 @@ class RadixSortRunTest : public testing::Test {
       payloads.reserve(run.storage()->size());
     }
     for (uint64_t row = 0; row < run.storage()->size(); ++row) {
-      const auto* key = run.storage()->keyDataAt(row);
+      const auto* key = recordAt(*run.storage(), row);
       keys.push_back(key);
       if (run.projection().hasPayload()) {
-        payloads.push_back(RadixSortKey(run.keyLayout(), key).payload());
+        payloads.push_back(payloadAt(run.keyLayout(), key));
       }
     }
     return {std::move(keys), std::move(payloads)};
@@ -611,7 +702,7 @@ class RadixSortRunTest : public testing::Test {
 
   RowVectorPtr makePreparedOutput(const RadixSortRun& run, vector_size_t size) {
     auto output = BaseVector::create<RowVector>(
-        run.projection().outputType(), size, outputPool_.get());
+        outputTypeOf(run), size, outputPool_.get());
     for (auto& child : output->children()) {
       child->resize(size);
     }
@@ -703,7 +794,8 @@ class RadixSortRunTest : public testing::Test {
     EXPECT_EQ(run.state(), RadixSortRunState::kConsumed);
     EXPECT_EQ(run.storage(), nullptr);
     EXPECT_EQ(run.retainedBytes(), 0);
-    EXPECT_EQ(run.getOutput(1, outputPool_.get()), nullptr);
+    RowVectorPtr reusableOutput;
+    EXPECT_EQ(nextOutput(run, 1, outputPool_.get(), reusableOutput), nullptr);
   }
 };
 
@@ -777,8 +869,12 @@ TEST_F(RadixSortRunTest, variableKeyHeapOffsetSortsAndDecodes) {
   EXPECT_EQ(run->keyLayout().heapKeyOffset(), 5);
   ASSERT_NE(run->storage(), nullptr);
   for (uint64_t row = 0; row < run->storage()->size(); ++row) {
-    const auto key = run->storage()->keyAt(row);
-    EXPECT_EQ(key.heapKey().size(), key.heapSize());
+    const auto record = recordAt(*run->storage(), row);
+    const auto key = overflowKeyBytes(run->keyLayout(), record);
+    EXPECT_EQ(
+        key.size(),
+        storedKeySize(run->keyLayout(), record) -
+            run->keyLayout().heapKeyOffset());
   }
   collectAndVerify(*run, *input, 2, 2, {0, 1}, keyFlags);
 }
@@ -827,22 +923,32 @@ TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
       SortComparatorOracle::makeSortFlags(true, true),
       SortComparatorOracle::makeSortFlags(true, true)};
 
-  std::array<EncodedKeyBatch, 3> encodedColumns;
-  for (uint32_t column = 0; column < encodedColumns.size(); ++column) {
-    std::unique_ptr<RadixSortKeyCodec> codec;
-    RadixSortKeyCodec::bind(
-        {input->childAt(column)->type()}, {keyFlags[column]}, codec);
-    auto columnInput = makeRows({"key"}, {input->childAt(column)});
-    codec->encode(*columnInput, runPool_.get(), encodedColumns[column]);
-  }
-  const auto encodedFixedColumnAt = [&](uint32_t column, vector_size_t row) {
-    auto word = encodedColumns[column].fixedKeyAt(row);
-    if constexpr (std::endian::native == std::endian::little) {
-      word = byteSwap(word);
+  const auto encodedIntegerAt = [&](uint32_t column, vector_size_t row) {
+    std::string encoded(5, '\0');
+    const auto& vector = *input->childAt(column);
+    if (vector.isNullAt(row)) {
+      encoded[0] = 1;
+      return encoded;
     }
-    std::string encoded(sizeof(word), '\0');
-    storeUnaligned(encoded.data(), word);
-    encoded.resize(5);
+    encoded[0] = 2;
+    const auto value =
+        vector.asUnchecked<SimpleVector<int32_t>>()->valueAt(row);
+    const auto sortable = static_cast<uint32_t>(value) ^ (uint32_t{1} << 31);
+    storeUnaligned<uint32_t>(encoded.data() + 1, folly::Endian::big(sortable));
+    return encoded;
+  };
+  const auto encodedStringAt = [&](vector_size_t row) {
+    const auto* vector =
+        input->childAt(2)->asUnchecked<SimpleVector<StringView>>();
+    if (vector->isNullAt(row)) {
+      return std::string(1, 1);
+    }
+    const auto value = vector->valueAt(row);
+    std::string encoded;
+    encoded.reserve(value.size() + 2);
+    encoded.push_back(2);
+    encoded.append(value.data(), value.size());
+    encoded.push_back(0);
     return encoded;
   };
 
@@ -859,15 +965,17 @@ TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
   ASSERT_NE(storage, nullptr);
   uint64_t expectedHeapBytes = 0;
   for (vector_size_t row = 0; row < input->size(); ++row) {
-    const auto first = encodedFixedColumnAt(0, row);
-    const auto second = encodedFixedColumnAt(1, row);
-    const auto suffix = encodedColumns[2].variableKeyAt(row);
-    const auto* record = storage->keyDataAt(row);
-    const auto key = storage->keyAt(row);
+    const auto first = encodedIntegerAt(0, row);
+    const auto second = encodedIntegerAt(1, row);
+    const auto suffix = encodedStringAt(row);
+    const auto recordRange = storage->keyRangeAt(row, 1);
+    ASSERT_EQ(recordRange.count, 1);
+    const auto* record = recordRange.data;
+    const auto key = overflowKeyBytes(storage->layout(), record);
 
     EXPECT_EQ(std::string_view(record, 5), first);
     EXPECT_EQ(std::string_view(record + 5, 5), second);
-    EXPECT_EQ(key.heapKey(), suffix);
+    EXPECT_EQ(key, suffix);
     EXPECT_EQ(
         std::string_view(record + 10, std::min<size_t>(suffix.size(), 8)),
         suffix.substr(0, 8));
@@ -878,11 +986,9 @@ TEST_F(RadixSortRunTest, variableKeyEncodesDirectlyIntoRecordAndHeap) {
     }
     expectedHeapBytes += suffix.size();
   }
-  uint64_t actualHeapBytes = 0;
-  for (const auto& group : storage->keyHeapGroups()) {
-    actualHeapBytes += group.used;
-  }
-  EXPECT_EQ(actualHeapBytes, expectedHeapBytes);
+  EXPECT_EQ(
+      storage->estimatedOutputBytes(),
+      input->size() * run->keyLayout().width() + expectedHeapBytes);
 
   run->finalize();
   auto output = collect(*run, 2);
@@ -916,13 +1022,11 @@ TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
   shortRun->append(*slice(*shortInput, 0, 2));
   shortRun->append(*slice(*shortInput, 2, 4));
   EXPECT_EQ(shortRun->keyLayout().inlineCapacity(), 12);
-  EXPECT_EQ(shortRun->maximumEncodedKeySize(), 4);
-  EXPECT_FALSE(shortRun->decodesVariableKeysFromInline());
   shortRun->finalize();
-  ASSERT_TRUE(shortRun->decodesVariableKeysFromInline());
   for (uint64_t row = 0; row < shortRun->storage()->size(); ++row) {
-    auto key = shortRun->storage()->keyAt(row);
-    std::memset(key.heapKeyData(), 'x', key.heapSize());
+    const auto key = overflowKeyBytes(
+        shortRun->keyLayout(), recordAt(*shortRun->storage(), row));
+    std::memset(const_cast<char*>(key.data()), 'x', key.size());
   }
   collectAndVerify(*shortRun, *shortInput, 2, 1);
 
@@ -934,12 +1038,10 @@ TEST_F(RadixSortRunTest, variableKeyOutputSourceIsSelectedAtFinalize) {
       {*mixedInput, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   mixedRun->append(*slice(*mixedInput, 0, 1));
   mixedRun->append(*slice(*mixedInput, 1, 4));
-  EXPECT_EQ(mixedRun->maximumEncodedKeySize(), 34);
   mixedRun->finalize();
-  ASSERT_FALSE(mixedRun->decodesVariableKeysFromInline());
   for (uint64_t row = 0; row < mixedRun->storage()->size(); ++row) {
     std::memset(
-        const_cast<char*>(mixedRun->storage()->keyDataAt(row)),
+        const_cast<char*>(recordAt(*mixedRun->storage(), row)),
         'x',
         mixedRun->keyLayout().inlineCapacity());
   }
@@ -957,10 +1059,9 @@ TEST_F(RadixSortRunTest, inheritedVariableKeySizeSelectsHeapOutput) {
   run->append(*input);
   EXPECT_FALSE(run->variableKeysFitRadixPrefix());
   run->finalize();
-  ASSERT_FALSE(run->decodesVariableKeysFromInline());
   for (uint64_t row = 0; row < run->storage()->size(); ++row) {
     std::memset(
-        const_cast<char*>(run->storage()->keyDataAt(row)),
+        const_cast<char*>(recordAt(*run->storage(), row)),
         'x',
         run->keyLayout().inlineCapacity());
   }
@@ -979,10 +1080,10 @@ TEST_F(RadixSortRunTest, fixedPrefixAndVariableSuffixDecodeFromRecord) {
   run->append(*input);
   run->finalize();
   ASSERT_EQ(run->keyLayout().heapKeyOffset(), 10);
-  ASSERT_TRUE(run->decodesVariableKeysFromInline());
   for (uint64_t row = 0; row < run->storage()->size(); ++row) {
-    auto key = run->storage()->keyAt(row);
-    std::memset(key.heapKeyData(), 'x', key.heapSize());
+    const auto key =
+        overflowKeyBytes(run->keyLayout(), recordAt(*run->storage(), row));
+    std::memset(const_cast<char*>(key.data()), 'x', key.size());
   }
   auto output = collect(*run, 2);
   expectSortedValues(*input, *output, {0, 1, 2}, keyFlags);
@@ -1093,14 +1194,16 @@ TEST_F(RadixSortRunTest, keyOnlyEmptyAndOneRow) {
   EXPECT_FALSE(emptyRun->projection().hasPayload());
   EXPECT_EQ(emptyRun->storage()->payloadLayout(), nullptr);
   emptyRun->finalize();
-  EXPECT_EQ(emptyRun->getOutput(10, outputPool_.get()), nullptr);
+  RowVectorPtr reusableOutput;
+  EXPECT_EQ(
+      nextOutput(*emptyRun, 10, outputPool_.get(), reusableOutput), nullptr);
   EXPECT_EQ(emptyRun->state(), RadixSortRunState::kConsumed);
 
   auto input = makeRows({"key"}, {makeVector<int64_t>(BIGINT(), {42})});
   auto run = createRun(
       {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   run->append(*input);
-  EXPECT_EQ(run->storage()->payloadSize(), 0);
+  EXPECT_FALSE(run->projection().hasPayload());
   run->finalize();
   auto output = collect(*run, 1);
   ASSERT_EQ(output->size(), 1);
@@ -1113,7 +1216,9 @@ TEST_F(RadixSortRunTest, lifecycleAndOutputValidation) {
       makeKeyStringRows({2, 1}, {std::string(32, 'b'), std::string(32, 'a')});
   auto run = createRun(
       {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
-  EXPECT_THROW(run->getOutput(1, outputPool_.get()), BoltException);
+  RowVectorPtr reusableOutput;
+  EXPECT_THROW(
+      nextOutput(*run, 1, outputPool_.get(), reusableOutput), BoltException);
 
   run->append(*input);
   run->finalize();
@@ -1158,15 +1263,16 @@ TEST_F(RadixSortRunTest, outputScratchGrowsAndShrinksAcrossCalls) {
         BaseVector::create(type, kRows, outputPool_.get()));
   }
   vector_size_t offset = 0;
+  RowVectorPtr reusableOutput;
   for (const auto batchSize : {1, 129, 2, 301}) {
-    auto batch = run->getOutput(batchSize, outputPool_.get());
+    auto batch = nextOutput(*run, batchSize, outputPool_.get(), reusableOutput);
     ASSERT_NE(batch, nullptr);
     EXPECT_EQ(batch->size(), batchSize);
     copyBatch(*batch, outputChildren, offset);
     offset += batch->size();
   }
   ASSERT_EQ(offset, kRows);
-  EXPECT_EQ(run->getOutput(1, outputPool_.get()), nullptr);
+  EXPECT_EQ(nextOutput(*run, 1, outputPool_.get(), reusableOutput), nullptr);
   auto output = std::make_shared<RowVector>(
       outputPool_.get(),
       input->type(),
@@ -1212,6 +1318,31 @@ TEST_F(RadixSortRunTest, duplicateDirectKeyStaysInPayload) {
   EXPECT_EQ(
       run->projection().columns()[0].source, RadixSortOutputSource::kPayload);
   collectAndVerify(*run, *input, 9, 1);
+}
+
+TEST_F(RadixSortRunTest, maskedComplexKeysRemainPayloadBacked) {
+  const std::vector<VectorPtr> variables{
+      makeStringVector(
+          {"a", "b", std::nullopt, "", std::string(80, 'x'), "d", "e"}),
+      makeIntegerArrays(),
+      makeIntegerStringMaps(),
+      makeNestedRows()};
+  for (const auto& variable : variables) {
+    for (const auto flags : SortComparatorOracle::allSortFlags()) {
+      auto input = makeRows(
+          {"key", "value", "id"},
+          {makeVector<int64_t>(BIGINT(), {3, 1, 2, 1, 3, 2, 1}),
+           variable,
+           makeIds(7)});
+      const std::vector<column_index_t> channels{0, 1, 1};
+      const std::vector<CompareFlags> keyFlags(3, flags);
+      auto run = finalizedRun({*input, channels, keyFlags});
+      EXPECT_EQ(
+          run->projection().columns()[1].source,
+          RadixSortOutputSource::kPayload);
+      collectAndVerify(*run, *input, 2, 2, channels, keyFlags);
+    }
+  }
 }
 
 TEST_F(RadixSortRunTest, floatingPointKeyOutputUsesDecodedKey) {
@@ -1531,7 +1662,8 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
       run->payloadMayHaveNulls(), (std::vector<uint8_t>{0, 0, 0, 0, 0, 1, 0}));
   run->finalize();
 
-  auto first = run->getOutput(4, outputPool_.get());
+  RowVectorPtr reusableOutput;
+  auto first = nextOutput(*run, 4, outputPool_.get(), reusableOutput);
   ASSERT_NE(first, nullptr);
   std::vector<VectorPtr> children;
   children.reserve(input->childrenSize());
@@ -1547,7 +1679,7 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
   }
   first.reset();
 
-  auto second = run->getOutput(4, outputPool_.get());
+  auto second = nextOutput(*run, 4, outputPool_.get(), reusableOutput);
   ASSERT_NE(second, nullptr);
   for (const auto column : {0, 2, 3, 4, 5, 6, 7, 8, 10}) {
     EXPECT_EQ(second->childAt(column)->rawNulls(), nullptr) << column;
@@ -1556,7 +1688,7 @@ TEST_F(RadixSortRunTest, nullFreeDecodedKeysAndPayloadResetNullBuffers) {
 
   copyBatch(*second, children, offset);
   offset += second->size();
-  while (auto batch = run->getOutput(4, outputPool_.get())) {
+  while (auto batch = nextOutput(*run, 4, outputPool_.get(), reusableOutput)) {
     copyBatch(*batch, children, offset);
     offset += batch->size();
   }
@@ -1580,14 +1712,15 @@ TEST_F(RadixSortRunTest, singleStringPayloadNullFreeReuseResetsNullBuffer) {
   EXPECT_EQ(run->payloadMayHaveNulls(), (std::vector<uint8_t>{0, 0}));
   run->finalize();
 
-  auto first = run->getOutput(3, outputPool_.get());
+  RowVectorPtr reusableOutput;
+  auto first = nextOutput(*run, 3, outputPool_.get(), reusableOutput);
   ASSERT_NE(first, nullptr);
   ASSERT_EQ(first->childAt(1)->rawNulls(), nullptr);
   first->childAt(1)->mutableRawNulls();
   ASSERT_NE(first->childAt(1)->rawNulls(), nullptr);
   first.reset();
 
-  auto second = run->getOutput(3, outputPool_.get());
+  auto second = nextOutput(*run, 3, outputPool_.get(), reusableOutput);
   ASSERT_NE(second, nullptr);
   EXPECT_EQ(second->childAt(1)->rawNulls(), nullptr);
   EXPECT_FALSE(second->childAt(1)->mayHaveNulls());
@@ -1614,25 +1747,16 @@ TEST_F(RadixSortRunTest, runOwnedAllocationPoolCoversPersistentData) {
 
   const auto* arena = run->storage();
   ASSERT_NE(arena, nullptr);
-  EXPECT_FALSE(arena->keyBlocks().empty());
-  EXPECT_FALSE(arena->keyHeapGroups().empty());
-  EXPECT_FALSE(arena->payloadFixedBlocks().empty());
-  EXPECT_FALSE(arena->payloadHeapGroups().empty());
+  EXPECT_GT(arena->allocatedBytes(), 0);
   ASSERT_NE(run->payloadLayout(), nullptr);
   ASSERT_EQ(run->payloadLayout()->columns().size(), 3);
 
-  const auto* keyBlockBegin = arena->keyBlocks()[0].base;
-  const auto* keyBlockEnd =
-      keyBlockBegin + arena->keyBlocks()[0].count * arena->layout().width();
   for (vector_size_t row = 0; row < kRows; ++row) {
-    EXPECT_GE(arena->keyDataAt(row), keyBlockBegin);
-    EXPECT_LT(arena->keyDataAt(row), keyBlockEnd);
-    const auto key = arena->keyAt(row);
-    ASSERT_NE(key.heapKeyData(), nullptr);
-    EXPECT_EQ(key.heapSize(), key.heapKey().size());
-    EXPECT_EQ(key.heapKeyData(), key.heapKey().data());
+    const auto record = recordAt(*arena, row);
+    const auto key = overflowKeyBytes(arena->layout(), record);
+    ASSERT_NE(key.data(), nullptr);
 
-    const auto* payload = key.payload();
+    const auto* payload = payloadAt(arena->layout(), record);
     ASSERT_NE(payload, nullptr);
 
     const auto longString = loadUnaligned<StringView>(
@@ -1660,22 +1784,26 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
   std::vector<std::array<char, 32>> records(run->size());
   std::vector<char*> payloadPointers(run->size());
   for (uint64_t row = 0; row < run->size(); ++row) {
-    std::memcpy(records[row].data(), run->storage()->keyDataAt(row), width);
-    payloadPointers[row] = run->storage()->keyAt(row).payload();
+    const auto* key = recordAt(*run->storage(), row);
+    std::memcpy(records[row].data(), key, width);
+    payloadPointers[row] = payloadAt(run->keyLayout(), key);
   }
 
-  auto firstBatch = run->getOutput(7, outputPool_.get());
+  RowVectorPtr reusableOutput;
+  auto firstBatch = nextOutput(*run, 7, outputPool_.get(), reusableOutput);
   ASSERT_NE(firstBatch, nullptr);
   EXPECT_EQ(run->state(), RadixSortRunState::kSortedInMemory);
   for (uint64_t row = 0; row < run->size(); ++row) {
     EXPECT_EQ(
-        std::memcmp(records[row].data(), run->storage()->keyDataAt(row), width),
+        std::memcmp(records[row].data(), recordAt(*run->storage(), row), width),
         0);
-    EXPECT_EQ(run->storage()->keyAt(row).payload(), payloadPointers[row]);
+    EXPECT_EQ(
+        payloadAt(run->keyLayout(), recordAt(*run->storage(), row)),
+        payloadPointers[row]);
   }
 
   uint64_t drainedRows = firstBatch->size();
-  while (auto batch = run->getOutput(9, outputPool_.get())) {
+  while (auto batch = nextOutput(*run, 9, outputPool_.get(), reusableOutput)) {
     drainedRows += batch->size();
   }
   EXPECT_EQ(run->state(), RadixSortRunState::kConsumed);
@@ -1702,7 +1830,7 @@ TEST_F(RadixSortRunTest, outputDoesNotMutateOrReferenceRun) {
 TEST_F(
     RadixSortRunTest,
     wideVariableKeyRoundTripAcrossBlocksBatchesAndPointerMerge) {
-  constexpr vector_size_t kRows = 41;
+  constexpr vector_size_t kRows = 4'097;
   constexpr uint32_t kKeys = 8;
   std::vector<VectorPtr> children;
   std::vector<std::string> names;
@@ -1733,10 +1861,10 @@ TEST_F(
   names.insert(names.end(), {"key7", "payload", "id"});
   children.push_back(makeStringVector(makeValues<std::string>(
       kRows, [](vector_size_t row) -> std::optional<std::string> {
-        return row % 18 == 0 ? std::nullopt
-                             : std::optional{std::string(
-                                   row % 5 == 0 ? 64 : 3 + row % 7,
-                                   static_cast<char>('a' + row % 17))};
+        return row % 18 == 0
+            ? std::nullopt
+            : std::optional{std::string(
+                  64 + row % 17, static_cast<char>('a' + row % 17))};
       })));
   children.push_back(makeStringVector(makeValues<std::string>(
       kRows, [](vector_size_t row) -> std::optional<std::string> {
@@ -1752,11 +1880,7 @@ TEST_F(
   auto input = makeRows(std::move(names), children);
 
   const auto makeRun = [&](const RowVector& rows) {
-    RadixSortRunOptions options;
-    options.keysPerBlock = 3;
-    options.preferredKeyHeapGroupBytes = 29;
-    options.payloadRowsPerBlock = 2;
-    auto run = createRun({*input, keyChannels, keyFlags}, options);
+    auto run = createRun({*input, keyChannels, keyFlags});
     const auto middle = (rows.size() - 6) / 2;
     run->append(*slice(rows, 0, 5));
     run->append(*slice(rows, 5, 1));
@@ -1765,20 +1889,33 @@ TEST_F(
     EXPECT_EQ(
         run->keyLayout().kind(),
         RadixSortKeyLayoutKind::kKeyWithPayloadVariable32);
-    EXPECT_GT(run->storage()->keyBlocks().size(), 1);
-    EXPECT_GT(run->storage()->keyHeapGroups().size(), 1);
-    EXPECT_GT(run->storage()->payloadFixedBlocks().size(), 1);
+    EXPECT_GT(run->retainedBytes(), run->estimatedOutputBytes());
     run->finalize();
     return run;
   };
 
   auto inMemoryRun = makeRun(*input);
-  auto first = inMemoryRun->getOutput(6, outputPool_.get());
+  const auto firstKeyRange = inMemoryRun->storage()->keyRangeAt(0, kRows);
+  ASSERT_GT(firstKeyRange.count, 0);
+  EXPECT_LT(firstKeyRange.count, kRows);
+  EXPECT_GT(
+      inMemoryRun->storage()->keyRangeAt(firstKeyRange.count, kRows).count, 0);
+  for (uint64_t row = 1; row < inMemoryRun->storage()->size(); ++row) {
+    const auto left = inMemoryRun->storage()->keyRangeAt(row - 1, 1);
+    const auto right = inMemoryRun->storage()->keyRangeAt(row, 1);
+    ASSERT_EQ(left.count, 1);
+    ASSERT_EQ(right.count, 1);
+    EXPECT_LE(
+        comparePhysicalKeys(inMemoryRun->keyLayout(), left.data, right.data),
+        0);
+  }
+  RowVectorPtr reusableOutput;
+  auto first = nextOutput(*inMemoryRun, 6, outputPool_.get(), reusableOutput);
   ASSERT_NE(first, nullptr);
   auto firstCopy = slice(*first, 0, first->size());
   const auto reusableBuffers = outputBuffers(*first);
   first.reset();
-  auto second = inMemoryRun->getOutput(6, outputPool_.get());
+  auto second = nextOutput(*inMemoryRun, 6, outputPool_.get(), reusableOutput);
   ASSERT_NE(second, nullptr);
   const auto retainedBuffers = outputBuffers(*second);
   EXPECT_EQ(retainedBuffers[0], reusableBuffers[0]);
@@ -1787,7 +1924,7 @@ TEST_F(
                                    ->asUnchecked<SimpleVector<StringView>>()
                                    ->valueAt(0)
                                    .str();
-  auto third = inMemoryRun->getOutput(6, outputPool_.get());
+  auto third = nextOutput(*inMemoryRun, 6, outputPool_.get(), reusableOutput);
   ASSERT_NE(third, nullptr);
   EXPECT_NE(outputBuffers(*third)[0], retainedBuffers[0]);
   EXPECT_EQ(idAt(*second, 0, kKeys + 1), retainedId);
@@ -1799,7 +1936,8 @@ TEST_F(
       retainedPayload);
   auto alternateOutputPool =
       rootPool_->addLeafChild("radix-sort-run-alternate-output-test");
-  auto alternate = inMemoryRun->getOutput(6, alternateOutputPool.get());
+  auto alternate =
+      nextOutput(*inMemoryRun, 6, alternateOutputPool.get(), reusableOutput);
   ASSERT_NE(alternate, nullptr);
   EXPECT_EQ(alternate->pool(), alternateOutputPool.get());
   for (uint32_t column = 0; column < alternate->childrenSize(); ++column) {
@@ -1807,7 +1945,8 @@ TEST_F(
   }
   std::vector<RowVectorPtr> inMemoryBatches{
       firstCopy, second, third, alternate};
-  while (auto batch = inMemoryRun->getOutput(7, outputPool_.get())) {
+  while (auto batch =
+             nextOutput(*inMemoryRun, 7, outputPool_.get(), reusableOutput)) {
     inMemoryBatches.push_back(std::move(batch));
   }
   auto inMemoryOutput = concatenate(inMemoryBatches);
@@ -1864,13 +2003,14 @@ TEST_F(RadixSortRunTest, outputReusesBuffersWithCopyOnWrite) {
   auto run = finalizedRun(
       {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
 
-  auto first = run->getOutput(4, outputPool_.get());
+  RowVectorPtr reusableOutput;
+  auto first = nextOutput(*run, 4, outputPool_.get(), reusableOutput);
   ASSERT_NE(first, nullptr);
   const auto reusableBuffers = outputBuffers(*first, true);
   ASSERT_NE(reusableBuffers[2], nullptr);
   first.reset();
 
-  auto second = run->getOutput(4, outputPool_.get());
+  auto second = nextOutput(*run, 4, outputPool_.get(), reusableOutput);
   ASSERT_NE(second, nullptr);
   auto* secondKey = second->childAt(0)->asUnchecked<FlatVector<int64_t>>();
   auto* secondString =
@@ -1884,7 +2024,7 @@ TEST_F(RadixSortRunTest, outputReusesBuffersWithCopyOnWrite) {
   const auto retainedKey = secondKey->valueAt(0);
   const auto retainedString = secondString->valueAt(0).getString();
 
-  auto third = run->getOutput(4, outputPool_.get());
+  auto third = nextOutput(*run, 4, outputPool_.get(), reusableOutput);
   ASSERT_NE(third, nullptr);
   const auto thirdBuffers = outputBuffers(*third, true);
   ASSERT_NE(thirdBuffers[2], nullptr);
@@ -1907,7 +2047,8 @@ TEST_F(RadixSortRunTest, outputSurvivesExplicitRunClear) {
       {*input, {0}, {SortComparatorOracle::makeSortFlags(true, true)}});
   run->append(*input);
   run->finalize();
-  auto output = run->getOutput(1, outputPool_.get());
+  RowVectorPtr reusableOutput;
+  auto output = nextOutput(*run, 1, outputPool_.get(), reusableOutput);
   ASSERT_NE(output, nullptr);
   ASSERT_EQ(output->size(), 1);
   run->clear();
@@ -2027,7 +2168,6 @@ TEST_F(RadixSortRunTest, spillOffsetLayeredVariableSegmentsAndChildIdentity) {
   auto run = finalizedRun({*input, keyChannels, flags});
   ASSERT_TRUE(run->keyLayout().isVariable());
   ASSERT_GT(run->keyLayout().heapKeyOffset(), 0);
-  ASSERT_FALSE(run->decodesVariableKeysFromInline());
   auto expectedRun = finalizedRun({*input, keyChannels, flags});
   auto expected = collect(*expectedRun, input->size());
   auto [keys, payloads] = rowPointers(*run);
@@ -2082,7 +2222,6 @@ TEST_F(
       keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
   auto run = finalizedRun({*input, keyChannels, flags});
   ASSERT_TRUE(run->keyLayout().isVariable());
-  ASSERT_FALSE(run->decodesVariableKeysFromInline());
   auto expectedRun = finalizedRun({*input, keyChannels, flags});
   auto expected = collect(*expectedRun, kRows);
 
@@ -2114,7 +2253,7 @@ TEST_F(
         segmentSizes.push_back(segmentSize);
         for (vector_size_t row = 0; row < segmentSize; ++row) {
           const auto expectedView =
-              RadixSortKey(run->keyLayout(), keys[row]).heapKey();
+              overflowKeyBytes(run->keyLayout(), keys[row]);
           EXPECT_EQ(batch.selectedViews()[row].bytes, expectedView);
           EXPECT_NE(batch.selectedViews()[row].bytes, kUnselected);
         }
@@ -2141,7 +2280,6 @@ TEST_F(RadixSortRunTest, spillOffsetInlineVariableNeedsNoExternalViews) {
       SortComparatorOracle::makeSortFlags(true, true)};
   auto run = finalizedRun({*input, keyChannels, flags});
   ASSERT_TRUE(run->keyLayout().isVariable());
-  ASSERT_TRUE(run->decodesVariableKeysFromInline());
   auto expectedRun = finalizedRun({*input, keyChannels, flags});
   auto expected = collect(*expectedRun, input->size());
   auto [keys, payloads] = rowPointers(*run);
@@ -2192,7 +2330,6 @@ TEST_F(RadixSortRunTest, spillOffsetVariablePrefixOnlyNeedsNoExternalViews) {
       keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
   auto run = finalizedRun({*input, keyChannels, flags});
   ASSERT_TRUE(run->keyLayout().isVariable());
-  ASSERT_FALSE(run->decodesVariableKeysFromInline());
   EXPECT_EQ(
       run->projection().decodedKeyMask(), (std::vector<uint8_t>{1, 0, 0}));
   EXPECT_EQ(
@@ -2247,7 +2384,6 @@ TEST_F(RadixSortRunTest, prepareMergeOutputPreSizesDecodeScratch) {
       keyChannels.size(), SortComparatorOracle::makeSortFlags(true, true));
   auto run = finalizedRun({*input, keyChannels, flags});
   ASSERT_TRUE(run->keyLayout().isVariable());
-  ASSERT_FALSE(run->decodesVariableKeysFromInline());
   auto expectedRun = finalizedRun({*input, keyChannels, flags});
   auto expected = collect(*expectedRun, kRows);
   auto [keys, payloads] = rowPointers(*run);

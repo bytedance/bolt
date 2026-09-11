@@ -100,31 +100,18 @@ void appendSpillRun(
   spillRuns.back().files.swap(files);
 }
 
-std::vector<std::string> copySpillFilePaths(
-    const std::vector<RadixSortSpillFile>& files) {
-  std::vector<std::string> paths;
-  paths.reserve(files.size());
-  for (const auto& file : files) {
-    paths.push_back(file.path);
-  }
-  return paths;
-}
-
-void cleanupSpillFilePathsNoThrow(
-    const std::vector<std::string>& paths) noexcept {
-  for (const auto& path : paths) {
-    cleanupSpillFileNoThrow(path);
-  }
-}
-
-uint64_t fixedWidthValueBytes(const Type& type, vector_size_t rows) {
-  if (type.kind() == TypeKind::UNKNOWN) {
+template <TypeKind KIND>
+uint64_t fixedWidthValueBytes(vector_size_t rows) {
+  if constexpr (KIND == TypeKind::UNKNOWN) {
     return 0;
-  }
-  if (type.kind() == TypeKind::BOOLEAN) {
+  } else if constexpr (KIND == TypeKind::BOOLEAN) {
     return BaseVector::byteSize<bool>(rows);
+  } else if constexpr (TypeTraits<KIND>::isFixedWidth) {
+    return checkedByteSize(
+        rows, sizeof(typename TypeTraits<KIND>::NativeType), "output value");
+  } else {
+    BOLT_FAIL("Expected a fixed-width scalar type");
   }
-  return checkedByteSize(rows, type.cppSizeInBytes(), "output value");
 }
 
 uint64_t spillReadBytesPerRun(common::CompressionKind compressionKind) {
@@ -293,7 +280,8 @@ bool RadixSortBuffer::canReuseOutput(vector_size_t batchSize) const {
       return false;
     }
 
-    const auto valueBytes = fixedWidthValueBytes(*childType, batchSize);
+    const auto valueBytes = BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+        fixedWidthValueBytes, childType->kind(), batchSize);
     if (valueBytes != 0 &&
         (child->values() == nullptr ||
          child->values()->capacity() < valueBytes)) {
@@ -429,8 +417,7 @@ void RadixSortBuffer::ensureMergeRowPointerBuffers(vector_size_t count) {
 std::optional<common::SortStats> RadixSortBuffer::sortStats() const {
   const auto& metrics = run_->metrics();
   common::SortStats stats;
-  stats.sortColToRowTimeUs = encodeTimeUs_ + appendTimeUs_ +
-      metrics.encodeTimeUs + metrics.appendTimeUs;
+  stats.sortColToRowTimeUs = appendTimeUs_ + metrics.appendTimeUs;
   stats.sortInSortTimeUs = sortTimeUs_ + metrics.sortTimeUs;
   stats.sortOutputTimeUs = outputTimeUs_ + metrics.outputTimeUs;
   return stats;
@@ -593,7 +580,7 @@ void RadixSortBuffer::reserveOutputForCurrentState(vector_size_t batchSize) {
 }
 
 std::unique_ptr<RadixSortRun> RadixSortBuffer::makeRun() const {
-  auto options = runOptions_;
+  RadixSortRunOptions options;
   options.initialKeyMayHaveNulls = keyMayHaveNulls_;
   options.initialPayloadMayHaveNulls = payloadMayHaveNulls_;
   options.initialVariableKeysFitRadixPrefix = variableKeysFitRadixPrefix_;
@@ -690,7 +677,6 @@ void RadixSortBuffer::spillBuildingRun() {
   const auto spillBegin = std::chrono::steady_clock::now();
   run_->finalize();
   const auto metrics = run_->metrics();
-  encodeTimeUs_ += metrics.encodeTimeUs;
   appendTimeUs_ += metrics.appendTimeUs;
   sortTimeUs_ += metrics.sortTimeUs;
   const auto mergeNullability = [](auto& target, const auto& source) {
@@ -774,6 +760,10 @@ void RadixSortBuffer::spillMemoryRun() {
     pool_->release();
     return;
   }
+  std::optional<memory::NonReclaimableSectionGuard> nonReclaimableGuard;
+  if (nonReclaimableSection_ != nullptr) {
+    nonReclaimableGuard.emplace(nonReclaimableSection_);
+  }
 
   const auto end = run_->size();
   uint64_t begin;
@@ -800,12 +790,8 @@ void RadixSortBuffer::spillMemoryRun() {
   const auto writeBegin = std::chrono::steady_clock::now();
   auto files = writer.writeRun(*run_->storage(), payloadLayout.get(), begin);
   const auto writeEnd = std::chrono::steady_clock::now();
-  auto cleanupReturnedFiles =
+  auto cleanupUncommittedFiles =
       folly::makeGuard([&files]() { cleanupSpillFilesNoThrow(files); });
-  auto cleanupFiles = copySpillFilePaths(files);
-  auto cleanupUncommittedFiles = folly::makeGuard(
-      [&cleanupFiles]() { cleanupSpillFilePathsNoThrow(cleanupFiles); });
-  cleanupReturnedFiles.dismiss();
   auto serializationTimeUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
           writeEnd - writeBegin)
@@ -833,16 +819,25 @@ void RadixSortBuffer::spillMemoryRun() {
     prepareMerge();
     cleanupUncommittedFiles.dismiss();
   } else {
-    merger_->replaceMemory(
-        RadixSortSpillRun{std::move(files)},
-        RadixSortSpillSectionMeta::create(keyLayout, payloadLayout.get()),
-        pool_,
-        spillConfig_->spillUringEnabled);
+    auto meta =
+        RadixSortSpillSectionMeta::create(keyLayout, payloadLayout.get());
+    try {
+      merger_->replaceMemory(
+          RadixSortSpillRun{std::move(files)},
+          std::move(meta),
+          pool_,
+          spillConfig_->spillUringEnabled,
+          [this]() noexcept {
+            mergeKeyRows_.reset();
+            mergePayloadRows_.reset();
+            output_.reset();
+            run_->clear();
+          });
+    } catch (...) {
+      merger_.reset();
+      throw;
+    }
     cleanupUncommittedFiles.dismiss();
-    mergeKeyRows_.reset();
-    mergePayloadRows_.reset();
-    output_.reset();
-    run_->clear();
   }
 
   bool firstSpilledPartition;

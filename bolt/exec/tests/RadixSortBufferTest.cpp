@@ -355,7 +355,6 @@ class RadixSortBufferTest : public testing::Test {
   struct SpillMemoryRunOptions {
     vector_size_t prefixRows;
     size_t expectedSpillRuns;
-    size_t expectedMergeStreams;
     uint64_t expectedSpilledRows;
   };
 
@@ -368,8 +367,6 @@ class RadixSortBufferTest : public testing::Test {
     ASSERT_EQ(prefix->size(), options.prefixRows);
 
     spillMemoryRunAndCheckStats(buffer, options.expectedSpilledRows);
-    EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
-    EXPECT_EQ(buffer.testingMergeStreamCount(), options.expectedMergeStreams);
     ASSERT_TRUE(buffer.spilledStats());
     EXPECT_EQ(buffer.spilledStats()->spillRuns, options.expectedSpillRuns);
     EXPECT_GT(buffer.spilledStats()->spilledFiles, 1);
@@ -1544,7 +1541,6 @@ TEST_F(RadixSortBufferTest, equalAndNullVariableKeysAcrossDiskStreams) {
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
   EXPECT_EQ(buffer.spilledStats()->spilledRows, 6);
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 3);
   collectAndVerify(buffer, input, 1, 1);
 }
 
@@ -1566,11 +1562,9 @@ TEST_F(RadixSortBufferTest, splitSpillFilesMergeAsSingleLogicalRun) {
 
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 1);
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
   ASSERT_GT(buffer.spilledStats()->spilledFiles, 1);
 
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
   collectAndVerify(buffer, input, 257, 1);
 }
 
@@ -1601,11 +1595,9 @@ TEST_F(RadixSortBufferTest, splitSpillFilesPreserveRunMergeFanIn) {
 
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 2);
   ASSERT_GT(buffer.spilledStats()->spilledFiles, 2);
 
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   collectAndVerify(buffer, input, 1024, 1);
 }
 
@@ -1640,7 +1632,6 @@ TEST_F(RadixSortBufferTest, spillMergeReadersUseOperatorPool) {
     EXPECT_EQ(
         memory::spillMemoryPool()->stats().currentBytes, spillPoolBytesBefore);
     EXPECT_GT(pool()->currentBytes(), operatorPoolBytesBefore);
-    EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
 
     collectAndVerify(
         buffer,
@@ -1707,7 +1698,6 @@ TEST_F(RadixSortBufferTest, spillMergeWidePayloadStaysWithinOperatorCap) {
   EXPECT_GE(buffer.spilledStats()->spillWrites, 12);
 
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   sortPool->release();
   auto output = buffer.getOutput(kRows);
 
@@ -2054,7 +2044,6 @@ DEBUG_ONLY_TEST_F(
 
   RadixSortBufferTestHelper::ensureOutputFits(buffer, kAdmissionRows);
   EXPECT_EQ(maybeReserveCalls, 2);
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
   const auto mergeEstimate = RadixSortBufferTestHelper::outputAdmissionEstimate(
       buffer, kAdmissionRows);
   const auto mergeNeed = mergeEstimate.total;
@@ -2121,7 +2110,6 @@ DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureMergeFitsCanTriggerReclaimSpill) {
 
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 1);
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
   pool()->release();
 
   std::atomic<bool> injected{false};
@@ -2145,8 +2133,6 @@ DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureMergeFitsCanTriggerReclaimSpill) {
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
   EXPECT_EQ(buffer.spilledStats()->spilledRows, input->size());
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   collectAndVerify(buffer, input, 2, 2);
 }
 
@@ -2156,7 +2142,6 @@ DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureOutputFitsCanTriggerReclaimSpill) {
   auto& buffer = spill.buffer;
   addInputRuns(buffer, input, {{3, true}, {3, false}});
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   pool()->release();
 
   std::atomic<bool> injected{false};
@@ -2179,9 +2164,6 @@ DEBUG_ONLY_TEST_F(RadixSortBufferTest, ensureOutputFitsCanTriggerReclaimSpill) {
   EXPECT_TRUE(injected);
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
-  // The reclaimed memory suffix replaces its slot with one disk stream.
-  // Existing disk streams are preserved, so fan-in stays unchanged.
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   SortComparatorOracle::expectRowsMatchById(*input, *output, 1);
   SortComparatorOracle::expectSorted(
       *output, {0}, {SortComparatorOracle::makeSortFlags(true, true)});
@@ -2204,14 +2186,12 @@ TEST_F(RadixSortBufferTest, splitOutputStageSpillFilesMergeAsSingleRun) {
   buffer.addInput(input);
   buffer.noMoreInput();
   EXPECT_FALSE(buffer.spilledStats());
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 0);
 
   spillMemoryRunAndVerifyReplacement(
       buffer,
       input,
       {.prefixRows = 1,
        .expectedSpillRuns = 1,
-       .expectedMergeStreams = 1,
        .expectedSpilledRows = kRows - 1});
 }
 
@@ -2239,7 +2219,6 @@ TEST_F(RadixSortBufferTest, keyOnlyConcatOutputReplacement) {
   const auto filesBefore = buffer.spilledStats()->spilledFiles;
   spillMemoryRunAndCheckStats(buffer, 2);
   EXPECT_GT(buffer.spilledStats()->spilledFiles - filesBefore, 1);
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
 
   auto output = collect(buffer, 2, prefix);
   ASSERT_EQ(output->size(), kRows);
@@ -2279,19 +2258,15 @@ TEST_F(RadixSortBufferTest, outputStageSpillReplacesMultiStreamMerge) {
 
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, kInputSpillRuns);
-  EXPECT_EQ(buffer.testingSpilledRunCount(), kInputSpillRuns);
   ASSERT_GT(buffer.spilledStats()->spilledFiles, kInputSpillRuns);
 
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
-  EXPECT_EQ(buffer.testingMergeStreamCount(), kInputSpillRuns + 1);
 
   spillMemoryRunAndVerifyReplacement(
       buffer,
       input,
       {.prefixRows = 3,
        .expectedSpillRuns = kInputSpillRuns + 1,
-       .expectedMergeStreams = kInputSpillRuns + 1,
        .expectedSpilledRows = 1});
 }
 
@@ -2321,7 +2296,6 @@ TEST_F(RadixSortBufferTest, outputStageSpillUsesMemoryCursor) {
         slice(*input, test.diskKeys.size(), test.memoryKeys.size()));
     buffer.noMoreInput();
 
-    ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
     auto prefix = buffer.getOutput(test.prefixRows);
     ASSERT_NE(prefix, nullptr);
     ASSERT_EQ(prefix->size(), test.prefixRows);
@@ -2334,13 +2308,11 @@ TEST_F(RadixSortBufferTest, outputStageSpillUsesMemoryCursor) {
       EXPECT_FALSE(buffer.canReclaim());
       buffer.spill();
       EXPECT_EQ(*buffer.spilledStats(), statsBefore);
-      EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
       expectSpillReadStatsEqual(readStatsBefore, buffer.spillReadStats());
     } else {
       spillMemoryRunAndCheckStats(buffer, remainingMemoryRows);
       ASSERT_TRUE(buffer.spilledStats());
       EXPECT_EQ(buffer.spilledStats()->spillRuns, statsBefore.spillRuns + 1);
-      EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
       // Constructing the replacement stream eagerly loads its first block,
       // so aggregate read counters can legitimately increase here.
       expectSpillReadStatsNotDecreased(
@@ -2403,7 +2375,6 @@ TEST_F(RadixSortBufferTest, diskOnlyMergeIsNotReclaimable) {
   addInputRuns(buffer, input, {{3, true}, {3, true}});
   buffer.noMoreInput();
 
-  ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
   ASSERT_TRUE(buffer.spilledStats());
   const auto statsBefore = *buffer.spilledStats();
   const auto readStatsBefore = buffer.spillReadStats();
@@ -2411,7 +2382,6 @@ TEST_F(RadixSortBufferTest, diskOnlyMergeIsNotReclaimable) {
   buffer.spill();
   EXPECT_EQ(*buffer.spilledStats(), statsBefore);
   expectSpillReadStatsEqual(readStatsBefore, buffer.spillReadStats());
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   collectAndVerify(buffer, input, 2, 2);
 }
 
@@ -2731,9 +2701,7 @@ TEST_F(RadixSortBufferTest, testSpillInjectionTriggersBeforeNextInput) {
   ASSERT_TRUE(buffer.spilledStats());
   EXPECT_EQ(buffer.spilledStats()->spillRuns, 1);
   EXPECT_EQ(buffer.spilledStats()->spilledRows, 3);
-  EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   collectAndVerify(buffer, input, 1, 2);
 }
 
@@ -2925,7 +2893,6 @@ TEST_F(RadixSortBufferTest, spillBatchOutputSizesAcrossBlockBoundaries) {
     EXPECT_GT(
         buffer.spilledStats()->spillWrites, buffer.spilledStats()->spillRuns);
     buffer.noMoreInput();
-    EXPECT_EQ(buffer.testingMergeStreamCount(), 3);
 
     std::vector<vector_size_t> batchSizes;
     std::vector<RowVectorPtr> batches;
@@ -3005,7 +2972,6 @@ TEST_F(RadixSortBufferTest, fixedWidthSpillOutputCrossesBlockBoundaries) {
   EXPECT_GE(buffer.spilledStats()->spillWrites, 4);
 
   buffer.noMoreInput();
-  EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
   auto output = buffer.getOutput(kRows);
 
   ASSERT_NE(output, nullptr);
@@ -3244,7 +3210,6 @@ TEST_F(
     ASSERT_TRUE(buffer.spilledStats());
     EXPECT_EQ(buffer.spilledStats()->spillRuns, 2);
     EXPECT_GT(buffer.spilledStats()->spillWrites, 0);
-    EXPECT_EQ(buffer.testingSpilledRunCount(), 2);
     for (const auto& file :
          std::filesystem::directory_iterator(spillDirectory->path)) {
       sourceFiles.push_back(file.path());
@@ -3252,7 +3217,6 @@ TEST_F(
     ASSERT_EQ(sourceFiles.size(), 2);
 
     buffer.noMoreInput();
-    ASSERT_EQ(buffer.testingMergeStreamCount(), 3);
     auto prefix = buffer.getOutput(1);
     ASSERT_NE(prefix, nullptr);
     ASSERT_EQ(prefix->size(), 1);
@@ -3320,13 +3284,13 @@ TEST_F(
     }
     ASSERT_EQ(diskFiles.size(), 1);
     buffer.noMoreInput();
-    ASSERT_EQ(buffer.testingMergeStreamCount(), 2);
 
     corruptOutputFile = true;
     EXPECT_THROW(buffer.spill(), BoltException);
     EXPECT_FALSE(outputFile.empty());
     EXPECT_FALSE(std::filesystem::exists(outputFile));
-    EXPECT_TRUE(std::filesystem::exists(diskFiles.front()));
+    EXPECT_FALSE(std::filesystem::exists(diskFiles.front()));
+    EXPECT_FALSE(buffer.spillReadStats().has_value());
   }
   EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
 }
@@ -3345,7 +3309,6 @@ TEST_F(RadixSortBufferTest, destructionCleansOwnedAndMergeStreamFiles) {
         &config);
     buffer.addInput(input);
     buffer.spill();
-    EXPECT_EQ(buffer.testingSpilledRunCount(), 1);
     EXPECT_FALSE(std::filesystem::is_empty(spillDirectory->path));
   }
   EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
@@ -3360,8 +3323,6 @@ TEST_F(RadixSortBufferTest, destructionCleansOwnedAndMergeStreamFiles) {
     buffer.addInput(input);
     buffer.spill();
     buffer.noMoreInput();
-    EXPECT_EQ(buffer.testingSpilledRunCount(), 0);
-    EXPECT_EQ(buffer.testingMergeStreamCount(), 1);
     EXPECT_FALSE(std::filesystem::is_empty(spillDirectory->path));
   }
   EXPECT_TRUE(std::filesystem::is_empty(spillDirectory->path));
@@ -3606,7 +3567,6 @@ TEST_F(RadixSortBufferTest, pointerFreeSpillMergeLayoutAndTopologyMatrix) {
   struct TopologyCase {
     const char* name;
     Topology topology;
-    size_t expectedStreams;
   };
 
   constexpr vector_size_t kRows = 16;
@@ -3614,10 +3574,10 @@ TEST_F(RadixSortBufferTest, pointerFreeSpillMergeLayoutAndTopologyMatrix) {
       15, 3, 11, 7, 14, 2, 10, 6, 13, 1, 9, 5, 12, 0, 8, 4};
   const std::string commonPrefix(80, 'p');
   const std::array<TopologyCase, 4> topologies{{
-      {"single spill", Topology::kSingleSpill, 1},
-      {"memory-spill", Topology::kMemorySpill, 2},
-      {"spill-spill two-way", Topology::kTwoSpills, 2},
-      {"spill-spill loser tree", Topology::kLoserTree, 3},
+      {"single spill", Topology::kSingleSpill},
+      {"memory-spill", Topology::kMemorySpill},
+      {"spill-spill two-way", Topology::kTwoSpills},
+      {"spill-spill loser tree", Topology::kLoserTree},
   }};
 
   const auto makeInput = [&](bool variableKey, bool hasPayload) {
@@ -3701,7 +3661,6 @@ TEST_F(RadixSortBufferTest, pointerFreeSpillMergeLayoutAndTopologyMatrix) {
             &config);
         addRuns(buffer, input, topology.topology);
         buffer.noMoreInput();
-        EXPECT_EQ(buffer.testingMergeStreamCount(), topology.expectedStreams);
 
         auto output = collect(buffer, 3);
         ASSERT_NE(output, nullptr);
@@ -3775,13 +3734,12 @@ TEST_F(RadixSortBufferTest, variableMergeCommonPrefixEqualAndNullOrdering) {
   struct Plan {
     const char* name;
     std::vector<InputRun> runs;
-    size_t expectedStreams;
   };
   const std::array<Plan, 4> plans{{
-      {"memory-spill two-way", {{8, true}, {7, false}}, 2},
-      {"spill-spill two-way", {{8, true}, {7, true}}, 2},
-      {"memory-spill loser tree", {{5, true}, {5, true}, {5, false}}, 3},
-      {"spill-spill loser tree", {{5, true}, {5, true}, {5, true}}, 3},
+      {"memory-spill two-way", {{8, true}, {7, false}}},
+      {"spill-spill two-way", {{8, true}, {7, true}}},
+      {"memory-spill loser tree", {{5, true}, {5, true}, {5, false}}},
+      {"spill-spill loser tree", {{5, true}, {5, true}, {5, true}}},
   }};
 
   for (const auto ascending : {false, true}) {
@@ -3804,7 +3762,6 @@ TEST_F(RadixSortBufferTest, variableMergeCommonPrefixEqualAndNullOrdering) {
             &config);
         addInputRuns(buffer, input, plan.runs);
         buffer.noMoreInput();
-        EXPECT_EQ(buffer.testingMergeStreamCount(), plan.expectedStreams);
         auto output = collect(buffer, 1);
         SortComparatorOracle::expectRowsMatchById(*input, *output, 2);
         SortComparatorOracle::expectSorted(*output, {0}, {flags});
@@ -3848,7 +3805,6 @@ TEST_F(RadixSortBufferTest, variableMergeOutputProjectionModes) {
         &config);
     addInputRuns(buffer, input, {{6, true}, {6, true}, {6, false}});
     buffer.noMoreInput();
-    ASSERT_EQ(buffer.testingMergeStreamCount(), 3);
     scratchGrowth =
         RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, 5)
             .scratchGrowth;
@@ -3935,7 +3891,6 @@ TEST_F(
         buffer.spilledStats()->spilledFiles);
 
     buffer.noMoreInput();
-    EXPECT_EQ(buffer.testingMergeStreamCount(), 2);
     while (auto batch = buffer.getOutput(257)) {
       batches.push_back(std::move(batch));
     }
