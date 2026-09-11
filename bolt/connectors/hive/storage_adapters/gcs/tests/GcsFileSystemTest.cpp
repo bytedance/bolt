@@ -215,6 +215,39 @@ TEST_F(GcsFileSystemTest, missingFile) {
       gcfs.openFileForRead(gcsFile), error_code::kFileNotFound);
 }
 
+TEST_F(GcsFileSystemTest, fileInfo) {
+  const auto bucket = emulator_->preexistingBucketName();
+  GcsFileSystem fs(bucket, emulator_->hiveConfig());
+  fs.initializeClient();
+  auto file = fs.openFileForWrite(gcsURI(bucket, "dir/data"));
+  file->append("bolt");
+  file->close();
+  auto empty = fs.openFileForWrite(gcsURI(bucket, "empty"));
+  empty->close();
+  const auto info = fs.fileInfo(gcsURI(bucket, "dir/data"));
+  EXPECT_FALSE(info.isDirectory);
+  EXPECT_EQ(info.size, 4);
+  EXPECT_GT(info.modificationTimeMs, 0);
+  const auto emptyInfo = fs.fileInfo(gcsURI(bucket, "empty"));
+  EXPECT_FALSE(emptyInfo.isDirectory);
+  EXPECT_EQ(emptyInfo.size, 0);
+  for (const auto* key : {"", "dir", "dir/"}) {
+    const auto directory = fs.fileInfo(gcsURI(bucket, key));
+    EXPECT_TRUE(directory.isDirectory) << key;
+    EXPECT_EQ(directory.size, 0);
+  }
+  EXPECT_TRUE(fs.fileInfo(gcsURI(bucket)).isDirectory);
+  fs.mkdir(gcsURI(bucket, "marker/"));
+  EXPECT_TRUE(fs.fileInfo(gcsURI(bucket, "marker/")).isDirectory);
+  EXPECT_TRUE(fs.fileInfo(gcsURI(bucket, "marker")).isDirectory);
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      fs.fileInfo(gcsURI(bucket, "missing")), error_code::kFileNotFound);
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      fs.fileInfo(gcsURI(bucket, "di")), error_code::kFileNotFound);
+  BOLT_ASSERT_RUNTIME_THROW_CODE(
+      fs.fileInfo("gs://missing-bucket/"), error_code::kFileNotFound);
+}
+
 TEST_F(GcsFileSystemTest, missingBucket) {
   filesystems::GcsFileSystem gcfs(
       emulator_->preexistingBucketName(), emulator_->hiveConfig());

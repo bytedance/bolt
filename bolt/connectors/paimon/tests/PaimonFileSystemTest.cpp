@@ -30,10 +30,15 @@
 
 #include "paimon/fs/file_system_factory.h"
 
+#ifdef BOLT_ENABLE_GCS
+#include "bolt/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
+#include "bolt/connectors/hive/storage_adapters/gcs/tests/GcsEmulator.h"
+#endif
+
 namespace bytedance::bolt::connector::paimon {
 namespace {
 
-class FakeFileSystem final : public filesystems::FileSystem {
+class FakeFileSystem : public filesystems::FileSystem {
  public:
   FakeFileSystem(
       std::shared_ptr<const config::ConfigBase> config,
@@ -49,14 +54,16 @@ class FakeFileSystem final : public filesystems::FileSystem {
 
   std::unique_ptr<ReadFile> openFileForRead(
       std::string_view,
-      const filesystems::FileOptions&) override {
+      const filesystems::FileOptions& options) override {
+    readOptions = options;
     return std::make_unique<InMemoryReadFile>(std::string_view{"fake"});
   }
 
   std::unique_ptr<WriteFile> openFileForWrite(
       std::string_view,
-      const filesystems::FileOptions&) override {
-    return nullptr;
+      const filesystems::FileOptions& options) override {
+    writeOptions = options;
+    return std::make_unique<InMemoryWriteFile>(&output);
   }
 
   void remove(std::string_view) override {}
@@ -85,9 +92,36 @@ class FakeFileSystem final : public filesystems::FileSystem {
 
   void rmdir(std::string_view) override {}
 
+  static inline filesystems::FileOptions readOptions;
+  static inline filesystems::FileOptions writeOptions;
+  static inline std::string output;
+
  private:
   std::string name_;
   int* renameCalls_;
+};
+
+class NonListingFileSystem final : public FakeFileSystem {
+ public:
+  using FakeFileSystem::FakeFileSystem;
+
+  filesystems::FileInfo fileInfo(std::string_view) override {
+    return {.isDirectory = true};
+  }
+
+  std::vector<std::string> list(std::string_view) override {
+    BOLT_FAIL("Directory listing is unavailable");
+  }
+
+  void remove(std::string_view path) override {
+    const auto localPath =
+        path.substr(std::string_view{"non-listing://"}.size());
+    filesystems::getFileSystem(localPath, nullptr)->remove(localPath);
+  }
+
+  void rmdir(std::string_view) override {
+    BOLT_FAIL("Recursive deletion must not be used");
+  }
 };
 
 class PaimonFileSystemTest : public testing::Test {
@@ -108,6 +142,14 @@ class PaimonFileSystemTest : public testing::Test {
         [](std::shared_ptr<const config::ConfigBase> config, std::string_view) {
           return std::make_shared<FakeFileSystem>(
               std::move(config), "second", &secondRenameCalls_);
+        });
+    filesystems::registerFileSystem(
+        [](std::string_view path) {
+          return path.rfind("non-listing://", 0) == 0;
+        },
+        [](std::shared_ptr<const config::ConfigBase> config, std::string_view) {
+          return std::make_shared<NonListingFileSystem>(
+              std::move(config), "non-listing", &firstRenameCalls_);
         });
   }
 
@@ -175,6 +217,165 @@ TEST_F(PaimonFileSystemTest, ConnectorOptionsReachRegisteredFileSystem) {
   EXPECT_EQ(firstConfig_.at("test.fs.credential"), "session-credential");
   EXPECT_EQ(firstConfig_.at(::paimon::Options::FILE_SYSTEM), "bolt");
 }
+
+TEST_F(PaimonFileSystemTest, ReaderOptionsRespectTableAndQueryPrecedence) {
+  const PaimonConfig config(std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kNaturalReadSize, "1024"},
+          {PaimonConfig::kCoalesceReads, "true"},
+          {PaimonConfig::kReadTimestampUnit, "3"}}));
+  const std::unordered_map<std::string, std::string> tableProperties{
+      {PaimonConfig::kNaturalReadSize, "2048"},
+      {PaimonConfig::kCoalesceReads, "false"},
+      {PaimonConfig::kReadTimestampUnit, "6"}};
+  auto options = resolvePaimonDataSourceOptions(
+      tableProperties, core::QueryConfig({}), config);
+  EXPECT_EQ(options.at(PaimonConfig::kNaturalReadSize), "2048");
+  EXPECT_EQ(options.at(PaimonConfig::kCoalesceReads), "false");
+  EXPECT_EQ(options.at(PaimonConfig::kReadTimestampUnit), "6");
+
+  options = resolvePaimonDataSourceOptions(
+      tableProperties,
+      core::QueryConfig(std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kNaturalReadSize, "4096"}}),
+      config);
+  EXPECT_EQ(options.at(PaimonConfig::kNaturalReadSize), "4096");
+  EXPECT_EQ(options.at(PaimonConfig::kCoalesceReads), "false");
+  EXPECT_EQ(options.at(PaimonConfig::kReadTimestampUnit), "6");
+
+  options = resolvePaimonDataSourceOptions({}, core::QueryConfig({}), config);
+  EXPECT_EQ(options.at(PaimonConfig::kNaturalReadSize), "1024");
+  EXPECT_EQ(options.at(PaimonConfig::kCoalesceReads), "true");
+  EXPECT_EQ(options.at(PaimonConfig::kReadTimestampUnit), "3");
+}
+
+TEST_F(PaimonFileSystemTest, OpenOptionsReachReadAndWriteFiles) {
+  const std::map<std::string, std::string> options{
+      {"bolt.io.file.buffer.size", "4096"},
+      {"bolt.dfs.replication", "2"},
+      {"bolt.dfs.blocksize", "1048576"}};
+  PaimonBoltFileSystem fs(options);
+  FakeFileSystem::readOptions = {};
+  FakeFileSystem::writeOptions = {};
+  auto input = fs.Open("first://file");
+  ASSERT_TRUE(input.ok()) << input.status().ToString();
+  auto output = fs.Create("first://file", true);
+  ASSERT_TRUE(output.ok()) << output.status().ToString();
+  ASSERT_TRUE(output.value()->Close().ok());
+  for (const auto& [key, value] : options) {
+    EXPECT_EQ(FakeFileSystem::readOptions.values[key], value);
+    EXPECT_EQ(FakeFileSystem::writeOptions.values[key], value);
+  }
+  EXPECT_TRUE(FakeFileSystem::writeOptions.shouldCreateParentDirectories);
+  EXPECT_FALSE(FakeFileSystem::writeOptions.shouldThrowOnFileAlreadyExists);
+}
+
+TEST_F(PaimonFileSystemTest, QueryOverridesMalformedTableReaderOptions) {
+  const PaimonConfig config(std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{}));
+  const auto options = resolvePaimonDataSourceOptions(
+      {{PaimonConfig::kNaturalReadSize, "invalid"},
+       {PaimonConfig::kCoalesceReads, "invalid"},
+       {PaimonConfig::kReadTimestampUnit, "invalid"}},
+      core::QueryConfig(
+          {{PaimonConfig::kNaturalReadSize, "4096"},
+           {PaimonConfig::kCoalesceReads, "false"},
+           {PaimonConfig::kReadTimestampUnit, "6"}}),
+      config);
+  EXPECT_EQ(options.at(PaimonConfig::kNaturalReadSize), "4096");
+  EXPECT_EQ(options.at(PaimonConfig::kCoalesceReads), "false");
+  EXPECT_EQ(options.at(PaimonConfig::kReadTimestampUnit), "6");
+}
+
+TEST_F(PaimonFileSystemTest, TableOverridesMalformedConnectorReaderOptions) {
+  const PaimonConfig config(std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {PaimonConfig::kNaturalReadSize, "invalid"},
+          {PaimonConfig::kCoalesceReads, "invalid"},
+          {PaimonConfig::kReadTimestampUnit, "invalid"}}));
+  const auto options = resolvePaimonDataSourceOptions(
+      {{PaimonConfig::kNaturalReadSize, "4096"},
+       {PaimonConfig::kCoalesceReads, "false"},
+       {PaimonConfig::kReadTimestampUnit, "6"}},
+      core::QueryConfig({}),
+      config);
+  EXPECT_EQ(options.at(PaimonConfig::kNaturalReadSize), "4096");
+  EXPECT_EQ(options.at(PaimonConfig::kCoalesceReads), "false");
+  EXPECT_EQ(options.at(PaimonConfig::kReadTimestampUnit), "6");
+}
+
+TEST_F(PaimonFileSystemTest, NonRecursiveDeleteAllowsOnlyEmptyDirectories) {
+  auto temp = exec::test::TempDirectoryPath::create();
+  const auto dir = temp->getPath() + "/dir";
+  const auto file = dir + "/data";
+  PaimonBoltFileSystem fs({});
+  ASSERT_TRUE(fs.Mkdirs(dir).ok());
+  ASSERT_TRUE(fs.Delete(dir, false).ok());
+  EXPECT_FALSE(fs.Exists(dir).value());
+
+  ASSERT_TRUE(fs.Mkdirs(dir).ok());
+  auto output = fs.Create(file, false);
+  ASSERT_TRUE(output.ok());
+  ASSERT_TRUE(output.value()->Close().ok());
+  EXPECT_FALSE(fs.Delete(dir, false).ok());
+  EXPECT_TRUE(fs.Exists(file).value());
+  ASSERT_TRUE(fs.Delete(file, false).ok());
+  ASSERT_TRUE(fs.Delete(dir, false).ok());
+}
+
+TEST_F(PaimonFileSystemTest, NonRecursiveDeleteDoesNotRequireListing) {
+  auto temp = exec::test::TempDirectoryPath::create();
+  PaimonBoltFileSystem fs({});
+  EXPECT_TRUE(fs.Delete("non-listing://" + temp->getPath(), false).ok());
+  EXPECT_FALSE(filesystems::getFileSystem(temp->getPath(), nullptr)
+                   ->exists(temp->getPath()));
+}
+
+#ifdef BOLT_ENABLE_GCS
+void checkGcsDirectoryDeletionIsRejected(bool recursive) {
+  filesystems::GcsEmulator emulator;
+  emulator.bootstrap();
+  filesystems::registerGcsFileSystem();
+  const auto config = emulator.hiveConfig()->rawConfigsCopy();
+  PaimonBoltFileSystem fs(
+      std::map<std::string, std::string>(config.begin(), config.end()));
+  const auto root = gcsURI(emulator.preexistingBucketName(), "");
+  auto backend = filesystems::getFileSystem(root, emulator.hiveConfig());
+  ASSERT_TRUE(fs.Mkdirs(root + "dir/").ok());
+  for (const auto* key : {"dir/data", "virtual/data", "sibling"}) {
+    auto output = backend->openFileForWrite(root + key);
+    output->append("bolt");
+    output->close();
+  }
+
+  for (const auto* key : {"dir/", "dir", "virtual", "virtual/", ""}) {
+    SCOPED_TRACE(key);
+    const auto status = fs.Delete(root + key, recursive);
+    EXPECT_TRUE(status.IsNotImplemented()) << status.ToString();
+    for (const auto* retained :
+         {"dir/", "dir/data", "virtual/data", "sibling"}) {
+      const auto info = fs.GetFileStatus(root + retained);
+      EXPECT_TRUE(info.ok()) << info.status().ToString();
+    }
+    // fileInfo can synthesize a directory from its children even if its
+    // marker was deleted, so also check that the exact marker still exists.
+    EXPECT_NO_THROW(backend->openFileForRead(root + "dir/"));
+  }
+
+  // Rejecting directory deletion must not prevent ordinary file deletion.
+  ASSERT_TRUE(fs.Delete(root + "dir/data", recursive).ok());
+  EXPECT_FALSE(fs.GetFileStatus(root + "dir/data").ok());
+  EXPECT_TRUE(fs.GetFileStatus(root + "sibling").ok());
+}
+
+TEST_F(PaimonFileSystemTest, GcsRecursiveDirectoryDeletePreservesBucket) {
+  checkGcsDirectoryDeletionIsRejected(true);
+}
+
+TEST_F(PaimonFileSystemTest, GcsNonRecursiveDirectoryDeletePreservesChildren) {
+  checkGcsDirectoryDeletionIsRejected(false);
+}
+#endif
 
 TEST_F(PaimonFileSystemTest, RenameRejectsDifferentBoltFilesystems) {
   auto result = ::paimon::FileSystemFactory::Get("bolt", "first://a", {});

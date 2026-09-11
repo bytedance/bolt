@@ -109,3 +109,12 @@ target_link_libraries(
 if(BOLT_ENABLE_HDFS)
   target_link_libraries(bolt_paimon_connector_test PRIVATE bolt_hdfs)
 endif()
+
+if(BOLT_ENABLE_GCS)
+  target_link_libraries(
+    bolt_paimon_connector_test
+    PRIVATE
+      bolt_gcs
+      GTest::gmock
+  )
+endif()

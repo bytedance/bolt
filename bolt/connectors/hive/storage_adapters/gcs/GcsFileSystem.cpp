@@ -38,6 +38,7 @@
 
 #include <fmt/format.h>
 #include <glog/logging.h>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -236,6 +237,54 @@ bool GcsFileSystem::exists(std::string_view path) {
       impl_->getClient()->GetBucketMetadata(bucket);
 
   return metadata.ok();
+}
+
+FileInfo GcsFileSystem::fileInfo(std::string_view path) {
+  BOLT_CHECK(isGcsFile(path), kGcsInvalidPath, path);
+  const auto objectPath = gcsPath(path);
+  const auto separator = objectPath.find('/');
+  const std::string bucket = objectPath.substr(0, separator);
+  std::string key =
+      separator == std::string::npos ? "" : objectPath.substr(separator + 1);
+  const auto toMillis = [](auto time) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               time.time_since_epoch())
+        .count();
+  };
+
+  if (key.empty()) {
+    const auto metadata = impl_->getClient()->GetBucketMetadata(bucket);
+    checkGcsStatus(
+        metadata.status(), "Failed to get GCS bucket metadata", bucket, key);
+    return {
+        .isDirectory = true,
+        .size = 0,
+        .modificationTimeMs = toMillis(metadata->updated())};
+  }
+
+  const auto metadata = impl_->getClient()->GetObjectMetadata(bucket, key);
+  if (metadata.ok()) {
+    const bool isDirectory = key.back() == '/';
+    return {
+        .isDirectory = isDirectory,
+        .size = isDirectory ? 0 : metadata->size(),
+        .modificationTimeMs = toMillis(metadata->updated())};
+  }
+  if (metadata.status().code() != gc::StatusCode::kNotFound) {
+    checkGcsStatus(
+        metadata.status(), "Failed to get GCS file metadata", bucket, key);
+  }
+
+  if (key.back() != '/') {
+    key += '/';
+  }
+  for (auto&& entry : impl_->getClient()->ListObjects(
+           bucket, gcs::Prefix(key), gcs::MaxResults(1))) {
+    checkGcsStatus(
+        entry.status(), "Failed to get GCS directory metadata", bucket, key);
+    return {.isDirectory = true};
+  }
+  BOLT_FILE_NOT_FOUND_ERROR("GCS path not found: {}", path);
 }
 
 std::vector<std::string> GcsFileSystem::list(std::string_view path) {

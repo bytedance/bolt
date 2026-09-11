@@ -298,7 +298,10 @@ PaimonBoltFileSystem::Open(const std::string& path) const {
   try {
     auto fs =
         bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
-    auto file = fs->openFileForRead(path, {});
+    bytedance::bolt::filesystems::FileOptions options;
+    bytedance::bolt::filesystems::copyOpenFileOptionsFromConfig(
+        connectorProperties_.get(), options);
+    auto file = fs->openFileForRead(path, options);
     auto shared = std::shared_ptr<bytedance::bolt::ReadFile>(std::move(file));
     return std::make_unique<PaimonBoltInputStream>(std::move(shared), path);
   } catch (const std::exception& e) {
@@ -321,6 +324,8 @@ PaimonBoltFileSystem::Create(const std::string& path, bool overwrite) const {
     }
 
     bytedance::bolt::filesystems::FileOptions options;
+    bytedance::bolt::filesystems::copyOpenFileOptionsFromConfig(
+        connectorProperties_.get(), options);
     options.shouldCreateParentDirectories = true;
     options.shouldThrowOnFileAlreadyExists = false;
     auto file = fs->openFileForWrite(path, options);
@@ -379,13 +384,19 @@ PaimonBoltFileSystem::Create(const std::string& path, bool overwrite) const {
   try {
     auto fs =
         bytedance::bolt::filesystems::getFileSystem(path, connectorProperties_);
-    if (fs->fileInfo(path).isDirectory) {
-      if (!recursive) {
-        return ::paimon::Status::Invalid(
-            "Non-recursive directory delete is not supported for " + path);
-      }
+    const bool isDirectory = fs->fileInfo(path).isDirectory;
+    if (isDirectory && fs->name() == "GCS") {
+      // GCS rmdir currently deletes the whole bucket, and remove only deletes
+      // a marker object without checking for children. Neither is safe here.
+      return ::paimon::Status::NotImplemented(
+          "GCS directory deletion is not supported by the Bolt Paimon filesystem: " +
+          path);
+    }
+    if (isDirectory && recursive) {
       fs->rmdir(path);
     } else {
+      // Let the backend reject non-empty directories without relying on
+      // listing or risking a recursive deletion of newly created children.
       fs->remove(path);
     }
     return ::paimon::Status::OK();

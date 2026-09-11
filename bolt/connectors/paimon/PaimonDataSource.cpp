@@ -226,8 +226,11 @@ std::map<std::string, std::string> resolvePaimonDataSourceOptions(
   options.insert_or_assign(
       ::paimon::Options::READ_BATCH_SIZE,
       std::to_string(paimonConfig.readBatchSize()));
+  const PaimonConfig tableConfig(std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>(
+          options.begin(), options.end())));
   const auto readOptions =
-      resolvePaimonDataSourceReadOptions(queryConfig, paimonConfig);
+      resolvePaimonDataSourceReadOptions(queryConfig, tableConfig);
   options.insert_or_assign(
       PaimonConfig::kNaturalReadSize,
       std::to_string(readOptions.naturalReadSize));
