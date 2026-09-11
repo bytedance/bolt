@@ -2224,6 +2224,43 @@ TEST_F(ExprTest, memo) {
   BOLT_CHECK(base.use_count() == 1);
 }
 
+TEST_F(ExprTest, clearNewlyInitializedMemo) {
+  constexpr vector_size_t kSize = 22;
+  const auto bytesBefore = pool_->currentBytes();
+  auto base = makeFlatVector<StringView>(kSize, [](auto row) {
+    return StringView(row % 2 == 0 ? "growth" : "mature");
+  });
+  auto indices = makeIndices(kSize, [](auto row) { return row; });
+  auto rowType = ROW({"c0"}, {VARCHAR()});
+  auto exprSet = compileExpression("coalesce(c0, 'unknown')", rowType);
+
+  auto evaluateBatch = [&]() {
+    auto result = evaluate(
+        exprSet.get(), makeRowVector({wrapInDictionary(indices, kSize, base)}));
+    auto* values = result->as<SimpleVector<StringView>>();
+    BOLT_CHECK_NOT_NULL(values);
+    for (vector_size_t row = 0; row < kSize; ++row) {
+      EXPECT_EQ(row % 2 == 0 ? "growth" : "mature", values->valueAt(row));
+    }
+    return result;
+  };
+
+  auto result = evaluateBatch();
+  result.reset();
+  ASSERT_TRUE(base.unique());
+
+  // The second encounter with the same dictionary base initializes the memo.
+  result = evaluateBatch();
+  result.reset();
+  ASSERT_FALSE(base.unique());
+  base.reset();
+  indices.reset();
+  EXPECT_GT(pool_->currentBytes(), bytesBefore);
+
+  exprSet->clear();
+  EXPECT_EQ(bytesBefore, pool_->currentBytes());
+}
+
 // This test triggers the situation when peelEncodings() produces an empty
 // selectivity vector, which if passed to evalWithMemo() causes the latter to
 // produce null Expr::dictionaryCache_, which leads to a crash in evaluation
