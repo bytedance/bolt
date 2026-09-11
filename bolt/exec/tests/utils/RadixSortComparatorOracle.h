@@ -48,6 +48,11 @@ class SortComparatorOracle {
       vector_size_t rightIndex,
       CompareFlags flags);
 
+  static bool hasDistinctEquivalentFloatingPointBits(
+      const BaseVector& values,
+      vector_size_t left,
+      vector_size_t right);
+
   static int32_t compareRows(
       const RowVector& left,
       vector_size_t leftIndex,

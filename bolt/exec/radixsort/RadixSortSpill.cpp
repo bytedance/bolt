@@ -28,6 +28,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/time/Timer.h"
+#include "bolt/exec/radixsort/RadixSortKeyCodec.h"
 
 namespace bytedance::bolt::exec::radixsort {
 namespace {
@@ -938,10 +939,11 @@ class RadixSortVariableSpillMergeStream final
 
   void advanceAfterFlush() override {
     BOLT_DCHECK_NOT_NULL(key_);
-    BOLT_DCHECK(key_ + recordStride_ == keyRecordsEnd_);
-    BOLT_CHECK(
-        encodedSuffix_.bytes.data() + encodedSuffix_.bytes.size() ==
-            keyHeapEnd_,
+    BOLT_DCHECK_EQ(key_ + recordStride_, keyRecordsEnd_);
+    BOLT_CHECK_EQ(
+        static_cast<const void*>(
+            encodedSuffix_.bytes.data() + encodedSuffix_.bytes.size()),
+        static_cast<const void*>(keyHeapEnd_),
         "Radix sort spill key heap is not consumed exactly");
     loadBatch();
   }
@@ -1064,8 +1066,10 @@ RadixSortMerger::RadixSortMerger(
     RadixSortKeyLayout keyLayout,
     std::vector<std::unique_ptr<RadixSortMergeStream>> streams,
     std::optional<size_t> memoryIndex,
-    std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache)
+    std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache,
+    const RadixSortKeyCodec* keyCodec)
     : keyLayout_(std::move(keyLayout)),
+      keyCodec_(keyCodec),
       bufferCache_(std::move(bufferCache)),
       streams_(std::move(streams)),
       memoryIndex_(memoryIndex) {
@@ -1440,6 +1444,21 @@ int32_t RadixSortMerger::compareStreams(
     const char* right,
     const RadixSortMergeStream& leftStream,
     const RadixSortMergeStream& rightStream) const {
+  if (keyCodec_ != nullptr) {
+    if constexpr (Variable) {
+      return keyCodec_->comparePhysical(
+          keyLayout_,
+          left,
+          right,
+          static_cast<const RadixSortVariableMergeStream&>(leftStream)
+              .encodedSuffixInline()
+              .bytes,
+          static_cast<const RadixSortVariableMergeStream&>(rightStream)
+              .encodedSuffixInline()
+              .bytes);
+    }
+    return keyCodec_->comparePhysical(keyLayout_, left, right);
+  }
   if constexpr (Variable) {
     return compare_.variable(
         left,

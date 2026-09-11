@@ -371,11 +371,18 @@ class RadixSortKeyCodecTest : public testing::Test {
           layout,
           run.storage()->keyRangeAt(left, 1).data,
           run.storage()->keyRangeAt(right, 1).data);
-      EXPECT_EQ((actual > 0) - (actual < 0), (expected > 0) - (expected < 0))
-          << "left " << left << ", right " << right << ", left-values "
-          << rows->toString(left) << ", right-values " << rows->toString(right)
-          << ", left-key " << hex(logicalKeyAt(run, left)) << ", right-key "
-          << hex(logicalKeyAt(run, right));
+      const bool allowDistinctEquivalentBits =
+          rows->childrenSize() == 1 &&
+          SortComparatorOracle::hasDistinctEquivalentFloatingPointBits(
+              *rows->childAt(0), left, right);
+      if (expected != 0 || !allowDistinctEquivalentBits) {
+        EXPECT_EQ((actual > 0) - (actual < 0), (expected > 0) - (expected < 0))
+            << "left " << left << ", right " << right << ", left-values "
+            << rows->toString(left) << ", right-values "
+            << rows->toString(right) << ", left-key "
+            << hex(logicalKeyAt(run, left)) << ", right-key "
+            << hex(logicalKeyAt(run, right));
+      }
       return (actual > 0) - (actual < 0);
     };
     if (verifyAllPairs) {

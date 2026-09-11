@@ -18,7 +18,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -117,6 +117,8 @@ void buildMetadata(
 
   metadata.type = type;
   metadata.flags = flags;
+  metadata.containsFloatingPoint =
+      type->kind() == TypeKind::REAL || type->kind() == TypeKind::DOUBLE;
   auto bodySize = fixedBodySize(*type);
   if (bodySize.has_value()) {
     metadata.maximumEncodedSize = *bodySize + 1;
@@ -128,6 +130,7 @@ void buildMetadata(
     for (uint32_t child = 0; child < type->size(); ++child) {
       RadixSortKeyColumn childMetadata;
       buildMetadata(type->childAt(child), flags, childMetadata);
+      metadata.containsFloatingPoint |= childMetadata.containsFloatingPoint;
       metadata.children.push_back(std::move(childMetadata));
     }
     if (type->kind() == TypeKind::ROW) {
@@ -198,33 +201,22 @@ encodeSignedWord(T value, char* output, bool descending) {
   encodeUnsignedWord(bits, output, descending);
 }
 
-uint32_t encodeFloat(float value) {
-  if (value == 0) {
-    return uint32_t{1} << 31;
+uint32_t encodeFloat(float value, const RadixSortKeyColumn& column) {
+  const auto bits = std::bit_cast<uint32_t>(value);
+  const auto magnitude = bits & 0x7fffffffU;
+  if (FOLLY_UNLIKELY(bits == 0x80000000U || magnitude > 0x7f800000U)) {
+    column.hasSpecialValues = true;
   }
-  if (std::isnan(value)) {
-    return std::numeric_limits<uint32_t>::max();
-  }
-  if (std::isinf(value)) {
-    return value > 0 ? std::numeric_limits<uint32_t>::max() - 1 : 0;
-  }
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
   return (bits & (uint32_t{1} << 31)) == 0 ? bits | (uint32_t{1} << 31) : ~bits;
 }
 
-uint64_t encodeDouble(double value) {
-  if (value == 0) {
-    return uint64_t{1} << 63;
+uint64_t encodeDouble(double value, const RadixSortKeyColumn& column) {
+  const auto bits = std::bit_cast<uint64_t>(value);
+  const auto magnitude = bits & 0x7fffffffffffffffULL;
+  if (FOLLY_UNLIKELY(
+          bits == 0x8000000000000000ULL || magnitude > 0x7ff0000000000000ULL)) {
+    column.hasSpecialValues = true;
   }
-  if (std::isnan(value)) {
-    return std::numeric_limits<uint64_t>::max();
-  }
-  if (std::isinf(value)) {
-    return value > 0 ? std::numeric_limits<uint64_t>::max() - 1 : 0;
-  }
-  uint64_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
   return (bits & (uint64_t{1} << 63)) == 0 ? bits | (uint64_t{1} << 63) : ~bits;
 }
 
@@ -232,7 +224,8 @@ template <TypeKind KIND>
 FOLLY_ALWAYS_INLINE void encodeFixedScalarValue(
     typename TypeTraits<KIND>::NativeType value,
     char* output,
-    bool descending) {
+    bool descending,
+    const RadixSortKeyColumn& column) {
   using T = typename TypeTraits<KIND>::NativeType;
   if constexpr (KIND == TypeKind::BOOLEAN) {
     const auto byte = static_cast<uint8_t>(value);
@@ -248,9 +241,9 @@ FOLLY_ALWAYS_INLINE void encodeFixedScalarValue(
     encodeUnsignedWord<uint64_t>(
         HugeInt::lower(value), output + sizeof(int64_t), descending);
   } else if constexpr (KIND == TypeKind::REAL) {
-    encodeUnsignedWord<uint32_t>(encodeFloat(value), output, descending);
+    encodeUnsignedWord<uint32_t>(encodeFloat(value, column), output, descending);
   } else if constexpr (KIND == TypeKind::DOUBLE) {
-    encodeUnsignedWord<uint64_t>(encodeDouble(value), output, descending);
+    encodeUnsignedWord<uint64_t>(encodeDouble(value, column), output, descending);
   } else if constexpr (KIND == TypeKind::TIMESTAMP) {
     encodeSignedWord<int64_t>(value.getSeconds(), output, descending);
     encodeUnsignedWord<uint64_t>(
@@ -264,11 +257,13 @@ FOLLY_ALWAYS_INLINE void encodeFixedScalarValue(
 
 template <TypeKind KIND>
 FOLLY_ALWAYS_INLINE uint64_t
-encodeFixed64Value(typename TypeTraits<KIND>::NativeType value) {
+encodeFixed64Value(
+    typename TypeTraits<KIND>::NativeType value,
+    const RadixSortKeyColumn& column) {
   if constexpr (KIND == TypeKind::BIGINT) {
     return static_cast<uint64_t>(value) ^ (uint64_t{1} << 63);
   } else if constexpr (KIND == TypeKind::DOUBLE) {
-    return encodeDouble(value);
+    return encodeDouble(value, column);
   } else {
     BOLT_FAIL(
         "64-bit radix sort key encoding is not implemented for {}",
@@ -489,7 +484,7 @@ void appendSingleFixedFlatByKind(
         size,
         arena,
         payloads,
-        [](T value) { return encodeFixed64Value<KIND>(value); });
+        [&column](T value) { return encodeFixed64Value<KIND>(value, column); });
   } else if constexpr (
       KIND == TypeKind::HUGEINT || KIND == TypeKind::TIMESTAMP) {
     appendSingleFixedFlat<
@@ -500,9 +495,9 @@ void appendSingleFixedFlatByKind(
         size,
         arena,
         payloads,
-        [](const auto& values, auto row, auto* output, bool descending) {
+        [&column](const auto& values, auto row, auto* output, bool descending) {
           encodeFixedScalarValue<KIND>(
-              values.rawValues()[row], output, descending);
+              values.rawValues()[row], output, descending, column);
         });
   } else if constexpr (
       KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
@@ -516,13 +511,13 @@ void appendSingleFixedFlatByKind(
         size,
         arena,
         payloads,
-        [](const auto& values, auto row, auto* output, bool descending) {
+        [&column](const auto& values, auto row, auto* output, bool descending) {
           if constexpr (KIND == TypeKind::BOOLEAN) {
             encodeFixedScalarValue<KIND>(
-                values.valueAtFast(row), output, descending);
+                values.valueAtFast(row), output, descending, column);
           } else {
             encodeFixedScalarValue<KIND>(
-                values.rawValues()[row], output, descending);
+                values.rawValues()[row], output, descending, column);
           }
         });
   } else {
@@ -993,7 +988,8 @@ template <TypeKind KIND>
 FOLLY_ALWAYS_INLINE void encodeBytesFixedScalarValue(
     typename TypeTraits<KIND>::NativeType value,
     char* output,
-    bool descending) {
+    bool descending,
+    const RadixSortKeyColumn& column) {
   using T = typename TypeTraits<KIND>::NativeType;
   if constexpr (KIND == TypeKind::BOOLEAN) {
     const auto byte = static_cast<uint8_t>(value);
@@ -1009,9 +1005,9 @@ FOLLY_ALWAYS_INLINE void encodeBytesFixedScalarValue(
     encodeUnsigned<uint64_t>(
         HugeInt::lower(value), output + sizeof(int64_t), descending);
   } else if constexpr (KIND == TypeKind::REAL) {
-    encodeUnsigned<uint32_t>(encodeFloat(value), output, descending);
+    encodeUnsigned<uint32_t>(encodeFloat(value, column), output, descending);
   } else if constexpr (KIND == TypeKind::DOUBLE) {
-    encodeUnsigned<uint64_t>(encodeDouble(value), output, descending);
+    encodeUnsigned<uint64_t>(encodeDouble(value, column), output, descending);
   } else if constexpr (KIND == TypeKind::TIMESTAMP) {
     encodeSigned<int64_t>(value.getSeconds(), output, descending);
     encodeUnsigned<uint64_t>(
@@ -1118,8 +1114,8 @@ uint64_t encodeFixedScalarArrayElementsByKind(
         offset,
         count,
         output,
-        [](T value, char* out, bool descending) {
-          encodeBytesFixedScalarValue<KIND>(value, out, descending);
+        [&column](T value, char* out, bool descending) {
+          encodeBytesFixedScalarValue<KIND>(value, out, descending, column);
         },
         decodedVectors);
   } else {
@@ -1254,6 +1250,7 @@ class MapKeyIndexScratch {
 
 template <TypeKind KIND>
 void encodeScalarValue(
+    const RadixSortKeyColumn& column,
     const BaseVector& vector,
     vector_size_t row,
     char* output,
@@ -1267,7 +1264,7 @@ void encodeScalarValue(
       KIND == TypeKind::REAL || KIND == TypeKind::DOUBLE ||
       KIND == TypeKind::TIMESTAMP) {
     encodeBytesFixedScalarValue<KIND>(
-        scalarValueAt<T>(vector, row), output, descending);
+        scalarValueAt<T>(vector, row), output, descending, column);
     written = 1 + sizeof(T);
   } else if constexpr (
       KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
@@ -1401,6 +1398,7 @@ void encodeValue(
     BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
         encodeScalarValue,
         column.type->kind(),
+        column,
         vector,
         row,
         body,
@@ -1870,8 +1868,8 @@ void encodeFixedColumnByKind(
         source,
         size,
         output,
-        [](T value, char* output, bool descending) {
-          encodeFixedScalarValue<KIND>(value, output, descending);
+        [&column](T value, char* output, bool descending) {
+          encodeFixedScalarValue<KIND>(value, output, descending, column);
         },
         fixedWidthNulls,
         decodedInputs);
@@ -2072,6 +2070,8 @@ void encodeAndAppendInlineLayout(
       });
 }
 
+} // namespace
+
 class EncodedKeyReader {
  public:
   EncodedKeyReader(const char* data, uint64_t size)
@@ -2142,6 +2142,8 @@ class EncodedKeyReader {
   uint64_t size_;
   uint64_t position_{0};
 };
+
+namespace {
 
 template <typename T>
 void decodeUnsigned(EncodedKeyReader& reader, bool descending, T& value) {
@@ -2247,37 +2249,15 @@ FOLLY_ALWAYS_INLINE T decodePhysicalSigned(
 }
 
 float decodeFloat(uint32_t input) {
-  if (input == std::numeric_limits<uint32_t>::max()) {
-    return std::numeric_limits<float>::quiet_NaN();
-  }
-  if (input == std::numeric_limits<uint32_t>::max() - 1) {
-    return std::numeric_limits<float>::infinity();
-  }
-  if (input == 0) {
-    return -std::numeric_limits<float>::infinity();
-  }
   input =
       (input & (uint32_t{1} << 31)) != 0 ? input ^ (uint32_t{1} << 31) : ~input;
-  float result;
-  std::memcpy(&result, &input, sizeof(result));
-  return result;
+  return std::bit_cast<float>(input);
 }
 
 double decodeDouble(uint64_t input) {
-  if (input == std::numeric_limits<uint64_t>::max()) {
-    return std::numeric_limits<double>::quiet_NaN();
-  }
-  if (input == std::numeric_limits<uint64_t>::max() - 1) {
-    return std::numeric_limits<double>::infinity();
-  }
-  if (input == 0) {
-    return -std::numeric_limits<double>::infinity();
-  }
   input =
       (input & (uint64_t{1} << 63)) != 0 ? input ^ (uint64_t{1} << 63) : ~input;
-  double result;
-  std::memcpy(&result, &input, sizeof(result));
-  return result;
+  return std::bit_cast<double>(input);
 }
 
 template <bool HostOrderWords, typename T, typename Decode>
@@ -3702,6 +3682,361 @@ void skipValue(const RadixSortKeyColumn& column, EncodedKeyReader& reader) {
   }
 }
 
+bool encodedSpecialValues(const RadixSortKeyColumn& column) {
+  if (!column.containsFloatingPoint) {
+    return false;
+  }
+  return column.hasSpecialValues ||
+      std::any_of(
+             column.children.begin(),
+             column.children.end(),
+             encodedSpecialValues);
+}
+
+void mergeSpecialValues(
+    RadixSortKeyColumn& target,
+    std::span<const uint8_t> flags,
+    uint32_t& index) {
+  BOLT_CHECK_LT(index, flags.size());
+  target.hasSpecialValues |= flags[index++] != 0;
+  for (auto& child : target.children) {
+    mergeSpecialValues(child, flags, index);
+  }
+}
+
+void appendSpecialValueFlags(
+    const RadixSortKeyColumn& column,
+    std::vector<uint8_t>& flags) {
+  flags.push_back(column.hasSpecialValues);
+  for (const auto& child : column.children) {
+    appendSpecialValueFlags(child, flags);
+  }
+}
+
+int32_t compareKeyBytes(std::string_view left, std::string_view right) {
+  const auto common = std::min(left.size(), right.size());
+  const auto result =
+      common == 0 ? 0 : std::memcmp(left.data(), right.data(), common);
+  return result == 0
+      ? (left.size() > right.size()) - (left.size() < right.size())
+      : (result > 0) - (result < 0);
+}
+
+template <typename T>
+int32_t comparePhysicalUnsigned(
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
+  const auto a = loadEncodedUnsigned<true, T>(left, offset, inlineWordBytes);
+  const auto b = loadEncodedUnsigned<true, T>(right, offset, inlineWordBytes);
+  return (a > b) - (a < b);
+}
+
+int32_t comparePhysicalBytes(
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t size,
+    uint32_t inlineWordBytes) {
+  while (size >= sizeof(uint64_t)) {
+    const auto result =
+        comparePhysicalUnsigned<uint64_t>(left, right, offset, inlineWordBytes);
+    if (result != 0) {
+      return result;
+    }
+    offset += sizeof(uint64_t);
+    size -= sizeof(uint64_t);
+  }
+  if (size >= sizeof(uint32_t)) {
+    const auto result =
+        comparePhysicalUnsigned<uint32_t>(left, right, offset, inlineWordBytes);
+    if (result != 0) {
+      return result;
+    }
+    offset += sizeof(uint32_t);
+    size -= sizeof(uint32_t);
+  }
+  if (size >= sizeof(uint16_t)) {
+    const auto result =
+        comparePhysicalUnsigned<uint16_t>(left, right, offset, inlineWordBytes);
+    if (result != 0) {
+      return result;
+    }
+    offset += sizeof(uint16_t);
+    size -= sizeof(uint16_t);
+  }
+  return size == 0
+      ? 0
+      : comparePhysicalUnsigned<uint8_t>(left, right, offset, inlineWordBytes);
+}
+
+template <typename T>
+int32_t
+compareFloatingPointBody(const char* left, const char* right, bool descending) {
+  const auto a = normalizeFloatingPointKey(
+      fromBigEndian(loadUnaligned<T>(left)), descending);
+  const auto b = normalizeFloatingPointKey(
+      fromBigEndian(loadUnaligned<T>(right)), descending);
+  return (a > b) - (a < b);
+}
+
+int32_t compareFixedBytes(
+    const RadixSortKeyColumn& column,
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
+  return comparePhysicalBytes(
+      left,
+      right,
+      offset,
+      static_cast<uint32_t>(*column.maximumEncodedSize - 1),
+      inlineWordBytes);
+}
+
+int32_t compareVariableBytes(
+    const RadixSortKeyColumn& column,
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t /*inlineWordBytes*/) {
+  const auto result = std::memcmp(
+      left + offset, right + offset, *column.maximumEncodedSize - 1);
+  return (result > 0) - (result < 0);
+}
+
+int32_t compareFixedFloat(
+    const RadixSortKeyColumn& column,
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
+  const auto x = normalizeFloatingPointKey(
+      loadEncodedUnsigned<true, uint32_t>(left, offset, inlineWordBytes),
+      !column.flags.ascending);
+  const auto y = normalizeFloatingPointKey(
+      loadEncodedUnsigned<true, uint32_t>(right, offset, inlineWordBytes),
+      !column.flags.ascending);
+  return (x > y) - (x < y);
+}
+
+int32_t compareFixedDouble(
+    const RadixSortKeyColumn& column,
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
+  const auto x = normalizeFloatingPointKey(
+      loadEncodedUnsigned<true, uint64_t>(left, offset, inlineWordBytes),
+      !column.flags.ascending);
+  const auto y = normalizeFloatingPointKey(
+      loadEncodedUnsigned<true, uint64_t>(right, offset, inlineWordBytes),
+      !column.flags.ascending);
+  return (x > y) - (x < y);
+}
+
+int32_t compareVariableFloat(
+    const RadixSortKeyColumn& column,
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t /*inlineWordBytes*/) {
+  return compareFloatingPointBody<uint32_t>(
+      left + offset, right + offset, !column.flags.ascending);
+}
+
+int32_t compareVariableDouble(
+    const RadixSortKeyColumn& column,
+    const char* left,
+    const char* right,
+    uint32_t offset,
+    uint32_t /*inlineWordBytes*/) {
+  return compareFloatingPointBody<uint64_t>(
+      left + offset, right + offset, !column.flags.ascending);
+}
+
+int32_t compareEncodedBytes(
+    const RadixSortKeyColumn& column,
+    EncodedKeyReader& left,
+    EncodedKeyReader& right) {
+  const auto* a = left.currentData();
+  const auto* b = right.currentData();
+  skipValue(column, left);
+  skipValue(column, right);
+  return compareKeyBytes(
+      {a, static_cast<size_t>(left.currentData() - a)},
+      {b, static_cast<size_t>(right.currentData() - b)});
+}
+
+template <typename T>
+int32_t compareEncodedFloating(
+    const RadixSortKeyColumn& column,
+    EncodedKeyReader& left,
+    EncodedKeyReader& right) {
+  uint8_t a;
+  uint8_t b;
+  left.checkedReadByte(a);
+  right.checkedReadByte(b);
+  if (a != b) {
+    return (a > b) - (a < b);
+  }
+  if (a == nullMarker(column.flags)) {
+    return 0;
+  }
+  BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
+  const auto* aBody = left.currentData();
+  const auto* bBody = right.currentData();
+  left.checkedSkip(sizeof(T));
+  right.checkedSkip(sizeof(T));
+  return compareFloatingPointBody<T>(aBody, bBody, !column.flags.ascending);
+}
+
+int32_t compareEncodedRow(
+    const RadixSortKeyColumn& column,
+    EncodedKeyReader& left,
+    EncodedKeyReader& right) {
+  uint8_t a;
+  uint8_t b;
+  left.checkedReadByte(a);
+  right.checkedReadByte(b);
+  if (a != b) {
+    return (a > b) - (a < b);
+  }
+  if (a == nullMarker(column.flags)) {
+    return 0;
+  }
+  BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
+  for (const auto& child : column.children) {
+    const auto result = child.encodedComparator(child, left, right);
+    if (result != 0) {
+      return result;
+    }
+  }
+  return 0;
+}
+
+int32_t compareEncodedArray(
+    const RadixSortKeyColumn& column,
+    EncodedKeyReader& left,
+    EncodedKeyReader& right) {
+  uint8_t a;
+  uint8_t b;
+  left.checkedReadByte(a);
+  right.checkedReadByte(b);
+  if (a != b) {
+    return (a > b) - (a < b);
+  }
+  if (a == nullMarker(column.flags)) {
+    return 0;
+  }
+  BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
+  const uint8_t delimiter =
+      column.flags.ascending ? uint8_t{0} : uint8_t{255};
+  const auto& child = column.children[0];
+  while (true) {
+    left.checkedPeekByte(a);
+    right.checkedPeekByte(b);
+    if (a == delimiter || b == delimiter) {
+      if (a != b) {
+        return (a > b) - (a < b);
+      }
+      left.skip(1);
+      right.skip(1);
+      return 0;
+    }
+    const auto result = child.encodedComparator(child, left, right);
+    if (result != 0) {
+      return result;
+    }
+  }
+}
+
+int32_t compareEncodedMap(
+    const RadixSortKeyColumn& column,
+    EncodedKeyReader& left,
+    EncodedKeyReader& right) {
+  uint8_t a;
+  uint8_t b;
+  left.checkedReadByte(a);
+  right.checkedReadByte(b);
+  if (a != b) {
+    return (a > b) - (a < b);
+  }
+  if (a == nullMarker(column.flags)) {
+    return 0;
+  }
+  BOLT_CHECK_EQ(a, validMarker(column.flags), "Invalid radix sort key marker");
+  const uint8_t delimiter =
+      column.flags.ascending ? uint8_t{0} : uint8_t{255};
+  uint64_t count = 0;
+  const auto& key = column.children[0];
+  const auto& value = column.children[1];
+  while (true) {
+    left.checkedPeekByte(a);
+    right.checkedPeekByte(b);
+    if (a == delimiter || b == delimiter) {
+      if (a != b) {
+        return (a > b) - (a < b);
+      }
+      left.skip(1);
+      right.skip(1);
+      break;
+    }
+    const auto result = key.encodedComparator(key, left, right);
+    if (result != 0) {
+      return result;
+    }
+    ++count;
+  }
+  for (uint64_t index = 0; index < count; ++index) {
+    const auto result = value.encodedComparator(value, left, right);
+    if (result != 0) {
+      return result;
+    }
+  }
+  left.checkedReadByte(a);
+  right.checkedReadByte(b);
+  BOLT_CHECK_EQ(a, delimiter, "Invalid radix sort encoded map delimiter");
+  BOLT_CHECK_EQ(b, delimiter, "Invalid radix sort encoded map delimiter");
+  return 0;
+}
+
+void prepareColumnComparators(const RadixSortKeyColumn& column) {
+  column.fixedComparator = compareFixedBytes;
+  column.variableComparator = compareVariableBytes;
+  column.encodedComparator = compareEncodedBytes;
+  for (const auto& child : column.children) {
+    prepareColumnComparators(child);
+  }
+  if (!encodedSpecialValues(column)) {
+    return;
+  }
+  switch (column.type->kind()) {
+    case TypeKind::REAL:
+      column.fixedComparator = compareFixedFloat;
+      column.variableComparator = compareVariableFloat;
+      column.encodedComparator = compareEncodedFloating<uint32_t>;
+      return;
+    case TypeKind::DOUBLE:
+      column.fixedComparator = compareFixedDouble;
+      column.variableComparator = compareVariableDouble;
+      column.encodedComparator = compareEncodedFloating<uint64_t>;
+      return;
+    case TypeKind::ROW:
+      column.encodedComparator = compareEncodedRow;
+      return;
+    case TypeKind::ARRAY:
+      column.encodedComparator = compareEncodedArray;
+      return;
+    case TypeKind::MAP:
+      column.encodedComparator = compareEncodedMap;
+      return;
+    default:
+      return;
+  }
+}
+
 template <bool FirstColumn>
 void skipColumn(
     const RadixSortKeyColumn& column,
@@ -4311,7 +4646,17 @@ RadixSortKeyCodec::RadixSortKeyCodec(
         }
         return ROW(std::move(types));
       }()),
-      maximumEncodedSize_(maximumEncodedSize) {}
+      maximumEncodedSize_(maximumEncodedSize),
+      allFixedScalarColumns_(
+          std::all_of(columns_.begin(), columns_.end(), [](const auto& column) {
+            return column.fixedPrefixOffset.has_value();
+          })) {
+  for (uint32_t column = 0; column < columns_.size(); ++column) {
+    if (columns_[column].containsFloatingPoint) {
+      floatingPointEnd_ = column + 1;
+    }
+  }
+}
 
 std::vector<uint32_t> RadixSortKeyCodec::leadingSkippableValidityOffsets(
     std::span<const uint8_t> keyMayHaveNulls,
@@ -4347,6 +4692,161 @@ uint32_t RadixSortKeyCodec::fixedPrefixColumnCount(
     ++count;
   }
   return count;
+}
+
+bool RadixSortKeyCodec::hasSpecialValues() const {
+  return std::any_of(
+      columns_.begin(),
+      columns_.begin() + floatingPointEnd_,
+      encodedSpecialValues);
+}
+
+std::vector<uint8_t> RadixSortKeyCodec::specialValueFlags() const {
+  std::vector<uint8_t> flags;
+  for (const auto& column : columns_) {
+    appendSpecialValueFlags(column, flags);
+  }
+  return flags;
+}
+
+void RadixSortKeyCodec::mergeSpecialValueFlags(std::span<const uint8_t> flags) {
+  uint32_t index = 0;
+  for (auto& column : columns_) {
+    mergeSpecialValues(column, flags, index);
+  }
+  BOLT_CHECK_EQ(index, flags.size());
+}
+
+void RadixSortKeyCodec::prepareSpecialComparators() const {
+  BOLT_DCHECK(hasSpecialValues());
+  for (const auto& column : columns_) {
+    prepareColumnComparators(column);
+  }
+  specialComparisonEnd_ = floatingPointEnd_;
+}
+
+RadixSortFloatingPointPlan RadixSortKeyCodec::floatingPointPlan(
+    const RadixSortKeyLayout& layout,
+    std::span<const uint8_t> mayHaveNulls) const {
+  RadixSortFloatingPointPlan plan;
+  const auto limit = layout.inlineCapacity();
+  uint32_t offset = 0;
+  for (uint32_t index = 0; index < columns_.size() && offset < limit; ++index) {
+    const auto& column = columns_[index];
+    const auto size = fixedBodySize(*column.type);
+    if (!size.has_value()) {
+      break;
+    }
+    const bool fixedNull =
+        layout.isVariable() && offset < layout.heapKeyOffset();
+    if ((mayHaveNulls.empty() || mayHaveNulls[index]) && !fixedNull &&
+        columns_.size() != 1) {
+      ++offset;
+      break;
+    }
+    if (column.hasSpecialValues) {
+      if (offset + 1 + *size > limit) {
+        ++offset;
+        break;
+      }
+      for (uint32_t byte = offset + 1; byte < offset + 1 + *size; ++byte) {
+        plan.digits[byte] = {
+            offset + 1, static_cast<uint8_t>(*size), !column.flags.ascending};
+      }
+    }
+    offset += 1 + *size;
+  }
+  plan.radixWidth = std::min(offset, limit);
+  plan.complete = maximumEncodedSize_.has_value() &&
+      *maximumEncodedSize_ <= plan.radixWidth;
+  return plan;
+}
+
+int32_t RadixSortKeyCodec::compareEncoded(
+    std::string_view left,
+    std::string_view right,
+    uint32_t firstColumn) const {
+  auto a = EncodedKeyReader::checkedAt(left, 0);
+  auto b = EncodedKeyReader::checkedAt(right, 0);
+  for (uint32_t column = firstColumn; column < specialComparisonEnd_; ++column) {
+    const auto& metadata = columns_[column];
+    const auto result = metadata.encodedComparator(metadata, a, b);
+    if (result != 0) {
+      return result;
+    }
+  }
+  return compareKeyBytes(
+      {a.currentData(), a.remaining()}, {b.currentData(), b.remaining()});
+}
+
+int32_t RadixSortKeyCodec::comparePhysical(
+    const RadixSortKeyLayout& layout,
+    const char* left,
+    const char* right,
+    std::string_view leftSuffix,
+    std::string_view rightSuffix) const {
+  if (!layout.isVariable()) {
+    if (allFixedScalarColumns_) {
+      const auto wordBytes = layout.inlineWordBytes();
+      uint32_t offset = 0;
+      for (const auto& column : columns_) {
+        const auto a = loadEncodedByte<true>(left, offset, wordBytes);
+        const auto b = loadEncodedByte<true>(right, offset, wordBytes);
+        if (a != b) {
+          return (a > b) - (a < b);
+        }
+        if (a == nullMarker(column.flags)) {
+          ++offset;
+          continue;
+        }
+        const auto result =
+            column.fixedComparator(column, left, right, offset + 1, wordBytes);
+        if (result != 0) {
+          return result;
+        }
+        offset += static_cast<uint32_t>(*column.maximumEncodedSize);
+      }
+      return 0;
+    }
+    RadixSortInlineKeyBuffer a;
+    RadixSortInlineKeyBuffer b;
+    EncodedKeyView aView;
+    EncodedKeyView bView;
+    RadixSortKey(layout, left).deconstruct(a, aView);
+    RadixSortKey(layout, right).deconstruct(b, bView);
+    return compareEncoded(aView.bytes, bView.bytes);
+  }
+  const auto heapOffset = layout.heapKeyOffset();
+  const auto prefixColumns = fixedPrefixColumnCount(heapOffset);
+  uint32_t column = 0;
+  for (; column < prefixColumns; ++column) {
+    const auto& metadata = columns_[column];
+    const auto offset = *metadata.fixedPrefixOffset;
+    const auto a = static_cast<uint8_t>(left[offset]);
+    const auto b = static_cast<uint8_t>(right[offset]);
+    if (a != b) {
+      return (a > b) - (a < b);
+    }
+    if (a == nullMarker(metadata.flags)) {
+      continue;
+    }
+    const auto result = metadata.variableComparator(
+        metadata, left, right, offset + 1, layout.inlineWordBytes());
+    if (result != 0) {
+      return (result > 0) - (result < 0);
+    }
+  }
+  if (leftSuffix.data() == nullptr) {
+    const auto leftSize =
+        loadUnaligned<uint64_t>(left + *layout.sizeOffset()) - heapOffset;
+    const auto rightSize =
+        loadUnaligned<uint64_t>(right + *layout.sizeOffset()) - heapOffset;
+    leftSuffix = {
+        loadCompactPointer(left + *layout.dataOffset()), leftSize};
+    rightSuffix = {
+        loadCompactPointer(right + *layout.dataOffset()), rightSize};
+  }
+  return compareEncoded(leftSuffix, rightSuffix, column);
 }
 
 uint64_t RadixSortKeyCodec::appendVariable(

@@ -688,6 +688,17 @@ void RadixSortBuffer::spillBuildingRun() {
       target[column] |= source[column];
     }
   };
+  if (run_->keyCodec_->hasSpecialValues()) {
+    auto flags = run_->keyCodec_->specialValueFlags();
+    if (spilledSpecialValueFlags_.empty()) {
+      spilledSpecialValueFlags_ = std::move(flags);
+    } else {
+      BOLT_CHECK_EQ(spilledSpecialValueFlags_.size(), flags.size());
+      for (uint32_t index = 0; index < flags.size(); ++index) {
+        spilledSpecialValueFlags_[index] |= flags[index];
+      }
+    }
+  }
   mergeNullability(keyMayHaveNulls_, run_->keyMayHaveNulls());
   mergeNullability(payloadMayHaveNulls_, run_->payloadMayHaveNulls());
   if (run_->keyLayout().isVariable()) {
@@ -883,11 +894,22 @@ void RadixSortBuffer::prepareMerge() {
     memoryIndex = streams.size();
     streams.push_back(makeRadixSortMemoryRunMergeStream(*run_->storage()));
   }
+  const RadixSortKeyCodec* mergeKeyCodec = nullptr;
+  if (!spilledSpecialValueFlags_.empty()) {
+    run_->keyCodec_->mergeSpecialValueFlags(spilledSpecialValueFlags_);
+    mergeKeyCodec = run_->keyCodec_.get();
+  } else if (run_->keyCodec_->hasSpecialValues()) {
+    mergeKeyCodec = run_->keyCodec_.get();
+  }
+  if (mergeKeyCodec != nullptr) {
+    mergeKeyCodec->prepareSpecialComparators();
+  }
   merger_ = std::make_unique<RadixSortMerger>(
       run_->keyLayout(),
       std::move(streams),
       memoryIndex,
-      std::move(readBufferCache));
+      std::move(readBufferCache),
+      mergeKeyCodec);
   // The merger streams own the spill files after successful construction.
   // Clear buffer-level metadata to avoid duplicate cleanup and filesystem
   // probes after each stream removes its file at EOF.
