@@ -37,6 +37,17 @@ class StringFunctionsTest : public FlinkFunctionBaseTest {
         "rpad(c0, c1, c2)", string, size, padString);
   }
 
+  std::optional<std::string> substr(
+      std::optional<std::string> str,
+      std::optional<int32_t> start,
+      std::optional<int32_t> length = std::nullopt) {
+    if (length.has_value()) {
+      return evaluateOnce<std::string>(
+          "substr(c0, c1, c2)", str, start, length);
+    }
+    return evaluateOnce<std::string>("substr(c0, c1)", str, start);
+  }
+
   std::optional<bool> isDigit(std::optional<std::string> str) {
     return evaluateOnce<bool>("is_digit(c0)", str);
   }
@@ -76,6 +87,48 @@ TEST_F(StringFunctionsTest, rpad) {
   EXPECT_EQ(std::nullopt, rpad(std::nullopt, 5, "??"));
   EXPECT_EQ(std::nullopt, rpad("hi", std::nullopt, "??"));
   EXPECT_EQ(std::nullopt, rpad("hi", 5, std::nullopt));
+}
+
+TEST_F(StringFunctionsTest, substr) {
+  // Positive start, 1-indexed.
+  EXPECT_EQ("hello", substr("hello", 1));
+  EXPECT_EQ("ello", substr("hello", 2));
+  EXPECT_EQ("o", substr("hello", 5));
+  EXPECT_EQ("", substr("hello", 6));
+  EXPECT_EQ("", substr("hello", 100));
+
+  // Start == 0 treated as 1 (Flink semantics).
+  EXPECT_EQ("hello", substr("hello", 0));
+  EXPECT_EQ("hello", substr("hello", 0, 5));
+
+  // Negative start: count from end.
+  EXPECT_EQ("o", substr("hello", -1));
+  EXPECT_EQ("lo", substr("hello", -2));
+  EXPECT_EQ("hello", substr("hello", -5));
+  EXPECT_EQ("", substr("hello", -100));
+
+  // With length.
+  EXPECT_EQ("el", substr("hello", 2, 2));
+  EXPECT_EQ("ello", substr("hello", 2, 10));
+
+  // length == 0 returns empty string.
+  EXPECT_EQ("", substr("hello", 1, 0));
+
+  // Negative length returns NULL (Flink semantics).
+  EXPECT_EQ(std::nullopt, substr("hello", 1, -1));
+  EXPECT_EQ(std::nullopt, substr("hello", 5, -1));
+
+  // NULL input.
+  EXPECT_EQ(std::nullopt, substr(std::nullopt, 1));
+  EXPECT_EQ(std::nullopt, substr(std::nullopt, 1, 2));
+  EXPECT_EQ(std::nullopt, substr("hello", std::nullopt));
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateOnce<std::string>(
+          "substr(c0, c1, c2)",
+          std::optional<std::string>{"hello"},
+          std::optional<int32_t>{1},
+          std::optional<int32_t>{}));
 }
 
 TEST_F(StringFunctionsTest, splitIndex) {
