@@ -349,7 +349,13 @@ void RadixSortRun::finalize() {
         skippableValidityOffsets.push_back(offset);
       }
     }
-    sorter.sort(skippableValidityOffsets);
+    const auto* specialCodec =
+        keyCodec_->hasSpecialValues() ? keyCodec_.get() : nullptr;
+    if (specialCodec != nullptr) {
+      specialCodec->prepareSpecialComparators();
+    }
+    sorter.sort(
+        skippableValidityOffsets, specialCodec, currentRunKeyMayHaveNulls_);
   } catch (...) {
     metrics_.sortTimeUs += elapsedUs(begin);
     throw;

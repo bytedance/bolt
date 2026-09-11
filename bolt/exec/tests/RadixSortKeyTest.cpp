@@ -384,14 +384,21 @@ class RadixSortKeyTest : public testing::Test {
   static void expectPairwiseCompare(
       const RadixSortRunStorage& arena,
       vector_size_t size,
-      Expected expected) {
+      Expected expected,
+      const RowVector* rows = nullptr) {
     for (vector_size_t left = 0; left < size; ++left) {
       for (vector_size_t right = 0; right < size; ++right) {
         const auto actual = comparePhysical(
             arena.layout(), recordAt(arena, left), recordAt(arena, right));
         const auto reference = expected(left, right);
-        EXPECT_EQ(
-            (actual > 0) - (actual < 0), (reference > 0) - (reference < 0));
+        const bool allowDistinctEquivalentBits =
+            rows != nullptr && rows->childrenSize() == 1 &&
+            SortComparatorOracle::hasDistinctEquivalentFloatingPointBits(
+                *rows->childAt(0), left, right);
+        if (reference != 0 || !allowDistinctEquivalentBits) {
+          EXPECT_EQ(
+              (actual > 0) - (actual < 0), (reference > 0) - (reference < 0));
+        }
       }
     }
   }
@@ -464,10 +471,14 @@ class RadixSortKeyTest : public testing::Test {
         ASSERT_TRUE(layout.isVariable());
       }
       ASSERT_EQ(arena.size(), rows->size());
-      expectPairwiseCompare(arena, rows->size(), [&](auto left, auto right) {
-        return SortComparatorOracle::compareRows(
-            *rows, left, *rows, right, channels, compareFlags);
-      });
+      expectPairwiseCompare(
+          arena,
+          rows->size(),
+          [&](auto left, auto right) {
+            return SortComparatorOracle::compareRows(
+                *rows, left, *rows, right, channels, compareFlags);
+          },
+          rows.get());
       std::vector<vector_size_t> expectedRows(rows->size());
       std::iota(expectedRows.begin(), expectedRows.end(), 0);
       std::stable_sort(
