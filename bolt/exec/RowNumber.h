@@ -90,7 +90,7 @@ class RowNumber : public Operator {
 
   RowVectorPtr getOutputForSinglePartition();
 
-  FlatVector<int64_t>& getOrCreateRowNumberVector(vector_size_t size);
+  VectorPtr& getOrCreateRowNumberVector(vector_size_t size);
 
   const std::optional<int32_t> limit_;
   const bool generateRowNumber_;

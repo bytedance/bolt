@@ -108,10 +108,15 @@ RowVectorPtr PaimonSplitReader::projectVector(
 }
 
 PaimonRowIteratorPtr PaimonSplitReader::getIterator(SplitReader* rowReader) {
-  VectorPtr result =
-      BaseVector::create(readerOutputType_, 0, rowReader->pool());
-
-  if (rowReader->next(paimon::kMAX_BATCH_SIZE, result)) {
+  for (;;) {
+    VectorPtr result =
+        BaseVector::create(readerOutputType_, 0, rowReader->pool());
+    if (!rowReader->next(paimon::kMAX_BATCH_SIZE, result)) {
+      return nullptr;
+    }
+    if (result->size() == 0) {
+      continue;
+    }
     RowVectorPtr resultAsRowVect = std::static_pointer_cast<RowVector>(result);
     resultAsRowVect->loadedVector();
     auto primaryKeys = projectVector(resultAsRowVect, primaryKeyIndices_);
@@ -148,8 +153,6 @@ PaimonRowIteratorPtr PaimonSplitReader::getIterator(SplitReader* rowReader) {
         values,
         sequenceGroups,
         rowReader);
-  } else {
-    return nullptr;
   }
 }
 

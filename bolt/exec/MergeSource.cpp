@@ -317,6 +317,7 @@ std::shared_ptr<MergeSource> MergeSource::createMergeExchangeSource(
 BlockingReason MergeJoinSource::next(
     ContinueFuture* future,
     RowVectorPtr* data) {
+  TestValue::adjust("bytedance::bolt::exec::MergeSource::next", this);
   ScopedPromiseNotification notification(1);
   return state_.withWLock([&](auto& state) {
     if (state.data != nullptr) {
@@ -339,6 +340,7 @@ BlockingReason MergeJoinSource::next(
 BlockingReason MergeJoinSource::enqueue(
     RowVectorPtr data,
     ContinueFuture* future) {
+  TestValue::adjust("bytedance::bolt::exec::MergeSource::enqueue", this);
   ScopedPromiseNotification notification(1);
   return state_.withWLock([&](auto& state) {
     if (state.atEnd) {

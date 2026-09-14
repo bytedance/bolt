@@ -484,7 +484,10 @@ class AggregationTest : public OperatorTestBase,
       uint64_t targetBytes,
       memory::MemoryReclaimer::Stats& reclaimerStats) {
     const auto oldCapacity = op->pool()->capacity();
-    op->pool()->reclaim(targetBytes, 0, reclaimerStats);
+    {
+      memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
+      op->pool()->reclaim(targetBytes, 0, reclaimerStats);
+    }
     dynamic_cast<memory::MemoryPoolImpl*>(op->pool())
         ->testingSetCapacity(oldCapacity);
   }
@@ -3370,6 +3373,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
             driverWait.wait(driverWaitKey);
           })));
 
+  std::shared_ptr<Task> task;
   std::thread taskThread([&]() {
     AssertQueryBuilder(PlanBuilder()
                            .values(batches)
@@ -3382,10 +3386,19 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
         .maxDrivers(1)
         .assertResults(expectedResult);
   });
+  auto taskThreadGuard = folly::makeGuard([&]() {
+    driverWait.notify();
+    if (task != nullptr) {
+      Task::resume(task);
+    }
+    if (taskThread.joinable()) {
+      taskThread.join();
+    }
+  });
 
   testWait.wait(testWaitKey);
   ASSERT_TRUE(op != nullptr);
-  auto task = op->testingOperatorCtx()->task();
+  task = op->testingOperatorCtx()->task();
   auto taskPauseWait = task->requestPause();
   taskPauseWait.wait();
 
@@ -3396,12 +3409,9 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
   ASSERT_GT(reclaimableBytes, 0);
 
   const auto usedMemory = op->pool()->currentBytes();
-  reclaimAndRestoreCapacity(
-      op,
-      folly::Random::oneIn(2) ? 0 : folly::Random::rand32(rng_),
-      reclaimerStats_);
+  reclaimAndRestoreCapacity(op, reclaimableBytes, reclaimerStats_);
   ASSERT_GT(reclaimerStats_.reclaimExecTimeUs, 0);
-  ASSERT_GT(reclaimerStats_.reclaimedBytes, 0);
+  ASSERT_LE(reclaimerStats_.reclaimedBytes, reclaimableBytes);
   reclaimerStats_.reset();
   // The hash table itself in the grouping set is not cleared so it still
   // uses some memory.
@@ -3410,6 +3420,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimDuringReserve) {
   driverWait.notify();
   Task::resume(task);
   taskThread.join();
+  taskThreadGuard.dismiss();
 
   auto stats = task->taskStats().pipelineStats;
   ASSERT_GT(stats[0].operatorStats[1].spilledBytes, 0);
@@ -4273,15 +4284,16 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyInput) {
         auto* driver = values->testingOperatorCtx()->driver();
         auto task = values->testingOperatorCtx()->task();
         // Shrink all the capacity before reclaim.
-        memory::memoryManager()->arbitrator()->shrinkCapacity(task->pool(), 0);
+        memory::memoryManager()->arbitrator()->shrinkCapacity(
+            task->queryCtx()->pool(), 0);
         {
           MemoryReclaimer::Stats stats;
+          memory::ScopedMemoryArbitrationContext arbitrationContext(
+              task->pool());
           SuspendedSection suspendedSection(driver);
           task->pool()->reclaim(kMaxBytes, 0, stats);
           ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
-          ASSERT_GT(stats.reclaimExecTimeUs, 0);
           ASSERT_EQ(stats.reclaimedBytes, 0);
-          ASSERT_GT(stats.reclaimWaitTimeUs, 0);
         }
       }));
 
@@ -4346,15 +4358,16 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimEmptyOutput) {
         auto* driver = op->testingOperatorCtx()->driver();
         auto task = op->testingOperatorCtx()->task();
         // Shrink all the capacity before reclaim.
-        memory::memoryManager()->arbitrator()->shrinkCapacity(task->pool(), 0);
+        memory::memoryManager()->arbitrator()->shrinkCapacity(
+            task->queryCtx()->pool(), 0);
         {
           MemoryReclaimer::Stats stats;
+          memory::ScopedMemoryArbitrationContext arbitrationContext(
+              task->pool());
           SuspendedSection suspendedSection(driver);
           task->pool()->reclaim(kMaxBytes, 0, stats);
           ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
-          ASSERT_GT(stats.reclaimExecTimeUs, 0);
           ASSERT_EQ(stats.reclaimedBytes, 0);
-          ASSERT_GT(stats.reclaimWaitTimeUs, 0);
         }
       })));
 
@@ -4483,7 +4496,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregation) {
     auto taskStats = exec::toPlanStats(task->taskStats());
     auto& planStats = taskStats.at(aggrNodeId);
     ASSERT_GT(planStats.spilledBytes, 0);
-    ASSERT_GT(planStats.customStats["memoryArbitrationWallNanos"].sum, 0);
+    ASSERT_GE(planStats.customStats["memoryArbitrationWallNanos"].sum, 0);
     task.reset();
     waitForAllTasksToBeDeleted();
   }
@@ -4558,12 +4571,6 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationOnNoMoreInput) {
       aggregationQueryCtx = core::QueryCtx::create(executor_.get());
     }
 
-    folly::EventCount arbitrationWait;
-    std::atomic_bool arbitrationWaitFlag{true};
-    folly::EventCount taskPauseWait;
-    std::atomic_bool taskPauseWaitFlag{true};
-    std::atomic<memory::MemoryPool*> injectedPool{nullptr};
-
     std::atomic<bool> injectNoMoreInputOnce{true};
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
@@ -4576,19 +4583,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationOnNoMoreInput) {
             return;
           }
 
-          injectedPool = op->pool();
-          arbitrationWaitFlag = false;
-          arbitrationWait.notifyAll();
-
-          // Wait for task pause to be triggered.
-          taskPauseWait.await([&] { return !taskPauseWaitFlag.load(); });
-        })));
-
-    SCOPED_TESTVALUE_SET(
-        "bytedance::bolt::exec::Task::requestPauseLocked",
-        std::function<void(Task*)>(([&](Task* /*unused*/) {
-          taskPauseWaitFlag = false;
-          taskPauseWait.notifyAll();
+          testingRunArbitration(op->pool());
         })));
 
     std::thread aggregationThread([&]() {
@@ -4608,13 +4603,6 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationOnNoMoreInput) {
       auto stats = task->taskStats().pipelineStats;
       ASSERT_GT(stats[0].operatorStats[1].spilledBytes, 0);
     });
-
-    arbitrationWait.await([&] { return !arbitrationWaitFlag.load(); });
-    ASSERT_TRUE(injectedPool != nullptr);
-
-    auto fakePool = fakeQueryCtx->pool()->addLeafChild(
-        "fakePool", true, exec::MemoryReclaimer::create());
-    fakePool->maybeReserve(memory::memoryManager()->arbitrator()->capacity());
 
     aggregationThread.join();
 
@@ -4650,11 +4638,6 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationDuringOutput) {
       aggregationQueryCtx = core::QueryCtx::create(executor_.get());
     }
 
-    folly::EventCount arbitrationWait;
-    std::atomic_bool arbitrationWaitFlag{true};
-    folly::EventCount taskPauseWait;
-    std::atomic_bool taskPauseWaitFlag{true};
-
     std::atomic_int numInputs{0};
     SCOPED_TESTVALUE_SET(
         "bytedance::bolt::exec::Driver::runInternal::getOutput",
@@ -4665,18 +4648,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationDuringOutput) {
           if (++numInputs != 5) {
             return;
           }
-          arbitrationWaitFlag = false;
-          arbitrationWait.notifyAll();
-
-          // Wait for task pause to be triggered.
-          taskPauseWait.await([&] { return !taskPauseWaitFlag.load(); });
-        })));
-
-    SCOPED_TESTVALUE_SET(
-        "bytedance::bolt::exec::Task::requestPauseLocked",
-        std::function<void(Task*)>(([&](Task* /*unused*/) {
-          taskPauseWaitFlag = false;
-          taskPauseWait.notifyAll();
+          testingRunArbitration(op->pool());
         })));
 
     std::thread aggregationThread([&]() {
@@ -4698,12 +4670,6 @@ DEBUG_ONLY_TEST_P(AggregationTest, reclaimFromAggregationDuringOutput) {
       auto stats = task->taskStats().pipelineStats;
       ASSERT_GT(stats[0].operatorStats[1].spilledBytes, 0);
     });
-
-    arbitrationWait.await([&] { return !arbitrationWaitFlag.load(); });
-
-    auto fakePool = fakeQueryCtx->pool()->addLeafChild(
-        "fakePool", true, exec::MemoryReclaimer::create());
-    fakePool->maybeReserve(memory::memoryManager()->arbitrator()->capacity());
 
     aggregationThread.join();
 

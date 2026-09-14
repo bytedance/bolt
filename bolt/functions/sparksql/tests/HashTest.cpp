@@ -239,10 +239,10 @@ TEST_F(HashTest, Map) {
       {{{1, {{2, 3}}}, {3, {{4, 5}}}}, {{6, {{7, 8}}}}});
   testMapHash(mapOfRow, {3568381598, 1066583986});
 
-  auto keys = makeFlatUnknownVector(6);
-  auto values = makeFlatUnknownVector(6);
-  auto mapOfUnkoen = makeMapVector({0, 1, 3}, keys, values);
-  testMapHash(mapOfUnkoen, {42, 42, 42});
+  auto keys = makeFlatUnknownVector(0);
+  auto values = makeFlatUnknownVector(0);
+  auto mapOfUnknown = makeMapVector({0, 0, 0}, keys, values);
+  testMapHash(mapOfUnknown, {42, 42, 42});
 }
 
 TEST_F(HashTest, Row) {

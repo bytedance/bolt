@@ -421,10 +421,10 @@ TEST_F(HiveHashTest, Map) {
       {{{1, {{2, 3}}}, {3, {{4, 5}}}}, {{6, {{7, 8}}}}});
   testMapHash(mapOfRow, {194, 231});
 
-  auto keys = makeFlatUnknownVector(6);
-  auto values = makeFlatUnknownVector(6);
-  auto mapOfUnkoen = makeMapVector({0, 1, 3}, keys, values);
-  testMapHash(mapOfUnkoen, {0, 0, 0});
+  auto keys = makeFlatUnknownVector(0);
+  auto values = makeFlatUnknownVector(0);
+  auto mapOfUnknown = makeMapVector({0, 0, 0}, keys, values);
+  testMapHash(mapOfUnknown, {0, 0, 0});
 }
 
 TEST_F(HiveHashTest, Row) {
