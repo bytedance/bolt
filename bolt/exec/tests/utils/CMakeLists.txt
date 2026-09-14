@@ -43,6 +43,8 @@ bolt_add_library(
   QueryAssertions.cpp
   RowBasedSerde.cpp
   SumNonPODAggregate.cpp
+  TpcdsPlanLoader.cpp
+  TpcdsQueryBuilder.cpp
   TpchQueryBuilder.cpp
   VectorTestUtil.cpp
 )

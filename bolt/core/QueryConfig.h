@@ -262,6 +262,16 @@ class QueryConfig {
   /// OrderBy spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kOrderBySpillEnabled = "order_by_spill_enabled";
 
+  static constexpr const char* kOrderByRadixSortEnabled =
+      "order_by_radix_sort_enabled";
+
+  /// If true, use the legacy SortBuffer when an OrderBy sorting key is REAL or
+  /// DOUBLE, or contains either type in an ARRAY, MAP, or ROW, because radix
+  /// key encoding does not preserve their exact bit representation.
+  static constexpr const char*
+      kOrderByRadixSortFallbackForFloatingPointKeysEnabled =
+          "order_by_radix_sort_fallback_for_floating_point_keys_enabled";
+
   /// Support orderBy spilling in output stage
   static constexpr const char* kOrderBySpillInOutputStageEnabled =
       "order_by_spill_output_stage_enabled";
@@ -414,6 +424,13 @@ class QueryConfig {
   /// If true, array_agg() aggregation function will ignore nulls in the input.
   static constexpr const char* kPrestoArrayAggIgnoreNulls =
       "presto.array_agg.ignore_nulls";
+
+  /// If false, size function returns null for null input.
+  static constexpr const char* kSparkLegacySizeOfNull =
+      "spark.sql.legacy.sizeOfNull";
+
+  /// If true, Spark SQL ANSI mode is enabled.
+  static constexpr const char* kSparkAnsiEnabled = "spark.sql.ansi.enabled";
 
   /// If true, array_agg() aggregation function will ignore nulls in the input.
   static constexpr const char* kPrestoSetAggIgnoreNulls =
@@ -1170,6 +1187,15 @@ class QueryConfig {
     return get<bool>(kOrderBySpillEnabled, true);
   }
 
+  bool orderByRadixSortEnabled() const {
+    return get<bool>(kOrderByRadixSortEnabled, false);
+  }
+
+  bool orderByRadixSortFallbackForFloatingPointKeysEnabled() const {
+    return get<bool>(
+        kOrderByRadixSortFallbackForFloatingPointKeysEnabled, true);
+  }
+
   bool orderBySpillInOutputStageEnabled() const {
     return get<bool>(kOrderBySpillInOutputStageEnabled, true);
   }
@@ -1366,6 +1392,8 @@ class QueryConfig {
   bool prestoArrayAggIgnoreNulls() const {
     return get<bool>(kPrestoArrayAggIgnoreNulls, false);
   }
+
+  bool sparkLegacySizeOfNull() const;
 
   bool prestoSetAggIgnoreNulls() const {
     return get<bool>(kPrestoSetAggIgnoreNulls, false);

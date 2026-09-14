@@ -143,12 +143,14 @@ HiveConnectorTestBase::makeHiveConnectorSplits(
         infoColumns) {
   auto file =
       filesystems::getFileSystem(filePath, nullptr)->openFileForRead(filePath);
-  const int64_t fileSize = file->size();
+  BOLT_CHECK_GT(splitCount, 0);
+  const uint64_t fileSize = file->size();
   // Take the upper bound.
-  const int splitSize = std::ceil((fileSize) / splitCount);
+  const uint64_t splitSize =
+      fileSize / splitCount + (fileSize % splitCount != 0);
   std::vector<std::shared_ptr<connector::hive::HiveConnectorSplit>> splits;
   // Add all the splits.
-  for (int i = 0; i < splitCount; i++) {
+  for (uint32_t i = 0; i < splitCount; i++) {
     auto splitBuilder = HiveConnectorSplitBuilder(filePath)
                             .connectorId(kHiveConnectorId)
                             .fileFormat(format)

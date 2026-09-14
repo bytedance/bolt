@@ -90,6 +90,7 @@ inline void deserializeVariant(
     readPart(variant.metadata);
     values->set(index, variant);
   }
+  result.setNull(index, false);
 }
 
 /// Read a length-prefixed StringView from a ByteInputStream.

@@ -312,7 +312,7 @@ class BoltConan(ConanFile):
         self.tool_requires("m4/1.4.19")
         self.tool_requires("bison/3.8.2")
         self.tool_requires("flex/2.6.4")
-        self.tool_requires("cmake/3.31.10", override=True)
+        self.tool_requires("cmake/3.31.10")
         self.tool_requires("ninja/1.11.1")
         self.tool_requires("protobuf/<host_version>")
         self.tool_requires("thrift/<host_version>")

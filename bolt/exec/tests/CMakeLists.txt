@@ -43,6 +43,15 @@ add_test(
 
 target_link_libraries(aggregate_companion_functions_test PRIVATE bolt_gtest_main)
 
+add_executable(tpcds_plan_loader_test TpcdsPlanLoaderTest.cpp)
+add_test(
+  NAME tpcds_plan_loader_test
+  COMMAND
+    tpcds_plan_loader_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(tpcds_plan_loader_test PRIVATE bolt_gtest_main)
+
 add_executable(
   bolt_exec_test
   AddressableNonNullValueListTest.cpp

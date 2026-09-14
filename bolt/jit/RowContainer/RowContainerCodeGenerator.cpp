@@ -1041,9 +1041,8 @@ llvm::BasicBlock* RowContainerCodeGenerator::genComplexCmpIR(
        builder.getInt8(isEqualOp() ? 0 : (int8_t)flags[idx].nullsFirst),
        builder.getInt8(isEqualOp() ? 0 : (int8_t)flags[idx].ascending)});
   auto const0 = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
-  auto cmpOp = isEqualOp()   ? llvm::ICmpInst::ICMP_EQ
-      : flags[idx].ascending ? llvm::ICmpInst::ICMP_SLT
-                             : llvm::ICmpInst::ICMP_SGT;
+  // The complex-type comparator has already applied the sort direction.
+  auto cmpOp = isEqualOp() ? llvm::ICmpInst::ICMP_EQ : llvm::ICmpInst::ICMP_SLT;
   // if it is the last key
   if (idx == keysTypes.size() - 1) {
     auto cmpRes = builder.CreateICmp(cmpOp, keyCmpRes, const0);

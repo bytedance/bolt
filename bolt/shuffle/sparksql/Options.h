@@ -36,6 +36,7 @@
 #include <bolt/common/base/Exceptions.h>
 #include <fmt/format.h>
 #include <cstdint>
+#include <string>
 #include "bolt/row/RowFormat.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
@@ -127,6 +128,9 @@ struct ShuffleReaderOptions {
   bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
+
+  /// Returns the options in a human readable form.
+  std::string toString() const;
 };
 
 struct PartitionWriterOptions {
@@ -165,6 +169,9 @@ struct PartitionWriterOptions {
 
   // Enable checksum in codec for shuffle data corruption detection
   bool checksumEnabled = true;
+
+  /// Returns the options in a human readable form.
+  std::string toString() const;
 };
 
 struct ShuffleWriterOptions {
@@ -189,6 +196,9 @@ struct ShuffleWriterOptions {
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
   PartitionWriterOptions partitionWriterOptions{};
+
+  /// Returns the options in a human readable form.
+  std::string toString() const;
 };
 
 struct ShuffleWriterMetrics {
@@ -213,10 +223,17 @@ struct ShuffleWriterMetrics {
   int64_t computePidTime{0};
   // total time for shuffle write, including split, evict, write, compress
   int64_t shuffleWriteTime{0};
+  // Total wall time of reclaims triggered from outside this operator, i.e. not
+  // covered by shuffleWriteTime.
+  int64_t externalReclaimTime{0};
   int64_t dataSize{0};
   int64_t peakBytes{0};
   std::vector<int64_t> partitionLengths{};
   std::vector<int64_t> rawPartitionLengths{}; // Uncompressed size.
+
+  /// Returns all metrics in a human readable form; per-partition lengths are
+  /// summarized.
+  std::string toString() const;
 };
 
 // Only partitioning that has pid support adaptive shuffle writer, otherwise

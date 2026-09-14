@@ -2000,6 +2000,30 @@ TEST_F(ParquetTableScanTest, convertTypePolicyMatrix) {
   }
 }
 
+TEST_F(ParquetTableScanTest, allowsStructuralMismatchForEmptyFile) {
+  auto fileType = ROW({"c0"}, {DOUBLE()});
+  auto emptyData = std::make_shared<RowVector>(
+      pool(),
+      fileType,
+      nullptr,
+      0,
+      std::vector<VectorPtr>{BaseVector::create(DOUBLE(), 0, pool())});
+  auto file = exec::test::TempFilePath::create();
+  writeToParquetFile(file->getPath(), {emptyData}, WriterOptions{});
+
+  auto declaredType = ROW({"c0"}, {ARRAY(DOUBLE())});
+  auto plan = PlanBuilder(pool())
+                  .tableScan(declaredType, {}, "", declaredType)
+                  .planNode();
+  auto result = AssertQueryBuilder(plan)
+                    .split(makeSplit(file->getPath()))
+                    .copyResults(pool());
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->size(), 0);
+  EXPECT_TRUE(result->type()->equivalent(*declaredType));
+}
+
 // Targeted value-validation companion for the matrix above. The cases
 // here exercise the data path (not just convertType), so we explicitly
 // check the column-reader-level cast and the integer-widening path
