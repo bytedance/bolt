@@ -781,8 +781,12 @@ class LikeGeneric final : public VectorFunction {
     auto applyRow = [&](const StringView& input,
                         const StringView& pattern,
                         const std::optional<char>& escapeChar) -> bool {
+      // Keep the pattern valid if memory arbitration reclaims its source
+      // buffer while processing this row.
+      const std::string patternCopy(pattern.data(), pattern.size());
+      const StringView patternView(patternCopy);
       PatternMetadata patternMetadata =
-          determinePatternKind(std::string_view(pattern), escapeChar);
+          determinePatternKind(patternCopy, escapeChar);
       const auto reducedLength = patternMetadata.length;
       const auto& fixedPattern = patternMetadata.fixedPattern;
 
@@ -790,10 +794,10 @@ class LikeGeneric final : public VectorFunction {
         switch (patternMetadata.patternKind) {
           case PatternKind::kExactlyN:
             return OptimizedLike<PatternKind::kExactlyN>::match<
-                /*isAscii*/ true>(input, pattern, reducedLength);
+                /*isAscii*/ true>(input, patternView, reducedLength);
           case PatternKind::kAtLeastN:
             return OptimizedLike<PatternKind::kAtLeastN>::match<
-                /*isAscii*/ true>(input, pattern, reducedLength);
+                /*isAscii*/ true>(input, patternView, reducedLength);
           case PatternKind::kFixed:
             return OptimizedLike<PatternKind::kFixed>::match</*isAscii*/ true>(
                 input, fixedPattern, reducedLength);
@@ -807,16 +811,16 @@ class LikeGeneric final : public VectorFunction {
             return OptimizedLike<PatternKind::kSubstring>::match<
                 /*isAscii*/ true>(input, fixedPattern, reducedLength);
           default:
-            return applyWithRegex(input, pattern, escapeChar);
+            return applyWithRegex(input, patternView, escapeChar);
         }
       } else {
         switch (patternMetadata.patternKind) {
           case PatternKind::kExactlyN:
             return OptimizedLike<PatternKind::kExactlyN>::match<
-                /*isAscii*/ false>(input, pattern, reducedLength);
+                /*isAscii*/ false>(input, patternView, reducedLength);
           case PatternKind::kAtLeastN:
             return OptimizedLike<PatternKind::kAtLeastN>::match<
-                /*isAscii*/ false>(input, pattern, reducedLength);
+                /*isAscii*/ false>(input, patternView, reducedLength);
           case PatternKind::kFixed:
             return OptimizedLike<PatternKind::kFixed>::match</*isAscii*/ false>(
                 input, fixedPattern, reducedLength);
@@ -830,7 +834,7 @@ class LikeGeneric final : public VectorFunction {
             return OptimizedLike<PatternKind::kSubstring>::match<
                 /*isAscii*/ false>(input, fixedPattern, reducedLength);
           default:
-            return applyWithRegex(input, pattern, escapeChar);
+            return applyWithRegex(input, patternView, escapeChar);
         }
       }
     };
@@ -1558,12 +1562,12 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> likeSignatures() {
       exec::FunctionSignatureBuilder()
           .returnType("boolean")
           .argumentType("varchar")
-          .constantArgumentType("varchar")
+          .argumentType("varchar")
           .build(),
       exec::FunctionSignatureBuilder()
           .returnType("boolean")
           .argumentType("varchar")
-          .constantArgumentType("varchar")
+          .argumentType("varchar")
           .constantArgumentType("varchar")
           .build(),
   };
