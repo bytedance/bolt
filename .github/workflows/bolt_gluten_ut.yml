@@ -20,8 +20,10 @@ on:
 
 env:
   # The Bolt backend (backends-bolt / cpp/bolt) lives in upstream Gluten main.
-  GLUTEN_REPO: ${{ inputs.gluten_repo || 'apache/incubator-gluten' }}
-  GLUTEN_REF: ${{ inputs.gluten_ref || 'main' }}
+  # TEMPORARY: upstream main (53ad31ba2) does not compile backends-bolt after
+  # the shims cleanup (#12954); point at the fix branch until it is merged.
+  GLUTEN_REPO: ${{ inputs.gluten_repo || 'zhangxffff/gluten' }}
+  GLUTEN_REF: ${{ inputs.gluten_ref || 'fix/bolt-shims-cleanup' }}
   # Matches build-test.yml — ccache + conan cache live under /data on the host.
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
