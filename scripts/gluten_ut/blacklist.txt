@@ -18,6 +18,8 @@ org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - un
 org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-47307: base64 encoding without chunking
 org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
 org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
 org.apache.spark.sql.execution.GlutenRemoveRedundantWindowGroupLimitsSuite#Gluten - remove redundant WindowGroupLimits
 org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on dense_rank
 org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on rank

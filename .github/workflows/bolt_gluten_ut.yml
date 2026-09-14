@@ -34,6 +34,13 @@ concurrency:
 
 jobs:
   spark-ut:
+    name: spark-ut (shard ${{ matrix.shard }}/2)
+    # The matrix is CPU-bound (~200 thread-minutes of JVM time): split the
+    # planned jobs across runners via SHARD_INDEX / SHARD_COUNT.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ 0, 1 ]
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
@@ -141,19 +148,23 @@ jobs:
           ) 200> "$BASE/.lock"
 
       - name: Run Gluten UT (parallel, blacklist-aware)
+        # JOBS defaults to min(threads/2, RAM/4GB); each job is one JVM with a
+        # 2 GB heap plus 1 GB of Bolt off-heap.
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
           SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
-          JOBS: '8'
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: '2'
         run: bash scripts/gluten_ut/run.sh
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bolt-gluten-ut-reports
+          name: bolt-gluten-ut-reports-shard${{ matrix.shard }}
           path: |
-            scripts/gluten_ut/logs/*.log
-            scripts/gluten_ut/logs/*.tsv
+            scripts/gluten_ut/logs/_*
+            scripts/gluten_ut/logs/classified/*
+            scripts/gluten_ut/logs/jobs/*
             scripts/gluten_ut/logs/reports/**/TEST-*.xml
           if-no-files-found: warn
