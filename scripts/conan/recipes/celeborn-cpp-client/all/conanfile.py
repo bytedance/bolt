@@ -14,7 +14,12 @@
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, copy
+from conan.tools.files import (
+    apply_conandata_patches,
+    copy,
+    download,
+    export_conandata_patches,
+)
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
 from conan.tools.scm import Git
 import os
@@ -63,6 +68,18 @@ class CelebornCppClientConan(ConanFile):
         git.clone("https://github.com/apache/celeborn", target="src")
         git = Git(self, folder=self.source_folder)
         git.checkout("81d89f3")
+        # This proto is stored in Git LFS. Conan builders do not necessarily
+        # have git-lfs installed, in which case clone leaves the pointer file.
+        download(
+            self,
+            "https://raw.githubusercontent.com/apache/celeborn/81d89f3/"
+            "cpp/celeborn/proto/TransportMessagesCpp.proto",
+            os.path.join(
+                self.source_folder,
+                "cpp/celeborn/proto/TransportMessagesCpp.proto",
+            ),
+            sha256="d04aae7cf1a20e1180566ff735c2948e4a4cad4ae2abe7c7b26c6f5d45d4e350",
+        )
         apply_conandata_patches(self)
 
     def export_sources(self):
