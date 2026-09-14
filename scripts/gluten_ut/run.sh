@@ -120,10 +120,18 @@ JOB_JVM_OPTS="${JOB_JVM_OPTS:--Xmx2g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:Pa
 JOB_MEM_GB="${JOB_MEM_GB:-4}" # heap + off-heap + metaspace budget per job
 # Each job is a Spark local[2] driver plus Bolt native threads: about two
 # cores per JVM saturates the CPU, and JOB_MEM_GB per JVM bounds the memory.
-# Override via JOBS.
+# Override via JOBS. Inside a cgroup-limited container (the CI runners are
+# capped at 16 CPUs / 50 GB) /proc still shows the host, so honour
+# CI_NUM_THREADS (same knob as the Makefile) and the cgroup memory limit.
 if [[ -z "${JOBS:-}" ]]; then
-  cpu_jobs=$(($(grep -c ^processor /proc/cpuinfo 2> /dev/null || echo 4) / 2))
-  mem_jobs=$(($(awk '/MemTotal/ {print $2}' /proc/meminfo 2> /dev/null || echo 16000000) / 1024 / 1024 / JOB_MEM_GB))
+  threads="${CI_NUM_THREADS:-$(grep -c ^processor /proc/cpuinfo 2> /dev/null || echo 4)}"
+  mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2> /dev/null || echo 16000000)
+  for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+    limit=$(cat "$f" 2> /dev/null || true)
+    [[ "$limit" =~ ^[0-9]+$ ]] && ((limit / 1024 < mem_kb)) && mem_kb=$((limit / 1024))
+  done
+  cpu_jobs=$((threads / 2))
+  mem_jobs=$((mem_kb / 1024 / 1024 / JOB_MEM_GB))
   JOBS=$((cpu_jobs < mem_jobs ? cpu_jobs : mem_jobs))
   ((JOBS < 1)) && JOBS=1
 fi
