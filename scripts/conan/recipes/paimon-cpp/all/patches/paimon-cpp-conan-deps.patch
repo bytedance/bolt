@@ -113,7 +113,7 @@ new file mode 100644
 index 0000000..e9318f6
 --- /dev/null
 +++ b/cmake_modules/PaimonConanDeps.cmake
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,172 @@
 +# Copyright 2024-present Alibaba Inc.
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -140,8 +140,6 @@ index 0000000..e9318f6
 +    # --- Find all Conan packages ---
 +    # This loads the *-data.cmake files which set *_INCLUDE_DIRS_RELEASE etc.
 +    find_package(Arrow QUIET CONFIG)
-+    find_package(arrow QUIET CONFIG)
-+    find_package(Parquet QUIET CONFIG)
 +    find_package(fmt)
 +    find_package(glog QUIET CONFIG)
 +    find_package(RapidJSON REQUIRED CONFIG)
@@ -209,8 +207,8 @@ index 0000000..e9318f6
 +
 +    if(NOT TARGET parquet)
 +        add_library(parquet INTERFACE IMPORTED)
-+        if(TARGET Parquet::parquet)
-+            target_link_libraries(parquet INTERFACE Parquet::parquet)
++        if(TARGET arrow::libparquet)
++            target_link_libraries(parquet INTERFACE arrow::libparquet)
 +        endif()
 +    endif()
 +
