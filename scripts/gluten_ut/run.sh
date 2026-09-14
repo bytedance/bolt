@@ -33,12 +33,15 @@
 #               TARGET_SECS, SHARD_MIN_SECS (job sizing), JOB_JVM_OPTS,
 #               SHARD_INDEX / SHARD_COUNT (run 1/N of the jobs, for a CI matrix),
 #               SKIP_INSTALL=1 (reuse the previous build; local iteration),
-#               REFRESH_TIMINGS=1 (overwrite suite_times.txt / test_times.txt
-#               with what this run measured).
+#               TIMINGS_DIR (where suite_times.txt / test_times.txt live,
+#               default $SCRIPT_DIR/timings; not in git), REFRESH_TIMINGS=0
+#               (don't merge this run's measurements back into them).
 #
-# Logs + reports go to $SCRIPT_DIR/logs/. blacklist.txt, suite_times.txt and
-# test_times.txt live next to this script; the timing files are only hints for
-# packing/sharding, never a filter — unknown suites still run.
+# Logs + reports go to $SCRIPT_DIR/logs/. blacklist.txt lives next to this
+# script. The timing files are measured by the previous run(s) and are only
+# hints for packing/sharding, never a filter — unknown suites still run, they
+# just pack less accurately until they have been measured once. In CI,
+# TIMINGS_DIR points at a host volume so every run calibrates the next.
 # Blacklist entry shape: `<FQCN>#<caseName>` or `<FQCN>#(aborted)`.
 #
 # Exit status: 0 if every failure is on the blacklist, else 1.
@@ -92,8 +95,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Override via env to pick per-spark-version lists (e.g. blacklist-3.4.txt),
 # or to share lists across multiple bolt checkouts.
 BLACKLIST_FILE="${BLACKLIST_FILE:-$SCRIPT_DIR/blacklist.txt}"
-SUITE_TIMES_FILE="${SUITE_TIMES_FILE:-$SCRIPT_DIR/suite_times.txt}"
-TEST_TIMES_FILE="${TEST_TIMES_FILE:-$SCRIPT_DIR/test_times.txt}"
+TIMINGS_DIR="${TIMINGS_DIR:-$SCRIPT_DIR/timings}"
+SUITE_TIMES_FILE="${SUITE_TIMES_FILE:-$TIMINGS_DIR/suite_times.txt}"
+TEST_TIMES_FILE="${TEST_TIMES_FILE:-$TIMINGS_DIR/test_times.txt}"
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 MVN_BIN="${MVN_BIN:-mvn}"
 # Job sizing: batches of small suites are filled up to TARGET_SECS; suites
@@ -373,12 +377,24 @@ rc=0
 python3 "$SCRIPT_DIR/summarize.py" --plan "$PLAN" --jobs-dir "$JOBS_DIR" \
   --reports-dir "$REPORTS_ROOT" --blacklist "$BLACKLIST_FILE" \
   --timings-dir "$LOG_DIR" --test-times-min "$SHARD_MIN_SECS" || rc=$?
-if [[ "${REFRESH_TIMINGS:-0}" == 1 ]]; then
-  cp "$LOG_DIR/_suite_times.txt" "$SUITE_TIMES_FILE"
-  cp "$LOG_DIR/_test_times.txt" "$TEST_TIMES_FILE"
-  echo "timing hints refreshed: $SUITE_TIMES_FILE, $TEST_TIMES_FILE"
+# Merge this run's measurements into the timing hints: measured keys win,
+# keys not measured this time (other shard, aborted job) keep their old value.
+merge_timings() {
+  local new="$1" old="$2" nkeys="$3"
+  local tmp="$old.tmp"
+  mkdir -p "$(dirname "$old")"
+  awk -F'\t' -v OFS='\t' -v n="$nkeys" '
+    { k = $1; for (i = 2; i <= n; i++) k = k SUBSEP $i }
+    NR == FNR { seen[k] = 1; print; next }
+    !(k in seen) { print }' "$new" "$old" 2> /dev/null > "$tmp" || cp "$new" "$tmp"
+  mv "$tmp" "$old"
+}
+if [[ "${REFRESH_TIMINGS:-1}" == 1 ]]; then
+  merge_timings "$LOG_DIR/_suite_times.txt" "$SUITE_TIMES_FILE" 1
+  merge_timings "$LOG_DIR/_test_times.txt" "$TEST_TIMES_FILE" 2
+  echo "timing hints updated: $SUITE_TIMES_FILE ($(wc -l < "$SUITE_TIMES_FILE") suites), $TEST_TIMES_FILE ($(wc -l < "$TEST_TIMES_FILE") tests)"
 else
-  echo "measured timings in $LOG_DIR/_suite_times.txt and _test_times.txt (REFRESH_TIMINGS=1 to adopt them)"
+  echo "measured timings left in $LOG_DIR/_suite_times.txt and _test_times.txt (REFRESH_TIMINGS=0)"
 fi
 step "Done"
 exit $rc

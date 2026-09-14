@@ -45,6 +45,9 @@ jobs:
         - /data/ccache-data:/data/ccache-data
         - /data/bolt-gluten-ut-arrow:/root/.m2/repository/org/apache/arrow
         - /data/bolt-gluten-ut-spark:/data/bolt-gluten-ut-spark
+        # Per-suite / per-test timings measured by previous runs; run.sh uses
+        # them to pack and shard jobs and merges its own measurements back.
+        - /data/bolt-gluten-ut-timings:/data/bolt-gluten-ut-timings
     services:
       conanserver:
         image: bolt-registry:5000/conan-server:latest
@@ -149,6 +152,7 @@ jobs:
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
           SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
+          TIMINGS_DIR: /data/bolt-gluten-ut-timings
         run: bash scripts/gluten_ut/run.sh
 
       - name: Upload test reports
