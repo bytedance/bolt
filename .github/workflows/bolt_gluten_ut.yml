@@ -34,13 +34,9 @@ concurrency:
 
 jobs:
   spark-ut:
-    name: spark-ut (shard ${{ matrix.shard }}/2)
-    # The matrix is CPU-bound (~200 thread-minutes of JVM time): split the
-    # planned jobs across runners via SHARD_INDEX / SHARD_COUNT.
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [ 0, 1 ]
+    # Single runner. The matrix is CPU-bound (~200 thread-minutes of JVM
+    # time); to split it across runners, add a matrix over `shard` and pass
+    # SHARD_INDEX / SHARD_COUNT to run.sh.
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
@@ -153,15 +149,13 @@ jobs:
         env:
           GLUTEN_HOME: ${{ github.workspace }}/gluten
           SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
-          SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_COUNT: '2'
         run: bash scripts/gluten_ut/run.sh
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bolt-gluten-ut-reports-shard${{ matrix.shard }}
+          name: bolt-gluten-ut-reports
           path: |
             scripts/gluten_ut/logs/_*
             scripts/gluten_ut/logs/classified/*
