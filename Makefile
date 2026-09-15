@@ -107,6 +107,9 @@ CONAN_PRESTO_OPTIONS = -o bolt/*:spark_compatible=False
 CONAN_SPARK_OPTIONS = -o bolt/*:spark_compatible=True
 CONAN_TESTUTIL_OPTIONS = -o bolt/*:enable_testutil=True
 CONAN_PERF_OPTIONS = -o bolt/*:enable_perf=True
+# Debug tests spawn many internal worker threads and have resource-sensitive
+# memory arbitration coverage. Keep process-level concurrency conservative.
+DEBUG_SPARK_CTEST_JOBS ?= 2
 
 # Controls the complete unit-test runtime linkage. If this differs from the
 # exported Bolt library, Conan provides the opposite gflags/glog variant while
@@ -373,7 +376,7 @@ unittest_release_spark: release_spark_with_test
 	$(MAKE) ctest_release
 
 unittest_debug_spark: debug_spark_with_test
-	$(MAKE) ctest_debug
+	$(MAKE) ctest_debug NUM_THREADS=$(DEBUG_SPARK_CTEST_JOBS)
 
 unittest_coverage: debug_with_test_cov		#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/Debug && \

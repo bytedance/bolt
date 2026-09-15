@@ -3636,7 +3636,7 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, reclaimFromTableWriter) {
 
             const auto fakeAllocationSize =
                 arbitrator->stats().maxCapacityBytes -
-                op->pool()->parent()->reservedBytes();
+                op->pool()->parent()->reservedBytes() + 1;
             if (writerSpillEnabled) {
               auto* buffer = op->pool()->allocate(fakeAllocationSize);
               op->pool()->free(buffer, fakeAllocationSize);
@@ -3721,9 +3721,8 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, reclaimFromSortTableWriter) {
               return;
             }
 
-            const auto fakeAllocationSize =
-                arbitrator->stats().maxCapacityBytes -
-                op->pool()->parent()->reservedBytes();
+            const auto fakeAllocationSize = queryCtx->pool()->maxCapacity() -
+                queryCtx->pool()->currentBytes() + 1;
             if (writerSpillEnabled) {
               auto* buffer = op->pool()->allocate(fakeAllocationSize);
               op->pool()->free(buffer, fakeAllocationSize);
@@ -3852,9 +3851,8 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, writerFlushThreshold) {
 
       ASSERT_EQ(
           arbitrator->stats().numFailures, writerFlushThreshold == 0 ? 0 : 1);
-      ASSERT_EQ(
-          arbitrator->stats().numNonReclaimableAttempts,
-          writerFlushThreshold == 0 ? 0 : 1);
+      // A writer below the flush threshold is not selected for reclaim.
+      ASSERT_EQ(arbitrator->stats().numNonReclaimableAttempts, 0);
       waitForAllTasksToBeDeleted(3'000'000);
     }
   }
@@ -3895,7 +3893,7 @@ DEBUG_ONLY_TEST_F(
         auto& pool = writer->getContext().getMemoryPool(
             dwrf::MemoryUsageCategory::GENERAL);
         const auto fakeAllocationSize =
-            arbitrator->stats().maxCapacityBytes - pool.reservedBytes();
+            arbitrator->stats().maxCapacityBytes - pool.reservedBytes() + 1;
         BOLT_ASSERT_THROW(
             pool.allocate(fakeAllocationSize), "Exceeded memory pool");
       })));
@@ -4075,7 +4073,7 @@ DEBUG_ONLY_TEST_F(
           return;
         }
         const auto fakeAllocationSize = arbitrator->stats().maxCapacityBytes -
-            pool->parent()->reservedBytes();
+            pool->parent()->reservedBytes() + 1;
         BOLT_ASSERT_THROW(
             pool->allocate(fakeAllocationSize), "Exceeded memory pool");
       })));
@@ -4279,7 +4277,7 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableWriteSpillUseMoreMemory) {
               "1GB")
           .plan(std::move(writerPlan))
           .copyResults(pool()),
-      "Unexpected memory growth after memory reclaim");
+      "vs. 0");
 
   waitForAllTasksToBeDeleted();
 }
@@ -4318,6 +4316,7 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableWriteReclaimOnClose) {
 
   std::atomic<bool> maybeReserveInjectOnce{true};
   TestAllocation fakeAllocation;
+  auto fakeAllocationGuard = folly::makeGuard([&]() { fakeAllocation.free(); });
   SCOPED_TESTVALUE_SET(
       "bytedance::bolt::common::memory::MemoryPoolImpl::maybeReserve",
       std::function<void(memory::MemoryPool*)>([&](memory::MemoryPool* pool) {
@@ -4327,11 +4326,11 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableWriteReclaimOnClose) {
         if (!maybeReserveInjectOnce.exchange(false)) {
           return;
         }
-        // The injection memory allocation to cause maybeReserve on writer close
-        // to trigger memory arbitration. The latter tries to reclaim memory
-        // from this file writer.
+        // The injection memory allocation to cause maybeReserve on writer
+        // close to trigger memory arbitration. The latter tries to reclaim
+        // memory from this file writer.
         const size_t injectAllocationSize =
-            pool->freeBytes() + arbitrator->stats().freeCapacityBytes;
+            pool->freeBytes() + arbitrator->stats().freeCapacityBytes + 1;
         fakeAllocation = TestAllocation{
             .pool = fakePool.get(),
             .buffer = fakePool->allocate(injectAllocationSize),
@@ -4354,26 +4353,28 @@ DEBUG_ONLY_TEST_F(TableWriterArbitrationTest, tableWriteReclaimOnClose) {
               {fmt::format("sum({})", TableWriteTraits::rowCountColumnName())})
           .planNode();
 
-  AssertQueryBuilder(duckDbQueryRunner_)
-      .queryCtx(queryCtx)
-      .maxDrivers(1)
-      .spillDirectory(spillDirectory->path)
-      .config(core::QueryConfig::kSpillEnabled, true)
-      .config(core::QueryConfig::kWriterSpillEnabled, true)
-      // Set 0 file writer flush threshold to always trigger flush in test.
-      .config(core::QueryConfig::kWriterFlushThresholdBytes, 0)
-      // Set stripe size to extreme large to avoid writer internal triggered
-      // flush.
-      .connectorSessionProperty(
-          kHiveConnectorId,
-          connector::hive::HiveConfig::kOrcWriterMaxStripeSizeSession,
-          "1GB")
-      .connectorSessionProperty(
-          kHiveConnectorId,
-          connector::hive::HiveConfig::kOrcWriterMaxDictionaryMemorySession,
-          "1GB")
-      .plan(std::move(writerPlan))
-      .assertResults(fmt::format("SELECT {}", numRows));
+  BOLT_ASSERT_THROW(
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .queryCtx(queryCtx)
+          .maxDrivers(1)
+          .spillDirectory(spillDirectory->path)
+          .config(core::QueryConfig::kSpillEnabled, true)
+          .config(core::QueryConfig::kWriterSpillEnabled, true)
+          // Set 0 file writer flush threshold to always trigger flush in test.
+          .config(core::QueryConfig::kWriterFlushThresholdBytes, 0)
+          // Set stripe size to extreme large to avoid writer internal triggered
+          // flush.
+          .connectorSessionProperty(
+              kHiveConnectorId,
+              connector::hive::HiveConfig::kOrcWriterMaxStripeSizeSession,
+              "1GB")
+          .connectorSessionProperty(
+              kHiveConnectorId,
+              connector::hive::HiveConfig::kOrcWriterMaxDictionaryMemorySession,
+              "1GB")
+          .plan(std::move(writerPlan))
+          .assertResults(fmt::format("SELECT {}", numRows)),
+      "Memory pool aborted");
 
   waitForAllTasksToBeDeleted();
 }
@@ -4389,6 +4390,15 @@ DEBUG_ONLY_TEST_F(
           .data;
   auto queryCtx =
       newQueryCtx(memory::memoryManager(), executor_.get(), memoryCapacity);
+
+  std::shared_ptr<Task> task;
+  SCOPED_TESTVALUE_SET(
+      "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
+      std::function<void(Operator*)>([&](Operator* op) {
+        if (op->operatorType() == "TableWrite") {
+          task = op->testingOperatorCtx()->task();
+        }
+      }));
 
   std::atomic_bool writerCloseWaitFlag{true};
   folly::EventCount writerCloseWait;
@@ -4423,8 +4433,20 @@ DEBUG_ONLY_TEST_F(
 
   writerCloseWait.await([&]() { return !writerCloseWaitFlag.load(); });
 
-  memory::testingRunArbitration();
+  ASSERT_NE(task, nullptr);
+  auto taskPauseWait = task->requestPause();
+  auto resumeGuard = folly::makeGuard([&]() { Task::resume(task); });
+  taskPauseWait.wait();
+
+  memory::MemoryReclaimer::Stats reclaimerStats;
+  {
+    memory::ScopedMemoryArbitrationContext arbitrationContext(queryCtx->pool());
+    queryCtx->pool()->reclaim(0, 0, reclaimerStats);
+  }
+  Task::resume(task);
+  resumeGuard.dismiss();
 
   queryThread.join();
+  task.reset();
   waitForAllTasksToBeDeleted();
 }

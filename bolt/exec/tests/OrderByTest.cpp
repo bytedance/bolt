@@ -435,8 +435,10 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
       uint64_t targetBytes,
       memory::MemoryReclaimer::Stats& reclaimerStats) {
     const auto oldCapacity = op->pool()->capacity();
-    memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
-    op->pool()->reclaim(targetBytes, 0, reclaimerStats);
+    {
+      memory::ScopedMemoryArbitrationContext arbitrationContext(op->pool());
+      op->pool()->reclaim(targetBytes, 0, reclaimerStats);
+    }
     dynamic_cast<memory::MemoryPoolImpl*>(op->pool())
         ->testingSetCapacity(oldCapacity);
   }
@@ -1957,8 +1959,8 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringAllocation) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
     auto tempDirectory = exec::test::TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
-    queryCtx->testingOverrideMemoryPool(
-        memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
+    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
+        queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
     auto expectedResult =
         AssertQueryBuilder(
             PlanBuilder()
@@ -2149,6 +2151,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
           driverWait.wait(driverWaitKey);
         })));
 
+    std::shared_ptr<Task> task;
     std::thread taskThread([&]() {
       if (enableSpilling) {
         AssertQueryBuilder(
@@ -2177,10 +2180,19 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
             .assertResults(expectedResult);
       }
     });
+    auto taskThreadGuard = folly::makeGuard([&]() {
+      driverWait.notify();
+      if (task != nullptr) {
+        Task::resume(task);
+      }
+      if (taskThread.joinable()) {
+        taskThread.join();
+      }
+    });
 
     testWait.wait(testWaitKey);
     ASSERT_TRUE(op != nullptr);
-    auto task = op->testingOperatorCtx()->task();
+    task = op->testingOperatorCtx()->task();
     auto taskPauseWait = task->requestPause();
     driverWait.notify();
     taskPauseWait.wait();
@@ -2225,6 +2237,7 @@ DEBUG_ONLY_TEST_P(OrderByTest, reclaimDuringOutputProcessing) {
 
     Task::resume(task);
     taskThread.join();
+    taskThreadGuard.dismiss();
 
     auto stats = task->taskStats().pipelineStats;
     const auto& finalStats = stats[0].operatorStats[1];

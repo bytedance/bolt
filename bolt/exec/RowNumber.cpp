@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/RowNumber.h"
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/exec/OperatorUtils.h"
 namespace bytedance::bolt::exec {
 
@@ -267,14 +268,15 @@ void RowNumber::ensureInputFits(const RowVectorPtr& input) {
                << ", reservation: " << succinctBytes(pool()->reservedBytes());
 }
 
-FlatVector<int64_t>& RowNumber::getOrCreateRowNumberVector(vector_size_t size) {
+VectorPtr& RowNumber::getOrCreateRowNumberVector(vector_size_t size) {
   VectorPtr& result = results_[0];
   if (result && result.use_count() == 1) {
     BaseVector::prepareForReuse(result, size);
   } else {
-    result = BaseVector::create(BIGINT(), size, pool());
+    result = BaseVector::create(
+        outputType_->childAt(outputType_->size() - 1), size, pool());
   }
-  return *result->as<FlatVector<int64_t>>();
+  return result;
 }
 
 RowVectorPtr RowNumber::getOutput() {
@@ -298,7 +300,7 @@ RowVectorPtr RowNumber::getOutput() {
   }
 
   // Compute row numbers if needed.
-  FlatVector<int64_t>* rowNumbers = nullptr;
+  VectorPtr* rowNumbers = nullptr;
   if (generateRowNumber_) {
     rowNumbers = &getOrCreateRowNumberVector(numInput);
   }
@@ -316,7 +318,11 @@ RowVectorPtr RowNumber::getOutput() {
     }
 
     if (generateRowNumber_) {
-      rowNumbers->set(i, rowNumber);
+      if constexpr (::bytedance::bolt::kSparkCompatible) {
+        (*rowNumbers)->asFlatVector<int32_t>()->set(i, rowNumber);
+      } else {
+        (*rowNumbers)->asFlatVector<int64_t>()->set(i, rowNumber);
+      }
     }
     setNumRows(partition, rowNumber);
   }
@@ -368,7 +374,11 @@ RowVectorPtr RowNumber::getOutputForSinglePartition() {
   if (generateRowNumber_) {
     auto& rowNumbers = getOrCreateRowNumberVector(numOutput);
     for (auto i = 0; i < numOutput; ++i) {
-      rowNumbers.set(i, ++numTotalInput_);
+      if constexpr (::bytedance::bolt::kSparkCompatible) {
+        rowNumbers->asFlatVector<int32_t>()->set(i, ++numTotalInput_);
+      } else {
+        rowNumbers->asFlatVector<int64_t>()->set(i, ++numTotalInput_);
+      }
     }
   }
 

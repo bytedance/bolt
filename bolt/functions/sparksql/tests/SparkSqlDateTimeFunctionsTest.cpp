@@ -2181,10 +2181,19 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeIllegal) {
   queryCtx_->testingOverrideConfigUnsafe({
       {core::QueryConfig::kThrowExceptionWhenEncounterBadTimestamp, "true"},
   });
-  // Spark returns a wrapped calendar value instead of throwing for extremely
-  // large seconds input. We only assert that parsing succeeds.
+#ifndef NDEBUG
+  EXPECT_THROW(fromUnixTime("20231228101858000", "yyyy-MM-dd"), BoltUserError);
+  EXPECT_THROW(fromUnixTime("-20231228101858000", "yyyy-MM-dd"), BoltUserError);
+
+  queryCtx_->testingOverrideConfigUnsafe({
+      {core::QueryConfig::kThrowExceptionWhenEncounterBadTimestamp, "false"},
+  });
+  EXPECT_EQ(fromUnixTime("20231228101858000", "yyyy-MM-dd"), "-12345678");
+  EXPECT_EQ(fromUnixTime("-20231228101858000", "yyyy-MM-dd"), "-12345678");
+#else
   EXPECT_NO_THROW(fromUnixTime("20231228101858000", "yyyy-MM-dd"));
   EXPECT_NO_THROW(fromUnixTime("-20231228101858000", "yyyy-MM-dd"));
+#endif
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, CastStringToLargeTimestamp) {

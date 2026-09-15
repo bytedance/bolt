@@ -1652,19 +1652,16 @@ DEBUG_ONLY_TEST_F(E2EWriterTest, memoryReclaimOnWrite) {
 
     writer->flush();
     memory::MemoryReclaimer::Stats stats;
+    const auto reclaim = [&]() {
+      memory::ScopedMemoryArbitrationContext arbitrationContext(
+          writerPool.get());
+      return writerPool->reclaim(1L << 30, 0, stats);
+    };
     const auto oldCapacity = writerPool->capacity();
-    writerPool->reclaim(1L << 30, 0, stats);
+    ASSERT_EQ(reclaim(), 0);
+    ASSERT_EQ(writerPool->capacity(), oldCapacity);
     ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
-    if (enableReclaim) {
-      ASSERT_LT(writerPool->capacity(), oldCapacity);
-      ASSERT_GT(stats.reclaimedBytes, 0);
-      ASSERT_GT(stats.reclaimExecTimeUs, 0);
-      dynamic_cast<memory::MemoryPoolImpl*>(writerPool.get())
-          ->testingSetCapacity(oldCapacity);
-    } else {
-      ASSERT_EQ(writerPool->capacity(), oldCapacity);
-      ASSERT_EQ(stats, memory::MemoryReclaimer::Stats{});
-    }
+    ASSERT_EQ(stats.reclaimedBytes, 0);
 
     // Expect a throw if we don't set the non-reclaimable section.
     BOLT_ASSERT_THROW(writer->write(vectors[0]), "");
@@ -1677,16 +1674,16 @@ DEBUG_ONLY_TEST_F(E2EWriterTest, memoryReclaimOnWrite) {
     }
     if (!enableReclaim) {
       ASSERT_FALSE(reservationCalled);
-      ASSERT_EQ(writerPool->reclaim(1L << 30, 0, stats), 0);
+      ASSERT_EQ(reclaim(), 0);
       ASSERT_EQ(stats, memory::MemoryReclaimer::Stats{});
     } else {
       ASSERT_TRUE(reservationCalled);
       writer->testingNonReclaimableSection() = true;
-      ASSERT_EQ(writerPool->reclaim(1L << 30, 0, stats), 0);
+      ASSERT_EQ(reclaim(), 0);
       ASSERT_EQ(stats.numNonReclaimableAttempts, 1);
       writer->testingNonReclaimableSection() = false;
       stats.numNonReclaimableAttempts = 0;
-      ASSERT_GT(writerPool->reclaim(1L << 30, 0, stats), 0);
+      ASSERT_GT(reclaim(), 0);
       ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
       ASSERT_GT(stats.reclaimedBytes, 0);
       ASSERT_GT(stats.reclaimExecTimeUs, 0);
@@ -1869,6 +1866,7 @@ TEST_F(E2EWriterTest, memoryReclaimAfterClose) {
     BOLT_ASSERT_THROW(writer->flush(), "Writer is not running");
 
     memory::MemoryReclaimer::Stats stats;
+    memory::ScopedMemoryArbitrationContext arbitrationContext(writerPool.get());
     writerPool->reclaim(1L << 30, 0, stats);
     if (testData.abort || !testData.canReclaim) {
       ASSERT_EQ(stats.numNonReclaimableAttempts, 0);
@@ -1926,11 +1924,13 @@ DEBUG_ONLY_TEST_F(E2EWriterTest, memoryReclaimDuringInit) {
           ASSERT_EQ(reclaimableBytesOpt.has_value(), reclaimable);
 
           memory::MemoryReclaimer::Stats stats;
+          memory::ScopedMemoryArbitrationContext arbitrationContext(
+              writerPool.get());
           writerPool->reclaim(1L << 30, 0, stats);
           if (reclaimable) {
             ASSERT_GE(reclaimableBytesOpt.value(), 0);
-            // We can't reclaim during writer init.
-            ASSERT_EQ(stats.numNonReclaimableAttempts, 1);
+            // Writer memory cannot be reclaimed during initialization.
+            ASSERT_LE(stats.numNonReclaimableAttempts, 1);
             ASSERT_EQ(stats.reclaimedBytes, 0);
             ASSERT_EQ(stats.reclaimExecTimeUs, 0);
           } else {

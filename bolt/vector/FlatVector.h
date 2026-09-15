@@ -440,6 +440,8 @@ class FlatVector final : public SimpleVector<T> {
 
   void setStringViewStats(StringViewStats /*stats*/) {}
 
+  void clearStringViewStats() {}
+
   uint64_t estimateFlatSize() const override {
     return BaseVector::estimateFlatSize();
   }
@@ -664,6 +666,9 @@ const std::optional<StringViewStats>& FlatVector<StringView>::stringStats()
 
 template <>
 void FlatVector<StringView>::setStringViewStats(StringViewStats stats);
+
+template <>
+void FlatVector<StringView>::clearStringViewStats();
 
 template <>
 uint64_t FlatVector<StringView>::estimateFlatSize() const;

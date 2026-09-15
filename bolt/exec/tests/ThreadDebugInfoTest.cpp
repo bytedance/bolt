@@ -81,7 +81,7 @@ DEBUG_ONLY_TEST_F(ThreadDebugInfoDeathTest, withinSeperateDriverThread) {
 #ifndef IS_BUILDING_WITH_ASAN
   ASSERT_DEATH(
       (assertQuery(op, vector)),
-      ".*Fatal signal handler. Query Id= TaskCursorQuery_0 Task Id= test_cursor 1.*");
+      ".*Fatal signal handler. Query Id= TaskCursorQuery_0 Task Id= test_cursor_1.*");
 #endif
 }
 
@@ -95,7 +95,7 @@ DEBUG_ONLY_TEST_F(ThreadDebugInfoDeathTest, withinQueryCompilation) {
 #ifndef IS_BUILDING_WITH_ASAN
   ASSERT_DEATH(
       (assertQuery(op, vector)),
-      ".*Fatal signal handler. Query Id= TaskCursorQuery_0 Task Id= test_cursor 1.*");
+      ".*Fatal signal handler. Query Id= TaskCursorQuery_0 Task Id= test_cursor_1.*");
 #endif
 }
 
@@ -113,16 +113,16 @@ DEBUG_ONLY_TEST_F(ThreadDebugInfoDeathTest, withinTheCallingThread) {
       nullptr,
       nullptr,
       "TaskCursorQuery_0");
-  auto task = exec::Task::create(
-      "single.execution.task.0",
-      std::move(plan),
-      0,
-      queryCtx,
-      exec::Task::ExecutionMode::kSerial);
 
 #ifndef IS_BUILDING_WITH_ASAN
   ASSERT_DEATH(
-      (task->next()),
+      (exec::Task::create(
+           "single.execution.task.0",
+           std::move(plan),
+           0,
+           queryCtx,
+           exec::Task::ExecutionMode::kSerial)
+           ->next()),
       ".*Fatal signal handler. Query Id= TaskCursorQuery_0 Task Id= single.execution.task.0.*");
 #endif
 }

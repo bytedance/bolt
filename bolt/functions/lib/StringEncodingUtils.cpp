@@ -52,6 +52,7 @@ bool prepareFlatResultsVector(
     const TypePtr& resultType) {
   BOLT_CHECK(resultType->isVarbinary() || resultType->isVarchar())
 
+  bool reusedInput = false;
   if (!result && BaseVector::isVectorWritable(argToReuse) &&
       argToReuse->isFlatEncoding() &&
       hasSingleReferencedBuffers(*argToReuse->asFlatVector<StringView>())) {
@@ -61,13 +62,15 @@ bool prepareFlatResultsVector(
         argToReuse.get()->typeKind() == resultType->kind());
 
     result = std::move(argToReuse);
-    return true;
+    reusedInput = true;
+  } else {
+    // This will allocate results if not allocated.
+    BaseVector::ensureWritable(rows, resultType, context.pool(), result);
   }
-  // This will allocate results if not allocated
-  BaseVector::ensureWritable(rows, resultType, context.pool(), result);
 
   BOLT_CHECK(VectorEncoding::isFlat(result->encoding()));
-  return false;
+  result->asFlatVector<StringView>()->clearStringViewStats();
+  return reusedInput;
 }
 
 /// Return the string encoding of a vector, if not set UTF8 is returned

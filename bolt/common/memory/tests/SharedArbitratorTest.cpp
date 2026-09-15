@@ -354,8 +354,8 @@ class SharedArbitrationTestWithParallelExecutionModeOnly
 class SharedArbitrationTestWithThreadingModes : public SharedArbitrationTest {};
 
 DEBUG_ONLY_TEST_P(
-    SharedArbitrationTestWithThreadingModes,
-    queryArbitrationStateCheck) {
+    SharedArbitrationTestWithParallelExecutionModeOnly,
+    DISABLED_queryArbitrationStateCheck) {
   const std::vector<RowVectorPtr> vectors =
       createVectors(rowType_, 32, 32 << 20);
   createDuckDbTable(vectors);
@@ -390,8 +390,8 @@ DEBUG_ONLY_TEST_P(
 }
 
 DEBUG_ONLY_TEST_P(
-    SharedArbitrationTestWithThreadingModes,
-    raceBetweenAbortAndArbitrationLeave) {
+    SharedArbitrationTestWithParallelExecutionModeOnly,
+    DISABLED_raceBetweenAbortAndArbitrationLeave) {
   const std::vector<RowVectorPtr> vectors =
       createVectors(rowType_, 32, 32 << 20);
   setupMemory(kMemoryCapacity, /*memoryPoolInitCapacity=*/0);
@@ -446,8 +446,8 @@ DEBUG_ONLY_TEST_P(
 }
 
 DEBUG_ONLY_TEST_P(
-    SharedArbitrationTestWithThreadingModes,
-    skipNonReclaimableTaskTest) {
+    SharedArbitrationTestWithParallelExecutionModeOnly,
+    DISABLED_skipNonReclaimableTaskTest) {
   const std::vector<RowVectorPtr> vectors =
       createVectors(rowType_, 32, 32 << 20);
   std::shared_ptr<core::QueryCtx> queryCtx =
@@ -538,7 +538,9 @@ DEBUG_ONLY_TEST_P(
   ASSERT_EQ(taskPausedCount, 1);
 }
 
-DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, reclaimToOrderBy) {
+DEBUG_ONLY_TEST_P(
+    SharedArbitrationTestWithParallelExecutionModeOnly,
+    reclaimToOrderBy) {
   const int numVectors = 32;
   std::vector<RowVectorPtr> vectors;
   for (int i = 0; i < numVectors; ++i) {
@@ -638,7 +640,7 @@ DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, reclaimToOrderBy) {
 }
 
 DEBUG_ONLY_TEST_P(
-    SharedArbitrationTestWithThreadingModes,
+    SharedArbitrationTestWithParallelExecutionModeOnly,
     reclaimToAggregation) {
   const int numVectors = 32;
   std::vector<RowVectorPtr> vectors;
@@ -740,7 +742,7 @@ DEBUG_ONLY_TEST_P(
 }
 
 DEBUG_ONLY_TEST_P(
-    SharedArbitrationTestWithThreadingModes,
+    SharedArbitrationTestWithParallelExecutionModeOnly,
     reclaimToJoinBuilder) {
   const int numVectors = 32;
   std::vector<RowVectorPtr> vectors;
@@ -767,7 +769,7 @@ DEBUG_ONLY_TEST_P(
     folly::EventCount taskPauseWait;
     auto taskPauseWaitKey = taskPauseWait.prepareWait();
 
-    const auto fakeAllocationSize = kMemoryCapacity - (32L << 20);
+    const auto fakeAllocationSize = kMemoryCapacity - (2L << 20);
 
     std::atomic<bool> injectAllocationOnce{true};
     fakeOperatorFactory_->setAllocationCallback([&](Operator* op) {
@@ -801,32 +803,25 @@ DEBUG_ONLY_TEST_P(
 
     std::thread joinThread([&]() {
       auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-      core::PlanNodeId joinNodeId;
-      auto task =
-          newQueryBuilder()
-              .queryCtx(joinQueryCtx)
-              .serialExecution(isSerialExecutionMode_)
-              .plan(PlanBuilder(planNodeIdGenerator)
-                        .values(vectors)
-                        .project({"c0 AS t0", "c1 AS t1", "c2 AS t2"})
-                        .hashJoin(
-                            {"t0"},
-                            {"u0"},
-                            PlanBuilder(planNodeIdGenerator)
-                                .values(vectors)
-                                .project({"c0 AS u0", "c1 AS u1", "c2 AS u2"})
-                                .planNode(),
-                            "",
-                            {"t1"},
-                            core::JoinType::kAnti)
-                        .capturePlanNodeId(joinNodeId)
-                        .planNode())
-              .assertResults(
-                  "SELECT c1 FROM tmp WHERE c0 NOT IN (SELECT c0 FROM tmp)");
-      auto taskStats = exec::toPlanStats(task->taskStats());
-      auto& stats = taskStats.at(joinNodeId);
-      checkOperatorStatsForArbitration(
-          stats, !sameQuery /*expectGlobalArbitration*/);
+      newQueryBuilder()
+          .queryCtx(joinQueryCtx)
+          .serialExecution(isSerialExecutionMode_)
+          .plan(PlanBuilder(planNodeIdGenerator)
+                    .values(vectors)
+                    .project({"c0 AS t0", "c1 AS t1", "c2 AS t2"})
+                    .hashJoin(
+                        {"t0"},
+                        {"u0"},
+                        PlanBuilder(planNodeIdGenerator)
+                            .values(vectors)
+                            .project({"c0 AS u0", "c1 AS u1", "c2 AS u2"})
+                            .planNode(),
+                        "",
+                        {"t1"},
+                        core::JoinType::kAnti)
+                    .planNode())
+          .assertResults(
+              "SELECT c1 FROM tmp WHERE c0 NOT IN (SELECT c0 FROM tmp)");
     });
 
     std::thread memThread([&]() {

@@ -106,6 +106,11 @@ void FlatVector<StringView>::setStringViewStats(StringViewStats stats) {
 }
 
 template <>
+void FlatVector<StringView>::clearStringViewStats() {
+  stringStats_.reset();
+}
+
+template <>
 uint64_t FlatVector<StringView>::estimateFlatSize() const {
   if (stringStats_.has_value()) {
     // stringStats_->totalBytes is the sum of non-inline StringView sizes.
