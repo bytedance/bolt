@@ -64,8 +64,8 @@ void BufferManager::Initialize(MemoryPool& parent) {
   BOLT_CHECK_NOT_NULL(pool_);
   spillStore_ =
       std::make_unique<SpillStore>(config_.spillStoreConfig, pool_.get());
-  pool_->setReclaimer(
-      std::make_unique<BufferManagerReclaimer>(weak_from_this()));
+  pool_->setReclaimer(std::make_unique<BufferManagerReclaimer>(
+      weak_from_this(), config_.arbitrationReclaimer));
 }
 
 BufferHandle BufferManager::Allocate(size_t size, MemoryTag tag) {

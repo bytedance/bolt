@@ -26,7 +26,13 @@ class BufferManager;
 
 class BufferManagerReclaimer final : public memory::MemoryReclaimer {
  public:
-  explicit BufferManagerReclaimer(std::weak_ptr<BufferManager> manager);
+  explicit BufferManagerReclaimer(
+      std::weak_ptr<BufferManager> manager,
+      std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer = nullptr);
+
+  void enterArbitration() override;
+
+  void leaveArbitration() noexcept override;
 
   bool reclaimableBytes(const MemoryPool& pool, uint64_t& reclaimableBytes)
       const override;
@@ -39,6 +45,7 @@ class BufferManagerReclaimer final : public memory::MemoryReclaimer {
 
  private:
   std::weak_ptr<BufferManager> manager_;
+  std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer_;
 };
 
 } // namespace bytedance::bolt::memory::bm
