@@ -310,7 +310,8 @@ class RadixSortRunSorterTest : public testing::Test {
         key[8] = static_cast<char>(row % 4);
       }
       for (uint32_t byte = effectivePasses + 1; byte < key.size(); ++byte) {
-        key[byte] = static_cast<char>(row >> ((key.size() - byte - 1) * 8));
+        key[byte] =
+            static_cast<char>(uint64_t{row} >> ((key.size() - byte - 1) * 8));
       }
       keys.push_back(std::move(key));
     }

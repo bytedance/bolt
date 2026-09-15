@@ -22,6 +22,8 @@
 
 #include <boost/sort/pdqsort/pdqsort.hpp>
 
+#include "bolt/exec/radixsort/RadixSortKeyCodec.h"
+
 namespace bytedance::bolt::exec::radixsort {
 namespace {
 
@@ -48,6 +50,7 @@ class RadixSortKeyLessState<true> {
 
 constexpr uint64_t kRunDetectionCutoff = 128;
 constexpr uint64_t kComparisonFallbackCutoff = 128;
+constexpr uint64_t kFloatingPointComparisonFallbackCutoff = 32;
 constexpr uint64_t kLargeBucketCutoff = 1024;
 constexpr uint32_t kEffectiveRadixPassLimit = sizeof(uint64_t);
 constexpr uint32_t kFreeRadixPassInformationBits = 2;
@@ -300,11 +303,88 @@ class SegmentedKeyIterator {
   uint64_t tupleIndex_{0};
 };
 
-template <RadixSortKeyLayoutKind KIND, bool CompletePrefixRadix>
+template <RadixSortKeyLayoutKind KIND>
+class FloatingPointKeyLess {
+ public:
+  FloatingPointKeyLess(
+      const RadixSortKeyLayout& layout,
+      const RadixSortKeyCodec& codec)
+      : layout_(layout), codec_(codec) {}
+
+  bool operator()(
+      const typename RadixSortKeyTraits<KIND>::Type& left,
+      const typename RadixSortKeyTraits<KIND>::Type& right) const {
+    return codec_.comparePhysical(
+               layout_,
+               reinterpret_cast<const char*>(&left),
+               reinterpret_cast<const char*>(&right)) < 0;
+  }
+
+ private:
+  const RadixSortKeyLayout& layout_;
+  const RadixSortKeyCodec& codec_;
+};
+
+template <RadixSortKeyLayoutKind KIND, typename T, bool Descending>
+class SingleFloatingPointKeyLess {
+ public:
+  bool operator()(
+      const typename RadixSortKeyTraits<KIND>::Type& left,
+      const typename RadixSortKeyTraits<KIND>::Type& right) const {
+    constexpr auto wordBytes = RadixSortKeyTraits<KIND>::kInlineWordBytes;
+    const auto* a = reinterpret_cast<const char*>(&left);
+    const auto* b = reinterpret_cast<const char*>(&right);
+    const auto aMarker = loadEncodedByte<true>(a, 0, wordBytes);
+    const auto bMarker = loadEncodedByte<true>(b, 0, wordBytes);
+    if (aMarker != bMarker) {
+      return aMarker < bMarker;
+    }
+    auto x = loadEncodedUnsigned<true, T>(a, 1, wordBytes);
+    auto y = loadEncodedUnsigned<true, T>(b, 1, wordBytes);
+    const auto ascendingX =
+        static_cast<uint8_t>((Descending ? ~x : x) >> (sizeof(T) * 8 - 8));
+    const auto ascendingY =
+        static_cast<uint8_t>((Descending ? ~y : y) >> (sizeof(T) * 8 - 8));
+    const auto mayNeedNormalization = [](uint8_t value) {
+      return value == 0x00 || value == 0x7f || value == 0xff;
+    };
+    if (!mayNeedNormalization(ascendingX) &&
+        !mayNeedNormalization(ascendingY)) {
+      return x < y;
+    }
+    x = normalizeFloatingPointKey(x, Descending);
+    y = normalizeFloatingPointKey(y, Descending);
+    return x < y;
+  }
+};
+
+template <
+    RadixSortKeyLayoutKind KIND,
+    bool CompletePrefixRadix,
+    bool FloatingPoint = false,
+    typename SingleFloat = void,
+    bool Descending = false>
 class RadixSortRunSorterKernel {
  public:
-  explicit RadixSortRunSorterKernel(RadixSortRunStorage& arena)
-      : arena_(arena), less_(arena.layout()), iteratorState_(arena) {
+  explicit RadixSortRunSorterKernel(
+      RadixSortRunStorage& arena,
+      const RadixSortKeyCodec* codec = nullptr,
+      std::span<const uint8_t> mayHaveNulls = {})
+      : arena_(arena),
+        less_([&]() -> Compare {
+          if constexpr (!std::is_void_v<SingleFloat>) {
+            return Compare{};
+          } else if constexpr (FloatingPoint) {
+            return Compare(arena.layout(), *codec);
+          } else {
+            return Compare(arena.layout());
+          }
+        }()),
+        iteratorState_(arena) {
+    if constexpr (FloatingPoint) {
+      floatingPointPlan_ =
+          codec->floatingPointPlan(arena.layout(), mayHaveNulls);
+    }
     static_assert(!CompletePrefixRadix || Traits::kVariable);
     if constexpr (CompletePrefixRadix) {
       BOLT_DCHECK_EQ(arena.layout().radixWidth(), kRadixByteLimit);
@@ -341,16 +421,23 @@ class RadixSortRunSorterKernel {
 
   using Iterator = SegmentedKeyIterator<KIND>;
   using Traits = RadixSortKeyTraits<KIND>;
-  using Compare = RadixSortKeyLess<KIND>;
+  using Compare = std::conditional_t<
+      !std::is_void_v<SingleFloat>,
+      SingleFloatingPointKeyLess<KIND, SingleFloat, Descending>,
+      std::conditional_t<
+          FloatingPoint,
+          FloatingPointKeyLess<KIND>,
+          RadixSortKeyLess<KIND>>>;
   using RunList = std::list<Iterator>;
   static constexpr bool kEnableSuffixRadix =
       !Traits::kVariable && !Traits::kHasPayload;
-  static constexpr uint32_t kRadixByteLimit = CompletePrefixRadix
+  static constexpr uint32_t kRadixByteLimit =
+      CompletePrefixRadix || FloatingPoint
       ? Traits::kInlineCapacity
       : (kEnableSuffixRadix
              ? Traits::kInlineCapacity
              : std::min<uint32_t>(Traits::kInlineCapacity, sizeof(uint64_t)));
-  static constexpr bool kRequiresFullKeyFallback =
+  static constexpr bool kRequiresFullKeyFallback = FloatingPoint ||
       Traits::kVariable || kRadixByteLimit < Traits::kInlineCapacity;
 
   void comparisonSort(Iterator begin, Iterator end) {
@@ -358,7 +445,12 @@ class RadixSortRunSorterKernel {
   }
 
   void finishRadixSort(Iterator begin, Iterator end) {
-    if constexpr (CompletePrefixRadix) {
+    if constexpr (FloatingPoint) {
+      if (!floatingPointPlan_.complete ||
+          floatingPointPlan_.radixWidth > kRadixByteLimit) {
+        comparisonSort(begin, end);
+      }
+    } else if constexpr (CompletePrefixRadix) {
       const auto heapKeyOffset = arena_.layout().heapKeyOffset();
       constexpr auto radixWidth = kRadixByteLimit;
       auto less = [heapKeyOffset, radixWidth](
@@ -514,7 +606,7 @@ class RadixSortRunSorterKernel {
     if (end - begin < 2) {
       return;
     }
-    if (end - begin < static_cast<int64_t>(kComparisonFallbackCutoff)) {
+    if (end - begin < static_cast<int64_t>(comparisonFallbackCutoff())) {
       fullSort(begin, end);
       return;
     }
@@ -544,6 +636,26 @@ class RadixSortRunSorterKernel {
   template <uint32_t OFFSET>
   uint8_t radixByte(const typename Traits::Type& key) const {
     static_assert(OFFSET < Traits::kInlineCapacity);
+    if constexpr (!std::is_void_v<SingleFloat>) {
+      if constexpr (OFFSET > 0 && OFFSET <= sizeof(SingleFloat)) {
+        const auto value = normalizeFloatingPointKey(
+            loadEncodedUnsigned<true, SingleFloat>(
+                reinterpret_cast<const char*>(&key),
+                1,
+                Traits::kInlineWordBytes),
+            Descending);
+        return static_cast<uint8_t>(
+            value >> ((sizeof(SingleFloat) - OFFSET) * 8));
+      }
+    } else if constexpr (FloatingPoint) {
+      const auto& digit = floatingPointPlan_.digits[OFFSET];
+      if (digit.width != 0) {
+        return digit.template extract<!Traits::kVariable>(
+            reinterpret_cast<const char*>(&key),
+            OFFSET,
+            Traits::kInlineWordBytes);
+      }
+    }
     if constexpr (Traits::kVariable) {
       return reinterpret_cast<const uint8_t*>(&key)[OFFSET];
     } else {
@@ -575,6 +687,11 @@ class RadixSortRunSorterKernel {
     return bucketCount > kFreeRadixPassBucketLimit;
   }
 
+  static constexpr uint64_t comparisonFallbackCutoff() {
+    return FloatingPoint ? kFloatingPointComparisonFallbackCutoff
+                         : kComparisonFallbackCutoff;
+  }
+
   template <uint32_t OFFSET>
   inline void
   sortBucket(Iterator begin, Iterator end, uint32_t effectivePasses) {
@@ -582,7 +699,7 @@ class RadixSortRunSorterKernel {
     if (count <= 1) {
       return;
     }
-    if (count < kComparisonFallbackCutoff) {
+    if (count < comparisonFallbackCutoff()) {
       fullSort(begin, end);
       return;
     }
@@ -808,6 +925,14 @@ class RadixSortRunSorterKernel {
       finishRadixSort(begin, end);
       return;
     } else {
+      if constexpr (FloatingPoint) {
+        if (OFFSET >= floatingPointPlan_.radixWidth) {
+          if (!floatingPointPlan_.complete) {
+            comparisonSort(begin, end);
+          }
+          return;
+        }
+      }
       if (byteIsSkippable(OFFSET)) {
         sortRadixByte<OFFSET + 1>(begin, end, effectivePasses);
         return;
@@ -837,6 +962,12 @@ class RadixSortRunSorterKernel {
   Compare less_;
   SegmentedKeyState<KIND> iteratorState_;
   uint32_t skippableByteMask_{0};
+  struct NoFloatingPointPlan {};
+  [[no_unique_address]] std::conditional_t<
+      FloatingPoint,
+      RadixSortFloatingPointPlan,
+      NoFloatingPointPlan>
+      floatingPointPlan_;
 };
 
 template <typename Function>
@@ -882,10 +1013,47 @@ void dispatchRadixSortKeyLayout(
 RadixSortRunSorter::RadixSortRunSorter(RadixSortRunStorage& arena)
     : arena_(arena) {}
 
-void RadixSortRunSorter::sort(std::span<const uint32_t> skippableByteOffsets) {
+void RadixSortRunSorter::sort(
+    std::span<const uint32_t> skippableByteOffsets,
+    const RadixSortKeyCodec* keyCodec,
+    std::span<const uint8_t> mayHaveNulls) {
   dispatchRadixSortKeyLayout(
       arena_.layout().kind(), [&]<RadixSortKeyLayoutKind KIND>() {
         using Traits = RadixSortKeyTraits<KIND>;
+        // The caller passes a codec only after per-column metadata detected
+        // negative zero or NaN. Ordinary floating-point keys stay on the
+        // normal radix/comparison dispatch.
+        if (keyCodec != nullptr) {
+          if constexpr (!Traits::kVariable && Traits::kInlineCapacity <= 16) {
+            if (const auto* column = keyCodec->singleFloatingPointColumn()) {
+              const auto sortSingle = [&]<typename T, bool Desc>() {
+                RadixSortRunSorterKernel<KIND, false, true, T, Desc> sorter(
+                    arena_, keyCodec, mayHaveNulls);
+                sorter.adaptiveSort(skippableByteOffsets);
+              };
+              if (column->type->kind() == TypeKind::REAL) {
+                if (column->flags.ascending) {
+                  sortSingle.template operator()<uint32_t, false>();
+                } else {
+                  sortSingle.template operator()<uint32_t, true>();
+                }
+                return;
+              }
+              if constexpr (Traits::kInlineCapacity >= 9) {
+                if (column->flags.ascending) {
+                  sortSingle.template operator()<uint64_t, false>();
+                } else {
+                  sortSingle.template operator()<uint64_t, true>();
+                }
+                return;
+              }
+            }
+          }
+          RadixSortRunSorterKernel<KIND, Traits::kVariable, true> sorter(
+              arena_, keyCodec, mayHaveNulls);
+          sorter.adaptiveSort(skippableByteOffsets);
+          return;
+        }
         if constexpr (Traits::kVariable) {
           if (arena_.layout().radixWidth() == Traits::kInlineCapacity) {
             RadixSortRunSorterKernel<KIND, true> sorter(arena_);

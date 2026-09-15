@@ -33,6 +33,10 @@ enum class ScenarioKind : uint8_t {
   kDuplicateInt64,
   kLowCardinalityInt64,
   kNullHeavyInt64,
+  kFloatingTriple,
+  kFloatingTripleNegativeZero,
+  kSingleRealSpecial,
+  kSingleDoubleSpecial,
   kEightKeyInt64,
   kSixteenKeyInt64,
   kMultiKeyNulls,
@@ -72,7 +76,7 @@ enum class ScenarioProfile : uint8_t {
   kSpill,
 };
 
-inline constexpr std::array<ScenarioSpec, 21> kInMemoryScenarioSpecs{{
+inline constexpr std::array<ScenarioSpec, 25> kInMemoryScenarioSpecs{{
     {"random_i64_narrow_256k", ScenarioKind::kRandomInt64, 256 * 1024},
     {"duplicate_i64_narrow_256k", ScenarioKind::kDuplicateInt64, 256 * 1024},
     {"low_cardinality_i64_256k",
@@ -112,9 +116,17 @@ inline constexpr std::array<ScenarioSpec, 21> kInMemoryScenarioSpecs{{
     {"low_card_i32_30_array15_5_payload_1m",
      ScenarioKind::kLowCardinalityInt32ArrayPayload,
      1 * 1024 * 1024},
+    {"double_real_i64_256k", ScenarioKind::kFloatingTriple, 256 * 1024},
+    {"double_real_i64_negative_zero_256k",
+     ScenarioKind::kFloatingTripleNegativeZero,
+     256 * 1024},
+    {"single_real_special_256k", ScenarioKind::kSingleRealSpecial, 256 * 1024},
+    {"single_double_special_256k",
+     ScenarioKind::kSingleDoubleSpecial,
+     256 * 1024},
 }};
 
-inline constexpr std::array<ScenarioSpec, 21> kSpillScenarioSpecs{{
+inline constexpr std::array<ScenarioSpec, 25> kSpillScenarioSpecs{{
     {"random_i64_256k_spill", ScenarioKind::kRandomInt64, 256 * 1024},
     {"duplicate_i64_256k_spill", ScenarioKind::kDuplicateInt64, 256 * 1024},
     {"null_heavy_i64_128k_spill", ScenarioKind::kNullHeavyInt64, 128 * 1024},
@@ -161,6 +173,16 @@ inline constexpr std::array<ScenarioSpec, 21> kSpillScenarioSpecs{{
      1 * 1024 * 1024},
     {"single_key_very_wide_mixed_payload_256k_spill",
      ScenarioKind::kSingleKeyVeryWideMixedPayload,
+     256 * 1024},
+    {"double_real_i64_256k_spill", ScenarioKind::kFloatingTriple, 256 * 1024},
+    {"double_real_i64_negative_zero_256k_spill",
+     ScenarioKind::kFloatingTripleNegativeZero,
+     256 * 1024},
+    {"single_real_special_256k_spill",
+     ScenarioKind::kSingleRealSpecial,
+     256 * 1024},
+    {"single_double_special_256k_spill",
+     ScenarioKind::kSingleDoubleSpecial,
      256 * 1024},
 }};
 

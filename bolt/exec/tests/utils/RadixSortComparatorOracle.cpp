@@ -17,6 +17,7 @@
 #include "bolt/exec/tests/utils/RadixSortComparatorOracle.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 #include <gtest/gtest.h>
@@ -69,6 +70,33 @@ int32_t SortComparatorOracle::compare(
   auto result = left.compare(&right, leftIndex, rightIndex, flags);
   BOLT_CHECK(result.has_value());
   return (*result > 0) - (*result < 0);
+}
+
+bool SortComparatorOracle::hasDistinctEquivalentFloatingPointBits(
+    const BaseVector& values,
+    vector_size_t left,
+    vector_size_t right) {
+  if (values.isNullAt(left) || values.isNullAt(right)) {
+    return false;
+  }
+  const auto* wrapped = values.wrappedVector();
+  if (values.typeKind() == TypeKind::REAL) {
+    return std::bit_cast<uint32_t>(
+               wrapped->asUnchecked<SimpleVector<float>>()->valueAt(
+                   values.wrappedIndex(left))) !=
+        std::bit_cast<uint32_t>(
+               wrapped->asUnchecked<SimpleVector<float>>()->valueAt(
+                   values.wrappedIndex(right)));
+  }
+  if (values.typeKind() == TypeKind::DOUBLE) {
+    return std::bit_cast<uint64_t>(
+               wrapped->asUnchecked<SimpleVector<double>>()->valueAt(
+                   values.wrappedIndex(left))) !=
+        std::bit_cast<uint64_t>(
+               wrapped->asUnchecked<SimpleVector<double>>()->valueAt(
+                   values.wrappedIndex(right)));
+  }
+  return false;
 }
 
 int32_t SortComparatorOracle::compareRows(

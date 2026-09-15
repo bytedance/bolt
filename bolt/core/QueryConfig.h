@@ -266,8 +266,7 @@ class QueryConfig {
       "order_by_radix_sort_enabled";
 
   /// If true, use the legacy SortBuffer when an OrderBy sorting key is REAL or
-  /// DOUBLE, or contains either type in an ARRAY, MAP, or ROW, because radix
-  /// key encoding does not preserve their exact bit representation.
+  /// DOUBLE, or contains either type in an ARRAY, MAP, or ROW.
   static constexpr const char*
       kOrderByRadixSortFallbackForFloatingPointKeysEnabled =
           "order_by_radix_sort_fallback_for_floating_point_keys_enabled";
@@ -1193,7 +1192,7 @@ class QueryConfig {
 
   bool orderByRadixSortFallbackForFloatingPointKeysEnabled() const {
     return get<bool>(
-        kOrderByRadixSortFallbackForFloatingPointKeysEnabled, true);
+        kOrderByRadixSortFallbackForFloatingPointKeysEnabled, false);
   }
 
   bool orderBySpillInOutputStageEnabled() const {

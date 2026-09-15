@@ -125,21 +125,9 @@ void abortPool(memory::MemoryPool* pool) {
 template <typename Bits>
 void expectFloatingPointBits(
     const std::vector<Bits>& actual,
-    const std::vector<Bits>& expected,
-    bool preserved) {
+    const std::vector<Bits>& expected) {
   ASSERT_EQ(actual.size(), expected.size());
-  if (preserved) {
-    EXPECT_EQ(actual, expected);
-    return;
-  }
-
-  EXPECT_EQ(actual[0], actual[1]);
-  EXPECT_EQ(actual[2], actual[3]);
-  EXPECT_NE(actual[1], expected[1]);
-  EXPECT_NE(actual[2], expected[2]);
-  EXPECT_NE(actual[3], expected[3]);
-  EXPECT_EQ(actual[4], expected[4]);
-  EXPECT_EQ(actual[5], expected[5]);
+  EXPECT_EQ(actual, expected);
 }
 
 class RecordingLazyLoader : public VectorLoader {
@@ -615,7 +603,7 @@ TEST_P(OrderByTest, radixSortFloatingPointKeyFallback) {
     SCOPED_TRACE(testCase.name);
     auto input = makeRowVector({"key"}, {fuzzer.fuzzFlat(testCase.keyType)});
 
-    run(input, std::nullopt, testCase.expectFallback);
+    run(input, std::nullopt, false);
     run(input, true, testCase.expectFallback);
     run(input, false, false);
   }
@@ -654,7 +642,7 @@ TEST_P(OrderByTest, floatingPointKeyFallbackPreservesBits) {
           actual.at(outputIds->valueAt(row)) =
               std::bit_cast<Bits>(keys->valueAt(row));
         }
-        expectFloatingPointBits(actual, inputBits, fallbackEnabled);
+        expectFloatingPointBits(actual, inputBits);
       }
     }
   };
@@ -733,12 +721,9 @@ TEST_P(OrderByTest, complexFloatingPointKeyFallbackPreservesBits) {
             std::bit_cast<uint64_t>(outputDoubles->valueAt(
                 outputMapsWithFloatingPointValues->offsetAt(row)));
       }
-      expectFloatingPointBits(
-          actualRealBits, kSpecialRealBits, fallbackEnabled);
-      expectFloatingPointBits(
-          actualMapKeyBits, kSpecialDoubleBits, fallbackEnabled);
-      expectFloatingPointBits(
-          actualDoubleBits, kSpecialDoubleBits, fallbackEnabled);
+      expectFloatingPointBits(actualRealBits, kSpecialRealBits);
+      expectFloatingPointBits(actualMapKeyBits, kSpecialDoubleBits);
+      expectFloatingPointBits(actualDoubleBits, kSpecialDoubleBits);
     }
   }
 }
