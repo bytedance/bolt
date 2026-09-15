@@ -86,6 +86,22 @@ BlockMemory makeBlock(size_t size, MemoryTag tag = MemoryTag::kTesting) {
   return BlockMemory{99, size, tag};
 }
 
+class CountingArbitrationReclaimer final : public MemoryReclaimer {
+ public:
+  CountingArbitrationReclaimer() : MemoryReclaimer(0) {}
+
+  void enterArbitration() override {
+    ++enterCount;
+  }
+
+  void leaveArbitration() noexcept override {
+    ++leaveCount;
+  }
+
+  uint64_t enterCount{0};
+  uint64_t leaveCount{0};
+};
+
 } // namespace
 
 TEST_F(BufferManagerInternalsTest, AccountingRecordsResidentPinTransitions) {
@@ -316,6 +332,17 @@ TEST_F(BufferManagerInternalsTest, ReclaimerHandlesExpiredAndLiveManagers) {
   handle = BufferHandle{};
   EXPECT_TRUE(live.reclaimableBytes(*root_, reclaimable));
   EXPECT_EQ(4096, reclaimable);
+}
+
+TEST_F(BufferManagerInternalsTest, ReclaimerDelegatesArbitrationLifecycle) {
+  auto delegate = std::make_shared<CountingArbitrationReclaimer>();
+  BufferManagerReclaimer reclaimer{std::weak_ptr<BufferManager>{}, delegate};
+
+  reclaimer.enterArbitration();
+  reclaimer.leaveArbitration();
+
+  EXPECT_EQ(1, delegate->enterCount);
+  EXPECT_EQ(1, delegate->leaveCount);
 }
 
 TEST_F(BufferManagerInternalsTest, PublicControlsDoNotRequireSpillPath) {

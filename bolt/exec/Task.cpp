@@ -486,6 +486,7 @@ void Task::maybeCreateBufferManager() {
   config.spillStoreConfig.fileAllocatorConfig.file_size_limit_bytes =
       1024LL * 1024LL * 1024LL;
   config.spillStoreConfig.fileAllocatorConfig.max_open_files_per_bucket = 64;
+  config.arbitrationReclaimer = exec::MemoryReclaimer::create();
   const auto compressionKind =
       queryCtx_->queryConfig().bufferManagerSpillCompressionKind();
   BOLT_USER_CHECK(

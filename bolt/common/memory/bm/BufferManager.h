@@ -44,6 +44,11 @@ struct BufferManagerConfig {
   IoPriority writePriority{IoPriority::Medium};
   IoPriority prefetchPriority{IoPriority::Low};
   uint32_t maxReclaimWriteInflight{128};
+
+  /// Handles execution state changes while the BufferManager pool initiates
+  /// memory arbitration. Reclaiming BufferManager blocks remains the
+  /// responsibility of BufferManagerReclaimer.
+  std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer;
 };
 
 class BufferManager : public std::enable_shared_from_this<BufferManager> {

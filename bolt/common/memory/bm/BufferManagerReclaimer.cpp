@@ -23,8 +23,23 @@
 namespace bytedance::bolt::memory::bm {
 
 BufferManagerReclaimer::BufferManagerReclaimer(
-    std::weak_ptr<BufferManager> manager)
-    : memory::MemoryReclaimer(0), manager_(std::move(manager)) {}
+    std::weak_ptr<BufferManager> manager,
+    std::shared_ptr<memory::MemoryReclaimer> arbitrationReclaimer)
+    : memory::MemoryReclaimer(0),
+      manager_(std::move(manager)),
+      arbitrationReclaimer_(std::move(arbitrationReclaimer)) {}
+
+void BufferManagerReclaimer::enterArbitration() {
+  if (arbitrationReclaimer_ != nullptr) {
+    arbitrationReclaimer_->enterArbitration();
+  }
+}
+
+void BufferManagerReclaimer::leaveArbitration() noexcept {
+  if (arbitrationReclaimer_ != nullptr) {
+    arbitrationReclaimer_->leaveArbitration();
+  }
+}
 
 bool BufferManagerReclaimer::reclaimableBytes(
     const MemoryPool& pool,
