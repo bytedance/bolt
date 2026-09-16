@@ -852,8 +852,10 @@ arrow::Status BoltShuffleWriter::doSplit(
     RETURN_NOT_OK(evictPartitionBuffers(pid, /*reuseBuffer=*/false));
     variableMemoryUsage_[pid] = 0;
   }
-  if (pool_ != spillArrowPool_) {
-    // try evict all cached payload if using different spill pool
+  // Complex, uncompressed payloads may retain buffers allocated directly from
+  // the spill pool. Keep the legacy batch drain for those writers until their
+  // buffers can also be retained in task-accounted memory.
+  if (hasComplexType_ && pool_ != spillArrowPool_) {
     evictCachedPayload(std::numeric_limits<int64_t>::max());
   }
   maxVariableMemoryUsage_ = *std::max_element(

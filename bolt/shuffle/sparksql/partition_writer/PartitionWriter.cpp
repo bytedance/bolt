@@ -24,14 +24,16 @@ using namespace bytedance::bolt::shuffle::sparksql;
 
 std::unique_ptr<PartitionWriter> PartitionWriter::create(
     PartitionWriterOptions options,
-    arrow::MemoryPool* pool) {
+    arrow::MemoryPool* pool,
+    bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool) {
   if (options.partitionWriterType == PartitionWriterType::kLocal) {
     return std::make_unique<LocalPartitionWriter>(
         options.numPartitions,
         options,
         pool,
         options.dataFile,
-        options.configuredDirs);
+        options.configuredDirs,
+        retainedPayloadBoltPool);
   } else if (options.partitionWriterType == PartitionWriterType::kCeleborn) {
     return std::make_unique<CelebornPartitionWriter>(
         options.numPartitions, options, pool, options.rssClient);

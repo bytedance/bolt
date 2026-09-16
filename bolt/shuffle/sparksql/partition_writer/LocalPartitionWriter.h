@@ -44,7 +44,8 @@ class LocalPartitionWriter : public PartitionWriter {
       PartitionWriterOptions options,
       arrow::MemoryPool* pool,
       const std::string& dataFile,
-      const std::vector<std::string>& localDirs);
+      const std::vector<std::string>& localDirs,
+      bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool = nullptr);
 
   arrow::Status evict(
       uint32_t partitionId,
@@ -153,6 +154,10 @@ class LocalPartitionWriter : public PartitionWriter {
 
   std::string dataFile_;
   std::vector<std::string> localDirs_;
+
+  // Task pool used by retained payloads when task and spill pools differ. The
+  // caller owns this pool and must outlive this writer.
+  bytedance::bolt::memory::MemoryPool* retainedPayloadBoltPool_{nullptr};
 
   bool stopped_{false};
   std::shared_ptr<LocalSpiller> spiller_{nullptr};

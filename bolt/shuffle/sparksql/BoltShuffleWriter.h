@@ -162,7 +162,8 @@ class BoltShuffleWriter : public ShuffleWriter {
             options.partitionWriterOptions.numPartitions,
             PartitionWriter::create(
                 options.partitionWriterOptions,
-                spillPool.get()),
+                spillPool.get(),
+                pool != spillPool.get() ? boltPool : nullptr),
             options,
             pool,
             spillPool),
