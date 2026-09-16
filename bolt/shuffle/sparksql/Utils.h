@@ -74,6 +74,19 @@ int64_t getMaxCompressedBufferSize(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
     Codec* codec);
 
+/// Wrap externally owned CPU memory without depending on Arrow's destructible
+/// default MemoryManager singleton during process shutdown.
+std::shared_ptr<arrow::Buffer> makeNonOwningBuffer(
+    const uint8_t* data,
+    int64_t size);
+
+/// Create a slice without calling Arrow's two-argument Buffer constructor,
+/// which transiently accesses the destructible default MemoryManager.
+std::shared_ptr<arrow::Buffer> makeNonOwningBufferSlice(
+    const std::shared_ptr<arrow::Buffer>& parent,
+    int64_t offset,
+    int64_t size);
+
 std::shared_ptr<arrow::Buffer> zeroLengthNullBuffer();
 
 std::shared_ptr<arrow::Schema> boltTypeToArrowSchema(

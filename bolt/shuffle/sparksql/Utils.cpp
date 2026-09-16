@@ -47,6 +47,16 @@
 namespace bytedance::bolt::shuffle::sparksql {
 
 namespace {
+const std::shared_ptr<arrow::MemoryManager>& processLifetimeCpuMemoryManager() {
+  // Arrow's default CPU MemoryManager is a destructible function-static
+  // shared_ptr. Shuffle cleanup can still release Buffers from worker threads
+  // while libc is running static destructors, so keep one owner alive for the
+  // lifetime of the process.
+  static const auto* memoryManager = new std::shared_ptr<arrow::MemoryManager>(
+      arrow::default_cpu_memory_manager());
+  return *memoryManager;
+}
+
 arrow::Result<std::shared_ptr<arrow::Array>> makeNullBinaryArray(
     std::shared_ptr<arrow::DataType> type,
     arrow::MemoryPool* pool) {
@@ -61,10 +71,9 @@ arrow::Result<std::shared_ptr<arrow::Array>> makeNullBinaryArray(
   // If it is not compressed array, null valueBuffer
   // worked, but if compress, will core dump at buffer::size(), so replace by
   // kNullBuffer
-  static std::shared_ptr<arrow::Buffer> kNullBuffer =
-      std::make_shared<arrow::Buffer>(nullptr, 0);
-  return arrow::MakeArray(arrow::ArrayData::Make(
-      type, 1, {nullptr, std::move(offsetBuffer), kNullBuffer}));
+  return arrow::MakeArray(
+      arrow::ArrayData::Make(
+          type, 1, {nullptr, std::move(offsetBuffer), zeroLengthNullBuffer()}));
 }
 
 arrow::Result<std::shared_ptr<arrow::Array>> makeBinaryArray(
@@ -328,9 +337,29 @@ int64_t getMaxCompressedBufferSize(
 }
 
 std::shared_ptr<arrow::Buffer> zeroLengthNullBuffer() {
-  static std::shared_ptr<arrow::Buffer> kNullBuffer =
-      std::make_shared<arrow::Buffer>(nullptr, 0);
-  return kNullBuffer;
+  static const auto* kNullBuffer =
+      new std::shared_ptr<arrow::Buffer>(makeNonOwningBuffer(nullptr, 0));
+  return *kNullBuffer;
+}
+
+std::shared_ptr<arrow::Buffer> makeNonOwningBuffer(
+    const uint8_t* data,
+    int64_t size) {
+  return std::make_shared<arrow::Buffer>(
+      data, size, processLifetimeCpuMemoryManager());
+}
+
+std::shared_ptr<arrow::Buffer> makeNonOwningBufferSlice(
+    const std::shared_ptr<arrow::Buffer>& parent,
+    int64_t offset,
+    int64_t size) {
+  BOLT_CHECK_NOT_NULL(parent);
+  BOLT_CHECK_LE(0, offset);
+  BOLT_CHECK_LE(0, size);
+  BOLT_CHECK_LE(offset, parent->size());
+  BOLT_CHECK_LE(size, parent->size() - offset);
+  return std::make_shared<arrow::Buffer>(
+      parent->data() + offset, size, parent->memory_manager(), parent);
 }
 
 std::shared_ptr<arrow::Schema> boltTypeToArrowSchema(

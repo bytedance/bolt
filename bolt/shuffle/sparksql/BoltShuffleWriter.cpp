@@ -1687,7 +1687,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(arrow::SliceBuffer(
+            allBuffers.push_back(makeNonOwningBufferSlice(
                 buffers[kValidityBufferIndex],
                 0,
                 arrow::bit_util::BytesForBits(numRows)));
@@ -1705,7 +1705,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryLengthBufferIndex],
             arrow::Status::Invalid("Offset buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(makeNonOwningBufferSlice(
               buffers[kBinaryLengthBufferIndex], 0, lengthBufferSize));
         } else {
           RETURN_NOT_OK(buffers[kBinaryLengthBufferIndex]->Resize(
@@ -1719,7 +1719,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
             !buffers[kBinaryValueBufferIndex],
             arrow::Status::Invalid("Value buffer of binary array is null."));
         if (reuseBuffers) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(makeNonOwningBufferSlice(
               buffers[kBinaryValueBufferIndex], 0, valueBufferSize));
         } else if (valueBufferSize > 0) {
           RETURN_NOT_OK(
@@ -1750,7 +1750,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         if (buffers[kValidityBufferIndex] != nullptr) {
           auto validityBufferSize = arrow::bit_util::BytesForBits(numRows);
           if (reuseBuffers) {
-            allBuffers.push_back(arrow::SliceBuffer(
+            allBuffers.push_back(makeNonOwningBufferSlice(
                 buffers[kValidityBufferIndex],
                 0,
                 arrow::bit_util::BytesForBits(numRows)));
@@ -1786,7 +1786,7 @@ BoltShuffleWriter::assembleBuffers(uint32_t partitionId, bool reuseBuffers) {
         }
         if (reuseBuffers) {
           auto slicedValueBuffer =
-              arrow::SliceBuffer(valueBuffer, 0, valueBufferSize);
+              makeNonOwningBufferSlice(valueBuffer, 0, valueBufferSize);
           allBuffers.push_back(std::move(slicedValueBuffer));
         } else {
           RETURN_NOT_OK(buffers[kFixedWidthValueBufferIndex]->Resize(
