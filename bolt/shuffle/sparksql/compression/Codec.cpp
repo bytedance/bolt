@@ -50,7 +50,7 @@ CodecType fromArrowCodecType(arrow::Compression::type type) {
 }
 
 std::string CodecOptions::toString() const {
-  if (compressionLevel == kDefaultCompressionLevel) {
+  if (isDefaultCompressionLevel(compressionLevel)) {
     return fmt::format(
         "CodecOptions{{backend={}, level=default, checksum={}}}",
         getCodecBackendName(backend),
