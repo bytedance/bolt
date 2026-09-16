@@ -69,9 +69,9 @@ TEST_F(EncodeDecodeTest, utf8) {
   // For UTF-8 the encoded bytes are the input's own bytes.
   EXPECT_EQ(encode("abc", "UTF-8"), "abc");
   EXPECT_EQ(encode("", "UTF-8"), "");
-  EXPECT_EQ(encode("caf\u00e9", "UTF-8"), "caf\u00e9");
+  EXPECT_EQ(encode("\u00fcber", "UTF-8"), "\u00fcber");
   EXPECT_EQ(decode("abc", "UTF-8"), "abc");
-  EXPECT_EQ(decode("caf\u00e9", "UTF-8"), "caf\u00e9");
+  EXPECT_EQ(decode("\u00fcber", "UTF-8"), "\u00fcber");
 }
 
 TEST_F(EncodeDecodeTest, asciiRoundTrip) {
@@ -82,8 +82,11 @@ TEST_F(EncodeDecodeTest, asciiRoundTrip) {
 
 TEST_F(EncodeDecodeTest, latin1) {
   // 'é' is a single byte 0xE9 in ISO-8859-1 but two bytes in UTF-8.
-  EXPECT_EQ(encode("caf\u00e9", "ISO-8859-1"), std::string("caf\xE9"));
-  EXPECT_EQ(roundTrip("caf\u00e9", "ISO-8859-1"), "caf\u00e9");
+  EXPECT_EQ(
+      encode("\u00fcber", "ISO-8859-1"),
+      std::string("\xFC"
+                  "ber"));
+  EXPECT_EQ(roundTrip("\u00fcber", "ISO-8859-1"), "\u00fcber");
 }
 
 TEST_F(EncodeDecodeTest, utf16Variants) {
@@ -126,7 +129,7 @@ TEST_F(EncodeDecodeTest, unmappableCharacterBecomesQuestionMark) {
   // Java's String.getBytes substitutes '?' rather than throwing. ICU's own
   // default is 0x1A, so this asserts the Spark-compatible byte.
   EXPECT_EQ(encode("\u4f60", "US-ASCII"), "?");
-  EXPECT_EQ(encode("caf\u00e9", "US-ASCII"), "caf?");
+  EXPECT_EQ(encode("\u00fcber", "US-ASCII"), "?ber");
   EXPECT_EQ(encode("a\u4f60b", "US-ASCII"), "a?b");
   EXPECT_EQ(encode("\u4f60", "ISO-8859-1"), "?");
 }
@@ -154,7 +157,10 @@ TEST_F(EncodeDecodeTest, charsetAliases) {
   for (const auto& alias : {"utf-8", "UTF8", "utf8", "UTF_8"}) {
     EXPECT_EQ(encode("abc", alias), "abc") << "alias: " << alias;
   }
-  EXPECT_EQ(encode("caf\u00e9", "latin1"), std::string("caf\xE9"));
+  EXPECT_EQ(
+      encode("\u00fcber", "latin1"),
+      std::string("\xFC"
+                  "ber"));
   EXPECT_EQ(encode("abc", "ascii"), "abc");
 }
 
@@ -167,15 +173,48 @@ TEST_F(EncodeDecodeTest, unsupportedCharsetThrows) {
 TEST_F(EncodeDecodeTest, nonConstantCharset) {
   // With a non-constant charset the converter is built per row; results must
   // still match the constant-charset path.
-  auto input = makeFlatVector<std::string>({"abc", "caf\u00e9", "abc"});
+  auto input = makeFlatVector<std::string>({"abc", "\u00fcber", "abc"});
   auto charsets =
       makeFlatVector<std::string>({"US-ASCII", "ISO-8859-1", "UTF-8"});
   auto result = evaluate<SimpleVector<StringView>>(
       "encode(c0, c1)", makeRowVector({input, charsets}));
 
   EXPECT_EQ(result->valueAt(0).str(), "abc");
-  EXPECT_EQ(result->valueAt(1).str(), std::string("caf\xE9"));
+  EXPECT_EQ(
+      result->valueAt(1).str(),
+      std::string("\xFC"
+                  "ber"));
   EXPECT_EQ(result->valueAt(2).str(), "abc");
+}
+
+TEST_F(EncodeDecodeTest, constantUtf8CharsetStillValidatesOnDecode) {
+  // A charset written as a SQL literal reaches the factory as
+  // inputArgs[1].constantValue, which selects the fast path where encode may
+  // copy bytes unchanged. decode must NOT take that shortcut: undecodable
+  // bytes still have to become U+FFFD rather than landing in a VARCHAR result
+  // as invalid UTF-8.
+  //
+  // Passing the charset as a column instead would build a per-row converter
+  // and would not cover this, so the literal here is load-bearing.
+  auto input = makeFlatVector<std::string>(
+      {std::string("\xFF"),
+       std::string("a\xFF"
+                   "b"),
+       std::string("ok")},
+      VARBINARY());
+  auto result = evaluate<SimpleVector<StringView>>(
+      "decode(c0, 'UTF-8')", makeRowVector({input}));
+
+  EXPECT_EQ(result->valueAt(0).str(), "\uFFFD");
+  EXPECT_EQ(result->valueAt(1).str(), "a\uFFFDb");
+  EXPECT_EQ(result->valueAt(2).str(), "ok");
+
+  // The encode direction may use the pass-through, and must be unaffected.
+  auto text = makeFlatVector<std::string>({"abc", "\u00fcber"});
+  auto encoded = evaluate<SimpleVector<StringView>>(
+      "encode(c0, 'UTF-8')", makeRowVector({text}));
+  EXPECT_EQ(encoded->valueAt(0).str(), "abc");
+  EXPECT_EQ(encoded->valueAt(1).str(), "\u00fcber");
 }
 
 } // namespace

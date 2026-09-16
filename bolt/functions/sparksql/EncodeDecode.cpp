@@ -119,13 +119,29 @@ class Converter {
     // UTF-16 code units than it consumes bytes.
     std::vector<UChar> utf16(input.size() + 1);
     ucnv_resetToUnicode(converter_);
-    const int32_t utf16Length = ucnv_toUChars(
+    int32_t utf16Length = ucnv_toUChars(
         converter_,
         utf16.data(),
         utf16.size(),
         input.data(),
         input.size(),
         &status);
+    if (status == U_BUFFER_OVERFLOW_ERROR) {
+      // One UTF-16 code unit per input byte covers the charsets Spark
+      // documents, but an ICU mapping table may expand one byte into several
+      // code units. ICU reports the required length, so grow and retry rather
+      // than failing the row.
+      status = U_ZERO_ERROR;
+      utf16.resize(utf16Length + 1);
+      ucnv_resetToUnicode(converter_);
+      utf16Length = ucnv_toUChars(
+          converter_,
+          utf16.data(),
+          utf16.size(),
+          input.data(),
+          input.size(),
+          &status);
+    }
     if (U_FAILURE(status)) {
       BOLT_USER_FAIL(
           "Failed to decode from charset '{}': {}",
@@ -181,9 +197,11 @@ class EncodeDecodeFunction : public exec::VectorFunction {
   /// which case a converter is built per row.
   explicit EncodeDecodeFunction(std::optional<std::string> constantCharset) {
     if (constantCharset.has_value()) {
-      // For UTF-8 the output bytes equal the input bytes, so conversion can be
-      // skipped entirely; only the type changes.
-      passThrough_ = isUtf8(constantCharset.value());
+      // For UTF-8 encoding the output bytes equal the input bytes, so the
+      // conversion can be skipped and only the type changes. Decoding must
+      // still go through ICU: invalid byte sequences have to become U+FFFD
+      // rather than being copied unchanged into a VARCHAR result.
+      passThrough_ = kEncode && isUtf8(constantCharset.value());
       if (!passThrough_) {
         converter_ = std::make_shared<Converter>(constantCharset.value());
       }
@@ -204,7 +222,10 @@ class EncodeDecodeFunction : public exec::VectorFunction {
     auto* flatResult = result->as<FlatVector<StringView>>();
 
     std::string buffer;
-    rows.applyToSelected([&](vector_size_t row) {
+    // NoThrow so that a bad charset or an unconvertible value fails only the
+    // rows it affects, and honours the TRY() semantics the engine expects,
+    // rather than aborting the whole batch.
+    context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
       const auto value = input->valueAt<StringView>(row);
 
       if (passThrough_) {
