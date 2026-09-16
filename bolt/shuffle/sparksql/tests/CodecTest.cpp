@@ -17,7 +17,6 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
-#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -196,17 +195,16 @@ TEST_P(CodecTest, ArrowDefaultCompressionLevel) {
   const auto data = generateCompressibleData(256 * 1024);
   int64_t defaultSize = 0;
   int64_t arrowDefaultSize = 0;
-  const auto arrowDefault = std::numeric_limits<int32_t>::min();
   if (GetParam().isStream) {
     ASSERT_NO_FATAL_FAILURE(
         verifyStreamRoundTrip(data, kDefaultCompressionLevel, &defaultSize));
-    ASSERT_NO_FATAL_FAILURE(
-        verifyStreamRoundTrip(data, arrowDefault, &arrowDefaultSize));
+    ASSERT_NO_FATAL_FAILURE(verifyStreamRoundTrip(
+        data, kArrowDefaultCompressionLevel, &arrowDefaultSize));
   } else {
     ASSERT_NO_FATAL_FAILURE(
         verifyOneShotRoundTrip(data, kDefaultCompressionLevel, &defaultSize));
-    ASSERT_NO_FATAL_FAILURE(
-        verifyOneShotRoundTrip(data, arrowDefault, &arrowDefaultSize));
+    ASSERT_NO_FATAL_FAILURE(verifyOneShotRoundTrip(
+        data, kArrowDefaultCompressionLevel, &arrowDefaultSize));
   }
   EXPECT_LT(defaultSize, data.size() / 2);
   EXPECT_EQ(arrowDefaultSize, defaultSize);

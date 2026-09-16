@@ -29,11 +29,13 @@ enum class CodecType { UNCOMPRESSED, GZIP, SNAPPY, LZ4, LZ4_FRAME, ZSTD };
 constexpr int32_t kDefaultCompressionLevel =
     std::numeric_limits<int32_t>::max();
 
+// Arrow's sentinel for the codec's default compression level.
+constexpr int32_t kArrowDefaultCompressionLevel =
+    std::numeric_limits<int32_t>::min();
+
 constexpr bool isDefaultCompressionLevel(int32_t level) {
-  // Arrow callers use INT_MIN, while Bolt uses INT_MAX. Neither sentinel
-  // should reach the underlying codec; other negative levels remain valid.
   return level == kDefaultCompressionLevel ||
-      level == std::numeric_limits<int32_t>::min();
+      level == kArrowDefaultCompressionLevel;
 }
 
 /// Options for codec creation.

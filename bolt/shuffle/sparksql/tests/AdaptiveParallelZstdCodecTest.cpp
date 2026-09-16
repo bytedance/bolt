@@ -20,7 +20,6 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
-#include <limits>
 #include <string>
 #include <vector>
 
@@ -176,8 +175,7 @@ TEST(AdaptiveParallelZstdCodecTest, RoundTripLargePayload) {
 }
 
 TEST(AdaptiveParallelZstdCodecTest, DefaultCompressionLevelsCompressRows) {
-  // Exercise both serial and parallel compressors with highly compressible
-  // rows. Round-trip alone would also pass with the broken INT_MIN level.
+  // Verify default levels compress rows in both serial and parallel modes.
   for (size_t payloadSize : {256'000, 2'300'000}) {
     SCOPED_TRACE(payloadSize);
     std::vector<std::vector<uint8_t>> rows{buildRow(payloadSize, 7)};
@@ -188,7 +186,7 @@ TEST(AdaptiveParallelZstdCodecTest, DefaultCompressionLevelsCompressRows) {
     ASSERT_LT(referenceSize, rawSize / 10);
 
     for (auto level :
-         {std::numeric_limits<int32_t>::min(), kDefaultCompressionLevel}) {
+         {kArrowDefaultCompressionLevel, kDefaultCompressionLevel}) {
       SCOPED_TRACE(level);
       int64_t compressedSize = 0;
       ASSERT_NO_FATAL_FAILURE(runRoundTrip(
