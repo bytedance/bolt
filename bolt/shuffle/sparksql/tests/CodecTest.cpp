@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -80,9 +81,13 @@ struct CodecTestParam {
 class CodecTest : public testing::TestWithParam<CodecTestParam> {
  protected:
   // Verify one-shot codec round trip
-  void verifyOneShotRoundTrip(const std::vector<uint8_t>& original) {
+  void verifyOneShotRoundTrip(
+      const std::vector<uint8_t>& original,
+      int32_t level = kDefaultCompressionLevel,
+      int64_t* compressedSizeOut = nullptr) {
     auto param = GetParam();
     CodecOptions options;
+    options.compressionLevel = level;
     options.checksumEnabled = param.checksumEnabled;
 
     auto codec = Codec::create(param.type, options);
@@ -96,6 +101,9 @@ class CodecTest : public testing::TestWithParam<CodecTestParam> {
 
     ASSERT_GT(compressedSize, 0);
     ASSERT_LE(compressedSize, maxCompressedSize);
+    if (compressedSizeOut != nullptr) {
+      *compressedSizeOut = compressedSize;
+    }
 
     // Decompress
     std::vector<uint8_t> decompressed(original.size());
@@ -113,9 +121,13 @@ class CodecTest : public testing::TestWithParam<CodecTestParam> {
   }
 
   // Verify stream codec round trip
-  void verifyStreamRoundTrip(const std::vector<uint8_t>& original) {
+  void verifyStreamRoundTrip(
+      const std::vector<uint8_t>& original,
+      int32_t level = kDefaultCompressionLevel,
+      int64_t* compressedSizeOut = nullptr) {
     auto param = GetParam();
     CodecOptions options;
+    options.compressionLevel = level;
     options.checksumEnabled = param.checksumEnabled;
 
     // Create compressor
@@ -144,6 +156,9 @@ class CodecTest : public testing::TestWithParam<CodecTestParam> {
     totalWritten += endResult.bytesWritten;
 
     ASSERT_GT(totalWritten, 0);
+    if (compressedSizeOut != nullptr) {
+      *compressedSizeOut = totalWritten;
+    }
 
     // Create decompressor
     auto decompressor = StreamDecompressor::create(param.type, options);
@@ -175,6 +190,26 @@ TEST_P(CodecTest, RoundTrip) {
   } else {
     verifyOneShotRoundTrip(data);
   }
+}
+
+TEST_P(CodecTest, ArrowDefaultCompressionLevel) {
+  const auto data = generateCompressibleData(256 * 1024);
+  int64_t defaultSize = 0;
+  int64_t arrowDefaultSize = 0;
+  const auto arrowDefault = std::numeric_limits<int32_t>::min();
+  if (GetParam().isStream) {
+    ASSERT_NO_FATAL_FAILURE(
+        verifyStreamRoundTrip(data, kDefaultCompressionLevel, &defaultSize));
+    ASSERT_NO_FATAL_FAILURE(
+        verifyStreamRoundTrip(data, arrowDefault, &arrowDefaultSize));
+  } else {
+    ASSERT_NO_FATAL_FAILURE(
+        verifyOneShotRoundTrip(data, kDefaultCompressionLevel, &defaultSize));
+    ASSERT_NO_FATAL_FAILURE(
+        verifyOneShotRoundTrip(data, arrowDefault, &arrowDefaultSize));
+  }
+  EXPECT_LT(defaultSize, data.size() / 2);
+  EXPECT_EQ(arrowDefaultSize, defaultSize);
 }
 
 // Empty input test
