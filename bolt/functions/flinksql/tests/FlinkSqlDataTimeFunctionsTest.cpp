@@ -364,11 +364,34 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, toTimestamp) {
   EXPECT_EQ(1483143120, ts->getSeconds());
   EXPECT_EQ(123000000, ts->getNanos());
 
+  ts = toTimestamp1("2016-12-31 00:12:00.1");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(100000000, ts->getNanos());
+
+  ts = toTimestamp1("2016-12-31 00:12:00.123456");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(123456000, ts->getNanos());
+
+  ts = toTimestamp1("2016-12-31 00:12:00.123456789");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(1483143120, ts->getSeconds());
+  EXPECT_EQ(123456789, ts->getNanos());
+
+  ts = toTimestamp1("1969-12-31 23:59:59.123456789");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(-1, ts->getSeconds());
+  EXPECT_EQ(123456789, ts->getNanos());
+
   // Flink falls back to Timestamp.valueOf/Date.valueOf for non-zero-padded
   // month and day fields.
   ts = toTimestamp1("1999-9-10 05:20:10");
   ASSERT_TRUE(ts.has_value());
   EXPECT_EQ(936940810, ts->getSeconds());
+
+  ts = toTimestamp1("1999-9-10 05:20:10.987654321");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(936940810, ts->getSeconds());
+  EXPECT_EQ(987654321, ts->getNanos());
 
   ts = toTimestamp1("1999-9-10");
   ASSERT_TRUE(ts.has_value());
@@ -388,6 +411,17 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, toTimestamp) {
   ASSERT_TRUE(ts.has_value());
   EXPECT_EQ(1483143120, ts->getSeconds());
   EXPECT_EQ(123000000, ts->getNanos());
+
+  ts = toTimestamp2(
+      "2016-12-31 00:12:00.123456789", "yyyy-MM-dd HH:mm:ss.SSSSSSSSS");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(1483143120, ts->getSeconds());
+  EXPECT_EQ(123456789, ts->getNanos());
+
+  ts = toTimestamp2("20000202 59:59.1234567", "yyyyMMdd mm:ss.SSSSSSS");
+  ASSERT_TRUE(ts.has_value());
+  EXPECT_EQ(949453199, ts->getSeconds());
+  EXPECT_EQ(123456700, ts->getNanos());
 
   // Two args: non-constant format column must use each row's own format,
   // not the first row's.
@@ -411,6 +445,7 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, toTimestamp) {
   EXPECT_EQ(std::nullopt, toTimestamp1("not_a_date"));
   EXPECT_EQ(std::nullopt, toTimestamp1("2016-12-31 trailing"));
   EXPECT_EQ(std::nullopt, toTimestamp1("2016-12-31 00:12:00 trailing"));
+  EXPECT_EQ(std::nullopt, toTimestamp1("2016-12-31 00:12:00.1234567890"));
   EXPECT_EQ(std::nullopt, toTimestamp2("2016-12-31 trailing", "yyyy-MM-dd"));
 }
 
