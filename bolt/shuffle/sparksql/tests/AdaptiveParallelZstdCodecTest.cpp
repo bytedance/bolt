@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,9 @@ std::vector<uint8_t> buildRow(size_t payloadSize, uint8_t seed) {
 void runRoundTrip(
     const std::vector<std::vector<uint8_t>>& rows,
     int64_t rawSize,
-    RowVectorLayout layout) {
+    RowVectorLayout layout,
+    int32_t compressionLevel = 1,
+    int64_t* compressedSize = nullptr) {
   std::vector<uint8_t*> rowPtrs;
   std::vector<uint8_t> expected;
   expected.reserve(static_cast<size_t>(rawSize));
@@ -69,7 +72,7 @@ void runRoundTrip(
   ASSERT_TRUE(outputStreamResult.ok());
   auto outputStream = outputStreamResult.ValueOrDie();
 
-  AdaptiveParallelZstdCodec encoder(1, true, pool, true);
+  AdaptiveParallelZstdCodec encoder(compressionLevel, true, pool, true);
   auto encodeStatus = encoder.CompressAndFlush(
       folly::Range<uint8_t**>(rowPtrs.data(), rowPtrs.size()),
       outputStream.get(),
@@ -81,6 +84,9 @@ void runRoundTrip(
   ASSERT_TRUE(bufferResult.ok());
   auto buffer = bufferResult.ValueOrDie();
   ASSERT_NE(buffer, nullptr);
+  if (compressedSize != nullptr) {
+    *compressedSize = buffer->size();
+  }
 
   auto inputStream = std::make_shared<arrow::io::BufferReader>(buffer);
 
@@ -167,6 +173,29 @@ TEST(AdaptiveParallelZstdCodecTest, RoundTripLargePayload) {
   }
 
   runRoundTrip(rows, rawSize, RowVectorLayout::kComposite);
+}
+
+TEST(AdaptiveParallelZstdCodecTest, DefaultCompressionLevelsCompressRows) {
+  // Exercise both serial and parallel compressors with highly compressible
+  // rows. Round-trip alone would also pass with the broken INT_MIN level.
+  for (size_t payloadSize : {256'000, 2'300'000}) {
+    SCOPED_TRACE(payloadSize);
+    std::vector<std::vector<uint8_t>> rows{buildRow(payloadSize, 7)};
+    const auto rawSize = static_cast<int64_t>(rows.front().size());
+    int64_t referenceSize = 0;
+    ASSERT_NO_FATAL_FAILURE(runRoundTrip(
+        rows, rawSize, RowVectorLayout::kColumnar, 1, &referenceSize));
+    ASSERT_LT(referenceSize, rawSize / 10);
+
+    for (auto level :
+         {std::numeric_limits<int32_t>::min(), kDefaultCompressionLevel}) {
+      SCOPED_TRACE(level);
+      int64_t compressedSize = 0;
+      ASSERT_NO_FATAL_FAILURE(runRoundTrip(
+          rows, rawSize, RowVectorLayout::kColumnar, level, &compressedSize));
+      EXPECT_EQ(compressedSize, referenceSize);
+    }
+  }
 }
 
 TEST(

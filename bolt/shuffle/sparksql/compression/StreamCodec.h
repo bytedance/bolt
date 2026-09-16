@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
@@ -97,7 +98,11 @@ class StreamCompressor {
 
  protected:
   int32_t compressionLevel() const {
-    return options_.compressionLevel == kDefaultCompressionLevel
+    // Older Gluten callers use Arrow's INT_MIN sentinel for the default level.
+    // Do not pass it to Zstd as an extremely fast negative compression level.
+    // Other negative levels are intentional and must remain unchanged.
+    return (options_.compressionLevel == kDefaultCompressionLevel ||
+            options_.compressionLevel == std::numeric_limits<int32_t>::min())
         ? defaultCompressionLevel()
         : options_.compressionLevel;
   }
