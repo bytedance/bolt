@@ -32,6 +32,8 @@
 #include "bolt/exec/radixsort/RadixSortSpillSections.h"
 
 namespace bytedance::bolt::exec::radixsort {
+class RadixSortKeyCodec;
+
 constexpr uint64_t kRadixSortSpillBufferSize =
     (1UL << 20) - AlignedBuffer::kPaddedSize;
 constexpr uint32_t kCurrentRadixSortSpillFormat = 2;
@@ -338,7 +340,8 @@ class RadixSortMerger {
       RadixSortKeyLayout keyLayout,
       std::vector<std::unique_ptr<RadixSortMergeStream>> streams,
       std::optional<size_t> memoryIndex = std::nullopt,
-      std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache = nullptr);
+      std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache = nullptr,
+      const RadixSortKeyCodec* keyCodec = nullptr);
 
   vector_size_t collectRows(
       vector_size_t count,
@@ -432,6 +435,7 @@ class RadixSortMerger {
   }
 
   RadixSortKeyLayout keyLayout_;
+  const RadixSortKeyCodec* keyCodec_;
   union CompareFn {
     constexpr CompareFn() : fixed(nullptr) {}
 

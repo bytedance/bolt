@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <type_traits>
@@ -411,6 +412,82 @@ BOLT_DEFINE_PHYSICAL_SORT_KEY_TRAITS(
     26);
 
 #undef BOLT_DEFINE_PHYSICAL_SORT_KEY_TRAITS
+
+template <typename T>
+inline T normalizeFloatingPointKey(T key, bool descending) {
+  static_assert(std::is_same_v<T, uint32_t> || std::is_same_v<T, uint64_t>);
+  constexpr T sign = T{1} << (sizeof(T) * 8 - 1);
+  constexpr T infinity = sizeof(T) == sizeof(uint32_t)
+      ? static_cast<T>(0x7f800000U)
+      : static_cast<T>(0x7ff0000000000000ULL);
+  constexpr T negativeInfinity = static_cast<T>(~(sign | infinity));
+  constexpr T positiveInfinity = sign | infinity;
+  const T directionMask = descending ? std::numeric_limits<T>::max() : T{0};
+  key ^= directionMask;
+  if (key < negativeInfinity || key > positiveInfinity) {
+    key = std::numeric_limits<T>::max();
+  } else if (key == sign - 1) {
+    key = sign;
+  }
+  return key ^ directionMask;
+}
+
+template <bool HostOrderWords, typename T>
+inline T loadEncodedUnsigned(
+    const char* key,
+    uint32_t offset,
+    uint32_t inlineWordBytes) {
+  static_assert(std::is_unsigned_v<T> && sizeof(T) <= sizeof(uint64_t));
+  if constexpr (!HostOrderWords) {
+    return fromBigEndian(loadUnaligned<T>(key + offset));
+  }
+  if (offset + sizeof(T) <= inlineWordBytes) {
+    const auto byteOffset = offset % sizeof(uint64_t);
+    const auto first = loadUnaligned<uint64_t>(
+        key + (offset / sizeof(uint64_t)) * sizeof(uint64_t));
+    if (byteOffset + sizeof(T) <= sizeof(uint64_t)) {
+      return static_cast<T>(
+          first >> ((sizeof(uint64_t) - byteOffset - sizeof(T)) * 8));
+    }
+    const auto second = loadUnaligned<uint64_t>(
+        key + (offset / sizeof(uint64_t) + 1) * sizeof(uint64_t));
+    const auto joined = (first << (byteOffset * 8)) |
+        (second >> ((sizeof(uint64_t) - byteOffset) * 8));
+    return static_cast<T>(joined >> ((sizeof(uint64_t) - sizeof(T)) * 8));
+  }
+  if (offset >= inlineWordBytes) {
+    return fromBigEndian(loadUnaligned<T>(key + offset));
+  }
+  const auto byteOffset = offset % sizeof(uint64_t);
+  const auto wordBytes = sizeof(uint64_t) - byteOffset;
+  const auto tailBytes = sizeof(T) - wordBytes;
+  const auto first = loadUnaligned<uint64_t>(
+      key + (offset / sizeof(uint64_t)) * sizeof(uint64_t));
+  const auto mask = std::numeric_limits<uint64_t>::max() >> (byteOffset * 8);
+  T result = static_cast<T>((first & mask) << (tailBytes * 8));
+  for (uint32_t byte = 0; byte < tailBytes; ++byte) {
+    result = static_cast<T>(
+        result |
+        static_cast<T>(static_cast<uint8_t>(key[inlineWordBytes + byte]))
+            << ((tailBytes - byte - 1) * 8));
+  }
+  return result;
+}
+
+template <bool HostOrderWords>
+inline uint8_t
+loadEncodedByte(const char* key, uint32_t offset, uint32_t inlineWordBytes) {
+  if constexpr (!HostOrderWords) {
+    return static_cast<uint8_t>(key[offset]);
+  }
+  if (offset >= inlineWordBytes) {
+    return static_cast<uint8_t>(key[offset]);
+  }
+  const auto word = loadUnaligned<uint64_t>(
+      key + (offset / sizeof(uint64_t)) * sizeof(uint64_t));
+  return static_cast<uint8_t>(
+      word >> ((sizeof(uint64_t) - 1 - offset % sizeof(uint64_t)) * 8));
+}
 
 template <typename Traits>
 inline void storeFixedKeyPrefix(const char* encoded, char* record) {

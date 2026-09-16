@@ -17,7 +17,9 @@
 #include "bolt/exec/benchmarks/RadixSortBenchmarkData.h"
 
 #include <algorithm>
+#include <bit>
 #include <string>
+#include <type_traits>
 
 #include "bolt/vector/FlatVector.h"
 
@@ -160,6 +162,15 @@ VectorPtr wrapDictionary(
 
 RowTypePtr rowTypeFor(ScenarioKind kind, ScenarioProfile profile) {
   switch (kind) {
+    case ScenarioKind::kFloatingTriple:
+    case ScenarioKind::kFloatingTripleNegativeZero:
+      return ROW(
+          {"key_double", "key_real", "key_i64", "id"},
+          {DOUBLE(), REAL(), BIGINT(), BIGINT()});
+    case ScenarioKind::kSingleRealSpecial:
+      return ROW({"key", "id"}, {REAL(), BIGINT()});
+    case ScenarioKind::kSingleDoubleSpecial:
+      return ROW({"key", "id"}, {DOUBLE(), BIGINT()});
     case ScenarioKind::kEightKeyInt64:
     case ScenarioKind::kSixteenKeyInt64: {
       const auto columns = kind == ScenarioKind::kEightKeyInt64
@@ -345,7 +356,11 @@ void addKeyMetadata(
     ScenarioFixture& fixture,
     ScenarioKind kind,
     ScenarioProfile profile) {
-  if (kind == ScenarioKind::kEightKeyInt64) {
+  if (kind == ScenarioKind::kFloatingTriple ||
+      kind == ScenarioKind::kFloatingTripleNegativeZero) {
+    fixture.keyChannels = {0, 1, 2};
+    fixture.keyFlags = {flags(), flags(), flags()};
+  } else if (kind == ScenarioKind::kEightKeyInt64) {
     fixture.keyChannels = {0, 1, 2, 3, 4, 5, 6, 7};
     fixture.keyFlags = {
         flags(true, false),
@@ -700,6 +715,106 @@ void addIntegerKey(
         return spec.kind == ScenarioKind::kNullHeavyInt64 &&
             (offset + row) % 3 == 0;
       }));
+}
+
+template <typename T>
+T floatingTripleKey(uint64_t ordinal, bool withNegativeZero) {
+  if (ordinal < 2) {
+    return ordinal == 1 && withNegativeZero ? -T{0.0} : T{0.0};
+  }
+  const auto magnitude = static_cast<T>((ordinal - 2) / 2 + 1);
+  return ordinal % 2 == 0 ? -magnitude : magnitude;
+}
+
+void addFloatingTripleKeys(
+    memory::MemoryPool* pool,
+    ScenarioKind kind,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  const bool withNegativeZero =
+      kind == ScenarioKind::kFloatingTripleNegativeZero;
+  children.push_back(makeFlatVector<double>(
+      pool,
+      DOUBLE(),
+      size,
+      [&](vector_size_t row) {
+        return floatingTripleKey<double>(
+            randomBits(static_cast<uint64_t>(offset + row) + 11) % 16,
+            withNegativeZero);
+      },
+      [](vector_size_t) { return false; }));
+  children.push_back(makeFlatVector<float>(
+      pool,
+      REAL(),
+      size,
+      [&](vector_size_t row) {
+        return floatingTripleKey<float>(
+            randomBits(static_cast<uint64_t>(offset + row) + 29) % 16, false);
+      },
+      [](vector_size_t) { return false; }));
+  children.push_back(makeFlatVector<int64_t>(
+      pool,
+      BIGINT(),
+      size,
+      [&](vector_size_t row) {
+        return static_cast<int64_t>(
+            randomBits(static_cast<uint64_t>(offset + row) + 47));
+      },
+      [](vector_size_t) { return false; }));
+}
+
+template <typename T>
+T singleFloatingSpecialValue(uint64_t ordinal) {
+  if constexpr (std::is_same_v<T, float>) {
+    constexpr std::array<uint32_t, 12> kBits{
+        0xff800000U,
+        0xbf800000U,
+        0xbdcccccdU,
+        0x80000000U,
+        0x00000000U,
+        0x3dcccccdU,
+        0x3f800000U,
+        0x7f800000U,
+        0x7fc00001U,
+        0x7fc00011U,
+        0xffc00021U,
+        0x7f800001U};
+    return std::bit_cast<float>(kBits[ordinal % kBits.size()]);
+  } else {
+    constexpr std::array<uint64_t, 12> kBits{
+        0xfff0000000000000ULL,
+        0xbff0000000000000ULL,
+        0xbfb999999999999aULL,
+        0x8000000000000000ULL,
+        0x0000000000000000ULL,
+        0x3fb999999999999aULL,
+        0x3ff0000000000000ULL,
+        0x7ff0000000000000ULL,
+        0x7ff8000000000001ULL,
+        0x7ff8000000000011ULL,
+        0xfff8000000000021ULL,
+        0x7ff0000000000001ULL};
+    return std::bit_cast<double>(kBits[ordinal % kBits.size()]);
+  }
+}
+
+template <typename T>
+void addSingleFloatingSpecialKey(
+    memory::MemoryPool* pool,
+    const TypePtr& type,
+    vector_size_t offset,
+    vector_size_t size,
+    std::vector<VectorPtr>& children) {
+  children.push_back(makeFlatVector<T>(
+      pool,
+      type,
+      size,
+      [&](vector_size_t row) {
+        return singleFloatingSpecialValue<T>(
+            randomBits(static_cast<uint64_t>(offset + row) + 71));
+      },
+      [](vector_size_t) { return false; }));
 }
 
 void addEightKeys(
@@ -1150,6 +1265,18 @@ ScenarioFixture makeFixture(
       case ScenarioKind::kLowCardinalityInt64:
       case ScenarioKind::kNullHeavyInt64:
         addIntegerKey(pool, spec, offset, size, children);
+        break;
+      case ScenarioKind::kFloatingTriple:
+      case ScenarioKind::kFloatingTripleNegativeZero:
+        addFloatingTripleKeys(pool, spec.kind, offset, size, children);
+        break;
+      case ScenarioKind::kSingleRealSpecial:
+        addSingleFloatingSpecialKey<float>(
+            pool, REAL(), offset, size, children);
+        break;
+      case ScenarioKind::kSingleDoubleSpecial:
+        addSingleFloatingSpecialKey<double>(
+            pool, DOUBLE(), offset, size, children);
         break;
       case ScenarioKind::kEightKeyInt64:
         addEightKeys(pool, offset, size, children);

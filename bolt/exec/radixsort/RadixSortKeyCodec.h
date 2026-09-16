@@ -16,12 +16,15 @@
 
 #pragma once
 
+#include <array>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/common/memory/Memory.h"
+#include "bolt/exec/radixsort/RadixSortKey.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
 
@@ -30,13 +33,57 @@ class RadixSortRun;
 class RadixSortRunStorage;
 struct EncodedKeyView;
 enum class RadixSortKeyLayoutKind : uint8_t;
+class EncodedKeyReader;
+struct RadixSortKeyColumn;
+
+using RadixSortPhysicalComparator = int32_t (*)(
+    const RadixSortKeyColumn&,
+    const char*,
+    const char*,
+    uint32_t,
+    uint32_t);
+using RadixSortEncodedComparator = int32_t (*)(
+    const RadixSortKeyColumn&,
+    EncodedKeyReader&,
+    EncodedKeyReader&);
 
 struct RadixSortKeyColumn {
   TypePtr type;
   CompareFlags flags;
   std::optional<uint64_t> maximumEncodedSize;
   std::optional<uint32_t> fixedPrefixOffset;
+  bool containsFloatingPoint{false};
+  mutable bool hasSpecialValues{false};
+  mutable RadixSortPhysicalComparator fixedComparator{nullptr};
+  mutable RadixSortPhysicalComparator variableComparator{nullptr};
+  mutable RadixSortEncodedComparator encodedComparator{nullptr};
   std::vector<RadixSortKeyColumn> children;
+};
+
+struct RadixSortFloatingPointDigit {
+  uint32_t offset{0};
+  uint8_t width{0};
+  bool descending{false};
+
+  template <bool HostOrderWords>
+  uint8_t extract(const char* key, uint32_t byte, uint32_t wordBytes) const {
+    if (width == sizeof(float)) {
+      auto value =
+          loadEncodedUnsigned<HostOrderWords, uint32_t>(key, offset, wordBytes);
+      value = normalizeFloatingPointKey(value, descending);
+      return static_cast<uint8_t>(value >> ((width - 1 - (byte - offset)) * 8));
+    }
+    auto value =
+        loadEncodedUnsigned<HostOrderWords, uint64_t>(key, offset, wordBytes);
+    value = normalizeFloatingPointKey(value, descending);
+    return static_cast<uint8_t>(value >> ((width - 1 - (byte - offset)) * 8));
+  }
+};
+
+struct RadixSortFloatingPointPlan {
+  uint32_t radixWidth{0};
+  bool complete{false};
+  std::array<RadixSortFloatingPointDigit, 32> digits{};
 };
 
 class RadixSortKeyCodec {
@@ -61,6 +108,39 @@ class RadixSortKeyCodec {
   uint32_t heapKeyOffsetForVariableLayout(uint32_t inlineCapacity) const;
 
   uint32_t fixedPrefixColumnCount(uint32_t heapKeyOffset) const;
+
+  const RadixSortKeyColumn* singleFloatingPointColumn() const {
+    return columns_.size() == 1 &&
+            (columns_[0].type->kind() == TypeKind::REAL ||
+             columns_[0].type->kind() == TypeKind::DOUBLE)
+        ? &columns_[0]
+        : nullptr;
+  }
+
+  bool hasSpecialValues() const;
+
+  // Selects comparators once from the per-column special-value metadata.
+  void prepareSpecialComparators() const;
+
+  std::vector<uint8_t> specialValueFlags() const;
+
+  void mergeSpecialValueFlags(std::span<const uint8_t> flags);
+
+  RadixSortFloatingPointPlan floatingPointPlan(
+      const RadixSortKeyLayout& layout,
+      std::span<const uint8_t> mayHaveNulls) const;
+
+  int32_t compareEncoded(
+      std::string_view left,
+      std::string_view right,
+      uint32_t firstColumn = 0) const;
+
+  int32_t comparePhysical(
+      const RadixSortKeyLayout& layout,
+      const char* left,
+      const char* right,
+      std::string_view leftSuffix = {},
+      std::string_view rightSuffix = {}) const;
 
   void decode(
       std::span<const EncodedKeyView> keys,
@@ -164,6 +244,9 @@ class RadixSortKeyCodec {
   std::vector<RadixSortKeyColumn> columns_;
   RowTypePtr rowType_;
   std::optional<uint64_t> maximumEncodedSize_;
+  bool allFixedScalarColumns_;
+  uint32_t floatingPointEnd_{0};
+  mutable uint32_t specialComparisonEnd_{0};
   mutable std::vector<uint64_t> encodeCursorScratch_;
 };
 

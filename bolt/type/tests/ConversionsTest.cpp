@@ -601,6 +601,50 @@ TEST_F(ConversionsTest, toIntegeralTypes) {
   }
 }
 
+TEST_F(ConversionsTest, truncateFloatingPointToIntegralBoundaries) {
+  testConversion<double, int64_t>(
+      {0x1.fffffffffffffp62, 0x1p63, -0x1p63},
+      {9'223'372'036'854'774'784LL,
+       std::numeric_limits<int64_t>::max(),
+       std::numeric_limits<int64_t>::min()},
+      /*truncate*/ true);
+  testConversion<double, int32_t>(
+      {0x1.fffffffffffffp30, 0x1p31, -0x1p31},
+      {std::numeric_limits<int32_t>::max(),
+       std::numeric_limits<int32_t>::max(),
+       std::numeric_limits<int32_t>::min()},
+      /*truncate*/ true);
+  testConversion<double, int16_t>(
+      {0x1.fffffffffffffp30, 0x1p31, -0x1p31},
+      {-1, -1, 0},
+      /*truncate*/ true);
+  testConversion<double, int8_t>(
+      {0x1.fffffffffffffp30, 0x1p31, -0x1p31},
+      {-1, -1, 0},
+      /*truncate*/ true);
+
+  testConversion<float, int64_t>(
+      {0x1.fffffep62f, 0x1p63f, -0x1p63f},
+      {9'223'371'487'098'961'920LL,
+       std::numeric_limits<int64_t>::max(),
+       std::numeric_limits<int64_t>::min()},
+      /*truncate*/ true);
+  testConversion<float, int32_t>(
+      {0x1.fffffep30f, 0x1p31f, -0x1p31f},
+      {2'147'483'520,
+       std::numeric_limits<int32_t>::max(),
+       std::numeric_limits<int32_t>::min()},
+      /*truncate*/ true);
+  testConversion<float, int16_t>(
+      {0x1.fffffep30f, 0x1p31f, -0x1p31f},
+      {-128, -1, 0},
+      /*truncate*/ true);
+  testConversion<float, int8_t>(
+      {0x1.fffffep30f, 0x1p31f, -0x1p31f},
+      {-128, -1, 0},
+      /*truncate*/ true);
+}
+
 TEST_F(ConversionsTest, toString) {
   // From integral types.
   {

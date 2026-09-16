@@ -23,11 +23,16 @@
 
 namespace bytedance::bolt::exec::radixsort {
 
+class RadixSortKeyCodec;
+
 class RadixSortRunSorter {
  public:
   explicit RadixSortRunSorter(RadixSortRunStorage& arena);
 
-  void sort(std::span<const uint32_t> skippableByteOffsets = {});
+  void sort(
+      std::span<const uint32_t> skippableByteOffsets = {},
+      const RadixSortKeyCodec* keyCodec = nullptr,
+      std::span<const uint8_t> mayHaveNulls = {});
 
  private:
   RadixSortRunStorage& arena_;

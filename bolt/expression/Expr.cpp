@@ -1205,6 +1205,7 @@ void Expr::evalWithMemo(
 
   if (baseOfDictionaryRepeats_ == 1) {
     evalWithNulls(rows, context, result);
+    context.exprSet()->addToMemo(this);
     baseOfDictionary_ = base;
     dictionaryCache_ = result;
     dictionaryCacheSize_ = dictionaryCache_->retainedSize();
@@ -1247,7 +1248,6 @@ void Expr::evalWithMemo(
 
     // stop updating dictionary if retained memory is too large
     if (!context.exprSet()->dictionaryCacheSizeExceedLimit()) {
-      context.exprSet()->addToMemo(this);
       auto newCacheSize = uncached->end();
 
       // dictionaryCache_ is valid only for cachedDictionaryIndices_. Hence, a
