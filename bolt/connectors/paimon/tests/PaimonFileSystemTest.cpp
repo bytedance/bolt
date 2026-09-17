@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -27,6 +28,7 @@
 #include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonDataSource.h"
+#include "bolt/connectors/paimon/PaimonReadFile.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 
 #include "paimon/fs/file_system_factory.h"
@@ -51,6 +53,63 @@ void expectEntries(
   EXPECT_EQ(actual, expected);
 }
 
+class ShortReadFile final : public InMemoryReadFile {
+ public:
+  ShortReadFile() : InMemoryReadFile(std::string_view{"fake"}) {}
+
+  std::string_view pread(uint64_t offset, uint64_t length, void* buffer)
+      const override {
+    return InMemoryReadFile::pread(
+        offset, std::min(length, size() - offset), buffer);
+  }
+};
+
+// Reject storage access after capturing its arguments, so very large reads can
+// exercise the adapter without allocating a multi-gigabyte buffer.
+class InspectingInputStream final : public ::paimon::InputStream {
+ public:
+  ::paimon::Status Seek(int64_t, ::paimon::SeekOrigin) override {
+    return ::paimon::Status::NotImplemented("Seek");
+  }
+
+  ::paimon::Result<int64_t> GetPos() const override {
+    return 0;
+  }
+
+  ::paimon::Result<int64_t> Read(char*, int64_t) override {
+    return ::paimon::Status::NotImplemented("Read");
+  }
+
+  ::paimon::Result<int64_t> Read(char*, int64_t size, int64_t offset) override {
+    readSize = size;
+    readOffset = offset;
+    return ::paimon::Status::IOError("Storage unavailable");
+  }
+
+  void ReadAsync(
+      char*,
+      int64_t,
+      int64_t,
+      std::function<void(::paimon::Status)>&& callback) override {
+    callback(::paimon::Status::NotImplemented("ReadAsync"));
+  }
+
+  ::paimon::Result<std::string> GetUri() const override {
+    return std::string("inspect://file");
+  }
+
+  ::paimon::Result<int64_t> Length() const override {
+    return -1;
+  }
+
+  ::paimon::Status Close() override {
+    return ::paimon::Status::OK();
+  }
+
+  int64_t readSize{0};
+  int64_t readOffset{0};
+};
+
 class FakeFileSystem : public filesystems::FileSystem {
  public:
   FakeFileSystem(
@@ -66,9 +125,12 @@ class FakeFileSystem : public filesystems::FileSystem {
   }
 
   std::unique_ptr<ReadFile> openFileForRead(
-      std::string_view,
+      std::string_view path,
       const filesystems::FileOptions& options) override {
     readOptions = options;
+    if (path == "first://short") {
+      return std::make_unique<ShortReadFile>();
+    }
     return std::make_unique<InMemoryReadFile>(std::string_view{"fake"});
   }
 
@@ -229,6 +291,96 @@ TEST_F(PaimonFileSystemTest, LocalRoundTripUsesBoltFileSystem) {
   ASSERT_TRUE(fs->Rename(file, renamed).ok());
   ASSERT_TRUE(fs->Exists(renamed).value());
   ASSERT_TRUE(fs->Delete(dir, true).ok());
+}
+
+TEST_F(PaimonFileSystemTest, RejectsInvalidReadAndSeekRanges) {
+  PaimonBoltFileSystem fs({});
+  auto input = fs.Open("first://file").value();
+  char buffer[4];
+  constexpr auto kMax = std::numeric_limits<int64_t>::max();
+  EXPECT_TRUE(input->Read(buffer, -1).status().IsInvalid());
+  EXPECT_TRUE(input->Read(buffer, 1, -1).status().IsInvalid());
+  EXPECT_TRUE(input->Read(buffer, -1, 0).status().IsInvalid());
+  EXPECT_TRUE(input->Read(buffer, 1, kMax).status().IsInvalid());
+  EXPECT_TRUE(input->Read(buffer, kMax, 1).status().IsInvalid());
+  EXPECT_TRUE(input->Seek(2, ::paimon::FS_SEEK_SET).ok());
+  EXPECT_TRUE(input->Seek(kMax, ::paimon::FS_SEEK_CUR).IsInvalid());
+  EXPECT_TRUE(input->Seek(kMax, ::paimon::FS_SEEK_END).IsInvalid());
+  EXPECT_TRUE(
+      input->Seek(std::numeric_limits<int64_t>::min(), ::paimon::FS_SEEK_CUR)
+          .IsInvalid());
+  EXPECT_EQ(input->GetPos().value(), 2);
+
+  int callbacks = 0;
+  input->ReadAsync(buffer, -1, 0, [&](::paimon::Status status) {
+    EXPECT_TRUE(status.IsInvalid());
+    ++callbacks;
+  });
+  EXPECT_EQ(callbacks, 1);
+  ASSERT_EQ(input->Read(buffer, 2).value(), 2);
+  EXPECT_EQ(std::string(buffer, 2), "ke");
+  EXPECT_EQ(input->GetPos().value(), 4);
+  EXPECT_EQ(input->Read(buffer, 0).value(), 0);
+}
+
+TEST_F(PaimonFileSystemTest, ShortReadsReturnActualCountButFailAsync) {
+  PaimonBoltFileSystem fs({});
+  auto input = fs.Open("first://short").value();
+  char buffer[8];
+  EXPECT_EQ(input->Read(buffer, 8, 0).value(), 4);
+  EXPECT_EQ(input->GetPos().value(), 0);
+  EXPECT_EQ(input->Read(buffer, 8).value(), 4);
+  EXPECT_EQ(input->GetPos().value(), 4);
+  int callbacks = 0;
+  input->ReadAsync(buffer, 8, 0, [&](::paimon::Status status) {
+    EXPECT_FALSE(status.ok());
+    ++callbacks;
+  });
+  EXPECT_EQ(callbacks, 1);
+}
+
+TEST_F(PaimonFileSystemTest, RejectsNegativeWriteAndPositionOverflow) {
+  FakeFileSystem::output.clear();
+  PaimonBoltFileSystem fs({});
+  auto output = fs.Create("first://file", true).value();
+  EXPECT_TRUE(output->Write("bolt", -1).status().IsInvalid());
+  EXPECT_EQ(output->GetPos().value(), 0);
+  EXPECT_TRUE(FakeFileSystem::output.empty());
+  ASSERT_EQ(output->Write("bolt", 4).value(), 4);
+  EXPECT_TRUE(output->Write("bolt", std::numeric_limits<int64_t>::max())
+                  .status()
+                  .IsInvalid());
+  EXPECT_EQ(output->GetPos().value(), 4);
+  EXPECT_EQ(FakeFileSystem::output, "bolt");
+}
+
+TEST_F(PaimonFileSystemTest, ReadFileRejectsUnrepresentableRanges) {
+  PaimonBoltFileSystem fs({});
+  auto input =
+      std::shared_ptr<::paimon::InputStream>(fs.Open("first://file").value());
+  PaimonReadFile file(input, PaimonIoOptions{});
+  char buffer[4];
+  constexpr auto kMax = std::numeric_limits<int64_t>::max();
+  EXPECT_THROW(file.pread(uint64_t{kMax} + 1, 1, buffer), std::runtime_error);
+  EXPECT_THROW(file.pread(0, uint64_t{kMax} + 1, buffer), std::runtime_error);
+  EXPECT_THROW(file.pread(kMax, 1, buffer), std::runtime_error);
+  std::vector<folly::Range<char*>> ranges{{buffer, 1}};
+  EXPECT_THROW(file.preadv(kMax, ranges), std::runtime_error);
+  bolt::common::Region region{kMax, 1};
+  folly::IOBuf iobuf;
+  EXPECT_THROW(file.preadv({&region, 1}, {&iobuf, 1}), std::runtime_error);
+  EXPECT_EQ(file.pread(2, 2, buffer), "ke");
+}
+
+TEST_F(PaimonFileSystemTest, ReadFilePreserves64BitReadArguments) {
+  auto input = std::make_shared<InspectingInputStream>();
+  PaimonReadFile file(input, PaimonIoOptions{});
+  constexpr int64_t kLargeSize = (int64_t{1} << 32) + 17;
+  char buffer;
+  EXPECT_THROW(file.pread(kLargeSize, kLargeSize, &buffer), std::runtime_error);
+  EXPECT_EQ(input->readSize, kLargeSize);
+  EXPECT_EQ(input->readOffset, kLargeSize);
+  EXPECT_THROW(file.size(), std::runtime_error);
 }
 
 TEST_F(PaimonFileSystemTest, FileStatusUsesGenericFileInfo) {

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -136,7 +137,11 @@ class PaimonBoltInputStream final : public ::paimon::InputStream {
           "invalid SeekOrigin, only support FS_SEEK_SET, FS_SEEK_CUR, and FS_SEEK_END");
     }
 
-    const int64_t size = static_cast<int64_t>(file_->size());
+    auto length = Length();
+    if (!length.ok()) {
+      return length.status();
+    }
+    const int64_t size = length.value();
     int64_t base = 0;
     if (origin == ::paimon::FS_SEEK_SET) {
       base = 0;
@@ -146,11 +151,10 @@ class PaimonBoltInputStream final : public ::paimon::InputStream {
       base = size;
     }
 
-    const int64_t next = base + offset;
-    if (next < 0 || next > size) {
+    if (offset < -base || offset > size - base) {
       return ::paimon::Status::Invalid("Seek out of range");
     }
-    pos_.store(next);
+    pos_.store(base + offset);
     return ::paimon::Status::OK();
   }
 
@@ -158,8 +162,8 @@ class PaimonBoltInputStream final : public ::paimon::InputStream {
     return pos_.load();
   }
 
-  ::paimon::Result<int32_t> Read(char* buffer, uint32_t size) override {
-    const auto offset = static_cast<uint64_t>(pos_.load());
+  ::paimon::Result<int64_t> Read(char* buffer, int64_t size) override {
+    const auto offset = pos_.load();
     auto res = Read(buffer, size, offset);
     if (res.ok()) {
       pos_.fetch_add(res.value());
@@ -167,11 +171,15 @@ class PaimonBoltInputStream final : public ::paimon::InputStream {
     return res;
   }
 
-  ::paimon::Result<int32_t> Read(char* buffer, uint32_t size, uint64_t offset)
+  ::paimon::Result<int64_t> Read(char* buffer, int64_t size, int64_t offset)
       override {
+    if (size < 0 || offset < 0 ||
+        size > std::numeric_limits<int64_t>::max() - offset) {
+      return ::paimon::Status::Invalid("Read range is out of bounds");
+    }
     try {
       auto view = file_->pread(offset, size, buffer);
-      return static_cast<int32_t>(view.size());
+      return static_cast<int64_t>(view.size());
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(
           std::string("pread failed: ") + e.what());
@@ -180,14 +188,16 @@ class PaimonBoltInputStream final : public ::paimon::InputStream {
 
   void ReadAsync(
       char* buffer,
-      uint32_t size,
-      uint64_t offset,
+      int64_t size,
+      int64_t offset,
       std::function<void(::paimon::Status)>&& callback) override {
     auto res = Read(buffer, size, offset);
-    if (res.ok()) {
-      callback(::paimon::Status::OK());
-    } else {
+    if (!res.ok()) {
       callback(res.status());
+    } else if (res.value() != size) {
+      callback(::paimon::Status::IOError("Short read from Bolt ReadFile"));
+    } else {
+      callback(::paimon::Status::OK());
     }
   }
 
@@ -195,8 +205,12 @@ class PaimonBoltInputStream final : public ::paimon::InputStream {
     return uri_;
   }
 
-  ::paimon::Result<uint64_t> Length() const override {
-    return file_->size();
+  ::paimon::Result<int64_t> Length() const override {
+    const auto size = file_->size();
+    if (size > std::numeric_limits<int64_t>::max()) {
+      return ::paimon::Status::Invalid("File length exceeds INT64_MAX");
+    }
+    return static_cast<int64_t>(size);
   }
 
   ::paimon::Status Close() override {
@@ -217,11 +231,14 @@ class PaimonBoltOutputStream final : public ::paimon::OutputStream {
       std::string uri)
       : file_(std::move(file)), uri_(std::move(uri)) {}
 
-  ::paimon::Result<int32_t> Write(const char* buffer, uint32_t size) override {
+  ::paimon::Result<int64_t> Write(const char* buffer, int64_t size) override {
+    if (size < 0 || size > std::numeric_limits<int64_t>::max() - pos_) {
+      return ::paimon::Status::Invalid("Write range is out of bounds");
+    }
     try {
       file_->append(std::string_view(buffer, size));
       pos_ += size;
-      return static_cast<int32_t>(size);
+      return size;
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(
           std::string("write failed: ") + e.what());
@@ -292,10 +309,12 @@ class PaimonBoltFileStatus final : public ::paimon::FileStatus {
       int64_t modificationTimeMs)
       : path_(std::move(path)),
         isDir_(isDir),
-        len_(len),
-        modificationTimeMs_(modificationTimeMs) {}
+        modificationTimeMs_(modificationTimeMs) {
+    BOLT_CHECK_LE(len, std::numeric_limits<int64_t>::max());
+    len_ = static_cast<int64_t>(len);
+  }
 
-  uint64_t GetLen() const override {
+  int64_t GetLen() const override {
     return len_;
   }
 
@@ -314,7 +333,7 @@ class PaimonBoltFileStatus final : public ::paimon::FileStatus {
  private:
   std::string path_;
   bool isDir_{false};
-  uint64_t len_{0};
+  int64_t len_{0};
   int64_t modificationTimeMs_{0};
 };
 

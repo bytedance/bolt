@@ -26,6 +26,7 @@
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/dwio/common/BufferedInput.h"
+#include "bolt/dwio/common/Mutation.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 #include "bolt/vector/arrow/Abi.h"
@@ -35,191 +36,100 @@ namespace bytedance::bolt::connector::paimon {
 
 namespace {
 
+// Input schemas are consumed even on failed resets. Partial output exports
+// must likewise be released if exporting the other C ABI object fails.
+template <typename T>
+struct ArrowRelease {
+  T* value;
+  ~ArrowRelease() {
+    if (value && value->release) {
+      value->release(value);
+    }
+  }
+};
+
 class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
- private:
-  static std::shared_ptr<bolt::common::ScanSpec> buildScanSpecFromRowType(
-      const RowTypePtr& rowType) {
-    auto scanSpec = std::make_shared<bolt::common::ScanSpec>("<root>");
-    scanSpec->addAllChildFields(*rowType);
-    return scanSpec;
-  }
-
-  dwio::common::RowReaderOptions makeRowReaderOpts(
-      const RowTypePtr& rowType) const {
-    dwio::common::RowReaderOptions opts;
-    opts.setScanSpec(buildScanSpecFromRowType(rowType));
-    opts.setTimestampPrecision(
-        static_cast<TimestampPrecision>(timestampPrecision_));
-    return opts;
-  }
-
-  void initializeRowReaderWithFullSchema() {
-    // LOG(INFO) << "Initializing rowReader_ with full file schema: " <<
-    // reader_->rowType()->toString();
-    rowReader_ =
-        reader_->createRowReader(makeRowReaderOpts(reader_->rowType()));
-  }
-
  public:
   PaimonParquetFileBatchReader(
-      std::unique_ptr<parquet::ParquetReader> reader,
-      int32_t batch_size,
-      memory::MemoryPool* const pool,
+      std::shared_ptr<ReadFile> file,
+      int32_t batchSize,
+      memory::MemoryPool* pool,
       core::ExpressionEvaluator* expressionEvaluator,
       uint8_t timestampPrecision)
-      : reader_(std::move(reader)),
-        batch_size_(batch_size),
+      : file_(std::move(file)),
+        batchSize_(batchSize),
         pool_(pool),
         expressionEvaluator_(expressionEvaluator),
-        timestampPrecision_(timestampPrecision),
-        readType_(reader_->rowType()) {
-    // LOG(INFO) << "PaimonParquetFileBatchReader created, reader_->rowType() =
-    // " << reader_->rowType()->toString();
+        timestampPrecision_(timestampPrecision) {
+    BOLT_CHECK_GT(batchSize_, 0, "Parquet batch size must be positive");
+    reader_ = createFileReader();
+    readType_ = reader_->rowType();
   }
 
   ::paimon::Result<std::unique_ptr<::ArrowSchema>> GetFileSchema()
       const override {
-    auto schema = std::make_unique<::ArrowSchema>();
-
-    const auto& fileRowType = reader_->rowType();
-
-    auto dummyVector = BaseVector::create(fileRowType, 0, pool_);
-
-    ArrowOptions opts;
-    exportToArrow(dummyVector, *schema, opts);
-
-    if (VLOG_IS_ON(1)) {
-      VLOG(1) << "GetFileSchema exported ArrowSchema has " << schema->n_children
-              << " children";
-      for (int i = 0; i < schema->n_children; ++i) {
-        VLOG(1) << "GetFileSchema child[" << i << "]: name="
-                << (schema->children[i]->name ? schema->children[i]->name : "")
-                << ", format="
-                << (schema->children[i]->format ? schema->children[i]->format
-                                                : "");
-      }
+    if (!reader_) {
+      return ::paimon::Status::Invalid("Parquet reader is closed");
     }
-    return std::move(schema);
+    auto schema = std::make_unique<::ArrowSchema>();
+    auto vector = BaseVector::create(reader_->rowType(), 0, pool_);
+    exportToArrow(vector, *schema, {});
+    return schema;
   }
 
   ::paimon::Status SetReadSchema(
-      ::ArrowSchema* read_schema,
+      ::ArrowSchema* schema,
       const std::shared_ptr<::paimon::Predicate>& predicate,
-      const std::optional<::paimon::RoaringBitmap32>& /*selection_bitmap*/)
-      override {
+      const std::optional<::paimon::RoaringBitmap32>& selection) override {
+    ArrowRelease schemaGuard{schema};
+    if (!reader_ || !schema) {
+      return ::paimon::Status::Invalid("Parquet reader or read schema is null");
+    }
     try {
-      auto type = importFromArrow(*read_schema);
-      auto rowType = std::dynamic_pointer_cast<const RowType>(type);
-      if (!rowType) {
+      auto type =
+          std::dynamic_pointer_cast<const RowType>(importFromArrow(*schema));
+      if (!type) {
         return ::paimon::Status::Invalid(
-            "Read schema must be a struct/row type");
+            "Parquet read schema must be a row type");
       }
-
-      std::vector<std::string> dataColumnNames;
-      int startIndex = 0;
-      for (int i = startIndex; i < rowType->size(); ++i) {
-        dataColumnNames.push_back(rowType->nameOf(i));
+      // Commit a new read only after construction succeeds; a failed reset
+      // leaves the native cursor and the previous row mapping intact.
+      // Native Parquet row readers share buffered row-group state, so a
+      // rewind needs an independent file reader over the same input file.
+      auto replacement = rowReader_ ? createFileReader() : nullptr;
+      bool appendRowNumbers;
+      auto rowReader = createRowReader(
+          replacement ? *replacement : *reader_,
+          type,
+          predicate,
+          appendRowNumbers);
+      rowReader_ = std::move(rowReader);
+      if (replacement) {
+        reader_ = std::move(replacement);
       }
-
-      dwio::common::RowReaderOptions opts = makeRowReaderOpts(rowType);
-      auto fileRowType = reader_->rowType();
-
-      auto scanSpec = buildScanSpecFromRowType(rowType);
-      if (predicate) {
-        // Convert: paimon::Predicate → TypedExprPtr → SubfieldFilters →
-        // ScanSpec
-        auto result = PaimonFilterTranslator::toTypedExpr(predicate, pool_);
-        BOLT_CHECK(
-            result.ok(),
-            "expression {} not supported for filter pushdown by paimon connector",
-            predicate->ToString());
-        auto filters = PaimonFilterTranslator::toSubfieldFilters(
-            result.value, expressionEvaluator_);
-        if (filters.empty()) {
-          LOG(INFO) << "[FilterPushdown] predicate translated successfully but "
-                       "produced zero subfield filters — filter will not be "
-                       "evaluated in the scan";
-        } else {
-          LOG(INFO) << "[FilterPushdown] pushed down " << filters.size()
-                    << " subfield filter(s)";
-        }
-        for (const auto& [subfield, filter] : filters) {
-          auto* fieldSpec = scanSpec->getOrCreateChild(subfield);
-          fieldSpec->addFilter(*filter);
-        }
-      }
-      opts.setScanSpec(scanSpec);
-      auto selector = std::make_shared<dwio::common::ColumnSelector>(
-          fileRowType, dataColumnNames);
-      opts.select(selector);
-      rowReader_ = reader_->createRowReader(opts);
-      readType_ = rowType;
-
+      readType_ = std::move(type);
+      appendRowNumbers_ = appendRowNumbers;
+      selection_ = selection;
+      positions_.clear();
       return ::paimon::Status::OK();
     } catch (const std::exception& e) {
-      LOG(ERROR) << "SetReadSchema: exception " << e.what();
       return ::paimon::Status::Invalid(
-          std::string("Failed to set read schema: ") + e.what());
+          std::string("Failed to set Parquet read schema: ") + e.what());
     }
   }
 
   ::paimon::Result<ReadBatch> NextBatch() override {
+    positions_.clear();
     try {
-      if (!rowReader_) {
-        LOG(INFO)
-            << "NextBatch: rowReader_ not initialized, initializing with full schema";
-        initializeRowReaderWithFullSchema();
+      auto output = readBatch();
+      if (!output) {
+        return MakeEofBatch();
       }
-
-      // Record the absolute file row number where this batch starts.
-      // nextRowNumber() returns the position relative to file start,
-      // including rows that may be filtered/deleted — this is what
-      // paimon-cpp needs for deletion vector offset computation.
-      int64_t nextRow = rowReader_->nextRowNumber();
-      if (nextRow == dwio::common::RowReader::kAtEnd) {
-        LOG(INFO) << "NextBatch: End of file reached";
-        return ::paimon::BatchReader::MakeEofBatch();
-      }
-      previousBatchFirstRowNumber_ = static_cast<uint64_t>(nextRow);
-
-      VectorPtr result = BaseVector::create(readType_, batch_size_, pool_);
-      uint64_t numRows = rowReader_->next(batch_size_, result);
-
-      if (numRows == 0) {
-        LOG(INFO) << "NextBatch: End of file reached";
-        return ::paimon::BatchReader::MakeEofBatch();
-      }
-
-      // LOG(INFO) << "NextBatch: result has type " <<
-      // result->type()->toString(); LOG(INFO) << "NextBatch: number of rows in
-      // batch = " << result->size();
-
-      auto arrowArray = std::make_unique<::ArrowArray>();
-      auto arrowSchema = std::make_unique<::ArrowSchema>();
-
-      ArrowOptions opts;
-      opts.timestampUnit = static_cast<TimestampUnit>(timestampPrecision_);
-      exportToArrow(result, *arrowArray, pool_, opts);
-      exportToArrow(result, *arrowSchema, opts);
-
-      // LOG(INFO) << "NextBatch: exported ArrowSchema has "
-      //           << arrowSchema->n_children << " children";
-      // for (int i = 0; i < arrowSchema->n_children; ++i) {
-      //   LOG(INFO) << "NextBatch exported child[" << i << "]: name=" <<
-      //   (arrowSchema->children[i]->name ? arrowSchema->children[i]->name :
-      //   "")
-      //             << ", format=" << (arrowSchema->children[i]->format ?
-      //             arrowSchema->children[i]->format : "");
-      // }
-      // LOG(INFO) << "NextBatch: exported ArrowArray has length " <<
-      // arrowArray->length;
-
-      hasReadAnyBatch_ = true;
-      return std::make_pair(std::move(arrowArray), std::move(arrowSchema));
+      return exportBatch(output);
     } catch (const std::exception& e) {
-      LOG(ERROR) << "NextBatch: exception " << e.what();
+      positions_.clear();
       return ::paimon::Status::IOError(
-          std::string("Failed to read batch: ") + e.what());
+          std::string("Failed to read Parquet batch: ") + e.what());
     }
   }
 
@@ -228,35 +138,186 @@ class PaimonParquetFileBatchReader : public ::paimon::FileBatchReader {
   }
 
   void Close() override {
+    positions_.clear();
+    selection_.reset();
     rowReader_.reset();
     reader_.reset();
+    file_.reset();
   }
 
-  ::paimon::Result<uint64_t> GetPreviousBatchFirstRowNumber() const override {
-    return previousBatchFirstRowNumber_;
+  ::paimon::Result<uint64_t> GetPreviousBatchFileRowId(
+      uint64_t index) const override {
+    if (index >= positions_.size()) {
+      return ::paimon::Status::Invalid("No row at this Parquet batch index");
+    }
+    return positions_[index];
   }
 
   ::paimon::Result<uint64_t> GetNumberOfRows() const override {
-    auto numRows = reader_->numberOfRows();
-    if (numRows) {
-      return *numRows;
+    if (reader_) {
+      if (auto rows = reader_->numberOfRows()) {
+        return *rows;
+      }
     }
     return ::paimon::Status::Invalid("Number of rows not available");
   }
+
   bool SupportPreciseBitmapSelection() const override {
-    return false;
+    return true;
   }
 
  private:
+  std::unique_ptr<parquet::ParquetReader> createFileReader() const {
+    return std::make_unique<parquet::ParquetReader>(
+        std::make_unique<dwio::common::BufferedInput>(file_, *pool_),
+        dwio::common::ReaderOptions(pool_));
+  }
+
+  std::unique_ptr<dwio::common::RowReader> createRowReader(
+      parquet::ParquetReader& reader,
+      const RowTypePtr& type,
+      const std::shared_ptr<::paimon::Predicate>& predicate,
+      bool& appendRowNumbers) {
+    auto scanSpec = std::make_shared<bolt::common::ScanSpec>("<root>");
+    scanSpec->addAllChildFields(*type);
+    if (predicate) {
+      const auto translated =
+          PaimonFilterTranslator::toTypedExpr(predicate, pool_);
+      BOLT_CHECK(translated.ok(), "{}", translated.reason);
+      auto filters = PaimonFilterTranslator::toSubfieldFilters(
+          translated.value, expressionEvaluator_);
+      for (const auto& [subfield, filter] : filters) {
+        scanSpec->getOrCreateChild(subfield)->addFilter(*filter);
+      }
+    }
+    // The native count/constant-only path has no column-reader outputRows().
+    // It retains physical rows; synthesize positions and apply the bitmap in
+    // this adapter instead. Predicate-only physical columns still need native
+    // row numbers even when none of those columns are projected.
+    appendRowNumbers = false;
+    for (const auto& child : scanSpec->children()) {
+      appendRowNumbers |= reader.rowType()->containsChild(child->fieldName());
+    }
+    dwio::common::RowReaderOptions opts;
+    opts.setScanSpec(scanSpec);
+    opts.setTimestampPrecision(
+        static_cast<TimestampPrecision>(timestampPrecision_));
+    opts.setAppendRowNumberColumn(appendRowNumbers);
+    opts.select(std::make_shared<dwio::common::ColumnSelector>(
+        reader.rowType(), type->names()));
+    return reader.createRowReader(opts);
+  }
+
+  bool selected(int64_t position) const {
+    return !selection_ ||
+        (position <= ::paimon::RoaringBitmap32::MAX_VALUE &&
+         selection_->Contains(position));
+  }
+
+  RowVectorPtr readBatch() {
+    BOLT_CHECK_NOT_NULL(reader_, "Parquet reader is closed");
+    if (selection_ && selection_->IsEmpty()) {
+      return nullptr;
+    }
+    if (!rowReader_) {
+      rowReader_ =
+          createRowReader(*reader_, readType_, nullptr, appendRowNumbers_);
+    }
+    while (true) {
+      const auto first = rowReader_->nextRowNumber();
+      if (first == dwio::common::RowReader::kAtEnd) {
+        return nullptr;
+      }
+      BufferPtr deletedRows;
+      dwio::common::Mutation mutation;
+      if (appendRowNumbers_ && selection_) {
+        const auto size = rowReader_->nextReadSize(batchSize_);
+        deletedRows =
+            AlignedBuffer::allocate<uint64_t>(bits::nwords(size), pool_, 0);
+        auto* raw = deletedRows->asMutable<uint64_t>();
+        for (int64_t i = 0; i < size; ++i) {
+          if (!selected(first + i)) {
+            bits::setBit(raw, i);
+          }
+        }
+        mutation.deletedRows = raw;
+      }
+      VectorPtr output = BaseVector::create(readType_, batchSize_, pool_);
+      const auto scanned = rowReader_->next(batchSize_, output, &mutation);
+      if (scanned == 0) {
+        return nullptr;
+      }
+      // A fully filtered batch is not EOF. Native next() counts physical rows.
+      if (output->size() == 0) {
+        continue;
+      }
+      auto row = std::dynamic_pointer_cast<RowVector>(output);
+      auto children = row->children();
+      if (appendRowNumbers_) {
+        auto* rowNumbers = children.back()->as<SimpleVector<int64_t>>();
+        BOLT_CHECK_NOT_NULL(rowNumbers);
+        for (vector_size_t i = 0; i < row->size(); ++i) {
+          positions_.push_back(rowNumbers->valueAt(i));
+        }
+        children.pop_back();
+      } else {
+        BOLT_CHECK_EQ(row->size(), scanned);
+        auto indices =
+            AlignedBuffer::allocate<vector_size_t>(row->size(), pool_);
+        auto* raw = indices->asMutable<vector_size_t>();
+        for (vector_size_t i = 0; i < row->size(); ++i) {
+          if (selected(first + i)) {
+            raw[positions_.size()] = i;
+            positions_.push_back(first + i);
+          }
+        }
+        if (positions_.empty()) {
+          continue;
+        }
+        if (positions_.size() != row->size()) {
+          for (auto& child : children) {
+            child = BaseVector::wrapInDictionary(
+                nullptr, indices, positions_.size(), child);
+          }
+        }
+      }
+      for (auto& child : children) {
+        child = BaseVector::loadedVectorShared(child);
+      }
+      return std::make_shared<RowVector>(
+          pool_, readType_, nullptr, positions_.size(), std::move(children));
+    }
+  }
+
+  ReadBatch exportBatch(const VectorPtr& vector) const {
+    auto array = std::make_unique<::ArrowArray>();
+    auto schema = std::make_unique<::ArrowSchema>();
+    ArrowRelease arrayGuard{array.get()};
+    ArrowRelease schemaGuard{schema.get()};
+    ArrowOptions opts;
+    opts.timestampUnit = static_cast<TimestampUnit>(timestampPrecision_);
+    // Paimon's row merge accesses primitive Arrow buffers directly. Neither
+    // selection dictionaries nor constant-null run-end encoding may escape.
+    opts.flattenDictionary = true;
+    opts.flattenConstant = true;
+    exportToArrow(vector, *array, pool_, opts);
+    exportToArrow(vector, *schema, opts);
+    arrayGuard.value = nullptr;
+    schemaGuard.value = nullptr;
+    return std::make_pair(std::move(array), std::move(schema));
+  }
+
+  std::shared_ptr<ReadFile> file_;
   std::unique_ptr<parquet::ParquetReader> reader_;
   std::unique_ptr<dwio::common::RowReader> rowReader_;
-  int32_t batch_size_;
+  int32_t batchSize_;
   memory::MemoryPool* const pool_;
   core::ExpressionEvaluator* const expressionEvaluator_;
   uint8_t timestampPrecision_;
   RowTypePtr readType_;
-  uint64_t previousBatchFirstRowNumber_{0};
-  bool hasReadAnyBatch_{false};
+  std::optional<::paimon::RoaringBitmap32> selection_;
+  bool appendRowNumbers_{false};
+  std::vector<int64_t> positions_;
 };
 
 class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
@@ -285,16 +346,8 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
         "PaimonParquetReaderBuilder requires WithMemoryPool to be called before Build");
     try {
       auto rf = std::make_shared<PaimonReadFile>(path, ioOptions_);
-      auto input = std::make_unique<dwio::common::BufferedInput>(
-          std::make_shared<dwio::common::ReadFileInputStream>(rf),
-          *paimonPool_->getBoltPool());
-
-      dwio::common::ReaderOptions readerOptions(paimonPool_->getBoltPool());
-      auto reader = std::make_unique<parquet::ParquetReader>(
-          std::move(input), readerOptions);
-
       return std::make_unique<PaimonParquetFileBatchReader>(
-          std::move(reader),
+          std::move(rf),
           batch_size_,
           paimonPool_->getBoltPool(),
           paimonPool_->getExpressionEvaluator(),
@@ -302,34 +355,6 @@ class PaimonParquetReaderBuilder : public ::paimon::ReaderBuilder {
     } catch (const std::exception& e) {
       return ::paimon::Status::IOError(
           std::string("Failed to build reader from InputStream: ") + e.what());
-    }
-  }
-
-  ::paimon::Result<std::unique_ptr<::paimon::FileBatchReader>> Build(
-      const std::string& path) const override {
-    BOLT_CHECK_NOT_NULL(
-        paimonPool_,
-        "PaimonParquetReaderBuilder requires WithMemoryPool to be called before Build");
-    try {
-      auto file = std::make_shared<LocalReadFile>(path);
-      memory::MemoryPool* boltPool = paimonPool_->getBoltPool();
-
-      auto input =
-          std::make_unique<dwio::common::BufferedInput>(file, *boltPool);
-
-      dwio::common::ReaderOptions readerOptions(boltPool);
-      auto reader = std::make_unique<parquet::ParquetReader>(
-          std::move(input), readerOptions);
-
-      return std::make_unique<PaimonParquetFileBatchReader>(
-          std::move(reader),
-          batch_size_,
-          paimonPool_->getBoltPool(),
-          paimonPool_->getExpressionEvaluator(),
-          timestampPrecision_);
-    } catch (const std::exception& e) {
-      return ::paimon::Status::IOError(
-          std::string("Failed to open file: ") + e.what());
     }
   }
 
