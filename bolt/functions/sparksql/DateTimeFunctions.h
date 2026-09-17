@@ -65,27 +65,9 @@ template <typename T>
 struct WeekFunction : public InitSessionTimezone<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  FOLLY_ALWAYS_INLINE uint32_t getWeek(
-      const Timestamp& timestamp,
-      const tz::TimeZone* timezone,
-      bool allowOverflow) {
-    Timestamp t = timestamp;
-    if (timezone) {
-      t.toTimezone(*timezone);
-    }
-    const auto civil = util::toCivilDateTime(t, allowOverflow, false);
-    return static_cast<uint32_t>(civil.isoWeek());
-  }
-
-  FOLLY_ALWAYS_INLINE void call(
-      int32_t& result,
-      const arg_type<Timestamp>& timestamp) {
-    result = getWeek(timestamp, this->timeZone_, false);
-  }
-
   FOLLY_ALWAYS_INLINE void call(int32_t& result, const arg_type<Date>& date) {
-    auto timestamp = Timestamp((int64_t)date * 24 * 3600, 0);
-    result = getWeek(timestamp, this->timeZone_, false);
+    result = static_cast<int32_t>(
+        getWeek(Timestamp::fromDate(date), nullptr, false));
   }
 };
 
