@@ -56,6 +56,16 @@ const std::shared_ptr<arrow::MemoryManager>& processLifetimeCpuMemoryManager() {
       arrow::default_cpu_memory_manager());
   return *memoryManager;
 }
+} // namespace
+
+void initializeArrowProcessLifetimeState() {
+  // Force initialization while the process is fully alive. The leaked owner
+  // keeps both CPUMemoryManager and its CPUDevice alive after Arrow's own
+  // function-static shared_ptr owners begin destruction.
+  (void)processLifetimeCpuMemoryManager();
+}
+
+namespace {
 
 arrow::Result<std::shared_ptr<arrow::Array>> makeNullBinaryArray(
     std::shared_ptr<arrow::DataType> type,

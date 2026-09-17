@@ -74,6 +74,11 @@ int64_t getMaxCompressedBufferSize(
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
     Codec* codec);
 
+/// Pin Arrow's default CPU MemoryManager and CPUDevice for the process
+/// lifetime. Shuffle workers can still allocate while JVM/DSO shutdown is
+/// running, after Arrow's function-local singleton owners are destroyed.
+void initializeArrowProcessLifetimeState();
+
 /// Wrap externally owned CPU memory without depending on Arrow's destructible
 /// default MemoryManager singleton during process shutdown.
 std::shared_ptr<arrow::Buffer> makeNonOwningBuffer(

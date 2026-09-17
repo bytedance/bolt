@@ -89,6 +89,16 @@ TEST_F(ShuffleMiscTest, NonOwningBufferUsesProcessLifetimeMemoryManager) {
   EXPECT_EQ(zeroLengthNullBuffer(), empty);
 }
 
+TEST_F(ShuffleMiscTest, InitializeArrowProcessLifetimeStateIsIdempotent) {
+  initializeArrowProcessLifetimeState();
+  auto first = arrow::default_cpu_memory_manager();
+  initializeArrowProcessLifetimeState();
+  auto second = arrow::default_cpu_memory_manager();
+
+  EXPECT_EQ(first, second);
+  EXPECT_TRUE(first->is_cpu());
+}
+
 TEST_F(ShuffleMiscTest, NonOwningBufferSliceRetainsParentAndMemoryManager) {
   std::shared_ptr<arrow::Buffer> parent =
       arrow::AllocateBuffer(4).ValueOrDie();

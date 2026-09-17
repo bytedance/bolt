@@ -2441,6 +2441,10 @@ arrow::Status BoltShuffleWriter::tryEvictComposite() {
 
 std::shared_ptr<arrow::MemoryPool> BoltShuffleWriter::getSpillArrowPool(
     arrow::MemoryPool* pool) {
+  // Arrow's PoolBuffer constructor creates a CPUMemoryManager for the supplied
+  // pool. That manager retains CPUDevice::Instance(), whose static owner can
+  // otherwise be destroyed while a late shuffle worker is still allocating.
+  initializeArrowProcessLifetimeState();
   if (dynamic_cast<BoltArrowMemoryPool*>(pool) != nullptr) {
     return std::make_shared<BoltArrowMemoryPool>(
         bytedance::bolt::memory::spillMemoryPool());
