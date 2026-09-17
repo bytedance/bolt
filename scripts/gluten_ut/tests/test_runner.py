@@ -48,8 +48,8 @@ class RunnerTest(unittest.TestCase):
             timeout=10,
         )
 
-    def summarize(self, *, kind="scalatest", log=COMPLETED, rc=0):
-        self.plan.write_text(f"job\tmodule\t{kind}\t1\t{SUITE}\t-\n")
+    def summarize(self, *, kind="scalatest", log=COMPLETED, rc=0, suite=SUITE):
+        self.plan.write_text(f"job\tmodule\t{kind}\t1\t{suite}\t-\n")
         (self.jobs / "job.log").write_text(log)
         if rc is not None:
             (self.jobs / "job.rc").write_text(str(rc))
@@ -67,18 +67,18 @@ class RunnerTest(unittest.TestCase):
             self.root,
         )
 
-    def report(self, *, failure=False, empty=False):
+    def report(self, *, failure=False, empty=False, suite=SUITE):
         case = (
             ""
             if empty
             else (
-                f'<testcase classname="{SUITE}" name="case" time="1">'
+                f'<testcase classname="{suite}" name="case" time="1">'
                 + ('<failure message="failed"/>' if failure else "")
                 + "</testcase>"
             )
         )
-        (self.reports / f"TEST-{SUITE}.xml").write_text(
-            f'<testsuite name="{SUITE}">{case}</testsuite>'
+        (self.reports / f"TEST-{suite}.xml").write_text(
+            f'<testsuite name="{suite}">{case}</testsuite>'
         )
 
     def assert_job_failed(self, result):
@@ -98,6 +98,22 @@ class RunnerTest(unittest.TestCase):
         result = self.summarize(rc=1)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("expected failures:   1", result.stdout)
+
+    def test_partition_discovery_suite_reports_are_preserved(self):
+        suite = "example.PartitionDiscoverySuite"
+        for failure, blacklisted in ((False, False), (True, False), (True, True)):
+            with self.subTest(failure=failure, blacklisted=blacklisted):
+                self.report(suite=suite, failure=failure)
+                self.blacklist.write_text(f"{suite}#case\n" if blacklisted else "")
+                result = self.summarize(suite=suite, rc=int(failure))
+                self.assertEqual(
+                    result.returncode,
+                    int(failure and not blacklisted),
+                    result.stdout + result.stderr,
+                )
+                self.assertNotIn("#(jvm-failed)", result.stdout)
+                if failure and not blacklisted:
+                    self.assertIn(f"! {suite}#case", result.stdout)
 
     def test_unknown_test_failure_fails(self):
         self.report(failure=True)

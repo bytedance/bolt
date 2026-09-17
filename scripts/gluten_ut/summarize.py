@@ -100,7 +100,8 @@ def main():
         reported = set()
         invalid_report = False
         for xml in glob.glob(os.path.join(args.reports_dir, job_id, "TEST-*.xml")):
-            if "DiscoverySuite" in os.path.basename(xml):
+            # Spark's PartitionDiscoverySuite classes are real test suites.
+            if os.path.basename(xml) == "TEST-org.scalatest.tools.DiscoverySuite.xml":
                 continue
             try:
                 root = ET.parse(xml).getroot()
