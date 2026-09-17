@@ -38,8 +38,7 @@ char* BmRowCopier::copyRowToSegment(SegmentData& segment, const char* source) {
   simd::memcpy(target, source, static_cast<int32_t>(layout().rowSize()));
 
   for (int32_t column = 0; column < types().size(); ++column) {
-    const auto kind = types()[column]->kind();
-    if ((kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) ||
+    if (!layout().column(column).variableWidth ||
         layout().isNull(target, column)) {
       continue;
     }

@@ -38,6 +38,7 @@ bolt_add_library(
   AggregationMasks.cpp
   ArrowStream.cpp
   AssignUniqueId.cpp
+  BmContainerRowSerde.cpp
   ContainerRow2RowSerde.cpp
   ContainerRowSerde.cpp
   DistinctAggregations.cpp

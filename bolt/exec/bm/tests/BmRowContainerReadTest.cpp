@@ -29,6 +29,53 @@ namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
 
+TEST_F(BmRowContainerTest, ComplexMapSurvivesRepeatedSpillReload) {
+  auto maps = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {1, 10}},
+      {{1, 10}, {2, 20}},
+  });
+  const std::string largeValue(1 << 20, 'q');
+  auto largeArrays = makeArrayVector<std::string>({
+      {largeValue},
+      {largeValue},
+  });
+  auto input = makeRowVector({maps, largeArrays});
+  BmRowContainer container(
+      {maps->type(), largeArrays->type()},
+      {false, false},
+      1,
+      bufferManager_,
+      MemoryTag::kTesting,
+      128,
+      64);
+  storeAll(container, input);
+  const auto segment = container.spillActiveSegment();
+
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto rowIds = session.listRowIds();
+  ASSERT_EQ(2, rowIds.size());
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    const auto rows = session.loadRows({rowIds.data(), rowIds.size()});
+    ASSERT_EQ(2, rows.size());
+    EXPECT_EQ(0, container.compare(rows[0], rows[1], 0));
+    EXPECT_EQ(container.hash(rows[0], 0), container.hash(rows[1], 0));
+
+    auto result = BaseVector::create(maps->type(), rows.size(), pool());
+    container.extractColumnResident(rows.data(), rows.size(), 0, result, true);
+    auto* resultMap = result->as<MapVector>();
+    ASSERT_NE(nullptr, resultMap);
+    EXPECT_EQ(1, resultMap->mapKeys()->asFlatVector<int64_t>()->valueAt(0));
+    EXPECT_EQ(1, resultMap->mapKeys()->asFlatVector<int64_t>()->valueAt(2));
+
+    auto largeResult =
+        BaseVector::create(largeArrays->type(), rows.size(), pool());
+    container.extractColumnResident(
+        rows.data(), rows.size(), 1, largeResult, true);
+    test::assertEqualVectors(largeArrays, largeResult);
+    EXPECT_GT(session.evictLoadedChunks(), 0);
+  }
+}
+
 TEST_F(BmRowContainerTest, OpenZlSpillRoundTripsFixedAndVariableRows) {
   resetBufferManagerCompression(
       memory::bm::compress::CompressionKind::kOpenZlFrame);
@@ -62,6 +109,7 @@ TEST_F(BmRowContainerTest, OpenZlSpillRoundTripsFixedAndVariableRows) {
   BmRowContainer container(
       {BIGINT(), INTEGER(), DOUBLE(), VARCHAR()},
       {true, false, false, true},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       64 << 10,
@@ -98,6 +146,7 @@ TEST_F(BmRowContainerTest, BulkReadSessionLoadsStablePointersWhenResident) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -128,7 +177,11 @@ TEST_F(BmRowContainerTest, BulkReadSessionLoadsStablePointersWhenResident) {
 
 TEST_F(BmRowContainerTest, ExtractColumnResidentWritesAtResultOffset) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, {true, true}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {true, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeRowVector({
       makeNullableFlatVector<int64_t>({10, std::nullopt, 30}),
       makeNullableFlatVector<std::string>({"alpha", std::nullopt, "charlie"}),
@@ -157,7 +210,7 @@ TEST_F(BmRowContainerTest, ExtractColumnResidentWritesAtResultOffset) {
 
 TEST_F(BmRowContainerTest, BulkReadSessionLoadSkipsConsumedChunks) {
   BmRowContainer container(
-      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting, 64 << 10);
+      {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);
   constexpr vector_size_t kRows = 9000;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
@@ -188,6 +241,7 @@ TEST_F(BmRowContainerTest, BulkReadSessionLoadsSegmentRowRanges) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -219,6 +273,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -257,6 +312,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -284,7 +340,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
 
 TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
   BmRowContainer container(
-      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting, 64 << 10);
+      {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);
   constexpr vector_size_t kRows = 9000;
   auto input = makeRowVector({
       makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
@@ -314,6 +370,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanReloadRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       256 << 10);
@@ -354,6 +411,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictDoesNotRewriteCleanBlocks) {
   BmRowContainer container(
       {BIGINT(), BIGINT()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       256 << 10);
@@ -385,6 +443,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       256 << 10);
@@ -435,6 +494,7 @@ TEST_F(BmRowContainerTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       256 << 10);
@@ -475,6 +535,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       256 << 10);
@@ -526,6 +587,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanLimitTargetBytes) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       64 << 10,
@@ -559,6 +621,7 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       256 << 10);
@@ -595,6 +658,7 @@ TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
   BmRowContainer container(
       {BIGINT(), VARCHAR(), VARCHAR()},
       {false, false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting,
       4 << 20,

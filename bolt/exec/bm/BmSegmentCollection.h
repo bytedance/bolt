@@ -106,8 +106,10 @@ class BmSegmentCollection {
       vector_size_t count,
       std::vector<BatchAppendRange>& ranges,
       std::vector<char*>* rows);
-  void
-  recordHeapForChunk(ChunkData& chunk, const BlockRef& heap, const char* row);
+  void recordHeapForChunk(
+      ChunkData& chunk,
+      const BlockRef& heap,
+      const char* referencingRow);
 
   // Read addressing.
   ChunkData& currentChunk(SegmentData& segment);

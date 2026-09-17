@@ -48,6 +48,11 @@ struct ColumnLayout {
   // Fixed-width cell size. VARCHAR stores StringView here; payload bytes live
   // in heap blocks.
   uint32_t width{0};
+  // True when the physical cell is a StringView whose bytes may live in heap
+  // blocks. Complex logical types use this representation as well.
+  bool variableWidth{false};
+  // True when the column participates in the key prefix.
+  bool isKey{false};
   // Whether this column owns a null bit.
   bool nullable{false};
   // Byte offset of the null bit inside one row.
@@ -81,6 +86,8 @@ struct ColumnStorePlan {
   uint32_t nullByte{0};
   uint8_t nullMask{0};
   bool stringKind{false};
+  bool complexKind{false};
+  bool isKey{false};
   StoreValueFn storeFn{nullptr};
 };
 
@@ -93,6 +100,7 @@ class BmRowLayout {
   BmRowLayout(
       const std::vector<TypePtr>& types,
       const std::vector<bool>& nullable,
+      uint32_t numKeyColumns,
       uint32_t rowBlockSize);
 
   FOLLY_ALWAYS_INLINE const ColumnLayout& column(int32_t column) const {

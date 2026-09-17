@@ -26,6 +26,14 @@ enum class DatasetKind {
   kFixed,
   kVariableSmall,
   kVariableLarge,
+  kBigint,
+  kInteger,
+  kDouble,
+  kVarcharSmall,
+  kVarcharLarge,
+  kArray,
+  kMap,
+  kRow,
 };
 
 struct StringProfileOptions {

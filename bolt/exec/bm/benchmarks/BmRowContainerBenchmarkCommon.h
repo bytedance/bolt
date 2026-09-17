@@ -120,6 +120,8 @@ BenchmarkOptions options(
 
 uint64_t rowCount(const BenchmarkOptions& options);
 
+uint64_t logicalBytesProcessed(const BenchmarkOptions& options);
+
 void checkOldRowBasedSpillBenchmarkSupported(const BenchmarkOptions& options);
 
 uint64_t benchmarkNowNs();
@@ -150,7 +152,8 @@ RowVectorPtr makeInputBatch(
 
 ReusableInputBatches makeReusableInputBatches(
     memory::MemoryPool* pool,
-    const BenchmarkOptions& options);
+    const BenchmarkOptions& options,
+    uint64_t minReusableRows = 1);
 
 void storeInputBatchOld(
     RowContainer& container,
@@ -200,7 +203,15 @@ std::unique_ptr<RowContainer> makeOldRowContainer(
     DatasetKind dataset,
     memory::MemoryPool* pool);
 
+std::unique_ptr<RowContainer> makeOldKeyRowContainer(
+    DatasetKind dataset,
+    memory::MemoryPool* pool);
+
 std::unique_ptr<BmRowContainer> makeBmRowContainer(
+    DatasetKind dataset,
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager);
+
+std::unique_ptr<BmRowContainer> makeBmKeyRowContainer(
     DatasetKind dataset,
     const std::shared_ptr<memory::bm::BufferManager>& bufferManager);
 
@@ -209,7 +220,17 @@ OldStoredRows storeOldRows(
     const BenchmarkOptions& options,
     bool keepRows);
 
+OldStoredRows storeOldKeyRows(
+    BenchmarkContext& context,
+    const BenchmarkOptions& options,
+    bool keepRows);
+
 BmStoredRows storeBmRows(
+    BenchmarkContext& context,
+    const BenchmarkOptions& options,
+    bool keepRows);
+
+BmStoredRows storeBmKeyRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
     bool keepRows);

@@ -17,6 +17,7 @@
 #include "bolt/exec/bm/BmRowContainer.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
@@ -77,24 +78,58 @@ int32_t compareStringViewsAsc(StringView left, StringView right) {
           .compare(std::string_view(right.data(), right.size())));
 }
 
+ByteInputStream inputFor(const StringView& value) {
+  return ByteInputStream({ByteRange{
+      reinterpret_cast<uint8_t*>(const_cast<char*>(value.data())),
+      static_cast<int32_t>(value.size()),
+      0}});
+}
+
 template <TypeKind Kind>
-int32_t
-compareScalarValue(const char* left, const char* right, const TypePtr& type) {
+int32_t compareScalarValue(
+    const char* left,
+    const char* right,
+    const TypePtr& type,
+    CompareFlags flags) {
+  int32_t result;
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     const auto leftValue = *reinterpret_cast<const StringView*>(left);
     const auto rightValue = *reinterpret_cast<const StringView*>(right);
-    return compareStringViewsAsc(leftValue, rightValue);
+    result = compareStringViewsAsc(leftValue, rightValue);
   } else if constexpr (Kind == TypeKind::HUGEINT) {
     const auto leftValue = HugeInt::deserialize(left);
     const auto rightValue = HugeInt::deserialize(right);
-    return leftValue < rightValue ? -1 : (leftValue > rightValue ? 1 : 0);
+    result = leftValue < rightValue ? -1 : (leftValue > rightValue ? 1 : 0);
   } else if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
       !TypeTraits<Kind>::isFixedWidth) {
     BOLT_NYI("Unsupported compare type {}", type->toString());
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
-    return compareValues<T>(left, right);
+    result = compareValues<T>(left, right);
+  }
+  return flags.ascending ? result : -result;
+}
+
+template <TypeKind Kind>
+uint64_t hashScalarValue(const char* value, const TypePtr& type) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    return folly::hasher<StringView>()(
+        *reinterpret_cast<const StringView*>(value));
+  } else if constexpr (
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
+    auto stream = inputFor(*reinterpret_cast<const StringView*>(value));
+    return ContainerRowSerde::hash(stream, type.get());
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
+    BOLT_NYI("Unsupported hash type {}", type->toString());
+  } else if constexpr (Kind == TypeKind::HUGEINT) {
+    return folly::hasher<int128_t>()(HugeInt::deserialize(value));
+  } else {
+    using T = typename TypeTraits<Kind>::NativeType;
+    return folly::hasher<T>()(*reinterpret_cast<const T*>(value));
   }
 }
 
@@ -125,8 +160,7 @@ int32_t BmRowContainer::compare(
   const auto& leftLayout = layout_.column(leftColumn);
   const auto& rightLayout = layout_.column(rightColumn);
   if (FOLLY_LIKELY(!leftLayout.nullable && !rightLayout.nullable)) {
-    auto result = compareNonNull(left, right, leftColumn, rightColumn);
-    return flags.ascending ? result : -result;
+    return compareNonNull(left, right, leftColumn, rightColumn, flags);
   }
 
   const auto leftNull = layout_.isNull(left, leftColumn);
@@ -139,11 +173,7 @@ int32_t BmRowContainer::compare(
     return flags.nullsFirst ? result : -result;
   }
 
-  auto result = compareNonNull(left, right, leftColumn, rightColumn);
-  if (!flags.ascending) {
-    result = -result;
-  }
-  return result;
+  return compareNonNull(left, right, leftColumn, rightColumn, flags);
 }
 
 int32_t BmRowContainer::compareRows(
@@ -165,11 +195,37 @@ int32_t BmRowContainer::compareNonNull(
     const char* left,
     const char* right,
     int32_t leftColumn,
-    int32_t rightColumn) const {
+    int32_t rightColumn,
+    CompareFlags flags) const {
   const auto* l = layout_.valueAddress(left, leftColumn);
   const auto* r = layout_.valueAddress(right, rightColumn);
+  if (layout_.column(leftColumn).variableWidth &&
+      !layout_.storePlan(leftColumn).stringKind) {
+    auto leftStream = inputFor(*reinterpret_cast<const StringView*>(l));
+    auto rightStream = inputFor(*reinterpret_cast<const StringView*>(r));
+    return ContainerRowSerde::compare(
+        leftStream, rightStream, types_[leftColumn].get(), flags);
+  }
   return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
-      compareScalarValue, types_[leftColumn]->kind(), l, r, types_[leftColumn]);
+      compareScalarValue,
+      types_[leftColumn]->kind(),
+      l,
+      r,
+      types_[leftColumn],
+      flags);
+}
+
+uint64_t BmRowContainer::hash(const char* row, int32_t column) const {
+  BOLT_DCHECK_NOT_NULL(row);
+  BOLT_DCHECK_LT(column, layout_.columns().size());
+  if (layout_.isNull(row, column)) {
+    return BaseVector::kNullHash;
+  }
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      hashScalarValue,
+      types_[column]->kind(),
+      layout_.valueAddress(row, column),
+      types_[column]);
 }
 
 } // namespace bytedance::bolt::exec::bm
