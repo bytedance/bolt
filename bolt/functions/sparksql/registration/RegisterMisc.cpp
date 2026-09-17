@@ -55,6 +55,8 @@ void registerMiscFunctions(const std::string& prefix) {
       prefix + "concat_ws", ConcatWsSignatures(), makeConcatWs);
 
   registerIn(prefix);
+  // Register decimal overloads for SparkSQL "in".
+  BOLT_REGISTER_VECTOR_FUNCTION(udf_in_decimal, prefix + "in");
 
   BOLT_REGISTER_VECTOR_FUNCTION(
       udf_input_file_name, prefix + "input_file_name");
