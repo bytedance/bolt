@@ -26,9 +26,11 @@
 #include <paimon/predicate/literal.h>
 #include <paimon/predicate/predicate_builder.h>
 #include <paimon/result.h>
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
@@ -59,6 +61,7 @@ class PaimonFilterPushdownTest : public testing::Test,
   }
 
   void SetUp() override {
+    filesystems::registerLocalFileSystem();
     rootPool_ =
         memory::memoryManager()->addRootPool("PaimonFilterPushdownTest");
     leafPool_ = rootPool_->addLeafChild("leaf");
@@ -242,7 +245,11 @@ class PaimonFilterPushdownTest : public testing::Test,
     auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
     builder->WithMemoryPool(paimonPool);
 
-    auto readerRes = builder->Build(path);
+    PaimonBoltFileSystem fs({});
+    auto stream = fs.Open(path);
+    BOLT_CHECK(stream.ok(), "{}", stream.status().ToString());
+    auto readerRes = builder->Build(
+        std::shared_ptr<::paimon::InputStream>(std::move(stream).value()));
     EXPECT_TRUE(readerRes.ok());
     if (!readerRes.ok()) {
       return RowVector::createEmpty(rowType, leafPool_.get());

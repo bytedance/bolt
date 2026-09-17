@@ -306,7 +306,7 @@ class BoltConan(ConanFile):
         if self.options.get_safe("spark_compatible"):
             self.requires("celeborn-cpp-client/main-20251212")
         if self.options.get_safe("enable_paimon"):
-            self.requires("paimon-cpp/0.0.4-bolt")
+            self.requires("paimon-cpp/v0.3.0")
         if self.options.get_safe("enable_testutil"):
             self.requires("gtest/1.17.0", force=True)
             self.requires("duckdb/1.1.3")
