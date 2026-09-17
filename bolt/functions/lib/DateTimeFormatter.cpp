@@ -84,6 +84,7 @@ struct Date {
   int32_t minute = 0;
   int32_t second = 0;
   int32_t microsecond = 0;
+  int32_t nanosecond = 0;
   bool isAm = true; // AM -> true, PM -> false
   int64_t timezoneId = -1;
 
@@ -720,6 +721,7 @@ int getMaxDigitConsume(
 
 using ErrorCode = DateTimeResult::ErrorCode;
 
+template <bool preserveNanos>
 ErrorCode parseFromPattern(
     FormatPattern curPattern,
     const std::string_view& input,
@@ -819,7 +821,9 @@ ErrorCode parseFromPattern(
           return ErrorCode::PARSE_FRACTION_ERROR;
         }
       }
-      if constexpr (::bytedance::bolt::kSparkCompatible) {
+      if constexpr (preserveNanos) {
+        number *= std::pow(10, 9 - count);
+      } else if constexpr (::bytedance::bolt::kSparkCompatible) {
         // .8 + S => .8 CORRECTED
         // .8 + SS => .8 CORRECTED
         // .8 + SSS => .8 CORRECTED
@@ -1050,9 +1054,13 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::FRACTION_OF_SECOND:
-        date.microsecond = ::bytedance::bolt::kSparkCompatible
-            ? number
-            : number * util::kMicrosPerMsec;
+        if constexpr (preserveNanos) {
+          date.nanosecond = number;
+        } else {
+          date.microsecond = ::bytedance::bolt::kSparkCompatible
+              ? number
+              : number * util::kMicrosPerMsec;
+        }
         break;
 
       case DateTimeFormatSpecifier::WEEK_YEAR:
@@ -1664,13 +1672,13 @@ DateTimeResult DateTimeFormatter::parse(const std::string_view& input) const {
       case DateTimeToken::Type::kPattern:
         if (i + 1 < tokens_.size() &&
             tokens_[i + 1].type == DateTimeToken::Type::kPattern) {
-          auto errorCode =
-              parseFromPattern(tok.pattern, input, cur, end, date, true, type_);
+          auto errorCode = parseFromPattern<false>(
+              tok.pattern, input, cur, end, date, true, type_);
           if (errorCode != ErrorCode::NO_ERROR) {
             return errorCode;
           }
         } else {
-          auto errorCode = parseFromPattern(
+          auto errorCode = parseFromPattern<false>(
               tok.pattern, input, cur, end, date, false, type_);
           if (errorCode != ErrorCode::NO_ERROR) {
             return errorCode;
@@ -1725,7 +1733,8 @@ DateTimeResult DateTimeFormatter::parse(const std::string_view& input) const {
 }
 
 // sql.legacy.timeParserPolicy = "legacy", "corrected", "exception"
-DateTimeResult DateTimeFormatter::parse(
+template <bool preserveNanos>
+DateTimeResult DateTimeFormatter::parseImpl(
     const std::string_view& input,
     const TimePolicy timeParserPolicy) const {
   Date date;
@@ -1770,13 +1779,13 @@ DateTimeResult DateTimeFormatter::parse(
         }
         if (i + 1 < tokens_.size() &&
             tokens_[i + 1].type == DateTimeToken::Type::kPattern) {
-          auto errorCode = parseFromPattern(
+          auto errorCode = parseFromPattern<preserveNanos>(
               tok.pattern, input, cur, end, date, true, type_, isLegacy);
           if (!noError(errorCode)) {
             return errorCode;
           }
         } else {
-          auto errorCode = parseFromPattern(
+          auto errorCode = parseFromPattern<preserveNanos>(
               tok.pattern, input, cur, end, date, false, type_, isLegacy);
           if (!noError(errorCode)) {
             return errorCode;
@@ -1954,10 +1963,33 @@ DateTimeResult DateTimeFormatter::parse(
         util::daysSinceEpochFromDate(date.year, date.month, date.day);
   }
 
-  int64_t microsSinceMidnight =
-      util::fromTime(date.hour, date.minute, date.second, date.microsecond);
-  return DateTimeResult{
-      util::fromDatetime(daysSinceEpoch, microsSinceMidnight), date.timezoneId};
+  if constexpr (preserveNanos) {
+    const int64_t secondsSinceMidnight =
+        static_cast<int64_t>(date.hour) * util::kSecsPerHour +
+        date.minute * util::kSecsPerMinute + date.second;
+    return DateTimeResult{
+        Timestamp(
+            daysSinceEpoch * util::kSecsPerDay + secondsSinceMidnight,
+            date.nanosecond),
+        date.timezoneId};
+  } else {
+    const int64_t microsSinceMidnight =
+        util::fromTime(date.hour, date.minute, date.second, date.microsecond);
+    return DateTimeResult{
+        util::fromDatetime(daysSinceEpoch, microsSinceMidnight),
+        date.timezoneId};
+  }
+}
+
+DateTimeResult DateTimeFormatter::parse(
+    const std::string_view& input,
+    const TimePolicy timeParserPolicy) const {
+  return parseImpl<false>(input, timeParserPolicy);
+}
+
+DateTimeResult DateTimeFormatter::parsePreserveNanos(
+    const std::string_view& input) const {
+  return parseImpl<true>(input, TimePolicy::CORRECTED);
 }
 
 std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(

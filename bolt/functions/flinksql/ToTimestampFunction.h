@@ -170,7 +170,7 @@ struct FlinkToTimestampFunction {
       fmt = &fallbackDateTimeFormatter(digits);
     }
 
-    auto r = fmt->parse(trimmed, TimePolicy::CORRECTED);
+    auto r = fmt->parsePreserveNanos(trimmed);
     if (r.hasError()) {
       return false;
     }
@@ -182,9 +182,8 @@ struct FlinkToTimestampFunction {
       const DateTimeFormatter& fmt,
       out_type<Timestamp>& result,
       const arg_type<Varchar>& dateStr) const {
-    auto r = fmt.parse(
-        std::string_view(dateStr.data(), dateStr.size()),
-        TimePolicy::CORRECTED);
+    auto r = fmt.parsePreserveNanos(
+        std::string_view(dateStr.data(), dateStr.size()));
     if (r.hasError()) {
       return tryParseFallback(result, dateStr);
     }
