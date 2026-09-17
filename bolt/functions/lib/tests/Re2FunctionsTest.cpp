@@ -440,6 +440,61 @@ TEST_F(Re2FunctionsTest, regexExtractConstantPatternNoGroupId) {
   EXPECT_EQ(extract("a b245 c3", "\\d+"), "245");
 }
 
+TEST_F(Re2FunctionsTest, likeSignaturesAllowDynamicPattern) {
+  const auto signatures = likeSignatures();
+  ASSERT_EQ(signatures.size(), 2);
+  EXPECT_THAT(
+      signatures[0]->constantArguments(), ::testing::ElementsAre(false, false));
+  EXPECT_THAT(
+      signatures[1]->constantArguments(),
+      ::testing::ElementsAre(false, false, true));
+}
+
+TEST_F(Re2FunctionsTest, likeDynamicPatterns) {
+  auto input = makeNullableFlatVector<std::string>(
+      {"axb", "axb", "xhelloy", "abcdef", std::nullopt, "abc"});
+  auto pattern = makeNullableFlatVector<std::string>(
+      {"a%b", "a_b", "%hello%", "%xyz%", "%a%", std::nullopt});
+
+  auto result = evaluate("like(c0, c1)", makeRowVector({input, pattern}));
+  auto expected = makeNullableFlatVector<bool>(
+      {true, true, true, false, std::nullopt, std::nullopt});
+
+  assertEqualVectors(expected, result);
+}
+
+TEST_F(Re2FunctionsTest, likeDynamicPatternsWithConstantEscape) {
+  auto input =
+      makeNullableFlatVector<std::string>({"a_b", "a%b", "axb", std::nullopt});
+  auto pattern =
+      makeNullableFlatVector<std::string>({R"(a\_b)", R"(a\%b)", "a_b", "%"});
+
+  auto result = evaluate("like(c0, c1, '\\')", makeRowVector({input, pattern}));
+  auto expected =
+      makeNullableFlatVector<bool>({true, true, true, std::nullopt});
+
+  assertEqualVectors(expected, result);
+}
+
+TEST_F(Re2FunctionsTest, likeDynamicLongPatterns) {
+  auto input = makeFlatVector<std::string>(
+      {"longfixedpatternvalue",
+       "longprefixpatternvalue",
+       "valuelongsuffixpattern",
+       "prefixlongsubstringpatternsuffix",
+       "a_long_generic_pattern_value"});
+  auto pattern = makeFlatVector<std::string>(
+      {"longfixedpatternvalue",
+       "longprefixpattern%",
+       "%longsuffixpattern",
+       "%longsubstringpattern%",
+       "%long_generic_pattern%"});
+
+  auto result = evaluate("like(c0, c1)", makeRowVector({input, pattern}));
+
+  assertEqualVectors(makeConstant(true, input->size()), result);
+}
+
 TEST_F(Re2FunctionsTest, likePattern) {
   testLike("abc", "%b%", true);
   testLike("bcd", "%b%", true);
