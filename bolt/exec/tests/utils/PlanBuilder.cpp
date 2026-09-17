@@ -476,45 +476,52 @@ PlanBuilder& PlanBuilder::tableWrite(
     const dwio::common::FileFormat fileFormat,
     const std::vector<std::string>& aggregates,
     const std::string& connectorId,
-    const std::string& outputFileName) {
+    const std::string& outputFileName,
+    const std::shared_ptr<core::InsertTableHandle>& insertHandle) {
   BOLT_CHECK_NOT_NULL(planNode_, "TableWrite cannot be the source node");
   auto rowType = planNode_->outputType();
 
-  std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
-      columnHandles;
-  for (auto i = 0; i < rowType->size(); ++i) {
-    const auto column = rowType->nameOf(i);
-    const bool isPartitionKey =
-        std::find(partitionBy.begin(), partitionBy.end(), column) !=
-        partitionBy.end();
-    columnHandles.push_back(std::make_shared<connector::hive::HiveColumnHandle>(
-        column,
-        isPartitionKey
-            ? connector::hive::HiveColumnHandle::ColumnType::kPartitionKey
-            : connector::hive::HiveColumnHandle::ColumnType::kRegular,
-        rowType->childAt(i),
-        rowType->childAt(i)));
-  }
+  // If insertHandle is not specified, build a HiveInsertTableHandle along with
+  // columnHandles, bucketProperty and locationHandle.
+  auto insertHandlePtr = insertHandle;
+  if (!insertHandlePtr) {
+    std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
+        columnHandles;
+    for (auto i = 0; i < rowType->size(); ++i) {
+      const auto column = rowType->nameOf(i);
+      const bool isPartitionKey =
+          std::find(partitionBy.begin(), partitionBy.end(), column) !=
+          partitionBy.end();
+      columnHandles.push_back(
+          std::make_shared<connector::hive::HiveColumnHandle>(
+              column,
+              isPartitionKey
+                  ? connector::hive::HiveColumnHandle::ColumnType::kPartitionKey
+                  : connector::hive::HiveColumnHandle::ColumnType::kRegular,
+              rowType->childAt(i),
+              rowType->childAt(i)));
+    }
 
-  auto locationHandle = std::make_shared<connector::hive::LocationHandle>(
-      outputDirectoryPath,
-      outputDirectoryPath,
-      connector::hive::LocationHandle::TableType::kNew,
-      outputFileName);
-  std::shared_ptr<HiveBucketProperty> bucketProperty;
-  if (!partitionBy.empty() && bucketCount != 0) {
-    bucketProperty =
-        buildHiveBucketProperty(rowType, bucketCount, bucketedBy, sortBy);
-  }
-  auto hiveHandle = std::make_shared<connector::hive::HiveInsertTableHandle>(
-      columnHandles,
-      locationHandle,
-      fileFormat,
-      bucketProperty,
-      common::CompressionKind_NONE);
+    auto locationHandle = std::make_shared<connector::hive::LocationHandle>(
+        outputDirectoryPath,
+        outputDirectoryPath,
+        connector::hive::LocationHandle::TableType::kNew,
+        outputFileName);
+    std::shared_ptr<HiveBucketProperty> bucketProperty;
+    if (!partitionBy.empty() && bucketCount != 0) {
+      bucketProperty =
+          buildHiveBucketProperty(rowType, bucketCount, bucketedBy, sortBy);
+    }
+    auto hiveHandle = std::make_shared<connector::hive::HiveInsertTableHandle>(
+        columnHandles,
+        locationHandle,
+        fileFormat,
+        bucketProperty,
+        common::CompressionKind_NONE);
 
-  auto insertHandle =
-      std::make_shared<core::InsertTableHandle>(connectorId, hiveHandle);
+    insertHandlePtr =
+        std::make_shared<core::InsertTableHandle>(connectorId, hiveHandle);
+  }
 
   std::shared_ptr<core::AggregationNode> aggregationNode;
   if (!aggregates.empty()) {
@@ -536,7 +543,7 @@ PlanBuilder& PlanBuilder::tableWrite(
       rowType,
       rowType->names(),
       aggregationNode,
-      insertHandle,
+      insertHandlePtr,
       false,
       TableWriteTraits::outputType(aggregationNode),
       connector::CommitStrategy::kNoCommit,
