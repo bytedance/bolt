@@ -173,6 +173,13 @@ class GroupingSet {
     return table_ ? table_->stats() : HashTableStats{};
   }
 
+  std::optional<BaseHashTable::HashMode> hashMode() const {
+    if (!table_) {
+      return std::nullopt;
+    }
+    return table_->hashMode();
+  }
+
   /// Return the number of rows kept in memory.
   int64_t numRows() const {
     return table_ ? table_->rows()->numRows() : 0;

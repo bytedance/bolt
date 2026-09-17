@@ -42,6 +42,7 @@
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <string_view>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::test;
@@ -917,6 +918,36 @@ TEST(HashTableTest, modeString) {
   ASSERT_EQ(
       "Unknown HashTable mode:100",
       BaseHashTable::modeString(static_cast<BaseHashTable::HashMode>(100)));
+}
+
+TEST(HashTableTest, hashModeRuntimeStats) {
+  std::unordered_map<std::string, RuntimeMetric> runtimeStats;
+  runtimeStats["unrelated"] = RuntimeMetric(7);
+
+  const auto verifyHashMode =
+      [&](std::optional<BaseHashTable::HashMode> hashMode,
+          const char* expectedMetric) {
+        detail::addHashModeRuntimeStats(runtimeStats, hashMode);
+        for (const char* metricName :
+             {"hashtable.hashModeArray",
+              "hashtable.hashModeNormalizedKey",
+              "hashtable.hashModeHash"}) {
+          if (expectedMetric != nullptr &&
+              std::string_view(metricName) == expectedMetric) {
+            EXPECT_EQ(runtimeStats.at(metricName).sum, 1);
+          } else {
+            EXPECT_EQ(runtimeStats.count(metricName), 0);
+          }
+        }
+        EXPECT_EQ(runtimeStats.at("unrelated").sum, 7);
+      };
+
+  verifyHashMode(BaseHashTable::HashMode::kArray, "hashtable.hashModeArray");
+  verifyHashMode(
+      BaseHashTable::HashMode::kNormalizedKey,
+      "hashtable.hashModeNormalizedKey");
+  verifyHashMode(BaseHashTable::HashMode::kHash, "hashtable.hashModeHash");
+  verifyHashMode(std::nullopt, nullptr);
 }
 
 DEBUG_ONLY_TEST_P(HashTableTest, nextBucketOffset) {

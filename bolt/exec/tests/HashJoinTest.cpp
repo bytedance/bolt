@@ -2616,11 +2616,29 @@ TEST_P(MultiThreadedHashJoinTest, leftJoin) {
       .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
         int nullJoinBuildKeyCount = 0;
         int nullJoinProbeKeyCount = 0;
+        int hashBuildCount = 0;
 
         for (auto& pipeline : task->taskStats().pipelineStats) {
           for (auto op : pipeline.operatorStats) {
             if (op.operatorType == "HashBuild") {
               nullJoinBuildKeyCount += op.numNullKeys;
+              int64_t hashModeMetricCount = 0;
+              for (const char* name :
+                   {"hashtable.hashModeArray",
+                    "hashtable.hashModeNormalizedKey",
+                    "hashtable.hashModeHash"}) {
+                const auto it = op.runtimeStats.find(name);
+                if (it == op.runtimeStats.end()) {
+                  continue;
+                }
+                const auto& metric = it->second;
+                EXPECT_EQ(metric.sum, metric.count);
+                hashModeMetricCount += metric.count;
+                EXPECT_EQ(metric.min, 1);
+                EXPECT_EQ(metric.max, 1);
+              }
+              EXPECT_GT(hashModeMetricCount, 0);
+              ++hashBuildCount;
             }
             if (op.operatorType == "HashProbe") {
               nullJoinProbeKeyCount += op.numNullKeys;
@@ -2629,6 +2647,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoin) {
         }
         ASSERT_EQ(nullJoinBuildKeyCount, 33 * GetParam().numDrivers);
         ASSERT_EQ(nullJoinProbeKeyCount, 34 * GetParam().numDrivers);
+        ASSERT_EQ(hashBuildCount, 1);
       })
       .run();
 }
