@@ -1,0 +1,62 @@
+name: Scheduled ASAN Nightly Build
+
+on:
+  schedule:
+    # Runs every day at 12:00 AM UTC (5:30 AM IST)
+    - cron: '0 0 * * *'
+  # Allows you to trigger it manually from the Actions tab for testing
+  workflow_dispatch: 
+
+jobs:
+  build-and-test-asan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Cache for Conan
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: ${{ runner.os }}-conan-${{ hashFiles('**/conanfile.py') }}
+          restore-keys: |
+            ${{ runner.os }}-conan-
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential curl python3-pip
+
+      - name: Install Conan
+        run: |
+          pip3 install conan
+          conan profile detect --force
+
+      - name: Build with ASAN Options
+        run: |
+          cd bolt
+          # Passing the AddressSanitizer flags down to the compiler through Conan/CMake parameters
+          # Adjust these flags depending on how Bolt's specific Makefile parses compilation variables
+          make release_spark CONAN_OPTIONS="-s '&:build_type=Release' -o 'bolt/*:spark_compatible=True' -o '*:shared=False'" CXXFLAGS="-fsanitize=address -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address"
+
+      - name: Run Unit Tests with ASAN
+        run: |
+          cd bolt
+          # ASAN options to instantly crash out and log on the first memory leak/corruption encountered
+          export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1
+          make unittest
+
+      - name: Automatically Create Issue on Failure
+        if: failure()
+        uses: imjohnbo/issue-bot@v3
+        with:
+          assignees: zhangxffff # Automatically assign the triager mentioned in your last issue
+          labels: bug, needs triage
+          title: "Nightly ASAN Build Failure"
+          body: |
+            The scheduled AddressSanitizer (ASAN) build has failed. 
+            
+            Please check the latest action run execution logs here: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} to identify and patch the memory corruption.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
