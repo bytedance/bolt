@@ -23,7 +23,7 @@ Failure keys (one per line in blacklist.txt):
                            matched against the blacklist on purpose
 
 Also writes _suite_times.txt / _test_times.txt (measured from the XML) next
-to the plan, for refreshing the checked-in timing hints.
+to the plan, for refreshing the cached timing hints.
 """
 
 import argparse
@@ -35,7 +35,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 
 ABORTED_RE = re.compile(r"^(\S+) \*\*\* ABORTED \*\*\*")
-JUNIT_FAIL_RE = re.compile(r"^\d+\) (\w+)\((\S+)\)")
+JUNIT_FAIL_RE = re.compile(r"^\d+\) (.+)\(([^()]+)\)$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -75,34 +75,39 @@ def main():
 
     for job_id, module, kind, _weight, members, _tests_file in plan:
         suites = members.split(",")
+        job_keys = []
         log = read_lines(os.path.join(args.jobs_dir, job_id + ".log"))
         try:
             with open(os.path.join(args.jobs_dir, job_id + ".rc")) as fh:
-                rc = int(fh.read().strip() or "1")
+                rc = int(fh.read().strip())
         except (OSError, ValueError):
-            rc = 1
+            rc = None
 
         if kind == "junit":
             found = False
             for line in log:
                 m = JUNIT_FAIL_RE.match(line)
                 if m:
-                    keys.append((f"{m.group(2)}#{m.group(1)}", job_id))
+                    job_keys.append((f"{m.group(2)}#{m.group(1)}", job_id))
                 if line.startswith("OK (") or line.startswith("Tests run:"):
                     found = True
-            if rc != 0 and not found:
+            keys.extend(job_keys)
+            if not found or rc not in (0, 1) or (rc == 1 and not job_keys):
                 keys.extend((f"{s}#(jvm-failed)", job_id) for s in suites)
             continue
 
         # scalatest: failures and timings from the XML, aborts from the log
         reported = set()
+        invalid_report = False
         for xml in glob.glob(os.path.join(args.reports_dir, job_id, "TEST-*.xml")):
             if "DiscoverySuite" in os.path.basename(xml):
                 continue
             try:
                 root = ET.parse(xml).getroot()
             except ET.ParseError:
+                invalid_report = True
                 continue
+            reported.add(root.get("name"))
             for tc in root.iter("testcase"):
                 cls, name = tc.get("classname"), tc.get("name")
                 secs = float(tc.get("time", 0) or 0)
@@ -110,16 +115,27 @@ def main():
                 suite_secs[cls] += secs
                 test_secs[(cls, name)] = secs
                 if tc.find("failure") is not None or tc.find("error") is not None:
-                    keys.append((f"{cls}#{name}", job_id))
+                    job_keys.append((f"{cls}#{name}", job_id))
         for line in log:
             m = ABORTED_RE.match(line)
             if m:
-                keys.append((f"{m.group(1)}#(aborted)", job_id))
+                job_keys.append((f"{m.group(1)}#(aborted)", job_id))
                 reported.add(m.group(1))
-        if not any(line.startswith("Run completed in") for line in log):
-            keys.extend(
-                (f"{s}#(jvm-failed)", job_id) for s in suites if s not in reported
-            )
+        keys.extend(job_keys)
+        # Exit 1 is expected for reported test failures and suite aborts. A
+        # crash, missing exit status, or incomplete run must never be excused
+        # by a partial XML report or a blacklisted failure earlier in the job.
+        incomplete = (
+            invalid_report
+            or rc not in (0, 1)
+            or (rc == 1 and not job_keys)
+            or not any(line.startswith("Run completed in") for line in log)
+        )
+        keys.extend(
+            (f"{s}#(jvm-failed)", job_id)
+            for s in suites
+            if incomplete or s not in reported
+        )
 
     fired = set()
     expected = unexpected = 0

@@ -1,6 +1,6 @@
 # Run the full Gluten UT matrix against the Bolt backend via
-# scripts/gluten_ut/run.sh (parallel dispatcher with bwrap per-suite isolation,
-# slow-suites priority dispatch, case-level blacklist).
+# scripts/gluten_ut/run.sh (parallel dispatcher with bwrap per-job isolation,
+# packed JVM jobs, case-level blacklist).
 
 name: Bolt Gluten UT
 
@@ -20,10 +20,8 @@ on:
 
 env:
   # The Bolt backend (backends-bolt / cpp/bolt) lives in upstream Gluten main.
-  # TEMPORARY: upstream main (53ad31ba2) does not compile backends-bolt after
-  # the shims cleanup (#12954); point at the fix branch until it is merged.
-  GLUTEN_REPO: ${{ inputs.gluten_repo || 'zhangxffff/gluten' }}
-  GLUTEN_REF: ${{ inputs.gluten_ref || 'fix/bolt-shims-cleanup' }}
+  GLUTEN_REPO: ${{ inputs.gluten_repo || 'apache/incubator-gluten' }}
+  GLUTEN_REF: ${{ inputs.gluten_ref || 'main' }}
   # Matches build-test.yml — ccache + conan cache live under /data on the host.
   CCACHE_DIR: /data/ccache-data
   CCACHE_MAX_SIZE: '100G'
@@ -42,9 +40,14 @@ jobs:
     runs-on: [ self-hosted, medium ]
     container:
       image: bolt-registry:5000/bolt-ci:20260114
-      options: --user root --init --privileged
+      # Keep this checkout's installed Gluten SNAPSHOTs private to the job,
+      # while sharing downloaded Maven dependencies across runs on this host.
+      options: >-
+        --user root --init --privileged
+        --tmpfs /root/.m2/repository/org/apache/gluten
       volumes:
         - /data/ccache-data:/data/ccache-data
+        - /data/bolt-gluten-ut-maven:/root/.m2/repository
         - /data/bolt-gluten-ut-arrow:/root/.m2/repository/org/apache/arrow
         - /data/bolt-gluten-ut-spark:/data/bolt-gluten-ut-spark
         # Per-suite / per-test timings measured by previous runs; run.sh uses
@@ -59,6 +62,9 @@ jobs:
     steps:
       - name: Checkout bolt (this repo)
         uses: actions/checkout@v6
+
+      - name: Check Gluten UT runner
+        run: python3 -m unittest discover -s scripts/gluten_ut/tests -v
 
       - name: Checkout gluten at ${{ env.GLUTEN_REF }}
         uses: actions/checkout@v6

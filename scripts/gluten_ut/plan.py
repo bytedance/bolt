@@ -16,7 +16,7 @@
 """Turn the discovered test classes into JVM jobs of roughly equal weight.
 
 Input is the SuiteClassifier output (scalatest / test / junit records) plus the
-checked-in timing hints. Output is one job per line, heaviest first:
+cached timing hints. Output is one job per line, heaviest first:
 
     <job id> <module> <kind> <weight secs> <fqcn,fqcn,...> <tests file or ->
 
@@ -86,14 +86,24 @@ def main():
         help="split the jobs across this many runners",
     )
     args = ap.parse_args()
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        ap.error("require --shard-count >= 1 and 0 <= --shard-index < --shard-count")
+    if not math.isfinite(args.target) or args.target <= 0:
+        ap.error("--target must be finite and positive")
+    if not math.isfinite(args.shard_min) or args.shard_min <= 0:
+        ap.error("--shard-min must be finite and positive")
 
-    suites = {}  # fqcn -> (module, kind)
-    tests = defaultdict(list)  # fqcn -> [test names]
+    # Different modules can define the same FQCN with different test cases.
+    suites = {}  # (module, fqcn) -> kind
+    tests = defaultdict(list)  # (module, fqcn) -> [test names]
     for rec in read_tsv(args.classified):
         if rec[0] in ("scalatest", "junit"):
-            suites[rec[2]] = (rec[1], rec[0])
+            suites[(rec[1], rec[2])] = rec[0]
         elif rec[0] == "test":
-            tests[rec[2]].append(rec[3])
+            tests[(rec[1], rec[2])].append(rec[3])
+
+    if not suites:
+        ap.error("no runnable test classes were discovered")
 
     suite_secs = {r[0]: float(r[1]) for r in read_tsv(args.suite_times) if len(r) >= 2}
     test_secs = {
@@ -107,7 +117,7 @@ def main():
     jobs = []  # (weight, module, kind, [fqcn], tests or None, label)
 
     per_module = defaultdict(lambda: {"scalatest": [], "junit": []})
-    for fqcn, (module, kind) in suites.items():
+    for (module, fqcn), kind in suites.items():
         per_module[module][kind].append(fqcn)
 
     for module in sorted(per_module):
@@ -115,7 +125,7 @@ def main():
         batchable = []
         for fqcn in per_module[module]["scalatest"]:
             weight = suite_weight(fqcn)
-            names = tests.get(fqcn, [])
+            names = tests.get((module, fqcn), [])
             nshards = math.ceil(weight / args.target)
             if weight >= args.shard_min and len(names) > 1 and nshards >= 2:
                 known = [test_secs[(fqcn, n)] for n in names if (fqcn, n) in test_secs]

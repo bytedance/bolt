@@ -197,9 +197,26 @@ rm -rf "$CP_DIR" "$CLASSIFIED_DIR"
 mkdir -p "$CP_DIR" "$CLASSIFIED_DIR"
 
 # JVM flags the poms hand to every forked test JVM (--add-opens etc.).
-JVM_ARGS=$("$MVN_BIN" -q -ntp help:evaluate -Dexpression=extraJavaTestArgs -DforceStdout 2> /dev/null | tr '\n' ' ' || true)
+# Read the property from a file: Maven console output can contain ANSI reset
+# codes even with -q, corrupting the last argument (e.g. -Dfile.encoding=UTF-8).
+JVM_ARGS_FILE="$LOG_DIR/_jvm_args.txt"
+rm -f "$JVM_ARGS_FILE"
+"$MVN_BIN" -q -B -ntp help:evaluate -Dexpression=extraJavaTestArgs \
+  -Doutput="$JVM_ARGS_FILE" > "$LOG_DIR/_jvm_args.log" 2>&1 || {
+  echo "could not evaluate extraJavaTestArgs; see $LOG_DIR/_jvm_args.log" >&2
+  tail -40 "$LOG_DIR/_jvm_args.log" >&2
+  exit 1
+}
+JVM_ARGS=$(tr '\n' ' ' < "$JVM_ARGS_FILE")
 [[ "$JVM_ARGS" == *IgnoreUnrecognizedVMOptions* ]] || {
   echo "could not read extraJavaTestArgs from the gluten pom (got: '$JVM_ARGS')" >&2
+  exit 1
+}
+# Fail once, before dispatching suites, if the shared JVM arguments are invalid.
+# shellcheck disable=SC2086
+"$JAVA_HOME/bin/java" $JVM_ARGS -version > "$LOG_DIR/_jvm_preflight.log" 2>&1 || {
+  echo "JVM startup failed; see $LOG_DIR/_jvm_preflight.log" >&2
+  cat "$LOG_DIR/_jvm_preflight.log" >&2
   exit 1
 }
 export JVM_ARGS
@@ -209,6 +226,10 @@ export JVM_ARGS
 MODULES=$(find . -type d \( -path '*/target/test-classes' -o -path '*/target/scala-*/test-classes' \) \
   \! -path '*/ep/_ep/*' \
   | sed -E 's|^\./(.+)/target/.*|\1|' | sort -u)
+[[ -n "$MODULES" ]] || {
+  echo "No compiled test modules found under $GLUTEN_HOME" >&2
+  exit 1
+}
 
 export MVN_BIN MVN_PROFILES MVN_AM CP_DIR CLASSIFIED_DIR SCRIPT_DIR GLUTEN_HOME SPARK_HOME
 
@@ -232,23 +253,32 @@ classify_module() {
   "$MVN_BIN" -q -ntp -pl "$module" $MVN_AM $MVN_PROFILES dependency:build-classpath \
     -Dmdep.includeScope=test -Dmdep.outputFile="$CP_DIR/$tag.txt" \
     > "$CP_DIR/$tag.log" 2>&1 || {
-    echo "  ! dependency:build-classpath failed for $module; see $CP_DIR/$tag.log"
-    return 0
+    echo "  ! dependency:build-classpath failed for $module; see $CP_DIR/$tag.log" >&2
+    return 1
   }
-  local cp="$test_classes:$classes:$(cat "$CP_DIR/$tag.txt")"
+  local dependencies cp
+  dependencies=$(cat "$CP_DIR/$tag.txt") || return 1
+  cp="$test_classes:$classes:$dependencies"
   (
-    cd "$GLUTEN_HOME/$module"
+    cd "$GLUTEN_HOME/$module" || exit 1
     "$JAVA_HOME/bin/java" -Xmx1g -Dlog4j.configurationFile=file:src/test/resources/log4j2.properties \
       -Dspark.test.home="$SPARK_HOME" -cp "$cp" \
       "$SCRIPT_DIR/SuiteClassifier.java" "$module" "$test_classes" \
-      > "$CLASSIFIED_DIR/$tag.tsv" 2> "$CLASSIFIED_DIR/$tag.log"
-  ) || echo "  ! SuiteClassifier failed for $module; see $CLASSIFIED_DIR/$tag.log"
+      > "$CLASSIFIED_DIR/$tag.tsv.tmp" 2> "$CLASSIFIED_DIR/$tag.log"
+  ) || {
+    echo "  ! SuiteClassifier failed for $module; see $CLASSIFIED_DIR/$tag.log" >&2
+    return 1
+  }
+  mv "$CLASSIFIED_DIR/$tag.tsv.tmp" "$CLASSIFIED_DIR/$tag.tsv" || return 1
   printf '  %-28s scalatest=%-4s junit=%s\n' "$module" \
     "$(grep -c '^scalatest' "$CLASSIFIED_DIR/$tag.tsv" || true)" \
     "$(grep -c '^junit' "$CLASSIFIED_DIR/$tag.tsv" || true)"
 }
 export -f classify_module
-echo "$MODULES" | xargs -P "$JOBS" -I{} bash -c 'classify_module "{}"'
+echo "$MODULES" | xargs -P "$JOBS" -I{} bash -c 'classify_module "$1"' _ {} || {
+  echo "Test discovery failed; refusing to run an incomplete test matrix." >&2
+  exit 1
+}
 cat "$CLASSIFIED_DIR"/*.tsv > "$LOG_DIR/_classified.tsv"
 echo "Discovered $(grep -cE '^(scalatest|junit)' "$LOG_DIR/_classified.tsv") test classes in $(echo "$MODULES" | wc -l) modules."
 [[ -f "$BLACKLIST_FILE" ]] && echo "Blacklist: $(wc -l < "$BLACKLIST_FILE" | tr -d ' ') entries."
