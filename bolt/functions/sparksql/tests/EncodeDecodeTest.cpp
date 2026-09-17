@@ -253,5 +253,43 @@ TEST_F(EncodeDecodeTest, constantUtf8CharsetStillValidatesOnDecode) {
   EXPECT_EQ(encoded->valueAt(1).str(), "\u00fcber");
 }
 
+TEST_F(EncodeDecodeTest, unsupportedCharsetInOneRowOnly) {
+  // With a per-row charset, an unsupported name must fail only its own row.
+  // Without TRY the whole expression raises; inside TRY the bad row becomes
+  // NULL and the valid rows still produce their values. This is what
+  // applyToSelectedNoThrow buys, so it is asserted rather than assumed.
+  auto text = makeFlatVector<std::string>({"abc", "def", "ghi"});
+  auto charsets =
+      makeFlatVector<std::string>({"UTF-8", "NO-SUCH-CHARSET", "US-ASCII"});
+  auto data = makeRowVector({text, charsets});
+
+  BOLT_ASSERT_THROW(
+      evaluate<SimpleVector<StringView>>("encode(c0, c1)", data),
+      "Unsupported charset");
+
+  auto encoded =
+      evaluate<SimpleVector<StringView>>("try(encode(c0, c1))", data);
+  EXPECT_FALSE(encoded->isNullAt(0));
+  EXPECT_EQ(encoded->valueAt(0).str(), "abc");
+  EXPECT_TRUE(encoded->isNullAt(1));
+  EXPECT_FALSE(encoded->isNullAt(2));
+  EXPECT_EQ(encoded->valueAt(2).str(), "ghi");
+
+  auto binary = makeFlatVector<std::string>({"abc", "def", "ghi"}, VARBINARY());
+  auto binaryData = makeRowVector({binary, charsets});
+
+  BOLT_ASSERT_THROW(
+      evaluate<SimpleVector<StringView>>("decode(c0, c1)", binaryData),
+      "Unsupported charset");
+
+  auto decoded =
+      evaluate<SimpleVector<StringView>>("try(decode(c0, c1))", binaryData);
+  EXPECT_FALSE(decoded->isNullAt(0));
+  EXPECT_EQ(decoded->valueAt(0).str(), "abc");
+  EXPECT_TRUE(decoded->isNullAt(1));
+  EXPECT_FALSE(decoded->isNullAt(2));
+  EXPECT_EQ(decoded->valueAt(2).str(), "ghi");
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test
