@@ -104,18 +104,54 @@ TEST_F(EncodeDecodeTest, utf16Variants) {
           "a\x00"
           "b\x00",
           4));
-  // Plain UTF-16 emits a byte-order mark, matching Java.
+  // Plain UTF-16 emits a big-endian BOM followed by big-endian code units,
+  // matching Java's Charset("UTF-16"). ICU's own "UTF-16" converter would emit
+  // FF FE and little-endian units on a little-endian host, so the
+  // implementation maps this name to ICU's "UnicodeBig" when encoding.
   EXPECT_EQ(
       encode("ab", "UTF-16"),
       std::string(
-          "\xFF\xFE"
+          "\xFE\xFF\x00"
           "a\x00"
-          "b\x00",
+          "b",
           6));
 
   EXPECT_EQ(roundTrip("ab", "UTF-16BE"), "ab");
   EXPECT_EQ(roundTrip("ab", "UTF-16LE"), "ab");
   EXPECT_EQ(roundTrip("ab", "UTF-16"), "ab");
+}
+
+TEST_F(EncodeDecodeTest, utf16DecodeHonoursEitherBom) {
+  // Java's UTF-16 decoder accepts either BOM and assumes big-endian when none
+  // is present. Decoding must therefore keep ICU's "UTF-16" converter: the
+  // "UnicodeBig" used for encoding would mis-decode little-endian input.
+  EXPECT_EQ(
+      decode(
+          std::string(
+              "\xFE\xFF\x00"
+              "a\x00"
+              "b",
+              6),
+          "UTF-16"),
+      "ab");
+  EXPECT_EQ(
+      decode(
+          std::string(
+              "\xFF\xFE"
+              "a\x00"
+              "b\x00",
+              6),
+          "UTF-16"),
+      "ab");
+  EXPECT_EQ(
+      decode(
+          std::string(
+              "\x00"
+              "a\x00"
+              "b",
+              4),
+          "UTF-16"),
+      "ab");
 }
 
 TEST_F(EncodeDecodeTest, multiByteRoundTrip) {

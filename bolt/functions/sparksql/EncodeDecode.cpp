@@ -28,15 +28,46 @@
 namespace bytedance::bolt::functions::sparksql {
 namespace {
 
+/// Maps a charset name to the ICU converter that encodes the way Java does.
+///
+/// Java's "UTF-16" writes a big-endian BOM (FE FF) followed by big-endian code
+/// units. ICU's "UTF-16" converter instead writes FF FE and little-endian units
+/// on a little-endian host, so using it directly produces bytes Spark would
+/// not. ICU's "UnicodeBig" is the fixed big-endian-with-BOM converter that
+/// matches.
+///
+/// This substitution applies to encoding only. On decode, ICU's "UTF-16"
+/// correctly honours either BOM and defaults to big-endian when none is
+/// present, which is exactly Java's contract; "UnicodeBig" would mis-decode
+/// input that carries a little-endian BOM.
+std::string resolveCharsetForEncode(const std::string& charset) {
+  UErrorCode status = U_ZERO_ERROR;
+  UConverter* converter = ucnv_open(charset.c_str(), &status);
+  if (U_FAILURE(status)) {
+    // Leave the name alone; opening it again below produces the user error.
+    return charset;
+  }
+  const char* canonical = ucnv_getName(converter, &status);
+  const bool isUtf16 = U_SUCCESS(status) && canonical != nullptr &&
+      std::string(canonical) == "UTF-16";
+  ucnv_close(converter);
+  return isUtf16 ? "UnicodeBig" : charset;
+}
+
 /// Owns a UConverter for one charset name.
 ///
 /// Spark's encode/decode take the charset as an argument, so when that argument
 /// is constant the converter is opened once at plan time instead of per row.
+///
+/// 'forEncode' selects the direction, which matters for one charset: see
+/// resolveCharsetForEncode.
 class Converter {
  public:
-  explicit Converter(const std::string& charset) : charset_(charset) {
+  Converter(const std::string& charset, bool forEncode)
+      : charset_(charset),
+        icuCharset_(forEncode ? resolveCharsetForEncode(charset) : charset) {
     UErrorCode status = U_ZERO_ERROR;
-    converter_ = ucnv_open(charset_.c_str(), &status);
+    converter_ = ucnv_open(icuCharset_.c_str(), &status);
     if (U_FAILURE(status)) {
       // Spark throws for an unsupported charset rather than returning NULL;
       // an unknown name is a query-authoring error, not a data value.
@@ -172,6 +203,9 @@ class Converter {
 
  private:
   const std::string charset_;
+  // The ICU converter name actually opened, which differs from charset_ only
+  // for UTF-16 on the encode side.
+  const std::string icuCharset_;
   UConverter* converter_{nullptr};
 };
 
@@ -203,7 +237,8 @@ class EncodeDecodeFunction : public exec::VectorFunction {
       // rather than being copied unchanged into a VARCHAR result.
       passThrough_ = kEncode && isUtf8(constantCharset.value());
       if (!passThrough_) {
-        converter_ = std::make_shared<Converter>(constantCharset.value());
+        converter_ =
+            std::make_shared<Converter>(constantCharset.value(), kEncode);
       }
     }
   }
@@ -238,7 +273,7 @@ class EncodeDecodeFunction : public exec::VectorFunction {
       std::shared_ptr<Converter> perRow;
       if (converter == nullptr) {
         perRow = std::make_shared<Converter>(
-            charsetArg->valueAt<StringView>(row).str());
+            charsetArg->valueAt<StringView>(row).str(), kEncode);
         converter = perRow.get();
       }
 
