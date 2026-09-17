@@ -189,3 +189,4 @@ if(${BOLT_BUILD_BENCHMARKS})
 endif()
 
 add_subdirectory(prefixsort)
+add_subdirectory(task_manager)
