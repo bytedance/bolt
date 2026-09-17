@@ -32,8 +32,11 @@
 
 #include <gtest/gtest.h>
 
+#include <span>
+
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/HashStringAllocator.h"
+#include "bolt/exec/BmContainerRowSerde.h"
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -111,6 +114,67 @@ class ContainerRowSerdeTest : public testing::Test,
     test::assertEqualVectors(data, copy);
 
     allocator_.clear();
+  }
+
+  void assertExactSerialization(const VectorPtr& data, bool isKey = true) {
+    const ContainerRowSerdeOptions options{.isKey = isKey};
+    for (auto i = 0; i < data->size(); ++i) {
+      ASSERT_FALSE(data->isNullAt(i));
+
+      ByteOutputStream out(&allocator_);
+      auto position = allocator_.newWrite(out);
+      ContainerRowSerde::serialize(*data, i, out, options);
+      const auto streamSize = out.size();
+      allocator_.finishWrite(out, 0);
+
+      const auto exactSize =
+          BmContainerRowSerde::serializedSize(*data, i, options);
+      ASSERT_EQ(streamSize, exactSize) << "at " << i;
+      std::vector<char> expected(exactSize);
+      auto in = HashStringAllocator::prepareRead(position.header);
+      in->readBytes(
+          reinterpret_cast<uint8_t*>(expected.data()), expected.size());
+
+      std::vector<char> actual(exactSize);
+      EXPECT_EQ(
+          exactSize,
+          BmContainerRowSerde::serializeInto(
+              *data, i, std::span<char>(actual), options));
+      EXPECT_EQ(expected, actual) << "at " << i;
+      allocator_.clear();
+    }
+  }
+
+  // Returns the exact serialized bytes of data[index] via serializeInto().
+  std::vector<char> serializeIntoBytes(
+      const VectorPtr& data,
+      vector_size_t index,
+      bool isKey = true) {
+    const ContainerRowSerdeOptions options{.isKey = isKey};
+    const auto size =
+        BmContainerRowSerde::serializedSize(*data, index, options);
+    std::vector<char> bytes(size);
+    BmContainerRowSerde::serializeInto(
+        *data, index, std::span<char>(bytes), options);
+    return bytes;
+  }
+
+  void assertBatchSerializedSizes(const VectorPtr& data, bool isKey = true) {
+    const ContainerRowSerdeOptions options{.isKey = isKey};
+    DecodedVector decoded(*data);
+    std::vector<uint64_t> sizes(data->size());
+    BmContainerRowSerde::serializedSizes(
+        decoded, 0, data->size(), options, std::span<uint64_t>(sizes));
+
+    for (auto i = 0; i < data->size(); ++i) {
+      ASSERT_FALSE(data->isNullAt(i));
+      ByteOutputStream out(&allocator_);
+      allocator_.newWrite(out);
+      ContainerRowSerde::serialize(*data, i, out, options);
+      EXPECT_EQ(out.size(), sizes[i]) << "at " << i;
+      allocator_.finishWrite(out, 0);
+      allocator_.clear();
+    }
   }
 
   void assertNotEqualVectors(const VectorPtr& left, const VectorPtr& right) {
@@ -273,6 +337,418 @@ TEST_F(ContainerRowSerdeTest, bigint) {
   auto data = makeFlatVector<int64_t>({1, 2, 3, 4, 5});
 
   testRoundTrip(data);
+}
+
+TEST_F(ContainerRowSerdeTest, exactSerializationMatchesStreamEncoding) {
+  assertExactSerialization(makeFlatVector<int64_t>({1, -2, 3}));
+  auto arrays = makeNullableArrayVector<std::string>({
+      {{{std::nullopt, "short", std::string(40, 'x')}}},
+      {{std::vector<std::optional<std::string>>{}}},
+      {{{"last"}}},
+  });
+  assertExactSerialization(arrays);
+  assertExactSerialization(wrapInDictionary(makeIndices({2, 0, 1}), arrays));
+  assertExactSerialization(BaseVector::wrapInConstant(3, 0, arrays));
+  assertExactSerialization(wrapInLazyDictionary(arrays));
+  assertExactSerialization(makeRowVector({
+      makeNullableFlatVector<int64_t>({1, std::nullopt}),
+      makeNullableArrayVector<int64_t>(
+          std::vector<std::vector<std::optional<int64_t>>>{
+              {1, std::nullopt}, {}}),
+  }));
+
+  auto maps = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {1, 10}},
+      {},
+  });
+  assertExactSerialization(maps, true);
+  assertExactSerialization(maps, false);
+
+  auto largeArray = makeArrayVector<std::string>({{std::string(1 << 20, 'z')}});
+  assertExactSerialization(largeArray);
+}
+
+// Exercises the flat fixed-width batched-run fast path in serializeDirectArray
+// (used by serializeInto/trySerializeInto): full non-null runs, interior nulls
+// splitting runs, int128 alignment, and the dictionary-element fallback. All
+// must stay byte-identical to stream serialization.
+TEST_F(ContainerRowSerdeTest, exactSerializationBatchedFixedWidthArrays) {
+  // Contiguous non-null fixed-width elements (single batched run).
+  assertExactSerialization(makeArrayVector<int64_t>({{1, 2, 3, 4, 5}, {6, 7}}));
+  assertExactSerialization(makeArrayVector<int32_t>({{1, 2, 3}, {}, {4}}));
+  assertExactSerialization(makeArrayVector<double>({{1.5, 2.5, 3.5}}));
+
+  // Interior nulls split the copy into multiple runs.
+  assertExactSerialization(makeNullableArrayVector<int64_t>(
+      std::vector<std::vector<std::optional<int64_t>>>{
+          {1, std::nullopt, 3, std::nullopt, 5},
+          {std::nullopt, std::nullopt},
+          {7, 8}}));
+
+  // int128 goes through the int8 view to avoid a misaligned 16-byte load.
+  assertExactSerialization(makeArrayVector<int128_t>({{1, 2, 3}, {4}}));
+  assertExactSerialization(makeNullableArrayVector<int128_t>(
+      std::vector<std::vector<std::optional<int128_t>>>{{1, std::nullopt, 3}}));
+
+  // Dictionary-wrapped elements are not flat: must fall back to per-element.
+  auto dictionaryElements = wrapInDictionary(
+      makeIndices({2, 1, 0, 2}),
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 3}));
+  assertExactSerialization(makeArrayVector({0, 2}, dictionaryElements));
+}
+
+TEST_F(ContainerRowSerdeTest, BatchSerializedSizesMatchStreamEncoding) {
+  auto variants = VariantVector::create(pool(), VARIANT(), 2);
+  variants->valueChildVector()->asUnchecked<FlatVector<StringView>>()->set(
+      0, StringView("value"));
+  variants->metadataChildVector()->asUnchecked<FlatVector<StringView>>()->set(
+      0, StringView("meta"));
+  const std::string longValue(48, 'v');
+  const std::string longMetadata(36, 'm');
+  variants->valueChildVector()->asUnchecked<FlatVector<StringView>>()->set(
+      1, StringView(longValue));
+  variants->metadataChildVector()->asUnchecked<FlatVector<StringView>>()->set(
+      1, StringView(longMetadata));
+  assertExactSerialization(variants);
+  assertBatchSerializedSizes(variants);
+
+  assertBatchSerializedSizes(makeFlatVector<bool>({true, false}));
+  assertBatchSerializedSizes(makeFlatVector<int8_t>({1, -2}));
+  assertBatchSerializedSizes(makeFlatVector<int16_t>({1, -2}));
+  assertBatchSerializedSizes(makeFlatVector<int32_t>({1, -2}));
+  assertBatchSerializedSizes(makeFlatVector<int64_t>({1, -2}));
+  assertBatchSerializedSizes(makeFlatVector<float>({1.5, -2.5}));
+  assertBatchSerializedSizes(makeFlatVector<double>({1.5, -2.5}));
+  assertBatchSerializedSizes(
+      makeFlatVector<Timestamp>({Timestamp(1, 2), Timestamp(3, 4)}));
+  assertBatchSerializedSizes(makeFlatVector<int128_t>({1, -2}));
+
+  auto arrays = makeNullableArrayVector<std::string>({
+      {{{std::nullopt, "short", std::string(40, 'x')}}},
+      {{std::vector<std::optional<std::string>>{}}},
+      {{{"last"}}},
+  });
+  assertBatchSerializedSizes(arrays);
+  assertBatchSerializedSizes(wrapInDictionary(makeIndices({2, 0, 1}), arrays));
+  assertBatchSerializedSizes(BaseVector::wrapInConstant(3, 0, arrays));
+  assertBatchSerializedSizes(wrapInLazyDictionary(arrays));
+
+  auto dictionaryElements = wrapInDictionary(
+      makeIndices({2, 1, 0, 2}),
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 3}));
+  assertBatchSerializedSizes(makeArrayVector({0, 2}, dictionaryElements));
+
+  auto maps = makeMapVector<int64_t, std::string>({
+      {{2, "two"}, {1, std::string(32, 'a')}},
+      {{4, "four"}},
+      {},
+  });
+  assertBatchSerializedSizes(maps, true);
+  assertBatchSerializedSizes(maps, false);
+  assertBatchSerializedSizes(makeRowVector({maps, arrays}));
+
+  using MapEntry = std::pair<int64_t, std::optional<std::string>>;
+  const std::vector<MapEntry> firstMap{{2, "two"}, {1, "one"}};
+  const std::vector<MapEntry> secondMap{{3, "three"}};
+  const std::vector<std::vector<std::vector<MapEntry>>> arrayOfMaps{
+      {firstMap, secondMap}, {secondMap}};
+  assertBatchSerializedSizes(
+      makeArrayOfMapVector<int64_t, std::string>(arrayOfMaps));
+
+  auto rows = makeRowVector({
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 3}),
+      arrays,
+  });
+  assertBatchSerializedSizes(rows);
+}
+
+TEST_F(
+    ContainerRowSerdeTest,
+    BatchSerializedSizesHandleNullsAndValidateOutput) {
+  auto arrays = makeNullableArrayVector<int64_t>(
+      {{{1, 2}}, std::nullopt, {{3, std::nullopt}}});
+  DecodedVector decoded(*arrays);
+  const ContainerRowSerdeOptions options;
+  std::vector<uint64_t> sizes(arrays->size());
+
+  BmContainerRowSerde::serializedSizes(
+      decoded, 0, arrays->size(), options, std::span<uint64_t>(sizes));
+
+  EXPECT_GT(sizes[0], 0);
+  EXPECT_EQ(sizes[1], 0);
+  EXPECT_GT(sizes[2], 0);
+
+  std::vector<uint64_t> suffixSizes(2);
+  BmContainerRowSerde::serializedSizes(
+      decoded, 1, 2, options, std::span<uint64_t>(suffixSizes));
+  EXPECT_EQ(suffixSizes[0], 0);
+  EXPECT_EQ(suffixSizes[1], sizes[2]);
+
+  const auto dictionaryNulls =
+      makeNulls(3, [](vector_size_t row) { return row == 1; });
+  auto nullableDictionary = BaseVector::wrapInDictionary(
+      dictionaryNulls, makeIndices({0, 1, 2}), 3, arrays);
+  DecodedVector nullableDecoded(*nullableDictionary);
+  BmContainerRowSerde::serializedSizes(
+      nullableDecoded, 0, 3, options, std::span<uint64_t>(sizes));
+  EXPECT_GT(sizes[0], 0);
+  EXPECT_EQ(sizes[1], 0);
+  EXPECT_GT(sizes[2], 0);
+  EXPECT_THROW(
+      BmContainerRowSerde::serializedSizes(
+          decoded,
+          0,
+          arrays->size(),
+          options,
+          std::span<uint64_t>(sizes.data(), sizes.size() - 1)),
+      BoltException);
+}
+
+TEST_F(ContainerRowSerdeTest, serializeIntoRequiresExactCapacity) {
+  auto data = makeFlatVector<int64_t>({123});
+  const ContainerRowSerdeOptions options;
+  const auto size = BmContainerRowSerde::serializedSize(*data, 0, options);
+  ASSERT_EQ(sizeof(int64_t), size);
+
+  std::vector<char> tooSmall(size - 1);
+  EXPECT_THROW(
+      BmContainerRowSerde::serializeInto(
+          *data, 0, std::span<char>(tooSmall), options),
+      BoltException);
+
+  std::vector<char> tooLarge(size + 1);
+  EXPECT_THROW(
+      BmContainerRowSerde::serializeInto(
+          *data, 0, std::span<char>(tooLarge), options),
+      BoltException);
+
+  auto nullable = makeNullableFlatVector<int64_t>({std::nullopt});
+  EXPECT_THROW(
+      BmContainerRowSerde::serializedSize(*nullable, 0, options),
+      BoltException);
+  EXPECT_THROW(
+      BmContainerRowSerde::serializeInto(
+          *nullable, 0, std::span<char>(tooLarge), options),
+      BoltException);
+}
+
+// ---------------------------------------------------------------------------
+// Speculative write tests for detail::trySerializeInto(source, index,
+// available, options) -> {size, complete}. It always reports the exact
+// serialized size, copies into 'available' only while the value fits, and
+// signals capacity exhaustion via complete == false instead of throwing.
+// Complex-type only (ARRAY / MAP / ROW); fixed-width and string paths are
+// unchanged.
+// ---------------------------------------------------------------------------
+
+// Span exactly the serialized size: complete, exact size, byte-identical.
+TEST_F(ContainerRowSerdeTest, TrySerializeExactFit) {
+  auto arrays = makeArrayVector<int64_t>({{1, 2, 3}, {4, 5}});
+  const ContainerRowSerdeOptions options;
+  for (auto i = 0; i < arrays->size(); ++i) {
+    const auto expected = serializeIntoBytes(arrays, i);
+    std::vector<char> actual(expected.size());
+    const auto result =
+        detail::trySerializeInto(*arrays, i, std::span<char>(actual), options);
+    EXPECT_TRUE(result.complete) << "at " << i;
+    EXPECT_EQ(result.size, expected.size()) << "at " << i;
+    EXPECT_EQ(expected, actual) << "at " << i;
+  }
+}
+
+// Span one byte short: incomplete, but size is still the exact full size.
+TEST_F(ContainerRowSerdeTest, TrySerializeOneByteShort) {
+  auto arrays = makeArrayVector<int64_t>({{1, 2, 3}, {4, 5}});
+  const ContainerRowSerdeOptions options;
+  for (auto i = 0; i < arrays->size(); ++i) {
+    const auto full = BmContainerRowSerde::serializedSize(*arrays, i, options);
+    ASSERT_GT(full, 0);
+    std::vector<char> actual(full - 1);
+    const auto result =
+        detail::trySerializeInto(*arrays, i, std::span<char>(actual), options);
+    EXPECT_FALSE(result.complete) << "at " << i;
+    EXPECT_EQ(result.size, full) << "at " << i;
+  }
+}
+
+// Empty span (as when no heap block exists yet): incomplete, exact size.
+TEST_F(ContainerRowSerdeTest, TrySerializeEmptySpan) {
+  auto arrays = makeArrayVector<int64_t>({{1, 2, 3}});
+  const ContainerRowSerdeOptions options;
+  const auto full = BmContainerRowSerde::serializedSize(*arrays, 0, options);
+  const auto result =
+      detail::trySerializeInto(*arrays, 0, std::span<char>(), options);
+  EXPECT_FALSE(result.complete);
+  EXPECT_EQ(result.size, full);
+}
+
+// Inline-sized value (<= kInlineSize) into a large-enough span: complete.
+// Empty ARRAY (4 bytes), empty MAP (8 bytes), all-null ROW (<= 12 bytes).
+TEST_F(ContainerRowSerdeTest, TrySerializeInlineSizedFits) {
+  const ContainerRowSerdeOptions options;
+
+  auto emptyArray = makeArrayVector<int64_t>({{}});
+  auto emptyMap = makeMapVector<int64_t, int64_t>({{}});
+  auto allNullRow = makeRowVector({
+      makeNullableFlatVector<int64_t>({std::nullopt}),
+      makeNullableFlatVector<int64_t>({std::nullopt}),
+  });
+
+  for (const auto& data :
+       std::vector<VectorPtr>{emptyArray, emptyMap, allNullRow}) {
+    const auto expected = serializeIntoBytes(data, 0);
+    EXPECT_LE(expected.size(), StringView::kInlineSize);
+    std::vector<char> actual(expected.size());
+    const auto result =
+        detail::trySerializeInto(*data, 0, std::span<char>(actual), options);
+    EXPECT_TRUE(result.complete);
+    EXPECT_LE(result.size, StringView::kInlineSize);
+    EXPECT_EQ(result.size, expected.size());
+    EXPECT_EQ(expected, actual);
+  }
+}
+
+// Inline-sized value with a span smaller than the value: incomplete, but the
+// reported size is still exact and inline-sized.
+TEST_F(ContainerRowSerdeTest, TrySerializeInlineSizedShortSpan) {
+  const ContainerRowSerdeOptions options;
+  auto emptyMap = makeMapVector<int64_t, int64_t>({{}});
+  const auto full = BmContainerRowSerde::serializedSize(*emptyMap, 0, options);
+  ASSERT_LE(full, StringView::kInlineSize);
+  ASSERT_GT(full, 1);
+  std::vector<char> actual(full - 1);
+  const auto result =
+      detail::trySerializeInto(*emptyMap, 0, std::span<char>(actual), options);
+  EXPECT_FALSE(result.complete);
+  EXPECT_EQ(result.size, full);
+  EXPECT_LE(result.size, StringView::kInlineSize);
+}
+
+// Nested MAP and ROW<MAP, ARRAY>: exact fit is byte-identical, one byte short
+// is incomplete with exact size.
+TEST_F(ContainerRowSerdeTest, TrySerializeNestedComplex) {
+  const ContainerRowSerdeOptions options;
+
+  using MapEntry = std::pair<int64_t, std::optional<std::string>>;
+  const std::vector<MapEntry> firstMap{{2, "two"}, {1, "one"}};
+  const std::vector<MapEntry> secondMap{{3, "three"}};
+  const std::vector<std::vector<std::vector<MapEntry>>> arrayOfMaps{
+      {firstMap, secondMap}, {secondMap}};
+  VectorPtr nestedArrayOfMaps =
+      makeArrayOfMapVector<int64_t, std::string>(arrayOfMaps);
+
+  auto maps = makeMapVector<int64_t, std::string>({
+      {{2, "two"}, {1, std::string(32, 'a')}},
+      {{4, "four"}},
+  });
+  auto arrays = makeArrayVector<int64_t>({{1, 2, 3}, {4}});
+  VectorPtr rowOfMapArray = makeRowVector({maps, arrays});
+
+  std::vector<VectorPtr> inputs{nestedArrayOfMaps, rowOfMapArray};
+  for (const auto& data : inputs) {
+    for (auto i = 0; i < data->size(); ++i) {
+      const auto expected = serializeIntoBytes(data, i);
+      std::vector<char> fit(expected.size());
+      const auto fitResult =
+          detail::trySerializeInto(*data, i, std::span<char>(fit), options);
+      EXPECT_TRUE(fitResult.complete) << "at " << i;
+      EXPECT_EQ(fitResult.size, expected.size()) << "at " << i;
+      EXPECT_EQ(expected, fit) << "at " << i;
+
+      std::vector<char> shortBuf(expected.size() - 1);
+      const auto shortResult = detail::trySerializeInto(
+          *data, i, std::span<char>(shortBuf), options);
+      EXPECT_FALSE(shortResult.complete) << "at " << i;
+      EXPECT_EQ(shortResult.size, expected.size()) << "at " << i;
+    }
+  }
+}
+
+// Unordered-key MAP stays canonical: output matches serializeInto(), and two
+// logically-equal maps with different physical order serialize identically.
+TEST_F(ContainerRowSerdeTest, TrySerializeMapCanonicalOrder) {
+  const ContainerRowSerdeOptions options{.isKey = true};
+
+  auto unordered =
+      makeMapVector<int64_t, int64_t>({{{3, 30}, {1, 10}, {2, 20}}});
+  auto ordered = makeMapVector<int64_t, int64_t>({{{1, 10}, {2, 20}, {3, 30}}});
+
+  const auto expected = serializeIntoBytes(unordered, 0);
+  std::vector<char> actual(expected.size());
+  const auto result =
+      detail::trySerializeInto(*unordered, 0, std::span<char>(actual), options);
+  EXPECT_TRUE(result.complete);
+  EXPECT_EQ(expected, actual);
+
+  // Logically-equal maps with different physical order serialize identically.
+  EXPECT_EQ(serializeIntoBytes(unordered, 0), serializeIntoBytes(ordered, 0));
+}
+
+// Dictionary / constant / lazy wrapped complex inputs behave like the flat
+// cases: exact fit is byte-identical, one byte short is incomplete.
+TEST_F(ContainerRowSerdeTest, TrySerializeWrappedEncodings) {
+  const ContainerRowSerdeOptions options;
+  auto arrays = makeNullableArrayVector<std::string>({
+      {{{std::nullopt, "short", std::string(40, 'x')}}},
+      {{{"last"}}},
+  });
+
+  std::vector<VectorPtr> wrapped{
+      wrapInDictionary(makeIndices({1, 0}), arrays),
+      BaseVector::wrapInConstant(2, 0, arrays),
+      wrapInLazyDictionary(arrays),
+  };
+  for (const auto& data : wrapped) {
+    for (auto i = 0; i < data->size(); ++i) {
+      const auto expected = serializeIntoBytes(data, i);
+      std::vector<char> fit(expected.size());
+      const auto fitResult =
+          detail::trySerializeInto(*data, i, std::span<char>(fit), options);
+      EXPECT_TRUE(fitResult.complete) << "at " << i;
+      EXPECT_EQ(expected, fit) << "at " << i;
+
+      std::vector<char> shortBuf(expected.empty() ? 0 : expected.size() - 1);
+      const auto shortResult = detail::trySerializeInto(
+          *data, i, std::span<char>(shortBuf), options);
+      EXPECT_EQ(shortResult.size, expected.size()) << "at " << i;
+      if (!expected.empty()) {
+        EXPECT_FALSE(shortResult.complete) << "at " << i;
+      }
+    }
+  }
+}
+
+// The reported size equals serializedSize() for every input, whether the span
+// fits or is empty.
+TEST_F(ContainerRowSerdeTest, TrySerializeSizeParity) {
+  const ContainerRowSerdeOptions options;
+  VectorPtr maps = makeMapVector<int64_t, std::string>({
+      {{2, "two"}, {1, std::string(32, 'a')}},
+      {},
+  });
+  VectorPtr arrays = makeNullableArrayVector<int64_t>(
+      std::vector<std::vector<std::optional<int64_t>>>{
+          {1, std::nullopt, 3}, {}});
+  VectorPtr rows = makeRowVector({maps, arrays});
+
+  std::vector<VectorPtr> inputs{maps, arrays, rows};
+  for (const auto& data : inputs) {
+    for (auto i = 0; i < data->size(); ++i) {
+      const auto expected =
+          BmContainerRowSerde::serializedSize(*data, i, options);
+      // Both a fitting and an empty span report the same exact size.
+      std::vector<char> buf(expected);
+      EXPECT_EQ(
+          detail::trySerializeInto(*data, i, std::span<char>(buf), options)
+              .size,
+          expected)
+          << "at " << i;
+      EXPECT_EQ(
+          detail::trySerializeInto(*data, i, std::span<char>(), options).size,
+          expected)
+          << "empty at " << i;
+    }
+  }
 }
 
 TEST_F(ContainerRowSerdeTest, map) {

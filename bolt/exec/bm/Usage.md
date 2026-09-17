@@ -30,12 +30,14 @@ using namespace bytedance::bolt::exec::bm;
 BmRowContainer rows(
     {BIGINT(), VARCHAR()},
     {false, true},
+    0, // Number of key columns.
     bufferManager,
     memory::bm::MemoryTag::kTesting);
 ```
 
-`types` 和 `nullable` 必须一一对应。nullable 信息会参与 row layout 生成，非 nullable
-列会走更短的快路径。
+`types` 和 `nullable` 必须一一对应。`numKeyColumns` 表示开头有多少列属于 key；key
+中的 MAP 会按 key 排序后序列化，以提供稳定的比较和 hash 语义。nullable 信息会参与 row
+layout 生成，非 nullable 列会走更短的快路径。
 
 ## 写入
 

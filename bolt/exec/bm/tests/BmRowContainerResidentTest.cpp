@@ -16,8 +16,11 @@
 
 #include "bolt/exec/bm/tests/BmRowContainerTestBase.h"
 
+#include "bolt/exec/BmContainerRowSerde.h"
+#include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -26,10 +29,155 @@ namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
 
+TEST_F(BmRowContainerTest, StoresComplexKeyAndPayloadColumns) {
+  auto keyMaps = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {1, 10}},
+      {{1, 10}, {2, 20}},
+  });
+  auto payloadMaps = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {1, 10}},
+      {{1, 10}, {2, 20}},
+  });
+  auto arrays = makeNullableArrayVector<double>(
+      std::vector<std::vector<std::optional<double>>>{
+          {1.0, std::nullopt, std::nan("")}, {}});
+  auto input = makeRowVector({keyMaps, payloadMaps, arrays});
+  BmRowContainer container(
+      {keyMaps->type(), payloadMaps->type(), arrays->type()},
+      {false, false, false},
+      1,
+      bufferManager_,
+      MemoryTag::kTesting);
+
+  auto rows = storeAll(container, input);
+  ASSERT_EQ(2, rows.size());
+
+  auto keyResult = BaseVector::create(keyMaps->type(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 0, keyResult, true);
+  auto payloadResult =
+      BaseVector::create(payloadMaps->type(), rows.size(), pool());
+  container.extractColumnResident(
+      rows.data(), rows.size(), 1, payloadResult, true);
+  auto arrayResult = BaseVector::create(arrays->type(), rows.size(), pool());
+  container.extractColumnResident(
+      rows.data(), rows.size(), 2, arrayResult, true);
+
+  auto* keyResultMap = keyResult->as<MapVector>();
+  auto* payloadResultMap = payloadResult->as<MapVector>();
+  ASSERT_NE(nullptr, keyResultMap);
+  ASSERT_NE(nullptr, payloadResultMap);
+  EXPECT_EQ(1, keyResultMap->mapKeys()->asFlatVector<int64_t>()->valueAt(0));
+  EXPECT_EQ(
+      2, payloadResultMap->mapKeys()->asFlatVector<int64_t>()->valueAt(0));
+  EXPECT_EQ(
+      1, payloadResultMap->mapKeys()->asFlatVector<int64_t>()->valueAt(2));
+  test::assertEqualVectors(arrays, arrayResult);
+
+  EXPECT_EQ(0, container.compare(rows[0], rows[1], 0));
+  EXPECT_EQ(container.hash(rows[0], 0), container.hash(rows[1], 0));
+
+  std::vector<char> rowCopy;
+  std::vector<char> variableCopy;
+  const std::vector<int32_t> deepColumns{0, 1, 2};
+  container.copyRowWithDeepColumns(
+      rows[0],
+      folly::Range<const int32_t*>(deepColumns.data(), deepColumns.size()),
+      rowCopy,
+      variableCopy);
+  const char* copiedRow = rowCopy.data();
+  auto copiedArray = BaseVector::create(arrays->type(), 1, pool());
+  container.extractColumnResident(&copiedRow, 1, 2, copiedArray, true);
+  const char* originalRow = rows[0];
+  auto expectedArray = BaseVector::create(arrays->type(), 1, pool());
+  container.extractColumnResident(&originalRow, 1, 2, expectedArray, true);
+  test::assertEqualVectors(expectedArray, copiedArray);
+}
+
+TEST_F(BmRowContainerTest, ComplexArrayAndRowCompareHashNestedValues) {
+  auto arrays = makeNullableArrayVector<double>(
+      std::vector<std::vector<std::optional<double>>>{
+          {1.0, std::nullopt, std::nan("")},
+          {1.0, std::nullopt, std::nan("")}});
+  auto nestedRows = makeRowVector({
+      makeNullableFlatVector<int64_t>({std::nullopt, std::nullopt}),
+      arrays,
+  });
+  auto input = makeRowVector({arrays, nestedRows});
+  BmRowContainer container(
+      {arrays->type(), nestedRows->type()},
+      {false, false},
+      2,
+      bufferManager_,
+      MemoryTag::kTesting);
+
+  auto rows = storeAll(container, input);
+  ASSERT_EQ(2, rows.size());
+  for (int32_t column = 0; column < 2; ++column) {
+    EXPECT_EQ(0, container.compare(rows[0], rows[1], column));
+    EXPECT_EQ(container.hash(rows[0], column), container.hash(rows[1], column));
+  }
+
+  auto result = BaseVector::create(nestedRows->type(), rows.size(), pool());
+  container.extractColumnResident(rows.data(), rows.size(), 1, result, true);
+  test::assertEqualVectors(nestedRows, result);
+}
+
+TEST_F(BmRowContainerTest, InlineComplexValuesRemainValidDuringCompareAndHash) {
+  auto nestedRows = makeRowVector({makeFlatVector<int8_t>({1, 2, 1})});
+  const ContainerRowSerdeOptions options{.isKey = true};
+  for (vector_size_t row = 0; row < nestedRows->size(); ++row) {
+    ASSERT_LE(
+        BmContainerRowSerde::serializedSize(*nestedRows, row, options),
+        StringView::kInlineSize);
+  }
+  auto input = makeRowVector({nestedRows});
+  BmRowContainer container(
+      {nestedRows->type()}, {false}, 1, bufferManager_, MemoryTag::kTesting);
+
+  auto rows = storeAll(container, input);
+  ASSERT_EQ(3, rows.size());
+  BmRowLayout layout(
+      {nestedRows->type()},
+      {false},
+      1,
+      static_cast<uint32_t>(
+          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)));
+  for (const auto* row : rows) {
+    EXPECT_TRUE(reinterpret_cast<const StringView*>(layout.valueAddress(row, 0))
+                    ->isInline());
+  }
+
+  EXPECT_LT(container.compare(rows[0], rows[1], 0), 0);
+  EXPECT_EQ(0, container.compare(rows[0], rows[2], 0));
+  EXPECT_NE(container.hash(rows[0], 0), container.hash(rows[1], 0));
+  EXPECT_EQ(container.hash(rows[0], 0), container.hash(rows[2], 0));
+}
+
+TEST_F(BmRowContainerTest, ComplexCompareHonorsFlags) {
+  auto arrays = makeNullableArrayVector<int8_t>({
+      {std::nullopt},
+      {1},
+      {1, 2},
+      {1, 3},
+  });
+  BmRowContainer container(
+      {arrays->type()}, {false}, 1, bufferManager_, MemoryTag::kTesting);
+  auto rows = storeAll(container, makeRowVector({arrays}));
+
+  CompareFlags nullsLast;
+  nullsLast.nullsFirst = false;
+  EXPECT_GT(container.compare(rows[0], rows[1], 0, nullsLast), 0);
+
+  CompareFlags descending;
+  descending.ascending = false;
+  EXPECT_GT(container.compare(rows[2], rows[3], 0, descending), 0);
+}
+
 TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -54,6 +202,7 @@ TEST_F(BmRowContainerTest, AppendRowsAndStringCompare) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeRowVector({
@@ -79,6 +228,7 @@ TEST_F(BmRowContainerTest, RowWriteContextKeepsCurrentChunkPointers) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto context = container.appendRow();
@@ -90,7 +240,7 @@ TEST_F(BmRowContainerTest, RowWriteContextKeepsCurrentChunkPointers) {
 }
 
 TEST_F(BmRowContainerTest, RowLayoutMatchesOldRowContainerPacking) {
-  BmRowLayout layout({BIGINT(), INTEGER()}, {true, false}, 4 << 20);
+  BmRowLayout layout({BIGINT(), INTEGER()}, {true, false}, 0, 4 << 20);
 
   EXPECT_EQ(1, layout.column(0).offset);
   EXPECT_EQ(9, layout.column(1).offset);
@@ -109,6 +259,7 @@ TEST_F(BmRowContainerTest, RowLayoutBuildsTypedFixedRowBlockDescriptor) {
        VARCHAR(),
        HUGEINT()},
       {true, false, false, false, false, false, false, false, false},
+      0,
       4 << 20);
 
   auto descriptor = layout.makeBlockDescriptor(17);
@@ -137,7 +288,7 @@ TEST_F(BmRowContainerTest, RowLayoutBuildsTypedFixedRowBlockDescriptor) {
 
 TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyNulls) {
   {
-    BmRowLayout layout({BIGINT(), INTEGER()}, {false, false}, 4 << 20);
+    BmRowLayout layout({BIGINT(), INTEGER()}, {false, false}, 0, 4 << 20);
     std::vector<char> row(layout.rowSize(), static_cast<char>(0x7f));
 
     layout.initializeNulls(row.data());
@@ -148,7 +299,7 @@ TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyNulls) {
   }
 
   {
-    BmRowLayout layout({BIGINT(), VARCHAR()}, {true, false}, 4 << 20);
+    BmRowLayout layout({BIGINT(), VARCHAR()}, {true, false}, 0, 4 << 20);
     std::vector<char> row(layout.rowSize(), static_cast<char>(0x7f));
 
     layout.initializeNulls(row.data());
@@ -169,7 +320,11 @@ TEST_F(BmRowContainerTest, RowLayoutInitializesOnlyNulls) {
 
 TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, {true, true}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {true, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeRowVector({
       makeNullableFlatVector<int64_t>({10, std::nullopt, 7}),
       makeNullableFlatVector<std::string>({"delta", std::nullopt, "alpha"}),
@@ -197,7 +352,11 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
 
 TEST_F(BmRowContainerTest, NullableStoreClearsNullBitForNonNullValue) {
   BmRowContainer container(
-      {BIGINT(), VARCHAR()}, {true, true}, bufferManager_, MemoryTag::kTesting);
+      {BIGINT(), VARCHAR()},
+      {true, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
   auto input = makeRowVector({
       makeNullableFlatVector<int64_t>({std::nullopt, 42}),
       makeNullableFlatVector<std::string>({std::nullopt, "value"}),
@@ -237,6 +396,7 @@ TEST_F(BmRowContainerTest, NullableStringNullSurvivesSpillRead) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, true},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeRowVector({
@@ -258,10 +418,10 @@ TEST_F(BmRowContainerTest, NullableStringNullSurvivesSpillRead) {
   EXPECT_EQ("alpha", flat->valueAt(2).str());
 }
 
-TEST_F(BmRowContainerTest, RejectsUnsupportedComplexTypes) {
+TEST_F(BmRowContainerTest, RejectsTooManyKeyColumns) {
   EXPECT_THROW(
       BmRowContainer(
-          {ARRAY(BIGINT())}, {false}, bufferManager_, MemoryTag::kTesting),
+          {ARRAY(BIGINT())}, {false}, 2, bufferManager_, MemoryTag::kTesting),
       BoltRuntimeError);
 }
 

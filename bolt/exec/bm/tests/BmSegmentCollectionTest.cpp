@@ -31,7 +31,7 @@ using bytedance::bolt::memory::bm::MemoryTag;
 TEST_F(
     BmRowContainerTest,
     SegmentCollectionDoesNotShareHeapBlocksAcrossChunks) {
-  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
+  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 0, 64);
   BmSegmentCollection segments(
       bufferManager_, MemoryTag::kTesting, &layout, layout.rowSize(), 1024);
   auto& segment = segments.createSegment(kDefaultPartition);
@@ -63,7 +63,7 @@ TEST_F(
 }
 
 TEST_F(BmRowContainerTest, SegmentCollectionLeavesHeapTailUntilFinalize) {
-  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 64);
+  BmRowLayout layout({BIGINT(), VARCHAR()}, {false, false}, 0, 64);
   BmSegmentCollection segments(
       bufferManager_, MemoryTag::kTesting, &layout, 4 << 20, 64);
   auto& segment = segments.createSegment(kDefaultPartition);
@@ -89,7 +89,7 @@ TEST_F(BmRowContainerTest, SegmentCollectionLeavesHeapTailUntilFinalize) {
 }
 
 TEST_F(BmRowContainerTest, SegmentCollectionListsLiveSegmentIdsInIdOrder) {
-  BmRowLayout layout({BIGINT()}, {false}, 64);
+  BmRowLayout layout({BIGINT()}, {false}, 0, 64);
   BmSegmentCollection segments(
       bufferManager_, MemoryTag::kTesting, &layout, 4 << 20, 64);
 

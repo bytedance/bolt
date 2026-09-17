@@ -120,6 +120,28 @@ std::string randomString(uint64_t row, uint32_t length) {
 }
 
 uint64_t logicalRowBytes(const BenchmarkOptions& options) {
+  switch (options.dataset) {
+    case DatasetKind::kBigint:
+      return sizeof(int64_t);
+    case DatasetKind::kInteger:
+      return sizeof(int32_t);
+    case DatasetKind::kDouble:
+      return sizeof(double);
+    case DatasetKind::kVarcharSmall:
+    case DatasetKind::kVarcharLarge:
+      return estimatedStringBytesPerRow(
+          options.dataset, options.stringProfiles);
+    case DatasetKind::kArray:
+      return 8 * sizeof(int64_t);
+    case DatasetKind::kMap:
+      return 4 * (sizeof(int64_t) + 32);
+    case DatasetKind::kRow:
+      return sizeof(int64_t) + 32 + 4 * sizeof(int32_t);
+    case DatasetKind::kFixed:
+    case DatasetKind::kVariableSmall:
+    case DatasetKind::kVariableLarge:
+      break;
+  }
   uint64_t bytes = sizeof(int64_t) + sizeof(int32_t) + sizeof(double);
   return bytes +
       estimatedStringBytesPerRow(options.dataset, options.stringProfiles);
@@ -366,6 +388,10 @@ uint64_t rowCount(const BenchmarkOptions& options) {
           logicalRowBytes(options));
 }
 
+uint64_t logicalBytesProcessed(const BenchmarkOptions& options) {
+  return rowCount(options) * logicalRowBytes(options);
+}
+
 void checkOldRowBasedSpillBenchmarkSupported(const BenchmarkOptions& options) {
   BOLT_CHECK(
       options.compression != SpillCompressionKind::kOpenZl,
@@ -394,6 +420,31 @@ void checkOldRowBasedSpillBenchmarkSupported(const BenchmarkOptions& options) {
 }
 
 std::vector<TypePtr> columnTypes(DatasetKind dataset) {
+  static const auto kArrayType = ARRAY(BIGINT());
+  static const auto kMapType = MAP(BIGINT(), VARCHAR());
+  static const auto kRowType =
+      ROW({"c0", "c1", "c2"}, {BIGINT(), VARCHAR(), ARRAY(INTEGER())});
+  switch (dataset) {
+    case DatasetKind::kBigint:
+      return {BIGINT()};
+    case DatasetKind::kInteger:
+      return {INTEGER()};
+    case DatasetKind::kDouble:
+      return {DOUBLE()};
+    case DatasetKind::kVarcharSmall:
+    case DatasetKind::kVarcharLarge:
+      return {VARCHAR()};
+    case DatasetKind::kArray:
+      return {kArrayType};
+    case DatasetKind::kMap:
+      return {kMapType};
+    case DatasetKind::kRow:
+      return {kRowType};
+    case DatasetKind::kFixed:
+    case DatasetKind::kVariableSmall:
+    case DatasetKind::kVariableLarge:
+      break;
+  }
   std::vector<TypePtr> types{BIGINT(), INTEGER(), DOUBLE()};
   if (hasVariableColumn(dataset)) {
     types.push_back(VARCHAR());
@@ -402,11 +453,13 @@ std::vector<TypePtr> columnTypes(DatasetKind dataset) {
 }
 
 RowTypePtr rowType(DatasetKind dataset) {
-  std::vector<std::string> names{"c0", "c1", "c2"};
-  if (hasVariableColumn(dataset)) {
-    names.push_back("c3");
+  auto types = columnTypes(dataset);
+  std::vector<std::string> names;
+  names.reserve(types.size());
+  for (size_t column = 0; column < types.size(); ++column) {
+    names.push_back(fmt::format("c{}", column));
   }
-  return ROW(std::move(names), columnTypes(dataset));
+  return ROW(std::move(names), std::move(types));
 }
 
 RowVectorPtr makeInputBatch(
@@ -415,6 +468,89 @@ RowVectorPtr makeInputBatch(
     uint64_t startRow,
     vector_size_t size) {
   test::VectorMaker maker(pool);
+  if (options.dataset == DatasetKind::kBigint) {
+    return maker.rowVector(
+        {maker.flatVector<int64_t>(size, [startRow](vector_size_t row) {
+          return static_cast<int64_t>(splitMix64(startRow + row));
+        })});
+  }
+  if (options.dataset == DatasetKind::kInteger) {
+    return maker.rowVector(
+        {maker.flatVector<int32_t>(size, [startRow](vector_size_t row) {
+          return static_cast<int32_t>(splitMix64(startRow + row));
+        })});
+  }
+  if (options.dataset == DatasetKind::kDouble) {
+    return maker.rowVector(
+        {maker.flatVector<double>(size, [startRow](vector_size_t row) {
+          return static_cast<double>(splitMix64(startRow + row) % 1'000'000) /
+              7.0;
+        })});
+  }
+  if (options.dataset == DatasetKind::kVarcharSmall ||
+      options.dataset == DatasetKind::kVarcharLarge) {
+    std::vector<std::string> strings;
+    strings.reserve(size);
+    for (vector_size_t row = 0; row < size; ++row) {
+      const auto logicalRow = startRow + row;
+      strings.push_back(randomString(
+          logicalRow % 1024,
+          stringLengthForRow(
+              options.dataset, logicalRow, options.stringProfiles)));
+    }
+    return maker.rowVector({maker.flatVector<std::string>(strings, VARCHAR())});
+  }
+  if (options.dataset == DatasetKind::kArray) {
+    const auto type = columnTypes(options.dataset).front();
+    auto arrays = maker.arrayVector<int64_t>(
+        size,
+        [](vector_size_t) { return 8; },
+        [startRow](vector_size_t row, vector_size_t index) {
+          return static_cast<int64_t>(splitMix64((startRow + row) * 8 + index));
+        },
+        nullptr,
+        type);
+    return maker.rowVector({arrays});
+  }
+  if (options.dataset == DatasetKind::kMap) {
+    const auto type = columnTypes(options.dataset).front();
+    auto maps = maker.mapVector<int64_t, std::string>(
+        size,
+        [](vector_size_t) { return 4; },
+        [](vector_size_t index) { return static_cast<int64_t>(index % 4); },
+        [startRow](vector_size_t index) {
+          return randomString((startRow * 4 + index) % 1024, 32);
+        },
+        nullptr,
+        nullptr,
+        type);
+    return maker.rowVector({maps});
+  }
+  if (options.dataset == DatasetKind::kRow) {
+    const auto type = columnTypes(options.dataset).front();
+    auto integers =
+        maker.flatVector<int64_t>(size, [startRow](vector_size_t row) {
+          return static_cast<int64_t>(splitMix64(startRow + row));
+        });
+    std::vector<std::string> strings;
+    strings.reserve(size);
+    for (vector_size_t row = 0; row < size; ++row) {
+      strings.push_back(randomString((startRow + row) % 1024, 32));
+    }
+    auto arrays = maker.arrayVector<int32_t>(
+        size,
+        [](vector_size_t) { return 4; },
+        [startRow](vector_size_t row, vector_size_t index) {
+          return static_cast<int32_t>(splitMix64((startRow + row) * 4 + index));
+        },
+        nullptr,
+        type->childAt(2));
+    std::vector<VectorPtr> nestedChildren{
+        integers, maker.flatVector<std::string>(strings, VARCHAR()), arrays};
+    auto nested = std::make_shared<RowVector>(
+        pool, type, nullptr, size, std::move(nestedChildren));
+    return maker.rowVector({nested});
+  }
   std::vector<VectorPtr> children;
   children.push_back(
       maker.flatVector<int64_t>(size, [startRow](vector_size_t row) {
@@ -446,7 +582,8 @@ RowVectorPtr makeInputBatch(
 
 ReusableInputBatches makeReusableInputBatches(
     memory::MemoryPool* pool,
-    const BenchmarkOptions& options) {
+    const BenchmarkOptions& options,
+    uint64_t minReusableRows) {
   const auto totalRows = rowCount(options);
   const auto rowBytes = logicalRowBytes(options);
   const auto cacheBytes = FLAGS_bm_row_container_reusable_input_bytes == 0
@@ -454,7 +591,9 @@ ReusableInputBatches makeReusableInputBatches(
       : std::min<uint64_t>(
             options.dataBytes, FLAGS_bm_row_container_reusable_input_bytes);
   const auto reusableRows = std::min<uint64_t>(
-      totalRows, std::max<uint64_t>(1, (cacheBytes + rowBytes - 1) / rowBytes));
+      totalRows,
+      std::max<uint64_t>(
+          minReusableRows, (cacheBytes + rowBytes - 1) / rowBytes));
 
   ReusableInputBatches input;
   input.rows = reusableRows;
@@ -572,6 +711,22 @@ std::unique_ptr<RowContainer> makeOldRowContainer(
   return std::make_unique<RowContainer>(columnTypes(dataset), pool);
 }
 
+std::unique_ptr<RowContainer> makeOldKeyRowContainer(
+    DatasetKind dataset,
+    memory::MemoryPool* pool) {
+  return std::make_unique<RowContainer>(
+      columnTypes(dataset),
+      false,
+      std::vector<Accumulator>{},
+      std::vector<TypePtr>{},
+      false,
+      false,
+      false,
+      false,
+      false,
+      pool);
+}
+
 std::unique_ptr<BmRowContainer> makeBmRowContainer(
     DatasetKind dataset,
     const std::shared_ptr<memory::bm::BufferManager>& bufferManager) {
@@ -580,6 +735,21 @@ std::unique_ptr<BmRowContainer> makeBmRowContainer(
   return std::make_unique<BmRowContainer>(
       std::move(types),
       std::move(nullable),
+      0,
+      bufferManager,
+      memory::bm::MemoryTag::kHashBuild);
+}
+
+std::unique_ptr<BmRowContainer> makeBmKeyRowContainer(
+    DatasetKind dataset,
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager) {
+  auto types = columnTypes(dataset);
+  std::vector<bool> nullable(types.size(), false);
+  const auto numKeyColumns = types.size();
+  return std::make_unique<BmRowContainer>(
+      std::move(types),
+      std::move(nullable),
+      numKeyColumns,
       bufferManager,
       memory::bm::MemoryTag::kHashBuild);
 }
@@ -598,12 +768,42 @@ OldStoredRows storeOldRows(
   return stored;
 }
 
+OldStoredRows storeOldKeyRows(
+    BenchmarkContext& context,
+    const BenchmarkOptions& options,
+    bool keepRows) {
+  OldStoredRows stored;
+  stored.container =
+      makeOldKeyRowContainer(options.dataset, context.pool.get());
+  storeOldRowsOnly(
+      *stored.container,
+      context.pool.get(),
+      options,
+      keepRows ? &stored.rows : nullptr);
+  return stored;
+}
+
 BmStoredRows storeBmRows(
     BenchmarkContext& context,
     const BenchmarkOptions& options,
     bool keepRows) {
   BmStoredRows stored;
   stored.container = makeBmRowContainer(options.dataset, context.bufferManager);
+  storeBmRowsOnly(
+      *stored.container,
+      context.pool.get(),
+      options,
+      keepRows ? &stored.rows : nullptr);
+  return stored;
+}
+
+BmStoredRows storeBmKeyRows(
+    BenchmarkContext& context,
+    const BenchmarkOptions& options,
+    bool keepRows) {
+  BmStoredRows stored;
+  stored.container =
+      makeBmKeyRowContainer(options.dataset, context.bufferManager);
   storeBmRowsOnly(
       *stored.container,
       context.pool.get(),

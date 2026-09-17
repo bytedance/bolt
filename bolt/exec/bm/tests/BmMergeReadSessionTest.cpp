@@ -28,6 +28,7 @@ TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -61,6 +62,7 @@ TEST_F(BmRowContainerTest, MergeReadRejectsUnorderedSegments) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
+      0,
       bufferManager_,
       MemoryTag::kTesting);
   auto input = makeInput();
@@ -72,7 +74,7 @@ TEST_F(BmRowContainerTest, MergeReadRejectsUnorderedSegments) {
 
 TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
   BmRowContainer container(
-      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting, 8);
+      {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 8);
   auto input = makeRowVector({makeFlatVector<int64_t>({4, 1, 3, 2})});
   auto rows = storeAll(container, input);
 
@@ -99,7 +101,7 @@ TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
 
 TEST_F(BmRowContainerTest, MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
   BmRowContainer container(
-      {BIGINT()}, {false}, bufferManager_, MemoryTag::kTesting, 8);
+      {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 8);
   auto input = makeRowVector({makeFlatVector<int64_t>({4, 1, 3, 2})});
   auto rows = storeAll(container, input);
 

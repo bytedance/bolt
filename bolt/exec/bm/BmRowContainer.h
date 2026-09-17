@@ -46,6 +46,7 @@ class BmRowContainer {
   BmRowContainer(
       std::vector<TypePtr> types,
       std::vector<bool> nullable,
+      uint32_t numKeyColumns,
       std::shared_ptr<memory::bm::BufferManager> bufferManager,
       memory::bm::MemoryTag tag,
       uint32_t rowBlockSize = static_cast<uint32_t>(
@@ -55,6 +56,7 @@ class BmRowContainer {
 
   // Allocates one row in the active segment for partition. The caller must fill
   // columns with store() before treating the row as complete.
+  // TODO: Make row publication transactional before exposing append failures.
   RowWriteContext appendRow(PartitionId partition = kDefaultPartition);
 
   // Appends all rows from input through a batch-only writer. This path reserves
@@ -91,6 +93,8 @@ class BmRowContainer {
       const char* left,
       const char* right,
       const std::vector<CompareFlags>& flags = {});
+
+  uint64_t hash(const char* row, int32_t column) const;
 
   FOLLY_ALWAYS_INLINE bool isNull(const char* row, int32_t column) const {
     return layout_.isNull(row, column);
@@ -189,7 +193,8 @@ class BmRowContainer {
       const char* left,
       const char* right,
       int32_t leftColumn,
-      int32_t rightColumn) const;
+      int32_t rightColumn,
+      CompareFlags flags) const;
   void storeValue(
       const DecodedVector& decoded,
       vector_size_t sourceIndex,
@@ -218,6 +223,21 @@ class BmRowContainer {
       vector_size_t sourceIndex,
       RowWriteContext& context,
       const ColumnStorePlan& column);
+  // Stores a non-null complex (ARRAY/MAP/ROW) value's serialized bytes into the
+  // heap and writes the referencing StringView. Not templated on TypeKind: the
+  // serializer dispatches internally.
+  void storeComplexValue(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      RowWriteContext& context,
+      const ColumnStorePlan& column);
+  // Stores a non-null VARCHAR/VARBINARY value: inline StringViews land in the
+  // row cell, longer payloads are copied into a heap block.
+  void storeStringValue(
+      const DecodedVector& decoded,
+      vector_size_t sourceIndex,
+      RowWriteContext& context,
+      const ColumnStorePlan& column);
   template <TypeKind Kind>
   void storeFixedColumnBatchRangesNoNullsTyped(
       const DecodedVector& decoded,
@@ -233,6 +253,10 @@ class BmRowContainer {
       folly::Range<const BatchAppendRange*> ranges,
       const ColumnStorePlan& column,
       BmBatchStringStoreMode stringStoreMode);
+  void storeComplexColumnBatchRanges(
+      const DecodedVector& decoded,
+      folly::Range<const BatchAppendRange*> ranges,
+      const ColumnStorePlan& column);
   template <TypeKind Kind>
   void extractColumnTyped(
       const char* const* rows,

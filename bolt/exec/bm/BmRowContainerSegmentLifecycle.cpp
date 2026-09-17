@@ -181,8 +181,7 @@ void BmRowContainer::copyRowWithDeepColumns(
   uint64_t variableBytes = 0;
   for (auto columnIndex : columns) {
     const auto& column = layout_.column(columnIndex);
-    const auto kind = column.type->kind();
-    if (kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) {
+    if (!column.variableWidth) {
       continue;
     }
     if (layout_.isNull(row, columnIndex)) {
@@ -199,8 +198,7 @@ void BmRowContainer::copyRowWithDeepColumns(
   auto* variable = variableCopy.data();
   for (auto columnIndex : columns) {
     const auto& column = layout_.column(columnIndex);
-    const auto kind = column.type->kind();
-    if (kind != TypeKind::VARCHAR && kind != TypeKind::VARBINARY) {
+    if (!column.variableWidth) {
       continue;
     }
     if (layout_.isNull(row, columnIndex)) {

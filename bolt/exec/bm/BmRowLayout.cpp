@@ -25,7 +25,10 @@ namespace {
 
 template <TypeKind Kind>
 uint32_t scalarTypeWidth(const TypePtr& type) {
-  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+  if constexpr (
+      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY ||
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
     return sizeof(StringView);
   } else if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
@@ -62,8 +65,10 @@ memory::bm::BlockFieldKind blockFieldKind(TypeKind kind) {
 BmRowLayout::BmRowLayout(
     const std::vector<TypePtr>& types,
     const std::vector<bool>& nullable,
+    uint32_t numKeyColumns,
     uint32_t rowBlockSize) {
   BOLT_CHECK_EQ(types.size(), nullable.size());
+  BOLT_CHECK_LE(numKeyColumns, types.size());
   uint32_t nullBits = 0;
   for (auto isNullable : nullable) {
     if (isNullable) {
@@ -87,7 +92,19 @@ BmRowLayout::BmRowLayout(
     // target tolerating unaligned scalar/StringView access. Wide scalars such
     // as HUGEINT must use HugeInt::serialize/deserialize to avoid alignment
     // faults.
-    ColumnLayout column{type, fixedRowSize_, width, nullable[i], 0, 0};
+    const bool stringKind =
+        kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY;
+    const bool complexKind = kind == TypeKind::ARRAY || kind == TypeKind::MAP ||
+        kind == TypeKind::ROW;
+    ColumnLayout column{
+        type,
+        fixedRowSize_,
+        width,
+        stringKind || complexKind,
+        i < numKeyColumns,
+        nullable[i],
+        0,
+        0};
     if (nullable[i]) {
       column.nullByte = nullOffset / 8;
       column.nullMask = static_cast<uint8_t>(1u << (nullOffset & 7));
@@ -103,9 +120,11 @@ BmRowLayout::BmRowLayout(
          stored.nullable,
          stored.nullByte,
          stored.nullMask,
-         kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY,
+         stringKind,
+         complexKind,
+         stored.isKey,
          BmRowContainer::storeFnFor(kind, stored.nullable)});
-    if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+    if (stored.variableWidth) {
       stringColumns_.push_back(
           {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});
     }

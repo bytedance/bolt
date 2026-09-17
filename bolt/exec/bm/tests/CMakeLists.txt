@@ -5,6 +5,7 @@ add_executable(
   ../benchmarks/BmRowContainerBenchmarkCommon.cpp
   ../benchmarks/BmRowContainerBenchmarkProfiles.cpp
   BmRowContainerBenchmarkProfileTest.cpp
+  BmRowContainerComplexBenchmarkTest.cpp
   BmMergeReadSessionTest.cpp
   BmPartitionTest.cpp
   BmRowContainerBatchTest.cpp

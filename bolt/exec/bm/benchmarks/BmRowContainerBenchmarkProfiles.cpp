@@ -27,7 +27,8 @@ uint32_t requirePositive(uint32_t value, const char* name) {
 } // namespace
 
 bool hasVariableColumn(DatasetKind dataset) {
-  return dataset != DatasetKind::kFixed;
+  return dataset == DatasetKind::kVariableSmall ||
+      dataset == DatasetKind::kVariableLarge;
 }
 
 const char* datasetName(DatasetKind dataset) {
@@ -38,6 +39,22 @@ const char* datasetName(DatasetKind dataset) {
       return "variable_small";
     case DatasetKind::kVariableLarge:
       return "variable_large";
+    case DatasetKind::kBigint:
+      return "bigint";
+    case DatasetKind::kInteger:
+      return "integer";
+    case DatasetKind::kDouble:
+      return "double";
+    case DatasetKind::kVarcharSmall:
+      return "varchar_small";
+    case DatasetKind::kVarcharLarge:
+      return "varchar_large";
+    case DatasetKind::kArray:
+      return "array";
+    case DatasetKind::kMap:
+      return "map";
+    case DatasetKind::kRow:
+      return "row";
   }
   BOLT_UNREACHABLE();
 }
@@ -49,13 +66,22 @@ uint32_t stringLengthForRow(
   switch (dataset) {
     case DatasetKind::kFixed:
       return 0;
-    case DatasetKind::kVariableSmall: {
+    case DatasetKind::kVariableSmall:
+    case DatasetKind::kVarcharSmall: {
       const auto maxLength = requirePositive(
           options.variableMaxStringLength, "variableMaxStringLength");
       return 1 + static_cast<uint32_t>(row % maxLength);
     }
     case DatasetKind::kVariableLarge:
+    case DatasetKind::kVarcharLarge:
       return requirePositive(options.largeStringLength, "largeStringLength");
+    case DatasetKind::kBigint:
+    case DatasetKind::kInteger:
+    case DatasetKind::kDouble:
+    case DatasetKind::kArray:
+    case DatasetKind::kMap:
+    case DatasetKind::kRow:
+      return 0;
   }
   BOLT_UNREACHABLE();
 }
@@ -66,13 +92,22 @@ uint64_t estimatedStringBytesPerRow(
   switch (dataset) {
     case DatasetKind::kFixed:
       return 0;
-    case DatasetKind::kVariableSmall: {
+    case DatasetKind::kVariableSmall:
+    case DatasetKind::kVarcharSmall: {
       const auto maxLength = requirePositive(
           options.variableMaxStringLength, "variableMaxStringLength");
       return (static_cast<uint64_t>(maxLength) + 2) / 2;
     }
     case DatasetKind::kVariableLarge:
+    case DatasetKind::kVarcharLarge:
       return requirePositive(options.largeStringLength, "largeStringLength");
+    case DatasetKind::kBigint:
+    case DatasetKind::kInteger:
+    case DatasetKind::kDouble:
+    case DatasetKind::kArray:
+    case DatasetKind::kMap:
+    case DatasetKind::kRow:
+      return 0;
   }
   BOLT_UNREACHABLE();
 }

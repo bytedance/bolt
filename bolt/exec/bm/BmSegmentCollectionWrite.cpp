@@ -145,9 +145,9 @@ char* BmSegmentCollection::newRowInSegment(SegmentData& segment) {
 void BmSegmentCollection::recordHeapForChunk(
     ChunkData& chunk,
     const BlockRef& heap,
-    const char* row) {
+    const char* referencingRow) {
   BOLT_DCHECK([&]() {
-    const auto rowAddress = reinterpret_cast<uintptr_t>(row);
+    const auto rowAddress = reinterpret_cast<uintptr_t>(referencingRow);
     const auto& block = chunk.rowBlock;
     const auto blockBegin = reinterpret_cast<uintptr_t>(block.ptr);
     const auto rowOffset = static_cast<uint32_t>(rowAddress - blockBegin);

@@ -18,11 +18,30 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/ContainerRowSerde.h"
 #include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
 
 namespace bytedance::bolt::exec::bm {
+namespace {
+
+void deserializeComplexValue(
+    const char* row,
+    const ColumnLayout& column,
+    vector_size_t resultIndex,
+    BaseVector* result,
+    bool exactSize) {
+  const auto value = *reinterpret_cast<const StringView*>(row + column.offset);
+  ByteInputStream stream({ByteRange{
+      reinterpret_cast<uint8_t*>(const_cast<char*>(value.data())),
+      static_cast<int32_t>(value.size()),
+      0}});
+  ContainerRowSerde::deserialize(stream, resultIndex, result, exactSize);
+  BOLT_CHECK(stream.atEnd(), "Complex value contains trailing bytes");
+}
+
+} // namespace
 
 void BmRowContainer::extractColumnResident(
     const char* const* rows,
@@ -32,6 +51,21 @@ void BmRowContainer::extractColumnResident(
     const VectorPtr& result,
     bool exactSize) {
   BOLT_DCHECK_LT(column, layout_.columns().size());
+  const auto& columnLayout = layout_.column(column);
+  if (columnLayout.variableWidth && !layout_.storePlan(column).stringKind) {
+    const auto resultSize = resultOffset + numRows;
+    result->resize(resultSize);
+    for (vector_size_t i = 0; i < numRows; ++i) {
+      const auto resultRow = resultOffset + i;
+      if (layout_.isNull(rows[i], column)) {
+        result->setNull(resultRow, true);
+      } else {
+        deserializeComplexValue(
+            rows[i], columnLayout, resultRow, result.get(), exactSize);
+      }
+    }
+    return;
+  }
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       types_[column]->kind(),
@@ -51,6 +85,22 @@ void BmRowContainer::extractColumnResident(
     const VectorPtr& result,
     bool exactSize) {
   BOLT_DCHECK_LT(column, layout_.columns().size());
+  const auto& columnLayout = layout_.column(column);
+  if (columnLayout.variableWidth && !layout_.storePlan(column).stringKind) {
+    const auto resultSize = resultOffset + rowNumbers.size();
+    result->resize(resultSize);
+    for (vector_size_t i = 0; i < rowNumbers.size(); ++i) {
+      const auto resultRow = resultOffset + i;
+      const auto rowNumber = rowNumbers[i];
+      if (rowNumber < 0 || layout_.isNull(rows[rowNumber], column)) {
+        result->setNull(resultRow, true);
+      } else {
+        deserializeComplexValue(
+            rows[rowNumber], columnLayout, resultRow, result.get(), exactSize);
+      }
+    }
+    return;
+  }
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnByRowNumbersTyped,
       types_[column]->kind(),
