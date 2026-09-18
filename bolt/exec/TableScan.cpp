@@ -107,26 +107,64 @@ folly::dynamic TableScan::toJson() const {
   return ret;
 }
 
+void TableScan::mergeDataSourceRuntimeStats(bool logIoPattern) {
+  BOLT_CHECK_NOT_NULL(dataSource_);
+  curStatus_ = "updating dataSource runtime stats";
+  auto connectorStats = dataSource_->runtimeStats();
+  auto lockedStats = stats_.wlock();
+  if (logIoPattern && connectorStats.contains("rawBytesRead<4k")) {
+    LOG(INFO) << "IO pattern: "
+              << "totalBytesRead: "
+              << succinctBytes(connectorStats.at("rawBytesRead").value)
+              << ", totalScanTime: "
+              << succinctNanos(connectorStats.at("totalScanTime").value)
+              << ", totalMergeTime: "
+              << succinctNanos(connectorStats.at("totalMergeTime").value)
+              << ", readBytes < 4K: [scantime: "
+              << succinctNanos(connectorStats.at("totalTimeRead<4k").value)
+              << ", readCnt: " << connectorStats.at("cntRead<4k").value
+              << ", readBytes: "
+              << succinctBytes(connectorStats.at("rawBytesRead<4k").value)
+              << "]"
+              << ", 4k <= readBytes < 32K: [scantime: "
+              << succinctNanos(connectorStats.at("totalTimeRead<32k").value)
+              << ", readCnt: " << connectorStats.at("cntRead<32k").value
+              << ", readBytes: "
+              << succinctBytes(connectorStats.at("rawBytesRead<32k").value)
+              << "]"
+              << ", 32k <= readBytes < 128K: [scantime: "
+              << succinctNanos(connectorStats.at("totalTimeRead<128k").value)
+              << ", readCnt: " << connectorStats.at("cntRead<128k").value
+              << ", readBytes: "
+              << succinctBytes(connectorStats.at("rawBytesRead<128k").value)
+              << "]"
+              << ", readBytes >= 128K: [scantime: "
+              << succinctNanos(connectorStats.at("totalTimeRead>=128k").value)
+              << ", readCnt: " << connectorStats.at("cntRead>=128k").value
+              << ", readBytes: "
+              << succinctBytes(connectorStats.at("rawBytesRead>=128k").value)
+              << "]";
+  }
+  for (const auto& [name, counter] : connectorStats) {
+    if (name == "ioWaitWallNanos") {
+      ioWaitNanos_ += counter.value - lastIoWaitNanos_;
+      lastIoWaitNanos_ = counter.value;
+    }
+    if (UNLIKELY(!lockedStats->runtimeStats.contains(name))) {
+      lockedStats->runtimeStats.insert(
+          std::make_pair(name, RuntimeMetric(counter.unit)));
+    } else {
+      BOLT_CHECK_EQ(lockedStats->runtimeStats.at(name).unit, counter.unit);
+    }
+    lockedStats->runtimeStats.at(name).addValue(counter.value);
+  }
+}
+
 OperatorStats TableScan::stats(bool clear) {
   if (!noMoreSplits_) {
     VLOG(1) << "get stats when there exist more splits!" << std::endl;
     if (dataSource_) {
-      curStatus_ = "getOutput: noMoreSplits_=1, updating stats_";
-      auto connectorStats = dataSource_->runtimeStats();
-      auto lockedStats = stats_.wlock();
-      for (const auto& [name, counter] : connectorStats) {
-        if (name == "ioWaitWallNanos") {
-          ioWaitNanos_ += counter.value - lastIoWaitNanos_;
-          lastIoWaitNanos_ = counter.value;
-        }
-        if (UNLIKELY(lockedStats->runtimeStats.count(name) == 0)) {
-          lockedStats->runtimeStats.insert(
-              std::make_pair(name, RuntimeMetric(counter.unit)));
-        } else {
-          BOLT_CHECK_EQ(lockedStats->runtimeStats.at(name).unit, counter.unit);
-        }
-        lockedStats->runtimeStats.at(name).addValue(counter.value);
-      }
+      mergeDataSourceRuntimeStats(false);
     }
   }
   return Operator::stats(clear);
@@ -201,59 +239,12 @@ RowVectorPtr TableScan::getOutput() {
         noMoreSplits_ = true;
         pendingDynamicFilters_.clear();
         if (dataSource_) {
-          curStatus_ = "getOutput: noMoreSplits_=1, updating stats_";
-          auto connectorStats = dataSource_->runtimeStats();
-          auto lockedStats = stats_.wlock();
-          if (connectorStats.count("rawBytesRead<4k") > 0) {
-            LOG(INFO)
-                << "IO pattern: "
-                << "totalBytesRead: "
-                << succinctBytes(connectorStats.at("rawBytesRead").value)
-                << ", totalScanTime: "
-                << succinctNanos(connectorStats.at("totalScanTime").value)
-                << ", totalMergeTime: "
-                << succinctNanos(connectorStats.at("totalMergeTime").value)
-                << ", readBytes < 4K: [scantime: "
-                << succinctNanos(connectorStats.at("totalTimeRead<4k").value)
-                << ", readCnt: " << connectorStats.at("cntRead<4k").value
-                << ", readBytes: "
-                << succinctBytes(connectorStats.at("rawBytesRead<4k").value)
-                << "]"
-                << ", 4k <= readBytes < 32K: [scantime: "
-                << succinctNanos(connectorStats.at("totalTimeRead<32k").value)
-                << ", readCnt: " << connectorStats.at("cntRead<32k").value
-                << ", readBytes: "
-                << succinctBytes(connectorStats.at("rawBytesRead<32k").value)
-                << "]"
-                << ", 32k <= readBytes < 128K: [scantime: "
-                << succinctNanos(connectorStats.at("totalTimeRead<128k").value)
-                << ", readCnt: " << connectorStats.at("cntRead<128k").value
-                << ", readBytes: "
-                << succinctBytes(connectorStats.at("rawBytesRead<128k").value)
-                << "]"
-                << ", readBytes >= 128K: [scantime: "
-                << succinctNanos(connectorStats.at("totalTimeRead>=128k").value)
-                << ", readCnt: " << connectorStats.at("cntRead>=128k").value
-                << ", readBytes: "
-                << succinctBytes(connectorStats.at("rawBytesRead>=128k").value)
-                << "]";
-          }
-          for (const auto& [name, counter] : connectorStats) {
-            if (name == "ioWaitWallNanos") {
-              ioWaitNanos_ += counter.value - lastIoWaitNanos_;
-              lastIoWaitNanos_ = counter.value;
-            }
-            if (UNLIKELY(lockedStats->runtimeStats.count(name) == 0)) {
-              lockedStats->runtimeStats.insert(
-                  std::make_pair(name, RuntimeMetric(counter.unit)));
-            } else {
-              BOLT_CHECK_EQ(
-                  lockedStats->runtimeStats.at(name).unit, counter.unit);
-            }
-            lockedStats->runtimeStats.at(name).addValue(counter.value);
-          }
-          lockedStats->addRuntimeStat(
-              "dynamicConcurrency", RuntimeCounter(this->getConcurrency()));
+          mergeDataSourceRuntimeStats(true);
+          stats_.wlock()->addRuntimeStat(
+              "dynamicConcurrency", RuntimeCounter(getConcurrency()));
+          // The final split has already finished. Release scan reader/input
+          // buffers before downstream operators enter final output processing.
+          dataSource_->releaseFinalSplitResources();
         }
         return nullptr;
       }
