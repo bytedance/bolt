@@ -1092,6 +1092,13 @@ class RowContainer {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
 
+    if constexpr (std::is_same_v<T, StringView>) {
+      extractStringsBatch(
+          rows, rowNumbers, numRows, offset, nullByte, nullMask, resultOffset,
+          result, true, exactSize);
+      return;
+    }
+
     BufferPtr& nullBuffer = result->mutableNulls(maxRows);
     auto nulls = nullBuffer->asMutable<uint64_t>();
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
@@ -1109,12 +1116,7 @@ class RowContainer {
         bits::setNull(nulls, resultIndex, true);
       } else {
         bits::setNull(nulls, resultIndex, false);
-        if constexpr (std::is_same_v<T, StringView>) {
-          extractString(
-              valueAt<StringView>(row, offset), result, resultIndex, exactSize);
-        } else {
-          values[resultIndex] = valueAt<T>(row, offset);
-        }
+        values[resultIndex] = valueAt<T>(row, offset);
       }
     }
   }
@@ -1130,6 +1132,14 @@ class RowContainer {
       bool exactSize) {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
+
+    if constexpr (std::is_same_v<T, StringView>) {
+      extractStringsBatch(
+          rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
+          false, exactSize);
+      return;
+    }
+
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
     [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
@@ -1145,12 +1155,7 @@ class RowContainer {
         result->setNull(resultIndex, true);
       } else {
         result->setNull(resultIndex, false);
-        if constexpr (std::is_same_v<T, StringView>) {
-          extractString(
-              valueAt<StringView>(row, offset), result, resultIndex, exactSize);
-        } else {
-          values[resultIndex] = valueAt<T>(row, offset);
-        }
+        values[resultIndex] = valueAt<T>(row, offset);
       }
     }
   }
@@ -1358,6 +1363,20 @@ class RowContainer {
       StringView value,
       FlatVector<StringView>* FOLLY_NONNULL values,
       vector_size_t index,
+      bool exactSize);
+
+  // Batch version: pre-scan rows, single reserve, setNoCopy per row.
+  // Eliminates per-row getBufferWithSpace / realloc / inline-branch overhead.
+  static void extractStringsBatch(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t offset,
+      int32_t nullByte,
+      uint8_t nullMask,
+      int32_t resultOffset,
+      FlatVector<StringView>* FOLLY_NONNULL result,
+      bool hasNulls,
       bool exactSize);
 
   static int32_t compareStringAsc(
