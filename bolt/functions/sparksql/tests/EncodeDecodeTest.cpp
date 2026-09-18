@@ -291,5 +291,84 @@ TEST_F(EncodeDecodeTest, unsupportedCharsetInOneRowOnly) {
   EXPECT_EQ(decoded->valueAt(2).str(), "ghi");
 }
 
+TEST_F(EncodeDecodeTest, literalCharsetErrorIsCatchableByTry) {
+  // A literal charset must be resolved during execution, not at plan time.
+  // Building the converter in the constructor put the error outside
+  // applyToSelectedNoThrow, so TRY() could not contain it.
+  auto text = makeFlatVector<std::string>({"abc", "def"});
+  auto data = makeRowVector({text});
+
+  BOLT_ASSERT_THROW(
+      evaluate<SimpleVector<StringView>>("encode(c0, 'BAD-CHARSET')", data),
+      "Unsupported charset");
+  auto encoded = evaluate<SimpleVector<StringView>>(
+      "try(encode(c0, 'BAD-CHARSET'))", data);
+  EXPECT_TRUE(encoded->isNullAt(0));
+  EXPECT_TRUE(encoded->isNullAt(1));
+
+  auto bin = makeFlatVector<std::string>({"abc", "def"}, VARBINARY());
+  auto binData = makeRowVector({bin});
+  BOLT_ASSERT_THROW(
+      evaluate<SimpleVector<StringView>>("decode(c0, 'BAD-CHARSET')", binData),
+      "Unsupported charset");
+  auto decoded = evaluate<SimpleVector<StringView>>(
+      "try(decode(c0, 'BAD-CHARSET'))", binData);
+  EXPECT_TRUE(decoded->isNullAt(0));
+  EXPECT_TRUE(decoded->isNullAt(1));
+}
+
+TEST_F(EncodeDecodeTest, illegalCharsetNameRejectedLikeJava) {
+  // Java's Charset.forName rejects these outright; ICU would accept them, so
+  // Bolt would otherwise offload queries Spark itself fails.
+  for (const auto& bad : {" UTF-8", "UTF-8 ", "-UTF-8", "_UTF8", ""}) {
+    BOLT_ASSERT_THROW(encode("abc", bad), "Illegal charset name");
+  }
+  // "UTF_8" and "ISO8859_1" are *legal* Java charset names (underscore is
+  // permitted after the first character), so they are deliberately NOT
+  // rejected by the name check. In Java they fail later, at alias lookup;
+  // ICU happens to resolve them, which is a remaining gap recorded in the PR
+  // discussion rather than something this check is meant to catch.
+}
+
+TEST_F(EncodeDecodeTest, malformedUtf8UsesMaximalSubpartReplacement) {
+  // Java replaces each maximal ill-formed subpart with ONE U+FFFD
+  // (Unicode 16.0 section 3.9); ICU's converter emits one per byte. The
+  // surrogate X'EDA080' is a single 3-byte subpart, so Spark returns exactly
+  // one replacement character, not three.
+  EXPECT_EQ(decode(std::string("\xED\xA0\x80", 3), "UTF-8"), "\uFFFD");
+  // A lone invalid byte is still one subpart, surrounded text is preserved.
+  EXPECT_EQ(
+      decode(
+          std::string(
+              "a\xFF"
+              "b",
+              3),
+          "UTF-8"),
+      "a\uFFFDb");
+  // Truncated sequences: the lead byte alone is the maximal subpart.
+  EXPECT_EQ(decode(std::string("\xE2\x82", 2), "UTF-8"), "\uFFFD");
+  EXPECT_EQ(decode(std::string("\xF0\x9F\x92", 3), "UTF-8"), "\uFFFD");
+  // Overlong forms have no valid initial subsequence, so each byte is its own
+  // subpart and Java emits one U+FFFD per byte here.
+  EXPECT_EQ(decode(std::string("\xC0\xAF", 2), "UTF-8"), "\uFFFD\uFFFD");
+  EXPECT_EQ(
+      decode(std::string("\xE0\x80\x80", 3), "UTF-8"), "\uFFFD\uFFFD\uFFFD");
+  // Well-formed input, including multi-byte and supplementary characters, must
+  // round-trip untouched through the same path.
+  EXPECT_EQ(decode("abc", "UTF-8"), "abc");
+  EXPECT_EQ(decode("\u20ac", "UTF-8"), "\u20ac");
+  EXPECT_EQ(decode("\U0001F600", "UTF-8"), "\U0001F600");
+  EXPECT_EQ(
+      decode(
+          std::string(
+              "a\xED\xA0\x80"
+              "z",
+              5),
+          "UTF-8"),
+      "a\uFFFDz");
+  // Aliases resolve to the same canonical charset and must behave identically.
+  EXPECT_EQ(decode(std::string("\xED\xA0\x80", 3), "utf8"), "\uFFFD");
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test
