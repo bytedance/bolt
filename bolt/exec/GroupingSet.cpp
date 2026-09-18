@@ -810,6 +810,14 @@ bool GroupingSet::getOutput(
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+  if (noMoreInput_ && !outputTableReleased_) {
+    const auto releasedBytes = table_ ? table_->releaseTable() : 0;
+    if (releasedBytes > 0) {
+      stats_.aggOutputReleasedBytes += releasedBytes;
+      pool_.release();
+    }
+    outputTableReleased_ = true;
+  }
   const int32_t numGroups = table_
       ? table_->rows()->listRows(
             &iterator, maxOutputRows, maxOutputBytes, groups)
@@ -824,6 +832,16 @@ bool GroupingSet::getOutput(
     extractGroupsInRowFormat(folly::Range<char**>(groups, numGroups), result);
   } else {
     extractGroups(folly::Range<char**>(groups, numGroups), result);
+    if (noMoreInput_ && sortedAggregations_ == nullptr) {
+      auto* rows = table_->rows();
+      const auto releasedBytes = rows->releaseOutputRangesBefore(iterator);
+      if (releasedBytes > 0) {
+        stats_.aggOutputReleasedBytes += releasedBytes;
+        // Free the reservation that only made sense while these output rows
+        // were still retained by the aggregation.
+        pool_.release();
+      }
+    }
   }
   return true;
 }

@@ -321,6 +321,10 @@ class BaseHashTable {
   /// be used for flushing a partial group by, for example.
   virtual void clear() = 0;
 
+  /// Releases the hash lookup table while keeping payload rows intact. This is
+  /// used by final aggregation output after all input has been processed.
+  virtual uint64_t releaseTable() = 0;
+
   /// Returns the capacity of the internal hash table which is number of rows
   /// it can stores in a group by or hash join build.
   virtual uint64_t capacity() const = 0;
@@ -656,6 +660,8 @@ class HashTable : public BaseHashTable {
       char** rows) override;
 
   void clear() override;
+
+  uint64_t releaseTable() override;
 
   void directAddRows(
       HashLookup& lookup,
