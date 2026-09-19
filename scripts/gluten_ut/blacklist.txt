@@ -1,0 +1,28 @@
+org.apache.gluten.execution.BoltExplodeExpressionSuite#(aborted)
+org.apache.gluten.execution.BoltScanSuite#Test file scheme validation
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with preprojection
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: with unrelated projection
+org.apache.gluten.execution.python.ArrowEvalPythonExecSuite#arrow_udf test: without projection
+org.apache.spark.sql.GlutenBitmapExpressionsQuerySuite#bitmap_construct_agg routes to native
+org.apache.spark.sql.GlutenCachedTableSuite#Gluten - SPARK-36120: Support cache/uncache table with TimestampNTZ type
+org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#char/varchar type values length check: partitioned columns of other types
+org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#length check for input string values: partitioned columns
+org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - SPARK-45171: Handle evaluated nondeterministic expression
+org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - single-column stack with null padding is offloaded
+org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack is offloaded
+org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack without null padding is offloaded
+org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
+org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - to_unix_timestamp
+org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - unix_timestamp
+org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - unhex
+org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-47307: base64 encoding without chunking
+org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
+org.apache.spark.sql.execution.BoltLocalCacheSuite#(aborted)
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+org.apache.spark.sql.execution.GlutenRemoveRedundantWindowGroupLimitsSuite#Gluten - remove redundant WindowGroupLimits
+org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on dense_rank
+org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on rank
+org.apache.spark.sql.gluten.GlutenFallbackSuite#ExpandFallbackPolicy should propagate fallback reason to vanilla SparkPlan
+org.apache.spark.sql.gluten.GlutenFallbackSuite#Gluten - test fallback event
+org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite#Gluten - ORC positional and Parquet name mapping can coexist in one Velox query

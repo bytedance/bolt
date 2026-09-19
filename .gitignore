@@ -338,3 +338,8 @@ files.txt
 log.txt
 
 bolt/version/version.h
+
+# gluten UT runner output (parallel dispatch logs + reports)
+/scripts/gluten_ut/logs/
+/scripts/gluten_ut/stdout
+/scripts/gluten_ut/timings/
