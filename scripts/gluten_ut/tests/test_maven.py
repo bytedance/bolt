@@ -89,6 +89,25 @@ class MavenTest(unittest.TestCase):
         self.assertAlmostEqual(seconds, 1.1)
         self.assertEqual((started, completed, aborts, unfinished), (1, 1, [], False))
 
+    def test_full_plugin_names_from_ci_maven(self):
+        log = LOG.replace("--- surefire:", "--- maven-surefire-plugin:").replace(
+            "--- scalatest:", "--- scalatest-maven-plugin:"
+        )
+        self.assertEqual(MAVEN.lifecycle_metrics(log), (1.1, 1, 1, [], False))
+
+    def test_partial_parallel_jobs_are_explicit_in_comparison(self):
+        self.report()
+        (self.parallel / "_phases.tsv").write_text("1\t1\tSummary\n2\t1\tDone\n")
+        jobs = self.parallel / "jobs"
+        jobs.mkdir()
+        (jobs / "complete.log").write_text("Total number of tests run: 3\n")
+        (jobs / "aborted.log").write_text("*** RUN ABORTED ***\n")
+        self.run_summary()
+        markdown = (self.logs / "_summary.md").read_text()
+        self.assertIn("| 2 | 1 | 3 |", markdown)
+        self.assertIn("Parallel jobs without a final test count: 1", markdown)
+        self.assertIn("`aborted`", markdown)
+
     def test_skipped_cases_and_discovery_aggregate_are_not_executed(self):
         self.report()
         self.report(suite="example.Skipped", content="<skipped/>")

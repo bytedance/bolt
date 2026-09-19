@@ -47,6 +47,11 @@ def lifecycle_metrics(log):
             active = None
         if goal:
             plugin, _, target = goal[2].split(":")
+            # Older Maven versions print artifact IDs instead of short names.
+            plugin = {
+                "maven-surefire-plugin": "surefire",
+                "scalatest-maven-plugin": "scalatest",
+            }.get(plugin, plugin)
             if plugin in ("surefire", "scalatest") and target == "test":
                 active = int(goal[1])
                 started += plugin == "scalatest"
@@ -174,7 +179,8 @@ def summarize(gluten_home, log_dir, parallel_log_dir):
             (row[1] for row in timings if row[2] == "Summary"), "incomplete"
         )
         parallel_tests = 0
-        for path in (parallel_log_dir / "jobs").glob("*.log"):
+        uncounted_jobs = []
+        for path in sorted((parallel_log_dir / "jobs").glob("*.log")):
             counts = re.findall(
                 r"^(?:Total number of tests run: |OK \(|Tests run: )(\d+)",
                 ANSI.sub("", path.read_text(errors="replace")),
@@ -182,13 +188,24 @@ def summarize(gluten_home, log_dir, parallel_log_dir):
             )
             if counts:
                 parallel_tests += int(counts[-1])
+            else:
+                uncounted_jobs.append(path.stem)
         lines += [
             "",
-            "| Runner | Total wall time (s) | Test execution wall time (s) | Executed tests |",
+            "| Runner | Total wall time (s) | Test execution wall time (s) | Reported executed tests |",
             "| --- | ---: | ---: | ---: |",
             f"| Parallel: build + classify + dispatch | {total} | {dispatch} | {parallel_tests} |",
             f"| Maven: clean test | {elapsed} | {seconds:.1f} | {executed} |",
         ]
+        if uncounted_jobs:
+            lines += [
+                "",
+                f"Parallel jobs without a final test count: {len(uncounted_jobs)}. "
+                "Their partial execution is omitted from the count above; "
+                "these timings are not a complete equal-work comparison.",
+                "",
+                *[f"- `{job}`" for job in uncounted_jobs],
+            ]
     if missing is not None:
         lines += [
             "",
