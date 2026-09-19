@@ -99,6 +99,24 @@ TEST_F(EltTest, longStrings) {
   EXPECT_EQ(long1, elt(2, long0, long1));
 }
 
+// Non-inlined strings must stay readable after the inputs go out of scope.
+// The implementation references the inputs' buffers via setNoCopy instead of
+// copying their bytes, so the result has to keep those buffers alive itself.
+TEST_F(EltTest, longStringsOutliveInputs) {
+  const std::string long0(100, 'x');
+  const std::string long1(200, 'y');
+  VectorPtr result;
+  {
+    auto index = makeFlatVector<int32_t>({1, 2, 2, 1});
+    auto input0 = makeFlatVector<std::string>({long0, long0, long0, long0});
+    auto input1 = makeFlatVector<std::string>({long1, long1, long1, long1});
+    result = evaluate("elt(c0, c1, c2)", makeRowVector({index, input0, input1}));
+  }
+  // The input vectors are gone; only the retained buffers keep these valid.
+  assertEqualVectors(
+      makeFlatVector<std::string>({long0, long1, long1, long0}), result);
+}
+
 TEST_F(EltTest, unicode) {
   EXPECT_EQ("你好", elt(1, "你好", "世界"));
   EXPECT_EQ("世界", elt(2, "你好", "世界"));

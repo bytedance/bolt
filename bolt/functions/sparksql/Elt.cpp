@@ -24,14 +24,15 @@ namespace {
 /// Implements Spark's elt(n, input1, input2, ...).
 ///
 /// The index argument is args[0]; the candidate inputs are args[1..n-1].
-/// Rows are grouped by the index value so that each candidate input is copied
-/// at most once, which keeps the number of copies bounded by the number of
-/// inputs rather than by the number of rows.
+/// Each row is visited once and reads only the input its own index selects,
+/// so the cost is O(rows) rather than O(rows x inputs).
 class EltFunction final : public exec::VectorFunction {
  public:
-  // elt() must return NULL, rather than propagating a NULL input, when the
-  // index is NULL or out of range. It therefore cannot use the default null
-  // behavior.
+  // The default null behavior sets a row to NULL when *any* argument is NULL
+  // and never calls apply() for it. That is wrong here: a NULL in an input
+  // that this row does not select must not make the result NULL --
+  // elt(1, 'a', NULL) is 'a', not NULL. So the rows have to be visited
+  // regardless of which inputs happen to contain nulls.
   bool isDefaultNullBehavior() const override {
     return false;
   }
@@ -46,44 +47,48 @@ class EltFunction final : public exec::VectorFunction {
     const auto numInputs = static_cast<int32_t>(args.size()) - 1;
 
     context.ensureWritable(rows, outputType, result);
-
-    // Rows whose index is NULL or out of range stay NULL, so start from all
-    // NULL and only overwrite the rows that select a valid input.
-    rows.applyToSelected(
-        [&](vector_size_t row) { result->setNull(row, true); });
+    auto* flatResult = result->asFlatVector<StringView>();
 
     exec::LocalDecodedVector indexHolder(context, *args[0], rows);
     const auto* decodedIndex = indexHolder.get();
 
-    // Group the rows by the input they select, so that each input vector is
-    // copied at most once for the whole batch.
-    exec::LocalSelectivityVector inputRowsHolder(context, rows.end());
-    auto* inputRows = inputRowsHolder.get();
-
+    // Decode each input once up front. Decoding inside the row loop would
+    // redo the work per row, and DecodedVector also hides whether the input
+    // arrived flat, dictionary- or constant-encoded.
+    std::vector<exec::LocalDecodedVector> inputHolders;
+    std::vector<const DecodedVector*> decodedInputs;
+    inputHolders.reserve(numInputs);
+    decodedInputs.reserve(numInputs);
     for (int32_t input = 1; input <= numInputs; ++input) {
-      inputRows->clearAll();
-      bool hasRows = false;
-
-      rows.applyToSelected([&](vector_size_t row) {
-        if (decodedIndex->isNullAt(row)) {
-          return;
-        }
-        if (decodedIndex->valueAt<int32_t>(row) == input) {
-          inputRows->setValid(row, true);
-          hasRows = true;
-        }
-      });
-
-      if (!hasRows) {
-        continue;
-      }
-      inputRows->updateBounds();
-
-      // copy() handles nulls in the source, as well as dictionary- and
-      // constant-encoded inputs, so the selected input does not need to be
-      // decoded here.
-      result->copy(args[input].get(), *inputRows, nullptr, false);
+      inputHolders.emplace_back(context, *args[input], rows);
+      decodedInputs.push_back(inputHolders.back().get());
     }
+
+    // The result borrows the inputs' string buffers instead of copying their
+    // bytes, so a selected value is referenced rather than duplicated.
+    for (int32_t input = 1; input <= numInputs; ++input) {
+      flatResult->acquireSharedStringBuffers(args[input].get());
+    }
+
+    rows.applyToSelected([&](vector_size_t row) {
+      // A NULL or out-of-range index yields NULL rather than an error, and a
+      // NULL in the selected input is propagated as NULL.
+      if (decodedIndex->isNullAt(row)) {
+        result->setNull(row, true);
+        return;
+      }
+      const auto index = decodedIndex->valueAt<int32_t>(row);
+      if (index < 1 || index > numInputs) {
+        result->setNull(row, true);
+        return;
+      }
+      const auto* selected = decodedInputs[index - 1];
+      if (selected->isNullAt(row)) {
+        result->setNull(row, true);
+        return;
+      }
+      flatResult->setNoCopy(row, selected->valueAt<StringView>(row));
+    });
   }
 };
 
