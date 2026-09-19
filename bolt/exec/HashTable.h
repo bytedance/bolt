@@ -43,6 +43,7 @@
 namespace bytedance {
 namespace bolt {
 namespace exec {
+class GroupingSet;
 
 using PartitionBoundIndexType = int64_t;
 /// Provides the partition info for parallel join table build use.
@@ -917,6 +918,10 @@ class HashTable : public BaseHashTable {
 
  private:
   struct SimdBuildScratch;
+  friend class GroupingSet;
+
+  /// Releases the hash lookup table while keeping payload rows intact.
+  void releaseTable();
 
   // Enables debug stats for collisions for debug build.
 #ifdef NDEBUG

@@ -297,6 +297,28 @@ class Spiller {
   }
 
  private:
+  friend class GroupingSet;
+
+  static std::unique_ptr<Spiller> createSortedOutput(
+      RowContainer* container,
+      RowTypePtr rowType,
+      int32_t numSortingKeys,
+      const std::vector<CompareFlags>& sortCompareFlags,
+      const common::SpillConfig* spillConfig);
+
+  OwnedSpillPartition spillSortedRunsAndFinish(
+      const std::vector<folly::Range<char* const*>>& runs,
+      bool needSetNextEqual);
+
+  uint64_t sortRowsInPlace(folly::Range<char**> rows);
+
+  int64_t extractSpillVector(
+      folly::Range<char* const*> rows,
+      int32_t maxRows,
+      int64_t maxBytes,
+      RowVectorPtr& spillVector,
+      size_t& nextBatchIndex);
+
   Spiller(
       Type type,
       RowContainer* container,
@@ -307,7 +329,8 @@ class Spiller {
       uint64_t targetFileSize,
       folly::Executor* executor,
       uint64_t maxSpillRunRows,
-      common::RowBasedSpillMode rowBasedSpillMode);
+      common::RowBasedSpillMode rowBasedSpillMode,
+      bool countSpilledPartition = true);
 
   // Invoked to spill. If 'startRowIter' is not null, then we only spill rows
   // from row container starting at the offset pointed by 'startRowIter'.
@@ -316,7 +339,10 @@ class Spiller {
   // Extracts the keys, dependents or accumulators for 'rows' into '*result'.
   // Creates '*results' in spillPool() if nullptr. Used from Spiller and
   // RowContainerSpillMergeStream.
-  void extractSpill(folly::Range<char**> rows, RowVectorPtr& result);
+  void extractSpill(
+      folly::Range<char* const*> rows,
+      memory::MemoryPool* pool,
+      RowVectorPtr& result);
 
   // Hybrid mode extraction: extracts keys from RowContainer and payloads from
   // HybridContainer for 'rows' into '*result'.
@@ -410,6 +436,7 @@ class Spiller {
   // set nextEqual if rows[i] == rows[i+1], return whether equal rows to
   // feedback whether bypass hash table or not
   size_t setNextEqualForAgg(SpillRun& run);
+  void setNextEqualForAgg(folly::Range<char* const*> rows);
 
   // Function for writing a spill partition on an executor. Writes to
   // 'partition' until all rows in spillRuns_[partition] are written

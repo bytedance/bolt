@@ -54,6 +54,99 @@ TEST_F(TreeOfLosersTest, merge) {
   testBoth(500, 1);
 }
 
+TEST_F(TreeOfLosersTest, largeNumberOfStreams) {
+  auto makeStreams = []() {
+    std::vector<std::unique_ptr<TestingStream>> streams(32'769);
+    for (auto& stream : streams) {
+      stream = std::make_unique<TestingStream>(std::vector<uint32_t>{1});
+    }
+    return streams;
+  };
+
+  {
+    TreeOfLosers<TestingStream> merge(makeStreams());
+    auto* first = merge.next();
+    ASSERT_NE(first, nullptr);
+    first->pop();
+    EXPECT_NE(merge.next(), nullptr);
+  }
+  {
+    TreeOfLosers<TestingStream> mergeWithEquals(makeStreams());
+    auto [equalFirst, hasEqual] = mergeWithEquals.nextWithEquals();
+    ASSERT_NE(equalFirst, nullptr);
+    EXPECT_TRUE(hasEqual);
+    equalFirst->pop();
+    EXPECT_NE(mergeWithEquals.nextWithEquals().first, nullptr);
+  }
+}
+
+TEST_F(TreeOfLosersTest, replaceStreams) {
+  std::vector<std::unique_ptr<TestingStream>> streams;
+  streams.push_back(
+      std::make_unique<TestingStream>(std::vector<uint32_t>{4, 2, 1}));
+  streams.push_back(
+      std::make_unique<TestingStream>(std::vector<uint32_t>{6, 3}));
+  streams.push_back(
+      std::make_unique<TestingStream>(std::vector<uint32_t>{5, 3}));
+  TreeOfLosers<TestingStream> merge(std::move(streams));
+
+  auto* first = merge.next();
+  ASSERT_EQ(first->current()->value(), 1);
+  first->pop();
+  bool released = false;
+  merge.replaceStreams(
+      1,
+      2,
+      [&]() {
+        EXPECT_TRUE(released);
+        std::vector<std::unique_ptr<TestingStream>> replacements;
+        replacements.push_back(
+            std::make_unique<TestingStream>(std::vector<uint32_t>{5, 3, 2}));
+        return replacements;
+      },
+      [&]() { released = true; });
+  EXPECT_TRUE(released);
+  EXPECT_EQ(merge.numStreams(), 2);
+  EXPECT_EQ(merge.streamAt(0)->current()->value(), 2);
+
+  std::vector<uint32_t> result;
+  std::vector<bool> hasEqual;
+  for (;;) {
+    auto next = merge.nextWithEquals();
+    if (next.first == nullptr) {
+      break;
+    }
+    auto* stream = next.first;
+    result.push_back(stream->current()->value());
+    hasEqual.push_back(next.second);
+    stream->pop();
+  }
+  EXPECT_EQ(result, (std::vector<uint32_t>{2, 2, 3, 4, 5}));
+  EXPECT_EQ(hasEqual, (std::vector<bool>{true, false, false, false, false}));
+}
+
+TEST_F(TreeOfLosersTest, replacementFailureClearsTree) {
+  std::vector<std::unique_ptr<TestingStream>> streams;
+  streams.push_back(
+      std::make_unique<TestingStream>(std::vector<uint32_t>{3, 2, 1}));
+  streams.push_back(
+      std::make_unique<TestingStream>(std::vector<uint32_t>{6, 5, 4}));
+  TreeOfLosers<TestingStream> merge(std::move(streams));
+
+  bool released = false;
+  EXPECT_THROW(
+      merge.replaceStreams(
+          0,
+          1,
+          []() -> std::vector<std::unique_ptr<TestingStream>> {
+            throw std::runtime_error("injected replacement failure");
+          },
+          [&]() { released = true; }),
+      std::runtime_error);
+  EXPECT_TRUE(released);
+  EXPECT_EQ(merge.numStreams(), 0);
+}
+
 TEST_F(TreeOfLosersTest, nextWithEquals) {
   constexpr int32_t kNumStreams = 17;
   std::vector<std::vector<uint32_t>> streams(kNumStreams);
