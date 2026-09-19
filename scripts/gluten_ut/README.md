@@ -37,8 +37,13 @@ The Maven script records its exact command and Gluten commit in `_command.txt`,
 raw output in `_maven.log`, and measurements in `_summary.json` / `_summary.md`.
 It archives fresh XML and text reports under `reports/`. `_phases.tsv` records
 the parallel runner's cumulative and previous-phase wall time in seconds.
-In CI, the Maven summary includes a comparison table in the job Summary, and
-both runners' logs are uploaded in `bolt-gluten-ut-reports`.
+Pull requests run the parallel gate. To also measure Maven in CI, manually run
+the workflow with `compare_maven=true`. The comparison repeats the tests on the
+same runner and can take much longer than the parallel gate. Its job Summary
+includes both timings, and both runners' logs are uploaded in
+`bolt-gluten-ut-reports`.
+GitHub requires the workflow file to exist on the default branch before
+[manual dispatch is available](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
 
 Interpret the measurements with these differences in mind:
 
@@ -48,8 +53,8 @@ Interpret the measurements with these differences in mind:
   startup. Parallel test time is the dispatch interval.
 - Both runs reuse downloaded dependencies; the second may benefit from cache
   entries populated by the first. Neither number includes the native build.
-- Maven's POM-based discovery can cover fewer suites. For example, the pinned
-  Gluten checkout's `gluten-arrow` module does not enable the ScalaTest plugin.
+- Maven's POM-based discovery can cover fewer suites. For example, the Gluten
+  revision used locally does not enable the ScalaTest plugin in `gluten-arrow`.
   The summary records executed and skipped tests separately and lists classes
   discovered by `run.sh` that have no Maven XML report. Excluded and aborted
   suites can also appear in this list.

@@ -17,6 +17,11 @@ on:
         description: 'Gluten branch/tag/sha to check out; leave blank to use the hardcoded default below.'
         required: false
         default: ''
+      compare_maven:
+        description: 'Also run the serial Maven UT baseline for a timing comparison.'
+        type: boolean
+        required: false
+        default: false
 
 env:
   # The Bolt backend (backends-bolt / cpp/bolt) lives in upstream Gluten main.
@@ -165,9 +170,9 @@ jobs:
         run: bash scripts/gluten_ut/run.sh
 
       - name: Run Gluten UT (Maven lifecycle comparison)
-        # Collect a serial Maven baseline on the same runner, even when the
-        # parallel tests fail. Require its successful JVM build first.
-        if: ${{ !cancelled() && steps.parallel.outputs.build_ready == 'true' }}
+        # Opt-in baseline on the same runner, even when parallel tests fail.
+        # Require its successful JVM build first.
+        if: ${{ !cancelled() && inputs.compare_maven && steps.parallel.outputs.build_ready == 'true' }}
         timeout-minutes: 120
         continue-on-error: true
         env:
