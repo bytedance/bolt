@@ -45,7 +45,6 @@
 #ifdef ENABLE_META_SORT
 #include "bolt/exec/meta/MetaRowSorterApi.h"
 #endif
-#include <gfx/timsort.hpp>
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
@@ -56,6 +55,37 @@ namespace {
 #define CHECK_FINALIZED() \
   BOLT_CHECK(finalized_, "Spiller hasn't been finalized yet");
 } // namespace
+
+std::unique_ptr<Spiller> Spiller::createSortedOutput(
+    RowContainer* container,
+    RowTypePtr rowType,
+    int32_t numSortingKeys,
+    const std::vector<CompareFlags>& sortCompareFlags,
+    const common::SpillConfig* spillConfig) {
+  BOLT_CHECK(
+      sortCompareFlags.empty() || sortCompareFlags.size() == numSortingKeys);
+  std::vector<CompareFlags> flags = sortCompareFlags;
+  if (flags.empty()) {
+    flags.resize(numSortingKeys);
+  }
+  auto ioConfig = spillConfig->spillIOConfig(1);
+  ioConfig.fileNamePrefix =
+      fmt::format("{}-output", spillConfig->fileNamePrefix);
+  auto spiller = std::unique_ptr<Spiller>(new Spiller(
+      Type::kAggregateOutput,
+      container,
+      std::move(rowType),
+      HashBitRange{},
+      SpillState::makeSortingKeys(flags),
+      ioConfig,
+      std::numeric_limits<uint64_t>::max(),
+      nullptr,
+      spillConfig->maxSpillRunRows,
+      spillConfig->rowBasedSpillMode,
+      false));
+  spiller->setSpillConfig(spillConfig);
+  return spiller;
+}
 
 Spiller::Spiller(
     Type type,
@@ -246,7 +276,8 @@ Spiller::Spiller(
     uint64_t targetFileSize,
     folly::Executor* executor,
     uint64_t maxSpillRunRows,
-    common::RowBasedSpillMode rowBasedSpillMode)
+    common::RowBasedSpillMode rowBasedSpillMode,
+    bool countSpilledPartition)
     : type_(type),
       container_(container),
       executor_(executor),
@@ -267,7 +298,8 @@ Spiller::Spiller(
           sortingKeys,
           targetFileSize,
           memory::spillMemoryPool(),
-          &stats_),
+          &stats_,
+          countSpilledPartition),
       spillMode_(Mode::kRowVector),
       rowInfo_(std::nullopt) {
   if (rowBasedSpillMode != common::RowBasedSpillMode::DISABLE) {
@@ -300,26 +332,11 @@ void Spiller::setRowFormatInfo(bool isSerialized) {
   rowInfo_.value().serialized = isSerialized;
 }
 
-void Spiller::extractSpill(folly::Range<char**> rows, RowVectorPtr& resultPtr) {
-  if (!resultPtr) {
-    resultPtr = BaseVector::create<RowVector>(
-        rowType_, rows.size(), memory::spillMemoryPool());
-  } else {
-    resultPtr->prepareForReuse();
-    resultPtr->resize(rows.size());
-  }
-  auto result = resultPtr.get();
-  auto& types = container_->columnTypes();
-  for (auto i = 0; i < types.size(); ++i) {
-    container_->extractColumn(rows.data(), rows.size(), i, result->childAt(i));
-  }
-
-  auto& accumulators = container_->accumulators();
-
-  auto numKeys = types.size();
-  for (auto i = 0; i < accumulators.size(); ++i) {
-    accumulators[i].extractForSpill(rows, result->childAt(i + numKeys));
-  }
+void Spiller::extractSpill(
+    folly::Range<char* const*> rows,
+    memory::MemoryPool* pool,
+    RowVectorPtr& resultPtr) {
+  extractRowContainerSpillVector(*container_, rowType_, rows, pool, resultPtr);
 }
 
 void Spiller::extractSpillHybrid(
@@ -355,6 +372,20 @@ int64_t Spiller::extractSpillVector(
     int64_t maxBytes,
     RowVectorPtr& spillVector,
     size_t& nextBatchIndex) {
+  return extractSpillVector(
+      folly::Range<char* const*>(rows.data(), rows.size()),
+      maxRows,
+      maxBytes,
+      spillVector,
+      nextBatchIndex);
+}
+
+int64_t Spiller::extractSpillVector(
+    folly::Range<char* const*> rows,
+    int32_t maxRows,
+    int64_t maxBytes,
+    RowVectorPtr& spillVector,
+    size_t& nextBatchIndex) {
   BOLT_CHECK(type_ != Type::kHashJoinProbe && type_ != Type::kLocalMergeInput);
 
   auto limit = std::min<size_t>(rows.size() - nextBatchIndex, maxRows);
@@ -380,7 +411,10 @@ int64_t Spiller::extractSpillVector(
         break;
       }
     }
-    extractSpill(folly::Range(&rows[nextBatchIndex], numRows), spillVector);
+    extractSpill(
+        folly::Range<char* const*>(&rows[nextBatchIndex], numRows),
+        memory::spillMemoryPool(),
+        spillVector);
     nextBatchIndex += numRows;
   }
   updateSpillConvertTime(convertTimeUs);
@@ -509,86 +543,68 @@ std::unique_ptr<SpillMergeStream> Spiller::spillMergeStreamOverRows(
 }
 
 void Spiller::ensureSorted(SpillRun& run) {
-  // The spill data of a hash join doesn't need to be sorted.
   if (run.sorted || !needSort()) {
     return;
   }
+  const auto sortTimeUs =
+      sortRowsInPlace(folly::Range<char**>(run.rows.data(), run.rows.size()));
+  run.sorted = true;
+  updateSpillSortTime(std::max<uint64_t>(1, sortTimeUs));
+}
 
-  uint64_t sortTimeUs{0};
+uint64_t Spiller::sortRowsInPlace(folly::Range<char**> rows) {
+  if (rows.size() < 2) {
+    return 0;
+  }
+  uint64_t sortTimeUs = 0;
   {
     MicrosecondTimer timer(&sortTimeUs);
-
-    auto compareFlags = compareFlags_.empty()
-        ? std::vector<CompareFlags>(container_->keyTypes().size())
-        : compareFlags_;
+    std::vector<CompareFlags> defaultCompareFlags;
+    if (compareFlags_.empty()) {
+      defaultCompareFlags.resize(container_->keyTypes().size());
+    }
+    const auto& compareFlags =
+        compareFlags_.empty() ? defaultCompareFlags : compareFlags_;
 
 #ifdef ENABLE_BOLT_JIT
     if (cmp_ == nullptr && spillConfig_ &&
-        spillConfig_->getJITenabledForSpill()) {
-      if (container_->JITable(container_->keyTypes())) {
-        auto [jitMod, rowRowCmpfn] = container_->codegenCompare(
-            container_->keyTypes(),
-            compareFlags,
-            bytedance::bolt::jit::CmpType::SORT_LESS,
-            true);
-        jitModule_ = std::move(jitMod);
-        cmp_ = (RowRowCompare)jitModule_->getFuncPtr(rowRowCmpfn);
-      }
+        spillConfig_->getJITenabledForSpill() &&
+        container_->JITable(container_->keyTypes())) {
+      auto [module, function] = container_->codegenCompare(
+          container_->keyTypes(),
+          compareFlags,
+          bytedance::bolt::jit::CmpType::SORT_LESS,
+          true);
+      jitModule_ = std::move(module);
+      cmp_ = reinterpret_cast<RowRowCompare>(jitModule_->getFuncPtr(function));
     }
-    if (cmp_) {
+    if (cmp_ != nullptr) {
 #if DEBUG_JIT
       sorter_.sort(
-          run.rows.begin(),
-          run.rows.end(),
-          [&](const char* left, const char* right) {
-            auto expected =
+          rows.begin(), rows.end(), [&](const char* left, const char* right) {
+            const auto expected =
                 container_->compareRows(left, right, compareFlags) < 0;
-            auto res = cmp_(left, right) > 0;
-            bool jitEqual = (int)res > 0; // as cmp_ may return 255 for true
-            if ((expected != jitEqual)) {
-              std::stringstream ss;
-              ss << " spill sort expected: " << (int)expected
-                 << " jitEqual: " << (int)jitEqual
-                 << " left: " << container_->toString(left)
-                 << " right: " << container_->toString(right) << std::endl;
-              std::cerr << ss.str() << std::endl;
-              BOLT_CHECK(false);
-            }
+            BOLT_CHECK_EQ(expected, cmp_(left, right) > 0);
             return expected;
           });
 #else
-      sorter_.sort(run.rows.begin(), run.rows.end(), cmp_);
+      sorter_.sort(rows.begin(), rows.end(), cmp_);
 #endif
-    } else {
+    } else
 #endif
-
+    {
 #ifdef ENABLE_META_SORT
-      MetaRowsSorterWraper<SpillRows>::MetaCodegenSort(
-          run.rows,
-          container_,
-          sorter_,
-          container_->keyIndices(),
-          compareFlags);
+      MetaRowsSorterWraper<folly::Range<char**>>::MetaCodegenSort(
+          rows, container_, sorter_, container_->keyIndices(), compareFlags);
 #else
-    sorter_.sort(
-        run.rows.begin(),
-        run.rows.end(),
-        [&](const char* left, const char* right) {
-          return container_->compareRows(left, right, compareFlags) < 0;
-        });
-
+      sorter_.sort(
+          rows.begin(), rows.end(), [&](const char* left, const char* right) {
+            return container_->compareRows(left, right, compareFlags) < 0;
+          });
 #endif
-
-#ifdef ENABLE_BOLT_JIT
     }
-#endif
-
-    run.sorted = true;
   }
-
-  // NOTE: Always set a non-zero sort time to avoid flakiness in tests which
-  // check sort time.
-  updateSpillSortTime(std::max<uint64_t>(1, sortTimeUs));
+  return std::max<uint64_t>(1, sortTimeUs);
 }
 
 size_t Spiller::setNextEqualForAgg(SpillRun& run) {
@@ -647,6 +663,69 @@ size_t Spiller::setNextEqualForAgg(SpillRun& run) {
   // the last is false
   bits::setBit(run.rows[i], container_->probedFlagOffset(), false);
   return equalNum;
+}
+
+void Spiller::setNextEqualForAgg(folly::Range<char* const*> rows) {
+  if (rows.empty()) {
+    return;
+  }
+  BOLT_CHECK_GT(container_->probedFlagOffset(), 0);
+  for (size_t i = 0; i + 1 < rows.size(); ++i) {
+    const auto equal =
+        container_->compareRows(rows[i], rows[i + 1], compareFlags_) == 0;
+    bits::setBit(rows[i], container_->probedFlagOffset(), equal);
+  }
+  bits::setBit(rows.back(), container_->probedFlagOffset(), false);
+}
+
+OwnedSpillPartition Spiller::spillSortedRunsAndFinish(
+    const std::vector<folly::Range<char* const*>>& runs,
+    bool needSetNextEqual) {
+  CHECK_NOT_FINALIZED();
+  BOLT_CHECK_EQ(type_, Type::kAggregateOutput);
+  BOLT_CHECK(!runs.empty());
+  markAllPartitionsSpilled();
+  auto cleanupFiles =
+      folly::makeGuard([this]() { state_.cleanupPartitionFilesNoThrow(0); });
+
+  constexpr int32_t kTargetBatchRows = 4096;
+  constexpr int64_t kTargetBatchBytes =
+      (1UL << 20) - AlignedBuffer::kPaddedSize;
+  uint64_t totalTimeUs = 0;
+  {
+    MicrosecondTimer timer(&totalTimeUs);
+    for (const auto rows : runs) {
+      BOLT_CHECK(!rows.empty());
+      if (needSetNextEqual) {
+        setNextEqualForAgg(rows);
+      }
+#ifndef NDEBUG
+      for (size_t i = 1; i < rows.size(); ++i) {
+        BOLT_DCHECK_LE(
+            container_->compareRows(rows[i - 1], rows[i], compareFlags_), 0);
+      }
+#endif
+      if (spillMode_ == Mode::kRowContainer) {
+        state_.appendToPartition(0, rows, rowType_, rowInfo_.value());
+      } else {
+        RowVectorPtr spillVector;
+        size_t offset = 0;
+        while (offset < rows.size()) {
+          extractSpillVector(
+              rows, kTargetBatchRows, kTargetBatchBytes, spillVector, offset);
+          state_.appendToPartition(0, spillVector);
+        }
+      }
+      state_.finishFile(0);
+    }
+  }
+  updateSpillTotalTime(totalTimeUs);
+  stats_.wlock()->spillRuns += runs.size();
+  auto partition = finishSpill();
+  OwnedSpillPartition owned(std::move(partition));
+  BOLT_CHECK_EQ(owned.numFiles(), runs.size());
+  cleanupFiles.dismiss();
+  return owned;
 }
 
 std::unique_ptr<Spiller::SpillStatus> Spiller::writeSpill(int32_t partition) {

@@ -77,6 +77,16 @@ TEST_F(QueryConfigTest, parquetRepDefStreamingWindowSize) {
   EXPECT_EQ(queryCtx->queryConfig().parquetRepDefStreamingWindowSize(), 0);
 }
 
+TEST_F(QueryConfigTest, aggregationDynamicFinalSpillEnabled) {
+  QueryConfig defaultConfig{{}};
+  EXPECT_FALSE(defaultConfig.aggregationDynamicFinalSpillEnabled());
+
+  QueryConfig enabled{{
+      {QueryConfig::kAggregationDynamicFinalSpillEnabled, "true"},
+  }};
+  EXPECT_TRUE(enabled.aggregationDynamicFinalSpillEnabled());
+}
+
 TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {
   auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
   ASSERT_TRUE(queryCtx->queryConfig()
