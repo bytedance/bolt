@@ -155,6 +155,7 @@ jobs:
           ) 200> "$BASE/.lock"
 
       - name: Run Gluten UT (parallel, blacklist-aware)
+        id: parallel
         # JOBS defaults to min(threads/2, RAM/4GB); each job is one JVM with a
         # 2 GB heap plus 1 GB of Bolt off-heap.
         env:
@@ -162,6 +163,17 @@ jobs:
           SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
           TIMINGS_DIR: /data/bolt-gluten-ut-timings
         run: bash scripts/gluten_ut/run.sh
+
+      - name: Run Gluten UT (Maven lifecycle comparison)
+        # Collect a serial Maven baseline on the same runner, even when the
+        # parallel tests fail. Require its successful JVM build first.
+        if: ${{ !cancelled() && steps.parallel.outputs.build_ready == 'true' }}
+        timeout-minutes: 120
+        continue-on-error: true
+        env:
+          GLUTEN_HOME: ${{ github.workspace }}/gluten
+          SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
+        run: bash scripts/gluten_ut/run_maven.sh
 
       - name: Upload test reports
         if: always()
@@ -173,4 +185,5 @@ jobs:
             scripts/gluten_ut/logs/classified/*
             scripts/gluten_ut/logs/jobs/*
             scripts/gluten_ut/logs/reports/**/TEST-*.xml
+            scripts/gluten_ut/logs/maven/**
           if-no-files-found: warn

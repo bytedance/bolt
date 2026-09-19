@@ -142,6 +142,7 @@ cd "$GLUTEN_HOME"
 # wall-time of each phase is visible from the banner that opens the NEXT one.
 SCRIPT_START=$(date +%s)
 LAST_STEP=$SCRIPT_START
+: > "$LOG_DIR/_phases.tsv"
 step() {
   local now total delta
   now=$(date +%s)
@@ -150,6 +151,7 @@ step() {
   printf '===== [%d:%02d total | prev %d:%02d] %s =====\n' \
     "$((total / 60))" "$((total % 60))" \
     "$((delta / 60))" "$((delta % 60))" "$*"
+  printf '%s\t%s\t%s\n' "$total" "$delta" "$*" >> "$LOG_DIR/_phases.tsv"
   LAST_STEP=$now
 }
 echo "GLUTEN_HOME=$GLUTEN_HOME  SPARK_HOME=$SPARK_HOME  JAVA_HOME=$JAVA_HOME  JOBS=$JOBS"
@@ -185,6 +187,9 @@ else
     tail -40 "$LOG_DIR/_install.log" >&2
     exit 1
   }
+fi
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo 'build_ready=true' >> "$GITHUB_OUTPUT"
 fi
 
 ###############################################################################
