@@ -377,6 +377,50 @@ TEST(DateTimeUtilTest, toGMT) {
   EXPECT_THROW(ts.toGMT(*laZone), BoltUserError);
 }
 
+TEST(DateTimeUtilTest, toGMTGapPolicies) {
+  auto* la = tz::locateZone("America/Los_Angeles");
+  const auto local = Timestamp(
+      fromTimestampString("2019-03-10 02:30:00", nullptr).getSeconds(),
+      123456789);
+  auto timestamp = local;
+  bool hasError = false;
+  timestamp.toGMT(*la, &hasError);
+  EXPECT_TRUE(hasError);
+  EXPECT_EQ(timestamp, local);
+  EXPECT_THROW(timestamp.toGMT(*la), BoltUserError);
+
+  timestamp.toGMT(*la, TimestampGapPolicy::kShiftForward, &hasError);
+  EXPECT_FALSE(hasError);
+  EXPECT_EQ(
+      timestamp,
+      Timestamp(
+          fromTimestampString("2019-03-10 10:30:00", nullptr).getSeconds(),
+          123456789));
+
+  auto* toronto = tz::locateZone("America/Toronto");
+  timestamp = fromTimestampString("1919-03-31 00:00:00", nullptr);
+  auto shifted = timestamp;
+  shifted.toGMT(*toronto, TimestampGapPolicy::kShiftForward);
+  EXPECT_EQ(shifted, fromTimestampString("1919-03-31 05:00:00", nullptr));
+  timestamp.toGMT(*toronto, TimestampGapPolicy::kNextValidSecond);
+  EXPECT_EQ(timestamp, fromTimestampString("1919-03-31 04:30:00", nullptr));
+
+  for (const auto policy :
+       {TimestampGapPolicy::kReject,
+        TimestampGapPolicy::kShiftForward,
+        TimestampGapPolicy::kNextValidSecond}) {
+    timestamp = fromTimestampString("2019-11-03 01:30:00.123456", nullptr);
+    timestamp.toGMT(*la, policy);
+    EXPECT_EQ(
+        timestamp, fromTimestampString("2019-11-03 08:30:00.123456", nullptr));
+
+    timestamp = fromTimestampString("1970-01-01 00:00:00.123456", nullptr);
+    timestamp.toGMT(*tz::locateZone("+05:30"), policy);
+    EXPECT_EQ(
+        timestamp, fromTimestampString("1969-12-31 18:30:00.123456", nullptr));
+  }
+}
+
 TEST(DateTimeUtilTest, toTimezone) {
   auto* laZone = tz::locateZone("America/Los_Angeles");
 

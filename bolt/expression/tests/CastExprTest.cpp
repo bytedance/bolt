@@ -1055,6 +1055,17 @@ TEST_F(CastExprTest, timestampAdjustToTimezone) {
           std::nullopt,
           Timestamp(957164400, 0),
       });
+
+  // Presto keeps rejecting nonexistent local times.
+  testInvalidCast<std::string>(
+      "timestamp", {"2019-03-10 02:30:00"}, "Cannot cast");
+  testTryCast<std::string, Timestamp>(
+      "timestamp", {"2019-03-10 02:30:00"}, {std::nullopt});
+
+  setTimezone("America/Toronto");
+  testInvalidCast<int32_t>("timestamp", {-18539}, "Cannot cast", DATE());
+  testTryCast<int32_t, Timestamp>(
+      "timestamp", {-18539}, {std::nullopt}, DATE());
 }
 
 TEST_F(CastExprTest, date) {

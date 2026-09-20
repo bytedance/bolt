@@ -80,6 +80,15 @@ enum class TimestampPrecision : int8_t {
   kNanoseconds = 9, // 10^9 nanoseconds are equal to one second.
 };
 
+enum class TimestampGapPolicy {
+  kReject,
+  // Preserve the local time's position within the gap, as LocalDateTime.atZone.
+  kShiftForward,
+  // Clamp seconds to the gap end, for DATE conversion via
+  // LocalDate.atStartOfDay.
+  kNextValidSecond,
+};
+
 struct TimestampToStringOptions {
   using Precision = TimestampPrecision;
 
@@ -422,6 +431,13 @@ struct Timestamp {
   // ts.toString() returns January 1, 1970 08:00:00
   // If error is not nullptr, it is set to true if the conversion fails.
   void toGMT(const tz::TimeZone& zone, bool* error = nullptr);
+
+  // Resolves overlaps to the earlier instant and handles gaps using gapPolicy.
+  // The nanosecond component is preserved.
+  void toGMT(
+      const tz::TimeZone& zone,
+      TimestampGapPolicy gapPolicy,
+      bool* error = nullptr);
 
   // Same as above, but accepts PrestoDB time zone ID.
   // If error is not nullptr, it is set to true if the conversion fails.

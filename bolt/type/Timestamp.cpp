@@ -67,16 +67,21 @@ std::string Timestamp::toString(
   return toString<::bytedance::bolt::kSparkCompatible>(precision, tz);
 }
 
-void Timestamp::toGMT(const tz::TimeZone& zone, bool* hasError) {
+namespace {
+FOLLY_ALWAYS_INLINE void toGMTImpl(
+    const tz::TimeZone& zone,
+    tz::TimeZone::TChoose choose,
+    int64_t& seconds,
+    bool* hasError) {
   std::chrono::seconds sysSeconds;
 
   try {
-    sysSeconds = zone.to_sys(std::chrono::seconds(seconds_));
+    sysSeconds = zone.to_sys(std::chrono::seconds(seconds), choose);
   } catch (const ::date::ambiguous_local_time&) {
     // If the time is ambiguous, pick the earlier possibility to be consistent
     // with Presto.
     sysSeconds = zone.to_sys(
-        std::chrono::seconds(seconds_), tz::TimeZone::TChoose::kEarliest);
+        std::chrono::seconds(seconds), tz::TimeZone::TChoose::kEarliest);
   } catch (const ::date::nonexistent_local_time& error) {
     if (hasError) {
       *hasError = true;
@@ -94,10 +99,28 @@ void Timestamp::toGMT(const tz::TimeZone& zone, bool* hasError) {
     // not suppress it.
     BOLT_FAIL_UNSUPPORTED_INPUT_UNCATCHABLE(e.what());
   }
-  seconds_ = sysSeconds.count();
+  seconds = sysSeconds.count();
   if (hasError) {
     *hasError = false;
   }
+}
+} // namespace
+
+void Timestamp::toGMT(const tz::TimeZone& zone, bool* hasError) {
+  toGMTImpl(zone, tz::TimeZone::TChoose::kFail, seconds_, hasError);
+}
+
+void Timestamp::toGMT(
+    const tz::TimeZone& zone,
+    TimestampGapPolicy gapPolicy,
+    bool* hasError) {
+  auto choose = tz::TimeZone::TChoose::kFail;
+  if (gapPolicy == TimestampGapPolicy::kShiftForward) {
+    choose = tz::TimeZone::TChoose::kEarliestOrShiftForward;
+  } else if (gapPolicy == TimestampGapPolicy::kNextValidSecond) {
+    choose = tz::TimeZone::TChoose::kEarliest;
+  }
+  toGMTImpl(zone, choose, seconds_, hasError);
 }
 
 void Timestamp::toGMT(int16_t tzID, bool* hasError) {

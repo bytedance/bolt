@@ -31,6 +31,7 @@
 #include "bolt/functions/prestosql/tests/CastBaseTest.h"
 #include "bolt/functions/sparksql/registration/Register.h"
 #include "bolt/parse/TypeResolver.h"
+#include "bolt/type/TimestampConversion.h"
 using namespace bytedance::bolt;
 namespace bytedance::bolt::test {
 namespace {
@@ -344,6 +345,74 @@ TEST_F(SparkCastExprTest, stringToTimestampWithTimezone) {
   setQueryTimeZone("Asia/Shanghai");
 
   testCast<std::string, Timestamp>("timestamp", input, expected);
+}
+
+TEST_F(SparkCastExprTest, stringToTimestampDst) {
+  struct TestCase {
+    const char* zone;
+    const char* local;
+    const char* utc;
+  };
+  // Expected values follow Spark's LocalDateTime.atZone resolution: move a
+  // gap forward by its duration and choose the earlier offset in an overlap.
+  const std::vector<TestCase> cases{
+      {"America/Los_Angeles", "2019-03-10 01:30:00", "2019-03-10 09:30:00"},
+      {"America/Los_Angeles",
+       "2019-03-10 02:30:00.123456",
+       "2019-03-10 10:30:00.123456"},
+      {"America/Los_Angeles", "2019-03-10 03:30:00", "2019-03-10 10:30:00"},
+      {"America/Los_Angeles", "2019-11-03 01:30:00", "2019-11-03 08:30:00"},
+      {"Europe/London", "2021-03-28 01:32:20", "2021-03-28 01:32:20"},
+      {"Australia/Lord_Howe", "2021-10-03 02:15:00", "2021-10-02 15:45:00"},
+      {"America/Toronto", "1919-03-31 00:00:00", "1919-03-31 05:00:00"},
+      {"+05:30", "1970-01-01 00:00:00.123456", "1969-12-31 18:30:00.123456"},
+      {"UTC", "1970-01-01 00:00:00", "1970-01-01 00:00:00"},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(fmt::format("{} {}", test.local, test.zone));
+    const auto timestamp = util::fromTimestampString(test.utc, nullptr);
+    const std::vector<std::optional<Timestamp>> expected{
+        timestamp, std::nullopt};
+    for (bool explicitZone : {false, true}) {
+      setQueryTimeZone(explicitZone ? "UTC" : test.zone);
+      const auto input = explicitZone
+          ? fmt::format("{} {}", test.local, test.zone)
+          : std::string(test.local);
+      testCast<std::string, Timestamp>(
+          "timestamp", {input, std::nullopt}, expected);
+      testTryCast<std::string, Timestamp>(
+          "timestamp", {input, std::nullopt}, expected);
+    }
+  }
+}
+
+TEST_F(SparkCastExprTest, dateToTimestampDst) {
+  struct TestCase {
+    const char* zone;
+    int32_t days;
+    int64_t seconds;
+  };
+  // Spark uses LocalDate.atStartOfDay: the first valid instant, even when
+  // moving midnight by the full gap would produce a later instant.
+  const std::vector<TestCase> cases{
+      {"America/Toronto", -18539, -1601753400}, // 1919-03-31 -> 04:30 UTC.
+      {"Asia/Kathmandu",
+       5844,
+       504901800}, // 1986-01-01 -> 18:30 UTC (prior day).
+      {"Pacific/Apia", 15338, 1325239200}, // 2011-12-30 was skipped entirely.
+      {"Asia/Shanghai",
+       -7550,
+       -652348800}, // 1949-05-01 -> 16:00 UTC (prior day).
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.zone);
+    setQueryTimeZone(test.zone);
+    const std::vector<std::optional<int32_t>> input{test.days, std::nullopt};
+    const std::vector<std::optional<Timestamp>> expected{
+        Timestamp(test.seconds, 0), std::nullopt};
+    testCast<int32_t, Timestamp>("timestamp", input, expected, DATE());
+    testTryCast<int32_t, Timestamp>("timestamp", input, expected, DATE());
+  }
 }
 
 TEST_F(SparkCastExprTest, intToTimestamp) {

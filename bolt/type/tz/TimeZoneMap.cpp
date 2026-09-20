@@ -303,6 +303,16 @@ template <typename TDuration>
     return ::date::zoned_time{tz, timestamp};
   }
 
+  if (choose == TimeZone::TChoose::kEarliestOrShiftForward) {
+    // The first offset selects the earlier instant in an overlap. In a gap,
+    // it shifts the local time forward without a second time zone lookup.
+    const auto info = tz->get_info(timestamp);
+    return ::date::zoned_time{
+        tz,
+        ::date::sys_time<TDuration>{
+            timestamp.time_since_epoch() - info.first.offset}};
+  }
+
   auto dateChoose = (choose == TimeZone::TChoose::kEarliest)
       ? ::date::choose::earliest
       : ::date::choose::latest;

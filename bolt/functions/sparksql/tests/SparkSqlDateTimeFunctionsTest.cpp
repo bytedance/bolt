@@ -3339,6 +3339,22 @@ TEST_F(SparkSqlDateTimeFunctionsTest, toUtcTimestamp) {
       "2021-03-28 01:32:20.000000000",
       toUtcTimestamp("2021-03-28 01:32:20", "Europe/London"));
 
+  EXPECT_EQ(
+      "2019-03-10 10:30:00.123456000",
+      toUtcTimestamp("2019-03-10 02:30:00.123456", "America/Los_Angeles"));
+  EXPECT_EQ(
+      "2019-11-03 08:30:00.000000000",
+      toUtcTimestamp("2019-11-03 01:30:00", "America/Los_Angeles"));
+  EXPECT_EQ(
+      "2021-10-02 15:45:00.000000000",
+      toUtcTimestamp("2021-10-03 02:15:00", "Australia/Lord_Howe"));
+  EXPECT_EQ(
+      "1919-03-31 05:00:00.000000000",
+      toUtcTimestamp("1919-03-31 00:00:00", "America/Toronto"));
+  EXPECT_EQ(
+      "1969-12-31 18:30:00.123456000",
+      toUtcTimestamp("1970-01-01 00:00:00.123456", "+05:30"));
+
   auto londonGapTimestamp = std::make_optional<Timestamp>(
       util::fromTimestampString("2021-03-28 01:32:20", 19, nullptr));
   auto londonGapToShanghai = evaluateOnce<Timestamp>(
