@@ -81,7 +81,7 @@ TTimeZoneDatabase buildTimeZoneDatabase(
     if (entry.first == 0) {
       timeZonePtr =
           std::make_unique<TimeZone>("UTC", entry.first, locateZoneImpl("UTC"));
-    } else if (entry.first <= 1680) {
+    } else if (entry.first <= kMaxFixedOffsetTimeZoneId) {
       std::chrono::minutes offset = getTimeZoneOffset(entry.first);
       timeZonePtr =
           std::make_unique<TimeZone>(entry.second, entry.first, offset);
@@ -301,6 +301,16 @@ template <typename TDuration>
   if (choose == TimeZone::TChoose::kFail) {
     // By default, throws.
     return ::date::zoned_time{tz, timestamp};
+  }
+
+  if (choose == TimeZone::TChoose::kEarliestOrShiftForward) {
+    // The first offset selects the earlier instant in an overlap. In a gap,
+    // it shifts the local time forward without a second time zone lookup.
+    const auto info = tz->get_info(timestamp);
+    return ::date::zoned_time{
+        tz,
+        ::date::sys_time<TDuration>{
+            timestamp.time_since_epoch() - info.first.offset}};
   }
 
   auto dateChoose = (choose == TimeZone::TChoose::kEarliest)

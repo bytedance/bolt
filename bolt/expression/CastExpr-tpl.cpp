@@ -694,12 +694,20 @@ class Converter {
         // timestamp at GMT at that time. For example, "1970-01-01 00:00:00
         // -00:01" is 60 seconds at GMT.
         if (result.second != -1) {
-          result.first.toGMT(result.second, &hasError);
+          if (result.second <= tz::kMaxFixedOffsetTimeZoneId) {
+            result.first.toGMT(result.second, &hasError);
+          } else {
+            result.first.toGMT(
+                *tz::locateZone(result.second),
+                TimestampGapPolicy::kShiftForward,
+                &hasError);
+          }
         } else if (timeZone_ != nullptr) {
           // If no timezone information is available in the input string, check
           // if we should understand it as being at the session timezone, and if
           // so, convert to GMT.
-          result.first.toGMT(*timeZone_, &hasError);
+          result.first.toGMT(
+              *timeZone_, TimestampGapPolicy::kShiftForward, &hasError);
         }
         to = result.first;
         return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
@@ -719,7 +727,11 @@ class Converter {
       to = Timestamp::fromMillis(from * kMillisPerDay);
       bool hasError = false;
       if (timeZone_) {
-        to.toGMT(*timeZone_, &hasError);
+        if constexpr (kIsInSpark) {
+          to.toGMT(*timeZone_, TimestampGapPolicy::kNextValidSecond, &hasError);
+        } else {
+          to.toGMT(*timeZone_, &hasError);
+        }
       }
       return hasError ? ConvertStatus::OTHER_FAILURE : ConvertStatus::SUCCESS;
     } else if constexpr (std::is_same_v<FromKind, BooleanKind>) {

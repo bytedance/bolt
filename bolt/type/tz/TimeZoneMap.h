@@ -56,6 +56,10 @@ namespace bytedance::bolt::tz {
 
 class TimeZone;
 
+/// Largest Presto time zone ID for minute offsets in [-14:00, +14:00].
+/// UTC uses ID 0; larger IDs refer to named time zones.
+inline constexpr int16_t kMaxFixedOffsetTimeZoneId = 1680;
+
 /// Returns a TimeZone pointer based on a time zone name. This makes an hash
 /// map access, and will construct the index on the first access. `failOnError`
 /// controls whether to throw or return nullptr in case the time zone was not
@@ -144,12 +148,14 @@ class TimeZone {
   /// `to_sys()` will throw `tzdb::ambiguous_local_time` and
   /// `tzdb::nonexistent_local_time` in these cases.
   ///
-  /// You can overwrite the behavior in ambiguous conversions by setting the
-  /// TChoose flag, but it will still throws in case of nonexistent conversions.
+  /// kEarliest and kLatest select an offset for overlaps and the transition
+  /// instant for gaps. kEarliestOrShiftForward selects the earlier instant for
+  /// overlaps and shifts nonexistent local times forward by the gap duration.
   enum class TChoose {
     kFail = 0,
     kEarliest = 1,
     kLatest = 2,
+    kEarliestOrShiftForward = 3,
   };
 
   seconds to_sys(seconds timestamp, TChoose choose = TChoose::kFail) const;

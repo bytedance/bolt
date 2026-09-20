@@ -112,7 +112,7 @@ struct UnixTimestampFunctionBase {
       const tz::TimeZone* sessionTimeZone) {
     if (tzID == 0) {
       return true;
-    } else if (tzID <= 1680) {
+    } else if (tzID <= tz::kMaxFixedOffsetTimeZoneId) {
       this->sessionTzOffsetInSeconds_ = getPrestoTZOffsetInSeconds(tzID);
       return true;
     } else if (tzID == 1980) {
@@ -216,7 +216,7 @@ struct UnixTimestampFunctionBase {
     if (tzID == 0) {
       return tryAssignConvertedTimestamp(timestamp, timestamp.getSeconds());
     }
-    if (tzID <= 1680) {
+    if (tzID <= tz::kMaxFixedOffsetTimeZoneId) {
       return trySubtractOffsetAndAssign(
           timestamp, getPrestoTZOffsetInSeconds(tzID));
     }
@@ -766,10 +766,7 @@ struct ToUtcTimestampFunction {
     auto fromTimezone = timezone_
         ? timezone_
         : tz::locateZone(std::string_view(timezone.data(), timezone.size()));
-    const auto adjusted = fromTimezone->correct_nonexistent_time(
-        std::chrono::seconds(result.getSeconds()));
-    result = Timestamp(adjusted.count(), result.getNanos());
-    result.toGMT(*fromTimezone);
+    result.toGMT(*fromTimezone, TimestampGapPolicy::kShiftForward);
   }
 
  private:
@@ -1365,7 +1362,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
     // time zone like '+00:00'.
     if (tzID == 0) {
       return;
-    } else if (tzID <= 1680) {
+    } else if (tzID <= tz::kMaxFixedOffsetTimeZoneId) {
       this->sessionTzOffsetInSeconds_ = getPrestoTZOffsetInSeconds(tzID);
       return;
     } else { // time zone like 'Asia/Shanghai'
