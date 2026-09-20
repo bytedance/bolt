@@ -51,7 +51,7 @@ class time_zone;
 
 namespace {
 
-// Assuming tzID is in [1, 1680] range.
+// Assuming tzID is in [1, tz::kMaxFixedOffsetTimeZoneId] range.
 // tzID - PrestoDB time zone ID.
 inline int64_t getPrestoTZOffsetInSeconds(int16_t tzID) {
   // TODO(spershin): Maybe we need something better if we can (we could use

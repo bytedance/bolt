@@ -126,7 +126,7 @@ void Timestamp::toGMT(
 void Timestamp::toGMT(int16_t tzID, bool* hasError) {
   if (tzID == 0) {
     // No conversion required for time zone id 0, as it is '+00:00'.
-  } else if (tzID <= 1680) {
+  } else if (tzID <= tz::kMaxFixedOffsetTimeZoneId) {
     seconds_ -= getPrestoTZOffsetInSeconds(tzID);
   } else {
     // Other ids go this path.
@@ -148,7 +148,7 @@ void Timestamp::toTimezone(const tz::TimeZone& zone) {
 void Timestamp::toTimezone(int16_t tzID) {
   if (tzID == 0) {
     // No conversion required for time zone id 0, as it is '+00:00'.
-  } else if (tzID <= 1680) {
+  } else if (tzID <= tz::kMaxFixedOffsetTimeZoneId) {
     seconds_ += getPrestoTZOffsetInSeconds(tzID);
   } else {
     // Other ids go this path.

@@ -694,7 +694,7 @@ class Converter {
         // timestamp at GMT at that time. For example, "1970-01-01 00:00:00
         // -00:01" is 60 seconds at GMT.
         if (result.second != -1) {
-          if (result.second <= 1680) {
+          if (result.second <= tz::kMaxFixedOffsetTimeZoneId) {
             result.first.toGMT(result.second, &hasError);
           } else {
             result.first.toGMT(

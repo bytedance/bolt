@@ -56,6 +56,10 @@ namespace bytedance::bolt::tz {
 
 class TimeZone;
 
+/// Largest Presto time zone ID for minute offsets in [-14:00, +14:00].
+/// UTC uses ID 0; larger IDs refer to named time zones.
+inline constexpr int16_t kMaxFixedOffsetTimeZoneId = 1680;
+
 /// Returns a TimeZone pointer based on a time zone name. This makes an hash
 /// map access, and will construct the index on the first access. `failOnError`
 /// controls whether to throw or return nullptr in case the time zone was not

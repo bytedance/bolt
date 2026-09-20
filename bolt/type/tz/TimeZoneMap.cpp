@@ -81,7 +81,7 @@ TTimeZoneDatabase buildTimeZoneDatabase(
     if (entry.first == 0) {
       timeZonePtr =
           std::make_unique<TimeZone>("UTC", entry.first, locateZoneImpl("UTC"));
-    } else if (entry.first <= 1680) {
+    } else if (entry.first <= kMaxFixedOffsetTimeZoneId) {
       std::chrono::minutes offset = getTimeZoneOffset(entry.first);
       timeZonePtr =
           std::make_unique<TimeZone>(entry.second, entry.first, offset);
