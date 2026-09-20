@@ -100,8 +100,7 @@ TEST_F(ShuffleMiscTest, InitializeArrowProcessLifetimeStateIsIdempotent) {
 }
 
 TEST_F(ShuffleMiscTest, NonOwningBufferSliceRetainsParentAndMemoryManager) {
-  std::shared_ptr<arrow::Buffer> parent =
-      arrow::AllocateBuffer(4).ValueOrDie();
+  std::shared_ptr<arrow::Buffer> parent = arrow::AllocateBuffer(4).ValueOrDie();
   auto* data = parent->mutable_data();
   data[0] = 1;
   data[1] = 2;

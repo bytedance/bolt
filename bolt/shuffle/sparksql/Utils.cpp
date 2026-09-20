@@ -81,9 +81,8 @@ arrow::Result<std::shared_ptr<arrow::Array>> makeNullBinaryArray(
   // If it is not compressed array, null valueBuffer
   // worked, but if compress, will core dump at buffer::size(), so replace by
   // kNullBuffer
-  return arrow::MakeArray(
-      arrow::ArrayData::Make(
-          type, 1, {nullptr, std::move(offsetBuffer), zeroLengthNullBuffer()}));
+  return arrow::MakeArray(arrow::ArrayData::Make(
+      type, 1, {nullptr, std::move(offsetBuffer), zeroLengthNullBuffer()}));
 }
 
 arrow::Result<std::shared_ptr<arrow::Array>> makeBinaryArray(
