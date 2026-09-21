@@ -22,7 +22,7 @@ Bolt focuses on the physical execution layer of DBMS while providing first-class
 
 Frameworks:
 * [Apache Gluten](https://github.com/apache/gluten#bolt-backend) for Apache Spark
-* RFC for [PrestoDB](https://github.com/prestodb/rfcs/pull/59)  
+* RFC for [PrestoDB](https://github.com/prestodb/rfcs/pull/59)
 * [OpenSearch](https://github.com/opensearch-project/sql/issues/4812?open_in_browser=true) for ElasticSearch
 * Flink (Coming Soon)
 * ...
@@ -54,15 +54,27 @@ git clone https://github.com/bytedance/bolt.git
 cd bolt
 ```
 
-### Setup Develop Env
-We provide scripts to help developers configure the environment and install dependencies.
+### Set Up the Development Environment
+
+Run the following script to set up your development environment and install dependencies:
+
 ```shell
 scripts/setup-dev-env.sh
 ```
 
-Bolt uses [Conan](https://conan.io/) as its dependency management tool, which is an open source and multi-platform package manager.
+Bolt manages its dependencies with [Conan](https://conan.io/), an open-source, cross-platform package manager.
 
-This script exports conan recipes to local cache. For the first time, dependencies will be built from source and installed into local cache. You can setup your own [conan server](https://docs.conan.io/2/reference/conan_server.html#conan-server) to accelerate building.
+The setup script exports Conan recipes to the local cache. During the first build, dependencies are compiled from source and stored in the local cache. You can set up your own [Conan server](https://docs.conan.io/2/reference/conan_server.html#conan-server) to speed up builds.
+
+Use the following helper script to configure your Conan profile:
+
+```sh
+# Auto-detect the compiler, C++ standard library, and linker.
+python3 scripts/configure-conan-profile.py
+```
+
+See [`configure-conan-profile.py`](scripts/configure-conan-profile.py) for the
+default toolchain selection behavior and the options that override it.
 
 ### Building Bolt
 #### Building Bolt for Presto
