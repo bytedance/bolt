@@ -101,12 +101,12 @@ class IoBuffer {
 
     auto allocation = std::make_shared<ContiguousAllocation>();
     const auto usablePages = AllocationTraits::numPages(usableSize);
-    const auto hugePagePages = AllocationTraits::numPagesInHugePage();
+    const auto pagesPerHugePage = AllocationTraits::numPagesInHugePage();
     // Reserve a huge-page-rounded payload plus one extra huge page. This
     // guarantees enough space for the payload after advancing an arbitrary
     // machine-page-aligned allocation start to the next huge-page boundary.
     const auto maxPages =
-        bits::roundUp(usablePages, hugePagePages) + hugePagePages;
+        bits::roundUp(usablePages, pagesPerHugePage) + pagesPerHugePage;
     pool->allocateContiguous(usablePages, *allocation, maxPages);
 
     const auto hugePageRange = allocation->hugePageRange();
