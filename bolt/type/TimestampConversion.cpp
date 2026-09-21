@@ -389,15 +389,15 @@ DateParseResult tryParseDateString(
   return isValid ? DateParseResult::kSuccess : DateParseResult::kInvalidDate;
 }
 
-// String format is hh:mm:ss.microseconds (microseconds are optional).
-// ISO 8601
+// Returns microseconds or nanoseconds since midnight.
+template <bool nanos = false>
 bool tryParseTimeString(
     const char* buf,
     size_t len,
     size_t& pos,
     int64_t& result,
     int32_t mode) {
-  int32_t hour = -1, min = -1, sec = -1, micros = -1;
+  int32_t hour = -1, min = -1, sec = -1, fraction = -1;
   pos = 0;
 
   if (len == 0) {
@@ -426,7 +426,7 @@ bool tryParseTimeString(
 
   // No minute and second.
   if ((mode & ParseMode::kNonStandardCast) && pos == len) {
-    result = fromTime(hour, 0, 0, 0);
+    result = fromTime(hour, 0, 0, 0) * (nanos ? kNanosPerMicro : 1);
     return true;
   }
 
@@ -450,7 +450,7 @@ bool tryParseTimeString(
 
   // No second.
   if ((mode & ParseMode::kNonStandardCast) && pos == len) {
-    result = fromTime(hour, min, 0, 0);
+    result = fromTime(hour, min, 0, 0) * (nanos ? kNanosPerMicro : 1);
     return true;
   }
 
@@ -469,14 +469,13 @@ bool tryParseTimeString(
     return false;
   }
 
-  micros = 0;
+  fraction = 0;
   if (pos < len && buf[pos] == '.') {
     pos++;
-    // We expect microseconds.
-    int32_t mult = 100000;
+    int32_t mult = nanos ? 100'000'000 : 100'000;
     for (; pos < len && characterIsDigit(buf[pos]); pos++, mult /= 10) {
       if (mult > 0) {
-        micros += (buf[pos] - '0') * mult;
+        fraction += (buf[pos] - '0') * mult;
       }
     }
   }
@@ -493,19 +492,34 @@ bool tryParseTimeString(
       return false;
     }
   }
-  result = fromTime(hour, min, sec, micros);
+  if constexpr (nanos) {
+    result = fromTime(hour, min, sec, 0) * kNanosPerMicro + fraction;
+  } else {
+    result = fromTime(hour, min, sec, fraction);
+  }
   return true;
 }
 
-// String format is "YYYY-MM-DD hh:mm:ss.microseconds" (seconds and microseconds
-// are optional). ISO 8601
+template <bool nanos>
+FOLLY_ALWAYS_INLINE Timestamp
+fromDatetimeImpl(int64_t daysSinceEpoch, int64_t timeSinceMidnight) {
+  constexpr int64_t kUnitsPerSecond =
+      nanos ? Timestamp::kNanosInSecond : kMicrosPerSec;
+  constexpr int64_t kNanosPerUnit = nanos ? 1 : kNanosPerMicro;
+  return Timestamp(
+      daysSinceEpoch * kSecsPerDay + timeSinceMidnight / kUnitsPerSecond,
+      (timeSinceMidnight % kUnitsPerSecond) * kNanosPerUnit);
+}
+
+// Seconds and fractional seconds are optional.
+template <bool nanos = false>
 bool tryParseTimestampString(
     const char* buf,
     size_t len,
     size_t& pos,
     Timestamp& result) {
   int64_t daysSinceEpoch = 0;
-  int64_t microsSinceMidnight = 0;
+  int64_t timeSinceMidnight = 0;
   if (tryParseDateString(
           buf,
           len,
@@ -518,7 +532,7 @@ bool tryParseTimestampString(
 
   if (pos == len) {
     // No time: only a date.
-    result = fromDatetime(daysSinceEpoch, 0);
+    result = fromDatetimeImpl<nanos>(daysSinceEpoch, 0);
     return true;
   }
 
@@ -528,24 +542,24 @@ bool tryParseTimestampString(
 
   // Try to parse a time field.
   size_t timePos = 0;
-  if (!tryParseTimeString(
+  if (!tryParseTimeString<nanos>(
           buf + pos,
           len - pos,
           timePos,
-          microsSinceMidnight,
+          timeSinceMidnight,
           ParseMode::kNonStrict | ParseMode::kNonStandardCast)) {
     // The rest of the string is not a valid time, but it could be relevant to
     // the caller (e.g. it could be a time zone), return the date we parsed
     // and let them decide what to do with the rest.
-    result = fromDatetime(daysSinceEpoch, 0);
+    result = fromDatetimeImpl<nanos>(daysSinceEpoch, 0);
     return true;
   }
   pos += timePos;
-  result = fromDatetime(daysSinceEpoch, microsSinceMidnight);
+  result = fromDatetimeImpl<nanos>(daysSinceEpoch, timeSinceMidnight);
   return true;
 }
 
-bool tryParseUTCOffsetString(
+FOLLY_ALWAYS_INLINE bool tryParseUTCOffsetString(
     const char* buf,
     size_t& pos,
     size_t len,
@@ -886,12 +900,7 @@ int64_t fromTimeString(const char* str, size_t len, bool* nullOutput) {
 }
 
 Timestamp fromDatetime(int64_t daysSinceEpoch, int64_t microsSinceMidnight) {
-  int64_t secondsSinceEpoch =
-      static_cast<int64_t>(daysSinceEpoch) * kSecsPerDay;
-  secondsSinceEpoch += microsSinceMidnight / kMicrosPerSec;
-  return Timestamp(
-      secondsSinceEpoch,
-      (microsSinceMidnight % kMicrosPerSec) * kNanosPerMicro);
+  return fromDatetimeImpl<false>(daysSinceEpoch, microsSinceMidnight);
 }
 
 namespace {
@@ -903,12 +912,12 @@ void parserError(const char* str, size_t len) {
       std::string(str, len));
 }
 
-} // namespace
-
-Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
+template <bool nanos>
+Timestamp
+fromTimestampStringImpl(const char* str, size_t len, bool* nullOutput) {
   size_t pos;
   int64_t daysSinceEpoch;
-  int64_t microsSinceMidnight;
+  int64_t timeSinceMidnight;
 
   constexpr auto kParseMode = ::bytedance::bolt::kSparkCompatible
       ? ParseMode::kNonStrict | ParseMode::kNonStandardCast
@@ -925,7 +934,7 @@ Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
 
   if (pos == len) {
     // No time: only a date.
-    return fromDatetime(daysSinceEpoch, 0);
+    return fromDatetimeImpl<nanos>(daysSinceEpoch, 0);
   }
 
   // Try to parse a time field.
@@ -934,8 +943,8 @@ Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
   }
 
   size_t timePos = 0;
-  if (!tryParseTimeString(
-          str + pos, len - pos, timePos, microsSinceMidnight, kParseMode)) {
+  if (!tryParseTimeString<nanos>(
+          str + pos, len - pos, timePos, timeSinceMidnight, kParseMode)) {
     if (nullOutput != nullptr) {
       *nullOutput = true;
       return Timestamp{};
@@ -945,7 +954,7 @@ Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
   }
 
   pos += timePos;
-  auto timestamp = fromDatetime(daysSinceEpoch, microsSinceMidnight);
+  auto timestamp = fromDatetimeImpl<nanos>(daysSinceEpoch, timeSinceMidnight);
 
   if (pos < len) {
     // Skip a "Z" at the end (as per the ISO 8601 specs).
@@ -974,6 +983,17 @@ Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
     }
   }
   return timestamp;
+}
+
+} // namespace
+
+Timestamp fromTimestampString(const char* str, size_t len, bool* nullOutput) {
+  return fromTimestampStringImpl<false>(str, len, nullOutput);
+}
+
+Timestamp
+fromTimestampStringNanos(const char* str, size_t len, bool* nullOutput) {
+  return fromTimestampStringImpl<true>(str, len, nullOutput);
 }
 
 bool removePrefix(std::string_view& input, std::string_view prefix) {
@@ -1008,13 +1028,15 @@ bool matchSubstring(
   return targets.find(sub) != targets.end();
 }
 
-std::optional<std::pair<Timestamp, int16_t>> fromTimestampWithTimezoneString(
-    const char* str,
-    size_t len) {
+namespace {
+
+template <bool nanos>
+std::optional<std::pair<Timestamp, int16_t>>
+fromTimestampWithTimezoneStringImpl(const char* str, size_t len) {
   size_t pos;
   Timestamp resultTimestamp;
 
-  if (!tryParseTimestampString(str, len, pos, resultTimestamp)) {
+  if (!tryParseTimestampString<nanos>(str, len, pos, resultTimestamp)) {
     return std::nullopt;
   }
 
@@ -1058,6 +1080,19 @@ std::optional<std::pair<Timestamp, int16_t>> fromTimestampWithTimezoneString(
     }
   }
   return std::make_pair(resultTimestamp, timezoneID);
+}
+
+} // namespace
+
+std::optional<std::pair<Timestamp, int16_t>> fromTimestampWithTimezoneString(
+    const char* str,
+    size_t len) {
+  return fromTimestampWithTimezoneStringImpl<false>(str, len);
+}
+
+std::optional<std::pair<Timestamp, int16_t>>
+fromTimestampWithTimezoneStringNanos(const char* str, size_t len) {
+  return fromTimestampWithTimezoneStringImpl<true>(str, len);
 }
 
 namespace {

@@ -306,19 +306,60 @@ struct Timestamp {
     return result;
   }
 
+  /// Truncates fractional seconds to precision decimal digits, in [0, 9].
+  /// Seconds are unchanged, including for timestamps before the Unix epoch.
+  /// The template overload permits constant division in vectorized callers.
+  template <int32_t precision>
+  Timestamp toPrecision() const {
+    static_assert(precision >= 0 && precision <= 9);
+    constexpr uint64_t divisor = [] {
+      uint64_t value = 1;
+      for (int32_t i = precision; i < 9; ++i) {
+        value *= 10;
+      }
+      return value;
+    }();
+    return Timestamp(seconds_, nanos_ / divisor * divisor);
+  }
+
+  Timestamp toPrecision(int32_t precision) const {
+    switch (precision) {
+      case 0:
+        return toPrecision<0>();
+      case 1:
+        return toPrecision<1>();
+      case 2:
+        return toPrecision<2>();
+      case 3:
+        return toPrecision<3>();
+      case 4:
+        return toPrecision<4>();
+      case 5:
+        return toPrecision<5>();
+      case 6:
+        return toPrecision<6>();
+      case 7:
+        return toPrecision<7>();
+      case 8:
+        return toPrecision<8>();
+      case 9:
+        return toPrecision<9>();
+      default:
+        BOLT_USER_FAIL(
+            "Timestamp precision must be between 0 and 9: {}", precision);
+    }
+  }
+
   Timestamp toPrecision(const TimestampPrecision& precision) const {
-    uint64_t nanos = nanos_;
     switch (precision) {
       case TimestampPrecision::kMilliseconds:
-        nanos = nanos / 1'000'000 * 1'000'000;
-        break;
+        return toPrecision<3>();
       case TimestampPrecision::kMicroseconds:
-        nanos = nanos / 1'000 * 1'000;
-        break;
+        return toPrecision<6>();
       case TimestampPrecision::kNanoseconds:
-        break;
+        return toPrecision<9>();
     }
-    return Timestamp(seconds_, nanos);
+    return *this;
   }
 
   /// Due to the limit of std::chrono, throws if timestamp is outside of
