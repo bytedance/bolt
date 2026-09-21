@@ -89,6 +89,7 @@ class BoltConan(ConanFile):
         # file system options
         "enable_hdfs": [True, False],
         "enable_s3": [True, False],
+        "enable_tos": [True, False],
         "enable_gcs": [True, False],
         "enable_abfs": [True, False],
         "use_arrow_hdfs": [True, False],
@@ -118,6 +119,7 @@ class BoltConan(ConanFile):
         # file system options
         "enable_hdfs": True,
         "enable_s3": False,
+        "enable_tos": False,
         "enable_gcs": False,
         "enable_abfs": False,
         "use_arrow_hdfs": True,
@@ -203,6 +205,10 @@ class BoltConan(ConanFile):
         return self._test_linkage() != library_linkage
 
     def requirements(self):
+        if self.options.get_safe("enable_tos"):
+            self.requires(
+                "tos_client/2.6.28", transitive_headers=True, transitive_libs=True
+            )
         protobuf_version = os.getenv("PROTOBUF_VERSION", "3.21.4")
         self.requires(
             f"folly/{self.FB_VERSION}", transitive_headers=True, transitive_libs=True
@@ -612,6 +618,7 @@ class BoltConan(ConanFile):
             tc.cache_variables["BOLT_USE_ARROW_HDFS"] = "OFF"
 
         tc.cache_variables["BOLT_ENABLE_S3"] = "OFF"
+        tc.cache_variables["BOLT_ENABLE_TOS"] = bool(self.options.enable_tos)
         if self.options.get_safe("enable_s3"):
             tc.cache_variables["BOLT_ENABLE_S3"] = "ON"
 
@@ -804,6 +811,10 @@ class BoltConan(ConanFile):
         if self.options.get_safe("enable_s3"):
             self.cpp_info.components["bolt_engine"].requires.append(
                 "aws-c-common::aws-c-common"
+            )
+        if self.options.get_safe("enable_tos"):
+            self.cpp_info.components["bolt_engine"].requires.append(
+                "tos_client::tos_client"
             )
         if self.options.get_safe("spark_compatible") and not self.options.shared:
             self.cpp_info.components["bolt_engine"].requires.append(
