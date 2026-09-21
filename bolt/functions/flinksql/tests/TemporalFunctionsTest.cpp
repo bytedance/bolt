@@ -480,13 +480,23 @@ TEST_F(TemporalFunctionsTest, legacyCalendarBoundaries) {
       timestamp("1582-10-21 00:00:00"),
       parseString(
           "flink_string_to_timestamp(c0, true)", "1582-10-10 23:59:60"));
-  EXPECT_THROW(
-      parseString("flink_string_to_timestamp(c0, true)", "1500-02-28 23:59:60"),
-      BoltUserError);
   EXPECT_EQ(
       Timestamp(7606495872000, 0),
       parseString(
           "flink_string_to_timestamp(c0, true)", "1970-01-01 -2147483648:0:0"));
+}
+
+TEST_F(TemporalFunctionsTest, legacyCalendarInvalidDates) {
+  for (const auto* input :
+       {"0000-02-29", "0100-2-29 0:0:0", "1500-02-28 23:59:60"}) {
+    SCOPED_TRACE(input);
+    EXPECT_EQ(
+        std::nullopt,
+        parseString("flink_string_to_timestamp(c0, true)", input));
+    BOLT_ASSERT_THROW(
+        parseString("flink_string_to_timestamp(c0, false)", input),
+        "Invalid timestamp literal");
+  }
 }
 
 TEST_F(TemporalFunctionsTest, unicodeDigits) {

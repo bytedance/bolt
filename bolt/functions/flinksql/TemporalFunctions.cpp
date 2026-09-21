@@ -212,12 +212,16 @@ bool parseTimestamp(
         // java.sql.Timestamp.toLocalDateTime does not carry the BC era.
         normalizedYear =
             normalizedYear <= 0 ? 1 - normalizedYear : normalizedYear;
-        seconds = util::daysSinceEpochFromDate(
-                      normalizedYear,
-                      static_cast<unsigned>(normalized.month()),
-                      static_cast<unsigned>(normalized.day())) *
-                util::kSecsPerDay +
-            (instant - days).count();
+        bool isValid = false;
+        const int64_t normalizedDays = util::daysSinceEpochFromDate(
+            normalizedYear,
+            static_cast<unsigned>(normalized.month()),
+            static_cast<unsigned>(normalized.day()),
+            &isValid);
+        if (!isValid) {
+          return false;
+        }
+        seconds = normalizedDays * util::kSecsPerDay + (instant - days).count();
       }
     }
   }
