@@ -137,6 +137,21 @@ TEST_F(BufferManagerTest, AllocateLargeReturnsHugePageAlignedPayload) {
   EXPECT_EQ(MemoryTag::kTesting, block->tag());
 }
 
+TEST_F(BufferManagerTest, AllocateNonHugePageMultipleLargeBlock) {
+  auto bm = makeBufferManager("allocate-non-huge-page-multiple");
+  constexpr size_t kBlockSize = 4'620'630;
+  constexpr size_t kHugePageSize = 2 * 1024 * 1024;
+
+  auto handle = bm->Allocate(kBlockSize, MemoryTag::kTesting);
+  auto block = handle.block();
+
+  ASSERT_NE(nullptr, block);
+  ASSERT_NE(nullptr, handle.Ptr());
+  EXPECT_EQ(0, reinterpret_cast<uintptr_t>(handle.Ptr()) % kHugePageSize);
+  EXPECT_EQ(kBlockSize, block->size());
+  EXPECT_EQ(MemoryTag::kTesting, block->tag());
+}
+
 TEST_F(BufferManagerTest, FailedHugePageAllocationDoesNotChangeStats) {
   auto bm = makeBufferManager("failed-huge-page-allocation");
   auto existing = bm->Allocate(4'620'630, MemoryTag::kWindow);
