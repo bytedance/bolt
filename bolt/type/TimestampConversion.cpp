@@ -397,7 +397,6 @@ bool tryParseTimeString(
     size_t& pos,
     int64_t& result,
     int32_t mode) {
-  int32_t hour = -1, min = -1, sec = -1, fraction = -1;
   pos = 0;
 
   if (len == 0) {
@@ -417,6 +416,7 @@ bool tryParseTimeString(
     return false;
   }
 
+  int32_t hour = -1;
   if (!parseDoubleDigit(buf, len, pos, hour)) {
     return false;
   }
@@ -441,6 +441,7 @@ bool tryParseTimeString(
     return false;
   }
 
+  int32_t min = -1;
   if (!parseDoubleDigit(buf, len, pos, min)) {
     return false;
   }
@@ -462,6 +463,7 @@ bool tryParseTimeString(
     return false;
   }
 
+  int32_t sec = -1;
   if (!parseDoubleDigit(buf, len, pos, sec)) {
     return false;
   }
@@ -469,7 +471,7 @@ bool tryParseTimeString(
     return false;
   }
 
-  fraction = 0;
+  int32_t fraction = 0;
   if (pos < len && buf[pos] == '.') {
     pos++;
     int32_t mult = nanos ? 100'000'000 : 100'000;
