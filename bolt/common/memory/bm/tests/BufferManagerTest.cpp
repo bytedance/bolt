@@ -28,6 +28,7 @@
 #include <utility>
 
 #include <fmt/format.h>
+#include <folly/ScopeGuard.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
@@ -134,6 +135,27 @@ TEST_F(BufferManagerTest, AllocateLargeReturnsHugePageAlignedPayload) {
   EXPECT_EQ(31, handle.Ptr()[kLargeBlockSize - 1]);
   EXPECT_EQ(kLargeBlockSize, block->size());
   EXPECT_EQ(MemoryTag::kTesting, block->tag());
+}
+
+TEST_F(BufferManagerTest, FailedHugePageAllocationDoesNotChangeStats) {
+  auto bm = makeBufferManager("failed-huge-page-allocation");
+  auto existing = bm->Allocate(4'620'630, MemoryTag::kWindow);
+  const auto before = bm->stats();
+  ASSERT_EQ(1, before.liveBlocks);
+  ASSERT_EQ(4'620'630, before.pinnedResidentBytes);
+
+  manager_.allocator()->testingSetFailureInjection(
+      MemoryAllocator::InjectedFailure::kCap, true);
+  auto clearFailureInjection = folly::makeGuard(
+      [&]() { manager_.allocator()->testingClearFailureInjection(); });
+  EXPECT_ANY_THROW(bm->Allocate(4'620'630, MemoryTag::kWindow));
+
+  const auto after = bm->stats();
+  EXPECT_EQ(before.allocatedBlocks, after.allocatedBlocks);
+  EXPECT_EQ(before.liveBlocks, after.liveBlocks);
+  EXPECT_EQ(before.pinnedResidentBytes, after.pinnedResidentBytes);
+  EXPECT_EQ(before.unpinnedResidentBytes, after.unpinnedResidentBytes);
+  ASSERT_NE(nullptr, existing.Ptr());
 }
 
 TEST_F(BufferManagerTest, PinResidentBlockSeesWrittenBytes) {

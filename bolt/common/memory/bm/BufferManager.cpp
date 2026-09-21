@@ -85,12 +85,12 @@ BufferManager::BatchAllocate(size_t count, size_t size, MemoryTag tag) {
 BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
   BOLT_CHECK_GT(size, 0);
   auto memory = std::make_shared<BlockMemory>(nextBlockId_++, size, tag);
-  memory->owner = weak_from_this();
   memory->payload = shouldAllocateHugePageAligned(size)
       ? IoBuffer::allocateHugePageAlignedFromPool(pool_.get(), size)
       : IoBuffer::allocateFromPool(pool_.get(), size);
   memory->pinCount = 1;
   accounting_->RecordAllocate(*memory);
+  memory->owner = weak_from_this();
   auto handle = std::make_shared<BlockHandle>(std::move(memory));
   return MakeHandle(handle);
 }
