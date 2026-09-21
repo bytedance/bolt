@@ -495,11 +495,7 @@ class BoltConan(ConanFile):
             tc.extra_cflags.append(flags)
 
         if str(self.settings.compiler) == "clang":
-            # ThinLTO needs bitcode inputs as well as the linker flag.
-            tc.extra_cflags.append("-flto=thin")
-            tc.extra_cxxflags.append("-flto=thin")
-            tc.extra_exelinkflags.append("-flto=thin")
-            tc.extra_sharedlinkflags.append("-flto=thin")
+            # Configure LTO and PGO in the global Conan profile.
             # Avoid incorrect dynamic_cast results across ThinLTO shared libraries.
             # https://github.com/llvm/llvm-project/issues/71196
             tc.extra_cxxflags.append("-fno-assume-unique-vtables")

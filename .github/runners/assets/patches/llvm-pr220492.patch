@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fangrui Song <i@maskray.me>
+Date: Tue, 1 Sep 2026 21:47:49 -0700
+Subject: [PATCH] [ELF] Omit zero-range FDEs from .eh_frame_hdr
+
+Semantic backport of https://github.com/llvm/llvm-project/pull/220492 to
+llvmorg-22.1.8. LLVM 22 builds the search table in EhFrameSection::writeTo,
+before the upstream code moved it to EhFrameHeader::updateAllocSize.
+
+--- a/lld/ELF/EhFrame.cpp
++++ b/lld/ELF/EhFrame.cpp
+@@ -139,6 +139,16 @@
+   return EhReader(p.sec, p.data()).hasLSDA();
+ }
+ 
++// pc_range follows the 4-byte length, 4-byte CIE pointer, and pc_begin, and
++// uses pc_begin's encoding.
++bool elf::hasZeroPcRange(Ctx &ctx, const EhSectionPiece &p, uint8_t enc) {
++  size_t pSize = getAugPSize(ctx, enc);
++  ArrayRef<uint8_t> d = p.data();
++  if (pSize == 0 || d.size() < 8 + 2 * pSize)
++    return false;
++  return llvm::all_of(d.slice(8 + pSize, pSize), [](uint8_t c) { return !c; });
++}
++
+ StringRef EhReader::getAugmentation() {
+   skipBytes(8);
+   int version = readByte();
+--- a/lld/ELF/EhFrame.h
++++ b/lld/ELF/EhFrame.h
+@@ -12,10 +12,12 @@
+ #include "lld/Common/LLVM.h"
+ 
+ namespace lld::elf {
++struct Ctx;
+ struct EhSectionPiece;
+ 
+ uint8_t getFdeEncoding(EhSectionPiece *p);
+ bool hasLSDA(const EhSectionPiece &p);
++bool hasZeroPcRange(Ctx &ctx, const EhSectionPiece &p, uint8_t enc);
+ }
+ 
+ #endif
+--- a/lld/ELF/SyntheticSections.cpp
++++ b/lld/ELF/SyntheticSections.cpp
+@@ -611,6 +611,10 @@
+   for (CieRecord *rec : cieRecords) {
+     uint8_t enc = getFdeEncoding(rec->cie);
+     for (EhSectionPiece *fde : rec->fdes) {
++      // Discard zero-range FDE, otherwise it would displace the FDE of the
++      // next function, which shares its address.
++      if (hasZeroPcRange(ctx, *fde, enc))
++        continue;
+       uint64_t pc = getFdePc(buf, fde->outputOff, enc);
+       uint64_t fdeVA = getParent()->addr + fde->outputOff;
+       if (!isInt<32>(pc - va)) {
+@@ -652,6 +656,14 @@
+   }
+ }
+ 
++size_t EhFrameSection::getNumFdesForHeader() const {
++  size_t count = 0;
++  for (CieRecord *rec : cieRecords)
++    for (EhSectionPiece *fde : rec->fdes)
++      count += !hasZeroPcRange(ctx, *fde, getFdeEncoding(rec->cie));
++  return count;
++}
++
+ EhFrameHeader::EhFrameHeader(Ctx &ctx)
+     : SyntheticSection(ctx, ".eh_frame_hdr", SHT_PROGBITS, SHF_ALLOC, 4) {}
+ 
+@@ -661,7 +673,7 @@
+ 
+ size_t EhFrameHeader::getSize() const {
+   // .eh_frame_hdr has a 12 bytes header followed by an array of FDEs.
+-  return 12 + getPartition(ctx).ehFrame->numFdes * 8;
++  return 12 + getPartition(ctx).ehFrame->getNumFdesForHeader() * 8;
+ }
+ 
+ bool EhFrameHeader::isNeeded() const {
+--- a/lld/ELF/SyntheticSections.h
++++ b/lld/ELF/SyntheticSections.h
+@@ -55,6 +55,7 @@
+   void finalizeContents() override;
+   bool isNeeded() const override { return !sections.empty(); }
+   size_t getSize() const override { return size; }
++  size_t getNumFdesForHeader() const;
+ 
+   static bool classof(const SectionBase *d) {
+     return SyntheticSection::classof(d) && d->name == ".eh_frame";

@@ -51,7 +51,7 @@ jobs:
     runs-on: [ self-hosted, medium, "${{ matrix.runner_host }}" ]
     timeout-minutes: 720
     container:
-      image: bolt-registry:5000/bolt-ci:20260114
+      image: bolt-registry:5000/bolt-ci:20260921
       options: --user root --init
       volumes:
         - /data/ccache-data:/data/ccache-data
@@ -83,7 +83,7 @@ jobs:
             -o "bolt/*:enable_gcs=True" \
             -o "bolt/*:enable_testutil=True" \
             -o "bolt/*:enable_perf=True" \
-            --build=missing
+            --build=missing -r=bolt-cci-local
 
       - name: Install Debug dependency graph
         if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Debug') }}

@@ -40,7 +40,7 @@ env:
   IN_CI: '1'
   # Bump this when external CI images/tooling change without a tree change.
   CI_REUSE_SALT: >-
-    bolt-ci:20260114|conan-server:latest|build-test-v2
+    bolt-ci:20260921|conan-server:latest|build-test-v2
   CI_BASE_SHA: >-
     ${{ github.event_name == 'pull_request' &&
         github.event.pull_request.base.sha ||
@@ -110,7 +110,7 @@ jobs:
           needs.changes.outputs.source_code == 'true' }}
     runs-on: [ self-hosted, medium ]
     container:
-      image: bolt-registry:5000/bolt-ci:20260114
+      image: bolt-registry:5000/bolt-ci:20260921
       options: --user root --init
       volumes:
         - /data/pre-commit-cache:/data/pre-commit-cache
@@ -136,11 +136,6 @@ jobs:
     - id: env-setup
       uses: ./.github/actions/bolt-build-base
 
-    - name: Configure Conan profile for benchmarks
-      if: ${{ matrix.build_type == 'release' }}
-      run: |
-        echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
-
     - name: Bolt build
       run: |
         make ${{ matrix.build_target }}
@@ -161,7 +156,7 @@ jobs:
             needs.changes.outputs.source_code == 'true' }}
       runs-on: [ self-hosted, medium ]
       container:
-        image: bolt-registry:5000/bolt-ci:20260114
+        image: bolt-registry:5000/bolt-ci:20260921
         volumes:
           - /data/ccache-data:/data/ccache-data
         options: --user root --init
@@ -182,7 +177,6 @@ jobs:
 
       - name: Bolt build
         run: |
-          echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
           make ${{ matrix.build_target }}
 
   source-result:

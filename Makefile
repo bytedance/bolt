@@ -93,8 +93,7 @@ CONAN_PACKAGE_ARGS = \
 	--channel=${BUILD_CHANNEL}
 
 CONAN_HOST_PROFILE_ARGS = \
-	-pr:h ${PROFILE} \
-	-pr:h ../../scripts/conan/bolt.profile
+	-pr:h ${PROFILE}
 
 # Package-scoped settings only apply when the matching dependency is in the graph.
 CONAN_BUILD_SETTINGS = \

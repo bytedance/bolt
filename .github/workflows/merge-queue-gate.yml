@@ -33,7 +33,7 @@ permissions:
 env:
   # Keep this in sync with the two source CI workflows.
   CI_REUSE_SALT: >-
-    bolt-ci:20260114|conan-server:latest|build-test-v2
+    bolt-ci:20260921|conan-server:latest|build-test-v2
 
 jobs:
   reconcile:
