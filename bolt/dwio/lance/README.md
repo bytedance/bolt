@@ -131,7 +131,8 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
   through its `BufferedInput`, then loaded once per object. The resolver must
   be thread-safe because prefetch may call it concurrently. External
   descriptors with `size == 0` consume the remainder of the resolved object,
-  matching Lance semantics.
+  matching Lance semantics. Resolved object inputs are retained in a bounded
+  reader-scoped LRU and cloned for independent batch reads.
 - Prefetch units use cloned inputs so a background load cannot invalidate the
   active reader's staged buffers.
 - Async-capable inputs maintain a one-batch-ahead I/O pipeline. Fully decoded
@@ -144,6 +145,10 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
 - Top-level filters are decoded first; projected columns are then materialized
   only for coalesced surviving row ranges. Nested selective filters and
   page/statistics pruning remain future work.
+- DWIO mutation bitmaps are applied before selective filters and before
+  materializing surviving projected rows. `columnStatistics()` reports the
+  reliable per-column on-disk page bytes available in v2 metadata; value, null,
+  min, and max statistics remain unknown because v2 files do not store them.
 
 ## Validation
 

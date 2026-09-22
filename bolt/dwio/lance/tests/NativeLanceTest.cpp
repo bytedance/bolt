@@ -3407,6 +3407,34 @@ TEST_F(NativeLanceTest, resolvesAllBlobV2StorageKinds) {
   EXPECT_EQ(resolver->requests[2].size, 0);
 }
 
+TEST_F(NativeLanceTest, cachesResolvedBlobObjectsAcrossBatches) {
+  auto delegate = std::make_shared<TestBlobResolver>();
+  CachingNativeLanceBlobResolver resolver(delegate, 1);
+  NativeLanceBlobResolver::Request packed{
+      .kind = NativeLanceBlobResolver::Kind::kPacked,
+      .sourceDataFile = "data.lance",
+      .blobId = 7,
+      .uri = "",
+      .position = 1,
+      .size = 3};
+
+  auto first = resolver.resolve(packed, *pool_);
+  packed.position = 5;
+  packed.size = 2;
+  auto second = resolver.resolve(packed, *pool_);
+  EXPECT_EQ(delegate->requests.size(), 1);
+  EXPECT_NE(first.get(), second.get());
+  EXPECT_EQ(first->getReadFile().get(), second->getReadFile().get());
+
+  auto dedicated = packed;
+  dedicated.kind = NativeLanceBlobResolver::Kind::kDedicated;
+  dedicated.blobId = 8;
+  resolver.resolve(dedicated, *pool_);
+  EXPECT_EQ(delegate->requests.size(), 2);
+  resolver.resolve(packed, *pool_);
+  EXPECT_EQ(delegate->requests.size(), 3);
+}
+
 TEST_F(NativeLanceTest, rowReaderPropagatesBlobV2Resolver) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(makeBlobResolverFile()), *pool_);
@@ -4006,6 +4034,91 @@ TEST_F(NativeLanceTest, rowReaderAppliesScanSpecFilter) {
     EXPECT_EQ(integers->valueAt(i), i + 8);
     EXPECT_DOUBLE_EQ(doubles->valueAt(i), i + 8);
   }
+}
+
+TEST_F(NativeLanceTest, rowReaderAppliesMutationDeletionVector) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  auto rowReader = reader.createRowReader();
+
+  std::array<uint64_t, 1> deletedRows{0};
+  bits::setBit(deletedRows.data(), 0);
+  bits::setBit(deletedRows.data(), 3);
+  bits::setBit(deletedRows.data(), 19);
+  dwio::common::Mutation mutation{.deletedRows = deletedRows.data()};
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result, &mutation), 20);
+  ASSERT_EQ(result->size(), 17);
+  const auto* values =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  ASSERT_NE(values, nullptr);
+  for (vector_size_t row = 0; row < result->size(); ++row) {
+    const auto expected = row < 2 ? row + 2 : row + 3;
+    EXPECT_EQ(values->valueAt(row), expected);
+  }
+
+  auto batched = reader.createRowReader();
+  std::array<uint64_t, 1> oddRows{0xAAAAAAAAAAAAAAAAULL};
+  dwio::common::Mutation oddMutation{.deletedRows = oddRows.data()};
+  uint64_t scanned = 0;
+  while (const auto batchScanned = batched->next(10, result, &oddMutation)) {
+    EXPECT_EQ(batchScanned, 10);
+    ASSERT_EQ(result->size(), 5);
+    const auto* batchValues =
+        result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+    for (vector_size_t row = 0; row < result->size(); ++row) {
+      EXPECT_EQ(batchValues->valueAt(row), scanned + row * 2 + 1);
+    }
+    scanned += batchScanned;
+  }
+  EXPECT_EQ(scanned, 20);
+
+  auto allDeleted = reader.createRowReader();
+  std::array<uint64_t, 1> allRows{std::numeric_limits<uint64_t>::max()};
+  dwio::common::Mutation allMutation{.deletedRows = allRows.data()};
+  EXPECT_EQ(allDeleted->next(20, result, &allMutation), 20);
+  EXPECT_EQ(result->size(), 0);
+}
+
+TEST_F(NativeLanceTest, selectiveReaderCombinesFilterAndMutation) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addField("a", 0)->setFilter(
+      std::make_unique<common::BigintRange>(8, 12, false));
+  scanSpec->addField("b", 1);
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  std::array<uint64_t, 1> deletedRows{0};
+  bits::setBit(deletedRows.data(), 7);
+  bits::setBit(deletedRows.data(), 9);
+  dwio::common::Mutation mutation{.deletedRows = deletedRows.data()};
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result, &mutation), 20);
+  ASSERT_EQ(result->size(), 3);
+  const auto* integers =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  EXPECT_EQ(integers->valueAt(0), 9);
+  EXPECT_EQ(integers->valueAt(1), 11);
+  EXPECT_EQ(integers->valueAt(2), 12);
+}
+
+TEST_F(NativeLanceTest, reportsOnDiskColumnStatistics) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  const auto root = reader.columnStatistics(reader.typeWithId()->id());
+  ASSERT_NE(root, nullptr);
+  EXPECT_EQ(root->getSize(), 2 * 20 * sizeof(int64_t));
+  EXPECT_FALSE(root->getNumberOfValues().has_value());
+  EXPECT_FALSE(root->hasNull().has_value());
+
+  const auto first =
+      reader.columnStatistics(reader.typeWithId()->childAt(0)->id());
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first->getSize(), 20 * sizeof(int64_t));
+  EXPECT_EQ(reader.columnStatistics(999), nullptr);
 }
 
 TEST_F(NativeLanceTest, selectiveReaderLateMaterializesProjectedColumn) {

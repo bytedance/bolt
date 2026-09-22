@@ -24,6 +24,7 @@
 #include <numeric>
 #include <unordered_map>
 
+#include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/type/Filter.h"
 #include "bolt/vector/ComplexVector.h"
@@ -147,11 +148,22 @@ VectorPtr readSelective(
     const common::ScanSpec& scanSpec,
     uint64_t batchRowStart,
     vector_size_t batchSize,
-    memory::MemoryPool& pool) {
+    memory::MemoryPool& pool,
+    const uint64_t* deletedRows = nullptr) {
   using RowSet =
       std::vector<vector_size_t, memory::StlAllocator<vector_size_t>>;
   RowSet selectedRows(batchSize, memory::StlAllocator<vector_size_t>(&pool));
-  std::iota(selectedRows.begin(), selectedRows.end(), 0);
+  if (deletedRows == nullptr) {
+    std::iota(selectedRows.begin(), selectedRows.end(), 0);
+  } else {
+    auto output = selectedRows.begin();
+    for (vector_size_t row = 0; row < batchSize; ++row) {
+      if (!bits::isBitSet(deletedRows, row)) {
+        *output++ = row;
+      }
+    }
+    selectedRows.erase(output, selectedRows.end());
+  }
   struct DecodedFilterColumn {
     DecodedFilterColumn(RowSet inputRows, VectorPtr inputValues)
         : rows(std::move(inputRows)), values(std::move(inputValues)) {}
@@ -244,6 +256,41 @@ VectorPtr readSelective(
       std::move(children));
 }
 
+VectorPtr applyDeletedRows(
+    VectorPtr result,
+    const uint64_t* deletedRows,
+    vector_size_t batchSize,
+    memory::MemoryPool& pool) {
+  if (deletedRows == nullptr) {
+    return result;
+  }
+  vector_size_t outputSize = 0;
+  for (vector_size_t row = 0; row < batchSize; ++row) {
+    outputSize += !bits::isBitSet(deletedRows, row);
+  }
+  if (outputSize == batchSize) {
+    return result;
+  }
+  auto indices = allocateIndices(outputSize, &pool);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  vector_size_t output = 0;
+  for (vector_size_t row = 0; row < batchSize; ++row) {
+    if (!bits::isBitSet(deletedRows, row)) {
+      rawIndices[output++] = row;
+    }
+  }
+  const auto* rows = result->as<RowVector>();
+  BOLT_CHECK_NOT_NULL(rows);
+  std::vector<VectorPtr> children;
+  children.reserve(rows->childrenSize());
+  for (const auto& child : rows->children()) {
+    children.push_back(
+        BaseVector::wrapInDictionary(nullptr, indices, outputSize, child));
+  }
+  return std::make_shared<RowVector>(
+      &pool, result->type(), nullptr, outputSize, std::move(children));
+}
+
 } // namespace
 
 NativeLanceReaderBase::NativeLanceReaderBase(
@@ -265,7 +312,11 @@ NativeLanceReaderBase::NativeLanceReaderBase(
       input_(std::move(input)),
       metadata_(*input_, pool_, std::move(typeAdapter)),
       typeWithId_(dwio::common::TypeWithId::create(metadata_.rowType())),
-      blobResolver_(std::move(blobResolver)),
+      blobResolver_(
+          blobResolver == nullptr
+              ? nullptr
+              : std::make_shared<CachingNativeLanceBlobResolver>(
+                    std::move(blobResolver))),
       readPlanOptions_(makeReadPlanOptions(options)),
       decodedPageCache_(std::make_shared<NativeLanceDecodedPageCache>(
           NativeLanceDecodedPageCache::kDefaultMaxBytes)) {
@@ -597,8 +648,6 @@ uint64_t NativeLanceRowReader::next(
     uint64_t size,
     VectorPtr& result,
     const dwio::common::Mutation* mutation) {
-  BOLT_CHECK_NULL(
-      mutation, "Native Lance reader does not support row mutation yet");
   advancePastFinishedRange();
   if (size == 0 || currentRange_ >= rowRanges_.size()) {
     return 0;
@@ -628,10 +677,16 @@ uint64_t NativeLanceRowReader::next(
         *scanSpec,
         currentRow_,
         static_cast<vector_size_t>(rowsToRead),
-        readerBase_->pool());
+        readerBase_->pool(),
+        mutation == nullptr ? nullptr : mutation->deletedRows);
   } else {
     result = rootColumnReader_->read(
         readDecoder, currentRow_, rowsToRead, readerBase_->pool());
+    result = applyDeletedRows(
+        std::move(result),
+        mutation == nullptr ? nullptr : mutation->deletedRows,
+        static_cast<vector_size_t>(rowsToRead),
+        readerBase_->pool());
   }
   currentRow_ += rowsToRead;
   markPrefetchRangesFinished(readBegin, currentRow_);
@@ -732,8 +787,41 @@ std::unique_ptr<dwio::common::RowReader> NativeLanceReader::createRowReader(
 }
 
 std::unique_ptr<dwio::common::ColumnStatistics>
-NativeLanceReader::columnStatistics(uint32_t) const {
-  return nullptr;
+NativeLanceReader::columnStatistics(uint32_t index) const {
+  const auto& typeWithId = readerBase_->typeWithId();
+  const auto& metadata = readerBase_->metadata();
+  uint32_t firstPhysical = 0;
+  uint32_t physicalCount = metadata.numPhysicalColumns();
+  if (index != typeWithId->id()) {
+    const auto child = std::find_if(
+        typeWithId->getChildren().begin(),
+        typeWithId->getChildren().end(),
+        [index](const auto& candidate) { return candidate->id() == index; });
+    if (child == typeWithId->getChildren().end()) {
+      return nullptr;
+    }
+    const auto logicalColumn = (*child)->column();
+    firstPhysical = metadata.physicalColumnIndex(logicalColumn);
+    physicalCount = metadata.usesStructuralEncoding()
+        ? metadata.structuralField(logicalColumn).physicalColumnCount
+        : metadata.physicalColumnSpan(firstPhysical);
+  }
+
+  uint64_t storageBytes = 0;
+  for (uint32_t physical = firstPhysical;
+       physical < firstPhysical + physicalCount;
+       ++physical) {
+    const auto& column = metadata.column(physical);
+    for (const auto& page : column.pages()) {
+      for (const auto bytes : page.buffer_sizes()) {
+        BOLT_CHECK_LE(
+            storageBytes, std::numeric_limits<uint64_t>::max() - bytes);
+        storageBytes += bytes;
+      }
+    }
+  }
+  return std::make_unique<dwio::common::ColumnStatistics>(
+      std::nullopt, std::nullopt, std::nullopt, storageBytes);
 }
 
 std::unique_ptr<dwio::common::Reader> NativeLanceReaderFactory::createReader(

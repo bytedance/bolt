@@ -7,6 +7,7 @@ bolt_add_library(
   bolt_dwio_lance_native
   NativeLanceBitmap.cpp
   NativeLanceBitpack.cpp
+  NativeLanceBlobResolver.cpp
   NativeLanceColumnReader.cpp
   NativeLanceDecodedPageCache.cpp
   NativeLanceListOffsets.cpp
