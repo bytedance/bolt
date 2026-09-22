@@ -2761,6 +2761,86 @@ TEST_F(NativeLanceTest, decodesExactStructuralFixtures) {
   }
 }
 
+TEST_F(NativeLanceTest, decodesBooleanAcrossUnalignedMiniBlockChunks) {
+  std::string metadata;
+  std::string chunks;
+  const auto appendChunk = [&](uint32_t items, uint8_t values) {
+    constexpr uint32_t kChunkBytes = 16;
+    const auto logItems = static_cast<uint32_t>(std::countr_zero(items));
+    appendLittleEndian(metadata, ((kChunkBytes / 8 - 1) << 4) | logItems);
+
+    std::string chunk;
+    appendLittleEndian(chunk, uint16_t{0});
+    appendLittleEndian(chunk, uint32_t{1});
+    chunk.resize(8, '\0');
+    chunk.push_back(static_cast<char>(values));
+    chunk.resize(kChunkBytes, '\0');
+    chunks.append(chunk);
+  };
+  // Each chunk has padding bits that must not be inserted between chunks.
+  appendChunk(4, 0xfd);
+  appendChunk(5, 0x1a);
+  const auto metadataBytes = metadata.size();
+  const auto chunkBytes = chunks.size();
+  std::string fileData = std::move(metadata);
+  fileData.append(chunks);
+
+  ::lance::file::v2::ColumnMetadata column;
+  auto* page = column.add_pages();
+  page->add_buffer_offsets(0);
+  page->add_buffer_sizes(metadataBytes);
+  page->add_buffer_offsets(metadataBytes);
+  page->add_buffer_sizes(chunkBytes);
+  page->set_length(9);
+
+  ::lance::encodings21::PageLayout layout;
+  auto* mini = layout.mutable_mini_block_layout();
+  mini->mutable_value_compression()->mutable_flat()->set_bits_per_value(1);
+  mini->add_layers(::lance::encodings21::REPDEF_ALL_VALID_ITEM);
+  mini->set_num_buffers(1);
+  mini->set_num_items(9);
+  mini->set_has_large_chunk(true);
+
+  const auto read = [&](uint64_t offset, uint64_t length) {
+    BOLT_CHECK_LE(offset, fileData.size());
+    BOLT_CHECK_LE(length, fileData.size() - offset);
+    auto result = AlignedBuffer::allocate<char>(length, pool_.get());
+    std::memcpy(result->asMutable<char>(), fileData.data() + offset, length);
+    return result;
+  };
+  const auto decode = [&](uint64_t start, uint64_t count) {
+    return decodeLanceStructuralPage(
+        BOOLEAN(),
+        "bool",
+        {},
+        {},
+        column,
+        *page,
+        layout,
+        start,
+        count,
+        *pool_,
+        nullptr,
+        {},
+        [](const auto&) {},
+        read);
+  };
+
+  constexpr std::array<bool, 9> kExpected{
+      true, false, true, true, false, true, false, true, true};
+  const auto all = decode(0, kExpected.size());
+  ASSERT_EQ(all->size(), kExpected.size());
+  for (vector_size_t row = 0; row < all->size(); ++row) {
+    EXPECT_EQ(all->asFlatVector<bool>()->valueAt(row), kExpected[row]);
+  }
+
+  const auto slice = decode(2, 5);
+  ASSERT_EQ(slice->size(), 5);
+  for (vector_size_t row = 0; row < slice->size(); ++row) {
+    EXPECT_EQ(slice->asFlatVector<bool>()->valueAt(row), kExpected[row + 2]);
+  }
+}
+
 TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
   std::shared_ptr<ReadFile> source =
       std::make_shared<LocalReadFile>("examples/compression_v2_1.lance");

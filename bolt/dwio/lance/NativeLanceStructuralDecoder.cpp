@@ -1050,17 +1050,68 @@ void appendFixed(
     uint64_t& outputValues,
     memory::MemoryPool& pool) {
   BOLT_CHECK(block.kind == DecodedBlock::Kind::kFixed);
-  BOLT_CHECK_EQ(block.bitsPerValue % 8, 0);
-  const auto oldBytes = output == nullptr ? 0 : output->size();
-  if (output == nullptr) {
-    output = AlignedBuffer::allocate<char>(block.data->size(), &pool);
-  } else {
-    AlignedBuffer::reallocate<char>(&output, oldBytes + block.data->size());
+  BOLT_CHECK_GT(block.bitsPerValue, 0);
+  uint64_t leafValuesPerItem = 1;
+  for (const auto dimension : block.fixedSizeDimensions) {
+    BOLT_CHECK_GT(dimension, 0);
+    BOLT_CHECK_LE(
+        leafValuesPerItem,
+        std::numeric_limits<uint64_t>::max() / dimension,
+        "Lance fixed-size dimensions overflow");
+    leafValuesPerItem *= dimension;
   }
-  std::memcpy(
-      output->asMutable<char>() + oldBytes,
-      block.data->as<char>(),
-      block.data->size());
+  BOLT_CHECK_LE(
+      numValues,
+      std::numeric_limits<uint64_t>::max() / leafValuesPerItem,
+      "Lance fixed-width value count overflows");
+  const auto leafValues = numValues * leafValuesPerItem;
+  BOLT_CHECK_LE(
+      leafValues,
+      std::numeric_limits<uint64_t>::max() / block.bitsPerValue,
+      "Lance fixed-width bit count overflows");
+  const auto bitsToAppend = leafValues * block.bitsPerValue;
+  const auto sourceBytes = bitsToAppend / 8 + (bitsToAppend % 8 != 0);
+  BOLT_CHECK_GE(block.data->size(), sourceBytes);
+
+  BOLT_CHECK_LE(
+      outputValues,
+      std::numeric_limits<uint64_t>::max() / leafValuesPerItem,
+      "Lance fixed-width output value count overflows");
+  const auto oldLeafValues = outputValues * leafValuesPerItem;
+  BOLT_CHECK_LE(
+      oldLeafValues,
+      std::numeric_limits<uint64_t>::max() / block.bitsPerValue,
+      "Lance fixed-width output bit count overflows");
+  const auto oldBits = oldLeafValues * block.bitsPerValue;
+  BOLT_CHECK_LE(
+      oldBits,
+      std::numeric_limits<uint64_t>::max() - bitsToAppend,
+      "Lance fixed-width output size overflows");
+  const auto outputBits = oldBits + bitsToAppend;
+  const auto outputBytes = outputBits / 8 + (outputBits % 8 != 0);
+  if (output == nullptr) {
+    BOLT_CHECK_EQ(oldBits, 0);
+    output = AlignedBuffer::allocate<char>(outputBytes, &pool);
+  } else {
+    AlignedBuffer::reallocate<char>(&output, outputBytes);
+  }
+  if (block.bitsPerValue % 8 == 0) {
+    std::memcpy(
+        output->asMutable<char>() + oldBits / 8,
+        block.data->as<char>(),
+        sourceBytes);
+  } else {
+    bits::copyBits(
+        reinterpret_cast<const uint64_t*>(block.data->as<char>()),
+        0,
+        reinterpret_cast<uint64_t*>(output->asMutable<char>()),
+        oldBits,
+        bitsToAppend);
+  }
+  BOLT_CHECK_LE(
+      outputValues,
+      std::numeric_limits<uint64_t>::max() - numValues,
+      "Lance fixed-width output item count overflows");
   outputValues += numValues;
 }
 
