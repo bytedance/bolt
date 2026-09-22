@@ -122,6 +122,74 @@ TEST(TimestampTest, fromNanos) {
   EXPECT_EQ(ts3, Timestamp::fromNanos(ts3.toNanos()));
 }
 
+TEST(TimestampTest, fractionalPrecision) {
+  const std::vector<uint64_t> expectedNanos = {
+      0,
+      100'000'000,
+      120'000'000,
+      123'000'000,
+      123'400'000,
+      123'450'000,
+      123'456'000,
+      123'456'700,
+      123'456'780,
+      123'456'789};
+  for (const auto seconds :
+       {Timestamp::kMinSeconds,
+        int64_t{-62'167'219'200},
+        int64_t{-1},
+        int64_t{0},
+        int64_t{253'402'300'799},
+        Timestamp::kMaxSeconds}) {
+    const Timestamp timestamp(seconds, 123'456'789);
+    for (int32_t precision = 0; precision <= 9; ++precision) {
+      SCOPED_TRACE(fmt::format("seconds={}, precision={}", seconds, precision));
+      EXPECT_EQ(
+          Timestamp(seconds, expectedNanos[precision]),
+          timestamp.toPrecision(precision));
+      EXPECT_EQ(
+          Timestamp(seconds, 0), Timestamp(seconds, 0).toPrecision(precision));
+    }
+    EXPECT_EQ(Timestamp(seconds, 0), timestamp.toPrecision<0>());
+    EXPECT_EQ(Timestamp(seconds, 123'456'700), timestamp.toPrecision<7>());
+    EXPECT_EQ(timestamp, timestamp.toPrecision<9>());
+    EXPECT_EQ(
+        Timestamp(seconds, 123'000'000),
+        timestamp.toPrecision(TimestampPrecision::kMilliseconds));
+    EXPECT_EQ(
+        Timestamp(seconds, 123'456'000),
+        timestamp.toPrecision(TimestampPrecision::kMicroseconds));
+    EXPECT_EQ(
+        timestamp, timestamp.toPrecision(TimestampPrecision::kNanoseconds));
+  }
+  EXPECT_EQ(
+      Timestamp(-1, 999'000'000), Timestamp(-1, 999'999'999).toPrecision(3));
+  EXPECT_EQ(
+      Timestamp(0, 999'000'000), Timestamp(0, 999'999'999).toPrecision(3));
+  for (const auto precision :
+       {std::numeric_limits<int32_t>::min(),
+        -1,
+        10,
+        std::numeric_limits<int32_t>::max()}) {
+    BOLT_ASSERT_THROW(
+        Timestamp().toPrecision(precision),
+        "Timestamp precision must be between 0 and 9");
+  }
+}
+
+TEST(TimestampTest, truncateRetainsOverflowChecks) {
+  for (const auto precision :
+       {TimestampPrecision::kMilliseconds, TimestampPrecision::kMicroseconds}) {
+    EXPECT_THROW(
+        Timestamp::truncate(
+            Timestamp(Timestamp::kMaxSeconds, Timestamp::kMaxNanos), precision),
+        BoltUserError);
+    EXPECT_THROW(
+        Timestamp::truncate(Timestamp(Timestamp::kMinSeconds, 0), precision),
+        BoltUserError);
+  }
+}
+
 TEST(TimestampTest, arithmeticOverflow) {
   int64_t positiveSecond = Timestamp::kMaxSeconds;
   int64_t negativeSecond = Timestamp::kMinSeconds;

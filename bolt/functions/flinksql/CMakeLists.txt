@@ -20,6 +20,7 @@ bolt_add_library(
   JsonFunctions.cpp
   RegexFunctions.cpp
   ElementAt.cpp
+  TemporalFunctions.cpp
   specialforms/DecimalRound.cpp
   specialforms/FlinkCastExpr.cpp
 )
