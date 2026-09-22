@@ -1046,14 +1046,7 @@ NativeLanceMetadata::NativeLanceMetadata(
 
   const auto columnTable =
       read(footer_.columnMetadataOffsetsStart, footer_.numColumns * 16);
-  struct ColumnMetadataRead {
-    uint64_t offset;
-    uint64_t length;
-    std::unique_ptr<dwio::common::SeekableInputStream> stream;
-  };
-  std::vector<ColumnMetadataRead, memory::StlAllocator<ColumnMetadataRead>>
-      columnReads{memory::StlAllocator<ColumnMetadataRead>(&pool_)};
-  columnReads.reserve(footer_.numColumns);
+  columnMetadataLocations_.reserve(footer_.numColumns);
   for (uint32_t i = 0; i < footer_.numColumns; ++i) {
     const auto* entry = columnTable->as<char>() + i * 16;
     const auto offset = readLittleEndian<uint64_t>(entry);
@@ -1067,77 +1060,19 @@ NativeLanceMetadata::NativeLanceMetadata(
         "Lance column metadata {} is too large: {} bytes",
         i,
         length);
-    columnReads.push_back({offset, length, input_.enqueue({offset, length})});
-  }
-  if (!columnReads.empty()) {
-    input_.load(dwio::common::LogType::HEADER);
+    columnMetadataLocations_.push_back({offset, length});
   }
 
-  columns_.reserve(footer_.numColumns);
-  pageEncodings_.reserve(footer_.numColumns);
-  pageLayouts_.reserve(footer_.numColumns);
-  blobColumns_.reserve(footer_.numColumns);
-  for (uint32_t i = 0; i < footer_.numColumns; ++i) {
-    const auto& columnRead = columnReads[i];
-    auto bytes = AlignedBuffer::allocate<char>(columnRead.length, &pool_);
-    columnRead.stream->readFully(bytes->asMutable<char>(), columnRead.length);
-    auto& column = columns_.emplace_back();
-    BOLT_CHECK(
-        column.ParseFromArray(
-            bytes->as<char>(), static_cast<int>(bytes->size())),
-        "Failed to parse Lance column metadata {}",
-        i);
-    blobColumns_.push_back(isBlobColumnEncoding(column, i));
-    auto& encodings = pageEncodings_.emplace_back();
-    auto& layouts = pageLayouts_.emplace_back();
-    encodings.reserve(column.pages_size());
-    layouts.reserve(column.pages_size());
-    for (int32_t pageIndex = 0; pageIndex < column.pages_size(); ++pageIndex) {
-      const auto& page = column.pages(pageIndex);
-      if (usesStructuralEncoding()) {
-        layouts.push_back(parsePageLayout(page, i, pageIndex));
-      } else {
-        encodings.push_back(parsePageEncoding(page, i, pageIndex));
-      }
-      BOLT_CHECK_EQ(
-          page.buffer_offsets_size(),
-          page.buffer_sizes_size(),
-          "Lance column {} page {} has mismatched buffer offsets and sizes",
-          i,
-          pageIndex);
-      for (int32_t bufferIndex = 0; bufferIndex < page.buffer_offsets_size();
-           ++bufferIndex) {
-        const auto bufferOffset = page.buffer_offsets(bufferIndex);
-        const auto bufferSize = page.buffer_sizes(bufferIndex);
-        BOLT_CHECK_LE(bufferOffset, fileSize);
-        BOLT_CHECK_LE(bufferSize, fileSize - bufferOffset);
-        BOLT_CHECK_LE(
-            bufferOffset + bufferSize,
-            footer_.columnMetadataStart,
-            "Lance column {} page {} buffer {} overlaps column metadata",
-            i,
-            pageIndex,
-            bufferIndex);
-      }
-    }
-    BOLT_CHECK_EQ(
-        column.buffer_offsets_size(),
-        column.buffer_sizes_size(),
-        "Lance column {} has mismatched column buffer offsets and sizes",
-        i);
-    for (int32_t bufferIndex = 0; bufferIndex < column.buffer_offsets_size();
-         ++bufferIndex) {
-      const auto bufferOffset = column.buffer_offsets(bufferIndex);
-      const auto bufferSize = column.buffer_sizes(bufferIndex);
-      BOLT_CHECK_LE(bufferOffset, fileSize);
-      BOLT_CHECK_LE(bufferSize, fileSize - bufferOffset);
-      BOLT_CHECK_LE(
-          bufferOffset + bufferSize,
-          footer_.columnMetadataStart,
-          "Lance column {} buffer {} overlaps column metadata",
-          i,
-          bufferIndex);
-    }
+  columns_.resize(footer_.numColumns);
+  pageEncodings_.resize(footer_.numColumns);
+  pageLayouts_.resize(footer_.numColumns);
+  blobColumns_.resize(footer_.numColumns);
+  columnMetadataLoaded_ = std::vector<std::atomic<bool>>(footer_.numColumns);
+  physicalColumnExpectedRows_.resize(footer_.numColumns);
+  if (!usesStructuralEncoding()) {
+    std::vector<uint32_t> allColumns(footer_.numColumns);
+    std::iota(allColumns.begin(), allColumns.end(), 0);
+    loadPhysicalColumns(allColumns);
   }
 
   const auto& childrenByParent = schemaTree.childrenByParent;
@@ -1204,33 +1139,21 @@ NativeLanceMetadata::NativeLanceMetadata(
       nextPhysicalColumn,
       footer_.numColumns);
   if (usesStructuralEncoding()) {
-    const auto validateLeaves = [&](const auto& self,
-                                    const StructuralField& field) -> void {
+    const auto setExpectedRows = [&](const auto& self,
+                                     const StructuralField& field) -> void {
       if (!field.leaf) {
         for (const auto& child : field.children) {
           self(self, child);
         }
         return;
       }
-      uint64_t rows = 0;
-      for (const auto& page : columns_[field.physicalColumnIndex].pages()) {
-        BOLT_CHECK_LE(
-            page.length(), std::numeric_limits<uint64_t>::max() - rows);
-        rows += page.length();
-      }
       BOLT_CHECK_LE(
           numRows_, std::numeric_limits<uint64_t>::max() / field.rowsPerParent);
-      const auto expectedRows = numRows_ * field.rowsPerParent;
-      BOLT_CHECK_EQ(
-          rows,
-          expectedRows,
-          "Lance physical column {} has {} rows but schema requires {}",
-          field.physicalColumnIndex,
-          rows,
-          expectedRows);
+      physicalColumnExpectedRows_[field.physicalColumnIndex] =
+          numRows_ * field.rowsPerParent;
     };
     for (const auto& field : structuralFields_) {
-      validateLeaves(validateLeaves, field);
+      setExpectedRows(setExpectedRows, field);
     }
   } else {
     for (const auto columnIndex : physicalColumnIndices_) {
@@ -1251,6 +1174,205 @@ NativeLanceMetadata::NativeLanceMetadata(
   }
 }
 
+void NativeLanceMetadata::parseColumnMetadata(
+    uint32_t physicalColumnIndex,
+    const char* data,
+    size_t size) const {
+  auto& column = columns_.at(physicalColumnIndex);
+  BOLT_CHECK(
+      column.ParseFromArray(data, static_cast<int>(size)),
+      "Failed to parse Lance column metadata {}",
+      physicalColumnIndex);
+  blobColumns_[physicalColumnIndex] =
+      isBlobColumnEncoding(column, physicalColumnIndex);
+  auto& encodings = pageEncodings_[physicalColumnIndex];
+  auto& layouts = pageLayouts_[physicalColumnIndex];
+  encodings.reserve(column.pages_size());
+  layouts.reserve(column.pages_size());
+  const auto fileSize = input_.getReadFile()->size();
+  for (int32_t pageIndex = 0; pageIndex < column.pages_size(); ++pageIndex) {
+    const auto& page = column.pages(pageIndex);
+    if (usesStructuralEncoding()) {
+      layouts.push_back(parsePageLayout(page, physicalColumnIndex, pageIndex));
+    } else {
+      encodings.push_back(
+          parsePageEncoding(page, physicalColumnIndex, pageIndex));
+    }
+    BOLT_CHECK_EQ(
+        page.buffer_offsets_size(),
+        page.buffer_sizes_size(),
+        "Lance column {} page {} has mismatched buffer offsets and sizes",
+        physicalColumnIndex,
+        pageIndex);
+    for (int32_t bufferIndex = 0; bufferIndex < page.buffer_offsets_size();
+         ++bufferIndex) {
+      const auto bufferOffset = page.buffer_offsets(bufferIndex);
+      const auto bufferSize = page.buffer_sizes(bufferIndex);
+      BOLT_CHECK_LE(bufferOffset, fileSize);
+      BOLT_CHECK_LE(bufferSize, fileSize - bufferOffset);
+      BOLT_CHECK_LE(
+          bufferOffset + bufferSize,
+          footer_.columnMetadataStart,
+          "Lance column {} page {} buffer {} overlaps column metadata",
+          physicalColumnIndex,
+          pageIndex,
+          bufferIndex);
+    }
+  }
+  BOLT_CHECK_EQ(
+      column.buffer_offsets_size(),
+      column.buffer_sizes_size(),
+      "Lance column {} has mismatched column buffer offsets and sizes",
+      physicalColumnIndex);
+  for (int32_t bufferIndex = 0; bufferIndex < column.buffer_offsets_size();
+       ++bufferIndex) {
+    const auto bufferOffset = column.buffer_offsets(bufferIndex);
+    const auto bufferSize = column.buffer_sizes(bufferIndex);
+    BOLT_CHECK_LE(bufferOffset, fileSize);
+    BOLT_CHECK_LE(bufferSize, fileSize - bufferOffset);
+    BOLT_CHECK_LE(
+        bufferOffset + bufferSize,
+        footer_.columnMetadataStart,
+        "Lance column {} buffer {} overlaps column metadata",
+        physicalColumnIndex,
+        bufferIndex);
+  }
+  validateColumnMetadata(physicalColumnIndex);
+}
+
+void NativeLanceMetadata::validateColumnMetadata(
+    uint32_t physicalColumnIndex) const {
+  const auto expectedRows = physicalColumnExpectedRows_[physicalColumnIndex];
+  if (expectedRows == 0 && numRows_ != 0) {
+    return;
+  }
+  uint64_t rows = 0;
+  for (const auto& page : columns_[physicalColumnIndex].pages()) {
+    BOLT_CHECK_LE(page.length(), std::numeric_limits<uint64_t>::max() - rows);
+    rows += page.length();
+  }
+  BOLT_CHECK_EQ(
+      rows,
+      expectedRows,
+      "Lance physical column {} has {} rows but schema requires {}",
+      physicalColumnIndex,
+      rows,
+      expectedRows);
+}
+
+void NativeLanceMetadata::loadPhysicalColumns(
+    const std::vector<uint32_t>& physicalColumnIndices) const {
+  const auto allLoaded = std::all_of(
+      physicalColumnIndices.begin(),
+      physicalColumnIndices.end(),
+      [&](const auto index) {
+        BOLT_CHECK_LT(index, footer_.numColumns);
+        return columnMetadataLoaded_[index].load(std::memory_order_acquire);
+      });
+  if (allLoaded) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(columnMetadataMutex_);
+  struct Read {
+    uint32_t index;
+    BufferDescriptor descriptor;
+    std::unique_ptr<dwio::common::SeekableInputStream> stream;
+  };
+  std::vector<Read, memory::StlAllocator<Read>> reads{
+      memory::StlAllocator<Read>(&pool_)};
+  for (const auto index : physicalColumnIndices) {
+    BOLT_CHECK_LT(index, footer_.numColumns);
+    if (columnMetadataLoaded_[index].load(std::memory_order_relaxed)) {
+      continue;
+    }
+    const auto descriptor = columnMetadataLocations_[index];
+    reads.push_back(
+        {index,
+         descriptor,
+         input_.enqueue({descriptor.offset, descriptor.length})});
+  }
+  if (!reads.empty()) {
+    input_.load(dwio::common::LogType::HEADER);
+  }
+  try {
+    for (auto& read : reads) {
+      auto bytes =
+          AlignedBuffer::allocate<char>(read.descriptor.length, &pool_);
+      read.stream->readFully(bytes->asMutable<char>(), read.descriptor.length);
+      parseColumnMetadata(read.index, bytes->as<char>(), bytes->size());
+    }
+    for (const auto& read : reads) {
+      columnMetadataLoaded_[read.index].store(true, std::memory_order_release);
+    }
+  } catch (...) {
+    for (const auto& read : reads) {
+      columns_[read.index].Clear();
+      pageEncodings_[read.index].clear();
+      pageLayouts_[read.index].clear();
+      blobColumns_[read.index] = false;
+      columnMetadataLoaded_[read.index].store(false, std::memory_order_relaxed);
+    }
+    throw;
+  }
+}
+
+void NativeLanceMetadata::loadLogicalColumns(
+    const std::vector<uint32_t>& columnIndices) const {
+  std::vector<uint32_t> physicalColumns;
+  for (const auto columnIndex : columnIndices) {
+    BOLT_CHECK_LT(columnIndex, physicalColumnIndices_.size());
+    const auto first = physicalColumnIndices_[columnIndex];
+    const auto count = usesStructuralEncoding()
+        ? structuralFields_[columnIndex].physicalColumnCount
+        : physicalColumnSpans_[first];
+    for (uint32_t offset = 0; offset < count; ++offset) {
+      physicalColumns.push_back(first + offset);
+    }
+  }
+  std::sort(physicalColumns.begin(), physicalColumns.end());
+  physicalColumns.erase(
+      std::unique(physicalColumns.begin(), physicalColumns.end()),
+      physicalColumns.end());
+  loadPhysicalColumns(physicalColumns);
+}
+
+const ::lance::file::v2::ColumnMetadata& NativeLanceMetadata::column(
+    uint32_t physicalColumnIndex) const {
+  loadPhysicalColumns({physicalColumnIndex});
+  return columns_.at(physicalColumnIndex);
+}
+
+const std::vector<::lance::file::v2::ColumnMetadata>&
+NativeLanceMetadata::columns() const {
+  std::vector<uint32_t> all(footer_.numColumns);
+  std::iota(all.begin(), all.end(), 0);
+  loadPhysicalColumns(all);
+  return columns_;
+}
+
+const ::lance::encodings::ArrayEncoding& NativeLanceMetadata::pageEncoding(
+    uint32_t physicalColumnIndex,
+    int32_t pageIndex) const {
+  loadPhysicalColumns({physicalColumnIndex});
+  return pageEncodings_.at(physicalColumnIndex).at(pageIndex);
+}
+
+const ::lance::encodings21::PageLayout& NativeLanceMetadata::pageLayout(
+    uint32_t physicalColumnIndex,
+    int32_t pageIndex) const {
+  loadPhysicalColumns({physicalColumnIndex});
+  return pageLayouts_.at(physicalColumnIndex).at(pageIndex);
+}
+
+size_t NativeLanceMetadata::loadedColumnMetadataCount() const {
+  return std::count_if(
+      columnMetadataLoaded_.begin(),
+      columnMetadataLoaded_.end(),
+      [](const auto& loaded) {
+        return loaded.load(std::memory_order_acquire);
+      });
+}
+
 std::vector<std::pair<uint64_t, uint64_t>>
 NativeLanceMetadata::rowRangesForFileRange(uint64_t offset, uint64_t limit)
     const {
@@ -1265,6 +1387,7 @@ NativeLanceMetadata::rowRangesForFileRange(uint64_t offset, uint64_t limit)
     if (!rowAlignedPhysicalColumns_[physicalIndex]) {
       continue;
     }
+    loadPhysicalColumns({physicalIndex});
     const auto& candidate = columns_[physicalIndex];
     const auto allPagesHaveBuffers = std::all_of(
         candidate.pages().begin(),

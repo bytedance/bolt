@@ -273,14 +273,28 @@ NativeLanceRowReader::NativeLanceRowReader(
           readerBase_->pool(),
           false,
           readerBase_->blobResolver()) {
-  rowRanges_ = readerBase_->metadata().rowRangesForFileRange(
-      options_.getOffset(), options_.getLimit());
-  currentRow_ = rowRanges_.empty() ? 0 : rowRanges_.front().first;
   maxBatchBytes_ = options_.getMaxBatchBytes();
   estimatedBytesPerRow_ =
       estimateReadBytesPerRow(readerBase_->metadata().rowType(), options_);
   rootColumnReader_ = NativeLanceStructColumnReader::buildRoot(
       readerBase_->metadata().rowType(), options_);
+  auto requiredColumns = rootColumnReader_->fileColumnIndices();
+  if (const auto& scanSpec = options_.getScanSpec()) {
+    for (const auto& child : scanSpec->children()) {
+      if (!child->isConstant() && child->filter() != nullptr) {
+        requiredColumns.push_back(
+            readerBase_->metadata().rowType()->getChildIdx(child->fieldName()));
+      }
+    }
+  }
+  std::sort(requiredColumns.begin(), requiredColumns.end());
+  requiredColumns.erase(
+      std::unique(requiredColumns.begin(), requiredColumns.end()),
+      requiredColumns.end());
+  readerBase_->metadata().loadLogicalColumns(requiredColumns);
+  rowRanges_ = readerBase_->metadata().rowRangesForFileRange(
+      options_.getOffset(), options_.getLimit());
+  currentRow_ = rowRanges_.empty() ? 0 : rowRanges_.front().first;
   initializePrefetchRanges();
 }
 
@@ -598,6 +612,10 @@ NativeLanceReader::typeWithId() const {
 
 NativeLanceMetadata::DebugStats NativeLanceReader::debugStats() const {
   return readerBase_->metadata().debugStats();
+}
+
+size_t NativeLanceReader::loadedColumnMetadataCount() const {
+  return readerBase_->metadata().loadedColumnMetadataCount();
 }
 
 std::unique_ptr<dwio::common::RowReader> NativeLanceReader::createRowReader(

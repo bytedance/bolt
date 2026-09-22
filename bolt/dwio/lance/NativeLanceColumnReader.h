@@ -66,6 +66,8 @@ class NativeLanceStructColumnReader {
       uint64_t rowStart,
       uint64_t rowCount) const;
 
+  std::vector<uint32_t> fileColumnIndices() const;
+
  private:
   NativeLanceStructColumnReader(
       RowTypePtr outputType,

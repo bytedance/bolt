@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -125,15 +126,28 @@ class NativeLanceMetadata {
     return globalBuffers_;
   }
 
-  const std::vector<::lance::file::v2::ColumnMetadata>& columns() const {
-    return columns_;
+  uint32_t numPhysicalColumns() const {
+    return footer_.numColumns;
   }
+
+  const ::lance::file::v2::ColumnMetadata& column(
+      uint32_t physicalColumnIndex) const;
+
+  /// Loads all column metadata. Prefer loadLogicalColumns for scan paths.
+  const std::vector<::lance::file::v2::ColumnMetadata>& columns() const;
+
+  /// Loads the physical metadata required by the specified top-level columns.
+  /// Missing columns are submitted together so BufferedInput can coalesce I/O.
+  void loadLogicalColumns(const std::vector<uint32_t>& columnIndices) const;
+
+  void loadPhysicalColumns(
+      const std::vector<uint32_t>& physicalColumnIndices) const;
+
+  size_t loadedColumnMetadataCount() const;
 
   const ::lance::encodings::ArrayEncoding& pageEncoding(
       uint32_t physicalColumnIndex,
-      int32_t pageIndex) const {
-    return pageEncodings_.at(physicalColumnIndex).at(pageIndex);
-  }
+      int32_t pageIndex) const;
 
   bool usesStructuralEncoding() const {
     return footer_.majorVersion == 2 && footer_.minorVersion >= 1;
@@ -141,9 +155,7 @@ class NativeLanceMetadata {
 
   const ::lance::encodings21::PageLayout& pageLayout(
       uint32_t physicalColumnIndex,
-      int32_t pageIndex) const {
-    return pageLayouts_.at(physicalColumnIndex).at(pageIndex);
-  }
+      int32_t pageIndex) const;
 
   uint32_t leafPhysicalColumnIndex(uint32_t fieldId) const {
     return leafPhysicalColumnIndices_.at(fieldId);
@@ -166,6 +178,7 @@ class NativeLanceMetadata {
   }
 
   bool isBlobColumn(uint32_t physicalColumnIndex) const {
+    loadPhysicalColumns({physicalColumnIndex});
     return blobColumns_.at(physicalColumnIndex);
   }
 
@@ -196,6 +209,11 @@ class NativeLanceMetadata {
   }
 
   BufferPtr read(uint64_t offset, uint64_t length) const;
+  void parseColumnMetadata(
+      uint32_t physicalColumnIndex,
+      const char* data,
+      size_t size) const;
+  void validateColumnMetadata(uint32_t physicalColumnIndex) const;
   void evictDecompressedBuffersLocked() const;
 
   dwio::common::BufferedInput& input_;
@@ -210,11 +228,17 @@ class NativeLanceMetadata {
   std::vector<uint32_t> physicalColumnSpans_;
   std::vector<std::vector<std::string>> physicalColumnChildLogicalTypes_;
   std::vector<bool> rowAlignedPhysicalColumns_;
+  std::vector<uint64_t> physicalColumnExpectedRows_;
   std::vector<BufferDescriptor> globalBuffers_;
-  std::vector<::lance::file::v2::ColumnMetadata> columns_;
-  std::vector<std::vector<::lance::encodings::ArrayEncoding>> pageEncodings_;
-  std::vector<std::vector<::lance::encodings21::PageLayout>> pageLayouts_;
-  std::vector<bool> blobColumns_;
+  std::vector<BufferDescriptor> columnMetadataLocations_;
+  mutable std::vector<::lance::file::v2::ColumnMetadata> columns_;
+  mutable std::vector<std::vector<::lance::encodings::ArrayEncoding>>
+      pageEncodings_;
+  mutable std::vector<std::vector<::lance::encodings21::PageLayout>>
+      pageLayouts_;
+  mutable std::vector<bool> blobColumns_;
+  mutable std::vector<std::atomic<bool>> columnMetadataLoaded_;
+  mutable std::mutex columnMetadataMutex_;
   std::unordered_map<uint32_t, uint32_t> leafPhysicalColumnIndices_;
   std::vector<StructuralField> structuralFields_;
   mutable std::mutex decompressedBufferCacheMutex_;

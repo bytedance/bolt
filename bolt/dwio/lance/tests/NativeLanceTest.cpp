@@ -2968,6 +2968,36 @@ TEST_F(NativeLanceTest, decodesSparseV23Fixture) {
   }
 }
 
+TEST_F(NativeLanceTest, lazilyLoadsProjectedStructuralColumnMetadata) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader projectedReader(
+      openFile("sparse_v2_3.lance", *pool_), readerOptions);
+  EXPECT_EQ(projectedReader.loadedColumnMetadataCount(), 0);
+
+  dwio::common::RowReaderOptions projectedOptions;
+  projectedOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+      projectedReader.rowType(), std::vector<std::string>{"primitive"}));
+  auto rowReader = projectedReader.createRowReader(projectedOptions);
+  EXPECT_EQ(projectedReader.loadedColumnMetadataCount(), 1);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(8, result), 8);
+  EXPECT_EQ(projectedReader.loadedColumnMetadataCount(), 1);
+  const auto* values =
+      result->as<RowVector>()->childAt(0)->asFlatVector<int64_t>();
+  ASSERT_NE(values, nullptr);
+  EXPECT_TRUE(values->isNullAt(0));
+  EXPECT_EQ(values->valueAt(1), 1 * 101 - 7000);
+
+  NativeLanceReader fullReader(
+      openFile("sparse_v2_3.lance", *pool_), readerOptions);
+  EXPECT_EQ(fullReader.loadedColumnMetadataCount(), 0);
+  auto fullRowReader =
+      fullReader.createRowReader(dwio::common::RowReaderOptions{});
+  EXPECT_EQ(fullReader.loadedColumnMetadataCount(), 3);
+  EXPECT_EQ(fullRowReader->next(1, result), 1);
+}
+
 TEST_F(NativeLanceTest, decodesStructuralFixedFullZipFixture) {
   for (const auto* fileName :
        {"fixed_fullzip_v2_1.lance", "fixed_fullzip_v2_2.lance"}) {

@@ -113,6 +113,10 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
 
 ## I/O, memory, and selective reads
 
+- For v2.1 and newer structural files, the footer, schema, and column-offset
+  table are opened eagerly while column metadata is loaded in one coalesced
+  request for only the projected and filtered physical columns. Legacy v2.0
+  metadata remains eager because its physical mapping depends on page encoding.
 - Page ranges are scheduled through `BufferedInput`, allowing native
   coalescing and asynchronous implementations.
 - Variable-width, list, map, and Blob payloads use a second scheduling stage

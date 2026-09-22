@@ -1560,7 +1560,7 @@ BufferPtr readFlatByteRange(
     return output;
   }
 
-  const auto& column = metadata.columns()[physicalColumnIndex];
+  const auto& column = metadata.column(physicalColumnIndex);
   uint64_t pageRowStart = 0;
   uint64_t outputOffset = 0;
   const auto rowEnd = rowStart + rowCount;
@@ -2617,9 +2617,9 @@ void NativeLanceDecoder::enqueuePhysicalColumn(
     uint32_t physicalIndex,
     uint64_t rowStart,
     uint64_t rowCount) const {
-  BOLT_CHECK_LT(physicalIndex, metadata_.columns().size());
+  BOLT_CHECK_LT(physicalIndex, metadata_.numPhysicalColumns());
   if (metadata_.usesStructuralEncoding()) {
-    const auto& column = metadata_.columns()[physicalIndex];
+    const auto& column = metadata_.column(physicalIndex);
     const auto rowEnd = rowStart + rowCount;
     uint64_t pageRowStart = 0;
     for (int32_t pageIndex = 0; pageIndex < column.pages_size(); ++pageIndex) {
@@ -2639,7 +2639,7 @@ void NativeLanceDecoder::enqueuePhysicalColumn(
     return;
   }
   if (metadata_.isBlobColumn(physicalIndex)) {
-    const auto& column = metadata_.columns()[physicalIndex];
+    const auto& column = metadata_.column(physicalIndex);
     const auto rowEnd = rowStart + rowCount;
     uint64_t pageRowStart = 0;
     auto enqueue = [this](uint64_t offset, uint64_t length) {
@@ -2669,7 +2669,7 @@ void NativeLanceDecoder::enqueuePhysicalColumn(
   // been decoded, but their offset/index buffers still can. Schedule these
   // first-stage ranges with other columns and let nested decoding issue the
   // second-stage payload plan after offsets are known.
-  const auto& column = metadata_.columns()[physicalIndex];
+  const auto& column = metadata_.column(physicalIndex);
   if (type->kind() == TypeKind::ROW && column.pages_size() > 0) {
     const auto firstDataPage = std::find_if(
         column.pages().begin(), column.pages().end(), [](const auto& page) {
@@ -2765,7 +2765,7 @@ NativeLanceDecoder::singlePageRange(
   if (rowCount == 0 || metadata_.isBlobColumn(physicalColumnIndex)) {
     return std::nullopt;
   }
-  const auto& column = metadata_.columns()[physicalColumnIndex];
+  const auto& column = metadata_.column(physicalColumnIndex);
   uint64_t pageRowStart = 0;
   for (int32_t pageIndex = 0; pageIndex < column.pages_size(); ++pageIndex) {
     const auto& page = column.pages(pageIndex);
@@ -2798,7 +2798,7 @@ bool NativeLanceDecoder::hasCompressedColumn(
   if (metadata_.usesStructuralEncoding()) {
     for (uint32_t physicalIndex = firstPhysical; physicalIndex < physicalEnd;
          ++physicalIndex) {
-      const auto& column = metadata_.columns()[physicalIndex];
+      const auto& column = metadata_.column(physicalIndex);
       uint64_t pageRowStart = 0;
       for (int32_t pageIndex = 0; pageIndex < column.pages_size();
            ++pageIndex) {
@@ -2816,7 +2816,7 @@ bool NativeLanceDecoder::hasCompressedColumn(
   }
   for (uint32_t physicalIndex = firstPhysical; physicalIndex < physicalEnd;
        ++physicalIndex) {
-    const auto& column = metadata_.columns()[physicalIndex];
+    const auto& column = metadata_.column(physicalIndex);
     uint64_t pageRowStart = 0;
     for (int32_t pageIndex = 0; pageIndex < column.pages_size(); ++pageIndex) {
       const auto& page = column.pages(pageIndex);
@@ -2858,7 +2858,7 @@ bool NativeLanceDecoder::shouldCacheDecodedPage(
       type->kind() == TypeKind::ROW) {
     return true;
   }
-  const auto& column = metadata_.columns()[physicalColumnIndex];
+  const auto& column = metadata_.column(physicalColumnIndex);
   BOLT_CHECK_LT(page.pageIndex, column.pages_size());
   const auto& pageMetadata = column.pages(page.pageIndex);
   if (!pageMetadata.has_encoding() || pageMetadata.length() == 0) {
@@ -3201,13 +3201,13 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
     uint64_t rowStart,
     uint64_t rowCount,
     const std::vector<uint32_t>& arrayDimensions) const {
-  BOLT_CHECK_LT(physicalIndex, metadata_.columns().size());
+  BOLT_CHECK_LT(physicalIndex, metadata_.numPhysicalColumns());
   BOLT_CHECK_LE(rowStart, std::numeric_limits<uint64_t>::max() - rowCount);
   if (rowCount == 0) {
     return BaseVector::create(type, 0, &pool_);
   }
   if (metadata_.usesStructuralEncoding()) {
-    const auto& column = metadata_.columns()[physicalIndex];
+    const auto& column = metadata_.column(physicalIndex);
     uint64_t rowScale = 1;
     for (const auto dimension : arrayDimensions) {
       if (dimension == 0) {
@@ -3284,7 +3284,7 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
     auto descriptors =
         AlignedBuffer::allocate<BlobDescriptor>(rowCount, &pool_);
     auto* rawDescriptors = descriptors->asMutable<BlobDescriptor>();
-    const auto& column = metadata_.columns()[physicalIndex];
+    const auto& column = metadata_.column(physicalIndex);
     const auto rowEnd = rowStart + rowCount;
     uint64_t pageRowStart = 0;
     uint64_t outputOffset = 0;
@@ -3379,7 +3379,7 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
     return result;
   }
   if (type->kind() == TypeKind::ROW) {
-    const auto& header = metadata_.columns()[physicalIndex];
+    const auto& header = metadata_.column(physicalIndex);
     const auto firstDataPage = std::find_if(
         header.pages().begin(), header.pages().end(), [](const auto& page) {
           return page.length() > 0;
@@ -3498,7 +3498,7 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
     return result;
   }
 
-  const auto& column = metadata_.columns()[physicalIndex];
+  const auto& column = metadata_.column(physicalIndex);
   uint64_t pageRowStart = 0;
   uint64_t outputOffset = 0;
   uint64_t itemsOffset = 0;

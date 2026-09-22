@@ -340,4 +340,17 @@ void NativeLanceStructColumnReader::planRead(
   decoder.planColumns(columns, rowStart, rowCount);
 }
 
+std::vector<uint32_t> NativeLanceStructColumnReader::fileColumnIndices() const {
+  std::vector<uint32_t> columns;
+  columns.reserve(children_.size());
+  for (const auto& child : children_) {
+    if (child->readFromFile()) {
+      columns.push_back(child->fileColumnIndex());
+    }
+  }
+  std::sort(columns.begin(), columns.end());
+  columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+  return columns;
+}
+
 } // namespace bytedance::bolt::lance::reader

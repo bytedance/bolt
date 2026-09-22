@@ -146,6 +146,7 @@ class NativeLanceReader : public dwio::common::Reader {
   const std::shared_ptr<const dwio::common::TypeWithId>& typeWithId()
       const override;
   NativeLanceMetadata::DebugStats debugStats() const;
+  size_t loadedColumnMetadataCount() const;
   std::unique_ptr<dwio::common::RowReader> createRowReader(
       const dwio::common::RowReaderOptions& options = {}) const override;
   std::unique_ptr<dwio::common::ColumnStatistics> columnStatistics(
