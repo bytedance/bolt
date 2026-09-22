@@ -4112,6 +4112,139 @@ TEST_F(NativeLanceTest, rowReaderAppliesNullableStructFilter) {
   EXPECT_TRUE(packedValues->isNullAt(1));
 }
 
+TEST_F(NativeLanceTest, rowReaderPrunesNestedStructFields) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(
+      openFile("packed_fixed_v2_2.lance", *pool_), readerOptions);
+
+  const auto& packedType = reader.rowType()->childAt(0);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* packed = scanSpec->addField("packed", 0);
+  packed->addFieldRecursively("x", *packedType->childAt(0), 0);
+  packed->addField("y", 1)->setConstantValue(
+      BaseVector::createNullConstant(packedType->childAt(1), 1, pool_.get()));
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result), 20);
+  const auto* packedValues =
+      result->as<RowVector>()->childAt(0)->as<RowVector>();
+  ASSERT_NE(packedValues, nullptr);
+  const auto* x = packedValues->childAt(0)->as<SimpleVector<int32_t>>();
+  ASSERT_NE(x, nullptr);
+  for (vector_size_t row = 0; row < result->size(); ++row) {
+    EXPECT_EQ(packedValues->isNullAt(row), row % 19 == 0);
+    if (!packedValues->isNullAt(row)) {
+      EXPECT_EQ(x->valueAt(row), row);
+    }
+    EXPECT_TRUE(packedValues->childAt(1)->isNullAt(row));
+  }
+}
+
+TEST_F(NativeLanceTest, rowReaderCombinesNestedFilterAndPruning) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(
+      openFile("packed_fixed_v2_2.lance", *pool_), readerOptions);
+
+  const auto& packedType = reader.rowType()->childAt(0);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* packed = scanSpec->addField("packed", 0);
+  packed->addFieldRecursively("x", *packedType->childAt(0), 0)
+      ->setFilter(std::make_unique<common::BigintRange>(1, 2, false));
+  packed->addField("y", 1)->setConstantValue(
+      BaseVector::createNullConstant(packedType->childAt(1), 1, pool_.get()));
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result), 20);
+  ASSERT_EQ(result->size(), 2);
+  const auto* packedValues =
+      result->as<RowVector>()->childAt(0)->as<RowVector>();
+  ASSERT_NE(packedValues, nullptr);
+  const auto* x = packedValues->childAt(0)->as<SimpleVector<int32_t>>();
+  ASSERT_NE(x, nullptr);
+  EXPECT_EQ(x->valueAt(0), 1);
+  EXPECT_EQ(x->valueAt(1), 2);
+  EXPECT_TRUE(packedValues->childAt(1)->isNullAt(0));
+  EXPECT_TRUE(packedValues->childAt(1)->isNullAt(1));
+}
+
+TEST_F(NativeLanceTest, rowReaderPrunesNestedArrays) {
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(makeNestedListFile()), *pool_);
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(std::move(input), readerOptions);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* outer =
+      scanSpec->addFieldRecursively("outer", *reader.rowType()->childAt(0), 0);
+  outer->setMaxArrayElementsCount(1);
+  outer->childByName(common::ScanSpec::kArrayElementsFieldName)
+      ->setMaxArrayElementsCount(1);
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  const auto* outerValues =
+      result->as<RowVector>()->childAt(0)->as<ArrayVector>();
+  ASSERT_NE(outerValues, nullptr);
+  const std::array<vector_size_t, 4> expectedOuterSizes{1, 0, 1, 1};
+  for (vector_size_t row = 0; row < result->size(); ++row) {
+    EXPECT_EQ(outerValues->sizeAt(row), expectedOuterSizes[row]);
+  }
+  const auto* innerValues = outerValues->elements()->as<ArrayVector>();
+  ASSERT_NE(innerValues, nullptr);
+  ASSERT_EQ(innerValues->size(), 3);
+  const auto* values = innerValues->elements()->as<SimpleVector<int32_t>>();
+  ASSERT_NE(values, nullptr);
+  const std::array<int32_t, 3> expectedValues{1, 3, 6};
+  for (vector_size_t row = 0; row < innerValues->size(); ++row) {
+    ASSERT_EQ(innerValues->sizeAt(row), 1);
+    EXPECT_EQ(values->valueAt(innerValues->offsetAt(row)), expectedValues[row]);
+  }
+}
+
+TEST_F(NativeLanceTest, rowReaderPrunesMapEntries) {
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(makeMapFile()), *pool_);
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(std::move(input), readerOptions);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* attributes = scanSpec->addFieldRecursively(
+      "attributes", *reader.rowType()->childAt(0), 0);
+  attributes->childByName(common::ScanSpec::kMapKeysFieldName)
+      ->setFilter(common::createBigintValues({2, 4}, false));
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(5, result), 5);
+  const auto* maps = result->as<RowVector>()->childAt(0)->as<MapVector>();
+  ASSERT_NE(maps, nullptr);
+  EXPECT_EQ(maps->sizeAt(0), 1);
+  EXPECT_TRUE(maps->isNullAt(1));
+  EXPECT_EQ(maps->sizeAt(2), 0);
+  EXPECT_EQ(maps->sizeAt(3), 0);
+  EXPECT_EQ(maps->sizeAt(4), 1);
+  const auto* keys = maps->mapKeys()->as<SimpleVector<int32_t>>();
+  const auto* values = maps->mapValues()->as<SimpleVector<int64_t>>();
+  ASSERT_NE(keys, nullptr);
+  ASSERT_NE(values, nullptr);
+  ASSERT_EQ(keys->size(), 2);
+  EXPECT_EQ(keys->valueAt(0), 2);
+  EXPECT_EQ(keys->valueAt(1), 4);
+  EXPECT_EQ(values->valueAt(0), 20);
+  EXPECT_EQ(values->valueAt(1), 40);
+}
+
 TEST_F(NativeLanceTest, rowReaderAppliesMutationDeletionVector) {
   dwio::common::ReaderOptions readerOptions(pool_.get());
   NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);

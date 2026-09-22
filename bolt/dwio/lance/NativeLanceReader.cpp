@@ -32,6 +32,8 @@
 namespace bytedance::bolt::lance::reader {
 namespace {
 
+using RowSet = std::vector<vector_size_t, memory::StlAllocator<vector_size_t>>;
+
 template <TypeKind kind>
 bool testFilterRow(
     const BaseVector& vector,
@@ -116,6 +118,266 @@ bool testScanSpecRow(
   return true;
 }
 
+bool requiresSubfieldPruning(
+    const TypePtr& type,
+    const common::ScanSpec& scanSpec) {
+  switch (type->kind()) {
+    case TypeKind::ROW: {
+      const auto& rowType = type->asRow();
+      bool hasProjectedChild = false;
+      for (const auto& child : scanSpec.children()) {
+        if (!child->projectOut()) {
+          continue;
+        }
+        hasProjectedChild = true;
+        if (child->isConstant()) {
+          return true;
+        }
+        const auto childIndex = rowType.getChildIdx(child->fieldName());
+        if (childIndex >= 0 &&
+            requiresSubfieldPruning(rowType.childAt(childIndex), *child)) {
+          return true;
+        }
+      }
+      if (!hasProjectedChild) {
+        return false;
+      }
+      for (uint32_t childIndex = 0; childIndex < rowType.size(); ++childIndex) {
+        const auto* child = scanSpec.childByName(rowType.nameOf(childIndex));
+        if (child == nullptr || !child->projectOut()) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case TypeKind::ARRAY: {
+      if (scanSpec.maxArrayElementsCount() !=
+          std::numeric_limits<vector_size_t>::max()) {
+        return true;
+      }
+      const auto* elements =
+          scanSpec.childByName(common::ScanSpec::kArrayElementsFieldName);
+      return elements != nullptr &&
+          requiresSubfieldPruning(type->childAt(0), *elements);
+    }
+    case TypeKind::MAP: {
+      if (scanSpec.maxArrayElementsCount() !=
+          std::numeric_limits<vector_size_t>::max()) {
+        return true;
+      }
+      const auto* keys =
+          scanSpec.childByName(common::ScanSpec::kMapKeysFieldName);
+      if (keys != nullptr &&
+          (keys->hasFilter() ||
+           requiresSubfieldPruning(type->childAt(0), *keys))) {
+        return true;
+      }
+      const auto* values =
+          scanSpec.childByName(common::ScanSpec::kMapValuesFieldName);
+      return values != nullptr &&
+          requiresSubfieldPruning(type->childAt(1), *values);
+    }
+    default:
+      return false;
+  }
+}
+
+BufferPtr copyLogicalNulls(const BaseVector& vector, memory::MemoryPool& pool) {
+  BufferPtr nulls;
+  for (vector_size_t row = 0; row < vector.size(); ++row) {
+    if (!vector.isNullAt(row)) {
+      continue;
+    }
+    if (nulls == nullptr) {
+      nulls = allocateNulls(vector.size(), &pool);
+    }
+    bits::setNull(nulls->asMutable<uint64_t>(), row);
+  }
+  return nulls;
+}
+
+VectorPtr wrapSelected(
+    const VectorPtr& source,
+    const RowSet& selected,
+    memory::MemoryPool& pool) {
+  if (selected.empty()) {
+    return BaseVector::create(source->type(), 0, &pool);
+  }
+  auto indices = allocateIndices(selected.size(), &pool);
+  std::copy(
+      selected.begin(), selected.end(), indices->asMutable<vector_size_t>());
+  return BaseVector::wrapInDictionary(
+      nullptr, std::move(indices), selected.size(), source);
+}
+
+VectorPtr applySubfieldPruning(
+    VectorPtr vector,
+    const common::ScanSpec& scanSpec,
+    memory::MemoryPool& pool) {
+  if (!requiresSubfieldPruning(vector->type(), scanSpec)) {
+    return vector;
+  }
+
+  switch (vector->typeKind()) {
+    case TypeKind::ROW: {
+      const auto* source = vector->wrappedVector()->as<RowVector>();
+      BOLT_CHECK_NOT_NULL(source);
+      const auto& rowType = vector->type()->asRow();
+      RowSet parentRows(
+          vector->size(), memory::StlAllocator<vector_size_t>(&pool));
+      for (vector_size_t row = 0; row < vector->size(); ++row) {
+        parentRows[row] = vector->wrappedIndex(row);
+      }
+      std::vector<VectorPtr> children;
+      children.reserve(rowType.size());
+      for (uint32_t childIndex = 0; childIndex < rowType.size(); ++childIndex) {
+        const auto* childSpec =
+            scanSpec.childByName(rowType.nameOf(childIndex));
+        if (childSpec == nullptr || !childSpec->projectOut()) {
+          children.push_back(BaseVector::createNullConstant(
+              rowType.childAt(childIndex), vector->size(), &pool));
+          continue;
+        }
+        if (childSpec->isConstant()) {
+          children.push_back(BaseVector::wrapInConstant(
+              vector->size(), 0, childSpec->constantValue()));
+          continue;
+        }
+        auto child =
+            wrapSelected(source->childAt(childIndex), parentRows, pool);
+        children.push_back(
+            applySubfieldPruning(std::move(child), *childSpec, pool));
+      }
+      return std::make_shared<RowVector>(
+          &pool,
+          vector->type(),
+          copyLogicalNulls(*vector, pool),
+          vector->size(),
+          std::move(children));
+    }
+    case TypeKind::ARRAY: {
+      const auto* source = vector->wrappedVector()->as<ArrayVector>();
+      BOLT_CHECK_NOT_NULL(source);
+      auto offsets = allocateOffsets(vector->size(), &pool);
+      auto sizes = allocateSizes(vector->size(), &pool);
+      auto* rawOffsets = offsets->asMutable<vector_size_t>();
+      auto* rawSizes = sizes->asMutable<vector_size_t>();
+      RowSet elementRows{memory::StlAllocator<vector_size_t>(&pool)};
+      for (vector_size_t row = 0; row < vector->size(); ++row) {
+        rawOffsets[row] = elementRows.size();
+        if (vector->isNullAt(row)) {
+          rawSizes[row] = 0;
+          continue;
+        }
+        const auto sourceRow = vector->wrappedIndex(row);
+        const auto size = std::min(
+            source->sizeAt(sourceRow), scanSpec.maxArrayElementsCount());
+        rawSizes[row] = size;
+        const auto offset = source->offsetAt(sourceRow);
+        for (vector_size_t element = 0; element < size; ++element) {
+          elementRows.push_back(offset + element);
+        }
+      }
+      auto elements = wrapSelected(source->elements(), elementRows, pool);
+      if (const auto* elementSpec =
+              scanSpec.childByName(common::ScanSpec::kArrayElementsFieldName)) {
+        elements =
+            applySubfieldPruning(std::move(elements), *elementSpec, pool);
+      }
+      return std::make_shared<ArrayVector>(
+          &pool,
+          vector->type(),
+          copyLogicalNulls(*vector, pool),
+          vector->size(),
+          std::move(offsets),
+          std::move(sizes),
+          std::move(elements));
+    }
+    case TypeKind::MAP: {
+      const auto* source = vector->wrappedVector()->as<MapVector>();
+      BOLT_CHECK_NOT_NULL(source);
+      const auto* keySpec =
+          scanSpec.childByName(common::ScanSpec::kMapKeysFieldName);
+      auto offsets = allocateOffsets(vector->size(), &pool);
+      auto sizes = allocateSizes(vector->size(), &pool);
+      auto* rawOffsets = offsets->asMutable<vector_size_t>();
+      auto* rawSizes = sizes->asMutable<vector_size_t>();
+      RowSet entryRows{memory::StlAllocator<vector_size_t>(&pool)};
+      for (vector_size_t row = 0; row < vector->size(); ++row) {
+        rawOffsets[row] = entryRows.size();
+        if (vector->isNullAt(row)) {
+          rawSizes[row] = 0;
+          continue;
+        }
+        const auto sourceRow = vector->wrappedIndex(row);
+        const auto size = std::min(
+            source->sizeAt(sourceRow), scanSpec.maxArrayElementsCount());
+        const auto offset = source->offsetAt(sourceRow);
+        for (vector_size_t entry = 0; entry < size; ++entry) {
+          const auto sourceEntry = offset + entry;
+          if (keySpec == nullptr || !keySpec->hasFilter() ||
+              testScanSpecRow(*source->mapKeys(), *keySpec, sourceEntry)) {
+            entryRows.push_back(sourceEntry);
+          }
+        }
+        rawSizes[row] = entryRows.size() - rawOffsets[row];
+      }
+      auto keys = wrapSelected(source->mapKeys(), entryRows, pool);
+      if (keySpec != nullptr) {
+        keys = applySubfieldPruning(std::move(keys), *keySpec, pool);
+      }
+      auto values = wrapSelected(source->mapValues(), entryRows, pool);
+      if (const auto* valueSpec =
+              scanSpec.childByName(common::ScanSpec::kMapValuesFieldName)) {
+        values = applySubfieldPruning(std::move(values), *valueSpec, pool);
+      }
+      return std::make_shared<MapVector>(
+          &pool,
+          vector->type(),
+          copyLogicalNulls(*vector, pool),
+          vector->size(),
+          std::move(offsets),
+          std::move(sizes),
+          std::move(keys),
+          std::move(values),
+          std::nullopt,
+          source->hasSortedKeys());
+    }
+    default:
+      return vector;
+  }
+}
+
+VectorPtr applyScanSpecProjection(
+    VectorPtr result,
+    const common::ScanSpec& scanSpec,
+    memory::MemoryPool& pool) {
+  const auto* rows = result->as<RowVector>();
+  BOLT_CHECK_NOT_NULL(rows);
+  std::vector<VectorPtr> children = rows->children();
+  bool changed = false;
+  for (const auto& childSpec : scanSpec.children()) {
+    if (!childSpec->projectOut() || childSpec->isConstant()) {
+      continue;
+    }
+    BOLT_CHECK_NE(childSpec->channel(), common::ScanSpec::kNoChannel);
+    auto& child = children.at(childSpec->channel());
+    if (requiresSubfieldPruning(child->type(), *childSpec)) {
+      child = applySubfieldPruning(std::move(child), *childSpec, pool);
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return result;
+  }
+  return std::make_shared<RowVector>(
+      &pool,
+      result->type(),
+      result->nulls(),
+      result->size(),
+      std::move(children));
+}
+
 uint64_t estimateTypeBytesPerRow(const TypePtr& type) {
   constexpr uint64_t kNullOverhead = 1;
   switch (type->kind()) {
@@ -173,8 +435,6 @@ VectorPtr readSelective(
     vector_size_t batchSize,
     memory::MemoryPool& pool,
     const uint64_t* deletedRows = nullptr) {
-  using RowSet =
-      std::vector<vector_size_t, memory::StlAllocator<vector_size_t>>;
   RowSet selectedRows(batchSize, memory::StlAllocator<vector_size_t>(&pool));
   if (deletedRows == nullptr) {
     std::iota(selectedRows.begin(), selectedRows.end(), 0);
@@ -715,6 +975,10 @@ uint64_t NativeLanceRowReader::next(
         mutation == nullptr ? nullptr : mutation->deletedRows,
         static_cast<vector_size_t>(rowsToRead),
         readerBase_->pool());
+  }
+  if (const auto& scanSpec = options_.getScanSpec()) {
+    result = applyScanSpecProjection(
+        std::move(result), *scanSpec, readerBase_->pool());
   }
   currentRow_ += rowsToRead;
   markPrefetchRangesFinished(readBegin, currentRow_);

@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include "bolt/dwio/common/tests/utils/DataFiles.h"
+#include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/HiveConnectorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 
@@ -25,6 +26,7 @@ namespace {
 
 using namespace bytedance::bolt::exec;
 using namespace bytedance::bolt::exec::test;
+using namespace bytedance::bolt::connector::hive;
 
 class NativeLanceTableScanTest : public HiveConnectorTestBase {
  protected:
@@ -93,6 +95,97 @@ TEST_F(NativeLanceTableScanTest, filterOnlyNestedStructField) {
           .planNode(),
       splits,
       "SELECT 3");
+}
+
+TEST_F(NativeLanceTableScanTest, requiredStructSubfield) {
+  const auto path = example("packed_fixed_v2_2.lance");
+  const auto packedType = ROW({"x", "y"}, {INTEGER(), BIGINT()});
+  const auto outputType = ROW({"packed"}, {packedType});
+  std::vector<common::Subfield> requiredSubfields;
+  requiredSubfields.emplace_back("packed.x");
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      assignments;
+  assignments["packed"] = std::make_shared<HiveColumnHandle>(
+      "packed",
+      HiveColumnHandle::ColumnType::kRegular,
+      packedType,
+      packedType,
+      std::move(requiredSubfields));
+  const auto plan = PlanBuilder(pool())
+                        .startTableScan()
+                        .outputType(outputType)
+                        .assignments(std::move(assignments))
+                        .endTableScan()
+                        .planNode();
+  const auto split =
+      makeHiveConnectorSplits(path, 1, dwio::common::FileFormat::LANCE)[0];
+  const auto result = AssertQueryBuilder(plan).split(split).copyResults(pool());
+
+  ASSERT_EQ(result->size(), 2'051);
+  const auto* packed = result->childAt(0)->as<RowVector>();
+  ASSERT_NE(packed, nullptr);
+  const auto* x = packed->childAt(0)->as<SimpleVector<int32_t>>();
+  ASSERT_NE(x, nullptr);
+  for (vector_size_t row = 0; row < result->size(); ++row) {
+    EXPECT_EQ(packed->isNullAt(row), row % 19 == 0);
+    if (!packed->isNullAt(row)) {
+      EXPECT_EQ(x->valueAt(row), row);
+    }
+    EXPECT_TRUE(packed->isNullAt(row) || packed->childAt(1)->isNullAt(row));
+  }
+}
+
+TEST_F(NativeLanceTableScanTest, requiredArrayAndMapSubfields) {
+  const auto path = example("complex_v2_2.lance");
+  const auto mapType = MAP(INTEGER(), BIGINT());
+  const auto arrayType = ARRAY(INTEGER());
+  const auto outputType = ROW({"map_val", "fsl"}, {mapType, arrayType});
+  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      assignments;
+  std::vector<common::Subfield> mapSubfields;
+  mapSubfields.emplace_back("map_val[31]");
+  assignments["map_val"] = std::make_shared<HiveColumnHandle>(
+      "map_val",
+      HiveColumnHandle::ColumnType::kRegular,
+      mapType,
+      mapType,
+      std::move(mapSubfields));
+  std::vector<common::Subfield> arraySubfields;
+  arraySubfields.emplace_back("fsl[2]");
+  assignments["fsl"] = std::make_shared<HiveColumnHandle>(
+      "fsl",
+      HiveColumnHandle::ColumnType::kRegular,
+      arrayType,
+      arrayType,
+      std::move(arraySubfields));
+  const auto plan = PlanBuilder(pool())
+                        .startTableScan()
+                        .outputType(outputType)
+                        .assignments(std::move(assignments))
+                        .endTableScan()
+                        .planNode();
+  const auto split =
+      makeHiveConnectorSplits(path, 1, dwio::common::FileFormat::LANCE)[0];
+  const auto result = AssertQueryBuilder(plan).split(split).copyResults(pool());
+
+  ASSERT_EQ(result->size(), 2'051);
+  const auto* maps = result->childAt(0)->as<MapVector>();
+  const auto* arrays = result->childAt(1)->as<ArrayVector>();
+  ASSERT_NE(maps, nullptr);
+  ASSERT_NE(arrays, nullptr);
+  for (vector_size_t row = 0; row < result->size(); ++row) {
+    EXPECT_EQ(maps->isNullAt(row), row % 17 == 0);
+    EXPECT_EQ(arrays->isNullAt(row), row % 31 == 0);
+    if (!maps->isNullAt(row)) {
+      EXPECT_EQ(maps->sizeAt(row), row == 3 ? 1 : 0);
+    }
+    if (!arrays->isNullAt(row)) {
+      EXPECT_EQ(arrays->sizeAt(row), 2);
+    }
+  }
+  ASSERT_EQ(maps->mapKeys()->size(), 1);
+  EXPECT_EQ(maps->mapKeys()->as<SimpleVector<int32_t>>()->valueAt(0), 31);
+  EXPECT_EQ(maps->mapValues()->as<SimpleVector<int64_t>>()->valueAt(0), 301);
 }
 
 TEST_F(NativeLanceTableScanTest, multipleSplitsDoNotDuplicatePages) {

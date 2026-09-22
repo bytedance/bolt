@@ -143,8 +143,12 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
 - `maxBatchBytes` caps row batches using a conservative estimate followed by
   feedback from the retained size of produced vectors.
 - Top-level and nested Struct filters are decoded first; projected columns are
-  then materialized only for coalesced surviving row ranges. Array/Map element
-  pruning remains future work. Page/statistics pruning is unavailable because
+  then materialized only for coalesced surviving row ranges. Nested Struct
+  projection replaces unselected children with typed null constants. Array
+  subscript projection bounds each row's elements, while Map subscript
+  projection filters keys and applies the same entry selection to values. The
+  transformed vectors retain parent nulls and use dictionary indices instead
+  of mutating decoded pages. Page/statistics pruning is unavailable because
   Lance v2 page metadata does not store value, null-count, minimum, or maximum
   statistics.
 - DWIO mutation bitmaps are applied before selective filters and before
