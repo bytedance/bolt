@@ -74,6 +74,7 @@ jobs:
         if: ${{ inputs.build_type == 'All' || inputs.build_type == 'Release' }}
         shell: bash
         run: |
+          conan remote remove ci || true
           conan install . \
             -s "llvm-core/*:build_type=Release" \
             -s "build_type=Release" \
@@ -98,7 +99,7 @@ jobs:
             -o "bolt/*:enable_gcs=True" \
             -o "bolt/*:enable_testutil=True" \
             -o "bolt/*:enable_perf=True" \
-            --build=missing
+            --build=missing -r=bolt-cci-local
 
       - name: Upload packages to conan remote
         if: ${{ always() && steps.env-setup.outcome == 'success' }}
@@ -106,5 +107,6 @@ jobs:
           CONAN_LOGIN_USERNAME: ${{ secrets.CONAN_ADMIN_USERNAME }}
           CONAN_PASSWORD: ${{ secrets.CONAN_ADMIN_PASSWORD }}
         run: |
+          conan remote add ci http://conanserver:9300
           conan remote auth ci
           conan upload -r ci --confirm --check "*"
