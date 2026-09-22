@@ -162,24 +162,18 @@ unknown-extension rejection, and explicit lossy
 type rejection paths. The fixture suite validates ranges crossing row 1,024.
 
 The checked-in current-writer fixtures are first read back by the matching
-Lance Rust reader before native tests consume them. The optional 0.37 FFI
-differential oracle covers its supported legacy and ordinary structural types;
-that older reader does not implement structural Dictionary, Map, or complex
-FixedSizeList dispatch.
-
-When `BOLT_ENABLE_LANCE=ON`, the differential test writes files with the legacy
-Rust writer and compares a test-only direct Rust FFI adapter with the native
-reader. Production native targets do not link `lance_file_ffi`.
+Lance Rust reader before native tests consume them. Production and public test
+targets do not link `lance_file_ffi`; cross-version performance comparison uses
+the standalone current-main Rust harness below.
 
 The C++ benchmark exposes independent `parquet` and `native` modes and forces
 every projected child vector to load. Use a batch size of 1,024 and the
 repository's `bolt-benchmark-compare --rounds 7` wrapper for alternating runs,
 paired sign-flip tests, and Holm correction.
 
-The optional differential test uses the packaged compatibility FFI. To compare
-against an arbitrary current Lance checkout without linking Rust into a
-production or benchmark target, build the standalone test harness and use the
-printed executable as the baseline command:
+To compare against an arbitrary current Lance checkout without linking Rust
+into a production or benchmark target, build the standalone test harness and
+use the printed executable as the baseline command:
 
     bolt/dwio/lance/tests/run_current_rust_reader_benchmark.py \
       --lance-repo /path/to/lance --prepare-only
