@@ -21,6 +21,11 @@
 namespace bytedance::bolt::functions::flinksql {
 
 /// Registers Flink Java 8 temporal functions (with an optional name prefix):
+/// - to_timestamp(text [, format]).
+/// - to_timestamp(text, format, defaultJvmTimeZone,
+/// defaultJvmRawOffsetSeconds).
+///   The shorter forms use UTC for the legacy parsing fallback; the
+///   four-argument form uses the supplied constant JVM zone and raw offset.
 /// - flink_string_to_timestamp(text, nullOnFailure [, defaultJvmTimeZone,
 ///   defaultJvmRawOffsetSeconds]).
 ///   The two-argument form uses UTC for Java's legacy parsing fallback. Pass

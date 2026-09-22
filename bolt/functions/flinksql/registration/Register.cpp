@@ -26,7 +26,6 @@
 #include "bolt/functions/flinksql/RegexFunctions.h"
 #include "bolt/functions/flinksql/String.h"
 #include "bolt/functions/flinksql/TemporalFunctions.h"
-#include "bolt/functions/flinksql/ToTimestampFunction.h"
 #include "bolt/functions/flinksql/URLFunctions.h"
 #include "bolt/functions/flinksql/specialforms/DecimalRound.h"
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
@@ -122,12 +121,6 @@ static void registerDatetimeFunctions(const std::string& prefix) {
       Timestamp>({prefix + "timestampdiff"});
   registerFunction<FlinkTimestampDiffFunction, int32_t, Varchar, Date, Date>(
       {prefix + "timestampdiff"});
-
-  // TO_TIMESTAMP(string) and TO_TIMESTAMP(string, format)
-  registerFunction<FlinkToTimestampFunction, Timestamp, Varchar>(
-      {prefix + "to_timestamp"});
-  registerFunction<FlinkToTimestampFunction, Timestamp, Varchar, Varchar>(
-      {prefix + "to_timestamp"});
 }
 
 static void registerMathFunctions(const std::string& prefix) {

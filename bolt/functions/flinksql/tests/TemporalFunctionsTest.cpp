@@ -84,11 +84,13 @@ TEST_F(TemporalFunctionsTest, stringNanoseconds) {
       Timestamp(-62135596800, 1),
       Timestamp(3661, 1)};
   auto input = makeRowVector({makeFlatVector<std::string>(texts)});
-  for (const auto flag : {"true", "false"}) {
+  for (const auto* expression :
+       {"to_timestamp(c0)",
+        "flink_string_to_timestamp(c0, true)",
+        "flink_string_to_timestamp(c0, false)"}) {
+    SCOPED_TRACE(expression);
     assertEqualVectors(
-        makeFlatVector<Timestamp>(expected),
-        evaluate(
-            fmt::format("flink_string_to_timestamp(c0, {})", flag), input));
+        makeFlatVector<Timestamp>(expected), evaluate(expression, input));
   }
 }
 
@@ -115,11 +117,13 @@ TEST_F(TemporalFunctionsTest, stringJavaResolution) {
       Timestamp(-62135596800, 1),
       Timestamp(-12219724800, 0),
       Timestamp(-12218860800, 0)};
-  assertEqualVectors(
-      makeFlatVector<Timestamp>(expected),
-      evaluate(
-          "flink_string_to_timestamp(c0, true)",
-          makeRowVector({makeFlatVector<std::string>(texts)})));
+  auto input = makeRowVector({makeFlatVector<std::string>(texts)});
+  for (const auto* expression :
+       {"to_timestamp(c0)", "flink_string_to_timestamp(c0, true)"}) {
+    SCOPED_TRACE(expression);
+    assertEqualVectors(
+        makeFlatVector<Timestamp>(expected), evaluate(expression, input));
+  }
 }
 
 TEST_F(TemporalFunctionsTest, stringErrorsAndNulls) {
@@ -143,10 +147,13 @@ TEST_F(TemporalFunctionsTest, stringErrorsAndNulls) {
        std::nullopt});
   auto input = makeRowVector({texts});
   auto expected = makeNullConstant(TypeKind::TIMESTAMP, texts->size());
-  assertEqualVectors(
-      expected, evaluate("flink_string_to_timestamp(c0, true)", input));
-  assertEqualVectors(
-      expected, evaluate("try(flink_string_to_timestamp(c0, false))", input));
+  for (const auto* expression :
+       {"to_timestamp(c0)",
+        "flink_string_to_timestamp(c0, true)",
+        "try(flink_string_to_timestamp(c0, false))"}) {
+    SCOPED_TRACE(expression);
+    assertEqualVectors(expected, evaluate(expression, input));
+  }
   BOLT_ASSERT_THROW(
       evaluate("flink_string_to_timestamp(c0, false)", input),
       "Invalid timestamp literal");
@@ -169,6 +176,59 @@ TEST_F(TemporalFunctionsTest, stringErrorsAndNulls) {
               "\0"
               "1970-01-01\0",
               12)));
+}
+
+TEST_F(TemporalFunctionsTest, formattedTimestampFallback) {
+  auto texts = makeNullableFlatVector<std::string>(
+      {"2023-02-29",
+       "1970-01-01 00:00:00.123456789",
+       "1970-1-1 0:0:0.000000001",
+       "１９７０-01-01",
+       "1582-10-10",
+       "2020-01-01 24:00:01",
+       "0000-02-29",
+       "invalid",
+       std::nullopt});
+  auto expected = makeNullableFlatVector<Timestamp>(
+      {timestamp("2023-03-01 00:00:00"),
+       Timestamp(0, 123456789),
+       Timestamp(0, 1),
+       Timestamp(0, 0),
+       timestamp("1582-10-20 00:00:00"),
+       timestamp("2020-01-02 00:00:01"),
+       std::nullopt,
+       std::nullopt,
+       std::nullopt});
+  assertEqualVectors(
+      expected,
+      evaluate("to_timestamp(c0, 'yyyy/MM/dd')", makeRowVector({texts})));
+  auto formats = makeFlatVector<std::string>(texts->size(), [](auto row) {
+    return row % 2 ? "yyyy/MM/dd" : "dd.MM.yyyy";
+  });
+  assertEqualVectors(
+      expected,
+      evaluate("to_timestamp(c0, c1)", makeRowVector({texts, formats})));
+}
+
+TEST_F(TemporalFunctionsTest, formattedTimestampDefaultJvmZone) {
+  const std::string input = "2021-03-14 02:30:00.123";
+  EXPECT_EQ(
+      timestamp("2021-03-14 03:30:00.123"),
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd', 'America/New_York', cast(-18000 as integer))",
+          input));
+  EXPECT_EQ(
+      timestamp(input),
+      parseString(
+          "to_timestamp(c0, 'yyyy-MM-dd HH:mm:ss.SSS', 'America/New_York', cast(-18000 as integer))",
+          input));
+  EXPECT_EQ(
+      timestamp(input), parseString("to_timestamp(c0, 'yyyy/MM/dd')", input));
+  EXPECT_EQ(
+      std::nullopt,
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd', 'America/New_York', cast(-18000 as integer))",
+          std::nullopt));
 }
 
 TEST_F(TemporalFunctionsTest, constantPrecision) {
@@ -490,6 +550,7 @@ TEST_F(TemporalFunctionsTest, legacyCalendarInvalidDates) {
   for (const auto* input :
        {"0000-02-29", "0100-2-29 0:0:0", "1500-02-28 23:59:60"}) {
     SCOPED_TRACE(input);
+    EXPECT_EQ(std::nullopt, parseString("to_timestamp(c0)", input));
     EXPECT_EQ(
         std::nullopt,
         parseString("flink_string_to_timestamp(c0, true)", input));
@@ -500,22 +561,20 @@ TEST_F(TemporalFunctionsTest, legacyCalendarInvalidDates) {
 }
 
 TEST_F(TemporalFunctionsTest, unicodeDigits) {
-  for (const auto* input : {"１９７０-01-01", "1970-１-１", "١٩٧٠-1-1"}) {
+  for (const auto* expression :
+       {"to_timestamp(c0)", "flink_string_to_timestamp(c0, true)"}) {
+    SCOPED_TRACE(expression);
+    for (const auto* input : {"１９７０-01-01", "1970-１-１", "١٩٧٠-1-1"}) {
+      EXPECT_EQ(Timestamp(0, 0), parseString(expression, input));
+    }
     EXPECT_EQ(
-        Timestamp(0, 0),
-        parseString("flink_string_to_timestamp(c0, true)", input));
+        Timestamp(0, 100000000),
+        parseString(expression, "1970-01-01 00:00:00.١"));
+    EXPECT_EQ(
+        timestamp("2023-03-01 00:00:00"),
+        parseString(expression, "２０２３-02-29"));
+    EXPECT_EQ(std::nullopt, parseString(expression, "1970-01-01 00:00:00.𝟙"));
   }
-  EXPECT_EQ(
-      Timestamp(0, 100000000),
-      parseString(
-          "flink_string_to_timestamp(c0, true)", "1970-01-01 00:00:00.١"));
-  EXPECT_EQ(
-      timestamp("2023-03-01 00:00:00"),
-      parseString("flink_string_to_timestamp(c0, true)", "２０２３-02-29"));
-  EXPECT_EQ(
-      std::nullopt,
-      parseString(
-          "flink_string_to_timestamp(c0, true)", "1970-01-01 00:00:00.𝟙"));
 }
 
 TEST_F(TemporalFunctionsTest, defaultJvmTimeZone) {
@@ -602,7 +661,8 @@ TEST_F(TemporalFunctionsTest, ltzTimeCast) {
 TEST_F(TemporalFunctionsTest, prefixedRegistration) {
   registerTemporalFunctions("test_");
   for (const auto* name :
-       {"flink_string_to_timestamp",
+       {"to_timestamp",
+        "flink_string_to_timestamp",
         "flink_timestamp_precision",
         "flink_timestamp_to_utc",
         "flink_timestamp_from_utc",
@@ -610,6 +670,14 @@ TEST_F(TemporalFunctionsTest, prefixedRegistration) {
         "flink_timestamp_to_time"}) {
     EXPECT_FALSE(getSignatureStrings("test_" + std::string(name)).empty());
   }
+  EXPECT_EQ(
+      Timestamp(0, 123456789),
+      parseString("test_to_timestamp(c0)", "1970-01-01 00:00:00.123456789"));
+  EXPECT_EQ(
+      Timestamp(0, 123000000),
+      parseString(
+          "test_to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSS')",
+          "1970/01/01 00:00:00.123"));
   EXPECT_EQ(
       Timestamp(0, 123000000),
       parseString(

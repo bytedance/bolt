@@ -22,12 +22,15 @@
 #include <algorithm>
 #include <charconv>
 #include <limits>
+#include <memory>
+#include <string>
 #include <string_view>
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/Registerer.h"
+#include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
@@ -416,19 +419,14 @@ void resolveTimeZone(
   }
 }
 
-template <typename T>
-struct StringToTimestampFunction {
-  BOLT_DEFINE_FUNCTION_TYPES(T);
+struct LegacyTimestampContext {
   const tz::TimeZone* defaultTimeZone_ = nullptr;
   int32_t defaultRawOffset_ = 0;
 
-  void initialize(
-      const std::vector<TypePtr>&,
-      const core::QueryConfig&,
-      const arg_type<Varchar>*,
-      const arg_type<bool>*,
-      const arg_type<Varchar>* zone,
-      const arg_type<int32_t>* rawOffset) {
+  template <typename StringType>
+  void initializeDefaultTimeZone(
+      const StringType* zone,
+      const int32_t* rawOffset) {
     BOLT_USER_CHECK_NOT_NULL(zone, "Default JVM time zone must be constant");
     BOLT_USER_CHECK_NOT_NULL(
         rawOffset, "Default JVM raw offset must be constant");
@@ -441,15 +439,113 @@ struct StringToTimestampFunction {
         true);
   }
 
+  bool parse(std::string_view text, Timestamp& result, bool allowCanonical)
+      const {
+    return parseTimestamp(
+               text,
+               result,
+               defaultTimeZone_,
+               defaultRawOffset_,
+               allowCanonical) ||
+        parseUnicodeTimestamp(
+               text, result, defaultTimeZone_, defaultRawOffset_);
+  }
+};
+
+template <typename T>
+struct ToTimestampWithFormatFunction : LegacyTimestampContext {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  using DateTimeFormatterPtr = std::shared_ptr<DateTimeFormatter>;
+
+  // Set only when the format argument is a constant (known at initialize time).
+  DateTimeFormatterPtr constFormatter_;
+  // One-entry memo so a non-constant format column does not rebuild the
+  // formatter on every row when consecutive rows share the same format.
+  std::string lastFormat_;
+  DateTimeFormatterPtr lastFormatter_;
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& /*config*/,
+      const arg_type<Varchar>* /*dateStr*/,
+      const arg_type<Varchar>* format) {
+    if (format != nullptr) {
+      constFormatter_ = buildJodaDateTimeFormatter(
+          std::string_view(format->data(), format->size()));
+    }
+  }
+
+  void initialize(
+      const std::vector<TypePtr>& inputTypes,
+      const core::QueryConfig& config,
+      const arg_type<Varchar>* dateStr,
+      const arg_type<Varchar>* format,
+      const arg_type<Varchar>* zone,
+      const arg_type<int32_t>* rawOffset) {
+    initialize(inputTypes, config, dateStr, format);
+    initializeDefaultTimeZone(zone, rawOffset);
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Timestamp>& result,
+      const arg_type<Varchar>& dateStr,
+      const arg_type<Varchar>& format) {
+    const DateTimeFormatter* fmt;
+    if (constFormatter_ != nullptr) {
+      fmt = constFormatter_.get();
+    } else {
+      const auto formatView = std::string_view(format.data(), format.size());
+      if (lastFormatter_ == nullptr ||
+          std::string_view(lastFormat_) != formatView) {
+        lastFormatter_ = buildJodaDateTimeFormatter(formatView);
+        lastFormat_.assign(formatView.data(), formatView.size());
+      }
+      fmt = lastFormatter_.get();
+    }
+    const auto input = std::string_view(dateStr.data(), dateStr.size());
+    auto parsed = fmt->parse(input, TimePolicy::CORRECTED);
+    if (parsed.hasError()) {
+      return parse(input, result, /*allowCanonical=*/false);
+    }
+    result = parsed.value().timestamp;
+    return true;
+  }
+
+  bool call(
+      out_type<Timestamp>& result,
+      const arg_type<Varchar>& text,
+      const arg_type<Varchar>& format,
+      const arg_type<Varchar>&,
+      const arg_type<int32_t>&) {
+    return call(result, text, format);
+  }
+};
+
+template <typename T>
+struct StringToTimestampFunction : LegacyTimestampContext {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void initialize(
+      const std::vector<TypePtr>&,
+      const core::QueryConfig&,
+      const arg_type<Varchar>*,
+      const arg_type<bool>*,
+      const arg_type<Varchar>* zone,
+      const arg_type<int32_t>* rawOffset) {
+    initializeDefaultTimeZone(zone, rawOffset);
+  }
+
+  bool call(out_type<Timestamp>& result, const arg_type<Varchar>& text) {
+    return call(result, text, true);
+  }
+
   bool call(
       out_type<Timestamp>& result,
       const arg_type<Varchar>& text,
       const arg_type<bool>& nullOnFailure) {
     const std::string_view input(text.data(), text.size());
-    const bool valid =
-        parseTimestamp(input, result, defaultTimeZone_, defaultRawOffset_) ||
-        parseUnicodeTimestamp(
-            input, result, defaultTimeZone_, defaultRawOffset_);
+    const bool valid = parse(input, result, /*allowCanonical=*/true);
     BOLT_USER_CHECK(valid || nullOnFailure, "Invalid timestamp literal");
     return valid;
   }
@@ -548,6 +644,17 @@ struct TimestampWithLocalZoneToTimeFunction : TimestampZoneFunction<T, false> {
 } // namespace
 
 void registerTemporalFunctions(const std::string& prefix) {
+  registerFunction<StringToTimestampFunction, Timestamp, Varchar>(
+      {prefix + "to_timestamp"});
+  registerFunction<ToTimestampWithFormatFunction, Timestamp, Varchar, Varchar>(
+      {prefix + "to_timestamp"});
+  registerFunction<
+      ToTimestampWithFormatFunction,
+      Timestamp,
+      Varchar,
+      Varchar,
+      Varchar,
+      int32_t>({prefix + "to_timestamp"});
   registerFunction<StringToTimestampFunction, Timestamp, Varchar, bool>(
       {prefix + "flink_string_to_timestamp"});
   registerFunction<
