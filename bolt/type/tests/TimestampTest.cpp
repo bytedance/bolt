@@ -240,6 +240,31 @@ TEST(TimestampTest, arithmeticOverflow) {
   ASSERT_NO_THROW(Timestamp(9223372036854, 775'807'000).toMicros());
 }
 
+TEST(TimestampTest, epochIntegerBoundaries) {
+  for (int64_t value :
+       {INT64_MIN,
+        INT64_MIN + 1,
+        int64_t{-1},
+        int64_t{0},
+        int64_t{1},
+        INT64_MAX - 1,
+        INT64_MAX}) {
+    EXPECT_EQ(Timestamp::fromMillis(value).toMillis(), value);
+    EXPECT_EQ(
+        Timestamp::fromMillisNoError(value), Timestamp::fromMillis(value));
+    EXPECT_EQ(Timestamp::fromMicros(value).toMicros(), value);
+    EXPECT_EQ(
+        Timestamp::fromMicrosNoError(value), Timestamp::fromMicros(value));
+    EXPECT_EQ(Timestamp::fromNanos(value).toNanos(), value);
+  }
+  EXPECT_EQ(
+      Timestamp::fromNanos(INT64_MIN), Timestamp(-9'223'372'037, 145'224'192));
+  BOLT_ASSERT_THROW(
+      Timestamp(-9'223'372'037, 145'224'191).toNanos(), "to nanoseconds");
+  BOLT_ASSERT_THROW(
+      Timestamp(9'223'372'036, 854'775'808).toNanos(), "to nanoseconds");
+}
+
 TEST(TimestampTest, toAppend) {
   std::string tsStringZeroValue;
   toAppend(Timestamp(0, 0), &tsStringZeroValue);

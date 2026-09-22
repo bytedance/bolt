@@ -229,6 +229,14 @@ ArrowVectorSerde::ArrowSerdeOptions toArrowSerdeOptions(
   if (options == nullptr) {
     return ArrowVectorSerde::ArrowSerdeOptions();
   }
+  if (const auto* arrowOptions =
+          dynamic_cast<const ArrowVectorSerde::ArrowSerdeOptions*>(options)) {
+    auto result = *arrowOptions;
+    // Keep the generic Options fields authoritative at the serde entry points.
+    result.useLosslessTimestamp = options->useLosslessTimestamp;
+    result.compressionKind = options->compressionKind;
+    return result;
+  }
   return ArrowVectorSerde::ArrowSerdeOptions(
       options->useLosslessTimestamp, options->compressionKind);
 }

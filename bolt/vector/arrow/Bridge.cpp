@@ -788,142 +788,55 @@ struct Selection {
   vector_size_t total_;
 };
 
-// Gather values from timestamp buffer. Nulls are skipped.
+// Visit selected, non-null flat timestamps with their output positions.
+template <typename WriteValue>
+void gatherTimestampValues(
+    const BaseVector& vec,
+    const Selection& rows,
+    WriteValue writeValue) {
+  const auto* values = vec.values()->as<Timestamp>();
+  const auto* nulls = vec.rawNulls();
+  vector_size_t output = 0;
+  if (nulls) {
+    rows.apply([&](vector_size_t row) {
+      if (!bits::isBitNull(nulls, row)) {
+        writeValue(output, values[row]);
+      }
+      ++output;
+    });
+  } else {
+    rows.apply([&](vector_size_t row) { writeValue(output++, values[row]); });
+  }
+}
+
 void gatherFromTimestampBuffer(
     const BaseVector& vec,
     const Selection& rows,
     TimestampUnit unit,
     Buffer& out) {
-  auto src = (*vec.values()).as<Timestamp>();
-  auto dst = out.asMutable<int64_t>();
-  vector_size_t j = 0; // index into dst
-  if (!vec.mayHaveNulls()) {
-    switch (unit) {
-      case TimestampUnit::kSecond:
-        rows.apply([&](vector_size_t i) { dst[j++] = src[i].getSeconds(); });
-        break;
-      case TimestampUnit::kMilli:
-        rows.apply([&](vector_size_t i) { dst[j++] = src[i].toMillis(); });
-        break;
-      case TimestampUnit::kMicro:
-        rows.apply([&](vector_size_t i) { dst[j++] = src[i].toMicros(); });
-        break;
-      case TimestampUnit::kNano:
-        rows.apply([&](vector_size_t i) { dst[j++] = src[i].toNanos(); });
-        break;
-      default:
-        BOLT_UNREACHABLE();
-    }
-    return;
-  }
+  auto* values = out.asMutable<int64_t>();
+  auto gather = [&](auto convert) {
+    gatherTimestampValues(
+        vec, rows, [&](vector_size_t row, const Timestamp& ts) {
+          values[row] = convert(ts);
+        });
+  };
   switch (unit) {
     case TimestampUnit::kSecond:
-      rows.apply([&](vector_size_t i) {
-        if (!vec.isNullAt(i)) {
-          dst[j] = src[i].getSeconds();
-        }
-        j++;
-      });
+      gather([](const Timestamp& ts) { return ts.getSeconds(); });
       break;
     case TimestampUnit::kMilli:
-      rows.apply([&](vector_size_t i) {
-        if (!vec.isNullAt(i)) {
-          dst[j] = src[i].toMillis();
-        }
-        j++;
-      });
+      gather([](const Timestamp& ts) { return ts.toMillis(); });
       break;
     case TimestampUnit::kMicro:
-      rows.apply([&](vector_size_t i) {
-        if (!vec.isNullAt(i)) {
-          dst[j] = src[i].toMicros();
-        };
-        j++;
-      });
+      gather([](const Timestamp& ts) { return ts.toMicros(); });
       break;
     case TimestampUnit::kNano:
-      rows.apply([&](vector_size_t i) {
-        if (!vec.isNullAt(i)) {
-          dst[j] = src[i].toNanos();
-        }
-        j++;
-      });
+      gather([](const Timestamp& ts) { return ts.toNanos(); });
       break;
     default:
       BOLT_UNREACHABLE();
   }
-}
-
-void gatherFromTimestampBufferIPC(
-    const BaseVector& vec,
-    const Selection& rows,
-    TimestampUnit unit,
-    Buffer& out) {
-  auto src = (*vec.values()).as<Timestamp>();
-  auto dst = out.asMutable<int64_t>();
-  vector_size_t j = 0;
-
-  auto safeConv = [&](const Timestamp& ts, int64_t* outVal) -> bool {
-    const int64_t sec = ts.getSeconds();
-    const int64_t nanos = ts.getNanos();
-
-    if (UNLIKELY(nanos < 0 || nanos >= 1000000000LL)) {
-      return false;
-    }
-
-    __int128 v = 0;
-    switch (unit) {
-      case TimestampUnit::kSecond:
-        v = static_cast<__int128>(sec);
-        break;
-      case TimestampUnit::kMilli:
-        // sec * 1'000 + nanos / 1'000'000
-        v = static_cast<__int128>(sec) * 1000 + nanos / 1000000;
-        break;
-      case TimestampUnit::kMicro:
-        // sec * 1'000'000 + nanos / 1'000
-        v = static_cast<__int128>(sec) * 1000000 + nanos / 1000;
-        break;
-      case TimestampUnit::kNano:
-        // sec * 1'000'000'000 + nanos
-        v = static_cast<__int128>(sec) * 1000000000 + nanos;
-        break;
-      default:
-        BOLT_UNREACHABLE();
-    }
-
-    if (UNLIKELY(
-            v > std::numeric_limits<int64_t>::max() ||
-            v < std::numeric_limits<int64_t>::min())) {
-      return false;
-    }
-
-    *outVal = static_cast<int64_t>(v);
-    return true;
-  };
-
-  auto writeOrZero = [&](vector_size_t i) {
-    int64_t v;
-    if (LIKELY(safeConv(src[i], &v))) {
-      dst[j] = v;
-    } else {
-      dst[j] = 0;
-    }
-    ++j;
-  };
-
-  if (!vec.mayHaveNulls()) {
-    rows.apply(writeOrZero);
-    return;
-  }
-
-  rows.apply([&](vector_size_t i) {
-    if (!vec.isNullAt(i)) {
-      writeOrZero(i);
-    } else {
-      ++j;
-    }
-  });
 }
 
 void gatherFromBuffer(
@@ -962,48 +875,44 @@ void gatherFromBuffer(
   }
 }
 
-// Optionally, holds shared_ptrs pointing to the ArrowArray object that
-// holds the buffer and the ArrowSchema object that describes the ArrowArray,
-// which will be released to signal that we will no longer hold on to the data
-// and the shared_ptr deleters should run the release procedures if no one
-// else is referencing the objects.
+struct ArrowImportOwner {
+  ArrowSchema schema{};
+  ArrowArray array{};
+
+  ~ArrowImportOwner() {
+    if (array.release) {
+      array.release(&array);
+    }
+    if (schema.release) {
+      schema.release(&schema);
+    }
+  }
+};
+
+// Every imported buffer shares the root; viewer imports leave it empty.
 struct BufferViewReleaser {
-  BufferViewReleaser() : BufferViewReleaser(nullptr, nullptr) {}
-  BufferViewReleaser(
-      std::shared_ptr<ArrowSchema> arrowSchema,
-      std::shared_ptr<ArrowArray> arrowArray)
-      : schemaReleaser_(std::move(arrowSchema)),
-        arrayReleaser_(std::move(arrowArray)) {}
+  explicit BufferViewReleaser(std::shared_ptr<ArrowImportOwner> owner = nullptr)
+      : owner_(std::move(owner)) {}
 
   void addRef() const {}
   void release() const {}
 
  private:
-  const std::shared_ptr<ArrowSchema> schemaReleaser_;
-  const std::shared_ptr<ArrowArray> arrayReleaser_;
+  const std::shared_ptr<ArrowImportOwner> owner_;
 };
 
-// Wraps a naked pointer using a Bolt buffer view, without copying it. Adding
-// a dummy releaser as the buffer lifetime is fully controlled by the client of
-// the API.
 BufferPtr wrapInBufferViewAsViewer(const void* buffer, size_t length) {
   static const BufferViewReleaser kViewerReleaser;
   return BufferView<BufferViewReleaser>::create(
       static_cast<const uint8_t*>(buffer), length, kViewerReleaser);
 }
 
-// Wraps a naked pointer using a Bolt buffer view, without copying it. This
-// buffer view uses shared_ptr to manage reference counting and releasing for
-// the ArrowSchema object and the ArrowArray object.
 BufferPtr wrapInBufferViewAsOwner(
     const void* buffer,
     size_t length,
-    std::shared_ptr<ArrowSchema> schemaReleaser,
-    std::shared_ptr<ArrowArray> arrayReleaser) {
+    const std::shared_ptr<ArrowImportOwner>& owner) {
   return BufferView<BufferViewReleaser>::create(
-      static_cast<const uint8_t*>(buffer),
-      length,
-      {std::move(schemaReleaser), std::move(arrayReleaser)});
+      static_cast<const uint8_t*>(buffer), length, BufferViewReleaser(owner));
 }
 
 std::optional<int64_t> optionalNullCount(int64_t value) {
@@ -1249,11 +1158,7 @@ void exportValues(
       : AlignedBuffer::allocate<uint8_t>(
             checkedMultiply<size_t>(out.length, size), pool);
   if (type->kind() == TypeKind::TIMESTAMP) {
-    if (options.exportToArrowIPC) {
-      gatherFromTimestampBufferIPC(vec, rows, options.timestampUnit, *values);
-    } else {
-      gatherFromTimestampBuffer(vec, rows, options.timestampUnit, *values);
-    }
+    gatherFromTimestampBuffer(vec, rows, options.timestampUnit, *values);
   } else {
     gatherFromBuffer(*type, *vec.values(), rows, options, *values);
   }
@@ -1526,6 +1431,18 @@ void exportToArrowImpl(
     memory::MemoryPool*,
     bool allowReuse = false);
 
+bool containsTimestamp(const Type& type) {
+  if (type.isTimestamp()) {
+    return true;
+  }
+  for (size_t i = 0; i < type.size(); ++i) {
+    if (containsTimestamp(*type.childAt(i))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 template <typename T>
 void exportRowsImpl(
     const T& vec,
@@ -1534,20 +1451,70 @@ void exportRowsImpl(
     ArrowArray& out,
     memory::MemoryPool* pool,
     BoltToArrowBridgeHolder& holder) {
-  exportValidityBitmap(vec, rows, options, out, pool, holder);
+  // The caller has already exported this vector's validity bitmap.
   out.n_buffers = 1;
   holder.resizeChildren(vec.childrenSize());
   out.n_children = vec.childrenSize();
   out.children = holder.getChildrenArrays();
   for (column_index_t i = 0; i < vec.childrenSize(); ++i) {
     try {
-      exportToArrowImpl(
-          *vec.childAt(i)->loadedVector(),
-          rows,
-          options,
-          *holder.allocateChild(i),
-          pool,
-          holder.reusable());
+      const BaseVector* child = vec.childAt(i)->loadedVector();
+      auto exportChild = [&](const BaseVector& value) {
+        exportToArrowImpl(
+            value,
+            rows,
+            options,
+            *holder.allocateChild(i),
+            pool,
+            holder.reusable());
+      };
+      if (out.null_count == 0 || !containsTimestamp(*child->type())) {
+        exportChild(*child);
+        continue;
+      }
+      // Timestamp conversion must not read storage hidden by a null row.
+      // Share value buffers and propagate nulls through complex children.
+      if (child->isConstantEncoding()) {
+        if (out.null_count == out.length) {
+          exportChild(
+              *BaseVector::createNullConstant(child->type(), vec.size(), pool));
+        } else {
+          exportChild(*child);
+        }
+        continue;
+      }
+      BufferPtr nulls = vec.nulls();
+      if (child->rawNulls()) {
+        nulls = allocateNulls(vec.size(), pool);
+        bits::andBits(
+            nulls->asMutable<uint64_t>(),
+            vec.rawNulls(),
+            child->rawNulls(),
+            0,
+            vec.size());
+      }
+      if (child->isFlatEncoding()) {
+        FlatVector<Timestamp> nullableChild(
+            pool,
+            TIMESTAMP(),
+            std::move(nulls),
+            vec.size(),
+            child->values(),
+            std::vector<BufferPtr>{});
+        exportChild(nullableChild);
+      } else if (child->encoding() == VectorEncoding::Simple::ROW) {
+        RowVector nullableChild(
+            pool,
+            child->type(),
+            std::move(nulls),
+            vec.size(),
+            child->asUnchecked<RowVector>()->children());
+        exportChild(nullableChild);
+      } else {
+        auto nullableChild = child->slice(0, vec.size());
+        nullableChild->setNulls(nulls);
+        exportChild(*nullableChild);
+      }
     } catch (const BoltException&) {
       if (!holder.reusable()) {
         for (column_index_t j = 0; j < i; ++j) {
@@ -2154,6 +2121,7 @@ void exportConstant(
     BoltToArrowBridgeHolder& holder) {
   // As per Arrow spec, REE has zero buffers and two children, `run_ends` and
   // `values`.
+  out.null_count = 0;
   out.n_buffers = 0;
   out.buffers = nullptr;
 
@@ -2341,9 +2309,14 @@ TypePtr importFromArrowImpl(
     const char* format,
     const ArrowSchema& arrowSchema) {
   BOLT_CHECK_NOT_NULL(format);
-  const std::string formatStr(format);
-  // TODO: Timezone and unit are not handled.
+  const std::string_view formatStr(format);
   if (formatStr.rfind("ts", 0) == 0) {
+    BOLT_USER_CHECK(
+        formatStr.size() >= 4 && formatStr[3] == ':' &&
+            std::string_view("smun").find(formatStr[2]) !=
+                std::string_view::npos,
+        "Invalid Arrow timestamp format: {}",
+        formatStr);
     return TIMESTAMP();
   }
 
@@ -3001,7 +2974,7 @@ VectorPtr importFromArrowImpl(
     ArrowSchema& arrowSchema,
     ArrowArray& arrowArray,
     memory::MemoryPool* pool,
-    bool isViewer);
+    WrapInBufferViewFunc wrapInBufferView);
 
 RowVectorPtr createRowVector(
     const ArrowOptions& options,
@@ -3010,7 +2983,7 @@ RowVectorPtr createRowVector(
     BufferPtr nulls,
     const ArrowSchema& arrowSchema,
     const ArrowArray& arrowArray,
-    bool isViewer) {
+    WrapInBufferViewFunc wrapInBufferView) {
   BOLT_CHECK_EQ(arrowArray.n_children, rowType->size());
 
   // Recursively create the children vectors.
@@ -3023,7 +2996,7 @@ RowVectorPtr createRowVector(
         *arrowSchema.children[i],
         *arrowArray.children[i],
         pool,
-        isViewer));
+        wrapInBufferView));
   }
   return std::make_shared<RowVector>(
       pool,
@@ -3054,7 +3027,6 @@ ArrayVectorPtr createArrayVector(
     BufferPtr nulls,
     const ArrowSchema& arrowSchema,
     const ArrowArray& arrowArray,
-    bool isViewer,
     WrapInBufferViewFunc wrapInBufferView) {
   static_assert(sizeof(vector_size_t) == sizeof(int32_t));
   BOLT_CHECK_EQ(arrowArray.n_buffers, 2);
@@ -3068,7 +3040,7 @@ ArrayVectorPtr createArrayVector(
       *arrowSchema.children[0],
       *arrowArray.children[0],
       pool,
-      isViewer);
+      wrapInBufferView);
   return std::make_shared<ArrayVector>(
       pool,
       type,
@@ -3087,7 +3059,6 @@ MapVectorPtr createMapVector(
     BufferPtr nulls,
     const ArrowSchema& arrowSchema,
     const ArrowArray& arrowArray,
-    bool isViewer,
     WrapInBufferViewFunc wrapInBufferView) {
   BOLT_CHECK_EQ(arrowArray.n_buffers, 2);
   BOLT_CHECK_EQ(arrowArray.n_children, 1);
@@ -3101,7 +3072,7 @@ MapVectorPtr createMapVector(
       *arrowSchema.children[0],
       *arrowArray.children[0],
       pool,
-      isViewer);
+      wrapInBufferView);
   BOLT_CHECK(entries->type()->isRow());
   const auto& rows = *entries->asUnchecked<RowVector>();
   BOLT_CHECK_EQ(rows.childrenSize(), 2);
@@ -3124,7 +3095,6 @@ VectorPtr createDictionaryVector(
     BufferPtr nulls,
     const ArrowSchema& arrowSchema,
     const ArrowArray& arrowArray,
-    bool isViewer,
     WrapInBufferViewFunc wrapInBufferView) {
   BOLT_CHECK_EQ(arrowArray.n_buffers, 2);
   BOLT_CHECK_NOT_NULL(arrowArray.dictionary);
@@ -3137,7 +3107,11 @@ VectorPtr createDictionaryVector(
       arrowArray.buffers[1], arrowArray.length * sizeof(vector_size_t));
   auto type = importFromArrow(*arrowSchema.dictionary);
   auto wrapped = importFromArrowImpl(
-      options, *arrowSchema.dictionary, *arrowArray.dictionary, pool, isViewer);
+      options,
+      *arrowSchema.dictionary,
+      *arrowArray.dictionary,
+      pool,
+      wrapInBufferView);
   return BaseVector::wrapInDictionary(
       std::move(nulls),
       std::move(indices),
@@ -3150,7 +3124,7 @@ VectorPtr createVectorFromReeArray(
     memory::MemoryPool* pool,
     const ArrowSchema& arrowSchema,
     const ArrowArray& arrowArray,
-    bool isViewer) {
+    WrapInBufferViewFunc wrapInBufferView) {
   BOLT_CHECK_EQ(arrowArray.n_children, 2);
   BOLT_CHECK_EQ(arrowSchema.n_children, 2);
 
@@ -3162,7 +3136,7 @@ VectorPtr createVectorFromReeArray(
       *arrowSchema.children[1],
       *arrowArray.children[1],
       pool,
-      isViewer);
+      wrapInBufferView);
 
   const auto& runEndSchema = *arrowSchema.children[0];
   auto runEndType = importFromArrowImpl(runEndSchema.format, runEndSchema);
@@ -3314,6 +3288,17 @@ VectorPtr createTimestampVector(
       optionalNullCount(nullCount));
 }
 
+void checkTemporalValues(const ArrowArray& array, const BufferPtr& nulls) {
+  BOLT_USER_CHECK_EQ(array.n_buffers, 2, "Temporal types expect two buffers");
+  BOLT_USER_CHECK_NOT_NULL(array.buffers);
+  BOLT_USER_CHECK(
+      array.buffers[1] || array.length == 0 ||
+          (nulls &&
+           bits::countNulls(nulls->as<uint64_t>(), 0, array.length) ==
+               array.length),
+      "Missing Arrow temporal values buffer");
+}
+
 VectorPtr createShortDecimalVector(
     memory::MemoryPool* pool,
     const TypePtr& type,
@@ -3369,7 +3354,6 @@ VectorPtr importFromArrowImpl(
     ArrowSchema& arrowSchema,
     ArrowArray& arrowArray,
     memory::MemoryPool* pool,
-    bool isViewer,
     WrapInBufferViewFunc wrapInBufferView) {
   BOLT_USER_CHECK_NOT_NULL(arrowSchema.release, "arrowSchema was released.");
   BOLT_USER_CHECK_NOT_NULL(arrowArray.release, "arrowArray was released.");
@@ -3378,6 +3362,8 @@ VectorPtr importFromArrowImpl(
       0,
       "Offsets are not supported during arrow conversion yet.");
   BOLT_CHECK_GE(arrowArray.length, 0, "Array length needs to be non-negative.");
+  BOLT_USER_CHECK_LE(
+      arrowArray.length, std::numeric_limits<vector_size_t>::max());
 
   // First parse and generate a Bolt type.
   auto type = importFromArrow(arrowSchema);
@@ -3395,6 +3381,8 @@ VectorPtr importFromArrowImpl(
   // non-null nulls buffer, in that case the converted Bolt vector will not
   // have null buffer.
   if (arrowArray.null_count != 0) {
+    BOLT_USER_CHECK_GE(arrowArray.n_buffers, 1);
+    BOLT_USER_CHECK_NOT_NULL(arrowArray.buffers);
     BOLT_USER_CHECK_NOT_NULL(
         arrowArray.buffers[0],
         "Nulls buffer can't be null unless null_count is zero.");
@@ -3411,13 +3399,12 @@ VectorPtr importFromArrowImpl(
         nulls,
         arrowSchema,
         arrowArray,
-        isViewer,
         wrapInBufferView);
   }
 
   if (isREE(arrowSchema)) {
     return createVectorFromReeArray(
-        options, pool, arrowSchema, arrowArray, isViewer);
+        options, pool, arrowSchema, arrowArray, wrapInBufferView);
   }
 
   // String data types (VARCHAR and VARBINARY).
@@ -3443,6 +3430,7 @@ VectorPtr importFromArrowImpl(
         arrowArray.null_count,
         wrapInBufferView);
   } else if (type->isTimestamp()) {
+    checkTemporalValues(arrowArray, nulls);
     return createTimestampVector(
         options,
         pool,
@@ -3478,27 +3466,13 @@ VectorPtr importFromArrowImpl(
         nulls,
         arrowSchema,
         arrowArray,
-        isViewer);
+        wrapInBufferView);
   } else if (type->isArray()) {
     return createArrayVector(
-        options,
-        pool,
-        type,
-        nulls,
-        arrowSchema,
-        arrowArray,
-        isViewer,
-        wrapInBufferView);
+        options, pool, type, nulls, arrowSchema, arrowArray, wrapInBufferView);
   } else if (type->isMap()) {
     return createMapVector(
-        options,
-        pool,
-        type,
-        nulls,
-        arrowSchema,
-        arrowArray,
-        isViewer,
-        wrapInBufferView);
+        options, pool, type, nulls, arrowSchema, arrowArray, wrapInBufferView);
   } else if (type->isPrimitiveType()) {
     // Other primitive types.
 
@@ -3525,7 +3499,7 @@ VectorPtr importFromArrowImpl(
   }
 }
 
-VectorPtr importFromArrowImpl(
+VectorPtr importFromArrowWithOwnership(
     const ArrowOptions& options,
     ArrowSchema& arrowSchema,
     ArrowArray& arrowArray,
@@ -3533,52 +3507,26 @@ VectorPtr importFromArrowImpl(
     bool isViewer) {
   if (isViewer) {
     return importFromArrowImpl(
-        options,
-        arrowSchema,
-        arrowArray,
-        pool,
-        isViewer,
-        wrapInBufferViewAsViewer);
+        options, arrowSchema, arrowArray, pool, wrapInBufferViewAsViewer);
   }
 
-  // This Vector will take over the ownership of `arrowSchema` and `arrowArray`
-  // by marking them as released and becoming responsible for calling the
-  // release callbacks when use count reaches zero. These ArrowSchema object and
-  // ArrowArray object will be co-owned by both the BufferVieweReleaser of the
-  // nulls buffer and values buffer.
-  std::shared_ptr<ArrowSchema> schemaReleaser(
-      new ArrowSchema(arrowSchema), [](ArrowSchema* toDelete) {
-        if (toDelete != nullptr) {
-          if (toDelete->release != nullptr) {
-            toDelete->release(toDelete);
-          }
-          delete toDelete;
-        }
-      });
-  std::shared_ptr<ArrowArray> arrayReleaser(
-      new ArrowArray(arrowArray), [](ArrowArray* toDelete) {
-        if (toDelete != nullptr) {
-          if (toDelete->release != nullptr) {
-            toDelete->release(toDelete);
-          }
-          delete toDelete;
-        }
-      });
-  VectorPtr imported = importFromArrowImpl(
-      options,
-      arrowSchema,
-      arrowArray,
-      pool,
-      false,
-      [&schemaReleaser, &arrayReleaser](const void* buffer, size_t length) {
-        return wrapInBufferViewAsOwner(
-            buffer, length, schemaReleaser, arrayReleaser);
-      });
-
+  BOLT_USER_CHECK_NOT_NULL(arrowSchema.release, "arrowSchema was released.");
+  BOLT_USER_CHECK_NOT_NULL(arrowArray.release, "arrowArray was released.");
+  // Allocate before taking ownership, then share the root with every buffer.
+  // Child schemas stay intact, including schemas retained by an export pool.
+  auto owner = std::make_shared<ArrowImportOwner>();
+  owner->schema = arrowSchema;
+  owner->array = arrowArray;
   arrowSchema.release = nullptr;
   arrowArray.release = nullptr;
-
-  return imported;
+  return importFromArrowImpl(
+      options,
+      owner->schema,
+      owner->array,
+      pool,
+      [&owner](const void* buffer, size_t length) {
+        return wrapInBufferViewAsOwner(buffer, length, owner);
+      });
 }
 
 } // namespace
@@ -3618,8 +3566,8 @@ VectorPtr importFromArrowImplWithMeasure(
     }
   }
 
-  auto result =
-      importFromArrowImpl(options, arrowSchema, arrowArray, pool, isViewer);
+  auto result = importFromArrowWithOwnership(
+      options, arrowSchema, arrowArray, pool, isViewer);
 
   if (FLAGS_bolt_collect_import_time) {
     auto this_end = std::chrono::high_resolution_clock::now();

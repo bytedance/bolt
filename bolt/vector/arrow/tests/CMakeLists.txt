@@ -29,6 +29,7 @@ add_executable(
   bolt_arrow_bridge_test
   ArrowBridgeArrayTest.cpp
   ArrowBridgeSchemaTest.cpp
+  ArrowBridgeTemporalTest.cpp
 )
 
 add_test(bolt_arrow_bridge_test bolt_arrow_bridge_test)

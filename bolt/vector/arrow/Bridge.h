@@ -229,6 +229,8 @@ VectorPtr importFromArrowAsViewer(
 /// (https://arrow.apache.org/docs/format/CDataInterface.html). Afterwards, the
 /// returned Vector will be responsible for calling the release callbacks when
 /// destructed.
+/// If conversion fails after ownership is acquired, the inputs remain marked
+/// as released and their release callbacks are invoked during cleanup.
 VectorPtr importFromArrowAsOwner(
     ArrowSchema& arrowSchema,
     ArrowArray& arrowArray,
