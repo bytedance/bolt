@@ -57,6 +57,17 @@ TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
   EXPECT_EQ(configured.parquetReaderImplicitCastMask(), -1);
 }
 
+TEST_F(QueryConfigTest, lanceDecodeParallelism) {
+  QueryConfig defaultConfig{{}};
+  EXPECT_EQ(defaultConfig.lanceDecodeParallelism(), 16);
+
+  QueryConfig configured{{{QueryConfig::kLanceDecodeParallelism, "8"}}};
+  EXPECT_EQ(configured.lanceDecodeParallelism(), 8);
+
+  QueryConfig invalid{{{QueryConfig::kLanceDecodeParallelism, "0"}}};
+  EXPECT_THROW(invalid.lanceDecodeParallelism(), BoltUserError);
+}
+
 TEST_F(QueryConfigTest, setConfig) {
   std::string path = "/tmp/setConfig";
   std::unordered_map<std::string, std::string> configData(

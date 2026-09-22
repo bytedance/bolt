@@ -1,0 +1,154 @@
+// Copyright (c) ByteDance Ltd. and/or its affiliates.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package lance.encodings;
+
+import "google/protobuf/empty.proto";
+
+message Buffer {
+  enum BufferType { page = 0; column = 1; file = 2; }
+  uint32 buffer_index = 1;
+  BufferType buffer_type = 2;
+}
+
+message Nullable {
+  message NoNull { ArrayEncoding values = 1; }
+  message AllNull {}
+  message SomeNull {
+    ArrayEncoding validity = 1;
+    ArrayEncoding values = 2;
+  }
+  oneof nullability {
+    NoNull no_nulls = 1;
+    SomeNull some_nulls = 2;
+    AllNull all_nulls = 3;
+  }
+}
+
+message List {
+  ArrayEncoding offsets = 1;
+  uint64 null_offset_adjustment = 2;
+  uint64 num_items = 3;
+}
+
+message FixedSizeList {
+  uint32 dimension = 1;
+  ArrayEncoding items = 2;
+  bool has_validity = 3;
+}
+
+message Compression {
+  string scheme = 1;
+  optional int32 level = 2;
+}
+
+message Flat {
+  uint64 bits_per_value = 1;
+  Buffer buffer = 2;
+  Compression compression = 3;
+}
+message Constant { bytes value = 1; }
+message Bitpacked {
+  uint64 compressed_bits_per_value = 1;
+  uint64 uncompressed_bits_per_value = 2;
+  Buffer buffer = 3;
+  bool signed = 4;
+}
+message BitpackedForNonNeg {
+  uint64 compressed_bits_per_value = 1;
+  uint64 uncompressed_bits_per_value = 2;
+  Buffer buffer = 3;
+}
+message InlineBitpacking { uint64 uncompressed_bits_per_value = 2; }
+message OutOfLineBitpacking {
+  uint64 uncompressed_bits_per_value = 2;
+  uint64 compressed_bits_per_value = 3;
+}
+message SimpleStruct {}
+message Binary {
+  ArrayEncoding indices = 1;
+  ArrayEncoding bytes = 2;
+  uint64 null_adjustment = 3;
+}
+message Variable { uint32 bits_per_offset = 1; }
+message Fsst {
+  ArrayEncoding binary = 1;
+  bytes symbol_table = 2;
+}
+message Dictionary {
+  ArrayEncoding indices = 1;
+  ArrayEncoding items = 2;
+  uint32 num_dictionary_items = 3;
+}
+message PackedStruct {
+  repeated ArrayEncoding inner = 1;
+  Buffer buffer = 2;
+}
+message PackedStructFixedWidthMiniBlock {
+  ArrayEncoding flat = 1;
+  repeated uint32 bits_per_values = 2;
+}
+message FixedSizeBinary {
+  ArrayEncoding bytes = 1;
+  uint32 byte_width = 2;
+}
+message Block { string scheme = 1; }
+message Rle { uint64 bits_per_value = 1; }
+message ByteStreamSplit { uint64 bits_per_value = 1; }
+message GeneralMiniBlock {
+  ArrayEncoding inner = 1;
+  Compression compression = 2;
+}
+
+message ArrayEncoding {
+  oneof array_encoding {
+    Flat flat = 1;
+    Nullable nullable = 2;
+    FixedSizeList fixed_size_list = 3;
+    List list = 4;
+    SimpleStruct struct = 5;
+    Binary binary = 6;
+    Dictionary dictionary = 7;
+    Fsst fsst = 8;
+    PackedStruct packed_struct = 9;
+    Bitpacked bitpacked = 10;
+    FixedSizeBinary fixed_size_binary = 11;
+    BitpackedForNonNeg bitpacked_for_non_neg = 12;
+    Constant constant = 13;
+    InlineBitpacking inline_bitpacking = 14;
+    OutOfLineBitpacking out_of_line_bitpacking = 15;
+    Variable variable = 16;
+    PackedStructFixedWidthMiniBlock packed_struct_fixed_width_mini_block = 17;
+    Block block = 18;
+    Rle rle = 19;
+    GeneralMiniBlock general_mini_block = 20;
+    ByteStreamSplit byte_stream_split = 21;
+  }
+}
+
+message ZoneIndex {
+  uint32 rows_per_zone = 1;
+  Buffer zone_map_buffer = 2;
+  ColumnEncoding inner = 3;
+}
+message Blob { ColumnEncoding inner = 1; }
+message ColumnEncoding {
+  oneof column_encoding {
+    google.protobuf.Empty values = 1;
+    ZoneIndex zone_index = 2;
+    Blob blob = 3;
+  }
+}

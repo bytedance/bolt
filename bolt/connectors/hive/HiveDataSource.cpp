@@ -32,8 +32,12 @@
 
 #include <fmt/core.h>
 #include <fmt/format.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/thread_factory/NamedThreadFactory.h>
+#include <algorithm>
 #include <exception>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include "bolt/common/file/FileSystems.h"
@@ -47,6 +51,17 @@
 #include "bolt/dwio/common/exception/Exception.h"
 #include "bolt/expression/FieldReference.h"
 namespace bytedance::bolt::connector::hive {
+namespace {
+
+const std::shared_ptr<folly::Executor>& lanceDecodeExecutor() {
+  static const std::shared_ptr<folly::Executor> executor =
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          std::max(1u, std::thread::hardware_concurrency()),
+          std::make_shared<folly::NamedThreadFactory>("LanceDecode"));
+  return executor;
+}
+
+} // namespace
 
 class HiveTableHandle;
 class HiveColumnHandle;
@@ -77,6 +92,7 @@ HiveDataSource::HiveDataSource(
   }
   parquetRepDefStreamingWindowSize_ =
       queryConfig.parquetRepDefStreamingWindowSize();
+  lanceDecodeParallelism_ = queryConfig.lanceDecodeParallelism();
   for (const auto& key : HiveConfig::hms_session_key) {
     std::optional<std::string> value = queryConfig.get<std::string>(key);
     if (value.has_value()) {
@@ -369,6 +385,12 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
 
   auto splitReader = createSplitReader(split, isPartOfPaimonSplit);
   splitReader->configureReaderOptions();
+  if (split->fileFormat == dwio::common::FileFormat::LANCE &&
+      lanceDecodeParallelism_ > 1) {
+    splitReader->rowReaderOptions().setDecodingParallelismFactor(
+        lanceDecodeParallelism_);
+    splitReader->rowReaderOptions().setDecodingExecutor(lanceDecodeExecutor());
+  }
   splitReader->rowReaderOptions().setAppendParquetRowNumberAndFileName(
       enable_parquet_rownum_and_filename);
 
