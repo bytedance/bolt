@@ -134,6 +134,9 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
   matching Lance semantics.
 - Prefetch units use cloned inputs so a background load cannot invalidate the
   active reader's staged buffers.
+- Async-capable inputs maintain a one-batch-ahead I/O pipeline. Fully decoded
+  compressed pages are cached in a reader-scoped LRU shared by the active and
+  cloned prefetch decoders; MiniBlock range reads remain chunk-selective.
 - Decompressed buffers are allocated from Bolt's pool and held in an adaptive
   bounded cache. `BOLT_LANCE_DECOMPRESSED_CACHE_BYTES` can override its limit.
 - `maxBatchBytes` caps row batches using a conservative estimate followed by

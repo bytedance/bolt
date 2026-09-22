@@ -48,7 +48,6 @@ using ArrayEncoding = ::lance::encodings::ArrayEncoding;
 using BufferDescriptor = NativeLanceMetadata::BufferDescriptor;
 using ColumnMetadata = ::lance::file::v2::ColumnMetadata;
 
-constexpr uint64_t kMaxDecodedPageCacheBytes = 512UL << 20;
 template <typename T>
 T readLittleEndian(const char* data);
 
@@ -2508,13 +2507,21 @@ NativeLanceDecoder::NativeLanceDecoder(
     memory::MemoryPool& pool,
     bool enableDecodedPageCache,
     std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
-    NativeLanceReadPlan::Options readPlanOptions)
+    NativeLanceReadPlan::Options readPlanOptions,
+    std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache)
     : input_(input),
       metadata_(metadata),
       pool_(pool),
       enableDecodedPageCache_(enableDecodedPageCache),
       blobResolver_(std::move(blobResolver)),
-      readPlan_(pool, readPlanOptions) {}
+      readPlan_(pool, readPlanOptions),
+      decodedPageCache_(
+          decodedPageCache != nullptr
+              ? std::move(decodedPageCache)
+              : (enableDecodedPageCache
+                     ? std::make_shared<NativeLanceDecodedPageCache>(
+                           NativeLanceDecodedPageCache::kDefaultMaxBytes)
+                     : nullptr)) {}
 
 NativeLanceDecoder::~NativeLanceDecoder() {
   cancelReadPlan();
@@ -2857,21 +2864,29 @@ bool NativeLanceDecoder::hasDecodedPhysicalPage(
     uint32_t physicalColumnIndex,
     uint64_t rowStart,
     uint64_t rowCount) const {
-  if (!enableDecodedPageCache_) {
+  if (decodedPageCache_ == nullptr) {
     return false;
   }
   const auto page = singlePageRange(physicalColumnIndex, rowStart, rowCount);
   if (!page.has_value()) {
     return false;
   }
-  return decodedPageCache_.find({physicalColumnIndex, page->pageIndex}) !=
-      decodedPageCache_.end();
+  return decodedPageCache_ != nullptr &&
+      decodedPageCache_->contains({physicalColumnIndex, page->pageIndex});
 }
 
 bool NativeLanceDecoder::shouldCacheDecodedPage(
     const TypePtr& type,
     uint32_t physicalColumnIndex,
     const PageRange& page) const {
+  if (decodedPageCache_ == nullptr) {
+    return false;
+  }
+  const NativeLanceDecodedPageCache::Key key{
+      physicalColumnIndex, page.pageIndex};
+  if (decodedPageCache_->contains(key)) {
+    return true;
+  }
   if (!enableDecodedPageCache_) {
     return false;
   }
@@ -2886,6 +2901,13 @@ bool NativeLanceDecoder::shouldCacheDecodedPage(
     return false;
   }
   if (metadata_.usesStructuralEncoding()) {
+    if (lanceStructuralPageSupportsRangeRead(
+            type,
+            {},
+            metadata_.physicalColumnChildLogicalTypes(physicalColumnIndex),
+            metadata_.pageLayout(physicalColumnIndex, page.pageIndex))) {
+      return false;
+    }
     return lanceStructuralLayoutHasCompression(
         metadata_.pageLayout(physicalColumnIndex, page.pageIndex));
   }
@@ -2899,46 +2921,16 @@ VectorPtr NativeLanceDecoder::getDecodedPage(
     std::string_view logicalType,
     uint32_t physicalColumnIndex,
     const PageRange& page) const {
-  const DecodedPageKey key{physicalColumnIndex, page.pageIndex};
-  const auto cached = decodedPageCache_.find(key);
-  if (cached != decodedPageCache_.end()) {
-    decodedPageLru_.splice(
-        decodedPageLru_.begin(), decodedPageLru_, cached->second.lruPosition);
-    return cached->second.vector;
-  }
-
-  auto decoded = decodePhysicalColumnNoCache(
-      type,
-      logicalType,
-      physicalColumnIndex,
-      page.pageRowStart,
-      page.pageRowCount);
-  const auto retainedBytes = decoded->retainedSize();
-  if (retainedBytes > kMaxDecodedPageCacheBytes) {
-    return decoded;
-  }
-  decodedPageLru_.push_front(key);
-  decodedPageCacheBytes_ += retainedBytes;
-  decodedPageCache_.emplace(
-      key,
-      DecodedPageCacheEntry{
-          .vector = decoded,
-          .retainedBytes = retainedBytes,
-          .lruPosition = decodedPageLru_.begin()});
-  evictDecodedPages();
-  return decoded;
-}
-
-void NativeLanceDecoder::evictDecodedPages() const {
-  while (decodedPageCacheBytes_ > kMaxDecodedPageCacheBytes &&
-         !decodedPageLru_.empty()) {
-    const auto key = decodedPageLru_.back();
-    const auto cached = decodedPageCache_.find(key);
-    BOLT_CHECK(cached != decodedPageCache_.end());
-    decodedPageCacheBytes_ -= cached->second.retainedBytes;
-    decodedPageCache_.erase(cached);
-    decodedPageLru_.pop_back();
-  }
+  const NativeLanceDecodedPageCache::Key key{
+      physicalColumnIndex, page.pageIndex};
+  return decodedPageCache_->getOrLoad(key, [&] {
+    return decodePhysicalColumnNoCache(
+        type,
+        logicalType,
+        physicalColumnIndex,
+        page.pageRowStart,
+        page.pageRowCount);
+  });
 }
 
 VectorPtr NativeLanceDecoder::decodeColumn(

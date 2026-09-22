@@ -66,6 +66,10 @@ class NativeLanceReaderBase {
     return readPlanOptions_;
   }
 
+  const std::shared_ptr<NativeLanceDecodedPageCache>& decodedPageCache() const {
+    return decodedPageCache_;
+  }
+
  private:
   memory::MemoryPool& pool_;
   std::shared_ptr<dwio::common::BufferedInput> input_;
@@ -73,6 +77,7 @@ class NativeLanceReaderBase {
   std::shared_ptr<const dwio::common::TypeWithId> typeWithId_;
   std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
   NativeLanceReadPlan::Options readPlanOptions_;
+  std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache_;
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
@@ -107,11 +112,22 @@ class NativeLanceRowReader : public dwio::common::RowReader {
     uint64_t end;
   };
 
+  struct PipelineState {
+    uint64_t begin;
+    uint64_t end;
+    std::unique_ptr<dwio::common::BufferedInput> input;
+    std::unique_ptr<NativeLanceDecoder> decoder;
+  };
+
   void advancePastFinishedRange();
   uint64_t capReadSize(uint64_t size) const;
   FetchResult prefetchRange(size_t rangeIndex);
   void initializePrefetchRanges();
   void markPrefetchRangesFinished(uint64_t begin, uint64_t end);
+  void prepareNextBatchPipeline(uint64_t readEnd, uint64_t requestedRows);
+  std::optional<PipelineState> takePipeline(
+      uint64_t readBegin,
+      uint64_t readEnd);
   std::optional<size_t> prefetchRangeIndex(uint64_t begin, uint64_t end) const;
   NativeLanceDecoder* prefetchedDecoderForRange(uint64_t begin, uint64_t end);
 
@@ -125,6 +141,7 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   std::vector<std::unique_ptr<dwio::common::BufferedInput>> prefetchInputs_;
   std::vector<std::unique_ptr<NativeLanceDecoder>> prefetchDecoders_;
   std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
+  std::optional<PipelineState> pipeline_;
   mutable std::mutex prefetchMutex_;
   mutable std::mutex decoderMutex_;
   size_t currentRange_{0};

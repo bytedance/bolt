@@ -18,12 +18,11 @@
 
 #include <folly/Range.h>
 
-#include <list>
 #include <mutex>
 #include <optional>
-#include <unordered_map>
 
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
+#include "bolt/dwio/lance/NativeLanceDecodedPageCache.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLanceReadPlan.h"
 #include "bolt/vector/BaseVector.h"
@@ -43,7 +42,8 @@ class NativeLanceDecoder {
       memory::MemoryPool& pool,
       bool enableDecodedPageCache = false,
       std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
-      NativeLanceReadPlan::Options readPlanOptions = {});
+      NativeLanceReadPlan::Options readPlanOptions = {},
+      std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache = nullptr);
 
   ~NativeLanceDecoder();
 
@@ -120,29 +120,6 @@ class NativeLanceDecoder {
       const std::vector<uint32_t>& arrayDimensions = {}) const;
 
  private:
-  struct DecodedPageKey {
-    uint32_t physicalColumnIndex;
-    int32_t pageIndex;
-
-    bool operator==(const DecodedPageKey& other) const {
-      return physicalColumnIndex == other.physicalColumnIndex &&
-          pageIndex == other.pageIndex;
-    }
-  };
-
-  struct DecodedPageKeyHash {
-    size_t operator()(DecodedPageKey key) const {
-      return std::hash<uint32_t>{}(key.physicalColumnIndex) ^
-          (std::hash<int32_t>{}(key.pageIndex) << 1);
-    }
-  };
-
-  struct DecodedPageCacheEntry {
-    VectorPtr vector;
-    uint64_t retainedBytes;
-    std::list<DecodedPageKey>::iterator lruPosition;
-  };
-
   struct PageRange {
     int32_t pageIndex;
     uint64_t pageRowStart;
@@ -173,7 +150,6 @@ class NativeLanceDecoder {
       std::string_view logicalType,
       uint32_t physicalColumnIndex,
       const PageRange& page) const;
-  void evictDecodedPages() const;
   void enqueuePhysicalColumn(
       const TypePtr& type,
       uint32_t physicalColumnIndex,
@@ -193,11 +169,7 @@ class NativeLanceDecoder {
   const bool enableDecodedPageCache_;
   const std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
   mutable NativeLanceReadPlan readPlan_;
-  mutable std::list<DecodedPageKey> decodedPageLru_;
-  mutable std::
-      unordered_map<DecodedPageKey, DecodedPageCacheEntry, DecodedPageKeyHash>
-          decodedPageCache_;
-  mutable uint64_t decodedPageCacheBytes_{0};
+  const std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache_;
   // Offset-dependent columns may independently schedule their second-stage
   // payload reads from decoding workers. Keep each plan mutation atomic.
   mutable std::recursive_mutex readPlanMutex_;

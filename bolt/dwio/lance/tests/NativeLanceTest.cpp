@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <future>
 #include <optional>
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
@@ -4550,6 +4551,73 @@ TEST_F(NativeLanceTest, decodesCompressedFlatRanges) {
   }
 }
 
+TEST_F(NativeLanceTest, decodedPageCacheIsSharedAcrossDecoders) {
+  auto readFile =
+      std::make_shared<InMemoryReadFile>(makeCompressedFile("zstd"));
+  auto firstInput =
+      std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  NativeLanceMetadata metadata(*firstInput, *pool_);
+  auto cache = std::make_shared<NativeLanceDecodedPageCache>(1 << 20);
+  NativeLanceDecoder first(
+      *firstInput,
+      metadata,
+      *pool_,
+      true,
+      nullptr,
+      NativeLanceReadPlan::Options{},
+      cache);
+
+  readFile->resetBytesRead();
+  const auto firstValues = first.decodeColumn(0, 2, 3);
+  EXPECT_EQ(firstValues->asFlatVector<int32_t>()->valueAt(0), 3);
+  const auto bytesAfterFirst = readFile->bytesRead();
+  EXPECT_GT(bytesAfterFirst, 0);
+  EXPECT_GT(cache->sizeBytes(), 0);
+
+  auto secondInput =
+      std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  NativeLanceMetadata secondMetadata(*secondInput, *pool_);
+  readFile->resetBytesRead();
+  NativeLanceDecoder second(
+      *secondInput,
+      secondMetadata,
+      *pool_,
+      false,
+      nullptr,
+      NativeLanceReadPlan::Options{},
+      cache);
+  const auto secondValues = second.decodeColumn(0, 3, 2);
+  EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(0), 4);
+  EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(1), 5);
+  EXPECT_EQ(readFile->bytesRead(), 0);
+}
+
+TEST_F(NativeLanceTest, decodedPageCacheCoalescesConcurrentLoads) {
+  auto cache = std::make_shared<NativeLanceDecodedPageCache>(1 << 20);
+  constexpr NativeLanceDecodedPageCache::Key kKey{3, 7};
+  folly::Baton<> loaderEntered;
+  folly::Baton<> releaseLoader;
+  std::atomic<uint32_t> loadCalls{0};
+  const auto load = [&]() -> VectorPtr {
+    ++loadCalls;
+    loaderEntered.post();
+    releaseLoader.wait();
+    return BaseVector::create(INTEGER(), 1, pool_.get());
+  };
+
+  auto first = std::async(
+      std::launch::async, [&] { return cache->getOrLoad(kKey, load); });
+  loaderEntered.wait();
+  auto second = std::async(
+      std::launch::async, [&] { return cache->getOrLoad(kKey, load); });
+  releaseLoader.post();
+
+  const auto firstVector = first.get();
+  const auto secondVector = second.get();
+  EXPECT_EQ(loadCalls, 1);
+  EXPECT_EQ(firstVector.get(), secondVector.get());
+}
+
 TEST_F(NativeLanceTest, decompressedCacheCanGrowWithFileSize) {
   EnvVarGuard guard("BOLT_LANCE_DECOMPRESSED_CACHE_BYTES", std::nullopt);
   auto input = std::make_unique<dwio::common::BufferedInput>(
@@ -5238,6 +5306,51 @@ TEST_F(NativeLanceTest, rowReaderPrefetchSubmitsDirectInputPlan) {
   ASSERT_NE(timestamps, nullptr);
   EXPECT_EQ(timestamps->valueAt(0), Timestamp::fromMicros(-1));
   EXPECT_EQ(timestamps->valueAt(1), Timestamp::fromMicros(0));
+}
+
+TEST_F(NativeLanceTest, rowReaderPipelinesNextDirectInputBatch) {
+  auto readFile =
+      std::make_shared<CountingReadFile>(makeBooleanTimestampFile());
+  auto ioStats = std::make_shared<io::IoStatistics>();
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  readerOptions.setLoadQuantum(64 * 1024);
+  auto input = std::make_unique<dwio::common::DirectBufferedInput>(
+      readFile,
+      dwio::common::MetricsLog::voidLog(),
+      1,
+      nullptr,
+      1,
+      ioStats,
+      nullptr,
+      readerOptions,
+      nullptr);
+  NativeLanceReader reader(std::move(input), readerOptions);
+
+  dwio::common::RowReaderOptions rowReaderOptions;
+  rowReaderOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+      reader.rowType(), std::vector<std::string>{"ts"}));
+  rowReaderOptions.setMaxBatchBytes(40);
+  auto rowReader = reader.createRowReader(rowReaderOptions);
+  auto units = rowReader->prefetchUnits();
+  ASSERT_TRUE(units.has_value());
+  ASSERT_EQ(units->size(), 3);
+
+  const auto readsAfterMetadata = readFile->readCalls();
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result), 2);
+  EXPECT_EQ(readFile->readCalls(), readsAfterMetadata + 1);
+  EXPECT_EQ(
+      (*units)[1].prefetch(),
+      dwio::common::RowReader::FetchResult::kAlreadyFetched);
+
+  EXPECT_EQ(rowReader->next(20, result), 2);
+  EXPECT_EQ(readFile->readCalls(), readsAfterMetadata + 2);
+  EXPECT_EQ(
+      (*units)[2].prefetch(),
+      dwio::common::RowReader::FetchResult::kAlreadyFetched);
+
+  EXPECT_EQ(rowReader->next(20, result), 1);
+  EXPECT_EQ(readFile->readCalls(), readsAfterMetadata + 3);
 }
 
 TEST_F(NativeLanceTest, rowReaderOnlyReadsProjectedColumn) {

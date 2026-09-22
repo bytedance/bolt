@@ -266,7 +266,9 @@ NativeLanceReaderBase::NativeLanceReaderBase(
       metadata_(*input_, pool_, std::move(typeAdapter)),
       typeWithId_(dwio::common::TypeWithId::create(metadata_.rowType())),
       blobResolver_(std::move(blobResolver)),
-      readPlanOptions_(makeReadPlanOptions(options)) {
+      readPlanOptions_(makeReadPlanOptions(options)),
+      decodedPageCache_(std::make_shared<NativeLanceDecodedPageCache>(
+          NativeLanceDecodedPageCache::kDefaultMaxBytes)) {
   BOLT_CHECK(
       !options.isFileColumnNamesReadAsLowerCase(),
       "The Lance format does not support reading column names as lowercase");
@@ -283,7 +285,8 @@ NativeLanceRowReader::NativeLanceRowReader(
           readerBase_->pool(),
           false,
           readerBase_->blobResolver(),
-          readerBase_->readPlanOptions()) {
+          readerBase_->readPlanOptions(),
+          readerBase_->decodedPageCache()) {
   maxBatchBytes_ = options_.getMaxBatchBytes();
   estimatedBytesPerRow_ =
       estimateReadBytesPerRow(readerBase_->metadata().rowType(), options_);
@@ -312,6 +315,10 @@ NativeLanceRowReader::NativeLanceRowReader(
 NativeLanceRowReader::~NativeLanceRowReader() {
   decoder_.cancelReadPlan();
   std::lock_guard<std::mutex> lock(prefetchMutex_);
+  if (pipeline_.has_value()) {
+    pipeline_->decoder->cancelReadPlan();
+    pipeline_.reset();
+  }
   for (auto& decoder : prefetchDecoders_) {
     if (decoder != nullptr) {
       decoder->cancelReadPlan();
@@ -400,6 +407,14 @@ dwio::common::RowReader::FetchResult NativeLanceRowReader::prefetchRange(
     size_t rangeIndex) {
   BOLT_CHECK_LT(rangeIndex, prefetchRanges_.size());
   {
+    std::lock_guard<std::mutex> lock(decoderMutex_);
+    const auto& range = prefetchRanges_[rangeIndex];
+    if (pipeline_.has_value() && pipeline_->begin == range.begin &&
+        pipeline_->end == range.end) {
+      return FetchResult::kAlreadyFetched;
+    }
+  }
+  {
     std::lock_guard<std::mutex> lock(prefetchMutex_);
     auto& status = prefetchStatuses_[rangeIndex];
     if (status == FetchStatus::kFinished) {
@@ -421,9 +436,10 @@ dwio::common::RowReader::FetchResult NativeLanceRowReader::prefetchRange(
           *prefetchInputs_[rangeIndex],
           readerBase_->metadata(),
           readerBase_->pool(),
-          false,
+          true,
           readerBase_->blobResolver(),
-          readerBase_->readPlanOptions());
+          readerBase_->readPlanOptions(),
+          readerBase_->decodedPageCache());
     }
   }
 
@@ -475,6 +491,70 @@ void NativeLanceRowReader::markPrefetchRangesFinished(
       prefetchBatons_[i]->post();
     }
   }
+}
+
+void NativeLanceRowReader::prepareNextBatchPipeline(
+    uint64_t readEnd,
+    uint64_t requestedRows) {
+  if (readerBase_->input().supportSyncLoad()) {
+    return;
+  }
+  uint64_t nextBegin = 0;
+  uint64_t nextEnd = 0;
+  if (readEnd < rowRanges_[currentRange_].second) {
+    nextBegin = readEnd;
+    nextEnd = rowRanges_[currentRange_].second;
+  } else if (currentRange_ + 1 < rowRanges_.size()) {
+    nextBegin = rowRanges_[currentRange_ + 1].first;
+    nextEnd = rowRanges_[currentRange_ + 1].second;
+  } else {
+    return;
+  }
+  const auto rows = capReadSize(std::min(requestedRows, nextEnd - nextBegin));
+  if (rows == 0) {
+    return;
+  }
+  if (const auto existing = prefetchRangeIndex(nextBegin, nextBegin + rows);
+      existing.has_value()) {
+    std::lock_guard<std::mutex> lock(prefetchMutex_);
+    if (prefetchStatuses_[*existing] != FetchStatus::kNotStarted) {
+      return;
+    }
+  }
+  auto input = readerBase_->input().clone();
+  auto decoder = std::make_unique<NativeLanceDecoder>(
+      *input,
+      readerBase_->metadata(),
+      readerBase_->pool(),
+      true,
+      readerBase_->blobResolver(),
+      readerBase_->readPlanOptions(),
+      readerBase_->decodedPageCache());
+  try {
+    rootColumnReader_->planRead(*decoder, nextBegin, rows);
+    pipeline_ = PipelineState{
+        .begin = nextBegin,
+        .end = nextBegin + rows,
+        .input = std::move(input),
+        .decoder = std::move(decoder)};
+  } catch (...) {
+    decoder->cancelReadPlan();
+  }
+}
+
+std::optional<NativeLanceRowReader::PipelineState>
+NativeLanceRowReader::takePipeline(uint64_t readBegin, uint64_t readEnd) {
+  if (!pipeline_.has_value()) {
+    return std::nullopt;
+  }
+  if (pipeline_->begin == readBegin && pipeline_->end == readEnd) {
+    auto result = std::move(pipeline_);
+    pipeline_.reset();
+    return result;
+  }
+  pipeline_->decoder->cancelReadPlan();
+  pipeline_.reset();
+  return std::nullopt;
 }
 
 std::optional<size_t> NativeLanceRowReader::prefetchRangeIndex(
@@ -533,12 +613,15 @@ uint64_t NativeLanceRowReader::next(
   const auto readBegin = currentRow_;
   const auto readEnd = readBegin + rowsToRead;
   const auto& fileType = readerBase_->metadata().rowType();
-  NativeLanceDecoder* const decoder =
-      prefetchedDecoderForRange(readBegin, readEnd);
+  std::lock_guard<std::mutex> decoderLock(decoderMutex_);
+  auto pipeline = takePipeline(readBegin, readEnd);
+  NativeLanceDecoder* const decoder = pipeline.has_value()
+      ? pipeline->decoder.get()
+      : prefetchedDecoderForRange(readBegin, readEnd);
+  prepareNextBatchPipeline(readEnd, size);
   auto& readDecoder = decoder == nullptr ? decoder_ : *decoder;
   if (const auto& scanSpec = options_.getScanSpec();
       scanSpec && hasFilter(*scanSpec) && supportsSelectiveRead(*scanSpec)) {
-    std::lock_guard<std::mutex> lock(decoderMutex_);
     result = readSelective(
         readDecoder,
         fileType,
@@ -547,7 +630,6 @@ uint64_t NativeLanceRowReader::next(
         static_cast<vector_size_t>(rowsToRead),
         readerBase_->pool());
   } else {
-    std::lock_guard<std::mutex> lock(decoderMutex_);
     result = rootColumnReader_->read(
         readDecoder, currentRow_, rowsToRead, readerBase_->pool());
   }
