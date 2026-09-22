@@ -173,9 +173,22 @@ targets do not link `lance_file_ffi`; cross-version performance comparison uses
 the standalone current-main Rust harness below.
 
 The C++ benchmark exposes independent `parquet` and `native` modes and forces
-every projected child vector to load. Use a batch size of 1,024 and the
-repository's `bolt-benchmark-compare --rounds 7` wrapper for alternating runs,
-paired sign-flip tests, and Holm correction.
+every projected child vector to load. The companion generator creates a
+deterministic 43-column Lance v2.2 Zstandard file and a Zstandard Parquet file
+with equivalent Bolt-visible values:
+
+    bolt/dwio/lance/tests/generate_lance_benchmark_data.py \
+      /tmp/bolt-lance-all-types \
+      --rows 65536 \
+      --batch-rows 65536 \
+      --lance-repo /path/to/lance
+
+The generated manifest records paths, file sizes, projected column count, and
+the row-count/checksum oracles. It also lists the logical storage adaptations
+needed because Bolt's Parquet reader does not expose every Arrow logical type
+supported by Lance. Blob v2 storage kinds are intentionally excluded because
+they require a dataset/sidecar resolver and have no equivalent Parquet
+representation; deterministic correctness fixtures cover them instead.
 
 To compare against an arbitrary current Lance checkout without linking Rust
 into a production or benchmark target, build the standalone test harness and
@@ -193,3 +206,27 @@ affinity when comparing equal CPU budgets. The harness performs a full-column
 materializing scan and emits Folly-compatible JSON, so it can be passed
 directly to bolt-benchmark-compare. The reported metric is picoseconds per row,
 matching the work-unit normalization performed by Folly BENCHMARK_MULTI.
+
+`run_lance_reader_benchmark_suite.py` wraps the native, Parquet, and Rust
+executables behind one JSON protocol. Each invocation performs exactly one
+scan for each combination of full scan or approximately 1% filtering and 1 or
+16 pinned CPUs. It fixes the row batch size at 1,024 and validates all four
+scans against the manifest. For example:
+
+    python3 bolt/dwio/lance/tests/run_lance_reader_benchmark_suite.py native \
+      --manifest /tmp/bolt-lance-all-types/manifest.json \
+      --native-benchmark \
+        _build/NativeWithFfi/bolt/dwio/lance/tests/bolt_dwio_native_lance_reader_benchmark
+
+Pass the suite commands to `bolt-benchmark-compare --rounds 7`. The tool
+alternates execution order, applies an exact paired sign-flip test on log
+ratios, corrects the four case p-values with Holm's method, and writes a
+self-contained HTML report plus companion JSON and per-run artifacts.
+
+The filter comparison has intentionally different execution semantics. Bolt's
+native reader applies the `ScanSpec` filter before materializing surviving
+projected rows. The current Rust `FileReader` API accepts only an opaque filter
+expression and does not execute this predicate in the core decoder, so the
+standalone Rust harness decodes all columns and applies Arrow's
+`filter_record_batch` afterward. Reports must retain this distinction rather
+than describe the Rust result as predicate pushdown.

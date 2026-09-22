@@ -22,10 +22,12 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <string_view>
 
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/lance/NativeLanceReader.h"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
+#include "bolt/type/Filter.h"
 
 namespace bytedance::bolt::lance::reader::benchmark {
 namespace {
@@ -45,13 +47,38 @@ std::string readerMode = [] {
   const auto* mode = std::getenv("BOLT_LANCE_READER_MODE");
   return mode == nullptr ? std::string{} : std::string(mode);
 }();
+std::string scenario = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_SCENARIO");
+  return value == nullptr ? std::string("full_scan") : std::string(value);
+}();
+std::string filterColumn = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_FILTER_COLUMN");
+  return value == nullptr ? std::string("filter_key") : std::string(value);
+}();
+std::string checksumColumn = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_CHECKSUM_COLUMN");
+  return value == nullptr ? std::string("row_id") : std::string(value);
+}();
 
-std::optional<uint64_t> expectedRows = []() -> std::optional<uint64_t> {
-  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_EXPECTED_ROWS");
-  if (value == nullptr) {
-    return std::nullopt;
-  }
-  return std::stoull(value);
+std::optional<uint64_t> optionalEnvU64(const char* name) {
+  const auto* value = std::getenv(name);
+  return value == nullptr ? std::nullopt
+                          : std::optional<uint64_t>(std::stoull(value));
+}
+
+std::optional<uint64_t> expectedRows =
+    optionalEnvU64("BOLT_LANCE_BENCHMARK_EXPECTED_ROWS");
+std::optional<uint64_t> expectedOutputRows =
+    optionalEnvU64("BOLT_LANCE_BENCHMARK_EXPECTED_OUTPUT_ROWS");
+std::optional<uint64_t> expectedChecksum =
+    optionalEnvU64("BOLT_LANCE_BENCHMARK_EXPECTED_CHECKSUM");
+int64_t filterMin = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_FILTER_MIN");
+  return value == nullptr ? 0 : std::stoll(value);
+}();
+int64_t filterMax = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_FILTER_MAX");
+  return value == nullptr ? 0 : std::stoll(value);
 }();
 size_t projectedColumnCount = [] {
   const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_COLUMNS");
@@ -87,14 +114,30 @@ std::vector<std::string> projectedColumns(const RowTypePtr& rowType) {
 }
 
 void materialize(const VectorPtr& result) {
-  const auto* row = result->asUnchecked<RowVector>();
+  auto* row = result->asUnchecked<RowVector>();
+  row->loadedVector();
   for (size_t i = 0; i < row->childrenSize(); ++i) {
-    const auto loaded = row->childAt(i)->loadedVector();
-    folly::doNotOptimizeAway(loaded->retainedSize());
+    folly::doNotOptimizeAway(row->childAt(i)->retainedSize());
   }
 }
 
-uint64_t scan(dwio::common::Reader& reader) {
+bool usesFilter() {
+  return scenario == "filter_1pct_all_types" || scenario == "filter";
+}
+
+bool usesChecksum() {
+  return scenario == "full_scan_all_types" || usesFilter() ||
+      expectedChecksum.has_value();
+}
+
+struct ScanResult {
+  uint64_t sourceRows;
+  uint64_t inputRows;
+  uint64_t outputRows;
+  uint64_t checksum;
+};
+
+ScanResult scan(dwio::common::Reader& reader) {
   const auto names = projectedColumns(reader.rowType());
   auto selector =
       std::make_shared<dwio::common::ColumnSelector>(reader.rowType(), names);
@@ -107,8 +150,21 @@ uint64_t scan(dwio::common::Reader& reader) {
   auto scanSpec = std::make_shared<common::ScanSpec>("root");
   for (size_t i = 0; i < names.size(); ++i) {
     const auto fileColumn = reader.rowType()->getChildIdx(names[i]);
-    scanSpec->addFieldRecursively(
+    auto* field = scanSpec->addFieldRecursively(
         names[i], *reader.rowType()->childAt(fileColumn), i);
+    // The benchmark consumes every projected column in the current batch.
+    // Request eager extraction so lazy loaders cannot outlive their row group
+    // when a selective reader advances across row groups.
+    field->setExtractValues(true);
+  }
+  if (usesFilter()) {
+    BOLT_USER_CHECK_LE(
+        filterMin, filterMax, "benchmark filter minimum exceeds maximum");
+    auto* filter = scanSpec->childByName(filterColumn);
+    BOLT_USER_CHECK_NOT_NULL(
+        filter, "benchmark filter column '{}' is not projected", filterColumn);
+    filter->setFilter(
+        std::make_unique<common::BigintRange>(filterMin, filterMax, false));
   }
   options.setScanSpec(std::move(scanSpec));
   auto rows = reader.createRowReader(options);
@@ -118,27 +174,65 @@ uint64_t scan(dwio::common::Reader& reader) {
   }
   VectorPtr result = BaseVector::create(
       selector->buildSelectedReordered(), 0, readerPool.get());
-  uint64_t count = 0;
+  BOLT_USER_CHECK(
+      !usesChecksum() || reader.rowType()->containsChild(checksumColumn),
+      "benchmark checksum column '{}' is missing",
+      checksumColumn);
+  uint64_t inputRows = 0;
+  uint64_t outputRows = 0;
+  uint64_t checksum = 0;
   uint64_t batches = 0;
   while (const auto scanned = rows->next(batchSize, result)) {
-    count += scanned;
+    inputRows += scanned;
+    outputRows += result->size();
     ++batches;
     if (!skipMaterialize) {
       materialize(result);
+    }
+    if (usesChecksum()) {
+      const auto outputChecksumChannel =
+          result->type()->asRow().getChildIdx(checksumColumn);
+      BOLT_USER_CHECK_GE(
+          outputChecksumChannel,
+          0,
+          "benchmark checksum column '{}' is not projected",
+          checksumColumn);
+      const auto* values = result->asUnchecked<RowVector>()
+                               ->childAt(outputChecksumChannel)
+                               ->asUnchecked<SimpleVector<int64_t>>();
+      for (vector_size_t row = 0; row < result->size(); ++row) {
+        BOLT_USER_CHECK(
+            !values->isNullAt(row),
+            "benchmark checksum column '{}' contains nulls",
+            checksumColumn);
+        checksum += static_cast<uint64_t>(values->valueAt(row));
+      }
     }
   }
   if (printStats) {
     dwio::common::RuntimeStatistics stats;
     rows->updateRuntimeStats(stats);
     std::cerr << "BOLT_LANCE_BENCHMARK_STATS mode=" << readerMode
-              << " batches=" << batches
+              << " scenario=" << scenario << " batches=" << batches
+              << " input_rows=" << inputRows << " output_rows=" << outputRows
+              << " checksum=" << checksum
               << " decode_ns=" << stats.decodeTimeNs - beforeStats.decodeTimeNs
               << "\n";
   }
+  const auto sourceRows = reader.numberOfRows().value_or(inputRows);
   if (expectedRows.has_value()) {
-    BOLT_CHECK_EQ(count, expectedRows.value());
+    BOLT_CHECK_EQ(sourceRows, expectedRows.value());
   }
-  return count;
+  if (!usesFilter()) {
+    BOLT_CHECK_EQ(inputRows, sourceRows);
+  }
+  if (expectedOutputRows.has_value()) {
+    BOLT_CHECK_EQ(outputRows, expectedOutputRows.value());
+  }
+  if (expectedChecksum.has_value()) {
+    BOLT_CHECK_EQ(checksum, expectedChecksum.value());
+  }
+  return {sourceRows, inputRows, outputRows, checksum};
 }
 
 uint64_t nativeReader(uint32_t iterations) {
@@ -146,7 +240,7 @@ uint64_t nativeReader(uint32_t iterations) {
   for (uint32_t i = 0; i < iterations; ++i) {
     dwio::common::ReaderOptions options(readerPool.get());
     NativeLanceReader reader(open(lanceFilePath), options);
-    rows += scan(reader);
+    rows += scan(reader).sourceRows;
     if (printStats) {
       const auto stats = reader.debugStats();
       std::cerr << "BOLT_LANCE_CACHE_STATS mode=native"
@@ -165,7 +259,7 @@ uint64_t parquetReader(uint32_t iterations) {
   for (uint32_t i = 0; i < iterations; ++i) {
     dwio::common::ReaderOptions options(readerPool.get());
     parquet::ParquetReader reader(open(parquetFilePath), options);
-    rows += scan(reader);
+    rows += scan(reader).sourceRows;
   }
   return rows;
 }
@@ -192,6 +286,13 @@ int main(int argc, char** argv) {
     std::cerr << "set BOLT_LANCE_BENCHMARK_FILE, "
                  "BOLT_LANCE_BENCHMARK_PARQUET_FILE for parquet mode, and set "
                  "BOLT_LANCE_READER_MODE to native or parquet\n";
+    return 1;
+  }
+  if (scenario != "full_scan" && scenario != "full_scan_all_types" &&
+      scenario != "filter" && scenario != "filter_1pct_all_types") {
+    std::cerr << "BOLT_LANCE_BENCHMARK_SCENARIO must be 'full_scan', "
+                 "'full_scan_all_types', 'filter', or "
+                 "'filter_1pct_all_types'\n";
     return 1;
   }
   bytedance::bolt::memory::MemoryManager::initialize({});
