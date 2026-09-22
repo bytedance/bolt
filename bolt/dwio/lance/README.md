@@ -176,10 +176,10 @@ every projected child vector to load. Use a batch size of 1,024 and the
 repository's `bolt-benchmark-compare --rounds 7` wrapper for alternating runs,
 paired sign-flip tests, and Holm correction.
 
-The rust mode above uses the packaged compatibility FFI. To compare against an
-arbitrary current Lance checkout without linking Rust into a production target,
-build the standalone test harness and use the printed executable as the
-baseline command:
+The optional differential test uses the packaged compatibility FFI. To compare
+against an arbitrary current Lance checkout without linking Rust into a
+production or benchmark target, build the standalone test harness and use the
+printed executable as the baseline command:
 
     bolt/dwio/lance/tests/run_current_rust_reader_benchmark.py \
       --lance-repo /path/to/lance --prepare-only
