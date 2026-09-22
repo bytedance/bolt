@@ -65,16 +65,6 @@ bool testFilterRow(
   }
 }
 
-bool supportsSelectiveRead(const common::ScanSpec& scanSpec) {
-  for (const auto& child : scanSpec.children()) {
-    if (!child->children().empty() ||
-        (child->isConstant() && child->filter() != nullptr)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 NativeLanceReadPlan::Options makeReadPlanOptions(
     const dwio::common::ReaderOptions& options) {
   BOLT_CHECK_GT(options.loadQuantum(), 0);
@@ -84,13 +74,46 @@ NativeLanceReadPlan::Options makeReadPlanOptions(
       .maxInFlightBytes = static_cast<uint64_t>(options.maxCoalesceBytes())};
 }
 
-bool hasFilter(const common::ScanSpec& scanSpec) {
+bool testScanSpecRow(
+    const BaseVector& vector,
+    const common::ScanSpec& scanSpec,
+    vector_size_t row) {
+  if (vector.isNullAt(row)) {
+    return scanSpec.testNull();
+  }
+  if (scanSpec.filter() != nullptr &&
+      !testFilterRow(vector, *scanSpec.filter(), row)) {
+    return false;
+  }
+  if (vector.typeKind() != TypeKind::ROW) {
+    return true;
+  }
+
+  const auto* values = vector.wrappedVector()->as<RowVector>();
+  BOLT_CHECK_NOT_NULL(values);
+  const auto& rowType = vector.type()->asRow();
+  const auto nestedRow = vector.wrappedIndex(row);
   for (const auto& child : scanSpec.children()) {
-    if (child->filter() != nullptr) {
-      return true;
+    if (!child->hasFilter()) {
+      continue;
+    }
+    if (child->isConstant()) {
+      if (!testScanSpecRow(*child->constantValue(), *child, 0)) {
+        return false;
+      }
+      continue;
+    }
+    const auto index = rowType.getChildIdx(child->fieldName());
+    BOLT_CHECK_GE(
+        index,
+        0,
+        "Nested Lance filter field '{}' is missing",
+        child->fieldName());
+    if (!testScanSpecRow(*values->childAt(index), *child, nestedRow)) {
+      return false;
     }
   }
-  return false;
+  return true;
 }
 
 uint64_t estimateTypeBytesPerRow(const TypePtr& type) {
@@ -176,24 +199,29 @@ VectorPtr readSelective(
   // Filter columns are decoded first. Every later filter sees only rows that
   // passed the earlier filters, allowing its I/O to shrink to matching ranges.
   for (const auto& child : scanSpec.children()) {
-    if (child->filter() == nullptr || child->isConstant()) {
+    if (!child->hasFilter()) {
       continue;
     }
-    const auto columnIndex = fileType->getChildIdx(child->fieldName());
-    auto values =
-        decoder.decodeSelectedRows(columnIndex, batchRowStart, selectedRows);
+    const auto columnIndex = child->isConstant()
+        ? std::optional<uint32_t>{}
+        : std::make_optional<uint32_t>(
+              fileType->getChildIdx(child->fieldName()));
+    auto values = child->isConstant()
+        ? BaseVector::wrapInConstant(
+              selectedRows.size(), 0, child->constantValue())
+        : decoder.decodeSelectedRows(*columnIndex, batchRowStart, selectedRows);
     const auto inputRows = selectedRows;
     RowSet passingRows{memory::StlAllocator<vector_size_t>(&pool)};
     passingRows.reserve(selectedRows.size());
     for (vector_size_t row = 0; row < values->size(); ++row) {
-      if (testFilterRow(*values, *child->filter(), row)) {
+      if (testScanSpecRow(*values, *child, row)) {
         passingRows.push_back(selectedRows[row]);
       }
     }
     selectedRows = std::move(passingRows);
-    if (child->projectOut()) {
+    if (child->projectOut() && columnIndex.has_value()) {
       decodedFilterColumns.emplace(
-          columnIndex, DecodedFilterColumn(inputRows, std::move(values)));
+          *columnIndex, DecodedFilterColumn(inputRows, std::move(values)));
     }
     if (selectedRows.empty()) {
       break;
@@ -346,7 +374,7 @@ NativeLanceRowReader::NativeLanceRowReader(
   auto requiredColumns = rootColumnReader_->fileColumnIndices();
   if (const auto& scanSpec = options_.getScanSpec()) {
     for (const auto& child : scanSpec->children()) {
-      if (!child->isConstant() && child->filter() != nullptr) {
+      if (!child->isConstant() && child->hasFilter()) {
         requiredColumns.push_back(
             readerBase_->metadata().rowType()->getChildIdx(child->fieldName()));
       }
@@ -670,7 +698,7 @@ uint64_t NativeLanceRowReader::next(
   prepareNextBatchPipeline(readEnd, size);
   auto& readDecoder = decoder == nullptr ? decoder_ : *decoder;
   if (const auto& scanSpec = options_.getScanSpec();
-      scanSpec && hasFilter(*scanSpec) && supportsSelectiveRead(*scanSpec)) {
+      scanSpec && scanSpec->hasFilter()) {
     result = readSelective(
         readDecoder,
         fileType,

@@ -4041,6 +4041,77 @@ TEST_F(NativeLanceTest, rowReaderAppliesScanSpecFilter) {
   }
 }
 
+TEST_F(NativeLanceTest, rowReaderAppliesNestedStructFilter) {
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(makePackedStructFile()), *pool_);
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(std::move(input), readerOptions);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* packed =
+      scanSpec->addFieldRecursively("packed", *reader.rowType()->childAt(0), 0);
+  packed->childByName("x")->setFilter(
+      std::make_unique<common::BigintRange>(101, 102, false));
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  ASSERT_EQ(result->size(), 2);
+  const auto& packedValues = result->as<RowVector>()->childAt(0);
+  const auto* rows = packedValues->wrappedVector()->as<RowVector>();
+  ASSERT_NE(rows, nullptr);
+  const auto* x = rows->childAt(0)->asFlatVector<int64_t>();
+  const auto* y = rows->childAt(1)->asFlatVector<int32_t>();
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(y, nullptr);
+  EXPECT_EQ(x->valueAt(packedValues->wrappedIndex(0)), 101);
+  EXPECT_EQ(x->valueAt(packedValues->wrappedIndex(1)), 102);
+  EXPECT_EQ(y->valueAt(packedValues->wrappedIndex(0)), 201);
+  EXPECT_EQ(y->valueAt(packedValues->wrappedIndex(1)), 202);
+}
+
+TEST_F(NativeLanceTest, filterOnlyNestedStructFieldFiltersRows) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(
+      openFile("packed_fixed_v2_2.lance", *pool_), readerOptions);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* packed = scanSpec->getOrCreateChild("packed");
+  packed->getOrCreateChild("x")->setFilter(
+      std::make_unique<common::BigintRange>(1, 2, false));
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result), 20);
+  EXPECT_EQ(result->type()->toString(), "ROW<>");
+  EXPECT_EQ(result->size(), 2);
+}
+
+TEST_F(NativeLanceTest, rowReaderAppliesNullableStructFilter) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(
+      openFile("packed_fixed_v2_2.lance", *pool_), readerOptions);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* packed =
+      scanSpec->addFieldRecursively("packed", *reader.rowType()->childAt(0), 0);
+  packed->setFilter(std::make_unique<common::IsNull>());
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result), 20);
+  ASSERT_EQ(result->size(), 2);
+  const auto& packedValues = result->as<RowVector>()->childAt(0);
+  EXPECT_TRUE(packedValues->isNullAt(0));
+  EXPECT_TRUE(packedValues->isNullAt(1));
+}
+
 TEST_F(NativeLanceTest, rowReaderAppliesMutationDeletionVector) {
   dwio::common::ReaderOptions readerOptions(pool_.get());
   NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);

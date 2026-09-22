@@ -73,6 +73,28 @@ TEST_F(NativeLanceTableScanTest, projectionFilterAndAggregation) {
       "SELECT sum(a) FROM tmp");
 }
 
+TEST_F(NativeLanceTableScanTest, filterOnlyNestedStructField) {
+  const auto path = example("packed_fixed_v2_2.lance");
+  const auto hiveSplits =
+      makeHiveConnectorSplits(path, 1, dwio::common::FileFormat::LANCE);
+  const std::vector<std::shared_ptr<connector::ConnectorSplit>> splits(
+      hiveSplits.begin(), hiveSplits.end());
+  const auto fileType =
+      ROW({"packed"}, {ROW({"x", "y"}, {INTEGER(), BIGINT()})});
+
+  assertQuery(
+      PlanBuilder(pool())
+          .tableScan(
+              ROW({}, {}),
+              {"packed.x BETWEEN 100::INTEGER AND 102::INTEGER"},
+              "",
+              fileType)
+          .singleAggregation({}, {"count(0)"})
+          .planNode(),
+      splits,
+      "SELECT 3");
+}
+
 TEST_F(NativeLanceTableScanTest, multipleSplitsDoNotDuplicatePages) {
   const auto path = example("v2_0_self_described.lance");
   const auto expected = makeRowVector(
