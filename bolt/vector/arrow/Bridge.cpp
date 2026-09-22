@@ -788,7 +788,7 @@ struct Selection {
   vector_size_t total_;
 };
 
-// Visit selected, non-null flat timestamps with their output positions.
+// Visit selected flat timestamps, replacing null storage with zero.
 template <typename WriteValue>
 void gatherTimestampValues(
     const BaseVector& vec,
@@ -801,6 +801,8 @@ void gatherTimestampValues(
     rows.apply([&](vector_size_t row) {
       if (!bits::isBitNull(nulls, row)) {
         writeValue(output, values[row]);
+      } else {
+        writeValue(output, Timestamp(0, 0));
       }
       ++output;
     });
@@ -1136,7 +1138,7 @@ void exportValues(
         break;
       case TypeKind::TIMESTAMP:
         holder.setBuffer(
-            1, AlignedBuffer::allocate<uint128_t>(vec.size(), pool));
+            1, AlignedBuffer::allocate<uint128_t>(vec.size(), pool, 0));
         break;
       default:
         BOLT_UNREACHABLE();

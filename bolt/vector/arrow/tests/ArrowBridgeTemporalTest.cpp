@@ -14,6 +14,12 @@
  * limitations under the License.
  */
 
+#include <arrow/array.h>
+#include <arrow/c/bridge.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/api.h>
+
+#include "bolt/common/base/tests/ArrowTestUtils.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
@@ -109,6 +115,83 @@ TEST_F(ArrowBridgeTemporalTest, standardTimestampBoundariesAndOverflow) {
     ArrowSchema schema{};
     schema.format = format;
     EXPECT_THROW(importFromArrow(schema), BoltUserError);
+  }
+}
+
+TEST_F(ArrowBridgeTemporalTest, nullTimestampStorage) {
+  auto mixed = makeNullableFlatVector<Timestamp>(
+      {Timestamp(10, 0), std::nullopt, Timestamp(-1, 0), std::nullopt});
+  // Null storage must not be converted, even if it exceeds the Arrow range.
+  mixed->mutableRawValues()[1] = Timestamp::max();
+  mixed->mutableRawValues()[3] = Timestamp::max();
+  auto allNull = makeNullableFlatVector<Timestamp>(
+      {std::nullopt, std::nullopt, std::nullopt});
+  auto noValues = std::make_shared<FlatVector<Timestamp>>(
+      pool(),
+      TIMESTAMP(),
+      allocateNulls(3, pool(), bits::kNull),
+      3,
+      nullptr,
+      std::vector<BufferPtr>{});
+  const std::vector<VectorPtr> inputs{
+      mixed,
+      allNull,
+      noValues,
+      BaseVector::wrapInDictionary(
+          nullptr, makeIndices({3, 0, 1, 2}), 4, mixed),
+      BaseVector::createNullConstant(TIMESTAMP(), 3, pool())};
+  auto checkNullStorage = [](const std::shared_ptr<arrow::Array>& array) {
+    const auto* values =
+        reinterpret_cast<const int64_t*>(array->data()->buffers[1]->data());
+    for (int64_t i = 0; i < array->length(); ++i) {
+      if (array->IsNull(i)) {
+        EXPECT_EQ(values[i], 0) << "row " << i;
+      }
+    }
+  };
+  for (auto unit :
+       {TimestampUnit::kSecond,
+        TimestampUnit::kMilli,
+        TimestampUnit::kMicro,
+        TimestampUnit::kNano}) {
+    for (bool ipc : {false, true}) {
+      ArrowOptions options;
+      options.timestampUnit = unit;
+      options.flattenDictionary = true;
+      options.flattenConstant = true;
+      options.exportToArrowIPC = ipc;
+      for (const auto& input : inputs) {
+        SCOPED_TRACE(input->toString());
+        ArrowData data;
+        exportVector(input, data, options);
+        assertEqualVectors(
+            input,
+            importFromArrowAsViewer(data.schema, data.array, options, pool()));
+        EXPECT_OK_AND_ASSIGN(
+            auto array, arrow::ImportArray(&data.array, &data.schema));
+        checkNullStorage(array);
+        if (ipc) {
+          auto batch = arrow::RecordBatch::Make(
+              arrow::schema({arrow::field("ts", array->type())}),
+              array->length(),
+              {array});
+          EXPECT_OK_AND_ASSIGN(
+              auto sink, arrow::io::BufferOutputStream::Create());
+          EXPECT_OK_AND_ASSIGN(
+              auto writer, arrow::ipc::MakeStreamWriter(sink, batch->schema()));
+          ASSERT_OK(writer->WriteRecordBatch(*batch));
+          ASSERT_OK(writer->Close());
+          EXPECT_OK_AND_ASSIGN(auto bytes, sink->Finish());
+          auto source = std::make_shared<arrow::io::BufferReader>(bytes);
+          EXPECT_OK_AND_ASSIGN(
+              auto reader, arrow::ipc::RecordBatchStreamReader::Open(source));
+          EXPECT_OK_AND_ASSIGN(auto restored, reader->Next());
+          ASSERT_NE(restored, nullptr);
+          EXPECT_TRUE(restored->Equals(*batch));
+          checkNullStorage(restored->column(0));
+        }
+      }
+    }
   }
 }
 
