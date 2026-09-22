@@ -247,6 +247,30 @@ TypePtr primitiveType(std::string_view logicalType) {
         "Lance Decimal256 cannot be represented losslessly by Bolt: {}",
         logicalType);
   }
+  if (logicalType == "union" || logicalType.rfind("union:", 0) == 0) {
+    BOLT_UNSUPPORTED(
+        "Lance Union cannot be represented losslessly by Bolt: {}",
+        logicalType);
+  }
+  if (logicalType == "run_end_encoded" ||
+      logicalType.rfind("run_end_encoded:", 0) == 0) {
+    BOLT_UNSUPPORTED(
+        "Lance RunEndEncoded cannot be represented losslessly by Bolt: {}",
+        logicalType);
+  }
+  if (logicalType == "list_view" || logicalType.rfind("list_view:", 0) == 0 ||
+      logicalType == "large_list_view" ||
+      logicalType.rfind("large_list_view:", 0) == 0) {
+    BOLT_UNSUPPORTED(
+        "Lance ListView cannot be represented without changing offset "
+        "semantics: {}",
+        logicalType);
+  }
+  if (logicalType == "interval" || logicalType.rfind("interval:", 0) == 0) {
+    BOLT_UNSUPPORTED(
+        "Lance Interval has no stable file logical type contract: {}",
+        logicalType);
+  }
   BOLT_UNSUPPORTED("Unsupported Lance logical type: {}", logicalType);
 }
 

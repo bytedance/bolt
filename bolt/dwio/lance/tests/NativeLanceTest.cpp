@@ -2394,6 +2394,40 @@ std::string makeEmptyPackedStructFile() {
   return data;
 }
 
+std::string makeUnsupportedLogicalTypeFile(std::string_view logicalType) {
+  std::string data;
+  const auto schemaOffset = data.size();
+  ::lance::file::FileDescriptor descriptor;
+  descriptor.set_length(0);
+  auto* field = descriptor.mutable_schema()->add_fields();
+  field->set_name("value");
+  field->set_id(0);
+  field->set_parent_id(-1);
+  field->set_logical_type(std::string(logicalType.data(), logicalType.size()));
+  data.append(descriptor.SerializeAsString());
+  const auto schemaLength = data.size() - schemaOffset;
+  const auto columnMetadataStart = data.size();
+  ::lance::file::v2::ColumnMetadata column;
+  const auto columnMetadataOffset = data.size();
+  data.append(column.SerializeAsString());
+  const auto columnMetadataLength = data.size() - columnMetadataOffset;
+  const auto columnMetadataOffsetsStart = data.size();
+  appendLittleEndian(data, static_cast<uint64_t>(columnMetadataOffset));
+  appendLittleEndian(data, static_cast<uint64_t>(columnMetadataLength));
+  const auto globalBufferOffsetsStart = data.size();
+  appendLittleEndian(data, static_cast<uint64_t>(schemaOffset));
+  appendLittleEndian(data, static_cast<uint64_t>(schemaLength));
+  appendLittleEndian(data, static_cast<uint64_t>(columnMetadataStart));
+  appendLittleEndian(data, static_cast<uint64_t>(columnMetadataOffsetsStart));
+  appendLittleEndian(data, static_cast<uint64_t>(globalBufferOffsetsStart));
+  appendLittleEndian(data, static_cast<uint32_t>(1));
+  appendLittleEndian(data, static_cast<uint32_t>(1));
+  appendLittleEndian(data, static_cast<uint16_t>(2));
+  appendLittleEndian(data, static_cast<uint16_t>(3));
+  data.append("LANC");
+  return data;
+}
+
 TEST_F(NativeLanceTest, sampleMetadata) {
   const auto file = load("sample.lance");
   const auto& metadata = file.metadata;
@@ -2517,6 +2551,34 @@ TEST_F(NativeLanceTest, parsesColonBearingDictionaryLogicalTypes) {
   EXPECT_THROW(
       nativeLanceDictionaryValueLogicalType("dict:int32:uint8:maybe"),
       BoltException);
+}
+
+TEST_F(NativeLanceTest, rejectsUnsupportedArrowTypeFamiliesExplicitly) {
+  const std::array<std::pair<std::string_view, std::string_view>, 5> cases{{
+      {"union:dense", "Union cannot be represented losslessly"},
+      {"run_end_encoded:int32:int64",
+       "RunEndEncoded cannot be represented losslessly"},
+      {"interval:month_day_nano",
+       "Interval has no stable file logical type contract"},
+      {"list_view", "ListView cannot be represented"},
+      {"large_list_view", "ListView cannot be represented"},
+  }};
+  for (const auto& [logicalType, expectedMessage] : cases) {
+    auto input = std::make_unique<dwio::common::BufferedInput>(
+        std::make_shared<InMemoryReadFile>(
+            makeUnsupportedLogicalTypeFile(logicalType)),
+        *pool_);
+    EXPECT_THROW(
+        {
+          try {
+            NativeLanceMetadata metadata(*input, *pool_);
+          } catch (const BoltException& error) {
+            EXPECT_NE(error.message().find(expectedMessage), std::string::npos);
+            throw;
+          }
+        },
+        BoltException);
+  }
 }
 
 TEST_F(NativeLanceTest, decimalMetadata) {
