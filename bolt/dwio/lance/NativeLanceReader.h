@@ -62,12 +62,17 @@ class NativeLanceReaderBase {
     return blobResolver_;
   }
 
+  NativeLanceReadPlan::Options readPlanOptions() const {
+    return readPlanOptions_;
+  }
+
  private:
   memory::MemoryPool& pool_;
   std::shared_ptr<dwio::common::BufferedInput> input_;
   NativeLanceMetadata metadata_;
   std::shared_ptr<const dwio::common::TypeWithId> typeWithId_;
   std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
+  NativeLanceReadPlan::Options readPlanOptions_;
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
@@ -75,6 +80,8 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   NativeLanceRowReader(
       std::shared_ptr<NativeLanceReaderBase> readerBase,
       dwio::common::RowReaderOptions options);
+
+  ~NativeLanceRowReader() override;
 
   int64_t nextRowNumber() override;
   int64_t nextReadSize(uint64_t size) override;

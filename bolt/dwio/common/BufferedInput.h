@@ -114,6 +114,11 @@ class BufferedInput {
   /// load all regions to be read in an optimized way (IO efficiency)
   virtual void load(const LogType);
 
+  /// Cancels staged or asynchronous loads owned by this input. Implementations
+  /// must keep this operation idempotent so reader teardown can call it even
+  /// after all requested streams have been consumed.
+  virtual void cancelPendingLoads();
+
   virtual bool isBuffered(uint64_t offset, uint64_t length) const {
     return !!readBuffer(offset, length);
   }

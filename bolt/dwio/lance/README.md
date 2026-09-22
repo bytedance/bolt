@@ -119,6 +119,9 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
   metadata remains eager because its physical mapping depends on page encoding.
 - Page ranges are scheduled through `BufferedInput`, allowing native
   coalescing and asynchronous implementations.
+- The read plan splits large ranges at the Bolt `loadQuantum`, limits submitted
+  but not yet materialized bytes with `maxCoalesceBytes`, and cancels pending
+  Direct/Cached input loads when a reader or plan is abandoned.
 - Primitive all-valid MiniBlock pages parse chunk metadata first and read only
   the contiguous chunk span covering the requested rows. Nullable, nested,
   packed, fixed-size, and rep/def-compressed layouts keep the full-page path.

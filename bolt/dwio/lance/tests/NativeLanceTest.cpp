@@ -145,6 +145,40 @@ class CountingReadFile final : public ReadFile {
   mutable std::atomic<uint64_t> readCalls_{0};
 };
 
+class TrackingBufferedInput final : public dwio::common::BufferedInput {
+ public:
+  TrackingBufferedInput(
+      std::shared_ptr<ReadFile> readFile,
+      memory::MemoryPool& pool)
+      : BufferedInput(
+            std::move(readFile),
+            pool,
+            dwio::common::MetricsLog::voidLog(),
+            nullptr,
+            0) {}
+
+  std::unique_ptr<dwio::common::SeekableInputStream> enqueue(
+      common::Region region,
+      const dwio::common::StreamIdentifier* streamIdentifier) override {
+    enqueuedRegions.push_back(region);
+    return BufferedInput::enqueue(region, streamIdentifier);
+  }
+
+  void load(dwio::common::LogType logType) override {
+    ++loadCalls;
+    BufferedInput::load(logType);
+  }
+
+  void cancelPendingLoads() override {
+    ++cancelCalls;
+    BufferedInput::cancelPendingLoads();
+  }
+
+  std::vector<common::Region> enqueuedRegions;
+  uint64_t loadCalls{0};
+  uint64_t cancelCalls{0};
+};
+
 std::string decodeBase64(std::string_view encoded) {
   static constexpr std::string_view kAlphabet =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -4993,6 +5027,51 @@ TEST_F(NativeLanceTest, readPlanDoesNotMatchRangesPastPrefetchedEnd) {
   plan.load(*input);
   EXPECT_EQ(readFile->readCalls(), 1);
   EXPECT_EQ(plan.take(5, 1), nullptr);
+}
+
+TEST_F(NativeLanceTest, readPlanChunksAndBoundsInFlightBytes) {
+  auto readFile = std::make_shared<CountingReadFile>(
+      "abcdefghijklmnopqrstuvwxyz0123456789");
+  auto input = std::make_unique<TrackingBufferedInput>(readFile, *pool_);
+  NativeLanceReadPlan plan(*pool_, {.maxReadBytes = 4, .maxInFlightBytes = 8});
+
+  plan.schedule(*input, 3, 17);
+  plan.submit(*input);
+  EXPECT_LE(plan.peakInFlightBytes(), 8);
+  EXPECT_EQ(input->loadCalls, 3);
+  ASSERT_EQ(input->enqueuedRegions.size(), 5);
+  EXPECT_EQ(
+      (std::vector<uint64_t>{4, 4, 4, 4, 1}),
+      (std::vector<uint64_t>{
+          input->enqueuedRegions[0].length,
+          input->enqueuedRegions[1].length,
+          input->enqueuedRegions[2].length,
+          input->enqueuedRegions[3].length,
+          input->enqueuedRegions[4].length}));
+
+  const auto result = plan.take(3, 17);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(
+      std::string(result->as<char>(), result->size()), "defghijklmnopqrst");
+  EXPECT_EQ(readFile->bytesRead(), 17);
+}
+
+TEST_F(NativeLanceTest, readPlanCancellationIsIdempotent) {
+  auto readFile =
+      std::make_shared<CountingReadFile>("abcdefghijklmnopqrstuvwxyz");
+  auto input = std::make_unique<TrackingBufferedInput>(readFile, *pool_);
+  NativeLanceReadPlan plan(*pool_, {.maxReadBytes = 4, .maxInFlightBytes = 8});
+
+  plan.schedule(*input, 2, 12);
+  plan.cancel(input.get());
+  plan.cancel(input.get());
+  EXPECT_EQ(input->cancelCalls, 1);
+  EXPECT_TRUE(plan.cancelled());
+  EXPECT_EQ(plan.inFlightBytes(), 0);
+  EXPECT_EQ(plan.take(2, 12), nullptr);
+  EXPECT_EQ(readFile->readCalls(), 0);
+  EXPECT_THROW(plan.schedule(*input, 0, 1), BoltException);
+  EXPECT_THROW(plan.submit(*input), BoltException);
 }
 
 TEST_F(NativeLanceTest, metadataCoalescesColumnDescriptors) {

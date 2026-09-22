@@ -117,9 +117,7 @@ class CachedBufferedInput : public BufferedInput {
         columnCacheBlackList_(std::move(columnCacheBlackList)) {}
 
   ~CachedBufferedInput() override {
-    for (auto& load : allCoalescedLoads_) {
-      load->cancel();
-    }
+    cancelPendingLoads();
   }
 
   std::unique_ptr<SeekableInputStream> enqueue(
@@ -135,6 +133,8 @@ class CachedBufferedInput : public BufferedInput {
   }
 
   void load(const LogType /*unused*/) override;
+
+  void cancelPendingLoads() override;
 
   bool isBuffered(uint64_t offset, uint64_t length) const override;
 

@@ -89,6 +89,11 @@ void BufferedInput::load(const LogType logType) {
   regions_.clear();
 }
 
+void BufferedInput::cancelPendingLoads() {
+  regions_.clear();
+  enqueuedToBufferOffset_.clear();
+}
+
 std::unique_ptr<SeekableInputStream> BufferedInput::enqueue(
     Region region,
     const dwio::common::StreamIdentifier* /*si*/) {

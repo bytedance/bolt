@@ -74,6 +74,15 @@ bool supportsSelectiveRead(const common::ScanSpec& scanSpec) {
   return true;
 }
 
+NativeLanceReadPlan::Options makeReadPlanOptions(
+    const dwio::common::ReaderOptions& options) {
+  BOLT_CHECK_GT(options.loadQuantum(), 0);
+  BOLT_CHECK_GT(options.maxCoalesceBytes(), 0);
+  return {
+      .maxReadBytes = static_cast<uint64_t>(options.loadQuantum()),
+      .maxInFlightBytes = static_cast<uint64_t>(options.maxCoalesceBytes())};
+}
+
 bool hasFilter(const common::ScanSpec& scanSpec) {
   for (const auto& child : scanSpec.children()) {
     if (child->filter() != nullptr) {
@@ -256,7 +265,8 @@ NativeLanceReaderBase::NativeLanceReaderBase(
       input_(std::move(input)),
       metadata_(*input_, pool_, std::move(typeAdapter)),
       typeWithId_(dwio::common::TypeWithId::create(metadata_.rowType())),
-      blobResolver_(std::move(blobResolver)) {
+      blobResolver_(std::move(blobResolver)),
+      readPlanOptions_(makeReadPlanOptions(options)) {
   BOLT_CHECK(
       !options.isFileColumnNamesReadAsLowerCase(),
       "The Lance format does not support reading column names as lowercase");
@@ -272,7 +282,8 @@ NativeLanceRowReader::NativeLanceRowReader(
           readerBase_->metadata(),
           readerBase_->pool(),
           false,
-          readerBase_->blobResolver()) {
+          readerBase_->blobResolver(),
+          readerBase_->readPlanOptions()) {
   maxBatchBytes_ = options_.getMaxBatchBytes();
   estimatedBytesPerRow_ =
       estimateReadBytesPerRow(readerBase_->metadata().rowType(), options_);
@@ -296,6 +307,16 @@ NativeLanceRowReader::NativeLanceRowReader(
       options_.getOffset(), options_.getLimit());
   currentRow_ = rowRanges_.empty() ? 0 : rowRanges_.front().first;
   initializePrefetchRanges();
+}
+
+NativeLanceRowReader::~NativeLanceRowReader() {
+  decoder_.cancelReadPlan();
+  std::lock_guard<std::mutex> lock(prefetchMutex_);
+  for (auto& decoder : prefetchDecoders_) {
+    if (decoder != nullptr) {
+      decoder->cancelReadPlan();
+    }
+  }
 }
 
 void NativeLanceRowReader::advancePastFinishedRange() {
@@ -401,7 +422,8 @@ dwio::common::RowReader::FetchResult NativeLanceRowReader::prefetchRange(
           readerBase_->metadata(),
           readerBase_->pool(),
           false,
-          readerBase_->blobResolver());
+          readerBase_->blobResolver(),
+          readerBase_->readPlanOptions());
     }
   }
 
@@ -413,6 +435,7 @@ dwio::common::RowReader::FetchResult NativeLanceRowReader::prefetchRange(
     {
       std::lock_guard<std::mutex> lock(prefetchMutex_);
       prefetchStatuses_[rangeIndex] = FetchStatus::kNotStarted;
+      prefetchDecoders_[rangeIndex]->cancelReadPlan();
       prefetchDecoders_[rangeIndex].reset();
       prefetchInputs_[rangeIndex].reset();
       baton = prefetchBatons_[rangeIndex];
@@ -444,6 +467,9 @@ void NativeLanceRowReader::markPrefetchRangesFinished(
         continue;
       }
       prefetchStatuses_[i] = FetchStatus::kFinished;
+      if (prefetchDecoders_[i] != nullptr) {
+        prefetchDecoders_[i]->cancelReadPlan();
+      }
       prefetchDecoders_[i].reset();
       prefetchInputs_[i].reset();
       prefetchBatons_[i]->post();

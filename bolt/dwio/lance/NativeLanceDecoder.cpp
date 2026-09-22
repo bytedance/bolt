@@ -2507,13 +2507,23 @@ NativeLanceDecoder::NativeLanceDecoder(
     const NativeLanceMetadata& metadata,
     memory::MemoryPool& pool,
     bool enableDecodedPageCache,
-    std::shared_ptr<const NativeLanceBlobResolver> blobResolver)
+    std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
+    NativeLanceReadPlan::Options readPlanOptions)
     : input_(input),
       metadata_(metadata),
       pool_(pool),
       enableDecodedPageCache_(enableDecodedPageCache),
       blobResolver_(std::move(blobResolver)),
-      readPlan_(pool) {}
+      readPlan_(pool, readPlanOptions) {}
+
+NativeLanceDecoder::~NativeLanceDecoder() {
+  cancelReadPlan();
+}
+
+void NativeLanceDecoder::cancelReadPlan() {
+  std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
+  readPlan_.cancel(&input_);
+}
 
 void NativeLanceDecoder::prefetchColumns(
     const std::vector<uint32_t>& columnIndices,

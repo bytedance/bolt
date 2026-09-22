@@ -354,6 +354,15 @@ void DirectBufferedInput::load(const LogType /*unused*/) {
   readRegions(storageLoad[0], false, groupEnds[0]);
 }
 
+void DirectBufferedInput::cancelPendingLoads() {
+  requests_.clear();
+  streamToCoalescedLoad_.wlock()->clear();
+  for (auto& load : coalescedLoads_) {
+    load->cancel();
+  }
+  coalescedLoads_.clear();
+}
+
 std::vector<int32_t> DirectBufferedInput::groupRequests(
     const std::vector<LoadRequest*>& requests,
     bool prefetch) const {

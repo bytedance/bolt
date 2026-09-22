@@ -16,6 +16,10 @@
 
 #include "bolt/dwio/lance/NativeLanceReadPlan.h"
 
+#include <algorithm>
+#include <cstring>
+#include <limits>
+
 #include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::lance::reader {
@@ -41,17 +45,69 @@ bool containsRange(
       length <= key.length - (offset - key.offset);
 }
 
+template <typename Map>
+std::optional<NativeLanceReadPlan::ReadKey> containingKey(
+    const Map& ranges,
+    uint64_t offset) {
+  std::optional<NativeLanceReadPlan::ReadKey> best;
+  for (const auto& entry : ranges) {
+    const auto& key = entry.first;
+    if (key.offset <= offset && offset - key.offset < key.length &&
+        (!best.has_value() ||
+         key.offset + key.length > best->offset + best->length)) {
+      best = key;
+    }
+  }
+  return best;
+}
+
 } // namespace
 
 NativeLanceReadPlan::NativeLanceReadPlan(memory::MemoryPool& pool)
-    : pool_(pool), stagedReads_(memory::StlAllocator<ScheduledRead>(&pool)) {}
+    : NativeLanceReadPlan(pool, Options{}) {}
+
+NativeLanceReadPlan::NativeLanceReadPlan(
+    memory::MemoryPool& pool,
+    Options options)
+    : pool_(pool),
+      options_(options),
+      stagedReads_(memory::StlAllocator<ScheduledRead>(&pool)) {
+  BOLT_CHECK_GT(options_.maxReadBytes, 0);
+  BOLT_CHECK_GT(options_.maxInFlightBytes, 0);
+}
+
+NativeLanceReadPlan::~NativeLanceReadPlan() {
+  cancel();
+}
 
 void NativeLanceReadPlan::clearStage() {
   stagedReads_.clear();
   scheduledReadKeys_.clear();
+  if (submittedReads_.empty() && prefetchedReads_.empty()) {
+    input_ = nullptr;
+  }
 }
 
 void NativeLanceReadPlan::schedule(
+    dwio::common::BufferedInput& input,
+    uint64_t offset,
+    uint64_t length) {
+  BOLT_CHECK(!cancelled(), "Cannot schedule a cancelled Lance read plan");
+  BOLT_CHECK(
+      input_ == nullptr || input_ == &input,
+      "A Lance read plan cannot span multiple BufferedInput instances");
+  input_ = &input;
+  BOLT_CHECK_LE(offset, std::numeric_limits<uint64_t>::max() - length);
+  const auto maxChunkBytes =
+      std::min(options_.maxReadBytes, options_.maxInFlightBytes);
+  for (uint64_t chunkOffset = 0; chunkOffset < length;) {
+    const auto chunkBytes = std::min(maxChunkBytes, length - chunkOffset);
+    scheduleChunk(input, offset + chunkOffset, chunkBytes);
+    chunkOffset += chunkBytes;
+  }
+}
+
+void NativeLanceReadPlan::scheduleChunk(
     dwio::common::BufferedInput& input,
     uint64_t offset,
     uint64_t length) {
@@ -80,25 +136,48 @@ void NativeLanceReadPlan::schedule(
     scheduledReadKeys_.erase(key);
     return;
   }
-  stagedReads_.push_back({key, input.enqueue({offset, length})});
+  stagedReads_.push_back({key});
 }
 
 void NativeLanceReadPlan::submit(dwio::common::BufferedInput& input) {
+  BOLT_CHECK(!cancelled(), "Cannot submit a cancelled Lance read plan");
+  BOLT_CHECK(input_ == nullptr || input_ == &input);
+  input_ = &input;
   if (stagedReads_.empty()) {
-    scheduledReadKeys_.clear();
     return;
   }
-  input.load(dwio::common::LogType::BLOCK);
-  for (auto& staged : stagedReads_) {
-    submittedReads_.insert_or_assign(
-        staged.key,
-        SubmittedRead{
-            .length = staged.key.length, .stream = std::move(staged.stream)});
+  size_t next = 0;
+  while (next < stagedReads_.size()) {
+    materializeUntilAdmitted(stagedReads_[next].key.length);
+    uint64_t batchBytes = 0;
+    std::vector<
+        std::pair<ReadKey, std::unique_ptr<dwio::common::SeekableInputStream>>>
+        batch;
+    while (next < stagedReads_.size()) {
+      const auto key = stagedReads_[next].key;
+      if (!batch.empty() &&
+          (batchBytes > options_.maxInFlightBytes - key.length ||
+           submittedBytes_ >
+               options_.maxInFlightBytes - batchBytes - key.length)) {
+        break;
+      }
+      batch.emplace_back(key, input.enqueue({key.offset, key.length}));
+      batchBytes += key.length;
+      ++next;
+    }
+    input.load(dwio::common::LogType::BLOCK);
+    for (auto& [key, stream] : batch) {
+      submittedReads_.insert_or_assign(
+          key,
+          SubmittedRead{.length = key.length, .stream = std::move(stream)});
+      submittedBytes_ += key.length;
+      peakSubmittedBytes_ = std::max(peakSubmittedBytes_, submittedBytes_);
+    }
+    if (input.supportSyncLoad()) {
+      materialize();
+    }
   }
   clearStage();
-  if (input.supportSyncLoad()) {
-    materialize();
-  }
 }
 
 void NativeLanceReadPlan::load(dwio::common::BufferedInput& input) {
@@ -112,19 +191,36 @@ void NativeLanceReadPlan::materialize() {
   }
 }
 
+void NativeLanceReadPlan::materializeUntilAdmitted(uint64_t incomingBytes) {
+  while (!submittedReads_.empty() &&
+         (incomingBytes > options_.maxInFlightBytes ||
+          submittedBytes_ > options_.maxInFlightBytes - incomingBytes)) {
+    materializeSubmitted(submittedReads_.begin());
+  }
+}
+
 BufferPtr NativeLanceReadPlan::materializeSubmitted(
     std::unordered_map<ReadKey, SubmittedRead, ReadKeyHash>::iterator it) {
   auto key = it->first;
   auto submitted = std::move(it->second);
   submittedReads_.erase(it);
+  BOLT_CHECK_GE(submittedBytes_, submitted.length);
+  submittedBytes_ -= submitted.length;
   auto buffer = AlignedBuffer::allocate<char>(submitted.length, &pool_);
   submitted.stream->readFully(buffer->asMutable<char>(), submitted.length);
   prefetchedReads_.insert_or_assign(key, buffer);
+  if (submittedReads_.empty() && stagedReads_.empty()) {
+    input_ = nullptr;
+  }
   return buffer;
 }
 
 BufferPtr NativeLanceReadPlan::take(uint64_t offset, uint64_t length) {
   std::lock_guard<std::mutex> guard(consumeMutex_);
+  if (cancelled()) {
+    return nullptr;
+  }
+  BOLT_CHECK_LE(offset, std::numeric_limits<uint64_t>::max() - length);
   const ReadKey key{offset, length};
   const auto prefetched = prefetchedReads_.find(key);
   if (prefetched != prefetchedReads_.end()) {
@@ -152,7 +248,57 @@ BufferPtr NativeLanceReadPlan::take(uint64_t offset, uint64_t length) {
           buffer, offset - submittedKey.offset, length, &pool_);
     }
   }
-  return nullptr;
+
+  uint64_t position = offset;
+  const auto end = offset + length;
+  while (position < end) {
+    auto key = containingKey(prefetchedReads_, position);
+    if (!key.has_value()) {
+      key = containingKey(submittedReads_, position);
+    }
+    if (!key.has_value()) {
+      return nullptr;
+    }
+    position = std::min(end, key->offset + key->length);
+  }
+
+  auto result = AlignedBuffer::allocate<char>(length, &pool_);
+  position = offset;
+  while (position < end) {
+    auto key = containingKey(prefetchedReads_, position);
+    if (!key.has_value()) {
+      const auto submittedKey = containingKey(submittedReads_, position);
+      BOLT_CHECK(submittedKey.has_value());
+      auto submitted = submittedReads_.find(*submittedKey);
+      BOLT_CHECK(submitted != submittedReads_.end());
+      materializeSubmitted(submitted);
+      key = submittedKey;
+    }
+    const auto bytes =
+        std::min(end - position, key->offset + key->length - position);
+    const auto& source = prefetchedReads_.at(*key);
+    std::memcpy(
+        result->asMutable<char>() + position - offset,
+        source->as<char>() + position - key->offset,
+        bytes);
+    position += bytes;
+  }
+  return result;
+}
+
+void NativeLanceReadPlan::cancel(dwio::common::BufferedInput* input) {
+  std::lock_guard<std::mutex> guard(consumeMutex_);
+  if (cancelled_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  if (input != nullptr) {
+    input->cancelPendingLoads();
+  }
+  clearStage();
+  submittedReads_.clear();
+  prefetchedReads_.clear();
+  submittedBytes_ = 0;
+  input_ = nullptr;
 }
 
 } // namespace bytedance::bolt::lance::reader

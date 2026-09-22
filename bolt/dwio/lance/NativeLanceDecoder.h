@@ -42,7 +42,12 @@ class NativeLanceDecoder {
       const NativeLanceMetadata& metadata,
       memory::MemoryPool& pool,
       bool enableDecodedPageCache = false,
-      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr);
+      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
+      NativeLanceReadPlan::Options readPlanOptions = {});
+
+  ~NativeLanceDecoder();
+
+  void cancelReadPlan();
 
   /// Schedules the first-stage ranges for all requested columns together.
   /// BufferedInput can coalesce these requests or dispatch them asynchronously.

@@ -16,12 +16,15 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "bolt/common/io/Options.h"
 #include "bolt/dwio/common/BufferedInput.h"
 #include "bolt/vector/BaseVector.h"
 
@@ -29,6 +32,11 @@ namespace bytedance::bolt::lance::reader {
 
 class NativeLanceReadPlan {
  public:
+  struct Options {
+    uint64_t maxReadBytes{io::ReaderOptions::kDefaultLoadQuantum};
+    uint64_t maxInFlightBytes{io::ReaderOptions::kDefaultCoalesceBytes};
+  };
+
   struct ReadKey {
     uint64_t offset;
     uint64_t length;
@@ -46,6 +54,10 @@ class NativeLanceReadPlan {
   };
 
   explicit NativeLanceReadPlan(memory::MemoryPool& pool);
+
+  NativeLanceReadPlan(memory::MemoryPool& pool, Options options);
+
+  ~NativeLanceReadPlan();
 
   /// Drops staged-but-not-submitted reads. Submitted or materialized reads are
   /// retained so later decode stages can consume prefetched bytes.
@@ -67,6 +79,23 @@ class NativeLanceReadPlan {
   /// Materializes all submitted streams into owned Bolt buffers.
   void materialize();
 
+  /// Cancels staged and submitted work, releases materialized buffers, and
+  /// prevents new requests from being admitted. Idempotent.
+  void cancel(dwio::common::BufferedInput* input = nullptr);
+
+  bool cancelled() const {
+    return cancelled_.load(std::memory_order_acquire);
+  }
+
+  /// Test/debug counters. Planning and materialization are single-threaded.
+  uint64_t inFlightBytes() const {
+    return submittedBytes_;
+  }
+
+  uint64_t peakInFlightBytes() const {
+    return peakSubmittedBytes_;
+  }
+
   /// Returns an exact prefetched range or a slice from a wider prefetched
   /// range. Submitted streams are materialized on demand.
   BufferPtr take(uint64_t offset, uint64_t length);
@@ -74,7 +103,6 @@ class NativeLanceReadPlan {
  private:
   struct ScheduledRead {
     ReadKey key;
-    std::unique_ptr<dwio::common::SeekableInputStream> stream;
   };
 
   struct SubmittedRead {
@@ -84,8 +112,14 @@ class NativeLanceReadPlan {
 
   BufferPtr materializeSubmitted(
       std::unordered_map<ReadKey, SubmittedRead, ReadKeyHash>::iterator it);
+  void scheduleChunk(
+      dwio::common::BufferedInput& input,
+      uint64_t offset,
+      uint64_t length);
+  void materializeUntilAdmitted(uint64_t incomingBytes);
 
   memory::MemoryPool& pool_;
+  const Options options_;
   // Streams returned by BufferedInput::enqueue must stay alive after submit().
   // DirectBufferedInput associates an async/coalesced load with the exact
   // stream pointer, so submitted streams remain owned here until decode asks
@@ -94,6 +128,10 @@ class NativeLanceReadPlan {
   std::unordered_set<ReadKey, ReadKeyHash> scheduledReadKeys_;
   std::unordered_map<ReadKey, SubmittedRead, ReadKeyHash> submittedReads_;
   std::unordered_map<ReadKey, BufferPtr, ReadKeyHash> prefetchedReads_;
+  uint64_t submittedBytes_{0};
+  uint64_t peakSubmittedBytes_{0};
+  std::atomic<bool> cancelled_{false};
+  dwio::common::BufferedInput* input_{nullptr};
   // The row-aligned decode stage consumes independent entries concurrently.
   // Planning and materialization remain single-threaded.
   std::mutex consumeMutex_;
