@@ -157,3 +157,18 @@ The benchmark exposes independent `parquet`, `rust`, and `native` modes and
 forces every projected child vector to load. Use a batch size of 1,024 and the
 repository's `bolt-benchmark-compare --rounds 7` wrapper for alternating runs,
 paired sign-flip tests, and Holm correction.
+
+The rust mode above uses the packaged compatibility FFI. To compare against an
+arbitrary current Lance checkout without linking Rust into a production target,
+build the standalone test harness and use the printed executable as the
+baseline command:
+
+    bolt/dwio/lance/tests/run_current_rust_reader_benchmark.py \
+      --lance-repo /path/to/lance --prepare-only
+
+The harness accepts the same BOLT_LANCE_BENCHMARK_FILE,
+BOLT_LANCE_BENCHMARK_EXPECTED_ROWS, and BOLT_LANCE_BENCHMARK_BATCH_SIZE
+environment variables as the C++ benchmark. It performs a full-column
+materializing scan and emits Folly-compatible JSON, so it can be passed
+directly to bolt-benchmark-compare. The reported metric is picoseconds per row,
+matching the work-unit normalization performed by Folly BENCHMARK_MULTI.
