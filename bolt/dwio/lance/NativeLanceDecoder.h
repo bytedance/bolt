@@ -65,6 +65,12 @@ class NativeLanceDecoder {
 
   void materializeReadPlan() const;
 
+  /// Returns true when independent columns can be decoded concurrently
+  /// without sharing mutable asynchronous read-plan state.
+  bool supportsConcurrentDecoding() const {
+    return input_.supportSyncLoad();
+  }
+
   /// Schedules one physical column and all fixed-row-count descendants. This
   /// is used for the second stage of list and map reads after their offsets
   /// reveal the child row range.

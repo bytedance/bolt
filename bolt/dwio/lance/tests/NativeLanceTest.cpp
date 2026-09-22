@@ -3995,6 +3995,31 @@ TEST_F(NativeLanceTest, rowReaderDecodesMixedFixedAndVariableColumns) {
   EXPECT_TRUE(rows->childAt(1)->isNullAt(14));
 }
 
+TEST_F(NativeLanceTest, rowReaderCachesCompressedStructuralPageAcrossBatches) {
+  auto readFile = std::make_shared<CountingReadFile>(makeCompressedListFile());
+  auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(std::move(input), readerOptions);
+  auto rowReader = reader.createRowReader({});
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(2, result), 2);
+  const auto readsAfterFirstBatch = readFile->readCalls();
+  ASSERT_GT(readsAfterFirstBatch, 0);
+  EXPECT_EQ(rowReader->next(2, result), 2);
+  EXPECT_EQ(readFile->readCalls(), readsAfterFirstBatch);
+
+  const auto* arrays = result->as<RowVector>()->childAt(0)->as<ArrayVector>();
+  ASSERT_NE(arrays, nullptr);
+  ASSERT_EQ(arrays->size(), 2);
+  EXPECT_EQ(arrays->sizeAt(0), 3);
+  EXPECT_EQ(arrays->sizeAt(1), 1);
+  const auto* values = arrays->elements()->asFlatVector<int32_t>();
+  ASSERT_NE(values, nullptr);
+  EXPECT_EQ(values->valueAt(arrays->offsetAt(0)), 30);
+  EXPECT_EQ(values->valueAt(arrays->offsetAt(1)), 60);
+}
+
 TEST_F(NativeLanceTest, byteRangeOwnsDisjointPageRows) {
   const auto file = load("v2_0_self_described.lance");
   const auto& pages = file.metadata->columns()[0].pages();
@@ -4991,7 +5016,16 @@ TEST_F(NativeLanceTest, decodedPageCacheIsSharedAcrossDecoders) {
   const auto secondValues = second.decodeColumn(0, 3, 2);
   EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(0), 4);
   EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(1), 5);
+  EXPECT_EQ(
+      secondValues->asFlatVector<int32_t>()->rawValues(),
+      firstValues->asFlatVector<int32_t>()->rawValues() + 1);
   EXPECT_EQ(readFile->bytesRead(), 0);
+
+  firstValues->asFlatVector<int32_t>()->mutableRawValues()[1] = 100;
+  EXPECT_EQ(firstValues->asFlatVector<int32_t>()->valueAt(1), 100);
+  EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(0), 4);
+  EXPECT_EQ(
+      second.decodeColumn(0, 3, 1)->asFlatVector<int32_t>()->valueAt(0), 4);
 }
 
 TEST_F(NativeLanceTest, compressedNestedItemsReturnCopyOnWriteViews) {
@@ -5824,6 +5858,42 @@ TEST_F(NativeLanceTest, rowReaderDecodesColumnsInParallel) {
     for (uint64_t i = 0; i < 8; ++i) {
       EXPECT_EQ(values->valueAt(i), column * 100 + i);
     }
+  }
+}
+
+TEST_F(NativeLanceTest, rowReaderDecodesFilteredProjectionInParallel) {
+  constexpr uint32_t kColumns = 3;
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(
+          makeManyCompressedColumnsFile(kColumns)),
+      *pool_);
+  NativeLanceReader reader(
+      std::move(input), dwio::common::ReaderOptions(pool_.get()));
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  for (uint32_t column = 0; column < kColumns; ++column) {
+    scanSpec->addField(fmt::format("c{}", column), column);
+  }
+  scanSpec->childByName("c0")->setFilter(
+      std::make_unique<common::BigintRange>(1, 2, false));
+
+  auto executor = std::make_shared<folly::CPUThreadPoolExecutor>(2);
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  options.setDecodingExecutor(executor);
+  options.setDecodingParallelismFactor(3);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(8, result), 8);
+  ASSERT_EQ(result->size(), 2);
+  const auto* row = result->as<RowVector>();
+  ASSERT_NE(row, nullptr);
+  ASSERT_EQ(row->childrenSize(), kColumns);
+  for (uint32_t column = 0; column < kColumns; ++column) {
+    const auto* values = row->childAt(column)->as<SimpleVector<int32_t>>();
+    ASSERT_NE(values, nullptr);
+    EXPECT_EQ(values->valueAt(0), column * 100 + 1);
+    EXPECT_EQ(values->valueAt(1), column * 100 + 2);
   }
 }
 

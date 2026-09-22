@@ -3002,8 +3002,78 @@ VectorPtr NativeLanceDecoder::decodeColumn(
   const auto logicalType = metadata_.columnLogicalType(columnIndex);
   const auto physicalIndex = metadata_.physicalColumnIndex(columnIndex);
   if (metadata_.usesStructuralEncoding()) {
-    return decodeStructuralField(
-        metadata_.structuralField(columnIndex), rowStart, rowCount);
+    const auto& field = metadata_.structuralField(columnIndex);
+    const auto firstLeaf = [&](const auto& self,
+                               const NativeLanceMetadata::StructuralField& node)
+        -> const NativeLanceMetadata::StructuralField* {
+      if (node.leaf) {
+        return &node;
+      }
+      for (const auto& child : node.children) {
+        if (const auto* leaf = self(self, child)) {
+          return leaf;
+        }
+      }
+      return nullptr;
+    };
+    const auto* anchor = firstLeaf(firstLeaf, field);
+    BOLT_CHECK_NOT_NULL(anchor);
+    BOLT_CHECK_LE(
+        rowStart, std::numeric_limits<uint64_t>::max() / anchor->rowsPerParent);
+    BOLT_CHECK_LE(
+        rowCount, std::numeric_limits<uint64_t>::max() / anchor->rowsPerParent);
+    const auto anchorPage = singlePageRange(
+        anchor->physicalColumnIndex,
+        rowStart * anchor->rowsPerParent,
+        rowCount * anchor->rowsPerParent);
+    if (decodedPageCache_ != nullptr && anchorPage.has_value() &&
+        anchorPage->pageRowStart % anchor->rowsPerParent == 0 &&
+        anchorPage->pageRowCount % anchor->rowsPerParent == 0) {
+      const auto pageRowStart =
+          anchorPage->pageRowStart / anchor->rowsPerParent;
+      const auto pageRowCount =
+          anchorPage->pageRowCount / anchor->rowsPerParent;
+      const auto allLeavesCovered =
+          [&](const auto& self,
+              const NativeLanceMetadata::StructuralField& node) -> bool {
+        if (!node.leaf) {
+          return std::all_of(
+              node.children.begin(),
+              node.children.end(),
+              [&](const auto& child) { return self(self, child); });
+        }
+        BOLT_CHECK_LE(
+            pageRowStart,
+            std::numeric_limits<uint64_t>::max() / node.rowsPerParent);
+        BOLT_CHECK_LE(
+            pageRowCount,
+            std::numeric_limits<uint64_t>::max() / node.rowsPerParent);
+        return singlePageRange(
+                   node.physicalColumnIndex,
+                   pageRowStart * node.rowsPerParent,
+                   pageRowCount * node.rowsPerParent)
+            .has_value();
+      };
+      constexpr int32_t kStructuralPageBase = -2;
+      BOLT_CHECK_LE(
+          anchorPage->pageIndex,
+          std::numeric_limits<int32_t>::max() + kStructuralPageBase);
+      const NativeLanceDecodedPageCache::Key key{
+          physicalIndex, kStructuralPageBase - anchorPage->pageIndex};
+      if (allLeavesCovered(allLeavesCovered, field) &&
+          (enableDecodedPageCache_ || decodedPageCache_->contains(key))) {
+        auto decoded = decodedPageCache_->getOrLoad(key, [&] {
+          return decodeStructuralField(field, pageRowStart, pageRowCount);
+        });
+        if (rowStart == pageRowStart && rowCount == pageRowCount) {
+          return decoded;
+        }
+        return decoded->slice(
+            static_cast<vector_size_t>(rowStart - pageRowStart),
+            static_cast<vector_size_t>(rowCount));
+      }
+    }
+    return decodeStructuralField(field, rowStart, rowCount);
   }
   return decodePhysicalColumn(
       type, logicalType, physicalIndex, rowStart, rowCount);
@@ -3253,9 +3323,7 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumn(
     if (offset == 0 && size == decoded->size()) {
       return decoded;
     }
-    auto result = BaseVector::create(type, size, &pool_);
-    result->copy(decoded.get(), 0, offset, size);
-    return result;
+    return decoded->slice(offset, size);
   }
   return decodePhysicalColumnNoCache(
       type, logicalType, physicalIndex, rowStart, rowCount, arrayDimensions);

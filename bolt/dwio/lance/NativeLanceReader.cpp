@@ -26,6 +26,7 @@
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/dwio/common/ParallelFor.h"
 #include "bolt/type/Filter.h"
 #include "bolt/vector/ComplexVector.h"
 
@@ -434,6 +435,8 @@ VectorPtr readSelective(
     uint64_t batchRowStart,
     vector_size_t batchSize,
     memory::MemoryPool& pool,
+    const std::shared_ptr<folly::Executor>& decodingExecutor,
+    size_t decodingParallelismFactor,
     const uint64_t* deletedRows = nullptr) {
   RowSet selectedRows(batchSize, memory::StlAllocator<vector_size_t>(&pool));
   if (deletedRows == nullptr) {
@@ -498,6 +501,11 @@ VectorPtr readSelective(
   std::vector<std::string> names(numOutputColumns);
   std::vector<TypePtr> types(numOutputColumns);
   std::vector<VectorPtr> children(numOutputColumns);
+  struct DecodeTask {
+    column_index_t channel;
+    uint32_t columnIndex;
+  };
+  std::vector<DecodeTask> decodeTasks;
   for (const auto& child : scanSpec.children()) {
     if (!child->projectOut()) {
       continue;
@@ -513,8 +521,7 @@ VectorPtr readSelective(
       types[channel] = fileType->childAt(columnIndex);
       const auto decoded = decodedFilterColumns.find(columnIndex);
       if (decoded == decodedFilterColumns.end()) {
-        children[channel] = decoder.decodeSelectedRows(
-            columnIndex, batchRowStart, selectedRows);
+        decodeTasks.push_back({channel, columnIndex});
       } else {
         auto indices = allocateIndices(selectedRows.size(), &pool);
         auto* rawIndices = indices->asMutable<vector_size_t>();
@@ -536,6 +543,19 @@ VectorPtr readSelective(
       }
     }
   }
+  dwio::common::ParallelFor(
+      pool.threadSafe() && decoder.supportsConcurrentDecoding() &&
+              decodeTasks.size() > 1
+          ? decodingExecutor
+          : nullptr,
+      0,
+      decodeTasks.size(),
+      decodingParallelismFactor)
+      .execute([&](size_t index) {
+        const auto& task = decodeTasks[index];
+        children[task.channel] = decoder.decodeSelectedRows(
+            task.columnIndex, batchRowStart, selectedRows);
+      });
   return std::make_shared<RowVector>(
       &pool,
       ROW(std::move(names), std::move(types)),
@@ -622,7 +642,7 @@ NativeLanceRowReader::NativeLanceRowReader(
           readerBase_->input(),
           readerBase_->metadata(),
           readerBase_->pool(),
-          false,
+          true,
           readerBase_->blobResolver(),
           readerBase_->readPlanOptions(),
           readerBase_->decodedPageCache()) {
@@ -966,6 +986,8 @@ uint64_t NativeLanceRowReader::next(
         currentRow_,
         static_cast<vector_size_t>(rowsToRead),
         readerBase_->pool(),
+        options_.getDecodingExecutor(),
+        options_.getDecodingParallelismFactor(),
         mutation == nullptr ? nullptr : mutation->deletedRows);
   } else {
     result = rootColumnReader_->read(

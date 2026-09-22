@@ -234,7 +234,11 @@ VectorPtr NativeLanceStructColumnReader::read(
     uint64_t rowStart,
     uint64_t rowCount,
     memory::MemoryPool& pool) const {
-  constexpr size_t kMinParallelCompressedColumns = 16;
+  // A handful of structural or variable-width columns can cost more than a
+  // much wider set of scalar columns.  Parallelize whenever at least two
+  // compressed columns are available instead of requiring a wide scalar
+  // schema.
+  constexpr size_t kMinParallelCompressedColumns = 2;
   const auto rowAlignedColumns = readColumns(NativeLanceReadStage::kRowAligned);
   const auto offsetDependentColumns =
       readColumns(NativeLanceReadStage::kOffsetDependent);
