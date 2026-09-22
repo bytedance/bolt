@@ -19,6 +19,17 @@ add_test(
 )
 target_link_libraries(bolt_dwio_native_lance_table_scan_test PRIVATE bolt_gtest_main)
 
+if(BOLT_BUILD_BENCHMARKS AND BOLT_ENABLE_PARQUET)
+  add_executable(bolt_dwio_native_lance_reader_benchmark NativeLanceReaderBenchmark.cpp)
+  target_link_libraries(
+    bolt_dwio_native_lance_reader_benchmark
+    PRIVATE
+      bolt_testutils
+      bolt_dwio_native_parquet_reader
+      ${FOLLY_BENCHMARK}
+  )
+endif()
+
 add_executable(bolt_dwio_native_lance_list_offsets_benchmark NativeLanceListOffsetsBenchmark.cpp)
 target_link_libraries(
   bolt_dwio_native_lance_list_offsets_benchmark

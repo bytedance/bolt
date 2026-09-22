@@ -17,7 +17,6 @@
 #include <folly/Benchmark.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/init/Init.h>
-#include <lance_file.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -26,7 +25,6 @@
 
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/lance/NativeLanceReader.h"
-#include "bolt/dwio/lance/tests/RustLanceReaderAdapter.inc"
 #include "bolt/dwio/parquet/reader/ParquetReader.h"
 
 namespace bytedance::bolt::lance::reader::benchmark {
@@ -162,32 +160,6 @@ uint64_t nativeReader(uint32_t iterations) {
   return rows;
 }
 
-uint64_t rustReader(uint32_t iterations) {
-  static const auto names = [] {
-    if (projectedColumnCount == 0) {
-      return std::vector<std::string>{};
-    }
-    test::RustLanceReaderAdapter reader(lanceFilePath, *readerPool);
-    return projectedColumns(reader.rowType());
-  }();
-  uint64_t rows = 0;
-  for (uint32_t i = 0; i < iterations; ++i) {
-    test::RustLanceReaderAdapter reader(lanceFilePath, *readerPool, names);
-    reader.open(batchSize);
-    VectorPtr result;
-    while (reader.next(result)) {
-      rows += result->size();
-      if (!skipMaterialize) {
-        materialize(result);
-      }
-    }
-    if (expectedRows.has_value()) {
-      BOLT_CHECK_EQ(rows, expectedRows.value() * (i + 1));
-    }
-  }
-  return rows;
-}
-
 uint64_t parquetReader(uint32_t iterations) {
   uint64_t rows = 0;
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -202,13 +174,10 @@ BENCHMARK_MULTI(scan, n) {
   if (readerMode == "native") {
     return nativeReader(n);
   }
-  if (readerMode == "rust") {
-    return rustReader(n);
-  }
   if (readerMode == "parquet") {
     return parquetReader(n);
   }
-  BOLT_FAIL("BOLT_LANCE_READER_MODE must be 'rust', 'native', or 'parquet'");
+  BOLT_FAIL("BOLT_LANCE_READER_MODE must be 'native' or 'parquet'");
 }
 
 } // namespace
@@ -219,11 +188,10 @@ int main(int argc, char** argv) {
   using namespace bytedance::bolt::lance::reader::benchmark;
   if ((readerMode == "parquet" && parquetFilePath.empty()) ||
       (readerMode != "parquet" && lanceFilePath.empty()) ||
-      (readerMode != "rust" && readerMode != "native" &&
-       readerMode != "parquet")) {
+      (readerMode != "native" && readerMode != "parquet")) {
     std::cerr << "set BOLT_LANCE_BENCHMARK_FILE, "
                  "BOLT_LANCE_BENCHMARK_PARQUET_FILE for parquet mode, and set "
-                 "BOLT_LANCE_READER_MODE to rust, native, or parquet\n";
+                 "BOLT_LANCE_READER_MODE to native or parquet\n";
     return 1;
   }
   bytedance::bolt::memory::MemoryManager::initialize({});

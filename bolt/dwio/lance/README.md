@@ -171,8 +171,8 @@ When `BOLT_ENABLE_LANCE=ON`, the differential test writes files with the legacy
 Rust writer and compares a test-only direct Rust FFI adapter with the native
 reader. Production native targets do not link `lance_file_ffi`.
 
-The benchmark exposes independent `parquet`, `rust`, and `native` modes and
-forces every projected child vector to load. Use a batch size of 1,024 and the
+The C++ benchmark exposes independent `parquet` and `native` modes and forces
+every projected child vector to load. Use a batch size of 1,024 and the
 repository's `bolt-benchmark-compare --rounds 7` wrapper for alternating runs,
 paired sign-flip tests, and Holm correction.
 
