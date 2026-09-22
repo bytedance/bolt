@@ -240,6 +240,16 @@ VectorPtr readSelective(
 NativeLanceReaderBase::NativeLanceReaderBase(
     std::unique_ptr<dwio::common::BufferedInput> input,
     const dwio::common::ReaderOptions& options,
+    std::shared_ptr<const NativeLanceBlobResolver> blobResolver)
+    : NativeLanceReaderBase(
+          std::move(input),
+          options,
+          std::move(blobResolver),
+          defaultNativeLanceTypeAdapter()) {}
+
+NativeLanceReaderBase::NativeLanceReaderBase(
+    std::unique_ptr<dwio::common::BufferedInput> input,
+    const dwio::common::ReaderOptions& options,
     std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
     std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter)
     : pool_(options.getMemoryPool()),
@@ -551,6 +561,16 @@ void NativeLanceRowReader::resetFilterCaches() {}
 std::optional<size_t> NativeLanceRowReader::estimatedRowSize() const {
   return estimatedBytesPerRow_;
 }
+
+NativeLanceReader::NativeLanceReader(
+    std::unique_ptr<dwio::common::BufferedInput> input,
+    const dwio::common::ReaderOptions& options,
+    std::shared_ptr<const NativeLanceBlobResolver> blobResolver)
+    : NativeLanceReader(
+          std::move(input),
+          options,
+          std::move(blobResolver),
+          defaultNativeLanceTypeAdapter()) {}
 
 NativeLanceReader::NativeLanceReader(
     std::unique_ptr<dwio::common::BufferedInput> input,

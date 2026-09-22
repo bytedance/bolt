@@ -34,9 +34,13 @@ class NativeLanceReaderBase {
   NativeLanceReaderBase(
       std::unique_ptr<dwio::common::BufferedInput> input,
       const dwio::common::ReaderOptions& options,
-      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
-      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter =
-          defaultNativeLanceTypeAdapter());
+      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr);
+
+  NativeLanceReaderBase(
+      std::unique_ptr<dwio::common::BufferedInput> input,
+      const dwio::common::ReaderOptions& options,
+      std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
+      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter);
 
   dwio::common::BufferedInput& input() const {
     return *input_;
@@ -129,9 +133,13 @@ class NativeLanceReader : public dwio::common::Reader {
   NativeLanceReader(
       std::unique_ptr<dwio::common::BufferedInput> input,
       const dwio::common::ReaderOptions& options,
-      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
-      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter =
-          defaultNativeLanceTypeAdapter());
+      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr);
+
+  NativeLanceReader(
+      std::unique_ptr<dwio::common::BufferedInput> input,
+      const dwio::common::ReaderOptions& options,
+      std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
+      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter);
 
   std::optional<uint64_t> numberOfRows() const override;
   const RowTypePtr& rowType() const override;
