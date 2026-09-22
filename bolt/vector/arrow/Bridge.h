@@ -44,6 +44,10 @@ struct ArrowSchema;
 
 enum class TimestampUnit { kSecond = 0, kMilli = 3, kMicro = 6, kNano = 9 };
 
+enum class TimestampEncoding { kArrow, kSecondsNanos };
+
+enum class TimeImportMode { kPreserveUnits, kMillisOfDay };
+
 struct ArrowOptions {
   bool flattenDictionary{false};
   bool flattenConstant{false};
@@ -65,6 +69,19 @@ struct ArrowOptions {
   // consumers that don't support REE (e.g. Arrow Java < 19). Other types
   // (scalar, map, struct) are unaffected and use REE.
   bool arrayConstantAsDictionary{false};
+
+  // kSecondsNanos exports bolt.timestamp, a FixedSizeBinary(16) extension
+  // with extension metadata "1". Each value contains little-endian int64
+  // seconds followed by uint64 nanoseconds in [0, 1'000'000'000). This
+  // preserves the full Timestamp range. timestampUnit and timestampTimeZone
+  // only apply to kArrow; logical precision and timezone remain with callers.
+  TimestampEncoding timestampEncoding{TimestampEncoding::kArrow};
+
+  // Preserve Arrow TIME values as INTEGER (seconds/millis) or BIGINT
+  // (micros/nanos). kMillisOfDay converts all units to INTEGER milliseconds,
+  // rejecting sub-millisecond values. Both modes validate the time-of-day
+  // range. Bolt integers do not retain the Arrow TIME type annotation.
+  TimeImportMode timeImportMode{TimeImportMode::kPreserveUnits};
 };
 namespace bytedance::bolt {
 /// Returns true when the vector will use the experimental
@@ -186,6 +203,10 @@ void exportToArrow(
 ///   arrowSchema.release(&arrowSchema);
 ///
 TypePtr importFromArrow(const ArrowSchema& arrowSchema);
+
+TypePtr importFromArrow(
+    const ArrowSchema& arrowSchema,
+    const ArrowOptions& options);
 
 /// Import an ArrowArray and ArrowSchema into a Bolt vector.
 ///

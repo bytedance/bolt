@@ -437,6 +437,10 @@ TEST_F(ArrowBridgeSchemaImportTest, scalar) {
 
   // Temporal.
   EXPECT_EQ(*TIMESTAMP(), *testSchemaImport("tsu:"));
+  EXPECT_EQ(*INTEGER(), *testSchemaImport("tts"));
+  EXPECT_EQ(*INTEGER(), *testSchemaImport("ttm"));
+  EXPECT_EQ(*BIGINT(), *testSchemaImport("ttu"));
+  EXPECT_EQ(*BIGINT(), *testSchemaImport("ttn"));
   EXPECT_EQ(*DATE(), *testSchemaImport("tdD"));
   EXPECT_EQ(*INTERVAL_YEAR_MONTH(), *testSchemaImport("tiM"));
 
@@ -538,8 +542,6 @@ TEST_F(ArrowBridgeSchemaImportTest, unsupported) {
   EXPECT_THROW(testSchemaImport("w:42"), BoltUserError);
 
   EXPECT_THROW(testSchemaImport("tdm"), BoltUserError);
-  EXPECT_THROW(testSchemaImport("tts"), BoltUserError);
-  EXPECT_THROW(testSchemaImport("ttm"), BoltUserError);
   EXPECT_THROW(testSchemaImport("tDs"), BoltUserError);
 
   EXPECT_THROW(testSchemaImport("+"), BoltUserError);
