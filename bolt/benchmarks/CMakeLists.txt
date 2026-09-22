@@ -39,6 +39,7 @@ add_library(bolt_benchmark_builder OBJECT ExpressionBenchmarkBuilder.cpp)
 target_link_libraries(bolt_benchmark_builder ${BOLT_BENCHMARK_DEPS})
 
 if(${BOLT_BUILD_BENCHMARKS})
+  add_subdirectory(clickbench)
   add_subdirectory(tpch)
   add_subdirectory(tpcds)
   add_subdirectory(paimon)
