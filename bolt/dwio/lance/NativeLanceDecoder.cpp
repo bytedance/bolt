@@ -937,6 +937,60 @@ VectorPtr decodeFixedWidthLogical(
   return result;
 }
 
+template <typename T>
+VectorPtr wrapRawFlatValues(
+    const TypePtr& type,
+    BufferPtr values,
+    uint64_t count,
+    memory::MemoryPool& pool) {
+  BOLT_CHECK_LE(
+      count, static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()));
+  return std::make_shared<FlatVector<T>>(
+      &pool,
+      type,
+      nullptr,
+      static_cast<vector_size_t>(count),
+      std::move(values),
+      std::vector<BufferPtr>{});
+}
+
+VectorPtr tryWrapRawFlatValues(
+    const TypePtr& type,
+    std::string_view logicalType,
+    uint64_t bitsPerValue,
+    BufferPtr values,
+    uint64_t count,
+    memory::MemoryPool& pool) {
+  if (!folly::kIsLittleEndian) {
+    return nullptr;
+  }
+  if (logicalType == "int8" && type->kind() == TypeKind::TINYINT &&
+      bitsPerValue == 8) {
+    return wrapRawFlatValues<int8_t>(type, std::move(values), count, pool);
+  }
+  if (logicalType == "int16" && type->kind() == TypeKind::SMALLINT &&
+      bitsPerValue == 16) {
+    return wrapRawFlatValues<int16_t>(type, std::move(values), count, pool);
+  }
+  if (logicalType == "int32" && type->kind() == TypeKind::INTEGER &&
+      bitsPerValue == 32) {
+    return wrapRawFlatValues<int32_t>(type, std::move(values), count, pool);
+  }
+  if (logicalType == "int64" && type->kind() == TypeKind::BIGINT &&
+      bitsPerValue == 64) {
+    return wrapRawFlatValues<int64_t>(type, std::move(values), count, pool);
+  }
+  if (logicalType == "float" && type->kind() == TypeKind::REAL &&
+      bitsPerValue == 32) {
+    return wrapRawFlatValues<float>(type, std::move(values), count, pool);
+  }
+  if (logicalType == "double" && type->kind() == TypeKind::DOUBLE &&
+      bitsPerValue == 64) {
+    return wrapRawFlatValues<double>(type, std::move(values), count, pool);
+  }
+  return nullptr;
+}
+
 void decodeBitpackedValues(
     const TypePtr& type,
     std::string_view logicalType,
@@ -3890,6 +3944,21 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
             [this](uint64_t offset, uint64_t length) {
               return read(offset, length);
             });
+        const auto allValid =
+            encoding.array_encoding_case() != ArrayEncoding::kNullable ||
+            encoding.nullable().nullability_case() ==
+                ::lance::encodings::Nullable::kNoNulls;
+        if (allValid && outputOffset == 0 && localCount == rowCount) {
+          if (auto wrapped = tryWrapRawFlatValues(
+                  type,
+                  logicalType,
+                  flat.bits_per_value(),
+                  values,
+                  localCount,
+                  pool_)) {
+            return wrapped;
+          }
+        }
         decodeFixedWidthValues(
             type,
             logicalType,

@@ -1503,9 +1503,12 @@ std::string makeCompressedListFile() {
   const std::array<int32_t, 6> items{10, 20, 30, 40, 50, 60};
   std::string data = compressedOffsets;
   const auto itemsOffset = data.size();
-  data.append(
-      reinterpret_cast<const char*>(items.data()),
-      items.size() * sizeof(int32_t));
+  const auto compressedItems = compressValues(
+      std::string_view(
+          reinterpret_cast<const char*>(items.data()),
+          items.size() * sizeof(int32_t)),
+      "zstd");
+  data.append(compressedItems);
 
   const auto schemaOffset = data.size();
   ::lance::file::FileDescriptor descriptor;
@@ -1546,11 +1549,13 @@ std::string makeCompressedListFile() {
     ::lance::file::v2::ColumnMetadata column;
     auto* page = column.add_pages();
     page->add_buffer_offsets(itemsOffset);
-    page->add_buffer_sizes(items.size() * sizeof(int32_t));
+    page->add_buffer_sizes(compressedItems.size());
     page->set_length(items.size());
     ::lance::encodings::ArrayEncoding encoding;
+    auto encodedItems = flatEncoding(32, 0);
+    encodedItems.mutable_flat()->mutable_compression()->set_scheme("zstd");
     *encoding.mutable_nullable()->mutable_no_nulls()->mutable_values() =
-        flatEncoding(32, 0);
+        std::move(encodedItems);
     *page->mutable_encoding() = directEncoding(encoding);
     const auto offset = data.size();
     data.append(column.SerializeAsString());
@@ -4703,6 +4708,32 @@ TEST_F(NativeLanceTest, decodedPageCacheIsSharedAcrossDecoders) {
   EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(0), 4);
   EXPECT_EQ(secondValues->asFlatVector<int32_t>()->valueAt(1), 5);
   EXPECT_EQ(readFile->bytesRead(), 0);
+}
+
+TEST_F(NativeLanceTest, compressedNestedItemsReturnCopyOnWriteViews) {
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(makeCompressedListFile()), *pool_);
+  NativeLanceMetadata metadata(*input, *pool_);
+  NativeLanceDecoder decoder(*input, metadata, *pool_);
+
+  auto first = decoder.decodeColumn(0, 1, 2);
+  const auto second = decoder.decodeColumn(0, 2, 2);
+  auto* firstArray = first->as<ArrayVector>();
+  const auto* secondArray = second->as<ArrayVector>();
+  ASSERT_NE(firstArray, nullptr);
+  ASSERT_NE(secondArray, nullptr);
+  auto* firstItems = firstArray->elements()->asFlatVector<int32_t>();
+  const auto* secondItems = secondArray->elements()->asFlatVector<int32_t>();
+  ASSERT_EQ(firstItems->rawValues(), secondItems->rawValues());
+  EXPECT_EQ(secondItems->valueAt(0), 30);
+
+  firstItems->mutableRawValues()[0] = 100;
+  EXPECT_EQ(firstItems->valueAt(0), 100);
+  EXPECT_EQ(secondItems->valueAt(0), 30);
+  const auto third = decoder.decodeColumn(0, 2, 2);
+  EXPECT_EQ(
+      third->as<ArrayVector>()->elements()->asFlatVector<int32_t>()->valueAt(0),
+      30);
 }
 
 TEST_F(NativeLanceTest, decodedPageCacheCoalescesConcurrentLoads) {
