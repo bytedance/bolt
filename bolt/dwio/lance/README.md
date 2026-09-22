@@ -186,7 +186,10 @@ printed executable as the baseline command:
 
 The harness accepts the same BOLT_LANCE_BENCHMARK_FILE,
 BOLT_LANCE_BENCHMARK_EXPECTED_ROWS, and BOLT_LANCE_BENCHMARK_BATCH_SIZE
-environment variables as the C++ benchmark. It performs a full-column
+environment variables as the C++ benchmark.
+`BOLT_LANCE_BENCHMARK_RUNTIME_THREADS` controls the harness Tokio runtime; use
+it together with Lance's `LANCE_CPU_THREADS` and `LANCE_IO_THREADS` plus CPU
+affinity when comparing equal CPU budgets. The harness performs a full-column
 materializing scan and emits Folly-compatible JSON, so it can be passed
 directly to bolt-benchmark-compare. The reported metric is picoseconds per row,
 matching the work-unit normalization performed by Folly BENCHMARK_MULTI.

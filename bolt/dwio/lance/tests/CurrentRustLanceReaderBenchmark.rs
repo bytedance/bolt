@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use lance_core::cache::LanceCache;
+use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
 use lance_file::reader::{FileReader, FileReaderOptions};
 use lance_io::ReadBatchParams;
@@ -34,7 +35,7 @@ fn env_u64(name: &str, default: u64) -> anyhow::Result<u64> {
     }
 }
 
-async fn scan() -> anyhow::Result<(u64, usize)> {
+async fn scan() -> anyhow::Result<(u64, usize, usize)> {
     let file = env::var("BOLT_LANCE_BENCHMARK_FILE")?;
     let batch_size = u32::try_from(env_u64("BOLT_LANCE_BENCHMARK_BATCH_SIZE", 1024)?)?;
     let batch_readahead = u32::try_from(env_u64("BOLT_LANCE_BENCHMARK_READAHEAD", 16)?)?;
@@ -45,6 +46,7 @@ async fn scan() -> anyhow::Result<(u64, usize)> {
 
     let started = Instant::now();
     let (object_store, path) = ObjectStore::from_uri(&file).await?;
+    let io_parallelism = object_store.io_parallelism();
     let scan_scheduler = ScanScheduler::new(
         object_store,
         SchedulerConfig::new(env_u64(
@@ -101,18 +103,33 @@ async fn scan() -> anyhow::Result<(u64, usize)> {
             retained_bytes
         );
     }
-    Ok((rows, retained_bytes))
+    Ok((rows, retained_bytes, io_parallelism))
 }
 
 fn main() -> anyhow::Result<()> {
+    let runtime_threads = usize::try_from(env_u64(
+        "BOLT_LANCE_BENCHMARK_RUNTIME_THREADS",
+        1,
+    )?)?;
+    anyhow::ensure!(
+        runtime_threads > 0,
+        "BOLT_LANCE_BENCHMARK_RUNTIME_THREADS must be at least 1"
+    );
+    let compute_threads = get_num_compute_intensive_cpus();
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+        .worker_threads(runtime_threads)
         .enable_all()
         .build()?;
     let start = Instant::now();
     let result = runtime.block_on(scan())?;
     let elapsed_ns = start.elapsed().as_nanos();
     anyhow::ensure!(result.0 > 0, "benchmark scan produced no rows");
+    if env::var_os("BOLT_LANCE_BENCHMARK_PRINT_STATS").is_some() {
+        eprintln!(
+            "BOLT_LANCE_RUST_MAIN_CONFIG runtime_threads={} compute_threads={} io_threads={}",
+            runtime_threads, compute_threads, result.2
+        );
+    }
     // Folly's BENCHMARK_MULTI reports picoseconds per unit of work returned by
     // the benchmark function. NativeLanceReaderBenchmark returns its row count,
     // so emit the same ps/row metric instead of whole-scan nanoseconds.
