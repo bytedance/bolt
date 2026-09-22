@@ -173,7 +173,8 @@ class NativeLanceDecoder {
       const TypePtr& type,
       uint32_t physicalColumnIndex,
       uint64_t rowStart,
-      uint64_t rowCount) const;
+      uint64_t rowCount,
+      const std::vector<uint32_t>& arrayDimensions = {}) const;
   void enqueueStructuralField(
       const NativeLanceMetadata::StructuralField& field,
       uint64_t rowStart,

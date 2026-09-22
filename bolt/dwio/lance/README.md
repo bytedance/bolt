@@ -119,6 +119,9 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
   metadata remains eager because its physical mapping depends on page encoding.
 - Page ranges are scheduled through `BufferedInput`, allowing native
   coalescing and asynchronous implementations.
+- Primitive all-valid MiniBlock pages parse chunk metadata first and read only
+  the contiguous chunk span covering the requested rows. Nullable, nested,
+  packed, fixed-size, and rep/def-compressed layouts keep the full-page path.
 - Variable-width, list, map, and Blob payloads use a second scheduling stage
   after offsets or descriptors have been decoded.
 - Non-inline Blob v2 payloads are grouped by resolved object and submitted

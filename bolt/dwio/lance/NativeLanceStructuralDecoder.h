@@ -24,8 +24,8 @@
 
 namespace bytedance::bolt::lance::reader {
 
-/// Decodes a complete v2.1-v2.3 structural page. Range slicing is performed
-/// by the caller after the structural layers have been reconstructed.
+/// Decodes a v2.1-v2.3 structural page. Primitive MiniBlock pages may return
+/// only the requested range; other layouts return the complete page.
 VectorPtr decodeLanceStructuralPage(
     const TypePtr& type,
     std::string_view leafLogicalType,
@@ -34,12 +34,20 @@ VectorPtr decodeLanceStructuralPage(
     const ::lance::file::v2::ColumnMetadata& column,
     const ::lance::file::v2::ColumnMetadata::Page& page,
     const ::lance::encodings21::PageLayout& layout,
+    uint64_t rowStart,
+    uint64_t rowCount,
     memory::MemoryPool& pool,
     const std::shared_ptr<const NativeLanceBlobResolver>& blobResolver,
     std::string_view sourceDataFile,
     const std::function<
         void(const std::vector<std::pair<uint64_t, uint64_t>>&)>& prefetch,
     const std::function<BufferPtr(uint64_t, uint64_t)>& read);
+
+bool lanceStructuralPageSupportsRangeRead(
+    const TypePtr& type,
+    const std::vector<uint32_t>& fixedSizeDimensions,
+    const std::vector<std::string>& packedChildLogicalTypes,
+    const ::lance::encodings21::PageLayout& layout);
 
 bool lanceStructuralLayoutHasCompression(
     const ::lance::encodings21::PageLayout& layout);

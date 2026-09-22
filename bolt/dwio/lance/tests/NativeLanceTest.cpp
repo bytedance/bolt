@@ -40,6 +40,7 @@
 #include "bolt/dwio/lance/NativeLancePackedStruct.h"
 #include "bolt/dwio/lance/NativeLanceReadPlan.h"
 #include "bolt/dwio/lance/NativeLanceReader.h"
+#include "bolt/dwio/lance/NativeLanceStructuralDecoder.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
 #include "bolt/dwio/lance/proto/lance_encodings_v2_0.pb.h"
 #include "bolt/dwio/lance/proto/lance_file.pb.h"
@@ -91,6 +92,7 @@ class CountingReadFile final : public ReadFile {
   std::string_view pread(uint64_t offset, uint64_t length, void* buffer)
       const override {
     ++readCalls_;
+    bytesRead_ += length;
     return delegate_->pread(offset, length, buffer);
   }
 
@@ -98,6 +100,9 @@ class CountingReadFile final : public ReadFile {
       uint64_t offset,
       const std::vector<folly::Range<char*>>& buffers) const override {
     ++readCalls_;
+    for (const auto& buffer : buffers) {
+      bytesRead_ += buffer.size();
+    }
     return delegate_->preadv(offset, buffers);
   }
 
@@ -105,6 +110,9 @@ class CountingReadFile final : public ReadFile {
       folly::Range<const common::Region*> regions,
       folly::Range<folly::IOBuf*> iobufs) const override {
     ++readCalls_;
+    for (const auto& region : regions) {
+      bytesRead_ += region.length;
+    }
     delegate_->preadv(regions, iobufs);
   }
 
@@ -2711,6 +2719,113 @@ TEST_F(NativeLanceTest, decodesExactStructuralFixtures) {
       }
     }
   }
+}
+
+TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
+  std::shared_ptr<ReadFile> source =
+      std::make_shared<LocalReadFile>("examples/compression_v2_1.lance");
+  const auto contents = source->pread(0, source->size());
+  auto readFile = std::make_shared<CountingReadFile>(contents);
+  auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  NativeLanceMetadata metadata(*input, *pool_);
+
+  constexpr uint64_t kStart = 1'020;
+  constexpr uint64_t kRows = 10;
+  constexpr uint32_t kColumn = 1;
+  const auto physical = metadata.physicalColumnIndex(kColumn);
+  const auto& column = metadata.column(physical);
+  ASSERT_GT(column.pages_size(), 0);
+  const auto& page = column.pages(0);
+  const auto& layout = metadata.pageLayout(physical, 0);
+  ASSERT_TRUE(lanceStructuralPageSupportsRangeRead(
+      metadata.rowType()->childAt(kColumn),
+      {},
+      metadata.physicalColumnChildLogicalTypes(physical),
+      layout));
+  ASSERT_EQ(
+      layout.layout_case(), ::lance::encodings21::PageLayout::kMiniBlockLayout);
+
+  const auto& mini = layout.mini_block_layout();
+  const auto metadataWordBytes = mini.has_large_chunk() ? 4 : 2;
+  ASSERT_EQ(page.buffer_sizes(0) % metadataWordBytes, 0);
+  const auto numChunks = page.buffer_sizes(0) / metadataWordBytes;
+  ASSERT_GT(numChunks, 1);
+  uint64_t chunkStart = 0;
+  std::optional<uint64_t> firstChunk;
+  std::optional<uint64_t> lastChunk;
+  for (uint64_t chunk = 0; chunk < numChunks; ++chunk) {
+    const auto* word =
+        contents.data() + page.buffer_offsets(0) + chunk * metadataWordBytes;
+    const auto encoded = mini.has_large_chunk()
+        ? static_cast<uint64_t>(
+              folly::Endian::little(folly::loadUnaligned<uint32_t>(word)))
+        : static_cast<uint64_t>(
+              folly::Endian::little(folly::loadUnaligned<uint16_t>(word)));
+    const auto chunkItems = chunk + 1 == numChunks
+        ? mini.num_items() - chunkStart
+        : uint64_t{1} << (encoded & 0xf);
+    const auto chunkEnd = chunkStart + chunkItems;
+    if (!firstChunk.has_value() && kStart < chunkEnd) {
+      firstChunk = chunk;
+    }
+    if (!lastChunk.has_value() && kStart + kRows <= chunkEnd) {
+      lastChunk = chunk;
+    }
+    chunkStart = chunkEnd;
+  }
+  ASSERT_TRUE(firstChunk.has_value());
+  ASSERT_TRUE(lastChunk.has_value());
+  EXPECT_LT(*firstChunk, *lastChunk);
+
+  uint64_t fullPageBytes = 0;
+  for (const auto bytes : page.buffer_sizes()) {
+    fullPageBytes += bytes;
+  }
+  readFile->resetBytesRead();
+  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  const auto values = decoder.decodeColumn(kColumn, kStart, kRows);
+  for (vector_size_t row = 0; row < values->size(); ++row) {
+    EXPECT_DOUBLE_EQ(
+        values->asFlatVector<double>()->valueAt(row),
+        1000.0 + (kStart + row) * 0.000'125);
+  }
+  EXPECT_LT(readFile->bytesRead(), fullPageBytes);
+
+  std::shared_ptr<ReadFile> fallbackSource =
+      std::make_shared<LocalReadFile>("examples/exact_v2_1.lance");
+  auto fallbackReadFile = std::make_shared<CountingReadFile>(
+      fallbackSource->pread(0, fallbackSource->size()));
+  auto fallbackInput =
+      std::make_unique<dwio::common::BufferedInput>(fallbackReadFile, *pool_);
+  NativeLanceMetadata fallbackMetadata(*fallbackInput, *pool_);
+  const auto namePhysical = fallbackMetadata.physicalColumnIndex(1);
+  const auto& nameColumn = fallbackMetadata.column(namePhysical);
+  ASSERT_GT(nameColumn.pages_size(), 0);
+  const auto& nameLayout = fallbackMetadata.pageLayout(namePhysical, 0);
+  EXPECT_FALSE(lanceStructuralPageSupportsRangeRead(
+      fallbackMetadata.rowType()->childAt(1),
+      {},
+      fallbackMetadata.physicalColumnChildLogicalTypes(namePhysical),
+      nameLayout));
+  uint64_t fullNamePageBytes = 0;
+  uint64_t namePageStart = 0;
+  for (const auto& namePage : nameColumn.pages()) {
+    const auto namePageEnd = namePageStart + namePage.length();
+    if (kStart < namePageEnd && kStart + kRows > namePageStart) {
+      for (const auto bytes : namePage.buffer_sizes()) {
+        fullNamePageBytes += bytes;
+      }
+    }
+    namePageStart = namePageEnd;
+  }
+  fallbackReadFile->resetBytesRead();
+  NativeLanceDecoder fallbackDecoder(*fallbackInput, fallbackMetadata, *pool_);
+  const auto names = fallbackDecoder.decodeColumn(1, kStart, kRows);
+  ASSERT_EQ(names->size(), kRows);
+  EXPECT_EQ(
+      names->asFlatVector<StringView>()->valueAt(0).str(),
+      "value-1020-deterministic-fixture");
+  EXPECT_EQ(fallbackReadFile->bytesRead(), fullNamePageBytes);
 }
 
 TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {

@@ -1076,6 +1076,8 @@ struct MiniBlockPage {
   std::vector<uint64_t> packedChildBits;
   std::vector<DecodedBlock> packedChildren;
   bool allNull{false};
+  uint64_t itemStart{0};
+  uint64_t numItems{0};
 };
 
 std::vector<uint16_t> decodeLevels(
@@ -1098,38 +1100,96 @@ MiniBlockPage decodeMiniBlock(
     const ::lance::encodings21::MiniBlockLayout& layout,
     const Page& page,
     memory::MemoryPool& pool,
-    const std::function<BufferPtr(uint64_t, uint64_t)>& read) {
+    const std::function<BufferPtr(uint64_t, uint64_t)>& read,
+    std::optional<std::pair<uint64_t, uint64_t>> itemRange = std::nullopt) {
   BOLT_CHECK_GE(page.buffer_offsets_size(), 2);
   BOLT_CHECK(layout.has_value_compression());
   const auto metadata = read(page.buffer_offsets(0), page.buffer_sizes(0));
-  const auto data = read(page.buffer_offsets(1), page.buffer_sizes(1));
   const auto metadataWordBytes = layout.has_large_chunk() ? 4 : 2;
   BOLT_CHECK_EQ(metadata->size() % metadataWordBytes, 0);
   const auto numChunks = metadata->size() / metadataWordBytes;
   BOLT_CHECK_GT(numChunks, 0);
 
-  MiniBlockPage result;
-  if (layout.has_dictionary()) {
-    BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
-    const auto dictionary = read(page.buffer_offsets(2), page.buffer_sizes(2));
-    result.dictionary = decodeCompressive(
-        layout.dictionary(), {dictionary}, layout.num_dictionary_items(), pool);
-  }
-  uint64_t dataOffset = 0;
-  uint64_t decodedItems = 0;
+  struct Chunk {
+    uint64_t dataOffset;
+    uint64_t bytes;
+    uint64_t itemStart;
+    uint64_t items;
+  };
+  std::vector<Chunk> chunks;
+  chunks.reserve(numChunks);
+  uint64_t pageDataBytes = 0;
+  uint64_t pageItems = 0;
   for (uint64_t chunkIndex = 0; chunkIndex < numChunks; ++chunkIndex) {
     const auto word = layout.has_large_chunk()
         ? static_cast<uint64_t>(readLittleEndian<uint32_t>(
               metadata->as<char>() + chunkIndex * metadataWordBytes))
         : static_cast<uint64_t>(readLittleEndian<uint16_t>(
               metadata->as<char>() + chunkIndex * metadataWordBytes));
-    const auto chunkBytes = ((word >> 4) + 1) * kMiniBlockAlignment;
+    const auto dividedBytes = word >> 4;
+    BOLT_CHECK_LE(
+        dividedBytes,
+        std::numeric_limits<uint64_t>::max() / kMiniBlockAlignment - 1,
+        "Lance MiniBlock chunk size overflows");
+    const auto chunkBytes = (dividedBytes + 1) * kMiniBlockAlignment;
     const auto logValues = word & 0xf;
+    BOLT_CHECK_LE(pageItems, layout.num_items());
     const auto chunkItems = chunkIndex + 1 == numChunks
-        ? layout.num_items() - decodedItems
+        ? layout.num_items() - pageItems
         : uint64_t{1} << logValues;
-    BOLT_CHECK_LE(chunkBytes, data->size() - dataOffset);
-    const auto* chunk = data->as<char>() + dataOffset;
+    BOLT_CHECK_LE(pageDataBytes, page.buffer_sizes(1));
+    BOLT_CHECK_LE(chunkBytes, page.buffer_sizes(1) - pageDataBytes);
+    BOLT_CHECK_LE(chunkItems, layout.num_items() - pageItems);
+    chunks.push_back({pageDataBytes, chunkBytes, pageItems, chunkItems});
+    pageDataBytes += chunkBytes;
+    pageItems += chunkItems;
+  }
+  BOLT_CHECK_EQ(pageDataBytes, page.buffer_sizes(1));
+  BOLT_CHECK_EQ(pageItems, layout.num_items());
+
+  const auto requestedStart = itemRange.has_value() ? itemRange->first : 0;
+  const auto requestedCount =
+      itemRange.has_value() ? itemRange->second : layout.num_items();
+  BOLT_CHECK_LE(requestedStart, layout.num_items());
+  BOLT_CHECK_LE(requestedCount, layout.num_items() - requestedStart);
+  const auto requestedEnd = requestedStart + requestedCount;
+  const auto firstChunk =
+      std::find_if(chunks.begin(), chunks.end(), [&](const auto& chunk) {
+        return requestedStart < chunk.itemStart + chunk.items;
+      });
+  const auto lastChunk =
+      std::find_if(firstChunk, chunks.end(), [&](const auto& chunk) {
+        return requestedEnd <= chunk.itemStart + chunk.items;
+      });
+  BOLT_CHECK(firstChunk != chunks.end());
+  BOLT_CHECK(lastChunk != chunks.end());
+  const auto firstChunkIndex = firstChunk - chunks.begin();
+  const auto lastChunkIndex = lastChunk - chunks.begin();
+  const auto selectedDataOffset = firstChunk->dataOffset;
+  BOLT_CHECK_LE(lastChunk->dataOffset, pageDataBytes);
+  BOLT_CHECK_LE(lastChunk->bytes, pageDataBytes - lastChunk->dataOffset);
+  const auto selectedDataBytes =
+      lastChunk->dataOffset + lastChunk->bytes - selectedDataOffset;
+  const auto data =
+      read(page.buffer_offsets(1) + selectedDataOffset, selectedDataBytes);
+
+  MiniBlockPage result;
+  result.itemStart = firstChunk->itemStart;
+  if (layout.has_dictionary()) {
+    BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
+    const auto dictionary = read(page.buffer_offsets(2), page.buffer_sizes(2));
+    result.dictionary = decodeCompressive(
+        layout.dictionary(), {dictionary}, layout.num_dictionary_items(), pool);
+  }
+  uint64_t decodedItems = 0;
+  for (uint64_t chunkIndex = firstChunkIndex; chunkIndex <= lastChunkIndex;
+       ++chunkIndex) {
+    const auto& chunkInfo = chunks[chunkIndex];
+    const auto chunkBytes = chunkInfo.bytes;
+    const auto chunkItems = chunkInfo.items;
+    const auto chunkOffset = chunkInfo.dataOffset - selectedDataOffset;
+    BOLT_CHECK_LE(chunkBytes, data->size() - chunkOffset);
+    const auto* chunk = data->as<char>() + chunkOffset;
     uint64_t cursor = 0;
     BOLT_CHECK_GE(chunkBytes, sizeof(uint16_t));
     const auto numLevels = readLittleEndian<uint16_t>(chunk + cursor);
@@ -1211,10 +1271,8 @@ MiniBlockPage decodeMiniBlock(
       }
       decodedItems += chunkItems;
     }
-    dataOffset += chunkBytes;
   }
-  BOLT_CHECK_EQ(decodedItems, layout.num_items());
-  BOLT_CHECK_EQ(dataOffset, data->size());
+  result.numItems = decodedItems;
   return result;
 }
 
@@ -2973,6 +3031,8 @@ VectorPtr decodeLanceStructuralPage(
     const ::lance::file::v2::ColumnMetadata& column,
     const Page& page,
     const ::lance::encodings21::PageLayout& layout,
+    uint64_t rowStart,
+    uint64_t rowCount,
     memory::MemoryPool& pool,
     const std::shared_ptr<const NativeLanceBlobResolver>& blobResolver,
     std::string_view sourceDataFile,
@@ -3147,8 +3207,17 @@ VectorPtr decodeLanceStructuralPage(
       ::lance::encodings21::PageLayout::kMiniBlockLayout,
       "Unsupported Lance structural page layout {}",
       static_cast<int>(layout.layout_case()));
-  auto decoded = decodeMiniBlock(layout.mini_block_layout(), page, pool, read);
-  uint64_t leafValues = layout.mini_block_layout().num_items();
+  const auto rangeRead = lanceStructuralPageSupportsRangeRead(
+      type, fixedSizeDimensions, packedChildLogicalTypes, layout);
+  auto decoded = decodeMiniBlock(
+      layout.mini_block_layout(),
+      page,
+      pool,
+      read,
+      rangeRead ? std::make_optional(std::pair{rowStart, rowCount})
+                : std::nullopt);
+  uint64_t leafValues =
+      rangeRead ? decoded.numItems : layout.mini_block_layout().num_items();
   for (const auto dimension : decoded.fixedSizeDimensions) {
     BOLT_CHECK_LE(leafValues, std::numeric_limits<uint64_t>::max() / dimension);
     leafValues *= dimension;
@@ -3164,7 +3233,7 @@ VectorPtr decodeLanceStructuralPage(
       std::move(decoded.rep),
       std::move(decoded.def),
       layout.mini_block_layout().layers(),
-      layout.mini_block_layout().num_items());
+      leafValues);
   std::vector<uint32_t> dimensions = fixedSizeDimensions;
   std::vector<std::vector<bool>> fixedSizeValidities(
       fixedSizeDimensions.size());
@@ -3191,7 +3260,7 @@ VectorPtr decodeLanceStructuralPage(
       fixedSizeLayer,
       !decoded.fixedSizeDimensions.empty());
   BOLT_CHECK_EQ(fixedSizeLayer, 0);
-  uint64_t expectedRows = page.length();
+  uint64_t expectedRows = rangeRead ? decoded.numItems : page.length();
   for (const auto dimension : fixedSizeDimensions) {
     if (dimension == 0) {
       continue;
@@ -3200,7 +3269,37 @@ VectorPtr decodeLanceStructuralPage(
     expectedRows /= dimension;
   }
   BOLT_CHECK_EQ(result->size(), expectedRows);
-  return result;
+  if (!rangeRead) {
+    return result;
+  }
+  BOLT_CHECK_LE(decoded.itemStart, rowStart);
+  const auto sliceOffset = rowStart - decoded.itemStart;
+  BOLT_CHECK_LE(sliceOffset, result->size());
+  BOLT_CHECK_LE(rowCount, result->size() - sliceOffset);
+  return result->slice(
+      static_cast<vector_size_t>(sliceOffset),
+      static_cast<vector_size_t>(rowCount));
+}
+
+bool lanceStructuralPageSupportsRangeRead(
+    const TypePtr& type,
+    const std::vector<uint32_t>& fixedSizeDimensions,
+    const std::vector<std::string>& packedChildLogicalTypes,
+    const ::lance::encodings21::PageLayout& layout) {
+  if (layout.layout_case() !=
+          ::lance::encodings21::PageLayout::kMiniBlockLayout ||
+      !fixedSizeDimensions.empty() || !packedChildLogicalTypes.empty() ||
+      type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
+      type->kind() == TypeKind::ROW) {
+    return false;
+  }
+  const auto& mini = layout.mini_block_layout();
+  if (mini.has_rep_compression() || mini.has_def_compression() ||
+      mini.repetition_index_depth() != 0) {
+    return false;
+  }
+  return mini.layers_size() == 1 &&
+      mini.layers(0) == ::lance::encodings21::REPDEF_ALL_VALID_ITEM;
 }
 
 bool lanceStructuralLayoutHasCompression(

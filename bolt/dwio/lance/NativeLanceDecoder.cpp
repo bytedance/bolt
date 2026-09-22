@@ -2576,7 +2576,9 @@ void NativeLanceDecoder::enqueueStructuralField(
       field.type,
       field.physicalColumnIndex,
       rowStart * field.rowsPerParent,
-      rowCount * field.rowsPerParent);
+      rowCount * field.rowsPerParent,
+      field.rowsPerParent == 1 ? std::vector<uint32_t>{}
+                               : std::vector<uint32_t>{1});
 }
 
 void NativeLanceDecoder::prefetchPhysicalColumn(
@@ -2616,7 +2618,8 @@ void NativeLanceDecoder::enqueuePhysicalColumn(
     const TypePtr& type,
     uint32_t physicalIndex,
     uint64_t rowStart,
-    uint64_t rowCount) const {
+    uint64_t rowCount,
+    const std::vector<uint32_t>& arrayDimensions) const {
   BOLT_CHECK_LT(physicalIndex, metadata_.numPhysicalColumns());
   if (metadata_.usesStructuralEncoding()) {
     const auto& column = metadata_.column(physicalIndex);
@@ -2626,8 +2629,16 @@ void NativeLanceDecoder::enqueuePhysicalColumn(
       const auto& page = column.pages(pageIndex);
       const auto pageRowEnd = pageRowStart + page.length();
       if (rowStart < pageRowEnd && rowEnd > pageRowStart) {
+        const auto rangeRead = lanceStructuralPageSupportsRangeRead(
+            type,
+            arrayDimensions,
+            metadata_.physicalColumnChildLogicalTypes(physicalIndex),
+            metadata_.pageLayout(physicalIndex, pageIndex));
         for (int32_t buffer = 0; buffer < page.buffer_offsets_size();
              ++buffer) {
+          if (rangeRead && buffer == 1) {
+            continue;
+          }
           if (page.buffer_sizes(buffer) > 0) {
             scheduleRead(
                 page.buffer_offsets(buffer), page.buffer_sizes(buffer));
@@ -3231,6 +3242,15 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
       const auto overlapStart = std::max(physicalRowStart, pageRowStart);
       const auto overlapEnd = std::min(rowEnd, pageRowEnd);
       if (overlapStart < overlapEnd) {
+        BOLT_CHECK_EQ((overlapStart - pageRowStart) % rowScale, 0);
+        BOLT_CHECK_EQ((overlapEnd - overlapStart) % rowScale, 0);
+        const auto localStart = (overlapStart - pageRowStart) / rowScale;
+        const auto localCount = (overlapEnd - overlapStart) / rowScale;
+        const auto rangeRead = lanceStructuralPageSupportsRangeRead(
+            type,
+            arrayDimensions,
+            metadata_.physicalColumnChildLogicalTypes(physicalIndex),
+            metadata_.pageLayout(physicalIndex, pageIndex));
         auto decoded = decodeLanceStructuralPage(
             type,
             metadata_.physicalColumnLogicalType(physicalIndex),
@@ -3239,6 +3259,8 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
             column,
             page,
             metadata_.pageLayout(physicalIndex, pageIndex),
+            localStart,
+            localCount,
             pool_,
             blobResolver_,
             input_.getName(),
@@ -3254,14 +3276,10 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
             [this](uint64_t offset, uint64_t length) {
               return read(offset, length);
             });
-        BOLT_CHECK_EQ((overlapStart - pageRowStart) % rowScale, 0);
-        BOLT_CHECK_EQ((overlapEnd - overlapStart) % rowScale, 0);
-        const auto localStart = (overlapStart - pageRowStart) / rowScale;
-        const auto localCount = (overlapEnd - overlapStart) / rowScale;
         result->copy(
             decoded.get(),
             static_cast<vector_size_t>(outputOffset),
-            static_cast<vector_size_t>(localStart),
+            static_cast<vector_size_t>(rangeRead ? 0 : localStart),
             static_cast<vector_size_t>(localCount));
         outputOffset += localCount;
       }
