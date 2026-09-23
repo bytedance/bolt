@@ -2911,21 +2911,21 @@ TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
   }
   EXPECT_LT(readFile->bytesRead(), fullPageBytes);
 
-  std::shared_ptr<ReadFile> fallbackSource =
+  std::shared_ptr<ReadFile> nullableStringSource =
       std::make_shared<LocalReadFile>("examples/exact_v2_1.lance");
-  auto fallbackReadFile = std::make_shared<CountingReadFile>(
-      fallbackSource->pread(0, fallbackSource->size()));
-  auto fallbackInput =
-      std::make_unique<dwio::common::BufferedInput>(fallbackReadFile, *pool_);
-  NativeLanceMetadata fallbackMetadata(*fallbackInput, *pool_);
-  const auto namePhysical = fallbackMetadata.physicalColumnIndex(1);
-  const auto& nameColumn = fallbackMetadata.column(namePhysical);
+  auto nullableStringReadFile = std::make_shared<CountingReadFile>(
+      nullableStringSource->pread(0, nullableStringSource->size()));
+  auto nullableStringInput = std::make_unique<dwio::common::BufferedInput>(
+      nullableStringReadFile, *pool_);
+  NativeLanceMetadata nullableStringMetadata(*nullableStringInput, *pool_);
+  const auto namePhysical = nullableStringMetadata.physicalColumnIndex(1);
+  const auto& nameColumn = nullableStringMetadata.column(namePhysical);
   ASSERT_GT(nameColumn.pages_size(), 0);
-  const auto& nameLayout = fallbackMetadata.pageLayout(namePhysical, 0);
-  EXPECT_FALSE(lanceStructuralPageSupportsRangeRead(
-      fallbackMetadata.rowType()->childAt(1),
+  const auto& nameLayout = nullableStringMetadata.pageLayout(namePhysical, 0);
+  EXPECT_TRUE(lanceStructuralPageSupportsRangeRead(
+      nullableStringMetadata.rowType()->childAt(1),
       {},
-      fallbackMetadata.physicalColumnChildLogicalTypes(namePhysical),
+      nullableStringMetadata.physicalColumnChildLogicalTypes(namePhysical),
       nameLayout));
   uint64_t fullNamePageBytes = 0;
   uint64_t namePageStart = 0;
@@ -2938,14 +2938,57 @@ TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
     }
     namePageStart = namePageEnd;
   }
-  fallbackReadFile->resetBytesRead();
-  NativeLanceDecoder fallbackDecoder(*fallbackInput, fallbackMetadata, *pool_);
-  const auto names = fallbackDecoder.decodeColumn(1, kStart, kRows);
+  nullableStringReadFile->resetBytesRead();
+  NativeLanceDecoder nullableStringDecoder(
+      *nullableStringInput, nullableStringMetadata, *pool_);
+  const auto names = nullableStringDecoder.decodeColumn(1, kStart, kRows);
   ASSERT_EQ(names->size(), kRows);
   EXPECT_EQ(
       names->asFlatVector<StringView>()->valueAt(0).str(),
       "value-1020-deterministic-fixture");
-  EXPECT_EQ(fallbackReadFile->bytesRead(), fullNamePageBytes);
+  EXPECT_LT(nullableStringReadFile->bytesRead(), fullNamePageBytes);
+}
+
+TEST_F(NativeLanceTest, nullableMiniBlockReadsSelectedChunks) {
+  std::shared_ptr<ReadFile> source =
+      std::make_shared<LocalReadFile>("examples/scalar_v2_2.lance");
+  const auto contents = source->pread(0, source->size());
+  auto readFile = std::make_shared<CountingReadFile>(contents);
+  auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  NativeLanceMetadata metadata(*input, *pool_);
+
+  constexpr uint64_t kStart = 1'020;
+  constexpr uint64_t kRows = 17;
+  constexpr uint32_t kColumn = 0;
+  const auto physical = metadata.physicalColumnIndex(kColumn);
+  const auto& column = metadata.column(physical);
+  ASSERT_GT(column.pages_size(), 0);
+  const auto& layout = metadata.pageLayout(physical, 0);
+  ASSERT_TRUE(lanceStructuralPageSupportsRangeRead(
+      metadata.rowType()->childAt(kColumn),
+      {},
+      metadata.physicalColumnChildLogicalTypes(physical),
+      layout));
+  ASSERT_TRUE(layout.mini_block_layout().has_def_compression());
+
+  uint64_t fullPageBytes = 0;
+  for (const auto bytes : column.pages(0).buffer_sizes()) {
+    fullPageBytes += bytes;
+  }
+  readFile->resetBytesRead();
+  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  const auto values = decoder.decodeColumn(kColumn, kStart, kRows);
+  ASSERT_EQ(values->size(), kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    const auto absolute = kStart + row;
+    EXPECT_EQ(values->isNullAt(row), absolute % 19 == 0);
+    if (!values->isNullAt(row)) {
+      EXPECT_EQ(
+          values->asFlatVector<int128_t>()->valueAt(row),
+          (static_cast<int128_t>(absolute) - 1000) * 100 + 7);
+    }
+  }
+  EXPECT_LT(readFile->bytesRead(), fullPageBytes);
 }
 
 TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {

@@ -3345,12 +3345,18 @@ bool lanceStructuralPageSupportsRangeRead(
     return false;
   }
   const auto& mini = layout.mini_block_layout();
-  if (mini.has_rep_compression() || mini.has_def_compression() ||
-      mini.repetition_index_depth() != 0) {
+  if (mini.has_rep_compression() || mini.repetition_index_depth() != 0 ||
+      mini.layers_size() != 1) {
     return false;
   }
-  return mini.layers_size() == 1 &&
-      mini.layers(0) == ::lance::encodings21::REPDEF_ALL_VALID_ITEM;
+  switch (mini.layers(0)) {
+    case ::lance::encodings21::REPDEF_ALL_VALID_ITEM:
+      return !mini.has_def_compression();
+    case ::lance::encodings21::REPDEF_NULLABLE_ITEM:
+      return mini.has_def_compression();
+    default:
+      return false;
+  }
 }
 
 bool lanceStructuralLayoutHasCompression(
