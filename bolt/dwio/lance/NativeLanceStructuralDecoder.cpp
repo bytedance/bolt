@@ -895,14 +895,19 @@ struct StructuralState {
     const auto compare = currentDef++;
     ++currentLayer;
     uint64_t output = 0;
+    vector_size_t nullCount = 0;
+    auto* rawNulls = vector->mutableRawNulls();
     for (const auto level : def) {
       BOLT_CHECK_LT(level, levelsToRep.size());
       if (levelsToRep[level] <= currentRep) {
         BOLT_CHECK_LT(output, vector->size());
-        vector->setNull(output++, level > compare);
+        const auto isNull = level > compare;
+        bits::setBit(rawNulls, output++, !isNull);
+        nullCount += isNull;
       }
     }
     BOLT_CHECK_EQ(output, vector->size());
+    vector->setNullCount(nullCount);
   }
 
   void decimate(uint64_t dimension) {
@@ -1900,11 +1905,14 @@ struct SparseStructuralState {
         vector->size(),
         checkedVectorSize(layer.numSlots, "validity slot count"),
         "Lance Sparse validity domain does not match the Bolt vector");
+    vector_size_t nullCount = 0;
+    auto* rawNulls = vector->mutableRawNulls();
     for (uint64_t slot = 0; slot < layer.numSlots; ++slot) {
-      if (!layer.validity.isValid(slot)) {
-        vector->setNull(static_cast<vector_size_t>(slot), true);
-      }
+      const auto isValid = layer.validity.isValid(slot);
+      bits::setBit(rawNulls, slot, isValid);
+      nullCount += !isValid;
     }
+    vector->setNullCount(nullCount);
     pendingFixedSizeList = false;
     consumeLayer();
   }
