@@ -1068,6 +1068,7 @@ struct StructuralState {
 void appendFixed(
     const DecodedBlock& block,
     uint64_t numValues,
+    uint64_t outputCapacityValues,
     BufferPtr& output,
     uint64_t& outputValues,
     memory::MemoryPool& pool) {
@@ -1099,6 +1100,8 @@ void appendFixed(
       outputValues,
       std::numeric_limits<uint64_t>::max() / leafValuesPerItem,
       "Lance fixed-width output value count overflows");
+  BOLT_CHECK_LE(outputValues, outputCapacityValues);
+  BOLT_CHECK_LE(numValues, outputCapacityValues - outputValues);
   const auto oldLeafValues = outputValues * leafValuesPerItem;
   BOLT_CHECK_LE(
       oldLeafValues,
@@ -1113,10 +1116,20 @@ void appendFixed(
   const auto outputBytes = outputBits / 8 + (outputBits % 8 != 0);
   if (output == nullptr) {
     BOLT_CHECK_EQ(oldBits, 0);
-    output = AlignedBuffer::allocate<char>(outputBytes, &pool);
-  } else {
-    AlignedBuffer::reallocate<char>(&output, outputBytes);
+    BOLT_CHECK_LE(
+        outputCapacityValues,
+        std::numeric_limits<uint64_t>::max() / leafValuesPerItem,
+        "Lance fixed-width output capacity overflows");
+    const auto capacityLeafValues = outputCapacityValues * leafValuesPerItem;
+    BOLT_CHECK_LE(
+        capacityLeafValues,
+        std::numeric_limits<uint64_t>::max() / block.bitsPerValue,
+        "Lance fixed-width output capacity overflows");
+    const auto capacityBits = capacityLeafValues * block.bitsPerValue;
+    output = AlignedBuffer::allocate<char>(
+        capacityBits / 8 + (capacityBits % 8 != 0), &pool);
   }
+  BOLT_CHECK_GE(output->size(), outputBytes);
   if (block.bitsPerValue % 8 == 0) {
     std::memcpy(
         output->asMutable<char>() + oldBits / 8,
@@ -1238,6 +1251,8 @@ MiniBlockPage decodeMiniBlock(
   BOLT_CHECK(lastChunk != chunks.end());
   const auto firstChunkIndex = firstChunk - chunks.begin();
   const auto lastChunkIndex = lastChunk - chunks.begin();
+  const auto decodedCapacity =
+      lastChunk->itemStart + lastChunk->items - firstChunk->itemStart;
   const auto selectedDataOffset = firstChunk->dataOffset;
   BOLT_CHECK_LE(lastChunk->dataOffset, pageDataBytes);
   BOLT_CHECK_LE(lastChunk->bytes, pageDataBytes - lastChunk->dataOffset);
@@ -1335,7 +1350,13 @@ MiniBlockPage decodeMiniBlock(
         result.bitsPerValue = values.bitsPerValue;
       }
       BOLT_CHECK_EQ(result.bitsPerValue, values.bitsPerValue);
-      appendFixed(values, chunkItems, result.fixed, decodedItems, pool);
+      appendFixed(
+          values,
+          chunkItems,
+          decodedCapacity,
+          result.fixed,
+          decodedItems,
+          pool);
     } else {
       for (uint64_t i = 0; i < chunkItems; ++i) {
         result.variable.emplace_back(
@@ -1345,6 +1366,7 @@ MiniBlockPage decodeMiniBlock(
       decodedItems += chunkItems;
     }
   }
+  BOLT_CHECK_EQ(decodedItems, decodedCapacity);
   result.numItems = decodedItems;
   return result;
 }
@@ -1726,7 +1748,12 @@ SparsePage decodeSparse(
       }
       BOLT_CHECK_EQ(result.values.bitsPerValue, decoded.bitsPerValue);
       appendFixed(
-          decoded, chunkValues, result.values.fixed, decodedValues, pool);
+          decoded,
+          chunkValues,
+          layout.num_visible_items(),
+          result.values.fixed,
+          decodedValues,
+          pool);
     } else {
       BOLT_CHECK_EQ(decoded.size(), chunkValues);
       for (uint64_t i = 0; i < chunkValues; ++i) {
