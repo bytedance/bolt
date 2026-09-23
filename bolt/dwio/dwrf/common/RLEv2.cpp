@@ -29,8 +29,14 @@
  */
 
 #include "bolt/dwio/dwrf/common/RLEv2.h"
+#include "bolt/common/base/SimdUtil.h"
 #include "bolt/dwio/common/SeekableInputStream.h"
 #include "bolt/dwio/dwrf/common/Common.h"
+
+#ifdef BOLT_RLEV2_SVE
+#include "bolt/dwio/dwrf/common/RLEv2SVE.h"
+#endif
+
 namespace bytedance::bolt::dwrf {
 
 using memory::MemoryPool;
@@ -156,7 +162,8 @@ RleDecoderV2<isSigned>::RleDecoderV2(
       patchMask(0),
       actualGap(0),
       unpacked(pool, 0),
-      unpackedPatch(pool, 0) {
+      unpackedPatch(pool, 0),
+      bulkScratch_(pool, 0) {
   // PASS
 }
 
@@ -483,6 +490,37 @@ template void RleDecoderV2<false>::doNext(
     const uint64_t* const nulls);
 
 template <bool isSigned>
+void RleDecoderV2<isSigned>::readLongsFromBuffer(
+    int64_t* data,
+    uint64_t len,
+    uint64_t fb) {
+  auto* input = reinterpret_cast<const uint8_t*>(this->bufferStart);
+  uint32_t available = bitsLeft;
+  uint32_t byte = curByte;
+  for (uint64_t i = 0; i < len; ++i) {
+    uint64_t value = 0;
+    uint32_t needed = fb;
+    while (needed > available) {
+      value = (value << available) | (byte & ((1u << available) - 1));
+      needed -= available;
+      byte = *input++;
+      available = 8;
+    }
+    available -= needed;
+    data[i] = static_cast<int64_t>(
+        (value << needed) | ((byte >> available) & ((1u << needed) - 1)));
+  }
+  this->bufferStart = reinterpret_cast<const char*>(input);
+  bitsLeft = available;
+  curByte = byte;
+}
+
+template void
+RleDecoderV2<true>::readLongsFromBuffer(int64_t*, uint64_t, uint64_t);
+template void
+RleDecoderV2<false>::readLongsFromBuffer(int64_t*, uint64_t, uint64_t);
+
+template <bool isSigned>
 uint64_t RleDecoderV2<isSigned>::nextShortRepeats(
     int64_t* const data,
     uint64_t offset,
@@ -508,6 +546,14 @@ uint64_t RleDecoderV2<isSigned>::nextShortRepeats(
 
   uint64_t nRead = std::min(runLength - runRead, numValues);
 
+#ifdef BOLT_RLEV2_SVE
+  if (nRead > 1 && process::hasSve()) {
+    runRead += detail::fillRepeatedSve(
+        data, offset, offset + nRead, nulls, firstValue);
+    return nRead;
+  }
+#endif
+
   if (nulls) {
     for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
       if (!bits::isBitNull(nulls, pos)) {
@@ -516,10 +562,8 @@ uint64_t RleDecoderV2<isSigned>::nextShortRepeats(
       }
     }
   } else {
-    for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
-      data[pos] = firstValue;
-      ++runRead;
-    }
+    std::fill_n(data + offset, nRead, firstValue);
+    runRead += nRead;
   }
 
   return nRead;
@@ -560,6 +604,12 @@ uint64_t RleDecoderV2<isSigned>::nextDirect(
   runRead += readLongs(data, offset, nRead, bitSize, nulls);
 
   if (isSigned) {
+#ifdef BOLT_RLEV2_SVE
+    if (nRead > 1 && process::hasSve()) {
+      detail::zigzagDecodeSve(data, offset, offset + nRead, nulls);
+      return nRead;
+    }
+#endif
     if (nulls) {
       for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
         if (!bits::isBitNull(nulls, pos)) {
@@ -568,7 +618,15 @@ uint64_t RleDecoderV2<isSigned>::nextDirect(
         }
       }
     } else {
-      for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
+      using Batch = xsimd::batch<uint64_t>;
+      uint64_t pos = offset;
+      for (; pos + Batch::size <= offset + nRead; pos += Batch::size) {
+        auto* values = reinterpret_cast<uint64_t*>(data + pos);
+        const auto encoded = Batch::load_unaligned(values);
+        const auto decoded = (encoded >> 1) ^ (Batch(0) - (encoded & Batch(1)));
+        decoded.store_unaligned(values);
+      }
+      for (; pos < offset + nRead; ++pos) {
         data[pos] = ZigZag::decode<uint64_t>(static_cast<uint64_t>(data[pos]));
       }
     }
@@ -765,6 +823,25 @@ uint64_t RleDecoderV2<isSigned>::nextDelta(
   }
 
   if (bitSize == 0) {
+#ifdef BOLT_RLEV2_SVE
+    if (offset + nRead - pos > 1 && process::hasSve()) {
+      runRead += detail::fixedDeltaSve(
+          data, pos, offset + nRead, nulls, deltaBase, prevValue);
+      return nRead;
+    }
+#endif
+    if (!nulls) {
+      using Batch = xsimd::batch<uint64_t>;
+      const auto delta = static_cast<uint64_t>(deltaBase);
+      const auto steps = (simd::iota<uint64_t>() + Batch(1)) * Batch(delta);
+      for (; pos + Batch::size <= offset + nRead; pos += Batch::size) {
+        const auto values = Batch(static_cast<uint64_t>(prevValue)) + steps;
+        values.store_unaligned(reinterpret_cast<uint64_t*>(data + pos));
+        prevValue = static_cast<int64_t>(
+            static_cast<uint64_t>(prevValue) + Batch::size * delta);
+        runRead += Batch::size;
+      }
+    }
     // add fixed deltas to adjacent values
     for (; pos < offset + nRead; ++pos) {
       // skip null positions
@@ -792,6 +869,14 @@ uint64_t RleDecoderV2<isSigned>::nextDelta(
     // is a decreasing sequence else an increasing sequence
     uint64_t remaining = (offset + nRead) - pos;
     runRead += readLongs(data, pos, remaining, bitSize, nulls);
+
+#ifdef BOLT_RLEV2_SVE
+    if (remaining > 1 && process::hasSve()) {
+      detail::variableDeltaSve(
+          data, pos, offset + nRead, nulls, deltaBase < 0, prevValue);
+      return nRead;
+    }
+#endif
 
     if (deltaBase < 0) {
       for (; pos < offset + nRead; ++pos) {

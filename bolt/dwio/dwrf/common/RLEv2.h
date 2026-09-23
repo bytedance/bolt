@@ -31,11 +31,13 @@
 #pragma once
 
 #include "bolt/common/memory/Memory.h"
+#include "bolt/common/process/ProcessBase.h"
 #include "bolt/dwio/common/Adaptor.h"
 #include "bolt/dwio/common/DataBuffer.h"
 #include "bolt/dwio/common/IntDecoder.h"
 #include "bolt/dwio/common/exception/Exception.h"
 
+#include <type_traits>
 #include <vector>
 namespace bytedance::bolt::dwrf {
 
@@ -81,6 +83,16 @@ class RleDecoderV2 : public dwio::common::IntDecoder<isSigned> {
     int32_t toSkip;
     bool atEnd = false;
     const bool allowNulls = hasNulls && visitor.allowNulls();
+    // Deterministic, dense ColumnVisitors consume every row in order. Hooks
+    // and positional filters retain the per-value path: decoding ahead of
+    // their callbacks could advance the stream past an early exit or skip.
+    bool batchRead = false;
+    if constexpr (
+        Visitor::dense && Visitor::FilterType::deterministic &&
+        !Visitor::kHasHook &&
+        !std::is_same_v<typename Visitor::DataType, int128_t>) {
+      batchRead = process::hasSimd() && visitor.filter().isDeterministic();
+    }
 
     for (;;) {
       if (hasNulls && allowNulls && bits::isBitNull(nulls, current)) {
@@ -93,6 +105,41 @@ class RleDecoderV2 : public dwio::common::IntDecoder<isSigned> {
           }
           if (atEnd) {
             return;
+          }
+        }
+
+        if constexpr (
+            Visitor::dense && Visitor::FilterType::deterministic &&
+            !Visitor::kHasHook &&
+            !std::is_same_v<typename Visitor::DataType, int128_t>) {
+          if (batchRead) {
+            // Use the non-const numRows(): it counts visitor rows, not the
+            // reader's output rows. Bound temporary storage independently of
+            // the size of the read request.
+            const auto limit =
+                std::min<int32_t>(kBatchSize, visitor.numRows() - current);
+            int32_t count = 1;
+            while (count < limit &&
+                   (!hasNulls || !bits::isBitNull(nulls, current + count))) {
+              ++count;
+            }
+            if (count > 1) {
+              if (bulkScratch_.size() < count) {
+                bulkScratch_.resize(kBatchSize);
+              }
+              doNext(bulkScratch_.data(), count, nullptr);
+              for (int32_t i = 0; i < count; ++i) {
+                toSkip = visitor.process(bulkScratch_[i], atEnd);
+                ++current;
+                // Do not attempt a scalar fallback after decoding ahead.
+                BOLT_CHECK_EQ(toSkip, 0);
+                if (atEnd) {
+                  BOLT_CHECK_EQ(i + 1, count);
+                  return;
+                }
+              }
+              continue;
+            }
           }
         }
 
@@ -113,6 +160,9 @@ class RleDecoderV2 : public dwio::common::IntDecoder<isSigned> {
   }
 
  private:
+  static constexpr int32_t kBatchSize = 512;
+  static constexpr int32_t kMinBatchSize = 8;
+
   // Used by PATCHED_BASE
   void adjustGapAndPatch() {
     curGap = static_cast<uint64_t>(unpackedPatch[patchIdx]) >> patchBitSize;
@@ -171,6 +221,17 @@ class RleDecoderV2 : public dwio::common::IntDecoder<isSigned> {
       uint64_t len,
       uint64_t fb,
       const uint64_t* nulls = nullptr) {
+    if (!nulls && fb >= 1 && fb <= 32 && len >= kMinBatchSize &&
+        this->bufferStart != this->bufferEnd) {
+      const uint64_t requiredBits = len * fb;
+      const uint64_t requiredBytes =
+          requiredBits > bitsLeft ? (requiredBits - bitsLeft + 7) / 8 : 0;
+      if (requiredBytes <=
+          static_cast<uint64_t>(this->bufferEnd - this->bufferStart)) {
+        readLongsFromBuffer(data + offset, len, fb);
+        return len;
+      }
+    }
     uint64_t ret = 0;
 
     // TODO: unroll to improve performance
@@ -201,6 +262,10 @@ class RleDecoderV2 : public dwio::common::IntDecoder<isSigned> {
 
     return ret;
   }
+
+  // MSB-first unpacking after the caller has checked the entire byte range.
+  // Unlike the general path, this does not refill or check each input byte.
+  void readLongsFromBuffer(int64_t* data, uint64_t len, uint64_t fb);
 
   uint64_t nextShortRepeats(
       int64_t* data,
@@ -256,6 +321,7 @@ class RleDecoderV2 : public dwio::common::IntDecoder<isSigned> {
   EncodingType type;
   dwio::common::DataBuffer<int64_t> unpacked; // Used by PATCHED_BASE
   dwio::common::DataBuffer<int64_t> unpackedPatch; // Used by PATCHED_BASE
+  dwio::common::DataBuffer<int64_t> bulkScratch_;
 };
 
 } // namespace bytedance::bolt::dwrf
