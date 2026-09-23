@@ -104,6 +104,19 @@ copyBuffer(const char* data, uint64_t size, memory::MemoryPool& pool) {
   return result;
 }
 
+struct ZstdContextDeleter {
+  void operator()(ZSTD_DCtx* context) const {
+    ZSTD_freeDCtx(context);
+  }
+};
+
+ZSTD_DCtx* zstdContext() {
+  thread_local auto context =
+      std::unique_ptr<ZSTD_DCtx, ZstdContextDeleter>(ZSTD_createDCtx());
+  BOLT_CHECK_NOT_NULL(context.get(), "Failed to create Lance zstd context");
+  return context.get();
+}
+
 BufferPtr decompressBuffer(
     const ::lance::encodings21::BufferCompression* compression,
     const BufferPtr& input,
@@ -132,8 +145,12 @@ BufferPtr decompressBuffer(
       sourceSize -= sizeof(uint64_t);
     }
     auto output = AlignedBuffer::allocate<char>(outputSize, &pool);
-    const auto decoded = ZSTD_decompress(
-        output->asMutable<char>(), outputSize, source, sourceSize);
+    const auto decoded = ZSTD_decompressDCtx(
+        zstdContext(),
+        output->asMutable<char>(),
+        outputSize,
+        source,
+        sourceSize);
     BOLT_CHECK(!ZSTD_isError(decoded), "Invalid Lance zstd block");
     BOLT_CHECK_EQ(decoded, outputSize);
     return output;
