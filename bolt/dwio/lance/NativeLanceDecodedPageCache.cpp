@@ -24,8 +24,10 @@ VectorPtr NativeLanceDecodedPageCache::get(Key key) {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto it = entries_.find(key);
   if (it == entries_.end()) {
+    ++misses_;
     return nullptr;
   }
+  ++hits_;
   lru_.splice(lru_.begin(), lru_, it->second.lruPosition);
   return it->second.vector;
 }
@@ -39,13 +41,20 @@ VectorPtr NativeLanceDecodedPageCache::getOrLoad(
     std::lock_guard<std::mutex> lock(mutex_);
     const auto cached = entries_.find(key);
     if (cached != entries_.end()) {
+      ++hits_;
       lru_.splice(lru_.begin(), lru_, cached->second.lruPosition);
       return cached->second.vector;
     }
+    ++misses_;
     const auto [it, inserted] =
         pending_.try_emplace(key, std::make_shared<Pending>());
     pending = it->second;
     loader = inserted;
+    if (loader) {
+      ++loads_;
+    } else {
+      ++waits_;
+    }
   }
   if (!loader) {
     std::unique_lock<std::mutex> lock(pending->mutex);
@@ -114,6 +123,18 @@ uint64_t NativeLanceDecodedPageCache::sizeBytes() const {
   return sizeBytes_;
 }
 
+NativeLanceDecodedPageCache::Stats NativeLanceDecodedPageCache::stats() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return {
+      .hits = hits_,
+      .misses = misses_,
+      .loads = loads_,
+      .waits = waits_,
+      .evictions = evictions_,
+      .sizeBytes = sizeBytes_,
+  };
+}
+
 void NativeLanceDecodedPageCache::evictLocked() {
   while (sizeBytes_ > maxBytes_ && !lru_.empty()) {
     const auto key = lru_.back();
@@ -122,6 +143,7 @@ void NativeLanceDecodedPageCache::evictLocked() {
     sizeBytes_ -= it->second.retainedBytes;
     entries_.erase(it);
     lru_.pop_back();
+    ++evictions_;
   }
 }
 

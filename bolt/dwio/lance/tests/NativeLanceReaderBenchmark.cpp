@@ -248,7 +248,12 @@ uint64_t nativeReader(uint32_t iterations) {
                 << " cache_misses=" << stats.decompressedCacheMisses
                 << " compressed_bytes=" << stats.compressedBytesRead
                 << " decompressed_bytes=" << stats.decompressedBytesProduced
-                << "\n";
+                << " page_cache_hits=" << stats.decodedPageCacheHits
+                << " page_cache_misses=" << stats.decodedPageCacheMisses
+                << " page_cache_loads=" << stats.decodedPageCacheLoads
+                << " page_cache_waits=" << stats.decodedPageCacheWaits
+                << " page_cache_evictions=" << stats.decodedPageCacheEvictions
+                << " page_cache_bytes=" << stats.decodedPageCacheBytes << "\n";
     }
   }
   return rows;

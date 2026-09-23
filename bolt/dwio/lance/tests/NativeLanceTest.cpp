@@ -5000,6 +5000,12 @@ TEST_F(NativeLanceTest, decodedPageCacheIsSharedAcrossDecoders) {
   const auto bytesAfterFirst = readFile->bytesRead();
   EXPECT_GT(bytesAfterFirst, 0);
   EXPECT_GT(cache->sizeBytes(), 0);
+  auto stats = cache->stats();
+  EXPECT_EQ(stats.hits, 0);
+  EXPECT_EQ(stats.misses, 1);
+  EXPECT_EQ(stats.loads, 1);
+  EXPECT_EQ(stats.waits, 0);
+  EXPECT_GT(stats.sizeBytes, 0);
 
   auto secondInput =
       std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
@@ -5020,6 +5026,10 @@ TEST_F(NativeLanceTest, decodedPageCacheIsSharedAcrossDecoders) {
       secondValues->asFlatVector<int32_t>()->rawValues(),
       firstValues->asFlatVector<int32_t>()->rawValues() + 1);
   EXPECT_EQ(readFile->bytesRead(), 0);
+  stats = cache->stats();
+  EXPECT_EQ(stats.hits, 1);
+  EXPECT_EQ(stats.misses, 1);
+  EXPECT_EQ(stats.loads, 1);
 
   firstValues->asFlatVector<int32_t>()->mutableRawValues()[1] = 100;
   EXPECT_EQ(firstValues->asFlatVector<int32_t>()->valueAt(1), 100);
@@ -5078,6 +5088,29 @@ TEST_F(NativeLanceTest, decodedPageCacheCoalescesConcurrentLoads) {
   const auto secondVector = second.get();
   EXPECT_EQ(loadCalls, 1);
   EXPECT_EQ(firstVector.get(), secondVector.get());
+  const auto stats = cache->stats();
+  EXPECT_EQ(stats.hits, 0);
+  EXPECT_EQ(stats.misses, 2);
+  EXPECT_EQ(stats.loads, 1);
+  EXPECT_EQ(stats.waits, 1);
+}
+
+TEST_F(NativeLanceTest, decodedPageCacheReportsEvictions) {
+  auto first = BaseVector::create(INTEGER(), 16, pool_.get());
+  auto second = BaseVector::create(INTEGER(), 16, pool_.get());
+  auto cache =
+      std::make_shared<NativeLanceDecodedPageCache>(first->retainedSize());
+  constexpr NativeLanceDecodedPageCache::Key kFirst{1, 1};
+  constexpr NativeLanceDecodedPageCache::Key kSecond{2, 2};
+
+  cache->put(kFirst, first);
+  cache->put(kSecond, second);
+
+  const auto stats = cache->stats();
+  EXPECT_EQ(stats.evictions, 1);
+  EXPECT_LE(stats.sizeBytes, first->retainedSize());
+  EXPECT_FALSE(cache->contains(kFirst));
+  EXPECT_TRUE(cache->contains(kSecond));
 }
 
 TEST_F(NativeLanceTest, decompressedCacheCanGrowWithFileSize) {

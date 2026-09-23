@@ -1088,7 +1088,15 @@ NativeLanceReader::typeWithId() const {
 }
 
 NativeLanceMetadata::DebugStats NativeLanceReader::debugStats() const {
-  return readerBase_->metadata().debugStats();
+  auto stats = readerBase_->metadata().debugStats();
+  const auto pageCacheStats = readerBase_->decodedPageCache()->stats();
+  stats.decodedPageCacheHits = pageCacheStats.hits;
+  stats.decodedPageCacheMisses = pageCacheStats.misses;
+  stats.decodedPageCacheLoads = pageCacheStats.loads;
+  stats.decodedPageCacheWaits = pageCacheStats.waits;
+  stats.decodedPageCacheEvictions = pageCacheStats.evictions;
+  stats.decodedPageCacheBytes = pageCacheStats.sizeBytes;
+  return stats;
 }
 
 size_t NativeLanceReader::loadedColumnMetadataCount() const {

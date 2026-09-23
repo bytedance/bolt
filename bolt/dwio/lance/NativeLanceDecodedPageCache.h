@@ -34,6 +34,15 @@ class NativeLanceDecodedPageCache {
  public:
   static constexpr uint64_t kDefaultMaxBytes = 512UL << 20;
 
+  struct Stats {
+    uint64_t hits{0};
+    uint64_t misses{0};
+    uint64_t loads{0};
+    uint64_t waits{0};
+    uint64_t evictions{0};
+    uint64_t sizeBytes{0};
+  };
+
   struct Key {
     uint32_t physicalColumnIndex;
     int32_t pageIndex;
@@ -64,6 +73,8 @@ class NativeLanceDecodedPageCache {
 
   uint64_t sizeBytes() const;
 
+  Stats stats() const;
+
  private:
   struct Entry {
     VectorPtr vector;
@@ -87,6 +98,11 @@ class NativeLanceDecodedPageCache {
   std::unordered_map<Key, Entry, KeyHash> entries_;
   std::unordered_map<Key, std::shared_ptr<Pending>, KeyHash> pending_;
   uint64_t sizeBytes_{0};
+  uint64_t hits_{0};
+  uint64_t misses_{0};
+  uint64_t loads_{0};
+  uint64_t waits_{0};
+  uint64_t evictions_{0};
 };
 
 } // namespace bytedance::bolt::lance::reader
