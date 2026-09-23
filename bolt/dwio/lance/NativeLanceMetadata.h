@@ -74,6 +74,10 @@ class NativeLanceMetadata {
     uint64_t decodedWindowBuilds{0};
     uint64_t decodedWindowRows{0};
     uint64_t decodedWindowSlices{0};
+    uint64_t selectiveWindowBuilds{0};
+    uint64_t selectiveWindowSourceRows{0};
+    uint64_t selectiveWindowOutputRows{0};
+    uint64_t selectiveWindowSlices{0};
   };
 
   struct StructuralField {

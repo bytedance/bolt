@@ -258,6 +258,11 @@ uint64_t nativeReader(uint32_t iterations) {
                 << " builds=" << stats.decodedWindowBuilds
                 << " rows=" << stats.decodedWindowRows
                 << " slices=" << stats.decodedWindowSlices << "\n";
+      std::cerr << "BOLT_LANCE_SELECTIVE_WINDOW_STATS mode=native"
+                << " builds=" << stats.selectiveWindowBuilds
+                << " source_rows=" << stats.selectiveWindowSourceRows
+                << " output_rows=" << stats.selectiveWindowOutputRows
+                << " slices=" << stats.selectiveWindowSlices << "\n";
     }
   }
   return rows;

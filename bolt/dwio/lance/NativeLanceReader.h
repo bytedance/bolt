@@ -20,6 +20,8 @@
 #include <mutex>
 #include <utility>
 
+#include <folly/Portability.h>
+
 #include "bolt/dwio/common/Reader.h"
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
@@ -84,6 +86,20 @@ class NativeLanceReaderBase {
     stats.decodedWindowBuilds = decodedWindowBuilds_;
     stats.decodedWindowRows = decodedWindowRows_;
     stats.decodedWindowSlices = decodedWindowSlices_;
+    stats.selectiveWindowBuilds = selectiveWindowBuilds_;
+    stats.selectiveWindowSourceRows = selectiveWindowSourceRows_;
+    stats.selectiveWindowOutputRows = selectiveWindowOutputRows_;
+    stats.selectiveWindowSlices = selectiveWindowSlices_;
+  }
+
+  void recordSelectiveWindow(uint64_t sourceRows, uint64_t outputRows) {
+    ++selectiveWindowBuilds_;
+    selectiveWindowSourceRows_ += sourceRows;
+    selectiveWindowOutputRows_ += outputRows;
+  }
+
+  void recordSelectiveWindowSlice() {
+    ++selectiveWindowSlices_;
   }
 
  private:
@@ -97,6 +113,10 @@ class NativeLanceReaderBase {
   std::atomic<uint64_t> decodedWindowBuilds_{0};
   std::atomic<uint64_t> decodedWindowRows_{0};
   std::atomic<uint64_t> decodedWindowSlices_{0};
+  std::atomic<uint64_t> selectiveWindowBuilds_{0};
+  std::atomic<uint64_t> selectiveWindowSourceRows_{0};
+  std::atomic<uint64_t> selectiveWindowOutputRows_{0};
+  std::atomic<uint64_t> selectiveWindowSlices_{0};
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
@@ -144,6 +164,13 @@ class NativeLanceRowReader : public dwio::common::RowReader {
     VectorPtr rows;
   };
 
+  struct SelectiveWindow {
+    uint64_t begin;
+    uint64_t end;
+    VectorPtr rows;
+    std::vector<vector_size_t> selectedRows;
+  };
+
   void advancePastFinishedRange();
   uint64_t capReadSize(uint64_t size) const;
   FetchResult prefetchRange(size_t rangeIndex);
@@ -155,6 +182,13 @@ class NativeLanceRowReader : public dwio::common::RowReader {
       uint64_t readEnd);
   std::optional<size_t> prefetchRangeIndex(uint64_t begin, uint64_t end) const;
   NativeLanceDecoder* prefetchedDecoderForRange(uint64_t begin, uint64_t end);
+  FOLLY_NOINLINE void readFiltered(
+      uint64_t readBegin,
+      uint64_t readEnd,
+      uint64_t requestedRows,
+      const common::ScanSpec& scanSpec,
+      const dwio::common::Mutation* mutation,
+      VectorPtr& result);
 
   std::shared_ptr<NativeLanceReaderBase> readerBase_;
   dwio::common::RowReaderOptions options_;
@@ -168,9 +202,12 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
   std::optional<PipelineState> pipeline_;
   std::optional<DenseWindow> denseWindow_;
+  std::optional<SelectiveWindow> selectiveWindow_;
+  std::optional<double> observedFilterSelectivity_;
   mutable std::mutex prefetchMutex_;
   mutable std::mutex decoderMutex_;
   bool denseWindowEnabled_{false};
+  bool selectiveWindowEnabled_{false};
   size_t currentRange_{0};
   uint64_t currentRow_{0};
   uint64_t batchesRead_{0};

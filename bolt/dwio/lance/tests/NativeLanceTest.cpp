@@ -4202,7 +4202,72 @@ TEST_F(NativeLanceTest, rowReaderDoesNotWindowFilteredScans) {
 
   VectorPtr result;
   EXPECT_EQ(rowReader->next(4, result), 4);
+  EXPECT_EQ(rowReader->next(4, result), 4);
   EXPECT_EQ(reader.debugStats().decodedWindowBuilds, 0);
+  EXPECT_EQ(reader.debugStats().selectiveWindowBuilds, 0);
+}
+
+TEST_F(NativeLanceTest, rowReaderSlicesLowSelectivityWindowBySourceRows) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addField("a", 0)->setFilter(
+      std::make_unique<common::BigintRange>(5, 5, false));
+  scanSpec->addField("b", 1);
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  EXPECT_EQ(result->size(), 0);
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  ASSERT_EQ(result->size(), 1);
+  EXPECT_EQ(
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>()->valueAt(
+          0),
+      5);
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  EXPECT_EQ(result->size(), 0);
+  const auto stats = reader.debugStats();
+  EXPECT_EQ(stats.selectiveWindowBuilds, 1);
+  EXPECT_EQ(stats.selectiveWindowSourceRows, 16);
+  EXPECT_EQ(stats.selectiveWindowOutputRows, 1);
+  EXPECT_EQ(stats.selectiveWindowSlices, 2);
+}
+
+TEST_F(NativeLanceTest, selectiveWindowRequiresFullProjection) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addField("a", 0)->setFilter(
+      std::make_unique<common::BigintRange>(5, 5, false));
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  EXPECT_EQ(rowReader->next(4, result), 4);
+  EXPECT_EQ(reader.debugStats().selectiveWindowBuilds, 0);
+}
+
+TEST_F(NativeLanceTest, selectiveWindowHonorsBatchMemoryBudget) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addField("a", 0)->setFilter(
+      std::make_unique<common::BigintRange>(5, 5, false));
+  scanSpec->addField("b", 1);
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  options.setMaxBatchBytes(64);
+  auto rowReader = reader.createRowReader(options);
+
+  VectorPtr result;
+  EXPECT_GT(rowReader->next(4, result), 0);
+  EXPECT_GT(rowReader->next(4, result), 0);
+  EXPECT_EQ(reader.debugStats().selectiveWindowBuilds, 0);
 }
 
 TEST_F(NativeLanceTest, rowReaderAppliesScanSpecFilter) {
