@@ -629,9 +629,7 @@ NativeLanceReaderBase::NativeLanceReaderBase(
               ? nullptr
               : std::make_shared<CachingNativeLanceBlobResolver>(
                     std::move(blobResolver))),
-      readPlanOptions_(makeReadPlanOptions(options)),
-      decodedPageCache_(std::make_shared<NativeLanceDecodedPageCache>(
-          NativeLanceDecodedPageCache::kDefaultMaxBytes)) {
+      readPlanOptions_(makeReadPlanOptions(options)) {
   BOLT_CHECK(
       !options.isFileColumnNamesReadAsLowerCase(),
       "The Lance format does not support reading column names as lowercase");
@@ -646,14 +644,11 @@ NativeLanceRowReader::NativeLanceRowReader(
           readerBase_->input(),
           readerBase_->metadata(),
           readerBase_->pool(),
-          true,
           readerBase_->blobResolver(),
-          readerBase_->readPlanOptions(),
-          readerBase_->decodedPageCache()) {
+          readerBase_->readPlanOptions()) {
   maxBatchBytes_ = options_.getMaxBatchBytes();
   estimatedBytesPerRow_ =
       estimateReadBytesPerRow(readerBase_->metadata().rowType(), options_);
-  windowBytesPerRow_ = estimatedBytesPerRow_;
   rootColumnReader_ = NativeLanceStructColumnReader::buildRoot(
       readerBase_->metadata().rowType(), options_);
   auto requiredColumns = rootColumnReader_->fileColumnIndices();
@@ -669,10 +664,6 @@ NativeLanceRowReader::NativeLanceRowReader(
   requiredColumns.erase(
       std::unique(requiredColumns.begin(), requiredColumns.end()),
       requiredColumns.end());
-  denseWindowEnabled_ = readerBase_->input().supportSyncLoad() &&
-      maxBatchBytes_ == 0 &&
-      requiredColumns.size() == readerBase_->metadata().rowType()->size();
-  selectiveWindowEnabled_ = denseWindowEnabled_;
   readerBase_->metadata().loadLogicalColumns(requiredColumns);
   rowRanges_ = readerBase_->metadata().rowRangesForFileRange(
       options_.getOffset(), options_.getLimit());
@@ -804,10 +795,8 @@ dwio::common::RowReader::FetchResult NativeLanceRowReader::prefetchRange(
           *prefetchInputs_[rangeIndex],
           readerBase_->metadata(),
           readerBase_->pool(),
-          true,
           readerBase_->blobResolver(),
-          readerBase_->readPlanOptions(),
-          readerBase_->decodedPageCache());
+          readerBase_->readPlanOptions());
     }
   }
 
@@ -894,10 +883,8 @@ void NativeLanceRowReader::prepareNextBatchPipeline(
       *input,
       readerBase_->metadata(),
       readerBase_->pool(),
-      true,
       readerBase_->blobResolver(),
-      readerBase_->readPlanOptions(),
-      readerBase_->decodedPageCache());
+      readerBase_->readPlanOptions());
   try {
     rootColumnReader_->planRead(*decoder, nextBegin, rows);
     pipeline_ = PipelineState{
@@ -969,69 +956,6 @@ void NativeLanceRowReader::readFiltered(
     const dwio::common::Mutation* mutation,
     VectorPtr& result) {
   const auto rowsToRead = readEnd - readBegin;
-  const bool canUseWindow = selectiveWindowEnabled_ && mutation == nullptr &&
-      observedFilterSelectivity_.has_value() &&
-      *observedFilterSelectivity_ <= 0.25;
-  if (canUseWindow) {
-    constexpr uint64_t kMaxWindowRows = 64 * 1024;
-    constexpr uint64_t kMaxWindowBytes = 64UL << 20;
-    if (!selectiveWindow_.has_value() || selectiveWindow_->begin > readBegin ||
-        selectiveWindow_->end < readEnd) {
-      const auto estimatedWindowRows =
-          std::max<uint64_t>(1, kMaxWindowBytes / windowBytesPerRow_);
-      auto windowRows = std::min(
-          {kMaxWindowRows,
-           estimatedWindowRows,
-           rowRanges_[currentRange_].second - readBegin});
-      if (windowRows > rowsToRead &&
-          windowRows < rowRanges_[currentRange_].second - readBegin) {
-        windowRows -= windowRows % rowsToRead;
-      }
-      if (windowRows > rowsToRead) {
-        std::vector<vector_size_t> selectedRows;
-        auto window = readSelective(
-            decoder_,
-            readerBase_->metadata().rowType(),
-            scanSpec,
-            readBegin,
-            static_cast<vector_size_t>(windowRows),
-            readerBase_->pool(),
-            options_.getDecodingExecutor(),
-            options_.getDecodingParallelismFactor(),
-            nullptr,
-            &selectedRows);
-        window = applyScanSpecProjection(
-            std::move(window), scanSpec, readerBase_->pool());
-        readerBase_->recordSelectiveWindow(windowRows, window->size());
-        selectiveWindow_ = SelectiveWindow{
-            readBegin, readBegin + windowRows, window, std::move(selectedRows)};
-      } else {
-        selectiveWindow_.reset();
-      }
-    }
-    if (selectiveWindow_.has_value() && selectiveWindow_->begin <= readBegin &&
-        selectiveWindow_->end >= readEnd) {
-      const auto localBegin =
-          static_cast<vector_size_t>(readBegin - selectiveWindow_->begin);
-      const auto localEnd =
-          static_cast<vector_size_t>(readEnd - selectiveWindow_->begin);
-      const auto first = std::lower_bound(
-          selectiveWindow_->selectedRows.begin(),
-          selectiveWindow_->selectedRows.end(),
-          localBegin);
-      const auto last = std::lower_bound(
-          first, selectiveWindow_->selectedRows.end(), localEnd);
-      result = selectiveWindow_->rows->slice(
-          static_cast<vector_size_t>(
-              first - selectiveWindow_->selectedRows.begin()),
-          static_cast<vector_size_t>(last - first));
-      readerBase_->recordSelectiveWindowSlice();
-      return;
-    }
-  } else {
-    selectiveWindow_.reset();
-  }
-
   auto pipeline = takePipeline(readBegin, readEnd);
   NativeLanceDecoder* const decoder = pipeline.has_value()
       ? pipeline->decoder.get()
@@ -1050,10 +974,6 @@ void NativeLanceRowReader::readFiltered(
       mutation == nullptr ? nullptr : mutation->deletedRows);
   result =
       applyScanSpecProjection(std::move(result), scanSpec, readerBase_->pool());
-  if (selectiveWindowEnabled_ && mutation == nullptr) {
-    observedFilterSelectivity_ =
-        static_cast<double>(result->size()) / rowsToRead;
-  }
 }
 
 uint64_t NativeLanceRowReader::next(
@@ -1076,7 +996,6 @@ uint64_t NativeLanceRowReader::next(
   std::lock_guard<std::mutex> decoderLock(decoderMutex_);
   const auto& scanSpec = options_.getScanSpec();
   if (FOLLY_UNLIKELY(scanSpec && scanSpec->hasFilter())) {
-    denseWindow_.reset();
     readFiltered(readBegin, readEnd, size, *scanSpec, mutation, result);
     currentRow_ += rowsToRead;
     markPrefetchRangesFinished(readBegin, currentRow_);
@@ -1097,61 +1016,22 @@ uint64_t NativeLanceRowReader::next(
     }
     return rowsToRead;
   }
-  const bool useDenseWindow = denseWindowEnabled_ && mutation == nullptr;
-  bool readFromDenseWindow = false;
-  if (useDenseWindow) {
-    constexpr uint64_t kMaxWindowRows = 64 * 1024;
-    constexpr uint64_t kMaxWindowBytes = 64UL << 20;
-    if (!denseWindow_.has_value() || denseWindow_->begin > readBegin ||
-        denseWindow_->end < readEnd) {
-      const auto estimatedWindowRows =
-          std::max<uint64_t>(1, kMaxWindowBytes / windowBytesPerRow_);
-      const auto windowRows = std::min(
-          {kMaxWindowRows,
-           estimatedWindowRows,
-           rowRanges_[currentRange_].second - readBegin});
-      if (windowRows > rowsToRead) {
-        auto window = rootColumnReader_->read(
-            decoder_, readBegin, windowRows, readerBase_->pool());
-        if (scanSpec) {
-          window = applyScanSpecProjection(
-              std::move(window), *scanSpec, readerBase_->pool());
-        }
-        denseWindow_ = DenseWindow{readBegin, readBegin + windowRows, window};
-        readerBase_->recordDecodedWindow(windowRows);
-      } else {
-        denseWindow_.reset();
-      }
-    }
-    if (denseWindow_.has_value() && denseWindow_->begin <= readBegin &&
-        denseWindow_->end >= readEnd) {
-      result = denseWindow_->rows->slice(
-          static_cast<vector_size_t>(readBegin - denseWindow_->begin),
-          static_cast<vector_size_t>(rowsToRead));
-      readerBase_->recordDecodedWindowSlice();
-      readFromDenseWindow = true;
-    }
-  } else {
-    denseWindow_.reset();
-  }
-  if (!readFromDenseWindow) {
-    auto pipeline = takePipeline(readBegin, readEnd);
-    NativeLanceDecoder* const decoder = pipeline.has_value()
-        ? pipeline->decoder.get()
-        : prefetchedDecoderForRange(readBegin, readEnd);
-    prepareNextBatchPipeline(readEnd, size);
-    auto& readDecoder = decoder == nullptr ? decoder_ : *decoder;
-    result = rootColumnReader_->read(
-        readDecoder, currentRow_, rowsToRead, readerBase_->pool());
-    result = applyDeletedRows(
-        std::move(result),
-        mutation == nullptr ? nullptr : mutation->deletedRows,
-        static_cast<vector_size_t>(rowsToRead),
-        readerBase_->pool());
-    if (scanSpec) {
-      result = applyScanSpecProjection(
-          std::move(result), *scanSpec, readerBase_->pool());
-    }
+  auto pipeline = takePipeline(readBegin, readEnd);
+  NativeLanceDecoder* const decoder = pipeline.has_value()
+      ? pipeline->decoder.get()
+      : prefetchedDecoderForRange(readBegin, readEnd);
+  prepareNextBatchPipeline(readEnd, size);
+  auto& readDecoder = decoder == nullptr ? decoder_ : *decoder;
+  result = rootColumnReader_->read(
+      readDecoder, currentRow_, rowsToRead, readerBase_->pool());
+  result = applyDeletedRows(
+      std::move(result),
+      mutation == nullptr ? nullptr : mutation->deletedRows,
+      static_cast<vector_size_t>(rowsToRead),
+      readerBase_->pool());
+  if (scanSpec) {
+    result = applyScanSpecProjection(
+        std::move(result), *scanSpec, readerBase_->pool());
   }
   currentRow_ += rowsToRead;
   markPrefetchRangesFinished(readBegin, currentRow_);
@@ -1174,9 +1054,6 @@ uint64_t NativeLanceRowReader::next(
 }
 
 uint64_t NativeLanceRowReader::skip(uint64_t skipSize) {
-  denseWindow_.reset();
-  selectiveWindow_.reset();
-  observedFilterSelectivity_.reset();
   uint64_t skipped = 0;
   while (skipSize > 0) {
     advancePastFinishedRange();
@@ -1239,19 +1116,6 @@ const RowTypePtr& NativeLanceReader::rowType() const {
 const std::shared_ptr<const dwio::common::TypeWithId>&
 NativeLanceReader::typeWithId() const {
   return readerBase_->typeWithId();
-}
-
-NativeLanceMetadata::DebugStats NativeLanceReader::debugStats() const {
-  auto stats = readerBase_->metadata().debugStats();
-  const auto pageCacheStats = readerBase_->decodedPageCache()->stats();
-  stats.decodedPageCacheHits = pageCacheStats.hits;
-  stats.decodedPageCacheMisses = pageCacheStats.misses;
-  stats.decodedPageCacheLoads = pageCacheStats.loads;
-  stats.decodedPageCacheWaits = pageCacheStats.waits;
-  stats.decodedPageCacheEvictions = pageCacheStats.evictions;
-  stats.decodedPageCacheBytes = pageCacheStats.sizeBytes;
-  readerBase_->addDecodedWindowStats(stats);
-  return stats;
 }
 
 size_t NativeLanceReader::loadedColumnMetadataCount() const {

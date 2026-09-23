@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <string_view>
@@ -33,19 +32,6 @@
 
 namespace bytedance::bolt::lance::reader {
 namespace {
-
-uint64_t maxDecompressedBufferCacheBytes(uint64_t fileSize) {
-  const auto* value = std::getenv("BOLT_LANCE_DECOMPRESSED_CACHE_BYTES");
-  if (value == nullptr) {
-    constexpr uint64_t kDefaultCacheBytes = 512UL << 20;
-    constexpr uint64_t kMaxAutoCacheBytes = 8UL << 30;
-    constexpr uint64_t kFileSizeMultiplier = 8;
-    return std::min(
-        kMaxAutoCacheBytes,
-        std::max(kDefaultCacheBytes, fileSize * kFileSizeMultiplier));
-  }
-  return std::stoull(value);
-}
 
 ::lance::encodings::ArrayEncoding parsePageEncoding(
     const ::lance::file::v2::ColumnMetadata::Page& page,
@@ -872,94 +858,12 @@ BufferPtr NativeLanceMetadata::read(uint64_t offset, uint64_t length) const {
   return buffer;
 }
 
-BufferPtr NativeLanceMetadata::getCachedDecompressedBuffer(
-    BufferDescriptor descriptor,
-    const std::function<BufferPtr()>& load,
-    bool* hit) const {
-  {
-    std::lock_guard<std::mutex> guard(decompressedBufferCacheMutex_);
-    const auto cached = decompressedBufferCache_.find(descriptor);
-    if (cached != decompressedBufferCache_.end()) {
-      ++debugStats_.decompressedCacheHits;
-      if (hit != nullptr) {
-        *hit = true;
-      }
-      decompressedBufferLru_.splice(
-          decompressedBufferLru_.begin(),
-          decompressedBufferLru_,
-          cached->second.lruPosition);
-      return cached->second.buffer;
-    }
-  }
-
-  if (hit != nullptr) {
-    *hit = false;
-  }
-  {
-    std::lock_guard<std::mutex> guard(decompressedBufferCacheMutex_);
-    ++debugStats_.decompressedCacheMisses;
-    debugStats_.compressedBytesRead += descriptor.length;
-  }
-  auto buffer = load();
-  {
-    std::lock_guard<std::mutex> guard(decompressedBufferCacheMutex_);
-    debugStats_.decompressedBytesProduced += buffer->size();
-  }
-  const auto maxCacheBytes = decompressedBufferCacheMaxBytes_;
-  if (buffer->size() > maxCacheBytes) {
-    return buffer;
-  }
-
-  std::lock_guard<std::mutex> guard(decompressedBufferCacheMutex_);
-  const auto cached = decompressedBufferCache_.find(descriptor);
-  if (cached != decompressedBufferCache_.end()) {
-    ++debugStats_.decompressedCacheHits;
-    if (hit != nullptr) {
-      *hit = true;
-    }
-    decompressedBufferLru_.splice(
-        decompressedBufferLru_.begin(),
-        decompressedBufferLru_,
-        cached->second.lruPosition);
-    return cached->second.buffer;
-  }
-  decompressedBufferLru_.push_front(descriptor);
-  decompressedBufferCacheBytes_ += buffer->size();
-  decompressedBufferCache_.emplace(
-      descriptor,
-      DecompressedBufferCacheEntry{
-          .buffer = buffer, .lruPosition = decompressedBufferLru_.begin()});
-  evictDecompressedBuffersLocked();
-  return buffer;
-}
-
-bool NativeLanceMetadata::hasCachedDecompressedBuffer(
-    BufferDescriptor descriptor) const {
-  std::lock_guard<std::mutex> guard(decompressedBufferCacheMutex_);
-  return decompressedBufferCache_.find(descriptor) !=
-      decompressedBufferCache_.end();
-}
-
-void NativeLanceMetadata::evictDecompressedBuffersLocked() const {
-  const auto maxCacheBytes = decompressedBufferCacheMaxBytes_;
-  while (decompressedBufferCacheBytes_ > maxCacheBytes &&
-         !decompressedBufferLru_.empty()) {
-    const auto descriptor = decompressedBufferLru_.back();
-    auto cached = decompressedBufferCache_.find(descriptor);
-    BOLT_CHECK(cached != decompressedBufferCache_.end());
-    decompressedBufferCacheBytes_ -= cached->second.buffer->size();
-    decompressedBufferCache_.erase(cached);
-    decompressedBufferLru_.pop_back();
-  }
-}
-
 NativeLanceMetadata::NativeLanceMetadata(
     dwio::common::BufferedInput& input,
     memory::MemoryPool& pool,
     std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter)
     : input_(input), pool_(pool), typeAdapter_(std::move(typeAdapter)) {
   const auto fileSize = input_.getReadFile()->size();
-  decompressedBufferCacheMaxBytes_ = maxDecompressedBufferCacheBytes(fileSize);
   BOLT_CHECK_GE(fileSize, kFooterSize, "Lance file is too small: {}", fileSize);
 
   const auto footerBytes = read(fileSize - kFooterSize, kFooterSize);

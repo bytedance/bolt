@@ -19,10 +19,8 @@
 #include <folly/Range.h>
 
 #include <mutex>
-#include <optional>
 
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
-#include "bolt/dwio/lance/NativeLanceDecodedPageCache.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLanceReadPlan.h"
 #include "bolt/vector/BaseVector.h"
@@ -40,10 +38,8 @@ class NativeLanceDecoder {
       dwio::common::BufferedInput& input,
       const NativeLanceMetadata& metadata,
       memory::MemoryPool& pool,
-      bool enableDecodedPageCache = false,
       std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
-      NativeLanceReadPlan::Options readPlanOptions = {},
-      std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache = nullptr);
+      NativeLanceReadPlan::Options readPlanOptions = {});
 
   ~NativeLanceDecoder();
 
@@ -90,18 +86,8 @@ class NativeLanceDecoder {
       uint64_t rowStart,
       uint64_t rowCount) const;
 
-  bool hasDecodedColumnPage(
-      uint32_t columnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
-
   bool hasCompressedColumn(
       uint32_t columnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
-
-  bool hasDecodedPhysicalPage(
-      uint32_t physicalColumnIndex,
       uint64_t rowStart,
       uint64_t rowCount) const;
 
@@ -126,20 +112,6 @@ class NativeLanceDecoder {
       const std::vector<uint32_t>& arrayDimensions = {}) const;
 
  private:
-  struct PageRange {
-    int32_t pageIndex;
-    uint64_t pageRowStart;
-    uint64_t pageRowCount;
-  };
-
-  std::optional<PageRange> singlePageRange(
-      uint32_t physicalColumnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
-  bool shouldCacheDecodedPage(
-      const TypePtr& type,
-      uint32_t physicalColumnIndex,
-      const PageRange& page) const;
   VectorPtr decodePhysicalColumnNoCache(
       const TypePtr& type,
       std::string_view logicalType,
@@ -151,11 +123,6 @@ class NativeLanceDecoder {
       const NativeLanceMetadata::StructuralField& field,
       uint64_t rowStart,
       uint64_t rowCount) const;
-  VectorPtr getDecodedPage(
-      const TypePtr& type,
-      std::string_view logicalType,
-      uint32_t physicalColumnIndex,
-      const PageRange& page) const;
   void enqueuePhysicalColumn(
       const TypePtr& type,
       uint32_t physicalColumnIndex,
@@ -172,10 +139,8 @@ class NativeLanceDecoder {
   dwio::common::BufferedInput& input_;
   const NativeLanceMetadata& metadata_;
   memory::MemoryPool& pool_;
-  const bool enableDecodedPageCache_;
   const std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
   mutable NativeLanceReadPlan readPlan_;
-  const std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache_;
   // Offset-dependent columns may independently schedule their second-stage
   // payload reads from decoding workers. Keep each plan mutation atomic.
   mutable std::recursive_mutex readPlanMutex_;

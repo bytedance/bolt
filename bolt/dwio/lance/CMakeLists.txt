@@ -9,7 +9,6 @@ bolt_add_library(
   NativeLanceBitpack.cpp
   NativeLanceBlobResolver.cpp
   NativeLanceColumnReader.cpp
-  NativeLanceDecodedPageCache.cpp
   NativeLanceListOffsets.cpp
   NativeLancePackedStruct.cpp
   NativeLanceReadPlan.cpp

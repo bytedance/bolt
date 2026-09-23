@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <mutex>
 #include <utility>
 
@@ -69,39 +68,6 @@ class NativeLanceReaderBase {
     return readPlanOptions_;
   }
 
-  const std::shared_ptr<NativeLanceDecodedPageCache>& decodedPageCache() const {
-    return decodedPageCache_;
-  }
-
-  void recordDecodedWindow(uint64_t rows) {
-    ++decodedWindowBuilds_;
-    decodedWindowRows_ += rows;
-  }
-
-  void recordDecodedWindowSlice() {
-    ++decodedWindowSlices_;
-  }
-
-  void addDecodedWindowStats(NativeLanceMetadata::DebugStats& stats) const {
-    stats.decodedWindowBuilds = decodedWindowBuilds_;
-    stats.decodedWindowRows = decodedWindowRows_;
-    stats.decodedWindowSlices = decodedWindowSlices_;
-    stats.selectiveWindowBuilds = selectiveWindowBuilds_;
-    stats.selectiveWindowSourceRows = selectiveWindowSourceRows_;
-    stats.selectiveWindowOutputRows = selectiveWindowOutputRows_;
-    stats.selectiveWindowSlices = selectiveWindowSlices_;
-  }
-
-  void recordSelectiveWindow(uint64_t sourceRows, uint64_t outputRows) {
-    ++selectiveWindowBuilds_;
-    selectiveWindowSourceRows_ += sourceRows;
-    selectiveWindowOutputRows_ += outputRows;
-  }
-
-  void recordSelectiveWindowSlice() {
-    ++selectiveWindowSlices_;
-  }
-
  private:
   memory::MemoryPool& pool_;
   std::shared_ptr<dwio::common::BufferedInput> input_;
@@ -109,14 +75,6 @@ class NativeLanceReaderBase {
   std::shared_ptr<const dwio::common::TypeWithId> typeWithId_;
   std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
   NativeLanceReadPlan::Options readPlanOptions_;
-  std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache_;
-  std::atomic<uint64_t> decodedWindowBuilds_{0};
-  std::atomic<uint64_t> decodedWindowRows_{0};
-  std::atomic<uint64_t> decodedWindowSlices_{0};
-  std::atomic<uint64_t> selectiveWindowBuilds_{0};
-  std::atomic<uint64_t> selectiveWindowSourceRows_{0};
-  std::atomic<uint64_t> selectiveWindowOutputRows_{0};
-  std::atomic<uint64_t> selectiveWindowSlices_{0};
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
@@ -158,19 +116,6 @@ class NativeLanceRowReader : public dwio::common::RowReader {
     std::unique_ptr<NativeLanceDecoder> decoder;
   };
 
-  struct DenseWindow {
-    uint64_t begin;
-    uint64_t end;
-    VectorPtr rows;
-  };
-
-  struct SelectiveWindow {
-    uint64_t begin;
-    uint64_t end;
-    VectorPtr rows;
-    std::vector<vector_size_t> selectedRows;
-  };
-
   void advancePastFinishedRange();
   uint64_t capReadSize(uint64_t size) const;
   FetchResult prefetchRange(size_t rangeIndex);
@@ -201,19 +146,13 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   std::vector<std::unique_ptr<NativeLanceDecoder>> prefetchDecoders_;
   std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
   std::optional<PipelineState> pipeline_;
-  std::optional<DenseWindow> denseWindow_;
-  std::optional<SelectiveWindow> selectiveWindow_;
-  std::optional<double> observedFilterSelectivity_;
   mutable std::mutex prefetchMutex_;
   mutable std::mutex decoderMutex_;
-  bool denseWindowEnabled_{false};
-  bool selectiveWindowEnabled_{false};
   size_t currentRange_{0};
   uint64_t currentRow_{0};
   uint64_t batchesRead_{0};
   uint64_t decodeTimeNs_{0};
   int64_t maxBatchBytes_{0};
-  uint64_t windowBytesPerRow_{0};
   mutable uint64_t estimatedBytesPerRow_{0};
 };
 
@@ -234,7 +173,6 @@ class NativeLanceReader : public dwio::common::Reader {
   const RowTypePtr& rowType() const override;
   const std::shared_ptr<const dwio::common::TypeWithId>& typeWithId()
       const override;
-  NativeLanceMetadata::DebugStats debugStats() const;
   size_t loadedColumnMetadataCount() const;
   std::unique_ptr<dwio::common::RowReader> createRowReader(
       const dwio::common::RowReaderOptions& options = {}) const override;

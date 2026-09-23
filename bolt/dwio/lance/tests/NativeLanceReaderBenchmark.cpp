@@ -241,29 +241,6 @@ uint64_t nativeReader(uint32_t iterations) {
     dwio::common::ReaderOptions options(readerPool.get());
     NativeLanceReader reader(open(lanceFilePath), options);
     rows += scan(reader).sourceRows;
-    if (printStats) {
-      const auto stats = reader.debugStats();
-      std::cerr << "BOLT_LANCE_CACHE_STATS mode=native"
-                << " cache_hits=" << stats.decompressedCacheHits
-                << " cache_misses=" << stats.decompressedCacheMisses
-                << " compressed_bytes=" << stats.compressedBytesRead
-                << " decompressed_bytes=" << stats.decompressedBytesProduced
-                << " page_cache_hits=" << stats.decodedPageCacheHits
-                << " page_cache_misses=" << stats.decodedPageCacheMisses
-                << " page_cache_loads=" << stats.decodedPageCacheLoads
-                << " page_cache_waits=" << stats.decodedPageCacheWaits
-                << " page_cache_evictions=" << stats.decodedPageCacheEvictions
-                << " page_cache_bytes=" << stats.decodedPageCacheBytes << "\n";
-      std::cerr << "BOLT_LANCE_WINDOW_STATS mode=native"
-                << " builds=" << stats.decodedWindowBuilds
-                << " rows=" << stats.decodedWindowRows
-                << " slices=" << stats.decodedWindowSlices << "\n";
-      std::cerr << "BOLT_LANCE_SELECTIVE_WINDOW_STATS mode=native"
-                << " builds=" << stats.selectiveWindowBuilds
-                << " source_rows=" << stats.selectiveWindowSourceRows
-                << " output_rows=" << stats.selectiveWindowOutputRows
-                << " slices=" << stats.selectiveWindowSlices << "\n";
-    }
   }
   return rows;
 }

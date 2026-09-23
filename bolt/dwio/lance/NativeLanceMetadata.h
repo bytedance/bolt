@@ -18,8 +18,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <functional>
-#include <list>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -58,26 +56,6 @@ class NativeLanceMetadata {
   struct BufferDescriptor {
     uint64_t offset;
     uint64_t length;
-  };
-
-  struct DebugStats {
-    uint64_t decompressedCacheHits{0};
-    uint64_t decompressedCacheMisses{0};
-    uint64_t compressedBytesRead{0};
-    uint64_t decompressedBytesProduced{0};
-    uint64_t decodedPageCacheHits{0};
-    uint64_t decodedPageCacheMisses{0};
-    uint64_t decodedPageCacheLoads{0};
-    uint64_t decodedPageCacheWaits{0};
-    uint64_t decodedPageCacheEvictions{0};
-    uint64_t decodedPageCacheBytes{0};
-    uint64_t decodedWindowBuilds{0};
-    uint64_t decodedWindowRows{0};
-    uint64_t decodedWindowSlices{0};
-    uint64_t selectiveWindowBuilds{0};
-    uint64_t selectiveWindowSourceRows{0};
-    uint64_t selectiveWindowOutputRows{0};
-    uint64_t selectiveWindowSlices{0};
   };
 
   struct StructuralField {
@@ -178,18 +156,6 @@ class NativeLanceMetadata {
     return structuralFields_.at(columnIndex);
   }
 
-  BufferPtr getCachedDecompressedBuffer(
-      BufferDescriptor descriptor,
-      const std::function<BufferPtr()>& load,
-      bool* hit = nullptr) const;
-
-  bool hasCachedDecompressedBuffer(BufferDescriptor descriptor) const;
-
-  DebugStats debugStats() const {
-    std::lock_guard<std::mutex> guard(decompressedBufferCacheMutex_);
-    return debugStats_;
-  }
-
   bool isBlobColumn(uint32_t physicalColumnIndex) const {
     loadPhysicalColumns({physicalColumnIndex});
     return blobColumns_.at(physicalColumnIndex);
@@ -203,18 +169,6 @@ class NativeLanceMetadata {
       uint64_t limit) const;
 
  private:
-  struct BufferDescriptorHash {
-    size_t operator()(BufferDescriptor descriptor) const {
-      return std::hash<uint64_t>{}(descriptor.offset) ^
-          (std::hash<uint64_t>{}(descriptor.length) << 1);
-    }
-  };
-
-  struct DecompressedBufferCacheEntry {
-    BufferPtr buffer;
-    std::list<BufferDescriptor>::iterator lruPosition;
-  };
-
   friend bool operator==(
       const BufferDescriptor& lhs,
       const BufferDescriptor& rhs) {
@@ -227,7 +181,6 @@ class NativeLanceMetadata {
       const char* data,
       size_t size) const;
   void validateColumnMetadata(uint32_t physicalColumnIndex) const;
-  void evictDecompressedBuffersLocked() const;
 
   dwio::common::BufferedInput& input_;
   memory::MemoryPool& pool_;
@@ -254,16 +207,6 @@ class NativeLanceMetadata {
   mutable std::mutex columnMetadataMutex_;
   std::unordered_map<uint32_t, uint32_t> leafPhysicalColumnIndices_;
   std::vector<StructuralField> structuralFields_;
-  mutable std::mutex decompressedBufferCacheMutex_;
-  mutable std::list<BufferDescriptor> decompressedBufferLru_;
-  mutable std::unordered_map<
-      BufferDescriptor,
-      DecompressedBufferCacheEntry,
-      BufferDescriptorHash>
-      decompressedBufferCache_;
-  mutable uint64_t decompressedBufferCacheBytes_{0};
-  uint64_t decompressedBufferCacheMaxBytes_{0};
-  mutable DebugStats debugStats_;
 };
 
 } // namespace bytedance::bolt::lance::reader
