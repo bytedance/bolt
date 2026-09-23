@@ -272,7 +272,6 @@ class BoltToArrowBridgeHolder {
     }
     resetRecursive();
     active_ = false;
-    releaseState_->activeCount.store(0, std::memory_order_release);
     if (registeredArray_ != &releasedArray) {
       resetArrowArray(releasedArray, nullptr);
       releasedArray.private_data = nullptr;
@@ -281,10 +280,6 @@ class BoltToArrowBridgeHolder {
 
   void releaseResources() {
     resetRecursive();
-    if (releaseState_) {
-      releaseState_->activeCount.store(0, std::memory_order_release);
-      releaseState_->inUse.store(false, std::memory_order_release);
-    }
     for (auto& child : childrenPtrs_) {
       if (!child) {
         continue;
@@ -317,6 +312,12 @@ class BoltToArrowBridgeHolder {
     childrenPtrs_.clear();
     children_.reset();
     dictionary_.reset();
+    // Failed exports can leave active descendants below an unpublished node.
+    // Keep their counts until the entire tree has been released.
+    if (ownsReleaseState_) {
+      releaseState_->activeCount.store(0, std::memory_order_release);
+      releaseState_->inUse.store(false, std::memory_order_release);
+    }
   }
 
   void resizeBuffers(size_t bufferCount) {
@@ -1138,7 +1139,7 @@ void exportValues(
         break;
       case TypeKind::TIMESTAMP:
         holder.setBuffer(
-            1, AlignedBuffer::allocate<uint128_t>(vec.size(), pool, 0));
+            1, AlignedBuffer::allocate<int64_t>(out.length, pool, 0));
         break;
       default:
         BOLT_UNREACHABLE();
@@ -1433,16 +1434,94 @@ void exportToArrowImpl(
     memory::MemoryPool*,
     bool allowReuse = false);
 
-bool containsTimestamp(const Type& type) {
-  if (type.isTimestamp()) {
+template <TypeKind... kinds>
+bool containsType(const Type& type) {
+  if (((type.kind() == kinds) || ...)) {
     return true;
   }
   for (size_t i = 0; i < type.size(); ++i) {
-    if (containsTimestamp(*type.childAt(i))) {
+    if (containsType<kinds...>(*type.childAt(i))) {
       return true;
     }
   }
   return false;
+}
+
+// Add nulls without changing the encoding described by the Arrow schema.
+void exportWithNulls(
+    const BaseVector& vec,
+    vector_size_t size,
+    const Selection& rows,
+    BufferPtr nulls,
+    bool allNull,
+    const ArrowOptions& options,
+    ArrowArray& out,
+    memory::MemoryPool* pool,
+    bool allowReuse) {
+  if (vec.isConstantEncoding()) {
+    if (!allNull || vec.isNullAt(0)) {
+      exportToArrowImpl(vec, rows, options, out, pool, allowReuse);
+      return;
+    }
+    VectorPtr constant;
+    if (vec.type()->size() > 0) {
+      auto value = vec.valueVector();
+      auto valueNulls = allocateNulls(1, pool, bits::kNull);
+      if (value->encoding() == VectorEncoding::Simple::ROW) {
+        // A null value can use row zero. Share children to retain constant
+        // storage instead of creating temporary scalar constant copies.
+        value = std::make_shared<RowVector>(
+            pool,
+            value->type(),
+            valueNulls,
+            1,
+            value->asUnchecked<RowVector>()->children());
+      } else {
+        value = value->slice(0, 1);
+        value->setNulls(valueNulls);
+      }
+      // Construct directly: wrapInConstant rebuilds null complex values by
+      // type.
+      constant = std::make_shared<ConstantVector<ComplexType>>(
+          pool, size, 0, std::move(value));
+    } else {
+      constant = BaseVector::createNullConstant(vec.type(), size, pool);
+    }
+    exportToArrowImpl(*constant, rows, options, out, pool, allowReuse);
+    return;
+  }
+  if (vec.rawNulls()) {
+    auto combined = allocateNulls(size, pool);
+    bits::andBits(
+        combined->asMutable<uint64_t>(),
+        nulls->as<uint64_t>(),
+        vec.rawNulls(),
+        0,
+        size);
+    nulls = std::move(combined);
+  }
+  if (vec.isFlatEncoding()) {
+    FlatVector<Timestamp> nullable(
+        pool,
+        vec.type(),
+        std::move(nulls),
+        size,
+        vec.values(),
+        std::vector<BufferPtr>{});
+    exportToArrowImpl(nullable, rows, options, out, pool, allowReuse);
+  } else if (vec.encoding() == VectorEncoding::Simple::ROW) {
+    RowVector nullable(
+        pool,
+        vec.type(),
+        std::move(nulls),
+        size,
+        vec.asUnchecked<RowVector>()->children());
+    exportToArrowImpl(nullable, rows, options, out, pool, allowReuse);
+  } else {
+    auto nullable = vec.slice(0, size);
+    nullable->setNulls(nulls);
+    exportToArrowImpl(*nullable, rows, options, out, pool, allowReuse);
+  }
 }
 
 template <typename T>
@@ -1470,53 +1549,21 @@ void exportRowsImpl(
             pool,
             holder.reusable());
       };
-      if (out.null_count == 0 || !containsTimestamp(*child->type())) {
+      if (out.null_count == 0 ||
+          !containsType<TypeKind::TIMESTAMP>(*child->type())) {
         exportChild(*child);
         continue;
       }
-      // Timestamp conversion must not read storage hidden by a null row.
-      // Share value buffers and propagate nulls through complex children.
-      if (child->isConstantEncoding()) {
-        if (out.null_count == out.length) {
-          exportChild(
-              *BaseVector::createNullConstant(child->type(), vec.size(), pool));
-        } else {
-          exportChild(*child);
-        }
-        continue;
-      }
-      BufferPtr nulls = vec.nulls();
-      if (child->rawNulls()) {
-        nulls = allocateNulls(vec.size(), pool);
-        bits::andBits(
-            nulls->asMutable<uint64_t>(),
-            vec.rawNulls(),
-            child->rawNulls(),
-            0,
-            vec.size());
-      }
-      if (child->isFlatEncoding()) {
-        FlatVector<Timestamp> nullableChild(
-            pool,
-            TIMESTAMP(),
-            std::move(nulls),
-            vec.size(),
-            child->values(),
-            std::vector<BufferPtr>{});
-        exportChild(nullableChild);
-      } else if (child->encoding() == VectorEncoding::Simple::ROW) {
-        RowVector nullableChild(
-            pool,
-            child->type(),
-            std::move(nulls),
-            vec.size(),
-            child->asUnchecked<RowVector>()->children());
-        exportChild(nullableChild);
-      } else {
-        auto nullableChild = child->slice(0, vec.size());
-        nullableChild->setNulls(nulls);
-        exportChild(*nullableChild);
-      }
+      exportWithNulls(
+          *child,
+          vec.size(),
+          rows,
+          vec.nulls(),
+          out.null_count == out.length,
+          options,
+          *holder.allocateChild(i),
+          pool,
+          holder.reusable());
     } catch (const BoltException&) {
       if (!holder.reusable()) {
         for (column_index_t j = 0; j < i; ++j) {
@@ -1828,6 +1875,61 @@ void exportDictionary(
     BoltToArrowBridgeHolder& holder) {
   out.n_buffers = 2;
   out.n_children = 0;
+  auto exportValues = [&](const BaseVector& values) {
+    out.dictionary = holder.allocateDictionary();
+    Selection valueRows(values.size());
+    auto exportUnmasked = [&](const ArrowOptions& valueOptions) {
+      exportToArrowImpl(
+          values,
+          valueRows,
+          valueOptions,
+          *out.dictionary,
+          pool,
+          holder.reusable());
+    };
+    // Usually the dictionary can be converted without scanning its indices.
+    // Preserve string views until timestamp conversion succeeds so a retry
+    // can still read the source. The string payload buffers remain shared.
+    try {
+      if (options.exportToView && !options.stringViewCopyValues &&
+          containsType<TypeKind::TIMESTAMP>(*values.type()) &&
+          containsType<TypeKind::VARCHAR, TypeKind::VARBINARY>(
+              *values.type())) {
+        auto valueOptions = options;
+        valueOptions.stringViewCopyValues = true;
+        exportUnmasked(valueOptions);
+      } else {
+        exportUnmasked(options);
+      }
+      return;
+    } catch (const BoltUserError&) {
+      if (!containsType<TypeKind::TIMESTAMP>(*values.type())) {
+        throw;
+      }
+      // A failure in a referenced value is reported by the masked export.
+    }
+    // Only referenced values can affect the result. Keep dictionary indices
+    // and the schema unchanged, and mask unused timestamp storage.
+    auto used = allocateNulls(values.size(), pool, bits::kNull);
+    auto* rawUsed = used->asMutable<uint64_t>();
+    const auto* indices = static_cast<const vector_size_t*>(out.buffers[1]);
+    const auto* nulls = static_cast<const uint64_t*>(out.buffers[0]);
+    for (vector_size_t row = 0; row < out.length; ++row) {
+      if (!nulls || !bits::isBitNull(nulls, row)) {
+        bits::setNull(rawUsed, indices[row], false);
+      }
+    }
+    exportWithNulls(
+        values,
+        values.size(),
+        valueRows,
+        std::move(used),
+        out.null_count == out.length,
+        options,
+        *out.dictionary,
+        pool,
+        holder.reusable());
+  };
   if (options.exportToArrowIPC && !options.flattenDictionary) {
     const BaseVector* cur = vec.valueVector()->loadedVector();
     const bool nested = (cur->encoding() == VectorEncoding::Simple::DICTIONARY);
@@ -1932,14 +2034,7 @@ void exportDictionary(
       }
 
       holder.setBuffer(1, composed);
-      out.dictionary = holder.allocateDictionary();
-      exportToArrowImpl(
-          *cur,
-          Selection(cur->size()),
-          options,
-          *out.dictionary,
-          pool,
-          holder.reusable());
+      exportValues(*cur);
       return;
     }
   }
@@ -1952,14 +2047,7 @@ void exportDictionary(
     holder.setBuffer(1, clampWrapInfoSize(vec));
   }
   auto& values = *vec.valueVector()->loadedVector();
-  out.dictionary = holder.allocateDictionary();
-  exportToArrowImpl(
-      values,
-      Selection(values.size()),
-      options,
-      *out.dictionary,
-      pool,
-      holder.reusable());
+  exportValues(values);
 }
 
 void exportFlattenedVector(

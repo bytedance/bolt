@@ -74,6 +74,26 @@ class ArrowBridgeTemporalTest : public testing::Test, public VectorTestBase {
     assertEqualVectors(input, owner);
   }
 
+  void arrowRoundTrip(
+      const VectorPtr& input,
+      const ArrowOptions& options,
+      ReusableArrowBatchPool* batchPool = nullptr) {
+    ArrowData data;
+    if (batchPool) {
+      batchPool->exportToArrow(
+          input, pool(), options, &data.schema, &data.array);
+    } else {
+      exportVector(input, data, options);
+    }
+    EXPECT_OK_AND_ASSIGN(
+        auto array, arrow::ImportArray(&data.array, &data.schema));
+    ASSERT_OK(array->ValidateFull());
+    ASSERT_OK(arrow::ExportArray(*array, &data.array, &data.schema));
+    assertEqualVectors(
+        input,
+        importFromArrowAsOwner(data.schema, data.array, options, pool()));
+  }
+
   void rawArray(
       ArrowData& data,
       const char* format,
@@ -232,6 +252,218 @@ TEST_F(ArrowBridgeTemporalTest, timestampsUnderNullRows) {
   // Exporting must not change a child shared with another vector.
   EXPECT_FALSE(timestamps->isNullAt(0));
   EXPECT_EQ(timestamps->valueAt(0), Timestamp::max());
+}
+
+TEST_F(ArrowBridgeTemporalTest, nullParentPreservesConstantEncoding) {
+  auto timestamps =
+      makeFlatVector<Timestamp>({Timestamp(0, 1), Timestamp(0, 2)});
+  auto constant = BaseVector::wrapInConstant(2, 1, timestamps);
+  auto dictionary =
+      BaseVector::wrapInDictionary(nullptr, makeIndices({1, 0}), 2, timestamps);
+  const std::vector<VectorPtr> payloads{
+      makeRowVector({constant}),
+      makeRowVector({dictionary}),
+      makeArrayVector({0, 1}, dictionary),
+      makeMapVector({0, 1}, makeFlatVector<int64_t>({1, 2}), dictionary)};
+  for (bool ipc : {false, true}) {
+    ArrowOptions options;
+    options.exportToArrowIPC = ipc;
+    for (const auto& payload : payloads) {
+      auto child = BaseVector::wrapInConstant(3, 1, payload);
+      auto input = makeRowVector({child});
+      ReusableArrowBatchPool batchPool(1);
+      for (bool allNull : {false, true, false, true}) {
+        for (vector_size_t row = 0; row < input->size(); ++row) {
+          input->setNull(row, allNull || row == 0);
+        }
+        SCOPED_TRACE(input->toString());
+        arrowRoundTrip(input, options);
+        arrowRoundTrip(input, options, &batchPool);
+      }
+      EXPECT_FALSE(child->isNullAt(0));
+      EXPECT_FALSE(payload->isNullAt(1));
+    }
+  }
+}
+
+TEST_F(ArrowBridgeTemporalTest, dictionaryTimestampVisibility) {
+  auto timestamps = makeFlatVector<Timestamp>(
+      {Timestamp::max(), Timestamp(0, 1), Timestamp(0, 2), Timestamp::max()});
+  auto dictionary = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({0, 1, 2}), 3, timestamps);
+  auto unused = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({1, 2, 1}), 3, timestamps);
+  auto nested = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({2, 0, 1}), 3, dictionary);
+  for (bool ipc : {false, true}) {
+    for (bool flatten : {false, true}) {
+      ArrowOptions options;
+      options.exportToArrowIPC = ipc;
+      options.flattenDictionary = flatten;
+      SCOPED_TRACE(fmt::format("ipc={}, flatten={}", ipc, flatten));
+      arrowRoundTrip(unused, options);
+      for (const auto& child : {dictionary, nested}) {
+        SCOPED_TRACE(child == dictionary ? "dictionary" : "nested");
+        auto input = makeRowVector({child});
+        const vector_size_t hiddenRow = child == dictionary ? 0 : 1;
+        input->setNull(hiddenRow, true);
+        if (child == nested && !ipc && !flatten) {
+          // The C Data path retains nested dictionaries. Validate with Arrow.
+          ArrowData data;
+          exportVector(input, data, options);
+          EXPECT_OK_AND_ASSIGN(
+              auto array, arrow::ImportArray(&data.array, &data.schema));
+          ASSERT_OK(array->ValidateFull());
+        } else {
+          arrowRoundTrip(input, options);
+        }
+        input->setNull(hiddenRow, false);
+        ArrowData data;
+        BOLT_ASSERT_THROW(
+            exportToArrow(input, data.array, pool(), options),
+            "Could not convert Timestamp");
+      }
+      auto rows = makeRowVector({timestamps});
+      auto complex =
+          BaseVector::wrapInDictionary(nullptr, makeIndices({1, 2}), 2, rows);
+      arrowRoundTrip(complex, options);
+    }
+  }
+  EXPECT_FALSE(timestamps->isNullAt(0));
+  EXPECT_FALSE(dictionary->isNullAt(0));
+  EXPECT_EQ(timestamps->valueAt(0), Timestamp::max());
+}
+
+TEST_F(ArrowBridgeTemporalTest, nullParentRetainsConstantStorage) {
+  auto integers =
+      BaseVector::wrapInConstant(2, 0, makeFlatVector<int64_t>({123}));
+  auto payload = makeRowVector(
+      {integers,
+       makeFlatVector<Timestamp>({Timestamp(0, 1), Timestamp(0, 2)})});
+  auto input = makeRowVector({BaseVector::wrapInConstant(3, 1, payload)});
+  input->setNulls(allocateNulls(input->size(), pool(), bits::kNull));
+  for (bool ipc : {false, true}) {
+    ArrowOptions options;
+    options.exportToArrowIPC = ipc;
+    ArrowData data;
+    exportVector(input, data, options);
+    const auto* values =
+        data.array.children[0]->children[1]->children[0]->children[1];
+    EXPECT_EQ(static_cast<const int64_t*>(values->buffers[1])[0], 123);
+    EXPECT_OK_AND_ASSIGN(
+        auto array, arrow::ImportArray(&data.array, &data.schema));
+    ASSERT_OK(array->ValidateFull());
+  }
+}
+
+TEST_F(ArrowBridgeTemporalTest, nullParentWithLongerTimestampChild) {
+  auto timestamps = makeFlatVector<Timestamp>(65'536, [](auto row) {
+    return row == 0 ? Timestamp::max() : Timestamp(0, 1);
+  });
+  timestamps->setNull(100, true);
+  auto input = std::make_shared<RowVector>(
+      pool(),
+      ROW({{"ts", TIMESTAMP()}}),
+      nullptr,
+      2,
+      std::vector<VectorPtr>{timestamps});
+  input->setNull(0, true);
+  arrowRoundTrip(input, {});
+}
+
+TEST_F(ArrowBridgeTemporalTest, dictionaryTimestampRetryReleasesSlot) {
+  auto values = makeRowVector(
+      {makeFlatVector<int64_t>({7, 8}),
+       makeFlatVector<Timestamp>({Timestamp::max(), Timestamp(0, 1)})});
+  auto input =
+      BaseVector::wrapInDictionary(nullptr, makeIndices({0, 1}), 2, values);
+  for (bool ipc : {false, true}) {
+    ArrowOptions options;
+    options.exportToArrowIPC = ipc;
+    ReusableArrowBatchPool batchPool(1);
+    ArrowArray* dictionary = nullptr;
+    for (bool hidden : {true, true, false, true, true}) {
+      input->setNull(0, hidden);
+      ArrowData data;
+      auto exportBatch = [&] {
+        batchPool.exportToArrow(
+            input, pool(), options, &data.schema, &data.array);
+      };
+      if (!hidden) {
+        BOLT_ASSERT_THROW(exportBatch(), "Could not convert Timestamp");
+        dictionary = nullptr;
+        continue;
+      }
+      exportBatch();
+      if (dictionary) {
+        EXPECT_EQ(data.array.dictionary, dictionary);
+      }
+      dictionary = data.array.dictionary;
+      EXPECT_OK_AND_ASSIGN(
+          auto array, arrow::ImportArray(&data.array, &data.schema));
+      ASSERT_OK(array->ValidateFull());
+    }
+  }
+}
+
+TEST_F(ArrowBridgeTemporalTest, dictionaryTimestampWithStringViews) {
+  for (bool copyValues : {false, true}) {
+    for (bool overflow : {false, true}) {
+      auto strings = makeFlatVector<std::string>(
+          {"unreferenced dictionary string",
+           "first dictionary string",
+           "second dictionary string"});
+      auto values = makeRowVector(
+          {strings,
+           makeFlatVector<Timestamp>(
+               {overflow ? Timestamp::max() : Timestamp(0, 0),
+                Timestamp(0, 1),
+                Timestamp(0, 2)})});
+      auto input =
+          BaseVector::wrapInDictionary(nullptr, makeIndices({1, 2}), 2, values);
+      auto expected = makeRowVector(
+          {makeFlatVector<std::string>(
+               {"first dictionary string", "second dictionary string"}),
+           makeFlatVector<Timestamp>({Timestamp(0, 1), Timestamp(0, 2)})});
+      ArrowOptions options;
+      options.exportToView = true;
+      options.stringViewCopyValues = copyValues;
+      ArrowData data;
+      exportVector(input, data, options);
+      EXPECT_EQ(
+          data.array.dictionary->children[0]->buffers[2],
+          strings->stringBuffers()[0]->as<void>());
+      EXPECT_OK_AND_ASSIGN(
+          auto array, arrow::ImportArray(&data.array, &data.schema));
+      ASSERT_OK(array->ValidateFull());
+      ASSERT_OK(arrow::ExportArray(*array, &data.array, &data.schema));
+      assertEqualVectors(
+          expected,
+          importFromArrowAsOwner(data.schema, data.array, options, pool()));
+    }
+  }
+}
+
+TEST_F(ArrowBridgeTemporalTest, nullTimestampSelectionAllocation) {
+  constexpr vector_size_t size = 65'536;
+  auto timestamps = std::make_shared<FlatVector<Timestamp>>(
+      pool(),
+      TIMESTAMP(),
+      allocateNulls(size, pool(), bits::kNull),
+      size,
+      nullptr,
+      std::vector<BufferPtr>{});
+  auto input =
+      BaseVector::wrapInConstant(1, size - 1, makeRowVector({timestamps}));
+  const auto before = pool()->usedBytes();
+  ArrowData data;
+  exportVector(input, data, {});
+  // Selecting one row must not allocate storage proportional to the source.
+  EXPECT_LT(pool()->usedBytes() - before, 4'096);
+  const auto* values = data.array.children[1]->children[0];
+  ASSERT_EQ(values->length, 1);
+  EXPECT_EQ(values->null_count, 1);
+  EXPECT_EQ(static_cast<const int64_t*>(values->buffers[1])[0], 0);
 }
 
 TEST_F(ArrowBridgeTemporalTest, unrelatedFieldsUnderNullRows) {
