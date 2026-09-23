@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <utility>
 
@@ -70,6 +71,21 @@ class NativeLanceReaderBase {
     return decodedPageCache_;
   }
 
+  void recordDecodedWindow(uint64_t rows) {
+    ++decodedWindowBuilds_;
+    decodedWindowRows_ += rows;
+  }
+
+  void recordDecodedWindowSlice() {
+    ++decodedWindowSlices_;
+  }
+
+  void addDecodedWindowStats(NativeLanceMetadata::DebugStats& stats) const {
+    stats.decodedWindowBuilds = decodedWindowBuilds_;
+    stats.decodedWindowRows = decodedWindowRows_;
+    stats.decodedWindowSlices = decodedWindowSlices_;
+  }
+
  private:
   memory::MemoryPool& pool_;
   std::shared_ptr<dwio::common::BufferedInput> input_;
@@ -78,6 +94,9 @@ class NativeLanceReaderBase {
   std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
   NativeLanceReadPlan::Options readPlanOptions_;
   std::shared_ptr<NativeLanceDecodedPageCache> decodedPageCache_;
+  std::atomic<uint64_t> decodedWindowBuilds_{0};
+  std::atomic<uint64_t> decodedWindowRows_{0};
+  std::atomic<uint64_t> decodedWindowSlices_{0};
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
@@ -119,6 +138,12 @@ class NativeLanceRowReader : public dwio::common::RowReader {
     std::unique_ptr<NativeLanceDecoder> decoder;
   };
 
+  struct DenseWindow {
+    uint64_t begin;
+    uint64_t end;
+    VectorPtr rows;
+  };
+
   void advancePastFinishedRange();
   uint64_t capReadSize(uint64_t size) const;
   FetchResult prefetchRange(size_t rangeIndex);
@@ -142,13 +167,16 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   std::vector<std::unique_ptr<NativeLanceDecoder>> prefetchDecoders_;
   std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
   std::optional<PipelineState> pipeline_;
+  std::optional<DenseWindow> denseWindow_;
   mutable std::mutex prefetchMutex_;
   mutable std::mutex decoderMutex_;
+  bool denseWindowEnabled_{false};
   size_t currentRange_{0};
   uint64_t currentRow_{0};
   uint64_t batchesRead_{0};
   uint64_t decodeTimeNs_{0};
   int64_t maxBatchBytes_{0};
+  uint64_t windowBytesPerRow_{0};
   mutable uint64_t estimatedBytesPerRow_{0};
 };
 

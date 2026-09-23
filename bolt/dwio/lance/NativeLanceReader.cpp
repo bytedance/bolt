@@ -649,6 +649,7 @@ NativeLanceRowReader::NativeLanceRowReader(
   maxBatchBytes_ = options_.getMaxBatchBytes();
   estimatedBytesPerRow_ =
       estimateReadBytesPerRow(readerBase_->metadata().rowType(), options_);
+  windowBytesPerRow_ = estimatedBytesPerRow_;
   rootColumnReader_ = NativeLanceStructColumnReader::buildRoot(
       readerBase_->metadata().rowType(), options_);
   auto requiredColumns = rootColumnReader_->fileColumnIndices();
@@ -664,6 +665,9 @@ NativeLanceRowReader::NativeLanceRowReader(
   requiredColumns.erase(
       std::unique(requiredColumns.begin(), requiredColumns.end()),
       requiredColumns.end());
+  denseWindowEnabled_ = readerBase_->input().supportSyncLoad() &&
+      maxBatchBytes_ == 0 &&
+      requiredColumns.size() == readerBase_->metadata().rowType()->size();
   readerBase_->metadata().loadLogicalColumns(requiredColumns);
   rowRanges_ = readerBase_->metadata().rowRangesForFileRange(
       options_.getOffset(), options_.getLimit());
@@ -971,36 +975,76 @@ uint64_t NativeLanceRowReader::next(
   const auto readEnd = readBegin + rowsToRead;
   const auto& fileType = readerBase_->metadata().rowType();
   std::lock_guard<std::mutex> decoderLock(decoderMutex_);
-  auto pipeline = takePipeline(readBegin, readEnd);
-  NativeLanceDecoder* const decoder = pipeline.has_value()
-      ? pipeline->decoder.get()
-      : prefetchedDecoderForRange(readBegin, readEnd);
-  prepareNextBatchPipeline(readEnd, size);
-  auto& readDecoder = decoder == nullptr ? decoder_ : *decoder;
-  if (const auto& scanSpec = options_.getScanSpec();
-      scanSpec && scanSpec->hasFilter()) {
-    result = readSelective(
-        readDecoder,
-        fileType,
-        *scanSpec,
-        currentRow_,
-        static_cast<vector_size_t>(rowsToRead),
-        readerBase_->pool(),
-        options_.getDecodingExecutor(),
-        options_.getDecodingParallelismFactor(),
-        mutation == nullptr ? nullptr : mutation->deletedRows);
+  const auto& scanSpec = options_.getScanSpec();
+  const bool useDenseWindow = denseWindowEnabled_ && mutation == nullptr &&
+      (!scanSpec || !scanSpec->hasFilter());
+  bool readFromDenseWindow = false;
+  if (useDenseWindow) {
+    constexpr uint64_t kMaxWindowRows = 64 * 1024;
+    constexpr uint64_t kMaxWindowBytes = 64UL << 20;
+    if (!denseWindow_.has_value() || denseWindow_->begin > readBegin ||
+        denseWindow_->end < readEnd) {
+      const auto estimatedWindowRows =
+          std::max<uint64_t>(1, kMaxWindowBytes / windowBytesPerRow_);
+      const auto windowRows = std::min(
+          {kMaxWindowRows,
+           estimatedWindowRows,
+           rowRanges_[currentRange_].second - readBegin});
+      if (windowRows > rowsToRead) {
+        auto window = rootColumnReader_->read(
+            decoder_, readBegin, windowRows, readerBase_->pool());
+        if (scanSpec) {
+          window = applyScanSpecProjection(
+              std::move(window), *scanSpec, readerBase_->pool());
+        }
+        denseWindow_ = DenseWindow{readBegin, readBegin + windowRows, window};
+        readerBase_->recordDecodedWindow(windowRows);
+      } else {
+        denseWindow_.reset();
+      }
+    }
+    if (denseWindow_.has_value() && denseWindow_->begin <= readBegin &&
+        denseWindow_->end >= readEnd) {
+      result = denseWindow_->rows->slice(
+          static_cast<vector_size_t>(readBegin - denseWindow_->begin),
+          static_cast<vector_size_t>(rowsToRead));
+      readerBase_->recordDecodedWindowSlice();
+      readFromDenseWindow = true;
+    }
   } else {
-    result = rootColumnReader_->read(
-        readDecoder, currentRow_, rowsToRead, readerBase_->pool());
-    result = applyDeletedRows(
-        std::move(result),
-        mutation == nullptr ? nullptr : mutation->deletedRows,
-        static_cast<vector_size_t>(rowsToRead),
-        readerBase_->pool());
+    denseWindow_.reset();
   }
-  if (const auto& scanSpec = options_.getScanSpec()) {
-    result = applyScanSpecProjection(
-        std::move(result), *scanSpec, readerBase_->pool());
+  if (!readFromDenseWindow) {
+    auto pipeline = takePipeline(readBegin, readEnd);
+    NativeLanceDecoder* const decoder = pipeline.has_value()
+        ? pipeline->decoder.get()
+        : prefetchedDecoderForRange(readBegin, readEnd);
+    prepareNextBatchPipeline(readEnd, size);
+    auto& readDecoder = decoder == nullptr ? decoder_ : *decoder;
+    if (scanSpec && scanSpec->hasFilter()) {
+      result = readSelective(
+          readDecoder,
+          fileType,
+          *scanSpec,
+          currentRow_,
+          static_cast<vector_size_t>(rowsToRead),
+          readerBase_->pool(),
+          options_.getDecodingExecutor(),
+          options_.getDecodingParallelismFactor(),
+          mutation == nullptr ? nullptr : mutation->deletedRows);
+    } else {
+      result = rootColumnReader_->read(
+          readDecoder, currentRow_, rowsToRead, readerBase_->pool());
+      result = applyDeletedRows(
+          std::move(result),
+          mutation == nullptr ? nullptr : mutation->deletedRows,
+          static_cast<vector_size_t>(rowsToRead),
+          readerBase_->pool());
+    }
+    if (scanSpec) {
+      result = applyScanSpecProjection(
+          std::move(result), *scanSpec, readerBase_->pool());
+    }
   }
   currentRow_ += rowsToRead;
   markPrefetchRangesFinished(readBegin, currentRow_);
@@ -1023,6 +1067,7 @@ uint64_t NativeLanceRowReader::next(
 }
 
 uint64_t NativeLanceRowReader::skip(uint64_t skipSize) {
+  denseWindow_.reset();
   uint64_t skipped = 0;
   while (skipSize > 0) {
     advancePastFinishedRange();
@@ -1096,6 +1141,7 @@ NativeLanceMetadata::DebugStats NativeLanceReader::debugStats() const {
   stats.decodedPageCacheWaits = pageCacheStats.waits;
   stats.decodedPageCacheEvictions = pageCacheStats.evictions;
   stats.decodedPageCacheBytes = pageCacheStats.sizeBytes;
+  readerBase_->addDecodedWindowStats(stats);
   return stats;
 }
 

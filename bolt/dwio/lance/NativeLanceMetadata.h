@@ -71,6 +71,9 @@ class NativeLanceMetadata {
     uint64_t decodedPageCacheWaits{0};
     uint64_t decodedPageCacheEvictions{0};
     uint64_t decodedPageCacheBytes{0};
+    uint64_t decodedWindowBuilds{0};
+    uint64_t decodedWindowRows{0};
+    uint64_t decodedWindowSlices{0};
   };
 
   struct StructuralField {

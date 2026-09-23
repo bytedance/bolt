@@ -254,6 +254,10 @@ uint64_t nativeReader(uint32_t iterations) {
                 << " page_cache_waits=" << stats.decodedPageCacheWaits
                 << " page_cache_evictions=" << stats.decodedPageCacheEvictions
                 << " page_cache_bytes=" << stats.decodedPageCacheBytes << "\n";
+      std::cerr << "BOLT_LANCE_WINDOW_STATS mode=native"
+                << " builds=" << stats.decodedWindowBuilds
+                << " rows=" << stats.decodedWindowRows
+                << " slices=" << stats.decodedWindowSlices << "\n";
     }
   }
   return rows;
