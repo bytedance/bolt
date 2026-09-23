@@ -412,7 +412,8 @@ void GroupingSet::createHashTable() {
         &pool_,
         nullptr,
         jitRowEqVectors,
-        queryConfig_.useMonoAlloc());
+        queryConfig_.useMonoAlloc(),
+        queryConfig_.simdHashTableEnabled());
   } else {
     table_ = HashTable<false>::createForAggregation(
         std::move(hashers_),
@@ -420,7 +421,8 @@ void GroupingSet::createHashTable() {
         &pool_,
         nullptr,
         jitRowEqVectors,
-        queryConfig_.useMonoAlloc());
+        queryConfig_.useMonoAlloc(),
+        queryConfig_.simdHashTableEnabled());
   }
 
   RowContainer& rows = *table_->rows();
