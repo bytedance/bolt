@@ -3078,3 +3078,147 @@ TEST_F(RLEv1Test, testLeadingNulls) {
     EXPECT_EQ(i - 4, data[i]) << "Output wrong at " << i;
   }
 }
+
+// ===========================================================================
+// skipValues regression tests.
+//
+// Each test builds a stream, reads it fully (baseline), then creates a fresh
+// decoder, skips K values via skip() (accumulated into pendingSkip and flushed
+// by the next next() call, which now routes through skipValues), and reads the
+// rest. The post-skip values must match the baseline's tail. This verifies that
+// skipValues advances runRead/curByte/bitsLeft/prevValue/unpackedIdx
+// identically to doNext, across run boundaries and all encoding types.
+// ===========================================================================
+
+std::vector<int64_t> readAllRLEv2(
+    const unsigned char* bytes,
+    unsigned long l,
+    size_t count) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  std::unique_ptr<dwio::common::IntDecoder<true>> rle = createRleDecoder<true>(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(bytes, l),
+      RleVersion_2,
+      *pool,
+      true,
+      dwio::common::INT_BYTE_SIZE);
+  std::vector<int64_t> data(count);
+  rle->next(data.data(), count, nullptr);
+  return data;
+}
+
+std::vector<int64_t> skipThenReadRLEv2(
+    const unsigned char* bytes,
+    unsigned long l,
+    size_t skipCount,
+    size_t readCount) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  std::unique_ptr<dwio::common::IntDecoder<true>> rle = createRleDecoder<true>(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(bytes, l),
+      RleVersion_2,
+      *pool,
+      true,
+      dwio::common::INT_BYTE_SIZE);
+  if (skipCount > 0) {
+    rle->skip(skipCount);
+  }
+  std::vector<int64_t> data(readCount);
+  rle->next(data.data(), readCount, nullptr);
+  return data;
+}
+
+// DELTA fixed-delta skip: stream 0..199 (single DELTA run, delta=1).
+TEST_F(RLEv2Test, skipDeltaFixed) {
+  const unsigned char bytes[] = {0xC0, 0xC7, 0x00, 0x02};
+  unsigned long l = sizeof(bytes) / sizeof(char);
+  const size_t count = 200;
+  auto baseline = readAllRLEv2(bytes, l, count);
+
+  for (size_t skip : {1u, 3u, 7u, 50u, 100u, 199u}) {
+    auto tail = skipThenReadRLEv2(bytes, l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// DELTA variable-delta skip (bitSize != 0): 5 values with variable deltas.
+TEST_F(RLEv2Test, skipDeltaVariable1) {
+  const unsigned char bytes[] = {
+      0xce, 0x04, 0xe7, 0x07, 0xc8, 0x01, 0x32, 0x19, 0x0f};
+  unsigned long l = sizeof(bytes) / sizeof(char);
+  const size_t count = 5;
+  auto baseline = readAllRLEv2(bytes, l, count);
+
+  for (size_t skip : {1u, 2u, 3u, 4u}) {
+    auto tail = skipThenReadRLEv2(bytes, l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// DIRECT skip: 50 byte-width values 0..49 (fb=8, zigzag-encoded).
+TEST_F(RLEv2Test, skipDirect) {
+  std::vector<unsigned char> bytes;
+  bytes.push_back(0x4E); // DIRECT, fb=8
+  bytes.push_back(0x31); // runLen = 49 -> 50 values
+  for (size_t i = 0; i < 50; ++i) {
+    bytes.push_back(static_cast<unsigned char>(2 * i)); // zigzag(i) = 2*i
+  }
+  unsigned long l = bytes.size();
+  const size_t count = 50;
+  auto baseline = readAllRLEv2(bytes.data(), l, count);
+
+  for (size_t skip : {1u, 5u, 25u, 49u}) {
+    auto tail = skipThenReadRLEv2(bytes.data(), l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// SHORT_REPEAT skip: 20 runs of 10 (value 66).
+TEST_F(RLEv2Test, skipShortRepeat) {
+  std::vector<unsigned char> bytes;
+  for (size_t r = 0; r < 20; ++r) {
+    bytes.push_back(0x07); // SHORT_REPEAT, byteSize=1, runLen=10
+    bytes.push_back(0x84); // zigzag(66) = 132 = 0x84
+  }
+  unsigned long l = bytes.size();
+  const size_t count = 200;
+  auto baseline = readAllRLEv2(bytes.data(), l, count);
+
+  for (size_t skip : {1u, 10u, 15u, 50u, 100u, 199u}) {
+    auto tail = skipThenReadRLEv2(bytes.data(), l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// PATCHED_BASE skip: basicPatched0 has 10 values with one patch at position 3.
+TEST_F(RLEv2Test, skipPatchedBase0) {
+  const unsigned char bytes[] = {
+      0x8e, 0x09, 0x2b, 0x21, 0x07, 0xd0, 0x1e, 0x00, 0x14, 0x70, 0x28,
+      0x32, 0x3c, 0x46, 0x50, 0x5a, 0xfc, 0xe8};
+  unsigned long l = sizeof(bytes) / sizeof(char);
+  const size_t count = 10;
+  auto baseline = readAllRLEv2(bytes, l, count);
+
+  for (size_t skip : {1u, 2u, 3u, 4u, 5u, 7u, 9u}) {
+    auto tail = skipThenReadRLEv2(bytes, l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
