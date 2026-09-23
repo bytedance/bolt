@@ -408,14 +408,16 @@ void GroupingSet::createHashTable() {
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        queryConfig_.simdHashTableEnabled());
   } else {
     table_ = HashTable<false>::createForAggregation(
         std::move(hashers_),
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        queryConfig_.simdHashTableEnabled());
   }
 
   RowContainer& rows = *table_->rows();

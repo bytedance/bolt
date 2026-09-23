@@ -111,6 +111,44 @@ class HashStringAllocatorTest : public testing::Test {
   folly::Random::DefaultGenerator rng_;
 };
 
+TEST_F(HashStringAllocatorTest, isContiguous) {
+  ASSERT_TRUE(HashStringAllocator::isContiguous(StringView("inline")));
+
+  auto* header = allocate(32);
+  ASSERT_TRUE(HashStringAllocator::isContiguous(
+      StringView(header->begin(), header->size())));
+  ASSERT_FALSE(HashStringAllocator::isContiguous(
+      StringView(header->begin(), header->size() + 1)));
+
+  allocator_->free(header);
+
+  for (const int32_t overflowBytes : {1, 8}) {
+    auto* first = allocate(32);
+    auto* second = allocate(32);
+    auto** continuation = reinterpret_cast<HashStringAllocator::Header**>(
+        first->end() - HashStringAllocator::Header::kContinuedPtrSize);
+    *continuation = second;
+    first->setContinued();
+
+    std::memset(first->begin(), 'a', first->usableSize());
+    std::memset(second->begin(), 'b', overflowBytes);
+    const auto stringSize = first->usableSize() + overflowBytes;
+    StringView multipart(first->begin(), stringSize);
+
+    ASSERT_FALSE(HashStringAllocator::isContiguous(multipart));
+    ASSERT_LE(stringSize, first->size());
+
+    std::string storage;
+    const auto contiguous =
+        HashStringAllocator::contiguousString(multipart, storage);
+    const auto expected =
+        std::string(first->usableSize(), 'a') + std::string(overflowBytes, 'b');
+    EXPECT_EQ(contiguous, StringView(expected));
+
+    allocator_->free(first);
+  }
+}
+
 TEST_F(HashStringAllocatorTest, headerToString) {
   ASSERT_NO_THROW(allocator_->toString());
 

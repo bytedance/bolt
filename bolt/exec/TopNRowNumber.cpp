@@ -184,6 +184,7 @@ TopNRowNumber::TopNRowNumber(
         nullptr,
         false); // support it later
     partitionOffset_ = table_->rows()->columnAt(numKeys).offset();
+    table_->setMayErase(true);
     lookup_ = std::make_unique<HashLookup>(table_->hashers());
   } else {
     allocator_ = std::make_unique<HashStringAllocator>(pool());
