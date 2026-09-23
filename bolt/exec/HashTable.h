@@ -32,6 +32,8 @@
 
 #include <vector/TypeAliases.h>
 #include "bolt/common/base/Portability.h"
+#include "bolt/common/process/ProcessBase.h"
+#include "bolt/exec/HashTableSimd.h"
 #include "bolt/exec/OneWayStatusFlag.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/VectorHasher.h"
@@ -131,6 +133,25 @@ struct HashLookup {
   /// If using valueIds, list of concatenated valueIds. 1:1 with 'hashes'.
   /// Populated by groupProbe and joinProbe.
   raw_vector<uint64_t> normalizedKeys;
+
+  /// Scratch for the SIMD bucket probe paths. Resized per-call by the
+  /// SIMD probe implementations. Size-indexed by probe number (index into
+  /// 'rows').
+  raw_vector<uint64_t> simdCandidateSlots;
+  raw_vector<int32_t> simdActiveRows;
+  /// Per-active-entry bucket cursor for SIMD probe walk/insert.
+  raw_vector<uint64_t> simdActiveSlots;
+  // Candidate/mismatch scratch for SIMD hash compare. Sized to nProbes and
+  // reused across rounds.
+  raw_vector<vector_size_t> simdCandidateRows;
+  raw_vector<char*> simdCandidateGroups;
+  raw_vector<uint8_t> simdMatchMask;
+  raw_vector<uint8_t> simdBothNullMask;
+
+  // Per-lookup key descriptors for SIMD probe compare. Hash join probes can
+  // run concurrently against the same HashTable, so this cannot be HashTable
+  // member scratch.
+  std::vector<hash_table_simd::KeyColumn> simdKeyColumns;
 
   bool jitRowEqVectors = false;
 };
@@ -377,6 +398,20 @@ class BaseHashTable {
   // and be unique.
   virtual void erase(folly::Range<char**> rows) = 0;
 
+  /// Enables/disables SIMD specialization for hash/rehash. Derived HashTable<>
+  /// honors the flag only when the CPU has AVX2 support.
+  virtual void setSimdEnabled(bool /*enabled*/) {}
+
+  /// Marks tables whose callers may invoke erase(). SIMD bucket layout is
+  /// disabled for these tables because it has no tombstone state.
+  virtual void setMayErase(bool /*mayErase*/) {}
+
+  /// True when SIMD input-side hash/valueId dispatch should be used. Overridden
+  /// by HashTable<> to gate on the flag, AVX2 support and non-hybrid layout.
+  virtual bool simdActive() const {
+    return false;
+  }
+
   /// Returns a brief description for use in debugging.
   virtual std::string toString() = 0;
 
@@ -574,8 +609,9 @@ class HashTable : public BaseHashTable {
       const std::vector<Accumulator>& accumulators,
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-      bool jitRowEqVectors) {
-    return std::make_unique<HashTable>(
+      bool jitRowEqVectors,
+      bool simdEnabled = false) {
+    auto table = std::make_unique<HashTable>(
         std::move(hashers),
         accumulators,
         std::vector<TypePtr>{},
@@ -586,6 +622,8 @@ class HashTable : public BaseHashTable {
         pool,
         stringArena,
         jitRowEqVectors);
+    table->setSimdEnabled(simdEnabled);
+    return table;
   }
 
   static std::unique_ptr<HashTable> createForJoin(
@@ -597,8 +635,9 @@ class HashTable : public BaseHashTable {
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
       bool jitRowEqVectors,
-      bool hybridMode = false) {
-    return std::make_unique<HashTable>(
+      bool hybridMode = false,
+      bool simdEnabled = false) {
+    auto table = std::make_unique<HashTable>(
         std::move(hashers),
         std::vector<Accumulator>{},
         dependentTypes,
@@ -611,6 +650,8 @@ class HashTable : public BaseHashTable {
         nullptr,
         jitRowEqVectors,
         hybridMode);
+    table->setSimdEnabled(simdEnabled);
+    return table;
   }
 
   void groupProbe(HashLookup& lookup) override;
@@ -725,7 +766,15 @@ class HashTable : public BaseHashTable {
           kNoSpillInputStartPartitionBit) override;
 
   uint64_t hashTableSizeIncrease(int32_t numNewDistinct) const override {
-    if (numDistinct_ + numNewDistinct > rehashSize()) {
+    const auto newNumDistinct = numDistinct_ + numNewDistinct;
+    if (simdLayoutActive()) {
+      if (newNumDistinct > simdRehashThreshold(capacity_)) {
+        const auto newCapacity = nextSimdCapacity(capacity_, newNumDistinct);
+        return (newCapacity - capacity_) * tableSlotSize();
+      }
+      return 0;
+    }
+    if (newNumDistinct > rehashSize()) {
       // If rehashed, the table adds size_ entries (i.e. doubles),
       // adding one pointer worth for each new position.  (16 tags, 16 6 byte
       // pointers, 16 bytes padding).
@@ -773,7 +822,57 @@ class HashTable : public BaseHashTable {
     return otherTables_;
   }
 
+  /// Enables the SIMD probe/build path. The flag is only honored at runtime
+  /// when the CPU supports AVX2; see simdActive().
+  void setSimdEnabled(bool enabled) override;
+
+  void setMayErase(bool mayErase) override {
+    if (mayErase_ == mayErase) {
+      return;
+    }
+    BOLT_CHECK_NULL(
+        table_,
+        "Cannot change erase setting after hash table allocation. Requested: {}, current: {}, capacity: {}, numDistinct: {}.",
+        mayErase,
+        mayErase_,
+        capacity_,
+        numDistinct_);
+    mayErase_ = mayErase;
+  }
+
+  bool simdEnabled() const {
+    return simdEnabled_;
+  }
+
+  /// True when SIMD paths should be used: the flag is on, the table is not in
+  /// hybrid mode and the CPU supports AVX2. Callers should branch on this
+  /// before invoking any SIMD-specific helper.
+  bool simdActive() const override {
+    return simdEnabled_ && hybridData_ == nullptr && process::hasAvx2();
+  }
+
+  /// True when the SIMD bucket NK layout is active. SIMD mode replaces
+  /// the F14 Bucket (128 B, 16-slot, tag-indexed) layout with fixed-width
+  /// tagged-pointer buckets for the 'kNormalizedKey' path.
+  bool simdNormalizedKeyLayoutActive() const {
+    return simdActive() && hashMode_ == HashMode::kNormalizedKey && !mayErase_;
+  }
+
+  /// True when the SIMD bucket layout is active for full-hash mode. Uses the
+  /// same bucket layout as SIMD-NK and validates tag matches with full key
+  /// compare. Gated off when erase is needed because erase() does not yet
+  /// support the tombstone-free SIMD layout.
+  bool simdHashLayoutActive() const {
+    return simdActive() && hashMode_ == HashMode::kHash && !mayErase_;
+  }
+
+  bool simdLayoutActive() const {
+    return simdNormalizedKeyLayoutActive() || simdHashLayoutActive();
+  }
+
  private:
+  struct SimdBuildScratch;
+
   // Enables debug stats for collisions for debug build.
 #ifdef NDEBUG
   static constexpr bool kTrackLoads = false;
@@ -832,6 +931,27 @@ class HashTable : public BaseHashTable {
   static uint64_t rehashSize(int64_t size) {
     // This implements the F14 load factor: Resize if less than 1/8 unoccupied.
     return size - (size / 8);
+  }
+
+  static constexpr double kSimdLoadFactor = 0.80;
+  static constexpr uint64_t kSimdGrowthFactor = 4;
+
+  // Returns the number of entries after which the SIMD bucket table gets
+  // rehashed.
+  static uint64_t simdRehashThreshold(int64_t size) {
+    return size * kSimdLoadFactor;
+  }
+
+  static uint64_t minimumSimdCapacity(uint64_t numDistincts) {
+    return bits::nextPowerOfTwo(
+        static_cast<uint64_t>(numDistincts / kSimdLoadFactor) + 1);
+  }
+
+  static uint64_t nextSimdCapacity(
+      uint64_t currentCapacity,
+      uint64_t numDistincts) {
+    return std::max(
+        currentCapacity * kSimdGrowthFactor, minimumSimdCapacity(numDistincts));
   }
 
   // Returns the number of entries with 'numNew' and existing 'numDistincts'
@@ -894,6 +1014,11 @@ class HashTable : public BaseHashTable {
   // a power of 2.
   void allocateTables(uint64_t size);
 
+  // SIMD-mode allocation: 'table_' is a flat array of fixed-width
+  // buckets. Used by the SIMD kNormalizedKey and kHash layouts. Size must be
+  // a power of two.
+  void allocateSimdTable(uint64_t size);
+
   // 'initNormalizedKeys' is passed to 'rehash' --> 'rehash' --> 'insertBatch'.
   // If it's false and the table is in normalized keys mode,
   // the keys are retrieved from the row and the hash is made
@@ -921,7 +1046,9 @@ class HashTable : public BaseHashTable {
       char** groups,
       uint64_t* hashes,
       int32_t numGroups,
-      TableInsertPartitionInfo*);
+      TableInsertPartitionInfo*,
+      SimdBuildScratch* scratch = nullptr,
+      std::vector<hash_table_simd::KeyColumn>* keyColumns = nullptr);
 
   // Inserts 'numGroups' entries into 'this'. 'groups' point to
   // contents in a RowContainer owned by 'this'. 'hashes' are the hash
@@ -976,6 +1103,11 @@ class HashTable : public BaseHashTable {
 
   char* insertEntry(HashLookup& lookup, uint64_t index, vector_size_t row);
 
+  // SIMD-path variant of insertEntry: uses the inlined storeKeysToRow and
+  // orders writes for group-row locality. Only legal when simdActive() is
+  // true (callers gate on the SIMD probe paths).
+  char* insertEntrySimd(HashLookup& lookup, uint64_t index, vector_size_t row);
+
   bool compareKeys(const char* group, HashLookup& lookup, vector_size_t row);
 
   bool compareKeys(const char* group, const char* inserted);
@@ -986,11 +1118,52 @@ class HashTable : public BaseHashTable {
   // Shortcut path for group by with normalized keys.
   void groupNormalizedKeyProbe(HashLookup& lookup);
 
+  // SIMD bucket-layout variant for group by with normalized keys.
+  void groupNormalizedKeyProbeSimd(HashLookup& lookup);
+
   // Array probe with SIMD.
   void arrayJoinProbe(HashLookup& lookup);
 
   // Shortcut for probe with normalized keys.
   void joinNormalizedKeyProbe(HashLookup& lookup);
+
+  // SIMD bucket-layout variant of the normalized-key join probe. Read-only.
+  void joinNormalizedKeyProbeSimd(HashLookup& lookup);
+
+  // SIMD bucket-layout group-by probe for full-hash mode.
+  void groupHashProbeSimd(HashLookup& lookup);
+
+  // SIMD bucket-layout join probe for full-hash mode. Read-only.
+  void joinHashProbeSimd(HashLookup& lookup);
+
+  // SIMD bucket-layout join-build insert for full-hash mode.
+  void insertForJoinHashSimd(
+      char** groups,
+      const uint64_t* hashes,
+      int32_t numGroups,
+      TableInsertPartitionInfo* partitionInfo,
+      SimdBuildScratch& scratch,
+      std::vector<hash_table_simd::KeyColumn>& keyColumns);
+
+  // SIMD bucket-layout build-side inserter for normalized keys. Handles
+  // duplicate-key-in-batch via a per-pass claim list; respects partition
+  // boundary and full-table wrap termination guards.
+  void insertForJoinNormalizedKeySimd(
+      char** newRows,
+      const uint64_t* hashes,
+      int32_t numRows,
+      TableInsertPartitionInfo* partitionInfo,
+      SimdBuildScratch& scratch);
+
+  // Claims an empty slot for 'row' in the SIMD bucket table. Returns false
+  // when the slot is outside the owner's partition, in which case 'row'
+  // is queued to the partition overflow list and not placed. Caller
+  // must have verified 'table_[bIdx] == nullptr' prior to calling.
+  bool insertJoinEntrySimd(
+      uint64_t bIdx,
+      char* row,
+      uint64_t hash,
+      TableInsertPartitionInfo* partitionInfo);
 
   // if a new entry was made and false if the row was added to an
   // existing set of rows with the same key.
@@ -1036,6 +1209,20 @@ class HashTable : public BaseHashTable {
   // Returns the byte offset of the bucket for 'hash' starting from 'table_'.
   int64_t bucketOffset(uint64_t hash) const {
     return hash & bucketOffsetMask_;
+  }
+
+  PartitionBoundIndexType parallelJoinBuildPartitionIndex(uint64_t hash) const {
+    return simdLayoutActive() ? hash_table_simd::bucketStart(hash & sizeMask_)
+                              : bucketOffset(hash);
+  }
+
+  PartitionBoundIndexType parallelJoinBuildPartitionBound(
+      uint8_t partition,
+      uint8_t numPartitions) const {
+    const auto rawBound = ((sizeMask_ + 1) / numPartitions) * partition;
+    return simdLayoutActive()
+        ? bits::roundUp(rawBound, hash_table_simd::kBucketSize)
+        : bits::roundUp(rawBound, kBucketSize);
   }
 
   // Returns the byte offset of the next bucket from 'offset'. Wraps around at
@@ -1097,6 +1284,55 @@ class HashTable : public BaseHashTable {
   int8_t sizeBits_;
   bool isJoinBuild_ = false;
   bool joinBuildNoDuplicates_ = false;
+
+  // Serial build reuses table-owned scratch; each parallel partition worker
+  // owns its scratch across input batches.
+  struct SimdBuildScratch {
+    raw_vector<int32_t> activeRows;
+    raw_vector<uint64_t> candidateSlots;
+    raw_vector<uint64_t> startSlots;
+    raw_vector<char*> normalizedKeyCandidateGroups;
+    raw_vector<uint64_t> activeSlots;
+    raw_vector<int32_t> insertRows;
+    raw_vector<uint64_t> insertSlots;
+    raw_vector<vector_size_t> candidateRows;
+    raw_vector<char*> candidateGroups;
+    raw_vector<uint8_t> matchMask;
+    raw_vector<uint8_t> bothNullMask;
+    raw_vector<char*> newGroupPointers;
+
+    void resize(int32_t numRows, bool normalizedKey) {
+      activeRows.resize(numRows);
+      startSlots.resize(numRows);
+      activeSlots.resize(numRows);
+      insertRows.resize(numRows);
+      insertSlots.resize(numRows);
+      if (normalizedKey) {
+        normalizedKeyCandidateGroups.resize(numRows);
+        return;
+      }
+      candidateSlots.resize(numRows);
+      candidateRows.resize(numRows);
+      candidateGroups.resize(numRows);
+      matchMask.resize(numRows);
+      bothNullMask.resize(numRows);
+      newGroupPointers.resize(numRows);
+    }
+  };
+  SimdBuildScratch simdBuildScratch_;
+
+  // If true and the CPU supports AVX2, enables the SIMD probe/build path.
+  // Callers must explicitly opt in via setSimdEnabled() or a factory argument.
+  bool simdEnabled_{false};
+
+  // If true, erase() may be called on this table (TopNRowNumber).
+  // When true, SIMD bucket layout is disabled since it has no tombstone
+  // state.
+  bool mayErase_{false};
+
+  // Cached build-side key column descriptors for serial SIMD-hash insertion.
+  // Parallel partition builders keep one independent vector per worker.
+  std::vector<hash_table_simd::KeyColumn> simdKeyColumns_;
 
   // Set at join build time if the table has duplicates, meaning that
   // the join can be cardinality increasing. Atomic for tsan because

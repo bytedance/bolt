@@ -30,6 +30,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <cstring>
 #include <sstream>
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/RawVector.h"
@@ -192,6 +193,73 @@ TEST(StringView, implicitConstructionAndConversion) {
 TEST(StringView, negativeSizes) {
   EXPECT_THROW(StringView("abc", -10), BoltException);
   EXPECT_NO_THROW(StringView(nullptr, 0));
+}
+
+// Regression test: every inline StringView (including size==0) must be
+// bitwise-deterministic so that raw 16-byte equality compares (used by
+// HashTable SIMD probe paths) treat equal-content inline strings as equal.
+//
+// A previous bug had the constructor early-return for size==0 *before*
+// zeroing bytes 8..15 of the union, so two empty StringView temporaries
+// constructed from different stack frames had different garbage in the
+// trailing 8 bytes. That broke any consumer that used a 16-byte memcmp or
+// 2x int64 compare.
+TEST(StringView, inlineBitwiseDeterminism) {
+  // Pre-fill the constructor's stack frame with a non-zero pattern using a
+  // helper function that overflows registers, then construct an empty
+  // StringView. The trailing 8 bytes must be zero, not the residual pattern.
+  auto construct = [](const char* data, int32_t len) {
+    // Spill registers to push prior callers' bytes into the stack slot the
+    // constructor will write into.
+    uint64_t scratch[8] = {
+        0xDEADBEEFCAFEBABEULL,
+        0x1122334455667788ULL,
+        0x99AABBCCDDEEFF00ULL,
+        0x0F0F0F0F0F0F0F0FULL,
+        0xF0F0F0F0F0F0F0F0ULL,
+        0x5555555555555555ULL,
+        0xAAAAAAAAAAAAAAAAULL,
+        0x123456789ABCDEF0ULL,
+    };
+    asm volatile("" : : "r"(scratch) : "memory");
+    return StringView(data, len);
+  };
+
+  // Empty StringViews must be bitwise identical no matter where they were
+  // constructed.
+  StringView a = construct("", 0);
+  StringView b = construct(nullptr, 0);
+  StringView c{}; // default constructor zeroes everything.
+  ASSERT_EQ(sizeof(StringView), 16);
+  EXPECT_EQ(0, std::memcmp(&a, &b, sizeof(StringView)));
+  EXPECT_EQ(0, std::memcmp(&a, &c, sizeof(StringView)));
+
+  // Sub-prefix sizes (1..4): content lives in prefix_, bytes 8..15 must be 0.
+  StringView one = construct("X", 1);
+  StringView four = construct("ABCD", 4);
+  uint64_t oneTrailing, fourTrailing;
+  std::memcpy(&oneTrailing, reinterpret_cast<const char*>(&one) + 8, 8);
+  std::memcpy(&fourTrailing, reinterpret_cast<const char*>(&four) + 8, 8);
+  EXPECT_EQ(0u, oneTrailing);
+  EXPECT_EQ(0u, fourTrailing);
+
+  // Inline-extension sizes (5..12): bytes past content within the inline
+  // region must be 0 so two equal-length inline strings compare equal byte-
+  // for-byte.
+  StringView five1 = construct("hello", 5);
+  StringView five2 = construct("hello", 5);
+  EXPECT_EQ(0, std::memcmp(&five1, &five2, sizeof(StringView)));
+
+  StringView eleven1 = construct("hello world", 11);
+  StringView eleven2 = construct("hello world", 11);
+  EXPECT_EQ(0, std::memcmp(&eleven1, &eleven2, sizeof(StringView)));
+
+  // Boundary inline (size==12): bytes 4..15 are exactly content, both halves
+  // must be content-only.
+  const char twelveData[] = "abcdefghijkl";
+  StringView twelve1 = construct(twelveData, 12);
+  StringView twelve2 = construct(twelveData, 12);
+  EXPECT_EQ(0, std::memcmp(&twelve1, &twelve2, sizeof(StringView)));
 }
 
 int32_t linearSearchSimple(
