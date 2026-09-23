@@ -110,7 +110,8 @@ TEST_F(EltTest, longStringsOutliveInputs) {
     auto index = makeFlatVector<int32_t>({1, 2, 2, 1});
     auto input0 = makeFlatVector<std::string>({long0, long0, long0, long0});
     auto input1 = makeFlatVector<std::string>({long1, long1, long1, long1});
-    result = evaluate("elt(c0, c1, c2)", makeRowVector({index, input0, input1}));
+    result =
+        evaluate("elt(c0, c1, c2)", makeRowVector({index, input0, input1}));
   }
   // The input vectors are gone; only the retained buffers keep these valid.
   assertEqualVectors(
