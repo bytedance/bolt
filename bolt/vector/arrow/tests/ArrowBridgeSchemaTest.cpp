@@ -647,7 +647,7 @@ TEST_F(ArrowBridgeSchemaImportTest, dictionaryTypeTest) {
       *testSchemaDictionaryImport(
           "i",
           makeComplexArrowSchema(
-              schemas, schemaPtrs, mapSchemas, mapSchemaPtrs, "+l", {"ts"})));
+              schemas, schemaPtrs, mapSchemas, mapSchemaPtrs, "+l", {"tsn:"})));
   EXPECT_EQ(
       *ARRAY(DATE()),
       *testSchemaDictionaryImport(

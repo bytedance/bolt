@@ -86,6 +86,9 @@ class ArrowSerializerTest
     common::CompressionKind kind = GetParam();
     serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions paramOptions{
         useLosslessTimestamp, kind};
+    if (serdeOptions != nullptr) {
+      paramOptions.arrowOptions = serdeOptions->arrowOptions;
+    }
     return paramOptions;
   }
 
@@ -528,6 +531,44 @@ TEST_P(ArrowSerializerTest, multiPage) {
     }
     assertEqualVectors(vec, deserialized);
     deserialized->validate({});
+  }
+}
+
+TEST_P(ArrowSerializerTest, genericOptionsWithArrowOptions) {
+  serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions options;
+  VectorSerde::Options& genericOptions = options;
+  genericOptions.useLosslessTimestamp = true;
+  genericOptions.compressionKind = GetParam();
+  auto input = makeRowVector({makeFlatVector<Timestamp>(
+      {Timestamp(0, 123'456'789), Timestamp(-1, 999'999'999)})});
+  auto type = asRowType(input->type());
+  for (bool batch : {false, true}) {
+    std::vector<std::string> payloads;
+    for (const auto* timezone : {"UTC", "America/Los_Angeles"}) {
+      options.arrowOptions.timestampTimeZone = timezone;
+      std::ostringstream bytes;
+      serializer::arrowserde::ArrowOutputStreamListener listener;
+      OStreamOutputStream output(&bytes, &listener);
+      if (batch) {
+        auto serializer =
+            serde_->createBatchSerializer(pool_.get(), &genericOptions);
+        serializer->serialize(input, &output);
+      } else {
+        StreamArena arena(pool_.get());
+        auto serializer = serde_->createSerializer(
+            type, input->size(), &arena, &genericOptions);
+        serializer->append(input);
+        serializer->flush(&output);
+      }
+      auto serialized = bytes.str();
+      auto source = toByteStream(serialized);
+      RowVectorPtr restored;
+      serde_->deserialize(
+          source.get(), pool_.get(), type, &restored, 0, &genericOptions);
+      assertEqualVectors(input, restored);
+      payloads.push_back(std::move(serialized));
+    }
+    EXPECT_NE(payloads[0], payloads[1]);
   }
 }
 

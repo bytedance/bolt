@@ -410,11 +410,7 @@ class ArrowBridgeArrayExportTest : public testing::Test {
 
     // Validate base REE array.
     EXPECT_EQ(vectorSize, arrowArray.length);
-    if (isNullConstant) {
-      EXPECT_EQ(vectorSize, arrowArray.null_count);
-    } else {
-      EXPECT_EQ(0, arrowArray.null_count);
-    }
+    EXPECT_EQ(0, arrowArray.null_count);
     EXPECT_EQ(0, arrowArray.offset);
     EXPECT_EQ(0, arrowArray.n_buffers);
     EXPECT_EQ(nullptr, arrowArray.buffers);

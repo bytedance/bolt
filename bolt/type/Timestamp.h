@@ -207,7 +207,7 @@ struct Timestamp {
       return Timestamp(micros / 1'000'000, (micros % 1'000'000) * 1'000);
     }
     auto second = micros / 1'000'000 - 1;
-    auto nano = ((micros - second * 1'000'000) % 1'000'000) * 1'000;
+    auto nano = (micros % 1'000'000 + 1'000'000) * 1'000;
     return Timestamp(second, nano);
   }
 
@@ -249,16 +249,17 @@ struct Timestamp {
     // int64 can store around 292 years in nanos ~ till 2262-04-12.
     // When an integer overflow occurs in the calculation,
     // an exception will be thrown.
-    try {
-      return checkedPlus(
-          checkedMultiply(seconds_, (int64_t)1'000'000'000), (int64_t)nanos_);
-    } catch (const std::exception& e) {
+    // A negative seconds * 1e9 may overflow even when adding nanos brings
+    // the final value back into the int64 range.
+    const __int128_t result =
+        static_cast<__int128_t>(seconds_) * kNanosInSecond + nanos_;
+    if (result < INT64_MIN || result > INT64_MAX) {
       BOLT_USER_FAIL(
-          "Could not convert Timestamp({}, {}) to nanoseconds, {}",
+          "Could not convert Timestamp({}, {}) to nanoseconds",
           seconds_,
-          nanos_,
-          e.what());
+          nanos_);
     }
+    return result;
   }
 
   // Keep it in header for getting inlined.
@@ -371,7 +372,7 @@ struct Timestamp {
       return Timestamp(millis / 1'000, (millis % 1'000) * 1'000'000);
     }
     auto second = millis / 1'000 - 1;
-    auto nano = ((millis - second * 1'000) % 1'000) * 1'000'000;
+    auto nano = (millis % 1'000 + 1'000) * 1'000'000;
     return Timestamp(second, nano);
   }
 
@@ -386,7 +387,7 @@ struct Timestamp {
       return Timestamp(millis / 1'000, (millis % 1'000) * 1'000'000);
     }
     auto second = millis / 1'000 - 1;
-    auto nano = ((millis - second * 1'000) % 1'000) * 1'000'000;
+    auto nano = (millis % 1'000 + 1'000) * 1'000'000;
     return Timestamp(second, nano);
   }
 
@@ -395,7 +396,7 @@ struct Timestamp {
       return Timestamp(micros / 1'000'000, (micros % 1'000'000) * 1'000);
     }
     auto second = micros / 1'000'000 - 1;
-    auto nano = ((micros - second * 1'000'000) % 1'000'000) * 1'000;
+    auto nano = (micros % 1'000'000 + 1'000'000) * 1'000;
     return Timestamp(second, nano);
   }
 
@@ -404,7 +405,7 @@ struct Timestamp {
       return Timestamp(nanos / 1'000'000'000, nanos % 1'000'000'000);
     }
     auto second = nanos / 1'000'000'000 - 1;
-    auto nano = (nanos - second * 1'000'000'000) % 1'000'000'000;
+    auto nano = nanos % 1'000'000'000 + 1'000'000'000;
     return Timestamp(second, nano);
   }
 
