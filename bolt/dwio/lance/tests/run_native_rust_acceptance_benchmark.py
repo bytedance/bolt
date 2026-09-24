@@ -157,7 +157,11 @@ def exact_sign_flip(log_ratios: list[float]) -> dict[str, float | int]:
         )
         extreme += statistic >= observed - 1e-15
         total += 1
-    return {"observed_abs_mean_log_ratio": observed, "p_value": extreme / total, "permutations": total}
+    return {
+        "observed_abs_mean_log_ratio": observed,
+        "p_value": extreme / total,
+        "permutations": total,
+    }
 
 
 def main() -> int:
@@ -170,9 +174,15 @@ def main() -> int:
     if args.output.exists():
         raise ValueError(f"refusing to overwrite output: {args.output}")
 
-    available = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else list(range(os.cpu_count() or 1))
+    available = (
+        sorted(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else list(range(os.cpu_count() or 1))
+    )
     if len(available) < args.threads:
-        raise ValueError(f"requested {args.threads} CPUs but only {len(available)} are available")
+        raise ValueError(
+            f"requested {args.threads} CPUs but only {len(available)} are available"
+        )
     affinity = set(available[: args.threads])
 
     common_env = os.environ.copy()
@@ -223,7 +233,9 @@ def main() -> int:
                     "implementation": implementation,
                     "reader_stats": parse_stats(
                         measurement["stderr"],
-                        STATS_PREFIX if implementation == "native" else RUST_STATS_PREFIX,
+                        STATS_PREFIX
+                        if implementation == "native"
+                        else RUST_STATS_PREFIX,
                     ),
                 }
             )
