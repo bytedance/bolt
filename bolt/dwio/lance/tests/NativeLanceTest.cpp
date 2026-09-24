@@ -35,6 +35,7 @@
 #include "bolt/dwio/lance/NativeLanceBitmap.h"
 #include "bolt/dwio/lance/NativeLanceBitpack.h"
 #include "bolt/dwio/lance/NativeLanceColumnCursor.h"
+#include "bolt/dwio/lance/NativeLanceColumnReader.h"
 #include "bolt/dwio/lance/NativeLanceDecompressor.h"
 #include "bolt/dwio/lance/NativeLanceFileOpenTask.h"
 #include "bolt/dwio/lance/NativeLanceListOffsets.h"
@@ -88,6 +89,36 @@ std::unique_ptr<dwio::common::BufferedInput> openFile(
     memory::MemoryPool& pool) {
   return std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<LocalReadFile>("examples/" + fileName), pool);
+}
+
+VectorPtr decodeColumn(
+    NativeLancePageSource& source,
+    uint32_t columnIndex,
+    uint64_t rowStart,
+    uint64_t rowCount) {
+  auto reader =
+      NativeLanceColumnReader::buildFileColumn(source.metadata(), columnIndex);
+  const NativeLanceColumnRequest request{
+      .rowStart = rowStart,
+      .rowCount = rowCount,
+      .purpose = NativeLanceDecodePurpose::kProjection};
+  return reader->read(source, request, source.pool(), true);
+}
+
+VectorPtr decodeSelectedRows(
+    NativeLancePageSource& source,
+    uint32_t columnIndex,
+    uint64_t rowStart,
+    folly::Range<const vector_size_t*> rows) {
+  auto reader =
+      NativeLanceColumnReader::buildFileColumn(source.metadata(), columnIndex);
+  const NativeLanceColumnRequest request{
+      .rowStart = rowStart,
+      .rowCount = source.metadata().numRows() - rowStart,
+      .selection = NativeLanceRowSelection::rows(rows),
+      .purpose = NativeLanceDecodePurpose::kProjection};
+  return reader->read(
+      source, request, source.pool(), source.supportsConcurrentDecoding());
 }
 
 class CountingReadFile final : public ReadFile {
@@ -2947,11 +2978,11 @@ TEST_F(NativeLanceTest, preservesColumnNames) {
 
 TEST_F(NativeLanceTest, decodesFixedWidthRange) {
   const auto file = load("sample.lance");
-  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
-  const auto integers = decoder.decodeColumn(0, 5, 7);
+  const auto integers = decodeColumn(decoder, 0, 5, 7);
   const auto* rawIntegers = integers->asFlatVector<int64_t>()->rawValues();
-  const auto doubles = decoder.decodeColumn(1, 5, 7);
+  const auto doubles = decodeColumn(decoder, 1, 5, 7);
   const auto* rawDoubles = doubles->asFlatVector<double>()->rawValues();
   for (vector_size_t i = 0; i < 7; ++i) {
     EXPECT_FALSE(integers->isNullAt(i));
@@ -2967,9 +2998,9 @@ TEST_F(NativeLanceTest, rangeReadDoesNotReadWholePage) {
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   const NativeLanceMetadata metadata(*input, *pool_);
   const auto bytesAfterMetadata = readFile->bytesRead();
-  const NativeLancePageSource decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto values = decoder.decodeColumn(0, 5, 2);
+  const auto values = decodeColumn(decoder, 0, 5, 2);
   EXPECT_EQ(values->asFlatVector<int64_t>()->valueAt(0), 6);
   EXPECT_EQ(values->asFlatVector<int64_t>()->valueAt(1), 7);
   EXPECT_EQ(readFile->bytesRead() - bytesAfterMetadata, 2 * sizeof(int64_t));
@@ -2977,11 +3008,11 @@ TEST_F(NativeLanceTest, rangeReadDoesNotReadWholePage) {
 
 TEST_F(NativeLanceTest, decodesDecimal128) {
   const auto file = load("decimal.lance");
-  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
-  const auto shortDecimals = decoder.decodeColumn(0, 3, 5);
+  const auto shortDecimals = decodeColumn(decoder, 0, 3, 5);
   const auto* rawShort = shortDecimals->asFlatVector<int64_t>()->rawValues();
-  const auto longDecimals = decoder.decodeColumn(1, 3, 5);
+  const auto longDecimals = decodeColumn(decoder, 1, 3, 5);
   const auto* rawLong = longDecimals->asFlatVector<int128_t>()->rawValues();
   const auto longBase = HugeInt::parse("10000000000000000000");
   for (vector_size_t i = 0; i < 5; ++i) {
@@ -3002,15 +3033,15 @@ TEST_F(NativeLanceTest, parsesStableV2StringFixture) {
   EXPECT_EQ(file.metadata->physicalColumnIndex(2), 3);
   EXPECT_EQ(file.metadata->physicalColumnIndex(3), 5);
 
-  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
-  const auto strings = decoder.decodeColumn(1, 1, 2);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
+  const auto strings = decodeColumn(decoder, 1, 1, 2);
   EXPECT_EQ(strings->asFlatVector<StringView>()->valueAt(0).str(), "bar");
   EXPECT_EQ(strings->asFlatVector<StringView>()->valueAt(1).str(), "baz");
-  const auto binaries = decoder.decodeColumn(2, 0, 3);
+  const auto binaries = decodeColumn(decoder, 2, 0, 3);
   EXPECT_EQ(binaries->asFlatVector<StringView>()->valueAt(0).str(), "foo");
   EXPECT_EQ(binaries->asFlatVector<StringView>()->valueAt(1).str(), "bar");
   EXPECT_EQ(binaries->asFlatVector<StringView>()->valueAt(2).str(), "baz");
-  const auto numbers = decoder.decodeColumn(3, 0, 3);
+  const auto numbers = decodeColumn(decoder, 3, 0, 3);
   EXPECT_EQ(numbers->asFlatVector<int64_t>()->valueAt(0), 4);
   EXPECT_EQ(numbers->asFlatVector<int64_t>()->valueAt(1), 5);
   EXPECT_EQ(numbers->asFlatVector<int64_t>()->valueAt(2), 6);
@@ -3026,11 +3057,11 @@ TEST_F(NativeLanceTest, decodesExactStructuralFixtures) {
         "category:VARCHAR,blob:VARBINARY>");
     NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
-    const auto ids = decoder.decodeColumn(0, 1'020, 10);
+    const auto ids = decodeColumn(decoder, 0, 1'020, 10);
     for (vector_size_t row = 0; row < ids->size(); ++row) {
       EXPECT_EQ(ids->asFlatVector<int32_t>()->valueAt(row), 1'020 + row);
     }
-    const auto names = decoder.decodeColumn(1, 1'020, 10);
+    const auto names = decodeColumn(decoder, 1, 1'020, 10);
     for (vector_size_t row = 0; row < names->size(); ++row) {
       const auto absolute = 1'020 + row;
       EXPECT_EQ(names->isNullAt(row), absolute % 7 == 0);
@@ -3040,7 +3071,7 @@ TEST_F(NativeLanceTest, decodesExactStructuralFixtures) {
             fmt::format("value-{:04}-deterministic-fixture", absolute));
       }
     }
-    const auto items = decoder.decodeColumn(2, 1'020, 10);
+    const auto items = decodeColumn(decoder, 2, 1'020, 10);
     const auto* arrays = items->as<ArrayVector>();
     ASSERT_NE(arrays, nullptr);
     const auto* elements = arrays->elements()->asFlatVector<int32_t>();
@@ -3201,7 +3232,7 @@ TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
   }
   readFile->resetBytesRead();
   NativeLancePageSource decoder(*input, metadata, *pool_);
-  const auto values = decoder.decodeColumn(kColumn, kStart, kRows);
+  const auto values = decodeColumn(decoder, kColumn, kStart, kRows);
   for (vector_size_t row = 0; row < values->size(); ++row) {
     EXPECT_DOUBLE_EQ(
         values->asFlatVector<double>()->valueAt(row),
@@ -3239,7 +3270,7 @@ TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
   nullableStringReadFile->resetBytesRead();
   NativeLancePageSource nullableStringDecoder(
       *nullableStringInput, nullableStringMetadata, *pool_);
-  const auto names = nullableStringDecoder.decodeColumn(1, kStart, kRows);
+  const auto names = decodeColumn(nullableStringDecoder, 1, kStart, kRows);
   ASSERT_EQ(names->size(), kRows);
   EXPECT_EQ(
       names->asFlatVector<StringView>()->valueAt(0).str(),
@@ -3275,7 +3306,7 @@ TEST_F(NativeLanceTest, nullableMiniBlockReadsSelectedChunks) {
   }
   readFile->resetBytesRead();
   NativeLancePageSource decoder(*input, metadata, *pool_);
-  const auto values = decoder.decodeColumn(kColumn, kStart, kRows);
+  const auto values = decodeColumn(decoder, kColumn, kStart, kRows);
   ASSERT_EQ(values->size(), kRows);
   for (vector_size_t row = 0; row < kRows; ++row) {
     const auto absolute = kStart + row;
@@ -3300,7 +3331,7 @@ TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {
 
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
-  const auto maps = decoder.decodeColumn(0, kStart, kRows);
+  const auto maps = decodeColumn(decoder, 0, kStart, kRows);
   const auto* map = maps->as<MapVector>();
   ASSERT_NE(map, nullptr);
   for (vector_size_t row = 0; row < kRows; ++row) {
@@ -3319,7 +3350,7 @@ TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {
     }
   }
 
-  const auto fixed = decoder.decodeColumn(1, kStart, kRows);
+  const auto fixed = decodeColumn(decoder, 1, kStart, kRows);
   const auto* fixedArray = fixed->as<ArrayVector>();
   ASSERT_NE(fixedArray, nullptr);
   for (vector_size_t row = 0; row < kRows; ++row) {
@@ -3344,7 +3375,7 @@ TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {
     }
   }
 
-  const auto fixedStruct = decoder.decodeColumn(2, kStart, kRows);
+  const auto fixedStruct = decodeColumn(decoder, 2, kStart, kRows);
   const auto* outer = fixedStruct->as<ArrayVector>();
   ASSERT_NE(outer, nullptr);
   const auto* rows = outer->elements()->as<RowVector>();
@@ -3378,7 +3409,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeListStructWithListAndMap) {
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
   for (uint32_t column = 0; column < 2; ++column) {
-    const auto decoded = decoder.decodeColumn(column, kStart, kRows);
+    const auto decoded = decodeColumn(decoder, column, kStart, kRows);
     const auto* outer = decoded->as<ArrayVector>();
     ASSERT_NE(outer, nullptr);
     ASSERT_EQ(outer->size(), kRows);
@@ -3450,10 +3481,10 @@ TEST_F(NativeLanceTest, decodesStructuralScalarFixture) {
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
 
-    const auto decimals = decoder.decodeColumn(0, kStart, kRows);
-    const auto timestamps = decoder.decodeColumn(1, kStart, kRows);
-    const auto fixed = decoder.decodeColumn(2, kStart, kRows);
-    const auto strings = decoder.decodeColumn(3, kStart, kRows);
+    const auto decimals = decodeColumn(decoder, 0, kStart, kRows);
+    const auto timestamps = decodeColumn(decoder, 1, kStart, kRows);
+    const auto fixed = decodeColumn(decoder, 2, kStart, kRows);
+    const auto strings = decodeColumn(decoder, 3, kStart, kRows);
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
       EXPECT_EQ(decimals->isNullAt(row), absolute % 19 == 0);
@@ -3495,9 +3526,9 @@ TEST_F(NativeLanceTest, decodesSparseV23Fixture) {
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
 
-  const auto primitive = decoder.decodeColumn(0, kStart, kRows);
-  const auto lists = decoder.decodeColumn(1, kStart, kRows);
-  const auto fixed = decoder.decodeColumn(2, kStart, kRows);
+  const auto primitive = decodeColumn(decoder, 0, kStart, kRows);
+  const auto lists = decodeColumn(decoder, 1, kStart, kRows);
+  const auto fixed = decodeColumn(decoder, 2, kStart, kRows);
   const auto* listVector = lists->as<ArrayVector>();
   const auto* fixedVector = fixed->as<ArrayVector>();
   ASSERT_NE(listVector, nullptr);
@@ -3582,7 +3613,7 @@ TEST_F(NativeLanceTest, decodesStructuralFixedFullZipFixture) {
     NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
-    const auto values = decoder.decodeColumn(0, kStart, kRows);
+    const auto values = decodeColumn(decoder, 0, kStart, kRows);
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
       EXPECT_EQ(values->isNullAt(row), absolute % 17 == 0);
@@ -3605,9 +3636,9 @@ TEST_F(NativeLanceTest, decodesStructuralCompressionFixtures) {
     NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
-    const auto rle = decoder.decodeColumn(0, kStart, kRows);
-    const auto bss = decoder.decodeColumn(1, kStart, kRows);
-    const auto general = decoder.decodeColumn(2, kStart, kRows);
+    const auto rle = decodeColumn(decoder, 0, kStart, kRows);
+    const auto bss = decodeColumn(decoder, 1, kStart, kRows);
+    const auto general = decodeColumn(decoder, 2, kStart, kRows);
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
       EXPECT_EQ(rle->asFlatVector<int32_t>()->valueAt(row), absolute / 64);
@@ -3636,17 +3667,17 @@ TEST_F(NativeLanceTest, decodesStructuralExtendedScalarFixtures) {
     NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
-    const auto f16 = decoder.decodeColumn(0, kStart, kRows);
-    const auto date32 = decoder.decodeColumn(1, kStart, kRows);
-    const auto date64 = decoder.decodeColumn(2, kStart, kRows);
-    const auto time32 = decoder.decodeColumn(3, kStart, kRows);
-    const auto time64 = decoder.decodeColumn(4, kStart, kRows);
-    const auto durationS = decoder.decodeColumn(5, kStart, kRows);
-    const auto durationUs = decoder.decodeColumn(6, kStart, kRows);
-    const auto durationNs = decoder.decodeColumn(7, kStart, kRows);
-    const auto binary = decoder.decodeColumn(8, kStart, kRows);
-    const auto allNull = decoder.decodeColumn(9, kStart, kRows);
-    const auto bfloat = decoder.decodeColumn(10, kStart, kRows);
+    const auto f16 = decodeColumn(decoder, 0, kStart, kRows);
+    const auto date32 = decodeColumn(decoder, 1, kStart, kRows);
+    const auto date64 = decodeColumn(decoder, 2, kStart, kRows);
+    const auto time32 = decodeColumn(decoder, 3, kStart, kRows);
+    const auto time64 = decodeColumn(decoder, 4, kStart, kRows);
+    const auto durationS = decodeColumn(decoder, 5, kStart, kRows);
+    const auto durationUs = decodeColumn(decoder, 6, kStart, kRows);
+    const auto durationNs = decodeColumn(decoder, 7, kStart, kRows);
+    const auto binary = decodeColumn(decoder, 8, kStart, kRows);
+    const auto allNull = decodeColumn(decoder, 9, kStart, kRows);
+    const auto bfloat = decodeColumn(decoder, 10, kStart, kRows);
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
       EXPECT_EQ(f16->isNullAt(row), absolute % 17 == 0);
@@ -3718,7 +3749,7 @@ TEST_F(NativeLanceTest, decodesStructuralPackedStructFixtures) {
         file.metadata->rowType()->toString(),
         "ROW<packed:ROW<x:INTEGER,y:BIGINT>>");
     NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
-    const auto decoded = decoder.decodeColumn(0, 1'020, 17);
+    const auto decoded = decodeColumn(decoder, 0, 1'020, 17);
     const auto* rows = decoded->as<RowVector>();
     ASSERT_NE(rows, nullptr);
     for (vector_size_t row = 0; row < decoded->size(); ++row) {
@@ -3739,7 +3770,7 @@ TEST_F(NativeLanceTest, decodesStructuralPackedStructFixtures) {
       file.metadata->rowType()->toString(),
       "ROW<packed:ROW<x:INTEGER,y:VARCHAR>>");
   NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
-  const auto decoded = decoder.decodeColumn(0, 1'020, 17);
+  const auto decoded = decodeColumn(decoder, 0, 1'020, 17);
   const auto* rows = decoded->as<RowVector>();
   ASSERT_NE(rows, nullptr);
   for (vector_size_t row = 0; row < decoded->size(); ++row) {
@@ -3770,7 +3801,7 @@ TEST_F(NativeLanceTest, decodesInlineBlobV2AcrossChunkBoundary) {
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
   decoder.prefetchColumns({0}, kStart, kRows);
-  const auto decoded = decoder.decodeColumn(0, kStart, kRows);
+  const auto decoded = decodeColumn(decoder, 0, kStart, kRows);
   ASSERT_EQ(decoded->size(), kRows);
   const auto* values = decoded->asFlatVector<StringView>();
   ASSERT_NE(values, nullptr);
@@ -3793,7 +3824,7 @@ TEST_F(NativeLanceTest, rejectsBlobV2ThatRequiresDatasetResolver) {
   EXPECT_THROW(
       {
         try {
-          decoder.decodeColumn(0, 1'024, 1);
+          decodeColumn(decoder, 0, 1'024, 1);
         } catch (const BoltException& error) {
           EXPECT_NE(
               error.message().find(
@@ -3811,7 +3842,7 @@ TEST_F(NativeLanceTest, resolvesAllBlobV2StorageKinds) {
   NativeLanceMetadata metadata(*input, *pool_);
   auto resolver = std::make_shared<TestBlobResolver>();
   NativeLancePageSource decoder(*input, metadata, *pool_, resolver);
-  const auto decoded = decoder.decodeColumn(0, 0, 4);
+  const auto decoded = decodeColumn(decoder, 0, 0, 4);
   const auto* values = decoded->asFlatVector<StringView>();
   ASSERT_NE(values, nullptr);
   ASSERT_EQ(values->size(), 4);
@@ -3879,14 +3910,14 @@ TEST_F(NativeLanceTest, decodesStructuralTypeMatrixFixtures) {
     NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
-    const auto time32 = decoder.decodeColumn(0, kStart, kRows);
-    const auto time64 = decoder.decodeColumn(1, kStart, kRows);
-    const auto duration = decoder.decodeColumn(2, kStart, kRows);
-    const auto timestampS = decoder.decodeColumn(3, kStart, kRows);
-    const auto timestampMs = decoder.decodeColumn(4, kStart, kRows);
-    const auto timestampNs = decoder.decodeColumn(5, kStart, kRows);
-    const auto largeString = decoder.decodeColumn(6, kStart, kRows);
-    const auto json = decoder.decodeColumn(7, kStart, kRows);
+    const auto time32 = decodeColumn(decoder, 0, kStart, kRows);
+    const auto time64 = decodeColumn(decoder, 1, kStart, kRows);
+    const auto duration = decodeColumn(decoder, 2, kStart, kRows);
+    const auto timestampS = decodeColumn(decoder, 3, kStart, kRows);
+    const auto timestampMs = decodeColumn(decoder, 4, kStart, kRows);
+    const auto timestampNs = decodeColumn(decoder, 5, kStart, kRows);
+    const auto largeString = decodeColumn(decoder, 6, kStart, kRows);
+    const auto json = decodeColumn(decoder, 7, kStart, kRows);
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
       EXPECT_EQ(time32->isNullAt(row), absolute % 17 == 0);
@@ -3953,7 +3984,7 @@ TEST_F(NativeLanceTest, decodesStructuralDictionaryTypeMatrix) {
     constexpr vector_size_t kRows = 17;
     std::vector<VectorPtr> columns;
     for (uint32_t column = 0; column < 8; ++column) {
-      columns.push_back(decoder.decodeColumn(column, kStart, kRows));
+      columns.push_back(decodeColumn(decoder, column, kStart, kRows));
     }
     constexpr std::array<std::string_view, 4> kStrings{
         "zero", "one", "two", "three"};
@@ -4010,7 +4041,7 @@ TEST_F(NativeLanceTest, decodesAllSupportedDictionaryValueTypes) {
     constexpr vector_size_t kRows = 17;
     std::vector<VectorPtr> columns;
     for (uint32_t column = 0; column < 16; ++column) {
-      columns.push_back(decoder.decodeColumn(column, kStart, kRows));
+      columns.push_back(decodeColumn(decoder, column, kStart, kRows));
     }
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
@@ -4083,7 +4114,7 @@ TEST_F(NativeLanceTest, decodesColonBearingDictionaryValueTypes) {
     constexpr vector_size_t kRows = 17;
     std::vector<VectorPtr> columns;
     for (uint32_t column = 0; column < 17; ++column) {
-      columns.push_back(decoder.decodeColumn(column, kStart, kRows));
+      columns.push_back(decodeColumn(decoder, column, kStart, kRows));
     }
     for (vector_size_t row = 0; row < kRows; ++row) {
       const auto absolute = kStart + row;
@@ -4158,11 +4189,11 @@ TEST_F(NativeLanceTest, decodesConstantAndEmptyStructFixture) {
   NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
-  const auto integers = decoder.decodeColumn(0, kStart, kRows);
-  const auto strings = decoder.decodeColumn(1, kStart, kRows);
-  const auto lists = decoder.decodeColumn(2, kStart, kRows);
-  const auto emptyStructs = decoder.decodeColumn(3, kStart, kRows);
-  const auto allNullFixed = decoder.decodeColumn(4, kStart, kRows);
+  const auto integers = decodeColumn(decoder, 0, kStart, kRows);
+  const auto strings = decodeColumn(decoder, 1, kStart, kRows);
+  const auto lists = decodeColumn(decoder, 2, kStart, kRows);
+  const auto emptyStructs = decodeColumn(decoder, 3, kStart, kRows);
+  const auto allNullFixed = decodeColumn(decoder, 4, kStart, kRows);
   const auto* arrays = lists->as<ArrayVector>();
   const auto* fixedArrays = allNullFixed->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
@@ -4215,7 +4246,7 @@ TEST_F(NativeLanceTest, decodesFullZipPerValueGeneralFixture) {
   NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
-  const auto decoded = decoder.decodeColumn(0, kStart, kRows);
+  const auto decoded = decodeColumn(decoder, 0, kStart, kRows);
   std::string prefix;
   for (int32_t i = 0; i < 2'048; ++i) {
     prefix.append("compressible-fullzip-general-");
@@ -4242,7 +4273,7 @@ TEST_F(NativeLanceTest, rejectsUnrepresentableStructuralScalarTypes) {
             if (!failsInMetadata) {
               NativeLancePageSource decoder(
                   *file.input, *file.metadata, *pool_);
-              decoder.decodeColumn(0, 0, 1);
+              decodeColumn(decoder, 0, 0, 1);
             }
           } catch (const BoltException& error) {
             EXPECT_NE(error.message().find(expectedMessage), std::string::npos);
@@ -4281,14 +4312,14 @@ TEST_F(NativeLanceTest, decodesCanonicalV2MultiPageBinary) {
   EXPECT_EQ(file.metadata->physicalColumnIndex(0), 0);
   EXPECT_EQ(file.metadata->physicalColumnIndex(1), 1);
 
-  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
-  const auto ids = decoder.decodeColumn(0, 15, 5);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
+  const auto ids = decodeColumn(decoder, 0, 15, 5);
   const auto* rawIds = ids->asFlatVector<int32_t>()->rawValues();
   for (vector_size_t i = 0; i < 5; ++i) {
     EXPECT_EQ(rawIds[i], 15 + i);
   }
 
-  const auto names = decoder.decodeColumn(1, 13, 5);
+  const auto names = decodeColumn(decoder, 1, 13, 5);
   const auto* strings = names->asFlatVector<StringView>();
   EXPECT_EQ(strings->valueAt(0).str(), "value-0013-deterministic-fixture");
   EXPECT_TRUE(names->isNullAt(1));
@@ -4390,7 +4421,7 @@ TEST_F(NativeLanceTest, structChildCanAnchorFileSplits) {
       (std::vector<std::pair<uint64_t, uint64_t>>{{2, 4}}));
 
   NativeLancePageSource decoder(*input, metadata, *pool_);
-  const auto decoded = decoder.decodeColumn(0, 1, 2);
+  const auto decoded = decodeColumn(decoder, 0, 1, 2);
   const auto* rows = decoded->as<RowVector>();
   ASSERT_NE(rows, nullptr);
   const auto* values = rows->childAt(0)->asFlatVector<int32_t>();
@@ -4407,7 +4438,7 @@ TEST_F(NativeLanceTest, emptyPackedStructUsesOnePhysicalColumn) {
   EXPECT_EQ(metadata.columns().size(), 1);
   EXPECT_EQ(metadata.physicalColumnSpan(0), 1);
   NativeLancePageSource decoder(*input, metadata, *pool_);
-  EXPECT_EQ(decoder.decodeColumn(0, 0, 0)->size(), 0);
+  EXPECT_EQ(decodeColumn(decoder, 0, 0, 0)->size(), 0);
 }
 
 TEST_F(NativeLanceTest, rowReaderBatchProjectionAndSkip) {
@@ -4833,8 +4864,8 @@ TEST_F(NativeLanceTest, parsesNestedSchemaAndPhysicalMapping) {
   EXPECT_EQ(file.metadata->physicalColumnLogicalType(3), "string");
   EXPECT_EQ(file.metadata->physicalColumnLogicalType(4), "string");
 
-  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
-  const auto data = decoder.decodeColumn(1, 0, 2);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
+  const auto data = decodeColumn(decoder, 1, 0, 2);
   const auto* lists = data->as<ArrayVector>();
   ASSERT_NE(lists, nullptr) << data->toString();
   ASSERT_EQ(lists->size(), 2);
@@ -4851,7 +4882,7 @@ TEST_F(NativeLanceTest, parsesNestedSchemaAndPhysicalMapping) {
   EXPECT_EQ(b->valueAt(0).str(), "b3");
   EXPECT_EQ(b->valueAt(1).str(), "b4");
 
-  const auto slicedData = decoder.decodeColumn(1, 1, 1);
+  const auto slicedData = decodeColumn(decoder, 1, 1, 1);
   const auto* sliced = slicedData->as<ArrayVector>();
   ASSERT_NE(sliced, nullptr);
   ASSERT_EQ(sliced->size(), 1);
@@ -4876,14 +4907,14 @@ TEST_F(NativeLanceTest, decodesBooleanNullsAndTimestamp) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto flags = decoder.decodeColumn(0, 1, 3);
+  const auto flags = decodeColumn(decoder, 0, 1, 3);
   EXPECT_TRUE(flags->isNullAt(0));
   EXPECT_FALSE(flags->isNullAt(1));
   EXPECT_TRUE(flags->asFlatVector<bool>()->valueAt(1));
   EXPECT_FALSE(flags->isNullAt(2));
   EXPECT_FALSE(flags->asFlatVector<bool>()->valueAt(2));
 
-  const auto timestamps = decoder.decodeColumn(1, 0, 5);
+  const auto timestamps = decodeColumn(decoder, 1, 0, 5);
   const auto* values = timestamps->asFlatVector<Timestamp>();
   EXPECT_EQ(values->valueAt(0), Timestamp::fromMicros(-1));
   EXPECT_EQ(values->valueAt(1), Timestamp::fromMicros(0));
@@ -4891,7 +4922,7 @@ TEST_F(NativeLanceTest, decodesBooleanNullsAndTimestamp) {
   EXPECT_EQ(values->valueAt(3), Timestamp::fromMicros(1'000'001));
   EXPECT_EQ(values->valueAt(4), Timestamp::fromMicros(2'000'002));
 
-  const auto allNulls = decoder.decodeColumn(2, 1, 3);
+  const auto allNulls = decodeColumn(decoder, 2, 1, 3);
   EXPECT_EQ(allNulls->size(), 3);
   EXPECT_TRUE(allNulls->isNullAt(0));
   EXPECT_TRUE(allNulls->isNullAt(1));
@@ -4910,15 +4941,15 @@ TEST_F(NativeLanceTest, decodesExtendedV20PrimitiveTypes) {
       "duration_us:INTERVAL DAY TO SECOND,duration_ns:INTERVAL DAY TO SECOND>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto u64 = decoder.decodeColumn(0, 0, 2)->asFlatVector<int128_t>();
+  const auto u64 = decodeColumn(decoder, 0, 0, 2)->asFlatVector<int128_t>();
   EXPECT_EQ(u64->valueAt(0), 0);
   EXPECT_EQ(
       u64->valueAt(1),
       static_cast<int128_t>(std::numeric_limits<uint64_t>::max()));
-  const auto f16 = decoder.decodeColumn(1, 0, 2)->asFlatVector<float>();
+  const auto f16 = decodeColumn(decoder, 1, 0, 2)->asFlatVector<float>();
   EXPECT_FLOAT_EQ(f16->valueAt(0), 1.0);
   EXPECT_FLOAT_EQ(f16->valueAt(1), -2.0);
-  const auto dates = decoder.decodeColumn(2, 0, 2)->asFlatVector<int32_t>();
+  const auto dates = decodeColumn(decoder, 2, 0, 2)->asFlatVector<int32_t>();
   EXPECT_EQ(dates->valueAt(0), -1);
   EXPECT_EQ(dates->valueAt(1), 2);
 
@@ -4929,14 +4960,14 @@ TEST_F(NativeLanceTest, decodesExtendedV20PrimitiveTypes) {
       std::array<int64_t, 2>{1, 86'399'999'999'999}};
   for (uint32_t column = 3; column <= 6; ++column) {
     const auto values =
-        decoder.decodeColumn(column, 0, 2)->asFlatVector<int64_t>();
+        decodeColumn(decoder, column, 0, 2)->asFlatVector<int64_t>();
     EXPECT_EQ(values->valueAt(0), expectedTimes[column - 3][0]);
     EXPECT_EQ(values->valueAt(1), expectedTimes[column - 3][1]);
   }
 
   for (uint32_t column = 7; column <= 9; ++column) {
     const auto values =
-        decoder.decodeColumn(column, 0, 2)->asFlatVector<int64_t>();
+        decodeColumn(decoder, column, 0, 2)->asFlatVector<int64_t>();
     EXPECT_EQ(values->valueAt(0), -2'000);
     EXPECT_EQ(values->valueAt(1), 3'000);
   }
@@ -4949,14 +4980,14 @@ TEST_F(NativeLanceTest, decodesSignedAndUnsignedBitpackedRanges) {
   NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
-  const auto signedValues = decoder.decodeColumn(0, 1, 4);
+  const auto signedValues = decodeColumn(decoder, 0, 1, 4);
   const auto* rawSigned = signedValues->asFlatVector<int16_t>();
   EXPECT_EQ(rawSigned->valueAt(0), -3);
   EXPECT_EQ(rawSigned->valueAt(1), -1);
   EXPECT_EQ(rawSigned->valueAt(2), 0);
   EXPECT_EQ(rawSigned->valueAt(3), 7);
 
-  const auto unsignedValues = decoder.decodeColumn(1, 1, 4);
+  const auto unsignedValues = decodeColumn(decoder, 1, 1, 4);
   const auto* rawUnsigned = unsignedValues->asFlatVector<int32_t>();
   EXPECT_EQ(rawUnsigned->valueAt(0), 1);
   EXPECT_EQ(rawUnsigned->valueAt(1), 7);
@@ -4975,7 +5006,7 @@ TEST_F(NativeLanceTest, decodesBitpackedForNonNegativeAcrossChunks) {
   constexpr uint64_t kCount = 1'030;
   constexpr std::array<uint8_t, 4> kBitWidths{5, 13, 23, 37};
   for (uint32_t column = 0; column < kBitWidths.size(); ++column) {
-    const auto decoded = decoder.decodeColumn(column, kStart, kCount);
+    const auto decoded = decodeColumn(decoder, column, kStart, kCount);
     const auto mask = (uint64_t{1} << kBitWidths[column]) - 1;
     for (uint64_t row = 0; row < kCount; ++row) {
       const auto expected = ((kStart + row) * 37 + column * 11 + 3) & mask;
@@ -5011,7 +5042,7 @@ TEST_F(NativeLanceTest, decodesZeroWidthV20BitpackingEndToEnd) {
   decoder.prefetchColumns({0, 1, 2, 3}, 1'020, 1'030);
   decoder.materializeReadPlan();
   for (uint32_t column = 0; column < 4; ++column) {
-    const auto decoded = decoder.decodeColumn(column, 1'020, 1'030);
+    const auto decoded = decodeColumn(decoder, column, 1'020, 1'030);
     ASSERT_EQ(decoded->size(), 1'030);
     for (vector_size_t row = 0; row < decoded->size(); ++row) {
       if (column == 0) {
@@ -5148,7 +5179,7 @@ TEST_F(NativeLanceTest, preservesDictionaryEncodingAndNulls) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto colors = decoder.decodeColumn(0, 1, 4);
+  const auto colors = decodeColumn(decoder, 0, 1, 4);
   EXPECT_EQ(colors->encoding(), VectorEncoding::Simple::DICTIONARY);
   const auto* values = colors->as<SimpleVector<StringView>>();
   EXPECT_EQ(values->valueAt(0).str(), "green");
@@ -5165,7 +5196,7 @@ TEST_F(NativeLanceTest, decodesLogicalDictionaryWithZeroBasedIndices) {
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<code:INTEGER>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto codes = decoder.decodeColumn(0, 0, 4);
+  const auto codes = decodeColumn(decoder, 0, 0, 4);
   EXPECT_EQ(codes->encoding(), VectorEncoding::Simple::DICTIONARY);
   const auto* values = codes->as<SimpleVector<int32_t>>();
   ASSERT_NE(values, nullptr);
@@ -5183,7 +5214,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeBinaryDictionaryItems) {
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<code:VARBINARY>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 0, 4);
+  const auto decoded = decodeColumn(decoder, 0, 0, 4);
   EXPECT_EQ(decoded->encoding(), VectorEncoding::Simple::DICTIONARY);
   const auto* values = decoded->as<SimpleVector<StringView>>();
   ASSERT_NE(values, nullptr);
@@ -5200,7 +5231,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeBinaryRange) {
   NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
-  const auto values = decoder.decodeColumn(0, 1, 2);
+  const auto values = decodeColumn(decoder, 0, 1, 2);
   const auto* strings = values->asFlatVector<StringView>();
   EXPECT_EQ(strings->valueAt(0).str(), "bbb");
   EXPECT_EQ(strings->valueAt(1).str(), "ccc");
@@ -5214,7 +5245,7 @@ TEST_F(NativeLanceTest, decodesFlatFixedSizeBinaryRange) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto values = decoder.decodeColumn(0, 1, 2);
+  const auto values = decodeColumn(decoder, 0, 1, 2);
   const auto* binaries = values->asFlatVector<StringView>();
   EXPECT_EQ(binaries->valueAt(0).str(), "bbb");
   EXPECT_EQ(binaries->valueAt(1).str(), "ccc");
@@ -5228,7 +5259,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeListRange) {
   NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
-  const auto values = decoder.decodeColumn(0, 1, 2);
+  const auto values = decodeColumn(decoder, 0, 1, 2);
   const auto* arrays = values->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
   EXPECT_EQ(arrays->size(), 2);
@@ -5251,7 +5282,7 @@ TEST_F(NativeLanceTest, decodesNestedFixedSizeListRange) {
       metadata.rowType()->toString(), "ROW<matrix:ARRAY<ARRAY<INTEGER>>>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 1, 1);
+  const auto decoded = decodeColumn(decoder, 0, 1, 1);
   const auto* outer = decoded->as<ArrayVector>();
   ASSERT_NE(outer, nullptr);
   ASSERT_EQ(outer->sizeAt(0), 2);
@@ -5275,7 +5306,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeListOfFixedSizeBinary) {
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<pairs:ARRAY<VARBINARY>>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 1, 1);
+  const auto decoded = decodeColumn(decoder, 0, 1, 1);
   const auto* arrays = decoded->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
   ASSERT_EQ(arrays->sizeAt(0), 2);
@@ -5293,7 +5324,7 @@ TEST_F(NativeLanceTest, preservesBFloat16ExtensionStorage) {
       metadata.rowType()->toString(), "ROW<values:ARRAY<LANCE_bfloat16>>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 0, 2);
+  const auto decoded = decodeColumn(decoder, 0, 0, 2);
   const auto* arrays = decoded->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
   const auto* values = arrays->elements()->asFlatVector<StringView>();
@@ -5318,7 +5349,7 @@ TEST_F(NativeLanceTest, decodesCompressedFlatRanges) {
     NativeLanceMetadata metadata(*input, *pool_);
     NativeLancePageSource decoder(*input, metadata, *pool_);
 
-    const auto values = decoder.decodeColumn(0, 2, 3);
+    const auto values = decodeColumn(decoder, 0, 2, 3);
     const auto* integers = values->asFlatVector<int32_t>();
     EXPECT_EQ(integers->valueAt(0), 3) << scheme;
     EXPECT_EQ(integers->valueAt(1), 4) << scheme;
@@ -5332,8 +5363,8 @@ TEST_F(NativeLanceTest, compressedNestedItemsStayIndependentAcrossDecodes) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  auto first = decoder.decodeColumn(0, 1, 2);
-  const auto second = decoder.decodeColumn(0, 2, 2);
+  auto first = decodeColumn(decoder, 0, 1, 2);
+  const auto second = decodeColumn(decoder, 0, 2, 2);
   auto* firstArray = first->as<ArrayVector>();
   const auto* secondArray = second->as<ArrayVector>();
   ASSERT_NE(firstArray, nullptr);
@@ -5345,7 +5376,7 @@ TEST_F(NativeLanceTest, compressedNestedItemsStayIndependentAcrossDecodes) {
   firstItems->mutableRawValues()[0] = 100;
   EXPECT_EQ(firstItems->valueAt(0), 100);
   EXPECT_EQ(secondItems->valueAt(0), 30);
-  const auto third = decoder.decodeColumn(0, 2, 2);
+  const auto third = decodeColumn(decoder, 0, 2, 2);
   EXPECT_EQ(
       third->as<ArrayVector>()->elements()->asFlatVector<int32_t>()->valueAt(0),
       30);
@@ -5357,7 +5388,7 @@ TEST_F(NativeLanceTest, decodesCompressedListOffsets) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 1, 2);
+  const auto decoded = decodeColumn(decoder, 0, 1, 2);
   const auto* arrays = decoded->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
   EXPECT_EQ(arrays->sizeAt(0), 0);
@@ -5378,7 +5409,7 @@ TEST_F(NativeLanceTest, decodesBitpackedListOffsetsAcrossChunks) {
 
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
-  const auto decoded = decoder.decodeColumn(0, kStart, kRows);
+  const auto decoded = decodeColumn(decoder, 0, kStart, kRows);
   const auto* arrays = decoded->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
   const auto* values = arrays->elements()->asFlatVector<int32_t>();
@@ -5403,7 +5434,7 @@ TEST_F(NativeLanceTest, decodesBitpackedLegacyBinaryOffsetsAcrossChunks) {
 
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
-  const auto decoded = decoder.decodeColumn(0, kStart, kRows);
+  const auto decoded = decodeColumn(decoder, 0, kStart, kRows);
   const auto* strings = decoded->asFlatVector<StringView>();
   ASSERT_NE(strings, nullptr);
   for (vector_size_t row = 0; row < kRows; ++row) {
@@ -5512,7 +5543,7 @@ TEST_F(NativeLanceTest, decodesPackedStructRange) {
   NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
-  const auto values = decoder.decodeColumn(0, 1, 2);
+  const auto values = decodeColumn(decoder, 0, 1, 2);
   const auto* rows = values->as<RowVector>();
   ASSERT_NE(rows, nullptr);
   EXPECT_EQ(rows->childAt(0)->asFlatVector<int64_t>()->valueAt(0), 101);
@@ -5571,7 +5602,7 @@ TEST_F(NativeLanceTest, decodesPackedNestedFixedSizeList) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 1, 1);
+  const auto decoded = decodeColumn(decoder, 0, 1, 1);
   const auto* row = decoded->as<RowVector>();
   ASSERT_NE(row, nullptr);
   const auto* outer = row->childAt(0)->as<ArrayVector>();
@@ -5593,7 +5624,7 @@ TEST_F(NativeLanceTest, decodesFsstSymbolsAndEscapes) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto values = decoder.decodeColumn(0, 1, 3);
+  const auto values = decodeColumn(decoder, 0, 1, 3);
   const auto* strings = values->asFlatVector<StringView>();
   EXPECT_EQ(strings->valueAt(0).str(), "world");
   EXPECT_EQ(strings->valueAt(1).str(), "!");
@@ -5624,7 +5655,7 @@ TEST_F(NativeLanceTest, decodesListAcrossPageBoundary) {
   NativeLanceMetadata metadata(*input, *pool_);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto values = decoder.decodeColumn(0, 1, 3);
+  const auto values = decodeColumn(decoder, 0, 1, 3);
   const auto* arrays = values->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
   EXPECT_EQ(arrays->sizeAt(0), 1);
@@ -5637,7 +5668,7 @@ TEST_F(NativeLanceTest, decodesListAcrossPageBoundary) {
   EXPECT_EQ(elements->valueAt(2), 5);
   EXPECT_EQ(elements->valueAt(3), 6);
 
-  const auto secondPage = decoder.decodeColumn(0, 3, 2);
+  const auto secondPage = decodeColumn(decoder, 0, 3, 2);
   const auto* secondArrays = secondPage->as<ArrayVector>();
   ASSERT_NE(secondArrays, nullptr);
   EXPECT_EQ(secondArrays->sizeAt(0), 0);
@@ -5653,7 +5684,7 @@ TEST_F(NativeLanceTest, decodesNestedLists) {
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<outer:ARRAY<ARRAY<INTEGER>>>");
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 1, 3);
+  const auto decoded = decodeColumn(decoder, 0, 1, 3);
   const auto* outer = decoded->as<ArrayVector>();
   ASSERT_NE(outer, nullptr);
   ASSERT_EQ(outer->size(), 3);
@@ -5685,7 +5716,7 @@ TEST_F(NativeLanceTest, decodesMapRangeWithNullAndEmptyRows) {
   EXPECT_EQ(metadata.physicalColumnSpan(0), 4);
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto values = decoder.decodeColumn(0, 1, 3);
+  const auto values = decodeColumn(decoder, 0, 1, 3);
   const auto* maps = values->as<MapVector>();
   ASSERT_NE(maps, nullptr) << values->toString();
   ASSERT_EQ(maps->size(), 3);
@@ -5731,7 +5762,7 @@ TEST_F(NativeLanceTest, decodesBlobColumnAcrossPages) {
   EXPECT_TRUE(metadata.isBlobColumn(0));
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
-  const auto decoded = decoder.decodeColumn(0, 1, 3);
+  const auto decoded = decodeColumn(decoder, 0, 1, 3);
   const auto* values = decoded->asFlatVector<StringView>();
   ASSERT_NE(values, nullptr);
   ASSERT_EQ(values->size(), 3);
@@ -5754,8 +5785,8 @@ TEST_F(NativeLanceTest, prefetchConsumesScheduledStreamsWithoutRereading) {
   decoder.prefetchColumns({0, 1}, 0, 5);
   const auto afterPrefetch = readFile->readCalls();
   EXPECT_EQ(afterPrefetch, metadataReads + 2);
-  EXPECT_EQ(decoder.decodeColumn(0, 0, 5)->size(), 5);
-  EXPECT_EQ(decoder.decodeColumn(1, 0, 5)->size(), 5);
+  EXPECT_EQ(decodeColumn(decoder, 0, 0, 5)->size(), 5);
+  EXPECT_EQ(decodeColumn(decoder, 1, 0, 5)->size(), 5);
   EXPECT_EQ(readFile->readCalls(), afterPrefetch);
 }
 
@@ -5960,7 +5991,7 @@ TEST_F(NativeLanceTest, selectedRangesShareOneDirectBufferedInputLoad) {
   NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const std::array<vector_size_t, 3> rows{0, 2, 4};
-  const auto result = decoder.decodeSelectedRows(1, 0, rows);
+  const auto result = decodeSelectedRows(decoder, 1, 0, rows);
   ASSERT_EQ(result->size(), rows.size());
   const auto* timestamps = result->asFlatVector<Timestamp>();
   EXPECT_EQ(timestamps->valueAt(0), Timestamp::fromMicros(-1));

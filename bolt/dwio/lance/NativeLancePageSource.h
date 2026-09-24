@@ -16,8 +16,6 @@
 
 #pragma once
 
-#include <folly/Range.h>
-
 #include <mutex>
 #include <unordered_map>
 
@@ -45,6 +43,14 @@ class NativeLancePageSource final {
       NativeLanceReadScheduler::Options readSchedulerOptions = {});
 
   ~NativeLancePageSource();
+
+  const NativeLanceMetadata& metadata() const {
+    return metadata_;
+  }
+
+  memory::MemoryPool& pool() const {
+    return pool_;
+  }
 
   void cancel();
 
@@ -98,18 +104,6 @@ class NativeLancePageSource final {
       uint64_t rowStart,
       uint64_t rowCount) const;
 
-  VectorPtr decodeColumn(
-      uint32_t columnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
-
-  /// Decodes sorted, batch-relative row numbers into a compact vector.
-  /// Consecutive rows are coalesced into one range read.
-  VectorPtr decodeSelectedRows(
-      uint32_t columnIndex,
-      uint64_t batchRowStart,
-      folly::Range<const vector_size_t*> rows) const;
-
   VectorPtr decodePhysicalColumn(
       const TypePtr& type,
       std::string_view logicalType,
@@ -117,11 +111,6 @@ class NativeLancePageSource final {
       uint64_t rowStart,
       uint64_t rowCount,
       const std::vector<uint32_t>& arrayDimensions = {}) const;
-
-  VectorPtr decodeStructuralField(
-      const NativeLanceMetadata::StructuralField& field,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
 
  private:
   void enqueueLogicalColumn(

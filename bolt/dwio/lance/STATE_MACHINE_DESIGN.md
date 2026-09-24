@@ -1949,7 +1949,9 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
   更名为 `NativeLanceRootColumnReader`。
 - ColumnReader 工厂已按 metadata/logical type 创建 scalar、binary、dictionary、list、map、
   struct、fixed-size-list、packed-struct、Blob 和 constant 节点；节点通过
-  `NativeLancePageSource` 发起物理读取，后续将复杂类型组装状态继续下沉到节点。
+  `NativeLancePageSource` 发起物理读取。Batch-relative selection 的连续 run 展开以及
+  structural branch 的 ROW/ARRAY/MAP 合并均由 ColumnReader 层完成，PageSource 不再暴露
+  logical-column decode API。
 - legacy scalar、nullable、bitmap、bitpack、fixed-size binary 和 zero-copy flat kernel 已迁移
   到 `NativeLanceLegacyScalar`；物理 buffer 定位统一由
   `NativeLanceMetadata::resolveBuffer()` 提供。
@@ -1975,17 +1977,12 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 
 ### 38.2 仍需完成
 
-- 将 list、map、struct、fixed-size-list、packed struct 和 Blob 的剩余逻辑组装状态从
-  `NativeLancePageSource` 下沉到独立 ColumnReader；现有 `NativeLanceLegacy*`
-  模块作为无缓存 PageReader/kernel 边界保留到调用方输出 buffer 接口完成。
 - nested subfield pruning 当前仍在根 RowVector 组装后执行；后续需要把 nested selection
   传播到 Struct/List/Map ColumnReader，避免先物化未投影 child 再裁剪。
 - `NativeLanceBatchBuilder` 已统一所有权和发布，但复杂类型仍会使用 compatibility
   vector；最终目标是 page kernel 直接写 caller-owned child buffer。
 - memory reservation 已用于 page-owned scheduler API，但全部 legacy compatibility buffer
   尚未纳入统一预算。
-- 删除 PageSource 中剩余的 logical-column mapping 和 compatibility vector copy 后，才能
-  完成结构验收项 3。
 
 ### 38.3 2026-09-24 快速验收
 

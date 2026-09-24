@@ -10,8 +10,10 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceFileOpenTask` constructs and validates an immutable
   `NativeLanceFileContext`. Each row reader clones its own scan input while the
   context retains the input used for lazy metadata reads.
-- `NativeLanceMetadata` parses the footer, schema, column metadata, page
-  layouts, physical-column mapping, page-row indexes, and split row ranges.
+- `NativeLanceFileMetadata`, `NativeLanceSchemaIndex`, and
+  `NativeLanceColumnMetadataLoader` separately own file descriptors, schema
+  mappings, and lazy column metadata. `NativeLanceMetadata` is their read-only
+  query surface.
 - `NativeLanceScanPlan` binds projection, filters, required physical columns,
   the logical column-reader tree, and split row ranges once per row reader.
 - `NativeLanceReadScheduler` deduplicates byte ranges, submits them to
@@ -33,6 +35,9 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
   migration adapter.
 - `NativeLanceLegacyBinary` and `NativeLanceLegacyDictionary` own v2.0
   variable-width, FSST, dictionary-index, and dictionary assembly kernels.
+- `NativeLanceLegacyList`, `NativeLanceLegacyStruct`, and
+  `NativeLanceLegacyBlob` own v2.0 parent/child domains, fixed and packed
+  structures, and Blob descriptor/payload reads.
 - `NativeLanceMemoryBudget` provides move-only reservations for bounded
   transient scan memory.
 - `NativeLancePageSource` owns scan-local page scheduling and physical kernel

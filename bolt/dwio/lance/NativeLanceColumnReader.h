@@ -25,12 +25,20 @@
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/ParallelFor.h"
 #include "bolt/dwio/lance/NativeLanceColumnRequest.h"
+#include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::lance::reader {
 
-class NativeLanceMetadata;
 class NativeLancePageSource;
+
+VectorPtr decodeNativeLanceStructuralColumn(
+    const NativeLancePageSource& source,
+    const NativeLanceMetadata& metadata,
+    memory::MemoryPool& pool,
+    const NativeLanceMetadata::StructuralField& field,
+    uint64_t rowStart,
+    uint64_t rowCount);
 
 enum class NativeLanceReadStage { kRowAligned, kOffsetDependent };
 

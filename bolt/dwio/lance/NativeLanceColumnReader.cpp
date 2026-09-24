@@ -42,6 +42,163 @@ bool typeRequiresDeferredRead(const TypePtr& type) {
   return false;
 }
 
+} // namespace
+
+VectorPtr decodeNativeLanceStructuralColumn(
+    const NativeLancePageSource& source,
+    const NativeLanceMetadata& metadata,
+    memory::MemoryPool& pool,
+    const NativeLanceMetadata::StructuralField& field,
+    uint64_t rowStart,
+    uint64_t rowCount) {
+  struct Branch {
+    uint32_t physicalColumnIndex;
+    TypePtr type;
+    uint64_t rowsPerParent;
+    std::vector<uint32_t> fixedSizeDimensions;
+  };
+  std::vector<Branch> branches;
+  const auto collectBranches =
+      [&](const auto& self,
+          const NativeLanceMetadata::StructuralField& node) -> void {
+    if (node.leaf) {
+      branches.push_back(
+          {node.physicalColumnIndex, node.type, node.rowsPerParent, {}});
+      return;
+    }
+    for (const auto& child : node.children) {
+      const auto first = branches.size();
+      self(self, child);
+      for (auto index = first; index < branches.size(); ++index) {
+        if (node.type->kind() == TypeKind::ROW) {
+          branches[index].type =
+              ROW({child.name}, {std::move(branches[index].type)});
+        } else if (node.type->kind() == TypeKind::MAP) {
+          // Arrow maps are encoded structurally as List<Struct<key, value>>.
+          branches[index].type = ARRAY(std::move(branches[index].type));
+          branches[index].fixedSizeDimensions.insert(
+              branches[index].fixedSizeDimensions.begin(), 0);
+        } else {
+          BOLT_CHECK_EQ(node.type->kind(), TypeKind::ARRAY);
+          branches[index].type = ARRAY(std::move(branches[index].type));
+          if (child.rowsPerParent != node.rowsPerParent) {
+            BOLT_CHECK_EQ(child.rowsPerParent % node.rowsPerParent, 0);
+            branches[index].fixedSizeDimensions.insert(
+                branches[index].fixedSizeDimensions.begin(),
+                child.rowsPerParent / node.rowsPerParent);
+          } else {
+            branches[index].fixedSizeDimensions.insert(
+                branches[index].fixedSizeDimensions.begin(), 0);
+          }
+        }
+      }
+    }
+  };
+  collectBranches(collectBranches, field);
+  BOLT_CHECK_EQ(branches.size(), field.physicalColumnCount);
+
+  std::vector<VectorPtr> decodedBranches;
+  decodedBranches.reserve(branches.size());
+  for (const auto& branch : branches) {
+    decodedBranches.push_back(source.decodePhysicalColumn(
+        branch.type,
+        metadata.physicalColumnLogicalType(branch.physicalColumnIndex),
+        branch.physicalColumnIndex,
+        rowStart,
+        rowCount,
+        branch.fixedSizeDimensions));
+  }
+
+  const auto checkNulls = [](const BaseVector& expected,
+                             const BaseVector& actual) {
+    BOLT_CHECK_EQ(expected.size(), actual.size());
+    for (vector_size_t row = 0; row < expected.size(); ++row) {
+      BOLT_CHECK_EQ(
+          expected.isNullAt(row),
+          actual.isNullAt(row),
+          "Structural sibling validity differs at row {}",
+          row);
+    }
+  };
+  const auto merge = [&](const auto& self,
+                         const NativeLanceMetadata::StructuralField& node,
+                         std::vector<VectorPtr> vectors) -> VectorPtr {
+    BOLT_CHECK_EQ(vectors.size(), node.physicalColumnCount);
+    if (node.leaf) {
+      BOLT_CHECK_EQ(vectors.size(), 1);
+      return std::move(vectors.front());
+    }
+    if (node.type->kind() == TypeKind::ROW) {
+      const auto* first = vectors.front()->as<RowVector>();
+      BOLT_CHECK_NOT_NULL(first);
+      std::vector<VectorPtr> children;
+      children.reserve(node.children.size());
+      size_t branchIndex = 0;
+      for (const auto& child : node.children) {
+        std::vector<VectorPtr> childBranches;
+        childBranches.reserve(child.physicalColumnCount);
+        for (uint32_t i = 0; i < child.physicalColumnCount; ++i) {
+          const auto* branch = vectors[branchIndex++]->as<RowVector>();
+          BOLT_CHECK_NOT_NULL(branch);
+          BOLT_CHECK_EQ(branch->childrenSize(), 1);
+          checkNulls(*first, *branch);
+          childBranches.push_back(branch->childAt(0));
+        }
+        children.push_back(self(self, child, std::move(childBranches)));
+      }
+      BOLT_CHECK_EQ(branchIndex, vectors.size());
+      return std::make_shared<RowVector>(
+          &pool, node.type, first->nulls(), first->size(), std::move(children));
+    }
+
+    BOLT_CHECK(
+        node.type->kind() == TypeKind::ARRAY ||
+        node.type->kind() == TypeKind::MAP);
+    const auto* first = vectors.front()->as<ArrayVector>();
+    BOLT_CHECK_NOT_NULL(first);
+    std::vector<VectorPtr> elementBranches;
+    elementBranches.reserve(vectors.size());
+    for (const auto& vector : vectors) {
+      const auto* branch = vector->as<ArrayVector>();
+      BOLT_CHECK_NOT_NULL(branch);
+      checkNulls(*first, *branch);
+      for (vector_size_t row = 0; row < first->size(); ++row) {
+        BOLT_CHECK_EQ(first->offsetAt(row), branch->offsetAt(row));
+        BOLT_CHECK_EQ(first->sizeAt(row), branch->sizeAt(row));
+      }
+      elementBranches.push_back(branch->elements());
+    }
+    BOLT_CHECK_EQ(node.children.size(), 1);
+    auto elements =
+        self(self, node.children.front(), std::move(elementBranches));
+    if (node.type->kind() == TypeKind::ARRAY) {
+      return std::make_shared<ArrayVector>(
+          &pool,
+          node.type,
+          first->nulls(),
+          first->size(),
+          first->offsets(),
+          first->sizes(),
+          std::move(elements));
+    }
+    const auto* entries = elements->template as<RowVector>();
+    BOLT_CHECK_NOT_NULL(entries);
+    BOLT_CHECK_EQ(entries->childrenSize(), 2);
+    return std::make_shared<MapVector>(
+        &pool,
+        node.type,
+        first->nulls(),
+        first->size(),
+        first->offsets(),
+        first->sizes(),
+        entries->childAt(0),
+        entries->childAt(1));
+  };
+  return merge(merge, field, std::move(decodedBranches));
+}
+
+namespace {
+
 class FileColumnReader : public NativeLanceColumnReader {
  public:
   FileColumnReader(
@@ -97,8 +254,13 @@ class FileColumnReader : public NativeLanceColumnReader {
     }
     const auto decodeRange = [&](uint64_t rowStart, uint64_t rowCount) {
       if (metadata_.usesStructuralEncoding()) {
-        return source.decodeStructuralField(
-            metadata_.structuralField(fileColumnIndex_), rowStart, rowCount);
+        return decodeNativeLanceStructuralColumn(
+            source,
+            metadata_,
+            pool,
+            metadata_.structuralField(fileColumnIndex_),
+            rowStart,
+            rowCount);
       }
       return source.decodePhysicalColumn(
           type_,
