@@ -29,8 +29,10 @@
  */
 
 #include "bolt/exec/GroupingSet.h"
+#include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SpillConfig.h"
+#include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/common/time/Timer.h"
 #include "bolt/exec/ContainerRow2RowSerde.h"
@@ -41,6 +43,84 @@
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
+class RowContainerSortedRuns {
+ public:
+  RowContainerSortedRuns(
+      RowContainer& rows,
+      memory::MemoryPool& pool,
+      uint64_t maxRunRows,
+      bool measureSerializedRows);
+  folly::Range<char* const*> rows() const;
+  folly::Range<char* const*> run(size_t index) const;
+  folly::Range<char**> mutableRun(size_t index);
+  size_t numRuns() const;
+  uint64_t maxSerializedRowBytes() const {
+    return maxSerializedRowBytes_;
+  }
+
+ private:
+  BufferPtr sortedRows_;
+  uint64_t size_{0};
+  uint64_t runSize_{0};
+  uint64_t maxSerializedRowBytes_{0};
+};
+
+RowContainerSortedRuns::RowContainerSortedRuns(
+    RowContainer& rows,
+    memory::MemoryPool& pool,
+    uint64_t maxRunRows,
+    bool measureSerializedRows) {
+  size_ = rows.numRows();
+  runSize_ = maxRunRows == 0 ? size_ : maxRunRows;
+  if (size_ == 0) {
+    return;
+  }
+  sortedRows_ = AlignedBuffer::allocate<char*>(size_, &pool);
+  RowContainerIterator iterator;
+  uint64_t listed = 0;
+  auto** rawRows = sortedRows_->asMutable<char*>();
+  std::optional<RowFormatInfo> rowInfo;
+  if (measureSerializedRows) {
+    rowInfo.emplace(&rows, true);
+  }
+  while (listed < size_) {
+    const auto count = rows.listRows(
+        &iterator,
+        std::min<uint64_t>(size_ - listed, std::numeric_limits<int32_t>::max()),
+        rawRows + listed);
+    BOLT_CHECK_GT(count, 0);
+    if (rowInfo.has_value()) {
+      for (int32_t i = 0; i < count; ++i) {
+        maxSerializedRowBytes_ = std::max<uint64_t>(
+            maxSerializedRowBytes_, rowInfo->getRowSize(rawRows[listed + i]));
+      }
+    }
+    listed += count;
+  }
+}
+
+folly::Range<char* const*> RowContainerSortedRuns::rows() const {
+  if (sortedRows_ == nullptr) {
+    return {};
+  }
+  return folly::Range<char* const*>(sortedRows_->as<char*>(), size_);
+}
+
+folly::Range<char* const*> RowContainerSortedRuns::run(size_t index) const {
+  const auto offset = index * runSize_;
+  return rows().subpiece(offset, std::min(runSize_, size_ - offset));
+}
+
+folly::Range<char**> RowContainerSortedRuns::mutableRun(size_t index) {
+  const auto offset = index * runSize_;
+  return folly::Range<char**>(
+      sortedRows_->asMutable<char*>() + offset,
+      std::min(runSize_, size_ - offset));
+}
+
+size_t RowContainerSortedRuns::numRuns() const {
+  return size_ == 0 ? 0 : size_ / runSize_ + (size_ % runSize_ != 0);
+}
 
 namespace {
 bool allAreSinglyReferenced(
@@ -94,6 +174,7 @@ GroupingSet::GroupingSet(
       rows_(operatorCtx->pool()),
       isAdaptive_(queryConfig_.hashAdaptivityEnabled()),
       pool_(*operatorCtx->pool()),
+      mergeScratch_(pool_),
       operatorCtx_(operatorCtx),
       bypassHTDistinctRatio_(queryConfig_.spilledAggregationBypassHTRatio()) {
   BOLT_CHECK_NOT_NULL(nonReclaimableSection_);
@@ -223,15 +304,203 @@ void GroupingSet::noMoreInput() {
     addRemainingInput();
   }
 
-  // Spill the remaining in-memory state to disk if spilling has been triggered
-  // on this grouping set. This is to simplify query OOM prevention when
-  // producing output as we don't support to spill during that stage as for now.
   if (hasSpilled()) {
-    spill();
-    spillSumRowCount_ = spiller_->sumPartitionRowCount();
+    if (!(supportsDynamicFinalSpill() && prepareResidentRuns()) &&
+        table_ != nullptr && table_->rows()->numRows() > 0) {
+      spill();
+    }
+    const auto diskRows = spiller_->sumPartitionRowCount();
+    const auto residentRows =
+        residentRuns_ == nullptr ? 0 : residentRuns_->rows().size();
+    spillSumRowCount_ = diskRows + residentRows;
+    if (dynamicFinalSpillActive()) {
+      pendingInputSpillPartition_.emplace(spiller_->finishSpill());
+    }
   }
 
   ensureOutputFits();
+}
+
+bool GroupingSet::supportsDynamicFinalSpill() const {
+  return queryConfig_.aggregationDynamicFinalSpillEnabled() &&
+      spillConfig_ != nullptr && sortedAggregations_ == nullptr &&
+      std::none_of(
+             distinctAggregations_.begin(),
+             distinctAggregations_.end(),
+             [](const auto& aggregation) { return aggregation != nullptr; });
+}
+
+bool GroupingSet::prepareResidentRuns() {
+  if (table_ == nullptr || table_->rows()->numRows() == 0) {
+    return false;
+  }
+  const auto rowCount = static_cast<uint64_t>(table_->rows()->numRows());
+  const auto indexBytes = checkedMultiply<uint64_t>(
+      rowCount, sizeof(char*), "resident row pointer index");
+  const auto roundedIndexBytes =
+      static_cast<uint64_t>(pool_.preferredSize(checkedPlus<uint64_t>(
+          indexBytes,
+          AlignedBuffer::kPaddedSize,
+          "resident row pointer allocation")));
+  auto reserveBytes = roundedIndexBytes;
+  reserveBytes =
+      checkedPlus<uint64_t>(reserveBytes, 64 * 1024, "resident sort scratch");
+  reserveBytes = checkedPlus<uint64_t>(
+      reserveBytes, reserveBytes / 5, "resident row pointer admission");
+  const auto availableReservation =
+      static_cast<uint64_t>(std::max<int64_t>(pool_.availableReservation(), 0));
+  {
+    memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
+    if (availableReservation < reserveBytes &&
+        !pool_.maybeReserve(reserveBytes)) {
+      return false;
+    }
+  }
+  // maybeReserve may synchronously reclaim this operator. Re-read state.
+  if (table_ == nullptr || table_->rows()->numRows() == 0) {
+    return false;
+  }
+
+  auto runs = std::make_unique<RowContainerSortedRuns>(
+      *table_->rows(),
+      pool_,
+      spillConfig_->maxSpillRunRows,
+      spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE);
+  for (size_t i = 0; i < runs->numRuns(); ++i) {
+    spiller_->sortRowsInPlace(runs->mutableRun(i));
+  }
+  residentRuns_ = std::move(runs);
+  if (ignoreNullKeys_) {
+    static_cast<HashTable<true>*>(table_.get())->releaseTable();
+  } else {
+    static_cast<HashTable<false>*>(table_.get())->releaseTable();
+  }
+  lookup_.reset();
+  return true;
+}
+
+uint64_t GroupingSet::residentPosition(size_t run) const {
+  if (residentRuns_ == nullptr) {
+    return 0;
+  }
+  if (!spillMergePrepared_) {
+    return 0;
+  }
+  BOLT_CHECK(firstResidentStreamIndex_.has_value());
+  const auto streamIndex = *firstResidentStreamIndex_ + run;
+  const auto position =
+      spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE
+      ? merge_->streamAt(streamIndex)->memoryPosition()
+      : rowBasedSpillMerge_->streamAt(streamIndex)->memoryPosition();
+  BOLT_CHECK(position.has_value());
+  return *position;
+}
+
+bool GroupingSet::residentRunsFinished() const {
+  if (residentRuns_ == nullptr) {
+    return true;
+  }
+  for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
+    if (residentPosition(i) < residentRuns_->run(i).size()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void GroupingSet::releaseResidentBacking() {
+  if (residentRuns_ == nullptr) {
+    return;
+  }
+  residentRuns_.reset();
+  if (table_ != nullptr) {
+    BOLT_CHECK(mergeRows_ == nullptr || mergeRows_->numRows() == 0);
+    table_->clear();
+    auto allocator = table_->rows()->stringAllocatorShared();
+    allocator->checkEmpty();
+    allocator->clear();
+  }
+  pool_.release();
+}
+
+void GroupingSet::releaseResidentRuns() {
+  if (spillMergePrepared_) {
+    BOLT_CHECK(firstResidentStreamIndex_.has_value());
+    for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
+      const auto index = *firstResidentStreamIndex_ + i;
+      if (spillConfig_->rowBasedSpillMode ==
+          common::RowBasedSpillMode::DISABLE) {
+        BOLT_CHECK(!merge_->streamAt(index)->hasData());
+      } else {
+        BOLT_CHECK(!rowBasedSpillMerge_->streamAt(index)->hasData());
+      }
+    }
+    firstResidentStreamIndex_.reset();
+  }
+  releaseResidentBacking();
+}
+
+void GroupingSet::spillRemainingResidentRuns() {
+  if (residentRuns_ == nullptr) {
+    return;
+  }
+  if (residentRunsFinished()) {
+    releaseResidentRuns();
+    return;
+  }
+  std::vector<folly::Range<char* const*>> remainingRuns;
+  remainingRuns.reserve(residentRuns_->numRuns());
+  for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
+    const auto run = residentRuns_->run(i);
+    const auto position = residentPosition(i);
+    BOLT_CHECK_LE(position, run.size());
+    if (position < run.size()) {
+      remainingRuns.push_back(run.subpiece(position));
+    }
+  }
+
+  memory::NonReclaimableSectionGuard guard(nonReclaimableSection_);
+  auto outputSpiller = Spiller::createSortedOutput(
+      table_->rows(), makeSpillType(), keyChannels_.size(), {}, spillConfig_);
+  auto owned =
+      outputSpiller->spillSortedRunsAndFinish(remainingRuns, bypassProbeHT_);
+  const auto completedStats = outputSpiller->stats();
+
+  if (!spillMergePrepared_) {
+    pendingInputSpillPartition_->addFiles(owned.takeFiles());
+    releaseResidentBacking();
+  } else if (
+      spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
+    const auto index = *firstResidentStreamIndex_;
+    merge_->replaceStreams(
+        index,
+        residentRuns_->numRuns(),
+        [&]() {
+          return owned.takeOrderedStreams(
+              &pool_,
+              spillConfig_->spillUringEnabled,
+              DistinctProvenance::kNew);
+        },
+        [this]() { releaseResidentBacking(); });
+    firstResidentStreamIndex_.reset();
+  } else {
+    const auto index = *firstResidentStreamIndex_;
+    rowBasedSpillMerge_->replaceStreams(
+        index,
+        residentRuns_->numRuns(),
+        [&]() {
+          return owned.takeRowBasedOrderedStreams(
+              &pool_,
+              table_->rows(),
+              spillConfig_->getJITenabledForSpill(),
+              spillConfig_->spillUringEnabled,
+              supportRowBasedOutput_,
+              DistinctProvenance::kNew);
+        },
+        [this]() { releaseResidentBacking(); });
+    firstResidentStreamIndex_.reset();
+  }
+  residentSuffixSpillStats_ += completedStats;
 }
 
 bool GroupingSet::hasSpilled() const {
@@ -862,7 +1131,7 @@ void GroupingSet::extractGroupsInRowFormat(
 void GroupingSet::extractSpilledGroupsInRowFormat(
     folly::Range<char**> groups,
     const RowVectorPtr& result,
-    const std::vector<std::pair<int32_t, int32_t>>& resultRanges) {
+    folly::Range<const std::pair<int32_t, int32_t>*> resultRanges) {
   BOLT_DCHECK(!sortedAggregations_ && isPartial_ && rowInfo_.has_value());
   NanosecondTimer timer(&stats_.aggExtractGroupsTimeNs);
   if (groups.empty()) {
@@ -1087,6 +1356,92 @@ void GroupingSet::ensureOutputFits() {
                << ", reservation: " << succinctBytes(pool_.reservedBytes());
 }
 
+void GroupingSet::ensureOutputFits(
+    int32_t maxOutputRows,
+    int32_t maxOutputBytes) {
+  if (!dynamicFinalSpillActive() || !hasSpilled() || spillConfig_ == nullptr) {
+    return;
+  }
+  const auto rows = static_cast<uint64_t>(std::max(maxOutputRows, 1));
+  const auto pointerScratch = checkedMultiply<uint64_t>(
+      rows, sizeof(void*) * 6, "aggregation merge pointer scratch");
+  for (;;) {
+    uint64_t readerBytes = 0;
+    if (!spillMergePrepared_) {
+      const auto fileCount = !pendingInputSpillPartition_.has_value()
+          ? 0
+          : pendingInputSpillPartition_->numFiles();
+      readerBytes = checkedMultiply<uint64_t>(
+          fileCount, spillReaderBytes(), "aggregation merge readers");
+      if (residentRuns_ != nullptr) {
+        const auto residentRowBytes = spillConfig_->rowBasedSpillMode ==
+                common::RowBasedSpillMode::DISABLE
+            ? residentRuns_->maxSerializedRowBytes()
+            : sizeof(char*) + (supportRowBasedOutput_ ? sizeof(size_t) : 0);
+        for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
+          readerBytes = checkedPlus<uint64_t>(
+              readerBytes,
+              checkedMultiply<uint64_t>(
+                  std::min<uint64_t>(residentRuns_->run(i).size(), 64),
+                  residentRowBytes,
+                  "resident stream first batch"),
+              "aggregation merge readers");
+        }
+      }
+    }
+    auto required = checkedPlus<uint64_t>(
+        readerBytes, pointerScratch, "aggregation output admission");
+    const auto outputBytes = static_cast<uint64_t>(std::max(maxOutputBytes, 0));
+    required = checkedPlus<uint64_t>(
+        required,
+        checkedMultiply<uint64_t>(
+            outputBytes, 2, "aggregation output and merge rows"),
+        "aggregation output admission");
+    required = checkedPlus<uint64_t>(
+        required, required / 5, "aggregation output admission padding");
+    const auto availableReservation = static_cast<uint64_t>(
+        std::max<int64_t>(pool_.availableReservation(), 0));
+    if (availableReservation >= required) {
+      return;
+    }
+    const bool hadResident = residentRuns_ != nullptr;
+    bool reserved;
+    {
+      memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
+      reserved = pool_.maybeReserve(required);
+    }
+    BOLT_TEST_ADJUST(
+        "bytedance::bolt::exec::GroupingSet::ensureOutputFits::afterReserve",
+        &reserved);
+    if (reserved && hadResident == (residentRuns_ != nullptr)) {
+      return;
+    }
+    // Arbitration may have spilled or released the resident run. Re-estimate
+    // the pure-file state before continuing.
+    if (hadResident && residentRuns_ == nullptr) {
+      continue;
+    }
+    LOG(WARNING) << "Failed to reserve " << succinctBytes(required)
+                 << " for aggregation spill output in pool " << pool_.name()
+                 << ", usage: " << succinctBytes(pool_.currentBytes())
+                 << ", reservation: " << succinctBytes(pool_.reservedBytes());
+    return;
+  }
+}
+
+uint64_t GroupingSet::spillReaderBytes() const {
+  constexpr uint64_t kReadBufferBytes = uint64_t{1} << 20;
+  auto bytes = checkedMultiply<uint64_t>(
+      spillConfig_->spillUringEnabled ? 3 : 2,
+      kReadBufferBytes,
+      "aggregation spill reader buffers");
+  if (spillConfig_->compressionKind != common::CompressionKind_NONE) {
+    bytes = checkedPlus<uint64_t>(
+        bytes, kReadBufferBytes, "aggregation spill compressed buffer");
+  }
+  return bytes;
+}
+
 RowTypePtr GroupingSet::makeSpillType() const {
   auto rows = table_->rows();
   auto types = rows->keyTypes();
@@ -1101,6 +1456,30 @@ RowTypePtr GroupingSet::makeSpillType() const {
   }
 
   return ROW(std::move(names), std::move(types));
+}
+
+void GroupingSet::initializeSpillMergeRows() {
+  if (isDistinct()) {
+    return;
+  }
+  mergeArgs_.resize(1);
+  std::vector<TypePtr> keyTypes;
+  for (auto& hasher : table_->hashers()) {
+    keyTypes.push_back(hasher->type());
+  }
+  mergeRows_ = std::make_unique<RowContainer>(
+      keyTypes,
+      !ignoreNullKeys_,
+      accumulators(false),
+      std::vector<TypePtr>(),
+      false,
+      false,
+      true,
+      false,
+      false /*useListRowIndex*/,
+      &pool_,
+      table_->rows()->stringAllocatorShared());
+  initializeAggregates(aggregates_, *mergeRows_, false);
 }
 
 void GroupingSet::spill() {
@@ -1197,66 +1576,103 @@ bool GroupingSet::getOutputWithSpill(
     int32_t maxOutputRows,
     int32_t maxOutputBytes,
     const RowVectorPtr& result) {
-  if (merge_ == nullptr && rowBasedSpillMerge_ == nullptr) {
-    LOG(INFO) << operatorCtx_->toString() << " prepare merge, files number: "
-              << spiller_->state().numFinishedFiles(0)
-              << " memory: " << pool_.currentBytes()
-              << ", reserved: " << pool_.reservedBytes();
-    BOLT_CHECK_NULL(mergeRows_);
-    BOLT_CHECK(mergeArgs_.empty());
-
-    if (!isDistinct()) {
-      mergeArgs_.resize(1);
-      std::vector<TypePtr> keyTypes;
-      for (auto& hasher : table_->hashers()) {
-        keyTypes.push_back(hasher->type());
+  if (!spillMergePrepared_) {
+    const bool dynamicFinalSpill = pendingInputSpillPartition_.has_value();
+    if (!dynamicFinalSpill) {
+      BOLT_CHECK_EQ(table_->rows()->numRows(), 0);
+      pendingInputSpillPartition_.emplace(spiller_->finishSpill());
+      if (pendingInputSpillPartition_->numFiles() == 0) {
+        BOLT_CHECK(spiller_->type() == Spiller::Type::kAggregateOutput);
+        BOLT_CHECK(spiller_->filledZeroRows());
+        pendingInputSpillPartition_.reset();
+        return false;
       }
-
-      mergeRows_ = std::make_unique<RowContainer>(
-          keyTypes,
-          !ignoreNullKeys_,
-          accumulators(false),
-          std::vector<TypePtr>(),
-          false,
-          false,
-          true,
-          false,
-          false /*useListRowIndex*/,
-          &pool_,
-          table_->rows()->stringAllocatorShared());
-
-      initializeAggregates(aggregates_, *mergeRows_, false);
     }
-
-    BOLT_CHECK_EQ(table_->rows()->numRows(), 0);
-
-    auto spillPartition = spiller_->finishSpill();
-    if (spillPartition.numFiles() == 0) {
-      BOLT_CHECK(spiller_->type() == Spiller::Type::kAggregateOutput);
-      BOLT_CHECK(spiller_->filledZeroRows());
-      return false;
-    }
-    if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
-      merge_ = spillPartition.createOrderedReader(
-          &pool_, spillConfig_->spillUringEnabled);
-    } else {
-      rowBasedSpillMerge_ = spillPartition.createRowBasedOrderedReader(
-          &pool_,
-          table_->rows(),
-          spillConfig_->getJITenabledForSpill(),
-          spillConfig_->spillUringEnabled);
-    }
-    LOG(INFO) << operatorCtx_->toString()
-              << " memory usage after preparing merge: "
-              << pool_.currentBytes();
+    prepareSpillMerge(dynamicFinalSpill);
   }
-  BOLT_CHECK_EQ(spiller_->state().maxPartitions(), 1);
-
   if (merge_ == nullptr && rowBasedSpillMerge_ == nullptr) {
     return false;
   }
 
-  return mergeNext(maxOutputRows, maxOutputBytes, result);
+  const auto hasOutput = mergeNext(maxOutputRows, maxOutputBytes, result);
+  if (dynamicFinalSpillActive() && residentRunsFinished()) {
+    releaseResidentRuns();
+  }
+  return hasOutput;
+}
+
+void GroupingSet::prepareSpillMerge(bool dynamicFinalSpill) {
+  LOG(INFO) << operatorCtx_->toString()
+            << " prepare merge, memory: " << pool_.currentBytes()
+            << ", reserved: " << pool_.reservedBytes();
+  initializeSpillMergeRows();
+
+  std::vector<std::unique_ptr<SpillMergeStream>> streams;
+  std::vector<std::unique_ptr<RowBasedSpillMergeStream>> rowStreams;
+  const auto firstDistinctFiles = numDistinctSpilledFiles_;
+  if (pendingInputSpillPartition_.has_value()) {
+    if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
+      streams = pendingInputSpillPartition_->takeOrderedStreams(
+          &pool_,
+          spillConfig_->spillUringEnabled,
+          DistinctProvenance::kNew,
+          isDistinct() ? firstDistinctFiles : 0);
+    } else {
+      rowStreams = pendingInputSpillPartition_->takeRowBasedOrderedStreams(
+          &pool_,
+          table_->rows(),
+          spillConfig_->getJITenabledForSpill(),
+          spillConfig_->spillUringEnabled,
+          dynamicFinalSpill && supportRowBasedOutput_,
+          DistinctProvenance::kNew,
+          isDistinct() ? firstDistinctFiles : 0);
+    }
+    pendingInputSpillPartition_.reset();
+  }
+  if (residentRuns_ != nullptr) {
+    const auto spillType = makeSpillType();
+    if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
+      firstResidentStreamIndex_ = streams.size();
+      for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
+        streams.push_back(makeRowContainerSpillMergeStream(
+            *table_->rows(),
+            spillType,
+            residentRuns_->run(i),
+            keyChannels_.size(),
+            {},
+            &pool_,
+            DistinctProvenance::kNew));
+      }
+    } else {
+      firstResidentStreamIndex_ = rowStreams.size();
+      for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
+        rowStreams.push_back(makeRowContainerRowBasedSpillMergeStream(
+            *table_->rows(),
+            spillType,
+            residentRuns_->run(i),
+            keyChannels_.size(),
+            {},
+            rowInfo_.value(),
+            DistinctProvenance::kNew));
+      }
+    }
+  }
+
+  if (streams.empty() && rowStreams.empty()) {
+    spillMergePrepared_ = true;
+    return;
+  }
+  if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
+    merge_ =
+        std::make_unique<TreeOfLosers<SpillMergeStream>>(std::move(streams));
+  } else {
+    rowBasedSpillMerge_ =
+        std::make_unique<TreeOfLosers<RowBasedSpillMergeStream>>(
+            std::move(rowStreams));
+  }
+  LOG(INFO) << operatorCtx_->toString()
+            << " memory usage after preparing merge: " << pool_.currentBytes();
+  spillMergePrepared_ = true;
 }
 
 bool GroupingSet::mergeNext(
@@ -1280,14 +1696,46 @@ bool GroupingSet::mergeNext(
   }
 }
 
+void GroupingSet::extractMergeKeys(
+    folly::Range<char* const*> rows,
+    folly::Range<const AggregationRowOrigin*> origins,
+    const RowVectorPtr& result,
+    vector_size_t resultOffset) {
+  auto* container = table_->rows();
+  for (size_t begin = 0; begin < rows.size();) {
+    size_t end = begin + 1;
+    while (end < rows.size() && origins[end] == origins[begin]) {
+      ++end;
+    }
+    auto** source = const_cast<char**>(rows.data() + begin);
+    const auto count = end - begin;
+    if (origins[begin] == AggregationRowOrigin::kRowContainer) {
+      for (column_index_t key = 0; key < keyChannels_.size(); ++key) {
+        container->extractColumn(
+            source, count, key, resultOffset + begin, result->childAt(key));
+      }
+    } else {
+      for (column_index_t key = 0; key < keyChannels_.size(); ++key) {
+        rowToColumnVector(
+            source,
+            count,
+            container->columnAt(key),
+            resultOffset + begin,
+            result->childAt(key));
+      }
+    }
+    begin = end;
+  }
+}
+
 void GroupingSet::copyKeyAndInitGroup(
-    std::vector<char*>& distinctRows,
-    std::vector<char*>& groups,
+    AggregationMergeScratch& scratch,
     size_t& initGroupCount,
-    const RowContainer* container,
     const RowVectorPtr& result,
     const vector_size_t resultOffset) {
   NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
+  auto& distinctRows = scratch.distinctRows;
+  auto& groups = scratch.groups;
   auto numNewGroups = distinctRows.size() - initGroupCount;
   // has new groups to handle
   if (numNewGroups) {
@@ -1295,15 +1743,13 @@ void GroupingSet::copyKeyAndInitGroup(
     if (!supportRowBasedOutput_) {
       result->resize(distinctRows.size());
     }
-    // key direct copy into result vector
-    for (auto i = 0; i < keyChannels_.size(); ++i) {
-      rowToColumnVector(
-          distinctRows.data() + initGroupCount,
-          distinctRows.size() - initGroupCount,
-          container->columns().at(i),
-          resultOffset,
-          result->childAt(i));
-    }
+    extractMergeKeys(
+        folly::Range<char* const*>(
+            distinctRows.data() + initGroupCount, numNewGroups),
+        folly::Range<const AggregationRowOrigin*>(
+            scratch.distinctOrigins.data() + initGroupCount, numNewGroups),
+        result,
+        resultOffset);
     if (!isDistinct()) {
       BOLT_CHECK_EQ(distinctRows.size(), groups.size());
       // init from initGroupCount to groups.size()
@@ -1312,11 +1758,11 @@ void GroupingSet::copyKeyAndInitGroup(
       if (supportRowBasedOutput_) {
         // need to store keys in columnar format
         SelectivityVector selectivity(result->size(), true);
-
-        for (auto row = 0; row < numNewGroups; ++row) {
-          for (auto i = 0; i < keyChannels_.size(); ++i) {
-            DecodedVector decoded(*result->childAt(i), selectivity);
-            char* group = groups[groupIndicesOfRows_[initGroupCount + row]];
+        auto* groupIndices = groupIndicesOfRows_.data() + initGroupCount;
+        for (auto i = 0; i < keyChannels_.size(); ++i) {
+          DecodedVector decoded(*result->childAt(i), selectivity);
+          for (auto row = 0; row < numNewGroups; ++row) {
+            char* group = groups[groupIndices[row]];
             mergeRows_->store(decoded, resultOffset + row, group, i);
           }
         }
@@ -1336,69 +1782,74 @@ void GroupingSet::copyKeyAndInitGroup(
 }
 
 void GroupingSet::copyKeyAndUpdateGroups(
-    std::vector<char*>& rows,
-    std::vector<char*>& groupOfRows,
-    std::vector<char*>& distinctRows,
-    std::vector<char*>& groups,
+    AggregationMergeScratch& scratch,
     size_t& initGroupCount,
     const RowContainer* container,
     const RowVectorPtr& result,
     const vector_size_t resultOffset) {
+  auto& rows = scratch.rows;
+  auto& groupOfRows = scratch.groupOfRows;
   if (rows.empty()) {
     return;
   }
   BOLT_CHECK_EQ(rows.size(), groupOfRows.size());
-  copyKeyAndInitGroup(
-      distinctRows, groups, initGroupCount, container, result, resultOffset);
+  copyKeyAndInitGroup(scratch, initGroupCount, result, resultOffset);
   NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
   // calculate rows into groupOfRows
-  SelectivityVector selections(groupOfRows.size());
+  mergeSelection_.resizeFill(groupOfRows.size());
   auto& accumulators = container->accumulators();
   BOLT_CHECK_EQ(accumulators.size(), aggregates_.size());
   for (auto i = 0; i < aggregates_.size(); ++i) {
-    // extract accumulate
-    std::vector<VectorPtr> args{BaseVector::create(
-        accumulators[i].spillType(), groupOfRows.size(), &pool_)};
+    if (mergeArgs_[0] == nullptr ||
+        !mergeArgs_[0]->type()->equivalent(*accumulators[i].spillType())) {
+      mergeArgs_[0] = BaseVector::create(
+          accumulators[i].spillType(), groupOfRows.size(), &pool_);
+    } else {
+      mergeArgs_[0]->prepareForReuse();
+      mergeArgs_[0]->resize(groupOfRows.size());
+    }
     accumulators[i].extractForSpill(
-        folly::Range<char**>(rows.data(), groupOfRows.size()), args[0]);
-    // update accumulate to groups
+        folly::Range<char**>(rows.data(), groupOfRows.size()), mergeArgs_[0]);
     aggregates_[i].function->addIntermediateResults(
-        groupOfRows.data(), selections, args, false);
+        groupOfRows.data(), mergeSelection_, mergeArgs_, false);
   }
   rows.clear();
   groupOfRows.clear();
 }
 
 void GroupingSet::outputUniqueGroups(
-    std::vector<char*>& uniqueRows,
-    const RowVectorPtr& uniqueRes,
+    AggregationMergeScratch& scratch,
+    const RowVectorPtr& result,
     size_t& uniqueCount,
     size_t& estimateUniqueBytesPerRow) {
+  auto& uniqueRows = scratch.uniqueRows;
   if (!uniqueRows.empty()) {
+    if (scratch.uniqueResult == nullptr) {
+      scratch.uniqueResult = RowVector::createEmpty(result->type(), &pool_);
+    }
+    auto& uniqueRes = scratch.uniqueResult;
     NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
     if (uniqueRows.size() + uniqueCount > uniqueRes->size()) {
       uniqueRes->resize(uniqueRows.size() + uniqueCount);
     }
     auto* container = spiller_->container();
-    for (auto i = 0; i < keyChannels_.size(); ++i) {
-      rowToColumnVector(
-          uniqueRows.data(),
-          uniqueRows.size(),
-          container->columns().at(i),
-          uniqueCount,
-          uniqueRes->childAt(i));
-    }
+    extractMergeKeys(uniqueRows, scratch.uniqueOrigins, uniqueRes, uniqueCount);
+    scratch.uniqueOrigins.clear();
 
     auto& accumulators = container->accumulators();
     BOLT_CHECK_EQ(accumulators.size(), aggregates_.size());
     for (auto i = 0; i < aggregates_.size(); ++i) {
       // extract accumulate
-      auto aggCol = uniqueRes->childAt(i + keyChannels_.size());
-      VectorPtr args = BaseVector::create(
-          isPartial_ ? accumulators[i].spillType()
-                     : accumulators[i].finalOutputType(),
-          uniqueRows.size(),
-          &pool_);
+      const auto& aggCol = uniqueRes->childAt(i + keyChannels_.size());
+      auto& args = mergeArgs_[0];
+      const auto& type = isPartial_ ? accumulators[i].spillType()
+                                    : accumulators[i].finalOutputType();
+      if (args == nullptr || !args->type()->equivalent(*type)) {
+        args = BaseVector::create(type, uniqueRows.size(), &pool_);
+      } else {
+        args->prepareForReuse();
+        args->resize(uniqueRows.size());
+      }
       BOLT_CHECK(aggCol->type()->equivalent(*args->type()));
       isPartial_
           ? accumulators[i].extractForSpill(
@@ -1419,32 +1870,50 @@ void GroupingSet::outputUniqueGroups(
 }
 
 void GroupingSet::outputUniqueGroupsInRowFormat(
-    std::vector<char*>& uniqueRows,
+    AggregationMergeScratch& scratch,
     const RowVectorPtr& result,
     const int32_t resultOffset,
-    size_t& estimateUniqueBytesPerRow,
-    const std::vector<int32_t>& rowSizeVec,
-    const uint64_t totalUniqueRowSize) {
+    size_t& estimateUniqueBytesPerRow) {
+  auto& uniqueRows = scratch.uniqueRows;
+  auto& uniqueOrigins = scratch.uniqueOrigins;
+  auto& rowSizeVec = scratch.uniqueRowSizes;
   if (!uniqueRows.empty()) {
-    auto* container = spiller_->container();
+    BOLT_DCHECK_EQ(uniqueRows.size(), uniqueOrigins.size());
     const CompositeRowVectorPtr& compositeResult =
         std::dynamic_pointer_cast<CompositeRowVector>(result);
     NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
-    // extract keys in RowVector format
-    for (auto i = 0; i < keyChannels_.size(); ++i) {
-      rowToColumnVector(
-          uniqueRows.data(),
-          uniqueRows.size(),
-          container->columns().at(i),
-          resultOffset,
-          compositeResult->childAt(i));
+    extractMergeKeys(uniqueRows, uniqueOrigins, result, resultOffset);
+    size_t begin = 0;
+    while (begin < uniqueRows.size()) {
+      size_t end = begin + 1;
+      while (end < uniqueRows.size() &&
+             uniqueOrigins[end] == uniqueOrigins[begin]) {
+        ++end;
+      }
+      const auto segment =
+          folly::Range<char* const*>(uniqueRows.data() + begin, end - begin);
+      if (uniqueOrigins[begin] == AggregationRowOrigin::kRowContainer) {
+        const std::pair<int32_t, int32_t> range{
+            resultOffset + static_cast<int32_t>(begin),
+            static_cast<int32_t>(end - begin)};
+        convertRowsFromContainerRows(
+            compositeResult,
+            segment,
+            folly::Range<const std::pair<int32_t, int32_t>*>(&range, 1));
+      } else {
+        const auto bytes = std::accumulate(
+            rowSizeVec.begin() + begin, rowSizeVec.begin() + end, int64_t{0});
+        convertRowsFromSpilledRows(
+            compositeResult,
+            segment,
+            resultOffset + begin,
+            folly::Range<const int32_t*>(
+                rowSizeVec.data() + begin, end - begin),
+            bytes);
+      }
+      begin = end;
     }
-    convertRowsFromSpilledRows(
-        compositeResult,
-        uniqueRows,
-        resultOffset,
-        rowSizeVec,
-        totalUniqueRowSize);
+    uniqueOrigins.clear();
     estimateUniqueBytesPerRow = std::max<size_t>(
         compositeResult->estimateRowSize(), estimateUniqueBytesPerRow);
   }
@@ -1458,23 +1927,21 @@ bool GroupingSet::mergeNextWithRowBasedSpillInRowFormat(
   BOLT_CHECK_NOT_NULL(rowBasedSpillMerge_);
 
   auto* container = spiller_->container();
-  // rows read from spill file as agg input
-  std::vector<char*> rows;
-  // distinct rows to extract keys
-  std::vector<char*> distinctRows;
-  // the only unique rows
-  std::vector<char*> uniqueRows;
-  std::vector<int32_t> uniqueRowSize;
-  // groups stores agg result
-  std::vector<char*> groups;
-  // groups of each row
-  std::vector<char*> groupOfRows;
+  auto& scratch = mergeScratch_;
+  scratch.clear();
+  auto& rows = scratch.rows;
+  auto& distinctRows = scratch.distinctRows;
+  auto& uniqueRows = scratch.uniqueRows;
+  auto& uniqueOrigins = scratch.uniqueOrigins;
+  auto& uniqueRowSize = scratch.uniqueRowSizes;
+  auto& groups = scratch.groups;
+  auto& groupOfRows = scratch.groupOfRows;
+  auto& resultRanges = scratch.resultRanges;
   size_t initGroupCount = 0;
   vector_size_t uniqueCount = 0;
   size_t estimateUniqueBytesPerRow = container->fixedRowSize();
-  size_t totalUniqueRowSize = 0;
+  uint64_t uniqueOutputBytes = 0;
 
-  std::vector<std::pair<int32_t, int32_t>> resultRanges;
   int32_t totalGroupsInResult = 0;
 
   // True if 'merge_' indicates that the next key is the same as the current
@@ -1490,17 +1957,12 @@ bool GroupingSet::mergeNextWithRowBasedSpillInRowFormat(
     result->resize(distinctRows.size() + uniqueRows.size() + uniqueCount);
     // copy unique rows to result first
     outputUniqueGroupsInRowFormat(
-        uniqueRows,
-        result,
-        totalGroupsInResult,
-        estimateUniqueBytesPerRow,
-        uniqueRowSize,
-        totalUniqueRowSize);
+        scratch, result, totalGroupsInResult, estimateUniqueBytesPerRow);
     totalGroupsInResult += uniqueRows.size();
     uniqueCount += uniqueRows.size();
     uniqueRows.clear();
     uniqueRowSize.clear();
-    totalUniqueRowSize = 0;
+    uniqueOutputBytes = 0;
 
     auto numNewGroups = distinctRows.size() - initGroupCount;
     if (numNewGroups) {
@@ -1508,14 +1970,7 @@ bool GroupingSet::mergeNextWithRowBasedSpillInRowFormat(
           std::make_pair(totalGroupsInResult, numNewGroups));
     }
     copyKeyAndUpdateGroups(
-        rows,
-        groupOfRows,
-        distinctRows,
-        groups,
-        initGroupCount,
-        container,
-        result,
-        totalGroupsInResult);
+        scratch, initGroupCount, container, result, totalGroupsInResult);
     totalGroupsInResult += numNewGroups;
   };
 
@@ -1537,25 +1992,31 @@ bool GroupingSet::mergeNextWithRowBasedSpillInRowFormat(
     }
     bool isEndOfBatch = false;
     const auto& currentBatch = next.first->current();
-    int32_t rowSize = 0;
-    auto index = next.first->currentIndex(&isEndOfBatch, rowSize);
+    auto index = next.first->currentIndex(&isEndOfBatch);
     bool unique = false;
     if (!nextKeyIsEqual) {
       // this row is in new group
-      // if not support unique output optimization or next is equal
-      // or this is the end of batch(so can not get rowSize), take the row as
-      // non-unique
+      // If unique output is disabled or another row has the same key, merge
+      // the complete group before producing output.
       if (!supportUniqueRowOpt_ || next.second) {
         groups.push_back(mergeRows_->newRow());
         distinctRows.push_back(currentBatch[index]);
+        scratch.distinctOrigins.push_back(next.first->origin());
       } else {
         unique = true;
         uniqueRows.push_back(currentBatch[index]);
-        rowSize = isEndOfBatch ? ContainerRow2RowSerde::rowSize(
-                                     currentBatch[index], rowInfo_.value())
-                               : rowSize;
-        uniqueRowSize.push_back(rowSize);
-        totalUniqueRowSize += rowSize;
+        uniqueOrigins.push_back(next.first->origin());
+        const auto rowSize = next.first->serializedRowSize();
+        BOLT_CHECK_LE(
+            rowSize,
+            std::numeric_limits<int32_t>::max() - sizeof(RowSizeType),
+            "Serialized aggregation row is too large");
+        uniqueRowSize.push_back(static_cast<int32_t>(rowSize));
+        uniqueOutputBytes = checkedPlus<uint64_t>(
+            uniqueOutputBytes,
+            checkedPlus<uint64_t>(
+                rowSize, sizeof(RowSizeType), "unique output row bytes"),
+            "unique output bytes");
       }
     }
     nextKeyIsEqual = next.second;
@@ -1563,20 +2024,33 @@ bool GroupingSet::mergeNextWithRowBasedSpillInRowFormat(
       rows.push_back(currentBatch[index]);
       groupOfRows.push_back(groups.back());
     }
-    if (isEndOfBatch) {
+    bool outputLimitReached = false;
+    if (!nextKeyIsEqual) {
+      const auto outputRows = groups.size() + uniqueCount + uniqueRows.size();
+      const auto estimatedUniqueBytes = checkedMultiply<uint64_t>(
+          uniqueCount + uniqueRows.size(),
+          estimateUniqueBytesPerRow,
+          "estimated unique output bytes");
+      const auto actualUniqueBytes = checkedPlus<uint64_t>(
+          compositeResult->totalRowSize(),
+          uniqueOutputBytes,
+          "actual unique output bytes");
+      outputLimitReached = outputRows > 0 &&
+          (outputRows >= maxOutputRows ||
+           checkedPlus<uint64_t>(
+               mergeRows_->usedBytes(),
+               std::max(actualUniqueBytes, estimatedUniqueBytes),
+               "aggregation output bytes") >=
+               static_cast<uint64_t>(std::max(maxOutputBytes, 0)));
+    }
+    if (isEndOfBatch || rows.size() >= maxOutputRows || outputLimitReached) {
       // stream end, should calculate agg with rows in case rows becomes
       // invalid
       copyUniqueRowsAndKeys();
     }
-    next.first->pop();
+    next.first->popWithLengths();
     ++spillOutputRowCount_;
-    if (!nextKeyIsEqual &&
-        ((groups.size() + uniqueCount + uniqueRows.size() >= maxOutputRows) ||
-         (mergeRows_->usedBytes() +
-              (uniqueCount + uniqueRows.size()) * estimateUniqueBytesPerRow >=
-          maxOutputBytes))) {
-      copyUniqueRowsAndKeys();
-
+    if (outputLimitReached) {
       if (initGroupCount) {
         extractSpillResultInRowFormat(result, resultRanges);
       }
@@ -1596,19 +2070,14 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
   BOLT_CHECK_NOT_NULL(rowBasedSpillMerge_);
 
   auto* container = spiller_->container();
-  // rows read from spill file as agg input
-  std::vector<char*> rows;
-  // distinct rows to extract keys
-  std::vector<char*> distinctRows;
-  // the only unique rows
-  std::vector<char*> uniqueRows;
-  // groups stores agg result
-  std::vector<char*> groups;
-  // groups of each row
-  std::vector<char*> groupOfRows;
+  auto& scratch = mergeScratch_;
+  scratch.clear();
+  auto& rows = scratch.rows;
+  auto& distinctRows = scratch.distinctRows;
+  auto& uniqueRows = scratch.uniqueRows;
+  auto& groups = scratch.groups;
+  auto& groupOfRows = scratch.groupOfRows;
   size_t initGroupCount = 0;
-  // TODO(fzh): to fix size
-  RowVectorPtr uniqueRes = RowVector::createEmpty(result->type(), &pool_);
   size_t uniqueCount = 0;
   size_t estimateUniqueBytesPerRow = container->fixedRowSize();
   size_t estimateUniqueBytes = 0;
@@ -1622,7 +2091,7 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
       if (stream == nullptr) {
         break;
       }
-      if (stream->id() < numDistinctSpilledFiles_) {
+      if (stream->provenance() == DistinctProvenance::kAlreadyOutput) {
         // current key exist in memory, so do not output to result
         newDistinct = false;
       }
@@ -1630,30 +2099,19 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
         if (newDistinct) {
           // for new key and newDistinct, save current key
           distinctRows.push_back(stream->current()[stream->currentIndex()]);
+          scratch.distinctOrigins.push_back(stream->origin());
         }
         newDistinct = true;
       }
       bool isEndOfBatch{false};
       stream->currentIndex(&isEndOfBatch);
       if (isEndOfBatch) {
-        copyKeyAndInitGroup(
-            distinctRows,
-            groups,
-            initGroupCount,
-            container,
-            result,
-            initGroupCount);
+        copyKeyAndInitGroup(scratch, initGroupCount, result, initGroupCount);
       }
       stream->pop();
       ++spillOutputRowCount_;
     }
-    copyKeyAndInitGroup(
-        distinctRows,
-        groups,
-        initGroupCount,
-        container,
-        result,
-        initGroupCount);
+    copyKeyAndInitGroup(scratch, initGroupCount, result, initGroupCount);
     return result->size() > 0;
   } else {
     // True if 'merge_' indicates that the next key is the same as the current
@@ -1664,21 +2122,14 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
       if (next.first == nullptr) {
         // no more data to read
         copyKeyAndUpdateGroups(
-            rows,
-            groupOfRows,
-            distinctRows,
-            groups,
-            initGroupCount,
-            container,
-            result,
-            initGroupCount);
+            scratch, initGroupCount, container, result, initGroupCount);
         outputUniqueGroups(
-            uniqueRows, uniqueRes, uniqueCount, estimateUniqueBytesPerRow);
+            scratch, result, uniqueCount, estimateUniqueBytesPerRow);
         if (initGroupCount) {
           extractSpillResult(result, true);
         }
         if (uniqueCount) {
-          result->append(uniqueRes->wrappedVector());
+          result->append(scratch.uniqueResult->wrappedVector());
           stats_.aggOutputUniqueRows += uniqueCount;
         }
         return result->size() > 0;
@@ -1692,9 +2143,11 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
         if (next.second) {
           groups.push_back(mergeRows_->newRow());
           distinctRows.push_back(currentBatch[index]);
+          scratch.distinctOrigins.push_back(next.first->origin());
         } else {
           unique = true;
           uniqueRows.push_back(currentBatch[index]);
+          scratch.uniqueOrigins.push_back(next.first->origin());
           estimateUniqueBytes += estimateUniqueBytesPerRow;
         }
       }
@@ -1703,20 +2156,12 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
         rows.push_back(currentBatch[index]);
         groupOfRows.push_back(groups.back());
       }
-      if (isEndOfBatch) {
-        // stream end, should calculate agg with rows in case rows becomes
-        // invalid
+      if (isEndOfBatch || rows.size() >= maxOutputRows) {
+        // Batch rows are invalid after pop. Flush once if either limit is hit.
         copyKeyAndUpdateGroups(
-            rows,
-            groupOfRows,
-            distinctRows,
-            groups,
-            initGroupCount,
-            container,
-            result,
-            initGroupCount);
+            scratch, initGroupCount, container, result, initGroupCount);
         outputUniqueGroups(
-            uniqueRows, uniqueRes, uniqueCount, estimateUniqueBytesPerRow);
+            scratch, result, uniqueCount, estimateUniqueBytesPerRow);
       }
       next.first->pop();
       ++spillOutputRowCount_;
@@ -1724,22 +2169,15 @@ bool GroupingSet::mergeNextWithRowBasedSpill(
           ((groups.size() + uniqueCount + uniqueRows.size() >= maxOutputRows) ||
            (mergeRows_->usedBytes() + estimateUniqueBytes >= maxOutputBytes))) {
         copyKeyAndUpdateGroups(
-            rows,
-            groupOfRows,
-            distinctRows,
-            groups,
-            initGroupCount,
-            container,
-            result,
-            initGroupCount);
+            scratch, initGroupCount, container, result, initGroupCount);
         outputUniqueGroups(
-            uniqueRows, uniqueRes, uniqueCount, estimateUniqueBytesPerRow);
+            scratch, result, uniqueCount, estimateUniqueBytesPerRow);
 
         if (initGroupCount) {
           extractSpillResult(result, true);
         }
         if (uniqueCount) {
-          result->append(uniqueRes->wrappedVector());
+          result->append(scratch.uniqueResult->wrappedVector());
           stats_.aggOutputUniqueRows += uniqueCount;
         }
         return true;
@@ -1761,22 +2199,22 @@ bool GroupingSet::mergeNextWithAggregates(
   // in groups into result vector and return result.
   BOLT_CHECK_NOT_NULL(merge_);
   BOLT_CHECK(!isDistinct());
+  auto& scratch = mergeScratch_;
+  scratch.clear();
 
   // True if 'merge_' indicates that the next key is the same as the current
   // one.
   bool nextKeyIsEqual{false};
 
   // stores all rows need to be update to groups
-  std::vector<const RowVector*> sources;
-  std::vector<vector_size_t> sourceIndice;
-  std::vector<char*> groupOfRows;
+  auto& sources = scratch.sources;
+  auto& sourceIndices = scratch.sourceIndices;
+  auto& groupOfRows = scratch.groupOfRows;
 
   // all distinct rows to extract keys
-  std::vector<const RowVector*> distinctInputs;
-  std::vector<vector_size_t> distinctIndices;
-  std::vector<char*> groups;
-
-  RowVectorPtr intermediate;
+  auto& distinctInputs = scratch.distinctInputs;
+  auto& distinctIndices = scratch.distinctIndices;
+  auto& groups = scratch.groups;
   uint64_t averageResultRowSize = 0;
 
   // gather all saved keys into result vector and all saved intermediate result
@@ -1798,7 +2236,7 @@ bool GroupingSet::mergeNextWithAggregates(
       }
 
       // initialize rows in row container
-      initializeRows(groups);
+      initializeRows(folly::Range<char* const*>(groups.data(), groups.size()));
 
       distinctInputs.clear();
       distinctIndices.clear();
@@ -1807,25 +2245,28 @@ bool GroupingSet::mergeNextWithAggregates(
 
     if (!sources.empty()) {
       // gather intermediate and add intermediate to groups
-      if (!intermediate) {
-        intermediate = BaseVector::create<RowVector>(
+      if (!scratch.intermediate) {
+        scratch.intermediate = BaseVector::create<RowVector>(
             sources.back()->type(), maxOutputRows, &pool_);
       }
-      intermediate->resize(sources.size());
+      scratch.intermediate->resize(sources.size());
       // only copy intermediate part
-      for (auto i = keyChannels_.size(); i < intermediate->childrenSize();
+      for (auto i = keyChannels_.size();
+           i < scratch.intermediate->childrenSize();
            i++) {
         gatherCopy(
-            intermediate->childAt(i).get(),
+            scratch.intermediate->childAt(i).get(),
             0,
             sources.size(),
             sources,
-            sourceIndice,
+            sourceIndices,
             i);
       }
-      updateRows(intermediate, groupOfRows);
+      updateRows(
+          scratch.intermediate,
+          folly::Range<char* const*>(groupOfRows.data(), groupOfRows.size()));
       sources.clear();
-      sourceIndice.clear();
+      sourceIndices.clear();
       groupOfRows.clear();
     }
     if (result->size() != 0) {
@@ -1851,7 +2292,7 @@ bool GroupingSet::mergeNextWithAggregates(
     }
     bool isEndOfRow = false;
     sources.push_back(&next.first->current());
-    sourceIndice.push_back(next.first->currentIndex(&isEndOfRow));
+    sourceIndices.push_back(next.first->currentIndex(&isEndOfRow));
     groupOfRows.push_back(mergeState_);
     nextKeyIsEqual = next.second;
     if (isEndOfRow || sources.size() == maxOutputRows) {
@@ -1879,6 +2320,8 @@ bool GroupingSet::mergeNextWithoutAggregates(
   BOLT_CHECK_NOT_NULL(merge_);
   BOLT_CHECK(isDistinct());
   BOLT_CHECK_GT(numDistinctSpilledFiles_, 0);
+  auto& scratch = mergeScratch_;
+  scratch.clear();
 
   // We are looping over sorted rows produced by tree-of-losers. We logically
   // split the stream into runs of duplicate rows. As we process each run we
@@ -1889,11 +2332,11 @@ bool GroupingSet::mergeNextWithoutAggregates(
   //
   // NOTE: the distinct stream refers to the stream that contains the spilled
   // distinct hash table. A distinct stream contains rows which has already
-  // been output as distinct before we trigger spilling. A distinct stream id is
-  // less than 'numDistinctSpilledFiles_'.
+  // been output as distinct before spilling. Its provenance survives resident
+  // replacement.
   result->ensureWritable(SelectivityVector(maxOutputRows));
-  std::vector<const RowVector*> sources;
-  std::vector<vector_size_t> sourceIndice;
+  auto& sources = scratch.sources;
+  auto& sourceIndices = scratch.sourceIndices;
   bool isEndOfBatch{false};
   bool newDistinct{true};
   int32_t numOutputRows{0};
@@ -1909,10 +2352,10 @@ bool GroupingSet::mergeNextWithoutAggregates(
               numOutputRows,
               sources.size(),
               sources,
-              sourceIndice);
+              sourceIndices);
           numOutputRows += sources.size();
           sources.clear();
-          sourceIndice.clear();
+          sourceIndices.clear();
         }
         ++spillOutputRowCount_;
         stream->pop();
@@ -1924,7 +2367,7 @@ bool GroupingSet::mergeNextWithoutAggregates(
     if (stream == nullptr) {
       break;
     }
-    if (stream->id() < numDistinctSpilledFiles_) {
+    if (stream->provenance() == DistinctProvenance::kAlreadyOutput) {
       newDistinct = false;
     }
     if (next.second) {
@@ -1933,7 +2376,7 @@ bool GroupingSet::mergeNextWithoutAggregates(
     }
     if (newDistinct) {
       sources.push_back(&stream->current());
-      sourceIndice.push_back(stream->currentIndex());
+      sourceIndices.push_back(stream->currentIndex());
     }
     popAndCopyIfNeeded(stream);
     newDistinct = true;
@@ -1941,7 +2384,7 @@ bool GroupingSet::mergeNextWithoutAggregates(
   if (!sources.empty()) {
     NanosecondTimer aggTimer(&stats_.aggOutputUpdateTimeNs);
     gatherCopy(
-        result.get(), numOutputRows, sources.size(), sources, sourceIndice);
+        result.get(), numOutputRows, sources.size(), sources, sourceIndices);
     numOutputRows += sources.size();
   }
   result->resize(numOutputRows);
@@ -1959,21 +2402,21 @@ void GroupingSet::ensureGroupIndices(vector_size_t size) {
   }
 }
 
-void GroupingSet::initializeRows(std::vector<char*> rows) {
+void GroupingSet::initializeRows(folly::Range<char* const*> rows) {
   ensureGroupIndices(rows.size());
   for (auto& aggregate : aggregates_) {
     if (!aggregate.sortingKeys.empty()) {
       continue;
     }
     aggregate.function->initializeNewGroups(
-        rows.data(),
+        const_cast<char**>(rows.data()),
         folly::Range<const vector_size_t*>(
             groupIndicesOfRows_.data(), rows.size()));
   }
 
   if (sortedAggregations_ != nullptr) {
     sortedAggregations_->initializeNewGroups(
-        rows.data(),
+        const_cast<char**>(rows.data()),
         folly::Range<const vector_size_t*>(
             groupIndicesOfRows_.data(), rows.size()));
   }
@@ -1983,7 +2426,8 @@ void GroupingSet::extractSpillResult(
     const RowVectorPtr& result,
     bool excludeKey) {
   // distinct agg's result only has key, so skip if excludeKey
-  std::vector<char*> rows(mergeRows_->numRows());
+  auto& rows = mergeScratch_.outputRows;
+  rows.resize(mergeRows_->numRows());
   RowContainerIterator iter;
   if (!rows.empty()) {
     mergeRows_->listRows(
@@ -1996,14 +2440,14 @@ void GroupingSet::extractSpillResult(
 
 void GroupingSet::extractSpillResultInRowFormat(
     const RowVectorPtr& result,
-    const std::vector<std::pair<int32_t, int32_t>>& ranges) {
+    folly::Range<const std::pair<int32_t, int32_t>*> ranges) {
   auto numRows = mergeRows_->numRows();
   if (numRows == 0) {
     return;
   }
-  std::vector<char*> rows(numRows);
+  auto& rows = mergeScratch_.outputRows;
+  rows.resize(numRows);
   RowContainerIterator iter;
-  uint64_t totalRowSize = 0;
   mergeRows_->listRows(
       &iter, rows.size(), RowContainer::kUnlimited, rows.data());
   // RowContainer to serialized row format
@@ -2014,18 +2458,18 @@ void GroupingSet::extractSpillResultInRowFormat(
 
 void GroupingSet::updateRows(
     const RowVectorPtr& input,
-    std::vector<char*>& rows) {
+    folly::Range<char* const*> rows) {
   BOLT_CHECK_EQ(input->size(), rows.size());
   mergeSelection_.resizeFill(input->size());
   for (auto i = 0; i < aggregates_.size(); ++i) {
     if (!aggregates_[i].sortingKeys.empty()) {
       continue;
     }
-    auto intermediate =
-        std::vector<VectorPtr>({input->childAt(i + keyChannels_.size())});
+    mergeArgs_[0] = input->childAt(i + keyChannels_.size());
     aggregates_[i].function->addIntermediateResults(
-        rows.data(), mergeSelection_, intermediate, false);
+        const_cast<char**>(rows.data()), mergeSelection_, mergeArgs_, false);
   }
+  mergeArgs_[0].reset();
 
   if (sortedAggregations_ != nullptr) {
     const auto& vector =
@@ -2251,15 +2695,17 @@ void GroupingSet::populateOutputValidColumns(
 
 void GroupingSet::convertRowsFromContainerRows(
     const CompositeRowVectorPtr& compositeResult,
-    folly::Range<char**> groups,
-    const std::vector<std::pair<int32_t, int32_t>>& resultRanges) {
+    folly::Range<char* const*> groups,
+    folly::Range<const std::pair<int32_t, int32_t>*> resultRanges) {
   const int32_t headerSize = sizeof(RowSizeType);
   int32_t actualTotalRowSize = 0, actualRowSize = 0;
   char *rowStart = nullptr, *newRow = nullptr;
   const auto& rowInfo = rowInfo_.value();
 
-  auto totalRowSizeWithLen =
-      rowInfo.getRowSize(groups) + headerSize * groups.size();
+  uint64_t totalRowSizeWithLen = headerSize * groups.size();
+  for (auto* row : groups) {
+    totalRowSizeWithLen += rowInfo.getRowSize(row);
+  }
   auto* bufferStart = compositeResult->allocateRows(totalRowSizeWithLen);
   auto* bufferEnd = bufferStart + totalRowSizeWithLen;
   int32_t groupIndex = 0;
@@ -2292,9 +2738,9 @@ void GroupingSet::convertRowsFromContainerRows(
 
 void GroupingSet::convertRowsFromSpilledRows(
     const CompositeRowVectorPtr& compositeResult,
-    std::vector<char*>& rows,
+    folly::Range<char* const*> rows,
     int32_t resultOffset,
-    const std::vector<int32_t>& rowSizeVec,
+    folly::Range<const int32_t*> rowSizes,
     const int64_t totalUniqueRowSize) {
   char* newRow = nullptr;
   const auto& rowInfo = rowInfo_.value();
@@ -2308,7 +2754,7 @@ void GroupingSet::convertRowsFromSpilledRows(
     RowInfoTracker tracker(compositeResult.get(), resultOffset, rows.size());
     for (auto i = 0; i < rows.size(); ++i) {
       const auto* row = rows[i];
-      auto rowSize = rowSizeVec[i];
+      auto rowSize = rowSizes[i];
       newRow = compositeResult->newRow();
       *((RowSizeType*)(newRow)) = rowSize;
       simd::memcpy(newRow + sizeof(RowSizeType), row, rowSize);

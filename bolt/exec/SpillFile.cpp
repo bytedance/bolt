@@ -626,6 +626,12 @@ uint64_t SpillWriter::writeAndFlush(
 uint64_t SpillWriter::write(
     const std::vector<char*, memory::StlAllocator<char*>>& rows,
     const RowFormatInfo& info) {
+  return write(folly::Range<char* const*>(rows.data(), rows.size()), info);
+}
+
+uint64_t SpillWriter::write(
+    folly::Range<char* const*> rows,
+    const RowFormatInfo& info) {
   checkNotFinished();
   static constexpr size_t kBufferSize =
       (1ULL << 20) - AlignedBuffer::kPaddedSize; // 1MB
@@ -715,8 +721,8 @@ uint64_t SpillWriter::write(
 
   {
     MicrosecondTimer timer(&timeUs);
-    vector_size_t rowIndex = 0;
-    vector_size_t needWriteRowCount = 0;
+    size_t rowIndex = 0;
+    size_t needWriteRowCount = 0;
     while (rowIndex < rows.size()) {
       char* row = rows[rowIndex];
       int32_t rowSize = 0;
