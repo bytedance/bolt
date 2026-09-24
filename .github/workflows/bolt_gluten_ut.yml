@@ -1,0 +1,187 @@
+# Run complete Gluten suites in parallel JVMs against the local Bolt build.
+
+name: Bolt Gluten UT
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      gluten_ref:
+        description: 'Apache Gluten branch, tag or SHA (use a SHA to reproduce a run)'
+        default: main
+
+env:
+  # Matches build-test.yml — ccache + conan cache live under /data on the host.
+  CCACHE_DIR: /data/ccache-data
+  CCACHE_MAXSIZE: '100G'
+  CI_NUM_THREADS: "16"
+  IN_CI: '1'
+  TOOLS_DIR: /data/bolt-gluten-ut-tools
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spark-ut:
+    # Observe CI stability before making this job required for merging.
+    continue-on-error: true
+    runs-on: [ self-hosted, medium ]
+    container:
+      image: bolt-registry:5000/bolt-ci:20260114
+      # /data/workspace is already a host bind mount in the outer runner.
+      # Share dependencies on that host; keep Gluten SNAPSHOTs private per job.
+      # Caches survive runner replacement; each host warms its own cache.
+      options: >-
+        --user root --init
+        --tmpfs /root/.m2/repository/org/apache/gluten
+      volumes:
+        - /data/ccache-data:/data/ccache-data
+        - /data/workspace/gluten-ut-cache/maven:/root/.m2/repository
+        - /data/workspace/gluten-ut-cache/arrow:/root/.m2/repository/org/apache/arrow
+        - /data/workspace/gluten-ut-cache/spark:/data/bolt-gluten-ut-spark
+        - /data/workspace/gluten-ut-cache/tools:/data/bolt-gluten-ut-tools
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    timeout-minutes: 120
+    steps:
+      - name: Checkout bolt (this repo)
+        uses: actions/checkout@v6
+
+      - name: Checkout Apache Gluten
+        uses: actions/checkout@v6
+        with:
+          repository: apache/gluten
+          ref: ${{ inputs.gluten_ref || 'main' }}
+          path: gluten
+
+      - name: Prepare cached JDK 17
+        # Use the full JDK archive: Arrow's CMake JNI detection requires AWT.
+        run: |
+          VERSION=17.0.20.1+1
+          JAVA_HOME="$TOOLS_DIR/jdk-$VERSION"
+          mkdir -p "$TOOLS_DIR"
+          exec 200> "$TOOLS_DIR/.lock"
+          flock -x 200
+          if [[ ! -f "$JAVA_HOME/.ready" || ! -x "$JAVA_HOME/bin/java" ]]; then
+            echo "JDK cache miss: $JAVA_HOME"
+            URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-$VERSION"
+            ARCHIVE="OpenJDK17U-jdk_x64_linux_hotspot_${VERSION/+/_}.tar.gz"
+            cd "$TOOLS_DIR"
+            curl -fL --retry 3 -o "$ARCHIVE" "$URL/$ARCHIVE"
+            curl -fL --retry 3 -o "$ARCHIVE.sha256.txt" "$URL/$ARCHIVE.sha256.txt"
+            sha256sum -c "$ARCHIVE.sha256.txt"
+            mkdir -p "$JAVA_HOME"
+            tar -xzf "$ARCHIVE" --strip-components=1 -C "$JAVA_HOME"
+            "$JAVA_HOME/bin/java" -version
+            touch "$JAVA_HOME/.ready"
+            rm -f "$ARCHIVE" "$ARCHIVE.sha256.txt"
+          else
+            echo "JDK cache hit: $JAVA_HOME"
+          fi
+          echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare cached Python test environment
+        run: |
+          packages=(numpy==1.26.4 pandas==2.2.3 pyarrow==15.0.2)
+          # A Python or dependency version change gets its own environment.
+          version=$(/usr/bin/python3 --version)
+          key=$(printf '%s\n' "$version" "${packages[@]}" | sha256sum)
+          VENV="$TOOLS_DIR/python-${key:0:16}"
+          exec 200> "$TOOLS_DIR/.lock"
+          flock -x 200
+          if [[ ! -f "$VENV/.ready" || ! -x "$VENV/bin/python" ]]; then
+            echo "Python cache miss: $VENV ($version, ${packages[*]})"
+            # The CI image already includes python3-virtualenv.
+            /usr/bin/virtualenv --clear -p /usr/bin/python3 "$VENV"
+            "$VENV/bin/pip" install "${packages[@]}"
+            "$VENV/bin/pip" check
+            # Interrupted installs must not count as cache hits.
+            touch "$VENV/.ready"
+          else
+            echo "Python cache hit: $VENV ($version, ${packages[*]})"
+          fi
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Set up bolt build environment (conan)
+        uses: ./.github/actions/bolt-build-base
+
+      - name: Build local bolt (make release_spark)
+        # Gluten uses only the default Conan profile; align it with Bolt's profile.
+        run: |
+          cat scripts/conan/bolt.profile >> ~/.conan2/profiles/default
+          make release_spark && make export_release
+
+      - name: Build gluten native libs (make release)
+        working-directory: ${{ github.workspace }}/gluten
+        run: make release
+
+      - name: Build gluten-arrow if jars missing or patches changed
+        # Jars use Bolt's patched Arrow source; invalidate on recipe/patch/script changes.
+        working-directory: ${{ github.workspace }}/gluten
+        run: |
+          ARROW_DIR=/root/.m2/repository/org/apache/arrow
+          STAMP=$ARROW_DIR/.gluten-15.0.0.stamp
+          CCI_ARROW=${CONAN_HOME:-$HOME/.conan2}/conan-center-index/recipes/arrow/all
+          KEY=$(cat dev/build_bolt_arrow.sh \
+                    "$CCI_ARROW/conanfile.py" "$CCI_ARROW/conandata.yml" \
+                    "$CCI_ARROW"/patches/15.* \
+                | sha256sum | cut -d' ' -f1)
+          mkdir -p "$ARROW_DIR"
+          exec 200> "$ARROW_DIR/.lock"
+          flock -x 200
+          if [[ -f $STAMP && "$(cat "$STAMP")" == "$KEY" \
+             && -s "$ARROW_DIR/arrow-dataset/15.0.0-gluten/arrow-dataset-15.0.0-gluten.jar" ]]; then
+            echo "Arrow cache hit: $KEY"
+            exit 0
+          fi
+          echo "Arrow cache miss: $KEY"
+          bash dev/build_bolt_arrow.sh
+          echo "$KEY" > "$STAMP"
+
+      - name: Populate Spark binary + source SQL test resources on /data
+        # Gluten needs both Spark binaries and source sql/ resources; share under a lock.
+        run: |
+          BASE=/data/bolt-gluten-ut-spark
+          mkdir -p "$BASE"
+          exec 200> "$BASE/.lock"
+          flock -x 200
+          [[ -d "$BASE/spark_home/jars" && -d "$BASE/spark_src/sql" && -L "$BASE/spark_home/sql" ]] && exit 0
+          apt-get update
+          apt-get install -y --no-install-recommends aria2
+          URL=https://archive.apache.org/dist/spark/spark-3.5.5
+          cd "$BASE"
+          aria2c --quiet -x16 -s16 -k1M -o bin.tgz "$URL/spark-3.5.5-bin-hadoop3.tgz"
+          aria2c --quiet -x16 -s16 -k1M -o src.tgz "$URL/spark-3.5.5.tgz"
+          mkdir -p spark_home spark_src
+          tar -xzf bin.tgz --strip-components=1 -C spark_home
+          tar -xzf src.tgz --strip-components=1 -C spark_src
+          ln -sfn ../spark_src/sql spark_home/sql
+          rm -f bin.tgz src.tgz
+
+      - name: Run Gluten UT (parallel, blacklist-aware)
+        env:
+          GLUTEN_HOME: ${{ github.workspace }}/gluten
+          SPARK_HOME: /data/bolt-gluten-ut-spark/spark_home/
+          JOBS: '8'
+        run: bash scripts/gluten_ut/run.sh
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolt-gluten-ut-reports
+          path: |
+            scripts/gluten_ut/logs/_*
+            scripts/gluten_ut/logs/jobs/*
+            scripts/gluten_ut/logs/reports/**/TEST-*.xml
+          if-no-files-found: warn
