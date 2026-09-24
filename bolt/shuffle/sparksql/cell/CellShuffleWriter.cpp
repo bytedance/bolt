@@ -27,7 +27,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
-uint64_t nowNs() {
+uint64_t currentTimeNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
@@ -67,6 +67,16 @@ CellShuffleWriter::CellShuffleWriter(
       "CellShuffleWriter requires hash or range partitioning");
 }
 
+CellShuffleWriter::~CellShuffleWriter() {
+  // Failed split/stop paths must return the warm reservation as well.
+  frontend_.reset();
+  cells_.reset();
+  allocator_.reset();
+  nulls_.reset();
+  output_.reset();
+  boltPool_->release();
+}
+
 void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   const auto& inputType = rv.type()->asRow();
   BOLT_CHECK_GE(inputType.size(), 2, "expected a pid column plus data");
@@ -90,7 +100,8 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
         ? (int64_t{1} << 30)
         : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
   }
-  const int64_t perStream = budget / 8 / numPartitions_ / numStreams;
+  const int64_t perStream =
+      budget / 8 / numPartitions_ / std::max<uint32_t>(1, numStreams);
   const int64_t cellCap =
       std::min<int64_t>(cellOpts.maxDataCellBytes, cellOpts.chunkBytes / 4);
   const uint32_t cellBytes = prevPowerOfTwo(std::max<int64_t>(
@@ -101,7 +112,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   cells_ = std::make_unique<DataCells>(
       boltPool_, allocator_.get(), numPartitions_, numStreams);
   nulls_ = std::make_unique<NullCells>(
-      boltPool_, numPartitions_, layout_.numColumns());
+      boltPool_, numPartitions_, layout_.numWireColumns());
   frontend_ = std::make_unique<CachedCellFrontend>(
       &layout_, cells_.get(), nulls_.get(), boltPool_, [this]() {
         onBeforeChunkGrow();
@@ -114,12 +125,14 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   // Partitioner::compute fills but does not size this.
   partition2RowCount_.resize(numPartitions_);
   decoded_.resize(layout_.numColumns());
-  encodingTags_.assign((layout_.numColumns() + 7) / 8, 0);
+  encodingTags_.assign((layout_.numWireColumns() + 7) / 8, 0);
 
   // Warm the reservation for the resident structures and the first chunks;
   // failure is not fatal, allocation will arbitrate.
-  boltPool_->maybeReserve(
-      frontend_->residentBytes() + 2 * cellOpts.chunkBytes);
+  if (numStreams != 0) {
+    boltPool_->maybeReserve(
+        frontend_->residentBytes() + 2 * cellOpts.chunkBytes);
+  }
   initialized_ = true;
 }
 
@@ -158,17 +171,24 @@ arrow::Status CellShuffleWriter::split(
   // them: one giant batch must not inflate a single payload window past
   // the reader-side bounds (the legacy writers slice the same way).
   const int64_t flatSize = rv->estimateFlatSize();
-  if (flatSize > kMaxShuffleWriterBatchBytes && rv->size() > 1) {
-    const int32_t pieces = static_cast<int32_t>(std::min<int64_t>(
-        rv->size(),
-        (flatSize + kMaxShuffleWriterBatchBytes - 1) /
-            kMaxShuffleWriterBatchBytes));
-    const int32_t rowsPerPiece = (rv->size() + pieces - 1) / pieces;
+  const int32_t rowLimit = std::max<int32_t>(
+      1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
+  if ((flatSize > kMaxShuffleWriterBatchBytes || rv->size() > rowLimit) &&
+      rv->size() > 1) {
+    rv->loadedVector(); // Lazy children must be loaded before slicing.
+    const int64_t pieces = std::max<int64_t>(
+        1,
+        std::min<int64_t>(
+            rv->size(),
+            (flatSize + kMaxShuffleWriterBatchBytes - 1) /
+                kMaxShuffleWriterBatchBytes));
+    const int32_t rowsPerPiece =
+        std::min<int64_t>(rowLimit, (rv->size() + pieces - 1) / pieces);
     for (int32_t begin = 0; begin < rv->size(); begin += rowsPerPiece) {
       const int32_t length =
           std::min<int32_t>(rowsPerPiece, rv->size() - begin);
-      auto piece = std::dynamic_pointer_cast<RowVector>(
-          rv->slice(begin, length));
+      auto piece =
+          std::dynamic_pointer_cast<RowVector>(rv->slice(begin, length));
       BOLT_CHECK_NOT_NULL(piece);
       RETURN_NOT_OK(splitBatch(std::move(piece)));
     }
@@ -178,7 +198,13 @@ arrow::Status CellShuffleWriter::split(
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
-  const uint64_t start = nowNs();
+  const uint64_t start = currentTimeNs();
+  const uint64_t rowLimit = std::max<int64_t>(
+      1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
+  if (totalWindowRows_ != 0 &&
+      maxWindowRows_ + uint64_t(rv->size()) > rowLimit) {
+    checkpoint();
+  }
   inSplit_ = true;
   const uint32_t numRows = rv->size();
   if (numRows == 0) {
@@ -197,6 +223,10 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   bool anyNullable = false;
   nullClass_.resize(layout_.numColumns());
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (layout_.isUnknownColumn(col)) {
+      nullClass_[col] = BatchNullClass::kAllNull;
+      continue;
+    }
     auto& decoded = decoded_[col];
     decoded.decode(*rv->childAt(col + 1));
     // Classify the batch's nulls up front: mayHaveNulls() only means a
@@ -271,7 +301,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   inSplit_ = false;
 
   maybeCheckpoint();
-  metrics_.splitTime += static_cast<int64_t>(nowNs() - start);
+  metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start);
   return arrow::Status::OK();
 }
 
@@ -323,11 +353,12 @@ void CellShuffleWriter::probeDictionary(uint32_t numRows) {
       }
     }
     const bool enable = fits && !seen.empty() &&
-        nonNull >= static_cast<uint64_t>(cellOpts.dictMinRepeatRatio) *
-            seen.size();
+        nonNull >=
+            static_cast<uint64_t>(cellOpts.dictMinRepeatRatio) * seen.size();
     if (enable) {
       frontend_->enableDictionary(col);
-      encodingTags_[col / 8] |= static_cast<uint8_t>(1u << (col % 8));
+      const auto wire = layout_.wireColumn(col);
+      encodingTags_[wire / 8] |= static_cast<uint8_t>(1u << (wire % 8));
     }
     LOG(INFO) << "CellShuffleWriter dictionary probe: column " << col
               << (enable ? " ON" : " OFF") << " (ndv=" << seen.size()
@@ -427,8 +458,7 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // and the allocation churn case never reaches here (its small asks are
   // satisfied by the idle memory).
   if ((size > 0 && *actual >= size) ||
-      allocator_->allocatedBytes() <
-          2 * options_.cellOptions.chunkBytes) {
+      allocator_->allocatedBytes() < 2 * options_.cellOptions.chunkBytes) {
     return arrow::Status::OK();
   }
   spillRunNow();
@@ -466,30 +496,31 @@ arrow::Status CellShuffleWriter::stop() {
   {
     const int64_t chunkBytes = allocator_->allocatedBytes();
     const int64_t dataBytes = static_cast<int64_t>(cells_->totalBytes());
-    LOG(INFO) << "CellShuffleWriter memory: chunks="
-              << (chunkBytes >> 20) << "MB, data=" << (dataBytes >> 20)
-              << "MB ("
+    LOG(INFO) << "CellShuffleWriter memory: chunks=" << (chunkBytes >> 20)
+              << "MB, data=" << (dataBytes >> 20) << "MB ("
               << (chunkBytes > 0 ? 100.0 * dataBytes / chunkBytes : 0.0)
               << "% utilization), resident="
-              << (frontend_->residentBytes() >> 20) << "MB, nulls="
-              << (nulls_->allocatedBytes() >> 20) << "MB, pool used="
-              << (boltPool_->usedBytes() >> 20) << "MB, pool peak="
-              << (boltPool_->peakBytes() >> 20) << "MB";
+              << (frontend_->residentBytes() >> 20)
+              << "MB, nulls=" << (nulls_->allocatedBytes() >> 20)
+              << "MB, pool used=" << (boltPool_->usedBytes() >> 20)
+              << "MB, pool peak=" << (boltPool_->peakBytes() >> 20) << "MB";
   }
   output_->finalize(windowInput(), windowHasData, metrics_);
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if ((encodingTags_[col / 8] >> (col % 8)) & 1) {
+    if (layout_.isUnknownColumn(col)) {
+      continue;
+    }
+    const auto wire = layout_.wireColumn(col);
+    if ((encodingTags_[wire / 8] >> (wire % 8)) & 1) {
       const auto stats = frontend_->dictionaryStats(col);
-      metrics_.dictionaryMatchedRows +=
-          static_cast<int64_t>(stats.matchedRows);
+      metrics_.dictionaryMatchedRows += static_cast<int64_t>(stats.matchedRows);
       metrics_.dictionaryFallbackRows +=
           static_cast<int64_t>(stats.fallbackRows);
       const uint64_t rows = stats.matchedRows + stats.fallbackRows;
-      LOG(INFO) << "CellShuffleWriter dictionary column " << col
-                << ": matched " << stats.matchedRows << " of " << rows
-                << " rows ("
-                << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0)
-                << "%), " << stats.segments << " segments, " << stats.demotes
+      LOG(INFO) << "CellShuffleWriter dictionary column " << col << ": matched "
+                << stats.matchedRows << " of " << rows << " rows ("
+                << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%), "
+                << stats.segments << " segments, " << stats.demotes
                 << " demotes";
     }
   }

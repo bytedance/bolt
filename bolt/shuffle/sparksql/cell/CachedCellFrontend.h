@@ -38,6 +38,7 @@ class CachedCellFrontend final : public SplitFrontend {
       ChunkAllocator::GrowCallback beforeGrow);
 
   void split(const SplitBatch& batch) override;
+
   void enableDictionary(uint32_t col) override;
   void flushAll() override;
 
@@ -68,9 +69,11 @@ class CachedCellFrontend final : public SplitFrontend {
   }
 
  private:
+  void splitConverted(uint32_t col, const SplitBatch& batch);
+
   char* cacheLine(uint32_t stream, uint32_t pid) const {
-    return cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_ + pid)
-                         << 6);
+    return cacheBase_ +
+        ((static_cast<size_t>(stream) * numPartitions_ + pid) << 6);
   }
 
   uint8_t* cursors(uint32_t stream) const {
@@ -80,7 +83,8 @@ class CachedCellFrontend final : public SplitFrontend {
   /// Encodes the full or partial cache line of an Encoding Loop stream into
   /// the cells. Out of the hot loop by design.
   template <typename T>
-  FOLLY_ALWAYS_INLINE void flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur);
+  FOLLY_ALWAYS_INLINE void
+  flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur);
 
   /// Flushes a raw stream's cache line bytes as they are.
   void flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur);
