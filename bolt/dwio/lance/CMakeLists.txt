@@ -8,12 +8,12 @@ bolt_add_library(
   NativeLanceBitmap.cpp
   NativeLanceBatchBuilder.cpp
   NativeLanceBitpack.cpp
-  NativeLanceBlobResolver.cpp
   NativeLanceColumnReader.cpp
   NativeLanceColumnCursor.cpp
   NativeLanceDecompressor.cpp
   NativeLanceListOffsets.cpp
   NativeLanceLegacyPageReader.cpp
+  NativeLanceLegacyScalar.cpp
   NativeLanceMemoryBudget.cpp
   NativeLancePackedStruct.cpp
   NativeLancePageReader.cpp

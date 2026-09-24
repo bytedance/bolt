@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string_view>
 
 #include "bolt/dwio/common/Options.h"
@@ -218,16 +219,17 @@ ScanResult scan(dwio::common::Reader& reader) {
     rows->updateRuntimeStats(stats);
     struct rusage usage {};
     BOLT_CHECK_EQ(getrusage(RUSAGE_SELF, &usage), 0);
-    std::cerr << "BOLT_LANCE_BENCHMARK_STATS mode=" << readerMode
-              << " scenario=" << scenario << " batches=" << batches
-              << " input_rows=" << inputRows << " output_rows=" << outputRows
-              << " checksum=" << checksum
-              << " decode_ns=" << stats.decodeTimeNs - beforeStats.decodeTimeNs
-              << " peak_rss_kb=" << usage.ru_maxrss
-              << " pool_current_bytes=" << readerPool->currentBytes()
-              << " pool_peak_bytes=" << readerPool->peakBytes()
-              << " max_output_retained_bytes=" << maxOutputRetainedBytes
-              << "\n";
+    std::ostringstream line;
+    line << "BOLT_LANCE_BENCHMARK_STATS mode=" << readerMode
+         << " scenario=" << scenario << " batches=" << batches
+         << " input_rows=" << inputRows << " output_rows=" << outputRows
+         << " checksum=" << checksum
+         << " decode_ns=" << stats.decodeTimeNs - beforeStats.decodeTimeNs
+         << " peak_rss_kb=" << usage.ru_maxrss
+         << " pool_current_bytes=" << readerPool->currentBytes()
+         << " pool_peak_bytes=" << readerPool->peakBytes()
+         << " max_output_retained_bytes=" << maxOutputRetainedBytes << '\n';
+    std::cerr << line.str();
   }
   const auto sourceRows = reader.numberOfRows().value_or(inputRows);
   if (expectedRows.has_value()) {

@@ -27,6 +27,9 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
   Flat page state.
 - `NativeLanceDecompressor` owns legacy zstd and LZ4 codec handling and exposes
   whether a codec is sequential-frame or whole-buffer based.
+- `NativeLanceLegacyScalar` owns v2.0 scalar, nullable, bitmap, bitpack, and
+  fixed-size binary kernels. These kernels no longer live in the monolithic
+  migration adapter.
 - `NativeLanceMemoryBudget` provides move-only reservations for bounded
   transient scan memory.
 - `NativeLanceDecoder` is the migration adapter for legacy page paths. It does
@@ -147,8 +150,8 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
   through its `BufferedInput`, then loaded once per object. The resolver must
   be thread-safe because prefetch may call it concurrently. External
   descriptors with `size == 0` consume the remainder of the resolved object,
-  matching Lance semantics. Resolved object inputs are retained in a bounded
-  reader-scoped LRU and cloned for independent batch reads.
+  matching Lance semantics. The native reader does not add a reader-scoped
+  object cache; dataset integrations may provide one behind the resolver.
 - Prefetch units and the one-batch-ahead pipeline submit compressed byte ranges
   into the single scan-owned scheduler. They do not clone inputs or decoders.
 - Zstd pages preserve only a sequential codec cursor, one bounded compressed

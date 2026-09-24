@@ -117,6 +117,11 @@ class NativeLanceMetadata {
     return globalBuffers_;
   }
 
+  BufferDescriptor resolveBuffer(
+      const ::lance::encodings::Buffer& buffer,
+      const ::lance::file::v2::ColumnMetadata& column,
+      const ::lance::file::v2::ColumnMetadata::Page& page) const;
+
   uint32_t numPhysicalColumns() const {
     return footer_.numColumns;
   }

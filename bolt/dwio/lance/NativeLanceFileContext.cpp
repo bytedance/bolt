@@ -41,11 +41,7 @@ NativeLanceFileContext::NativeLanceFileContext(
       metadataInput_(std::move(input)),
       metadata_(*metadataInput_, pool_, std::move(typeAdapter)),
       typeWithId_(dwio::common::TypeWithId::create(metadata_.rowType())),
-      blobResolver_(
-          blobResolver == nullptr
-              ? nullptr
-              : std::make_shared<CachingNativeLanceBlobResolver>(
-                    std::move(blobResolver))),
+      blobResolver_(std::move(blobResolver)),
       readSchedulerOptions_(makeReadSchedulerOptions(options)) {
   BOLT_CHECK(
       !options.isFileColumnNamesReadAsLowerCase(),

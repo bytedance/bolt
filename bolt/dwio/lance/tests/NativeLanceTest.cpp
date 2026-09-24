@@ -3780,34 +3780,6 @@ TEST_F(NativeLanceTest, resolvesAllBlobV2StorageKinds) {
   EXPECT_EQ(resolver->requests[2].size, 0);
 }
 
-TEST_F(NativeLanceTest, cachesResolvedBlobObjectsAcrossBatches) {
-  auto delegate = std::make_shared<TestBlobResolver>();
-  CachingNativeLanceBlobResolver resolver(delegate, 1);
-  NativeLanceBlobResolver::Request packed{
-      .kind = NativeLanceBlobResolver::Kind::kPacked,
-      .sourceDataFile = "data.lance",
-      .blobId = 7,
-      .uri = "",
-      .position = 1,
-      .size = 3};
-
-  auto first = resolver.resolve(packed, *pool_);
-  packed.position = 5;
-  packed.size = 2;
-  auto second = resolver.resolve(packed, *pool_);
-  EXPECT_EQ(delegate->requests.size(), 1);
-  EXPECT_NE(first.get(), second.get());
-  EXPECT_EQ(first->getReadFile().get(), second->getReadFile().get());
-
-  auto dedicated = packed;
-  dedicated.kind = NativeLanceBlobResolver::Kind::kDedicated;
-  dedicated.blobId = 8;
-  resolver.resolve(dedicated, *pool_);
-  EXPECT_EQ(delegate->requests.size(), 2);
-  resolver.resolve(packed, *pool_);
-  EXPECT_EQ(delegate->requests.size(), 3);
-}
-
 TEST_F(NativeLanceTest, rowReaderPropagatesBlobV2Resolver) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(makeBlobResolverFile()), *pool_);
@@ -3833,6 +3805,11 @@ TEST_F(NativeLanceTest, rowReaderPropagatesBlobV2Resolver) {
   EXPECT_EQ(values->valueAt(2).str(), "DEDI");
   EXPECT_EQ(values->valueAt(3).str(), "external");
   EXPECT_EQ(resolver->requests.size(), 3);
+
+  auto secondRowReader = reader->createRowReader();
+  EXPECT_EQ(secondRowReader->next(4, result), 4);
+  EXPECT_EQ(resolver->requests.size(), 6)
+      << "The native reader must not add a reader-scoped Blob object cache";
 }
 
 TEST_F(NativeLanceTest, decodesStructuralTypeMatrixFixtures) {

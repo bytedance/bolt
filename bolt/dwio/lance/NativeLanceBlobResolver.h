@@ -17,11 +17,8 @@
 #pragma once
 
 #include <cstdint>
-#include <list>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 
 #include "bolt/dwio/common/BufferedInput.h"
 
@@ -55,50 +52,6 @@ class NativeLanceBlobResolver {
   virtual std::unique_ptr<dwio::common::BufferedInput> resolve(
       const Request& request,
       memory::MemoryPool& pool) const = 0;
-};
-
-/// Wraps a dataset resolver with a bounded, reader-scoped cache of resolved
-/// object inputs. Each request receives a clean clone so staged reads never
-/// leak across decoders or batches.
-class CachingNativeLanceBlobResolver final : public NativeLanceBlobResolver {
- public:
-  static constexpr size_t kDefaultMaxEntries = 256;
-
-  explicit CachingNativeLanceBlobResolver(
-      std::shared_ptr<const NativeLanceBlobResolver> delegate,
-      size_t maxEntries = kDefaultMaxEntries);
-
-  std::unique_ptr<dwio::common::BufferedInput> resolve(
-      const Request& request,
-      memory::MemoryPool& pool) const override;
-
- private:
-  struct Key {
-    Kind kind;
-    std::string sourceDataFile;
-    uint32_t blobId;
-    std::string uri;
-
-    bool operator==(const Key& other) const {
-      return kind == other.kind && sourceDataFile == other.sourceDataFile &&
-          blobId == other.blobId && uri == other.uri;
-    }
-  };
-
-  struct KeyHash {
-    size_t operator()(const Key& key) const;
-  };
-
-  struct Entry {
-    std::shared_ptr<dwio::common::BufferedInput> input;
-    std::list<Key>::iterator lruPosition;
-  };
-
-  const std::shared_ptr<const NativeLanceBlobResolver> delegate_;
-  const size_t maxEntries_;
-  mutable std::mutex mutex_;
-  mutable std::list<Key> lru_;
-  mutable std::unordered_map<Key, Entry, KeyHash> entries_;
 };
 
 } // namespace bytedance::bolt::lance::reader

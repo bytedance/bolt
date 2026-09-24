@@ -1938,12 +1938,17 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
   whole-buffer policy。两者都不保留完整 decompressed page。
 - `NativeLanceColumnSource` 已隔离逻辑 ColumnReader 与迁移期单体 Decoder；旧根类已更名
   为 `NativeLanceRootColumnReader`。
+- legacy scalar、nullable、bitmap、bitpack、fixed-size binary 和 zero-copy flat kernel 已迁移
+  到 `NativeLanceLegacyScalar`；物理 buffer 定位统一由
+  `NativeLanceMetadata::resolveBuffer()` 提供。
+- Reader 不再包装 Blob resolver，也不保留 reader-scoped Blob object LRU；对象缓存策略完全
+  归 dataset/object-store resolver 所有。
 - 根输出统一通过 `NativeLanceBatchBuilder` 组装，并由 ScanWindow 原子发布。
 
 ### 38.2 仍需完成
 
-- 将 scalar、binary、dictionary、list、map、struct、fixed-size-list、packed struct 和
-  Blob 从 `NativeLanceDecoder` adapter 迁移到独立 ColumnReader/PageReader 组合。
+- 将 dictionary、binary、FSST、list、map、struct、fixed-size-list、packed struct 和 Blob
+  从 `NativeLanceDecoder` adapter 迁移到独立 ColumnReader/PageReader 组合。
 - filter pipeline 仍有一条直接调用 `NativeLanceColumnSource::decodeSelectedRows()` 的迁移
   路径；需要改为 ColumnRequest/RowSelection 驱动。
 - `NativeLanceBatchBuilder` 已统一所有权和发布，但复杂类型仍会使用 compatibility
@@ -1969,7 +1974,7 @@ decode threads 16，full scan。
 该快照是单轮快速验收，只用于验证方向。最终结论必须按第 33.2 节执行 native/Rust
 交替 7 轮、paired log-ratio exact sign-flip test 和 Holm correction。
 
-当前正确性回归：native Lance `122/122`，TableScan `7/7`。
+当前正确性回归：native Lance `121/121`，TableScan `7/7`。
 
 ### 38.4 2026-09-24 七轮交替验收
 

@@ -858,6 +858,27 @@ BufferPtr NativeLanceMetadata::read(uint64_t offset, uint64_t length) const {
   return buffer;
 }
 
+NativeLanceMetadata::BufferDescriptor NativeLanceMetadata::resolveBuffer(
+    const ::lance::encodings::Buffer& buffer,
+    const ::lance::file::v2::ColumnMetadata& column,
+    const ::lance::file::v2::ColumnMetadata::Page& page) const {
+  const auto index = buffer.buffer_index();
+  switch (buffer.buffer_type()) {
+    case ::lance::encodings::Buffer::page:
+      BOLT_CHECK_LT(index, page.buffer_offsets_size());
+      return {page.buffer_offsets(index), page.buffer_sizes(index)};
+    case ::lance::encodings::Buffer::column:
+      BOLT_CHECK_LT(index, column.buffer_offsets_size());
+      return {column.buffer_offsets(index), column.buffer_sizes(index)};
+    case ::lance::encodings::Buffer::file:
+      BOLT_CHECK_LT(index, globalBuffers_.size());
+      return globalBuffers_[index];
+    default:
+      BOLT_UNSUPPORTED(
+          "Unsupported Lance buffer type: {}", buffer.buffer_type());
+  }
+}
+
 NativeLanceMetadata::NativeLanceMetadata(
     dwio::common::BufferedInput& input,
     memory::MemoryPool& pool,
