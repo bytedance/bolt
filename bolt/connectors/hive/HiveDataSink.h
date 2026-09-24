@@ -562,12 +562,14 @@ class HiveDataSink : public DataSink {
   }
 
   // Invoked to write 'input' to the specified file writer.
-  void write(size_t index, RowVectorPtr input);
+  // Writes a data-only vector. Partition columns must already be removed.
+  void write(size_t index, RowVectorPtr dataInput);
 
   void closeInternal();
 
   const RowTypePtr inputType_;
   const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle_;
+  const bool replaceInvalidUtf8ForParquetSerde_;
   const ConnectorQueryCtx* const connectorQueryCtx_;
   const CommitStrategy commitStrategy_;
   const std::shared_ptr<const HiveConfig> hiveConfig_;
