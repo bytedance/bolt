@@ -75,6 +75,48 @@ TEST_F(ShuffleMiscTest, TotalRowBytesIncludesHeadersAndUsesInt64) {
       2LL * (std::numeric_limits<int32_t>::max() + kSizeOfRowHeader));
 }
 
+TEST_F(ShuffleMiscTest, NonOwningBufferUsesProcessLifetimeMemoryManager) {
+  const uint8_t data[] = {1, 2, 3};
+  auto first = makeNonOwningBuffer(data, sizeof(data));
+  auto second = makeNonOwningBuffer(data, sizeof(data));
+  auto empty = zeroLengthNullBuffer();
+
+  EXPECT_EQ(first->data(), data);
+  EXPECT_EQ(first->size(), sizeof(data));
+  EXPECT_EQ(first->memory_manager(), second->memory_manager());
+  EXPECT_EQ(first->memory_manager(), empty->memory_manager());
+  EXPECT_TRUE(first->memory_manager()->is_cpu());
+  EXPECT_EQ(zeroLengthNullBuffer(), empty);
+}
+
+TEST_F(ShuffleMiscTest, InitializeArrowProcessLifetimeStateIsIdempotent) {
+  initializeArrowProcessLifetimeState();
+  auto first = arrow::default_cpu_memory_manager();
+  initializeArrowProcessLifetimeState();
+  auto second = arrow::default_cpu_memory_manager();
+
+  EXPECT_EQ(first, second);
+  EXPECT_TRUE(first->is_cpu());
+}
+
+TEST_F(ShuffleMiscTest, NonOwningBufferSliceRetainsParentAndMemoryManager) {
+  std::shared_ptr<arrow::Buffer> parent = arrow::AllocateBuffer(4).ValueOrDie();
+  auto* data = parent->mutable_data();
+  data[0] = 1;
+  data[1] = 2;
+  data[2] = 3;
+  data[3] = 4;
+  auto memoryManager = parent->memory_manager();
+
+  auto slice = makeNonOwningBufferSlice(parent, 1, 2);
+  parent.reset();
+
+  EXPECT_EQ(slice->memory_manager(), memoryManager);
+  EXPECT_EQ(slice->size(), 2);
+  EXPECT_EQ(slice->data()[0], 2);
+  EXPECT_EQ(slice->data()[1], 3);
+}
+
 // End-to-end test: RoundRobin with Adaptive mode, >=8000 partitions and >=5
 // columns should use V1 consistently on both writer and reader side.
 // Before the fix, the writer chose V1 for RoundRobin (not in adaptive set

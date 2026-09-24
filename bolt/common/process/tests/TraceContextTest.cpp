@@ -58,3 +58,23 @@ TEST(TraceContextTest, basic) {
   EXPECT_EQ(kNumThreads, after["process data"].numEnters);
   EXPECT_EQ(0, after["process data"].numThreads);
 }
+
+TEST(TraceContextTest, concurrentTemporaryContexts) {
+  constexpr int32_t kNumThreads = 10;
+  constexpr int32_t kIterations = 100;
+  std::vector<std::thread> threads;
+  threads.reserve(kNumThreads);
+  for (int32_t i = 0; i < kNumThreads; ++i) {
+    threads.emplace_back([]() {
+      for (int32_t j = 0; j < kIterations; ++j) {
+        TraceContext trace("temporary context", true);
+        (void)TraceContext::status();
+      }
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  EXPECT_EQ(0, TraceContext::status().count("temporary context"));
+}

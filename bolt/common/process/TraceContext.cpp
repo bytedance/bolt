@@ -35,9 +35,12 @@ namespace bytedance::bolt::process {
 
 namespace {
 folly::Synchronized<std::unordered_map<std::string, TraceData>>& traceMap() {
-  static folly::Synchronized<std::unordered_map<std::string, TraceData>>
-      staticTraceMap;
-  return staticTraceMap;
+  // Trace contexts can still be destroyed by native I/O workers while libc
+  // exit handlers are running. Keep the registry alive for the process
+  // lifetime so these late destructors never access an already-destroyed map.
+  static auto* staticTraceMap =
+      new folly::Synchronized<std::unordered_map<std::string, TraceData>>();
+  return *staticTraceMap;
 }
 } // namespace
 
