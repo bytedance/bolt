@@ -21,6 +21,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/lance/NativeLanceBatchBuilder.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
+#include "bolt/dwio/lance/NativeLancePageSource.h"
 
 namespace bytedance::bolt::lance::reader {
 namespace {
@@ -44,11 +45,13 @@ bool typeRequiresDeferredRead(const TypePtr& type) {
 class FileColumnReader : public NativeLanceColumnReader {
  public:
   FileColumnReader(
+      const NativeLanceMetadata& metadata,
       NativeLanceColumnKind kind,
       std::string name,
       TypePtr type,
       uint32_t fileColumnIndex)
-      : name_(std::move(name)),
+      : metadata_(metadata),
+        name_(std::move(name)),
         type_(std::move(type)),
         fileColumnIndex_(fileColumnIndex),
         kind_(kind),
@@ -78,20 +81,61 @@ class FileColumnReader : public NativeLanceColumnReader {
   }
 
   void plan(
-      NativeLanceColumnSource& source,
+      NativeLancePageSource& source,
       const NativeLanceColumnRequest& request) const override {
     source.planColumns({fileColumnIndex_}, request);
   }
 
   VectorPtr read(
-      NativeLanceColumnSource& source,
+      NativeLancePageSource& source,
       const NativeLanceColumnRequest& request,
-      memory::MemoryPool&,
+      memory::MemoryPool& pool,
       bool rangesPlanned) const override {
-    return source.decodeColumn(fileColumnIndex_, request, rangesPlanned);
+    request.validate();
+    if (!rangesPlanned) {
+      plan(source, request);
+    }
+    const auto decodeRange = [&](uint64_t rowStart, uint64_t rowCount) {
+      if (metadata_.usesStructuralEncoding()) {
+        return source.decodeStructuralField(
+            metadata_.structuralField(fileColumnIndex_), rowStart, rowCount);
+      }
+      return source.decodePhysicalColumn(
+          type_,
+          metadata_.columnLogicalType(fileColumnIndex_),
+          metadata_.physicalColumnIndex(fileColumnIndex_),
+          rowStart,
+          rowCount);
+    };
+    if (request.selection.selectsAll()) {
+      return decodeRange(request.rowStart, request.rowCount);
+    }
+    const auto rows = request.selection.selectedRows();
+    if (rows.empty()) {
+      return BaseVector::create(type_, 0, &pool);
+    }
+
+    auto result = BaseVector::create(type_, rows.size(), &pool);
+    size_t outputOffset = 0;
+    while (outputOffset < rows.size()) {
+      size_t runEnd = outputOffset + 1;
+      while (runEnd < rows.size() && rows[runEnd] == rows[runEnd - 1] + 1) {
+        ++runEnd;
+      }
+      const auto values = decodeRange(
+          request.rowStart + rows[outputOffset], runEnd - outputOffset);
+      result->copy(
+          values.get(),
+          static_cast<vector_size_t>(outputOffset),
+          0,
+          static_cast<vector_size_t>(runEnd - outputOffset));
+      outputOffset = runEnd;
+    }
+    return result;
   }
 
  private:
+  const NativeLanceMetadata& metadata_;
   std::string name_;
   TypePtr type_;
   uint32_t fileColumnIndex_;
@@ -103,10 +147,12 @@ template <NativeLanceColumnKind readerKind>
 class TypedFileColumnReader final : public FileColumnReader {
  public:
   TypedFileColumnReader(
+      const NativeLanceMetadata& metadata,
       std::string name,
       TypePtr type,
       uint32_t fileColumnIndex)
       : FileColumnReader(
+            metadata,
             readerKind,
             std::move(name),
             std::move(type),
@@ -159,11 +205,11 @@ class ConstantColumnReader final : public NativeLanceColumnReader {
     return type_;
   }
 
-  void plan(NativeLanceColumnSource&, const NativeLanceColumnRequest&)
+  void plan(NativeLancePageSource&, const NativeLanceColumnRequest&)
       const override {}
 
   VectorPtr read(
-      NativeLanceColumnSource&,
+      NativeLancePageSource&,
       const NativeLanceColumnRequest& request,
       memory::MemoryPool&,
       bool) const override {
@@ -225,6 +271,7 @@ NativeLanceColumnKind columnKind(
 }
 
 std::unique_ptr<NativeLanceColumnReader> makeFileColumnReader(
+    const NativeLanceMetadata& metadata,
     NativeLanceColumnKind kind,
     std::string name,
     TypePtr type,
@@ -232,7 +279,7 @@ std::unique_ptr<NativeLanceColumnReader> makeFileColumnReader(
 #define MAKE_READER(readerKind, readerType) \
   case NativeLanceColumnKind::readerKind:   \
     return std::make_unique<readerType>(    \
-        std::move(name), std::move(type), fileColumnIndex)
+        metadata, std::move(name), std::move(type), fileColumnIndex)
   switch (kind) {
     MAKE_READER(kScalar, NativeLanceScalarColumnReader);
     MAKE_READER(kBinary, NativeLanceBinaryColumnReader);
@@ -262,8 +309,8 @@ void addProjectedFileColumn(
   const auto kind = columnKind(metadata, fileColumnIndex, type);
   outputNames.push_back(name);
   outputTypes.push_back(type);
-  children.push_back(
-      makeFileColumnReader(kind, name, std::move(type), fileColumnIndex));
+  children.push_back(makeFileColumnReader(
+      metadata, kind, name, std::move(type), fileColumnIndex));
 }
 
 } // namespace
@@ -277,6 +324,7 @@ NativeLanceColumnReader::buildFileColumn(
   auto type = fileType->childAt(fileColumnIndex);
   const auto kind = columnKind(metadata, fileColumnIndex, type);
   return makeFileColumnReader(
+      metadata,
       kind,
       fileType->nameOf(fileColumnIndex),
       std::move(type),
@@ -330,7 +378,11 @@ NativeLanceRootColumnReader::buildRoot(
         const auto kind = columnKind(metadata, fileColumnIndex, type);
         outputTypes[channel] = type;
         children[channel] = makeFileColumnReader(
-            kind, childSpec->fieldName(), std::move(type), fileColumnIndex);
+            metadata,
+            kind,
+            childSpec->fieldName(),
+            std::move(type),
+            fileColumnIndex);
       }
     }
     return std::unique_ptr<NativeLanceRootColumnReader>(
@@ -381,7 +433,7 @@ std::vector<uint32_t> NativeLanceRootColumnReader::readColumns(
 }
 
 VectorPtr NativeLanceRootColumnReader::read(
-    NativeLanceColumnSource& source,
+    NativeLancePageSource& source,
     const NativeLanceColumnRequest& request,
     memory::MemoryPool& pool,
     bool primaryRangesPlanned,
@@ -499,7 +551,7 @@ VectorPtr NativeLanceRootColumnReader::read(
 }
 
 void NativeLanceRootColumnReader::planRead(
-    NativeLanceColumnSource& source,
+    NativeLancePageSource& source,
     const NativeLanceColumnRequest& request) const {
   request.validate();
   std::vector<uint32_t> columns;
@@ -535,7 +587,7 @@ NativeLanceColumnReadTask::NativeLanceColumnReadTask(
           primaryRangesPlanned ? NativeLanceColumnState::kWaitingPages
                                : NativeLanceColumnState::kIdle) {}
 
-void NativeLanceColumnReadTask::plan(NativeLanceColumnSource& decoder) {
+void NativeLanceColumnReadTask::plan(NativeLancePageSource& decoder) {
   if (state_ == NativeLanceColumnState::kFailed) {
     rethrowFailure();
   }
@@ -554,7 +606,7 @@ void NativeLanceColumnReadTask::plan(NativeLanceColumnSource& decoder) {
 }
 
 void NativeLanceColumnReadTask::decode(
-    NativeLanceColumnSource& decoder,
+    NativeLancePageSource& decoder,
     memory::MemoryPool& pool) {
   if (state_ == NativeLanceColumnState::kFailed) {
     rethrowFailure();
@@ -587,7 +639,7 @@ VectorPtr NativeLanceColumnReadTask::consume() {
   return std::move(result_);
 }
 
-void NativeLanceColumnReadTask::cancel(NativeLanceColumnSource& decoder) {
+void NativeLanceColumnReadTask::cancel(NativeLancePageSource& decoder) {
   if (state_ == NativeLanceColumnState::kConsumed ||
       state_ == NativeLanceColumnState::kFailed ||
       state_ == NativeLanceColumnState::kCancelled) {

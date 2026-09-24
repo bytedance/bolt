@@ -35,9 +35,9 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
   variable-width, FSST, dictionary-index, and dictionary assembly kernels.
 - `NativeLanceMemoryBudget` provides move-only reservations for bounded
   transient scan memory.
-- `NativeLanceDecoder` is the migration adapter for legacy page paths. It does
-  not retain decoded or decompressed payloads across batches and will be
-  removed after all encoding families move to page readers.
+- `NativeLancePageSource` owns scan-local page scheduling and physical kernel
+  dispatch. It does not retain decoded or decompressed payloads across batches;
+  projection, filtering, and logical assembly stay in ColumnReader.
 - `NativeLanceStructuralDecoder` implements the v2.1-v2.3 dense and Sparse
   structural layouts and compressive encoding grammar.
 - `NativeLanceTypeAdapter` preserves semantic type identity without changing

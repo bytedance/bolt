@@ -28,7 +28,7 @@ bolt_add_library(
   NativeLanceScanWindow.cpp
   NativeLanceStructuralDecoder.cpp
   NativeLanceTypeAdapter.cpp
-  NativeLanceDecoder.cpp
+  NativeLancePageSource.cpp
   NativeLanceFileContext.cpp
   NativeLanceFileOpenTask.cpp
   NativeLanceMetadata.cpp

@@ -26,8 +26,8 @@
 #include "bolt/dwio/common/ReaderFactory.h"
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
 #include "bolt/dwio/lance/NativeLanceColumnReader.h"
-#include "bolt/dwio/lance/NativeLanceDecoder.h"
 #include "bolt/dwio/lance/NativeLanceFileContext.h"
+#include "bolt/dwio/lance/NativeLancePageSource.h"
 #include "bolt/dwio/lance/NativeLanceScanPlan.h"
 #include "bolt/dwio/lance/NativeLanceScanWindow.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
@@ -118,7 +118,7 @@ class NativeLanceScanCoordinator {
   std::shared_ptr<const NativeLanceFileContext> fileContext_;
   dwio::common::RowReaderOptions options_;
   std::unique_ptr<dwio::common::BufferedInput> input_;
-  NativeLanceDecoder decoder_;
+  NativeLancePageSource pageSource_;
   std::unique_ptr<NativeLanceScanPlan> scanPlan_;
   std::optional<NativeLanceScanWindow> window_;
   uint64_t generation_{0};
@@ -126,7 +126,7 @@ class NativeLanceScanCoordinator {
   std::vector<FetchStatus> prefetchStatuses_;
   std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
   mutable std::mutex prefetchMutex_;
-  mutable std::mutex decoderMutex_;
+  mutable std::mutex pageSourceMutex_;
   mutable std::mutex stateMutex_;
   NativeLanceScanState state_{NativeLanceScanState::kIdle};
   std::exception_ptr failure_;

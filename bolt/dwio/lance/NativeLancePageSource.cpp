@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/dwio/lance/NativeLanceDecoder.h"
+#include "bolt/dwio/lance/NativeLancePageSource.h"
 
 #include <algorithm>
 #include <bit>
@@ -414,7 +414,7 @@ bool hasCompressedFlatBuffer(const ArrayEncoding& encoding) {
 
 } // namespace
 
-NativeLanceDecoder::NativeLanceDecoder(
+NativeLancePageSource::NativeLancePageSource(
     dwio::common::BufferedInput& input,
     const NativeLanceMetadata& metadata,
     memory::MemoryPool& pool,
@@ -429,11 +429,11 @@ NativeLanceDecoder::NativeLanceDecoder(
           readSchedulerOptions.maxInFlightBytes)),
       readScheduler_(pool, readSchedulerOptions) {}
 
-NativeLanceDecoder::~NativeLanceDecoder() {
+NativeLancePageSource::~NativeLancePageSource() {
   cancel();
 }
 
-void NativeLanceDecoder::cancel() {
+void NativeLancePageSource::cancel() {
   {
     std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
     readScheduler_.cancel(&input_);
@@ -445,7 +445,7 @@ void NativeLanceDecoder::cancel() {
   legacyPageReaders_.clear();
 }
 
-void NativeLanceDecoder::prefetchColumns(
+void NativeLancePageSource::prefetchColumns(
     const std::vector<uint32_t>& columnIndices,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -454,7 +454,7 @@ void NativeLanceDecoder::prefetchColumns(
   materializeReadPlan();
 }
 
-void NativeLanceDecoder::planColumns(
+void NativeLancePageSource::planColumns(
     const std::vector<uint32_t>& columnIndices,
     const NativeLanceColumnRequest& request) const {
   request.validate();
@@ -486,7 +486,7 @@ void NativeLanceDecoder::planColumns(
   submitReadPlan();
 }
 
-void NativeLanceDecoder::planColumns(
+void NativeLancePageSource::planColumns(
     const std::vector<uint32_t>& columnIndices,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -504,7 +504,7 @@ void NativeLanceDecoder::planColumns(
   submitReadPlan();
 }
 
-void NativeLanceDecoder::enqueueLogicalColumn(
+void NativeLancePageSource::enqueueLogicalColumn(
     uint32_t columnIndex,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -521,7 +521,7 @@ void NativeLanceDecoder::enqueueLogicalColumn(
       rowCount);
 }
 
-void NativeLanceDecoder::enqueueStructuralField(
+void NativeLancePageSource::enqueueStructuralField(
     const NativeLanceMetadata::StructuralField& field,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -544,7 +544,7 @@ void NativeLanceDecoder::enqueueStructuralField(
                                : std::vector<uint32_t>{1});
 }
 
-void NativeLanceDecoder::prefetchPhysicalColumn(
+void NativeLancePageSource::prefetchPhysicalColumn(
     const TypePtr& type,
     uint32_t physicalColumnIndex,
     uint64_t rowStart,
@@ -552,7 +552,7 @@ void NativeLanceDecoder::prefetchPhysicalColumn(
   prefetchPhysicalColumns({{type, physicalColumnIndex}}, rowStart, rowCount);
 }
 
-void NativeLanceDecoder::prefetchPhysicalColumns(
+void NativeLancePageSource::prefetchPhysicalColumns(
     const std::vector<std::pair<TypePtr, uint32_t>>& columns,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -561,7 +561,7 @@ void NativeLanceDecoder::prefetchPhysicalColumns(
   materializeReadPlan();
 }
 
-void NativeLanceDecoder::planPhysicalColumns(
+void NativeLancePageSource::planPhysicalColumns(
     const std::vector<std::pair<TypePtr, uint32_t>>& columns,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -573,7 +573,7 @@ void NativeLanceDecoder::planPhysicalColumns(
   submitReadPlan();
 }
 
-void NativeLanceDecoder::enqueuePhysicalColumn(
+void NativeLancePageSource::enqueuePhysicalColumn(
     const TypePtr& type,
     uint32_t physicalIndex,
     uint64_t rowStart,
@@ -680,11 +680,12 @@ void NativeLanceDecoder::enqueuePhysicalColumn(
   }
 }
 
-void NativeLanceDecoder::scheduleRead(uint64_t offset, uint64_t length) const {
+void NativeLancePageSource::scheduleRead(uint64_t offset, uint64_t length)
+    const {
   readScheduler_.schedule(input_, offset, length);
 }
 
-void NativeLanceDecoder::scheduleCompressedRead(
+void NativeLancePageSource::scheduleCompressedRead(
     std::string_view scheme,
     uint64_t offset,
     uint64_t length) const {
@@ -698,17 +699,17 @@ void NativeLanceDecoder::scheduleCompressedRead(
   scheduleRead(offset, length);
 }
 
-void NativeLanceDecoder::submitReadPlan() const {
+void NativeLancePageSource::submitReadPlan() const {
   std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
   readScheduler_.submit(input_);
 }
 
-void NativeLanceDecoder::materializeReadPlan() const {
+void NativeLancePageSource::materializeReadPlan() const {
   std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
   readScheduler_.materialize();
 }
 
-BufferPtr NativeLanceDecoder::read(uint64_t offset, uint64_t length) const {
+BufferPtr NativeLancePageSource::read(uint64_t offset, uint64_t length) const {
   std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
   BOLT_CHECK_LE(offset, input_.getReadFile()->size());
   BOLT_CHECK_LE(length, input_.getReadFile()->size() - offset);
@@ -727,7 +728,7 @@ BufferPtr NativeLanceDecoder::read(uint64_t offset, uint64_t length) const {
   return buffer;
 }
 
-BufferPtr NativeLanceDecoder::readCompressedRange(
+BufferPtr NativeLancePageSource::readCompressedRange(
     std::string_view scheme,
     uint64_t compressedOffset,
     uint64_t compressedLength,
@@ -770,7 +771,7 @@ BufferPtr NativeLanceDecoder::readCompressedRange(
   return result;
 }
 
-bool NativeLanceDecoder::hasCompressedColumn(
+bool NativeLancePageSource::hasCompressedColumn(
     uint32_t columnIndex,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -806,7 +807,7 @@ bool NativeLanceDecoder::hasCompressedColumn(
   return false;
 }
 
-VectorPtr NativeLanceDecoder::decodeColumn(
+VectorPtr NativeLancePageSource::decodeColumn(
     uint32_t columnIndex,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -828,33 +829,10 @@ VectorPtr NativeLanceDecoder::decodeColumn(
       type, logicalType, physicalIndex, rowStart, rowCount);
 }
 
-VectorPtr NativeLanceDecoder::decodeColumn(
-    uint32_t columnIndex,
-    const NativeLanceColumnRequest& request,
-    bool rangesPlanned) const {
-  request.validate();
-  if (request.selection.selectsAll()) {
-    return decodeColumn(columnIndex, request.rowStart, request.rowCount);
-  }
-  return decodeSelectedRowsImpl(
-      columnIndex,
-      request.rowStart,
-      request.selection.selectedRows(),
-      rangesPlanned);
-}
-
-VectorPtr NativeLanceDecoder::decodeSelectedRows(
+VectorPtr NativeLancePageSource::decodeSelectedRows(
     uint32_t columnIndex,
     uint64_t batchRowStart,
     folly::Range<const vector_size_t*> rows) const {
-  return decodeSelectedRowsImpl(columnIndex, batchRowStart, rows, false);
-}
-
-VectorPtr NativeLanceDecoder::decodeSelectedRowsImpl(
-    uint32_t columnIndex,
-    uint64_t batchRowStart,
-    folly::Range<const vector_size_t*> rows,
-    bool rangesPlanned) const {
   BOLT_CHECK_LT(columnIndex, metadata_.rowType()->size());
   BOLT_CHECK_LE(batchRowStart, metadata_.numRows());
   BOLT_CHECK_LE(
@@ -876,9 +854,7 @@ VectorPtr NativeLanceDecoder::decodeSelectedRowsImpl(
       metadata_.numRows() - batchRowStart - 1);
 
   if (rows.size() == static_cast<size_t>(rows.back() - rows.front() + 1)) {
-    if (!rangesPlanned) {
-      prefetchColumns({columnIndex}, batchRowStart + rows.front(), rows.size());
-    }
+    prefetchColumns({columnIndex}, batchRowStart + rows.front(), rows.size());
     return decodeColumn(columnIndex, batchRowStart + rows.front(), rows.size());
   }
 
@@ -886,7 +862,7 @@ VectorPtr NativeLanceDecoder::decodeSelectedRowsImpl(
   // DirectBufferedInput one complete request set to coalesce and dispatch.
   // Variable-width containers intentionally defer their payload planning
   // until offsets have been decoded.
-  if (!rangesPlanned && !input_.supportSyncLoad()) {
+  if (!input_.supportSyncLoad()) {
     readScheduler_.clearStage();
     size_t scheduledOffset = 0;
     while (scheduledOffset < rows.size()) {
@@ -925,7 +901,7 @@ VectorPtr NativeLanceDecoder::decodeSelectedRowsImpl(
   return result;
 }
 
-VectorPtr NativeLanceDecoder::decodeStructuralField(
+VectorPtr NativeLancePageSource::decodeStructuralField(
     const NativeLanceMetadata::StructuralField& field,
     uint64_t rowStart,
     uint64_t rowCount) const {
@@ -1079,18 +1055,7 @@ VectorPtr NativeLanceDecoder::decodeStructuralField(
   return merge(merge, field, std::move(decodedBranches));
 }
 
-VectorPtr NativeLanceDecoder::decodePhysicalColumn(
-    const TypePtr& type,
-    std::string_view logicalType,
-    uint32_t physicalIndex,
-    uint64_t rowStart,
-    uint64_t rowCount,
-    const std::vector<uint32_t>& arrayDimensions) const {
-  return decodePhysicalColumnNoCache(
-      type, logicalType, physicalIndex, rowStart, rowCount, arrayDimensions);
-}
-
-VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
+VectorPtr NativeLancePageSource::decodePhysicalColumn(
     const TypePtr& type,
     std::string_view logicalType,
     uint32_t physicalIndex,

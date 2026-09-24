@@ -24,12 +24,13 @@
 
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/ParallelFor.h"
-#include "bolt/dwio/lance/NativeLanceColumnSource.h"
+#include "bolt/dwio/lance/NativeLanceColumnRequest.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::lance::reader {
 
 class NativeLanceMetadata;
+class NativeLancePageSource;
 
 enum class NativeLanceReadStage { kRowAligned, kOffsetDependent };
 
@@ -72,11 +73,11 @@ class NativeLanceColumnReader {
   virtual const TypePtr& type() const = 0;
 
   virtual void plan(
-      NativeLanceColumnSource& source,
+      NativeLancePageSource& source,
       const NativeLanceColumnRequest& request) const = 0;
 
   virtual VectorPtr read(
-      NativeLanceColumnSource& source,
+      NativeLancePageSource& source,
       const NativeLanceColumnRequest& request,
       memory::MemoryPool& pool,
       bool rangesPlanned) const = 0;
@@ -93,7 +94,7 @@ class NativeLanceRootColumnReader {
   }
 
   VectorPtr read(
-      NativeLanceColumnSource& source,
+      NativeLancePageSource& source,
       const NativeLanceColumnRequest& request,
       memory::MemoryPool& pool,
       bool primaryRangesPlanned = false,
@@ -101,7 +102,7 @@ class NativeLanceRootColumnReader {
           nullptr) const;
 
   void planRead(
-      NativeLanceColumnSource& source,
+      NativeLancePageSource& source,
       const NativeLanceColumnRequest& request) const;
 
   std::vector<uint32_t> fileColumnIndices() const;
@@ -133,10 +134,10 @@ class NativeLanceColumnReadTask {
       NativeLanceColumnRequest request,
       bool primaryRangesPlanned = false);
 
-  void plan(NativeLanceColumnSource& decoder);
-  void decode(NativeLanceColumnSource& decoder, memory::MemoryPool& pool);
+  void plan(NativeLancePageSource& decoder);
+  void decode(NativeLancePageSource& decoder, memory::MemoryPool& pool);
   VectorPtr consume();
-  void cancel(NativeLanceColumnSource& decoder);
+  void cancel(NativeLancePageSource& decoder);
 
   NativeLanceColumnState state() const {
     return state_;

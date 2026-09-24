@@ -425,7 +425,7 @@ struct NativeLanceFilterResult {
 };
 
 NativeLanceFilterResult decodeFilters(
-    NativeLanceColumnSource& source,
+    NativeLancePageSource& source,
     const NativeLanceScanPlan& scanPlan,
     const RowTypePtr& fileType,
     const common::ScanSpec& scanSpec,
@@ -528,7 +528,7 @@ NativeLanceScanCoordinator::NativeLanceScanCoordinator(
     : fileContext_(std::move(fileContext)),
       options_(std::move(options)),
       input_(fileContext_->newInput()),
-      decoder_(
+      pageSource_(
           *input_,
           fileContext_->metadata(),
           fileContext_->pool(),
@@ -557,7 +557,7 @@ void NativeLanceScanCoordinator::cancel() {
       window_->cancel();
     }
   }
-  decoder_.cancel();
+  pageSource_.cancel();
 }
 
 NativeLanceScanState NativeLanceScanCoordinator::state() const {
@@ -685,14 +685,14 @@ dwio::common::RowReader::FetchResult NativeLanceScanCoordinator::prefetchRange(
   const auto range = prefetchRanges_[rangeIndex];
   try {
     // Prefetch advances the coordinator-owned scheduler. It must not fork an
-    // independent decoder because page cursors and codec sessions are
+    // independent page source because page cursors and codec sessions are
     // scan-local state.
-    std::lock_guard<std::mutex> decoderLock(decoderMutex_);
+    std::lock_guard<std::mutex> pageSourceLock(pageSourceMutex_);
     const NativeLanceColumnRequest request{
         .rowStart = range.begin,
         .rowCount = range.end - range.begin,
         .purpose = NativeLanceDecodePurpose::kPrefetch};
-    scanPlan_->rootColumnReader().planRead(decoder_, request);
+    scanPlan_->rootColumnReader().planRead(pageSource_, request);
   } catch (...) {
     std::shared_ptr<folly::Baton<>> baton;
     {
@@ -771,7 +771,7 @@ void NativeLanceScanCoordinator::prepareNextBatchPipeline(
         .rowStart = nextBegin,
         .rowCount = rows,
         .purpose = NativeLanceDecodePurpose::kPrefetch};
-    scanPlan_->rootColumnReader().planRead(decoder_, request);
+    scanPlan_->rootColumnReader().planRead(pageSource_, request);
     {
       std::lock_guard<std::mutex> lock(prefetchMutex_);
       prefetchStatuses_[*rangeIndex] = FetchStatus::kFinished;
@@ -824,7 +824,7 @@ void NativeLanceScanCoordinator::readFiltered(
     VectorPtr& result) {
   const auto rowsToRead = readEnd - readBegin;
   auto filtered = decodeFilters(
-      decoder_,
+      pageSource_,
       *scanPlan_,
       fileContext_->metadata().rowType(),
       scanSpec,
@@ -842,7 +842,7 @@ void NativeLanceScanCoordinator::readFiltered(
       filtered.selectedRows,
       NativeLanceDecodePurpose::kProjection);
   result = scanPlan_->rootColumnReader().read(
-      decoder_,
+      pageSource_,
       request,
       fileContext_->pool(),
       false,
@@ -942,7 +942,7 @@ uint64_t NativeLanceScanCoordinator::nextImpl(
   const auto readBegin = currentRow_;
   const auto readEnd = readBegin + rowsToRead;
   const auto primaryRangesPlanned = waitForPrefetchedRange(readBegin, readEnd);
-  std::lock_guard<std::mutex> decoderLock(decoderMutex_);
+  std::lock_guard<std::mutex> pageSourceLock(pageSourceMutex_);
   const auto& scanSpec = options_.getScanSpec();
   if (FOLLY_UNLIKELY(scanSpec && scanSpec->hasFilter())) {
     readFiltered(readBegin, readEnd, size, *scanSpec, mutation, result);
@@ -982,9 +982,9 @@ uint64_t NativeLanceScanCoordinator::nextImpl(
   NativeLanceColumnReadTask columnTask(
       scanPlan_->rootColumnReader(), request, primaryRangesPlanned);
   if (!primaryRangesPlanned) {
-    columnTask.plan(decoder_);
+    columnTask.plan(pageSource_);
   }
-  columnTask.decode(decoder_, fileContext_->pool());
+  columnTask.decode(pageSource_, fileContext_->pool());
   result = columnTask.consume();
   prepareNextBatchPipeline(readEnd, size);
   if (scanSpec) {

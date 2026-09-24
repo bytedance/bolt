@@ -35,7 +35,6 @@
 #include "bolt/dwio/lance/NativeLanceBitmap.h"
 #include "bolt/dwio/lance/NativeLanceBitpack.h"
 #include "bolt/dwio/lance/NativeLanceColumnCursor.h"
-#include "bolt/dwio/lance/NativeLanceDecoder.h"
 #include "bolt/dwio/lance/NativeLanceDecompressor.h"
 #include "bolt/dwio/lance/NativeLanceFileOpenTask.h"
 #include "bolt/dwio/lance/NativeLanceListOffsets.h"
@@ -43,6 +42,7 @@
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLancePackedStruct.h"
 #include "bolt/dwio/lance/NativeLancePageReader.h"
+#include "bolt/dwio/lance/NativeLancePageSource.h"
 #include "bolt/dwio/lance/NativeLanceReadScheduler.h"
 #include "bolt/dwio/lance/NativeLanceReader.h"
 #include "bolt/dwio/lance/NativeLanceScanPlan.h"
@@ -2619,7 +2619,7 @@ TEST_F(NativeLanceTest, columnReadTaskHasBatchLocalState) {
       context->metadata().rowType(), std::vector<std::string>{"a"}));
   const auto plan = NativeLanceScanPlan::build(*context, rowOptions);
   auto input = context->newInput();
-  NativeLanceDecoder decoder(
+  NativeLancePageSource decoder(
       *input, context->metadata(), *pool_, context->blobResolver());
   NativeLanceColumnReadTask task(
       plan->rootColumnReader(), {.rowStart = 0, .rowCount = 5});
@@ -2652,7 +2652,7 @@ TEST_F(NativeLanceTest, columnReadTaskAppliesBatchRelativeSelection) {
       context->metadata().rowType(), std::vector<std::string>{"a"}));
   const auto plan = NativeLanceScanPlan::build(*context, rowOptions);
   auto input = context->newInput();
-  NativeLanceDecoder decoder(
+  NativeLancePageSource decoder(
       *input, context->metadata(), *pool_, context->blobResolver());
   const std::array<vector_size_t, 2> selectedRows{1, 3};
   NativeLanceColumnReadTask task(
@@ -2947,7 +2947,7 @@ TEST_F(NativeLanceTest, preservesColumnNames) {
 
 TEST_F(NativeLanceTest, decodesFixedWidthRange) {
   const auto file = load("sample.lance");
-  const NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
   const auto integers = decoder.decodeColumn(0, 5, 7);
   const auto* rawIntegers = integers->asFlatVector<int64_t>()->rawValues();
@@ -2967,7 +2967,7 @@ TEST_F(NativeLanceTest, rangeReadDoesNotReadWholePage) {
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   const NativeLanceMetadata metadata(*input, *pool_);
   const auto bytesAfterMetadata = readFile->bytesRead();
-  const NativeLanceDecoder decoder(*input, metadata, *pool_);
+  const NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto values = decoder.decodeColumn(0, 5, 2);
   EXPECT_EQ(values->asFlatVector<int64_t>()->valueAt(0), 6);
@@ -2977,7 +2977,7 @@ TEST_F(NativeLanceTest, rangeReadDoesNotReadWholePage) {
 
 TEST_F(NativeLanceTest, decodesDecimal128) {
   const auto file = load("decimal.lance");
-  const NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
   const auto shortDecimals = decoder.decodeColumn(0, 3, 5);
   const auto* rawShort = shortDecimals->asFlatVector<int64_t>()->rawValues();
@@ -3002,7 +3002,7 @@ TEST_F(NativeLanceTest, parsesStableV2StringFixture) {
   EXPECT_EQ(file.metadata->physicalColumnIndex(2), 3);
   EXPECT_EQ(file.metadata->physicalColumnIndex(3), 5);
 
-  const NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   const auto strings = decoder.decodeColumn(1, 1, 2);
   EXPECT_EQ(strings->asFlatVector<StringView>()->valueAt(0).str(), "bar");
   EXPECT_EQ(strings->asFlatVector<StringView>()->valueAt(1).str(), "baz");
@@ -3024,7 +3024,7 @@ TEST_F(NativeLanceTest, decodesExactStructuralFixtures) {
         file.metadata->rowType()->toString(),
         "ROW<id:INTEGER,name:VARCHAR,items:ARRAY<INTEGER>,"
         "category:VARCHAR,blob:VARBINARY>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
     const auto ids = decoder.decodeColumn(0, 1'020, 10);
     for (vector_size_t row = 0; row < ids->size(); ++row) {
@@ -3200,7 +3200,7 @@ TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
     fullPageBytes += bytes;
   }
   readFile->resetBytesRead();
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   const auto values = decoder.decodeColumn(kColumn, kStart, kRows);
   for (vector_size_t row = 0; row < values->size(); ++row) {
     EXPECT_DOUBLE_EQ(
@@ -3237,7 +3237,7 @@ TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
     namePageStart = namePageEnd;
   }
   nullableStringReadFile->resetBytesRead();
-  NativeLanceDecoder nullableStringDecoder(
+  NativeLancePageSource nullableStringDecoder(
       *nullableStringInput, nullableStringMetadata, *pool_);
   const auto names = nullableStringDecoder.decodeColumn(1, kStart, kRows);
   ASSERT_EQ(names->size(), kRows);
@@ -3274,7 +3274,7 @@ TEST_F(NativeLanceTest, nullableMiniBlockReadsSelectedChunks) {
     fullPageBytes += bytes;
   }
   readFile->resetBytesRead();
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   const auto values = decoder.decodeColumn(kColumn, kStart, kRows);
   ASSERT_EQ(values->size(), kRows);
   for (vector_size_t row = 0; row < kRows; ++row) {
@@ -3296,7 +3296,7 @@ TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {
       file.metadata->rowType()->toString(),
       "ROW<map_val:MAP<INTEGER,BIGINT>,fsl:ARRAY<INTEGER>,"
       "fsl_struct:ARRAY<ROW<x:INTEGER,y:VARCHAR>>>");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
 
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
@@ -3374,7 +3374,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeListStructWithListAndMap) {
       "ROW<complex_fsl_miniblock:ARRAY<ROW<id:INTEGER,items:ARRAY<INTEGER>,"
       "attrs:MAP<INTEGER,BIGINT>>>,complex_fsl_fullzip:ARRAY<ROW<id:INTEGER,"
       "items:ARRAY<INTEGER>,attrs:MAP<INTEGER,BIGINT>>>>");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
   for (uint32_t column = 0; column < 2; ++column) {
@@ -3446,7 +3446,7 @@ TEST_F(NativeLanceTest, decodesStructuralScalarFixture) {
         "ROW<decimal:DECIMAL(20, 2),"
         "timestamp:LANCE_timestamp:us:Asia/Shanghai,fixed:VARBINARY,"
         "wide_string:VARCHAR>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
 
@@ -3491,7 +3491,7 @@ TEST_F(NativeLanceTest, decodesSparseV23Fixture) {
   EXPECT_EQ(
       file.metadata->rowType()->toString(),
       "ROW<primitive:BIGINT,list:ARRAY<INTEGER>,fixed:ARRAY<INTEGER>>");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
 
@@ -3579,7 +3579,7 @@ TEST_F(NativeLanceTest, decodesStructuralFixedFullZipFixture) {
        {"fixed_fullzip_v2_1.lance", "fixed_fullzip_v2_2.lance"}) {
     auto file = load(fileName);
     EXPECT_EQ(file.metadata->rowType()->toString(), "ROW<value:BIGINT>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     const auto values = decoder.decodeColumn(0, kStart, kRows);
@@ -3602,7 +3602,7 @@ TEST_F(NativeLanceTest, decodesStructuralCompressionFixtures) {
     EXPECT_EQ(
         file.metadata->rowType()->toString(),
         "ROW<rle:INTEGER,bss:DOUBLE,general:BIGINT>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     const auto rle = decoder.decodeColumn(0, kStart, kRows);
@@ -3633,7 +3633,7 @@ TEST_F(NativeLanceTest, decodesStructuralExtendedScalarFixtures) {
         "duration_us:INTERVAL DAY TO SECOND,duration_ns:INTERVAL DAY TO "
         "SECOND,large_binary:VARBINARY,all_null:UNKNOWN,"
         "bfloat:LANCE_bfloat16>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     const auto f16 = decoder.decodeColumn(0, kStart, kRows);
@@ -3717,7 +3717,7 @@ TEST_F(NativeLanceTest, decodesStructuralPackedStructFixtures) {
     EXPECT_EQ(
         file.metadata->rowType()->toString(),
         "ROW<packed:ROW<x:INTEGER,y:BIGINT>>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     const auto decoded = decoder.decodeColumn(0, 1'020, 17);
     const auto* rows = decoded->as<RowVector>();
     ASSERT_NE(rows, nullptr);
@@ -3738,7 +3738,7 @@ TEST_F(NativeLanceTest, decodesStructuralPackedStructFixtures) {
   EXPECT_EQ(
       file.metadata->rowType()->toString(),
       "ROW<packed:ROW<x:INTEGER,y:VARCHAR>>");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   const auto decoded = decoder.decodeColumn(0, 1'020, 17);
   const auto* rows = decoded->as<RowVector>();
   ASSERT_NE(rows, nullptr);
@@ -3766,7 +3766,7 @@ TEST_F(NativeLanceTest, decodesInlineBlobV2AcrossChunkBoundary) {
       (std::vector<std::string>{
           "uint8", "uint64", "uint64", "uint32", "string"}));
 
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
   decoder.prefetchColumns({0}, kStart, kRows);
@@ -3789,7 +3789,7 @@ TEST_F(NativeLanceTest, decodesInlineBlobV2AcrossChunkBoundary) {
 
 TEST_F(NativeLanceTest, rejectsBlobV2ThatRequiresDatasetResolver) {
   auto file = load("blob_v2_non_inline.lance");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   EXPECT_THROW(
       {
         try {
@@ -3810,7 +3810,7 @@ TEST_F(NativeLanceTest, resolvesAllBlobV2StorageKinds) {
       std::make_shared<InMemoryReadFile>(makeBlobResolverFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   auto resolver = std::make_shared<TestBlobResolver>();
-  NativeLanceDecoder decoder(*input, metadata, *pool_, resolver);
+  NativeLancePageSource decoder(*input, metadata, *pool_, resolver);
   const auto decoded = decoder.decodeColumn(0, 0, 4);
   const auto* values = decoded->asFlatVector<StringView>();
   ASSERT_NE(values, nullptr);
@@ -3876,7 +3876,7 @@ TEST_F(NativeLanceTest, decodesStructuralTypeMatrixFixtures) {
         "timestamp_ms:LANCE_timestamp:ms:UTC,"
         "timestamp_ns:LANCE_timestamp:ns:Asia/Shanghai,"
         "large_string:VARCHAR,json:LANCE_json:lance.json>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     const auto time32 = decoder.decodeColumn(0, kStart, kRows);
@@ -3948,7 +3948,7 @@ TEST_F(NativeLanceTest, decodesStructuralDictionaryTypeMatrix) {
         "dict_i16_bigint:BIGINT,dict_u16_binary:VARBINARY,"
         "dict_u32_double:DOUBLE,dict_u64_string:VARCHAR,"
         "dict_i32_bigint:BIGINT,dict_i64_string:VARCHAR>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     std::vector<VectorPtr> columns;
@@ -4005,7 +4005,7 @@ TEST_F(NativeLanceTest, decodesAllSupportedDictionaryValueTypes) {
         "dict_f32:REAL,dict_f64:DOUBLE,dict_string:VARCHAR,"
         "dict_binary:VARBINARY,dict_large_string:VARCHAR,"
         "dict_large_binary:VARBINARY>");
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     std::vector<VectorPtr> columns;
@@ -4078,7 +4078,7 @@ TEST_F(NativeLanceTest, decodesColonBearingDictionaryValueTypes) {
         "dictionary_logical_values_v2_2.lance"}) {
     auto file = load(fileName);
     EXPECT_EQ(file.metadata->rowType()->size(), 17);
-    NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+    NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
     constexpr vector_size_t kStart = 1'020;
     constexpr vector_size_t kRows = 17;
     std::vector<VectorPtr> columns;
@@ -4155,7 +4155,7 @@ TEST_F(NativeLanceTest, decodesConstantAndEmptyStructFixture) {
       "ROW<constant_i32:INTEGER,constant_string:VARCHAR,"
       "constant_list:ARRAY<INTEGER>,empty_struct:ROW<>,"
       "all_null_fsl:ARRAY<INTEGER>>");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
   const auto integers = decoder.decodeColumn(0, kStart, kRows);
@@ -4212,7 +4212,7 @@ TEST_F(NativeLanceTest, decodesConstantAndEmptyStructFixture) {
 
 TEST_F(NativeLanceTest, decodesFullZipPerValueGeneralFixture) {
   auto file = load("fullzip_general_v2_2.lance");
-  NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
   const auto decoded = decoder.decodeColumn(0, kStart, kRows);
@@ -4240,7 +4240,8 @@ TEST_F(NativeLanceTest, rejectsUnrepresentableStructuralScalarTypes) {
           try {
             auto file = load(fileName);
             if (!failsInMetadata) {
-              NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+              NativeLancePageSource decoder(
+                  *file.input, *file.metadata, *pool_);
               decoder.decodeColumn(0, 0, 1);
             }
           } catch (const BoltException& error) {
@@ -4280,7 +4281,7 @@ TEST_F(NativeLanceTest, decodesCanonicalV2MultiPageBinary) {
   EXPECT_EQ(file.metadata->physicalColumnIndex(0), 0);
   EXPECT_EQ(file.metadata->physicalColumnIndex(1), 1);
 
-  const NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   const auto ids = decoder.decodeColumn(0, 15, 5);
   const auto* rawIds = ids->asFlatVector<int32_t>()->rawValues();
   for (vector_size_t i = 0; i < 5; ++i) {
@@ -4388,7 +4389,7 @@ TEST_F(NativeLanceTest, structChildCanAnchorFileSplits) {
       metadata.rowRangesForFileRange(64, 128),
       (std::vector<std::pair<uint64_t, uint64_t>>{{2, 4}}));
 
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   const auto decoded = decoder.decodeColumn(0, 1, 2);
   const auto* rows = decoded->as<RowVector>();
   ASSERT_NE(rows, nullptr);
@@ -4405,7 +4406,7 @@ TEST_F(NativeLanceTest, emptyPackedStructUsesOnePhysicalColumn) {
   EXPECT_EQ(metadata.numRows(), 0);
   EXPECT_EQ(metadata.columns().size(), 1);
   EXPECT_EQ(metadata.physicalColumnSpan(0), 1);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   EXPECT_EQ(decoder.decodeColumn(0, 0, 0)->size(), 0);
 }
 
@@ -4832,7 +4833,7 @@ TEST_F(NativeLanceTest, parsesNestedSchemaAndPhysicalMapping) {
   EXPECT_EQ(file.metadata->physicalColumnLogicalType(3), "string");
   EXPECT_EQ(file.metadata->physicalColumnLogicalType(4), "string");
 
-  const NativeLanceDecoder decoder(*file.input, *file.metadata, *pool_);
+  const NativeLancePageSource decoder(*file.input, *file.metadata, *pool_);
   const auto data = decoder.decodeColumn(1, 0, 2);
   const auto* lists = data->as<ArrayVector>();
   ASSERT_NE(lists, nullptr) << data->toString();
@@ -4873,7 +4874,7 @@ TEST_F(NativeLanceTest, decodesBooleanNullsAndTimestamp) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(makeBooleanTimestampFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto flags = decoder.decodeColumn(0, 1, 3);
   EXPECT_TRUE(flags->isNullAt(0));
@@ -4907,7 +4908,7 @@ TEST_F(NativeLanceTest, decodesExtendedV20PrimitiveTypes) {
       "time_ms:LANCE_time32:ms,time_us:LANCE_time64:us,"
       "time_ns:LANCE_time64:ns,duration_s:INTERVAL DAY TO SECOND,"
       "duration_us:INTERVAL DAY TO SECOND,duration_ns:INTERVAL DAY TO SECOND>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto u64 = decoder.decodeColumn(0, 0, 2)->asFlatVector<int128_t>();
   EXPECT_EQ(u64->valueAt(0), 0);
@@ -4945,7 +4946,7 @@ TEST_F(NativeLanceTest, decodesSignedAndUnsignedBitpackedRanges) {
   auto readFile = std::make_shared<InMemoryReadFile>(makeBitpackedFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
   const auto signedValues = decoder.decodeColumn(0, 1, 4);
@@ -4969,7 +4970,7 @@ TEST_F(NativeLanceTest, decodesBitpackedForNonNegativeAcrossChunks) {
       std::make_shared<InMemoryReadFile>(makeBitpackedForNonNegFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   constexpr uint64_t kStart = 1'020;
   constexpr uint64_t kCount = 1'030;
   constexpr std::array<uint8_t, 4> kBitWidths{5, 13, 23, 37};
@@ -5005,7 +5006,7 @@ TEST_F(NativeLanceTest, decodesZeroWidthV20BitpackingEndToEnd) {
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(metadata.footer().majorVersion, 2);
   EXPECT_EQ(metadata.footer().minorVersion, 0);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   decoder.prefetchColumns({0, 1, 2, 3}, 1'020, 1'030);
   decoder.materializeReadPlan();
@@ -5145,7 +5146,7 @@ TEST_F(NativeLanceTest, preservesDictionaryEncodingAndNulls) {
   auto readFile = std::make_shared<InMemoryReadFile>(makeDictionaryFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto colors = decoder.decodeColumn(0, 1, 4);
   EXPECT_EQ(colors->encoding(), VectorEncoding::Simple::DICTIONARY);
@@ -5162,7 +5163,7 @@ TEST_F(NativeLanceTest, decodesLogicalDictionaryWithZeroBasedIndices) {
       std::make_shared<InMemoryReadFile>(makeLogicalDictionaryFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<code:INTEGER>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto codes = decoder.decodeColumn(0, 0, 4);
   EXPECT_EQ(codes->encoding(), VectorEncoding::Simple::DICTIONARY);
@@ -5180,7 +5181,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeBinaryDictionaryItems) {
       *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<code:VARBINARY>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 0, 4);
   EXPECT_EQ(decoded->encoding(), VectorEncoding::Simple::DICTIONARY);
@@ -5196,7 +5197,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeBinaryRange) {
   auto readFile = std::make_shared<InMemoryReadFile>(makeFixedSizeBinaryFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
   const auto values = decoder.decodeColumn(0, 1, 2);
@@ -5211,7 +5212,7 @@ TEST_F(NativeLanceTest, decodesFlatFixedSizeBinaryRange) {
       std::make_shared<InMemoryReadFile>(makeFlatFixedSizeBinaryFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto values = decoder.decodeColumn(0, 1, 2);
   const auto* binaries = values->asFlatVector<StringView>();
@@ -5224,7 +5225,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeListRange) {
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<coordinates:ARRAY<INTEGER>>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
   const auto values = decoder.decodeColumn(0, 1, 2);
@@ -5248,7 +5249,7 @@ TEST_F(NativeLanceTest, decodesNestedFixedSizeListRange) {
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(
       metadata.rowType()->toString(), "ROW<matrix:ARRAY<ARRAY<INTEGER>>>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 1, 1);
   const auto* outer = decoded->as<ArrayVector>();
@@ -5272,7 +5273,7 @@ TEST_F(NativeLanceTest, decodesFixedSizeListOfFixedSizeBinary) {
       *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<pairs:ARRAY<VARBINARY>>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 1, 1);
   const auto* arrays = decoded->as<ArrayVector>();
@@ -5290,7 +5291,7 @@ TEST_F(NativeLanceTest, preservesBFloat16ExtensionStorage) {
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(
       metadata.rowType()->toString(), "ROW<values:ARRAY<LANCE_bfloat16>>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 0, 2);
   const auto* arrays = decoded->as<ArrayVector>();
@@ -5315,7 +5316,7 @@ TEST_F(NativeLanceTest, decodesCompressedFlatRanges) {
     auto input =
         std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
     NativeLanceMetadata metadata(*input, *pool_);
-    NativeLanceDecoder decoder(*input, metadata, *pool_);
+    NativeLancePageSource decoder(*input, metadata, *pool_);
 
     const auto values = decoder.decodeColumn(0, 2, 3);
     const auto* integers = values->asFlatVector<int32_t>();
@@ -5329,7 +5330,7 @@ TEST_F(NativeLanceTest, compressedNestedItemsStayIndependentAcrossDecodes) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(makeCompressedListFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   auto first = decoder.decodeColumn(0, 1, 2);
   const auto second = decoder.decodeColumn(0, 2, 2);
@@ -5354,7 +5355,7 @@ TEST_F(NativeLanceTest, decodesCompressedListOffsets) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(makeCompressedListFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 1, 2);
   const auto* arrays = decoded->as<ArrayVector>();
@@ -5373,7 +5374,7 @@ TEST_F(NativeLanceTest, decodesBitpackedListOffsetsAcrossChunks) {
       std::make_shared<InMemoryReadFile>(makeBitpackedListOffsetsFile()),
       *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
@@ -5398,7 +5399,7 @@ TEST_F(NativeLanceTest, decodesBitpackedLegacyBinaryOffsetsAcrossChunks) {
           makeBitpackedLegacyBinaryOffsetsFile()),
       *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   constexpr vector_size_t kStart = 1'020;
   constexpr vector_size_t kRows = 17;
@@ -5508,7 +5509,7 @@ TEST_F(NativeLanceTest, decodesPackedStructRange) {
       "ROW<packed:ROW<x:BIGINT,y:INTEGER,z:SMALLINT>>");
   EXPECT_EQ(metadata.columns().size(), 1);
   EXPECT_EQ(metadata.physicalColumnSpan(0), 1);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
   readFile->resetBytesRead();
 
   const auto values = decoder.decodeColumn(0, 1, 2);
@@ -5568,7 +5569,7 @@ TEST_F(NativeLanceTest, decodesPackedNestedFixedSizeList) {
       std::make_shared<InMemoryReadFile>(makePackedNestedFixedSizeListFile()),
       *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 1, 1);
   const auto* row = decoded->as<RowVector>();
@@ -5590,7 +5591,7 @@ TEST_F(NativeLanceTest, decodesFsstSymbolsAndEscapes) {
   auto readFile = std::make_shared<InMemoryReadFile>(makeFsstFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto values = decoder.decodeColumn(0, 1, 3);
   const auto* strings = values->asFlatVector<StringView>();
@@ -5621,7 +5622,7 @@ TEST_F(NativeLanceTest, decodesListAcrossPageBoundary) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(makeMultiPageListFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto values = decoder.decodeColumn(0, 1, 3);
   const auto* arrays = values->as<ArrayVector>();
@@ -5650,7 +5651,7 @@ TEST_F(NativeLanceTest, decodesNestedLists) {
       std::make_shared<InMemoryReadFile>(makeNestedListFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_EQ(metadata.rowType()->toString(), "ROW<outer:ARRAY<ARRAY<INTEGER>>>");
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 1, 3);
   const auto* outer = decoded->as<ArrayVector>();
@@ -5682,7 +5683,7 @@ TEST_F(NativeLanceTest, decodesMapRangeWithNullAndEmptyRows) {
       metadata.rowType()->toString(), "ROW<attributes:MAP<INTEGER,BIGINT>>");
   EXPECT_EQ(metadata.columns().size(), 4);
   EXPECT_EQ(metadata.physicalColumnSpan(0), 4);
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto values = decoder.decodeColumn(0, 1, 3);
   const auto* maps = values->as<MapVector>();
@@ -5728,7 +5729,7 @@ TEST_F(NativeLanceTest, decodesBlobColumnAcrossPages) {
       std::make_shared<InMemoryReadFile>(makeBlobFile()), *pool_);
   NativeLanceMetadata metadata(*input, *pool_);
   EXPECT_TRUE(metadata.isBlobColumn(0));
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const auto decoded = decoder.decodeColumn(0, 1, 3);
   const auto* values = decoded->asFlatVector<StringView>();
@@ -5748,7 +5749,7 @@ TEST_F(NativeLanceTest, prefetchConsumesScheduledStreamsWithoutRereading) {
       readFile, *pool_, dwio::common::MetricsLog::voidLog(), nullptr, 0);
   NativeLanceMetadata metadata(*input, *pool_);
   const auto metadataReads = readFile->readCalls();
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   decoder.prefetchColumns({0, 1}, 0, 5);
   const auto afterPrefetch = readFile->readCalls();
@@ -5956,7 +5957,7 @@ TEST_F(NativeLanceTest, selectedRangesShareOneDirectBufferedInputLoad) {
       nullptr);
   NativeLanceMetadata metadata(*input, *pool_);
   const auto readsAfterMetadata = readFile->readCalls();
-  NativeLanceDecoder decoder(*input, metadata, *pool_);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
 
   const std::array<vector_size_t, 3> rows{0, 2, 4};
   const auto result = decoder.decodeSelectedRows(1, 0, rows);

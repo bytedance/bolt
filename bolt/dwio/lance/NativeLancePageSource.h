@@ -22,7 +22,7 @@
 #include <unordered_map>
 
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
-#include "bolt/dwio/lance/NativeLanceColumnSource.h"
+#include "bolt/dwio/lance/NativeLanceColumnRequest.h"
 #include "bolt/dwio/lance/NativeLanceLegacyPageReader.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLanceReadScheduler.h"
@@ -35,18 +35,18 @@ namespace bytedance::bolt::lance::reader {
 /// Reads are issued as ranges against the original BufferedInput. No Rust or
 /// Arrow objects participate in this path, and all output storage belongs to
 /// the supplied Bolt memory pool.
-class NativeLanceDecoder final : public NativeLanceColumnSource {
+class NativeLancePageSource final {
  public:
-  NativeLanceDecoder(
+  NativeLancePageSource(
       dwio::common::BufferedInput& input,
       const NativeLanceMetadata& metadata,
       memory::MemoryPool& pool,
       std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
       NativeLanceReadScheduler::Options readSchedulerOptions = {});
 
-  ~NativeLanceDecoder();
+  ~NativeLancePageSource();
 
-  void cancel() override;
+  void cancel();
 
   /// Schedules the first-stage ranges for all requested columns together.
   /// BufferedInput can coalesce these requests or dispatch them asynchronously.
@@ -57,7 +57,7 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
 
   void planColumns(
       const std::vector<uint32_t>& columnIndices,
-      const NativeLanceColumnRequest& request) const override;
+      const NativeLanceColumnRequest& request) const;
 
   void planColumns(
       const std::vector<uint32_t>& columnIndices,
@@ -70,7 +70,7 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
 
   /// Returns true when independent columns can be decoded concurrently
   /// without sharing mutable asynchronous read-plan state.
-  bool supportsConcurrentDecoding() const override {
+  bool supportsConcurrentDecoding() const {
     return input_.supportSyncLoad();
   }
 
@@ -96,12 +96,7 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
   bool hasCompressedColumn(
       uint32_t columnIndex,
       uint64_t rowStart,
-      uint64_t rowCount) const override;
-
-  VectorPtr decodeColumn(
-      uint32_t columnIndex,
-      const NativeLanceColumnRequest& request,
-      bool rangesPlanned) const override;
+      uint64_t rowCount) const;
 
   VectorPtr decodeColumn(
       uint32_t columnIndex,
@@ -123,29 +118,17 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
       uint64_t rowCount,
       const std::vector<uint32_t>& arrayDimensions = {}) const;
 
+  VectorPtr decodeStructuralField(
+      const NativeLanceMetadata::StructuralField& field,
+      uint64_t rowStart,
+      uint64_t rowCount) const;
+
  private:
   void enqueueLogicalColumn(
       uint32_t columnIndex,
       uint64_t rowStart,
       uint64_t rowCount) const;
 
-  VectorPtr decodeSelectedRowsImpl(
-      uint32_t columnIndex,
-      uint64_t batchRowStart,
-      folly::Range<const vector_size_t*> rows,
-      bool rangesPlanned) const;
-
-  VectorPtr decodePhysicalColumnNoCache(
-      const TypePtr& type,
-      std::string_view logicalType,
-      uint32_t physicalColumnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount,
-      const std::vector<uint32_t>& arrayDimensions = {}) const;
-  VectorPtr decodeStructuralField(
-      const NativeLanceMetadata::StructuralField& field,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
   void enqueuePhysicalColumn(
       const TypePtr& type,
       uint32_t physicalColumnIndex,

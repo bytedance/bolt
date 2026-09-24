@@ -1930,25 +1930,26 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - metadata 所有权已拆为三个独立对象：`NativeLanceFileMetadata` 独占 footer、全局 buffer
   和 column metadata 位置；`NativeLanceSchemaIndex` 独占 logical/physical mapping 与
   structural field tree；`NativeLanceColumnMetadataLoader` 独占 lazy protobuf、page
-  layout/encoding、page row index 和加载同步。`NativeLanceMetadata` 只保留跨组件查询与
-  打开阶段编排。
+  layout/encoding、page row index、解析校验和加载同步。`NativeLanceMetadata` 不再持有
+  这些状态，只保留跨组件查询与打开阶段编排。
 - RowReader 只委托给 `NativeLanceScanCoordinator`；一个 `next()` 只对应一个
   `NativeLanceScanWindow`，部分结果不会对调用方可见。
 - `NativeLanceScanPlan` 固化 projection、filter required columns、split row ranges 和逻辑
   reader tree，不在每个 batch 重建。
 - 删除 range/batch 级 cloned input、cloned decoder 和 prefetch decoder 数组。一个 scan
-  只有一个输入、一个 `NativeLanceColumnSource` adapter 和一个 `ReadScheduler`。
+  只有一个输入、一个 `NativeLancePageSource` 和一个 `ReadScheduler`。
 - `NativeLanceReadScheduler` 支持 page-owned key、压缩输入范围去重、提交后按需
   materialize、取消和 in-flight 上限。
 - v2.1+ structural page 通过 `NativeLanceStructuralPageReader` 进入结构解码 kernel。
 - v2.0 Flat 压缩 buffer 通过 `NativeLanceLegacyPageReader`。zstd 使用跨 batch 的顺序
   cursor，只保留 codec context、当前压缩块和 64-byte 尾部；LZ4 保持明确的
   whole-buffer policy。两者都不保留完整 decompressed page。
-- `NativeLanceColumnSource` 已隔离逻辑 ColumnReader 与迁移期单体 Decoder；旧根类已更名
-  为 `NativeLanceRootColumnReader`。
+- 原 `NativeLanceDecoder` 和迁移期 `NativeLanceColumnSource` adapter 已删除；
+  `NativeLancePageSource` 只负责 scan-local page 调度、物理读取和 kernel 分派，旧根类已
+  更名为 `NativeLanceRootColumnReader`。
 - ColumnReader 工厂已按 metadata/logical type 创建 scalar、binary、dictionary、list、map、
-  struct、fixed-size-list、packed-struct、Blob 和 constant 节点；节点当前仍通过
-  `NativeLanceColumnSource` adapter 发起物理读取，后续将请求与组装状态直接下沉到节点。
+  struct、fixed-size-list、packed-struct、Blob 和 constant 节点；节点通过
+  `NativeLancePageSource` 发起物理读取，后续将复杂类型组装状态继续下沉到节点。
 - legacy scalar、nullable、bitmap、bitpack、fixed-size binary 和 zero-copy flat kernel 已迁移
   到 `NativeLanceLegacyScalar`；物理 buffer 定位统一由
   `NativeLanceMetadata::resolveBuffer()` 提供。
@@ -1958,7 +1959,7 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - legacy List、Map、字符串 List 的 parent/child row domain 计算已迁移到
   `NativeLanceLegacyList`；fixed-size-list 和 packed struct 已迁移到
   `NativeLanceLegacyStruct`；Blob descriptor/payload 读取已迁移到
-  `NativeLanceLegacyBlob`。`NativeLanceDecoder` 中对应的旧实现及其内部递归入口已删除。
+  `NativeLanceLegacyBlob`。原 Decoder 中对应的旧实现及其内部递归入口已删除。
 - `NativeLanceColumnRequest` 已统一携带 batch row range、batch-relative
   `NativeLanceRowSelection` 和 filter/projection/prefetch purpose。Filter 不再从
   `NativeLanceReader.cpp` 直调 Decoder；filter reader、projected reader 和 prefetch 都从
@@ -1974,8 +1975,8 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 
 ### 38.2 仍需完成
 
-- 将 list、map、struct、fixed-size-list、packed struct 和 Blob 的逻辑组装状态从
-  `NativeLanceColumnSource` adapter 下沉到独立 ColumnReader；现有 `NativeLanceLegacy*`
+- 将 list、map、struct、fixed-size-list、packed struct 和 Blob 的剩余逻辑组装状态从
+  `NativeLancePageSource` 下沉到独立 ColumnReader；现有 `NativeLanceLegacy*`
   模块作为无缓存 PageReader/kernel 边界保留到调用方输出 buffer 接口完成。
 - nested subfield pruning 当前仍在根 RowVector 组装后执行；后续需要把 nested selection
   传播到 Struct/List/Map ColumnReader，避免先物化未投影 child 再裁剪。
@@ -1983,7 +1984,8 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
   vector；最终目标是 page kernel 直接写 caller-owned child buffer。
 - memory reservation 已用于 page-owned scheduler API，但全部 legacy compatibility buffer
   尚未纳入统一预算。
-- 删除 `NativeLanceDecoder` 和全部 compatibility fallback 后，才能完成结构验收项 3。
+- 删除 PageSource 中剩余的 logical-column mapping 和 compatibility vector copy 后，才能
+  完成结构验收项 3。
 
 ### 38.3 2026-09-24 快速验收
 
@@ -2004,16 +2006,16 @@ decode threads 16，full scan。
 
 固定 16 CPUs、batch size 4,096，奇数轮 native -> Rust，偶数轮 Rust -> native；每种
 实现共 7 个配对样本。原始结果保存在：
-`/tmp/lance-stream-session-dedup-7round-20260924.json`。
+`/tmp/lance-page-source-final-rerun-7round-20260924.json`。
 
 | 指标 | native 中位数 | Rust 中位数 | native / Rust |
 |---|---:|---:|---:|
-| wall time | 7.535 s | 7.086 s | 1.0666 |
-| peak RSS | 6.795 GiB | 11.580 GiB | 0.5868 |
+| wall time | 7.849 s | 6.988 s | 1.1089 |
+| peak RSS | 6.617 GiB | 11.467 GiB | 0.5770 |
 
-- native wall time 比 Rust 慢约 6.7%；paired log-ratio exact sign-flip
+- native wall time 比 Rust 慢约 10.9%；paired log-ratio exact sign-flip
   `p = 0.015625`，7 个配对样本方向一致，差异不能解释为单次波动。
-- native peak RSS 比 Rust 低约 41.3%，符合超宽表优先控制内存的目标。
-- 相对重复整页解压的 native 约 52.94 s 基线，当前中位数约提速 7.03 倍。
+- native peak RSS 比 Rust 低约 42.3%，符合超宽表优先控制内存的目标。
+- 相对重复整页解压的 native 约 52.94 s 基线，当前中位数约提速 6.74 倍。
 - 性能目标尚未完成：下一步应减少 legacy compatibility vector/copy、把 filter 和 nested
   path 迁入 ColumnReader/PageReader，并在相同方法下重新验收。
