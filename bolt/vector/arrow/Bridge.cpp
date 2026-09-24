@@ -30,6 +30,7 @@
 
 #include "bolt/vector/arrow/Bridge.h"
 
+#include <folly/lang/Bits.h>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -58,7 +59,45 @@ namespace {
 static constexpr size_t kMaxBuffers{3};
 static constexpr size_t kMaxReusableScratchBufferBytes{32UL << 10};
 constexpr const char kArrowExtensionNameKey[] = "ARROW:extension:name";
+constexpr const char kArrowExtensionMetadataKey[] = "ARROW:extension:metadata";
 constexpr const char kSparkVariantExtensionName[] = "spark.variant";
+constexpr const char kTimestampExtensionName[] = "bolt.timestamp";
+constexpr const char kTimestampExtensionMetadata[] = "1";
+constexpr size_t kSecondsNanosSize = 2 * sizeof(uint64_t);
+
+std::optional<std::string_view> arrowMetadataValue(
+    const ArrowSchema& schema,
+    std::string_view key) {
+  if (!schema.metadata) {
+    return std::nullopt;
+  }
+  const char* data = schema.metadata;
+  auto readSize = [&]() {
+    const auto size = folly::loadUnaligned<int32_t>(data);
+    BOLT_USER_CHECK_GE(size, 0, "Negative Arrow metadata length");
+    data += sizeof(int32_t);
+    return size;
+  };
+  const auto count = readSize();
+  for (int32_t i = 0; i < count; ++i) {
+    const auto keySize = readSize();
+    const std::string_view entryKey(data, keySize);
+    data += keySize;
+    const auto valueSize = readSize();
+    const std::string_view value(data, valueSize);
+    data += valueSize;
+    if (entryKey == key) {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+bool isArrowTime(std::string_view format) {
+  return format.size() == 3 && format[0] == 't' && format[1] == 't' &&
+      (format[2] == 's' || format[2] == 'm' || format[2] == 'u' ||
+       format[2] == 'n');
+}
 
 bool isSupportedArrayConstantElementType(const Type& type) {
   if (type.isDate() || type.isDecimal()) {
@@ -539,20 +578,30 @@ struct BoltToArrowSchemaBridgeHolder {
   }
 };
 
-void setArrowMetadataEntry(
+void setArrowMetadata(
     ArrowSchema& arrowSchema,
     BoltToArrowSchemaBridgeHolder& bridgeHolder,
-    std::string_view key,
-    std::string_view value) {
+    std::initializer_list<std::pair<std::string_view, std::string_view>>
+        entries) {
   bridgeHolder.metadataBuffer.clear();
-  appendArrowMetadataInt32(bridgeHolder.metadataBuffer, 1);
-  appendArrowMetadataInt32(
-      bridgeHolder.metadataBuffer, static_cast<int32_t>(key.size()));
-  bridgeHolder.metadataBuffer.append(key.data(), key.size());
-  appendArrowMetadataInt32(
-      bridgeHolder.metadataBuffer, static_cast<int32_t>(value.size()));
-  bridgeHolder.metadataBuffer.append(value.data(), value.size());
+  appendArrowMetadataInt32(bridgeHolder.metadataBuffer, entries.size());
+  for (const auto& [key, value] : entries) {
+    appendArrowMetadataInt32(bridgeHolder.metadataBuffer, key.size());
+    bridgeHolder.metadataBuffer.append(key.data(), key.size());
+    appendArrowMetadataInt32(bridgeHolder.metadataBuffer, value.size());
+    bridgeHolder.metadataBuffer.append(value.data(), value.size());
+  }
   arrowSchema.metadata = bridgeHolder.metadataBuffer.data();
+}
+
+void setTimestampMetadata(
+    ArrowSchema& schema,
+    BoltToArrowSchemaBridgeHolder& holder) {
+  setArrowMetadata(
+      schema,
+      holder,
+      {{kArrowExtensionNameKey, kTimestampExtensionName},
+       {kArrowExtensionMetadataKey, kTimestampExtensionMetadata}});
 }
 
 // Release function for ArrowArray. Arrow standard requires it to recurse down
@@ -635,6 +684,9 @@ static void releaseArrowSchema(ArrowSchema* arrowSchema) {
 const char* exportArrowFormatTimestampStr(
     const ArrowOptions& options,
     std::string& formatBuffer) {
+  if (options.timestampEncoding == TimestampEncoding::kSecondsNanos) {
+    return "w:16";
+  }
   switch (options.timestampUnit) {
     case TimestampUnit::kSecond:
       formatBuffer = "tss:";
@@ -840,6 +892,21 @@ void gatherFromTimestampBuffer(
     default:
       BOLT_UNREACHABLE();
   }
+}
+
+// The extension layout is independent of Timestamp's C++ object layout.
+void gatherSecondsNanos(
+    const BaseVector& vec,
+    const Selection& rows,
+    Buffer& out) {
+  auto* values = out.asMutable<char>();
+  gatherTimestampValues(vec, rows, [&](vector_size_t row, const Timestamp& ts) {
+    const auto seconds = folly::Endian::little(ts.getSeconds());
+    const auto nanos = folly::Endian::little(ts.getNanos());
+    auto* value = values + row * kSecondsNanosSize;
+    memcpy(value, &seconds, sizeof(seconds));
+    memcpy(value + sizeof(seconds), &nanos, sizeof(nanos));
+  });
 }
 
 void gatherFromBuffer(
@@ -1139,7 +1206,10 @@ void exportValues(
         break;
       case TypeKind::TIMESTAMP:
         holder.setBuffer(
-            1, AlignedBuffer::allocate<int64_t>(out.length, pool, 0));
+            1,
+            options.timestampEncoding == TimestampEncoding::kSecondsNanos
+                ? AlignedBuffer::allocate<uint128_t>(out.length, pool, 0)
+                : AlignedBuffer::allocate<int64_t>(out.length, pool, 0));
         break;
       default:
         BOLT_UNREACHABLE();
@@ -1155,13 +1225,20 @@ void exportValues(
   }
 
   // Otherwise we will need a new buffer and copy the data.
-  auto size = getArrowElementSize(type);
+  const bool secondsNanos = type->isTimestamp() &&
+      options.timestampEncoding == TimestampEncoding::kSecondsNanos;
+  const auto size =
+      secondsNanos ? kSecondsNanosSize : getArrowElementSize(type);
   auto values = type->isBoolean()
       ? AlignedBuffer::allocate<bool>(out.length, pool)
       : AlignedBuffer::allocate<uint8_t>(
             checkedMultiply<size_t>(out.length, size), pool);
   if (type->kind() == TypeKind::TIMESTAMP) {
-    gatherFromTimestampBuffer(vec, rows, options.timestampUnit, *values);
+    if (secondsNanos) {
+      gatherSecondsNanos(vec, rows, *values);
+    } else {
+      gatherFromTimestampBuffer(vec, rows, options.timestampUnit, *values);
+    }
   } else {
     gatherFromBuffer(*type, *vec.values(), rows, options, *values);
   }
@@ -2397,9 +2474,24 @@ TypePtr parseDecimalFormat(const char* format) {
 
 TypePtr importFromArrowImpl(
     const char* format,
-    const ArrowSchema& arrowSchema) {
+    const ArrowSchema& arrowSchema,
+    const ArrowOptions& options) {
   BOLT_CHECK_NOT_NULL(format);
   const std::string_view formatStr(format);
+  if (arrowSchema.metadata != nullptr &&
+      arrowMetadataValue(arrowSchema, kArrowExtensionNameKey) ==
+          kTimestampExtensionName) {
+    BOLT_USER_CHECK_EQ(
+        formatStr, "w:16", "bolt.timestamp requires FixedSizeBinary(16)");
+    const auto metadata =
+        arrowMetadataValue(arrowSchema, kArrowExtensionMetadataKey);
+    BOLT_USER_CHECK(metadata.has_value(), "Missing bolt.timestamp metadata");
+    BOLT_USER_CHECK_EQ(
+        *metadata,
+        kTimestampExtensionMetadata,
+        "Unsupported bolt.timestamp version");
+    return TIMESTAMP();
+  }
   if (formatStr.rfind("ts", 0) == 0) {
     BOLT_USER_CHECK(
         formatStr.size() >= 4 && formatStr[3] == ':' &&
@@ -2408,6 +2500,13 @@ TypePtr importFromArrowImpl(
         "Invalid Arrow timestamp format: {}",
         formatStr);
     return TIMESTAMP();
+  }
+  if (isArrowTime(formatStr)) {
+    if (options.timeImportMode == TimeImportMode::kMillisOfDay ||
+        formatStr == "tts" || formatStr == "ttm") {
+      return INTEGER();
+    }
+    return BIGINT();
   }
 
   switch (format[0]) {
@@ -2448,10 +2547,6 @@ TypePtr importFromArrowImpl(
       break;
 
     case 't': // temporal types.
-      // Mapping it to ttn for now.
-      if (format[1] == 't' && format[2] == 'n') {
-        return TIMESTAMP();
-      }
       if (format[1] == 'd' && format[2] == 'D') {
         return DATE();
       }
@@ -2474,7 +2569,7 @@ TypePtr importFromArrowImpl(
         case 'l':
           BOLT_CHECK_EQ(arrowSchema.n_children, 1);
           BOLT_CHECK_NOT_NULL(arrowSchema.children[0]);
-          return ARRAY(importFromArrow(*arrowSchema.children[0]));
+          return ARRAY(importFromArrow(*arrowSchema.children[0], options));
 
         // Map.
         case 'm': {
@@ -2486,8 +2581,8 @@ TypePtr importFromArrowImpl(
           BOLT_CHECK_NOT_NULL(child.children[0]);
           BOLT_CHECK_NOT_NULL(child.children[1]);
           return MAP(
-              importFromArrow(*child.children[0]),
-              importFromArrow(*child.children[1]));
+              importFromArrow(*child.children[0], options),
+              importFromArrow(*child.children[1], options));
         }
 
         // Struct/rows.
@@ -2500,7 +2595,8 @@ TypePtr importFromArrowImpl(
 
           for (size_t i = 0; i < arrowSchema.n_children; ++i) {
             BOLT_CHECK_NOT_NULL(arrowSchema.children[i]);
-            childTypes.emplace_back(importFromArrow(*arrowSchema.children[i]));
+            childTypes.emplace_back(
+                importFromArrow(*arrowSchema.children[i], options));
             childNames.emplace_back(
                 arrowSchema.children[i]->name != nullptr
                     ? arrowSchema.children[i]->name
@@ -2532,35 +2628,8 @@ TypePtr importFromArrowImpl(
           // Callers that import Spark VARIANT data via Arrow should either:
           // 1. Set the "ARROW:extension:name" metadata to "spark.variant", or
           // 2. Post-process the imported ROW type into VARIANT.
-          bool isVariant = false;
-          if (arrowSchema.metadata) {
-            // Arrow C metadata is encoded as:
-            //   int32 num_pairs
-            //   (int32 key_len, key, int32 val_len, val) * num_pairs
-            const char* meta = arrowSchema.metadata;
-            int32_t numPairs;
-            memcpy(&numPairs, meta, 4);
-            meta += 4;
-            for (int32_t p = 0; p < numPairs; ++p) {
-              int32_t keyLen;
-              memcpy(&keyLen, meta, 4);
-              meta += 4;
-              std::string_view key(meta, keyLen);
-              meta += keyLen;
-              int32_t valLen;
-              memcpy(&valLen, meta, 4);
-              meta += 4;
-              std::string_view val(meta, valLen);
-              meta += valLen;
-              if (key == kArrowExtensionNameKey &&
-                  val == kSparkVariantExtensionName) {
-                isVariant = true;
-                break;
-              }
-            }
-          }
-
-          if (isVariant) {
+          if (arrowMetadataValue(arrowSchema, kArrowExtensionNameKey) ==
+              kSparkVariantExtensionName) {
             return VARIANT();
           }
 
@@ -2572,7 +2641,7 @@ TypePtr importFromArrowImpl(
           BOLT_CHECK_EQ(arrowSchema.n_children, 2);
           BOLT_CHECK_NOT_NULL(arrowSchema.children[1]);
           // The Bolt type is the type of the `values` child.
-          return importFromArrow(*arrowSchema.children[1]);
+          return importFromArrow(*arrowSchema.children[1], options);
 
         default:
           break;
@@ -2646,11 +2715,10 @@ void exportVariantToArrowSchema(
     child->name = (i == 0) ? "value" : "metadata";
     bridgeHolder->setChildAtIndex(i, std::move(child), arrowSchema);
   }
-  setArrowMetadataEntry(
+  setArrowMetadata(
       arrowSchema,
       *bridgeHolder,
-      kArrowExtensionNameKey,
-      kSparkVariantExtensionName);
+      {{kArrowExtensionNameKey, kSparkVariantExtensionName}});
 }
 
 void exportRowToArrowSchema(
@@ -2945,6 +3013,12 @@ void exportToArrow(
     } else {
       valuesChild->format =
           exportArrowFormatStr(type, options, bridgeHolder->formatBuffer);
+      if (type->isTimestamp() &&
+          options.timestampEncoding == TimestampEncoding::kSecondsNanos) {
+        auto childHolder = std::make_unique<BoltToArrowSchemaBridgeHolder>();
+        setTimestampMetadata(*valuesChild, *childHolder);
+        valuesChild->private_data = childHolder.release();
+      }
     }
     valuesChild->name = "values";
 
@@ -3010,12 +3084,24 @@ void exportToArrow(
     }
   }
 
+  if (type->isTimestamp() &&
+      options.timestampEncoding == TimestampEncoding::kSecondsNanos &&
+      std::string_view(arrowSchema.format) == "w:16") {
+    setTimestampMetadata(arrowSchema, *bridgeHolder);
+  }
+
   // Set release callback.
   arrowSchema.release = releaseArrowSchema;
   arrowSchema.private_data = bridgeHolder.release();
 }
 
 TypePtr importFromArrow(const ArrowSchema& arrowSchema) {
+  return importFromArrow(arrowSchema, ArrowOptions{});
+}
+
+TypePtr importFromArrow(
+    const ArrowSchema& arrowSchema,
+    const ArrowOptions& options) {
   // For dictionaries, format encodes the index type, while the dictionary value
   // is encoded in the dictionary member, as per
   // https://arrow.apache.org/docs/format/CDataInterface.html#dictionary-encoded-arrays.
@@ -3024,7 +3110,7 @@ TypePtr importFromArrow(const ArrowSchema& arrowSchema) {
                                               : arrowSchema.format;
   ArrowSchema schema =
       arrowSchema.dictionary ? *arrowSchema.dictionary : arrowSchema;
-  return importFromArrowImpl(format, schema);
+  return importFromArrowImpl(format, schema, options);
 }
 
 namespace {
@@ -3038,13 +3124,7 @@ TimestampUnit getTimestampUnit(const ArrowSchema& arrowSchema) {
       3,
       "The arrow format string of timestamp should contain 'ts' and unit char.");
   BOLT_USER_CHECK_EQ(format[0], 't', "The first character should be 't'.");
-  // There are two different types of timestamp. s signifies with timezone, and
-  // t is without.
-  if (strlen(format) > 3) {
-    BOLT_USER_CHECK_EQ(format[1], 's', "The second character should be 's'.");
-  } else {
-    BOLT_USER_CHECK_EQ(format[1], 't', "The second character should be 't'.");
-  }
+  BOLT_USER_CHECK_EQ(format[1], 's', "The second character should be 's'.");
   switch (format[2]) {
     case 's':
       return TimestampUnit::kSecond;
@@ -3195,7 +3275,7 @@ VectorPtr createDictionaryVector(
       "Only int32 indices are supported for arrow conversion");
   auto indices = wrapInBufferView(
       arrowArray.buffers[1], arrowArray.length * sizeof(vector_size_t));
-  auto type = importFromArrow(*arrowSchema.dictionary);
+  auto type = importFromArrow(*arrowSchema.dictionary, options);
   auto wrapped = importFromArrowImpl(
       options,
       *arrowSchema.dictionary,
@@ -3229,7 +3309,8 @@ VectorPtr createVectorFromReeArray(
       wrapInBufferView);
 
   const auto& runEndSchema = *arrowSchema.children[0];
-  auto runEndType = importFromArrowImpl(runEndSchema.format, runEndSchema);
+  auto runEndType =
+      importFromArrowImpl(runEndSchema.format, runEndSchema, options);
   BOLT_CHECK_EQ(
       runEndType->kind(),
       TypeKind::INTEGER,
@@ -3389,6 +3470,93 @@ void checkTemporalValues(const ArrowArray& array, const BufferPtr& nulls) {
       "Missing Arrow temporal values buffer");
 }
 
+VectorPtr createSecondsNanosVector(
+    memory::MemoryPool* pool,
+    BufferPtr nulls,
+    const ArrowArray& array) {
+  checkTemporalValues(array, nulls);
+  auto values = AlignedBuffer::allocate<Timestamp>(array.length, pool);
+  auto* timestamps = values->asMutable<Timestamp>();
+  const auto* input = static_cast<const char*>(array.buffers[1]);
+  const auto* rawNulls = nulls ? nulls->as<uint64_t>() : nullptr;
+  for (vector_size_t i = 0; i < array.length; ++i) {
+    if (rawNulls && bits::isBitNull(rawNulls, i)) {
+      continue;
+    }
+    const auto* value = input + i * kSecondsNanosSize;
+    const auto seconds =
+        folly::Endian::little(folly::loadUnaligned<int64_t>(value));
+    const auto nanos = folly::Endian::little(
+        folly::loadUnaligned<uint64_t>(value + sizeof(int64_t)));
+    BOLT_USER_CHECK_GE(seconds, Timestamp::kMinSeconds);
+    BOLT_USER_CHECK_LE(seconds, Timestamp::kMaxSeconds);
+    BOLT_USER_CHECK_LE(nanos, Timestamp::kMaxNanos, "Invalid timestamp nanos");
+    timestamps[i] = Timestamp(seconds, nanos);
+  }
+  return createFlatVector<TypeKind::TIMESTAMP>(
+      pool,
+      TIMESTAMP(),
+      std::move(nulls),
+      array.length,
+      values,
+      array.null_count);
+}
+
+template <typename T, int64_t UnitsPerSecond>
+VectorPtr createTimeVector(
+    const ArrowOptions& options,
+    memory::MemoryPool* pool,
+    const TypePtr& type,
+    BufferPtr nulls,
+    const ArrowArray& array,
+    const WrapInBufferViewFunc& wrapInBufferView) {
+  checkTemporalValues(array, nulls);
+  const bool convert = options.timeImportMode == TimeImportMode::kMillisOfDay &&
+      UnitsPerSecond != Timestamp::kMillisecondsInSecond;
+  const auto* input = static_cast<const char*>(array.buffers[1]);
+  const auto* rawNulls = nulls ? nulls->as<uint64_t>() : nullptr;
+  const auto byteSize = array.length * type->cppSizeInBytes();
+  BufferPtr values;
+  if (!convert && input &&
+      reinterpret_cast<uintptr_t>(input) % alignof(T) == 0) {
+    values = wrapInBufferView(input, byteSize);
+  } else {
+    values = AlignedBuffer::allocate<char>(byteSize, pool);
+    if (!convert && input) {
+      memcpy(values->asMutable<char>(), input, byteSize);
+    }
+  }
+  auto* millis = convert ? values->asMutable<int32_t>() : nullptr;
+  for (vector_size_t i = 0; i < array.length; ++i) {
+    if (rawNulls && bits::isBitNull(rawNulls, i)) {
+      continue;
+    }
+    const auto value = folly::loadUnaligned<T>(input + i * sizeof(T));
+    BOLT_USER_CHECK_GE(value, 0, "Arrow TIME is outside the time-of-day range");
+    BOLT_USER_CHECK_LT(
+        value,
+        Timestamp::kSecondsInDay * UnitsPerSecond,
+        "Arrow TIME is outside the time-of-day range");
+    if (convert) {
+      if constexpr (UnitsPerSecond == 1) {
+        millis[i] = value * Timestamp::kMillisecondsInSecond;
+      } else {
+        constexpr auto kDivisor =
+            UnitsPerSecond / Timestamp::kMillisecondsInSecond;
+        BOLT_USER_CHECK_EQ(
+            value % kDivisor, 0, "Arrow TIME has sub-millisecond precision");
+        millis[i] = value / kDivisor;
+      }
+    }
+  }
+  if (type->isInteger()) {
+    return createFlatVector<TypeKind::INTEGER>(
+        pool, type, std::move(nulls), array.length, values, array.null_count);
+  }
+  return createFlatVector<TypeKind::BIGINT>(
+      pool, type, std::move(nulls), array.length, values, array.null_count);
+}
+
 VectorPtr createShortDecimalVector(
     memory::MemoryPool* pool,
     const TypePtr& type,
@@ -3456,7 +3624,7 @@ VectorPtr importFromArrowImpl(
       arrowArray.length, std::numeric_limits<vector_size_t>::max());
 
   // First parse and generate a Bolt type.
-  auto type = importFromArrow(arrowSchema);
+  auto type = importFromArrow(arrowSchema, options);
   if (options.exportToArrowIPC && type->kind() == TypeKind::UNKNOWN) {
     return BaseVector::createNullConstant(type, arrowArray.length, pool);
   }
@@ -3481,7 +3649,8 @@ VectorPtr importFromArrowImpl(
   }
 
   if (arrowSchema.dictionary) {
-    auto indexType = importFromArrowImpl(arrowSchema.format, arrowSchema);
+    auto indexType =
+        importFromArrowImpl(arrowSchema.format, arrowSchema, options);
     return createDictionaryVector(
         options,
         pool,
@@ -3495,6 +3664,25 @@ VectorPtr importFromArrowImpl(
   if (isREE(arrowSchema)) {
     return createVectorFromReeArray(
         options, pool, arrowSchema, arrowArray, wrapInBufferView);
+  }
+
+  if (isArrowTime(arrowSchema.format)) {
+    switch (arrowSchema.format[2]) {
+      case 's':
+        return createTimeVector<int32_t, 1>(
+            options, pool, type, nulls, arrowArray, wrapInBufferView);
+      case 'm':
+        return createTimeVector<int32_t, 1'000>(
+            options, pool, type, nulls, arrowArray, wrapInBufferView);
+      case 'u':
+        return createTimeVector<int64_t, 1'000'000>(
+            options, pool, type, nulls, arrowArray, wrapInBufferView);
+      case 'n':
+        return createTimeVector<int64_t, 1'000'000'000>(
+            options, pool, type, nulls, arrowArray, wrapInBufferView);
+      default:
+        BOLT_UNREACHABLE();
+    }
   }
 
   // String data types (VARCHAR and VARBINARY).
@@ -3520,6 +3708,9 @@ VectorPtr importFromArrowImpl(
         arrowArray.null_count,
         wrapInBufferView);
   } else if (type->isTimestamp()) {
+    if (std::string_view(arrowSchema.format) == "w:16") {
+      return createSecondsNanosVector(pool, std::move(nulls), arrowArray);
+    }
     checkTemporalValues(arrowArray, nulls);
     return createTimestampVector(
         options,
@@ -3785,6 +3976,7 @@ SchemaSignature makeSchemaSignature(
   mixSignature(signature, options.stringViewCopyValues ? 1 : 0);
   mixSignature(signature, options.exportToArrowIPC ? 1 : 0);
   mixSignature(signature, options.arrayConstantAsDictionary ? 1 : 0);
+  mixSignature(signature, static_cast<uint64_t>(options.timestampEncoding));
   for (const auto& fieldName : fieldNames) {
     ++signature.fields;
     mixStringView(signature, fieldName);

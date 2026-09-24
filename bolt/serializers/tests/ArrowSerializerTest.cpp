@@ -572,6 +572,18 @@ TEST_P(ArrowSerializerTest, genericOptionsWithArrowOptions) {
   }
 }
 
+TEST_P(ArrowSerializerTest, timestampWithSecondsNanosEncoding) {
+  serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions options;
+  options.arrowOptions.timestampEncoding = TimestampEncoding::kSecondsNanos;
+  auto timestamps = makeNullableFlatVector<Timestamp>(
+      {Timestamp::min(),
+       Timestamp(-1, 999'999'999),
+       std::nullopt,
+       Timestamp(253'402'300'799, 123'456'789),
+       Timestamp::max()});
+  testRoundTrip(timestamps, &options);
+}
+
 TEST_P(ArrowSerializerTest, timestampWithNanosecondPrecision) {
   // Verify that nanosecond precision is preserved when the right options are
   // passed to the serde.
