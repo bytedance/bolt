@@ -147,12 +147,15 @@ class BmRowContainer {
   SegmentId finalizeReorderedSegment(folly::Range<char* const*> sortedRows);
 
   // Conservative estimate for whether all blocks in segments can be bulk
-  // loaded now. Only blocks with active BufferHandle are treated as loaded;
-  // unpinned resident blocks are counted as reloadable because MaybeReserve()
-  // may reclaim them while probing capacity. This is a hint only:
-  // BulkReadSession::load() still performs the actual reservation and may throw
-  // if memory changes.
-  bool canBulkRead(folly::Range<const SegmentId*> segments) const;
+  // loaded now. Requires admissionMultiplier times the unloaded bytes to leave
+  // headroom for caller processing. Only blocks with active BufferHandle are
+  // treated as loaded; unpinned resident blocks are counted as reloadable
+  // because MaybeReserve() may reclaim them while probing capacity. This is a
+  // hint only: BulkReadSession::load() still performs the actual reservation
+  // and may throw if memory changes.
+  bool canBulkRead(
+      folly::Range<const SegmentId*> segments,
+      size_t admissionMultiplier = 2) const;
 
   BulkReadSession beginBulkReadSegments(
       folly::Range<const SegmentId*> segments);

@@ -18,6 +18,8 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#include <limits>
+
 namespace bytedance::bolt::exec::bm {
 namespace {
 
@@ -54,13 +56,21 @@ uint64_t BmRowContainer::unloadedBytes(
 }
 
 bool BmRowContainer::canBulkRead(
-    folly::Range<const SegmentId*> segments) const {
+    folly::Range<const SegmentId*> segments,
+    size_t admissionMultiplier) const {
   validateSegments(segments);
+  BOLT_CHECK_GT(admissionMultiplier, 0);
   const auto bytes = unloadedBytes(segments);
   if (bytes == 0) {
     return true;
   }
-  const auto reserved = bufferManager_->MaybeReserve(bytes);
+  const auto maxBulkReadBytes =
+      std::numeric_limits<size_t>::max() / admissionMultiplier;
+  if (bytes > maxBulkReadBytes) {
+    return false;
+  }
+  const auto reserved =
+      bufferManager_->MaybeReserve(bytes * admissionMultiplier);
   bufferManager_->ReleaseUnusedReservation();
   return reserved;
 }
