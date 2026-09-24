@@ -135,7 +135,11 @@ std::unique_ptr<ReadFile> HdfsFileSystem::openFileForRead(
   const auto bufferSize =
       parseHdfsOpenFileIntOption(options, HdfsOpenFileOptions::kBufferSize);
   return std::make_unique<HdfsReadFile>(
-      impl_->hdfsShim(), impl_->hdfsClient(), path, bufferSize);
+      impl_->hdfsShim(),
+      impl_->hdfsClient(),
+      path,
+      bufferSize,
+      options.fileSize);
 }
 
 std::unique_ptr<WriteFile> HdfsFileSystem::openFileForWrite(

@@ -42,6 +42,7 @@
 #include "bolt/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h"
 #include "bolt/core/QueryConfig.h"
 #include "bolt/exec/tests/utils/TempFilePath.h"
+#include "bolt/external/hdfs/ArrowHdfsInternal.h"
 #include "gtest/gtest.h"
 using namespace bytedance::bolt;
 
@@ -56,6 +57,23 @@ static const std::unordered_map<std::string, std::string> configurationValues(
     {{"hive.hdfs.host", localhost}, {"hive.hdfs.port", hdfsPort}});
 static const std::map<std::string, std::string> config;
 static const filesystems::HdfsServiceEndpoint endpoint(localhost, hdfsPort);
+
+namespace {
+
+int pathInfoCalls;
+int freeFileInfoCalls;
+hdfsFileInfo fileInfo;
+
+hdfsFileInfo* getPathInfo(hdfsFS, const char*) {
+  ++pathInfoCalls;
+  return &fileInfo;
+}
+
+void freeFileInfo(hdfsFileInfo*, int) {
+  ++freeFileInfoCalls;
+}
+
+} // namespace
 
 class HdfsFileSystemTest : public testing::Test {
  public:
@@ -126,6 +144,43 @@ void readData(ReadFile* readFile) {
   ASSERT_EQ(zarf, "ccccccccccddddd");
   ASSERT_EQ(warf, "abbbbbcc");
   ASSERT_EQ(warfFromBuf, "abbbbbcc");
+}
+
+TEST(HdfsReadFileTest, usesProvidedFileSizeWithoutPathInfo) {
+  filesystems::arrow::io::internal::LibHdfsShim driver;
+  driver.Initialize();
+  driver.hdfsGetPathInfo = [](hdfsFS, const char*) -> hdfsFileInfo* {
+    ADD_FAILURE() << "GetPathInfo should not be called";
+    return nullptr;
+  };
+
+  HdfsReadFile readFile(&driver, nullptr, destinationPath, 0, 123);
+  ASSERT_EQ(readFile.size(), 123);
+  BOLT_ASSERT_THROW(
+      readFile.pread(123, 1),
+      "Cannot read HDFS file beyond its size: 123, offset: 123, end point: 124");
+}
+
+TEST(HdfsReadFileTest, usesPathInfoWhenFileSizeIsUnknown) {
+  pathInfoCalls = 0;
+  freeFileInfoCalls = 0;
+  fileInfo = {};
+  fileInfo.mSize = 123;
+  fileInfo.mBlockSize = 456;
+
+  filesystems::arrow::io::internal::LibHdfsShim driver;
+  driver.Initialize();
+  driver.hdfsGetPathInfo = getPathInfo;
+  driver.hdfsFreeFileInfo = freeFileInfo;
+
+  {
+    HdfsReadFile readFile(&driver, nullptr, destinationPath);
+    ASSERT_EQ(readFile.size(), 123);
+    ASSERT_EQ(readFile.memoryUsage(), 456);
+  }
+
+  ASSERT_EQ(pathInfoCalls, 1);
+  ASSERT_EQ(freeFileInfoCalls, 1);
 }
 
 std::unique_ptr<WriteFile> openFileForWrite(std::string_view path) {
