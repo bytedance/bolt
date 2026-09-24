@@ -212,6 +212,14 @@ class Buffer {
         sizeof(T), is_pod_like_v<T>, buffer, offset, length);
   }
 
+  /// Transfers this buffer to 'pool'. Returns true if the transfer succeeds, or
+  /// false if the transfer fails. A buffer can be transferred to 'pool' if its
+  /// original pool and 'pool' are from the same MemoryAllocator and the buffer
+  /// is not a BufferView.
+  virtual bool transferTo(bolt::memory::MemoryPool* /*pool*/) {
+    BOLT_NYI("{} unsupported", __FUNCTION__);
+  }
+
  protected:
   // Writes a magic word at 'capacity_'. No-op for a BufferView. The actual
   // logic is inside a separate virtual function, allowing override by derived
@@ -509,6 +517,42 @@ class AlignedBuffer : public Buffer {
     return newBuffer;
   }
 
+  template <typename T>
+  static BufferPtr copy(
+      const BufferPtr& buffer,
+      bolt::memory::MemoryPool* pool) {
+    if (buffer == nullptr) {
+      return nullptr;
+    }
+
+    // The reason we use uint8_t is because mutableNulls()->size() will return
+    // in byte count. We also don't bother initializing since copyFrom will be
+    // overwriting anyway.
+    BufferPtr newBuffer;
+    if constexpr (std::is_same_v<T, bool>) {
+      newBuffer = AlignedBuffer::allocate<uint8_t>(buffer->size(), pool);
+    } else {
+      const auto numElements = checkedDivide(buffer->size(), sizeof(T));
+      newBuffer = AlignedBuffer::allocate<T>(numElements, pool);
+    }
+
+    newBuffer->copyFrom(buffer.get(), newBuffer->size());
+
+    return newBuffer;
+  }
+
+  bool transferTo(bolt::memory::MemoryPool* pool) override {
+    if (pool_ == pool) {
+      return true;
+    }
+    if (pool_->transferTo(
+            pool, this, checkedPlus<size_t>(kPaddedSize, capacity_))) {
+      setPool(pool);
+      return true;
+    }
+    return false;
+  }
+
  protected:
   AlignedBuffer(bolt::memory::MemoryPool* pool, size_t capacity)
       : Buffer(
@@ -547,6 +591,12 @@ class AlignedBuffer : public Buffer {
       memset(asMutable<char>() + oldBytes, 0xa1, capacity() - oldBytes);
 #endif
     }
+  }
+
+  void setPool(bolt::memory::MemoryPool* pool) {
+    bolt::memory::MemoryPool** poolPtr =
+        const_cast<bolt::memory::MemoryPool**>(&pool_);
+    *poolPtr = pool;
   }
 
  protected:
@@ -689,6 +739,23 @@ class NonPODAlignedBuffer : public Buffer {
         this, checkedPlus<size_t>(AlignedBuffer::kPaddedSize, capacity_));
   }
 
+  bool transferTo(bolt::memory::MemoryPool* pool) override {
+    if (pool_ == pool) {
+      return true;
+    }
+
+    if (pool_->transferTo(
+            pool,
+            this,
+            checkedPlus<size_t>(AlignedBuffer::kPaddedSize, capacity_))) {
+      bolt::memory::MemoryPool** poolPtr =
+          const_cast<bolt::memory::MemoryPool**>(&pool_);
+      *poolPtr = pool;
+      return true;
+    }
+    return false;
+  }
+
   // Needs to use this class from static methods of AlignedBuffer
   friend class AlignedBuffer;
 };
@@ -714,6 +781,13 @@ class BufferView : public Buffer {
 
   bool isView() const override {
     return true;
+  }
+
+  bool transferTo(bolt::memory::MemoryPool* pool) override {
+    if (pool_ == pool) {
+      return true;
+    }
+    return false;
   }
 
  private:
