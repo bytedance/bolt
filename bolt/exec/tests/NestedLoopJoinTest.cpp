@@ -805,6 +805,39 @@ TEST_F(NestedLoopJoinTest, dynamicBatchSizeWithWideBuildRows) {
   ASSERT_EQ(result->size(), kProbeRows);
 }
 
+TEST_F(NestedLoopJoinTest, collapseProbeDictionaryInOutput) {
+  auto probeBase = makeFlatVector<int32_t>({10, 20, 30, 40});
+  auto probeDictionary = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({3, 1, 2}), 3, probeBase);
+  auto probeVector = makeRowVector({"t0"}, {probeDictionary});
+  auto buildVector =
+      makeRowVector({"u0"}, {makeFlatVector<int32_t>(std::vector<int32_t>{0})});
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  CursorParameters params;
+  params.planNode =
+      PlanBuilder(planNodeIdGenerator)
+          .values({probeVector})
+          .nestedLoopJoin(
+              PlanBuilder(planNodeIdGenerator).values({buildVector}).planNode(),
+              "t0 > u0",
+              {"t0", "u0"},
+              core::JoinType::kInner)
+          .planNode();
+  params.copyResult = false;
+
+  auto cursor = TaskCursor::create(params);
+  ASSERT_TRUE(cursor->moveNext());
+  const auto& result = cursor->current();
+  ASSERT_EQ(result->size(), 3);
+
+  const auto& probeOutput = result->childAt(0);
+  ASSERT_EQ(probeOutput->encoding(), VectorEncoding::Simple::DICTIONARY);
+  EXPECT_EQ(probeOutput->valueVector().get(), probeBase.get());
+  assertEqualVectors(makeFlatVector<int32_t>({40, 20, 30}), probeOutput);
+  ASSERT_FALSE(cursor->moveNext());
+}
+
 // Verifies filter path correctness when build side has a single row.
 // The optimization batches all probe rows into one filter evaluation.
 TEST_F(NestedLoopJoinTest, filterWithSingleBuildRow) {
