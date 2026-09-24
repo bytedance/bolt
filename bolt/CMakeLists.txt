@@ -328,6 +328,7 @@ function(bolt_configure_engine target_name)
       Boost::url
       $<$<BOOL:${BOLT_BUILD_TEST_UTILS}>:cpr::cpr>
       $<$<BOOL:${BOLT_ENABLE_S3}>:aws-sdk-cpp::aws-sdk-cpp>
+      $<$<BOOL:${BOLT_ENABLE_TOS}>:$<LINK_ONLY:tos_client::tos_client>>
       $<$<BOOL:${BOLT_ENABLE_GCS}>:google-cloud-cpp::storage>
       $<$<BOOL:${BOLT_ENABLE_ABFS}>:Azure::azure-storage-blobs
       Azure::azure-storage-files-datalake
