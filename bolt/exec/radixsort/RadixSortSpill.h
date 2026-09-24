@@ -76,6 +76,14 @@ class RadixSortSpillWriter {
     return inputBytes_;
   }
 
+  uint64_t firstBlockUncompressedSize() const {
+    return firstBlockUncompressedSize_;
+  }
+
+  uint64_t firstBlockStoredSize() const {
+    return firstBlockStoredSize_;
+  }
+
  private:
   void prepareWriteBuffer();
 
@@ -126,6 +134,8 @@ class RadixSortSpillWriter {
   uint64_t normalBufferSize_{0};
   uint64_t pendingBodyCapacity_{0};
   uint64_t inputBytes_{0};
+  uint64_t firstBlockUncompressedSize_{0};
+  uint64_t firstBlockStoredSize_{0};
   bool finished_{false};
 };
 
@@ -343,6 +353,8 @@ class RadixSortMerger {
       std::unique_ptr<RadixSortSpillReadBufferCache> bufferCache = nullptr,
       const RadixSortKeyCodec* keyCodec = nullptr);
 
+  ~RadixSortMerger();
+
   vector_size_t collectRows(
       vector_size_t count,
       const char** keys,
@@ -357,6 +369,12 @@ class RadixSortMerger {
   uint64_t getSpillReadIOTime() const;
 
   std::optional<uint64_t> memoryPosition() const;
+
+  bool hasPendingMemoryReplacement() const {
+    return pendingMemoryReplacement_ != nullptr;
+  }
+
+  void finishMemoryReplacement();
 
   void replaceMemory(
       RadixSortSpillRun run,
@@ -422,6 +440,26 @@ class RadixSortMerger {
 
   void validateVariableStreams() const;
 
+  struct PendingMemoryReplacement {
+    PendingMemoryReplacement(
+        size_t index,
+        RadixSortSpillRun run,
+        RadixSortSpillSectionMeta meta,
+        memory::MemoryPool* pool,
+        bool spillUringEnabled)
+        : index(index),
+          run(std::move(run)),
+          meta(std::move(meta)),
+          pool(pool),
+          spillUringEnabled(spillUringEnabled) {}
+
+    size_t index;
+    RadixSortSpillRun run;
+    RadixSortSpillSectionMeta meta;
+    memory::MemoryPool* pool;
+    bool spillUringEnabled;
+  };
+
   static int32_t parent(int32_t node) {
     return (node - 1) / 2;
   }
@@ -449,6 +487,7 @@ class RadixSortMerger {
   std::vector<StreamIndex> losers_;
   StreamIndex lastIndex_{kEmpty};
   int32_t firstStream_{0};
+  std::unique_ptr<PendingMemoryReplacement> pendingMemoryReplacement_;
 };
 
 } // namespace bytedance::bolt::exec::radixsort

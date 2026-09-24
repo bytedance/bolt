@@ -399,6 +399,10 @@ void RadixSortSpillWriter::flush() {
       payloadHeapBytes};
   spillWriter_->writeEncodedBlock(
       start, kBlockHeaderSize, uncompressedSize, rowCount);
+  if (firstBlockUncompressedSize_ == 0) {
+    firstBlockUncompressedSize_ = uncompressedSize;
+    firstBlockStoredSize_ = header->storedSize;
+  }
   resetBuffer(normalBufferSize_);
 }
 
@@ -1087,6 +1091,12 @@ RadixSortMerger::RadixSortMerger(
   resetSelection();
 }
 
+RadixSortMerger::~RadixSortMerger() {
+  if (pendingMemoryReplacement_ != nullptr) {
+    cleanupSpillFilesNoThrow(pendingMemoryReplacement_->run.files);
+  }
+}
+
 void RadixSortMerger::resetSelection() {
   BOLT_CHECK_LE(
       streams_.size(),
@@ -1141,6 +1151,9 @@ void RadixSortMerger::replaceMemory(
     folly::FunctionRef<void()> releaseMemory) {
   auto cleanupFilesOnError =
       folly::makeGuard([&run]() { cleanupSpillFilesNoThrow(run.files); });
+  BOLT_CHECK(
+      pendingMemoryReplacement_ == nullptr,
+      "Radix memory replacement is already pending");
   BOLT_CHECK(memoryIndex_.has_value(), "Missing radix memory merge stream");
   BOLT_CHECK(!run.files.empty(), "Radix sort spill run has no files");
   BOLT_CHECK(
@@ -1152,13 +1165,8 @@ void RadixSortMerger::replaceMemory(
   memoryIndex_.reset();
   try {
     releaseMemory();
-    streams_[index] = makeRadixSortSpillMergeStream(
-        std::move(run),
-        std::move(meta),
-        pool,
-        spillUringEnabled,
-        bufferCache_.get());
-    resetSelection();
+    pendingMemoryReplacement_ = std::make_unique<PendingMemoryReplacement>(
+        index, std::move(run), std::move(meta), pool, spillUringEnabled);
   } catch (...) {
     streams_.clear();
     losers_.clear();
@@ -1166,6 +1174,30 @@ void RadixSortMerger::replaceMemory(
     throw;
   }
   cleanupFilesOnError.dismiss();
+}
+
+void RadixSortMerger::finishMemoryReplacement() {
+  if (pendingMemoryReplacement_ == nullptr) {
+    return;
+  }
+  auto& pending = *pendingMemoryReplacement_;
+  BOLT_DCHECK_LT(pending.index, streams_.size());
+  try {
+    streams_[pending.index] = makeRadixSortSpillMergeStream(
+        std::move(pending.run),
+        std::move(pending.meta),
+        pending.pool,
+        pending.spillUringEnabled,
+        bufferCache_.get());
+    pendingMemoryReplacement_.reset();
+    resetSelection();
+  } catch (...) {
+    pendingMemoryReplacement_.reset();
+    streams_.clear();
+    losers_.clear();
+    lastIndex_ = kEmpty;
+    throw;
+  }
 }
 
 void RadixSortMerger::removeMemory() {
@@ -1491,7 +1523,9 @@ void RadixSortMerger::validateVariableStreams() const {
 uint64_t RadixSortMerger::getSpillReadTime() const {
   uint64_t time = 0;
   for (const auto& stream : streams_) {
-    time += stream->getSpillReadTime();
+    if (stream != nullptr) {
+      time += stream->getSpillReadTime();
+    }
   }
   return time;
 }
@@ -1499,7 +1533,9 @@ uint64_t RadixSortMerger::getSpillReadTime() const {
 uint64_t RadixSortMerger::getSpillDecompressTime() const {
   uint64_t time = 0;
   for (const auto& stream : streams_) {
-    time += stream->getSpillDecompressTime();
+    if (stream != nullptr) {
+      time += stream->getSpillDecompressTime();
+    }
   }
   return time;
 }
@@ -1507,7 +1543,9 @@ uint64_t RadixSortMerger::getSpillDecompressTime() const {
 uint64_t RadixSortMerger::getSpillReadIOTime() const {
   uint64_t time = 0;
   for (const auto& stream : streams_) {
-    time += stream->getSpillReadIOTime();
+    if (stream != nullptr) {
+      time += stream->getSpillReadIOTime();
+    }
   }
   return time;
 }

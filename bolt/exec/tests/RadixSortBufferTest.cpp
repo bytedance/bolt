@@ -33,6 +33,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
+#include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/SortBuffer.h"
@@ -2963,6 +2964,86 @@ TEST_F(RadixSortBufferTest, outputStageSpillReplacesMultiStreamMerge) {
        .expectedSpilledRows = 1});
 }
 
+TEST_F(RadixSortBufferTest, outputStageReclaimDoesNotIncreaseReservation) {
+  constexpr vector_size_t kRowsPerRun = 4;
+  constexpr vector_size_t kInputSpillRuns = 2;
+  for (const bool withInputSpills : {false, true}) {
+    SCOPED_TRACE(withInputSpills ? "existing merge" : "direct output");
+    const vector_size_t rows =
+        (withInputSpills ? kInputSpillRuns + 1 : 1) * kRowsPerRun;
+    auto input = makeKeyPayloadIdRows(generate<std::optional<int64_t>>(
+        rows, [rows](vector_size_t row) { return rows - row; }));
+    SpillContext spill(*this, input);
+    auto& buffer = spill.buffer;
+    if (withInputSpills) {
+      addInputRuns(
+          buffer,
+          input,
+          {{kRowsPerRun, true}, {kRowsPerRun, true}, {kRowsPerRun, false}});
+    } else {
+      buffer.addInput(input);
+    }
+    buffer.noMoreInput();
+
+    // Keep the returned output alive so reclaim cannot count its backing
+    // buffers as released. Only one row remains in the resident run.
+    auto prefix = buffer.getOutput(kRowsPerRun - 1);
+    ASSERT_NE(prefix, nullptr);
+    ASSERT_EQ(prefix->size(), kRowsPerRun - 1);
+    ASSERT_TRUE(buffer.canReclaim());
+    const auto readStatsBefore = buffer.spillReadStats();
+    pool()->release();
+
+    int64_t reclaimedBytes = 0;
+    {
+      memory::ScopedReclaimedBytesRecorder recorder(pool(), &reclaimedBytes);
+      buffer.spill();
+    }
+    EXPECT_GE(reclaimedBytes, 0);
+    EXPECT_FALSE(buffer.canReclaim());
+    expectSpillReadStatsEqual(readStatsBefore, buffer.spillReadStats());
+
+    collectAndVerify(
+        buffer,
+        input,
+        /*batchSize=*/2,
+        /*idChannel=*/2,
+        /*keyChannel=*/0,
+        /*idBase=*/0,
+        prefix);
+  }
+}
+
+TEST_F(RadixSortBufferTest, outputStageSpillAdmitsOversizedFirstBlock) {
+  constexpr uint64_t kPayloadBytes = 32UL << 20;
+  auto input = makeKeyPayloadIdRows(
+      {2, 1}, {std::string(kPayloadBytes, 'x'), std::string("small")});
+  SpillContext spill(*this, input);
+  auto& buffer = spill.buffer;
+  buffer.addInput(input);
+  buffer.noMoreInput();
+
+  auto prefix = buffer.getOutput(1);
+  ASSERT_NE(prefix, nullptr);
+  ASSERT_EQ(prefix->size(), 1);
+  buffer.spill();
+
+  const auto estimate =
+      RadixSortBufferTestHelper::outputAdmissionEstimate(buffer, /*rows=*/1);
+  const auto oversizedBlockAllocation =
+      pool()->preferredSize(kPayloadBytes + AlignedBuffer::kPaddedSize);
+  EXPECT_GE(estimate.scratchGrowth, oversizedBlockAllocation);
+
+  collectAndVerify(
+      buffer,
+      input,
+      /*batchSize=*/1,
+      /*idChannel=*/2,
+      /*keyChannel=*/0,
+      /*idBase=*/0,
+      prefix);
+}
+
 TEST_F(RadixSortBufferTest, outputStageSpillUsesMemoryCursor) {
   struct TestCase {
     const char* name;
@@ -3006,10 +3087,7 @@ TEST_F(RadixSortBufferTest, outputStageSpillUsesMemoryCursor) {
       spillMemoryRunAndCheckStats(buffer, remainingMemoryRows);
       ASSERT_TRUE(buffer.spilledStats());
       EXPECT_EQ(buffer.spilledStats()->spillRuns, statsBefore.spillRuns + 1);
-      // Constructing the replacement stream eagerly loads its first block,
-      // so aggregate read counters can legitimately increase here.
-      expectSpillReadStatsNotDecreased(
-          readStatsBefore, buffer.spillReadStats());
+      expectSpillReadStatsEqual(readStatsBefore, buffer.spillReadStats());
     }
 
     collectAndVerify(buffer, input, 2, 2, 0, 0, prefix);
@@ -3979,8 +4057,12 @@ TEST_F(
     buffer.noMoreInput();
 
     corruptOutputFile = true;
-    EXPECT_THROW(buffer.spill(), BoltException);
+    EXPECT_NO_THROW(buffer.spill());
     EXPECT_FALSE(outputFile.empty());
+    EXPECT_TRUE(std::filesystem::exists(outputFile));
+    EXPECT_TRUE(std::filesystem::exists(diskFiles.front()));
+    EXPECT_TRUE(buffer.spillReadStats().has_value());
+    EXPECT_THROW(buffer.getOutput(1), BoltException);
     EXPECT_FALSE(std::filesystem::exists(outputFile));
     EXPECT_FALSE(std::filesystem::exists(diskFiles.front()));
     EXPECT_FALSE(buffer.spillReadStats().has_value());
