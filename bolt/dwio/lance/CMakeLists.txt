@@ -12,10 +12,13 @@ bolt_add_library(
   NativeLanceColumnCursor.cpp
   NativeLanceDecompressor.cpp
   NativeLanceListOffsets.cpp
+  NativeLanceLegacyBlob.cpp
   NativeLanceLegacyBinary.cpp
   NativeLanceLegacyDictionary.cpp
+  NativeLanceLegacyList.cpp
   NativeLanceLegacyPageReader.cpp
   NativeLanceLegacyScalar.cpp
+  NativeLanceLegacyStruct.cpp
   NativeLanceMemoryBudget.cpp
   NativeLancePackedStruct.cpp
   NativeLancePageReader.cpp
