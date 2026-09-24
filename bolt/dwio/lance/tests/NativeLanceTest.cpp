@@ -2480,7 +2480,15 @@ TEST_F(NativeLanceTest, fileOpenTaskHasExplicitPhases) {
       nullptr,
       defaultNativeLanceTypeAdapter());
 
-  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedContext);
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedFooter);
+  EXPECT_TRUE(task.executeStep());
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedGlobalBufferIndex);
+  EXPECT_TRUE(task.executeStep());
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedSchema);
+  EXPECT_TRUE(task.executeStep());
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedColumnMetadataIndex);
+  EXPECT_TRUE(task.executeStep());
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedSchemaIndex);
   EXPECT_TRUE(task.executeStep());
   EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedValidation);
   EXPECT_FALSE(task.executeStep());

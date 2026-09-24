@@ -1924,6 +1924,9 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 
 - FileReader 通过不可变 `NativeLanceFileContext` 发布 metadata、schema、type mapping、
   resolver 和 scheduler 配置；每个 RowReader 只创建一个独立输入。
+- `NativeLanceFileOpenTask` 已按 footer、global buffer index、schema、column metadata
+  index、schema index、validation 六个真实阶段推进；任一阶段失败都会冻结为终态，未完成
+  的 metadata 不会暴露给 Reader。
 - RowReader 只委托给 `NativeLanceScanCoordinator`；一个 `next()` 只对应一个
   `NativeLanceScanWindow`，部分结果不会对调用方可见。
 - `NativeLanceScanPlan` 固化 projection、filter required columns、split row ranges 和逻辑
@@ -1973,8 +1976,6 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
   传播到 Struct/List/Map ColumnReader，避免先物化未投影 child 再裁剪。
 - `NativeLanceBatchBuilder` 已统一所有权和发布，但复杂类型仍会使用 compatibility
   vector；最终目标是 page kernel 直接写 caller-owned child buffer。
-- FileOpenTask 当前把 metadata 构造作为一个阶段；需要将 footer、schema、global buffer
-  index、column index 拆成可独立失败的真实阶段。
 - `NativeLanceMetadata` 仍同时承担 file metadata、schema index 和 lazy column metadata
   loader，最终需要按第 8 节拆分。
 - memory reservation 已用于 page-owned scheduler API，但全部 legacy compatibility buffer

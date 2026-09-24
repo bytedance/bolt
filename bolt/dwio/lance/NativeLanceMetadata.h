@@ -29,10 +29,13 @@
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
 #include "bolt/dwio/lance/proto/lance_encodings_v2_0.pb.h"
 #include "bolt/dwio/lance/proto/lance_encodings_v2_1.pb.h"
+#include "bolt/dwio/lance/proto/lance_file.pb.h"
 #include "bolt/dwio/lance/proto/lance_file_v2.pb.h"
 #include "bolt/type/Type.h"
 
 namespace bytedance::bolt::lance::reader {
+
+class NativeLanceFileOpenTask;
 
 /// Metadata needed to plan native reads of Lance v2.0-v2.3 files.
 ///
@@ -181,6 +184,9 @@ class NativeLanceMetadata {
       uint64_t limit) const;
 
  private:
+  struct DeferredOpenTag {};
+
+  friend class NativeLanceFileOpenTask;
   friend bool operator==(
       const BufferDescriptor& lhs,
       const BufferDescriptor& rhs) {
@@ -188,6 +194,17 @@ class NativeLanceMetadata {
   }
 
   BufferPtr read(uint64_t offset, uint64_t length) const;
+  NativeLanceMetadata(
+      dwio::common::BufferedInput& input,
+      memory::MemoryPool& pool,
+      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter,
+      DeferredOpenTag);
+  void readFooter();
+  void readGlobalBufferIndex();
+  void readSchema();
+  void readColumnMetadataIndex();
+  void buildSchemaIndex();
+  void validateOpenState() const;
   void parseColumnMetadata(
       uint32_t physicalColumnIndex,
       const char* data,
@@ -197,6 +214,7 @@ class NativeLanceMetadata {
   dwio::common::BufferedInput& input_;
   memory::MemoryPool& pool_;
   std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter_;
+  ::lance::file::FileDescriptor fileDescriptor_;
   Footer footer_;
   uint64_t numRows_{0};
   RowTypePtr rowType_;

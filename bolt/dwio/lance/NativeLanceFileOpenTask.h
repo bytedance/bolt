@@ -24,7 +24,11 @@
 namespace bytedance::bolt::lance::reader {
 
 enum class NativeLanceFileOpenState : uint8_t {
-  kNeedContext,
+  kNeedFooter,
+  kNeedGlobalBufferIndex,
+  kNeedSchema,
+  kNeedColumnMetadataIndex,
+  kNeedSchemaIndex,
   kNeedValidation,
   kReady,
   kFailed,
@@ -57,9 +61,10 @@ class NativeLanceFileOpenTask {
   dwio::common::ReaderOptions options_;
   std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
   std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter_;
+  std::unique_ptr<NativeLanceMetadata> metadata_;
   std::shared_ptr<NativeLanceFileContext> context_;
   std::exception_ptr failure_;
-  NativeLanceFileOpenState state_{NativeLanceFileOpenState::kNeedContext};
+  NativeLanceFileOpenState state_{NativeLanceFileOpenState::kNeedFooter};
 };
 
 std::shared_ptr<const NativeLanceFileContext> openNativeLanceFile(

@@ -31,6 +31,11 @@ NativeLanceFileOpenTask::NativeLanceFileOpenTask(
       typeAdapter_(std::move(typeAdapter)) {
   BOLT_CHECK_NOT_NULL(input_);
   BOLT_CHECK_NOT_NULL(typeAdapter_);
+  metadata_.reset(new NativeLanceMetadata(
+      *input_,
+      options_.getMemoryPool(),
+      typeAdapter_,
+      NativeLanceMetadata::DeferredOpenTag{}));
 }
 
 bool NativeLanceFileOpenTask::executeStep() {
@@ -51,12 +56,30 @@ bool NativeLanceFileOpenTask::executeStep() {
 
 bool NativeLanceFileOpenTask::executeImpl() {
   switch (state_) {
-    case NativeLanceFileOpenState::kNeedContext:
-      context_ = std::make_shared<NativeLanceFileContext>(
-          std::move(input_), options_, blobResolver_, typeAdapter_);
+    case NativeLanceFileOpenState::kNeedFooter:
+      metadata_->readFooter();
+      state_ = NativeLanceFileOpenState::kNeedGlobalBufferIndex;
+      return true;
+    case NativeLanceFileOpenState::kNeedGlobalBufferIndex:
+      metadata_->readGlobalBufferIndex();
+      state_ = NativeLanceFileOpenState::kNeedSchema;
+      return true;
+    case NativeLanceFileOpenState::kNeedSchema:
+      metadata_->readSchema();
+      state_ = NativeLanceFileOpenState::kNeedColumnMetadataIndex;
+      return true;
+    case NativeLanceFileOpenState::kNeedColumnMetadataIndex:
+      metadata_->readColumnMetadataIndex();
+      state_ = NativeLanceFileOpenState::kNeedSchemaIndex;
+      return true;
+    case NativeLanceFileOpenState::kNeedSchemaIndex:
+      metadata_->buildSchemaIndex();
       state_ = NativeLanceFileOpenState::kNeedValidation;
       return true;
     case NativeLanceFileOpenState::kNeedValidation:
+      metadata_->validateOpenState();
+      context_ = std::make_shared<NativeLanceFileContext>(
+          std::move(input_), options_, blobResolver_, std::move(metadata_));
       context_->validate();
       state_ = NativeLanceFileOpenState::kReady;
       return false;

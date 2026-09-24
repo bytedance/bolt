@@ -883,7 +883,29 @@ NativeLanceMetadata::NativeLanceMetadata(
     dwio::common::BufferedInput& input,
     memory::MemoryPool& pool,
     std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter)
+    : NativeLanceMetadata(
+          input,
+          pool,
+          std::move(typeAdapter),
+          DeferredOpenTag{}) {
+  readFooter();
+  readGlobalBufferIndex();
+  readSchema();
+  readColumnMetadataIndex();
+  buildSchemaIndex();
+  validateOpenState();
+}
+
+NativeLanceMetadata::NativeLanceMetadata(
+    dwio::common::BufferedInput& input,
+    memory::MemoryPool& pool,
+    std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter,
+    DeferredOpenTag)
     : input_(input), pool_(pool), typeAdapter_(std::move(typeAdapter)) {
+  BOLT_CHECK_NOT_NULL(typeAdapter_);
+}
+
+void NativeLanceMetadata::readFooter() {
   const auto fileSize = input_.getReadFile()->size();
   BOLT_CHECK_GE(fileSize, kFooterSize, "Lance file is too small: {}", fileSize);
 
@@ -931,7 +953,10 @@ NativeLanceMetadata::NativeLanceMetadata(
           static_cast<uint64_t>(footer_.numColumns) * 16,
       footer_.globalBufferOffsetsStart,
       "Invalid Lance column metadata offset table");
+}
 
+void NativeLanceMetadata::readGlobalBufferIndex() {
+  const auto fileSize = input_.getReadFile()->size();
   const auto globalTable =
       read(footer_.globalBufferOffsetsStart, footer_.numGlobalBuffers * 16);
   globalBuffers_.reserve(footer_.numGlobalBuffers);
@@ -951,24 +976,27 @@ NativeLanceMetadata::NativeLanceMetadata(
     globalBuffers_.push_back(descriptor);
   }
   BOLT_CHECK(!globalBuffers_.empty(), "Lance file has no schema buffer");
+}
 
+void NativeLanceMetadata::readSchema() {
   const auto schemaBytes =
       read(globalBuffers_[0].offset, globalBuffers_[0].length);
-  ::lance::file::FileDescriptor descriptor;
   BOLT_CHECK(
-      descriptor.ParseFromArray(
+      fileDescriptor_.ParseFromArray(
           schemaBytes->as<char>(), static_cast<int>(schemaBytes->size())),
       "Failed to parse Lance file descriptor");
-  BOLT_CHECK(descriptor.has_schema(), "Lance file descriptor has no schema");
-  numRows_ = descriptor.length();
-  const auto schemaTree = buildSchemaTree(descriptor.schema());
+  BOLT_CHECK(
+      fileDescriptor_.has_schema(), "Lance file descriptor has no schema");
+  numRows_ = fileDescriptor_.length();
+  const auto schemaTree = buildSchemaTree(fileDescriptor_.schema());
   rowType_ = convertSchema(schemaTree, typeAdapter_);
-  const auto& rootFields = schemaTree.roots;
-  for (const auto* field : rootFields) {
+  for (const auto* field : schemaTree.roots) {
     columnLogicalTypes_.emplace_back(effectiveLogicalType(*field));
   }
   BOLT_CHECK_EQ(columnLogicalTypes_.size(), rowType_->size());
+}
 
+void NativeLanceMetadata::readColumnMetadataIndex() {
   const auto columnTable =
       read(footer_.columnMetadataOffsetsStart, footer_.numColumns * 16);
   columnMetadataLocations_.reserve(footer_.numColumns);
@@ -995,6 +1023,12 @@ NativeLanceMetadata::NativeLanceMetadata(
   blobColumns_.resize(footer_.numColumns);
   columnMetadataLoaded_ = std::vector<std::atomic<bool>>(footer_.numColumns);
   physicalColumnExpectedRows_.resize(footer_.numColumns);
+}
+
+void NativeLanceMetadata::buildSchemaIndex() {
+  BOLT_CHECK(fileDescriptor_.has_schema());
+  const auto schemaTree = buildSchemaTree(fileDescriptor_.schema());
+  const auto& rootFields = schemaTree.roots;
   if (!usesStructuralEncoding()) {
     std::vector<uint32_t> allColumns(footer_.numColumns);
     std::iota(allColumns.begin(), allColumns.end(), 0);
@@ -1098,6 +1132,17 @@ NativeLanceMetadata::NativeLanceMetadata(
           numRows_);
     }
   }
+  fileDescriptor_.Clear();
+}
+
+void NativeLanceMetadata::validateOpenState() const {
+  BOLT_CHECK_NOT_NULL(input_.getReadFile());
+  BOLT_CHECK_NOT_NULL(typeAdapter_);
+  BOLT_CHECK_NOT_NULL(rowType_);
+  BOLT_CHECK_EQ(rowType_->size(), columnLogicalTypes_.size());
+  BOLT_CHECK_EQ(physicalColumnIndices_.size(), rowType_->size());
+  BOLT_CHECK_EQ(columns_.size(), footer_.numColumns);
+  BOLT_CHECK_EQ(columnMetadataLocations_.size(), footer_.numColumns);
 }
 
 void NativeLanceMetadata::parseColumnMetadata(

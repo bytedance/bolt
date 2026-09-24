@@ -39,10 +39,31 @@ NativeLanceFileContext::NativeLanceFileContext(
     std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter)
     : pool_(options.getMemoryPool()),
       metadataInput_(std::move(input)),
-      metadata_(*metadataInput_, pool_, std::move(typeAdapter)),
-      typeWithId_(dwio::common::TypeWithId::create(metadata_.rowType())),
+      metadata_(std::make_unique<NativeLanceMetadata>(
+          *metadataInput_,
+          pool_,
+          std::move(typeAdapter))),
+      typeWithId_(dwio::common::TypeWithId::create(metadata_->rowType())),
       blobResolver_(std::move(blobResolver)),
       readSchedulerOptions_(makeReadSchedulerOptions(options)) {
+  BOLT_CHECK(
+      !options.isFileColumnNamesReadAsLowerCase(),
+      "The Lance format does not support reading column names as lowercase");
+}
+
+NativeLanceFileContext::NativeLanceFileContext(
+    std::unique_ptr<dwio::common::BufferedInput> input,
+    const dwio::common::ReaderOptions& options,
+    std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
+    std::unique_ptr<NativeLanceMetadata> metadata)
+    : pool_(options.getMemoryPool()),
+      metadataInput_(std::move(input)),
+      metadata_(std::move(metadata)),
+      typeWithId_(dwio::common::TypeWithId::create(metadata_->rowType())),
+      blobResolver_(std::move(blobResolver)),
+      readSchedulerOptions_(makeReadSchedulerOptions(options)) {
+  BOLT_CHECK_NOT_NULL(metadataInput_);
+  BOLT_CHECK_NOT_NULL(metadata_);
   BOLT_CHECK(
       !options.isFileColumnNamesReadAsLowerCase(),
       "The Lance format does not support reading column names as lowercase");
@@ -51,9 +72,10 @@ NativeLanceFileContext::NativeLanceFileContext(
 void NativeLanceFileContext::validate() const {
   BOLT_CHECK_NOT_NULL(metadataInput_);
   BOLT_CHECK_NOT_NULL(metadataInput_->getReadFile());
-  BOLT_CHECK_NOT_NULL(metadata_.rowType());
+  BOLT_CHECK_NOT_NULL(metadata_);
+  BOLT_CHECK_NOT_NULL(metadata_->rowType());
   BOLT_CHECK_NOT_NULL(typeWithId_);
-  BOLT_CHECK_EQ(metadata_.rowType()->size(), typeWithId_->size());
+  BOLT_CHECK_EQ(metadata_->rowType()->size(), typeWithId_->size());
 }
 
 } // namespace bytedance::bolt::lance::reader
