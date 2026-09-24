@@ -38,10 +38,12 @@ CachedCellFrontend::CachedCellFrontend(
       dictEnabled_(layout->numColumns(), 0),
       dictStates_(layout->numColumns()),
       dictStats_(layout->numColumns()) {
+  if (numStreams_ == 0) {
+    return;
+  }
   const size_t cacheBytes =
       static_cast<size_t>(numPartitions_) * numStreams_ * kBlockSourceBytes;
-  const size_t cursorBytes =
-      static_cast<size_t>(numPartitions_) * numStreams_;
+  const size_t cursorBytes = static_cast<size_t>(numPartitions_) * numStreams_;
   // + 8: the dictionary walk's 8-byte window may anchor near the end of
   // the very last cache line.
   cacheBase_ = arena_.allocateFixed(cacheBytes + 8, kBlockSourceBytes);
@@ -91,8 +93,7 @@ void CachedCellFrontend::enableDictionary(uint32_t col) {
       "dictionary form is defined for string columns only");
   dictEnabled_[col] = 1;
   dictStates_[col].assign(numPartitions_, DictState{});
-  residentBytes_ +=
-      static_cast<int64_t>(numPartitions_) * sizeof(DictState);
+  residentBytes_ += static_cast<int64_t>(numPartitions_) * sizeof(DictState);
 }
 
 void CachedCellFrontend::closeDictSegment(
@@ -279,26 +280,28 @@ FOLLY_ALWAYS_INLINE bool CachedCellFrontend::appendDictValue(
 
 template <typename T, bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitFixed(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_->wireColumn(col);
   auto& decoded = (*batch.decoded)[col];
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_->columnStream(col);
   uint8_t* __restrict cur = cursors(stream);
-  char* __restrict base = cacheBase_ +
-      ((static_cast<size_t>(stream) * numPartitions_) << 6);
+  char* __restrict base =
+      cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_) << 6);
   const uint32_t* __restrict row2pid = batch.row2Partition;
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
   // (materialized once per batch): one bit test replaces the isNullAt
   // call - which the compiler declines to inline here - for identity and
   // dictionary inputs alike.
-  const uint64_t* __restrict rawNulls =
-      kHasNulls ? decoded.nulls() : nullptr;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
-            pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
+            pid,
+            nullColumn,
+            batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
       }
     }
@@ -314,26 +317,28 @@ void CachedCellFrontend::splitFixed(uint32_t col, const SplitBatch& batch) {
 
 template <typename T, bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitRawFixed(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_->wireColumn(col);
   auto& decoded = (*batch.decoded)[col];
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_->columnStream(col);
   uint8_t* __restrict cur = cursors(stream);
-  char* __restrict base = cacheBase_ +
-      ((static_cast<size_t>(stream) * numPartitions_) << 6);
+  char* __restrict base =
+      cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_) << 6);
   const uint32_t* __restrict row2pid = batch.row2Partition;
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
   // (materialized once per batch): one bit test replaces the isNullAt
   // call - which the compiler declines to inline here - for identity and
   // dictionary inputs alike.
-  const uint64_t* __restrict rawNulls =
-      kHasNulls ? decoded.nulls() : nullptr;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
-            pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
+            pid,
+            nullColumn,
+            batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
       }
     }
@@ -349,6 +354,7 @@ void CachedCellFrontend::splitRawFixed(uint32_t col, const SplitBatch& batch) {
 
 template <bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_->wireColumn(col);
   auto& decoded = (*batch.decoded)[col];
   const StringView* __restrict views = decoded.data<StringView>();
   const uint32_t lengthStream = layout_->columnStream(col);
@@ -356,15 +362,16 @@ void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
   uint8_t* __restrict lengthCur = cursors(lengthStream);
   uint8_t* __restrict dataCur = cursors(dataStream);
   const uint32_t* __restrict row2pid = batch.row2Partition;
-  const uint64_t* __restrict rawNulls =
-      kHasNulls ? decoded.nulls() : nullptr;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
-            pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
+            pid,
+            nullColumn,
+            batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
       }
     }
@@ -397,7 +404,8 @@ void CachedCellFrontend::splitString(uint32_t col, const SplitBatch& batch) {
       const char* src = view.data();
       uint32_t left = size;
       while (left > 0) {
-        const uint32_t piece = left < kDirectAppendPiece ? left : kDirectAppendPiece;
+        const uint32_t piece =
+            left < kDirectAppendPiece ? left : kDirectAppendPiece;
         cells_->append(pid, dataStream, src, piece, beforeGrow_);
         src += piece;
         left -= piece;
@@ -417,6 +425,7 @@ template <bool kHasNulls, bool kIndexed>
 void CachedCellFrontend::splitStringDict(
     uint32_t col,
     const SplitBatch& batch) {
+  const auto nullColumn = layout_->wireColumn(col);
   auto& decoded = (*batch.decoded)[col]; // nulls() may materialize lazily
   const StringView* __restrict views = decoded.data<StringView>();
   const uint32_t lengthStream = layout_->columnStream(col);
@@ -428,10 +437,9 @@ void CachedCellFrontend::splitStringDict(
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
   // (materialized once per batch): one bit test replaces the isNullAt
   // call for identity and dictionary inputs alike.
-  const uint64_t* __restrict rawNulls =
-      kHasNulls ? decoded.nulls() : nullptr;
-  char* __restrict dictLineBase = cacheBase_ +
-      ((static_cast<size_t>(dataStream) * numPartitions_) << 6);
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  char* __restrict dictLineBase =
+      cacheBase_ + ((static_cast<size_t>(dataStream) * numPartitions_) << 6);
 
   for (uint32_t row = 0; row < batch.numRows; ++row) {
     const uint32_t pid = row2pid[row];
@@ -445,12 +453,13 @@ void CachedCellFrontend::splitStringDict(
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
         nulls_->setNull(
-            pid, col, batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
+            pid,
+            nullColumn,
+            batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
         continue;
       }
     }
-    const StringView& view =
-        kIndexed ? views[decoded.index(row)] : views[row];
+    const StringView& view = kIndexed ? views[decoded.index(row)] : views[row];
     // The first 8 StringView bytes are (size u32)(zero-padded 4-byte
     // prefix) for inline and heap values alike: one load feeds the size,
     // the byte accounting and the whole dictionary probe, and view.data()
@@ -462,8 +471,7 @@ void CachedCellFrontend::splitStringDict(
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
         appendDictValue(
-            lengthStream, dataStream, pid, st, view, key, lengthCur,
-            dataCur)) {
+            lengthStream, dataStream, pid, st, view, key, lengthCur, dataCur)) {
       continue;
     }
 
@@ -537,9 +545,50 @@ void CachedCellFrontend::dispatchRaw(
   }
 }
 
+// Boolean vectors are bit packed; timestamps use Spark's microsecond wire
+// value.
+void CachedCellFrontend::splitConverted(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_->wireColumn(col);
+  const auto& decoded = (*batch.decoded)[col];
+  const auto stream = layout_->columnStream(col);
+  auto* cur = cursors(stream);
+  const bool boolean =
+      layout_->rowType()->childAt(col)->kind() == TypeKind::BOOLEAN;
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const auto pid = batch.row2Partition[row];
+    if (decoded.isNullAt(row)) {
+      nulls_->setNull(
+          pid,
+          nullColumn,
+          batch.windowRowStart[pid] + batch.rowIndexInPid[row]);
+      continue;
+    }
+    char* slot = cacheLine(stream, pid) + cur[pid];
+    if (boolean) {
+      *slot = decoded.valueAt<bool>(row) ? 1 : 0;
+      ++cur[pid];
+    } else {
+      const int64_t value = decoded.valueAt<Timestamp>(row).toMicros();
+      ::memcpy(slot, &value, sizeof(value));
+      cur[pid] += sizeof(value);
+    }
+    if (cur[pid] == kBlockSourceBytes) {
+      if (boolean) {
+        flushRaw(stream, pid, cur);
+      } else {
+        flushEncoded<int64_t>(stream, pid, cur);
+      }
+    }
+  }
+}
+
 void CachedCellFrontend::split(const SplitBatch& batch) {
   const auto& rowType = layout_->rowType();
   for (uint32_t col = 0; col < layout_->numColumns(); ++col) {
+    if (layout_->isUnknownColumn(col)) {
+      continue;
+    }
+    const auto nullColumn = layout_->wireColumn(col);
     const auto klass = batch.nullClass[col];
     if (klass == BatchNullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat
@@ -549,7 +598,7 @@ void CachedCellFrontend::split(const SplitBatch& batch) {
       for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
         const uint32_t count = batch.partition2RowCount[pid];
         if (count > 0) {
-          nulls_->setNullRun(pid, col, batch.windowRowStart[pid], count);
+          nulls_->setNullRun(pid, nullColumn, batch.windowRowStart[pid], count);
         }
       }
       continue;
@@ -564,6 +613,13 @@ void CachedCellFrontend::split(const SplitBatch& batch) {
         break;
       case TypeKind::BIGINT:
         dispatchEncoded<int64_t>(col, batch, hasNulls);
+        break;
+      case TypeKind::BOOLEAN:
+      case TypeKind::TIMESTAMP:
+        splitConverted(col, batch);
+        break;
+      case TypeKind::HUGEINT:
+        dispatchRaw<int128_t>(col, batch, hasNulls);
         break;
       case TypeKind::TINYINT:
         dispatchRaw<int8_t>(col, batch, hasNulls);

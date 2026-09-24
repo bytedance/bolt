@@ -119,13 +119,15 @@ bool CellPayloadDecoder::parseNullRegion(
   }
 
   const uint32_t numColumns = layout_.numColumns();
-  const uint32_t tagBytes = nullTagBytes(numColumns);
+  const uint32_t tagBytes = nullTagBytes(layout_.numWireColumns());
   if (nullBody_.size() < tagBytes) {
     return fail(error, "null body shorter than its tags");
   }
   uint32_t rawNullColumns = 0;
   for (uint32_t col = 0; col < numColumns; ++col) {
-    const auto tag = getNullTag(nullBody_.udata(), col);
+    const auto tag = layout_.isUnknownColumn(col)
+        ? NullTag::kAllNull
+        : getNullTag(nullBody_.udata(), layout_.wireColumn(col));
     if (tag == NullTag::kReserved) {
       return fail(error, "reserved null tag"); // rule 7
     }
@@ -133,9 +135,9 @@ bool CellPayloadDecoder::parseNullRegion(
     rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
   }
   // Unused high bits of the last tags byte must be zero.
-  if ((numColumns % 4) != 0) {
+  if ((layout_.numWireColumns() % 4) != 0) {
     const uint8_t tail = nullBody_.udata()[tagBytes - 1];
-    if ((tail >> ((numColumns % 4) * 2)) != 0) {
+    if ((tail >> ((layout_.numWireColumns() % 4) * 2)) != 0) {
       return fail(error, "non-zero unused null tag bits");
     }
   }
@@ -147,7 +149,8 @@ bool CellPayloadDecoder::parseNullRegion(
     return fail(error, "null body length mismatch"); // rule 6
   }
 
-  const uint8_t* cursor = nullBody_.udata() + tagBytes;
+  const uint8_t* cursor =
+      tagBytes == 0 ? nullptr : nullBody_.udata() + tagBytes;
   for (uint32_t col = 0; col < numColumns; ++col) {
     switch (tags_[col]) {
       case NullTag::kAllNull:
@@ -503,8 +506,7 @@ bool CellPayloadDecoder::buildStringColumn(
       return fail(error, "matched counts beyond non-null rows");
     }
     const uint64_t fallbackCount = nonNull - matchedSum;
-    const std::string_view fallbackRaw(
-        dataBytes.data() + pos, dataSize - pos);
+    const std::string_view fallbackRaw(dataBytes.data() + pos, dataSize - pos);
 
     // Length stream: matchedSum 1-byte indexes, then the fallback lengths.
     if (lengthBytes.size() < matchedSum) {
@@ -567,8 +569,8 @@ bool CellPayloadDecoder::buildStringColumn(
     if (allNonNull || (bitmap != nullptr && bitSet(bitmap, row))) {
       const auto value = resolved[next++];
       ::memcpy(rawChars + charOffset, value.data(), value.size());
-      rawViews[row] = StringView(
-          rawChars + charOffset, static_cast<int32_t>(value.size()));
+      rawViews[row] =
+          StringView(rawChars + charOffset, static_cast<int32_t>(value.size()));
       charOffset += value.size();
     } else {
       rawViews[row] = StringView();
@@ -603,7 +605,12 @@ bool CellPayloadDecoder::decode(
   // (spec section 3.1).
   const uint32_t nullStoredSize = loadU32(header + 16);
   const uint32_t nullDecodedSize = loadU32(header + 20);
-  if (nullStoredSize < 1) {
+  if (layout_.numWireColumns() == 0 &&
+      (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
+       loadU64(header + 8) != 0)) {
+    return fail(error, "UNKNOWN-only payload must contain only its header");
+  }
+  if (layout_.numWireColumns() != 0 && nullStoredSize < 1) {
     return fail(error, "null stored size must be at least 1"); // rule 2
   }
   // Implementation-level bounds on untrusted fields (spec section 10.3).
@@ -619,18 +626,22 @@ bool CellPayloadDecoder::decode(
   }
 
   const uint32_t numColumns = layout_.numColumns();
-  encodingTags_.resize((numColumns + 7) / 8);
+  encodingTags_.resize((layout_.numWireColumns() + 7) / 8);
   if (!in.read(encodingTags_.data(), encodingTags_.size())) {
     return fail(error, "truncated encoding tags"); // rule 3
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
-    const bool tagged = (encodingTags_[col / 8] >> (col % 8)) & 1;
+    if (layout_.isUnknownColumn(col)) {
+      continue;
+    }
+    const auto wire = layout_.wireColumn(col);
+    const bool tagged = (encodingTags_[wire / 8] >> (wire % 8)) & 1;
     if (tagged && !layout_.isStringColumn(col)) {
       return fail(error, "encoding tag on a non-string column");
     }
   }
-  if ((numColumns % 8) != 0 &&
-      (encodingTags_.back() >> (numColumns % 8)) != 0) {
+  if ((layout_.numWireColumns() % 8) != 0 &&
+      (encodingTags_.back() >> (layout_.numWireColumns() % 8)) != 0) {
     return fail(error, "non-zero unused encoding tag bits");
   }
 
@@ -661,6 +672,43 @@ bool CellPayloadDecoder::decode(
         ok = buildEncodedColumn<int64_t>(
             col, rowCount, type, children[col], error);
         break;
+      case TypeKind::UNKNOWN:
+        children[col] = BaseVector::createNullConstant(type, rowCount, pool_);
+        ok = true;
+        break;
+      case TypeKind::BOOLEAN:
+      case TypeKind::TIMESTAMP: {
+        VectorPtr wire;
+        const bool boolean = type->kind() == TypeKind::BOOLEAN;
+        ok = boolean
+            ? buildRawColumn<int8_t>(col, rowCount, TINYINT(), wire, error)
+            : buildEncodedColumn<int64_t>(col, rowCount, BIGINT(), wire, error);
+        if (!ok) {
+          return false;
+        }
+        children[col] = BaseVector::create(type, rowCount, pool_);
+        for (uint32_t row = 0; row < rowCount; ++row) {
+          if (wire->isNullAt(row)) {
+            children[col]->setNull(row, true);
+          } else if (boolean) {
+            const auto value = wire->as<FlatVector<int8_t>>()->valueAt(row);
+            if (value != 0 && value != 1) {
+              return fail(error, "invalid boolean byte");
+            }
+            children[col]->as<FlatVector<bool>>()->set(row, value != 0);
+          } else {
+            children[col]->as<FlatVector<Timestamp>>()->set(
+                row,
+                Timestamp::fromMicros(
+                    wire->as<FlatVector<int64_t>>()->valueAt(row)));
+          }
+        }
+        break;
+      }
+      case TypeKind::HUGEINT:
+        ok =
+            buildRawColumn<int128_t>(col, rowCount, type, children[col], error);
+        break;
       case TypeKind::TINYINT:
         ok = buildRawColumn<int8_t>(col, rowCount, type, children[col], error);
         break;
@@ -672,7 +720,8 @@ bool CellPayloadDecoder::decode(
         break;
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY: {
-        const bool dictionary = (encodingTags_[col / 8] >> (col % 8)) & 1;
+        const auto wire = layout_.wireColumn(col);
+        const bool dictionary = (encodingTags_[wire / 8] >> (wire % 8)) & 1;
         ok = buildStringColumn(
             col, rowCount, type, dictionary, children[col], error);
         break;

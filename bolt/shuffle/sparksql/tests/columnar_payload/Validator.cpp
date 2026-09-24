@@ -477,6 +477,9 @@ void ColumnarPayloadValidator::decodeColumn(
   auto& target = result.decoded.columns[column];
   target.type = type;
 
+  if (type == PhysicalType::kUnknown) {
+    return;
+  }
   if (type != PhysicalType::kString) {
     const auto& stream = streams[streamIndex];
     const auto& bounds = runBoundaries[streamIndex];
@@ -520,9 +523,19 @@ void ColumnarPayloadValidator::decodeColumn(
       }
     }
     for (size_t i = 0; i < nonNull; ++i) {
+      if (type == PhysicalType::kHugeint) {
+        std::array<uint8_t, 16> value;
+        std::copy_n(stream.data() + i * width, 16, value.data());
+        target.wideValues.push_back(value);
+        continue;
+      }
       uint64_t raw = 0;
       for (size_t b = 0; b < width; ++b) {
         raw |= static_cast<uint64_t>(stream[i * width + b]) << (8 * b);
+      }
+      if (type == PhysicalType::kBoolean && raw > 1) {
+        report(result, Check::kStructural, i, "invalid boolean byte");
+        return;
       }
       switch (type) {
         case PhysicalType::kFloat: {
@@ -808,6 +821,12 @@ ValidationResult ColumnarPayloadValidator::validate(
     size_t size) {
   ValidationResult result;
   const size_t columnCount = schema_.size();
+  std::vector<size_t> wireIndex(columnCount);
+  size_t wireCount = 0;
+  for (size_t col = 0; col < columnCount; ++col) {
+    wireIndex[col] = wireCount;
+    wireCount += schema_[col] != PhysicalType::kUnknown;
+  }
   if (columnCount == 0) {
     report(result, Check::kStructural, 0, "column_count must be >= 1");
     return result;
@@ -878,7 +897,14 @@ ValidationResult ColumnarPayloadValidator::validate(
     return result;
   }
 
-  if (nullStoredSize < 1) {
+  if (wireCount == 0 &&
+      (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
+       variableSize != 0)) {
+    report(
+        result, Check::kStructural, 0, "UNKNOWN-only payload is header-only");
+    return result;
+  }
+  if (wireCount != 0 && nullStoredSize < 1) {
     report(
         result,
         Check::kNullStoredSizeBounds,
@@ -910,7 +936,7 @@ ValidationResult ColumnarPayloadValidator::validate(
     return result;
   }
 
-  const size_t tagBytes = (columnCount * 2 + 7) / 8;
+  const size_t tagBytes = (wireCount * 2 + 7) / 8;
   if (nullBody.size() < tagBytes) {
     report(
         result,
@@ -921,11 +947,15 @@ ValidationResult ColumnarPayloadValidator::validate(
     return result;
   }
 
-  std::vector<NullTag> tags(columnCount);
+  std::vector<NullTag> tags(columnCount, NullTag::kAllNull);
   size_t rawNullColumnCount = 0;
   for (size_t column = 0; column < columnCount; ++column) {
-    const auto tag = static_cast<NullTag>(
-        (nullBody[column / 4] >> ((column % 4) * 2)) & 0x03);
+    if (schema_[column] == PhysicalType::kUnknown) {
+      continue;
+    }
+    const auto wire = wireIndex[column];
+    const auto tag =
+        static_cast<NullTag>((nullBody[wire / 4] >> ((wire % 4) * 2)) & 0x03);
     if (tag == NullTag::kReserved) {
       report(
           result,
@@ -940,7 +970,7 @@ ValidationResult ColumnarPayloadValidator::validate(
     }
   }
   if (options_.enableLevelTwo &&
-      !tailBitsZero(nullBody.data(), tagBytes, columnCount * 2)) {
+      !tailBitsZero(nullBody.data(), tagBytes, wireCount * 2)) {
     report(
         result,
         Check::kUnusedBitsZero,
@@ -1005,7 +1035,7 @@ ValidationResult ColumnarPayloadValidator::validate(
   }
 
   // Encoding tags, RFC section 3.2.
-  const size_t encodingTagBytes = (columnCount + 7) / 8;
+  const size_t encodingTagBytes = (wireCount + 7) / 8;
   const uint8_t* encodingTags = nullptr;
   const size_t encodingTagsOffset = reader.offset();
   if (!reader.readBytes(encodingTagBytes, encodingTags)) {
@@ -1018,8 +1048,11 @@ ValidationResult ColumnarPayloadValidator::validate(
   }
   std::vector<StringEncoding> encodings(columnCount, StringEncoding::kRaw);
   for (size_t column = 0; column < columnCount; ++column) {
-    const bool dictionary =
-        ((encodingTags[column / 8] >> (column % 8)) & 1u) != 0;
+    if (schema_[column] == PhysicalType::kUnknown) {
+      continue;
+    }
+    const auto wire = wireIndex[column];
+    const bool dictionary = ((encodingTags[wire / 8] >> (wire % 8)) & 1u) != 0;
     encodings[column] =
         dictionary ? StringEncoding::kDictionary : StringEncoding::kRaw;
     if (options_.enableLevelTwo && dictionary &&
@@ -1033,7 +1066,7 @@ ValidationResult ColumnarPayloadValidator::validate(
     }
   }
   if (options_.enableLevelTwo &&
-      !tailBitsZero(encodingTags, encodingTagBytes, columnCount)) {
+      !tailBitsZero(encodingTags, encodingTagBytes, wireCount)) {
     report(
         result,
         Check::kUnusedBitsZero,
