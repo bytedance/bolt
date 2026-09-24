@@ -42,7 +42,11 @@ namespace bytedance::bolt::functions {
 /// Round function
 /// when AlwaysRoundNegDec is false, presto semantics is followed which does not
 /// round negative decimals for integrals and round it otherwise
-template <typename TNum, typename TDecimals, bool alwaysRoundNegDec = false>
+template <
+    typename TNum,
+    typename TDecimals,
+    bool alwaysRoundNegDec = false,
+    BigDecimal::RoundingMode mode = BigDecimal::RoundingMode::kHalfUp>
 FOLLY_ALWAYS_INLINE TNum
 round(const TNum& number, const TDecimals& decimals = 0) {
   static_assert(!std::is_same_v<TNum, bool> && "round not supported for bool");
@@ -68,10 +72,21 @@ round(const TNum& number, const TDecimals& decimals = 0) {
       int128_t value = static_cast<int128_t>(number);
       int128_t quotient = value / scalingFactor;
       int128_t remainder = value % scalingFactor;
-      if (value >= 0 && remainder >= scalingFactor / 2) {
-        ++quotient;
-      } else if (remainder <= -scalingFactor / 2) {
-        --quotient;
+      if constexpr (mode == BigDecimal::RoundingMode::kHalfEven) {
+        // Compare |remainder| so the rule is symmetric for negative values;
+        // a tie moves the quotient away from zero only when it is odd.
+        const int128_t half = scalingFactor / 2;
+        const int128_t absRemainder = remainder < 0 ? -remainder : remainder;
+        if (absRemainder > half ||
+            (absRemainder == half && quotient % 2 != 0)) {
+          quotient += value >= 0 ? 1 : -1;
+        }
+      } else {
+        if (value >= 0 && remainder >= scalingFactor / 2) {
+          ++quotient;
+        } else if (remainder <= -scalingFactor / 2) {
+          --quotient;
+        }
       }
       int128_t rounded = quotient * scalingFactor;
       return static_cast<TNum>(rounded);
@@ -85,7 +100,7 @@ round(const TNum& number, const TDecimals& decimals = 0) {
 
   double dNumber = static_cast<double>(number);
   BigDecimal decimal(dNumber);
-  decimal.setScale(decimals);
+  decimal.setScale(decimals, mode);
   if constexpr (std::is_same_v<TNum, double>) {
     auto res = decimal.doubleValue();
     return res;
