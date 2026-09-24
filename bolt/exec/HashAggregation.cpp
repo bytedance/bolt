@@ -226,12 +226,15 @@ void HashAggregation::initialize() {
             << ", outputType_ = " << outputType_->toString()
             << ", isPartialStep = " << isPartialStep_;
 
+  initProjection();
+  initRollupAgg();
+
   aggregationNode_.reset();
 }
 
 bool HashAggregation::abandonPartialAggregationEarly(int64_t numOutput) const {
   BOLT_CHECK(isPartialOutput_ && !isGlobal_);
-  if (groupingSet_->hasSpilled()) {
+  if (groupingSet_->hasSpilled() || expandNode_) {
     // Once spilling kicked in, disable the abandoning code path.
     // This is because spilling only enabled when output/input is small,
     // and abandoning in this case will cause data expansion in shuffle
@@ -260,6 +263,11 @@ bool HashAggregation::preferPartialSpill(
        100 * numOutput / numInputRows_ <= partialAggregationSpillMaxPct_);
   if (preferPartialSpill_) {
     groupingSet_->setPreferPartialSpill(preferPartialSpill_);
+    if (expandNode_) {
+      for (auto&& groupingSet : groupingSetsRollUp_) {
+        groupingSet->setPreferPartialSpill(preferPartialSpill_);
+      }
+    }
   }
   return preferPartialSpill_;
 }
@@ -440,6 +448,7 @@ void HashAggregation::resetPartialOutputIfNeed() {
   }
   BOLT_CHECK(
       !isGlobal_ && (groupingSet_ == nullptr || !groupingSet_->hasSpilled()));
+  numInputRows_ += rollUpNumInputRows_;
   const double aggregationPct =
       numOutputRows_ == 0 ? 0 : (numOutputRows_ * 1.0) / numInputRows_ * 100;
   {
@@ -459,6 +468,7 @@ void HashAggregation::resetPartialOutputIfNeed() {
   }
   numOutputRows_ = 0;
   numInputRows_ = 0;
+  rollUpNumInputRows_ = 0;
 }
 
 void HashAggregation::maybeIncreasePartialAggregationMemoryUsage(
@@ -620,6 +630,11 @@ RowVectorPtr HashAggregation::getOutput() {
 
   // Reuse output vectors if possible.
   prepareOutput(maxOutputRows, supportRowBasedOutput_);
+
+  if (expandNode_) {
+    return getRollupOutput(
+        maxOutputRows, queryConfig, beforeMemorySize, accumulatorRowSize);
+  }
 
   const bool hasData = groupingSet_->getOutput(
       maxOutputRows,
@@ -805,6 +820,11 @@ void HashAggregation::close() {
     groupingSet_.reset();
   }
   output_ = nullptr;
+  if (expandNode_) {
+    for (auto& groupingSet : groupingSetsRollUp_) {
+      groupingSet.reset();
+    }
+  }
 }
 
 void HashAggregation::updateEstimatedOutputRowSize() {
@@ -820,5 +840,291 @@ void HashAggregation::updateEstimatedOutputRowSize() {
   } else if (rowSize > estimatedOutputRowSize_.value()) {
     estimatedOutputRowSize_ = rowSize;
   }
+}
+
+void HashAggregation::initProjection() {
+  if (expandNode_ == nullptr) {
+    return;
+  }
+  const auto& groupingKeys = aggregationNode_->groupingKeys();
+  const auto numRows = groupingKeys.size();
+  fieldProjections_.reserve(numRows);
+  constantProjections_.reserve(numRows);
+  const auto numColumns = numRows;
+  std::vector<column_index_t> expandOutputChannels;
+  const auto& expandOutputType = expandNode_->outputType();
+  const auto& inputType = aggregationNode_->sources()[0]->outputType();
+  std::vector<column_index_t> groupingKeyInputChannels;
+  for (auto i = 0; i < groupingKeys.size(); ++i) {
+    groupingKeyInputChannels.push_back(
+        exprToChannel(groupingKeys[i].get(), inputType));
+  }
+  if (projectNode_) {
+    std::unordered_map<column_index_t, column_index_t> channelMap;
+    for (column_index_t i = 0; i < projectNode_->projections().size(); i++) {
+      auto& projection = projectNode_->projections()[i];
+      if (auto field = core::TypedExprs::asFieldAccess(projection)) {
+        const auto& inputs = field->inputs();
+        if (inputs.empty() ||
+            (inputs.size() == 1 &&
+             dynamic_cast<const core::InputTypedExpr*>(inputs[0].get()))) {
+          const auto inputChannel =
+              expandOutputType->getChildIdx(field->name());
+          channelMap[i] = inputChannel;
+        }
+      }
+    }
+    for (auto col : groupingKeyInputChannels) {
+      expandOutputChannels.push_back(channelMap[col]);
+    }
+  } else {
+    for (auto col : groupingKeyInputChannels) {
+      expandOutputChannels.push_back(col);
+    }
+  }
+  for (const auto& rowProjections : expandNode_->projections()) {
+    std::vector<column_index_t> rowProjection;
+    rowProjection.reserve(numColumns);
+    std::vector<std::shared_ptr<const core::ConstantTypedExpr>>
+        constantProjection;
+    constantProjection.reserve(numColumns);
+    for (int i = 0; i < numColumns; i++) {
+      const auto& columnProjection = rowProjections[expandOutputChannels[i]];
+      if (auto field = core::TypedExprs::asFieldAccess(columnProjection)) {
+        rowProjection.push_back(i);
+        constantProjection.push_back(nullptr);
+      } else if (
+          auto constant = core::TypedExprs::asConstant(columnProjection)) {
+        rowProjection.push_back(kConstantChannel);
+        constantProjection.push_back(constant);
+      } else {
+        BOLT_USER_FAIL(
+            "Expand operator doesn't support this expression. Only column references and constants are supported. {}",
+            columnProjection->toString());
+      }
+    }
+    fieldProjections_.emplace_back(std::move(rowProjection));
+    constantProjections_.emplace_back(std::move(constantProjection));
+  }
+}
+
+void HashAggregation::initRollupAgg() {
+  if (expandNode_ == nullptr) {
+    return;
+  }
+  groupingSetsRollUp_.resize(fieldProjections_.size());
+  auto rollupAggregationNode = createIntermediateOrFinalAggregation(
+      core::AggregationNode::Step::kIntermediate, aggregationNode_);
+  const auto& inputType = outputType_;
+  for (int groupIndex = 0; groupIndex < fieldProjections_.size();
+       groupIndex++) {
+    if (groupIndex == 0) {
+      groupingSetsRollUp_[groupIndex] = groupingSet_;
+      continue;
+    }
+    auto hashers =
+        createVectorHashers(inputType, rollupAggregationNode->groupingKeys());
+    auto numHashers = hashers.size();
+
+    std::vector<column_index_t> preGroupedChannels;
+    preGroupedChannels.reserve(rollupAggregationNode->preGroupedKeys().size());
+    for (const auto& key : rollupAggregationNode->preGroupedKeys()) {
+      auto channel = exprToChannel(key.get(), inputType);
+      preGroupedChannels.push_back(channel);
+    }
+
+    std::shared_ptr<core::ExpressionEvaluator> expressionEvaluator;
+    std::vector<AggregateInfo> aggregateInfos = toAggregateInfo(
+        *rollupAggregationNode, *operatorCtx_, numHashers, expressionEvaluator);
+
+    // Check that aggregate result type match the output type.
+    for (auto i = 0; i < aggregateInfos.size(); i++) {
+      const auto& aggResultType = aggregateInfos[i].function->resultType();
+      const auto& expectedType = outputType_->childAt(numHashers + i);
+      BOLT_CHECK(
+          aggResultType->kindEquals(expectedType),
+          "Unexpected result type for an aggregation: {}, expected {}, step {}",
+          aggResultType->toString(),
+          expectedType->toString(),
+          core::AggregationNode::stepName(rollupAggregationNode->step()));
+    }
+
+    std::optional<column_index_t> groupIdChannel;
+    if (rollupAggregationNode->groupId().has_value()) {
+      groupIdChannel = outputType_->getChildIdxIfExists(
+          rollupAggregationNode->groupId().value()->name());
+      BOLT_CHECK(groupIdChannel.has_value());
+    }
+
+    groupingSetsRollUp_[groupIndex] = std::make_shared<GroupingSet>(
+        inputType,
+        std::move(hashers),
+        std::move(preGroupedChannels),
+        std::move(aggregateInfos),
+        rollupAggregationNode->ignoreNullKeys(),
+        isPartialOutput_,
+        isRawInput(rollupAggregationNode->step()),
+        rollupAggregationNode->globalGroupingSets(),
+        groupIdChannel,
+        spillConfig_.has_value() ? &spillConfig_.value() : nullptr,
+        &nonReclaimableSection_,
+        operatorCtx_.get());
+
+    groupingSetsRollUp_[groupIndex]->setPreferPartialSpill(preferPartialSpill_);
+    groupingSetsRollUp_[groupIndex]->setSupportRowBasedOutput(
+        supportRowBasedOutput_);
+    groupingSetsRollUp_[groupIndex]->setSupportUniqueRowOptimization(
+        operatorCtx_->driverCtx()
+            ->queryConfig()
+            .isUniqueRowOptimizationEnabled());
+  }
+  rollupAggregationNode.reset();
+}
+
+RowVectorPtr HashAggregation::rollupProjection(
+    RowVectorPtr input,
+    int32_t rowIndex) {
+  if (rowIndex >= fieldProjections_.size() || input == nullptr ||
+      expandNode_ == nullptr) {
+    return nullptr;
+  }
+  const auto numInput = input->size();
+
+  const auto& rowProjection = fieldProjections_[rowIndex];
+  const auto& constantProjection = constantProjections_[rowIndex];
+  const auto numColumns = rowProjection.size();
+  std::vector<VectorPtr> inputProjection(outputType_->size());
+  for (int i = 0; i < input->childrenSize(); i++) {
+    inputProjection[i] = input->childAt(i);
+  }
+
+  for (auto i = 0; i < numColumns; ++i) {
+    if (rowProjection[i] == kConstantChannel) {
+      const auto& constantExpr = constantProjection[i];
+      if (constantExpr->value().isNull()) {
+        // Add null column.
+        inputProjection[i] = BaseVector::createNullConstant(
+            outputType_->childAt(i), numInput, pool());
+      } else {
+        // Add constant column.
+        inputProjection[i] = BaseVector::createConstant(
+            constantExpr->type(), constantExpr->value(), numInput, pool());
+      }
+    } else {
+      inputProjection[i] = input->childAt(rowProjection[i]);
+    }
+  }
+  return std::make_shared<RowVector>(
+      pool(), outputType_, nullptr, numInput, std::move(inputProjection));
+}
+
+RowVectorPtr HashAggregation::getRollupOutput(
+    uint32_t maxOutputRows,
+    const core::QueryConfig& queryConfig,
+    int64_t beforeMemorySize,
+    uint64_t accumulatorRowSize) {
+  RowVectorPtr rollupInput;
+  bool hasData = true;
+  while (true) {
+    hasData = groupingSet_->getOutput(
+        maxOutputRows,
+        queryConfig.preferredOutputBatchBytes(),
+        resultIterator_,
+        output_);
+    if (hasData) {
+      if (groupingSetIndex < groupingSetsRollUp_.size() - 1) {
+        rollupInput = rollupProjection(output_, groupingSetIndex + 1);
+        rollUpNumInputRows_ += rollupInput->size();
+        groupingSetsRollUp_[groupingSetIndex + 1]->addInput(
+            rollupInput, mayPushdown_);
+      }
+      numOutputRows_ += output_->size();
+      recordRuntimeMetrics();
+      auto afterMemorySize = pool()->currentBytes();
+      if (containsVidSplit_) {
+        int64_t oldEstimatedRowSize = estimatedOutputRowSize_.value_or(0);
+        int64_t newEstimatedRowSize =
+            (afterMemorySize - beforeMemorySize) / output_->size() +
+            accumulatorRowSize;
+        estimatedOutputRowSize_ =
+            std::max(oldEstimatedRowSize, newEstimatedRowSize);
+      }
+      return output_;
+    }
+    resultIterator_.reset();
+    groupingSet_->resetTable();
+    groupingSetIndex++;
+    if (noMoreInput_ && groupingSetIndex < groupingSetsRollUp_.size()) {
+      groupingSet_ = groupingSetsRollUp_[groupingSetIndex - 1];
+      recordSpillReadStats();
+      groupingSet_ = groupingSetsRollUp_[groupingSetIndex];
+      recordSpillStats();
+    }
+    if (groupingSetIndex == groupingSetsRollUp_.size()) {
+      if (noMoreInput_) {
+        finished_ = true;
+        groupingSet_ = groupingSetsRollUp_[groupingSetIndex - 1];
+        recordSpillReadStats();
+      }
+      groupingSetIndex = 0;
+      groupingSet_ = groupingSetsRollUp_[groupingSetIndex];
+      resetPartialOutputIfNeed();
+      pool()->release();
+      return nullptr;
+    }
+    prepareOutput(maxOutputRows, supportRowBasedOutput_);
+  }
+}
+
+std::shared_ptr<const core::AggregationNode>
+HashAggregation::createIntermediateOrFinalAggregation(
+    core::AggregationNode::Step step,
+    std::shared_ptr<const core::AggregationNode> partialAggNode) {
+  // Create intermediate or final aggregation using same grouping keys and same
+  // aggregate function names.
+  const auto& partialAggregates = partialAggNode->aggregates();
+  const auto& groupingKeys = partialAggNode->groupingKeys();
+
+  auto numAggregates = partialAggregates.size();
+  auto numGroupingKeys = groupingKeys.size();
+
+  std::vector<core::AggregationNode::Aggregate> aggregates;
+  aggregates.reserve(numAggregates);
+  auto partialOutputType = partialAggNode->outputType();
+  for (auto i = 0; i < numAggregates; i++) {
+    auto name = partialAggregates[i].call->name();
+    auto rawInputs = partialAggregates[i].call->inputs();
+
+    core::AggregationNode::Aggregate aggregate;
+    for (auto& rawInput : rawInputs) {
+      aggregate.rawInputTypes.push_back(rawInput->type());
+    }
+    auto inputIndex = numGroupingKeys + i;
+    std::vector<core::TypedExprPtr> inputs = {
+        std::make_shared<core::FieldAccessTypedExpr>(
+            partialOutputType->childAt(inputIndex),
+            partialOutputType->names()[inputIndex])};
+
+    // Add lambda inputs.
+    for (const auto& rawInput : rawInputs) {
+      if (rawInput->type()->kind() == TypeKind::FUNCTION) {
+        inputs.push_back(rawInput);
+      }
+    }
+
+    aggregate.call = std::make_shared<core::CallTypedExpr>(
+        partialAggregates[i].call->type(), std::move(inputs), name);
+    aggregates.emplace_back(aggregate);
+  }
+
+  return std::make_shared<core::AggregationNode>(
+      partialAggNode->id(),
+      step,
+      groupingKeys,
+      partialAggNode->preGroupedKeys(),
+      partialAggNode->aggregateNames(),
+      aggregates,
+      partialAggNode->ignoreNullKeys(),
+      partialAggNode);
 }
 } // namespace bytedance::bolt::exec
