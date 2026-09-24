@@ -58,8 +58,8 @@
 #include <gtest/gtest.h>
 
 #include "bolt/common/memory/Memory.h"
-#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -212,7 +212,8 @@ class EngineWriter : public PayloadWriter {
 
  private:
   void writeEmptyPayload(const RowVectorPtr& input, std::vector<uint8_t>& out) {
-    const uint32_t numColumns = input->type()->size();
+    const uint32_t numColumns =
+        cell::CellLayout::create(asRowType(input->type())).numWireColumns();
     const uint32_t tagBytes = cell::nullTagBytes(numColumns);
     out.assign(cell::kPayloadFixedHeaderBytes, 0);
     // row_count, run_count, variable_size stay zero.
@@ -365,9 +366,7 @@ class ColumnarPayloadIntegrationTest : public testing::Test,
 /// Writer that only emits PLAIN blocks and RAW strings passes exactly the
 /// test a Writer using every encoding does. Types not implemented yet belong
 /// in supports(), which counts them as skipped rather than failed.
-TEST_F(
-    ColumnarPayloadIntegrationTest,
-    engineWriterAgainstReferenceReader) {
+TEST_F(ColumnarPayloadIntegrationTest, engineWriterAgainstReferenceReader) {
   EngineCodec codec;
   EngineWriter writer{codec, pool()};
   auto reader = makeReferenceReader(codec, pool());
@@ -411,9 +410,7 @@ TEST_F(ColumnarPayloadIntegrationTest, engineReaderOnEveryEncoding) {
 /// Enable last. On its own this one cannot distinguish a correct pair from a
 /// pair that agrees on the same mistake, so it is worth little until the two
 /// above pass.
-TEST_F(
-    ColumnarPayloadIntegrationTest,
-    engineWriterAgainstEngineReader) {
+TEST_F(ColumnarPayloadIntegrationTest, engineWriterAgainstEngineReader) {
   EngineCodec codec;
   EngineWriter writer{codec, pool()};
   EngineReader reader{codec, pool()};

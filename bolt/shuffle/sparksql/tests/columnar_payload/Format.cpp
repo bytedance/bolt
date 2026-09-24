@@ -57,10 +57,20 @@ constexpr TypeInfo kTypes[] = {
     {PhysicalType::kFloat, 4, false, false, 0, 0, "Float"},
     {PhysicalType::kDouble, 8, false, false, 0, 0, "Double"},
     {PhysicalType::kString, 0, false, false, 0, 0, "String"},
+    {PhysicalType::kBoolean, 1, false, false, 0, 1, "Boolean"},
+    {PhysicalType::kTimestamp,
+     8,
+     true,
+     true,
+     kInt64Min,
+     kInt64Max,
+     "Timestamp"},
+    {PhysicalType::kHugeint, 16, false, false, 0, 0, "Hugeint"},
+    {PhysicalType::kUnknown, 0, false, false, 0, 0, "Unknown"},
 };
 
 static_assert(
-    std::size(kTypes) == static_cast<size_t>(PhysicalType::kString) + 1,
+    std::size(kTypes) == static_cast<size_t>(PhysicalType::kUnknown) + 1,
     "kTypes must carry one row per PhysicalType");
 
 /// info() indexes kTypes by the enumerator's value, which is only sound while
@@ -95,7 +105,9 @@ bool isSignedIntegral(PhysicalType type) {
 }
 
 size_t streamCount(PhysicalType type) {
-  return type == PhysicalType::kString ? 2 : 1;
+  return type == PhysicalType::kUnknown ? 0
+      : type == PhysicalType::kString   ? 2
+                                        : 1;
 }
 
 int64_t typeMin(PhysicalType type) {
@@ -173,6 +185,8 @@ bool operator==(const FlatColumn& lhs, const FlatColumn& rhs) {
     return false;
   }
   switch (lhs.type) {
+    case PhysicalType::kHugeint:
+      return lhs.wideValues == rhs.wideValues;
     case PhysicalType::kString:
       return lhs.stringValues == rhs.stringValues;
     case PhysicalType::kFloat:

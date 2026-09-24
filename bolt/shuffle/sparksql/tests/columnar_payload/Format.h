@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -70,6 +71,10 @@ enum class PhysicalType : uint8_t {
   kFloat = 5,
   kDouble = 6,
   kString = 7,
+  kBoolean = 8,
+  kTimestamp = 9,
+  kHugeint = 10,
+  kUnknown = 11,
 };
 
 /// RFC section 4.2.
@@ -143,6 +148,7 @@ struct FlatColumn {
   /// selected by type: intValues for the integral types, doubleValues for
   /// kFloat and kDouble, stringValues for kString.
   std::vector<int64_t> intValues;
+  std::vector<std::array<uint8_t, 16>> wideValues;
   std::vector<double> doubleValues;
   std::vector<std::string> stringValues;
 
