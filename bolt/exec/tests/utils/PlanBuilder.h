@@ -523,6 +523,9 @@ class PlanBuilder {
   /// @param outputFileName Optional file name of the output. If specified
   /// (non-empty), use it instead of generating the file name in Bolt. Should
   /// only be specified in non-bucketing write.
+  /// @param insertHandle TableInsertHandle (optional). Other arguments such as
+  /// the `connectorId`, `outputDirectoryPath`, `fileFormat` and so on will be
+  /// ignored.
   PlanBuilder& tableWrite(
       const std::string& outputDirectoryPath,
       const std::vector<std::string>& partitionBy,
@@ -533,7 +536,8 @@ class PlanBuilder {
           dwio::common::FileFormat::DWRF,
       const std::vector<std::string>& aggregates = {},
       const std::string& connectorId = "test-hive",
-      const std::string& outputFileName = "");
+      const std::string& outputFileName = "",
+      const std::shared_ptr<core::InsertTableHandle>& insertHandle = nullptr);
 
   /// Add a TableWriteMergeNode.
   PlanBuilder& tableWriteMerge(
