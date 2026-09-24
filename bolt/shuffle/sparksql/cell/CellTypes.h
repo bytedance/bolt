@@ -81,10 +81,11 @@ enum class RunLayout : uint8_t {
 
 /// How one stream's bytes are produced and parsed (spec sections 1.4, 7.1).
 enum class StreamKind : uint8_t {
-  /// Encoding Loop stream: SmallInt/Integer/Bigint/Date value stream, or a
+  /// Encoding Loop stream: SmallInt/Integer/Bigint/Date/Timestamp value stream,
+  /// or a
   /// String Length/Index stream (lengths encoded as Bigint).
   kEncoded,
-  /// Raw fixed-width value stream: TinyInt/Float/Double.
+  /// Raw fixed-width value stream: Boolean/TinyInt/Hugeint/Float/Double.
   kRawFixed,
   /// String Data stream: raw variable-length bytes.
   kStringData,
@@ -94,7 +95,7 @@ enum class StreamKind : uint8_t {
 struct CellStream {
   uint16_t column; // logical column index
   StreamKind kind;
-  /// Bytes per source value: 1/2/4/8 for value streams, 8 for a String
+  /// Bytes per source value: 1/2/4/8/16 for value streams, 8 for a String
   /// length stream, 0 for kStringData.
   uint8_t sourceWidth;
   /// Sign-extension rule for encoded streams (spec section 7.3). String
@@ -110,6 +111,10 @@ class CellLayout {
  public:
   static bool isSupportedType(const TypePtr& type) {
     switch (type->kind()) {
+      case TypeKind::UNKNOWN:
+      case TypeKind::BOOLEAN:
+      case TypeKind::TIMESTAMP:
+      case TypeKind::HUGEINT:
       case TypeKind::TINYINT:
       case TypeKind::SMALLINT:
       case TypeKind::INTEGER: // includes DATE (spec type Date)
@@ -137,6 +142,23 @@ class CellLayout {
 
   uint32_t numColumns() const {
     return numColumns_;
+  }
+
+  // UNKNOWN has no wire slot, null state or value stream.
+  bool isUnknownColumn(uint32_t column) const {
+    return rowType_->childAt(column)->kind() == TypeKind::UNKNOWN;
+  }
+
+  uint32_t numWireColumns() const {
+    return wireColumns_.size();
+  }
+
+  uint32_t wireColumn(uint32_t column) const {
+    return wireIndex_[column];
+  }
+
+  uint32_t logicalColumn(uint32_t wireColumn) const {
+    return wireColumns_[wireColumn];
   }
 
   uint32_t numStreams() const {
@@ -168,6 +190,8 @@ class CellLayout {
  private:
   RowTypePtr rowType_;
   uint32_t numColumns_{0};
+  std::vector<uint32_t> wireColumns_;
+  std::vector<uint32_t> wireIndex_;
   std::vector<CellStream> streams_;
   std::vector<uint32_t> columnStream_;
   std::vector<bool> isString_;

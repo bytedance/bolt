@@ -32,6 +32,7 @@ bolt_add_library(
   BoltShuffleReader.cpp
   BoltShuffleWriter.cpp
   BoltShuffleWriterV2.cpp
+  CellShuffleTypeAdapter.cpp
   CelebornReaderStreamIterator.cpp
   cell/CellDirectory.cpp
   cell/CellEncoding.cpp

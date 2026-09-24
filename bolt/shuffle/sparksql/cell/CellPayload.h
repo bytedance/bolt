@@ -64,7 +64,9 @@ class MemoryByteSource final : public CellByteSource {
     if (size_ - pos_ < n) {
       return false;
     }
-    ::memcpy(out, data_ + pos_, n);
+    if (n != 0) {
+      ::memcpy(out, data_ + pos_, n);
+    }
     pos_ += n;
     return true;
   }

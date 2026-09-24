@@ -97,8 +97,8 @@ SparkShuffleReader::SparkShuffleReader(
   // non-composite plans, so the reader picks the cell chain exactly when
   // the writer did.
   useCellReader_ = shuffleWriterType_ == ShuffleWriterType::Cell &&
-      supportAdaptiveShuffleWriter(partitioning) &&
-      cell::CellLayout::isSupportedRowType(outputType_) &&
+      supportAdaptiveShuffleWriter(partitioning) && outputType_->size() > 0 &&
+      CellShuffleTypeAdapter::isSupported(outputType_) &&
       !operatorCtx_->driverCtx()
            ->queryConfig()
            .isHashAggregationCompositeOutputEnabled() &&
@@ -123,15 +123,33 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
 
   if (useCellReader_) {
     if (!cellShuffleReader_) {
+      cellTypeAdapter_ = std::make_unique<CellShuffleTypeAdapter>(outputType_);
       NanosecondTimer timer(&deserializerCreateTime_);
       cellShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
           readerStreamIterator_,
-          cell::CellLayout::create(outputType_),
+          cell::CellLayout::create(cellTypeAdapter_->physicalType()),
           codec_.get(),
           arrowPool_.get(),
           pool(),
           batchSize_,
           shuffleBatchByteSize_);
+    }
+    if (cellTypeAdapter_->hasComplexColumns()) {
+      if (!pendingCellRows_) {
+        pendingCellRows_ = cellShuffleReader_->next();
+        pendingCellOffset_ = 0;
+      }
+      if (!pendingCellRows_) {
+        finished_ = true;
+        return nullptr;
+      }
+      NanosecondTimer convertTimer(&deserializeTime_);
+      auto output = cellTypeAdapter_->decodeNext(
+          pendingCellRows_, pendingCellOffset_, pool());
+      if (pendingCellOffset_ == pendingCellRows_->size()) {
+        pendingCellRows_.reset();
+      }
+      return output;
     }
     auto output = cellShuffleReader_->next();
     if (!output) {
@@ -253,6 +271,7 @@ void SparkShuffleReader::close() {
         totalReadTime_);
   }
 
+  pendingCellRows_.reset();
   if (readerStreamIterator_) {
     readerStreamIterator_->close();
     readerStreamIterator_ = nullptr;

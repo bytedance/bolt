@@ -31,13 +31,15 @@
 
 #pragma once
 
+#include "bolt/shuffle/sparksql/CellShuffleTypeAdapter.h"
+
 #include <cstdint>
 #include "bolt/exec/Driver.h"
 #include "bolt/exec/Operator.h"
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
-#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 namespace bytedance::bolt::shuffle::sparksql {
 
 class SparkShuffleReaderNode : public bytedance::bolt::core::PlanNode {
@@ -152,6 +154,9 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   // cell writer. Independent of the deserializer stack above.
   std::unique_ptr<cell::CellShuffleReader> cellShuffleReader_;
   bool useCellReader_ = false;
+  std::unique_ptr<CellShuffleTypeAdapter> cellTypeAdapter_;
+  RowVectorPtr pendingCellRows_;
+  vector_size_t pendingCellOffset_{0};
 
   bool isRowBased_ = false;
 
