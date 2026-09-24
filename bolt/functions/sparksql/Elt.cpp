@@ -65,9 +65,24 @@ class EltFunction final : public exec::VectorFunction {
     }
 
     // The result borrows the inputs' string buffers instead of copying their
-    // bytes, so a selected value is referenced rather than duplicated.
+    // bytes, so a selected value is referenced rather than duplicated. Only an
+    // input that some selected row actually indexes into can contribute bytes,
+    // so scan the indices first and acquire buffers for just those inputs; an
+    // input no row selects would otherwise pin its buffers for nothing.
+    std::vector<bool> inputReferenced(numInputs, false);
+    rows.applyToSelected([&](vector_size_t row) {
+      if (decodedIndex->isNullAt(row)) {
+        return;
+      }
+      const auto index = decodedIndex->valueAt<int32_t>(row);
+      if (index >= 1 && index <= numInputs) {
+        inputReferenced[index - 1] = true;
+      }
+    });
     for (int32_t input = 1; input <= numInputs; ++input) {
-      flatResult->acquireSharedStringBuffers(args[input].get());
+      if (inputReferenced[input - 1]) {
+        flatResult->acquireSharedStringBuffers(args[input].get());
+      }
     }
 
     rows.applyToSelected([&](vector_size_t row) {
