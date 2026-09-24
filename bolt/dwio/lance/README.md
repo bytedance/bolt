@@ -30,6 +30,8 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceLegacyScalar` owns v2.0 scalar, nullable, bitmap, bitpack, and
   fixed-size binary kernels. These kernels no longer live in the monolithic
   migration adapter.
+- `NativeLanceLegacyBinary` and `NativeLanceLegacyDictionary` own v2.0
+  variable-width, FSST, dictionary-index, and dictionary assembly kernels.
 - `NativeLanceMemoryBudget` provides move-only reservations for bounded
   transient scan memory.
 - `NativeLanceDecoder` is the migration adapter for legacy page paths. It does

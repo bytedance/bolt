@@ -1941,14 +1941,17 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - legacy scalar、nullable、bitmap、bitpack、fixed-size binary 和 zero-copy flat kernel 已迁移
   到 `NativeLanceLegacyScalar`；物理 buffer 定位统一由
   `NativeLanceMetadata::resolveBuffer()` 提供。
+- legacy Binary、FSST 和 dictionary 已分别迁移到
+  `NativeLanceLegacyBinary`、`NativeLanceLegacyDictionary`；dictionary items 直接分派到
+  scalar/binary page kernel，不再回调 Decoder 的通用递归入口。
 - Reader 不再包装 Blob resolver，也不保留 reader-scoped Blob object LRU；对象缓存策略完全
   归 dataset/object-store resolver 所有。
 - 根输出统一通过 `NativeLanceBatchBuilder` 组装，并由 ScanWindow 原子发布。
 
 ### 38.2 仍需完成
 
-- 将 dictionary、binary、FSST、list、map、struct、fixed-size-list、packed struct 和 Blob
-  从 `NativeLanceDecoder` adapter 迁移到独立 ColumnReader/PageReader 组合。
+- 将 list、map、struct、fixed-size-list、packed struct 和 Blob 从
+  `NativeLanceDecoder` adapter 迁移到独立 ColumnReader/PageReader 组合。
 - filter pipeline 仍有一条直接调用 `NativeLanceColumnSource::decodeSelectedRows()` 的迁移
   路径；需要改为 ColumnRequest/RowSelection 驱动。
 - `NativeLanceBatchBuilder` 已统一所有权和发布，但复杂类型仍会使用 compatibility

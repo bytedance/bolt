@@ -30,6 +30,8 @@
 #include "bolt/dwio/lance/NativeLanceBitpack.h"
 #include "bolt/dwio/lance/NativeLanceColumnCursor.h"
 #include "bolt/dwio/lance/NativeLanceDecompressor.h"
+#include "bolt/dwio/lance/NativeLanceLegacyBinary.h"
+#include "bolt/dwio/lance/NativeLanceLegacyDictionary.h"
 #include "bolt/dwio/lance/NativeLanceLegacyScalar.h"
 #include "bolt/dwio/lance/NativeLanceListOffsets.h"
 #include "bolt/dwio/lance/NativeLancePackedStruct.h"
@@ -955,192 +957,6 @@ BufferPtr readFlatByteRange(
   return output;
 }
 
-void decodeBinaryValues(
-    const TypePtr& type,
-    const ArrayEncoding& encoding,
-    const ColumnMetadata& column,
-    const ColumnMetadata::Page& page,
-    const NativeLanceMetadata& metadata,
-    uint64_t localStart,
-    uint64_t localCount,
-    uint64_t outputOffset,
-    const DecodeInput& read,
-    VectorPtr& result) {
-  BOLT_CHECK(
-      type->kind() == TypeKind::VARCHAR || type->kind() == TypeKind::VARBINARY);
-  const auto& binary = encoding.binary();
-  BOLT_CHECK(binary.has_indices());
-  BOLT_CHECK(binary.has_bytes());
-  const auto& indices = requireNoNullFlat(binary.indices(), "binary indices");
-  const auto& bytes = requireNoNullFlat(binary.bytes(), "binary bytes");
-  BOLT_CHECK_EQ(indices.bits_per_value(), 64);
-  BOLT_CHECK_EQ(bytes.bits_per_value(), 8);
-
-  const auto firstIndex = localStart == 0 ? 0 : localStart - 1;
-  const auto numIndices = localCount + (localStart == 0 ? 0 : 1);
-  const auto encodedIndices = readFlatRange(
-      indices,
-      column,
-      page,
-      metadata,
-      firstIndex * sizeof(uint64_t),
-      numIndices * sizeof(uint64_t),
-      *result->pool(),
-      read);
-
-  const auto* rawIndices = encodedIndices->as<char>();
-  const auto firstOffset = localStart == 0
-      ? 0
-      : normalizedStringOffset(
-            readLittleEndian<uint64_t>(rawIndices), binary.null_adjustment());
-  const auto lastOffset = normalizedStringOffset(
-      readLittleEndian<uint64_t>(
-          rawIndices + (numIndices - 1) * sizeof(uint64_t)),
-      binary.null_adjustment());
-  BOLT_CHECK_LE(firstOffset, lastOffset);
-
-  auto stringBytes = readFlatRange(
-      bytes,
-      column,
-      page,
-      metadata,
-      firstOffset,
-      lastOffset - firstOffset,
-      *result->pool(),
-      read);
-  auto* output = result->asFlatVector<StringView>();
-  output->addStringBuffer(stringBytes);
-
-  uint64_t currentOffset = firstOffset;
-  const auto indexShift = localStart == 0 ? 0 : 1;
-  for (uint64_t i = 0; i < localCount; ++i) {
-    const auto encodedEnd = readLittleEndian<uint64_t>(
-        rawIndices + (i + indexShift) * sizeof(uint64_t));
-    const auto endOffset =
-        normalizedStringOffset(encodedEnd, binary.null_adjustment());
-    BOLT_CHECK_LE(currentOffset, endOffset);
-    BOLT_CHECK_LE(endOffset, lastOffset);
-    BOLT_CHECK_LE(
-        endOffset - currentOffset,
-        static_cast<uint64_t>(std::numeric_limits<int32_t>::max()));
-    if (encodedEnd >= binary.null_adjustment()) {
-      result->setNull(outputOffset + i, true);
-    } else {
-      output->setNoCopy(
-          outputOffset + i,
-          StringView(
-              stringBytes->as<char>() + currentOffset - firstOffset,
-              static_cast<int32_t>(endOffset - currentOffset)));
-    }
-    currentOffset = endOffset;
-  }
-}
-
-VectorPtr decodeFsstValues(
-    const TypePtr& type,
-    const ArrayEncoding& encoding,
-    const ColumnMetadata& column,
-    const ColumnMetadata::Page& page,
-    const NativeLanceMetadata& metadata,
-    uint64_t localStart,
-    uint64_t localCount,
-    memory::MemoryPool& pool,
-    const DecodeInput& read) {
-  constexpr uint64_t kFsstMagic = uint64_t{0x46535354} << 32;
-  constexpr uint8_t kFsstEscape = 255;
-  constexpr size_t kFsstSymbolTableSize = 8 + 256 * 8 + 256;
-  BOLT_CHECK_EQ(encoding.array_encoding_case(), ArrayEncoding::kFsst);
-  const auto& fsst = encoding.fsst();
-  BOLT_CHECK(fsst.has_binary());
-  BOLT_CHECK_EQ(fsst.symbol_table().size(), kFsstSymbolTableSize);
-  const auto* table = fsst.symbol_table().data();
-  const auto header = readLittleEndian<uint64_t>(table);
-  BOLT_CHECK_EQ(
-      header & 0xffffffff00000000ULL,
-      kFsstMagic,
-      "Invalid Lance FSST symbol-table magic");
-
-  auto compressed =
-      BaseVector::create(type, static_cast<vector_size_t>(localCount), &pool);
-  decodeBinaryValues(
-      type,
-      fsst.binary(),
-      column,
-      page,
-      metadata,
-      localStart,
-      localCount,
-      0,
-      read,
-      compressed);
-  if ((header & (uint64_t{1} << 24)) == 0) {
-    return compressed;
-  }
-
-  const auto numSymbols = static_cast<uint8_t>(header & 0xff);
-  const auto* symbols = table + sizeof(uint64_t);
-  const auto* lengths =
-      reinterpret_cast<const uint8_t*>(symbols + numSymbols * sizeof(uint64_t));
-  const auto* compressedStrings = compressed->as<SimpleVector<StringView>>();
-  uint64_t outputSize = 0;
-  for (uint64_t row = 0; row < localCount; ++row) {
-    if (compressed->isNullAt(row)) {
-      continue;
-    }
-    const auto value = compressedStrings->valueAt(row);
-    for (int32_t i = 0; i < value.size(); ++i) {
-      const auto code = static_cast<uint8_t>(value.data()[i]);
-      if (code == kFsstEscape) {
-        BOLT_CHECK_LT(++i, value.size(), "Truncated Lance FSST escape");
-        ++outputSize;
-      } else {
-        BOLT_CHECK_LT(code, numSymbols, "Invalid Lance FSST symbol code");
-        BOLT_CHECK_LE(
-            outputSize, std::numeric_limits<uint64_t>::max() - lengths[code]);
-        outputSize += lengths[code];
-      }
-    }
-  }
-  BOLT_CHECK_LE(
-      outputSize,
-      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
-      "Decoded Lance FSST page exceeds Bolt StringView capacity");
-  auto outputBytes = AlignedBuffer::allocate<char>(outputSize, &pool);
-  auto* destination = outputBytes->asMutable<char>();
-  auto result =
-      BaseVector::create(type, static_cast<vector_size_t>(localCount), &pool);
-  auto* output = result->asFlatVector<StringView>();
-  output->addStringBuffer(outputBytes);
-  uint64_t outputOffset = 0;
-  for (uint64_t row = 0; row < localCount; ++row) {
-    if (compressed->isNullAt(row)) {
-      result->setNull(row, true);
-      continue;
-    }
-    const auto value = compressedStrings->valueAt(row);
-    const auto valueStart = outputOffset;
-    for (int32_t i = 0; i < value.size(); ++i) {
-      const auto code = static_cast<uint8_t>(value.data()[i]);
-      if (code == kFsstEscape) {
-        destination[outputOffset++] = value.data()[++i];
-      } else {
-        const auto length = lengths[code];
-        BOLT_CHECK_GE(length, 1);
-        BOLT_CHECK_LE(length, 8);
-        std::memcpy(destination + outputOffset, symbols + code * 8, length);
-        outputOffset += length;
-      }
-    }
-    output->setNoCopy(
-        row,
-        StringView(
-            destination + valueStart,
-            static_cast<int32_t>(outputOffset - valueStart)));
-  }
-  BOLT_CHECK_EQ(outputOffset, outputSize);
-  return result;
-}
-
 const ArrayEncoding& unwrapNoNullEncoding(
     const ArrayEncoding& encoding,
     std::string_view role) {
@@ -1154,281 +970,6 @@ const ArrayEncoding& unwrapNoNullEncoding(
       role);
   BOLT_CHECK(encoding.nullable().no_nulls().has_values());
   return encoding.nullable().no_nulls().values();
-}
-
-BufferPtr decodeDictionaryIndices(
-    const ArrayEncoding& encodedIndices,
-    const ColumnMetadata& column,
-    const ColumnMetadata::Page& page,
-    const NativeLanceMetadata& metadata,
-    uint64_t localStart,
-    uint64_t localCount,
-    memory::MemoryPool& pool,
-    const DecodeInput& read) {
-  const auto& indices = unwrapNoNullEncoding(encodedIndices, "indices");
-  auto result = AlignedBuffer::allocate<uint64_t>(localCount, &pool);
-  auto* rawResult = result->asMutable<uint64_t>();
-  if (indices.array_encoding_case() == ArrayEncoding::kFlat) {
-    const auto& flat = requireFlat(indices, "dictionary indices");
-    BOLT_CHECK_EQ(flat.bits_per_value() % 8, 0);
-    const auto bytesPerValue = flat.bits_per_value() / 8;
-    BOLT_CHECK(
-        bytesPerValue == 1 || bytesPerValue == 2 || bytesPerValue == 4 ||
-        bytesPerValue == 8);
-    const auto values = readFlatRange(
-        flat,
-        column,
-        page,
-        metadata,
-        localStart * bytesPerValue,
-        localCount * bytesPerValue,
-        pool,
-        read);
-    for (uint64_t i = 0; i < localCount; ++i) {
-      switch (bytesPerValue) {
-        case 1:
-          rawResult[i] = values->as<uint8_t>()[i];
-          break;
-        case 2:
-          rawResult[i] = readLittleEndian<uint16_t>(
-              values->as<char>() + i * sizeof(uint16_t));
-          break;
-        case 4:
-          rawResult[i] = readLittleEndian<uint32_t>(
-              values->as<char>() + i * sizeof(uint32_t));
-          break;
-        case 8:
-          rawResult[i] = readLittleEndian<uint64_t>(
-              values->as<char>() + i * sizeof(uint64_t));
-          break;
-      }
-    }
-    return result;
-  }
-
-  if (indices.array_encoding_case() == ArrayEncoding::kBitpackedForNonNeg) {
-    constexpr uint64_t kChunkRows = 1'024;
-    const auto& bitpacked = indices.bitpacked_for_non_neg();
-    const auto compressedBits = bitpacked.compressed_bits_per_value();
-    const auto uncompressedBits = bitpacked.uncompressed_bits_per_value();
-    BOLT_CHECK_LE(compressedBits, uncompressedBits);
-    BOLT_CHECK(
-        uncompressedBits == 8 || uncompressedBits == 16 ||
-        uncompressedBits == 32 || uncompressedBits == 64);
-    const auto bytesPerValue = uncompressedBits / 8;
-    auto unpacked =
-        AlignedBuffer::allocate<char>(localCount * bytesPerValue, &pool);
-    if (compressedBits == 0) {
-      std::memset(unpacked->asMutable<char>(), 0, unpacked->size());
-    } else {
-      BOLT_CHECK(bitpacked.has_buffer());
-      const auto buffer =
-          metadata.resolveBuffer(bitpacked.buffer(), column, page);
-      const auto chunkBytes = kChunkRows * compressedBits / 8;
-      const auto firstChunk = localStart / kChunkRows;
-      const auto endChunk =
-          (localStart + localCount + kChunkRows - 1) / kChunkRows;
-      const auto firstByte = firstChunk * chunkBytes;
-      const auto endByte = endChunk * chunkBytes;
-      BOLT_CHECK_LE(endByte, buffer.length);
-      const auto packed = read(buffer.offset + firstByte, endByte - firstByte);
-      decodeLanceBitpackedForNonNeg(
-          packed->as<uint8_t>(),
-          packed->size(),
-          localStart - firstChunk * kChunkRows,
-          localCount,
-          compressedBits,
-          uncompressedBits,
-          unpacked->asMutable<uint8_t>());
-    }
-    for (uint64_t i = 0; i < localCount; ++i) {
-      const auto* value = unpacked->as<char>() + i * bytesPerValue;
-      switch (uncompressedBits) {
-        case 8:
-          rawResult[i] = static_cast<uint8_t>(*value);
-          break;
-        case 16:
-          rawResult[i] = readLittleEndian<uint16_t>(value);
-          break;
-        case 32:
-          rawResult[i] = readLittleEndian<uint32_t>(value);
-          break;
-        case 64:
-          rawResult[i] = readLittleEndian<uint64_t>(value);
-          break;
-      }
-    }
-    return result;
-  }
-
-  BOLT_CHECK_EQ(
-      indices.array_encoding_case(),
-      ArrayEncoding::kBitpacked,
-      "Native Lance dictionary indices require Flat, Bitpacked, or "
-      "BitpackedForNonNeg encoding");
-  const auto& bitpacked = indices.bitpacked();
-  BOLT_CHECK(!bitpacked.signed_());
-  BOLT_CHECK_LE(bitpacked.compressed_bits_per_value(), 64);
-  if (bitpacked.compressed_bits_per_value() == 0) {
-    std::memset(rawResult, 0, localCount * sizeof(uint64_t));
-    return result;
-  }
-  BOLT_CHECK(bitpacked.has_buffer());
-  const auto buffer = metadata.resolveBuffer(bitpacked.buffer(), column, page);
-  const auto firstBit = localStart * bitpacked.compressed_bits_per_value();
-  const auto endBit =
-      (localStart + localCount) * bitpacked.compressed_bits_per_value();
-  const auto firstByte = firstBit / 8;
-  const auto endByte = (endBit + 7) / 8;
-  BOLT_CHECK_LE(endByte, buffer.length);
-  const auto packed = read(buffer.offset + firstByte, endByte - firstByte);
-  decodeLanceBitpacked(
-      packed->as<uint8_t>(),
-      packed->size(),
-      firstBit - firstByte * 8,
-      localCount,
-      bitpacked.compressed_bits_per_value(),
-      64,
-      false,
-      reinterpret_cast<uint8_t*>(rawResult));
-  return result;
-}
-
-std::string_view dictionaryValueLogicalType(std::string_view logicalType) {
-  if (logicalType.rfind("dict:", 0) != 0) {
-    return logicalType;
-  }
-  return nativeLanceDictionaryValueLogicalType(logicalType);
-}
-
-void applyNullableEncoding(
-    const ::lance::encodings::Nullable* nullable,
-    const ColumnMetadata& column,
-    const ColumnMetadata::Page& page,
-    const NativeLanceMetadata& metadata,
-    uint64_t localStart,
-    uint64_t localCount,
-    memory::MemoryPool& pool,
-    const DecodeInput& read,
-    VectorPtr& result) {
-  if (nullable == nullptr ||
-      nullable->nullability_case() == ::lance::encodings::Nullable::kNoNulls) {
-    return;
-  }
-  if (nullable->nullability_case() == ::lance::encodings::Nullable::kAllNulls) {
-    setLegacyAllNull(0, localCount, *result);
-    return;
-  }
-  BOLT_CHECK_EQ(
-      nullable->nullability_case(), ::lance::encodings::Nullable::kSomeNulls);
-  const auto& validity =
-      requireFlat(nullable->some_nulls().validity(), "validity");
-  BOLT_CHECK_EQ(validity.bits_per_value(), 1);
-  const auto firstByte = localStart / 8;
-  const auto endByte = (localStart + localCount + 7) / 8;
-  const auto bytes = readFlatRange(
-      validity,
-      column,
-      page,
-      metadata,
-      firstByte,
-      endByte - firstByte,
-      pool,
-      read);
-  applyLegacyValidityBitmap(
-      bytes->as<uint8_t>(), localStart - firstByte * 8, localCount, 0, *result);
-}
-
-VectorPtr decodeDictionaryItems(
-    const TypePtr& type,
-    std::string_view logicalType,
-    const ArrayEncoding& encoding,
-    const ColumnMetadata& column,
-    const ColumnMetadata::Page& page,
-    const NativeLanceMetadata& metadata,
-    memory::MemoryPool& pool,
-    uint64_t count,
-    const DecodeInput& read) {
-  return decodePageEncoding(
-      type,
-      logicalType,
-      encoding,
-      column,
-      page,
-      metadata,
-      0,
-      count,
-      pool,
-      read);
-}
-
-VectorPtr decodeDictionaryValues(
-    const TypePtr& type,
-    std::string_view logicalType,
-    const ArrayEncoding& encoding,
-    const ColumnMetadata& column,
-    const ColumnMetadata::Page& page,
-    const NativeLanceMetadata& metadata,
-    memory::MemoryPool& pool,
-    uint64_t localStart,
-    uint64_t localCount,
-    const DecodeInput& read) {
-  const auto& dictionary = encoding.dictionary();
-  BOLT_CHECK(dictionary.has_indices());
-  BOLT_CHECK(dictionary.has_items());
-  BOLT_CHECK_GT(dictionary.num_dictionary_items(), 0);
-  BOLT_CHECK_LE(
-      dictionary.num_dictionary_items(),
-      static_cast<uint32_t>(std::numeric_limits<vector_size_t>::max()));
-
-  const auto valueLogicalType = dictionaryValueLogicalType(logicalType);
-  const auto encodedIndices = decodeDictionaryIndices(
-      dictionary.indices(),
-      column,
-      page,
-      metadata,
-      localStart,
-      localCount,
-      pool,
-      read);
-  // Consume planned index data before dictionary item decoding. Variable-width
-  // items can trigger a second BufferedInput load after their offsets are
-  // known, which invalidates outstanding streams in DirectBufferedInput.
-  auto dictionaryValues = decodeDictionaryItems(
-      type,
-      valueLogicalType,
-      dictionary.items(),
-      column,
-      page,
-      metadata,
-      pool,
-      dictionary.num_dictionary_items(),
-      read);
-  auto indices = allocateIndices(localCount, &pool);
-  auto* rawIndices = indices->asMutable<vector_size_t>();
-  const auto* rawEncodedIndices = encodedIndices->as<uint64_t>();
-  BufferPtr nulls;
-  const auto logicalDictionary = logicalType.rfind("dict:", 0) == 0;
-  for (uint64_t i = 0; i < localCount; ++i) {
-    const auto encodedIndex = rawEncodedIndices[i];
-    if (!logicalDictionary && encodedIndex == 0) {
-      if (nulls == nullptr) {
-        nulls = allocateNulls(localCount, &pool);
-      }
-      bits::setNull(nulls->asMutable<uint64_t>(), i);
-      rawIndices[i] = 0;
-    } else {
-      const auto dictionaryIndex =
-          logicalDictionary ? encodedIndex : encodedIndex - 1;
-      BOLT_CHECK_LT(dictionaryIndex, dictionary.num_dictionary_items());
-      rawIndices[i] = static_cast<vector_size_t>(dictionaryIndex);
-    }
-  }
-  return BaseVector::wrapInDictionary(
-      std::move(nulls),
-      std::move(indices),
-      static_cast<vector_size_t>(localCount),
-      std::move(dictionaryValues));
 }
 
 VectorPtr decodePageEncoding(
@@ -1477,48 +1018,23 @@ VectorPtr decodePageEncoding(
   if (values->array_encoding_case() == ArrayEncoding::kDictionary) {
     BOLT_CHECK_NULL(
         nullable, "Nullable Dictionary wrapper is not valid in Lance v2.0");
-    return decodeDictionaryValues(
+    return decodeLegacyDictionaryPage(
         type,
         logicalType,
         *values,
         column,
         page,
         metadata,
-        pool,
         localStart,
         localCount,
-        read);
+        pool,
+        read.rawRead(),
+        read.compressedRead());
   }
-
-  VectorPtr result;
-  if (values->array_encoding_case() == ArrayEncoding::kBinary) {
-    result = BaseVector::create(type, localCount, &pool);
-    decodeBinaryValues(
+  if (values->array_encoding_case() == ArrayEncoding::kBinary ||
+      values->array_encoding_case() == ArrayEncoding::kFsst) {
+    return decodeLegacyBinaryPage(
         type,
-        *values,
-        column,
-        page,
-        metadata,
-        localStart,
-        localCount,
-        0,
-        read,
-        result);
-  } else if (values->array_encoding_case() == ArrayEncoding::kFsst) {
-    result = decodeFsstValues(
-        type,
-        *values,
-        column,
-        page,
-        metadata,
-        localStart,
-        localCount,
-        pool,
-        read);
-  } else {
-    return decodeLegacyPrimitivePage(
-        type,
-        logicalType,
         encoding,
         column,
         page,
@@ -1529,17 +1045,19 @@ VectorPtr decodePageEncoding(
         read.rawRead(),
         read.compressedRead());
   }
-  applyNullableEncoding(
-      nullable,
+
+  return decodeLegacyPrimitivePage(
+      type,
+      logicalType,
+      encoding,
       column,
       page,
       metadata,
       localStart,
       localCount,
       pool,
-      read,
-      result);
-  return result;
+      read.rawRead(),
+      read.compressedRead());
 }
 
 void decodeLegacyBinaryValues(
@@ -2772,17 +2290,18 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
       continue;
     }
     if (encoding.array_encoding_case() == ArrayEncoding::kDictionary) {
-      auto pageResult = decodeDictionaryValues(
+      auto pageResult = decodeLegacyDictionaryPage(
           type,
           logicalType,
           encoding,
           column,
           page,
           metadata_,
-          pool_,
           localStart,
           localCount,
-          readInput);
+          pool_,
+          readInput.rawRead(),
+          readInput.compressedRead());
       if (outputOffset == 0 && localCount == rowCount) {
         result = std::move(pageResult);
       } else {
@@ -2796,8 +2315,10 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
       pageRowStart = pageRowEnd;
       continue;
     }
-    if (encoding.array_encoding_case() == ArrayEncoding::kFsst) {
-      auto pageResult = decodeFsstValues(
+    if ((type->kind() == TypeKind::VARCHAR ||
+         type->kind() == TypeKind::VARBINARY) &&
+        isLegacyBinaryEncoding(encoding)) {
+      auto pageResult = decodeLegacyBinaryPage(
           type,
           encoding,
           column,
@@ -2806,7 +2327,8 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
           localStart,
           localCount,
           pool_,
-          readInput);
+          readInput.rawRead(),
+          readInput.compressedRead());
       if (outputOffset == 0 && localCount == rowCount) {
         result = std::move(pageResult);
       } else {
@@ -2816,22 +2338,6 @@ VectorPtr NativeLanceDecoder::decodePhysicalColumnNoCache(
             0,
             static_cast<vector_size_t>(localCount));
       }
-      outputOffset += localCount;
-      pageRowStart = pageRowEnd;
-      continue;
-    }
-    if (encoding.array_encoding_case() == ArrayEncoding::kBinary) {
-      decodeBinaryValues(
-          type,
-          encoding,
-          column,
-          page,
-          metadata_,
-          localStart,
-          localCount,
-          outputOffset,
-          readInput,
-          result);
       outputOffset += localCount;
       pageRowStart = pageRowEnd;
       continue;
