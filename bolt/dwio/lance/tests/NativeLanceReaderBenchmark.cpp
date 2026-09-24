@@ -18,6 +18,7 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/init/Init.h>
 
+#include <sys/resource.h>
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -182,10 +183,13 @@ ScanResult scan(dwio::common::Reader& reader) {
   uint64_t outputRows = 0;
   uint64_t checksum = 0;
   uint64_t batches = 0;
+  uint64_t maxOutputRetainedBytes = 0;
   while (const auto scanned = rows->next(batchSize, result)) {
     inputRows += scanned;
     outputRows += result->size();
     ++batches;
+    maxOutputRetainedBytes =
+        std::max<uint64_t>(maxOutputRetainedBytes, result->retainedSize());
     if (!skipMaterialize) {
       materialize(result);
     }
@@ -212,11 +216,17 @@ ScanResult scan(dwio::common::Reader& reader) {
   if (printStats) {
     dwio::common::RuntimeStatistics stats;
     rows->updateRuntimeStats(stats);
+    struct rusage usage {};
+    BOLT_CHECK_EQ(getrusage(RUSAGE_SELF, &usage), 0);
     std::cerr << "BOLT_LANCE_BENCHMARK_STATS mode=" << readerMode
               << " scenario=" << scenario << " batches=" << batches
               << " input_rows=" << inputRows << " output_rows=" << outputRows
               << " checksum=" << checksum
               << " decode_ns=" << stats.decodeTimeNs - beforeStats.decodeTimeNs
+              << " peak_rss_kb=" << usage.ru_maxrss
+              << " pool_current_bytes=" << readerPool->currentBytes()
+              << " pool_peak_bytes=" << readerPool->peakBytes()
+              << " max_output_retained_bytes=" << maxOutputRetainedBytes
               << "\n";
   }
   const auto sourceRows = reader.numberOfRows().value_or(inputRows);

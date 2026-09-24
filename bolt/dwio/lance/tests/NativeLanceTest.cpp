@@ -31,14 +31,21 @@
 #include "bolt/dwio/common/ColumnSelector.h"
 #include "bolt/dwio/common/DirectBufferedInput.h"
 #include "bolt/dwio/common/Options.h"
+#include "bolt/dwio/lance/NativeLanceBatchBuilder.h"
 #include "bolt/dwio/lance/NativeLanceBitmap.h"
 #include "bolt/dwio/lance/NativeLanceBitpack.h"
+#include "bolt/dwio/lance/NativeLanceColumnCursor.h"
 #include "bolt/dwio/lance/NativeLanceDecoder.h"
+#include "bolt/dwio/lance/NativeLanceDecompressor.h"
+#include "bolt/dwio/lance/NativeLanceFileOpenTask.h"
 #include "bolt/dwio/lance/NativeLanceListOffsets.h"
+#include "bolt/dwio/lance/NativeLanceMemoryBudget.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLancePackedStruct.h"
-#include "bolt/dwio/lance/NativeLanceReadPlan.h"
+#include "bolt/dwio/lance/NativeLancePageReader.h"
+#include "bolt/dwio/lance/NativeLanceReadScheduler.h"
 #include "bolt/dwio/lance/NativeLanceReader.h"
+#include "bolt/dwio/lance/NativeLanceScanPlan.h"
 #include "bolt/dwio/lance/NativeLanceStructuralDecoder.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
 #include "bolt/dwio/lance/proto/lance_encodings_v2_0.pb.h"
@@ -2465,6 +2472,276 @@ TEST_F(NativeLanceTest, sampleMetadata) {
   EXPECT_EQ(metadata->columns()[1].pages(0).buffer_sizes(0), 160);
 }
 
+TEST_F(NativeLanceTest, fileOpenTaskHasExplicitPhases) {
+  dwio::common::ReaderOptions options(pool_.get());
+  NativeLanceFileOpenTask task(
+      openFile("sample.lance", *pool_),
+      options,
+      nullptr,
+      defaultNativeLanceTypeAdapter());
+
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedContext);
+  EXPECT_TRUE(task.executeStep());
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kNeedValidation);
+  EXPECT_FALSE(task.executeStep());
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kReady);
+
+  const auto context = task.finish();
+  EXPECT_EQ(context->metadata().numRows(), 20);
+  auto firstInput = context->newInput();
+  auto secondInput = context->newInput();
+  EXPECT_NE(firstInput.get(), secondInput.get());
+  EXPECT_EQ(firstInput->getReadFile(), secondInput->getReadFile());
+
+  EXPECT_THROW(task.executeStep(), BoltException);
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kReady);
+}
+
+TEST_F(NativeLanceTest, fileOpenTaskFreezesTerminalFailure) {
+  dwio::common::ReaderOptions options(pool_.get());
+  NativeLanceFileOpenTask task(
+      std::make_unique<dwio::common::BufferedInput>(
+          std::make_shared<InMemoryReadFile>(std::string("invalid")), *pool_),
+      options,
+      nullptr,
+      defaultNativeLanceTypeAdapter());
+
+  EXPECT_THROW(task.executeStep(), BoltException);
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kFailed);
+  EXPECT_THROW(task.executeStep(), BoltException);
+  EXPECT_EQ(task.state(), NativeLanceFileOpenState::kFailed);
+}
+
+TEST_F(NativeLanceTest, scanPlanBindsProjectionAndRowRangesOnce) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  const auto context = openNativeLanceFile(
+      openFile("sample.lance", *pool_),
+      readerOptions,
+      nullptr,
+      defaultNativeLanceTypeAdapter());
+  dwio::common::RowReaderOptions rowOptions;
+  rowOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+      context->metadata().rowType(), std::vector<std::string>{"b"}));
+
+  const auto plan = NativeLanceScanPlan::build(*context, rowOptions);
+  EXPECT_EQ(plan->outputType()->toString(), "ROW<b:DOUBLE>");
+  EXPECT_EQ(plan->requiredColumns(), std::vector<uint32_t>({1}));
+  const std::vector<std::pair<uint64_t, uint64_t>> expectedRanges{{0, 20}};
+  EXPECT_EQ(plan->rowRanges(), expectedRanges);
+  EXPECT_GT(plan->estimatedBytesPerRow(), 0);
+}
+
+TEST_F(NativeLanceTest, scanCoordinatorOwnsReaderLifecycle) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  const auto context = openNativeLanceFile(
+      openFile("sample.lance", *pool_),
+      readerOptions,
+      nullptr,
+      defaultNativeLanceTypeAdapter());
+  NativeLanceScanCoordinator coordinator(
+      context, dwio::common::RowReaderOptions{});
+
+  EXPECT_EQ(coordinator.state(), NativeLanceScanState::kIdle);
+  VectorPtr result;
+  EXPECT_EQ(coordinator.next(5, result, nullptr), 5);
+  EXPECT_EQ(coordinator.state(), NativeLanceScanState::kIdle);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->size(), 5);
+  EXPECT_EQ(coordinator.skip(15), 15);
+  EXPECT_EQ(coordinator.state(), NativeLanceScanState::kFinished);
+  EXPECT_EQ(coordinator.next(5, result, nullptr), 0);
+}
+
+TEST_F(NativeLanceTest, columnCursorProducesMonotonicPageSpans) {
+  const std::vector<uint64_t> pageRowStarts{0, 5, 5, 10, 20};
+  NativeLanceColumnCursor cursor(7, pageRowStarts);
+
+  const auto first = cursor.spans(3, 10);
+  ASSERT_EQ(first.size(), 3);
+  EXPECT_EQ(first[0].physicalColumn, 7);
+  EXPECT_EQ(first[0].pageIndex, 0);
+  EXPECT_EQ(first[0].localRowBegin, 3);
+  EXPECT_EQ(first[0].rowCount, 2);
+  EXPECT_EQ(first[1].pageIndex, 2);
+  EXPECT_EQ(first[1].localRowBegin, 0);
+  EXPECT_EQ(first[1].rowCount, 5);
+  EXPECT_EQ(first[2].pageIndex, 3);
+  EXPECT_EQ(first[2].localRowBegin, 0);
+  EXPECT_EQ(first[2].rowCount, 3);
+  EXPECT_EQ(cursor.nextRow(), 13);
+  EXPECT_EQ(cursor.pageIndex(), 3);
+
+  const auto second = cursor.spans(13, 7);
+  ASSERT_EQ(second.size(), 1);
+  EXPECT_EQ(second[0].pageIndex, 3);
+  EXPECT_EQ(second[0].localRowBegin, 3);
+  EXPECT_EQ(second[0].rowCount, 7);
+  EXPECT_EQ(cursor.nextRow(), 20);
+  EXPECT_EQ(cursor.pageIndex(), 4);
+  EXPECT_THROW(cursor.spans(19, 1), BoltException);
+}
+
+TEST_F(NativeLanceTest, metadataBuildsPageRowIndex) {
+  const auto file = load("sample.lance");
+  EXPECT_EQ(file.metadata->pageRowStarts(0), std::vector<uint64_t>({0, 20}));
+  EXPECT_EQ(file.metadata->pageRowStarts(1), std::vector<uint64_t>({0, 20}));
+}
+
+TEST_F(NativeLanceTest, columnReadTaskHasBatchLocalState) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  const auto context = openNativeLanceFile(
+      openFile("sample.lance", *pool_),
+      readerOptions,
+      nullptr,
+      defaultNativeLanceTypeAdapter());
+  dwio::common::RowReaderOptions rowOptions;
+  rowOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+      context->metadata().rowType(), std::vector<std::string>{"a"}));
+  const auto plan = NativeLanceScanPlan::build(*context, rowOptions);
+  auto input = context->newInput();
+  NativeLanceDecoder decoder(
+      *input, context->metadata(), *pool_, context->blobResolver());
+  NativeLanceColumnReadTask task(
+      plan->rootColumnReader(), {.rowStart = 0, .rowCount = 5});
+
+  EXPECT_EQ(task.state(), NativeLanceColumnState::kIdle);
+  task.plan(decoder);
+  EXPECT_EQ(task.state(), NativeLanceColumnState::kWaitingPages);
+  task.decode(decoder, *pool_);
+  EXPECT_EQ(task.state(), NativeLanceColumnState::kReady);
+  const auto result = task.consume();
+  EXPECT_EQ(task.state(), NativeLanceColumnState::kConsumed);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->size(), 5);
+
+  NativeLanceColumnReadTask cancelled(
+      plan->rootColumnReader(), {.rowStart = 5, .rowCount = 5});
+  cancelled.cancel(decoder);
+  EXPECT_EQ(cancelled.state(), NativeLanceColumnState::kCancelled);
+}
+
+TEST_F(NativeLanceTest, memoryBudgetUsesMoveOnlyReservations) {
+  NativeLanceMemoryBudget budget(100);
+  auto compressed =
+      budget.tryReserve(NativeLanceMemoryClass::kCompressedInput, 60);
+  ASSERT_TRUE(compressed.has_value());
+  EXPECT_EQ(budget.usedBytes(), 60);
+  EXPECT_EQ(budget.usedBytes(NativeLanceMemoryClass::kCompressedInput), 60);
+  EXPECT_FALSE(budget.tryReserve(NativeLanceMemoryClass::kDecodeScratch, 41)
+                   .has_value());
+
+  auto scratch = budget.tryReserve(NativeLanceMemoryClass::kDecodeScratch, 40);
+  ASSERT_TRUE(scratch.has_value());
+  EXPECT_EQ(budget.usedBytes(), 100);
+  EXPECT_EQ(budget.peakBytes(), 100);
+
+  compressed.reset();
+  EXPECT_EQ(budget.usedBytes(), 40);
+  auto moved = std::move(*scratch);
+  scratch.reset();
+  EXPECT_EQ(budget.usedBytes(), 40);
+  EXPECT_EQ(moved.bytes(), 40);
+}
+
+TEST_F(NativeLanceTest, memoryBudgetAllowsOneIsolatedOversizedOutput) {
+  NativeLanceMemoryBudget budget(100);
+  {
+    auto output = budget.reserveOversizedOutput(150);
+    EXPECT_EQ(output.bytes(), 150);
+    EXPECT_EQ(budget.usedBytes(), 150);
+    EXPECT_EQ(budget.peakBytes(), 150);
+    EXPECT_FALSE(
+        budget.tryReserve(NativeLanceMemoryClass::kControl, 1).has_value());
+  }
+  EXPECT_EQ(budget.usedBytes(), 0);
+  EXPECT_TRUE(
+      budget.tryReserve(NativeLanceMemoryClass::kControl, 100).has_value());
+}
+
+TEST_F(NativeLanceTest, decompressorExposesCodecAccessMode) {
+  EXPECT_EQ(
+      NativeLanceDecompressor::accessMode("zstd"),
+      NativeLanceCodecAccess::kSequentialFrame);
+  EXPECT_EQ(
+      NativeLanceDecompressor::accessMode("lz4"),
+      NativeLanceCodecAccess::kWholeBuffer);
+  EXPECT_THROW(NativeLanceDecompressor::accessMode("unknown"), BoltException);
+}
+
+TEST_F(NativeLanceTest, zstdStreamDecodesMonotonicRangesWithoutPageCache) {
+  std::string values;
+  values.reserve(257);
+  for (size_t i = 0; i < 257; ++i) {
+    values.push_back(static_cast<char>((i * 37) & 0xff));
+  }
+
+  for (const auto scheme : {"zstd", "zstd_raw"}) {
+    const auto encoded = compressValues(values, scheme);
+    uint64_t bytesRead = 0;
+    NativeLanceZstdStream stream(
+        0,
+        encoded.size(),
+        *pool_,
+        [&](uint64_t offset, uint64_t length) {
+          EXPECT_LE(offset, encoded.size());
+          EXPECT_LE(length, encoded.size() - offset);
+          bytesRead += length;
+          auto result = AlignedBuffer::allocate<char>(length, pool_.get());
+          std::memcpy(
+              result->asMutable<char>(), encoded.data() + offset, length);
+          return result;
+        },
+        17,
+        8);
+
+    const auto first = stream.decodeRange(0, 31);
+    EXPECT_EQ(
+        std::string(first->as<char>(), first->size()), values.substr(0, 31));
+    const auto second = stream.decodeRange(31, 29);
+    EXPECT_EQ(
+        std::string(second->as<char>(), second->size()), values.substr(31, 29));
+    const auto skipped = stream.decodeRange(80, 20);
+    EXPECT_EQ(
+        std::string(skipped->as<char>(), skipped->size()),
+        values.substr(80, 20));
+    EXPECT_EQ(stream.restartCount(), 0);
+
+    const auto overlap = stream.decodeRange(95, 10);
+    EXPECT_EQ(
+        std::string(overlap->as<char>(), overlap->size()),
+        values.substr(95, 10));
+    EXPECT_EQ(stream.restartCount(), 0);
+
+    const auto restarted = stream.decodeRange(0, 5);
+    EXPECT_EQ(
+        std::string(restarted->as<char>(), restarted->size()),
+        values.substr(0, 5));
+    EXPECT_EQ(stream.restartCount(), 1);
+    EXPECT_GT(bytesRead, 0);
+    EXPECT_LE(stream.retainedBytes(), 25);
+  }
+}
+
+TEST_F(NativeLanceTest, batchBuilderPublishesOnlyCompleteOutput) {
+  const auto outputType = ROW({"a", "b"}, {BIGINT(), DOUBLE()});
+  NativeLanceBatchBuilder incomplete(outputType, 2, *pool_);
+  incomplete.setChild(0, BaseVector::create(BIGINT(), 2, pool_.get()));
+  EXPECT_EQ(incomplete.state(), NativeLanceBatchBuilderState::kBuilding);
+  EXPECT_THROW(incomplete.finish(), BoltException);
+  incomplete.abort();
+  EXPECT_EQ(incomplete.state(), NativeLanceBatchBuilderState::kAborted);
+
+  NativeLanceBatchBuilder complete(outputType, 2, *pool_);
+  complete.setChild(0, BaseVector::create(BIGINT(), 2, pool_.get()));
+  complete.setChild(1, BaseVector::create(DOUBLE(), 2, pool_.get()));
+  EXPECT_EQ(complete.state(), NativeLanceBatchBuilderState::kReady);
+  const auto result = complete.finish();
+  EXPECT_EQ(complete.state(), NativeLanceBatchBuilderState::kFinished);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->size(), 2);
+  EXPECT_EQ(result->type()->toString(), "ROW<a:BIGINT,b:DOUBLE>");
+}
+
 TEST_F(NativeLanceTest, rejectsUnknownArrowExtension) {
   auto input = std::make_unique<dwio::common::BufferedInput>(
       std::make_shared<InMemoryReadFile>(
@@ -4006,7 +4283,7 @@ TEST_F(NativeLanceTest, rowReaderDecodesMixedFixedAndVariableColumns) {
   EXPECT_TRUE(rows->childAt(1)->isNullAt(14));
 }
 
-TEST_F(NativeLanceTest, rowReaderStreamsCompressedStructuralPageAcrossBatches) {
+TEST_F(NativeLanceTest, rowReaderContinuesCompressedPageWithoutRereading) {
   auto readFile = std::make_shared<CountingReadFile>(makeCompressedListFile());
   auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
   dwio::common::ReaderOptions readerOptions(pool_.get());
@@ -4018,7 +4295,7 @@ TEST_F(NativeLanceTest, rowReaderStreamsCompressedStructuralPageAcrossBatches) {
   const auto readsAfterFirstBatch = readFile->readCalls();
   ASSERT_GT(readsAfterFirstBatch, 0);
   EXPECT_EQ(rowReader->next(2, result), 2);
-  EXPECT_GT(readFile->readCalls(), readsAfterFirstBatch);
+  EXPECT_EQ(readFile->readCalls(), readsAfterFirstBatch);
 
   const auto* arrays = result->as<RowVector>()->childAt(0)->as<ArrayVector>();
   ASSERT_NE(arrays, nullptr);
@@ -5422,12 +5699,12 @@ TEST_F(NativeLanceTest, prefetchConsumesScheduledStreamsWithoutRereading) {
   EXPECT_EQ(readFile->readCalls(), afterPrefetch);
 }
 
-TEST_F(NativeLanceTest, readPlanDeduplicatesAndServesSubmittedSubranges) {
+TEST_F(NativeLanceTest, readSchedulerDeduplicatesAndServesSubmittedSubranges) {
   auto readFile =
       std::make_shared<CountingReadFile>("abcdefghijklmnopqrstuvwxyz");
   auto input = std::make_unique<dwio::common::BufferedInput>(
       readFile, *pool_, dwio::common::MetricsLog::voidLog(), nullptr, 0);
-  NativeLanceReadPlan plan(*pool_);
+  NativeLanceReadScheduler plan(*pool_);
 
   plan.schedule(*input, 2, 10);
   plan.schedule(*input, 2, 10);
@@ -5445,12 +5722,12 @@ TEST_F(NativeLanceTest, readPlanDeduplicatesAndServesSubmittedSubranges) {
   EXPECT_EQ(readFile->readCalls(), 1);
 }
 
-TEST_F(NativeLanceTest, readPlanDoesNotMatchRangesPastPrefetchedEnd) {
+TEST_F(NativeLanceTest, readSchedulerDoesNotMatchRangesPastPrefetchedEnd) {
   auto readFile =
       std::make_shared<CountingReadFile>("abcdefghijklmnopqrstuvwxyz");
   auto input = std::make_unique<dwio::common::BufferedInput>(
       readFile, *pool_, dwio::common::MetricsLog::voidLog(), nullptr, 0);
-  NativeLanceReadPlan plan(*pool_);
+  NativeLanceReadScheduler plan(*pool_);
 
   plan.schedule(*input, 2, 3);
   plan.load(*input);
@@ -5458,11 +5735,12 @@ TEST_F(NativeLanceTest, readPlanDoesNotMatchRangesPastPrefetchedEnd) {
   EXPECT_EQ(plan.take(5, 1), nullptr);
 }
 
-TEST_F(NativeLanceTest, readPlanChunksAndBoundsInFlightBytes) {
+TEST_F(NativeLanceTest, readSchedulerChunksAndBoundsInFlightBytes) {
   auto readFile = std::make_shared<CountingReadFile>(
       "abcdefghijklmnopqrstuvwxyz0123456789");
   auto input = std::make_unique<TrackingBufferedInput>(readFile, *pool_);
-  NativeLanceReadPlan plan(*pool_, {.maxReadBytes = 4, .maxInFlightBytes = 8});
+  NativeLanceReadScheduler plan(
+      *pool_, {.maxReadBytes = 4, .maxInFlightBytes = 8});
 
   plan.schedule(*input, 3, 17);
   plan.submit(*input);
@@ -5485,11 +5763,12 @@ TEST_F(NativeLanceTest, readPlanChunksAndBoundsInFlightBytes) {
   EXPECT_EQ(readFile->bytesRead(), 17);
 }
 
-TEST_F(NativeLanceTest, readPlanCancellationIsIdempotent) {
+TEST_F(NativeLanceTest, readSchedulerCancellationIsIdempotent) {
   auto readFile =
       std::make_shared<CountingReadFile>("abcdefghijklmnopqrstuvwxyz");
   auto input = std::make_unique<TrackingBufferedInput>(readFile, *pool_);
-  NativeLanceReadPlan plan(*pool_, {.maxReadBytes = 4, .maxInFlightBytes = 8});
+  NativeLanceReadScheduler plan(
+      *pool_, {.maxReadBytes = 4, .maxInFlightBytes = 8});
 
   plan.schedule(*input, 2, 12);
   plan.cancel(input.get());
@@ -5501,6 +5780,63 @@ TEST_F(NativeLanceTest, readPlanCancellationIsIdempotent) {
   EXPECT_EQ(readFile->readCalls(), 0);
   EXPECT_THROW(plan.schedule(*input, 0, 1), BoltException);
   EXPECT_THROW(plan.submit(*input), BoltException);
+}
+
+TEST_F(NativeLanceTest, readSchedulerReturnsPageOwnedBuffer) {
+  auto readFile =
+      std::make_shared<CountingReadFile>("abcdefghijklmnopqrstuvwxyz");
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      readFile, *pool_, dwio::common::MetricsLog::voidLog(), nullptr, 0);
+  NativeLanceMemoryBudget budget(10);
+  {
+    NativeLanceReadScheduler scheduler(
+        *pool_, NativeLanceReadScheduler::Options{}, &budget);
+    const NativeLanceReadScheduler::PageBufferKey pageBuffer{
+        .page = {.physicalColumn = 3, .pageIndex = 7},
+        .role = NativeLanceBufferRole::kValues,
+        .ordinal = 0};
+
+    scheduler.schedulePage(*input, pageBuffer, 4, 6);
+    scheduler.submit(*input);
+    const auto result = scheduler.takePage(pageBuffer);
+    ASSERT_NE(result.data, nullptr);
+    EXPECT_EQ(
+        std::string(result.data->as<char>(), result.data->size()), "efghij");
+    EXPECT_EQ(budget.usedBytes(), 6);
+    EXPECT_EQ(readFile->readCalls(), 1);
+  }
+  EXPECT_EQ(budget.usedBytes(), 0);
+}
+
+TEST_F(NativeLanceTest, structuralPageReaderHasTerminalCancellation) {
+  auto file = load("scalar_v2_1.lance");
+  const auto& metadata = *file.metadata;
+  ASSERT_TRUE(metadata.usesStructuralEncoding());
+  ASSERT_GT(metadata.numPhysicalColumns(), 0);
+  const auto& column = metadata.column(0);
+  ASSERT_GT(column.pages_size(), 0);
+  NativeLanceStructuralPageReader pageReader(
+      {.key = {.physicalColumn = 0, .pageIndex = 0},
+       .type = metadata.rowType()->childAt(0),
+       .logicalType = metadata.physicalColumnLogicalType(0),
+       .fixedSizeDimensions = {},
+       .packedChildLogicalTypes = metadata.physicalColumnChildLogicalTypes(0),
+       .localRowStart = 0,
+       .rowCount = std::min<uint64_t>(column.pages(0).length(), 1)},
+      metadata,
+      *pool_,
+      nullptr,
+      "examples/scalar_v2_1.lance",
+      [](const auto&) {},
+      [](uint64_t, uint64_t) -> BufferPtr {
+        BOLT_FAIL("Cancelled page reader must not read");
+      });
+
+  EXPECT_EQ(pageReader.state(), NativeLancePageState::kCreated);
+  pageReader.cancel();
+  EXPECT_EQ(pageReader.state(), NativeLancePageState::kCancelled);
+  EXPECT_THROW(pageReader.decode(), BoltException);
+  EXPECT_EQ(pageReader.state(), NativeLancePageState::kCancelled);
 }
 
 TEST_F(NativeLanceTest, metadataCoalescesColumnDescriptors) {

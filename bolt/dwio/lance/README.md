@@ -7,15 +7,31 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 
 ## Architecture
 
+- `NativeLanceFileOpenTask` constructs and validates an immutable
+  `NativeLanceFileContext`. Each row reader clones its own scan input while the
+  context retains the input used for lazy metadata reads.
 - `NativeLanceMetadata` parses the footer, schema, column metadata, page
-  layouts, physical-column mapping, and row ranges.
-- `NativeLanceReadPlan` deduplicates byte ranges, submits them to
-  `BufferedInput`, retains async streams, and materializes Bolt-owned buffers.
-- `NativeLanceColumnReader` binds projection and constants, separates
-  row-aligned from offset-dependent work, and runs independent compressed
-  columns on Bolt's decode executor.
-- `NativeLanceDecoder` performs page selection, two-stage planning, decoding,
-  page caching, and structural sibling assembly.
+  layouts, physical-column mapping, page-row indexes, and split row ranges.
+- `NativeLanceScanPlan` binds projection, filters, required physical columns,
+  the logical column-reader tree, and split row ranges once per row reader.
+- `NativeLanceReadScheduler` deduplicates byte ranges, submits them to
+  `BufferedInput`, and can return page-owned buffers together with their memory
+  reservations.
+- `NativeLanceColumnReader` owns logical type semantics. Batch-local
+  `NativeLanceColumnReadTask` instances keep execution state out of the shared
+  reader tree.
+- `NativeLanceColumnCursor` maps monotonically increasing row ranges to page
+  spans without rescanning page metadata from the beginning.
+- `NativeLanceStructuralPageReader` owns v2.1+ page state and invokes the
+  structural decode kernel. `NativeLanceLegacyPageReader` owns v2.0 compressed
+  Flat page state.
+- `NativeLanceDecompressor` owns legacy zstd and LZ4 codec handling and exposes
+  whether a codec is sequential-frame or whole-buffer based.
+- `NativeLanceMemoryBudget` provides move-only reservations for bounded
+  transient scan memory.
+- `NativeLanceDecoder` is the migration adapter for legacy page paths. It does
+  not retain decoded or decompressed payloads across batches and will be
+  removed after all encoding families move to page readers.
 - `NativeLanceStructuralDecoder` implements the v2.1-v2.3 dense and Sparse
   structural layouts and compressive encoding grammar.
 - `NativeLanceTypeAdapter` preserves semantic type identity without changing
@@ -133,13 +149,12 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
   descriptors with `size == 0` consume the remainder of the resolved object,
   matching Lance semantics. Resolved object inputs are retained in a bounded
   reader-scoped LRU and cloned for independent batch reads.
-- Prefetch units use cloned inputs so a background load cannot invalidate the
-  active reader's staged buffers.
-- Async-capable inputs maintain a one-batch-ahead I/O pipeline using cloned
-  inputs so prefetch does not share staged state with the active decoder.
-- Compressed page buffers are decompressed within the current batch decode and
-  released with the produced vectors; the native reader does not retain decoded
-  or decompressed payload caches across batches.
+- Prefetch units and the one-batch-ahead pipeline submit compressed byte ranges
+  into the single scan-owned scheduler. They do not clone inputs or decoders.
+- Zstd pages preserve only a sequential codec cursor, one bounded compressed
+  chunk, and a small unaligned tail across batches. LZ4 is explicitly handled
+  as a whole-buffer codec. Neither path retains decoded or decompressed page
+  caches across batches.
 - `maxBatchBytes` caps row batches using a conservative estimate followed by
   feedback from the retained size of produced vectors.
 - Top-level and nested Struct filters are decoded first; projected columns are
@@ -222,6 +237,18 @@ Pass the suite commands to `bolt-benchmark-compare --rounds 7`. The tool
 alternates execution order, applies an exact paired sign-flip test on log
 ratios, corrects the four case p-values with Holm's method, and writes a
 self-contained HTML report plus companion JSON and per-run artifacts.
+
+For one acceptance dataset, `run_native_rust_acceptance_benchmark.py` provides
+a standalone paired runner. It alternates native/Rust order for seven rounds,
+pins both readers to the same CPUs, samples process peak RSS from `/proc`, and
+stores raw outputs together with an exact paired sign-flip result:
+
+    python3 bolt/dwio/lance/tests/run_native_rust_acceptance_benchmark.py \
+      --dataset /tmp/data.lance \
+      --native-benchmark \
+        _build/NativeWithFfi/bolt/dwio/lance/tests/bolt_dwio_native_lance_reader_benchmark \
+      --rust-benchmark /tmp/bolt-current-rust-lance-benchmark/target/release/bolt-current-rust-lance-benchmark \
+      --output /tmp/lance-reader-acceptance.json
 
 The filter comparison has intentionally different execution semantics. Bolt's
 native reader applies the `ScanSpec` filter before materializing surviving

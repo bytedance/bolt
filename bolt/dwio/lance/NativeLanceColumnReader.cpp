@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/dwio/lance/NativeLanceBatchBuilder.h"
 
 namespace bytedance::bolt::lance::reader {
 namespace {
@@ -67,7 +68,7 @@ class FileColumnReader final : public NativeLanceColumnReader {
   }
 
   VectorPtr read(
-      NativeLanceDecoder& decoder,
+      NativeLanceColumnSource& decoder,
       uint64_t rowStart,
       uint64_t rowCount,
       memory::MemoryPool&) const override {
@@ -105,7 +106,7 @@ class ConstantColumnReader final : public NativeLanceColumnReader {
   }
 
   VectorPtr read(
-      NativeLanceDecoder&,
+      NativeLanceColumnSource&,
       uint64_t,
       uint64_t rowCount,
       memory::MemoryPool&) const override {
@@ -134,7 +135,7 @@ void addProjectedFileColumn(
 
 } // namespace
 
-NativeLanceStructColumnReader::NativeLanceStructColumnReader(
+NativeLanceRootColumnReader::NativeLanceRootColumnReader(
     RowTypePtr outputType,
     std::vector<std::unique_ptr<NativeLanceColumnReader>> children,
     std::shared_ptr<folly::Executor> decodingExecutor,
@@ -144,8 +145,8 @@ NativeLanceStructColumnReader::NativeLanceStructColumnReader(
       decodingExecutor_(std::move(decodingExecutor)),
       decodingParallelismFactor_(decodingParallelismFactor) {}
 
-std::unique_ptr<NativeLanceStructColumnReader>
-NativeLanceStructColumnReader::buildRoot(
+std::unique_ptr<NativeLanceRootColumnReader>
+NativeLanceRootColumnReader::buildRoot(
     const RowTypePtr& fileType,
     const dwio::common::RowReaderOptions& options) {
   std::vector<std::string> outputNames;
@@ -182,8 +183,8 @@ NativeLanceStructColumnReader::buildRoot(
             childSpec->fieldName(), std::move(type), fileColumnIndex);
       }
     }
-    return std::unique_ptr<NativeLanceStructColumnReader>(
-        new NativeLanceStructColumnReader(
+    return std::unique_ptr<NativeLanceRootColumnReader>(
+        new NativeLanceRootColumnReader(
             ROW(std::move(outputNames), std::move(outputTypes)),
             std::move(children),
             options.getDecodingExecutor(),
@@ -207,15 +208,15 @@ NativeLanceStructColumnReader::buildRoot(
         outputTypes,
         children);
   }
-  return std::unique_ptr<NativeLanceStructColumnReader>(
-      new NativeLanceStructColumnReader(
+  return std::unique_ptr<NativeLanceRootColumnReader>(
+      new NativeLanceRootColumnReader(
           ROW(std::move(outputNames), std::move(outputTypes)),
           std::move(children),
           options.getDecodingExecutor(),
           options.getDecodingParallelismFactor()));
 }
 
-std::vector<uint32_t> NativeLanceStructColumnReader::readColumns(
+std::vector<uint32_t> NativeLanceRootColumnReader::readColumns(
     NativeLanceReadStage stage) const {
   std::vector<uint32_t> columns;
   columns.reserve(children_.size());
@@ -229,11 +230,12 @@ std::vector<uint32_t> NativeLanceStructColumnReader::readColumns(
   return columns;
 }
 
-VectorPtr NativeLanceStructColumnReader::read(
-    NativeLanceDecoder& decoder,
+VectorPtr NativeLanceRootColumnReader::read(
+    NativeLanceColumnSource& decoder,
     uint64_t rowStart,
     uint64_t rowCount,
-    memory::MemoryPool& pool) const {
+    memory::MemoryPool& pool,
+    bool primaryRangesPlanned) const {
   // A handful of structural or variable-width columns can cost more than a
   // much wider set of scalar columns.  Parallelize whenever at least two
   // compressed columns are available instead of requiring a wide scalar
@@ -260,10 +262,12 @@ VectorPtr NativeLanceStructColumnReader::read(
   }
   std::vector<VectorPtr> rowAlignedResults(rowAlignedColumns.size());
 
-  decoder.planColumns(rowAlignedColumns, rowStart, rowCount);
-  // Finish I/O before worker threads enter the decoder. Each worker then
-  // consumes independent buffers and can decompress its column concurrently.
-  decoder.materializeReadPlan();
+  if (!primaryRangesPlanned) {
+    decoder.planColumns(rowAlignedColumns, rowStart, rowCount);
+  }
+  // Submitted streams stay compressed and page-owned until the worker for
+  // that column asks for its exact range. ReadScheduler serializes stream
+  // extraction while decompression remains parallel across columns.
   const auto rowAlignedCompressed = std::count_if(
       rowAlignedColumns.begin(), rowAlignedColumns.end(), [&](auto column) {
         return decoder.hasCompressedColumn(column, rowStart, rowCount);
@@ -283,8 +287,9 @@ VectorPtr NativeLanceStructColumnReader::read(
     decodedColumns.emplace(
         rowAlignedColumns[index], std::move(rowAlignedResults[index]));
   }
-  decoder.planColumns(offsetDependentColumns, rowStart, rowCount);
-  decoder.materializeReadPlan();
+  if (!primaryRangesPlanned) {
+    decoder.planColumns(offsetDependentColumns, rowStart, rowCount);
+  }
   std::vector<const NativeLanceColumnReader*> offsetDependentReaders;
   offsetDependentReaders.reserve(offsetDependentColumns.size());
   for (const auto column : offsetDependentColumns) {
@@ -315,23 +320,20 @@ VectorPtr NativeLanceStructColumnReader::read(
         std::move(offsetDependentResults[index]));
   }
 
-  std::vector<VectorPtr> children(children_.size());
+  NativeLanceBatchBuilder batchBuilder(
+      outputType_, static_cast<vector_size_t>(rowCount), pool);
   for (size_t channel = 0; channel < children_.size(); ++channel) {
     const auto& child = children_[channel];
-    children[channel] = child->readFromFile()
+    auto result = child->readFromFile()
         ? decodedColumns.at(child->fileColumnIndex())
         : child->read(decoder, rowStart, rowCount, pool);
+    batchBuilder.setChild(channel, std::move(result));
   }
-  return std::make_shared<RowVector>(
-      &pool,
-      outputType_,
-      nullptr,
-      static_cast<vector_size_t>(rowCount),
-      std::move(children));
+  return batchBuilder.finish();
 }
 
-void NativeLanceStructColumnReader::planRead(
-    NativeLanceDecoder& decoder,
+void NativeLanceRootColumnReader::planRead(
+    NativeLanceColumnSource& decoder,
     uint64_t rowStart,
     uint64_t rowCount) const {
   std::vector<uint32_t> columns;
@@ -344,7 +346,7 @@ void NativeLanceStructColumnReader::planRead(
   decoder.planColumns(columns, rowStart, rowCount);
 }
 
-std::vector<uint32_t> NativeLanceStructColumnReader::fileColumnIndices() const {
+std::vector<uint32_t> NativeLanceRootColumnReader::fileColumnIndices() const {
   std::vector<uint32_t> columns;
   columns.reserve(children_.size());
   for (const auto& child : children_) {
@@ -355,6 +357,89 @@ std::vector<uint32_t> NativeLanceStructColumnReader::fileColumnIndices() const {
   std::sort(columns.begin(), columns.end());
   columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
   return columns;
+}
+
+NativeLanceColumnReadTask::NativeLanceColumnReadTask(
+    const NativeLanceRootColumnReader& reader,
+    NativeLanceColumnRequest request,
+    bool primaryRangesPlanned)
+    : reader_(reader),
+      request_(request),
+      state_(
+          primaryRangesPlanned ? NativeLanceColumnState::kWaitingPages
+                               : NativeLanceColumnState::kIdle) {}
+
+void NativeLanceColumnReadTask::plan(NativeLanceColumnSource& decoder) {
+  if (state_ == NativeLanceColumnState::kFailed) {
+    rethrowFailure();
+  }
+  BOLT_CHECK(
+      state_ == NativeLanceColumnState::kIdle,
+      "Lance column batch can only be planned from the idle state");
+  state_ = NativeLanceColumnState::kPlanningPages;
+  try {
+    reader_.planRead(decoder, request_.rowStart, request_.rowCount);
+    state_ = NativeLanceColumnState::kWaitingPages;
+  } catch (...) {
+    failure_ = std::current_exception();
+    state_ = NativeLanceColumnState::kFailed;
+    throw;
+  }
+}
+
+void NativeLanceColumnReadTask::decode(
+    NativeLanceColumnSource& decoder,
+    memory::MemoryPool& pool) {
+  if (state_ == NativeLanceColumnState::kFailed) {
+    rethrowFailure();
+  }
+  BOLT_CHECK(
+      state_ == NativeLanceColumnState::kIdle ||
+          state_ == NativeLanceColumnState::kWaitingPages,
+      "Lance column batch is not ready to decode");
+  const auto primaryRangesPlanned =
+      state_ == NativeLanceColumnState::kWaitingPages;
+  state_ = NativeLanceColumnState::kAssembling;
+  try {
+    result_ = reader_.read(
+        decoder,
+        request_.rowStart,
+        request_.rowCount,
+        pool,
+        primaryRangesPlanned);
+    state_ = NativeLanceColumnState::kReady;
+  } catch (...) {
+    failure_ = std::current_exception();
+    state_ = NativeLanceColumnState::kFailed;
+    throw;
+  }
+}
+
+VectorPtr NativeLanceColumnReadTask::consume() {
+  if (state_ == NativeLanceColumnState::kFailed) {
+    rethrowFailure();
+  }
+  BOLT_CHECK(
+      state_ == NativeLanceColumnState::kReady,
+      "Lance column batch is not ready to consume");
+  state_ = NativeLanceColumnState::kConsumed;
+  return std::move(result_);
+}
+
+void NativeLanceColumnReadTask::cancel(NativeLanceColumnSource& decoder) {
+  if (state_ == NativeLanceColumnState::kConsumed ||
+      state_ == NativeLanceColumnState::kFailed ||
+      state_ == NativeLanceColumnState::kCancelled) {
+    return;
+  }
+  decoder.cancel();
+  result_.reset();
+  state_ = NativeLanceColumnState::kCancelled;
+}
+
+void NativeLanceColumnReadTask::rethrowFailure() const {
+  BOLT_CHECK_NOT_NULL(failure_);
+  std::rethrow_exception(failure_);
 }
 
 } // namespace bytedance::bolt::lance::reader

@@ -970,6 +970,7 @@ NativeLanceMetadata::NativeLanceMetadata(
   columns_.resize(footer_.numColumns);
   pageEncodings_.resize(footer_.numColumns);
   pageLayouts_.resize(footer_.numColumns);
+  pageRowStarts_.resize(footer_.numColumns);
   blobColumns_.resize(footer_.numColumns);
   columnMetadataLoaded_ = std::vector<std::atomic<bool>>(footer_.numColumns);
   physicalColumnExpectedRows_.resize(footer_.numColumns);
@@ -1147,13 +1148,19 @@ void NativeLanceMetadata::parseColumnMetadata(
 void NativeLanceMetadata::validateColumnMetadata(
     uint32_t physicalColumnIndex) const {
   const auto expectedRows = physicalColumnExpectedRows_[physicalColumnIndex];
-  if (expectedRows == 0 && numRows_ != 0) {
-    return;
-  }
   uint64_t rows = 0;
+  auto& pageRowStarts = pageRowStarts_[physicalColumnIndex];
+  pageRowStarts.clear();
+  pageRowStarts.reserve(
+      columns_[physicalColumnIndex].pages_size() + static_cast<size_t>(1));
+  pageRowStarts.push_back(0);
   for (const auto& page : columns_[physicalColumnIndex].pages()) {
     BOLT_CHECK_LE(page.length(), std::numeric_limits<uint64_t>::max() - rows);
     rows += page.length();
+    pageRowStarts.push_back(rows);
+  }
+  if (expectedRows == 0 && numRows_ != 0) {
+    return;
   }
   BOLT_CHECK_EQ(
       rows,

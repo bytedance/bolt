@@ -19,10 +19,13 @@
 #include <folly/Range.h>
 
 #include <mutex>
+#include <unordered_map>
 
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
+#include "bolt/dwio/lance/NativeLanceColumnSource.h"
+#include "bolt/dwio/lance/NativeLanceLegacyPageReader.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
-#include "bolt/dwio/lance/NativeLanceReadPlan.h"
+#include "bolt/dwio/lance/NativeLanceReadScheduler.h"
 #include "bolt/vector/BaseVector.h"
 
 namespace bytedance::bolt::lance::reader {
@@ -32,18 +35,18 @@ namespace bytedance::bolt::lance::reader {
 /// Reads are issued as ranges against the original BufferedInput. No Rust or
 /// Arrow objects participate in this path, and all output storage belongs to
 /// the supplied Bolt memory pool.
-class NativeLanceDecoder {
+class NativeLanceDecoder final : public NativeLanceColumnSource {
  public:
   NativeLanceDecoder(
       dwio::common::BufferedInput& input,
       const NativeLanceMetadata& metadata,
       memory::MemoryPool& pool,
       std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr,
-      NativeLanceReadPlan::Options readPlanOptions = {});
+      NativeLanceReadScheduler::Options readSchedulerOptions = {});
 
   ~NativeLanceDecoder();
 
-  void cancelReadPlan();
+  void cancel() override;
 
   /// Schedules the first-stage ranges for all requested columns together.
   /// BufferedInput can coalesce these requests or dispatch them asynchronously.
@@ -55,7 +58,7 @@ class NativeLanceDecoder {
   void planColumns(
       const std::vector<uint32_t>& columnIndices,
       uint64_t rowStart,
-      uint64_t rowCount) const;
+      uint64_t rowCount) const override;
 
   void submitReadPlan() const;
 
@@ -63,7 +66,7 @@ class NativeLanceDecoder {
 
   /// Returns true when independent columns can be decoded concurrently
   /// without sharing mutable asynchronous read-plan state.
-  bool supportsConcurrentDecoding() const {
+  bool supportsConcurrentDecoding() const override {
     return input_.supportSyncLoad();
   }
 
@@ -89,19 +92,19 @@ class NativeLanceDecoder {
   bool hasCompressedColumn(
       uint32_t columnIndex,
       uint64_t rowStart,
-      uint64_t rowCount) const;
+      uint64_t rowCount) const override;
 
   VectorPtr decodeColumn(
       uint32_t columnIndex,
       uint64_t rowStart,
-      uint64_t rowCount) const;
+      uint64_t rowCount) const override;
 
   /// Decodes sorted, batch-relative row numbers into a compact vector.
   /// Consecutive rows are coalesced into one range read.
   VectorPtr decodeSelectedRows(
       uint32_t columnIndex,
       uint64_t batchRowStart,
-      folly::Range<const vector_size_t*> rows) const;
+      folly::Range<const vector_size_t*> rows) const override;
 
   VectorPtr decodePhysicalColumn(
       const TypePtr& type,
@@ -134,16 +137,49 @@ class NativeLanceDecoder {
       uint64_t rowStart,
       uint64_t rowCount) const;
   void scheduleRead(uint64_t offset, uint64_t length) const;
+  void scheduleCompressedRead(
+      std::string_view scheme,
+      uint64_t offset,
+      uint64_t length) const;
   BufferPtr read(uint64_t offset, uint64_t length) const;
+  BufferPtr readCompressedRange(
+      std::string_view scheme,
+      uint64_t compressedOffset,
+      uint64_t compressedLength,
+      uint64_t decodedOffset,
+      uint64_t decodedLength) const;
+
+  struct CompressedBufferKey {
+    uint64_t offset;
+    uint64_t length;
+
+    bool operator==(const CompressedBufferKey& other) const {
+      return offset == other.offset && length == other.length;
+    }
+  };
+
+  struct CompressedBufferKeyHash {
+    size_t operator()(const CompressedBufferKey& key) const {
+      return std::hash<uint64_t>{}(key.offset) ^
+          (std::hash<uint64_t>{}(key.length) << 1);
+    }
+  };
 
   dwio::common::BufferedInput& input_;
   const NativeLanceMetadata& metadata_;
   memory::MemoryPool& pool_;
   const std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
-  mutable NativeLanceReadPlan readPlan_;
+  const uint64_t compressedStreamChunkBytes_;
+  mutable NativeLanceReadScheduler readScheduler_;
   // Offset-dependent columns may independently schedule their second-stage
   // payload reads from decoding workers. Keep each plan mutation atomic.
   mutable std::recursive_mutex readPlanMutex_;
+  mutable std::mutex legacyPageReadersMutex_;
+  mutable std::unordered_map<
+      CompressedBufferKey,
+      std::shared_ptr<NativeLanceLegacyPageReader>,
+      CompressedBufferKeyHash>
+      legacyPageReaders_;
 };
 
 } // namespace bytedance::bolt::lance::reader

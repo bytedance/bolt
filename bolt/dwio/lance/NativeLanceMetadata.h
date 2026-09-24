@@ -148,6 +148,13 @@ class NativeLanceMetadata {
       uint32_t physicalColumnIndex,
       int32_t pageIndex) const;
 
+  /// Returns cumulative physical row offsets with one trailing end offset.
+  const std::vector<uint64_t>& pageRowStarts(
+      uint32_t physicalColumnIndex) const {
+    loadPhysicalColumns({physicalColumnIndex});
+    return pageRowStarts_.at(physicalColumnIndex);
+  }
+
   uint32_t leafPhysicalColumnIndex(uint32_t fieldId) const {
     return leafPhysicalColumnIndices_.at(fieldId);
   }
@@ -202,6 +209,7 @@ class NativeLanceMetadata {
       pageEncodings_;
   mutable std::vector<std::vector<::lance::encodings21::PageLayout>>
       pageLayouts_;
+  mutable std::vector<std::vector<uint64_t>> pageRowStarts_;
   mutable std::vector<bool> blobColumns_;
   mutable std::vector<std::atomic<bool>> columnMetadataLoaded_;
   mutable std::mutex columnMetadataMutex_;

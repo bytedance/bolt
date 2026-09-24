@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <exception>
 #include <mutex>
 #include <utility>
 
@@ -26,61 +27,120 @@
 #include "bolt/dwio/lance/NativeLanceBlobResolver.h"
 #include "bolt/dwio/lance/NativeLanceColumnReader.h"
 #include "bolt/dwio/lance/NativeLanceDecoder.h"
+#include "bolt/dwio/lance/NativeLanceFileContext.h"
+#include "bolt/dwio/lance/NativeLanceScanPlan.h"
+#include "bolt/dwio/lance/NativeLanceScanWindow.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
 #include "folly/synchronization/Baton.h"
 
 namespace bytedance::bolt::lance::reader {
 
-class NativeLanceReaderBase {
+enum class NativeLanceScanState : uint8_t {
+  kIdle,
+  kPlanningWindow,
+  kDecodingFilters,
+  kDecodingValues,
+  kAssemblingBatch,
+  kOutputReady,
+  kDrainingOutput,
+  kFinished,
+  kFailed,
+  kCancelled,
+};
+
+/// Owns all scan-local state and drives one output batch at a time.
+class NativeLanceScanCoordinator {
  public:
-  NativeLanceReaderBase(
-      std::unique_ptr<dwio::common::BufferedInput> input,
-      const dwio::common::ReaderOptions& options,
-      std::shared_ptr<const NativeLanceBlobResolver> blobResolver = nullptr);
+  static constexpr int64_t kAtEnd = dwio::common::RowReader::kAtEnd;
+  using FetchResult = dwio::common::RowReader::FetchResult;
+  using PrefetchUnit = dwio::common::RowReader::PrefetchUnit;
 
-  NativeLanceReaderBase(
-      std::unique_ptr<dwio::common::BufferedInput> input,
-      const dwio::common::ReaderOptions& options,
-      std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
-      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter);
+  NativeLanceScanCoordinator(
+      std::shared_ptr<const NativeLanceFileContext> fileContext,
+      dwio::common::RowReaderOptions options);
 
-  dwio::common::BufferedInput& input() const {
-    return *input_;
-  }
+  ~NativeLanceScanCoordinator();
 
-  memory::MemoryPool& pool() const {
-    return pool_;
-  }
+  int64_t nextRowNumber();
+  int64_t nextReadSize(uint64_t size);
+  uint64_t next(
+      uint64_t size,
+      VectorPtr& result,
+      const dwio::common::Mutation* mutation);
+  uint64_t skip(uint64_t skipSize);
+  void cancel();
+  void updateRuntimeStats(dwio::common::RuntimeStatistics& stats) const;
+  void resetFilterCaches();
+  std::optional<size_t> estimatedRowSize() const;
 
-  const NativeLanceMetadata& metadata() const {
-    return metadata_;
-  }
+  bool allPrefetchIssued() const;
 
-  const std::shared_ptr<const dwio::common::TypeWithId>& typeWithId() const {
-    return typeWithId_;
-  }
+  std::optional<std::vector<dwio::common::RowReader::PrefetchUnit>>
+  prefetchUnits();
 
-  const std::shared_ptr<const NativeLanceBlobResolver>& blobResolver() const {
-    return blobResolver_;
-  }
-
-  NativeLanceReadPlan::Options readPlanOptions() const {
-    return readPlanOptions_;
-  }
+  NativeLanceScanState state() const;
 
  private:
-  memory::MemoryPool& pool_;
-  std::shared_ptr<dwio::common::BufferedInput> input_;
-  NativeLanceMetadata metadata_;
-  std::shared_ptr<const dwio::common::TypeWithId> typeWithId_;
-  std::shared_ptr<const NativeLanceBlobResolver> blobResolver_;
-  NativeLanceReadPlan::Options readPlanOptions_;
+  enum class FetchStatus { kNotStarted, kInProgress, kFinished };
+
+  struct PrefetchRange {
+    uint64_t begin;
+    uint64_t end;
+  };
+
+  void advancePastFinishedRange();
+  const std::vector<std::pair<uint64_t, uint64_t>>& rowRanges() const {
+    return scanPlan_->rowRanges();
+  }
+  uint64_t capReadSize(uint64_t size) const;
+  dwio::common::RowReader::FetchResult prefetchRange(size_t rangeIndex);
+  void initializePrefetchRanges();
+  void markPrefetchRangesFinished(uint64_t begin, uint64_t end);
+  void prepareNextBatchPipeline(uint64_t readEnd, uint64_t requestedRows);
+  std::optional<size_t> prefetchRangeIndex(uint64_t begin, uint64_t end) const;
+  bool waitForPrefetchedRange(uint64_t begin, uint64_t end);
+  FOLLY_NOINLINE void readFiltered(
+      uint64_t readBegin,
+      uint64_t readEnd,
+      uint64_t requestedRows,
+      const common::ScanSpec& scanSpec,
+      const dwio::common::Mutation* mutation,
+      VectorPtr& result);
+  uint64_t nextImpl(
+      uint64_t size,
+      VectorPtr& result,
+      const dwio::common::Mutation* mutation);
+  void transition(NativeLanceScanState expected, NativeLanceScanState desired);
+  void fail(std::exception_ptr error);
+  [[noreturn]] void rethrowFailure() const;
+
+  std::shared_ptr<const NativeLanceFileContext> fileContext_;
+  dwio::common::RowReaderOptions options_;
+  std::unique_ptr<dwio::common::BufferedInput> input_;
+  NativeLanceDecoder decoder_;
+  std::unique_ptr<NativeLanceScanPlan> scanPlan_;
+  std::optional<NativeLanceScanWindow> window_;
+  uint64_t generation_{0};
+  std::vector<PrefetchRange> prefetchRanges_;
+  std::vector<FetchStatus> prefetchStatuses_;
+  std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
+  mutable std::mutex prefetchMutex_;
+  mutable std::mutex decoderMutex_;
+  mutable std::mutex stateMutex_;
+  NativeLanceScanState state_{NativeLanceScanState::kIdle};
+  std::exception_ptr failure_;
+  size_t currentRange_{0};
+  uint64_t currentRow_{0};
+  uint64_t batchesRead_{0};
+  uint64_t decodeTimeNs_{0};
+  int64_t maxBatchBytes_{0};
+  mutable uint64_t estimatedBytesPerRow_{0};
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
  public:
   NativeLanceRowReader(
-      std::shared_ptr<NativeLanceReaderBase> readerBase,
+      std::shared_ptr<const NativeLanceFileContext> fileContext,
       dwio::common::RowReaderOptions options);
 
   ~NativeLanceRowReader() override;
@@ -96,64 +156,11 @@ class NativeLanceRowReader : public dwio::common::RowReader {
       dwio::common::RuntimeStatistics& stats) const override;
   void resetFilterCaches() override;
   std::optional<size_t> estimatedRowSize() const override;
-
   bool allPrefetchIssued() const override;
-
   std::optional<std::vector<PrefetchUnit>> prefetchUnits() override;
 
  private:
-  enum class FetchStatus { kNotStarted, kInProgress, kFinished };
-
-  struct PrefetchRange {
-    uint64_t begin;
-    uint64_t end;
-  };
-
-  struct PipelineState {
-    uint64_t begin;
-    uint64_t end;
-    std::unique_ptr<dwio::common::BufferedInput> input;
-    std::unique_ptr<NativeLanceDecoder> decoder;
-  };
-
-  void advancePastFinishedRange();
-  uint64_t capReadSize(uint64_t size) const;
-  FetchResult prefetchRange(size_t rangeIndex);
-  void initializePrefetchRanges();
-  void markPrefetchRangesFinished(uint64_t begin, uint64_t end);
-  void prepareNextBatchPipeline(uint64_t readEnd, uint64_t requestedRows);
-  std::optional<PipelineState> takePipeline(
-      uint64_t readBegin,
-      uint64_t readEnd);
-  std::optional<size_t> prefetchRangeIndex(uint64_t begin, uint64_t end) const;
-  NativeLanceDecoder* prefetchedDecoderForRange(uint64_t begin, uint64_t end);
-  FOLLY_NOINLINE void readFiltered(
-      uint64_t readBegin,
-      uint64_t readEnd,
-      uint64_t requestedRows,
-      const common::ScanSpec& scanSpec,
-      const dwio::common::Mutation* mutation,
-      VectorPtr& result);
-
-  std::shared_ptr<NativeLanceReaderBase> readerBase_;
-  dwio::common::RowReaderOptions options_;
-  NativeLanceDecoder decoder_;
-  std::unique_ptr<NativeLanceStructColumnReader> rootColumnReader_;
-  std::vector<std::pair<uint64_t, uint64_t>> rowRanges_;
-  std::vector<PrefetchRange> prefetchRanges_;
-  std::vector<FetchStatus> prefetchStatuses_;
-  std::vector<std::unique_ptr<dwio::common::BufferedInput>> prefetchInputs_;
-  std::vector<std::unique_ptr<NativeLanceDecoder>> prefetchDecoders_;
-  std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
-  std::optional<PipelineState> pipeline_;
-  mutable std::mutex prefetchMutex_;
-  mutable std::mutex decoderMutex_;
-  size_t currentRange_{0};
-  uint64_t currentRow_{0};
-  uint64_t batchesRead_{0};
-  uint64_t decodeTimeNs_{0};
-  int64_t maxBatchBytes_{0};
-  mutable uint64_t estimatedBytesPerRow_{0};
+  std::unique_ptr<NativeLanceScanCoordinator> coordinator_;
 };
 
 class NativeLanceReader : public dwio::common::Reader {
@@ -180,7 +187,7 @@ class NativeLanceReader : public dwio::common::Reader {
       uint32_t index) const override;
 
  private:
-  std::shared_ptr<NativeLanceReaderBase> readerBase_;
+  std::shared_ptr<const NativeLanceFileContext> fileContext_;
 };
 
 class NativeLanceReaderFactory : public dwio::common::ReaderFactory {

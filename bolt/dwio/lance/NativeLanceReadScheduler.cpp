@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/dwio/lance/NativeLanceReadPlan.h"
+#include "bolt/dwio/lance/NativeLanceReadScheduler.h"
 
 #include <algorithm>
 #include <cstring>
@@ -38,7 +38,7 @@ bool containsRange(const Map& ranges, uint64_t offset, uint64_t length) {
 }
 
 bool containsRange(
-    const NativeLanceReadPlan::ReadKey& key,
+    const NativeLanceReadScheduler::ReadKey& key,
     uint64_t offset,
     uint64_t length) {
   return offset >= key.offset && offset - key.offset <= key.length &&
@@ -46,10 +46,10 @@ bool containsRange(
 }
 
 template <typename Map>
-std::optional<NativeLanceReadPlan::ReadKey> containingKey(
+std::optional<NativeLanceReadScheduler::ReadKey> containingKey(
     const Map& ranges,
     uint64_t offset) {
-  std::optional<NativeLanceReadPlan::ReadKey> best;
+  std::optional<NativeLanceReadScheduler::ReadKey> best;
   for (const auto& entry : ranges) {
     const auto& key = entry.first;
     if (key.offset <= offset && offset - key.offset < key.length &&
@@ -63,24 +63,26 @@ std::optional<NativeLanceReadPlan::ReadKey> containingKey(
 
 } // namespace
 
-NativeLanceReadPlan::NativeLanceReadPlan(memory::MemoryPool& pool)
-    : NativeLanceReadPlan(pool, Options{}) {}
+NativeLanceReadScheduler::NativeLanceReadScheduler(memory::MemoryPool& pool)
+    : NativeLanceReadScheduler(pool, Options{}, nullptr) {}
 
-NativeLanceReadPlan::NativeLanceReadPlan(
+NativeLanceReadScheduler::NativeLanceReadScheduler(
     memory::MemoryPool& pool,
-    Options options)
+    Options options,
+    NativeLanceMemoryBudget* memoryBudget)
     : pool_(pool),
       options_(options),
-      stagedReads_(memory::StlAllocator<ScheduledRead>(&pool)) {
+      stagedReads_(memory::StlAllocator<ScheduledRead>(&pool)),
+      memoryBudget_(memoryBudget) {
   BOLT_CHECK_GT(options_.maxReadBytes, 0);
   BOLT_CHECK_GT(options_.maxInFlightBytes, 0);
 }
 
-NativeLanceReadPlan::~NativeLanceReadPlan() {
+NativeLanceReadScheduler::~NativeLanceReadScheduler() {
   cancel();
 }
 
-void NativeLanceReadPlan::clearStage() {
+void NativeLanceReadScheduler::clearStage() {
   stagedReads_.clear();
   scheduledReadKeys_.clear();
   if (submittedReads_.empty() && prefetchedReads_.empty()) {
@@ -88,14 +90,14 @@ void NativeLanceReadPlan::clearStage() {
   }
 }
 
-void NativeLanceReadPlan::schedule(
+void NativeLanceReadScheduler::schedule(
     dwio::common::BufferedInput& input,
     uint64_t offset,
     uint64_t length) {
-  BOLT_CHECK(!cancelled(), "Cannot schedule a cancelled Lance read plan");
+  BOLT_CHECK(!cancelled(), "Cannot schedule a cancelled Lance read scheduler");
   BOLT_CHECK(
       input_ == nullptr || input_ == &input,
-      "A Lance read plan cannot span multiple BufferedInput instances");
+      "A Lance read scheduler cannot span multiple BufferedInput instances");
   input_ = &input;
   BOLT_CHECK_LE(offset, std::numeric_limits<uint64_t>::max() - length);
   const auto maxChunkBytes =
@@ -107,7 +109,17 @@ void NativeLanceReadPlan::schedule(
   }
 }
 
-void NativeLanceReadPlan::scheduleChunk(
+void NativeLanceReadScheduler::schedulePage(
+    dwio::common::BufferedInput& input,
+    PageBufferKey pageBuffer,
+    uint64_t offset,
+    uint64_t length) {
+  const ReadKey key{offset, length};
+  pageReads_.insert_or_assign(pageBuffer, key);
+  schedule(input, offset, length);
+}
+
+void NativeLanceReadScheduler::scheduleChunk(
     dwio::common::BufferedInput& input,
     uint64_t offset,
     uint64_t length) {
@@ -129,18 +141,22 @@ void NativeLanceReadPlan::scheduleChunk(
     return;
   }
   if (input.isBuffered(offset, length)) {
+    auto reservation = reserve(length);
     auto buffer = AlignedBuffer::allocate<char>(length, &pool_);
     auto stream = input.enqueue({offset, length});
     stream->readFully(buffer->asMutable<char>(), length);
-    prefetchedReads_.insert_or_assign(key, std::move(buffer));
+    prefetchedReads_.insert_or_assign(
+        key,
+        PrefetchedRead{
+            .data = std::move(buffer), .reservation = std::move(reservation)});
     scheduledReadKeys_.erase(key);
     return;
   }
   stagedReads_.push_back({key});
 }
 
-void NativeLanceReadPlan::submit(dwio::common::BufferedInput& input) {
-  BOLT_CHECK(!cancelled(), "Cannot submit a cancelled Lance read plan");
+void NativeLanceReadScheduler::submit(dwio::common::BufferedInput& input) {
+  BOLT_CHECK(!cancelled(), "Cannot submit a cancelled Lance read scheduler");
   BOLT_CHECK(input_ == nullptr || input_ == &input);
   input_ = &input;
   if (stagedReads_.empty()) {
@@ -180,18 +196,19 @@ void NativeLanceReadPlan::submit(dwio::common::BufferedInput& input) {
   clearStage();
 }
 
-void NativeLanceReadPlan::load(dwio::common::BufferedInput& input) {
+void NativeLanceReadScheduler::load(dwio::common::BufferedInput& input) {
   submit(input);
   materialize();
 }
 
-void NativeLanceReadPlan::materialize() {
+void NativeLanceReadScheduler::materialize() {
   while (!submittedReads_.empty()) {
     materializeSubmitted(submittedReads_.begin());
   }
 }
 
-void NativeLanceReadPlan::materializeUntilAdmitted(uint64_t incomingBytes) {
+void NativeLanceReadScheduler::materializeUntilAdmitted(
+    uint64_t incomingBytes) {
   while (!submittedReads_.empty() &&
          (incomingBytes > options_.maxInFlightBytes ||
           submittedBytes_ > options_.maxInFlightBytes - incomingBytes)) {
@@ -199,23 +216,26 @@ void NativeLanceReadPlan::materializeUntilAdmitted(uint64_t incomingBytes) {
   }
 }
 
-BufferPtr NativeLanceReadPlan::materializeSubmitted(
+BufferPtr NativeLanceReadScheduler::materializeSubmitted(
     std::unordered_map<ReadKey, SubmittedRead, ReadKeyHash>::iterator it) {
   auto key = it->first;
   auto submitted = std::move(it->second);
   submittedReads_.erase(it);
   BOLT_CHECK_GE(submittedBytes_, submitted.length);
   submittedBytes_ -= submitted.length;
+  auto reservation = reserve(submitted.length);
   auto buffer = AlignedBuffer::allocate<char>(submitted.length, &pool_);
   submitted.stream->readFully(buffer->asMutable<char>(), submitted.length);
-  prefetchedReads_.insert_or_assign(key, buffer);
+  prefetchedReads_.insert_or_assign(
+      key,
+      PrefetchedRead{.data = buffer, .reservation = std::move(reservation)});
   if (submittedReads_.empty() && stagedReads_.empty()) {
     input_ = nullptr;
   }
   return buffer;
 }
 
-BufferPtr NativeLanceReadPlan::take(uint64_t offset, uint64_t length) {
+BufferPtr NativeLanceReadScheduler::take(uint64_t offset, uint64_t length) {
   std::lock_guard<std::mutex> guard(consumeMutex_);
   if (cancelled()) {
     return nullptr;
@@ -224,7 +244,10 @@ BufferPtr NativeLanceReadPlan::take(uint64_t offset, uint64_t length) {
   const ReadKey key{offset, length};
   const auto prefetched = prefetchedReads_.find(key);
   if (prefetched != prefetchedReads_.end()) {
-    auto buffer = std::move(prefetched->second);
+    BOLT_CHECK(
+        !prefetched->second.reservation.has_value(),
+        "Budgeted Lance page buffers must be consumed by page owner");
+    auto buffer = std::move(prefetched->second.data);
     prefetchedReads_.erase(prefetched);
     return buffer;
   }
@@ -234,10 +257,13 @@ BufferPtr NativeLanceReadPlan::take(uint64_t offset, uint64_t length) {
     prefetchedReads_.erase(key);
     return buffer;
   }
-  for (const auto& [prefetchedKey, buffer] : prefetchedReads_) {
+  for (const auto& [prefetchedKey, read] : prefetchedReads_) {
     if (containsRange(prefetchedKey, offset, length)) {
+      BOLT_CHECK(
+          !read.reservation.has_value(),
+          "Budgeted Lance page buffers must be consumed by page owner");
       return Buffer::slice<char>(
-          buffer, offset - prefetchedKey.offset, length, &pool_);
+          read.data, offset - prefetchedKey.offset, length, &pool_);
     }
   }
   for (auto it = submittedReads_.begin(); it != submittedReads_.end(); ++it) {
@@ -277,16 +303,53 @@ BufferPtr NativeLanceReadPlan::take(uint64_t offset, uint64_t length) {
     const auto bytes =
         std::min(end - position, key->offset + key->length - position);
     const auto& source = prefetchedReads_.at(*key);
+    BOLT_CHECK(
+        !source.reservation.has_value(),
+        "Budgeted Lance page buffers must be consumed by page owner");
     std::memcpy(
         result->asMutable<char>() + position - offset,
-        source->as<char>() + position - key->offset,
+        source.data->as<char>() + position - key->offset,
         bytes);
     position += bytes;
   }
   return result;
 }
 
-void NativeLanceReadPlan::cancel(dwio::common::BufferedInput* input) {
+NativeLanceReadScheduler::PageBuffer NativeLanceReadScheduler::takePage(
+    PageBufferKey pageBuffer) {
+  const auto it = pageReads_.find(pageBuffer);
+  BOLT_CHECK(it != pageReads_.end(), "Lance page buffer was not scheduled");
+  const auto key = it->second;
+  pageReads_.erase(it);
+  materialize();
+  const auto prefetched = prefetchedReads_.find(key);
+  if (prefetched == prefetchedReads_.end()) {
+    BOLT_CHECK_NULL(
+        memoryBudget_,
+        "Budgeted page reads must be scheduled as individually consumable ranges");
+    return {.data = take(key.offset, key.length), .reservation = std::nullopt};
+  }
+  auto result = PageBuffer{
+      .data = std::move(prefetched->second.data),
+      .reservation = std::move(prefetched->second.reservation)};
+  prefetchedReads_.erase(prefetched);
+  return result;
+}
+
+std::optional<NativeLanceMemoryBudget::Reservation>
+NativeLanceReadScheduler::reserve(uint64_t bytes) {
+  if (memoryBudget_ == nullptr) {
+    return std::nullopt;
+  }
+  auto reservation = memoryBudget_->tryReserve(
+      NativeLanceMemoryClass::kCompressedInput, bytes);
+  BOLT_CHECK(
+      reservation.has_value(),
+      "Lance compressed input exceeds the scan memory budget");
+  return reservation;
+}
+
+void NativeLanceReadScheduler::cancel(dwio::common::BufferedInput* input) {
   std::lock_guard<std::mutex> guard(consumeMutex_);
   if (cancelled_.exchange(true, std::memory_order_acq_rel)) {
     return;
@@ -297,6 +360,7 @@ void NativeLanceReadPlan::cancel(dwio::common::BufferedInput* input) {
   clearStage();
   submittedReads_.clear();
   prefetchedReads_.clear();
+  pageReads_.clear();
   submittedBytes_ = 0;
   input_ = nullptr;
 }

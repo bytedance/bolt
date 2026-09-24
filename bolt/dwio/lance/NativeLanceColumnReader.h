@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <exception>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -23,12 +24,28 @@
 
 #include "bolt/dwio/common/Options.h"
 #include "bolt/dwio/common/ParallelFor.h"
-#include "bolt/dwio/lance/NativeLanceDecoder.h"
+#include "bolt/dwio/lance/NativeLanceColumnSource.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::lance::reader {
 
 enum class NativeLanceReadStage { kRowAligned, kOffsetDependent };
+
+enum class NativeLanceColumnState : uint8_t {
+  kIdle,
+  kPlanningPages,
+  kWaitingPages,
+  kAssembling,
+  kReady,
+  kConsumed,
+  kFailed,
+  kCancelled,
+};
+
+struct NativeLanceColumnRequest {
+  uint64_t rowStart;
+  uint64_t rowCount;
+};
 
 class NativeLanceColumnReader {
  public:
@@ -39,15 +56,15 @@ class NativeLanceColumnReader {
   virtual uint32_t fileColumnIndex() const = 0;
   virtual const TypePtr& type() const = 0;
   virtual VectorPtr read(
-      NativeLanceDecoder& decoder,
+      NativeLanceColumnSource& decoder,
       uint64_t rowStart,
       uint64_t rowCount,
       memory::MemoryPool& pool) const = 0;
 };
 
-class NativeLanceStructColumnReader {
+class NativeLanceRootColumnReader {
  public:
-  static std::unique_ptr<NativeLanceStructColumnReader> buildRoot(
+  static std::unique_ptr<NativeLanceRootColumnReader> buildRoot(
       const RowTypePtr& fileType,
       const dwio::common::RowReaderOptions& options);
 
@@ -56,20 +73,21 @@ class NativeLanceStructColumnReader {
   }
 
   VectorPtr read(
-      NativeLanceDecoder& decoder,
+      NativeLanceColumnSource& decoder,
       uint64_t rowStart,
       uint64_t rowCount,
-      memory::MemoryPool& pool) const;
+      memory::MemoryPool& pool,
+      bool primaryRangesPlanned = false) const;
 
   void planRead(
-      NativeLanceDecoder& decoder,
+      NativeLanceColumnSource& decoder,
       uint64_t rowStart,
       uint64_t rowCount) const;
 
   std::vector<uint32_t> fileColumnIndices() const;
 
  private:
-  NativeLanceStructColumnReader(
+  NativeLanceRootColumnReader(
       RowTypePtr outputType,
       std::vector<std::unique_ptr<NativeLanceColumnReader>> children,
       std::shared_ptr<folly::Executor> decodingExecutor,
@@ -81,6 +99,33 @@ class NativeLanceStructColumnReader {
   std::vector<std::unique_ptr<NativeLanceColumnReader>> children_;
   std::shared_ptr<folly::Executor> decodingExecutor_;
   size_t decodingParallelismFactor_;
+};
+
+/// Batch-local state for executing an immutable column-reader tree.
+class NativeLanceColumnReadTask {
+ public:
+  NativeLanceColumnReadTask(
+      const NativeLanceRootColumnReader& reader,
+      NativeLanceColumnRequest request,
+      bool primaryRangesPlanned = false);
+
+  void plan(NativeLanceColumnSource& decoder);
+  void decode(NativeLanceColumnSource& decoder, memory::MemoryPool& pool);
+  VectorPtr consume();
+  void cancel(NativeLanceColumnSource& decoder);
+
+  NativeLanceColumnState state() const {
+    return state_;
+  }
+
+ private:
+  [[noreturn]] void rethrowFailure() const;
+
+  const NativeLanceRootColumnReader& reader_;
+  const NativeLanceColumnRequest request_;
+  VectorPtr result_;
+  std::exception_ptr failure_;
+  NativeLanceColumnState state_{NativeLanceColumnState::kIdle};
 };
 
 } // namespace bytedance::bolt::lance::reader
