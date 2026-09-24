@@ -20,6 +20,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/lance/NativeLanceBatchBuilder.h"
+#include "bolt/dwio/lance/NativeLanceMetadata.h"
 
 namespace bytedance::bolt::lance::reader {
 namespace {
@@ -40,12 +41,17 @@ bool typeRequiresDeferredRead(const TypePtr& type) {
   return false;
 }
 
-class FileColumnReader final : public NativeLanceColumnReader {
+class FileColumnReader : public NativeLanceColumnReader {
  public:
-  FileColumnReader(std::string name, TypePtr type, uint32_t fileColumnIndex)
+  FileColumnReader(
+      NativeLanceColumnKind kind,
+      std::string name,
+      TypePtr type,
+      uint32_t fileColumnIndex)
       : name_(std::move(name)),
         type_(std::move(type)),
         fileColumnIndex_(fileColumnIndex),
+        kind_(kind),
         readStage_(
             typeRequiresDeferredRead(type_)
                 ? NativeLanceReadStage::kOffsetDependent
@@ -53,6 +59,10 @@ class FileColumnReader final : public NativeLanceColumnReader {
 
   bool readFromFile() const override {
     return true;
+  }
+
+  NativeLanceColumnKind kind() const override {
+    return kind_;
   }
 
   NativeLanceReadStage readStage() const override {
@@ -79,8 +89,42 @@ class FileColumnReader final : public NativeLanceColumnReader {
   std::string name_;
   TypePtr type_;
   uint32_t fileColumnIndex_;
+  NativeLanceColumnKind kind_;
   NativeLanceReadStage readStage_;
 };
+
+template <NativeLanceColumnKind readerKind>
+class TypedFileColumnReader final : public FileColumnReader {
+ public:
+  TypedFileColumnReader(
+      std::string name,
+      TypePtr type,
+      uint32_t fileColumnIndex)
+      : FileColumnReader(
+            readerKind,
+            std::move(name),
+            std::move(type),
+            fileColumnIndex) {}
+};
+
+using NativeLanceScalarColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kScalar>;
+using NativeLanceBinaryColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kBinary>;
+using NativeLanceDictionaryColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kDictionary>;
+using NativeLanceListColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kList>;
+using NativeLanceMapColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kMap>;
+using NativeLanceStructColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kStruct>;
+using NativeLanceFixedSizeListColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kFixedSizeList>;
+using NativeLancePackedStructColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kPackedStruct>;
+using NativeLanceBlobColumnReader =
+    TypedFileColumnReader<NativeLanceColumnKind::kBlob>;
 
 class ConstantColumnReader final : public NativeLanceColumnReader {
  public:
@@ -91,6 +135,10 @@ class ConstantColumnReader final : public NativeLanceColumnReader {
 
   bool readFromFile() const override {
     return false;
+  }
+
+  NativeLanceColumnKind kind() const override {
+    return NativeLanceColumnKind::kConstant;
   }
 
   NativeLanceReadStage readStage() const override {
@@ -119,18 +167,94 @@ class ConstantColumnReader final : public NativeLanceColumnReader {
   VectorPtr constantValue_;
 };
 
+NativeLanceColumnKind columnKind(
+    const NativeLanceMetadata& metadata,
+    uint32_t fileColumnIndex,
+    const TypePtr& type) {
+  const auto logicalType = metadata.columnLogicalType(fileColumnIndex);
+  if (logicalType.rfind("dict:", 0) == 0) {
+    return NativeLanceColumnKind::kDictionary;
+  }
+  if (logicalType == "lance.blob.v2") {
+    return NativeLanceColumnKind::kBlob;
+  }
+  if (logicalType.rfind("fixed_size_list:", 0) == 0) {
+    return NativeLanceColumnKind::kFixedSizeList;
+  }
+  switch (type->kind()) {
+    case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
+      return NativeLanceColumnKind::kBinary;
+    case TypeKind::ARRAY:
+      return NativeLanceColumnKind::kList;
+    case TypeKind::MAP:
+      return NativeLanceColumnKind::kMap;
+    case TypeKind::ROW: {
+      if (!metadata.usesStructuralEncoding()) {
+        const auto physicalIndex =
+            metadata.physicalColumnIndex(fileColumnIndex);
+        const auto& column = metadata.column(physicalIndex);
+        for (int32_t pageIndex = 0; pageIndex < column.pages_size();
+             ++pageIndex) {
+          if (column.pages(pageIndex).length() == 0) {
+            continue;
+          }
+          const auto& encoding =
+              metadata.pageEncoding(physicalIndex, pageIndex);
+          if (encoding.array_encoding_case() ==
+              ::lance::encodings::ArrayEncoding::kPackedStruct) {
+            return NativeLanceColumnKind::kPackedStruct;
+          }
+          break;
+        }
+      }
+      return NativeLanceColumnKind::kStruct;
+    }
+    default:
+      return NativeLanceColumnKind::kScalar;
+  }
+}
+
+std::unique_ptr<NativeLanceColumnReader> makeFileColumnReader(
+    NativeLanceColumnKind kind,
+    std::string name,
+    TypePtr type,
+    uint32_t fileColumnIndex) {
+#define MAKE_READER(readerKind, readerType) \
+  case NativeLanceColumnKind::readerKind:   \
+    return std::make_unique<readerType>(    \
+        std::move(name), std::move(type), fileColumnIndex)
+  switch (kind) {
+    MAKE_READER(kScalar, NativeLanceScalarColumnReader);
+    MAKE_READER(kBinary, NativeLanceBinaryColumnReader);
+    MAKE_READER(kDictionary, NativeLanceDictionaryColumnReader);
+    MAKE_READER(kList, NativeLanceListColumnReader);
+    MAKE_READER(kMap, NativeLanceMapColumnReader);
+    MAKE_READER(kStruct, NativeLanceStructColumnReader);
+    MAKE_READER(kFixedSizeList, NativeLanceFixedSizeListColumnReader);
+    MAKE_READER(kPackedStruct, NativeLancePackedStructColumnReader);
+    MAKE_READER(kBlob, NativeLanceBlobColumnReader);
+    case NativeLanceColumnKind::kConstant:
+      BOLT_UNREACHABLE();
+  }
+#undef MAKE_READER
+  BOLT_UNREACHABLE();
+}
+
 void addProjectedFileColumn(
-    const RowTypePtr& fileType,
+    const NativeLanceMetadata& metadata,
     const std::string& name,
     std::vector<std::string>& outputNames,
     std::vector<TypePtr>& outputTypes,
     std::vector<std::unique_ptr<NativeLanceColumnReader>>& children) {
+  const auto& fileType = metadata.rowType();
   const auto fileColumnIndex = fileType->getChildIdx(name);
   auto type = fileType->childAt(fileColumnIndex);
+  const auto kind = columnKind(metadata, fileColumnIndex, type);
   outputNames.push_back(name);
   outputTypes.push_back(type);
-  children.push_back(std::make_unique<FileColumnReader>(
-      name, std::move(type), fileColumnIndex));
+  children.push_back(
+      makeFileColumnReader(kind, name, std::move(type), fileColumnIndex));
 }
 
 } // namespace
@@ -147,8 +271,9 @@ NativeLanceRootColumnReader::NativeLanceRootColumnReader(
 
 std::unique_ptr<NativeLanceRootColumnReader>
 NativeLanceRootColumnReader::buildRoot(
-    const RowTypePtr& fileType,
+    const NativeLanceMetadata& metadata,
     const dwio::common::RowReaderOptions& options) {
+  const auto& fileType = metadata.rowType();
   std::vector<std::string> outputNames;
   std::vector<TypePtr> outputTypes;
   std::vector<std::unique_ptr<NativeLanceColumnReader>> children;
@@ -178,9 +303,10 @@ NativeLanceRootColumnReader::buildRoot(
         const auto fileColumnIndex =
             fileType->getChildIdx(childSpec->fieldName());
         auto type = fileType->childAt(fileColumnIndex);
+        const auto kind = columnKind(metadata, fileColumnIndex, type);
         outputTypes[channel] = type;
-        children[channel] = std::make_unique<FileColumnReader>(
-            childSpec->fieldName(), std::move(type), fileColumnIndex);
+        children[channel] = makeFileColumnReader(
+            kind, childSpec->fieldName(), std::move(type), fileColumnIndex);
       }
     }
     return std::unique_ptr<NativeLanceRootColumnReader>(
@@ -202,7 +328,7 @@ NativeLanceRootColumnReader::buildRoot(
   children.reserve(outputType->size());
   for (uint32_t channel = 0; channel < outputType->size(); ++channel) {
     addProjectedFileColumn(
-        fileType,
+        metadata,
         outputType->nameOf(channel),
         outputNames,
         outputTypes,

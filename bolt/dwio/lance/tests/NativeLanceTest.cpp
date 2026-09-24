@@ -2526,6 +2526,8 @@ TEST_F(NativeLanceTest, scanPlanBindsProjectionAndRowRangesOnce) {
   const auto plan = NativeLanceScanPlan::build(*context, rowOptions);
   EXPECT_EQ(plan->outputType()->toString(), "ROW<b:DOUBLE>");
   EXPECT_EQ(plan->requiredColumns(), std::vector<uint32_t>({1}));
+  EXPECT_EQ(
+      plan->rootColumnReader().childKind(0), NativeLanceColumnKind::kScalar);
   const std::vector<std::pair<uint64_t, uint64_t>> expectedRanges{{0, 20}};
   EXPECT_EQ(plan->rowRanges(), expectedRanges);
   EXPECT_GT(plan->estimatedBytesPerRow(), 0);

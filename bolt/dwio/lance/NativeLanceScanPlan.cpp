@@ -77,7 +77,7 @@ std::unique_ptr<NativeLanceScanPlan> NativeLanceScanPlan::build(
     const dwio::common::RowReaderOptions& options) {
   const auto& metadata = context.metadata();
   auto rootColumnReader =
-      NativeLanceRootColumnReader::buildRoot(metadata.rowType(), options);
+      NativeLanceRootColumnReader::buildRoot(metadata, options);
   auto requiredColumns = rootColumnReader->fileColumnIndices();
   if (const auto& scanSpec = options.getScanSpec()) {
     for (const auto& child : scanSpec->children()) {

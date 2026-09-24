@@ -1938,6 +1938,9 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
   whole-buffer policy。两者都不保留完整 decompressed page。
 - `NativeLanceColumnSource` 已隔离逻辑 ColumnReader 与迁移期单体 Decoder；旧根类已更名
   为 `NativeLanceRootColumnReader`。
+- ColumnReader 工厂已按 metadata/logical type 创建 scalar、binary、dictionary、list、map、
+  struct、fixed-size-list、packed-struct、Blob 和 constant 节点；复杂节点当前仍通过
+  `NativeLanceColumnSource` adapter 解码，后续逐类替换其组装逻辑。
 - legacy scalar、nullable、bitmap、bitpack、fixed-size binary 和 zero-copy flat kernel 已迁移
   到 `NativeLanceLegacyScalar`；物理 buffer 定位统一由
   `NativeLanceMetadata::resolveBuffer()` 提供。

@@ -29,7 +29,22 @@
 
 namespace bytedance::bolt::lance::reader {
 
+class NativeLanceMetadata;
+
 enum class NativeLanceReadStage { kRowAligned, kOffsetDependent };
+
+enum class NativeLanceColumnKind : uint8_t {
+  kConstant,
+  kScalar,
+  kBinary,
+  kDictionary,
+  kList,
+  kMap,
+  kStruct,
+  kFixedSizeList,
+  kPackedStruct,
+  kBlob,
+};
 
 enum class NativeLanceColumnState : uint8_t {
   kIdle,
@@ -52,6 +67,7 @@ class NativeLanceColumnReader {
   virtual ~NativeLanceColumnReader() = default;
 
   virtual bool readFromFile() const = 0;
+  virtual NativeLanceColumnKind kind() const = 0;
   virtual NativeLanceReadStage readStage() const = 0;
   virtual uint32_t fileColumnIndex() const = 0;
   virtual const TypePtr& type() const = 0;
@@ -65,7 +81,7 @@ class NativeLanceColumnReader {
 class NativeLanceRootColumnReader {
  public:
   static std::unique_ptr<NativeLanceRootColumnReader> buildRoot(
-      const RowTypePtr& fileType,
+      const NativeLanceMetadata& metadata,
       const dwio::common::RowReaderOptions& options);
 
   const RowTypePtr& outputType() const {
@@ -85,6 +101,10 @@ class NativeLanceRootColumnReader {
       uint64_t rowCount) const;
 
   std::vector<uint32_t> fileColumnIndices() const;
+
+  NativeLanceColumnKind childKind(column_index_t channel) const {
+    return children_.at(channel)->kind();
+  }
 
  private:
   NativeLanceRootColumnReader(

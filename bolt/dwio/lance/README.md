@@ -19,7 +19,8 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
   reservations.
 - `NativeLanceColumnReader` owns logical type semantics. Batch-local
   `NativeLanceColumnReadTask` instances keep execution state out of the shared
-  reader tree.
+  reader tree. The factory creates explicit scalar, binary, dictionary, list,
+  map, struct, fixed-size-list, packed-struct, Blob, and constant node kinds.
 - `NativeLanceColumnCursor` maps monotonically increasing row ranges to page
   spans without rescanning page metadata from the beginning.
 - `NativeLanceStructuralPageReader` owns v2.1+ page state and invokes the
