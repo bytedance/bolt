@@ -41,6 +41,11 @@ target_link_libraries(
     Paimon::libavrocpp
 )
 
+if(BOLT_ENABLE_ORC)
+  target_sources(bolt_connector_paimon PRIVATE PaimonOrcReader.cpp)
+  target_link_libraries(bolt_connector_paimon PUBLIC bolt_dwio_orc_reader)
+endif()
+
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
