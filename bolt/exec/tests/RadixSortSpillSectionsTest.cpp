@@ -957,6 +957,11 @@ class RadixSortSpillSectionsTest : public testing::Test {
     EXPECT_EQ(file.compressionKind, compression);
     const auto fileSize = std::filesystem::file_size(file.path);
     EXPECT_GT(fileSize, 0);
+    const auto firstHeader =
+        readSpillValue<TestRadixSortSpillBlockHeader>(file.path, 0);
+    EXPECT_EQ(
+        writer.firstBlockUncompressedSize(), firstHeader.uncompressedSize);
+    EXPECT_EQ(writer.firstBlockStoredSize(), firstHeader.storedSize);
     const auto written = stats.copy();
     EXPECT_EQ(written.spilledBytes, fileSize);
     EXPECT_EQ(written.spilledRows, 0);
@@ -4504,8 +4509,11 @@ TEST_F(RadixSortSpillSectionsTest, mergerReplacesMemoryAndResetsSelection) {
 
   EXPECT_EQ(memoryStorage.allocatedBytes(), 0);
   EXPECT_FALSE(merger.memoryPosition());
+  EXPECT_TRUE(merger.hasPendingMemoryReplacement());
   EXPECT_EQ(leftPtr->position(), leftPosition);
   EXPECT_EQ(rightPtr->position(), rightPosition);
+  merger.finishMemoryReplacement();
+  EXPECT_FALSE(merger.hasPendingMemoryReplacement());
   EXPECT_EQ(collect(5), 5);
   EXPECT_EQ(outputRows, 9);
 }
@@ -4531,21 +4539,21 @@ TEST_F(
     streams.push_back(makeRadixSortMemoryRunMergeStream(storage));
     RadixSortMerger merger(layout, std::move(streams), 0);
     bool released = false;
-    EXPECT_THROW(
-        merger.replaceMemory(
-            RadixSortSpillRun{std::move(files)},
-            RadixSortSpillSectionMeta::create(layout, nullptr),
-            pool_.get(),
-            false,
-            [&]() noexcept {
-              storage.clear();
-              released = true;
-            }),
-        BoltException);
+    merger.replaceMemory(
+        RadixSortSpillRun{std::move(files)},
+        RadixSortSpillSectionMeta::create(layout, nullptr),
+        pool_.get(),
+        false,
+        [&]() noexcept {
+          storage.clear();
+          released = true;
+        });
     EXPECT_TRUE(released);
     EXPECT_EQ(storage.allocatedBytes(), 0);
     EXPECT_FALSE(merger.memoryPosition());
     EXPECT_EQ(merger.getSpillReadTime(), 0);
+    EXPECT_THROW(merger.finishMemoryReplacement(), BoltException);
+    EXPECT_FALSE(merger.hasPendingMemoryReplacement());
     EXPECT_FALSE(std::filesystem::exists(replacementPath));
     std::array<const char*, 1> keys{};
     EXPECT_THROW(
