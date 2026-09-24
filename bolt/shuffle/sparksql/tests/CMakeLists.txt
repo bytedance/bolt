@@ -163,24 +163,14 @@ add_test(
 )
 
 add_executable(
-    bolt_shuffle_cell_test
-    CellChunkTest.cpp
-    CellEncodingTest.cpp
-    CellWriterTest.cpp
+  bolt_shuffle_cell_test
+  CellChunkTest.cpp
+  CellEncodingTest.cpp
+  CellWriterTest.cpp
 )
 
-target_link_libraries(
-    bolt_shuffle_cell_test
-    PRIVATE
-        bolt_shuffle_spark_impl
-        bolt_testutils
-        bolt_vector_test_lib
-        GTest::gtest
-)
+target_link_libraries(bolt_shuffle_cell_test PRIVATE bolt_gtest_main)
 
-add_test(
-    NAME bolt_shuffle_cell_test
-    COMMAND bolt_shuffle_cell_test
-)
+add_test(NAME bolt_shuffle_cell_test COMMAND bolt_shuffle_cell_test)
 
 add_subdirectory(columnar_payload)

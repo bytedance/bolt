@@ -64,6 +64,37 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
   return params;
 }
 
+class CellTypeIntegrationTest : public ShuffleTestBase {};
+
+TEST_F(CellTypeIntegrationTest, complexUsesAdapterUnderLimitedMemory) {
+  ShuffleTestParam param{
+      "hash", 4, PartitionWriterType::kLocal, DataTypeGroup::kComplex, 4, 1};
+  param.memoryLimit = 64 << 20;
+  ShuffleInputData input;
+  auto arrays = makeArrayVector<int64_t>(
+      4096,
+      [](auto) { return 10; },
+      [](auto row) { return row; },
+      [](auto row) { return row % 5 == 0; });
+  input.inputsPerMapper = {{makeRowVector({arrays})}};
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, input, &result);
+  EXPECT_GT(result.metrics.convertTime, 0);
+}
+
+TEST_F(CellTypeIntegrationTest, unknownOnlyUsesHeaderPayloads) {
+  ShuffleTestParam param{
+      "hash", 4, PartitionWriterType::kLocal, DataTypeGroup::kHighNulls, 4, 2};
+  ShuffleInputData input;
+  input.inputsPerMapper = {{makeRowVector(
+      {BaseVector::createNullConstant(UNKNOWN(), 2048, pool()),
+       BaseVector::createNullConstant(UNKNOWN(), 2048, pool())})}};
+  input.inputsPerMapper.push_back(input.inputsPerMapper.front());
+  ShuffleRunResult result;
+  executeTestWithCustomInput(param, input, &result);
+  EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+}
+
 // A test suite that runs shuffle tests with different parameters
 class ShuffleMatrixTest : public ShuffleTestBase,
                           public testing::WithParamInterface<ShuffleTestParam> {

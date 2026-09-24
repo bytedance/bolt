@@ -20,10 +20,11 @@
 #include <optional>
 #include <random>
 
+#include "bolt/shuffle/sparksql/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
-#include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -54,6 +55,10 @@ class TestDecompressor : public cell::CellDecompressor {
 
 class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
+  static void SetUpTestSuite() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
     char pathTemplate[] = "/tmp/bolt_cell_writer_test_XXXXXX";
     const int fd = ::mkstemp(pathTemplate);
@@ -188,15 +193,15 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     }
     uint64_t offset = 0;
     for (int32_t pid = 0; pid < numPartitions; ++pid) {
-      const auto payloads = decodePartition(
-          layout, file, offset, metrics.partitionLengths[pid]);
+      const auto payloads =
+          decodePartition(layout, file, offset, metrics.partitionLengths[pid]);
       size_t k = 0;
       for (const auto& decoded : payloads) {
         for (vector_size_t row = 0; row < decoded->size(); ++row, ++k) {
           ASSERT_LT(k, expected[pid].size()) << "partition " << pid;
           const auto [batchIdx, sourceRow] = expected[pid][k];
-          EXPECT_TRUE(batches[batchIdx]->equalValueAt(
-              decoded.get(), sourceRow, row))
+          EXPECT_TRUE(
+              batches[batchIdx]->equalValueAt(decoded.get(), sourceRow, row))
               << "partition " << pid << " row " << k << ": expected "
               << batches[batchIdx]->toString(sourceRow) << ", got "
               << decoded->toString(row);
@@ -209,6 +214,303 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
 
   std::string dataFile_;
 };
+
+TEST_F(CellWriterTest, fullPrimitiveTypesAndUnknownWireSlots) {
+  constexpr int32_t n = 257;
+  std::vector<VectorPtr> children;
+  for (int i = 0; i < 10; ++i) {
+    children.push_back(BaseVector::createNullConstant(UNKNOWN(), n, pool()));
+    children.push_back(makeFlatVector<bool>(
+        n,
+        [i](auto row) { return (row + i) % 2; },
+        [](auto row) { return row % 5 == 0; }));
+  }
+  children.push_back(makeFlatVector<Timestamp>(
+      n,
+      [](auto row) {
+        return Timestamp::fromMicros((int64_t(row) - 128) * 1000001);
+      },
+      [](auto row) { return row % 7 == 0; }));
+  children.push_back(makeFlatVector<int128_t>(
+      n,
+      [](auto row) { return (int128_t(row) - 128) * (int128_t(1) << 90); },
+      [](auto row) { return row % 9 == 0; },
+      DECIMAL(38, 4)));
+  children.push_back(BaseVector::createNullConstant(UNKNOWN(), n, pool()));
+  children.push_back(makeFlatVector<StringView>(
+      n, [](auto) { return StringView("dictionary"); }));
+  auto data = makeRowVector(children);
+  auto options = makeOptions(4);
+  options.cellOptions.dictMinProbeRows = 1;
+  options.cellOptions.maxWindowRows = 33;
+  std::vector<int32_t> pids(n);
+  for (int i = 0; i < n; ++i) {
+    pids[i] = i % 3;
+  }
+  roundTrip(options, {pids}, {data});
+  std::vector<VectorPtr> wrapped;
+  auto indices = makeIndices(n, [](auto row) { return n - row - 1; });
+  for (const auto& child : children) {
+    wrapped.push_back(BaseVector::wrapInDictionary(nullptr, indices, n, child));
+  }
+  roundTrip(options, {pids}, {makeRowVector(wrapped)});
+  wrapped.clear();
+  for (const auto& child : children) {
+    wrapped.push_back(wrapInLazyDictionary(child));
+  }
+  roundTrip(options, {pids}, {makeRowVector(wrapped)});
+  wrapped.clear();
+  for (const auto& child : children) {
+    wrapped.push_back(BaseVector::wrapInConstant(n, 1, child));
+  }
+  roundTrip(options, {pids}, {makeRowVector(wrapped)});
+}
+
+TEST_F(CellWriterTest, unknownOnlyHeaderAndRowBoundaries) {
+  auto data = makeRowVector(
+      {BaseVector::createNullConstant(UNKNOWN(), 99, pool()),
+       BaseVector::createNullConstant(UNKNOWN(), 99, pool())});
+  auto options = makeOptions(3);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  roundTrip(options, {std::vector<int32_t>(99, 1)}, {data}, &writer);
+  ASSERT_EQ(
+      writer.metrics().partitionLengths, (std::vector<int64_t>{0, 24, 0}));
+  auto bytes = readFile();
+  EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 99);
+  EXPECT_EQ(bytes.substr(1), std::string(23, '\0'));
+
+  options.cellOptions.maxWindowRows = 10;
+  CellShuffleWriter bounded(options, pool(), arrow::default_memory_pool());
+  roundTrip(options, {std::vector<int32_t>(99, 1)}, {data}, &bounded);
+  EXPECT_EQ(bounded.metrics().partitionLengths[1], 10 * 24);
+
+  auto layout = CellLayout::create(asRowType(data->type()));
+  CellPayloadDecoder decoder(layout, nullptr, pool());
+  for (const auto index : {4, 8, 16, 20}) {
+    auto invalid = bytes;
+    invalid[index] = 1;
+    MemoryByteSource source(
+        reinterpret_cast<const uint8_t*>(invalid.data()), invalid.size());
+    RowVectorPtr output;
+    std::string error;
+    EXPECT_FALSE(decoder.decode(source, output, error)) << index;
+  }
+}
+
+TEST_F(CellWriterTest, groupedComplexAdapterAndCellRoundTrip) {
+  auto arrays = makeArrayVector<int64_t>({{1, 2}, {}, {3}, {4, 5}});
+  arrays->setNull(2, true);
+  auto maps =
+      makeMapVector<int64_t, int64_t>({{{1, 2}}, {}, {{3, 4}}, {{5, 6}}});
+  maps->setNull(2, true);
+  auto nested = makeRowVector({arrays, maps});
+  nested->setNull(1, true);
+  auto nativeBinary = makeFlatVector<StringView>(
+      {StringView("ab"), StringView(""), StringView("cd"), StringView("ef")},
+      VARBINARY());
+  auto logical = makeRowVector(
+      {arrays,
+       nativeBinary,
+       BaseVector::createNullConstant(UNKNOWN(), 4, pool()),
+       maps,
+       nested});
+  CellShuffleTypeAdapter adapter(asRowType(logical->type()));
+  ASSERT_EQ(adapter.physicalType()->size(), 3);
+  EXPECT_EQ(adapter.physicalType()->childAt(0)->kind(), TypeKind::VARBINARY);
+  EXPECT_EQ(adapter.physicalType()->childAt(1)->kind(), TypeKind::UNKNOWN);
+  EXPECT_EQ(adapter.physicalType()->childAt(2)->kind(), TypeKind::VARBINARY);
+  vector_size_t offset = 0;
+  auto physical = adapter.encodeNext(logical, offset, pool());
+  ASSERT_EQ(offset, 4);
+  auto binary = physical->childAt(2)->as<FlatVector<StringView>>();
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_FALSE(binary->isNullAt(i));
+  }
+  bolt::test::assertEqualVectors(logical, adapter.decode(physical, pool()));
+  auto options = makeOptions(1);
+  options.cellOptions.maxWindowRows = 2;
+  roundTrip(options, {{0, 0, 0, 0}}, {physical});
+  auto payloads = decodePartition(
+      CellLayout::create(adapter.physicalType()),
+      readFile(),
+      0,
+      readFile().size());
+  vector_size_t at = 0;
+  for (const auto& payload : payloads) {
+    auto restored = adapter.decode(payload, pool());
+    bolt::test::assertEqualVectors(
+        logical->slice(at, restored->size()), restored);
+    at += restored->size();
+  }
+  ASSERT_EQ(at, 4);
+
+  // A corrupted binary must fail before nested vector allocations.
+  auto malformed =
+      makeFlatVector<StringView>({StringView("\0", 1)}, VARBINARY());
+  auto bad = std::make_shared<RowVector>(
+      pool(),
+      adapter.physicalType(),
+      nullptr,
+      1,
+      std::vector<VectorPtr>{
+          nativeBinary->slice(0, 1),
+          BaseVector::createNullConstant(UNKNOWN(), 1, pool()),
+          malformed});
+  EXPECT_THROW(adapter.decode(bad, pool()), BoltException);
+  malformed->setNull(0, true);
+  EXPECT_THROW(adapter.decode(bad, pool()), BoltException);
+}
+
+TEST_F(CellWriterTest, complexAdapterSlicesAndSimpleFastPath) {
+  auto simple = makeRowVector({makeFlatVector<int64_t>({1, 2, 3})});
+  CellShuffleTypeAdapter identity(asRowType(simple->type()));
+  vector_size_t offset = 0;
+  EXPECT_EQ(identity.encodeNext(simple, offset, pool()).get(), simple.get());
+  EXPECT_EQ(identity.decode(simple, pool()).get(), simple.get());
+  auto arrays = makeArrayVector<int64_t>(
+      2049, [](auto) { return 2; }, [](auto i) { return i; });
+  auto input = makeRowVector({arrays});
+  CellShuffleTypeAdapter adapter(asRowType(input->type()));
+  offset = 0;
+  int batches = 0;
+  while (offset < input->size()) {
+    const auto start = offset;
+    auto physical = adapter.encodeNext(input, offset, pool());
+    EXPECT_LE(physical->size(), CellShuffleTypeAdapter::kMaxBatchRows);
+    bolt::test::assertEqualVectors(
+        input->slice(start, offset - start), adapter.decode(physical, pool()));
+    ++batches;
+  }
+  EXPECT_EQ(batches, 3);
+}
+
+TEST_F(CellWriterTest, nestedComplexEncodingsAndMalformedInput) {
+  using Inner = std::vector<std::optional<int64_t>>;
+  using Outer = std::vector<std::optional<Inner>>;
+  auto arrays = makeNullableNestedArrayVector<int64_t>(
+      {Outer{Inner{1, std::nullopt, 3}, std::nullopt, Inner{}},
+       std::nullopt,
+       Outer{Inner{4}, Inner{5, 6}}});
+  auto nested = makeRowVector(
+      {BaseVector::createNullConstant(UNKNOWN(), 3, pool()), arrays});
+  auto logical = makeRowVector({arrays, nested});
+  CellShuffleTypeAdapter adapter(asRowType(logical->type()));
+  for (const bool lazy : {false, true}) {
+    std::vector<VectorPtr> children;
+    for (const auto& child : logical->children()) {
+      children.push_back(lazy ? wrapInLazyDictionary(child) : child);
+    }
+    auto input = makeRowVector(children);
+    vector_size_t offset = 0;
+    auto physical = adapter.encodeNext(input, offset, pool());
+    bolt::test::assertEqualVectors(logical, adapter.decode(physical, pool()));
+    auto binary = physical->childAt(0)->as<FlatVector<StringView>>();
+    auto value = binary->valueAt(0).str();
+    value.push_back('\0');
+    binary->set(0, StringView(value));
+    EXPECT_THROW(adapter.decode(physical, pool()), BoltException);
+  }
+  auto nullInput = makeRowVector(
+      {BaseVector::createNullConstant(arrays->type(), 3, pool()),
+       BaseVector::createNullConstant(nested->type(), 3, pool())});
+  vector_size_t offset = 0;
+  auto physical = adapter.encodeNext(nullInput, offset, pool());
+  EXPECT_FALSE(physical->childAt(0)->isNullAt(0));
+  bolt::test::assertEqualVectors(nullInput, adapter.decode(physical, pool()));
+}
+
+TEST_F(CellWriterTest, complexByteBounds) {
+  std::string text(3 << 20, 'x');
+  auto strings = makeFlatVector<StringView>(
+      {StringView(text), StringView(text), StringView(text)});
+  auto input = makeRowVector({makeRowVector({strings})});
+  CellShuffleTypeAdapter adapter(asRowType(input->type()));
+  vector_size_t offset = 0;
+  auto physical = adapter.encodeNext(input, offset, pool());
+  EXPECT_EQ(offset, 2);
+  bolt::test::assertEqualVectors(
+      input->slice(0, 2), adapter.decode(physical, pool()));
+  physical = adapter.encodeNext(input, offset, pool());
+  EXPECT_EQ(offset, 3);
+  bolt::test::assertEqualVectors(
+      input->slice(2, 1), adapter.decode(physical, pool()));
+
+  std::string oversized(CellShuffleTypeAdapter::kMaxRowBytes, 'z');
+  auto tooLarge = makeRowVector(
+      {makeRowVector({makeFlatVector<StringView>({StringView(oversized)})})});
+  offset = 0;
+  EXPECT_THROW(adapter.encodeNext(tooLarge, offset, pool()), BoltException);
+  EXPECT_EQ(offset, 0);
+}
+
+TEST_F(CellWriterTest, rejectsInvalidBooleanAndMissingNullBody) {
+  // One non-null BOOLEAN, one stored Run, one raw byte.
+  std::string bytes(44, '\0');
+  bytes[0] = 1;
+  bytes[4] = 1;
+  bytes[16] = 1;
+  bytes[24] = 1;
+  bytes[26] = 2;
+  bytes[27] = 1;
+  bytes[35] = 1;
+  bytes[43] = 2;
+  CellPayloadDecoder decoder(
+      CellLayout::create(ROW({BOOLEAN()})), nullptr, pool());
+  auto decode = [&](const std::string& payload) {
+    MemoryByteSource source(
+        reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    RowVectorPtr output;
+    std::string error;
+    return decoder.decode(source, output, error);
+  };
+  EXPECT_FALSE(decode(bytes));
+  bytes[43] = 1;
+  EXPECT_TRUE(decode(bytes));
+  bytes[16] = 0;
+  EXPECT_FALSE(decode(bytes));
+}
+
+TEST_F(CellWriterTest, complexDecodeSplitsByWorkspaceBudget) {
+  constexpr vector_size_t elementsPerRow = 10000;
+  auto offsets = allocateOffsets(1, pool());
+  offsets->asMutable<vector_size_t>()[0] = 0;
+  auto sizes = allocateSizes(1, pool());
+  sizes->asMutable<vector_size_t>()[0] = elementsPerRow;
+  auto array = std::make_shared<ArrayVector>(
+      pool(),
+      ARRAY(UNKNOWN()),
+      nullptr,
+      1,
+      offsets,
+      sizes,
+      BaseVector::createNullConstant(UNKNOWN(), elementsPerRow, pool()));
+  auto input = makeRowVector({array});
+  CellShuffleTypeAdapter adapter(asRowType(input->type()));
+  vector_size_t offset = 0;
+  auto encoded = adapter.encodeNext(input, offset, pool());
+  // A small repeated binary can represent far more nested elements than its
+  // byte size suggests. Decoding must stop at the workspace boundary.
+  auto physical = std::make_shared<RowVector>(
+      pool(),
+      adapter.physicalType(),
+      nullptr,
+      1024,
+      std::vector<VectorPtr>{
+          BaseVector::wrapInConstant(1024, 0, encoded->childAt(0))});
+  offset = 0;
+  auto first = adapter.decodeNext(physical, offset, pool());
+  EXPECT_GT(first->size(), 0);
+  EXPECT_LT(first->size(), 1024);
+  auto second = adapter.decodeNext(physical, offset, pool());
+  EXPECT_EQ(offset, 1024);
+  EXPECT_EQ(first->size() + second->size(), 1024);
+  for (const auto& part : {first, second}) {
+    const auto* restored = part->childAt(0)->as<ArrayVector>();
+    EXPECT_EQ(restored->sizeAt(0), elementsPerRow);
+    EXPECT_EQ(restored->sizeAt(part->size() - 1), elementsPerRow);
+    EXPECT_TRUE(restored->elements()->isNullAt(0));
+  }
+}
 
 TEST_F(CellWriterTest, multiPartitionRoundTrip) {
   constexpr int32_t kPartitions = 8;
@@ -230,8 +532,7 @@ TEST_F(CellWriterTest, multiPartitionRoundTrip) {
           : std::optional<int16_t>(static_cast<int16_t>(i % 100 - 50));
     }
     auto smallints = makeNullableFlatVector<int16_t>(shorts);
-    auto reals =
-        makeFlatVector<float>(n, [](auto row) { return row * 0.5f; });
+    auto reals = makeFlatVector<float>(n, [](auto row) { return row * 0.5f; });
     auto strings = makeNullableStrings(n, rng);
     batches.push_back(makeRowVector(
         {"a", "b", "c", "d"}, {bigints, smallints, reals, strings}));
@@ -464,8 +765,18 @@ TEST_F(CellWriterTest, stringDictionaryRoundTripAndShrinksBytes) {
   // so the probe turns the column on. The second string column is
   // high-cardinality and must stay raw.
   const std::vector<std::string> vocab = {
-      "aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff",
-      "gggg", "hhhh", "iiii", "jjjj", "", "kk"};
+      "aaaa",
+      "bbbb",
+      "cccc",
+      "dddd",
+      "eeee",
+      "ffff",
+      "gggg",
+      "hhhh",
+      "iiii",
+      "jjjj",
+      "",
+      "kk"};
   std::mt19937 rng(42);
   std::vector<std::vector<int32_t>> pids;
   std::vector<RowVectorPtr> batches;
@@ -615,8 +926,7 @@ TEST_F(CellWriterTest, coalescedMergeShrinksManyRunPayloads) {
   int64_t bytesPerSpill = 0;
   for (const bool coalesce : {true, false}) {
     auto options = makeOptions(kPartitions);
-    options.cellOptions.cellMemoryCapBytes =
-        2 * options.cellOptions.chunkBytes;
+    options.cellOptions.cellMemoryCapBytes = 2 * options.cellOptions.chunkBytes;
     options.cellOptions.coalesceMergedRuns = coalesce;
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
     roundTrip(options, pids, batches, &writer);

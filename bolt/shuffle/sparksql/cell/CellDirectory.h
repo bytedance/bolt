@@ -155,9 +155,9 @@ class DataCells {
   uint64_t totalBytes_{0};
 };
 
-/// Null bitmaps per (partition, logical column) for the current checkpoint
-/// window, kept in the writer's semantics: bit 1 = non-null, bit 0 = null
-/// (spec section 4.2).
+/// Null bitmaps per (partition, non-UNKNOWN wire column) for the current
+/// checkpoint window, kept in the writer's semantics: bit 1 = non-null, bit 0 =
+/// null (spec section 4.2).
 ///
 /// Storage is lazy: a partition allocates nothing until its first null.
 /// Untouched (partition, column) pairs cost zero memory and summarize as

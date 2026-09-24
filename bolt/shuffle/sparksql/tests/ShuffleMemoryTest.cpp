@@ -835,6 +835,7 @@ TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
   EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
   EXPECT_GT(metrics.totalBytesEvicted, 0)
       << "reclaim should have forced the writer to spill Runs";
+  EXPECT_GT(metrics.externalReclaimTime, 0);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

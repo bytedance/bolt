@@ -39,16 +39,9 @@ add_library(
 # else, so an include of a vector or exec header fails here.
 add_executable(bolt_columnar_payload_ref_test Standalone.cpp)
 
-target_link_libraries(
-  bolt_columnar_payload_ref_test
-  PRIVATE
-    bolt_columnar_payload_ref
-)
+target_link_libraries(bolt_columnar_payload_ref_test PRIVATE bolt_columnar_payload_ref)
 
-add_test(
-  NAME bolt_columnar_payload_ref_test
-  COMMAND bolt_columnar_payload_ref_test
-)
+add_test(NAME bolt_columnar_payload_ref_test COMMAND bolt_columnar_payload_ref_test)
 
 # Everything needing RowVector lives above the reference, never inside it.
 # Vectors.cpp is the only bridge; Conformance.cpp is the seam a real Writer
@@ -58,9 +51,7 @@ add_executable(
   Vectors.cpp
   Conformance.cpp
   PayloadTest.cpp
-  # The form the engine's Writer and Reader are plugged into. Its tests are
-  # disabled until there is something to plug in, but it is kept compiling so
-  # that the form stays valid while nobody is using it.
+  # Cell shuffle writer and decoder conformance against the reference.
   IntegrationTest.cpp
 )
 
@@ -68,18 +59,7 @@ target_link_libraries(
   bolt_columnar_payload_test
   PRIVATE
     bolt_columnar_payload_ref
-    # The engine side of the seam: IntegrationTest plugs the Cell shuffle
-    # decoder (and later its writer) into the conformance suite.
-    bolt_shuffle_spark_impl
-    bolt_exec
-    bolt_vector
-    bolt_vector_test_lib
-    bolt_testutils
-    GTest::gtest
-    GTest::gtest_main
+    bolt_gtest_main
 )
 
-add_test(
-  NAME bolt_columnar_payload_test
-  COMMAND bolt_columnar_payload_test
-)
+add_test(NAME bolt_columnar_payload_test COMMAND bolt_columnar_payload_test)

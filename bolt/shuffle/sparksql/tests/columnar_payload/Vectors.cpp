@@ -107,6 +107,18 @@ bool toPhysicalType(const TypePtr& type, PhysicalType& out) {
     return true;
   }
   switch (type->kind()) {
+    case TypeKind::BOOLEAN:
+      out = PhysicalType::kBoolean;
+      return true;
+    case TypeKind::TIMESTAMP:
+      out = PhysicalType::kTimestamp;
+      return true;
+    case TypeKind::HUGEINT:
+      out = PhysicalType::kHugeint;
+      return true;
+    case TypeKind::UNKNOWN:
+      out = PhysicalType::kUnknown;
+      return true;
     case TypeKind::TINYINT:
       out = PhysicalType::kTinyInt;
       return true;
@@ -125,6 +137,7 @@ bool toPhysicalType(const TypePtr& type, PhysicalType& out) {
     case TypeKind::DOUBLE:
       out = PhysicalType::kDouble;
       return true;
+    case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
       out = PhysicalType::kString;
       return true;
@@ -135,6 +148,14 @@ bool toPhysicalType(const TypePtr& type, PhysicalType& out) {
 
 TypePtr toBoltType(PhysicalType type) {
   switch (type) {
+    case PhysicalType::kBoolean:
+      return BOOLEAN();
+    case PhysicalType::kTimestamp:
+      return TIMESTAMP();
+    case PhysicalType::kHugeint:
+      return HUGEINT();
+    case PhysicalType::kUnknown:
+      return UNKNOWN();
     case PhysicalType::kTinyInt:
       return TINYINT();
     case PhysicalType::kSmallInt:
@@ -204,7 +225,8 @@ bool toFlatTable(
     }
     // Only flat children are handled; a caller holding an encoded vector has
     // to flatten it and stay aware that it did.
-    if (child->encoding() != VectorEncoding::Simple::FLAT) {
+    if (child->encoding() != VectorEncoding::Simple::FLAT &&
+        schema[index] != PhysicalType::kUnknown) {
       error = "column " + std::to_string(index) + " is " +
           std::string(VectorEncoding::mapSimpleToName(child->encoding())) +
           ", not flat";
@@ -220,6 +242,29 @@ bool toFlatTable(
     column.isNull.assign(static_cast<size_t>(size), false);
 
     switch (schema[index]) {
+      case PhysicalType::kUnknown:
+        column.isNull.assign(size, true);
+        break;
+      case PhysicalType::kBoolean:
+        readIntegral<bool>(child, size, column);
+        break;
+      case PhysicalType::kTimestamp:
+      case PhysicalType::kHugeint:
+        for (vector_size_t row = 0; row < size; ++row) {
+          column.isNull[row] = child->isNullAt(row);
+          if (!column.isNull[row]) {
+            if (schema[index] == PhysicalType::kTimestamp) {
+              column.intValues.push_back(
+                  asFlat<Timestamp>(child)->valueAt(row).toMicros());
+            } else {
+              const auto value = asFlat<int128_t>(child)->valueAt(row);
+              std::array<uint8_t, 16> bytes;
+              ::memcpy(bytes.data(), &value, 16);
+              column.wideValues.push_back(bytes);
+            }
+          }
+        }
+        break;
       case PhysicalType::kTinyInt:
         readIntegral<int8_t>(child, size, column);
         break;
@@ -272,6 +317,9 @@ RowVectorPtr toRowVector(
     }
     size_t values = 0;
     switch (column.type) {
+      case PhysicalType::kHugeint:
+        values = column.wideValues.size();
+        break;
       case PhysicalType::kFloat:
       case PhysicalType::kDouble:
         values = column.doubleValues.size();
@@ -297,6 +345,40 @@ RowVectorPtr toRowVector(
     const auto size = static_cast<vector_size_t>(column.isNull.size());
 
     switch (column.type) {
+      case PhysicalType::kUnknown:
+        children.push_back(BaseVector::createNullConstant(type, size, pool));
+        break;
+      case PhysicalType::kBoolean:
+        children.push_back(writeIntegral<bool>(type, column, pool));
+        break;
+      case PhysicalType::kTimestamp: {
+        auto flat = newFlat<Timestamp>(type, size, pool);
+        size_t next = 0;
+        for (vector_size_t row = 0; row < size; ++row) {
+          if (column.isNull[row]) {
+            flat->setNull(row, true);
+          } else {
+            flat->set(row, Timestamp::fromMicros(column.intValues[next++]));
+          }
+        }
+        children.push_back(flat);
+        break;
+      }
+      case PhysicalType::kHugeint: {
+        auto flat = newFlat<int128_t>(type, size, pool);
+        size_t next = 0;
+        for (vector_size_t row = 0; row < size; ++row) {
+          if (column.isNull[row]) {
+            flat->setNull(row, true);
+          } else {
+            int128_t value;
+            ::memcpy(&value, column.wideValues[next++].data(), 16);
+            flat->set(row, value);
+          }
+        }
+        children.push_back(flat);
+        break;
+      }
       case PhysicalType::kTinyInt:
         children.push_back(writeIntegral<int8_t>(type, column, pool));
         break;

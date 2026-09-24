@@ -26,6 +26,7 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
       isSupportedRowType(rowType),
       "CellLayout: unsupported row type {}",
       rowType->toString());
+  BOLT_CHECK_LE(rowType->size(), UINT16_MAX, "too many Cell columns");
   CellLayout layout;
   layout.rowType_ = rowType;
   layout.numColumns_ = static_cast<uint32_t>(rowType->size());
@@ -35,7 +36,15 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
     const auto kind = rowType->childAt(col)->kind();
     layout.columnStream_.push_back(
         static_cast<uint32_t>(layout.streams_.size()));
+    layout.wireIndex_.push_back(layout.wireColumns_.size());
+    if (kind != TypeKind::UNKNOWN) {
+      layout.wireColumns_.push_back(col);
+    }
     switch (kind) {
+      case TypeKind::UNKNOWN:
+        layout.isString_.push_back(false);
+        break;
+      case TypeKind::BOOLEAN:
       case TypeKind::TINYINT:
         layout.streams_.push_back(
             {static_cast<uint16_t>(col), StreamKind::kRawFixed, 1, true});
@@ -51,9 +60,15 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
             {static_cast<uint16_t>(col), StreamKind::kEncoded, 4, true});
         layout.isString_.push_back(false);
         break;
+      case TypeKind::TIMESTAMP:
       case TypeKind::BIGINT:
         layout.streams_.push_back(
             {static_cast<uint16_t>(col), StreamKind::kEncoded, 8, true});
+        layout.isString_.push_back(false);
+        break;
+      case TypeKind::HUGEINT:
+        layout.streams_.push_back(
+            {static_cast<uint16_t>(col), StreamKind::kRawFixed, 16, true});
         layout.isString_.push_back(false);
         break;
       case TypeKind::REAL:

@@ -39,6 +39,8 @@ class CellShuffleWriter final : public ShuffleWriter {
       memory::MemoryPool* boltPool,
       arrow::MemoryPool* arrowPool);
 
+  ~CellShuffleWriter() override;
+
   arrow::Status split(RowVectorPtr rv, int64_t memLimitIgnored) override;
 
   arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;

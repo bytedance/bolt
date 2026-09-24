@@ -169,6 +169,11 @@ bool reservedNullTag(std::vector<uint8_t>& payload) {
   if (payload.size() <= kFixedHeaderBytes) {
     return false;
   }
+  // Only an uncompressed body can be mutated as a NullTag. Changing a
+  // compressed byte may be a no-op or another valid compressed value.
+  if (payload[20] || payload[21] || payload[22] || payload[23]) {
+    return false;
+  }
   payload[kFixedHeaderBytes] =
       static_cast<uint8_t>(payload[kFixedHeaderBytes] | 0x03);
   return true;
