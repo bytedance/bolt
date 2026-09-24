@@ -567,6 +567,28 @@ bool ColumnarPayloadGenerator::buildStreams(
     }
     const size_t nonNull = column.nonNullCount();
 
+    if (column.type == PhysicalType::kUnknown) {
+      if (nonNull != 0) {
+        error = "UNKNOWN must be all null";
+        return false;
+      }
+      continue;
+    }
+    if (column.type == PhysicalType::kHugeint) {
+      if (column.wideValues.size() != nonNull) {
+        error = "wideValues size mismatch";
+        return false;
+      }
+      std::vector<uint8_t> stream;
+      for (const auto& value : column.wideValues) {
+        stream.insert(stream.end(), value.begin(), value.end());
+      }
+      std::vector<size_t> boundaries;
+      addFreeRange(0, stream.size(), boundaries);
+      out.bytes.push_back(std::move(stream));
+      out.legalSplits.push_back(std::move(boundaries));
+      continue;
+    }
     if (column.type == PhysicalType::kString) {
       if (column.stringValues.size() != nonNull) {
         error = "stringValues size does not match non-null count";
@@ -678,13 +700,22 @@ bool ColumnarPayloadGenerator::generate(
 
   // Null region, RFC section 4.2.
   const size_t columnCount = table.columns.size();
-  std::vector<NullTag> tags(columnCount, NullTag::kNoNull);
-  std::vector<uint8_t> nullBody((columnCount * 2 + 7) / 8, 0);
+  std::vector<size_t> wireIndex(columnCount);
+  size_t wireCount = 0;
+  for (size_t col = 0; col < columnCount; ++col) {
+    wireIndex[col] = wireCount;
+    wireCount += table.columns[col].type != PhysicalType::kUnknown;
+  }
+  std::vector<NullTag> tags(columnCount, NullTag::kAllNull);
+  std::vector<uint8_t> nullBody((wireCount * 2 + 7) / 8, 0);
   std::vector<uint8_t> bitmaps;
   const size_t bitmapBytes = (table.rowCount + 7) / 8;
 
   for (size_t column = 0; column < columnCount; ++column) {
     const auto& source = table.columns[column];
+    if (source.type == PhysicalType::kUnknown) {
+      continue;
+    }
     const size_t nonNull = source.nonNullCount();
     NullTag tag = NullTag::kRawNull;
     if (table.rowCount == 0) {
@@ -696,8 +727,8 @@ bool ColumnarPayloadGenerator::generate(
     }
     tags[column] = tag;
     stats_.nullTags[static_cast<size_t>(tag)]++;
-    nullBody[column / 4] |=
-        static_cast<uint8_t>(static_cast<uint8_t>(tag) << ((column % 4) * 2));
+    nullBody[wireIndex[column] / 4] |= static_cast<uint8_t>(
+        static_cast<uint8_t>(tag) << ((wireIndex[column] % 4) * 2));
   }
   for (size_t column = 0; column < columnCount; ++column) {
     if (tags[column] != NullTag::kRawNull) {
@@ -716,7 +747,7 @@ bool ColumnarPayloadGenerator::generate(
 
   std::vector<uint8_t> nullStored;
   uint32_t nullDecodedSize = 0;
-  if (options_.compressNullBody) {
+  if (options_.compressNullBody && !nullBody.empty()) {
     nullStored = codec_->compress(nullBody.data(), nullBody.size());
     nullDecodedSize = static_cast<uint32_t>(nullBody.size());
   } else {
@@ -724,14 +755,15 @@ bool ColumnarPayloadGenerator::generate(
   }
 
   // Encoding tags, RFC section 3.2.
-  std::vector<uint8_t> encodingTags((columnCount + 7) / 8, 0);
+  std::vector<uint8_t> encodingTags((wireCount + 7) / 8, 0);
   for (size_t column = 0; column < columnCount; ++column) {
     // A column with no non-null value carries no stream at all, so leave its
     // tag clear rather than announcing a dictionary that is not there.
     if (table.columns[column].type == PhysicalType::kString &&
         table.columns[column].nonNullCount() != 0 &&
         stringEncodingFor(column) == StringEncoding::kDictionary) {
-      encodingTags[column / 8] |= static_cast<uint8_t>(1u << (column % 8));
+      encodingTags[wireIndex[column] / 8] |=
+          static_cast<uint8_t>(1u << (wireIndex[column] % 8));
     }
   }
 
@@ -1011,6 +1043,37 @@ std::vector<NamedTable> boundaryCorpus() {
       oneColumn(intColumn(PhysicalType::kInteger, ramp(32, 0, 1))));
 
   // Every NullTag, plus the shapes around them.
+  add("boolean", oneColumn(intColumn(PhysicalType::kBoolean, {0, 1, 1, 0, 1})));
+  add("timestamp",
+      oneColumn(intColumn(
+          PhysicalType::kTimestamp,
+          {INT64_MIN, -1000001, -1, 0, 1, INT64_MAX})));
+  add("unknownOnly", oneColumn(nullColumn(PhysicalType::kUnknown, 24)));
+  {
+    FlatTable table;
+    table.rowCount = 3;
+    for (int i = 0; i < 10; ++i) {
+      table.columns.push_back(nullColumn(PhysicalType::kUnknown, 3));
+      table.columns.push_back(intColumn(PhysicalType::kBoolean, {0, 1, 0}));
+    }
+    table.columns.push_back(nullColumn(PhysicalType::kUnknown, 3));
+    table.columns.push_back(stringColumn({"xy", "xy", "xy"}));
+    add("unknownInterleaved", table);
+  }
+  {
+    FlatColumn column;
+    column.type = PhysicalType::kHugeint;
+    column.isNull = {false, true, false, false};
+    std::array<uint8_t, 16> value{};
+    value[15] = 0x80;
+    column.wideValues.push_back(value);
+    value.fill(0xff);
+    value[15] = 0x7f;
+    column.wideValues.push_back(value);
+    value.fill(0);
+    column.wideValues.push_back(value);
+    add("hugeint", oneColumn(column));
+  }
   add("allNull", oneColumn(nullColumn(PhysicalType::kBigint, 24)));
   add("noNull", oneColumn(intColumn(PhysicalType::kBigint, ramp(24, 5, 1))));
   {

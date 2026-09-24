@@ -1,9 +1,9 @@
 ---
 spec: ColumnarPayload
 format-version: 0
-doc-revision: 5
+doc-revision: 6
 status: Draft
-updated: 2026-08-27
+updated: 2026-09-16
 ---
 
 # ColumnarPayload Binary Format
@@ -39,6 +39,10 @@ Shuffle 的列式二进制 Payload 格式，与既有的行式 `RowBlockPayload`
 
 | 物理类型 | `type_width` | Signedness | 值流编码 |
 |---|---:|---|---|
+| Boolean | 1 | unsigned，值只能为 0 或 1 | Raw Data |
+| Timestamp | 8 | signed，Unix epoch microseconds | Encoding Loop |
+| Hugeint / long Decimal | 16 | signed，two’s complement little-endian | Raw Data |
+| UNKNOWN | 0 | 恒为 Null | 无 Stream、无 NullTag、无 EncodingTag |
 | TinyInt | 1 | signed | Raw Data |
 | SmallInt | 2 | signed | Encoding Loop |
 | Integer | 4 | signed | Encoding Loop |
@@ -48,14 +52,28 @@ Shuffle 的列式二进制 Payload 格式，与既有的行式 `RowBlockPayload`
 | Double | 8 | — | Raw Data |
 | String | 变长 | — | §7.1、§8 |
 
-Schema 中出现表外类型的 Payload 非法。
+String 包括 VARCHAR 和 VARBINARY；Date、interval、short Decimal 使用对应的
+INTEGER / BIGINT 表示，逻辑类型由外部 Schema 保留。Schema 中出现表外类型的
+Payload 非法。
+
+ARRAY / MAP / ROW 在进入 Cell 前由独立的 `CellShuffleTypeAdapter` 转换：所有
+复杂列按原始顺序组成一个非 Null ROW，每个输入行用 CompactRow 序列化一次，
+作为唯一的末尾 VARBINARY。保留列（含 pid 和顶层 UNKNOWN）保持相对顺序。
+即使所有复杂字段都是 Null，这个 Binary 也非 Null；字段的 Null 状态存在
+CompactRow 内。Reader 在 Cell 解码后执行逆变换，恢复原 Schema 与列序。
+嵌套 UNKNOWN 沿用 CompactRow 的 null bits，不改变其格式。
+
+记 `W` 为 Schema 中非 UNKNOWN 列的数量。NullTag 与 EncodingTag 均仅为这些
+列分配槽位，按原列序紧密排列；`c` 为逻辑列索引，`w` 为过滤 UNKNOWN 后的索引。
+两种索引不可混用。UNKNOWN 仅由 Schema 和 `row_count` 恢复为全 Null 向量。
 
 ### 1.4 Stream
 
 Stream 是格式内的最小物理单位，由外部 Schema 唯一确定：
 
 ```text
-stream_count(c) := 2, if column_schema[c].type == String
+stream_count(c) := 0, if column_schema[c].type == UNKNOWN
+                   2, if column_schema[c].type == String
                    1, otherwise
 stream_count_total (S) := sum over c in [0, C) of stream_count(c)
 ```
@@ -99,7 +117,7 @@ ColumnarPayload :=
     null_stored_size   : u32
     null_decoded_size  : u32
     null_stored_body   : bytes[null_stored_size]
-    encoding_tags      : bytes[ceil(C / 8)]
+    encoding_tags      : bytes[ceil(W / 8)]
     runs               : Run[run_count]
 ```
 
@@ -108,7 +126,7 @@ ColumnarPayload :=
 | `row_count` | 逻辑总行数。 |
 | `run_count` | Run 数量。 |
 | `variable_size` | 变长数据原始字节总数的**估计值**，见 §3.1。 |
-| `null_stored_size` | Null stored body 的字节数。必须 `>= 1`。 |
+| `null_stored_size` | Null stored body 的字节数。`W > 0` 时必须 `>= 1`；`W == 0` 时必须为 0。 |
 | `null_decoded_size` | Null 解压后的字节数；`0` 表示未压缩。 |
 | `null_stored_body` | Null 区域，见 §4。 |
 | `encoding_tags` | 编码 bitset，每列 1 bit，见 §3.2。 |
@@ -127,11 +145,12 @@ Dictionary metadata 或任何 Header；Null 值贡献 0。
 Writer 可以给出近似值，应当保证 `variable_size >= 实际值`，偏小不构成非法
 Payload。Reader 不得将其用于正确性校验，必须能处理预分配不足。变长数据的
 真实边界始终由 Length Stream（§7.1）与字典结构（§8）给出。
+全 UNKNOWN 的规范化头例外：没有变长列，此字段必须为 0。
 
 ### 3.2 EncodingTag
 
 ```text
-tag = (encoding_tags[c / 8] >> (c % 8)) & 0x01
+tag = (encoding_tags[w / 8] >> (w % 8)) & 0x01
 ```
 
 | 值 | 含义 |
@@ -141,7 +160,7 @@ tag = (encoding_tags[c / 8] >> (c % 8)) & 0x01
 
 EncodingTag 只对 String 列有意义，是**列级**属性并覆盖整个 Payload：同一列不得
 在部分 Run 用 Dictionary、其余 Run 用 RAW（RAW fallback 是 Dictionary 编码内部的
-机制，见 §8.3）。非 String 列对应 bit 必须为 0；最后一个 byte 中超出 `C` 的
+机制，见 §8.3）。非 String 列对应 bit 必须为 0；最后一个 byte 中超出 `W` 的
 未使用高 bit 必须为 0。
 
 ## 4. Null 区域
@@ -159,17 +178,17 @@ else:
 
 `len(null_decoded_body)` 必须精确等于 `expected_size`。
 
-`null_decoded_size == 0` 只表示未压缩，不表示空 body：`C >= 1` 蕴含 decoded body
-至少含 1 byte 的 NullTag，故其长度恒 `>= 1`，`null_stored_size` 亦必须 `>= 1`。
+`W > 0` 时，`null_decoded_size == 0` 表示未压缩，body 至少含 1 byte NullTag。
+`W == 0` 时，Null body 和 EncodingTag 均不存在，两个 null size 必须均为 0。
 
 ### 4.2 Null decoded body
 
 ```text
 Nulls :=
-    tags             : bytes[ceil(C * 2 / 8)]
+    tags             : bytes[ceil(W * 2 / 8)]
     raw_null_bitmaps : RawNullBitmap[raw_null_column_count]
 
-null_tag(c) = (tags[c / 4] >> ((c % 4) * 2)) & 0x03
+null_tag(c) = (tags[w / 4] >> ((w % 4) * 2)) & 0x03
 ```
 
 | 值 | 名称 | 含义 |
@@ -179,7 +198,7 @@ null_tag(c) = (tags[c / 4] >> ((c % 4) * 2)) & 0x03
 | `0b10` | `RAW_NULL` | 后续存在当前列的 RawNull bitmap。 |
 | `0b11` | Reserved | Reader 必须拒绝。 |
 
-最后一个 tags byte 中超出 `C` 的未使用高 bit 必须为 0。
+最后一个 tags byte 中超出 `W` 的未使用高 bit 必须为 0。
 `raw_null_column_count` 是 NullTag 为 `RAW_NULL` 的列数，由 tags 派生。
 
 RawNull bitmap：
@@ -195,7 +214,7 @@ Writer 应当在 bitmap 全 0 或全 1 时改用 `ALL_NULL` / `NO_NULL`；Reader
 Null decoded body 的长度必须等于：
 
 ```text
-ceil(C * 2 / 8) + raw_null_column_count * ceil(row_count / 8)
+ceil(W * 2 / 8) + raw_null_column_count * ceil(row_count / 8)
 ```
 
 ## 5. Run
@@ -280,7 +299,7 @@ entry 表与消费它的 index 段可以分处不同 Run。Reader 不得假设�
 Null 行在值流中不存在，也不占位。对列 `c`：
 
 ```text
-non_null_count[c] := 0,                          if ALL_NULL
+non_null_count[c] := 0,                          if UNKNOWN or ALL_NULL
                      row_count,                  if NO_NULL
                      popcount(RawNullBitmap[c]), if RAW_NULL
 ```
@@ -299,7 +318,7 @@ non_null_count[c] := 0,                          if ALL_NULL
 | Stream | 内容 | 编码 |
 |---|---|---|
 | SmallInt / Integer / Bigint / Date 值流 | 非 Null 值 | Encoding Loop |
-| TinyInt / Float / Double 值流 | 非 Null 值 | Raw Data |
+| Boolean / TinyInt / Hugeint / Float / Double 值流 | 非 Null 值 | Raw Data |
 | String Length/Index（RAW tag） | 每个非 Null 值的 byte 长度 | Bigint Encoding Loop |
 | String Length/Index（Dictionary tag） | index 段 + fallback 长度段 | Raw `u8` + Bigint Encoding Loop |
 | String Data（RAW tag） | 非 Null 值的原始字节 | Raw Data |
@@ -450,8 +469,9 @@ sum(fallback_lengths) == len(FallbackRawBytes)
 | 情况 | 规定 |
 |---|---|
 | `C == 0` | 非法，Reader 必须拒绝。 |
-| `row_count == 0` | 合法。所有列的 NullTag 应当为 `NO_NULL`，`variable_size` 与 `run_count` 应当为 0。 |
-| `run_count == 0` 且 `row_count > 0` | 仅当所有列均为 `ALL_NULL` 时合法。 |
+| `W == 0` | 非空分区只写 24 字节定长头：实际 `row_count`，其他字段全部为 0。空分区不产出 Payload。 |
+| `row_count == 0` | 合法。所有非 UNKNOWN 列的 NullTag 应当为 `NO_NULL`，`variable_size` 与 `run_count` 应当为 0。 |
+| `run_count == 0` 且 `row_count > 0` | 仅当所有非 UNKNOWN 列均为 `ALL_NULL` 时合法（UNKNOWN 隐式全 Null）。 |
 | 某列 `ALL_NULL`，或 `non_null_count == 0` | 该列的所有 Stream 在每个 Run 中必须为空，即 `stored_sizes[s] == 0` 且 `decoded_sizes[s] == 0`。 |
 | String 列全为空串 | 合法。Data Stream 长度为 0，Length Stream 仍需编码 `non_null_count` 个 0。 |
 | 某个 Run 的所有 Stream 均为空 | 合法，但 Writer 不应当产生。 |
@@ -474,7 +494,7 @@ sum(fallback_lengths) == len(FallbackRawBytes)
 | # | 校验 |
 |---:|---|
 | 1 | 剩余字节足以读出 24 bytes 定长头 |
-| 2 | `null_stored_size >= 1`，且读取 Null body 不越界 |
+| 2 | `W > 0` 时 `null_stored_size >= 1`；`W == 0` 时为 0，且读取 Null body 不越界 |
 | 3 | 读取 `encoding_tags`（`ceil(C/8)` bytes）不越界 |
 | 4 | 若外层协议提供 `payload_size`：所有读取偏移不超过它 |
 | 5 | Null decoded body 实际长度等于 §4.1 的 `expected_size` |
@@ -612,6 +632,7 @@ tags / bitmap / bit-packed 的尾部未使用 bit 必须写 0，但对其校验�
 
   | 路径 | 作用 |
   |---|---|
+  | `CellShuffleTypeAdapter.{h,cpp}` | 集成层逻辑 Schema 与末尾复杂 Binary 的双向转换；Cell 核心不依赖复杂 serde |
   | `cell/CellEncoding.{h,cpp}` | Encoding Loop 编解码 kernel 与 Null tag 工具（§7、§4.2） |
   | `cell/CellPayload.{h,cpp}` | Reader 侧：payload 解析（§3–§9，含 §10.1 全部 L1 校验）直建 RowVector |
   | `cell/LocalCellOutput.cpp` + `cell/CachedCellFrontend.cpp` | Writer 侧：Run body / Null 区 / payload 组装与按块编码 |
@@ -719,9 +740,9 @@ bitmap 读取；而 `sum(fallback_lengths) == len(FallbackRawBytes)` 属 L2 —�
 
 ```text
 stream_count_total (S)  = sum over c of (2 if String else 1)
-runs_offset             = 24 + null_stored_size + ceil(C / 8)
+runs_offset             = 24 + null_stored_size + ceil(W / 8)
 raw_null_column_count   = #{c : null_tag(c) == RAW_NULL}
-null_body_expected_size = ceil(C * 2 / 8)
+null_body_expected_size = ceil(W * 2 / 8)
                         + raw_null_column_count * ceil(row_count / 8)
 non_null_count[c]       = 0 | row_count | popcount(bitmap[c])
 total_source_bytes[s]   = non_null_count[c] * type_width   // 定宽值流
@@ -794,6 +815,7 @@ Run 长度 = `1 + 24 + 24 + 17 = 66`。完整 Payload 共 93 bytes：
 
 | `doc-revision` | `format-version` | 日期 | 需改动 | 变更 |
 |---:|---:|---|---|---|
+| 6 | | 2026-09-16 | Writer / Reader / 测试向量 | 扩展 Boolean、Timestamp、Hugeint；UNKNOWN 不占 tags 或 streams，全 UNKNOWN 仅 24 字节头；明确复杂列入口前聚合为末尾 Binary。无 UNKNOWN 的既有类型布局保持不变。 |
 | 5 | | 2026-08-27 | 仅文档 | §11.5「实现位置」换成落地后的真实路径：cell/ 下的 Writer 与 Reader，四个一致性配对全部启用。 |
 | 4 | | 2026-08-24 | 仅文档 | §11.5 补入参照实现与接入点的实际路径，替换原先的占位。 |
 | 3 | | 2026-08-20 | 仅文档 | §10.2 补入校验 27–29：Run 边界结构、`run_count == 0` 的前提、`FOR_BIT_PACK` 结果值域。三条约束正文早有，校验清单漏列。 |

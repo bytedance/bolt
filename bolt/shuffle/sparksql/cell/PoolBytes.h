@@ -91,6 +91,9 @@ class PoolBytes {
   }
 
   void append(const void* src, size_t bytes) {
+    if (bytes == 0) {
+      return;
+    }
     ensure(size_ + bytes);
     ::memcpy(data_ + size_, src, bytes);
     size_ += bytes;

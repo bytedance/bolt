@@ -31,6 +31,10 @@ constexpr uint32_t kCellsPerChunk = kChunkBytes / kCellBytes;
 
 class CellChunkTest : public testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
     pool_ = memory::memoryManager()->addLeafPool();
   }
@@ -198,8 +202,7 @@ TEST_F(CellChunkTest, dataCellsAppendScanRoundtrip) {
     }
   }
   EXPECT_EQ(cells.totalBytes(), expectedTotal);
-  EXPECT_EQ(
-      alloc.usedBytes() >= static_cast<int64_t>(expectedTotal), true);
+  EXPECT_EQ(alloc.usedBytes() >= static_cast<int64_t>(expectedTotal), true);
 
   cells.reset();
   alloc.resetAll();
@@ -230,9 +233,8 @@ TEST_F(CellChunkTest, dataCellsReleasePartitionRecycles) {
 
   // Partition 2's data survives, byte for byte.
   std::string got;
-  cells.scan(2, 0, [&](const char* data, uint32_t len) {
-    got.append(data, len);
-  });
+  cells.scan(
+      2, 0, [&](const char* data, uint32_t len) { got.append(data, len); });
   EXPECT_EQ(got, blobB);
 
   // Recycled cells feed later appends without growth.
@@ -361,8 +363,8 @@ TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
 }
 
 TEST_F(CellChunkTest, cellLayoutStreams) {
-  auto rowType = ROW(
-      {"a", "b", "c", "d"}, {BIGINT(), VARCHAR(), REAL(), TINYINT()});
+  auto rowType =
+      ROW({"a", "b", "c", "d"}, {BIGINT(), VARCHAR(), REAL(), TINYINT()});
   ASSERT_TRUE(CellLayout::isSupportedRowType(rowType));
   const auto layout = CellLayout::create(rowType);
   EXPECT_EQ(layout.numColumns(), 4);
@@ -381,17 +383,10 @@ TEST_F(CellChunkTest, cellLayoutStreams) {
   EXPECT_TRUE(layout.isStringColumn(1));
   EXPECT_FALSE(layout.isStringColumn(0));
 
-  EXPECT_FALSE(CellLayout::isSupportedRowType(ROW({"x"}, {BOOLEAN()})));
-  EXPECT_FALSE(CellLayout::isSupportedRowType(ROW({"x"}, {TIMESTAMP()})));
-  EXPECT_FALSE(
-      CellLayout::isSupportedRowType(ROW({"x"}, {ARRAY(BIGINT())})));
+  EXPECT_TRUE(CellLayout::isSupportedRowType(ROW({"x"}, {BOOLEAN()})));
+  EXPECT_TRUE(CellLayout::isSupportedRowType(ROW({"x"}, {TIMESTAMP()})));
+  EXPECT_FALSE(CellLayout::isSupportedRowType(ROW({"x"}, {ARRAY(BIGINT())})));
 }
 
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  bytedance::bolt::memory::MemoryManager::initialize({});
-  return RUN_ALL_TESTS();
-}

@@ -32,17 +32,22 @@ DataCells::DataCells(
       allocator_(allocator),
       numPartitions_(numPartitions),
       numStreams_(numStreams) {
-  const size_t numChains =
-      static_cast<size_t>(numPartitions_) * numStreams_;
+  const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
+  if (numChains == 0) {
+    return;
+  }
   infos_ = reinterpret_cast<ChainInfo*>(
       pool_->allocate(numChains * sizeof(ChainInfo)));
-  std::fill(infos_, infos_ + numChains, ChainInfo{});
+  if (numChains != 0) {
+    std::fill(infos_, infos_ + numChains, ChainInfo{});
+  }
 }
 
 DataCells::~DataCells() {
-  const size_t numChains =
-      static_cast<size_t>(numPartitions_) * numStreams_;
-  pool_->free(infos_, numChains * sizeof(ChainInfo));
+  const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
+  if (infos_ != nullptr) {
+    pool_->free(infos_, numChains * sizeof(ChainInfo));
+  }
   if (next_ != nullptr) {
     pool_->free(next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
   }
@@ -52,13 +57,12 @@ void DataCells::linkCell(ChainInfo& info, uint32_t id) {
   if (FOLLY_UNLIKELY(id >= nextCapacity_)) {
     const uint32_t newCapacity = allocator_->cellIdCapacity();
     BOLT_CHECK_LT(id, newCapacity);
-    auto* grown = reinterpret_cast<uint32_t*>(pool_->allocate(
-        static_cast<size_t>(newCapacity) * sizeof(uint32_t)));
+    auto* grown = reinterpret_cast<uint32_t*>(
+        pool_->allocate(static_cast<size_t>(newCapacity) * sizeof(uint32_t)));
     if (next_ != nullptr) {
       ::memcpy(
           grown, next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
-      pool_->free(
-          next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
+      pool_->free(next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
     }
     next_ = grown;
     nextCapacity_ = newCapacity;
@@ -91,7 +95,8 @@ void DataCells::append(
     // is the overwhelmingly common case.
     auto& info = infos_[chainIndex(pid, stream)];
     if (info.numCells != 0 && info.tailUsed + bytes <= cellBytes) {
-      ::memcpy(allocator_->cellData(info.lastCell) + info.tailUsed, data, bytes);
+      ::memcpy(
+          allocator_->cellData(info.lastCell) + info.tailUsed, data, bytes);
       info.tailUsed += bytes;
       totalBytes_ += bytes;
       return;
@@ -150,9 +155,10 @@ void DataCells::releaseAll() {
 }
 
 void DataCells::reset() {
-  const size_t numChains =
-      static_cast<size_t>(numPartitions_) * numStreams_;
-  std::fill(infos_, infos_ + numChains, ChainInfo{});
+  const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
+  if (numChains != 0) {
+    std::fill(infos_, infos_ + numChains, ChainInfo{});
+  }
   totalBytes_ = 0;
 }
 
@@ -178,10 +184,10 @@ NullCells::NullCells(
     uint32_t numPartitions,
     uint32_t numColumns)
     : pool_(pool),
-      numPartitions_(numPartitions),
+      numPartitions_(numColumns == 0 ? 0 : numPartitions),
       numColumns_(numColumns),
-      base_(numPartitions, nullptr),
-      capBytes_(numPartitions, 0),
+      base_(numPartitions_, nullptr),
+      capBytes_(numPartitions_, 0),
       hasNull_(static_cast<size_t>(numPartitions) * numColumns, 0),
       nullPrefix_(static_cast<size_t>(numPartitions) * numColumns, 0) {}
 
@@ -193,8 +199,7 @@ void NullCells::grow(uint32_t pid, uint32_t rowInWindow) {
   constexpr uint32_t kMinCapBytes = 16; // 128 rows, the design's NullCell
   const uint32_t needBytes = (rowInWindow >> 3) + 1;
   const uint32_t newCap = std::max(
-      kMinCapBytes,
-      static_cast<uint32_t>(bits::nextPowerOfTwo(needBytes)));
+      kMinCapBytes, static_cast<uint32_t>(bits::nextPowerOfTwo(needBytes)));
   const uint32_t oldCap = capBytes_[pid];
   char* grown = reinterpret_cast<char*>(
       pool_->allocate(static_cast<size_t>(numColumns_) * newCap));
@@ -214,10 +219,8 @@ void NullCells::grow(uint32_t pid, uint32_t rowInWindow) {
   allocatedBytes_ += static_cast<int64_t>(numColumns_) * newCap;
 }
 
-NullCells::Summary NullCells::summarize(
-    uint32_t pid,
-    uint32_t col,
-    uint32_t rowCount) const {
+NullCells::Summary
+NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
   const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
   if (rowCount == 0 || hasNull_[slot] == 0) {
     return {NullTag::kNoNull, rowCount};
@@ -240,8 +243,8 @@ NullCells::Summary NullCells::summarize(
       uint32_t setBits = 0;
       uint32_t byte = prefix >> 3;
       const uint32_t lastByte = (coveredRows - 1) >> 3;
-      uint8_t first = bits[byte] &
-          static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
+      uint8_t first =
+          bits[byte] & static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
       if (byte == lastByte) {
         if ((coveredRows & 7) != 0) {
           first &= static_cast<uint8_t>((1u << (coveredRows & 7)) - 1);
@@ -283,8 +286,7 @@ void NullCells::emitBitmap(
     uint8_t* out) const {
   const uint32_t outBytes = (rowCount + 7) >> 3;
   const uint32_t cap = capBytes_[pid];
-  const uint32_t covered =
-      base_[pid] == nullptr ? 0 : std::min(outBytes, cap);
+  const uint32_t covered = base_[pid] == nullptr ? 0 : std::min(outBytes, cap);
   if (covered > 0) {
     ::memcpy(out, base_[pid] + static_cast<size_t>(col) * cap, covered);
   }
@@ -319,14 +321,19 @@ void NullCells::reset() {
 }
 
 void NullCells::releasePartition(uint32_t pid) {
+  if (numColumns_ == 0) {
+    return;
+  }
   if (base_[pid] != nullptr) {
     pool_->free(base_[pid], static_cast<size_t>(numColumns_) * capBytes_[pid]);
     allocatedBytes_ -= static_cast<int64_t>(numColumns_) * capBytes_[pid];
     base_[pid] = nullptr;
     capBytes_[pid] = 0;
   }
-  std::fill_n(hasNull_.begin() + static_cast<size_t>(pid) * numColumns_,
-              numColumns_, 0);
+  std::fill_n(
+      hasNull_.begin() + static_cast<size_t>(pid) * numColumns_,
+      numColumns_,
+      0);
   std::fill_n(
       nullPrefix_.begin() + static_cast<size_t>(pid) * numColumns_,
       numColumns_,

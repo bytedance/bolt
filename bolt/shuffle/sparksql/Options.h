@@ -142,6 +142,9 @@ struct CellShuffleOptions {
   int32_t dictMinProbeRows = 1024;
   // ... and average at least this many rows per distinct value.
   int32_t dictMinRepeatRatio = 4;
+
+  /// Returns all options in a human readable form.
+  std::string toString() const;
 };
 
 enum PartitionWriterType { kLocal, kCeleborn };
