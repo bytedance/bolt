@@ -531,6 +531,44 @@ TEST_F(BmRowContainerTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   EXPECT_EQ(reservesBefore + 1, bmPool->stats().numReserves);
 }
 
+TEST_F(BmRowContainerTest, CanBulkReadRequiresProcessingHeadroom) {
+  constexpr vector_size_t size = 50'000;
+  constexpr uint32_t blockSize = 32 << 10;
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      blockSize,
+      blockSize);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+      makeFlatVector<std::string>(
+          size, [](auto row) { return std::string(256, 'a' + row % 26); }),
+  });
+  storeAll(container, input);
+  const auto segment = container.spillActiveSegment();
+
+  const auto unloadedBytes = bufferManager_->stats().spilledBytes;
+  ASSERT_GT(unloadedBytes, 0);
+  const auto readSlack = unloadedBytes + unloadedBytes / 2;
+  const auto freeBeforePressure = root_->freeBytes();
+  ASSERT_GT(freeBeforePressure, readSlack);
+  const auto pressureBytes = freeBeforePressure - readSlack;
+  auto pressurePool = root_->addLeafChild("bulk-read-headroom-pressure");
+  auto* pressure = pressurePool->allocate(pressureBytes);
+  auto pressureGuard =
+      folly::makeGuard([&]() { pressurePool->free(pressure, pressureBytes); });
+
+  EXPECT_TRUE(container.canBulkRead({&segment, 1}, 1));
+  EXPECT_FALSE(container.canBulkRead({&segment, 1}));
+
+  auto session = container.beginBulkReadSegments({&segment, 1});
+  EXPECT_NO_THROW(session.load());
+  EXPECT_GT(bufferManager_->stats().pinnedResidentBytes, 0);
+}
+
 TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
