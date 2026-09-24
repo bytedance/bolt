@@ -2549,7 +2549,10 @@ TEST_F(NativeLanceTest, scanCoordinatorOwnsReaderLifecycle) {
   EXPECT_EQ(coordinator.state(), NativeLanceScanState::kIdle);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(result->size(), 5);
-  EXPECT_EQ(coordinator.skip(15), 15);
+  EXPECT_EQ(coordinator.skip(5), 5);
+  EXPECT_EQ(coordinator.state(), NativeLanceScanState::kIdle);
+  EXPECT_EQ(coordinator.nextRowNumber(), 10);
+  EXPECT_EQ(coordinator.skip(10), 10);
   EXPECT_EQ(coordinator.state(), NativeLanceScanState::kFinished);
   EXPECT_EQ(coordinator.next(5, result, nullptr), 0);
 }
@@ -2620,6 +2623,39 @@ TEST_F(NativeLanceTest, columnReadTaskHasBatchLocalState) {
       plan->rootColumnReader(), {.rowStart = 5, .rowCount = 5});
   cancelled.cancel(decoder);
   EXPECT_EQ(cancelled.state(), NativeLanceColumnState::kCancelled);
+}
+
+TEST_F(NativeLanceTest, columnReadTaskAppliesBatchRelativeSelection) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  const auto context = openNativeLanceFile(
+      openFile("sample.lance", *pool_),
+      readerOptions,
+      nullptr,
+      defaultNativeLanceTypeAdapter());
+  dwio::common::RowReaderOptions rowOptions;
+  rowOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+      context->metadata().rowType(), std::vector<std::string>{"a"}));
+  const auto plan = NativeLanceScanPlan::build(*context, rowOptions);
+  auto input = context->newInput();
+  NativeLanceDecoder decoder(
+      *input, context->metadata(), *pool_, context->blobResolver());
+  const std::array<vector_size_t, 2> selectedRows{1, 3};
+  NativeLanceColumnReadTask task(
+      plan->rootColumnReader(),
+      {.rowStart = 5,
+       .rowCount = 5,
+       .selection = NativeLanceRowSelection::rows(selectedRows),
+       .purpose = NativeLanceDecodePurpose::kProjection});
+
+  task.plan(decoder);
+  task.decode(decoder, *pool_);
+  const auto result = task.consume();
+  ASSERT_EQ(result->size(), selectedRows.size());
+  const auto* values =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  ASSERT_NE(values, nullptr);
+  EXPECT_EQ(values->valueAt(0), 7);
+  EXPECT_EQ(values->valueAt(1), 9);
 }
 
 TEST_F(NativeLanceTest, memoryBudgetUsesMoveOnlyReservations) {
@@ -4659,6 +4695,35 @@ TEST_F(NativeLanceTest, rowReaderAppliesMutationDeletionVector) {
   dwio::common::Mutation allMutation{.deletedRows = allRows.data()};
   EXPECT_EQ(allDeleted->next(20, result, &allMutation), 20);
   EXPECT_EQ(result->size(), 0);
+}
+
+TEST_F(NativeLanceTest, mutationPrunesProjectedIoBeforeDecode) {
+  auto readFile = std::make_shared<LocalReadFile>("examples/sample.lance");
+  auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(std::move(input), readerOptions);
+  readFile->resetBytesRead();
+
+  dwio::common::RowReaderOptions rowReaderOptions;
+  rowReaderOptions.select(std::make_shared<dwio::common::ColumnSelector>(
+      reader.rowType(), std::vector<std::string>{"b"}));
+  auto rowReader = reader.createRowReader(rowReaderOptions);
+
+  std::array<uint64_t, 1> deletedRows{std::numeric_limits<uint64_t>::max()};
+  bits::clearBit(deletedRows.data(), 2);
+  bits::clearBit(deletedRows.data(), 5);
+  bits::clearBit(deletedRows.data(), 9);
+  dwio::common::Mutation mutation{.deletedRows = deletedRows.data()};
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(20, result, &mutation), 20);
+  ASSERT_EQ(result->size(), 3);
+  const auto* values =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<double>>();
+  ASSERT_NE(values, nullptr);
+  EXPECT_DOUBLE_EQ(values->valueAt(0), 3);
+  EXPECT_DOUBLE_EQ(values->valueAt(1), 6);
+  EXPECT_DOUBLE_EQ(values->valueAt(2), 10);
+  EXPECT_EQ(readFile->bytesRead(), 3 * sizeof(double));
 }
 
 TEST_F(NativeLanceTest, selectiveReaderCombinesFilterAndMutation) {

@@ -456,6 +456,38 @@ void NativeLanceDecoder::prefetchColumns(
 
 void NativeLanceDecoder::planColumns(
     const std::vector<uint32_t>& columnIndices,
+    const NativeLanceColumnRequest& request) const {
+  request.validate();
+  if (request.selection.selectsAll()) {
+    planColumns(columnIndices, request.rowStart, request.rowCount);
+    return;
+  }
+  if (input_.supportSyncLoad()) {
+    return;
+  }
+
+  std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
+  BOLT_CHECK_LE(request.rowStart, metadata_.numRows());
+  BOLT_CHECK_LE(request.rowCount, metadata_.numRows() - request.rowStart);
+  readScheduler_.clearStage();
+  const auto rows = request.selection.selectedRows();
+  size_t runOffset = 0;
+  while (runOffset < rows.size()) {
+    size_t runEnd = runOffset + 1;
+    while (runEnd < rows.size() && rows[runEnd] == rows[runEnd - 1] + 1) {
+      ++runEnd;
+    }
+    for (const auto columnIndex : columnIndices) {
+      enqueueLogicalColumn(
+          columnIndex, request.rowStart + rows[runOffset], runEnd - runOffset);
+    }
+    runOffset = runEnd;
+  }
+  submitReadPlan();
+}
+
+void NativeLanceDecoder::planColumns(
+    const std::vector<uint32_t>& columnIndices,
     uint64_t rowStart,
     uint64_t rowCount) const {
   std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
@@ -467,21 +499,26 @@ void NativeLanceDecoder::planColumns(
 
   readScheduler_.clearStage();
   for (const auto logicalColumnIndex : columnIndices) {
-    BOLT_CHECK_LT(logicalColumnIndex, metadata_.rowType()->size());
-    if (metadata_.usesStructuralEncoding()) {
-      enqueueStructuralField(
-          metadata_.structuralField(logicalColumnIndex), rowStart, rowCount);
-      continue;
-    }
-    const auto physicalIndex =
-        metadata_.physicalColumnIndex(logicalColumnIndex);
-    enqueuePhysicalColumn(
-        metadata_.rowType()->childAt(logicalColumnIndex),
-        physicalIndex,
-        rowStart,
-        rowCount);
+    enqueueLogicalColumn(logicalColumnIndex, rowStart, rowCount);
   }
   submitReadPlan();
+}
+
+void NativeLanceDecoder::enqueueLogicalColumn(
+    uint32_t columnIndex,
+    uint64_t rowStart,
+    uint64_t rowCount) const {
+  BOLT_CHECK_LT(columnIndex, metadata_.rowType()->size());
+  if (metadata_.usesStructuralEncoding()) {
+    enqueueStructuralField(
+        metadata_.structuralField(columnIndex), rowStart, rowCount);
+    return;
+  }
+  enqueuePhysicalColumn(
+      metadata_.rowType()->childAt(columnIndex),
+      metadata_.physicalColumnIndex(columnIndex),
+      rowStart,
+      rowCount);
 }
 
 void NativeLanceDecoder::enqueueStructuralField(
@@ -791,10 +828,33 @@ VectorPtr NativeLanceDecoder::decodeColumn(
       type, logicalType, physicalIndex, rowStart, rowCount);
 }
 
+VectorPtr NativeLanceDecoder::decodeColumn(
+    uint32_t columnIndex,
+    const NativeLanceColumnRequest& request,
+    bool rangesPlanned) const {
+  request.validate();
+  if (request.selection.selectsAll()) {
+    return decodeColumn(columnIndex, request.rowStart, request.rowCount);
+  }
+  return decodeSelectedRowsImpl(
+      columnIndex,
+      request.rowStart,
+      request.selection.selectedRows(),
+      rangesPlanned);
+}
+
 VectorPtr NativeLanceDecoder::decodeSelectedRows(
     uint32_t columnIndex,
     uint64_t batchRowStart,
     folly::Range<const vector_size_t*> rows) const {
+  return decodeSelectedRowsImpl(columnIndex, batchRowStart, rows, false);
+}
+
+VectorPtr NativeLanceDecoder::decodeSelectedRowsImpl(
+    uint32_t columnIndex,
+    uint64_t batchRowStart,
+    folly::Range<const vector_size_t*> rows,
+    bool rangesPlanned) const {
   BOLT_CHECK_LT(columnIndex, metadata_.rowType()->size());
   BOLT_CHECK_LE(batchRowStart, metadata_.numRows());
   BOLT_CHECK_LE(
@@ -816,7 +876,9 @@ VectorPtr NativeLanceDecoder::decodeSelectedRows(
       metadata_.numRows() - batchRowStart - 1);
 
   if (rows.size() == static_cast<size_t>(rows.back() - rows.front() + 1)) {
-    prefetchColumns({columnIndex}, batchRowStart + rows.front(), rows.size());
+    if (!rangesPlanned) {
+      prefetchColumns({columnIndex}, batchRowStart + rows.front(), rows.size());
+    }
     return decodeColumn(columnIndex, batchRowStart + rows.front(), rows.size());
   }
 
@@ -824,7 +886,7 @@ VectorPtr NativeLanceDecoder::decodeSelectedRows(
   // DirectBufferedInput one complete request set to coalesce and dispatch.
   // Variable-width containers intentionally defer their payload planning
   // until offsets have been decoded.
-  if (!input_.supportSyncLoad()) {
+  if (!rangesPlanned && !input_.supportSyncLoad()) {
     readScheduler_.clearStage();
     size_t scheduledOffset = 0;
     while (scheduledOffset < rows.size()) {

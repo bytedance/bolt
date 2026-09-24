@@ -36,6 +36,54 @@ namespace {
 
 using RowSet = std::vector<vector_size_t, memory::StlAllocator<vector_size_t>>;
 
+NativeLanceRowSelection selectionForRows(
+    const RowSet& rows,
+    vector_size_t inputSize) {
+  if (rows.size() == static_cast<size_t>(inputSize)) {
+    bool identity = true;
+    for (vector_size_t row = 0; row < inputSize; ++row) {
+      if (rows[row] != row) {
+        identity = false;
+        break;
+      }
+    }
+    if (identity) {
+      return NativeLanceRowSelection::all();
+    }
+  }
+  return NativeLanceRowSelection::rows(rows);
+}
+
+NativeLanceColumnRequest columnRequest(
+    uint64_t rowStart,
+    vector_size_t inputSize,
+    const RowSet& rows,
+    NativeLanceDecodePurpose purpose) {
+  return {
+      .rowStart = rowStart,
+      .rowCount = static_cast<uint64_t>(inputSize),
+      .selection = selectionForRows(rows, inputSize),
+      .purpose = purpose};
+}
+
+void initializeSelectedRows(
+    RowSet& rows,
+    vector_size_t inputSize,
+    const uint64_t* deletedRows) {
+  rows.resize(inputSize);
+  if (deletedRows == nullptr) {
+    std::iota(rows.begin(), rows.end(), 0);
+    return;
+  }
+  auto output = rows.begin();
+  for (vector_size_t row = 0; row < inputSize; ++row) {
+    if (!bits::isBitSet(deletedRows, row)) {
+      *output++ = row;
+    }
+  }
+  rows.erase(output, rows.end());
+}
+
 template <TypeKind kind>
 bool testFilterRow(
     const BaseVector& vector,
@@ -371,29 +419,23 @@ VectorPtr applyScanSpecProjection(
       std::move(children));
 }
 
-VectorPtr readSelective(
-    NativeLanceColumnSource& decoder,
+struct NativeLanceFilterResult {
+  RowSet selectedRows;
+  std::unordered_map<uint32_t, VectorPtr> predecodedColumns;
+};
+
+NativeLanceFilterResult decodeFilters(
+    NativeLanceColumnSource& source,
+    const NativeLanceScanPlan& scanPlan,
     const RowTypePtr& fileType,
     const common::ScanSpec& scanSpec,
     uint64_t batchRowStart,
     vector_size_t batchSize,
     memory::MemoryPool& pool,
-    const std::shared_ptr<folly::Executor>& decodingExecutor,
-    size_t decodingParallelismFactor,
-    const uint64_t* deletedRows = nullptr,
-    std::vector<vector_size_t>* selectedRowsOut = nullptr) {
-  RowSet selectedRows(batchSize, memory::StlAllocator<vector_size_t>(&pool));
-  if (deletedRows == nullptr) {
-    std::iota(selectedRows.begin(), selectedRows.end(), 0);
-  } else {
-    auto output = selectedRows.begin();
-    for (vector_size_t row = 0; row < batchSize; ++row) {
-      if (!bits::isBitSet(deletedRows, row)) {
-        *output++ = row;
-      }
-    }
-    selectedRows.erase(output, selectedRows.end());
-  }
+    const uint64_t* deletedRows) {
+  RowSet selectedRows{memory::StlAllocator<vector_size_t>(&pool)};
+  initializeSelectedRows(selectedRows, batchSize, deletedRows);
+
   struct DecodedFilterColumn {
     DecodedFilterColumn(RowSet inputRows, VectorPtr inputValues)
         : rows(std::move(inputRows)), values(std::move(inputValues)) {}
@@ -413,11 +455,22 @@ VectorPtr readSelective(
         ? std::optional<uint32_t>{}
         : std::make_optional<uint32_t>(
               fileType->getChildIdx(child->fieldName()));
-    auto values = child->isConstant()
-        ? BaseVector::wrapInConstant(
-              selectedRows.size(), 0, child->constantValue())
-        : decoder.decodeSelectedRows(*columnIndex, batchRowStart, selectedRows);
-    const auto inputRows = selectedRows;
+    const auto request = columnRequest(
+        batchRowStart,
+        batchSize,
+        selectedRows,
+        NativeLanceDecodePurpose::kFilter);
+    VectorPtr values;
+    if (child->isConstant()) {
+      values = BaseVector::wrapInConstant(
+          request.outputSize(), 0, child->constantValue());
+    } else {
+      const auto& reader = scanPlan.filterColumnReader(*columnIndex);
+      reader.plan(source, request);
+      values = reader.read(source, request, pool, true);
+    }
+
+    auto inputRows = selectedRows;
     RowSet passingRows{memory::StlAllocator<vector_size_t>(&pool)};
     passingRows.reserve(selectedRows.size());
     for (vector_size_t row = 0; row < values->size(); ++row) {
@@ -428,122 +481,43 @@ VectorPtr readSelective(
     selectedRows = std::move(passingRows);
     if (child->projectOut() && columnIndex.has_value()) {
       decodedFilterColumns.emplace(
-          *columnIndex, DecodedFilterColumn(inputRows, std::move(values)));
+          *columnIndex,
+          DecodedFilterColumn(std::move(inputRows), std::move(values)));
     }
     if (selectedRows.empty()) {
       break;
     }
   }
 
-  column_index_t numOutputColumns = 0;
-  for (const auto& child : scanSpec.children()) {
-    if (child->projectOut()) {
-      BOLT_CHECK_NE(child->channel(), common::ScanSpec::kNoChannel);
-      numOutputColumns = std::max(numOutputColumns, child->channel() + 1);
-    }
-  }
-  std::vector<std::string> names(numOutputColumns);
-  std::vector<TypePtr> types(numOutputColumns);
-  std::vector<VectorPtr> children(numOutputColumns);
-  struct DecodeTask {
-    column_index_t channel;
-    uint32_t columnIndex;
-  };
-  std::vector<DecodeTask> decodeTasks;
-  for (const auto& child : scanSpec.children()) {
-    if (!child->projectOut()) {
+  std::unordered_map<uint32_t, VectorPtr> predecodedColumns;
+  predecodedColumns.reserve(decodedFilterColumns.size());
+  for (auto& [columnIndex, decoded] : decodedFilterColumns) {
+    if (decoded.rows == selectedRows) {
+      predecodedColumns.emplace(columnIndex, std::move(decoded.values));
       continue;
     }
-    const auto channel = child->channel();
-    names[channel] = child->fieldName();
-    if (child->isConstant()) {
-      types[channel] = child->constantValue()->type();
-      children[channel] = BaseVector::wrapInConstant(
-          selectedRows.size(), 0, child->constantValue());
-    } else {
-      const auto columnIndex = fileType->getChildIdx(child->fieldName());
-      types[channel] = fileType->childAt(columnIndex);
-      const auto decoded = decodedFilterColumns.find(columnIndex);
-      if (decoded == decodedFilterColumns.end()) {
-        decodeTasks.push_back({channel, columnIndex});
-      } else {
-        auto indices = allocateIndices(selectedRows.size(), &pool);
-        auto* rawIndices = indices->asMutable<vector_size_t>();
-        size_t sourceIndex = 0;
-        for (size_t i = 0; i < selectedRows.size(); ++i) {
-          while (sourceIndex < decoded->second.rows.size() &&
-                 decoded->second.rows[sourceIndex] < selectedRows[i]) {
-            ++sourceIndex;
-          }
-          BOLT_CHECK_LT(sourceIndex, decoded->second.rows.size());
-          BOLT_CHECK_EQ(decoded->second.rows[sourceIndex], selectedRows[i]);
-          rawIndices[i] = static_cast<vector_size_t>(sourceIndex);
-        }
-        children[channel] = BaseVector::wrapInDictionary(
+    auto indices = allocateIndices(selectedRows.size(), &pool);
+    auto* rawIndices = indices->asMutable<vector_size_t>();
+    size_t sourceIndex = 0;
+    for (size_t i = 0; i < selectedRows.size(); ++i) {
+      while (sourceIndex < decoded.rows.size() &&
+             decoded.rows[sourceIndex] < selectedRows[i]) {
+        ++sourceIndex;
+      }
+      BOLT_CHECK_LT(sourceIndex, decoded.rows.size());
+      BOLT_CHECK_EQ(decoded.rows[sourceIndex], selectedRows[i]);
+      rawIndices[i] = static_cast<vector_size_t>(sourceIndex);
+    }
+    predecodedColumns.emplace(
+        columnIndex,
+        BaseVector::wrapInDictionary(
             nullptr,
             std::move(indices),
             selectedRows.size(),
-            decoded->second.values);
-      }
-    }
+            std::move(decoded.values)));
   }
-  dwio::common::ParallelFor(
-      pool.threadSafe() && decoder.supportsConcurrentDecoding() &&
-              decodeTasks.size() > 1
-          ? decodingExecutor
-          : nullptr,
-      0,
-      decodeTasks.size(),
-      decodingParallelismFactor)
-      .execute([&](size_t index) {
-        const auto& task = decodeTasks[index];
-        children[task.channel] = decoder.decodeSelectedRows(
-            task.columnIndex, batchRowStart, selectedRows);
-      });
-  if (selectedRowsOut != nullptr) {
-    selectedRowsOut->assign(selectedRows.begin(), selectedRows.end());
-  }
-  return std::make_shared<RowVector>(
-      &pool,
-      ROW(std::move(names), std::move(types)),
-      nullptr,
-      static_cast<vector_size_t>(selectedRows.size()),
-      std::move(children));
-}
 
-VectorPtr applyDeletedRows(
-    VectorPtr result,
-    const uint64_t* deletedRows,
-    vector_size_t batchSize,
-    memory::MemoryPool& pool) {
-  if (deletedRows == nullptr) {
-    return result;
-  }
-  vector_size_t outputSize = 0;
-  for (vector_size_t row = 0; row < batchSize; ++row) {
-    outputSize += !bits::isBitSet(deletedRows, row);
-  }
-  if (outputSize == batchSize) {
-    return result;
-  }
-  auto indices = allocateIndices(outputSize, &pool);
-  auto* rawIndices = indices->asMutable<vector_size_t>();
-  vector_size_t output = 0;
-  for (vector_size_t row = 0; row < batchSize; ++row) {
-    if (!bits::isBitSet(deletedRows, row)) {
-      rawIndices[output++] = row;
-    }
-  }
-  const auto* rows = result->as<RowVector>();
-  BOLT_CHECK_NOT_NULL(rows);
-  std::vector<VectorPtr> children;
-  children.reserve(rows->childrenSize());
-  for (const auto& child : rows->children()) {
-    children.push_back(
-        BaseVector::wrapInDictionary(nullptr, indices, outputSize, child));
-  }
-  return std::make_shared<RowVector>(
-      &pool, result->type(), nullptr, outputSize, std::move(children));
+  return {std::move(selectedRows), std::move(predecodedColumns)};
 }
 
 } // namespace
@@ -714,8 +688,11 @@ dwio::common::RowReader::FetchResult NativeLanceScanCoordinator::prefetchRange(
     // independent decoder because page cursors and codec sessions are
     // scan-local state.
     std::lock_guard<std::mutex> decoderLock(decoderMutex_);
-    scanPlan_->rootColumnReader().planRead(
-        decoder_, range.begin, range.end - range.begin);
+    const NativeLanceColumnRequest request{
+        .rowStart = range.begin,
+        .rowCount = range.end - range.begin,
+        .purpose = NativeLanceDecodePurpose::kPrefetch};
+    scanPlan_->rootColumnReader().planRead(decoder_, request);
   } catch (...) {
     std::shared_ptr<folly::Baton<>> baton;
     {
@@ -790,7 +767,11 @@ void NativeLanceScanCoordinator::prepareNextBatchPipeline(
     baton = prefetchBatons_[*rangeIndex] = std::make_shared<folly::Baton<>>();
   }
   try {
-    scanPlan_->rootColumnReader().planRead(decoder_, nextBegin, rows);
+    const NativeLanceColumnRequest request{
+        .rowStart = nextBegin,
+        .rowCount = rows,
+        .purpose = NativeLanceDecodePurpose::kPrefetch};
+    scanPlan_->rootColumnReader().planRead(decoder_, request);
     {
       std::lock_guard<std::mutex> lock(prefetchMutex_);
       prefetchStatuses_[*rangeIndex] = FetchStatus::kFinished;
@@ -842,16 +823,30 @@ void NativeLanceScanCoordinator::readFiltered(
     const dwio::common::Mutation* mutation,
     VectorPtr& result) {
   const auto rowsToRead = readEnd - readBegin;
-  result = readSelective(
+  auto filtered = decodeFilters(
       decoder_,
+      *scanPlan_,
       fileContext_->metadata().rowType(),
       scanSpec,
       readBegin,
       static_cast<vector_size_t>(rowsToRead),
       fileContext_->pool(),
-      options_.getDecodingExecutor(),
-      options_.getDecodingParallelismFactor(),
       mutation == nullptr ? nullptr : mutation->deletedRows);
+  transition(
+      NativeLanceScanState::kDecodingFilters,
+      NativeLanceScanState::kDecodingValues);
+  window_->filtersReady();
+  const auto request = columnRequest(
+      readBegin,
+      static_cast<vector_size_t>(rowsToRead),
+      filtered.selectedRows,
+      NativeLanceDecodePurpose::kProjection);
+  result = scanPlan_->rootColumnReader().read(
+      decoder_,
+      request,
+      fileContext_->pool(),
+      false,
+      &filtered.predecodedColumns);
   result = applyScanSpecProjection(
       std::move(result), scanSpec, fileContext_->pool());
   prepareNextBatchPipeline(readEnd, requestedRows);
@@ -901,7 +896,9 @@ uint64_t NativeLanceScanCoordinator::next(
       state_ = NativeLanceScanState::kFinished;
       return 0;
     }
-    transition(decodeState, NativeLanceScanState::kAssemblingBatch);
+    transition(
+        NativeLanceScanState::kDecodingValues,
+        NativeLanceScanState::kAssemblingBatch);
     window_->beginAssembly();
     window_->publish(rows, std::move(decoded));
     transition(
@@ -968,21 +965,28 @@ uint64_t NativeLanceScanCoordinator::nextImpl(
     }
     return rowsToRead;
   }
+  RowSet selectedRows{
+      memory::StlAllocator<vector_size_t>(&fileContext_->pool())};
+  NativeLanceColumnRequest request{
+      .rowStart = currentRow_,
+      .rowCount = rowsToRead,
+      .purpose = NativeLanceDecodePurpose::kProjection};
+  if (mutation != nullptr) {
+    initializeSelectedRows(
+        selectedRows,
+        static_cast<vector_size_t>(rowsToRead),
+        mutation->deletedRows);
+    request.selection =
+        selectionForRows(selectedRows, static_cast<vector_size_t>(rowsToRead));
+  }
   NativeLanceColumnReadTask columnTask(
-      scanPlan_->rootColumnReader(),
-      {.rowStart = currentRow_, .rowCount = rowsToRead},
-      primaryRangesPlanned);
+      scanPlan_->rootColumnReader(), request, primaryRangesPlanned);
   if (!primaryRangesPlanned) {
     columnTask.plan(decoder_);
   }
   columnTask.decode(decoder_, fileContext_->pool());
   result = columnTask.consume();
   prepareNextBatchPipeline(readEnd, size);
-  result = applyDeletedRows(
-      std::move(result),
-      mutation == nullptr ? nullptr : mutation->deletedRows,
-      static_cast<vector_size_t>(rowsToRead),
-      fileContext_->pool());
   if (scanSpec) {
     result = applyScanSpecProjection(
         std::move(result), *scanSpec, fileContext_->pool());
@@ -1022,7 +1026,7 @@ uint64_t NativeLanceScanCoordinator::skip(uint64_t skipSize) {
     BOLT_CHECK(
         state_ == NativeLanceScanState::kIdle,
         "A native Lance scan already has an active operation");
-    state_ = NativeLanceScanState::kPlanningWindow;
+    state_ = NativeLanceScanState::kSkipping;
   }
 
   try {
@@ -1043,6 +1047,7 @@ uint64_t NativeLanceScanCoordinator::skip(uint64_t skipSize) {
     advancePastFinishedRange();
     {
       std::lock_guard<std::mutex> lock(stateMutex_);
+      BOLT_CHECK(state_ == NativeLanceScanState::kSkipping);
       state_ = currentRange_ >= rowRanges().size()
           ? NativeLanceScanState::kFinished
           : NativeLanceScanState::kIdle;

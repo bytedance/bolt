@@ -57,25 +57,29 @@ enum class NativeLanceColumnState : uint8_t {
   kCancelled,
 };
 
-struct NativeLanceColumnRequest {
-  uint64_t rowStart;
-  uint64_t rowCount;
-};
-
 class NativeLanceColumnReader {
  public:
   virtual ~NativeLanceColumnReader() = default;
+
+  static std::unique_ptr<NativeLanceColumnReader> buildFileColumn(
+      const NativeLanceMetadata& metadata,
+      uint32_t fileColumnIndex);
 
   virtual bool readFromFile() const = 0;
   virtual NativeLanceColumnKind kind() const = 0;
   virtual NativeLanceReadStage readStage() const = 0;
   virtual uint32_t fileColumnIndex() const = 0;
   virtual const TypePtr& type() const = 0;
+
+  virtual void plan(
+      NativeLanceColumnSource& source,
+      const NativeLanceColumnRequest& request) const = 0;
+
   virtual VectorPtr read(
-      NativeLanceColumnSource& decoder,
-      uint64_t rowStart,
-      uint64_t rowCount,
-      memory::MemoryPool& pool) const = 0;
+      NativeLanceColumnSource& source,
+      const NativeLanceColumnRequest& request,
+      memory::MemoryPool& pool,
+      bool rangesPlanned) const = 0;
 };
 
 class NativeLanceRootColumnReader {
@@ -89,16 +93,16 @@ class NativeLanceRootColumnReader {
   }
 
   VectorPtr read(
-      NativeLanceColumnSource& decoder,
-      uint64_t rowStart,
-      uint64_t rowCount,
+      NativeLanceColumnSource& source,
+      const NativeLanceColumnRequest& request,
       memory::MemoryPool& pool,
-      bool primaryRangesPlanned = false) const;
+      bool primaryRangesPlanned = false,
+      const std::unordered_map<uint32_t, VectorPtr>* predecodedColumns =
+          nullptr) const;
 
   void planRead(
-      NativeLanceColumnSource& decoder,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
+      NativeLanceColumnSource& source,
+      const NativeLanceColumnRequest& request) const;
 
   std::vector<uint32_t> fileColumnIndices() const;
 

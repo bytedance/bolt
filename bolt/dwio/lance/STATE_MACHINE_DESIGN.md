@@ -1951,6 +1951,15 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
   `NativeLanceLegacyList`；fixed-size-list 和 packed struct 已迁移到
   `NativeLanceLegacyStruct`；Blob descriptor/payload 读取已迁移到
   `NativeLanceLegacyBlob`。`NativeLanceDecoder` 中对应的旧实现及其内部递归入口已删除。
+- `NativeLanceColumnRequest` 已统一携带 batch row range、batch-relative
+  `NativeLanceRowSelection` 和 filter/projection/prefetch purpose。Filter 不再从
+  `NativeLanceReader.cpp` 直调 Decoder；filter reader、projected reader 和 prefetch 都从
+  ColumnReader 入口创建请求。
+- mutation delete bitmap 在任何 filter 或 projected payload 解码前转换成 selection；无
+  filter 路径也只读取 surviving rows。Filter 同时被投影时，本 batch 的 filter vector 经
+  selection 收窄后直接交给根 ColumnReader，不重复读取。
+- ScanCoordinator 已区分 filter decode、value decode 和 skip 状态；ScanWindow 在 filter
+  完成后显式进入 value decode，不能从 filter 状态直接发布结果。
 - Reader 不再包装 Blob resolver，也不保留 reader-scoped Blob object LRU；对象缓存策略完全
   归 dataset/object-store resolver 所有。
 - 根输出统一通过 `NativeLanceBatchBuilder` 组装，并由 ScanWindow 原子发布。
@@ -1960,8 +1969,8 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - 将 list、map、struct、fixed-size-list、packed struct 和 Blob 的逻辑组装状态从
   `NativeLanceColumnSource` adapter 下沉到独立 ColumnReader；现有 `NativeLanceLegacy*`
   模块作为无缓存 PageReader/kernel 边界保留到调用方输出 buffer 接口完成。
-- filter pipeline 仍有一条直接调用 `NativeLanceColumnSource::decodeSelectedRows()` 的迁移
-  路径；需要改为 ColumnRequest/RowSelection 驱动。
+- nested subfield pruning 当前仍在根 RowVector 组装后执行；后续需要把 nested selection
+  传播到 Struct/List/Map ColumnReader，避免先物化未投影 child 再裁剪。
 - `NativeLanceBatchBuilder` 已统一所有权和发布，但复杂类型仍会使用 compatibility
   vector；最终目标是 page kernel 直接写 caller-owned child buffer。
 - FileOpenTask 当前把 metadata 构造作为一个阶段；需要将 footer、schema、global buffer
@@ -1985,7 +1994,7 @@ decode threads 16，full scan。
 该快照是单轮快速验收，只用于验证方向。最终结论必须按第 33.2 节执行 native/Rust
 交替 7 轮、paired log-ratio exact sign-flip test 和 Holm correction。
 
-当前正确性回归：native Lance `121/121`，TableScan `7/7`。
+当前正确性回归：native Lance `123/123`，TableScan `7/7`。
 
 ### 38.4 2026-09-24 七轮交替验收
 

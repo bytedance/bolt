@@ -43,6 +43,7 @@ class NativeLanceScanWindow {
       uint64_t requestedRows);
 
   void beginDecode(bool hasFilters);
+  void filtersReady();
   void beginAssembly();
   void publish(uint64_t scannedRows, VectorPtr result);
   uint64_t drain(VectorPtr& result);

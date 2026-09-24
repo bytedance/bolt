@@ -37,10 +37,13 @@ void NativeLanceScanWindow::beginDecode(bool hasFilters) {
                       : NativeLanceWindowState::kDecodingValues;
 }
 
+void NativeLanceScanWindow::filtersReady() {
+  BOLT_CHECK(state_ == NativeLanceWindowState::kDecodingFilters);
+  state_ = NativeLanceWindowState::kDecodingValues;
+}
+
 void NativeLanceScanWindow::beginAssembly() {
-  BOLT_CHECK(
-      state_ == NativeLanceWindowState::kDecodingFilters ||
-      state_ == NativeLanceWindowState::kDecodingValues);
+  BOLT_CHECK(state_ == NativeLanceWindowState::kDecodingValues);
   state_ = NativeLanceWindowState::kAssembling;
 }
 

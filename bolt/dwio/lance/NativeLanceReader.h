@@ -38,6 +38,7 @@ namespace bytedance::bolt::lance::reader {
 enum class NativeLanceScanState : uint8_t {
   kIdle,
   kPlanningWindow,
+  kSkipping,
   kDecodingFilters,
   kDecodingValues,
   kAssemblingBatch,

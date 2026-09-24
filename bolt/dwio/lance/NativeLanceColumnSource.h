@@ -16,8 +16,7 @@
 
 #pragma once
 
-#include <folly/Range.h>
-
+#include "bolt/dwio/lance/NativeLanceColumnRequest.h"
 #include "bolt/vector/BaseVector.h"
 
 namespace bytedance::bolt::lance::reader {
@@ -33,8 +32,7 @@ class NativeLanceColumnSource {
 
   virtual void planColumns(
       const std::vector<uint32_t>& columnIndices,
-      uint64_t rowStart,
-      uint64_t rowCount) const = 0;
+      const NativeLanceColumnRequest& request) const = 0;
 
   virtual bool supportsConcurrentDecoding() const = 0;
 
@@ -45,13 +43,8 @@ class NativeLanceColumnSource {
 
   virtual VectorPtr decodeColumn(
       uint32_t columnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount) const = 0;
-
-  virtual VectorPtr decodeSelectedRows(
-      uint32_t columnIndex,
-      uint64_t batchRowStart,
-      folly::Range<const vector_size_t*> rows) const = 0;
+      const NativeLanceColumnRequest& request,
+      bool rangesPlanned) const = 0;
 };
 
 } // namespace bytedance::bolt::lance::reader

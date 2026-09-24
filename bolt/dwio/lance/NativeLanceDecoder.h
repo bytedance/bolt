@@ -57,8 +57,12 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
 
   void planColumns(
       const std::vector<uint32_t>& columnIndices,
+      const NativeLanceColumnRequest& request) const override;
+
+  void planColumns(
+      const std::vector<uint32_t>& columnIndices,
       uint64_t rowStart,
-      uint64_t rowCount) const override;
+      uint64_t rowCount) const;
 
   void submitReadPlan() const;
 
@@ -96,15 +100,20 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
 
   VectorPtr decodeColumn(
       uint32_t columnIndex,
+      const NativeLanceColumnRequest& request,
+      bool rangesPlanned) const override;
+
+  VectorPtr decodeColumn(
+      uint32_t columnIndex,
       uint64_t rowStart,
-      uint64_t rowCount) const override;
+      uint64_t rowCount) const;
 
   /// Decodes sorted, batch-relative row numbers into a compact vector.
   /// Consecutive rows are coalesced into one range read.
   VectorPtr decodeSelectedRows(
       uint32_t columnIndex,
       uint64_t batchRowStart,
-      folly::Range<const vector_size_t*> rows) const override;
+      folly::Range<const vector_size_t*> rows) const;
 
   VectorPtr decodePhysicalColumn(
       const TypePtr& type,
@@ -115,6 +124,17 @@ class NativeLanceDecoder final : public NativeLanceColumnSource {
       const std::vector<uint32_t>& arrayDimensions = {}) const;
 
  private:
+  void enqueueLogicalColumn(
+      uint32_t columnIndex,
+      uint64_t rowStart,
+      uint64_t rowCount) const;
+
+  VectorPtr decodeSelectedRowsImpl(
+      uint32_t columnIndex,
+      uint64_t batchRowStart,
+      folly::Range<const vector_size_t*> rows,
+      bool rangesPlanned) const;
+
   VectorPtr decodePhysicalColumnNoCache(
       const TypePtr& type,
       std::string_view logicalType,
