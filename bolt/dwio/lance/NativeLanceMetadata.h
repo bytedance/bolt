@@ -16,22 +16,13 @@
 
 #pragma once
 
-#include <atomic>
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "bolt/dwio/common/BufferedInput.h"
-#include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
-#include "bolt/dwio/lance/proto/lance_encodings_v2_0.pb.h"
-#include "bolt/dwio/lance/proto/lance_encodings_v2_1.pb.h"
-#include "bolt/dwio/lance/proto/lance_file.pb.h"
-#include "bolt/dwio/lance/proto/lance_file_v2.pb.h"
-#include "bolt/type/Type.h"
+#include "bolt/dwio/lance/NativeLanceMetadataComponents.h"
 
 namespace bytedance::bolt::lance::reader {
 
@@ -42,36 +33,14 @@ class NativeLanceFileOpenTask;
 /// The object deliberately retains offsets rather than page payloads. Payloads
 /// are requested later through BufferedInput so Bolt remains in control of
 /// coalescing, caching, prefetch, accounting, and cancellation.
-class NativeLanceMetadata {
+class NativeLanceMetadata final : private NativeLanceFileMetadata,
+                                  private NativeLanceSchemaIndex,
+                                  private NativeLanceColumnMetadataLoader {
  public:
-  static constexpr uint64_t kFooterSize = 40;
-
-  struct Footer {
-    uint64_t columnMetadataStart;
-    uint64_t columnMetadataOffsetsStart;
-    uint64_t globalBufferOffsetsStart;
-    uint32_t numGlobalBuffers;
-    uint32_t numColumns;
-    uint16_t majorVersion;
-    uint16_t minorVersion;
-  };
-
-  struct BufferDescriptor {
-    uint64_t offset;
-    uint64_t length;
-  };
-
-  struct StructuralField {
-    std::string name;
-    std::string logicalType;
-    TypePtr type;
-    bool nullable{false};
-    bool leaf{false};
-    uint32_t physicalColumnIndex{0};
-    uint32_t physicalColumnCount{0};
-    uint64_t rowsPerParent{1};
-    std::vector<StructuralField> children;
-  };
+  static constexpr uint64_t kFooterSize = NativeLanceFileMetadata::kFooterSize;
+  using Footer = NativeLanceFileMetadata::Footer;
+  using BufferDescriptor = NativeLanceFileMetadata::BufferDescriptor;
+  using StructuralField = NativeLanceSchemaIndex::StructuralField;
 
   NativeLanceMetadata(
       dwio::common::BufferedInput& input,
@@ -80,15 +49,15 @@ class NativeLanceMetadata {
           defaultNativeLanceTypeAdapter());
 
   const Footer& footer() const {
-    return footer_;
+    return NativeLanceFileMetadata::footer();
   }
 
   uint64_t numRows() const {
-    return numRows_;
+    return NativeLanceFileMetadata::numRows();
   }
 
   const RowTypePtr& rowType() const {
-    return rowType_;
+    return NativeLanceSchemaIndex::rowType();
   }
 
   std::string_view columnLogicalType(uint32_t columnIndex) const {
@@ -100,7 +69,7 @@ class NativeLanceMetadata {
   }
 
   const std::vector<uint32_t>& physicalColumnIndices() const {
-    return physicalColumnIndices_;
+    return NativeLanceSchemaIndex::physicalColumnIndices();
   }
 
   std::string_view physicalColumnLogicalType(uint32_t columnIndex) const {
@@ -117,7 +86,7 @@ class NativeLanceMetadata {
   }
 
   const std::vector<BufferDescriptor>& globalBuffers() const {
-    return globalBuffers_;
+    return NativeLanceFileMetadata::globalBuffers();
   }
 
   BufferDescriptor resolveBuffer(
@@ -159,8 +128,7 @@ class NativeLanceMetadata {
   /// Returns cumulative physical row offsets with one trailing end offset.
   const std::vector<uint64_t>& pageRowStarts(
       uint32_t physicalColumnIndex) const {
-    loadPhysicalColumns({physicalColumnIndex});
-    return pageRowStarts_.at(physicalColumnIndex);
+    return NativeLanceColumnMetadataLoader::pageRowStarts(physicalColumnIndex);
   }
 
   uint32_t leafPhysicalColumnIndex(uint32_t fieldId) const {
@@ -168,12 +136,23 @@ class NativeLanceMetadata {
   }
 
   const StructuralField& structuralField(uint32_t columnIndex) const {
-    return structuralFields_.at(columnIndex);
+    return NativeLanceSchemaIndex::structuralField(columnIndex);
+  }
+
+  const NativeLanceFileMetadata& fileMetadata() const {
+    return *this;
+  }
+
+  const NativeLanceSchemaIndex& schemaIndex() const {
+    return *this;
+  }
+
+  const NativeLanceColumnMetadataLoader& columnMetadataLoader() const {
+    return *this;
   }
 
   bool isBlobColumn(uint32_t physicalColumnIndex) const {
-    loadPhysicalColumns({physicalColumnIndex});
-    return blobColumns_.at(physicalColumnIndex);
+    return NativeLanceColumnMetadataLoader::isBlobColumn(physicalColumnIndex);
   }
 
   /// Returns top-level row ranges owned by a byte range. A page belongs to
@@ -187,12 +166,6 @@ class NativeLanceMetadata {
   struct DeferredOpenTag {};
 
   friend class NativeLanceFileOpenTask;
-  friend bool operator==(
-      const BufferDescriptor& lhs,
-      const BufferDescriptor& rhs) {
-    return lhs.offset == rhs.offset && lhs.length == rhs.length;
-  }
-
   BufferPtr read(uint64_t offset, uint64_t length) const;
   NativeLanceMetadata(
       dwio::common::BufferedInput& input,
@@ -205,39 +178,6 @@ class NativeLanceMetadata {
   void readColumnMetadataIndex();
   void buildSchemaIndex();
   void validateOpenState() const;
-  void parseColumnMetadata(
-      uint32_t physicalColumnIndex,
-      const char* data,
-      size_t size) const;
-  void validateColumnMetadata(uint32_t physicalColumnIndex) const;
-
-  dwio::common::BufferedInput& input_;
-  memory::MemoryPool& pool_;
-  std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter_;
-  ::lance::file::FileDescriptor fileDescriptor_;
-  Footer footer_;
-  uint64_t numRows_{0};
-  RowTypePtr rowType_;
-  std::vector<std::string> columnLogicalTypes_;
-  std::vector<uint32_t> physicalColumnIndices_;
-  std::vector<std::string> physicalColumnLogicalTypes_;
-  std::vector<uint32_t> physicalColumnSpans_;
-  std::vector<std::vector<std::string>> physicalColumnChildLogicalTypes_;
-  std::vector<bool> rowAlignedPhysicalColumns_;
-  std::vector<uint64_t> physicalColumnExpectedRows_;
-  std::vector<BufferDescriptor> globalBuffers_;
-  std::vector<BufferDescriptor> columnMetadataLocations_;
-  mutable std::vector<::lance::file::v2::ColumnMetadata> columns_;
-  mutable std::vector<std::vector<::lance::encodings::ArrayEncoding>>
-      pageEncodings_;
-  mutable std::vector<std::vector<::lance::encodings21::PageLayout>>
-      pageLayouts_;
-  mutable std::vector<std::vector<uint64_t>> pageRowStarts_;
-  mutable std::vector<bool> blobColumns_;
-  mutable std::vector<std::atomic<bool>> columnMetadataLoaded_;
-  mutable std::mutex columnMetadataMutex_;
-  std::unordered_map<uint32_t, uint32_t> leafPhysicalColumnIndices_;
-  std::vector<StructuralField> structuralFields_;
 };
 
 } // namespace bytedance::bolt::lance::reader

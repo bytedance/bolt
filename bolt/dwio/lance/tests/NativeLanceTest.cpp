@@ -2459,6 +2459,13 @@ TEST_F(NativeLanceTest, sampleMetadata) {
   EXPECT_EQ(metadata->footer().minorVersion, 3);
   EXPECT_EQ(metadata->numRows(), 20);
   EXPECT_EQ(metadata->rowType()->toString(), "ROW<a:BIGINT,b:DOUBLE>");
+  EXPECT_EQ(metadata->fileMetadata().numRows(), metadata->numRows());
+  EXPECT_EQ(
+      metadata->schemaIndex().rowType()->toString(),
+      metadata->rowType()->toString());
+  EXPECT_EQ(
+      metadata->columnMetadataLoader().loadedColumnMetadataCount(),
+      metadata->loadedColumnMetadataCount());
   ASSERT_EQ(metadata->globalBuffers().size(), 1);
   EXPECT_EQ(metadata->globalBuffers()[0].offset, 384);
   EXPECT_EQ(metadata->globalBuffers()[0].length, 79);
