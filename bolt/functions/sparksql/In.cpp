@@ -31,12 +31,15 @@
 #include "folly/container/F14Set.h"
 #include "folly/hash/Hash.h"
 
+#include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
+#include "bolt/expression/VectorReaders.h"
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/sparksql/Arena.h"
 #include "bolt/functions/sparksql/Comparisons.h"
 #include "bolt/type/Filter.h"
+#include "bolt/vector/DecodedVector.h"
 namespace bytedance::bolt::functions::sparksql {
 namespace {
 
@@ -165,7 +168,171 @@ void registerInFn(const std::string& prefix) {
       {prefix + "in"});
 }
 
+std::vector<std::shared_ptr<exec::FunctionSignature>> inDecimalSignatures() {
+  // Accept any DECIMAL(p, s). The physical representation depends on
+  // precision: short decimal (<= 18) uses BIGINT, long decimal uses HUGEINT.
+  return {exec::FunctionSignatureBuilder()
+              .integerVariable("p")
+              .integerVariable("s")
+              .returnType("boolean")
+              .argumentType("DECIMAL(p, s)")
+              .argumentType("array(DECIMAL(p, s))")
+              .build()};
+}
+
+template <typename T>
+class DecimalInVectorFunction final : public exec::VectorFunction {
+ public:
+  explicit DecimalInVectorFunction(const VectorPtr& constantArrayVector) {
+    buildConstantSet(constantArrayVector);
+  }
+
+  void apply(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      const TypePtr& outputType,
+      exec::EvalCtx& context,
+      VectorPtr& result) const override {
+    context.ensureWritable(rows, outputType, result);
+    result->clearNulls(rows);
+    auto* flatResult = result->asUnchecked<FlatVector<bool>>();
+
+    exec::DecodedArgs decodedArgs(rows, args, context);
+    auto* decodedLhs = decodedArgs.at(0);
+    auto* decodedRhs = decodedArgs.at(1);
+
+    if (hasConstantRhs_) {
+      if (constantRhsIsNull_) {
+        rows.applyToSelected([&](vector_size_t row) {
+          if (decodedLhs->isNullAt(row)) {
+            result->setNull(row, true);
+            return;
+          }
+          // Non-null lhs IN NULL -> NULL.
+          result->setNull(row, true);
+        });
+        return;
+      }
+
+      rows.applyToSelected([&](vector_size_t row) {
+        if (decodedLhs->isNullAt(row)) {
+          result->setNull(row, true);
+          return;
+        }
+
+        const auto lhs = decodedLhs->valueAt<T>(row);
+        const bool found = constantElements_.contains(lhs);
+        if (found) {
+          flatResult->set(row, true);
+          return;
+        }
+        if (constantHasNull_) {
+          result->setNull(row, true);
+          return;
+        }
+        flatResult->set(row, false);
+      });
+      return;
+    }
+
+    // Fallback for non-constant rhs: scan per row.
+    exec::VectorReader<Array<T>> rhsReader(decodedRhs);
+    rows.applyToSelected([&](vector_size_t row) {
+      if (decodedLhs->isNullAt(row)) {
+        result->setNull(row, true);
+        return;
+      }
+      if (decodedRhs->isNullAt(row)) {
+        result->setNull(row, true);
+        return;
+      }
+
+      const auto lhs = decodedLhs->valueAt<T>(row);
+      const auto arrayView = rhsReader[row];
+      bool hasNull = false;
+      bool found = false;
+      for (const auto& entry : arrayView) {
+        if (!entry.has_value()) {
+          hasNull = true;
+          continue;
+        }
+        if (entry.value() == lhs) {
+          found = true;
+          break;
+        }
+      }
+
+      if (found) {
+        flatResult->set(row, true);
+        return;
+      }
+      if (hasNull) {
+        result->setNull(row, true);
+        return;
+      }
+      flatResult->set(row, false);
+    });
+  }
+
+ private:
+  void buildConstantSet(const VectorPtr& constantArrayVector) {
+    if (constantArrayVector == nullptr) {
+      // Not a constant argument.
+      hasConstantRhs_ = false;
+      return;
+    }
+
+    hasConstantRhs_ = true;
+
+    SelectivityVector oneRow(1);
+    DecodedVector decoded(*constantArrayVector, oneRow);
+    exec::VectorReader<Array<T>> reader(&decoded);
+    if (decoded.isNullAt(0)) {
+      constantRhsIsNull_ = true;
+      return;
+    }
+
+    const auto arrayView = reader[0];
+    constantElements_.reserve(arrayView.size());
+    for (const auto& entry : arrayView) {
+      if (!entry.has_value()) {
+        constantHasNull_ = true;
+        continue;
+      }
+      constantElements_.emplace(entry.value());
+    }
+  }
+
+  bool hasConstantRhs_{false};
+  bool constantHasNull_{false};
+  bool constantRhsIsNull_{false};
+  Set<T> constantElements_;
+};
+
+std::shared_ptr<exec::VectorFunction> makeDecimalIn(
+    const std::string& /*name*/,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& /*config*/) {
+  const auto& lhsType = inputArgs.at(0).type;
+  const auto& rhsConst = inputArgs.at(1).constantValue;
+
+  if (lhsType->isShortDecimal()) {
+    return std::make_shared<DecimalInVectorFunction<int64_t>>(rhsConst);
+  }
+  if (lhsType->isLongDecimal()) {
+    return std::make_shared<DecimalInVectorFunction<int128_t>>(rhsConst);
+  }
+
+  BOLT_FAIL(
+      "Decimal IN expects DECIMAL input type, but got {}", lhsType->toString());
+}
+
 } // namespace
+
+BOLT_DECLARE_STATEFUL_VECTOR_FUNCTION(
+    udf_in_decimal,
+    inDecimalSignatures(),
+    makeDecimalIn);
 
 void registerIn(const std::string& prefix) {
   registerInFn<int8_t>(prefix);
