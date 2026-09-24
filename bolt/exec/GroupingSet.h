@@ -486,6 +486,7 @@ class GroupingSet {
   const bool isAdaptive_;
 
   bool noMoreInput_{false};
+  bool outputTableReleased_{false};
 
   // In case of partial streaming aggregation, the input vector passed to
   // addInput(). A set of rows that belong to the last group of pre-grouped
