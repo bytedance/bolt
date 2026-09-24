@@ -326,11 +326,7 @@ void HashStringAllocator::newContiguousRange(int32_t bytes, ByteRange* range) {
 StringView HashStringAllocator::contiguousString(
     StringView view,
     std::string& storage) {
-  if (view.isInline()) {
-    return view;
-  }
-  auto header = headerOf(view.data());
-  if (view.size() <= header->size()) {
+  if (isContiguous(view)) {
     return view;
   }
 

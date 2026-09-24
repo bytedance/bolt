@@ -42,6 +42,7 @@
 #include "bolt/common/process/ProcessBase.h"
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/HashTable.h"
+#include "bolt/exec/HashTableSimd-inl.h"
 #include "bolt/exec/OperatorUtils.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/jit/RowContainer/RowContainerCodeGenerator.h"
@@ -591,7 +592,15 @@ void HashTable<ignoreNullKeys>::groupProbe(HashLookup& lookup) {
   checkSize(lookup.rows.size(), false);
   if (hashMode_ == HashMode::kNormalizedKey) {
     populateNormalizedKeys(lookup, sizeBits_);
-    groupNormalizedKeyProbe(lookup);
+    if (simdNormalizedKeyLayoutActive()) {
+      groupNormalizedKeyProbeSimd(lookup);
+    } else {
+      groupNormalizedKeyProbe(lookup);
+    }
+    return;
+  }
+  if (simdHashLayoutActive()) {
+    groupHashProbeSimd(lookup);
     return;
   }
   ProbeState state1;
@@ -675,7 +684,15 @@ void HashTable<ignoreNullKeys>::joinProbe(HashLookup& lookup) {
   }
   if (hashMode_ == HashMode::kNormalizedKey) {
     populateNormalizedKeys(lookup, sizeBits_);
-    joinNormalizedKeyProbe(lookup);
+    if (simdNormalizedKeyLayoutActive()) {
+      joinNormalizedKeyProbeSimd(lookup);
+    } else {
+      joinNormalizedKeyProbe(lookup);
+    }
+    return;
+  }
+  if (simdHashLayoutActive()) {
+    joinHashProbeSimd(lookup);
     return;
   }
   int32_t probeIndex = 0;
@@ -891,9 +908,17 @@ void HashTable<ignoreNullKeys>::checkSize(
       hashMode_);
 
   const int64_t newNumDistincts = numNew + numDistinct_;
+  const bool useSimdLayout = simdLayoutActive();
+  const auto allocate = [&](uint64_t size) {
+    if (useSimdLayout) {
+      allocateSimdTable(size);
+    } else {
+      allocateTables(size);
+    }
+  };
   if (table_ == nullptr || capacity_ == 0) {
     const auto newSize = newHashTableEntries(numDistinct_, numNew);
-    allocateTables(newSize);
+    allocate(newSize);
     if (numDistinct_ > 0) {
       rehash(initNormalizedKeys);
     }
@@ -903,11 +928,15 @@ void HashTable<ignoreNullKeys>::checkSize(
     // table. Also, if there is non-trivial amount of tombstone slots in table,
     // then the table lookup will become slow. Given that, we treat tombstone
     // slot as non-empty slot here to decide whether to trigger rehash or not.
-  } else if (newNumDistincts > rehashSize()) {
+  } else if (
+      useSimdLayout ? newNumDistincts > simdRehashThreshold(capacity_)
+                    : newNumDistincts > rehashSize()) {
     // NOTE: we need to plus one here as number itself could be power of two.
-    const auto newCapacity = bits::nextPowerOfTwo(
-        std::max(newNumDistincts, capacity_ - numTombstones_) + 1);
-    allocateTables(newCapacity);
+    const auto newCapacity = useSimdLayout
+        ? nextSimdCapacity(capacity_, newNumDistincts)
+        : bits::nextPowerOfTwo(
+              std::max(newNumDistincts, capacity_ - numTombstones_) + 1);
+    allocate(newCapacity);
     rehash(initNormalizedKeys);
   }
 }
@@ -920,10 +949,16 @@ bool HashTable<ignoreNullKeys>::hashRows(
   if (rows.empty()) {
     return true;
   }
+  const bool useSimd = simdActive();
   if (!initNormalizedKeys && hashMode_ == HashMode::kNormalizedKey) {
-    for (auto i = 0; i < rows.size(); ++i) {
-      hashes[i] =
-          mixNormalizedKey(RowContainer::normalizedKey(rows[i]), sizeBits_);
+    if (useSimd) {
+      hash_table_simd::rehashNormalizedKeys(
+          rows.data(), rows.size(), hashes.data());
+    } else {
+      for (auto i = 0; i < rows.size(); ++i) {
+        hashes[i] =
+            mixNormalizedKey(RowContainer::normalizedKey(rows[i]), sizeBits_);
+      }
     }
     return true;
   }
@@ -931,7 +966,24 @@ bool HashTable<ignoreNullKeys>::hashRows(
   for (int32_t i = 0; i < hashers_.size(); ++i) {
     auto& hasher = hashers_[i];
     if (hashMode_ == HashMode::kHash) {
-      rows_->hash(i, rows, i > 0, hashes.data());
+      const auto column = rows_->columnAt(i);
+      const auto nullByte = column.nullByte();
+      const uint8_t nullMask = column.nullMask();
+      bool handled = false;
+      if (useSimd) {
+        handled = hash_table_simd::tryRehash(
+            hasher->typeKind(),
+            rows.data(),
+            column.offset(),
+            rows.size(),
+            i > 0,
+            nullByte,
+            nullMask,
+            hashes.data());
+      }
+      if (!handled) {
+        rows_->hash(i, rows, i > 0, hashes.data());
+      }
     } else {
       // Array or normalized key.
       auto column = rows_->columnAt(i);
@@ -950,7 +1002,14 @@ bool HashTable<ignoreNullKeys>::hashRows(
   if (hashMode_ == HashMode::kNormalizedKey && initNormalizedKeys) {
     for (auto i = 0; i < rows.size(); ++i) {
       RowContainer::normalizedKey(rows[i]) = hashes[i];
-      hashes[i] = mixNormalizedKey(hashes[i], sizeBits_);
+    }
+    if (useSimd) {
+      hash_table_simd::rehashNormalizedKeys(
+          rows.data(), rows.size(), hashes.data());
+    } else {
+      for (auto i = 0; i < rows.size(); ++i) {
+        hashes[i] = mixNormalizedKey(hashes[i], sizeBits_);
+      }
     }
   }
   return true;
@@ -1023,12 +1082,10 @@ void HashTable<ignoreNullKeys>::parallelJoinBuild() {
       buildPartitionBounds_.begin() + buildPartitionBounds_.capacity(),
       std::numeric_limits<PartitionBoundIndexType>::max());
 
-  // The partitioning is in terms of ranges of bucket offset.
+  // The partitioning is in terms of layout-specific table indexes.
   for (auto i = 0; i < numPartitions; ++i) {
-    // The bounds are the closes tag/row pointer group bound, always cache
-    // line aligned.
     buildPartitionBounds_[i] =
-        bits::roundUp(((sizeMask_ + 1) / numPartitions) * i, kBucketSize);
+        parallelJoinBuildPartitionBound(i, numPartitions);
     // Bounds must always be positive
     BOLT_CHECK_GE(
         buildPartitionBounds_[i],
@@ -1099,13 +1156,18 @@ void HashTable<ignoreNullKeys>::parallelJoinBuild() {
   raw_vector<uint64_t> hashes;
   for (auto i = 0; i < numPartitions; ++i) {
     auto& overflows = overflowPerPartition[i];
-    hashes.resize(overflows.size());
-    hashRows(
-        folly::Range<char**>(overflows.data(), overflows.size()),
-        false,
-        hashes);
+    // Keep SIMD scratch bounded even when a skewed partition overflows.
+    const size_t batchSize = simdLayoutActive() ? 1024 : overflows.size();
+    for (size_t offset = 0; offset < overflows.size(); offset += batchSize) {
+      const auto count = std::min(batchSize, overflows.size() - offset);
+      hashes.resize(count);
+      hashRows(
+          folly::Range<char**>(overflows.data() + offset, count),
+          false,
+          hashes);
+      insertForJoin(overflows.data() + offset, hashes.data(), count, nullptr);
+    }
     auto table = i == 0 ? this : otherTables_[i - 1].get();
-    insertForJoin(overflows.data(), hashes.data(), overflows.size(), nullptr);
 
     BOLT_CHECK_EQ(table->rows()->numRows(), table->numParallelBuildRows_);
   }
@@ -1151,7 +1213,7 @@ void HashTable<ignoreNullKeys>::partitionRows(
             xsimd::batch<PartitionBoundIndexType>::size,
         "partition bounds must be padded to SIMD width");
     for (auto i = 0; i < numRows; ++i) {
-      auto index = bucketOffset(hashes[i]);
+      const auto index = parallelJoinBuildPartitionIndex(hashes[i]);
       partitions[i] = findPartition(
           index, buildPartitionBounds_.data(), buildPartitionBounds_.size());
     }
@@ -1173,13 +1235,21 @@ void HashTable<ignoreNullKeys>::buildJoinPartition(
       buildPartitionBounds_[partition],
       buildPartitionBounds_[partition + 1],
       overflow};
+  SimdBuildScratch scratch;
+  std::vector<hash_table_simd::KeyColumn> keyColumns;
   for (auto i = 0; i < numPartitions; ++i) {
     auto* table = i == 0 ? this : otherTables_[i - 1].get();
     RowContainerIterator iter;
     while (const auto numRows = table->rows_->listPartitionRows(
                iter, partition, kBatch, *rowPartitions[i], rows.data())) {
       hashRows(folly::Range(rows.data(), numRows), false, hashes);
-      insertForJoin(rows.data(), hashes.data(), numRows, &partitionInfo);
+      insertForJoin(
+          rows.data(),
+          hashes.data(),
+          numRows,
+          &partitionInfo,
+          &scratch,
+          &keyColumns);
       table->numParallelBuildRows_ += numRows;
     }
   }
@@ -1214,7 +1284,34 @@ void HashTable<ignoreNullKeys>::insertForGroupBy(
       BOLT_CHECK_NULL(table_[index]);
       table_[index] = groups[i];
     }
-  } else {
+    return;
+  }
+  if (simdNormalizedKeyLayoutActive() || simdHashLayoutActive()) {
+    // SIMD-mode reinsertion (used by rehash()). Start at the row's bucket and
+    // linearly scan bucket lanes; the table is freshly zeroed so
+    // every row finds a slot before wrapping.
+    // Tag the stored pointer with the hash's pointer-tag (bits 48-63)
+    // to match the hot-path SIMD bucket tag filter.
+    constexpr int32_t kPrefetchDistance = 32;
+    for (int32_t i = 0; i < kPrefetchDistance && i < numGroups; ++i) {
+      __builtin_prefetch(
+          &table_[hash_table_simd::bucketStart(hashes[i] & sizeMask_)]);
+    }
+    for (int32_t i = 0; i < numGroups; ++i) {
+      if (i + kPrefetchDistance < numGroups) {
+        __builtin_prefetch(&table_[hash_table_simd::bucketStart(
+            hashes[i + kPrefetchDistance] & sizeMask_)]);
+      }
+      const uint64_t h = hashes[i];
+      uint64_t idx = hash_table_simd::bucketStart(h & sizeMask_);
+      while (table_[idx] != nullptr) {
+        idx = (idx + 1) & sizeMask_;
+      }
+      table_[idx] = hash_table_simd::applyTag(groups[i], h);
+    }
+    return;
+  }
+  {
     constexpr int32_t kPrefetchDistance = 10;
     for (int32_t i = 0; i < numGroups; ++i) {
       auto hash = hashes[i];
@@ -1377,7 +1474,9 @@ void HashTable<ignoreNullKeys>::insertForJoin(
     char** groups,
     uint64_t* hashes,
     int32_t numGroups,
-    TableInsertPartitionInfo* partitionInfo) {
+    TableInsertPartitionInfo* partitionInfo,
+    SimdBuildScratch* scratch,
+    std::vector<hash_table_simd::KeyColumn>* keyColumns) {
   // The insertable rows are in the table, all get put in the hash
   // table or array.
   if (hashMode_ == HashMode::kArray) {
@@ -1390,9 +1489,29 @@ void HashTable<ignoreNullKeys>::insertForJoin(
   }
 
   if (hashMode_ == HashMode::kNormalizedKey) {
-    insertForJoinWithPrefetch<true>(groups, hashes, numGroups, partitionInfo);
+    if (simdNormalizedKeyLayoutActive()) {
+      insertForJoinNormalizedKeySimd(
+          groups,
+          hashes,
+          numGroups,
+          partitionInfo,
+          scratch ? *scratch : simdBuildScratch_);
+    } else {
+      insertForJoinWithPrefetch<true>(groups, hashes, numGroups, partitionInfo);
+    }
   } else {
-    insertForJoinWithPrefetch<false>(groups, hashes, numGroups, partitionInfo);
+    if (simdHashLayoutActive()) {
+      insertForJoinHashSimd(
+          groups,
+          hashes,
+          numGroups,
+          partitionInfo,
+          scratch ? *scratch : simdBuildScratch_,
+          keyColumns ? *keyColumns : simdKeyColumns_);
+    } else {
+      insertForJoinWithPrefetch<false>(
+          groups, hashes, numGroups, partitionInfo);
+    }
   }
 }
 
@@ -1727,6 +1846,15 @@ std::string HashTable<ignoreNullKeys>::toString() {
       }
     }
     out << "Total slots used: " << occupied << std::endl;
+  } else if (simdNormalizedKeyLayoutActive() || simdHashLayoutActive()) {
+    int64_t occupied = 0;
+    if (table_ && tableAllocation_.data() && tableAllocation_.size()) {
+      for (int64_t i = 0; i < capacity_; ++i) {
+        occupied += table_[i] != nullptr;
+      }
+    }
+    out << "Total slots used: " << occupied << " (SIMD bucket layout)"
+        << std::endl;
   } else {
     int64_t occupied = 0;
 
@@ -2148,6 +2276,9 @@ HashTable<true>::listNullKeyRows(NullKeyRowsIterator*, int32_t, char**) {
 
 template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::erase(folly::Range<char**> rows) {
+  BOLT_CHECK(
+      !simdLayoutActive(),
+      "erase() not supported on SIMD bucket layout. Set mayErase=true.");
   auto numRows = rows.size();
   raw_vector<uint64_t> hashes;
   hashes.resize(numRows);
@@ -2226,6 +2357,32 @@ void HashTable<ignoreNullKeys>::checkConsistency() const {
   if (hashMode_ == BaseHashTable::HashMode::kArray) {
     return;
   }
+  if (simdNormalizedKeyLayoutActive() || simdHashLayoutActive()) {
+    // SIMD bucket layout: count rows, including duplicate join-key chains.
+    uint64_t numOccupied = 0;
+    uint64_t numRows = 0;
+    for (int64_t i = 0; i < capacity_; ++i) {
+      if (table_[i] == nullptr) {
+        continue;
+      }
+      ++numOccupied;
+      auto* row = hash_table_simd::stripTag(table_[i]);
+      do {
+        ++numRows;
+        row = nextOffset_ == 0
+            ? nullptr
+            : *reinterpret_cast<char* const*>(row + nextOffset_);
+      } while (row != nullptr);
+    }
+    BOLT_CHECK_EQ(
+        numRows,
+        numDistinct_,
+        "SIMD bucket layout: occupied={}, rows={}, distinct={}",
+        numOccupied,
+        numRows,
+        numDistinct_);
+    return;
+  }
   uint64_t numEmpty = 0;
   uint64_t numTombstone = 0;
   for (auto start = 0; start < sizeMask_; start += kBucketSize) {
@@ -2249,6 +2406,745 @@ void HashTable<ignoreNullKeys>::checkConsistency() const {
       numEmpty,
       numTombstone,
       numDistinct_);
+}
+
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::setSimdEnabled(bool enabled) {
+  if (simdEnabled_ == enabled) {
+    return;
+  }
+  BOLT_CHECK_NULL(
+      table_,
+      "Cannot change SIMD setting after hash table allocation. Requested: {}, current: {}, capacity: {}, numDistinct: {}.",
+      enabled,
+      simdEnabled_,
+      capacity_,
+      numDistinct_);
+  simdEnabled_ = enabled;
+}
+
+template <bool ignoreNullKeys>
+FOLLY_ALWAYS_INLINE char* HashTable<ignoreNullKeys>::insertEntrySimd(
+    HashLookup& lookup,
+    uint64_t index,
+    vector_size_t row) {
+  char* group = rows_->newRow();
+  // Locality-ordered writes. `group` is L1-hot from newRow() and
+  // `table_[index]` was touched during the probe walk, so cluster group writes
+  // before publishing the slot and updating lookup bookkeeping.
+  if (hashMode_ == HashMode::kNormalizedKey) {
+    RowContainer::normalizedKey(group) = lookup.normalizedKeys[row]; // NOLINT
+  }
+  hash_table_simd::storeKeysToRow<ignoreNullKeys>(
+      hashers_, rows_.get(), group, row);
+  table_[index] = hash_table_simd::applyTag(
+      reinterpret_cast<char*>(group), lookup.hashes[row]);
+  lookup.hits[row] = group; // NOLINT
+  ++numDistinct_;
+  lookup.newGroups.push_back(row);
+  return group;
+}
+
+// SIMD normalized-key group-by probe over fixed-width tagged-pointer buckets.
+// Duplicate-key-in-batch is deduped via a per-pass claim list. checkSize()
+// at groupProbe entry pre-sizes the table so no mid-pass rehash is possible.
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::groupNormalizedKeyProbeSimd(
+    HashLookup& lookup) {
+  constexpr int32_t kNormalizedKeyOffset =
+      -static_cast<int32_t>(sizeof(normalized_key_t));
+
+  const int32_t numProbes = lookup.rows.size();
+  if (numProbes == 0) {
+    return;
+  }
+
+  lookup.simdActiveRows.resize(numProbes);
+  lookup.simdActiveSlots.resize(numProbes);
+
+  const uint64_t mask = sizeMask_;
+  const uint64_t* keys = lookup.normalizedKeys.data();
+  const uint64_t* hashes = lookup.hashes.data();
+  const vector_size_t* rows = lookup.rows.data();
+  char** hits = lookup.hits.data();
+  int32_t* activeRows = lookup.simdActiveRows.data();
+  uint64_t* activeSlots = lookup.simdActiveSlots.data();
+
+  int numActive = numProbes;
+  for (int a = 0; a < numActive; ++a) {
+    const int32_t row = rows[a];
+    activeRows[a] = row;
+    activeSlots[a] = hash_table_simd::bucketStart(hashes[row] & mask);
+  }
+
+  while (numActive > 0) {
+    auto insert = [&](uint64_t slot, vector_size_t row) {
+      insertEntrySimd(lookup, slot, row);
+    };
+    // Walk buckets and split into survivors. Empty slots are inserted
+    // immediately so later rows in this batch can find the new group without a
+    // retry pass.
+    const int numSurvivors = hash_table_simd::walkSplitAndInsertInPlace(
+        numActive, mask, activeSlots, activeRows, hashes, table_, hits, insert);
+
+    int numNextActive = 0;
+
+    if (numSurvivors > 0) {
+      // Compare normalized keys on survivors only.
+      hash_table_simd::compareNormalizedKeys<kNormalizedKeyOffset>(
+          numSurvivors, activeRows, keys, hits);
+      asm volatile("" ::: "memory");
+      // Compact normalized-key mismatches and advance them by one slot.
+      numNextActive = hash_table_simd::compactNormalizedKeyMismatches(
+          numSurvivors,
+          activeRows,
+          activeSlots,
+          hits,
+          activeRows,
+          activeSlots,
+          mask);
+    }
+
+    numActive = numNextActive;
+  }
+}
+
+// SIMD normalized-key join probe over fixed-width tagged-pointer buckets.
+// Read-only; writes a definitive hit or nullptr into hits[].
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::joinNormalizedKeyProbeSimd(HashLookup& lookup) {
+  constexpr int32_t kNormalizedKeyOffset =
+      -static_cast<int32_t>(sizeof(normalized_key_t));
+
+  const int32_t numProbes = lookup.rows.size();
+  if (numProbes == 0) {
+    return;
+  }
+  lookup.simdActiveRows.resize(numProbes);
+  lookup.simdActiveSlots.resize(numProbes);
+
+  const uint64_t mask = sizeMask_;
+  const uint64_t* keys = lookup.normalizedKeys.data();
+  const uint64_t* hashes = lookup.hashes.data();
+  const vector_size_t* rows = lookup.rows.data();
+  char** hits = lookup.hits.data();
+  int32_t* activeRows = lookup.simdActiveRows.data();
+  uint64_t* activeSlots = lookup.simdActiveSlots.data();
+
+  int numActive = numProbes;
+  for (int a = 0; a < numActive; ++a) {
+    const int32_t row = rows[a];
+    activeRows[a] = row;
+    activeSlots[a] = hash_table_simd::bucketStart(hashes[row] & mask);
+  }
+
+  while (numActive > 0) {
+    // Walk buckets. Empty rows are final misses; survivors compact in-place.
+    numActive = hash_table_simd::walkAndSplitInPlace</*kEmitInsert=*/false>(
+        numActive,
+        mask,
+        activeSlots,
+        activeRows,
+        hashes,
+        table_,
+        hits,
+        /*insertRows=*/nullptr,
+        /*insertSlots=*/nullptr,
+        /*numInsertsOut=*/nullptr);
+    if (numActive == 0) {
+      break;
+    }
+
+    // Compare normalized keys on survivors only.
+    hash_table_simd::compareNormalizedKeys<kNormalizedKeyOffset>(
+        numActive, activeRows, keys, hits);
+    asm volatile("" ::: "memory");
+
+    // Compact normalized-key mismatches and advance them by one slot.
+    int numNextActive = hash_table_simd::compactNormalizedKeyMismatches(
+        numActive,
+        activeRows,
+        activeSlots,
+        hits,
+        activeRows,
+        activeSlots,
+        mask);
+    numActive = numNextActive;
+  }
+}
+
+// SIMD full-hash group-by probe over tagged-pointer buckets. Tag matches are
+// verified with full key compare.
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::groupHashProbeSimd(HashLookup& lookup) {
+  const int numProbes = lookup.rows.size();
+  if (numProbes == 0) {
+    return;
+  }
+
+  // Build SIMD key columns once per batch.
+  hash_table_simd::buildKeyColumns<ignoreNullKeys>(
+      lookup,
+      lookup.simdKeyColumns,
+      rows_.get(),
+      /*hasStoredNullKeys=*/false,
+      /*columnHasNulls=*/{});
+
+  lookup.simdActiveRows.resize(numProbes);
+  lookup.simdActiveSlots.resize(numProbes);
+  lookup.simdCandidateRows.resize(numProbes);
+  lookup.simdCandidateGroups.resize(numProbes);
+  lookup.simdMatchMask.resize(numProbes);
+  lookup.simdBothNullMask.resize(numProbes);
+  lookup.simdCandidateSlots.resize(numProbes);
+
+  const uint64_t mask = sizeMask_;
+  const uint64_t* hashes = lookup.hashes.data();
+  const vector_size_t* rows = lookup.rows.data();
+  char** hits = lookup.hits.data();
+  int32_t* activeRows = lookup.simdActiveRows.data();
+  uint64_t* activeSlots = lookup.simdActiveSlots.data();
+  auto* candidateRows = lookup.simdCandidateRows.data();
+  auto* candidateGroups = lookup.simdCandidateGroups.data();
+  uint64_t* candidateSlots = lookup.simdCandidateSlots.data();
+
+  int numActive = numProbes;
+  for (int a = 0; a < numActive; ++a) {
+    const int32_t row = rows[a];
+    activeSlots[a] = hash_table_simd::bucketStart(hashes[row] & mask);
+  }
+  const int32_t* activeRowsInput = rows;
+
+  while (numActive > 0) {
+    auto insert = [&](uint64_t slot, vector_size_t row) {
+      insertEntrySimd(lookup, slot, row);
+    };
+    // Walk buckets and split tag matches into candidate streams. Empty slots
+    // are inserted immediately.
+    const int numCandidates =
+        hash_table_simd::walkSplitAndInsertToCandidates</*kWriteHits=*/false>(
+            numActive,
+            mask,
+            activeSlots,
+            activeRowsInput,
+            hashes,
+            table_,
+            hits,
+            candidateRows,
+            candidateGroups,
+            candidateSlots,
+            insert);
+
+    int numNextActive = 0;
+
+    // Compare full keys before publishing hits.
+    if (numCandidates > 0) {
+      for (int k = 0; k < numCandidates; ++k) {
+        __builtin_prefetch(candidateGroups[k], 0, 1);
+      }
+      int32_t numColumnMismatches = 0;
+      const int32_t numMatches =
+          hash_table_simd::compareProbeColumns<ignoreNullKeys>(
+              lookup.simdKeyColumns,
+              candidateRows,
+              candidateGroups,
+              candidateSlots,
+              numCandidates,
+              activeRows,
+              activeSlots,
+              numColumnMismatches,
+              rows_.get(),
+              mask,
+              lookup.simdMatchMask.data(),
+              lookup.simdBothNullMask.data());
+
+      // Publish matches.
+      for (int k = 0; k < numMatches; ++k) {
+        hits[candidateRows[k]] = candidateGroups[k];
+      }
+      numNextActive += numColumnMismatches;
+    }
+
+    numActive = numNextActive;
+    activeRowsInput = activeRows;
+  }
+}
+
+// SIMD full-hash join probe over tagged-pointer buckets. Read-only.
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::joinHashProbeSimd(HashLookup& lookup) {
+  const int numProbes = lookup.rows.size();
+  if (numProbes == 0) {
+    return;
+  }
+  hash_table_simd::buildKeyColumns<ignoreNullKeys>(
+      lookup,
+      lookup.simdKeyColumns,
+      rows_.get(),
+      /*hasStoredNullKeys=*/false,
+      /*columnHasNulls=*/{});
+
+  lookup.simdActiveRows.resize(numProbes);
+  lookup.simdActiveSlots.resize(numProbes);
+  lookup.simdCandidateRows.resize(numProbes);
+  lookup.simdCandidateGroups.resize(numProbes);
+  lookup.simdMatchMask.resize(numProbes);
+  lookup.simdBothNullMask.resize(numProbes);
+  lookup.simdCandidateSlots.resize(numProbes);
+
+  const uint64_t mask = sizeMask_;
+  const uint64_t* hashes = lookup.hashes.data();
+  const vector_size_t* rows = lookup.rows.data();
+  char** hits = lookup.hits.data();
+  int32_t* activeRows = lookup.simdActiveRows.data();
+  uint64_t* activeSlots = lookup.simdActiveSlots.data();
+  auto* candidateRows = lookup.simdCandidateRows.data();
+  auto* candidateGroups = lookup.simdCandidateGroups.data();
+  uint64_t* candidateSlots = lookup.simdCandidateSlots.data();
+
+  int numActive = numProbes;
+  for (int a = 0; a < numActive; ++a) {
+    const int32_t row = rows[a];
+    activeSlots[a] = hash_table_simd::bucketStart(hashes[row] & mask);
+  }
+  const int32_t* activeRowsInput = rows;
+
+  while (numActive > 0) {
+    // Walk buckets. Empty rows are final misses; tag matches land in candidate
+    // streams for full key compare.
+    const int numCandidates = hash_table_simd::walkAndSplitToCandidates<
+        /*kEmitInsert=*/false,
+        /*kWriteHits=*/true>(
+        numActive,
+        mask,
+        activeSlots,
+        activeRowsInput,
+        hashes,
+        table_,
+        hits,
+        candidateRows,
+        candidateGroups,
+        candidateSlots,
+        /*insertRows=*/nullptr,
+        /*insertSlots=*/nullptr,
+        /*numInsertsOut=*/nullptr);
+
+    int numNextActive = 0;
+    if (numCandidates > 0) {
+      int32_t numColumnMismatches = 0;
+      hash_table_simd::compareProbeColumns<ignoreNullKeys>(
+          lookup.simdKeyColumns,
+          candidateRows,
+          candidateGroups,
+          candidateSlots,
+          numCandidates,
+          activeRows,
+          activeSlots,
+          numColumnMismatches,
+          rows_.get(),
+          mask,
+          lookup.simdMatchMask.data(),
+          lookup.simdBothNullMask.data());
+      numNextActive += numColumnMismatches;
+    }
+
+    numActive = numNextActive;
+    activeRowsInput = activeRows;
+  }
+}
+
+// SIMD full-hash join-build insert over tagged-pointer buckets.
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::insertForJoinHashSimd(
+    char** newRows,
+    const uint64_t* hashes,
+    int32_t numRows,
+    TableInsertPartitionInfo* partitionInfo,
+    SimdBuildScratch& scratch,
+    std::vector<hash_table_simd::KeyColumn>& keyColumns) {
+  if (numRows == 0) {
+    return;
+  }
+  auto initializeKeyColumns =
+      [&](std::vector<hash_table_simd::KeyColumn>& keyColumns) {
+        if (!keyColumns.empty()) {
+          return;
+        }
+        keyColumns.reserve(hashers_.size());
+        const auto numHashers = static_cast<int32_t>(hashers_.size());
+        for (int32_t i = 0; i < numHashers; ++i) {
+          const auto& hasher = hashers_[i];
+          keyColumns.push_back(hash_table_simd::KeyColumn{
+              nullptr,
+              nullptr,
+              rows_->columnAt(i),
+              hasher->typeKind(),
+              i,
+              false,
+              false,
+              nullptr,
+              false});
+        }
+      };
+  initializeKeyColumns(keyColumns);
+  scratch.resize(numRows, false);
+  int32_t* activeRows = scratch.activeRows.data();
+  uint64_t* startSlots = scratch.startSlots.data();
+  uint64_t* activeSlots = scratch.activeSlots.data();
+  int32_t* insertRows = scratch.insertRows.data();
+  uint64_t* insertSlots = scratch.insertSlots.data();
+  auto* candidateRows = scratch.candidateRows.data();
+  auto* candidateGroups = scratch.candidateGroups.data();
+  uint64_t* candidateSlots = scratch.candidateSlots.data();
+
+  const uint64_t mask = sizeMask_;
+
+  int numActive = numRows;
+  for (int a = 0; a < numActive; ++a) {
+    activeRows[a] = a;
+    const uint64_t hash = hashes[a];
+    const uint64_t slot = hash_table_simd::bucketStart(hash & mask);
+    startSlots[a] = slot;
+    activeSlots[a] = slot;
+  }
+
+  while (numActive > 0) {
+    // Walk buckets and split tag matches into candidate streams; empty slots
+    // go to the insert stream.
+    int numCandidates = 0;
+    int numInserts = 0;
+    {
+      constexpr int kPrefetchDistance = hash_table_simd::kProbePrefetchDistance;
+      for (int i = 0; i < kPrefetchDistance && i < numActive; ++i) {
+        __builtin_prefetch(
+            &table_[hash_table_simd::bucketStart(activeSlots[i])]);
+      }
+      if (partitionInfo == nullptr) {
+        for (int a = 0; a < numActive; ++a) {
+          if (a + kPrefetchDistance < numActive) {
+            __builtin_prefetch(&table_[hash_table_simd::bucketStart(
+                activeSlots[a + kPrefetchDistance])]);
+          }
+          const int32_t rowIndex = activeRows[a];
+          const uint64_t tag = hash_table_simd::tagFromHash(hashes[rowIndex]);
+          char* taggedPointer;
+          uint64_t slot;
+          hash_table_simd::scanBucketChain(
+              activeSlots[a], mask, tag, table_, taggedPointer, slot);
+          char* group = hash_table_simd::stripTag(taggedPointer);
+          const int nonEmpty = (taggedPointer != nullptr);
+          candidateRows[numCandidates] = rowIndex;
+          candidateGroups[numCandidates] = group;
+          candidateSlots[numCandidates] = slot;
+          numCandidates += nonEmpty;
+          insertRows[numInserts] = rowIndex;
+          insertSlots[numInserts] = slot;
+          numInserts += (1 - nonEmpty);
+        }
+      } else {
+        for (int a = 0; a < numActive; ++a) {
+          if (a + kPrefetchDistance < numActive) {
+            __builtin_prefetch(&table_[hash_table_simd::bucketStart(
+                activeSlots[a + kPrefetchDistance])]);
+          }
+          const int32_t rowIndex = activeRows[a];
+          const uint64_t tag = hash_table_simd::tagFromHash(hashes[rowIndex]);
+          char* taggedPointer;
+          uint64_t slot;
+          const bool inRange = hash_table_simd::scanBucketChainInRange(
+              activeSlots[a],
+              mask,
+              tag,
+              table_,
+              partitionInfo->start,
+              partitionInfo->end,
+              taggedPointer,
+              slot);
+          if (UNLIKELY(!inRange)) {
+            partitionInfo->addOverflow(newRows[rowIndex]);
+            continue;
+          }
+          char* group = hash_table_simd::stripTag(taggedPointer);
+          const int nonEmpty = (taggedPointer != nullptr);
+          candidateRows[numCandidates] = rowIndex;
+          candidateGroups[numCandidates] = group;
+          candidateSlots[numCandidates] = slot;
+          numCandidates += nonEmpty;
+          insertRows[numInserts] = rowIndex;
+          insertSlots[numInserts] = slot;
+          numInserts += (1 - nonEmpty);
+        }
+      }
+    }
+
+    int numNextActive = 0;
+    // Insert pass: claim empty slots; intra-batch race losers re-queue.
+    for (int k = 0; k < numInserts; ++k) {
+      const int32_t rowIndex = insertRows[k];
+      const uint64_t slot = insertSlots[k];
+      if (UNLIKELY(table_[slot] != nullptr)) {
+        activeSlots[numNextActive] = slot;
+        activeRows[numNextActive++] = rowIndex;
+        continue;
+      }
+      insertJoinEntrySimd(
+          slot, newRows[rowIndex], hashes[rowIndex], partitionInfo);
+    }
+
+    if (numCandidates > 0) {
+      int32_t numColumnMismatches = 0;
+      const int32_t numMatches =
+          hash_table_simd::compareBuildColumns<ignoreNullKeys>(
+              keyColumns,
+              newRows,
+              candidateRows,
+              candidateGroups,
+              candidateSlots,
+              numCandidates,
+              activeRows + numNextActive,
+              activeSlots + numNextActive,
+              numColumnMismatches,
+              rows_.get(),
+              scratch.matchMask.data(),
+              scratch.bothNullMask.data(),
+              scratch.newGroupPointers.data());
+
+      // Link duplicate matches.
+      for (int k = 0; k < numMatches; ++k) {
+        char* const group = candidateGroups[k];
+        char* const newRow = newRows[candidateRows[k]];
+        if (nextOffset_ != 0) {
+          pushNext(group, newRow);
+        }
+      }
+      // Advance full-key mismatches using pre-captured bucket positions.
+      const int32_t mismatchStart = numNextActive;
+      for (int m = 0; m < numColumnMismatches; ++m) {
+        const int32_t rowIndex = activeRows[mismatchStart + m];
+        const uint64_t nextSlot = (activeSlots[mismatchStart + m] + 1) & mask;
+        if (partitionInfo != nullptr &&
+            UNLIKELY(!partitionInfo->inRange(nextSlot))) {
+          partitionInfo->addOverflow(newRows[rowIndex]);
+          continue;
+        }
+        if (UNLIKELY(nextSlot == startSlots[rowIndex])) {
+          if (partitionInfo != nullptr) {
+            partitionInfo->addOverflow(newRows[rowIndex]);
+          } else {
+            BOLT_FAIL("SIMD hash build: table full, no free slot for row");
+          }
+          continue;
+        }
+        activeSlots[numNextActive] = nextSlot;
+        activeRows[numNextActive++] = rowIndex;
+      }
+    }
+
+    numActive = numNextActive;
+  }
+}
+
+// SIMD-mode allocation: flat storage of fixed-width tagged-pointer buckets.
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::allocateSimdTable(uint64_t size) {
+  BOLT_CHECK(bits::isPowerOfTwo(size), "Size is not a power of two: {}", size);
+  BOLT_CHECK_GE(size, hash_table_simd::kBucketSize);
+  capacity_ = size;
+  const uint64_t byteSize = capacity_ * sizeof(char*);
+  // Slot mask for SIMD bucket layout — distinct from F14's byte mask.
+  sizeMask_ = size - 1;
+  numBuckets_ = size / hash_table_simd::kBucketSize;
+  sizeBits_ = __builtin_popcountll(sizeMask_);
+  // bucketOffsetMask_ is unused in SIMD bucket mode; leave at zero.
+  bucketOffsetMask_ = 0;
+  numTombstones_ = 0;
+  const auto numPages = memory::AllocationTraits::numPages(byteSize);
+  rows_->pool()->allocateContiguous(numPages, tableAllocation_);
+  table_ = tableAllocation_.data<char*>();
+  ::memset(table_, 0, byteSize);
+}
+
+// SIMD normalized-key join-build insert over tagged-pointer buckets. Tracks
+// each row's start bucket for wrap-around detection. Empty slots are claimed
+// with per-pass dedupe; equal keys link duplicates; mismatches advance.
+// Partition boundary and full-table wrap each divert the row into
+// partitionInfo->overflows.
+template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::insertForJoinNormalizedKeySimd(
+    char** newRows,
+    const uint64_t* hashes,
+    int32_t numRows,
+    TableInsertPartitionInfo* partitionInfo,
+    SimdBuildScratch& scratch) {
+  constexpr int32_t kNormalizedKeyOffset =
+      -static_cast<int32_t>(sizeof(normalized_key_t));
+
+  if (numRows == 0) {
+    return;
+  }
+  scratch.resize(numRows, true);
+  int32_t* activeRows = scratch.activeRows.data();
+  uint64_t* startSlots = scratch.startSlots.data();
+  uint64_t* activeSlots = scratch.activeSlots.data();
+  int32_t* insertRows = scratch.insertRows.data();
+  uint64_t* insertSlots = scratch.insertSlots.data();
+  char** normalizedKeyCandidateGroups =
+      scratch.normalizedKeyCandidateGroups.data();
+
+  const uint64_t mask = sizeMask_;
+
+  int numActive = numRows;
+  for (int a = 0; a < numActive; ++a) {
+    activeRows[a] = a;
+    const uint64_t hash = hashes[a];
+    const uint64_t slot = hash_table_simd::bucketStart(hash & mask);
+    startSlots[a] = slot;
+    activeSlots[a] = slot;
+  }
+
+  while (numActive > 0) {
+    // Walk + split: survivors compacted in-place into
+    int numSurvivors = 0;
+    int numInserts = 0;
+    {
+      constexpr int kPrefetchDistance = hash_table_simd::kProbePrefetchDistance;
+      for (int i = 0; i < kPrefetchDistance && i < numActive; ++i) {
+        __builtin_prefetch(
+            &table_[hash_table_simd::bucketStart(activeSlots[i])]);
+      }
+      if (partitionInfo == nullptr) {
+        for (int a = 0; a < numActive; ++a) {
+          if (a + kPrefetchDistance < numActive) {
+            __builtin_prefetch(&table_[hash_table_simd::bucketStart(
+                activeSlots[a + kPrefetchDistance])]);
+          }
+          const int32_t rowIndex = activeRows[a];
+          const uint64_t tag = hash_table_simd::tagFromHash(hashes[rowIndex]);
+          char* taggedPointer;
+          uint64_t slot;
+          hash_table_simd::scanBucketChain(
+              activeSlots[a], mask, tag, table_, taggedPointer, slot);
+          char* group = hash_table_simd::stripTag(taggedPointer);
+          const int nonEmpty = (taggedPointer != nullptr);
+          // Survivor in-place compact.
+          activeRows[numSurvivors] = rowIndex;
+          activeSlots[numSurvivors] = slot;
+          normalizedKeyCandidateGroups[numSurvivors] = group;
+          numSurvivors += nonEmpty;
+          // Insert stream (dense).
+          insertRows[numInserts] = rowIndex;
+          insertSlots[numInserts] = slot;
+          numInserts += (1 - nonEmpty);
+        }
+      } else {
+        for (int a = 0; a < numActive; ++a) {
+          if (a + kPrefetchDistance < numActive) {
+            __builtin_prefetch(&table_[hash_table_simd::bucketStart(
+                activeSlots[a + kPrefetchDistance])]);
+          }
+          const int32_t rowIndex = activeRows[a];
+          const uint64_t tag = hash_table_simd::tagFromHash(hashes[rowIndex]);
+          char* taggedPointer;
+          uint64_t slot;
+          const bool inRange = hash_table_simd::scanBucketChainInRange(
+              activeSlots[a],
+              mask,
+              tag,
+              table_,
+              partitionInfo->start,
+              partitionInfo->end,
+              taggedPointer,
+              slot);
+          if (UNLIKELY(!inRange)) {
+            partitionInfo->addOverflow(newRows[rowIndex]);
+            continue;
+          }
+          char* group = hash_table_simd::stripTag(taggedPointer);
+          const int nonEmpty = (taggedPointer != nullptr);
+          // Survivor in-place compact.
+          activeRows[numSurvivors] = rowIndex;
+          activeSlots[numSurvivors] = slot;
+          normalizedKeyCandidateGroups[numSurvivors] = group;
+          numSurvivors += nonEmpty;
+          // Insert stream (dense).
+          insertRows[numInserts] = rowIndex;
+          insertSlots[numInserts] = slot;
+          numInserts += (1 - nonEmpty);
+        }
+      }
+    }
+    asm volatile("" ::: "memory");
+
+    int numNextActive = 0;
+
+    // Compare normalized keys before the insert pass overwrites
+    // activeRows/activeSlots. All survivors are non-null.
+    for (int a = 0; a < numSurvivors; ++a) {
+      const int32_t rowIndex = activeRows[a];
+      char* const newRow = newRows[rowIndex];
+      char* const group = normalizedKeyCandidateGroups[a];
+      const uint64_t newNormalizedKey =
+          *reinterpret_cast<uint64_t*>(newRow + kNormalizedKeyOffset);
+      const uint64_t storedNormalizedKey =
+          *reinterpret_cast<uint64_t*>(group + kNormalizedKeyOffset);
+
+      if (storedNormalizedKey == newNormalizedKey) {
+        // Duplicate key: link chain.
+        if (nextOffset_ != 0) {
+          pushNext(group, newRow);
+        }
+        continue;
+      }
+
+      // Mismatch: advance with partition/wrap checks.
+      const uint64_t nextSlot = (activeSlots[a] + 1) & mask;
+      if (partitionInfo != nullptr &&
+          UNLIKELY(!partitionInfo->inRange(nextSlot))) {
+        partitionInfo->addOverflow(newRow);
+        continue;
+      }
+      if (UNLIKELY(nextSlot == startSlots[rowIndex])) {
+        if (partitionInfo != nullptr) {
+          partitionInfo->addOverflow(newRow);
+        } else {
+          BOLT_FAIL("SIMD hash build: table full, no free slot for row");
+        }
+        continue;
+      }
+      activeSlots[numNextActive] = nextSlot;
+      activeRows[numNextActive++] = rowIndex;
+    }
+
+    // Insert pass: claim empty slots; intra-batch race losers re-queue.
+    for (int k = 0; k < numInserts; ++k) {
+      const int32_t rowIndex = insertRows[k];
+      const uint64_t slot = insertSlots[k];
+      if (UNLIKELY(table_[slot] != nullptr)) {
+        activeSlots[numNextActive] = slot;
+        activeRows[numNextActive++] = rowIndex;
+        continue;
+      }
+      insertJoinEntrySimd(
+          slot, newRows[rowIndex], hashes[rowIndex], partitionInfo);
+    }
+    numActive = numNextActive;
+  }
+}
+
+// Claim an empty slot for a join-build row. Returns false if the slot is
+// outside the owner's partition range (row queued to overflow).
+template <bool ignoreNullKeys>
+bool HashTable<ignoreNullKeys>::insertJoinEntrySimd(
+    uint64_t slot,
+    char* row,
+    uint64_t hash,
+    TableInsertPartitionInfo* partitionInfo) {
+  if (partitionInfo != nullptr && !partitionInfo->inRange(slot)) {
+    partitionInfo->addOverflow(row);
+    return false;
+  }
+  table_[slot] = hash_table_simd::applyTag(row, hash);
+  return true;
 }
 
 template class HashTable<true>;
@@ -2323,14 +3219,29 @@ void BaseHashTable::prepareForGroupProbe(
 
   bool rehash = false;
   const auto mode = hashMode();
+  const bool useSimd = simdActive();
   for (auto i = 0; i < hashers.size(); ++i) {
     auto& hasher = hashers[i];
     if (mode != BaseHashTable::HashMode::kHash) {
-      if (!hasher->computeValueIds(rows, lookup.hashes)) {
-        rehash = true;
+      bool handled = false;
+      if (useSimd) {
+        handled = hash_table_simd::tryValueIds(
+            *hasher, rows, i > 0, lookup.hashes.data());
+      }
+      if (!handled) {
+        if (!hasher->computeValueIds(rows, lookup.hashes)) {
+          rehash = true;
+        }
       }
     } else {
-      hasher->hash(rows, i > 0, lookup.hashes);
+      bool handled = false;
+      if (useSimd) {
+        handled = hash_table_simd::tryHash(
+            *hasher, rows, i > 0, lookup.hashes.data());
+      }
+      if (!handled) {
+        hasher->hash(rows, i > 0, lookup.hashes);
+      }
     }
   }
 
@@ -2368,6 +3279,7 @@ void BaseHashTable::prepareForJoinProbe(
   lookup.reset(rows.end());
 
   const auto mode = hashMode();
+  const bool useSimd = simdActive();
   for (auto i = 0; i < hashers.size(); ++i) {
     auto& hasher = hashers[i];
     if (mode != BaseHashTable::HashMode::kHash) {
@@ -2375,7 +3287,14 @@ void BaseHashTable::prepareForJoinProbe(
       hashers_[i]->lookupValueIds(
           *key, rows, lookup.scratchMemory, lookup.hashes);
     } else {
-      hasher->hash(rows, i > 0, lookup.hashes);
+      bool handled = false;
+      if (useSimd) {
+        handled = hash_table_simd::tryHash(
+            *hasher, rows, i > 0, lookup.hashes.data());
+      }
+      if (!handled) {
+        hasher->hash(rows, i > 0, lookup.hashes);
+      }
     }
   }
 
