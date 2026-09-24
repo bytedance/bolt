@@ -29,8 +29,14 @@
  */
 
 #include "bolt/dwio/dwrf/common/RLEv2.h"
+#include "bolt/common/base/SimdUtil.h"
 #include "bolt/dwio/common/SeekableInputStream.h"
 #include "bolt/dwio/dwrf/common/Common.h"
+
+#ifdef BOLT_RLEV2_SVE
+#include "bolt/dwio/dwrf/common/RLEv2SVE.h"
+#endif
+
 namespace bytedance::bolt::dwrf {
 
 using memory::MemoryPool;
@@ -156,7 +162,8 @@ RleDecoderV2<isSigned>::RleDecoderV2(
       patchMask(0),
       actualGap(0),
       unpacked(pool, 0),
-      unpackedPatch(pool, 0) {
+      unpackedPatch(pool, 0),
+      bulkScratch_(pool, 0) {
   // PASS
 }
 
@@ -187,21 +194,242 @@ template void RleDecoderV2<false>::seekToRowGroup(
 
 template <bool isSigned>
 void RleDecoderV2<isSigned>::skipPending() {
-  // simple for now, until perf tests indicate something encoding specific is
-  // needed
-  constexpr int64_t N = 64;
-  int64_t dummy[N];
   auto numValues = this->pendingSkip;
   this->pendingSkip = 0;
-  while (numValues) {
-    uint64_t nRead = std::min(N, numValues);
-    doNext(dummy, nRead, nullptr);
-    numValues -= nRead;
+  if (numValues == 0) {
+    return;
   }
+  skipValues(numValues);
 }
 
 template void RleDecoderV2<true>::skipPending();
 template void RleDecoderV2<false>::skipPending();
+
+template <bool isSigned>
+void RleDecoderV2<isSigned>::skipValues(uint64_t numValues) {
+  // Encoding-aware skip: advance runRead and the bit stream / unpacked index
+  // exactly as doNext would, without materializing values. Mirrors the control
+  // flow of doNext (resetRun at run boundaries, dispatch by type) but each
+  // branch advances state arithmetically instead of decoding into a buffer.
+  while (numValues > 0) {
+    if (runRead == runLength) {
+      resetRun();
+    }
+
+    switch (type) {
+      case SHORT_REPEAT: {
+        // Header decode (same guard as nextShortRepeats).
+        if (runRead == runLength) {
+          byteSize = (firstByte >> 3) & 0x07;
+          byteSize += 1;
+          runLength = firstByte & 0x07;
+          runLength += RLE_MINIMUM_REPEAT;
+          runRead = 0;
+          firstValue = readLongBE(byteSize);
+          if (isSigned) {
+            firstValue =
+                ZigZag::decode<uint64_t>(static_cast<uint64_t>(firstValue));
+          }
+        }
+        uint64_t nSkip = std::min(runLength - runRead, numValues);
+        // Repeated value: no bit stream to advance, just count.
+        runRead += nSkip;
+        numValues -= nSkip;
+        break;
+      }
+      case DIRECT: {
+        // Header decode (same guard as nextDirect).
+        if (runRead == runLength) {
+          unsigned char fbo = (firstByte >> 1) & 0x1f;
+          bitSize = decodeBitWidth(fbo);
+          runLength = static_cast<uint64_t>(firstByte & 0x01) << 8;
+          runLength |= readByte();
+          runLength += 1;
+          runRead = 0;
+        }
+        uint64_t nSkip = std::min(runLength - runRead, numValues);
+        // Advance the MSB-first bit stream by nSkip * bitSize bits, leaving
+        // curByte/bitsLeft in the same state as if readLongs had decoded the
+        // values one-by-one.
+        uint64_t totalBits = nSkip * bitSize;
+        if (totalBits <= bitsLeft) {
+          bitsLeft -= static_cast<uint32_t>(totalBits);
+        } else {
+          uint64_t need = totalBits - bitsLeft;
+          uint64_t extraBytes = (need + 7) / 8;
+          for (uint64_t b = 0; b < extraBytes; ++b) {
+            curByte = readByte();
+          }
+          bitsLeft = static_cast<uint32_t>(extraBytes * 8 - need);
+        }
+        runRead += nSkip;
+        numValues -= nSkip;
+        break;
+      }
+      case PATCHED_BASE: {
+        // Header decode + full pre-decode (same as nextPatched).
+        if (runRead == runLength) {
+          unsigned char fbo = (firstByte >> 1) & 0x1f;
+          bitSize = decodeBitWidth(fbo);
+          runLength = static_cast<uint64_t>(firstByte & 0x01) << 8;
+          runLength |= readByte();
+          runLength += 1;
+          runRead = 0;
+
+          uint64_t thirdByte = readByte();
+          byteSize = (thirdByte >> 5) & 0x07;
+          byteSize += 1;
+
+          uint32_t pwo = thirdByte & 0x1f;
+          patchBitSize = decodeBitWidth(pwo);
+
+          uint64_t fourthByte = readByte();
+          uint32_t pgw = (fourthByte >> 5) & 0x07;
+          pgw += 1;
+
+          size_t pl = fourthByte & 0x1f;
+          DWIO_ENSURE_NE(
+              pl,
+              0,
+              "Corrupt PATCHED_BASE encoded data (pl==0)! ",
+              dwio::common::IntDecoder<isSigned>::inputStream->getName());
+
+          base = readLongBE(byteSize);
+          int64_t mask = (static_cast<int64_t>(1) << ((byteSize * 8) - 1));
+          if ((base & mask) != 0) {
+            base = base & ~mask;
+            base = -base;
+          }
+
+          unpacked.resize(runLength);
+          unpackedIdx = 0;
+          readLongs(unpacked.data(), 0, runLength, bitSize);
+          resetReadLongs();
+
+          unpackedPatch.resize(pl);
+          patchIdx = 0;
+          DWIO_ENSURE_LE(
+              (patchBitSize + pgw),
+              64,
+              "Corrupt PATCHED_BASE encoded data (patchBitSize + pgw > 64)! ",
+              dwio::common::IntDecoder<isSigned>::inputStream->getName());
+          uint32_t cfb = getClosestFixedBits(patchBitSize + pgw);
+          readLongs(unpackedPatch.data(), 0, pl, cfb);
+          resetReadLongs();
+
+          patchMask = ((static_cast<int64_t>(1) << patchBitSize) - 1);
+          adjustGapAndPatch();
+        }
+        uint64_t nSkip = std::min(runLength - runRead, numValues);
+        // Advance through the pre-decoded run, advancing patch state at each
+        // patch position (mirrors nextPatched's per-value loop body).
+        for (uint64_t i = 0; i < nSkip; ++i) {
+          if (static_cast<int64_t>(unpackedIdx) != actualGap) {
+            // no patching required
+          } else {
+            ++patchIdx;
+            if (patchIdx < unpackedPatch.size()) {
+              adjustGapAndPatch();
+              actualGap += unpackedIdx;
+            }
+          }
+          ++runRead;
+          ++unpackedIdx;
+        }
+        numValues -= nSkip;
+        break;
+      }
+      case DELTA: {
+        // Header decode (same guard as nextDelta).
+        if (runRead == runLength) {
+          unsigned char fbo = (firstByte >> 1) & 0x1f;
+          if (fbo != 0) {
+            bitSize = decodeBitWidth(fbo);
+          } else {
+            bitSize = 0;
+          }
+          runLength = static_cast<uint64_t>(firstByte & 0x01) << 8;
+          runLength |= readByte();
+          ++runLength;
+          runRead = deltaBase = 0;
+
+          if constexpr (isSigned) {
+            firstValue = dwio::common::IntDecoder<isSigned>::readVsLong();
+          } else {
+            firstValue = static_cast<int64_t>(
+                dwio::common::IntDecoder<isSigned>::readVuLong());
+          }
+          prevValue = firstValue;
+          deltaBase = dwio::common::IntDecoder<isSigned>::readVsLong();
+        }
+        uint64_t nSkip = std::min(runLength - runRead, numValues);
+
+        if (bitSize == 0) {
+          // Fixed delta: pure arithmetic series. The first value (firstValue)
+          // occupies runRead==0 with no delta added; each subsequent position
+          // adds deltaBase.
+          if (runRead == 0) {
+            if (nSkip == 1) {
+              prevValue = firstValue;
+            } else {
+              prevValue =
+                  firstValue + static_cast<int64_t>(nSkip - 1) * deltaBase;
+            }
+          } else {
+            prevValue += static_cast<int64_t>(nSkip) * deltaBase;
+          }
+          runRead += nSkip;
+        } else {
+          // Variable delta: read and accumulate deltas from the bit stream.
+          //   - runRead==0: position 0 is firstValue (no delta)
+          //   - runRead<2:  position 1 is firstValue + deltaBase
+          //   - runRead>=2: subsequent positions add/subtract deltas
+          uint64_t remaining = nSkip;
+          if (runRead == 0 && remaining > 0) {
+            // position 0: firstValue, prevValue already == firstValue
+            ++runRead;
+            --remaining;
+          }
+          if (runRead < 2 && remaining > 0) {
+            // position 1: firstValue + deltaBase
+            prevValue = firstValue + deltaBase;
+            ++runRead;
+            --remaining;
+          }
+          if (remaining > 0) {
+            constexpr uint64_t SCRATCH = 256;
+            int64_t local[SCRATCH];
+            int64_t* scratch = local;
+            if (remaining > SCRATCH) {
+              if (unpacked.size() < remaining) {
+                unpacked.resize(remaining);
+              }
+              scratch = unpacked.data();
+            }
+            readLongs(scratch, 0, remaining, bitSize, nullptr);
+            if (deltaBase < 0) {
+              for (uint64_t i = 0; i < remaining; ++i) {
+                prevValue -= scratch[i];
+              }
+            } else {
+              for (uint64_t i = 0; i < remaining; ++i) {
+                prevValue += scratch[i];
+              }
+            }
+            runRead += remaining;
+          }
+        }
+        numValues -= nSkip;
+        break;
+      }
+      default:
+        DWIO_RAISE("unknown encoding");
+    }
+  }
+}
+
+template void RleDecoderV2<true>::skipValues(uint64_t numValues);
+template void RleDecoderV2<false>::skipValues(uint64_t numValues);
 
 template <bool isSigned>
 void RleDecoderV2<isSigned>::next(
@@ -262,6 +490,37 @@ template void RleDecoderV2<false>::doNext(
     const uint64_t* const nulls);
 
 template <bool isSigned>
+void RleDecoderV2<isSigned>::readLongsFromBuffer(
+    int64_t* data,
+    uint64_t len,
+    uint64_t fb) {
+  auto* input = reinterpret_cast<const uint8_t*>(this->bufferStart);
+  uint32_t available = bitsLeft;
+  uint32_t byte = curByte;
+  for (uint64_t i = 0; i < len; ++i) {
+    uint64_t value = 0;
+    uint32_t needed = fb;
+    while (needed > available) {
+      value = (value << available) | (byte & ((1u << available) - 1));
+      needed -= available;
+      byte = *input++;
+      available = 8;
+    }
+    available -= needed;
+    data[i] = static_cast<int64_t>(
+        (value << needed) | ((byte >> available) & ((1u << needed) - 1)));
+  }
+  this->bufferStart = reinterpret_cast<const char*>(input);
+  bitsLeft = available;
+  curByte = byte;
+}
+
+template void
+RleDecoderV2<true>::readLongsFromBuffer(int64_t*, uint64_t, uint64_t);
+template void
+RleDecoderV2<false>::readLongsFromBuffer(int64_t*, uint64_t, uint64_t);
+
+template <bool isSigned>
 uint64_t RleDecoderV2<isSigned>::nextShortRepeats(
     int64_t* const data,
     uint64_t offset,
@@ -287,6 +546,14 @@ uint64_t RleDecoderV2<isSigned>::nextShortRepeats(
 
   uint64_t nRead = std::min(runLength - runRead, numValues);
 
+#ifdef BOLT_RLEV2_SVE
+  if (nRead > 1 && process::hasSve()) {
+    runRead += detail::fillRepeatedSve(
+        data, offset, offset + nRead, nulls, firstValue);
+    return nRead;
+  }
+#endif
+
   if (nulls) {
     for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
       if (!bits::isBitNull(nulls, pos)) {
@@ -295,10 +562,8 @@ uint64_t RleDecoderV2<isSigned>::nextShortRepeats(
       }
     }
   } else {
-    for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
-      data[pos] = firstValue;
-      ++runRead;
-    }
+    std::fill_n(data + offset, nRead, firstValue);
+    runRead += nRead;
   }
 
   return nRead;
@@ -339,6 +604,12 @@ uint64_t RleDecoderV2<isSigned>::nextDirect(
   runRead += readLongs(data, offset, nRead, bitSize, nulls);
 
   if (isSigned) {
+#ifdef BOLT_RLEV2_SVE
+    if (nRead > 1 && process::hasSve()) {
+      detail::zigzagDecodeSve(data, offset, offset + nRead, nulls);
+      return nRead;
+    }
+#endif
     if (nulls) {
       for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
         if (!bits::isBitNull(nulls, pos)) {
@@ -347,7 +618,15 @@ uint64_t RleDecoderV2<isSigned>::nextDirect(
         }
       }
     } else {
-      for (uint64_t pos = offset; pos < offset + nRead; ++pos) {
+      using Batch = xsimd::batch<uint64_t>;
+      uint64_t pos = offset;
+      for (; pos + Batch::size <= offset + nRead; pos += Batch::size) {
+        auto* values = reinterpret_cast<uint64_t*>(data + pos);
+        const auto encoded = Batch::load_unaligned(values);
+        const auto decoded = (encoded >> 1) ^ (Batch(0) - (encoded & Batch(1)));
+        decoded.store_unaligned(values);
+      }
+      for (; pos < offset + nRead; ++pos) {
         data[pos] = ZigZag::decode<uint64_t>(static_cast<uint64_t>(data[pos]));
       }
     }
@@ -544,6 +823,25 @@ uint64_t RleDecoderV2<isSigned>::nextDelta(
   }
 
   if (bitSize == 0) {
+#ifdef BOLT_RLEV2_SVE
+    if (offset + nRead - pos > 1 && process::hasSve()) {
+      runRead += detail::fixedDeltaSve(
+          data, pos, offset + nRead, nulls, deltaBase, prevValue);
+      return nRead;
+    }
+#endif
+    if (!nulls) {
+      using Batch = xsimd::batch<uint64_t>;
+      const auto delta = static_cast<uint64_t>(deltaBase);
+      const auto steps = (simd::iota<uint64_t>() + Batch(1)) * Batch(delta);
+      for (; pos + Batch::size <= offset + nRead; pos += Batch::size) {
+        const auto values = Batch(static_cast<uint64_t>(prevValue)) + steps;
+        values.store_unaligned(reinterpret_cast<uint64_t*>(data + pos));
+        prevValue = static_cast<int64_t>(
+            static_cast<uint64_t>(prevValue) + Batch::size * delta);
+        runRead += Batch::size;
+      }
+    }
     // add fixed deltas to adjacent values
     for (; pos < offset + nRead; ++pos) {
       // skip null positions
@@ -571,6 +869,14 @@ uint64_t RleDecoderV2<isSigned>::nextDelta(
     // is a decreasing sequence else an increasing sequence
     uint64_t remaining = (offset + nRead) - pos;
     runRead += readLongs(data, pos, remaining, bitSize, nulls);
+
+#ifdef BOLT_RLEV2_SVE
+    if (remaining > 1 && process::hasSve()) {
+      detail::variableDeltaSve(
+          data, pos, offset + nRead, nulls, deltaBase < 0, prevValue);
+      return nRead;
+    }
+#endif
 
     if (deltaBase < 0) {
       for (; pos < offset + nRead; ++pos) {

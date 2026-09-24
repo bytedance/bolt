@@ -964,6 +964,84 @@ TEST_P(TestColumnReader, testIntegerRLEv2) {
   streams_.setFormat(DwrfFormat::kDwrf);
 }
 
+TEST_P(TestColumnReader, testIntegerRLEv2BatchAndSkip) {
+  streams_.setFormat(DwrfFormat::kOrc);
+  proto::ColumnEncoding direct;
+  proto::ColumnEncoding directV2;
+  direct.set_kind(proto::ColumnEncoding_Kind_DIRECT);
+  directV2.set_kind(proto::ColumnEncoding_Kind_DIRECT_V2);
+  EXPECT_CALL(streams_, getEncodingProxy(0)).WillRepeatedly(Return(&direct));
+  EXPECT_CALL(streams_, getEncodingProxy(1)).WillRepeatedly(Return(&directV2));
+  EXPECT_CALL(streams_, getStreamProxy(_, proto::Stream_Kind_PRESENT, false))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(streams_, getStreamProxy(_, proto::Stream_Kind_ROW_INDEX, false))
+      .WillRepeatedly(Return(nullptr));
+  // Fixed DELTA runs 0..511 and 512..1023 (first values are ZigZag varints).
+  const unsigned char data[] = {
+      0xc1, 0xff, 0x00, 0x02, 0xc1, 0xff, 0x80, 0x08, 0x02};
+  EXPECT_CALL(streams_, getStreamProxy(1, proto::Stream_Kind_DATA, true))
+      .WillRepeatedly(Invoke([&](auto, auto, auto) {
+        return new SeekableArrayInputStream(data, sizeof(data), 3);
+      }));
+  auto rowType = HiveTypeParser().parse("struct<col0:int>");
+  buildReader(rowType);
+  VectorPtr batch = newBatch(rowType);
+  skipAndRead(batch, 700);
+  auto values = getOnlyChild<FlatVector<int32_t>>(batch);
+  for (int32_t i = 0; i < 700; ++i) {
+    EXPECT_EQ(values->valueAt(i), i);
+  }
+  values.reset();
+  skipAndRead(batch, 101, 17);
+  values = getOnlyChild<FlatVector<int32_t>>(batch);
+  for (int32_t i = 0; i < 101; ++i) {
+    EXPECT_EQ(values->valueAt(i), i + 717);
+  }
+  streams_.setFormat(DwrfFormat::kDwrf);
+}
+
+TEST_P(TestColumnReader, testIntegerRLEv2BatchNulls) {
+  streams_.setFormat(DwrfFormat::kOrc);
+  proto::ColumnEncoding direct;
+  proto::ColumnEncoding directV2;
+  direct.set_kind(proto::ColumnEncoding_Kind_DIRECT);
+  directV2.set_kind(proto::ColumnEncoding_Kind_DIRECT_V2);
+  EXPECT_CALL(streams_, getEncodingProxy(0)).WillRepeatedly(Return(&direct));
+  EXPECT_CALL(streams_, getEncodingProxy(1)).WillRepeatedly(Return(&directV2));
+  EXPECT_CALL(streams_, getStreamProxy(0, proto::Stream_Kind_PRESENT, false))
+      .WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(streams_, getStreamProxy(_, proto::Stream_Kind_ROW_INDEX, false))
+      .WillRepeatedly(Return(nullptr));
+  // Byte-RLE literal of 16 PRESENT bytes. Rows 56 and 120..127 are null.
+  std::vector<unsigned char> present(17, 0xff);
+  present[0] = 0xf0;
+  present[8] = 0x7f;
+  present[16] = 0;
+  EXPECT_CALL(streams_, getStreamProxy(1, proto::Stream_Kind_PRESENT, false))
+      .WillRepeatedly(Invoke([&](auto, auto, auto) {
+        return new SeekableArrayInputStream(present.data(), present.size(), 3);
+      }));
+  const unsigned char data[] = {0xc0, 0x76, 0x00, 0x02}; // 119 values 0..118.
+  EXPECT_CALL(streams_, getStreamProxy(1, proto::Stream_Kind_DATA, true))
+      .WillRepeatedly(Invoke([&](auto, auto, auto) {
+        return new SeekableArrayInputStream(data, sizeof(data), 3);
+      }));
+  auto rowType = HiveTypeParser().parse("struct<col0:smallint>");
+  buildReader(rowType);
+  VectorPtr batch = newBatch(rowType);
+  skipAndRead(batch, 128);
+  auto values = getOnlyChild<FlatVector<int16_t>>(batch);
+  int16_t expected = 0;
+  for (int32_t i = 0; i < 128; ++i) {
+    const bool isNull = i == 56 || i >= 120;
+    ASSERT_EQ(values->isNullAt(i), isNull) << i;
+    if (!isNull) {
+      EXPECT_EQ(values->valueAt(i), expected++);
+    }
+  }
+  streams_.setFormat(DwrfFormat::kDwrf);
+}
+
 TEST_P(TestColumnReader, testIntegerWithNulls) {
   // set getEncoding
   proto::ColumnEncoding directEncoding;

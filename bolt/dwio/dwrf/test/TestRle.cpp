@@ -29,14 +29,135 @@
  */
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <numeric>
 
 #include "bolt/common/base/Nulls.h"
+#include "bolt/common/flags/BoltFlags.h"
 #include "bolt/dwio/common/IntDecoder.h"
 #include "bolt/dwio/common/SeekableInputStream.h"
 #include "bolt/dwio/dwrf/common/DecoderUtil.h"
+#include "bolt/dwio/dwrf/common/RLEv2.h"
 #include "bolt/dwio/dwrf/test/OrcTest.h"
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::dwrf;
+
+namespace {
+
+// Encode independently, one bit at a time, so byte order and partial bytes
+// are checked against values rather than another copy of the decoder.
+void appendPacked(
+    std::vector<unsigned char>& bytes,
+    const std::vector<uint64_t>& values,
+    uint32_t width) {
+  uint32_t bit = 0;
+  for (auto value : values) {
+    for (uint32_t j = width; j > 0; --j) {
+      if (bit % 8 == 0) {
+        bytes.push_back(0);
+      }
+      bytes.back() |= ((value >> (j - 1)) & 1) << (7 - bit % 8);
+      ++bit;
+    }
+  }
+}
+
+std::vector<unsigned char> directRun(
+    const std::vector<uint64_t>& values,
+    uint32_t width) {
+  const std::vector<uint32_t> widths = {
+      1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
+      17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 40, 48, 56, 64};
+  const auto code =
+      std::find(widths.begin(), widths.end(), width) - widths.begin();
+  const auto length = values.size() - 1;
+  std::vector<unsigned char> bytes = {
+      static_cast<unsigned char>(0x40 | (code << 1) | (length >> 8)),
+      static_cast<unsigned char>(length)};
+  appendPacked(bytes, values, width);
+  return bytes;
+}
+
+void appendVarint(std::vector<unsigned char>& bytes, uint64_t value) {
+  while (value >= 128) {
+    bytes.push_back(static_cast<unsigned char>(value) | 0x80);
+    value >>= 7;
+  }
+  bytes.push_back(value);
+}
+
+uint64_t encodeZigZag(int64_t value) {
+  return (static_cast<uint64_t>(value) << 1) ^
+      (value < 0 ? ~uint64_t{0} : uint64_t{0});
+}
+
+struct ReadValueFilter {
+  static constexpr bool deterministic = true;
+  bool enabled = true;
+  bool isDeterministic() const {
+    return enabled;
+  }
+};
+
+// A visitor with the same sequential-row contract as ColumnVisitor. The
+// non-const numRows call records whether the batching gate was entered.
+template <typename T, bool isDense, bool hasHook = false>
+struct ReadValueVisitor {
+  using DataType = T;
+  using FilterType = ReadValueFilter;
+  static constexpr bool dense = isDense;
+  static constexpr bool kHasHook = hasHook;
+
+  const std::vector<int32_t>& rows;
+  std::vector<std::pair<int32_t, int64_t>>& output;
+  int32_t& batchChecks;
+  bool acceptNulls = false;
+  ReadValueFilter testFilter{};
+  int32_t index = 0;
+
+  int32_t start() {
+    return rows.front();
+  }
+  bool allowNulls() {
+    return acceptNulls;
+  }
+  auto& filter() {
+    return testFilter;
+  }
+  int32_t numRows() {
+    ++batchChecks;
+    return rows.size();
+  }
+  int32_t advance(bool& atEnd) {
+    const auto previous = rows[index++];
+    atEnd = index == rows.size();
+    return atEnd ? 0 : rows[index] - previous - 1;
+  }
+  int32_t process(T value, bool& atEnd) {
+    output.emplace_back(rows[index], value);
+    return advance(atEnd);
+  }
+  int32_t processNull(bool& atEnd) {
+    output.emplace_back(rows[index], -99999);
+    return advance(atEnd);
+  }
+  int32_t
+  checkAndSkipNulls(const uint64_t* nulls, int32_t& current, bool& atEnd) {
+    int32_t skipped = 0;
+    while (bits::isBitNull(nulls, rows[index])) {
+      const auto previous = rows[index];
+      advance(atEnd);
+      if (atEnd) {
+        return skipped;
+      }
+      skipped += bits::countNonNulls(nulls, previous + 1, rows[index]);
+      current = rows[index];
+    }
+    return skipped;
+  }
+};
+
+} // namespace
 
 std::vector<int64_t> decodeRLEv2(
     const unsigned char* bytes,
@@ -92,6 +213,382 @@ class RLEv2Test : public testing::Test {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
   }
 };
+
+TEST_F(RLEv2Test, readValueDirectWidthsAndRefills) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  for (uint32_t width :
+       {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
+        17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 40, 48, 56, 64}) {
+    const uint64_t mask = ~uint64_t{0} >> (64 - width);
+    std::vector<uint64_t> encoded(127);
+    std::vector<int64_t> expected;
+    for (size_t i = 0; i < encoded.size(); ++i) {
+      encoded[i] = (0x9e3779b97f4a7c15ULL * i) & mask;
+      expected.push_back(
+          static_cast<int64_t>(encoded[i] >> 1) ^
+          -static_cast<int64_t>(encoded[i] & 1));
+    }
+    const auto bytes = directRun(encoded, width);
+    for (uint64_t block : {0, 1, 3, 17}) {
+      for (int32_t chunk : {1, 7, 8, 31, 127}) {
+        SCOPED_TRACE(
+            fmt::format("width={} block={} chunk={}", width, block, chunk));
+        RleDecoderV2<true> decoder(
+            std::make_unique<dwio::common::SeekableArrayInputStream>(
+                bytes.data(), bytes.size(), block),
+            *pool);
+        std::vector<int64_t> actual(expected.size());
+        for (size_t i = 0; i < actual.size(); i += chunk) {
+          decoder.next(
+              actual.data() + i,
+              std::min<size_t>(chunk, actual.size() - i),
+              nullptr);
+        }
+        EXPECT_EQ(actual, expected);
+      }
+    }
+    RleDecoderV2<false> unsignedDecoder(
+        std::make_unique<dwio::common::SeekableArrayInputStream>(
+            bytes.data(), bytes.size()),
+        *pool);
+    std::vector<int64_t> unsignedValues(encoded.size());
+    unsignedDecoder.next(unsignedValues.data(), unsignedValues.size(), nullptr);
+    for (size_t i = 0; i < encoded.size(); ++i) {
+      EXPECT_EQ(static_cast<uint64_t>(unsignedValues[i]), encoded[i]);
+    }
+  }
+}
+
+TEST_F(RLEv2Test, readValueBatchNullsAndTail) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  // Two runs cross both the 512-value scratch limit and the input run limit.
+  std::vector<unsigned char> bytes;
+  std::vector<uint64_t> encoded(512);
+  for (size_t i = 0; i < encoded.size(); ++i) {
+    encoded[i] = encodeZigZag(static_cast<int64_t>(i) - 256);
+  }
+  const auto run = directRun(encoded, 16);
+  bytes.insert(bytes.end(), run.begin(), run.end());
+  bytes.insert(bytes.end(), run.begin(), run.end());
+  for (bool acceptNulls : {false, true}) {
+    for (int32_t pattern : {0, 1, 2, 3}) {
+      constexpr int32_t count = 800;
+      std::vector<int32_t> rows(count);
+      std::iota(rows.begin(), rows.end(), 0);
+      std::vector<uint64_t> nulls(bits::nwords(count), bits::kNotNull64);
+      int32_t nonNull = 0;
+      std::vector<std::pair<int32_t, int64_t>> expected;
+      for (int32_t i = 0; i < count; ++i) {
+        const bool isNull = pattern == 1 ? (i % 67 == 0 || i == count - 1)
+            : pattern == 2               ? (i % 2 == 0)
+                                         : pattern == 3;
+        bits::setNull(nulls.data(), i, isNull);
+        if (!isNull) {
+          expected.emplace_back(i, nonNull++ % 512 - 256);
+        } else if (acceptNulls) {
+          expected.emplace_back(i, -99999);
+        }
+      }
+      RleDecoderV2<true> decoder(
+          std::make_unique<dwio::common::SeekableArrayInputStream>(
+              bytes.data(), bytes.size(), 73),
+          *pool);
+      int32_t batchChecks = 0;
+      std::vector<std::pair<int32_t, int64_t>> output;
+      decoder.readWithVisitor<true>(
+          nulls.data(),
+          ReadValueVisitor<int32_t, true>{
+              rows, output, batchChecks, acceptNulls});
+      EXPECT_EQ(output, expected);
+      if (pattern < 2 && process::hasSimd()) {
+        EXPECT_GT(batchChecks, 0);
+      }
+      decoder.skip(3);
+      int64_t tail;
+      decoder.next(&tail, 1, nullptr);
+      EXPECT_EQ(tail, (nonNull + 3) % 512 - 256);
+      std::vector<uint64_t> positions{0, 5};
+      dwio::common::PositionProvider position(positions);
+      decoder.seekToRowGroup(position);
+      decoder.next(&tail, 1, nullptr);
+      EXPECT_EQ(tail, -251);
+    }
+  }
+}
+
+TEST_F(RLEv2Test, readValueFallbackVisitors) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  std::vector<uint64_t> encoded(100);
+  for (int32_t i = 0; i < encoded.size(); ++i) {
+    encoded[i] = encodeZigZag(i);
+  }
+  const auto bytes = directRun(encoded, 8);
+  auto verify =
+      [&](auto visitor, const auto& rows, auto& output, auto& checks) {
+        RleDecoderV2<true> decoder(
+            std::make_unique<dwio::common::SeekableArrayInputStream>(
+                bytes.data(), bytes.size()),
+            *pool);
+        decoder.readWithVisitor<false>(nullptr, visitor);
+        ASSERT_EQ(output.size(), rows.size());
+        for (size_t i = 0; i < rows.size(); ++i) {
+          EXPECT_EQ(output[i].second, rows[i]);
+        }
+        EXPECT_EQ(checks, 0);
+        int64_t tail;
+        decoder.next(&tail, 1, nullptr);
+        EXPECT_EQ(tail, rows.back() + 1);
+      };
+  std::vector<int32_t> sparse{1, 4, 9, 16, 25, 36, 49, 64};
+  std::vector<std::pair<int32_t, int64_t>> output;
+  int32_t checks = 0;
+  verify(
+      ReadValueVisitor<int64_t, false>{sparse, output, checks},
+      sparse,
+      output,
+      checks);
+  std::vector<int32_t> dense(40);
+  std::iota(dense.begin(), dense.end(), 0);
+  output.clear();
+  verify(
+      ReadValueVisitor<int16_t, true, true>{dense, output, checks},
+      dense,
+      output,
+      checks);
+  output.clear();
+  verify(
+      ReadValueVisitor<int64_t, true>{dense, output, checks, false, {false}},
+      dense,
+      output,
+      checks);
+}
+
+TEST_F(RLEv2Test, readValueDeltaVectorAndChunkBoundaries) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  for (bool variable : {false, true}) {
+    for (int64_t delta : {-3, 0, 3}) {
+      constexpr int32_t count = 127;
+      const int64_t first = delta < 0 ? 10000 : -10000;
+      std::vector<unsigned char> bytes{
+          static_cast<unsigned char>(variable ? 0xc6 : 0xc0), count - 1};
+      appendVarint(bytes, encodeZigZag(first));
+      appendVarint(bytes, encodeZigZag(delta));
+      std::vector<int64_t> expected{first, first + delta};
+      std::vector<uint64_t> deltas;
+      for (int32_t i = 2; i < count; ++i) {
+        const auto step = variable ? (i % 15) : std::abs(delta);
+        deltas.push_back(step);
+        expected.push_back(expected.back() + (delta < 0 ? -step : step));
+      }
+      if (variable) {
+        appendPacked(bytes, deltas, 4);
+      }
+      for (int32_t chunk : {1, 2, 7, 8, 31, 127}) {
+        EXPECT_EQ(
+            decodeRLEv2(bytes.data(), bytes.size(), chunk, count), expected);
+      }
+      std::vector<int32_t> rows(count);
+      std::iota(rows.begin(), rows.end(), 0);
+      std::vector<std::pair<int32_t, int64_t>> output;
+      int32_t checks = 0;
+      RleDecoderV2<true> decoder(
+          std::make_unique<dwio::common::SeekableArrayInputStream>(
+              bytes.data(), bytes.size()),
+          *pool);
+      decoder.readWithVisitor<false>(
+          nullptr, ReadValueVisitor<int64_t, true>{rows, output, checks});
+      ASSERT_EQ(output.size(), count);
+      for (int32_t i = 0; i < count; ++i) {
+        EXPECT_EQ(output[i].second, expected[i]);
+      }
+      EXPECT_EQ(checks > 0, process::hasSimd());
+    }
+  }
+}
+
+TEST_F(RLEv2Test, readValueFixedDeltaWideIntermediate) {
+  const auto first = std::numeric_limits<int64_t>::min();
+  const int64_t delta = int64_t{1} << 62;
+  std::vector<unsigned char> bytes{0xc0, 0x03};
+  appendVarint(bytes, encodeZigZag(first));
+  appendVarint(bytes, encodeZigZag(delta));
+  const std::vector<int64_t> expected{first, -delta, 0, delta};
+  EXPECT_EQ(decodeRLEv2(bytes.data(), bytes.size(), 4, 4), expected);
+}
+
+TEST_F(RLEv2Test, readValueMixedRunsAndTruncatedInput) {
+  const std::vector<unsigned char> bytes{
+      0x07, 0x84, // Ten repetitions of 66.
+      0x8e, 0x09, 0x2b, 0x21, 0x07, 0xd0, 0x1e, 0x00, 0x14,
+      0x70, 0x28, 0x32, 0x3c, 0x46, 0x50, 0x5a, 0xfc, 0xe8, // Patched-base run.
+      0xc0, 0x13, 0x00, 0x02}; // Twenty values 0..19.
+  std::vector<int64_t> expected(10, 66);
+  for (int64_t value :
+       {2030, 2000, 2020, 1000000, 2040, 2050, 2060, 2070, 2080, 2090}) {
+    expected.push_back(value);
+  }
+  for (int64_t i = 0; i < 20; ++i) {
+    expected.push_back(i);
+  }
+  auto pool = memory::memoryManager()->addLeafPool();
+  std::vector<int32_t> rows(expected.size());
+  std::iota(rows.begin(), rows.end(), 0);
+  int32_t checks = 0;
+  std::vector<std::pair<int32_t, int64_t>> output;
+  RleDecoderV2<true> decoder(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(
+          bytes.data(), bytes.size()),
+      *pool);
+  decoder.readWithVisitor<false>(
+      nullptr, ReadValueVisitor<int64_t, true>{rows, output, checks});
+  ASSERT_EQ(output.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(output[i].second, expected[i]);
+  }
+  auto truncated = directRun(std::vector<uint64_t>(64, 15), 4);
+  truncated.pop_back();
+  RleDecoderV2<true> broken(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(
+          truncated.data(), truncated.size()),
+      *pool);
+  std::vector<int64_t> values(64);
+  EXPECT_THROW(
+      broken.next(values.data(), values.size(), nullptr), std::exception);
+}
+
+// Exercise the actual decoder with SVE enabled/disabled, rather than testing
+// a second implementation of the vector arithmetic. The stream ends with a
+// different encoding to check the carry and run cursor after null-heavy reads.
+TEST_F(RLEv2Test, vectorizedNullsAcrossRunsAndBitmaps) {
+  gflags::FlagSaver flags;
+  auto pool = memory::memoryManager()->addLeafPool();
+  for (bool sve : {false, true}) {
+    FLAGS_bolt_enable_sve = sve;
+    for (int encoding = 0; encoding < 6; ++encoding) {
+      std::vector<unsigned char> bytes;
+      std::vector<int64_t> expected;
+      if (encoding == 0) {
+        for (int i = 0; i < 17; ++i) {
+          bytes.insert(bytes.end(), {0x07, 0x83}); // Ten repetitions of -66.
+          expected.insert(expected.end(), 10, -66);
+        }
+      } else if (encoding == 1) {
+        std::vector<uint64_t> encoded;
+        for (int64_t i = 0; i < 170; ++i) {
+          const int64_t value = i % 4 == 0 ? std::numeric_limits<int64_t>::min()
+              : i % 4 == 1                 ? std::numeric_limits<int64_t>::max()
+              : i % 4 == 2                 ? -(i * 100003)
+                                           : i * 100003;
+          expected.push_back(value);
+          encoded.push_back(encodeZigZag(value));
+        }
+        bytes = directRun(encoded, 64);
+      } else {
+        const bool variable = encoding == 3 || encoding == 4;
+        const int64_t delta = encoding >= 4 ? -3 : 3;
+        bytes = {static_cast<unsigned char>(variable ? 0xc6 : 0xc0), 169};
+        appendVarint(bytes, encodeZigZag(-10000));
+        appendVarint(bytes, encodeZigZag(delta));
+        expected = {-10000, -10000 + delta};
+        std::vector<uint64_t> deltas;
+        for (int i = 2; i < 170; ++i) {
+          auto step = variable ? i % 15 : 3;
+          deltas.push_back(step);
+          expected.push_back(expected.back() + (delta < 0 ? -step : step));
+        }
+        if (variable) {
+          appendPacked(bytes, deltas, 4);
+        }
+      }
+      const auto tail = directRun({encodeZigZag(777)}, 16);
+      bytes.insert(bytes.end(), tail.begin(), tail.end());
+      for (int pattern : {0, 1, 2, 3}) {
+        std::vector<uint64_t> nulls(bits::nwords(640), bits::kNull64);
+        size_t rows = 0;
+        for (size_t n = 0; n < expected.size(); ++rows) {
+          const bool valid = pattern == 0 || (pattern == 1 && rows % 3 == 2) ||
+              (pattern == 2 && rows >= 63 && (rows % 129 < 65)) ||
+              (pattern == 3 && rows % 67 != 0);
+          if (valid) {
+            bits::clearNull(nulls.data(), rows);
+            ++n;
+          }
+        }
+        // An all-null tail must not consume the next encoded value.
+        rows += 35;
+        nulls.resize(bits::nwords(rows));
+        for (size_t chunk : {1, 2, 7, 8, 31, 63, 64, 65, 129, 640}) {
+          SCOPED_TRACE(fmt::format(
+              "sve={} encoding={} pattern={} chunk={}",
+              sve,
+              encoding,
+              pattern,
+              chunk));
+          RleDecoderV2<true> decoder(
+              std::make_unique<dwio::common::SeekableArrayInputStream>(
+                  bytes.data(), bytes.size(), 11),
+              *pool);
+          size_t next = 0;
+          constexpr int64_t sentinel = 0x123456789abcdef;
+          for (size_t start = 0; start < rows; start += chunk) {
+            const auto count = std::min(chunk, rows - start);
+            std::vector<uint64_t> bitmap(bits::nwords(count), bits::kNull64);
+            for (size_t i = 0; i < count; ++i) {
+              bits::setNull(
+                  bitmap.data(), i, bits::isBitNull(nulls.data(), start + i));
+            }
+            std::vector<int64_t> data(count + 2, sentinel);
+            decoder.next(data.data() + 1, count, bitmap.data());
+            EXPECT_EQ(data.front(), sentinel);
+            EXPECT_EQ(data.back(), sentinel);
+            for (size_t i = 0; i < count; ++i) {
+              if (bits::isBitNull(bitmap.data(), i)) {
+                EXPECT_EQ(data[i + 1], sentinel);
+              } else {
+                ASSERT_LT(next, expected.size());
+                EXPECT_EQ(data[i + 1], expected[next++]);
+              }
+            }
+          }
+          EXPECT_EQ(next, expected.size());
+          int64_t finalValue;
+          decoder.next(&finalValue, 1, nullptr);
+          EXPECT_EQ(finalValue, 777);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(RLEv2Test, batchSimdGateAndShortRuns) {
+  gflags::FlagSaver flags;
+  auto pool = memory::memoryManager()->addLeafPool();
+  for (bool enabled : {false, true}) {
+    FLAGS_bolt_enable_avx2 = enabled;
+    for (int32_t count : {2, 3, 7, 8, 513}) {
+      std::vector<uint64_t> encoded(512);
+      std::iota(encoded.begin(), encoded.end(), 0);
+      auto bytes = directRun(encoded, 16);
+      const auto tail = directRun(encoded, 16);
+      bytes.insert(bytes.end(), tail.begin(), tail.end());
+      std::vector<int32_t> rows(count);
+      std::iota(rows.begin(), rows.end(), 0);
+      std::vector<std::pair<int32_t, int64_t>> output;
+      int32_t checks = 0;
+      RleDecoderV2<false> decoder(
+          std::make_unique<dwio::common::SeekableArrayInputStream>(
+              bytes.data(), bytes.size()),
+          *pool);
+      decoder.readWithVisitor<false>(
+          nullptr, ReadValueVisitor<int64_t, true>{rows, output, checks});
+      ASSERT_EQ(output.size(), count);
+      for (int32_t i = 0; i < count; ++i) {
+        EXPECT_EQ(output[i].second, i % 512);
+      }
+      EXPECT_EQ(checks > 0, process::hasSimd());
+    }
+  }
+}
 
 TEST_F(RLEv2Test, basicDelta0) {
   const size_t count = 20;
@@ -3076,5 +3573,163 @@ TEST_F(RLEv1Test, testLeadingNulls) {
 
   for (size_t i = 5; i < 10; ++i) {
     EXPECT_EQ(i - 4, data[i]) << "Output wrong at " << i;
+  }
+}
+
+// ===========================================================================
+// skipValues regression tests.
+//
+// Each test builds a stream, reads it fully (baseline), then creates a fresh
+// decoder, skips K values via skip() (accumulated into pendingSkip and flushed
+// by the next next() call, which now routes through skipValues), and reads the
+// rest. The post-skip values must match the baseline's tail. This verifies that
+// skipValues advances runRead/curByte/bitsLeft/prevValue/unpackedIdx
+// identically to doNext, across run boundaries and all encoding types.
+// ===========================================================================
+
+std::vector<int64_t>
+readAllRLEv2(const unsigned char* bytes, unsigned long l, size_t count) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  std::unique_ptr<dwio::common::IntDecoder<true>> rle = createRleDecoder<true>(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(bytes, l),
+      RleVersion_2,
+      *pool,
+      true,
+      dwio::common::INT_BYTE_SIZE);
+  std::vector<int64_t> data(count);
+  rle->next(data.data(), count, nullptr);
+  return data;
+}
+
+std::vector<int64_t> skipThenReadRLEv2(
+    const unsigned char* bytes,
+    unsigned long l,
+    size_t skipCount,
+    size_t readCount) {
+  auto pool = memory::memoryManager()->addLeafPool();
+  std::unique_ptr<dwio::common::IntDecoder<true>> rle = createRleDecoder<true>(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(bytes, l),
+      RleVersion_2,
+      *pool,
+      true,
+      dwio::common::INT_BYTE_SIZE);
+  if (skipCount > 0) {
+    rle->skip(skipCount);
+  }
+  std::vector<int64_t> data(readCount);
+  rle->next(data.data(), readCount, nullptr);
+  return data;
+}
+
+// DELTA fixed-delta skip: stream 0..199 (single DELTA run, delta=1).
+TEST_F(RLEv2Test, skipDeltaFixed) {
+  const unsigned char bytes[] = {0xC0, 0xC7, 0x00, 0x02};
+  unsigned long l = sizeof(bytes) / sizeof(char);
+  const size_t count = 200;
+  auto baseline = readAllRLEv2(bytes, l, count);
+
+  for (size_t skip : {1u, 3u, 7u, 50u, 100u, 199u}) {
+    auto tail = skipThenReadRLEv2(bytes, l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// DELTA variable-delta skip (bitSize != 0): 5 values with variable deltas.
+TEST_F(RLEv2Test, skipDeltaVariable1) {
+  const unsigned char bytes[] = {
+      0xce, 0x04, 0xe7, 0x07, 0xc8, 0x01, 0x32, 0x19, 0x0f};
+  unsigned long l = sizeof(bytes) / sizeof(char);
+  const size_t count = 5;
+  auto baseline = readAllRLEv2(bytes, l, count);
+
+  for (size_t skip : {1u, 2u, 3u, 4u}) {
+    auto tail = skipThenReadRLEv2(bytes, l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// DIRECT skip: 50 byte-width values 0..49 (fb=8, zigzag-encoded).
+TEST_F(RLEv2Test, skipDirect) {
+  std::vector<unsigned char> bytes;
+  bytes.push_back(0x4E); // DIRECT, fb=8
+  bytes.push_back(0x31); // runLen = 49 -> 50 values
+  for (size_t i = 0; i < 50; ++i) {
+    bytes.push_back(static_cast<unsigned char>(2 * i)); // zigzag(i) = 2*i
+  }
+  unsigned long l = bytes.size();
+  const size_t count = 50;
+  auto baseline = readAllRLEv2(bytes.data(), l, count);
+
+  for (size_t skip : {1u, 5u, 25u, 49u}) {
+    auto tail = skipThenReadRLEv2(bytes.data(), l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// SHORT_REPEAT skip: 20 runs of 10 (value 66).
+TEST_F(RLEv2Test, skipShortRepeat) {
+  std::vector<unsigned char> bytes;
+  for (size_t r = 0; r < 20; ++r) {
+    bytes.push_back(0x07); // SHORT_REPEAT, byteSize=1, runLen=10
+    bytes.push_back(0x84); // zigzag(66) = 132 = 0x84
+  }
+  unsigned long l = bytes.size();
+  const size_t count = 200;
+  auto baseline = readAllRLEv2(bytes.data(), l, count);
+
+  for (size_t skip : {1u, 10u, 15u, 50u, 100u, 199u}) {
+    auto tail = skipThenReadRLEv2(bytes.data(), l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
+  }
+}
+
+// PATCHED_BASE skip: basicPatched0 has 10 values with one patch at position 3.
+TEST_F(RLEv2Test, skipPatchedBase0) {
+  const unsigned char bytes[] = {
+      0x8e,
+      0x09,
+      0x2b,
+      0x21,
+      0x07,
+      0xd0,
+      0x1e,
+      0x00,
+      0x14,
+      0x70,
+      0x28,
+      0x32,
+      0x3c,
+      0x46,
+      0x50,
+      0x5a,
+      0xfc,
+      0xe8};
+  unsigned long l = sizeof(bytes) / sizeof(char);
+  const size_t count = 10;
+  auto baseline = readAllRLEv2(bytes, l, count);
+
+  for (size_t skip : {1u, 2u, 3u, 4u, 5u, 7u, 9u}) {
+    auto tail = skipThenReadRLEv2(bytes, l, skip, count - skip);
+    EXPECT_EQ(count - skip, tail.size());
+    for (size_t i = 0; i < tail.size(); ++i) {
+      EXPECT_EQ(baseline[skip + i], tail[i])
+          << "skip=" << skip << " mismatch at offset " << i;
+    }
   }
 }
