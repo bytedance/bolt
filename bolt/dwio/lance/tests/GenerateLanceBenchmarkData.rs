@@ -89,6 +89,18 @@ fn make_batch(start: u64, rows: usize) -> RecordBatch {
         Arc::new(Int64Array::from_iter(range().map(|row| {
             nullable(row, 61).then_some(row as i64 * 101 - 7_000_000)
         }))) as ArrayRef;
+    let null_i64_0 = Arc::new(Int64Array::from_iter_values(
+        range().map(|row| row as i64 * 101 - 7_000_000),
+    )) as ArrayRef;
+    let null_i64_1 =
+        Arc::new(Int64Array::from_iter(range().map(|row| {
+            (row % 100 != 0).then_some(row as i64 * 101 - 7_000_000)
+        }))) as ArrayRef;
+    let null_i64_50 =
+        Arc::new(Int64Array::from_iter(range().map(|row| {
+            (row % 2 != 0).then_some(row as i64 * 101 - 7_000_000)
+        }))) as ArrayRef;
+    let null_i64_100 = Arc::new(Int64Array::new_null(rows)) as ArrayRef;
     let u64_value = Arc::new(UInt64Array::from_iter(
         range().map(|row| nullable(row, 59).then_some(row * 1_000_003)),
     )) as ArrayRef;
@@ -304,6 +316,10 @@ fn make_batch(start: u64, rows: usize) -> RecordBatch {
         Field::new("i32_value", DataType::Int32, true),
         Field::new("u32_value", DataType::UInt32, true),
         Field::new("i64_value", DataType::Int64, true),
+        Field::new("null_i64_0", DataType::Int64, false),
+        Field::new("null_i64_1", DataType::Int64, true),
+        Field::new("null_i64_50", DataType::Int64, true),
+        Field::new("null_i64_100", DataType::Int64, true),
         Field::new("u64_value", DataType::UInt64, true),
         Field::new("f16_value", DataType::Float16, true),
         Field::new("f32_value", DataType::Float32, true),
@@ -377,6 +393,10 @@ fn make_batch(start: u64, rows: usize) -> RecordBatch {
         i32_value,
         u32_value,
         i64_value,
+        null_i64_0,
+        null_i64_1,
+        null_i64_50,
+        null_i64_100,
         u64_value,
         f16_value,
         f32_value,

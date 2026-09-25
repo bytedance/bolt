@@ -22,11 +22,14 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 #include <folly/Portability.h>
 #include <folly/lang/Bits.h>
+#include <folly/small_vector.h>
 #include <lz4.h>
 #include <zstd.h>
 
@@ -45,6 +48,7 @@ using CompressiveEncoding = ::lance::encodings21::CompressiveEncoding;
 using Compression = ::lance::encodings21::CompressiveEncoding::CompressionCase;
 using Page = ::lance::file::v2::ColumnMetadata::Page;
 using RepDefLayer = ::lance::encodings21::RepDefLayer;
+using BufferList = folly::small_vector<BufferPtr, 4>;
 
 constexpr uint64_t kChunkRows = 1'024;
 constexpr uint64_t kMiniBlockAlignment = 8;
@@ -93,6 +97,21 @@ T readLittleEndian(const char* data) {
 uint64_t alignUp(uint64_t value, uint64_t alignment) {
   BOLT_CHECK_GT(alignment, 0);
   return (value + alignment - 1) / alignment * alignment;
+}
+
+uint64_t fixedSizeRowScale(const std::vector<uint32_t>& dimensions) {
+  uint64_t scale = 1;
+  for (const auto dimension : dimensions) {
+    if (dimension == 0) {
+      continue;
+    }
+    BOLT_CHECK_LE(
+        scale,
+        std::numeric_limits<uint64_t>::max() / dimension,
+        "Lance FixedSizeList dimensions overflow");
+    scale *= dimension;
+  }
+  return scale;
 }
 
 BufferPtr
@@ -202,13 +221,13 @@ struct DecodedBlock {
 
 DecodedBlock decodeCompressive(
     const CompressiveEncoding& encoding,
-    const std::vector<BufferPtr>& inputs,
+    const BufferList& inputs,
     uint64_t numValues,
     memory::MemoryPool& pool);
 
 DecodedBlock decodeFixedSizeList(
     const ::lance::encodings21::FixedSizeList& fixedSizeList,
-    const std::vector<BufferPtr>& inputs,
+    const BufferList& inputs,
     uint64_t numValues,
     memory::MemoryPool& pool) {
   BOLT_CHECK_GT(fixedSizeList.items_per_value(), 0);
@@ -231,8 +250,7 @@ DecodedBlock decodeFixedSizeList(
       inputOffset < inputs.size() ||
       fixedSizeList.values().compression_case() ==
           CompressiveEncoding::kConstant);
-  std::vector<BufferPtr> childInputs(
-      inputs.begin() + inputOffset, inputs.end());
+  BufferList childInputs(inputs.begin() + inputOffset, inputs.end());
   auto child =
       decodeCompressive(fixedSizeList.values(), childInputs, childValues, pool);
   child.fixedSizeDimensions.insert(
@@ -409,10 +427,11 @@ DecodedBlock decodeVariable(
   for (uint64_t i = 1; i < offsets.size(); ++i) {
     BOLT_CHECK_LE(offsets[i - 1], offsets[i]);
   }
-  auto values = copyBuffer(
-      input->as<char>() + valueStart,
+  auto values = Buffer::slice<char>(
+      input,
+      valueStart,
       offsetStart == 0 ? offsets.back() - valueStart : offsets.back(),
-      pool);
+      &pool);
   if (offsetStart == 0) {
     for (auto& offset : offsets) {
       offset -= valueStart;
@@ -500,7 +519,7 @@ DecodedBlock decodeFsstBlock(
 
 DecodedBlock decodeFsst(
     const ::lance::encodings21::Fsst& fsst,
-    const std::vector<BufferPtr>& inputs,
+    const BufferList& inputs,
     uint64_t numValues,
     memory::MemoryPool& pool) {
   BOLT_CHECK(fsst.has_values());
@@ -536,7 +555,7 @@ DecodedBlock decodePerValueGeneral(
       continue;
     }
     auto encoded =
-        copyBuffer(compressed.data->as<char>() + start, end - start, pool);
+        Buffer::slice<char>(compressed.data, start, end - start, &pool);
     auto decoded = decompressBuffer(&general.compression(), encoded, pool);
     decodedBytes.insert(
         decodedBytes.end(),
@@ -556,7 +575,7 @@ DecodedBlock decodePerValueGeneral(
 
 DecodedBlock decodeByteStreamSplit(
     const ::lance::encodings21::ByteStreamSplit& byteStreamSplit,
-    const std::vector<BufferPtr>& inputs,
+    const BufferList& inputs,
     uint64_t numValues,
     memory::MemoryPool& pool) {
   BOLT_CHECK(byteStreamSplit.has_values());
@@ -597,7 +616,7 @@ uint64_t readUnsignedWidth(const char* data, uint64_t bitsPerValue) {
 
 DecodedBlock decodeRle(
     const ::lance::encodings21::Rle& rle,
-    const std::vector<BufferPtr>& inputs,
+    const BufferList& inputs,
     uint64_t numValues,
     memory::MemoryPool& pool) {
   BOLT_CHECK(inputs.size() == 1 || inputs.size() == 2);
@@ -610,11 +629,12 @@ DecodedBlock decodeRle(
     const auto valuesSize = readLittleEndian<uint64_t>(inputs[0]->as<char>());
     BOLT_CHECK_LE(valuesSize, inputs[0]->size() - sizeof(uint64_t));
     valuesInput =
-        copyBuffer(inputs[0]->as<char>() + sizeof(uint64_t), valuesSize, pool);
-    lengthsInput = copyBuffer(
-        inputs[0]->as<char>() + sizeof(uint64_t) + valuesSize,
+        Buffer::slice<char>(inputs[0], sizeof(uint64_t), valuesSize, &pool);
+    lengthsInput = Buffer::slice<char>(
+        inputs[0],
+        sizeof(uint64_t) + valuesSize,
         inputs[0]->size() - sizeof(uint64_t) - valuesSize,
-        pool);
+        &pool);
   } else {
     valuesInput = inputs[0];
     lengthsInput = inputs[1];
@@ -760,7 +780,7 @@ DecodedBlock decodeVariablePackedStruct(
 
 DecodedBlock decodeCompressive(
     const CompressiveEncoding& encoding,
-    const std::vector<BufferPtr>& inputs,
+    const BufferList& inputs,
     uint64_t numValues,
     memory::MemoryPool& pool) {
   if (encoding.compression_case() == CompressiveEncoding::kFixedSizeList) {
@@ -773,7 +793,14 @@ DecodedBlock decodeCompressive(
     BOLT_CHECK(!inputs.empty());
     auto decompressed =
         decompressBuffer(&encoding.general().compression(), inputs[0], pool);
-    std::vector<BufferPtr> innerInputs(inputs);
+    if (inputs.size() == 1) {
+      return decodeCompressive(
+          encoding.general().values(),
+          {std::move(decompressed)},
+          numValues,
+          pool);
+    }
+    BufferList innerInputs(inputs);
     innerInputs[0] = std::move(decompressed);
     return decodeCompressive(
         encoding.general().values(), innerInputs, numValues, pool);
@@ -793,13 +820,22 @@ DecodedBlock decodeCompressive(
       return result;
     }
     BOLT_CHECK(!constant.value().empty());
-    auto output = AlignedBuffer::allocate<char>(
-        numValues * constant.value().size(), &pool);
-    for (uint64_t i = 0; i < numValues; ++i) {
-      std::memcpy(
-          output->asMutable<char>() + i * constant.value().size(),
-          constant.value().data(),
-          constant.value().size());
+    const auto valueBytes = constant.value().size();
+    BOLT_CHECK_LE(
+        numValues,
+        std::numeric_limits<uint64_t>::max() / valueBytes,
+        "Lance constant output size overflows");
+    const auto outputBytes = numValues * valueBytes;
+    auto output = AlignedBuffer::allocate<char>(outputBytes, &pool);
+    if (outputBytes > 0) {
+      auto* target = output->asMutable<char>();
+      std::memcpy(target, constant.value().data(), valueBytes);
+      uint64_t initialized = valueBytes;
+      while (initialized < outputBytes) {
+        const auto copyBytes = std::min(initialized, outputBytes - initialized);
+        std::memcpy(target + initialized, target, copyBytes);
+        initialized += copyBytes;
+      }
     }
     return {
         DecodedBlock::Kind::kFixed,
@@ -911,9 +947,37 @@ struct StructuralState {
         layers[currentLayer], ::lance::encodings21::REPDEF_NULLABLE_ITEM);
     const auto compare = currentDef++;
     ++currentLayer;
-    uint64_t output = 0;
     vector_size_t nullCount = 0;
     auto* rawNulls = vector->mutableRawNulls();
+    const auto direct = def.size() == vector->size() &&
+        std::all_of(levelsToRep.begin(),
+                    levelsToRep.end(),
+                    [&](const auto level) { return level <= currentRep; });
+    if (direct) {
+      uint64_t output = 0;
+      while (output + 64 <= def.size()) {
+        uint64_t validBits = 0;
+        for (uint64_t bit = 0; bit < 64; ++bit) {
+          const auto level = def[output + bit];
+          BOLT_CHECK_LT(level, levelsToRep.size());
+          const auto valid = level <= compare;
+          validBits |= static_cast<uint64_t>(valid) << bit;
+          nullCount += !valid;
+        }
+        rawNulls[output / 64] = validBits;
+        output += 64;
+      }
+      for (; output < def.size(); ++output) {
+        const auto level = def[output];
+        BOLT_CHECK_LT(level, levelsToRep.size());
+        const auto isNull = level > compare;
+        bits::setBit(rawNulls, output, !isNull);
+        nullCount += isNull;
+      }
+      vector->setNullCount(nullCount);
+      return;
+    }
+    uint64_t output = 0;
     for (const auto level : def) {
       BOLT_CHECK_LT(level, levelsToRep.size());
       if (levelsToRep[level] <= currentRep) {
@@ -1114,6 +1178,12 @@ void appendFixed(
       "Lance fixed-width output size overflows");
   const auto outputBits = oldBits + bitsToAppend;
   const auto outputBytes = outputBits / 8 + (outputBits % 8 != 0);
+  if (output == nullptr && numValues == outputCapacityValues &&
+      block.data->size() == sourceBytes) {
+    output = block.data;
+    outputValues = numValues;
+    return;
+  }
   if (output == nullptr) {
     BOLT_CHECK_EQ(oldBits, 0);
     BOLT_CHECK_LE(
@@ -1153,7 +1223,8 @@ void appendFixed(
 struct MiniBlockPage {
   BufferPtr fixed;
   uint64_t bitsPerValue{0};
-  std::vector<std::string> variable;
+  std::vector<std::string_view> variable;
+  std::vector<BufferPtr> variableOwners;
   std::vector<uint16_t> rep;
   std::vector<uint16_t> def;
   std::optional<DecodedBlock> dictionary;
@@ -1164,6 +1235,7 @@ struct MiniBlockPage {
   bool allNull{false};
   uint64_t itemStart{0};
   uint64_t numItems{0};
+  uint64_t rowStart{0};
 };
 
 std::vector<uint16_t> decodeLevels(
@@ -1175,9 +1247,15 @@ std::vector<uint16_t> decodeLevels(
   BOLT_CHECK(block.kind == DecodedBlock::Kind::kFixed);
   BOLT_CHECK_EQ(block.bitsPerValue, 16);
   std::vector<uint16_t> result(numLevels);
-  for (uint64_t i = 0; i < numLevels; ++i) {
-    result[i] = readLittleEndian<uint16_t>(
-        block.data->as<char>() + i * sizeof(uint16_t));
+  const auto outputBytes = numLevels * sizeof(uint16_t);
+  BOLT_CHECK_GE(block.data->size(), outputBytes);
+  if constexpr (std::endian::native == std::endian::little) {
+    std::memcpy(result.data(), block.data->as<char>(), outputBytes);
+  } else {
+    for (uint64_t i = 0; i < numLevels; ++i) {
+      result[i] = readLittleEndian<uint16_t>(
+          block.data->as<char>() + i * sizeof(uint16_t));
+    }
   }
   return result;
 }
@@ -1201,6 +1279,9 @@ MiniBlockPage decodeMiniBlock(
     uint64_t bytes;
     uint64_t itemStart;
     uint64_t items;
+    uint64_t rowStart;
+    bool hasPreamble;
+    bool hasTrailer;
   };
   std::vector<Chunk> chunks;
   chunks.reserve(numChunks);
@@ -1226,29 +1307,84 @@ MiniBlockPage decodeMiniBlock(
     BOLT_CHECK_LE(pageDataBytes, page.buffer_sizes(1));
     BOLT_CHECK_LE(chunkBytes, page.buffer_sizes(1) - pageDataBytes);
     BOLT_CHECK_LE(chunkItems, layout.num_items() - pageItems);
-    chunks.push_back({pageDataBytes, chunkBytes, pageItems, chunkItems});
+    chunks.push_back(
+        {pageDataBytes,
+         chunkBytes,
+         pageItems,
+         chunkItems,
+         pageItems,
+         false,
+         false});
     pageDataBytes += chunkBytes;
     pageItems += chunkItems;
   }
   BOLT_CHECK_EQ(pageDataBytes, page.buffer_sizes(1));
   BOLT_CHECK_EQ(pageItems, layout.num_items());
 
+  uint64_t pageRows = layout.num_items();
+  if (layout.repetition_index_depth() > 0) {
+    BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
+    const auto stride = layout.repetition_index_depth() + 1;
+    const auto& indexOffset =
+        page.buffer_offsets(page.buffer_offsets_size() - 1);
+    const auto& indexSize = page.buffer_sizes(page.buffer_sizes_size() - 1);
+    BOLT_CHECK_EQ(indexSize, numChunks * stride * sizeof(uint64_t));
+    const auto index = read(indexOffset, indexSize);
+    uint64_t rowStart = 0;
+    auto hasPreamble = false;
+    for (uint64_t chunk = 0; chunk < numChunks; ++chunk) {
+      const auto* entry = index->as<char>() + chunk * stride * sizeof(uint64_t);
+      const auto ends = readLittleEndian<uint64_t>(entry);
+      const auto partial = readLittleEndian<uint64_t>(entry + sizeof(uint64_t));
+      const auto hasTrailer = partial > 0;
+      BOLT_CHECK_GE(ends + static_cast<uint64_t>(hasTrailer), hasPreamble);
+      chunks[chunk].rowStart = rowStart;
+      chunks[chunk].hasPreamble = hasPreamble;
+      chunks[chunk].hasTrailer = hasTrailer;
+      rowStart += ends + static_cast<uint64_t>(hasTrailer) - hasPreamble;
+      hasPreamble = hasTrailer;
+    }
+    pageRows = rowStart;
+  }
+
   const auto requestedStart = itemRange.has_value() ? itemRange->first : 0;
   const auto requestedCount =
-      itemRange.has_value() ? itemRange->second : layout.num_items();
-  BOLT_CHECK_LE(requestedStart, layout.num_items());
-  BOLT_CHECK_LE(requestedCount, layout.num_items() - requestedStart);
+      itemRange.has_value() ? itemRange->second : pageRows;
+  BOLT_CHECK_LE(requestedStart, pageRows);
+  BOLT_CHECK_LE(requestedCount, pageRows - requestedStart);
   const auto requestedEnd = requestedStart + requestedCount;
-  const auto firstChunk =
-      std::find_if(chunks.begin(), chunks.end(), [&](const auto& chunk) {
-        return requestedStart < chunk.itemStart + chunk.items;
-      });
-  const auto lastChunk =
-      std::find_if(firstChunk, chunks.end(), [&](const auto& chunk) {
-        return requestedEnd <= chunk.itemStart + chunk.items;
-      });
+  auto findChunk = [&](uint64_t row) {
+    auto chunk = std::lower_bound(
+        chunks.begin(),
+        chunks.end(),
+        row,
+        [](const auto& candidate, uint64_t value) {
+          return candidate.rowStart < value;
+        });
+    if (chunk != chunks.end() && chunk->rowStart == row) {
+      return chunk;
+    }
+    BOLT_CHECK(chunk != chunks.begin());
+    return std::prev(chunk);
+  };
+  auto firstChunk = layout.repetition_index_depth() > 0
+      ? findChunk(requestedStart)
+      : std::find_if(chunks.begin(), chunks.end(), [&](const auto& chunk) {
+          return requestedStart < chunk.itemStart + chunk.items;
+        });
+  auto lastChunk = layout.repetition_index_depth() > 0
+      ? findChunk(requestedEnd - 1)
+      : std::find_if(firstChunk, chunks.end(), [&](const auto& chunk) {
+          return requestedEnd <= chunk.itemStart + chunk.items;
+        });
   BOLT_CHECK(firstChunk != chunks.end());
   BOLT_CHECK(lastChunk != chunks.end());
+  while (firstChunk != chunks.begin() && firstChunk->hasPreamble) {
+    --firstChunk;
+  }
+  while (lastChunk + 1 != chunks.end() && lastChunk->hasTrailer) {
+    ++lastChunk;
+  }
   const auto firstChunkIndex = firstChunk - chunks.begin();
   const auto lastChunkIndex = lastChunk - chunks.begin();
   const auto decodedCapacity =
@@ -1263,6 +1399,7 @@ MiniBlockPage decodeMiniBlock(
 
   MiniBlockPage result;
   result.itemStart = firstChunk->itemStart;
+  result.rowStart = firstChunk->rowStart;
   if (layout.has_dictionary()) {
     BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
     const auto dictionary = read(page.buffer_offsets(2), page.buffer_sizes(2));
@@ -1302,7 +1439,8 @@ MiniBlockPage decodeMiniBlock(
     cursor = alignUp(cursor, kMiniBlockAlignment);
     if (repBytes.has_value()) {
       BOLT_CHECK_LE(*repBytes, chunkBytes - cursor);
-      auto encoded = copyBuffer(chunk + cursor, *repBytes, pool);
+      auto encoded =
+          Buffer::slice<char>(data, chunkOffset + cursor, *repBytes, &pool);
       auto levels =
           decodeLevels(layout.rep_compression(), encoded, numLevels, pool);
       result.rep.insert(result.rep.end(), levels.begin(), levels.end());
@@ -1310,17 +1448,19 @@ MiniBlockPage decodeMiniBlock(
     }
     if (defBytes.has_value()) {
       BOLT_CHECK_LE(*defBytes, chunkBytes - cursor);
-      auto encoded = copyBuffer(chunk + cursor, *defBytes, pool);
+      auto encoded =
+          Buffer::slice<char>(data, chunkOffset + cursor, *defBytes, &pool);
       auto levels =
           decodeLevels(layout.def_compression(), encoded, numLevels, pool);
       result.def.insert(result.def.end(), levels.begin(), levels.end());
       cursor = alignUp(cursor + *defBytes, kMiniBlockAlignment);
     }
-    std::vector<BufferPtr> valueBuffers;
+    BufferList valueBuffers;
     valueBuffers.reserve(valueBufferSizes.size());
     for (const auto size : valueBufferSizes) {
       BOLT_CHECK_LE(size, chunkBytes - cursor);
-      valueBuffers.push_back(copyBuffer(chunk + cursor, size, pool));
+      valueBuffers.push_back(
+          Buffer::slice<char>(data, chunkOffset + cursor, size, &pool));
       cursor = alignUp(cursor + size, kMiniBlockAlignment);
     }
     BOLT_CHECK_LE(cursor, chunkBytes);
@@ -1358,11 +1498,13 @@ MiniBlockPage decodeMiniBlock(
           decodedItems,
           pool);
     } else {
+      auto owner = values.data;
       for (uint64_t i = 0; i < chunkItems; ++i) {
         result.variable.emplace_back(
-            values.data->as<char>() + values.offsets[i],
+            owner->as<char>() + values.offsets[i],
             values.offsets[i + 1] - values.offsets[i]);
       }
+      result.variableOwners.push_back(std::move(owner));
       decodedItems += chunkItems;
     }
   }
@@ -1708,11 +1850,12 @@ SparsePage decodeSparse(
     }
     cursor = alignUp(cursor, kMiniBlockAlignment);
     BOLT_CHECK_LE(cursor, chunkBytes);
-    std::vector<BufferPtr> valueBuffers;
+    BufferList valueBuffers;
     valueBuffers.reserve(valueBufferSizes.size());
     for (const auto size : valueBufferSizes) {
       BOLT_CHECK_LE(size, chunkBytes - cursor);
-      valueBuffers.push_back(copyBuffer(chunk + cursor, size, pool));
+      valueBuffers.push_back(
+          Buffer::slice<char>(data, dataOffset + cursor, size, &pool));
       cursor = alignUp(cursor + size, kMiniBlockAlignment);
       BOLT_CHECK_LE(cursor, chunkBytes);
     }
@@ -1756,11 +1899,13 @@ SparsePage decodeSparse(
           pool);
     } else {
       BOLT_CHECK_EQ(decoded.size(), chunkValues);
+      auto owner = decoded.data;
       for (uint64_t i = 0; i < chunkValues; ++i) {
         result.values.variable.emplace_back(
-            decoded.data->as<char>() + decoded.offsets[i],
+            owner->as<char>() + decoded.offsets[i],
             decoded.offsets[i + 1] - decoded.offsets[i]);
       }
+      result.values.variableOwners.push_back(std::move(owner));
       decodedValues = checkedAdd(decodedValues, chunkValues, "value count");
     }
     dataOffset = checkedAdd(dataOffset, chunkBytes, "value data offset");
@@ -2094,11 +2239,29 @@ uint64_t readControlWord(const char* source, uint32_t width) {
   }
 }
 
+uint64_t readUnsignedWord(const char* source, uint64_t width) {
+  switch (width) {
+    case 1:
+      return static_cast<uint8_t>(*source);
+    case 2:
+      return readLittleEndian<uint16_t>(source);
+    case 4:
+      return readLittleEndian<uint32_t>(source);
+    case 8:
+      return readLittleEndian<uint64_t>(source);
+    default:
+      BOLT_UNSUPPORTED("Unsupported Lance unsigned-word width {}", width);
+  }
+}
+
 MiniBlockPage decodeFullZip(
     const ::lance::encodings21::FullZipLayout& layout,
     const Page& page,
     memory::MemoryPool& pool,
-    const std::function<BufferPtr(uint64_t, uint64_t)>& read) {
+    const std::function<
+        void(const std::vector<std::pair<uint64_t, uint64_t>>&)>& prefetch,
+    const std::function<BufferPtr(uint64_t, uint64_t)>& read,
+    std::optional<std::pair<uint64_t, uint64_t>> itemRange = std::nullopt) {
   BOLT_CHECK_EQ(page.buffer_offsets_size() > 0, true);
   BOLT_CHECK(layout.has_value_compression());
   BOLT_CHECK(
@@ -2120,7 +2283,6 @@ MiniBlockPage decodeFullZip(
               CompressiveEncoding::kVariablePackedStruct,
       "Unsupported Lance FullZip compression {}",
       static_cast<int>(layout.value_compression().compression_case()));
-  auto input = read(page.buffer_offsets(0), page.buffer_sizes(0));
   const auto [maxRep, maxDef] = structuralLevelMaxima(layout.layers());
   const auto repBits = levelBitWidth(maxRep);
   const auto defBits = levelBitWidth(maxDef);
@@ -2132,45 +2294,122 @@ MiniBlockPage decodeFullZip(
       controlBytes == 4);
   const auto defMask = defBits == 0 ? 0 : (uint64_t{1} << defBits) - 1;
   const auto visibleDef = maxVisibleDefinitionLevel(layout.layers());
+  const auto requestedStart = itemRange.has_value() ? itemRange->first : 0;
+  const auto requestedCount = itemRange.has_value()
+      ? itemRange->second
+      : static_cast<uint64_t>(layout.num_items());
+  BOLT_CHECK_LE(requestedStart, layout.num_items());
+  BOLT_CHECK_LE(requestedCount, layout.num_items() - requestedStart);
+  const auto requestedEnd = requestedStart + requestedCount;
+
+  auto inputOffset = page.buffer_offsets(0);
+  auto inputSize = page.buffer_sizes(0);
+  auto parseItems = requestedEnd;
+  auto firstSelectedItem = requestedStart;
+  auto readsExactRange = false;
+  if (itemRange.has_value() && layout.has_bits_per_value()) {
+    BOLT_CHECK_EQ(layout.bits_per_value() % 8, 0);
+    const auto bytesPerItem = controlBytes + layout.bits_per_value() / 8;
+    if (bytesPerItem > 0) {
+      BOLT_CHECK_LE(
+          layout.num_items(),
+          std::numeric_limits<uint64_t>::max() / bytesPerItem);
+    }
+    BOLT_CHECK_EQ(page.buffer_sizes(0), layout.num_items() * bytesPerItem);
+    inputOffset += requestedStart * bytesPerItem;
+    inputSize = requestedCount * bytesPerItem;
+    parseItems = requestedCount;
+    firstSelectedItem = 0;
+    readsExactRange = true;
+  } else if (itemRange.has_value() && page.buffer_offsets_size() >= 2) {
+    BOLT_CHECK_EQ(page.length(), layout.num_items());
+    const auto indexValues = page.length() + 1;
+    BOLT_CHECK_EQ(page.buffer_sizes(1) % indexValues, 0);
+    const auto indexWidth = page.buffer_sizes(1) / indexValues;
+    BOLT_CHECK(
+        indexWidth == 1 || indexWidth == 2 || indexWidth == 4 ||
+        indexWidth == 8);
+    const auto indexOffset =
+        page.buffer_offsets(1) + requestedStart * indexWidth;
+    const auto indexSize = (requestedCount + 1) * indexWidth;
+    prefetch({{indexOffset, indexSize}});
+    const auto index = read(indexOffset, indexSize);
+    const auto begin = readUnsignedWord(index->as<char>(), indexWidth);
+    const auto end = readUnsignedWord(
+        index->as<char>() + requestedCount * indexWidth, indexWidth);
+    BOLT_CHECK_LE(begin, end);
+    BOLT_CHECK_LE(end, page.buffer_sizes(0));
+    inputOffset += begin;
+    inputSize = end - begin;
+    parseItems = requestedCount;
+    firstSelectedItem = 0;
+    readsExactRange = true;
+  }
+  if (readsExactRange && inputSize > 0) {
+    prefetch({{inputOffset, inputSize}});
+  }
+  auto input = read(inputOffset, inputSize);
 
   MiniBlockPage result;
-  std::vector<char> fixed;
-  std::vector<char> variable;
-  result.variable.reserve(layout.num_visible_items());
+  result.itemStart = requestedStart;
+  BufferPtr fixed;
+  uint64_t fixedOffset = 0;
+  BufferPtr variable;
+  uint64_t variableOffset = 0;
+  std::vector<uint64_t> variableOffsets;
+  if (layout.has_bits_per_value()) {
+    BOLT_CHECK_EQ(layout.bits_per_value() % 8, 0);
+    const auto bytesPerValue = layout.bits_per_value() / 8;
+    BOLT_CHECK_LE(
+        requestedCount, std::numeric_limits<uint64_t>::max() / bytesPerValue);
+    fixed =
+        AlignedBuffer::allocate<char>(requestedCount * bytesPerValue, &pool);
+  } else {
+    variable = AlignedBuffer::allocate<char>(input->size(), &pool);
+    variableOffsets.reserve(requestedCount + 1);
+    variableOffsets.push_back(0);
+  }
   uint64_t offset = 0;
   uint64_t visibleItems = 0;
-  for (uint64_t item = 0; item < layout.num_items(); ++item) {
+  for (uint64_t item = 0; item < parseItems; ++item) {
     BOLT_CHECK_LE(controlBytes, input->size() - offset);
     const auto control =
         readControlWord(input->as<char>() + offset, controlBytes);
     offset += controlBytes;
     const auto rep = repBits == 0 ? 0 : control >> defBits;
     const auto def = defBits == 0 ? 0 : control & defMask;
-    if (repBits > 0) {
+    const auto selected = item >= firstSelectedItem;
+    if (selected && repBits > 0) {
       result.rep.push_back(static_cast<uint16_t>(rep));
     }
-    if (defBits > 0) {
+    if (selected && defBits > 0) {
       result.def.push_back(static_cast<uint16_t>(def));
     }
     if (def > visibleDef) {
       continue;
     }
-    ++visibleItems;
+    visibleItems += selected;
     if (layout.has_bits_per_value()) {
-      BOLT_CHECK_EQ(layout.bits_per_value() % 8, 0);
       const auto bytes = layout.bits_per_value() / 8;
       BOLT_CHECK_LE(bytes, input->size() - offset);
-      fixed.insert(
-          fixed.end(),
-          input->as<char>() + offset,
-          input->as<char>() + offset + bytes);
+      if (selected) {
+        BOLT_CHECK_LE(fixedOffset, fixed->size());
+        BOLT_CHECK_LE(bytes, fixed->size() - fixedOffset);
+        std::memcpy(
+            fixed->asMutable<char>() + fixedOffset,
+            input->as<char>() + offset,
+            bytes);
+        fixedOffset += bytes;
+      }
       offset += bytes;
     } else {
       BOLT_CHECK(layout.has_bits_per_offset());
       const auto bytes = layout.bits_per_offset() / 8;
       BOLT_CHECK(bytes == 4 || bytes == 8);
       if (def != 0) {
-        result.variable.emplace_back();
+        if (selected) {
+          variableOffsets.push_back(variableOffset);
+        }
         continue;
       }
       BOLT_CHECK_LE(bytes, input->size() - offset);
@@ -2180,21 +2419,30 @@ MiniBlockPage decodeFullZip(
           : readLittleEndian<uint64_t>(input->as<char>() + offset);
       offset += bytes;
       BOLT_CHECK_LE(length, input->size() - offset);
-      const auto valueStart = variable.size();
-      variable.insert(
-          variable.end(),
-          input->as<char>() + offset,
-          input->as<char>() + offset + length);
-      result.variable.emplace_back(variable.data() + valueStart, length);
+      if (selected) {
+        BOLT_CHECK_LE(variableOffset, variable->size());
+        BOLT_CHECK_LE(length, variable->size() - variableOffset);
+        std::memcpy(
+            variable->asMutable<char>() + variableOffset,
+            input->as<char>() + offset,
+            length);
+        variableOffset += length;
+        variableOffsets.push_back(variableOffset);
+      }
       offset += length;
     }
   }
-  BOLT_CHECK_EQ(visibleItems, layout.num_visible_items());
-  BOLT_CHECK_EQ(offset, input->size());
+  BOLT_CHECK_EQ(
+      visibleItems,
+      itemRange.has_value() ? requestedCount : layout.num_visible_items());
+  if (readsExactRange || requestedEnd == layout.num_items()) {
+    BOLT_CHECK_EQ(offset, input->size());
+  }
+  result.numItems = visibleItems;
   if (layout.has_bits_per_value()) {
-    auto encoded = copyBuffer(fixed.data(), fixed.size(), pool);
+    fixed->setSize(fixedOffset);
     auto block = decodeCompressive(
-        layout.value_compression(), {encoded}, visibleItems, pool);
+        layout.value_compression(), {fixed}, visibleItems, pool);
     result.fixed = std::move(block.data);
     result.bitsPerValue = block.bitsPerValue;
     result.fixedSizeDimensions = std::move(block.fixedSizeDimensions);
@@ -2202,19 +2450,13 @@ MiniBlockPage decodeFullZip(
     result.packedChildBits = std::move(block.packedChildBits);
     result.allNull = block.allNull;
   } else {
-    auto values = copyBuffer(variable.data(), variable.size(), pool);
-    std::vector<uint64_t> offsets(result.variable.size() + 1);
-    uint64_t valueOffset = 0;
-    for (size_t i = 0; i < result.variable.size(); ++i) {
-      offsets[i] = valueOffset;
-      valueOffset += result.variable[i].size();
-    }
-    offsets.back() = valueOffset;
+    BOLT_CHECK_EQ(variableOffsets.size(), visibleItems + 1);
+    variable->setSize(variableOffset);
     DecodedBlock block{
         DecodedBlock::Kind::kVariable,
-        std::move(values),
+        std::move(variable),
         0,
-        std::move(offsets)};
+        std::move(variableOffsets)};
     if (layout.value_compression().compression_case() ==
         CompressiveEncoding::kFsst) {
       block = decodeFsstBlock(
@@ -2242,12 +2484,14 @@ MiniBlockPage decodeFullZip(
     if (!block.packedChildren.empty()) {
       result.packedChildren = std::move(block.packedChildren);
     } else {
-      result.variable.clear();
+      result.variable.reserve(visibleItems);
+      auto owner = block.data;
       for (uint64_t i = 0; i < visibleItems; ++i) {
         result.variable.emplace_back(
-            block.data->as<char>() + block.offsets[i],
+            owner->as<char>() + block.offsets[i],
             block.offsets[i + 1] - block.offsets[i]);
       }
+      result.variableOwners.push_back(std::move(owner));
     }
   }
   return result;
@@ -2312,11 +2556,13 @@ VectorPtr makeLeafVector(
         childPage.fixed = block.data;
         childPage.bitsPerValue = block.bitsPerValue;
       } else {
+        auto owner = block.data;
         for (uint64_t row = 0; row < block.size(); ++row) {
           childPage.variable.emplace_back(
-              block.data->as<char>() + block.offsets[row],
+              owner->as<char>() + block.offsets[row],
               block.offsets[row + 1] - block.offsets[row]);
         }
+        childPage.variableOwners.push_back(std::move(owner));
       }
       children.push_back(makeLeafVector(
           type->childAt(childIndex),
@@ -2361,11 +2607,13 @@ VectorPtr makeLeafVector(
     }
     MiniBlockPage dictionaryPage;
     if (page.dictionary->kind == DecodedBlock::Kind::kVariable) {
+      auto owner = page.dictionary->data;
       for (uint64_t i = 0; i < page.dictionary->size(); ++i) {
         dictionaryPage.variable.emplace_back(
-            page.dictionary->data->as<char>() + page.dictionary->offsets[i],
+            owner->as<char>() + page.dictionary->offsets[i],
             page.dictionary->offsets[i + 1] - page.dictionary->offsets[i]);
       }
+      dictionaryPage.variableOwners.push_back(std::move(owner));
     } else {
       dictionaryPage.fixed = page.dictionary->data;
       dictionaryPage.bitsPerValue = page.dictionary->bitsPerValue;
@@ -2409,7 +2657,8 @@ VectorPtr makeLeafVector(
     auto result = BaseVector::create(type, numValues, &pool);
     auto* strings = result->asFlatVector<StringView>();
     for (uint64_t i = 0; i < page.variable.size(); ++i) {
-      strings->set(i, StringView(page.variable[i]));
+      strings->set(
+          i, StringView(page.variable[i].data(), page.variable[i].size()));
     }
     return result;
   }
@@ -2456,9 +2705,16 @@ VectorPtr makeLeafVector(
   }
   const auto copyPrimitive = [&]<typename Input, typename Output>() {
     auto* output = result->asFlatVector<Output>()->mutableRawValues();
-    for (uint64_t i = 0; i < result->size(); ++i) {
-      output[i] = static_cast<Output>(
-          readLittleEndian<Input>(page.fixed->as<char>() + i * sizeof(Input)));
+    if constexpr (
+        std::is_same_v<Input, Output> &&
+        std::endian::native == std::endian::little) {
+      std::memcpy(
+          output, page.fixed->as<char>(), result->size() * sizeof(Input));
+    } else {
+      for (uint64_t i = 0; i < result->size(); ++i) {
+        output[i] = static_cast<Output>(readLittleEndian<Input>(
+            page.fixed->as<char>() + i * sizeof(Input)));
+      }
     }
   };
   if (logicalType == "halffloat") {
@@ -2934,7 +3190,7 @@ VectorPtr decodeConstantPage(
     const std::function<BufferPtr(uint64_t, uint64_t)>& read) {
   BOLT_CHECK_GT(layout.layers_size(), 0);
   BufferPtr value;
-  std::vector<BufferPtr> scalarBuffers;
+  BufferList scalarBuffers;
   int32_t bufferIndex = 0;
   if (layout.has_inline_value()) {
     value = copyBuffer(
@@ -3041,6 +3297,7 @@ VectorPtr decodeConstantPage(
     BOLT_CHECK_LE(end, scalarBuffers[1]->size());
     scalar.variable.emplace_back(
         scalarBuffers[1]->as<char>() + first, end - first);
+    scalar.variableOwners.push_back(scalarBuffers[1]);
   } else {
     scalar.fixed = value;
     scalar.bitsPerValue = value->size() * 8;
@@ -3232,7 +3489,20 @@ VectorPtr decodeLanceStructuralPage(
   }
   if (layout.layout_case() ==
       ::lance::encodings21::PageLayout::kFullZipLayout) {
-    auto decoded = decodeFullZip(layout.full_zip_layout(), page, pool, read);
+    const auto rangeRead = lanceStructuralPageSupportsRangeRead(
+        type, fixedSizeDimensions, packedChildLogicalTypes, layout);
+    const auto rowScale = fixedSizeRowScale(fixedSizeDimensions);
+    BOLT_CHECK_LE(rowStart, std::numeric_limits<uint64_t>::max() / rowScale);
+    BOLT_CHECK_LE(rowCount, std::numeric_limits<uint64_t>::max() / rowScale);
+    auto decoded = decodeFullZip(
+        layout.full_zip_layout(),
+        page,
+        pool,
+        prefetch,
+        read,
+        rangeRead ? std::make_optional(
+                        std::pair{rowStart * rowScale, rowCount * rowScale})
+                  : std::nullopt);
     if (leafLogicalType == "lance.blob.v2") {
       BOLT_CHECK(fixedSizeDimensions.empty());
       BOLT_CHECK_EQ(type->kind(), TypeKind::VARBINARY);
@@ -3252,7 +3522,9 @@ VectorPtr decodeLanceStructuralPage(
           prefetch,
           read);
     }
-    uint64_t leafValues = layout.full_zip_layout().num_visible_items();
+    uint64_t leafValues = rangeRead
+        ? decoded.numItems
+        : layout.full_zip_layout().num_visible_items();
     for (const auto dimension : decoded.fixedSizeDimensions) {
       BOLT_CHECK_LE(
           leafValues, std::numeric_limits<uint64_t>::max() / dimension);
@@ -3269,7 +3541,7 @@ VectorPtr decodeLanceStructuralPage(
         std::move(decoded.rep),
         std::move(decoded.def),
         layout.full_zip_layout().layers(),
-        layout.full_zip_layout().num_visible_items());
+        leafValues);
     std::vector<uint32_t> dimensions = fixedSizeDimensions;
     std::vector<std::vector<bool>> fixedSizeValidities(
         fixedSizeDimensions.size());
@@ -3294,6 +3566,10 @@ VectorPtr decodeLanceStructuralPage(
         fixedSizeLayer,
         !decoded.fixedSizeDimensions.empty());
     BOLT_CHECK_EQ(fixedSizeLayer, 0);
+    if (rangeRead) {
+      BOLT_CHECK_EQ(result->size(), rowCount);
+      return result;
+    }
     uint64_t expectedRows = page.length();
     for (const auto dimension : fixedSizeDimensions) {
       if (dimension == 0) {
@@ -3312,12 +3588,16 @@ VectorPtr decodeLanceStructuralPage(
       static_cast<int>(layout.layout_case()));
   const auto rangeRead = lanceStructuralPageSupportsRangeRead(
       type, fixedSizeDimensions, packedChildLogicalTypes, layout);
+  const auto rowScale = fixedSizeRowScale(fixedSizeDimensions);
+  BOLT_CHECK_LE(rowStart, std::numeric_limits<uint64_t>::max() / rowScale);
+  BOLT_CHECK_LE(rowCount, std::numeric_limits<uint64_t>::max() / rowScale);
   auto decoded = decodeMiniBlock(
       layout.mini_block_layout(),
       page,
       pool,
       read,
-      rangeRead ? std::make_optional(std::pair{rowStart, rowCount})
+      rangeRead ? std::make_optional(
+                      std::pair{rowStart * rowScale, rowCount * rowScale})
                 : std::nullopt);
   uint64_t leafValues =
       rangeRead ? decoded.numItems : layout.mini_block_layout().num_items();
@@ -3363,7 +3643,18 @@ VectorPtr decodeLanceStructuralPage(
       fixedSizeLayer,
       !decoded.fixedSizeDimensions.empty());
   BOLT_CHECK_EQ(fixedSizeLayer, 0);
-  uint64_t expectedRows = rangeRead ? decoded.numItems : page.length();
+  if (rangeRead) {
+    const auto requestedRowStart = rowStart * rowScale;
+    BOLT_CHECK_LE(decoded.rowStart, requestedRowStart);
+    BOLT_CHECK_EQ((requestedRowStart - decoded.rowStart) % rowScale, 0);
+    const auto sliceOffset = (requestedRowStart - decoded.rowStart) / rowScale;
+    BOLT_CHECK_LE(sliceOffset, result->size());
+    BOLT_CHECK_LE(rowCount, result->size() - sliceOffset);
+    return result->slice(
+        static_cast<vector_size_t>(sliceOffset),
+        static_cast<vector_size_t>(rowCount));
+  }
+  uint64_t expectedRows = page.length();
   for (const auto dimension : fixedSizeDimensions) {
     if (dimension == 0) {
       continue;
@@ -3372,16 +3663,7 @@ VectorPtr decodeLanceStructuralPage(
     expectedRows /= dimension;
   }
   BOLT_CHECK_EQ(result->size(), expectedRows);
-  if (!rangeRead) {
-    return result;
-  }
-  BOLT_CHECK_LE(decoded.itemStart, rowStart);
-  const auto sliceOffset = rowStart - decoded.itemStart;
-  BOLT_CHECK_LE(sliceOffset, result->size());
-  BOLT_CHECK_LE(rowCount, result->size() - sliceOffset);
-  return result->slice(
-      static_cast<vector_size_t>(sliceOffset),
-      static_cast<vector_size_t>(rowCount));
+  return result;
 }
 
 bool lanceStructuralPageSupportsRangeRead(
@@ -3389,26 +3671,72 @@ bool lanceStructuralPageSupportsRangeRead(
     const std::vector<uint32_t>& fixedSizeDimensions,
     const std::vector<std::string>& packedChildLogicalTypes,
     const ::lance::encodings21::PageLayout& layout) {
+  if (!packedChildLogicalTypes.empty()) {
+    return false;
+  }
+  const auto itemLayers = [](const auto& layers) {
+    return !layers.empty() &&
+        std::all_of(layers.begin(), layers.end(), [](const auto encoded) {
+          const auto layer = static_cast<RepDefLayer>(encoded);
+          return layer == ::lance::encodings21::REPDEF_ALL_VALID_ITEM ||
+              layer == ::lance::encodings21::REPDEF_NULLABLE_ITEM;
+        });
+  };
+  const auto fixedSizeLeafIsScalar = [&]() {
+    auto elementType = type;
+    for (size_t layer = 0; layer < fixedSizeDimensions.size(); ++layer) {
+      if (elementType->kind() != TypeKind::ARRAY) {
+        return false;
+      }
+      elementType = elementType->childAt(0);
+    }
+    return elementType->kind() != TypeKind::ARRAY &&
+        elementType->kind() != TypeKind::MAP &&
+        elementType->kind() != TypeKind::ROW;
+  };
+  if (layout.layout_case() ==
+      ::lance::encodings21::PageLayout::kFullZipLayout) {
+    if ((!fixedSizeDimensions.empty() && !fixedSizeLeafIsScalar()) ||
+        type->kind() == TypeKind::MAP ||
+        std::any_of(
+            fixedSizeDimensions.begin(),
+            fixedSizeDimensions.end(),
+            [](auto dimension) { return dimension == 0; })) {
+      return false;
+    }
+    const auto& fullZip = layout.full_zip_layout();
+    return fullZip.bits_rep() == 0 && itemLayers(fullZip.layers());
+  }
   if (layout.layout_case() !=
-          ::lance::encodings21::PageLayout::kMiniBlockLayout ||
-      !fixedSizeDimensions.empty() || !packedChildLogicalTypes.empty() ||
-      type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
-      type->kind() == TypeKind::ROW) {
+      ::lance::encodings21::PageLayout::kMiniBlockLayout) {
     return false;
   }
   const auto& mini = layout.mini_block_layout();
-  if (mini.has_rep_compression() || mini.repetition_index_depth() != 0 ||
-      mini.layers_size() != 1) {
+  if (mini.has_rep_compression()) {
+    return mini.repetition_index_depth() > 0 &&
+        std::all_of(
+               fixedSizeDimensions.begin(),
+               fixedSizeDimensions.end(),
+               [](auto dimension) { return dimension == 0; });
+  }
+  if (!fixedSizeDimensions.empty()) {
+    if (!fixedSizeLeafIsScalar()) {
+      return false;
+    }
+  }
+  if (mini.repetition_index_depth() != 0 || !itemLayers(mini.layers()) ||
+      std::any_of(
+          fixedSizeDimensions.begin(),
+          fixedSizeDimensions.end(),
+          [](auto dimension) { return dimension == 0; })) {
     return false;
   }
-  switch (mini.layers(0)) {
-    case ::lance::encodings21::REPDEF_ALL_VALID_ITEM:
-      return !mini.has_def_compression();
-    case ::lance::encodings21::REPDEF_NULLABLE_ITEM:
-      return mini.has_def_compression();
-    default:
-      return false;
-  }
+  const auto hasNullable = std::any_of(
+      mini.layers().begin(), mini.layers().end(), [](const auto encoded) {
+        return static_cast<RepDefLayer>(encoded) ==
+            ::lance::encodings21::REPDEF_NULLABLE_ITEM;
+      });
+  return hasNullable == mini.has_def_compression();
 }
 
 bool lanceStructuralLayoutHasCompression(

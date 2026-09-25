@@ -149,9 +149,13 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
 - The read plan splits large ranges at the Bolt `loadQuantum`, limits submitted
   but not yet materialized bytes with `maxCoalesceBytes`, and cancels pending
   Direct/Cached input loads when a reader or plan is abandoned.
-- Primitive all-valid MiniBlock pages parse chunk metadata first and read only
-  the contiguous chunk span covering the requested rows. Nullable, nested,
-  packed, fixed-size, and rep/def-compressed layouts keep the full-page path.
+- MiniBlock pages parse chunk metadata first and read only the contiguous chunk
+  span covering the requested rows. Flat and FixedSizeList pages use their
+  value-domain chunk index; List, Map, and nested Struct branches use the
+  on-disk repetition index to translate parent rows to leaf chunks. FullZip
+  pages whose structural layers stay in one row domain read and materialize
+  only the requested rows. Packed and mixed fixed/repeated domains retain the
+  conservative full-page path until their row mapping can be proven exactly.
 - Variable-width, list, map, and Blob payloads use a second scheduling stage
   after offsets or descriptors have been decoded.
 - Non-inline Blob v2 payloads are grouped by resolved object and submitted
@@ -200,8 +204,10 @@ the standalone current-main Rust harness below.
 
 The C++ benchmark exposes independent `parquet` and `native` modes and forces
 every projected child vector to load. The companion generator creates a
-deterministic 43-column Lance v2.2 Zstandard file and a Zstandard Parquet file
-with equivalent Bolt-visible values:
+deterministic 47-column Lance v2.2 Zstandard file and a Zstandard Parquet file
+with equivalent Bolt-visible values. Four Int64 columns contain the same value
+distribution with 0%, 1%, 50%, and 100% nulls for controlled validity-path
+comparisons:
 
     bolt/dwio/lance/tests/generate_lance_benchmark_data.py \
       /tmp/bolt-lance-all-types \
@@ -223,9 +229,13 @@ use the printed executable as the baseline command:
     bolt/dwio/lance/tests/run_current_rust_reader_benchmark.py \
       --lance-repo /path/to/lance --prepare-only
 
-The harness accepts the same BOLT_LANCE_BENCHMARK_FILE,
-BOLT_LANCE_BENCHMARK_EXPECTED_ROWS, and BOLT_LANCE_BENCHMARK_BATCH_SIZE
-environment variables as the C++ benchmark.
+The harness accepts the same `BOLT_LANCE_BENCHMARK_FILE`,
+`BOLT_LANCE_BENCHMARK_EXPECTED_ROWS`, and
+`BOLT_LANCE_BENCHMARK_BATCH_SIZE` environment variables as the C++ benchmark.
+`BOLT_LANCE_BENCHMARK_COLUMN_NAMES` selects an exact comma-separated
+projection in both implementations. The Rust harness additionally accepts
+`BOLT_LANCE_BENCHMARK_ROW_INDICES` for `take_rows` and
+`BOLT_LANCE_BENCHMARK_CACHE_BYTES` for cache sensitivity checks.
 `BOLT_LANCE_BENCHMARK_RUNTIME_THREADS` controls the harness Tokio runtime; use
 it together with Lance's `LANCE_CPU_THREADS` and `LANCE_IO_THREADS` plus CPU
 affinity when comparing equal CPU budgets. The harness performs a full-column

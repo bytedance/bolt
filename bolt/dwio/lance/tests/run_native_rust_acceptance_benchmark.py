@@ -24,6 +24,7 @@ import math
 import os
 from pathlib import Path
 import re
+import resource
 import statistics
 import subprocess
 import time
@@ -44,11 +45,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--columns", type=int, default=0)
+    parser.add_argument("--column-names", default="")
     parser.add_argument("--scenario", default="full_scan")
+    parser.add_argument("--native-scenario")
+    parser.add_argument("--rust-scenario")
+    parser.add_argument("--row-indices", default="")
+    parser.add_argument("--rust-cache-bytes", type=int, default=256 * 1024 * 1024)
     parser.add_argument("--filter-column", default="filter_key")
     parser.add_argument("--filter-min", type=int, default=0)
     parser.add_argument("--filter-max", type=int, default=0)
     parser.add_argument("--checksum-column", default="row_id")
+    parser.add_argument("--expected-output-rows", type=int)
+    parser.add_argument("--expected-checksum", type=int)
     return parser.parse_args()
 
 
@@ -108,6 +116,7 @@ def run_process(
             os.sched_setaffinity(0, affinity)
 
     started = time.monotonic()
+    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     process = subprocess.Popen(
         command,
         env=env,
@@ -117,11 +126,14 @@ def run_process(
         preexec_fn=set_affinity if hasattr(os, "sched_setaffinity") else None,
     )
     peak_rss_bytes = 0
-    while process.poll() is None:
+    while True:
         _, sampled_peak = process_memory_bytes(process.pid)
         peak_rss_bytes = max(peak_rss_bytes, sampled_peak)
-        time.sleep(0.02)
+        if process.poll() is not None:
+            break
+        time.sleep(0.001)
     stdout, stderr = process.communicate()
+    usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     wall_seconds = time.monotonic() - started
     if process.returncode != 0:
         raise RuntimeError(
@@ -132,6 +144,8 @@ def run_process(
         "command": command,
         "wall_seconds": wall_seconds,
         "peak_rss_bytes": peak_rss_bytes,
+        "user_cpu_seconds": usage_after.ru_utime - usage_before.ru_utime,
+        "system_cpu_seconds": usage_after.ru_stime - usage_before.ru_stime,
         "scan_picoseconds_per_row": parse_json_metric(stdout),
         "stdout": stdout,
         "stderr": stderr,
@@ -196,6 +210,7 @@ def main() -> int:
             "BOLT_LANCE_BENCHMARK_RUNTIME_THREADS": str(args.threads),
             "LANCE_CPU_THREADS": str(args.threads),
             "LANCE_IO_THREADS": str(args.threads),
+            "BOLT_LANCE_BENCHMARK_CACHE_BYTES": str(args.rust_cache_bytes),
             "BOLT_LANCE_BENCHMARK_PRINT_STATS": "1",
             "BOLT_LANCE_BENCHMARK_FILTER_COLUMN": args.filter_column,
             "BOLT_LANCE_BENCHMARK_FILTER_MIN": str(args.filter_min),
@@ -203,6 +218,18 @@ def main() -> int:
             "BOLT_LANCE_BENCHMARK_CHECKSUM_COLUMN": args.checksum_column,
         }
     )
+    if args.column_names:
+        common_env["BOLT_LANCE_BENCHMARK_COLUMN_NAMES"] = args.column_names
+    if args.row_indices:
+        common_env["BOLT_LANCE_BENCHMARK_ROW_INDICES"] = args.row_indices
+    if args.expected_output_rows is not None:
+        common_env["BOLT_LANCE_BENCHMARK_EXPECTED_OUTPUT_ROWS"] = str(
+            args.expected_output_rows
+        )
+    if args.expected_checksum is not None:
+        common_env["BOLT_LANCE_BENCHMARK_EXPECTED_CHECKSUM"] = str(
+            args.expected_checksum
+        )
     commands = {
         "native": [
             str(args.native_benchmark),
@@ -220,23 +247,33 @@ def main() -> int:
         for position, implementation in enumerate(order, start=1):
             env = common_env.copy()
             if implementation == "native":
+                env["BOLT_LANCE_BENCHMARK_SCENARIO"] = (
+                    args.native_scenario or args.scenario
+                )
                 env["BOLT_LANCE_READER_MODE"] = "native"
+            else:
+                env["BOLT_LANCE_BENCHMARK_SCENARIO"] = (
+                    args.rust_scenario or args.scenario
+                )
             print(
                 f"round {round_number}/{args.rounds} position {position}: {implementation}",
                 flush=True,
             )
             measurement = run_process(commands[implementation], env, affinity)
+            reader_stats = parse_stats(
+                measurement["stderr"],
+                STATS_PREFIX if implementation == "native" else RUST_STATS_PREFIX,
+            )
+            input_rows = int(reader_stats["input_rows"])
             measurement.update(
                 {
                     "round": round_number,
                     "position": position,
                     "implementation": implementation,
-                    "reader_stats": parse_stats(
-                        measurement["stderr"],
-                        STATS_PREFIX
-                        if implementation == "native"
-                        else RUST_STATS_PREFIX,
-                    ),
+                    "reader_stats": reader_stats,
+                    "scan_seconds": measurement["scan_picoseconds_per_row"]
+                    * input_rows
+                    / 1e12,
                 }
             )
             measurements.append(measurement)
@@ -265,18 +302,41 @@ def main() -> int:
             "batch_size": args.batch_size,
             "threads": args.threads,
             "columns": args.columns,
+            "column_names": args.column_names,
             "scenario": args.scenario,
+            "native_scenario": args.native_scenario or args.scenario,
+            "rust_scenario": args.rust_scenario or args.scenario,
+            "row_indices": args.row_indices,
+            "rust_cache_bytes": args.rust_cache_bytes,
             "cpu_affinity": sorted(affinity),
         },
         "measurements": measurements,
         "summary": {
             "native_wall_seconds": summarize(native_wall),
             "rust_wall_seconds": summarize(rust_wall),
+            "native_scan_seconds": summarize(
+                [value["scan_seconds"] for value in by_impl["native"]]
+            ),
+            "rust_scan_seconds": summarize(
+                [value["scan_seconds"] for value in by_impl["rust"]]
+            ),
             "native_peak_rss_bytes": summarize(
                 [value["peak_rss_bytes"] for value in by_impl["native"]]
             ),
             "rust_peak_rss_bytes": summarize(
                 [value["peak_rss_bytes"] for value in by_impl["rust"]]
+            ),
+            "native_user_cpu_seconds": summarize(
+                [value["user_cpu_seconds"] for value in by_impl["native"]]
+            ),
+            "rust_user_cpu_seconds": summarize(
+                [value["user_cpu_seconds"] for value in by_impl["rust"]]
+            ),
+            "native_system_cpu_seconds": summarize(
+                [value["system_cpu_seconds"] for value in by_impl["native"]]
+            ),
+            "rust_system_cpu_seconds": summarize(
+                [value["system_cpu_seconds"] for value in by_impl["rust"]]
             ),
             "paired_native_over_rust": summarize(ratios),
             "exact_sign_flip": exact_sign_flip([math.log(value) for value in ratios]),

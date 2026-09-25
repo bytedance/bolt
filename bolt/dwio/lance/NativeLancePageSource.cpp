@@ -587,13 +587,19 @@ void NativeLancePageSource::enqueuePhysicalColumn(
         physicalIndex, metadata_.pageRowStarts(physicalIndex));
     for (const auto& span : cursor.spans(rowStart, rowCount)) {
       const auto& page = column.pages(span.pageIndex);
+      const auto& layout = metadata_.pageLayout(physicalIndex, span.pageIndex);
       const auto rangeRead = lanceStructuralPageSupportsRangeRead(
           type,
           arrayDimensions,
           metadata_.physicalColumnChildLogicalTypes(physicalIndex),
-          metadata_.pageLayout(physicalIndex, span.pageIndex));
+          layout);
       for (int32_t buffer = 0; buffer < page.buffer_offsets_size(); ++buffer) {
-        if (rangeRead && buffer == 1) {
+        if (rangeRead &&
+            ((layout.layout_case() ==
+                  ::lance::encodings21::PageLayout::kMiniBlockLayout &&
+              buffer == 1) ||
+             layout.layout_case() ==
+                 ::lance::encodings21::PageLayout::kFullZipLayout)) {
           continue;
         }
         if (page.buffer_sizes(buffer) > 0) {

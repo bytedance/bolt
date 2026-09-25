@@ -1941,6 +1941,10 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - `NativeLanceReadScheduler` 支持 page-owned key、压缩输入范围去重、提交后按需
   materialize、取消和 in-flight 上限。
 - v2.1+ structural page 通过 `NativeLanceStructuralPageReader` 进入结构解码 kernel。
+- 可证明 row domain 的 v2.1+ 页面已走范围解码：item-only FullZip 直接定位请求行，
+  MiniBlock 通过磁盘内 repetition index 把 List/Map parent range 映射为连续 chunk，
+  FixedSizeList scalar leaf 使用 value-domain chunk range。混合 fixed/repeated domain 继续
+  走保守路径，避免错误地把 parent row offset 当成 leaf offset。
 - v2.0 Flat 压缩 buffer 通过 `NativeLanceLegacyPageReader`。zstd 使用跨 batch 的顺序
   cursor，只保留 codec context、当前压缩块和 64-byte 尾部；LZ4 保持明确的
   whole-buffer policy。两者都不保留完整 decompressed page。
@@ -1997,7 +2001,8 @@ decode threads 16，full scan。
 该快照是单轮快速验收，只用于验证方向。最终结论必须按第 33.2 节执行 native/Rust
 交替 7 轮、paired log-ratio exact sign-flip test 和 Holm correction。
 
-当前正确性回归：native Lance `123/123`，TableScan `7/7`。
+该阶段正确性回归：native Lance `123/123`，TableScan `7/7`。加入 FullZip 和 nested
+MiniBlock 精确范围读取回归后，当前为 native Lance `125/125`，TableScan `7/7`。
 
 ### 38.4 2026-09-24 七轮交替验收
 
@@ -2016,3 +2021,27 @@ decode threads 16，full scan。
 - 相对重复整页解压的 native 约 52.94 s 基线，当前中位数约提速 6.74 倍。
 - 性能目标尚未完成：下一步应减少 legacy compatibility vector/copy、把 filter 和 nested
   path 迁入 ColumnReader/PageReader，并在相同方法下重新验收。
+
+### 38.5 2026-09-25 单线程 decode 验收
+
+数据集：`/tmp/bolt-lance-perf-all-types-1m/all_types_v2_2.lance`，1,048,576 行，
+47 列，batch size 4,096，单线程，Native/Rust 七轮交替。
+
+| 指标 | 优化前 Native | 优化后 Native | Rust current |
+|---|---:|---:|---:|
+| 核心 scan 中位数 | 15.413 s | 4.197 s | 2.018 s |
+| Native 相对优化前 | 1.00x | 3.67x | - |
+| 峰值 RSS 中位数 | 90.3 MiB | 69.8 MiB | 206.5 MiB |
+
+优化前后 Native paired log-ratio exact sign-flip `p = 0.015625`。优化来自减少重复
+page/chunk decode、消除临时 payload copy 和 FastLanes hot-loop 查表，没有增加 decoded
+或 decompressed page cache。
+
+普适性门禁：
+
+- 4,096 行、43 列小文件：Native 13.56 ms，Rust 10.74 ms；
+- 1M 行单列：Native 23.13 ms，Rust 22.90 ms；
+- 1M 行 nested 五列：Native 0.939 s，Rust 0.492 s；
+- 1% filter、47 列：Native 0.263 s，Rust 2.071 s；
+- 800 列单线程全扫：Native 21.293 s，Rust 26.807 s；Native 峰值 RSS
+  5.69 GiB，Rust 6.19 GiB。

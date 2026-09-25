@@ -206,6 +206,61 @@ void decodeRowsWithBolt(
   signExtendValues(typedOutput, count, compressedBits, isSigned);
 }
 
+template <typename T>
+void decodeFastLanesForNonNeg(
+    const uint8_t* input,
+    uint64_t rowOffset,
+    uint64_t count,
+    uint8_t compressedBits,
+    uint8_t* output) {
+  constexpr uint64_t kChunkRows = 1'024;
+  constexpr std::array<uint8_t, 8> kGroupForBlock64{0, 4, 2, 6, 1, 5, 3, 7};
+  constexpr std::array<uint8_t, 4> kGroupForBlock32{0, 2, 1, 3};
+  constexpr std::array<uint8_t, 2> kGroupForBlock16{0, 1};
+  constexpr std::array<uint8_t, 1> kGroupForBlock8{0};
+  constexpr auto kOutputBits = sizeof(T) * 8;
+  constexpr auto kLanes = kChunkRows / kOutputBits;
+  const auto chunkBytes = kChunkRows * compressedBits / 8;
+  const auto mask = compressedBits == 64 ? std::numeric_limits<uint64_t>::max()
+                                         : (uint64_t{1} << compressedBits) - 1;
+  auto* typedOutput = reinterpret_cast<T*>(output);
+  for (uint64_t outputIndex = 0; outputIndex < count; ++outputIndex) {
+    const auto encodedIndex = rowOffset + outputIndex;
+    const auto* chunk = input + encodedIndex / kChunkRows * chunkBytes;
+    const auto logicalIndex = encodedIndex % kChunkRows;
+    const auto sublane = logicalIndex / 128;
+    const auto lanePosition = logicalIndex % 128;
+    const auto block = lanePosition / kLanes;
+    uint64_t group;
+    if constexpr (kOutputBits == 64) {
+      group = kGroupForBlock64[block];
+    } else if constexpr (kOutputBits == 32) {
+      group = kGroupForBlock32[block];
+    } else if constexpr (kOutputBits == 16) {
+      group = kGroupForBlock16[block];
+    } else {
+      group = kGroupForBlock8[block];
+    }
+    const auto row = group * 8 + sublane;
+    const auto lane = lanePosition % kLanes;
+    const auto laneBit = row * compressedBits;
+    const auto word = laneBit / kOutputBits;
+    const auto bitInWord = laneBit % kOutputBits;
+    const auto* wordAddress = chunk + (word * kLanes + lane) * sizeof(T);
+    auto value = static_cast<uint64_t>(folly::Endian::little(
+                     folly::loadUnaligned<T>(wordAddress))) >>
+        bitInWord;
+    if (bitInWord + compressedBits > kOutputBits) {
+      const auto* nextWordAddress =
+          chunk + ((word + 1) * kLanes + lane) * sizeof(T);
+      value |= static_cast<uint64_t>(folly::Endian::little(
+                   folly::loadUnaligned<T>(nextWordAddress)))
+          << (kOutputBits - bitInWord);
+    }
+    typedOutput[outputIndex] = static_cast<T>(value & mask);
+  }
+}
+
 } // namespace
 
 void decodeLanceBitpackedScalar(
@@ -321,7 +376,6 @@ void decodeLanceBitpackedForNonNeg(
     uint8_t uncompressedBits,
     uint8_t* output) {
   constexpr uint64_t kChunkRows = 1'024;
-  constexpr std::array<uint8_t, 8> kFastLanesOrder{0, 4, 2, 6, 1, 5, 3, 7};
   BOLT_CHECK_LE(compressedBits, uncompressedBits);
   BOLT_CHECK(
       uncompressedBits == 8 || uncompressedBits == 16 ||
@@ -337,56 +391,25 @@ void decodeLanceBitpackedForNonNeg(
   const auto chunkBytes = kChunkRows * compressedBits / 8;
   const auto requiredChunks = (rowOffset + count + kChunkRows - 1) / kChunkRows;
   BOLT_CHECK_LE(requiredChunks, inputBytes / chunkBytes);
-  const auto lanes = kChunkRows / uncompressedBits;
-  const auto wordBytes = uncompressedBits / 8;
-  const auto mask = compressedBits == 64 ? std::numeric_limits<uint64_t>::max()
-                                         : (uint64_t{1} << compressedBits) - 1;
-  const auto loadWord = [&](const uint8_t* source) {
-    switch (uncompressedBits) {
-      case 8:
-        return static_cast<uint64_t>(*source);
-      case 16:
-        return static_cast<uint64_t>(
-            folly::Endian::little(folly::loadUnaligned<uint16_t>(source)));
-      case 32:
-        return static_cast<uint64_t>(
-            folly::Endian::little(folly::loadUnaligned<uint32_t>(source)));
-      case 64:
-        return folly::Endian::little(folly::loadUnaligned<uint64_t>(source));
-      default:
-        BOLT_UNREACHABLE("Unsupported FastLanes word width");
-    }
-  };
-  for (uint64_t outputIndex = 0; outputIndex < count; ++outputIndex) {
-    const auto encodedIndex = rowOffset + outputIndex;
-    const auto* chunk = input + encodedIndex / kChunkRows * chunkBytes;
-    const auto logicalIndex = encodedIndex % kChunkRows;
-    const auto sublane = logicalIndex / 128;
-    const auto lanePosition = logicalIndex % 128;
-    uint64_t row = 0;
-    uint64_t lane = 0;
-    bool found = false;
-    for (uint64_t group = 0; group < uncompressedBits / 8; ++group) {
-      const auto base = static_cast<uint64_t>(kFastLanesOrder[group]) * 16;
-      if (lanePosition >= base && lanePosition < base + lanes) {
-        row = group * 8 + sublane;
-        lane = lanePosition - base;
-        found = true;
-        break;
-      }
-    }
-    BOLT_CHECK(found);
-    const auto laneBit = row * compressedBits;
-    const auto word = laneBit / uncompressedBits;
-    const auto bitInWord = laneBit % uncompressedBits;
-    const auto* wordAddress = chunk + (word * lanes + lane) * wordBytes;
-    auto value = loadWord(wordAddress) >> bitInWord;
-    if (bitInWord + compressedBits > uncompressedBits) {
-      const auto* nextWordAddress =
-          chunk + ((word + 1) * lanes + lane) * wordBytes;
-      value |= loadWord(nextWordAddress) << (uncompressedBits - bitInWord);
-    }
-    storeScalarValue(value & mask, outputIndex, uncompressedBits, output);
+  switch (uncompressedBits) {
+    case 8:
+      decodeFastLanesForNonNeg<uint8_t>(
+          input, rowOffset, count, compressedBits, output);
+      return;
+    case 16:
+      decodeFastLanesForNonNeg<uint16_t>(
+          input, rowOffset, count, compressedBits, output);
+      return;
+    case 32:
+      decodeFastLanesForNonNeg<uint32_t>(
+          input, rowOffset, count, compressedBits, output);
+      return;
+    case 64:
+      decodeFastLanesForNonNeg<uint64_t>(
+          input, rowOffset, count, compressedBits, output);
+      return;
+    default:
+      BOLT_UNREACHABLE("Unsupported FastLanes word width");
   }
 }
 

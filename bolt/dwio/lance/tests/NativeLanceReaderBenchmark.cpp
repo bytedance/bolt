@@ -24,6 +24,7 @@
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <string_view>
 
 #include "bolt/dwio/common/Options.h"
@@ -86,6 +87,36 @@ size_t projectedColumnCount = [] {
   const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_COLUMNS");
   return value == nullptr ? 0 : std::stoull(value);
 }();
+std::vector<std::string> projectedColumnNames = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_COLUMN_NAMES");
+  if (value == nullptr || std::string_view(value).empty()) {
+    return std::vector<std::string>{};
+  }
+  std::vector<std::string> names;
+  std::stringstream input(value);
+  std::string name;
+  while (std::getline(input, name, ',')) {
+    BOLT_USER_CHECK(
+        !name.empty(), "benchmark projection contains an empty name");
+    names.push_back(std::move(name));
+  }
+  return names;
+}();
+std::vector<int64_t> rowIndices = [] {
+  const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_ROW_INDICES");
+  if (value == nullptr || std::string_view(value).empty()) {
+    return std::vector<int64_t>{};
+  }
+  std::vector<int64_t> indices;
+  std::stringstream input(value);
+  std::string index;
+  while (std::getline(input, index, ',')) {
+    BOLT_USER_CHECK(
+        !index.empty(), "benchmark row indices contain an empty value");
+    indices.push_back(std::stoll(index));
+  }
+  return indices;
+}();
 uint64_t batchSize = [] {
   const auto* value = std::getenv("BOLT_LANCE_BENCHMARK_BATCH_SIZE");
   return value == nullptr ? 4'096 : std::stoull(value);
@@ -109,6 +140,15 @@ std::unique_ptr<dwio::common::BufferedInput> open(const std::string& path) {
 }
 
 std::vector<std::string> projectedColumns(const RowTypePtr& rowType) {
+  if (!projectedColumnNames.empty()) {
+    for (const auto& name : projectedColumnNames) {
+      BOLT_USER_CHECK(
+          rowType->containsChild(name),
+          "benchmark projection column '{}' is missing",
+          name);
+    }
+    return projectedColumnNames;
+  }
   const auto count = projectedColumnCount == 0
       ? static_cast<size_t>(rowType->size())
       : std::min(projectedColumnCount, static_cast<size_t>(rowType->size()));
@@ -124,7 +164,8 @@ void materialize(const VectorPtr& result) {
 }
 
 bool usesFilter() {
-  return scenario == "filter_1pct_all_types" || scenario == "filter";
+  return scenario == "filter_1pct_all_types" || scenario == "filter" ||
+      scenario == "filter_indices";
 }
 
 bool usesChecksum() {
@@ -165,8 +206,15 @@ ScanResult scan(dwio::common::Reader& reader) {
     auto* filter = scanSpec->childByName(filterColumn);
     BOLT_USER_CHECK_NOT_NULL(
         filter, "benchmark filter column '{}' is not projected", filterColumn);
-    filter->setFilter(
-        std::make_unique<common::BigintRange>(filterMin, filterMax, false));
+    if (scenario == "filter_indices") {
+      BOLT_USER_CHECK(
+          !rowIndices.empty(),
+          "filter_indices requires BOLT_LANCE_BENCHMARK_ROW_INDICES");
+      filter->setFilter(common::createBigintValues(rowIndices, false));
+    } else {
+      filter->setFilter(
+          std::make_unique<common::BigintRange>(filterMin, filterMax, false));
+    }
   }
   options.setScanSpec(std::move(scanSpec));
   auto rows = reader.createRowReader(options);
@@ -292,10 +340,11 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (scenario != "full_scan" && scenario != "full_scan_all_types" &&
-      scenario != "filter" && scenario != "filter_1pct_all_types") {
+      scenario != "filter" && scenario != "filter_1pct_all_types" &&
+      scenario != "filter_indices") {
     std::cerr << "BOLT_LANCE_BENCHMARK_SCENARIO must be 'full_scan', "
                  "'full_scan_all_types', 'filter', or "
-                 "'filter_1pct_all_types'\n";
+                 "'filter_1pct_all_types', or 'filter_indices'\n";
     return 1;
   }
   bytedance::bolt::memory::MemoryManager::initialize({});

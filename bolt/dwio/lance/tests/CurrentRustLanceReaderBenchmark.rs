@@ -17,13 +17,16 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch};
+use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, UInt32Array};
 use arrow_select::filter::filter_record_batch;
 use futures::StreamExt;
 use lance_core::cache::LanceCache;
 use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
-use lance_file::reader::{FileReader, FileReaderOptions};
+use lance_file::{
+    reader::{FileReader, FileReaderOptions},
+    versions,
+};
 use lance_io::ReadBatchParams;
 use lance_io::object_store::ObjectStore;
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
@@ -43,6 +46,52 @@ fn optional_env_u64(name: &str) -> anyhow::Result<Option<u64>> {
         .map(|value| value.parse::<u64>())
         .transpose()
         .map_err(Into::into)
+}
+
+fn projected_column_names(reader: &FileReader) -> anyhow::Result<Vec<String>> {
+    if let Ok(value) = env::var("BOLT_LANCE_BENCHMARK_COLUMN_NAMES") {
+        let names = value
+            .split(',')
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !names.is_empty() && names.iter().all(|name| !name.is_empty()),
+            "BOLT_LANCE_BENCHMARK_COLUMN_NAMES contains an empty name"
+        );
+        return Ok(names);
+    }
+    let count = usize::try_from(env_u64(
+        "BOLT_LANCE_BENCHMARK_COLUMNS",
+        reader.schema().fields.len() as u64,
+    )?)?
+    .min(reader.schema().fields.len());
+    Ok(reader
+        .schema()
+        .fields
+        .iter()
+        .take(count)
+        .map(|field| field.name.clone())
+        .collect())
+}
+
+fn read_batch_params(scenario: &str) -> anyhow::Result<ReadBatchParams> {
+    if scenario != "take_rows" {
+        return Ok(ReadBatchParams::RangeFull);
+    }
+    let value = env::var("BOLT_LANCE_BENCHMARK_ROW_INDICES")?;
+    let indices = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()?;
+    anyhow::ensure!(
+        !indices.is_empty(),
+        "take_rows requires at least one row index"
+    );
+    Ok(ReadBatchParams::Indices(UInt32Array::from_iter_values(
+        indices,
+    )))
 }
 
 fn env_i64(name: &str, default: i64) -> anyhow::Result<i64> {
@@ -100,7 +149,7 @@ async fn scan() -> anyhow::Result<(u64, u64, u64, usize, usize)> {
     anyhow::ensure!(
         matches!(
             scenario.as_str(),
-            "full_scan" | "full_scan_all_types" | "filter" | "filter_1pct_all_types"
+            "full_scan" | "full_scan_all_types" | "filter" | "filter_1pct_all_types" | "take_rows"
         ),
         "unsupported benchmark scenario '{scenario}'"
     );
@@ -130,7 +179,12 @@ async fn scan() -> anyhow::Result<(u64, u64, u64, usize, usize)> {
     let file_scheduler = scan_scheduler
         .open_file(&path, &CachedFileSize::unknown())
         .await?;
-    let cache = LanceCache::with_capacity(256 * 1024 * 1024);
+    let cache_bytes = env_u64("BOLT_LANCE_BENCHMARK_CACHE_BYTES", 256 * 1024 * 1024)?;
+    let cache = if cache_bytes == 0 {
+        LanceCache::no_cache()
+    } else {
+        LanceCache::with_capacity(usize::try_from(cache_bytes)?)
+    };
     let reader = FileReader::try_open(
         file_scheduler,
         None,
@@ -140,11 +194,19 @@ async fn scan() -> anyhow::Result<(u64, u64, u64, usize, usize)> {
     )
     .await?;
     let opened = Instant::now();
+    let column_names = projected_column_names(&reader)?;
+    let column_name_refs = column_names.iter().map(String::as_str).collect::<Vec<_>>();
+    let projection = versions::reader_projection_from_column_names(
+        reader.version(),
+        reader.schema().as_ref(),
+        &column_name_refs,
+    )?;
     let mut stream = reader
-        .read_stream(
-            ReadBatchParams::RangeFull,
+        .read_stream_projected(
+            read_batch_params(&scenario)?,
             batch_size,
             batch_readahead,
+            projection,
             FilterExpression::no_filter(),
         )
         .await?;

@@ -24,8 +24,9 @@
 
 namespace bytedance::bolt::lance::reader {
 
-/// Decodes a v2.1-v2.3 structural page. Primitive MiniBlock pages may return
-/// only the requested range; other layouts return the complete page.
+/// Decodes a v2.1-v2.3 structural page. Range-addressable MiniBlock and
+/// FullZip pages return only the requested rows; other layouts return the
+/// complete page.
 VectorPtr decodeLanceStructuralPage(
     const TypePtr& type,
     std::string_view leafLogicalType,

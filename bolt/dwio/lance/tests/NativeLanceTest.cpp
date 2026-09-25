@@ -3320,6 +3320,37 @@ TEST_F(NativeLanceTest, nullableMiniBlockReadsSelectedChunks) {
   EXPECT_LT(readFile->bytesRead(), fullPageBytes);
 }
 
+TEST_F(NativeLanceTest, nestedMiniBlockReadsSelectedChunks) {
+  std::shared_ptr<ReadFile> source =
+      std::make_shared<LocalReadFile>("examples/complex_v2_2.lance");
+  const auto contents = source->pread(0, source->size());
+  auto readFile = std::make_shared<CountingReadFile>(contents);
+  auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  NativeLanceMetadata metadata(*input, *pool_);
+
+  constexpr uint32_t kColumn = 0;
+  constexpr uint64_t kStart = 1'020;
+  constexpr uint64_t kRows = 17;
+  const auto firstPhysical = metadata.physicalColumnIndex(kColumn);
+  const auto physicalEnd =
+      firstPhysical + metadata.physicalColumnSpan(firstPhysical);
+  uint64_t fullColumnBytes = 0;
+  for (auto physical = firstPhysical; physical < physicalEnd; ++physical) {
+    const auto& column = metadata.column(physical);
+    for (const auto& page : column.pages()) {
+      for (const auto bytes : page.buffer_sizes()) {
+        fullColumnBytes += bytes;
+      }
+    }
+  }
+
+  readFile->resetBytesRead();
+  NativeLancePageSource decoder(*input, metadata, *pool_);
+  const auto decoded = decodeColumn(decoder, kColumn, kStart, kRows);
+  EXPECT_EQ(decoded->size(), kRows);
+  EXPECT_LT(readFile->bytesRead(), fullColumnBytes);
+}
+
 TEST_F(NativeLanceTest, decodesStructuralComplexFixture) {
   auto file = load("complex_v2_2.lance");
   EXPECT_EQ(file.metadata->numRows(), 2'051);
@@ -4260,6 +4291,38 @@ TEST_F(NativeLanceTest, decodesFullZipPerValueGeneralFixture) {
           fmt::format("{}-{}", prefix, absolute));
     }
   }
+}
+
+TEST_F(NativeLanceTest, fullZipReadsOnlySelectedRows) {
+  std::shared_ptr<ReadFile> source =
+      std::make_shared<LocalReadFile>("examples/fullzip_general_v2_2.lance");
+  const auto contents = source->pread(0, source->size());
+  auto readFile = std::make_shared<CountingReadFile>(contents);
+  auto input = std::make_unique<dwio::common::BufferedInput>(readFile, *pool_);
+  NativeLanceMetadata metadata(*input, *pool_);
+
+  constexpr uint32_t kColumn = 0;
+  constexpr uint64_t kStart = 1'020;
+  constexpr uint64_t kRows = 17;
+  const auto physical = metadata.physicalColumnIndex(kColumn);
+  const auto& column = metadata.column(physical);
+  ASSERT_GT(column.pages_size(), 0);
+  const auto& layout = metadata.pageLayout(physical, 0);
+  ASSERT_TRUE(lanceStructuralPageSupportsRangeRead(
+      metadata.rowType()->childAt(kColumn),
+      {},
+      metadata.physicalColumnChildLogicalTypes(physical),
+      layout));
+  uint64_t fullPageBytes = 0;
+  for (const auto bytes : column.pages(0).buffer_sizes()) {
+    fullPageBytes += bytes;
+  }
+
+  readFile->resetBytesRead();
+  NativeLancePageSource decoder(*input, metadata, *pool_);
+  const auto decoded = decodeColumn(decoder, kColumn, kStart, kRows);
+  EXPECT_EQ(decoded->size(), kRows);
+  EXPECT_LT(readFile->bytesRead(), fullPageBytes);
 }
 
 TEST_F(NativeLanceTest, rejectsUnrepresentableStructuralScalarTypes) {
