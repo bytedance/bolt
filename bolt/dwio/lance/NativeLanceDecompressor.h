@@ -22,9 +22,14 @@
 #include <string_view>
 #include <utility>
 
-#include "bolt/dwio/lance/NativeLancePageReader.h"
+#include "bolt/vector/BaseVector.h"
 
 namespace bytedance::bolt::lance::reader {
+
+enum class NativeLanceCodecAccess : uint8_t {
+  kSequentialFrame,
+  kWholeBuffer,
+};
 
 /// Codec boundary shared by legacy and structural page readers.
 class NativeLanceDecompressor {

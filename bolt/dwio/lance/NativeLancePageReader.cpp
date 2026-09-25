@@ -39,17 +39,7 @@ NativeLanceStructuralPageReader::NativeLanceStructuralPageReader(
       sourceDataFile_(sourceDataFile),
       prefetch_(std::move(prefetch)),
       read_(std::move(read)),
-      plan_(std::move(plan)),
-      supportsRangeRead_(lanceStructuralPageSupportsRangeRead(
-          request_.type,
-          request_.fixedSizeDimensions,
-          request_.packedChildLogicalTypes,
-          metadata_.pageLayout(
-              request_.key.physicalColumn,
-              request_.key.pageIndex))),
-      accessMode_(
-          supportsRangeRead_ ? NativeLanceCodecAccess::kBlock
-                             : NativeLanceCodecAccess::kWholeBuffer) {
+      plan_(std::move(plan)) {
   BOLT_CHECK_LT(request_.key.physicalColumn, metadata_.numPhysicalColumns());
   const auto& column = metadata_.column(request_.key.physicalColumn);
   BOLT_CHECK_GE(request_.key.pageIndex, 0);
@@ -59,72 +49,29 @@ NativeLanceStructuralPageReader::NativeLanceStructuralPageReader(
       std::numeric_limits<uint64_t>::max() - request_.rowCount);
 }
 
-void NativeLanceStructuralPageReader::decode() {
-  if (state_ == NativeLancePageState::kFailed) {
-    rethrowFailure();
-  }
-  BOLT_CHECK(
-      state_ == NativeLancePageState::kCreated,
-      "Structural Lance page can only decode from the created state");
-  state_ = NativeLancePageState::kDecoding;
-  try {
-    const auto& column = metadata_.column(request_.key.physicalColumn);
-    const auto& page = column.pages(request_.key.pageIndex);
-    const auto& layout = metadata_.pageLayout(
-        request_.key.physicalColumn, request_.key.pageIndex);
-    result_ = decodeLanceStructuralPage(
-        request_.type,
-        request_.logicalType,
-        request_.fixedSizeDimensions,
-        request_.packedChildLogicalTypes,
-        column,
-        page,
-        layout,
-        request_.localRowStart,
-        request_.rowCount,
-        pool_,
-        blobResolver_,
-        sourceDataFile_,
-        [&](const std::vector<std::pair<uint64_t, uint64_t>>& ranges) {
-          state_ = NativeLancePageState::kPlanningPayload;
-          prefetch_(ranges);
-          state_ = NativeLancePageState::kDecoding;
-        },
-        read_,
-        plan_.get());
-    BOLT_CHECK_NOT_NULL(result_);
-    state_ = NativeLancePageState::kReadyToEmit;
-  } catch (...) {
-    failure_ = std::current_exception();
-    state_ = NativeLancePageState::kFailed;
-    throw;
-  }
-}
-
-VectorPtr NativeLanceStructuralPageReader::consume() {
-  if (state_ == NativeLancePageState::kFailed) {
-    rethrowFailure();
-  }
-  BOLT_CHECK(
-      state_ == NativeLancePageState::kReadyToEmit,
-      "Structural Lance page has no decoded result to consume");
-  state_ = NativeLancePageState::kExhausted;
-  return std::move(result_);
-}
-
-void NativeLanceStructuralPageReader::cancel() {
-  if (state_ == NativeLancePageState::kExhausted ||
-      state_ == NativeLancePageState::kFailed ||
-      state_ == NativeLancePageState::kCancelled) {
-    return;
-  }
-  result_.reset();
-  state_ = NativeLancePageState::kCancelled;
-}
-
-void NativeLanceStructuralPageReader::rethrowFailure() const {
-  BOLT_CHECK_NOT_NULL(failure_);
-  std::rethrow_exception(failure_);
+VectorPtr NativeLanceStructuralPageReader::read() {
+  const auto& column = metadata_.column(request_.key.physicalColumn);
+  const auto& page = column.pages(request_.key.pageIndex);
+  const auto& layout =
+      metadata_.pageLayout(request_.key.physicalColumn, request_.key.pageIndex);
+  auto result = decodeLanceStructuralPage(
+      request_.type,
+      request_.logicalType,
+      request_.fixedSizeDimensions,
+      request_.packedChildLogicalTypes,
+      column,
+      page,
+      layout,
+      request_.localRowStart,
+      request_.rowCount,
+      pool_,
+      blobResolver_,
+      sourceDataFile_,
+      prefetch_,
+      read_,
+      plan_.get());
+  BOLT_CHECK_NOT_NULL(result);
+  return result;
 }
 
 } // namespace bytedance::bolt::lance::reader

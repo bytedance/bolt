@@ -883,27 +883,15 @@ NativeLanceMetadata::NativeLanceMetadata(
     dwio::common::BufferedInput& input,
     memory::MemoryPool& pool,
     std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter)
-    : NativeLanceMetadata(
-          input,
-          pool,
-          std::move(typeAdapter),
-          DeferredOpenTag{}) {
+    : NativeLanceSchemaIndex(std::move(typeAdapter)),
+      NativeLanceColumnMetadataLoader(input, pool) {
+  BOLT_CHECK_NOT_NULL(typeAdapter_);
   readFooter();
   readGlobalBufferIndex();
   readSchema();
   readColumnMetadataIndex();
   buildSchemaIndex();
   validateOpenState();
-}
-
-NativeLanceMetadata::NativeLanceMetadata(
-    dwio::common::BufferedInput& input,
-    memory::MemoryPool& pool,
-    std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter,
-    DeferredOpenTag)
-    : NativeLanceSchemaIndex(std::move(typeAdapter)),
-      NativeLanceColumnMetadataLoader(input, pool) {
-  BOLT_CHECK_NOT_NULL(typeAdapter_);
 }
 
 void NativeLanceMetadata::readFooter() {
@@ -989,12 +977,6 @@ void NativeLanceMetadata::readSchema() {
   BOLT_CHECK(
       fileDescriptor_.has_schema(), "Lance file descriptor has no schema");
   numRows_ = fileDescriptor_.length();
-  const auto schemaTree = buildSchemaTree(fileDescriptor_.schema());
-  rowType_ = convertSchema(schemaTree, typeAdapter_);
-  for (const auto* field : schemaTree.roots) {
-    columnLogicalTypes_.emplace_back(effectiveLogicalType(*field));
-  }
-  BOLT_CHECK_EQ(columnLogicalTypes_.size(), rowType_->size());
 }
 
 void NativeLanceMetadata::readColumnMetadataIndex() {
@@ -1030,6 +1012,12 @@ void NativeLanceMetadata::buildSchemaIndex() {
   BOLT_CHECK(fileDescriptor_.has_schema());
   const auto schemaTree = buildSchemaTree(fileDescriptor_.schema());
   const auto& rootFields = schemaTree.roots;
+  rowType_ = convertSchema(schemaTree, typeAdapter_);
+  columnLogicalTypes_.reserve(rootFields.size());
+  for (const auto* field : rootFields) {
+    columnLogicalTypes_.emplace_back(effectiveLogicalType(*field));
+  }
+  BOLT_CHECK_EQ(columnLogicalTypes_.size(), rowType_->size());
   if (!usesStructuralEncoding()) {
     std::vector<uint32_t> allColumns(footer_.numColumns);
     std::iota(allColumns.begin(), allColumns.end(), 0);
@@ -1039,25 +1027,6 @@ void NativeLanceMetadata::buildSchemaIndex() {
   const auto& childrenByParent = schemaTree.childrenByParent;
   uint32_t nextPhysicalColumn = 0;
   if (usesStructuralEncoding()) {
-    const auto appendLeafMapping =
-        [&](const auto& self, const ::lance::file::Field& field) -> void {
-      const auto children = childrenByParent.find(field.id());
-      const auto isLeaf = children == childrenByParent.end() ||
-          children->second.empty() || isPackedField(field) ||
-          isBlobField(field);
-      if (isLeaf) {
-        BOLT_CHECK_LT(nextPhysicalColumn, footer_.numColumns);
-        leafPhysicalColumnIndices_.emplace(field.id(), nextPhysicalColumn++);
-        return;
-      }
-      for (const auto* child : children->second) {
-        self(self, *child);
-      }
-    };
-    for (const auto* field : rootFields) {
-      appendLeafMapping(appendLeafMapping, *field);
-    }
-    nextPhysicalColumn = 0;
     structuralFields_.reserve(rootFields.size());
     for (const auto* field : rootFields) {
       structuralFields_.push_back(makeStructuralField(

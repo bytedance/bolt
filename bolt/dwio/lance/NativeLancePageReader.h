@@ -17,7 +17,6 @@
 #pragma once
 
 #include <cstdint>
-#include <exception>
 #include <functional>
 #include <string_view>
 #include <vector>
@@ -29,23 +28,6 @@
 namespace bytedance::bolt::lance::reader {
 
 class NativeLanceStructuralPagePlan;
-
-enum class NativeLancePageState : uint8_t {
-  kCreated,
-  kDecoding,
-  kPlanningPayload,
-  kReadyToEmit,
-  kExhausted,
-  kFailed,
-  kCancelled,
-};
-
-enum class NativeLanceCodecAccess : uint8_t {
-  kRange,
-  kBlock,
-  kSequentialFrame,
-  kWholeBuffer,
-};
 
 struct NativeLancePageKey {
   uint32_t physicalColumn;
@@ -84,29 +66,9 @@ class NativeLanceStructuralPageReader {
       Read read,
       std::shared_ptr<const NativeLanceStructuralPagePlan> plan = nullptr);
 
-  void decode();
-  VectorPtr consume();
-  void cancel();
-
-  NativeLancePageKey key() const {
-    return request_.key;
-  }
-
-  NativeLancePageState state() const {
-    return state_;
-  }
-
-  NativeLanceCodecAccess accessMode() const {
-    return accessMode_;
-  }
-
-  bool supportsRangeRead() const {
-    return supportsRangeRead_;
-  }
+  VectorPtr read();
 
  private:
-  [[noreturn]] void rethrowFailure() const;
-
   NativeLanceStructuralPageRequest request_;
   const NativeLanceMetadata& metadata_;
   memory::MemoryPool& pool_;
@@ -115,11 +77,6 @@ class NativeLanceStructuralPageReader {
   Prefetch prefetch_;
   Read read_;
   std::shared_ptr<const NativeLanceStructuralPagePlan> plan_;
-  VectorPtr result_;
-  std::exception_ptr failure_;
-  NativeLancePageState state_{NativeLancePageState::kCreated};
-  NativeLanceCodecAccess accessMode_;
-  bool supportsRangeRead_;
 };
 
 } // namespace bytedance::bolt::lance::reader

@@ -34,14 +34,6 @@ class NativeLanceScanPlan {
     return *rootColumnReader_;
   }
 
-  const RowTypePtr& outputType() const {
-    return rootColumnReader_->outputType();
-  }
-
-  const std::vector<uint32_t>& requiredColumns() const {
-    return requiredColumns_;
-  }
-
   const NativeLanceColumnReader& filterColumnReader(
       uint32_t fileColumnIndex) const {
     return *filterColumnReaders_.at(fileColumnIndex);
@@ -60,14 +52,12 @@ class NativeLanceScanPlan {
       std::unique_ptr<NativeLanceRootColumnReader> rootColumnReader,
       std::unordered_map<uint32_t, std::unique_ptr<NativeLanceColumnReader>>
           filterColumnReaders,
-      std::vector<uint32_t> requiredColumns,
       std::vector<std::pair<uint64_t, uint64_t>> rowRanges,
       uint64_t estimatedBytesPerRow);
 
   std::unique_ptr<NativeLanceRootColumnReader> rootColumnReader_;
   std::unordered_map<uint32_t, std::unique_ptr<NativeLanceColumnReader>>
       filterColumnReaders_;
-  std::vector<uint32_t> requiredColumns_;
   std::vector<std::pair<uint64_t, uint64_t>> rowRanges_;
   uint64_t estimatedBytesPerRow_;
 };

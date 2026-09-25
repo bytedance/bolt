@@ -125,7 +125,6 @@ class NativeLanceSchemaIndex {
   std::vector<uint32_t> physicalColumnSpans_;
   std::vector<std::vector<std::string>> physicalColumnChildLogicalTypes_;
   std::vector<bool> rowAlignedPhysicalColumns_;
-  std::unordered_map<uint32_t, uint32_t> leafPhysicalColumnIndices_;
   std::vector<StructuralField> structuralFields_;
 };
 

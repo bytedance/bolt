@@ -29,7 +29,6 @@
 #include "bolt/dwio/lance/NativeLanceFileContext.h"
 #include "bolt/dwio/lance/NativeLancePageSource.h"
 #include "bolt/dwio/lance/NativeLanceScanPlan.h"
-#include "bolt/dwio/lance/NativeLanceScanWindow.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
 #include "folly/synchronization/Baton.h"
 
@@ -37,13 +36,8 @@ namespace bytedance::bolt::lance::reader {
 
 enum class NativeLanceScanState : uint8_t {
   kIdle,
-  kPlanningWindow,
+  kReading,
   kSkipping,
-  kDecodingFilters,
-  kDecodingValues,
-  kAssemblingBatch,
-  kOutputReady,
-  kDrainingOutput,
   kFinished,
   kFailed,
   kCancelled,
@@ -96,6 +90,7 @@ class NativeLanceScanCoordinator {
   uint64_t capReadSize(uint64_t size) const;
   dwio::common::RowReader::FetchResult prefetchRange(size_t rangeIndex);
   void initializePrefetchRanges();
+  void planPrefetchRange(uint64_t rowStart, uint64_t rowCount);
   void markPrefetchRangesFinished(uint64_t begin, uint64_t end);
   void prepareNextBatchPipeline(uint64_t readEnd, uint64_t requestedRows);
   std::optional<size_t> prefetchRangeIndex(uint64_t begin, uint64_t end) const;
@@ -106,12 +101,12 @@ class NativeLanceScanCoordinator {
       uint64_t requestedRows,
       const common::ScanSpec& scanSpec,
       const dwio::common::Mutation* mutation,
-      VectorPtr& result);
+      VectorPtr& result,
+      bool firstFilterRangesPlanned);
   uint64_t nextImpl(
       uint64_t size,
       VectorPtr& result,
       const dwio::common::Mutation* mutation);
-  void transition(NativeLanceScanState expected, NativeLanceScanState desired);
   void fail(std::exception_ptr error);
   [[noreturn]] void rethrowFailure() const;
 
@@ -120,11 +115,10 @@ class NativeLanceScanCoordinator {
   std::unique_ptr<dwio::common::BufferedInput> input_;
   NativeLancePageSource pageSource_;
   std::unique_ptr<NativeLanceScanPlan> scanPlan_;
-  std::optional<NativeLanceScanWindow> window_;
-  uint64_t generation_{0};
   std::vector<PrefetchRange> prefetchRanges_;
   std::vector<FetchStatus> prefetchStatuses_;
   std::vector<std::shared_ptr<folly::Baton<>>> prefetchBatons_;
+  bool prefetchRangesInitialized_{false};
   mutable std::mutex prefetchMutex_;
   mutable std::mutex pageSourceMutex_;
   mutable std::mutex stateMutex_;

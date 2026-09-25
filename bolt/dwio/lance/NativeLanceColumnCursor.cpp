@@ -34,16 +34,16 @@ NativeLanceColumnCursor::NativeLanceColumnCursor(
 
 std::vector<NativeLancePageSpan> NativeLanceColumnCursor::spans(
     uint64_t rowStart,
-    uint64_t rowCount) {
-  BOLT_CHECK_GE(
-      rowStart, nextRow_, "Lance column cursor cannot move backwards");
+    uint64_t rowCount) const {
   BOLT_CHECK_LE(rowStart, std::numeric_limits<uint64_t>::max() - rowCount);
   const auto rowEnd = rowStart + rowCount;
   BOLT_CHECK_LE(rowEnd, pageRowStarts_->back());
-  seek(rowStart);
-
   std::vector<NativeLancePageSpan> result;
-  auto pageIndex = pageIndex_;
+  const auto upper = std::upper_bound(
+      pageRowStarts_->begin(), pageRowStarts_->end(), rowStart);
+  auto pageIndex = rowStart == pageRowStarts_->back()
+      ? static_cast<int32_t>(pageRowStarts_->size() - 1)
+      : static_cast<int32_t>(upper - pageRowStarts_->begin() - 1);
   while (pageIndex < static_cast<int32_t>(pageRowStarts_->size() - 1) &&
          (*pageRowStarts_)[pageIndex] < rowEnd) {
     const auto pageBegin = (*pageRowStarts_)[pageIndex];
@@ -60,23 +60,7 @@ std::vector<NativeLancePageSpan> NativeLanceColumnCursor::spans(
     }
     ++pageIndex;
   }
-  nextRow_ = rowEnd;
-  seek(rowEnd);
   return result;
-}
-
-void NativeLanceColumnCursor::seek(uint64_t row) {
-  BOLT_CHECK_LE(row, pageRowStarts_->back());
-  if (row == pageRowStarts_->back()) {
-    pageIndex_ = static_cast<int32_t>(pageRowStarts_->size() - 1);
-    nextRow_ = row;
-    return;
-  }
-  const auto upper =
-      std::upper_bound(pageRowStarts_->begin(), pageRowStarts_->end(), row);
-  BOLT_CHECK(upper != pageRowStarts_->begin());
-  pageIndex_ = static_cast<int32_t>(upper - pageRowStarts_->begin() - 1);
-  nextRow_ = row;
 }
 
 } // namespace bytedance::bolt::lance::reader

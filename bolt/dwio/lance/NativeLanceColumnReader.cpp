@@ -20,14 +20,12 @@
 #include <cstring>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/dwio/lance/NativeLanceBatchBuilder.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLancePageSource.h"
 
 namespace bytedance::bolt::lance::reader {
-namespace {
 
-bool typeRequiresDeferredRead(const TypePtr& type) {
+bool nativeLanceTypeRequiresDeferredRead(const TypePtr& type) {
   if (type->kind() == TypeKind::VARCHAR ||
       type->kind() == TypeKind::VARBINARY || type->kind() == TypeKind::ARRAY ||
       type->kind() == TypeKind::MAP) {
@@ -35,13 +33,15 @@ bool typeRequiresDeferredRead(const TypePtr& type) {
   }
   if (type->kind() == TypeKind::ROW) {
     for (uint32_t i = 0; i < type->size(); ++i) {
-      if (typeRequiresDeferredRead(type->childAt(i))) {
+      if (nativeLanceTypeRequiresDeferredRead(type->childAt(i))) {
         return true;
       }
     }
   }
   return false;
 }
+
+namespace {
 
 void checkMatchingNulls(const BaseVector& expected, const BaseVector& actual) {
   BOLT_CHECK_EQ(expected.size(), actual.size());
@@ -95,6 +95,7 @@ VectorPtr decodeNativeLanceStructuralColumn(
     TypePtr type;
     uint64_t rowsPerParent;
     std::vector<uint32_t> fixedSizeDimensions;
+    std::vector<const NativeLanceMetadata::StructuralField*> shapePath;
   };
   std::vector<Branch> branches;
   const auto collectBranches =
@@ -102,13 +103,15 @@ VectorPtr decodeNativeLanceStructuralColumn(
           const NativeLanceMetadata::StructuralField& node) -> void {
     if (node.leaf) {
       branches.push_back(
-          {node.physicalColumnIndex, node.type, node.rowsPerParent, {}});
+          {node.physicalColumnIndex, node.type, node.rowsPerParent, {}, {}});
       return;
     }
     for (const auto& child : node.children) {
       const auto first = branches.size();
       self(self, child);
       for (auto index = first; index < branches.size(); ++index) {
+        branches[index].shapePath.insert(
+            branches[index].shapePath.begin(), &node);
         if (node.type->kind() == TypeKind::ROW) {
           branches[index].type =
               ROW({child.name}, {std::move(branches[index].type)});
@@ -138,14 +141,71 @@ VectorPtr decodeNativeLanceStructuralColumn(
 
   std::vector<VectorPtr> decodedBranches;
   decodedBranches.reserve(branches.size());
+  std::unordered_map<const NativeLanceMetadata::StructuralField*, VectorPtr>
+      canonicalShapes;
+  // Each physical leaf carries the same ancestor shape. Rebind sibling
+  // wrappers to the first decoded buffers so duplicate null/offset/size
+  // storage is released before the remaining leaves are decoded.
+  const auto shareShape = [&](const auto& self,
+                              const Branch& branch,
+                              size_t depth,
+                              VectorPtr vector) -> VectorPtr {
+    if (depth == branch.shapePath.size()) {
+      return vector;
+    }
+    const auto* node = branch.shapePath[depth];
+    if (node->type->kind() == TypeKind::ROW) {
+      const auto* row = vector->as<RowVector>();
+      BOLT_CHECK_NOT_NULL(row);
+      BOLT_CHECK_EQ(row->childrenSize(), 1);
+      auto child = self(self, branch, depth + 1, row->childAt(0));
+      const auto [shape, inserted] = canonicalShapes.try_emplace(node, vector);
+      if (inserted) {
+        return vector;
+      }
+      const auto* canonical = shape->second->as<RowVector>();
+      BOLT_CHECK_NOT_NULL(canonical);
+      checkMatchingNulls(*canonical, *row);
+      return std::make_shared<RowVector>(
+          &pool,
+          vector->type(),
+          canonical->nulls(),
+          canonical->size(),
+          std::vector<VectorPtr>{std::move(child)});
+    }
+
+    BOLT_CHECK(
+        node->type->kind() == TypeKind::ARRAY ||
+        node->type->kind() == TypeKind::MAP);
+    const auto* array = vector->as<ArrayVector>();
+    BOLT_CHECK_NOT_NULL(array);
+    auto child = self(self, branch, depth + 1, array->elements());
+    const auto [shape, inserted] = canonicalShapes.try_emplace(node, vector);
+    if (inserted) {
+      return vector;
+    }
+    const auto* canonical = shape->second->as<ArrayVector>();
+    BOLT_CHECK_NOT_NULL(canonical);
+    checkMatchingArrayLayout(*canonical, *array);
+    return std::make_shared<ArrayVector>(
+        &pool,
+        vector->type(),
+        canonical->nulls(),
+        canonical->size(),
+        canonical->offsets(),
+        canonical->sizes(),
+        std::move(child));
+  };
   for (const auto& branch : branches) {
-    decodedBranches.push_back(source.decodePhysicalColumn(
+    auto decoded = source.decodePhysicalColumn(
         branch.type,
         metadata.physicalColumnLogicalType(branch.physicalColumnIndex),
         branch.physicalColumnIndex,
         rowStart,
         rowCount,
-        branch.fixedSizeDimensions));
+        branch.fixedSizeDimensions);
+    decodedBranches.push_back(
+        shareShape(shareShape, branch, 0, std::move(decoded)));
   }
 
   const auto merge = [&](const auto& self,
@@ -223,30 +283,22 @@ VectorPtr decodeNativeLanceStructuralColumn(
 
 namespace {
 
-class FileColumnReader : public NativeLanceColumnReader {
+class FileColumnReader final : public NativeLanceColumnReader {
  public:
   FileColumnReader(
       const NativeLanceMetadata& metadata,
-      NativeLanceColumnKind kind,
-      std::string name,
       TypePtr type,
       uint32_t fileColumnIndex)
       : metadata_(metadata),
-        name_(std::move(name)),
         type_(std::move(type)),
         fileColumnIndex_(fileColumnIndex),
-        kind_(kind),
         readStage_(
-            typeRequiresDeferredRead(type_)
+            nativeLanceTypeRequiresDeferredRead(type_)
                 ? NativeLanceReadStage::kOffsetDependent
                 : NativeLanceReadStage::kRowAligned) {}
 
   bool readFromFile() const override {
     return true;
-  }
-
-  NativeLanceColumnKind kind() const override {
-    return kind_;
   }
 
   NativeLanceReadStage readStage() const override {
@@ -322,61 +374,19 @@ class FileColumnReader : public NativeLanceColumnReader {
 
  private:
   const NativeLanceMetadata& metadata_;
-  std::string name_;
   TypePtr type_;
   uint32_t fileColumnIndex_;
-  NativeLanceColumnKind kind_;
   NativeLanceReadStage readStage_;
 };
 
-template <NativeLanceColumnKind readerKind>
-class TypedFileColumnReader final : public FileColumnReader {
- public:
-  TypedFileColumnReader(
-      const NativeLanceMetadata& metadata,
-      std::string name,
-      TypePtr type,
-      uint32_t fileColumnIndex)
-      : FileColumnReader(
-            metadata,
-            readerKind,
-            std::move(name),
-            std::move(type),
-            fileColumnIndex) {}
-};
-
-using NativeLanceScalarColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kScalar>;
-using NativeLanceBinaryColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kBinary>;
-using NativeLanceDictionaryColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kDictionary>;
-using NativeLanceListColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kList>;
-using NativeLanceMapColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kMap>;
-using NativeLanceStructColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kStruct>;
-using NativeLanceFixedSizeListColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kFixedSizeList>;
-using NativeLancePackedStructColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kPackedStruct>;
-using NativeLanceBlobColumnReader =
-    TypedFileColumnReader<NativeLanceColumnKind::kBlob>;
-
 class ConstantColumnReader final : public NativeLanceColumnReader {
  public:
-  ConstantColumnReader(std::string name, VectorPtr constantValue)
-      : name_(std::move(name)),
-        type_(constantValue->type()),
+  explicit ConstantColumnReader(VectorPtr constantValue)
+      : type_(constantValue->type()),
         constantValue_(std::move(constantValue)) {}
 
   bool readFromFile() const override {
     return false;
-  }
-
-  NativeLanceColumnKind kind() const override {
-    return NativeLanceColumnKind::kConstant;
   }
 
   NativeLanceReadStage readStage() const override {
@@ -403,84 +413,16 @@ class ConstantColumnReader final : public NativeLanceColumnReader {
   }
 
  private:
-  std::string name_;
   TypePtr type_;
   VectorPtr constantValue_;
 };
 
-NativeLanceColumnKind columnKind(
-    const NativeLanceMetadata& metadata,
-    uint32_t fileColumnIndex,
-    const TypePtr& type) {
-  const auto logicalType = metadata.columnLogicalType(fileColumnIndex);
-  if (logicalType.rfind("dict:", 0) == 0) {
-    return NativeLanceColumnKind::kDictionary;
-  }
-  if (logicalType == "lance.blob.v2") {
-    return NativeLanceColumnKind::kBlob;
-  }
-  if (logicalType.rfind("fixed_size_list:", 0) == 0) {
-    return NativeLanceColumnKind::kFixedSizeList;
-  }
-  switch (type->kind()) {
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
-      return NativeLanceColumnKind::kBinary;
-    case TypeKind::ARRAY:
-      return NativeLanceColumnKind::kList;
-    case TypeKind::MAP:
-      return NativeLanceColumnKind::kMap;
-    case TypeKind::ROW: {
-      if (!metadata.usesStructuralEncoding()) {
-        const auto physicalIndex =
-            metadata.physicalColumnIndex(fileColumnIndex);
-        const auto& column = metadata.column(physicalIndex);
-        for (int32_t pageIndex = 0; pageIndex < column.pages_size();
-             ++pageIndex) {
-          if (column.pages(pageIndex).length() == 0) {
-            continue;
-          }
-          const auto& encoding =
-              metadata.pageEncoding(physicalIndex, pageIndex);
-          if (encoding.array_encoding_case() ==
-              ::lance::encodings::ArrayEncoding::kPackedStruct) {
-            return NativeLanceColumnKind::kPackedStruct;
-          }
-          break;
-        }
-      }
-      return NativeLanceColumnKind::kStruct;
-    }
-    default:
-      return NativeLanceColumnKind::kScalar;
-  }
-}
-
 std::unique_ptr<NativeLanceColumnReader> makeFileColumnReader(
     const NativeLanceMetadata& metadata,
-    NativeLanceColumnKind kind,
-    std::string name,
     TypePtr type,
     uint32_t fileColumnIndex) {
-#define MAKE_READER(readerKind, readerType) \
-  case NativeLanceColumnKind::readerKind:   \
-    return std::make_unique<readerType>(    \
-        metadata, std::move(name), std::move(type), fileColumnIndex)
-  switch (kind) {
-    MAKE_READER(kScalar, NativeLanceScalarColumnReader);
-    MAKE_READER(kBinary, NativeLanceBinaryColumnReader);
-    MAKE_READER(kDictionary, NativeLanceDictionaryColumnReader);
-    MAKE_READER(kList, NativeLanceListColumnReader);
-    MAKE_READER(kMap, NativeLanceMapColumnReader);
-    MAKE_READER(kStruct, NativeLanceStructColumnReader);
-    MAKE_READER(kFixedSizeList, NativeLanceFixedSizeListColumnReader);
-    MAKE_READER(kPackedStruct, NativeLancePackedStructColumnReader);
-    MAKE_READER(kBlob, NativeLanceBlobColumnReader);
-    case NativeLanceColumnKind::kConstant:
-      BOLT_UNREACHABLE();
-  }
-#undef MAKE_READER
-  BOLT_UNREACHABLE();
+  return std::make_unique<FileColumnReader>(
+      metadata, std::move(type), fileColumnIndex);
 }
 
 void addProjectedFileColumn(
@@ -492,11 +434,10 @@ void addProjectedFileColumn(
   const auto& fileType = metadata.rowType();
   const auto fileColumnIndex = fileType->getChildIdx(name);
   auto type = fileType->childAt(fileColumnIndex);
-  const auto kind = columnKind(metadata, fileColumnIndex, type);
   outputNames.push_back(name);
   outputTypes.push_back(type);
-  children.push_back(makeFileColumnReader(
-      metadata, kind, name, std::move(type), fileColumnIndex));
+  children.push_back(
+      makeFileColumnReader(metadata, std::move(type), fileColumnIndex));
 }
 
 } // namespace
@@ -508,13 +449,7 @@ NativeLanceColumnReader::buildFileColumn(
   const auto& fileType = metadata.rowType();
   BOLT_CHECK_LT(fileColumnIndex, fileType->size());
   auto type = fileType->childAt(fileColumnIndex);
-  const auto kind = columnKind(metadata, fileColumnIndex, type);
-  return makeFileColumnReader(
-      metadata,
-      kind,
-      fileType->nameOf(fileColumnIndex),
-      std::move(type),
-      fileColumnIndex);
+  return makeFileColumnReader(metadata, std::move(type), fileColumnIndex);
 }
 
 NativeLanceRootColumnReader::NativeLanceRootColumnReader(
@@ -525,7 +460,9 @@ NativeLanceRootColumnReader::NativeLanceRootColumnReader(
     : outputType_(std::move(outputType)),
       children_(std::move(children)),
       decodingExecutor_(std::move(decodingExecutor)),
-      decodingParallelismFactor_(decodingParallelismFactor) {}
+      decodingParallelismFactor_(decodingParallelismFactor) {
+  initializeReadPlan();
+}
 
 std::unique_ptr<NativeLanceRootColumnReader>
 NativeLanceRootColumnReader::buildRoot(
@@ -555,20 +492,15 @@ NativeLanceRootColumnReader::buildRoot(
       outputNames[channel] = childSpec->fieldName();
       if (childSpec->isConstant()) {
         outputTypes[channel] = childSpec->constantValue()->type();
-        children[channel] = std::make_unique<ConstantColumnReader>(
-            childSpec->fieldName(), childSpec->constantValue());
+        children[channel] =
+            std::make_unique<ConstantColumnReader>(childSpec->constantValue());
       } else {
         const auto fileColumnIndex =
             fileType->getChildIdx(childSpec->fieldName());
         auto type = fileType->childAt(fileColumnIndex);
-        const auto kind = columnKind(metadata, fileColumnIndex, type);
         outputTypes[channel] = type;
-        children[channel] = makeFileColumnReader(
-            metadata,
-            kind,
-            childSpec->fieldName(),
-            std::move(type),
-            fileColumnIndex);
+        children[channel] =
+            makeFileColumnReader(metadata, std::move(type), fileColumnIndex);
       }
     }
     return std::unique_ptr<NativeLanceRootColumnReader>(
@@ -604,18 +536,42 @@ NativeLanceRootColumnReader::buildRoot(
           options.getDecodingParallelismFactor()));
 }
 
-std::vector<uint32_t> NativeLanceRootColumnReader::readColumns(
-    NativeLanceReadStage stage) const {
-  std::vector<uint32_t> columns;
-  columns.reserve(children_.size());
+void NativeLanceRootColumnReader::initializeReadPlan() {
+  std::unordered_map<uint32_t, ReadColumn> rowAligned;
+  std::unordered_map<uint32_t, ReadColumn> offsetDependent;
   for (const auto& child : children_) {
-    if (child->readFromFile() && child->readStage() == stage) {
-      columns.push_back(child->fileColumnIndex());
+    if (!child->readFromFile()) {
+      continue;
     }
+    const auto column = child->fileColumnIndex();
+    auto& stage = child->readStage() == NativeLanceReadStage::kRowAligned
+        ? rowAligned
+        : offsetDependent;
+    stage.try_emplace(column, ReadColumn{column, child.get()});
   }
-  std::sort(columns.begin(), columns.end());
-  columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
-  return columns;
+  const auto materialize = [](const auto& source, auto& destination) {
+    destination.reserve(source.size());
+    for (const auto& [column, entry] : source) {
+      destination.push_back(entry);
+    }
+    std::sort(
+        destination.begin(),
+        destination.end(),
+        [](const auto& lhs, const auto& rhs) {
+          return lhs.fileColumnIndex < rhs.fileColumnIndex;
+        });
+  };
+  materialize(rowAligned, rowAlignedReadPlan_);
+  materialize(offsetDependent, offsetDependentReadPlan_);
+  fileColumnIndices_.reserve(
+      rowAlignedReadPlan_.size() + offsetDependentReadPlan_.size());
+  for (const auto& entry : rowAlignedReadPlan_) {
+    fileColumnIndices_.push_back(entry.fileColumnIndex);
+  }
+  for (const auto& entry : offsetDependentReadPlan_) {
+    fileColumnIndices_.push_back(entry.fileColumnIndex);
+  }
+  std::sort(fileColumnIndices_.begin(), fileColumnIndices_.end());
 }
 
 VectorPtr NativeLanceRootColumnReader::read(
@@ -630,47 +586,41 @@ VectorPtr NativeLanceRootColumnReader::read(
   // compressed columns are available instead of requiring a wide scalar
   // schema.
   constexpr size_t kMinParallelCompressedColumns = 2;
-  auto rowAlignedColumns = readColumns(NativeLanceReadStage::kRowAligned);
-  auto offsetDependentColumns =
-      readColumns(NativeLanceReadStage::kOffsetDependent);
+  auto rowAlignedPlan = rowAlignedReadPlan_;
+  auto offsetDependentPlan = offsetDependentReadPlan_;
   std::unordered_map<uint32_t, VectorPtr> decodedColumns;
   if (predecodedColumns != nullptr) {
     decodedColumns = *predecodedColumns;
-    const auto removePredecoded = [&](std::vector<uint32_t>& columns) {
-      columns.erase(
+    const auto removePredecoded = [&](std::vector<ReadColumn>& plan) {
+      plan.erase(
           std::remove_if(
-              columns.begin(),
-              columns.end(),
-              [&](uint32_t column) { return decodedColumns.contains(column); }),
-          columns.end());
+              plan.begin(),
+              plan.end(),
+              [&](const auto& entry) {
+                return decodedColumns.contains(entry.fileColumnIndex);
+              }),
+          plan.end());
     };
-    removePredecoded(rowAlignedColumns);
-    removePredecoded(offsetDependentColumns);
+    removePredecoded(rowAlignedPlan);
+    removePredecoded(offsetDependentPlan);
   }
   decodedColumns.reserve(
-      decodedColumns.size() + rowAlignedColumns.size() +
-      offsetDependentColumns.size());
-  const auto readerForColumn = [&](uint32_t column) {
-    const auto reader = std::find_if(
-        children_.begin(), children_.end(), [&](const auto& child) {
-          return child->readFromFile() && child->fileColumnIndex() == column;
-        });
-    BOLT_CHECK(reader != children_.end());
-    return reader->get();
+      decodedColumns.size() + rowAlignedPlan.size() +
+      offsetDependentPlan.size());
+  const auto columns = [](const std::vector<ReadColumn>& plan) {
+    std::vector<uint32_t> result;
+    result.reserve(plan.size());
+    for (const auto& entry : plan) {
+      result.push_back(entry.fileColumnIndex);
+    }
+    return result;
   };
-  std::vector<const NativeLanceColumnReader*> rowAlignedReaders;
-  rowAlignedReaders.reserve(rowAlignedColumns.size());
-  for (const auto column : rowAlignedColumns) {
-    rowAlignedReaders.push_back(readerForColumn(column));
-  }
-  std::vector<VectorPtr> rowAlignedResults(rowAlignedColumns.size());
+  const auto rowAlignedColumns = columns(rowAlignedPlan);
+  std::vector<VectorPtr> rowAlignedResults(rowAlignedPlan.size());
 
   if (!primaryRangesPlanned && !rowAlignedColumns.empty()) {
     source.planColumns(rowAlignedColumns, request);
   }
-  // Submitted streams stay compressed and page-owned until the worker for
-  // that column asks for its exact range. ReadScheduler serializes stream
-  // extraction while decompression remains parallel across columns.
   const auto rowAlignedCompressed = std::count_if(
       rowAlignedColumns.begin(), rowAlignedColumns.end(), [&](auto column) {
         return source.hasCompressedColumn(
@@ -681,25 +631,23 @@ VectorPtr NativeLanceRootColumnReader::read(
           ? decodingExecutor_
           : nullptr,
       0,
-      rowAlignedColumns.size(),
+      rowAlignedPlan.size(),
       decodingParallelismFactor_)
       .execute([&](size_t index) {
         rowAlignedResults[index] =
-            rowAlignedReaders[index]->read(source, request, pool, true);
+            rowAlignedPlan[index].reader->read(source, request, pool, true);
       });
-  for (size_t index = 0; index < rowAlignedColumns.size(); ++index) {
+  for (size_t index = 0; index < rowAlignedPlan.size(); ++index) {
     decodedColumns.emplace(
-        rowAlignedColumns[index], std::move(rowAlignedResults[index]));
+        rowAlignedPlan[index].fileColumnIndex,
+        std::move(rowAlignedResults[index]));
   }
+
+  const auto offsetDependentColumns = columns(offsetDependentPlan);
   if (!primaryRangesPlanned && !offsetDependentColumns.empty()) {
     source.planColumns(offsetDependentColumns, request);
   }
-  std::vector<const NativeLanceColumnReader*> offsetDependentReaders;
-  offsetDependentReaders.reserve(offsetDependentColumns.size());
-  for (const auto column : offsetDependentColumns) {
-    offsetDependentReaders.push_back(readerForColumn(column));
-  }
-  std::vector<VectorPtr> offsetDependentResults(offsetDependentColumns.size());
+  std::vector<VectorPtr> offsetDependentResults(offsetDependentPlan.size());
   const auto offsetDependentCompressed = std::count_if(
       offsetDependentColumns.begin(),
       offsetDependentColumns.end(),
@@ -713,132 +661,45 @@ VectorPtr NativeLanceRootColumnReader::read(
           ? decodingExecutor_
           : nullptr,
       0,
-      offsetDependentColumns.size(),
+      offsetDependentPlan.size(),
       decodingParallelismFactor_)
       .execute([&](size_t index) {
-        offsetDependentResults[index] =
-            offsetDependentReaders[index]->read(source, request, pool, true);
+        offsetDependentResults[index] = offsetDependentPlan[index].reader->read(
+            source, request, pool, true);
       });
-  for (size_t index = 0; index < offsetDependentColumns.size(); ++index) {
+  for (size_t index = 0; index < offsetDependentPlan.size(); ++index) {
     decodedColumns.emplace(
-        offsetDependentColumns[index],
+        offsetDependentPlan[index].fileColumnIndex,
         std::move(offsetDependentResults[index]));
   }
 
-  NativeLanceBatchBuilder batchBuilder(outputType_, request.outputSize(), pool);
+  std::vector<VectorPtr> children;
+  children.reserve(children_.size());
   for (size_t channel = 0; channel < children_.size(); ++channel) {
     const auto& child = children_[channel];
     auto result = child->readFromFile()
         ? decodedColumns.at(child->fileColumnIndex())
         : child->read(source, request, pool, true);
-    batchBuilder.setChild(channel, std::move(result));
+    BOLT_CHECK_NOT_NULL(result);
+    BOLT_CHECK_EQ(result->size(), request.outputSize());
+    BOLT_CHECK(
+        result->type()->equivalent(*outputType_->childAt(channel)),
+        "Native Lance output child type does not match the scan plan");
+    children.push_back(std::move(result));
   }
-  return batchBuilder.finish();
+  return std::make_shared<RowVector>(
+      &pool, outputType_, nullptr, request.outputSize(), std::move(children));
 }
 
 void NativeLanceRootColumnReader::planRead(
     NativeLancePageSource& source,
     const NativeLanceColumnRequest& request) const {
   request.validate();
-  std::vector<uint32_t> columns;
-  columns.reserve(children_.size());
-  for (const auto& child : children_) {
-    if (child->readFromFile()) {
-      columns.push_back(child->fileColumnIndex());
-    }
-  }
-  source.planColumns(columns, request);
+  source.planColumns(fileColumnIndices_, request);
 }
 
 std::vector<uint32_t> NativeLanceRootColumnReader::fileColumnIndices() const {
-  std::vector<uint32_t> columns;
-  columns.reserve(children_.size());
-  for (const auto& child : children_) {
-    if (child->readFromFile()) {
-      columns.push_back(child->fileColumnIndex());
-    }
-  }
-  std::sort(columns.begin(), columns.end());
-  columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
-  return columns;
-}
-
-NativeLanceColumnReadTask::NativeLanceColumnReadTask(
-    const NativeLanceRootColumnReader& reader,
-    NativeLanceColumnRequest request,
-    bool primaryRangesPlanned)
-    : reader_(reader),
-      request_(request),
-      state_(
-          primaryRangesPlanned ? NativeLanceColumnState::kWaitingPages
-                               : NativeLanceColumnState::kIdle) {}
-
-void NativeLanceColumnReadTask::plan(NativeLancePageSource& decoder) {
-  if (state_ == NativeLanceColumnState::kFailed) {
-    rethrowFailure();
-  }
-  BOLT_CHECK(
-      state_ == NativeLanceColumnState::kIdle,
-      "Lance column batch can only be planned from the idle state");
-  state_ = NativeLanceColumnState::kPlanningPages;
-  try {
-    reader_.planRead(decoder, request_);
-    state_ = NativeLanceColumnState::kWaitingPages;
-  } catch (...) {
-    failure_ = std::current_exception();
-    state_ = NativeLanceColumnState::kFailed;
-    throw;
-  }
-}
-
-void NativeLanceColumnReadTask::decode(
-    NativeLancePageSource& decoder,
-    memory::MemoryPool& pool) {
-  if (state_ == NativeLanceColumnState::kFailed) {
-    rethrowFailure();
-  }
-  BOLT_CHECK(
-      state_ == NativeLanceColumnState::kIdle ||
-          state_ == NativeLanceColumnState::kWaitingPages,
-      "Lance column batch is not ready to decode");
-  const auto primaryRangesPlanned =
-      state_ == NativeLanceColumnState::kWaitingPages;
-  state_ = NativeLanceColumnState::kAssembling;
-  try {
-    result_ = reader_.read(decoder, request_, pool, primaryRangesPlanned);
-    state_ = NativeLanceColumnState::kReady;
-  } catch (...) {
-    failure_ = std::current_exception();
-    state_ = NativeLanceColumnState::kFailed;
-    throw;
-  }
-}
-
-VectorPtr NativeLanceColumnReadTask::consume() {
-  if (state_ == NativeLanceColumnState::kFailed) {
-    rethrowFailure();
-  }
-  BOLT_CHECK(
-      state_ == NativeLanceColumnState::kReady,
-      "Lance column batch is not ready to consume");
-  state_ = NativeLanceColumnState::kConsumed;
-  return std::move(result_);
-}
-
-void NativeLanceColumnReadTask::cancel(NativeLancePageSource& decoder) {
-  if (state_ == NativeLanceColumnState::kConsumed ||
-      state_ == NativeLanceColumnState::kFailed ||
-      state_ == NativeLanceColumnState::kCancelled) {
-    return;
-  }
-  decoder.cancel();
-  result_.reset();
-  state_ = NativeLanceColumnState::kCancelled;
-}
-
-void NativeLanceColumnReadTask::rethrowFailure() const {
-  BOLT_CHECK_NOT_NULL(failure_);
-  std::rethrow_exception(failure_);
+  return fileColumnIndices_;
 }
 
 } // namespace bytedance::bolt::lance::reader

@@ -26,24 +26,9 @@
 
 #include "bolt/common/io/Options.h"
 #include "bolt/dwio/common/BufferedInput.h"
-#include "bolt/dwio/lance/NativeLanceMemoryBudget.h"
-#include "bolt/dwio/lance/NativeLancePageReader.h"
 #include "bolt/vector/BaseVector.h"
 
 namespace bytedance::bolt::lance::reader {
-
-enum class NativeLanceBufferRole : uint8_t {
-  kValues,
-  kValidity,
-  kOffsets,
-  kRepetition,
-  kDefinition,
-  kDictionary,
-  kPayload,
-  kBlobDescriptor,
-  kBlobPayload,
-  kUnknown,
-};
 
 class NativeLanceReadScheduler {
  public:
@@ -68,37 +53,9 @@ class NativeLanceReadScheduler {
     }
   };
 
-  struct PageBufferKey {
-    NativeLancePageKey page;
-    NativeLanceBufferRole role;
-    uint32_t ordinal;
-
-    bool operator==(const PageBufferKey& other) const {
-      return page == other.page && role == other.role &&
-          ordinal == other.ordinal;
-    }
-  };
-
-  struct PageBufferKeyHash {
-    size_t operator()(const PageBufferKey& key) const {
-      return std::hash<uint32_t>{}(key.page.physicalColumn) ^
-          (std::hash<int32_t>{}(key.page.pageIndex) << 1) ^
-          (std::hash<uint8_t>{}(static_cast<uint8_t>(key.role)) << 2) ^
-          (std::hash<uint32_t>{}(key.ordinal) << 3);
-    }
-  };
-
-  struct PageBuffer {
-    BufferPtr data;
-    std::optional<NativeLanceMemoryBudget::Reservation> reservation;
-  };
-
   explicit NativeLanceReadScheduler(memory::MemoryPool& pool);
 
-  NativeLanceReadScheduler(
-      memory::MemoryPool& pool,
-      Options options,
-      NativeLanceMemoryBudget* memoryBudget = nullptr);
+  NativeLanceReadScheduler(memory::MemoryPool& pool, Options options);
 
   ~NativeLanceReadScheduler();
 
@@ -108,12 +65,6 @@ class NativeLanceReadScheduler {
 
   void schedule(
       dwio::common::BufferedInput& input,
-      uint64_t offset,
-      uint64_t length);
-
-  void schedulePage(
-      dwio::common::BufferedInput& input,
-      PageBufferKey pageBuffer,
       uint64_t offset,
       uint64_t length);
 
@@ -127,6 +78,10 @@ class NativeLanceReadScheduler {
 
   /// Materializes all submitted streams into owned Bolt buffers.
   void materialize();
+
+  /// Releases reads that were planned but not consumed by the completed
+  /// batch. Buffers transferred to decoders are no longer scheduler-owned.
+  void finishBatch();
 
   /// Cancels staged and submitted work, releases materialized buffers, and
   /// prevents new requests from being admitted. Idempotent.
@@ -149,9 +104,6 @@ class NativeLanceReadScheduler {
   /// range. Submitted streams are materialized on demand.
   BufferPtr take(uint64_t offset, uint64_t length);
 
-  /// Returns the bytes owned by a specific page buffer request.
-  PageBuffer takePage(PageBufferKey pageBuffer);
-
  private:
   struct ScheduledRead {
     ReadKey key;
@@ -164,7 +116,6 @@ class NativeLanceReadScheduler {
 
   struct PrefetchedRead {
     BufferPtr data;
-    std::optional<NativeLanceMemoryBudget::Reservation> reservation;
   };
 
   BufferPtr materializeSubmitted(
@@ -174,7 +125,6 @@ class NativeLanceReadScheduler {
       uint64_t offset,
       uint64_t length);
   void materializeUntilAdmitted(uint64_t incomingBytes);
-  std::optional<NativeLanceMemoryBudget::Reservation> reserve(uint64_t bytes);
 
   memory::MemoryPool& pool_;
   const Options options_;
@@ -186,12 +136,10 @@ class NativeLanceReadScheduler {
   std::unordered_set<ReadKey, ReadKeyHash> scheduledReadKeys_;
   std::unordered_map<ReadKey, SubmittedRead, ReadKeyHash> submittedReads_;
   std::unordered_map<ReadKey, PrefetchedRead, ReadKeyHash> prefetchedReads_;
-  std::unordered_map<PageBufferKey, ReadKey, PageBufferKeyHash> pageReads_;
   uint64_t submittedBytes_{0};
   uint64_t peakSubmittedBytes_{0};
   std::atomic<bool> cancelled_{false};
   dwio::common::BufferedInput* input_{nullptr};
-  NativeLanceMemoryBudget* const memoryBudget_;
   // The row-aligned decode stage consumes independent entries concurrently.
   // Planning and materialization remain single-threaded.
   std::mutex consumeMutex_;

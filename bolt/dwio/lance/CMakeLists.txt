@@ -6,7 +6,6 @@ add_subdirectory(proto)
 bolt_add_library(
   bolt_dwio_lance_native
   NativeLanceBitmap.cpp
-  NativeLanceBatchBuilder.cpp
   NativeLanceBitpack.cpp
   NativeLanceColumnReader.cpp
   NativeLanceColumnCursor.cpp
@@ -19,18 +18,15 @@ bolt_add_library(
   NativeLanceLegacyPageReader.cpp
   NativeLanceLegacyScalar.cpp
   NativeLanceLegacyStruct.cpp
-  NativeLanceMemoryBudget.cpp
   NativeLancePackedStruct.cpp
   NativeLancePageReader.cpp
   NativeLanceReadScheduler.cpp
   NativeLanceReader.cpp
   NativeLanceScanPlan.cpp
-  NativeLanceScanWindow.cpp
   NativeLanceStructuralDecoder.cpp
   NativeLanceTypeAdapter.cpp
   NativeLancePageSource.cpp
   NativeLanceFileContext.cpp
-  NativeLanceFileOpenTask.cpp
   NativeLanceMetadata.cpp
   RegisterNativeLanceReader.cpp
 )

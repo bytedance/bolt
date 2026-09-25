@@ -249,7 +249,7 @@ prepare(page metadata, row selection)
 
 ### P1：将并行任务从逻辑列下沉到 physical branch/page chunk
 
-构建 `DecodeTaskGraph`：`Read -> Decompress -> DecodeLeaf -> ApplyRepDef -> Assemble`。Struct 的两个 child、Map 的 key/value、跨 page spans 可以并行，最终只在 ColumnReader 汇合。任务提交必须先申请 `NativeLanceMemoryBudget` token，并设置每列最多一个或两个 active chunks，防止 800 列同时持有大页。
+构建 `DecodeTaskGraph`：`Read -> Decompress -> DecodeLeaf -> ApplyRepDef -> Assemble`。Struct 的两个 child、Map 的 key/value、跨 page spans 可以并行，最终只在 ColumnReader 汇合。输入读取保持批量合并，但 scheduler-owned buffer 必须在 batch 边界释放；decoder 只保留当前 page 的流式状态，禁止跨 batch 缓存解压结果。
 
 验收目标：复杂类型 16 线程平均 CPU 利用达到至少 6 核；800 列 RSS 不高于当前 6.62 GiB；线程数 1/4/16 的加速曲线单调且没有 oversubscription 回退。
 
@@ -299,7 +299,7 @@ prepare(page metadata, row selection)
 1. 先增加 page decode 次数、decoded rows、copied bytes、task queue wait、active bytes 五类 runtime counter，并把“每个 physical page 在顺序扫描中只初始化一次”写成测试。
 2. 实现 StructuralPageDecodeSession，先覆盖 Struct、FixedSizeList、Map，再覆盖 scalar FullZip 和 Sparse。
 3. 增加 Native `Ranges/Indices` 入口和 page-grouped selection，复跑 1/100/100,000 点 workload。
-4. 下沉 physical branch 并行，接入现有 memory budget；验证 1/4/16 线程扩展性。
+4. 下沉 physical branch 并行，按 batch/page 生命周期约束临时输入；验证 1/4/16 线程扩展性。
 5. 做 null bitmap、variable 和 dictionary bulk materialization；每项必须用单类型数据隔离收益。
 6. 每个优化分别跑 7 轮交替 paired benchmark；主门禁继续使用 800 列全扫、47 列全类型、单点查询三项并做 Holm 校正。
 
@@ -443,6 +443,37 @@ chunk 边界大多天然落在 batch 内。此时增加跨 batch codec cursor �
 frame 次数，反而会为每个活跃列增加状态。因此 cursor 只应在 plan 检测到 chunk 确实跨越
 请求边界时启用，并继续遵守压缩输入预算；不能把它实现成通用 payload cache。
 
+### 9.6 Reader 生命周期收敛与内存验收
+
+在不修改 `BufferedInput` 的前提下，本轮进一步完成以下结构调整：
+
+- filter prefetch 只读取第一个实际过滤列，projection 等 selection 生成后再规划；
+- 每个 batch 完成后释放 scheduler 中未消费的输入，且在构造下一批输出前释放上一批；
+- legacy Zstd session 按 physical column/page 索引，进入下一页时回收旧页；
+- structural sibling 共享 canonical null、offset 和 size buffer，不缓存 decoded page；
+- RootColumnReader 的 physical column、reader 和 stage 映射在构造时一次生成；
+- structural 与 legacy 路径使用同一个 Zstd/LZ4 解压入口；
+- 删除未接线的 memory-budget API 和只包装同步调用的多层状态对象。
+
+16 线程、batch 4,096、每端七轮交替的结果：
+
+| 场景 | 调整前 Native scan | 调整后 Native scan | 调整后 Native RSS | 调整后 pool peak |
+| --- | ---: | ---: | ---: | ---: |
+| 800 列 v2.0 full scan | 7.071 s | **6.722 s** | **6.23 GiB** | **1.13 GB** |
+| 47 列全类型 full scan | - | **0.782 s** | **76.7 MiB** | **16.3 MiB** |
+| 1% filter、47 列 | - | **0.166 s** | **52.0 MiB** | **2.50 MiB** |
+| 单点 filter fallback | - | **22.4 ms** | **40.6 MiB** | **0.27 MiB** |
+
+800 列调整前 RSS 中位数为 6.67 GiB、pool peak 为 1.59 GB；调整后分别下降
+到 6.23 GiB 和 1.13 GB。scan 中位数同步改善 4.9%，没有用更大的 batch、readahead
+或 decoded/decompressed cache 换取性能。对应结果文件为：
+
+- `/tmp/lance-refactor-baseline-wide-800-7round.json`
+- `/tmp/lance-refactor-final2-wide-800-7round.json`
+- `/tmp/lance-refactor-final2-full-types-7round.json`
+- `/tmp/lance-refactor-final-filter-7round.json`
+- `/tmp/lance-refactor-final-point1-7round.json`
+
 ## 10. 复现与验证
 
 原始 JSON 位于 `/tmp/lance-perf-report-20260924/`。paired runner：
@@ -461,7 +492,7 @@ python3 bolt/dwio/lance/tests/run_native_rust_acceptance_benchmark.py \
 
 本轮验证结果：
 
-- Native Lance unit tests：125/125 通过；
+- Native Lance unit tests：121/121 通过；
 - Native Lance TableScan tests：7/7 通过；
 - 47 列数据生成、全量 materialization、过滤输出行数和 checksum 校验通过；
 - 点查 1 行和 100 行的输出行数与 `row_id` checksum 校验通过；

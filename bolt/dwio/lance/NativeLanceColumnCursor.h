@@ -29,30 +29,19 @@ struct NativeLancePageSpan {
   uint64_t rowCount;
 };
 
-/// Maps monotonically increasing physical row ranges to page-local spans.
+/// Maps physical row ranges to page-local spans.
 class NativeLanceColumnCursor {
  public:
   NativeLanceColumnCursor(
       uint32_t physicalColumn,
       const std::vector<uint64_t>& pageRowStarts);
 
-  std::vector<NativeLancePageSpan> spans(uint64_t rowStart, uint64_t rowCount);
-
-  void seek(uint64_t row);
-
-  uint64_t nextRow() const {
-    return nextRow_;
-  }
-
-  int32_t pageIndex() const {
-    return pageIndex_;
-  }
+  std::vector<NativeLancePageSpan> spans(uint64_t rowStart, uint64_t rowCount)
+      const;
 
  private:
   uint32_t physicalColumn_;
   const std::vector<uint64_t>* pageRowStarts_;
-  int32_t pageIndex_{0};
-  uint64_t nextRow_{0};
 };
 
 } // namespace bytedance::bolt::lance::reader

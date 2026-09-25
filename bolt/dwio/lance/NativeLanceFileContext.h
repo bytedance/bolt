@@ -37,12 +37,6 @@ class NativeLanceFileContext {
       std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
       std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter);
 
-  NativeLanceFileContext(
-      std::unique_ptr<dwio::common::BufferedInput> input,
-      const dwio::common::ReaderOptions& options,
-      std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
-      std::unique_ptr<NativeLanceMetadata> metadata);
-
   memory::MemoryPool& pool() const {
     return pool_;
   }

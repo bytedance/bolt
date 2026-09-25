@@ -27,7 +27,6 @@
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/common/ParallelFor.h"
-#include "bolt/dwio/lance/NativeLanceFileOpenTask.h"
 #include "bolt/type/Filter.h"
 #include "bolt/vector/ComplexVector.h"
 
@@ -54,16 +53,12 @@ NativeLanceRowSelection selectionForRows(
   return NativeLanceRowSelection::rows(rows);
 }
 
-NativeLanceColumnRequest columnRequest(
-    uint64_t rowStart,
-    vector_size_t inputSize,
-    const RowSet& rows,
-    NativeLanceDecodePurpose purpose) {
+NativeLanceColumnRequest
+columnRequest(uint64_t rowStart, vector_size_t inputSize, const RowSet& rows) {
   return {
       .rowStart = rowStart,
       .rowCount = static_cast<uint64_t>(inputSize),
-      .selection = selectionForRows(rows, inputSize),
-      .purpose = purpose};
+      .selection = selectionForRows(rows, inputSize)};
 }
 
 void initializeSelectedRows(
@@ -432,7 +427,8 @@ NativeLanceFilterResult decodeFilters(
     uint64_t batchRowStart,
     vector_size_t batchSize,
     memory::MemoryPool& pool,
-    const uint64_t* deletedRows) {
+    const uint64_t* deletedRows,
+    bool firstFilterRangesPlanned) {
   RowSet selectedRows{memory::StlAllocator<vector_size_t>(&pool)};
   initializeSelectedRows(selectedRows, batchSize, deletedRows);
 
@@ -447,6 +443,7 @@ NativeLanceFilterResult decodeFilters(
 
   // Filter columns are decoded first. Every later filter sees only rows that
   // passed the earlier filters, allowing its I/O to shrink to matching ranges.
+  bool plannedFilterConsumed = false;
   for (const auto& child : scanSpec.children()) {
     if (!child->hasFilter()) {
       continue;
@@ -455,19 +452,20 @@ NativeLanceFilterResult decodeFilters(
         ? std::optional<uint32_t>{}
         : std::make_optional<uint32_t>(
               fileType->getChildIdx(child->fieldName()));
-    const auto request = columnRequest(
-        batchRowStart,
-        batchSize,
-        selectedRows,
-        NativeLanceDecodePurpose::kFilter);
+    const auto request = columnRequest(batchRowStart, batchSize, selectedRows);
     VectorPtr values;
     if (child->isConstant()) {
       values = BaseVector::wrapInConstant(
           request.outputSize(), 0, child->constantValue());
     } else {
       const auto& reader = scanPlan.filterColumnReader(*columnIndex);
-      reader.plan(source, request);
+      const auto rangesPlanned =
+          firstFilterRangesPlanned && !plannedFilterConsumed;
+      if (!rangesPlanned) {
+        reader.plan(source, request);
+      }
       values = reader.read(source, request, pool, true);
+      plannedFilterConsumed = true;
     }
 
     auto inputRows = selectedRows;
@@ -539,7 +537,6 @@ NativeLanceScanCoordinator::NativeLanceScanCoordinator(
   estimatedBytesPerRow_ = scanPlan_->estimatedBytesPerRow();
   currentRow_ =
       scanPlan_->rowRanges().empty() ? 0 : scanPlan_->rowRanges().front().first;
-  initializePrefetchRanges();
 }
 
 NativeLanceScanCoordinator::~NativeLanceScanCoordinator() {
@@ -553,9 +550,6 @@ void NativeLanceScanCoordinator::cancel() {
         state_ != NativeLanceScanState::kFailed) {
       state_ = NativeLanceScanState::kCancelled;
     }
-    if (window_.has_value()) {
-      window_->cancel();
-    }
   }
   pageSource_.cancel();
 }
@@ -565,23 +559,12 @@ NativeLanceScanState NativeLanceScanCoordinator::state() const {
   return state_;
 }
 
-void NativeLanceScanCoordinator::transition(
-    NativeLanceScanState expected,
-    NativeLanceScanState desired) {
-  std::lock_guard<std::mutex> lock(stateMutex_);
-  BOLT_CHECK(state_ == expected, "Invalid native Lance scan state transition");
-  state_ = desired;
-}
-
 void NativeLanceScanCoordinator::fail(std::exception_ptr error) {
   std::lock_guard<std::mutex> lock(stateMutex_);
   if (state_ == NativeLanceScanState::kCancelled) {
     return;
   }
   failure_ = std::move(error);
-  if (window_.has_value()) {
-    window_->fail(failure_);
-  }
   state_ = NativeLanceScanState::kFailed;
 }
 
@@ -626,6 +609,10 @@ uint64_t NativeLanceScanCoordinator::capReadSize(uint64_t size) const {
 }
 
 void NativeLanceScanCoordinator::initializePrefetchRanges() {
+  if (prefetchRangesInitialized_) {
+    return;
+  }
+  prefetchRangesInitialized_ = true;
   prefetchRanges_.clear();
   for (const auto& [begin, end] : rowRanges()) {
     auto next = begin;
@@ -637,15 +624,12 @@ void NativeLanceScanCoordinator::initializePrefetchRanges() {
     }
   }
   prefetchStatuses_.assign(prefetchRanges_.size(), FetchStatus::kNotStarted);
-  prefetchBatons_.clear();
-  prefetchBatons_.reserve(prefetchRanges_.size());
-  for (size_t i = 0; i < prefetchRanges_.size(); ++i) {
-    prefetchBatons_.push_back(std::make_shared<folly::Baton<>>());
-  }
+  prefetchBatons_.assign(prefetchRanges_.size(), nullptr);
 }
 
 std::optional<std::vector<dwio::common::RowReader::PrefetchUnit>>
 NativeLanceScanCoordinator::prefetchUnits() {
+  initializePrefetchRanges();
   std::vector<PrefetchUnit> units;
   units.reserve(prefetchRanges_.size());
   for (size_t rangeIndex = 0; rangeIndex < prefetchRanges_.size();
@@ -664,6 +648,27 @@ bool NativeLanceScanCoordinator::allPrefetchIssued() const {
   // Lance row prefetch units are optional and do not gate correctness of the
   // current split, so keep split-level preloading enabled like Parquet.
   return true;
+}
+
+void NativeLanceScanCoordinator::planPrefetchRange(
+    uint64_t rowStart,
+    uint64_t rowCount) {
+  const NativeLanceColumnRequest request{
+      .rowStart = rowStart, .rowCount = rowCount};
+  const auto& scanSpec = options_.getScanSpec();
+  if (scanSpec && scanSpec->hasFilter()) {
+    for (const auto& child : scanSpec->children()) {
+      if (!child->hasFilter() || child->isConstant()) {
+        continue;
+      }
+      const auto columnIndex =
+          fileContext_->metadata().rowType()->getChildIdx(child->fieldName());
+      scanPlan_->filterColumnReader(columnIndex).plan(pageSource_, request);
+      return;
+    }
+    return;
+  }
+  scanPlan_->rootColumnReader().planRead(pageSource_, request);
 }
 
 dwio::common::RowReader::FetchResult NativeLanceScanCoordinator::prefetchRange(
@@ -688,11 +693,7 @@ dwio::common::RowReader::FetchResult NativeLanceScanCoordinator::prefetchRange(
     // independent page source because page cursors and codec sessions are
     // scan-local state.
     std::lock_guard<std::mutex> pageSourceLock(pageSourceMutex_);
-    const NativeLanceColumnRequest request{
-        .rowStart = range.begin,
-        .rowCount = range.end - range.begin,
-        .purpose = NativeLanceDecodePurpose::kPrefetch};
-    scanPlan_->rootColumnReader().planRead(pageSource_, request);
+    planPrefetchRange(range.begin, range.end - range.begin);
   } catch (...) {
     std::shared_ptr<folly::Baton<>> baton;
     {
@@ -720,13 +721,22 @@ void NativeLanceScanCoordinator::markPrefetchRangesFinished(
     return;
   }
   std::lock_guard<std::mutex> lock(prefetchMutex_);
-  for (size_t i = 0; i < prefetchRanges_.size(); ++i) {
+  const auto first = std::lower_bound(
+      prefetchRanges_.begin(),
+      prefetchRanges_.end(),
+      begin,
+      [](const auto& candidate, uint64_t row) { return candidate.end <= row; });
+  for (size_t i = first - prefetchRanges_.begin(); i < prefetchRanges_.size();
+       ++i) {
     const auto& range = prefetchRanges_[i];
-    if (range.end > begin && range.end <= end) {
-      if (prefetchStatuses_[i] == FetchStatus::kInProgress) {
-        continue;
-      }
-      prefetchStatuses_[i] = FetchStatus::kFinished;
+    if (range.end > end) {
+      break;
+    }
+    if (prefetchStatuses_[i] == FetchStatus::kInProgress) {
+      continue;
+    }
+    prefetchStatuses_[i] = FetchStatus::kFinished;
+    if (prefetchBatons_[i] != nullptr) {
       prefetchBatons_[i]->post();
     }
   }
@@ -738,6 +748,7 @@ void NativeLanceScanCoordinator::prepareNextBatchPipeline(
   if (input_->supportSyncLoad()) {
     return;
   }
+  initializePrefetchRanges();
   uint64_t nextBegin = 0;
   uint64_t nextEnd = 0;
   if (readEnd < rowRanges()[currentRange_].second) {
@@ -767,11 +778,7 @@ void NativeLanceScanCoordinator::prepareNextBatchPipeline(
     baton = prefetchBatons_[*rangeIndex] = std::make_shared<folly::Baton<>>();
   }
   try {
-    const NativeLanceColumnRequest request{
-        .rowStart = nextBegin,
-        .rowCount = rows,
-        .purpose = NativeLanceDecodePurpose::kPrefetch};
-    scanPlan_->rootColumnReader().planRead(pageSource_, request);
+    planPrefetchRange(nextBegin, rows);
     {
       std::lock_guard<std::mutex> lock(prefetchMutex_);
       prefetchStatuses_[*rangeIndex] = FetchStatus::kFinished;
@@ -786,11 +793,17 @@ void NativeLanceScanCoordinator::prepareNextBatchPipeline(
 std::optional<size_t> NativeLanceScanCoordinator::prefetchRangeIndex(
     uint64_t begin,
     uint64_t end) const {
-  for (size_t i = 0; i < prefetchRanges_.size(); ++i) {
-    const auto& range = prefetchRanges_[i];
-    if (range.begin <= begin && end <= range.end) {
-      return i;
-    }
+  const auto upper = std::upper_bound(
+      prefetchRanges_.begin(),
+      prefetchRanges_.end(),
+      begin,
+      [](uint64_t row, const auto& range) { return row < range.begin; });
+  if (upper == prefetchRanges_.begin()) {
+    return std::nullopt;
+  }
+  const auto candidate = std::prev(upper);
+  if (candidate->begin <= begin && end <= candidate->end) {
+    return candidate - prefetchRanges_.begin();
   }
   return std::nullopt;
 }
@@ -821,7 +834,8 @@ void NativeLanceScanCoordinator::readFiltered(
     uint64_t requestedRows,
     const common::ScanSpec& scanSpec,
     const dwio::common::Mutation* mutation,
-    VectorPtr& result) {
+    VectorPtr& result,
+    bool firstFilterRangesPlanned) {
   const auto rowsToRead = readEnd - readBegin;
   auto filtered = decodeFilters(
       pageSource_,
@@ -831,16 +845,10 @@ void NativeLanceScanCoordinator::readFiltered(
       readBegin,
       static_cast<vector_size_t>(rowsToRead),
       fileContext_->pool(),
-      mutation == nullptr ? nullptr : mutation->deletedRows);
-  transition(
-      NativeLanceScanState::kDecodingFilters,
-      NativeLanceScanState::kDecodingValues);
-  window_->filtersReady();
+      mutation == nullptr ? nullptr : mutation->deletedRows,
+      firstFilterRangesPlanned);
   const auto request = columnRequest(
-      readBegin,
-      static_cast<vector_size_t>(rowsToRead),
-      filtered.selectedRows,
-      NativeLanceDecodePurpose::kProjection);
+      readBegin, static_cast<vector_size_t>(rowsToRead), filtered.selectedRows);
   result = scanPlan_->rootColumnReader().read(
       pageSource_,
       request,
@@ -849,6 +857,7 @@ void NativeLanceScanCoordinator::readFiltered(
       &filtered.predecodedColumns);
   result = applyScanSpecProjection(
       std::move(result), scanSpec, fileContext_->pool());
+  pageSource_.finishBatch();
   prepareNextBatchPipeline(readEnd, requestedRows);
 }
 
@@ -876,44 +885,21 @@ uint64_t NativeLanceScanCoordinator::next(
     BOLT_CHECK(
         state_ == NativeLanceScanState::kIdle,
         "A native Lance scan already has an active operation");
-    state_ = NativeLanceScanState::kPlanningWindow;
-    window_.emplace(++generation_, currentRow_, size);
+    state_ = NativeLanceScanState::kReading;
   }
 
   try {
-    const auto& scanSpec = options_.getScanSpec();
-    const auto decodeState = scanSpec && scanSpec->hasFilter()
-        ? NativeLanceScanState::kDecodingFilters
-        : NativeLanceScanState::kDecodingValues;
-    transition(NativeLanceScanState::kPlanningWindow, decodeState);
-    window_->beginDecode(scanSpec && scanSpec->hasFilter());
-    VectorPtr decoded;
-    const auto rows = nextImpl(size, decoded, mutation);
+    result.reset();
+    const auto rows = nextImpl(size, result, mutation);
     if (rows == 0) {
       std::lock_guard<std::mutex> lock(stateMutex_);
-      window_->cancel();
-      window_.reset();
       state_ = NativeLanceScanState::kFinished;
       return 0;
     }
-    transition(
-        NativeLanceScanState::kDecodingValues,
-        NativeLanceScanState::kAssemblingBatch);
-    window_->beginAssembly();
-    window_->publish(rows, std::move(decoded));
-    transition(
-        NativeLanceScanState::kAssemblingBatch,
-        NativeLanceScanState::kOutputReady);
-    transition(
-        NativeLanceScanState::kOutputReady,
-        NativeLanceScanState::kDrainingOutput);
-    const auto drainedRows = window_->drain(result);
-    BOLT_CHECK_EQ(drainedRows, rows);
-    window_.reset();
     const auto finished = nextRowNumber() == kAtEnd;
     {
       std::lock_guard<std::mutex> lock(stateMutex_);
-      BOLT_CHECK(state_ == NativeLanceScanState::kDrainingOutput);
+      BOLT_CHECK(state_ == NativeLanceScanState::kReading);
       state_ = finished ? NativeLanceScanState::kFinished
                         : NativeLanceScanState::kIdle;
     }
@@ -945,7 +931,14 @@ uint64_t NativeLanceScanCoordinator::nextImpl(
   std::lock_guard<std::mutex> pageSourceLock(pageSourceMutex_);
   const auto& scanSpec = options_.getScanSpec();
   if (FOLLY_UNLIKELY(scanSpec && scanSpec->hasFilter())) {
-    readFiltered(readBegin, readEnd, size, *scanSpec, mutation, result);
+    readFiltered(
+        readBegin,
+        readEnd,
+        size,
+        *scanSpec,
+        mutation,
+        result,
+        primaryRangesPlanned);
     currentRow_ += rowsToRead;
     markPrefetchRangesFinished(readBegin, currentRow_);
     advancePastFinishedRange();
@@ -968,9 +961,7 @@ uint64_t NativeLanceScanCoordinator::nextImpl(
   RowSet selectedRows{
       memory::StlAllocator<vector_size_t>(&fileContext_->pool())};
   NativeLanceColumnRequest request{
-      .rowStart = currentRow_,
-      .rowCount = rowsToRead,
-      .purpose = NativeLanceDecodePurpose::kProjection};
+      .rowStart = currentRow_, .rowCount = rowsToRead};
   if (mutation != nullptr) {
     initializeSelectedRows(
         selectedRows,
@@ -979,13 +970,12 @@ uint64_t NativeLanceScanCoordinator::nextImpl(
     request.selection =
         selectionForRows(selectedRows, static_cast<vector_size_t>(rowsToRead));
   }
-  NativeLanceColumnReadTask columnTask(
-      scanPlan_->rootColumnReader(), request, primaryRangesPlanned);
   if (!primaryRangesPlanned) {
-    columnTask.plan(pageSource_);
+    scanPlan_->rootColumnReader().planRead(pageSource_, request);
   }
-  columnTask.decode(pageSource_, fileContext_->pool());
-  result = columnTask.consume();
+  result = scanPlan_->rootColumnReader().read(
+      pageSource_, request, fileContext_->pool(), primaryRangesPlanned);
+  pageSource_.finishBatch();
   prepareNextBatchPipeline(readEnd, size);
   if (scanSpec) {
     result = applyScanSpecProjection(
@@ -1045,6 +1035,10 @@ uint64_t NativeLanceScanCoordinator::skip(uint64_t skipSize) {
       skipSize -= inRange;
     }
     advancePastFinishedRange();
+    {
+      std::lock_guard<std::mutex> pageSourceLock(pageSourceMutex_);
+      pageSource_.finishBatch();
+    }
     {
       std::lock_guard<std::mutex> lock(stateMutex_);
       BOLT_CHECK(state_ == NativeLanceScanState::kSkipping);
@@ -1136,7 +1130,7 @@ NativeLanceReader::NativeLanceReader(
     const dwio::common::ReaderOptions& options,
     std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
     std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter)
-    : fileContext_(openNativeLanceFile(
+    : fileContext_(std::make_shared<NativeLanceFileContext>(
           std::move(input),
           options,
           std::move(blobResolver),

@@ -111,7 +111,6 @@ std::unique_ptr<NativeLanceScanPlan> NativeLanceScanPlan::build(
   return std::unique_ptr<NativeLanceScanPlan>(new NativeLanceScanPlan(
       std::move(rootColumnReader),
       std::move(filterColumnReaders),
-      std::move(requiredColumns),
       metadata.rowRangesForFileRange(options.getOffset(), options.getLimit()),
       estimateReadBytesPerRow(metadata.rowType(), options)));
 }
@@ -120,12 +119,10 @@ NativeLanceScanPlan::NativeLanceScanPlan(
     std::unique_ptr<NativeLanceRootColumnReader> rootColumnReader,
     std::unordered_map<uint32_t, std::unique_ptr<NativeLanceColumnReader>>
         filterColumnReaders,
-    std::vector<uint32_t> requiredColumns,
     std::vector<std::pair<uint64_t, uint64_t>> rowRanges,
     uint64_t estimatedBytesPerRow)
     : rootColumnReader_(std::move(rootColumnReader)),
       filterColumnReaders_(std::move(filterColumnReaders)),
-      requiredColumns_(std::move(requiredColumns)),
       rowRanges_(std::move(rowRanges)),
       estimatedBytesPerRow_(estimatedBytesPerRow) {}
 

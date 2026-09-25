@@ -27,12 +27,6 @@
 
 namespace bytedance::bolt::lance::reader {
 
-enum class NativeLanceDecodePurpose : uint8_t {
-  kFilter,
-  kProjection,
-  kPrefetch,
-};
-
 /// A non-owning, batch-relative row selection. The owner must keep explicit
 /// row storage alive until the request has been planned and decoded.
 class NativeLanceRowSelection {
@@ -88,7 +82,6 @@ struct NativeLanceColumnRequest {
   uint64_t rowStart{0};
   uint64_t rowCount{0};
   NativeLanceRowSelection selection{NativeLanceRowSelection::all()};
-  NativeLanceDecodePurpose purpose{NativeLanceDecodePurpose::kProjection};
 
   vector_size_t outputSize() const {
     return selection.outputSize(rowCount);

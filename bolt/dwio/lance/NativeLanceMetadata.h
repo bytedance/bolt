@@ -26,8 +26,6 @@
 
 namespace bytedance::bolt::lance::reader {
 
-class NativeLanceFileOpenTask;
-
 /// Metadata needed to plan native reads of Lance v2.0-v2.3 files.
 ///
 /// The object deliberately retains offsets rather than page payloads. Payloads
@@ -131,24 +129,8 @@ class NativeLanceMetadata final : private NativeLanceFileMetadata,
     return NativeLanceColumnMetadataLoader::pageRowStarts(physicalColumnIndex);
   }
 
-  uint32_t leafPhysicalColumnIndex(uint32_t fieldId) const {
-    return leafPhysicalColumnIndices_.at(fieldId);
-  }
-
   const StructuralField& structuralField(uint32_t columnIndex) const {
     return NativeLanceSchemaIndex::structuralField(columnIndex);
-  }
-
-  const NativeLanceFileMetadata& fileMetadata() const {
-    return *this;
-  }
-
-  const NativeLanceSchemaIndex& schemaIndex() const {
-    return *this;
-  }
-
-  const NativeLanceColumnMetadataLoader& columnMetadataLoader() const {
-    return *this;
   }
 
   bool isBlobColumn(uint32_t physicalColumnIndex) const {
@@ -163,15 +145,7 @@ class NativeLanceMetadata final : private NativeLanceFileMetadata,
       uint64_t limit) const;
 
  private:
-  struct DeferredOpenTag {};
-
-  friend class NativeLanceFileOpenTask;
   BufferPtr read(uint64_t offset, uint64_t length) const;
-  NativeLanceMetadata(
-      dwio::common::BufferedInput& input,
-      memory::MemoryPool& pool,
-      std::shared_ptr<const NativeLanceTypeAdapter> typeAdapter,
-      DeferredOpenTag);
   void readFooter();
   void readGlobalBufferIndex();
   void readSchema();

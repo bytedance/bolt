@@ -30,11 +30,9 @@
 #include <folly/Portability.h>
 #include <folly/lang/Bits.h>
 #include <folly/small_vector.h>
-#include <lz4.h>
-#include <zstd.h>
-
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/lance/NativeLanceBitpack.h"
+#include "bolt/dwio/lance/NativeLanceDecompressor.h"
 #include "bolt/dwio/lance/NativeLanceLegacyScalar.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
 #include "bolt/dwio/parquet/arrow/util/ByteStreamSplitInternal.h"
@@ -125,19 +123,6 @@ copyBuffer(const char* data, uint64_t size, memory::MemoryPool& pool) {
   return result;
 }
 
-struct ZstdContextDeleter {
-  void operator()(ZSTD_DCtx* context) const {
-    ZSTD_freeDCtx(context);
-  }
-};
-
-ZSTD_DCtx* zstdContext() {
-  thread_local auto context =
-      std::unique_ptr<ZSTD_DCtx, ZstdContextDeleter>(ZSTD_createDCtx());
-  BOLT_CHECK_NOT_NULL(context.get(), "Failed to create Lance zstd context");
-  return context.get();
-}
-
 BufferPtr decompressBuffer(
     const ::lance::encodings21::BufferCompression* compression,
     const BufferPtr& input,
@@ -147,52 +132,13 @@ BufferPtr decompressBuffer(
           ::lance::encodings21::COMPRESSION_ALGORITHM_UNSPECIFIED) {
     return input;
   }
-  const auto* source = input->as<char>();
-  auto sourceSize = input->size();
   if (compression->scheme() ==
       ::lance::encodings21::COMPRESSION_ALGORITHM_ZSTD) {
-    constexpr uint32_t kZstdMagic = 0xFD2FB528;
-    const auto rawFrame = sourceSize >= sizeof(uint32_t) &&
-        readLittleEndian<uint32_t>(source) == kZstdMagic;
-    uint64_t outputSize = 0;
-    if (rawFrame) {
-      outputSize = ZSTD_getFrameContentSize(source, sourceSize);
-      BOLT_CHECK_NE(outputSize, ZSTD_CONTENTSIZE_ERROR);
-      BOLT_CHECK_NE(outputSize, ZSTD_CONTENTSIZE_UNKNOWN);
-    } else {
-      BOLT_CHECK_GE(sourceSize, sizeof(uint64_t));
-      outputSize = readLittleEndian<uint64_t>(source);
-      source += sizeof(uint64_t);
-      sourceSize -= sizeof(uint64_t);
-    }
-    auto output = AlignedBuffer::allocate<char>(outputSize, &pool);
-    const auto decoded = ZSTD_decompressDCtx(
-        zstdContext(),
-        output->asMutable<char>(),
-        outputSize,
-        source,
-        sourceSize);
-    BOLT_CHECK(!ZSTD_isError(decoded), "Invalid Lance zstd block");
-    BOLT_CHECK_EQ(decoded, outputSize);
-    return output;
+    return NativeLanceDecompressor::decompress("zstd", input, pool);
   }
   if (compression->scheme() ==
       ::lance::encodings21::COMPRESSION_ALGORITHM_LZ4) {
-    BOLT_CHECK_GE(sourceSize, sizeof(uint32_t));
-    const auto outputSize = readLittleEndian<uint32_t>(source);
-    source += sizeof(uint32_t);
-    sourceSize -= sizeof(uint32_t);
-    BOLT_CHECK_LE(outputSize, std::numeric_limits<int>::max());
-    BOLT_CHECK_LE(sourceSize, std::numeric_limits<int>::max());
-    auto output = AlignedBuffer::allocate<char>(outputSize, &pool);
-    const auto decoded = LZ4_decompress_safe(
-        source,
-        output->asMutable<char>(),
-        static_cast<int>(sourceSize),
-        static_cast<int>(outputSize));
-    BOLT_CHECK_GE(decoded, 0, "Invalid Lance lz4 block");
-    BOLT_CHECK_EQ(decoded, outputSize);
-    return output;
+    return NativeLanceDecompressor::decompress("lz4", input, pool);
   }
   BOLT_UNSUPPORTED(
       "Unsupported Lance structural buffer compression {}",

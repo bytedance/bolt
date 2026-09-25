@@ -24,6 +24,7 @@
 #include "bolt/dwio/lance/NativeLanceColumnRequest.h"
 #include "bolt/dwio/lance/NativeLanceLegacyPageReader.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
+#include "bolt/dwio/lance/NativeLancePageReader.h"
 #include "bolt/dwio/lance/NativeLanceReadScheduler.h"
 #include "bolt/vector/BaseVector.h"
 
@@ -74,6 +75,8 @@ class NativeLancePageSource final {
   void submitReadPlan() const;
 
   void materializeReadPlan() const;
+
+  void finishBatch() const;
 
   /// Returns true when independent columns can be decoded concurrently
   /// without sharing mutable asynchronous read-plan state.
@@ -155,11 +158,13 @@ class NativeLancePageSource final {
       uint64_t length) const;
   BufferPtr read(uint64_t offset, uint64_t length) const;
   BufferPtr readCompressedRange(
+      NativeLancePageKey pageKey,
       std::string_view scheme,
       uint64_t compressedOffset,
       uint64_t compressedLength,
       uint64_t decodedOffset,
       uint64_t decodedLength) const;
+  void releaseLegacyPageReadersBefore(NativeLancePageKey pageKey) const;
 
   struct CompressedBufferKey {
     uint64_t offset;
@@ -177,6 +182,11 @@ class NativeLancePageSource final {
     }
   };
 
+  struct LegacyPageReaderEntry {
+    NativeLancePageKey page;
+    std::shared_ptr<NativeLanceLegacyPageReader> reader;
+  };
+
   dwio::common::BufferedInput& input_;
   const NativeLanceMetadata& metadata_;
   memory::MemoryPool& pool_;
@@ -189,9 +199,11 @@ class NativeLancePageSource final {
   mutable std::mutex legacyPageReadersMutex_;
   mutable std::unordered_map<
       CompressedBufferKey,
-      std::shared_ptr<NativeLanceLegacyPageReader>,
+      LegacyPageReaderEntry,
       CompressedBufferKeyHash>
       legacyPageReaders_;
+  mutable std::vector<std::map<int32_t, std::vector<CompressedBufferKey>>>
+      legacyPageReaderKeys_;
   mutable std::mutex structuralPagePlansMutex_;
   mutable std::vector<
       std::map<int32_t, std::shared_ptr<const NativeLanceStructuralPagePlan>>>

@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <exception>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -42,29 +41,7 @@ VectorPtr decodeNativeLanceStructuralColumn(
 
 enum class NativeLanceReadStage { kRowAligned, kOffsetDependent };
 
-enum class NativeLanceColumnKind : uint8_t {
-  kConstant,
-  kScalar,
-  kBinary,
-  kDictionary,
-  kList,
-  kMap,
-  kStruct,
-  kFixedSizeList,
-  kPackedStruct,
-  kBlob,
-};
-
-enum class NativeLanceColumnState : uint8_t {
-  kIdle,
-  kPlanningPages,
-  kWaitingPages,
-  kAssembling,
-  kReady,
-  kConsumed,
-  kFailed,
-  kCancelled,
-};
+bool nativeLanceTypeRequiresDeferredRead(const TypePtr& type);
 
 class NativeLanceColumnReader {
  public:
@@ -75,7 +52,6 @@ class NativeLanceColumnReader {
       uint32_t fileColumnIndex);
 
   virtual bool readFromFile() const = 0;
-  virtual NativeLanceColumnKind kind() const = 0;
   virtual NativeLanceReadStage readStage() const = 0;
   virtual uint32_t fileColumnIndex() const = 0;
   virtual const TypePtr& type() const = 0;
@@ -97,10 +73,6 @@ class NativeLanceRootColumnReader {
       const NativeLanceMetadata& metadata,
       const dwio::common::RowReaderOptions& options);
 
-  const RowTypePtr& outputType() const {
-    return outputType_;
-  }
-
   VectorPtr read(
       NativeLancePageSource& source,
       const NativeLanceColumnRequest& request,
@@ -115,50 +87,27 @@ class NativeLanceRootColumnReader {
 
   std::vector<uint32_t> fileColumnIndices() const;
 
-  NativeLanceColumnKind childKind(column_index_t channel) const {
-    return children_.at(channel)->kind();
-  }
-
  private:
+  struct ReadColumn {
+    uint32_t fileColumnIndex;
+    const NativeLanceColumnReader* reader;
+  };
+
   NativeLanceRootColumnReader(
       RowTypePtr outputType,
       std::vector<std::unique_ptr<NativeLanceColumnReader>> children,
       std::shared_ptr<folly::Executor> decodingExecutor,
       size_t decodingParallelismFactor);
 
-  std::vector<uint32_t> readColumns(NativeLanceReadStage stage) const;
+  void initializeReadPlan();
 
   RowTypePtr outputType_;
   std::vector<std::unique_ptr<NativeLanceColumnReader>> children_;
+  std::vector<ReadColumn> rowAlignedReadPlan_;
+  std::vector<ReadColumn> offsetDependentReadPlan_;
+  std::vector<uint32_t> fileColumnIndices_;
   std::shared_ptr<folly::Executor> decodingExecutor_;
   size_t decodingParallelismFactor_;
-};
-
-/// Batch-local state for executing an immutable column-reader tree.
-class NativeLanceColumnReadTask {
- public:
-  NativeLanceColumnReadTask(
-      const NativeLanceRootColumnReader& reader,
-      NativeLanceColumnRequest request,
-      bool primaryRangesPlanned = false);
-
-  void plan(NativeLancePageSource& decoder);
-  void decode(NativeLancePageSource& decoder, memory::MemoryPool& pool);
-  VectorPtr consume();
-  void cancel(NativeLancePageSource& decoder);
-
-  NativeLanceColumnState state() const {
-    return state_;
-  }
-
- private:
-  [[noreturn]] void rethrowFailure() const;
-
-  const NativeLanceRootColumnReader& reader_;
-  const NativeLanceColumnRequest request_;
-  VectorPtr result_;
-  std::exception_ptr failure_;
-  NativeLanceColumnState state_{NativeLanceColumnState::kIdle};
 };
 
 } // namespace bytedance::bolt::lance::reader

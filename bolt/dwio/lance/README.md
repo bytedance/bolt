@@ -7,9 +7,9 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 
 ## Architecture
 
-- `NativeLanceFileOpenTask` constructs and validates an immutable
-  `NativeLanceFileContext`. Each row reader clones its own scan input while the
-  context retains the input used for lazy metadata reads.
+- `NativeLanceFileContext` synchronously constructs and validates immutable
+  file metadata. Each row reader clones its own scan input while the context
+  retains the input used for lazy metadata reads.
 - `NativeLanceFileMetadata`, `NativeLanceSchemaIndex`, and
   `NativeLanceColumnMetadataLoader` separately own file descriptors, schema
   mappings, and lazy column metadata. `NativeLanceMetadata` is their read-only
@@ -17,22 +17,20 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceScanPlan` binds projection, filters, required physical columns,
   the logical column-reader tree, and split row ranges once per row reader.
 - `NativeLanceReadScheduler` deduplicates byte ranges, submits them to
-  `BufferedInput`, and can return page-owned buffers together with their memory
-  reservations.
-- `NativeLanceColumnReader` owns logical type semantics. Batch-local
-  `NativeLanceColumnReadTask` instances keep execution state out of the shared
-  reader tree. The factory creates explicit scalar, binary, dictionary, list,
-  map, struct, fixed-size-list, packed-struct, Blob, and constant node kinds.
-- `NativeLanceColumnCursor` maps monotonically increasing row ranges to page
-  spans without rescanning page metadata from the beginning.
-- `NativeLanceStructuralPageReader` owns v2.1+ page state and invokes the
-  structural decode kernel. Scan-local `NativeLanceStructuralPagePlan`
+  `BufferedInput`, and releases unconsumed scheduler-owned buffers at every
+  batch boundary.
+- `NativeLanceColumnReader` owns logical column selection and assembly. Its
+  immutable execution plan maps physical columns directly to readers and read
+  stages; type and layout dispatch remains in the page decoder.
+- `NativeLanceColumnCursor` maps arbitrary physical row ranges to page spans.
+- `NativeLanceStructuralPageReader` is the v2.1+ page decode boundary.
+  Scan-local `NativeLanceStructuralPagePlan`
   instances parse MiniBlock chunk metadata and repetition indexes once, map
   later batch ranges without retaining payload data, and are released when the
   page is consumed. `NativeLanceLegacyPageReader` owns v2.0 compressed Flat
   page state.
-- `NativeLanceDecompressor` owns legacy zstd and LZ4 codec handling and exposes
-  whether a codec is sequential-frame or whole-buffer based.
+- `NativeLanceDecompressor` is the shared zstd and LZ4 implementation for both
+  legacy and structural layouts. Legacy zstd uses a bounded streaming cursor.
 - Structural ByteStreamSplit pages reuse the existing vectorized decode kernel.
   Exact-width primitive and variable-width outputs transfer their decoded
   buffers directly into Bolt vectors when representation and lifetime permit;
@@ -45,8 +43,6 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceLegacyList`, `NativeLanceLegacyStruct`, and
   `NativeLanceLegacyBlob` own v2.0 parent/child domains, fixed and packed
   structures, and Blob descriptor/payload reads.
-- `NativeLanceMemoryBudget` provides move-only reservations for bounded
-  transient scan memory.
 - `NativeLancePageSource` owns scan-local page scheduling and physical kernel
   dispatch. Synchronous inputs keep payload reads on demand; asynchronous
   inputs can use the structural plan for exact second-stage payload scheduling.
@@ -64,6 +60,12 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceReader` exposes the implementation as a DWIO `Reader` and
   `RowReader`, including skip, split ownership, batch memory limits, prefetch,
   selective top-level filtering, and runtime statistics.
+
+For filtered scans, prefetch plans only the first non-constant filter column.
+Projection ranges are planned after the selected row set is known. For full
+scans, all projected ranges stay in one I/O plan so wide-column coalescing is
+not sacrificed. Unused planned input is released before the next batch is
+prefetched.
 
 `lance_decode_parallelism` is the maximum number of decode execution contexts
 used for one batch, including the calling thread. Its default is 16; set it to

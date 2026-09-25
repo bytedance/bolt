@@ -88,22 +88,6 @@ const ::lance::encodings::Flat& requireFlat(
 bool isCompressed(const ::lance::encodings::Flat& flat);
 bool hasCompressedFlatBuffer(const ArrayEncoding& encoding);
 
-bool requiresDeferredRead(const TypePtr& type) {
-  if (type->kind() == TypeKind::VARCHAR ||
-      type->kind() == TypeKind::VARBINARY || type->kind() == TypeKind::ARRAY ||
-      type->kind() == TypeKind::MAP) {
-    return true;
-  }
-  if (type->kind() == TypeKind::ROW) {
-    for (uint32_t childIndex = 0; childIndex < type->size(); ++childIndex) {
-      if (requiresDeferredRead(type->childAt(childIndex))) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 uint64_t fixedEncodingBitWidth(const ArrayEncoding& encoding) {
   switch (encoding.array_encoding_case()) {
     case ArrayEncoding::kFlat:
@@ -429,6 +413,7 @@ NativeLancePageSource::NativeLancePageSource(
           readSchedulerOptions.maxReadBytes,
           readSchedulerOptions.maxInFlightBytes)),
       readScheduler_(pool, readSchedulerOptions),
+      legacyPageReaderKeys_(metadata.numPhysicalColumns()),
       structuralPagePlans_(metadata.numPhysicalColumns()) {}
 
 NativeLancePageSource::~NativeLancePageSource() {
@@ -441,10 +426,13 @@ void NativeLancePageSource::cancel() {
     readScheduler_.cancel(&input_);
   }
   std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
-  for (auto& [key, session] : legacyPageReaders_) {
-    session->cancel();
+  for (auto& [key, entry] : legacyPageReaders_) {
+    entry.reader->cancel();
   }
   legacyPageReaders_.clear();
+  for (auto& pages : legacyPageReaderKeys_) {
+    pages.clear();
+  }
   {
     std::lock_guard<std::mutex> planLock(structuralPagePlansMutex_);
     for (auto& plans : structuralPagePlans_) {
@@ -629,6 +617,12 @@ void NativeLancePageSource::enqueuePhysicalColumn(
           : std::shared_ptr<const NativeLanceStructuralPagePlan>{};
       if (preparedPlan != nullptr) {
         if (!input_.supportSyncLoad()) {
+          if (layout.layout_case() ==
+                  ::lance::encodings21::PageLayout::kMiniBlockLayout &&
+              layout.mini_block_layout().has_dictionary()) {
+            BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
+            scheduleRead(page.buffer_offsets(2), page.buffer_sizes(2));
+          }
           for (const auto& [offset, length] :
                preparedPlan->payloadRanges(span.localRowBegin, span.rowCount)) {
             scheduleRead(offset, length);
@@ -830,6 +824,11 @@ void NativeLancePageSource::materializeReadPlan() const {
   readScheduler_.materialize();
 }
 
+void NativeLancePageSource::finishBatch() const {
+  std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
+  readScheduler_.finishBatch();
+}
+
 BufferPtr NativeLancePageSource::read(uint64_t offset, uint64_t length) const {
   std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
   BOLT_CHECK_LE(offset, input_.getReadFile()->size());
@@ -850,6 +849,7 @@ BufferPtr NativeLancePageSource::read(uint64_t offset, uint64_t length) const {
 }
 
 BufferPtr NativeLancePageSource::readCompressedRange(
+    NativeLancePageKey pageKey,
     std::string_view scheme,
     uint64_t compressedOffset,
     uint64_t compressedLength,
@@ -861,7 +861,8 @@ BufferPtr NativeLancePageSource::readCompressedRange(
     std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
     const auto session = legacyPageReaders_.find(key);
     if (session != legacyPageReaders_.end()) {
-      pageReader = session->second;
+      BOLT_CHECK(session->second.page == pageKey);
+      pageReader = session->second.reader;
     }
   }
   if (pageReader == nullptr) {
@@ -875,8 +876,14 @@ BufferPtr NativeLancePageSource::readCompressedRange(
         },
         compressedStreamChunkBytes_);
     std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
-    const auto [session, inserted] = legacyPageReaders_.emplace(key, candidate);
-    pageReader = inserted ? std::move(candidate) : session->second;
+    const auto [session, inserted] = legacyPageReaders_.emplace(
+        key, LegacyPageReaderEntry{pageKey, candidate});
+    BOLT_CHECK(session->second.page == pageKey);
+    if (inserted) {
+      legacyPageReaderKeys_.at(pageKey.physicalColumn)[pageKey.pageIndex]
+          .push_back(key);
+    }
+    pageReader = inserted ? std::move(candidate) : session->second.reader;
   }
   BOLT_CHECK(
       pageReader->accessMode() == NativeLanceDecompressor::accessMode(scheme));
@@ -885,11 +892,28 @@ BufferPtr NativeLancePageSource::readCompressedRange(
     std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
     const auto session = legacyPageReaders_.find(key);
     if (session != legacyPageReaders_.end() &&
-        session->second.get() == pageReader.get()) {
+        session->second.reader.get() == pageReader.get()) {
       legacyPageReaders_.erase(session);
     }
   }
   return result;
+}
+
+void NativeLancePageSource::releaseLegacyPageReadersBefore(
+    NativeLancePageKey pageKey) const {
+  std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
+  auto& pages = legacyPageReaderKeys_.at(pageKey.physicalColumn);
+  const auto end = pages.lower_bound(pageKey.pageIndex);
+  for (auto page = pages.begin(); page != end; ++page) {
+    for (const auto& key : page->second) {
+      const auto reader = legacyPageReaders_.find(key);
+      if (reader != legacyPageReaders_.end()) {
+        reader->second.reader->cancel();
+        legacyPageReaders_.erase(reader);
+      }
+    }
+  }
+  pages.erase(pages.begin(), end);
 }
 
 bool NativeLancePageSource::hasCompressedColumn(
@@ -940,21 +964,8 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
   if (rowCount == 0) {
     return BaseVector::create(type, 0, &pool_);
   }
-  const DecodeInput readInput(
-      [this](uint64_t offset, uint64_t length) { return read(offset, length); },
-      [this](
-          std::string_view scheme,
-          uint64_t compressedOffset,
-          uint64_t compressedLength,
-          uint64_t decodedOffset,
-          uint64_t decodedLength) {
-        return readCompressedRange(
-            scheme,
-            compressedOffset,
-            compressedLength,
-            decodedOffset,
-            decodedLength);
-      });
+  const DecodeInput::RawRead rawRead =
+      [this](uint64_t offset, uint64_t length) { return read(offset, length); };
   const NativeLancePrefetchPhysicalColumn prefetchChild =
       [this](
           const TypePtr& childType,
@@ -1041,10 +1052,9 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
             }
             submitReadPlan();
           },
-          readInput,
+          rawRead,
           std::move(plan));
-      pageReader.decode();
-      auto decoded = pageReader.consume();
+      auto decoded = pageReader.read();
       if (rangeRead && spans.size() == 1 && type->kind() != TypeKind::ARRAY &&
           type->kind() != TypeKind::MAP && type->kind() != TypeKind::ROW) {
         BOLT_CHECK_EQ(localCount, rowCount);
@@ -1082,7 +1092,7 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
         metadata_,
         pool_,
         input_,
-        readInput.rawRead());
+        rawRead);
   }
   if (type->kind() == TypeKind::ROW) {
     const auto& header = metadata_.column(physicalIndex);
@@ -1125,7 +1135,7 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
                 overlapStart - pageRowStart,
                 overlapEnd - overlapStart,
                 pool_,
-                readInput.rawRead());
+                rawRead);
             if (outputOffset == 0 && pageResult->size() == rowCount) {
               return pageResult;
             }
@@ -1163,7 +1173,8 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
 
     std::vector<VectorPtr> children;
     children.reserve(type->size());
-    const auto scheduleChildrenSeparately = requiresDeferredRead(type);
+    const auto scheduleChildrenSeparately =
+        nativeLanceTypeRequiresDeferredRead(type);
     uint32_t childPhysicalIndex = physicalIndex + 1;
     std::vector<std::pair<TypePtr, uint32_t>> childrenToSchedule;
     for (uint32_t childIndex = 0; childIndex < type->size(); ++childIndex) {
@@ -1228,6 +1239,24 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
 
     BOLT_CHECK(page.has_encoding(), "Lance page has no encoding");
     const auto& encoding = metadata_.pageEncoding(physicalIndex, pageIndex);
+    const NativeLancePageKey pageKey{physicalIndex, pageIndex};
+    releaseLegacyPageReadersBefore(pageKey);
+    const DecodeInput readInput(
+        rawRead,
+        [this, pageKey](
+            std::string_view scheme,
+            uint64_t compressedOffset,
+            uint64_t compressedLength,
+            uint64_t decodedOffset,
+            uint64_t decodedLength) {
+          return readCompressedRange(
+              pageKey,
+              scheme,
+              compressedOffset,
+              compressedLength,
+              decodedOffset,
+              decodedLength);
+        });
     const auto localStart = overlapStart - pageRowStart;
     const auto localCount = overlapEnd - overlapStart;
     const auto* unwrappedEncoding = &encoding;
