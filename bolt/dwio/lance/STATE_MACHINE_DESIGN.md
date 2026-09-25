@@ -237,11 +237,12 @@ stateDiagram-v2
 2. scheduler-owned 输入只活到当前 batch，`finishBatch()` 清理未消费 ranges。
 3. StringView 等零拷贝输出必须显式持有其底层 `BufferPtr`，清理 scheduler 不得使输出失效。
 4. Structural page plan 只保存 metadata，不保存 encoded、decompressed 或 decoded payload。
-5. Legacy Zstd session 只保留当前页，并在该 physical column 进入下一页时回收。
+5. Legacy Zstd session 在顺序 scan 中只保留当前页，并在该 physical column 进入下一页时
+   回收；row-addressed take 在每个逻辑列完成后立即释放该列所有 session。
 6. Filter prefetch 不得读取 projection；projection I/O 基于最终 selection。
 7. 并行度不创建独立全局线程池，使用调用方注入的 query executor。
-8. take 只保留当前地址批次、去重结果和最终 dictionary indices；不保留跨 batch 的
-   decoded/decompressed page cache。
+8. take 只保留当前地址批次、去重结果和最终 dictionary indices；不保留跨列或跨 batch
+   的 legacy codec session，也不保留 decoded/decompressed page cache。
 
 `maxInFlightBytes` 是单次 I/O 提交波次限制，不声明为所有解码临时内存的全局硬配额。
 统一的硬内存限制由 Bolt `MemoryPool` 和 batch sizing 提供，避免维护一套未接线的旁路

@@ -180,7 +180,13 @@ Time, Timestamp, Duration, Decimal, and FixedSizeBinary values for v2.0-v2.2.
 - Zstd pages preserve only a sequential codec cursor, one bounded compressed
   chunk, and a small unaligned tail across batches. LZ4 is explicitly handled
   as a whole-buffer codec. Neither path retains decoded or decompressed page
-  caches across batches.
+  caches across batches. Sequential scans retain the cursor because their next
+  batch is monotonic. Row-addressed take requests release each logical
+  column's legacy sessions immediately after materialization because a later
+  take batch may revisit arbitrary rows.
+- `NativeLanceLegacyPageReaderStats` exposes current and peak session count,
+  resident codec/input bytes, and released session count. This is observability
+  for scan-owned state, not a decoded-page cache.
 - `maxBatchBytes` caps row batches using a conservative estimate followed by
   feedback from the retained size of produced vectors.
 - Top-level and nested Struct filters are decoded first; projected columns are

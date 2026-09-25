@@ -286,6 +286,11 @@ ScanResult scan(dwio::common::Reader& reader) {
   if (printStats) {
     dwio::common::RuntimeStatistics stats;
     rows->updateRuntimeStats(stats);
+    NativeLanceLegacyPageReaderStats legacyPageReaders;
+    if (const auto* nativeRows =
+            dynamic_cast<const NativeLanceRowReader*>(rows.get())) {
+      legacyPageReaders = nativeRows->legacyPageReaderStats();
+    }
     struct rusage usage {};
     BOLT_CHECK_EQ(getrusage(RUSAGE_SELF, &usage), 0);
     std::ostringstream line;
@@ -297,6 +302,12 @@ ScanResult scan(dwio::common::Reader& reader) {
          << " peak_rss_kb=" << usage.ru_maxrss
          << " pool_current_bytes=" << readerPool->currentBytes()
          << " pool_peak_bytes=" << readerPool->peakBytes()
+         << " legacy_active_readers=" << legacyPageReaders.activeReaders
+         << " legacy_peak_readers=" << legacyPageReaders.peakActiveReaders
+         << " legacy_retained_bytes=" << legacyPageReaders.retainedBytes
+         << " legacy_peak_retained_bytes="
+         << legacyPageReaders.peakRetainedBytes
+         << " legacy_released_readers=" << legacyPageReaders.releasedReaders
          << " max_output_retained_bytes=" << maxOutputRetainedBytes << '\n';
     std::cerr << line.str();
   }

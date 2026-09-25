@@ -17,6 +17,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,11 +38,15 @@ VectorPtr decodeNativeLanceStructuralColumn(
     memory::MemoryPool& pool,
     const NativeLanceMetadata::StructuralField& field,
     uint64_t rowStart,
-    uint64_t rowCount);
+    uint64_t rowCount,
+    NativeLanceDecoderStateRetention decoderStateRetention =
+        NativeLanceDecoderStateRetention::kScan);
 
 enum class NativeLanceReadStage { kRowAligned, kOffsetDependent };
 
 bool nativeLanceTypeRequiresDeferredRead(const TypePtr& type);
+
+uint64_t estimateNativeLanceTypeBytesPerRow(const TypePtr& type);
 
 class NativeLanceColumnReader {
  public:
@@ -95,6 +100,8 @@ class NativeLanceRootColumnReader {
   struct ReadColumn {
     uint32_t fileColumnIndex;
     const NativeLanceColumnReader* reader;
+    uint64_t estimatedBytesPerRow;
+    mutable std::optional<bool> hasCompressedData;
   };
 
   NativeLanceRootColumnReader(
@@ -104,7 +111,10 @@ class NativeLanceRootColumnReader {
       size_t decodingParallelismFactor);
 
   void initializeReadPlan();
-
+  size_t effectiveParallelism(
+      const NativeLancePageSource& source,
+      const NativeLanceColumnRequest& request,
+      const std::vector<ReadColumn>& plan) const;
   RowTypePtr outputType_;
   std::vector<std::unique_ptr<NativeLanceColumnReader>> children_;
   std::vector<ReadColumn> rowAlignedReadPlan_;

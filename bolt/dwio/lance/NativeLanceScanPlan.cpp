@@ -21,33 +21,6 @@
 namespace bytedance::bolt::lance::reader {
 namespace {
 
-uint64_t estimateTypeBytesPerRow(const TypePtr& type) {
-  constexpr uint64_t kNullOverhead = 1;
-  switch (type->kind()) {
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
-      return sizeof(StringView) + 16 + kNullOverhead;
-    case TypeKind::ARRAY:
-      return 2 * sizeof(vector_size_t) +
-          estimateTypeBytesPerRow(type->childAt(0)) + kNullOverhead;
-    case TypeKind::MAP:
-      return 2 * sizeof(vector_size_t) +
-          estimateTypeBytesPerRow(type->childAt(0)) +
-          estimateTypeBytesPerRow(type->childAt(1)) + kNullOverhead;
-    case TypeKind::ROW: {
-      uint64_t size = kNullOverhead;
-      for (uint32_t i = 0; i < type->size(); ++i) {
-        size += estimateTypeBytesPerRow(type->childAt(i));
-      }
-      return size;
-    }
-    case TypeKind::UNKNOWN:
-      return kNullOverhead;
-    default:
-      return type->cppSizeInBytes() + kNullOverhead;
-  }
-}
-
 uint64_t estimateReadBytesPerRow(
     const RowTypePtr& fileType,
     const dwio::common::RowReaderOptions& options) {
@@ -55,17 +28,17 @@ uint64_t estimateReadBytesPerRow(
   if (const auto& scanSpec = options.getScanSpec()) {
     for (const auto& child : scanSpec->children()) {
       if (!child->isConstant()) {
-        estimate +=
-            estimateTypeBytesPerRow(fileType->findChild(child->fieldName()));
+        estimate += estimateNativeLanceTypeBytesPerRow(
+            fileType->findChild(child->fieldName()));
       }
     }
   } else if (const auto& selector = options.getSelector()) {
     const auto selectedType = selector->buildSelectedReordered();
     for (const auto& type : selectedType->children()) {
-      estimate += estimateTypeBytesPerRow(type);
+      estimate += estimateNativeLanceTypeBytesPerRow(type);
     }
   } else {
-    estimate = estimateTypeBytesPerRow(fileType);
+    estimate = estimateNativeLanceTypeBytesPerRow(fileType);
   }
   return std::max<uint64_t>(estimate, 1);
 }

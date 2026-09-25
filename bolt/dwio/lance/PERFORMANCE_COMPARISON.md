@@ -523,6 +523,54 @@ Native pool peak 为 367.5 MiB。Native RSS 低于同文件全扫的 6.16 GiB，
 - `/tmp/lance-take-ab-wide-fullscan-7round-20260925.json`
 - `/tmp/lance-take-ab-filter-7round-20260925.json`
 
+### 9.8 超宽 take 的 request-scoped codec 生命周期
+
+v2.0 单大 Zstd frame 无法随机跳到解压后偏移。顺序 scan 必须跨 batch 保留单调 cursor，
+否则每批都会从 frame 头重新解码；但 row-addressed take 的下一批地址没有单调保证，跨请求
+保留 800 列 decoder 不仅不能提供稳定复用，还会让每个 `ZSTD_DCtx` 的 window workspace
+长期驻留。新实现通过统一的 `NativeLanceDecoderStateRetention` 区分两种生命周期：
+
+- `kScan` 保留原有跨 batch cursor，full scan 行为不变；
+- `kRequest` 在一个逻辑列完成后释放其全部 physical page session；
+- 释放粒度与有效解码并发度绑定，不增加 batch、readahead 或 decoded/decompressed cache；
+- runtime stats 报告 active/peak reader 数、codec/input retained bytes 和 release 次数。
+
+主验收数据 `/tmp/data-0ee2-v20-zstd9-full.lance`，800 列、100 个间隔 4,000 行的地址，
+每端七轮奇偶交替：
+
+| 线程 | 优化前 Native scan | 优化后 Native scan | 变化 | 优化前 RSS | 优化后 RSS | RSS 变化 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 10.501 s | **8.332 s** | **-20.7%** | 4.557 GiB | **0.087 GiB** | **-98.1%** |
+| 16 | 2.127 s | **1.791 s** | **-15.8%** | 4.642 GiB | **0.353 GiB** | **-92.4%** |
+
+两组核心 scan log-ratio exact sign-flip 均为 `p=0.015625`。最终 16T 运行中
+`legacy_active_readers=0`，峰值 reader 数中位数为 34，峰值 codec/input 驻留约
+157.5 MiB；1T 峰值 reader 数为 3，峰值驻留约 14.5 MiB。Native 16T 核心时间为
+Rust 的约 0.38x，RSS 也低于 Rust 的 0.447 GiB。
+
+800 列 full scan 仍使用 `kScan`。最终 1T 七轮中位数为 21.684 秒，对比原基线
+21.916 秒没有回退；16T 跨时段结果为 7.200 秒。为排除环境波动，用同一源码分别构建
+fixed/adaptive 二进制做同机七轮交替 A/B，差异为 `+1.85%`、`p=0.984375`，没有可检测
+回退。
+
+另外验证了两个并行方案但未保留：动态列任务抢占破坏文件列局部性，full-types smoke
+从约 0.748 秒回退到 0.852 秒；physical-branch 并行使单 Struct 的 16T 中位数提升
+22.9%，但严格同机 A/B 显示 1T 回退 3.03%（`p=0.015625`）。后者必须在不改变串行
+函数代码布局的独立 decode-session/task graph 中实现后再合入。对 v2.0 长 frame 做
+跨 batch 硬预算 LRU 也不成立：当列数超过预算时会在每个 batch 逐列淘汰，并从 frame
+头重复解码，复杂度退化；通用解法需要 writer 侧 reset point/更细 page，不能在 reader
+中用缓存或特判掩盖。
+
+本轮新增结果：
+
+- `/tmp/lance-final-session-wide-take-t1-7round.json`
+- `/tmp/lance-final-session-wide-take-t16-7round.json`
+- `/tmp/lance-final-wide-fullscan-t1-7round.json`
+- `/tmp/lance-final-wide-fullscan-t16-7round.json`
+- `/tmp/lance-wide-fullscan-adaptive-ab.json`
+- `/tmp/lance-struct-branch-ab.json`
+- `/tmp/lance-struct-branch-fastpath2-ab-t1.json`
+
 ## 10. 复现与验证
 
 原始 JSON 位于 `/tmp/lance-perf-report-20260924/`。paired runner：
@@ -541,7 +589,7 @@ python3 bolt/dwio/lance/tests/run_native_rust_acceptance_benchmark.py \
 
 本轮验证结果：
 
-- Native Lance unit tests：126/126 通过；
+- Native Lance unit tests：129/129 通过；
 - Native Lance TableScan tests：7/7 通过；
 - 47 列数据生成、全量 materialization、过滤输出行数和 checksum 校验通过；
 - take 的 1 行、100 行以及 800 列 100 行输出数量校验通过，前两者同时校验

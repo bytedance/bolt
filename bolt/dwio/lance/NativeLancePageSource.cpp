@@ -429,7 +429,9 @@ void NativeLancePageSource::cancel() {
   for (auto& [key, entry] : legacyPageReaders_) {
     entry.reader->cancel();
   }
+  legacyPageReadersReleased_ += legacyPageReaders_.size();
   legacyPageReaders_.clear();
+  legacyPageReaderRetainedBytes_ = 0;
   for (auto& pages : legacyPageReaderKeys_) {
     pages.clear();
   }
@@ -467,21 +469,14 @@ void NativeLancePageSource::planColumns(
   BOLT_CHECK_LE(request.rowCount, metadata_.numRows() - request.rowStart);
   readScheduler_.clearStage();
   std::vector<StructuralPageRangeRequest> structuralRequests;
-  const auto rows = request.selection.selectedRows();
-  size_t runOffset = 0;
-  while (runOffset < rows.size()) {
-    size_t runEnd = runOffset + 1;
-    while (runEnd < rows.size() && rows[runEnd] == rows[runEnd - 1] + 1) {
-      ++runEnd;
-    }
+  for (const auto& range : request.selection.selectedRanges()) {
     for (const auto columnIndex : columnIndices) {
       enqueueLogicalColumn(
           columnIndex,
-          request.rowStart + rows[runOffset],
-          runEnd - runOffset,
+          request.rowStart + range.begin,
+          range.size,
           &structuralRequests);
     }
-    runOffset = runEnd;
   }
   submitReadPlan();
   scheduleStructuralPayloads(structuralRequests);
@@ -854,7 +849,8 @@ BufferPtr NativeLancePageSource::readCompressedRange(
     uint64_t compressedOffset,
     uint64_t compressedLength,
     uint64_t decodedOffset,
-    uint64_t decodedLength) const {
+    uint64_t decodedLength,
+    NativeLanceDecoderStateRetention decoderStateRetention) const {
   const CompressedBufferKey key{compressedOffset, compressedLength};
   std::shared_ptr<NativeLanceLegacyPageReader> pageReader;
   {
@@ -877,26 +873,59 @@ BufferPtr NativeLancePageSource::readCompressedRange(
         compressedStreamChunkBytes_);
     std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
     const auto [session, inserted] = legacyPageReaders_.emplace(
-        key, LegacyPageReaderEntry{pageKey, candidate});
+        key, LegacyPageReaderEntry{pageKey, candidate, 0});
     BOLT_CHECK(session->second.page == pageKey);
     if (inserted) {
       legacyPageReaderKeys_.at(pageKey.physicalColumn)[pageKey.pageIndex]
           .push_back(key);
+      updateLegacyPageReaderPeaksLocked();
     }
     pageReader = inserted ? std::move(candidate) : session->second.reader;
   }
   BOLT_CHECK(
       pageReader->accessMode() == NativeLanceDecompressor::accessMode(scheme));
   auto result = pageReader->decodeRange(decodedOffset, decodedLength);
-  if (pageReader->finished()) {
+  const auto finished = pageReader->finished();
+  if (decoderStateRetention == NativeLanceDecoderStateRetention::kRequest ||
+      finished) {
+    const auto retainedBytes =
+        decoderStateRetention == NativeLanceDecoderStateRetention::kRequest
+        ? pageReader->retainedBytes()
+        : 0;
     std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
     const auto session = legacyPageReaders_.find(key);
     if (session != legacyPageReaders_.end() &&
         session->second.reader.get() == pageReader.get()) {
-      legacyPageReaders_.erase(session);
+      BOLT_CHECK_GE(
+          legacyPageReaderRetainedBytes_, session->second.retainedBytes);
+      legacyPageReaderRetainedBytes_ -= session->second.retainedBytes;
+      legacyPageReaderRetainedBytes_ += retainedBytes;
+      session->second.retainedBytes = retainedBytes;
+      updateLegacyPageReaderPeaksLocked();
+      if (finished) {
+        eraseLegacyPageReaderLocked(session);
+      }
     }
   }
   return result;
+}
+
+void NativeLancePageSource::updateLegacyPageReaderPeaksLocked() const {
+  legacyPageReaderPeakCount_ =
+      std::max<uint64_t>(legacyPageReaderPeakCount_, legacyPageReaders_.size());
+  legacyPageReaderPeakRetainedBytes_ = std::max(
+      legacyPageReaderPeakRetainedBytes_, legacyPageReaderRetainedBytes_);
+}
+
+void NativeLancePageSource::eraseLegacyPageReaderLocked(
+    std::unordered_map<
+        CompressedBufferKey,
+        LegacyPageReaderEntry,
+        CompressedBufferKeyHash>::iterator reader) const {
+  BOLT_CHECK_GE(legacyPageReaderRetainedBytes_, reader->second.retainedBytes);
+  legacyPageReaderRetainedBytes_ -= reader->second.retainedBytes;
+  ++legacyPageReadersReleased_;
+  legacyPageReaders_.erase(reader);
 }
 
 void NativeLancePageSource::releaseLegacyPageReadersBefore(
@@ -909,47 +938,98 @@ void NativeLancePageSource::releaseLegacyPageReadersBefore(
       const auto reader = legacyPageReaders_.find(key);
       if (reader != legacyPageReaders_.end()) {
         reader->second.reader->cancel();
-        legacyPageReaders_.erase(reader);
+        eraseLegacyPageReaderLocked(reader);
       }
     }
   }
   pages.erase(pages.begin(), end);
 }
 
-bool NativeLancePageSource::hasCompressedColumn(
-    uint32_t columnIndex,
-    uint64_t rowStart,
-    uint64_t rowCount) const {
+void NativeLancePageSource::releaseLegacyPageReadersForLogicalColumn(
+    uint32_t columnIndex) const {
+  BOLT_CHECK_LT(columnIndex, metadata_.rowType()->size());
+  const auto physicalBegin = metadata_.physicalColumnIndex(columnIndex);
+  const auto physicalEnd =
+      physicalBegin + metadata_.physicalColumnSpan(physicalBegin);
+  std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
+  for (auto physical = physicalBegin; physical < physicalEnd; ++physical) {
+    auto& pages = legacyPageReaderKeys_.at(physical);
+    for (const auto& [pageIndex, keys] : pages) {
+      for (const auto& key : keys) {
+        const auto reader = legacyPageReaders_.find(key);
+        if (reader != legacyPageReaders_.end()) {
+          const auto retainedBytes = reader->second.reader->retainedBytes();
+          BOLT_CHECK_GE(
+              legacyPageReaderRetainedBytes_, reader->second.retainedBytes);
+          legacyPageReaderRetainedBytes_ -= reader->second.retainedBytes;
+          legacyPageReaderRetainedBytes_ += retainedBytes;
+          reader->second.retainedBytes = retainedBytes;
+          updateLegacyPageReaderPeaksLocked();
+          eraseLegacyPageReaderLocked(reader);
+        }
+      }
+    }
+    pages.clear();
+  }
+}
+
+NativeLanceLegacyPageReaderStats NativeLancePageSource::legacyPageReaderStats()
+    const {
+  std::lock_guard<std::mutex> lock(legacyPageReadersMutex_);
+  legacyPageReaderRetainedBytes_ = 0;
+  for (auto& [key, entry] : legacyPageReaders_) {
+    entry.retainedBytes = entry.reader->retainedBytes();
+    legacyPageReaderRetainedBytes_ += entry.retainedBytes;
+  }
+  updateLegacyPageReaderPeaksLocked();
+  return {
+      .activeReaders = legacyPageReaders_.size(),
+      .retainedBytes = legacyPageReaderRetainedBytes_,
+      .peakActiveReaders = legacyPageReaderPeakCount_,
+      .peakRetainedBytes = legacyPageReaderPeakRetainedBytes_,
+      .releasedReaders = legacyPageReadersReleased_};
+}
+
+bool NativeLancePageSource::hasCompressedColumn(uint32_t columnIndex) const {
   BOLT_CHECK_LT(columnIndex, metadata_.rowType()->size());
   const auto firstPhysical = metadata_.physicalColumnIndex(columnIndex);
   const auto physicalEnd =
       firstPhysical + metadata_.physicalColumnSpan(firstPhysical);
+  bool compressed = false;
   if (metadata_.usesStructuralEncoding()) {
     for (uint32_t physicalIndex = firstPhysical; physicalIndex < physicalEnd;
          ++physicalIndex) {
-      NativeLanceColumnCursor cursor(
-          physicalIndex, metadata_.pageRowStarts(physicalIndex));
-      for (const auto& span : cursor.spans(rowStart, rowCount)) {
+      const auto& column = metadata_.column(physicalIndex);
+      for (int32_t pageIndex = 0; pageIndex < column.pages_size();
+           ++pageIndex) {
         if (lanceStructuralLayoutHasCompression(
-                metadata_.pageLayout(physicalIndex, span.pageIndex))) {
-          return true;
+                metadata_.pageLayout(physicalIndex, pageIndex))) {
+          compressed = true;
+          break;
         }
       }
+      if (compressed) {
+        break;
+      }
     }
-    return false;
-  }
-  for (uint32_t physicalIndex = firstPhysical; physicalIndex < physicalEnd;
-       ++physicalIndex) {
-    NativeLanceColumnCursor cursor(
-        physicalIndex, metadata_.pageRowStarts(physicalIndex));
-    for (const auto& span : cursor.spans(rowStart, rowCount)) {
-      if (hasCompressedFlatBuffer(
-              metadata_.pageEncoding(physicalIndex, span.pageIndex))) {
-        return true;
+  } else {
+    for (uint32_t physicalIndex = firstPhysical; physicalIndex < physicalEnd;
+         ++physicalIndex) {
+      const auto& column = metadata_.column(physicalIndex);
+      for (int32_t pageIndex = 0; pageIndex < column.pages_size();
+           ++pageIndex) {
+        if (hasCompressedFlatBuffer(
+                metadata_.pageEncoding(physicalIndex, pageIndex))) {
+          compressed = true;
+          break;
+        }
+      }
+      if (compressed) {
+        break;
       }
     }
   }
-  return false;
+  return compressed;
 }
 
 VectorPtr NativeLancePageSource::decodePhysicalColumn(
@@ -958,7 +1038,8 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
     uint32_t physicalIndex,
     uint64_t rowStart,
     uint64_t rowCount,
-    const std::vector<uint32_t>& arrayDimensions) const {
+    const std::vector<uint32_t>& arrayDimensions,
+    NativeLanceDecoderStateRetention decoderStateRetention) const {
   BOLT_CHECK_LT(physicalIndex, metadata_.numPhysicalColumns());
   BOLT_CHECK_LE(rowStart, std::numeric_limits<uint64_t>::max() - rowCount);
   if (rowCount == 0) {
@@ -975,14 +1056,20 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
         prefetchPhysicalColumn(childType, childColumn, childStart, childCount);
       };
   const NativeLanceDecodePhysicalColumn decodeChild =
-      [this](
+      [this, decoderStateRetention](
           const TypePtr& childType,
           std::string_view childLogicalType,
           uint32_t childColumn,
           uint64_t childStart,
           uint64_t childCount) {
         return decodePhysicalColumn(
-            childType, childLogicalType, childColumn, childStart, childCount);
+            childType,
+            childLogicalType,
+            childColumn,
+            childStart,
+            childCount,
+            {},
+            decoderStateRetention);
       };
   if (metadata_.usesStructuralEncoding()) {
     const auto& column = metadata_.column(physicalIndex);
@@ -1194,7 +1281,9 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
           metadata_.physicalColumnLogicalType(childPhysicalIndex),
           childPhysicalIndex,
           rowStart,
-          rowCount));
+          rowCount,
+          {},
+          decoderStateRetention));
       childPhysicalIndex += metadata_.physicalColumnSpan(childPhysicalIndex);
     }
     BOLT_CHECK_EQ(
@@ -1243,7 +1332,7 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
     releaseLegacyPageReadersBefore(pageKey);
     const DecodeInput readInput(
         rawRead,
-        [this, pageKey](
+        [this, pageKey, decoderStateRetention](
             std::string_view scheme,
             uint64_t compressedOffset,
             uint64_t compressedLength,
@@ -1255,7 +1344,8 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
               compressedOffset,
               compressedLength,
               decodedOffset,
-              decodedLength);
+              decodedLength,
+              decoderStateRetention);
         });
     const auto localStart = overlapStart - pageRowStart;
     const auto localCount = overlapEnd - overlapStart;

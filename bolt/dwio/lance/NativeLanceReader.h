@@ -77,6 +77,7 @@ class NativeLanceScanCoordinator {
   uint64_t skip(uint64_t skipSize);
   void cancel();
   void updateRuntimeStats(dwio::common::RuntimeStatistics& stats) const;
+  NativeLanceLegacyPageReaderStats legacyPageReaderStats() const;
   void resetFilterCaches();
   std::optional<size_t> estimatedRowSize() const;
 
@@ -171,6 +172,7 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   uint64_t skip(uint64_t skipSize) override;
   void updateRuntimeStats(
       dwio::common::RuntimeStatistics& stats) const override;
+  NativeLanceLegacyPageReaderStats legacyPageReaderStats() const;
   void resetFilterCaches() override;
   std::optional<size_t> estimatedRowSize() const override;
   bool allPrefetchIssued() const override;

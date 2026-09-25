@@ -18,12 +18,42 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
+
+#include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/lance/NativeLanceMetadata.h"
 #include "bolt/dwio/lance/NativeLancePageSource.h"
 
 namespace bytedance::bolt::lance::reader {
+
+uint64_t estimateNativeLanceTypeBytesPerRow(const TypePtr& type) {
+  constexpr uint64_t kNullOverhead = 1;
+  switch (type->kind()) {
+    case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
+      return sizeof(StringView) + 16 + kNullOverhead;
+    case TypeKind::ARRAY:
+      return 2 * sizeof(vector_size_t) +
+          estimateNativeLanceTypeBytesPerRow(type->childAt(0)) + kNullOverhead;
+    case TypeKind::MAP:
+      return 2 * sizeof(vector_size_t) +
+          estimateNativeLanceTypeBytesPerRow(type->childAt(0)) +
+          estimateNativeLanceTypeBytesPerRow(type->childAt(1)) + kNullOverhead;
+    case TypeKind::ROW: {
+      uint64_t size = kNullOverhead;
+      for (uint32_t i = 0; i < type->size(); ++i) {
+        size += estimateNativeLanceTypeBytesPerRow(type->childAt(i));
+      }
+      return size;
+    }
+    case TypeKind::UNKNOWN:
+      return kNullOverhead;
+    default:
+      return type->cppSizeInBytes() + kNullOverhead;
+  }
+}
 
 bool nativeLanceTypeRequiresDeferredRead(const TypePtr& type) {
   if (type->kind() == TypeKind::VARCHAR ||
@@ -89,7 +119,8 @@ VectorPtr decodeNativeLanceStructuralColumn(
     memory::MemoryPool& pool,
     const NativeLanceMetadata::StructuralField& field,
     uint64_t rowStart,
-    uint64_t rowCount) {
+    uint64_t rowCount,
+    NativeLanceDecoderStateRetention decoderStateRetention) {
   struct Branch {
     uint32_t physicalColumnIndex;
     TypePtr type;
@@ -203,7 +234,8 @@ VectorPtr decodeNativeLanceStructuralColumn(
         branch.physicalColumnIndex,
         rowStart,
         rowCount,
-        branch.fixedSizeDimensions);
+        branch.fixedSizeDimensions,
+        decoderStateRetention);
     decodedBranches.push_back(
         shareShape(shareShape, branch, 0, std::move(decoded)));
   }
@@ -325,6 +357,12 @@ class FileColumnReader final : public NativeLanceColumnReader {
       memory::MemoryPool& pool,
       bool rangesPlanned) const override {
     request.validate();
+    const auto releasePageState = folly::makeGuard([&]() {
+      if (request.decoderStateRetention ==
+          NativeLanceDecoderStateRetention::kRequest) {
+        source.releaseLegacyPageReadersForLogicalColumn(fileColumnIndex_);
+      }
+    });
     if (!rangesPlanned) {
       plan(source, request);
     }
@@ -336,14 +374,17 @@ class FileColumnReader final : public NativeLanceColumnReader {
             pool,
             metadata_.structuralField(fileColumnIndex_),
             rowStart,
-            rowCount);
+            rowCount,
+            request.decoderStateRetention);
       }
       return source.decodePhysicalColumn(
           type_,
           metadata_.columnLogicalType(fileColumnIndex_),
           metadata_.physicalColumnIndex(fileColumnIndex_),
           rowStart,
-          rowCount);
+          rowCount,
+          {},
+          request.decoderStateRetention);
     };
     if (request.selection.selectsAll()) {
       return decodeRange(request.rowStart, request.rowCount);
@@ -354,21 +395,14 @@ class FileColumnReader final : public NativeLanceColumnReader {
     }
 
     auto result = BaseVector::create(type_, rows.size(), &pool);
-    size_t outputOffset = 0;
-    while (outputOffset < rows.size()) {
-      size_t runEnd = outputOffset + 1;
-      while (runEnd < rows.size() && rows[runEnd] == rows[runEnd - 1] + 1) {
-        ++runEnd;
-      }
-      const auto values = decodeRange(
-          request.rowStart + rows[outputOffset], runEnd - outputOffset);
-      result->copy(
-          values.get(),
-          static_cast<vector_size_t>(outputOffset),
-          0,
-          static_cast<vector_size_t>(runEnd - outputOffset));
-      outputOffset = runEnd;
+    vector_size_t outputOffset = 0;
+    for (const auto& range : request.selection.selectedRanges()) {
+      const auto values =
+          decodeRange(request.rowStart + range.begin, range.size);
+      result->copy(values.get(), outputOffset, 0, range.size);
+      outputOffset += range.size;
     }
+    BOLT_CHECK_EQ(outputOffset, result->size());
     return result;
   }
 
@@ -547,7 +581,13 @@ void NativeLanceRootColumnReader::initializeReadPlan() {
     auto& stage = child->readStage() == NativeLanceReadStage::kRowAligned
         ? rowAligned
         : offsetDependent;
-    stage.try_emplace(column, ReadColumn{column, child.get()});
+    stage.try_emplace(
+        column,
+        ReadColumn{
+            column,
+            child.get(),
+            estimateNativeLanceTypeBytesPerRow(child->type()),
+            std::nullopt});
   }
   const auto materialize = [](const auto& source, auto& destination) {
     destination.reserve(source.size());
@@ -574,6 +614,45 @@ void NativeLanceRootColumnReader::initializeReadPlan() {
   std::sort(fileColumnIndices_.begin(), fileColumnIndices_.end());
 }
 
+size_t NativeLanceRootColumnReader::effectiveParallelism(
+    const NativeLancePageSource& source,
+    const NativeLanceColumnRequest& request,
+    const std::vector<ReadColumn>& plan) const {
+  if (decodingExecutor_ == nullptr || decodingParallelismFactor_ <= 1 ||
+      plan.size() <= 1 || request.outputSize() == 0) {
+    return 1;
+  }
+
+  constexpr uint64_t kMinCellsPerWorker = 512;
+  constexpr uint64_t kMinBytesPerWorker = 32 << 10;
+  unsigned __int128 cells = 0;
+  unsigned __int128 bytes = 0;
+  size_t compressedColumns = 0;
+  const auto structural = source.metadata().usesStructuralEncoding();
+  for (const auto& column : plan) {
+    BOLT_CHECK(column.hasCompressedData.has_value());
+    const auto compressed = *column.hasCompressedData;
+    compressedColumns += compressed;
+    const auto rows = !structural && compressed
+        ? request.rowCount
+        : static_cast<uint64_t>(request.outputSize());
+    cells += rows;
+    bytes += static_cast<unsigned __int128>(rows) * column.estimatedBytesPerRow;
+  }
+  const auto workersForCells =
+      (cells + kMinCellsPerWorker - 1) / kMinCellsPerWorker;
+  const auto workersForBytes =
+      (bytes + kMinBytesPerWorker - 1) / kMinBytesPerWorker;
+  auto requestedWorkers = std::max(workersForCells, workersForBytes);
+  if (compressedColumns >= 2) {
+    requestedWorkers = std::max<unsigned __int128>(requestedWorkers, 2);
+  }
+  const auto maxWorkers = std::min(decodingParallelismFactor_, plan.size());
+  return requestedWorkers >= maxWorkers
+      ? maxWorkers
+      : std::max<size_t>(1, static_cast<size_t>(requestedWorkers));
+}
+
 VectorPtr NativeLanceRootColumnReader::read(
     NativeLancePageSource& source,
     const NativeLanceColumnRequest& request,
@@ -581,11 +660,18 @@ VectorPtr NativeLanceRootColumnReader::read(
     bool primaryRangesPlanned,
     const std::unordered_map<uint32_t, VectorPtr>* predecodedColumns) const {
   request.validate();
-  // A handful of structural or variable-width columns can cost more than a
-  // much wider set of scalar columns.  Parallelize whenever at least two
-  // compressed columns are available instead of requiring a wide scalar
-  // schema.
-  constexpr size_t kMinParallelCompressedColumns = 2;
+  const auto cacheCompression = [&source](const auto& plan) {
+    for (const auto& column : plan) {
+      if (!column.hasCompressedData.has_value()) {
+        column.hasCompressedData =
+            source.hasCompressedColumn(column.fileColumnIndex);
+      }
+    }
+  };
+  if (request.outputSize() > 0) {
+    cacheCompression(rowAlignedReadPlan_);
+    cacheCompression(offsetDependentReadPlan_);
+  }
   auto rowAlignedPlan = rowAlignedReadPlan_;
   auto offsetDependentPlan = offsetDependentReadPlan_;
   std::unordered_map<uint32_t, VectorPtr> decodedColumns;
@@ -621,18 +707,14 @@ VectorPtr NativeLanceRootColumnReader::read(
   if (!primaryRangesPlanned && !rowAlignedColumns.empty()) {
     source.planColumns(rowAlignedColumns, request);
   }
-  const auto rowAlignedCompressed = std::count_if(
-      rowAlignedColumns.begin(), rowAlignedColumns.end(), [&](auto column) {
-        return source.hasCompressedColumn(
-            column, request.rowStart, request.rowCount);
-      });
+  const auto rowAlignedParallelism =
+      effectiveParallelism(source, request, rowAlignedPlan);
   dwio::common::ParallelFor(
-      pool.threadSafe() && rowAlignedCompressed >= kMinParallelCompressedColumns
-          ? decodingExecutor_
-          : nullptr,
+      pool.threadSafe() && rowAlignedParallelism > 1 ? decodingExecutor_
+                                                     : nullptr,
       0,
       rowAlignedPlan.size(),
-      decodingParallelismFactor_)
+      rowAlignedParallelism)
       .execute([&](size_t index) {
         rowAlignedResults[index] =
             rowAlignedPlan[index].reader->read(source, request, pool, true);
@@ -648,21 +730,14 @@ VectorPtr NativeLanceRootColumnReader::read(
     source.planColumns(offsetDependentColumns, request);
   }
   std::vector<VectorPtr> offsetDependentResults(offsetDependentPlan.size());
-  const auto offsetDependentCompressed = std::count_if(
-      offsetDependentColumns.begin(),
-      offsetDependentColumns.end(),
-      [&](auto column) {
-        return source.hasCompressedColumn(
-            column, request.rowStart, request.rowCount);
-      });
+  const auto offsetDependentParallelism =
+      effectiveParallelism(source, request, offsetDependentPlan);
   dwio::common::ParallelFor(
-      pool.threadSafe() &&
-              offsetDependentCompressed >= kMinParallelCompressedColumns
-          ? decodingExecutor_
-          : nullptr,
+      pool.threadSafe() && offsetDependentParallelism > 1 ? decodingExecutor_
+                                                          : nullptr,
       0,
       offsetDependentPlan.size(),
-      decodingParallelismFactor_)
+      offsetDependentParallelism)
       .execute([&](size_t index) {
         offsetDependentResults[index] = offsetDependentPlan[index].reader->read(
             source, request, pool, true);

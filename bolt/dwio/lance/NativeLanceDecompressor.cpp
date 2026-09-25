@@ -244,9 +244,15 @@ class NativeLanceZstdStream::Impl {
     return restartCount_;
   }
 
-  uint64_t retainedBytes() const {
+  uint64_t retainedInputBytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return (input_ == nullptr ? 0 : input_->size()) + history_.capacity();
+  }
+
+  uint64_t retainedBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ZSTD_sizeof_DCtx(context_.get()) +
+        (input_ == nullptr ? 0 : input_->size()) + history_.capacity();
   }
 
   bool finished() const {
@@ -442,6 +448,10 @@ uint64_t NativeLanceZstdStream::decodedOffset() const {
 
 uint64_t NativeLanceZstdStream::restartCount() const {
   return impl_->restartCount();
+}
+
+uint64_t NativeLanceZstdStream::retainedInputBytes() const {
+  return impl_->retainedInputBytes();
 }
 
 uint64_t NativeLanceZstdStream::retainedBytes() const {

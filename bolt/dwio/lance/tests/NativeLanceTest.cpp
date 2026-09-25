@@ -2722,6 +2722,22 @@ TEST_F(NativeLanceTest, columnCursorMapsArbitraryPageSpans) {
   EXPECT_EQ(backwards[0].pageIndex, 0);
 }
 
+TEST_F(NativeLanceTest, rowSelectionBuildsCanonicalRangesOnce) {
+  const std::array<vector_size_t, 7> rows{1, 2, 3, 7, 11, 12, 19};
+  const auto selection = NativeLanceRowSelection::rows(rows);
+  selection.validate(20);
+  const auto ranges = selection.selectedRanges();
+  ASSERT_EQ(ranges.size(), 4);
+  EXPECT_EQ(ranges[0].begin, 1);
+  EXPECT_EQ(ranges[0].size, 3);
+  EXPECT_EQ(ranges[1].begin, 7);
+  EXPECT_EQ(ranges[1].size, 1);
+  EXPECT_EQ(ranges[2].begin, 11);
+  EXPECT_EQ(ranges[2].size, 2);
+  EXPECT_EQ(ranges[3].begin, 19);
+  EXPECT_EQ(ranges[3].size, 1);
+}
+
 TEST_F(NativeLanceTest, metadataBuildsPageRowIndex) {
   const auto file = load("sample.lance");
   EXPECT_EQ(file.metadata->pageRowStarts(0), std::vector<uint64_t>({0, 20}));
@@ -2818,7 +2834,8 @@ TEST_F(NativeLanceTest, zstdStreamDecodesMonotonicRangesWithoutPageCache) {
         values.substr(0, 5));
     EXPECT_EQ(stream.restartCount(), 1);
     EXPECT_GT(bytesRead, 0);
-    EXPECT_LE(stream.retainedBytes(), 25);
+    EXPECT_LE(stream.retainedInputBytes(), 25);
+    EXPECT_GT(stream.retainedBytes(), stream.retainedInputBytes());
   }
 }
 
@@ -6308,6 +6325,62 @@ TEST_F(NativeLanceTest, rowReaderDecodesColumnsInParallel) {
       EXPECT_EQ(values->valueAt(i), column * 100 + i);
     }
   }
+}
+
+TEST_F(NativeLanceTest, sequentialScanRetainsLegacyPageReadersAcrossBatches) {
+  constexpr uint32_t kColumns = 4;
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(
+          makeManyCompressedColumnsFile(kColumns)),
+      *pool_);
+  NativeLanceReader reader(
+      std::move(input), dwio::common::ReaderOptions(pool_.get()));
+  auto rowReader = reader.createRowReader({});
+
+  VectorPtr result;
+  EXPECT_EQ(rowReader->next(2, result), 2);
+  const auto firstStats =
+      dynamic_cast<NativeLanceRowReader&>(*rowReader).legacyPageReaderStats();
+  EXPECT_EQ(firstStats.activeReaders, kColumns);
+  EXPECT_EQ(firstStats.peakActiveReaders, kColumns);
+  EXPECT_GT(firstStats.retainedBytes, 0);
+  EXPECT_GE(firstStats.peakRetainedBytes, firstStats.retainedBytes);
+  EXPECT_EQ(firstStats.releasedReaders, 0);
+
+  EXPECT_EQ(rowReader->next(2, result), 2);
+  const auto secondStats =
+      dynamic_cast<NativeLanceRowReader&>(*rowReader).legacyPageReaderStats();
+  EXPECT_EQ(secondStats.activeReaders, kColumns);
+  EXPECT_EQ(secondStats.releasedReaders, 0);
+}
+
+TEST_F(NativeLanceTest, rowAddressedTakeBoundsLegacyPageReaderResidency) {
+  constexpr uint32_t kColumns = 16;
+  constexpr size_t kParallelism = 4;
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(
+          makeManyCompressedColumnsFile(kColumns)),
+      *pool_);
+  NativeLanceReader reader(
+      std::move(input), dwio::common::ReaderOptions(pool_.get()));
+  auto executor = std::make_shared<folly::CPUThreadPoolExecutor>(kParallelism);
+  dwio::common::RowReaderOptions options;
+  options.setDecodingExecutor(executor);
+  options.setDecodingParallelismFactor(kParallelism);
+  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{1, 2});
+  auto take = reader.createTakeReader(options, {.rowIds = rowIds});
+
+  VectorPtr result;
+  EXPECT_EQ(take->next(rowIds->size(), result), rowIds->size());
+  ASSERT_EQ(result->size(), rowIds->size());
+  const auto stats = take->legacyPageReaderStats();
+  EXPECT_EQ(stats.activeReaders, 0);
+  EXPECT_EQ(stats.retainedBytes, 0);
+  EXPECT_GT(stats.peakActiveReaders, 0);
+  EXPECT_LE(stats.peakActiveReaders, kParallelism);
+  EXPECT_GT(stats.peakRetainedBytes, 0);
+  EXPECT_EQ(stats.releasedReaders, kColumns);
 }
 
 TEST_F(NativeLanceTest, rowReaderDecodesFilteredProjectionInParallel) {

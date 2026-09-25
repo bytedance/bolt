@@ -70,6 +70,7 @@ class NativeLanceZstdStream {
 
   uint64_t decodedOffset() const;
   uint64_t restartCount() const;
+  uint64_t retainedInputBytes() const;
   uint64_t retainedBytes() const;
   bool finished() const;
   std::optional<std::pair<uint64_t, uint64_t>> nextCompressedRange() const;

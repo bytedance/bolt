@@ -30,6 +30,14 @@
 
 namespace bytedance::bolt::lance::reader {
 
+struct NativeLanceLegacyPageReaderStats {
+  uint64_t activeReaders{0};
+  uint64_t retainedBytes{0};
+  uint64_t peakActiveReaders{0};
+  uint64_t peakRetainedBytes{0};
+  uint64_t releasedReaders{0};
+};
+
 /// Decodes Lance v2.0-v2.3 page encodings directly into Bolt vectors.
 ///
 /// Reads are issued as ranges against the original BufferedInput. No Rust or
@@ -103,10 +111,14 @@ class NativeLancePageSource final {
       uint64_t rowStart,
       uint64_t rowCount) const;
 
-  bool hasCompressedColumn(
-      uint32_t columnIndex,
-      uint64_t rowStart,
-      uint64_t rowCount) const;
+  bool hasCompressedColumn(uint32_t columnIndex) const;
+
+  /// Releases page-local legacy decoder state owned by one logical column.
+  /// Callers use this at independent request boundaries where retaining a
+  /// monotonic zstd cursor cannot help a later request.
+  void releaseLegacyPageReadersForLogicalColumn(uint32_t columnIndex) const;
+
+  NativeLanceLegacyPageReaderStats legacyPageReaderStats() const;
 
   VectorPtr decodePhysicalColumn(
       const TypePtr& type,
@@ -114,7 +126,9 @@ class NativeLancePageSource final {
       uint32_t physicalColumnIndex,
       uint64_t rowStart,
       uint64_t rowCount,
-      const std::vector<uint32_t>& arrayDimensions = {}) const;
+      const std::vector<uint32_t>& arrayDimensions = {},
+      NativeLanceDecoderStateRetention decoderStateRetention =
+          NativeLanceDecoderStateRetention::kScan) const;
 
  private:
   struct StructuralPageRangeRequest {
@@ -163,7 +177,8 @@ class NativeLancePageSource final {
       uint64_t compressedOffset,
       uint64_t compressedLength,
       uint64_t decodedOffset,
-      uint64_t decodedLength) const;
+      uint64_t decodedLength,
+      NativeLanceDecoderStateRetention decoderStateRetention) const;
   void releaseLegacyPageReadersBefore(NativeLancePageKey pageKey) const;
 
   struct CompressedBufferKey {
@@ -185,7 +200,15 @@ class NativeLancePageSource final {
   struct LegacyPageReaderEntry {
     NativeLancePageKey page;
     std::shared_ptr<NativeLanceLegacyPageReader> reader;
+    uint64_t retainedBytes;
   };
+
+  void updateLegacyPageReaderPeaksLocked() const;
+  void eraseLegacyPageReaderLocked(
+      std::unordered_map<
+          CompressedBufferKey,
+          LegacyPageReaderEntry,
+          CompressedBufferKeyHash>::iterator reader) const;
 
   dwio::common::BufferedInput& input_;
   const NativeLanceMetadata& metadata_;
@@ -204,6 +227,10 @@ class NativeLancePageSource final {
       legacyPageReaders_;
   mutable std::vector<std::map<int32_t, std::vector<CompressedBufferKey>>>
       legacyPageReaderKeys_;
+  mutable uint64_t legacyPageReaderRetainedBytes_{0};
+  mutable uint64_t legacyPageReaderPeakCount_{0};
+  mutable uint64_t legacyPageReaderPeakRetainedBytes_{0};
+  mutable uint64_t legacyPageReadersReleased_{0};
   mutable std::mutex structuralPagePlansMutex_;
   mutable std::vector<
       std::map<int32_t, std::shared_ptr<const NativeLanceStructuralPagePlan>>>

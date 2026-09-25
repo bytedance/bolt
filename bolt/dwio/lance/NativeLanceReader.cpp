@@ -53,12 +53,17 @@ NativeLanceRowSelection selectionForRows(
   return NativeLanceRowSelection::rows(rows);
 }
 
-NativeLanceColumnRequest
-columnRequest(uint64_t rowStart, vector_size_t inputSize, const RowSet& rows) {
+NativeLanceColumnRequest columnRequest(
+    uint64_t rowStart,
+    vector_size_t inputSize,
+    const RowSet& rows,
+    NativeLanceDecoderStateRetention decoderStateRetention =
+        NativeLanceDecoderStateRetention::kScan) {
   return {
       .rowStart = rowStart,
       .rowCount = static_cast<uint64_t>(inputSize),
-      .selection = selectionForRows(rows, inputSize)};
+      .selection = selectionForRows(rows, inputSize),
+      .decoderStateRetention = decoderStateRetention};
 }
 
 void initializeSelectedRows(
@@ -429,7 +434,9 @@ NativeLanceFilterResult decodeFilters(
     memory::MemoryPool& pool,
     const uint64_t* deletedRows,
     bool firstFilterRangesPlanned,
-    const RowSet* initialRows = nullptr) {
+    const RowSet* initialRows = nullptr,
+    NativeLanceDecoderStateRetention decoderStateRetention =
+        NativeLanceDecoderStateRetention::kScan) {
   RowSet selectedRows{memory::StlAllocator<vector_size_t>(&pool)};
   if (initialRows == nullptr) {
     initializeSelectedRows(selectedRows, batchSize, deletedRows);
@@ -459,7 +466,8 @@ NativeLanceFilterResult decodeFilters(
         ? std::optional<uint32_t>{}
         : std::make_optional<uint32_t>(
               fileType->getChildIdx(child->fieldName()));
-    const auto request = columnRequest(batchRowStart, batchSize, selectedRows);
+    const auto request = columnRequest(
+        batchRowStart, batchSize, selectedRows, decoderStateRetention);
     VectorPtr values;
     if (child->isConstant()) {
       values = BaseVector::wrapInConstant(
@@ -975,11 +983,13 @@ uint64_t NativeLanceScanCoordinator::nextTake(
           fileContext_->pool(),
           nullptr,
           false,
-          &selectedRows);
+          &selectedRows,
+          NativeLanceDecoderStateRetention::kRequest);
       const auto request = columnRequest(
           rowStart,
           static_cast<vector_size_t>(rowCount),
-          filtered.selectedRows);
+          filtered.selectedRows,
+          NativeLanceDecoderStateRetention::kRequest);
       windowResult = scanPlan_->rootColumnReader().read(
           pageSource_,
           request,
@@ -995,7 +1005,8 @@ uint64_t NativeLanceScanCoordinator::nextTake(
       const NativeLanceColumnRequest request{
           .rowStart = rowStart,
           .rowCount = rowCount,
-          .selection = NativeLanceRowSelection::rows(selectedRows)};
+          .selection = NativeLanceRowSelection::rows(selectedRows),
+          .decoderStateRetention = NativeLanceDecoderStateRetention::kRequest};
       scanPlan_->rootColumnReader().planRead(pageSource_, request);
       windowResult = scanPlan_->rootColumnReader().read(
           pageSource_, request, fileContext_->pool(), true);
@@ -1308,6 +1319,11 @@ void NativeLanceScanCoordinator::updateRuntimeStats(
   stats.decodeTimeNs += decodeTimeNs_;
 }
 
+NativeLanceLegacyPageReaderStats
+NativeLanceScanCoordinator::legacyPageReaderStats() const {
+  return pageSource_.legacyPageReaderStats();
+}
+
 void NativeLanceScanCoordinator::resetFilterCaches() {}
 
 std::optional<size_t> NativeLanceScanCoordinator::estimatedRowSize() const {
@@ -1354,6 +1370,11 @@ uint64_t NativeLanceRowReader::skip(uint64_t skipSize) {
 void NativeLanceRowReader::updateRuntimeStats(
     dwio::common::RuntimeStatistics& stats) const {
   coordinator_->updateRuntimeStats(stats);
+}
+
+NativeLanceLegacyPageReaderStats NativeLanceRowReader::legacyPageReaderStats()
+    const {
+  return coordinator_->legacyPageReaderStats();
 }
 
 void NativeLanceRowReader::resetFilterCaches() {

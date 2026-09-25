@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 #include <folly/Range.h>
 
@@ -26,6 +27,20 @@
 #include "bolt/vector/TypeAliases.h"
 
 namespace bytedance::bolt::lance::reader {
+
+struct NativeLanceRowRange {
+  vector_size_t begin;
+  vector_size_t size;
+};
+
+/// Controls how long stateful page decoders may remain resident. Sequential
+/// scans benefit from carrying monotonic decoder state across batches. An
+/// independent request, such as row-addressed take, may revisit arbitrary rows
+/// in its next batch and releases page state as soon as each column completes.
+enum class NativeLanceDecoderStateRetention : uint8_t {
+  kScan,
+  kRequest,
+};
 
 /// A non-owning, batch-relative row selection. The owner must keep explicit
 /// row storage alive until the request has been planned and decoded.
@@ -45,6 +60,10 @@ class NativeLanceRowSelection {
 
   folly::Range<const vector_size_t*> selectedRows() const {
     return rows_;
+  }
+
+  folly::Range<const NativeLanceRowRange*> selectedRanges() const {
+    return ranges_;
   }
 
   vector_size_t outputSize(uint64_t inputRowCount) const {
@@ -72,16 +91,34 @@ class NativeLanceRowSelection {
 
  private:
   NativeLanceRowSelection(bool all, folly::Range<const vector_size_t*> rows)
-      : all_(all), rows_(rows) {}
+      : all_(all), rows_(rows) {
+    if (all_ || rows_.empty()) {
+      return;
+    }
+    size_t runBegin = 0;
+    while (runBegin < rows_.size()) {
+      size_t runEnd = runBegin + 1;
+      while (runEnd < rows_.size() && rows_[runEnd] == rows_[runEnd - 1] + 1) {
+        ++runEnd;
+      }
+      ranges_.push_back(
+          {.begin = rows_[runBegin],
+           .size = static_cast<vector_size_t>(runEnd - runBegin)});
+      runBegin = runEnd;
+    }
+  }
 
   bool all_;
   folly::Range<const vector_size_t*> rows_;
+  std::vector<NativeLanceRowRange> ranges_;
 };
 
 struct NativeLanceColumnRequest {
   uint64_t rowStart{0};
   uint64_t rowCount{0};
   NativeLanceRowSelection selection{NativeLanceRowSelection::all()};
+  NativeLanceDecoderStateRetention decoderStateRetention{
+      NativeLanceDecoderStateRetention::kScan};
 
   vector_size_t outputSize() const {
     return selection.outputSize(rowCount);
