@@ -2539,6 +2539,149 @@ TEST_F(NativeLanceTest, scanCoordinatorOwnsReaderLifecycle) {
   EXPECT_EQ(coordinator.next(5, result, nullptr), 0);
 }
 
+TEST_F(NativeLanceTest, rowAddressedTakePreservesOrderAndDuplicates) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  dwio::common::RowReaderOptions options;
+  options.select(std::make_shared<dwio::common::ColumnSelector>(
+      reader.rowType(), std::vector<std::string>{"a"}));
+  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{7, 1, 7, 19, 0});
+  auto take = reader.createTakeReader(options, {.rowIds = rowIds});
+
+  EXPECT_FALSE(take->prefetchUnits().has_value());
+  EXPECT_EQ(take->nextRowNumber(), 7);
+  EXPECT_EQ(take->nextReadSize(3), 3);
+  VectorPtr result;
+  EXPECT_EQ(take->next(3, result), 3);
+  ASSERT_EQ(result->size(), 3);
+  const auto* first =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first->valueAt(0), 8);
+  EXPECT_EQ(first->valueAt(1), 2);
+  EXPECT_EQ(first->valueAt(2), 8);
+
+  EXPECT_EQ(take->nextRowNumber(), 19);
+  EXPECT_EQ(take->next(10, result), 2);
+  ASSERT_EQ(result->size(), 2);
+  const auto* second =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->valueAt(0), 20);
+  EXPECT_EQ(second->valueAt(1), 1);
+  EXPECT_EQ(take->nextRowNumber(), dwio::common::RowReader::kAtEnd);
+}
+
+TEST_F(NativeLanceTest, rowAddressedTakeHandlesEmptyAndInvalidRows) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  const auto emptyRows = std::make_shared<const std::vector<uint64_t>>();
+  auto empty = reader.createTakeReader({}, {.rowIds = emptyRows});
+  VectorPtr result;
+  EXPECT_EQ(empty->nextRowNumber(), dwio::common::RowReader::kAtEnd);
+  EXPECT_EQ(empty->next(10, result), 0);
+
+  const auto invalidRows = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{20});
+  EXPECT_THROW(
+      reader.createTakeReader({}, {.rowIds = invalidRows}), BoltException);
+  EXPECT_THROW(reader.createTakeReader({}, {.rowIds = nullptr}), BoltException);
+
+  const auto validRows = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{7, 1, 19});
+  auto skipped = reader.createTakeReader({}, {.rowIds = validRows});
+  EXPECT_EQ(skipped->skip(1), 1);
+  EXPECT_EQ(skipped->nextRowNumber(), 1);
+  EXPECT_EQ(skipped->next(1, result), 1);
+  EXPECT_EQ(
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>()->valueAt(
+          0),
+      2);
+
+  auto withMutation = reader.createTakeReader({}, {.rowIds = validRows});
+  std::array<uint64_t, 1> deletedRows{0};
+  dwio::common::Mutation mutation{.deletedRows = deletedRows.data()};
+  EXPECT_THROW(withMutation->next(1, result, &mutation), BoltException);
+}
+
+TEST_F(NativeLanceTest, rowAddressedTakeMatchesComplexSequentialRead) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(
+      openFile("complex_v2_2.lance", *pool_), readerOptions);
+  auto sequential = reader.createRowReader({});
+  EXPECT_EQ(sequential->skip(1'020), 1'020);
+  VectorPtr expected;
+  EXPECT_EQ(sequential->next(17, expected), 17);
+
+  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{1'036, 1'020, 1'036});
+  auto take = reader.createTakeReader({}, {.rowIds = rowIds});
+  VectorPtr result;
+  EXPECT_EQ(take->next(3, result), 3);
+  ASSERT_EQ(result->size(), 3);
+  EXPECT_TRUE(result->equalValueAt(expected.get(), 0, 16));
+  EXPECT_TRUE(result->equalValueAt(expected.get(), 1, 0));
+  EXPECT_TRUE(result->equalValueAt(expected.get(), 2, 16));
+}
+
+TEST_F(NativeLanceTest, rowAddressedTakePreservesNullsAndSemanticTypes) {
+  auto input = std::make_unique<dwio::common::BufferedInput>(
+      std::make_shared<InMemoryReadFile>(makeBooleanTimestampFile()), *pool_);
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(std::move(input), readerOptions);
+  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{3, 1, 3, 0});
+  auto take = reader.createTakeReader({}, {.rowIds = rowIds});
+
+  VectorPtr result;
+  EXPECT_EQ(take->next(4, result), 4);
+  ASSERT_EQ(result->size(), 4);
+  const auto* rows = result->as<RowVector>();
+  ASSERT_NE(rows, nullptr);
+  const auto* flags = rows->childAt(0)->as<SimpleVector<bool>>();
+  const auto* timestamps = rows->childAt(1)->as<SimpleVector<Timestamp>>();
+  ASSERT_NE(flags, nullptr);
+  ASSERT_NE(timestamps, nullptr);
+  EXPECT_FALSE(flags->isNullAt(0));
+  EXPECT_FALSE(flags->valueAt(0));
+  EXPECT_TRUE(flags->isNullAt(1));
+  EXPECT_FALSE(flags->isNullAt(2));
+  EXPECT_FALSE(flags->valueAt(2));
+  EXPECT_FALSE(flags->isNullAt(3));
+  EXPECT_TRUE(flags->valueAt(3));
+  EXPECT_EQ(timestamps->valueAt(0), Timestamp::fromMicros(1'000'001));
+  EXPECT_EQ(timestamps->valueAt(1), Timestamp::fromMicros(0));
+  EXPECT_EQ(timestamps->valueAt(2), Timestamp::fromMicros(1'000'001));
+  EXPECT_EQ(timestamps->valueAt(3), Timestamp::fromMicros(-1));
+  for (vector_size_t row = 0; row < result->size(); ++row) {
+    EXPECT_TRUE(rows->childAt(2)->isNullAt(row));
+  }
+}
+
+TEST_F(NativeLanceTest, rowAddressedTakeAppliesFiltersToRequestedRows) {
+  dwio::common::ReaderOptions readerOptions(pool_.get());
+  NativeLanceReader reader(openFile("sample.lance", *pool_), readerOptions);
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addField("a", 0)->setFilter(
+      std::make_unique<common::BigintRange>(2, 3, false));
+  scanSpec->addField("b", 1);
+  dwio::common::RowReaderOptions options;
+  options.setScanSpec(scanSpec);
+  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{2, 0, 1, 3});
+  auto take = reader.createTakeReader(options, {.rowIds = rowIds});
+
+  VectorPtr result;
+  EXPECT_EQ(take->next(4, result), 4);
+  ASSERT_EQ(result->size(), 2);
+  const auto* values =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  ASSERT_NE(values, nullptr);
+  EXPECT_EQ(values->valueAt(0), 3);
+  EXPECT_EQ(values->valueAt(1), 2);
+}
+
 TEST_F(NativeLanceTest, columnCursorMapsArbitraryPageSpans) {
   const std::vector<uint64_t> pageRowStarts{0, 5, 5, 10, 20};
   NativeLanceColumnCursor cursor(7, pageRowStarts);

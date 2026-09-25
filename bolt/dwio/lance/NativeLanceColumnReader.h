@@ -73,6 +73,10 @@ class NativeLanceRootColumnReader {
       const NativeLanceMetadata& metadata,
       const dwio::common::RowReaderOptions& options);
 
+  const RowTypePtr& outputType() const {
+    return outputType_;
+  }
+
   VectorPtr read(
       NativeLancePageSource& source,
       const NativeLanceColumnRequest& request,

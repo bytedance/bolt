@@ -11,7 +11,7 @@
 3. **小数据与窄投影没有被牺牲。** 4,096 行、43 列小文件上 Native/Rust 核心时间为 9.94/10.48 ms，Native 快 5.2%；1M 行单列投影上一轮为 23.13/22.13 ms。
 4. **Structural page 初始化已从 batch 生命周期中移出。** Nested 五列单线程为 0.664/0.486 秒。MiniBlock chunk table 和 repetition index 现在按 page 解析一次，并在 page 消费后立即释放；同步输入不驻留 payload。
 5. **部分 nullable Int64 已达到 Rust 水平。** 0%、1%、50% null 的 Native/Rust 核心时间分别为 22.62/22.90、29.03/29.71、33.86/34.39 ms；100% null 继续走 constant fast path。
-6. **剩余最大功能缺口是已知 row offset 的 take API。** Native 单点仍需扫描 `row_id`，核心时间 38.8 ms；Rust `ReadBatchParams::Indices` 为 1.96 ms。这里首先是 API 和调度语义差异，不能当成相同物理读取计划下的 decoder 对比。
+6. **row-addressed take API 已落地。** 在同一组地址和两列投影下，Native 1 点和 100 点核心时间分别为 0.829 ms 和 3.173 ms，Rust `ReadBatchParams::Indices` 为 2.712 ms 和 7.434 ms。Native 不再扫描 `row_id`，并保持调用方顺序、重复项、filter-first 和 batch 内存上界。
 
 ## 2. 测试对象与环境
 
@@ -110,7 +110,10 @@ Native 相比自己的全扫从 9.200 秒下降到 3.039 秒，证明 filter-fir
 | 已知 offset，1 行 | 扫描 `row_id`，命中后 late materialize | `ReadBatchParams::Indices` | 37.3 ms | 2.19 ms | 17.1x |
 | 已知 offset，100 行 | `BigintValues` 扫描，按选中 run 解码 | `ReadBatchParams::Indices` | 265.3 ms | 6.87 ms | 38.6x |
 
-Native 目前已有内部 `NativeLanceRowSelection`，但 `NativeLanceReader` 的公开扫描入口没有等价于 Rust `Indices/Ranges` 的 row-domain API。100 个离散点还会在 `FileColumnReader::read` 中拆成多个连续 run，逐 run 调用 `decodeRange`。因此这里首先是 API 和调度能力缺口，其次才是 kernel 差距。
+优化前 Native 虽已有内部 `NativeLanceRowSelection`，但 `NativeLanceReader` 的公开扫描
+入口没有等价于 Rust `Indices/Ranges` 的 row-domain API。100 个离散点会在
+`FileColumnReader::read` 中拆成多个连续 run，逐 run 调用 `decodeRange`。因此该基线首先
+反映 API 和调度能力缺口，其次才是 kernel 差距；第 9.7 节记录了新 take API 的结果。
 
 ### 4.4 各类型解码性能
 
@@ -233,9 +236,12 @@ prepare(page metadata, row selection)
 - batch 1,024/4,096/16,384 的吞吐差异控制在 20% 内；
 - RSS 不得超过当前 batch 4,096 基线，且不能通过保留已解码 page 达标。
 
-### P0：给 Native Reader 增加 row-domain `Ranges/Indices` API
+### 已完成 P0：给 Native Reader 增加 row-domain `Indices` API
 
-把现有 `NativeLanceRowSelection` 提升为公开、不可变的 scan plan 输入，并提供与 Rust `ReadBatchParams::{Range,Ranges,Indices}` 等价的能力。FileReader 在 open 阶段已有 page row index，应直接把 row ids 映射到 page spans，而不是扫描 `row_id`。
+`NativeLanceReader::createTakeReader()` 接受不可变、file-global 的 row ID 流。Coordinator
+仅新增地址 cursor；地址批次通过现有 `NativeLanceRowSelection` 进入同一个
+RootColumnReader/PageSource/PageReader，不新增第二套 reader 或 decoder。FileReader 在 open
+阶段已有 page row index，因此 row IDs 直接映射到 page spans，不再扫描 `row_id`。
 
 对于 sparse indices：
 
@@ -244,6 +250,10 @@ prepare(page metadata, row selection)
 - 每个 page 只初始化一次 decoder；
 - selection 直接传给 page kernel，输出紧凑 vector；
 - 多列共享同一个 immutable row selection，但不共享 decoded payload。
+
+实现额外保证：`next()` 返回消费的地址数，过滤后输出可以更少；乱序和重复项通过
+dictionary scatter 恢复；超出 `vector_size_t` 表示范围的地址跨度拆成多个 window；随机
+take 不发布顺序 prefetch units，也不支持语义不明确的 Mutation。
 
 验收目标：单点核心时间不高于 5 ms，100 个分散点不高于 15 ms，且读取字节随触及 page 数增长，而不是随全文件行数增长。
 
@@ -371,8 +381,9 @@ prepare(page metadata, row selection)
    单线程 CPU 的主要部分，应将同一 page 的 codec plan 编译一次并复用不可变描述。
 3. List/Map materialization 仍有 offsets/nulls 二次构造和 `ArrayVector::copyRanges`；应让
    page kernel 直接写 batch-owned offsets、sizes 和 null bitmap。
-4. 已知 row offset 的 take API 尚未落地，当前单点查询仍需扫描 filter 列；该工作与
-   decode kernel 优化分开，不能用索引或缓存掩盖。
+4. v2.0 单大 Zstd frame 的超宽稀疏 take 仍需要把每个被访问列流式推进到最远地址；
+   后续应使用 writer 侧更细 page/reset-point 布局或 byte-budgeted decode 调度降低工作集，
+   不能恢复 decoded/decompressed page cache。
 
 ### 9.4 Scan-local StructuralPagePlan 优化
 
@@ -474,6 +485,39 @@ frame 次数，反而会为每个活跃列增加状态。因此 cursor 只应在
 - `/tmp/lance-refactor-final-filter-7round.json`
 - `/tmp/lance-refactor-final-point1-7round.json`
 
+take 改动后的独立七轮回归为 6.928 秒、6.16 GiB RSS 和 1.13 GB pool peak，仍在该
+全扫基线范围内；同轮 1% filter 为 171.6 ms、52.3 MiB RSS 和 2.56 MB pool peak。
+
+### 9.7 Row-addressed take 优化
+
+相同 47 列全类型文件、`row_id,string_value` 投影、16 线程、每端七轮交替：
+
+| 用例 | 旧 Native filter fallback | Native take | Rust take | Native/Rust | Native RSS | Native pool peak |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 点 | 22.415 ms | **0.829 ms** | 2.712 ms | **0.31x** | 39.2 MiB | 0.14 MiB |
+| 100 点，间隔 5,120 行 | 119.124 ms | **3.173 ms** | 7.434 ms | **0.43x** | 40.1 MiB | 0.42 MiB |
+
+Native 相对旧 fallback 分别提升 27.0x 和 37.5x；相对 Rust take 分别快 3.26x 和
+2.32x。两项核心 scan log-ratio 的 exact paired sign-flip `p` 均为 `0.015625`，两端输出
+行数与 `row_id` checksum 一致。窄点查的进程 wall time 仍由 Native 静态初始化主导，
+因此 reader 路径比较使用 benchmark 核心 scan time，不把进程启动时间归因给 take
+decoder。
+
+主验收 800 列 v2.0 文件另取 100 个间隔 4,000 行的地址并投影全部列：Native/Rust
+核心时间中位数为 **2.141/5.044 秒**，Native 快 2.36x；RSS 为 **4.62/0.445 GiB**，
+Native pool peak 为 367.5 MiB。Native RSS 低于同文件全扫的 6.16 GiB，但该结果同时暴露
+出 legacy 单大 Zstd frame 的限制：稀疏 selection 不能跳过 frame 前缀，800 个列 session
+的 codec/allocator 工作集仍然较大。这是后续 page/reset-point 与 byte-budgeted decode
+调度问题，不应以 page cache 规避。
+
+对应结果文件为：
+
+- `/tmp/lance-native-take-point1-7round-final-20260925.json`
+- `/tmp/lance-native-take-point100-7round-final-20260925.json`
+- `/tmp/lance-native-take-wide100-7round-20260925.json`
+- `/tmp/lance-native-take-wide-fullscan-7round-20260925.json`
+- `/tmp/lance-native-take-filter-7round-20260925.json`
+
 ## 10. 复现与验证
 
 原始 JSON 位于 `/tmp/lance-perf-report-20260924/`。paired runner：
@@ -492,8 +536,9 @@ python3 bolt/dwio/lance/tests/run_native_rust_acceptance_benchmark.py \
 
 本轮验证结果：
 
-- Native Lance unit tests：121/121 通过；
+- Native Lance unit tests：126/126 通过；
 - Native Lance TableScan tests：7/7 通过；
 - 47 列数据生成、全量 materialization、过滤输出行数和 checksum 校验通过；
-- 点查 1 行和 100 行的输出行数与 `row_id` checksum 校验通过；
+- take 的 1 行、100 行以及 800 列 100 行输出数量校验通过，前两者同时校验
+  `row_id` checksum；
 - benchmark C++ target 和 Rust current-main harness 均使用 release build。

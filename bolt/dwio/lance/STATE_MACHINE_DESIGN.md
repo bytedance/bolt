@@ -60,6 +60,15 @@ enum class NativeLanceScanState : uint8_t {
 内部的 plan/decode/assemble 都是同步步骤，不再创建 ScanWindow、ColumnTask 或
 BatchBuilder 状态机。
 
+Coordinator 接受两种互斥的 row domain，且复用同一组状态和解码组件：
+
+- 顺序扫描使用 `rowRanges + currentRange/currentRow`；
+- row-addressed take 使用不可变 `rowIds + takePosition`。
+
+take 不是第二套 reader。它只把当前地址批次规范化成已有
+`NativeLanceColumnRequest::selection`，后续仍进入同一个 RootColumnReader、PageSource 和
+PageReader。
+
 ### 2.3 ScanPlan 与 ColumnReader
 
 `NativeLanceScanPlan` 在 RowReader 创建时完成：
@@ -148,6 +157,39 @@ sequenceDiagram
 外部或内部 prefetch 只规划第一个非 constant filter。projection 不得在 selection 产生前
 预取，避免低选择性结果下读取整张宽表。
 
+### 3.3 Row-addressed take
+
+```mermaid
+sequenceDiagram
+  participant C as Caller
+  participant R as NativeLanceReader
+  participant SC as ScanCoordinator
+  participant CR as RootColumnReader
+  participant PS as PageSource
+
+  C->>R: createTakeReader(options, rowIds)
+  R->>SC: validate file-global addresses against split ranges
+  C->>SC: next(batchSize)
+  SC->>SC: copy bounded slice, sort and deduplicate
+  loop each vector_size_t address window
+    SC->>CR: plan/read(batch-relative selection)
+    CR->>PS: map selected runs to physical page spans
+    PS-->>CR: decode only selected rows
+    CR-->>SC: sorted unique RowVector
+    SC->>PS: finishBatch()
+  end
+  SC->>SC: dictionary scatter to caller order and duplicates
+  SC-->>C: consumed address count + RowVector
+```
+
+每次 `next(size)` 最多消费 `size` 个地址，并继续受 `maxBatchBytes` 约束。返回值是已消费
+的地址数；有 filter 时可能大于输出行数。排序只改变内部访问顺序，最终 dictionary
+scatter 恢复调用方顺序和重复项。跨度无法由 `vector_size_t` 表示时拆成多个 window，
+不会把地址之间的空洞 materialize 成 vector。
+
+take 禁用顺序 scan prefetch unit，因为随机地址不应触发整段 speculative prefetch；
+Mutation 当前明确拒绝，避免把文件行域 deletion bitmap 与地址流位置混淆。
+
 ## 4. Prefetch 状态
 
 Prefetch 只保留三种状态：`NotStarted`、`InProgress`、`Finished`。范围索引保持有序并
@@ -198,6 +240,8 @@ stateDiagram-v2
 5. Legacy Zstd session 只保留当前页，并在该 physical column 进入下一页时回收。
 6. Filter prefetch 不得读取 projection；projection I/O 基于最终 selection。
 7. 并行度不创建独立全局线程池，使用调用方注入的 query executor。
+8. take 只保留当前地址批次、去重结果和最终 dictionary indices；不保留跨 batch 的
+   decoded/decompressed page cache。
 
 `maxInFlightBytes` 是单次 I/O 提交波次限制，不声明为所有解码临时内存的全局硬配额。
 统一的硬内存限制由 Bolt `MemoryPool` 和 batch sizing 提供，避免维护一套未接线的旁路
@@ -216,6 +260,17 @@ class NativeLanceFileContext {
 
   const NativeLanceMetadata& metadata() const;
   std::unique_ptr<dwio::common::BufferedInput> newInput() const;
+};
+
+struct NativeLanceTakeOptions {
+  std::shared_ptr<const std::vector<uint64_t>> rowIds;
+};
+
+class NativeLanceReader {
+ public:
+  std::unique_ptr<NativeLanceRowReader> createTakeReader(
+      const dwio::common::RowReaderOptions& options,
+      NativeLanceTakeOptions takeOptions) const;
 };
 
 class NativeLanceRootColumnReader {
@@ -259,6 +314,7 @@ class NativeLanceReadScheduler {
 
 - Native Lance 单测和 Hive TableScan 集成测试全部通过；
 - 兼容 v2.0、v2.1、v2.2、v2.3 以及全部已声明类型；
+- take 覆盖乱序、重复、空输入、非法地址、跨页复杂类型、null、过滤和 skip；
 - 过滤用例校验输出行数与 checksum；
 - 主验收数据使用 `/tmp/data-0ee2-v20-zstd9-full.lance`；
 - Native/Rust 各运行七轮并交替顺序；

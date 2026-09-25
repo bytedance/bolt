@@ -168,6 +168,10 @@ bool usesFilter() {
       scenario == "filter_indices";
 }
 
+bool usesTake() {
+  return scenario == "take_rows";
+}
+
 bool usesChecksum() {
   return scenario == "full_scan_all_types" || usesFilter() ||
       expectedChecksum.has_value();
@@ -217,7 +221,24 @@ ScanResult scan(dwio::common::Reader& reader) {
     }
   }
   options.setScanSpec(std::move(scanSpec));
-  auto rows = reader.createRowReader(options);
+  std::unique_ptr<dwio::common::RowReader> rows;
+  if (usesTake()) {
+    BOLT_USER_CHECK_EQ(
+        readerMode, "native", "take_rows requires the native Lance reader");
+    BOLT_USER_CHECK(!rowIndices.empty(), "take_rows requires row indices");
+    auto addresses = std::make_shared<std::vector<uint64_t>>();
+    addresses->reserve(rowIndices.size());
+    for (const auto row : rowIndices) {
+      BOLT_USER_CHECK_GE(row, 0, "take_rows row IDs must be non-negative");
+      addresses->push_back(static_cast<uint64_t>(row));
+    }
+    auto* nativeReader = dynamic_cast<NativeLanceReader*>(&reader);
+    BOLT_CHECK_NOT_NULL(nativeReader);
+    rows = nativeReader->createTakeReader(
+        options, NativeLanceTakeOptions{std::move(addresses)});
+  } else {
+    rows = reader.createRowReader(options);
+  }
   dwio::common::RuntimeStatistics beforeStats;
   if (printStats) {
     rows->updateRuntimeStats(beforeStats);
@@ -283,7 +304,7 @@ ScanResult scan(dwio::common::Reader& reader) {
   if (expectedRows.has_value()) {
     BOLT_CHECK_EQ(sourceRows, expectedRows.value());
   }
-  if (!usesFilter()) {
+  if (!usesFilter() && !usesTake()) {
     BOLT_CHECK_EQ(inputRows, sourceRows);
   }
   if (expectedOutputRows.has_value()) {
@@ -300,7 +321,7 @@ uint64_t nativeReader(uint32_t iterations) {
   for (uint32_t i = 0; i < iterations; ++i) {
     dwio::common::ReaderOptions options(readerPool.get());
     NativeLanceReader reader(open(lanceFilePath), options);
-    rows += scan(reader).sourceRows;
+    rows += scan(reader).inputRows;
   }
   return rows;
 }
@@ -310,7 +331,7 @@ uint64_t parquetReader(uint32_t iterations) {
   for (uint32_t i = 0; i < iterations; ++i) {
     dwio::common::ReaderOptions options(readerPool.get());
     parquet::ParquetReader reader(open(parquetFilePath), options);
-    rows += scan(reader).sourceRows;
+    rows += scan(reader).inputRows;
   }
   return rows;
 }
@@ -341,10 +362,10 @@ int main(int argc, char** argv) {
   }
   if (scenario != "full_scan" && scenario != "full_scan_all_types" &&
       scenario != "filter" && scenario != "filter_1pct_all_types" &&
-      scenario != "filter_indices") {
+      scenario != "filter_indices" && scenario != "take_rows") {
     std::cerr << "BOLT_LANCE_BENCHMARK_SCENARIO must be 'full_scan', "
                  "'full_scan_all_types', 'filter', or "
-                 "'filter_1pct_all_types', or 'filter_indices'\n";
+                 "'filter_1pct_all_types', 'filter_indices', or 'take_rows'\n";
     return 1;
   }
   bytedance::bolt::memory::MemoryManager::initialize({});

@@ -154,7 +154,10 @@ async fn scan() -> anyhow::Result<(u64, u64, u64, usize, usize)> {
         "unsupported benchmark scenario '{scenario}'"
     );
     let uses_filter = matches!(scenario.as_str(), "filter" | "filter_1pct_all_types");
-    let uses_checksum = scenario != "full_scan" || expected_checksum.is_some();
+    let uses_checksum = matches!(
+        scenario.as_str(),
+        "full_scan_all_types" | "filter" | "filter_1pct_all_types"
+    ) || expected_checksum.is_some();
     let filter_column =
         env::var("BOLT_LANCE_BENCHMARK_FILTER_COLUMN").unwrap_or_else(|_| "filter_key".to_string());
     let checksum_column =

@@ -19,6 +19,7 @@
 #include <exception>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include <folly/Portability.h>
 
@@ -33,6 +34,12 @@
 #include "folly/synchronization/Baton.h"
 
 namespace bytedance::bolt::lance::reader {
+
+struct NativeLanceTakeOptions {
+  /// Zero-based, file-global row addresses in caller-visible output order.
+  /// The shared ownership keeps a large address stream out of RowReader copies.
+  std::shared_ptr<const std::vector<uint64_t>> rowIds;
+};
 
 enum class NativeLanceScanState : uint8_t {
   kIdle,
@@ -53,6 +60,11 @@ class NativeLanceScanCoordinator {
   NativeLanceScanCoordinator(
       std::shared_ptr<const NativeLanceFileContext> fileContext,
       dwio::common::RowReaderOptions options);
+
+  NativeLanceScanCoordinator(
+      std::shared_ptr<const NativeLanceFileContext> fileContext,
+      dwio::common::RowReaderOptions options,
+      NativeLanceTakeOptions takeOptions);
 
   ~NativeLanceScanCoordinator();
 
@@ -84,6 +96,7 @@ class NativeLanceScanCoordinator {
   };
 
   void advancePastFinishedRange();
+  bool atEnd() const;
   const std::vector<std::pair<uint64_t, uint64_t>>& rowRanges() const {
     return scanPlan_->rowRanges();
   }
@@ -107,6 +120,8 @@ class NativeLanceScanCoordinator {
       uint64_t size,
       VectorPtr& result,
       const dwio::common::Mutation* mutation);
+  uint64_t nextTake(uint64_t size, VectorPtr& result);
+  void validateTakeRows() const;
   void fail(std::exception_ptr error);
   [[noreturn]] void rethrowFailure() const;
 
@@ -130,6 +145,8 @@ class NativeLanceScanCoordinator {
   uint64_t decodeTimeNs_{0};
   int64_t maxBatchBytes_{0};
   mutable uint64_t estimatedBytesPerRow_{0};
+  std::shared_ptr<const std::vector<uint64_t>> takeRows_;
+  size_t takePosition_{0};
 };
 
 class NativeLanceRowReader : public dwio::common::RowReader {
@@ -137,6 +154,11 @@ class NativeLanceRowReader : public dwio::common::RowReader {
   NativeLanceRowReader(
       std::shared_ptr<const NativeLanceFileContext> fileContext,
       dwio::common::RowReaderOptions options);
+
+  NativeLanceRowReader(
+      std::shared_ptr<const NativeLanceFileContext> fileContext,
+      dwio::common::RowReaderOptions options,
+      NativeLanceTakeOptions takeOptions);
 
   ~NativeLanceRowReader() override;
 
@@ -178,6 +200,10 @@ class NativeLanceReader : public dwio::common::Reader {
   size_t loadedColumnMetadataCount() const;
   std::unique_ptr<dwio::common::RowReader> createRowReader(
       const dwio::common::RowReaderOptions& options = {}) const override;
+
+  std::unique_ptr<NativeLanceRowReader> createTakeReader(
+      const dwio::common::RowReaderOptions& options,
+      NativeLanceTakeOptions takeOptions) const;
   std::unique_ptr<dwio::common::ColumnStatistics> columnStatistics(
       uint32_t index) const override;
 

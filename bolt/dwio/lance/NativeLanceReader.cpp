@@ -428,9 +428,16 @@ NativeLanceFilterResult decodeFilters(
     vector_size_t batchSize,
     memory::MemoryPool& pool,
     const uint64_t* deletedRows,
-    bool firstFilterRangesPlanned) {
+    bool firstFilterRangesPlanned,
+    const RowSet* initialRows = nullptr) {
   RowSet selectedRows{memory::StlAllocator<vector_size_t>(&pool)};
-  initializeSelectedRows(selectedRows, batchSize, deletedRows);
+  if (initialRows == nullptr) {
+    initializeSelectedRows(selectedRows, batchSize, deletedRows);
+  } else {
+    BOLT_CHECK_NULL(
+        deletedRows, "Row-addressed Lance reads do not support mutations");
+    selectedRows.assign(initialRows->begin(), initialRows->end());
+  }
 
   struct DecodedFilterColumn {
     DecodedFilterColumn(RowSet inputRows, VectorPtr inputValues)
@@ -539,8 +546,38 @@ NativeLanceScanCoordinator::NativeLanceScanCoordinator(
       scanPlan_->rowRanges().empty() ? 0 : scanPlan_->rowRanges().front().first;
 }
 
+NativeLanceScanCoordinator::NativeLanceScanCoordinator(
+    std::shared_ptr<const NativeLanceFileContext> fileContext,
+    dwio::common::RowReaderOptions options,
+    NativeLanceTakeOptions takeOptions)
+    : NativeLanceScanCoordinator(std::move(fileContext), std::move(options)) {
+  takeRows_ = std::move(takeOptions.rowIds);
+  validateTakeRows();
+}
+
 NativeLanceScanCoordinator::~NativeLanceScanCoordinator() {
   cancel();
+}
+
+void NativeLanceScanCoordinator::validateTakeRows() const {
+  BOLT_USER_CHECK_NOT_NULL(takeRows_);
+  const auto& ranges = rowRanges();
+  for (const auto row : *takeRows_) {
+    BOLT_USER_CHECK_LE(
+        row,
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+        "Lance row address {} exceeds the RowReader row-number range",
+        row);
+    const auto upper = std::upper_bound(
+        ranges.begin(),
+        ranges.end(),
+        row,
+        [](uint64_t value, const auto& range) { return value < range.first; });
+    const auto owned =
+        upper != ranges.begin() && row < std::prev(upper)->second;
+    BOLT_USER_CHECK(
+        owned, "Lance row address {} is outside this reader's file range", row);
+  }
 }
 
 void NativeLanceScanCoordinator::cancel() {
@@ -583,7 +620,17 @@ void NativeLanceScanCoordinator::advancePastFinishedRange() {
   }
 }
 
+bool NativeLanceScanCoordinator::atEnd() const {
+  return takeRows_ != nullptr ? takePosition_ >= takeRows_->size()
+                              : currentRange_ >= rowRanges().size();
+}
+
 int64_t NativeLanceScanCoordinator::nextRowNumber() {
+  if (takeRows_ != nullptr) {
+    return takePosition_ >= takeRows_->size()
+        ? kAtEnd
+        : static_cast<int64_t>(takeRows_->at(takePosition_));
+  }
   advancePastFinishedRange();
   return currentRange_ >= rowRanges().size()
       ? kAtEnd
@@ -592,6 +639,15 @@ int64_t NativeLanceScanCoordinator::nextRowNumber() {
 
 int64_t NativeLanceScanCoordinator::nextReadSize(uint64_t size) {
   BOLT_CHECK_GT(size, 0);
+  if (takeRows_ != nullptr) {
+    if (takePosition_ >= takeRows_->size()) {
+      return kAtEnd;
+    }
+    const auto remaining = takeRows_->size() - takePosition_;
+    return static_cast<int64_t>(std::min<uint64_t>(
+        capReadSize(std::min<uint64_t>(size, remaining)),
+        std::numeric_limits<vector_size_t>::max()));
+  }
   advancePastFinishedRange();
   if (currentRange_ >= rowRanges().size()) {
     return kAtEnd;
@@ -629,6 +685,9 @@ void NativeLanceScanCoordinator::initializePrefetchRanges() {
 
 std::optional<std::vector<dwio::common::RowReader::PrefetchUnit>>
 NativeLanceScanCoordinator::prefetchUnits() {
+  if (takeRows_ != nullptr) {
+    return std::nullopt;
+  }
   initializePrefetchRanges();
   std::vector<PrefetchUnit> units;
   units.reserve(prefetchRanges_.size());
@@ -861,6 +920,181 @@ void NativeLanceScanCoordinator::readFiltered(
   prepareNextBatchPipeline(readEnd, requestedRows);
 }
 
+uint64_t NativeLanceScanCoordinator::nextTake(
+    uint64_t size,
+    VectorPtr& result) {
+  BOLT_CHECK_NOT_NULL(takeRows_);
+  if (takePosition_ >= takeRows_->size()) {
+    return 0;
+  }
+  const auto requestedRows = std::min<uint64_t>(
+      capReadSize(std::min<uint64_t>(size, takeRows_->size() - takePosition_)),
+      std::numeric_limits<vector_size_t>::max());
+  BOLT_CHECK_GT(requestedRows, 0);
+  const auto decodeStart = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> pageSourceLock(pageSourceMutex_);
+
+  std::vector<uint64_t> uniqueRows(
+      takeRows_->begin() + takePosition_,
+      takeRows_->begin() + takePosition_ + requestedRows);
+  std::sort(uniqueRows.begin(), uniqueRows.end());
+  uniqueRows.erase(
+      std::unique(uniqueRows.begin(), uniqueRows.end()), uniqueRows.end());
+
+  std::vector<VectorPtr> windowResults;
+  std::vector<uint64_t> survivingRows;
+  const auto& scanSpec = options_.getScanSpec();
+  size_t windowBegin = 0;
+  while (windowBegin < uniqueRows.size()) {
+    const auto rowStart = uniqueRows[windowBegin];
+    size_t windowEnd = windowBegin + 1;
+    while (
+        windowEnd < uniqueRows.size() &&
+        uniqueRows[windowEnd] - rowStart <
+            static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max())) {
+      ++windowEnd;
+    }
+    const auto rowCount = uniqueRows[windowEnd - 1] - rowStart + 1;
+    RowSet selectedRows{
+        memory::StlAllocator<vector_size_t>(&fileContext_->pool())};
+    selectedRows.reserve(windowEnd - windowBegin);
+    for (size_t index = windowBegin; index < windowEnd; ++index) {
+      selectedRows.push_back(
+          static_cast<vector_size_t>(uniqueRows[index] - rowStart));
+    }
+
+    VectorPtr windowResult;
+    if (scanSpec && scanSpec->hasFilter()) {
+      auto filtered = decodeFilters(
+          pageSource_,
+          *scanPlan_,
+          fileContext_->metadata().rowType(),
+          *scanSpec,
+          rowStart,
+          static_cast<vector_size_t>(rowCount),
+          fileContext_->pool(),
+          nullptr,
+          false,
+          &selectedRows);
+      const auto request = columnRequest(
+          rowStart,
+          static_cast<vector_size_t>(rowCount),
+          filtered.selectedRows);
+      windowResult = scanPlan_->rootColumnReader().read(
+          pageSource_,
+          request,
+          fileContext_->pool(),
+          false,
+          &filtered.predecodedColumns);
+      windowResult = applyScanSpecProjection(
+          std::move(windowResult), *scanSpec, fileContext_->pool());
+      for (const auto row : filtered.selectedRows) {
+        survivingRows.push_back(rowStart + row);
+      }
+    } else {
+      const NativeLanceColumnRequest request{
+          .rowStart = rowStart,
+          .rowCount = rowCount,
+          .selection = NativeLanceRowSelection::rows(selectedRows)};
+      scanPlan_->rootColumnReader().planRead(pageSource_, request);
+      windowResult = scanPlan_->rootColumnReader().read(
+          pageSource_, request, fileContext_->pool(), true);
+      survivingRows.insert(
+          survivingRows.end(),
+          uniqueRows.begin() + windowBegin,
+          uniqueRows.begin() + windowEnd);
+    }
+    pageSource_.finishBatch();
+    windowResults.push_back(std::move(windowResult));
+    windowBegin = windowEnd;
+  }
+
+  VectorPtr uniqueResult;
+  if (windowResults.size() == 1) {
+    uniqueResult = std::move(windowResults.front());
+  } else {
+    uniqueResult = BaseVector::create(
+        scanPlan_->rootColumnReader().outputType(),
+        static_cast<vector_size_t>(survivingRows.size()),
+        &fileContext_->pool());
+    vector_size_t outputOffset = 0;
+    for (const auto& windowResult : windowResults) {
+      uniqueResult->copy(
+          windowResult.get(), outputOffset, 0, windowResult->size());
+      outputOffset += windowResult->size();
+    }
+    BOLT_CHECK_EQ(outputOffset, uniqueResult->size());
+  }
+
+  if (survivingRows.empty()) {
+    result = BaseVector::create(
+        scanPlan_->rootColumnReader().outputType(), 0, &fileContext_->pool());
+  } else {
+    std::unordered_map<uint64_t, vector_size_t> uniquePositions;
+    uniquePositions.reserve(survivingRows.size());
+    for (vector_size_t index = 0; index < survivingRows.size(); ++index) {
+      uniquePositions.emplace(survivingRows[index], index);
+    }
+    std::vector<vector_size_t> selectedOutputPositions;
+    selectedOutputPositions.reserve(requestedRows);
+    for (uint64_t index = 0; index < requestedRows; ++index) {
+      const auto position =
+          uniquePositions.find(takeRows_->at(takePosition_ + index));
+      if (position != uniquePositions.end()) {
+        selectedOutputPositions.push_back(position->second);
+      }
+    }
+
+    bool identity = selectedOutputPositions.size() == survivingRows.size();
+    for (vector_size_t index = 0;
+         identity && index < selectedOutputPositions.size();
+         ++index) {
+      identity = selectedOutputPositions[index] == index;
+    }
+    if (identity) {
+      result = std::move(uniqueResult);
+    } else {
+      auto indices = allocateIndices(
+          selectedOutputPositions.size(), &fileContext_->pool());
+      std::copy(
+          selectedOutputPositions.begin(),
+          selectedOutputPositions.end(),
+          indices->asMutable<vector_size_t>());
+      const auto* unique = uniqueResult->as<RowVector>();
+      BOLT_CHECK_NOT_NULL(unique);
+      std::vector<VectorPtr> children;
+      children.reserve(unique->childrenSize());
+      for (const auto& child : unique->children()) {
+        children.push_back(BaseVector::wrapInDictionary(
+            nullptr, indices, selectedOutputPositions.size(), child));
+      }
+      result = std::make_shared<RowVector>(
+          &fileContext_->pool(),
+          scanPlan_->rootColumnReader().outputType(),
+          nullptr,
+          static_cast<vector_size_t>(selectedOutputPositions.size()),
+          std::move(children));
+    }
+  }
+
+  takePosition_ += requestedRows;
+  ++batchesRead_;
+  const auto decodeTimeNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - decodeStart)
+          .count();
+  decodeTimeNs_ += decodeTimeNs;
+  if (const auto& report = options_.getDecodingTimeMsCallback()) {
+    report(decodeTimeNs / 1'000'000);
+  }
+  if (requestedRows > 0 && result != nullptr) {
+    estimatedBytesPerRow_ = std::max<uint64_t>(
+        estimatedBytesPerRow_,
+        (result->retainedSize() + requestedRows - 1) / requestedRows);
+  }
+  return requestedRows;
+}
+
 uint64_t NativeLanceScanCoordinator::next(
     uint64_t size,
     VectorPtr& result,
@@ -868,11 +1102,12 @@ uint64_t NativeLanceScanCoordinator::next(
   if (size == 0) {
     return 0;
   }
-  advancePastFinishedRange();
+  if (takeRows_ == nullptr) {
+    advancePastFinishedRange();
+  }
   {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    if (state_ == NativeLanceScanState::kFinished ||
-        currentRange_ >= rowRanges().size()) {
+    if (state_ == NativeLanceScanState::kFinished || atEnd()) {
       state_ = NativeLanceScanState::kFinished;
       return 0;
     }
@@ -890,7 +1125,11 @@ uint64_t NativeLanceScanCoordinator::next(
 
   try {
     result.reset();
-    const auto rows = nextImpl(size, result, mutation);
+    BOLT_USER_CHECK(
+        takeRows_ == nullptr || mutation == nullptr,
+        "Row-addressed Lance reads do not support mutations");
+    const auto rows = takeRows_ == nullptr ? nextImpl(size, result, mutation)
+                                           : nextTake(size, result);
     if (rows == 0) {
       std::lock_guard<std::mutex> lock(stateMutex_);
       state_ = NativeLanceScanState::kFinished;
@@ -1020,6 +1259,16 @@ uint64_t NativeLanceScanCoordinator::skip(uint64_t skipSize) {
   }
 
   try {
+    if (takeRows_ != nullptr) {
+      const auto skipped =
+          std::min<uint64_t>(skipSize, takeRows_->size() - takePosition_);
+      takePosition_ += skipped;
+      std::lock_guard<std::mutex> lock(stateMutex_);
+      BOLT_CHECK(state_ == NativeLanceScanState::kSkipping);
+      state_ = atEnd() ? NativeLanceScanState::kFinished
+                       : NativeLanceScanState::kIdle;
+      return skipped;
+    }
     uint64_t skipped = 0;
     while (skipSize > 0) {
       advancePastFinishedRange();
@@ -1071,6 +1320,15 @@ NativeLanceRowReader::NativeLanceRowReader(
     : coordinator_(std::make_unique<NativeLanceScanCoordinator>(
           std::move(fileContext),
           std::move(options))) {}
+
+NativeLanceRowReader::NativeLanceRowReader(
+    std::shared_ptr<const NativeLanceFileContext> fileContext,
+    dwio::common::RowReaderOptions options,
+    NativeLanceTakeOptions takeOptions)
+    : coordinator_(std::make_unique<NativeLanceScanCoordinator>(
+          std::move(fileContext),
+          std::move(options),
+          std::move(takeOptions))) {}
 
 NativeLanceRowReader::~NativeLanceRowReader() = default;
 
@@ -1156,6 +1414,13 @@ size_t NativeLanceReader::loadedColumnMetadataCount() const {
 std::unique_ptr<dwio::common::RowReader> NativeLanceReader::createRowReader(
     const dwio::common::RowReaderOptions& options) const {
   return std::make_unique<NativeLanceRowReader>(fileContext_, options);
+}
+
+std::unique_ptr<NativeLanceRowReader> NativeLanceReader::createTakeReader(
+    const dwio::common::RowReaderOptions& options,
+    NativeLanceTakeOptions takeOptions) const {
+  return std::make_unique<NativeLanceRowReader>(
+      fileContext_, options, std::move(takeOptions));
 }
 
 std::unique_ptr<dwio::common::ColumnStatistics>

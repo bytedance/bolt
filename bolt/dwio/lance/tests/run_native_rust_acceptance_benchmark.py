@@ -294,6 +294,9 @@ def main() -> int:
     native_wall = [value["wall_seconds"] for value in by_impl["native"]]
     rust_wall = [value["wall_seconds"] for value in by_impl["rust"]]
     ratios = [native / rust for native, rust in zip(native_wall, rust_wall)]
+    native_scan = [value["scan_seconds"] for value in by_impl["native"]]
+    rust_scan = [value["scan_seconds"] for value in by_impl["rust"]]
+    scan_ratios = [native / rust for native, rust in zip(native_scan, rust_scan)]
     report = {
         "configuration": {
             "dataset": str(args.dataset),
@@ -314,12 +317,8 @@ def main() -> int:
         "summary": {
             "native_wall_seconds": summarize(native_wall),
             "rust_wall_seconds": summarize(rust_wall),
-            "native_scan_seconds": summarize(
-                [value["scan_seconds"] for value in by_impl["native"]]
-            ),
-            "rust_scan_seconds": summarize(
-                [value["scan_seconds"] for value in by_impl["rust"]]
-            ),
+            "native_scan_seconds": summarize(native_scan),
+            "rust_scan_seconds": summarize(rust_scan),
             "native_peak_rss_bytes": summarize(
                 [value["peak_rss_bytes"] for value in by_impl["native"]]
             ),
@@ -340,6 +339,10 @@ def main() -> int:
             ),
             "paired_native_over_rust": summarize(ratios),
             "exact_sign_flip": exact_sign_flip([math.log(value) for value in ratios]),
+            "paired_native_over_rust_scan": summarize(scan_ratios),
+            "exact_scan_sign_flip": exact_sign_flip(
+                [math.log(value) for value in scan_ratios]
+            ),
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
