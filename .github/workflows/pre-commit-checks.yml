@@ -39,7 +39,7 @@ env:
   GOCACHE: /data/pre-commit-cache/gocache
   # Bump this when external CI images/tooling change without a tree change.
   CI_REUSE_SALT: >-
-    bolt-ci:20260114|conan-server:latest|build-test-v2
+    bolt-ci:20260921|conan-server:latest|build-test-v2
   CI_BASE_SHA: >-
     ${{ github.event_name == 'pull_request' &&
         github.event.pull_request.base.sha ||
@@ -80,7 +80,7 @@ jobs:
     if: ${{ needs.reuse-check.outputs.hit != 'true' }}
     runs-on: ['self-hosted', 'small']
     container:
-      image: bolt-registry:5000/bolt-ci:20260114
+      image: bolt-registry:5000/bolt-ci:20260921
       options: --user root --init
       volumes:
         - /data/pre-commit-cache:/data/pre-commit-cache
