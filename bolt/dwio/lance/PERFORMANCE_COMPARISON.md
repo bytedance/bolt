@@ -485,8 +485,11 @@ frame 次数，反而会为每个活跃列增加状态。因此 cursor 只应在
 - `/tmp/lance-refactor-final-filter-7round.json`
 - `/tmp/lance-refactor-final-point1-7round.json`
 
-take 改动后的独立七轮回归为 6.928 秒、6.16 GiB RSS 和 1.13 GB pool peak，仍在该
-全扫基线范围内；同轮 1% filter 为 171.6 ms、52.3 MiB RSS 和 2.56 MB pool peak。
+为排除跨时段波动，又将 take 前提交 `b0fc548753` 与当前提交用独立 Release 二进制做了
+同机、七轮、奇偶换序 A/B。800 列 full scan 的 after/before 配对时间比中位数为
+`1.0096x`，exact sign-flip `p=0.546875`；RSS 配对比中位数为 `1.0017x`。47 列 1%
+filter 的配对时间比中位数为 `1.0047x`，`p=0.90625`；RSS 配对比中位数为
+`0.9853x`。两项均没有可检测的性能或内存回退。
 
 ### 9.7 Row-addressed take 优化
 
@@ -517,6 +520,8 @@ Native pool peak 为 367.5 MiB。Native RSS 低于同文件全扫的 6.16 GiB，
 - `/tmp/lance-native-take-wide100-7round-20260925.json`
 - `/tmp/lance-native-take-wide-fullscan-7round-20260925.json`
 - `/tmp/lance-native-take-filter-7round-20260925.json`
+- `/tmp/lance-take-ab-wide-fullscan-7round-20260925.json`
+- `/tmp/lance-take-ab-filter-7round-20260925.json`
 
 ## 10. 复现与验证
 
@@ -540,5 +545,6 @@ python3 bolt/dwio/lance/tests/run_native_rust_acceptance_benchmark.py \
 - Native Lance TableScan tests：7/7 通过；
 - 47 列数据生成、全量 materialization、过滤输出行数和 checksum 校验通过；
 - take 的 1 行、100 行以及 800 列 100 行输出数量校验通过，前两者同时校验
-  `row_id` checksum；
+  `row_id` checksum；take 与顺序读取还在 v2.0/v2.1/v2.2 的 scalar、semantic、
+  dictionary、null 和 nested type matrix 上逐行相等；
 - benchmark C++ target 和 Rust current-main harness 均使用 release build。

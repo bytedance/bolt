@@ -314,7 +314,8 @@ class NativeLanceReadScheduler {
 
 - Native Lance 单测和 Hive TableScan 集成测试全部通过；
 - 兼容 v2.0、v2.1、v2.2、v2.3 以及全部已声明类型；
-- take 覆盖乱序、重复、空输入、非法地址、跨页复杂类型、null、过滤和 skip；
+- take 覆盖乱序、重复、空输入、非法地址、跨页复杂类型、null、过滤和 skip，并与
+  v2.0/v2.1/v2.2 类型矩阵的顺序读取逐行比较；
 - 过滤用例校验输出行数与 checksum；
 - 主验收数据使用 `/tmp/data-0ee2-v20-zstd9-full.lance`；
 - Native/Rust 各运行七轮并交替顺序；

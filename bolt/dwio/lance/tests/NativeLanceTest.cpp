@@ -2605,24 +2605,38 @@ TEST_F(NativeLanceTest, rowAddressedTakeHandlesEmptyAndInvalidRows) {
   EXPECT_THROW(withMutation->next(1, result, &mutation), BoltException);
 }
 
-TEST_F(NativeLanceTest, rowAddressedTakeMatchesComplexSequentialRead) {
-  dwio::common::ReaderOptions readerOptions(pool_.get());
-  NativeLanceReader reader(
-      openFile("complex_v2_2.lance", *pool_), readerOptions);
-  auto sequential = reader.createRowReader({});
-  EXPECT_EQ(sequential->skip(1'020), 1'020);
-  VectorPtr expected;
-  EXPECT_EQ(sequential->next(17, expected), 17);
+TEST_F(NativeLanceTest, rowAddressedTakeMatchesSequentialTypeMatrix) {
+  constexpr std::array<const char*, 10> kFiles{
+      "complex_v2_2.lance",
+      "type_matrix_v2_1.lance",
+      "type_matrix_v2_2.lance",
+      "dictionary_v2_1.lance",
+      "dictionary_v2_2.lance",
+      "dictionary_values_v2_1.lance",
+      "dictionary_values_v2_2.lance",
+      "dictionary_logical_values_v2_0.lance",
+      "dictionary_logical_values_v2_1.lance",
+      "dictionary_logical_values_v2_2.lance"};
+  for (const auto* fileName : kFiles) {
+    SCOPED_TRACE(fileName);
+    dwio::common::ReaderOptions readerOptions(pool_.get());
+    NativeLanceReader reader(openFile(fileName, *pool_), readerOptions);
+    auto sequential = reader.createRowReader({});
+    EXPECT_EQ(sequential->skip(1'020), 1'020);
+    VectorPtr expected;
+    EXPECT_EQ(sequential->next(17, expected), 17);
 
-  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
-      std::initializer_list<uint64_t>{1'036, 1'020, 1'036});
-  auto take = reader.createTakeReader({}, {.rowIds = rowIds});
-  VectorPtr result;
-  EXPECT_EQ(take->next(3, result), 3);
-  ASSERT_EQ(result->size(), 3);
-  EXPECT_TRUE(result->equalValueAt(expected.get(), 0, 16));
-  EXPECT_TRUE(result->equalValueAt(expected.get(), 1, 0));
-  EXPECT_TRUE(result->equalValueAt(expected.get(), 2, 16));
+    auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+        std::initializer_list<uint64_t>{1'036, 1'020, 1'028, 1'036});
+    auto take = reader.createTakeReader({}, {.rowIds = rowIds});
+    VectorPtr result;
+    EXPECT_EQ(take->next(4, result), 4);
+    ASSERT_EQ(result->size(), 4);
+    EXPECT_TRUE(result->equalValueAt(expected.get(), 0, 16));
+    EXPECT_TRUE(result->equalValueAt(expected.get(), 1, 0));
+    EXPECT_TRUE(result->equalValueAt(expected.get(), 2, 8));
+    EXPECT_TRUE(result->equalValueAt(expected.get(), 3, 16));
+  }
 }
 
 TEST_F(NativeLanceTest, rowAddressedTakePreservesNullsAndSemanticTypes) {
