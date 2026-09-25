@@ -1220,6 +1220,184 @@ void appendFixed(
   outputValues += numValues;
 }
 
+} // namespace
+
+NativeLanceStructuralPagePlan::NativeLanceStructuralPagePlan(
+    uint64_t dataBufferOffset,
+    uint64_t dataBufferBytes,
+    uint64_t pageRows,
+    bool hasRepetition,
+    std::vector<Chunk> chunks)
+    : dataBufferOffset_(dataBufferOffset),
+      dataBufferBytes_(dataBufferBytes),
+      pageRows_(pageRows),
+      hasRepetition_(hasRepetition),
+      chunks_(std::move(chunks)) {
+  BOLT_CHECK_GT(pageRows_, 0);
+  BOLT_CHECK(!chunks_.empty());
+}
+
+NativeLanceStructuralPagePlan::ChunkRange NativeLanceStructuralPagePlan::select(
+    uint64_t rowStart,
+    uint64_t rowCount) const {
+  BOLT_CHECK_GT(rowCount, 0);
+  BOLT_CHECK_LE(rowStart, pageRows_);
+  BOLT_CHECK_LE(rowCount, pageRows_ - rowStart);
+  const auto rowEnd = rowStart + rowCount;
+  const auto findChunkByRow = [&](uint64_t row) {
+    auto chunk = std::lower_bound(
+        chunks_.begin(),
+        chunks_.end(),
+        row,
+        [](const auto& candidate, uint64_t value) {
+          return candidate.rowStart < value;
+        });
+    if (chunk != chunks_.end() && chunk->rowStart == row) {
+      return chunk;
+    }
+    BOLT_CHECK(chunk != chunks_.begin());
+    return std::prev(chunk);
+  };
+  auto first = hasRepetition_
+      ? findChunkByRow(rowStart)
+      : std::find_if(chunks_.begin(), chunks_.end(), [&](const auto& chunk) {
+          return rowStart < chunk.itemStart + chunk.items;
+        });
+  auto last = hasRepetition_
+      ? findChunkByRow(rowEnd - 1)
+      : std::find_if(first, chunks_.end(), [&](const auto& chunk) {
+          return rowEnd <= chunk.itemStart + chunk.items;
+        });
+  BOLT_CHECK(first != chunks_.end());
+  BOLT_CHECK(last != chunks_.end());
+  while (first != chunks_.begin() && first->hasPreamble) {
+    --first;
+  }
+  while (last + 1 != chunks_.end() && last->hasTrailer) {
+    ++last;
+  }
+  BOLT_CHECK_LE(last->dataOffset, dataBufferBytes_);
+  BOLT_CHECK_LE(last->bytes, dataBufferBytes_ - last->dataOffset);
+  const auto firstIndex = static_cast<size_t>(first - chunks_.begin());
+  const auto lastIndex = static_cast<size_t>(last - chunks_.begin());
+  return {
+      .firstChunk = firstIndex,
+      .lastChunk = lastIndex,
+      .dataOffset = dataBufferOffset_ + first->dataOffset,
+      .dataBytes = last->dataOffset + last->bytes - first->dataOffset,
+      .itemStart = first->itemStart,
+      .decodedItems = last->itemStart + last->items - first->itemStart,
+      .rowStart = first->rowStart};
+}
+
+std::vector<std::pair<uint64_t, uint64_t>>
+NativeLanceStructuralPagePlan::payloadRanges(
+    uint64_t rowStart,
+    uint64_t rowCount) const {
+  const auto selected = select(rowStart, rowCount);
+  return {{selected.dataOffset, selected.dataBytes}};
+}
+
+namespace {
+
+std::shared_ptr<const NativeLanceStructuralPagePlan> prepareMiniBlockPagePlan(
+    const ::lance::file::v2::ColumnMetadata::Page& page,
+    const ::lance::encodings21::MiniBlockLayout& mini,
+    const std::function<BufferPtr(uint64_t, uint64_t)>& read) {
+  BOLT_CHECK_GE(page.buffer_offsets_size(), 2);
+  BOLT_CHECK(mini.has_value_compression());
+  const auto metadata = read(page.buffer_offsets(0), page.buffer_sizes(0));
+  const auto metadataWordBytes = mini.has_large_chunk() ? 4 : 2;
+  BOLT_CHECK_EQ(metadata->size() % metadataWordBytes, 0);
+  const auto numChunks = metadata->size() / metadataWordBytes;
+  BOLT_CHECK_GT(numChunks, 0);
+
+  std::vector<NativeLanceStructuralPagePlan::Chunk> chunks;
+  chunks.reserve(numChunks);
+  uint64_t pageDataBytes = 0;
+  uint64_t pageItems = 0;
+  for (uint64_t chunkIndex = 0; chunkIndex < numChunks; ++chunkIndex) {
+    const auto word = mini.has_large_chunk()
+        ? static_cast<uint64_t>(readLittleEndian<uint32_t>(
+              metadata->as<char>() + chunkIndex * metadataWordBytes))
+        : static_cast<uint64_t>(readLittleEndian<uint16_t>(
+              metadata->as<char>() + chunkIndex * metadataWordBytes));
+    const auto dividedBytes = word >> 4;
+    BOLT_CHECK_LE(
+        dividedBytes,
+        std::numeric_limits<uint64_t>::max() / kMiniBlockAlignment - 1,
+        "Lance MiniBlock chunk size overflows");
+    const auto chunkBytes = (dividedBytes + 1) * kMiniBlockAlignment;
+    const auto logValues = word & 0xf;
+    BOLT_CHECK_LE(pageItems, mini.num_items());
+    const auto chunkItems = chunkIndex + 1 == numChunks
+        ? mini.num_items() - pageItems
+        : uint64_t{1} << logValues;
+    BOLT_CHECK_LE(pageDataBytes, page.buffer_sizes(1));
+    BOLT_CHECK_LE(chunkBytes, page.buffer_sizes(1) - pageDataBytes);
+    BOLT_CHECK_LE(chunkItems, mini.num_items() - pageItems);
+    chunks.push_back(
+        {.dataOffset = pageDataBytes,
+         .bytes = chunkBytes,
+         .itemStart = pageItems,
+         .items = chunkItems,
+         .rowStart = pageItems,
+         .hasPreamble = false,
+         .hasTrailer = false});
+    pageDataBytes += chunkBytes;
+    pageItems += chunkItems;
+  }
+  BOLT_CHECK_EQ(pageDataBytes, page.buffer_sizes(1));
+  BOLT_CHECK_EQ(pageItems, mini.num_items());
+
+  uint64_t pageRows = mini.num_items();
+  if (mini.repetition_index_depth() > 0) {
+    BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
+    const auto stride = mini.repetition_index_depth() + 1;
+    const auto indexOffset =
+        page.buffer_offsets(page.buffer_offsets_size() - 1);
+    const auto indexSize = page.buffer_sizes(page.buffer_sizes_size() - 1);
+    BOLT_CHECK_EQ(indexSize, numChunks * stride * sizeof(uint64_t));
+    const auto index = read(indexOffset, indexSize);
+    uint64_t rowStart = 0;
+    auto hasPreamble = false;
+    for (uint64_t chunk = 0; chunk < numChunks; ++chunk) {
+      const auto* entry = index->as<char>() + chunk * stride * sizeof(uint64_t);
+      const auto ends = readLittleEndian<uint64_t>(entry);
+      const auto partial = readLittleEndian<uint64_t>(entry + sizeof(uint64_t));
+      const auto hasTrailer = partial > 0;
+      BOLT_CHECK_GE(ends + static_cast<uint64_t>(hasTrailer), hasPreamble);
+      chunks[chunk].rowStart = rowStart;
+      chunks[chunk].hasPreamble = hasPreamble;
+      chunks[chunk].hasTrailer = hasTrailer;
+      rowStart += ends + static_cast<uint64_t>(hasTrailer) - hasPreamble;
+      hasPreamble = hasTrailer;
+    }
+    pageRows = rowStart;
+  }
+
+  return std::make_shared<const NativeLanceStructuralPagePlan>(
+      page.buffer_offsets(1),
+      page.buffer_sizes(1),
+      pageRows,
+      mini.repetition_index_depth() > 0,
+      std::move(chunks));
+}
+
+} // namespace
+
+std::shared_ptr<const NativeLanceStructuralPagePlan>
+prepareLanceStructuralPagePlan(
+    const ::lance::file::v2::ColumnMetadata::Page& page,
+    const ::lance::encodings21::PageLayout& layout,
+    const std::function<BufferPtr(uint64_t, uint64_t)>& read) {
+  BOLT_CHECK_EQ(
+      layout.layout_case(), ::lance::encodings21::PageLayout::kMiniBlockLayout);
+  return prepareMiniBlockPagePlan(page, layout.mini_block_layout(), read);
+}
+
+namespace {
+
 struct MiniBlockPage {
   BufferPtr fixed;
   uint64_t bitsPerValue{0};
@@ -1265,141 +1443,23 @@ MiniBlockPage decodeMiniBlock(
     const Page& page,
     memory::MemoryPool& pool,
     const std::function<BufferPtr(uint64_t, uint64_t)>& read,
-    std::optional<std::pair<uint64_t, uint64_t>> itemRange = std::nullopt) {
-  BOLT_CHECK_GE(page.buffer_offsets_size(), 2);
-  BOLT_CHECK(layout.has_value_compression());
-  const auto metadata = read(page.buffer_offsets(0), page.buffer_sizes(0));
-  const auto metadataWordBytes = layout.has_large_chunk() ? 4 : 2;
-  BOLT_CHECK_EQ(metadata->size() % metadataWordBytes, 0);
-  const auto numChunks = metadata->size() / metadataWordBytes;
-  BOLT_CHECK_GT(numChunks, 0);
-
-  struct Chunk {
-    uint64_t dataOffset;
-    uint64_t bytes;
-    uint64_t itemStart;
-    uint64_t items;
-    uint64_t rowStart;
-    bool hasPreamble;
-    bool hasTrailer;
-  };
-  std::vector<Chunk> chunks;
-  chunks.reserve(numChunks);
-  uint64_t pageDataBytes = 0;
-  uint64_t pageItems = 0;
-  for (uint64_t chunkIndex = 0; chunkIndex < numChunks; ++chunkIndex) {
-    const auto word = layout.has_large_chunk()
-        ? static_cast<uint64_t>(readLittleEndian<uint32_t>(
-              metadata->as<char>() + chunkIndex * metadataWordBytes))
-        : static_cast<uint64_t>(readLittleEndian<uint16_t>(
-              metadata->as<char>() + chunkIndex * metadataWordBytes));
-    const auto dividedBytes = word >> 4;
-    BOLT_CHECK_LE(
-        dividedBytes,
-        std::numeric_limits<uint64_t>::max() / kMiniBlockAlignment - 1,
-        "Lance MiniBlock chunk size overflows");
-    const auto chunkBytes = (dividedBytes + 1) * kMiniBlockAlignment;
-    const auto logValues = word & 0xf;
-    BOLT_CHECK_LE(pageItems, layout.num_items());
-    const auto chunkItems = chunkIndex + 1 == numChunks
-        ? layout.num_items() - pageItems
-        : uint64_t{1} << logValues;
-    BOLT_CHECK_LE(pageDataBytes, page.buffer_sizes(1));
-    BOLT_CHECK_LE(chunkBytes, page.buffer_sizes(1) - pageDataBytes);
-    BOLT_CHECK_LE(chunkItems, layout.num_items() - pageItems);
-    chunks.push_back(
-        {pageDataBytes,
-         chunkBytes,
-         pageItems,
-         chunkItems,
-         pageItems,
-         false,
-         false});
-    pageDataBytes += chunkBytes;
-    pageItems += chunkItems;
-  }
-  BOLT_CHECK_EQ(pageDataBytes, page.buffer_sizes(1));
-  BOLT_CHECK_EQ(pageItems, layout.num_items());
-
-  uint64_t pageRows = layout.num_items();
-  if (layout.repetition_index_depth() > 0) {
-    BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
-    const auto stride = layout.repetition_index_depth() + 1;
-    const auto& indexOffset =
-        page.buffer_offsets(page.buffer_offsets_size() - 1);
-    const auto& indexSize = page.buffer_sizes(page.buffer_sizes_size() - 1);
-    BOLT_CHECK_EQ(indexSize, numChunks * stride * sizeof(uint64_t));
-    const auto index = read(indexOffset, indexSize);
-    uint64_t rowStart = 0;
-    auto hasPreamble = false;
-    for (uint64_t chunk = 0; chunk < numChunks; ++chunk) {
-      const auto* entry = index->as<char>() + chunk * stride * sizeof(uint64_t);
-      const auto ends = readLittleEndian<uint64_t>(entry);
-      const auto partial = readLittleEndian<uint64_t>(entry + sizeof(uint64_t));
-      const auto hasTrailer = partial > 0;
-      BOLT_CHECK_GE(ends + static_cast<uint64_t>(hasTrailer), hasPreamble);
-      chunks[chunk].rowStart = rowStart;
-      chunks[chunk].hasPreamble = hasPreamble;
-      chunks[chunk].hasTrailer = hasTrailer;
-      rowStart += ends + static_cast<uint64_t>(hasTrailer) - hasPreamble;
-      hasPreamble = hasTrailer;
-    }
-    pageRows = rowStart;
-  }
-
+    std::optional<std::pair<uint64_t, uint64_t>> itemRange = std::nullopt,
+    const NativeLanceStructuralPagePlan* preparedPlan = nullptr) {
+  auto ownedPlan = preparedPlan == nullptr
+      ? prepareMiniBlockPagePlan(page, layout, read)
+      : nullptr;
+  const auto& plan = preparedPlan == nullptr ? *ownedPlan : *preparedPlan;
+  const auto& chunks = plan.chunks();
   const auto requestedStart = itemRange.has_value() ? itemRange->first : 0;
   const auto requestedCount =
-      itemRange.has_value() ? itemRange->second : pageRows;
-  BOLT_CHECK_LE(requestedStart, pageRows);
-  BOLT_CHECK_LE(requestedCount, pageRows - requestedStart);
-  const auto requestedEnd = requestedStart + requestedCount;
-  auto findChunk = [&](uint64_t row) {
-    auto chunk = std::lower_bound(
-        chunks.begin(),
-        chunks.end(),
-        row,
-        [](const auto& candidate, uint64_t value) {
-          return candidate.rowStart < value;
-        });
-    if (chunk != chunks.end() && chunk->rowStart == row) {
-      return chunk;
-    }
-    BOLT_CHECK(chunk != chunks.begin());
-    return std::prev(chunk);
-  };
-  auto firstChunk = layout.repetition_index_depth() > 0
-      ? findChunk(requestedStart)
-      : std::find_if(chunks.begin(), chunks.end(), [&](const auto& chunk) {
-          return requestedStart < chunk.itemStart + chunk.items;
-        });
-  auto lastChunk = layout.repetition_index_depth() > 0
-      ? findChunk(requestedEnd - 1)
-      : std::find_if(firstChunk, chunks.end(), [&](const auto& chunk) {
-          return requestedEnd <= chunk.itemStart + chunk.items;
-        });
-  BOLT_CHECK(firstChunk != chunks.end());
-  BOLT_CHECK(lastChunk != chunks.end());
-  while (firstChunk != chunks.begin() && firstChunk->hasPreamble) {
-    --firstChunk;
-  }
-  while (lastChunk + 1 != chunks.end() && lastChunk->hasTrailer) {
-    ++lastChunk;
-  }
-  const auto firstChunkIndex = firstChunk - chunks.begin();
-  const auto lastChunkIndex = lastChunk - chunks.begin();
-  const auto decodedCapacity =
-      lastChunk->itemStart + lastChunk->items - firstChunk->itemStart;
-  const auto selectedDataOffset = firstChunk->dataOffset;
-  BOLT_CHECK_LE(lastChunk->dataOffset, pageDataBytes);
-  BOLT_CHECK_LE(lastChunk->bytes, pageDataBytes - lastChunk->dataOffset);
-  const auto selectedDataBytes =
-      lastChunk->dataOffset + lastChunk->bytes - selectedDataOffset;
-  const auto data =
-      read(page.buffer_offsets(1) + selectedDataOffset, selectedDataBytes);
+      itemRange.has_value() ? itemRange->second : plan.pageRows();
+  const auto selected = plan.select(requestedStart, requestedCount);
+  const auto& firstChunk = chunks[selected.firstChunk];
+  const auto data = read(selected.dataOffset, selected.dataBytes);
 
   MiniBlockPage result;
-  result.itemStart = firstChunk->itemStart;
-  result.rowStart = firstChunk->rowStart;
+  result.itemStart = selected.itemStart;
+  result.rowStart = selected.rowStart;
   if (layout.has_dictionary()) {
     BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
     const auto dictionary = read(page.buffer_offsets(2), page.buffer_sizes(2));
@@ -1407,12 +1467,13 @@ MiniBlockPage decodeMiniBlock(
         layout.dictionary(), {dictionary}, layout.num_dictionary_items(), pool);
   }
   uint64_t decodedItems = 0;
-  for (uint64_t chunkIndex = firstChunkIndex; chunkIndex <= lastChunkIndex;
+  for (uint64_t chunkIndex = selected.firstChunk;
+       chunkIndex <= selected.lastChunk;
        ++chunkIndex) {
     const auto& chunkInfo = chunks[chunkIndex];
     const auto chunkBytes = chunkInfo.bytes;
     const auto chunkItems = chunkInfo.items;
-    const auto chunkOffset = chunkInfo.dataOffset - selectedDataOffset;
+    const auto chunkOffset = chunkInfo.dataOffset - firstChunk.dataOffset;
     BOLT_CHECK_LE(chunkBytes, data->size() - chunkOffset);
     const auto* chunk = data->as<char>() + chunkOffset;
     uint64_t cursor = 0;
@@ -1493,7 +1554,7 @@ MiniBlockPage decodeMiniBlock(
       appendFixed(
           values,
           chunkItems,
-          decodedCapacity,
+          selected.decodedItems,
           result.fixed,
           decodedItems,
           pool);
@@ -1508,7 +1569,7 @@ MiniBlockPage decodeMiniBlock(
       decodedItems += chunkItems;
     }
   }
-  BOLT_CHECK_EQ(decodedItems, decodedCapacity);
+  BOLT_CHECK_EQ(decodedItems, selected.decodedItems);
   result.numItems = decodedItems;
   return result;
 }
@@ -3398,7 +3459,8 @@ VectorPtr decodeLanceStructuralPage(
     std::string_view sourceDataFile,
     const std::function<
         void(const std::vector<std::pair<uint64_t, uint64_t>>&)>& prefetch,
-    const std::function<BufferPtr(uint64_t, uint64_t)>& read) {
+    const std::function<BufferPtr(uint64_t, uint64_t)>& read,
+    const NativeLanceStructuralPagePlan* plan) {
   if (layout.layout_case() ==
       ::lance::encodings21::PageLayout::kConstantLayout) {
     return decodeConstantPage(
@@ -3598,7 +3660,8 @@ VectorPtr decodeLanceStructuralPage(
       read,
       rangeRead ? std::make_optional(
                       std::pair{rowStart * rowScale, rowCount * rowScale})
-                : std::nullopt);
+                : std::nullopt,
+      plan);
   uint64_t leafValues =
       rangeRead ? decoded.numItems : layout.mini_block_layout().num_items();
   for (const auto dimension : decoded.fixedSizeDimensions) {

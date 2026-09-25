@@ -28,6 +28,8 @@
 
 namespace bytedance::bolt::lance::reader {
 
+class NativeLanceStructuralPagePlan;
+
 enum class NativeLancePageState : uint8_t {
   kCreated,
   kDecoding,
@@ -79,7 +81,8 @@ class NativeLanceStructuralPageReader {
       std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
       std::string_view sourceDataFile,
       Prefetch prefetch,
-      Read read);
+      Read read,
+      std::shared_ptr<const NativeLanceStructuralPagePlan> plan = nullptr);
 
   void decode();
   VectorPtr consume();
@@ -111,6 +114,7 @@ class NativeLanceStructuralPageReader {
   std::string sourceDataFile_;
   Prefetch prefetch_;
   Read read_;
+  std::shared_ptr<const NativeLanceStructuralPagePlan> plan_;
   VectorPtr result_;
   std::exception_ptr failure_;
   NativeLancePageState state_{NativeLancePageState::kCreated};

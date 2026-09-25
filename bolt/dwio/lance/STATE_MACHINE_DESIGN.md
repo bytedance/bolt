@@ -1941,6 +1941,9 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - `NativeLanceReadScheduler` 支持 page-owned key、压缩输入范围去重、提交后按需
   materialize、取消和 in-flight 上限。
 - v2.1+ structural page 通过 `NativeLanceStructuralPageReader` 进入结构解码 kernel。
+- `NativeLanceStructuralPagePlan` 将 MiniBlock chunk table 和 repetition index 提升为
+  scan-local、page-scoped 的不可变控制状态。它不持有 compressed payload、decompressed
+  buffer 或 decoded vector；PageSource 在页消费完成或游标前进后立即释放对应 plan。
 - 可证明 row domain 的 v2.1+ 页面已走范围解码：item-only FullZip 直接定位请求行，
   MiniBlock 通过磁盘内 repetition index 把 List/Map parent range 映射为连续 chunk，
   FixedSizeList scalar leaf 使用 value-domain chunk range。混合 fixed/repeated domain 继续
@@ -2045,3 +2048,25 @@ page/chunk decode、消除临时 payload copy 和 FastLanes hot-loop 查表，�
 - 1% filter、47 列：Native 0.263 s，Rust 2.071 s；
 - 800 列单线程全扫：Native 21.293 s，Rust 26.807 s；Native 峰值 RSS
   5.69 GiB，Rust 6.19 GiB。
+
+### 38.6 2026-09-25 Scan-local Page Plan 验收
+
+在上一轮范围解码基础上，MiniBlock 的 page metadata 不再随每个 4,096 行 batch 重复
+读取和解析。`NativeLancePageSource` 只保留当前扫描涉及的不可变 page plan，page 结束即
+释放；同步 input 不预取或保留 payload，异步 input 才使用 plan 做精确的第二阶段调度。
+单页 flat 输出直接转移 range decode 结果，复杂类型仍由 batch assembler 归一化 offsets。
+
+单线程、batch size 4,096、Native/Rust 七轮交替：
+
+| 场景 | 上一轮 Native | 当前 Native | Rust current |
+|---|---:|---:|---:|
+| 47 列全类型 | 4.197 s | 2.516 s | 2.023 s |
+| Nested 五列 | 0.939 s | 0.787 s | 0.491 s |
+| 1% filter、47 列 | 0.263 s | 0.204 s | 2.068 s |
+| 4,096 行、43 列 | 13.56 ms | 11.63 ms | 10.61 ms |
+| 800 列 v2.0 | 21.293 s | 22.144 s | 26.486 s |
+
+全类型累计相对最初 15.413 秒基线提升 6.13 倍，本轮单独提升 40.1%；峰值 RSS 从
+69.8 MiB 降到 67.8 MiB。800 列路径的 Native 峰值 RSS 为 5.66 GiB，未增加 payload
+驻留；该验收文件是 v2.0，不命中 structural page plan，因此仅作为宽表无内存回退门禁。
+下一阶段在此 plan 生命周期上增加可暂停 codec cursor，仍禁止完整 page/chunk 的解压缓存。

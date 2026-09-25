@@ -30,7 +30,8 @@ NativeLanceStructuralPageReader::NativeLanceStructuralPageReader(
     std::shared_ptr<const NativeLanceBlobResolver> blobResolver,
     std::string_view sourceDataFile,
     Prefetch prefetch,
-    Read read)
+    Read read,
+    std::shared_ptr<const NativeLanceStructuralPagePlan> plan)
     : request_(std::move(request)),
       metadata_(metadata),
       pool_(pool),
@@ -38,6 +39,7 @@ NativeLanceStructuralPageReader::NativeLanceStructuralPageReader(
       sourceDataFile_(sourceDataFile),
       prefetch_(std::move(prefetch)),
       read_(std::move(read)),
+      plan_(std::move(plan)),
       supportsRangeRead_(lanceStructuralPageSupportsRangeRead(
           request_.type,
           request_.fixedSizeDimensions,
@@ -88,7 +90,8 @@ void NativeLanceStructuralPageReader::decode() {
           prefetch_(ranges);
           state_ = NativeLancePageState::kDecoding;
         },
-        read_);
+        read_,
+        plan_.get());
     BOLT_CHECK_NOT_NULL(result_);
     state_ = NativeLancePageState::kReadyToEmit;
   } catch (...) {

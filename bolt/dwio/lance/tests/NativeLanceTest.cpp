@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <optional>
+#include <unordered_map>
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/lang/Bits.h>
@@ -3130,13 +3131,22 @@ TEST_F(NativeLanceTest, decodesBooleanAcrossUnalignedMiniBlockChunks) {
   mini->set_num_items(9);
   mini->set_has_large_chunk(true);
 
+  std::unordered_map<uint64_t, uint64_t> readsByOffset;
   const auto read = [&](uint64_t offset, uint64_t length) {
+    ++readsByOffset[offset];
     BOLT_CHECK_LE(offset, fileData.size());
     BOLT_CHECK_LE(length, fileData.size() - offset);
     auto result = AlignedBuffer::allocate<char>(length, pool_.get());
     std::memcpy(result->asMutable<char>(), fileData.data() + offset, length);
     return result;
   };
+  const auto plan = prepareLanceStructuralPagePlan(*page, layout, read);
+  ASSERT_NE(plan, nullptr);
+  ASSERT_EQ(plan->chunks().size(), 2);
+  const auto selected = plan->payloadRanges(2, 5);
+  ASSERT_EQ(selected.size(), 1);
+  EXPECT_EQ(selected[0].first, metadataBytes);
+  EXPECT_EQ(selected[0].second, chunkBytes);
   const auto decode = [&](uint64_t start, uint64_t count) {
     return decodeLanceStructuralPage(
         BOOLEAN(),
@@ -3152,7 +3162,8 @@ TEST_F(NativeLanceTest, decodesBooleanAcrossUnalignedMiniBlockChunks) {
         nullptr,
         {},
         [](const auto&) {},
-        read);
+        read,
+        plan.get());
   };
 
   constexpr std::array<bool, 9> kExpected{
@@ -3168,6 +3179,8 @@ TEST_F(NativeLanceTest, decodesBooleanAcrossUnalignedMiniBlockChunks) {
   for (vector_size_t row = 0; row < slice->size(); ++row) {
     EXPECT_EQ(slice->asFlatVector<bool>()->valueAt(row), kExpected[row + 2]);
   }
+  EXPECT_EQ(readsByOffset[0], 1);
+  EXPECT_EQ(readsByOffset[metadataBytes], 2);
 }
 
 TEST_F(NativeLanceTest, structuralMiniBlockReadsSelectedChunks) {
@@ -3318,6 +3331,37 @@ TEST_F(NativeLanceTest, nullableMiniBlockReadsSelectedChunks) {
     }
   }
   EXPECT_LT(readFile->bytesRead(), fullPageBytes);
+}
+
+TEST_F(NativeLanceTest, structuralPagePlanIsReusedAcrossBatches) {
+  std::shared_ptr<ReadFile> source =
+      std::make_shared<LocalReadFile>("examples/scalar_v2_2.lance");
+  const auto contents = source->pread(0, source->size());
+  auto readFile = std::make_shared<CountingReadFile>(contents);
+  auto input = std::make_unique<TrackingBufferedInput>(readFile, *pool_);
+  auto* trackingInput = input.get();
+  NativeLanceMetadata metadata(*input, *pool_);
+  trackingInput->enqueuedRegions.clear();
+
+  constexpr uint32_t kColumn = 0;
+  const auto physical = metadata.physicalColumnIndex(kColumn);
+  const auto& page = metadata.column(physical).pages(0);
+  NativeLancePageSource decoder(*input, metadata, *pool_);
+
+  for (uint64_t rowStart : {uint64_t{0}, uint64_t{8}}) {
+    decoder.prefetchColumns({kColumn}, rowStart, 8);
+    const auto values = decodeColumn(decoder, kColumn, rowStart, 8);
+    ASSERT_EQ(values->size(), 8);
+  }
+
+  const auto metadataRequests = std::count_if(
+      trackingInput->enqueuedRegions.begin(),
+      trackingInput->enqueuedRegions.end(),
+      [&](const auto& region) {
+        return region.offset == page.buffer_offsets(0) &&
+            region.length == page.buffer_sizes(0);
+      });
+  EXPECT_EQ(metadataRequests, 1);
 }
 
 TEST_F(NativeLanceTest, nestedMiniBlockReadsSelectedChunks) {

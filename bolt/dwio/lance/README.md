@@ -26,8 +26,11 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceColumnCursor` maps monotonically increasing row ranges to page
   spans without rescanning page metadata from the beginning.
 - `NativeLanceStructuralPageReader` owns v2.1+ page state and invokes the
-  structural decode kernel. `NativeLanceLegacyPageReader` owns v2.0 compressed
-  Flat page state.
+  structural decode kernel. Scan-local `NativeLanceStructuralPagePlan`
+  instances parse MiniBlock chunk metadata and repetition indexes once, map
+  later batch ranges without retaining payload data, and are released when the
+  page is consumed. `NativeLanceLegacyPageReader` owns v2.0 compressed Flat
+  page state.
 - `NativeLanceDecompressor` owns legacy zstd and LZ4 codec handling and exposes
   whether a codec is sequential-frame or whole-buffer based.
 - `NativeLanceLegacyScalar` owns v2.0 scalar, nullable, bitmap, bitpack, and
@@ -41,7 +44,9 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
 - `NativeLanceMemoryBudget` provides move-only reservations for bounded
   transient scan memory.
 - `NativeLancePageSource` owns scan-local page scheduling and physical kernel
-  dispatch. It does not retain decoded or decompressed payloads across batches;
+  dispatch. Synchronous inputs keep payload reads on demand; asynchronous
+  inputs can use the structural plan for exact second-stage payload scheduling.
+  It does not retain decoded or decompressed payloads across batches;
   projection, filtering, and logical assembly stay in ColumnReader.
 - `NativeLanceStructuralDecoder` implements the v2.1-v2.3 dense and Sparse
   structural layouts and compressive encoding grammar.

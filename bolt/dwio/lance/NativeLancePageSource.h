@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <map>
 #include <mutex>
 #include <unordered_map>
 
@@ -113,21 +114,40 @@ class NativeLancePageSource final {
       const std::vector<uint32_t>& arrayDimensions = {}) const;
 
  private:
+  struct StructuralPageRangeRequest {
+    uint32_t physicalColumnIndex;
+    int32_t pageIndex;
+    uint64_t localRowStart;
+    uint64_t rowCount;
+  };
+
   void enqueueLogicalColumn(
       uint32_t columnIndex,
       uint64_t rowStart,
-      uint64_t rowCount) const;
+      uint64_t rowCount,
+      std::vector<StructuralPageRangeRequest>* structuralRequests) const;
 
   void enqueuePhysicalColumn(
       const TypePtr& type,
       uint32_t physicalColumnIndex,
       uint64_t rowStart,
       uint64_t rowCount,
-      const std::vector<uint32_t>& arrayDimensions = {}) const;
+      const std::vector<uint32_t>& arrayDimensions,
+      std::vector<StructuralPageRangeRequest>* structuralRequests) const;
   void enqueueStructuralField(
       const NativeLanceMetadata::StructuralField& field,
       uint64_t rowStart,
-      uint64_t rowCount) const;
+      uint64_t rowCount,
+      std::vector<StructuralPageRangeRequest>* structuralRequests) const;
+  void scheduleStructuralPayloads(
+      const std::vector<StructuralPageRangeRequest>& requests) const;
+  std::shared_ptr<const NativeLanceStructuralPagePlan>
+  getOrCreateStructuralPagePlan(
+      const StructuralPageRangeRequest& request) const;
+  std::shared_ptr<const NativeLanceStructuralPagePlan> findStructuralPagePlan(
+      NativeLancePageKey key) const;
+  void releaseStructuralPagePlansBefore(NativeLancePageKey key) const;
+  void releaseStructuralPagePlan(NativeLancePageKey key) const;
   void scheduleRead(uint64_t offset, uint64_t length) const;
   void scheduleCompressedRead(
       std::string_view scheme,
@@ -172,6 +192,10 @@ class NativeLancePageSource final {
       std::shared_ptr<NativeLanceLegacyPageReader>,
       CompressedBufferKeyHash>
       legacyPageReaders_;
+  mutable std::mutex structuralPagePlansMutex_;
+  mutable std::vector<
+      std::map<int32_t, std::shared_ptr<const NativeLanceStructuralPagePlan>>>
+      structuralPagePlans_;
 };
 
 } // namespace bytedance::bolt::lance::reader

@@ -428,7 +428,8 @@ NativeLancePageSource::NativeLancePageSource(
       compressedStreamChunkBytes_(std::min(
           readSchedulerOptions.maxReadBytes,
           readSchedulerOptions.maxInFlightBytes)),
-      readScheduler_(pool, readSchedulerOptions) {}
+      readScheduler_(pool, readSchedulerOptions),
+      structuralPagePlans_(metadata.numPhysicalColumns()) {}
 
 NativeLancePageSource::~NativeLancePageSource() {
   cancel();
@@ -444,6 +445,12 @@ void NativeLancePageSource::cancel() {
     session->cancel();
   }
   legacyPageReaders_.clear();
+  {
+    std::lock_guard<std::mutex> planLock(structuralPagePlansMutex_);
+    for (auto& plans : structuralPagePlans_) {
+      plans.clear();
+    }
+  }
 }
 
 void NativeLancePageSource::prefetchColumns(
@@ -471,6 +478,7 @@ void NativeLancePageSource::planColumns(
   BOLT_CHECK_LE(request.rowStart, metadata_.numRows());
   BOLT_CHECK_LE(request.rowCount, metadata_.numRows() - request.rowStart);
   readScheduler_.clearStage();
+  std::vector<StructuralPageRangeRequest> structuralRequests;
   const auto rows = request.selection.selectedRows();
   size_t runOffset = 0;
   while (runOffset < rows.size()) {
@@ -480,10 +488,15 @@ void NativeLancePageSource::planColumns(
     }
     for (const auto columnIndex : columnIndices) {
       enqueueLogicalColumn(
-          columnIndex, request.rowStart + rows[runOffset], runEnd - runOffset);
+          columnIndex,
+          request.rowStart + rows[runOffset],
+          runEnd - runOffset,
+          &structuralRequests);
     }
     runOffset = runEnd;
   }
+  submitReadPlan();
+  scheduleStructuralPayloads(structuralRequests);
   submitReadPlan();
 }
 
@@ -499,36 +512,47 @@ void NativeLancePageSource::planColumns(
   }
 
   readScheduler_.clearStage();
+  std::vector<StructuralPageRangeRequest> structuralRequests;
   for (const auto logicalColumnIndex : columnIndices) {
-    enqueueLogicalColumn(logicalColumnIndex, rowStart, rowCount);
+    enqueueLogicalColumn(
+        logicalColumnIndex, rowStart, rowCount, &structuralRequests);
   }
+  submitReadPlan();
+  scheduleStructuralPayloads(structuralRequests);
   submitReadPlan();
 }
 
 void NativeLancePageSource::enqueueLogicalColumn(
     uint32_t columnIndex,
     uint64_t rowStart,
-    uint64_t rowCount) const {
+    uint64_t rowCount,
+    std::vector<StructuralPageRangeRequest>* structuralRequests) const {
   BOLT_CHECK_LT(columnIndex, metadata_.rowType()->size());
   if (metadata_.usesStructuralEncoding()) {
     enqueueStructuralField(
-        metadata_.structuralField(columnIndex), rowStart, rowCount);
+        metadata_.structuralField(columnIndex),
+        rowStart,
+        rowCount,
+        structuralRequests);
     return;
   }
   enqueuePhysicalColumn(
       metadata_.rowType()->childAt(columnIndex),
       metadata_.physicalColumnIndex(columnIndex),
       rowStart,
-      rowCount);
+      rowCount,
+      {},
+      structuralRequests);
 }
 
 void NativeLancePageSource::enqueueStructuralField(
     const NativeLanceMetadata::StructuralField& field,
     uint64_t rowStart,
-    uint64_t rowCount) const {
+    uint64_t rowCount,
+    std::vector<StructuralPageRangeRequest>* structuralRequests) const {
   if (!field.leaf) {
     for (const auto& child : field.children) {
-      enqueueStructuralField(child, rowStart, rowCount);
+      enqueueStructuralField(child, rowStart, rowCount, structuralRequests);
     }
     return;
   }
@@ -542,7 +566,8 @@ void NativeLancePageSource::enqueueStructuralField(
       rowStart * field.rowsPerParent,
       rowCount * field.rowsPerParent,
       field.rowsPerParent == 1 ? std::vector<uint32_t>{}
-                               : std::vector<uint32_t>{1});
+                               : std::vector<uint32_t>{1},
+      structuralRequests);
 }
 
 void NativeLancePageSource::prefetchPhysicalColumn(
@@ -568,9 +593,13 @@ void NativeLancePageSource::planPhysicalColumns(
     uint64_t rowCount) const {
   std::lock_guard<std::recursive_mutex> guard(readPlanMutex_);
   readScheduler_.clearStage();
+  std::vector<StructuralPageRangeRequest> structuralRequests;
   for (const auto& [type, physicalColumnIndex] : columns) {
-    enqueuePhysicalColumn(type, physicalColumnIndex, rowStart, rowCount);
+    enqueuePhysicalColumn(
+        type, physicalColumnIndex, rowStart, rowCount, {}, &structuralRequests);
   }
+  submitReadPlan();
+  scheduleStructuralPayloads(structuralRequests);
   submitReadPlan();
 }
 
@@ -579,7 +608,8 @@ void NativeLancePageSource::enqueuePhysicalColumn(
     uint32_t physicalIndex,
     uint64_t rowStart,
     uint64_t rowCount,
-    const std::vector<uint32_t>& arrayDimensions) const {
+    const std::vector<uint32_t>& arrayDimensions,
+    std::vector<StructuralPageRangeRequest>* structuralRequests) const {
   BOLT_CHECK_LT(physicalIndex, metadata_.numPhysicalColumns());
   if (metadata_.usesStructuralEncoding()) {
     const auto& column = metadata_.column(physicalIndex);
@@ -593,6 +623,19 @@ void NativeLancePageSource::enqueuePhysicalColumn(
           arrayDimensions,
           metadata_.physicalColumnChildLogicalTypes(physicalIndex),
           layout);
+      const NativeLancePageKey pageKey{physicalIndex, span.pageIndex};
+      const auto preparedPlan = rangeRead
+          ? findStructuralPagePlan(pageKey)
+          : std::shared_ptr<const NativeLanceStructuralPagePlan>{};
+      if (preparedPlan != nullptr) {
+        if (!input_.supportSyncLoad()) {
+          for (const auto& [offset, length] :
+               preparedPlan->payloadRanges(span.localRowBegin, span.rowCount)) {
+            scheduleRead(offset, length);
+          }
+        }
+        continue;
+      }
       for (int32_t buffer = 0; buffer < page.buffer_offsets_size(); ++buffer) {
         if (rangeRead &&
             ((layout.layout_case() ==
@@ -605,6 +648,16 @@ void NativeLancePageSource::enqueuePhysicalColumn(
         if (page.buffer_sizes(buffer) > 0) {
           scheduleRead(page.buffer_offsets(buffer), page.buffer_sizes(buffer));
         }
+      }
+      if (rangeRead &&
+          layout.layout_case() ==
+              ::lance::encodings21::PageLayout::kMiniBlockLayout &&
+          structuralRequests != nullptr) {
+        structuralRequests->push_back(
+            {.physicalColumnIndex = physicalIndex,
+             .pageIndex = span.pageIndex,
+             .localRowStart = span.localRowBegin,
+             .rowCount = span.rowCount});
       }
     }
     return;
@@ -659,7 +712,12 @@ void NativeLancePageSource::enqueuePhysicalColumn(
       uint32_t childPhysicalIndex = physicalIndex + 1;
       for (uint32_t childIndex = 0; childIndex < type->size(); ++childIndex) {
         enqueuePhysicalColumn(
-            type->childAt(childIndex), childPhysicalIndex, rowStart, rowCount);
+            type->childAt(childIndex),
+            childPhysicalIndex,
+            rowStart,
+            rowCount,
+            {},
+            structuralRequests);
         childPhysicalIndex += metadata_.physicalColumnSpan(childPhysicalIndex);
       }
       return;
@@ -685,6 +743,62 @@ void NativeLancePageSource::enqueuePhysicalColumn(
         enqueue,
         enqueueCompressed);
   }
+}
+
+void NativeLancePageSource::scheduleStructuralPayloads(
+    const std::vector<StructuralPageRangeRequest>& requests) const {
+  if (input_.supportSyncLoad()) {
+    return;
+  }
+  for (const auto& request : requests) {
+    const auto plan = getOrCreateStructuralPagePlan(request);
+    for (const auto& [offset, length] :
+         plan->payloadRanges(request.localRowStart, request.rowCount)) {
+      scheduleRead(offset, length);
+    }
+  }
+}
+
+std::shared_ptr<const NativeLanceStructuralPagePlan>
+NativeLancePageSource::getOrCreateStructuralPagePlan(
+    const StructuralPageRangeRequest& request) const {
+  const NativeLancePageKey key{request.physicalColumnIndex, request.pageIndex};
+  if (auto plan = findStructuralPagePlan(key)) {
+    return plan;
+  }
+  const auto& page =
+      metadata_.column(request.physicalColumnIndex).pages(request.pageIndex);
+  const auto& layout =
+      metadata_.pageLayout(request.physicalColumnIndex, request.pageIndex);
+  auto candidate = prepareLanceStructuralPagePlan(
+      page, layout, [this](uint64_t offset, uint64_t length) {
+        return read(offset, length);
+      });
+  std::lock_guard<std::mutex> lock(structuralPagePlansMutex_);
+  auto& plans = structuralPagePlans_.at(key.physicalColumn);
+  const auto [it, inserted] = plans.emplace(key.pageIndex, candidate);
+  return inserted ? std::move(candidate) : it->second;
+}
+
+std::shared_ptr<const NativeLanceStructuralPagePlan>
+NativeLancePageSource::findStructuralPagePlan(NativeLancePageKey key) const {
+  std::lock_guard<std::mutex> lock(structuralPagePlansMutex_);
+  const auto& plans = structuralPagePlans_.at(key.physicalColumn);
+  const auto it = plans.find(key.pageIndex);
+  return it == plans.end() ? nullptr : it->second;
+}
+
+void NativeLancePageSource::releaseStructuralPagePlansBefore(
+    NativeLancePageKey key) const {
+  std::lock_guard<std::mutex> lock(structuralPagePlansMutex_);
+  auto& plans = structuralPagePlans_.at(key.physicalColumn);
+  plans.erase(plans.begin(), plans.lower_bound(key.pageIndex));
+}
+
+void NativeLancePageSource::releaseStructuralPagePlan(
+    NativeLancePageKey key) const {
+  std::lock_guard<std::mutex> lock(structuralPagePlansMutex_);
+  structuralPagePlans_.at(key.physicalColumn).erase(key.pageIndex);
 }
 
 void NativeLancePageSource::scheduleRead(uint64_t offset, uint64_t length)
@@ -874,11 +988,11 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
     const auto physicalRowStart = rowStart * rowScale;
     const auto physicalRowCount = rowCount * rowScale;
     uint64_t outputOffset = 0;
-    auto result =
-        BaseVector::create(type, static_cast<vector_size_t>(rowCount), &pool_);
+    VectorPtr result;
     NativeLanceColumnCursor cursor(
         physicalIndex, metadata_.pageRowStarts(physicalIndex));
-    for (const auto& span : cursor.spans(physicalRowStart, physicalRowCount)) {
+    const auto spans = cursor.spans(physicalRowStart, physicalRowCount);
+    for (const auto& span : spans) {
       BOLT_CHECK_EQ(span.localRowBegin % rowScale, 0);
       BOLT_CHECK_EQ(span.rowCount % rowScale, 0);
       const auto localStart = span.localRowBegin / rowScale;
@@ -889,9 +1003,25 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
           arrayDimensions,
           metadata_.physicalColumnChildLogicalTypes(physicalIndex),
           metadata_.pageLayout(physicalIndex, span.pageIndex));
+      const NativeLancePageKey pageKey{physicalIndex, span.pageIndex};
+      releaseStructuralPagePlansBefore(pageKey);
+      auto plan = rangeRead &&
+              metadata_.pageLayout(physicalIndex, span.pageIndex)
+                      .layout_case() ==
+                  ::lance::encodings21::PageLayout::kMiniBlockLayout
+          ? findStructuralPagePlan(pageKey)
+          : std::shared_ptr<const NativeLanceStructuralPagePlan>{};
+      if (rangeRead && plan == nullptr &&
+          metadata_.pageLayout(physicalIndex, span.pageIndex).layout_case() ==
+              ::lance::encodings21::PageLayout::kMiniBlockLayout) {
+        plan = getOrCreateStructuralPagePlan(
+            {.physicalColumnIndex = physicalIndex,
+             .pageIndex = span.pageIndex,
+             .localRowStart = span.localRowBegin,
+             .rowCount = span.rowCount});
+      }
       NativeLanceStructuralPageReader pageReader(
-          {.key =
-               {.physicalColumn = physicalIndex, .pageIndex = span.pageIndex},
+          {.key = pageKey,
            .type = type,
            .logicalType = metadata_.physicalColumnLogicalType(physicalIndex),
            .fixedSizeDimensions = arrayDimensions,
@@ -911,17 +1041,35 @@ VectorPtr NativeLancePageSource::decodePhysicalColumn(
             }
             submitReadPlan();
           },
-          readInput);
+          readInput,
+          std::move(plan));
       pageReader.decode();
       auto decoded = pageReader.consume();
+      if (rangeRead && spans.size() == 1 && type->kind() != TypeKind::ARRAY &&
+          type->kind() != TypeKind::MAP && type->kind() != TypeKind::ROW) {
+        BOLT_CHECK_EQ(localCount, rowCount);
+        BOLT_CHECK_EQ(decoded->size(), rowCount);
+        if (span.localRowBegin + span.rowCount == page.length()) {
+          releaseStructuralPagePlan(pageKey);
+        }
+        return decoded;
+      }
+      if (result == nullptr) {
+        result = BaseVector::create(
+            type, static_cast<vector_size_t>(rowCount), &pool_);
+      }
       result->copy(
           decoded.get(),
           static_cast<vector_size_t>(outputOffset),
           static_cast<vector_size_t>(rangeRead ? 0 : localStart),
           static_cast<vector_size_t>(localCount));
       outputOffset += localCount;
+      if (span.localRowBegin + span.rowCount == page.length()) {
+        releaseStructuralPagePlan(pageKey);
+      }
     }
     BOLT_CHECK_EQ(outputOffset, rowCount);
+    BOLT_CHECK_NOT_NULL(result);
     return result;
   }
   if (metadata_.isBlobColumn(physicalIndex)) {
