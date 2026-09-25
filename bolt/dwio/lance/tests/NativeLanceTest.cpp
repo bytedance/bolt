@@ -6372,6 +6372,19 @@ TEST_F(NativeLanceTest, rowReaderHonorsBatchMemoryBudget) {
   rowReader->updateRuntimeStats(stats);
   EXPECT_EQ(stats.processedStrides, 1);
   EXPECT_GT(stats.decodeTimeNs, 0);
+
+  auto rowIds = std::make_shared<const std::vector<uint64_t>>(
+      std::initializer_list<uint64_t>{7, 1, 3, 9, 0});
+  auto take = reader.createTakeReader(
+      rowReaderOptions, NativeLanceTakeOptions{std::move(rowIds)});
+  EXPECT_EQ(take->nextReadSize(5), 2);
+  EXPECT_EQ(take->next(5, result), 2);
+  ASSERT_EQ(result->size(), 2);
+  const auto* takeValues =
+      result->as<RowVector>()->childAt(0)->as<SimpleVector<int64_t>>();
+  ASSERT_NE(takeValues, nullptr);
+  EXPECT_EQ(takeValues->valueAt(0), 8);
+  EXPECT_EQ(takeValues->valueAt(1), 2);
 }
 
 } // namespace
