@@ -51,4 +51,8 @@ add_subdirectory(dwrf)
 add_subdirectory(orc)
 add_subdirectory(txt)
 add_subdirectory(parquet)
+if(BOLT_ENABLE_NATIVE_LANCE_READER)
+  add_subdirectory(lance)
+endif()
+
 add_subdirectory(paimon)

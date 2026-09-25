@@ -103,6 +103,7 @@ class BoltConan(ConanFile):
         "enable_torch": TorchOption.all(),
         "enable_cudf": [True, False],
         "enable_perf": [True, False],
+        "enable_native_lance_reader": [True, False],
     }
     default_options = {
         "shared": False,
@@ -133,6 +134,7 @@ class BoltConan(ConanFile):
         "enable_torch": TorchOption().value,
         "enable_cudf": False,
         "enable_perf": False,
+        "enable_native_lance_reader": False,
     }
 
     FB_VERSION = "2022.10.31.00"
@@ -536,6 +538,9 @@ class BoltConan(ConanFile):
             "ON" if self.options.enable_orc else "OFF"
         )
 
+        tc.cache_variables["BOLT_ENABLE_NATIVE_LANCE_READER"] = (
+            "ON" if self.options.enable_native_lance_reader else "OFF"
+        )
         tc.cache_variables["BOLT_ENABLE_TXT"] = (
             "ON" if self.options.enable_txt else "OFF"
         )

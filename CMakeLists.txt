@@ -161,6 +161,7 @@ option(BOLT_ENABLE_HDFS "Build Hdfs Connector" ON)
 option(BOLT_USE_ARROW_HDFS "Build Arrow Hdfs FileSystem Implement" ON)
 
 option(BOLT_ENABLE_PARQUET "Enable Parquet support" OFF)
+option(BOLT_ENABLE_NATIVE_LANCE_READER "Build the Bolt-native Lance reader" OFF)
 option(BOLT_ENABLE_ORC "Enable ORC support" OFF)
 option(BOLT_ENABLE_TXT "Enable TXT read support" OFF)
 option(BOLT_ENABLE_ARROW "Enable Arrow support" OFF)
