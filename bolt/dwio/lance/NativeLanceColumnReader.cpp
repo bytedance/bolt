@@ -17,6 +17,7 @@
 #include "bolt/dwio/lance/NativeLanceColumnReader.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/lance/NativeLanceBatchBuilder.h"
@@ -40,6 +41,44 @@ bool typeRequiresDeferredRead(const TypePtr& type) {
     }
   }
   return false;
+}
+
+void checkMatchingNulls(const BaseVector& expected, const BaseVector& actual) {
+  BOLT_CHECK_EQ(expected.size(), actual.size());
+  if (expected.rawNulls() == actual.rawNulls()) {
+    return;
+  }
+  const auto words = bits::nwords(expected.size());
+  for (uint64_t word = 0; word < words; ++word) {
+    const auto expectedBits = expected.rawNulls() == nullptr
+        ? bits::kNotNull64
+        : expected.rawNulls()[word];
+    const auto actualBits = actual.rawNulls() == nullptr
+        ? bits::kNotNull64
+        : actual.rawNulls()[word];
+    const auto remaining = expected.size() - word * 64;
+    const auto mask = remaining < 64 ? bits::lowMask(remaining) : ~uint64_t{0};
+    BOLT_CHECK_EQ(
+        (expectedBits ^ actualBits) & mask,
+        0,
+        "Structural sibling validity differs in word {}",
+        word);
+  }
+}
+
+void checkMatchingArrayLayout(
+    const ArrayVectorBase& expected,
+    const ArrayVectorBase& actual) {
+  checkMatchingNulls(expected, actual);
+  const auto bytes = expected.size() * sizeof(vector_size_t);
+  BOLT_CHECK_EQ(
+      std::memcmp(expected.rawOffsets(), actual.rawOffsets(), bytes),
+      0,
+      "Structural sibling offsets differ");
+  BOLT_CHECK_EQ(
+      std::memcmp(expected.rawSizes(), actual.rawSizes(), bytes),
+      0,
+      "Structural sibling sizes differ");
 }
 
 } // namespace
@@ -109,17 +148,6 @@ VectorPtr decodeNativeLanceStructuralColumn(
         branch.fixedSizeDimensions));
   }
 
-  const auto checkNulls = [](const BaseVector& expected,
-                             const BaseVector& actual) {
-    BOLT_CHECK_EQ(expected.size(), actual.size());
-    for (vector_size_t row = 0; row < expected.size(); ++row) {
-      BOLT_CHECK_EQ(
-          expected.isNullAt(row),
-          actual.isNullAt(row),
-          "Structural sibling validity differs at row {}",
-          row);
-    }
-  };
   const auto merge = [&](const auto& self,
                          const NativeLanceMetadata::StructuralField& node,
                          std::vector<VectorPtr> vectors) -> VectorPtr {
@@ -141,7 +169,7 @@ VectorPtr decodeNativeLanceStructuralColumn(
           const auto* branch = vectors[branchIndex++]->as<RowVector>();
           BOLT_CHECK_NOT_NULL(branch);
           BOLT_CHECK_EQ(branch->childrenSize(), 1);
-          checkNulls(*first, *branch);
+          checkMatchingNulls(*first, *branch);
           childBranches.push_back(branch->childAt(0));
         }
         children.push_back(self(self, child, std::move(childBranches)));
@@ -161,11 +189,7 @@ VectorPtr decodeNativeLanceStructuralColumn(
     for (const auto& vector : vectors) {
       const auto* branch = vector->as<ArrayVector>();
       BOLT_CHECK_NOT_NULL(branch);
-      checkNulls(*first, *branch);
-      for (vector_size_t row = 0; row < first->size(); ++row) {
-        BOLT_CHECK_EQ(first->offsetAt(row), branch->offsetAt(row));
-        BOLT_CHECK_EQ(first->sizeAt(row), branch->sizeAt(row));
-      }
+      checkMatchingArrayLayout(*first, *branch);
       elementBranches.push_back(branch->elements());
     }
     BOLT_CHECK_EQ(node.children.size(), 1);

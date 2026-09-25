@@ -35,7 +35,9 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/dwio/lance/NativeLanceBitpack.h"
+#include "bolt/dwio/lance/NativeLanceLegacyScalar.h"
 #include "bolt/dwio/lance/NativeLanceTypeAdapter.h"
+#include "bolt/dwio/parquet/arrow/util/ByteStreamSplitInternal.h"
 #include "bolt/type/HugeInt.h"
 #include "bolt/type/Timestamp.h"
 #include "bolt/vector/ComplexVector.h"
@@ -586,11 +588,20 @@ DecodedBlock decodeByteStreamSplit(
   const auto bytesPerValue = transposed.bitsPerValue / 8;
   BOLT_CHECK_EQ(transposed.data->size(), numValues * bytesPerValue);
   auto output = AlignedBuffer::allocate<char>(transposed.data->size(), &pool);
-  for (uint64_t row = 0; row < numValues; ++row) {
-    for (uint64_t byte = 0; byte < bytesPerValue; ++byte) {
-      output->asMutable<char>()[row * bytesPerValue + byte] =
-          transposed.data->as<char>()[byte * numValues + row];
-    }
+  BOLT_CHECK_LE(numValues, std::numeric_limits<int64_t>::max());
+  if (bytesPerValue == sizeof(uint32_t)) {
+    parquet::arrow::ByteStreamSplitDecode<uint32_t>(
+        transposed.data->as<uint8_t>(),
+        static_cast<int64_t>(numValues),
+        static_cast<int64_t>(numValues),
+        output->asMutable<uint32_t>());
+  } else {
+    BOLT_CHECK_EQ(bytesPerValue, sizeof(uint64_t));
+    parquet::arrow::ByteStreamSplitDecode<uint64_t>(
+        transposed.data->as<uint8_t>(),
+        static_cast<int64_t>(numValues),
+        static_cast<int64_t>(numValues),
+        output->asMutable<uint64_t>());
   }
   return {
       DecodedBlock::Kind::kFixed,
@@ -1416,25 +1427,38 @@ struct MiniBlockPage {
   uint64_t rowStart{0};
 };
 
+void appendLevels(
+    const CompressiveEncoding& encoding,
+    const BufferPtr& input,
+    uint64_t numLevels,
+    memory::MemoryPool& pool,
+    std::vector<uint16_t>& result) {
+  const auto block = decodeCompressive(encoding, {input}, numLevels, pool);
+  BOLT_CHECK(block.kind == DecodedBlock::Kind::kFixed);
+  BOLT_CHECK_EQ(block.bitsPerValue, 16);
+  const auto outputBytes = numLevels * sizeof(uint16_t);
+  BOLT_CHECK_GE(block.data->size(), outputBytes);
+  const auto outputOffset = result.size();
+  result.resize(outputOffset + numLevels);
+  if constexpr (std::endian::native == std::endian::little) {
+    std::memcpy(
+        result.data() + outputOffset, block.data->as<char>(), outputBytes);
+  } else {
+    for (uint64_t i = 0; i < numLevels; ++i) {
+      result[outputOffset + i] = readLittleEndian<uint16_t>(
+          block.data->as<char>() + i * sizeof(uint16_t));
+    }
+  }
+}
+
 std::vector<uint16_t> decodeLevels(
     const CompressiveEncoding& encoding,
     const BufferPtr& input,
     uint64_t numLevels,
     memory::MemoryPool& pool) {
-  const auto block = decodeCompressive(encoding, {input}, numLevels, pool);
-  BOLT_CHECK(block.kind == DecodedBlock::Kind::kFixed);
-  BOLT_CHECK_EQ(block.bitsPerValue, 16);
-  std::vector<uint16_t> result(numLevels);
-  const auto outputBytes = numLevels * sizeof(uint16_t);
-  BOLT_CHECK_GE(block.data->size(), outputBytes);
-  if constexpr (std::endian::native == std::endian::little) {
-    std::memcpy(result.data(), block.data->as<char>(), outputBytes);
-  } else {
-    for (uint64_t i = 0; i < numLevels; ++i) {
-      result[i] = readLittleEndian<uint16_t>(
-          block.data->as<char>() + i * sizeof(uint16_t));
-    }
-  }
+  std::vector<uint16_t> result;
+  result.reserve(numLevels);
+  appendLevels(encoding, input, numLevels, pool, result);
   return result;
 }
 
@@ -1460,6 +1484,14 @@ MiniBlockPage decodeMiniBlock(
   MiniBlockPage result;
   result.itemStart = selected.itemStart;
   result.rowStart = selected.rowStart;
+  result.variable.reserve(selected.decodedItems);
+  result.variableOwners.reserve(selected.lastChunk - selected.firstChunk + 1);
+  if (layout.has_rep_compression()) {
+    result.rep.reserve(selected.decodedItems);
+  }
+  if (layout.has_def_compression()) {
+    result.def.reserve(selected.decodedItems);
+  }
   if (layout.has_dictionary()) {
     BOLT_CHECK_GE(page.buffer_offsets_size(), 3);
     const auto dictionary = read(page.buffer_offsets(2), page.buffer_sizes(2));
@@ -1490,7 +1522,7 @@ MiniBlockPage decodeMiniBlock(
       defBytes = readLittleEndian<uint16_t>(chunk + cursor);
       cursor += sizeof(uint16_t);
     }
-    std::vector<uint32_t> valueBufferSizes(layout.num_buffers());
+    folly::small_vector<uint32_t, 4> valueBufferSizes(layout.num_buffers());
     for (auto& size : valueBufferSizes) {
       size = layout.has_large_chunk()
           ? readLittleEndian<uint32_t>(chunk + cursor)
@@ -1502,18 +1534,16 @@ MiniBlockPage decodeMiniBlock(
       BOLT_CHECK_LE(*repBytes, chunkBytes - cursor);
       auto encoded =
           Buffer::slice<char>(data, chunkOffset + cursor, *repBytes, &pool);
-      auto levels =
-          decodeLevels(layout.rep_compression(), encoded, numLevels, pool);
-      result.rep.insert(result.rep.end(), levels.begin(), levels.end());
+      appendLevels(
+          layout.rep_compression(), encoded, numLevels, pool, result.rep);
       cursor = alignUp(cursor + *repBytes, kMiniBlockAlignment);
     }
     if (defBytes.has_value()) {
       BOLT_CHECK_LE(*defBytes, chunkBytes - cursor);
       auto encoded =
           Buffer::slice<char>(data, chunkOffset + cursor, *defBytes, &pool);
-      auto levels =
-          decodeLevels(layout.def_compression(), encoded, numLevels, pool);
-      result.def.insert(result.def.end(), levels.begin(), levels.end());
+      appendLevels(
+          layout.def_compression(), encoded, numLevels, pool, result.def);
       cursor = alignUp(cursor + *defBytes, kMiniBlockAlignment);
     }
     BufferList valueBuffers;
@@ -2702,9 +2732,13 @@ VectorPtr makeLeafVector(
     BOLT_CHECK_EQ(page.bitsPerValue, byteWidth * 8);
     auto result = BaseVector::create(type, numValues, &pool);
     auto* strings = result->asFlatVector<StringView>();
+    if (!StringView::isInline(byteWidth)) {
+      strings->addStringBuffer(page.fixed);
+    }
+    auto* rawStrings = strings->mutableRawValues();
     for (uint64_t i = 0; i < numValues; ++i) {
-      strings->set(
-          i, StringView(page.fixed->as<char>() + i * byteWidth, byteWidth));
+      rawStrings[i] =
+          StringView(page.fixed->as<char>() + i * byteWidth, byteWidth);
     }
     return result;
   }
@@ -2717,14 +2751,28 @@ VectorPtr makeLeafVector(
     BOLT_CHECK_EQ(page.variable.size(), numValues);
     auto result = BaseVector::create(type, numValues, &pool);
     auto* strings = result->asFlatVector<StringView>();
+    const auto hasOutOfLineValue =
+        std::any_of(page.variable.begin(), page.variable.end(), [](auto value) {
+          return !StringView::isInline(value.size());
+        });
+    if (hasOutOfLineValue) {
+      for (const auto& owner : page.variableOwners) {
+        strings->addStringBuffer(owner);
+      }
+    }
+    auto* rawStrings = strings->mutableRawValues();
     for (uint64_t i = 0; i < page.variable.size(); ++i) {
-      strings->set(
-          i, StringView(page.variable[i].data(), page.variable[i].size()));
+      rawStrings[i] =
+          StringView(page.variable[i].data(), page.variable[i].size());
     }
     return result;
   }
   BOLT_CHECK_NOT_NULL(page.fixed);
   BOLT_CHECK_GE(page.fixed->size() * 8, numValues * page.bitsPerValue);
+  if (auto wrapped = tryWrapLegacyRawFlatValues(
+          type, logicalType, page.bitsPerValue, page.fixed, numValues, pool)) {
+    return wrapped;
+  }
   auto result = BaseVector::create(type, numValues, &pool);
   if (type->kind() == TypeKind::BOOLEAN) {
     BOLT_CHECK_EQ(page.bitsPerValue, 1);

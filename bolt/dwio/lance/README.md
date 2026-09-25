@@ -33,6 +33,10 @@ Bolt through `BufferedInput`, `MemoryPool`, and the DWIO reader interfaces.
   page state.
 - `NativeLanceDecompressor` owns legacy zstd and LZ4 codec handling and exposes
   whether a codec is sequential-frame or whole-buffer based.
+- Structural ByteStreamSplit pages reuse the existing vectorized decode kernel.
+  Exact-width primitive and variable-width outputs transfer their decoded
+  buffers directly into Bolt vectors when representation and lifetime permit;
+  this is output ownership, not a page cache.
 - `NativeLanceLegacyScalar` owns v2.0 scalar, nullable, bitmap, bitpack, and
   fixed-size binary kernels. These kernels no longer live in the monolithic
   migration adapter.

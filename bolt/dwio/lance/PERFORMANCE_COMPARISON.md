@@ -6,10 +6,10 @@
 
 ## 1. 结论摘要
 
-1. **单线程全类型 decode 累计获得 6.13x 提升。** 同一 47 列 v2.2 文件、batch 4,096 下，Native 核心扫描中位数从 15.413 秒降到 2.516 秒，RSS 从 90.3 MiB 降到 67.8 MiB；提升来自范围解码、page plan 复用和减少复制，不是扩大 batch 或增加 decoded/decompressed cache。
-2. **单线程宽表仍快于 Rust。** 800 列真实 v2.0 数据全扫中，Native 核心扫描时间为 22.144 秒，Rust 为 26.486 秒，Native 快 16.4%；RSS 为 5.66 GiB 对 6.42 GiB，Native 低 11.7%。该数据不经过本轮 v2.1+ structural page plan，结果用于确认没有宽表内存回退。
-3. **小数据与窄投影没有被牺牲。** 4,096 行、43 列小文件上 Native/Rust 核心时间为 11.63/10.61 ms；1M 行单列投影上一轮为 23.13/22.13 ms。Native 的短扫描差距已收窄到 9.6%。
-4. **Structural page 初始化已从 batch 生命周期中移出。** Nested 五列单线程为 0.787/0.491 秒。MiniBlock chunk table 和 repetition index 现在按 page 解析一次，并在 page 消费后立即释放；同步输入不驻留 payload。
+1. **单线程全类型 decode 累计获得 7.61x 提升。** 同一 47 列 v2.2 文件、batch 4,096 下，Native 核心扫描中位数从 15.413 秒降到 2.025 秒，RSS 从 90.3 MiB 降到 67.3 MiB；提升来自范围解码、page plan 复用、SIMD codec kernel 和输出 buffer 所有权转移，不是扩大 batch 或增加 decoded/decompressed cache。
+2. **单线程宽表仍快于 Rust。** 800 列真实 v2.0 数据全扫中，Native 核心扫描时间为 21.780 秒，Rust 为 26.852 秒，Native 快 18.9%；RSS 为 5.66 GiB 对 6.46 GiB，Native 低 12.4%。该数据不经过本轮 v2.1+ structural 优化，结果用于确认没有宽表内存回退。
+3. **小数据与窄投影没有被牺牲。** 4,096 行、43 列小文件上 Native/Rust 核心时间为 9.94/10.48 ms，Native 快 5.2%；1M 行单列投影上一轮为 23.13/22.13 ms。
+4. **Structural page 初始化已从 batch 生命周期中移出。** Nested 五列单线程为 0.664/0.486 秒。MiniBlock chunk table 和 repetition index 现在按 page 解析一次，并在 page 消费后立即释放；同步输入不驻留 payload。
 5. **部分 nullable Int64 已达到 Rust 水平。** 0%、1%、50% null 的 Native/Rust 核心时间分别为 22.62/22.90、29.03/29.71、33.86/34.39 ms；100% null 继续走 constant fast path。
 6. **剩余最大功能缺口是已知 row offset 的 take API。** Native 单点仍需扫描 `row_id`，核心时间 38.8 ms；Rust `ReadBatchParams::Indices` 为 1.96 ms。这里首先是 API 和调度语义差异，不能当成相同物理读取计划下的 decoder 对比。
 
@@ -398,7 +398,7 @@ prepare(page metadata, row selection)
 | Nested 五列 full scan | 0.939 s | 0.787 s | 0.491 s | **快 16.2%** |
 | 1% filter、47 列 | 0.263 s | 0.204 s | 2.068 s | **快 22.3%** |
 | 4,096 行、43 列 | 13.56 ms | 11.63 ms | 10.61 ms | **快 14.2%** |
-| 800 列 v2.0 full scan | 21.293 s | 22.144 s | 26.486 s | 路径未命中，作为无回退门禁 |
+| 800 列 v2.0 full scan | 21.293 s | 21.780 s | 26.852 s | 路径未命中，作为无回退门禁 |
 
 全类型 Native/Rust 核心时间比从 `2.08x` 降到 `1.24x`。全类型 Native 峰值 RSS
 中位数从 69.8 MiB 降到 67.8 MiB；800 列 Native/Rust 峰值 RSS 为 5.66/6.42 GiB。
@@ -408,6 +408,40 @@ prepare(page metadata, row selection)
 本轮后剩余的首要 CPU 问题是同一 MiniBlock chunk 跨 batch 时仍重复执行 value/rep/def
 解压。下一阶段应在 plan 之上加入可暂停 codec cursor；只允许保留 codec context、受预算
 约束的 compressed input 和极小 tail，禁止保留完整 decoded/decompressed chunk。
+
+### 9.5 SIMD decode 与输出 buffer 所有权转移
+
+profile 显示 page plan 落地后，热点已从 metadata I/O 转移到 Zstd、ByteStreamSplit、
+rep/def 拼接和 Bolt vector 物化。本轮继续做不增加驻留内存的通用优化：
+
+- v2.1+ ByteStreamSplit 复用已有 Parquet/Arrow SIMD kernel，替换逐行逐字节转置；
+- 与 Bolt 类型宽度、字节序完全一致的 primitive 复用 v2.0 raw-flat ownership API，直接将
+  decoder 输出 buffer 交给 `FlatVector`；
+- VARCHAR、VARBINARY 和 FixedSizeBinary 通过 `addStringBuffer` + `setNoCopy` 转移 value
+  buffer 所有权；只有存在 out-of-line `StringView` 时才附加 owner；
+- MiniBlock rep/def 直接 append 到最终 level vector，并使用 small-vector 保存常见的少量
+  value buffer size，消除逐 chunk 临时容器；
+- Struct/List/Map sibling 的 null bitmap、offset 和 size 一致性改为 word/buffer 批量校验，
+  保留相同的完整校验语义。
+
+单线程、batch 4,096、每端七轮交替的最新结果：
+
+| 场景 | PagePlan 后 Native | 当前 Native | Rust current | 本轮 Native 变化 |
+| --- | ---: | ---: | ---: | ---: |
+| 47 列全类型 full scan | 2.516 s | 2.025 s | 2.011 s | **快 19.5%** |
+| Nested 五列 full scan | 0.787 s | 0.664 s | 0.486 s | **快 15.6%** |
+| 1% filter、47 列 | 0.204 s | 0.165 s | 2.028 s | **快 19.3%** |
+| 4,096 行、43 列 | 11.63 ms | 9.94 ms | 10.48 ms | **快 14.6%** |
+
+全类型 Native/Rust 核心 decode 差距已从上一轮的 24.4% 收窄到 0.7%，累计相对最初
+15.413 秒基线提升 7.61 倍。Native 峰值 RSS 中位数为 67.3 MiB，低于上一轮的
+67.8 MiB。800 列七轮中位数为 21.780 秒、5.66 GiB RSS；本轮修改只位于 structural
+decoder 和 structural ColumnReader 合并路径，因此该 v2.0 数据集不命中新路径。
+
+实测主数据集中 scalar MiniBlock 通常为 512 或 1,024 items，而 batch 为 4,096 行，
+chunk 边界大多天然落在 batch 内。此时增加跨 batch codec cursor 不会减少主路径的 Zstd
+frame 次数，反而会为每个活跃列增加状态。因此 cursor 只应在 plan 检测到 chunk 确实跨越
+请求边界时启用，并继续遵守压缩输入预算；不能把它实现成通用 payload cache。
 
 ## 10. 复现与验证
 

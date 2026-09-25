@@ -1944,6 +1944,9 @@ Controlled future 以不同顺序完成 I/O 和 decode，验证：
 - `NativeLanceStructuralPagePlan` 将 MiniBlock chunk table 和 repetition index 提升为
   scan-local、page-scoped 的不可变控制状态。它不持有 compressed payload、decompressed
   buffer 或 decoded vector；PageSource 在页消费完成或游标前进后立即释放对应 plan。
+- structural ByteStreamSplit 复用现有 SIMD kernel；同宽 primitive、字符串和二进制结果在
+  生命周期允许时直接把 decoder buffer 所有权移交给 Bolt vector。复杂 sibling 的 null、
+  offset 和 size 校验按 bitmap/连续 buffer 批量执行，不降低校验语义。
 - 可证明 row domain 的 v2.1+ 页面已走范围解码：item-only FullZip 直接定位请求行，
   MiniBlock 通过磁盘内 repetition index 把 List/Map parent range 映射为连续 chunk，
   FixedSizeList scalar leaf 使用 value-domain chunk range。混合 fixed/repeated domain 继续
@@ -2060,13 +2063,18 @@ page/chunk decode、消除临时 payload copy 和 FastLanes hot-loop 查表，�
 
 | 场景 | 上一轮 Native | 当前 Native | Rust current |
 |---|---:|---:|---:|
-| 47 列全类型 | 4.197 s | 2.516 s | 2.023 s |
-| Nested 五列 | 0.939 s | 0.787 s | 0.491 s |
-| 1% filter、47 列 | 0.263 s | 0.204 s | 2.068 s |
-| 4,096 行、43 列 | 13.56 ms | 11.63 ms | 10.61 ms |
-| 800 列 v2.0 | 21.293 s | 22.144 s | 26.486 s |
+| 47 列全类型 | 4.197 s | 2.025 s | 2.011 s |
+| Nested 五列 | 0.939 s | 0.664 s | 0.486 s |
+| 1% filter、47 列 | 0.263 s | 0.165 s | 2.028 s |
+| 4,096 行、43 列 | 13.56 ms | 9.94 ms | 10.48 ms |
+| 800 列 v2.0 | 21.293 s | 21.780 s | 26.852 s |
 
-全类型累计相对最初 15.413 秒基线提升 6.13 倍，本轮单独提升 40.1%；峰值 RSS 从
-69.8 MiB 降到 67.8 MiB。800 列路径的 Native 峰值 RSS 为 5.66 GiB，未增加 payload
-驻留；该验收文件是 v2.0，不命中 structural page plan，因此仅作为宽表无内存回退门禁。
-下一阶段在此 plan 生命周期上增加可暂停 codec cursor，仍禁止完整 page/chunk 的解压缓存。
+全类型累计相对最初 15.413 秒基线提升 7.61 倍，核心 decode 已与 Rust 基本持平；峰值
+RSS 从 90.3 MiB 降到 67.3 MiB。800 列路径的七轮 Native/Rust 峰值 RSS 为
+5.66/6.46 GiB。该验收文件是 v2.0，不命中 structural page plan 或 structural SIMD
+路径，因此只作为宽表无额外驻留门禁。
+
+主验收数据中的 scalar MiniBlock 通常为 512/1,024 items，4,096 行 batch 不会跨 batch
+重复解压这些 chunk。后续可暂停 codec cursor 只在 page plan 检测到 chunk 跨请求边界时
+启用；状态只允许包含 codec context、受预算约束的 compressed input 和极小 tail，禁止
+保留完整 decoded/decompressed chunk。
