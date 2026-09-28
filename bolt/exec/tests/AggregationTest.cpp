@@ -32,6 +32,7 @@
 #include <folly/Math.h>
 #include <re2/re2.h>
 
+#include "bolt/common/base/SpillStats.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -1776,6 +1777,16 @@ TEST_P(AggregationTest, dynamicFinalResidentRun) {
         "dynamic final spill enabled: {}, row based mode: {}",
         enabled,
         rowBasedMode));
+#ifndef NDEBUG
+    std::optional<common::SpillStats> statsBeforeNoMoreInput;
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
+        std::function<void(Operator*)>([&](Operator* op) {
+          if (enabled && op->operatorType() == "Aggregation") {
+            statsBeforeNoMoreInput = common::globalSpillStats();
+          }
+        }));
+#endif
     core::PlanNodeId aggregationId;
     auto spillDirectory = exec::test::TempDirectoryPath::create();
     auto task =
@@ -1787,6 +1798,7 @@ TEST_P(AggregationTest, dynamicFinalResidentRun) {
             .config(QueryConfig::kMaxSpillRunRows, "32")
             .config(QueryConfig::kRowBasedSpillMode, rowBasedMode)
             .config(QueryConfig::kAggregationDynamicFinalSpillEnabled, enabled)
+            .maxDrivers(1)
             .plan(PlanBuilder()
                       .values(batches)
                       .singleAggregation({"c0"}, {"sum(c1)"})
@@ -1796,6 +1808,16 @@ TEST_P(AggregationTest, dynamicFinalResidentRun) {
     const auto planStats = toPlanStats(task->taskStats());
     const auto& stats = planStats.at(aggregationId);
     if (enabled) {
+#ifndef NDEBUG
+      ASSERT_TRUE(statsBeforeNoMoreInput.has_value());
+      const auto statsAfterNoMoreInput = common::globalSpillStats();
+      EXPECT_GT(
+          statsAfterNoMoreInput.spillSortTimeUs,
+          statsBeforeNoMoreInput->spillSortTimeUs);
+      EXPECT_GT(
+          statsAfterNoMoreInput.spillTotalTimeUs,
+          statsBeforeNoMoreInput->spillTotalTimeUs);
+#endif
       EXPECT_LT(stats.spilledRows, 400);
     } else {
       EXPECT_EQ(stats.spilledRows, 400);

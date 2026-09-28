@@ -361,21 +361,28 @@ bool GroupingSet::prepareResidentRuns() {
     return false;
   }
 
-  auto runs = std::make_unique<RowContainerSortedRuns>(
-      *table_->rows(),
-      pool_,
-      spillConfig_->maxSpillRunRows,
-      spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE);
-  for (size_t i = 0; i < runs->numRuns(); ++i) {
-    spiller_->sortRowsInPlace(runs->mutableRun(i));
+  uint64_t sortTimeUs{0};
+  uint64_t totalTimeUs{0};
+  {
+    MicrosecondTimer timer(&totalTimeUs);
+    auto runs = std::make_unique<RowContainerSortedRuns>(
+        *table_->rows(),
+        pool_,
+        spillConfig_->maxSpillRunRows,
+        spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE);
+    for (size_t i = 0; i < runs->numRuns(); ++i) {
+      sortTimeUs += spiller_->sortRowsInPlace(runs->mutableRun(i));
+    }
+    residentRuns_ = std::move(runs);
+    if (ignoreNullKeys_) {
+      static_cast<HashTable<true>*>(table_.get())->releaseTable();
+    } else {
+      static_cast<HashTable<false>*>(table_.get())->releaseTable();
+    }
+    lookup_.reset();
   }
-  residentRuns_ = std::move(runs);
-  if (ignoreNullKeys_) {
-    static_cast<HashTable<true>*>(table_.get())->releaseTable();
-  } else {
-    static_cast<HashTable<false>*>(table_.get())->releaseTable();
-  }
-  lookup_.reset();
+  spiller_->updateSpillSortTime(sortTimeUs);
+  spiller_->updateSpillTotalTime(totalTimeUs);
   return true;
 }
 
