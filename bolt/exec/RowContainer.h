@@ -1365,8 +1365,8 @@ class RowContainer {
       vector_size_t index,
       bool exactSize);
 
-  // Batch version: pre-scan rows, single reserve, setNoCopy per row.
-  // Eliminates per-row getBufferWithSpace / realloc / inline-branch overhead.
+  // Batched variant of extractString: pre-scan the rows, reserve the string
+  // buffer once, then copy all out-of-line strings in a single pass.
   static void extractStringsBatch(
       const char* const* rows,
       folly::Range<const vector_size_t*> rowNumbers,
