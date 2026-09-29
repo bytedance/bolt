@@ -33,6 +33,8 @@
 #include <utility>
 #include "bolt/common/memory/MemoryResource.h"
 
+#include <folly/ScopeGuard.h>
+
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -917,6 +919,12 @@ void RowContainer::extractStringsBatch(
         result->pool()->allocate(sizeof(RowMeta) * numRows));
     meta = heapMeta;
   }
+  auto* pool = result->pool();
+  SCOPE_EXIT {
+    if (heapMeta) {
+      pool->free(heapMeta, static_cast<int64_t>(sizeof(RowMeta) * numRows));
+    }
+  };
 
   size_t totalBytes = 0;
   bool useRowNumbers = !rowNumbers.empty();
@@ -1002,11 +1010,6 @@ void RowContainer::extractStringsBatch(
       rawValues[resultIndex] = StringView(dst, size);
       bufferOffset += size;
     }
-  }
-
-  if (heapMeta) {
-    result->pool()->free(
-        heapMeta, static_cast<int64_t>(sizeof(RowMeta) * numRows));
   }
 }
 
