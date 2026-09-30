@@ -553,9 +553,6 @@ void Spiller::ensureSorted(SpillRun& run) {
 }
 
 uint64_t Spiller::sortRowsInPlace(folly::Range<char**> rows) {
-  if (rows.size() < 2) {
-    return 0;
-  }
   uint64_t sortTimeUs = 0;
   {
     MicrosecondTimer timer(&sortTimeUs);
@@ -671,8 +668,9 @@ void Spiller::setNextEqualForAgg(folly::Range<char* const*> rows) {
   }
   BOLT_CHECK_GT(container_->probedFlagOffset(), 0);
   for (size_t i = 0; i + 1 < rows.size(); ++i) {
-    const auto equal =
-        container_->compareRows(rows[i], rows[i + 1], compareFlags_) == 0;
+    const auto equal = cmp_ != nullptr
+        ? !cmp_(rows[i], rows[i + 1])
+        : container_->compareRows(rows[i], rows[i + 1], compareFlags_) == 0;
     bits::setBit(rows[i], container_->probedFlagOffset(), equal);
   }
   bits::setBit(rows.back(), container_->probedFlagOffset(), false);

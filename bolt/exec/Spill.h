@@ -58,7 +58,6 @@ class RowBasedSpillReadFile;
 class Spiller;
 
 enum class DistinctProvenance : uint8_t { kAlreadyOutput, kNew };
-enum class AggregationRowOrigin : uint8_t { kSpillFile, kRowContainer };
 
 // A source of sorted spilled RowVectors coming either from a file or memory.
 class SpillMergeStream : public MergeStream {
@@ -267,12 +266,14 @@ class ConcatFilesSpillBatchStream final : public BatchStream {
 // A source of sorted spilled rows coming either from a file or memory.
 class RowBasedSpillMergeStream : public MergeStream {
  public:
+  static constexpr size_t kResidentBatchRows = 64 << 10;
+  static constexpr size_t kResidentBatchBytes = 1 << 20;
+
   RowBasedSpillMergeStream(
       RowTypePtr rowType,
       std::vector<RowColumn> rowColumns,
       std::vector<SpillSortKey> sortingKeys,
       DistinctProvenance provenance,
-      AggregationRowOrigin origin,
       RowRowCompare compare = nullptr);
   virtual ~RowBasedSpillMergeStream() = default;
 
@@ -281,10 +282,6 @@ class RowBasedSpillMergeStream : public MergeStream {
 
   DistinctProvenance provenance() const {
     return provenance_;
-  }
-
-  AggregationRowOrigin origin() const {
-    return origin_;
   }
 
   virtual std::optional<uint64_t> memoryPosition() const {
@@ -302,6 +299,10 @@ class RowBasedSpillMergeStream : public MergeStream {
   }
 
   int32_t compare(const MergeStream& other) const final;
+
+  RowRowCompare rowCompare() const {
+    return compare_;
+  }
 
   const std::vector<RowColumn>& rowColumns() const {
     return rowColumns_;
@@ -416,7 +417,6 @@ class RowBasedSpillMergeStream : public MergeStream {
   const std::vector<RowColumn> rowColumns_;
   const std::vector<SpillSortKey> sortingKeys_;
   const DistinctProvenance provenance_;
-  const AggregationRowOrigin origin_;
   const RowRowCompare compare_;
 };
 
@@ -523,7 +523,6 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
             spillFile->rowColumns(),
             std::move(sortingKeys),
             provenance,
-            AggregationRowOrigin::kSpillFile,
             compare),
         rowInfo_(spillFile->info()),
         spillFile_(std::move(spillFile))
@@ -956,7 +955,8 @@ makeRowContainerRowBasedSpillMergeStream(
     int32_t numSortKeys,
     const std::vector<CompareFlags>& sortCompareFlags,
     const RowFormatInfo& rowInfo,
-    DistinctProvenance provenance);
+    DistinctProvenance provenance,
+    RowRowCompare compare = nullptr);
 
 using SpillPartitionSet =
     std::map<SpillPartitionId, std::unique_ptr<SpillPartition>>;

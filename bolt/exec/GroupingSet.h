@@ -273,7 +273,6 @@ class GroupingSet {
     explicit AggregationMergeScratch(memory::MemoryPool& pool)
         : rows(memory::StlAllocator<char*>(pool)),
           distinctRows(memory::StlAllocator<char*>(pool)),
-          distinctOrigins(memory::StlAllocator<AggregationRowOrigin>(pool)),
           uniqueRows(memory::StlAllocator<char*>(pool)),
           groups(memory::StlAllocator<char*>(pool)),
           groupOfRows(memory::StlAllocator<char*>(pool)),
@@ -281,7 +280,6 @@ class GroupingSet {
           sourceIndices(memory::StlAllocator<vector_size_t>(pool)),
           distinctInputs(memory::StlAllocator<const RowVector*>(pool)),
           distinctIndices(memory::StlAllocator<vector_size_t>(pool)),
-          uniqueOrigins(memory::StlAllocator<AggregationRowOrigin>(pool)),
           uniqueRowSizes(memory::StlAllocator<int32_t>(pool)),
           resultRanges(memory::StlAllocator<std::pair<int32_t, int32_t>>(pool)),
           outputRows(memory::StlAllocator<char*>(pool)) {}
@@ -289,7 +287,6 @@ class GroupingSet {
     void clear() {
       rows.clear();
       distinctRows.clear();
-      distinctOrigins.clear();
       uniqueRows.clear();
       groups.clear();
       groupOfRows.clear();
@@ -297,7 +294,6 @@ class GroupingSet {
       sourceIndices.clear();
       distinctInputs.clear();
       distinctIndices.clear();
-      uniqueOrigins.clear();
       uniqueRowSizes.clear();
       resultRanges.clear();
       outputRows.clear();
@@ -327,7 +323,6 @@ class GroupingSet {
 
     Vector<char*> rows;
     Vector<char*> distinctRows;
-    Vector<AggregationRowOrigin> distinctOrigins;
     Vector<char*> uniqueRows;
     Vector<char*> groups;
     Vector<char*> groupOfRows;
@@ -335,7 +330,6 @@ class GroupingSet {
     Vector<vector_size_t> sourceIndices;
     Vector<const RowVector*> distinctInputs;
     Vector<vector_size_t> distinctIndices;
-    Vector<AggregationRowOrigin> uniqueOrigins;
     Vector<int32_t> uniqueRowSizes;
     Vector<std::pair<int32_t, int32_t>> resultRanges;
     Vector<char*> outputRows;
@@ -433,6 +427,11 @@ class GroupingSet {
       int32_t maxOutputBytes,
       const RowVectorPtr& result);
 
+  uint64_t mergeOutputBytes() const {
+    const auto bytes = mergeRows_->usedBytes();
+    return bytes > residentStringBytes_ ? bytes - residentStringBytes_ : 0;
+  }
+
   // Reads from spilled rows for group by with aggregates.
   bool mergeNextWithAggregates(
       int32_t maxOutputRows,
@@ -456,7 +455,6 @@ class GroupingSet {
 
   void extractMergeKeys(
       folly::Range<char* const*> rows,
-      folly::Range<const AggregationRowOrigin*> origins,
       const RowVectorPtr& result,
       vector_size_t resultOffset);
 
@@ -612,6 +610,10 @@ class GroupingSet {
   std::unique_ptr<TreeOfLosers<RowBasedSpillMergeStream>> rowBasedSpillMerge_;
   // Owns the sorted index; the hash table continues to own the row storage.
   std::unique_ptr<RowContainerSortedRuns> residentRuns_;
+
+  // mergeRows_ shares this allocator with the resident rows. Exclude their
+  // existing variable-length storage from the size of each output batch.
+  uint64_t residentStringBytes_{0};
   std::optional<OwnedSpillPartition> pendingInputSpillPartition_;
   common::SpillStats residentSuffixSpillStats_;
   std::optional<size_t> firstResidentStreamIndex_;

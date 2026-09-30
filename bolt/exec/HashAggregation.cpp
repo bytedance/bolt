@@ -620,6 +620,12 @@ RowVectorPtr HashAggregation::getOutput() {
 
   const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
   auto maxOutputRows = isGlobal_ ? 1 : outputBatchRows(estimatedOutputRowSize_);
+  if (!isGlobal_ && !isDistinct_ && groupingSet_->hasSpilled() &&
+      queryConfig.aggregationDynamicFinalSpillEnabled()) {
+    // Spill merge applies the byte limit to its live merge state. A stale
+    // pre-spill average must not collapse output to one row per batch.
+    maxOutputRows = queryConfig.maxOutputBatchRows();
+  }
   // if aggregate function is vid_split_agg_metrics, set output rows up to 1k
   if (!isGlobal_ && containsVidSplit_ && numOutputRows_ == 0) {
     maxOutputRows = 5;

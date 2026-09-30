@@ -505,13 +505,11 @@ RowBasedSpillMergeStream::RowBasedSpillMergeStream(
     std::vector<RowColumn> rowColumns,
     std::vector<SpillSortKey> sortingKeys,
     DistinctProvenance provenance,
-    AggregationRowOrigin origin,
     RowRowCompare compare)
     : rowType_(std::move(rowType)),
       rowColumns_(std::move(rowColumns)),
       sortingKeys_(std::move(sortingKeys)),
       provenance_(provenance),
-      origin_(origin),
       compare_(compare) {
   BOLT_CHECK_NOT_NULL(rowType_);
   BOLT_CHECK_EQ(rowColumns_.size(), rowType_->size());
@@ -521,67 +519,11 @@ int32_t RowBasedSpillMergeStream::compare(const MergeStream& other) const {
   const auto& otherStream = static_cast<const RowBasedSpillMergeStream&>(other);
   char* left = rowVector_[index_];
   char* right = otherStream.current()[otherStream.currentIndex()];
-  if (compare_ != nullptr && origin_ == otherStream.origin_) {
+  if (compare_ != nullptr) {
     return compare_(left, right);
   }
-  const bool hasRowContainer = origin_ == AggregationRowOrigin::kRowContainer ||
-      otherStream.origin_ == AggregationRowOrigin::kRowContainer;
   for (const auto& [key, flags] : sortingKeys_) {
     const auto& type = rowType_->childAt(key);
-    if (!type->isFixedWidth() && hasRowContainer) {
-      const auto leftColumn = rowColumns_[key];
-      const auto rightColumn = otherStream.rowColumns_[key];
-      const bool leftNull = RowContainer::isNullAt(left, leftColumn);
-      const bool rightNull = RowContainer::isNullAt(right, rightColumn);
-      if (leftNull || rightNull) {
-        if (leftNull != rightNull) {
-          return leftNull == flags.nullsFirst ? -1 : 1;
-        }
-        continue;
-      }
-      int32_t result;
-      if (type->kind() == TypeKind::VARCHAR ||
-          type->kind() == TypeKind::VARBINARY) {
-        auto leftValue =
-            RowContainer::valueAt<StringView>(left, leftColumn.offset());
-        auto rightValue =
-            RowContainer::valueAt<StringView>(right, rightColumn.offset());
-        std::string leftStorage, rightStorage;
-        if (origin_ == AggregationRowOrigin::kRowContainer) {
-          leftValue =
-              HashStringAllocator::contiguousString(leftValue, leftStorage);
-        }
-        if (otherStream.origin_ == AggregationRowOrigin::kRowContainer) {
-          rightValue =
-              HashStringAllocator::contiguousString(rightValue, rightStorage);
-        }
-        result = leftValue.compare(rightValue);
-        if (!flags.ascending) {
-          result = -result;
-        }
-      } else {
-        const auto streamFor =
-            [](char* row, RowColumn column, AggregationRowOrigin origin) {
-              if (origin == AggregationRowOrigin::kRowContainer) {
-                return RowContainer::prepareRead(row, column.offset());
-              }
-              const auto value =
-                  RowContainer::valueAt<std::string_view>(row, column.offset());
-              return std::make_unique<ByteInputStream>(std::vector<ByteRange>{
-                  {reinterpret_cast<uint8_t*>(const_cast<char*>(value.data())),
-                   static_cast<int32_t>(value.size()),
-                   0}});
-            };
-        auto leftStream = streamFor(left, leftColumn, origin_);
-        auto rightStream = streamFor(right, rightColumn, otherStream.origin_);
-        result = ContainerRowSerde::compare(
-            *leftStream, *rightStream, type.get(), flags);
-      }
-      if (result != 0) {
-        return result;
-      }
-      continue;
-    }
     const auto result = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
         compareByRow,
         type->kind(),
@@ -602,9 +544,7 @@ uint64_t RowBasedSpillMergeStream::serializedRowSize() const {
   if (!rowLengths_.empty()) {
     return rowLengths_[index_];
   }
-  return origin_ == AggregationRowOrigin::kRowContainer
-      ? info().getRowSize(rowVector_[index_])
-      : ContainerRow2RowSerde::rowSize(rowVector_[index_], info());
+  return ContainerRow2RowSerde::rowSize(rowVector_[index_], info());
 }
 
 RowBasedFileSpillMergeStream::~RowBasedFileSpillMergeStream() {
@@ -738,7 +678,8 @@ class RowContainerRowBasedSpillMergeStream final
       int32_t numSortKeys,
       std::vector<CompareFlags> sortCompareFlags,
       RowFormatInfo rowInfo,
-      DistinctProvenance provenance)
+      DistinctProvenance provenance,
+      RowRowCompare compare)
       : RowBasedSpillMergeStream(
             std::move(rowType),
             rowInfo.rowColumns,
@@ -749,11 +690,19 @@ class RowContainerRowBasedSpillMergeStream final
               return sortCompareFlags;
             }()),
             provenance,
-            AggregationRowOrigin::kRowContainer),
+            compare),
         container_(container),
         rows_(rows),
-        sortCompareFlags_(std::move(sortCompareFlags)),
-        rowInfo_(std::move(rowInfo)) {
+        rowInfo_(std::move(rowInfo)),
+        needsMaterialization_(
+            !rowInfo_.variableColumns.empty() ||
+            !rowInfo_.serializableAccumulators.empty()),
+        canInitializeStringViews_(
+            rowInfo_.serializableAccumulators.empty() &&
+            std::all_of(
+                rowInfo_.variableColumns.begin(),
+                rowInfo_.variableColumns.end(),
+                [](const auto& column) { return column.first; })) {
     if (!rows_.empty()) {
       nextBatch();
     }
@@ -768,10 +717,8 @@ class RowContainerRowBasedSpillMergeStream final
   }
 
   bool isNextEqual() const override {
-    const auto position = *memoryPosition();
-    return position + 1 < rows_.size() &&
-        container_.compareRows(
-            rows_[position], rows_[position + 1], sortCompareFlags_) == 0;
+    return rowInfo_.nextEqualOffset > 0 &&
+        bits::isBitSet(rowVector_[index_], rowInfo_.nextEqualOffset);
   }
 
  private:
@@ -784,7 +731,6 @@ class RowContainerRowBasedSpillMergeStream final
   }
 
   void loadBatch(bool withLengths) {
-    static constexpr vector_size_t kMaxRows = 64;
     batchBegin_ += rowVector_.size();
     index_ = 0;
     rowVector_.clear();
@@ -792,17 +738,55 @@ class RowContainerRowBasedSpillMergeStream final
     if (batchBegin_ >= rows_.size()) {
       return;
     }
-    const auto count = std::min<uint64_t>(kMaxRows, rows_.size() - batchBegin_);
-    rowVector_.reserve(count);
-    if (withLengths) {
-      rowLengths_.reserve(count);
-    }
-    for (uint64_t i = 0; i < count; ++i) {
-      auto* row = rows_[batchBegin_ + i];
-      rowVector_.push_back(row);
+    const auto limit =
+        std::min<uint64_t>(kResidentBatchRows, rows_.size() - batchBegin_);
+    rowVector_.reserve(limit);
+    if (!needsMaterialization_) {
+      const auto rowSize = rowInfo_.getRowSize(rows_[batchBegin_]);
+      const auto count = std::min<uint64_t>(
+          limit, std::max<uint64_t>(1, kResidentBatchBytes / rowSize));
+      rowVector_.assign(
+          rows_.begin() + batchBegin_, rows_.begin() + batchBegin_ + count);
       if (withLengths) {
-        rowLengths_.push_back(rowInfo_.getRowSize(row));
+        rowLengths_.assign(count, rowSize);
       }
+      return;
+    }
+    rowLengths_.reserve(limit);
+    size_t bytes = 0;
+    for (size_t i = 0; i < limit; ++i) {
+      const auto size = rowInfo_.getRowSize(rows_[batchBegin_ + i]);
+      if (i != 0 && bytes + size > kResidentBatchBytes) {
+        break;
+      }
+      rowLengths_.push_back(size);
+      bytes += size;
+    }
+    // Expose the same row layout as file readers, so comparisons and output
+    // extraction can process a mixed merge in batches. Fixed-width rows above
+    // already have this layout and need no copy.
+    if (rowBuffer_ == nullptr || rowBuffer_->capacity() < bytes) {
+      rowBuffer_ = AlignedBuffer::allocate<char>(bytes, container_.pool());
+    }
+    auto* write = rowBuffer_->asMutable<char>();
+    const auto* end = write + rowBuffer_->capacity();
+    for (size_t i = 0; i < rowLengths_.size(); ++i) {
+      auto* row = write;
+      ContainerRow2RowSerde::serialize(
+          rows_[batchBegin_ + i],
+          write,
+          end,
+          rowInfo_,
+          canInitializeStringViews_);
+      rowLengths_[i] = write - row;
+      if (!canInitializeStringViews_) {
+        rowLengths_[i] =
+            ContainerRow2RowSerde::deserialize(row, rowInfo_, false);
+      }
+      rowVector_.push_back(row);
+    }
+    if (!withLengths) {
+      rowLengths_.clear();
     }
   }
 
@@ -812,8 +796,10 @@ class RowContainerRowBasedSpillMergeStream final
 
   RowContainer& container_;
   const folly::Range<char* const*> rows_;
-  const std::vector<CompareFlags> sortCompareFlags_;
   const RowFormatInfo rowInfo_;
+  const bool needsMaterialization_;
+  const bool canInitializeStringViews_;
+  BufferPtr rowBuffer_;
   uint64_t batchBegin_{0};
 };
 } // namespace
@@ -844,7 +830,8 @@ makeRowContainerRowBasedSpillMergeStream(
     int32_t numSortKeys,
     const std::vector<CompareFlags>& sortCompareFlags,
     const RowFormatInfo& rowInfo,
-    DistinctProvenance provenance) {
+    DistinctProvenance provenance,
+    RowRowCompare compare) {
   return std::make_unique<RowContainerRowBasedSpillMergeStream>(
       container,
       rowType,
@@ -852,7 +839,8 @@ makeRowContainerRowBasedSpillMergeStream(
       numSortKeys,
       sortCompareFlags,
       rowInfo,
-      provenance);
+      provenance,
+      compare);
 }
 
 OwnedSpillPartition::OwnedSpillPartition(SpillPartition&& partition)
