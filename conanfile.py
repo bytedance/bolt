@@ -330,7 +330,7 @@ class BoltConan(ConanFile):
                 options={"shared": test_runtime_shared},
             )
             glog_options = {"shared": test_runtime_shared}
-            if self.settings.os in ["Linux", "FreeBSD"]:
+            if self.settings_build.os in ["Linux", "FreeBSD"]:
                 glog_options["with_unwind"] = False
             self.requires(
                 "glog/0.7.1",
