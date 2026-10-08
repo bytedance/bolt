@@ -111,6 +111,7 @@ header:
     - '.licenserc.yaml'
     - 'license.header'
     - 'bolt/tpch/gen/dbgen/**'
+    - 'bolt/tpcds/gen/dsdgen/**'
     - 'LICENSE'
     - 'MANIFEST.in'
     - 'scripts/conan/patches/**'
