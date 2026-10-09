@@ -1,10 +1,11 @@
-# 最新运行结果分析
+# Latest Benchmark Result Analysis
 
-本文整理 `/data00/home/wangxinshuo.db/bolt/log.txt` 中的最新运行结果。
+This document summarizes the latest results in
+`/data00/home/wangxinshuo.db/bolt/log.txt`.
 
-## 运行条件
+## Test Conditions
 
-本轮运行使用 buffered IO：
+This run used buffered I/O:
 
 ```text
 direct=0
@@ -13,19 +14,19 @@ norandommap=1
 DROP_CACHES=1
 DROP_CACHES_DEBUG=1
 runtime=90s
-fio 和 scheduler 使用不同数据文件
+fio and the scheduler used different data files
 ```
 
-`drop_caches` 在每次运行 fio 或 scheduler 前执行：
+The benchmark dropped caches before every fio or scheduler run:
 
 ```bash
 sync
 sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
 ```
 
-## Page Cache 清理结果
+## Page Cache Reset Results
 
-日志显示 `drop_caches` 生效。典型样例：
+The logs show that `drop_caches` took effect. A representative sample follows:
 
 ```text
 drop_caches before:
@@ -41,7 +42,7 @@ Dirty:               608 kB
 Writeback:             0 kB
 ```
 
-write 场景前也能看到 dirty page 被清理：
+Dirty pages were also cleared before write scenarios:
 
 ```text
 drop_caches before:
@@ -55,11 +56,12 @@ Dirty:                84 kB
 Writeback:             0 kB
 ```
 
-结论：OS page cache 和 dirty/writeback 状态确实在每次 benchmark 前被重置到较低水平。
+Conclusion: the OS page cache and dirty/writeback state were reset to low
+levels before each benchmark run.
 
-## 性能结果汇总
+## Performance Summary
 
-| 场景 | 后端 | Block | QD | IOPS | BW MiB/s | p50 us | p99 us | errors |
+| Scenario | Backend | Block | QD | IOPS | BW MiB/s | p50 us | p99 us | Errors |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | bandwidth_read | fio | 1 MiB | 128 | 2379.02 | 2379.02 | 20316.16 | 717225.98 | 0 |
 | bandwidth_read | scheduler | 1 MiB | 128 | 5575.83 | 5575.83 | 24703.00 | 54286.00 | 0 |
@@ -70,7 +72,7 @@ Writeback:             0 kB
 | iops_write | fio | 4 KiB | 256 | 377502.38 | 1474.62 | 667.65 | 864.26 | 0 |
 | iops_write | scheduler | 4 KiB | 256 | 478280.00 | 1868.28 | 448.00 | 1066.00 | 0 |
 
-相对 fio 的 scheduler 结果：
+Scheduler results relative to fio:
 
 ```text
 bandwidth_read   +134.38%
@@ -79,11 +81,11 @@ iops_read        +3859.87%
 iops_write       +26.70%
 ```
 
-## Scheduler 细分耗时
+## Scheduler Timing Breakdown
 
 ### bandwidth_write
 
-`bandwidth_write` 是本轮重点关注场景。
+`bandwidth_write` was the primary scenario of interest in this run.
 
 ```text
 average_device_latency_us=43574
@@ -103,17 +105,26 @@ average_completion_batch_size=1.00001
 max_observed_inflight_requests=128
 ```
 
-这些数据说明：
+These measurements indicate the following:
 
-1. `max_observed_inflight_requests=128`，scheduler 能把 fixed depth 打满。
-2. `average_queue_wait_us=5.78`，请求没有堵在 scheduler pending queue。
-3. `average_backend_submit_us=0.0158`，`io_uring_submit` 路径不是瓶颈。
-4. `average_backend_reap_us=0.0022`，reap CQE 不是瓶颈。
-5. `average_future_fulfill_us=1.1083`，future fulfill 不是瓶颈。
-6. `average_device_latency_us=43574`，长耗时发生在 submit 后等待内核 completion 的阶段。
-7. `max_worker_wait_us=1690606` 和 `max_latency_us=1733065` 接近，说明长尾期间 worker 主要在 epoll 等待 completion event。
+1. `max_observed_inflight_requests=128`: the scheduler can saturate the fixed
+   queue depth.
+2. `average_queue_wait_us=5.78`: requests do not stall in the scheduler's
+   pending queue.
+3. `average_backend_submit_us=0.0158`: the `io_uring_submit` path is not the
+   bottleneck.
+4. `average_backend_reap_us=0.0022`: reaping CQEs is not the bottleneck.
+5. `average_future_fulfill_us=1.1083`: fulfilling futures is not the
+   bottleneck.
+6. `average_device_latency_us=43574`: the long delay occurs after submission
+   while waiting for kernel completion.
+7. `max_worker_wait_us=1690606` is close to `max_latency_us=1733065`, showing
+   that the worker mostly waits in epoll for completion events during the tail
+   latency interval.
 
-因此，`bandwidth_write` 的瓶颈不在 scheduler 用户态 submit/reap/future 路径，而在 buffered write 的内核 completion/writeback 路径。
+Therefore, the `bandwidth_write` bottleneck is not in the scheduler's
+user-space submit, reap, or future path. It is in the kernel completion and
+writeback path for buffered writes.
 
 ### bandwidth_read
 
@@ -128,7 +139,11 @@ average_completion_batch_size=49.6144
 max_observed_inflight_requests=120
 ```
 
-read 场景 completion batch 较大，submit/completion batch size 都约为 49。这里 `average_backend_submit_us=177.849` 明显高于 write，说明 buffered read 场景可能有一部分工作在 `io_uring_submit()` 调用内完成或阻塞，但整体吞吐仍高于 fio。
+The read scenario has large completion batches, with both submit and
+completion batch sizes around 49. `average_backend_submit_us=177.849` is
+significantly higher than for writes. This suggests that some work in the
+buffered-read scenario may complete or block inside `io_uring_submit()`, even
+though overall throughput remains higher than fio.
 
 ### iops_write
 
@@ -143,7 +158,11 @@ average_submit_batch_size=7.15592
 average_completion_batch_size=7.04089
 ```
 
-4 KiB write 下 scheduler 的平均 submit/reap/future 开销很低，吞吐高于 fio。`max_latency_us` 和 `max_worker_wait_us` 仍出现长尾，说明小块 write 也可能遇到内核侧偶发等待，但平均影响较小。
+For 4 KiB writes, the scheduler's average submit, reap, and future overhead is
+low, and throughput is higher than fio. `max_latency_us` and
+`max_worker_wait_us` still show long-tail events, indicating that small writes
+can also encounter occasional kernel-side waits, but with limited effect on
+the average.
 
 ### iops_read
 
@@ -158,20 +177,40 @@ average_submit_batch_size=94.5906
 average_completion_batch_size=94.5906
 ```
 
-4 KiB read 的 scheduler 路径非常快，completion batch 较大。需要注意的是，在 `DROP_CACHES=1` 且 buffered read 场景下，scheduler 因为运行速度更快，会更快把自己的文件读热并反复命中 page cache；因此 `iops_read` 的巨大领先不能直接解释为纯 scheduler 开销优势。
+The scheduler path is very fast for 4 KiB reads and uses large completion
+batches. However, with `DROP_CACHES=1` and buffered reads, the faster scheduler
+warms its own file sooner and repeatedly hits the page cache. The large
+`iops_read` lead therefore cannot be attributed solely to lower scheduler
+overhead.
 
-## 结论
+## Conclusions
 
-1. `drop_caches` 已确认生效，日志中 `Cached`、`Dirty`、`Writeback` 在 drop 后明显下降。
-2. 本轮四个场景均 `errors=0`。
-3. `bandwidth_write` 中 scheduler 相比 fio 快 16.12%，但两者都有明显 p99 长尾。
-4. 细分耗时显示，`bandwidth_write` 的长尾不来自 scheduler pending queue、backend submit、backend reap 或 future fulfill。
-5. `bandwidth_write` 的长尾主要发生在 submit 后等待内核 completion 的阶段，结合 dirty page 和 writeback 变化，瓶颈应归因于 buffered write/writeback completion 延迟。
-6. `average_submit_batch_size=1` 是完成一个补一个的稳态表现，不是吞吐低的直接根因。
-7. `iops_read` 在冷 cache + buffered 场景下仍需谨慎解读，因为 scheduler 更快进入热 cache 循环，fio 冷读占比更高。
+1. `drop_caches` was confirmed to work: `Cached`, `Dirty`, and `Writeback`
+   dropped substantially after each reset.
+2. All four scenarios completed with `errors=0`.
+3. The scheduler was 16.12% faster than fio in `bandwidth_write`, although both
+   showed significant p99 tail latency.
+4. The timing breakdown shows that the `bandwidth_write` tail latency does not
+   come from the scheduler's pending queue, backend submit, backend reap, or
+   future fulfillment.
+5. The `bandwidth_write` tail latency occurs primarily after submission while
+   waiting for kernel completion. Together with the observed dirty-page and
+   writeback changes, this points to buffered-write/writeback completion
+   latency as the bottleneck.
+6. `average_submit_batch_size=1` is the expected steady state when each
+   completion is immediately replaced; it is not directly responsible for low
+   throughput.
+7. `iops_read` must be interpreted carefully under cold-cache buffered I/O:
+   the scheduler reaches a warm-cache loop sooner, while fio spends a larger
+   fraction of its run on cold reads.
 
-## 后续建议
+## Follow-up Recommendations
 
-1. 如果要进一步验证 writeback 影响，可以对比 `BS=256k`、`BS=512k`、`BS=1m` 的 `bandwidth_write`，观察 p99 和 `average_device_latency_us` 是否随 block size 增大。
-2. 如果要比较纯 IO 栈，后续需要支持 aligned buffer 后增加 `DIRECT=1` 场景。
-3. 如果要评估生产 buffered 行为，当前 `DROP_CACHES=1` 结果适合作为冷 cache 对照；建议同时保留 `DROP_CACHES=0` 的热 cache/稳态结果。
+1. To further validate the effect of writeback, compare `bandwidth_write` with
+   `BS=256k`, `BS=512k`, and `BS=1m`, and observe whether p99 and
+   `average_device_latency_us` increase with block size.
+2. To compare the raw I/O stacks, add a `DIRECT=1` scenario after aligned
+   buffers are supported.
+3. To evaluate production buffered-I/O behavior, retain the current
+   `DROP_CACHES=1` results as a cold-cache baseline and also collect
+   `DROP_CACHES=0` warm-cache or steady-state results.
