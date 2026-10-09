@@ -199,12 +199,23 @@ class BoltShuffleWriter : public ShuffleWriter {
     uint64_t valueOffset;
   };
 
-  // Factory method to create a ShuffleWriter instance depending on the
-  // options and the first input batch statistics. May return BoltShuffleWriter
-  // (V1), BoltShuffleWriterV2, RowBasedSortShuffleWriter or
-  // cell::CellShuffleWriter. Cell input types are validated at the input
-  // adapter and layout boundaries, without type-based fallback.
-  static std::shared_ptr<ShuffleWriter> create(
+  // Factory method to create a BoltShuffleWriter instance depending on the
+  // options and input RowVector. May return
+  // BoltShuffleWriter/BoltShuffleWriterV2 or RowBasedSortShuffleWriter.
+  // The Cell writer is not a BoltShuffleWriter: forcing it here fails, use
+  // createShuffleWriter() instead.
+  static std::shared_ptr<BoltShuffleWriter> create(
+      const ShuffleWriterOptions& options,
+      int32_t numColumnsExludePid,
+      int64_t firstBatchRowNumber,
+      int64_t firstBatchFlatSize,
+      int64_t memLimit,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      arrow::MemoryPool* arrowPool);
+
+  // Same selection as create(), additionally able to return
+  // cell::CellShuffleWriter when the Cell writer is forced.
+  static std::shared_ptr<ShuffleWriter> createShuffleWriter(
       const ShuffleWriterOptions& options,
       int32_t numColumnsExludePid,
       int64_t firstBatchRowNumber,
@@ -374,6 +385,14 @@ class BoltShuffleWriter : public ShuffleWriter {
       const std::string& funcLine);
 
   virtual arrow::Status init();
+
+  // Constructs and initializes the writer for an already decided type;
+  // rejects Cell, which is not a BoltShuffleWriter.
+  static std::shared_ptr<BoltShuffleWriter> createForType(
+      ShuffleWriterType type,
+      const ShuffleWriterOptions& options,
+      bytedance::bolt::memory::MemoryPool* boltPool,
+      arrow::MemoryPool* arrowPool);
 
   virtual arrow::Status initPartitions();
 

@@ -94,19 +94,9 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
           static_cast<int32_t>(ShuffleWriterType::V1);
     }
   }
-  auto inputType = asRowType(rv->type());
-  if (options.forceShuffleWriterType ==
-          static_cast<int32_t>(ShuffleWriterType::Cell) &&
-      supportAdaptiveShuffleWriter(options.partitioning) &&
-      options.partitionWriterOptions.partitionWriterType ==
-          PartitionWriterType::kLocal) {
-    cellTypeAdapter_ =
-        std::make_unique<cell::CellShuffleTypeAdapter>(inputType);
-    inputType = cellTypeAdapter_->physicalType();
-  }
-  shuffleWriter_ = BoltShuffleWriter::create(
+  shuffleWriter_ = BoltShuffleWriter::createShuffleWriter(
       options,
-      inputType->size() - 1,
+      rv->childrenSize() - 1,
       rv->size(),
       rv->estimateFlatSize(),
       freeMem.value() + pool()->freeBytes(),
@@ -135,23 +125,7 @@ void SparkShuffleWriter::addInput(RowVectorPtr input) {
           << ", pool free: " << pool()->freeBytes()
           << ", pool reserved: " << pool()->reservedBytes()
           << ", total free: " << freeMem.value();
-  arrow::Status status;
-  if (cellTypeAdapter_ && cellTypeAdapter_->hasComplexColumns()) {
-    vector_size_t offset = 0;
-    do {
-      RowVectorPtr physical;
-      {
-        NanosecondTimer timer(&cellConvertTime_);
-        physical = cellTypeAdapter_->encodeNext(input, offset, pool());
-      }
-      status = shuffleWriter_->split(std::move(physical), memLimit);
-      if (!status.ok()) {
-        break;
-      }
-    } while (offset < input->size());
-  } else {
-    status = shuffleWriter_->split(input, memLimit);
-  }
+  auto status = shuffleWriter_->split(input, memLimit);
   BOLT_CHECK(
       status.ok(),
       "Native split: shuffle writer split failed: {}",
@@ -182,7 +156,6 @@ void SparkShuffleWriter::noMoreInput() {
     LOG(INFO) << "ShuffleWriter is null";
   }
 
-  metrics.convertTime += cellConvertTime_;
   metrics.shuffleWriteTime = shuffleWriteTime_;
   metrics.externalReclaimTime = externalReclaimTime_;
 

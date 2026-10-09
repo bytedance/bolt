@@ -21,15 +21,19 @@
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
 
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
+#include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+#include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -231,6 +235,55 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     return payloads;
   }
 
+  /// `n` rows of 1KB single-letter strings beside a small bigint - the
+  /// strings compress far below their size. Row 0 goes to the last
+  /// partition with an 8-byte string, the rest spreads over the others.
+  RowVectorPtr makeCompressibleBatch(
+      int n,
+      int32_t numPartitions,
+      std::mt19937& rng,
+      std::vector<int32_t>& pids) {
+    pids.resize(n);
+    std::vector<std::string> storage(n);
+    std::vector<std::optional<StringView>> views(n);
+    for (int i = 0; i < n; ++i) {
+      pids[i] = i == 0 ? numPartitions - 1 : rng() % (numPartitions - 1);
+      storage[i].assign(i == 0 ? 8 : 1024, static_cast<char>('a' + i % 4));
+      views[i] = StringView(storage[i]);
+    }
+    return makeRowVector(
+        {"v", "s"},
+        {makeFlatVector<int64_t>(n, [](auto row) { return row % 977; }),
+         makeNullableFlatVector<StringView>(views)});
+  }
+
+  /// The run count of every payload in one partition's byte range.
+  std::vector<uint32_t> payloadRunCounts(
+      const CellLayout& layout,
+      const std::string& file,
+      uint64_t offset,
+      uint64_t length) {
+    std::vector<uint32_t> runCounts;
+    const uint64_t end = offset + length;
+    const uint64_t tagBytes = (layout.numWireColumns() + 7) / 8;
+    const uint64_t runHeaderBytes = 1 + 8 + 8ull * layout.numStreams();
+    while (offset < end) {
+      uint32_t runCount;
+      uint32_t nullStored;
+      ::memcpy(&runCount, file.data() + offset + 4, sizeof(runCount));
+      ::memcpy(&nullStored, file.data() + offset + 16, sizeof(nullStored));
+      offset += 24 + nullStored + tagBytes;
+      for (uint32_t run = 0; run < runCount; ++run) {
+        uint64_t stored;
+        ::memcpy(&stored, file.data() + offset + 1, sizeof(stored));
+        offset += runHeaderBytes + stored;
+      }
+      runCounts.push_back(runCount);
+    }
+    EXPECT_EQ(offset, end);
+    return runCounts;
+  }
+
   /// Runs the writer over the batches and verifies, per partition, that the
   /// decoded rows equal the input rows routed to it, in order.
   void roundTrip(
@@ -305,7 +358,7 @@ TEST_F(CellWriterTest, schemaLessFactoryWritesCellPayloads) {
       static_cast<int32_t>(ShuffleWriterType::Cell);
   const auto rows = makeRowVector(
       {makeFlatVector<int64_t>(kRows, [](auto row) { return row * 7; })});
-  auto writer = BoltShuffleWriter::create(
+  auto writer = BoltShuffleWriter::createShuffleWriter(
       options,
       rows->childrenSize(),
       rows->size(),
@@ -323,16 +376,196 @@ TEST_F(CellWriterTest, schemaLessFactoryWritesCellPayloads) {
   roundTrip(options, {pids}, {rows}, cellWriter);
 }
 
-TEST_F(CellWriterTest, pidOnlyInputFailsWithoutChangingWriterType) {
+TEST_F(CellWriterTest, legacyCreateKeepsItsInterfaceAndRejectsCell) {
+  // The default factory keeps its original signature and return type, so
+  // integrations holding a shared_ptr<BoltShuffleWriter> keep compiling.
+  static_assert(std::is_same_v<
+                decltype(BoltShuffleWriter::create(
+                    std::declval<const ShuffleWriterOptions&>(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    nullptr,
+                    nullptr)),
+                std::shared_ptr<BoltShuffleWriter>>);
   auto options = makeOptions(2);
   options.forceShuffleWriterType =
       static_cast<int32_t>(ShuffleWriterType::Cell);
-  auto writer = BoltShuffleWriter::create(
-      options, 0, 1, 0, 1 << 20, pool(), arrow::default_memory_pool());
-  ASSERT_NE(dynamic_cast<CellShuffleWriter*>(writer.get()), nullptr);
-  const auto rows = makeRowVector({"pid"}, {makeFlatVector<int32_t>({0})});
-  EXPECT_THROW(writer->split(rows, 0), BoltException);
-  EXPECT_THROW(CellLayout::create(ROW({}, {})), BoltException);
+  EXPECT_THROW(
+      BoltShuffleWriter::create(
+          options, 1, 1, 0, 1 << 20, pool(), arrow::default_memory_pool()),
+      BoltException);
+}
+
+TEST_F(CellWriterTest, pidOnlyRoundTripsAsHeaderOnlyPayloads) {
+  constexpr vector_size_t kRows = 101;
+  auto options = makeOptions(3);
+  options.forceShuffleWriterType =
+      static_cast<int32_t>(ShuffleWriterType::Cell);
+  auto writer = BoltShuffleWriter::createShuffleWriter(
+      options, 0, kRows, 0, 1 << 20, pool(), arrow::default_memory_pool());
+  auto* cellWriter = dynamic_cast<CellShuffleWriter*>(writer.get());
+  ASSERT_NE(cellWriter, nullptr);
+  auto data = std::make_shared<RowVector>(
+      pool(), ROW({}, {}), nullptr, kRows, std::vector<VectorPtr>{});
+  std::vector<int32_t> pids(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    pids[row] = row % 2; // partition 2 stays empty
+  }
+  roundTrip(options, {pids}, {data}, cellWriter);
+  // One 24-byte header per non-empty partition, carrying the row count.
+  EXPECT_EQ(
+      cellWriter->metrics().partitionLengths,
+      (std::vector<int64_t>{24, 24, 0}));
+  const auto bytes = readFile();
+  EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 51);
+  EXPECT_EQ(static_cast<uint8_t>(bytes[24]), 50);
+}
+
+TEST_F(CellWriterTest, timestampKeepsAllSixteenBytes) {
+  constexpr int32_t n = 1500;
+  const std::vector<Timestamp> extremes = {
+      Timestamp(Timestamp::kMinSeconds, 0),
+      Timestamp(Timestamp::kMaxSeconds, Timestamp::kMaxNanos),
+      Timestamp(-1, 1),
+      Timestamp(0, 999'999'999)};
+  auto timestamps = makeFlatVector<Timestamp>(
+      n,
+      [&](auto row) {
+        return row < extremes.size()
+            ? extremes[row]
+            // Nanosecond precision that a microsecond encoding would lose.
+            : Timestamp(1'700'000'000 + row * 37, (row * 7919) % 1'000'000'000);
+      },
+      [](auto row) { return row % 11 == 5; });
+  auto data = makeRowVector({timestamps});
+  std::vector<int32_t> pids(n);
+  for (int32_t row = 0; row < n; ++row) {
+    pids[row] = row % 4;
+  }
+  auto options = makeOptions(4);
+  options.cellOptions.maxWindowRows = 256;
+  for (const auto& input :
+       {data,
+        makeRowVector({BaseVector::wrapInDictionary(
+            nullptr,
+            makeIndices(n, [](auto row) { return n - row - 1; }),
+            n,
+            timestamps)}),
+        makeRowVector({wrapInLazyDictionary(timestamps)}),
+        makeRowVector({BaseVector::wrapInConstant(n, 1, timestamps)})}) {
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, {pids}, {input}, &writer);
+  }
+
+  // Spilled, merged and all-null batches: both streams stay in lockstep
+  // across Run boundaries and window seals. High-entropy values keep the
+  // encoded streams large enough to cross the chunk cap several times.
+  constexpr vector_size_t kBig = 250'000;
+  std::mt19937_64 rng(97);
+  std::vector<RowVectorPtr> batches;
+  std::vector<std::vector<int32_t>> bigPids;
+  for (int b = 0; b < 4; ++b) {
+    if (b == 1) {
+      batches.push_back(makeRowVector(
+          {BaseVector::createNullConstant(TIMESTAMP(), kBig, pool())}));
+    } else {
+      batches.push_back(makeRowVector({makeFlatVector<Timestamp>(
+          kBig,
+          [&](auto) {
+            return Timestamp(
+                static_cast<int64_t>(rng() % 4'000'000'000'000) -
+                    2'000'000'000'000,
+                rng() % 1'000'000'000);
+          },
+          [](auto row) { return row % 13 == 3; })}));
+    }
+    std::vector<int32_t> batchPids(kBig);
+    for (auto& pid : batchPids) {
+      pid = rng() % 4;
+    }
+    bigPids.push_back(std::move(batchPids));
+  }
+  auto spillOptions = makeOptions(4);
+  // One chunk of cells at most: every further growth spills a Run first.
+  spillOptions.cellOptions.cellMemoryCapBytes = 4 << 20;
+  spillOptions.cellOptions.checkpointPartitionBytes = 1 << 20;
+  CellShuffleWriter spilling(
+      spillOptions, pool(), arrow::default_memory_pool());
+  roundTrip(spillOptions, bigPids, batches, &spilling);
+  EXPECT_GT(spilling.metrics().totalBytesEvicted, 0);
+  EXPECT_GT(spilling.metrics().spillCount, 0);
+}
+
+TEST_F(CellWriterTest, rejectsOutOfRangeTimestamp) {
+  const auto layout = CellLayout::create(ROW({TIMESTAMP()}));
+  const auto payload = [](int64_t seconds, int64_t nanos) {
+    std::string secondsStream;
+    std::string nanosStream;
+    encodeStream<int64_t>(&seconds, 1, secondsStream);
+    encodeStream<int64_t>(&nanos, 1, nanosStream);
+    std::string bytes(24, '\0');
+    bytes[0] = 1; // row_count
+    bytes[4] = 1; // run_count
+    bytes[16] = 1; // null_stored_size: one tags byte
+    bytes.push_back(0x01); // NO_NULL
+    bytes.push_back(0x00); // encoding tags
+    bytes.push_back(static_cast<char>(RunLayout::kCombinedStored));
+    const auto appendU64 = [&](uint64_t value) {
+      bytes.append(reinterpret_cast<const char*>(&value), 8);
+    };
+    appendU64(secondsStream.size() + nanosStream.size());
+    appendU64(secondsStream.size());
+    appendU64(nanosStream.size());
+    return bytes + secondsStream + nanosStream;
+  };
+  CellPayloadDecoder decoder(layout, nullptr, pool());
+  const auto decode = [&](const std::string& bytes, RowVectorPtr& output) {
+    MemoryByteSource source(
+        reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    std::string error;
+    return decoder.decode(source, output, error);
+  };
+  RowVectorPtr output;
+  ASSERT_TRUE(decode(payload(-5, 999'999'999), output));
+  EXPECT_EQ(
+      output->childAt(0)->as<FlatVector<Timestamp>>()->valueAt(0),
+      Timestamp(-5, 999'999'999));
+  EXPECT_FALSE(decode(payload(0, 1'000'000'000), output));
+  EXPECT_FALSE(decode(payload(0, -1), output));
+  EXPECT_FALSE(decode(payload(Timestamp::kMaxSeconds + 1, 0), output));
+}
+
+TEST_F(CellWriterTest, lazyInputIsSlicedByLoadedBytes) {
+  // Lazy children estimate as zero bytes until loaded; the byte bound must
+  // still split a batch whose loaded size exceeds it.
+  constexpr vector_size_t kRows = 3300;
+  constexpr int32_t kValueBytes = 64 << 10;
+  auto chars = AlignedBuffer::allocate<char>(
+      static_cast<size_t>(kRows) * kValueBytes, pool());
+  ::memset(chars->asMutable<char>(), 'q', chars->size());
+  auto views = AlignedBuffer::allocate<StringView>(kRows, pool());
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    views->asMutable<StringView>()[row] = StringView(
+        chars->as<char>() + static_cast<size_t>(row) * kValueBytes,
+        kValueBytes);
+  }
+  auto strings = std::make_shared<FlatVector<StringView>>(
+      pool(),
+      VARBINARY(),
+      nullptr,
+      kRows,
+      views,
+      std::vector<BufferPtr>{chars});
+  auto lazy = makeRowVector({wrapInLazyDictionary(strings)});
+  ASSERT_GT(kRows * int64_t{kValueBytes}, kMaxShuffleWriterBatchBytes);
+  auto options = makeOptions(1);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  ASSERT_TRUE(
+      writer.split(withPid(std::vector<int32_t>(kRows, 0), lazy), 0).ok());
+  EXPECT_GE(writer.metrics().totalInputBatches, 2);
+  ASSERT_TRUE(writer.stop().ok());
 }
 
 TEST_F(CellWriterTest, variantSchemasFailWithoutChangingWriterType) {
@@ -348,12 +581,12 @@ TEST_F(CellWriterTest, variantSchemasFailWithoutChangingWriterType) {
     // as well as a top-level VARIANT, before converting complex values.
     EXPECT_THROW(CellShuffleTypeAdapter{logicalType}, BoltException);
 
-    auto writer = BoltShuffleWriter::create(
+    auto writer = BoltShuffleWriter::createShuffleWriter(
         options, 1, 1, 0, 1 << 20, pool(), arrow::default_memory_pool());
     ASSERT_NE(dynamic_cast<CellShuffleWriter*>(writer.get()), nullptr);
     const auto rows = makeRowVector({BaseVector::create(type, 1, pool())});
-    // Direct callers bypassing the adapter still fail in Cell's layout
-    // validation instead of silently producing a different payload format.
+    // The writer's own adapter rejects it instead of silently producing a
+    // different payload format.
     EXPECT_THROW(writer->split(withPid({0}, rows), 0), BoltException);
   }
 }
@@ -774,12 +1007,19 @@ TEST_F(CellWriterTest, complexByteBounds) {
   EXPECT_EQ(decodeOffset, 3);
   bolt::test::assertEqualVectors(input->slice(2, 1), second);
 
-  std::string oversized(64ULL << 20, 'z');
-  auto tooLarge = makeRowVector(
-      {makeRowVector({makeFlatVector<StringView>({StringView(oversized)})})});
+  // No per-row size cap: a row beyond the batch target forms its own batch.
+  std::string oversized((64ULL << 20) + 1, 'z');
+  auto large = makeRowVector({makeRowVector({makeFlatVector<StringView>(
+      {StringView(oversized), StringView(text)})})});
   offset = 0;
-  EXPECT_THROW(adapter.encodeNext(tooLarge, offset, pool()), BoltException);
-  EXPECT_EQ(offset, 0);
+  physical = adapter.encodeNext(large, offset, pool());
+  EXPECT_EQ(offset, 1);
+  bolt::test::assertEqualVectors(
+      large->slice(0, 1), decodeComplex(adapter, physical));
+  physical = adapter.encodeNext(large, offset, pool());
+  EXPECT_EQ(offset, 2);
+  bolt::test::assertEqualVectors(
+      large->slice(1, 1), decodeComplex(adapter, physical));
 }
 
 TEST_F(CellWriterTest, rejectsInvalidBooleanAndMissingNullBody) {
@@ -954,6 +1194,243 @@ TEST_F(CellWriterTest, compressionCodecShrinksSpillsAndRoundTrips) {
   EXPECT_LT(compressedSpillBytes * 2, rawSpillBytes)
       << "compressed spill " << compressedSpillBytes << " vs raw "
       << rawSpillBytes;
+}
+
+TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(31);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  // ~4MB per batch: with an 8MB chunk cap every window sees several
+  // pressure spills. The last partition takes one short row per batch, so
+  // its segments stay below the compression minimum - stored at spill time
+  // even with compressSpill, and final as they are. The closing small
+  // batch leaves resident cells beside the last window's spilled segments.
+  for (int batch = 0; batch < 9; ++batch) {
+    pids.emplace_back();
+    batches.push_back(makeCompressibleBatch(
+        batch < 8 ? 4096 : 256, kPartitions, rng, pids.back()));
+  }
+  const auto layout = CellLayout::create(asRowType(batches[0]->type()));
+  // Sealed windows (the first payload of a partition spans several spill
+  // runs), then one window only: the residual payload gathers its spilled
+  // segments together with the resident cells.
+  for (const bool seal : {true, false}) {
+    for (const bool coalesce : {true, false}) {
+      SCOPED_TRACE(
+          std::string(seal ? "sealed windows" : "residual window") + ", " +
+          (coalesce ? "coalesced" : "run per segment"));
+      int64_t evicted[2] = {0, 0};
+      int64_t written[2] = {0, 0};
+      for (const bool compressSpill : {true, false}) {
+        auto options = makeOptions(kPartitions);
+        options.partitionWriterOptions.compressionType =
+            arrow::Compression::LZ4_FRAME;
+        options.cellOptions.compressSpill = compressSpill;
+        options.cellOptions.coalesceMergedRuns = coalesce;
+        options.cellOptions.cellMemoryCapBytes = 8 << 20;
+        options.cellOptions.checkpointPartitionBytes =
+            seal ? 4 << 20 : 1LL << 30;
+        CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+        roundTrip(options, pids, batches, &writer);
+        const auto& metrics = writer.metrics();
+        EXPECT_GT(metrics.totalBytesEvicted, 0);
+        EXPECT_EQ(metrics.spillCount > 0, seal); // sealed windows
+        const auto file = readFile();
+        const auto runCounts =
+            payloadRunCounts(layout, file, 0, metrics.partitionLengths[0]);
+        ASSERT_FALSE(runCounts.empty());
+        if (seal) {
+          EXPECT_GE(runCounts.size(), 2);
+        } else {
+          EXPECT_EQ(runCounts.size(), 1);
+        }
+        if (coalesce) {
+          EXPECT_EQ(runCounts[0], 1);
+        } else {
+          // Spilled segments, plus the resident cells when not sealed.
+          EXPECT_GE(runCounts[0], 2);
+        }
+        evicted[compressSpill] = metrics.totalBytesEvicted;
+        written[compressSpill] = metrics.totalBytesWritten;
+        ::unlink(dataFile_.c_str());
+      }
+      EXPECT_LT(evicted[1] * 2, evicted[0]);
+      // Spill compression changes what hits the spill file, never the
+      // final file: verbatim and re-merged runs carry the same bytes.
+      EXPECT_EQ(written[1], written[0]);
+    }
+  }
+}
+
+TEST_F(CellWriterTest, unfundedSpillCompressionIsMadeAtMerge) {
+  // A pressure spill whose pool cannot fund the compression workspace
+  // streams its runs out stored; those segments are not final, so the
+  // merge makes the compression attempt for them.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(37);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  int64_t rawBytes = 0;
+  for (int batch = 0; batch < 8; ++batch) {
+    pids.emplace_back();
+    batches.push_back(
+        makeCompressibleBatch(4096, kPartitions, rng, pids.back()));
+    rawBytes += batches.back()->estimateFlatSize();
+  }
+  auto root = memory::memoryManager()->addRootPool(
+      "unfundedSpillCompression", 24 << 20);
+  auto leaf = root->addLeafChild("writer");
+  const auto setCapacity = [&](int64_t bytes) {
+    static_cast<memory::MemoryPoolImpl*>(root.get())->testingSetCapacity(bytes);
+  };
+  for (const bool coalesce : {true, false}) {
+    SCOPED_TRACE(coalesce ? "coalesced" : "run per segment");
+    auto options = makeOptions(kPartitions);
+    options.partitionWriterOptions.compressionType =
+        arrow::Compression::LZ4_FRAME;
+    options.cellOptions.coalesceMergedRuns = coalesce;
+    options.cellOptions.checkpointPartitionBytes = 4 << 20;
+    setCapacity(24 << 20);
+    CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+    roundTrip(
+        options, pids, batches, &writer, [&](CellShuffleWriter&, uint32_t i) {
+          if (i + 1 == batches.size()) {
+            setCapacity(1LL << 30); // the merge is funded
+          }
+        });
+    const auto& metrics = writer.metrics();
+    EXPECT_GT(metrics.spillCount, 0);
+    // The spills could not compress: the spill file holds raw runs ...
+    EXPECT_GT(metrics.totalBytesEvicted * 2, rawBytes);
+    // ... and the merge compressed them all the same.
+    EXPECT_LT(metrics.totalBytesWritten * 8, rawBytes);
+    ::unlink(dataFile_.c_str());
+  }
+}
+
+TEST_F(CellWriterTest, shrinkIsSafeWhileTheOutputReadsCells) {
+  // Reclaim may shrink idle chunks while the output is reading the cells:
+  // only chunks without a live cell may go, and a seal (which recycles
+  // every cell first) leaves them all idle.
+  const auto rows = makeRowVector(
+      {makeFlatVector<int64_t>(4096, [](auto row) { return row * 31; })});
+  const auto layout = CellLayout::create(asRowType(rows->type()));
+  ChunkAllocator allocator(pool(), 16 << 10, 1 << 10, []() {});
+  RecordingCellOutput output;
+  CellSplitter splitter(layout, 1, allocator, output, *pool());
+  std::string reference;
+  std::string scanned;
+  const auto scan = [&](const CellWindowInput& in, std::string& into) {
+    in.cells->scan(0, 0, [&](const char* data, uint32_t bytes) {
+      into.append(data, bytes);
+    });
+  };
+  output.onSpill = [&](const CellWindowInput& in) {
+    scan(in, reference);
+    allocator.shrink(); // all chunks hold live cells: nothing may move
+    scan(in, scanned);
+  };
+  int64_t releasedAtSeal = 0;
+  output.onSeal = [&](const CellWindowInput&) {
+    releasedAtSeal = allocator.shrink();
+  };
+  std::vector<uint32_t> row2Partition(rows->size(), 0);
+  std::vector<uint32_t> partition2RowCount{static_cast<uint32_t>(rows->size())};
+  std::vector<DecodedVector> decoded(1);
+  decoded[0].decode(*rows->childAt(0));
+  BatchNullClass nullClass = BatchNullClass::kNoNulls;
+  SplitBatch batch;
+  batch.decoded = decoded.data();
+  batch.row2Partition = row2Partition.data();
+  batch.partition2RowCount = partition2RowCount.data();
+  batch.nullClass = &nullClass;
+  batch.numRows = rows->size();
+  batch.rowIndexInPid = nullptr;
+  splitter.split(batch);
+  splitter.sealWindow();
+  EXPECT_FALSE(reference.empty());
+  EXPECT_EQ(scanned, reference);
+  EXPECT_GT(releasedAtSeal, 0);
+}
+
+TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {
+  auto options = makeOptions(2);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  auto data = makeRowVector(
+      {makeFlatVector<int64_t>(4096, [](auto row) { return row; })});
+  ASSERT_TRUE(
+      writer.split(withPid(std::vector<int32_t>(4096, 1), data), 0).ok());
+  ASSERT_TRUE(writer.stop().ok());
+  int64_t actual = -1;
+  ASSERT_TRUE(writer.reclaimFixedSize(1 << 30, &actual).ok());
+  EXPECT_GE(actual, 0);
+}
+
+TEST_F(CellWriterTest, complexColumnsRoundTripThroughWriterAndReader) {
+  // Callers hand logical rows to the writer and get logical rows back from
+  // the reader; the CompactRow packing stays inside the Cell classes.
+  constexpr int32_t kPartitions = 3;
+  constexpr vector_size_t kRows = 3000;
+  auto data = makeRowVector(
+      {"id", "tags", "attrs", "nested"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+       makeArrayVector<int32_t>(
+           kRows,
+           [](auto row) { return row % 4; },
+           [](auto row) { return row; },
+           [](auto row) { return row % 7 == 0; }),
+       makeMapVector<int32_t, int64_t>(
+           kRows,
+           [](auto row) { return row % 3; },
+           [](auto row) { return row; },
+           [](auto row) { return row * 2; }),
+       makeRowVector(
+           {makeFlatVector<std::string>(
+                kRows, [](auto row) { return std::string(row % 20, 'n'); }),
+            makeFlatVector<bool>(kRows, [](auto row) { return row % 2; })},
+           [](auto row) { return row % 11 == 0; })});
+  std::vector<int32_t> pids(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    pids[row] = row % kPartitions;
+  }
+  auto options = makeOptions(kPartitions);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  ASSERT_TRUE(writer.split(withPid(pids, data), 0).ok());
+  ASSERT_TRUE(writer.stop().ok());
+  EXPECT_GT(writer.metrics().convertTime, 0);
+
+  const auto file = readFile();
+  auto codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  uint64_t offset = 0;
+  for (int32_t pid = 0; pid < kPartitions; ++pid) {
+    const auto length = writer.metrics().partitionLengths[pid];
+    auto streams = std::make_shared<test::MemoryReaderStreamIterator>(
+        std::vector<std::vector<char>>{std::vector<char>(
+            file.begin() + offset, file.begin() + offset + length)});
+    offset += length;
+    CellShuffleReader reader(
+        streams,
+        asRowType(data->type()),
+        codec.get(),
+        arrow::default_memory_pool(),
+        pool(),
+        4096,
+        1 << 20);
+    vector_size_t next = pid;
+    while (auto batch = reader.next()) {
+      ASSERT_TRUE(batch->type()->equivalent(*data->type()));
+      for (vector_size_t row = 0; row < batch->size(); ++row) {
+        ASSERT_LT(next, kRows);
+        EXPECT_TRUE(data->equalValueAt(batch.get(), next, row))
+            << "partition " << pid << " row " << next;
+        next += kPartitions;
+      }
+    }
+    EXPECT_GE(next, kRows);
+  }
 }
 
 TEST_F(CellWriterTest, reclaimMidStreamReleasesMemory) {

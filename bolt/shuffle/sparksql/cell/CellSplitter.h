@@ -136,7 +136,14 @@ class CellSplitter {
 
   CellWindowInput windowInput() const;
 
-  void splitConverted(uint32_t col, const SplitBatch& batch);
+  /// Boolean values as 0/1 bytes of a Raw Data stream.
+  template <bool kHasNulls>
+  void splitBoolean(uint32_t col, const SplitBatch& batch);
+
+  /// The full 16-byte Timestamp: seconds and nanos into two Bigint
+  /// Encoding Loop streams whose cache cursors move in lockstep.
+  template <bool kHasNulls, bool kIndexed>
+  void splitTimestamp(uint32_t col, const SplitBatch& batch);
 
   char* cacheLine(uint32_t stream, uint32_t pid) const {
     return cacheBase_ +
