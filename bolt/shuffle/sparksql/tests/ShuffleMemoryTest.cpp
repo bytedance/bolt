@@ -32,6 +32,7 @@
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
 #include "bolt/shuffle/sparksql/partitioner/Partitioning.h"
+#include "bolt/shuffle/sparksql/tests/MockRssClient.h"
 #include "bolt/shuffle/sparksql/tests/ShuffleTestBase.h"
 
 using namespace bytedance::bolt::common::testutil;
@@ -62,6 +63,16 @@ class ShuffleMemoryTest : public ShuffleTestBase {
       int32_t compressionThreshold = kDefaultCompressionThreshold);
 
   void verifyRetainedPayloadPool();
+
+  // Runs the cell writer node over 8 batches of 1024 compressible 8KB rows
+  // under a task `memoryLimit` with operator reclaim on. With `hogBytes`, a
+  // MemoryHog source allocates that much at batch 6, so the arbitrator
+  // reclaims the writer between batches.
+  ShuffleWriterMetrics runCellUnderPressure(
+      PartitionWriterType partitionWriterType,
+      int64_t memoryLimit,
+      int64_t hogBytes,
+      const std::shared_ptr<RssClient>& rssClient);
 
   std::shared_ptr<CompositeRowVector> createCompositeInput(
       const RowVectorPtr& input,
@@ -758,10 +769,11 @@ TEST_F(ShuffleMemoryTest, testCellWriterKeepsDataResidentUnderReclaimableHog) {
   EXPECT_EQ(metrics.spillCount, 0);
 }
 
-// The inverse pressure: a transient allocation forces the arbitrator to
-// reclaim the writer itself between batches. The cell writer must spill its
-// Runs, shrink, and still produce a byte-exact file.
-TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
+ShuffleWriterMetrics ShuffleMemoryTest::runCellUnderPressure(
+    PartitionWriterType partitionWriterType,
+    int64_t memoryLimit,
+    int64_t hogBytes,
+    const std::shared_ptr<RssClient>& rssClient) {
   using namespace bytedance::bolt::exec::test;
 
   constexpr int32_t kNumPartitions = 4;
@@ -779,7 +791,6 @@ TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
     batches.push_back(makeRowVector({"pid", "c0"}, {pidVector, dataVector}));
   }
 
-  const int64_t memoryLimit = 128 * 1024 * 1024;
   auto memoryManagerHolder = TestMemoryManagerHolder::create(
       memoryLimit, /*withOperatorReclaim=*/true);
 
@@ -793,7 +804,8 @@ TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
       static_cast<int32_t>(ShuffleWriterType::Cell);
   writerOptions.partitionWriterOptions.numPartitions = kNumPartitions;
   writerOptions.partitionWriterOptions.partitionWriterType =
-      PartitionWriterType::kLocal;
+      partitionWriterType;
+  writerOptions.partitionWriterOptions.rssClient = rssClient;
   writerOptions.partitionWriterOptions.dataFile =
       tempDir->path + "/shuffle_data.bin";
   writerOptions.partitionWriterOptions.configuredDirs = {localDir};
@@ -804,8 +816,8 @@ TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
       "source",
       rowType,
       batches,
-      kTriggerAt,
-      /*allocBytes=*/100 * 1024 * 1024);
+      hogBytes > 0 ? kTriggerAt : kNumBatches,
+      hogBytes);
   core::PlanNodeId writerId("writer");
   ShuffleWriterMetrics metrics;
   auto reportCallback = [&](const ShuffleWriterMetrics& m) { metrics = m; };
@@ -827,15 +839,57 @@ TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
     while (cursor->moveNext()) {
     }
   });
-  ASSERT_GT(metrics.totalBytesWritten, 0);
   int64_t lengthSum = 0;
   for (const auto length : metrics.partitionLengths) {
     lengthSum += length;
   }
   EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
+  if (partitionWriterType == PartitionWriterType::kCeleborn) {
+    EXPECT_FALSE(
+        std::filesystem::exists(writerOptions.partitionWriterOptions.dataFile));
+    EXPECT_TRUE(std::filesystem::is_empty(localDir))
+        << "a Celeborn shuffle must not spill locally";
+  }
+  return metrics;
+}
+
+// The inverse pressure: a transient allocation forces the arbitrator to
+// reclaim the writer itself between batches. The cell writer must spill its
+// Runs, shrink, and still produce a byte-exact file.
+TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
+  const auto metrics = runCellUnderPressure(
+      PartitionWriterType::kLocal, 128 << 20, 100 << 20, nullptr);
+  ASSERT_GT(metrics.totalBytesWritten, 0);
   EXPECT_GT(metrics.totalBytesEvicted, 0)
       << "reclaim should have forced the writer to spill Runs";
   EXPECT_GT(metrics.externalReclaimTime, 0);
+}
+
+// On Celeborn the same reclaim arrives between batches, where the window is
+// whole: it is pushed at once instead of spilled.
+TEST_F(ShuffleMemoryTest, testCellWriterOnCelebornPushesWhenReclaimed) {
+  auto client = std::make_shared<MockRssClient>();
+  const auto metrics = runCellUnderPressure(
+      PartitionWriterType::kCeleborn, 128 << 20, 100 << 20, client);
+  ASSERT_GT(metrics.totalBytesWritten, 0);
+  EXPECT_GT(metrics.spillCount, 0) << "reclaim should have pushed a window";
+  EXPECT_GT(metrics.externalReclaimTime, 0);
+  int64_t pushed = 0;
+  for (const auto& [pid, bytes] : client->getData()) {
+    pushed += static_cast<int64_t>(bytes.size());
+  }
+  EXPECT_EQ(pushed, metrics.totalBytesWritten);
+}
+
+// A task limit below the data: the Celeborn writer can only release memory
+// by pushing whole windows at batch boundaries, so the slice admission must
+// keep it inside the limit without any local spill.
+TEST_F(ShuffleMemoryTest, testCellWriterOnCelebornFitsATightLimit) {
+  auto client = std::make_shared<MockRssClient>();
+  const auto metrics =
+      runCellUnderPressure(PartitionWriterType::kCeleborn, 40 << 20, 0, client);
+  ASSERT_GT(metrics.totalBytesWritten, 0);
+  EXPECT_GT(metrics.spillCount, 0) << "the limit should have forced pushes";
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::test

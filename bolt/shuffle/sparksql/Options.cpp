@@ -73,7 +73,7 @@ std::string ShuffleReaderOptions::toString() const {
       "shuffleBatchByteSize={} shuffleBufferSize={} numPartitions={} "
       "partitionShortName={} forceShuffleWriterType={} rowFormat={} "
       "rowBasedShuffleThreshold={} checksumEnabled={} "
-      "reuseBufferedInputStream={} reuseColumnBuffer={} partitionWriterType={}",
+      "reuseBufferedInputStream={} reuseColumnBuffer={}",
       arrow::util::Codec::GetCodecAsString(compressionType),
       codecBackend,
       batchSize,
@@ -86,8 +86,7 @@ std::string ShuffleReaderOptions::toString() const {
       rowBasedShuffleThreshold,
       checksumEnabled,
       reuseBufferedInputStream,
-      reuseColumnBuffer,
-      partitionWriterType);
+      reuseColumnBuffer);
 }
 
 std::string PartitionWriterOptions::toString() const {

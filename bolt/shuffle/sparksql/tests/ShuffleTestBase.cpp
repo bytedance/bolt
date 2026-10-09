@@ -644,7 +644,6 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     }
 
     ShuffleReaderOptions readerOptions;
-    readerOptions.partitionWriterType = param.writerType;
     readerOptions.numPartitions = param.numPartitions;
     readerOptions.forceShuffleWriterType = param.shuffleMode;
     readerOptions.rowFormat = param.rowFormat;
