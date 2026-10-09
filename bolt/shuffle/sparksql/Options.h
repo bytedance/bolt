@@ -90,58 +90,21 @@ enum class ShuffleWriterType {
   Cell = 4
 };
 
-// CellShuffleWriter knobs. Memory decisions are made purely from the pool
-// and these values; the legacy memLimit plays no part.
+// Cell memory thresholds and encoding policy; compression uses
+// PartitionWriterOptions.
 struct CellShuffleOptions {
-  // Unit of real allocation and return; matches the pool's reservation
-  // quantum. Power of two.
-  int32_t chunkBytes = 4 << 20;
-  // Bounds of the adaptive DataCell size. Powers of two. The upper bound
-  // keeps a small-partition-count writer from pinning huge tail cells per
-  // (partition, stream) chain (and from faulting in far more fresh pages
-  // than it has data).
-  int32_t minDataCellBytes = 256;
-  int32_t maxDataCellBytes = 64 << 10;
-  // Sizing budget for the cell size formula; 0 derives it from the pool's
-  // max capacity. A sizing hint, not a reservation.
-  int64_t cellMemoryBudgetBytes = 0;
-  // Optional hard self-cap on chunk memory; 0 disables it.
+  // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
   int64_t cellMemoryCapBytes = 0;
-  // A partition whose window exceeds this many appended bytes closes the
-  // window at the next batch boundary (reader-side payload bound).
+  // Close the window at a batch boundary when a partition exceeds this size.
   int64_t checkpointPartitionBytes = 40LL << 20;
-  // Null bitmap memory that forces a window close.
+  // Close the window when total null bitmap memory exceeds this threshold.
   int64_t nullMemLimitBytes = 16LL << 20;
-  // Rows per partition per window bound; keeps payloads under the reader's
-  // row-count sanity limit.
+  // Maximum rows per partition window.
   uint32_t maxWindowRows = 1u << 22;
-  // A payload run below this many bytes is stored uncompressed: codec
-  // overhead is not worth it. Compression is governed by the partition
-  // writer options' compressionType (UNCOMPRESSED disables it everywhere).
-  int64_t compressMinRunBytes = 1 << 10;
-  // Compress runs when they spill, in the final wire form, so the merge
-  // copies them verbatim. Both disk passes then write compressed bytes -
-  // this is an SSD-endurance knob as much as a space one (spilled data is
-  // written twice), at the price of codec time at the spill point instead
-  // of at stop.
-  bool compressSpill = true;
-  // Merge every spilled run of a payload into a single run at finalize:
-  // one run header (1 + 8 + 8 x streams bytes) and one compression
-  // context per partition instead of one per spill. With tens of
-  // thousands of partitions, many columns and frequent spills the
-  // per-run costs dominate the file otherwise; the price is
-  // decompressing spilled segments once during the merge.
-  bool coalesceMergedRuns = true;
-  // String dictionary writing (spec section 8). One probe over the first
-  // batch decides per string column, for the writer's lifetime, whether to
-  // write dictionary form; a wrongly enabled column self-heals per
-  // partition through the fallback tail, a disabled one stays raw forever.
+  // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
-  // Probe gates: the first batch must have at least this many rows (a tiny
-  // batch is a weak signal and a tiny task is not worth a dictionary) ...
-  int32_t dictMinProbeRows = 1024;
-  // ... and average at least this many rows per distinct value.
-  int32_t dictMinRepeatRatio = 4;
+  // Merge runs per partition; disabling avoids gathering the whole window.
+  bool coalesceMergedRuns = true;
 
   /// Returns all options in a human readable form.
   std::string toString() const;
@@ -192,9 +155,7 @@ struct ShuffleReaderOptions {
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 
-  // Which partition writer produced this shuffle. The cell writer falls
-  // back to V1 on remote shuffles for now, and the reader must mirror that
-  // decision.
+  // Matches the writer backend so Cell format selection agrees on both ends.
   PartitionWriterType partitionWriterType = PartitionWriterType::kLocal;
 
   /// Returns the options in a human readable form.
@@ -275,8 +236,7 @@ struct ShuffleWriterMetrics {
   int64_t totalInputBatches{0};
   // CellShuffleWriter: sealed checkpoint windows.
   int64_t spillCount{0};
-  // CellShuffleWriter: rows written as dictionary indexes vs through the
-  // fallback tail, aggregated over dictionary-enabled string columns.
+  // Cell row counts summed over dictionary-enabled columns.
   int64_t dictionaryMatchedRows{0};
   int64_t dictionaryFallbackRows{0};
   int64_t totalBytesWritten{0};

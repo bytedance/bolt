@@ -93,12 +93,10 @@ SparkShuffleReader::SparkShuffleReader(
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
   // Mirror of the writer-side fallback gate: the cell writer is only ever
-  // used for hash/range partitioning, supported column types and
-  // non-composite plans, so the reader picks the cell chain exactly when
-  // the writer did.
+  // used for hash/range partitioning and non-composite plans. Unsupported
+  // types fail at the adapter boundary instead of changing the wire format.
   useCellReader_ = shuffleWriterType_ == ShuffleWriterType::Cell &&
-      supportAdaptiveShuffleWriter(partitioning) && outputType_->size() > 0 &&
-      CellShuffleTypeAdapter::isSupported(outputType_) &&
+      supportAdaptiveShuffleWriter(partitioning) &&
       !operatorCtx_->driverCtx()
            ->queryConfig()
            .isHashAggregationCompositeOutputEnabled() &&
@@ -123,7 +121,8 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
 
   if (useCellReader_) {
     if (!cellShuffleReader_) {
-      cellTypeAdapter_ = std::make_unique<CellShuffleTypeAdapter>(outputType_);
+      cellTypeAdapter_ =
+          std::make_unique<cell::CellShuffleTypeAdapter>(outputType_);
       NanosecondTimer timer(&deserializerCreateTime_);
       cellShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
           readerStreamIterator_,

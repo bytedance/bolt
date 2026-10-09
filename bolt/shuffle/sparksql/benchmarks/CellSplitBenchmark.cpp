@@ -63,6 +63,7 @@ struct Scenario {
 };
 
 memory::MemoryPool* leafPool() {
+  // Cell writers automatically size cells from this pool's capacity.
   static std::shared_ptr<memory::MemoryPool> pool =
       memory::memoryManager()->addLeafPool("cell_split_benchmark");
   return pool.get();
@@ -77,7 +78,10 @@ VectorPtr makeFlatNullable(
 template <typename T>
 VectorPtr makeFlat(const std::vector<T>& values) {
   auto buffer = AlignedBuffer::allocate<T>(values.size(), leafPool());
-  ::memcpy(buffer->template asMutable<T>(), values.data(), values.size() * sizeof(T));
+  ::memcpy(
+      buffer->template asMutable<T>(),
+      values.data(),
+      values.size() * sizeof(T));
   TypePtr type;
   if constexpr (std::is_same_v<T, int64_t>) {
     type = BIGINT();
@@ -225,7 +229,8 @@ Scenario makeFixedScenario(
       children.push_back(
           BaseVector::createNullConstant(BIGINT(), kRowsPerBatch, leafPool()));
     }
-    scenario.batches.push_back(makeBatch(std::move(names), std::move(children)));
+    scenario.batches.push_back(
+        makeBatch(std::move(names), std::move(children)));
   }
   return scenario;
 }
@@ -420,15 +425,11 @@ size_t runWriter(
     options.partitionWriterOptions.dataFile = dataFile;
     options.partitionWriterOptions.configuredDirs = {spillDir};
     options.partitionWriterOptions.numSubDirs = 1;
-    // A production-typical sizing budget; the benchmark pool's capacity is
-    // not a meaningful signal for it.
-    options.cellOptions.cellMemoryBudgetBytes = 512LL << 20;
     options.cellOptions.enableStringDictionary = !disableDict;
     arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
     const auto& first = scenario.batches[0];
     writer = BoltShuffleWriter::create(
         options,
-        asRowType(first->type()),
         first->type()->size() - 1,
         first->size(),
         first->estimateFlatSize(),
@@ -448,8 +449,9 @@ size_t runWriter(
     const auto& metrics = writer->metrics();
     auto& slot = results()
         [scenario.name + "/" +
-         (writerType == 4 ? (disableDict ? "Cell-nodict" : "Cell")
-                          : writerType == 2 ? "V2" : "V1")];
+         (writerType == 4       ? (disableDict ? "Cell-nodict" : "Cell")
+              : writerType == 2 ? "V2"
+                                : "V1")];
     slot.bytes = metrics.totalBytesWritten;
     int64_t raw = 0;
     for (const auto length : metrics.rawPartitionLengths) {
@@ -467,16 +469,16 @@ size_t runWriter(
   return rows;
 }
 
-#define CELL_SPLIT_BENCH(scenarioIndex, suffix)                          \
-  BENCHMARK_MULTI(split_##suffix##_Cell) {                               \
-    return runWriter(4, scenarios()[scenarioIndex]);                     \
-  }                                                                      \
-  BENCHMARK_MULTI(split_##suffix##_V1) {                        \
-    return runWriter(1, scenarios()[scenarioIndex]);                     \
-  }                                                                      \
-  BENCHMARK_MULTI(split_##suffix##_V2) {                        \
-    return runWriter(2, scenarios()[scenarioIndex]);                     \
-  }                                                                      \
+#define CELL_SPLIT_BENCH(scenarioIndex, suffix)      \
+  BENCHMARK_MULTI(split_##suffix##_Cell) {           \
+    return runWriter(4, scenarios()[scenarioIndex]); \
+  }                                                  \
+  BENCHMARK_MULTI(split_##suffix##_V1) {             \
+    return runWriter(1, scenarios()[scenarioIndex]); \
+  }                                                  \
+  BENCHMARK_MULTI(split_##suffix##_V2) {             \
+    return runWriter(2, scenarios()[scenarioIndex]); \
+  }                                                  \
   BENCHMARK_DRAW_LINE();
 
 CELL_SPLIT_BENCH(0, fixed4_P64)
@@ -564,8 +566,15 @@ class BufferStreamIterator final : public ReaderStreamIterator {
   }
 
   void close() override {}
-  void updateMetrics(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
-                     int64_t, int64_t) override {}
+  void updateMetrics(
+      int64_t,
+      int64_t,
+      int64_t,
+      int64_t,
+      int64_t,
+      int64_t,
+      int64_t,
+      int64_t) override {}
 
  private:
   const std::string* const file_;
@@ -654,13 +663,11 @@ WriterPhases runWriterPhases(
   options.partitionWriterOptions.dataFile = dataFile;
   options.partitionWriterOptions.configuredDirs = {spillDir};
   options.partitionWriterOptions.numSubDirs = 1;
-  options.cellOptions.cellMemoryBudgetBytes = 512LL << 20;
   options.cellOptions.enableStringDictionary = !disableDict;
   auto arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
   const auto& first = scenario.batches[0];
   auto writer = BoltShuffleWriter::create(
       options,
-      asRowType(first->type()),
       first->type()->size() - 1,
       first->size(),
       first->estimateFlatSize(),
@@ -760,8 +767,7 @@ ReaderPhases runLegacyReaderPhases(
       continue;
     }
     auto in = std::make_shared<arrow::io::BufferReader>(
-        reinterpret_cast<const uint8_t*>(written.file.data()) + offset,
-        length);
+        reinterpret_cast<const uint8_t*>(written.file.data()) + offset, length);
     offset += length;
     auto deserializer = factory.createDeserializer(std::move(in));
     while (auto batch = deserializer->next()) {
@@ -896,8 +902,9 @@ int main(int argc, char** argv) {
         static_cast<long>(written.bytes),
         static_cast<long>(written.rawBytes),
         written.compressNs / 1e6,
-        written.rows > 0 ? static_cast<double>(written.compressNs) / written.rows
-                         : 0.0,
+        written.rows > 0
+            ? static_cast<double>(written.compressNs) / written.rows
+            : 0.0,
         written.writeNs / 1e6);
   }
   return 0;

@@ -31,7 +31,7 @@
 
 #pragma once
 
-#include "bolt/shuffle/sparksql/CellShuffleTypeAdapter.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 
 #include <atomic>
 #include <cstdint>
@@ -145,7 +145,7 @@ class SparkShuffleWriter : public bytedance::bolt::exec::Operator {
   std::atomic<bool> inShuffleSection_{false};
   uint64_t cellConvertTime_{0};
   std::unique_ptr<BoltArrowMemoryPool> arrowPool_;
-  std::unique_ptr<CellShuffleTypeAdapter> cellTypeAdapter_;
+  std::unique_ptr<cell::CellShuffleTypeAdapter> cellTypeAdapter_;
   std::shared_ptr<ShuffleWriter> shuffleWriter_;
   bool finished_ = false;
   ReportShuffleStatusCallback reportShuffleStatusCallback_;

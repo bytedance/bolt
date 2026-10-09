@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-/// Shared vocabulary of the Cell shuffle writer and reader.
+/// Shared wire format and stream layout of the Cell shuffle writer and reader.
 ///
 /// Wire semantics come from bolt/shuffle/sparksql/ColumnarPayloadFormat.md;
 /// every constant marked "spec" below mirrors a value that document fixes.
@@ -105,8 +105,8 @@ struct CellStream {
 };
 
 /// Maps a shuffle row type (pid column already stripped) onto the spec's
-/// stream model. The factory must have rejected unsupported types before a
-/// layout is built; create() throws on any it cannot map.
+/// stream model. The input adapter converts supported complex types to binary;
+/// create() rejects physical types it cannot map.
 class CellLayout {
  public:
   static bool isSupportedType(const TypePtr& type) {

@@ -1,9 +1,9 @@
 ---
 spec: ColumnarPayload
 format-version: 0
-doc-revision: 6
+doc-revision: 12
 status: Draft
-updated: 2026-09-16
+updated: 2026-10-09
 ---
 
 # ColumnarPayload Binary Format
@@ -62,6 +62,10 @@ ARRAY / MAP / ROW 在进入 Cell 前由独立的 `CellShuffleTypeAdapter` 转换
 即使所有复杂字段都是 Null，这个 Binary 也非 Null；字段的 Null 状态存在
 CompactRow 内。Reader 在 Cell 解码后执行逆变换，恢复原 Schema 与列序。
 嵌套 UNKNOWN 沿用 CompactRow 的 null bits，不改变其格式。
+
+VARIANT 不在 Cell 支持范围内，包括 ARRAY / MAP / ROW 中嵌套的 VARIANT。
+选中 Cell 路径后，Writer / Reader 在 Node 的类型 adapter 入口校验逻辑 Schema；
+不支持的类型直接报错，不按类型静默回退 V1，也不能借复杂列 Binary 转换绕过校验。
 
 记 `W` 为 Schema 中非 UNKNOWN 列的数量。NullTag 与 EncodingTag 均仅为这些
 列分配槽位，按原列序紧密排列；`c` 为逻辑列索引，`w` 为过滤 UNKNOWN 后的索引。
@@ -632,16 +636,27 @@ tags / bitmap / bit-packed 的尾部未使用 bit 必须写 0，但对其校验�
 
   | 路径 | 作用 |
   |---|---|
-  | `CellShuffleTypeAdapter.{h,cpp}` | 集成层逻辑 Schema 与末尾复杂 Binary 的双向转换；Cell 核心不依赖复杂 serde |
+  | `cell/CellShuffleTypeAdapter.{h,cpp}` | 集成层逻辑 Schema 与末尾复杂 Binary 的双向转换；Cell 核心不依赖复杂 serde |
   | `cell/CellEncoding.{h,cpp}` | Encoding Loop 编解码 kernel 与 Null tag 工具（§7、§4.2） |
   | `cell/CellPayload.{h,cpp}` | Reader 侧：payload 解析（§3–§9，含 §10.1 全部 L1 校验）直建 RowVector |
-  | `cell/LocalCellOutput.cpp` + `cell/CachedCellFrontend.cpp` | Writer 侧：Run body / Null 区 / payload 组装与按块编码 |
+  | `cell/CellSplitter.{h,cpp}` | 拥有 DataCells / NullCells 与窗口状态，按块编码并直接调用输出接口 |
+  | `cell/LocalCellOutput.{h,cpp}` | Writer 侧：Run body / Null 区 / payload 组装、本地 spill 与 merge |
   | `cell/CellShuffleWriter.{h,cpp}` / `cell/CellShuffleReader.{h,cpp}` | 引擎接入的写读两端 |
-  | `tests/columnar_payload/Format,Generator,Validator` | 参照编码器与校验器，不依赖引擎 |
-  | `tests/columnar_payload/Conformance.h` | Writer / Reader 接入的接缝，顶部有完整示例 |
-  | `tests/columnar_payload/IntegrationTest.cpp` | 真实 Writer / Reader 的一致性用例，四个配对全部启用 |
-  | `tests/columnar_payload/Standalone.cpp` | 只链参照实现，强制它不沾引擎依赖 |
+  | `tests/CellEncodingTest.cpp` | 编码 kernel 与测试向量校验 |
+  | `tests/CellWriterTest.cpp` | Cell Writer / Reader 端到端测试 |
 
+- 写端由 Writer 拥有 allocator、output 和 splitter；先构造 output，再构造借用
+  `CellOutput&` 的 splitter。Writer 负责 decode、分区、字典 probe 选择和预算调度；
+  splitter 以值成员持有 DataCells / NullCells，并统一管理窗口行数、encoding tags
+  和变量字节。其生命周期入口为 `split()`、`spillRun()`、`sealWindow()` 和
+  `finish(metrics)`，`flushAll()` / `resetWindow()` 为私有操作。
+- Writer factory 根据配置和已有列数参数选择实现，不接收 `inputType`；类型适配和
+  校验由 Node 入口负责。当前保留 Celeborn、Composite 的配置回退；不支持类型
+  或 pid-only 输入直接报错，不另行改变 Writer / Reader 的格式选择。
+- `CellWindowInput` 仅供 splitter 同步调用 output 时借用，不新增窗口对象或缓冲层。
+  Local spill 只排出已链接的 Cell；关窗的 cache 收尾仍允许 grow 回调触发 spill，
+  实际调用 output 时防止重入。`finish()` 保留 resident 数据直接输出的路径。
+  这些职责调整不改变线格式，也不代表已实现 Celeborn 全量 flush。
 - Writer 与 Reader 必须始终位于同一构建单元中，这是 §11.1 的一致性前提，不得让
   其中一侧单独发布或单独回滚；
 - `format-version` 变更的 PR 必须一次性完成：改本文档、改 Writer、改 Reader、更新
@@ -815,6 +830,12 @@ Run 长度 = `1 + 24 + 24 + 17 = 66`。完整 Payload 共 93 bytes：
 
 | `doc-revision` | `format-version` | 日期 | 需改动 | 变更 |
 |---:|---:|---|---|---|
+| 12 | | 2026-10-09 | 仅文档 | 移除 pid-only 回退，零数据列输入由 Cell 入口校验拒绝。线格式不变。 |
+| 11 | | 2026-10-09 | 仅文档 | 明确 VARIANT（含嵌套）不支持，Cell 类型校验在 Node adapter 入口报错，不再按类型回退；记录 factory 边界调整。线格式不变。 |
+| 10 | | 2026-10-08 | 仅文档 | §11.5 明确 splitter 拥有窗口状态并直接调用 output，区分 Writer 调度与内部窗口生命周期。线格式不变。 |
+| 9 | | 2026-10-08 | 仅文档 | §11.5 更新类型适配器路径，统一放入 `cell/` 目录。线格式不变。 |
+| 8 | | 2026-10-08 | 仅文档 | §11.5 更新拆分与编码组件路径为 `cell/CellSplitter.cpp`。线格式不变。 |
+| 7 | | 2026-10-08 | 仅文档 | §11.5 移除已删除的独立参照实现与一致性测试路径，列出保留的 Cell 测试。线格式不变。 |
 | 6 | | 2026-09-16 | Writer / Reader / 测试向量 | 扩展 Boolean、Timestamp、Hugeint；UNKNOWN 不占 tags 或 streams，全 UNKNOWN 仅 24 字节头；明确复杂列入口前聚合为末尾 Binary。无 UNKNOWN 的既有类型布局保持不变。 |
 | 5 | | 2026-08-27 | 仅文档 | §11.5「实现位置」换成落地后的真实路径：cell/ 下的 Writer 与 Reader，四个一致性配对全部启用。 |
 | 4 | | 2026-08-24 | 仅文档 | §11.5 补入参照实现与接入点的实际路径，替换原先的占位。 |
