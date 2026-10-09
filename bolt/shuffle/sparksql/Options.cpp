@@ -55,25 +55,15 @@ const char* rowFormatName(row::RowFormat format) {
 
 std::string CellShuffleOptions::toString() const {
   return fmt::format(
-      "chunkBytes={} minDataCellBytes={} maxDataCellBytes={} "
-      "cellMemoryBudgetBytes={} cellMemoryCapBytes={} "
+      "cellMemoryCapBytes={} "
       "checkpointPartitionBytes={} nullMemLimitBytes={} maxWindowRows={} "
-      "compressMinRunBytes={} compressSpill={} coalesceMergedRuns={} "
-      "enableStringDictionary={} dictMinProbeRows={} dictMinRepeatRatio={}",
-      chunkBytes,
-      minDataCellBytes,
-      maxDataCellBytes,
-      cellMemoryBudgetBytes,
+      "enableStringDictionary={} coalesceMergedRuns={}",
       cellMemoryCapBytes,
       checkpointPartitionBytes,
       nullMemLimitBytes,
       maxWindowRows,
-      compressMinRunBytes,
-      compressSpill,
-      coalesceMergedRuns,
       enableStringDictionary,
-      dictMinProbeRows,
-      dictMinRepeatRatio);
+      coalesceMergedRuns);
 }
 
 std::string ShuffleReaderOptions::toString() const {

@@ -24,12 +24,13 @@
 
 #pragma once
 
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
 
-#include "bolt/shuffle/sparksql/cell/CellTypes.h"
-#include "bolt/shuffle/sparksql/cell/PoolBytes.h"
+#include "bolt/buffer/Buffer.h"
+#include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/vector/ComplexVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -121,6 +122,10 @@ class CellPayloadDecoder {
       memory::MemoryPool* pool,
       CellDecodeLimits limits = {});
 
+  CellPayloadDecoder(const CellPayloadDecoder&) = delete;
+  CellPayloadDecoder& operator=(const CellPayloadDecoder&) = delete;
+  CellPayloadDecoder(CellPayloadDecoder&&) = default;
+
   /// Decodes exactly one payload from `in`. On success fills `out` and
   /// returns true; on malformed input returns false with `error` set and
   /// consumes an unspecified prefix of `in`.
@@ -182,16 +187,16 @@ class CellPayloadDecoder {
   // Per-payload state, reused across calls. The byte buffers sized from
   // untrusted payload fields live in the reader pool so decoded runs stay
   // inside task memory accounting.
-  std::vector<PoolBytes> streamBytes_;
-  PoolBytes nullBody_;
+  std::vector<BufferPtr> streamBytes_;
+  BufferPtr nullBody_;
   std::vector<NullTag> tags_;
   std::vector<uint32_t> nonNullCount_;
   std::vector<const uint8_t*> bitmaps_; // into nullBody_, per column
   std::vector<uint8_t> encodingTags_;
   std::vector<uint64_t> storedSizes_;
   std::vector<uint64_t> decodedSizes_;
-  PoolBytes scratch_;
-  PoolBytes scratch2_;
+  BufferPtr scratch_;
+  BufferPtr scratch2_;
   std::vector<int64_t> lengthScratch_;
 };
 
