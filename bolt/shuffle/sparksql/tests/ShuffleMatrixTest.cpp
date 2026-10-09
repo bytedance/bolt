@@ -95,6 +95,21 @@ TEST_F(CellTypeIntegrationTest, unknownOnlyUsesHeaderPayloads) {
   EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
 }
 
+TEST_F(CellTypeIntegrationTest, pidOnlyUsesHeaderPayloads) {
+  // Column pruning leaves exchanges with no data column (e.g. a count over
+  // a repartition): Cell must carry them end to end as row counts.
+  ShuffleTestParam param{
+      "hash", 4, PartitionWriterType::kLocal, DataTypeGroup::kHighNulls, 4, 2};
+  ShuffleInputData input;
+  input.inputsPerMapper = {{std::make_shared<RowVector>(
+      pool(), ROW({}, {}), nullptr, 2048, std::vector<VectorPtr>{})}};
+  input.inputsPerMapper.push_back(input.inputsPerMapper.front());
+  ShuffleRunResult result;
+  // The harness verifies every partition's row count and contents.
+  executeTestWithCustomInput(param, input, &result);
+  EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+}
+
 // A test suite that runs shuffle tests with different parameters
 class ShuffleMatrixTest : public ShuffleTestBase,
                           public testing::WithParamInterface<ShuffleTestParam> {

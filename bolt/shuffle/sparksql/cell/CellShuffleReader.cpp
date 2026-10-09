@@ -43,7 +43,9 @@ bool CellShuffleReader::StreamSource::read(void* out, size_t n) {
   while (n > 0) {
     const auto result = in_->Read(n, dst);
     BOLT_CHECK(
-        result.ok(), "shuffle stream read failed: {}", result.status().ToString());
+        result.ok(),
+        "shuffle stream read failed: {}",
+        result.status().ToString());
     const auto got = static_cast<size_t>(*result);
     if (got == 0) {
       ended_ = true;
@@ -64,7 +66,9 @@ bool CellShuffleReader::StreamSource::atEnd() const {
   }
   const auto result = in_->Read(1, &peekByte_);
   BOLT_CHECK(
-      result.ok(), "shuffle stream read failed: {}", result.status().ToString());
+      result.ok(),
+      "shuffle stream read failed: {}",
+      result.status().ToString());
   if (*result == 0) {
     ended_ = true;
     return true;
@@ -91,14 +95,15 @@ bool CellShuffleReader::CodecDecompressor::decompress(
 
 CellShuffleReader::CellShuffleReader(
     std::shared_ptr<ReaderStreamIterator> streams,
-    CellLayout layout,
+    const RowTypePtr& outputType,
     Codec* codec,
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
     int32_t batchSize,
     int64_t batchByteSize)
     : streams_(std::move(streams)),
-      layout_(std::move(layout)),
+      adapter_(outputType),
+      layout_(CellLayout::create(adapter_.physicalType())),
       decompressor_(
           codec == nullptr ? nullptr
                            : std::make_unique<CodecDecompressor>(codec)),
@@ -145,6 +150,26 @@ RowVectorPtr CellShuffleReader::concat(const std::vector<RowVectorPtr>& parts) {
 }
 
 RowVectorPtr CellShuffleReader::next() {
+  if (!adapter_.hasComplexColumns()) {
+    return nextPhysical();
+  }
+  if (pending_ == nullptr) {
+    pending_ = nextPhysical();
+    pendingOffset_ = 0;
+    if (pending_ == nullptr) {
+      return nullptr;
+    }
+  }
+  const uint64_t start = nowNs();
+  auto output = adapter_.decodeNext(pending_, pendingOffset_, pool_);
+  if (pendingOffset_ == pending_->size()) {
+    pending_.reset();
+  }
+  decodeTimeNs_ += nowNs() - start;
+  return output;
+}
+
+RowVectorPtr CellShuffleReader::nextPhysical() {
   const uint64_t start = nowNs();
   std::vector<RowVectorPtr> parts;
   int64_t pendingRows = 0;

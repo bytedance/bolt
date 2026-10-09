@@ -105,6 +105,12 @@ struct CellShuffleOptions {
   bool enableStringDictionary = true;
   // Merge runs per partition; disabling avoids gathering the whole window.
   bool coalesceMergedRuns = true;
+  // Compress runs as they spill, so both disk passes write compressed bytes
+  // (SSD endurance). Spilled segments are then final runs, copied verbatim
+  // at merge; only with coalesceMergedRuns, a payload gathered from several
+  // segments is decompressed and compressed again as a single run.
+  // Disabling trades that codec CPU for uncompressed spill writes.
+  bool compressSpill = true;
 
   /// Returns all options in a human readable form.
   std::string toString() const;

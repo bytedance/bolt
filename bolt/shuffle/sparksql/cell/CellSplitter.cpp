@@ -536,37 +536,69 @@ void CellSplitter::dispatchRaw(
   }
 }
 
-// Boolean vectors are bit packed; timestamps use Spark's microsecond wire
-// value.
-void CellSplitter::splitConverted(uint32_t col, const SplitBatch& batch) {
+template <bool kHasNulls>
+void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
-  const auto& decoded = batch.decoded[col];
-  const auto stream = layout_.columnStream(col);
-  auto* cur = cursors(stream);
-  const bool boolean =
-      layout_.rowType()->childAt(col)->kind() == TypeKind::BOOLEAN;
+  auto& decoded = batch.decoded[col];
+  const uint32_t stream = layout_.columnStream(col);
+  uint8_t* __restrict cur = cursors(stream);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
   for (uint32_t row = 0; row < batch.numRows; ++row) {
-    const auto pid = batch.row2Partition[row];
-    if (decoded.isNullAt(row)) {
-      nulls_.setNull(
-          pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
-      continue;
-    }
-    char* slot = cacheLine(stream, pid) + cur[pid];
-    if (boolean) {
-      *slot = decoded.valueAt<bool>(row) ? 1 : 0;
-      ++cur[pid];
-    } else {
-      const int64_t value = decoded.valueAt<Timestamp>(row).toMicros();
-      ::memcpy(slot, &value, sizeof(value));
-      cur[pid] += sizeof(value);
-    }
-    if (cur[pid] == kBlockSourceBytes) {
-      if (boolean) {
-        flushRaw(stream, pid, cur);
-      } else {
-        flushEncoded<int64_t>(stream, pid, cur);
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
       }
+    }
+    cacheLine(stream, pid)[cur[pid]] = decoded.valueAt<bool>(row) ? 1 : 0;
+    if (FOLLY_UNLIKELY(++cur[pid] == kBlockSourceBytes)) {
+      flushRaw(stream, pid, cur);
+    }
+  }
+}
+
+template <bool kHasNulls, bool kIndexed>
+void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col];
+  const Timestamp* __restrict vals = decoded.data<Timestamp>();
+  const uint32_t secondsStream = layout_.columnStream(col);
+  const uint32_t nanosStream = secondsStream + 1;
+  uint8_t* __restrict secondsCur = cursors(secondsStream);
+  uint8_t* __restrict nanosCur = cursors(nanosStream);
+  char* __restrict secondsBase =
+      cacheBase_ + ((static_cast<size_t>(secondsStream) * numPartitions_) << 6);
+  char* __restrict nanosBase =
+      cacheBase_ + ((static_cast<size_t>(nanosStream) * numPartitions_) << 6);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const Timestamp& value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    const int64_t seconds = value.getSeconds();
+    const int64_t nanos = static_cast<int64_t>(value.getNanos());
+    // Both streams hold one 8-byte value per row, so the two cursors are
+    // always equal and both lines fill on the same row.
+    const size_t at = (static_cast<size_t>(pid) << 6) + secondsCur[pid];
+    ::memcpy(secondsBase + at, &seconds, sizeof(int64_t));
+    ::memcpy(nanosBase + at, &nanos, sizeof(int64_t));
+    secondsCur[pid] += sizeof(int64_t);
+    nanosCur[pid] += sizeof(int64_t);
+    if (FOLLY_UNLIKELY(secondsCur[pid] == kBlockSourceBytes)) {
+      flushEncoded<int64_t>(secondsStream, pid, secondsCur);
+      flushEncoded<int64_t>(nanosStream, pid, nanosCur);
     }
   }
 }
@@ -604,9 +636,20 @@ void CellSplitter::split(const SplitBatch& batch) {
         dispatchEncoded<int64_t>(col, batch, hasNulls);
         break;
       case TypeKind::BOOLEAN:
-      case TypeKind::TIMESTAMP:
-        splitConverted(col, batch);
+        hasNulls ? splitBoolean<true>(col, batch)
+                 : splitBoolean<false>(col, batch);
         break;
+      case TypeKind::TIMESTAMP: {
+        const bool indexed = !batch.decoded[col].isIdentityMapping();
+        if (hasNulls) {
+          indexed ? splitTimestamp<true, true>(col, batch)
+                  : splitTimestamp<true, false>(col, batch);
+        } else {
+          indexed ? splitTimestamp<false, true>(col, batch)
+                  : splitTimestamp<false, false>(col, batch);
+        }
+        break;
+      }
       case TypeKind::HUGEINT:
         dispatchRaw<int128_t>(col, batch, hasNulls);
         break;

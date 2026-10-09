@@ -432,6 +432,108 @@ bool CellPayloadDecoder::buildRawColumn(
   return true;
 }
 
+bool CellPayloadDecoder::buildBooleanColumn(
+    uint32_t col,
+    uint32_t rowCount,
+    const TypePtr& type,
+    VectorPtr& out,
+    std::string& error) {
+  const auto bytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
+  const uint32_t nonNull = nonNullCount_[col];
+  if (bytes.size() != nonNull) {
+    return fail(error, "raw stream length mismatch");
+  }
+  const auto* dense = reinterpret_cast<const uint8_t*>(bytes.data());
+  auto values = AlignedBuffer::allocate<bool>(rowCount, pool_);
+  auto* rawValues = values->asMutable<uint64_t>();
+  const uint8_t* bitmap = nonNull == rowCount ? nullptr : bitmaps_[col];
+  uint32_t next = 0;
+  for (uint32_t row = 0; row < rowCount; ++row) {
+    bool value = false;
+    if (nonNull == rowCount || (bitmap != nullptr && bitSet(bitmap, row))) {
+      const uint8_t byte = dense[next++];
+      if (byte > 1) {
+        return fail(error, "invalid boolean byte");
+      }
+      value = byte != 0;
+    }
+    bits::setBit(rawValues, row, value);
+  }
+  out = std::make_shared<FlatVector<bool>>(
+      pool_,
+      type,
+      makeNulls(col, rowCount),
+      rowCount,
+      std::move(values),
+      std::vector<BufferPtr>{});
+  return true;
+}
+
+bool CellPayloadDecoder::buildTimestampColumn(
+    uint32_t col,
+    uint32_t rowCount,
+    const TypePtr& type,
+    VectorPtr& out,
+    std::string& error) {
+  const uint32_t secondsStream = layout_.columnStream(col);
+  const auto secondsBytes = bufferBytes(streamBytes_[secondsStream]);
+  const auto nanosBytes = bufferBytes(streamBytes_[secondsStream + 1]);
+  const uint32_t nonNull = nonNullCount_[col];
+  auto* dense = reinterpret_cast<int64_t*>(resizeBuffer(
+      timestampScratch_,
+      checkedMultiply<size_t>(2 * sizeof(int64_t), nonNull),
+      pool_));
+  int64_t* seconds = dense;
+  int64_t* nanos = dense + nonNull;
+  if (!decodeStream<int64_t>(
+          reinterpret_cast<const uint8_t*>(secondsBytes.data()),
+          secondsBytes.size(),
+          nonNull,
+          seconds) ||
+      !decodeStream<int64_t>(
+          reinterpret_cast<const uint8_t*>(nanosBytes.data()),
+          nanosBytes.size(),
+          nonNull,
+          nanos)) {
+    return fail(error, "malformed timestamp stream");
+  }
+  for (uint32_t i = 0; i < nonNull; ++i) {
+    // Untrusted values must not reach the Timestamp constructor's range
+    // checks, which abort in debug builds.
+    if (seconds[i] < Timestamp::kMinSeconds ||
+        seconds[i] > Timestamp::kMaxSeconds || nanos[i] < 0 ||
+        nanos[i] > static_cast<int64_t>(Timestamp::kMaxNanos)) {
+      return fail(error, "timestamp out of range");
+    }
+  }
+  auto values = AlignedBuffer::allocate<Timestamp>(rowCount, pool_);
+  auto* rawValues = values->asMutable<Timestamp>();
+  if (nonNull == rowCount) {
+    for (uint32_t row = 0; row < rowCount; ++row) {
+      rawValues[row] = Timestamp(seconds[row], nanos[row]);
+    }
+  } else {
+    const uint8_t* bitmap = bitmaps_[col];
+    uint32_t next = 0;
+    for (uint32_t row = 0; row < rowCount; ++row) {
+      if (bitmap != nullptr && bitSet(bitmap, row)) {
+        rawValues[row] = Timestamp(seconds[next], nanos[next]);
+        ++next;
+      } else {
+        rawValues[row] = Timestamp();
+      }
+    }
+  }
+  out = std::make_shared<FlatVector<Timestamp>>(
+      pool_,
+      type,
+      makeNulls(col, rowCount),
+      rowCount,
+      std::move(values),
+      std::vector<BufferPtr>{});
+  return true;
+}
+
 bool CellPayloadDecoder::buildStringColumn(
     uint32_t col,
     uint32_t rowCount,
@@ -483,15 +585,21 @@ bool CellPayloadDecoder::buildStringColumn(
     const auto* data = reinterpret_cast<const uint8_t*>(dataBytes.data());
     const size_t dataSize = dataBytes.size();
     size_t pos = 0;
-    // Entry ranges per dictionary, and each dictionary's matched count.
-    std::vector<std::vector<std::string_view>> dictionaries;
-    std::vector<uint32_t> matched;
+    // Every dictionary's entries in one flat table; per dictionary its
+    // first entry, entry count and matched count.
+    struct Dictionary {
+      size_t firstEntry;
+      size_t numEntries;
+      uint32_t matched;
+    };
+    std::vector<std::string_view> entries;
+    std::vector<Dictionary> dictionaries;
     uint64_t matchedSum = 0;
     while (true) {
       if (pos >= dataSize) {
         return fail(error, "unterminated dictionary sequence");
       }
-      std::vector<std::string_view> entries;
+      const size_t firstEntry = entries.size();
       uint32_t serialized = 0;
       uint8_t marker;
       while (true) {
@@ -522,8 +630,8 @@ bool CellPayloadDecoder::buildStringColumn(
       }
       const uint32_t matchedRows = loadU32(data + pos);
       pos += 4;
-      dictionaries.push_back(std::move(entries));
-      matched.push_back(matchedRows);
+      dictionaries.push_back(
+          {firstEntry, entries.size() - firstEntry, matchedRows});
       if (addOverflows(matchedSum, matchedRows, matchedSum)) {
         return fail(error, "matched counts overflow");
       }
@@ -554,15 +662,15 @@ bool CellPayloadDecoder::buildStringColumn(
 
     // Resolve dictionary hits per segment (rule 19), then the fallback.
     size_t indexPos = 0;
-    for (size_t d = 0; d < dictionaries.size(); ++d) {
-      const auto& entries = dictionaries[d];
-      for (uint32_t i = 0; i < matched[d]; ++i) {
+    for (const auto& dictionary : dictionaries) {
+      for (uint32_t i = 0; i < dictionary.matched; ++i) {
         const uint8_t index = indexes[indexPos++];
-        if (index >= entries.size()) {
+        if (index >= dictionary.numEntries) {
           return fail(error, "dictionary index out of range");
         }
-        resolved.push_back(entries[index]);
-        totalChars += entries[index].size();
+        const auto entry = entries[dictionary.firstEntry + index];
+        resolved.push_back(entry);
+        totalChars += entry.size();
       }
     }
     uint64_t fallbackChars = 0;
@@ -638,7 +746,8 @@ bool CellPayloadDecoder::decode(
   if (layout_.numWireColumns() == 0 &&
       (nullStoredSize != 0 || nullDecodedSize != 0 || runCount != 0 ||
        loadU64(header + 8) != 0)) {
-    return fail(error, "UNKNOWN-only payload must contain only its header");
+    return fail(
+        error, "payload without wire columns must contain only its header");
   }
   if (layout_.numWireColumns() != 0 && nullStoredSize < 1) {
     return fail(error, "null stored size must be at least 1"); // rule 2
@@ -709,34 +818,11 @@ bool CellPayloadDecoder::decode(
         ok = true;
         break;
       case TypeKind::BOOLEAN:
-      case TypeKind::TIMESTAMP: {
-        VectorPtr wire;
-        const bool boolean = type->kind() == TypeKind::BOOLEAN;
-        ok = boolean
-            ? buildRawColumn<int8_t>(col, rowCount, TINYINT(), wire, error)
-            : buildEncodedColumn<int64_t>(col, rowCount, BIGINT(), wire, error);
-        if (!ok) {
-          return false;
-        }
-        children[col] = BaseVector::create(type, rowCount, pool_);
-        for (uint32_t row = 0; row < rowCount; ++row) {
-          if (wire->isNullAt(row)) {
-            children[col]->setNull(row, true);
-          } else if (boolean) {
-            const auto value = wire->as<FlatVector<int8_t>>()->valueAt(row);
-            if (value != 0 && value != 1) {
-              return fail(error, "invalid boolean byte");
-            }
-            children[col]->as<FlatVector<bool>>()->set(row, value != 0);
-          } else {
-            children[col]->as<FlatVector<Timestamp>>()->set(
-                row,
-                Timestamp::fromMicros(
-                    wire->as<FlatVector<int64_t>>()->valueAt(row)));
-          }
-        }
+        ok = buildBooleanColumn(col, rowCount, type, children[col], error);
         break;
-      }
+      case TypeKind::TIMESTAMP:
+        ok = buildTimestampColumn(col, rowCount, type, children[col], error);
+        break;
       case TypeKind::HUGEINT:
         ok =
             buildRawColumn<int128_t>(col, rowCount, type, children[col], error);

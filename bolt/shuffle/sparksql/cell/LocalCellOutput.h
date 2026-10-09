@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdio>
+#include <iosfwd>
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
@@ -27,11 +28,14 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// The ESS backend: Runs and sealed windows go to one temporary spill file;
 /// stop() merges everything into the shuffle data file, partition-major.
 ///
-/// Spill segments are stored in the exact Run body form of the wire format
-/// (COMBINED_STORED, uncompressed), so the final merge is a header plus a
-/// sequential byte copy — nothing is re-parsed or re-assembled. A task whose
-/// data never needed a spill writes payloads straight from the live cells
-/// and touches no temporary file at all.
+/// Spill segments are stored in the exact Run body form of the wire format:
+/// COMBINED when spill compression pays, COMBINED_STORED otherwise. A
+/// payload that is a single run (one spilled segment, or only resident
+/// cells) is a header plus a verbatim copy. With coalesceMergedRuns,
+/// several segments - or segments plus resident cells - are gathered
+/// stream-major and written as one run; without it, each segment stays a
+/// run of its own. A task whose data never needed a spill writes payloads
+/// straight from the live cells and touches no temporary file at all.
 class LocalCellOutput final : public CellOutput {
  public:
   /// `pool` backs the gather/compress workspaces so they stay inside task
@@ -55,10 +59,26 @@ class LocalCellOutput final : public CellOutput {
   }
 
  private:
+  struct SpilledRun {
+    /// P + 1 absolute spill-file offsets; equal neighbours mean an empty
+    /// segment for that partition.
+    std::vector<uint64_t> pidEnds;
+    /// Whether the run's COMBINED_STORED segments already are their final
+    /// form: there is no codec, or spill-time compression was tried and did
+    /// not pay. False with compressSpill off, or when a pressure spill could
+    /// not fund the compression workspace; merge then compresses them.
+    bool storedIsFinal{false};
+  };
+
+  /// One partition's slice of a SpilledRun.
+  struct SpillSegment {
+    uint64_t begin;
+    uint64_t end;
+    bool storedIsFinal;
+  };
+
   struct SealedWindow {
-    /// Per run: P + 1 absolute spill-file offsets; equal neighbours mean an
-    /// empty segment for that partition.
-    std::vector<std::vector<uint64_t>> runPidEnds;
+    std::vector<SpilledRun> runs;
     std::vector<uint64_t> nullOffset;
     std::vector<uint32_t> nullLength;
     std::vector<uint32_t> rowCounts;
@@ -79,6 +99,18 @@ class LocalCellOutput final : public CellOutput {
   /// checkpoint-heavy task cannot flood the log.
   void logWindowDiagnostics(const CellWindowInput& in, bool windowHasData);
 
+  /// Appends "N runs [a, b, ...]" for one window's runs and returns their
+  /// total spill bytes.
+  static uint64_t describeRuns(
+      const std::vector<SpilledRun>& runs,
+      uint32_t numPartitions,
+      std::ostream& os);
+
+  /// The non-empty segments of `pid` across `runs`, oldest first.
+  static std::vector<SpillSegment> partitionSegments(
+      const std::vector<SpilledRun>& runs,
+      uint32_t pid);
+
   /// Appends one partition's payload assembled from a sealed window.
   void writeDiskPayload(
       std::FILE* out,
@@ -87,8 +119,10 @@ class LocalCellOutput final : public CellOutput {
       uint32_t pid);
 
   /// Copies one spilled run segment into the data file: verbatim when it
-  /// was compressed at spill time, else through the compressing run writer.
-  void writeSpilledSegment(std::FILE* out, uint64_t begin, uint64_t end);
+  /// already is in final form, else through the compressing run writer -
+  /// or still verbatim when that writer's workspace cannot be funded, since
+  /// the stored form is a valid run too.
+  void writeSpilledSegment(std::FILE* out, const SpillSegment& segment);
 
   /// Coalesced merge: reads every spilled segment of one partition
   /// (decompressing the ones compressed at spill time), lays their bytes
@@ -96,7 +130,7 @@ class LocalCellOutput final : public CellOutput {
   /// when `resident` is set - as the chronologically last piece of every
   /// stream. Fills the per-stream sizes and returns the total.
   uint64_t gatherPartitionRuns(
-      const std::vector<std::pair<uint64_t, uint64_t>>& segments,
+      const std::vector<SpillSegment>& segments,
       const CellWindowInput* resident,
       uint32_t pid,
       std::vector<uint64_t>& streamSizes);
@@ -121,9 +155,10 @@ class LocalCellOutput final : public CellOutput {
       const uint64_t* decodedSizes);
 
   /// Appends one partition's payload for the current (unsealed) window:
-  /// header, null body and row counts straight from memory, any mid-window
-  /// spilled runs copied from the spill file, and the still-resident cells
-  /// as the final run. The residual never takes a spill round-trip.
+  /// header, null body and row counts straight from memory, then the
+  /// mid-window spilled runs and the still-resident cells - coalesced into
+  /// one run, or as separate runs in that order. The residual never takes a
+  /// spill round-trip.
   void writeCurrentWindowPayload(
       std::FILE* out,
       const CellWindowInput& in,
@@ -135,7 +170,7 @@ class LocalCellOutput final : public CellOutput {
   const CellLayout* const layout_;
   const CellShuffleOptions cellOptions_;
   memory::MemoryPool* const pool_;
-  /// Final-merge codec; null when compressionType is UNCOMPRESSED.
+  /// Spill and merge codec; null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
   /// Time metrics align with the V1/V2 partition writers and never
   /// overlap: compress = codec calls only; write = fwrite/fflush moments
@@ -146,7 +181,8 @@ class LocalCellOutput final : public CellOutput {
   /// Pool-backed workspaces, released after every spill and after finalize
   /// so their capacity never sits on the reservation between uses. When the
   /// pool cannot fund them during a pressure spill, spillRun degrades to
-  /// streaming the run out uncompressed instead of failing.
+  /// streaming the run out uncompressed instead of failing, and the merge
+  /// makes the compression attempt for it.
   BufferPtr runScratch_;
   BufferPtr compressScratch_;
   BufferPtr gather_;
@@ -158,7 +194,7 @@ class LocalCellOutput final : public CellOutput {
   int64_t bytesEvicted_{0};
 
   /// Runs of the still-open window, then folded into a SealedWindow.
-  std::vector<std::vector<uint64_t>> openWindowRuns_;
+  std::vector<SpilledRun> openWindowRuns_;
   std::vector<SealedWindow> sealed_;
 
   uint64_t finalBytes_{0};

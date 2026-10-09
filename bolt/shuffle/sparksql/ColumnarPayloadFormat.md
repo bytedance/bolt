@@ -1,7 +1,7 @@
 ---
 spec: ColumnarPayload
 format-version: 0
-doc-revision: 12
+doc-revision: 13
 status: Draft
 updated: 2026-10-09
 ---
@@ -40,7 +40,7 @@ Shuffle 的列式二进制 Payload 格式，与既有的行式 `RowBlockPayload`
 | 物理类型 | `type_width` | Signedness | 值流编码 |
 |---|---:|---|---|
 | Boolean | 1 | unsigned，值只能为 0 或 1 | Raw Data |
-| Timestamp | 8 | signed，Unix epoch microseconds | Encoding Loop |
+| Timestamp | 8（每条流） | 完整 16 字节值拆为两条 Bigint 流：Seconds（signed，Unix epoch 秒）与 Nanos（`[0, 999999999]`） | 两条 Bigint Encoding Loop（§1.4、§7.1） |
 | Hugeint / long Decimal | 16 | signed，two’s complement little-endian | Raw Data |
 | UNKNOWN | 0 | 恒为 Null | 无 Stream、无 NullTag、无 EncodingTag |
 | TinyInt | 1 | signed | Raw Data |
@@ -56,15 +56,16 @@ String 包括 VARCHAR 和 VARBINARY；Date、interval、short Decimal 使用对�
 INTEGER / BIGINT 表示，逻辑类型由外部 Schema 保留。Schema 中出现表外类型的
 Payload 非法。
 
-ARRAY / MAP / ROW 在进入 Cell 前由独立的 `CellShuffleTypeAdapter` 转换：所有
-复杂列按原始顺序组成一个非 Null ROW，每个输入行用 CompactRow 序列化一次，
-作为唯一的末尾 VARBINARY。保留列（含 pid 和顶层 UNKNOWN）保持相对顺序。
+ARRAY / MAP / ROW 在进入 Cell 编码前由 Writer 内部的
+`CellShuffleTypeAdapter` 转换：所有复杂列按原始顺序组成一个非 Null ROW，
+每个输入行用 CompactRow 序列化一次，作为唯一的末尾 VARBINARY。保留列（含 pid 和顶层 UNKNOWN）保持相对顺序。
 即使所有复杂字段都是 Null，这个 Binary 也非 Null；字段的 Null 状态存在
 CompactRow 内。Reader 在 Cell 解码后执行逆变换，恢复原 Schema 与列序。
 嵌套 UNKNOWN 沿用 CompactRow 的 null bits，不改变其格式。
 
 VARIANT 不在 Cell 支持范围内，包括 ARRAY / MAP / ROW 中嵌套的 VARIANT。
-选中 Cell 路径后，Writer / Reader 在 Node 的类型 adapter 入口校验逻辑 Schema；
+选中 Cell 路径后，`CellShuffleWriter` / `CellShuffleReader` 内部的类型 adapter
+校验逻辑 Schema；
 不支持的类型直接报错，不按类型静默回退 V1，也不能借复杂列 Binary 转换绕过校验。
 
 记 `W` 为 Schema 中非 UNKNOWN 列的数量。NullTag 与 EncodingTag 均仅为这些
@@ -77,18 +78,24 @@ Stream 是格式内的最小物理单位，由外部 Schema 唯一确定：
 
 ```text
 stream_count(c) := 0, if column_schema[c].type == UNKNOWN
-                   2, if column_schema[c].type == String
+                   2, if column_schema[c].type == String or Timestamp
                    1, otherwise
 stream_count_total (S) := sum over c in [0, C) of stream_count(c)
 ```
 
-Stream 按列顺序展开，String 列先 Length/Index Stream、后 Data Stream：
+Stream 按列顺序展开，String 列先 Length/Index Stream、后 Data Stream；Timestamp
+列先 Seconds Stream、后 Nanos Stream，两者都是 Bigint 值流，各含
+`non_null_count[c]` 个值：
 
 ```text
 column 0 (Integer) -> stream 0
 column 1 (String)  -> stream 1 (Length/Index), stream 2 (Data)
 column 2 (Double)  -> stream 3
+column 3 (Timestamp) -> stream 4 (Seconds), stream 5 (Nanos)
 ```
+
+超出 Timestamp 取值范围的 Seconds 或 Nanos 使 Payload 非法；对应校验为 §10.2
+第 30 条（L2），本实现的 Reader 始终执行。
 
 ## 2. 外部上下文
 
@@ -96,7 +103,7 @@ Payload 不自描述。Reader 必须从外层协议取得：
 
 | 名称 | 含义 |
 |---|---|
-| `column_count` (`C`) | 列数量。必须 `>= 1`。 |
+| `column_count` (`C`) | 列数量，`>= 0`；`C == 0` 即只有 pid 的 Shuffle（§9）。 |
 | `column_schema[C]` | 固定列顺序、物理类型、类型宽度、signedness。 |
 | `schema_identity` | 生产端与消费端一致的 Schema ID 或 fingerprint。 |
 | `codec` | 整个 Payload 共用的外部 codec 抽象。 |
@@ -322,6 +329,7 @@ non_null_count[c] := 0,                          if UNKNOWN or ALL_NULL
 | Stream | 内容 | 编码 |
 |---|---|---|
 | SmallInt / Integer / Bigint / Date 值流 | 非 Null 值 | Encoding Loop |
+| Timestamp Seconds / Nanos | 非 Null 值的秒 / 纳秒 | Bigint（`type_width = 8`）Encoding Loop |
 | Boolean / TinyInt / Hugeint / Float / Double 值流 | 非 Null 值 | Raw Data |
 | String Length/Index（RAW tag） | 每个非 Null 值的 byte 长度 | Bigint Encoding Loop |
 | String Length/Index（Dictionary tag） | index 段 + fallback 长度段 | Raw `u8` + Bigint Encoding Loop |
@@ -335,7 +343,8 @@ unsigned 解释结果一致。
 
 Encoding Loop 把 Stream 的源数据切成 Block 逐块独立编码，
 `value_count(block) = source_bytes(block) / type_width`。`type_width` 必须整除 64，
-因此定长 Block 的 `value_count` 为 32 / 16 / 8。
+因此定长 Block 的 `value_count` 为 32 / 16 / 8。`type_width` 取 Stream 的宽度：
+Timestamp 的两条流均按 Bigint 计（8）。
 
 源数据总量由 §6 导出，不单独存储：
 
@@ -472,7 +481,7 @@ sum(fallback_lengths) == len(FallbackRawBytes)
 
 | 情况 | 规定 |
 |---|---|
-| `C == 0` | 非法，Reader 必须拒绝。 |
+| `C == 0` | 合法，即只有 pid 的 Shuffle；按 `W == 0` 处理。 |
 | `W == 0` | 非空分区只写 24 字节定长头：实际 `row_count`，其他字段全部为 0。空分区不产出 Payload。 |
 | `row_count == 0` | 合法。所有非 UNKNOWN 列的 NullTag 应当为 `NO_NULL`，`variable_size` 与 `run_count` 应当为 0。 |
 | `run_count == 0` 且 `row_count > 0` | 仅当所有非 UNKNOWN 列均为 `ALL_NULL` 时合法（UNKNOWN 隐式全 Null）。 |
@@ -499,7 +508,7 @@ sum(fallback_lengths) == len(FallbackRawBytes)
 |---:|---|
 | 1 | 剩余字节足以读出 24 bytes 定长头 |
 | 2 | `W > 0` 时 `null_stored_size >= 1`；`W == 0` 时为 0，且读取 Null body 不越界 |
-| 3 | 读取 `encoding_tags`（`ceil(C/8)` bytes）不越界 |
+| 3 | 读取 `encoding_tags`（`ceil(W/8)` bytes）不越界 |
 | 4 | 若外层协议提供 `payload_size`：所有读取偏移不超过它 |
 | 5 | Null decoded body 实际长度等于 §4.1 的 `expected_size` |
 | 6 | Null decoded body 长度等于 §4.2 由 tags 导出的期望长度（该条同时保证后续所有 bitmap 读取不越界） |
@@ -533,6 +542,7 @@ sum(fallback_lengths) == len(FallbackRawBytes)
 | 27 | Encoding Block 与单个 Dictionary 都不跨 Run 边界（§5.4）。需要在拼接 Stream 时保留每个 Run 的贡献区间 |
 | 28 | `run_count == 0` 且 `row_count > 0` 时，所有列必须为 `ALL_NULL`（§9） |
 | 29 | `FOR_BIT_PACK` 的 `base + delta` 落在物理类型范围内（§7.3 把该义务压在 Writer 上，Reader 可以据此拒绝） |
+| 30 | Timestamp 的 Seconds 落在 Timestamp 秒范围内，Nanos 落在 `[0, 999999999]`（§1.3） |
 
 `variable_size` 不作为校验项（§3.1）。
 
@@ -636,7 +646,7 @@ tags / bitmap / bit-packed 的尾部未使用 bit 必须写 0，但对其校验�
 
   | 路径 | 作用 |
   |---|---|
-  | `cell/CellShuffleTypeAdapter.{h,cpp}` | 集成层逻辑 Schema 与末尾复杂 Binary 的双向转换；Cell 核心不依赖复杂 serde |
+  | `cell/CellShuffleTypeAdapter.{h,cpp}` | 逻辑 Schema 与末尾复杂 Binary 的双向转换，由 CellShuffleWriter / CellShuffleReader 内部持有；Splitter 与 Payload 编解码不依赖复杂 serde |
   | `cell/CellEncoding.{h,cpp}` | Encoding Loop 编解码 kernel 与 Null tag 工具（§7、§4.2） |
   | `cell/CellPayload.{h,cpp}` | Reader 侧：payload 解析（§3–§9，含 §10.1 全部 L1 校验）直建 RowVector |
   | `cell/CellSplitter.{h,cpp}` | 拥有 DataCells / NullCells 与窗口状态，按块编码并直接调用输出接口 |
@@ -651,8 +661,10 @@ tags / bitmap / bit-packed 的尾部未使用 bit 必须写 0，但对其校验�
   和变量字节。其生命周期入口为 `split()`、`spillRun()`、`sealWindow()` 和
   `finish(metrics)`，`flushAll()` / `resetWindow()` 为私有操作。
 - Writer factory 根据配置和已有列数参数选择实现，不接收 `inputType`；类型适配和
-  校验由 Node 入口负责。当前保留 Celeborn、Composite 的配置回退；不支持类型
-  或 pid-only 输入直接报错，不另行改变 Writer / Reader 的格式选择。
+  校验在 `CellShuffleWriter` / `CellShuffleReader` 内部完成，Node 只传逻辑行。`BoltShuffleWriter::create()` 保持原接口，返回
+  `BoltShuffleWriter`，强制 Cell 时报错；`createShuffleWriter()` 才能返回 Cell
+  Writer。当前保留 Celeborn、Composite 的配置回退；不支持类型直接报错，不另行
+  改变 Writer / Reader 的格式选择。pid-only 输入（`C == 0`）走 `W == 0` 路径。
 - `CellWindowInput` 仅供 splitter 同步调用 output 时借用，不新增窗口对象或缓冲层。
   Local spill 只排出已链接的 Cell；关窗的 cache 收尾仍允许 grow 回调触发 spill，
   实际调用 output 时防止重入。`finish()` 保留 resident 数据直接输出的路径。
@@ -679,7 +691,7 @@ Presto / Arrow 序列化器缺少整数列的窄化与位打包。
 
 - 长期存储与跨版本兼容 —— Payload 生命周期不超过一次 Shuffle；
 - 随机访问、谓词下推、列裁剪 —— Reader 总是完整解码 Payload；
-- 嵌套类型（Array / Map / Row）、Decimal、Timestamp、Boolean；
+- 嵌套类型（Array / Map / Row）的原生列式编码 —— 由 §1.3 的 CompactRow 适配器以 Binary 承载；
 - codec 本身，以及分帧、校验和与传输协议。
 
 ### 12.2 设计决策
@@ -754,13 +766,13 @@ bitmap 读取；而 `sum(fallback_lengths) == len(FallbackRawBytes)` 属 L2 —�
 以下均不在线格式中，由 Reader 计算得出：
 
 ```text
-stream_count_total (S)  = sum over c of (2 if String else 1)
+stream_count_total (S)  = sum over c of stream_count(c)  (§1.4)
 runs_offset             = 24 + null_stored_size + ceil(W / 8)
 raw_null_column_count   = #{c : null_tag(c) == RAW_NULL}
 null_body_expected_size = ceil(W * 2 / 8)
                         + raw_null_column_count * ceil(row_count / 8)
 non_null_count[c]       = 0 | row_count | popcount(bitmap[c])
-total_source_bytes[s]   = non_null_count[c] * type_width   // 定宽值流
+total_source_bytes[s]   = non_null_count[c] * type_width   // 定宽值流（Timestamp 每条流为 8）
                         | non_null_count[c] * 8            // RAW 长度流
                         | fallback_value_count[c] * 8      // Dict 长度流尾段
 full_block_count[s]     = total_source_bytes[s] / 64
@@ -830,6 +842,7 @@ Run 长度 = `1 + 24 + 24 + 17 = 66`。完整 Payload 共 93 bytes：
 
 | `doc-revision` | `format-version` | 日期 | 需改动 | 变更 |
 |---:|---:|---|---|---|
+| 13 | | 2026-10-09 | Writer / Reader | Timestamp 改为 Seconds + Nanos 两条 Bigint 流，完整保存 16 字节，Reader 校验取值范围（L2 第 30 条）；`C == 0`（pid-only）合法，按 `W == 0` 只写定长头；类型 adapter 移入 Cell Writer / Reader 内部。 |
 | 12 | | 2026-10-09 | 仅文档 | 移除 pid-only 回退，零数据列输入由 Cell 入口校验拒绝。线格式不变。 |
 | 11 | | 2026-10-09 | 仅文档 | 明确 VARIANT（含嵌套）不支持，Cell 类型校验在 Node adapter 入口报错，不再按类型回退；记录 factory 边界调整。线格式不变。 |
 | 10 | | 2026-10-08 | 仅文档 | §11.5 明确 splitter 拥有窗口状态并直接调用 output，区分 Writer 调度与内部窗口生命周期。线格式不变。 |

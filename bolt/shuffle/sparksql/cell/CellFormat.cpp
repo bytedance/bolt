@@ -60,8 +60,16 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
             {static_cast<uint16_t>(col), StreamKind::kEncoded, 4, true});
         layout.isString_.push_back(false);
         break;
-      case TypeKind::TIMESTAMP:
       case TypeKind::BIGINT:
+        layout.streams_.push_back(
+            {static_cast<uint16_t>(col), StreamKind::kEncoded, 8, true});
+        layout.isString_.push_back(false);
+        break;
+      case TypeKind::TIMESTAMP:
+        // The full 16-byte value: Seconds stream first, Nanos stream second
+        // (spec section 1.4), both Bigint Encoding Loop streams.
+        layout.streams_.push_back(
+            {static_cast<uint16_t>(col), StreamKind::kEncoded, 8, true});
         layout.streams_.push_back(
             {static_cast<uint16_t>(col), StreamKind::kEncoded, 8, true});
         layout.isString_.push_back(false);
