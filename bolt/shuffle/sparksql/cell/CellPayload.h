@@ -86,12 +86,21 @@ class MemoryByteSource final : public CellByteSource {
   size_t pos_{0};
 };
 
-/// Implementation-level bounds on untrusted input (spec section 10.3).
-/// Defaults match the reference validator; zero disables a limit.
+/// Implementation-level bounds on untrusted input (spec section 10.3); zero
+/// disables a limit. The row and run counts match what the writer can emit
+/// (it slices batches to at most 1 << 24 rows per window). Decoded run size
+/// is unbounded by default: a run holds a whole window of one partition and
+/// a single value may reach 2 GiB, so no fixed cap is safe for payloads of
+/// the same-binary writer (spec section 11.1). Every buffer sized from the
+/// run and null-region size fields comes from the reader pool, so a corrupt
+/// size fails on the pool's capacity rather than exhausting the process.
+/// Decode scratch outside the pool (per-row value views, dictionary tables)
+/// is linear in maxRowCount and in those pool-backed stream bytes.
+/// Untrusted deployments set it.
 struct CellDecodeLimits {
   uint32_t maxRowCount{1u << 24};
   uint32_t maxRunCount{1u << 16};
-  uint64_t maxDecodedBytes{1ull << 30};
+  uint64_t maxDecodedBytes{0};
 };
 
 /// The external codec context of spec section 2, decompression side. The
@@ -174,6 +183,20 @@ class CellPayloadDecoder {
       VectorPtr& out,
       std::string& error);
 
+  bool buildBooleanColumn(
+      uint32_t col,
+      uint32_t rowCount,
+      const TypePtr& type,
+      VectorPtr& out,
+      std::string& error);
+
+  bool buildTimestampColumn(
+      uint32_t col,
+      uint32_t rowCount,
+      const TypePtr& type,
+      VectorPtr& out,
+      std::string& error);
+
   /// Nulls buffer for a column: nullptr for NO_NULL, otherwise bits in the
   /// engine convention (bit set = non-null), which is byte-identical to the
   /// spec's bitmap.
@@ -197,6 +220,7 @@ class CellPayloadDecoder {
   std::vector<uint64_t> decodedSizes_;
   BufferPtr scratch_;
   BufferPtr scratch2_;
+  BufferPtr timestampScratch_; // dense seconds then nanos, 2 x non-null
   std::vector<int64_t> lengthScratch_;
 };
 

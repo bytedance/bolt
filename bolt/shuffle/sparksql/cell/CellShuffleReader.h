@@ -18,6 +18,7 @@
 
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -29,12 +30,14 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// payloads into output vectors.
 ///
 /// Deliberately shares nothing with the existing deserializer stack; its
-/// only inputs are the stream iterator, the schema and the codec.
+/// only inputs are the stream iterator, the schema and the codec. Batches
+/// come out in the logical schema: complex columns packed by the writer are
+/// restored here by the type adapter.
 class CellShuffleReader {
  public:
   CellShuffleReader(
       std::shared_ptr<ReaderStreamIterator> streams,
-      CellLayout layout,
+      const RowTypePtr& outputType, // logical row type, no pid column
       Codec* codec, // decompression context; may be null (uncompressed)
       arrow::MemoryPool* arrowPool, // only handed to nextStream()
       memory::MemoryPool* pool,
@@ -44,8 +47,8 @@ class CellShuffleReader {
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();
 
-  /// Total decode time: payload parsing, decompression and vector
-  /// building together.
+  /// Total decode time: payload parsing, decompression, vector building
+  /// and complex-column restoration together.
   uint64_t decodeTimeNs() const {
     return decodeTimeNs_;
   }
@@ -97,9 +100,13 @@ class CellShuffleReader {
   /// Decodes the next payload across streams; false at the end of input.
   bool nextDecoded(RowVectorPtr& out);
 
+  /// Next batch in the physical (Cell) schema; nullptr at the end.
+  RowVectorPtr nextPhysical();
+
   RowVectorPtr concat(const std::vector<RowVectorPtr>& parts);
 
   std::shared_ptr<ReaderStreamIterator> streams_;
+  const CellShuffleTypeAdapter adapter_;
   const CellLayout layout_;
   std::unique_ptr<CodecDecompressor> decompressor_;
   arrow::MemoryPool* const arrowPool_;
@@ -111,6 +118,9 @@ class CellShuffleReader {
   std::unique_ptr<StreamSource> source_;
   bool exhausted_{false};
   uint64_t decodeTimeNs_{0};
+  /// Physical batch whose complex rows are still being restored.
+  RowVectorPtr pending_;
+  vector_size_t pendingOffset_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
