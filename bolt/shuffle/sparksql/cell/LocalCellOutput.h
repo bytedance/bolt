@@ -18,8 +18,8 @@
 
 #include <cstdio>
 
+#include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
-#include "bolt/shuffle/sparksql/cell/PoolBytes.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -134,6 +134,7 @@ class LocalCellOutput final : public CellOutput {
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
   const CellShuffleOptions cellOptions_;
+  memory::MemoryPool* const pool_;
   /// Final-merge codec; null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
   /// Time metrics align with the V1/V2 partition writers and never
@@ -146,9 +147,9 @@ class LocalCellOutput final : public CellOutput {
   /// so their capacity never sits on the reservation between uses. When the
   /// pool cannot fund them during a pressure spill, spillRun degrades to
   /// streaming the run out uncompressed instead of failing.
-  PoolBytes runScratch_;
-  PoolBytes compressScratch_;
-  PoolBytes gather_;
+  BufferPtr runScratch_;
+  BufferPtr compressScratch_;
+  BufferPtr gather_;
 
   std::FILE* spillFile_{nullptr};
   int spillFd_{-1};
@@ -164,7 +165,7 @@ class LocalCellOutput final : public CellOutput {
   uint64_t rawAccum_{0};
   uint64_t evictTimeNs_{0};
   uint64_t writeTimeNs_{0};
-  PoolBytes scratch_;
+  BufferPtr scratch_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

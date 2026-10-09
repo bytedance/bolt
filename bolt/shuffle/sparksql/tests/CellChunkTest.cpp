@@ -19,8 +19,8 @@
 #include <random>
 
 #include "bolt/common/memory/Memory.h"
-#include "bolt/shuffle/sparksql/cell/CellDirectory.h"
-#include "bolt/shuffle/sparksql/cell/CellTypes.h"
+#include "bolt/shuffle/sparksql/cell/CellBuffer.h"
+#include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
@@ -43,16 +43,16 @@ class CellChunkTest : public testing::Test {
 };
 
 TEST_F(CellChunkTest, bumpAllocationAndAddressing) {
-  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
+  int growCalls = 0;
+  ChunkAllocator alloc(
+      pool_.get(), kChunkBytes, kCellBytes, [&]() { ++growCalls; });
   EXPECT_EQ(alloc.allocatedBytes(), 0);
   EXPECT_EQ(alloc.usedCells(), 0);
-
-  int growCalls = 0;
-  const auto grow = [&]() { ++growCalls; };
+  EXPECT_EQ(growCalls, 0);
 
   std::vector<uint32_t> ids;
   for (uint32_t i = 0; i < kCellsPerChunk; ++i) {
-    ids.push_back(alloc.allocCell(grow));
+    ids.push_back(alloc.allocCell());
   }
   EXPECT_EQ(growCalls, 1); // only the very first cell needed a chunk
   EXPECT_EQ(alloc.allocatedBytes(), kChunkBytes);
@@ -72,7 +72,7 @@ TEST_F(CellChunkTest, bumpAllocationAndAddressing) {
   }
 
   // Next cell spills into a second chunk, announced via the callback.
-  alloc.allocCell(grow);
+  alloc.allocCell();
   EXPECT_EQ(growCalls, 2);
   EXPECT_EQ(alloc.allocatedBytes(), 2 * kChunkBytes);
 }
@@ -81,36 +81,43 @@ TEST_F(CellChunkTest, recycleIsReusedBeforeGrowth) {
   ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
   std::vector<uint32_t> ids;
   for (uint32_t i = 0; i < kCellsPerChunk; ++i) {
-    ids.push_back(alloc.allocCell({}));
+    ids.push_back(alloc.allocCell());
   }
   alloc.recycle(ids[3]);
   alloc.recycle(ids[7]);
   EXPECT_EQ(alloc.usedCells(), kCellsPerChunk - 2);
 
   // LIFO reuse, no new chunk.
-  EXPECT_EQ(alloc.allocCell({}), ids[7]);
-  EXPECT_EQ(alloc.allocCell({}), ids[3]);
+  EXPECT_EQ(alloc.allocCell(), ids[7]);
+  EXPECT_EQ(alloc.allocCell(), ids[3]);
   EXPECT_EQ(alloc.allocatedBytes(), kChunkBytes);
   EXPECT_EQ(alloc.usedCells(), kCellsPerChunk);
 }
 
 TEST_F(CellChunkTest, growCallbackMayRecycleInsteadOfGrowing) {
-  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
   std::vector<uint32_t> ids;
+  bool recycleOnGrow = false;
+  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes, [&]() {
+    if (recycleOnGrow) {
+      alloc.recycle(ids[5]);
+    }
+  });
   for (uint32_t i = 0; i < kCellsPerChunk; ++i) {
-    ids.push_back(alloc.allocCell({}));
+    ids.push_back(alloc.allocCell());
   }
   // The callback simulates a spill: it frees a cell, so the allocator must
   // serve from the freelist and not grow.
-  const auto spillingGrow = [&]() { alloc.recycle(ids[5]); };
-  EXPECT_EQ(alloc.allocCell(spillingGrow), ids[5]);
+  recycleOnGrow = true;
+  EXPECT_EQ(alloc.allocCell(), ids[5]);
   EXPECT_EQ(alloc.allocatedBytes(), kChunkBytes);
 }
 
 TEST_F(CellChunkTest, resetAllRetainsChunksAndReusesThem) {
-  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
+  int growCalls = 0;
+  ChunkAllocator alloc(
+      pool_.get(), kChunkBytes, kCellBytes, [&]() { ++growCalls; });
   for (uint32_t i = 0; i < kCellsPerChunk + 5; ++i) {
-    alloc.allocCell({});
+    alloc.allocCell();
   }
   EXPECT_EQ(alloc.allocatedBytes(), 2 * kChunkBytes);
   const auto capacityBefore = alloc.cellIdCapacity();
@@ -119,9 +126,9 @@ TEST_F(CellChunkTest, resetAllRetainsChunksAndReusesThem) {
   EXPECT_EQ(alloc.usedCells(), 0);
   EXPECT_EQ(alloc.allocatedBytes(), 2 * kChunkBytes); // retained
 
-  int growCalls = 0;
+  growCalls = 0;
   for (uint32_t i = 0; i < 2 * kCellsPerChunk; ++i) {
-    alloc.allocCell([&]() { ++growCalls; });
+    alloc.allocCell();
   }
   EXPECT_EQ(growCalls, 0); // fully served by retained chunks
   EXPECT_EQ(alloc.cellIdCapacity(), capacityBefore);
@@ -131,9 +138,9 @@ TEST_F(CellChunkTest, shrinkReleasesIdleChunksAndPurgesFreelist) {
   ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
   std::vector<uint32_t> first;
   for (uint32_t i = 0; i < kCellsPerChunk; ++i) {
-    first.push_back(alloc.allocCell({}));
+    first.push_back(alloc.allocCell());
   }
-  const uint32_t second = alloc.allocCell({});
+  const uint32_t second = alloc.allocCell();
   EXPECT_EQ(alloc.allocatedBytes(), 2 * kChunkBytes);
 
   // Chunk 0 becomes fully idle; its freelist entries must not survive shrink.
@@ -150,7 +157,7 @@ TEST_F(CellChunkTest, shrinkReleasesIdleChunksAndPurgesFreelist) {
 
   // New growth reuses the hole slot; ids stay within capacity.
   for (uint32_t i = 0; i < 2 * kCellsPerChunk; ++i) {
-    const auto id = alloc.allocCell({});
+    const auto id = alloc.allocCell();
     ASSERT_LT(id, alloc.cellIdCapacity());
     *alloc.cellData(id) = 7;
   }
@@ -181,7 +188,7 @@ TEST_F(CellChunkTest, dataCellsAppendScanRoundtrip) {
     for (auto& c : blob) {
       c = static_cast<char>(rng());
     }
-    cells.append(pid, stream, blob.data(), bytes, {});
+    cells.append(pid, stream, blob.data(), bytes);
     expected[stream * kPartitions + pid].push_back(std::move(blob));
   }
 
@@ -210,7 +217,7 @@ TEST_F(CellChunkTest, dataCellsAppendScanRoundtrip) {
   EXPECT_EQ(cells.bytes(1, 1), 0);
 
   // Usable again after reset.
-  cells.append(1, 1, "abc", 3, {});
+  cells.append(1, 1, "abc", 3);
   EXPECT_EQ(cells.bytes(1, 1), 3);
 }
 
@@ -219,9 +226,9 @@ TEST_F(CellChunkTest, dataCellsReleasePartitionRecycles) {
   DataCells cells(pool_.get(), &alloc, 4, 2);
   std::string blobA(1000, 'a');
   std::string blobB(1000, 'b');
-  cells.append(0, 0, blobA.data(), blobA.size(), {});
-  cells.append(0, 1, blobA.data(), 500, {});
-  cells.append(2, 0, blobB.data(), blobB.size(), {});
+  cells.append(0, 0, blobA.data(), blobA.size());
+  cells.append(0, 1, blobA.data(), 500);
+  cells.append(2, 0, blobB.data(), blobB.size());
   const auto usedBefore = alloc.usedCells();
 
   cells.releasePartition(0);
@@ -239,7 +246,7 @@ TEST_F(CellChunkTest, dataCellsReleasePartitionRecycles) {
 
   // Recycled cells feed later appends without growth.
   const auto bytesBefore = alloc.allocatedBytes();
-  cells.append(3, 1, blobA.data(), blobA.size(), {});
+  cells.append(3, 1, blobA.data(), blobA.size());
   EXPECT_EQ(alloc.allocatedBytes(), bytesBefore);
 }
 

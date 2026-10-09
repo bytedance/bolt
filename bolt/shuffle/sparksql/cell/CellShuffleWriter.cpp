@@ -27,6 +27,12 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
+constexpr uint32_t kChunkBytes = 4 << 20;
+constexpr uint32_t kMinDataCellBytes = 256;
+constexpr uint32_t kMaxDataCellBytes = 64 << 10;
+constexpr uint32_t kDictMinProbeRows = 1024;
+constexpr uint32_t kDictMinRepeatRatio = 4;
+
 uint64_t currentTimeNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -69,11 +75,9 @@ CellShuffleWriter::CellShuffleWriter(
 
 CellShuffleWriter::~CellShuffleWriter() {
   // Failed split/stop paths must return the warm reservation as well.
-  frontend_.reset();
-  cells_.reset();
-  allocator_.reset();
-  nulls_.reset();
+  splitter_.reset();
   output_.reset();
+  allocator_.reset();
   boltPool_->release();
 }
 
@@ -92,46 +96,32 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 
   const auto& cellOpts = options_.cellOptions;
   const uint32_t numStreams = layout_.numStreams();
-  int64_t budget = cellOpts.cellMemoryBudgetBytes;
-  if (budget <= 0) {
-    const int64_t capacity = boltPool_->maxCapacity();
-    // An unlimited pool reports kMaxMemory; fall back to a sane default.
-    budget = (capacity <= 0 || capacity > (int64_t{1} << 40))
-        ? (int64_t{1} << 30)
-        : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
-  }
+  const int64_t capacity = boltPool_->maxCapacity();
+  // An unlimited pool reports kMaxMemory; use a 1 GiB sizing budget.
+  const int64_t budget = (capacity <= 0 || capacity > (int64_t{1} << 40))
+      ? (int64_t{1} << 30)
+      : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
   const int64_t perStream =
       budget / 8 / numPartitions_ / std::max<uint32_t>(1, numStreams);
-  const int64_t cellCap =
-      std::min<int64_t>(cellOpts.maxDataCellBytes, cellOpts.chunkBytes / 4);
-  const uint32_t cellBytes = prevPowerOfTwo(std::max<int64_t>(
-      cellOpts.minDataCellBytes, std::min<int64_t>(perStream, cellCap)));
+  const uint32_t cellBytes = prevPowerOfTwo(
+      std::clamp<int64_t>(perStream, kMinDataCellBytes, kMaxDataCellBytes));
 
   allocator_ = std::make_unique<ChunkAllocator>(
-      boltPool_, cellOpts.chunkBytes, cellBytes);
-  cells_ = std::make_unique<DataCells>(
-      boltPool_, allocator_.get(), numPartitions_, numStreams);
-  nulls_ = std::make_unique<NullCells>(
-      boltPool_, numPartitions_, layout_.numWireColumns());
-  frontend_ = std::make_unique<CachedCellFrontend>(
-      &layout_, cells_.get(), nulls_.get(), boltPool_, [this]() {
-        onBeforeChunkGrow();
-      });
+      boltPool_, kChunkBytes, cellBytes, [this]() { onBeforeChunkGrow(); });
   output_ = std::make_unique<LocalCellOutput>(
       options_.partitionWriterOptions, &layout_, cellOpts, boltPool_);
+  splitter_ = std::make_unique<CellSplitter>(
+      layout_, numPartitions_, *allocator_, *output_, *boltPool_);
 
-  windowRowStart_.assign(numPartitions_, 0);
   perPidCounter_.assign(numPartitions_, 0);
   // Partitioner::compute fills but does not size this.
   partition2RowCount_.resize(numPartitions_);
   decoded_.resize(layout_.numColumns());
-  encodingTags_.assign((layout_.numWireColumns() + 7) / 8, 0);
 
   // Warm the reservation for the resident structures and the first chunks;
   // failure is not fatal, allocation will arbitrate.
   if (numStreams != 0) {
-    boltPool_->maybeReserve(
-        frontend_->residentBytes() + 2 * cellOpts.chunkBytes);
+    boltPool_->maybeReserve(splitter_->residentBytes() + 2 * kChunkBytes);
   }
   initialized_ = true;
 }
@@ -201,8 +191,8 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   const uint64_t start = currentTimeNs();
   const uint64_t rowLimit = std::max<int64_t>(
       1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
-  if (totalWindowRows_ != 0 &&
-      maxWindowRows_ + uint64_t(rv->size()) > rowLimit) {
+  if (splitter_->hasWindowRows() &&
+      splitter_->maxWindowRows() + uint64_t(rv->size()) > rowLimit) {
     checkpoint();
   }
   inSplit_ = true;
@@ -276,26 +266,14 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   }
 
   SplitBatch batch;
-  batch.decoded = &decoded_;
+  batch.decoded = decoded_.data();
   batch.row2Partition = row2Partition_.data();
   batch.partition2RowCount = partition2RowCount_.data();
   batch.nullClass = nullClass_.data();
   batch.numRows = numRows;
   batch.rowIndexInPid = anyNullable ? rowIndexInPid_.data() : nullptr;
-  batch.windowRowStart = windowRowStart_.data();
-  frontend_->split(batch);
+  splitter_->split(batch);
 
-  for (uint32_t pid = 0; pid < static_cast<uint32_t>(numPartitions_); ++pid) {
-    const uint32_t added = partition2RowCount_[pid];
-    if (added == 0) {
-      continue;
-    }
-    windowRowStart_[pid] += added;
-    if (windowRowStart_[pid] > maxWindowRows_) {
-      maxWindowRows_ = windowRowStart_[pid];
-    }
-  }
-  totalWindowRows_ += numRows;
   metrics_.totalInputRowNumber += numRows;
   metrics_.totalInputBatches += 1;
   inSplit_ = false;
@@ -307,8 +285,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
 
 void CellShuffleWriter::probeDictionary(uint32_t numRows) {
   const auto& cellOpts = options_.cellOptions;
-  if (!cellOpts.enableStringDictionary ||
-      numRows < static_cast<uint32_t>(cellOpts.dictMinProbeRows)) {
+  if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
     return;
   }
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
@@ -353,12 +330,9 @@ void CellShuffleWriter::probeDictionary(uint32_t numRows) {
       }
     }
     const bool enable = fits && !seen.empty() &&
-        nonNull >=
-            static_cast<uint64_t>(cellOpts.dictMinRepeatRatio) * seen.size();
+        nonNull >= static_cast<uint64_t>(kDictMinRepeatRatio) * seen.size();
     if (enable) {
-      frontend_->enableDictionary(col);
-      const auto wire = layout_.wireColumn(col);
-      encodingTags_[wire / 8] |= static_cast<uint8_t>(1u << (wire % 8));
+      splitter_->enableDictionary(col);
     }
     LOG(INFO) << "CellShuffleWriter dictionary probe: column " << col
               << (enable ? " ON" : " OFF") << " (ndv=" << seen.size()
@@ -367,72 +341,39 @@ void CellShuffleWriter::probeDictionary(uint32_t numRows) {
   }
 }
 
-CellWindowInput CellShuffleWriter::windowInput() {
-  CellWindowInput in;
-  in.cells = cells_.get();
-  in.nulls = nulls_.get();
-  in.layout = &layout_;
-  in.rowCounts = windowRowStart_.data();
-  in.variableBytes = frontend_->variableBytesArray();
-  in.encodingTags = encodingTags_.data();
-  in.numPartitions = static_cast<uint32_t>(numPartitions_);
-  return in;
-}
-
 void CellShuffleWriter::onBeforeChunkGrow() {
-  if (spilling_) {
+  if (!initialized_ || splitter_->isWritingOutput()) {
     return;
   }
   const auto& cellOpts = options_.cellOptions;
   if (cellOpts.cellMemoryCapBytes > 0 &&
-      allocator_->allocatedBytes() + cellOpts.chunkBytes >
+      allocator_->allocatedBytes() + kChunkBytes >
           cellOpts.cellMemoryCapBytes) {
-    spillRunNow();
+    splitter_->spillRun();
     return;
   }
-  if (!boltPool_->maybeReserve(cellOpts.chunkBytes)) {
-    spillRunNow();
+  if (!boltPool_->maybeReserve(kChunkBytes)) {
+    splitter_->spillRun();
   }
-}
-
-void CellShuffleWriter::spillRunNow() {
-  if (spilling_ || !initialized_ || cells_->totalBytes() == 0) {
-    return;
-  }
-  spilling_ = true;
-  output_->spillRun(windowInput());
-  cells_->releaseAll();
-  // Chunk-packed freelist: the refill after this spill fills the lowest
-  // chunks first, so a reclaim landing mid-refill can shrink the
-  // untouched tail chunks away instead of finding everything scattered.
-  allocator_->packFreelist();
-  spilling_ = false;
 }
 
 void CellShuffleWriter::checkpoint() {
-  frontend_->flushAll();
-  spillRunNow();
-  output_->sealWindow(windowInput());
-  nulls_->reset();
-  std::fill(windowRowStart_.begin(), windowRowStart_.end(), 0);
-  frontend_->resetWindowStats();
-  totalWindowRows_ = 0;
-  maxWindowRows_ = 0;
+  splitter_->sealWindow();
   checkpointRequested_ = false;
   // A sealed window is a batch boundary: drop reservation slack.
   boltPool_->release();
 }
 
 void CellShuffleWriter::maybeCheckpoint() {
-  if (!initialized_ || totalWindowRows_ == 0) {
+  if (!initialized_ || !splitter_->hasWindowRows()) {
     return;
   }
   const auto& cellOpts = options_.cellOptions;
   if (checkpointRequested_ ||
-      frontend_->maxPartitionBytes() >
+      splitter_->maxPartitionBytes() >
           static_cast<uint64_t>(cellOpts.checkpointPartitionBytes) ||
-      nulls_->allocatedBytes() > cellOpts.nullMemLimitBytes ||
-      maxWindowRows_ > cellOpts.maxWindowRows) {
+      splitter_->nullBytes() > cellOpts.nullMemLimitBytes ||
+      splitter_->maxWindowRows() > cellOpts.maxWindowRows) {
     checkpoint();
   }
 }
@@ -441,7 +382,7 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
     int64_t size,
     int64_t* actual) {
   *actual = 0;
-  if (!initialized_ || spilling_ || stopped_) {
+  if (!initialized_ || stopped_ || splitter_->isWritingOutput()) {
     return arrow::Status::OK();
   }
   // Free memory first, without touching data: chunks that hold no live
@@ -458,10 +399,10 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // and the allocation churn case never reaches here (its small asks are
   // satisfied by the idle memory).
   if ((size > 0 && *actual >= size) ||
-      allocator_->allocatedBytes() < 2 * options_.cellOptions.chunkBytes) {
+      allocator_->allocatedBytes() < 2 * kChunkBytes) {
     return arrow::Status::OK();
   }
-  spillRunNow();
+  splitter_->spillRun();
   *actual += allocator_->shrink();
   // Freed chunks alone are not enough: the reservation built up by the
   // chunk-grow choke point must go back too, or the arbitrator's requester
@@ -470,7 +411,7 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   // Close the window at the next batch boundary only when the resident
   // null-bitmap state is actually worth returning; requesting a seal on
   // every reclaim turns pressure churn into a checkpoint storm.
-  if (nulls_->allocatedBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
+  if (splitter_->nullBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
     checkpointRequested_ = true;
   }
   metrics_.totalBytesEvicted = output_->bytesEvicted();
@@ -485,45 +426,7 @@ arrow::Status CellShuffleWriter::stop() {
     metrics_.rawPartitionLengths.assign(numPartitions_, 0);
     return arrow::Status::OK();
   }
-  const bool windowHasData = totalWindowRows_ > 0;
-  if (windowHasData) {
-    frontend_->flushAll();
-  }
-  // Memory accounting picture at the end of input: how much of the chunk
-  // memory actually held data (the rest is tail-cell slack, recycled
-  // cells and unissued chunk tails), alongside the resident structures
-  // and the pool's own view.
-  {
-    const int64_t chunkBytes = allocator_->allocatedBytes();
-    const int64_t dataBytes = static_cast<int64_t>(cells_->totalBytes());
-    LOG(INFO) << "CellShuffleWriter memory: chunks=" << (chunkBytes >> 20)
-              << "MB, data=" << (dataBytes >> 20) << "MB ("
-              << (chunkBytes > 0 ? 100.0 * dataBytes / chunkBytes : 0.0)
-              << "% utilization), resident="
-              << (frontend_->residentBytes() >> 20)
-              << "MB, nulls=" << (nulls_->allocatedBytes() >> 20)
-              << "MB, pool used=" << (boltPool_->usedBytes() >> 20)
-              << "MB, pool peak=" << (boltPool_->peakBytes() >> 20) << "MB";
-  }
-  output_->finalize(windowInput(), windowHasData, metrics_);
-  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (layout_.isUnknownColumn(col)) {
-      continue;
-    }
-    const auto wire = layout_.wireColumn(col);
-    if ((encodingTags_[wire / 8] >> (wire % 8)) & 1) {
-      const auto stats = frontend_->dictionaryStats(col);
-      metrics_.dictionaryMatchedRows += static_cast<int64_t>(stats.matchedRows);
-      metrics_.dictionaryFallbackRows +=
-          static_cast<int64_t>(stats.fallbackRows);
-      const uint64_t rows = stats.matchedRows + stats.fallbackRows;
-      LOG(INFO) << "CellShuffleWriter dictionary column " << col << ": matched "
-                << stats.matchedRows << " of " << rows << " rows ("
-                << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%), "
-                << stats.segments << " segments, " << stats.demotes
-                << " demotes";
-    }
-  }
+  splitter_->finish(metrics_);
   // Data size is the pre-compression payload volume (what the raw lengths
   // account); bytes written is the compressed file. Reporting them as the
   // same number would hide the compression ratio from the engine metrics.
@@ -533,10 +436,8 @@ arrow::Status CellShuffleWriter::stop() {
       int64_t{0});
   metrics_.peakBytes = boltPool_->peakBytes();
 
-  // Return everything: drop chains, chunks and the reservation.
-  cells_->releaseAll();
+  // The splitter has released its window; return idle chunks and reservation.
   allocator_->shrink();
-  nulls_->reset();
   boltPool_->release();
   return arrow::Status::OK();
 }

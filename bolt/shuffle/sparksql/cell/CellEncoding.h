@@ -28,7 +28,7 @@
 #include <cstring>
 #include <string>
 
-#include "bolt/shuffle/sparksql/cell/CellTypes.h"
+#include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -37,7 +37,6 @@ inline uint8_t makeEncodingByte(EncodingKind kind, uint32_t param) {
   return static_cast<uint8_t>(
       static_cast<uint8_t>(kind) | static_cast<uint8_t>(param << 2));
 }
-
 
 namespace detail {
 
@@ -63,11 +62,8 @@ inline uint32_t narrowBytesFor(int64_t value, uint32_t maxBytes) {
 /// staging split is deliberate: masking / delta subtraction is data-parallel
 /// and auto-vectorizes, while this bit-stitch is a serial dependency chain
 /// the compiler can only unroll.
-inline uint8_t* packBits(
-    const uint64_t* staged,
-    uint32_t count,
-    uint32_t bits,
-    uint8_t* out) {
+inline uint8_t*
+packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
   uint64_t acc = 0;
   uint32_t accBits = 0;
   for (uint32_t i = 0; i < count; ++i) {
@@ -94,7 +90,8 @@ inline void storeLeEnc(uint8_t* out, uint64_t value, uint32_t bytes) {
 }
 
 template <typename T, typename Count>
-inline uint32_t encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
+inline uint32_t
+encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
   const uint32_t sourceBytes = count * kWidth;
@@ -114,13 +111,14 @@ inline uint32_t encodeBlockImpl(const T* values, const Count count, uint8_t* out
   // encoder: strict improvement in PLAIN, CONST, BIT_PACK, FOR order.
   const uint32_t constBytes =
       allEqual ? narrowBytesFor(static_cast<int64_t>(values[0]), kWidth) : 0;
-  const uint32_t packBitsNeeded = signedBitWidth(static_cast<int64_t>(minValue)) >
+  const uint32_t packBitsNeeded =
+      signedBitWidth(static_cast<int64_t>(minValue)) >
           signedBitWidth(static_cast<int64_t>(maxValue))
       ? signedBitWidth(static_cast<int64_t>(minValue))
       : signedBitWidth(static_cast<int64_t>(maxValue));
   const uint32_t bitWidth = packBitsNeeded <= kMaxPackBits ? packBitsNeeded : 0;
-  const uint64_t maxDelta = static_cast<uint64_t>(maxValue) -
-      static_cast<uint64_t>(minValue);
+  const uint64_t maxDelta =
+      static_cast<uint64_t>(maxValue) - static_cast<uint64_t>(minValue);
   const uint32_t deltaBits = unsignedBitWidth(maxDelta);
 
   uint32_t bestSize = sourceBytes;
@@ -148,7 +146,10 @@ inline uint32_t encodeBlockImpl(const T* values, const Count count, uint8_t* out
   switch (bestKind) {
     case EncodingKind::kConstNarrow:
       *pos++ = makeEncodingByte(EncodingKind::kConstNarrow, constBytes);
-      storeLeEnc(pos, static_cast<uint64_t>(static_cast<int64_t>(values[0])), constBytes);
+      storeLeEnc(
+          pos,
+          static_cast<uint64_t>(static_cast<int64_t>(values[0])),
+          constBytes);
       pos += constBytes;
       break;
     case EncodingKind::kBitPack: {
@@ -156,14 +157,16 @@ inline uint32_t encodeBlockImpl(const T* values, const Count count, uint8_t* out
       const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
       uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
       for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
-        staged[i] = static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
+        staged[i] =
+            static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
       }
       pos = packBits(staged, count, bitWidth, pos);
       break;
     }
     case EncodingKind::kForBitPack: {
       *pos++ = makeEncodingByte(EncodingKind::kForBitPack, deltaBits);
-      storeLeEnc(pos, static_cast<uint64_t>(static_cast<int64_t>(minValue)), kWidth);
+      storeLeEnc(
+          pos, static_cast<uint64_t>(static_cast<int64_t>(minValue)), kWidth);
       pos += kWidth;
       if (deltaBits > 0) {
         const uint64_t base = static_cast<uint64_t>(minValue);
@@ -243,8 +246,8 @@ inline uint32_t nullTagBytes(uint32_t numColumns) {
 
 /// Requires the tag byte's slot to be zero (tags buffer starts zeroed).
 inline void setNullTag(uint8_t* tags, uint32_t col, NullTag tag) {
-  tags[col / 4] |= static_cast<uint8_t>(
-      static_cast<uint8_t>(tag) << ((col % 4) * 2));
+  tags[col / 4] |=
+      static_cast<uint8_t>(static_cast<uint8_t>(tag) << ((col % 4) * 2));
 }
 
 inline NullTag getNullTag(const uint8_t* tags, uint32_t col) {

@@ -172,5 +172,3 @@ add_executable(
 target_link_libraries(bolt_shuffle_cell_test PRIVATE bolt_gtest_main)
 
 add_test(NAME bolt_shuffle_cell_test COMMAND bolt_shuffle_cell_test)
-
-add_subdirectory(columnar_payload)

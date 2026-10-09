@@ -17,15 +17,15 @@
 #pragma once
 
 #include "bolt/shuffle/sparksql/Options.h"
-#include "bolt/shuffle/sparksql/cell/CellDirectory.h"
+#include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// What an output backend reads from the writer when draining or sealing:
+/// What an output backend reads from the splitter when draining or sealing:
 /// the live window state. Borrowed for the duration of a call.
 struct CellWindowInput {
-  DataCells* cells;
-  NullCells* nulls;
+  const DataCells* cells;
+  const NullCells* nulls;
   const CellLayout* layout;
   /// Per partition: rows and raw variable bytes of the current window.
   const uint32_t* rowCounts;
@@ -46,12 +46,12 @@ class CellOutput {
   virtual ~CellOutput() = default;
 
   /// Physically drains every DataCell chain into a Run of the current
-  /// window. Does not release the cells: the caller recycles them (so a
+  /// window. Does not release the cells: the splitter recycles them (so a
   /// spill fired from inside an append never frees held ids twice).
   virtual void spillRun(const CellWindowInput& in) = 0;
 
   /// Closes the logical window: records the null region and row counts.
-  /// Precondition (writer-orchestrated): caches flushed, cells drained.
+  /// Precondition (splitter-orchestrated): caches flushed, cells drained.
   virtual void sealWindow(const CellWindowInput& in) = 0;
 
   /// Final merge. `windowHasData` says whether the current (unsealed)

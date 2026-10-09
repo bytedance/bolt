@@ -99,14 +99,13 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
           static_cast<int32_t>(ShuffleWriterType::Cell) &&
       supportAdaptiveShuffleWriter(options.partitioning) &&
       options.partitionWriterOptions.partitionWriterType ==
-          PartitionWriterType::kLocal &&
-      inputType->size() > 1 && CellShuffleTypeAdapter::isSupported(inputType)) {
-    cellTypeAdapter_ = std::make_unique<CellShuffleTypeAdapter>(inputType);
+          PartitionWriterType::kLocal) {
+    cellTypeAdapter_ =
+        std::make_unique<cell::CellShuffleTypeAdapter>(inputType);
     inputType = cellTypeAdapter_->physicalType();
   }
   shuffleWriter_ = BoltShuffleWriter::create(
       options,
-      inputType,
       inputType->size() - 1,
       rv->size(),
       rv->estimateFlatSize(),

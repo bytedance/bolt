@@ -16,13 +16,37 @@
 
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
-#include "bolt/buffer/Buffer.h"
+#include <algorithm>
+#include <string_view>
+
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
+
+// Keep reusable storage on the reader pool and grow only when necessary.
+char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
+  if (buffer == nullptr) {
+    if (size == 0) {
+      return nullptr;
+    }
+    buffer = AlignedBuffer::allocate<char>(size, pool);
+  } else if (size > buffer->capacity()) {
+    AlignedBuffer::reallocate<char>(
+        &buffer,
+        std::max(size, checkedMultiply<size_t>(buffer->capacity(), 2)));
+  }
+  buffer->setSize(size);
+  return buffer->asMutable<char>();
+}
+
+std::string_view bufferBytes(const BufferPtr& buffer) {
+  return buffer == nullptr
+      ? std::string_view{}
+      : std::string_view(buffer->as<char>(), buffer->size());
+}
 
 inline uint32_t loadU32(const uint8_t* p) {
   uint32_t v;
@@ -69,13 +93,7 @@ CellPayloadDecoder::CellPayloadDecoder(
       decompressor_(decompressor),
       pool_(pool),
       limits_(limits),
-      nullBody_(pool),
-      scratch_(pool),
-      scratch2_(pool) {
-  streamBytes_.reserve(layout_.numStreams());
-  for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
-    streamBytes_.emplace_back(pool);
-  }
+      streamBytes_(layout_.numStreams()) {
   tags_.resize(layout_.numColumns());
   nonNullCount_.resize(layout_.numColumns());
   bitmaps_.resize(layout_.numColumns());
@@ -91,8 +109,8 @@ bool CellPayloadDecoder::parseNullRegion(
     return fail(error, "truncated null body");
   }
   if (nullDecodedSize == 0) {
-    nullBody_.resize(nullStoredSize);
-    if (!in.read(nullBody_.data(), nullStoredSize)) {
+    auto* nullData = resizeBuffer(nullBody_, nullStoredSize, pool_);
+    if (!in.read(nullData, nullStoredSize)) {
       return fail(error, "truncated null body");
     }
   } else {
@@ -103,15 +121,15 @@ bool CellPayloadDecoder::parseNullRegion(
         nullDecodedSize > limits_.maxDecodedBytes) {
       return fail(error, "null decoded size beyond sanity bound");
     }
-    scratch_.resize(nullStoredSize);
-    if (!in.read(scratch_.data(), nullStoredSize)) {
+    auto* stored = resizeBuffer(scratch_, nullStoredSize, pool_);
+    if (!in.read(stored, nullStoredSize)) {
       return fail(error, "truncated null body");
     }
-    nullBody_.resize(nullDecodedSize);
+    auto* decoded = resizeBuffer(nullBody_, nullDecodedSize, pool_);
     if (!decompressor_->decompress(
-            reinterpret_cast<const uint8_t*>(scratch_.data()),
+            reinterpret_cast<const uint8_t*>(stored),
             nullStoredSize,
-            nullBody_.udata(),
+            reinterpret_cast<uint8_t*>(decoded),
             nullDecodedSize)) {
       // Rule 5: the decompressed length must match exactly.
       return fail(error, "null body decompression failed");
@@ -120,14 +138,16 @@ bool CellPayloadDecoder::parseNullRegion(
 
   const uint32_t numColumns = layout_.numColumns();
   const uint32_t tagBytes = nullTagBytes(layout_.numWireColumns());
-  if (nullBody_.size() < tagBytes) {
+  const auto nullBody = bufferBytes(nullBody_);
+  const auto* nullData = reinterpret_cast<const uint8_t*>(nullBody.data());
+  if (nullBody.size() < tagBytes) {
     return fail(error, "null body shorter than its tags");
   }
   uint32_t rawNullColumns = 0;
   for (uint32_t col = 0; col < numColumns; ++col) {
     const auto tag = layout_.isUnknownColumn(col)
         ? NullTag::kAllNull
-        : getNullTag(nullBody_.udata(), layout_.wireColumn(col));
+        : getNullTag(nullData, layout_.wireColumn(col));
     if (tag == NullTag::kReserved) {
       return fail(error, "reserved null tag"); // rule 7
     }
@@ -136,7 +156,7 @@ bool CellPayloadDecoder::parseNullRegion(
   }
   // Unused high bits of the last tags byte must be zero.
   if ((layout_.numWireColumns() % 4) != 0) {
-    const uint8_t tail = nullBody_.udata()[tagBytes - 1];
+    const uint8_t tail = nullData[tagBytes - 1];
     if ((tail >> ((layout_.numWireColumns() % 4) * 2)) != 0) {
       return fail(error, "non-zero unused null tag bits");
     }
@@ -145,12 +165,11 @@ bool CellPayloadDecoder::parseNullRegion(
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
   const uint64_t expected =
       tagBytes + static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
-  if (nullBody_.size() != expected) {
+  if (nullBody.size() != expected) {
     return fail(error, "null body length mismatch"); // rule 6
   }
 
-  const uint8_t* cursor =
-      tagBytes == 0 ? nullptr : nullBody_.udata() + tagBytes;
+  const uint8_t* cursor = tagBytes == 0 ? nullptr : nullData + tagBytes;
   for (uint32_t col = 0; col < numColumns; ++col) {
     switch (tags_[col]) {
       case NullTag::kAllNull:
@@ -233,25 +252,27 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
         auto& stream = streamBytes_[s];
         if (decoded == 0) {
           // Uncompressed: bytes go to the stream as they are.
-          const size_t offset = stream.size();
-          stream.resize(offset + stored);
-          if (!in.read(stream.data() + offset, stored)) {
+          const size_t offset = stream == nullptr ? 0 : stream->size();
+          auto* out =
+              resizeBuffer(stream, checkedPlus<size_t>(offset, stored), pool_);
+          if (!in.read(out + offset, stored)) {
             return fail(error, "truncated run buffer");
           }
         } else {
           if (decompressor_ == nullptr) {
             return fail(error, "compressed buffer without a codec");
           }
-          scratch_.resize(stored);
-          if (!in.read(scratch_.data(), stored)) {
+          auto* input = resizeBuffer(scratch_, stored, pool_);
+          if (!in.read(input, stored)) {
             return fail(error, "truncated run buffer");
           }
-          const size_t offset = stream.size();
-          stream.resize(offset + decoded);
+          const size_t offset = stream == nullptr ? 0 : stream->size();
+          auto* out =
+              resizeBuffer(stream, checkedPlus<size_t>(offset, decoded), pool_);
           if (!decompressor_->decompress(
-                  reinterpret_cast<const uint8_t*>(scratch_.data()),
+                  reinterpret_cast<const uint8_t*>(input),
                   stored,
-                  reinterpret_cast<uint8_t*>(stream.data()) + offset,
+                  reinterpret_cast<uint8_t*>(out) + offset,
                   decoded)) {
             return fail(error, "run buffer decompression failed"); // rule 11
           }
@@ -270,9 +291,10 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
           continue;
         }
         auto& stream = streamBytes_[s];
-        const size_t offset = stream.size();
-        stream.resize(offset + decoded);
-        if (!in.read(stream.data() + offset, decoded)) {
+        const size_t offset = stream == nullptr ? 0 : stream->size();
+        auto* out =
+            resizeBuffer(stream, checkedPlus<size_t>(offset, decoded), pool_);
+        if (!in.read(out + offset, decoded)) {
           return fail(error, "truncated run buffer");
         }
       }
@@ -282,21 +304,28 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
       if (decompressor_ == nullptr) {
         return fail(error, "compressed buffer without a codec");
       }
-      scratch_.resize(storedSizes_[0]);
-      if (!in.read(scratch_.data(), storedSizes_[0])) {
+      auto* input = resizeBuffer(scratch_, storedSizes_[0], pool_);
+      if (!in.read(input, storedSizes_[0])) {
         return fail(error, "truncated run buffer");
       }
-      scratch2_.resize(decodedSum);
+      auto* decodedData = resizeBuffer(scratch2_, decodedSum, pool_);
       if (!decompressor_->decompress(
-              reinterpret_cast<const uint8_t*>(scratch_.data()),
+              reinterpret_cast<const uint8_t*>(input),
               storedSizes_[0],
-              reinterpret_cast<uint8_t*>(scratch2_.data()),
+              reinterpret_cast<uint8_t*>(decodedData),
               decodedSum)) {
         return fail(error, "combined buffer decompression failed"); // rule 12
       }
       size_t offset = 0;
       for (uint32_t s = 0; s < numStreams; ++s) {
-        streamBytes_[s].append(scratch2_.data() + offset, decodedSizes_[s]);
+        if (decodedSizes_[s] == 0) {
+          continue;
+        }
+        auto& stream = streamBytes_[s];
+        const size_t streamOffset = stream == nullptr ? 0 : stream->size();
+        auto* out = resizeBuffer(
+            stream, checkedPlus<size_t>(streamOffset, decodedSizes_[s]), pool_);
+        ::memcpy(out + streamOffset, decodedData + offset, decodedSizes_[s]);
         offset += decodedSizes_[s];
       }
       return true;
@@ -327,7 +356,7 @@ bool CellPayloadDecoder::buildEncodedColumn(
     const TypePtr& type,
     VectorPtr& out,
     std::string& error) {
-  const auto& bytes = streamBytes_[layout_.columnStream(col)];
+  const auto bytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
   const uint32_t nonNull = nonNullCount_[col];
   auto values = AlignedBuffer::allocate<T>(rowCount, pool_);
   auto* rawValues = values->template asMutable<T>();
@@ -374,7 +403,7 @@ bool CellPayloadDecoder::buildRawColumn(
     const TypePtr& type,
     VectorPtr& out,
     std::string& error) {
-  const auto& bytes = streamBytes_[layout_.columnStream(col)];
+  const auto bytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
   const uint32_t nonNull = nonNullCount_[col];
   if (bytes.size() != static_cast<size_t>(nonNull) * sizeof(T)) {
     return fail(error, "raw stream length mismatch");
@@ -410,8 +439,9 @@ bool CellPayloadDecoder::buildStringColumn(
     bool dictionaryEncoded,
     VectorPtr& out,
     std::string& error) {
-  const auto& lengthBytes = streamBytes_[layout_.columnStream(col)];
-  const auto& dataBytes = streamBytes_[layout_.columnStream(col) + 1];
+  const auto lengthBytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
+  const auto dataBytes =
+      bufferBytes(streamBytes_[layout_.columnStream(col) + 1]);
   const uint32_t nonNull = nonNullCount_[col];
 
   // Resolved values, in dense (non-null row) order, viewing borrowed bytes.
@@ -646,7 +676,9 @@ bool CellPayloadDecoder::decode(
   }
 
   for (auto& stream : streamBytes_) {
-    stream.clear();
+    if (stream != nullptr) {
+      stream->setSize(0);
+    }
   }
   for (uint32_t run = 0; run < runCount; ++run) {
     if (!parseRun(in, error)) {

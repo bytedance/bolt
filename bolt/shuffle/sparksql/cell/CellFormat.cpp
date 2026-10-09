@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/cell/CellTypes.h"
+#include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
 #include "bolt/common/base/Exceptions.h"
 
