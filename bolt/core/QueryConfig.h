@@ -248,12 +248,12 @@ class QueryConfig {
   static constexpr const char* kSpillEnabled = "spill_enabled";
 
   /// Enables the task-level BufferManager for operators that opt in.
-  static constexpr const char* kBufferManagerEnabled = "buffer-manager-enabled";
+  static constexpr const char* kBufferManagerEnabled = "buffer_manager_enabled";
 
   /// Overrides the BufferManager spill codec independently of the legacy
   /// operator spill codec. Empty preserves the existing mapping.
   static constexpr const char* kBufferManagerSpillCompressionKind =
-      "buffer-manager-spill-compression-kind";
+      "buffer_manager_spill_compression_kind";
 
   /// Aggregation spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kAggregationSpillEnabled =
