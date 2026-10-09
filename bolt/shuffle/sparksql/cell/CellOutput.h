@@ -16,6 +16,9 @@
 
 #pragma once
 
+#include <functional>
+
+#include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 
@@ -36,6 +39,10 @@ struct CellWindowInput {
   const uint8_t* encodingTags;
   uint32_t numPartitions;
 };
+
+/// Produces the next opaque block of partition `pid` into `block`; false
+/// once that partition has no more.
+using RawBlockSource = std::function<bool(uint32_t pid, BufferPtr& block)>;
 
 /// L4 of the Cell shuffle writer: the output backend. Run = physical
 /// swap-out (may happen at any allocation point, never closes the logical
@@ -62,6 +69,14 @@ class CellOutput {
   /// Precondition (splitter-orchestrated): caches flushed, and the cells
   /// drained unless sealsResidentCells().
   virtual void sealWindow(const CellWindowInput& in) = 0;
+
+  /// Writes opaque, already-framed blocks - the composite rows of a
+  /// CompositeShuffleWriter - as one unit, like a Run: `next` is called
+  /// for partition 0, 1, ... until it returns false for each, and every
+  /// block is written before the next call, so the producer may reuse the
+  /// buffer. The blocks belong to no window; each partition's land after
+  /// its payloads in the final output.
+  virtual void spillRaw(const RawBlockSource& next) = 0;
 
   /// Final merge. `windowHasData` says whether the current (unsealed)
   /// window still carries rows; the backend either seals it through disk or

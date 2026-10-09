@@ -77,23 +77,13 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
       freeMem.has_value(),
       "Expect ExecutionMemoryPool::getMinimumFreeMemoryForTask return value");
   auto options = shuffleWriterOptions_;
-  if (options.forceShuffleWriterType ==
-      static_cast<int32_t>(ShuffleWriterType::Cell)) {
-    // Composite row vectors (HashAggregation composite output) switch the
-    // input layout mid-stream; the cell writer stays out of that entirely.
-    // Only the query config gates this: the reader mirrors the same check,
-    // and a data-dependent downgrade here would be invisible to it. Should
-    // a composite vector ever arrive with the config off, the cell writer
-    // fails loudly instead of writing bytes the reader cannot read.
-    if (operatorCtx_->driverCtx()
-            ->queryConfig()
-            .isHashAggregationCompositeOutputEnabled()) {
-      LOG(INFO) << "CellShuffleWriter does not support composite input; "
-                   "falling back to V1";
-      options.forceShuffleWriterType =
-          static_cast<int32_t>(ShuffleWriterType::V1);
-    }
-  }
+  // CompositeRowVectors (HashAggregation composite output) may arrive only
+  // when the query enables them; the cell reader frames its blocks by the
+  // same static config, never by what the data turns out to be.
+  options.cellOptions.compositeInput =
+      operatorCtx_->driverCtx()
+          ->queryConfig()
+          .isHashAggregationCompositeOutputEnabled();
   shuffleWriter_ = BoltShuffleWriter::createShuffleWriter(
       options,
       rv->childrenSize() - 1,
