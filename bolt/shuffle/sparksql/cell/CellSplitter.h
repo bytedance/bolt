@@ -83,7 +83,8 @@ class CellSplitter {
   /// Safe during a split or cache flush; nested output calls are suppressed.
   void spillRun();
 
-  /// Flushes caches, drains cells and seals the window, then resets its state.
+  /// Flushes caches, drains cells (unless the output seals resident cells)
+  /// and seals the window, then recycles every cell and resets its state.
   /// Called only at a complete batch boundary.
   void sealWindow();
 

@@ -67,47 +67,59 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
 class CellTypeIntegrationTest : public ShuffleTestBase {};
 
 TEST_F(CellTypeIntegrationTest, complexUsesAdapterUnderLimitedMemory) {
-  ShuffleTestParam param{
-      "hash", 4, PartitionWriterType::kLocal, DataTypeGroup::kComplex, 4, 1};
-  param.memoryLimit = 64 << 20;
-  ShuffleInputData input;
-  auto arrays = makeArrayVector<int64_t>(
-      4096,
-      [](auto) { return 10; },
-      [](auto row) { return row; },
-      [](auto row) { return row % 5 == 0; });
-  input.inputsPerMapper = {{makeRowVector({arrays})}};
-  ShuffleRunResult result;
-  executeTestWithCustomInput(param, input, &result);
-  EXPECT_GT(result.metrics.convertTime, 0);
+  for (const auto writerType :
+       {PartitionWriterType::kLocal, PartitionWriterType::kCeleborn}) {
+    SCOPED_TRACE(fmt::format("{}", writerType));
+    ShuffleTestParam param{
+        "hash", 4, writerType, DataTypeGroup::kComplex, 4, 1};
+    param.memoryLimit = 64 << 20;
+    ShuffleInputData input;
+    auto arrays = makeArrayVector<int64_t>(
+        4096,
+        [](auto) { return 10; },
+        [](auto row) { return row; },
+        [](auto row) { return row % 5 == 0; });
+    input.inputsPerMapper = {{makeRowVector({arrays})}};
+    ShuffleRunResult result;
+    executeTestWithCustomInput(param, input, &result);
+    EXPECT_GT(result.metrics.convertTime, 0);
+  }
 }
 
 TEST_F(CellTypeIntegrationTest, unknownOnlyUsesHeaderPayloads) {
-  ShuffleTestParam param{
-      "hash", 4, PartitionWriterType::kLocal, DataTypeGroup::kHighNulls, 4, 2};
-  ShuffleInputData input;
-  input.inputsPerMapper = {{makeRowVector(
-      {BaseVector::createNullConstant(UNKNOWN(), 2048, pool()),
-       BaseVector::createNullConstant(UNKNOWN(), 2048, pool())})}};
-  input.inputsPerMapper.push_back(input.inputsPerMapper.front());
-  ShuffleRunResult result;
-  executeTestWithCustomInput(param, input, &result);
-  EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+  for (const auto writerType :
+       {PartitionWriterType::kLocal, PartitionWriterType::kCeleborn}) {
+    SCOPED_TRACE(fmt::format("{}", writerType));
+    ShuffleTestParam param{
+        "hash", 4, writerType, DataTypeGroup::kHighNulls, 4, 2};
+    ShuffleInputData input;
+    input.inputsPerMapper = {{makeRowVector(
+        {BaseVector::createNullConstant(UNKNOWN(), 2048, pool()),
+         BaseVector::createNullConstant(UNKNOWN(), 2048, pool())})}};
+    input.inputsPerMapper.push_back(input.inputsPerMapper.front());
+    ShuffleRunResult result;
+    executeTestWithCustomInput(param, input, &result);
+    EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+  }
 }
 
 TEST_F(CellTypeIntegrationTest, pidOnlyUsesHeaderPayloads) {
   // Column pruning leaves exchanges with no data column (e.g. a count over
   // a repartition): Cell must carry them end to end as row counts.
-  ShuffleTestParam param{
-      "hash", 4, PartitionWriterType::kLocal, DataTypeGroup::kHighNulls, 4, 2};
-  ShuffleInputData input;
-  input.inputsPerMapper = {{std::make_shared<RowVector>(
-      pool(), ROW({}, {}), nullptr, 2048, std::vector<VectorPtr>{})}};
-  input.inputsPerMapper.push_back(input.inputsPerMapper.front());
-  ShuffleRunResult result;
-  // The harness verifies every partition's row count and contents.
-  executeTestWithCustomInput(param, input, &result);
-  EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+  for (const auto writerType :
+       {PartitionWriterType::kLocal, PartitionWriterType::kCeleborn}) {
+    SCOPED_TRACE(fmt::format("{}", writerType));
+    ShuffleTestParam param{
+        "hash", 4, writerType, DataTypeGroup::kHighNulls, 4, 2};
+    ShuffleInputData input;
+    input.inputsPerMapper = {{std::make_shared<RowVector>(
+        pool(), ROW({}, {}), nullptr, 2048, std::vector<VectorPtr>{})}};
+    input.inputsPerMapper.push_back(input.inputsPerMapper.front());
+    ShuffleRunResult result;
+    // The harness verifies every partition's row count and contents.
+    executeTestWithCustomInput(param, input, &result);
+    EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+  }
 }
 
 // A test suite that runs shuffle tests with different parameters
