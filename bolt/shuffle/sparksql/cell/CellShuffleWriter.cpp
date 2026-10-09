@@ -52,39 +52,32 @@ uint32_t prevPowerOfTwo(uint64_t value) {
 
 } // namespace
 
-namespace {
-int32_t numPartitionsOf(const ShuffleWriterOptions& options) {
-  return options.partitionWriterOptions.numPartitions;
-}
-} // namespace
-
 CellShuffleWriter::CellShuffleWriter(
     ShuffleWriterOptions options,
     memory::MemoryPool* boltPool,
     arrow::MemoryPool* arrowPool)
-    : ShuffleWriter(
-          numPartitionsOf(options), // read before the move below can happen
-          /*partitionWriter=*/nullptr, // all output goes through CellOutput
-          options,
-          arrowPool),
-      boltPool_(boltPool),
+    : CompositeShuffleWriter(std::move(options), boltPool, arrowPool),
       remote_(
           options_.partitionWriterOptions.partitionWriterType ==
           PartitionWriterType::kCeleborn) {
-  auto maybePartitioner = Partitioner::make(
-      options_.partitioning, numPartitions_, options_.startPartitionId);
-  BOLT_CHECK(
-      maybePartitioner.ok(),
-      "Failed to create partitioner: {}",
-      maybePartitioner.status().ToString());
-  partitioner_ = *maybePartitioner;
-  BOLT_CHECK(
-      partitioner_->hasPid(),
-      "CellShuffleWriter requires hash or range partitioning");
+  // Built up front: the composite side writes through it even when no
+  // ordinary batch ever comes. Neither backend reads layout_ before the
+  // first ordinary batch fills it.
   if (remote_) {
     BOLT_CHECK_NOT_NULL(
         options_.partitionWriterOptions.rssClient,
         "CellShuffleWriter on Celeborn requires an RSS client");
+    output_ = std::make_unique<CelebornCellOutput>(
+        options_.partitionWriterOptions,
+        &layout_,
+        boltPool_,
+        options_.cellOptions.compositeInput);
+  } else {
+    output_ = std::make_unique<LocalCellOutput>(
+        options_.partitionWriterOptions,
+        &layout_,
+        options_.cellOptions,
+        boltPool_);
   }
 }
 
@@ -128,13 +121,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { onBeforeChunkGrow(); });
-  if (remote_) {
-    output_ = std::make_unique<CelebornCellOutput>(
-        options_.partitionWriterOptions, &layout_, boltPool_);
-  } else {
-    output_ = std::make_unique<LocalCellOutput>(
-        options_.partitionWriterOptions, &layout_, cellOpts, boltPool_);
-  }
   splitter_ = std::make_unique<CellSplitter>(
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
 
@@ -169,16 +155,10 @@ const int32_t* CellShuffleWriter::pidArray(const RowVector& rv) {
   return pidValues_.data();
 }
 
-arrow::Status CellShuffleWriter::split(
+arrow::Status CellShuffleWriter::splitOrdinary(
     RowVectorPtr rv,
     int64_t /*memLimitIgnored: cell memory decisions never use it*/) {
   BOLT_CHECK(!stopped_, "split after stop");
-  // The factory keeps composite plans on V1 via the query config; a
-  // composite vector arriving anyway must fail loudly rather than be
-  // written as bytes the reader cannot interpret.
-  BOLT_CHECK(
-      !RowVector::isComposite(rv),
-      "CellShuffleWriter cannot split a CompositeRowVector");
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
@@ -468,7 +448,7 @@ void CellShuffleWriter::maybeCheckpoint() {
   }
 }
 
-arrow::Status CellShuffleWriter::reclaimFixedSize(
+arrow::Status CellShuffleWriter::reclaimOrdinary(
     int64_t size,
     int64_t* actual) {
   *actual = 0;
@@ -537,19 +517,34 @@ arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
   return arrow::Status::OK();
 }
 
-arrow::Status CellShuffleWriter::stop() {
+arrow::Status CellShuffleWriter::flushOrdinary() {
+  // Composite rows come next: the window goes out whole and its memory
+  // back, so the two kinds never share memory or a payload.
+  if (initialized_ && splitter_->hasWindowRows()) {
+    checkpoint();
+    allocator_->shrink();
+    boltPool_->release();
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status CellShuffleWriter::stopOrdinary() {
   BOLT_CHECK(!stopped_, "stop called twice");
   stopped_ = true;
-  if (!initialized_) {
-    if (remote_) {
-      // An empty mapper still ends its Celeborn attempt.
-      options_.partitionWriterOptions.rssClient->stop();
-    }
-    metrics_.partitionLengths.assign(numPartitions_, 0);
-    metrics_.rawPartitionLengths.assign(numPartitions_, 0);
-    return arrow::Status::OK();
+  if (initialized_) {
+    splitter_->finish(metrics_);
+  } else {
+    // No ordinary batch ever came: the output still writes the data file -
+    // empty, or the composite rows alone - or ends the Celeborn attempt.
+    const std::vector<uint32_t> noRows(numPartitions_, 0);
+    const std::vector<uint64_t> noBytes(numPartitions_, 0);
+    CellWindowInput in{};
+    in.layout = &layout_;
+    in.rowCounts = noRows.data();
+    in.variableBytes = noBytes.data();
+    in.numPartitions = numPartitions_;
+    output_->finalize(in, /*windowHasData=*/false, metrics_);
   }
-  splitter_->finish(metrics_);
   // Data size is the pre-compression payload volume (what the raw lengths
   // account); bytes written is the compressed file. Reporting them as the
   // same number would hide the compression ratio from the engine metrics.
@@ -560,7 +555,9 @@ arrow::Status CellShuffleWriter::stop() {
   metrics_.peakBytes = boltPool_->peakBytes();
 
   // The splitter has released its window; return idle chunks and reservation.
-  allocator_->shrink();
+  if (allocator_ != nullptr) {
+    allocator_->shrink();
+  }
   boltPool_->release();
   return arrow::Status::OK();
 }

@@ -92,15 +92,15 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
-  // Mirror of the writer-side fallback gate: the cell writer is only ever
-  // used for hash/range partitioning and non-composite plans, on local and
-  // Celeborn shuffles alike. Unsupported types fail at the adapter boundary
-  // instead of changing the wire format.
+  // Mirror of the writer-side gate: the cell writer is only ever used for
+  // hash/range partitioning, on local and Celeborn shuffles alike, and
+  // frames composite-capable streams by the same query config. Unsupported
+  // types fail at the adapter boundary instead of changing the wire format.
   useCellReader_ = shuffleWriterType_ == ShuffleWriterType::Cell &&
-      supportAdaptiveShuffleWriter(partitioning) &&
-      !operatorCtx_->driverCtx()
-           ->queryConfig()
-           .isHashAggregationCompositeOutputEnabled();
+      supportAdaptiveShuffleWriter(partitioning);
+  cellCompositeInput_ = operatorCtx_->driverCtx()
+                            ->queryConfig()
+                            .isHashAggregationCompositeOutputEnabled();
 }
 
 void SparkShuffleReader::init() {
@@ -128,7 +128,8 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
           arrowPool_.get(),
           pool(),
           batchSize_,
-          shuffleBatchByteSize_);
+          shuffleBatchByteSize_,
+          cellCompositeInput_);
     }
     auto output = cellShuffleReader_->next();
     if (!output) {

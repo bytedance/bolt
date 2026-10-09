@@ -18,10 +18,10 @@
 
 #include "bolt/vector/ComplexVector.h"
 
-#include "bolt/shuffle/sparksql/ShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
+#include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -30,7 +30,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 ///
 /// Accepts logical rows (pid column first): complex columns are packed into
 /// the trailing binary column by the type adapter here, so callers never
-/// see the physical Cell schema.
+/// see the physical Cell schema. CompositeRowVectors are handled entirely by
+/// the CompositeShuffleWriter base.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
 /// ignored by design): the only choke point is the chunk-grow callback,
@@ -42,7 +43,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// spills becomes a seal at the next batch boundary instead: batches are
 /// sliced small, each slice is admitted against the pool first, and a
 /// reclaim arriving mid-batch is deferred to the boundary.
-class CellShuffleWriter final : public ShuffleWriter {
+class CellShuffleWriter final : public CompositeShuffleWriter {
  public:
   CellShuffleWriter(
       ShuffleWriterOptions options,
@@ -51,17 +52,21 @@ class CellShuffleWriter final : public ShuffleWriter {
 
   ~CellShuffleWriter() override;
 
-  arrow::Status split(RowVectorPtr rv, int64_t memLimitIgnored) override;
-
-  arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;
-
-  arrow::Status stop() override;
-
   const uint64_t cachedPayloadSize() const override {
     return 0; // no payload cache layer, by design
   }
 
   std::string toString() const override;
+
+ protected:
+  arrow::Status splitOrdinary(RowVectorPtr rv, int64_t memLimitIgnored)
+      override;
+  arrow::Status reclaimOrdinary(int64_t size, int64_t* actual) override;
+  arrow::Status flushOrdinary() override;
+  arrow::Status stopOrdinary() override;
+  CellOutput& output() override {
+    return *output_;
+  }
 
  private:
   void initOnFirstBatch(const RowVector& rv);
@@ -82,7 +87,6 @@ class CellShuffleWriter final : public ShuffleWriter {
   void maybeCheckpoint();
   arrow::Status reclaimRemote(int64_t size, int64_t* actual);
 
-  memory::MemoryPool* const boltPool_;
   /// Celeborn partition writer: windows are pushed whole, never spilled.
   const bool remote_;
 

@@ -72,6 +72,26 @@ enum class NullTag : uint8_t {
   kReserved = 0b11,
 };
 
+/// What a block of a composite-capable stream holds. With
+/// CellShuffleOptions::compositeInput every block - a ColumnarPayload or a
+/// CompositeRows block - starts with this byte.
+enum class CellBlockKind : uint8_t {
+  kPayload = 0,
+  kCompositeRows = 1,
+};
+
+/// A CompositeRows block carries CompositeRowVector rows - serialized
+/// aggregation state - as opaque bytes, row-framed as the V1 shuffle ships
+/// them:
+///
+///   kind      u8   kCompositeRows
+///   rowCount  u32
+///   rawBytes  u64  body bytes before compression
+///   stored    u64  body bytes that follow
+///   layout    u8   RunLayout::kCombined (compressed) or kCombinedStored
+///   body           rows back to back, each [size i32][size bytes]
+constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
+
 /// Spec section 5, Run compression layout byte.
 enum class RunLayout : uint8_t {
   kCombined = 0x00,

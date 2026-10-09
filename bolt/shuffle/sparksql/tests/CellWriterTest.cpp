@@ -26,6 +26,8 @@
 #include <type_traits>
 
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
+#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
@@ -33,6 +35,7 @@
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
+#include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
@@ -82,6 +85,10 @@ class RecordingCellOutput final : public CellOutput {
     }
   }
 
+  void spillRaw(const RawBlockSource& /*next*/) override {
+    ++rawCalls;
+  }
+
   void finalize(
       const CellWindowInput& in,
       bool windowHasData,
@@ -97,6 +104,7 @@ class RecordingCellOutput final : public CellOutput {
   }
 
   uint32_t spillCalls{0};
+  uint32_t rawCalls{0};
   uint32_t sealCalls{0};
   uint32_t finalizeCalls{0};
   std::function<void(const CellWindowInput&)> onSpill;
@@ -290,6 +298,59 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
         {"v", "s"},
         {makeFlatVector<int64_t>(n, [](auto row) { return row % 977; }),
          makeNullableFlatVector<StringView>(views)});
+  }
+
+  /// `data` as HashAggregation composite output: pid column first, each
+  /// row [size i32][CompactRow bytes] like a serialized aggregation state.
+  std::shared_ptr<CompositeRowVector> makeComposite(
+      const std::vector<int32_t>& pids,
+      const RowVectorPtr& data) {
+    ShuffleColumnarToRowConverter converter(
+        asRowType(data->type()), pool(), row::RowFormat::COMPACT);
+    auto stats =
+        converter.getWithStats(data, std::numeric_limits<int64_t>::max());
+    std::vector<std::vector<uint8_t*>> rows(1);
+    std::vector<uint32_t> partitions(data->size(), 0);
+    std::vector<int64_t> partitionBytes(1, 0);
+    converter.convert(stats, partitions, rows, partitionBytes);
+    const auto ordinary = withPid(pids, data);
+    auto children = ordinary->children();
+    auto composite = std::make_shared<CompositeRowVector>(
+        ordinary->type(),
+        data->size(),
+        pool(),
+        std::make_unique<SelectivityVector>(children.size(), true),
+        std::move(children));
+    composite->allocateRows(partitionBytes[0]);
+    RowInfoTracker tracker(composite.get(), 0, data->size());
+    for (vector_size_t i = 0; i < data->size(); ++i) {
+      const auto rowSize =
+          *reinterpret_cast<int32_t*>(rows[0][i]) + kSizeOfRowHeader;
+      auto* row = composite->newRow();
+      ::memcpy(row, rows[0][i], rowSize);
+      composite->store(i, row);
+      composite->advance(rowSize);
+    }
+    return composite;
+  }
+
+  /// The rows of a CompositeRowVector read back from the shuffle, decoded.
+  RowVectorPtr decodeCompositeRows(
+      const RowTypePtr& rowType,
+      const RowVectorPtr& batch) {
+    auto composite = std::dynamic_pointer_cast<CompositeRowVector>(batch);
+    EXPECT_NE(composite, nullptr);
+    std::vector<std::string_view> rows;
+    for (vector_size_t row = 0; row < composite->size(); ++row) {
+      auto* data = composite->rowAt(row);
+      auto* end = row + 1 < composite->size()
+          ? composite->rowAt(row + 1)
+          : composite->rowAt(0) + composite->totalRowSize();
+      rows.emplace_back(data, end - data);
+    }
+    ShuffleRowToColumnarConverter converter(
+        rowType, pool(), row::RowFormat::COMPACT);
+    return converter.convert(rows);
   }
 
   /// The run count of every payload in one partition's byte range.
@@ -1446,6 +1507,246 @@ TEST_F(CellWriterTest, celebornEmptyMapperStillEndsTheAttempt) {
   EXPECT_EQ(client->numPushes, 0);
   EXPECT_EQ(writer.metrics().partitionLengths, std::vector<int64_t>(3, 0));
   EXPECT_TRUE(readFile().empty());
+}
+
+TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {
+  // Aggregation-state rows and ordinary rows alternate: every switch writes
+  // the other side out first, and the reader hands back CompositeRowVectors
+  // and ordinary batches, each with its rows intact and in order.
+  constexpr int32_t kPartitions = 3;
+  struct Batch {
+    bool composite;
+    std::vector<int32_t> pids;
+    RowVectorPtr data;
+  };
+  std::vector<Batch> batches;
+  const std::vector<bool> kinds = {true, true, false, true, false, false, true};
+  int64_t base = 0;
+  for (const bool composite : kinds) {
+    const int n = 2500;
+    Batch batch{composite, std::vector<int32_t>(n), nullptr};
+    for (int i = 0; i < n; ++i) {
+      batch.pids[i] = (base + i * 7) % kPartitions;
+    }
+    batch.data = makeRowVector(
+        {"k", "s"},
+        {makeFlatVector<int64_t>(n, [&](auto row) { return base + row; }),
+         makeFlatVector<std::string>(n, [&](auto row) {
+           return std::string((base + row) % 37, 'a' + row % 26);
+         })});
+    base += n;
+    batches.push_back(std::move(batch));
+  }
+  const auto rowType = asRowType(batches[0].data->type());
+  // Per partition and kind, the expected (batch, row) sequence.
+  std::vector<std::vector<std::pair<size_t, vector_size_t>>> expected[2];
+  expected[0].resize(kPartitions);
+  expected[1].resize(kPartitions);
+  for (size_t b = 0; b < batches.size(); ++b) {
+    for (vector_size_t row = 0; row < batches[b].data->size(); ++row) {
+      expected[batches[b].composite][batches[b].pids[row]].emplace_back(b, row);
+    }
+  }
+  auto codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+
+  for (const bool celeborn : {false, true}) {
+    SCOPED_TRACE(celeborn ? "celeborn" : "local");
+    auto client = std::make_shared<RecordingRssClient>();
+    auto options = celeborn ? makeCelebornOptions(kPartitions, client)
+                            : makeOptions(kPartitions);
+    options.cellOptions.compositeInput = true;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    for (const auto& batch : batches) {
+      RowVectorPtr input = batch.composite
+          ? makeComposite(batch.pids, batch.data)
+          : withPid(batch.pids, batch.data);
+      ASSERT_TRUE(writer.split(input, 0).ok());
+    }
+    ASSERT_TRUE(writer.stop().ok());
+    const auto& metrics = writer.metrics();
+    int64_t lengthSum = 0;
+    for (const auto length : metrics.partitionLengths) {
+      lengthSum += length;
+    }
+    EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
+    EXPECT_GE(metrics.spillCount, 1) << "an ordinary window was sealed";
+    EXPECT_GT(metrics.convertTime, 0);
+
+    std::vector<std::vector<char>> streams(kPartitions);
+    if (celeborn) {
+      EXPECT_EQ(client->stops, 1);
+      EXPECT_TRUE(readFile().empty());
+      for (int32_t pid = 0; pid < kPartitions; ++pid) {
+        for (const auto& blob : client->pushes[pid]) {
+          streams[pid].insert(streams[pid].end(), blob.begin(), blob.end());
+        }
+        EXPECT_EQ(
+            metrics.partitionLengths[pid],
+            static_cast<int64_t>(streams[pid].size()));
+      }
+    } else {
+      const auto file = readFile();
+      ASSERT_EQ(static_cast<int64_t>(file.size()), metrics.totalBytesWritten);
+      uint64_t offset = 0;
+      for (int32_t pid = 0; pid < kPartitions; ++pid) {
+        const auto length = metrics.partitionLengths[pid];
+        streams[pid].assign(
+            file.begin() + offset, file.begin() + offset + length);
+        offset += length;
+      }
+    }
+
+    for (int32_t pid = 0; pid < kPartitions; ++pid) {
+      CellShuffleReader reader(
+          std::make_shared<test::MemoryReaderStreamIterator>(
+              std::vector<std::vector<char>>{streams[pid]}),
+          rowType,
+          codec.get(),
+          arrow::default_memory_pool(),
+          pool(),
+          /*batchSize=*/1000,
+          1 << 20,
+          /*compositeInput=*/true);
+      size_t next[2] = {0, 0};
+      while (auto batch = reader.next()) {
+        const bool composite = RowVector::isComposite(batch);
+        auto rows = composite ? decodeCompositeRows(rowType, batch) : batch;
+        if (composite) {
+          EXPECT_LE(batch->size(), 1000);
+        }
+        for (vector_size_t row = 0; row < rows->size(); ++row) {
+          auto& want = expected[composite][pid];
+          ASSERT_LT(next[composite], want.size());
+          const auto [b, sourceRow] = want[next[composite]++];
+          EXPECT_TRUE(batches[b].data->equalValueAt(rows.get(), sourceRow, row))
+              << "partition " << pid << (composite ? " composite" : "")
+              << " row " << next[composite] - 1;
+        }
+      }
+      EXPECT_EQ(next[0], expected[0][pid].size()) << "partition " << pid;
+      EXPECT_EQ(next[1], expected[1][pid].size()) << "partition " << pid;
+    }
+    ::unlink(dataFile_.c_str());
+  }
+}
+
+TEST_F(CellWriterTest, compositeReclaimWritesTheBufferedRows) {
+  // While composite rows are held, a reclaim writes them out as blocks and
+  // gives their memory back; only-composite output still reaches the data
+  // file (local) or the pushes (Celeborn), and the attempt ends once.
+  constexpr int32_t kPartitions = 2;
+  const auto data = makeRowVector(
+      {"k", "s"},
+      {makeFlatVector<int64_t>(4000, [](auto row) { return row; }),
+       makeFlatVector<std::string>(
+           4000, [](auto row) { return std::string(500 + row % 1000, 'z'); })});
+  std::vector<int32_t> pids(data->size());
+  for (vector_size_t row = 0; row < data->size(); ++row) {
+    pids[row] = row % kPartitions;
+  }
+  for (const bool celeborn : {false, true}) {
+    SCOPED_TRACE(celeborn ? "celeborn" : "local");
+    auto client = std::make_shared<RecordingRssClient>();
+    auto options = celeborn ? makeCelebornOptions(kPartitions, client)
+                            : makeOptions(kPartitions);
+    options.cellOptions.compositeInput = true;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    ASSERT_TRUE(writer.split(makeComposite(pids, data), 0).ok());
+    EXPECT_EQ(client->numPushes, 0);
+    int64_t freed = 0;
+    ASSERT_TRUE(writer.reclaimFixedSize(1LL << 30, &freed).ok());
+    EXPECT_GT(freed, 0);
+    if (celeborn) {
+      EXPECT_EQ(client->numPushes, kPartitions);
+    }
+    ASSERT_TRUE(writer.split(makeComposite(pids, data), 0).ok());
+    ASSERT_TRUE(writer.stop().ok());
+    const auto& metrics = writer.metrics();
+    EXPECT_GT(metrics.totalBytesWritten, 0);
+    EXPECT_GT(metrics.totalBytesEvicted, 0);
+    EXPECT_GT(metrics.dataSize, 2 * data->size() * 4);
+    int64_t lengthSum = 0;
+    for (const auto length : metrics.partitionLengths) {
+      lengthSum += length;
+    }
+    EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
+    if (celeborn) {
+      EXPECT_EQ(client->stops, 1);
+      EXPECT_EQ(client->numPushes, 2 * kPartitions);
+    } else {
+      EXPECT_EQ(
+          static_cast<int64_t>(readFile().size()), metrics.totalBytesWritten);
+    }
+    ::unlink(dataFile_.c_str());
+  }
+}
+
+TEST_F(CellWriterTest, compositeInputNeedsTheQueryConfig) {
+  // Without the framing a reader would parse composite blocks as payloads.
+  const auto data =
+      makeRowVector({makeFlatVector<int64_t>(8, [](auto row) { return row; })});
+  CellShuffleWriter writer(
+      makeOptions(2), pool(), arrow::default_memory_pool());
+  EXPECT_THROW(
+      writer.split(makeComposite(std::vector<int32_t>(8, 1), data), 0),
+      BoltException);
+}
+
+TEST_F(CellWriterTest, compositeReaderRejectsAnUnknownBlockKind) {
+  const auto rowType = ROW({"k"}, {BIGINT()});
+  CellShuffleReader reader(
+      std::make_shared<test::MemoryReaderStreamIterator>(
+          std::vector<std::vector<char>>{{7, 0, 0, 0}}),
+      rowType,
+      nullptr,
+      arrow::default_memory_pool(),
+      pool(),
+      1000,
+      1 << 20,
+      /*compositeInput=*/true);
+  EXPECT_THROW(reader.next(), BoltException);
+}
+
+TEST_F(CellWriterTest, rawRunsFollowEachPartitionsPayloads) {
+  // Each spillRaw() call is one unit over all partitions, like a Run; the
+  // final merge places every partition's raw blocks after its payloads, in
+  // call order - also when no window ever existed.
+  constexpr uint32_t kPartitions = 3;
+  auto options = makeOptions(kPartitions);
+  const auto layout = CellLayout::create(ROW({"v"}, {BIGINT()}));
+  LocalCellOutput output(
+      options.partitionWriterOptions, &layout, options.cellOptions, pool());
+  const auto spill = [&](std::vector<std::vector<std::string>> blocks) {
+    output.spillRaw([&](uint32_t pid, BufferPtr& block) {
+      if (blocks[pid].empty()) {
+        return false;
+      }
+      const auto bytes = blocks[pid].front();
+      blocks[pid].erase(blocks[pid].begin());
+      block = AlignedBuffer::allocate<char>(bytes.size(), pool());
+      ::memcpy(block->asMutable<char>(), bytes.data(), bytes.size());
+      return true;
+    });
+  };
+  spill({{"a0"}, {}, {"c0", "c1"}});
+  spill({{"a1"}, {"b1"}, {}});
+
+  const std::vector<uint32_t> noRows(kPartitions, 0);
+  const std::vector<uint64_t> noBytes(kPartitions, 0);
+  CellWindowInput in{};
+  in.layout = &layout;
+  in.rowCounts = noRows.data();
+  in.variableBytes = noBytes.data();
+  in.numPartitions = kPartitions;
+  ShuffleWriterMetrics metrics;
+  output.finalize(in, /*windowHasData=*/false, metrics);
+
+  EXPECT_EQ(readFile(), "a0a1b1c0c1");
+  EXPECT_EQ(metrics.partitionLengths, (std::vector<int64_t>{4, 2, 4}));
+  EXPECT_EQ(metrics.totalBytesWritten, 10);
+  EXPECT_EQ(metrics.totalBytesEvicted, 10);
 }
 
 TEST_F(CellWriterTest, shrinkIsSafeWhileTheOutputReadsCells) {
