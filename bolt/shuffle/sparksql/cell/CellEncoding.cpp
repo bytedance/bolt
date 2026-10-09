@@ -24,7 +24,8 @@ namespace {
 /// the caller has verified in holds ceil(count * bits / 8) bytes. `put(i, v)`
 /// receives the raw unsigned bit pattern.
 template <typename Put>
-inline void unpackBits(const uint8_t* in, uint32_t count, uint32_t bits, const Put& put) {
+inline void
+unpackBits(const uint8_t* in, uint32_t count, uint32_t bits, const Put& put) {
   const uint64_t mask = (uint64_t{1} << bits) - 1;
   // 128-bit accumulator: refilling by whole bytes can hold up to
   // bits - 1 + 8 = 70 pending bits when bits is large.
@@ -60,7 +61,8 @@ inline uint64_t loadLe(const uint8_t* in, uint32_t bytes) {
 } // namespace
 
 template <typename T>
-uint32_t decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
+uint32_t
+decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
   if (inBytes < 1) {
@@ -104,8 +106,8 @@ uint32_t decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) 
       if (param > 63 || bodyAvail < kWidth) {
         return 0;
       }
-      const uint64_t base = static_cast<uint64_t>(
-          signExtend(loadLe(body, kWidth), kWidth * 8));
+      const uint64_t base =
+          static_cast<uint64_t>(signExtend(loadLe(body, kWidth), kWidth * 8));
       if (param == 0) {
         const T value = static_cast<T>(base);
         for (uint32_t i = 0; i < count; ++i) {
