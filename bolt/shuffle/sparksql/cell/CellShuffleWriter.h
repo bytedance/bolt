@@ -20,12 +20,17 @@
 
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// Prepares decoded and partitioned input batches and schedules spills,
 /// window seals and final output through CellSplitter.
+///
+/// Accepts logical rows (pid column first): complex columns are packed into
+/// the trailing binary column by the type adapter here, so callers never
+/// see the physical Cell schema.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
 /// ignored by design): the only choke point is the chunk-grow callback,
@@ -55,6 +60,8 @@ class CellShuffleWriter final : public ShuffleWriter {
 
  private:
   void initOnFirstBatch(const RowVector& rv);
+  /// Splits one physical (adapter-converted) batch, slicing oversized ones.
+  arrow::Status splitPhysical(RowVectorPtr rv);
   arrow::Status splitBatch(RowVectorPtr rv);
   /// The single dictionary probe (first batch, lifetime decision).
   void probeDictionary(uint32_t numRows);
@@ -71,6 +78,7 @@ class CellShuffleWriter final : public ShuffleWriter {
   bool checkpointRequested_{false};
   bool dictProbed_{false};
 
+  std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
   std::unique_ptr<CellOutput> output_;

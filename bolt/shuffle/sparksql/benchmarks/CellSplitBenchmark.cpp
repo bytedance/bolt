@@ -428,7 +428,7 @@ size_t runWriter(
     options.cellOptions.enableStringDictionary = !disableDict;
     arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
     const auto& first = scenario.batches[0];
-    writer = BoltShuffleWriter::create(
+    writer = BoltShuffleWriter::createShuffleWriter(
         options,
         first->type()->size() - 1,
         first->size(),
@@ -666,7 +666,7 @@ WriterPhases runWriterPhases(
   options.cellOptions.enableStringDictionary = !disableDict;
   auto arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
   const auto& first = scenario.batches[0];
-  auto writer = BoltShuffleWriter::create(
+  auto writer = BoltShuffleWriter::createShuffleWriter(
       options,
       first->type()->size() - 1,
       first->size(),
@@ -721,7 +721,7 @@ ReaderPhases runCellReaderPhases(
       &written.file, written.partitionLengths);
   cell::CellShuffleReader reader(
       streams,
-      cell::CellLayout::create(rowType),
+      rowType,
       &timing,
       arrow::default_memory_pool(),
       leafPool(),

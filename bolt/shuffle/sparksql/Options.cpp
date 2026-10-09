@@ -57,13 +57,14 @@ std::string CellShuffleOptions::toString() const {
   return fmt::format(
       "cellMemoryCapBytes={} "
       "checkpointPartitionBytes={} nullMemLimitBytes={} maxWindowRows={} "
-      "enableStringDictionary={} coalesceMergedRuns={}",
+      "enableStringDictionary={} coalesceMergedRuns={} compressSpill={}",
       cellMemoryCapBytes,
       checkpointPartitionBytes,
       nullMemLimitBytes,
       maxWindowRows,
       enableStringDictionary,
-      coalesceMergedRuns);
+      coalesceMergedRuns,
+      compressSpill);
 }
 
 std::string ShuffleReaderOptions::toString() const {

@@ -2,8 +2,9 @@
 
 状态：设计，尚未实现。当前 Celeborn 继续回退 V1。本期只实现 Local 普通
 RowVector 的 Cell 类型支持，不含 VARIANT（包括嵌套 VARIANT）；选中 Cell 路径后，
-不支持的类型在 Node adapter 入口报错，不按类型回退。Celeborn / Composite 的配置
-回退保留。支持的复杂类型已经在 Cell 入口前变成末尾 Binary，不影响远端接口。
+不支持的类型在 Cell Writer / Reader 内部的类型 adapter 报错，不按类型回退。
+Celeborn / Composite 的配置回退保留。支持的复杂类型在 Cell Writer 内部变成末尾
+Binary，不影响远端接口。
 
 Celeborn 第一版采用全量 flush：内存预算不足时，在完整输入单元边界关闭所有分区
 的当前窗口，逐分区发送，然后整体重置。暂不实现最大分区选择、局部窗口回收或
@@ -68,8 +69,9 @@ Local 的 `spillRun()` 只排出已链接的 Cell，关窗收尾期间允许 gro
    不重新发送整轮窗口；请求重试及 batch identity 由 SDK 管理。
 
 `maxRemotePayloadBytes` 限制单次 push 中的 Cell payload 字节，不含 Celeborn header；
-header 和 SDK 工作内存另外计入预算。40 MiB 仅作为候选初值，单行上限须与入口
-adapter 的 64 MiB 限制协调，并按包含 framing 的保守上界在追加前检查。每个 payload
+header 和 SDK 工作内存另外计入预算。40 MiB 仅作为候选初值。类型 adapter 不限制单行
+大小（单个值或复杂行最大约 2 GiB），远端须按包含 framing 的保守上界在追加前检查，
+超出 `maxRemotePayloadBytes` 的单行明确报错。每个 payload
 独立解码，不跨 push 拆分。这些阈值属于远端 policy，不改变 Local 行为。
 
 ## SDK 与所有权
