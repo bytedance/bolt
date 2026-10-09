@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <random>
 #include <sstream>
 
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -143,8 +144,14 @@ void LocalCellOutput::ensureSpillFile() {
     return;
   }
   if (!options_.configuredDirs.empty()) {
+    // One spill file per task, in a random directory as the local partition
+    // writer does, so concurrent tasks spread their spill I/O over the disks.
+    const auto& dirs = options_.configuredDirs;
+    std::default_random_engine engine(std::random_device{}());
     const auto dir = getSpilledShuffleFileDir(
-        options_.configuredDirs[0], 0 % options_.numSubDirs);
+        dirs[std::uniform_int_distribution<size_t>(0, dirs.size() - 1)(engine)],
+        std::uniform_int_distribution<int32_t>(
+            0, std::max<int32_t>(options_.numSubDirs, 1) - 1)(engine));
     auto maybePath = createTempShuffleFile(dir);
     BOLT_CHECK(
         maybePath.ok(),

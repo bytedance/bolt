@@ -88,7 +88,8 @@ TEST(CellEncodingTest, bitPackBlocks) {
   EXPECT_EQ(decoded, values);
 
   // Symmetric-around-zero values keep the sign bit through the pack.
-  expectRoundtrip<int32_t>({-8, 7, -1, 0, 3, -5, 2, -7, 6, 1, -2, 4, -3, 5, 0, -6});
+  expectRoundtrip<int32_t>(
+      {-8, 7, -1, 0, 3, -5, 2, -7, 6, 1, -2, 4, -3, 5, 0, -6});
   expectRoundtrip<int16_t>({-1, 1, -1, 1});
   expectRoundtrip<int64_t>({31, -32, 0, 15, -16, 7, -8, 1});
 }
@@ -118,9 +119,14 @@ TEST(CellEncodingTest, forBitPackBlocks) {
 
   // Negative bases round-trip.
   expectRoundtrip<int64_t>(
-      {-1'000'000'000'007, -1'000'000'000'001, -1'000'000'000'003,
-       -1'000'000'000'002, -1'000'000'000'007, -1'000'000'000'004,
-       -1'000'000'000'006, -1'000'000'000'005});
+      {-1'000'000'000'007,
+       -1'000'000'000'001,
+       -1'000'000'000'003,
+       -1'000'000'000'002,
+       -1'000'000'000'007,
+       -1'000'000'000'004,
+       -1'000'000'000'006,
+       -1'000'000'000'005});
 }
 
 TEST(CellEncodingTest, plainFallback) {
