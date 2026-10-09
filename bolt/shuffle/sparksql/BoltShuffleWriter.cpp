@@ -263,7 +263,6 @@ arrow::Status collectFlatVectorBuffer<bytedance::bolt::TypeKind::VARBINARY>(
 
 ShuffleWriterType decideBoltShuffleWriterType(
     const ShuffleWriterOptions& options,
-    const RowTypePtr& inputType,
     int32_t numColumnsExludePid,
     int64_t firstBatchRowNumber,
     int64_t firstBatchFlatSize,
@@ -285,38 +284,14 @@ ShuffleWriterType decideBoltShuffleWriterType(
   // 0 is adaptive strategy, > 0 means shuffle type forced
   if (options.forceShuffleWriterType && supportAdaptive) {
     const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
-    if (forced == ShuffleWriterType::Cell) {
-      // The type-less legacy create() cannot enable the cell writer: the
-      // type-based fallback decision must run, and its outcome must be
-      // derivable on the reader side from the same static information.
-      BOLT_CHECK_NOT_NULL(
-          inputType,
-          "forceShuffleWriterType=Cell requires the create() overload "
-          "taking the input row type");
-      if (inputType->size() < 2) {
-        // pid column only: nothing for the cell writer to lay out.
-        LOG(INFO) << "CellShuffleWriter needs at least one data column; "
-                     "falling back to V1";
-        return ShuffleWriterType::V1;
-      }
-      if (options.partitionWriterOptions.partitionWriterType ==
-          PartitionWriterType::kCeleborn) {
-        // The RSS backend of the cell writer is a later phase; remote
-        // shuffles keep the V1 path for now.
-        LOG(INFO) << "CellShuffleWriter does not support the remote "
-                     "partition writer yet; falling back to V1";
-        return ShuffleWriterType::V1;
-      }
-      // The cell writer covers the ColumnarPayload type table only; any
-      // other column type falls back to V1 (never a runtime error).
-      for (uint32_t i = 1; i < inputType->size(); ++i) {
-        if (!cell::CellLayout::isSupportedType(inputType->childAt(i))) {
-          LOG(INFO) << "CellShuffleWriter does not support "
-                    << inputType->childAt(i)->toString()
-                    << "; falling back to V1";
-          return ShuffleWriterType::V1;
-        }
-      }
+    if (forced == ShuffleWriterType::Cell &&
+        options.partitionWriterOptions.partitionWriterType ==
+            PartitionWriterType::kCeleborn) {
+      // The RSS backend of the cell writer is a later phase; remote
+      // shuffles keep the V1 path for now.
+      LOG(INFO) << "CellShuffleWriter does not support the remote "
+                   "partition writer yet; falling back to V1";
+      return ShuffleWriterType::V1;
     }
     return forced;
   }
@@ -394,7 +369,6 @@ ShuffleWriterType decideBoltShuffleWriterType(
 
 std::shared_ptr<ShuffleWriter> BoltShuffleWriter::create(
     const ShuffleWriterOptions& options,
-    const RowTypePtr& inputType,
     int32_t numColumnsExludePid,
     int64_t firstBatchRowNumber,
     int64_t firstBatchFlatSize,
@@ -403,7 +377,6 @@ std::shared_ptr<ShuffleWriter> BoltShuffleWriter::create(
     arrow::MemoryPool* arrowPool) {
   ShuffleWriterType type = decideBoltShuffleWriterType(
       options,
-      inputType,
       numColumnsExludePid,
       firstBatchRowNumber,
       firstBatchFlatSize,

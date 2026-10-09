@@ -19,13 +19,13 @@
 #include "bolt/vector/ComplexVector.h"
 
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
-#include "bolt/shuffle/sparksql/cell/CachedCellFrontend.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
+#include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// L5 of the Cell shuffle: the writer orchestrating split, Run spill,
-/// window seal and final merge.
+/// Prepares decoded and partitioned input batches and schedules spills,
+/// window seals and final output through CellSplitter.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
 /// ignored by design): the only choke point is the chunk-grow callback,
@@ -60,43 +60,30 @@ class CellShuffleWriter final : public ShuffleWriter {
   void probeDictionary(uint32_t numRows);
   const int32_t* pidArray(const RowVector& rv);
   void onBeforeChunkGrow();
-  void spillRunNow();
   void checkpoint();
   void maybeCheckpoint();
-  CellWindowInput windowInput();
 
   memory::MemoryPool* const boltPool_;
 
   bool initialized_{false};
   bool inSplit_{false};
-  bool spilling_{false};
   bool stopped_{false};
   bool checkpointRequested_{false};
   bool dictProbed_{false};
 
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
-  std::unique_ptr<DataCells> cells_;
-  std::unique_ptr<NullCells> nulls_;
-  std::unique_ptr<SplitFrontend> frontend_;
   std::unique_ptr<CellOutput> output_;
+  std::unique_ptr<CellSplitter> splitter_;
 
   std::vector<uint32_t> row2Partition_;
   std::vector<uint32_t> partition2RowCount_;
-  /// Rows per partition since the window opened; the null-bit base offset.
-  std::vector<uint32_t> windowRowStart_;
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
   std::vector<int32_t> pidValues_;
   std::vector<DecodedVector> decoded_;
   std::vector<BatchNullClass> nullClass_;
-  /// Payload encoding tags, one bit per column; set by the probe, constant
-  /// afterwards.
-  std::vector<uint8_t> encodingTags_;
   DecodedVector pidDecoded_;
-
-  uint64_t totalWindowRows_{0};
-  uint32_t maxWindowRows_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
