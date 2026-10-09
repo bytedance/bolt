@@ -28,11 +28,13 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 CelebornCellOutput::CelebornCellOutput(
     PartitionWriterOptions options,
     const CellLayout* layout,
-    memory::MemoryPool* pool)
+    memory::MemoryPool* pool,
+    bool framed)
     : options_(std::move(options)),
       layout_(layout),
       pool_(pool),
-      client_(options_.rssClient) {
+      client_(options_.rssClient),
+      framed_(framed) {
   BOLT_CHECK_NOT_NULL(
       client_, "CellShuffleWriter on Celeborn requires an RSS client");
   if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
@@ -73,6 +75,10 @@ void CelebornCellOutput::pushPartition(
   const uint32_t numStreams = layout_->numStreams();
   const uint64_t total = residentBytes(in, pid);
   resizeBuffer(payload_, 0, pool_);
+  if (framed_) {
+    const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+    appendBytes(payload_, &kind, 1, pool_);
+  }
   appendPayloadPrefix(in, pid, total > 0 ? 1 : 0, payload_, pool_);
   uint64_t raw = payload_->size();
   if (total > 0) {
@@ -118,12 +124,24 @@ void CelebornCellOutput::pushPartition(
     payload_->setSize(bodyAt + stored);
   }
   rawPartitionLengths_[pid] += static_cast<int64_t>(raw);
+  push(pid, payload_);
+}
 
+void CelebornCellOutput::spillRaw(const RawBlockSource& next) {
+  BufferPtr block;
+  for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
+    while (next(pid, block)) {
+      push(pid, block);
+    }
+  }
+}
+
+void CelebornCellOutput::push(uint32_t pid, BufferPtr& bytes) {
   const uint64_t start = currentTimeNs();
   const int32_t pushed = client_->pushPartitionData(
       static_cast<int32_t>(pid),
-      payload_->asMutable<char>(),
-      static_cast<int64_t>(payload_->size()));
+      bytes->asMutable<char>(),
+      static_cast<int64_t>(bytes->size()));
   pushTimeNs_ += currentTimeNs() - start;
   partitionLengths_[pid] += pushed;
   pushedBytes_ += pushed;

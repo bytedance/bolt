@@ -36,11 +36,13 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 class CelebornCellOutput final : public CellOutput {
  public:
   /// `pool` backs the payload workspaces so they stay inside task memory
-  /// accounting; it must outlive this object.
+  /// accounting; it must outlive this object. With `framed`, every push
+  /// opens with the payload kind byte (CellShuffleOptions::compositeInput).
   CelebornCellOutput(
       PartitionWriterOptions options,
       const CellLayout* layout,
-      memory::MemoryPool* pool);
+      memory::MemoryPool* pool,
+      bool framed);
 
   bool sealsResidentCells() const override {
     return true;
@@ -48,6 +50,9 @@ class CelebornCellOutput final : public CellOutput {
 
   void spillRun(const CellWindowInput& in) override;
   void sealWindow(const CellWindowInput& in) override;
+  /// Pushes every block as it comes; a block is whole, so it may land
+  /// anywhere among the partition's other pushes.
+  void spillRaw(const RawBlockSource& next) override;
   void finalize(
       const CellWindowInput& in,
       bool windowHasData,
@@ -64,10 +69,13 @@ class CelebornCellOutput final : public CellOutput {
   /// Assembles one partition's payload into payload_ and pushes it.
   void pushPartition(const CellWindowInput& in, uint32_t pid);
 
+  void push(uint32_t pid, BufferPtr& bytes);
+
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
   memory::MemoryPool* const pool_;
   const std::shared_ptr<RssClient> client_;
+  const bool framed_;
   /// Null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
 

@@ -74,50 +74,6 @@ class ShuffleMemoryTest : public ShuffleTestBase {
       int64_t hogBytes,
       const std::shared_ptr<RssClient>& rssClient);
 
-  std::shared_ptr<CompositeRowVector> createCompositeInput(
-      const RowVectorPtr& input,
-      row::RowFormat rowFormat) {
-    ShuffleColumnarToRowConverter converter(
-        std::dynamic_pointer_cast<const RowType>(input->type()),
-        pool(),
-        rowFormat);
-    auto stats =
-        converter.getWithStats(input, std::numeric_limits<int64_t>::max());
-    std::vector<std::vector<uint8_t*>> rows(1);
-    std::vector<uint32_t> partitions(input->size(), 0);
-    std::vector<int64_t> partitionBytes(1, 0);
-    converter.convert(stats, partitions, rows, partitionBytes);
-
-    auto names = input->type()->asRow().names();
-    auto types = input->type()->asRow().children();
-    names.insert(names.begin(), "pid");
-    types.insert(types.begin(), INTEGER());
-    auto rowType = ROW(std::move(names), std::move(types));
-    auto validColumns =
-        std::make_unique<SelectivityVector>(rowType->size(), true);
-    auto children = input->children();
-    children.insert(
-        children.begin(),
-        makeFlatVector<int32_t>(input->size(), [](auto) { return 0; }));
-    auto composite = std::make_shared<CompositeRowVector>(
-        rowType,
-        input->size(),
-        pool(),
-        std::move(validColumns),
-        std::move(children));
-    composite->allocateRows(partitionBytes[0]);
-    RowInfoTracker tracker(composite.get(), 0, input->size());
-    for (auto i = 0; i < input->size(); ++i) {
-      const auto rowSize =
-          *reinterpret_cast<int32_t*>(rows[0][i]) + kSizeOfRowHeader;
-      auto* row = composite->newRow();
-      std::memcpy(row, rows[0][i], rowSize);
-      composite->store(i, row);
-      composite->advance(rowSize);
-    }
-    return composite;
-  }
-
   // Asserts the shuffle output compressed far below the raw size, i.e. the
   // writer made splits large enough for the per-partition repeats to dedup.
   static void expectWellCompressed(const ShuffleWriterMetrics& metrics) {

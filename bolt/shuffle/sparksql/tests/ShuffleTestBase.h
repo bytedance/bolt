@@ -70,6 +70,9 @@ struct ShuffleTestParam {
   // On-wire row format for the RowBased writer (shuffleMode == 3); ignored by
   // the other modes. Threaded into both writer and reader options.
   row::RowFormat rowFormat = bytedance::bolt::row::RowFormat::DENSE;
+  // Enables HashAggregation composite output in the query config of both the
+  // writer and the reader task.
+  bool compositeOutputEnabled = false;
 
   std::string toString() const;
 
@@ -105,6 +108,13 @@ class ShuffleTestBase : public bytedance::bolt::exec::test::OperatorTestBase {
 
   // execute test with param, generating input data internally
   void executeTest(const ShuffleTestParam& param);
+
+  // `input` as HashAggregation composite output: a pid column (all 0, set
+  // by the harness) and `input`'s rows serialized in `rowFormat`, each with
+  // its 4-byte size header.
+  std::shared_ptr<CompositeRowVector> createCompositeInput(
+      const RowVectorPtr& input,
+      row::RowFormat rowFormat);
 
   std::shared_ptr<CompositeRowVector> createCompositeRowVectorWithPid(
       const RowTypePtr& rowTypeWithoutPid,

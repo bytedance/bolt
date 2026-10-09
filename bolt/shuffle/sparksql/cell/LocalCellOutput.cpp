@@ -208,6 +208,37 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
   sealed_.push_back(std::move(window));
 }
 
+void LocalCellOutput::spillRaw(const RawBlockSource& next) {
+  ensureSpillFile();
+  auto& ends = rawRuns_.emplace_back(options_.numPartitions + 1);
+  ends[0] = spillOffset_;
+  BufferPtr block;
+  for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
+    while (next(pid, block)) {
+      spillWrite(block->as<char>(), block->size());
+    }
+    ends[pid + 1] = spillOffset_;
+  }
+  const uint64_t flushStart = currentTimeNs();
+  BOLT_CHECK_EQ(::fflush(spillFile_), 0, "cell spill flush failed");
+  evictTimeNs_ += currentTimeNs() - flushStart;
+}
+
+void LocalCellOutput::copySpill(
+    std::FILE* out,
+    uint64_t begin,
+    uint64_t bytes) {
+  char copyBuffer[64 << 10];
+  while (bytes > 0) {
+    const size_t chunk =
+        bytes < sizeof(copyBuffer) ? bytes : sizeof(copyBuffer);
+    readSpill(begin, copyBuffer, chunk);
+    writeOut(out, copyBuffer, chunk);
+    begin += chunk;
+    bytes -= chunk;
+  }
+}
+
 void LocalCellOutput::writeOut(std::FILE* out, const void* data, size_t bytes) {
   const uint64_t start = currentTimeNs();
   BOLT_CHECK_EQ(
@@ -371,6 +402,7 @@ void LocalCellOutput::writeDiskPayload(
   const uint32_t runCount = coalesce ? (segments.empty() ? 0 : 1)
                                      : static_cast<uint32_t>(segments.size());
   resizeBuffer(scratch_, 0, pool_);
+  appendBlockKind();
   appendLe32(scratch_, rows, pool_);
   appendLe32(scratch_, runCount, pool_);
   appendLe64(scratch_, w.variableBytes[pid], pool_);
@@ -451,16 +483,7 @@ void LocalCellOutput::writeSpilledSegment(
   }
   rawAccum_ += runHeaderBytes + decodedSum;
   writeOut(out, scratch_->as<char>(), runHeaderBytes);
-  char copyBuffer[64 << 10];
-  uint64_t offset = segment.begin + runHeaderBytes;
-  uint64_t left = dataBytes;
-  while (left > 0) {
-    const size_t chunk = left < sizeof(copyBuffer) ? left : sizeof(copyBuffer);
-    readSpill(offset, copyBuffer, chunk);
-    writeOut(out, copyBuffer, chunk);
-    offset += chunk;
-    left -= chunk;
-  }
+  copySpill(out, segment.begin + runHeaderBytes, dataBytes);
 }
 
 void LocalCellOutput::writeCurrentWindowPayload(
@@ -479,6 +502,7 @@ void LocalCellOutput::writeCurrentWindowPayload(
   }
 
   resizeBuffer(scratch_, 0, pool_);
+  appendBlockKind();
   appendPayloadPrefix(in, pid, runCount, scratch_, pool_);
   rawAccum_ += scratch_->size();
   writeOut(out, scratch_->as<char>(), scratch_->size());
@@ -611,6 +635,13 @@ void LocalCellOutput::logWindowDiagnostics(
             << mb(totalRunBytes) << " spilled";
 }
 
+void LocalCellOutput::appendBlockKind() {
+  if (cellOptions_.compositeInput) {
+    const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+    appendBytes(scratch_, &kind, 1, pool_);
+  }
+}
+
 void LocalCellOutput::finalize(
     const CellWindowInput& in,
     bool windowHasData,
@@ -635,6 +666,9 @@ void LocalCellOutput::finalize(
     }
     if (windowHasData && in.rowCounts[pid] > 0) {
       writeCurrentWindowPayload(out, in, pid);
+    }
+    for (const auto& ends : rawRuns_) {
+      copySpill(out, ends[pid], ends[pid + 1] - ends[pid]);
     }
     metrics.partitionLengths[pid] =
         static_cast<int64_t>(finalBytes_ - partitionStart);

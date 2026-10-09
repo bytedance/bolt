@@ -122,6 +122,50 @@ TEST_F(CellTypeIntegrationTest, pidOnlyUsesHeaderPayloads) {
   }
 }
 
+TEST_F(CellTypeIntegrationTest, compositeOutputSharesTheShuffle) {
+  // HashAggregation composite output: aggregation-state rows - alone, or
+  // alternating with ordinary rows - go through the cell shuffle and come
+  // back as CompositeRowVectors and ordinary batches with every row intact.
+  for (const auto writerType :
+       {PartitionWriterType::kLocal, PartitionWriterType::kCeleborn}) {
+    for (const bool mixed : {false, true}) {
+      SCOPED_TRACE(
+          fmt::format("{}{}", writerType, mixed ? ", mixed" : ", composite"));
+      ShuffleTestParam param{
+          "hash", 4, writerType, DataTypeGroup::kString, 4, 2};
+      param.compositeOutputEnabled = true;
+      const auto batch = [&](int32_t base) {
+        return makeRowVector(
+            {"c0", "c1"},
+            {makeFlatVector<int64_t>(
+                 3000, [base](auto row) { return base + row; }),
+             makeFlatVector<std::string>(3000, [base](auto row) {
+               return std::string((base + row) % 41, 'a' + row % 26);
+             })});
+      };
+      ShuffleInputData input;
+      for (int32_t mapper = 0; mapper < 2; ++mapper) {
+        const int32_t base = mapper * 100'000;
+        std::vector<RowVectorPtr> batches{
+            createCompositeInput(batch(base), param.rowFormat)};
+        if (mixed) {
+          batches.push_back(batch(base + 10'000));
+        }
+        batches.push_back(
+            createCompositeInput(batch(base + 20'000), param.rowFormat));
+        if (mixed) {
+          batches.push_back(batch(base + 30'000));
+        }
+        input.inputsPerMapper.push_back(std::move(batches));
+      }
+      ShuffleRunResult result;
+      // The harness checks every partition's rows, composite ones decoded.
+      executeTestWithCustomInput(param, input, &result);
+      EXPECT_GT(result.metrics.convertTime, 0);
+    }
+  }
+}
+
 // A test suite that runs shuffle tests with different parameters
 class ShuffleMatrixTest : public ShuffleTestBase,
                           public testing::WithParamInterface<ShuffleTestParam> {

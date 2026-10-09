@@ -17,6 +17,7 @@
 #pragma once
 
 #include "bolt/shuffle/sparksql/ReaderStreamIterator.h"
+#include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
@@ -32,7 +33,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// Deliberately shares nothing with the existing deserializer stack; its
 /// only inputs are the stream iterator, the schema and the codec. Batches
 /// come out in the logical schema: complex columns packed by the writer are
-/// restored here by the type adapter.
+/// restored here by the type adapter. With `compositeInput` every block opens
+/// with a kind byte, and CompositeRows blocks come out as CompositeRowVectors
+/// of at most batchSize rows, never concatenated with payload rows.
 class CellShuffleReader {
  public:
   CellShuffleReader(
@@ -42,7 +45,8 @@ class CellShuffleReader {
       arrow::MemoryPool* arrowPool, // only handed to nextStream()
       memory::MemoryPool* pool,
       int32_t batchSize,
-      int64_t batchByteSize);
+      int64_t batchByteSize,
+      bool compositeInput = false);
 
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();
@@ -97,8 +101,23 @@ class CellShuffleReader {
     uint64_t decompressTimeNs_{0};
   };
 
-  /// Decodes the next payload across streams; false at the end of input.
-  bool nextDecoded(RowVectorPtr& out);
+  enum class Decoded { kPayload, kComposite, kEnd };
+
+  /// Decodes the next block across streams: a payload into `out`, or a
+  /// CompositeRows block into compositeRows_.
+  Decoded nextDecoded(RowVectorPtr& out);
+
+  /// Reads one CompositeRows block (CellFormat.h) whose kind byte was
+  /// consumed; false, with `error`, on a malformed one.
+  bool decodeComposite(std::string& error);
+
+  bool hasCompositeRows() const {
+    return nextCompositeRow_ < compositeRows_.size();
+  }
+
+  /// The next up to batchSize rows of the last CompositeRows block, rebuilt
+  /// as a CompositeRowVector the way the V1 reader does.
+  RowVectorPtr nextComposite();
 
   /// Next batch in the physical (Cell) schema; nullptr at the end.
   RowVectorPtr nextPhysical();
@@ -115,6 +134,13 @@ class CellShuffleReader {
   const int64_t batchByteSize_;
 
   CellPayloadDecoder decoder_;
+  /// Set with compositeInput.
+  std::unique_ptr<ShuffleRowToColumnarConverter> compositeConverter_;
+  BufferPtr compositeStored_;
+  BufferPtr compositeRaw_;
+  /// Row bodies (without the size prefix) of the last CompositeRows block.
+  std::vector<std::string_view> compositeRows_;
+  size_t nextCompositeRow_{0};
   std::unique_ptr<StreamSource> source_;
   bool exhausted_{false};
   uint64_t decodeTimeNs_{0};
