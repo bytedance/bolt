@@ -1,28 +1,32 @@
-# BM RowContainer 使用说明
+# BM RowContainer Usage Guide
 
-本文面向接入 `BmRowContainer` 的执行算子，只描述算子需要依赖的接口和生命周期。
-内部的 segment/chunk/block 组织、StringView rebase 和 BufferManager pin 细节不作为算子
-接入约束。
+This guide is for execution operators that integrate `BmRowContainer`. It
+documents public interfaces and lifetimes, not internal segment, chunk, block,
+`StringView` rebasing, or BufferManager pin details.
 
-公共入口：
+Public entry points:
 
 - `BmRowContainer.h`
 - `BmRowContainerRead.h`
 - `BmRowContainerPublicTypes.h`
 
-内部存储类型在 `BmSegmentTypes.h`，只供 `bm` 内部实现和白盒 UT 使用。
+`BmSegmentTypes.h` contains internal storage types for the `bm` implementation
+and white-box tests only.
 
-## 基本模型
+## Model
 
-`BmRowContainer` 是 row-based 临时数据容器。
+`BmRowContainer` is a row-based temporary data container.
 
-- 写入阶段优先在内存中追加 row。
-- 上层感知内存压力后调用 spill，把当前 active segment 交给 BufferManager 管理。
-- spill 返回 `SegmentId`。后续读回、释放、partition 管理都以 `SegmentId` 为单位。
-- resident 阶段使用 `char*` row 指针；不能全量 resident 时使用 `RowId` 句柄，再交给
-  `ReadOnlyWindowReadSession` 批量转成只读 resident 指针。
+- The write phase appends rows in memory.
+- Under memory pressure, the operator spills the active segment to
+  BufferManager.
+- Spill returns a `SegmentId`; reload, release, and partition management use
+  segment IDs.
+- Resident data uses `char*` row pointers. When the full set cannot remain
+  resident, use `RowId` handles and resolve them in batches through
+  `ReadOnlyWindowReadSession`.
 
-## 创建
+## Construction
 
 ```cpp
 using namespace bytedance::bolt::exec::bm;
@@ -35,13 +39,12 @@ BmRowContainer rows(
     memory::bm::MemoryTag::kTesting);
 ```
 
-`types` 和 `nullable` 必须一一对应。`numKeyColumns` 表示开头有多少列属于 key；key
-中的 MAP 会按 key 排序后序列化，以提供稳定的比较和 hash 语义。nullable 信息会参与 row
-layout 生成，非 nullable 列会走更短的快路径。
+`types` and `nullable` must have matching entries. `numKeyColumns` identifies
+the leading key columns. Maps in keys are serialized in sorted-key order for
+stable comparison and hashing. Nullability participates in row layout; a
+non-nullable column uses a shorter fast path.
 
-## 写入
-
-使用 `appendRow()` + `store()` 写入一行：
+## Writing Rows
 
 ```cpp
 auto context = rows.appendRow(partitionId);
@@ -50,49 +53,47 @@ rows.store(context, decodedPayload, sourceIndex, payloadColumn);
 char* row = context.row();
 ```
 
-`RowWriteContext` 只描述当前 row 的写入位置，不要跨 container、跨 spill 或异步流程保存。
+`RowWriteContext` describes only the current row's write location. Never retain
+it across containers, spills, or asynchronous operations.
 
-## Resident 指针访问
+## Resident Pointer Access
 
-比较和列提取都要求输入 row 指针当前 resident。
+Comparison and extraction require resident row pointers:
 
 ```cpp
 int32_t result = rows.compare(leftRow, rightRow, column, flags);
 int32_t rowResult = rows.compareRows(leftRow, rightRow, keyFlags);
 
 rows.extractColumnResident(
-    rowPtrs.data(),
-    rowPtrs.size(),
-    column,
-    outputVector);
+    rowPtrs.data(), rowPtrs.size(), column, outputVector);
 ```
 
-spill 后旧指针不再有效。读回后需要重新通过 `BulkReadSession`、
-`ReadOnlyWindowReadSession` 或 `MergeReadSession` 获取指针。
+Pointers obtained before a spill are invalid afterward. Obtain new pointers
+through `BulkReadSession`, `ReadOnlyWindowReadSession`, or `MergeReadSession`.
 
-## Spill
+## Spilling
 
-默认 partition：
+Default partition:
 
 ```cpp
 SegmentId segment = rows.spillActiveSegment();
 ```
 
-多 partition：
+Explicit partition:
 
 ```cpp
 SegmentId segment = rows.spillActivePartitionSegment(partitionId);
 ```
 
-同一个 partition 可以多次 spill，适合 Hash Build 这类分区写入场景：
+A partition may be spilled repeatedly, which supports partitioned Hash Build:
 
 ```cpp
 const auto& segments = rows.segmentsForPartition(partitionId);
 ```
 
-## 全量读
+## Bulk Read
 
-如果 working set 预计可以全部 resident，先快速判断，再全量加载：
+Use bulk read when the full working set is expected to fit in memory:
 
 ```cpp
 std::vector<SegmentId> segments = ...;
@@ -101,23 +102,24 @@ folly::Range<const SegmentId*> range(segments.data(), segments.size());
 if (rows.canBulkRead(range)) {
   auto bulk = rows.beginBulkReadSegments(range);
   std::vector<char*> rowPtrs = bulk.loadRows();
-  // rowPtrs 可直接用于 compare / extractColumnResident。
+  // rowPtrs can be used by compare and extractColumnResident.
 }
 ```
 
-`canBulkRead()` 是保守判断：只有当前仍持有 `BufferHandle` 的 block 才算已加载，
-已经 unpin 但仍 resident 的 block 会按可能重新加载计入 reserve 预算。这样可以避免
-`MaybeReserve()` 探测过程中 reclaim 改变 resident 状态导致低估。`BulkReadSession::loadRows()`
-会真正 reserve 和 pin；如果期间内存状态变化，仍可能抛异常。
+`canBulkRead()` is conservative. Only blocks with a retained `BufferHandle`
+count as loaded. Unpinned but resident blocks count against the reload reserve,
+because reclaim may change their state during the `MaybeReserve()` probe.
+`loadRows()` performs the real reserve and pin operation and can still throw if
+memory state changes.
 
-`BulkReadSession::loadRows()` 返回的 `char*` 由 container 持有的 resident block 支撑。
-Bulk 读不提供局部 eviction 能力；如果需要按窗口释放 working set，使用
-`ReadOnlyWindowReadSession`。
+Returned pointers are backed by resident blocks held by the container. Bulk
+read has no partial eviction; use a read-only window session when the working
+set must be released incrementally.
 
-## Window read
+## Window Read
 
-如果不能全量加载，先列出 `RowId`，再按算子自己的访问窗口批量加载。`RowId` 是
-container 返回给读 session 的定位句柄，调用方不要解析其中字段。
+When bulk read is not possible, list `RowId`s and load the operator's current
+window. `RowId` is an opaque locator and must not be decoded by callers.
 
 ```cpp
 auto session = rows.beginReadOnlyWindowReadSegments(range);
@@ -128,31 +130,33 @@ std::vector<const char*> rowPtrs = session.loadRows(
     folly::Range<const RowId*>(needed.data(), needed.size()));
 ```
 
-单行接口是显式慢路径：
+Single-row loading is an explicit slow path:
 
 ```cpp
 const char* row = session.loadRow(rowId);
 ```
 
-`ReadOnlyWindowReadSession` 只返回 `const char*`。读阶段如果当前 batch 的 row 指针不再
-使用，调用 `session.releaseLoadedChunks(targetBytes)` 释放 session 持有的 pin；block 仍由
-BufferManager 管理，后续是否真正回收或 spill 由上层内存仲裁触发。释放以 chunk 为粒度：
-一个 chunk 的 row block 和 heap blocks 会一起 unpin。需要立即回收 resident block 时，
-再显式调用 `session.evictLoadedChunks(targetBytes)`；clean block 可直接丢弃，dirty row
-block 会写回 spill backing。
+The session returns only `const char*`. After the current batch is no longer in
+use, call `releaseLoadedChunks(targetBytes)` to release session-owned pins. The
+blocks remain managed by BufferManager and may later be reclaimed or spilled.
+Release is chunk-granular: a chunk's row block and heap blocks are unpinned
+together.
 
-## Reordered Segment 和 Merge Read
+Use `evictLoadedChunks(targetBytes)` when resident blocks should be reclaimed
+immediately. Clean blocks can be discarded; dirty row blocks are written back
+to their spill backing.
 
-Sort / HashAgg 在内存中完成排序后，可以按排序后的 row 指针顺序物理写出一个可 merge 的
-segment：
+## Reordered Segments and Merge Read
+
+Sort or HashAgg can materialize rows in sorted pointer order as a mergeable
+segment:
 
 ```cpp
-SegmentId orderedSegment =
-    rows.finalizeReorderedSegment(
-        folly::Range<char* const*>(orderedRows.data(), orderedRows.size()));
+SegmentId orderedSegment = rows.finalizeReorderedSegment(
+    folly::Range<char* const*>(orderedRows.data(), orderedRows.size()));
 ```
 
-多个有序 segment 使用 `MergeReadSession` 顺序读回：
+Read multiple ordered segments through `MergeReadSession`:
 
 ```cpp
 auto merge = rows.beginMergeReadSegments(range);
@@ -163,98 +167,109 @@ while (merge.next(batch, maxRows)) {
 }
 ```
 
-`beginMergeReadSegments()` 只接受 `finalizeReorderedSegment()` 产生的有序 segment。普通
-spill segment 不能直接进入 merge read。
+`beginMergeReadSegments()` accepts only ordered segments produced by
+`finalizeReorderedSegment()`. Ordinary spill segments cannot be merged
+directly.
 
-merge read 默认是消费型读取：读完的 chunk 会在安全时机释放，避免后续内存压力下再次 spill
-已经消费的数据。如果调用方需要重复读取，显式关闭读后释放：
+Merge read consumes data by default and releases completed chunks when safe,
+preventing consumed data from being spilled again under later pressure. Disable
+release-after-read for repeatable access:
 
 ```cpp
 auto merge = rows.beginMergeReadSegments(range, false);
 ```
 
-## Window Release 和显式 Evict
+## Releasing and Evicting Data
 
-当前 batch 的指针不再使用，但数据未来还可能再读：
+Release pins while keeping data available for later reads:
 
 ```cpp
 session.releaseLoadedChunks(targetBytes);
 ```
 
-需要立即尝试回收 resident block：
+Attempt immediate resident-memory reclamation:
 
 ```cpp
 session.evictLoadedChunks(targetBytes);
 ```
 
-数据已经不会再用：
+Release data permanently:
 
 ```cpp
 rows.releaseSegment(segment);
 rows.releaseSegments(range);
 ```
 
-## 常见接入方式
+## Integration Patterns
 
-Sort / HashAgg：
+Sort and HashAgg:
 
-1. `appendRow()` + `store()` 写入。
-2. resident 阶段保留 row 指针并用 `compareRows()` 排序。
-3. 排序后调用 `finalizeReorderedSegment()`。
-4. 多个有序 segment 用 `beginMergeReadSegments()` 输出。
+1. Write with `appendRow()` and `store()`.
+2. Retain resident row pointers and sort them with `compareRows()`.
+3. Call `finalizeReorderedSegment()` after sorting.
+4. Produce output from multiple ordered segments with
+   `beginMergeReadSegments()`.
 
-Hash Build：
+Hash Build:
 
-1. 按 partition 写入：`appendRow(partition)` + `store()`。
-2. 每个 partition 可以多次 `spillActivePartitionSegment(partition)`。
-3. probe 或后续处理某个 partition 时，读取 `segmentsForPartition(partition)`。
-4. 能全量加载则 `BulkReadSession::loadRows()`；不能则
-   `ReadOnlyWindowReadSession::listRowIds()` + `ReadOnlyWindowReadSession::loadRows()`。
-5. partition 完成后释放对应 segments。
+1. Write by partition with `appendRow(partition)` and `store()`.
+2. Call `spillActivePartitionSegment(partition)` as often as needed.
+3. Read `segmentsForPartition(partition)` during probe or later processing.
+4. Use `BulkReadSession::loadRows()` when everything fits; otherwise use
+   `ReadOnlyWindowReadSession::listRowIds()` and `loadRows()`.
+5. Release the partition's segments when processing completes.
 
-## 使用约束
+## Usage Constraints
 
-- spill 后不要继续使用旧 row 指针。
-- `RowId` 不应由算子自行解析，应交回 `ReadOnlyWindowReadSession`。
-- `compare()`、`compareRows()`、`extractColumnResident()` 都要求 row 指针 resident。
-- `RowWriteContext` 只用于当前 row 的逐列 store。
-- 当前常规快路径覆盖 fixed-width 类型、`VARCHAR` 和 `VARBINARY`；复杂类型不要作为接入假设。
+- Never use a row pointer after its data has spilled.
+- Treat `RowId` as opaque and return it to `ReadOnlyWindowReadSession`.
+- `compare()`, `compareRows()`, and `extractColumnResident()` require resident
+  pointers.
+- Use `RowWriteContext` only for per-column stores into its current row.
+- Common fast paths cover fixed-width values, `VARCHAR`, and `VARBINARY`.
+  Verify complex-type behavior explicitly instead of assuming a fast path.
 
-## 开发和测试约定
+## Development and Testing Rules
 
-重构和新增功能需要保持热路径性能稳定。不要为了隐藏实现细节引入 PImpl、虚调用、额外堆分配
-或新的锁到 `appendRow()`、`store()`、`appendBatch()`、resident compare/extract 等热路径。
-公共头可以保留必要的 hot-path detail，但新代码应尽量依赖更窄的公共类型头。
+Preserve hot-path performance during refactoring. Do not introduce PImpl,
+virtual dispatch, heap allocations, or locks into `appendRow()`, `store()`,
+`appendBatch()`, resident comparison, or extraction merely to hide
+implementation details. Public headers may retain necessary hot-path details;
+new code should otherwise depend on the narrowest public types.
 
-`BmRowContainer` 的正式 API 不暴露细粒度 trace metrics。线上问题定位优先使用
-`BufferManagerStats`、`BufferManagerTagStats` 和 IO scheduler stats 这类大范围统计；
-benchmark 可以在容器外层测量端到端阶段耗时，但不要把逐行、逐 block 或 ns 级阶段计数重新
-放回 `appendRow()`、`store()`、`appendBatch()`、bulk read 等热路径。
+The public API does not expose fine-grained trace metrics. Use broad
+`BufferManagerStats`, `BufferManagerTagStats`, and I/O scheduler statistics for
+production diagnostics. Benchmarks may measure end-to-end phases outside the
+container, but must not reintroduce per-row, per-block, or nanosecond counters
+into container hot paths.
 
-## Benchmark 数据 profile
+## Benchmark Data Profiles
 
-`bolt/exec/bm/benchmarks` 里的 RowContainer benchmark 使用三个 dataset profile：
+RowContainer benchmarks under `bolt/exec/bm/benchmarks` use three profiles:
 
-- `fixed`：只包含 `BIGINT`、`INTEGER`、`DOUBLE`，不包含变长列。
-- `variable_small`：包含一个 `VARCHAR` 列，字符串长度按 row id 确定性分布在 `1..64`，
-  平均约 `32B`。可通过 `--bm_row_container_variable_max_string_length=64` 调整上限。
-- `variable_large`：包含一个 `VARCHAR` 列，字符串固定为 `1024B`，用于保留大字符串
-  copy/spill/compress/IO 压力场景。可通过 `--bm_row_container_large_string_length=1024`
-  调整长度。
+- `fixed`: `BIGINT`, `INTEGER`, and `DOUBLE` only.
+- `variable_small`: one `VARCHAR` whose deterministic length ranges from 1 to
+  64 bytes with an average near 32 bytes. Override the maximum with
+  `--bm_row_container_variable_max_string_length=64`.
+- `variable_large`: one fixed 1024-byte `VARCHAR` for large-value copy, spill,
+  compression, and I/O pressure. Override it with
+  `--bm_row_container_large_string_length=1024`.
 
-两个字符串长度 flag 可以在同一次运行中同时传入，但只分别作用于对应 profile：`variable_small`
-只读取 `variable_max_string_length`，`variable_large` 只读取 `large_string_length`。
-runner 脚本默认枚举并运行 binary 注册的全部 case，因此会同时跑 `fixed`、`variable_small` 和
-`variable_large`。
+Both string-length flags may be provided together, but each affects only its
+matching profile. The runner enumerates every registered binary case, so a
+default run includes all three profiles.
 
-UT 按行为域拆分：
+Tests are split by behavior:
 
-- `BmRowContainerResidentTest.cpp`：resident 写入、比较、提取、nullable 和基础 layout 行为。
-- `BmRowContainerReadTest.cpp`：bulk/window read、window eviction 和 StringView rebase。
-- `BmRowContainerBatchTest.cpp`：`appendBatch()` fixed/string/null/chunk 跨越行为。
-- `BmMergeReadSessionTest.cpp`：reordered segment 和 merge read 行为。
-- `BmSegmentCollectionTest.cpp`：segment/chunk/block 内部存储行为。
-- `BmPartitionTest.cpp`：partition spill 和 partition 边界。
+- `BmRowContainerResidentTest.cpp`: resident writes, comparison, extraction,
+  nullability, and layout.
+- `BmRowContainerReadTest.cpp`: bulk/window reads, eviction, and `StringView`
+  rebasing.
+- `BmRowContainerBatchTest.cpp`: fixed, string, null, and cross-chunk batch
+  append behavior.
+- `BmMergeReadSessionTest.cpp`: reordered segments and merge reads.
+- `BmSegmentCollectionTest.cpp`: internal segment, chunk, and block storage.
+- `BmPartitionTest.cpp`: partition spilling and boundaries.
 
-新增 UT 优先放到对应行为域文件；如果新增一个独立行为域，再新增单独测试文件并更新
-`tests/CMakeLists.txt`。
+Add a unit test to the matching behavior file. Create a new test file and
+update `tests/CMakeLists.txt` only for a genuinely separate behavior domain.
