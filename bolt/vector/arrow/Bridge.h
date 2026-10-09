@@ -33,6 +33,9 @@
 #include <fmt/format.h>
 #include <cstddef>
 #include <memory>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 #include "bolt/common/memory/Memory.h"
 #include "bolt/vector/BaseVector.h"
 
@@ -43,6 +46,10 @@ struct ArrowArray;
 struct ArrowSchema;
 
 enum class TimestampUnit { kSecond = 0, kMilli = 3, kMicro = 6, kNano = 9 };
+
+enum class TimestampEncoding { kArrow, kSecondsNanos };
+
+enum class TimeImportMode { kPreserveUnits, kMillisOfDay };
 
 struct ArrowOptions {
   bool flattenDictionary{false};
@@ -65,7 +72,57 @@ struct ArrowOptions {
   // consumers that don't support REE (e.g. Arrow Java < 19). Other types
   // (scalar, map, struct) are unaffected and use REE.
   bool arrayConstantAsDictionary{false};
+
+  // kSecondsNanos exports bolt.timestamp, a FixedSizeBinary(16) extension
+  // with extension metadata "1". Each value contains little-endian int64
+  // seconds followed by uint64 nanoseconds in [0, 1'000'000'000). This
+  // preserves the full Timestamp range. timestampUnit and timestampTimeZone
+  // only apply to kArrow; logical precision and timezone remain with callers.
+  // Arrow C++ consumers must call registerArrowTimestampType() from
+  // TimestampExtensionType.h before importing this encoding.
+  TimestampEncoding timestampEncoding{TimestampEncoding::kArrow};
+
+  // Preserve Arrow TIME values as INTEGER (seconds/millis) or BIGINT
+  // (micros/nanos). kMillisOfDay converts all units to INTEGER milliseconds,
+  // rejecting sub-millisecond values. Both modes validate the time-of-day
+  // range. Bolt integers do not retain the Arrow TIME type annotation.
+  TimeImportMode timeImportMode{TimeImportMode::kPreserveUnits};
+
+  // Structured bindings retain the nine-field Arrow options interface.
+  template <
+      size_t I,
+      typename Self,
+      std::enable_if_t<
+          std::is_same_v<
+              std::remove_cv_t<std::remove_reference_t<Self>>,
+              ArrowOptions>,
+          int> = 0>
+  friend constexpr decltype(auto) get(Self&& self) noexcept {
+    return std::get<I>(std::forward_as_tuple(
+        std::forward<Self>(self).flattenDictionary,
+        std::forward<Self>(self).flattenConstant,
+        std::forward<Self>(self).timestampUnit,
+        std::forward<Self>(self).timestampTimeZone,
+        std::forward<Self>(self).exportToView,
+        std::forward<Self>(self).useLargeString,
+        std::forward<Self>(self).stringViewCopyValues,
+        std::forward<Self>(self).exportToArrowIPC,
+        std::forward<Self>(self).arrayConstantAsDictionary));
+  }
 };
+
+namespace std {
+
+template <>
+struct tuple_size<ArrowOptions> : integral_constant<size_t, 9> {};
+
+template <size_t I>
+struct tuple_element<I, ArrowOptions> {
+  using type = remove_reference_t<decltype(get<I>(declval<ArrowOptions&>()))>;
+};
+
+} // namespace std
+
 namespace bytedance::bolt {
 /// Returns true when the vector will use the experimental
 /// Dictionary<List<T>> export path for ARRAY constants. Callers that prepare
@@ -186,6 +243,11 @@ void exportToArrow(
 ///   arrowSchema.release(&arrowSchema);
 ///
 TypePtr importFromArrow(const ArrowSchema& arrowSchema);
+
+/// Imports a schema using the selected temporal conversion options.
+TypePtr importFromArrowWithOptions(
+    const ArrowSchema& arrowSchema,
+    const ArrowOptions& options);
 
 /// Import an ArrowArray and ArrowSchema into a Bolt vector.
 ///

@@ -36,6 +36,7 @@ bolt_add_library(
 target_link_libraries(
   bolt_presto_serializer
   bolt_vector
+  bolt_arrow_timestamp
   bolt_row_fast
   utf8proc::utf8proc
 )
