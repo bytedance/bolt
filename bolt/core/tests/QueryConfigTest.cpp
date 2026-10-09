@@ -70,6 +70,32 @@ TEST_F(QueryConfigTest, bufferManagerSpillCompressionKind) {
       "openzl", configured->queryConfig().bufferManagerSpillCompressionKind());
 }
 
+TEST_F(QueryConfigTest, bufferManagerEnabledUsesUnderscoreConfigKey) {
+  QueryConfig config{{{"buffer_manager_enabled", "true"}}};
+  EXPECT_TRUE(config.bufferManagerEnabled());
+}
+
+TEST_F(
+    QueryConfigTest,
+    bufferManagerSpillCompressionKindUsesUnderscoreConfigKey) {
+  QueryConfig config{{{"buffer_manager_spill_compression_kind", "openzl"}}};
+  EXPECT_EQ("openzl", config.bufferManagerSpillCompressionKind());
+}
+
+TEST_F(QueryConfigTest, bufferManagerEnabledHyphenatedKeyIsIgnored) {
+  const auto oldKey = std::string{"buffer-manager"} + "-enabled";
+  QueryConfig config{{{oldKey, "true"}}};
+  EXPECT_FALSE(config.bufferManagerEnabled());
+}
+
+TEST_F(
+    QueryConfigTest,
+    bufferManagerSpillCompressionKindHyphenatedKeyIsIgnored) {
+  const auto oldKey = std::string{"buffer-manager"} + "-spill-compression-kind";
+  QueryConfig config{{{oldKey, "openzl"}}};
+  EXPECT_TRUE(config.bufferManagerSpillCompressionKind().empty());
+}
+
 TEST_F(QueryConfigTest, setConfig) {
   std::string path = "/tmp/setConfig";
   std::unordered_map<std::string, std::string> configData(
