@@ -32,17 +32,16 @@ bolt_add_library(
   BoltShuffleReader.cpp
   BoltShuffleWriter.cpp
   BoltShuffleWriterV2.cpp
-  CellShuffleTypeAdapter.cpp
   CelebornReaderStreamIterator.cpp
-  cell/CellDirectory.cpp
+  cell/CellBuffer.cpp
   cell/CellEncoding.cpp
   cell/CellPayload.cpp
-  cell/CachedCellFrontend.cpp
+  cell/CellSplitter.cpp
   cell/CellShuffleReader.cpp
+  cell/CellShuffleTypeAdapter.cpp
   cell/CellShuffleWriter.cpp
   cell/LocalCellOutput.cpp
-  cell/CellTypes.cpp
-  cell/ChunkAllocator.cpp
+  cell/CellFormat.cpp
   compression/Compression.cpp
   compression/Codec.cpp
   compression/GzipCodec.cpp

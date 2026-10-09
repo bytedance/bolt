@@ -18,15 +18,14 @@
 
 #include "bolt/vector/ComplexVector.h"
 
-namespace bytedance::bolt::shuffle::sparksql {
+namespace bytedance::bolt::shuffle::sparksql::cell {
 
 // Integration boundary for logical Spark rows. Cell itself only sees primitive
 // columns and, when needed, one final binary containing all complex fields.
+// CompactRow owns the binary format and its serialization/deserialization.
 class CellShuffleTypeAdapter {
  public:
   explicit CellShuffleTypeAdapter(RowTypePtr logicalType);
-
-  static bool isSupported(const TypePtr& type);
 
   const RowTypePtr& physicalType() const {
     return physicalType_;
@@ -43,9 +42,6 @@ class CellShuffleTypeAdapter {
       vector_size_t& offset,
       memory::MemoryPool* pool) const;
 
-  RowVectorPtr decode(const RowVectorPtr& input, memory::MemoryPool* pool)
-      const;
-
   // Restores a bounded part of a physical payload, advancing offset only after
   // success. The caller retains input until every row has been consumed.
   RowVectorPtr decodeNext(
@@ -53,20 +49,8 @@ class CellShuffleTypeAdapter {
       vector_size_t& offset,
       memory::MemoryPool* pool) const;
 
-  // Implementation bounds, independent of Cell's wire representation.
-  // Actual allocations use the caller's task pool and may fail sooner.
-  static constexpr vector_size_t kMaxBatchRows = 1024;
-  static constexpr uint64_t kTargetBatchBytes = 8ULL << 20;
-  static constexpr uint64_t kMaxRowBytes = 64ULL << 20;
-  static constexpr uint64_t kMaxDecodedBytes = 1ULL << 30;
-
  private:
-  RowVectorPtr decodeBatch(
-      const RowVectorPtr& input,
-      vector_size_t& offset,
-      vector_size_t maxRows,
-      uint64_t maxBytes,
-      memory::MemoryPool* pool) const;
+  static bool isSupported(const TypePtr& type);
 
   RowTypePtr logicalType_;
   RowTypePtr physicalType_;
@@ -75,4 +59,4 @@ class CellShuffleTypeAdapter {
   std::vector<uint32_t> complexColumns_;
 };
 
-} // namespace bytedance::bolt::shuffle::sparksql
+} // namespace bytedance::bolt::shuffle::sparksql::cell

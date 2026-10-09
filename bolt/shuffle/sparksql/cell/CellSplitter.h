@@ -17,58 +17,125 @@
 #pragma once
 
 #include "bolt/common/memory/AllocationPool.h"
-#include "bolt/shuffle/sparksql/cell/SplitFrontend.h"
+#include "bolt/shuffle/sparksql/cell/CellOutput.h"
+#include "bolt/vector/DecodedVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// The CacheCell split front end: every (partition, stream) owns one 64-byte
-/// cache line; the row loop writes values into those lines and a full line
-/// becomes one Encoding Block (or a raw copy) appended to the DataCells.
+/// Per-column null shape of one batch. Resolved by the writer with a
+/// word-level scan of the decoded nulls, because mayHaveNulls() only says a
+/// nulls buffer EXISTS - upstream operators routinely attach defensively
+/// allocated, all-set buffers, and trusting them would tax every row of the
+/// loop for nulls that are not there.
+enum class BatchNullClass : uint8_t {
+  kNoNulls = 0, // buffer absent, all-set, or constant non-null
+  kSomeNulls = 1, // genuinely mixed: the per-row null path applies
+  kAllNull = 2, // every batch row null: one counted run per partition
+};
+
+/// One decoded input batch, pid column already excluded. Borrowed for the
+/// duration of a split call.
+struct SplitBatch {
+  /// One DecodedVector per logical column of the layout. Mutable because
+  /// nulls() may materialize lazily.
+  DecodedVector* decoded;
+  const uint32_t* row2Partition;
+  /// Rows this batch adds per partition (the partitioner's output); lets a
+  /// whole-batch fast path work per partition instead of per row.
+  const uint32_t* partition2RowCount;
+  /// Per column, see BatchNullClass.
+  const BatchNullClass* nullClass;
+  uint32_t numRows;
+  /// Position of row r within its partition in this batch. The splitter
+  /// adds its current window row count to locate the null bit. May be null
+  /// when no column of this batch requires per-row null checks.
+  const uint32_t* rowIndexInPid;
+};
+
+/// Splits decoded column values into partitioned cells. Every (partition,
+/// stream) owns one 64-byte cache line; the row loop writes values into those
+/// lines and a full line becomes one Encoding Block (or a raw copy) appended
+/// to the DataCells.
 ///
 /// Locality by construction: a column's cache lines are contiguous
 /// (64B * P, L2-resident), its cursors are a P-byte array (L1-resident), and
 /// the only scattered store of the hot loop lands inside that window.
-class CachedCellFrontend final : public SplitFrontend {
+/// Owns the cells, nulls and window metadata, and submits them to CellOutput.
+/// The writer decides when to spill, seal a window or finish.
+class CellSplitter {
  public:
-  CachedCellFrontend(
-      const CellLayout* layout,
-      DataCells* cells,
-      NullCells* nulls,
-      memory::MemoryPool* pool,
-      ChunkAllocator::GrowCallback beforeGrow);
+  /// The layout, allocator, output and pool must outlive this splitter.
+  CellSplitter(
+      const CellLayout& layout,
+      uint32_t numPartitions,
+      ChunkAllocator& allocator,
+      CellOutput& output,
+      memory::MemoryPool& pool);
 
-  void split(const SplitBatch& batch) override;
+  void split(const SplitBatch& batch);
 
-  void enableDictionary(uint32_t col) override;
-  void flushAll() override;
+  /// Switches one string column to dictionary form (spec section 8) for the
+  /// writer's lifetime and sets its encoding tag. Called by the probe before
+  /// the first split.
+  void enableDictionary(uint32_t col);
 
-  uint64_t partitionBytes(uint32_t pid) const override {
-    return partitionBytes_[pid];
-  }
+  /// Writes and recycles the linked cells, retaining caches and window state.
+  /// Safe during a split or cache flush; nested output calls are suppressed.
+  void spillRun();
 
-  uint64_t maxPartitionBytes() const override {
+  /// Flushes caches, drains cells and seals the window, then resets its state.
+  /// Called only at a complete batch boundary.
+  void sealWindow();
+
+  /// Flushes caches and finalizes the output, allowing the backend to consume
+  /// resident cells directly. Populates output and dictionary metrics.
+  void finish(ShuffleWriterMetrics& metrics);
+
+  /// Maximum bytes appended to a partition since the window opened; drives
+  /// the checkpoint trigger and approximates its payload size.
+  uint64_t maxPartitionBytes() const {
     return maxPartitionBytes_;
   }
 
-  uint64_t variableBytes(uint32_t pid) const override {
-    return variableBytes_[pid];
+  bool hasWindowRows() const {
+    return totalWindowRows_ != 0;
   }
 
-  const uint64_t* variableBytesArray() const override {
-    return variableBytes_.data();
+  uint32_t maxWindowRows() const {
+    return maxWindowRows_;
   }
 
-  void resetWindowStats() override;
-
-  DictColumnStats dictionaryStats(uint32_t col) const override {
-    return dictStats_.empty() ? DictColumnStats{} : dictStats_[col];
+  int64_t nullBytes() const {
+    return nulls_.allocatedBytes();
   }
 
-  int64_t residentBytes() const override {
+  /// Reclaim must not change cells while the output is reading them.
+  bool isWritingOutput() const {
+    return writingOutput_;
+  }
+
+  /// Fixed memory held by the splitter (caches, cursors).
+  int64_t residentBytes() const {
     return residentBytes_;
   }
 
  private:
+  /// Lifetime dictionary row counters for logging and metrics. Updated when
+  /// segments close and in the fallback row loop, off the dictionary hit path.
+  struct DictColumnStats {
+    uint64_t matchedRows{0}; // rows written as dictionary indexes
+    uint64_t fallbackRows{0}; // rows written through the fallback tail
+  };
+
+  /// Encodes cache residues as stream tail blocks before a window closes.
+  /// Chunk growth during this step may still spill complete prior appends.
+  void flushAll();
+
+  /// Clears nulls, row counts and dictionary state after successful output.
+  void resetWindow();
+
+  CellWindowInput windowInput() const;
+
   void splitConverted(uint32_t col, const SplitBatch& batch);
 
   char* cacheLine(uint32_t stream, uint32_t pid) const {
@@ -182,12 +249,21 @@ class CachedCellFrontend final : public SplitFrontend {
   template <typename T>
   void dispatchRaw(uint32_t col, const SplitBatch& batch, bool hasNulls);
 
-  const CellLayout* const layout_;
-  DataCells* const cells_;
-  NullCells* const nulls_;
-  const ChunkAllocator::GrowCallback beforeGrow_;
+  const CellLayout& layout_;
+  ChunkAllocator& allocator_;
+  CellOutput& output_;
   const uint32_t numPartitions_;
   const uint32_t numStreams_;
+  DataCells cells_;
+  NullCells nulls_;
+  bool writingOutput_{false};
+
+  /// Rows committed per partition in the current window, updated after split.
+  std::vector<uint32_t> windowRowCounts_;
+  uint64_t totalWindowRows_{0};
+  uint32_t maxWindowRows_{0};
+  /// One bit per wire column, set by enableDictionary for the writer lifetime.
+  std::vector<uint8_t> encodingTags_;
 
   /// Cache lines (64B * P * S) and cursors (P * S), one arena allocation,
   /// huge-page backed above the threshold.
