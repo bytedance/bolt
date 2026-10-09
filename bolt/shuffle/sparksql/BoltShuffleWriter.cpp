@@ -283,17 +283,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
   bool supportAdaptive = supportAdaptiveShuffleWriter(options.partitioning);
   // 0 is adaptive strategy, > 0 means shuffle type forced
   if (options.forceShuffleWriterType && supportAdaptive) {
-    const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
-    if (forced == ShuffleWriterType::Cell &&
-        options.partitionWriterOptions.partitionWriterType ==
-            PartitionWriterType::kCeleborn) {
-      // The RSS backend of the cell writer is a later phase; remote
-      // shuffles keep the V1 path for now.
-      LOG(INFO) << "CellShuffleWriter does not support the remote "
-                   "partition writer yet; falling back to V1";
-      return ShuffleWriterType::V1;
-    }
-    return forced;
+    return (ShuffleWriterType)options.forceShuffleWriterType;
   }
   constexpr int32_t v1PartitionThreholdL1 = 10000;
   constexpr int32_t v1PartitionThreholdL2 = 50000;

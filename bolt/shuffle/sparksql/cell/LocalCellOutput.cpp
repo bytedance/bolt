@@ -19,7 +19,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -28,90 +27,10 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
+#include "bolt/shuffle/sparksql/cell/CellPayloadAssembly.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
-
-namespace {
-
-constexpr uint64_t kMinCompressRunBytes = 1 << 10;
-
-uint64_t currentTimeNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-// Keep existing capacity on clear or shrink; growth is shared across
-// partitions.
-void resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
-  if (!buffer) {
-    if (size == 0) {
-      return;
-    }
-    buffer = AlignedBuffer::allocate<char>(std::max<size_t>(64, size), pool);
-  } else if (size > buffer->capacity()) {
-    AlignedBuffer::reallocate<char>(
-        &buffer,
-        std::max(size, checkedMultiply<size_t>(2, buffer->capacity())));
-  }
-  buffer->setSize(size);
-}
-
-void appendBytes(
-    BufferPtr& out,
-    const void* data,
-    size_t bytes,
-    memory::MemoryPool* pool) {
-  if (bytes == 0) {
-    return;
-  }
-  const size_t at = out ? out->size() : 0;
-  resizeBuffer(out, checkedPlus(at, bytes), pool);
-  ::memcpy(out->asMutable<char>() + at, data, bytes);
-}
-
-void appendLe32(BufferPtr& out, uint32_t value, memory::MemoryPool* pool) {
-  appendBytes(out, &value, sizeof(value), pool);
-}
-
-void appendLe64(BufferPtr& out, uint64_t value, memory::MemoryPool* pool) {
-  appendBytes(out, &value, sizeof(value), pool);
-}
-
-/// Builds the spec section 4.2 null body of one partition.
-void buildNullBody(
-    const CellWindowInput& in,
-    uint32_t pid,
-    uint32_t rows,
-    BufferPtr& out,
-    memory::MemoryPool* pool) {
-  const uint32_t numColumns = in.layout->numWireColumns();
-  if (numColumns == 0) {
-    return;
-  }
-  const uint32_t tagBytes = nullTagBytes(numColumns);
-  const size_t tagStart = out ? out->size() : 0;
-  resizeBuffer(out, checkedPlus<size_t>(tagStart, tagBytes), pool);
-  auto* tags = out->asMutable<uint8_t>() + tagStart;
-  ::memset(tags, 0, tagBytes);
-  const uint32_t bitmapBytes = (rows + 7) / 8;
-  for (uint32_t col = 0; col < numColumns; ++col) {
-    const auto summary = in.nulls->summarize(pid, col, rows);
-    setNullTag(tags, col, summary.tag);
-  }
-  // Bitmaps follow the tags for RAW_NULL columns, in column order. The tag
-  // byte array may move as `out` grows, so tags were fully written first.
-  for (uint32_t col = 0; col < numColumns; ++col) {
-    if (getNullTag(out->as<uint8_t>() + tagStart, col) == NullTag::kRawNull) {
-      const size_t at = out->size();
-      resizeBuffer(out, checkedPlus<size_t>(at, bitmapBytes), pool);
-      in.nulls->emitBitmap(pid, col, rows, out->asMutable<uint8_t>() + at);
-    }
-  }
-}
-
-} // namespace
 
 LocalCellOutput::LocalCellOutput(
     PartitionWriterOptions options,
@@ -302,26 +221,15 @@ RunLayout LocalCellOutput::maybeCompressRun(
     uint64_t dataBytes,
     const char*& body,
     uint64_t& stored) {
-  body = data;
-  stored = dataBytes;
-  if (codec_ != nullptr && dataBytes >= kMinCompressRunBytes) {
-    const uint64_t start = currentTimeNs();
-    resizeBuffer(compressScratch_, codec_->maxCompressedLen(dataBytes), pool_);
-    const int64_t written = codec_->compress(
-        reinterpret_cast<const uint8_t*>(data),
-        static_cast<int64_t>(dataBytes),
-        compressScratch_->asMutable<uint8_t>(),
-        static_cast<int64_t>(compressScratch_->size()));
-    compressTimeNs_ += currentTimeNs() - start;
-    // Spec section 5: fall back to the stored form when compression does
-    // not pay.
-    if (written > 0 && static_cast<uint64_t>(written) < dataBytes) {
-      body = compressScratch_->as<char>();
-      stored = static_cast<uint64_t>(written);
-      return RunLayout::kCombined;
-    }
-  }
-  return RunLayout::kCombinedStored;
+  return cell::maybeCompressRun(
+      codec_.get(),
+      data,
+      dataBytes,
+      compressScratch_,
+      pool_,
+      body,
+      stored,
+      compressTimeNs_);
 }
 
 void LocalCellOutput::writeRun(
@@ -559,12 +467,8 @@ void LocalCellOutput::writeCurrentWindowPayload(
     std::FILE* out,
     const CellWindowInput& in,
     uint32_t pid) {
-  const uint32_t rows = in.rowCounts[pid];
   const uint32_t numStreams = layout_->numStreams();
-  uint64_t total = 0;
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    total += in.cells->bytes(pid, s);
-  }
+  const uint64_t total = residentBytes(in, pid);
   const auto segments = partitionSegments(openWindowRuns_, pid);
   const bool coalesce = cellOptions_.coalesceMergedRuns;
   uint32_t runCount;
@@ -575,19 +479,7 @@ void LocalCellOutput::writeCurrentWindowPayload(
   }
 
   resizeBuffer(scratch_, 0, pool_);
-  appendLe32(scratch_, rows, pool_);
-  appendLe32(scratch_, runCount, pool_);
-  appendLe64(scratch_, in.variableBytes[pid], pool_);
-  const size_t nullSizeAt = scratch_->size();
-  appendLe32(scratch_, 0, pool_); // patched below
-  appendLe32(scratch_, 0, pool_); // uncompressed
-  const size_t nullBodyAt = scratch_->size();
-  buildNullBody(in, pid, rows, scratch_, pool_);
-  const uint32_t nullLength =
-      static_cast<uint32_t>(scratch_->size() - nullBodyAt);
-  ::memcpy(scratch_->asMutable<char>() + nullSizeAt, &nullLength, 4);
-  appendBytes(
-      scratch_, in.encodingTags, (layout_->numWireColumns() + 7) / 8, pool_);
+  appendPayloadPrefix(in, pid, runCount, scratch_, pool_);
   rawAccum_ += scratch_->size();
   writeOut(out, scratch_->as<char>(), scratch_->size());
   if (coalesce && (segments.size() > 1 || (total > 0 && !segments.empty()))) {
@@ -608,14 +500,8 @@ void LocalCellOutput::writeCurrentWindowPayload(
     std::vector<uint64_t> decodedSizes(numStreams);
     resizeBuffer(runScratch_, 0, pool_);
     resizeBuffer(runScratch_, total, pool_);
-    size_t offset = 0;
-    for (uint32_t s = 0; s < numStreams; ++s) {
-      decodedSizes[s] = in.cells->bytes(pid, s);
-      in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
-        ::memcpy(runScratch_->asMutable<char>() + offset, data, bytes);
-        offset += bytes;
-      });
-    }
+    gatherResident(
+        in, pid, runScratch_->asMutable<char>(), decodedSizes.data());
     writeRun(out, runScratch_->as<char>(), total, decodedSizes.data());
   }
 }
