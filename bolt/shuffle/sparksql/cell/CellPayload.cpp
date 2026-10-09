@@ -603,6 +603,9 @@ bool CellPayloadDecoder::buildStringColumn(
       uint32_t serialized = 0;
       uint8_t marker;
       while (true) {
+        if (pos >= dataSize) {
+          return fail(error, "unterminated dictionary sequence");
+        }
         marker = data[pos];
         if (marker >= 0xFE) {
           ++pos;
