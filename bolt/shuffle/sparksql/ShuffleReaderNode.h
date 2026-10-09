@@ -152,6 +152,8 @@ class SparkShuffleReader : public bytedance::bolt::exec::SourceOperator {
   // cell writer. Independent of the deserializer stack above.
   std::unique_ptr<cell::CellShuffleReader> cellShuffleReader_;
   bool useCellReader_ = false;
+  // The query may feed CompositeRowVectors: cell blocks carry a kind byte.
+  bool cellCompositeInput_ = false;
 
   bool isRowBased_ = false;
 

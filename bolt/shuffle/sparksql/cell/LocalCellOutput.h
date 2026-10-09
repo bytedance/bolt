@@ -36,6 +36,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// stream-major and written as one run; without it, each segment stays a
 /// run of its own. A task whose data never needed a spill writes payloads
 /// straight from the live cells and touches no temporary file at all.
+/// Raw runs (spillRaw) share the spill file; each partition's raw blocks
+/// are copied verbatim after its payloads.
 class LocalCellOutput final : public CellOutput {
  public:
   /// `pool` backs the gather/compress workspaces so they stay inside task
@@ -49,6 +51,7 @@ class LocalCellOutput final : public CellOutput {
 
   void spillRun(const CellWindowInput& in) override;
   void sealWindow(const CellWindowInput& in) override;
+  void spillRaw(const RawBlockSource& next) override;
   void finalize(
       const CellWindowInput& in,
       bool windowHasData,
@@ -166,6 +169,12 @@ class LocalCellOutput final : public CellOutput {
 
   void writeOut(std::FILE* out, const void* data, size_t bytes);
 
+  /// Copies `bytes` of the spill file from `begin` into the data file.
+  void copySpill(std::FILE* out, uint64_t begin, uint64_t bytes);
+
+  /// With compositeInput, the kind byte that opens every block on the wire.
+  void appendBlockKind();
+
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
   const CellShuffleOptions cellOptions_;
@@ -196,6 +205,8 @@ class LocalCellOutput final : public CellOutput {
   /// Runs of the still-open window, then folded into a SealedWindow.
   std::vector<SpilledRun> openWindowRuns_;
   std::vector<SealedWindow> sealed_;
+  /// Per raw run: P + 1 absolute spill-file offsets.
+  std::vector<std::vector<uint64_t>> rawRuns_;
 
   uint64_t finalBytes_{0};
   uint64_t rawAccum_{0};
