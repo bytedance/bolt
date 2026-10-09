@@ -25,7 +25,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
-uint64_t nowNs() {
+uint64_t currentTimeNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
@@ -82,14 +82,14 @@ bool CellShuffleReader::CodecDecompressor::decompress(
     size_t size,
     uint8_t* out,
     size_t decodedSize) {
-  const uint64_t start = nowNs();
+  const uint64_t start = currentTimeNs();
   const bool ok = codec_->decompress(
                       data,
                       static_cast<int64_t>(size),
                       out,
                       static_cast<int64_t>(decodedSize)) ==
       static_cast<int64_t>(decodedSize);
-  decompressTimeNs_ += nowNs() - start;
+  decompressTimeNs_ += currentTimeNs() - start;
   return ok;
 }
 
@@ -160,17 +160,17 @@ RowVectorPtr CellShuffleReader::next() {
       return nullptr;
     }
   }
-  const uint64_t start = nowNs();
+  const uint64_t start = currentTimeNs();
   auto output = adapter_.decodeNext(pending_, pendingOffset_, pool_);
   if (pendingOffset_ == pending_->size()) {
     pending_.reset();
   }
-  decodeTimeNs_ += nowNs() - start;
+  decodeTimeNs_ += currentTimeNs() - start;
   return output;
 }
 
 RowVectorPtr CellShuffleReader::nextPhysical() {
-  const uint64_t start = nowNs();
+  const uint64_t start = currentTimeNs();
   std::vector<RowVectorPtr> parts;
   int64_t pendingRows = 0;
   int64_t pendingBytes = 0;
@@ -186,7 +186,7 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
     pendingBytes += decoded->estimateFlatSize();
     parts.push_back(std::move(decoded));
   }
-  decodeTimeNs_ += nowNs() - start;
+  decodeTimeNs_ += currentTimeNs() - start;
   if (parts.empty()) {
     return nullptr;
   }
