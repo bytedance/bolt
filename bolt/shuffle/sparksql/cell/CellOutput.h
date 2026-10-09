@@ -45,13 +45,22 @@ class CellOutput {
  public:
   virtual ~CellOutput() = default;
 
+  /// Whether sealWindow() consumes the window's resident cells itself. A
+  /// backend that does (RSS: every payload is pushed whole at the seal) is
+  /// never asked for a Run; otherwise the splitter drains the cells into a
+  /// Run before sealing.
+  virtual bool sealsResidentCells() const {
+    return false;
+  }
+
   /// Physically drains every DataCell chain into a Run of the current
   /// window. Does not release the cells: the splitter recycles them (so a
   /// spill fired from inside an append never frees held ids twice).
   virtual void spillRun(const CellWindowInput& in) = 0;
 
   /// Closes the logical window: records the null region and row counts.
-  /// Precondition (splitter-orchestrated): caches flushed, cells drained.
+  /// Precondition (splitter-orchestrated): caches flushed, and the cells
+  /// drained unless sealsResidentCells().
   virtual void sealWindow(const CellWindowInput& in) = 0;
 
   /// Final merge. `windowHasData` says whether the current (unsealed)
@@ -66,11 +75,6 @@ class CellOutput {
 
   /// Bytes written to spill storage so far (the evict metric).
   virtual int64_t bytesEvicted() const = 0;
-
-  // RSS seam (二期): flush selected partitions as complete payloads and
-  // release their cells, leaving the rest of the window in place.
-  // virtual void flushPartitions(const std::vector<uint32_t>& pids,
-  //                              const CellWindowInput& in) = 0;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -19,7 +19,10 @@
 #include <chrono>
 #include <numeric>
 
+#include <folly/ScopeGuard.h>
+
 #include "bolt/common/base/BitUtil.h"
+#include "bolt/shuffle/sparksql/cell/CelebornCellOutput.h"
 #include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -28,6 +31,10 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
 constexpr uint32_t kChunkBytes = 4 << 20;
+/// Slice bound on a remote shuffle, where a window is released only whole
+/// at a batch boundary: one slice bounds how far memory runs past a failed
+/// reservation before the window can be pushed.
+constexpr int64_t kRemoteSliceBytes = 8 << 20;
 constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
 constexpr uint32_t kDictMinProbeRows = 1024;
@@ -60,7 +67,10 @@ CellShuffleWriter::CellShuffleWriter(
           /*partitionWriter=*/nullptr, // all output goes through CellOutput
           options,
           arrowPool),
-      boltPool_(boltPool) {
+      boltPool_(boltPool),
+      remote_(
+          options_.partitionWriterOptions.partitionWriterType ==
+          PartitionWriterType::kCeleborn) {
   auto maybePartitioner = Partitioner::make(
       options_.partitioning, numPartitions_, options_.startPartitionId);
   BOLT_CHECK(
@@ -71,6 +81,11 @@ CellShuffleWriter::CellShuffleWriter(
   BOLT_CHECK(
       partitioner_->hasPid(),
       "CellShuffleWriter requires hash or range partitioning");
+  if (remote_) {
+    BOLT_CHECK_NOT_NULL(
+        options_.partitionWriterOptions.rssClient,
+        "CellShuffleWriter on Celeborn requires an RSS client");
+  }
 }
 
 CellShuffleWriter::~CellShuffleWriter() {
@@ -113,8 +128,13 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { onBeforeChunkGrow(); });
-  output_ = std::make_unique<LocalCellOutput>(
-      options_.partitionWriterOptions, &layout_, cellOpts, boltPool_);
+  if (remote_) {
+    output_ = std::make_unique<CelebornCellOutput>(
+        options_.partitionWriterOptions, &layout_, boltPool_);
+  } else {
+    output_ = std::make_unique<LocalCellOutput>(
+        options_.partitionWriterOptions, &layout_, cellOpts, boltPool_);
+  }
   splitter_ = std::make_unique<CellSplitter>(
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
 
@@ -189,16 +209,13 @@ arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
     rv->loadedVector();
   }
   const int64_t flatSize = rv->estimateFlatSize();
+  const int64_t maxBytes =
+      remote_ ? kRemoteSliceBytes : kMaxShuffleWriterBatchBytes;
   const int32_t rowLimit = std::max<int32_t>(
       1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
-  if ((flatSize > kMaxShuffleWriterBatchBytes || rv->size() > rowLimit) &&
-      rv->size() > 1) {
+  if ((flatSize > maxBytes || rv->size() > rowLimit) && rv->size() > 1) {
     const int64_t pieces = std::max<int64_t>(
-        1,
-        std::min<int64_t>(
-            rv->size(),
-            (flatSize + kMaxShuffleWriterBatchBytes - 1) /
-                kMaxShuffleWriterBatchBytes));
+        1, std::min<int64_t>(rv->size(), (flatSize + maxBytes - 1) / maxBytes));
     const int32_t rowsPerPiece =
         std::min<int64_t>(rowLimit, (rv->size() + pieces - 1) / pieces);
     for (int32_t begin = 0; begin < rv->size(); begin += rowsPerPiece) {
@@ -207,11 +224,31 @@ arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
       auto piece =
           std::dynamic_pointer_cast<RowVector>(rv->slice(begin, length));
       BOLT_CHECK_NOT_NULL(piece);
+      admitRemoteSlice(flatSize * length / rv->size());
       RETURN_NOT_OK(splitBatch(std::move(piece)));
     }
     return arrow::Status::OK();
   }
+  admitRemoteSlice(flatSize);
   return splitBatch(std::move(rv));
+}
+
+void CellShuffleWriter::admitRemoteSlice(int64_t estimatedBytes) {
+  // A slice must fit before it starts: halfway through, the window cannot
+  // be pushed. The reservation also keeps room to assemble the window's
+  // largest payload and its compressed copy, since a push needs that room
+  // exactly when memory is short. Without it, the window goes out first.
+  if (!remote_ || !splitter_->hasWindowRows()) {
+    return;
+  }
+  const int64_t sliceBytes = estimatedBytes + kChunkBytes;
+  const int64_t pushBytes =
+      2 * static_cast<int64_t>(splitter_->maxPartitionBytes());
+  const int64_t cap = options_.cellOptions.cellMemoryCapBytes;
+  if ((cap > 0 && allocator_->allocatedBytes() + sliceBytes > cap) ||
+      !boltPool_->maybeReserve(sliceBytes + pushBytes)) {
+    flushRemoteWindow();
+  }
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
@@ -376,26 +413,49 @@ void CellShuffleWriter::onBeforeChunkGrow() {
     return;
   }
   const auto& cellOpts = options_.cellOptions;
-  if (cellOpts.cellMemoryCapBytes > 0 &&
-      allocator_->allocatedBytes() + kChunkBytes >
-          cellOpts.cellMemoryCapBytes) {
-    splitter_->spillRun();
+  const bool overCap = cellOpts.cellMemoryCapBytes > 0 &&
+      allocator_->allocatedBytes() + kChunkBytes > cellOpts.cellMemoryCapBytes;
+  if (remote_) {
+    // A remote window is pushed only whole, at a batch boundary: ask for
+    // that there and let this growth proceed.
+    if (overCap || !boltPool_->maybeReserve(kChunkBytes)) {
+      checkpointRequested_ = true;
+    }
     return;
   }
-  if (!boltPool_->maybeReserve(kChunkBytes)) {
+  if (overCap || !boltPool_->maybeReserve(kChunkBytes)) {
     splitter_->spillRun();
   }
 }
 
 void CellShuffleWriter::checkpoint() {
-  splitter_->sealWindow();
+  {
+    sealing_ = true;
+    SCOPE_EXIT {
+      sealing_ = false;
+    };
+    splitter_->sealWindow();
+  }
   checkpointRequested_ = false;
   // A sealed window is a batch boundary: drop reservation slack.
   boltPool_->release();
 }
 
+int64_t CellShuffleWriter::flushRemoteWindow() {
+  checkpoint();
+  // Every cell was recycled by the seal: the chunks go back as well.
+  const int64_t freed = allocator_->shrink();
+  boltPool_->release();
+  return freed;
+}
+
 void CellShuffleWriter::maybeCheckpoint() {
   if (!initialized_ || !splitter_->hasWindowRows()) {
+    return;
+  }
+  if (remote_ && checkpointRequested_) {
+    // Memory ran short mid-batch: push the window now that it is whole.
+    flushRemoteWindow();
     return;
   }
   const auto& cellOpts = options_.cellOptions;
@@ -427,6 +487,9 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
     // The output is reading the cells: no run may drain them now.
     return arrow::Status::OK();
   }
+  if (remote_) {
+    return reclaimRemote(size, actual);
+  }
   // A run costs an O(partitions x streams) drain and a segment with its
   // own header and spill compression context per non-empty partition, so
   // it is produced only when actually needed: when the free memory above
@@ -455,10 +518,33 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
   return arrow::Status::OK();
 }
 
+arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
+  // Only a whole window can be pushed: mid-batch or mid-seal the request
+  // is honored at the next batch boundary, and this reclaim returns just
+  // the idle memory freed above.
+  if (inSplit_ || sealing_) {
+    checkpointRequested_ = true;
+    return arrow::Status::OK();
+  }
+  // Same bar as a local run: no push when the idle memory already covers
+  // the request or the window holds nothing meaningful.
+  if ((size > 0 && *actual >= size) || !splitter_->hasWindowRows() ||
+      allocator_->allocatedBytes() < 2 * kChunkBytes) {
+    return arrow::Status::OK();
+  }
+  *actual += flushRemoteWindow();
+  metrics_.totalBytesEvicted = output_->bytesEvicted();
+  return arrow::Status::OK();
+}
+
 arrow::Status CellShuffleWriter::stop() {
   BOLT_CHECK(!stopped_, "stop called twice");
   stopped_ = true;
   if (!initialized_) {
+    if (remote_) {
+      // An empty mapper still ends its Celeborn attempt.
+      options_.partitionWriterOptions.rssClient->stop();
+    }
     metrics_.partitionLengths.assign(numPartitions_, 0);
     metrics_.rawPartitionLengths.assign(numPartitions_, 0);
     return arrow::Status::OK();

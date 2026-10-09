@@ -17,7 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -33,6 +35,7 @@
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+#include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
 #include "bolt/shuffle/sparksql/tests/MemoryReaderStreamIterator.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
@@ -101,6 +104,27 @@ class RecordingCellOutput final : public CellOutput {
   std::function<void(const CellWindowInput&, bool)> onFinalize;
 };
 
+/// Keeps every push as its own blob, so a test can check that each one is
+/// exactly one whole payload.
+class RecordingRssClient final : public RssClient {
+ public:
+  int32_t pushPartitionData(int32_t partitionId, char* bytes, int64_t size)
+      override {
+    BOLT_CHECK_EQ(stops, 0, "push after stop");
+    pushes[partitionId].emplace_back(bytes, size);
+    ++numPushes;
+    return static_cast<int32_t>(size);
+  }
+
+  void stop() override {
+    ++stops;
+  }
+
+  std::map<int32_t, std::vector<std::string>> pushes;
+  uint64_t numPushes{0};
+  int32_t stops{0};
+};
+
 class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
   static void SetUpTestSuite() {
@@ -125,6 +149,17 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     options.partitioning = Partitioning::kHash;
     options.partitionWriterOptions.numPartitions = numPartitions;
     options.partitionWriterOptions.dataFile = dataFile_;
+    return options;
+  }
+
+  /// Options for a Celeborn shuffle recorded by `client`.
+  ShuffleWriterOptions makeCelebornOptions(
+      int32_t numPartitions,
+      const std::shared_ptr<RecordingRssClient>& client) {
+    auto options = makeOptions(numPartitions);
+    options.partitionWriterOptions.partitionWriterType =
+        PartitionWriterType::kCeleborn;
+    options.partitionWriterOptions.rssClient = client;
     return options;
   }
 
@@ -309,17 +344,45 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     ASSERT_TRUE(writer->stop().ok());
 
     const auto& metrics = writer->metrics();
-    const auto file = readFile();
+    const auto layout = CellLayout::create(asRowType(batches[0]->type()));
     ASSERT_EQ(metrics.partitionLengths.size(), numPartitions);
     int64_t sum = 0;
     for (const auto length : metrics.partitionLengths) {
       sum += length;
     }
     EXPECT_EQ(sum, metrics.totalBytesWritten);
-    EXPECT_EQ(static_cast<int64_t>(file.size()), metrics.totalBytesWritten);
+    std::vector<std::vector<RowVectorPtr>> payloads(numPartitions);
+    if (options.partitionWriterOptions.partitionWriterType ==
+        PartitionWriterType::kCeleborn) {
+      // Every push is exactly one whole payload, and nothing touches disk.
+      const auto client = std::dynamic_pointer_cast<RecordingRssClient>(
+          options.partitionWriterOptions.rssClient);
+      ASSERT_NE(client, nullptr);
+      EXPECT_EQ(client->stops, 1);
+      EXPECT_TRUE(readFile().empty());
+      EXPECT_FALSE(std::filesystem::exists(dataFile_ + ".cellspill"));
+      for (int32_t pid = 0; pid < numPartitions; ++pid) {
+        int64_t pushed = 0;
+        for (const auto& blob : client->pushes[pid]) {
+          auto decoded = decodePartition(layout, blob, 0, blob.size());
+          ASSERT_EQ(decoded.size(), 1) << "partition " << pid;
+          payloads[pid].push_back(std::move(decoded[0]));
+          pushed += static_cast<int64_t>(blob.size());
+        }
+        EXPECT_EQ(metrics.partitionLengths[pid], pushed) << "partition " << pid;
+      }
+    } else {
+      const auto file = readFile();
+      EXPECT_EQ(static_cast<int64_t>(file.size()), metrics.totalBytesWritten);
+      uint64_t offset = 0;
+      for (int32_t pid = 0; pid < numPartitions; ++pid) {
+        payloads[pid] = decodePartition(
+            layout, file, offset, metrics.partitionLengths[pid]);
+        offset += metrics.partitionLengths[pid];
+      }
+    }
 
     // Expected rows per partition, in arrival order.
-    const auto layout = CellLayout::create(asRowType(batches[0]->type()));
     std::vector<std::vector<std::pair<uint32_t, vector_size_t>>> expected(
         numPartitions);
     for (uint32_t i = 0; i < batches.size(); ++i) {
@@ -327,12 +390,9 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
         expected[pidsPerBatch[i][row]].emplace_back(i, row);
       }
     }
-    uint64_t offset = 0;
     for (int32_t pid = 0; pid < numPartitions; ++pid) {
-      const auto payloads =
-          decodePartition(layout, file, offset, metrics.partitionLengths[pid]);
       size_t k = 0;
-      for (const auto& decoded : payloads) {
+      for (const auto& decoded : payloads[pid]) {
         for (vector_size_t row = 0; row < decoded->size(); ++row, ++k) {
           ASSERT_LT(k, expected[pid].size()) << "partition " << pid;
           const auto [batchIdx, sourceRow] = expected[pid][k];
@@ -344,7 +404,6 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
         }
       }
       EXPECT_EQ(k, expected[pid].size()) << "partition " << pid;
-      offset += metrics.partitionLengths[pid];
     }
   }
 
@@ -1309,6 +1368,86 @@ TEST_F(CellWriterTest, unfundedSpillCompressionIsMadeAtMerge) {
   }
 }
 
+TEST_F(CellWriterTest, celebornPushesEveryWindowWhole) {
+  // Under a cap far below the data, every pressure point turns into a seal
+  // at the next batch boundary: many windows, each pushed as one whole
+  // payload per partition, and no local file at all.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(41);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  int64_t rawBytes = 0;
+  for (int batch = 0; batch < 8; ++batch) {
+    pids.emplace_back();
+    batches.push_back(
+        makeCompressibleBatch(4096, kPartitions, rng, pids.back()));
+    rawBytes += batches.back()->estimateFlatSize();
+  }
+  for (const bool compress : {true, false}) {
+    SCOPED_TRACE(compress ? "lz4" : "uncompressed");
+    auto client = std::make_shared<RecordingRssClient>();
+    auto options = makeCelebornOptions(kPartitions, client);
+    options.partitionWriterOptions.compressionType = compress
+        ? arrow::Compression::LZ4_FRAME
+        : arrow::Compression::UNCOMPRESSED;
+    options.cellOptions.cellMemoryCapBytes = 8 << 20;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    const auto& metrics = writer.metrics();
+    EXPECT_GE(metrics.spillCount, 3);
+    // Every window spans whole batches, so it reaches every partition.
+    EXPECT_EQ(client->numPushes % kPartitions, 0);
+    EXPECT_GE(client->numPushes, metrics.spillCount * kPartitions);
+    EXPECT_EQ(metrics.totalBytesEvicted, metrics.totalBytesWritten);
+    if (compress) {
+      EXPECT_LT(metrics.totalBytesWritten * 8, rawBytes);
+    } else {
+      EXPECT_GT(metrics.totalBytesWritten * 2, rawBytes);
+    }
+  }
+}
+
+TEST_F(CellWriterTest, celebornReclaimPushesTheWindowBetweenBatches) {
+  // Between batches the window is whole: a reclaim pushes it at once and
+  // returns its chunks.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(43);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 6; ++batch) {
+    pids.emplace_back();
+    batches.push_back(
+        makeCompressibleBatch(4096, kPartitions, rng, pids.back()));
+  }
+  auto client = std::make_shared<RecordingRssClient>();
+  auto options = makeCelebornOptions(kPartitions, client);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  int64_t freed = 0;
+  roundTrip(
+      options, pids, batches, &writer, [&](CellShuffleWriter& w, uint32_t i) {
+        if (i != 2) {
+          return;
+        }
+        EXPECT_EQ(client->numPushes, 0);
+        ASSERT_TRUE(w.reclaimFixedSize(1LL << 30, &freed).ok());
+        EXPECT_EQ(client->numPushes, kPartitions);
+      });
+  EXPECT_GE(freed, 8 << 20);
+  EXPECT_EQ(writer.metrics().spillCount, 1);
+  EXPECT_EQ(client->numPushes, 2 * kPartitions);
+}
+
+TEST_F(CellWriterTest, celebornEmptyMapperStillEndsTheAttempt) {
+  auto client = std::make_shared<RecordingRssClient>();
+  const auto options = makeCelebornOptions(3, client);
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  ASSERT_TRUE(writer.stop().ok());
+  EXPECT_EQ(client->stops, 1);
+  EXPECT_EQ(client->numPushes, 0);
+  EXPECT_EQ(writer.metrics().partitionLengths, std::vector<int64_t>(3, 0));
+  EXPECT_TRUE(readFile().empty());
+}
+
 TEST_F(CellWriterTest, shrinkIsSafeWhileTheOutputReadsCells) {
   // Reclaim may shrink idle chunks while the output is reading the cells:
   // only chunks without a live cell may go, and a seal (which recycles
@@ -1694,16 +1833,24 @@ TEST_F(CellWriterTest, dictionarySegmentsChainDemoteAndResetAcrossWindows) {
     return vocabA[rng() % vocabA.size()];
   });
 
-  auto options = makeOptions(kPartitions);
   // Tiny window bound: several checkpoints, so per-window framing and the
-  // dictionary state reset are exercised.
-  options.cellOptions.checkpointPartitionBytes = 2 << 10;
-  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
-  roundTrip(options, pids, batches, &writer);
-  // The vocabulary batches index through dictionaries; the long values
-  // and the high-cardinality batch demote partitions into the tail.
-  EXPECT_GT(writer.metrics().dictionaryMatchedRows, 0);
-  EXPECT_GT(writer.metrics().dictionaryFallbackRows, 0);
+  // dictionary state reset are exercised - on Celeborn, each window pushed.
+  for (const bool celeborn : {false, true}) {
+    SCOPED_TRACE(celeborn ? "celeborn" : "local");
+    auto options = celeborn
+        ? makeCelebornOptions(
+              kPartitions, std::make_shared<RecordingRssClient>())
+        : makeOptions(kPartitions);
+    options.cellOptions.checkpointPartitionBytes = 2 << 10;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    // The vocabulary batches index through dictionaries; the long values
+    // and the high-cardinality batch demote partitions into the tail.
+    EXPECT_GT(writer.metrics().dictionaryMatchedRows, 0);
+    EXPECT_GT(writer.metrics().dictionaryFallbackRows, 0);
+    EXPECT_GT(writer.metrics().spillCount, 1);
+    ::unlink(dataFile_.c_str());
+  }
 }
 
 TEST_F(CellWriterTest, coalescedMergeShrinksManyRunPayloads) {

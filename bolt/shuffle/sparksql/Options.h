@@ -91,7 +91,9 @@ enum class ShuffleWriterType {
 };
 
 // Cell memory thresholds and encoding policy; compression uses
-// PartitionWriterOptions.
+// PartitionWriterOptions. On Celeborn nothing is spilled: the spill
+// thresholds push the window at the next batch boundary instead, and the
+// run options (coalesceMergedRuns, compressSpill) do not apply.
 struct CellShuffleOptions {
   // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
   int64_t cellMemoryCapBytes = 0;
@@ -160,9 +162,6 @@ struct ShuffleReaderOptions {
   bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
-
-  // Matches the writer backend so Cell format selection agrees on both ends.
-  PartitionWriterType partitionWriterType = PartitionWriterType::kLocal;
 
   /// Returns the options in a human readable form.
   std::string toString() const;
