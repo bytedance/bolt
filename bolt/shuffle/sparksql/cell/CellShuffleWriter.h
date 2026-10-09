@@ -37,6 +37,11 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// where a failed maybeReserve — or the optional self cap — triggers a
 /// physical Run spill; external reclaim drains and shrinks. Accounting is
 /// the allocator's exact chunk/cell counters.
+///
+/// On Celeborn a window can only be pushed whole, so every one of those
+/// spills becomes a seal at the next batch boundary instead: batches are
+/// sliced small, each slice is admitted against the pool first, and a
+/// reclaim arriving mid-batch is deferred to the boundary.
 class CellShuffleWriter final : public ShuffleWriter {
  public:
   CellShuffleWriter(
@@ -63,19 +68,29 @@ class CellShuffleWriter final : public ShuffleWriter {
   /// Splits one physical (adapter-converted) batch, slicing oversized ones.
   arrow::Status splitPhysical(RowVectorPtr rv);
   arrow::Status splitBatch(RowVectorPtr rv);
+  /// Remote only: pushes the window first when the next slice of about
+  /// `estimatedBytes` cannot be reserved.
+  void admitRemoteSlice(int64_t estimatedBytes);
   /// The single dictionary probe (first batch, lifetime decision).
   void probeDictionary(uint32_t numRows);
   const int32_t* pidArray(const RowVector& rv);
   void onBeforeChunkGrow();
   void checkpoint();
+  /// Remote: seals (pushes) the window and returns its memory; returns the
+  /// chunk bytes freed.
+  int64_t flushRemoteWindow();
   void maybeCheckpoint();
+  arrow::Status reclaimRemote(int64_t size, int64_t* actual);
 
   memory::MemoryPool* const boltPool_;
+  /// Celeborn partition writer: windows are pushed whole, never spilled.
+  const bool remote_;
 
   bool initialized_{false};
   bool inSplit_{false};
   bool stopped_{false};
   bool checkpointRequested_{false};
+  bool sealing_{false};
   bool dictProbed_{false};
 
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;

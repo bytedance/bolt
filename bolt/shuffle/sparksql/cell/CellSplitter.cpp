@@ -736,12 +736,19 @@ void CellSplitter::sealWindow() {
   // Cache flushes can grow cells and trigger a Run spill. Only protect the
   // actual output call, after all cache residues have been committed.
   flushAll();
-  spillRun();
+  const bool sealsResident = output_.sealsResidentCells();
+  if (!sealsResident) {
+    spillRun();
+  }
   writingOutput_ = true;
   SCOPE_EXIT {
     writingOutput_ = false;
   };
   output_.sealWindow(windowInput());
+  if (sealsResident) {
+    cells_.releaseAll();
+    allocator_.packFreelist();
+  }
   resetWindow();
 }
 
