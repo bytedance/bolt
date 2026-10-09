@@ -81,9 +81,9 @@ enum class RunLayout : uint8_t {
 
 /// How one stream's bytes are produced and parsed (spec sections 1.4, 7.1).
 enum class StreamKind : uint8_t {
-  /// Encoding Loop stream: SmallInt/Integer/Bigint/Date/Timestamp value stream,
-  /// or a
-  /// String Length/Index stream (lengths encoded as Bigint).
+  /// Encoding Loop stream: SmallInt/Integer/Bigint/Date value stream, a
+  /// Timestamp Seconds or Nanos stream, or a String Length/Index stream
+  /// (Timestamp halves and lengths encoded as Bigint).
   kEncoded,
   /// Raw fixed-width value stream: Boolean/TinyInt/Hugeint/Float/Double.
   kRawFixed,
@@ -135,7 +135,8 @@ class CellLayout {
         return false;
       }
     }
-    return rowType->size() >= 1; // spec section 9: C == 0 is illegal
+    // C == 0 is a pid-only shuffle: a W == 0 layout (spec section 9).
+    return true;
   }
 
   static CellLayout create(const RowTypePtr& rowType);
@@ -174,7 +175,8 @@ class CellLayout {
   }
 
   /// First stream of a logical column; a String column owns this stream
-  /// (Length/Index) and the next one (Data).
+  /// (Length/Index) and the next one (Data), a Timestamp column this one
+  /// (Seconds) and the next one (Nanos).
   uint32_t columnStream(uint32_t column) const {
     return columnStream_[column];
   }

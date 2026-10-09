@@ -23,10 +23,10 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
-// Byte limits apply to serialized rows, not decoded vector memory.
+// Batch targets apply to serialized rows, not decoded vector memory. A
+// single row larger than the target still forms a batch of its own.
 constexpr vector_size_t kMaxBatchRows = 1024;
 constexpr uint64_t kTargetBatchBytes = 8ULL << 20;
-constexpr uint64_t kMaxRowBytes = 64ULL << 20;
 
 bool isComplex(const TypePtr& type) {
   return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
@@ -114,7 +114,6 @@ RowVectorPtr CellShuffleTypeAdapter::encodeNext(
   for (vector_size_t i = 0; i < candidateRows; ++i) {
     const int32_t size = fixedSize ? *fixedSize : serde.rowSize(i);
     BOLT_CHECK_GE(size, 0);
-    BOLT_CHECK_LE(size, kMaxRowBytes, "Cell complex row exceeds size limit");
     if (!sizes.empty() && bytes + size > kTargetBatchBytes) {
       break;
     }
@@ -170,8 +169,6 @@ RowVectorPtr CellShuffleTypeAdapter::decodeNext(
   for (vector_size_t i = start; i < start + count; ++i) {
     BOLT_CHECK(!binary.isNullAt(i), "Cell complex payload must be non-null");
     const auto& value = binary.data<StringView>()[binary.index(i)];
-    BOLT_CHECK_LE(
-        value.size(), kMaxRowBytes, "Cell complex row exceeds size limit");
     if (!rows.empty() && bytes + value.size() > kTargetBatchBytes) {
       break;
     }
