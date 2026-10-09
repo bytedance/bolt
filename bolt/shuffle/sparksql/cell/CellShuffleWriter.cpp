@@ -83,14 +83,19 @@ CellShuffleWriter::~CellShuffleWriter() {
 
 void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   const auto& inputType = rv.type()->asRow();
-  BOLT_CHECK_GE(inputType.size(), 2, "expected a pid column plus data");
+  // A pid column alone is legal: the payloads then carry only row counts.
+  BOLT_CHECK_GE(inputType.size(), 1, "expected a pid column");
+  // The adapter rejects unsupported logical types and maps complex columns
+  // onto one trailing binary column; the pid column stays first.
+  adapter_ = std::make_unique<CellShuffleTypeAdapter>(asRowType(rv.type()));
+  const auto& physicalType = adapter_->physicalType()->asRow();
   std::vector<std::string> names;
   std::vector<TypePtr> types;
-  names.reserve(inputType.size() - 1);
-  types.reserve(inputType.size() - 1);
-  for (uint32_t i = 1; i < inputType.size(); ++i) {
-    names.push_back(inputType.nameOf(i));
-    types.push_back(inputType.childAt(i));
+  names.reserve(physicalType.size() - 1);
+  types.reserve(physicalType.size() - 1);
+  for (uint32_t i = 1; i < physicalType.size(); ++i) {
+    names.push_back(physicalType.nameOf(i));
+    types.push_back(physicalType.childAt(i));
   }
   layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
 
@@ -157,15 +162,37 @@ arrow::Status CellShuffleWriter::split(
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
+  if (!adapter_->hasComplexColumns()) {
+    return splitPhysical(std::move(rv));
+  }
+  // Complex columns are serialized in bounded slices, each split on its own.
+  vector_size_t offset = 0;
+  do {
+    RowVectorPtr physical;
+    {
+      const uint64_t start = currentTimeNs();
+      physical = adapter_->encodeNext(rv, offset, boltPool_);
+      metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
+    }
+    RETURN_NOT_OK(splitPhysical(std::move(physical)));
+  } while (offset < rv->size());
+  return arrow::Status::OK();
+}
+
+arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
   // Oversized inputs are sliced so a checkpoint boundary exists inside
   // them: one giant batch must not inflate a single payload window past
-  // the reader-side bounds (the legacy writers slice the same way).
+  // the reader-side bounds (the legacy writers slice the same way). Lazy
+  // children are loaded first: unloaded they estimate as zero bytes and
+  // the byte bound would never fire.
+  if (isLazyNotLoaded(*rv)) {
+    rv->loadedVector();
+  }
   const int64_t flatSize = rv->estimateFlatSize();
   const int32_t rowLimit = std::max<int32_t>(
       1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
   if ((flatSize > kMaxShuffleWriterBatchBytes || rv->size() > rowLimit) &&
       rv->size() > 1) {
-    rv->loadedVector(); // Lazy children must be loaded before slicing.
     const int64_t pieces = std::max<int64_t>(
         1,
         std::min<int64_t>(
@@ -260,7 +287,10 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     // The single probe of the dictionary design: the first batch decides,
     // per string column and for the writer's lifetime, before its first
     // byte is split (cell bytes are final wire form; a payload's form
-    // cannot change once written).
+    // cannot change once written). A first batch below the probe minimum -
+    // tiny, or sliced small because its rows are wide - therefore settles
+    // on no dictionary rather than deferring; wide rows gain little from
+    // 64-byte entries anyway.
     probeDictionary(numRows);
     dictProbed_ = true;
   }
@@ -382,14 +412,21 @@ arrow::Status CellShuffleWriter::reclaimFixedSize(
     int64_t size,
     int64_t* actual) {
   *actual = 0;
-  if (!initialized_ || stopped_ || splitter_->isWritingOutput()) {
+  if (!initialized_) {
     return arrow::Status::OK();
   }
   // Free memory first, without touching data: chunks that hold no live
   // cell (the freelist is chunk-packed after every spill, so mid-refill
   // the untouched tail chunks are all returnable) and reservation slack.
+  // shrink() never frees a chunk with a live cell, so this is safe while
+  // the output reads cells - and a window seal, which recycles every cell
+  // before writing its null bodies, is exactly when most chunks are idle.
   *actual = allocator_->shrink();
   boltPool_->release();
+  if (stopped_ || splitter_->isWritingOutput()) {
+    // The output is reading the cells: no run may drain them now.
+    return arrow::Status::OK();
+  }
   // A run costs an O(partitions x streams) drain and a segment with its
   // own header and spill compression context per non-empty partition, so
   // it is produced only when actually needed: when the free memory above
