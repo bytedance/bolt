@@ -28,65 +28,42 @@
  * --------------------------------------------------------------------------
  */
 
-#pragma once
+#include "bolt/common/process/ProcessBase.h"
+#include <gtest/gtest.h>
+#include "bolt/common/flags/BoltFlags.h"
 
-#include <pthread.h>
-#include <sys/types.h>
+#if defined(__aarch64__) && defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 
-#include <cstdint>
-#include <string>
-#include <vector>
-namespace bytedance {
-namespace bolt {
-namespace process {
+namespace bytedance::bolt::process {
 
-/**
- * Current executable's name.
- */
-std::string getAppName();
+TEST(ProcessBaseTest, simdCapabilities) {
+  gflags::FlagSaver flags;
+  for (bool enabled : {false, true}) {
+    FLAGS_bolt_enable_avx2 = enabled;
+#if defined(__aarch64__)
+    EXPECT_EQ(hasSimd(), hasNeon());
+#else
+    EXPECT_EQ(hasSimd(), hasAvx2());
+    if (!enabled) {
+      EXPECT_FALSE(hasSimd());
+    }
+#endif
+  }
+}
 
-/**
- * This machine'a name.
- */
-std::string getHostName();
+TEST(ProcessBaseTest, sveCapabilities) {
+  gflags::FlagSaver flags;
+  FLAGS_bolt_enable_sve = false;
+  EXPECT_FALSE(hasSve());
+  FLAGS_bolt_enable_sve = true;
+#if defined(__aarch64__) && defined(__linux__)
+  EXPECT_EQ(hasSve(), (getauxval(AT_HWCAP) & HWCAP_SVE) != 0);
+#else
+  EXPECT_FALSE(hasSve());
+#endif
+}
 
-/**
- * Process identifier.
- */
-pid_t getProcessId();
-
-/**
- * Current thread's identifier.
- */
-pthread_t getThreadId();
-
-/**
- * Get current working directory.
- */
-std::string getCurrentDirectory();
-
-/**
- * Returns elapsed CPU nanoseconds on the calling thread
- */
-uint64_t threadCpuNanos();
-
-// True if the machine has Intel AVX2 instructions and these are not disabled by
-// flag.
-bool hasAvx2();
-
-// True if the machine has Intel BMI2 instructions and these are not disabled by
-// flag.
-bool hasBmi2();
-
-// True if the machine has ARM Neon instructions
-bool hasNeon();
-
-// True if the target supports the SIMD instructions used by bulk readers.
-bool hasSimd();
-
-// True if the CPU and OS support ARM SVE and it is not disabled by flag.
-bool hasSve();
-
-} // namespace process
-} // namespace bolt
-} // namespace bytedance
+} // namespace bytedance::bolt::process

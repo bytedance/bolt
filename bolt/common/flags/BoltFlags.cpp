@@ -50,6 +50,8 @@ DEFINE_bool(bolt_enable_avx2, true, "Enables use of AVX2 when available");
 
 DEFINE_bool(bolt_enable_bmi2, true, "Enables use of BMI2 when available");
 
+DEFINE_bool(bolt_enable_sve, true, "Enables use of SVE when available");
+
 // Used in exec/Expr.cpp
 
 DEFINE_string(

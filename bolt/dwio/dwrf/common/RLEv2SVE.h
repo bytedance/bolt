@@ -30,63 +30,40 @@
 
 #pragma once
 
-#include <pthread.h>
-#include <sys/types.h>
-
 #include <cstdint>
-#include <string>
-#include <vector>
-namespace bytedance {
-namespace bolt {
-namespace process {
 
-/**
- * Current executable's name.
- */
-std::string getAppName();
+namespace bytedance::bolt::dwrf::detail {
 
-/**
- * This machine'a name.
- */
-std::string getHostName();
+// These helpers require SVE. Call only after process::hasSve() succeeds.
+// [offset, end) uses row positions; null bits set to one denote valid rows.
+uint64_t fillRepeatedSve(
+    int64_t* data,
+    uint64_t offset,
+    uint64_t end,
+    const uint64_t* nulls,
+    int64_t value);
 
-/**
- * Process identifier.
- */
-pid_t getProcessId();
+void zigzagDecodeSve(
+    int64_t* data,
+    uint64_t offset,
+    uint64_t end,
+    const uint64_t* nulls);
 
-/**
- * Current thread's identifier.
- */
-pthread_t getThreadId();
+// Returns the number of non-null values written and updates the carry.
+uint64_t fixedDeltaSve(
+    int64_t* data,
+    uint64_t offset,
+    uint64_t end,
+    const uint64_t* nulls,
+    int64_t delta,
+    int64_t& previous);
 
-/**
- * Get current working directory.
- */
-std::string getCurrentDirectory();
+void variableDeltaSve(
+    int64_t* data,
+    uint64_t offset,
+    uint64_t end,
+    const uint64_t* nulls,
+    bool negative,
+    int64_t& previous);
 
-/**
- * Returns elapsed CPU nanoseconds on the calling thread
- */
-uint64_t threadCpuNanos();
-
-// True if the machine has Intel AVX2 instructions and these are not disabled by
-// flag.
-bool hasAvx2();
-
-// True if the machine has Intel BMI2 instructions and these are not disabled by
-// flag.
-bool hasBmi2();
-
-// True if the machine has ARM Neon instructions
-bool hasNeon();
-
-// True if the target supports the SIMD instructions used by bulk readers.
-bool hasSimd();
-
-// True if the CPU and OS support ARM SVE and it is not disabled by flag.
-bool hasSve();
-
-} // namespace process
-} // namespace bolt
-} // namespace bytedance
+} // namespace bytedance::bolt::dwrf::detail
