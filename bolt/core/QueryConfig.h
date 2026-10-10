@@ -654,6 +654,11 @@ class QueryConfig {
   static constexpr const char* kParquetReaderImplicitCastMask =
       "parquet_reader_implicit_cast_mask";
 
+  /// Maximum number of execution contexts used to decode projected Lance
+  /// columns in one batch, including the calling thread.
+  static constexpr const char* kLanceDecodeParallelism =
+      "lance_decode_parallelism";
+
   static constexpr const char* kHybridJoinEnabled = "hybrid_join_enabled";
 
   /// Number of levels per Parquet rep/def streaming window. Zero disables
@@ -1783,6 +1788,13 @@ class QueryConfig {
 
   int64_t parquetReaderImplicitCastMask() const {
     return get<int64_t>(kParquetReaderImplicitCastMask, 0);
+  }
+
+  int32_t lanceDecodeParallelism() const {
+    const auto value = get<int32_t>(kLanceDecodeParallelism, 16);
+    BOLT_USER_CHECK_GE(
+        value, 1, "{} must be at least 1", kLanceDecodeParallelism);
+    return value;
   }
 
   int32_t parquetRepDefStreamingWindowSize() const {

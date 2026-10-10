@@ -636,6 +636,15 @@ std::shared_ptr<cache::CoalescedLoad> CachedBufferedInput::coalescedLoad(
       });
 }
 
+void CachedBufferedInput::cancelPendingLoads() {
+  requests_.clear();
+  coalescedLoads_.wlock()->clear();
+  for (auto& load : allCoalescedLoads_) {
+    load->cancel();
+  }
+  allCoalescedLoads_.clear();
+}
+
 std::unique_ptr<SeekableInputStream> CachedBufferedInput::read(
     uint64_t offset,
     uint64_t length,

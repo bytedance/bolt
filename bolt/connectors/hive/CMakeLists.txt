@@ -86,6 +86,11 @@ list(APPEND ENABLED_FILESYSTEMS "bolt_gcs")
 list(APPEND ENABLED_FILESYSTEMS "bolt_hdfs")
 list(APPEND ENABLED_FILESYSTEMS "bolt_abfs")
 
+if(BOLT_ENABLE_NATIVE_LANCE_READER)
+  list(APPEND ENABLED_DWIO_FORMATS bolt_dwio_lance_native)
+  target_compile_definitions(bolt_hive_connector PRIVATE BOLT_ENABLE_NATIVE_LANCE_READER)
+endif()
+
 target_link_libraries(
   bolt_hive_connector
   PUBLIC

@@ -65,6 +65,9 @@
 #include "bolt/dwio/txt/reader/RegisterTxtReader.h"
 #include "bolt/dwio/txt/writer/RegisterTxtWriter.h"
 #endif
+#ifdef BOLT_ENABLE_NATIVE_LANCE_READER
+#include "bolt/dwio/lance/RegisterNativeLanceReader.h"
+#endif
 #include "bolt/expression/FieldReference.h"
 
 #include <boost/lexical_cast.hpp>
@@ -175,6 +178,9 @@ void HiveConnectorFactory::initialize() {
 #ifdef BOLT_ENABLE_TXT
     txt::registerTxtReaderFactory();
     txt::registerTxtWriterFactory();
+#endif
+#ifdef BOLT_ENABLE_NATIVE_LANCE_READER
+    lance::registerNativeLanceReaderFactory();
 #endif
 // Meta's buck build system needs this check.
 #ifdef BOLT_ENABLE_S3

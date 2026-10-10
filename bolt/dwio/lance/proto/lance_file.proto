@@ -1,0 +1,55 @@
+// Copyright (c) ByteDance Ltd. and/or its affiliates.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package lance.file;
+
+// Self-describing schema stored in global buffer zero of a Lance file. Field
+// numbers are part of the stable Lance file format and must not be changed.
+message FileDescriptor {
+  Schema schema = 1;
+  uint64 length = 2;
+}
+
+message Schema {
+  repeated Field fields = 1;
+  map<string, bytes> metadata = 5;
+}
+
+message Dictionary {
+  int64 offset = 1;
+  int64 length = 2;
+}
+
+message Field {
+  enum Type {
+    PARENT = 0;
+    REPEATED = 1;
+    LEAF = 2;
+  }
+
+  Type type = 1;
+  string name = 2;
+  int32 id = 3;
+  int32 parent_id = 4;
+  string logical_type = 5;
+  bool nullable = 6;
+  int32 encoding = 7;
+  Dictionary dictionary = 8;
+  string extension_name = 9;
+  map<string, bytes> metadata = 10;
+  string storage_class = 11;
+  bool unenforced_primary_key = 12;
+}
