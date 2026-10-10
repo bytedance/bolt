@@ -134,7 +134,7 @@ BENCHMARK_NAMED_PARAM(
     runImportFromArrowComplex,
     complexTimestampArray,
     "+l",
-    {"ttn"});
+    {"tsn:"});
 BENCHMARK_NAMED_PARAM(
     runImportFromArrowComplex,
     complexDateArray,

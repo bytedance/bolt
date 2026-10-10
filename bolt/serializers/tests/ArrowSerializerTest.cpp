@@ -115,13 +115,13 @@ class ArrowSerializerTest
       raw_vector<vector_size_t*> sizes(indexRanges.value().size());
       std::fill(sizes.begin(), sizes.end(), &sizeEstimate);
       serde_->estimateSerializedSize(
-          rowVector, indexRanges.value(), sizes.data(), scratch);
+          rowVector, indexRanges.value(), sizes.data(), scratch, &paramOptions);
       serializer->append(rowVector, indexRanges.value(), scratch);
     } else if (rows.has_value()) {
       raw_vector<vector_size_t*> sizes(rows.value().size());
       std::fill(sizes.begin(), sizes.end(), &sizeEstimate);
       serde_->estimateSerializedSize(
-          rowVector, rows.value(), sizes.data(), scratch);
+          rowVector, rows.value(), sizes.data(), scratch, &paramOptions);
       serializer->append(rowVector, rows.value(), scratch);
     } else {
       vector_size_t* sizes = &sizeEstimate;
@@ -130,7 +130,8 @@ class ArrowSerializerTest
           rowVector,
           folly::Range<const IndexRange*>(&range, 1),
           &sizes,
-          scratch);
+          scratch,
+          &paramOptions);
       serializer->append(rowVector);
     }
     auto size = serializer->maxSerializedSize();
@@ -569,6 +570,95 @@ TEST_P(ArrowSerializerTest, genericOptionsWithArrowOptions) {
       payloads.push_back(std::move(serialized));
     }
     EXPECT_NE(payloads[0], payloads[1]);
+  }
+}
+
+TEST_P(ArrowSerializerTest, encodedAppendPreservesPrefix) {
+  auto values = makeNullableFlatVector<int64_t>({17, 42, std::nullopt});
+  auto dictionary =
+      BaseVector::wrapInDictionary(nullptr, makeIndices({2, 1, 0}), 3, values);
+  auto constant = BaseVector::wrapInConstant(3, 1, values);
+  testBatchVectorSerializerRoundTrip(makeRowVector(
+      {values, dictionary, constant, makeRowVector({dictionary, constant})}));
+}
+
+TEST_P(ArrowSerializerTest, timestampWithSecondsNanosEncoding) {
+  serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions options;
+  options.arrowOptions.timestampEncoding = TimestampEncoding::kSecondsNanos;
+  auto timestamps = makeNullableFlatVector<Timestamp>(
+      {Timestamp::min(),
+       Timestamp(-1, 999'999'999),
+       std::nullopt,
+       Timestamp(253'402'300'799, 123'456'789),
+       Timestamp::max()});
+  testRoundTrip(timestamps, &options);
+  auto dictionary = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({4, 0, 2, 1, 3}), 5, timestamps);
+  auto constant = BaseVector::wrapInConstant(5, 4, timestamps);
+  auto input = makeRowVector({
+      timestamps,
+      dictionary,
+      constant,
+      BaseVector::createNullConstant(TIMESTAMP(), 5, pool()),
+      makeArrayVector({0, 1, 2, 3, 4}, dictionary),
+      makeRowVector({dictionary, constant}),
+  });
+  testBatchVectorSerializerRoundTrip(input, &options);
+  options.arrowOptions.flattenDictionary = false;
+  options.arrowOptions.flattenConstant = false;
+  std::ostringstream bytes;
+  serialize(input, &bytes, &options);
+  verifySerializedEncodedData(input, bytes.str(), &options);
+}
+
+TEST_P(ArrowSerializerTest, timestampSizeEstimation) {
+  constexpr vector_size_t size = 8192;
+  auto timestamps = makeFlatVector<Timestamp>(
+      size, [](auto row) { return Timestamp(row, 123'000'000); });
+  serializer::arrowserde::ArrowVectorSerde::ArrowSerdeOptions options;
+  options.arrowOptions.timestampEncoding = TimestampEncoding::kSecondsNanos;
+  auto input = makeRowVector({timestamps});
+  std::ostringstream standardBytes;
+  const auto standard = serialize(input, &standardBytes, nullptr);
+  std::ostringstream wideBytes;
+  const auto wide = serialize(input, &wideBytes, &options);
+  EXPECT_EQ(wide.estimatedSize - standard.estimatedSize, 8 * size);
+  EXPECT_GE(wide.estimatedSize, wideBytes.str().size());
+  EXPECT_GE(wide.actualSize, wideBytes.str().size());
+
+  auto nested = makeRowVector({
+      makeArrayVector({0, size / 2}, timestamps),
+      makeMapVector(
+          {0, size / 2},
+          makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+          timestamps),
+      makeRowVector({BaseVector::wrapInConstant(2, 0, timestamps)}),
+  });
+  auto* serde = serde_.get();
+  Scratch scratch;
+  const IndexRange range{0, 2};
+  const vector_size_t rows[] = {1, 0};
+  auto estimate = [&](const VectorSerde::Options* opts, bool useRows) {
+    vector_size_t bytes = 0;
+    vector_size_t* sizes[] = {&bytes, &bytes};
+    if (useRows) {
+      serde->estimateSerializedSize(
+          nested, folly::Range(rows, 2), sizes, scratch, opts);
+    } else {
+      serde->estimateSerializedSize(
+          nested, folly::Range(&range, 1), sizes, scratch, opts);
+    }
+    return bytes;
+  };
+  vector_size_t legacyEstimate = 0;
+  vector_size_t* legacySize = &legacyEstimate;
+  static_cast<VectorSerde*>(serde)->estimateSerializedSize(
+      nested, folly::Range(&range, 1), &legacySize, scratch);
+  VectorSerde::Options genericOptions;
+  for (bool useRows : {false, true}) {
+    EXPECT_EQ(estimate(nullptr, useRows), legacyEstimate);
+    EXPECT_EQ(estimate(&genericOptions, useRows), legacyEstimate);
+    EXPECT_EQ(estimate(&options, useRows) - legacyEstimate, 8 * (2 * size + 2));
   }
 }
 
