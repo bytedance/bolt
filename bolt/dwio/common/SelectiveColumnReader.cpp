@@ -71,7 +71,21 @@ SelectiveColumnReader::SelectiveColumnReader(
       requestedType_(requestedType),
       fileType_(fileType),
       formatData_(params.toFormatData(fileType, scanSpec)),
-      scanSpec_(&scanSpec) {}
+      scanSpec_(&scanSpec) {
+  validateReaderCastFilter();
+}
+
+void SelectiveColumnReader::validateReaderCastFilter() const {
+  const auto* filter = scanSpec_->filter();
+  if (fileType_->type()->kind() == TypeKind::BIGINT &&
+      !fileType_->type()->isDecimal() &&
+      requestedType_->equivalent(*VARCHAR()) && filter &&
+      !filter->isValueIndependent()) {
+    BOLT_USER_FAIL(
+        "Cannot apply VARCHAR filter to physical BIGINT column {}",
+        scanSpec_->fieldName());
+  }
+}
 
 void SelectiveColumnReader::filterRowGroups(
     uint64_t rowGroupSize,
@@ -209,6 +223,24 @@ void SelectiveColumnReader::getIntValues(
     RowSet rows,
     const TypePtr& requestedType,
     VectorPtr* result) {
+  if (requestedType->equivalent(*VARCHAR())) {
+    VectorPtr integerResult;
+    getIntValues(rows, BIGINT(), &integerResult);
+    auto stringResult = BaseVector::create<FlatVector<StringView>>(
+        VARCHAR(), integerResult->size(), &memoryPool_);
+    auto integers = integerResult->as<SimpleVector<int64_t>>();
+    for (vector_size_t i = 0; i < integerResult->size(); ++i) {
+      if (integerResult->isNullAt(i)) {
+        stringResult->setNull(i, true);
+      } else {
+        const auto value = folly::to<std::string>(integers->valueAt(i));
+        stringResult->set(i, StringView(value));
+      }
+    }
+    *result = std::move(stringResult);
+    return;
+  }
+
   switch (requestedType->kind()) {
     case TypeKind::SMALLINT:
       switch (valueSize_) {
@@ -539,6 +571,7 @@ void SelectiveColumnReader::setNulls(BufferPtr resultNulls) {
 }
 
 void SelectiveColumnReader::resetFilterCaches() {
+  validateReaderCastFilter();
   if (scanState_.filterCache.empty() && scanSpec_->hasFilter()) {
     scanState_.filterCache.resize(std::max<int32_t>(
         1, scanState_.dictionary.numValues + scanState_.dictionary2.numValues));

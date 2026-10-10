@@ -48,6 +48,10 @@ inline bool isReaderCastFilterMismatch(
       return requestedKind == TypeKind::DOUBLE ||
           (fileType->isDate() && requestedType->isVarchar());
     case TypeKind::BIGINT:
+      if (!fileType->isDecimal() && requestedType->isVarchar()) {
+        return true;
+      }
+      [[fallthrough]];
     case TypeKind::HUGEINT:
       return fileType->isDecimal() && requestedType->isDecimal() &&
           fileType->isShortDecimal() != requestedType->isShortDecimal();
