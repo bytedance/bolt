@@ -49,6 +49,7 @@ add_executable(
   VectorToStringTest.cpp
   SimpleVectorTest.cpp
   ToStringUtilityTest.cpp
+  Utf8UtilsTest.cpp
   BiasVectorTest.cpp
   VariantVectorTest.cpp
 )

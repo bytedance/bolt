@@ -270,6 +270,22 @@ class SimpleVector : public BaseVector {
     return std::nullopt;
   }
 
+  /// Returns ASCII-ness when it is known for every row in this vector, or
+  /// std::nullopt otherwise. Unlike isAscii(rows), this does not require the
+  /// caller to allocate and populate a SelectivityVector.
+  template <typename U = T>
+  typename std::enable_if_t<std::is_same_v<U, StringView>, std::optional<bool>>
+  isAscii() const {
+    auto computedRows{asciiInfo.readLockedAsciiComputedRows()};
+    if (computedRows->size() == BaseVector::length_ &&
+        computedRows->begin() == 0 &&
+        computedRows->end() == BaseVector::length_ &&
+        bits::isAllSet(computedRows->allBits(), 0, BaseVector::length_, true)) {
+      return asciiInfo.isAllAscii();
+    }
+    return std::nullopt;
+  }
+
   /// This function takes an index and returns:
   /// 1. True if the string at that index is ASCII
   /// 2. False if the string at that index is not ASCII
