@@ -26,6 +26,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -34,11 +35,15 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <gtest/gtest.h>
+#include <sys/epoll.h>
+#include <unistd.h>
 
 using namespace bytedance::bolt::memory::bm;
 
@@ -49,6 +54,8 @@ std::unique_ptr<char[]> makeBuffer(size_t size) {
 }
 
 constexpr auto kFutureTimeout = std::chrono::seconds(5);
+constexpr std::string_view kEventFdTarget = "anon_inode:[eventfd]";
+constexpr std::string_view kEpollFdTarget = "anon_inode:[eventpoll]";
 
 IoRequest makeValidRequest(IoPriority priority = IoPriority::Medium) {
   IoRequest request;
@@ -75,13 +82,24 @@ bool waitUntilReady(std::future<IoResult>& future) {
   return future.wait_for(kFutureTimeout) == std::future_status::ready;
 }
 
-size_t countOpenFds() {
+size_t countEventAndEpollFds() {
   DIR* dir = ::opendir("/proc/self/fd");
   BOLT_CHECK(dir != nullptr, "failed to open /proc/self/fd");
 
   size_t count = 0;
-  while (::readdir(dir) != nullptr) {
-    ++count;
+  std::array<char, 64> target;
+  while (const auto* entry = ::readdir(dir)) {
+    const auto targetLength =
+        ::readlinkat(::dirfd(dir), entry->d_name, target.data(), target.size());
+    if (targetLength < 0) {
+      continue;
+    }
+
+    const std::string_view targetView(
+        target.data(), static_cast<size_t>(targetLength));
+    if (targetView == kEventFdTarget || targetView == kEpollFdTarget) {
+      ++count;
+    }
   }
   ::closedir(dir);
   return count;
@@ -350,8 +368,23 @@ class NeverCompleteBackend : public IoBackend {
 
 } // namespace
 
+TEST(DiskIoSchedulerImplTest, fdCounterTracksOnlyEventAndEpollDescriptors) {
+  const auto openFdsBefore = countEventAndEpollFds();
+
+  ScopedFd regularFd(::open("/dev/null", O_RDONLY | O_CLOEXEC));
+  ASSERT_GE(regularFd.get(), 0);
+  EXPECT_EQ(openFdsBefore, countEventAndEpollFds());
+
+  EventFd eventFd;
+  EXPECT_EQ(openFdsBefore + 1, countEventAndEpollFds());
+
+  ScopedFd epollFd(::epoll_create1(EPOLL_CLOEXEC));
+  ASSERT_GE(epollFd.get(), 0);
+  EXPECT_EQ(openFdsBefore + 2, countEventAndEpollFds());
+}
+
 TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
-  const auto openFdsBefore = countOpenFds();
+  const auto openFdsBefore = countEventAndEpollFds();
 
   DiskIoSchedulerConfig config;
   config.ringDepth = 16;
@@ -365,7 +398,7 @@ TEST(DiskIoSchedulerImplTest, constructorClosesEpollFdWhenValidationThrows) {
       }(),
       "invalid DiskIoSchedulerConfig");
 
-  EXPECT_EQ(openFdsBefore, countOpenFds());
+  EXPECT_EQ(openFdsBefore, countEventAndEpollFds());
 }
 
 TEST(DiskIoSchedulerImplTest, constructorUsesDefaultBackendWhenSupported) {
