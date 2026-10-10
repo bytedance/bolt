@@ -583,6 +583,10 @@ class RowContainer {
         (iter->normalizedKeysLeft > 0 ? originalNormalizedKeySize_ : 0);
     for (auto i = iter->allocationIndex; i < numAllocations; ++i) {
       auto range = rows_.rangeAt(i);
+      if (range.empty()) {
+        iter->rowOffset = 0;
+        continue;
+      }
       auto* data =
           range.data() + memory::alignmentPadding(range.data(), alignment_);
       auto limit = range.size() -
@@ -754,6 +758,14 @@ class RowContainer {
   uint64_t allocatedBytes() const {
     return rows_.allocatedBytes() + stringAllocator_->retainedSize();
   }
+
+  bool supportsOutputRangeRelease() const {
+    return rowSizeOffset_ == 0 && !usesExternalMemory_ &&
+        !hasVariableAccumulator_ && numFreeRows_ == 0 && !checkFree_ &&
+        !useListRowIndex_;
+  }
+
+  uint64_t releaseOutputRangesBefore(const RowContainerIterator& iterator);
 
   uint64_t usedBytes() const {
     return rows_.allocatedBytes() - rows_.freeBytes() +

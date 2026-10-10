@@ -445,6 +445,19 @@ int32_t RowContainer::findRows(folly::Range<char**> rows, char** result) {
   return numRows;
 }
 
+uint64_t RowContainer::releaseOutputRangesBefore(
+    const RowContainerIterator& iterator) {
+  if (!supportsOutputRangeRelease()) {
+    return 0;
+  }
+  const auto released = rows_.releaseRangesBefore(iterator.allocationIndex);
+  BOLT_CHECK_LE(released.allocations, numRows_);
+  numRows_ -= released.allocations;
+  numRowsWithNormalizedKey_ -=
+      std::min<int64_t>(numRowsWithNormalizedKey_, released.allocations);
+  return released.bytes;
+}
+
 void RowContainer::eraseRowsSkippingKeys(folly::Range<char**> rows) {
   for (auto i = 0; i < types_.size(); ++i) {
     if (i < keyTypes_.size()) {
