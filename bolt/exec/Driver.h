@@ -646,6 +646,10 @@ struct DriverFactory {
 
   static void registerAdapter(DriverAdapter adapter);
 
+  bool isRollupEnabled(
+      const core::ExpandNode* expandNode,
+      const core::AggregationNode* aggregationNode);
+
   bool supportsSerialExecution() const {
     return !needsPartitionedOutput() && !needsExchangeClient();
   }
