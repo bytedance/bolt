@@ -16,13 +16,13 @@
 
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 
-#include <chrono>
 #include <numeric>
 
 #include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/shuffle/sparksql/cell/CelebornCellOutput.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -39,12 +39,6 @@ constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
 constexpr uint32_t kDictMinProbeRows = 1024;
 constexpr uint32_t kDictMinRepeatRatio = 4;
-
-uint64_t currentTimeNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
 
 uint32_t prevPowerOfTwo(uint64_t value) {
   return uint32_t{1} << (63 - __builtin_clzll(value));

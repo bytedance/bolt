@@ -37,7 +37,6 @@ bolt_add_library(
   cell/CelebornCellOutput.cpp
   cell/CellEncoding.cpp
   cell/CellPayload.cpp
-  cell/CellPayloadAssembly.cpp
   cell/CellSplitter.cpp
   cell/CompositeShuffleWriter.cpp
   cell/CellShuffleReader.cpp
