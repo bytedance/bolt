@@ -31,6 +31,7 @@
 #include "bolt/functions/lib/Re2Functions.h"
 #include "bolt/functions/prestosql/StringFunctions.h"
 #include "bolt/functions/sparksql/Base64Function.h"
+#include "bolt/functions/sparksql/Elt.h"
 #include "bolt/functions/sparksql/FormatNumber.h"
 #include "bolt/functions/sparksql/LuhnCheckFunction.h"
 #include "bolt/functions/sparksql/MaskFunction.h"
@@ -111,6 +112,8 @@ void registerStringFunctions(const std::string& prefix) {
 
   exec::registerStatefulVectorFunction(
       prefix + "instr", instrSignatures(), makeInstr);
+  exec::registerStatefulVectorFunction(
+      prefix + "elt", eltSignatures(), makeElt);
   exec::registerStatefulVectorFunction(
       prefix + "length", lengthSignatures(), makeLength);
   registerFunction<SubstringIndexFunction, Varchar, Varchar, Varchar, int32_t>(
