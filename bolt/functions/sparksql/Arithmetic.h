@@ -215,6 +215,16 @@ struct RoundFunction {
 };
 
 template <typename T>
+struct BRoundFunction {
+  template <typename TInput>
+  FOLLY_ALWAYS_INLINE void
+  call(TInput& result, const TInput& a, const int32_t b = 0) {
+    result = bytedance::bolt::functions::
+        round<TInput, int32_t, true, BigDecimal::RoundingMode::kHalfEven>(a, b);
+  }
+};
+
+template <typename T>
 struct AcoshFunction {
   template <typename TInput>
   FOLLY_ALWAYS_INLINE void call(TInput& result, TInput a) {
