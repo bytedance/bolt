@@ -291,6 +291,84 @@ TEST_F(ArrowBridgeTemporalTest, timestampsUnderNullRows) {
   roundTrip(input, wideOptions());
 }
 
+TEST_F(ArrowBridgeTemporalTest, constantTimestampsUnderNullArraysAndMaps) {
+  auto timestamps = BaseVector::wrapInConstant(
+      2, 0, makeFlatVector<Timestamp>({Timestamp::max()}));
+  const std::vector<VectorPtr> inputs{
+      makeArrayVector({0, 1}, timestamps),
+      makeMapVector({0, 1}, makeFlatVector<int64_t>({1, 2}), timestamps),
+      makeMapVector({0, 1}, timestamps, makeFlatVector<int64_t>({1, 2}))};
+  for (const auto& input : inputs) {
+    SCOPED_TRACE(input->type()->toString());
+    input->setNull(0, true);
+    input->setNull(1, true);
+    for (bool flatten : {false, true}) {
+      ArrowOptions options;
+      options.flattenConstant = flatten;
+      arrowRoundTrip(input, options);
+    }
+    input->setNull(0, false);
+    ArrowData data;
+    BOLT_ASSERT_THROW(
+        exportToArrow(input, data.array, pool(), {}),
+        "Could not convert Timestamp");
+  }
+  EXPECT_FALSE(timestamps->isNullAt(0));
+  EXPECT_EQ(
+      timestamps->as<ConstantVector<Timestamp>>()->valueAt(0),
+      Timestamp::max());
+}
+
+TEST_F(ArrowBridgeTemporalTest, emptyConstantsPreserveNestedEncodings) {
+  auto timestamps = BaseVector::wrapInConstant(
+      2, 0, makeFlatVector<Timestamp>({Timestamp::max()}));
+  const std::vector<VectorPtr> values{
+      timestamps,
+      makeRowVector({timestamps}),
+      makeArrayVector({0, 1}, timestamps),
+      makeMapVector({0, 1}, makeFlatVector<int64_t>({1, 2}), timestamps)};
+  for (const auto& value : values) {
+    SCOPED_TRACE(value->type()->toString());
+    arrowRoundTrip(BaseVector::wrapInConstant(0, 0, value), {});
+
+    auto constant = BaseVector::wrapInConstant(2, 0, value);
+    auto input = makeArrayVector({0, 1}, constant);
+    input->setNull(0, true);
+    input->setNull(1, true);
+    arrowRoundTrip(input, {});
+  }
+  arrowRoundTrip(BaseVector::createNullConstant(TIMESTAMP(), 0, pool()), {});
+}
+
+TEST_F(ArrowBridgeTemporalTest, reusableEmptyConstantTimestamps) {
+  auto timestamps = BaseVector::wrapInConstant(
+      2, 0, makeFlatVector<Timestamp>({Timestamp(0, 1)}));
+  const std::vector<VectorPtr> inputs{
+      makeArrayVector({0, 1}, timestamps),
+      makeMapVector({0, 1}, makeFlatVector<int64_t>({1, 2}), timestamps)};
+  for (const auto& input : inputs) {
+    SCOPED_TRACE(input->type()->toString());
+    ReusableArrowBatchPool batchPool(1);
+    ArrowArray* previousChild = nullptr;
+    for (bool allNull : {false, true, false, true}) {
+      input->setNull(0, allNull);
+      input->setNull(1, allNull);
+      ArrowData data;
+      batchPool.exportToArrow(input, pool(), {}, &data.schema, &data.array);
+      if (previousChild) {
+        EXPECT_EQ(data.array.children[0], previousChild);
+      }
+      previousChild = data.array.children[0];
+      EXPECT_OK_AND_ASSIGN(
+          auto array, arrow::ImportArray(&data.array, &data.schema));
+      ASSERT_OK(array->ValidateFull());
+      ASSERT_OK(arrow::ExportArray(*array, &data.array, &data.schema));
+      assertEqualVectors(
+          input, importFromArrowAsOwner(data.schema, data.array, {}, pool()));
+    }
+  }
+}
+
 TEST_F(ArrowBridgeTemporalTest, nullParentPreservesConstantEncoding) {
   auto timestamps =
       makeFlatVector<Timestamp>({Timestamp(0, 1), Timestamp(0, 2)});
