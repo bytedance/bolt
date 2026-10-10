@@ -859,7 +859,7 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthColumnCount_ + binaryIdx]
                                    [partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(makeNonOwningBufferSlice(
               partitionValidityBuffers_[fixedWidthColumnCount_ + binaryIdx]
                                        [partitionId],
               0,
@@ -892,8 +892,7 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
             lengthBytes,
             valueOffset);
 #endif
-        allBuffers.push_back(
-            std::make_shared<arrow::Buffer>(lengthBuffer, lengthBytes));
+        allBuffers.push_back(makeNonOwningBuffer(lengthBuffer, lengthBytes));
 
         // value buffer
         if (valueLength > 0) {
@@ -907,8 +906,7 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
                 binaryBufs[n].valueOffset);
             valueOffset += binaryBufs[n].valueOffset;
           }
-          allBuffers.push_back(
-              std::make_shared<arrow::Buffer>(valueBuffer, valueLength));
+          allBuffers.push_back(makeNonOwningBuffer(valueBuffer, valueLength));
         } else {
           allBuffers.push_back(zeroLengthNullBuffer());
         }
@@ -928,7 +926,7 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
       default: {
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthIdx][partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(makeNonOwningBufferSlice(
               partitionValidityBuffers_[fixedWidthIdx][partitionId],
               0,
               validityBytes));
@@ -938,7 +936,7 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
 
         // value buffer
         if (arrowColumnTypes_[i]->id() == arrow::BooleanType::type_id) {
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
+          allBuffers.push_back(makeNonOwningBuffer(
               partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
                                                   [0],
               validityBytes));
@@ -957,8 +955,7 @@ BoltShuffleWriterV2::assembleBuffersGeneral(
             valueOffset += valueLen;
           }
           BOLT_CHECK(valueOffset == fixedLen * numRows);
-          allBuffers.push_back(
-              std::make_shared<arrow::Buffer>(valueBuffer, valueOffset));
+          allBuffers.push_back(makeNonOwningBuffer(valueBuffer, valueOffset));
           partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
               .clear();
         }
@@ -1027,7 +1024,7 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthColumnCount_ + binaryIdx]
                                    [partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(makeNonOwningBufferSlice(
               partitionValidityBuffers_[fixedWidthColumnCount_ + binaryIdx]
                                        [partitionId],
               0,
@@ -1040,12 +1037,12 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
             partitionBinaryAddrsVector_[binaryIdx][partitionId];
         if (binaryBufs.size() == 1) {
           // length buffer
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
-              binaryBufs[0].lengthPtr, lengthBytes));
+          allBuffers.push_back(
+              makeNonOwningBuffer(binaryBufs[0].lengthPtr, lengthBytes));
 
           // value buffer
           if (binaryBufs[0].valueOffset > 0) {
-            allBuffers.push_back(std::make_shared<arrow::Buffer>(
+            allBuffers.push_back(makeNonOwningBuffer(
                 binaryBufs[0].valuePtr, binaryBufs[0].valueOffset));
           } else {
             allBuffers.push_back(zeroLengthNullBuffer());
@@ -1073,8 +1070,7 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
               lengthBytes,
               valueOffset);
 #endif
-          allBuffers.push_back(
-              std::make_shared<arrow::Buffer>(lengthBuffer, lengthBytes));
+          allBuffers.push_back(makeNonOwningBuffer(lengthBuffer, lengthBytes));
 
           // value buffer
           if (valueLength > 0) {
@@ -1088,8 +1084,7 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
                   binaryBufs[n].valueOffset);
               valueOffset += binaryBufs[n].valueOffset;
             }
-            allBuffers.push_back(
-                std::make_shared<arrow::Buffer>(valueBuffer, valueLength));
+            allBuffers.push_back(makeNonOwningBuffer(valueBuffer, valueLength));
           } else {
             allBuffers.push_back(zeroLengthNullBuffer());
           }
@@ -1110,7 +1105,7 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
       default: {
         // validity buffer
         if (partitionValidityAddrs_[fixedWidthIdx][partitionId] != nullptr) {
-          allBuffers.push_back(arrow::SliceBuffer(
+          allBuffers.push_back(makeNonOwningBufferSlice(
               partitionValidityBuffers_[fixedWidthIdx][partitionId],
               0,
               validityBytes));
@@ -1120,7 +1115,7 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
 
         // value buffer
         if (arrowColumnTypes_[i]->id() == arrow::BooleanType::type_id) {
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
+          allBuffers.push_back(makeNonOwningBuffer(
               partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
                                                   [0],
               validityBytes));
@@ -1128,8 +1123,8 @@ BoltShuffleWriterV2::assembleBuffersOneBatch(uint32_t partitionId) {
           auto fixedLen = fixedColValueSize_[fixedWidthIdx];
           const auto& fixedValues =
               partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId];
-          allBuffers.push_back(std::make_shared<arrow::Buffer>(
-              fixedValues[0], fixedLen * numRows));
+          allBuffers.push_back(
+              makeNonOwningBuffer(fixedValues[0], fixedLen * numRows));
           partitionFixedWidthValueAddrsVector_[fixedWidthIdx][partitionId]
               .clear();
         }
@@ -1340,9 +1335,9 @@ BoltShuffleWriterV2::assembleBuffersRowVectorMode(uint32_t partitionId) {
 #endif
   lengthBufferPtr[0] = uncompressedSize;
   allBuffers.push_back(
-      std::make_shared<arrow::Buffer>(lengthBuffer, totalLengthBufferSize));
+      makeNonOwningBuffer(lengthBuffer, totalLengthBufferSize));
   allBuffers.push_back(
-      std::make_shared<arrow::Buffer>(uncompressedBufferPtr, uncompressedSize));
+      makeNonOwningBuffer(uncompressedBufferPtr, uncompressedSize));
 
   // complextype buffer is separately stored
   if (hasComplexType_ && complexTypeData_[partitionId] != nullptr) {
