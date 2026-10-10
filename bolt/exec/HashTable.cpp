@@ -28,10 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include <boost/sort/pdqsort/pdqsort.hpp>
@@ -61,6 +63,25 @@ std::string BaseHashTable::modeString(HashMode mode) {
     default:
       return fmt::format(
           "Unknown HashTable mode:{}", static_cast<int32_t>(mode));
+  }
+}
+
+void detail::addHashModeRuntimeStats(
+    std::unordered_map<std::string, RuntimeMetric>& runtimeStats,
+    std::optional<BaseHashTable::HashMode> hashMode) {
+  using HashMode = BaseHashTable::HashMode;
+  static constexpr std::array<std::pair<HashMode, const char*>, 3>
+      kHashModeMetrics{{
+          {HashMode::kArray, "hashtable.hashModeArray"},
+          {HashMode::kNormalizedKey, "hashtable.hashModeNormalizedKey"},
+          {HashMode::kHash, "hashtable.hashModeHash"},
+      }};
+  for (const auto& [mode, metricName] : kHashModeMetrics) {
+    if (hashMode == mode) {
+      runtimeStats[metricName] = RuntimeMetric(1);
+    } else {
+      runtimeStats.erase(metricName);
+    }
   }
 }
 

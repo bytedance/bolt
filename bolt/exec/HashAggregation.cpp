@@ -358,6 +358,7 @@ void HashAggregation::updateRuntimeStats() {
   uint64_t asRange;
   uint64_t asDistinct;
   const auto hashTableStats = groupingSet_->hashTableStats();
+  const auto hashMode = groupingSet_->hashMode();
 
   auto lockedStats = stats_.wlock();
   auto& runtimeStats = lockedStats->runtimeStats;
@@ -379,6 +380,7 @@ void HashAggregation::updateRuntimeStats() {
       RuntimeMetric(hashTableStats.numDistinct);
   runtimeStats["hashtable.numTombstones"] =
       RuntimeMetric(hashTableStats.numTombstones);
+  detail::addHashModeRuntimeStats(runtimeStats, hashMode);
 }
 
 void HashAggregation::recordSpillStats() {
