@@ -1,0 +1,700 @@
+diff --git a/gluten-ut/spark40/pom.xml b/gluten-ut/spark40/pom.xml
+index 179d479172..758cbe26e1 100644
+--- a/gluten-ut/spark40/pom.xml
++++ b/gluten-ut/spark40/pom.xml
+@@ -365,6 +365,73 @@
+       </build>
+     </profile>
+ 
++    <profile>
++      <id>backends-bolt</id>
++      <activation>
++        <activeByDefault>false</activeByDefault>
++      </activation>
++      <dependencies>
++        <dependency>
++          <groupId>org.apache.gluten</groupId>
++          <artifactId>backends-bolt</artifactId>
++          <version>${project.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <!-- log4j -->
++        <dependency>
++          <groupId>org.slf4j</groupId>
++          <artifactId>slf4j-api</artifactId>
++          <version>${slf4j.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.logging.log4j</groupId>
++          <artifactId>log4j-slf4j2-impl</artifactId>
++          <version>${log4j.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>com.h2database</groupId>
++          <artifactId>h2</artifactId>
++          <version>2.2.220</version>
++          <scope>test</scope>
++        </dependency>
++      </dependencies>
++      <build>
++        <plugins>
++          <plugin>
++            <groupId>org.codehaus.mojo</groupId>
++            <artifactId>build-helper-maven-plugin</artifactId>
++            <executions>
++              <execution>
++                <id>add-sources</id>
++                <goals>
++                  <goal>add-test-source</goal>
++                </goals>
++                <phase>generate-sources</phase>
++                <configuration>
++                  <sources>
++                    <source>src/test/backends-bolt</source>
++                  </sources>
++                </configuration>
++              </execution>
++            </executions>
++          </plugin>
++          <plugin>
++            <groupId>com.diffplug.spotless</groupId>
++            <artifactId>spotless-maven-plugin</artifactId>
++            <configuration>
++              <scala>
++                <includes combine.children="append">
++                  <include>src/test/backends-bolt/**/*.scala</include>
++                </includes>
++              </scala>
++            </configuration>
++          </plugin>
++        </plugins>
++      </build>
++    </profile>
++
+     <profile>
+       <id>delta</id>
+       <dependencies>
+diff --git a/gluten-ut/spark40/src/test/backends-bolt/org/apache/gluten/GlutenColumnarWriteTestSupport.scala b/gluten-ut/spark40/src/test/backends-bolt/org/apache/gluten/GlutenColumnarWriteTestSupport.scala
+new file mode 100644
+index 0000000000..4258cd891a
+--- /dev/null
++++ b/gluten-ut/spark40/src/test/backends-bolt/org/apache/gluten/GlutenColumnarWriteTestSupport.scala
+@@ -0,0 +1,27 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.gluten
++
++import org.apache.spark.sql.execution.{ColumnarWriteFilesExec, SparkPlan}
++
++trait GlutenColumnarWriteTestSupport {
++
++  def checkWriteFilesAndGetChild(sparkPlan: SparkPlan): SparkPlan = {
++    assert(sparkPlan.isInstanceOf[ColumnarWriteFilesExec])
++    sparkPlan.asInstanceOf[ColumnarWriteFilesExec].child
++  }
++}
+diff --git a/gluten-ut/spark40/src/test/backends-bolt/org/apache/gluten/utils/bolt/BoltTestSettings.scala b/gluten-ut/spark40/src/test/backends-bolt/org/apache/gluten/utils/bolt/BoltTestSettings.scala
+new file mode 100644
+index 0000000000..ea59842e92
+--- /dev/null
++++ b/gluten-ut/spark40/src/test/backends-bolt/org/apache/gluten/utils/bolt/BoltTestSettings.scala
+@@ -0,0 +1,43 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.gluten.utils.bolt
++
++import org.apache.gluten.utils.{BackendTestSettings, SQLQueryTestSettings}
++
++import org.apache.spark.sql.GlutenBoltBackendSmokeSuite
++import org.apache.spark.sql.catalyst.expressions.{GlutenArithmeticExpressionSuite, GlutenBitwiseExpressionsSuite, GlutenConditionalExpressionSuite, GlutenLiteralExpressionSuite, GlutenNullExpressionsSuite, GlutenPredicateSuite}
++
++/** Spark 4 coverage is enabled per suite after checking Bolt execution and results. */
++class BoltTestSettings extends BackendTestSettings {
++  enableSuite[GlutenBoltBackendSmokeSuite]
++  enableSuite[GlutenArithmeticExpressionSuite]
++  enableSuite[GlutenBitwiseExpressionsSuite]
++  enableSuite[GlutenConditionalExpressionSuite]
++  enableSuite[GlutenLiteralExpressionSuite]
++  enableSuite[GlutenNullExpressionsSuite]
++  enableSuite[GlutenPredicateSuite]
++
++  override def getSQLQueryTestSettings: SQLQueryTestSettings = BoltSQLQueryTestSettings
++}
++
++// Spark 3.5 backend-specific golden files are not reusable for Spark 4.
++// Enable SQL query resources only after validating their version-specific results.
++private object BoltSQLQueryTestSettings extends SQLQueryTestSettings {
++  override def getResourceFilePath: String = getClass.getResource("/").getPath
++  override def getSupportedSQLQueryTests: Set[String] = Set.empty
++  override def getOverwriteSQLQueryTests: Set[String] = Set.empty
++}
+diff --git a/gluten-ut/spark40/src/test/backends-bolt/org/apache/spark/sql/GlutenBoltBackendSmokeSuite.scala b/gluten-ut/spark40/src/test/backends-bolt/org/apache/spark/sql/GlutenBoltBackendSmokeSuite.scala
+new file mode 100644
+index 0000000000..4bcddec757
+--- /dev/null
++++ b/gluten-ut/spark40/src/test/backends-bolt/org/apache/spark/sql/GlutenBoltBackendSmokeSuite.scala
+@@ -0,0 +1,92 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.spark.sql
++
++import org.apache.gluten.execution.{BroadcastHashJoinExecTransformerBase, FileSourceScanExecTransformerBase, HashAggregateExecBaseTransformer, ProjectExecTransformer}
++import org.apache.gluten.utils.BackendTestUtils
++
++import org.apache.spark.sql.execution.ColumnarShuffleExchangeExec
++import org.apache.spark.sql.functions.sum
++
++/** Verifies that the Bolt Spark 4 test profile executes native operators. */
++class GlutenBoltBackendSmokeSuite extends GlutenSQLTestsTrait {
++
++  private def withParquetData(body: DataFrame => Unit): Unit = {
++    assert(BackendTestUtils.isBoltBackendLoaded())
++    withTempPath {
++      path =>
++        withSQLConf("spark.gluten.enabled" -> "false") {
++          spark.range(8).selectExpr("id", "id % 2 AS k", "concat('row-', id) AS label")
++            .write.parquet(path.getCanonicalPath)
++        }
++        body(spark.read.parquet(path.getCanonicalPath))
++    }
++  }
++
++  for (adaptive <- Seq(false, true)) {
++    test(s"Bolt native Parquet scan and expressions with AQE=$adaptive") {
++      withSQLConf(
++        "spark.sql.ansi.enabled" -> "false",
++        "spark.sql.adaptive.enabled" -> adaptive.toString) {
++        withParquetData {
++          input =>
++            val result = input.filter("id >= 6").selectExpr("id + 3 AS shifted", "upper(label)")
++            checkAnswer(result, Seq(Row(9L, "ROW-6"), Row(10L, "ROW-7")))
++            val plan = getExecutedPlan(result)
++            assert(
++              plan.exists(_.isInstanceOf[FileSourceScanExecTransformerBase]),
++              result.queryExecution)
++            assert(plan.exists(_.isInstanceOf[ProjectExecTransformer]), result.queryExecution)
++        }
++      }
++    }
++
++    test(s"Bolt native shuffle and aggregation with AQE=$adaptive") {
++      withSQLConf(
++        "spark.sql.ansi.enabled" -> "false",
++        "spark.sql.adaptive.enabled" -> adaptive.toString) {
++        withParquetData {
++          input =>
++            val result = input.repartition(2, input("k")).groupBy("k").agg(sum("id"))
++            checkAnswer(result, Seq(Row(0L, 12L), Row(1L, 16L)))
++            val plan = getExecutedPlan(result)
++            assert(
++              plan.exists(_.isInstanceOf[HashAggregateExecBaseTransformer]),
++              result.queryExecution)
++            assert(plan.exists(_.isInstanceOf[ColumnarShuffleExchangeExec]), result.queryExecution)
++            assert(
++              plan.exists(_.isInstanceOf[FileSourceScanExecTransformerBase]),
++              result.queryExecution)
++        }
++      }
++    }
++  }
++
++  test("Bolt native broadcast join") {
++    withSQLConf("spark.sql.ansi.enabled" -> "false") {
++      withParquetData {
++        input =>
++          val result = input.join(spark.range(2).selectExpr("id AS k"), "k")
++            .groupBy("k").agg(sum("id"))
++          checkAnswer(result, Seq(Row(0L, 12L), Row(1L, 16L)))
++          assert(
++            getExecutedPlan(result).exists(_.isInstanceOf[BroadcastHashJoinExecTransformerBase]),
++            result.queryExecution)
++      }
++    }
++  }
++}
+diff --git a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala
+index d259293249..5868d4b591 100644
+--- a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala
++++ b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala
+@@ -16,11 +16,37 @@
+  */
+ package org.apache.spark.sql.catalyst.expressions
+ 
++import org.apache.spark.{SparkArithmeticException, SparkConf}
++import org.apache.spark.serializer.JavaSerializer
+ import org.apache.spark.sql.GlutenExpressionOffloadTracker
++import org.apache.spark.sql.internal.SQLConf
++import org.apache.spark.sql.types.Decimal
+ 
+ class GlutenArithmeticExpressionSuite
+   extends ArithmeticExpressionSuite
+   with GlutenExpressionOffloadTracker {
++  override protected def resolveExpression(expression: Expression): Expression = {
++    // Keep DataFrame analysis from caching decimal types on a reused Catalyst expression.
++    val serializer = new JavaSerializer(new SparkConf()).newInstance()
++    super.resolveExpression(serializer.deserialize[Expression](serializer.serialize(expression)))
++  }
++
++  testGluten("decimal precision settings do not mutate reusable expressions") {
++    withSQLConf(SQLConf.ANSI_ENABLED.key -> "true") {
++      val expression = Multiply(
++        Literal(Decimal(BigDecimal("1234567890.12345678901234567890"), 38, 20)),
++        Literal(Decimal(BigDecimal("1234567890.12345678901234567890"), 38, 20)))
++      withSQLConf(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> "true") {
++        checkEvaluation(expression, Decimal(BigDecimal("1524157875323883675.049535")))
++      }
++      withSQLConf(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> "false") {
++        checkExceptionInExpression[SparkArithmeticException](
++          expression,
++          "NUMERIC_VALUE_OUT_OF_RANGE")
++      }
++    }
++  }
++
+   override protected def offloadCategory: String = "arithmetic"
+   override protected def panoramaMeta(expression: Expression): Map[String, String] =
+     expression match {
+diff --git a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala
+index f81ef0b6ff..90831673ef 100644
+--- a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala
++++ b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala
+@@ -18,6 +18,7 @@ package org.apache.spark.sql.catalyst.expressions
+ 
+ import org.apache.spark.sql.GlutenTestsTrait
+ import org.apache.spark.sql.Row
++import org.apache.spark.sql.catalyst.InternalRow
+ import org.apache.spark.sql.catalyst.util.DateTimeUtils
+ import org.apache.spark.sql.internal.SQLConf
+ import org.apache.spark.sql.types._
+@@ -27,6 +28,18 @@ import java.nio.charset.StandardCharsets
+ import java.time.{Instant, LocalDate}
+ 
+ class GlutenLiteralExpressionSuite extends LiteralExpressionSuite with GlutenTestsTrait {
++  override protected def checkEvaluation(
++      expression: => Expression,
++      expected: Any,
++      inputRow: InternalRow = EmptyRow): Unit = {
++    expression.dataType match {
++      // DataFrame collection deserializes UDTs and cannot encode Object/CHAR/VARCHAR literals.
++      case _: UserDefinedType[_] | _: ObjectType | _: CharType | _: VarcharType =>
++        super[LiteralExpressionSuite].checkEvaluation(expression, expected, inputRow)
++      case _ => super.checkEvaluation(expression, expected, inputRow)
++    }
++  }
++
+   testGluten("default") {
+     checkEvaluation(Literal.default(BooleanType), false)
+     checkEvaluation(Literal.default(ByteType), 0.toByte)
+diff --git a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala
+index 491961d7d0..bed7cd69f7 100644
+--- a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala
++++ b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala
+@@ -96,8 +96,7 @@ class GlutenLogicalPlanTagInSparkPlanSuite
+         assert(plan.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).isEmpty)
+ 
+       // Gluten infrastructure nodes (no corresponding logical plan)
+-      case _: WholeStageTransformer | _: InputIteratorTransformer | _: ColumnarInputAdapter |
+-          _: VeloxResizeBatchesExec =>
++      case _: WholeStageTransformer | _: InputIteratorTransformer | _: ColumnarInputAdapter =>
+       // These are Gluten-specific wrapper nodes without logical plan links.
+ 
+       // Scan trees
+diff --git a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala
+index 142cd5700c..090de69855 100644
+--- a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala
++++ b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala
+@@ -492,7 +492,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+     Seq(true, false).foreach {
+       codegenEnabled =>
+         withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> codegenEnabled.toString) {
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             df1.join(df2),
+             expectedCount = 1)
+           checkAnswer(
+@@ -511,7 +511,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+               Row(3, 1),
+               Row(3, 2)))
+           val conditionalJoin = df1.join(df2, $"k1" + 1 =!= $"k2")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             conditionalJoin,
+             expectedCount = 1)
+           checkAnswer(
+@@ -528,7 +528,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+               Row(3, 1),
+               Row(3, 2)))
+           val twoJoins = df1.join(df2, $"k1" < $"k2").crossJoin(df3)
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             twoJoins,
+             expectedCount = 1)
+           checkAnswer(
+@@ -556,7 +556,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+       codegenEnabled =>
+         withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> codegenEnabled.toString) {
+           val leftOuterJoin = df1.join(df2, $"k1" > $"k2", "left_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             leftOuterJoin,
+             expectedCount = 1)
+           checkAnswer(
+@@ -570,7 +570,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+               Row(3, 1),
+               Row(3, 2)))
+           val rightOuterJoin = df1.join(df2, $"k1" < $"k2", "right_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             rightOuterJoin,
+             expectedCount = 1)
+           checkAnswer(
+@@ -579,14 +579,14 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+           val twoJoins = df1
+             .join(df2, $"k1" > $"k2" + 1, "right_outer")
+             .join(df3, $"k1" <= $"k3", "left_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             twoJoins,
+             expectedCount = 1)
+           checkAnswer(
+             twoJoins,
+             Seq(Row(2, 0, null), Row(3, 0, null), Row(3, 1, null), Row(null, 2, null)))
+           val emptyBuildSide = df3.join(empty, $"k3" > $"k4", "left_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             emptyBuildSide,
+             expectedCount = 1)
+           checkAnswer(
+@@ -601,19 +601,19 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+     val df2 = spark.range(3).select($"id".as("k2"))
+     val df3 = spark.range(2).select($"id".as("k3"))
+ 
+-    // Velox does not support native left semi/anti broadcast nested loop joins, so these plans
+-    // fall back without a VeloxBroadcastNestedLoopJoinExecTransformer.
++    // Native left semi/anti broadcast nested loop joins are unsupported, so these plans
++    // fall back without a BroadcastNestedLoopJoinExecTransformer.
+     Seq(true, false).foreach {
+       codegenEnabled =>
+         withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> codegenEnabled.toString) {
+           val semiJoin = df1.join(df2, $"k1" + 1 <= $"k2", "left_semi")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             semiJoin,
+             expectedCount = 0)
+           checkAnswer(semiJoin, Seq(Row(0), Row(1)))
+ 
+           val antiJoin = df1.join(df2, $"k1" + 1 <= $"k2", "left_anti")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             antiJoin,
+             expectedCount = 0)
+           checkAnswer(antiJoin, Seq(Row(2), Row(3)))
+@@ -621,7 +621,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+           val twoJoins = df1
+             .join(df2, $"k1" < $"k2", "left_semi")
+             .join(df3, $"k1" > $"k3", "left_anti")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             twoJoins,
+             expectedCount = 0)
+           checkAnswer(twoJoins, Row(0))
+diff --git a/gluten-ut/spark41/pom.xml b/gluten-ut/spark41/pom.xml
+index dbb761d93f..3062c675df 100644
+--- a/gluten-ut/spark41/pom.xml
++++ b/gluten-ut/spark41/pom.xml
+@@ -366,6 +366,62 @@
+       </build>
+     </profile>
+ 
++    <profile>
++      <id>backends-bolt</id>
++      <activation>
++        <activeByDefault>false</activeByDefault>
++      </activation>
++      <dependencies>
++        <dependency>
++          <groupId>org.apache.gluten</groupId>
++          <artifactId>backends-bolt</artifactId>
++          <version>${project.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <!-- log4j -->
++        <dependency>
++          <groupId>org.slf4j</groupId>
++          <artifactId>slf4j-api</artifactId>
++          <version>${slf4j.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.logging.log4j</groupId>
++          <artifactId>log4j-slf4j2-impl</artifactId>
++          <version>${log4j.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>com.h2database</groupId>
++          <artifactId>h2</artifactId>
++          <version>2.2.220</version>
++          <scope>test</scope>
++        </dependency>
++      </dependencies>
++      <build>
++        <plugins>
++          <plugin>
++            <groupId>org.codehaus.mojo</groupId>
++            <artifactId>build-helper-maven-plugin</artifactId>
++            <executions>
++              <execution>
++                <id>add-sources</id>
++                <goals>
++                  <goal>add-test-source</goal>
++                </goals>
++                <phase>generate-sources</phase>
++                <configuration>
++                  <sources>
++                    <source>${project.basedir}/../spark40/src/test/backends-bolt</source>
++                  </sources>
++                </configuration>
++              </execution>
++            </executions>
++          </plugin>
++        </plugins>
++      </build>
++    </profile>
++
+     <profile>
+       <id>delta</id>
+       <dependencies>
+diff --git a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala
+index 9d428d2b71..52132a9a30 100644
+--- a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala
++++ b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenArithmeticExpressionSuite.scala
+@@ -16,8 +16,11 @@
+  */
+ package org.apache.spark.sql.catalyst.expressions
+ 
++import org.apache.spark.SparkArithmeticException
+ import org.apache.spark.sql.GlutenExpressionOffloadTracker
++import org.apache.spark.sql.internal.SQLConf
+ import org.apache.spark.sql.shim.GlutenTestsTrait
++import org.apache.spark.sql.types.Decimal
+ 
+ class GlutenArithmeticExpressionSuite
+   extends ArithmeticExpressionSuite
+@@ -36,5 +39,22 @@ class GlutenArithmeticExpressionSuite
+       case _: UnaryMinus => Map("operator" -> "UnaryMinus")
+       case _ => Map.empty
+     }
++  testGluten("decimal precision settings are captured when creating expressions") {
++    def multiply: Expression = Multiply(
++      Literal(Decimal(BigDecimal("1234567890.12345678901234567890"), 38, 20)),
++      Literal(Decimal(BigDecimal("1234567890.12345678901234567890"), 38, 20)))
++    withSQLConf(
++      SQLConf.ANSI_ENABLED.key -> "true",
++      SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> "true") {
++      val expression = multiply
++      val expected = Decimal(BigDecimal("1524157875323883675.049535"))
++      checkEvaluation(expression, expected)
++      withSQLConf(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> "false") {
++        checkEvaluation(expression, expected)
++        checkExceptionInExpression[SparkArithmeticException](multiply, "NUMERIC_VALUE_OUT_OF_RANGE")
++      }
++    }
++  }
++
+   override protected def offloadCategory: String = "arithmetic"
+ }
+diff --git a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala
+index f81ef0b6ff..6aa2b90959 100644
+--- a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala
++++ b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/catalyst/expressions/GlutenLiteralExpressionSuite.scala
+@@ -18,6 +18,7 @@ package org.apache.spark.sql.catalyst.expressions
+ 
+ import org.apache.spark.sql.GlutenTestsTrait
+ import org.apache.spark.sql.Row
++import org.apache.spark.sql.catalyst.InternalRow
+ import org.apache.spark.sql.catalyst.util.DateTimeUtils
+ import org.apache.spark.sql.internal.SQLConf
+ import org.apache.spark.sql.types._
+@@ -27,6 +28,24 @@ import java.nio.charset.StandardCharsets
+ import java.time.{Instant, LocalDate}
+ 
+ class GlutenLiteralExpressionSuite extends LiteralExpressionSuite with GlutenTestsTrait {
++  override protected def initializeSession(): Unit = {
++    super.initializeSession()
++    // Spark enables TIME in its test environment; retain that setting for DataFrame evaluation.
++    _spark.conf.set(SQLConf.TIME_TYPE_ENABLED.key, true)
++  }
++
++  override protected def checkEvaluation(
++      expression: => Expression,
++      expected: Any,
++      inputRow: InternalRow = EmptyRow): Unit = {
++    expression.dataType match {
++      // DataFrame collection deserializes UDTs and cannot encode Object/CHAR/VARCHAR literals.
++      case _: UserDefinedType[_] | _: ObjectType | _: CharType | _: VarcharType =>
++        super[LiteralExpressionSuite].checkEvaluation(expression, expected, inputRow)
++      case _ => super.checkEvaluation(expression, expected, inputRow)
++    }
++  }
++
+   testGluten("default") {
+     checkEvaluation(Literal.default(BooleanType), false)
+     checkEvaluation(Literal.default(ByteType), 0.toByte)
+diff --git a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala
+index 491961d7d0..bed7cd69f7 100644
+--- a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala
++++ b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenLogicalPlanTagInSparkPlanSuite.scala
+@@ -96,8 +96,7 @@ class GlutenLogicalPlanTagInSparkPlanSuite
+         assert(plan.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).isEmpty)
+ 
+       // Gluten infrastructure nodes (no corresponding logical plan)
+-      case _: WholeStageTransformer | _: InputIteratorTransformer | _: ColumnarInputAdapter |
+-          _: VeloxResizeBatchesExec =>
++      case _: WholeStageTransformer | _: InputIteratorTransformer | _: ColumnarInputAdapter =>
+       // These are Gluten-specific wrapper nodes without logical plan links.
+ 
+       // Scan trees
+diff --git a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala
+index 142cd5700c..090de69855 100644
+--- a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala
++++ b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/execution/GlutenWholeStageCodegenSuite.scala
+@@ -492,7 +492,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+     Seq(true, false).foreach {
+       codegenEnabled =>
+         withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> codegenEnabled.toString) {
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             df1.join(df2),
+             expectedCount = 1)
+           checkAnswer(
+@@ -511,7 +511,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+               Row(3, 1),
+               Row(3, 2)))
+           val conditionalJoin = df1.join(df2, $"k1" + 1 =!= $"k2")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             conditionalJoin,
+             expectedCount = 1)
+           checkAnswer(
+@@ -528,7 +528,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+               Row(3, 1),
+               Row(3, 2)))
+           val twoJoins = df1.join(df2, $"k1" < $"k2").crossJoin(df3)
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             twoJoins,
+             expectedCount = 1)
+           checkAnswer(
+@@ -556,7 +556,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+       codegenEnabled =>
+         withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> codegenEnabled.toString) {
+           val leftOuterJoin = df1.join(df2, $"k1" > $"k2", "left_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             leftOuterJoin,
+             expectedCount = 1)
+           checkAnswer(
+@@ -570,7 +570,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+               Row(3, 1),
+               Row(3, 2)))
+           val rightOuterJoin = df1.join(df2, $"k1" < $"k2", "right_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             rightOuterJoin,
+             expectedCount = 1)
+           checkAnswer(
+@@ -579,14 +579,14 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+           val twoJoins = df1
+             .join(df2, $"k1" > $"k2" + 1, "right_outer")
+             .join(df3, $"k1" <= $"k3", "left_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             twoJoins,
+             expectedCount = 1)
+           checkAnswer(
+             twoJoins,
+             Seq(Row(2, 0, null), Row(3, 0, null), Row(3, 1, null), Row(null, 2, null)))
+           val emptyBuildSide = df3.join(empty, $"k3" > $"k4", "left_outer")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             emptyBuildSide,
+             expectedCount = 1)
+           checkAnswer(
+@@ -601,19 +601,19 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+     val df2 = spark.range(3).select($"id".as("k2"))
+     val df3 = spark.range(2).select($"id".as("k3"))
+ 
+-    // Velox does not support native left semi/anti broadcast nested loop joins, so these plans
+-    // fall back without a VeloxBroadcastNestedLoopJoinExecTransformer.
++    // Native left semi/anti broadcast nested loop joins are unsupported, so these plans
++    // fall back without a BroadcastNestedLoopJoinExecTransformer.
+     Seq(true, false).foreach {
+       codegenEnabled =>
+         withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> codegenEnabled.toString) {
+           val semiJoin = df1.join(df2, $"k1" + 1 <= $"k2", "left_semi")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             semiJoin,
+             expectedCount = 0)
+           checkAnswer(semiJoin, Seq(Row(0), Row(1)))
+ 
+           val antiJoin = df1.join(df2, $"k1" + 1 <= $"k2", "left_anti")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             antiJoin,
+             expectedCount = 0)
+           checkAnswer(antiJoin, Seq(Row(2), Row(3)))
+@@ -621,7 +621,7 @@ class GlutenWholeStageCodegenSuite extends WholeStageCodegenSuite with GlutenSQL
+           val twoJoins = df1
+             .join(df2, $"k1" < $"k2", "left_semi")
+             .join(df3, $"k1" > $"k3", "left_anti")
+-          assertWholeStageCount[VeloxBroadcastNestedLoopJoinExecTransformer](
++          assertWholeStageCount[BroadcastNestedLoopJoinExecTransformer](
+             twoJoins,
+             expectedCount = 0)
+           checkAnswer(twoJoins, Row(0))

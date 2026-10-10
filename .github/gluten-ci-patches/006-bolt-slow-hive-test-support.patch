@@ -1,0 +1,47 @@
+diff --git a/gluten-ut/spark35/src/test/scala/org/apache/gluten/utils/bolt/BoltTestSettings.scala b/gluten-ut/spark35/src/test/scala/org/apache/gluten/utils/bolt/BoltTestSettings.scala
+--- a/gluten-ut/spark35/src/test/scala/org/apache/gluten/utils/bolt/BoltTestSettings.scala
++++ b/gluten-ut/spark35/src/test/scala/org/apache/gluten/utils/bolt/BoltTestSettings.scala
+@@ -39,6 +39,7 @@
+ import org.apache.spark.sql.execution.python._
+ import org.apache.spark.sql.extension.{GlutenCollapseProjectExecTransformerSuite, GlutenSessionExtensionSuite}
+ import org.apache.spark.sql.gluten.GlutenFallbackSuite
++import org.apache.spark.sql.hive.{execution => hive}
+ import org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite
+ import org.apache.spark.sql.sources._
+ 
+@@ -1023,6 +1024,35 @@
+     // Rewrite for transformed plan
+     .exclude("dumping query execution info to a file - explainMode=formatted")
+ 
++  // The dedicated CI stage opts into the previously untested slow Hive suites.
++  if (sys.env.get("GLUTEN_TEST_ENABLE_SLOW_HIVE").contains("true")) {
++    enableSuite[hive.GlutenHashAggregationQuerySuite]
++    enableSuite[hive.GlutenHashAggregationQueryWithControlledFallbackSuite]
++    enableSuite[hive.GlutenHashUDAQuerySuite]
++    enableSuite[hive.GlutenHashUDAQueryWithControlledFallbackSuite]
++    enableSuite[hive.GlutenHiveCommandSuite]
++    enableSuite[hive.GlutenHiveDDLSuite]
++    enableSuite[hive.GlutenHiveExplainSuite]
++    enableSuite[hive.GlutenHivePlanTest]
++    enableSuite[hive.GlutenHiveQuerySuite]
++    enableSuite[hive.GlutenHiveResolutionSuite]
++    enableSuite[hive.GlutenHiveSQLViewSuite]
++    enableSuite[hive.GlutenHiveScriptTransformationSuite]
++    enableSuite[hive.GlutenHiveSerDeReadWriteSuite]
++    enableSuite[hive.GlutenHiveSerDeSuite]
++    enableSuite[hive.GlutenHiveTableScanSuite]
++    enableSuite[hive.GlutenHiveTypeCoercionSuite]
++    enableSuite[hive.GlutenHiveUDAFSuite]
++    enableSuite[hive.GlutenHiveUDFSuite]
++    enableSuite[hive.GlutenObjectHashAggregateSuite]
++    enableSuite[hive.GlutenPruneHiveTablePartitionsSuite]
++    enableSuite[hive.GlutenPruningSuite]
++    enableSuite[hive.GlutenSQLMetricsSuite]
++    enableSuite[hive.GlutenSQLQuerySuite]
++    enableSuite[hive.GlutenSQLQuerySuiteAE]
++    enableSuite[hive.GlutenWindowQuerySuite]
++  }
++
+   override def getSQLQueryTestSettings: SQLQueryTestSettings = BoltSQLQueryTestSettings
+ }
+ // scalastyle:on line.size.limit

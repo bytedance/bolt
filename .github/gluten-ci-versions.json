@@ -1,0 +1,10 @@
+{
+  "gluten_repository": "apache/gluten",
+  "gluten_ref": "main",
+  "spark": "3.5.5",
+  "scala": "2.12",
+  "jdk": "17",
+  "os": "Linux",
+  "architecture": "x86_64",
+  "build_type": "Release"
+}

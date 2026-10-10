@@ -1,0 +1,15 @@
+diff --git a/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala b/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala
+--- a/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala
++++ b/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala
+@@ -37,7 +37,10 @@ class BoltDeltaComponent extends Component {
+     val legacy = injector.gluten.legacy
+     legacy.injectTransform {
+       c =>
+-        val offload = Seq(OffloadDeltaScan(), OffloadDeltaProject(), OffloadDeltaFilter())
++        val offload = Seq(
++          OffloadDeltaScan(enableNativeDmlRowIndexScan = false),
++          OffloadDeltaProject(),
++          OffloadDeltaFilter())
+           .map(_.toStrcitRule())
+         HeuristicTransform.Simple(
+           Validators.newValidator(new GlutenConfig(c.sqlConf), offload),

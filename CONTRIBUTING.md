@@ -8,6 +8,7 @@ Welcome to the Bolt community! Bolt is a C++ acceleration library focused on hig
 - [Fork and PR Workflow](#fork-and-pr-workflow)
 - [Building and Testing](#building-and-testing)
   - [Common Targets](#common-targets)
+  - [Gluten Bolt backend CI](#gluten-bolt-backend-ci)
   - [Working with IDE](#working-with-ide)
 - [Code Style and Static Analysis](#code-style-and-static-analysis)
   - [Formatting (clang-format)](#formatting-clang-format)
@@ -152,6 +153,77 @@ make release_spark
 make release_spark BUILD_VERSION=main
 ```
 
+
+### Gluten Bolt backend CI
+
+The [Gluten Bolt Backend workflow](.github/workflows/gluten-bolt.yml) runs on
+pull requests, merge groups and manual dispatch. It tests the candidate Bolt
+code against `apache/gluten:main`, selected in `.github/gluten-ci-versions.json`.
+It compiles Spark 3.4/3.5/4.0/4.1 support and runs native, backend JVM, Spark
+and TPC checks. Temporary source compatibility fixes live in
+`.github/gluten-ci-patches/` and are applied explicitly to the resolved Apache
+main. The helper verifies their hashes, records which patches were applied or
+already upstream, and rejects unrelated source changes.
+
+The default image and runner match Bolt's existing CI. Missing or empty
+repository Actions variables use these defaults:
+
+| Optional variable | Default |
+| --- | --- |
+| `BOLT_GLUTEN_CI_IMAGE` | `bolt-registry:5000/bolt-ci:20260114` |
+| `BOLT_GLUTEN_CI_CONAN_IMAGE` | `bolt-registry:5000/conan-server:latest` |
+| `BOLT_GLUTEN_CI_RUNNER` | `["self-hosted", "medium"]` |
+
+Other image overrides require an `@sha256:` digest. The default images use
+tags because each CI host builds its own registry images; a digest override
+must be available to every selected runner. The runner must reach the Bolt
+registry and Conan service. The workflow
+installs a full JDK 17 and provisions the pinned Spark and Python test runtime
+inside the existing image; Spark archives are verified against Apache SHA512
+manifests.
+
+Local execution requires Linux x86_64, a full JDK 17 with AWT, Python 3.10+,
+Conan 2.32.0, Maven, CMake 3.31, Ninja, mold and a C++ compiler. Provide a
+Spark 3.5.5 binary distribution with Python ZIPs and the matching source `sql/`
+test resources, plus PySpark 3.5.5, pandas 2.2.3 and PyArrow 20.0.0. Set
+`BOLT_GLUTEN_SPARK_HOME` to the binary directory; its `sql/` can be a symlink
+to the source tree. The container default is `/opt/shims/spark35/spark_home`.
+
+Use an isolated checkout and Conan home, with the same linker settings as the
+workflow. From the Bolt repository root:
+
+```bash
+git clone --branch main https://github.com/apache/gluten.git gluten
+export JAVA_HOME=/path/to/jdk17
+export PATH="$JAVA_HOME/bin:$PATH"
+export BOLT_GLUTEN_SPARK_HOME=/path/to/spark-3.5.5
+export CONAN_HOME="$PWD/.ci/conan"
+conan profile detect
+profile_path="$(conan profile path default)"
+cat >> "$profile_path" <<'EOF'
+
+[conf]
+tools.build:exelinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
+tools.build:sharedlinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
+EOF
+./scripts/install-bolt-deps.sh
+python3 .github/scripts/gluten_ci.py prepare --local
+python3 .github/scripts/gluten_ci.py patch
+python3 .github/scripts/gluten_ci.py build
+python3 .github/scripts/gluten_ci.py test
+```
+
+`--local` records the actual local Gluten checkout and is unavailable in
+GitHub Actions. These commands configure Release and export a Bolt package
+into the selected Conan home. Reports and failure logs go to `.ci/gluten-bolt/`.
+To check the CI helper independently, use JDK 17 and run
+`python3 -m unittest discover -s .github/scripts/tests -p 'test_gluten_ci*.py'`.
+
+`.github/gluten-ci-blacklist.txt` lists temporary exact testcase exceptions.
+Every test still executes its original assertions; only listed failures are
+classified after execution. Compilation errors, suite aborts, crashes and
+missing or incomplete reports remain fatal. Spark 4 stages do not use the
+Spark 3.5 blacklist. Repair patches remove only entries verified to pass.
 
 ### Working with IDE
 

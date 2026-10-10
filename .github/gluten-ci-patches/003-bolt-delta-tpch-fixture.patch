@@ -1,0 +1,72 @@
+diff --git a/backends-bolt/src-delta/test/scala/org/apache/gluten/execution/BoltTPCHDeltaSuite.scala b/backends-bolt/src-delta/test/scala/org/apache/gluten/execution/BoltTPCHDeltaSuite.scala
+index 3d9feae51d..f36e0f7851 100644
+--- a/backends-bolt/src-delta/test/scala/org/apache/gluten/execution/BoltTPCHDeltaSuite.scala
++++ b/backends-bolt/src-delta/test/scala/org/apache/gluten/execution/BoltTPCHDeltaSuite.scala
+@@ -16,27 +16,59 @@
+  */
+ package org.apache.gluten.execution
+ 
++import org.apache.gluten.config.{BoltConfig, GlutenConfig}
++
+ import org.apache.spark.SparkConf
+ 
+ import java.io.File
+ 
+-class BoltTPCHDeltaSuite extends BoltTPCHSuite {
+-  protected val tpchBasePath: String =
+-    getClass.getResource("/").getPath + "../../../src/test/resources"
+-
+-  override protected val resourcePath: String =
+-    getClass.getResource("/tpch-data-parquet").getFile
++class BoltTPCHDeltaSuite extends BoltWholeStageTransformerSuite {
++  override protected val resourcePath: String = "/tpch-data-parquet"
++  override protected val fileFormat: String = "parquet"
+ 
+-  override protected val queriesResults: String =
+-    new File(tpchBasePath, "queries-output").getCanonicalPath
++  private val tpchQueries: String =
++    getClass.getResource("/").getPath +
++      "../../../../tools/gluten-it/common/src/main/resources/tpch-queries"
+ 
+   override protected def sparkConf: SparkConf = {
+     super.sparkConf
++      .set("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager")
++      .set("spark.sql.files.maxPartitionBytes", "1g")
++      .set("spark.sql.shuffle.partitions", "1")
++      .set(BoltConfig.COLUMNAR_BOLT_MEM_INIT_CAPACITY.key, "1m")
++      .set("spark.memory.offHeap.size", "2g")
++      .set("spark.unsafe.exceptionOnMemoryLeak", "true")
++      .set("spark.sql.autoBroadcastJoinThreshold", "-1")
++      .set("spark.gluten.shuffle.inside.bolt", "false")
++      .set(GlutenConfig.COLUMNAR_FORCE_SHUFFLED_HASH_JOIN_ENABLED.key, "true")
+       .set("spark.executor.memory", "4g")
+       .set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+       .set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+   }
+ 
++  override def beforeAll(): Unit = {
++    super.beforeAll()
++    createTPCHNotNullTables()
++  }
++
++  (1 to 22).foreach {
++    query =>
++      test(s"TPC-H q$query") {
++        compareTPCHQueryAgainstVanillaSpark(
++          query,
++          tpchQueries,
++          df => {
++            val scans = collectWithSubqueries(df.queryExecution.executedPlan) {
++              case scan: DeltaScanTransformer => scan
++            }
++            assert(scans.nonEmpty, df.queryExecution.executedPlan.treeString)
++          },
++          noFallBack = true,
++          compareResult = true
++        )
++      }
++  }
++
+   override protected def createTPCHNotNullTables(): Unit = {
+     val tableDir = getClass.getResource(resourcePath).getFile
+     TPCHTables

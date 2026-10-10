@@ -1,0 +1,1912 @@
+diff --git a/backends-bolt/pom.xml b/backends-bolt/pom.xml
+index e120f50bd4..d6f309d0e4 100644
+--- a/backends-bolt/pom.xml
++++ b/backends-bolt/pom.xml
+@@ -32,6 +32,7 @@
+     <cpp.build.dir>../cpp/build/</cpp.build.dir>
+     <cpp.bolt.package.dir>${cpp.build.dir}/package/bolt/${platform}/${arch}/</cpp.bolt.package.dir>
+     <byte-buddy.version>1.9.3</byte-buddy.version>
++    <iceberg.spark.artifact.prefix>iceberg-spark-runtime</iceberg.spark.artifact.prefix>
+   </properties>
+ 
+   <dependencies>
+@@ -365,6 +366,153 @@
+         </dependency>
+       </dependencies>
+     </profile>
++    <profile>
++      <id>iceberg-test</id>
++      <properties>
++        <!-- Keep relocated Parquet APIs out of the unshaded test implementation's classpath. -->
++        <iceberg.spark.artifact.prefix>iceberg-spark</iceberg.spark.artifact.prefix>
++        <!-- Match the unshaded Iceberg test implementation's dependency versions. -->
++        <iceberg.test.parquet.version>1.16.0</iceberg.test.parquet.version>
++        <iceberg.test.avro.version>1.12.0</iceberg.test.avro.version>
++        <iceberg.test.orc.version>1.9.7</iceberg.test.orc.version>
++        <iceberg.test.jetty.version>11.0.26</iceberg.test.jetty.version>
++      </properties>
++      <dependencies>
++        <!-- Iceberg's test jars use the unshaded Spark implementation and its Avro/Parquet APIs. -->
++        <dependency>
++          <groupId>org.apache.iceberg</groupId>
++          <artifactId>${iceberg.spark.artifact.prefix}-${sparkbundle.version}_${scala.binary.version}</artifactId>
++          <version>${iceberg.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.iceberg</groupId>
++          <artifactId>iceberg-hive-metastore</artifactId>
++          <version>${iceberg.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.iceberg</groupId>
++          <artifactId>iceberg-spark-extensions-${sparkbundle.version}_${scala.binary.version}</artifactId>
++          <version>${iceberg.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <!-- Maven otherwise selects Spark's older jars ahead of Iceberg's transitive jars. -->
++        <dependency>
++          <groupId>org.apache.parquet</groupId>
++          <artifactId>parquet-column</artifactId>
++          <version>${iceberg.test.parquet.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.parquet</groupId>
++          <artifactId>parquet-common</artifactId>
++          <version>${iceberg.test.parquet.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.parquet</groupId>
++          <artifactId>parquet-encoding</artifactId>
++          <version>${iceberg.test.parquet.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.parquet</groupId>
++          <artifactId>parquet-hadoop</artifactId>
++          <version>${iceberg.test.parquet.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.parquet</groupId>
++          <artifactId>parquet-format-structures</artifactId>
++          <version>${iceberg.test.parquet.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.parquet</groupId>
++          <artifactId>parquet-jackson</artifactId>
++          <version>${iceberg.test.parquet.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.avro</groupId>
++          <artifactId>avro</artifactId>
++          <version>${iceberg.test.avro.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.orc</groupId>
++          <artifactId>orc-core</artifactId>
++          <version>${iceberg.test.orc.version}</version>
++          <classifier>shaded-protobuf</classifier>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.orc</groupId>
++          <artifactId>orc-shims</artifactId>
++          <version>${iceberg.test.orc.version}</version>
++          <scope>provided</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.orc</groupId>
++          <artifactId>orc-mapreduce</artifactId>
++          <version>${iceberg.test.orc.version}</version>
++          <classifier>shaded-protobuf</classifier>
++          <scope>provided</scope>
++        </dependency>
++        <!-- The current catalog fixtures start a REST server for their catalog parameters. -->
++        <dependency>
++          <groupId>org.apache.iceberg</groupId>
++          <artifactId>iceberg-open-api</artifactId>
++          <version>${iceberg.version}</version>
++          <classifier>test-fixtures</classifier>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.apache.iceberg</groupId>
++          <artifactId>iceberg-core</artifactId>
++          <version>${iceberg.version}</version>
++          <type>test-jar</type>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.xerial</groupId>
++          <artifactId>sqlite-jdbc</artifactId>
++          <version>3.50.3.0</version>
++          <scope>test</scope>
++        </dependency>
++        <!-- Spark also brings older Jetty utility modules; align the REST server's dependencies. -->
++        <dependency>
++          <groupId>org.eclipse.jetty</groupId>
++          <artifactId>jetty-util</artifactId>
++          <version>${iceberg.test.jetty.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.eclipse.jetty</groupId>
++          <artifactId>jetty-io</artifactId>
++          <version>${iceberg.test.jetty.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.eclipse.jetty</groupId>
++          <artifactId>jetty-servlet</artifactId>
++          <version>${iceberg.test.jetty.version}</version>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.junit.jupiter</groupId>
++          <artifactId>junit-jupiter</artifactId>
++          <scope>test</scope>
++        </dependency>
++        <dependency>
++          <groupId>org.junit.vintage</groupId>
++          <artifactId>junit-vintage-engine</artifactId>
++          <version>${junit5.version}</version>
++          <scope>test</scope>
++        </dependency>
++      </dependencies>
++    </profile>
+     <profile>
+       <id>iceberg</id>
+       <activation>
+@@ -389,7 +537,7 @@
+         </dependency>
+         <dependency>
+           <groupId>org.apache.iceberg</groupId>
+-          <artifactId>iceberg-spark-runtime-${sparkbundle.version}_${scala.binary.version}</artifactId>
++          <artifactId>${iceberg.spark.artifact.prefix}-${sparkbundle.version}_${scala.binary.version}</artifactId>
+           <version>${iceberg.version}</version>
+           <scope>provided</scope>
+         </dependency>
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/GlutenIcebergTestExtension.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/GlutenIcebergTestExtension.java
+new file mode 100644
+index 0000000000..b90e739c79
+--- /dev/null
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/GlutenIcebergTestExtension.java
+@@ -0,0 +1,70 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.gluten;
++
++import org.apache.spark.sql.SparkSession;
++import org.junit.jupiter.api.extension.AfterAllCallback;
++import org.junit.jupiter.api.extension.BeforeAllCallback;
++import org.junit.jupiter.api.extension.BeforeEachCallback;
++import org.junit.jupiter.api.extension.ExtensionContext;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++/** Enables Gluten before the inherited Iceberg fixtures create their Spark sessions. */
++public class GlutenIcebergTestExtension
++    implements BeforeAllCallback, BeforeEachCallback, AfterAllCallback {
++  private static final ExtensionContext.Namespace NAMESPACE =
++      ExtensionContext.Namespace.create(GlutenIcebergTestExtension.class);
++
++  @Override
++  public void beforeAll(ExtensionContext context) {
++    Map<String, String> previous = new LinkedHashMap<>();
++    TestConfUtil.GLUTEN_CONF.forEach(
++        (key, value) -> {
++          previous.put(key, System.getProperty(key));
++          System.setProperty(key, value.toString());
++        });
++    context.getStore(NAMESPACE).put("previous", previous);
++  }
++
++  @Override
++  public void beforeEach(ExtensionContext context) {
++    SparkSession session = SparkSession.getDefaultSession().get();
++    TestConfUtil.GLUTEN_CONF.forEach(
++        (key, value) ->
++            assertThat(session.sparkContext().getConf().get(key))
++                .as("Inherited Iceberg fixtures must run with Gluten: %s", key)
++                .isEqualTo(value.toString()));
++  }
++
++  @Override
++  @SuppressWarnings("unchecked")
++  public void afterAll(ExtensionContext context) {
++    Map<String, String> previous = context.getStore(NAMESPACE).remove("previous", Map.class);
++    previous.forEach(
++        (key, value) -> {
++          if (value == null) {
++            System.clearProperty(key);
++          } else {
++            System.setProperty(key, value);
++          }
++        });
++  }
++}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenCopyOnWriteDelete.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenCopyOnWriteDelete.java
+index e03d4aba8c..355afd3f72 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenCopyOnWriteDelete.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenCopyOnWriteDelete.java
+@@ -16,48 +16,10 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import org.apache.iceberg.PlanningMode;
+-import org.apache.iceberg.spark.extensions.TestCopyOnWriteDelete;
+-import org.junit.Test;
+-
+-import java.util.Map;
+-import java.util.concurrent.ExecutionException;
+-
+-public class TestGlutenCopyOnWriteDelete extends TestCopyOnWriteDelete {
+-  public TestGlutenCopyOnWriteDelete(
+-      String catalogName,
+-      String implementation,
+-      Map<String, String> config,
+-      String fileFormat,
+-      Boolean vectorized,
+-      String distributionMode,
+-      boolean fanoutEnabled,
+-      String branch,
+-      PlanningMode planningMode) {
+-    super(
+-        catalogName,
+-        implementation,
+-        config,
+-        fileFormat,
+-        vectorized,
+-        distributionMode,
+-        fanoutEnabled,
+-        branch,
+-        planningMode);
+-  }
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-  @Test
+-  public synchronized void testDeleteWithConcurrentTableRefresh() {
+-    System.out.println("Run timeout");
+-  }
+-
+-  @Test
+-  public synchronized void testDeleteWithSerializableIsolation() {
+-    System.out.println("Run timeout");
+-  }
++import org.apache.iceberg.spark.extensions.TestCopyOnWriteDelete;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-  @Test
+-  public synchronized void testDeleteWithSnapshotIsolation() throws ExecutionException {
+-    System.out.println("Run timeout");
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenCopyOnWriteDelete extends TestCopyOnWriteDelete {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadDelete.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadDelete.java
+index f2fe3e3341..2231854dc2 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadDelete.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadDelete.java
+@@ -16,48 +16,10 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import org.apache.iceberg.PlanningMode;
+-import org.apache.iceberg.spark.extensions.TestMergeOnReadDelete;
+-import org.junit.Test;
+-
+-import java.util.Map;
+-import java.util.concurrent.ExecutionException;
+-
+-public class TestGlutenMergeOnReadDelete extends TestMergeOnReadDelete {
+-  public TestGlutenMergeOnReadDelete(
+-      String catalogName,
+-      String implementation,
+-      Map<String, String> config,
+-      String fileFormat,
+-      Boolean vectorized,
+-      String distributionMode,
+-      boolean fanoutEnabled,
+-      String branch,
+-      PlanningMode planningMode) {
+-    super(
+-        catalogName,
+-        implementation,
+-        config,
+-        fileFormat,
+-        vectorized,
+-        distributionMode,
+-        fanoutEnabled,
+-        branch,
+-        planningMode);
+-  }
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-  @Test
+-  public synchronized void testDeleteWithConcurrentTableRefresh() {
+-    System.out.println("Run timeout");
+-  }
+-
+-  @Test
+-  public synchronized void testDeleteWithSerializableIsolation() {
+-    System.out.println("Run timeout");
+-  }
++import org.apache.iceberg.spark.extensions.TestMergeOnReadDelete;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-  @Test
+-  public synchronized void testDeleteWithSnapshotIsolation() throws ExecutionException {
+-    System.out.println("Run timeout");
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenMergeOnReadDelete extends TestMergeOnReadDelete {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadMerge.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadMerge.java
+index efb919f1b4..9d7e122bc4 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadMerge.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadMerge.java
+@@ -16,7 +16,8 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import org.apache.iceberg.PlanningMode;
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.RowLevelOperationMode;
+ import org.apache.iceberg.Table;
+ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+@@ -24,55 +25,19 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+ import org.apache.iceberg.spark.extensions.TestMergeOnReadMerge;
+ import org.apache.spark.sql.execution.SparkPlan;
+ import org.apache.spark.sql.internal.SQLConf;
+-import org.junit.Test;
+-
+-import java.util.Map;
++import org.junit.jupiter.api.TestTemplate;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+ import static org.apache.iceberg.RowLevelOperationMode.COPY_ON_WRITE;
+ import static org.apache.iceberg.TableProperties.MERGE_MODE;
+ import static org.apache.iceberg.TableProperties.MERGE_MODE_DEFAULT;
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenMergeOnReadMerge extends TestMergeOnReadMerge {
+-  public TestGlutenMergeOnReadMerge(
+-      String catalogName,
+-      String implementation,
+-      Map<String, String> config,
+-      String fileFormat,
+-      boolean vectorized,
+-      String distributionMode,
+-      boolean fanoutEnabled,
+-      String branch,
+-      PlanningMode planningMode) {
+-    super(
+-        catalogName,
+-        implementation,
+-        config,
+-        fileFormat,
+-        vectorized,
+-        distributionMode,
+-        fanoutEnabled,
+-        branch,
+-        planningMode);
+-  }
+-
+-  @Test
+-  public synchronized void testMergeWithConcurrentTableRefresh() {
+-    System.out.println("Run timeout");
+-  }
+-
+-  @Test
+-  public synchronized void testMergeWithSerializableIsolation() {
+-    System.out.println("Run timeout");
+-  }
+-
+-  @Test
+-  public synchronized void testMergeWithSnapshotIsolation() {
+-    System.out.println("Run timeout");
+-  }
+ 
+   // The matched join string is changed from Join to ShuffledHashJoinExecTransformer
+-  @Test
++  @TestTemplate
+   public void testMergeConditionSplitIntoTargetPredicateAndJoinCondition() {
+     createAndInitTable(
+         "id INT, salary INT, dep STRING, sub_dep STRING",
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadUpdate.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadUpdate.java
+index f2db135cec..0b64c9b942 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadUpdate.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenMergeOnReadUpdate.java
+@@ -16,48 +16,10 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import org.apache.iceberg.PlanningMode;
+-import org.apache.iceberg.spark.extensions.TestMergeOnReadUpdate;
+-import org.junit.Test;
+-
+-import java.util.Map;
+-import java.util.concurrent.ExecutionException;
+-
+-public class TestGlutenMergeOnReadUpdate extends TestMergeOnReadUpdate {
+-  public TestGlutenMergeOnReadUpdate(
+-      String catalogName,
+-      String implementation,
+-      Map<String, String> config,
+-      String fileFormat,
+-      boolean vectorized,
+-      String distributionMode,
+-      boolean fanoutEnabled,
+-      String branch,
+-      PlanningMode planningMode) {
+-    super(
+-        catalogName,
+-        implementation,
+-        config,
+-        fileFormat,
+-        vectorized,
+-        distributionMode,
+-        fanoutEnabled,
+-        branch,
+-        planningMode);
+-  }
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-  @Test
+-  public synchronized void testUpdateWithConcurrentTableRefresh() {
+-    System.out.println("Run timeout");
+-  }
+-
+-  @Test
+-  public synchronized void testUpdateWithSerializableIsolation() {
+-    System.out.println("Run timeout");
+-  }
++import org.apache.iceberg.spark.extensions.TestMergeOnReadUpdate;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-  @Test
+-  public synchronized void testUpdateWithSnapshotIsolation() throws ExecutionException {
+-    System.out.println("Run timeout");
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenMergeOnReadUpdate extends TestMergeOnReadUpdate {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenStoragePartitionedJoinsInRowLevelOperations.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenStoragePartitionedJoinsInRowLevelOperations.java
+index 9d650c6f6c..669246b149 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenStoragePartitionedJoinsInRowLevelOperations.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenStoragePartitionedJoinsInRowLevelOperations.java
+@@ -16,14 +16,11 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import org.apache.iceberg.spark.extensions.TestStoragePartitionedJoinsInRowLevelOperations;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.extensions.TestStoragePartitionedJoinsInRowLevelOperations;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenStoragePartitionedJoinsInRowLevelOperations
+-    extends TestStoragePartitionedJoinsInRowLevelOperations {
+-  public TestGlutenStoragePartitionedJoinsInRowLevelOperations(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++    extends TestStoragePartitionedJoinsInRowLevelOperations {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownDQL.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownDQL.java
+index 059da14725..9fd66648e5 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownDQL.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownDQL.java
+@@ -16,13 +16,10 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import org.apache.iceberg.spark.extensions.TestSystemFunctionPushDownDQL;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.extensions.TestSystemFunctionPushDownDQL;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenSystemFunctionPushDownDQL extends TestSystemFunctionPushDownDQL {
+-  public TestGlutenSystemFunctionPushDownDQL(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenSystemFunctionPushDownDQL extends TestSystemFunctionPushDownDQL {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownInRowLevelOperations.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownInRowLevelOperations.java
+index 2eaaa6e5fe..f3d020a4a5 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownInRowLevelOperations.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/extensions/TestGlutenSystemFunctionPushDownInRowLevelOperations.java
+@@ -16,12 +16,11 @@
+  */
+ package org.apache.gluten.extensions;
+ 
+-import java.util.Map;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
++import org.apache.iceberg.spark.extensions.TestSystemFunctionPushDownInRowLevelOperations;
++import org.junit.jupiter.api.extension.ExtendWith;
++
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenSystemFunctionPushDownInRowLevelOperations
+-    extends TestGlutenSystemFunctionPushDownDQL {
+-  public TestGlutenSystemFunctionPushDownInRowLevelOperations(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++    extends TestSystemFunctionPushDownInRowLevelOperations {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestDataFrameWrites.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestDataFrameWrites.java
+index 678cec58d9..a9ae2a26f0 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestDataFrameWrites.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestDataFrameWrites.java
+@@ -16,6 +16,7 @@
+  */
+ package org.apache.gluten.source;
+ 
++import org.apache.avro.generic.GenericData.Record;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.iceberg.*;
+ import org.apache.iceberg.avro.Avro;
+@@ -24,13 +25,12 @@ import org.apache.iceberg.hadoop.HadoopTables;
+ import org.apache.iceberg.io.FileAppender;
+ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData.Record;
+ import org.apache.iceberg.spark.SparkSQLProperties;
+ import org.apache.iceberg.spark.SparkSchemaUtil;
+ import org.apache.iceberg.spark.SparkWriteOptions;
+ import org.apache.iceberg.spark.data.AvroDataTest;
+ import org.apache.iceberg.spark.data.RandomData;
+-import org.apache.iceberg.spark.data.SparkAvroReader;
++import org.apache.iceberg.spark.data.SparkPlannedAvroReader;
+ import org.apache.iceberg.types.Types;
+ import org.apache.spark.SparkException;
+ import org.apache.spark.TaskContext;
+@@ -226,8 +226,7 @@ public class TestDataFrameWrites extends AvroDataTest {
+   }
+ 
+   private Dataset<Row> createDataset(Iterable<Record> records, Schema schema) throws IOException {
+-    // this uses the SparkAvroReader to create a DataFrame from the list of records
+-    // it assumes that SparkAvroReader is correct
++    // Use Iceberg's resolving reader to create Spark rows from the Avro records.
+     File testFile = temp.newFile();
+     Assert.assertTrue("Delete should succeed", testFile.delete());
+ 
+@@ -242,7 +241,7 @@ public class TestDataFrameWrites extends AvroDataTest {
+     List<InternalRow> rows = Lists.newArrayList();
+     try (AvroIterable<InternalRow> reader =
+         Avro.read(Files.localInput(testFile))
+-            .createReaderFunc(SparkAvroReader::new)
++            .createResolvingReader(SparkPlannedAvroReader::create)
+             .project(schema)
+             .build()) {
+ 
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestForwardCompatibility.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestForwardCompatibility.java
+index 3913ff4d61..b6bd64ce66 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestForwardCompatibility.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestForwardCompatibility.java
+@@ -18,6 +18,7 @@ package org.apache.gluten.source;
+ 
+ import org.apache.gluten.TestConfUtil;
+ 
++import org.apache.avro.generic.GenericData;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.iceberg.*;
+ import org.apache.iceberg.hadoop.HadoopTables;
+@@ -25,7 +26,6 @@ import org.apache.iceberg.io.FileAppender;
+ import org.apache.iceberg.io.OutputFile;
+ import org.apache.iceberg.parquet.Parquet;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData;
+ import org.apache.iceberg.spark.data.RandomData;
+ import org.apache.iceberg.spark.data.TestHelpers;
+ import org.apache.iceberg.spark.source.SimpleRecord;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2.java
+index b66015515d..ffc94d3102 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2.java
+@@ -16,6 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestDataFrameWriterV2;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenDataFrameWriterV2 extends TestDataFrameWriterV2 {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2Coercion.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2Coercion.java
+index f40b98bf18..46ddf3e8dd 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2Coercion.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataFrameWriterV2Coercion.java
+@@ -16,11 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
+-import org.apache.iceberg.FileFormat;
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestDataFrameWriterV2Coercion;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenDataFrameWriterV2Coercion extends TestDataFrameWriterV2Coercion {
+-  public TestGlutenDataFrameWriterV2Coercion(FileFormat format, String dataType) {
+-    super(format, dataType);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenDataFrameWriterV2Coercion extends TestDataFrameWriterV2Coercion {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataSourceOptions.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataSourceOptions.java
+index 11c2ecfe71..536148f393 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataSourceOptions.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenDataSourceOptions.java
+@@ -16,6 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestDataSourceOptions;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenDataSourceOptions extends TestDataSourceOptions {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIcebergSourceHiveTables.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIcebergSourceHiveTables.java
+index c3e921e324..57fb89ec36 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIcebergSourceHiveTables.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIcebergSourceHiveTables.java
+@@ -16,7 +16,11 @@
+  */
+ package org.apache.gluten.source;
+ 
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestIcebergSourceHiveTables;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+ // Fallback all the table scan because source table is metadata table with format avro.
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenIcebergSourceHiveTables extends TestIcebergSourceHiveTables {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIdentityPartitionData.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIdentityPartitionData.java
+index 506f8a5226..993552adad 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIdentityPartitionData.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenIdentityPartitionData.java
+@@ -16,12 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
+-import org.apache.iceberg.PlanningMode;
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestIdentityPartitionData;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenIdentityPartitionData extends TestIdentityPartitionData {
+-  public TestGlutenIdentityPartitionData(
+-      String format, boolean vectorized, PlanningMode planningMode) {
+-    super(format, vectorized, planningMode);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenIdentityPartitionData extends TestIdentityPartitionData {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenPositionDeletesTable.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenPositionDeletesTable.java
+index 02d348544d..acb309d467 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenPositionDeletesTable.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenPositionDeletesTable.java
+@@ -16,14 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
+-import org.apache.iceberg.FileFormat;
+-import org.apache.iceberg.spark.source.TestPositionDeletesTable;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.source.TestPositionDeletesTable;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenPositionDeletesTable extends TestPositionDeletesTable {
+-  public TestGlutenPositionDeletesTable(
+-      String catalogName, String implementation, Map<String, String> config, FileFormat format) {
+-    super(catalogName, implementation, config, format);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenPositionDeletesTable extends TestPositionDeletesTable {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenRuntimeFiltering.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenRuntimeFiltering.java
+index 90e3828991..cf012366fe 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenRuntimeFiltering.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenRuntimeFiltering.java
+@@ -16,11 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
+-import org.apache.iceberg.PlanningMode;
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestRuntimeFiltering;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenRuntimeFiltering extends TestRuntimeFiltering {
+-  public TestGlutenRuntimeFiltering(PlanningMode planningMode) {
+-    super(planningMode);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenRuntimeFiltering extends TestRuntimeFiltering {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkMetadataColumns.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkMetadataColumns.java
+index 8e49b5876b..77757dfad9 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkMetadataColumns.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkMetadataColumns.java
+@@ -16,12 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
+-import org.apache.iceberg.FileFormat;
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.source.TestSparkMetadataColumns;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenSparkMetadataColumns extends TestSparkMetadataColumns {
+-  public TestGlutenSparkMetadataColumns(
+-      FileFormat fileFormat, boolean vectorized, int formatVersion) {
+-    super(fileFormat, vectorized, formatVersion);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenSparkMetadataColumns extends TestSparkMetadataColumns {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkStagedScan.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkStagedScan.java
+index 09a6583320..2a1fa46dfc 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkStagedScan.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestGlutenSparkStagedScan.java
+@@ -16,13 +16,10 @@
+  */
+ package org.apache.gluten.source;
+ 
+-import org.apache.iceberg.spark.source.TestSparkStagedScan;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.source.TestSparkStagedScan;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenSparkStagedScan extends TestSparkStagedScan {
+-  public TestGlutenSparkStagedScan(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenSparkStagedScan extends TestSparkStagedScan {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestParquetScan.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestParquetScan.java
+index ef1e3becc0..6aaf6cc60a 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestParquetScan.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestParquetScan.java
+@@ -18,6 +18,7 @@ package org.apache.gluten.source;
+ 
+ import org.apache.gluten.TestConfUtil;
+ 
++import org.apache.avro.generic.GenericData;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.iceberg.*;
+ import org.apache.iceberg.hadoop.HadoopTables;
+@@ -25,7 +26,6 @@ import org.apache.iceberg.io.FileAppender;
+ import org.apache.iceberg.parquet.Parquet;
+ import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData;
+ import org.apache.iceberg.spark.data.AvroDataTest;
+ import org.apache.iceberg.spark.data.RandomData;
+ import org.apache.iceberg.types.TypeUtil;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionPruning.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionPruning.java
+index ceb5799db7..d8b2af3424 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionPruning.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionPruning.java
+@@ -31,7 +31,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+ import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+ import org.apache.iceberg.spark.SparkReadOptions;
+ import org.apache.iceberg.spark.SparkSchemaUtil;
+-import org.apache.iceberg.spark.source.LogMessage;
++import org.apache.iceberg.spark.source.GlutenLogMessage;
+ import org.apache.iceberg.transforms.Transforms;
+ import org.apache.iceberg.types.Types;
+ import org.apache.spark.api.java.JavaRDD;
+@@ -140,18 +140,18 @@ public class TestPartitionPruning {
+           Types.NestedField.optional(4, "message", Types.StringType.get()),
+           Types.NestedField.optional(5, "timestamp", Types.TimestampType.withZone()));
+ 
+-  private static final List<LogMessage> LOGS =
++  private static final List<GlutenLogMessage> LOGS =
+       ImmutableList.of(
+-          LogMessage.debug("2020-02-02", "debug event 1", getInstant("2020-02-02T00:00:00")),
+-          LogMessage.info("2020-02-02", "info event 1", getInstant("2020-02-02T01:00:00")),
+-          LogMessage.debug("2020-02-02", "debug event 2", getInstant("2020-02-02T02:00:00")),
+-          LogMessage.info("2020-02-03", "info event 2", getInstant("2020-02-03T00:00:00")),
+-          LogMessage.debug("2020-02-03", "debug event 3", getInstant("2020-02-03T01:00:00")),
+-          LogMessage.info("2020-02-03", "info event 3", getInstant("2020-02-03T02:00:00")),
+-          LogMessage.error("2020-02-03", "error event 1", getInstant("2020-02-03T03:00:00")),
+-          LogMessage.debug("2020-02-04", "debug event 4", getInstant("2020-02-04T01:00:00")),
+-          LogMessage.warn("2020-02-04", "warn event 1", getInstant("2020-02-04T02:00:00")),
+-          LogMessage.debug("2020-02-04", "debug event 5", getInstant("2020-02-04T03:00:00")));
++          GlutenLogMessage.debug("2020-02-02", "debug event 1", getInstant("2020-02-02T00:00:00")),
++          GlutenLogMessage.info("2020-02-02", "info event 1", getInstant("2020-02-02T01:00:00")),
++          GlutenLogMessage.debug("2020-02-02", "debug event 2", getInstant("2020-02-02T02:00:00")),
++          GlutenLogMessage.info("2020-02-03", "info event 2", getInstant("2020-02-03T00:00:00")),
++          GlutenLogMessage.debug("2020-02-03", "debug event 3", getInstant("2020-02-03T01:00:00")),
++          GlutenLogMessage.info("2020-02-03", "info event 3", getInstant("2020-02-03T02:00:00")),
++          GlutenLogMessage.error("2020-02-03", "error event 1", getInstant("2020-02-03T03:00:00")),
++          GlutenLogMessage.debug("2020-02-04", "debug event 4", getInstant("2020-02-04T01:00:00")),
++          GlutenLogMessage.warn("2020-02-04", "warn event 1", getInstant("2020-02-04T02:00:00")),
++          GlutenLogMessage.debug("2020-02-04", "debug event 5", getInstant("2020-02-04T03:00:00")));
+ 
+   private static Instant getInstant(String timestampWithoutZone) {
+     Long epochMicros =
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionValues.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionValues.java
+index 4fb6de296b..db07d68bdb 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionValues.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/source/TestPartitionValues.java
+@@ -18,12 +18,12 @@ package org.apache.gluten.source;
+ 
+ import org.apache.gluten.TestConfUtil;
+ 
++import org.apache.avro.generic.GenericData;
+ import org.apache.iceberg.*;
+ import org.apache.iceberg.avro.Avro;
+ import org.apache.iceberg.hadoop.HadoopTables;
+ import org.apache.iceberg.io.FileAppender;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData;
+ import org.apache.iceberg.spark.SparkReadOptions;
+ import org.apache.iceberg.spark.SparkTestBase;
+ import org.apache.iceberg.spark.SparkWriteOptions;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenAggregatePushDown.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenAggregatePushDown.java
+index 17a578bad8..d709620a1e 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenAggregatePushDown.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenAggregatePushDown.java
+@@ -16,50 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
+-import org.apache.gluten.TestConfUtil;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import org.apache.iceberg.CatalogUtil;
+-import org.apache.iceberg.catalog.Namespace;
+-import org.apache.iceberg.exceptions.AlreadyExistsException;
+-import org.apache.iceberg.hive.HiveCatalog;
+-import org.apache.iceberg.hive.TestHiveMetastore;
+-import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+-import org.apache.iceberg.spark.SparkTestBase;
+ import org.apache.iceberg.spark.sql.TestAggregatePushDown;
+-import org.apache.spark.sql.SparkSession;
+-import org.junit.BeforeClass;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-import java.util.Map;
+-
+-public class TestGlutenAggregatePushDown extends TestAggregatePushDown {
+-  public TestGlutenAggregatePushDown(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-
+-  @BeforeClass
+-  public static void startMetastoreAndSpark() {
+-    SparkTestBase.metastore = new TestHiveMetastore();
+-    metastore.start();
+-    SparkTestBase.hiveConf = metastore.hiveConf();
+-
+-    SparkTestBase.spark =
+-        SparkSession.builder()
+-            .master("local[2]")
+-            .config("spark.sql.iceberg.aggregate_pushdown", "true")
+-            .config(TestConfUtil.GLUTEN_CONF)
+-            .enableHiveSupport()
+-            .getOrCreate();
+-
+-    SparkTestBase.catalog =
+-        (HiveCatalog)
+-            CatalogUtil.loadCatalog(
+-                HiveCatalog.class.getName(), "hive", ImmutableMap.of(), hiveConf);
+-
+-    try {
+-      catalog.createNamespace(Namespace.of("default"));
+-    } catch (AlreadyExistsException ignored) {
+-      // the default namespace already exists. ignore the create error
+-    }
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenAggregatePushDown extends TestAggregatePushDown {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenDeleteFrom.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenDeleteFrom.java
+index f52f0ddb8a..69adbe5f0b 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenDeleteFrom.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenDeleteFrom.java
+@@ -16,13 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
+-import org.apache.iceberg.spark.sql.TestDeleteFrom;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.sql.TestDeleteFrom;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenDeleteFrom extends TestDeleteFrom {
+-  public TestGlutenDeleteFrom(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenDeleteFrom extends TestDeleteFrom {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesAsSelect.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesAsSelect.java
+index 52221d6e85..ea6d1af09d 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesAsSelect.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesAsSelect.java
+@@ -16,6 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
++import org.apache.gluten.GlutenIcebergTestExtension;
++
+ import org.apache.iceberg.spark.sql.TestPartitionedWritesAsSelect;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
++@ExtendWith(GlutenIcebergTestExtension.class)
+ public class TestGlutenPartitionedWritesAsSelect extends TestPartitionedWritesAsSelect {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToBranch.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToBranch.java
+index 6711a7fd22..d3d1836333 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToBranch.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToBranch.java
+@@ -16,13 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
+-import org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenPartitionedWritesToBranch extends TestPartitionedWritesToBranch {
+-  public TestGlutenPartitionedWritesToBranch(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenPartitionedWritesToBranch extends TestPartitionedWritesToBranch {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToWapBranch.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToWapBranch.java
+index 935ca6872e..332c0f9b0a 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToWapBranch.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenPartitionedWritesToWapBranch.java
+@@ -16,13 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
+-import org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenPartitionedWritesToWapBranch extends TestPartitionedWritesToWapBranch {
+-  public TestGlutenPartitionedWritesToWapBranch(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenPartitionedWritesToWapBranch extends TestPartitionedWritesToWapBranch {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenSelect.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenSelect.java
+index eff29920df..1a46bfec64 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenSelect.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenSelect.java
+@@ -16,12 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
+-import org.apache.iceberg.spark.sql.TestSelect;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.sql.TestSelect;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenSelect extends TestSelect {
+-  public TestGlutenSelect(String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenSelect extends TestSelect {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenTimestampWithoutZone.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenTimestampWithoutZone.java
+index af83dafd1d..7a2f95e89b 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenTimestampWithoutZone.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/gluten/sql/TestGlutenTimestampWithoutZone.java
+@@ -16,13 +16,10 @@
+  */
+ package org.apache.gluten.sql;
+ 
+-import org.apache.iceberg.spark.sql.TestTimestampWithoutZone;
++import org.apache.gluten.GlutenIcebergTestExtension;
+ 
+-import java.util.Map;
++import org.apache.iceberg.spark.sql.TestTimestampWithoutZone;
++import org.junit.jupiter.api.extension.ExtendWith;
+ 
+-public class TestGlutenTimestampWithoutZone extends TestTimestampWithoutZone {
+-  public TestGlutenTimestampWithoutZone(
+-      String catalogName, String implementation, Map<String, String> config) {
+-    super(catalogName, implementation, config);
+-  }
+-}
++@ExtendWith(GlutenIcebergTestExtension.class)
++public class TestGlutenTimestampWithoutZone extends TestTimestampWithoutZone {}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkCatalogTestBase.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkCatalogTestBase.java
+new file mode 100644
+index 0000000000..6119d0df3b
+--- /dev/null
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkCatalogTestBase.java
+@@ -0,0 +1,61 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.iceberg.spark;
++
++import org.junit.Rule;
++import org.junit.rules.TemporaryFolder;
++import org.junit.runner.RunWith;
++import org.junit.runners.Parameterized;
++
++import java.util.Map;
++
++@RunWith(Parameterized.class)
++public abstract class SparkCatalogTestBase extends SparkTestBaseWithCatalog {
++
++  // these parameters are broken out to avoid changes that need to modify lots of test suites
++  @Parameterized.Parameters(name = "catalogName = {0}, implementation = {1}, config = {2}")
++  public static Object[][] parameters() {
++    return new Object[][] {
++      {
++        SparkCatalogConfig.HIVE.catalogName(),
++        SparkCatalogConfig.HIVE.implementation(),
++        SparkCatalogConfig.HIVE.properties()
++      },
++      {
++        SparkCatalogConfig.HADOOP.catalogName(),
++        SparkCatalogConfig.HADOOP.implementation(),
++        SparkCatalogConfig.HADOOP.properties()
++      },
++      {
++        SparkCatalogConfig.SPARK.catalogName(),
++        SparkCatalogConfig.SPARK.implementation(),
++        SparkCatalogConfig.SPARK.properties()
++      }
++    };
++  }
++
++  @Rule public TemporaryFolder temp = new TemporaryFolder();
++
++  public SparkCatalogTestBase(SparkCatalogConfig config) {
++    super(config);
++  }
++
++  public SparkCatalogTestBase(
++      String catalogName, String implementation, Map<String, String> config) {
++    super(catalogName, implementation, config);
++  }
++}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBase.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBase.java
+index 9d82ec7b4f..617c935f0c 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBase.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBase.java
+@@ -55,7 +55,7 @@ import java.util.concurrent.TimeoutException;
+ import java.util.concurrent.atomic.AtomicReference;
+ 
+ import scala.Option;
+-import scala.collection.JavaConversions;
++import scala.collection.JavaConverters;
+ 
+ import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.METASTOREURIS;
+ 
+@@ -290,7 +290,7 @@ public abstract class SparkTestBase extends SparkTestHelperBase {
+         () -> {
+           Option<String> msg =
+               QueryTest.getErrorMessageInCheckAnswer(
+-                  df, JavaConversions.asScalaBuffer(rows).toSeq(), true);
++                  df, JavaConverters.asScalaBufferConverter(rows).asScala().toSeq(), true);
+           if (msg.isDefined()) {
+             throw new RuntimeException(msg.get());
+           }
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBaseWithCatalog.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBaseWithCatalog.java
+new file mode 100644
+index 0000000000..89b6f23687
+--- /dev/null
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/SparkTestBaseWithCatalog.java
+@@ -0,0 +1,129 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.iceberg.spark;
++
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.fs.Path;
++import org.apache.iceberg.CatalogProperties;
++import org.apache.iceberg.PlanningMode;
++import org.apache.iceberg.TableProperties;
++import org.apache.iceberg.catalog.Catalog;
++import org.apache.iceberg.catalog.Namespace;
++import org.apache.iceberg.catalog.SupportsNamespaces;
++import org.apache.iceberg.catalog.TableIdentifier;
++import org.apache.iceberg.hadoop.HadoopCatalog;
++import org.apache.iceberg.util.PropertyUtil;
++import org.junit.AfterClass;
++import org.junit.Assert;
++import org.junit.BeforeClass;
++import org.junit.Rule;
++import org.junit.rules.TemporaryFolder;
++
++import java.io.File;
++import java.io.IOException;
++import java.util.Map;
++
++public abstract class SparkTestBaseWithCatalog extends SparkTestBase {
++  protected static File warehouse = null;
++
++  @BeforeClass
++  public static void createWarehouse() throws IOException {
++    SparkTestBaseWithCatalog.warehouse = File.createTempFile("warehouse", null);
++    Assert.assertTrue(warehouse.delete());
++  }
++
++  @AfterClass
++  public static void dropWarehouse() throws IOException {
++    if (warehouse != null && warehouse.exists()) {
++      Path warehousePath = new Path(warehouse.getAbsolutePath());
++      FileSystem fs = warehousePath.getFileSystem(hiveConf);
++      Assert.assertTrue("Failed to delete " + warehousePath, fs.delete(warehousePath, true));
++    }
++  }
++
++  @Rule public TemporaryFolder temp = new TemporaryFolder();
++
++  protected final String catalogName;
++  protected final Map<String, String> catalogConfig;
++  protected final Catalog validationCatalog;
++  protected final SupportsNamespaces validationNamespaceCatalog;
++  protected final TableIdentifier tableIdent = TableIdentifier.of(Namespace.of("default"), "table");
++  protected final String tableName;
++
++  public SparkTestBaseWithCatalog() {
++    this(SparkCatalogConfig.HADOOP);
++  }
++
++  public SparkTestBaseWithCatalog(SparkCatalogConfig config) {
++    this(config.catalogName(), config.implementation(), config.properties());
++  }
++
++  public SparkTestBaseWithCatalog(
++      String catalogName, String implementation, Map<String, String> config) {
++    this.catalogName = catalogName;
++    this.catalogConfig = config;
++    this.validationCatalog =
++        catalogName.equals("testhadoop")
++            ? new HadoopCatalog(spark.sessionState().newHadoopConf(), "file:" + warehouse)
++            : catalog;
++    this.validationNamespaceCatalog = (SupportsNamespaces) validationCatalog;
++
++    spark.conf().set("spark.sql.catalog." + catalogName, implementation);
++    config.forEach(
++        (key, value) -> spark.conf().set("spark.sql.catalog." + catalogName + "." + key, value));
++
++    if ("hadoop".equalsIgnoreCase(config.get("type"))) {
++      spark.conf().set("spark.sql.catalog." + catalogName + ".warehouse", "file:" + warehouse);
++    }
++
++    this.tableName =
++        (catalogName.equals("spark_catalog") ? "" : catalogName + ".") + "default.table";
++
++    sql("CREATE NAMESPACE IF NOT EXISTS default");
++  }
++
++  protected String tableName(String name) {
++    return (catalogName.equals("spark_catalog") ? "" : catalogName + ".") + "default." + name;
++  }
++
++  protected String commitTarget() {
++    return tableName;
++  }
++
++  protected String selectTarget() {
++    return tableName;
++  }
++
++  protected boolean cachingCatalogEnabled() {
++    return PropertyUtil.propertyAsBoolean(
++        catalogConfig, CatalogProperties.CACHE_ENABLED, CatalogProperties.CACHE_ENABLED_DEFAULT);
++  }
++
++  protected void configurePlanningMode(PlanningMode planningMode) {
++    configurePlanningMode(tableName, planningMode);
++  }
++
++  protected void configurePlanningMode(String table, PlanningMode planningMode) {
++    sql(
++        "ALTER TABLE %s SET TBLPROPERTIES ('%s' '%s', '%s' '%s')",
++        table,
++        TableProperties.DATA_PLANNING_MODE,
++        planningMode.modeName(),
++        TableProperties.DELETE_PLANNING_MODE,
++        planningMode.modeName());
++  }
++}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/AvroDataTest.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/AvroDataTest.java
+new file mode 100644
+index 0000000000..f5194f7458
+--- /dev/null
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/AvroDataTest.java
+@@ -0,0 +1,278 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.iceberg.spark.data;
++
++import org.apache.iceberg.Schema;
++import org.apache.iceberg.relocated.com.google.common.collect.Lists;
++import org.apache.iceberg.relocated.com.google.common.collect.Maps;
++import org.apache.iceberg.types.TypeUtil;
++import org.apache.iceberg.types.Types;
++import org.apache.iceberg.types.Types.ListType;
++import org.apache.iceberg.types.Types.LongType;
++import org.apache.iceberg.types.Types.MapType;
++import org.apache.iceberg.types.Types.StructType;
++import org.apache.spark.sql.internal.SQLConf;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.TemporaryFolder;
++
++import java.io.IOException;
++import java.util.Map;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import static org.apache.iceberg.types.Types.NestedField.optional;
++import static org.apache.iceberg.types.Types.NestedField.required;
++
++public abstract class AvroDataTest {
++
++  protected abstract void writeAndValidate(Schema schema) throws IOException;
++
++  protected static final StructType SUPPORTED_PRIMITIVES =
++      StructType.of(
++          required(100, "id", LongType.get()),
++          optional(101, "data", Types.StringType.get()),
++          required(102, "b", Types.BooleanType.get()),
++          optional(103, "i", Types.IntegerType.get()),
++          required(104, "l", LongType.get()),
++          optional(105, "f", Types.FloatType.get()),
++          required(106, "d", Types.DoubleType.get()),
++          optional(107, "date", Types.DateType.get()),
++          required(108, "ts", Types.TimestampType.withZone()),
++          required(110, "s", Types.StringType.get()),
++          required(111, "uuid", Types.UUIDType.get()),
++          required(112, "fixed", Types.FixedType.ofLength(7)),
++          optional(113, "bytes", Types.BinaryType.get()),
++          required(114, "dec_9_0", Types.DecimalType.of(9, 0)), // int encoded
++          required(115, "dec_11_2", Types.DecimalType.of(11, 2)), // long encoded
++          required(116, "dec_20_5", Types.DecimalType.of(20, 5)), // requires padding
++          required(117, "dec_38_10", Types.DecimalType.of(38, 10)) // Spark's maximum precision
++          );
++
++  @Rule public TemporaryFolder temp = new TemporaryFolder();
++
++  @Test
++  public void testSimpleStruct() throws IOException {
++    writeAndValidate(TypeUtil.assignIncreasingFreshIds(new Schema(SUPPORTED_PRIMITIVES.fields())));
++  }
++
++  @Test
++  public void testStructWithRequiredFields() throws IOException {
++    writeAndValidate(
++        TypeUtil.assignIncreasingFreshIds(
++            new Schema(
++                Lists.transform(SUPPORTED_PRIMITIVES.fields(), Types.NestedField::asRequired))));
++  }
++
++  @Test
++  public void testStructWithOptionalFields() throws IOException {
++    writeAndValidate(
++        TypeUtil.assignIncreasingFreshIds(
++            new Schema(
++                Lists.transform(SUPPORTED_PRIMITIVES.fields(), Types.NestedField::asOptional))));
++  }
++
++  @Test
++  public void testNestedStruct() throws IOException {
++    writeAndValidate(
++        TypeUtil.assignIncreasingFreshIds(new Schema(required(1, "struct", SUPPORTED_PRIMITIVES))));
++  }
++
++  @Test
++  public void testArray() throws IOException {
++    Schema schema =
++        new Schema(
++            required(0, "id", LongType.get()),
++            optional(1, "data", ListType.ofOptional(2, Types.StringType.get())));
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testArrayOfStructs() throws IOException {
++    Schema schema =
++        TypeUtil.assignIncreasingFreshIds(
++            new Schema(
++                required(0, "id", LongType.get()),
++                optional(1, "data", ListType.ofOptional(2, SUPPORTED_PRIMITIVES))));
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testMap() throws IOException {
++    Schema schema =
++        new Schema(
++            required(0, "id", LongType.get()),
++            optional(
++                1,
++                "data",
++                MapType.ofOptional(2, 3, Types.StringType.get(), Types.StringType.get())));
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testNumericMapKey() throws IOException {
++    Schema schema =
++        new Schema(
++            required(0, "id", LongType.get()),
++            optional(1, "data", MapType.ofOptional(2, 3, LongType.get(), Types.StringType.get())));
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testComplexMapKey() throws IOException {
++    Schema schema =
++        new Schema(
++            required(0, "id", LongType.get()),
++            optional(
++                1,
++                "data",
++                MapType.ofOptional(
++                    2,
++                    3,
++                    StructType.of(
++                        required(4, "i", Types.IntegerType.get()),
++                        optional(5, "s", Types.StringType.get())),
++                    Types.StringType.get())));
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testMapOfStructs() throws IOException {
++    Schema schema =
++        TypeUtil.assignIncreasingFreshIds(
++            new Schema(
++                required(0, "id", LongType.get()),
++                optional(
++                    1,
++                    "data",
++                    MapType.ofOptional(2, 3, Types.StringType.get(), SUPPORTED_PRIMITIVES))));
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testMixedTypes() throws IOException {
++    StructType structType =
++        StructType.of(
++            required(0, "id", LongType.get()),
++            optional(
++                1,
++                "list_of_maps",
++                ListType.ofOptional(
++                    2, MapType.ofOptional(3, 4, Types.StringType.get(), SUPPORTED_PRIMITIVES))),
++            optional(
++                5,
++                "map_of_lists",
++                MapType.ofOptional(
++                    6, 7, Types.StringType.get(), ListType.ofOptional(8, SUPPORTED_PRIMITIVES))),
++            required(
++                9,
++                "list_of_lists",
++                ListType.ofOptional(10, ListType.ofOptional(11, SUPPORTED_PRIMITIVES))),
++            required(
++                12,
++                "map_of_maps",
++                MapType.ofOptional(
++                    13,
++                    14,
++                    Types.StringType.get(),
++                    MapType.ofOptional(15, 16, Types.StringType.get(), SUPPORTED_PRIMITIVES))),
++            required(
++                17,
++                "list_of_struct_of_nested_types",
++                ListType.ofOptional(
++                    19,
++                    StructType.of(
++                        Types.NestedField.required(
++                            20,
++                            "m1",
++                            MapType.ofOptional(
++                                21, 22, Types.StringType.get(), SUPPORTED_PRIMITIVES)),
++                        Types.NestedField.optional(
++                            23, "l1", ListType.ofRequired(24, SUPPORTED_PRIMITIVES)),
++                        Types.NestedField.required(
++                            25, "l2", ListType.ofRequired(26, SUPPORTED_PRIMITIVES)),
++                        Types.NestedField.optional(
++                            27,
++                            "m2",
++                            MapType.ofOptional(
++                                28, 29, Types.StringType.get(), SUPPORTED_PRIMITIVES))))));
++
++    Schema schema =
++        new Schema(
++            TypeUtil.assignFreshIds(structType, new AtomicInteger(0)::incrementAndGet)
++                .asStructType()
++                .fields());
++
++    writeAndValidate(schema);
++  }
++
++  @Test
++  public void testTimestampWithoutZone() throws IOException {
++    Schema schema =
++        TypeUtil.assignIncreasingFreshIds(
++            new Schema(
++                required(0, "id", LongType.get()),
++                optional(1, "ts_without_zone", Types.TimestampType.withoutZone())));
++
++    writeAndValidate(schema);
++  }
++
++  protected void withSQLConf(Map<String, String> conf, Action action) throws IOException {
++    SQLConf sqlConf = SQLConf.get();
++
++    Map<String, String> currentConfValues = Maps.newHashMap();
++    conf.keySet()
++        .forEach(
++            confKey -> {
++              if (sqlConf.contains(confKey)) {
++                String currentConfValue = sqlConf.getConfString(confKey);
++                currentConfValues.put(confKey, currentConfValue);
++              }
++            });
++
++    conf.forEach(
++        (confKey, confValue) -> {
++          if (SQLConf.isStaticConfigKey(confKey)) {
++            throw new RuntimeException("Cannot modify the value of a static config: " + confKey);
++          }
++          sqlConf.setConfString(confKey, confValue);
++        });
++
++    try {
++      action.invoke();
++    } finally {
++      conf.forEach(
++          (confKey, confValue) -> {
++            if (currentConfValues.containsKey(confKey)) {
++              sqlConf.setConfString(confKey, currentConfValues.get(confKey));
++            } else {
++              sqlConf.unsetConf(confKey);
++            }
++          });
++    }
++  }
++
++  @FunctionalInterface
++  protected interface Action {
++    void invoke() throws IOException;
++  }
++}
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/RandomData.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/RandomData.java
+index 2a7ed0c19a..ddd19a5f71 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/RandomData.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/RandomData.java
+@@ -16,14 +16,14 @@
+  */
+ package org.apache.iceberg.spark.data;
+ 
++import org.apache.avro.generic.GenericData;
++import org.apache.avro.generic.GenericData.Record;
+ import org.apache.iceberg.Schema;
+ import org.apache.iceberg.avro.AvroSchemaUtil;
+ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+ import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData.Record;
+ import org.apache.iceberg.types.Type;
+ import org.apache.iceberg.types.TypeUtil;
+ import org.apache.iceberg.types.Types;
+@@ -127,7 +127,7 @@ public class RandomData {
+   }
+ 
+   private static class RandomDataGenerator extends TypeUtil.CustomOrderSchemaVisitor<Object> {
+-    private final Map<Type, org.apache.iceberg.shaded.org.apache.avro.Schema> typeToSchema;
++    private final Map<Type, org.apache.avro.Schema> typeToSchema;
+     private final Random random;
+     // Percentage of number of values that are null for optional fields
+     private final float nullPercentage;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/TestHelpers.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/TestHelpers.java
+index dcc7d91d7d..e2812f3c8f 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/TestHelpers.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/data/TestHelpers.java
+@@ -16,13 +16,13 @@
+  */
+ package org.apache.iceberg.spark.data;
+ 
++import org.apache.avro.generic.GenericData;
++import org.apache.avro.generic.GenericData.Record;
+ import org.apache.iceberg.*;
+ import org.apache.iceberg.io.CloseableIterable;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+ import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+ import org.apache.iceberg.relocated.com.google.common.collect.Streams;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData.Record;
+ import org.apache.iceberg.spark.SparkSchemaUtil;
+ import org.apache.iceberg.types.Type;
+ import org.apache.iceberg.types.Types;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/LogMessage.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/GlutenLogMessage.java
+similarity index 56%
+rename from backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/LogMessage.java
+rename to backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/GlutenLogMessage.java
+index 73f76d1bb6..b6ffc0d52c 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/LogMessage.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/GlutenLogMessage.java
+@@ -20,39 +20,39 @@ import java.time.Instant;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ // Change the functions from private to public.
+-public class LogMessage {
++public class GlutenLogMessage {
+   private static final AtomicInteger ID_COUNTER = new AtomicInteger(0);
+ 
+-  public static LogMessage debug(String date, String message) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "DEBUG", message);
++  public static GlutenLogMessage debug(String date, String message) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "DEBUG", message);
+   }
+ 
+-  public static LogMessage debug(String date, String message, Instant timestamp) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "DEBUG", message, timestamp);
++  public static GlutenLogMessage debug(String date, String message, Instant timestamp) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "DEBUG", message, timestamp);
+   }
+ 
+-  public static LogMessage info(String date, String message) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "INFO", message);
++  public static GlutenLogMessage info(String date, String message) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "INFO", message);
+   }
+ 
+-  public static LogMessage info(String date, String message, Instant timestamp) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "INFO", message, timestamp);
++  public static GlutenLogMessage info(String date, String message, Instant timestamp) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "INFO", message, timestamp);
+   }
+ 
+-  public static LogMessage error(String date, String message) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "ERROR", message);
++  public static GlutenLogMessage error(String date, String message) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "ERROR", message);
+   }
+ 
+-  public static LogMessage error(String date, String message, Instant timestamp) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "ERROR", message, timestamp);
++  public static GlutenLogMessage error(String date, String message, Instant timestamp) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "ERROR", message, timestamp);
+   }
+ 
+-  public static LogMessage warn(String date, String message) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "WARN", message);
++  public static GlutenLogMessage warn(String date, String message) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "WARN", message);
+   }
+ 
+-  public static LogMessage warn(String date, String message, Instant timestamp) {
+-    return new LogMessage(ID_COUNTER.getAndIncrement(), date, "WARN", message, timestamp);
++  public static GlutenLogMessage warn(String date, String message, Instant timestamp) {
++    return new GlutenLogMessage(ID_COUNTER.getAndIncrement(), date, "WARN", message, timestamp);
+   }
+ 
+   private int id;
+@@ -61,14 +61,14 @@ public class LogMessage {
+   private String message;
+   private Instant timestamp;
+ 
+-  private LogMessage(int id, String date, String level, String message) {
++  private GlutenLogMessage(int id, String date, String level, String message) {
+     this.id = id;
+     this.date = date;
+     this.level = level;
+     this.message = message;
+   }
+ 
+-  private LogMessage(int id, String date, String level, String message, Instant timestamp) {
++  private GlutenLogMessage(int id, String date, String level, String message, Instant timestamp) {
+     this.id = id;
+     this.date = date;
+     this.level = level;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestIcebergSourceTablesBase.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestIcebergSourceTablesBase.java
+index b05fd3b502..5709df501f 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestIcebergSourceTablesBase.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestIcebergSourceTablesBase.java
+@@ -16,6 +16,8 @@
+  */
+ package org.apache.iceberg.spark.source;
+ 
++import org.apache.avro.generic.GenericData;
++import org.apache.avro.generic.GenericRecordBuilder;
+ import org.apache.iceberg.*;
+ import org.apache.iceberg.actions.DeleteOrphanFiles;
+ import org.apache.iceberg.actions.RewriteManifests;
+@@ -39,8 +41,6 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+ import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericData;
+-import org.apache.iceberg.shaded.org.apache.avro.generic.GenericRecordBuilder;
+ import org.apache.iceberg.spark.*;
+ import org.apache.iceberg.spark.actions.SparkActions;
+ import org.apache.iceberg.spark.data.TestHelpers;
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReadProjection.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReadProjection.java
+index da6e83f6f6..4021b2d01b 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReadProjection.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReadProjection.java
+@@ -19,6 +19,8 @@ package org.apache.iceberg.spark.source;
+ import org.apache.gluten.TestConfUtil;
+ 
+ import org.apache.iceberg.*;
++import org.apache.iceberg.Parameter;
++import org.apache.iceberg.Parameters;
+ import org.apache.iceberg.data.GenericAppenderFactory;
+ import org.apache.iceberg.data.Record;
+ import org.apache.iceberg.io.FileAppender;
+@@ -33,11 +35,9 @@ import org.apache.iceberg.types.Types;
+ import org.apache.spark.sql.Dataset;
+ import org.apache.spark.sql.Row;
+ import org.apache.spark.sql.SparkSession;
+-import org.junit.AfterClass;
+ import org.junit.Assert;
+-import org.junit.BeforeClass;
+-import org.junit.runner.RunWith;
+-import org.junit.runners.Parameterized;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
+ 
+ import java.io.File;
+ import java.io.IOException;
+@@ -51,34 +51,28 @@ import static org.apache.iceberg.PlanningMode.LOCAL;
+ import static org.apache.iceberg.types.Types.NestedField.optional;
+ import static org.apache.iceberg.types.Types.NestedField.required;
+ 
+-@RunWith(Parameterized.class)
+ public class TestSparkReadProjection extends TestReadProjection {
+ 
+   private static SparkSession spark = null;
+ 
+-  @Parameterized.Parameters(name = "format = {0}, vectorized = {1}, planningMode = {2}")
++  @Parameters(name = "format = {0}, vectorized = {1}, planningMode = {2}")
+   public static Object[][] parameters() {
+     return new Object[][] {
+-      {"parquet", false, LOCAL},
+-      {"parquet", true, DISTRIBUTED},
+-      {"avro", false, LOCAL},
+-      {"orc", false, DISTRIBUTED},
+-      {"orc", true, LOCAL}
++      {FileFormat.PARQUET, false, LOCAL},
++      {FileFormat.PARQUET, true, DISTRIBUTED},
++      {FileFormat.AVRO, false, LOCAL},
++      {FileFormat.ORC, false, DISTRIBUTED},
++      {FileFormat.ORC, true, LOCAL}
+     };
+   }
+ 
+-  private final FileFormat format;
+-  private final boolean vectorized;
+-  private final PlanningMode planningMode;
++  @Parameter(index = 1)
++  private boolean vectorized;
+ 
+-  public TestSparkReadProjection(String format, boolean vectorized, PlanningMode planningMode) {
+-    super(format);
+-    this.format = FileFormat.fromString(format);
+-    this.vectorized = vectorized;
+-    this.planningMode = planningMode;
+-  }
++  @Parameter(index = 2)
++  private PlanningMode planningMode;
+ 
+-  @BeforeClass
++  @BeforeAll
+   public static void startSpark() {
+     TestSparkReadProjection.spark =
+         SparkSession.builder().master("local[2]").config(TestConfUtil.GLUTEN_CONF).getOrCreate();
+@@ -95,7 +89,7 @@ public class TestSparkReadProjection extends TestReadProjection {
+         (key, value) -> spark.conf().set("spark.sql.catalog.spark_catalog." + key, value));
+   }
+ 
+-  @AfterClass
++  @AfterAll
+   public static void stopSpark() {
+     SparkSession currentSpark = TestSparkReadProjection.spark;
+     TestSparkReadProjection.spark = null;
+@@ -105,7 +99,7 @@ public class TestSparkReadProjection extends TestReadProjection {
+   @Override
+   protected Record writeAndRead(String desc, Schema writeSchema, Schema readSchema, Record record)
+       throws IOException {
+-    File parent = temp.newFolder(desc);
++    File parent = java.nio.file.Files.createTempDirectory(temp, desc).toFile();
+     File location = new File(parent, "test");
+     File dataFolder = new File(location, "data");
+     Assert.assertTrue("mkdirs should succeed", dataFolder.mkdirs());
+@@ -150,8 +144,7 @@ public class TestSparkReadProjection extends TestReadProjection {
+       Schema expectedSchema = reassignIds(readSchema, idMapping);
+ 
+       // Set the schema to the expected schema directly to simulate the table schema evolving
+-      TestTables.replaceMetadata(
+-          desc, TestTables.readMetadata(desc).updateSchema(expectedSchema, 100));
++      TestTables.replaceMetadata(desc, TestTables.readMetadata(desc).updateSchema(expectedSchema));
+ 
+       Dataset<Row> df =
+           spark
+diff --git a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReaderDeletes.java b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReaderDeletes.java
+index d58f603298..86e855c0f8 100644
+--- a/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReaderDeletes.java
++++ b/backends-bolt/src-iceberg-spark34/test/java/org/apache/iceberg/spark/source/TestSparkReaderDeletes.java
+@@ -37,8 +37,6 @@ import org.apache.iceberg.parquet.ParquetSchemaUtil;
+ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+ import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+-import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileWriter;
+-import org.apache.iceberg.shaded.org.apache.parquet.hadoop.util.HadoopInputFile;
+ import org.apache.iceberg.spark.SparkSchemaUtil;
+ import org.apache.iceberg.spark.SparkStructLike;
+ import org.apache.iceberg.spark.data.RandomData;
+@@ -46,6 +44,8 @@ import org.apache.iceberg.spark.data.SparkParquetWriters;
+ import org.apache.iceberg.spark.source.metrics.NumDeletes;
+ import org.apache.iceberg.types.Types;
+ import org.apache.iceberg.util.*;
++import org.apache.parquet.hadoop.ParquetFileWriter;
++import org.apache.parquet.hadoop.util.HadoopInputFile;
+ import org.apache.spark.sql.Dataset;
+ import org.apache.spark.sql.Row;
+ import org.apache.spark.sql.SparkSession;
+@@ -77,19 +77,19 @@ public class TestSparkReaderDeletes extends DeleteReadTests {
+   protected static SparkSession spark = null;
+   protected static HiveCatalog catalog = null;
+ 
+-  @Parameter(index = 1)
++  @Parameter(index = 2)
+   private boolean vectorized;
+ 
+-  @Parameter(index = 2)
++  @Parameter(index = 3)
+   private PlanningMode planningMode;
+ 
+-  @Parameters(name = "format = {0}, vectorized = {1}, planningMode = {2}")
++  @Parameters(name = "format = {0}, formatVersion = {1}, vectorized = {2}, planningMode = {3}")
+   public static Object[][] parameters() {
+     return new Object[][] {
+-      new Object[] {FileFormat.PARQUET, false, PlanningMode.DISTRIBUTED},
+-      new Object[] {FileFormat.PARQUET, true, PlanningMode.LOCAL},
+-      new Object[] {FileFormat.ORC, false, PlanningMode.DISTRIBUTED},
+-      new Object[] {FileFormat.AVRO, false, PlanningMode.LOCAL}
++      new Object[] {FileFormat.PARQUET, 2, false, PlanningMode.DISTRIBUTED},
++      new Object[] {FileFormat.PARQUET, 2, true, PlanningMode.LOCAL},
++      new Object[] {FileFormat.ORC, 2, false, PlanningMode.DISTRIBUTED},
++      new Object[] {FileFormat.AVRO, 2, false, PlanningMode.LOCAL}
+     };
+   }
+ 
+@@ -299,7 +299,7 @@ public class TestSparkReaderDeletes extends DeleteReadTests {
+ 
+     for (CombinedScanTask task : tasks) {
+       try (EqualityDeleteRowReader reader =
+-          new EqualityDeleteRowReader(task, table, null, table.schema(), false)) {
++          new EqualityDeleteRowReader(task, table, null, table.schema(), false, false)) {
+         while (reader.next()) {
+           actualRowSet.add(
+               new InternalRowWrapper(
+@@ -557,7 +557,7 @@ public class TestSparkReaderDeletes extends DeleteReadTests {
+ 
+   @TestTemplate
+   public void testPosDeletesOnParquetFileWithMultipleRowGroups() throws IOException {
+-    assumeThat(format).isEqualTo("parquet");
++    assumeThat(format).isEqualTo(FileFormat.PARQUET);
+ 
+     String tblName = "test3";
+     Table tbl = createTable(tblName, SCHEMA, PartitionSpec.unpartitioned());

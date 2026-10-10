@@ -1,0 +1,243 @@
+# Copyright (c) ByteDance Ltd. and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Gluten Bolt Backend
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gluten-bolt-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      inputs_artifact: gluten-bolt-inputs-${{ github.sha }}-${{ github.run_attempt }}
+      gluten_repository: ${{ steps.inputs.outputs.gluten_repository }}
+      gluten_sha: ${{ steps.inputs.outputs.gluten_sha }}
+      image: ${{ steps.inputs.outputs.image }}
+      conan_image: ${{ steps.inputs.outputs.conan_image }}
+      runner: ${{ steps.inputs.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Validate CI failure semantics
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_gluten_ci*.py'
+      - name: Resolve source and execution inputs
+        id: inputs
+        env:
+          BOLT_GLUTEN_CI_IMAGE: ${{ vars.BOLT_GLUTEN_CI_IMAGE }}
+          BOLT_GLUTEN_CI_CONAN_IMAGE: ${{ vars.BOLT_GLUTEN_CI_CONAN_IMAGE }}
+          BOLT_GLUTEN_CI_RUNNER: ${{ vars.BOLT_GLUTEN_CI_RUNNER }}
+        run: python3 .github/scripts/gluten_ci.py prepare
+      - name: Save inputs and configuration errors
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gluten-bolt-inputs-${{ github.sha }}-${{ github.run_attempt }}
+          path: .ci/gluten-bolt/
+          if-no-files-found: error
+          retention-days: 14
+
+  compatibility:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spark: '3.4'
+            module: spark34
+            scala: '2.13'
+          - spark: '3.5'
+            module: spark35
+            scala: '2.12'
+          - spark: '4.0'
+            module: spark40
+            scala: '2.13'
+          - spark: '4.1'
+            module: spark41
+            scala: '2.13'
+    steps:
+      - name: Checkout the tested Bolt merge commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Checkout resolved Apache Gluten main
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.prepare.outputs.gluten_repository }}
+          ref: ${{ needs.prepare.outputs.gluten_sha }}
+          path: gluten
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.inputs_artifact }}
+          path: .ci/gluten-bolt/
+      - name: Apply declared Gluten compatibility patches
+        run: python3 .github/scripts/gluten_ci.py patch
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: gluten/**/pom.xml
+      - name: Compile Bolt backend, Delta and Spark UT support
+        working-directory: gluten
+        env:
+          SPARK_PROFILE: ${{ matrix.spark }}
+          SPARK_MODULE: ${{ matrix.module }}
+          SCALA_PROFILE: ${{ matrix.scala }}
+        run: |
+          set -o pipefail
+          storage_profiles=()
+          if [[ "${SPARK_PROFILE}" == "3.4" ]]; then
+            storage_profiles=(-Piceberg -Piceberg-test)
+          fi
+          ./build/mvn install -Pbackends-bolt -Pdelta -Pspark-ut -Pfast-build \
+            "-Pspark-${SPARK_PROFILE}" "-Pscala-${SCALA_PROFILE}" -Pjava-17 \
+            "${storage_profiles[@]}" \
+            -Dmaven.compiler.release=17 -DskipTests=true \
+            -Dmaven.test.skip=false -Dmaven.test.failure.ignore=false \
+            -pl "backends-bolt,gluten-ut/${SPARK_MODULE}" -am 2>&1 | tee compatibility.log
+      - name: Preserve compatibility compiler output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gluten-bolt-compile-${{ matrix.spark }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            gluten/compatibility.log
+            .ci/gluten-bolt/
+          if-no-files-found: error
+          retention-days: 14
+
+  integration:
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
+    timeout-minutes: 1440
+    container:
+      image: ${{ needs.prepare.outputs.image }}
+      options: --user root --init
+    services:
+      conanserver:
+        # Each CI host builds its own registry images; digest overrides must be
+        # published to every selected runner's registry.
+        image: ${{ needs.prepare.outputs.conan_image }}
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    env:
+      # Defaults to the existing Bolt CI image; resource checks run in the helper.
+      CI_NUM_THREADS: '16'
+      IN_CI: '1'
+    steps:
+      - name: Locate Conan cache in the container workspace
+        run: echo "CONAN_HOME=${GITHUB_WORKSPACE}/.ci/conan" >> "$GITHUB_ENV"
+      - name: Checkout the tested Bolt merge commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Checkout resolved Apache Gluten main
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.prepare.outputs.gluten_repository }}
+          ref: ${{ needs.prepare.outputs.gluten_sha }}
+          path: gluten
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.inputs_artifact }}
+          path: .ci/gluten-bolt/
+      - name: Apply declared Gluten compatibility patches
+        run: python3 .github/scripts/gluten_ci.py patch
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Provision Gluten Spark test environment
+        run: python3 .github/scripts/setup_gluten_ci_environment.py
+      - name: Configure Conan and Bolt dependencies
+        run: |
+          conan profile detect
+          profile_path="$(conan profile path default)"
+          cat >> "$profile_path" <<'EOF'
+
+          [conf]
+          tools.build:exelinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
+          tools.build:sharedlinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
+          EOF
+          echo 'core.download:parallel=1' >> "${CONAN_HOME}/global.conf"
+          conan remote add --index=0 ci http://conanserver:9300
+          ./scripts/install-bolt-deps.sh
+      - name: Build and export the candidate Bolt package and Gluten native backend
+        run: python3 .github/scripts/gluten_ci.py build
+      - name: Run native, Spark 3.5 integration and Spark 4 compatibility tests
+        run: python3 .github/scripts/gluten_ci.py test
+      - name: Preserve reports, source identities and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gluten-bolt-reports-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .ci/gluten-bolt/
+            gluten/**/target/*reports/TEST-*.xml
+            gluten/**/target/*.log
+            gluten/**/hs_err_*.log
+            gluten/**/core.*
+            /var/log/java/hs_err_*.log
+            gluten/cpp/build/Release/Testing/Temporary/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve native artifacts from this run
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gluten-bolt-native-${{ github.sha }}-${{ github.run_attempt }}
+          path: gluten/cpp/build/releases/
+          if-no-files-found: error
+          retention-days: 2
+
+  gluten-bolt-check:
+    name: gluten-bolt-check
+    needs: [prepare, compatibility, integration]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require every integration job to succeed
+        env:
+          GLUTEN_CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/gluten_ci.py gate
