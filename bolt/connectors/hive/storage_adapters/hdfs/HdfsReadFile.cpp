@@ -80,32 +80,34 @@ class HdfsReadFile::Impl {
       filesystems::arrow::io::internal::LibHdfsShim* driver,
       hdfsFS hdfs,
       const std::string_view path,
-      int bufferSize)
+      int bufferSize,
+      uint64_t fileSize)
       : driver_(driver),
         hdfsClient_(hdfs),
         filePath_(path),
-        bufferSize_(bufferSize) {
-    fileInfo_ = driver_->GetPathInfo(hdfsClient_, filePath_.data());
-    if (fileInfo_ == nullptr) {
-      auto error = fmt::format(
-          "FileNotFoundException: Path {} does not exist.", filePath_);
-      auto errMsg = fmt::format(
-          "Unable to get file path info for file: {}. got error: {}",
-          filePath_,
-          error);
-      if (error.find("FileNotFoundException") != std::string::npos) {
-        BOLT_FILE_NOT_FOUND_ERROR(errMsg);
+        bufferSize_(bufferSize),
+        fileSize_(fileSize) {
+    if (fileSize_ == 0) {
+      auto* fileInfo = driver_->GetPathInfo(hdfsClient_, filePath_.data());
+      if (fileInfo == nullptr) {
+        auto error = fmt::format(
+            "FileNotFoundException: Path {} does not exist.", filePath_);
+        auto errMsg = fmt::format(
+            "Unable to get file path info for file: {}. got error: {}",
+            filePath_,
+            error);
+        if (error.find("FileNotFoundException") != std::string::npos) {
+          BOLT_FILE_NOT_FOUND_ERROR(errMsg);
+        }
+        BOLT_FAIL(errMsg);
       }
-      BOLT_FAIL(errMsg);
+      fileSize_ = fileInfo->mSize;
+      memoryUsage_ = fileInfo->mBlockSize;
+      driver_->FreeFileInfo(fileInfo, 1);
     }
   }
 
-  ~Impl() {
-    // Should call hdfsFreeFileInfo to avoid memory leak
-    if (fileInfo_) {
-      driver_->FreeFileInfo(fileInfo_, 1);
-    }
-  }
+  ~Impl() = default;
 
   void preadInternal(uint64_t offset, uint64_t length, char* pos) const {
     checkFileReadParameters(offset, length);
@@ -134,11 +136,11 @@ class HdfsReadFile::Impl {
   }
 
   uint64_t size() const {
-    return fileInfo_->mSize;
+    return fileSize_;
   }
 
   uint64_t memoryUsage() const {
-    return fileInfo_->mBlockSize;
+    return memoryUsage_;
   }
 
   bool shouldCoalesce() const {
@@ -166,7 +168,8 @@ class HdfsReadFile::Impl {
   hdfsFS hdfsClient_;
   std::string filePath_;
   int bufferSize_;
-  hdfsFileInfo* fileInfo_;
+  uint64_t fileSize_;
+  uint64_t memoryUsage_{0};
   folly::ThreadLocal<HdfsFile> file_;
 };
 
@@ -174,8 +177,9 @@ HdfsReadFile::HdfsReadFile(
     filesystems::arrow::io::internal::LibHdfsShim* driver,
     hdfsFS hdfs,
     const std::string_view path,
-    int bufferSize)
-    : pImpl(std::make_unique<Impl>(driver, hdfs, path, bufferSize)) {}
+    int bufferSize,
+    uint64_t fileSize)
+    : pImpl(std::make_unique<Impl>(driver, hdfs, path, bufferSize, fileSize)) {}
 
 HdfsReadFile::~HdfsReadFile() = default;
 
