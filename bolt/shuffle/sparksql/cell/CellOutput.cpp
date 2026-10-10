@@ -14,13 +14,10 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
+#include "bolt/shuffle/sparksql/cell/CellOutput.h"
 
-#include <fcntl.h>
-#include <unistd.h>
 #include <algorithm>
 #include <cstring>
-#include <random>
 #include <sstream>
 
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -37,7 +34,7 @@ LocalCellOutput::LocalCellOutput(
     const CellLayout* layout,
     CellShuffleOptions cellOptions,
     memory::MemoryPool* pool)
-    : options_(std::move(options)),
+    : LocalRawOutput(std::move(options)),
       layout_(layout),
       cellOptions_(cellOptions),
       pool_(pool) {
@@ -51,61 +48,6 @@ LocalCellOutput::LocalCellOutput(
   }
 }
 
-LocalCellOutput::~LocalCellOutput() {
-  if (spillFile_ != nullptr) {
-    ::fclose(spillFile_);
-    ::unlink(spillPath_.c_str());
-  }
-}
-
-void LocalCellOutput::ensureSpillFile() {
-  if (spillFile_ != nullptr) {
-    return;
-  }
-  if (!options_.configuredDirs.empty()) {
-    // One spill file per task, in a random directory as the local partition
-    // writer does, so concurrent tasks spread their spill I/O over the disks.
-    const auto& dirs = options_.configuredDirs;
-    std::default_random_engine engine(std::random_device{}());
-    const auto dir = getSpilledShuffleFileDir(
-        dirs[std::uniform_int_distribution<size_t>(0, dirs.size() - 1)(engine)],
-        std::uniform_int_distribution<int32_t>(
-            0, std::max<int32_t>(options_.numSubDirs, 1) - 1)(engine));
-    auto maybePath = createTempShuffleFile(dir);
-    BOLT_CHECK(
-        maybePath.ok(),
-        "Failed to create cell spill file: {}",
-        maybePath.status().ToString());
-    spillPath_ = *maybePath;
-  } else {
-    // Test convenience: sit next to the data file.
-    spillPath_ = options_.dataFile + ".cellspill";
-  }
-  spillFile_ = ::fopen(spillPath_.c_str(), "wb+");
-  BOLT_CHECK_NOT_NULL(spillFile_, "Failed to open {}", spillPath_);
-  spillFd_ = ::fileno(spillFile_);
-}
-
-void LocalCellOutput::spillWrite(const void* data, size_t bytes) {
-  const uint64_t start = currentTimeNs();
-  BOLT_CHECK_EQ(
-      ::fwrite(data, 1, bytes, spillFile_), bytes, "cell spill write failed");
-  evictTimeNs_ += currentTimeNs() - start;
-  spillOffset_ += bytes;
-  bytesEvicted_ += bytes;
-}
-
-void LocalCellOutput::readSpill(uint64_t offset, void* out, size_t bytes)
-    const {
-  size_t done = 0;
-  auto* dst = reinterpret_cast<char*>(out);
-  while (done < bytes) {
-    const auto n = ::pread(spillFd_, dst + done, bytes - done, offset + done);
-    BOLT_CHECK_GT(n, 0, "cell spill read failed");
-    done += n;
-  }
-}
-
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
   ensureSpillFile();
   const uint32_t numStreams = layout_->numStreams();
@@ -113,7 +55,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   run.storedIsFinal = codec_ == nullptr || cellOptions_.compressSpill;
   auto& ends = run.pidEnds;
   ends.resize(in.numPartitions + 1);
-  ends[0] = spillOffset_;
+  ends[0] = spillOffset();
 
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     uint64_t total = 0;
@@ -167,15 +109,13 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
         }
       }
     }
-    ends[pid + 1] = spillOffset_;
+    ends[pid + 1] = spillOffset();
   }
   // A spill exists to free memory: hand the workspace capacity back too.
   runScratch_.reset();
   compressScratch_.reset();
   scratch_.reset();
-  const uint64_t flushStart = currentTimeNs();
-  BOLT_CHECK_EQ(::fflush(spillFile_), 0, "cell spill flush failed");
-  evictTimeNs_ += currentTimeNs() - flushStart;
+  flushSpill();
 }
 
 void LocalCellOutput::sealWindow(const CellWindowInput& in) {
@@ -195,56 +135,15 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
     }
     resizeBuffer(scratch_, 0, pool_);
     buildNullBody(in, pid, window.rowCounts[pid], scratch_, pool_);
-    window.nullOffset[pid] = spillOffset_;
+    window.nullOffset[pid] = spillOffset();
     window.nullLength[pid] =
         scratch_ ? static_cast<uint32_t>(scratch_->size()) : 0;
     if (window.nullLength[pid] > 0) {
       spillWrite(scratch_->as<char>(), scratch_->size());
     }
   }
-  const uint64_t flushStart = currentTimeNs();
-  BOLT_CHECK_EQ(::fflush(spillFile_), 0, "cell spill flush failed");
-  evictTimeNs_ += currentTimeNs() - flushStart;
+  flushSpill();
   sealed_.push_back(std::move(window));
-}
-
-void LocalCellOutput::spillRaw(const RawBlockSource& next) {
-  ensureSpillFile();
-  auto& ends = rawRuns_.emplace_back(options_.numPartitions + 1);
-  ends[0] = spillOffset_;
-  BufferPtr block;
-  for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
-    while (next(pid, block)) {
-      spillWrite(block->as<char>(), block->size());
-    }
-    ends[pid + 1] = spillOffset_;
-  }
-  const uint64_t flushStart = currentTimeNs();
-  BOLT_CHECK_EQ(::fflush(spillFile_), 0, "cell spill flush failed");
-  evictTimeNs_ += currentTimeNs() - flushStart;
-}
-
-void LocalCellOutput::copySpill(
-    std::FILE* out,
-    uint64_t begin,
-    uint64_t bytes) {
-  char copyBuffer[64 << 10];
-  while (bytes > 0) {
-    const size_t chunk =
-        bytes < sizeof(copyBuffer) ? bytes : sizeof(copyBuffer);
-    readSpill(begin, copyBuffer, chunk);
-    writeOut(out, copyBuffer, chunk);
-    begin += chunk;
-    bytes -= chunk;
-  }
-}
-
-void LocalCellOutput::writeOut(std::FILE* out, const void* data, size_t bytes) {
-  const uint64_t start = currentTimeNs();
-  BOLT_CHECK_EQ(
-      ::fwrite(data, 1, bytes, out), bytes, "shuffle data file write failed");
-  writeTimeNs_ += currentTimeNs() - start;
-  finalBytes_ += bytes;
 }
 
 RunLayout LocalCellOutput::maybeCompressRun(
@@ -647,54 +546,133 @@ void LocalCellOutput::finalize(
   // The residual window never takes a spill round-trip: whatever is still
   // in memory is written straight into the data file, alongside any runs
   // the window already spilled mid-stream.
-
   logWindowDiagnostics(in, windowHasData);
-  std::FILE* out = ::fopen(options_.dataFile.c_str(), "wb");
-  BOLT_CHECK_NOT_NULL(
-      out, "Failed to open shuffle data file {}", options_.dataFile);
-  finalBytes_ = 0;
-
-  metrics.partitionLengths.assign(in.numPartitions, 0);
   metrics.rawPartitionLengths.assign(in.numPartitions, 0);
-  for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
-    const uint64_t partitionStart = finalBytes_;
-    const uint64_t rawStart = rawAccum_;
-    for (const auto& window : sealed_) {
-      writeDiskPayload(out, window, in.encodingTags, pid);
-    }
-    if (windowHasData && in.rowCounts[pid] > 0) {
-      writeCurrentWindowPayload(out, in, pid);
-    }
-    for (const auto& ends : rawRuns_) {
-      copySpill(out, ends[pid], ends[pid + 1] - ends[pid]);
-    }
-    metrics.partitionLengths[pid] =
-        static_cast<int64_t>(finalBytes_ - partitionStart);
-    metrics.rawPartitionLengths[pid] =
-        static_cast<int64_t>(rawAccum_ - rawStart);
-  }
-  const uint64_t flushStart = currentTimeNs();
-  BOLT_CHECK_EQ(::fflush(out), 0, "shuffle data file flush failed");
-  writeTimeNs_ += currentTimeNs() - flushStart;
-  BOLT_CHECK_EQ(::fclose(out), 0, "shuffle data file close failed");
-
-  if (spillFile_ != nullptr) {
-    ::fclose(spillFile_);
-    ::unlink(spillPath_.c_str());
-    spillFile_ = nullptr;
-    spillFd_ = -1;
-  }
+  writeDataFile(
+      [&](std::FILE* out, uint32_t pid) {
+        const uint64_t rawStart = rawAccum_;
+        for (const auto& window : sealed_) {
+          writeDiskPayload(out, window, in.encodingTags, pid);
+        }
+        if (windowHasData && in.rowCounts[pid] > 0) {
+          writeCurrentWindowPayload(out, in, pid);
+        }
+        metrics.rawPartitionLengths[pid] =
+            static_cast<int64_t>(rawAccum_ - rawStart);
+      },
+      metrics);
   runScratch_.reset();
   compressScratch_.reset();
   gather_.reset();
   scratch_.reset();
-
-  metrics.totalBytesWritten = static_cast<int64_t>(finalBytes_);
-  metrics.totalBytesEvicted = bytesEvicted_;
-  metrics.totalWriteTime = static_cast<int64_t>(writeTimeNs_);
-  metrics.totalEvictTime = static_cast<int64_t>(evictTimeNs_);
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(sealed_.size());
+}
+
+RssCellOutput::RssCellOutput(
+    PartitionWriterOptions options,
+    const CellLayout* layout,
+    memory::MemoryPool* pool)
+    : RssRawOutput(std::move(options)), layout_(layout), pool_(pool) {
+  if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
+    codec_ = createCodec(
+        options_.compressionType,
+        CodecOptions{
+            getCodecBackend(options_.codecBackend),
+            options_.compressionLevel,
+            options_.checksumEnabled});
+  }
+  rawPartitionLengths_.assign(options_.numPartitions, 0);
+}
+
+void RssCellOutput::spillRun(const CellWindowInput& /*in*/) {
+  BOLT_FAIL("RssCellOutput never spills: windows are pushed whole");
+}
+
+void RssCellOutput::sealWindow(const CellWindowInput& in) {
+  pushWindow(in);
+  ++numSealed_;
+}
+
+void RssCellOutput::pushWindow(const CellWindowInput& in) {
+  for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
+    if (in.rowCounts[pid] > 0) {
+      pushPartition(in, pid);
+    }
+  }
+  // A seal exists to free memory: hand the workspace capacity back too.
+  payload_.reset();
+  compressScratch_.reset();
+}
+
+void RssCellOutput::pushPartition(const CellWindowInput& in, uint32_t pid) {
+  const uint32_t numStreams = layout_->numStreams();
+  const uint64_t total = residentBytes(in, pid);
+  resizeBuffer(payload_, 0, pool_);
+  const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+  appendBytes(payload_, &kind, 1, pool_);
+  appendPayloadPrefix(in, pid, total > 0 ? 1 : 0, payload_, pool_);
+  uint64_t raw = payload_->size();
+  if (total > 0) {
+    // The run is gathered straight into its place in the payload, so a
+    // stored run needs no second copy and a compressed one is copied back
+    // over it. When the compression workspace cannot be funded - a seal is
+    // often the moment the pool is exhausted - the stored run goes out as
+    // it is rather than failing the operation meant to free memory.
+    const size_t headerAt = payload_->size();
+    const size_t bodyAt = headerAt + runHeaderBytes(numStreams);
+    resizeBuffer(payload_, checkedPlus<size_t>(bodyAt, total), pool_);
+    streamSizes_.resize(numStreams);
+    gatherResident(
+        in, pid, payload_->asMutable<char>() + bodyAt, streamSizes_.data());
+    raw += runHeaderBytes(numStreams) + total;
+    auto runLayout = RunLayout::kCombinedStored;
+    uint64_t stored = total;
+    try {
+      const char* body = nullptr;
+      runLayout = maybeCompressRun(
+          codec_.get(),
+          payload_->as<char>() + bodyAt,
+          total,
+          compressScratch_,
+          pool_,
+          body,
+          stored,
+          compressTimeNs_);
+      if (runLayout == RunLayout::kCombined) {
+        ::memcpy(payload_->asMutable<char>() + bodyAt, body, stored);
+      }
+    } catch (const std::exception&) {
+      compressScratch_.reset();
+      runLayout = RunLayout::kCombinedStored;
+      stored = total;
+    }
+    writeRunHeader(
+        payload_->asMutable<char>() + headerAt,
+        runLayout,
+        stored,
+        streamSizes_.data(),
+        numStreams);
+    payload_->setSize(bodyAt + stored);
+  }
+  rawPartitionLengths_[pid] += static_cast<int64_t>(raw);
+  push(pid, payload_);
+}
+
+void RssCellOutput::finalize(
+    const CellWindowInput& in,
+    bool windowHasData,
+    ShuffleWriterMetrics& metrics) {
+  if (windowHasData) {
+    pushWindow(in);
+  }
+  LOG(INFO) << "CellShuffleWriter rss: sealed windows=" << numSealed_
+            << ", pushes=" << numPushes()
+            << ", pushed bytes=" << bytesEvicted();
+  finish(metrics);
+  metrics.rawPartitionLengths = std::move(rawPartitionLengths_);
+  metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
+  metrics.spillCount = static_cast<int64_t>(numSealed_);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
