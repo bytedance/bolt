@@ -19,9 +19,9 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
 
+#include "bolt/shuffle/sparksql/RawPartitionOutput.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
-#include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -67,8 +67,9 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// Final output, after the composite rows went to output().
   virtual arrow::Status stopOrdinary() = 0;
 
-  /// The sink both sides write through; exists from construction.
-  virtual CellOutput& output() = 0;
+  /// Where the composite blocks go - the same place the ordinary side
+  /// writes to; exists from construction.
+  virtual RawPartitionOutput& output() = 0;
 
   memory::MemoryPool* const boltPool_;
 
