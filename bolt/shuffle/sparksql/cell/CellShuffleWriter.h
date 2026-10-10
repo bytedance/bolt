@@ -65,7 +65,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   arrow::Status flushOrdinary() override;
   arrow::Status stopOrdinary() override;
   RawPartitionOutput& output() override {
-    return *rawOutput_;
+    return *raw_;
   }
 
  private:
@@ -100,9 +100,11 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
+  /// The composite blocks' output: locally a spill of its own, merged by
+  /// output_ after the Cell payloads; on Celeborn also the push channel of
+  /// those payloads. Outlives output_, which refers to it.
+  std::unique_ptr<RawPartitionOutput> raw_;
   std::unique_ptr<CellOutput> output_;
-  /// output_ in its role as the raw block output.
-  RawPartitionOutput* rawOutput_{nullptr};
   std::unique_ptr<CellSplitter> splitter_;
 
   std::vector<uint32_t> row2Partition_;

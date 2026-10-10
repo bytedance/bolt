@@ -67,8 +67,8 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// Final output, after the composite rows went to output().
   virtual arrow::Status stopOrdinary() = 0;
 
-  /// Where the composite blocks go - the same place the ordinary side
-  /// writes to; exists from construction.
+  /// Where the composite blocks go; exists from construction. The subclass
+  /// ends it together with its own output in stopOrdinary().
   virtual RawPartitionOutput& output() = 0;
 
   memory::MemoryPool* const boltPool_;
