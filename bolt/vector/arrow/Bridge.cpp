@@ -2227,19 +2227,26 @@ void exportFlattenedVector(
 
 void exportConstantValue(
     const BaseVector& vec,
+    const Selection& rows,
     const ArrowOptions& options,
     ArrowArray& out,
     memory::MemoryPool* pool,
     const BoltToArrowBridgeHolder& parentHolder) {
   VectorPtr valuesVector;
-  Selection selection(1);
+  const bool empty = rows.count() == 0;
+  Selection selection(empty ? 0 : 1);
 
   // If it's a complex type, then ConstantVector is wrapped around an inner
   // complex vector. Take that vector and the correct index.
   if (vec.type()->size() > 0) {
     valuesVector = vec.valueVector();
     selection.clearAll();
-    selection.addRange(vec.as<ConstantVector<ComplexType>>()->index(), 1);
+    if (!empty) {
+      selection.addRange(vec.as<ConstantVector<ComplexType>>()->index(), 1);
+    }
+  } else if (empty) {
+    // An empty selection must not read the stored constant value.
+    valuesVector = BaseVector::create(vec.type(), 0, pool);
   } else {
     const bool isStr = vec.type()->isVarchar() || vec.type()->isVarbinary();
     if (isStr && options.exportToArrowIPC) {
@@ -2289,8 +2296,7 @@ void exportConstantValue(
       *valuesVector, selection, options, out, pool, parentHolder.reusable());
 }
 
-// Bolt constant vectors are exported as Arrow REE containing a single run
-// equals to the vector size.
+// Bolt constant vectors are exported as Arrow REE with zero or one run.
 void exportConstant(
     const BaseVector& vec,
     const Selection& rows,
@@ -2307,7 +2313,8 @@ void exportConstant(
   out.n_children = 2;
   holder.resizeChildren(2);
   out.children = holder.getChildrenArrays();
-  exportConstantValue(vec, options, *holder.allocateChild(1), pool, holder);
+  exportConstantValue(
+      vec, rows, options, *holder.allocateChild(1), pool, holder);
 
   // Create the run ends child.
   auto* runEnds = holder.allocateChild(0);
@@ -2329,7 +2336,7 @@ void exportConstant(
   runEndsHolder->markActive(*runEnds);
 
   runEnds->buffers = runEndsHolder->getArrowBuffers();
-  runEnds->length = 1;
+  runEnds->length = out.length == 0 ? 0 : 1;
   runEnds->offset = 0;
   runEnds->null_count = 0;
   runEnds->n_buffers = 2;
@@ -2337,9 +2344,11 @@ void exportConstant(
   runEnds->children = nullptr;
   runEnds->dictionary = nullptr;
 
-  // Allocate single runs buffer with the run set as size.
-  auto runsBuffer = AlignedBuffer::allocate<int32_t>(1, pool);
-  runsBuffer->asMutable<int32_t>()[0] = vec.size();
+  // A non-empty constant has one run covering the vector.
+  auto runsBuffer = AlignedBuffer::allocate<int32_t>(runEnds->length, pool);
+  if (runEnds->length > 0) {
+    runsBuffer->asMutable<int32_t>()[0] = vec.size();
+  }
   runEndsHolder->setBuffer(1, runsBuffer);
 
   if (runEndsHolderOwner) {
