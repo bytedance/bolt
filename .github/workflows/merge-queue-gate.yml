@@ -35,6 +35,12 @@ env:
   CI_REUSE_SALT: >-
     bolt-ci:20260114|conan-server:latest|build-test-v2
 
+  # Allow the new image before its PR lands: workflow_run uses main
+  # while source CI uses the PR configuration. Remove this extra salt once
+  # all three workflows use the new image salt.
+  CI_MIGRATION_SALT: >-
+    bolt-ci:20260921|conan-server:latest|build-test-v2
+
 jobs:
   reconcile:
     runs-on: ubuntu-latest
@@ -52,6 +58,7 @@ jobs:
           python3 .github/scripts/merge_queue_ci.py reconcile-gate \
             --source-run-id "${{ github.event.workflow_run.id }}" \
             --salt "${CI_REUSE_SALT}" \
+            --accept-salt "${CI_MIGRATION_SALT}" \
             --output ci-result/result.json \
             --github-output "${GITHUB_OUTPUT}"
       - name: Upload trusted reusable result
