@@ -908,8 +908,12 @@ VectorPtr deserializeFixedWidthArrays(
   return flatVector;
 }
 
-// Length of the string starting at 'offset', with its bytes known present.
-int32_t stringSize(std::string_view data, size_t offset, size_t row) {
+size_t readString(
+    std::string_view data,
+    size_t offset,
+    FlatVector<StringView>* flatVector,
+    vector_size_t index,
+    size_t row) {
   checkAvailable(data, row, offset, kSizeBytes, "string length");
   const int32_t size = readInt32(data.data() + offset);
   BOLT_CHECK_GE(
@@ -925,49 +929,10 @@ int32_t stringSize(std::string_view data, size_t offset, size_t row) {
       offset + kSizeBytes,
       static_cast<size_t>(size),
       "string payload");
-  return size;
+  StringView value(data.data() + offset + kSizeBytes, size);
+  flatVector->set(index, value);
+  return kSizeBytes + size;
 }
-
-// Bytes a string of 'size' occupies outside its StringView.
-size_t outOfLineBytes(int32_t size) {
-  return size > static_cast<int32_t>(StringView::kInlineSize) ? size : 0;
-}
-
-// Copies strings into one buffer allocated at exactly the size the framing
-// declares, instead of growing the vector's string buffers value by value.
-class ExactStringWriter {
- public:
-  ExactStringWriter(
-      FlatVector<StringView>* vector,
-      size_t bytes,
-      memory::MemoryPool* pool)
-      : vector_(vector) {
-    if (bytes > 0) {
-      auto buffer = AlignedBuffer::allocate<char>(bytes, pool);
-      cursor_ = buffer->asMutable<char>();
-      vector_->addStringBuffer(std::move(buffer));
-    }
-  }
-
-  // Reads the string at 'offset' into 'index'; returns the bytes consumed.
-  size_t
-  read(std::string_view data, size_t offset, vector_size_t index, size_t row) {
-    const int32_t size = stringSize(data, offset, row);
-    const char* source = data.data() + offset + kSizeBytes;
-    if (outOfLineBytes(size) == 0) {
-      vector_->setNoCopy(index, StringView(source, size));
-    } else {
-      ::memcpy(cursor_, source, size);
-      vector_->setNoCopy(index, StringView(cursor_, size));
-      cursor_ += size;
-    }
-    return kSizeBytes + size;
-  }
-
- private:
-  FlatVector<StringView>* const vector_;
-  char* cursor_{nullptr};
-};
 
 VectorPtr deserializeUnknowns(
     const TypePtr& type,
@@ -994,19 +959,11 @@ VectorPtr deserializeStrings(
 
   auto* rawNulls = nulls->as<uint64_t>();
 
-  size_t stringBytes = 0;
-  for (auto i = 0; i < numRows; ++i) {
-    if (!bits::isBitNull(rawNulls, i)) {
-      stringBytes += outOfLineBytes(stringSize(data[i], offsets[i], i));
-    }
-  }
-  ExactStringWriter writer(flatVector.get(), stringBytes, pool);
-
   for (auto i = 0; i < numRows; ++i) {
     if (bits::isBitNull(rawNulls, i)) {
       flatVector->setNull(i, true);
     } else {
-      offsets[i] += writer.read(data[i], offsets[i], i, i);
+      offsets[i] += readString(data[i], offsets[i], flatVector.get(), i, i);
     }
   }
 
@@ -1051,23 +1008,6 @@ VectorPtr deserializeStringArrays(
   auto flatVector =
       BaseVector::create<FlatVector<StringView>>(type, total, pool);
 
-  size_t stringBytes = 0;
-  for (auto i = 0; i < numRows; ++i) {
-    const auto size = rawSizes[i];
-    if (size > 0) {
-      auto* rawElementNulls = readNulls(data[i].data() + offsets[i]);
-      size_t offset = offsets[i] + nullBytes(size);
-      for (auto j = 0; j < size; ++j) {
-        if (!bits::isBitSet(rawElementNulls, j)) {
-          const int32_t valueSize = stringSize(data[i], offset, i);
-          stringBytes += outOfLineBytes(valueSize);
-          offset += kSizeBytes + valueSize;
-        }
-      }
-    }
-  }
-  ExactStringWriter writer(flatVector.get(), stringBytes, pool);
-
   vector_size_t index = 0;
   for (auto i = 0; i < numRows; ++i) {
     const auto size = rawSizes[i];
@@ -1081,7 +1021,8 @@ VectorPtr deserializeStringArrays(
         if (bits::isBitSet(rawElementNulls, j)) {
           flatVector->setNull(index++, true);
         } else {
-          offsets[i] += writer.read(data[i], offsets[i], index, i);
+          offsets[i] +=
+              readString(data[i], offsets[i], flatVector.get(), index, i);
           ++index;
         }
       }
