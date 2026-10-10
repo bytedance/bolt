@@ -21,9 +21,8 @@
 #include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/BitUtil.h"
-#include "bolt/shuffle/sparksql/cell/CelebornCellOutput.h"
+#include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
-#include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -61,14 +60,18 @@ CellShuffleWriter::CellShuffleWriter(
     BOLT_CHECK_NOT_NULL(
         options_.partitionWriterOptions.rssClient,
         "CellShuffleWriter on Celeborn requires an RSS client");
-    output_ = std::make_unique<CelebornCellOutput>(
+    auto output = std::make_unique<RssCellOutput>(
         options_.partitionWriterOptions, &layout_, boltPool_);
+    rawOutput_ = output.get();
+    output_ = std::move(output);
   } else {
-    output_ = std::make_unique<LocalCellOutput>(
+    auto output = std::make_unique<LocalCellOutput>(
         options_.partitionWriterOptions,
         &layout_,
         options_.cellOptions,
         boltPool_);
+    rawOutput_ = output.get();
+    output_ = std::move(output);
   }
 }
 
@@ -485,7 +488,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (splitter_->nullBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
     checkpointRequested_ = true;
   }
-  metrics_.totalBytesEvicted = output_->bytesEvicted();
+  metrics_.totalBytesEvicted = rawOutput_->bytesEvicted();
   return arrow::Status::OK();
 }
 
@@ -504,7 +507,7 @@ arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
     return arrow::Status::OK();
   }
   *actual += flushRemoteWindow();
-  metrics_.totalBytesEvicted = output_->bytesEvicted();
+  metrics_.totalBytesEvicted = rawOutput_->bytesEvicted();
   return arrow::Status::OK();
 }
 
@@ -525,16 +528,10 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   if (initialized_) {
     splitter_->finish(metrics_);
   } else {
-    // No ordinary batch ever came: the output still writes the data file -
-    // empty, or the composite rows alone - or ends the Celeborn attempt.
-    const std::vector<uint32_t> noRows(numPartitions_, 0);
-    const std::vector<uint64_t> noBytes(numPartitions_, 0);
-    CellWindowInput in{};
-    in.layout = &layout_;
-    in.rowCounts = noRows.data();
-    in.variableBytes = noBytes.data();
-    in.numPartitions = numPartitions_;
-    output_->finalize(in, /*windowHasData=*/false, metrics_);
+    // No ordinary batch ever came: the raw output alone writes the data file
+    // - empty, or the composite rows - or ends the Celeborn attempt.
+    rawOutput_->finish(metrics_);
+    metrics_.rawPartitionLengths.assign(numPartitions_, 0);
   }
   // Data size is the pre-compression payload volume (what the raw lengths
   // account); bytes written is the compressed file. Reporting them as the

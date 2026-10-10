@@ -64,8 +64,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   arrow::Status reclaimOrdinary(int64_t size, int64_t* actual) override;
   arrow::Status flushOrdinary() override;
   arrow::Status stopOrdinary() override;
-  CellOutput& output() override {
-    return *output_;
+  RawPartitionOutput& output() override {
+    return *rawOutput_;
   }
 
  private:
@@ -101,6 +101,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
   std::unique_ptr<CellOutput> output_;
+  /// output_ in its role as the raw block output.
+  RawPartitionOutput* rawOutput_{nullptr};
   std::unique_ptr<CellSplitter> splitter_;
 
   std::vector<uint32_t> row2Partition_;
