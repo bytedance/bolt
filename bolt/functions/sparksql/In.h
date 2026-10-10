@@ -34,13 +34,13 @@ namespace bytedance::bolt::functions::sparksql {
 // Supported types:
 //   - Bools
 //   - Integer types (byte, short, int, long)
+//   - Decimal
 //   - String, Binary
 //   - Float, Double
 //   - Timestamp
 //   - Date
 //
 // Unsupported:
-//   - Decimal
 //   - Datetime
 //   - Structs, Arrays
 //   - Maps
