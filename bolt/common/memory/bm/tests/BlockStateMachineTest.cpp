@@ -103,6 +103,31 @@ TEST_F(
   EXPECT_EQ(1, memory.evictionSequence);
 }
 
+TEST_F(BlockStateMachineTest, DiscardRequiresUnpinnedCleanResidentWithBacking) {
+  BlockMemory memory{10, 4096, MemoryTag::kTesting};
+  memory.payload = MakePayload(memory.size, 'd');
+  EXPECT_FALSE(BlockStateMachine::CanDiscardResidentWithBacking(memory));
+
+  memory.segment.emplace();
+  memory.dirty = false;
+  ASSERT_TRUE(BlockStateMachine::CanDiscardResidentWithBacking(memory));
+
+  BlockStateMachine::PinResident(memory);
+  EXPECT_FALSE(BlockStateMachine::CanDiscardResidentWithBacking(memory));
+  BlockStateMachine::Unpin(memory);
+
+  memory.dirty = true;
+  EXPECT_FALSE(BlockStateMachine::CanDiscardResidentWithBacking(memory));
+  memory.dirty = false;
+
+  auto payload = BlockStateMachine::DiscardResidentWithBacking(memory);
+  EXPECT_FALSE(BlockStateMachine::CanDiscardResidentWithBacking(memory));
+  EXPECT_EQ(BlockMemoryState::kSpilled, memory.state);
+  EXPECT_TRUE(memory.segment.has_value());
+  EXPECT_FALSE(memory.payload.has_value());
+  EXPECT_EQ('d', payload.data()[0]);
+}
+
 TEST_F(BlockStateMachineTest, SubmitConsumeFailAndCompleteReadTransitions) {
   BlockMemory memory{9, 4096, MemoryTag::kTesting};
   memory.state = BlockMemoryState::kSpilled;

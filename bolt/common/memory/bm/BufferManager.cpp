@@ -218,9 +218,7 @@ uint64_t BufferManager::DiscardCleanResidentBlocks(
       continue;
     }
     auto& memory = *block->memory_;
-    if (memory.state != BlockMemoryState::kInMemory || memory.pinCount != 0 ||
-        !memory.payload.has_value() || !memory.segment.has_value() ||
-        memory.dirty) {
+    if (!BlockStateMachine::CanDiscardResidentWithBacking(memory)) {
       continue;
     }
 

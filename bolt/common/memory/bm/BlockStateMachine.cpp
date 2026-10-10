@@ -95,6 +95,12 @@ IoBuffer BlockStateMachine::BeginSpill(BlockMemory& memory) {
   return payload;
 }
 
+bool BlockStateMachine::CanDiscardResidentWithBacking(
+    const BlockMemory& memory) {
+  return memory.state == BlockMemoryState::kInMemory && memory.pinCount == 0 &&
+      memory.payload.has_value() && memory.segment.has_value() && !memory.dirty;
+}
+
 IoBuffer BlockStateMachine::DiscardResidentWithBacking(BlockMemory& memory) {
   BOLT_CHECK(memory.state == BlockMemoryState::kInMemory);
   BOLT_CHECK_EQ(memory.pinCount, 0);

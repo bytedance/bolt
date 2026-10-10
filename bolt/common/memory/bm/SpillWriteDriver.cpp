@@ -18,6 +18,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/bm/BlockMemory.h"
+#include "bolt/common/memory/bm/BlockStateMachine.h"
 #include "bolt/common/memory/bm/BufferManagerStats.h"
 #include "bolt/common/memory/bm/ReclaimWriteWindow.h"
 
@@ -58,6 +59,15 @@ uint64_t SpillWriteDriver::Spill(
 
       accounting_.RecordReclaimAttemptedBlock();
       const auto blockSize = memory->size;
+      if (BlockStateMachine::CanDiscardResidentWithBacking(*memory)) {
+        // Readback retained the spill backing. An unchanged block needs no
+        // compression or write before releasing its resident payload.
+        accounting_.OnCleanResidentDiscarded(*memory);
+        auto payload = BlockStateMachine::DiscardResidentWithBacking(*memory);
+        reclaimed += blockSize;
+        submitted += blockSize;
+        continue;
+      }
       writeWindow.Submit(std::move(memory));
       submitted += blockSize;
     }

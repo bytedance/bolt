@@ -30,6 +30,7 @@ class BlockStateMachine {
   static ManagedFileSegment CompleteRead(BlockMemory& memory, IoBuffer payload);
   static void CompleteReadKeepBacking(BlockMemory& memory, IoBuffer payload);
   static IoBuffer BeginSpill(BlockMemory& memory);
+  static bool CanDiscardResidentWithBacking(const BlockMemory& memory);
   static IoBuffer DiscardResidentWithBacking(BlockMemory& memory);
   static void RollbackSpill(BlockMemory& memory, IoBuffer payload);
   static void CompleteSpill(BlockMemory& memory, ManagedFileSegment segment);

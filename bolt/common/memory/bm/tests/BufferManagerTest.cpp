@@ -296,6 +296,45 @@ TEST_F(BufferManagerTest, SpillBlocksSpillsOnlyUnpinnedResidentBlocks) {
   EXPECT_EQ(23, repin.Ptr()[4095]);
 }
 
+TEST_F(BufferManagerTest, ReclaimReusesCleanBackingAndWritesDirtyChanges) {
+  auto bm = makeBufferManager("reclaim-existing-backing");
+  std::shared_ptr<BlockHandle> block;
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+    block = handle.block();
+    std::memset(handle.Ptr(), 9, block->size());
+  }
+  ASSERT_EQ(4096, bm->Reclaim(4096));
+  ASSERT_EQ(1, bm->stats().spillWriteCount);
+
+  char expected = 9;
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    const bool modify = iteration == 1;
+    {
+      auto handle = bm->Pin(block);
+      ASSERT_TRUE(bm->HasSpillBacking(block));
+      ASSERT_FALSE(bm->IsDirty(block));
+      EXPECT_EQ(expected, handle.Ptr()[0]);
+      EXPECT_EQ(expected, handle.Ptr()[4095]);
+      if (modify) {
+        expected = 13;
+        bm->MarkDirty(block);
+        std::memset(handle.Ptr(), expected, block->size());
+      }
+    }
+    const auto before = bm->stats();
+    EXPECT_EQ(4096, bm->Reclaim(4096));
+    const auto after = bm->stats();
+    EXPECT_EQ(before.spillWriteCount + (modify ? 1 : 0), after.spillWriteCount);
+    EXPECT_EQ(before.reclaimedBytes + 4096, after.reclaimedBytes);
+    EXPECT_EQ(0, after.unpinnedResidentBytes);
+    EXPECT_EQ(4096, after.spilledBytes);
+  }
+  auto handle = bm->Pin(block);
+  EXPECT_EQ(expected, handle.Ptr()[0]);
+  EXPECT_EQ(expected, handle.Ptr()[4095]);
+}
+
 TEST_F(BufferManagerTest, ReclaimSubmitFailurePropagatesWithoutRollback) {
   auto bm = makeBufferManager("reclaim-submit-failure");
   std::shared_ptr<BlockHandle> block;

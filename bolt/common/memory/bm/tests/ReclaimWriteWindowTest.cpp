@@ -248,4 +248,57 @@ TEST(SpillWriteDriverTest, SpillsCandidatesWithFakeWrites) {
   EXPECT_EQ(4096 + 8192, stats.reclaimedBytes);
 }
 
+TEST(SpillWriteDriverTest, CountsCleanDiscardsTowardsReclaimTarget) {
+  for (const uint64_t target : {uint64_t{12288}, uint64_t{0}}) {
+    SCOPED_TRACE(target);
+    BufferManagerStatsCollector accounting;
+    auto clean = makeUnpinnedResidentBlock(4096);
+    clean->segment.emplace();
+    clean->dirty = false;
+    auto dirty = makeUnpinnedResidentBlock(8192);
+    dirty->segment.emplace();
+    auto fresh = makeUnpinnedResidentBlock(4096);
+    std::vector<std::shared_ptr<BlockMemory>> candidates{clean, dirty, fresh};
+    for (const auto& block : candidates) {
+      accounting.RecordAllocate(*block);
+      accounting.OnResidentUnpinned(*block);
+    }
+    size_t index = 0;
+    size_t writes = 0;
+    SpillWriteDriver driver{
+        2,
+        IoPriority::Medium,
+        [&](IoBuffer&,
+            size_t size,
+            IoPriority,
+            std::shared_ptr<const BlockDescriptor>) {
+          ++writes;
+          return makeCompletedWrite(size);
+        },
+        accounting};
+    const auto reclaimed =
+        driver.Spill(target, [&]() -> std::shared_ptr<BlockMemory> {
+          return index < candidates.size() ? candidates[index++] : nullptr;
+        });
+
+    const auto expected = target == 0 ? 16384 : 12288;
+    EXPECT_EQ(expected, reclaimed);
+    EXPECT_EQ(target == 0 ? 2 : 1, writes);
+    EXPECT_EQ(BlockMemoryState::kSpilled, clean->state);
+    EXPECT_TRUE(clean->segment.has_value());
+    EXPECT_FALSE(clean->payload.has_value());
+    EXPECT_EQ(BlockMemoryState::kSpilled, dirty->state);
+    EXPECT_EQ(
+        target == 0 ? BlockMemoryState::kSpilled : BlockMemoryState::kInMemory,
+        fresh->state);
+    const auto stats = accounting.stats();
+    EXPECT_EQ(expected, stats.reclaimedBytes);
+    EXPECT_EQ(writes, stats.spillWriteCount);
+    EXPECT_EQ(expected - 4096, stats.spillWriteBytes);
+    EXPECT_EQ(target == 0 ? 3 : 2, stats.reclaimAttemptedBlocks);
+    EXPECT_EQ(expected, stats.spilledBytes);
+    EXPECT_EQ(target == 0 ? 0 : 4096, stats.unpinnedResidentBytes);
+  }
+}
+
 } // namespace bytedance::bolt::memory::bm
