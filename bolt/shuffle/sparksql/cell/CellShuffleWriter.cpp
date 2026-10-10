@@ -60,18 +60,20 @@ CellShuffleWriter::CellShuffleWriter(
     BOLT_CHECK_NOT_NULL(
         options_.partitionWriterOptions.rssClient,
         "CellShuffleWriter on Celeborn requires an RSS client");
-    auto output = std::make_unique<RssCellOutput>(
-        options_.partitionWriterOptions, &layout_, boltPool_);
-    rawOutput_ = output.get();
-    output_ = std::move(output);
+    raw_ = std::make_unique<RssRawOutput>(options_.partitionWriterOptions);
+    output_ = std::make_unique<RssCellOutput>(
+        *raw_, &layout_, options_.partitionWriterOptions, boltPool_);
   } else {
-    auto output = std::make_unique<LocalCellOutput>(
-        options_.partitionWriterOptions,
+    // Two outputs with a spill file each, merged into the one data file.
+    auto composite =
+        std::make_unique<LocalRawOutput>(options_.partitionWriterOptions);
+    output_ = std::make_unique<LocalCellOutput>(
+        *composite,
         &layout_,
         options_.cellOptions,
+        options_.partitionWriterOptions,
         boltPool_);
-    rawOutput_ = output.get();
-    output_ = std::move(output);
+    raw_ = std::move(composite);
   }
 }
 
@@ -488,7 +490,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (splitter_->nullBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
     checkpointRequested_ = true;
   }
-  metrics_.totalBytesEvicted = rawOutput_->bytesEvicted();
+  metrics_.totalBytesEvicted = output_->bytesEvicted();
   return arrow::Status::OK();
 }
 
@@ -507,7 +509,7 @@ arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
     return arrow::Status::OK();
   }
   *actual += flushRemoteWindow();
-  metrics_.totalBytesEvicted = rawOutput_->bytesEvicted();
+  metrics_.totalBytesEvicted = output_->bytesEvicted();
   return arrow::Status::OK();
 }
 
@@ -530,7 +532,7 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   } else {
     // No ordinary batch ever came: the raw output alone writes the data file
     // - empty, or the composite rows - or ends the Celeborn attempt.
-    rawOutput_->finish(metrics_);
+    raw_->finish(metrics_);
     metrics_.rawPartitionLengths.assign(numPartitions_, 0);
   }
   // Data size is the pre-compression payload volume (what the raw lengths
