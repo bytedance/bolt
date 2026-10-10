@@ -166,6 +166,14 @@ void gatherCopy(
     const std::vector<vector_size_t>& sourceIndices,
     const std::vector<IdentityProjection>& columnMap = {});
 
+void gatherCopy(
+    RowVector* FOLLY_NONNULL target,
+    vector_size_t targetIndex,
+    vector_size_t count,
+    folly::Range<const RowVector* const*> sources,
+    folly::Range<const vector_size_t*> sourceIndices,
+    const std::vector<IdentityProjection>& columnMap = {});
+
 // gatherCopy to target from each source RowVector's sourceChannel child
 void gatherCopy(
     BaseVector* target,
@@ -173,6 +181,14 @@ void gatherCopy(
     vector_size_t count,
     const std::vector<const RowVector*>& sources,
     const std::vector<vector_size_t>& sourceIndices,
+    column_index_t sourceChannel);
+
+void gatherCopy(
+    BaseVector* target,
+    vector_size_t targetIndex,
+    vector_size_t count,
+    folly::Range<const RowVector* const*> sources,
+    folly::Range<const vector_size_t*> sourceIndices,
     column_index_t sourceChannel);
 
 /// Generates the system-wide unique disk spill file path for an operator. It

@@ -877,6 +877,20 @@ void HashTable<ignoreNullKeys>::clear() {
 }
 
 template <bool ignoreNullKeys>
+void HashTable<ignoreNullKeys>::releaseTable() {
+  if (table_ == nullptr) {
+    return;
+  }
+  rows_->pool()->freeContiguous(tableAllocation_);
+  table_ = nullptr;
+  capacity_ = 0;
+  sizeMask_ = 0;
+  bucketOffsetMask_ = 0;
+  numBuckets_ = 0;
+  numTombstones_ = 0;
+}
+
+template <bool ignoreNullKeys>
 void HashTable<ignoreNullKeys>::checkSize(
     int32_t numNew,
     bool initNormalizedKeys) {

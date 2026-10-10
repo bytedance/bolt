@@ -121,6 +121,7 @@ void MetaRowsSorterWraper<SortedRows>::MetaCodegenSort(
 /// And instantiate here to reduce compiling time
 template struct MetaRowsSorterWraper<SpillRows>;
 template struct MetaRowsSorterWraper<BufferRows>;
+template struct MetaRowsSorterWraper<folly::Range<char**>>;
 
 } // namespace bytedance::bolt::exec
 

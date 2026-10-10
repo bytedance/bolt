@@ -64,6 +64,7 @@ using BufferRows = std::vector<char*>;
 #ifdef ENABLE_META_SORT
 extern template struct MetaRowsSorterWraper<SpillRows>;
 extern template struct MetaRowsSorterWraper<BufferRows>;
+extern template struct MetaRowsSorterWraper<folly::Range<char**>>;
 #endif
 
 } // namespace bytedance::bolt::exec

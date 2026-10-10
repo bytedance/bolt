@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <cstring>
+
 #include <folly/CPortability.h>
 #include "bolt/common/memory/HashStringAllocator.h"
 #include "bolt/core/PlanNode.h"
@@ -1819,9 +1821,12 @@ struct RowFormatInfo {
   }
 
   FLATTEN uint32_t getRowSize(char* row) const {
-    uint32_t size = fixRowSize +
-        (rowSizeOffset ? *reinterpret_cast<const uint32_t*>(row + rowSizeOffset)
-                       : 0);
+    uint32_t variableRowSize{0};
+    if (rowSizeOffset) {
+      std::memcpy(
+          &variableRowSize, row + rowSizeOffset, sizeof(variableRowSize));
+    }
+    uint32_t size = fixRowSize + variableRowSize;
     for (const auto& accumulator : serializableAccumulators) {
       size += accumulator.getSerializeSize(row);
     }

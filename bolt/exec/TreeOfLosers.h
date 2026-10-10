@@ -38,6 +38,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SimdUtil.h"
 
+#include <folly/Function.h>
 #include <folly/Likely.h>
 namespace bytedance::bolt {
 
@@ -92,7 +93,50 @@ class TreeOfLosers {
     static_assert(std::is_base_of_v<MergeStream, Stream>);
     BOLT_CHECK_LT(streams_.size(), std::numeric_limits<TIndex>::max());
     BOLT_CHECK_GE(streams_.size(), 1);
+    resetSelection();
+  }
 
+  const Stream* streamAt(size_t index) const {
+    BOLT_CHECK_LT(index, streams_.size());
+    return streams_[index].get();
+  }
+
+  void replaceStreams(
+      size_t index,
+      size_t count,
+      folly::FunctionRef<std::vector<std::unique_ptr<Stream>>()>
+          makeReplacements,
+      folly::FunctionRef<void()> releaseOldBacking) {
+    BOLT_CHECK_LE(index, streams_.size());
+    BOLT_CHECK_LE(count, streams_.size() - index);
+    BOLT_CHECK_GT(count, 0);
+    for (size_t i = index; i < index + count; ++i) {
+      streams_[i].reset();
+    }
+    try {
+      releaseOldBacking();
+      auto replacements = makeReplacements();
+      BOLT_CHECK(!replacements.empty());
+      streams_.erase(
+          streams_.begin() + index, streams_.begin() + index + count);
+      streams_.insert(
+          streams_.begin() + index,
+          std::make_move_iterator(replacements.begin()),
+          std::make_move_iterator(replacements.end()));
+      resetSelection();
+    } catch (...) {
+      streams_.clear();
+      values_.clear();
+      equals_.clear();
+      lastIndex_ = kEmpty;
+      firstStream_ = 0;
+      throw;
+    }
+  }
+
+ private:
+  /// Rebuilds the loser-tree topology and selection state after replacement.
+  void resetSelection() {
     int32_t size = 0;
     int32_t levelSize = 1;
     int32_t numStreams = streams_.size();
@@ -119,10 +163,12 @@ class TreeOfLosers {
       // move to the level below.
       firstStream_ = (size - secondLastSize) + overflow;
     }
-    values_.resize(firstStream_, kEmpty);
-    equals_.resize(firstStream_, false);
+    values_.assign(firstStream_, kEmpty);
+    equals_.assign(firstStream_, false);
+    lastIndex_ = kEmpty;
   }
 
+ public:
   /// Returns the number of streams.
   size_t numStreams() const {
     return streams_.size();
@@ -218,7 +264,7 @@ class TreeOfLosers {
     return std::pair<TIndex, bool>{index, flag};
   }
 
-  TIndex first(TIndex node) {
+  TIndex first(size_t node) {
     if (node >= firstStream_) {
       return streams_[node - firstStream_]->hasData() ? node - firstStream_
                                                       : kEmpty;
@@ -238,7 +284,7 @@ class TreeOfLosers {
     }
   }
 
-  FOLLY_ALWAYS_INLINE TIndex propagate(TIndex node, TIndex value) {
+  FOLLY_ALWAYS_INLINE TIndex propagate(size_t node, TIndex value) {
     while (UNLIKELY(values_[node] == kEmpty)) {
       if (UNLIKELY(node == 0)) {
         return value;
@@ -267,7 +313,7 @@ class TreeOfLosers {
     }
   }
 
-  IndexAndFlag firstWithEquals(TIndex node) {
+  IndexAndFlag firstWithEquals(size_t node) {
     if (node >= firstStream_) {
       BOLT_DCHECK_LT(node - firstStream_, streams_.size());
       return streams_[node - firstStream_]->hasData()
@@ -301,7 +347,7 @@ class TreeOfLosers {
   }
 
   FOLLY_ALWAYS_INLINE IndexAndFlag
-  propagateWithEquals(TIndex node, TIndex valueIndex) {
+  propagateWithEquals(size_t node, TIndex valueIndex) {
     auto value = indexAndFlag(
         valueIndex,
         valueIndex == kEmpty ? false : streams_[valueIndex]->isNextEqual());
@@ -344,19 +390,19 @@ class TreeOfLosers {
     }
   }
 
-  static TIndex parent(TIndex node) {
+  static size_t parent(size_t node) {
     return (node - 1) / 2;
   }
 
-  static TIndex leftChild(TIndex node) {
+  static size_t leftChild(size_t node) {
     return node * 2 + 1;
   }
 
-  static TIndex rightChild(TIndex node) {
+  static size_t rightChild(size_t node) {
     return node * 2 + 2;
   }
 
-  const std::vector<std::unique_ptr<Stream>> streams_;
+  std::vector<std::unique_ptr<Stream>> streams_;
 
   std::vector<TIndex> values_;
   // 'true' if the corresponding element of 'values_' has met an equal
@@ -364,7 +410,7 @@ class TreeOfLosers {
   // A byte vector is in this case faster than one of bool.
   std::vector<uint8_t> equals_;
   TIndex lastIndex_ = kEmpty;
-  int32_t firstStream_;
+  size_t firstStream_;
 };
 
 // Array-based merging structure implementing the same interface as
