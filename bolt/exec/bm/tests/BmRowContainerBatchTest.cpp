@@ -303,7 +303,7 @@ TEST_F(BmRowContainerTest, AppendBatchStoresMultipleNonInlineStringColumns) {
 }
 
 TEST_F(
-    BmRowContainerTest,
+    BmRowContainerDiskIoTest,
     AppendBatchReloadsMultipleStringColumnsAcrossChunks) {
   BmRowContainer container(
       {BIGINT(), VARCHAR(), VARCHAR()},
@@ -660,7 +660,7 @@ TEST_F(BmRowContainerTest, SpeculativeBatchCrossesHeapBlocks) {
 // Uncommitted overflow tail bytes live beyond heap.used, so a spill+bulk-read
 // round-trip reproduces the values with no leaked garbage. A tiny heap block
 // forces the overflow that leaves such tail bytes behind.
-TEST_F(BmRowContainerTest, SpeculativeSpillExcludesUncommittedTail) {
+TEST_F(BmRowContainerDiskIoTest, SpeculativeSpillExcludesUncommittedTail) {
   auto arrays = makeArrayVector<int64_t>({
       {1, 2, 3, 4, 5},
       {6, 7, 8, 9, 10},

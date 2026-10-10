@@ -21,7 +21,7 @@ namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
 
-TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
+TEST_F(BmRowContainerDiskIoTest, PartitionCanFlushMultipleSegments) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting);
   auto input = makeRowVector({makeFlatVector<int64_t>({1, 2})});
@@ -45,7 +45,7 @@ TEST_F(BmRowContainerTest, PartitionCanFlushMultipleSegments) {
   EXPECT_EQ(2, container.segmentsForPartition(7).size());
 }
 
-TEST_F(BmRowContainerTest, PartitionUsesFixedVectorLimit) {
+TEST_F(BmRowContainerDiskIoTest, PartitionUsesFixedVectorLimit) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting);
   auto input = makeRowVector({makeFlatVector<int64_t>({42})});

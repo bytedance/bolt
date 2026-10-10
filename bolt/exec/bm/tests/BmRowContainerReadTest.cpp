@@ -29,7 +29,7 @@ namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
 
-TEST_F(BmRowContainerTest, ComplexMapSurvivesRepeatedSpillReload) {
+TEST_F(BmRowContainerDiskIoTest, ComplexMapSurvivesRepeatedSpillReload) {
   auto maps = makeMapVector<int64_t, int64_t>({
       {{2, 20}, {1, 10}},
       {{1, 10}, {2, 20}},
@@ -76,7 +76,7 @@ TEST_F(BmRowContainerTest, ComplexMapSurvivesRepeatedSpillReload) {
   }
 }
 
-TEST_F(BmRowContainerTest, OpenZlSpillRoundTripsFixedAndVariableRows) {
+TEST_F(BmRowContainerDiskIoTest, OpenZlSpillRoundTripsFixedAndVariableRows) {
   resetBufferManagerCompression(
       memory::bm::compress::CompressionKind::kOpenZlFrame);
   constexpr vector_size_t kRows = 2048;
@@ -142,7 +142,9 @@ TEST_F(BmRowContainerTest, OpenZlSpillRoundTripsFixedAndVariableRows) {
   EXPECT_GT(stats.spillCompressedBlocks, 0);
 }
 
-TEST_F(BmRowContainerTest, BulkReadSessionLoadsStablePointersWhenResident) {
+TEST_F(
+    BmRowContainerDiskIoTest,
+    BulkReadSessionLoadsStablePointersWhenResident) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -208,7 +210,7 @@ TEST_F(BmRowContainerTest, ExtractColumnResidentWritesAtResultOffset) {
   EXPECT_EQ("charlie", strings->valueAt(4).str());
 }
 
-TEST_F(BmRowContainerTest, BulkReadSessionLoadSkipsConsumedChunks) {
+TEST_F(BmRowContainerDiskIoTest, BulkReadSessionLoadSkipsConsumedChunks) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);
   constexpr vector_size_t kRows = 9000;
@@ -237,7 +239,7 @@ TEST_F(BmRowContainerTest, BulkReadSessionLoadSkipsConsumedChunks) {
   EXPECT_EQ(8194, flat->valueAt(2));
 }
 
-TEST_F(BmRowContainerTest, BulkReadSessionLoadsSegmentRowRanges) {
+TEST_F(BmRowContainerDiskIoTest, BulkReadSessionLoadsSegmentRowRanges) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -269,7 +271,7 @@ TEST_F(BmRowContainerTest, BulkReadSessionLoadsSegmentRowRanges) {
   EXPECT_EQ("bravo", flat->valueAt(2).str());
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
+TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -308,7 +310,9 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionListsAndLoadsRows) {
   EXPECT_EQ("alpha", single->asFlatVector<StringView>()->valueAt(0).str());
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
+TEST_F(
+    BmRowContainerDiskIoTest,
+    ReadOnlyWindowReadSessionLoadsSegmentRowRanges) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -366,7 +370,7 @@ TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
   EXPECT_EQ(8194, flat->valueAt(2));
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanReloadRows) {
+TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowEvictCanReloadRows) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -407,7 +411,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanReloadRows) {
   EXPECT_EQ("reload-string-value-4095", flat->valueAt(4095).str());
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowEvictDoesNotRewriteCleanBlocks) {
+TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowEvictDoesNotRewriteCleanBlocks) {
   BmRowContainer container(
       {BIGINT(), BIGINT()},
       {false, false},
@@ -439,7 +443,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictDoesNotRewriteCleanBlocks) {
   EXPECT_EQ(writesAfterFirstEvict, bufferManager_->stats().spillWriteCount);
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
+TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -490,7 +494,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
   EXPECT_EQ("release-string-value-4095", flat->valueAt(4095).str());
 }
 
-TEST_F(BmRowContainerTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
+TEST_F(BmRowContainerDiskIoTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -531,7 +535,7 @@ TEST_F(BmRowContainerTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   EXPECT_EQ(reservesBefore + 1, bmPool->stats().numReserves);
 }
 
-TEST_F(BmRowContainerTest, CanBulkReadRequiresProcessingHeadroom) {
+TEST_F(BmRowContainerDiskIoTest, CanBulkReadRequiresProcessingHeadroom) {
   constexpr vector_size_t size = 50'000;
   constexpr uint32_t blockSize = 32 << 10;
   BmRowContainer container(
@@ -569,7 +573,7 @@ TEST_F(BmRowContainerTest, CanBulkReadRequiresProcessingHeadroom) {
   EXPECT_GT(bufferManager_->stats().pinnedResidentBytes, 0);
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
+TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -621,7 +625,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowReloadsAfterMemoryPoolReclaim) {
   EXPECT_EQ("reclaim-string-value-4095", flat->valueAt(4095).str());
 }
 
-TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanLimitTargetBytes) {
+TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowEvictCanLimitTargetBytes) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -655,7 +659,7 @@ TEST_F(BmRowContainerTest, ReadOnlyWindowEvictCanLimitTargetBytes) {
   EXPECT_GT(remaining, 0);
 }
 
-TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
+TEST_F(BmRowContainerDiskIoTest, WindowReadRebasesStringsAcrossChunks) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -692,7 +696,7 @@ TEST_F(BmRowContainerTest, WindowReadRebasesStringsAcrossChunks) {
   EXPECT_EQ("window-read-string-value-29999", flat->valueAt(29999).str());
 }
 
-TEST_F(BmRowContainerTest, WindowReadRebasesMultipleStringColumns) {
+TEST_F(BmRowContainerDiskIoTest, WindowReadRebasesMultipleStringColumns) {
   BmRowContainer container(
       {BIGINT(), VARCHAR(), VARCHAR()},
       {false, false, false},

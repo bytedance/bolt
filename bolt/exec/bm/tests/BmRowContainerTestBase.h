@@ -20,11 +20,13 @@
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
+#include "bolt/common/memory/bm/io/DiskIoScheduler.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include <exception>
 #include <memory>
 #include <string>
 #include <utility>
@@ -97,6 +99,22 @@ class BmRowContainerTest : public testing::Test,
 
   std::shared_ptr<memory::MemoryPool> root_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
+};
+
+class BmRowContainerDiskIoTest : public BmRowContainerTest {
+ protected:
+  void SetUp() override {
+    try {
+      memory::bm::diskIoScheduler().ensureReady();
+    } catch (const std::exception& e) {
+      if (std::string(e.what()).find("io_uring_queue_init failed") !=
+          std::string::npos) {
+        GTEST_SKIP() << e.what();
+      }
+      throw;
+    }
+    BmRowContainerTest::SetUp();
+  }
 };
 
 } // namespace bytedance::bolt::exec::bm
