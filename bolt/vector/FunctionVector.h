@@ -207,6 +207,10 @@ class FunctionVector : public BaseVector {
     BOLT_NYI();
   }
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* /*pool*/) override {
+    BOLT_UNSUPPORTED("transferTo not defined for FunctionVector");
+  }
+
  private:
   std::vector<std::shared_ptr<Callable>> functions_;
   std::vector<SelectivityVector> rowSets_;

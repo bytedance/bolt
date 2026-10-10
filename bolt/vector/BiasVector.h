@@ -181,6 +181,10 @@ class BiasVector : public SimpleVector<T> {
     BOLT_NYI();
   }
 
+  void transferOrCopyTo(bolt::memory::MemoryPool* /*pool*/) override {
+    BOLT_UNSUPPORTED("transferTo not defined for BiasVector");
+  }
+
  private:
   template <typename U>
   inline xsimd::batch<T> loadSIMDInternal(size_t byteOffset) const {
