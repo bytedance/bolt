@@ -26,6 +26,7 @@
 #include <type_traits>
 
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
+#include "bolt/shuffle/sparksql/RawPartitionOutput.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
@@ -35,7 +36,6 @@
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
-#include "bolt/shuffle/sparksql/cell/LocalCellOutput.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/shuffle/sparksql/partition_writer/rss/RssClient.h"
@@ -85,10 +85,6 @@ class RecordingCellOutput final : public CellOutput {
     }
   }
 
-  void spillRaw(const RawBlockSource& /*next*/) override {
-    ++rawCalls;
-  }
-
   void finalize(
       const CellWindowInput& in,
       bool windowHasData,
@@ -99,12 +95,7 @@ class RecordingCellOutput final : public CellOutput {
     }
   }
 
-  int64_t bytesEvicted() const override {
-    return 0;
-  }
-
   uint32_t spillCalls{0};
-  uint32_t rawCalls{0};
   uint32_t sealCalls{0};
   uint32_t finalizeCalls{0};
   std::function<void(const CellWindowInput&)> onSpill;
@@ -149,7 +140,7 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
 
   void TearDown() override {
     ::unlink(dataFile_.c_str());
-    ::unlink((dataFile_ + ".cellspill").c_str());
+    ::unlink((dataFile_ + ".rawspill").c_str());
   }
 
   ShuffleWriterOptions makeOptions(int32_t numPartitions) {
@@ -426,7 +417,7 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
       ASSERT_NE(client, nullptr);
       EXPECT_EQ(client->stops, 1);
       EXPECT_TRUE(readFile().empty());
-      EXPECT_FALSE(std::filesystem::exists(dataFile_ + ".cellspill"));
+      EXPECT_FALSE(std::filesystem::exists(dataFile_ + ".rawspill"));
       for (int32_t pid = 0; pid < numPartitions; ++pid) {
         int64_t pushed = 0;
         for (const auto& blob : client->pushes[pid]) {
@@ -1701,6 +1692,56 @@ TEST_F(CellWriterTest, compositeReaderRejectsAnUnknownBlockKind) {
       1000,
       1 << 20);
   EXPECT_THROW(reader.next(), BoltException);
+}
+
+TEST_F(CellWriterTest, rawOutputsPlaceOpaqueBlocks) {
+  // The writer-neutral outputs on their own, as a row-based writer would
+  // use them: each spillRaw() call is one unit over all partitions.
+  constexpr uint32_t kPartitions = 3;
+  const auto spill = [&](RawPartitionOutput& output,
+                         std::vector<std::vector<std::string>> blocks) {
+    output.spillRaw([&](uint32_t pid, BufferPtr& block) {
+      if (blocks[pid].empty()) {
+        return false;
+      }
+      const auto bytes = blocks[pid].front();
+      blocks[pid].erase(blocks[pid].begin());
+      block = AlignedBuffer::allocate<char>(bytes.size(), pool());
+      ::memcpy(block->asMutable<char>(), bytes.data(), bytes.size());
+      return true;
+    });
+  };
+  {
+    auto options = makeOptions(kPartitions);
+    auto output = RawPartitionOutput::create(options.partitionWriterOptions);
+    spill(*output, {{"a0"}, {}, {"c0", "c1"}});
+    spill(*output, {{"a1"}, {"b1"}, {}});
+    ShuffleWriterMetrics metrics;
+    output->finish(metrics);
+    EXPECT_EQ(readFile(), "a0a1b1c0c1");
+    EXPECT_EQ(metrics.partitionLengths, (std::vector<int64_t>{4, 2, 4}));
+    EXPECT_EQ(metrics.totalBytesWritten, 10);
+    EXPECT_EQ(metrics.totalBytesEvicted, 10);
+    EXPECT_FALSE(std::filesystem::exists(dataFile_ + ".rawspill"));
+  }
+  {
+    auto client = std::make_shared<RecordingRssClient>();
+    auto options = makeCelebornOptions(kPartitions, client);
+    ::unlink(dataFile_.c_str());
+    auto output = RawPartitionOutput::create(options.partitionWriterOptions);
+    spill(*output, {{"a0"}, {}, {"c0", "c1"}});
+    EXPECT_EQ(client->numPushes, 3);
+    spill(*output, {{"a1"}, {"b1"}, {}});
+    ShuffleWriterMetrics metrics;
+    output->finish(metrics);
+    EXPECT_EQ(client->stops, 1);
+    EXPECT_EQ(client->pushes[0], (std::vector<std::string>{"a0", "a1"}));
+    EXPECT_EQ(client->pushes[1], (std::vector<std::string>{"b1"}));
+    EXPECT_EQ(client->pushes[2], (std::vector<std::string>{"c0", "c1"}));
+    EXPECT_EQ(metrics.partitionLengths, (std::vector<int64_t>{4, 2, 4}));
+    EXPECT_EQ(metrics.totalBytesWritten, 10);
+    EXPECT_FALSE(std::filesystem::exists(dataFile_));
+  }
 }
 
 TEST_F(CellWriterTest, rawRunsFollowEachPartitionsPayloads) {
