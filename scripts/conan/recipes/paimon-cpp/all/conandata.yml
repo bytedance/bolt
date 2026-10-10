@@ -13,10 +13,16 @@
 # limitations under the License.
 
 sources:
+  "v0.3.0":
+    url: "https://codeload.github.com/apache/paimon-cpp/tar.gz/refs/tags/v0.3.0"
+    sha256: "689878d223ca272665babc03757dcd1352ce1cdc2311745994dc1d1e574115c2"
   "0.0.4-bolt":
     url: "https://github.com/alibaba/paimon-cpp.git"
     revision: "d474ebc24ac302239ca596a2d72f32210586b882"
 patches:
+  "v0.3.0":
+    - patch_file: "patches/paimon-cpp-0.3.0-conan-deps.patch"
+      patch_description: "Build Apache Paimon 0.3.0 with Bolt Conan dependencies"
   "0.0.4-bolt":
     - patch_file: "patches/paimon-cpp-conan-deps.patch"
       patch_description: "Add Conan dependencies support"

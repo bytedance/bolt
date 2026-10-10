@@ -15,13 +15,17 @@
  */
 
 #include <gtest/gtest.h>
+#include <paimon/predicate/literal.h>
+#include <paimon/predicate/predicate_builder.h>
 #include <filesystem>
 #include <memory>
 #include <string>
 
+#include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/connectors/paimon/BoltMemoryPool.h"
+#include "bolt/connectors/paimon/PaimonBoltFileSystem.h"
 #include "bolt/connectors/paimon/PaimonConfig.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 #include "bolt/dwio/common/FileSink.h"
@@ -41,6 +45,13 @@ using namespace bytedance::bolt::dwio::common;
 
 namespace {
 
+std::shared_ptr<::paimon::InputStream> openInput(const std::string& path) {
+  PaimonBoltFileSystem fs({});
+  auto stream = fs.Open(path);
+  BOLT_CHECK(stream.ok(), "{}", stream.status().ToString());
+  return std::shared_ptr<::paimon::InputStream>(std::move(stream).value());
+}
+
 class PaimonParquetReaderTest : public ::testing::Test,
                                 public bytedance::bolt::test::VectorTestBase {
  protected:
@@ -51,6 +62,7 @@ class PaimonParquetReaderTest : public ::testing::Test,
   }
 
   void SetUp() override {
+    filesystems::registerLocalFileSystem();
     dwio::common::LocalFileSink::registerFactory();
     pool_ = memory::memoryManager()->addRootPool("PaimonParquetReaderTest");
     leafPool_ = pool_->addLeafChild("leaf");
@@ -92,7 +104,7 @@ class PaimonParquetReaderTest : public ::testing::Test,
     auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(pool);
     builder->WithMemoryPool(paimonPool);
 
-    auto readerRes = builder->Build(parquetPath);
+    auto readerRes = builder->Build(openInput(parquetPath));
     ASSERT_TRUE(readerRes.ok());
     std::unique_ptr<::paimon::FileBatchReader> fileReader =
         std::move(readerRes).value();
@@ -408,7 +420,7 @@ TEST_F(PaimonParquetReaderTest, NextBatchWithoutSetReadSchema) {
   auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool_.get());
   builder->WithMemoryPool(paimonPool);
 
-  auto readerRes = builder->Build(path);
+  auto readerRes = builder->Build(openInput(path));
   ASSERT_TRUE(readerRes.ok());
   std::unique_ptr<::paimon::FileBatchReader> fileReader =
       std::move(readerRes).value();
@@ -462,7 +474,7 @@ TEST_F(PaimonParquetReaderTest, NextBatchWithoutSetReadSchema) {
 
 /// Helper: open a parquet file via PaimonParquetReader and return the
 /// FileBatchReader. Does NOT call SetReadSchema — use for testing
-/// GetPreviousBatchFirstRowNumber with full-schema fallback.
+/// GetPreviousBatchFileRowId with full-schema fallback.
 std::unique_ptr<::paimon::FileBatchReader> openReader(
     const std::string& parquetPath,
     int32_t batchSize,
@@ -476,12 +488,12 @@ std::unique_ptr<::paimon::FileBatchReader> openReader(
   auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(pool);
   builder->WithMemoryPool(paimonPool);
 
-  auto readerRes = builder->Build(parquetPath);
+  auto readerRes = builder->Build(openInput(parquetPath));
   EXPECT_TRUE(readerRes.ok()) << readerRes.status().message();
   return std::move(readerRes).value();
 }
 
-// ---- GetPreviousBatchFirstRowNumber tests
+// ---- GetPreviousBatchFileRowId tests
 // ----------------------------------------------------------
 
 TEST_F(PaimonParquetReaderTest, PreviousBatchRowNumberSingleBatch) {
@@ -498,10 +510,9 @@ TEST_F(PaimonParquetReaderTest, PreviousBatchRowNumberSingleBatch) {
 
   auto reader = openReader(path, kRows, leafPool_.get());
 
-  // First batch should start at row 0.
-  auto rowRes = reader->GetPreviousBatchFirstRowNumber();
-  ASSERT_TRUE(rowRes.ok()) << rowRes.status().message();
-  EXPECT_EQ(rowRes.value(), 0U);
+  // No previous batch exists before the first read.
+  auto rowRes = reader->GetPreviousBatchFileRowId(0);
+  EXPECT_TRUE(rowRes.status().IsInvalid());
 
   // Read the only batch.
   auto batchRes = reader->NextBatch();
@@ -547,9 +558,9 @@ TEST_F(PaimonParquetReaderTest, PreviousBatchRowNumberMultipleBatches) {
     }
     ASSERT_TRUE(batchRes.ok()) << batchRes.status().message();
 
-    // After NextBatch(), GetPreviousBatchFirstRowNumber() returns the start
+    // After NextBatch(), GetPreviousBatchFileRowId(0) returns the start
     // row of the batch just read.
-    auto rowRes = reader->GetPreviousBatchFirstRowNumber();
+    auto rowRes = reader->GetPreviousBatchFileRowId(0);
     ASSERT_TRUE(rowRes.ok()) << rowRes.status().message();
     EXPECT_EQ(rowRes.value(), expectedStart)
         << "Batch starting at wrong absolute row position";
@@ -577,10 +588,8 @@ TEST_F(PaimonParquetReaderTest, PreviousBatchRowNumberMultipleBatches) {
   reader->Close();
 }
 
-TEST_F(
-    PaimonParquetReaderTest,
-    PreviousBatchRowNumberReturnsZeroBeforeAnyRead) {
-  // Before any NextBatch() call, the method should return 0.
+TEST_F(PaimonParquetReaderTest, PreviousBatchRowMappingRejectsBeforeRead) {
+  // Before any NextBatch() call, no row mapping exists.
   const int64_t kRows = 50;
   auto schema = ROW({"id"}, {BIGINT()});
   auto data =
@@ -593,11 +602,303 @@ TEST_F(
 
   auto reader = openReader(path, 20, leafPool_.get());
 
-  auto rowRes = reader->GetPreviousBatchFirstRowNumber();
-  ASSERT_TRUE(rowRes.ok()) << rowRes.status().message();
-  EXPECT_EQ(rowRes.value(), 0U);
+  auto rowRes = reader->GetPreviousBatchFileRowId(0);
+  EXPECT_TRUE(rowRes.status().IsInvalid());
 
   reader->Close();
+}
+
+// The payload deliberately encodes its physical position independently of the
+// predicate column, so an incorrect batch origin cannot pass by coincidence.
+TEST_F(
+    PaimonParquetReaderTest,
+    FilteredBitmapBatchesPreservePhysicalPositions) {
+  const auto type = ROW({"id", "payload"}, {INTEGER(), BIGINT()});
+  const auto data = makeRowVector(
+      {"id", "payload"},
+      {makeFlatVector<int32_t>({0, 8, 2, 9, 1, 7, 0, 6, 2, 5, 0, 4}),
+       makeFlatVector<int64_t>(12, [](auto row) { return 100 + row; })});
+  auto path = tempPath("physical_positions.parquet");
+  auto writer = createWriter(path, type);
+  writer->write(data);
+  writer->close();
+  auto predicate = ::paimon::PredicateBuilder::GreaterOrEqual(
+      0, "id", ::paimon::FieldType::INT, ::paimon::Literal(int32_t{4}));
+  ASSERT_TRUE(predicate);
+
+  for (bool withSelection : {false, true}) {
+    SCOPED_TRACE(withSelection);
+    auto reader = openReader(path, 4, leafPool_.get());
+    std::optional<::paimon::RoaringBitmap32> selection;
+    if (withSelection) {
+      selection = ::paimon::RoaringBitmap32::From({0, 1, 3, 7, 8, 11});
+    }
+    ArrowSchema schema{};
+    exportToArrow(data, schema, {});
+    ASSERT_TRUE(reader->SetReadSchema(&schema, predicate, selection).ok());
+    if (schema.release) {
+      schema.release(&schema);
+    }
+    std::vector<int64_t> positions;
+    std::vector<RowVectorPtr> retained;
+    while (true) {
+      auto next = reader->NextBatchWithBitmap();
+      ASSERT_TRUE(next.ok()) << next.status().ToString();
+      auto [batch, valid] = std::move(next).value();
+      if (::paimon::BatchReader::IsEofBatch(batch)) {
+        break;
+      }
+      ASSERT_FALSE(valid.IsEmpty());
+      auto vector = std::dynamic_pointer_cast<RowVector>(importFromArrowAsOwner(
+          *batch.second, *batch.first, {}, leafPool_.get()));
+      retained.push_back(vector);
+      EXPECT_EQ(valid.Cardinality(), vector->size());
+      EXPECT_TRUE(reader->GetPreviousBatchFileRowId(vector->size())
+                      .status()
+                      .IsInvalid());
+      // The first physical window [0,4) has exactly two survivors, rows 1,3.
+      // Re-expanding those into a sparse physical span would return 3 rows.
+      if (retained.size() == 1) {
+        EXPECT_EQ(vector->size(), 2);
+        EXPECT_EQ(reader->GetPreviousBatchFileRowId(0).value(), 1);
+        EXPECT_EQ(reader->GetPreviousBatchFileRowId(1).value(), 3);
+      }
+      auto* payload = vector->childAt(1)->as<SimpleVector<int64_t>>();
+      for (auto it = valid.Begin(); it != valid.End(); ++it) {
+        EXPECT_EQ(
+            payload->valueAt(*it),
+            100 + reader->GetPreviousBatchFileRowId(*it).value());
+        positions.push_back(payload->valueAt(*it) - 100);
+      }
+    }
+    EXPECT_EQ(
+        positions,
+        withSelection ? std::vector<int64_t>({1, 3, 7, 11})
+                      : std::vector<int64_t>({1, 3, 5, 7, 9, 11}));
+    EXPECT_TRUE(reader->SupportPreciseBitmapSelection());
+    reader->Close();
+    // Exported data must retain its ownership after the reader is closed.
+    ASSERT_FALSE(retained.empty());
+    EXPECT_GT(retained.front()->size(), 0);
+    EXPECT_EQ(
+        retained.front()->childAt(1)->as<SimpleVector<int64_t>>()->valueAt(0),
+        101);
+  }
+}
+
+TEST_F(PaimonParquetReaderTest, AllNullColumnsExportPrimitiveArrowArrays) {
+  auto data = makeRowVector(
+      {"id", "age", "name"},
+      {makeFlatVector<int64_t>({1, 2, 3}),
+       makeNullableFlatVector<int32_t>(
+           {std::nullopt, std::nullopt, std::nullopt}),
+       makeNullableFlatVector<StringView>(
+           {std::nullopt, std::nullopt, std::nullopt})});
+  auto path = tempPath("all_null_columns.parquet");
+  auto writer = createWriter(path, asRowType(data->type()));
+  writer->write(data);
+  writer->close();
+  auto reader = openReader(path, 8, leafPool_.get());
+  auto next = reader->NextBatch();
+  ASSERT_TRUE(next.ok()) << next.status().ToString();
+  auto batch = std::move(next).value();
+  // Paimon's row merge accesses primitive Arrow buffers directly. A Bolt
+  // constant-null column must not escape as a run-end encoded Arrow array.
+  EXPECT_STREQ(batch.second->children[1]->format, "i");
+  EXPECT_STREQ(batch.second->children[2]->format, "u");
+  if (HasFailure()) {
+    batch.first->release(batch.first.get());
+    batch.second->release(batch.second.get());
+    return;
+  }
+  auto actual =
+      importFromArrowAsOwner(*batch.second, *batch.first, {}, leafPool_.get());
+  test::assertEqualVectors(data, actual);
+}
+
+TEST_F(PaimonParquetReaderTest, FilteredPlainBatchesPreserveCompactRowMapping) {
+  const auto type = ROW({"id"}, {INTEGER()});
+  auto data = makeRowVector(
+      {"id"}, {makeFlatVector<int32_t>(12, [](auto i) { return i; })});
+  auto path = tempPath("plain_positions.parquet");
+  auto writer = createWriter(path, type);
+  writer->write(data);
+  writer->close();
+  auto reader = openReader(path, 5, leafPool_.get());
+  ArrowSchema schema{};
+  exportToArrow(data, schema, {});
+  auto predicate = ::paimon::PredicateBuilder::GreaterOrEqual(
+      0, "id", ::paimon::FieldType::INT, ::paimon::Literal(int32_t{2}));
+  auto selection = ::paimon::RoaringBitmap32::From({0, 2, 3, 6, 7, 8, 11});
+  ASSERT_TRUE(reader->SetReadSchema(&schema, predicate, selection).ok());
+  if (schema.release) {
+    schema.release(&schema);
+  }
+  std::vector<int32_t> ids;
+  while (true) {
+    auto next = reader->NextBatch();
+    ASSERT_TRUE(next.ok()) << next.status().ToString();
+    auto batch = std::move(next).value();
+    if (::paimon::BatchReader::IsEofBatch(batch)) {
+      break;
+    }
+    auto vector = std::dynamic_pointer_cast<RowVector>(importFromArrowAsOwner(
+        *batch.second, *batch.first, {}, leafPool_.get()));
+    auto* values = vector->childAt(0)->as<SimpleVector<int32_t>>();
+    for (vector_size_t i = 0; i < vector->size(); ++i) {
+      EXPECT_EQ(
+          values->valueAt(i), reader->GetPreviousBatchFileRowId(i).value());
+      ids.push_back(values->valueAt(i));
+    }
+  }
+  EXPECT_EQ(ids, std::vector<int32_t>({2, 3, 6, 7, 8, 11}));
+}
+
+TEST_F(PaimonParquetReaderTest, EmptyProjectionAndBitmapReset) {
+  auto data = makeRowVector(
+      {"id"}, {makeFlatVector<int32_t>(12, [](auto i) { return i; })});
+  auto path = tempPath("empty_projection.parquet");
+  auto writer = createWriter(path, asRowType(data->type()));
+  writer->write(data);
+  writer->close();
+  auto reader = openReader(path, 5, leafPool_.get());
+  for (auto selected :
+       {std::vector<int32_t>{1, 4, 6, 10},
+        std::vector<int32_t>{},
+        std::vector<int32_t>{3, 9}}) {
+    ArrowSchema schema{};
+    exportToArrow(
+        BaseVector::create(ROW({}, {}), 0, leafPool_.get()), schema, {});
+    auto selection = ::paimon::RoaringBitmap32::From(selected);
+    ASSERT_TRUE(reader->SetReadSchema(&schema, nullptr, selection).ok());
+    if (schema.release) {
+      schema.release(&schema);
+    }
+    std::vector<int32_t> actual;
+    while (true) {
+      auto next = reader->NextBatchWithBitmap();
+      ASSERT_TRUE(next.ok()) << next.status().ToString();
+      auto [batch, valid] = std::move(next).value();
+      if (::paimon::BatchReader::IsEofBatch(batch)) {
+        break;
+      }
+      EXPECT_EQ(batch.second->n_children, 0);
+      for (auto it = valid.Begin(); it != valid.End(); ++it) {
+        actual.push_back(reader->GetPreviousBatchFileRowId(*it).value());
+      }
+      batch.first->release(batch.first.get());
+      batch.second->release(batch.second.get());
+    }
+    EXPECT_EQ(actual, selected);
+  }
+}
+
+TEST_F(
+    PaimonParquetReaderTest,
+    PredicateOnlyColumnWithEmptyProjectionAndPrunedGroups) {
+  const auto type = ROW({"id"}, {INTEGER()});
+  auto path = tempPath("predicate_only.parquet");
+  auto writer = createWriter(path, type);
+  // A pruned row group followed by a group whose first entire batch fails.
+  // The batch size also does not divide the surviving group's row count.
+  writer->write(makeRowVector({"id"}, {makeFlatVector<int32_t>({0, 1, 2, 3})}));
+  writer->flush();
+  writer->write(makeRowVector(
+      {"id"}, {makeFlatVector<int32_t>({0, 1, 2, 3, 4, 9, 6, 8, 7})}));
+  writer->close();
+  auto reader = openReader(path, 4, leafPool_.get());
+  ArrowSchema schema{};
+  exportToArrow(
+      BaseVector::create(ROW({}, {}), 0, leafPool_.get()), schema, {});
+  auto predicate = ::paimon::PredicateBuilder::GreaterOrEqual(
+      0, "id", ::paimon::FieldType::INT, ::paimon::Literal(int32_t{7}));
+  ASSERT_TRUE(reader->SetReadSchema(&schema, predicate, std::nullopt).ok());
+  EXPECT_EQ(schema.release, nullptr);
+  std::vector<int64_t> actual;
+  while (true) {
+    auto next = reader->NextBatchWithBitmap();
+    ASSERT_TRUE(next.ok()) << next.status().ToString();
+    auto [batch, valid] = std::move(next).value();
+    if (::paimon::BatchReader::IsEofBatch(batch)) {
+      break;
+    }
+    EXPECT_EQ(batch.second->n_children, 0);
+    for (auto it = valid.Begin(); it != valid.End(); ++it) {
+      actual.push_back(reader->GetPreviousBatchFileRowId(*it).value());
+    }
+    batch.first->release(batch.first.get());
+    batch.second->release(batch.second.get());
+  }
+  EXPECT_EQ(actual, std::vector<int64_t>({9, 11, 12}));
+}
+
+TEST_F(
+    PaimonParquetReaderTest,
+    MixedBatchInterfacesAndResetClearPreviousMapping) {
+  auto data = makeRowVector(
+      {"id"}, {makeFlatVector<int32_t>(12, [](auto i) { return i; })});
+  auto path = tempPath("mixed_interfaces.parquet");
+  auto writer = createWriter(path, asRowType(data->type()));
+  writer->write(data);
+  writer->close();
+  auto reader = openReader(path, 8, leafPool_.get());
+  auto reset = [&](const TypePtr& type, const std::vector<int32_t>& selected) {
+    ArrowSchema schema{};
+    exportToArrow(BaseVector::create(type, 0, leafPool_.get()), schema, {});
+    auto status = reader->SetReadSchema(
+        &schema, nullptr, ::paimon::RoaringBitmap32::From(selected));
+    EXPECT_EQ(schema.release, nullptr);
+    return status;
+  };
+  ASSERT_TRUE(reset(data->type(), {1, 3, 4, 6, 10}).ok());
+  auto first = reader->NextBatch();
+  ASSERT_TRUE(first.ok());
+  auto batch = std::move(first).value();
+  auto vector = std::dynamic_pointer_cast<RowVector>(
+      importFromArrowAsOwner(*batch.second, *batch.first, {}, leafPool_.get()));
+  ASSERT_EQ(vector->size(), 4);
+  EXPECT_EQ(vector->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(0), 1);
+  EXPECT_EQ(reader->GetPreviousBatchFileRowId(3).value(), 6);
+
+  // A rejected schema reset preserves both the previous mapping and cursor.
+  EXPECT_FALSE(reset(INTEGER(), {0}).ok());
+  EXPECT_EQ(reader->GetPreviousBatchFileRowId(3).value(), 6);
+  auto second = reader->NextBatchWithBitmap();
+  ASSERT_TRUE(second.ok()) << second.status().ToString();
+  auto [secondBatch, valid] = std::move(second).value();
+  EXPECT_EQ(reader->GetPreviousBatchFileRowId(0).value(), 10);
+  EXPECT_EQ(valid, ::paimon::RoaringBitmap32::From({0}));
+  auto secondVector =
+      std::dynamic_pointer_cast<RowVector>(importFromArrowAsOwner(
+          *secondBatch.second, *secondBatch.first, {}, leafPool_.get()));
+  EXPECT_EQ(
+      secondVector->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(0), 10);
+
+  // A successful reset clears the previous mapping and rewinds the file.
+  ASSERT_TRUE(reset(data->type(), {1, 3, 4, 6}).ok());
+  auto pending = reader->NextBatch();
+  ASSERT_TRUE(pending.ok());
+  auto pendingBatch = std::move(pending).value();
+  pendingBatch.first->release(pendingBatch.first.get());
+  pendingBatch.second->release(pendingBatch.second.get());
+  ASSERT_TRUE(reset(data->type(), {11}).ok());
+  EXPECT_TRUE(reader->GetPreviousBatchFileRowId(0).status().IsInvalid());
+  auto last = reader->NextBatch();
+  ASSERT_TRUE(last.ok());
+  auto lastBatch = std::move(last).value();
+  auto lastVector = std::dynamic_pointer_cast<RowVector>(importFromArrowAsOwner(
+      *lastBatch.second, *lastBatch.first, {}, leafPool_.get()));
+  ASSERT_EQ(lastVector->size(), 1);
+  EXPECT_EQ(
+      lastVector->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(0), 11);
+  EXPECT_TRUE(
+      ::paimon::BatchReader::IsEofBatch(reader->NextBatchWithBitmap().value()));
+  EXPECT_TRUE(reader->GetPreviousBatchFileRowId(0).status().IsInvalid());
+  reader->Close();
+  EXPECT_TRUE(reader->GetPreviousBatchFileRowId(0).status().IsInvalid());
+  EXPECT_EQ(vector->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(0), 1);
+  EXPECT_EQ(
+      secondVector->childAt(0)->as<SimpleVector<int32_t>>()->valueAt(0), 10);
 }
 
 } // namespace

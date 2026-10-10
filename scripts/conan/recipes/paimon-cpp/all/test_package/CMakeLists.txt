@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-versions:
-  "v0.3.0":
-    folder: all
-  "0.0.4-bolt":
-    folder: all
+cmake_minimum_required(VERSION 3.15)
+project(test_package LANGUAGES CXX)
+
+find_package(Paimon REQUIRED CONFIG)
+add_executable(test_package test_package.cpp)
+target_link_libraries(test_package PRIVATE Paimon::core)
+target_compile_features(test_package PRIVATE cxx_std_17)
+if(PAIMON_HAS_ROW_MAPPING)
+  target_compile_definitions(test_package PRIVATE PAIMON_HAS_ROW_MAPPING=1)
+endif()

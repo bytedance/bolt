@@ -1,0 +1,594 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -58,6 +58,7 @@
+ option(PAIMON_USE_ASAN "Use Address Sanitizer" OFF)
+ option(PAIMON_USE_UBSAN "Use Undefined Behavior Sanitizer" OFF)
+ option(PAIMON_USE_CXX11_ABI "Use C++11 ABI" ON)
++option(PAIMON_ENABLE_PARQUET "Whether to enable native parquet file format" ON)
+ option(PAIMON_ENABLE_AVRO "Whether to enable avro file format" ON)
+ option(PAIMON_ENABLE_ORC "Whether to enable orc file format" ON)
+ option(PAIMON_ENABLE_JINDO "Whether to enable jindo file system" OFF)
+@@ -292,8 +293,20 @@
+ #
+ # For generate_export_header() and add_compiler_export_flags().
+ include(GenerateExportHeader)
++# Always include ExternalProject to have macros available; heavy builds are
++# controlled inside ThirdpartyToolchain.
+ include(ExternalProject)
+-include(ThirdpartyToolchain)
++
++# Resolve dependencies: either from Conan packages or from ThirdpartyToolchain.
++# Both paths create targets with identical names (arrow, fmt, glog, tbb, etc.)
++# and proper INTERFACE_INCLUDE_DIRECTORIES so that BuildUtils.cmake's automatic
++# propagation works without per-subdirectory workarounds.
++if(PAIMON_USE_CONAN_DEPS)
++    include(PaimonConanDeps)
++    paimon_setup_conan_deps()
++else()
++    include(ThirdpartyToolchain)
++endif()
+ 
+ add_custom_target(paimon_dependencies)
+ 
+@@ -305,6 +318,10 @@
+ 
+ add_subdirectory(third_party/roaring_bitmap EXCLUDE_FROM_ALL)
+ add_subdirectory(third_party/xxhash EXCLUDE_FROM_ALL)
++
++# Static consumers need the packaged internal dependency archives.
++install(FILES $<TARGET_FILE:roaring_bitmap> $<TARGET_FILE:xxhash> $<TARGET_FILE:tbb>
++        DESTINATION ${CMAKE_INSTALL_LIBDIR})
+ 
+ # ---- tantivy-fulltext Rust FFI via Corrosion-rs --------------------------------
+ # Corrosion wraps the Cargo crate as a CMake target named `paimon_tantivy_ffi`.
+@@ -347,11 +364,48 @@
+ include_directories("${CMAKE_SOURCE_DIR}/third_party/roaring_bitmap")
+ include_directories("${CMAKE_SOURCE_DIR}/third_party/xxhash")
+ 
+-include_directories(SYSTEM ${ARROW_INCLUDE_DIR})
++if(ARROW_INCLUDE_DIR)
++  include_directories(SYSTEM ${ARROW_INCLUDE_DIR})
++endif()
++if(GLOG_INCLUDE_DIR)
++  include_directories(SYSTEM ${GLOG_INCLUDE_DIR})
++endif()
++if(FMT_INCLUDE_DIR)
++  include_directories(SYSTEM ${FMT_INCLUDE_DIR})
++endif()
++if(RAPIDJSON_INCLUDE_DIR)
++  include_directories(SYSTEM ${RAPIDJSON_INCLUDE_DIR})
++endif()
++if(LZ4_INCLUDE_DIR)
++  include_directories(SYSTEM ${LZ4_INCLUDE_DIR})
++endif()
++if(SNAPPY_INCLUDE_DIR)
++  include_directories(SYSTEM ${SNAPPY_INCLUDE_DIR})
++endif()
++if(ZSTD_INCLUDE_DIR)
++  include_directories(SYSTEM ${ZSTD_INCLUDE_DIR})
++endif()
++if(ZLIB_INCLUDE_DIR)
++  include_directories(SYSTEM ${ZLIB_INCLUDE_DIR})
++endif()
++
++# Include toolchain macros; guarded builds inside the module.
++include(ThirdpartyToolchain)
++
++# If using Conan but ORC is enabled and not provided by Conan, build ORC from source.
++if(PAIMON_USE_CONAN_DEPS AND PAIMON_ENABLE_ORC AND NOT TARGET orc::orc)
++  message(STATUS "ORC not found via Conan; falling back to source build")
++  build_protobuf()
++  build_orc()
++endif()
++
++# If using Conan but Avro is enabled and not provided by Conan, build Avro from source.
++if(PAIMON_USE_CONAN_DEPS AND PAIMON_ENABLE_AVRO AND NOT TARGET avro)
++  message(STATUS "Avro not found via Conan; falling back to source build")
++  build_avro()
++endif()
++
+ include_directories(SYSTEM ${TBB_INCLUDE_DIR})
+-
+-include_directories(SYSTEM ${GLOG_INCLUDE_DIR})
+-add_compile_definitions("GLOG_USE_GLOG_EXPORT")
+ 
+ set(THREADS_PREFER_PTHREAD_FLAG ON)
+ find_package(Threads REQUIRED)
+@@ -362,6 +416,10 @@
+ endif()
+ 
+ set(ENV{PAIMON_TEST_DATA} "${CMAKE_SOURCE_DIR}/test/test_data")
++
++if((PAIMON_BUILD_TESTS OR PAIMON_BUILD_BENCHMARKS) AND NOT PAIMON_ENABLE_PARQUET)
++    message(FATAL_ERROR "Tests and benchmarks require PAIMON_ENABLE_PARQUET")
++endif()
+ 
+ if(PAIMON_BUILD_TESTS OR PAIMON_BUILD_BENCHMARKS)
+     resolve_dependency(GTest)
+@@ -509,7 +567,9 @@
+ add_subdirectory(src/paimon/fs/s3)
+ add_subdirectory(src/paimon/format/blob)
+ add_subdirectory(src/paimon/format/orc)
+-add_subdirectory(src/paimon/format/parquet)
++if(PAIMON_ENABLE_PARQUET)
++    add_subdirectory(src/paimon/format/parquet)
++endif()
+ add_subdirectory(src/paimon/format/avro)
+ if(PAIMON_ENABLE_LUMINA)
+     add_subdirectory(src/paimon/global_index/lumina)
+diff --git a/cmake_modules/PaimonConanDeps.cmake b/cmake_modules/PaimonConanDeps.cmake
+--- /dev/null
++++ b/cmake_modules/PaimonConanDeps.cmake
+@@ -0,0 +1,173 @@
++# Copyright 2024-present Alibaba Inc.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++# PaimonConanDeps.cmake
++#
++# Resolves dependencies from Conan CMakeDeps-generated configs and populates
++# the exact same variables and targets that ThirdpartyToolchain does when building
++# from source.  This allows all downstream CMakeLists to work identically in both
++# modes without any per-file conan/thirdparty branching.
++
++macro(paimon_setup_conan_deps)
++
++    # --- Find all Conan packages ---
++    # This loads the *-data.cmake files which set *_INCLUDE_DIRS_RELEASE etc.
++    find_package(Arrow QUIET CONFIG)
++    find_package(arrow QUIET CONFIG)
++    find_package(Parquet QUIET CONFIG)
++    find_package(fmt)
++    find_package(glog QUIET CONFIG)
++    find_package(RapidJSON REQUIRED CONFIG)
++
++    find_package(ZLIB QUIET)
++    find_package(zstd QUIET CONFIG)
++    find_package(lz4 QUIET CONFIG)
++    find_package(Snappy QUIET CONFIG)
++    find_package(Protobuf QUIET CONFIG)
++
++    # --- Helper: get the config suffix from the active build type ---
++    # Conan generates variables like <pkg>_INCLUDE_DIRS_RELEASE or _DEBUG.
++    # Map CMAKE_BUILD_TYPE to the suffix Conan uses. SetupCxxFlags uppercases it for compatibility, we also compare the uppercase version.
++    string(TOUPPER "${CMAKE_BUILD_TYPE}" _PAIMON_BUILD_TYPE)
++    if(_PAIMON_BUILD_TYPE STREQUAL "DEBUG")
++        set(_PAIMON_CONAN_CONFIG_SUFFIX "_DEBUG")
++    elseif(_PAIMON_BUILD_TYPE STREQUAL "RELWITHDEBINFO")
++        # Conan doesn't generate RelWithDebInfo data files; fall back to Release
++        set(_PAIMON_CONAN_CONFIG_SUFFIX "_RELEASE")
++    elseif(_PAIMON_BUILD_TYPE STREQUAL "MINSIZEREL")
++        set(_PAIMON_CONAN_CONFIG_SUFFIX "_RELEASE")
++    else()
++        # Default to Release (covers empty CMAKE_BUILD_TYPE and unknown types)
++        set(_PAIMON_CONAN_CONFIG_SUFFIX "_RELEASE")
++    endif()
++
++    # --- Helper: get a Conan variable that has a config suffix ---
++    # Usage: _paimon_conan_var(RESULT_VAR pkg_VAR_NAME)
++    # e.g.:  _paimon_conan_var(ARROW_INCLUDE_DIR arrow_INCLUDE_DIRS)
++    # This expands to ${arrow_INCLUDE_DIRS_RELEASE} or ${arrow_INCLUDE_DIRS_DEBUG}
++    macro(_paimon_conan_var result_var pkg_var_base)
++        set(${result_var} ${${pkg_var_base}${_PAIMON_CONAN_CONFIG_SUFFIX}})
++    endmacro()
++
++    # --- Populate *_INCLUDE_DIR variables (same names ThirdpartyToolchain uses) ---
++    # Conan CMakeDeps generates <pkg>_INCLUDE_DIRS_<CONFIG> with plain paths.
++    # These are set by the *-data.cmake files that find_package() includes.
++    # Note: variable names use the Conan package name (e.g. onetbb not TBB).
++    _paimon_conan_var(ARROW_INCLUDE_DIR  arrow_INCLUDE_DIRS)
++    _paimon_conan_var(FMT_INCLUDE_DIR    fmt_INCLUDE_DIRS)
++    _paimon_conan_var(GLOG_INCLUDE_DIR   glog_INCLUDE_DIRS)
++    _paimon_conan_var(LZ4_INCLUDE_DIR    lz4_INCLUDE_DIRS)
++    _paimon_conan_var(SNAPPY_INCLUDE_DIR snappy_INCLUDE_DIRS)
++    _paimon_conan_var(ZSTD_INCLUDE_DIR   zstd_INCLUDE_DIRS)
++    _paimon_conan_var(ZLIB_INCLUDE_DIR   zlib_INCLUDE_DIRS)
++    _paimon_conan_var(RAPIDJSON_INCLUDE_DIR rapidjson_INCLUDE_DIRS)
++
++    # --- Create unified alias targets (same names ThirdpartyToolchain uses) ---
++    # Must be INTERFACE IMPORTED with explicit target_link_libraries.
++    # This must happen at macro scope (not inside a function) so that
++    # generator expressions in link libraries propagate correctly at build time.
++
++    # Arrow: aggregate target. Link to arrow::arrow for transitive deps.
++    if(NOT TARGET arrow)
++        add_library(arrow INTERFACE IMPORTED)
++        if(TARGET Arrow::arrow)
++            target_link_libraries(arrow INTERFACE Arrow::arrow)
++        elseif(TARGET arrow::arrow)
++            target_link_libraries(arrow INTERFACE arrow::arrow)
++        endif()
++        if(ARROW_INCLUDE_DIR)
++            target_include_directories(arrow INTERFACE ${ARROW_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET parquet)
++        add_library(parquet INTERFACE IMPORTED)
++        if(TARGET Parquet::parquet)
++            target_link_libraries(parquet INTERFACE Parquet::parquet)
++        endif()
++    endif()
++
++    if(NOT TARGET fmt)
++        add_library(fmt INTERFACE IMPORTED)
++        if(TARGET fmt::fmt)
++            target_link_libraries(fmt INTERFACE fmt::fmt)
++            target_include_directories(fmt INTERFACE ${FMT_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET glog)
++        add_library(glog INTERFACE IMPORTED)
++        if(TARGET glog::glog)
++            target_link_libraries(glog INTERFACE glog::glog)
++            target_include_directories(glog INTERFACE ${GLOG_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET RapidJSON)
++        add_library(RapidJSON INTERFACE IMPORTED)
++        if(TARGET RapidJSON::RapidJSON)
++            target_link_libraries(RapidJSON INTERFACE RapidJSON::RapidJSON)
++            target_include_directories(RapidJSON INTERFACE ${RAPIDJSON_INCLUDE_DIR})
++        elseif(TARGET rapidjson)
++            target_link_libraries(RapidJSON INTERFACE rapidjson)
++            target_include_directories(RapidJSON INTERFACE ${RAPIDJSON_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET zlib)
++        add_library(zlib INTERFACE IMPORTED)
++        if(TARGET ZLIB::ZLIB)
++            target_link_libraries(zlib INTERFACE ZLIB::ZLIB)
++            target_include_directories(zlib INTERFACE ${ZLIB_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET zstd)
++        add_library(zstd INTERFACE IMPORTED)
++        if(TARGET zstd::zstd)
++            target_link_libraries(zstd INTERFACE zstd::zstd)
++            target_include_directories(zstd INTERFACE ${ZSTD_INCLUDE_DIR})
++        elseif(TARGET zstd::libzstd_static)
++            target_link_libraries(zstd INTERFACE zstd::libzstd_static)
++            target_include_directories(zstd INTERFACE ${ZSTD_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET lz4)
++        add_library(lz4 INTERFACE IMPORTED)
++        if(TARGET LZ4::lz4_static)
++            target_link_libraries(lz4 INTERFACE LZ4::lz4_static)
++            target_include_directories(lz4 INTERFACE ${LZ4_INCLUDE_DIR})
++        elseif(TARGET lz4::lz4)
++            target_link_libraries(lz4 INTERFACE lz4::lz4)
++            target_include_directories(lz4 INTERFACE ${LZ4_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET snappy)
++        add_library(snappy INTERFACE IMPORTED)
++        if(TARGET Snappy::snappy)
++            target_link_libraries(snappy INTERFACE Snappy::snappy)
++            target_include_directories(snappy INTERFACE ${SNAPPY_INCLUDE_DIR})
++        endif()
++    endif()
++
++    if(NOT TARGET libprotobuf)
++        add_library(libprotobuf INTERFACE IMPORTED)
++        if(TARGET protobuf::libprotobuf)
++            target_link_libraries(libprotobuf INTERFACE protobuf::libprotobuf)
++        endif()
++    endif()
++
++endmacro()
+diff --git a/cmake_modules/ThirdpartyToolchain.cmake b/cmake_modules/ThirdpartyToolchain.cmake
+--- a/cmake_modules/ThirdpartyToolchain.cmake
++++ b/cmake_modules/ThirdpartyToolchain.cmake
+@@ -860,7 +860,8 @@
+         ${EP_COMMON_CMAKE_ARGS} "-DENABLE_TEST=OFF" "-DCPPJIEBA_TOP_LEVEL_PROJECT=OFF"
+         "-DCMAKE_INSTALL_PREFIX=${JIEBA_INSTALL}")
+ 
+-    set(PATCH_FILE "${CMAKE_CURRENT_LIST_DIR}/jieba.diff")
++    # Use absolute path relative to project source to avoid context issues
++    set(PATCH_FILE "${CMAKE_SOURCE_DIR}/cmake_modules/jieba.diff")
+     externalproject_add(jieba_ep
+                         ${EP_COMMON_OPTIONS}
+                         URL ${JIEBA_SOURCE_URL}
+@@ -1375,22 +1376,77 @@
+     file(MAKE_DIRECTORY "${PROTOBUF_INCLUDE_DIR}")
+ 
+     include_directories(SYSTEM ${PROTOBUF_INCLUDE_DIR})
+-    add_library(libprotobuf STATIC IMPORTED)
+-    set_target_properties(libprotobuf PROPERTIES IMPORTED_LOCATION ${PROTOBUF_STATIC_LIB})
+-    target_include_directories(libprotobuf INTERFACE ${PROTOBUF_INCLUDE_DIR})
+-    add_library(libprotoc STATIC IMPORTED)
+-    set_target_properties(libprotoc PROPERTIES IMPORTED_LOCATION ${PROTOC_STATIC_LIB})
+-    target_include_directories(libprotoc INTERFACE ${PROTOBUF_INCLUDE_DIR})
+-
+-    add_executable(protoc IMPORTED)
+-    set_target_properties(protoc PROPERTIES IMPORTED_LOCATION ${PROTOBUF_COMPILER})
+-
+-    add_dependencies(libprotobuf protobuf_ep)
+-    add_dependencies(protoc protobuf_ep)
++    # Avoid duplicate imported targets if Protobuf was found via Conan
++    if(NOT TARGET libprotobuf)
++        add_library(libprotobuf STATIC IMPORTED)
++        set_target_properties(libprotobuf PROPERTIES IMPORTED_LOCATION ${PROTOBUF_STATIC_LIB})
++        target_include_directories(libprotobuf INTERFACE ${PROTOBUF_INCLUDE_DIR})
++        add_dependencies(libprotobuf protobuf_ep)
++    endif()
++    if(NOT TARGET libprotoc)
++        add_library(libprotoc STATIC IMPORTED)
++        set_target_properties(libprotoc PROPERTIES IMPORTED_LOCATION ${PROTOC_STATIC_LIB})
++        target_include_directories(libprotoc INTERFACE ${PROTOBUF_INCLUDE_DIR})
++        add_dependencies(libprotoc protobuf_ep)
++    endif()
++    if(NOT TARGET protoc)
++        add_executable(protoc IMPORTED)
++        set_target_properties(protoc PROPERTIES IMPORTED_LOCATION ${PROTOBUF_COMPILER})
++        add_dependencies(protoc protobuf_ep)
++    endif()
+ endmacro()
+ 
+ macro(build_avro)
+     message(STATUS "Building avro from source")
++
++    # Ensure required compression/utility targets exist; use Conan packages if
++    # available, otherwise build from source.
++    if(NOT TARGET snappy)
++        find_package(Snappy QUIET CONFIG)
++        if(TARGET Snappy::snappy)
++            add_library(snappy INTERFACE IMPORTED)
++            target_link_libraries(snappy INTERFACE Snappy::snappy)
++        else()
++            build_snappy()
++        endif()
++    endif()
++
++    if(NOT TARGET zstd)
++        find_package(zstd QUIET CONFIG)
++        find_package(Zstd QUIET CONFIG)
++        if(TARGET zstd::zstd)
++            add_library(zstd INTERFACE IMPORTED)
++            target_link_libraries(zstd INTERFACE zstd::zstd)
++        elseif(TARGET Zstd::Zstd)
++            add_library(zstd INTERFACE IMPORTED)
++            target_link_libraries(zstd INTERFACE Zstd::Zstd)
++        elseif(TARGET zstd::libzstd_static)
++            add_library(zstd INTERFACE IMPORTED)
++            target_link_libraries(zstd INTERFACE zstd::libzstd_static)
++        else()
++            build_zstd()
++        endif()
++    endif()
++
++    if(NOT TARGET zlib)
++        find_package(ZLIB QUIET)
++        if(TARGET ZLIB::ZLIB)
++            add_library(zlib INTERFACE IMPORTED)
++            target_link_libraries(zlib INTERFACE ZLIB::ZLIB)
++        else()
++            build_zlib()
++        endif()
++    endif()
++
++    if(NOT TARGET fmt)
++        find_package(fmt QUIET CONFIG)
++        if(TARGET fmt::fmt)
++            add_library(fmt INTERFACE IMPORTED)
++            target_link_libraries(fmt INTERFACE fmt::fmt)
++        else()
++            build_fmt()
++        endif()
++    endif()
+     set(AVRO_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/avro_ep-install")
+     set(AVRO_INCLUDE_DIR "${AVRO_PREFIX}/include")
+     set(AVRO_STATIC_LIB_NAME avrocpp_s)
+@@ -1420,6 +1476,18 @@
+         "-Dfmt_ROOT=${AVRO_FMT_ROOT}"
+         "-Dzstd_ROOT=${AVRO_ZSTD_ROOT}"
+         "-DSnappy_ROOT=${AVRO_SNAPPY_ROOT}")
++    if(PAIMON_USE_CONAN_DEPS)
++        # The Avro ExternalProject starts a separate CMake configure. Point it
++        # at the parent's CMakeDeps configs explicitly so sysroot-only
++        # toolchains don't re-root the Conan package paths.
++        get_filename_component(AVRO_CONAN_GENERATORS_DIR
++                               "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
++        list(APPEND AVRO_CMAKE_ARGS
++             "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
++             "-DZLIB_DIR=${AVRO_CONAN_GENERATORS_DIR}"
++             "-DSnappy_DIR=${AVRO_CONAN_GENERATORS_DIR}"
++             "-Dzstd_DIR=${AVRO_CONAN_GENERATORS_DIR}")
++    endif()
+     externalproject_add(avro_ep
+                         URL ${AVRO_SOURCE_URL}
+                         URL_HASH "SHA256=${PAIMON_AVRO_BUILD_SHA256_CHECKSUM}"
+@@ -1436,10 +1504,73 @@
+     target_include_directories(avro INTERFACE ${AVRO_INCLUDE_DIR})
+     target_link_libraries(avro INTERFACE zlib zstd snappy)
+     add_dependencies(avro avro_ep)
++
++    # Install avro external project output so Conan can package it.
++    # Use file-based install (not install(TARGETS)) to avoid issues where
++    # the IMPORTED target may not be fully registered at configure time
++    # in certain build contexts (e.g., conan build .).
++    install(FILES "${AVRO_STATIC_LIB}"
++            DESTINATION ${CMAKE_INSTALL_LIBDIR})
++    install(DIRECTORY "${AVRO_INCLUDE_DIR}/"
++            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
++            FILES_MATCHING PATTERN "*.h")
+ endmacro()
+ 
+ macro(build_orc)
+     message(STATUS "Building orc from source")
++
++    # Ensure required compression targets exist; if not, build them from source.
++    if(NOT TARGET snappy)
++        find_package(Snappy QUIET CONFIG)
++        if(TARGET Snappy::snappy)
++            add_library(snappy INTERFACE IMPORTED)
++            target_link_libraries(snappy INTERFACE Snappy::snappy)
++        else()
++            build_snappy()
++        endif()
++    endif()
++    if(NOT TARGET lz4)
++        find_package(lz4 QUIET CONFIG)
++        if(TARGET lz4::lz4)
++            add_library(lz4 INTERFACE IMPORTED)
++            target_link_libraries(lz4 INTERFACE lz4::lz4)
++        else()
++            build_lz4()
++        endif()
++    endif()
++    if(NOT TARGET zstd)
++        # Try common Conan targets
++        find_package(zstd QUIET CONFIG)
++        find_package(Zstd QUIET CONFIG)
++        if(TARGET zstd::zstd)
++            add_library(zstd INTERFACE IMPORTED)
++            target_link_libraries(zstd INTERFACE zstd::zstd)
++        elseif(TARGET Zstd::Zstd)
++            add_library(zstd INTERFACE IMPORTED)
++            target_link_libraries(zstd INTERFACE Zstd::Zstd)
++        elseif(TARGET zstd::libzstd_static)
++            add_library(zstd INTERFACE IMPORTED)
++            target_link_libraries(zstd INTERFACE zstd::libzstd_static)
++        else()
++            build_zstd()
++        endif()
++    endif()
++    if(NOT TARGET zlib)
++        find_package(ZLIB QUIET)
++        if(TARGET ZLIB::ZLIB)
++            add_library(zlib INTERFACE IMPORTED)
++            target_link_libraries(zlib INTERFACE ZLIB::ZLIB)
++        else()
++            build_zlib()
++        endif()
++    endif()
++    if(NOT TARGET libprotobuf)
++        find_package(Protobuf QUIET CONFIG)
++        if(TARGET protobuf::libprotobuf)
++            add_library(libprotobuf INTERFACE IMPORTED)
++            target_link_libraries(libprotobuf INTERFACE protobuf::libprotobuf)
++        endif()
++    endif()
+ 
+     get_target_property(ORC_SNAPPY_INCLUDE_DIR snappy INTERFACE_INCLUDE_DIRECTORIES)
+     get_filename_component(ORC_SNAPPY_ROOT "${ORC_SNAPPY_INCLUDE_DIR}" DIRECTORY)
+@@ -1492,7 +1623,8 @@
+         -DBUILD_TOOLS=OFF
+         -DBUILD_CPP_ENABLE_METRICS=ON)
+ 
+-    set(PATCH_FILE "${CMAKE_CURRENT_LIST_DIR}/orc.diff")
++    # Use absolute path relative to project source to avoid context issues
++    set(PATCH_FILE "${CMAKE_SOURCE_DIR}/cmake_modules/orc.diff")
+     externalproject_add(orc_ep
+                         URL ${ORC_SOURCE_URL}
+                         URL_HASH "SHA256=${PAIMON_ORC_BUILD_SHA256_CHECKSUM}"
+@@ -1618,7 +1750,8 @@
+         -DBUILD_WARNING_LEVEL=PRODUCTION) # ignore warnings under gcc8
+ 
+     set(ARROW_CONFIGURE SOURCE_SUBDIR "cpp" CMAKE_ARGS ${ARROW_CMAKE_ARGS})
+-    set(PATCH_FILE "${CMAKE_CURRENT_LIST_DIR}/arrow.diff")
++    # Use absolute path relative to project source to avoid context issues
++    set(PATCH_FILE "${CMAKE_SOURCE_DIR}/cmake_modules/arrow.diff")
+     externalproject_add(arrow_ep
+                         URL ${ARROW_SOURCE_URL}
+                         URL_HASH "SHA256=${PAIMON_ARROW_BUILD_SHA256_CHECKSUM}"
+@@ -1885,6 +2018,10 @@
+     endif()
+ endmacro()
+ 
++if(PAIMON_USE_CONAN_DEPS)
++    build_tbb()
++else()
++
+ resolve_dependency(fmt)
+ resolve_dependency(RapidJSON)
+ paimon_enforce_patched_dependency_policy()
+@@ -1929,3 +2066,5 @@
+ if(PAIMON_ENABLE_LUCENE OR PAIMON_ENABLE_TANTIVY)
+     build_jieba()
+ endif()
++
++endif()
+diff --git a/src/paimon/common/utils/arrow/mem_utils.cpp b/src/paimon/common/utils/arrow/mem_utils.cpp
+--- a/src/paimon/common/utils/arrow/mem_utils.cpp
++++ b/src/paimon/common/utils/arrow/mem_utils.cpp
+@@ -47,7 +47,7 @@
+             return arrow::Status::OutOfMemory(fmt::format("failed to allocate {} bytes", size));
+         }
+         *out = new_out;
+-        stats_.DidAllocateBytes(size);
++        stats_.UpdateAllocatedBytes(size);
+         return arrow::Status::OK();
+     }
+ 
+@@ -66,13 +66,15 @@
+                 fmt::format("failed to reallocate memory from {} to {} bytes", old_size, new_size));
+         }
+         *ptr = new_ptr;
+-        stats_.DidReallocateBytes(old_size, new_size);
++        if (new_size != old_size) {
++            stats_.UpdateAllocatedBytes(new_size - old_size);
++        }
+         return arrow::Status::OK();
+     }
+ 
+     void Free(uint8_t* buffer, int64_t size, int64_t alignment) override {
+         pool_.Free(buffer, size, alignment);
+-        stats_.DidFreeBytes(size);
++        stats_.UpdateAllocatedBytes(-size, true);
+     }
+ 
+     int64_t bytes_allocated() const override {
+diff --git a/src/paimon/common/utils/preconditions.h b/src/paimon/common/utils/preconditions.h
+--- a/src/paimon/common/utils/preconditions.h
++++ b/src/paimon/common/utils/preconditions.h
+@@ -22,7 +22,6 @@
+ #include <string>
+ #include <utility>
+ 
+-#include "fmt/base.h"
+ #include "fmt/core.h"
+ #include "fmt/format.h"
+ #include "fmt/ranges.h"
+diff --git a/src/paimon/core/operation/file_store_commit_impl.cpp b/src/paimon/core/operation/file_store_commit_impl.cpp
+--- a/src/paimon/core/operation/file_store_commit_impl.cpp
++++ b/src/paimon/core/operation/file_store_commit_impl.cpp
+@@ -1181,10 +1181,17 @@
+     std::optional<int64_t> changelog_record_count =
+         ManifestEntry::NullableRecordCount(changelog_entries);
+     int64_t schema_id = 0;
+-    PAIMON_ASSIGN_OR_RAISE(std::optional<std::shared_ptr<TableSchema>> table_schema,
+-                           schema_manager_->Latest());
++    std::shared_ptr<TableSchema> table_schema;
++    {
++        auto _schema_result = schema_manager_->Latest();
++        PAIMON_RETURN_IF_(!_schema_result.ok(), std::move(_schema_result).status(),
++                          "schema_manager_->Latest()");
++        if (_schema_result.value().has_value()) {
++            table_schema = std::move(_schema_result.value()).value();
++        }
++    }
+     if (table_schema) {
+-        schema_id = table_schema.value()->Id();
++        schema_id = table_schema->Id();
+     }
+ 
+     // Keep Java semantics: inherit previous stats only when schema matches.

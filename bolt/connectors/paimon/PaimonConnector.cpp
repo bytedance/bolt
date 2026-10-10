@@ -27,6 +27,10 @@
 #include "bolt/connectors/paimon/PaimonDataSource.h"
 #include "bolt/connectors/paimon/PaimonParquetReader.h"
 
+#ifdef BOLT_ENABLE_ORC
+#include "bolt/connectors/paimon/PaimonOrcReader.h"
+#endif
+
 // Forward declarations for paimon factories whose headers are not publicly
 // exposed by their respective conan components. Explicit registration here
 // avoids linker stripping of REGISTER_PAIMON_FACTORY's static constructors.
@@ -92,11 +96,14 @@ PaimonConnectorFactory::PaimonConnectorFactory()
     : ConnectorFactory(kPaimonConnectorName) {
   LOG(INFO)
       << "[PAIMON] PaimonConnectorFactory constructed, registering factories";
-  // Register paimon factories (parquet format, avro format, Bolt filesystem)
+  // Register paimon factories (Parquet, ORC, Avro and Bolt filesystem)
   // so they are available when paimon-cpp resolves format identifiers. Using
   // explicit calls avoids linker stripping of REGISTER_PAIMON_FACTORY's static
   // constructors from paimon's format libraries.
   EnsurePaimonParquetFormatRegistered();
+#ifdef BOLT_ENABLE_ORC
+  EnsurePaimonOrcFormatRegistered();
+#endif
   ensureAvroFormatFactoryRegistered();
   EnsurePaimonBoltFileSystemRegistered();
 }

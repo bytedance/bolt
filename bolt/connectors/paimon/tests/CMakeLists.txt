@@ -54,6 +54,10 @@ set(
   PaimonParquetReaderTest.cpp
 )
 
+if(BOLT_ENABLE_ORC)
+  list(APPEND PAIMON_CONNECTOR_TEST_SOURCES PaimonOrcReaderTest.cpp)
+endif()
+
 if(BOLT_ENABLE_HDFS)
   list(
     APPEND PAIMON_CONNECTOR_TEST_SOURCES
