@@ -35,6 +35,7 @@
 #include "bolt/core/PlanNode.h"
 #include "bolt/substrait/BoltSubstraitSignature.h"
 #include "bolt/substrait/proto/substrait/algebra.pb.h"
+#include "bolt/substrait/proto/substrait/extensions/extensions.pb.h"
 #include "bolt/substrait/proto/substrait/plan.pb.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::substrait {
@@ -61,6 +62,15 @@ class SubstraitExtensionCollector {
  public:
   SubstraitExtensionCollector();
 
+  /// Construct the collector from a list of pre-declared Substrait
+  /// SimpleExtensionDeclaration entries. These may include extension functions
+  /// and/or extension types. The internal bi-directional maps are initialized
+  /// accordingly, and the next reference anchors are advanced to the maximum
+  /// observed values.
+  explicit SubstraitExtensionCollector(
+      const std::vector<::substrait::extensions::SimpleExtensionDeclaration>&
+          extensions);
+
   /// Given a scalar function name and argument types, return the functionId
   /// using ExtensionFunctionId.
   int getReferenceNumber(
@@ -77,6 +87,9 @@ class SubstraitExtensionCollector {
   /// Add extension functions to Substrait plan.
   void addExtensionsToPlan(::substrait::Plan* plan) const;
 
+  /// Given a custom type name, return a stable type anchor.
+  int getTypeAnchor(const std::string& typeName);
+
  private:
   /// A bi-direction hash map to keep the relation between reference number and
   /// either function or type signature.
@@ -89,7 +102,7 @@ class SubstraitExtensionCollector {
     /// @return True if the values were added successfully. False, otherwise.
     bool putIfAbsent(const int& key, const T& value);
 
-    const std::unordered_map<int, ExtensionFunctionId> forwardMap() const {
+    const std::unordered_map<int, T>& forwardMap() const {
       return forwardMap_;
     }
 
@@ -105,8 +118,11 @@ class SubstraitExtensionCollector {
   /// Assigns unique IDs to function signatures using ExtensionFunctionId.
   int getReferenceNumber(const ExtensionFunctionId& extensionFunctionId);
 
-  int functionReferenceNumber = -1;
+  int functionReferenceNumber_ = -1;
   std::shared_ptr<BiDirectionHashMap<ExtensionFunctionId>> extensionFunctions_;
+
+  int typeReferenceNumber_ = 0;
+  std::shared_ptr<BiDirectionHashMap<std::string>> typeExtensions_;
 };
 
 using SubstraitExtensionCollectorPtr =

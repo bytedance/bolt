@@ -35,7 +35,7 @@
 
 using namespace bytedance::bolt;
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 PythonOperator::PythonOperator(
     std::string functionName,
     pybind11::function function,
@@ -106,4 +106,4 @@ bool PythonOperator::isFinished() {
 void PythonOperator::noMoreInput() {
   Operator::noMoreInput();
 }
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

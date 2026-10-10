@@ -28,19 +28,26 @@
  * --------------------------------------------------------------------------
  */
 
-#include "pybind11/pybind11.h"
+#include <pybind11/pybind11.h>
 
+#include "bolt/expression/EvalCtx.h"
 #include "bolt/python/Utils.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ConstantVector.h"
-#include "expression/EvalCtx.h"
 
 using namespace ::bytedance::bolt;
 
 namespace {
 
-std::optional<pybind11::module_> pickleModule(
-    pybind11::module_::import("pickle"));
+pybind11::module_ pickleModule() {
+  // Import under the caller's GIL. Python caches modules, so no static Python
+  // object needs to survive interpreter shutdown or initialize the interpreter.
+  try {
+    return pybind11::module_::import("cloudpickle");
+  } catch (const pybind11::error_already_set&) {
+    return pybind11::module_::import("pickle");
+  }
+}
 
 // Cast a vector arg to a ConstantVector and append the matching python
 // scalar value to the list of python arguments
@@ -48,7 +55,7 @@ template <TypeKind KIND>
 void appendConstantValue(pybind11::list& args, BaseVector& v) {
   auto* vec = v.as<ConstantVector<typename TypeTraits<KIND>::DeepCopiedType>>();
   BOLT_CHECK_NOT_NULL(vec);
-  bolt::python::pyTry<void>(
+  bytedance::bolt::python::pyTry<void>(
       [&]() { args.append(pybind11::cast(vec->value())); },
       [&]() {
         return fmt::format(
@@ -61,7 +68,7 @@ void appendConstantValue(pybind11::list& args, BaseVector& v) {
 // Append a VectorPtr to a python list of args with a direct cast
 // to the pybolt python binding to VectorPtr.
 void appendGenericArg(pybind11::list& args, const VectorPtr& arg) {
-  bolt::python::pyTry<void>(
+  bytedance::bolt::python::pyTry<void>(
       [&]() { args.append(pybind11::cast(arg)); },
       [&]() {
         return fmt::format(
@@ -72,7 +79,7 @@ void appendGenericArg(pybind11::list& args, const VectorPtr& arg) {
 }
 } // namespace
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 std::vector<std::shared_ptr<exec::FunctionSignature>> getSignatures(
     const TypePtr& returnType) {
   auto builder = exec::FunctionSignatureBuilder();
@@ -128,17 +135,17 @@ std::string toString(const pybind11::object& obj) {
 
 std::string pickle(const pybind11::object& obj) {
   return pyTry<std::string>([&]() {
-    return pickleModule->attr("dumps")(obj).cast<pybind11::bytes>();
+    return pickleModule().attr("dumps")(obj).cast<pybind11::bytes>();
   });
 }
 
 pybind11::object unpickle(const std::string& bytes) {
   return pyTry<pybind11::object>(
-      [&]() { return pickleModule->attr("loads")(pybind11::bytes(bytes)); });
+      [&]() { return pickleModule().attr("loads")(pybind11::bytes(bytes)); });
 }
 
 void cleanup() {
-  pickleModule.reset();
+  // Retained for existing callers; serialization owns no static Python objects.
 }
 
 pybind11::list asPyArgs(
@@ -231,4 +238,4 @@ std::shared_ptr<RowVector> combineInputColumns(
   return std::make_shared<RowVector>(
       context.pool(), rowType, nullptr, length, children, 0);
 }
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

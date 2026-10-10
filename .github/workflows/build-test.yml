@@ -94,6 +94,7 @@ jobs:
               - '!bolt/**/*.md'
               - 'Makefile'
               - 'conanfile.py'
+              - 'requirements.txt'
               - 'CMakeLists.txt'
               - 'scripts/conan/**'
               - 'scripts/install-bolt-deps.sh'
@@ -185,8 +186,74 @@ jobs:
           echo 'tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CXX_FLAGS_DEBUG": ""}' >> $(conan profile path default)
           make ${{ matrix.build_target }}
 
+  python-check:
+    name: Python unit and integration tests
+    needs: [reuse-check, changes]
+    if: >-
+      ${{ needs.reuse-check.outputs.hit != 'true' &&
+          needs.changes.outputs.source_code == 'true' }}
+    runs-on: [ self-hosted, medium ]
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI_NUM_LINK_JOB: '2'
+      BOLTML_TEST_DISTRIBUTED: '0'
+      BOLTML_TEST_MATRIX: Local_Substrait,Local_Bolt
+    container:
+      image: bolt-registry:5000/bolt-ci:20260921
+      options: --user root --init --shm-size=1g
+      volumes:
+        - /data/ccache-data:/data/ccache-data
+    services:
+      conanserver:
+        image: bolt-registry:5000/conan-server:latest
+        volumes:
+          - /data/conan-server-data:/var/conan/data
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/bolt-build-base
+      - name: Prepare Python environment
+        run: |
+          python3 -m pip install 'uv==0.11.28'
+          uv venv --seed --managed-python --python 3.11 "$RUNNER_TEMP/python"
+          echo "PYTHON_CI=$RUNNER_TEMP/python/bin/python" >> "$GITHUB_ENV"
+      - name: Build and install wheel
+        id: wheel
+        run: |
+          make python-wheel BUILD_TYPE=Release \
+            PYTHON_EXECUTABLE="$PYTHON_CI" \
+            PYTHON_DIST_DIR="$RUNNER_TEMP/wheel"
+          uv pip install --python "$PYTHON_CI" \
+            --group bolt/python/pyproject.toml:test "$RUNNER_TEMP"/wheel/*.whl
+          uv pip check --python "$PYTHON_CI"
+      - name: Run Python unit tests
+        run: |
+          # Copy top-level tests only, excluding fuzzers and TPC-H suites.
+          SITE_PACKAGES="$("$PYTHON_CI" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          for package in pybolt boltml; do
+            mkdir -p "$SITE_PACKAGES/$package/test"
+            cp "$GITHUB_WORKSPACE/bolt/python/$package/test/"*.py "$SITE_PACKAGES/$package/test/"
+          done
+          # External dependencies and legacy Ray tests have separate prerequisites.
+          rm "$SITE_PACKAGES/boltml/test/"test_{hive,paimon,ray_executor,rollout_readiness}.py
+          unset PYTHONPATH LD_LIBRARY_PATH
+          cd "$RUNNER_TEMP"
+          for package in pybolt boltml; do
+            "$PYTHON_CI" -I -B -m unittest discover \
+              -s "$SITE_PACKAGES/$package/test" -t "$SITE_PACKAGES" -p 'test_*.py' -v
+          done
+      - name: Run Python and Ray integration tests
+        if: ${{ !cancelled() && steps.wheel.outcome == 'success' }}
+        run: |
+          unset PYTHONPATH LD_LIBRARY_PATH
+          cd "$RUNNER_TEMP"
+          "$PYTHON_CI" -I -B -m unittest discover \
+            -s "$GITHUB_WORKSPACE/bolt/python/tests/integration" -p 'test_*.py' -v
+
   source-result:
-    needs: [reuse-check, changes, build-test, build-only]
+    needs: [reuse-check, changes, build-test, build-only, python-check]
     if: >-
       ${{ always() &&
           needs.reuse-check.result == 'success' &&
@@ -201,7 +268,14 @@ jobs:
         uses: actions/checkout@v6
       - name: Record tested source
         id: source
+        env:
+          PYTHON_CHECK_PASSED: >-
+            ${{ needs.python-check.result == 'success' ||
+                (needs.python-check.result == 'skipped' &&
+                 (needs.reuse-check.outputs.hit == 'true' ||
+                  needs.changes.outputs.source_code == 'false')) }}
         run: |
+          test "$PYTHON_CHECK_PASSED" = true
           python3 .github/scripts/merge_queue_ci.py record-source \
             --workflow build-test.yml \
             --event "${{ github.event_name }}" \

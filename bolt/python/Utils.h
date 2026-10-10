@@ -32,6 +32,7 @@
 #include <fmt/format.h>
 #include <pybind11/gil.h>
 #include <pybind11/pytypes.h>
+#include <optional>
 
 #include "bolt/common/base/BoltException.h"
 #include "bolt/expression/VectorFunction.h"
@@ -42,7 +43,7 @@ class BaseVector;
 using VectorPtr = std::shared_ptr<BaseVector>;
 } // namespace bytedance::bolt
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 std::vector<std::shared_ptr<bytedance::bolt::exec::FunctionSignature>>
 getSignatures(const bytedance::bolt::TypePtr& returnType);
 
@@ -62,8 +63,15 @@ template <typename ReturnType>
 ReturnType pyTry(
     std::function<ReturnType()> function,
     std::function<std::string()> makeErrorString = nullptr) {
+  BOLT_USER_CHECK(
+      Py_IsInitialized(), "Python interpreter must be initialized by the host");
+  // Hold the GIL through the callback and exception formatting. A Python
+  // caller may already hold it; native worker threads must acquire it here.
+  std::optional<pybind11::gil_scoped_acquire> gil;
+  if (PyGILState_Check() == 0) {
+    gil.emplace();
+  }
   try {
-    pybind11::gil_scoped_acquire();
     return function();
   }
   // Short circuit.
@@ -99,8 +107,7 @@ std::string pickle(const pybind11::object& obj);
 // Deserialize python object.
 pybind11::object unpickle(const std::string& bytes);
 
-// Cleanup static python object that need to be deleted before the python
-// interpreter.
+// Compatibility entry point. Serialization keeps no static Python objects.
 void cleanup();
 
 // Convert a list of arguments to a python list of arguments while
@@ -113,4 +120,4 @@ pybind11::list asPyArgs(
 std::shared_ptr<bytedance::bolt::RowVector> combineInputColumns(
     const std::vector<bytedance::bolt::VectorPtr>& args,
     const bytedance::bolt::exec::EvalCtx& context);
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

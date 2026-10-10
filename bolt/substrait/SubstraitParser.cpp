@@ -31,6 +31,7 @@
 #include "bolt/substrait/SubstraitParser.h"
 #include <string>
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/substrait/BoltExtensions.h"
 #include "bolt/substrait/BoltSubstraitSignature.h"
 #include "bolt/substrait/TypeUtils.h"
 namespace bytedance::bolt::substrait {
@@ -78,12 +79,30 @@ TypePtr SubstraitParser::parseType(const ::substrait::Type& substraitType) {
       const auto& valueType = sMap.value();
       return MAP(parseType(keyType), parseType(valueType));
     }
-    case ::substrait::Type::KindCase::kUserDefined:
-      // We only support UNKNOWN type to handle the null literal whose type is
-      // not known.
-      return UNKNOWN();
+    case ::substrait::Type::KindCase::kUserDefined: {
+      // Resolve user-defined type via the extension type anchor.
+      const auto& ud = substraitType.user_defined();
+      const uint32_t anchor = ud.type_reference();
+      auto it = typeExtensions_.find(anchor);
+      if (it == typeExtensions_.end()) {
+        BOLT_FAIL(
+            "Unknown user-defined type anchor {}. Ensure Plan.extensions contains a matching type extension.",
+            anchor);
+      }
+      const std::string& name = it->second;
+      if (name == "UNKNOWN") {
+        return UNKNOWN();
+      }
+      BOLT_NYI("Unsupported user-defined type '{}'.", name);
+    }
     case ::substrait::Type::KindCase::kDate:
       return DATE();
+    case ::substrait::Type::KindCase::kPrecisionTimestamp:
+      return TIMESTAMP();
+    case ::substrait::Type::KindCase::kDecimal: {
+      const auto& decimal = substraitType.decimal();
+      return DECIMAL(decimal.precision(), decimal.scale());
+    }
     default:
       BOLT_NYI(
           "Parsing for Substrait type not supported: {}",
@@ -93,7 +112,7 @@ TypePtr SubstraitParser::parseType(const ::substrait::Type& substraitType) {
 
 std::vector<TypePtr> SubstraitParser::parseNamedStruct(
     const ::substrait::NamedStruct& namedStruct) {
-  // Nte that "names" are not used.
+  // Note that "names" are not used.
 
   // Parse Struct.
   const auto& substraitStruct = namedStruct.struct_();
@@ -156,19 +175,32 @@ int SubstraitParser::getIdxFromNodeName(const std::string& nodeName) {
 
 const std::string& SubstraitParser::findFunctionSpec(
     const std::unordered_map<uint64_t, std::string>& functionMap,
-    uint64_t id) const {
-  if (functionMap.find(id) == functionMap.end()) {
+    uint64_t id) {
+  try {
+    return functionMap.at(id);
+  } catch (const std::out_of_range&) {
     BOLT_FAIL("Could not find function id {} in function map.", id);
   }
-  std::unordered_map<uint64_t, std::string>& map =
-      const_cast<std::unordered_map<uint64_t, std::string>&>(functionMap);
-  return map[id];
+}
+
+const std::string& SubstraitParser::findFunctionSpec(uint64_t id) const {
+  try {
+    return functionMap_.at(id);
+  } catch (const std::out_of_range&) {
+    BOLT_FAIL("Could not find function id {} in function map.", id);
+  }
 }
 
 std::string SubstraitParser::findBoltFunction(
     const std::unordered_map<uint64_t, std::string>& functionMap,
     uint64_t id) const {
   std::string funcSpec = findFunctionSpec(functionMap, id);
+  std::string_view funcName = getNameBeforeDelimiter(funcSpec, ":");
+  return mapToBoltFunction({funcName.begin(), funcName.end()});
+}
+
+std::string SubstraitParser::findBoltFunction(uint64_t id) const {
+  std::string funcSpec = findFunctionSpec(id);
   std::string_view funcName = getNameBeforeDelimiter(funcSpec, ":");
   return mapToBoltFunction({funcName.begin(), funcName.end()});
 }
@@ -224,6 +256,17 @@ std::vector<TypePtr> SubstraitParser::getInputTypes(
     types.emplace_back(BoltSubstraitSignature::fromSubstraitSignature(typeStr));
   }
   return types;
+}
+
+const std::string& SubstraitParser::getTypeExtensionName(
+    uint32_t anchor) const {
+  auto it = typeExtensions_.find(anchor);
+  if (it == typeExtensions_.end()) {
+    BOLT_FAIL(
+        "Unknown type extension anchor {}. Ensure Plan.extensions declares it.",
+        anchor);
+  }
+  return it->second;
 }
 
 } // namespace bytedance::bolt::substrait
