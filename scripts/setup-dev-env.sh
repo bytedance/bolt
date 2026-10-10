@@ -181,27 +181,8 @@ function install_python_dep() {
 }
 
 function check_conan() {
-  if [ -z "${CONAN_HOME:-}" ]; then
-    export CONAN_HOME=~/.conan2
-  fi
-  SETTING_KEY="compiler.cppstd"
-  PROFILE_FILE="${CONAN_HOME}/profiles/default"
-  if [ ! -f "${CONAN_HOME}/profiles/default" ]; then
-    conan profile detect
-  fi
-
-  echo "Configuring conan profile to use $CPP_STANDARD standard by default"
-  if grep -q "^${SETTING_KEY}=${CPP_STANDARD}$" "${PROFILE_FILE}"; then
-    echo "✅ ${SETTING_KEY} is already set to ${CPP_STANDARD}. Skipping."
-  elif grep -q "^${SETTING_KEY}=" "${PROFILE_FILE}"; then
-    echo "🔄 Updating ${SETTING_KEY} to ${CPP_STANDARD}..."
-  else
-    echo "➕ Adding ${SETTING_KEY}=${CPP_STANDARD} to ${PROFILE_FILE}..."
-    echo "${SETTING_KEY}=${CPP_STANDARD}" >> "${PROFILE_FILE}"
-  fi
-
   # as a conan extension, add (libc, version) as conan settings.
-  python ${CUR_DIR}/configure-conan-libc-settings.py
+  python ${CUR_DIR}/configure-conan-profile.py
 }
 
 function install_git_hooks() {
