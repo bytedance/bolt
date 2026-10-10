@@ -34,6 +34,8 @@
 #include "bolt/type/FloatingPointUtil.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/TypeAliases.h"
+
+#include <limits>
 namespace bytedance::bolt::functions {
 namespace {
 template <typename T>
@@ -54,6 +56,35 @@ struct SetWithNull {
   }
 
   bool hasNull{false};
+  static constexpr vector_size_t kInitialSetSize{128};
+};
+
+template <typename T>
+struct StateSetWithNull {
+  StateSetWithNull(vector_size_t initialSetSize = kInitialSetSize) {
+    set.reserve(initialSetSize);
+  }
+
+  void nextGeneration(vector_size_t size) {
+    if (presentMarker > std::numeric_limits<uint64_t>::max() - 2) {
+      set.clear();
+      presentMarker = 1;
+    } else {
+      presentMarker += 2;
+    }
+    emittedMarker = presentMarker + 1;
+    set.reserve(size);
+    hasNull = false;
+    nullEmitted = false;
+  }
+
+  typename util::floating_point::HashMapNaNAwareTypeTraits<T, uint64_t>::Type
+      set;
+
+  uint64_t presentMarker{1};
+  uint64_t emittedMarker{2};
+  bool hasNull{false};
+  bool nullEmitted{false};
   static constexpr vector_size_t kInitialSetSize{128};
 };
 
@@ -81,6 +112,30 @@ void generateSet(
         rightSet.set.insert(arrayElements->template valueAt<T>(i));
       } else {
         rightSet.set.insert(arrayElements->valueAt(i));
+      }
+    }
+  }
+}
+
+template <typename T, typename TVector>
+void generateStateSet(
+    const ArrayVector* arrayVector,
+    const TVector* arrayElements,
+    vector_size_t idx,
+    StateSetWithNull<T>& rightSet) {
+  auto size = arrayVector->sizeAt(idx);
+  auto offset = arrayVector->offsetAt(idx);
+  rightSet.nextGeneration(size);
+
+  for (vector_size_t i = offset; i < (offset + size); ++i) {
+    if (arrayElements->isNullAt(i)) {
+      rightSet.hasNull = true;
+    } else {
+      if constexpr (std::is_same_v<TVector, DecodedVector>) {
+        rightSet.set[arrayElements->template valueAt<T>(i)] =
+            rightSet.presentMarker;
+      } else {
+        rightSet.set[arrayElements->valueAt(i)] = rightSet.presentMarker;
       }
     }
   }
@@ -139,7 +194,9 @@ class ArrayIntersectExceptFunction : public exec::VectorFunction {
   ArrayIntersectExceptFunction() = default;
 
   explicit ArrayIntersectExceptFunction(SetWithNull<T> constantSet)
-      : constantSet_(std::move(constantSet)) {}
+      : constantSet_(std::move(constantSet)) {
+    initializeDenseConstantSet();
+  }
 
   void apply(
       const SelectivityVector& rows,
@@ -237,13 +294,107 @@ class ArrayIntersectExceptFunction : public exec::VectorFunction {
       rawNewLengths[row] = indicesCursor - rawNewOffsets[row];
     };
 
+    auto processIntersectRow = [&](vector_size_t row,
+                                   StateSetWithNull<T>& rightSet) {
+      auto idx = decodedLeftArray->index(row);
+      auto size = baseLeftArray->sizeAt(idx);
+      auto offset = baseLeftArray->offsetAt(idx);
+
+      rawNewOffsets[row] = indicesCursor;
+      for (vector_size_t i = offset; i < (offset + size); ++i) {
+        if (decodedLeftElements->isNullAt(i)) {
+          if (rightSet.hasNull && !rightSet.nullEmitted) {
+            bits::setNull(rawNewElementNulls, indicesCursor++, true);
+            rightSet.nullEmitted = true;
+          }
+        } else {
+          auto val = decodedLeftElements->valueAt<T>(i);
+          auto it = rightSet.set.find(val);
+          if (it != rightSet.set.end() &&
+              it->second == rightSet.presentMarker) {
+            rawNewIndices[indicesCursor++] = i;
+            it->second = rightSet.emittedMarker;
+          }
+        }
+      }
+      rawNewLengths[row] = indicesCursor - rawNewOffsets[row];
+    };
+
+    auto processFlatIntersectRow = [&](vector_size_t row,
+                                       const T* leftElements,
+                                       const vector_size_t* leftOffsets,
+                                       const vector_size_t* leftSizes,
+                                       StateSetWithNull<T>& rightSet) {
+      auto size = leftSizes[row];
+      auto offset = leftOffsets[row];
+
+      rawNewOffsets[row] = indicesCursor;
+      for (vector_size_t i = offset; i < (offset + size); ++i) {
+        auto it = rightSet.set.find(leftElements[i]);
+        if (it != rightSet.set.end() && it->second == rightSet.presentMarker) {
+          rawNewIndices[indicesCursor++] = i;
+          it->second = rightSet.emittedMarker;
+        }
+      }
+      rawNewLengths[row] = indicesCursor - rawNewOffsets[row];
+    };
+
     SetWithNull<T> outputSet;
 
     // Optimized case when the right-hand side array is constant.
     if (constantSet_.has_value()) {
-      rows.applyToSelected([&](vector_size_t row) {
-        processRow(row, *constantSet_, outputSet);
-      });
+      if constexpr (
+          isIntersect && std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+        if (decodedLeftArray->isIdentityMapping() &&
+            decodedLeftElements->isIdentityMapping() &&
+            !decodedLeftElements->mayHaveNulls() &&
+            !constantSet_->set.empty()) {
+          if (denseConstantSet_.has_value()) {
+            auto rawLeftElements = decodedLeftElements->template data<T>();
+            auto rawLeftOffsets = baseLeftArray->rawOffsets();
+            auto rawLeftSizes = baseLeftArray->rawSizes();
+            const auto minValue = denseConstantSet_->minValue;
+            const auto& presentMarkers = denseConstantSet_->presentMarkers;
+            std::vector<uint64_t> emittedMarkers(presentMarkers.size(), 0);
+
+            uint64_t emittedMarker = 1;
+            rows.applyToSelected([&](vector_size_t row) {
+              ++emittedMarker;
+              if (emittedMarker == 0) {
+                std::fill(emittedMarkers.begin(), emittedMarkers.end(), 0);
+                emittedMarker = 1;
+              }
+
+              auto size = rawLeftSizes[row];
+              auto offset = rawLeftOffsets[row];
+              rawNewOffsets[row] = indicesCursor;
+              for (vector_size_t i = offset; i < (offset + size); ++i) {
+                auto markerIndex =
+                    static_cast<uint64_t>(rawLeftElements[i] - minValue);
+                if (markerIndex < presentMarkers.size() &&
+                    presentMarkers[markerIndex] &&
+                    emittedMarkers[markerIndex] != emittedMarker) {
+                  rawNewIndices[indicesCursor++] = i;
+                  emittedMarkers[markerIndex] = emittedMarker;
+                }
+              }
+              rawNewLengths[row] = indicesCursor - rawNewOffsets[row];
+            });
+          } else {
+            rows.applyToSelected([&](vector_size_t row) {
+              processRow(row, *constantSet_, outputSet);
+            });
+          }
+        } else {
+          rows.applyToSelected([&](vector_size_t row) {
+            processRow(row, *constantSet_, outputSet);
+          });
+        }
+      } else {
+        rows.applyToSelected([&](vector_size_t row) {
+          processRow(row, *constantSet_, outputSet);
+        });
+      }
     }
     // General case when no arrays are constant and both sets need to be
     // computed for each row.
@@ -254,12 +405,125 @@ class ArrayIntersectExceptFunction : public exec::VectorFunction {
       auto decodedRightElements =
           decodeArrayElements(rightHolder, rightElementsHolder, rows);
       SetWithNull<T> rightSet;
+      StateSetWithNull<T> rightStateSet;
       auto rightArrayVector = rightHolder.get()->base()->as<ArrayVector>();
-      rows.applyToSelected([&](vector_size_t row) {
-        auto idx = rightHolder.get()->index(row);
-        generateSet<T>(rightArrayVector, decodedRightElements, idx, rightSet);
-        processRow(row, rightSet, outputSet);
-      });
+      const auto useFlatIntersectPath = isIntersect &&
+          decodedLeftArray->isIdentityMapping() &&
+          rightHolder.get()->isIdentityMapping() &&
+          decodedLeftElements->isIdentityMapping() &&
+          decodedRightElements->isIdentityMapping() &&
+          !decodedLeftElements->mayHaveNulls() &&
+          !decodedRightElements->mayHaveNulls();
+
+      if (useFlatIntersectPath) {
+        auto rawLeftElements = decodedLeftElements->template data<T>();
+        auto rawRightElements = decodedRightElements->template data<T>();
+        auto rawLeftOffsets = baseLeftArray->rawOffsets();
+        auto rawLeftSizes = baseLeftArray->rawSizes();
+        auto rawRightOffsets = rightArrayVector->rawOffsets();
+        auto rawRightSizes = rightArrayVector->rawSizes();
+        std::vector<uint64_t> denseMarkers;
+        uint64_t denseMarker = 1;
+
+        rows.applyToSelected([&](vector_size_t row) {
+          auto rightSize = rawRightSizes[row];
+          auto rightOffset = rawRightOffsets[row];
+          if constexpr (
+              std::is_integral_v<T> && !std::is_same_v<T, bool> &&
+              sizeof(T) <= sizeof(uint64_t)) {
+            if (rightSize > 0) {
+              auto minValue = rawRightElements[rightOffset];
+              auto maxValue = minValue;
+              for (vector_size_t i = rightOffset + 1;
+                   i < (rightOffset + rightSize);
+                   ++i) {
+                minValue = std::min(minValue, rawRightElements[i]);
+                maxValue = std::max(maxValue, rawRightElements[i]);
+              }
+              const auto nonNegativeRange =
+                  std::is_unsigned_v<T> || static_cast<int64_t>(minValue) >= 0;
+              if (nonNegativeRange) {
+                const auto range =
+                    static_cast<uint64_t>(maxValue - minValue) + 1;
+                if (range > static_cast<uint64_t>(rightSize) * 8 ||
+                    range > 4096) {
+                  rightStateSet.nextGeneration(rightSize);
+                  for (vector_size_t i = rightOffset;
+                       i < (rightOffset + rightSize);
+                       ++i) {
+                    rightStateSet.set[rawRightElements[i]] =
+                        rightStateSet.presentMarker;
+                  }
+                  processFlatIntersectRow(
+                      row,
+                      rawLeftElements,
+                      rawLeftOffsets,
+                      rawLeftSizes,
+                      rightStateSet);
+                  return;
+                }
+                if (denseMarker > std::numeric_limits<uint64_t>::max() - 2) {
+                  denseMarkers.assign(denseMarkers.size(), 0);
+                  denseMarker = 1;
+                }
+                if (denseMarkers.size() < range) {
+                  denseMarkers.resize(range, 0);
+                }
+                const auto presentMarker = denseMarker;
+                const auto emittedMarker = denseMarker + 1;
+                denseMarker += 2;
+
+                for (vector_size_t i = rightOffset;
+                     i < (rightOffset + rightSize);
+                     ++i) {
+                  denseMarkers[static_cast<uint64_t>(
+                      rawRightElements[i] - minValue)] = presentMarker;
+                }
+                auto leftSize = rawLeftSizes[row];
+                auto leftOffset = rawLeftOffsets[row];
+                rawNewOffsets[row] = indicesCursor;
+                for (vector_size_t i = leftOffset; i < (leftOffset + leftSize);
+                     ++i) {
+                  auto markerIndex =
+                      static_cast<uint64_t>(rawLeftElements[i] - minValue);
+                  if (markerIndex < denseMarkers.size() &&
+                      denseMarkers[markerIndex] == presentMarker) {
+                    rawNewIndices[indicesCursor++] = i;
+                    denseMarkers[markerIndex] = emittedMarker;
+                  }
+                }
+                rawNewLengths[row] = indicesCursor - rawNewOffsets[row];
+                return;
+              }
+            }
+          }
+          rightStateSet.nextGeneration(rightSize);
+          for (vector_size_t i = rightOffset; i < (rightOffset + rightSize);
+               ++i) {
+            rightStateSet.set[rawRightElements[i]] =
+                rightStateSet.presentMarker;
+          }
+          processFlatIntersectRow(
+              row,
+              rawLeftElements,
+              rawLeftOffsets,
+              rawLeftSizes,
+              rightStateSet);
+        });
+      } else {
+        rows.applyToSelected([&](vector_size_t row) {
+          auto idx = rightHolder.get()->index(row);
+          if constexpr (isIntersect) {
+            generateStateSet<T>(
+                rightArrayVector, decodedRightElements, idx, rightStateSet);
+            processIntersectRow(row, rightStateSet);
+          } else {
+            generateSet<T>(
+                rightArrayVector, decodedRightElements, idx, rightSet);
+            processRow(row, rightSet, outputSet);
+          }
+        });
+      }
     }
 
     auto newElements = BaseVector::wrapInDictionary(
@@ -285,6 +549,45 @@ class ArrayIntersectExceptFunction : public exec::VectorFunction {
   // set generated from its elements, which is calculated only once, before
   // instantiating this object.
   std::optional<SetWithNull<T>> constantSet_;
+
+  struct DenseConstantSet {
+    T minValue;
+    std::vector<uint8_t> presentMarkers;
+  };
+
+  void initializeDenseConstantSet() {
+    if constexpr (
+        isIntersect && std::is_integral_v<T> && !std::is_same_v<T, bool> &&
+        sizeof(T) <= sizeof(uint64_t)) {
+      if (!constantSet_.has_value() || constantSet_->set.empty()) {
+        return;
+      }
+      auto minValue = *constantSet_->set.begin();
+      auto maxValue = minValue;
+      for (const auto& value : constantSet_->set) {
+        minValue = std::min(minValue, value);
+        maxValue = std::max(maxValue, value);
+      }
+      const auto nonNegativeRange =
+          std::is_unsigned_v<T> || static_cast<int64_t>(minValue) >= 0;
+      if (nonNegativeRange) {
+        const auto range = static_cast<uint64_t>(maxValue - minValue) + 1;
+        if (range > static_cast<uint64_t>(constantSet_->set.size()) * 8 ||
+            range > 4096) {
+          return;
+        }
+        DenseConstantSet denseSet{
+            .minValue = minValue,
+            .presentMarkers = std::vector<uint8_t>(range)};
+        for (const auto& value : constantSet_->set) {
+          denseSet.presentMarkers[static_cast<uint64_t>(value - minValue)] = 1;
+        }
+        denseConstantSet_ = std::move(denseSet);
+      }
+    }
+  }
+
+  std::optional<DenseConstantSet> denseConstantSet_;
 }; // class ArrayIntersectExcept
 
 template <typename T>
