@@ -636,10 +636,8 @@ void LocalCellOutput::logWindowDiagnostics(
 }
 
 void LocalCellOutput::appendBlockKind() {
-  if (cellOptions_.compositeInput) {
-    const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
-    appendBytes(scratch_, &kind, 1, pool_);
-  }
+  const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+  appendBytes(scratch_, &kind, 1, pool_);
 }
 
 void LocalCellOutput::finalize(

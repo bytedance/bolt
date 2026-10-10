@@ -62,10 +62,7 @@ CellShuffleWriter::CellShuffleWriter(
         options_.partitionWriterOptions.rssClient,
         "CellShuffleWriter on Celeborn requires an RSS client");
     output_ = std::make_unique<CelebornCellOutput>(
-        options_.partitionWriterOptions,
-        &layout_,
-        boltPool_,
-        options_.cellOptions.compositeInput);
+        options_.partitionWriterOptions, &layout_, boltPool_);
   } else {
     output_ = std::make_unique<LocalCellOutput>(
         options_.partitionWriterOptions,
