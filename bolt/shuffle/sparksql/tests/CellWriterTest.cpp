@@ -95,6 +95,10 @@ class RecordingCellOutput final : public CellOutput {
     }
   }
 
+  int64_t bytesEvicted() const override {
+    return 0;
+  }
+
   uint32_t spillCalls{0};
   uint32_t sealCalls{0};
   uint32_t finalizeCalls{0};
@@ -140,7 +144,15 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
 
   void TearDown() override {
     ::unlink(dataFile_.c_str());
-    ::unlink((dataFile_ + ".rawspill").c_str());
+    ::unlink((dataFile_ + ".cell.spill").c_str());
+    ::unlink((dataFile_ + ".raw.spill").c_str());
+  }
+
+  /// With no configured directory, the outputs' spill files sit next to the
+  /// data file.
+  bool spillFilesExist() const {
+    return std::filesystem::exists(dataFile_ + ".cell.spill") ||
+        std::filesystem::exists(dataFile_ + ".raw.spill");
   }
 
   ShuffleWriterOptions makeOptions(int32_t numPartitions) {
@@ -417,7 +429,7 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
       ASSERT_NE(client, nullptr);
       EXPECT_EQ(client->stops, 1);
       EXPECT_TRUE(readFile().empty());
-      EXPECT_FALSE(std::filesystem::exists(dataFile_ + ".rawspill"));
+      EXPECT_FALSE(spillFilesExist());
       for (int32_t pid = 0; pid < numPartitions; ++pid) {
         int64_t pushed = 0;
         for (const auto& blob : client->pushes[pid]) {
@@ -1722,7 +1734,7 @@ TEST_F(CellWriterTest, rawOutputsPlaceOpaqueBlocks) {
     EXPECT_EQ(metrics.partitionLengths, (std::vector<int64_t>{4, 2, 4}));
     EXPECT_EQ(metrics.totalBytesWritten, 10);
     EXPECT_EQ(metrics.totalBytesEvicted, 10);
-    EXPECT_FALSE(std::filesystem::exists(dataFile_ + ".rawspill"));
+    EXPECT_FALSE(spillFilesExist());
   }
   {
     auto client = std::make_shared<RecordingRssClient>();
@@ -1746,15 +1758,20 @@ TEST_F(CellWriterTest, rawOutputsPlaceOpaqueBlocks) {
 
 TEST_F(CellWriterTest, rawRunsFollowEachPartitionsPayloads) {
   // Each spillRaw() call is one unit over all partitions, like a Run; the
-  // final merge places every partition's raw blocks after its payloads, in
-  // call order - also when no window ever existed.
+  // Cell output's merge places every partition's raw blocks after its
+  // payloads, in call order - also when no window ever existed.
   constexpr uint32_t kPartitions = 3;
   auto options = makeOptions(kPartitions);
   const auto layout = CellLayout::create(ROW({"v"}, {BIGINT()}));
+  LocalRawOutput raw(options.partitionWriterOptions);
   LocalCellOutput output(
-      options.partitionWriterOptions, &layout, options.cellOptions, pool());
+      raw,
+      &layout,
+      options.cellOptions,
+      options.partitionWriterOptions,
+      pool());
   const auto spill = [&](std::vector<std::vector<std::string>> blocks) {
-    output.spillRaw([&](uint32_t pid, BufferPtr& block) {
+    raw.spillRaw([&](uint32_t pid, BufferPtr& block) {
       if (blocks[pid].empty()) {
         return false;
       }
@@ -1782,6 +1799,41 @@ TEST_F(CellWriterTest, rawRunsFollowEachPartitionsPayloads) {
   EXPECT_EQ(metrics.partitionLengths, (std::vector<int64_t>{4, 2, 4}));
   EXPECT_EQ(metrics.totalBytesWritten, 10);
   EXPECT_EQ(metrics.totalBytesEvicted, 10);
+  EXPECT_FALSE(spillFilesExist());
+
+  // The merge ran once and sealed both outputs behind it.
+  EXPECT_THROW(spill({{"late"}, {}, {}}), BoltException);
+  EXPECT_THROW(raw.finish(metrics), BoltException);
+}
+
+TEST_F(CellWriterTest, mergeToDataFileTakesEachSpillerOnce) {
+  auto options = makeOptions(1);
+  LocalRawOutput raw(options.partitionWriterOptions);
+  ShuffleWriterMetrics metrics;
+  EXPECT_THROW(
+      PartialSpiller::mergeToDataFile(
+          options.partitionWriterOptions, {&raw, &raw}, metrics),
+      BoltException);
+}
+
+TEST_F(CellWriterTest, shuffleSpillFileRefusesAppendsOnceSealed) {
+  auto options = makeOptions(1);
+  ShuffleSpillFile spill(options.partitionWriterOptions, "raw");
+  EXPECT_EQ(spill.end(), 0);
+  EXPECT_EQ(spill.append("abc", 3), 0);
+  EXPECT_EQ(spill.append("de", 2), 3);
+  spill.flush();
+  char out[5];
+  spill.read(0, out, 5);
+  EXPECT_EQ(std::string(out, 5), "abcde");
+  spill.seal();
+  EXPECT_THROW(spill.append("f", 1), BoltException);
+  spill.read(3, out, 2);
+  EXPECT_EQ(std::string(out, 2), "de");
+  EXPECT_THROW(spill.read(4, out, 2), BoltException);
+  EXPECT_TRUE(spillFilesExist());
+  spill.remove();
+  EXPECT_FALSE(spillFilesExist());
 }
 
 TEST_F(CellWriterTest, shrinkIsSafeWhileTheOutputReadsCells) {

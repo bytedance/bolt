@@ -78,10 +78,15 @@ class CellOutput {
       const CellWindowInput& in,
       bool windowHasData,
       ShuffleWriterMetrics& metrics) = 0;
+
+  /// Bytes the task's output - this one and the composite output it ends
+  /// together with - spilled or pushed so far.
+  virtual int64_t bytesEvicted() const = 0;
 };
 
-/// The ESS backend: Runs and sealed windows go to one temporary spill file;
-/// stop() merges everything into the shuffle data file, partition-major.
+/// The ESS backend: Runs and sealed windows go to a spill file of its own;
+/// finalize() merges them into the shuffle data file, partition-major,
+/// together with the task's composite output.
 ///
 /// Spill segments are stored in the exact Run body form of the wire format:
 /// COMBINED when spill compression pays, COMBINED_STORED otherwise. A
@@ -91,26 +96,40 @@ class CellOutput {
 /// stream-major and written as one run; without it, each segment stays a
 /// run of its own. A task whose data never needed a spill writes payloads
 /// straight from the live cells and touches no temporary file at all.
-/// The spill file, raw runs (spillRaw) and the data file come from
-/// LocalRawOutput; each partition's raw blocks follow its payloads.
-class LocalCellOutput final : public LocalRawOutput, public CellOutput {
+class LocalCellOutput final : public CellOutput, public PartialSpiller {
  public:
-  /// `pool` backs the gather/compress workspaces so they stay inside task
-  /// memory accounting; it must outlive this object.
+  /// `composite` holds the task's CompositeRowVector blocks, merged after
+  /// this output's payloads in every partition; it must outlive this
+  /// object. `options` gives the codec, the data file and the spill
+  /// directories; `pool` backs the gather/compress workspaces so they stay
+  /// inside task memory accounting and must outlive this object.
   LocalCellOutput(
-      PartitionWriterOptions options,
+      PartialSpiller& composite,
       const CellLayout* layout,
       CellShuffleOptions cellOptions,
+      PartitionWriterOptions options,
       memory::MemoryPool* pool);
 
   void spillRun(const CellWindowInput& in) override;
   void sealWindow(const CellWindowInput& in) override;
+
+  /// Writes the data file: mergeToDataFile() of this output and the
+  /// composite one. Here, not in the writer, because the current window -
+  /// written straight from memory - only lives through this call.
   void finalize(
       const CellWindowInput& in,
       bool windowHasData,
       ShuffleWriterMetrics& metrics) override;
 
+  int64_t bytesEvicted() const override {
+    return spilledBytes() + composite_.spilledBytes();
+  }
+
  private:
+  /// The partition's payloads: every sealed window's, then the window
+  /// borrowed by finalize().
+  void mergeToFinal(uint32_t pid, DataFileWriter& out) override;
+
   struct SpilledRun {
     /// P + 1 absolute spill-file offsets; equal neighbours mean an empty
     /// segment for that partition.
@@ -157,7 +176,7 @@ class LocalCellOutput final : public LocalRawOutput, public CellOutput {
 
   /// Appends one partition's payload assembled from a sealed window.
   void writeDiskPayload(
-      std::FILE* out,
+      DataFileWriter& out,
       const SealedWindow& w,
       const uint8_t* encodingTags,
       uint32_t pid);
@@ -166,7 +185,7 @@ class LocalCellOutput final : public LocalRawOutput, public CellOutput {
   /// already is in final form, else through the compressing run writer -
   /// or still verbatim when that writer's workspace cannot be funded, since
   /// the stored form is a valid run too.
-  void writeSpilledSegment(std::FILE* out, const SpillSegment& segment);
+  void writeSpilledSegment(DataFileWriter& out, const SpillSegment& segment);
 
   /// Coalesced merge: reads every spilled segment of one partition
   /// (decompressing the ones compressed at spill time), lays their bytes
@@ -193,7 +212,7 @@ class LocalCellOutput final : public LocalRawOutput, public CellOutput {
   /// `data` is the concatenated stream bytes; sizes are the per-stream
   /// decoded lengths.
   void writeRun(
-      std::FILE* out,
+      DataFileWriter& out,
       const char* data,
       uint64_t dataBytes,
       const uint64_t* decodedSizes);
@@ -204,13 +223,15 @@ class LocalCellOutput final : public LocalRawOutput, public CellOutput {
   /// one run, or as separate runs in that order. The residual never takes a
   /// spill round-trip.
   void writeCurrentWindowPayload(
-      std::FILE* out,
+      DataFileWriter& out,
       const CellWindowInput& in,
       uint32_t pid);
 
   /// The kind byte that opens every block on the wire.
   void appendBlockKind();
 
+  PartialSpiller& composite_;
+  const PartitionWriterOptions options_;
   const CellLayout* const layout_;
   const CellShuffleOptions cellOptions_;
   memory::MemoryPool* const pool_;
@@ -234,28 +255,33 @@ class LocalCellOutput final : public LocalRawOutput, public CellOutput {
   /// Runs of the still-open window, then folded into a SealedWindow.
   std::vector<SpilledRun> openWindowRuns_;
   std::vector<SealedWindow> sealed_;
+  /// The window still in memory, borrowed by finalize() for its merge.
+  const CellWindowInput* residual_{nullptr};
+  bool residualHasData_{false};
 
   uint64_t rawAccum_{0};
+  /// Pre-compression bytes merged per partition.
+  std::vector<int64_t> rawLengths_;
   BufferPtr scratch_;
 };
 
 /// The remote shuffle service (RSS) backend, e.g. Celeborn. The service may
 /// reorder a mapper's pushes and interleave other mappers' pushes between
-/// them, so every push is exactly one complete ColumnarPayload: a window is
-/// only ever output whole, at a seal, one partition after another, and
-/// nothing is spilled - no local file is ever created. Each payload carries
-/// the partition's resident cells as one run, compressed when that pays.
-///
-/// Pushes, partition lengths and the end of the attempt come from
-/// RssRawOutput; the payload workspace is reused for the next partition
-/// right away.
-class RssCellOutput final : public RssRawOutput, public CellOutput {
+/// them, so every block is exactly one complete ColumnarPayload: a window is
+/// only ever output whole, at a seal - one spillRaw() of every partition's
+/// payload - and nothing is spilled. Each payload carries the partition's
+/// resident cells as one run, compressed when that pays. The payloads go
+/// through `raw`, the push channel the task's composite blocks share, which
+/// finalize() ends once for both.
+class RssCellOutput final : public CellOutput {
  public:
-  /// `pool` backs the payload workspaces so they stay inside task memory
-  /// accounting; it must outlive this object.
+  /// `raw` must outlive this object. `options` gives the codec; `pool`
+  /// backs the payload workspaces so they stay inside task memory
+  /// accounting and must outlive this object.
   RssCellOutput(
-      PartitionWriterOptions options,
+      RawPartitionOutput& raw,
       const CellLayout* layout,
+      const PartitionWriterOptions& options,
       memory::MemoryPool* pool);
 
   bool sealsResidentCells() const override {
@@ -269,18 +295,24 @@ class RssCellOutput final : public RssRawOutput, public CellOutput {
       bool windowHasData,
       ShuffleWriterMetrics& metrics) override;
 
+  int64_t bytesEvicted() const override {
+    return raw_.bytesEvicted();
+  }
+
  private:
-  void pushWindow(const CellWindowInput& in);
+  /// One spillRaw() carrying the whole payload of every partition with rows.
+  void sendWindow(const CellWindowInput& in);
 
-  /// Assembles one partition's payload into payload_ and pushes it.
-  void pushPartition(const CellWindowInput& in, uint32_t pid);
+  /// Assembles partition `pid`'s payload into `payload`.
+  void
+  buildPayload(const CellWindowInput& in, uint32_t pid, BufferPtr& payload);
 
+  RawPartitionOutput& raw_;
   const CellLayout* const layout_;
   memory::MemoryPool* const pool_;
   /// Null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
 
-  BufferPtr payload_;
   BufferPtr compressScratch_;
   std::vector<uint64_t> streamSizes_;
 
