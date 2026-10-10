@@ -226,6 +226,9 @@ class NestedLoopJoinProbe : public Operator {
   // vector).
   void copyBuildValues(const RowVectorPtr& buildVector);
 
+  // Wraps probe projections after probeOutputIndices_ is fully populated.
+  void wrapProbeOutput();
+
   // Whether to use dictionary encoding for build columns in the output.
   // Enabled when there is a single build vector, avoiding deep copy of build
   // data. Not applicable to LeftSemiProject joins (which skip build
@@ -329,6 +332,9 @@ class NestedLoopJoinProbe : public Operator {
   // Dictionary indices for probe columns for output vector.
   BufferPtr probeOutputIndices_;
   vector_size_t* rawProbeOutputIndices_;
+
+  // Probe input backing the current output batch.
+  RowVectorPtr outputProbeInput_;
 
   // Dictionary indices for build columns.
   BufferPtr buildIndices_;
