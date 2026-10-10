@@ -78,20 +78,23 @@ round(const TNum& number, const TDecimals& decimals = 0) {
     } else {
       return number;
     }
-  }
-  if (!std::isfinite(number)) {
-    return number;
-  }
+  } else {
+    if (!std::isfinite(number)) {
+      return number;
+    }
 
-  double dNumber = static_cast<double>(number);
-  BigDecimal decimal(dNumber);
-  decimal.setScale(decimals);
-  if constexpr (std::is_same_v<TNum, double>) {
-    auto res = decimal.doubleValue();
-    return res;
-  } else if constexpr (std::is_same_v<TNum, float>) {
-    auto res = decimal.floatValue();
-    return res;
+    double dNumber = static_cast<double>(number);
+    BigDecimal decimal(dNumber);
+    decimal.setScale(decimals);
+    if constexpr (std::is_same_v<TNum, double>) {
+      auto res = decimal.doubleValue();
+      return res;
+    } else if constexpr (std::is_same_v<TNum, float>) {
+      auto res = decimal.floatValue();
+      return res;
+    }
+
+    BOLT_UNREACHABLE("Unsupported input type for round");
   }
 }
 
