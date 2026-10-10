@@ -36,6 +36,7 @@ bolt_add_library(
   DecimalArithmetic.cpp
   DecimalCompare.cpp
   DecimalVectorFunctions.cpp
+  EncodeDecode.cpp
   FormatNumber.cpp
   Hash.cpp
   ICURegexFunctions.cpp
