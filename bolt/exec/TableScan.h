@@ -104,6 +104,8 @@ class TableScan : public SourceOperator {
 
   void estimateBytesPerRow(const std::optional<RowVectorPtr>& dataOptional);
 
+  void mergeDataSourceRuntimeStats(bool logIoPattern);
+
   // Process-wide IO wait time.
   static std::atomic<uint64_t> ioWaitNanos_;
 
