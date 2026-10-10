@@ -70,9 +70,6 @@ struct ShuffleTestParam {
   // On-wire row format for the RowBased writer (shuffleMode == 3); ignored by
   // the other modes. Threaded into both writer and reader options.
   row::RowFormat rowFormat = bytedance::bolt::row::RowFormat::DENSE;
-  // Enables HashAggregation composite output in the query config of both the
-  // writer and the reader task.
-  bool compositeOutputEnabled = false;
 
   std::string toString() const;
 

@@ -35,9 +35,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// writes everything of the current one out, so each side reclaims only its
 /// own state. Composite rows - serialized aggregation state, kept byte for
 /// byte - are buffered per partition and written through output() as
-/// CompositeRows blocks, all partitions in one spillRaw() call. Composite
-/// input needs CellShuffleOptions::compositeInput, which frames every block
-/// on the wire with a kind byte.
+/// CompositeRows blocks, all partitions in one spillRaw() call; the kind
+/// byte that opens every block on the wire tells the reader which is which.
 class CompositeShuffleWriter : public ShuffleWriter {
  public:
   arrow::Status split(RowVectorPtr rv, int64_t memLimit) final;
@@ -89,7 +88,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// The last batch was composite, so that side holds the data.
   bool compositeHeld_{false};
 
-  /// Null when compositeInput is off or compressionType is UNCOMPRESSED.
+  /// Null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
   ShuffleRowToRowConverter converter_;
   /// Per partition: the held rows, each pointing at [size i32][bytes].

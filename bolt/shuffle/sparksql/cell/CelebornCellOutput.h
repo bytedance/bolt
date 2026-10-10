@@ -36,13 +36,11 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 class CelebornCellOutput final : public CellOutput {
  public:
   /// `pool` backs the payload workspaces so they stay inside task memory
-  /// accounting; it must outlive this object. With `framed`, every push
-  /// opens with the payload kind byte (CellShuffleOptions::compositeInput).
+  /// accounting; it must outlive this object.
   CelebornCellOutput(
       PartitionWriterOptions options,
       const CellLayout* layout,
-      memory::MemoryPool* pool,
-      bool framed);
+      memory::MemoryPool* pool);
 
   bool sealsResidentCells() const override {
     return true;
@@ -75,7 +73,6 @@ class CelebornCellOutput final : public CellOutput {
   const CellLayout* const layout_;
   memory::MemoryPool* const pool_;
   const std::shared_ptr<RssClient> client_;
-  const bool framed_;
   /// Null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
 

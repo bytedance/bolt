@@ -172,7 +172,7 @@ class LocalCellOutput final : public CellOutput {
   /// Copies `bytes` of the spill file from `begin` into the data file.
   void copySpill(std::FILE* out, uint64_t begin, uint64_t bytes);
 
-  /// With compositeInput, the kind byte that opens every block on the wire.
+  /// The kind byte that opens every block on the wire.
   void appendBlockKind();
 
   const PartitionWriterOptions options_;

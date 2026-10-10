@@ -113,11 +113,6 @@ struct CellShuffleOptions {
   // segments is decompressed and compressed again as a single run.
   // Disabling trades that codec CPU for uncompressed spill writes.
   bool compressSpill = true;
-  // The plan may feed CompositeRowVectors (HashAggregation composite output).
-  // Set from the query config on both shuffle ends: every block on the wire
-  // then starts with a kind byte, so payloads and composite row blocks can
-  // share a partition stream.
-  bool compositeInput = false;
 
   /// Returns all options in a human readable form.
   std::string toString() const;
