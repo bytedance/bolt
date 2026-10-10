@@ -92,8 +92,7 @@ CellShuffleReader::CellShuffleReader(
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
     int32_t batchSize,
-    int64_t batchByteSize,
-    bool compositeInput)
+    int64_t batchByteSize)
     : streams_(std::move(streams)),
       adapter_(outputType),
       layout_(CellLayout::create(adapter_.physicalType())),
@@ -104,12 +103,8 @@ CellShuffleReader::CellShuffleReader(
       pool_(pool),
       batchSize_(batchSize),
       batchByteSize_(batchByteSize),
-      decoder_(layout_, decompressor_.get(), pool_) {
-  if (compositeInput) {
-    compositeConverter_ =
-        std::make_unique<ShuffleRowToColumnarConverter>(outputType, pool_);
-  }
-}
+      decoder_(layout_, decompressor_.get(), pool_),
+      compositeConverter_(outputType, pool_) {}
 
 CellShuffleReader::Decoded CellShuffleReader::nextDecoded(RowVectorPtr& out) {
   while (!exhausted_) {
@@ -126,19 +121,17 @@ CellShuffleReader::Decoded CellShuffleReader::nextDecoded(RowVectorPtr& out) {
       continue;
     }
     std::string error;
-    if (compositeConverter_ != nullptr) {
-      uint8_t kind;
-      BOLT_CHECK(source_->read(&kind, 1), "truncated cell shuffle block");
-      if (kind == static_cast<uint8_t>(CellBlockKind::kCompositeRows)) {
-        const bool ok = decodeComposite(error);
-        BOLT_CHECK(ok, "malformed composite shuffle block: {}", error);
-        return Decoded::kComposite;
-      }
-      BOLT_CHECK_EQ(
-          kind,
-          static_cast<uint8_t>(CellBlockKind::kPayload),
-          "unknown cell shuffle block kind");
+    uint8_t kind;
+    BOLT_CHECK(source_->read(&kind, 1), "truncated cell shuffle block");
+    if (kind == static_cast<uint8_t>(CellBlockKind::kCompositeRows)) {
+      const bool ok = decodeComposite(error);
+      BOLT_CHECK(ok, "malformed composite shuffle block: {}", error);
+      return Decoded::kComposite;
     }
+    BOLT_CHECK_EQ(
+        kind,
+        static_cast<uint8_t>(CellBlockKind::kPayload),
+        "unknown cell shuffle block kind");
     const bool ok = decoder_.decode(*source_, out, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
     return Decoded::kPayload;
@@ -241,7 +234,7 @@ RowVectorPtr CellShuffleReader::nextComposite() {
       std::numeric_limits<int32_t>::max(),
       "composite rows too large for one vector");
   nextCompositeRow_ = end;
-  auto output = compositeConverter_->convertToComposite(
+  auto output = compositeConverter_.convertToComposite(
       slice, static_cast<int32_t>(total));
   decodeTimeNs_ += currentTimeNs() - start;
   return output;

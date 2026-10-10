@@ -28,13 +28,11 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 CelebornCellOutput::CelebornCellOutput(
     PartitionWriterOptions options,
     const CellLayout* layout,
-    memory::MemoryPool* pool,
-    bool framed)
+    memory::MemoryPool* pool)
     : options_(std::move(options)),
       layout_(layout),
       pool_(pool),
-      client_(options_.rssClient),
-      framed_(framed) {
+      client_(options_.rssClient) {
   BOLT_CHECK_NOT_NULL(
       client_, "CellShuffleWriter on Celeborn requires an RSS client");
   if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
@@ -75,10 +73,8 @@ void CelebornCellOutput::pushPartition(
   const uint32_t numStreams = layout_->numStreams();
   const uint64_t total = residentBytes(in, pid);
   resizeBuffer(payload_, 0, pool_);
-  if (framed_) {
-    const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
-    appendBytes(payload_, &kind, 1, pool_);
-  }
+  const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
+  appendBytes(payload_, &kind, 1, pool_);
   appendPayloadPrefix(in, pid, total > 0 ? 1 : 0, payload_, pool_);
   uint64_t raw = payload_->size();
   if (total > 0) {

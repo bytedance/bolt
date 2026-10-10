@@ -33,9 +33,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// Deliberately shares nothing with the existing deserializer stack; its
 /// only inputs are the stream iterator, the schema and the codec. Batches
 /// come out in the logical schema: complex columns packed by the writer are
-/// restored here by the type adapter. With `compositeInput` every block opens
-/// with a kind byte, and CompositeRows blocks come out as CompositeRowVectors
-/// of at most batchSize rows, never concatenated with payload rows.
+/// restored here by the type adapter. Every block opens with a kind byte;
+/// CompositeRows blocks come out as CompositeRowVectors of at most batchSize
+/// rows, never concatenated with payload rows.
 class CellShuffleReader {
  public:
   CellShuffleReader(
@@ -45,8 +45,7 @@ class CellShuffleReader {
       arrow::MemoryPool* arrowPool, // only handed to nextStream()
       memory::MemoryPool* pool,
       int32_t batchSize,
-      int64_t batchByteSize,
-      bool compositeInput = false);
+      int64_t batchByteSize);
 
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();
@@ -134,8 +133,7 @@ class CellShuffleReader {
   const int64_t batchByteSize_;
 
   CellPayloadDecoder decoder_;
-  /// Set with compositeInput.
-  std::unique_ptr<ShuffleRowToColumnarConverter> compositeConverter_;
+  ShuffleRowToColumnarConverter compositeConverter_;
   BufferPtr compositeStored_;
   BufferPtr compositeRaw_;
   /// Row bodies (without the size prefix) of the last CompositeRows block.
