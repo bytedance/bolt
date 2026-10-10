@@ -92,6 +92,16 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
+  // Mirror of the writer-side fallback gate: the cell writer is only ever
+  // used for hash/range partitioning and non-composite plans. Unsupported
+  // types fail at the adapter boundary instead of changing the wire format.
+  useCellReader_ = shuffleWriterType_ == ShuffleWriterType::Cell &&
+      supportAdaptiveShuffleWriter(partitioning) &&
+      !operatorCtx_->driverCtx()
+           ->queryConfig()
+           .isHashAggregationCompositeOutputEnabled() &&
+      // The cell writer falls back to V1 on remote shuffles for now.
+      shuffleReaderOptions_.partitionWriterType == PartitionWriterType::kLocal;
 }
 
 void SparkShuffleReader::init() {
@@ -107,6 +117,25 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
   if (finished_) {
     return nullptr;
+  }
+
+  if (useCellReader_) {
+    if (!cellShuffleReader_) {
+      NanosecondTimer timer(&deserializerCreateTime_);
+      cellShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
+          readerStreamIterator_,
+          outputType_,
+          codec_.get(),
+          arrowPool_.get(),
+          pool(),
+          batchSize_,
+          shuffleBatchByteSize_);
+    }
+    auto output = cellShuffleReader_->next();
+    if (!output) {
+      finished_ = true;
+    }
+    return output;
   }
 
   if (reuseBufferedInputStream_) {
@@ -202,6 +231,14 @@ void SparkShuffleReader::close() {
     columnBufferPool_->release();
   }
 
+  if (cellShuffleReader_) {
+    // Report decompression and deserialization disjointly, matching the
+    // legacy reader's accounting.
+    const uint64_t decompressNs = cellShuffleReader_->decompressTimeNs();
+    decompressTime_ += decompressNs;
+    deserializeTime_ += cellShuffleReader_->decodeTimeNs() - decompressNs;
+    cellShuffleReader_.reset();
+  }
   {
     auto stats = this->stats().rlock();
     readerStreamIterator_->updateMetrics(

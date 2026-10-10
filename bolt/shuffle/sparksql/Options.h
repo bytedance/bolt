@@ -82,7 +82,39 @@ static constexpr bool kDefaultReuseColumnBuffer = false;
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
 
-enum class ShuffleWriterType { Adaptive = 0, V1 = 1, V2 = 2, RowBased = 3 };
+enum class ShuffleWriterType {
+  Adaptive = 0,
+  V1 = 1,
+  V2 = 2,
+  RowBased = 3,
+  Cell = 4
+};
+
+// Cell memory thresholds and encoding policy; compression uses
+// PartitionWriterOptions.
+struct CellShuffleOptions {
+  // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
+  int64_t cellMemoryCapBytes = 0;
+  // Close the window at a batch boundary when a partition exceeds this size.
+  int64_t checkpointPartitionBytes = 40LL << 20;
+  // Close the window when total null bitmap memory exceeds this threshold.
+  int64_t nullMemLimitBytes = 16LL << 20;
+  // Maximum rows per partition window.
+  uint32_t maxWindowRows = 1u << 22;
+  // Probe the first batch to enable dictionary encoding per string column.
+  bool enableStringDictionary = true;
+  // Merge runs per partition; disabling avoids gathering the whole window.
+  bool coalesceMergedRuns = true;
+  // Compress runs as they spill, so both disk passes write compressed bytes
+  // (SSD endurance). Spilled segments are then final runs, copied verbatim
+  // at merge; only with coalesceMergedRuns, a payload gathered from several
+  // segments is decompressed and compressed again as a single run.
+  // Disabling trades that codec CPU for uncompressed spill writes.
+  bool compressSpill = true;
+
+  /// Returns all options in a human readable form.
+  std::string toString() const;
+};
 
 enum PartitionWriterType { kLocal, kCeleborn };
 
@@ -128,6 +160,9 @@ struct ShuffleReaderOptions {
   bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
+
+  // Matches the writer backend so Cell format selection agrees on both ends.
+  PartitionWriterType partitionWriterType = PartitionWriterType::kLocal;
 
   /// Returns the options in a human readable form.
   std::string toString() const;
@@ -195,6 +230,7 @@ struct ShuffleWriterOptions {
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
+  CellShuffleOptions cellOptions{};
   PartitionWriterOptions partitionWriterOptions{};
 
   /// Returns the options in a human readable form.
@@ -204,6 +240,11 @@ struct ShuffleWriterOptions {
 struct ShuffleWriterMetrics {
   int64_t totalInputRowNumber{0};
   int64_t totalInputBatches{0};
+  // CellShuffleWriter: sealed checkpoint windows.
+  int64_t spillCount{0};
+  // Cell row counts summed over dictionary-enabled columns.
+  int64_t dictionaryMatchedRows{0};
+  int64_t dictionaryFallbackRows{0};
   int64_t totalBytesWritten{0};
   int64_t totalBytesEvicted{0};
   int64_t totalWriteTime{0};
