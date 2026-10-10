@@ -13,12 +13,13 @@
 # limitations under the License.
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.files import apply_conandata_patches, export_conandata_patches
 from conan.tools.scm import Git, Version
 import os
 
 from conan.tools.cmake import CMake, CMakeToolchain, CMakeDeps, cmake_layout
-from conan.tools.files import copy
+from conan.tools.files import copy, get
 
 
 class PaimonCppConan(ConanFile):
@@ -27,7 +28,7 @@ class PaimonCppConan(ConanFile):
     name = "paimon-cpp"
     package_type = "library"
     license = "Apache-2.0"
-    url = "https://github.com/alibaba/paimon-cpp"
+    url = "https://github.com/apache/paimon-cpp"
     description = "Paimon C++ core library and optional plugins"
     topics = ("paimon", "lakehouse", "arrow", "parquet", "orc")
 
@@ -37,6 +38,7 @@ class PaimonCppConan(ConanFile):
         "shared": [True, False],
         "fPIC": [True, False],
         "with_orc": [True, False],
+        "with_parquet": [True, False],
         "with_avro": [True, False],
         "with_lance": [True, False],
         "with_jindo": [True, False],
@@ -49,15 +51,32 @@ class PaimonCppConan(ConanFile):
         "fPIC": True,
         "with_avro": True,
         "with_orc": False,
+        "with_parquet": False,
         "with_lance": False,
         "with_jindo": False,
         "with_lumina": False,
         "with_lucene": False,
     }
 
+    @property
+    def _is_apache_release(self):
+        return str(self.version).startswith("v")
+
     def config_options(self):
+        if not self._is_apache_release:
+            self.options.rm_safe("with_parquet")
         if self.settings.os == "Windows":
             self.options.rm_safe("fPIC")
+
+    def validate(self):
+        if self._is_apache_release and self.options.with_lance:
+            raise ConanInvalidConfiguration("Apache Paimon v0.3.0 has no Lance plugin")
+        if self._is_apache_release and self.options.with_parquet:
+            raise ConanInvalidConfiguration(
+                "Paimon 0.3 native Parquet requires upstream patched Arrow APIs; "
+                "the Arrow 15 recipe supports with_parquet=False and an external "
+                "format reader such as Bolt."
+            )
 
     def requirements(self):
         """Declare dependencies for the Conan dependency graph."""
@@ -79,13 +98,13 @@ class PaimonCppConan(ConanFile):
             pass
 
     def source(self):
-        """Clone paimon-cpp source from GitHub and apply patches."""
+        """Download Apache v-prefixed releases; fetch legacy Git revisions."""
         data = self.conan_data["sources"][self.version]
-        git_url = data["url"]
-        expected_commit = data["revision"]
-
-        git = Git(self)
-        git.fetch_commit(git_url, expected_commit)
+        if self._is_apache_release:
+            get(self, **data, filename="paimon-cpp.tar.gz", strip_root=True)
+        else:
+            git = Git(self)
+            git.fetch_commit(data["url"], data["revision"])
 
         apply_conandata_patches(self)
 
@@ -121,6 +140,9 @@ class PaimonCppConan(ConanFile):
         tc.variables["PAIMON_BUILD_TESTS"] = False
         tc.variables["PAIMON_BUILD_SHARED"] = bool(self.options.shared)
         tc.variables["PAIMON_BUILD_STATIC"] = not bool(self.options.shared)
+
+        if self._is_apache_release:
+            tc.variables["PAIMON_ENABLE_PARQUET"] = bool(self.options.with_parquet)
 
         tc.variables["PAIMON_ENABLE_ORC"] = bool(self.options.with_orc)
         tc.variables["PAIMON_ENABLE_AVRO"] = bool(self.options.with_avro)
@@ -243,10 +265,11 @@ class PaimonCppConan(ConanFile):
         global_index.requires = ["core", "file_index"]
         global_index.set_property("cmake_target_name", "Paimon::global_index")
 
-        fmt_parquet = self.cpp_info.components["format_parquet"]
-        fmt_parquet.libs = ["paimon_parquet_file_format"]
-        fmt_parquet.requires = ["core"]
-        fmt_parquet.set_property("cmake_target_name", "Paimon::format_parquet")
+        if self.options.get_safe("with_parquet", True):
+            fmt_parquet = self.cpp_info.components["format_parquet"]
+            fmt_parquet.libs = ["paimon_parquet_file_format"]
+            fmt_parquet.requires = ["core"]
+            fmt_parquet.set_property("cmake_target_name", "Paimon::format_parquet")
 
         fmt_blob = self.cpp_info.components["format_blob"]
         fmt_blob.libs = ["paimon_blob_file_format"]

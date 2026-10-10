@@ -17,6 +17,7 @@ from pypaimon import CatalogFactory
 from pypaimon.catalog.catalog_exception import (
     TableNotExistException,
 )
+from pypaimon.deletionvectors.bitmap_deletion_vector import BitmapDeletionVector
 from typing import Any
 import pyarrow as pa
 from pypaimon import Schema
@@ -120,6 +121,109 @@ def append_only_multiple_append(catalog):
 
     # write dataset 2
     write_to_table(table, dataframe_2)
+
+
+def serialized_append_table(catalog, table_name: str, file_format: str):
+    pa_schema = pa.schema(
+        [
+            ("id", pa.int64()),
+            ("score", pa.int64()),
+            ("label", pa.string()),
+        ]
+    )
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=[],
+        options={"bucket": "-1", "file.format": file_format},
+        comment=f"serialized {file_format} append table",
+    )
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database="test_db",
+        table_name=table_name,
+        schema=schema,
+    )
+    if not table_created:
+        return
+
+    write_to_table(
+        table,
+        pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "score": [10, 20, 30],
+                "label": ["alpha", "beta", "gamma"],
+            }
+        ),
+    )
+    write_to_table(
+        table,
+        pd.DataFrame(
+            {
+                "id": [4, 5, 6],
+                "score": [40, 50, 60],
+                "label": ["delta", "epsilon", "zeta"],
+            }
+        ),
+    )
+
+
+def serialized_deletion_vector_table(catalog, table_name: str, file_format: str):
+    """Create one data file plus a paimon-cpp-compatible deletion-vector file.
+
+    The deletion vector is deliberately not added to Paimon's snapshot metadata.
+    PaimonConnectorTest serializes the normal DataSplit and attaches this file using
+    the public Split wire format, which exercises TableRead's real DV path.
+    """
+    pa_schema = pa.schema(
+        [
+            ("id", pa.int64()),
+            ("score", pa.int64()),
+            ("label", pa.string()),
+        ]
+    )
+    schema = Schema.from_pyarrow_schema(
+        pa_schema=pa_schema,
+        partition_keys=[],
+        primary_keys=[],
+        options={
+            "bucket": "-1",
+            "file.format": file_format,
+            "row-tracking.enabled": "true",
+        },
+        comment=f"serialized {file_format} deletion-vector table",
+    )
+    (table_created, table) = create_table(
+        catalog=catalog,
+        database="test_db",
+        table_name=table_name,
+        schema=schema,
+    )
+    if not table_created:
+        return
+
+    write_to_table(
+        table,
+        pd.DataFrame(
+            {
+                "id": list(range(9)),
+                "score": [value * 10 for value in range(9)],
+                "label": [f"row-{value}" for value in range(9)],
+            }
+        ),
+    )
+
+    deletion_vector = BitmapDeletionVector()
+    for position in (1, 4, 7):
+        deletion_vector.delete(position)
+    deletion_vector_path = (
+        Path(table.table_path.replace("file://", "")) / "index" / "serialized-dv-0"
+    )
+    deletion_vector_path.parent.mkdir(parents=True, exist_ok=True)
+    # DeletionFileWriter prefixes a v1 index file with one byte. The vector
+    # payload has Paimon's big-endian length, magic, roaring bitmap, and CRC.
+    deletion_vector_path.write_bytes(b"\x01" + deletion_vector.serialize())
 
 
 def pk_no_overwrite(catalog):
@@ -458,6 +562,12 @@ def main():
     tables = [
         basic_table,
         append_only_multiple_append,
+        lambda catalog: serialized_append_table(
+            catalog, "serialized_append_parquet", "parquet"
+        ),
+        lambda catalog: serialized_deletion_vector_table(
+            catalog, "serialized_dv_parquet", "parquet"
+        ),
         pk_no_overwrite,
         pk_with_overwrite,
         data_evolution_table,

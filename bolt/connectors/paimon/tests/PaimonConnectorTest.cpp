@@ -23,8 +23,12 @@
 #include <paimon/scan_context.h>
 #include <paimon/table/source/data_split.h>
 #include <paimon/table/source/plan.h>
+#include <paimon/table/source/split.h>
 #include <paimon/table/source/table_scan.h>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <limits>
 #include "bolt/common/config/Config.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/common/memory/Memory.h"
@@ -35,6 +39,7 @@
 #include "bolt/connectors/paimon/PaimonDataSource.h"
 #include "bolt/connectors/paimon/PaimonFilterTranslator.h"
 #include "bolt/connectors/paimon/PaimonTableHandle.h"
+#include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/OperatorTestBase.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
@@ -972,10 +977,30 @@ TEST_F(PaimonConnectorTest, TestTableScanDeduplicate) {
 //
 
 /// Helper: build splits for a given table path.
+static std::vector<std::string> makeSerializedPaimonSplits(
+    const std::string& tablePath,
+    const std::shared_ptr<BoltPaimonMemoryPool>& paimonPool,
+    const std::unordered_map<std::string, std::string>& extraOptions = {});
+
 static std::vector<std::shared_ptr<connector::ConnectorSplit>> makePaimonSplits(
     const std::string& tablePath,
     const std::shared_ptr<BoltPaimonMemoryPool>& paimonPool,
     const std::unordered_map<std::string, std::string>& extraOptions = {}) {
+  const auto serializedSplits =
+      makeSerializedPaimonSplits(tablePath, paimonPool, extraOptions);
+  std::vector<std::shared_ptr<connector::ConnectorSplit>> result;
+  result.reserve(serializedSplits.size());
+  for (const auto& serialized : serializedSplits) {
+    result.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test", serialized.data(), serialized.length()));
+  }
+  return result;
+}
+
+static std::vector<std::string> makeSerializedPaimonSplits(
+    const std::string& tablePath,
+    const std::shared_ptr<BoltPaimonMemoryPool>& paimonPool,
+    const std::unordered_map<std::string, std::string>& extraOptions) {
   ::paimon::ScanContextBuilder contextBuilder(tablePath);
   contextBuilder.AddOption(::paimon::Options::FILE_SYSTEM, "bolt");
   for (const auto& [key, value] : extraOptions) {
@@ -983,18 +1008,308 @@ static std::vector<std::shared_ptr<connector::ConnectorSplit>> makePaimonSplits(
   }
   auto scanContext = contextBuilder.Finish().value();
   auto tableScan = ::paimon::TableScan::Create(std::move(scanContext)).value();
-  auto paimonPlan = tableScan->CreatePlan().value();
+  const auto paimonPlan = tableScan->CreatePlan().value();
 
-  std::vector<std::shared_ptr<::paimon::Split>> paimonSplits =
-      paimonPlan->Splits();
-  std::vector<std::shared_ptr<connector::ConnectorSplit>> result;
+  std::vector<std::string> result;
+  const auto paimonSplits = paimonPlan->Splits();
   result.reserve(paimonSplits.size());
-  for (auto& ps : paimonSplits) {
-    auto serialized = ::paimon::Split::Serialize(ps, paimonPool).value();
-    result.push_back(std::make_shared<PaimonConnectorSplit>(
-        "paimon_test", serialized.data(), serialized.length()));
+  for (const auto& split : paimonSplits) {
+    result.push_back(::paimon::Split::Serialize(split, paimonPool).value());
   }
   return result;
+}
+
+static void
+appendBigEndian(std::string& output, uint64_t value, size_t byteCount) {
+  for (size_t i = byteCount; i > 0; --i) {
+    output.push_back(static_cast<char>(value >> ((i - 1) * 8)));
+  }
+}
+
+static uint64_t
+readBigEndian(const std::string& input, size_t offset, size_t byteCount) {
+  uint64_t value = 0;
+  for (size_t i = 0; i < byteCount; ++i) {
+    value = (value << 8) | static_cast<unsigned char>(input[offset + i]);
+  }
+  return value;
+}
+
+static std::string withDeletionFile(
+    const std::string& split,
+    const std::string& path,
+    int64_t offset,
+    int64_t length,
+    int64_t cardinality) {
+  // A v8 DataSplit ends with an empty data-deletion-file list followed by
+  // isStreaming and rawConvertible. Replace that empty list with the public
+  // DeletionFile::SerializeList representation for its sole data file.
+  std::string result = split.substr(0, split.size() - 3);
+  result.push_back(1);
+  appendBigEndian(result, 1, 4);
+  result.push_back(1);
+  appendBigEndian(result, path.size(), 2);
+  result.append(path);
+  appendBigEndian(result, offset, 8);
+  appendBigEndian(result, length, 8);
+  appendBigEndian(result, cardinality, 8);
+  result.append(split, split.size() - 2, 2);
+  return result;
+}
+
+static std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+serializedAppendColumnHandles() {
+  return {
+      {"id", std::make_shared<PaimonColumnHandle>("id", BIGINT())},
+      {"score", std::make_shared<PaimonColumnHandle>("score", BIGINT())},
+      {"label", std::make_shared<PaimonColumnHandle>("label", VARCHAR())},
+  };
+}
+
+static size_t countFilesWithExtension(
+    const std::filesystem::path& directory,
+    const std::string& extension) {
+  size_t count = 0;
+  for (const auto& entry :
+       std::filesystem::recursive_directory_iterator(directory)) {
+    if (entry.is_regular_file() && entry.path().extension() == extension) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+TEST_F(
+    PaimonConnectorTest,
+    SerializedDeletionVectorsPreservePhysicalPositionsWithPredicateAndRowTracking) {
+  auto rootPool =
+      memory::memoryManager()->addRootPool("SerializedDeletionVector");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+
+  const std::vector<std::string> formats{
+      "parquet",
+  };
+  for (const auto& format : formats) {
+    SCOPED_TRACE(format);
+    const std::string tableName = "serialized_dv_" + format;
+    const std::string tablePath =
+        "file:" + tempDir_->path + "/test_db.db/" + tableName;
+    const std::filesystem::path localDeletionVectorPath =
+        tempDir_->path + "/test_db.db/" + tableName + "/index/serialized-dv-0";
+    const std::string deletionVectorPath =
+        "file:" + localDeletionVectorPath.string();
+    EXPECT_EQ(
+        countFilesWithExtension(
+            tempDir_->path + "/test_db.db/" + tableName, "." + format),
+        1);
+    ASSERT_TRUE(std::filesystem::exists(localDeletionVectorPath));
+    const auto deletionVectorSize =
+        std::filesystem::file_size(localDeletionVectorPath);
+    ASSERT_GT(deletionVectorSize, 9);
+    ASSERT_LE(
+        deletionVectorSize - 9,
+        static_cast<uintmax_t>(std::numeric_limits<int32_t>::max()));
+    ASSERT_LE(
+        deletionVectorPath.size(),
+        static_cast<size_t>(std::numeric_limits<uint16_t>::max()));
+
+    const auto serializedSplits =
+        makeSerializedPaimonSplits(tablePath, paimonPool);
+    ASSERT_EQ(serializedSplits.size(), 1);
+    const auto& serializedSplit = serializedSplits.front();
+    ASSERT_GE(serializedSplit.size(), 15);
+    // The public C++ API exposes Split serialization but no DataSplit builder.
+    // Verify the Java-compatible v8 wire layout before replacing its empty data
+    // deletion-file list with the documented one-file representation.
+    ASSERT_EQ(readBigEndian(serializedSplit, 8, 4), 8);
+    ASSERT_EQ(serializedSplit[serializedSplit.size() - 3], '\0');
+    auto originalSplit = ::paimon::Split::Deserialize(
+        serializedSplit.data(), serializedSplit.size(), paimonPool);
+    ASSERT_TRUE(originalSplit.ok()) << originalSplit.status().ToString();
+    auto originalDataSplit =
+        std::dynamic_pointer_cast<::paimon::DataSplit>(originalSplit.value());
+    ASSERT_NE(originalDataSplit, nullptr);
+    ASSERT_EQ(originalDataSplit->GetFileList().size(), 1);
+    ASSERT_EQ(originalDataSplit->GetFileList().front().row_count, 9);
+
+    const auto splitWithDeletionFile = withDeletionFile(
+        serializedSplit,
+        deletionVectorPath,
+        /*offset=*/1,
+        /*length=*/deletionVectorSize - 9,
+        /*cardinality=*/3);
+    auto patchedSplit = ::paimon::Split::Deserialize(
+        splitWithDeletionFile.data(), splitWithDeletionFile.size(), paimonPool);
+    ASSERT_TRUE(patchedSplit.ok()) << patchedSplit.status().ToString();
+    std::vector<std::shared_ptr<connector::ConnectorSplit>> connectorSplits;
+    connectorSplits.push_back(std::make_shared<PaimonConnectorSplit>(
+        "paimon_test",
+        splitWithDeletionFile.data(),
+        splitWithDeletionFile.size()));
+
+    auto columnHandles = serializedAppendColumnHandles();
+    columnHandles.emplace(
+        "_ROW_ID", std::make_shared<PaimonColumnHandle>("_ROW_ID", BIGINT()));
+    const auto fullType =
+        ROW({"id", "score", "label"}, {BIGINT(), BIGINT(), VARCHAR()});
+    auto tableHandle = std::make_shared<PaimonTableHandle>(
+        "paimon_test",
+        tableName,
+        tablePath,
+        std::unordered_map<std::string, std::string>{});
+    auto allRowsPlan =
+        exec::test::PlanBuilder()
+            .tableScan(ROW({"id"}, {BIGINT()}), tableHandle, columnHandles)
+            .planNode();
+    auto allRowsExpected =
+        mk.rowVector({mk.flatVector<int64_t>({0, 2, 3, 5, 6, 8})});
+    exec::test::AssertQueryBuilder(allRowsPlan)
+        .connectorSessionProperty(
+            "paimon_test", PaimonConfig::kReadBatchSize, "3")
+        .splits(connectorSplits)
+        .assertResults(allRowsExpected);
+
+    auto filteredTableHandle = std::make_shared<PaimonTableHandle>(
+        "paimon_test",
+        tableName,
+        tablePath,
+        std::unordered_map<std::string, std::string>{},
+        parseExpr("id >= 7", fullType));
+    auto filteredPlan =
+        exec::test::PlanBuilder()
+            .tableScan(
+                ROW({"label"}, {VARCHAR()}), filteredTableHandle, columnHandles)
+            .planNode();
+    auto filteredExpected =
+        mk.rowVector({mk.flatVector<std::string>({"row-8"})});
+    for (const auto& predicateEnabled : {"true", "false"}) {
+      exec::test::AssertQueryBuilder(filteredPlan)
+          .connectorSessionProperty(
+              "paimon_test", PaimonConfig::kReadBatchSize, "3")
+          .connectorSessionProperty(
+              "paimon_test",
+              PaimonConfig::kPredicateFilterEnabled,
+              predicateEnabled)
+          .splits(connectorSplits)
+          .assertResults(filteredExpected);
+    }
+    // Row IDs are reconstructed by Paimon from each output row's physical
+    // position, including after predicate pushdown and DV remove rows.
+    auto rowIdPlan = exec::test::PlanBuilder()
+                         .tableScan(
+                             ROW({"_ROW_ID", "label"}, {BIGINT(), VARCHAR()}),
+                             filteredTableHandle,
+                             columnHandles)
+                         .planNode();
+    exec::test::AssertQueryBuilder(rowIdPlan)
+        .connectorSessionProperty(
+            "paimon_test", PaimonConfig::kReadBatchSize, "3")
+        .splits(connectorSplits)
+        .assertResults(mk.rowVector(
+            {mk.flatVector<int64_t>({8}),
+             mk.flatVector<std::string>({"row-8"})}));
+    // Without a DV, row tracking still requires original physical positions.
+    auto unmodifiedSplits = makePaimonSplits(tablePath, paimonPool);
+    exec::test::AssertQueryBuilder(rowIdPlan)
+        .connectorSessionProperty(
+            "paimon_test", PaimonConfig::kReadBatchSize, "3")
+        .splits(unmodifiedSplits)
+        .assertResults(mk.rowVector(
+            {mk.flatVector<int64_t>({7, 8}),
+             mk.flatVector<std::string>({"row-7", "row-8"})}));
+    auto sparseHandle = std::make_shared<PaimonTableHandle>(
+        "paimon_test",
+        tableName,
+        tablePath,
+        std::unordered_map<std::string, std::string>{},
+        parseExpr("id >= 2 AND id <= 6", fullType));
+    auto sparsePlan = exec::test::PlanBuilder()
+                          .tableScan(
+                              ROW({"_ROW_ID", "label"}, {BIGINT(), VARCHAR()}),
+                              sparseHandle,
+                              columnHandles)
+                          .planNode();
+    exec::test::AssertQueryBuilder(sparsePlan)
+        .connectorSessionProperty(
+            "paimon_test", PaimonConfig::kReadBatchSize, "9")
+        .splits(connectorSplits)
+        .assertResults(mk.rowVector(
+            {mk.flatVector<int64_t>({2, 3, 5, 6}),
+             mk.flatVector<std::string>(
+                 {"row-2", "row-3", "row-5", "row-6"})}));
+    auto countPlan =
+        exec::test::PlanBuilder()
+            .tableScan(ROW({}, {}), filteredTableHandle, columnHandles)
+            .singleAggregation({}, {"count(1)"})
+            .planNode();
+    exec::test::AssertQueryBuilder(countPlan)
+        .connectorSessionProperty(
+            "paimon_test", PaimonConfig::kReadBatchSize, "3")
+        .splits(connectorSplits)
+        .assertResults(mk.rowVector({mk.flatVector<int64_t>({1})}));
+  }
+}
+
+TEST_F(
+    PaimonConnectorTest,
+    CrossColumnOrPreservesFilterOnlyColumnsWithPredicateFilteringEnabledAndDisabled) {
+  auto rootPool =
+      memory::memoryManager()->addRootPool("DisabledPredicateResidual");
+  auto leafPool = rootPool->addLeafChild("leaf");
+  auto paimonPool = std::make_shared<BoltPaimonMemoryPool>(leafPool.get());
+  bytedance::bolt::test::VectorMaker mk(leafPool.get());
+
+  const auto filterType =
+      ROW({"id", "score", "label"}, {BIGINT(), BIGINT(), VARCHAR()});
+  const auto outputType = ROW({"label"}, {VARCHAR()});
+  const auto filterExpr = parseExpr("id = 2 OR score = 50", filterType);
+  const auto translated =
+      PaimonFilterTranslator::translate(filterExpr, filterType);
+  ASSERT_TRUE(translated.ok()) << translated.reason;
+  const auto typed =
+      PaimonFilterTranslator::toTypedExpr(translated.value, leafPool.get());
+  ASSERT_TRUE(typed.ok()) << typed.reason;
+  EXPECT_TRUE(PaimonFilterTranslator::toSubfieldFilters(typed.value).empty());
+
+  const auto expected =
+      mk.rowVector({mk.flatVector<std::string>({"beta", "epsilon"})});
+  const auto columnHandles = serializedAppendColumnHandles();
+  const std::vector<std::string> formats{
+      "parquet",
+  };
+  for (const auto& format : formats) {
+    SCOPED_TRACE(format);
+    const std::string tableName = "serialized_append_" + std::string(format);
+    const std::string tablePath =
+        "file:" + tempDir_->path + "/test_db.db/" + tableName;
+    const auto connectorSplits = makePaimonSplits(
+        tablePath,
+        paimonPool,
+        {{::paimon::Options::SOURCE_SPLIT_TARGET_SIZE, "1B"}});
+    ASSERT_GE(connectorSplits.size(), 2);
+
+    auto tableHandle = std::make_shared<PaimonTableHandle>(
+        "paimon_test",
+        tableName,
+        tablePath,
+        std::unordered_map<std::string, std::string>{},
+        filterExpr);
+    auto plan = exec::test::PlanBuilder()
+                    .tableScan(outputType, tableHandle, columnHandles)
+                    .planNode();
+    for (const auto predicateFilteringEnabled : {"true", "false"}) {
+      SCOPED_TRACE(predicateFilteringEnabled);
+      exec::test::AssertQueryBuilder(plan)
+          .connectorSessionProperty(
+              "paimon_test",
+              PaimonConfig::kPredicateFilterEnabled,
+              predicateFilteringEnabled)
+          .splits(connectorSplits)
+          .assertResults(expected);
+    }
+  }
 }
 
 TEST_F(PaimonConnectorTest, TablePropertyCannotOverrideBoltFileSystem) {
