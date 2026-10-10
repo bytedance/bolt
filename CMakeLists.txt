@@ -697,7 +697,7 @@ if(NOT ${BOLT_BUILD_MINIMAL})
   find_package(lz4 CONFIG REQUIRED)
   find_package(zstd CONFIG REQUIRED)
   find_package(Snappy CONFIG REQUIRED)
-  find_package(zstd CONFIG REQUIRED)
+  find_package(openzl CONFIG REQUIRED)
 endif()
 
 find_package(re2 CONFIG REQUIRED)

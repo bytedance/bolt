@@ -1,0 +1,159 @@
+/*
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "bolt/exec/bm/BmRowLayout.h"
+
+#include "bolt/common/base/BitUtil.h"
+#include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/bm/BmRowContainer.h"
+
+namespace bytedance::bolt::exec::bm {
+namespace {
+
+template <TypeKind Kind>
+uint32_t scalarTypeWidth(const TypePtr& type) {
+  if constexpr (
+      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY ||
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
+    return sizeof(StringView);
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
+    BOLT_NYI("BmRowContainer does not support type {}", type->toString());
+  } else {
+    return sizeof(typename TypeTraits<Kind>::NativeType);
+  }
+}
+
+uint32_t typeWidth(const TypePtr& type) {
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(scalarTypeWidth, type->kind(), type);
+}
+
+memory::bm::BlockFieldKind blockFieldKind(TypeKind kind) {
+  switch (kind) {
+    case TypeKind::BOOLEAN:
+      return memory::bm::BlockFieldKind::kUnsignedInteger;
+    case TypeKind::TINYINT:
+    case TypeKind::SMALLINT:
+    case TypeKind::INTEGER:
+    case TypeKind::BIGINT:
+      return memory::bm::BlockFieldKind::kSignedInteger;
+    case TypeKind::REAL:
+    case TypeKind::DOUBLE:
+      return memory::bm::BlockFieldKind::kFloatingPoint;
+    default:
+      return memory::bm::BlockFieldKind::kOpaque;
+  }
+}
+
+} // namespace
+
+BmRowLayout::BmRowLayout(
+    const std::vector<TypePtr>& types,
+    const std::vector<bool>& nullable,
+    uint32_t numKeyColumns,
+    uint32_t rowBlockSize) {
+  BOLT_CHECK_EQ(types.size(), nullable.size());
+  BOLT_CHECK_LE(numKeyColumns, types.size());
+  uint32_t nullBits = 0;
+  for (auto isNullable : nullable) {
+    if (isNullable) {
+      ++nullBits;
+    }
+  }
+  nullBytes_ = bits::nbytes(nullBits);
+  fixedRowSize_ = nullBytes_;
+  columns_.reserve(types.size());
+  stringColumns_.reserve(types.size());
+  storePlans_.reserve(types.size());
+  uint32_t nullOffset = 0;
+  for (auto i = 0; i < types.size(); ++i) {
+    const auto& type = types[i];
+    const auto width = typeWidth(type);
+    const auto kind = type->kind();
+    // Match RowContainer's packed fixed-width layout: key/dependent cells are
+    // laid out by width without per-type alignment padding. This can place
+    // fixed-width cells at non-natural alignment. Like RowContainer, most cell
+    // accesses still use typed pointer dereference and rely on the current
+    // target tolerating unaligned scalar/StringView access. Wide scalars such
+    // as HUGEINT must use HugeInt::serialize/deserialize to avoid alignment
+    // faults.
+    const bool stringKind =
+        kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY;
+    const bool complexKind = kind == TypeKind::ARRAY || kind == TypeKind::MAP ||
+        kind == TypeKind::ROW;
+    ColumnLayout column{
+        type,
+        fixedRowSize_,
+        width,
+        stringKind || complexKind,
+        i < numKeyColumns,
+        nullable[i],
+        0,
+        0};
+    if (nullable[i]) {
+      column.nullByte = nullOffset / 8;
+      column.nullMask = static_cast<uint8_t>(1u << (nullOffset & 7));
+      ++nullOffset;
+    }
+    columns_.push_back(std::move(column));
+    const auto& stored = columns_.back();
+    storePlans_.push_back(
+        {stored.type,
+         kind,
+         stored.offset,
+         stored.width,
+         stored.nullable,
+         stored.nullByte,
+         stored.nullMask,
+         stringKind,
+         complexKind,
+         stored.isKey,
+         BmRowContainer::storeFnFor(kind, stored.nullable)});
+    if (stored.variableWidth) {
+      stringColumns_.push_back(
+          {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});
+    }
+    fixedRowSize_ += width;
+  }
+  BOLT_CHECK_LE(fixedRowSize_, rowBlockSize);
+}
+
+std::shared_ptr<const memory::bm::BlockDescriptor>
+BmRowLayout::makeBlockDescriptor(uint32_t elementCount) const {
+  std::vector<memory::bm::BlockFieldSchema> fields;
+  fields.reserve(columns_.size() + (nullBytes_ == 0 ? 0 : 1));
+  if (nullBytes_ != 0) {
+    fields.push_back({memory::bm::BlockFieldKind::kOpaque, 0, nullBytes_});
+  }
+  for (const auto& column : columns_) {
+    fields.push_back(
+        {blockFieldKind(column.type->kind()), column.offset, column.width});
+  }
+  return std::make_shared<const memory::bm::BlockDescriptor>(
+      memory::bm::BlockDescriptor{
+          .schemaKind = memory::bm::BlockSchemaKind::kFixedRow,
+          .elementCount = elementCount,
+          .schema =
+              memory::bm::FixedRowBlockSchema{
+                  .rowStride = fixedRowSize_,
+                  .fields = std::move(fields),
+              },
+      });
+}
+
+} // namespace bytedance::bolt::exec::bm

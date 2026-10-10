@@ -57,6 +57,45 @@ TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
   EXPECT_EQ(configured.parquetReaderImplicitCastMask(), -1);
 }
 
+TEST_F(QueryConfigTest, bufferManagerSpillCompressionKind) {
+  auto defaultConfig = QueryCtx::create(nullptr, QueryConfig{{}});
+  EXPECT_TRUE(
+      defaultConfig->queryConfig().bufferManagerSpillCompressionKind().empty());
+
+  auto configured = QueryCtx::create(
+      nullptr,
+      QueryConfig{
+          {{QueryConfig::kBufferManagerSpillCompressionKind, "openzl"}}});
+  EXPECT_EQ(
+      "openzl", configured->queryConfig().bufferManagerSpillCompressionKind());
+}
+
+TEST_F(QueryConfigTest, bufferManagerEnabledUsesUnderscoreConfigKey) {
+  QueryConfig config{{{"buffer_manager_enabled", "true"}}};
+  EXPECT_TRUE(config.bufferManagerEnabled());
+}
+
+TEST_F(
+    QueryConfigTest,
+    bufferManagerSpillCompressionKindUsesUnderscoreConfigKey) {
+  QueryConfig config{{{"buffer_manager_spill_compression_kind", "openzl"}}};
+  EXPECT_EQ("openzl", config.bufferManagerSpillCompressionKind());
+}
+
+TEST_F(QueryConfigTest, bufferManagerEnabledHyphenatedKeyIsIgnored) {
+  const auto oldKey = std::string{"buffer-manager"} + "-enabled";
+  QueryConfig config{{{oldKey, "true"}}};
+  EXPECT_FALSE(config.bufferManagerEnabled());
+}
+
+TEST_F(
+    QueryConfigTest,
+    bufferManagerSpillCompressionKindHyphenatedKeyIsIgnored) {
+  const auto oldKey = std::string{"buffer-manager"} + "-spill-compression-kind";
+  QueryConfig config{{{oldKey, "openzl"}}};
+  EXPECT_TRUE(config.bufferManagerSpillCompressionKind().empty());
+}
+
 TEST_F(QueryConfigTest, setConfig) {
   std::string path = "/tmp/setConfig";
   std::unordered_map<std::string, std::string> configData(

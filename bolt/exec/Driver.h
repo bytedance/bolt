@@ -44,6 +44,11 @@
 #include "bolt/core/QueryCtx.h"
 #include "bolt/exec/Spiller.h"
 #include "bolt/exec/TraceConfig.h"
+
+namespace bytedance::bolt::memory::bm {
+class BufferManager;
+}
+
 namespace bytedance::bolt::exec {
 
 class Driver;
@@ -303,6 +308,8 @@ struct DriverCtx {
   const core::QueryConfig& queryConfig() const;
 
   const std::optional<trace::TraceConfig>& traceConfig() const;
+
+  std::shared_ptr<memory::bm::BufferManager> bufferManager() const;
 
   bolt::memory::MemoryPool* addOperatorPool(
       const core::PlanNodeId& planNodeId,
