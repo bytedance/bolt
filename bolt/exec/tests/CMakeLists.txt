@@ -117,7 +117,11 @@ if(KERNEL_SUPPORTS_IO_URING)
   add_executable(iouring_spill_test AsyncSpillerTest.cpp)
 endif()
 
-add_executable(bolt_exec_aggregation_test AggregationTest.cpp)
+add_executable(
+  bolt_exec_aggregation_test
+  AggregationTest.cpp
+  HashTableSimdAggregationTest.cpp
+)
 
 add_executable(bolt_exec_spiller_test SpillerTest.cpp)
 
@@ -132,6 +136,7 @@ add_executable(
   HashBitRangeTest.cpp
   HashJoinBridgeTest.cpp
   HashJoinTest.cpp
+  HashTableSimdJoinTest.cpp
   HashPartitionFunctionTest.cpp
   HashTableTest.cpp
 )

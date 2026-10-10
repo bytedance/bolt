@@ -60,7 +60,8 @@ void WindowPartition::extractColumn(
       columns_[columnIndex],
       resultOffset,
       result,
-      exactSize);
+      exactSize,
+      true);
 }
 
 void WindowPartition::extractColumn(
@@ -76,7 +77,8 @@ void WindowPartition::extractColumn(
       columns_[columnIndex],
       resultOffset,
       result,
-      exactSize);
+      exactSize,
+      true);
 }
 
 void WindowPartition::extractNulls(
@@ -340,7 +342,8 @@ void WindowPartitionImpl<T>::extractColumn(
         columns_[columnIndex],
         resultOffset,
         result,
-        exactSize);
+        exactSize,
+        true);
     return;
   } else if constexpr (T == RowFormat::kSerializedRows) {
     rowToColumnVector(
@@ -348,7 +351,8 @@ void WindowPartitionImpl<T>::extractColumn(
         rowNumbers,
         columns_[columnIndex],
         resultOffset,
-        result);
+        result,
+        true);
     return;
   }
   BOLT_FAIL("Unsupported RowFormat!");
@@ -369,7 +373,8 @@ void WindowPartitionImpl<T>::extractColumn(
         columns_[columnIndex],
         resultOffset,
         result,
-        exactSize);
+        exactSize,
+        true);
     return;
 
   } else if constexpr (T == RowFormat::kSerializedRows) {
@@ -378,7 +383,8 @@ void WindowPartitionImpl<T>::extractColumn(
         numRows,
         columns_[columnIndex],
         resultOffset,
-        result);
+        result,
+        true);
     return;
   }
   BOLT_FAIL("Unsupported RowFormat!");
@@ -670,7 +676,8 @@ bool SpilledWindowPartition<R>::getBatch(RowVectorPtr& output, bool& isEnd) {
             tmpRows.size(),
             this->columns_[i],
             0,
-            output->childAt(i));
+            output->childAt(i),
+            true);
       }
 
       processedRows_ += output->size();

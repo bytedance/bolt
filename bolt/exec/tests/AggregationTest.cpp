@@ -959,6 +959,44 @@ TEST_P(AggregationTest, hashmodes) {
 #endif
 }
 
+TEST_P(AggregationTest, simdHashPreservesStoredNullKeysAcrossBatches) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not use the SIMD hash table";
+  }
+
+  const auto targetBucket =
+      folly::hasher<int32_t>{}(std::numeric_limits<int32_t>::max()) & 2040;
+  std::vector<int32_t> collisionKeys;
+  for (int32_t key = 0; collisionKeys.size() < targetBucket; ++key) {
+    if ((folly::hasher<int32_t>{}(key)&2040) == 0) {
+      collisionKeys.push_back(key);
+    }
+  }
+
+  const auto regularKeys =
+      makeRowVector({makeFlatVector<int32_t>(collisionKeys)});
+  const auto nullKey =
+      makeRowVector({makeNullableFlatVector<int32_t>({std::nullopt})});
+  const auto maxKey = makeRowVector(
+      {makeFlatVector<int32_t>({std::numeric_limits<int32_t>::max()})});
+  const auto plan = PlanBuilder()
+                        .values({regularKeys, nullKey, maxKey})
+                        .singleAggregation({"c0"}, {"count(1)"})
+                        .planNode();
+  const auto expectedGroups = collisionKeys.size() + 2;
+
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    const auto result =
+        AssertQueryBuilder(plan)
+            .config(QueryConfig::kHashAdaptivityEnabled, false)
+            .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+            .maxDrivers(1)
+            .copyResults(pool());
+    EXPECT_EQ(result->size(), expectedGroups);
+  }
+}
+
 TEST_P(AggregationTest, rangeToDistinct) {
   rng_.seed(1);
   auto rowType =
@@ -2077,11 +2115,11 @@ TEST_P(AggregationTest, DISABLED_memoryAllocations) {
 
   task = assertQuery(plan, "SELECT c0, sum(c0 + c1) FROM tmp GROUP BY 1");
 
-  // Verify memory allocations. Aggregation should make 5 allocations: 1 for the
-  // hash table, 1 for the RowContainer holding accumulators, 3 for results (2
-  // for values and nulls buffers of the grouping key column, 1 for sum column).
+  // Verify memory allocations. Aggregation should make 4 allocations: 1 for the
+  // hash table, 1 for the RowContainer holding accumulators, 2 for results (1
+  // for values of the grouping key column, 1 for sum column).
   planStats = toPlanStats(task->taskStats());
-  ASSERT_EQ(5, planStats.at(aggNodeId).numMemoryAllocations);
+  ASSERT_EQ(4, planStats.at(aggNodeId).numMemoryAllocations);
 }
 
 TEST_P(AggregationTest, optimizedDistinctAggregationPath) {

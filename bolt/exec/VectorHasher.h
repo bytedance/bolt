@@ -184,11 +184,34 @@ class VectorHasher {
         "Type mismatch: {} vs. {}",
         type_->toString(),
         vector.type()->toString());
+    inputVectorEncoding_ = vector.encoding();
     decoded_.decode(vector, rows);
   }
 
   DecodedVector& decodedVector() {
     return decoded_;
+  }
+
+  const DecodedVector& decodedVector() const {
+    return decoded_;
+  }
+
+  VectorEncoding::Simple inputVectorEncoding() const {
+    return inputVectorEncoding_;
+  }
+
+  /// Read-only accessors for range-mode parameters used by hash table SIMD
+  /// value-ID computation.
+  int64_t rangeMin() const {
+    return min_;
+  }
+
+  int64_t rangeMax() const {
+    return max_;
+  }
+
+  uint64_t multiplier() const {
+    return multiplier_;
   }
 
   // Computes a hash for 'rows' in the vector previously decoded via decode()
@@ -562,6 +585,7 @@ class VectorHasher {
   const TypeKind typeKind_;
 
   DecodedVector decoded_;
+  VectorEncoding::Simple inputVectorEncoding_{VectorEncoding::Simple::FLAT};
   raw_vector<uint64_t> cachedHashes_;
 
   // Single precomputed hash for constant partition keys.

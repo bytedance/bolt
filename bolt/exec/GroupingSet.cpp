@@ -408,14 +408,16 @@ void GroupingSet::createHashTable() {
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        queryConfig_.simdHashTableEnabled());
   } else {
     table_ = HashTable<false>::createForAggregation(
         std::move(hashers_),
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        queryConfig_.simdHashTableEnabled());
   }
 
   RowContainer& rows = *table_->rows();
@@ -1302,7 +1304,8 @@ void GroupingSet::copyKeyAndInitGroup(
           distinctRows.size() - initGroupCount,
           container->columns().at(i),
           resultOffset,
-          result->childAt(i));
+          result->childAt(i),
+          container->columnHasNulls(i));
     }
     if (!isDistinct()) {
       BOLT_CHECK_EQ(distinctRows.size(), groups.size());
@@ -1386,7 +1389,8 @@ void GroupingSet::outputUniqueGroups(
           uniqueRows.size(),
           container->columns().at(i),
           uniqueCount,
-          uniqueRes->childAt(i));
+          uniqueRes->childAt(i),
+          container->columnHasNulls(i));
     }
 
     auto& accumulators = container->accumulators();
@@ -1437,7 +1441,8 @@ void GroupingSet::outputUniqueGroupsInRowFormat(
           uniqueRows.size(),
           container->columns().at(i),
           resultOffset,
-          compositeResult->childAt(i));
+          compositeResult->childAt(i),
+          container->columnHasNulls(i));
     }
     convertRowsFromSpilledRows(
         compositeResult,

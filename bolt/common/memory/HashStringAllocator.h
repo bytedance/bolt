@@ -238,6 +238,13 @@ class HashStringAllocator : public StreamArena {
         1;
   }
 
+  /// Returns true if 'view' is inline or fully contained in its first
+  /// allocation piece.
+  FOLLY_ALWAYS_INLINE static bool isContiguous(const StringView& view) {
+    return view.isInline() ||
+        view.size() <= static_cast<size_t>(headerOf(view.data())->usableSize());
+  }
+
   // Returns ByteInputStream over the data in the range of 'header' and
   // possible continuation ranges.
   // @param maxBytes If provided, the returned stream will cover at most that

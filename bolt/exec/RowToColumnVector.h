@@ -307,14 +307,19 @@ FOLLY_ALWAYS_INLINE void rowToColumnVector(
     folly::Range<const vector_size_t*> rowNumbers,
     RowColumn column,
     int32_t resultOffset,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    bool columnHasNulls = true) {
+  const auto effectiveColumn =
+      !columnHasNulls && result->type()->isPrimitiveType()
+      ? RowColumn(column.offset(), RowColumn::kNotNullOffset)
+      : column;
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
       rows,
       rowNumbers,
       rowNumbers.size(),
-      column,
+      effectiveColumn,
       resultOffset,
       result);
 }
@@ -324,14 +329,19 @@ FOLLY_ALWAYS_INLINE void rowToColumnVector(
     int32_t numRows,
     RowColumn column,
     int32_t resultOffset,
-    const VectorPtr& result) {
+    const VectorPtr& result,
+    bool columnHasNulls = true) {
+  const auto effectiveColumn =
+      !columnHasNulls && result->type()->isPrimitiveType()
+      ? RowColumn(column.offset(), RowColumn::kNotNullOffset)
+      : column;
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
       rows,
       folly::Range<const vector_size_t*>(),
       numRows,
-      column,
+      effectiveColumn,
       resultOffset,
       result);
 }
@@ -342,7 +352,8 @@ FOLLY_ALWAYS_INLINE void rowToColumnVector(
     const std::vector<RowColumn>& columns,
     int32_t resultOffset,
     const RowVectorPtr& result,
-    const std::vector<IdentityProjection>& columnMap) {
+    const std::vector<IdentityProjection>& columnMap,
+    bool columnHasNulls = true) {
   if (!columnMap.empty()) {
     for (const auto& columnProjection : columnMap) {
       rowToColumnVector(
@@ -350,12 +361,18 @@ FOLLY_ALWAYS_INLINE void rowToColumnVector(
           numRows,
           columns[columnProjection.inputChannel],
           resultOffset,
-          result->childAt(columnProjection.outputChannel));
+          result->childAt(columnProjection.outputChannel),
+          columnHasNulls);
     }
   } else {
     for (vector_size_t i = 0; i < columns.size(); i++) {
       rowToColumnVector(
-          rows, numRows, columns[i], resultOffset, result->childAt(i));
+          rows,
+          numRows,
+          columns[i],
+          resultOffset,
+          result->childAt(i),
+          columnHasNulls);
     }
   }
 }

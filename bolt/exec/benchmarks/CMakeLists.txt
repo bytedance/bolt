@@ -70,6 +70,15 @@ target_link_libraries(
     ${FOLLY_BENCHMARK}
 )
 
+add_executable(bolt_simd_hash_table_benchmark HashTableSimdBenchmark.cpp)
+
+target_link_libraries(
+  bolt_simd_hash_table_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+)
+
 add_executable(bolt_sort_random_data_benchmark SortRandomDataBenchmark.cpp)
 
 add_executable(bolt_sort_window_benchmark SortWindowBenchmark.cpp)

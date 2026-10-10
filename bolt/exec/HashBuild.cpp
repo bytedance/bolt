@@ -237,6 +237,7 @@ void HashBuild::setupTable() {
     dependentTypes.emplace_back(tableType_->childAt(i));
   }
   auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
+  const bool simdHashTableEnabled = queryConfig.simdHashTableEnabled();
   if (joinNode_->isRightJoin() || joinNode_->isFullJoin() ||
       joinNode_->isRightSemiProjectJoin()) {
     // Do not ignore null keys.
@@ -250,7 +251,8 @@ void HashBuild::setupTable() {
         queryConfig.minTableRowsForParallelJoinBuild(),
         pool(),
         queryConfig.enableJitRowEqVectors(),
-        hybridJoin_);
+        hybridJoin_,
+        simdHashTableEnabled);
   } else {
     // Right semi join needs to tag build rows that were probed.
     const bool needProbedFlag = joinNode_->isRightSemiFilterJoin();
@@ -267,7 +269,8 @@ void HashBuild::setupTable() {
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
           queryConfig.enableJitRowEqVectors(),
-          hybridJoin_);
+          hybridJoin_,
+          simdHashTableEnabled);
     } else {
       // Ignore null keys
       table_ = HashTable<true>::createForJoin(
@@ -280,7 +283,8 @@ void HashBuild::setupTable() {
           queryConfig.minTableRowsForParallelJoinBuild(),
           pool(),
           queryConfig.enableJitRowEqVectors(),
-          hybridJoin_);
+          hybridJoin_,
+          simdHashTableEnabled);
     }
   }
   lookup_ = std::make_unique<HashLookup>(
