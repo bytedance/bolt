@@ -24,7 +24,7 @@ namespace {
 
 using bytedance::bolt::memory::bm::MemoryTag;
 
-TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
+TEST_F(BmRowContainerDiskIoTest, MergeReadSegmentsReadsMaterializedOrder) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -58,7 +58,7 @@ TEST_F(BmRowContainerTest, MergeReadSegmentsReadsMaterializedOrder) {
       container.beginMergeReadSegments({&segment, 1}), BoltRuntimeError);
 }
 
-TEST_F(BmRowContainerTest, MergeReadRejectsUnorderedSegments) {
+TEST_F(BmRowContainerDiskIoTest, MergeReadRejectsUnorderedSegments) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, false},
@@ -72,7 +72,9 @@ TEST_F(BmRowContainerTest, MergeReadRejectsUnorderedSegments) {
       container.beginMergeReadSegments({&segment, 1}), BoltRuntimeError);
 }
 
-TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
+TEST_F(
+    BmRowContainerDiskIoTest,
+    MergeReadDefaultsToReleasingConsumedChunkBlocks) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 8);
   auto input = makeRowVector({makeFlatVector<int64_t>({4, 1, 3, 2})});
@@ -99,7 +101,9 @@ TEST_F(BmRowContainerTest, MergeReadDefaultsToReleasingConsumedChunkBlocks) {
   EXPECT_THROW(bulk.loadRows(), BoltRuntimeError);
 }
 
-TEST_F(BmRowContainerTest, MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
+TEST_F(
+    BmRowContainerDiskIoTest,
+    MergeReadWithoutReleaseKeepsConsumedChunksReadable) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 8);
   auto input = makeRowVector({makeFlatVector<int64_t>({4, 1, 3, 2})});

@@ -392,7 +392,7 @@ TEST_F(BmRowContainerTest, NullableStoreClearsNullBitForNonNullValue) {
   EXPECT_EQ("value", varcharFlat->valueAt(0).str());
 }
 
-TEST_F(BmRowContainerTest, NullableStringNullSurvivesSpillRead) {
+TEST_F(BmRowContainerDiskIoTest, NullableStringNullSurvivesSpillRead) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
       {false, true},
