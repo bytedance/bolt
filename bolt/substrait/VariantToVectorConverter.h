@@ -34,7 +34,7 @@
 namespace bytedance::bolt::substrait {
 
 /// Create Base Vector from bolt variants.
-/// Only scalar types are supported except VARBINARY.
+/// Supports scalar types and recursively converts ARRAY, MAP and ROW values.
 VectorPtr setVectorFromVariants(
     const TypePtr& type,
     const std::vector<bolt::variant>& values,

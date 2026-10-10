@@ -32,12 +32,20 @@
 
 #include "bolt/core/PlanNode.h"
 
+#include "bolt/substrait/SubstraitExtensionCollector.h"
 #include "bolt/substrait/proto/substrait/algebra.pb.h"
 #include "bolt/substrait/proto/substrait/type.pb.h"
 namespace bytedance::bolt::substrait {
 
 class BoltToSubstraitTypeConvertor {
  public:
+  explicit BoltToSubstraitTypeConvertor(
+      const SubstraitExtensionCollectorPtr& extensionCollector = nullptr)
+      : extensionCollector_(
+            extensionCollector
+                ? extensionCollector
+                : std::make_shared<SubstraitExtensionCollector>()) {}
+
   /// Convert Bolt RowType to Substrait NamedStruct.
   const ::substrait::NamedStruct& toSubstraitNamedStruct(
       google::protobuf::Arena& arena,
@@ -47,7 +55,13 @@ class BoltToSubstraitTypeConvertor {
   const ::substrait::Type& toSubstraitType(
       google::protobuf::Arena& arena,
       const bolt::TypePtr& type);
+
+ private:
+  SubstraitExtensionCollectorPtr extensionCollector_;
 };
+
+bolt::core::JoinType toBoltJoinType(
+    ::substrait::HashJoinRel::JoinType joinType);
 
 using BoltToSubstraitTypeConvertorPtr =
     std::shared_ptr<BoltToSubstraitTypeConvertor>;

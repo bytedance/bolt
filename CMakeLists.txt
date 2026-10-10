@@ -912,6 +912,13 @@ if(BOLT_ENABLE_TORCH)
 endif()
 
 if(BOLT_BUILD_PYTHON_PACKAGE)
+  find_package(
+    Python3
+    REQUIRED
+    COMPONENTS
+      Development
+      Interpreter
+  )
   find_package(pybind11 CONFIG REQUIRED)
 endif()
 

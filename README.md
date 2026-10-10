@@ -129,6 +129,21 @@ class GluenConan(ConanFile):
     self.requires(f"bolt/{bolt_version}", transitive_headers=True, transitive_libs=True)
 ```
 
+#### Using Bolt from Python
+
+The `bolt-engine` package provides two Python APIs:
+
+- **`boltml`**: a DataFrame API for reading Parquet and ORC files, filtering,
+  joining, and aggregating data, and applying Python functions to prepare data
+  and ML features. It works with Arrow and NumPy and supports execution on Ray
+  workers.
+- **`pybolt`**: direct access to Bolt's native types, vectors, and query plans
+  for building and running execution pipelines from Python.
+
+Start with `boltml` for data processing; use `pybolt` to construct query plans
+directly. See the [Python quick start](bolt/python/README.md) for installation
+and examples, and the [build guide](bolt/python/packaging/BUILDING.md) for wheel
+packaging and Ray deployment.
 
 ## Contributing
 

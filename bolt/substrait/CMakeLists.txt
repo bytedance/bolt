@@ -104,6 +104,7 @@ add_dependencies(substrait_proto protobuf::libprotobuf)
 set(
   SRCS
   ${PROTO_SRCS}
+  BoltExtensions.cpp
   SubstraitParser.cpp
   SubstraitToBoltExpr.cpp
   SubstraitToBoltPlan.cpp
@@ -115,6 +116,10 @@ set(
   BoltSubstraitSignature.cpp
   VariantToVectorConverter.cpp
 )
+
+if(BOLT_BUILD_PYTHON_PACKAGE)
+  list(APPEND SRCS PythonRel.cpp)
+endif()
 
 bolt_add_library(bolt_substrait_plan_converter ${SRCS})
 target_include_directories(bolt_substrait_plan_converter PUBLIC ${PROTO_OUTPUT_DIR}/)
@@ -128,6 +133,11 @@ if(${BOLT_ENABLE_TORCH})
   target_compile_definitions(bolt_substrait_plan_converter PRIVATE BOLT_HAS_TORCH=1)
   target_include_directories(bolt_substrait_plan_converter SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})
   target_link_libraries(bolt_substrait_plan_converter bolt_torch)
+endif()
+
+if(BOLT_BUILD_PYTHON_PACKAGE)
+  target_compile_definitions(bolt_substrait_plan_converter PRIVATE BOLT_HAS_PYTHON=1)
+  target_link_libraries(bolt_substrait_plan_converter pybind11::embed)
 endif()
 
 # Force export this library
