@@ -20,7 +20,7 @@
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/shuffle/sparksql/cell/CellPayloadAssembly.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {

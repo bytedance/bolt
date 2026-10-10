@@ -21,7 +21,7 @@
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/shuffle/sparksql/cell/CellPayloadAssembly.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
