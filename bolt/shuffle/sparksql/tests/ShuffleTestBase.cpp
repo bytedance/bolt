@@ -488,12 +488,6 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
   std::string localDir = tempDir->path + "/local_dir";
   std::filesystem::create_directories(localDir);
 
-  // Both shuffle ends read the composite switch from the same query config.
-  std::unordered_map<std::string, std::string> configs;
-  if (param.compositeOutputEnabled) {
-    configs[core::QueryConfig::kHashAggregationCompositeOutputEnabled] = "true";
-  }
-
   std::shared_ptr<MockRssClient> mockRssClient;
   std::shared_ptr<celeborn::client::ShuffleClient> realCelebornClient;
   // The guard owns lifecycle cleanup and lazily allocates a unique shuffle id
@@ -565,7 +559,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     params.serialExecution = true;
     params.queryCtx = core::QueryCtx::create(
         nullptr,
-        core::QueryConfig{configs},
+        core::QueryConfig{{}},
         {},
         cache::AsyncDataCache::getInstance(),
         memoryManagerHolder->rootPool());
@@ -666,7 +660,7 @@ ShuffleRunResult ShuffleTestBase::runShuffle(
     readerParams.serialExecution = true;
     readerParams.queryCtx = core::QueryCtx::create(
         nullptr,
-        core::QueryConfig{configs},
+        core::QueryConfig{{}},
         {},
         cache::AsyncDataCache::getInstance(),
         memoryManagerHolder->rootPool());

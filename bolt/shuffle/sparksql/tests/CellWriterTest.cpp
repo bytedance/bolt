@@ -251,7 +251,8 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     return result;
   }
 
-  /// Decodes every payload of one partition's byte range, in payload order.
+  /// Decodes every payload of one partition's byte range, in payload order;
+  /// each opens with its kind byte.
   std::vector<RowVectorPtr> decodePartition(
       const CellLayout& layout,
       const std::string& file,
@@ -267,6 +268,9 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     TestDecompressor decompressor(codec.get());
     CellPayloadDecoder decoder(layout, &decompressor, pool());
     while (!source.atEnd()) {
+      uint8_t kind;
+      EXPECT_TRUE(source.read(&kind, 1));
+      EXPECT_EQ(kind, static_cast<uint8_t>(CellBlockKind::kPayload));
       RowVectorPtr decoded;
       std::string error;
       EXPECT_TRUE(decoder.decode(source, decoded, error)) << error;
@@ -364,6 +368,7 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     const uint64_t tagBytes = (layout.numWireColumns() + 7) / 8;
     const uint64_t runHeaderBytes = 1 + 8 + 8ull * layout.numStreams();
     while (offset < end) {
+      ++offset; // the block kind byte
       uint32_t runCount;
       uint32_t nullStored;
       ::memcpy(&runCount, file.data() + offset + 4, sizeof(runCount));
@@ -534,13 +539,15 @@ TEST_F(CellWriterTest, pidOnlyRoundTripsAsHeaderOnlyPayloads) {
     pids[row] = row % 2; // partition 2 stays empty
   }
   roundTrip(options, {pids}, {data}, cellWriter);
-  // One 24-byte header per non-empty partition, carrying the row count.
+  // One kind byte and 24-byte header per non-empty partition, carrying the
+  // row count.
   EXPECT_EQ(
       cellWriter->metrics().partitionLengths,
-      (std::vector<int64_t>{24, 24, 0}));
+      (std::vector<int64_t>{25, 25, 0}));
   const auto bytes = readFile();
-  EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 51);
-  EXPECT_EQ(static_cast<uint8_t>(bytes[24]), 50);
+  EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 0);
+  EXPECT_EQ(static_cast<uint8_t>(bytes[1]), 51);
+  EXPECT_EQ(static_cast<uint8_t>(bytes[26]), 50);
 }
 
 TEST_F(CellWriterTest, timestampKeepsAllSixteenBytes) {
@@ -944,15 +951,17 @@ TEST_F(CellWriterTest, unknownOnlyHeaderAndRowBoundaries) {
   CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
   roundTrip(options, {std::vector<int32_t>(99, 1)}, {data}, &writer);
   ASSERT_EQ(
-      writer.metrics().partitionLengths, (std::vector<int64_t>{0, 24, 0}));
-  auto bytes = readFile();
+      writer.metrics().partitionLengths, (std::vector<int64_t>{0, 25, 0}));
+  const auto file = readFile();
+  EXPECT_EQ(static_cast<uint8_t>(file[0]), 0); // the block kind byte
+  const auto bytes = file.substr(1);
   EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 99);
   EXPECT_EQ(bytes.substr(1), std::string(23, '\0'));
 
   options.cellOptions.maxWindowRows = 10;
   CellShuffleWriter bounded(options, pool(), arrow::default_memory_pool());
   roundTrip(options, {std::vector<int32_t>(99, 1)}, {data}, &bounded);
-  EXPECT_EQ(bounded.metrics().partitionLengths[1], 10 * 24);
+  EXPECT_EQ(bounded.metrics().partitionLengths[1], 10 * 25);
 
   auto layout = CellLayout::create(asRowType(data->type()));
   CellPayloadDecoder decoder(layout, nullptr, pool());
@@ -1556,7 +1565,6 @@ TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {
     auto client = std::make_shared<RecordingRssClient>();
     auto options = celeborn ? makeCelebornOptions(kPartitions, client)
                             : makeOptions(kPartitions);
-    options.cellOptions.compositeInput = true;
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
     for (const auto& batch : batches) {
       RowVectorPtr input = batch.composite
@@ -1607,8 +1615,7 @@ TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {
           arrow::default_memory_pool(),
           pool(),
           /*batchSize=*/1000,
-          1 << 20,
-          /*compositeInput=*/true);
+          1 << 20);
       size_t next[2] = {0, 0};
       while (auto batch = reader.next()) {
         const bool composite = RowVector::isComposite(batch);
@@ -1651,7 +1658,6 @@ TEST_F(CellWriterTest, compositeReclaimWritesTheBufferedRows) {
     auto client = std::make_shared<RecordingRssClient>();
     auto options = celeborn ? makeCelebornOptions(kPartitions, client)
                             : makeOptions(kPartitions);
-    options.cellOptions.compositeInput = true;
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
     ASSERT_TRUE(writer.split(makeComposite(pids, data), 0).ok());
     EXPECT_EQ(client->numPushes, 0);
@@ -1683,17 +1689,6 @@ TEST_F(CellWriterTest, compositeReclaimWritesTheBufferedRows) {
   }
 }
 
-TEST_F(CellWriterTest, compositeInputNeedsTheQueryConfig) {
-  // Without the framing a reader would parse composite blocks as payloads.
-  const auto data =
-      makeRowVector({makeFlatVector<int64_t>(8, [](auto row) { return row; })});
-  CellShuffleWriter writer(
-      makeOptions(2), pool(), arrow::default_memory_pool());
-  EXPECT_THROW(
-      writer.split(makeComposite(std::vector<int32_t>(8, 1), data), 0),
-      BoltException);
-}
-
 TEST_F(CellWriterTest, compositeReaderRejectsAnUnknownBlockKind) {
   const auto rowType = ROW({"k"}, {BIGINT()});
   CellShuffleReader reader(
@@ -1704,8 +1699,7 @@ TEST_F(CellWriterTest, compositeReaderRejectsAnUnknownBlockKind) {
       arrow::default_memory_pool(),
       pool(),
       1000,
-      1 << 20,
-      /*compositeInput=*/true);
+      1 << 20);
   EXPECT_THROW(reader.next(), BoltException);
 }
 

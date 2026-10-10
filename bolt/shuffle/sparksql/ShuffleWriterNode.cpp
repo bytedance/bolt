@@ -76,16 +76,8 @@ void SparkShuffleWriter::init(const bytedance::bolt::RowVectorPtr& rv) {
   BOLT_CHECK(
       freeMem.has_value(),
       "Expect ExecutionMemoryPool::getMinimumFreeMemoryForTask return value");
-  auto options = shuffleWriterOptions_;
-  // CompositeRowVectors (HashAggregation composite output) may arrive only
-  // when the query enables them; the cell reader frames its blocks by the
-  // same static config, never by what the data turns out to be.
-  options.cellOptions.compositeInput =
-      operatorCtx_->driverCtx()
-          ->queryConfig()
-          .isHashAggregationCompositeOutputEnabled();
   shuffleWriter_ = BoltShuffleWriter::createShuffleWriter(
-      options,
+      shuffleWriterOptions_,
       rv->childrenSize() - 1,
       rv->size(),
       rv->estimateFlatSize(),

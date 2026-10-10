@@ -99,7 +99,7 @@ TEST_F(CellTypeIntegrationTest, unknownOnlyUsesHeaderPayloads) {
     input.inputsPerMapper.push_back(input.inputsPerMapper.front());
     ShuffleRunResult result;
     executeTestWithCustomInput(param, input, &result);
-    EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+    EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 25);
   }
 }
 
@@ -118,7 +118,7 @@ TEST_F(CellTypeIntegrationTest, pidOnlyUsesHeaderPayloads) {
     ShuffleRunResult result;
     // The harness verifies every partition's row count and contents.
     executeTestWithCustomInput(param, input, &result);
-    EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 24);
+    EXPECT_EQ(result.metrics.totalBytesWritten, 8 * 25);
   }
 }
 
@@ -133,7 +133,6 @@ TEST_F(CellTypeIntegrationTest, compositeOutputSharesTheShuffle) {
           fmt::format("{}{}", writerType, mixed ? ", mixed" : ", composite"));
       ShuffleTestParam param{
           "hash", 4, writerType, DataTypeGroup::kString, 4, 2};
-      param.compositeOutputEnabled = true;
       const auto batch = [&](int32_t base) {
         return makeRowVector(
             {"c0", "c1"},

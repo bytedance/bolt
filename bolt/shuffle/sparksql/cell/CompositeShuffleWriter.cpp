@@ -127,8 +127,7 @@ CompositeShuffleWriter::CompositeShuffleWriter(
       partitioner_->hasPid(),
       "CellShuffleWriter requires hash or range partitioning");
   const auto& writerOptions = options_.partitionWriterOptions;
-  if (options_.cellOptions.compositeInput &&
-      writerOptions.compressionType != arrow::Compression::UNCOMPRESSED) {
+  if (writerOptions.compressionType != arrow::Compression::UNCOMPRESSED) {
     codec_ = createCodec(
         writerOptions.compressionType,
         CodecOptions{
@@ -153,12 +152,6 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
     }
     return splitOrdinary(std::move(rv), memLimit);
   }
-  // Without the framing the reader would take composite blocks for
-  // payloads: fail loudly instead of writing unreadable bytes.
-  BOLT_CHECK(
-      options_.cellOptions.compositeInput,
-      "CompositeRowVector input needs HashAggregation composite output "
-      "enabled for the query, on both shuffle ends");
   if (!compositeHeld_) {
     RETURN_NOT_OK(flushOrdinary());
     compositeHeld_ = true;

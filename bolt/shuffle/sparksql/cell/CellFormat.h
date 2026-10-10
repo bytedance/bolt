@@ -72,9 +72,9 @@ enum class NullTag : uint8_t {
   kReserved = 0b11,
 };
 
-/// What a block of a composite-capable stream holds. With
-/// CellShuffleOptions::compositeInput every block - a ColumnarPayload or a
-/// CompositeRows block - starts with this byte.
+/// What a block of a Cell shuffle stream holds: every block on the wire - a
+/// ColumnarPayload or a CompositeRows block - starts with this byte, as
+/// every V1 block starts with its layout byte.
 enum class CellBlockKind : uint8_t {
   kPayload = 0,
   kCompositeRows = 1,
