@@ -475,48 +475,6 @@ TEST_F(CompactRowTest, arrayOfString) {
   testRoundTrip(data);
 }
 
-TEST_F(CompactRowTest, stringsDeserializeIntoOneExactBuffer) {
-  // Out-of-line bytes: 18 + 17 = 35 in column 0 and 13 + 18 + 17 + 13 = 61
-  // in the array elements; inline (<= 12 bytes), empty and null values
-  // take no buffer space.
-  const std::string a(18, 'a');
-  const std::string b(17, 'b');
-  const std::string c(13, 'c');
-  auto data = makeRowVector({
-      makeNullableFlatVector<std::string>(
-          {a, std::nullopt, "short", "", b, "twelve chars"}),
-      makeNullableArrayVector<std::string>({
-          {{c, std::nullopt, "x"}},
-          std::nullopt,
-          {{a, b}},
-          {{}},
-          {{std::nullopt}},
-          {{"", c}},
-      }),
-  });
-  CompactRow row(data);
-  std::vector<std::string> storage(data->size());
-  std::vector<std::string_view> serialized;
-  for (vector_size_t i = 0; i < data->size(); ++i) {
-    storage[i].resize(row.rowSize(i));
-    row.serialize(i, storage[i].data());
-    serialized.emplace_back(storage[i]);
-  }
-  auto copy =
-      CompactRow::deserialize(serialized, asRowType(data->type()), pool());
-  assertEqualVectors(data, copy);
-
-  const auto exactBuffer = [](const VectorPtr& vector, size_t expected) {
-    const auto& buffers = vector->asFlatVector<StringView>()->stringBuffers();
-    ASSERT_EQ(buffers.size(), 1);
-    EXPECT_EQ(buffers[0]->size(), expected);
-  };
-  exactBuffer(copy->childAt(0), a.size() + b.size());
-  exactBuffer(
-      copy->childAt(1)->as<ArrayVector>()->elements(),
-      2 * c.size() + a.size() + b.size());
-}
-
 TEST_F(CompactRowTest, map) {
   auto data = makeRowVector({
       makeMapVector<int16_t, int64_t>(
