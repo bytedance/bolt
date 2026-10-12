@@ -91,4 +91,6 @@ target_link_libraries(
     re2::re2
 )
 
-add_subdirectory(bm)
+if(NOT BOLT_BUILD_MINIMAL)
+  add_subdirectory(bm)
+endif()
