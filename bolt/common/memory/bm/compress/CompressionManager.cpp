@@ -31,31 +31,18 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <string>
 #include <utility>
 
 namespace bytedance::bolt::memory::bm::compress {
 namespace {
 
-int32_t checkedSimdCopyBytes(uint64_t bytes, const char* context) {
-  BOLT_CHECK_LE(
-      bytes,
-      static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
-      "BM raw spill {} payload is too large for simd::memcpy, bytes={}, max={}",
-      context,
-      bytes,
-      std::numeric_limits<int32_t>::max());
-  return static_cast<int32_t>(bytes);
-}
-
 CompressionRecordResult makeUncompressedRecord(std::span<const char> payload) {
   const auto rawSize = static_cast<uint64_t>(payload.size());
-  const auto copyBytes = checkedSimdCopyBytes(rawSize, "write");
   auto record = AllocateSpillRecord(payload.size());
   FinalizeSpillRecord(record, CompressionKind::kNone, rawSize, rawSize);
-  if (copyBytes > 0) {
-    simd::memcpy(SpillRecordBody(record), payload.data(), copyBytes);
+  if (!payload.empty()) {
+    simd::memcpy(SpillRecordBody(record), payload.data(), payload.size());
   }
 
   CompressionRecordResult result;
@@ -235,7 +222,6 @@ IoBuffer CompressionManager::DecodeSpillRecord(
   const auto storedPayload =
       StoredPayloadSpan(record, header.headerSize, header.storedSize);
 
-  std::optional<int32_t> rawCopyBytes;
   if (storedKind == CompressionKind::kNone) {
     if (header.storedSize != header.rawSize) {
       BOLT_FAIL(
@@ -243,13 +229,13 @@ IoBuffer CompressionManager::DecodeSpillRecord(
           header.storedSize,
           header.rawSize);
     }
-    rawCopyBytes = checkedSimdCopyBytes(header.rawSize, "read");
   }
 
   auto rawPayload = AllocateDecodedPayload(outputPool, header.rawSize);
   if (storedKind == CompressionKind::kNone) {
-    if (*rawCopyBytes > 0) {
-      simd::memcpy(rawPayload.data(), storedPayload.data(), *rawCopyBytes);
+    if (!storedPayload.empty()) {
+      simd::memcpy(
+          rawPayload.data(), storedPayload.data(), storedPayload.size());
     }
     return rawPayload;
   }
