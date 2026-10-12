@@ -173,6 +173,11 @@ class BmRowContainer {
   void releaseSegment(SegmentId segment);
   void releaseSegments(folly::Range<const SegmentId*> segments);
   void releaseChunk(SegmentId segment, ChunkId chunk);
+  // Releases complete chunks from the consumed prefix of a single physical BM
+  // partition's append stream. This is the layout used by streaming Window:
+  // logical Window partitions are contiguous ranges in the same BM partition.
+  // Interleaved writes to multiple BM partitions do not have a contiguous
+  // global order in chunk metadata and must be released by segment instead.
   void popFrontRows(uint64_t rowCount);
 
   SegmentState segmentState(SegmentId segment) const;

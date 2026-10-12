@@ -57,6 +57,11 @@ void BmSegmentCollection::popFrontRows(uint64_t rowCount) {
       if (chunk.consumed) {
         continue;
       }
+      // popFrontRows() is a FIFO operation for a single physical BM partition,
+      // as used by streaming Window. Logical Window partitions are contiguous
+      // ranges in that one append stream, so segment-local row numbers map to
+      // consecutive global ordinals. This calculation is not valid for
+      // interleaved physical BM partitions; those callers release by segment.
       const auto chunkBegin =
           segment.meta.firstGlobalRow + chunk.meta.firstRowNumber;
       const auto chunkEnd = chunkBegin + chunk.meta.rowCount;
