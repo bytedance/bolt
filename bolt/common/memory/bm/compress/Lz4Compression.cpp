@@ -32,7 +32,7 @@ LZ4_stream_t* ensureLz4Context(Lz4CompressionContext* context) {
   if (context->native == nullptr) {
     context->native = LZ4_createStream();
   }
-  return static_cast<LZ4_stream_t*>(context->native);
+  return context->native;
 }
 
 } // namespace
@@ -98,7 +98,6 @@ uint64_t Lz4Compress(
 }
 
 void Lz4Decompress(
-    Lz4DecompressionContext* /*context*/,
     const char* source,
     size_t sourceSize,
     char* target,
@@ -120,11 +119,9 @@ void Lz4Decompress(
   }
 }
 
-Lz4DecompressionContext::~Lz4DecompressionContext() = default;
-
 Lz4CompressionContext::~Lz4CompressionContext() {
   if (native != nullptr) {
-    LZ4_freeStream(static_cast<LZ4_stream_t*>(native));
+    LZ4_freeStream(native);
   }
 }
 

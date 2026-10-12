@@ -68,7 +68,7 @@ ZSTD_CCtx* ensureZstdContext(ZstdCompressionContext* context) {
   if (context->native == nullptr) {
     context->native = ZSTD_createCCtx();
   }
-  return static_cast<ZSTD_CCtx*>(context->native);
+  return context->native;
 }
 
 ZSTD_DCtx* ensureZstdDecompressionContext(ZstdDecompressionContext* context) {
@@ -78,7 +78,7 @@ ZSTD_DCtx* ensureZstdDecompressionContext(ZstdDecompressionContext* context) {
   if (context->native == nullptr) {
     context->native = ZSTD_createDCtx();
   }
-  return static_cast<ZSTD_DCtx*>(context->native);
+  return context->native;
 }
 
 } // namespace
@@ -150,13 +150,13 @@ void ZstdDecompress(
 
 ZstdDecompressionContext::~ZstdDecompressionContext() {
   if (native != nullptr) {
-    ZSTD_freeDCtx(static_cast<ZSTD_DCtx*>(native));
+    ZSTD_freeDCtx(native);
   }
 }
 
 ZstdCompressionContext::~ZstdCompressionContext() {
   if (native != nullptr) {
-    ZSTD_freeCCtx(static_cast<ZSTD_CCtx*>(native));
+    ZSTD_freeCCtx(native);
   }
 }
 

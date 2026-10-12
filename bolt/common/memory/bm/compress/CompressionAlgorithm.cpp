@@ -76,13 +76,13 @@ void DecompressWithAlgorithm(
     size_t targetSize) {
   switch (kind) {
     case CompressionKind::kLz4Block:
-      Lz4Decompress(contexts.lz4, source, sourceSize, target, targetSize);
+      Lz4Decompress(source, sourceSize, target, targetSize);
       return;
     case CompressionKind::kZstdFrame:
       ZstdDecompress(contexts.zstd, source, sourceSize, target, targetSize);
       return;
     case CompressionKind::kSnappyRaw:
-      SnappyDecompress(contexts.snappy, source, sourceSize, target, targetSize);
+      SnappyDecompress(source, sourceSize, target, targetSize);
       return;
     default:
       BOLT_FAIL("BM unsupported compression kind={}", static_cast<int>(kind));
