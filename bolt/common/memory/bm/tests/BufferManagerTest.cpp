@@ -304,7 +304,14 @@ TEST_F(BufferManagerTest, ReclaimReusesCleanBackingAndWritesDirtyChanges) {
     block = handle.block();
     std::memset(handle.Ptr(), 9, block->size());
   }
-  ASSERT_EQ(4096, bm->Reclaim(4096));
+  try {
+    ASSERT_EQ(4096, bm->Reclaim(4096));
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
   ASSERT_EQ(1, bm->stats().spillWriteCount);
 
   char expected = 9;
