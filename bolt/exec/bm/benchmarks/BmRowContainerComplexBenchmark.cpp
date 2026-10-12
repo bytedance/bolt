@@ -16,7 +16,7 @@
 
 #include "bolt/exec/bm/benchmarks/BmRowContainerBenchmarkCommon.h"
 
-#include "bolt/exec/BmContainerRowSerde.h"
+#include "bolt/exec/bm/BmContainerRowSerde.h"
 
 #include <fmt/core.h>
 #include <folly/Benchmark.h>

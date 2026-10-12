@@ -16,8 +16,8 @@
 
 #include "bolt/exec/bm/tests/BmRowContainerTestBase.h"
 
-#include "bolt/exec/BmContainerRowSerde.h"
 #include "bolt/exec/ContainerRowSerde.h"
+#include "bolt/exec/bm/BmContainerRowSerde.h"
 #include "bolt/exec/bm/BmRowLayout.h"
 
 #include <cmath>

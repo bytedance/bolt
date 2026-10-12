@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/exec/BmContainerRowSerde.h"
+#include "bolt/exec/bm/BmContainerRowSerde.h"
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/CheckedArithmetic.h"
@@ -28,7 +28,7 @@
 #include <span>
 #include <type_traits>
 
-namespace bytedance::bolt::exec {
+namespace bytedance::bolt::exec::bm {
 
 // This file has two independent traversals of the same recursive
 // ARRAY/MAP/ROW structure, grouped into separate namespaces:
@@ -605,4 +605,4 @@ TrySerializeResult trySerializeInto(
 
 } // namespace detail
 
-} // namespace bytedance::bolt::exec
+} // namespace bytedance::bolt::exec::bm

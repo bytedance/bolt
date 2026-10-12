@@ -36,7 +36,7 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/HashStringAllocator.h"
-#include "bolt/exec/BmContainerRowSerde.h"
+#include "bolt/exec/bm/BmContainerRowSerde.h"
 #include "bolt/vector/VariantVector.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -128,7 +128,7 @@ class ContainerRowSerdeTest : public testing::Test,
       allocator_.finishWrite(out, 0);
 
       const auto exactSize =
-          BmContainerRowSerde::serializedSize(*data, i, options);
+          bm::BmContainerRowSerde::serializedSize(*data, i, options);
       ASSERT_EQ(streamSize, exactSize) << "at " << i;
       std::vector<char> expected(exactSize);
       auto in = HashStringAllocator::prepareRead(position.header);
@@ -138,7 +138,7 @@ class ContainerRowSerdeTest : public testing::Test,
       std::vector<char> actual(exactSize);
       EXPECT_EQ(
           exactSize,
-          BmContainerRowSerde::serializeInto(
+          bm::BmContainerRowSerde::serializeInto(
               *data, i, std::span<char>(actual), options));
       EXPECT_EQ(expected, actual) << "at " << i;
       allocator_.clear();
@@ -152,9 +152,9 @@ class ContainerRowSerdeTest : public testing::Test,
       bool isKey = true) {
     const ContainerRowSerdeOptions options{.isKey = isKey};
     const auto size =
-        BmContainerRowSerde::serializedSize(*data, index, options);
+        bm::BmContainerRowSerde::serializedSize(*data, index, options);
     std::vector<char> bytes(size);
-    BmContainerRowSerde::serializeInto(
+    bm::BmContainerRowSerde::serializeInto(
         *data, index, std::span<char>(bytes), options);
     return bytes;
   }
@@ -163,7 +163,7 @@ class ContainerRowSerdeTest : public testing::Test,
     const ContainerRowSerdeOptions options{.isKey = isKey};
     DecodedVector decoded(*data);
     std::vector<uint64_t> sizes(data->size());
-    BmContainerRowSerde::serializedSizes(
+    bm::BmContainerRowSerde::serializedSizes(
         decoded, 0, data->size(), options, std::span<uint64_t>(sizes));
 
     for (auto i = 0; i < data->size(); ++i) {
@@ -471,7 +471,7 @@ TEST_F(
   const ContainerRowSerdeOptions options;
   std::vector<uint64_t> sizes(arrays->size());
 
-  BmContainerRowSerde::serializedSizes(
+  bm::BmContainerRowSerde::serializedSizes(
       decoded, 0, arrays->size(), options, std::span<uint64_t>(sizes));
 
   EXPECT_GT(sizes[0], 0);
@@ -479,7 +479,7 @@ TEST_F(
   EXPECT_GT(sizes[2], 0);
 
   std::vector<uint64_t> suffixSizes(2);
-  BmContainerRowSerde::serializedSizes(
+  bm::BmContainerRowSerde::serializedSizes(
       decoded, 1, 2, options, std::span<uint64_t>(suffixSizes));
   EXPECT_EQ(suffixSizes[0], 0);
   EXPECT_EQ(suffixSizes[1], sizes[2]);
@@ -489,13 +489,13 @@ TEST_F(
   auto nullableDictionary = BaseVector::wrapInDictionary(
       dictionaryNulls, makeIndices({0, 1, 2}), 3, arrays);
   DecodedVector nullableDecoded(*nullableDictionary);
-  BmContainerRowSerde::serializedSizes(
+  bm::BmContainerRowSerde::serializedSizes(
       nullableDecoded, 0, 3, options, std::span<uint64_t>(sizes));
   EXPECT_GT(sizes[0], 0);
   EXPECT_EQ(sizes[1], 0);
   EXPECT_GT(sizes[2], 0);
   EXPECT_THROW(
-      BmContainerRowSerde::serializedSizes(
+      bm::BmContainerRowSerde::serializedSizes(
           decoded,
           0,
           arrays->size(),
@@ -507,33 +507,33 @@ TEST_F(
 TEST_F(ContainerRowSerdeTest, serializeIntoRequiresExactCapacity) {
   auto data = makeFlatVector<int64_t>({123});
   const ContainerRowSerdeOptions options;
-  const auto size = BmContainerRowSerde::serializedSize(*data, 0, options);
+  const auto size = bm::BmContainerRowSerde::serializedSize(*data, 0, options);
   ASSERT_EQ(sizeof(int64_t), size);
 
   std::vector<char> tooSmall(size - 1);
   EXPECT_THROW(
-      BmContainerRowSerde::serializeInto(
+      bm::BmContainerRowSerde::serializeInto(
           *data, 0, std::span<char>(tooSmall), options),
       BoltException);
 
   std::vector<char> tooLarge(size + 1);
   EXPECT_THROW(
-      BmContainerRowSerde::serializeInto(
+      bm::BmContainerRowSerde::serializeInto(
           *data, 0, std::span<char>(tooLarge), options),
       BoltException);
 
   auto nullable = makeNullableFlatVector<int64_t>({std::nullopt});
   EXPECT_THROW(
-      BmContainerRowSerde::serializedSize(*nullable, 0, options),
+      bm::BmContainerRowSerde::serializedSize(*nullable, 0, options),
       BoltException);
   EXPECT_THROW(
-      BmContainerRowSerde::serializeInto(
+      bm::BmContainerRowSerde::serializeInto(
           *nullable, 0, std::span<char>(tooLarge), options),
       BoltException);
 }
 
 // ---------------------------------------------------------------------------
-// Speculative write tests for detail::trySerializeInto(source, index,
+// Speculative write tests for bm::detail::trySerializeInto(source, index,
 // available, options) -> {size, complete}. It always reports the exact
 // serialized size, copies into 'available' only while the value fits, and
 // signals capacity exhaustion via complete == false instead of throwing.
@@ -548,8 +548,8 @@ TEST_F(ContainerRowSerdeTest, TrySerializeExactFit) {
   for (auto i = 0; i < arrays->size(); ++i) {
     const auto expected = serializeIntoBytes(arrays, i);
     std::vector<char> actual(expected.size());
-    const auto result =
-        detail::trySerializeInto(*arrays, i, std::span<char>(actual), options);
+    const auto result = bm::detail::trySerializeInto(
+        *arrays, i, std::span<char>(actual), options);
     EXPECT_TRUE(result.complete) << "at " << i;
     EXPECT_EQ(result.size, expected.size()) << "at " << i;
     EXPECT_EQ(expected, actual) << "at " << i;
@@ -561,11 +561,12 @@ TEST_F(ContainerRowSerdeTest, TrySerializeOneByteShort) {
   auto arrays = makeArrayVector<int64_t>({{1, 2, 3}, {4, 5}});
   const ContainerRowSerdeOptions options;
   for (auto i = 0; i < arrays->size(); ++i) {
-    const auto full = BmContainerRowSerde::serializedSize(*arrays, i, options);
+    const auto full =
+        bm::BmContainerRowSerde::serializedSize(*arrays, i, options);
     ASSERT_GT(full, 0);
     std::vector<char> actual(full - 1);
-    const auto result =
-        detail::trySerializeInto(*arrays, i, std::span<char>(actual), options);
+    const auto result = bm::detail::trySerializeInto(
+        *arrays, i, std::span<char>(actual), options);
     EXPECT_FALSE(result.complete) << "at " << i;
     EXPECT_EQ(result.size, full) << "at " << i;
   }
@@ -575,9 +576,10 @@ TEST_F(ContainerRowSerdeTest, TrySerializeOneByteShort) {
 TEST_F(ContainerRowSerdeTest, TrySerializeEmptySpan) {
   auto arrays = makeArrayVector<int64_t>({{1, 2, 3}});
   const ContainerRowSerdeOptions options;
-  const auto full = BmContainerRowSerde::serializedSize(*arrays, 0, options);
+  const auto full =
+      bm::BmContainerRowSerde::serializedSize(*arrays, 0, options);
   const auto result =
-      detail::trySerializeInto(*arrays, 0, std::span<char>(), options);
+      bm::detail::trySerializeInto(*arrays, 0, std::span<char>(), options);
   EXPECT_FALSE(result.complete);
   EXPECT_EQ(result.size, full);
 }
@@ -599,8 +601,8 @@ TEST_F(ContainerRowSerdeTest, TrySerializeInlineSizedFits) {
     const auto expected = serializeIntoBytes(data, 0);
     EXPECT_LE(expected.size(), StringView::kInlineSize);
     std::vector<char> actual(expected.size());
-    const auto result =
-        detail::trySerializeInto(*data, 0, std::span<char>(actual), options);
+    const auto result = bm::detail::trySerializeInto(
+        *data, 0, std::span<char>(actual), options);
     EXPECT_TRUE(result.complete);
     EXPECT_LE(result.size, StringView::kInlineSize);
     EXPECT_EQ(result.size, expected.size());
@@ -613,12 +615,13 @@ TEST_F(ContainerRowSerdeTest, TrySerializeInlineSizedFits) {
 TEST_F(ContainerRowSerdeTest, TrySerializeInlineSizedShortSpan) {
   const ContainerRowSerdeOptions options;
   auto emptyMap = makeMapVector<int64_t, int64_t>({{}});
-  const auto full = BmContainerRowSerde::serializedSize(*emptyMap, 0, options);
+  const auto full =
+      bm::BmContainerRowSerde::serializedSize(*emptyMap, 0, options);
   ASSERT_LE(full, StringView::kInlineSize);
   ASSERT_GT(full, 1);
   std::vector<char> actual(full - 1);
-  const auto result =
-      detail::trySerializeInto(*emptyMap, 0, std::span<char>(actual), options);
+  const auto result = bm::detail::trySerializeInto(
+      *emptyMap, 0, std::span<char>(actual), options);
   EXPECT_FALSE(result.complete);
   EXPECT_EQ(result.size, full);
   EXPECT_LE(result.size, StringView::kInlineSize);
@@ -650,13 +653,13 @@ TEST_F(ContainerRowSerdeTest, TrySerializeNestedComplex) {
       const auto expected = serializeIntoBytes(data, i);
       std::vector<char> fit(expected.size());
       const auto fitResult =
-          detail::trySerializeInto(*data, i, std::span<char>(fit), options);
+          bm::detail::trySerializeInto(*data, i, std::span<char>(fit), options);
       EXPECT_TRUE(fitResult.complete) << "at " << i;
       EXPECT_EQ(fitResult.size, expected.size()) << "at " << i;
       EXPECT_EQ(expected, fit) << "at " << i;
 
       std::vector<char> shortBuf(expected.size() - 1);
-      const auto shortResult = detail::trySerializeInto(
+      const auto shortResult = bm::detail::trySerializeInto(
           *data, i, std::span<char>(shortBuf), options);
       EXPECT_FALSE(shortResult.complete) << "at " << i;
       EXPECT_EQ(shortResult.size, expected.size()) << "at " << i;
@@ -675,8 +678,8 @@ TEST_F(ContainerRowSerdeTest, TrySerializeMapCanonicalOrder) {
 
   const auto expected = serializeIntoBytes(unordered, 0);
   std::vector<char> actual(expected.size());
-  const auto result =
-      detail::trySerializeInto(*unordered, 0, std::span<char>(actual), options);
+  const auto result = bm::detail::trySerializeInto(
+      *unordered, 0, std::span<char>(actual), options);
   EXPECT_TRUE(result.complete);
   EXPECT_EQ(expected, actual);
 
@@ -703,12 +706,12 @@ TEST_F(ContainerRowSerdeTest, TrySerializeWrappedEncodings) {
       const auto expected = serializeIntoBytes(data, i);
       std::vector<char> fit(expected.size());
       const auto fitResult =
-          detail::trySerializeInto(*data, i, std::span<char>(fit), options);
+          bm::detail::trySerializeInto(*data, i, std::span<char>(fit), options);
       EXPECT_TRUE(fitResult.complete) << "at " << i;
       EXPECT_EQ(expected, fit) << "at " << i;
 
       std::vector<char> shortBuf(expected.empty() ? 0 : expected.size() - 1);
-      const auto shortResult = detail::trySerializeInto(
+      const auto shortResult = bm::detail::trySerializeInto(
           *data, i, std::span<char>(shortBuf), options);
       EXPECT_EQ(shortResult.size, expected.size()) << "at " << i;
       if (!expected.empty()) {
@@ -735,16 +738,17 @@ TEST_F(ContainerRowSerdeTest, TrySerializeSizeParity) {
   for (const auto& data : inputs) {
     for (auto i = 0; i < data->size(); ++i) {
       const auto expected =
-          BmContainerRowSerde::serializedSize(*data, i, options);
+          bm::BmContainerRowSerde::serializedSize(*data, i, options);
       // Both a fitting and an empty span report the same exact size.
       std::vector<char> buf(expected);
       EXPECT_EQ(
-          detail::trySerializeInto(*data, i, std::span<char>(buf), options)
+          bm::detail::trySerializeInto(*data, i, std::span<char>(buf), options)
               .size,
           expected)
           << "at " << i;
       EXPECT_EQ(
-          detail::trySerializeInto(*data, i, std::span<char>(), options).size,
+          bm::detail::trySerializeInto(*data, i, std::span<char>(), options)
+              .size,
           expected)
           << "empty at " << i;
     }

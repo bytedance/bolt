@@ -27,7 +27,7 @@
 // ByteOutputStream API, these entry points compute exact serialized sizes and
 // write into caller-provided memory ranges. They reuse ContainerRowSerdeOptions
 // and produce output identical to ContainerRowSerde::serialize().
-namespace bytedance::bolt::exec {
+namespace bytedance::bolt::exec::bm {
 
 /// Span-based serialization for BmRowContainer. The byte format matches
 /// ContainerRowSerde::serialize(); MAP keys are serialized in canonical
@@ -91,4 +91,4 @@ TrySerializeResult trySerializeInto(
 
 } // namespace detail
 
-} // namespace bytedance::bolt::exec
+} // namespace bytedance::bolt::exec::bm

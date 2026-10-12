@@ -18,8 +18,8 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SimdUtil.h"
-#include "bolt/exec/BmContainerRowSerde.h"
 #include "bolt/exec/ContainerRowSerde.h"
+#include "bolt/exec/bm/BmContainerRowSerde.h"
 #include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
