@@ -21,6 +21,7 @@
 #include "bolt/exec/bm/BmRowLayout.h"
 
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -196,6 +197,59 @@ TEST_F(BmRowContainerTest, ResidentStoreCompareAndExtract) {
   EXPECT_EQ(3, flat->valueAt(1));
   EXPECT_EQ(7, flat->valueAt(2));
   EXPECT_EQ(3, flat->valueAt(3));
+}
+
+TEST_F(BmRowContainerTest, ScalarFloatingPointNaNAwareCompareAndHash) {
+  const auto realNaN = std::copysign(
+      std::numeric_limits<float>::quiet_NaN(), static_cast<float>(1));
+  const auto otherRealNaN = std::copysign(
+      std::numeric_limits<float>::quiet_NaN(), static_cast<float>(-1));
+  const auto doubleNaN =
+      std::copysign(std::numeric_limits<double>::quiet_NaN(), 1.0);
+  const auto otherDoubleNaN =
+      std::copysign(std::numeric_limits<double>::quiet_NaN(), -1.0);
+  ASSERT_FALSE(std::signbit(realNaN));
+  ASSERT_TRUE(std::signbit(otherRealNaN));
+  ASSERT_FALSE(std::signbit(doubleNaN));
+  ASSERT_TRUE(std::signbit(otherDoubleNaN));
+
+  auto input = makeRowVector({
+      makeFlatVector<float>({
+          1.0f,
+          std::numeric_limits<float>::infinity(),
+          realNaN,
+          otherRealNaN,
+      }),
+      makeFlatVector<double>({
+          1.0,
+          std::numeric_limits<double>::infinity(),
+          doubleNaN,
+          otherDoubleNaN,
+      }),
+  });
+  BmRowContainer container(
+      {REAL(), DOUBLE()},
+      {false, false},
+      2,
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto rows = storeAll(container, input);
+
+  CompareFlags descending;
+  descending.ascending = false;
+  for (int32_t column = 0; column < 2; ++column) {
+    EXPECT_LT(container.compare(rows[0], rows[1], column), 0);
+    EXPECT_LT(container.compare(rows[1], rows[2], column), 0);
+    EXPECT_GT(container.compare(rows[2], rows[1], column), 0);
+    EXPECT_EQ(0, container.compare(rows[2], rows[3], column));
+    EXPECT_EQ(0, container.compare(rows[3], rows[2], column));
+
+    EXPECT_GT(container.compare(rows[1], rows[2], column, descending), 0);
+    EXPECT_LT(container.compare(rows[2], rows[1], column, descending), 0);
+    EXPECT_EQ(0, container.compare(rows[2], rows[3], column, descending));
+
+    EXPECT_EQ(container.hash(rows[2], column), container.hash(rows[3], column));
+  }
 }
 
 TEST_F(BmRowContainerTest, AppendRowsAndStringCompare) {

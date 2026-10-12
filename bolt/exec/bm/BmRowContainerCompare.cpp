@@ -18,6 +18,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/exec/ContainerRowSerde.h"
+#include "bolt/type/FloatingPointUtil.h"
 #include "bolt/type/HugeInt.h"
 
 #include <folly/Portability.h>
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <bit>
 #include <string_view>
+#include <type_traits>
 
 namespace bytedance::bolt::exec::bm {
 namespace {
@@ -33,6 +35,10 @@ template <typename T>
 int32_t compareValues(const char* left, const char* right) {
   const auto l = *reinterpret_cast<const T*>(left);
   const auto r = *reinterpret_cast<const T*>(right);
+  if constexpr (std::is_floating_point_v<T>) {
+    const util::floating_point::NaNAwareLessThan<T> less;
+    return less(l, r) ? -1 : (less(r, l) ? 1 : 0);
+  }
   return l < r ? -1 : (l > r ? 1 : 0);
 }
 
@@ -129,7 +135,11 @@ uint64_t hashScalarValue(const char* value, const TypePtr& type) {
     return folly::hasher<int128_t>()(HugeInt::deserialize(value));
   } else {
     using T = typename TypeTraits<Kind>::NativeType;
-    return folly::hasher<T>()(*reinterpret_cast<const T*>(value));
+    const auto scalar = *reinterpret_cast<const T*>(value);
+    if constexpr (std::is_floating_point_v<T>) {
+      return util::floating_point::NaNAwareHash<T>{}(scalar);
+    }
+    return folly::hasher<T>()(scalar);
   }
 }
 
