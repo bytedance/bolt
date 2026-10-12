@@ -34,6 +34,12 @@ uint64_t SnappyCompress(
     size_t sourceSize,
     char* target,
     size_t targetCapacity) {
+  BOLT_CHECK_GE(
+      targetCapacity,
+      SnappyMaxCompressedLength(sourceSize),
+      "BM Snappy target capacity is too small, source_size={}, target_capacity={}",
+      sourceSize,
+      targetCapacity);
   size_t written = 0;
   switch (options.strategy) {
     case SnappyStrategy::kRaw:
@@ -65,6 +71,16 @@ void SnappyDecompress(
     size_t sourceSize,
     char* target,
     size_t targetSize) {
+  size_t decodedSize = 0;
+  BOLT_CHECK(
+      snappy::GetUncompressedLength(source, sourceSize, &decodedSize),
+      "BM Snappy failed to read decoded size, source_size={}",
+      sourceSize);
+  BOLT_CHECK_EQ(
+      decodedSize,
+      targetSize,
+      "BM Snappy decoded size mismatch, source_size={}",
+      sourceSize);
   if (!snappy::RawUncompress(source, sourceSize, target)) {
     BOLT_FAIL("BM Snappy decompression failed, source_size={}", sourceSize);
   }

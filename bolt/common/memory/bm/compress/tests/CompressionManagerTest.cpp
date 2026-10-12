@@ -683,8 +683,11 @@ TEST_F(CompressionManagerTest, AlgorithmRejectsUnsupportedKindsAndStrategies) {
 
 TEST_F(CompressionManagerTest, AlgorithmsDecodeWithReusableContexts) {
   const auto original = compressiblePayload(64 * 1024);
-  std::vector<char> compressed(
-      MaxCompressedLength(CompressionKind::kZstdFrame, original.size()));
+  const auto maxCompressedSize = std::max(
+      {MaxCompressedLength(CompressionKind::kLz4Block, original.size()),
+       MaxCompressedLength(CompressionKind::kZstdFrame, original.size()),
+       MaxCompressedLength(CompressionKind::kSnappyRaw, original.size())});
+  std::vector<char> compressed(maxCompressedSize);
   std::vector<char> decoded(original.size());
 
   Lz4CompressionContext lz4Compression;
@@ -799,6 +802,49 @@ TEST_F(CompressionManagerTest, AlgorithmsRejectInvalidCompressedPayloads) {
           std::strlen("not-a-snappy-record"),
           decoded.data(),
           decoded.size()),
+      std::exception);
+}
+
+TEST_F(CompressionManagerTest, SnappyRejectsEmbeddedDecodedSizeMismatch) {
+  constexpr size_t kExpectedRawSize = 4095;
+  const auto original = compressiblePayload(kExpectedRawSize + 1);
+  const auto capacity = SnappyMaxCompressedLength(original.size());
+  auto record = AllocateSpillRecord(capacity);
+  SnappyOptions options;
+  const auto storedSize = SnappyCompress(
+      options,
+      original.data(),
+      original.size(),
+      SpillRecordBody(record),
+      capacity);
+  FinalizeSpillRecord(
+      record, CompressionKind::kSnappyRaw, kExpectedRawSize, storedSize);
+
+  CompressionConfig config;
+  config.kind = CompressionKind::kSnappyRaw;
+  CompressionManager manager(config);
+  EXPECT_THROW(
+      manager.DecodeSpillRecord(
+          std::span<const char>(record.data(), record.length()),
+          kExpectedRawSize,
+          nullptr,
+          nullptr),
+      std::exception);
+}
+
+TEST_F(CompressionManagerTest, SnappyRejectsInsufficientTargetCapacity) {
+  const auto original = compressiblePayload(1024);
+  const auto capacity = SnappyMaxCompressedLength(original.size());
+  std::vector<char> compressed(capacity);
+  SnappyOptions options;
+
+  EXPECT_THROW(
+      SnappyCompress(
+          options,
+          original.data(),
+          original.size(),
+          compressed.data(),
+          capacity - 1),
       std::exception);
 }
 
