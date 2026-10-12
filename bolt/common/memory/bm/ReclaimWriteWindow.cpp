@@ -56,6 +56,10 @@ void ReclaimWriteWindow::Submit(std::shared_ptr<BlockMemory> memory) {
   auto descriptor = memory->descriptor;
   auto payload = BlockStateMachine::BeginSpill(*memory);
   accounting_.OnSpillStarted(*memory);
+  // A spill submission failure is fatal to the Task that owns this
+  // BufferManager. The task tears down the task-scoped BufferManager instead
+  // of reusing the block, so intentionally do not roll back its payload,
+  // kSpilling state, or accounting before propagating the exception.
   auto write =
       submitWrite_(payload, memory->size, priority_, std::move(descriptor));
   pending_.push_back(
@@ -71,6 +75,9 @@ ReclaimWriteWindow::HarvestResult ReclaimWriteWindow::HarvestNext() {
   auto write = pending.write.get();
 
   if (!write.ok()) {
+    // Spill I/O failure has the same task-fatal contract as submission
+    // failure. The caller propagates it as an exception and the owning Task is
+    // terminated, so this block is intentionally not made resident again.
     accounting_.RecordWriteIoFailure();
     IoResult io = std::move(write.io);
     auto memory = pending.memory;
