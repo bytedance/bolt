@@ -18,6 +18,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 
+#include <fmt/format.h>
 #include <openzl/codecs/zl_conversion.h>
 #include <openzl/codecs/zl_field_lz.h>
 #include <openzl/codecs/zl_split.h>
@@ -28,6 +29,7 @@
 #include <openzl/zl_decompress.h>
 
 #include <array>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -137,19 +139,18 @@ std::string OpenZlDescriptorFingerprint(
       descriptor.schemaKind == BlockSchemaKind::kFixedRow,
       "BM OpenZL fingerprint requires a fixed-row descriptor");
   const auto& schema = std::get<FixedRowBlockSchema>(descriptor.schema);
-  std::string result = "fixed-row:";
-  result.append(std::to_string(schema.rowStride));
-  result.push_back(':');
-  result.append(std::to_string(descriptor.elementCount));
-  result.push_back(':');
-  result.append(std::to_string(blockSize));
+  auto result = fmt::format(
+      "fixed-row:{}:{}:{}",
+      schema.rowStride,
+      descriptor.elementCount,
+      blockSize);
   for (const auto& field : NormalizeFixedRowFields(schema)) {
-    result.push_back(':');
-    result.append(std::to_string(static_cast<uint8_t>(field.kind)));
-    result.push_back(',');
-    result.append(std::to_string(field.offset));
-    result.push_back(',');
-    result.append(std::to_string(field.width));
+    fmt::format_to(
+        std::back_inserter(result),
+        ":{},{},{}",
+        static_cast<uint32_t>(field.kind),
+        field.offset,
+        field.width);
   }
   return result;
 }
