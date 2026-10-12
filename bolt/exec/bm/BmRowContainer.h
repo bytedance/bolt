@@ -187,6 +187,13 @@ class BmRowContainer {
   RowNumber activeSegmentNextRowNumber(
       PartitionId partition = kDefaultPartition) const;
   uint32_t rowSize() const;
+
+  /// Copies the fixed-width row into 'rowCopy' and deep-copies non-inline
+  /// payloads for the selected variable-width columns into 'variableCopy',
+  /// rebasing their StringViews to caller-owned storage. This lets callers
+  /// retain selected columns after the source BM segment is spilled or
+  /// released. Variable-width columns not listed in 'columns' remain shallow
+  /// references to the source row's heap storage.
   void copyRowWithDeepColumns(
       const char* row,
       folly::Range<const int32_t*> columns,
