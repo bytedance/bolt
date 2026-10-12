@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <random>
 #include <vector>
 #include "bolt/exec/HashTable.h"
@@ -47,6 +48,31 @@ DEFINE_int32(
     -1,
     "If >=0, pin the benchmark thread to this CPU core (taskset-style) "
     "for stable cache state. Set governor=performance externally.");
+DEFINE_bool(
+    bolt_benchmark_simd_hash_table_wide_string_join_only,
+    false,
+    "Run only the calibrated HASH and NORMALIZED_KEY join-probe cases");
+DEFINE_string(
+    bolt_benchmark_simd_hash_table_wide_string_join_variant,
+    "all",
+    "Calibrated join variant to run: all, f14, jit, or simd");
+DEFINE_int32(
+    bolt_benchmark_simd_hash_table_wide_string_join_keys,
+    0,
+    "Calibrated join key count to run: 0 (all), or a specific count");
+DEFINE_int32(
+    bolt_benchmark_simd_hash_table_wide_string_join_length,
+    32,
+    "Byte length of each non-inline VARCHAR wide join key");
+DEFINE_int32(
+    bolt_benchmark_simd_hash_table_wide_string_join_probe_batches,
+    100,
+    "Number of 4096-row probe batches in calibrated join cases");
+DEFINE_string(
+    bolt_benchmark_simd_hash_table_wide_string_join_scenario,
+    "all",
+    "Calibrated join scenario to run: all, hash, hash-existing-mixed, "
+    "normalized-varchar, or normalized-wide");
 
 DEFINE_bool(
     bolt_benchmark_simd_hash_table_use_mono_alloc,
@@ -381,6 +407,193 @@ makeInt16Int64NullBatches(int numBatches, int batchSize, int numDistinct) {
         nullptr,
         batchSize,
         std::vector<VectorPtr>{k1, k2}));
+  }
+  return batches;
+}
+
+uint64_t mixWideJoinKey(uint64_t value) {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+std::string
+makeWideJoinString(uint64_t logicalValue, int key, int stringLength) {
+  std::string value(stringLength, '\0');
+  uint64_t bits =
+      mixWideJoinKey(logicalValue ^ (static_cast<uint64_t>(key + 1) << 48));
+  for (int byte = 0; byte < stringLength; ++byte) {
+    if ((byte & 7) == 0) {
+      bits = mixWideJoinKey(bits + byte);
+    }
+    value[byte] = static_cast<char>('a' + ((bits >> ((byte & 7) * 8)) % 26));
+  }
+  return value;
+}
+
+// Generates a wide join key with a majority of fixed-length, non-inline
+// VARCHAR columns. Build rows use unique logical keys. Probe rows are a
+// deterministic, shuffled 100%-hit workload over the build-key domain.
+std::vector<RowVectorPtr> makeWideStringJoinBatches(
+    int numRows,
+    int batchSize,
+    int numStringKeys,
+    int numBigintKeys,
+    int numBuildKeys,
+    bool buildSide,
+    int stringLength = 32) {
+  BOLT_CHECK_GT(numBuildKeys, 0);
+  BOLT_CHECK_GT(stringLength, 0);
+
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  names.reserve(numStringKeys + numBigintKeys);
+  types.reserve(numStringKeys + numBigintKeys);
+  for (int key = 0; key < numStringKeys; ++key) {
+    names.push_back("s" + std::to_string(key));
+    types.push_back(VARCHAR());
+  }
+  for (int key = 0; key < numBigintKeys; ++key) {
+    names.push_back("i" + std::to_string(key));
+    types.push_back(BIGINT());
+  }
+  auto rowType = ROW(std::move(names), std::move(types));
+
+  std::vector<RowVectorPtr> batches;
+  batches.reserve((numRows + batchSize - 1) / batchSize);
+  for (int offset = 0; offset < numRows; offset += batchSize) {
+    const int size = std::min(batchSize, numRows - offset);
+    std::vector<VectorPtr> children;
+    children.reserve(numStringKeys + numBigintKeys);
+    for (int key = 0; key < numStringKeys; ++key) {
+      children.push_back(
+          BaseVector::create(VARCHAR(), size, benchmarkPool.get()));
+    }
+    for (int key = 0; key < numBigintKeys; ++key) {
+      children.push_back(
+          BaseVector::create(BIGINT(), size, benchmarkPool.get()));
+    }
+
+    std::vector<FlatVector<StringView>*> stringVectors;
+    std::vector<int64_t*> bigintValues;
+    stringVectors.reserve(numStringKeys);
+    bigintValues.reserve(numBigintKeys);
+    for (int key = 0; key < numStringKeys; ++key) {
+      stringVectors.push_back(children[key]->as<FlatVector<StringView>>());
+    }
+    for (int key = 0; key < numBigintKeys; ++key) {
+      bigintValues.push_back(children[numStringKeys + key]
+                                 ->as<FlatVector<int64_t>>()
+                                 ->mutableRawValues());
+    }
+
+    for (int row = 0; row < size; ++row) {
+      const uint64_t ordinal = static_cast<uint64_t>(offset + row);
+      const uint64_t logicalKey = buildSide
+          ? ordinal
+          : mixWideJoinKey(ordinal ^ 0xd1b54a32d192ed03ULL) % numBuildKeys;
+      for (int key = 0; key < numStringKeys; ++key) {
+        auto value = makeWideJoinString(logicalKey, key, stringLength);
+        stringVectors[key]->set(row, StringView(value));
+      }
+      for (int key = 0; key < numBigintKeys; ++key) {
+        bigintValues[key][row] = static_cast<int64_t>(mixWideJoinKey(
+            logicalKey ^ (static_cast<uint64_t>(key + 1) << 32)));
+      }
+    }
+    batches.push_back(std::make_shared<RowVector>(
+        benchmarkPool.get(), rowType, nullptr, size, std::move(children)));
+  }
+  return batches;
+}
+
+// Generates two non-inline VARCHAR value-id domains whose Cartesian space is
+// larger than array mode. The mapping is reversible for logical keys below
+// 2048^2, so the build tuples remain unique while each individual column stays
+// within VectorHasher's value-id limit.
+std::vector<RowVectorPtr> makeNormalizedVarcharJoinBatches(
+    int numRows,
+    int batchSize,
+    int numBuildKeys,
+    bool buildSide,
+    int stringLength) {
+  BOLT_CHECK_GT(numBuildKeys, 0);
+  BOLT_CHECK_LE(numBuildKeys, 2048 * 2048);
+  BOLT_CHECK_GE(stringLength, StringView::kInlineSize + 1);
+  auto rowType = ROW({"s0", "s1"}, {VARCHAR(), VARCHAR()});
+
+  std::vector<RowVectorPtr> batches;
+  batches.reserve((numRows + batchSize - 1) / batchSize);
+  for (int offset = 0; offset < numRows; offset += batchSize) {
+    const int size = std::min(batchSize, numRows - offset);
+    std::vector<VectorPtr> children{
+        BaseVector::create(VARCHAR(), size, benchmarkPool.get()),
+        BaseVector::create(VARCHAR(), size, benchmarkPool.get())};
+    auto* first = children[0]->as<FlatVector<StringView>>();
+    auto* second = children[1]->as<FlatVector<StringView>>();
+    for (int row = 0; row < size; ++row) {
+      const uint64_t ordinal = static_cast<uint64_t>(offset + row);
+      const uint64_t logicalKey = buildSide
+          ? ordinal
+          : mixWideJoinKey(ordinal ^ 0xd1b54a32d192ed03ULL) % numBuildKeys;
+      const uint64_t firstId = logicalKey & 2047;
+      const uint64_t secondId = ((logicalKey >> 11) + firstId * 131) & 2047;
+      auto firstValue = makeWideJoinString(firstId, 0, stringLength);
+      auto secondValue = makeWideJoinString(secondId, 1, stringLength);
+      first->set(row, StringView(firstValue));
+      second->set(row, StringView(secondValue));
+    }
+    batches.push_back(std::make_shared<RowVector>(
+        benchmarkPool.get(), rowType, nullptr, size, std::move(children)));
+  }
+  return batches;
+}
+
+// Generates five finite BIGINT ranges whose combined range exceeds array mode
+// capacity but fits in a normalized key. The first four columns uniquely
+// encode the logical key for this benchmark's build cardinality; the fifth
+// broadens the normalized-key working set without changing hit semantics.
+std::vector<RowVectorPtr> makeNormalizedWideJoinBatches(
+    int numRows,
+    int batchSize,
+    int numBuildKeys,
+    bool buildSide) {
+  BOLT_CHECK_GT(numBuildKeys, 0);
+  constexpr int64_t kRadices[] = {37, 41, 43, 47};
+  auto rowType =
+      ROW({"i0", "i1", "i2", "i3", "i4"},
+          {BIGINT(), BIGINT(), BIGINT(), BIGINT(), BIGINT()});
+
+  std::vector<RowVectorPtr> batches;
+  batches.reserve((numRows + batchSize - 1) / batchSize);
+  for (int offset = 0; offset < numRows; offset += batchSize) {
+    const int size = std::min(batchSize, numRows - offset);
+    std::vector<VectorPtr> children;
+    std::vector<int64_t*> rawValues;
+    children.reserve(5);
+    rawValues.reserve(5);
+    for (int key = 0; key < 5; ++key) {
+      children.push_back(
+          BaseVector::create(BIGINT(), size, benchmarkPool.get()));
+      rawValues.push_back(
+          children.back()->as<FlatVector<int64_t>>()->mutableRawValues());
+    }
+
+    for (int row = 0; row < size; ++row) {
+      const uint64_t ordinal = static_cast<uint64_t>(offset + row);
+      const uint64_t logicalKey = buildSide
+          ? ordinal
+          : mixWideJoinKey(ordinal ^ 0xd1b54a32d192ed03ULL) % numBuildKeys;
+      uint64_t quotient = logicalKey;
+      for (int key = 0; key < 4; ++key) {
+        rawValues[key][row] = quotient % kRadices[key];
+        quotient /= kRadices[key];
+      }
+      rawValues[4][row] = mixWideJoinKey(logicalKey) % 53;
+    }
+    batches.push_back(std::make_shared<RowVector>(
+        benchmarkPool.get(), rowType, nullptr, size, std::move(children)));
   }
   return batches;
 }
@@ -864,18 +1077,25 @@ void runMultiColumnJoinVariant(
     bool enableSimdHashTable,
     bool enableJit,
     const std::vector<RowVectorPtr>& buildBatches,
-    const std::vector<RowVectorPtr>& probeBatches) {
+    const std::vector<RowVectorPtr>& probeBatches,
+    std::optional<BaseHashTable::HashMode> expectedHashMode = std::nullopt) {
   int warmup = std::max(0, FLAGS_bolt_benchmark_simd_hash_table_warmup);
   int measured = std::max(1, FLAGS_bolt_benchmark_simd_hash_table_iters);
   int totalIters = warmup + measured;
 
-  std::vector<double> buildSamples, probeSamples;
+  std::vector<double> buildSamples, prepareSamples, probeSamples, totalSamples;
   buildSamples.reserve(measured);
+  prepareSamples.reserve(measured);
   probeSamples.reserve(measured);
+  totalSamples.reserve(measured);
   uint64_t reportDistinct = 0, reportCapacity = 0, reportHits = 0;
   std::string reportHashMode;
 
   auto numKeyCols = buildBatches[0]->childrenSize();
+  bool hasNullableKeys = false;
+  for (int32_t column = 0; column < numKeyCols; ++column) {
+    hasNullableKeys |= buildBatches[0]->childAt(column)->mayHaveNulls();
+  }
 
   for (int it = 0; it < totalIters; ++it) {
     std::vector<std::unique_ptr<VectorHasher>> hashers;
@@ -888,7 +1108,8 @@ void runMultiColumnJoinVariant(
         {},
         false,
         false,
-        BaseHashTable::HashMode::kArray,
+        hasNullableKeys ? BaseHashTable::HashMode::kHash
+                        : BaseHashTable::HashMode::kArray,
         0,
         benchmarkPool.get(),
         enableJit,
@@ -907,7 +1128,11 @@ void runMultiColumnJoinVariant(
       for (int c = 0; c < numKeyCols; c++) {
         auto key = batch->childAt(c)->loadedVector();
         table->hashers()[c]->decode(*key, rows);
-        table->hashers()[c]->hash(rows, c > 0, analyzeHashes);
+        if (table->hashMode() == BaseHashTable::HashMode::kHash) {
+          table->hashers()[c]->hash(rows, c > 0, analyzeHashes);
+        } else {
+          table->hashers()[c]->computeValueIds(rows, analyzeHashes);
+        }
       }
     }
 
@@ -929,16 +1154,29 @@ void runMultiColumnJoinVariant(
     auto tBuild0 = Clock::now();
     table->prepareJoinTable({});
     auto tBuild1 = Clock::now();
+    if (expectedHashMode.has_value()) {
+      BOLT_CHECK(
+          table->hashMode() == expectedHashMode.value(),
+          "Expected hash mode {}, got {}",
+          BaseHashTable::modeString(expectedHashMode.value()),
+          BaseHashTable::modeString(table->hashMode()));
+    }
     double buildMs =
         std::chrono::duration<double, std::milli>(tBuild1 - tBuild0).count();
 
     auto lookup = std::make_unique<HashLookup>(table->hashers(), enableJit);
     int64_t totalProbeRows = 0, totalHits = 0;
+    int64_t prepareProbeNanos = 0;
     int64_t joinProbeNanos = 0;
     for (auto& batch : probeBatches) {
       SelectivityVector rows(batch->size());
       lookup->reset(batch->size());
+      auto prepareStart = Clock::now();
       table->prepareForJoinProbe(*lookup, batch, rows, true);
+      auto prepareEnd = Clock::now();
+      prepareProbeNanos += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               prepareEnd - prepareStart)
+                               .count();
       auto t0 = Clock::now();
       table->joinProbe(*lookup);
       auto t1 = Clock::now();
@@ -950,11 +1188,22 @@ void runMultiColumnJoinVariant(
           ++totalHits;
       }
     }
+    if (expectedHashMode.has_value()) {
+      BOLT_CHECK_EQ(
+          totalHits,
+          totalProbeRows,
+          "Calibrated join case must be a 100% hit workload");
+    }
     double probeMillis = static_cast<double>(joinProbeNanos) / 1e6;
 
     if (it >= warmup) {
       buildSamples.push_back(buildMs);
-      probeSamples.push_back(probeMillis * 1e6 / totalProbeRows);
+      const auto prepareNsPerRow =
+          static_cast<double>(prepareProbeNanos) / totalProbeRows;
+      const auto probeNsPerRow = probeMillis * 1e6 / totalProbeRows;
+      prepareSamples.push_back(prepareNsPerRow);
+      probeSamples.push_back(probeNsPerRow);
+      totalSamples.push_back(prepareNsPerRow + probeNsPerRow);
       reportDistinct = (long)table->numDistinct();
       reportCapacity = (unsigned long)table->capacity();
       reportHits = totalHits;
@@ -963,19 +1212,23 @@ void runMultiColumnJoinVariant(
     }
   }
   auto sBuild = computeSampleStatistics(buildSamples);
+  auto sPrepare = computeSampleStatistics(prepareSamples);
   auto sProbe = computeSampleStatistics(probeSamples);
+  auto sTotal = computeSampleStatistics(totalSamples);
   printf(
-      "  %-7s [%-14s] build=%4.0fms±%3.0f  %5ldK grp  cap=%6luK  "
-      "probe=%5.1f±%4.1f ns/row  (min=%4.1f)  hits=%ldK  (n=%d)\n",
+      "  %-7s [%-14s] build=%5.1fms±%3.1f  %5ldK grp  cap=%6luK  "
+      "prepare=%5.1f  probe=%5.1f±%4.1f  total=%5.1f ns/row  "
+      "hits=%ldK  (n=%d)\n",
       label,
       reportHashMode.c_str(),
       sBuild.mean,
       sBuild.standardDeviation,
       (long)reportDistinct / 1000,
       (unsigned long)reportCapacity / 1000,
+      sPrepare.mean,
       sProbe.mean,
       sProbe.standardDeviation,
-      sProbe.minimum,
+      sTotal.mean,
       (long)reportHits / 1000,
       (int)measured);
 }
@@ -996,6 +1249,166 @@ void runMultiColumnJoinCase(
 #endif
 }
 
+void runCalibratedJoinVariants(
+    const std::vector<RowVectorPtr>& build,
+    const std::vector<RowVectorPtr>& probe,
+    BaseHashTable::HashMode expectedHashMode) {
+  const auto& variant =
+      FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_variant;
+  BOLT_CHECK(
+      variant == "all" || variant == "f14" || variant == "jit" ||
+          variant == "simd",
+      "Unknown calibrated join variant: {}",
+      variant);
+
+  if (variant == "all" || variant == "f14") {
+    runMultiColumnJoinVariant(
+        "F14", false, false, build, probe, expectedHashMode);
+  }
+#ifdef ENABLE_BOLT_JIT
+  if ((variant == "all" || variant == "jit") &&
+      expectedHashMode == BaseHashTable::HashMode::kHash) {
+    runMultiColumnJoinVariant(
+        "JIT", false, true, build, probe, expectedHashMode);
+  } else if (
+      variant == "jit" &&
+      expectedHashMode == BaseHashTable::HashMode::kNormalizedKey) {
+    // Normalized-key probe compares the packed key and does not invoke the
+    // generated row comparator. Keep the isolated baseline option useful, but
+    // label it accurately.
+    runMultiColumnJoinVariant(
+        "Scalar", false, false, build, probe, expectedHashMode);
+  }
+#else
+  BOLT_CHECK_NE(variant, "jit", "JIT is not enabled in this build");
+#endif
+  if (variant == "all" || variant == "simd") {
+    runMultiColumnJoinVariant(
+        "SIMD", true, false, build, probe, expectedHashMode);
+  }
+}
+
+void runWideStringJoinCases() {
+  constexpr int kBuildRows = 100'000;
+  constexpr int kBatchSize = 4096;
+  const int probeRows =
+      FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_probe_batches *
+      kBatchSize;
+  const int stringLength =
+      FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_length;
+  const auto& scenario =
+      FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_scenario;
+  BOLT_CHECK(
+      scenario == "all" || scenario == "hash" ||
+          scenario == "hash-existing-mixed" ||
+          scenario == "normalized-varchar" || scenario == "normalized-wide",
+      "Unknown calibrated join scenario: {}",
+      scenario);
+  BOLT_CHECK_GT(
+      FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_probe_batches, 0);
+
+  auto keyCountEnabled = [](int numKeys) {
+    return FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_keys == 0 ||
+        FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_keys == numKeys;
+  };
+
+  struct WideStringJoinCase {
+    int numStringKeys;
+    int numBigintKeys;
+  };
+  if (scenario == "all" || scenario == "hash") {
+    for (const auto testCase :
+         {WideStringJoinCase{3, 1},
+          WideStringJoinCase{4, 1},
+          WideStringJoinCase{5, 1},
+          WideStringJoinCase{6, 1},
+          WideStringJoinCase{6, 2},
+          WideStringJoinCase{14, 4}}) {
+      const int numKeys = testCase.numStringKeys + testCase.numBigintKeys;
+      if (!keyCountEnabled(numKeys)) {
+        continue;
+      }
+      auto build = makeWideStringJoinBatches(
+          kBuildRows,
+          kBatchSize,
+          testCase.numStringKeys,
+          testCase.numBigintKeys,
+          kBuildRows,
+          true,
+          stringLength);
+      auto probe = makeWideStringJoinBatches(
+          probeRows,
+          kBatchSize,
+          testCase.numStringKeys,
+          testCase.numBigintKeys,
+          kBuildRows,
+          false,
+          stringLength);
+      printf(
+          "--- HASH %d keys (%d VARCHAR[%dB] + %d BIGINT), "
+          "%dK unique build, %dK probe, 100%% hit ---\n",
+          numKeys,
+          testCase.numStringKeys,
+          stringLength,
+          testCase.numBigintKeys,
+          kBuildRows / 1000,
+          probeRows / 1000);
+      runCalibratedJoinVariants(build, probe, BaseHashTable::HashMode::kHash);
+      printf("\n");
+    }
+  }
+
+  if (scenario == "hash-existing-mixed") {
+    auto build = makeMixedTypeBatches(
+        kBuildRows / kBatchSize + 1, kBatchSize, kBuildRows);
+    auto probe = makeMixedTypeBatches(
+        FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_probe_batches,
+        kBatchSize,
+        kBuildRows);
+    printf(
+        "--- HASH existing mixed keys "
+        "(BOOL/I8/I16/I32/I64/VARCHAR[8..20B]), "
+        "%dK build, %dK probe ---\n",
+        static_cast<int>(build.size()) * kBatchSize / 1000,
+        probeRows / 1000);
+    runMultiColumnJoinVariant("SIMD", true, false, build, probe);
+    printf("\n");
+  }
+
+  if ((scenario == "all" || scenario == "normalized-varchar") &&
+      keyCountEnabled(2)) {
+    auto build = makeNormalizedVarcharJoinBatches(
+        kBuildRows, kBatchSize, kBuildRows, true, stringLength);
+    auto probe = makeNormalizedVarcharJoinBatches(
+        probeRows, kBatchSize, kBuildRows, false, stringLength);
+    printf(
+        "--- NORMALIZED_KEY 2 keys (2 VARCHAR[%dB]), "
+        "%dK unique build, %dK probe, 100%% hit ---\n",
+        stringLength,
+        kBuildRows / 1000,
+        probeRows / 1000);
+    runCalibratedJoinVariants(
+        build, probe, BaseHashTable::HashMode::kNormalizedKey);
+    printf("\n");
+  }
+
+  if ((scenario == "all" || scenario == "normalized-wide") &&
+      keyCountEnabled(5)) {
+    auto build =
+        makeNormalizedWideJoinBatches(kBuildRows, kBatchSize, kBuildRows, true);
+    auto probe =
+        makeNormalizedWideJoinBatches(probeRows, kBatchSize, kBuildRows, false);
+    printf(
+        "--- NORMALIZED_KEY 5 BIGINT keys, "
+        "%dK unique build, %dK probe, 100%% hit ---\n",
+        kBuildRows / 1000,
+        probeRows / 1000);
+    runCalibratedJoinVariants(
+        build, probe, BaseHashTable::HashMode::kNormalizedKey);
+    printf("\n");
+  }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1013,6 +1426,12 @@ int main(int argc, char** argv) {
       FLAGS_bolt_benchmark_simd_hash_table_iters,
       FLAGS_bolt_benchmark_simd_hash_table_warmup,
       FLAGS_bolt_benchmark_simd_hash_table_trim);
+
+  if (FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_only) {
+    printf("=== Calibrated SIMD Hash Table Join Probe ===\n\n");
+    runWideStringJoinCases();
+    return 0;
+  }
 
   // ========== 1. Single Key (INT32) ==========
   printf("=== 1. Single Key (INT32) ===\n\n");
@@ -1353,6 +1772,10 @@ int main(int argc, char** argv) {
       printf("\n");
     }
   }
+
+  // ========== 18. Calibrated HASH and NORMALIZED_KEY Join ==========
+  printf("=== 18. Calibrated SIMD Hash Table Join Probe ===\n\n");
+  runWideStringJoinCases();
 
   return 0;
 }

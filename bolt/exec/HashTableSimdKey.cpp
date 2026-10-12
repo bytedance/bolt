@@ -404,26 +404,35 @@ bool compareConstantProbeValues(
           candidateGroups[i] + columnOffset);
       __builtin_prefetch(stored.data(), 0, 2);
     }
-    for (int32_t j = 0; j < numNonInline; ++j) {
-      const auto i = nonInlineRows[j];
-      const auto& stored = *reinterpret_cast<const StringView*>(
-          candidateGroups[i] + columnOffset);
-      if (FOLLY_LIKELY(
-              column.stringsAreContiguous ||
-              HashStringAllocator::isContiguous(stored))) {
-        const auto equal = std::memcmp(
-                               stored.data() + StringView::kPrefixSize,
-                               constantValue.data() + StringView::kPrefixSize,
-                               stored.size() - StringView::kPrefixSize) == 0;
-        matchMask[i] = static_cast<uint8_t>(equal);
-        anyMismatch |= !equal;
+    auto compareNonInline = [&](auto contiguous) {
+      for (int32_t j = 0; j < numNonInline; ++j) {
+        const auto i = nonInlineRows[j];
+        const auto& stored = *reinterpret_cast<const StringView*>(
+            candidateGroups[i] + columnOffset);
+        if (FOLLY_LIKELY(
+                decltype(contiguous)::value ||
+                HashStringAllocator::isContiguous(stored))) {
+          const auto equal = std::memcmp(
+                                 stored.data() + StringView::kPrefixSize,
+                                 constantValue.data() + StringView::kPrefixSize,
+                                 stored.size() - StringView::kPrefixSize) == 0;
+          matchMask[i] = static_cast<uint8_t>(equal);
+          anyMismatch |= !equal;
+        } else {
+          std::string storedString;
+          auto storedView =
+              HashStringAllocator::contiguousString(stored, storedString);
+          const auto equal = storedView == constantValue;
+          matchMask[i] = static_cast<uint8_t>(equal);
+          anyMismatch |= !equal;
+        }
+      }
+    };
+    if (numNonInline > 0) {
+      if (column.stringsAreContiguous) {
+        compareNonInline(std::true_type{});
       } else {
-        std::string storedString;
-        auto storedView =
-            HashStringAllocator::contiguousString(stored, storedString);
-        const auto equal = storedView == constantValue;
-        matchMask[i] = static_cast<uint8_t>(equal);
-        anyMismatch |= !equal;
+        compareNonInline(std::false_type{});
       }
     }
   }
@@ -563,16 +572,10 @@ bool compareProbeValues(
       }
     }
 
-    {
-      for (int32_t j = 0; j < numNonInline; ++j) {
-        const auto i = nonInlineRows[j];
-        const auto& stored = *reinterpret_cast<const StringView*>(
-            candidateGroups[i] + columnOffset);
-        __builtin_prefetch(stored.data(), 0, 2);
-        const auto& input = inputStringAt<hasNulls, isFlat>(
-            inputBase, indices, matchMask, bothNullMask, candidateRows, i);
-        __builtin_prefetch(input.data(), 0, 2);
-      }
+    // A separate full-batch prefetch pass adds another pair of indirect
+    // gathers and fetches string data too far ahead of its use for large
+    // candidate batches. Compare immediately after the descriptor pass above.
+    auto compareNonInline = [&](auto contiguous) {
       for (int32_t j = 0; j < numNonInline; ++j) {
         const auto i = nonInlineRows[j];
         const auto& stored = *reinterpret_cast<const StringView*>(
@@ -580,8 +583,8 @@ bool compareProbeValues(
         const auto& input = inputStringAt<hasNulls, isFlat>(
             inputBase, indices, matchMask, bothNullMask, candidateRows, i);
         if (FOLLY_LIKELY(
-              column.stringsAreContiguous ||
-              HashStringAllocator::isContiguous(stored))) {
+                decltype(contiguous)::value ||
+                HashStringAllocator::isContiguous(stored))) {
           const auto equal = std::memcmp(
                                  stored.data() + StringView::kPrefixSize,
                                  input.data() + StringView::kPrefixSize,
@@ -596,6 +599,13 @@ bool compareProbeValues(
           matchMask[i] = static_cast<uint8_t>(equal);
           anyMismatch |= !equal;
         }
+      }
+    };
+    if (numNonInline > 0) {
+      if (column.stringsAreContiguous) {
+        compareNonInline(std::true_type{});
+      } else {
+        compareNonInline(std::false_type{});
       }
     }
   }
@@ -757,7 +767,7 @@ FOLLY_ALWAYS_INLINE void nullPrePassBuild(
 
 template <TypeKind Kind, bool hasNulls, bool kMaterialized>
 bool compareBuildValues(
-    int32_t columnOffset,
+    const KeyColumn& column,
     char* const* __restrict existingGroups,
     char* const* __restrict newGroupsOrPtrs,
     const vector_size_t* __restrict candidateRows,
@@ -765,6 +775,7 @@ bool compareBuildValues(
     uint8_t* __restrict matchMask,
     const uint8_t* __restrict bothNullMask,
     vector_size_t* __restrict nonInlineRows) {
+  const auto columnOffset = column.rowColumn.offset();
   bool anyMismatch = false;
   if constexpr (
       Kind == TypeKind::BIGINT || Kind == TypeKind::INTEGER ||
@@ -858,37 +869,45 @@ bool compareBuildValues(
           *reinterpret_cast<const StringView*>(newGroup + columnOffset);
       __builtin_prefetch(newStringView.data(), 0, 2);
     }
-    for (int32_t j = 0; j < numNonInline; ++j) {
-      const auto i = nonInlineRows[j];
-      const auto& existing = *reinterpret_cast<const StringView*>(
-          existingGroups[i] + columnOffset);
-      char* newGroup =
-          buildNewGroupAt<kMaterialized>(newGroupsOrPtrs, candidateRows, i);
-      const auto& newStringView =
-          *reinterpret_cast<const StringView*>(newGroup + columnOffset);
-      const bool existingIsContiguous =
-          column.stringsAreContiguous ||
-          HashStringAllocator::isContiguous(existing);
-      const bool newIsContiguous =
-          column.stringsAreContiguous ||
-          HashStringAllocator::isContiguous(newStringView);
-      if (FOLLY_LIKELY(existingIsContiguous && newIsContiguous)) {
-        const auto equal = std::memcmp(
-                               existing.data() + StringView::kPrefixSize,
-                               newStringView.data() + StringView::kPrefixSize,
-                               existing.size() - StringView::kPrefixSize) == 0;
-        matchMask[i] = static_cast<uint8_t>(equal);
-        anyMismatch |= !equal;
+    auto compareNonInline = [&](auto contiguous) {
+      for (int32_t j = 0; j < numNonInline; ++j) {
+        const auto i = nonInlineRows[j];
+        const auto& existing = *reinterpret_cast<const StringView*>(
+            existingGroups[i] + columnOffset);
+        char* newGroup =
+            buildNewGroupAt<kMaterialized>(newGroupsOrPtrs, candidateRows, i);
+        const auto& newStringView =
+            *reinterpret_cast<const StringView*>(newGroup + columnOffset);
+        const bool existingIsContiguous = decltype(contiguous)::value ||
+            HashStringAllocator::isContiguous(existing);
+        const bool newIsContiguous = decltype(contiguous)::value ||
+            HashStringAllocator::isContiguous(newStringView);
+        if (FOLLY_LIKELY(existingIsContiguous && newIsContiguous)) {
+          const auto equal =
+              std::memcmp(
+                  existing.data() + StringView::kPrefixSize,
+                  newStringView.data() + StringView::kPrefixSize,
+                  existing.size() - StringView::kPrefixSize) == 0;
+          matchMask[i] = static_cast<uint8_t>(equal);
+          anyMismatch |= !equal;
+        } else {
+          std::string existingStringStorage;
+          auto existingStringView = HashStringAllocator::contiguousString(
+              existing, existingStringStorage);
+          std::string newStringStorage;
+          auto contiguousNewStringView = HashStringAllocator::contiguousString(
+              newStringView, newStringStorage);
+          const auto equal = existingStringView == contiguousNewStringView;
+          matchMask[i] = static_cast<uint8_t>(equal);
+          anyMismatch |= !equal;
+        }
+      }
+    };
+    if (numNonInline > 0) {
+      if (column.stringsAreContiguous) {
+        compareNonInline(std::true_type{});
       } else {
-        std::string existingStringStorage;
-        auto existingStringView = HashStringAllocator::contiguousString(
-            existing, existingStringStorage);
-        std::string newStringStorage;
-        auto contiguousNewStringView = HashStringAllocator::contiguousString(
-            newStringView, newStringStorage);
-        const auto equal = existingStringView == contiguousNewStringView;
-        matchMask[i] = static_cast<uint8_t>(equal);
-        anyMismatch |= !equal;
+        compareNonInline(std::false_type{});
       }
     }
   }
@@ -923,13 +942,11 @@ bool dispatchBuildComparison(
         bothNullMask);
   }
 
-  const auto columnOffset = column.rowColumn.offset();
-
 #define DISPATCH_BUILD_KIND(KIND)                                             \
   case TypeKind::KIND:                                                        \
     if (hasNulls) {                                                           \
       anyMismatch = compareBuildValues<TypeKind::KIND, true, kMaterialized>(  \
-          columnOffset,                                                       \
+          column,                                                             \
           existingGroups,                                                     \
           newGroupsOrPtrs,                                                    \
           candidateRows,                                                      \
@@ -939,7 +956,7 @@ bool dispatchBuildComparison(
           nonInlineRows);                                                     \
     } else {                                                                  \
       anyMismatch = compareBuildValues<TypeKind::KIND, false, kMaterialized>( \
-          columnOffset,                                                       \
+          column,                                                             \
           existingGroups,                                                     \
           newGroupsOrPtrs,                                                    \
           candidateRows,                                                      \

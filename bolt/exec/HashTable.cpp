@@ -2822,7 +2822,8 @@ void HashTable<ignoreNullKeys>::insertForJoinHashSimd(
               false,
               false,
               nullptr,
-              false});
+              false,
+              rows_->useMonotonicStringAllocation()});
         }
       };
   initializeKeyColumns(keyColumns);
