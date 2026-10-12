@@ -130,6 +130,12 @@ class IoBuffer {
     BOLT_CHECK_GT(size, 0);
     const auto allocationSize =
         ((size + kAlignment - 1) / kAlignment) * kAlignment;
+    // Intentionally bypass MemoryPool accounting for short-lived spill I/O
+    // scratch buffers. Spill can run while the owning pool is under pressure or
+    // being reclaimed, and charging this temporary allocation to the same pool
+    // can recursively trigger its reclaimer on explicit spill paths. Callers
+    // must bound the number and total size of outstanding malloc-backed
+    // buffers.
     // TODO: Large malloc-backed IoBuffers are used by spill record and spill
     // read/write temporary buffers. Freshly allocating and writing them can
     // still trigger first-touch minor page faults; huge-page hints only reduce
