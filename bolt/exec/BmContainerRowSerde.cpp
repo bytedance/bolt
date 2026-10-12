@@ -58,9 +58,7 @@ template <bool TolerateOverflow>
 class SerializeWriter {
  public:
   explicit SerializeWriter(std::span<char> target)
-      : begin_(target.data()), cursor_(target.data()) {
-    end_ = target.empty() ? cursor_ : cursor_ + target.size();
-  }
+      : cursor_(target.data()), remaining_(target.size()) {}
 
   template <typename T>
   void append(folly::Range<const T*> values) {
@@ -82,11 +80,7 @@ class SerializeWriter {
   }
 
   uint64_t size() const {
-    if constexpr (TolerateOverflow) {
-      return size_;
-    } else {
-      return begin_ == nullptr ? 0 : static_cast<uint64_t>(cursor_ - begin_);
-    }
+    return size_;
   }
 
   bool overflowed() const {
@@ -96,7 +90,7 @@ class SerializeWriter {
   void finish() const {
     if constexpr (!TolerateOverflow) {
       BOLT_CHECK(
-          cursor_ == end_,
+          remaining_ == 0,
           "ContainerRowSerde target range must have exact serialized size");
     }
   }
@@ -106,30 +100,30 @@ class SerializeWriter {
     if constexpr (TolerateOverflow) {
       // Always count; copy only while the value fits, then stop.
       size_ += bytes;
-      if (FOLLY_LIKELY(!overflowed_ && cursor_ + bytes <= end_)) {
+      if (FOLLY_LIKELY(!overflowed_ && bytes <= remaining_)) {
         if (bytes != 0) {
           simd::memcpy(cursor_, data, bytes);
           cursor_ += bytes;
         }
+        remaining_ -= bytes;
         return;
       }
       overflowed_ = true;
     } else {
-      const auto remaining =
-          cursor_ == nullptr ? 0 : static_cast<uint64_t>(end_ - cursor_);
       BOLT_CHECK_LE(
-          bytes, remaining, "ContainerRowSerde target range is too small");
+          bytes, remaining_, "ContainerRowSerde target range is too small");
+      size_ += bytes;
       if (bytes != 0) {
         simd::memcpy(cursor_, data, bytes);
         cursor_ += bytes;
       }
+      remaining_ -= bytes;
     }
   }
 
-  char* begin_{nullptr};
   char* cursor_{nullptr};
-  char* end_{nullptr};
-  uint64_t size_{0}; // TolerateOverflow only.
+  uint64_t remaining_{0};
+  uint64_t size_{0};
   bool overflowed_{false}; // TolerateOverflow only.
 };
 
