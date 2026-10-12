@@ -916,6 +916,43 @@ TEST_P(HashTableTest, simdDisabledForHybridJoin) {
   EXPECT_FALSE(hybridTable->simdHashLayoutActive());
 }
 
+TEST_P(HashTableTest, simdNormalizedKeyLayoutOnlyForAggregation) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+
+  std::vector<std::unique_ptr<VectorHasher>> joinHashers;
+  joinHashers.push_back(VectorHasher::create(BIGINT(), 0));
+  joinHashers.push_back(VectorHasher::create(BIGINT(), 1));
+  auto joinTable = HashTable<true>::createForJoin(
+      std::move(joinHashers),
+      {},
+      false,
+      false,
+      BaseHashTable::HashMode::kNormalizedKey,
+      1'000,
+      pool(),
+      GetParam().jitRowEqVectors,
+      false,
+      true);
+  EXPECT_TRUE(joinTable->simdActive());
+  EXPECT_FALSE(joinTable->simdNormalizedKeyLayoutActive());
+
+  std::vector<std::unique_ptr<VectorHasher>> aggregationHashers;
+  aggregationHashers.push_back(VectorHasher::create(BIGINT(), 0));
+  aggregationHashers.push_back(VectorHasher::create(BIGINT(), 1));
+  auto aggregationTable = HashTable<true>::createForAggregation(
+      std::move(aggregationHashers),
+      {},
+      pool(),
+      nullptr,
+      GetParam().jitRowEqVectors,
+      true);
+  auto helper = HashTableTestHelper<true>::create(aggregationTable.get());
+  helper.setHashMode(BaseHashTable::HashMode::kNormalizedKey, 1);
+  EXPECT_TRUE(aggregationTable->simdNormalizedKeyLayoutActive());
+}
+
 DEBUG_ONLY_TEST_P(HashTableTest, simdConsistencyWithDuplicateJoinKeys) {
   if (!process::hasAvx2()) {
     GTEST_SKIP() << "SIMD requires AVX2";

@@ -872,11 +872,13 @@ class HashTable : public BaseHashTable {
     return simdEnabled_ && hybridData_ == nullptr && process::hasAvx2();
   }
 
-  /// True when the SIMD bucket NK layout is active. SIMD mode replaces
-  /// the F14 Bucket (128 B, 16-slot, tag-indexed) layout with fixed-width
-  /// tagged-pointer buckets for the 'kNormalizedKey' path.
+  /// True when the SIMD bucket NK layout is active for aggregation. Join probe
+  /// keeps the compact tag-first layout because normalized keys need no full
+  /// row compare to amortize the wider tagged-pointer bucket and scratch
+  /// streams.
   bool simdNormalizedKeyLayoutActive() const {
-    return simdActive() && hashMode_ == HashMode::kNormalizedKey && !mayErase_;
+    return simdActive() && hashMode_ == HashMode::kNormalizedKey &&
+        !isJoinBuild_ && !mayErase_;
   }
 
   /// True when the SIMD bucket layout is active for full-hash mode. Uses the

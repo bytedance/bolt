@@ -560,37 +560,29 @@ bool compareProbeValues(
       }
     }
 
-    {
-      for (int32_t j = 0; j < numNonInline; ++j) {
-        const auto i = nonInlineRows[j];
-        const auto& stored = *reinterpret_cast<const StringView*>(
-            candidateGroups[i] + columnOffset);
-        __builtin_prefetch(stored.data(), 0, 2);
-        const auto& input = inputStringAt<hasNulls, isFlat>(
-            inputBase, indices, matchMask, bothNullMask, candidateRows, i);
-        __builtin_prefetch(input.data(), 0, 2);
-      }
-      for (int32_t j = 0; j < numNonInline; ++j) {
-        const auto i = nonInlineRows[j];
-        const auto& stored = *reinterpret_cast<const StringView*>(
-            candidateGroups[i] + columnOffset);
-        const auto& input = inputStringAt<hasNulls, isFlat>(
-            inputBase, indices, matchMask, bothNullMask, candidateRows, i);
-        if (FOLLY_LIKELY(HashStringAllocator::isContiguous(stored))) {
-          const auto equal = std::memcmp(
-                                 stored.data() + StringView::kPrefixSize,
-                                 input.data() + StringView::kPrefixSize,
-                                 stored.size() - StringView::kPrefixSize) == 0;
-          matchMask[i] = static_cast<uint8_t>(equal);
-          anyMismatch |= !equal;
-        } else {
-          std::string storedStr;
-          auto storedStringView =
-              HashStringAllocator::contiguousString(stored, storedStr);
-          const auto equal = storedStringView == input;
-          matchMask[i] = static_cast<uint8_t>(equal);
-          anyMismatch |= !equal;
-        }
+    // A separate full-batch prefetch pass adds another pair of indirect
+    // gathers and fetches string data too far ahead of its use for large
+    // candidate batches. Compare immediately after the descriptor pass above.
+    for (int32_t j = 0; j < numNonInline; ++j) {
+      const auto i = nonInlineRows[j];
+      const auto& stored = *reinterpret_cast<const StringView*>(
+          candidateGroups[i] + columnOffset);
+      const auto& input = inputStringAt<hasNulls, isFlat>(
+          inputBase, indices, matchMask, bothNullMask, candidateRows, i);
+      if (FOLLY_LIKELY(HashStringAllocator::isContiguous(stored))) {
+        const auto equal = std::memcmp(
+                               stored.data() + StringView::kPrefixSize,
+                               input.data() + StringView::kPrefixSize,
+                               stored.size() - StringView::kPrefixSize) == 0;
+        matchMask[i] = static_cast<uint8_t>(equal);
+        anyMismatch |= !equal;
+      } else {
+        std::string storedStr;
+        auto storedStringView =
+            HashStringAllocator::contiguousString(stored, storedStr);
+        const auto equal = storedStringView == input;
+        matchMask[i] = static_cast<uint8_t>(equal);
+        anyMismatch |= !equal;
       }
     }
   }

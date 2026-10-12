@@ -608,75 +608,6 @@ hashDictionaryInt32(
   }
 }
 
-// Not SIMD (CRC32 is inherently serial), but bypasses DecodedVector dispatch
-// and adds short-string fast path + long-string prefetch.
-
-template <bool kMix, bool kHasNulls>
-static void hashDenseVarchar(
-    const StringView* __restrict views,
-    const uint64_t* nullBits,
-    int32_t begin,
-    int32_t end,
-    uint64_t* __restrict output) {
-  constexpr int kBatch = 4;
-  int32_t row = begin;
-
-  for (; row + kBatch <= end; row += kBatch) {
-    if (row + 2 * kBatch <= end) {
-      for (int b = 0; b < kBatch; ++b) {
-        const auto aheadRow = row + kBatch + b;
-        if constexpr (kHasNulls) {
-          if (bits::isBitNull(nullBits, aheadRow)) {
-            continue;
-          }
-        }
-        auto& ahead = views[aheadRow];
-        if (ahead.size() > 12) {
-          __builtin_prefetch(ahead.data(), 0, 0);
-        }
-      }
-    }
-
-    uint64_t hashValue[kBatch];
-    for (int b = 0; b < kBatch; ++b) {
-      if constexpr (kHasNulls) {
-        if (bits::isBitNull(nullBits, row + b)) {
-          hashValue[b] = BaseVector::kNullHash;
-          continue;
-        }
-      }
-      hashValue[b] = folly::hasher<StringView>()(views[row + b]);
-    }
-
-    for (int b = 0; b < kBatch; ++b) {
-      if constexpr (kMix) {
-        output[row + b] = bits::hashMix(output[row + b], hashValue[b]);
-      } else {
-        output[row + b] = hashValue[b];
-      }
-    }
-  }
-
-  for (; row < end; ++row) {
-    if constexpr (kHasNulls) {
-      if (bits::isBitNull(nullBits, row)) {
-        if constexpr (kMix) {
-          output[row] = bits::hashMix(output[row], BaseVector::kNullHash);
-        } else {
-          output[row] = BaseVector::kNullHash;
-        }
-        continue;
-      }
-    }
-    auto hashValue = folly::hasher<StringView>()(views[row]);
-    if constexpr (kMix) {
-      output[row] = bits::hashMix(output[row], hashValue);
-    } else {
-      output[row] = hashValue;
-    }
-  }
-}
-
 template <typename T, bool kMix>
 static bool tryHashTyped(
     DecodedVector& decoded,
@@ -793,31 +724,6 @@ bool tryHash(
   } else if (kind == TypeKind::REAL) {
     // Preserve NaNAwareHash semantics in VectorHasher.
     return false;
-  } else if (kind == TypeKind::VARCHAR) {
-    if (!decoded.isIdentityMapping()) {
-      return false;
-    }
-    if (!rows.isAllSelected()) {
-      return false;
-    }
-    const auto* views = decoded.data<StringView>();
-    if (!views) {
-      return false;
-    }
-    const auto begin = rows.begin();
-    const auto end = rows.end();
-    const bool hasNulls = decoded.mayHaveNulls();
-    const uint64_t* nullBits = hasNulls ? decoded.nulls(&rows) : nullptr;
-    if (mixWithExisting) {
-      hasNulls
-          ? hashDenseVarchar<true, true>(views, nullBits, begin, end, hashes)
-          : hashDenseVarchar<true, false>(views, nullptr, begin, end, hashes);
-    } else {
-      hasNulls
-          ? hashDenseVarchar<false, true>(views, nullBits, begin, end, hashes)
-          : hashDenseVarchar<false, false>(views, nullptr, begin, end, hashes);
-    }
-    return true;
   }
   return false;
 }
