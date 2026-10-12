@@ -22,11 +22,9 @@
 namespace bytedance::bolt::exec::bm {
 
 BmRowCopier::BmRowCopier(
-    const std::vector<TypePtr>* types,
     const BmRowLayout* layout,
     BmSegmentCollection* segments)
-    : types_(types), layout_(layout), segments_(segments) {
-  BOLT_CHECK_NOT_NULL(types_);
+    : layout_(layout), segments_(segments) {
   BOLT_CHECK_NOT_NULL(layout_);
   BOLT_CHECK_NOT_NULL(segments_);
 }
@@ -37,13 +35,11 @@ char* BmRowCopier::copyRowToSegment(SegmentData& segment, const char* source) {
   auto& chunk = *segment.writeCursor.chunk;
   simd::memcpy(target, source, static_cast<int32_t>(layout().rowSize()));
 
-  for (int32_t column = 0; column < types().size(); ++column) {
-    if (!layout().column(column).variableWidth ||
-        layout().isNull(target, column)) {
+  for (const auto& column : layout().variableColumns()) {
+    if (layout().isNull(target, column)) {
       continue;
     }
-    auto* value =
-        reinterpret_cast<StringView*>(layout().valueAddress(target, column));
+    auto* value = reinterpret_cast<StringView*>(target + column.offset);
     if (value->isInline()) {
       continue;
     }

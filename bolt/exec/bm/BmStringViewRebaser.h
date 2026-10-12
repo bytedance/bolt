@@ -66,7 +66,7 @@ FOLLY_ALWAYS_INLINE void rebaseSingleRange(
   const auto end = range.end;
   auto* row = chunk.rowBlock.ptr;
   for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
-    for (const auto& column : layout.stringColumns()) {
+    for (const auto& column : layout.variableColumns()) {
       if (layout.isNull(row, column)) {
         continue;
       }
@@ -97,7 +97,7 @@ FOLLY_ALWAYS_INLINE void rebaseMultipleRanges(
   // or sort ranges by oldBase and use upper_bound for interval lookup.
   auto* row = chunk.rowBlock.ptr;
   for (uint32_t rowIndex = 0; rowIndex < chunk.meta.rowCount; ++rowIndex) {
-    for (const auto& column : layout.stringColumns()) {
+    for (const auto& column : layout.variableColumns()) {
       if (layout.isNull(row, column)) {
         continue;
       }
@@ -152,7 +152,8 @@ FOLLY_ALWAYS_INLINE bool rebaseStringViewsInChunk(
     const BmRowLayout& layout,
     uint32_t rowStride,
     const std::unordered_map<BlockId, uintptr_t>& heapBases) {
-  if (FOLLY_LIKELY(layout.stringColumns().empty() || chunk.heapBases.empty())) {
+  if (FOLLY_LIKELY(
+          layout.variableColumns().empty() || chunk.heapBases.empty())) {
     return false;
   }
   if (FOLLY_UNLIKELY(heapBases.empty())) {

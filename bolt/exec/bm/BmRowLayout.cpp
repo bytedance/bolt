@@ -78,7 +78,7 @@ BmRowLayout::BmRowLayout(
   nullBytes_ = bits::nbytes(nullBits);
   fixedRowSize_ = nullBytes_;
   columns_.reserve(types.size());
-  stringColumns_.reserve(types.size());
+  variableColumns_.reserve(types.size());
   storePlans_.reserve(types.size());
   uint32_t nullOffset = 0;
   for (auto i = 0; i < types.size(); ++i) {
@@ -100,11 +100,11 @@ BmRowLayout::BmRowLayout(
         type,
         fixedRowSize_,
         width,
+        0,
+        0,
         stringKind || complexKind,
         i < numKeyColumns,
-        nullable[i],
-        0,
-        0};
+        nullable[i]};
     if (nullable[i]) {
       column.nullByte = nullOffset / 8;
       column.nullMask = static_cast<uint8_t>(1u << (nullOffset & 7));
@@ -125,7 +125,7 @@ BmRowLayout::BmRowLayout(
          stored.isKey,
          BmRowContainer::storeFnFor(kind, stored.nullable)});
     if (stored.variableWidth) {
-      stringColumns_.push_back(
+      variableColumns_.push_back(
           {stored.offset, stored.nullable, stored.nullByte, stored.nullMask});
     }
     fixedRowSize_ += width;

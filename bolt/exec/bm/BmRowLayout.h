@@ -48,6 +48,10 @@ struct ColumnLayout {
   // Fixed-width cell size. VARCHAR stores StringView here; payload bytes live
   // in heap blocks.
   uint32_t width{0};
+  // Byte offset of the null bit inside one row.
+  uint32_t nullByte{0};
+  // Bit mask inside nullByte. Zero means non-nullable.
+  uint8_t nullMask{0};
   // True when the physical cell is a StringView whose bytes may live in heap
   // blocks. Complex logical types use this representation as well.
   bool variableWidth{false};
@@ -55,16 +59,12 @@ struct ColumnLayout {
   bool isKey{false};
   // Whether this column owns a null bit.
   bool nullable{false};
-  // Byte offset of the null bit inside one row.
-  uint32_t nullByte{0};
-  // Bit mask inside nullByte. Zero means non-nullable.
-  uint8_t nullMask{0};
 };
 
-struct StringColumnLayout {
+struct VariableColumnLayout {
   // Offset of StringView inside one row.
   uint32_t offset{0};
-  // Null metadata duplicated here so string rebasing can skip null values
+  // Null metadata duplicated here so StringView rebasing can skip null values
   // without looking up the full ColumnLayout.
   bool nullable{false};
   uint32_t nullByte{0};
@@ -111,9 +111,9 @@ class BmRowLayout {
     return columns_;
   }
 
-  FOLLY_ALWAYS_INLINE const std::vector<StringColumnLayout>& stringColumns()
+  FOLLY_ALWAYS_INLINE const std::vector<VariableColumnLayout>& variableColumns()
       const {
-    return stringColumns_;
+    return variableColumns_;
   }
 
   FOLLY_ALWAYS_INLINE const ColumnStorePlan& storePlan(int32_t column) const {
@@ -169,7 +169,7 @@ class BmRowLayout {
 
   FOLLY_ALWAYS_INLINE bool isNull(
       const char* row,
-      const StringColumnLayout& column) const {
+      const VariableColumnLayout& column) const {
     return column.nullable && (row[column.nullByte] & column.nullMask);
   }
 
@@ -199,7 +199,7 @@ class BmRowLayout {
 
  private:
   std::vector<ColumnLayout> columns_;
-  std::vector<StringColumnLayout> stringColumns_;
+  std::vector<VariableColumnLayout> variableColumns_;
   std::vector<ColumnStorePlan> storePlans_;
   uint32_t nullBytes_{0};
   uint32_t fixedRowSize_{0};

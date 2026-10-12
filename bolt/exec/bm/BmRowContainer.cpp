@@ -33,7 +33,7 @@ BmRowContainer::BmRowContainer(
       bufferManager_(std::move(bufferManager)),
       segments_(bufferManager_, tag, &layout_, rowBlockSize, heapBlockSize),
       blockLoader_(bufferManager_, &layout_, &segments_),
-      rowCopier_(&types_, &layout_, &segments_) {
+      rowCopier_(&layout_, &segments_) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
 }
 

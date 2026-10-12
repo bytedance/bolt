@@ -54,7 +54,7 @@ void BmRowBlockLoader::loadSegments(folly::Range<const SegmentId*> segments) {
 }
 
 void BmRowBlockLoader::loadChunks(folly::Range<ChunkData* const*> chunks) {
-  const bool mayNeedRebase = !layout().stringColumns().empty();
+  const bool mayNeedRebase = !layout().variableColumns().empty();
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> blocks;
   std::vector<BlockRef*> blockRefs;
   std::vector<ChunkData*> touchedChunks;

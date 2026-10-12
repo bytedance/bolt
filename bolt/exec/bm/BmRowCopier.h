@@ -21,27 +21,17 @@
 
 #include <folly/Portability.h>
 
-#include <vector>
-
 namespace bytedance::bolt::exec::bm {
 
 // Copies an already-resident row into another segment. Used by reordered
 // segment materialization so merge cursors can scan rows in physical order.
 class BmRowCopier {
  public:
-  BmRowCopier(
-      const std::vector<TypePtr>* types,
-      const BmRowLayout* layout,
-      BmSegmentCollection* segments);
+  BmRowCopier(const BmRowLayout* layout, BmSegmentCollection* segments);
 
   char* copyRowToSegment(SegmentData& segment, const char* source);
 
  private:
-  FOLLY_ALWAYS_INLINE const std::vector<TypePtr>& types() const {
-    BOLT_DCHECK_NOT_NULL(types_);
-    return *types_;
-  }
-
   FOLLY_ALWAYS_INLINE const BmRowLayout& layout() const {
     BOLT_DCHECK_NOT_NULL(layout_);
     return *layout_;
@@ -52,7 +42,6 @@ class BmRowCopier {
     return *segments_;
   }
 
-  const std::vector<TypePtr>* types_{nullptr};
   const BmRowLayout* layout_{nullptr};
   BmSegmentCollection* segments_{nullptr};
 };
