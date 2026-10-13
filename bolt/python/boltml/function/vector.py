@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
 import inspect
 from typing import Optional, Sequence, Union
 
@@ -22,6 +23,8 @@ from ..executor.local import LocalExecutor
 from .register import UserFunctionRegister
 
 functionRegister = UserFunctionRegister()
+# UDF globals may retain DataFrames; release them before native pool teardown.
+atexit.register(functionRegister.clear)
 
 ExecutorsArgument = Optional[Union[Sequence[Executor], Executor]]
 

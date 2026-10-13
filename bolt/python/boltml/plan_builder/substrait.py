@@ -17,13 +17,16 @@ from typing import Optional
 from substrait.proto import algebra, plan
 
 from pybolt import (
+    ArrayType,
     BoltType,
     FileFormat,
     JoinType,
+    LongDecimalType,
+    MapType,
     RowType,
     RowVector,
+    ShortDecimalType,
     SortOrder,
-    fromList,
     rowVector,
     convertSubstraitPlan,
 )
@@ -67,32 +70,102 @@ from .bolt import BoltPlanBuilder, BoltPlanBuilderFactory
 # from the dispatch so that the engine-level routing is a cheap, pure
 # predicate (no factory construction, no exception catching).
 #
-# Currently empty: every BoltML logical source kind is Substrait-
-# lowerable. ``tpch_read`` lowers to a Substrait ``ReadRel`` carrying a
-# ``TpchExtensionTable`` payload (handled C++-side in
-# ``SubstraitToBoltPlan.cpp`` via
-# ``readRel.extension_table().detail().Is<TpchExtensionTable>()``).
+# Some otherwise-supported sources require native execution depending on their
+# schema or partition metadata; those are checked by _source_needs_native below.
 _NON_SUBSTRAIT_LOWERABLE_SOURCES: frozenset[str] = frozenset()
 
 
-# Spill-cleanup state for ``SubstraitPlanBuilderFactory._fromDataViaParquetSpill``.
-#
-# ``fromData`` writes the spill files to ``$TMPDIR/boltml_virtual_table_spill/``
-# (process-shared). Without explicit cleanup these accumulate forever, since
-# the process holds no other reference once the substrait plan referencing the
-# file completes. We register a single ``atexit`` hook the first time a spill
-# is requested in this process; the hook removes the whole spill root on
-# graceful shutdown. ``ignore_errors=True`` keeps the hook safe to invoke
-# more than once and survives partial cleanup by other processes sharing the
-# same ``TMPDIR`` (each spill file has a uuid-suffixed name so cross-process
-# collisions are negligible).
-#
-# This handles the GRACEFUL exit case. Hard kill (SIGKILL, OOM-killer, container
-# stop) bypasses atexit; orphaned spills from those events accumulate until the
-# tmpfs is GC'd by the OS or a startup sweep removes them. Both Ray exchange
-# tmpdirs and these spill dirs share the same fragility — see RayRuntime's
-# stale-tempdir sweep at process start for the recovery-time mechanism.
-_SPILL_CLEANUP_REGISTERED: bool = False
+def _type_needs_native(dtype, *, literal=False, nested=False):
+    # The current converter assigns its own names to nested ROW fields, and
+    # cannot construct decimal literals inside ARRAY/MAP values faithfully.
+    if isinstance(dtype, RowType):
+        return True
+    if isinstance(dtype, ArrayType):
+        return _type_needs_native(dtype.elementType(), literal=literal, nested=True)
+    if isinstance(dtype, MapType):
+        return any(
+            _type_needs_native(child, literal=literal, nested=True)
+            for child in (dtype.keyType(), dtype.valueType())
+        )
+    return literal and nested and isinstance(dtype, (ShortDecimalType, LongDecimalType))
+
+
+def _complex_null(value, dtype):
+    if not isinstance(dtype, (ArrayType, MapType, ShortDecimalType, LongDecimalType)):
+        return False
+    if value is None:
+        return True
+    if isinstance(dtype, ArrayType):
+        return any(_complex_null(element, dtype.elementType()) for element in value)
+    if isinstance(dtype, MapType):
+        return any(
+            _complex_null(key, dtype.keyType())
+            or _complex_null(element, dtype.valueType())
+            for key, element in value.items()
+        )
+    return False
+
+
+def _values_need_native(data):
+    nullRows = len(data) == 0 or (
+        data.mayHaveNulls() and any(data.isNullAt(i) for i in range(len(data)))
+    )
+    for i, name in enumerate(data.dtype().names()):
+        dtype = data.dtype().childAt(i)
+        if _type_needs_native(dtype, literal=True):
+            return True
+        vector = data.childAt(name)
+        if isinstance(dtype, (ArrayType, MapType, ShortDecimalType, LongDecimalType)):
+            if nullRows:
+                return True
+            if vector.mayHaveNulls() and any(
+                vector.isNullAt(i) for i in range(len(vector))
+            ):
+                return True
+            children = (
+                (dtype.elementType(),)
+                if isinstance(dtype, ArrayType)
+                else (
+                    (dtype.keyType(), dtype.valueType())
+                    if isinstance(dtype, MapType)
+                    else ()
+                )
+            )
+            # Primitive arrays (including tensors) need no element-wise probe.
+            if any(isinstance(child, (ArrayType, MapType)) for child in children):
+                if any(_complex_null(vector[i], dtype) for i in range(len(vector))):
+                    return True
+    return False
+
+
+def _source_needs_native(source):
+    if source.kind == "values":
+        return _values_need_native(source.args[0])
+    if source.kind in ("single_file_read", "local_files_read", "catalog_read"):
+        schema = source.args[1]
+        if any(_type_needs_native(schema.childAt(i)) for i in range(schema.size())):
+            return True
+        if source.kind == "catalog_read":
+            from ..catalog.hive import HiveSplit
+
+            _, _, partitionKeys, _, splits = source.args
+            return any(
+                isinstance(split, HiveSplit) and (partitionKeys or split.partMap)
+                for split in splits
+            )
+    return False
+
+
+# Each process owns only its own spill directories, including after fork.
+_SPILL_ROOTS: dict[tuple[int, str], str] = {}
+
+
+def _cleanup_virtual_table_spill(root: str, owner_pid: int):
+    import os
+    import shutil
+
+    if os.getpid() == owner_pid:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _virtual_table_spill_root() -> str:
@@ -127,10 +200,8 @@ def _virtual_table_spill_root() -> str:
     import atexit
     import logging
     import os
-    import shutil
     import tempfile
 
-    global _SPILL_CLEANUP_REGISTERED
     explicit = os.environ.get("BOLTML_VIRTUAL_TABLE_SPILL_ROOT", "").strip()
     exchange_root = os.environ.get("BOLTML_EXCHANGE_ROOT", "").strip()
     if explicit:
@@ -167,11 +238,13 @@ def _virtual_table_spill_root() -> str:
                         _SPILL_MULTINODE_WARNED = True
             except Exception:  # noqa: BLE001
                 pass
-    os.makedirs(root, exist_ok=True)
-    if not _SPILL_CLEANUP_REGISTERED:
-        atexit.register(shutil.rmtree, root, ignore_errors=True)
-        _SPILL_CLEANUP_REGISTERED = True
-    return root
+    key = (os.getpid(), root)
+    if key not in _SPILL_ROOTS:
+        os.makedirs(root, exist_ok=True)
+        owned_root = tempfile.mkdtemp(prefix=f"{os.getpid()}-", dir=root)
+        _SPILL_ROOTS[key] = owned_root
+        atexit.register(_cleanup_virtual_table_spill, owned_root, os.getpid())
+    return _SPILL_ROOTS[key]
 
 
 _SPILL_MULTINODE_WARNED: bool = False
@@ -182,18 +255,13 @@ def plan_is_substrait_lowerable(logicalPlan: LogicalPlan) -> bool:
     lowered to a Substrait ``plan.Plan`` by
     ``SubstraitPlanBuilderFactory.fromLogicalPlan(...).toSubstraitPlan()``.
 
-    ``_NON_SUBSTRAIT_LOWERABLE_SOURCES`` is currently empty, so this
-    predicate returns True for every BoltML logical plan whose ops
-    chain stays inside the supported op set. The constant + this
-    predicate are preserved as the registry's zero-value rather than
-    deleted: future non-lowerable source kinds (if any) plug in here
-    without changing call sites.
-
     Recurses into the right-hand side of every ``join`` op (left-hand
     side is the chain we are walking). A plan with no ops is
     lowerable iff its own source kind is supported.
     """
     if logicalPlan.source.kind in _NON_SUBSTRAIT_LOWERABLE_SOURCES:
+        return False
+    if _source_needs_native(logicalPlan.source):
         return False
     for op in logicalPlan.operations:
         if op.kind == "join":
@@ -398,7 +466,21 @@ class SubstraitPlanBuilder(LogicalPlanBuilder):
         return self
 
     def limit(self, count: int, offset: int) -> "Self":  # noqa: F821
-        rel = algebra.Rel(fetch=fetchRel(self.__rel, count, offset))
+        if count is None or count < 0 or offset < 0:
+            raise ValueError("Substrait limit requires non-negative count and offset")
+        if count > 2**31 - 1 or offset > 2**31 - 1:
+            raise ValueError("Substrait limit count and offset must fit in int32")
+        if count == 0:
+            rel = algebra.Rel(
+                filter=algebra.FilterRel(
+                    input=self.__rel,
+                    condition=algebra.Expression(
+                        literal=algebra.Expression.Literal(boolean=False)
+                    ),
+                )
+            )
+        else:
+            rel = algebra.Rel(fetch=fetchRel(self.__rel, count, offset))
         self.__rel = rel
         self.__operations.append(LogicalOp("limit", (count, offset)))
         return self
@@ -440,6 +522,9 @@ class SubstraitPlanBuilder(LogicalPlanBuilder):
         outputLayout: list[str],
         joinType: JoinType,
     ) -> "Self":  # noqa F821
+        if not plan_is_substrait_lowerable(rhs.logicalPlan()):
+            return self.boltPlan().join(rhs, lhsKeys, rhsKeys, outputLayout, joinType)
+        rhs = rhs.substraitPlan()
         leftOutputNames = tuple(self.dtype().names())
         rightOutputNames = tuple(rhs.dtype().names())
         rel = algebra.Rel(
@@ -490,6 +575,10 @@ class SubstraitPlanBuilder(LogicalPlanBuilder):
     ) -> "Self":  # noqa: F821
         if self.__rel is None:
             raise ValueError("catalogWrite requires an input relation")
+        if aggregations:
+            raise NotImplementedError(
+                "Substrait writes do not support writer aggregations"
+            )
 
         wrel = writeRel(
             self.__rel, directoryPath, fileFormat, partitionBy, numBuckets, bucketBy
@@ -575,7 +664,7 @@ class SubstraitPlanBuilderFactory(LogicalPlanBuilderFactory):
                 builder.filter(op.args[0])
             elif op.kind == "join":
                 rhs = self.fromLogicalPlan(op.args[0])
-                builder.join(
+                builder = builder.join(
                     rhs,
                     _fields(builder, list(op.args[1])),
                     _fields(rhs, list(op.args[2])),
@@ -616,6 +705,9 @@ class SubstraitPlanBuilderFactory(LogicalPlanBuilderFactory):
 
     def fromData(self, data: RowVector) -> PlanBuilder:
         import os
+
+        if _values_need_native(data):
+            return BoltPlanBuilderFactory().fromData(data)
 
         try:
             max_rows = int(
@@ -737,6 +829,12 @@ class SubstraitPlanBuilderFactory(LogicalPlanBuilderFactory):
         outputType: RowType,
         fileFormat: FileFormat,
     ) -> PlanBuilder:
+        if _source_needs_native(
+            PlanSource("single_file_read", (filePath, outputType, fileFormat))
+        ):
+            return BoltPlanBuilderFactory().fromSingleFileRead(
+                filePath, outputType, fileFormat
+            )
         return SubstraitPlanBuilder(
             algebra.Rel(read=localFilesRel([filePath], outputType, fileFormat)),
             outputType.names(),
@@ -765,6 +863,12 @@ class SubstraitPlanBuilderFactory(LogicalPlanBuilderFactory):
         only saw ``part-0000.parquet`` instead of all 16 shards,
         under-counting the anti-join by ~15/16).
         """
+        if _source_needs_native(
+            PlanSource("local_files_read", (filePaths, outputType, fileFormat))
+        ):
+            return BoltPlanBuilderFactory().fromLocalFiles(
+                filePaths, outputType, fileFormat
+            )
         return SubstraitPlanBuilder(
             algebra.Rel(read=localFilesRel(list(filePaths), outputType, fileFormat)),
             outputType.names(),
@@ -782,11 +886,17 @@ class SubstraitPlanBuilderFactory(LogicalPlanBuilderFactory):
         splits: list["CatalogSplit"],  # noqa: F821
     ) -> PlanBuilder:
         if len(splits) == 0:
-            data = rowVector(
-                outputType.names(),
-                [fromList([], outputType.childAt(i)) for i in range(outputType.size())],
+            return self.fromData(rowVector(outputType))
+
+        if _source_needs_native(
+            PlanSource(
+                "catalog_read",
+                (tableName, outputType, partitionKeys, parameters, splits),
             )
-            return self.fromData(data)
+        ):
+            return BoltPlanBuilderFactory().fromCatalog(
+                tableName, outputType, partitionKeys, parameters, splits
+            )
 
         from ..catalog.hive import HiveSplit
         from ..catalog.paimon import PaimonSplit
@@ -832,6 +942,10 @@ class SubstraitPlanBuilderFactory(LogicalPlanBuilderFactory):
             )
             read_rel = algebra.ReadRel()
             read_rel.ParseFromString(read_bytes)
+            # The native producer still emits legacy TIMESTAMP types.
+            from ..substrait.types import substraitType
+
+            read_rel.base_schema.struct.CopyFrom(substraitType(outputType).struct)
             return SubstraitPlanBuilder(
                 algebra.Rel(read=read_rel),
                 outputType.names(),

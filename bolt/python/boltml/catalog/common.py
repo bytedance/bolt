@@ -93,21 +93,27 @@ class CatalogTable(ABC):
         Return a lazy dataframe ready to read this catalog table.
 
         """
-        splits = self.getReaderSplits(options)
+        schema, partitionKeys, parameters, splits = self._readState(options)
         if len(splits) == 0:
-            raise ValueError(
-                f"CatalogTable '{self.getName()}' read with options ({options}) "
-                "yielded 0 splits. Perhaps options are too restrictive?"
-            )
+            return DataFrame(pb.rowVector(schema), executor, planFactory=planFactory)
 
         planBuilder = planFactory.fromCatalog(
             self.getName(),
-            self.getSchema(),
-            self.getPartitionKeys(),
-            self.getReaderParameters(options),
+            schema,
+            partitionKeys,
+            parameters,
             splits,
         )
         return DataFrame(planBuilder, executor, planFactory=planFactory)
+
+    def _readState(self, options):
+        """Resolve the metadata and splits used by one read."""
+        return (
+            self.getSchema(),
+            self.getPartitionKeys(),
+            self.getReaderParameters(options),
+            self.getReaderSplits(options),
+        )
 
 
 def hiveTypeToBoltType(hiveType: str) -> BoltType:
@@ -129,8 +135,16 @@ def hiveTypeToBoltType(hiveType: str) -> BoltType:
         parts = []
         start = 0
         depth = 0
+        quote = None
         for i, c in enumerate(value):
-            if c in "(<":
+            if c in ("`", '"'):
+                if quote is None:
+                    quote = c
+                elif quote == c:
+                    quote = None
+            elif quote is not None:
+                continue
+            elif c in "(<":
                 depth += 1
             elif c in ")>":
                 depth -= 1
@@ -142,16 +156,28 @@ def hiveTypeToBoltType(hiveType: str) -> BoltType:
 
     def _splitStructField(field: str) -> tuple[str, str]:
         depth = 0
+        quote = None
         for i, c in enumerate(field):
-            if c in "(<":
+            if c in ("`", '"'):
+                if quote is None:
+                    quote = c
+                elif quote == c:
+                    quote = None
+            elif quote is not None:
+                continue
+            elif c in "(<":
                 depth += 1
             elif c in ")>":
                 depth -= 1
             elif c == ":" and depth == 0:
-                return field[:i].strip("`"), field[i + 1 :]
+                name = field[:i].strip()
+                if len(name) >= 2 and name[0] == name[-1] and name[0] in ("`", '"'):
+                    name = name[1:-1].replace(name[0] * 2, name[0])
+                return name, field[i + 1 :]
         raise NotImplementedError(f"Invalid hive struct field type: '{field}'.")
 
-    hiveType = "".join(hiveType.lower().removesuffix(" not null").split())
+    hiveType = re.sub(r"\s+not\s+null\s*$", "", hiveType.strip(), flags=re.I)
+    normalized = re.sub(r"\s+", "", hiveType).lower()
     for t in (
         pb.BooleanType(),
         pb.IntegerType(),
@@ -162,48 +188,54 @@ def hiveTypeToBoltType(hiveType: str) -> BoltType:
         pb.RealType(),
         pb.DoubleType(),
         pb.TimestampType(),
+        pb.DateType(),
         pb.VarcharType(),
         pb.VarbinaryType(),
         pb.UnknownType(),
     ):
         boltTypeName = t.name().lower()
-        if hiveType == boltTypeName:
+        if normalized == boltTypeName:
             return t
-    if hiveType == "int":
+    if normalized == "int":
         return pb.IntegerType()
-    if hiveType == "binary":
+    if normalized in ("binary", "bytes") or re.fullmatch(
+        r"(?:var)?binary\(\d+\)", normalized
+    ):
         return pb.VarbinaryType()
-    if hiveType == "float":
+    if normalized == "float":
         return pb.RealType()
-    if hiveType == "string":
+    if normalized == "string" or re.fullmatch(r"(?:var)?char\(\d+\)", normalized):
         return pb.VarcharType()
-    if hiveType in ("void", "null"):
+    if normalized in ("void", "null"):
         return pb.UnknownType()
-    match = re.fullmatch(r"decimal\((\d+),(\d+)\)", hiveType)
+    if re.fullmatch(r"timestamp\([0-9]\)", normalized):
+        return pb.TimestampType()
+    match = re.fullmatch(r"decimal\((\d+),(\d+)\)", normalized)
     if match:
         precision = int(match.group(1))
         scale = int(match.group(2))
         if precision <= 18:
             return pb.ShortDecimalType(precision, scale)
         return pb.LongDecimalType(precision, scale)
-    if hiveType.startswith("array<") and hiveType.endswith(">"):
-        return pb.ArrayType(hiveTypeToBoltType(hiveType[len("array<") : -1]))
-    if hiveType.startswith("map<") and hiveType.endswith(">"):
-        fields = _splitTopLevel(hiveType[len("map<") : -1])
+    compound = re.fullmatch(r"(array|map|struct|row)\s*<(.*)>", hiveType, re.I | re.S)
+    kind, inner = (compound[1].lower(), compound[2]) if compound else (None, None)
+    if kind == "array":
+        return pb.ArrayType(hiveTypeToBoltType(inner))
+    if kind == "map":
+        fields = _splitTopLevel(inner)
         if len(fields) != 2:
             raise NotImplementedError(f"Invalid hive map type: '{hiveType}'.")
         return pb.MapType(hiveTypeToBoltType(fields[0]), hiveTypeToBoltType(fields[1]))
-    for rowTypeName in ("struct", "row"):
-        prefix = f"{rowTypeName}<"
-        if hiveType.startswith(prefix) and hiveType.endswith(">"):
-            fields = [
-                _splitStructField(field)
-                for field in _splitTopLevel(hiveType[len(prefix) : -1])
-            ]
-            return pb.RowType(
-                [name for name, _ in fields],
-                [hiveTypeToBoltType(dtype) for _, dtype in fields],
-            )
+    if kind in ("struct", "row"):
+        fields = (
+            [_splitStructField(field) for field in _splitTopLevel(inner)]
+            if inner.strip()
+            else []
+        )
+        return pb.RowType(
+            [name for name, _ in fields],
+            [hiveTypeToBoltType(dtype) for _, dtype in fields],
+        )
     raise NotImplementedError(
         f"Conversion from hive type '{hiveType}' to bolt type is not supported."
     )
@@ -222,6 +254,8 @@ def boltTypeToHiveType(boltType: BoltType) -> str:
         return "tinyint"
     elif isinstance(boltType, pb.SmallintType):
         return "smallint"
+    elif isinstance(boltType, pb.DateType):
+        return "date"
     elif isinstance(boltType, pb.IntegerType):
         return "int"
     elif isinstance(boltType, pb.BigintType):
@@ -263,7 +297,10 @@ def hiveFileFormatToBoltFileFormat(hiveFileFormat: str) -> FileFormat:
     Convert a string file format obtained from a hive thrift client into a bolt
     file format.
     """
-    hiveFileFormat = hiveFileFormat.upper()
+    hiveFileFormat = {
+        "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat": "PARQUET",
+        "org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat": "ORC",
+    }.get(hiveFileFormat, hiveFileFormat).upper()
     if hiveFileFormat == "JSON":
         return FileFormat.JSON
     if hiveFileFormat == "ORC":

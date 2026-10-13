@@ -204,11 +204,9 @@ class UserFunctionTests(unittest.TestCase):
         self.assertEqual(list(frame["image"]), [payload, None, None])
 
 
-class KnownRegressionTests(unittest.TestCase):
-    """Assert intended behavior until these known regressions are fixed."""
+class RegressionTests(unittest.TestCase):
+    """Assert public API behavior for past regressions."""
 
-    # Count() currently binds the first column instead of emitting COUNT(*).
-    @unittest.expectedFailure
     def testCountStarIncludesNullRows(self):
         frame = DataFrame({"value": [1, None, 3]})
         result = frame.groupBy().aggregate(rows=Count(), nonnull=Count("value"))
@@ -216,8 +214,6 @@ class KnownRegressionTests(unittest.TestCase):
             result.toArrow(pa.Table).to_pylist(), [{"rows": 3, "nonnull": 2}]
         )
 
-    # Dictionary string constants are currently split into individual characters.
-    @unittest.expectedFailure
     def testStringConstantBroadcasts(self):
         frame = DataFrame({"id": [1, 2], "label": "ok"})
         self.assertEqual(
@@ -225,8 +221,6 @@ class KnownRegressionTests(unittest.TestCase):
             [{"id": 1, "label": "ok"}, {"id": 2, "label": "ok"}],
         )
 
-    # Substrait retains an empty null bitmap that NumPy export currently rejects.
-    @unittest.expectedFailure
     def testInitialNumpyTensorRemainsConvertible(self):
         @tensorFunction(pybolt.IntegerType(), [2, 2])
         @tensorAdapter(inputDtype=np.ndarray, outputDtype=np.ndarray)

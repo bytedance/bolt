@@ -25,6 +25,7 @@ from pybolt import (
     BoltType,
     BooleanType,
     DoubleType,
+    DateType,
     Timestamp,
     IntegerType,
     LongDecimalType,
@@ -79,6 +80,8 @@ def substraitLiteral(val: Any, btype: BoltType) -> Literal:
         return Literal(boolean=val)
     if isinstance(btype, DoubleType):
         return Literal(fp64=val)
+    if isinstance(btype, DateType):
+        return Literal(date=val)
     if isinstance(btype, IntegerType):
         return Literal(i32=val)
     if isinstance(btype, (ShortDecimalType, LongDecimalType)):
@@ -109,9 +112,10 @@ def substraitLiteral(val: Any, btype: BoltType) -> Literal:
     if isinstance(btype, SmallintType):
         return Literal(i16=val)
     if isinstance(btype, TimestampType):
-        precision_timestamp = Literal.PrecisionTimestamp(
-            precision=9, value=val.nanos() + 1_000_000_000 * val.seconds()
-        )
+        nanos = val.nanos() + 1_000_000_000 * val.seconds()
+        if not -(2**63) <= nanos < 2**63:
+            raise ValueError("Timestamp literal is outside the int64 nanosecond range")
+        precision_timestamp = Literal.PrecisionTimestamp(precision=9, value=nanos)
         return Literal(precision_timestamp=precision_timestamp)
     if isinstance(btype, TinyintType):
         return Literal(i8=val)
@@ -144,6 +148,8 @@ def boltLiteral(
         return lit.i8, TinyintType()
     if kind == "i16":
         return lit.i16, SmallintType()
+    if kind == "date":
+        return lit.date, DateType()
     if kind == "i32":
         return lit.i32, IntegerType()
     if kind == "i64":
@@ -156,9 +162,13 @@ def boltLiteral(
         prec = lit.decimal.precision
         scale = lit.decimal.scale
         if prec < 19:
-            return lit.decimal.value, ShortDecimalType(prec, scale)
+            return int.from_bytes(
+                lit.decimal.value, "little", signed=True
+            ), ShortDecimalType(prec, scale)
         else:
-            return lit.decimal.value, LongDecimalType(prec, scale)
+            return int.from_bytes(
+                lit.decimal.value, "little", signed=True
+            ), LongDecimalType(prec, scale)
     if kind == "string":
         return lit.string, VarcharType()
     if kind == "var_char":

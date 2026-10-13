@@ -109,6 +109,87 @@ ALL_BOLT_TYPES = (
 
 
 class SubstraitTest(unittest.TestCase):
+    def testPythonTableFunctionPreservesTimestamps(self):
+        dtype = RowType(["ts"], [TimestampType()])
+
+        @dataframeFunction(dtype)
+        def substraitTimestampIdentity(frame):
+            return frame
+
+        values = [Timestamp(123, 456), None]
+        frame = DataFrame({"ts": pybolt.fromList(values, TimestampType())})
+        frame.map(substraitTimestampIdentity)
+        self.assertEqual(list(frame["ts"]), values)
+        self.assertEqual(frame.dtype, dtype)
+
+    def testPaimonPlanUsesPrecisionTimestampSchema(self):
+        from ..catalog.paimon import PaimonSplit
+
+        dtype = RowType(["ts"], [TimestampType()])
+        builder = SubstraitPlanBuilderFactory().fromCatalog(
+            "events",
+            dtype,
+            [],
+            {"file.format": "parquet"},
+            [PaimonSplit(["/tmp/unused-timestamp-schema.parquet"], FileFormat.PARQUET)],
+        )
+        read = builder.toSubstraitPlan().relations[0].root.input.read
+        self.assertEqual(
+            read.base_schema.struct.types[0].WhichOneof("kind"), "precision_timestamp"
+        )
+        self.assertEqual(builder.dtype(), dtype)
+
+    def testDateLiteralPreservesItsType(self):
+        dtype = pybolt.DateType()
+        literal = substraitLiteral(123, dtype)
+        self.assertEqual(literal.WhichOneof("literal_type"), "date")
+        self.assertEqual(boltLiteral(literal), (123, dtype))
+
+    def testNestedDatesAfterNullPreserveValues(self):
+        for values in (
+            pa.array([[None, 1, -1]], type=pa.list_(pa.date32())),
+            pa.array(
+                [[("missing", None), ("date", 123)]],
+                type=pa.map_(pa.string(), pa.date32()),
+            ),
+        ):
+            with self.subTest(dtype=str(values.type)):
+                source = pa.table({"values": values})
+                self.assertEqual(
+                    DataFrame(source).toArrow(pa.Table).to_pylist(), source.to_pylist()
+                )
+
+    def testDecimalLiteralRoundTrip(self):
+        for dtype in (ShortDecimalType(12, 2), LongDecimalType(25, 4)):
+            for value in (-12345, 0, 12345):
+                with self.subTest(dtype=str(dtype), value=value):
+                    literal = substraitLiteral(value, dtype)
+                    self.assertEqual(boltLiteral(literal), (value, dtype))
+
+    def testTimestampLiteralRangeIsChecked(self):
+        with self.assertRaisesRegex(ValueError, "nanosecond range"):
+            substraitLiteral(Timestamp(10**12, 0), TimestampType())
+
+    def testSpillCleanupOnlyRemovesOwnedDirectory(self):
+        from pathlib import Path
+        from ..plan_builder.substrait import (
+            _cleanup_virtual_table_spill,
+            _virtual_table_spill_root,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"BOLTML_VIRTUAL_TABLE_SPILL_ROOT": directory}):
+                owned = Path(_virtual_table_spill_root())
+                self.assertEqual(str(owned), _virtual_table_spill_root())
+                other = owned.parent / "other-process"
+                other.mkdir()
+                (other / "data").write_text("keep")
+                _cleanup_virtual_table_spill(str(owned), os.getpid() + 1)
+                self.assertTrue(owned.exists())
+                _cleanup_virtual_table_spill(str(owned), os.getpid())
+                self.assertFalse(owned.exists())
+                self.assertEqual((other / "data").read_text(), "keep")
+
     def testTypeConversion(self):
         """Test that Bolt types can be converted to Substrait types and back."""
         for t in ALL_BOLT_TYPES:
@@ -385,8 +466,8 @@ class SubstraitTest(unittest.TestCase):
                 ProjectExpression(df["c1"]),
             ),
         ):
-            rel = algebra.Rel(extension_leaf=algebra.ExtensionLeafRel())
-            _ = substraitExpression(expr, rel)
+            inputRel = algebra.Rel(read=rel.virtualTable(df._data_))
+            _ = substraitExpression(expr, inputRel)
 
     def testRel(self):
         df = makeDataframe()

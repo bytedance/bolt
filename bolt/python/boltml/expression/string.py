@@ -61,10 +61,28 @@ class StringProjectExpression(ProjectExpression):
         )
 
     def __eq__(self, literal: str) -> BooleanExpression:
-        return BooleanExpression(self, BooleanOp.EQ, LiteralExpression(literal))
+        return self.__compare(literal, BooleanOp.EQ)
 
     def __ne__(self, literal: str) -> BooleanExpression:
-        return BooleanExpression(self, BooleanOp.NE, LiteralExpression(literal))
+        return self.__compare(literal, BooleanOp.NE)
+
+    def __compare(self, other, op):
+        other = other if isinstance(other, Expression) else LiteralExpression(other)
+        if other.dtype != VarcharType():
+            raise TypeError("String comparisons require a string expression.")
+        return BooleanExpression(self, op, other)
+
+    def __lt__(self, other):
+        return self.__compare(other, BooleanOp.LT)
+
+    def __le__(self, other):
+        return self.__compare(other, BooleanOp.LE)
+
+    def __gt__(self, other):
+        return self.__compare(other, BooleanOp.GT)
+
+    def __ge__(self, other):
+        return self.__compare(other, BooleanOp.GE)
 
     def like(self, pattern: str) -> BooleanExpression:
         from pybolt import BooleanType
@@ -107,7 +125,17 @@ class StringProjectExpression(ProjectExpression):
         )
 
     def contains(self, needle: str) -> BooleanExpression:
-        return self.like(f"%{needle}%")
+        from pybolt import BooleanType
+
+        escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return BooleanExpression(
+            FunctionExpression(
+                "like",
+                BooleanType(),
+                [self, LiteralExpression(f"%{escaped}%"), LiteralExpression("\\")],
+                self.dataframe,
+            )
+        )
 
     def isin(self, values) -> BooleanExpression:
         if not values:

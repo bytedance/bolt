@@ -1304,6 +1304,12 @@ def _try_optimize_subtree(rel: algebra.Rel) -> Optional[algebra.Rel]:
     if n < 2 or n > _MAX_LEAVES:
         return None
 
+    # Rebuilding currently tracks canonical names, not leaf/column identities.
+    # Shared names can refer to different values even when prefixed by joins.
+    names = [name for leaf in graph.leaves for name in leaf.names]
+    if len(names) != len(set(names)):
+        return None
+
     # Add all extracted edges to the graph (now that all leaves are
     # registered with stable ids).
     for l_pair, r_pair in pending:

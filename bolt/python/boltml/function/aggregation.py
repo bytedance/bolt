@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
+import atexit
 from collections import defaultdict
 from typing import Callable, Optional, Union
 import inspect
@@ -27,6 +28,9 @@ from ..expression.function import FunctionExpression
 # The register of user custom aggregation functions used to collect the
 # return type and name of the function.
 functionRegister = defaultdict(list)
+_aggregatorNames: dict[type, str] = {}
+atexit.register(functionRegister.clear)
+atexit.register(_aggregatorNames.clear)
 
 
 class AggregationFunction:
@@ -180,25 +184,23 @@ class Max(AggregationFunction):
 class Count(AggregationFunction):
     """SQL ``COUNT`` aggregation.
 
-    * ``Count()`` -- ``COUNT(*)``: counts every row in the group, never
-      skipping. Internally uses an ``AnyField`` placeholder so the C++
-      side knows it can pick any column to walk row-by-row.
+    * ``Count()`` -- ``COUNT(*)``: counts every row, including NULLs,
+      using a zero-argument aggregate.
     * ``Count(col)`` -- ``COUNT(col)``: counts non-NULL values of *col*
       only. This is the SQL-spec null-skipping count, the form needed by
       LEFT-outer-join + group-by patterns like TPC-H Q13 where customers
       with no matching orders should reach the group-by stage with a
       NULL ``o_orderkey`` and contribute 0 to the count.
 
-    Both variants resolve to Substrait's ``count`` scalar function; the
-    difference is solely whether the argument is a placeholder or a
-    bound field reference. Bolt's C++ aggregation layer reads the
+    Both variants resolve to Substrait's ``count`` aggregate function.
+    Bolt's C++ aggregation layer reads the
     function arity at run time and dispatches to ``count_star`` or
     ``count(col)`` accordingly.
     """
 
     def __init__(self, col: Optional[str] = None):
         if col is None:
-            super().__init__("count", BigintType(), [AggregationFunction.AnyField()])
+            super().__init__("count", BigintType(), [])
         else:
             super().__init__(
                 "count",
@@ -252,7 +254,7 @@ class Aggregator(ABC):
             for arg in args
         ]
         return AggregationFunction(
-            self.__class__.__name__,
+            self.name,
             self.outputType(),
             args,
             registrationHook=lambda executor: self.__register(executor),
@@ -323,7 +325,12 @@ class Aggregator(ABC):
         aggregator.
         `Aggregator`s are registered in the backend based on this name.
         """
-        return self.__class__.__name__
+        cls = self.__class__
+        if cls not in _aggregatorNames:
+            _aggregatorNames[cls] = (
+                f"boltml_udaf_{len(_aggregatorNames)}_{cls.__name__}"
+            )
+        return _aggregatorNames[cls]
 
     def __register(self, executor: Executor):
         """

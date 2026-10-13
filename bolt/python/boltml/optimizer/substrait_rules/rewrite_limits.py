@@ -42,7 +42,8 @@ class RewriteLimits(Rule):
        step (2).
 
     2. ``FetchRel(FetchRel(X))`` → single ``FetchRel`` whose
-       ``(count, offset)`` is the algebraic merge of the two.
+       ``(count, offset)`` is the algebraic merge of the two, or an
+       always-false filter when the merged range is empty.
        Given outer ``LIMIT a OFFSET b`` and inner ``LIMIT c OFFSET d``:
 
            merged_offset = b + d
@@ -173,6 +174,9 @@ def _merge_counts(
 def _merge_adjacent_fetches(rel: algebra.Rel) -> Optional[algebra.Rel]:
     outer = rel.fetch
     inner = outer.input.fetch
+    # Merging must not discard the inner output projection.
+    if inner.common.HasField("emit"):
+        return None
 
     merged = _merge_counts(
         _fetch_count(outer),
@@ -183,6 +187,18 @@ def _merge_adjacent_fetches(rel: algebra.Rel) -> Optional[algebra.Rel]:
     if merged is None:
         return None
     merged_count, merged_offset = merged
+
+    if merged_count == 0:
+        # Bolt's native LimitNode requires a strictly positive count.
+        empty = algebra.FilterRel(
+            input=inner.input,
+            condition=algebra.Expression(
+                literal=algebra.Expression.Literal(boolean=False)
+            ),
+        )
+        if outer.HasField("common"):
+            empty.common.CopyFrom(outer.common)
+        return algebra.Rel(filter=empty)
 
     new_fetch = algebra.FetchRel()
     # Preserve the outer common (output names / hints, if any).

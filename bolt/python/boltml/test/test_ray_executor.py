@@ -771,7 +771,7 @@ class TestRayExecutor(unittest.TestCase):
 
             self.assertEqual(expected, result)
 
-    def testRayExecutorReportsMissingExchangeManagerForConsumerStages(self):
+    def testRayExecutorCreatesExchangeManagerForConsumerStages(self):
         executor = RayExecutor()
         df = DataFrame(
             {"id": [1, 2], "tag": ["a", "b"]},
@@ -780,8 +780,8 @@ class TestRayExecutor(unittest.TestCase):
 
         shuffled = df.shuffle(7)
 
-        with self.assertRaisesRegex(RuntimeError, "stage-1.*exchange manager"):
-            len(shuffled)
+        self.assertEqual(sorted(shuffled["id"]), [1, 2])
+        self.assertGreaterEqual(len(executor.lastExecutionSummary.stages), 2)
 
     def testRayExecutorRetriesTransientStageFailure(self):
         executor = RayExecutor(runtime=_FailOnceRuntime("stage-0", maxStageRetries=1))

@@ -23,6 +23,8 @@ from .vector import ExecutorsArgument, normalizeExecutors, registerVectorFunctio
 def registerScalarFunction(
     fn: Callable, name, outputType: BoltType, executors: ExecutorsArgument
 ):
+    outputTypeString = str(outputType)
+
     @wraps(fn)
     def rowWrapper(*args, **kwargs):
         # Imports deferred into the closure body so cloudpickle does
@@ -66,12 +68,15 @@ def registerScalarFunction(
             # For instance, in the expression: "my_udf(c0, 4)", the
             # user expects to get c0[i] and 4 as arguments  for each row `i`.
             kwargs_ = {
-                k: v[i] if (_isVectorType_(v) and len(v[i]) == nrows) else v
+                k: v[i] if (_isVectorType_(v) and len(v) == nrows) else v
                 for k, v in kwargs.items()
             }
             output.append(fn(*args_, **kwargs_))
-        return fromList(output)
+        from ..distributed.ray.udf_spec import _parseBoltType
 
+        return fromList(output, _parseBoltType(outputTypeString))
+
+    rowWrapper.__name__ = name
     registerVectorFunction(rowWrapper, name, outputType, executors, False)
     return rowWrapper
 

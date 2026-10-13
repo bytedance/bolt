@@ -141,21 +141,21 @@ def _merge_one(rel: algebra.Rel) -> Optional[algebra.Rel]:
     # two-project shape is correct and the optimizer is free to find
     # a smarter form in a later rule if it can prove purity.
     ref_counts: dict[int, int] = {}
-    for outer_expr in outer.expressions:
-        for idx in collect_field_indices(outer_expr):
-            ref_counts[idx] = ref_counts.get(idx, 0) + 1
-    for idx, count in ref_counts.items():
-        if count > 1 and not _is_trivial_inner(inner.expressions[idx]):
-            return None
 
     def _lookup(idx: int) -> Optional[algebra.Expression]:
         if idx < 0 or idx >= inner_width:
             return None
+        # Count each substitution, including repeated references within
+        # one expression (x + x); collect_field_indices returns a set.
+        ref_counts[idx] = ref_counts.get(idx, 0) + 1
         return inner.expressions[idx]
 
     new_expressions = [
         substitute_field_refs(outer_expr, _lookup) for outer_expr in outer.expressions
     ]
+    for idx, count in ref_counts.items():
+        if count > 1 and not _is_trivial_inner(inner.expressions[idx]):
+            return None
 
     merged = algebra.ProjectRel()
     merged.CopyFrom(outer)

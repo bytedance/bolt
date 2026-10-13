@@ -154,15 +154,10 @@ def _try_elide(rel: algebra.Rel) -> Optional[algebra.Rel]:
             inner_keys = _scatter_field_indices(inner)
             if inner_keys is None:
                 return None
-            # Each tracked outer-key position must, after walking the
-            # chain, correspond to one of the inner exchange's scatter
-            # positions. (Exact positional match isn't required — what
-            # matters is the SET, since hash partitioning is commutative
-            # over keys.)
-            tracked = set(k for k in keys_to_track if k is not None)
+            # Hash combination is order-sensitive, including repeated keys.
             if any(k is None for k in keys_to_track):
                 return None
-            if tracked != set(inner_keys):
+            if keys_to_track != list(inner_keys):
                 return None
             # Note: we deliberately do NOT compare ``RelCommon.Hint.alias``
             # ("hash(l_partkey)" vs "hash(l_l_partkey)") because Bolt's

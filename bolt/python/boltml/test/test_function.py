@@ -364,3 +364,13 @@ class TestPythonUDF(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             UnregisteredFunction()
+
+
+class ArrowAdapterNameTests(unittest.TestCase):
+    def testFunctionNamedLikeArrowType(self):
+        @arrowAdapter
+        def array(values):
+            return pc.add(values, 1)
+
+        result = array(pybolt.fromList([1, 2]))
+        self.assertEqual(list(result), [2, 3])

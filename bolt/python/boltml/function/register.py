@@ -33,6 +33,9 @@ class UserFunctionRegister:
     def __iter__(self):
         return iter(self.__functions.values())
 
+    def clear(self):
+        self.__functions.clear()
+
     @staticmethod
     def __fnName(fn) -> str:
         from .stateful import StatefulFunction

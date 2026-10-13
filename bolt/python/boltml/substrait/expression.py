@@ -50,18 +50,18 @@ def substraitExpression(
         return substraitExpression(expression.inner(), rel)
 
     if isinstance(expression, FieldExpression):
-        return fieldExpression(expression)
+        return fieldExpression(expression, rel)
 
     if isinstance(expression, LiteralExpression) or expression.asLiteral() is not None:
         return literalExpression(expression.asLiteral())
     fn = expression.asFunction()
     if fn is not None:
-        return vectorFunctionExpression(fn)
+        return vectorFunctionExpression(fn, rel)
     if isinstance(expression, CastExpression):
-        return castExpression(expression)
+        return castExpression(expression, rel)
 
     if isinstance(expression, CaseExpression):
-        return caseExpression(expression)
+        return caseExpression(expression, rel)
 
     raise NotImplementedError(
         "Conversion to substrait expression is not implemented for "
@@ -97,8 +97,8 @@ def literalExpression(expression: LiteralExpression) -> algebra.Expression:
     return algebra.Expression(literal=literal)
 
 
-def castExpression(expression: CastExpression) -> algebra.Expression:
-    inputExpr = substraitExpression(expression.input())
+def castExpression(expression: CastExpression, rel=None) -> algebra.Expression:
+    inputExpr = substraitExpression(expression.input(), rel)
     dtype = substraitType(expression.dtype)
     return algebra.Expression(
         cast=algebra.Expression.Cast(
@@ -109,23 +109,33 @@ def castExpression(expression: CastExpression) -> algebra.Expression:
     )
 
 
-def fieldExpression(expression: FieldExpression) -> algebra.Expression:
+def fieldExpression(expression: FieldExpression, rel=None) -> algebra.Expression:
+    index = expression.fieldIndex
+    if rel is not None:
+        from .rel import rel_output_names
+
+        names = rel_output_names(rel)
+        if expression.name not in names:
+            raise ValueError(f"Field '{expression.name}' not found in input schema.")
+        index = names.index(expression.name)
     return algebra.Expression(
         selection=algebra.Expression.FieldReference(
             direct_reference=algebra.Expression.ReferenceSegment(
                 struct_field=algebra.Expression.ReferenceSegment.StructField(
-                    field=expression.fieldIndex,
+                    field=index,
                 )
             )
         )
     )
 
 
-def vectorFunctionExpression(expression: FunctionExpression) -> algebra.Expression:
+def vectorFunctionExpression(
+    expression: FunctionExpression, rel=None
+) -> algebra.Expression:
     ext = extensionRegister[expression]
     functionReference = extensionIndex(ext)
     arguments = [
-        algebra.FunctionArgument(value=substraitExpression(arg))
+        algebra.FunctionArgument(value=substraitExpression(arg, rel))
         for arg in expression.arguments
     ]
     outputType = substraitType(expression.dtype)
@@ -139,19 +149,19 @@ def vectorFunctionExpression(expression: FunctionExpression) -> algebra.Expressi
     )
 
 
-def caseExpression(expression: CaseExpression) -> algebra.Expression:
+def caseExpression(expression: CaseExpression, rel=None) -> algebra.Expression:
     if_then_expr = algebra.Expression.IfThen()
 
     for arm in expression.cases:
-        if_expr = substraitExpression(arm.predicate)
-        then_expr = substraitExpression(arm.value)
+        if_expr = substraitExpression(arm.predicate, rel)
+        then_expr = substraitExpression(arm.value, rel)
         if_clause = algebra.Expression.IfThen.IfClause(
             **{"if": if_expr, "then": then_expr}
         )
         if_then_expr.ifs.append(if_clause)
 
     if expression.defaultValue is not None:
-        else_expr = substraitExpression(expression.defaultValue)
+        else_expr = substraitExpression(expression.defaultValue, rel)
         if_then_expr = algebra.Expression.IfThen(
             **{"ifs": if_then_expr.ifs, "else": else_expr}
         )

@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+import posixpath
 from typing import Optional
+from urllib.parse import urlsplit
 
 from pybolt import FileFormat, RowType
 from pybolt import Split as BoltSplit
@@ -27,7 +29,7 @@ from .common import (
 )
 from .._generated.hive_metastore.ThriftHiveMetastore import Client as ThriftClient
 from .._generated.hive_metastore.ttypes import Table as ThriftTable
-from .._generated.hive_metastore.ttypes import Partition, StorageDescriptor
+from .._generated.hive_metastore.ttypes import Partition
 
 
 @dataclass
@@ -49,7 +51,7 @@ class HiveSplit(CatalogSplit):
 
     filePath: str
     fileFormat: FileFormat
-    partMap: dict[str, str]
+    partMap: dict[str, Optional[str]]
 
     def toBoltSplit(self) -> BoltSplit:
         return BoltSplit.hive(self.filePath, self.fileFormat, self.partMap)
@@ -71,7 +73,7 @@ class HiveTable(CatalogTable):
         return self.__thriftTable.tableName
 
     def getPartitionKeys(self) -> list[str]:
-        return [pk.name for pk in self.__thriftTable.partitionKeys]
+        return [pk.name for pk in (self.__thriftTable.partitionKeys or [])]
 
     def getFileFormat(self) -> FileFormat:
         return hiveFileFormatToBoltFileFormat(self.__thriftTable.sd.outputFormat)
@@ -79,7 +81,11 @@ class HiveTable(CatalogTable):
     def getSchema(self) -> RowType:
         fieldNames = []
         fieldTypes = []
-        for field in self.__thriftTable.sd.cols:
+        for field in (self.__thriftTable.sd.cols or []) + (
+            self.__thriftTable.partitionKeys or []
+        ):
+            if field.name in fieldNames:
+                continue
             fieldNames.append(field.name)
             fieldTypes.append(hiveTypeToBoltType(field.type))
         return RowType(fieldNames, fieldTypes)
@@ -90,7 +96,7 @@ class HiveTable(CatalogTable):
                 f"Invalid option type '{type(options)}' for HiveTable. "
                 "Expected HiveOptions."
             )
-        return self.__thriftTable.parameters
+        return self.__thriftTable.parameters or {}
 
     def getReaderSplits(self, options: HiveOptions) -> list[CatalogSplit]:
         if type(options) is not HiveOptions:
@@ -98,20 +104,15 @@ class HiveTable(CatalogTable):
                 f"Invalid option type '{type(options)}' for HiveTable. "
                 "Expected HiveOptions."
             )
-        if options.partitionFilterExpr is None:
+        partitionKeys = self.getPartitionKeys()
+        if not partitionKeys:
+            partitions = [Partition(values=[], sd=self.__thriftTable.sd)]
+        elif options.partitionFilterExpr is None:
             partitions = self.__client.get_partitions(
                 self.__thriftTable.dbName,
                 self.__thriftTable.tableName,
                 options.maxPartitions,
             )
-            # Case for tables without partitions.
-            if len(partitions) == 0:
-                partitions = [
-                    Partition(
-                        values=[],
-                        sd=StorageDescriptor(location=self.__thriftTable.sd.location),
-                    )
-                ]
         else:
             partitions = self.__client.get_partitions_by_filter(
                 db_name=self.__thriftTable.dbName,
@@ -121,12 +122,25 @@ class HiveTable(CatalogTable):
             )
 
         splits: list[CatalogSplit] = []
-        fileFormat = self.getFileFormat()
-        partitionKeys = self.getPartitionKeys()
         for p in partitions:
-            partMap: dict[str, str] = {k: v for k, v in zip(partitionKeys, p.values)}
+            if len(partitionKeys) != len(p.values):
+                raise ValueError(
+                    "Hive partition values do not match the partition keys"
+                )
+            partMap = {
+                k: None if v == "__HIVE_DEFAULT_PARTITION__" else v
+                for k, v in zip(partitionKeys, p.values)
+            }
+            fileFormat = hiveFileFormatToBoltFileFormat(
+                p.sd.outputFormat or self.__thriftTable.sd.outputFormat
+            )
             filenames = FileUtils.listFiles(p.sd.location)
             # TODO: support bucketed splits with multiple files.
             for f in filenames:
+                relativePath = posixpath.relpath(
+                    urlsplit(f).path, urlsplit(p.sd.location).path
+                )
+                if any(part.startswith((".", "_")) for part in relativePath.split("/")):
+                    continue
                 splits.append(HiveSplit(f, fileFormat, partMap))
         return splits

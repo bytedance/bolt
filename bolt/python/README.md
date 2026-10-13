@@ -134,9 +134,7 @@ if __name__ == "__main__":
 ```
 
 This function handles nulls explicitly. Materializing a column as a list also
-executes the plan. Keep UDF DataFrames inside a function as shown: retaining
-them as module globals can currently cause a native memory-pool error when
-Python exits.
+executes the plan.
 
 For Arrow vector functions, batch functions, tensors, and
 image processing, see the [runnable integration examples](tests/integration/test_boltml.py).

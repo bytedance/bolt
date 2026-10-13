@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -81,7 +82,8 @@ inline pybind11::dtype numpyDtypeForElementKind(TypeKind kind) {
     case TypeKind::DOUBLE:
       return pybind11::dtype::of<double>();
     case TypeKind::BOOLEAN:
-      return pybind11::dtype::of<bool>();
+      throw pybind11::type_error(
+          "BOOLEAN tensors are not supported by the zero-copy numpy bridge");
     default:
       throw pybind11::type_error(
           "tensor element kind not supported by numpy bridge: " +
@@ -110,13 +112,34 @@ inline BufferPtr flatValuesBufferForElementKind(
       return elements->asFlatVector<float>()->values();
     case TypeKind::DOUBLE:
       return elements->asFlatVector<double>()->values();
-    case TypeKind::BOOLEAN:
-      return elements->asFlatVector<bool>()->values();
     default:
       throw pybind11::type_error(
           "tensor element kind not supported by numpy bridge: " +
           std::string(mapTypeKindToName(kind)));
   }
+}
+
+// Bolt's array sizes and offsets must fit vector_size_t, even when numpy uses
+// a wider index type. Check before multiplying or narrowing either dimension.
+inline vector_size_t checkedTensorListSize(
+    const std::vector<int64_t>& shape,
+    int64_t numRows) {
+  constexpr auto maxSize = std::numeric_limits<vector_size_t>::max();
+  if (numRows < 0 || numRows > maxSize) {
+    throw pybind11::value_error(
+        "Tensor row count exceeds Bolt vector capacity");
+  }
+  int64_t listSize = 1;
+  for (const auto dimension : shape) {
+    if (dimension <= 0 || dimension > maxSize / listSize) {
+      throw pybind11::value_error("Tensor shape exceeds Bolt vector capacity");
+    }
+    listSize *= dimension;
+  }
+  if (numRows > maxSize / listSize) {
+    throw pybind11::value_error("Tensor elements exceed Bolt vector capacity");
+  }
+  return static_cast<vector_size_t>(listSize);
 }
 
 // Build a FlatVector<NativeType> whose values buffer is `valuesBuffer`.

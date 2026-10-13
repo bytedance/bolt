@@ -69,10 +69,17 @@ def _splitTopLevel(s: str, sep: str = ",") -> list[str]:
     parts: list[str] = []
     depth = 0
     start = 0
+    quoted = False
     for i, c in enumerate(s):
-        if c == "<":
+        if c == '"':
+            # Bolt escapes quotes by doubling them: toggling twice keeps
+            # punctuation inside such a name protected from splitting.
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif c in "<(":
             depth += 1
-        elif c == ">":
+        elif c in ">)":
             depth -= 1
         elif c == sep and depth == 0:
             parts.append(s[start:i].strip())
@@ -113,13 +120,20 @@ def _parseBoltType(s: str):
         fields = _splitTopLevel(inner, ",")
         names: list[str] = []
         types: list = []
+        if not inner:
+            return pybolt.RowType(names, types)
         for f in fields:
             # Field is ``name:TYPE`` — the colon is at depth-0 too.
-            m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$", f)
-            if not m:
+            parts = _splitTopLevel(f, ":")
+            if len(parts) != 2:
                 raise ValueError(f"ROW field {f!r} not in 'name:TYPE' form")
-            names.append(m.group(1))
-            types.append(_parseBoltType(m.group(2)))
+            name, fieldType = parts
+            if name.startswith('"') and name.endswith('"'):
+                name = name[1:-1].replace('""', '"')
+            elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"Invalid ROW field name: {name!r}")
+            names.append(name)
+            types.append(_parseBoltType(fieldType))
         return pybolt.RowType(names, types)
     # ``DECIMAL(p, s)`` — Short for p<=18, Long for p>18. The canonical
     # form ``str(BoltType)`` emits matches this regex.

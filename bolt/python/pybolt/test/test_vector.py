@@ -592,16 +592,17 @@ class TestTensorNumpyBridge(unittest.TestCase):
         self.assertEqual(back[1, 2], 7.5)
 
     def testToNumpyAliasesVeloxMemory(self):
-        # Inverse direction: the np.ndarray returned by to_numpy must
-        # alias the underlying BufferPtr's memory. We mutate via the
-        # numpy view and re-export to confirm.
+        # The view shares storage but cannot mutate engine-owned inputs.
         arr = np.array([[1, 2], [3, 4]], dtype=np.int32)
         vec = pb.fromNumpy(arr, pb.IntegerType(), [2])
         view = vec.to_numpy(shape=[2])
-        view[0, 0] = 99
-        view2 = vec.to_numpy(shape=[2])
-        self.assertEqual(view2[0, 0], 99)
-        self.assertEqual(arr[0, 0], 99)
+        self.assertTrue(np.shares_memory(view, arr))
+        self.assertFalse(view.flags.writeable)
+        with self.assertRaises(ValueError):
+            view[0, 0] = 99
+        copied = view.copy()
+        copied[0, 0] = 99
+        self.assertEqual(vec[0], [1, 2])
 
     def testVectorOutlivesNumpy(self):
         # The BufferView holds a +1 ref on the numpy array; even after

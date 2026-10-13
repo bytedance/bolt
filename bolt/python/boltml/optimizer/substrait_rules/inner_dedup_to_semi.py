@@ -31,10 +31,11 @@ Pattern recognised
 
 When ALL non-join-key grouping keys come from a single side (call it
 "A"), the inner-join + dedup-groupby is semantically equivalent to a
-semi-join of A against the OTHER side ("B"). The inner-join materialises
+deduplicated semi-join of A against the OTHER side ("B"). The inner-join materialises
 every matching ``(L, R)`` pair (M:N row blow-up) and the groupBy then
 collapses the duplicates; a semi-join streams A and emits each A row
-at most once when a B match is found — same result, fewer rows.
+at most once when a B match is found. A final group-by still collapses
+equal grouping keys from different A rows.
 
 This is the pattern q4 emits today: ``orders.join(lineitem, key=orderkey)
 .groupBy(o_orderkey, o_orderpriority).count()``. Both group keys come
@@ -117,8 +118,8 @@ materializing the joined columns.
 Idempotency
 -----------
 
-After a successful rewrite the aggregate is gone, so a second pass
-can't match the same shape. The rule is bottom-up, so each fixpoint
+After a successful rewrite the join is semi rather than inner, so a
+second pass cannot match the same shape. The rule is bottom-up, so each fixpoint
 iteration sees the post-rewrite tree.
 """
 
@@ -545,7 +546,16 @@ def _try_rewrite(
         f"join_out_width={len(join_names)}->{len(a_names)} "
         f"new_join_type={'LEFT_SEMI' if a_side == 'L' else 'RIGHT_SEMI'}",
     )
-    return rename_proj
+    # A semi join removes build-side multiplicity but does not deduplicate
+    # equal grouping keys from distinct probe rows.
+    dedup = algebra.AggregateRel()
+    dedup.CopyFrom(agg)
+    dedup.input.CopyFrom(rename_proj)
+    del dedup.grouping_expressions[:]
+    dedup.grouping_expressions.extend(
+        _make_field_ref(i) for i in range(len(rename_exprs))
+    )
+    return algebra.Rel(aggregate=dedup)
 
 
 # ---------------------------------------------------------------------------

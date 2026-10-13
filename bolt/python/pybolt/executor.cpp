@@ -216,7 +216,9 @@ void addExecutorBindings( // NOLINT
         exec::HashPartitionFunction fn(
             numPartitions, rowType, channels, /*constValues*/ {});
         std::vector<uint32_t> partitions;
-        fn.partition(*input, partitions);
+        if (auto singlePartition = fn.partition(*input, partitions)) {
+          partitions.assign(input->size(), *singlePartition);
+        }
         return partitions;
       },
       pybind11::arg("input"),
@@ -234,6 +236,9 @@ void addExecutorBindings( // NOLINT
             std::dynamic_pointer_cast<const RowType>(input->type());
         BOLT_CHECK_NOT_NULL(rowType, "input must be a RowVector");
         const auto size = input->size();
+        if (keyChannels.empty()) {
+          return std::vector<uint64_t>(size, 0);
+        }
         std::vector<std::unique_ptr<exec::VectorHasher>> hashers;
         hashers.reserve(keyChannels.size());
         for (auto c : keyChannels) {

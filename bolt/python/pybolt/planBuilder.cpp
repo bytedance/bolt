@@ -33,6 +33,10 @@
 #include <pybind11/pytypes.h>
 #include <pybind11/stl.h>
 
+#include <folly/Conv.h>
+
+#include <limits>
+
 #include "bolt/connectors/hive/TableHandle.h"
 #include "bolt/connectors/tpch/TpchConnector.h"
 #include "bolt/core/PlanNode.h"
@@ -65,9 +69,20 @@ void addPlanBindings( // NOLINT
           pybind11::arg("startId"))
       .def(
           pybind11::init([](const core::PlanNodePtr& initialPlanNode) {
+            BOLT_USER_CHECK_NOT_NULL(initialPlanNode);
+            int startId = 0;
+            core::PlanNode::findFirstNode(
+                initialPlanNode.get(), [&](const core::PlanNode* node) {
+                  if (auto id = folly::tryTo<int>(node->id())) {
+                    BOLT_USER_CHECK_LT(*id, std::numeric_limits<int>::max());
+                    startId = std::max(startId, *id + 1);
+                  }
+                  return false;
+                });
             return std::make_shared<exec::test::PlanBuilder>(
                 initialPlanNode,
-                std::make_shared<core::PlanNodeIdGenerator>(0));
+                std::make_shared<core::PlanNodeIdGenerator>(startId),
+                PyBoltContext::getSingletonInstance().pool());
           }),
           pybind11::arg("planNode"))
       .def(

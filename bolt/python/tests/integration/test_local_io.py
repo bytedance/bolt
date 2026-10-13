@@ -121,17 +121,13 @@ class LocalIoTests(unittest.TestCase):
             actual.extend(values)
         self.assertEqual(sorted(actual), list(range(12)))
 
-    # The Substrait table writer currently drops requested column statistics.
-    @unittest.expectedFailure
-    def testWriterAggregationsProduceRequestedStatistics(self):
-        executor = RecordingLocalExecutor()
+    def testWriterAggregationsAreExplicitlyRejected(self):
         output = self.directory / "statistics"
-        LocalTableWriter(str(output), aggregations=["max(id) AS max_id"]).write(
-            DataFrame(self.data, executor=executor)
-        )
-        self.assertEqual(len(self.dataFiles(output)), 1)
-        self.assertIn("max_id", executor.lastResult.dtype().names())
-        self.assertIn(3, list(executor.lastResult.childAt("max_id")))
+        with self.assertRaisesRegex(NotImplementedError, "writer aggregations"):
+            LocalTableWriter(str(output), aggregations=["max(id) AS max_id"]).write(
+                DataFrame(self.data)
+            )
+        self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

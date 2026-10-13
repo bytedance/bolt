@@ -64,8 +64,6 @@ struct ElementCounter {
       0; // to track the elements already in the vector
   vector_size_t totalElements = 0;
   std::vector<ElementCounter> children;
-  TypePtr inferredMapKeyType;
-  TypePtr inferredMapValueType;
 };
 
 void checkOrAssignType(TypePtr& type, const TypePtr& expectedType) {
@@ -84,7 +82,7 @@ void setElementInFlatVector(
     VectorPtr& vector) {
   using NativeType = typename TypeTraits<Kind>::NativeType;
   auto asFlat = vector->asFlatVector<NativeType>();
-  asFlat->set(idx, NativeType{v.value<NativeType>()});
+  asFlat->set(idx, NativeType{v.value<Kind>()});
 }
 
 void countElementsForType(
@@ -160,83 +158,38 @@ void constructType(const variant& v, TypePtr& type, ElementCounter& counter) {
 
   switch (v.kind()) {
     case TypeKind::ARRAY: {
+      if (type->kind() != TypeKind::UNKNOWN &&
+          type->kind() != TypeKind::ARRAY) {
+        throw pybind11::type_error("Cannot mix array and scalar values");
+      }
       counter.children.resize(1);
-      auto asArray = v.array();
-      TypePtr childType = createType(TypeKind::UNKNOWN, {});
-      for (const auto& element : asArray) {
+      TypePtr childType =
+          type->kind() == TypeKind::ARRAY ? type->childAt(0) : UNKNOWN();
+      for (const auto& element : v.array()) {
         constructType(element, childType, counter.children[0]);
       }
-
-      // if child's type still remains Unknown, implies all the
-      // elements in the array are actually NULL
-      if (childType->kind() == TypeKind::UNKNOWN) {
-        throw pybind11::value_error(
-            "Cannot construct array with all None values");
-      }
-      checkOrAssignType(type, createType<TypeKind::ARRAY>({childType}));
+      // An empty or all-null row may acquire its element type from a later row.
+      type = ARRAY(childType);
       break;
     }
     case TypeKind::MAP: {
-      counter.children.resize(2);
-      const auto& asMap = v.map();
-
-      if (type->kind() == TypeKind::MAP) {
-        const auto& keyType = type->childAt(0);
-        const auto& valueType = type->childAt(1);
-        for (const auto& [key, value] : asMap) {
-          if (key.isNull()) {
-            throw pybind11::type_error("Map key cannot be None");
-          }
-          countElementsForType(key, keyType, counter.children[0]);
-          countElementsForType(value, valueType, counter.children[1]);
-        }
-        break;
-      }
-
-      if (type->kind() != TypeKind::UNKNOWN) {
+      if (type->kind() != TypeKind::UNKNOWN && type->kind() != TypeKind::MAP) {
         throw pybind11::type_error(
             "Cannot construct type tree, invalid variant for complex type");
       }
-
-      TypePtr keyType = counter.inferredMapKeyType
-          ? counter.inferredMapKeyType
-          : createType(TypeKind::UNKNOWN, {});
-      TypePtr valueType = counter.inferredMapValueType
-          ? counter.inferredMapValueType
-          : createType(TypeKind::UNKNOWN, {});
-      for (const auto& [key, value] : asMap) {
+      counter.children.resize(2);
+      TypePtr keyType =
+          type->kind() == TypeKind::MAP ? type->childAt(0) : UNKNOWN();
+      TypePtr valueType =
+          type->kind() == TypeKind::MAP ? type->childAt(1) : UNKNOWN();
+      for (const auto& [key, value] : v.map()) {
         if (key.isNull()) {
           throw pybind11::type_error("Map key cannot be None");
         }
-        if (keyType->kind() == TypeKind::UNKNOWN) {
-          constructType(key, keyType, counter.children[0]);
-        } else {
-          countElementsForType(key, keyType, counter.children[0]);
-        }
-
-        if (valueType->kind() == TypeKind::UNKNOWN) {
-          if (value.isNull()) {
-            countElementsForType(value, valueType, counter.children[1]);
-          } else {
-            constructType(value, valueType, counter.children[1]);
-          }
-        } else {
-          countElementsForType(value, valueType, counter.children[1]);
-        }
+        constructType(key, keyType, counter.children[0]);
+        constructType(value, valueType, counter.children[1]);
       }
-
-      if (keyType->kind() != TypeKind::UNKNOWN) {
-        counter.inferredMapKeyType = keyType;
-      }
-      if (valueType->kind() != TypeKind::UNKNOWN) {
-        counter.inferredMapValueType = valueType;
-      }
-      if (counter.inferredMapKeyType && counter.inferredMapValueType) {
-        checkOrAssignType(
-            type,
-            createType<TypeKind::MAP>(
-                {counter.inferredMapKeyType, counter.inferredMapValueType}));
-      }
+      type = MAP(keyType, valueType);
       break;
     }
 
@@ -326,13 +279,9 @@ VectorPtr variantsToVector(
   for (const auto& variant : variants) {
     constructType(variant, type, counter);
   }
-  if (type->kind() == TypeKind::UNKNOWN) {
-    if (!counter.inferredMapKeyType) {
-      throw pybind11::value_error("Cannot construct map with empty keys");
-    }
-    if (!counter.inferredMapValueType) {
-      throw pybind11::value_error("Cannot construct map with all None values");
-    }
+  if (type->containsUnknown()) {
+    throw pybind11::value_error(
+        "Cannot infer element types from empty or all-None values; specify dtype");
   }
   VectorPtr resultVector =
       BaseVector::create(std::move(type), variants.size(), pool);
@@ -802,10 +751,10 @@ VectorPtr variantToConstantVector(
 
   NativeType value;
   if constexpr (std::is_same_v<NativeType, StringView>) {
-    const std::string& str = variant.value<std::string>();
+    const std::string& str = variant.value<T>();
     value = StringView(str);
   } else {
-    value = variant.value<NativeType>();
+    value = variant.value<T>();
   }
   auto result = std::make_shared<ConstantVector<NativeType>>(
       pool,
@@ -962,16 +911,34 @@ inline void setItemInFlatVector(
     pybind11::handle& obj) {
   checkBounds(vector, idx);
 
-  variant var = pyToVariant(obj);
-  if (var.kind() == TypeKind::INVALID) {
+  if (obj.is_none()) {
     return vector->setNull(idx, true);
   }
 
-  if (var.kind() != vector->typeKind()) {
+  variant var = pyToVariant(obj);
+  const auto targetKind = vector->typeKind();
+  // Python integers and floats have no narrow-width variants. Convert within
+  // the same numeric category using the target type's checked scalar cast.
+  if ((var.kind() == TypeKind::BIGINT &&
+       (targetKind == TypeKind::TINYINT || targetKind == TypeKind::SMALLINT ||
+        targetKind == TypeKind::INTEGER)) ||
+      (var.kind() == TypeKind::DOUBLE && targetKind == TypeKind::REAL)) {
+    var = pyToVariant(obj, *vector->type());
+  }
+
+  if (var.kind() != targetKind) {
     throw pybind11::type_error("Attempted to insert value of mismatched types");
   }
 
-  vector->set(idx, NativeType{var.value<NativeType>()});
+  if constexpr (std::is_same_v<NativeType, StringView>) {
+    vector->set(
+        idx,
+        vector->typeKind() == TypeKind::VARBINARY
+            ? StringView(var.value<TypeKind::VARBINARY>())
+            : StringView(var.value<TypeKind::VARCHAR>()));
+  } else {
+    vector->set(idx, NativeType{var.value<NativeType>()});
+  }
 }
 
 inline void setItemInComplexVector(
@@ -1117,16 +1084,14 @@ void addVectorBindings( // NOLINT
             }
             std::vector<int64_t> resolvedShape = std::move(shape);
 
-            if (v->mayHaveNulls()) {
+            if (BaseVector::countNulls(v->nulls(), v->size()) != 0) {
               throw pybind11::value_error(
                   "to_numpy on an ArrayVector with nulls is not supported");
             }
 
             const vector_size_t numRows = v->size();
-            int64_t listSize = 1;
-            for (auto d : resolvedShape) {
-              listSize *= d;
-            }
+            const auto listSize = checkedTensorListSize(resolvedShape, numRows);
+            const auto totalElements = numRows * listSize;
 
             // Verify dense uniform layout. Cheap check, important: any
             // intermediate operator that re-laid out the rows (e.g.
@@ -1149,6 +1114,14 @@ void addVectorBindings( // NOLINT
             // scalar kind, with a single contiguous values buffer.
             auto elements = v->elements();
             const auto elementKind = elements->typeKind();
+            if (elements->size() < totalElements) {
+              throw pybind11::value_error(
+                  "to_numpy: tensor elements are missing");
+            }
+            if (BaseVector::countNulls(elements->nulls(), totalElements) != 0) {
+              throw pybind11::value_error(
+                  "to_numpy: null tensor elements require an explicit fill value");
+            }
             if (elements->encoding() != VectorEncoding::Simple::FLAT) {
               throw pybind11::value_error(
                   "to_numpy: elements vector is not FLAT-encoded; "
@@ -1179,20 +1152,23 @@ void addVectorBindings( // NOLINT
 
             // strides default to C-contiguous for the given dtype+shape.
             auto dtype = numpyDtypeForElementKind(elementKind);
-            return pybind11::array(
+            auto result = pybind11::array(
                 dtype,
                 npShape,
                 /*strides=*/{},
-                valuesBuf->as<void>(),
+                valuesBuf ? valuesBuf->as<void>() : nullptr,
                 keepalive);
+            result.attr("setflags")(false);
+            return result;
           },
           pybind11::arg("shape"),
-          "Zero-copy export as a numpy ndarray of shape (N, *shape) "
+          "Read-only zero-copy export as a numpy ndarray of shape (N, *shape) "
           "and dtype matching the element kind. The column must be a "
           "plain ArrayType<element_type> with the dense uniform layout "
           "that `pybolt.fromNumpy` produces (offsets[i] == i*listSize, "
           "sizes[i] == listSize, where listSize == product(shape)). "
-          "`shape` is the producer/consumer contract and is required.");
+          "`shape` is the producer/consumer contract and is required. "
+          "Call .copy() before modifying the returned array.");
 
   pybind11::class_<MapVector, MapVectorPtr, BaseVector>(
       m, "MapVector", pybind11::module_local(asModuleLocalDefinitions))
@@ -1299,7 +1275,7 @@ void addVectorBindings( // NOLINT
 
         // Dtype check against the declared element_type.
         auto wantDtype = numpyDtypeForElementKind(elementType->kind());
-        if (!arr.dtype().is(wantDtype)) {
+        if (!arr.dtype().equal(wantDtype)) {
           throw pybind11::type_error(
               std::string("fromNumpy: array dtype mismatch; want ") +
               pybind11::str(wantDtype).cast<std::string>() + ", got " +
@@ -1315,11 +1291,8 @@ void addVectorBindings( // NOLINT
               "np.ascontiguousarray() first if needed");
         }
 
+        const auto listSize = checkedTensorListSize(shape, arr.shape(0));
         const auto numRows = static_cast<vector_size_t>(arr.shape(0));
-        int64_t listSize = 1;
-        for (auto d : shape) {
-          listSize *= d;
-        }
 
         NumpyReleaser releaser{arr.ptr()};
         const auto sizeBytes = static_cast<size_t>(arr.nbytes());

@@ -39,13 +39,15 @@ namespace bytedance::bolt::python {
 
 void addArrowAdapterBindings(pybind11::module& m) { // NOLINT
   m.def("exportToArrow", [](const VectorPtr& inputVector) {
+    const auto arrowOptions =
+        ArrowOptions{.flattenDictionary = true, .flattenConstant = true};
     auto arrowArray = std::make_unique<ArrowArray>();
     auto* pool = PyBoltContext::getSingletonInstance().pool();
     bytedance::bolt::exportToArrow(
-        inputVector, *arrowArray, pool, ArrowOptions{});
+        inputVector, *arrowArray, pool, arrowOptions);
 
     auto arrowSchema = std::make_unique<ArrowSchema>();
-    bytedance::bolt::exportToArrow(inputVector, *arrowSchema, ArrowOptions{});
+    bytedance::bolt::exportToArrow(inputVector, *arrowSchema, arrowOptions);
 
     pybind11::module arrowModule = pybind11::module::import("pyarrow");
     pybind11::object arrayClass = arrowModule.attr("Array");

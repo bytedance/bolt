@@ -280,45 +280,51 @@ def _audit_read_rels(r, path: str = ""):
         _audit_read_rels(r.extension_single.input, path)
 
 
-def _traverse_and_replace_read(r, new_reads):
-    kind = r.WhichOneof("rel_type")
-    if kind == "read":
-        if new_reads:
-            new_r = new_reads.pop(0)
-            r.CopyFrom(new_r)
-    elif kind == "filter":
-        _traverse_and_replace_read(r.filter.input, new_reads)
-    elif kind == "project":
-        _traverse_and_replace_read(r.project.input, new_reads)
-    elif kind == "aggregate":
-        _traverse_and_replace_read(r.aggregate.input, new_reads)
-    elif kind == "sort":
-        _traverse_and_replace_read(r.sort.input, new_reads)
-    elif kind == "join":
-        _traverse_and_replace_read(r.join.left, new_reads)
-        _traverse_and_replace_read(r.join.right, new_reads)
-    elif kind == "hash_join":
-        _traverse_and_replace_read(r.hash_join.left, new_reads)
-        _traverse_and_replace_read(r.hash_join.right, new_reads)
-    elif kind == "merge_join":
-        _traverse_and_replace_read(r.merge_join.left, new_reads)
-        _traverse_and_replace_read(r.merge_join.right, new_reads)
-    elif kind == "nested_loop_join":
-        _traverse_and_replace_read(r.nested_loop_join.left, new_reads)
-        _traverse_and_replace_read(r.nested_loop_join.right, new_reads)
-    elif kind == "cross":
-        _traverse_and_replace_read(r.cross.left, new_reads)
-        _traverse_and_replace_read(r.cross.right, new_reads)
-    elif kind == "set":
-        for inp in r.set.inputs:
-            _traverse_and_replace_read(inp, new_reads)
-    elif kind == "fetch":
-        _traverse_and_replace_read(r.fetch.input, new_reads)
-    elif kind == "extension_single":
-        _traverse_and_replace_read(r.extension_single.input, new_reads)
-    elif kind == "extension_multi":
-        for inp in r.extension_multi.inputs:
-            _traverse_and_replace_read(inp, new_reads)
+def _rel_inputs(rel):
+    from ...optimizer.substrait_rules.base import (
+        _SINGLE_INPUT_KINDS,
+        _DUAL_INPUT_KINDS,
+        _MULTI_INPUT_KINDS,
+    )
+
+    kind = rel.WhichOneof("rel_type")
+    if kind in _SINGLE_INPUT_KINDS:
+        node = getattr(rel, kind)
+        if node.HasField("input"):
+            yield node.input
+    elif kind in _DUAL_INPUT_KINDS:
+        node = getattr(rel, kind)
+        yield node.left
+        yield node.right
+    elif kind in _MULTI_INPUT_KINDS or kind == "extension_multi":
+        yield from getattr(rel, kind).inputs
+
+
+def _traverse_and_replace_read(rel, new_reads):
+    if rel.WhichOneof("rel_type") == "read":
+        # A stage may also have ordinary file/values reads. Only exchange
+        # placeholders consume the supplied input dataframes.
+        if rel.read.WhichOneof("read_type") == "named_table":
+            if not new_reads:
+                raise ValueError("Missing input for exchange placeholder")
+            rel.CopyFrom(new_reads.pop(0))
+        return
+    for child in _rel_inputs(rel):
+        _traverse_and_replace_read(child, new_reads)
+
+
+def _plan_contains_global_order(substraitPlan) -> bool:
+    """Sort/limit cannot be evaluated independently on leaf shards."""
+
+    def contains(rel):
+        if rel.WhichOneof("rel_type") in ("sort", "fetch"):
+            return True
+        return any(contains(child) for child in _rel_inputs(rel))
+
+    return any(
+        item.HasField("root") and contains(item.root.input)
+        for item in substraitPlan.relations
+    )
 
 
 _TMP_INPUT_DIR = None
@@ -441,6 +447,8 @@ def _execute_substrait_bytes(
             rel = localFilesRel([uri], rowType, fileFormat)
             new_reads.append(algebra.Rel(read=rel))
         _traverse_and_replace_read(substraitPlan.relations[0].root.input, new_reads)
+        if new_reads:
+            raise ValueError("Unused exchange inputs after placeholder replacement")
 
     planNode, splits = convertSubstraitPlan(substraitPlan.SerializeToString())
 

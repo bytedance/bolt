@@ -70,10 +70,10 @@ class ExtensionRegister:
 
     @staticmethod
     def _makeKey(arg: Union[Expression, BoltType]) -> str:
-        if isinstance(arg, Expression):
-            return arg.expr()
+        if isinstance(arg, FunctionExpression):
+            return "function:" + substraitSignature(arg)
         if isinstance(arg, BoltType):
-            return str(arg)
+            return "type:" + str(arg)
         raise TypeError(f"Invalid ExtensionRegister key type: {type(arg)}")
 
     def _makeExtension(self, arg: Union[FunctionExpression, BoltType]):

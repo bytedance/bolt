@@ -117,9 +117,14 @@ void setValueAt(
             TYPE != TypeKind::ROW && TYPE != TypeKind::MAP &&
             TYPE != TypeKind::ARRAY) {
           auto cppVal = pyVal.cast<typename TypeTraits<TYPE>::DeepCopiedType>();
-          auto* vec = v.as<FlatVector<decltype(cppVal)>>();
+          auto* vec = v.as<FlatVector<typename TypeTraits<TYPE>::NativeType>>();
           BOLT_CHECK(vec != nullptr);
-          vec->set(i, std::move(cppVal));
+          if constexpr (
+              TYPE == TypeKind::VARCHAR || TYPE == TypeKind::VARBINARY) {
+            vec->set(i, StringView(cppVal));
+          } else {
+            vec->set(i, std::move(cppVal));
+          }
         }
       },
       [&]() {

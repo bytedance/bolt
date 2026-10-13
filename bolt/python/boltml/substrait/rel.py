@@ -236,7 +236,7 @@ def aggregateRel(
 
     # Build grouping expressions from key names
     # We need to use a struct field reference instead of map_key.
-    grouping_exprs = [substraitExpression(k) for k in keys]
+    grouping_exprs = [substraitExpression(k, input) for k in keys]
 
     # Single grouping set referencing all grouping expressions by index
     groupings = []
@@ -253,7 +253,7 @@ def aggregateRel(
         agg = agg.asFunction()
         function_reference = extensionIndex(extensionRegister[agg])
         args = [
-            algebra.FunctionArgument(value=substraitExpression(arg))
+            algebra.FunctionArgument(value=substraitExpression(arg, input))
             for arg in agg.arguments
         ]
         output_type = substraitType(agg.dtype)
@@ -298,7 +298,7 @@ def sortRel(
     common = algebra.RelCommon(direct=algebra.RelCommon.Direct())
     sorts = []
     for e, so in order:
-        expr = substraitExpression(e)
+        expr = substraitExpression(e, input)
         sorts.append(algebra.SortField(expr=expr, direction=substraitSortDirection(so)))
 
     return algebra.SortRel(common=common, input=input, sorts=sorts)
@@ -370,6 +370,17 @@ def pythonRel(
     )
     ext_rel = algebra.ExtensionSingleRel()
     ext_rel.ParseFromString(bytes(ext_bytes))
+    # The native producer emits legacy timestamp types. Keep Python's output
+    # declaration consistent with the precision-aware consumer.
+    embedded = algebra.Expression.EmbeddedFunction()
+    if ext_rel.detail.Unpack(embedded):
+        output = substraitType(outputType)
+        if extensionRegister.find(output):
+            raise NotImplementedError(
+                "Python table functions cannot return UNKNOWN types"
+            )
+        embedded.output_type.CopyFrom(output)
+        ext_rel.detail.Pack(embedded)
     return ext_rel
 
 

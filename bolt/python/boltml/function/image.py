@@ -24,24 +24,25 @@ def downloadImage(
 ):
     import urllib.error
     import urllib.request
+    import http.client
 
     if url is None:
         return None
     if isinstance(url, (bytes, bytearray)):
         url = url.decode("utf-8", errors="ignore")
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": user_agent, "Accept": "image/*,*/*;q=0.8"},
-        method="GET",
-    )
     try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": user_agent, "Accept": "image/*,*/*;q=0.8"},
+            method="GET",
+        )
         with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
             content_type = (resp.headers.get("Content-Type") or "").lower()
             data = resp.read()
         if not data or (content_type and not content_type.startswith("image/")):
             return None
         return data
-    except (urllib.error.URLError, urllib.error.HTTPError, ValueError):
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
         return None
 
 

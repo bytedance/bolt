@@ -34,6 +34,10 @@ from boltml import DataFrame
 from boltml.distributed.ray import RayExecutionConfig, RayExecutionMode
 from boltml.executor.ray import RayExecutor
 from boltml.function import scalarFunction
+from boltml.function.aggregation import Sum
+from boltml.optimizer.substrait_physical_pipeline import (
+    SubstraitPhysicalOptimizerPipeline,
+)
 from boltml.plan_builder.substrait import SubstraitPlanBuilderFactory
 
 
@@ -178,6 +182,52 @@ class RayExecutionTests(unittest.TestCase):
                 frame.filter(frame["x"] >= 2).select(["x"])
                 self.assertEqual(sorted(frame["x"]), [2, 3, 4, 5, 6, 7])
                 self.assertRemoteTasks(executor, 4)
+
+    def testRemoteGroupedExchangeIncludesNullKeys(self):
+        executor = RayExecutor(
+            config=RayExecutionConfig(mode=RayExecutionMode.REMOTE_LEAF),
+            physical=SubstraitPhysicalOptimizerPipeline(defaultPartitionCount=2),
+        )
+        frame = DataFrame(
+            pa.table({"grp": ["a", None, "a", None, "b"], "v": [1, 2, 3, 7, 5]}),
+            executor=executor,
+        )
+        frame.groupBy("grp").aggregate(total=Sum("v"))
+        self.assertCountEqual(
+            frame.toArrow(pa.Table).to_pylist(),
+            [
+                {"grp": "a", "total": 4},
+                {"grp": None, "total": 9},
+                {"grp": "b", "total": 5},
+            ],
+        )
+        stages = executor.lastExecutionSummary.stages
+        self.assertGreaterEqual(len(stages), 2)
+        self.assertTrue(all(stage.remote for stage in stages))
+        self.assertEqual(stages[-1].remoteTaskCount, 2)
+
+    def testOrderedFileLeafKeepsGlobalOrderWithFanoutRequested(self):
+        with tempfile.TemporaryDirectory(prefix="bolt-ordered-splits-") as folder:
+            paths = []
+            for index, values in enumerate(([8, 1], [7, 2], [6, 3], [5, 4])):
+                path = Path(folder) / f"part-{index}.parquet"
+                pq.write_table(pa.table({"x": values}), path)
+                paths.append(path.as_uri())
+            factory = SubstraitPlanBuilderFactory()
+            with patch.dict(os.environ, {"BOLTML_LEAF_PARALLELISM": "4"}):
+                executor = self.executor()
+                frame = DataFrame(
+                    factory.fromLocalFiles(
+                        paths,
+                        pybolt.RowType(["x"], [pybolt.BigintType()]),
+                        pybolt.FileFormat.PARQUET,
+                    ),
+                    planFactory=factory,
+                    executor=executor,
+                )
+                frame.orderBy("x")
+                self.assertEqual(list(frame["x"]), list(range(1, 9)))
+                self.assertRemoteTasks(executor, 1)
 
 
 if __name__ == "__main__":

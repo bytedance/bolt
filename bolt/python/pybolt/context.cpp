@@ -32,6 +32,7 @@
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
 
+#include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/common/file/FileSystems.h"
 #include "bolt/connectors/hive/HiveConfig.h"
 #include "bolt/connectors/hive/HiveConnector.h"
@@ -102,6 +103,11 @@ PyBoltContext::PyBoltContext() {
   FileSink::registerFactory(
       [](const std::string& name,
          const FileSink::Options& options) -> std::unique_ptr<FileSink> {
+        // Other factories own URI schemes. This fallback only adds relative
+        // local paths, which the standard local factory does not accept.
+        if (name.find(':') < name.find('/')) {
+          return nullptr;
+        }
         return std::make_unique<LocalFileSink>(name, options);
       });
 }
@@ -128,16 +134,22 @@ void PyBoltContext::initMemoryManager() {
 
 void PyBoltContext::registerAllFunctions() {
   bytedance::bolt::parse::registerTypeResolver();
-  bytedance::bolt::functions::prestosql::registerAllScalarFunctions();
-  bytedance::bolt::functions::sparksql::registerFunctions(kFunctionPrefix);
-
-  bytedance::bolt::aggregate::prestosql::registerAllAggregateFunctions(
-      kFunctionPrefix, true /*registerCompanionFunctions*/, true /*overwrite*/);
-  bytedance::bolt::functions::aggregate::sparksql::registerAggregateFunctions(
-      kFunctionPrefix, true /*registerCompanionFunctions*/, true /*overwrite*/);
-  bytedance::bolt::window::prestosql::registerAllWindowFunctions();
-  bytedance::bolt::functions::window::sparksql::registerWindowFunctions(
-      kFunctionPrefix);
+  if (kSparkCompatible) {
+    bytedance::bolt::functions::sparksql::registerFunctions(kFunctionPrefix);
+    bytedance::bolt::functions::aggregate::sparksql::registerAggregateFunctions(
+        kFunctionPrefix,
+        true /*registerCompanionFunctions*/,
+        true /*overwrite*/);
+    bytedance::bolt::functions::window::sparksql::registerWindowFunctions(
+        kFunctionPrefix);
+  } else {
+    bytedance::bolt::functions::prestosql::registerAllScalarFunctions();
+    bytedance::bolt::aggregate::prestosql::registerAllAggregateFunctions(
+        kFunctionPrefix,
+        true /*registerCompanionFunctions*/,
+        true /*overwrite*/);
+    bytedance::bolt::window::prestosql::registerAllWindowFunctions();
+  }
 }
 
 void PyBoltContext::registerHiveConnector() {

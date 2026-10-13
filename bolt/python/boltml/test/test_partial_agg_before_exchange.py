@@ -39,6 +39,7 @@ import pyarrow as pa
 from substrait.proto import algebra, plan as plan_pb2
 
 from ..dataframe import DataFrame
+from ..executor.ray import RayExecutor
 from ..function.aggregation import Mean, Sum, Count
 from ..optimizer.substrait_physical_pipeline import (
     SubstraitPhysicalOptimizerPipeline,
@@ -277,10 +278,8 @@ class TestPartialAggBeforeExchangeBehavioral(unittest.TestCase):
     optimizer (which now includes ``PartialAggBeforeExchange``) yields
     the same rows as the equivalent reference computation.
 
-    Local-mode execution doesn't actually shuffle rows, but the
-    partial-then-final split still runs through Bolt's kPartial /
-    kFinal aggregate code paths — so this exercises the rule's
-    correctness independently of Ray.
+    Staged-local RayExecutor applies the physical optimizer and executes
+    the producer/exchange/consumer stages without starting a Ray cluster.
     """
 
     def _result_dict(self, df: DataFrame, key: str, value: str) -> dict:
@@ -294,6 +293,7 @@ class TestPartialAggBeforeExchangeBehavioral(unittest.TestCase):
                 "v": [1, 2, 3, 4, 5, 6],
             },
             planFactory=SubstraitPlanBuilderFactory(),
+            executor=RayExecutor(),
         )
         result = df.groupBy("grp").aggregate(total=Sum("v"))
         # Expected sums: a=3, b=3, c=15.
@@ -309,6 +309,7 @@ class TestPartialAggBeforeExchangeBehavioral(unittest.TestCase):
                 "v": [1, 2, 3, 4, 5, 6],
             },
             planFactory=SubstraitPlanBuilderFactory(),
+            executor=RayExecutor(),
         )
         result = df.groupBy("grp").aggregate(n=Count("v"))
         self.assertEqual(
@@ -325,6 +326,7 @@ class TestPartialAggBeforeExchangeBehavioral(unittest.TestCase):
                 "v": [2.0, 3.0, 4.0],
             },
             planFactory=SubstraitPlanBuilderFactory(),
+            executor=RayExecutor(),
         )
         result = (
             df.transform(vsq=lambda f: f["v"] * f["v"])

@@ -14,6 +14,8 @@
 
 from typing import Union
 
+from pybolt import BigintType, TinyintType, SmallintType, IntegerType
+
 from ..expression.field import FieldExpression
 from ..function.aggregation import (
     AggregationFunction,
@@ -71,6 +73,10 @@ class GroupedDataFrame:
             outputType = self.__dataframe[fn.outputType.fieldName].dtype
         else:
             outputType = fn.outputType
+        if isinstance(fn, Sum) and isinstance(
+            outputType, (TinyintType, SmallintType, IntegerType)
+        ):
+            outputType = BigintType()
         arguments = [
             self.__dataframe[arg.fieldName]
             if isinstance(arg, AggregationFunction.Field)

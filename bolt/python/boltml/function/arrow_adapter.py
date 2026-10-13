@@ -50,7 +50,9 @@ def arrowAdapter(dtype=pyarrow.StructArray):
     # We need to check whether `dtype` is the user function or an arrow type.
     # This may vary whether the user uses `arrowAdapter` with or without
     # argument.
-    _argIsArrowType_ = dtype.__name__ in dir(pyarrow)
+    _argIsArrowType_ = (
+        isinstance(dtype, type) and getattr(pyarrow, dtype.__name__, None) is dtype
+    )
 
     def decorator(fn):
         validTypes = [pyarrow.StructArray, pyarrow.RecordBatch]

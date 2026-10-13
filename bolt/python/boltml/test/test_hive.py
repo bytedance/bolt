@@ -355,10 +355,12 @@ class HiveTest(unittest.TestCase, HiveTestCommon):
         options = HiveOptions(partitionFilterExpr="c10='INVALID'")
 
         # The partition filter should result in an empty partition set.
-        with self.assertRaises(ValueError):
-            catalog.getTable(tableName, self.dbName).read(
-                options, planFactory=df._planFactory_, executor=df._executor_
-            )
+        result = catalog.getTable(tableName, self.dbName).read(
+            options, planFactory=df._planFactory_, executor=df._executor_
+        )
+        self.assertEqual(len(result), 0)
+        self.assertEqual(result.names, df.names)
+        self.assertEqual(result.types, df.types)
 
     @WithDataFrame.data(**data)
     def testReadBucketed(self, df):

@@ -26,25 +26,40 @@ class RayLeafScheduler:
     def __init__(self, workerMode="task"):
         self._workerMode = workerMode
         self._actor = None
+        self._actorSession = None
 
     def ensureInitialized(self):
         ensureRayInitialized()
 
     def _ensureActor(self):
         self.ensureInitialized()
-        if self._actor is None:
+        context = ray.get_runtime_context()
+        session = (context.get_job_id(), context.get_node_id())
+        if self._actor is None or self._actorSession != session:
             boltmlDebugLog("scheduler", "creating remote execution actor")
             self._actor = RemoteExecutionActor.remote()
+            self._actorSession = session
         return self._actor
+
+    def _get(self, refs, **kwargs):
+        try:
+            return ray.get(refs, **kwargs)
+        except ray.exceptions.ActorDiedError:
+            # The runtime owns retry policy; its next attempt must get a new
+            # actor instead of resubmitting to this permanently dead handle.
+            self._actor = None
+            raise
 
     def _useActorMode(self) -> bool:
         return getattr(self._workerMode, "value", self._workerMode) == "actor"
 
     def execute(self, taskSpec, outputPlaceholders=(), publishConfig=None):
-        return ray.get(self.submit(taskSpec, outputPlaceholders, publishConfig))
+        return self._get(self.submit(taskSpec, outputPlaceholders, publishConfig))
 
-    def submit(self, taskSpec, outputPlaceholders=(), publishConfig=None):
-        if self._useActorMode():
+    def submit(
+        self, taskSpec, outputPlaceholders=(), publishConfig=None, forceTaskMode=False
+    ):
+        if self._useActorMode() and not forceTaskMode:
             boltmlDebugLog(
                 "scheduler", f"dispatch leaf task via actor stage={taskSpec.stageId}"
             )
@@ -60,7 +75,7 @@ class RayLeafScheduler:
     def executeSingleInputConsumer(
         self, taskSpec, inputDescriptors, outputPlaceholders=(), publishConfig=None
     ):
-        return ray.get(
+        return self._get(
             self.submitSingleInputConsumer(
                 taskSpec, inputDescriptors, outputPlaceholders, publishConfig
             )
@@ -99,7 +114,7 @@ class RayLeafScheduler:
         outputPlaceholders=(),
         publishConfig=None,
     ):
-        return ray.get(
+        return self._get(
             self.submitMultiInputConsumer(
                 taskSpec,
                 lhsDescriptors,
@@ -141,7 +156,7 @@ class RayLeafScheduler:
 
     def wait(self, refs):
         self.ensureInitialized()
-        return ray.get(list(refs))
+        return self._get(list(refs))
 
     def waitWithPartialResults(self, refs, drainGraceSeconds: float = 10.0):
         """Like ``wait`` but on any failure also collects results from
@@ -184,7 +199,7 @@ class RayLeafScheduler:
         self.ensureInitialized()
         ref_list = list(refs)
         try:
-            results = ray.get(ref_list)
+            results = self._get(ref_list)
             return tuple(results), None
         except Exception as error:  # noqa: BLE001
             # Failure path. Drain siblings with a bounded grace

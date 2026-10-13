@@ -36,12 +36,12 @@ from .expression import (
     AggregationExpression,
     GroupedDataFrame,
     BooleanExpression,
-    CaseExpression,
     Expression,
     FieldExpression,
     LiteralExpression,
     NamedExpression,
     ProjectExpression,
+    FunctionExpression,
 )
 
 from .column.view import ColumnView
@@ -187,7 +187,11 @@ class DataFrame:
         def _makeField_(arg, length=None):
             if _isVectorType_(arg):
                 return arg
-            if not isinstance(arg, list) and hasattr(arg, "__iter__"):
+            if (
+                not _isConstantType_(arg)
+                and not isinstance(arg, list)
+                and hasattr(arg, "__iter__")
+            ):
                 arg = list(arg)
             if isinstance(arg, list):
                 return fromList(arg)
@@ -221,7 +225,7 @@ class DataFrame:
         for k, v in constantFields.items():
             fields[k] = _makeField_(v, length)
 
-        names = list(fields.keys())
+        names = list(dictionary.keys())
         values = [fields[k] for k in names]
         return self.fromRowVector(rowVector(names, values))
 
@@ -585,7 +589,7 @@ class DataFrame:
                     self.transform(**{col: value})
                 else:
                     data = {c: self._data_.childAt(c) for c in self.names}
-                    data[col] = value._data_.copy()
+                    data[col] = value.data.copy()
                     self.fromDict(data)
             elif isinstance(value, Expression):
                 self.transform(**{col: value})
@@ -695,7 +699,7 @@ class DataFrame:
             return self
 
         if self.__data is None:
-            self.__data = rhs.__data
+            self.__data = rhs._data_.copy()
             return self
 
         self.__checkSchemaCompatibility(rhs, "append")
@@ -768,6 +772,14 @@ class DataFrame:
         `count` is the number of rows to output. If not set, all rows
         after `offset` will be output.
         """
+        if count is not None and count < 0:
+            raise ValueError("count must be non-negative")
+        if offset < 0 or (offset != 0 and count is None):
+            size = len(self)
+            offset = max(0, size + offset) if offset < 0 else offset
+            if count is None:
+                count = max(0, size - offset)
+            self.__lazy()
         plan: PlanBuilder = self.__data
         if columns is not None:
             plan.project(
@@ -816,17 +828,20 @@ class DataFrame:
         projectExprs = {
             k: v
             for k, v in expressions.items()
-            if (
-                isinstance(v, ProjectExpression)
-                or isinstance(v, BooleanExpression)
-                or isinstance(v, CaseExpression)
-            )
+            if (isinstance(v, Expression) and not isinstance(v, AggregationExpression))
         }
         projectExprs |= {
             k: ProjectExpression(LiteralExpression(v))
             for k, v in expressions.items()
             if any((isinstance(v, t) for t in (bool, int, float, str, bytes)))
         }
+        for name, value in expressions.items():
+            if name not in projectExprs and not isinstance(
+                value, AggregationExpression
+            ):
+                raise TypeError(
+                    f"Unsupported transform expression for {name}: {type(value)}"
+                )
         if len(projectExprs) > 0:
             self.__assignProjectExpressions(projectExprs)
         aggExprs = {
@@ -928,6 +943,8 @@ class DataFrame:
         """
         if not isinstance(expression, BooleanExpression):
             raise TypeError(f"Invalid filter expression type: {type(expression)}")
+        if expression.dataframe is not None and expression.dataframe is not self:
+            raise ValueError("Cannot filter with an expression from another dataframe.")
         plan: PlanBuilder = self.__data
         plan.filter(expression)
         return self
@@ -971,6 +988,7 @@ class DataFrame:
                 "over the matching key set instead. The substrait optimizer "
                 "may still emit SemiFilter internally."
             )
+        rhs = rhs.copy()
         lhsPlan: PlanBuilder = self.__data
         if not isinstance(rhs.__data, PlanBuilder):
             rhs.__lazy()
@@ -1015,6 +1033,19 @@ class DataFrame:
             outputLayout = list(lhsKeys.values()) + list(lhsNames.values())
         elif internalJoinType == JoinType.kRightSemiProject:
             outputLayout = list(rhsKeys.values()) + list(rhsNames.values())
+        elif internalJoinType == JoinType.kRight:
+            outputLayout = (
+                list(rhsKeys.values())
+                + list(lhsNames.values())
+                + list(rhsNames.values())
+            )
+        elif internalJoinType == JoinType.kFull:
+            outputLayout = (
+                list(lhsKeys.values())
+                + list(rhsKeys.values())
+                + list(lhsNames.values())
+                + list(rhsNames.values())
+            )
         else:
             outputLayout = (
                 list(lhsKeys.values())
@@ -1026,7 +1057,7 @@ class DataFrame:
             outputLayout = [*outputLayout, "match"]
 
         # Queue Hash Join in the plan:
-        lhsPlan.join(
+        self.__data = lhsPlan.join(
             rhsPlan,
             [FieldExpression(k, self) for k in lhsKeys.values()],
             [FieldExpression(k, rhs) for k in rhsKeys.values()],
@@ -1034,13 +1065,32 @@ class DataFrame:
             joinType=internalJoinType,
         )
 
+        if internalJoinType == JoinType.kFull:
+            self.transform(
+                **{
+                    lhsKeys[k]: FunctionExpression(
+                        "coalesce",
+                        self[lhsKeys[k]].dtype,
+                        [self[lhsKeys[k]], self[rhsKeys[k]]],
+                        self,
+                    )
+                    for k in keysOrder
+                }
+            )
+            self.select([name for name in self.names if name not in rhsKeys.values()])
+
         # Remove prefix from columns
         # We only remove the prefix if columns would have different names.
         if internalJoinType == JoinType.kRightSemiProject:
             newNames = {v: k for k, v in rhsKeys.items()}
             newNames |= {v: k for k, v in rhsNames.items()}
         else:
-            newNames = {v: k for k, v in lhsKeys.items()}
+            newNames = {
+                v: k
+                for k, v in (
+                    rhsKeys if internalJoinType == JoinType.kRight else lhsKeys
+                ).items()
+            }
             newNames |= {v: k for k, v in lhsNames.items() if k not in rhsNames}
             if internalJoinType not in (
                 JoinType.kLeftSemiProject,

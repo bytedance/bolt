@@ -35,7 +35,7 @@ def ensureRayInitialized():
             logging_level="ERROR",
             namespace="boltml",
             runtime_env={
-                "py_modules": [str(Path(__file__).resolve().parents[1])],
+                "py_modules": [str(Path(__file__).resolve().parents[2])],
                 "env_vars": envVars,
             },
         )
@@ -251,12 +251,15 @@ class _ExchangeRegistryActor:
         self, ownerId: str, executionId: str, stageId: str, exchangeId: str
     ):
         key = (executionId, stageId, exchangeId)
+        pending = self._pendingExchanges.get(key)
+        entry = self._descriptors.get(key)
+        if pending is not None and pending[0] != ownerId:
+            return False
+        if entry is not None and entry[0] != ownerId:
+            return False
         self._pendingExchanges.pop(key, None)
         self._pendingTimestamps.pop(key, None)
-        entry = self._descriptors.get(key)
         if entry is None:
-            return False
-        if entry[0] != ownerId:
             return False
         self._descriptors.pop(key, None)
         self._descriptorTimestamps.pop(key, None)
@@ -309,6 +312,7 @@ class _ExchangeRegistryActor:
 # and matches Ray's documented "don't re-acquire detached actor handles
 # via ``get_actor`` from the creating process" guidance.
 _REGISTRY_HANDLE = None
+_REGISTRY_SESSION = None
 
 
 def getExchangeRegistry():
@@ -316,7 +320,8 @@ def getExchangeRegistry():
     registry actor. Idempotent: the first call creates (or attaches to)
     the detached actor and caches its handle; subsequent calls return
     the cached handle so every caller shares the registration that Ray
-    tracks reliably.
+    tracks reliably. The cache is scoped to the current Ray job and node;
+    job identifiers alone can repeat after connecting to a different cluster.
 
     Concurrency note: this is intentionally not thread-locked. The
     boltml driver-side code paths that reach this function are
@@ -326,10 +331,14 @@ def getExchangeRegistry():
     body in a ``threading.Lock`` — there is no shared-mutable-state
     invariant at risk beyond the cache slot itself.
     """
-    global _REGISTRY_HANDLE
+    global _REGISTRY_HANDLE, _REGISTRY_SESSION
     ensureRayInitialized()
-    if _REGISTRY_HANDLE is not None:
+    context = ray.get_runtime_context()
+    session = (context.get_job_id(), context.get_node_id())
+    if _REGISTRY_HANDLE is not None and _REGISTRY_SESSION == session:
         return _REGISTRY_HANDLE
+    _REGISTRY_HANDLE = None
+    _REGISTRY_SESSION = session
     try:
         _REGISTRY_HANDLE = ray.get_actor("boltml_exchange_registry", namespace="boltml")
         # We just attached to an existing detached actor from a previous
@@ -355,5 +364,6 @@ def getExchangeRegistry():
             name="boltml_exchange_registry",
             namespace="boltml",
             lifetime="detached",
+            get_if_exists=True,
         ).remote()
     return _REGISTRY_HANDLE

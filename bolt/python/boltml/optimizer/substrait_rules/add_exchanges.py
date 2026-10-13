@@ -280,6 +280,11 @@ def _make_exchange(
 
 def _hash_alias(key_names: List[str]) -> str:
     """Render the legacy ``hash(col,col)`` scattering string."""
+    if any(not name or "," in name or name != name.strip() for name in key_names):
+        raise ValueError(
+            "Hash exchange keys must be nonempty and cannot contain commas "
+            "or leading/trailing whitespace; rename the columns before execution"
+        )
     return f"hash({','.join(key_names)})"
 
 

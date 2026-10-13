@@ -260,6 +260,36 @@ class RewriteLimitsRuleTest(unittest.TestCase):
         self.assertEqual(root.fetch.offset_expr.literal.i64, 4)
         self.assertEqual(root.fetch.count_expr.literal.i64, 2)
 
+    def test_empty_merge_preserves_outer_output_metadata(self) -> None:
+        for count in (1, None):
+            with self.subTest(count=count):
+                read = _read_rel(["a", "b"])
+                inner = _fetch_rel(read, count=2, offset=1)
+                outer = _fetch_rel(inner, count=count, offset=2)
+                outer.fetch.common.emit.output_mapping.extend([1, 0])
+                outer.fetch.common.hint.output_names.extend(["b", "a"])
+                original = _wrap_plan(outer)
+                before = original.SerializeToString()
+                out = RewriteLimits().apply(original)
+                root = get_root_rel(out)
+                self.assertEqual(get_rel_kind(root), "filter")
+                self.assertEqual(root.filter.common, outer.fetch.common)
+                self.assertEqual(root.filter.input, read)
+                self.assertEqual(
+                    root.filter.condition,
+                    algebra.Expression(
+                        literal=algebra.Expression.Literal(boolean=False)
+                    ),
+                )
+                self.assertEqual(original.SerializeToString(), before)
+                self.assertEqual(RewriteLimits().apply(out), out)
+
+    def test_does_not_merge_across_inner_emit(self) -> None:
+        inner = _fetch_rel(_read_rel(["a", "b"]), count=2, offset=0)
+        inner.fetch.common.emit.output_mapping.append(1)
+        original = _wrap_plan(_fetch_rel(inner, count=1, offset=2))
+        self.assertEqual(RewriteLimits().apply(original), original)
+
     def test_unlimited_inner_takes_outer_count(self) -> None:
         # Inner unlimited, outer count=5 offset=0 → merged count=5 offset=0.
         read = _read_rel(["a"])

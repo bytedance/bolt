@@ -17,6 +17,13 @@ from typing import Optional, Union
 from pybolt import (
     BooleanType,
     BoltType,
+    TinyintType,
+    SmallintType,
+    IntegerType,
+    BigintType,
+    HugeintType,
+    RealType,
+    DoubleType,
 )
 
 from ..details import _isArithmeticType_
@@ -34,18 +41,33 @@ def binopCheck(fn):
         if not isinstance(rhs, Expression):
             rhs = NumProjectExpression(rhs)
 
-        # Implicit cast to matching types. This is done to match bolt behavior.
-        # Without this, the fuzzer test comparing exact plan match between bolt
-        # and boltml will fail.
-        # Bolt expression parser does implicit type casting in the following
-        # situation: parsing the expression: `multiply("c_real", 6.38)`.
-        # `6.38` literal is mapped as a `DOUBLE` type. Bolt then chooses to
-        # promote `c_real` column from `REAL` type to `DOUBLE` type with an
-        # implicit cast from the right to the left. The cast is added to the
-        # expression so that it matches the registered
-        # `multiply(DOUBLE, DOUBLE)` signature.
+        # Promote both operands to a common numeric type; operand order
+        # must not narrow a floating-point column to an integer literal.
         if lhs.dtype != rhs.dtype:
-            lhs = CastExpression(lhs, rhs.dtype)
+            numericTypes = (
+                TinyintType,
+                SmallintType,
+                IntegerType,
+                BigintType,
+                HugeintType,
+                RealType,
+                DoubleType,
+            )
+            ranks = [
+                next(
+                    (i for i, t in enumerate(numericTypes) if type(e.dtype) is t), None
+                )
+                for e in (lhs, rhs)
+            ]
+            if None in ranks:
+                raise TypeError(
+                    f"Cannot combine numeric types {lhs.dtype} and {rhs.dtype}"
+                )
+            target = numericTypes[max(ranks)]()
+            if lhs.dtype != target:
+                lhs = NumProjectExpression(CastExpression(lhs, target))
+            if rhs.dtype != target:
+                rhs = NumProjectExpression(CastExpression(rhs, target))
         if (
             lhs.dataframe is not None
             and rhs.dataframe is not None
@@ -73,8 +95,13 @@ class NumProjectExpression(ProjectExpression):
         super().__init__(arg)
 
     @binopCheck
-    def __arith(self, rhs: Union[Expression, int, float], name: str) -> "Self":  # noqa: F821
-        expr = FunctionExpression(name, self.dtype, [self, rhs], self.dataframe)
+    def __arith(
+        self, rhs: Union[Expression, int, float], name: str, reverse: bool = False
+    ) -> "Self":  # noqa: F821
+        arguments = [self, rhs]
+        if reverse:
+            arguments.reverse()
+        expr = FunctionExpression(name, self.dtype, arguments, self.dataframe)
         return NumProjectExpression(expr)
 
     def __add__(self, rhs: Union[Expression, int, float]) -> "Self":  # noqa: F821
@@ -87,7 +114,13 @@ class NumProjectExpression(ProjectExpression):
         return self.__arith(rhs, "multiply")
 
     def __truediv__(self, rhs: Union["NumProjectExpression", int, float]) -> "Self":  # noqa: F821
-        return self.__arith(rhs, "divide")
+        # Choose DOUBLE before promotion so BIGINT / REAL never rounds via REAL.
+        floating = NumProjectExpression(CastExpression(self, DoubleType()))
+        return floating.__arith(rhs, "divide")
+
+    def __rtruediv__(self, lhs):
+        floating = NumProjectExpression(CastExpression(self, DoubleType()))
+        return floating.__arith(lhs, "divide", True)
 
     # ``__radd__`` and ``__rmul__`` can delegate to their forward forms
     # because ``+`` and ``*`` are commutative — ``lhs + self`` produces

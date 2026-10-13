@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
+
 from pybolt import BoltType, RowType
 
 from .register import UserFunctionRegister
 
 functionRegister = UserFunctionRegister()
+atexit.register(functionRegister.clear)
 
 
 def registerDataframeFunction(func, outputType: BoltType):

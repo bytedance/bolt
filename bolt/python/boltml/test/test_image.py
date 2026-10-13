@@ -180,3 +180,23 @@ class TestBoltImageUDF(unittest.TestCase):
             self.assertEqual(df[4, "result"], None)
 
         run(self)
+
+
+class DownloadImageFailureTests(unittest.TestCase):
+    def testNetworkReadErrorsBecomeNull(self):
+        import http.client
+        from boltml.function.image import downloadImage
+
+        for error in (
+            TimeoutError(),
+            ConnectionResetError(),
+            http.client.IncompleteRead(b""),
+        ):
+            with self.subTest(error=type(error).__name__):
+                with patch("urllib.request.urlopen", side_effect=error):
+                    self.assertIsNone(downloadImage("https://example.test/image.png"))
+
+    def testMalformedUrlBecomesNull(self):
+        from boltml.function.image import downloadImage
+
+        self.assertIsNone(downloadImage("not a URL"))

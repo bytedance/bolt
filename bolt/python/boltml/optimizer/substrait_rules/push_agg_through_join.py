@@ -30,10 +30,12 @@ it rewrites to:
       Project*[exprs]
         HashJoin[J](
           Aggregate[K_L ∪ J_L, partial(M_L)](L),    (kPartial)
-          Aggregate[K_R ∪ J_R, partial(M_R)](R),    (kPartial)
+          R,                                    (unchanged)
         )
 
-so the join sees fewer rows when the LHS / RHS contains a high-multiplicity
+The symmetric RHS-only rewrite is also supported. Both sides may not be
+collapsed together: that would lose their original join multiplicities.
+The join sees fewer rows when its aggregated side contains a high-multiplicity
 "fact" relationship that the group-by collapses anyway.
 
 Why decomposable phases work in Bolt
@@ -53,8 +55,7 @@ Decomposable function allowlist
 
 Only ``sum``, ``count``, ``min``, ``max`` are pushed through. These are the
 classical decomposable aggregates whose intermediate type equals the
-result type (in Bolt's TPC-H coverage where all numerics are float64 or
-int64 — see ``bolt/functions/prestosql/aggregates/SumAggregate.cpp``,
+result type (sums are restricted to float64 or int64 — see ``bolt/functions/prestosql/aggregates/SumAggregate.cpp``,
 ``CountAggregate.cpp``). This lets us keep the partial measure's
 ``output_type`` byte-equal to the original (no per-function intermediate
 type lookup), which would otherwise require importing the Bolt function
@@ -73,6 +74,9 @@ reach are bucketed per-side via the project chain that translates them
 back to the join's ``l_``/``r_``-prefixed output. A measure that touches
 columns from BOTH sides (e.g. ``sum(L.a * R.b)``) cannot be pushed —
 the partial agg on either side wouldn't have all the inputs. Skipped.
+Measures on both sides are also rejected. Computed arguments are not moved
+below joins without purity and totality metadata; only fields and literals
+are accepted.
 
 Other guards
 ------------
@@ -100,11 +104,6 @@ unlikely to pay off:
   (TPC-H Q18's ``HAVING SUM(l_quantity) > 300`` lineitem-side pattern).
   Pushing on top of an existing partial-agg is double-aggregation
   with no row reduction.
-* All measure args are direct field-refs (no scalar computation).
-  Pushing those just adds a partial-agg step; the real win of this
-  rewrite is moving the per-row arithmetic of ``sum(a*b)``-style
-  expressions below the join so it runs on the side's input rather
-  than the join's typically-larger output.
 
 Output schema preservation
 --------------------------
@@ -231,6 +230,13 @@ def _build_extension_lookup(p: plan.Plan) -> Dict[int, str]:
     return out
 
 
+def _has_compatible_partial_type(measure, name: str) -> bool:
+    """Only split sums whose accumulator is also their declared output type."""
+    if name == "sum":
+        return measure.measure.output_type.WhichOneof("kind") in ("i64", "fp64")
+    return True
+
+
 def _key_field_index(
     ref: algebra.Expression.FieldReference,
 ) -> Optional[int]:
@@ -305,6 +311,8 @@ def _try_push(
             return None
         nm = _agg_function_uri_name(m, ext_lookup)
         if nm is None or nm not in _DECOMPOSABLE_AGG_NAMES:
+            return None
+        if not _has_compatible_partial_type(m, nm):
             return None
         # Reject distinct (the Substrait `invocation` field would set
         # AGGREGATION_INVOCATION_DISTINCT).
@@ -488,6 +496,11 @@ def _try_push(
             sub = _substitute_through_project(arg.value)
             if sub is None:
                 return None
+            # Moving a computation below a join evaluates it on rows the
+            # join may discard, and changes UDF invocation counts. Without
+            # purity/totality metadata only fields and literals are safe.
+            if not is_direct_field_ref(sub) and sub.WhichOneof("rex_type") != "literal":
+                return None
             sub_args.append(sub)
             for idx in collect_field_indices(sub):
                 if not (0 <= idx < len(join_idx_to_side)):
@@ -551,6 +564,11 @@ def _try_push(
         else:
             rhs_measure_indices.append(i)
 
+    # Collapsing both inputs loses each opposite side's row multiplicity.
+    # A one-sided partial still joins against every original opposite row.
+    if lhs_measure_indices and rhs_measure_indices:
+        return None
+
     # Build LHS partial agg.
     # Field refs in measure args address LHS columns in the join's
     # left-side coordinate system already (we established this above by
@@ -602,27 +620,6 @@ def _try_push(
     if lhs_measure_indices and _side_skips_due_to_inner_agg(hj.left):
         return None
     if rhs_measure_indices and _side_skips_due_to_inner_agg(hj.right):
-        return None
-
-    # Heuristic: only push down a measure whose argument is a COMPUTED
-    # expression (not just a direct field-ref). Pushing a computed
-    # expression below the join saves the cost of evaluating it on the
-    # join's output — usually more rows than the side's input. Pushing
-    # a direct-field measure (``Sum(l_quantity)``) doesn't save
-    # arithmetic; it just adds a partial-agg step whose row reduction
-    # may be undone if a downstream join filters into a small set
-    # (e.g. TPC-H Q18: a HAVING-style pre-aggregate is filtered down to
-    # ~600 orderkeys before the second lineitem scan, so pushing the
-    # partial sum on full 6M lineitem before the join is pure overhead).
-    has_computed_measure_arg = False
-    for sub_args in measure_arg_exprs:
-        for arg in sub_args:
-            if not is_direct_field_ref(arg):
-                has_computed_measure_arg = True
-                break
-        if has_computed_measure_arg:
-            break
-    if not has_computed_measure_arg:
         return None
 
     if lhs_measure_indices:

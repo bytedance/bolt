@@ -153,6 +153,7 @@ from ...substrait.rel import rel_output_names as _rel_output_names
 from .push_agg_through_join import (
     _DECOMPOSABLE_AGG_NAMES,
     _agg_function_uri_name,
+    _has_compatible_partial_type,
     _build_extension_lookup,
     _hint_output_names,
     _make_field_ref,
@@ -213,6 +214,8 @@ def _try_split(
             return None
         nm = _agg_function_uri_name(m, ext_lookup)
         if nm is None or nm not in _DECOMPOSABLE_AGG_NAMES:
+            return None
+        if not _has_compatible_partial_type(m, nm):
             return None
         if (
             m.measure.invocation

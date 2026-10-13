@@ -99,21 +99,28 @@ class BoltPlanBuilder(LogicalPlanBuilder):
         """
         # Local import to avoid a builder.bolt → builder.substrait cycle
         # at module-import time.
-        from .substrait import SubstraitPlanBuilderFactory
-
-        return (
-            SubstraitPlanBuilderFactory()
-            .fromLogicalPlan(self.logicalPlan())
-            .toSubstraitPlan()
-        )
+        return self.substraitPlan().toSubstraitPlan()
 
     def substraitPlan(self) -> "SubstraitPlanBuilder":  # noqa: F821
         """Lower the captured logical plan to a ``SubstraitPlanBuilder`` by
         replaying the ``LogicalOp`` log — the same recovery as
         ``toSubstraitPlan()`` but returning the builder, not the proto."""
-        from .substrait import SubstraitPlanBuilderFactory
+        from .substrait import SubstraitPlanBuilderFactory, plan_is_substrait_lowerable
 
+        if not plan_is_substrait_lowerable(self.logicalPlan()):
+            raise NotImplementedError(
+                "This plan requires native local execution: partitioned Hive reads "
+                "or types/literals cannot be represented losslessly in Substrait. "
+                "Ray execution is not supported for this plan."
+            )
         return SubstraitPlanBuilderFactory().fromLogicalPlan(self.logicalPlan())
+
+    def optimize(self):
+        from .substrait import plan_is_substrait_lowerable
+
+        if not plan_is_substrait_lowerable(self.logicalPlan()):
+            return self
+        return super().optimize()
 
     def project(
         self,

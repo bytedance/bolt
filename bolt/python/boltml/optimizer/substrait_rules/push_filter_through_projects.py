@@ -20,7 +20,11 @@ from typing import Optional
 
 from substrait.proto import algebra, plan
 
-from ._expression import collect_field_indices, substitute_field_refs
+from ._expression import (
+    collect_field_indices,
+    is_direct_field_ref,
+    substitute_field_refs,
+)
 from .base import (
     Rule,
     get_rel_kind,
@@ -60,6 +64,14 @@ def _push_one(rel: algebra.Rel) -> Optional[algebra.Rel]:
     if get_rel_kind(filt.input) != "project":
         return None
     proj = filt.input.project
+
+    # Pushing across computed columns can duplicate UDF calls, or suppress
+    # computations on filtered-out rows. No expression purity metadata exists.
+    if any(
+        not is_direct_field_ref(expr) and expr.WhichOneof("rex_type") != "literal"
+        for expr in proj.expressions
+    ):
+        return None
 
     proj_width = len(proj.expressions)
     valid_range = range(proj_width)

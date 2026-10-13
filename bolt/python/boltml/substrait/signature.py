@@ -20,6 +20,7 @@ from pybolt import (
     BooleanType,
     BoltType,
     DoubleType,
+    DateType,
     IntegerType,
     LongDecimalType,
     MapType,
@@ -34,7 +35,7 @@ from pybolt import (
     VarcharType,
 )
 
-from ..expression import FunctionExpression
+from ..expression import FunctionExpression, ProjectExpression
 
 
 def substraitSignature(arg: Union[BoltType, FunctionExpression]) -> str:
@@ -50,6 +51,8 @@ def substraitSignature(arg: Union[BoltType, FunctionExpression]) -> str:
         from .extensions import extensionRegister
 
         return f"u!{extensionRegister[arg].extension_type.name}"
+    if isinstance(arg, DateType):
+        return "date"
     if isinstance(arg, IntegerType):
         return "i32"
     if isinstance(arg, (LongDecimalType, ShortDecimalType)):
@@ -66,7 +69,7 @@ def substraitSignature(arg: Union[BoltType, FunctionExpression]) -> str:
     if isinstance(arg, SmallintType):
         return "i16"
     if isinstance(arg, TimestampType):
-        return "pts"
+        return "ts"
     if isinstance(arg, TinyintType):
         return "i8"
     if isinstance(arg, VarbinaryType):
@@ -74,7 +77,15 @@ def substraitSignature(arg: Union[BoltType, FunctionExpression]) -> str:
     if isinstance(arg, VarcharType):
         return "str"
     if isinstance(arg, FunctionExpression):
-        args = "_".join([substraitSignature(expr.dtype) for expr in arg.arguments])
+        # ColumnView.dtype follows its live DataFrame, but a recorded function
+        # argument refers to the captured input expression, even after an
+        # aggregate replaces the column with its differently typed result.
+        types = []
+        for expr in arg.arguments:
+            while isinstance(expr, ProjectExpression):
+                expr = expr.inner()
+            types.append(substraitSignature(expr.dtype))
+        args = "_".join(types)
         if len(args) == 0:
             return arg.name
         return f"{arg.name}:{args}"

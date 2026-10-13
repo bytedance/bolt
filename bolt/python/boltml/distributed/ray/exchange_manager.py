@@ -518,7 +518,7 @@ class FileExchangeManager(ExchangeManager):
         # Best-effort: if Ray runtime context is unavailable we
         # leave the field None and the consumer-side check no-ops
         # (single-node / unit-test cases).
-        if self.__sharedFilesystem:
+        if self.__sharedFilesystem or not ray.is_initialized():
             producerNodeId = None
         else:
             try:

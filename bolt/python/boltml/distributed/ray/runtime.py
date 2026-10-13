@@ -27,7 +27,7 @@ import ray
 from ...dataframe import DataFrame
 from ...logging import boltmlDebugEnabled, boltmlDebugLog, boltmlTraceLog
 from .runtime_summary import RuntimeExecutionSummary
-from .exchange_manager import AdaptiveExchangeManager
+from .exchange_manager import AdaptiveExchangeManager, FileExchangeManager
 from .scheduler import RayLeafScheduler
 from .task_spec import StageTaskSpec
 from .task_spec import StageTaskResult
@@ -744,7 +744,7 @@ def _substrait_partition_parallel_reason(taskSpec: StageTaskSpec) -> str | None:
         rhs_join_keys = _join_key_names(keys, "right", rhs_input_names)
         if lhs_join_keys is None or rhs_join_keys is None:
             return "cannot_prove_join_key_equivalence"
-        if set(lhs_keys) != set(lhs_join_keys) or set(rhs_keys) != set(rhs_join_keys):
+        if tuple(lhs_keys) != lhs_join_keys or tuple(rhs_keys) != rhs_join_keys:
             return "join_partitioning_key_mismatch"
         return None
     return "unsupported_task_kind"
@@ -780,72 +780,6 @@ def _join_key_names(
     return tuple(names)
 
 
-def _grouping_key_count_from_plan_bytes(plan_bytes: "bytes | None") -> int:
-    """Return the grouping-key count of the topmost grouped aggregate
-    in *plan_bytes*, or 0 if there isn't one.
-
-    Used by ``_merge_remote_results`` to decide whether the concatenated
-    partition outputs need a stable key-sort. Local kSerial hash
-    aggregate emits groups in insertion order; Ray hash-shuffle collects
-    each partition's final-aggregate output in partition-hash order, so
-    a plan-determined key-sort over the *gathered* result is the
-    minimal fix that:
-
-    * leaves the partition-parallel aggregate stage unchanged (no Sort
-      injected into the plan, so the dispatcher still spawns N final-
-      aggregate tasks rather than gathering to one);
-    * doesn't alter the dataframe's stored ``PlanBuilder`` (plan-equality
-      tests stay green);
-    * matches local-mode surface ordering so users see consistent
-      results regardless of executor.
-
-    Recognised shapes (matches ``substrait_rules.sort_grouped_aggregate
-    _output._find_grouped_aggregate``):
-
-    * top-level ``aggregate``;
-    * ``project(aggregate(...))`` (``DecomposeMeanBeforeExchange``'s
-      avg-rewrite).
-
-    Returns 0 for plans without a top-level grouped aggregate, plans
-    with computed (non-field-ref) grouping keys, or any parse failure.
-    Conservative: skip-not-crash keeps the runtime robust against
-    plan-shape evolution.
-    """
-    if not plan_bytes:
-        return 0
-    try:
-        from substrait.proto import plan as plan_pb2
-
-        plan = plan_pb2.Plan()
-        plan.ParseFromString(plan_bytes)
-        if not plan.relations:
-            return 0
-        root = plan.relations[0].root.input
-        kind = root.WhichOneof("rel_type")
-        if kind == "aggregate":
-            agg = root.aggregate
-        elif kind == "project" and root.project.HasField("input"):
-            inner = root.project.input
-            if inner.WhichOneof("rel_type") != "aggregate":
-                return 0
-            agg = inner.aggregate
-        else:
-            return 0
-        if not agg.grouping_expressions:
-            return 0
-        for ge in agg.grouping_expressions:
-            if not ge.HasField("selection"):
-                return 0
-            sel = ge.selection
-            if not sel.HasField("direct_reference"):
-                return 0
-            if not sel.direct_reference.HasField("struct_field"):
-                return 0
-        return len(agg.grouping_expressions)
-    except Exception:  # noqa: BLE001
-        return 0
-
-
 def _merge_remote_results(remoteResults, taskSpec: "StageTaskSpec | None" = None):
     if len(remoteResults) == 1:
         return _dataframe_from_typed_arrow(remoteResults[0].table)._data_
@@ -857,19 +791,9 @@ def _merge_remote_results(remoteResults, taskSpec: "StageTaskSpec | None" = None
     first_metadata = remoteResults[0].table.schema.metadata
     if first_metadata is not None:
         concatenated = concatenated.replace_schema_metadata(first_metadata)
-    # Driver-side key-sort for grouped aggregate consumer stages.
-    # See ``_grouping_key_count_from_plan_bytes`` for why we sort here
-    # rather than in the substrait physical pipeline (would gather all
-    # partitions to one task and destroy partition-parallelism, per
-    # ``testRayExecutorRunsPartitionParallelRemoteGroupedConsumer``).
-    n_keys = (
-        _grouping_key_count_from_plan_bytes(taskSpec.substraitPlanBytes)
-        if taskSpec is not None
-        else 0
-    )
-    if n_keys > 0 and concatenated.num_rows > 1:
-        sort_keys = [(concatenated.column_names[i], "ascending") for i in range(n_keys)]
-        concatenated = concatenated.sort_by(sort_keys)
+    # Aggregation has no ordering guarantee. A presentation sort here cannot
+    # infer surviving keys after projection, and Arrow cannot sort every Bolt
+    # grouping type (for example ARRAY). Explicit SortRel supplies ordering.
     return _dataframe_from_typed_arrow(concatenated)._data_
 
 
@@ -1364,6 +1288,7 @@ class RayRuntime:
         from .remote_worker import (
             _plan_contains_aggregate,
             _plan_contains_join,
+            _plan_contains_global_order,
             _plan_has_shardable_input,
             _plan_has_short_split_input,
         )
@@ -1372,6 +1297,10 @@ class RayRuntime:
         if shardCount > 1 and taskSpec.substraitPlanBytes:
             _sp = _plan.Plan()
             _sp.ParseFromString(taskSpec.substraitPlanBytes)
+            if _plan_contains_global_order(_sp):
+                return self._runLeafStageRemotely(
+                    taskSpec, outputPlaceholders, publishConfig
+                )
             if _plan_contains_aggregate(_sp):
                 boltmlDebugLog(
                     "runtime",
@@ -1466,7 +1395,9 @@ class RayRuntime:
                 leafShardCount=shardCount,
             )
             submitted.append(
-                self._scheduler.submit(shardSpec, outputPlaceholders, publishConfig)
+                self._scheduler.submit(
+                    shardSpec, outputPlaceholders, publishConfig, forceTaskMode=True
+                )
             )
         remoteResults, _waitError = self._scheduler.waitWithPartialResults(submitted)
         if _waitError is not None:
@@ -1773,6 +1704,16 @@ class RayRuntime:
         if (
             exchangeManager is None
             and stageInputs
+            and self.executionMode == RayExecutionMode.STAGED_LOCAL
+        ):
+            ownedExchangeTmpDir = tempfile.TemporaryDirectory(
+                prefix="boltml-staged-local-"
+            )
+            exchangeManager = FileExchangeManager(ownedExchangeTmpDir.name)
+
+        if (
+            exchangeManager is None
+            and stageInputs
             and self.executionMode == RayExecutionMode.REMOTE_LEAF
         ):
             # Allow env-var override of the exchange transport policy
@@ -1815,10 +1756,8 @@ class RayRuntime:
             # transport on >1-node clusters and fall back to object.
             exchange_root = os.environ.get("BOLTML_EXCHANGE_ROOT", "").strip()
             if transport == "file" and not exchange_root:
-                try:
-                    alive_node_count = sum(1 for n in ray.nodes() if n.get("Alive"))
-                except Exception:  # noqa: BLE001
-                    alive_node_count = 1
+                self._scheduler.ensureInitialized()
+                alive_node_count = sum(1 for n in ray.nodes() if n.get("Alive"))
                 if alive_node_count > 1:
                     boltmlDebugLog(
                         "runtime",

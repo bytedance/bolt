@@ -165,7 +165,7 @@ def _isConstantType_(t) -> bool:
         dtype = t
     else:
         dtype = type(t)
-    return dtype in [bool, int, float, str]
+    return dtype in [bool, int, float, str, bytes]
 
 
 def _isArithmeticType_(t) -> bool:

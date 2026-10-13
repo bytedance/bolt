@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import reduce
@@ -23,6 +24,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import pypaimon
 from pypaimon.schema.data_types import DataField
+from pypaimon.read.scanner.full_starting_scanner import FullStartingScanner
+from pypaimon.table.file_store_table import FileStoreTable
 
 from pybolt import (
     FileFormat,
@@ -117,7 +120,8 @@ class PaimonOptions:
         default_factory=lambda: PaimonTimestamp.LATEST
     )
 
-    # Maximum timestamp for the last split records.
+    # Inclusive maximum timestamp for the last split records. Without an end,
+    # LATEST reads the full table; other starts read that snapshot's delta.
     endTimestampMs: Optional[PaimonTimestamp] = None
 
     # The merge engine needed to read files.
@@ -135,6 +139,7 @@ class PaimonSchema:
     primaryKeys: list[str]
     partitionKeys: list[str]
     fileFormat: str
+    options: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     def fromJson(jsonSchema: dict[str, Any]) -> "PaimonSchema":
@@ -148,7 +153,8 @@ class PaimonSchema:
             fields=[DataField.from_dict(f) for f in jsonSchema["fields"]],
             primaryKeys=jsonSchema["primaryKeys"],
             partitionKeys=jsonSchema["partitionKeys"],
-            fileFormat=jsonSchema["options"]["file.format"],
+            fileFormat=jsonSchema.get("options", {}).get("file.format", "parquet"),
+            options=dict(jsonSchema.get("options", {})),
         )
 
     @staticmethod
@@ -204,50 +210,56 @@ class PaimonSnapshot:
         snapshotId: Optional[int],
         fs: FileSystem,
     ) -> "PaimonSnapshot":
-        # This function is largely inspired from
-        # pypaimon/snapshot/snapshot_manager.SnapshotManager.earlier_or_equal_time_millis.
-        # It uses a recursive dichotic approach to find the closest `snapshotId`
-        # before `timestampMs` with a special case handling EARLIEST and LATEST
-        # timestamps.
-
         if snapshotId is not None:
             snapshotFile = uri + f"/snapshot/snapshot-{snapshotId}"
             snapshotContent = fs.read(snapshotFile)
             jsonSnapshot = json.loads(snapshotContent)
             return PaimonSnapshot.fromJson(jsonSnapshot)
-        elif timestampMs in (PaimonTimestamp.EARLIEST, PaimonTimestamp.LATEST):
+        if timestampMs in (PaimonTimestamp.EARLIEST, PaimonTimestamp.LATEST):
             snapshotFile = uri + f"/snapshot/{timestampMs.value}"
-            # pypaimon doesn't always create snapshot/EARLIEST file.
-            # sometimes it is snapshot/timestamp-1.
-            if timestampMs is PaimonTimestamp.EARLIEST and not fs.exists(snapshotFile):
-                return PaimonSnapshot.__fromTableUri(uri, None, 1, fs)
-            snapshotId = int(fs.read(snapshotFile).strip())
-            return PaimonSnapshot.__fromTableUri(uri, None, snapshotId, fs)
+            if fs.exists(snapshotFile):
+                snapshotId = int(fs.read(snapshotFile).strip())
+                if fs.exists(uri + f"/snapshot/snapshot-{snapshotId}"):
+                    return PaimonSnapshot.__fromTableUri(uri, None, snapshotId, fs)
         if timestampMs is None:
             raise ValueError(f"Invalid paimon timestamp: {timestampMs}.")
 
+        # Expiration may remove snapshot 1 (and older hints). Search the actual
+        # retained IDs, including tables whose writer does not create EARLIEST.
+        snapshotIds = sorted(
+            int(match[1])
+            for entry in fs.list(uri + "/snapshot")
+            if (match := re.fullmatch(r"snapshot-(\d+)", os.path.basename(entry)))
+        )
+        if not snapshotIds:
+            raise ValueError(f"Paimon table '{uri}' has no retained snapshots")
+        if timestampMs in (PaimonTimestamp.EARLIEST, PaimonTimestamp.LATEST):
+            snapshotId = (
+                snapshotIds[0]
+                if timestampMs == PaimonTimestamp.EARLIEST
+                else snapshotIds[-1]
+            )
+            return PaimonSnapshot.__fromTableUri(uri, None, snapshotId, fs)
         if isinstance(timestampMs.value, int):
-            low = 1
-            high = PaimonSnapshot.__fromTableUri(
-                uri, PaimonTimestamp.LATEST, None, fs=fs
-            ).id
+            low = 0
+            high = len(snapshotIds) - 1
             best: Optional[PaimonSnapshot] = None
             while low <= high:
-                snapshotId = low + (high - low) // 2
-                snapshot = PaimonSnapshot.__fromTableUri(uri, None, snapshotId, fs)
+                middle = low + (high - low) // 2
+                snapshot = PaimonSnapshot.__fromTableUri(
+                    uri, None, snapshotIds[middle], fs
+                )
                 commitTime = snapshot.timeMs
                 if commitTime > timestampMs.value:
-                    high = snapshotId - 1
-                elif commitTime < timestampMs.value:
-                    best = snapshot
-                    low = snapshotId + 1
+                    high = middle - 1
                 else:
-                    return snapshot
-            return (
-                best
-                if best is not None
-                else PaimonSnapshot.__fromTableUri(uri, None, 1, fs)
-            )
+                    best = snapshot
+                    low = middle + 1
+            if best is None:
+                raise ValueError(
+                    f"No retained Paimon snapshot at or before {timestampMs.value}"
+                )
+            return best
 
         raise ValueError(f"Invalid paimon timestamp: {timestampMs}.")
 
@@ -310,7 +322,33 @@ def makePaimonPredicate(
     if predicate.op is BooleanOp.LT:
         return predicate_builder.less_than(predicate.lhs.expr(), rhs)
     if predicate.op is BooleanOp.NE:
-        return predicate_builder.no_equal(predicate.lhs.expr(), rhs)
+        return predicate_builder.not_equal(predicate.lhs.expr(), rhs)
+
+
+class _SnapshotScanner(FullStartingScanner):
+    """Pin the SDK's full scan to the snapshot used to resolve the schema."""
+
+    def __init__(self, table, predicate, snapshotId):
+        super().__init__(table, predicate, None)
+        self.snapshotId = snapshotId
+
+    def plan_files(self):
+        snapshot = self.snapshot_manager.get_snapshot_by_id(self.snapshotId)
+        if snapshot is None:
+            raise ValueError(
+                f"Paimon snapshot {self.snapshotId} is no longer available"
+            )
+        return self.read_manifest_entries(self.manifest_list_manager.read_all(snapshot))
+
+
+def _restoreFileUri(tableUri: str, filePath: str) -> str:
+    """Restore the scheme removed by pypaimon without repeating its authority."""
+    table = urlsplit(tableUri)
+    if not table.scheme or "://" in filePath:
+        return filePath
+    if table.netloc and filePath.lstrip("/").startswith(table.netloc + "/"):
+        return table.scheme + "://" + filePath.lstrip("/")
+    return urlunsplit((table.scheme, table.netloc, "/" + filePath.lstrip("/"), "", ""))
 
 
 class PaimonTable(CatalogTable):
@@ -321,43 +359,48 @@ class PaimonTable(CatalogTable):
     def __init__(self, tableUri: str, options: PaimonOptions = PaimonOptions()):
         self.__uri: str = tableUri
         self.__options = options
-        self.__snapshots: dict[PaimonTimestamp, PaimonSnapshot] = {}
-        self.__schemas: dict[PaimonTimestamp, PaimonSchema] = {}
+        self.__schemas: dict[int, PaimonSchema] = {}
 
     def __paimonSnapshot(
         self,
         startTimestampMs: PaimonTimestamp,
-    ) -> PaimonSnapshot:
+    ) -> Optional[PaimonSnapshot]:
         """
         Get the snapshot of this table for a specific timestamp.
         """
-        try:
-            return self.__snapshots[startTimestampMs]
-        except KeyError:
-            snapshot = PaimonSnapshot.fromTableUri(
-                self.__uri,
-                startTimestampMs,
-            )
-            self.__snapshots[startTimestampMs] = snapshot
-            return snapshot
+        fs = FileSystem.get(self.__uri)
+        snapshotDir = self.__uri + "/snapshot"
+        if not fs.exists(snapshotDir):
+            return None
+        if not fs.exists(snapshotDir + "/LATEST") and not any(
+            re.fullmatch(r"snapshot-\d+", os.path.basename(path))
+            for path in fs.list(snapshotDir)
+        ):
+            return None
+        return PaimonSnapshot.fromTableUri(self.__uri, startTimestampMs)
 
     def __paimonSchema(
         self,
-        startTimestampMs: PaimonTimestamp,
+        snapshot: Optional[PaimonSnapshot],
     ) -> PaimonSchema:
         """
         Get the schema of this table for a specific timestamp.
         """
+        schemaId = (
+            snapshot.schemaId
+            if snapshot is not None
+            else self.__paimonTable().table_schema.id
+        )
         try:
-            return self.__schemas[startTimestampMs]
+            return self.__schemas[schemaId]
         except KeyError:
-            schema = PaimonSchema.fromTableUri(
-                self.__uri, self.__paimonSnapshot(startTimestampMs).schemaId
-            )
-            self.__schemas[startTimestampMs] = schema
+            schema = PaimonSchema.fromTableUri(self.__uri, schemaId)
+            self.__schemas[schemaId] = schema
             return schema
 
-    def __paimonTable(self) -> pypaimon.table.table.Table:
+    def __paimonTable(
+        self, schemaId: Optional[int] = None
+    ) -> pypaimon.table.table.Table:
         """
         Get the pypaimon table object corresponding to this table.
         """
@@ -370,7 +413,16 @@ class PaimonTable(CatalogTable):
         catalog = pypaimon.CatalogFactory().create(
             {pypaimon.common.config.CatalogOptions.WAREHOUSE: warehousePath}
         )
-        return catalog.get_table(f"{dbName}.{tableName}")
+        table = catalog.get_table(f"{dbName}.{tableName}")
+        if schemaId is not None and table.table_schema.id != schemaId:
+            table = FileStoreTable(
+                table.file_io,
+                table.identifier,
+                table.table_path,
+                table.schema_manager.get_schema(schemaId),
+                table.catalog_environment,
+            )
+        return table
 
     def getPath(self) -> str:
         return self.__uri
@@ -379,23 +431,39 @@ class PaimonTable(CatalogTable):
         return self.__uri.split("/")[-1]
 
     def getPartitionKeys(self) -> list[str]:
-        return self.__paimonSchema(self.__options.startTimestampMs).partitionKeys
+        return self.__paimonSchema(
+            self.__paimonSnapshot(self.__options.startTimestampMs)
+        ).partitionKeys
 
     def getFileFormat(self) -> FileFormat:
         return hiveFileFormatToBoltFileFormat(
-            self.__paimonSchema(self.__options.startTimestampMs).fileFormat
+            self.__paimonSchema(
+                self.__paimonSnapshot(self.__options.startTimestampMs)
+            ).fileFormat
         )
 
     def getSchema(self) -> RowType:
+        return self.__rowType(
+            self.__paimonSchema(self.__paimonSnapshot(self.__options.startTimestampMs))
+        )
+
+    @staticmethod
+    def __rowType(schema: PaimonSchema) -> RowType:
         return RowType(
-            [
-                f.name
-                for f in self.__paimonSchema(self.__options.startTimestampMs).fields
-            ],
-            [
-                hiveTypeToBoltType(str(f.type))
-                for f in self.__paimonSchema(self.__options.startTimestampMs).fields
-            ],
+            [f.name for f in schema.fields],
+            [hiveTypeToBoltType(str(f.type)) for f in schema.fields],
+        )
+
+    def _readState(self, options):
+        if type(options) is not PaimonOptions:
+            raise TypeError("Expected PaimonOptions for a PaimonTable read")
+        snapshot = self.__paimonSnapshot(options.startTimestampMs)
+        schema = self.__paimonSchema(snapshot)
+        return (
+            self.__rowType(schema),
+            schema.partitionKeys,
+            self.__readerParameters(options, schema),
+            self.__readerSplits(options, snapshot, schema),
         )
 
     def getReaderParameters(self, options: PaimonOptions) -> dict:
@@ -411,14 +479,28 @@ class PaimonTable(CatalogTable):
                 f"Invalid option type '{type(options)}' for PaimonTable. "
                 "Expected PaimonOptions."
             )
-        schema = self.__paimonSchema(options.startTimestampMs)
+        schema = self.__paimonSchema(self.__paimonSnapshot(options.startTimestampMs))
+        return self.__readerParameters(options, schema)
+
+    @staticmethod
+    def __readerParameters(options, schema):
+        # Some Python writers persist numeric/bool option values. The native
+        # connector accepts the same string-valued configuration as Java Paimon.
         parameters = {
-            pypaimon.common.core_options.CoreOptions.FILE_FORMAT: schema.fileFormat,
+            key: str(value).lower() if isinstance(value, bool) else str(value)
+            for key, value in schema.options.items()
         }
+        parameters["file.format"] = schema.fileFormat
         if len(schema.primaryKeys) > 0:
             parameters["primary-key"] = ",".join(schema.primaryKeys)
         if options.mergeEngine is not None:
             parameters["merge-engine"] = options.mergeEngine.value
+        if parameters.get("merge-engine", "deduplicate") not in {
+            engine.value for engine in PaimonMergeEngine
+        }:
+            raise NotImplementedError(
+                f"Unsupported Paimon merge engine: {parameters['merge-engine']}"
+            )
         return parameters
 
     def getReaderSplits(self, options: PaimonOptions) -> list[CatalogSplit]:
@@ -429,9 +511,14 @@ class PaimonTable(CatalogTable):
                 "Expected PaimonOptions."
             )
 
-        schema = self.__paimonSchema(options.startTimestampMs)
+        snapshot = self.__paimonSnapshot(options.startTimestampMs)
+        return self.__readerSplits(options, snapshot, self.__paimonSchema(snapshot))
+
+    def __readerSplits(self, options, snapshot, schema):
+        if snapshot is None:
+            return []
         fileFormat = hiveFileFormatToBoltFileFormat(schema.fileFormat)
-        table = self.__paimonTable()
+        table = self.__paimonTable(schema.id)
         table.options |= {
             pypaimon.common.core_options.CoreOptions.SOURCE_SPLIT_TARGET_SIZE: str(
                 options.targetSplitSize
@@ -444,40 +531,40 @@ class PaimonTable(CatalogTable):
         )
         if (
             options.endTimestampMs is None
-            and options.startTimestampMs is PaimonTimestamp.LATEST
+            and options.startTimestampMs == PaimonTimestamp.LATEST
         ):
-            scanner = pypaimon.read.scanner.full_starting_scanner.FullStartingScanner(
-                table,
-                partFilter,
-                None,
-            )
+            scanner = _SnapshotScanner(table, partFilter, snapshot.id)
         else:
-            start = self.__paimonSnapshot(options.startTimestampMs).id - 1
+            start = snapshot.id - 1
             if options.endTimestampMs is None:
                 end = start + 1
             else:
-                end = self.__paimonSnapshot(options.endTimestampMs).id - 1
+                endSnapshot = self.__paimonSnapshot(options.endTimestampMs)
+                if endSnapshot.schemaId != schema.id:
+                    raise NotImplementedError(
+                        "Paimon incremental reads across schema changes are not supported"
+                    )
+                end = endSnapshot.id
+            if end < snapshot.id:
+                raise ValueError("Paimon end snapshot precedes the start snapshot")
             scanner = pypaimon.read.scanner.incremental_starting_scanner.IncrementalStartingScanner(
                 table, partFilter, None, start, end
             )
 
-        # The list of filenames returned by pypaimon does not contain the
-        # file system path prefix such as: 'hdfs://localhost:9000'.
-        # We need it for bolt paimon reader. We collect it from the
-        # table uri.
-        prefix = urlsplit(self.getPath())._replace(path="", query="", fragment="")
-        prefix = urlunsplit(prefix)
         paimonSplits = scanner.scan().splits()
 
         if len(paimonSplits) == 0:
             return []
         if len(schema.primaryKeys) == 0:
             return [
-                PaimonSplit([prefix + f], fileFormat)
+                PaimonSplit([_restoreFileUri(self.__uri, f)], fileFormat)
                 for f in reduce(add, [split.file_paths for split in paimonSplits])
             ]
         else:
             return [
-                PaimonSplit([prefix + f for f in split.file_paths], fileFormat)
+                PaimonSplit(
+                    [_restoreFileUri(self.__uri, f) for f in split.file_paths],
+                    fileFormat,
+                )
                 for split in paimonSplits
             ]

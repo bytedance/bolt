@@ -218,8 +218,8 @@ class TestDataFrame(unittest.TestCase):
     )
     def testGroupByMean(self, df):
         result = df.copy().groupBy("c1").aggregate(c0=Mean("c0"))
-        expected = DataFrame({"c0": [1.0, 2.0], "c1": ["aa", "bb"]})
-        self.assertEqual(result, expected)
+        expected = DataFrame({"c1": ["aa", "bb"], "c0": [1.0, 2.0]})
+        self.assertEqual(result.select(expected.names).orderBy("c1"), expected)
 
         with self.assertRaises(RuntimeError):
             df.copy().groupBy("c1").aggregate(c0=Mean("c1"))
