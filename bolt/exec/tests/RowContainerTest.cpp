@@ -169,6 +169,21 @@ class RowContainerTest : public exec::test::RowContainerTestBase,
       container.extractColumn(input.data(), size, column, result);
       verifyResults(result);
 
+      // A caller-provided null row represents a synthetic null (e.g. an
+      // unmatched outer-join build row), independent of whether this column
+      // contains stored null values.
+      auto syntheticNullResult =
+          BaseVector::create(expected->type(), size, pool_.get());
+      RowContainer::extractColumn(
+          input.data(),
+          size,
+          container.columnAt(column),
+          syntheticNullResult,
+          false,
+          container.columnHasNulls(column),
+          true);
+      verifyResults(syntheticNullResult);
+
       // Test extractColumn from offset.
       container.extractColumn(
           input.data() + offset, size - offset, column, offset, result);
