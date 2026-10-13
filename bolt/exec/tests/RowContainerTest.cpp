@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <type_traits>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/process/StackTrace.h"
 #include "bolt/exec/Aggregate.h"
@@ -1549,6 +1550,32 @@ TEST_F(RowContainerTest, listRowIndexClearReleasesAllocatorStorageBeforeReuse) {
     data->newRow();
   }
   ASSERT_EQ(data->numRows(), kRowsToUseHashStringAllocatorPool);
+}
+
+TEST_F(RowContainerTest, listRowsFastInBatches) {
+  constexpr int32_t kNumRows = 5;
+  constexpr int32_t kBatchSize = 2;
+  auto data = makeRowContainer({BIGINT()}, {}, false, true);
+
+  std::vector<char*> expectedRows;
+  expectedRows.reserve(kNumRows);
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    expectedRows.push_back(data->newRow());
+  }
+
+  RowContainerIterator iter;
+  static_assert(
+      std::is_same_v<decltype(iter.listRowCursor), size_t>,
+      "The fast-list cursor must address all rows in the container.");
+
+  std::vector<char*> listedRows(kNumRows);
+  EXPECT_EQ(data->listRows(&iter, kBatchSize, listedRows.data()), kBatchSize);
+  EXPECT_EQ(
+      data->listRows(&iter, kBatchSize, listedRows.data() + kBatchSize),
+      kBatchSize);
+  EXPECT_EQ(
+      data->listRows(&iter, kBatchSize, listedRows.data() + 2 * kBatchSize), 1);
+  EXPECT_EQ(listedRows, expectedRows);
 }
 
 TEST_F(RowContainerTest, unknown) {
