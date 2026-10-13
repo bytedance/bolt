@@ -56,10 +56,16 @@ namespace bytedance::bolt::functions::flinksql {
 ///   flink_interval_day_time_to_string(interval), using Flink's Calcite format.
 /// - add, subtract, and negative overloads for intervals; add/subtract a
 ///   year-month or day-time interval to/from DATE or TIMESTAMP, and add the
-///   operands in either order. Integer arithmetic wraps as in Java. DATE
-///   day-time arithmetic truncates to whole days and checks the int32 day
-///   count; TIMESTAMP arithmetic preserves nanoseconds and ignores the session
-///   zone.
+///   operands in either order. Integer arithmetic wraps as in Java. Operations
+///   returning DATE truncate day-time intervals to whole days and check the
+///   int32 day count; TIMESTAMP arithmetic preserves nanoseconds and ignores
+///   the session zone.
+/// - flink_date_add_interval(date, dayTimeInterval) and
+///   flink_date_subtract_interval(date, dayTimeInterval), returning TIMESTAMP
+///   from midnight plus/minus the full millisecond interval. Addition accepts
+///   either operand order. Callers select these functions when Flink infers a
+///   TIMESTAMP result for DATE/interval arithmetic. The session zone is
+///   ignored.
 /// - flink_timestamp_to_local_date(timestamp), after shifting an LTZ value into
 ///   the session's local time zone. Dates before the epoch use floor division.
 /// - flink_time_extract(milliseconds, modulus, divisor), using Java's signed

@@ -1304,6 +1304,84 @@ TEST_F(TemporalFunctionsTest, dateDayIntervalArithmetic) {
   }
 }
 
+TEST_F(TemporalFunctionsTest, dateDayIntervalTimestampArithmetic) {
+  auto values = makeRowVector(
+      {makeNullableFlatVector<int32_t>(
+           {0, 0, 0, 0, -1, 0, std::nullopt, 0}, DATE()),
+       makeNullableFlatVector<int64_t>(
+           {3'600'000, 60'000, 1'001, 86'400'000, 1, -1, 1, std::nullopt},
+           INTERVAL_DAY_TIME())});
+  auto added = makeNullableFlatVector<Timestamp>(
+      {Timestamp(3600, 0),
+       Timestamp(60, 0),
+       Timestamp(1, 1'000'000),
+       Timestamp(86'400, 0),
+       Timestamp(-86'400, 1'000'000),
+       Timestamp(-1, 999'000'000),
+       std::nullopt,
+       std::nullopt});
+  auto subtracted = makeNullableFlatVector<Timestamp>(
+      {Timestamp(-3600, 0),
+       Timestamp(-60, 0),
+       Timestamp(-2, 999'000'000),
+       Timestamp(-86'400, 0),
+       Timestamp(-86'401, 999'000'000),
+       Timestamp(0, 1'000'000),
+       std::nullopt,
+       std::nullopt});
+  const auto inputType = asRowType(values->type());
+  for (const auto* zone : {"UTC", "America/New_York"}) {
+    SCOPED_TRACE(zone);
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kSessionTimezone, zone},
+         {core::QueryConfig::kAdjustTimestampToTimezone, "true"}});
+    for (const auto* expression :
+         {"flink_date_add_interval(c0, c1)",
+          "flink_date_add_interval(c1, c0)"}) {
+      auto expr = makeTypedExpr(expression, inputType);
+      ASSERT_TRUE(expr->type()->isTimestamp());
+      testEncodings(expr, values->children(), added);
+    }
+    testEncodings(
+        makeTypedExpr("flink_date_subtract_interval(c0, c1)", inputType),
+        values->children(),
+        subtracted);
+  }
+}
+
+TEST_F(TemporalFunctionsTest, dateDayIntervalTimestampLimits) {
+  constexpr int64_t kMaxDateMillis = int64_t{INT32_MAX} * 86'400'000;
+  constexpr int64_t kMinDateMillis = int64_t{INT32_MIN} * 86'400'000;
+  constexpr int64_t kLargeInterval = 185'542'587'187'200'000;
+  auto values = makeRowVector(
+      {makeFlatVector<int32_t>({0, 0, INT32_MAX, INT32_MIN, 1, -1, 0}, DATE()),
+       makeFlatVector<int64_t>(
+           {INT64_MAX, INT64_MIN, 1, -1, INT64_MAX, INT64_MIN, kLargeInterval},
+           INTERVAL_DAY_TIME())});
+  auto added = makeFlatVector<Timestamp>(
+      {Timestamp::maxMillis(),
+       Timestamp::minMillis(),
+       Timestamp::fromMillis(kMaxDateMillis + 1),
+       Timestamp::fromMillis(kMinDateMillis - 1),
+       Timestamp::fromMillis(INT64_MIN + 86'400'000 - 1),
+       Timestamp::fromMillis(INT64_MAX - 86'400'000 + 1),
+       Timestamp::fromMillis(kLargeInterval)});
+  assertEqualVectors(
+      added, evaluate("flink_date_add_interval(c0, c1)", values));
+  assertEqualVectors(
+      added, evaluate("flink_date_add_interval(c1, c0)", values));
+  assertEqualVectors(
+      makeFlatVector<Timestamp>(
+          {Timestamp::fromMillis(-INT64_MAX),
+           Timestamp::minMillis(),
+           Timestamp::fromMillis(kMaxDateMillis - 1),
+           Timestamp::fromMillis(kMinDateMillis + 1),
+           Timestamp::fromMillis(INT64_MIN + 86'400'000 + 1),
+           Timestamp::fromMillis(INT64_MAX - 86'400'000 + 1),
+           Timestamp::fromMillis(-kLargeInterval)}),
+      evaluate("flink_date_subtract_interval(c0, c1)", values));
+}
+
 TEST_F(TemporalFunctionsTest, dateMonthIntervalArithmetic) {
   auto values = makeRowVector(
       {makeNullableFlatVector<int32_t>(
@@ -1422,13 +1500,30 @@ TEST_F(TemporalFunctionsTest, prefixedRegistration) {
         "flink_byte_seconds_to_timestamp",
         "flink_timestamp_to_date",
         "flink_interval_year_month_to_string",
-        "flink_interval_day_time_to_string"}) {
+        "flink_interval_day_time_to_string",
+        "flink_date_add_interval",
+        "flink_date_subtract_interval"}) {
     EXPECT_FALSE(getSignatureStrings("test_" + std::string(name)).empty());
   }
   EXPECT_EQ(10, getSignatureStrings("test_add").size());
   EXPECT_EQ(6, getSignatureStrings("test_subtract").size());
   EXPECT_EQ(2, getSignatureStrings("test_negative").size());
   EXPECT_EQ(2, getSignatureStrings("test_timestamp_to_long").size());
+  EXPECT_EQ(2, getSignatureStrings("test_flink_date_add_interval").size());
+  EXPECT_EQ(1, getSignatureStrings("test_flink_date_subtract_interval").size());
+  auto dateAndInterval = makeRowVector(
+      {makeFlatVector<int32_t>({0}, DATE()),
+       makeFlatVector<int64_t>({3'600'001}, INTERVAL_DAY_TIME())});
+  for (const auto* expression :
+       {"test_flink_date_add_interval(c0, c1)",
+        "test_flink_date_add_interval(c1, c0)"}) {
+    assertEqualVectors(
+        makeFlatVector<Timestamp>({Timestamp(3600, 1'000'000)}),
+        evaluate(expression, dateAndInterval));
+  }
+  assertEqualVectors(
+      makeFlatVector<Timestamp>({Timestamp(-3601, 999'000'000)}),
+      evaluate("test_flink_date_subtract_interval(c0, c1)", dateAndInterval));
   EXPECT_EQ(
       Timestamp(0, 123456789),
       parseString("test_to_timestamp(c0)", "1970-01-01 00:00:00.123456789"));

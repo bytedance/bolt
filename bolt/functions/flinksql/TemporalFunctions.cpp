@@ -889,6 +889,16 @@ struct DateIntervalFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
   void call(
+      out_type<Timestamp>& result,
+      const arg_type<Date>& date,
+      const arg_type<IntervalDayTime>& interval) {
+    const auto millis = static_cast<int64_t>(date) * kMillisInDay;
+    result = Timestamp::fromMillis(
+        Subtract ? subtractWrapped(millis, interval)
+                 : addWrapped(millis, interval));
+  }
+
+  void call(
       out_type<Date>& result,
       const arg_type<Date>& date,
       const arg_type<IntervalDayTime>& interval) {
@@ -920,8 +930,8 @@ using DateSubtractIntervalFunction = DateIntervalFunction<T, true>;
 
 template <typename T>
 struct IntervalAddDateFunction {
-  template <typename I>
-  void call(int32_t& result, const I& interval, const int32_t& date) {
+  template <typename Out, typename I>
+  void call(Out& result, const I& interval, const int32_t& date) {
     DateAddIntervalFunction<T>().call(result, date, interval);
   }
 };
@@ -1158,6 +1168,15 @@ void registerTemporalFunctions(const std::string& prefix) {
       {prefix + "flink_interval_day_time_to_string"});
   registerIntervalFunctions<IntervalYearMonth>(prefix);
   registerIntervalFunctions<IntervalDayTime>(prefix);
+  registerFunction<DateAddIntervalFunction, Timestamp, Date, IntervalDayTime>(
+      {prefix + "flink_date_add_interval"});
+  registerFunction<IntervalAddDateFunction, Timestamp, IntervalDayTime, Date>(
+      {prefix + "flink_date_add_interval"});
+  registerFunction<
+      DateSubtractIntervalFunction,
+      Timestamp,
+      Date,
+      IntervalDayTime>({prefix + "flink_date_subtract_interval"});
   registerFunction<FloatSecondsToTimestampFunction, Timestamp, float>(
       {prefix + "flink_float_seconds_to_timestamp"});
   registerFunction<DoubleSecondsToTimestampFunction, Timestamp, double>(
