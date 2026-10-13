@@ -26,6 +26,22 @@
 namespace bytedance::bolt::exec::bm {
 namespace {
 
+template <TypeKind Kind, typename T>
+FOLLY_ALWAYS_INLINE void writeExtractedValue(
+    FlatVector<T>* result,
+    MutableRange<T>& values,
+    vector_size_t resultRow,
+    const char* row,
+    uint32_t offset) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    result->set(resultRow, *reinterpret_cast<const StringView*>(row + offset));
+  } else if constexpr (Kind == TypeKind::HUGEINT) {
+    values[resultRow] = HugeInt::deserialize(row + offset);
+  } else {
+    values[resultRow] = *reinterpret_cast<const T*>(row + offset);
+  }
+}
+
 void deserializeComplexValue(
     const char* row,
     const ColumnLayout& column,
@@ -166,22 +182,33 @@ void BmRowContainer::extractColumnByRowNumbersTyped(
           continue;
         }
         const auto* row = rows[rowNumber];
-        if constexpr (
-            Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-          flatResult->set(
-              resultRow,
-              *reinterpret_cast<const StringView*>(row + column.offset));
-        } else if constexpr (Kind == TypeKind::HUGEINT) {
-          values[resultRow] = HugeInt::deserialize(row + column.offset);
-        } else {
-          values[resultRow] = *reinterpret_cast<const T*>(row + column.offset);
-        }
+        writeExtractedValue<Kind>(
+            flatResult, values, resultRow, row, column.offset);
       }
       return;
     }
 
-    auto* nulls = result->mutableRawNulls();
-    for (vector_size_t i = 0; i < numRows; ++i) {
+    auto* nulls = result->rawNulls() ? result->mutableRawNulls() : nullptr;
+    vector_size_t i = 0;
+    // Allocate nulls only when a selected row actually needs them. Once a
+    // bitmap exists, use the regular loop to overwrite this output range.
+    if (nulls == nullptr) {
+      for (; i < numRows; ++i) {
+        const auto rowNumber = rowNumbers[i];
+        if (rowNumber < 0 ||
+            (rows[rowNumber][column.nullByte] & column.nullMask)) {
+          nulls = result->mutableRawNulls();
+          break;
+        }
+        writeExtractedValue<Kind>(
+            flatResult,
+            values,
+            resultOffset + i,
+            rows[rowNumber],
+            column.offset);
+      }
+    }
+    for (; i < numRows; ++i) {
       const auto resultRow = resultOffset + i;
       const auto rowNumber = rowNumbers[i];
       if (FOLLY_UNLIKELY(rowNumber < 0)) {
@@ -195,15 +222,8 @@ void BmRowContainer::extractColumnByRowNumbersTyped(
         continue;
       }
       bits::setNull(nulls, resultRow, false);
-      if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-        flatResult->set(
-            resultRow,
-            *reinterpret_cast<const StringView*>(row + column.offset));
-      } else if constexpr (Kind == TypeKind::HUGEINT) {
-        values[resultRow] = HugeInt::deserialize(row + column.offset);
-      } else {
-        values[resultRow] = *reinterpret_cast<const T*>(row + column.offset);
-      }
+      writeExtractedValue<Kind>(
+          flatResult, values, resultRow, row, column.offset);
     }
   }
 }
@@ -228,32 +248,35 @@ void BmRowContainer::extractColumnTyped(
     BOLT_CHECK_NOT_NULL(flatResult);
     const auto resultSize = resultOffset + numRows;
     result->resize(resultSize);
+    auto values =
+        flatResult->mutableValues(resultSize)->template asMutableRange<T>();
 
     if (FOLLY_LIKELY(!column.nullable)) {
       result->clearNulls(resultOffset, resultSize);
-      auto values =
-          flatResult->mutableValues(resultSize)->template asMutableRange<T>();
       for (vector_size_t i = 0; i < numRows; ++i) {
         const auto resultRow = resultOffset + i;
-        if constexpr (
-            Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-          flatResult->set(
-              resultRow,
-              *reinterpret_cast<const StringView*>(rows[i] + column.offset));
-        } else if constexpr (Kind == TypeKind::HUGEINT) {
-          values[resultRow] = HugeInt::deserialize(rows[i] + column.offset);
-        } else {
-          values[resultRow] =
-              *reinterpret_cast<const T*>(rows[i] + column.offset);
-        }
+        writeExtractedValue<Kind>(
+            flatResult, values, resultRow, rows[i], column.offset);
       }
       return;
     }
 
-    auto* nulls = result->mutableRawNulls();
-    auto values =
-        flatResult->mutableValues(resultSize)->template asMutableRange<T>();
-    for (vector_size_t i = 0; i < numRows; ++i) {
+    auto* nulls = result->rawNulls() ? result->mutableRawNulls() : nullptr;
+    vector_size_t i = 0;
+    // A nullable column can still produce an entirely non-null batch. Defer
+    // bitmap allocation until the first null, preserving any existing bitmap.
+    if (nulls == nullptr) {
+      for (; i < numRows; ++i) {
+        const auto* row = rows[i];
+        if (row[column.nullByte] & column.nullMask) {
+          nulls = result->mutableRawNulls();
+          break;
+        }
+        writeExtractedValue<Kind>(
+            flatResult, values, resultOffset + i, row, column.offset);
+      }
+    }
+    for (; i < numRows; ++i) {
       const auto* row = rows[i];
       const auto resultRow = resultOffset + i;
       if (FOLLY_UNLIKELY(row[column.nullByte] & column.nullMask)) {
@@ -261,15 +284,8 @@ void BmRowContainer::extractColumnTyped(
         continue;
       }
       bits::setNull(nulls, resultRow, false);
-      if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-        flatResult->set(
-            resultRow,
-            *reinterpret_cast<const StringView*>(row + column.offset));
-      } else if constexpr (Kind == TypeKind::HUGEINT) {
-        values[resultRow] = HugeInt::deserialize(row + column.offset);
-      } else {
-        values[resultRow] = *reinterpret_cast<const T*>(row + column.offset);
-      }
+      writeExtractedValue<Kind>(
+          flatResult, values, resultRow, row, column.offset);
     }
   }
 }
