@@ -476,12 +476,13 @@ class BaseHashTable {
   }
 
   /// Copies the values at 'columnIndex' into 'result' for the 'rows.size' rows
-  /// pointed to by 'rows'. If an entry in 'rows' is null, sets corresponding
-  /// row in 'result' to null.
+  /// pointed to by 'rows'. 'hasNullRows' lets callers report synthetic null row
+  /// pointers independently of null values stored in the table.
   virtual void extractColumn(
       folly::Range<char* const*> rows,
       int32_t columnIndex,
-      const VectorPtr& result) = 0;
+      const VectorPtr& result,
+      bool hasNullRows = false) = 0;
 
  protected:
   static FOLLY_ALWAYS_INLINE size_t tableSlotSize() {
@@ -896,14 +897,16 @@ class HashTable : public BaseHashTable {
   void extractColumn(
       folly::Range<char* const*> rows,
       int32_t columnIndex,
-      const VectorPtr& result) override {
+      const VectorPtr& result,
+      bool hasNullRows = false) override {
     RowContainer::extractColumn(
         rows.data(),
         rows.size(),
         rows_->columnAt(columnIndex),
         result,
         false,
-        columnHasNulls_[columnIndex]);
+        columnHasNulls_[columnIndex],
+        hasNullRows);
   }
 
  private:

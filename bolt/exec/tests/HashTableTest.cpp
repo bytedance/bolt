@@ -1372,6 +1372,20 @@ TEST_P(HashTableTest, extractColumnUsesMergedNulls) {
     numNulls += nullable->isNullAt(i);
   }
   EXPECT_EQ(numNulls, 1);
+
+  std::vector<char*> rowsWithSyntheticNulls{rows[0], nullptr, rows[1], nullptr};
+  auto syntheticNulls =
+      BaseVector::create<FlatVector<int64_t>>(BIGINT(), 4, pool());
+  table->extractColumn(
+      folly::Range<char* const*>(
+          rowsWithSyntheticNulls.data(), rowsWithSyntheticNulls.size()),
+      1,
+      syntheticNulls,
+      true);
+  EXPECT_FALSE(syntheticNulls->isNullAt(0));
+  EXPECT_TRUE(syntheticNulls->isNullAt(1));
+  EXPECT_FALSE(syntheticNulls->isNullAt(2));
+  EXPECT_TRUE(syntheticNulls->isNullAt(3));
 }
 
 TEST_P(HashTableTest, groupBySpill) {

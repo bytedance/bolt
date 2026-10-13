@@ -73,6 +73,10 @@ DEFINE_string(
     "all",
     "Calibrated join scenario to run: all, hash, hash-existing-mixed, "
     "normalized-varchar, or normalized-wide");
+DEFINE_bool(
+    bolt_benchmark_simd_hash_table_empty_build_output_only,
+    false,
+    "Run only the empty-build FullOuter synthetic-NULL extraction case");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -147,6 +151,121 @@ void pinToCpuIfRequested() {
         FLAGS_bolt_benchmark_simd_hash_table_pin_cpu);
   }
 #endif
+}
+
+enum class NullExtractionMode { kNoNullFastPath, kNullablePath, kAllNullBatch };
+
+void runEmptyBuildOutputExtractionVariant(
+    const char* label,
+    RowContainer& rows,
+    const std::vector<TypePtr>& outputTypes,
+    NullExtractionMode mode) {
+  constexpr int32_t kTotalRows = 5'101'165;
+  constexpr int32_t kBatchSize = 21'900;
+  raw_vector<char*> nullRows(kBatchSize);
+  std::fill(nullRows.data(), nullRows.data() + nullRows.size(), nullptr);
+  const int warmup = std::max(0, FLAGS_bolt_benchmark_simd_hash_table_warmup);
+  const int measured = std::max(1, FLAGS_bolt_benchmark_simd_hash_table_iters);
+  std::vector<double> samples;
+  samples.reserve(measured);
+
+  for (int iteration = 0; iteration < warmup + measured; ++iteration) {
+    std::vector<VectorPtr> outputs;
+    outputs.reserve(outputTypes.size());
+    for (const auto& type : outputTypes) {
+      outputs.push_back(
+          BaseVector::create(type, kBatchSize, benchmarkPool.get()));
+    }
+
+    const auto start = Clock::now();
+    for (int32_t offset = 0; offset < kTotalRows; offset += kBatchSize) {
+      const int32_t size = std::min(kBatchSize, kTotalRows - offset);
+      for (int32_t column = 0; column < outputTypes.size(); ++column) {
+        if (mode == NullExtractionMode::kAllNullBatch) {
+          outputs[column]->resize(size);
+          auto* rawNulls =
+              outputs[column]->mutableNulls(size)->asMutable<uint64_t>();
+          bits::fillBits(rawNulls, 0, size, bits::kNull);
+          outputs[column]->setNullCount(size);
+        } else {
+          RowContainer::extractColumn(
+              nullRows.data(),
+              size,
+              rows.columnAt(column),
+              outputs[column],
+              false,
+              mode == NullExtractionMode::kNullablePath);
+        }
+      }
+    }
+    const auto end = Clock::now();
+
+    for (const auto& output : outputs) {
+      for (vector_size_t row = 0; row < output->size(); ++row) {
+        BOLT_CHECK(output->isNullAt(row));
+      }
+    }
+    if (iteration >= warmup) {
+      const auto nanos =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
+              .count();
+      samples.push_back(
+          static_cast<double>(nanos) / kTotalRows / outputTypes.size());
+    }
+  }
+
+  const auto stats = computeSampleStatistics(samples);
+  printf(
+      "  %-24s %5.2f±%4.2f ns/null-cell  (min=%5.2f max=%5.2f, n=%d)\n",
+      label,
+      stats.mean,
+      stats.standardDeviation,
+      stats.minimum,
+      stats.maximum,
+      measured);
+}
+
+void runEmptyBuildOutputExtractionBenchmark() {
+  std::vector<TypePtr> keyTypes{BIGINT(), BIGINT(), BIGINT()};
+  std::vector<TypePtr> dependentTypes{VARCHAR(), VARCHAR(), INTEGER()};
+  for (int32_t column = 0; column < 11; ++column) {
+    dependentTypes.push_back(BIGINT());
+  }
+  dependentTypes.push_back(INTEGER());
+
+  std::vector<TypePtr> outputTypes = keyTypes;
+  outputTypes.insert(
+      outputTypes.end(), dependentTypes.begin(), dependentTypes.end());
+  RowContainer rows(
+      keyTypes,
+      true,
+      {},
+      dependentTypes,
+      true,
+      true,
+      true,
+      false,
+      false,
+      benchmarkPool.get());
+
+  printf(
+      "=== Empty-build FullOuter synthetic NULL extraction ===\n"
+      "5,101,165 rows, 233 batches, 18 build columns\n\n");
+  runEmptyBuildOutputExtractionVariant(
+      "regressed no-null path",
+      rows,
+      outputTypes,
+      NullExtractionMode::kNoNullFastPath);
+  runEmptyBuildOutputExtractionVariant(
+      "prior nullable path",
+      rows,
+      outputTypes,
+      NullExtractionMode::kNullablePath);
+  runEmptyBuildOutputExtractionVariant(
+      "fixed all-null batch",
+      rows,
+      outputTypes,
+      NullExtractionMode::kAllNullBatch);
 }
 
 std::vector<RowVectorPtr>
@@ -1413,6 +1532,11 @@ int main(int argc, char** argv) {
       FLAGS_bolt_benchmark_simd_hash_table_iters,
       FLAGS_bolt_benchmark_simd_hash_table_warmup,
       FLAGS_bolt_benchmark_simd_hash_table_trim);
+
+  if (FLAGS_bolt_benchmark_simd_hash_table_empty_build_output_only) {
+    runEmptyBuildOutputExtractionBenchmark();
+    return 0;
+  }
 
   if (FLAGS_bolt_benchmark_simd_hash_table_wide_string_join_only) {
     printf("=== Calibrated SIMD Hash Table Join Probe ===\n\n");

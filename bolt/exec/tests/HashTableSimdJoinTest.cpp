@@ -377,6 +377,33 @@ TEST_F(HashTableSimdJoinTest, fullOuter) {
   assertQueryResultsEqualWithSimdHashTable(plan, pool_.get(), "HashJoin");
 }
 
+TEST_F(HashTableSimdJoinTest, fullOuterEmptyBuild) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+  auto buildVector = makeRowVector(
+      {"u_k", "u_v"},
+      {makeFlatVector<std::string>(0, [](auto) { return std::string{}; }),
+       makeFlatVector<int64_t>(0, [](auto) { return 0; })});
+  std::vector<RowVectorPtr> probeVectors;
+  for (int32_t batch = 0; batch < 3; ++batch) {
+    probeVectors.push_back(makeVarcharProbeVector(5'000));
+  }
+
+  auto idGen = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(idGen)
+                  .values(probeVectors)
+                  .hashJoin(
+                      {"t_k"},
+                      {"u_k"},
+                      PlanBuilder(idGen).values({buildVector}).planNode(),
+                      "",
+                      {"t_k", "t_v", "u_k", "u_v"},
+                      core::JoinType::kFull)
+                  .planNode();
+  assertQueryResultsEqualWithSimdHashTable(plan, pool_.get(), "HashJoin");
+}
+
 TEST_F(HashTableSimdJoinTest, leftSemiProject) {
   if (!process::hasAvx2()) {
     GTEST_SKIP() << "SIMD requires AVX2";

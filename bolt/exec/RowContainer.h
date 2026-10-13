@@ -424,7 +424,9 @@ class RowContainer {
 
   /// Copies the values at 'col' into 'result' (starting at 'resultOffset')
   /// for the 'numRows' rows pointed to by 'rows'. If a 'row' is null, sets
-  /// corresponding row in 'result' to null.
+  /// corresponding row in 'result' to null. 'columnHasNulls' describes values
+  /// stored in non-null rows. 'rowsMayHaveNulls' describes synthetic nulls in
+  /// the caller-provided row selection.
   static void extractColumn(
       const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
       int32_t numRows,
@@ -432,7 +434,8 @@ class RowContainer {
       vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize = false,
-      bool columnHasNulls = true);
+      bool columnHasNulls = true,
+      bool rowsMayHaveNulls = false);
 
   /// Copies the values at 'col' into 'result' for the 'numRows' rows pointed to
   /// by 'rows'. If an entry in 'rows' is null, sets corresponding row in
@@ -443,8 +446,17 @@ class RowContainer {
       RowColumn col,
       const VectorPtr& result,
       bool exactSize = false,
-      bool columnHasNulls = true) {
-    extractColumn(rows, numRows, col, 0, result, exactSize, columnHasNulls);
+      bool columnHasNulls = true,
+      bool rowsMayHaveNulls = false) {
+    extractColumn(
+        rows,
+        numRows,
+        col,
+        0,
+        result,
+        exactSize,
+        columnHasNulls,
+        rowsMayHaveNulls);
   }
 
   /// Copies the values from the array pointed to by 'rows' at 'col' into
@@ -460,7 +472,8 @@ class RowContainer {
       vector_size_t resultOffset,
       const VectorPtr& result,
       bool exactSize = false,
-      bool columnHasNulls = true);
+      bool columnHasNulls = true,
+      bool rowsMayHaveNulls = false);
 
   /// Sets in result all locations with null values in col for rows (for numRows
   /// number of rows).
@@ -983,7 +996,8 @@ class RowContainer {
       int32_t resultOffset,
       const VectorPtr& result,
       bool exactSize,
-      bool columnHasNulls) {
+      bool columnHasNulls,
+      bool rowsMayHaveNulls) {
     if (rowNumbers.size() > 0) {
       extractColumnTypedInternal<true, Kind>(
           rows,
@@ -993,7 +1007,8 @@ class RowContainer {
           resultOffset,
           result,
           exactSize,
-          columnHasNulls);
+          columnHasNulls,
+          rowsMayHaveNulls);
     } else {
       extractColumnTypedInternal<false, Kind>(
           rows,
@@ -1003,7 +1018,8 @@ class RowContainer {
           resultOffset,
           result,
           exactSize,
-          columnHasNulls);
+          columnHasNulls,
+          rowsMayHaveNulls);
     }
   }
 
@@ -1016,7 +1032,8 @@ class RowContainer {
       int32_t resultOffset,
       const VectorPtr& result,
       bool exactSize,
-      bool columnHasNulls) {
+      bool columnHasNulls,
+      bool rowsMayHaveNulls) {
     // Resize the result vector before all copies.
     result->resize(numRows + resultOffset);
 
@@ -1031,7 +1048,7 @@ class RowContainer {
     auto* flatResult = result->as<FlatVector<T>>();
     auto nullMask = column.nullMask();
     auto offset = column.offset();
-    if (!nullMask || !columnHasNulls) {
+    if (!rowsMayHaveNulls && (!nullMask || !columnHasNulls)) {
       extractValuesNoNulls<useRowNumbers, T>(
           rows,
           rowNumbers,
@@ -1669,7 +1686,8 @@ inline void RowContainer::extractColumnTyped<TypeKind::OPAQUE>(
     int32_t /*resultOffset*/,
     const VectorPtr& /*result*/,
     bool exactSize /*exactSize*/,
-    bool /*columnHasNulls*/) {
+    bool /*columnHasNulls*/,
+    bool /*rowsMayHaveNulls*/) {
   BOLT_UNSUPPORTED("RowContainer doesn't support values of type OPAQUE");
 }
 
@@ -1680,7 +1698,8 @@ inline void RowContainer::extractColumn(
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize,
-    bool columnHasNulls) {
+    bool columnHasNulls,
+    bool rowsMayHaveNulls) {
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -1691,7 +1710,8 @@ inline void RowContainer::extractColumn(
       resultOffset,
       result,
       exactSize,
-      columnHasNulls);
+      columnHasNulls,
+      rowsMayHaveNulls);
 }
 
 inline void RowContainer::extractColumn(
@@ -1701,7 +1721,8 @@ inline void RowContainer::extractColumn(
     int32_t resultOffset,
     const VectorPtr& result,
     bool exactSize,
-    bool columnHasNulls) {
+    bool columnHasNulls,
+    bool rowsMayHaveNulls) {
   BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
       extractColumnTyped,
       result->typeKind(),
@@ -1712,7 +1733,8 @@ inline void RowContainer::extractColumn(
       resultOffset,
       result,
       exactSize,
-      columnHasNulls);
+      columnHasNulls,
+      rowsMayHaveNulls);
 }
 
 inline void RowContainer::extractNulls(
