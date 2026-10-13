@@ -28,6 +28,10 @@ class Expression:
         self.__dtype = dtype
         self.__dataframe = dataframe
 
+    def _capture_(self) -> "Expression":
+        """Capture current column state for use in a containing expression."""
+        return self
+
     def expr(self) -> str:
         """
         Convert object instance to an expression.

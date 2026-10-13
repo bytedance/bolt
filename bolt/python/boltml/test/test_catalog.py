@@ -426,6 +426,81 @@ class LocalPaimonReadTest(unittest.TestCase):
 
 
 class NativeSourceFallbackTest(unittest.TestCase):
+    def testHugeintValuesRemainNativeAtBothSpillThresholds(self):
+        dtype = pybolt.HugeintType()
+        values = [None, -(2**127), 2**80 + 7, 2**127 - 1]
+        flat = pybolt.fromList(values, dtype)
+        cases = [
+            (flat, values),
+            (pybolt.constantVector(values[2], 4, dtype), [values[2]] * 4),
+            (
+                pybolt.dictionaryVector(flat, [3, 0, 2, 1]),
+                [values[i] for i in [3, 0, 2, 1]],
+            ),
+            (
+                pybolt.fromList(
+                    [values, [], [values[2]], None], pybolt.ArrayType(dtype)
+                ),
+                [values, [], [values[2]], None],
+            ),
+            (
+                pybolt.fromList(
+                    [{"a": values[1]}, {}, {"b": None}, {"c": values[3]}],
+                    pybolt.MapType(pybolt.VarcharType(), dtype),
+                ),
+                [{"a": values[1]}, {}, {"b": None}, {"c": values[3]}],
+            ),
+        ]
+        for vector, expected in cases:
+            for threshold in ("0", "1000"):
+                with (
+                    self.subTest(
+                        dtype=vector.dtype(),
+                        encoding=type(vector).__name__,
+                        threshold=threshold,
+                    ),
+                    patch.dict(
+                        "os.environ", {"BOLTML_VIRTUAL_TABLE_MAX_ROWS": threshold}
+                    ),
+                ):
+                    builder = SubstraitPlanBuilderFactory().fromData(
+                        pybolt.rowVector(
+                            ["payload", "row_id"],
+                            [vector, pybolt.fromList(list(range(len(vector))))],
+                        )
+                    )
+                    self.assertIsInstance(builder, BoltPlanBuilder)
+                    self.assertFalse(plan_is_substrait_lowerable(builder.logicalPlan()))
+                    dataframe = DataFrame(builder).copy()
+                    self.assertEqual(
+                        list(dataframe._data_.childAt("payload")), expected
+                    )
+                    selected = DataFrame(builder).copy()
+                    selected.filter(selected["row_id"] >= 1).select(
+                        ["payload"], count=2
+                    )
+                    self.assertEqual(
+                        list(selected._data_.childAt("payload")), expected[1:3]
+                    )
+                    self.assertEqual(selected.types, [vector.dtype()])
+                    with self.assertRaisesRegex(
+                        NotImplementedError, "Ray execution is not supported"
+                    ):
+                        RayExecutor().eval(builder.copy())
+
+    def testHugeintFileSchemasRemainNative(self):
+        for dtype in (pybolt.HugeintType(), pybolt.ArrayType(pybolt.HugeintType())):
+            with self.subTest(dtype=dtype):
+                schema = pybolt.RowType(["payload"], [dtype])
+                builder = SubstraitPlanBuilderFactory().fromLocalFiles(
+                    [], schema, pybolt.FileFormat.PARQUET
+                )
+                self.assertIsInstance(builder, BoltPlanBuilder)
+                self.assertFalse(plan_is_substrait_lowerable(builder.logicalPlan()))
+                dataframe = DataFrame(builder).copy().select(["payload"])
+                self.assertEqual(len(dataframe), 0)
+                self.assertEqual(dataframe.dtype, schema)
+
     def testComplexValuesRemainNativeAtBothSpillThresholds(self):
         arrays = [
             pa.array([{"UserID": 7}], pa.struct([("UserID", pa.int64())])),

@@ -29,7 +29,7 @@ class FunctionExpression(Expression):
     ):
         self.__fnName = fnName
         self.__dtype = outputType
-        self.__args = arguments
+        self.__args = [argument._capture_() for argument in arguments]
         self.__dataframe = dataframe
 
     @property

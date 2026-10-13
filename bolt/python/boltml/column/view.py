@@ -73,6 +73,10 @@ class ColumnView(Column):
         self.__name = column
         self.__dtype = self._captureDtype(df, column)
 
+    def _capture_(self) -> "ColumnView":
+        """Snapshot the name and expression without copying or evaluating data."""
+        return copy.copy(self)
+
     @property
     def data(self):
         """
@@ -166,16 +170,9 @@ class ColumnView(Column):
         return DataFrame(*args, **self.__dataframe._derivedKwargs_())
 
     def __deepcopy__(self, memo) -> "ColumnView":
-        newInstance = self.__class__.__new__(self.__class__)
-        memo[id(self)] = newInstance
         data = rowVector([self.name], [self.data.copy()])
-        newInstance.__dataframe = self.__makeDataframe(data)
-        newInstance.__name = self.name
-        # ``__class__.__new__`` bypasses ``__init__`` so the dtype
-        # snapshot must be re-established explicitly here; otherwise
-        # ``newInstance.dtype`` would crash on AttributeError when
-        # the property accesses the unset ``__dtype`` attribute.
-        newInstance.__dtype = self._captureDtype(newInstance.__dataframe, self.name)
+        newInstance = self.__class__(self.__makeDataframe(data), self.name)
+        memo[id(self)] = newInstance
         return newInstance
 
     def copy(self) -> "ColumnView":
@@ -191,6 +188,10 @@ class ColumnView(Column):
         """
         self.__dataframe.rename(**{self.name: replacement})
         self.__name = replacement
+        if isinstance(self, ProjectExpression):
+            ProjectExpression.__init__(
+                self, FieldExpression(replacement, self.__dataframe)
+            )
         return self
 
     def cast(self, dtype: BoltType) -> "Self":  # noqa: F821

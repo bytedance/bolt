@@ -40,6 +40,7 @@ class CaseExpressionArm(Expression):
             )
         if not isinstance(value, Expression):
             raise TypeError(f"value must be an Expression, got {type(value)}")
+        value = value._capture_()
         self.__predicate = predicate
         self.__value = value
 
@@ -68,6 +69,8 @@ class CaseExpression(Expression):
         if len(cases) == 0:
             raise ValueError("Cannot make a case expression with no cases.")
 
+        if defaultValue is not None:
+            defaultValue = defaultValue._capture_()
         dtype = (
             defaultValue.dtype
             if defaultValue is not None

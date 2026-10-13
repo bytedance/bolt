@@ -15,11 +15,13 @@
 import copy
 import unittest
 
+import pyarrow as pa
 import pybolt
 from pybolt.test.utils import StringGenerator, IntGenerator, FloatGenerator
 
 from ..function import scalarFunction
 from ..dataframe import DataFrame
+from ..expression.case import If
 
 from .utils import WithDataFrame, Runtime
 
@@ -70,6 +72,23 @@ class TestBoltColumn(unittest.TestCase):
         rhs = copy.deepcopy(lhs["c0"])
         self.assertTrue(lhs["c0"].equals(rhs))
 
+    @WithDataFrame.data(flag=[True, None, False], items=[[1], None, []])
+    def testCopyGenericColumnInitializesExpression(self, df):
+        expected = {"flag": [True, None, False], "items": [[1], None, []]}
+        for name in df.names:
+            with self.subTest(column=name):
+                original = df[name]
+                copied = original.copy()
+                self.assertIsNot(copied.dataframe, df)
+                self.assertEqual(copied.dtype, original.dtype)
+                copied.dataframe.transform(missing=copied.isNone())
+                self.assertEqual(
+                    list(copied.dataframe["missing"]), [False, True, False]
+                )
+                copied.map(lambda c: c.isNotNone())
+                self.assertEqual(list(copied), [True, False, True])
+                self.assertEqual(df.toArrow(pa.Table).to_pydict(), expected)
+
     @WithDataFrame.data(c0=[1], runtimes=Runtime.minimal())
     def testRename(self, df):
         names = list(df.names)
@@ -84,6 +103,74 @@ class TestBoltColumn(unittest.TestCase):
                 for n in df.names
             )
         )
+
+    @WithDataFrame.data(
+        number=[1, None, 3], text=["hi", None, "world"], flag=[True, None, False]
+    )
+    def testRenameRefreshesColumnExpression(self, df):
+        cases = (
+            ("number", lambda c: c + 1, [2, None, 4]),
+            ("text", lambda c: c.uppercase(), ["HI", None, "WORLD"]),
+            ("flag", lambda c: c.isNone(), [False, True, False]),
+        )
+        for name, expression, expected in cases:
+            with self.subTest(column=name):
+                column = df[name]
+                renamed = f"new_{name}"
+                self.assertIs(column.rename(renamed), column)
+                column.map(expression)
+                self.assertEqual(column.name, renamed)
+                self.assertNotIn(name, df.names)
+                self.assertEqual(list(column), expected)
+                self.assertEqual(list(df[renamed]), expected)
+
+    def testRenamePreservesEarlierMappedExpressions(self):
+        runtimes = Runtime.all()
+
+        @scalarFunction(pybolt.BigintType(), Runtime.executors(runtimes))
+        def increment(value):
+            return None if value is None else value + 1
+
+        for runtime in runtimes:
+            for mapping in (increment, lambda c: c + 1, None):
+                with self.subTest(runtime=str(runtime), mapping=mapping):
+                    df = DataFrame(
+                        {"a": [1, None, 3]},
+                        executor=runtime.executor,
+                        planFactory=runtime.planFactory,
+                    )
+                    column = df["a"]
+                    column.map(column + 1 if mapping is None else mapping)
+                    column.rename("b").map(lambda c: c + 1)
+                    copied = df.copy()
+                    self.assertEqual(
+                        copied.toArrow(pa.Table).to_pydict(), {"b": [3, None, 5]}
+                    )
+                    self.assertEqual(
+                        df.toArrow(pa.Table).to_pydict(), {"b": [3, None, 5]}
+                    )
+
+    @WithDataFrame.data(a=[1, None, 3])
+    def testRenamePreservesEarlierProjectionExpressions(self, df):
+        column = df["a"]
+        df.transform(
+            alias=column,
+            derived=column + 1,
+            divided=column / 2,
+            matched=If(column > 1).then(column).otherwise(0),
+            unmatched=If(column > 1).then(0).otherwise(column),
+        )
+        column.rename("b").map(lambda c: c + 2)
+        expected = {
+            "b": [3, None, 5],
+            "alias": [1, None, 3],
+            "derived": [2, None, 4],
+            "divided": [0.5, None, 1.5],
+            "matched": [0, 0, 3],
+            "unmatched": [1, None, 0],
+        }
+        self.assertEqual(df.copy().toArrow(pa.Table).to_pydict(), expected)
+        self.assertEqual(df.toArrow(pa.Table).to_pydict(), expected)
 
     def testMapUdf(self):
         runtimes = Runtime.all()

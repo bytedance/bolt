@@ -155,6 +155,7 @@ class CastExpression(Expression):
         expr: Expression,
         targetType: BoltType,
     ):
+        expr = expr._capture_()
         checkCast(expr.dtype, targetType)
 
         self.__input = expr

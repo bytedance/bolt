@@ -25,8 +25,10 @@ Covers:
 
 from __future__ import annotations
 
+from itertools import product
 import unittest
 
+import pybolt
 from substrait.proto import algebra, plan
 
 from ..dataframe import DataFrame
@@ -259,6 +261,110 @@ class RewriteLimitsRuleTest(unittest.TestCase):
         self.assertEqual(get_rel_kind(root.fetch.input), "read")
         self.assertEqual(root.fetch.offset_expr.literal.i64, 4)
         self.assertEqual(root.fetch.count_expr.literal.i64, 2)
+
+    def test_merges_scalar_and_expression_fetch_bounds(self) -> None:
+        modes = list(product(("scalar", "i64"), repeat=4))
+        modes.append(("i32",) * 4)
+        for representations in modes:
+            with self.subTest(representations=representations):
+                read = _read_rel(["a"])
+                for value in range(15):
+                    read.read.virtual_table.values.add().fields.add().i32 = value
+                inner = algebra.Rel(fetch=algebra.FetchRel(input=read))
+                outer = algebra.Rel(fetch=algebra.FetchRel(input=inner))
+                bounds = (
+                    (outer.fetch.input.fetch, "count", 5),
+                    (outer.fetch.input.fetch, "offset", 2),
+                    (outer.fetch, "count", 10),
+                    (outer.fetch, "offset", 1),
+                )
+                for (fetch, field, value), mode in zip(bounds, representations):
+                    if mode == "scalar":
+                        setattr(fetch, field, value)
+                    else:
+                        getattr(fetch, f"{field}_expr").CopyFrom(
+                            algebra.Expression(
+                                literal=algebra.Expression.Literal(**{mode: value})
+                            )
+                        )
+                original = _wrap_plan(outer)
+                before = original.SerializeToString()
+                out = RewriteLimits().apply(original)
+                root = get_root_rel(out)
+                self.assertEqual(get_rel_kind(root.fetch.input), "read")
+                self.assertEqual(root.fetch.count_expr.literal.i64, 4)
+                self.assertEqual(root.fetch.offset_expr.literal.i64, 3)
+                self.assertEqual(original.SerializeToString(), before)
+                self.assertEqual(RewriteLimits().apply(out), out)
+                node, _ = pybolt.convertSubstraitPlan(out.SerializeToString())
+                result = pybolt.BoltTaskExecutor().execute(
+                    pybolt.PlanBuilder(node).planFragment(), self.id()
+                )
+                self.assertEqual(list(result.childAt("a")), [3, 4, 5, 6])
+
+    def test_scalar_zero_and_unlimited_counts(self) -> None:
+        for inner_count, outer_count, expected in (
+            (None, 5, 5),
+            (-1, 5, 5),
+            (5, None, 4),
+            (5, -1, 4),
+            (-1, -1, None),
+            (None, -1, None),
+            (-1, None, None),
+            (0, 10, 0),
+            (5, 0, 0),
+        ):
+            with self.subTest(inner=inner_count, outer=outer_count):
+                inner = algebra.Rel(
+                    fetch=algebra.FetchRel(input=_read_rel(["a"]), offset=2)
+                )
+                if inner_count is not None:
+                    inner.fetch.count = inner_count
+                outer = algebra.Rel(fetch=algebra.FetchRel(input=inner, offset=1))
+                if outer_count is not None:
+                    outer.fetch.count = outer_count
+                root = get_root_rel(RewriteLimits().apply(_wrap_plan(outer)))
+                if expected == 0:
+                    self.assertEqual(get_rel_kind(root), "filter")
+                    self.assertFalse(root.filter.condition.literal.boolean)
+                else:
+                    self.assertEqual(get_rel_kind(root.fetch.input), "read")
+                    self.assertEqual(root.fetch.offset_expr.literal.i64, 3)
+                    if expected is None:
+                        self.assertIsNone(root.fetch.WhichOneof("count_mode"))
+                    else:
+                        self.assertEqual(root.fetch.count_expr.literal.i64, expected)
+
+    def test_does_not_merge_unknown_fetch_bounds(self) -> None:
+        for level, field, expression in product(
+            ("inner", "outer"),
+            ("count_expr", "offset_expr"),
+            (
+                _field_ref(0),
+                algebra.Expression(literal=algebra.Expression.Literal(boolean=True)),
+                algebra.Expression(),
+            ),
+        ):
+            with self.subTest(level=level, field=field, expression=expression):
+                inner = _fetch_rel(_read_rel(["a"]), count=5, offset=2)
+                outer = _fetch_rel(inner, count=10, offset=1)
+                fetch = outer.fetch.input.fetch if level == "inner" else outer.fetch
+                getattr(fetch, field).CopyFrom(expression)
+                original = _wrap_plan(outer)
+                self.assertEqual(RewriteLimits().apply(original), original)
+
+    def test_does_not_merge_negative_offsets(self) -> None:
+        for level, scalar in product(("inner", "outer"), (False, True)):
+            with self.subTest(level=level, scalar=scalar):
+                inner = _fetch_rel(_read_rel(["a"]), count=5, offset=2)
+                outer = _fetch_rel(inner, count=10, offset=1)
+                fetch = outer.fetch.input.fetch if level == "inner" else outer.fetch
+                if scalar:
+                    fetch.offset = -1
+                else:
+                    fetch.offset_expr.literal.i64 = -1
+                original = _wrap_plan(outer)
+                self.assertEqual(RewriteLimits().apply(original), original)
 
     def test_empty_merge_preserves_outer_output_metadata(self) -> None:
         for count in (1, None):

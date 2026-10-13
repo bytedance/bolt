@@ -20,6 +20,7 @@ from pybolt import (
     ArrayType,
     BoltType,
     FileFormat,
+    HugeintType,
     JoinType,
     LongDecimalType,
     MapType,
@@ -76,6 +77,9 @@ _NON_SUBSTRAIT_LOWERABLE_SOURCES: frozenset[str] = frozenset()
 
 
 def _type_needs_native(dtype, *, literal=False, nested=False):
+    # Raw HUGEINT has no Substrait type; DECIMAL remains supported separately.
+    if isinstance(dtype, HugeintType):
+        return True
     # The current converter assigns its own names to nested ROW fields, and
     # cannot construct decimal literals inside ARRAY/MAP values faithfully.
     if isinstance(dtype, RowType):

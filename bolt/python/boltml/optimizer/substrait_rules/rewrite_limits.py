@@ -28,12 +28,6 @@ from .base import (
 )
 
 
-# A FetchRel without a count_expr means "no upper bound" (take everything
-# after offset). The Python pipeline represents that with ``count is None``;
-# in Substrait the count_expr field is simply not set.
-_UNLIMITED: Optional[int] = None
-
-
 class RewriteLimits(Rule):
     """Rewrite limit chains in two complementary ways (one rule, one pass).
 
@@ -117,41 +111,21 @@ def _swap_fetch_project(rel: algebra.Rel) -> Optional[algebra.Rel]:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_offset(fetch: algebra.FetchRel) -> int:
-    """Read a non-negative offset from a ``FetchRel``.
-
-    Substrait stores offset in ``offset_expr`` as a signed 64-bit literal;
-    a missing field means zero.
-    """
-    if not fetch.HasField("offset_expr"):
-        return 0
-    expr = fetch.offset_expr
+def _fetch_bound(fetch: algebra.FetchRel, field: str, default: int) -> Optional[int]:
+    """Read a scalar or literal bound; return ``None`` if it is unknown."""
+    mode = fetch.WhichOneof(f"{field}_mode")
+    if mode is None:
+        return default
+    if mode == field:
+        return getattr(fetch, field)
+    expr = getattr(fetch, mode)
     if expr.WhichOneof("rex_type") != "literal":
-        return 0
+        return None
     lit = expr.literal
-    if lit.WhichOneof("literal_type") != "i64":
-        return 0
-    return lit.i64
-
-
-def _fetch_count(fetch: algebra.FetchRel) -> Optional[int]:
-    """Read the count from a ``FetchRel`` (``None`` means unlimited).
-
-    A missing ``count_expr`` or a negative value is treated as
-    "unlimited", matching BoltML's ``fetchRel`` constructor in
-    ``boltml/substrait/rel.py``.
-    """
-    if not fetch.HasField("count_expr"):
-        return _UNLIMITED
-    expr = fetch.count_expr
-    if expr.WhichOneof("rex_type") != "literal":
-        return _UNLIMITED
-    lit = expr.literal
-    if lit.WhichOneof("literal_type") != "i64":
-        return _UNLIMITED
-    if lit.i64 < 0:
-        return _UNLIMITED
-    return lit.i64
+    kind = lit.WhichOneof("literal_type")
+    if kind not in ("i32", "i64"):
+        return None
+    return getattr(lit, kind)
 
 
 def _merge_counts(
@@ -183,11 +157,17 @@ def _merge_adjacent_fetches(rel: algebra.Rel) -> Optional[algebra.Rel]:
     if inner.common.HasField("emit"):
         return None
 
+    outer_count = _fetch_bound(outer, "count", -1)
+    outer_offset = _fetch_bound(outer, "offset", 0)
+    inner_count = _fetch_bound(inner, "count", -1)
+    inner_offset = _fetch_bound(inner, "offset", 0)
+    if None in (outer_count, outer_offset, inner_count, inner_offset):
+        return None
     merged = _merge_counts(
-        _fetch_count(outer),
-        _fetch_offset(outer),
-        _fetch_count(inner),
-        _fetch_offset(inner),
+        None if outer_count < 0 else outer_count,
+        outer_offset,
+        None if inner_count < 0 else inner_count,
+        inner_offset,
     )
     if merged is None:
         return None
@@ -211,8 +191,8 @@ def _merge_adjacent_fetches(rel: algebra.Rel) -> Optional[algebra.Rel]:
     new_fetch.input.CopyFrom(inner.input)
 
     # Reset offset/count to the merged values.
-    new_fetch.ClearField("offset_expr")
-    new_fetch.ClearField("count_expr")
+    new_fetch.ClearField("offset_mode")
+    new_fetch.ClearField("count_mode")
     new_fetch.offset_expr.CopyFrom(
         algebra.Expression(literal=algebra.Expression.Literal(i64=merged_offset))
     )

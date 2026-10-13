@@ -27,6 +27,7 @@ class ProjectExpression(Expression):
         self,
         expr: Expression,
     ):
+        expr = expr._capture_()
         self.__expr = expr
         super().__init__(expr.expr(), expr.dtype, expr.dataframe)
 
