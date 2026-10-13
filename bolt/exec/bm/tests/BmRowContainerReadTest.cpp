@@ -344,6 +344,41 @@ TEST_F(
   EXPECT_EQ("bravo", flat->valueAt(2).str());
 }
 
+TEST_F(
+    BmRowContainerDiskIoTest,
+    ReadOnlyWindowReadSessionLoadsChunkBoundedRows) {
+  constexpr vector_size_t kRows = 9'000;
+  BmRowContainer container(
+      {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 32 << 10);
+  storeAll(
+      container,
+      makeRowVector({
+          makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      }));
+
+  const auto segment = container.spillActiveSegment();
+  auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto rowIds = session.listRowIds();
+  const auto chunkBoundary =
+      std::find_if(rowIds.begin() + 1, rowIds.end(), [&](const auto& row) {
+        return row.rowBlockId != rowIds.front().rowBlockId;
+      });
+  ASSERT_NE(rowIds.end(), chunkBoundary);
+  const auto boundary = static_cast<RowNumber>(chunkBoundary - rowIds.begin());
+  ASSERT_GE(boundary, 2);
+
+  const SegmentRowRange range{segment, boundary - 2, 4};
+  {
+    auto rows = session.loadChunkBoundedRowsScoped(range);
+    ASSERT_EQ(2, rows.size());
+    auto result = BaseVector::create(BIGINT(), rows.size(), pool());
+    container.extractColumnResident(rows.data(), rows.size(), 0, result);
+    EXPECT_EQ(boundary - 2, result->asFlatVector<int64_t>()->valueAt(0));
+    EXPECT_EQ(boundary - 1, result->asFlatVector<int64_t>()->valueAt(1));
+  }
+  EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+}
+
 TEST_F(BmRowContainerTest, PopFrontRowsKeepsLaterSegmentRangesReadable) {
   BmRowContainer container(
       {BIGINT()}, {false}, 0, bufferManager_, MemoryTag::kTesting, 64 << 10);

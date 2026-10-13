@@ -202,6 +202,34 @@ ScopedLoadedRows ReadOnlyWindowReadSession::loadRowsScoped(
   return loadRowsScoped({rows.data(), rows.size()});
 }
 
+ScopedLoadedRows ReadOnlyWindowReadSession::loadChunkBoundedRowsScoped(
+    const SegmentRowRange& range) {
+  BOLT_CHECK_NOT_NULL(container_);
+  BOLT_CHECK_GT(range.count, 0);
+  BOLT_CHECK(
+      segments_.count(range.segment) != 0,
+      "Range segment {} is not covered by this read session",
+      range.segment);
+  const auto& segment = container_->segments_.segmentData(range.segment);
+  BOLT_CHECK_LE(
+      static_cast<uint64_t>(range.begin) + range.count,
+      segment.nextRowNumber,
+      "Row range [{}, {}) exceeds segment {} row count {}",
+      range.begin,
+      range.begin + range.count,
+      range.segment,
+      segment.nextRowNumber);
+
+  const auto& chunk = container_->segments_.chunkForRow(segment, range.begin);
+  const auto rowsUntilChunkEnd =
+      chunk.meta.firstRowNumber + chunk.meta.rowCount - range.begin;
+  // Stop at the current chunk boundary so its lease can be released before
+  // loading rows from the next chunk.
+  const SegmentRowRange chunkRange{
+      range.segment, range.begin, std::min(range.count, rowsUntilChunkEnd)};
+  return loadRowsScoped({&chunkRange, 1});
+}
+
 void ReadOnlyWindowReadSession::releaseRowLeases(
     const std::vector<uint64_t>& chunkKeys) noexcept {
   for (auto key : chunkKeys) {

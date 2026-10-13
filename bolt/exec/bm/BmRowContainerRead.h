@@ -87,6 +87,11 @@ class ReadOnlyWindowReadSession {
   ScopedLoadedRows loadRowsScoped(folly::Range<const RowId*> rows);
   ScopedLoadedRows loadRowsScoped(folly::Range<const SegmentRowRange*> ranges);
 
+  /// Loads the leading rows of 'range' that belong to one physical chunk.
+  /// The returned ScopedLoadedRows owns the chunk lease. Its row pointers
+  /// remain valid until the ScopedLoadedRows object is destroyed.
+  ScopedLoadedRows loadChunkBoundedRowsScoped(const SegmentRowRange& range);
+
   // Legacy raw-pointer reads cannot start while a scoped batch is active.
   std::vector<const char*> loadRows(folly::Range<const RowId*> rows);
   std::vector<const char*> loadRows(
