@@ -31,21 +31,18 @@ void collectReadOnlyEvictBlock(
     const std::shared_ptr<memory::bm::BufferManager>& bufferManager,
     std::vector<std::shared_ptr<memory::bm::BlockHandle>>& discardBlocks,
     std::vector<std::shared_ptr<memory::bm::BlockHandle>>& spillBlocks) {
-  if (!block.handle.valid()) {
-    return;
-  }
   BOLT_CHECK_NOT_NULL(block.block);
+  // Scoped batches release their pins before eviction. Keep using the block
+  // identity even if BufferManager has already reclaimed its resident memory.
   auto blockHandle = block.block;
-  block.handle = memory::bm::BufferHandle{};
-  block.ptr = nullptr;
 
   if (bufferManager->HasSpillBacking(blockHandle) &&
       !bufferManager->IsDirty(blockHandle)) {
     discardBlocks.push_back(std::move(blockHandle));
   } else {
     spillBlocks.push_back(std::move(blockHandle));
+    selectedBytes += block.size;
   }
-  selectedBytes += block.size;
 }
 
 void collectReadOnlyEvictChunkBlocks(
@@ -106,6 +103,7 @@ uint64_t BmRowContainer::evictReadOnlyLoadedChunks(
   }
 
   uint64_t selectedBytes = 0;
+  uint64_t reclaimed = 0;
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> discardBlocks;
   std::vector<std::shared_ptr<memory::bm::BlockHandle>> spillBlocks;
 
@@ -128,14 +126,18 @@ uint64_t BmRowContainer::evictReadOnlyLoadedChunks(
 
     collectReadOnlyEvictChunkBlocks(
         chunkData, selectedBytes, bufferManager_, discardBlocks, spillBlocks);
+    if (!discardBlocks.empty()) {
+      // Discard before checking whether to process another chunk.
+      // Count only memory freed now; already reclaimed blocks contribute zero.
+      const auto discarded = bufferManager_->DiscardCleanResidentBlocks(
+          std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
+              discardBlocks.data(), discardBlocks.size()));
+      reclaimed += discarded;
+      selectedBytes += discarded;
+      discardBlocks.clear();
+    }
   }
 
-  uint64_t reclaimed = 0;
-  if (!discardBlocks.empty()) {
-    reclaimed += bufferManager_->DiscardCleanResidentBlocks(
-        std::span<const std::shared_ptr<memory::bm::BlockHandle>>(
-            discardBlocks.data(), discardBlocks.size()));
-  }
   if (!spillBlocks.empty()) {
     for (const auto& block : spillBlocks) {
       reclaimed += block->size();
