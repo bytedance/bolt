@@ -21,16 +21,19 @@
 #include <unicode/utf8.h>
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "bolt/expression/DecodedArgs.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/Registerer.h"
 #include "bolt/functions/lib/DateTimeFormatter.h"
+#include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
@@ -560,7 +563,7 @@ struct StringToTimestampFunction : LegacyTimestampContext {
   }
 };
 
-template <typename T, bool ToUtc>
+template <typename T, bool ToUtc, bool LaterOffset = false>
 struct TimestampZoneFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
   const tz::TimeZone* zone_ = nullptr;
@@ -586,7 +589,15 @@ struct TimestampZoneFunction {
       return;
     }
     result = input;
-    if constexpr (ToUtc) {
+    if constexpr (ToUtc && LaterOffset) {
+      const std::chrono::seconds seconds(input.getSeconds());
+      tz::validateRange(tz::time_point<std::chrono::seconds>(seconds));
+      // Calendar shifts gaps forward and chooses the later overlap offset.
+      const auto local = zone_->correct_nonexistent_time(seconds);
+      result = Timestamp(
+          zone_->to_sys(local, tz::TimeZone::TChoose::kLatest).count(),
+          input.getNanos());
+    } else if constexpr (ToUtc) {
       result.toGMT(*zone_, TimestampGapPolicy::kShiftForward);
     } else {
       result.toTimezone(*zone_);
@@ -596,7 +607,439 @@ struct TimestampZoneFunction {
 template <typename T>
 struct TimestampToUtcFunction : TimestampZoneFunction<T, true> {};
 template <typename T>
+struct TimestampToUtcLaterOffsetFunction
+    : TimestampZoneFunction<T, true, true> {};
+template <typename T>
 struct TimestampFromUtcFunction : TimestampZoneFunction<T, false> {};
+
+template <typename T, typename In>
+struct FloatingSecondsToTimestampFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(out_type<Timestamp>& result, const arg_type<In>& seconds) {
+    const In millis = seconds * 1000;
+    int64_t epochMillis;
+    // Flink uses (long) (seconds * 1000), including Java's NaN and overflow
+    // rules.
+    if (std::isnan(millis)) {
+      epochMillis = 0;
+    } else if (millis >= std::numeric_limits<int64_t>::max()) {
+      epochMillis = std::numeric_limits<int64_t>::max();
+    } else if (millis <= std::numeric_limits<int64_t>::min()) {
+      epochMillis = std::numeric_limits<int64_t>::min();
+    } else {
+      epochMillis = static_cast<int64_t>(millis);
+    }
+    result = Timestamp::fromMillis(epochMillis);
+  }
+};
+template <typename T>
+struct FloatSecondsToTimestampFunction
+    : FloatingSecondsToTimestampFunction<T, float> {};
+template <typename T>
+struct DoubleSecondsToTimestampFunction
+    : FloatingSecondsToTimestampFunction<T, double> {};
+
+// Overflow builtins retain Java's low bits without C++ signed overflow.
+template <typename To, typename From>
+To narrowInteger(From value) {
+  To result;
+  __builtin_add_overflow(value, 0, &result);
+  return result;
+}
+
+template <typename I>
+I addWrapped(I left, I right) {
+  I result;
+  __builtin_add_overflow(left, right, &result);
+  return result;
+}
+
+template <typename I>
+I subtractWrapped(I left, I right) {
+  I result;
+  __builtin_sub_overflow(left, right, &result);
+  return result;
+}
+
+template <typename T>
+struct TimestampToSecondsFunction {
+  template <typename Out>
+  void call(Out& result, const Timestamp& timestamp) {
+    const auto millis = timestamp.toMillis();
+    if constexpr (std::is_floating_point_v<Out>) {
+      // Java divides as double before narrowing to FLOAT.
+      result = static_cast<Out>(millis / 1000.0);
+    } else {
+      result = narrowInteger<Out>(millis / 1000);
+    }
+  }
+};
+
+template <typename T>
+struct IntegerSecondsToTimestampFunction {
+  template <typename In>
+  void call(Timestamp& result, const In& seconds) {
+    int64_t millis;
+    __builtin_mul_overflow(static_cast<int64_t>(seconds), 1000, &millis);
+    result = Timestamp::fromMillis(millis);
+  }
+};
+
+template <typename T>
+struct TimestampToDateFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(out_type<Date>& result, const arg_type<Timestamp>& timestamp) {
+    result = narrowInteger<int32_t>(timestamp.toMillis() / kMillisInDay);
+  }
+};
+
+// This millisecond UDF uses strict local-time resolution. SQL casts use the
+// separate timestamp-to-UTC functions to select an overlap/gap policy.
+template <typename T>
+struct TimestampToLongFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  const tz::TimeZone* zone_ = nullptr;
+  int32_t offset_ = 0;
+  bool constantZone_ = false;
+
+  void initialize(
+      const std::vector<TypePtr>&,
+      const core::QueryConfig& config,
+      const arg_type<Timestamp>*) {
+    if (config.adjustTimestampToTimezone()) {
+      const auto name = config.sessionTimezone();
+      if (!name.empty()) {
+        resolveTimeZone(name, zone_, offset_);
+      }
+    }
+  }
+
+  void initialize(
+      const std::vector<TypePtr>&,
+      const core::QueryConfig&,
+      const arg_type<Timestamp>*,
+      const arg_type<Varchar>* zone) {
+    if (zone != nullptr && !zone->empty()) {
+      resolveTimeZone(
+          std::string_view(zone->data(), zone->size()), zone_, offset_);
+      constantZone_ = true;
+    }
+  }
+
+  void call(out_type<int64_t>& result, const arg_type<Timestamp>& input) {
+    result = toMillis(input, zone_, offset_);
+  }
+
+  void call(
+      out_type<int64_t>& result,
+      const arg_type<Timestamp>& input,
+      const arg_type<Varchar>& zone) {
+    const tz::TimeZone* timeZone = zone_;
+    int32_t offset = offset_;
+    if (!constantZone_) {
+      timeZone = nullptr;
+      offset = 0;
+      resolveTimeZone(
+          std::string_view(zone.data(), zone.size()), timeZone, offset);
+    }
+    result = toMillis(input, timeZone, offset);
+  }
+
+  static int64_t
+  toMillis(const Timestamp& input, const tz::TimeZone* zone, int32_t offset) {
+    if (zone != nullptr && zone->id() != 0) {
+      if (const auto zoneOffset = zone->offset()) {
+        offset = zoneOffset->count() * util::kSecsPerMinute;
+      } else {
+        const std::chrono::seconds seconds(input.getSeconds());
+        return Timestamp(zone->to_sys(seconds).count(), input.getNanos())
+            .toMillis();
+      }
+    }
+    // UTC and fixed offsets skip the calendar lookup. The offset-adjusted
+    // result must fit in int64 milliseconds.
+    if (offset == 0) {
+      return input.toMillis();
+    }
+    const __int128_t millis =
+        static_cast<__int128_t>(input.getSeconds()) * 1'000 +
+        input.getNanos() / 1'000'000 - static_cast<int64_t>(offset) * 1'000;
+    BOLT_USER_CHECK(
+        millis >= INT64_MIN && millis <= INT64_MAX,
+        "Could not convert Timestamp({}, {}) to milliseconds",
+        input.getSeconds(),
+        input.getNanos());
+    return static_cast<int64_t>(millis);
+  }
+};
+
+template <typename T>
+struct IntervalAddFunction {
+  template <typename I>
+  void call(I& result, const I& left, const I& right) {
+    result = addWrapped(left, right);
+  }
+};
+
+template <typename T>
+struct IntervalSubtractFunction {
+  template <typename I>
+  void call(I& result, const I& left, const I& right) {
+    result = subtractWrapped(left, right);
+  }
+};
+
+template <typename T>
+struct IntervalNegateFunction {
+  template <typename I>
+  void call(I& result, const I& value) {
+    result = subtractWrapped(I{0}, value);
+  }
+};
+
+// Calcite counts the digits without the sign when padding interval fields.
+void appendIntervalNumber(std::string& result, int64_t value, int width) {
+  int digits = 1;
+  for (auto remaining = value / 10; remaining != 0; remaining /= 10) {
+    ++digits;
+  }
+  result.append(std::max(0, width - digits), '0');
+  result.append(std::to_string(value));
+}
+
+template <typename T>
+struct IntervalYearMonthToStringFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(
+      out_type<Varchar>& result,
+      const arg_type<IntervalYearMonth>& input) {
+    const auto value = input < 0 ? subtractWrapped(int32_t{0}, input) : input;
+    std::string text = input < 0 ? "-" : "+";
+    text += std::to_string(value / 12) + "-";
+    appendIntervalNumber(text, value % 12, 2);
+    result.copy_from(text);
+  }
+};
+
+template <typename T>
+struct IntervalDayTimeToStringFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(out_type<Varchar>& result, const arg_type<IntervalDayTime>& input) {
+    const auto value = input < 0 ? subtractWrapped(int64_t{0}, input) : input;
+    std::string text = input < 0 ? "-" : "+";
+    // Flink's Calcite formatter narrows the day count to int32.
+    text += std::to_string(narrowInteger<int32_t>(value / kMillisInDay)) + " ";
+    appendIntervalNumber(text, value / 3'600'000 % 24, 2);
+    text += ":";
+    appendIntervalNumber(text, value / 60'000 % 60, 2);
+    text += ":";
+    appendIntervalNumber(text, value / 1000 % 60, 2);
+    text += ".";
+    appendIntervalNumber(text, value % 1000, 3);
+    result.copy_from(text);
+  }
+};
+
+// Flink and Calcite use truncating division and int32 narrowing, including
+// civil dates before -4800-03-01.
+int32_t localDateToUnixDate(const util::CivilDate& date) {
+  const int32_t a = (14 - date.month) / 12;
+  const int64_t y = static_cast<int64_t>(date.year) + 4800 - a;
+  const int32_t m = date.month + 12 * a - 3;
+  return narrowInteger<int32_t>(
+      date.day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 -
+      32'045 - 2'440'588);
+}
+
+// Calcite's Julian-day decomposition deliberately uses Java signed division
+// and int32 addition. Keep these rules for dates outside the usual SQL range.
+util::CivilDate intervalDate(int32_t days) {
+  const int32_t shifted = addWrapped(days, int32_t{2'440'588 + 32'044});
+  const int32_t eras = shifted / 146'097;
+  const int32_t eraDays = shifted % 146'097;
+  const int32_t centuries = ((eraDays / 36'524 + 1) * 3) / 4;
+  const int32_t centuryDays = eraDays - centuries * 36'524;
+  const int32_t cycles = centuryDays / 1461;
+  const int32_t cycleDays = centuryDays % 1461;
+  const int32_t yearsInCycle = ((cycleDays / 365 + 1) * 3) / 4;
+  const int32_t yearDays = cycleDays - yearsInCycle * 365;
+  const int32_t year = eras * 400 + centuries * 100 + cycles * 4 + yearsInCycle;
+  const int32_t month = (yearDays * 5 + 308) / 153 - 2;
+  const int32_t day = yearDays - (month + 4) * 153 / 5 + 123;
+  return {year - 4800 + (month + 2) / 12, (month + 2) % 12 + 1, day};
+}
+
+int32_t addMonths(int32_t days, int32_t months) {
+  const auto date = intervalDate(days);
+  const int32_t month = addWrapped(date.month, months);
+  const int32_t year = date.year + month / 12 - (month % 12 <= 0);
+  const int32_t newMonth = (month % 12 + 11) % 12 + 1;
+  const int32_t day =
+      std::min(date.day, util::getMaxDayOfMonth(year, newMonth));
+  return localDateToUnixDate({year, newMonth, day});
+}
+
+template <typename T, bool Subtract>
+struct DateIntervalFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(
+      out_type<Date>& result,
+      const arg_type<Date>& date,
+      const arg_type<IntervalDayTime>& interval) {
+    const auto days = interval / kMillisInDay;
+    BOLT_USER_CHECK(
+        days >= std::numeric_limits<int32_t>::min() &&
+            days <= std::numeric_limits<int32_t>::max(),
+        "Day interval exceeds integer range");
+    if constexpr (Subtract) {
+      result = subtractWrapped(date, static_cast<int32_t>(days));
+    } else {
+      result = addWrapped(date, static_cast<int32_t>(days));
+    }
+  }
+
+  void call(
+      out_type<Date>& result,
+      const arg_type<Date>& date,
+      const arg_type<IntervalYearMonth>& interval) {
+    const auto months =
+        Subtract ? subtractWrapped(int32_t{0}, interval) : interval;
+    result = addMonths(date, months);
+  }
+};
+template <typename T>
+using DateAddIntervalFunction = DateIntervalFunction<T, false>;
+template <typename T>
+using DateSubtractIntervalFunction = DateIntervalFunction<T, true>;
+
+template <typename T>
+struct IntervalAddDateFunction {
+  template <typename I>
+  void call(int32_t& result, const I& interval, const int32_t& date) {
+    DateAddIntervalFunction<T>().call(result, date, interval);
+  }
+};
+
+template <typename T, bool Subtract>
+struct TimestampIntervalFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(
+      out_type<Timestamp>& result,
+      const arg_type<Timestamp>& input,
+      const arg_type<IntervalDayTime>& interval) {
+    const auto millis = Subtract ? subtractWrapped(input.toMillis(), interval)
+                                 : addWrapped(input.toMillis(), interval);
+    result = withMillis(input, millis);
+  }
+
+  void call(
+      out_type<Timestamp>& result,
+      const arg_type<Timestamp>& input,
+      const arg_type<IntervalYearMonth>& interval) {
+    const auto millis = input.toMillis();
+    const auto remainder =
+        (millis % kMillisInDay + kMillisInDay) % kMillisInDay;
+    const auto days = narrowInteger<int32_t>(
+        subtractWrapped(millis, remainder) / kMillisInDay);
+    const auto months =
+        Subtract ? subtractWrapped(int32_t{0}, interval) : interval;
+    result = withMillis(
+        input,
+        static_cast<int64_t>(addMonths(days, months)) * kMillisInDay +
+            remainder);
+  }
+
+  static Timestamp withMillis(const Timestamp& input, int64_t millis) {
+    const auto result = Timestamp::fromMillis(millis);
+    return Timestamp(
+        result.getSeconds(), result.getNanos() + input.getNanos() % 1'000'000);
+  }
+};
+template <typename T>
+using TimestampAddIntervalFunction = TimestampIntervalFunction<T, false>;
+template <typename T>
+using TimestampSubtractIntervalFunction = TimestampIntervalFunction<T, true>;
+
+template <typename T>
+struct IntervalAddTimestampFunction {
+  template <typename I>
+  void call(Timestamp& result, const I& interval, const Timestamp& timestamp) {
+    TimestampAddIntervalFunction<T>().call(result, timestamp, interval);
+  }
+};
+
+template <typename Interval>
+void registerIntervalFunctions(const std::string& prefix) {
+  registerFunction<IntervalAddFunction, Interval, Interval, Interval>(
+      {prefix + "add"});
+  registerFunction<IntervalSubtractFunction, Interval, Interval, Interval>(
+      {prefix + "subtract"});
+  registerFunction<IntervalNegateFunction, Interval, Interval>(
+      {prefix + "negative"});
+  registerFunction<DateAddIntervalFunction, Date, Date, Interval>(
+      {prefix + "add"});
+  registerFunction<DateSubtractIntervalFunction, Date, Date, Interval>(
+      {prefix + "subtract"});
+  registerFunction<IntervalAddDateFunction, Date, Interval, Date>(
+      {prefix + "add"});
+  registerFunction<
+      TimestampAddIntervalFunction,
+      Timestamp,
+      Timestamp,
+      Interval>({prefix + "add"});
+  registerFunction<
+      TimestampSubtractIntervalFunction,
+      Timestamp,
+      Timestamp,
+      Interval>({prefix + "subtract"});
+  registerFunction<
+      IntervalAddTimestampFunction,
+      Timestamp,
+      Interval,
+      Timestamp>({prefix + "add"});
+}
+
+// The input has already been shifted into the session's local time zone.
+template <typename T>
+struct TimestampToLocalDateFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(out_type<Date>& result, const arg_type<Timestamp>& timestamp) {
+    // From -4800-03-01, Flink's shifted calendar year is non-negative and its
+    // formula matches epoch-day flooring.
+    constexpr int64_t kFirstMatchingEpochDay = -2'472'632;
+    const auto days = timestamp.getDays();
+    if (days >= kFirstMatchingEpochDay) {
+      result = narrowInteger<int32_t>(days);
+      return;
+    }
+    result = localDateToUnixDate(
+        util::toCivilDateTime(timestamp, /*allowOverflow=*/true).date);
+  }
+};
+
+template <typename T>
+struct TimeExtractFunction {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  void call(
+      out_type<int32_t>& result,
+      const arg_type<int32_t>& millis,
+      const arg_type<int32_t>& modulus,
+      const arg_type<int32_t>& divisor) {
+    BOLT_USER_CHECK_GT(modulus, 0);
+    BOLT_USER_CHECK_GT(divisor, 0);
+    // Flink TIME extraction retains the sign of its millisecond remainder.
+    result = (millis % modulus) / divisor;
+  }
+};
 
 template <typename T>
 struct TimeToTimestampFunction {
@@ -674,8 +1117,55 @@ void registerTemporalFunctions(const std::string& prefix) {
       makeTimestampPrecision);
   registerFunction<TimestampToUtcFunction, Timestamp, Timestamp, Varchar>(
       {prefix + "flink_timestamp_to_utc"});
+  registerFunction<
+      TimestampToUtcLaterOffsetFunction,
+      Timestamp,
+      Timestamp,
+      Varchar>({prefix + "flink_timestamp_to_utc_later_offset"});
   registerFunction<TimestampFromUtcFunction, Timestamp, Timestamp, Varchar>(
       {prefix + "flink_timestamp_from_utc"});
+  registerFunction<TimestampToLongFunction, int64_t, Timestamp>(
+      {prefix + "timestamp_to_long"});
+  registerFunction<TimestampToLongFunction, int64_t, Timestamp, Varchar>(
+      {prefix + "timestamp_to_long"});
+  registerFunction<TimestampToSecondsFunction, int64_t, Timestamp>(
+      {prefix + "flink_timestamp_to_long_seconds"});
+  registerFunction<TimestampToSecondsFunction, int32_t, Timestamp>(
+      {prefix + "flink_timestamp_to_int_seconds"});
+  registerFunction<TimestampToSecondsFunction, int16_t, Timestamp>(
+      {prefix + "flink_timestamp_to_smallint_seconds"});
+  registerFunction<TimestampToSecondsFunction, int8_t, Timestamp>(
+      {prefix + "flink_timestamp_to_tinyint_seconds"});
+  registerFunction<TimestampToSecondsFunction, float, Timestamp>(
+      {prefix + "flink_timestamp_to_float_seconds"});
+  registerFunction<TimestampToSecondsFunction, double, Timestamp>(
+      {prefix + "flink_timestamp_to_double_seconds"});
+  registerFunction<IntegerSecondsToTimestampFunction, Timestamp, int64_t>(
+      {prefix + "flink_long_seconds_to_timestamp"});
+  registerFunction<IntegerSecondsToTimestampFunction, Timestamp, int32_t>(
+      {prefix + "flink_int_seconds_to_timestamp"});
+  registerFunction<IntegerSecondsToTimestampFunction, Timestamp, int16_t>(
+      {prefix + "flink_short_seconds_to_timestamp"});
+  registerFunction<IntegerSecondsToTimestampFunction, Timestamp, int8_t>(
+      {prefix + "flink_byte_seconds_to_timestamp"});
+  registerFunction<TimestampToDateFunction, Date, Timestamp>(
+      {prefix + "flink_timestamp_to_date"});
+  registerFunction<
+      IntervalYearMonthToStringFunction,
+      Varchar,
+      IntervalYearMonth>({prefix + "flink_interval_year_month_to_string"});
+  registerFunction<IntervalDayTimeToStringFunction, Varchar, IntervalDayTime>(
+      {prefix + "flink_interval_day_time_to_string"});
+  registerIntervalFunctions<IntervalYearMonth>(prefix);
+  registerIntervalFunctions<IntervalDayTime>(prefix);
+  registerFunction<FloatSecondsToTimestampFunction, Timestamp, float>(
+      {prefix + "flink_float_seconds_to_timestamp"});
+  registerFunction<DoubleSecondsToTimestampFunction, Timestamp, double>(
+      {prefix + "flink_double_seconds_to_timestamp"});
+  registerFunction<TimestampToLocalDateFunction, Date, Timestamp>(
+      {prefix + "flink_timestamp_to_local_date"});
+  registerFunction<TimeExtractFunction, int32_t, int32_t, int32_t, int32_t>(
+      {prefix + "flink_time_extract"});
   registerFunction<TimeToTimestampFunction, Timestamp, int32_t>(
       {prefix + "flink_time_to_timestamp"});
   registerFunction<TimestampToTimeFunction, int32_t, Timestamp>(
