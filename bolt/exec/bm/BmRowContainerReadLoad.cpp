@@ -16,6 +16,8 @@
 
 #include "bolt/exec/bm/BmRowContainer.h"
 
+#include "bolt/exec/MemoryPressureUtils.h"
+
 #include "bolt/common/base/Exceptions.h"
 
 #include <limits>
@@ -69,6 +71,8 @@ bool BmRowContainer::canBulkRead(
   if (bytes > maxBulkReadBytes) {
     return false;
   }
+  const auto scopedDisableMemoryExpansion =
+      memorypressure::maybeScopedDisableMemoryExpansion(taskAttemptId_);
   const auto reserved =
       bufferManager_->MaybeReserve(bytes * admissionMultiplier);
   bufferManager_->ReleaseUnusedReservation();

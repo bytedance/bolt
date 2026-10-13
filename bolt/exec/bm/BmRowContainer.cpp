@@ -27,10 +27,12 @@ BmRowContainer::BmRowContainer(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     memory::bm::MemoryTag tag,
     uint32_t rowBlockSize,
-    uint32_t heapBlockSize)
+    uint32_t heapBlockSize,
+    std::optional<int64_t> taskAttemptId)
     : types_(std::move(types)),
       layout_(types_, nullable, numKeyColumns, rowBlockSize),
       bufferManager_(std::move(bufferManager)),
+      taskAttemptId_(taskAttemptId),
       segments_(bufferManager_, tag, &layout_, rowBlockSize, heapBlockSize),
       blockLoader_(bufferManager_, &layout_, &segments_),
       rowCopier_(&layout_, &segments_) {
