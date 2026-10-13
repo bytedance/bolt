@@ -171,8 +171,13 @@ SplitReader::SplitReader(
       ioStats_(ioStats),
       baseReaderOpts_(connectorQueryCtx->memoryPool()),
       isPartOfPaimonSplit_(isPartOfPaimonSplit) {
-  if ((hiveSplit->fileFormat == dwio::common::FileFormat::TEXT) &&
-      hiveTableHandle->isFilterPushdownEnabled()) {
+  auto unsupportedFilterPushdown =
+      hiveSplit->fileFormat == dwio::common::FileFormat::TEXT;
+#ifndef BOLT_ENABLE_NATIVE_LANCE_READER
+  unsupportedFilterPushdown |=
+      hiveSplit->fileFormat == dwio::common::FileFormat::LANCE;
+#endif
+  if (unsupportedFilterPushdown && hiveTableHandle->isFilterPushdownEnabled()) {
     BOLT_FAIL(
         "{} reader does not support filter pushdown yet!",
         hiveSplit->fileFormat);

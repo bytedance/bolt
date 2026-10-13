@@ -32,6 +32,7 @@
 
 #include <fmt/core.h>
 #include <fmt/format.h>
+#include <algorithm>
 #include <exception>
 #include <string>
 #include <unordered_map>
@@ -47,7 +48,6 @@
 #include "bolt/dwio/common/exception/Exception.h"
 #include "bolt/expression/FieldReference.h"
 namespace bytedance::bolt::connector::hive {
-
 class HiveTableHandle;
 class HiveColumnHandle;
 
@@ -77,6 +77,7 @@ HiveDataSource::HiveDataSource(
   }
   parquetRepDefStreamingWindowSize_ =
       queryConfig.parquetRepDefStreamingWindowSize();
+  lanceDecodeParallelism_ = queryConfig.lanceDecodeParallelism();
   for (const auto& key : HiveConfig::hms_session_key) {
     std::optional<std::string> value = queryConfig.get<std::string>(key);
     if (value.has_value()) {
@@ -369,6 +370,13 @@ std::unique_ptr<SplitReader> HiveDataSource::createConfiguredSplitReader(
 
   auto splitReader = createSplitReader(split, isPartOfPaimonSplit);
   splitReader->configureReaderOptions();
+  if (split->fileFormat == dwio::common::FileFormat::LANCE &&
+      lanceDecodeParallelism_ > 1 && executor_ != nullptr) {
+    splitReader->rowReaderOptions().setDecodingParallelismFactor(
+        lanceDecodeParallelism_);
+    splitReader->rowReaderOptions().setDecodingExecutor(
+        std::shared_ptr<folly::Executor>(executor_, [](folly::Executor*) {}));
+  }
   splitReader->rowReaderOptions().setAppendParquetRowNumberAndFileName(
       enable_parquet_rownum_and_filename);
 

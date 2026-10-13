@@ -1,3 +1,4 @@
 .github export-ignore
 .licenserc.yaml export-ignore
 .pre-commit-config.yaml export-ignore
+*.lance binary

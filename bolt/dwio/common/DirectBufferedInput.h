@@ -186,10 +186,7 @@ class DirectBufferedInput : public BufferedInput {
         asyncThreadCtx_(asyncThreadCtx) {}
 
   ~DirectBufferedInput() override {
-    streamToCoalescedLoad_.wlock()->clear();
-    for (auto& load : coalescedLoads_) {
-      load->cancel();
-    }
+    cancelPendingLoads();
   }
 
   std::unique_ptr<SeekableInputStream> enqueue(
@@ -211,6 +208,8 @@ class DirectBufferedInput : public BufferedInput {
   }
 
   void load(const LogType /*unused*/) override;
+
+  void cancelPendingLoads() override;
 
   bool isBuffered(uint64_t offset, uint64_t length) const override;
 
