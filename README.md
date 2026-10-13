@@ -60,6 +60,12 @@ Run the following script to set up your development environment and install depe
 
 ```shell
 scripts/setup-dev-env.sh
+
+# configure your conan profile
+# For more detailed usage, see the instructions in configure-conan-profile.py.
+python ./scripts/configure-conan-profile.py --compiler clang  --libcxx=libc++
+# or
+python ./scripts/configure-conan-profile.py --compiler gcc  --libcxx=libstdc++11
 ```
 
 Bolt manages its dependencies with [Conan](https://conan.io/), an open-source, cross-platform package manager.

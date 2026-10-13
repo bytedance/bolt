@@ -664,8 +664,8 @@ def toolchain_flag_entries(
             normalized_values.extend(extra_flags)
         if pgo is not None:
             normalized_values.append(pgo.flag)
-        if toolchain_root is not None:
-            normalized_values.append(f"--gcc-toolchain={toolchain_root}")
+        if toolchain_root is not None and key == "tools.build:cxxflags":
+            normalized_values.append(shlex.quote(f"--gcc-toolchain={toolchain_root}"))
         if linker and key in (
             "tools.build:exelinkflags",
             "tools.build:sharedlinkflags",
@@ -679,10 +679,16 @@ def toolchain_flag_entries(
 
 
 def gcc_toolchain_root(gcc_executable: str) -> Path:
-    gcc_path = Path(gcc_executable)
-    if gcc_path.parent.name == "bin":
-        return gcc_path.parent.parent
-    return gcc_path.parent
+    # Query GCC itself: wrappers and symlinks may live outside its installation.
+    libgcc = Path(run_command([gcc_executable, "-print-libgcc-file-name"]))
+    if libgcc.is_absolute() and libgcc.is_file():
+        # Clang searches <prefix>/lib{,64}/gcc/<target>/<version>.
+        for parent in libgcc.parents:
+            if parent.name == "gcc" and parent.parent.name in ("lib", "lib64"):
+                return parent.parent.parent
+    raise RuntimeError(
+        f"Cannot determine GCC toolchain root from {gcc_executable}: {libgcc}"
+    )
 
 
 def discover_latest_clang() -> CompilerInfo:
@@ -730,13 +736,14 @@ def discover_latest_gcc_toolchain() -> GccToolchainInfo:
                 continue
             try:
                 compiler = detect_compiler(str(entry))
+                root = gcc_toolchain_root(compiler.executables["c"])
             except (RuntimeError, subprocess.CalledProcessError, OSError):
                 continue
             if compiler.family != "gcc":
                 continue
             candidates[compiler.executables["c"]] = GccToolchainInfo(
                 version=compiler.version,
-                root=gcc_toolchain_root(compiler.executables["c"]),
+                root=root,
                 executables=compiler.executables,
             )
 
