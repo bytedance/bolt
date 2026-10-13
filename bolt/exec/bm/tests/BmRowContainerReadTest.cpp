@@ -19,7 +19,9 @@
 #include "bolt/common/memory/MemoryArbitrator.h"
 
 #include <fmt/format.h>
+#include <folly/ScopeGuard.h>
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
@@ -492,6 +494,200 @@ TEST_F(BmRowContainerDiskIoTest, ReadOnlyWindowReleaseUnpinsWithoutReclaiming) {
   EXPECT_EQ("release-string-value-0", flat->valueAt(0).str());
   EXPECT_EQ("release-string-value-1024", flat->valueAt(1024).str());
   EXPECT_EQ("release-string-value-4095", flat->valueAt(4095).str());
+}
+
+TEST_F(BmRowContainerDiskIoTest, ScopedRowsSharePinsAndReleaseAllHeapBlocks) {
+  constexpr vector_size_t kRows = 4096;
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      32 << 10,
+      16 << 10);
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+      makeFlatVector<std::string>(
+          kRows,
+          [](auto row) {
+            return fmt::format("scoped-{}-{}", row, std::string(256, 'x'));
+          }),
+  });
+  storeAll(container, input);
+  const auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = window.listRowIds();
+  memory::MemoryPool* bmPool = nullptr;
+  root_->visitChildren([&](memory::MemoryPool* child) {
+    bmPool = child;
+    return false;
+  });
+  ASSERT_NE(nullptr, bmPool);
+
+  auto outer = window.loadRowsScoped({ids.data(), 1});
+  const auto outerStats = bufferManager_->stats();
+  // One row pins the entire chunk, including several separate heap blocks.
+  ASSERT_GT(outerStats.pinnedResidentBytes, (32 + 16) << 10);
+  const auto reserves = bmPool->stats().numReserves;
+  {
+    const RowId repeated[] = {ids.front(), ids.front()};
+    auto inner = window.loadRowsScoped({repeated, 2});
+    EXPECT_EQ(outer.data()[0], inner.data()[0]);
+    EXPECT_EQ(inner.data()[0], inner.data()[1]);
+    EXPECT_EQ(outerStats.pinCount, bufferManager_->stats().pinCount);
+    EXPECT_EQ(reserves, bmPool->stats().numReserves);
+    EXPECT_EQ(0, window.releaseLoadedChunks());
+    EXPECT_EQ(0, window.evictLoadedChunks());
+    EXPECT_THROW(window.loadRow(ids.front()), BoltException);
+  }
+  EXPECT_EQ(
+      outerStats.pinnedResidentBytes,
+      bufferManager_->stats().pinnedResidentBytes);
+  {
+    auto distinct = window.loadRowsScoped({&ids.back(), 1});
+    EXPECT_GT(
+        bufferManager_->stats().pinnedResidentBytes,
+        outerStats.pinnedResidentBytes);
+  }
+  EXPECT_EQ(
+      outerStats.pinnedResidentBytes,
+      bufferManager_->stats().pinnedResidentBytes);
+  ASSERT_GT(bufferManager_->reclaimableBytes(), 0);
+  {
+    const auto reclaimedBefore = bufferManager_->stats().reclaimedBytes;
+    memory::MemoryReclaimer::Stats stats;
+    memory::ScopedMemoryArbitrationContext context(root_.get());
+    root_->reclaim(bufferManager_->reclaimableBytes(), 0, stats);
+    // Root reservation accounting is coarser than these small chunks.
+    EXPECT_GT(bufferManager_->stats().reclaimedBytes, reclaimedBefore);
+  }
+  // Reclaiming the expired inner scope must not invalidate the outer string.
+  auto result = BaseVector::create(VARCHAR(), 0, pool());
+  container.extractColumnResident(outer.data(), outer.size(), 1, result);
+  const auto expected = fmt::format("scoped-0-{}", std::string(256, 'x'));
+  EXPECT_EQ(expected, result->asFlatVector<StringView>()->valueAt(0).str());
+  const auto beforeRelease = bufferManager_->stats();
+  outer.reset();
+  outer.reset();
+  EXPECT_TRUE(outer.empty());
+  EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+  EXPECT_EQ(
+      beforeRelease.spillWriteCount, bufferManager_->stats().spillWriteCount);
+  {
+    memory::MemoryReclaimer::Stats stats;
+    memory::ScopedMemoryArbitrationContext context(root_.get());
+    EXPECT_GT(root_->reclaim(bufferManager_->reclaimableBytes(), 0, stats), 0);
+  }
+  EXPECT_EQ(expected, result->asFlatVector<StringView>()->valueAt(0).str());
+  auto reloaded = window.loadRowsScoped({ids.data(), 1});
+  container.extractColumnResident(reloaded.data(), reloaded.size(), 1, result);
+  EXPECT_EQ(expected, result->asFlatVector<StringView>()->valueAt(0).str());
+  EXPECT_GT(
+      bufferManager_->stats().spillReadCount, beforeRelease.spillReadCount);
+}
+
+TEST_F(BmRowContainerDiskIoTest, ScopedRowsMoveAndUnwind) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
+  storeAll(container, makeInput());
+  const auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = window.listRowIds();
+  {
+    auto first = window.loadRowsScoped({ids.data(), ids.size()});
+    const auto pinned = bufferManager_->stats().pinnedResidentBytes;
+    auto second = std::move(first);
+    EXPECT_TRUE(first.empty());
+    auto third = window.loadRowsScoped({ids.data(), 1});
+    third = std::move(second);
+    EXPECT_TRUE(second.empty());
+    auto* self = &third;
+    third = std::move(*self);
+    EXPECT_EQ(ids.size(), third.size());
+    EXPECT_EQ(pinned, bufferManager_->stats().pinnedResidentBytes);
+    EXPECT_THROW(
+        ([&]() {
+          auto nested = window.loadRowsScoped({ids.data(), 1});
+          BOLT_FAIL("unwind scoped rows");
+        }()),
+        BoltException);
+    EXPECT_EQ(pinned, bufferManager_->stats().pinnedResidentBytes);
+    const SegmentRowRange invalid{
+        segment, static_cast<RowNumber>(ids.size()), 1};
+    EXPECT_THROW(window.loadRowsScoped({&invalid, 1}), BoltException);
+  }
+  EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+  auto movedWindow = std::move(window);
+  auto loaded = movedWindow.loadRowsScoped({ids.data(), 1});
+  EXPECT_EQ(1, loaded.size());
+}
+
+TEST_F(BmRowContainerDiskIoTest, ScopedRowsProtectBorrowedLegacyPins) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
+  storeAll(container, makeInput());
+  const auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = window.listRowIds();
+  auto raw = window.loadRows({ids.data(), ids.size()});
+  {
+    auto scoped = window.loadRowsScoped({ids.data(), 1});
+    EXPECT_EQ(raw.front(), scoped.data()[0]);
+    EXPECT_EQ(0, window.releaseLoadedChunks());
+    EXPECT_EQ(0, window.evictLoadedChunks());
+  }
+  EXPECT_GT(bufferManager_->stats().pinnedResidentBytes, 0);
+  EXPECT_GT(window.releaseLoadedChunks(), 0);
+  EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+}
+
+TEST_F(BmRowContainerDiskIoTest, ScopedRowsRollBackLeasesWhenReservationFails) {
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {false, false},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      32 << 10,
+      16 << 10);
+  constexpr vector_size_t kRows = 4096;
+  storeAll(
+      container,
+      makeRowVector({
+          makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+          makeFlatVector<std::string>(
+              kRows, [](auto row) { return std::string(256, 'a' + row % 26); }),
+      }));
+  const auto segment = container.spillActiveSegment();
+  auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
+  const auto ids = window.listRowIds();
+  {
+    auto pressurePool = root_->addLeafChild("scoped-load-pressure");
+    const auto pressureBytes = root_->freeBytes() - (64 << 10);
+    auto* pressure = pressurePool->allocate(pressureBytes);
+    auto guard = folly::makeGuard(
+        [&]() { pressurePool->free(pressure, pressureBytes); });
+    EXPECT_THROW(
+        window.loadRowsScoped({ids.data(), ids.size()}), BoltException);
+    EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+  }
+  // No stale count from the failed batch may prevent the successful batch
+  // from releasing the same chunks.
+  {
+    auto loaded = window.loadRowsScoped({ids.data(), ids.size()});
+    EXPECT_EQ(ids.size(), loaded.size());
+    EXPECT_GT(bufferManager_->stats().pinnedResidentBytes, 0);
+  }
+  EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
 }
 
 TEST_F(BmRowContainerDiskIoTest, CanBulkReadReservesForUnpinnedResidentBlocks) {

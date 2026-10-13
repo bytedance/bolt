@@ -61,6 +61,70 @@ uint64_t releaseLoadedChunk(ChunkData& chunkData) {
 
 } // namespace
 
+ScopedLoadedRows::~ScopedLoadedRows() {
+  reset();
+}
+
+ScopedLoadedRows::ScopedLoadedRows(ScopedLoadedRows&& other) noexcept
+    : session_(std::exchange(other.session_, nullptr)),
+      rows_(std::move(other.rows_)),
+      chunkKeys_(std::move(other.chunkKeys_)) {
+  other.rows_.clear();
+  other.chunkKeys_.clear();
+}
+
+ScopedLoadedRows& ScopedLoadedRows::operator=(
+    ScopedLoadedRows&& other) noexcept {
+  if (this != &other) {
+    reset();
+    session_ = std::exchange(other.session_, nullptr);
+    rows_ = std::move(other.rows_);
+    chunkKeys_ = std::move(other.chunkKeys_);
+    other.rows_.clear();
+    other.chunkKeys_.clear();
+  }
+  return *this;
+}
+
+ScopedLoadedRows ScopedLoadedRows::borrowed(std::vector<const char*> rows) {
+  ScopedLoadedRows result;
+  result.rows_ = std::move(rows);
+  return result;
+}
+
+void ScopedLoadedRows::reset() noexcept {
+  if (session_ != nullptr) {
+    session_->releaseRowLeases(chunkKeys_);
+    session_ = nullptr;
+  }
+  rows_.clear();
+  chunkKeys_.clear();
+}
+
+ReadOnlyWindowReadSession::~ReadOnlyWindowReadSession() {
+  CHECK(activeLeases_.empty())
+      << "Scoped batches must outlive neither session nor container";
+}
+
+ReadOnlyWindowReadSession::ReadOnlyWindowReadSession(
+    ReadOnlyWindowReadSession&& other) noexcept {
+  *this = std::move(other);
+}
+
+ReadOnlyWindowReadSession& ReadOnlyWindowReadSession::operator=(
+    ReadOnlyWindowReadSession&& other) noexcept {
+  if (this != &other) {
+    CHECK(activeLeases_.empty());
+    CHECK(other.activeLeases_.empty());
+    container_ = std::exchange(other.container_, nullptr);
+    segmentOrder_ = std::move(other.segmentOrder_);
+    segments_ = std::move(other.segments_);
+    loadedChunks_ = std::move(other.loadedChunks_);
+    loadedChunkKeys_ = std::move(other.loadedChunkKeys_);
+  }
+  return *this;
+}
+
 ReadOnlyWindowReadSession::ReadOnlyWindowReadSession(
     BmRowContainer* container,
     std::vector<SegmentId> segments)
@@ -74,8 +138,8 @@ std::vector<RowId> ReadOnlyWindowReadSession::listRowIds() const {
       {segmentOrder_.data(), segmentOrder_.size()});
 }
 
-std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
-    folly::Range<const RowId*> rows) {
+std::vector<ChunkData*> ReadOnlyWindowReadSession::chunksForRows(
+    folly::Range<const RowId*> rows) const {
   BOLT_CHECK_NOT_NULL(container_);
 
   std::vector<ChunkData*> chunks;
@@ -97,8 +161,72 @@ std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
     if (seenChunks.insert(key).second) {
       chunks.push_back(&chunk);
     }
+  }
+  return chunks;
+}
+
+ScopedLoadedRows ReadOnlyWindowReadSession::loadRowsScoped(
+    folly::Range<const RowId*> rows) {
+  auto chunks = chunksForRows(rows);
+  ScopedLoadedRows result;
+  result.rows_.resize(rows.size());
+  result.chunkKeys_.reserve(chunks.size());
+  result.session_ = chunks.empty() ? nullptr : this;
+  for (auto* chunk : chunks) {
+    const auto key = chunkKey(chunk->meta.segmentId, chunk->meta.id);
+    const auto& segment =
+        container_->segments_.segmentData(chunk->meta.segmentId);
+    auto [it, inserted] = activeLeases_.try_emplace(
+        key,
+        ActiveLease{
+            chunk,
+            0,
+            segment.meta.state != SegmentState::kActiveResident &&
+                !chunkHasPinnedBlocks(*chunk)});
+    ++it->second.count;
+    // Capacity is reserved before acquiring leases, so recording a lease
+    // cannot throw. The result unwinds all acquired leases if loading fails.
+    result.chunkKeys_.push_back(key);
+  }
+
+  container_->ensureChunksLoaded({chunks.data(), chunks.size()});
+  for (size_t i = 0; i < rows.size(); ++i) {
+    result.rows_[i] = container_->segments_.rowPointer(rows[i]);
+  }
+  return result;
+}
+
+ScopedLoadedRows ReadOnlyWindowReadSession::loadRowsScoped(
+    folly::Range<const SegmentRowRange*> ranges) {
+  auto rows = expandRanges(ranges);
+  return loadRowsScoped({rows.data(), rows.size()});
+}
+
+void ReadOnlyWindowReadSession::releaseRowLeases(
+    const std::vector<uint64_t>& chunkKeys) noexcept {
+  for (auto key : chunkKeys) {
+    auto it = activeLeases_.find(key);
+    CHECK(it != activeLeases_.end());
+    CHECK_GT(it->second.count, 0);
+    if (--it->second.count == 0) {
+      if (it->second.releasePins) {
+        releaseLoadedChunk(*it->second.chunk);
+      }
+      activeLeases_.erase(it);
+    }
+  }
+}
+
+std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
+    folly::Range<const RowId*> rows) {
+  BOLT_CHECK(
+      activeLeases_.empty(),
+      "Cannot start raw reads with active scoped batches");
+  auto chunks = chunksForRows(rows);
+  for (auto* chunk : chunks) {
+    const auto key = chunkKey(chunk->meta.segmentId, chunk->meta.id);
     if (loadedChunkKeys_.insert(key).second) {
-      loadedChunks_.emplace_back(row.segmentId, chunk.meta.id);
+      loadedChunks_.emplace_back(chunk->meta.segmentId, chunk->meta.id);
     }
   }
 
@@ -114,6 +242,12 @@ std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
 
 std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
     folly::Range<const SegmentRowRange*> ranges) {
+  auto rows = expandRanges(ranges);
+  return loadRows({rows.data(), rows.size()});
+}
+
+std::vector<RowId> ReadOnlyWindowReadSession::expandRanges(
+    folly::Range<const SegmentRowRange*> ranges) const {
   BOLT_CHECK_NOT_NULL(container_);
 
   std::vector<RowId> rows;
@@ -140,7 +274,7 @@ std::vector<const char*> ReadOnlyWindowReadSession::loadRows(
           segment, range.begin + offset));
     }
   }
-  return loadRows({rows.data(), rows.size()});
+  return rows;
 }
 
 const char* ReadOnlyWindowReadSession::loadRow(const RowId& row) {
@@ -159,6 +293,9 @@ uint64_t ReadOnlyWindowReadSession::releaseLoadedChunks(uint64_t targetBytes) {
   for (const auto& [segment, chunk] : loadedChunks_) {
     if (released >= targetBytes) {
       break;
+    }
+    if (activeLeases_.count(chunkKey(segment, chunk)) != 0) {
+      continue;
     }
     auto& segmentData = container_->segments_.segmentData(segment);
     if (segmentData.meta.state == SegmentState::kActiveResident) {
@@ -195,8 +332,15 @@ uint64_t ReadOnlyWindowReadSession::evictLoadedChunks(uint64_t targetBytes) {
     return 0;
   }
 
+  std::vector<std::pair<SegmentId, ChunkId>> evictable;
+  evictable.reserve(loadedChunks_.size());
+  for (const auto& chunk : loadedChunks_) {
+    if (activeLeases_.count(chunkKey(chunk.first, chunk.second)) == 0) {
+      evictable.push_back(chunk);
+    }
+  }
   const auto reclaimed = container_->evictReadOnlyLoadedChunks(
-      {loadedChunks_.data(), loadedChunks_.size()}, targetBytes);
+      {evictable.data(), evictable.size()}, targetBytes);
 
   std::vector<std::pair<SegmentId, ChunkId>> stillLoaded;
   stillLoaded.reserve(loadedChunks_.size());
