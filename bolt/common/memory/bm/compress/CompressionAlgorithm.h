@@ -24,6 +24,9 @@
 
 namespace bytedance::bolt::memory::bm::compress {
 
+// Returns whether 'kind' is supported by CompressionManager. kNone and
+// kOpenZlFrame are handled directly by CompressionManager instead of the
+// generic algorithm dispatch below.
 bool SupportedCompressionKind(CompressionKind kind);
 size_t MaxCompressedLength(CompressionKind kind, size_t rawSize);
 
