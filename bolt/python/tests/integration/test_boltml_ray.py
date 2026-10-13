@@ -19,6 +19,7 @@ from importlib.metadata import version
 import os
 from pathlib import Path
 import socket
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -74,7 +75,23 @@ class RayExecutionTests(unittest.TestCase):
             temp_dir=str(Path(cls.temporary.name) / "ray"),
         )
         cls.addClassCleanup(ray.shutdown)
-        ray.init(address=f"ray://127.0.0.1:{port}", namespace="bolt-integration-tests")
+        try:
+            ray.init(
+                address=f"ray://127.0.0.1:{port}", namespace="bolt-integration-tests"
+            )
+        except Exception:
+            # Class cleanups remove the temporary session, including the server
+            # logs needed to diagnose a failed Ray Client startup in CI.
+            try:
+                logs = Path(cls.cluster.head_node.get_logs_dir_path())
+                for path in sorted(logs.glob("ray_client_server*.err")):
+                    print(
+                        f"\n{path.name}:\n{path.read_text(errors='replace')[-16000:]}",
+                        file=sys.stderr,
+                    )
+            except OSError:
+                pass  # Preserve the original startup error if logs are unavailable.
+            raise
 
     def executor(self):
         return RayExecutor(config=RayExecutionConfig(mode=RayExecutionMode.REMOTE_LEAF))

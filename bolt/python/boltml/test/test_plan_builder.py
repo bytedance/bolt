@@ -22,9 +22,14 @@ need a materialise-fallback can override.
 
 import unittest
 
+import pyarrow as pa
+import pybolt
+
 from ..dataframe import DataFrame
+from ..function.aggregation import Count
 from ..plan_builder.bolt import BoltPlanBuilderFactory
 from ..plan_builder.substrait import SubstraitPlanBuilderFactory
+from ..tpch import Region
 
 
 class TestPlanBuilderCopy(unittest.TestCase):
@@ -104,6 +109,38 @@ class TestPlanBuilderCopy(unittest.TestCase):
             self.assertEqual(originalBuilder.dtype(), clonedBuilder.dtype())
 
         self._assertAcrossPlanBuilders(run)
+
+
+class TestSubstraitSources(unittest.TestCase):
+    def testEmptyLocalFilesCompletesWithDeclaredSchema(self):
+        schema = pybolt.RowType(["value"], [pybolt.BigintType()])
+        builder = SubstraitPlanBuilderFactory().fromLocalFiles(
+            [], schema, pybolt.FileFormat.PARQUET
+        )
+        plan = builder.boltPlan()
+        self.assertEqual(plan.splits(), {plan.plan().planNode().id(): []})
+        result = DataFrame(builder).toArrow(pa.Table)
+        self.assertEqual(result.to_pylist(), [])
+        self.assertEqual(result.schema, pa.schema([("value", pa.int64())]))
+
+    def testCountOverEmptyLocalFiles(self):
+        builder = SubstraitPlanBuilderFactory().fromLocalFiles(
+            [],
+            pybolt.RowType(["value"], [pybolt.BigintType()]),
+            pybolt.FileFormat.PARQUET,
+        )
+        frame = DataFrame(builder).groupBy().aggregate(rows=Count())
+        self.assertEqual(frame.toArrow(pa.Table).to_pylist(), [{"rows": 0}])
+
+    def testTpchExtensionRemainsAvailable(self):
+        builder = SubstraitPlanBuilderFactory().tpchGenerator(
+            Region, scaleFactor=0.01, numSplits=2
+        )
+        frame = DataFrame(builder).select(["regionkey"])
+        self.assertEqual(
+            sorted(row["regionkey"] for row in frame.toArrow(pa.Table).to_pylist()),
+            list(range(5)),
+        )
 
 
 if __name__ == "__main__":

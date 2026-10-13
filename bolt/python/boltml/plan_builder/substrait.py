@@ -83,6 +83,9 @@ def _type_needs_native(dtype, *, literal=False, nested=False):
     if isinstance(dtype, ArrayType):
         return _type_needs_native(dtype.elementType(), literal=literal, nested=True)
     if isinstance(dtype, MapType):
+        # Nested MAP literals are not supported by the Substrait converter.
+        if literal and nested:
+            return True
         return any(
             _type_needs_native(child, literal=literal, nested=True)
             for child in (dtype.keyType(), dtype.valueType())

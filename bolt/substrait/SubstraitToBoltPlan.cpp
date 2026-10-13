@@ -38,8 +38,10 @@
 #include "bolt/connectors/hive/HiveDataSink.h"
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/TableHandle.h"
+#if defined BOLT_SUBSTRAIT_HAS_TPCH && BOLT_SUBSTRAIT_HAS_TPCH == 1
 #include "bolt/connectors/tpch/TpchConnector.h"
 #include "bolt/connectors/tpch/TpchConnectorSplit.h"
+#endif
 #include "bolt/dwio/catalog/fbhive/FileUtils.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/substrait/BoltExtensions.h"
@@ -625,6 +627,7 @@ core::PlanNodePtr SubstraitBoltPlanConverter::toBoltPlan(
       readRel.extension_table()
           .detail()
           .Is<::substrait::bolt::TpchExtensionTable>()) {
+#if defined BOLT_SUBSTRAIT_HAS_TPCH && BOLT_SUBSTRAIT_HAS_TPCH == 1
     // Handle TpchExtensionTable: construct splits and set up TPCH handle.
     ::substrait::bolt::TpchExtensionTable ext;
     readRel.extension_table().detail().UnpackTo(&ext);
@@ -680,6 +683,10 @@ core::PlanNodePtr SubstraitBoltPlanConverter::toBoltPlan(
         std::move(outputType),
         std::move(tableHandle),
         std::move(assignments));
+#else
+    BOLT_UNSUPPORTED(
+        "TPC-H Substrait tables require BOLT_BUILD_TEST_UTILS and BOLT_ENABLE_TPCH_CONNECTOR.");
+#endif
   }
 
 #ifdef BOLT_USE_ARROW_CONNECTOR
@@ -862,7 +869,7 @@ core::PlanNodePtr SubstraitBoltPlanConverter::toBoltPlan(
     std::vector<exec::Split> splits;
     auto planNode = toBoltPlan(rel.read(), splits);
     /// Not all source nodes have splits. ValuesNode does not.
-    if (planNode->requiresSplits() && !splits.empty()) {
+    if (planNode->requiresSplits()) {
       splitInfoMap_[planNode->id()] = std::move(splits);
     }
     return planNode;

@@ -24,13 +24,14 @@
 #include "bolt/connectors/hive/HiveDataSink.h"
 #include "bolt/connectors/hive/PaimonConnectorSplit.h"
 #include "bolt/connectors/hive/TableHandle.h"
-#include "bolt/connectors/tpch/TpchConnector.h"
 #include "bolt/dwio/common/Options.h"
 #include "bolt/exec/Split.h"
 #include "bolt/exec/TableWriter.h"
 #include "bolt/substrait/BoltToSubstraitType.h"
 #include "bolt/substrait/proto/substrait/bolt/extensions.pb.h"
+#if defined BOLT_SUBSTRAIT_HAS_TPCH && BOLT_SUBSTRAIT_HAS_TPCH == 1
 #include "bolt/tpch/gen/TpchGen.h"
+#endif
 
 namespace bytedance::bolt::substrait {
 
@@ -169,6 +170,7 @@ void fillSubstraitFileOrFiles(
     double scaleFactor,
     uint64_t numSplits,
     const std::string& connectorId) {
+#if defined BOLT_SUBSTRAIT_HAS_TPCH && BOLT_SUBSTRAIT_HAS_TPCH == 1
   ::substrait::ReadRel readRel;
 
   // Derive schema from TPCH definitions for provided columns (no prefix).
@@ -212,6 +214,10 @@ void fillSubstraitFileOrFiles(
 
   readRel.mutable_extension_table()->mutable_detail()->PackFrom(ext);
   return readRel;
+#else
+  BOLT_UNSUPPORTED(
+      "TPC-H Substrait tables require BOLT_BUILD_TEST_UTILS and BOLT_ENABLE_TPCH_CONNECTOR.");
+#endif
 }
 
 ::substrait::ExtensionSingleRel createShuffleRel(

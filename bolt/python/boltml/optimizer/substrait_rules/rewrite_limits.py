@@ -20,6 +20,7 @@ from typing import Optional
 
 from substrait.proto import algebra, plan
 
+from ._expression import is_direct_field_ref
 from .base import (
     Rule,
     get_rel_kind,
@@ -36,7 +37,8 @@ _UNLIMITED: Optional[int] = None
 class RewriteLimits(Rule):
     """Rewrite limit chains in two complementary ways (one rule, one pass).
 
-    1. ``FetchRel(ProjectRel(X))`` → ``ProjectRel(FetchRel(X))``.
+    1. ``FetchRel(ProjectRel(X))`` → ``ProjectRel(FetchRel(X))`` when the
+       project contains only field references and literals.
        Swapping keeps the limit closer to the data so the project does
        less work; this also exposes adjacent ``Fetch(Fetch(...))`` for
        step (2).
@@ -84,17 +86,20 @@ def _rewrite_one(rel: algebra.Rel) -> Optional[algebra.Rel]:
 # ---------------------------------------------------------------------------
 
 
-def _swap_fetch_project(rel: algebra.Rel) -> algebra.Rel:
+def _swap_fetch_project(rel: algebra.Rel) -> Optional[algebra.Rel]:
     """Rewrite ``Fetch(Project(X))`` to ``Project(Fetch(X))``.
 
-    BoltML projects are row-preserving and replacement-style with no
-    field-ref shift across the swap, so the limit can be applied to the
-    project's input directly. Field-references inside the project's
-    ``expressions`` are unchanged because the input column space is the
-    same on both sides of the swap.
+    Field references keep their input column space across the swap.
+    Computed expressions may contain batch-dependent or stateful Python UDFs,
+    so preserving the row count alone does not make the swap safe.
     """
     fetch = rel.fetch
     proj = fetch.input.project
+    if any(
+        not is_direct_field_ref(expr) and expr.WhichOneof("rex_type") != "literal"
+        for expr in proj.expressions
+    ):
+        return None
 
     new_fetch = algebra.FetchRel()
     new_fetch.CopyFrom(fetch)

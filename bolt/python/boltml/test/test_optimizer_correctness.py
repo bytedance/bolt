@@ -37,6 +37,27 @@ from boltml.reader import LocalTableReader
 
 
 class OptimizerCorrectnessTests(unittest.TestCase):
+    def testLimitPreservesBatchUdfInput(self):
+        calls = []
+
+        @vectorFunction(pybolt.BigintType())
+        def limitBatchSum(values):
+            batch = list(values)
+            calls.append(batch)
+            return pybolt.fromList([sum(batch)] * len(batch))
+
+        for computed in (False, True):
+            for offset in (0, 1):
+                with self.subTest(computed=computed, offset=offset):
+                    calls.clear()
+                    frame = DataFrame({"x": [1, 2, 3]})
+                    if computed:
+                        frame.transform(x=lambda df: df["x"] + 0)
+                    frame["x"].map(limitBatchSum)
+                    frame.select(count=1, offset=offset)
+                    self.assertEqual(frame.toArrow(pa.Table).to_pylist(), [{"x": 6}])
+                    self.assertEqual(calls, [[1, 2, 3]])
+
     def testMergedEmptyLimitsPreserveSchema(self):
         data = pa.table({"id": [0, 1, 2, 3], "label": ["a", "b", "c", "d"]})
         for offset in (2, 3):

@@ -129,6 +129,11 @@ target_link_libraries(
   bolt_dwio_dwrf_common
 )
 
+if(BOLT_BUILD_TEST_UTILS AND TARGET bolt_tpch_connector AND TARGET bolt_tpch_gen)
+  # TPC-H implementations belong to bolt_testutils, not the production engine.
+  target_compile_definitions(bolt_substrait_plan_converter PRIVATE BOLT_SUBSTRAIT_HAS_TPCH=1)
+endif()
+
 if(${BOLT_ENABLE_TORCH})
   target_compile_definitions(bolt_substrait_plan_converter PRIVATE BOLT_HAS_TORCH=1)
   target_include_directories(bolt_substrait_plan_converter SYSTEM PRIVATE ${TORCH_INCLUDE_DIRS})

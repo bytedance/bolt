@@ -27,6 +27,7 @@ from boltml.expression.literal import LiteralExpression
 from boltml.function import Aggregator, scalarFunction
 from boltml.function.aggregation import Count, Sum
 from boltml.function.stateful import StatefulScalarFunction
+from boltml.plan_builder.bolt import BoltPlanBuilderFactory
 from boltml.substrait.extensions import ExtensionRegister, extensionIndex
 from boltml.substrait.signature import substraitSignature
 
@@ -380,6 +381,27 @@ class ApiCorrectnessTests(unittest.TestCase):
     def testSelectRejectsNegativeCount(self):
         with self.assertRaisesRegex(ValueError, "count must be non-negative"):
             DataFrame({"x": [1, 2]}).select(count=-1)
+
+    def testNativeEmptySelectionsPreserveSchemaAndAggregation(self):
+        primitive = pa.table({"id": [1, 2], "label": ["a", "b"]})
+        nested = pa.table({"id": [1, 2], "payload": [{"value": 3}, {"value": 4}]})
+        for data in (primitive, nested):
+            for native in (False, True):
+                for options in ({"count": 0}, {"count": 0, "offset": 1}, {"offset": 3}):
+                    with self.subTest(
+                        schema=data.schema, native=native, options=options
+                    ):
+                        kwargs = (
+                            {"planFactory": BoltPlanBuilderFactory()} if native else {}
+                        )
+                        frame = DataFrame(data, **kwargs).select(**options)
+                        # Copy replays the logical limit, including an empty range.
+                        copied = frame.copy()
+                        table = copied.toArrow(pa.Table)
+                        self.assertEqual(table.to_pylist(), [])
+                        self.assertEqual(table.schema, data.schema)
+                        frame.groupBy().aggregate(rows=Count(), total=Sum("id"))
+                        self.assertEqual(self.rows(frame), [{"rows": 0, "total": None}])
 
 
 if __name__ == "__main__":

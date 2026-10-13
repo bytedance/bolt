@@ -152,7 +152,10 @@ class BoltPlanBuilder(LogicalPlanBuilder):
         return self
 
     def limit(self, count: int, offset: int) -> "Self":  # noqa: F821
-        self.__pb.limit(offset, count, False)
+        if count == 0:
+            self.__pb.filter("false")
+        else:
+            self.__pb.limit(offset, count, False)
         self.__operations.append(LogicalOp("limit", (count, offset)))
         return self
 

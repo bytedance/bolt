@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from decimal import Decimal
 import os
 import tempfile
 import unittest
@@ -165,6 +166,39 @@ class SubstraitTest(unittest.TestCase):
                 with self.subTest(dtype=str(dtype), value=value):
                     literal = substraitLiteral(value, dtype)
                     self.assertEqual(boltLiteral(literal), (value, dtype))
+
+    def testLongDecimalVectorsExecuteThroughVirtualTables(self):
+        for precision, scale in ((25, 4), (38, 18)):
+            limit = 10**precision - 1
+            unscaled = [-limit, -(2**64) - 7, 0, 2**64 + 7, limit]
+            values = [
+                Decimal((int(value < 0), tuple(map(int, str(abs(value)))), -scale))
+                for value in unscaled
+            ]
+            arrowType = pa.decimal128(precision, scale)
+            flat = pybolt.importFromArrow(pa.array(values, arrowType))
+            for vector, expected in (
+                (flat, values),
+                (
+                    pybolt.dictionaryVector(flat, [4, 0, 3]),
+                    [values[4], values[0], values[3]],
+                ),
+                (pybolt.constantVector(unscaled[4], 2, flat.dtype()), [values[4]] * 2),
+            ):
+                with (
+                    self.subTest(dtype=str(arrowType), encoding=type(vector).__name__),
+                    patch.dict(os.environ, {"BOLTML_VIRTUAL_TABLE_MAX_ROWS": "1000"}),
+                ):
+                    data = rowVector(["amount"], [vector])
+                    builder = SubstraitPlanBuilderFactory().fromData(data)
+                    read = builder.toSubstraitPlan().relations[0].root.input.read
+                    self.assertTrue(read.HasField("virtual_table"))
+                    result = (
+                        DataFrame(builder).copy().select(["amount"]).toArrow(pa.Table)
+                    )
+                    self.assertEqual(
+                        result, pa.table({"amount": pa.array(expected, arrowType)})
+                    )
 
     def testTimestampLiteralRangeIsChecked(self):
         with self.assertRaisesRegex(ValueError, "nanosecond range"):

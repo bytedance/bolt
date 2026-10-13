@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from decimal import Decimal
 import pickle
 from pathlib import Path
 import subprocess
@@ -51,6 +52,116 @@ class _BinaryAccumulator(_StringAccumulator):
 
 
 class TestVectorConversions(unittest.TestCase):
+    def testHugeintVectorsPreserveSigned128BitValues(self):
+        values = [None, -(2**127), -(2**64) - 7, -1, 0, 2**64 + 7, 2**127 - 1]
+        dtype = pb.HugeintType()
+        vector = pb.fromList(values, dtype)
+        self.assertEqual(list(vector), values)
+        self.assertEqual(list(vector[1:]), values[1:])
+        indices = [6, 0, 1, 5, 3]
+        dictionary = pb.dictionaryVector(vector, indices)
+        self.assertEqual(list(dictionary), [values[i] for i in indices])
+        for value in values:
+            with self.subTest(value=value):
+                constant = pb.constantVector(value, 2, dtype)
+                self.assertEqual(list(constant), [value, value])
+                vector[0] = value
+                self.assertEqual(vector[0], value)
+                self.assertEqual(vector.dtype(), dtype)
+        for index in (-1, len(vector)):
+            with self.assertRaises(IndexError):
+                vector[index]
+
+    def testHugeintInputRangeAndCategoriesAreChecked(self):
+        dtype = pb.HugeintType()
+        vector = pb.fromList([None, 2**80], dtype)
+        invalid = [
+            (-(2**127) - 1, OverflowError),
+            (2**127, OverflowError),
+            ((2**127 - 1) * 10, OverflowError),
+            (True, TypeError),
+            (1.5, TypeError),
+            ("123", TypeError),
+        ]
+        for value, error in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(error):
+                    pb.fromList([value], dtype)
+                with self.assertRaises(error):
+                    pb.constantVector(value, 2, dtype)
+                for index in (0, 1):
+                    with self.assertRaises(error):
+                        vector[index] = value
+                    self.assertEqual(list(vector), [None, 2**80])
+
+    def testLongDecimalsPreserveUnscaledValuesAndArrowType(self):
+        for precision, scale in ((25, 4), (38, 18)):
+            dtype = pb.LongDecimalType(precision, scale)
+            limit = 10**precision - 1
+            values = [None, -limit, -(2**64) - 7, 0, 2**64 + 7, limit]
+            decimals = [
+                None
+                if value is None
+                else Decimal((int(value < 0), tuple(map(int, str(abs(value)))), -scale))
+                for value in values
+            ]
+            source = pa.array(decimals, pa.decimal128(precision, scale))
+            for vector in (pb.fromList(values, dtype), pb.importFromArrow(source)):
+                with self.subTest(dtype=dtype, encoding=type(vector).__name__):
+                    dictionary = pb.dictionaryVector(vector, [5, 0, 1, 4])
+                    self.assertEqual(list(vector), values)
+                    self.assertEqual(
+                        list(dictionary), [values[i] for i in [5, 0, 1, 4]]
+                    )
+                    self.assertEqual(pb.exportToArrow(vector), source)
+                    self.assertEqual(
+                        pb.exportToArrow(dictionary).to_pylist(),
+                        [decimals[i] for i in [5, 0, 1, 4]],
+                    )
+                    # Arrow imports may reference read-only buffers. Own the
+                    # storage before testing mutation, as for other types.
+                    mutable = vector.copy()
+                    for value, decimal in zip(values, decimals):
+                        constant = pb.constantVector(value, 2, dtype)
+                        self.assertEqual(list(constant), [value, value])
+                        self.assertEqual(
+                            pb.exportToArrow(constant),
+                            pa.array([decimal, decimal], source.type),
+                        )
+                        mutable[0] = value
+                        self.assertEqual(mutable[0], value)
+                        self.assertEqual(mutable.dtype(), dtype)
+
+    def testLongDecimalPrecisionIsCheckedBeforeMutation(self):
+        dtype = pb.LongDecimalType(25, 4)
+        vector = pb.fromList([None, 10**25 - 1], dtype)
+        for value in (-(10**25), 10**25, 2**127 - 1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(OverflowError, "DECIMAL precision"):
+                    pb.fromList([value], dtype)
+                with self.assertRaisesRegex(OverflowError, "DECIMAL precision"):
+                    pb.constantVector(value, 2, dtype)
+                for index in (0, 1):
+                    with self.assertRaisesRegex(OverflowError, "DECIMAL precision"):
+                        vector[index] = value
+                    self.assertEqual(list(vector), [None, 10**25 - 1])
+
+    def testNestedLongDecimalsPreserveUnscaledValues(self):
+        decimal = pb.LongDecimalType(25, 4)
+        value = 10**24 + 7
+        for values, dtype in (
+            ([[value, None, -value], []], pb.ArrayType(decimal)),
+            (
+                [{"x": value, "y": None}, {"x": -value}],
+                pb.MapType(pb.VarcharType(), decimal),
+            ),
+        ):
+            with self.subTest(dtype=dtype):
+                vector = pb.fromList(values, dtype)
+                self.assertEqual(list(vector), values)
+                vector[1] = values[0]
+                self.assertEqual(vector[1], values[0])
+
     def testNarrowNumericAssignmentPreservesTypeAndNulls(self):
         for dtype, value in (
             (pb.TinyintType(), 7),

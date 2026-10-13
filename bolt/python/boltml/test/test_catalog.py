@@ -433,6 +433,11 @@ class NativeSourceFallbackTest(unittest.TestCase):
             pa.array([[Decimal("1.23")]], pa.list_(pa.decimal128(10, 2))),
             pa.array([None], pa.decimal128(10, 2)),
             pa.array([], pa.list_(pa.int64())),
+            pa.array([[[("key", 1)]]], pa.list_(pa.map_(pa.string(), pa.int64()))),
+            pa.array(
+                [[("outer", [("inner", 2)])]],
+                pa.map_(pa.string(), pa.map_(pa.string(), pa.int64())),
+            ),
         ]
         for array in arrays:
             for threshold in ("0", "1000"):
@@ -449,10 +454,16 @@ class NativeSourceFallbackTest(unittest.TestCase):
                     self.assertIsInstance(builder, BoltPlanBuilder)
                     self.assertFalse(plan_is_substrait_lowerable(builder.logicalPlan()))
                     dataframe = DataFrame(builder).copy().select(["payload"])
+                    table = dataframe.toArrow(pa.Table)
                     self.assertEqual(
-                        dataframe.toArrow().to_pylist(),
+                        table.to_pylist(),
                         [{"payload": item} for item in array.to_pylist()],
                     )
+                    self.assertEqual(table.schema, pa.schema([("payload", array.type)]))
+                    with self.assertRaisesRegex(
+                        NotImplementedError, "Ray execution is not supported"
+                    ):
+                        RayExecutor().eval(builder.copy())
 
     def testPrimitiveArraysStillUseSubstrait(self):
         data = pybolt.rowVector(

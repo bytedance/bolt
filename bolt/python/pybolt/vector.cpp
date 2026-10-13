@@ -29,6 +29,7 @@
  */
 
 // NOLINTBEGIN(misc-no-recursion)
+#include <folly/Conv.h>
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -42,6 +43,7 @@
 #include "bolt/parse/IExpr.h"
 #include "bolt/python/numpy.h"
 #include "bolt/python/pybolt/context.h"
+#include "bolt/type/DecimalUtil.h"
 #include "bolt/type/Type.h"
 #include "bolt/type/Variant.h"
 #include "bolt/vector/ComplexVector.h"
@@ -314,6 +316,38 @@ inline auto pyToVariant(const pybind11::handle& obj) {
   return variant::create<T>(pybind11::cast<NativeType>(obj));
 }
 
+int128_t pyToHugeint(const pybind11::handle& obj) {
+  if (!pybind11::isinstance<pybind11::int_>(obj) ||
+      pybind11::isinstance<pybind11::bool_>(obj)) {
+    throw pybind11::type_error("HUGEINT requires an integer value");
+  }
+  // pybind11's built-in integer caster uses at most 64 bits. Normalize int
+  // subclasses before converting and use Folly's checked 128-bit parser.
+  auto integer =
+      pybind11::reinterpret_steal<pybind11::object>(PyNumber_Index(obj.ptr()));
+  if (!integer) {
+    throw pybind11::error_already_set();
+  }
+  auto result =
+      folly::tryTo<int128_t>(pybind11::str(integer).cast<std::string>());
+  if (result.hasError()) {
+    PyErr_SetString(
+        PyExc_OverflowError, "Integer is outside the HUGEINT range");
+    throw pybind11::error_already_set();
+  }
+  return result.value();
+}
+
+pybind11::object hugeintToPy(int128_t value) {
+  auto text = folly::to<std::string>(value);
+  auto result = pybind11::reinterpret_steal<pybind11::object>(
+      PyLong_FromString(text.data(), nullptr, 10));
+  if (!result) {
+    throw pybind11::error_already_set();
+  }
+  return result;
+}
+
 inline variant pyToVariant(const pybind11::handle& obj) {
   if (obj.is_none()) {
     return variant();
@@ -377,6 +411,17 @@ inline variant pyToVariant(const pybind11::handle& obj, const Type& dtype) {
     }
     case TypeKind::BIGINT: {
       return pyToVariant<TypeKind::BIGINT>(obj);
+    }
+    case TypeKind::HUGEINT: {
+      const auto value = pyToHugeint(obj);
+      if (dtype.isLongDecimal() &&
+          !DecimalUtil::valueInPrecisionRange(
+              value, dtype.asLongDecimal().precision())) {
+        PyErr_SetString(
+            PyExc_OverflowError, "Unscaled integer exceeds DECIMAL precision");
+        throw pybind11::error_already_set();
+      }
+      return variant(value);
     }
     case TypeKind::REAL: {
       return pyToVariant<TypeKind::REAL>(obj);
@@ -542,6 +587,8 @@ inline pybind11::object getItemFromSimpleVector(
       return pybind11::bytes(value.data(), value.size());
     }
     return pybind11::str(std::string_view(value));
+  } else if constexpr (std::is_same_v<NativeType, int128_t>) {
+    return hugeintToPy(v->valueAt(idx));
   } else {
     return pybind11::cast(v->valueAt(idx));
   }
@@ -773,11 +820,13 @@ VectorPtr pyToConstantVector(
   if (obj.is_none() && !type) {
     throw pybind11::type_error("Cannot infer type of constant None vector");
   }
-  variant variant = pyToVariant(obj);
+  variant variant = type && type->kind() == TypeKind::HUGEINT
+      ? pyToVariant(obj, *type)
+      : pyToVariant(obj);
   TypeKind kind = variant.kind();
   if (type) {
     kind = type->kind();
-    if (!obj.is_none()) {
+    if (!obj.is_none() && variant.kind() != kind) {
       variant = VariantConverter::convert(variant, type->kind());
     }
   }
@@ -886,22 +935,7 @@ template <typename NativeType>
 inline pybind11::object getItemFromSimpleVector(
     SimpleVectorPtr<NativeType>& vector,
     vector_size_t idx) {
-  checkBounds(vector, idx);
-  if (vector->isNullAt(idx)) {
-    return pybind11::none();
-  }
-  if constexpr (std::is_same_v<NativeType, StringView>) {
-    const StringView value = vector->valueAt(idx);
-    if (vector->typeKind() == TypeKind::VARBINARY) {
-      return pybind11::bytes(value.data(), value.size());
-    }
-    return pybind11::str(std::string_view(value));
-    pybind11::str result = std::string_view(value);
-    return result;
-  } else {
-    pybind11::object result = pybind11::cast(vector->valueAt(idx));
-    return result;
-  }
+  return getItemFromSimpleVector(vector.get(), idx);
 }
 
 template <typename NativeType>
@@ -915,8 +949,10 @@ inline void setItemInFlatVector(
     return vector->setNull(idx, true);
   }
 
-  variant var = pyToVariant(obj);
   const auto targetKind = vector->typeKind();
+  variant var = targetKind == TypeKind::HUGEINT
+      ? pyToVariant(obj, *vector->type())
+      : pyToVariant(obj);
   // Python integers and floats have no narrow-width variants. Convert within
   // the same numeric category using the target type's checked scalar cast.
   if ((var.kind() == TypeKind::BIGINT &&
@@ -1202,6 +1238,7 @@ void addVectorBindings( // NOLINT
       TypeKind::SMALLINT,
       TypeKind::INTEGER,
       TypeKind::BIGINT,
+      TypeKind::HUGEINT,
       TypeKind::REAL,
       TypeKind::DOUBLE,
       TypeKind::VARBINARY,
