@@ -34,7 +34,13 @@ FOLLY_ALWAYS_INLINE void writeExtractedValue(
     const char* row,
     uint32_t offset) {
   if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
-    result->set(resultRow, *reinterpret_cast<const StringView*>(row + offset));
+    const auto value = *reinterpret_cast<const StringView*>(row + offset);
+    if (value.isInline()) {
+      BOLT_DCHECK(!result->stringStats().has_value());
+      values[resultRow] = value;
+    } else {
+      result->set(resultRow, value);
+    }
   } else if constexpr (Kind == TypeKind::HUGEINT) {
     values[resultRow] = HugeInt::deserialize(row + offset);
   } else {
