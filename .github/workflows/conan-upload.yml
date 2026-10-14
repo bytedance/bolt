@@ -86,6 +86,24 @@ jobs:
             -o "bolt/*:enable_perf=True" \
             --build=missing -r=bolt-cci-local
 
+      - name: Install Python Release dependency graph
+        if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Release') }}
+        shell: bash
+        env:
+          BOLT_TEST_LINKAGE: static
+        run: |
+          # Match the Python wheel dependency graph in bolt_build_backend.py.
+          conan install . \
+            -pr:h default -pr:b default \
+            -s "build_type=Release" \
+            -s "&:build_type=Release" \
+            -o "&:python_bind=True" \
+            -o "&:enable_testutil=True" \
+            -o "&:enable_jit=False" \
+            -o "&:spark_compatible=False" \
+            -o "&:shared=False" \
+            --build=missing -r=bolt-cci-local
+
       - name: Install Debug dependency graph
         if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Debug') }}
         shell: bash
