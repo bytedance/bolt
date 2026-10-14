@@ -34,6 +34,7 @@
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/VectorHasher.h"
+#include "bolt/exec/tests/utils/HashTableSimdTestUtil.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 #include "folly/experimental/EventCount.h"
@@ -953,7 +954,7 @@ TEST_P(HashTableTest, simdNormalizedKeyLayoutOnlyForAggregation) {
   EXPECT_TRUE(aggregationTable->simdNormalizedKeyLayoutActive());
 }
 
-DEBUG_ONLY_TEST_P(HashTableTest, simdConsistencyWithDuplicateJoinKeys) {
+TEST_P(HashTableTest, simdConsistencyWithDuplicateJoinKeys) {
   if (!process::hasAvx2()) {
     GTEST_SKIP() << "SIMD requires AVX2";
   }
@@ -972,16 +973,75 @@ DEBUG_ONLY_TEST_P(HashTableTest, simdConsistencyWithDuplicateJoinKeys) {
   table->setSimdEnabled(true);
 
   constexpr int32_t kNumRows = 1'000;
+  auto palette = hashTableSimdVarcharValues();
   auto batch = makeRowVector({makeFlatVector<std::string>(
-      kNumRows, [](auto row) { return fmt::format("key_{}", row % 10); })});
+      kNumRows, [&](auto row) { return palette[row % palette.size()]; })});
   copyVectorsToTable({batch}, 0, table.get());
   table->prepareJoinTable({}, executor_.get());
 
   ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kHash);
-  ASSERT_TRUE(table->simdActive());
+  ASSERT_TRUE(table->simdHashLayoutActive());
   ASSERT_TRUE(table->hasDuplicateKeys());
   ASSERT_EQ(table->numDistinct(), kNumRows);
   ASSERT_NO_THROW(table->checkConsistency());
+
+  // Exercise the HASH probe, including scratch reuse across sizes/encodings.
+  // Low-cardinality operator tests can otherwise stay in ARRAY mode.
+  std::vector<std::optional<std::string>> probeKeys(
+      palette.begin(), palette.end());
+  probeKeys.emplace_back("missing_key");
+  probeKeys.emplace_back(std::nullopt);
+  auto base = makeNullableFlatVector<std::string>(probeKeys);
+  HashLookup lookup(table->hashers(), GetParam().jitRowEqVectors);
+  for (vector_size_t size : {1, 3, 4, 5, 63, 64, 65, 1025, 5}) {
+    SCOPED_TRACE(size);
+    auto flat = makeFlatVector<std::string>(
+        size,
+        [&](auto row) {
+          return probeKeys[row % probeKeys.size()].value_or("");
+        },
+        [&](auto row) {
+          return !probeKeys[row % probeKeys.size()].has_value();
+        });
+    auto indices = makeIndices(
+        size, [&](auto row) { return (row * 3 + 1) % probeKeys.size(); });
+    for (const auto& probe : std::vector<VectorPtr>{
+             flat,
+             BaseVector::wrapInDictionary(nullptr, indices, size, base),
+             BaseVector::wrapInDictionary(
+                 makeNulls(size, nullEvery(3)), indices, size, base),
+             BaseVector::wrapInConstant(size, palette.size() - 1, base),
+             BaseVector::wrapInConstant(size, palette.size(), base),
+             BaseVector::wrapInConstant(size, palette.size() + 1, base)}) {
+      SCOPED_TRACE(probe->toString());
+      SelectivityVector selected(size);
+      table->prepareForJoinProbe(
+          lookup, makeRowVector({probe}), selected, true);
+      if (!lookup.rows.empty()) {
+        table->joinProbe(lookup);
+      }
+      DecodedVector decoded(*probe);
+      for (vector_size_t row = 0; row < size; ++row) {
+        if (decoded.isNullAt(row)) {
+          EXPECT_FALSE(selected.isValid(row));
+          continue;
+        }
+        ASSERT_TRUE(selected.isValid(row));
+        const auto key = decoded.valueAt<StringView>(row);
+        auto* hit = lookup.hits[row];
+        if (key == StringView("missing_key")) {
+          EXPECT_EQ(hit, nullptr);
+        } else {
+          ASSERT_NE(hit, nullptr);
+          const auto& stored = RowContainer::valueAt<StringView>(
+              hit, table->rows()->columnAt(0).offset());
+          std::string storage;
+          EXPECT_EQ(
+              HashStringAllocator::contiguousString(stored, storage), key);
+        }
+      }
+    }
+  }
 }
 
 TEST_P(HashTableTest, simdKeyColumnsUseNullMask) {

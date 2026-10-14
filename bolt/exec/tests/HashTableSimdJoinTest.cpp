@@ -378,9 +378,6 @@ TEST_F(HashTableSimdJoinTest, fullOuter) {
 }
 
 TEST_F(HashTableSimdJoinTest, fullOuterEmptyBuild) {
-  if (!process::hasAvx2()) {
-    GTEST_SKIP() << "SIMD requires AVX2";
-  }
   auto buildVector = makeRowVector(
       {"u_k", "u_v"},
       {makeFlatVector<std::string>(0, [](auto) { return std::string{}; }),
@@ -389,6 +386,8 @@ TEST_F(HashTableSimdJoinTest, fullOuterEmptyBuild) {
   for (int32_t batch = 0; batch < 3; ++batch) {
     probeVectors.push_back(makeVarcharProbeVector(5'000));
   }
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", {buildVector});
 
   auto idGen = std::make_shared<core::PlanNodeIdGenerator>();
   auto plan = PlanBuilder(idGen)
@@ -401,7 +400,15 @@ TEST_F(HashTableSimdJoinTest, fullOuterEmptyBuild) {
                       {"t_k", "t_v", "u_k", "u_v"},
                       core::JoinType::kFull)
                   .planNode();
-  assertQueryResultsEqualWithSimdHashTable(plan, pool_.get(), "HashJoin");
+  // Both settings share the synthetic-null output path, so compare with an
+  // independent result instead of comparing the two executions to each other.
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    AssertQueryBuilder(plan, duckDbQueryRunner_)
+        .config(core::QueryConfig::kSimdHashTableEnabled, simdEnabled)
+        .assertResults(
+            "SELECT t_k, t_v, u_k, u_v FROM t FULL OUTER JOIN u ON t_k = u_k");
+  }
 }
 
 TEST_F(HashTableSimdJoinTest, leftSemiProject) {
