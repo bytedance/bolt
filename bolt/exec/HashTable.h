@@ -31,7 +31,10 @@
 #pragma once
 
 #include <vector/TypeAliases.h>
+#include <optional>
+#include <unordered_map>
 #include "bolt/common/base/Portability.h"
+#include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/exec/OneWayStatusFlag.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/VectorHasher.h"
@@ -467,6 +470,16 @@ class BaseHashTable {
   // Time spent in build outside of the calling thread.
   CpuWallTiming offThreadBuildTiming_;
 };
+
+namespace detail {
+
+/// Updates runtime stats to report only 'hashMode', or removes all hash mode
+/// stats if 'hashMode' is not set.
+void addHashModeRuntimeStats(
+    std::unordered_map<std::string, RuntimeMetric>& runtimeStats,
+    std::optional<BaseHashTable::HashMode> hashMode);
+
+} // namespace detail
 
 FOLLY_ALWAYS_INLINE std::ostream& operator<<(
     std::ostream& os,

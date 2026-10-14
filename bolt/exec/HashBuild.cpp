@@ -1510,6 +1510,7 @@ void HashBuild::addRuntimeStats() {
   // Report range sizes and number of distinct values for the join keys.
   const auto& hashers = table_->hashers();
   const auto hashTableStats = table_->stats();
+  const auto hashMode = table_->hashMode();
   uint64_t asRange;
   uint64_t asDistinct;
   auto lockedStats = stats_.wlock();
@@ -1537,6 +1538,9 @@ void HashBuild::addRuntimeStats() {
     lockedStats->runtimeStats["hashtable.numTombstones"] =
         RuntimeMetric(hashTableStats.numTombstones);
   }
+  detail::addHashModeRuntimeStats(
+      lockedStats->runtimeStats,
+      std::optional<BaseHashTable::HashMode>{hashMode});
 
   // Add max spilling level stats if spilling has been triggered.
   if (spiller_ != nullptr && spiller_->isAnySpilled()) {

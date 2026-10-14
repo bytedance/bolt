@@ -950,10 +950,29 @@ TEST_P(AggregationTest, hashmodes) {
       std::function<void(void*)>([&](void* newMode) {
         mode = *reinterpret_cast<BaseHashTable::HashMode*>(newMode);
       }));
-  assertQuery(
+  auto task = assertQuery(
       op,
       "SELECT c0, c1, C2, C3, C4, C5, sum(1) FROM tmp "
       " GROUP BY c0, c1, c2, c3, c4, c5");
+  if (!GetParam().useGPU) {
+    int32_t numAggregations = 0;
+    for (const auto& pipeline : task->taskStats().pipelineStats) {
+      for (const auto& operatorStats : pipeline.operatorStats) {
+        if (operatorStats.operatorType != "Aggregation") {
+          continue;
+        }
+        EXPECT_EQ(
+            operatorStats.runtimeStats.at("hashtable.hashModeHash").sum, 1);
+        EXPECT_EQ(
+            operatorStats.runtimeStats.count("hashtable.hashModeArray"), 0);
+        EXPECT_EQ(
+            operatorStats.runtimeStats.count("hashtable.hashModeNormalizedKey"),
+            0);
+        ++numAggregations;
+      }
+    }
+    EXPECT_EQ(numAggregations, 1);
+  }
 #ifndef NDEBUG
   EXPECT_EQ(mode, BaseHashTable::HashMode::kHash);
 #endif
