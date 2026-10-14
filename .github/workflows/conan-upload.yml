@@ -102,7 +102,7 @@ jobs:
             -o "&:enable_jit=False" \
             -o "&:spark_compatible=False" \
             -o "&:shared=False" \
-            --build=missing -r=bolt-cci-local
+            --build=missing -r=bolt-cci-local -r=conancenter
 
       - name: Install Debug dependency graph
         if: ${{ !cancelled() && steps.env-setup.outcome == 'success' && (inputs.build_type == 'All' || inputs.build_type == 'Debug') }}
