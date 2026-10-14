@@ -1,0 +1,875 @@
+/*
+ * Copyright (c) ByteDance Ltd. and/or its affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "bolt/shuffle/sparksql/cell/CellSplitter.h"
+
+#include <folly/ScopeGuard.h>
+
+#include "bolt/shuffle/sparksql/cell/CellEncoding.h"
+
+namespace bytedance::bolt::shuffle::sparksql::cell {
+
+CellSplitter::CellSplitter(
+    const CellLayout& layout,
+    uint32_t numPartitions,
+    ChunkAllocator& allocator,
+    CellOutput& output,
+    memory::MemoryPool& pool)
+    : layout_(layout),
+      allocator_(allocator),
+      output_(output),
+      numPartitions_(numPartitions),
+      numStreams_(layout.numStreams()),
+      cells_(&pool, &allocator, numPartitions_, numStreams_),
+      nulls_(&pool, numPartitions_, layout.numWireColumns()),
+      windowRowCounts_(numPartitions_, 0),
+      encodingTags_((layout.numWireColumns() + 7) / 8, 0),
+      arena_(&pool),
+      partitionBytes_(numPartitions_, 0),
+      variableBytes_(numPartitions_, 0),
+      dictEnabled_(layout.numColumns(), 0),
+      dictStates_(layout.numColumns()),
+      dictStats_(layout.numColumns()) {
+  if (numStreams_ == 0) {
+    return;
+  }
+  const size_t cacheBytes =
+      static_cast<size_t>(numPartitions_) * numStreams_ * kBlockSourceBytes;
+  const size_t cursorBytes = static_cast<size_t>(numPartitions_) * numStreams_;
+  // + 8: the dictionary walk's 8-byte window may anchor near the end of
+  // the very last cache line.
+  cacheBase_ = arena_.allocateFixed(cacheBytes + 8, kBlockSourceBytes);
+  cursors_ = reinterpret_cast<uint8_t*>(arena_.allocateFixed(cursorBytes, 64));
+  ::memset(cursors_, 0, cursorBytes);
+  residentBytes_ = static_cast<int64_t>(cacheBytes + cursorBytes) +
+      static_cast<int64_t>(partitionBytes_.size() + variableBytes_.size()) * 8;
+}
+
+template <typename T>
+void CellSplitter::flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur) {
+  const auto* line = reinterpret_cast<const T*>(cacheLine(stream, pid));
+  const bool full = cur[pid] == kBlockSourceBytes;
+  // Common case: encode straight into the tail cell (reserve allocates
+  // nothing, so nothing can spill between reserve and commit).
+  if (auto* dst = reinterpret_cast<uint8_t*>(
+          cells_.tryReserve(pid, stream, kMaxBlockBytes))) {
+    const uint32_t bytes = full
+        ? encodeBlockFull<T>(line, dst)
+        : encodeBlock<T>(line, cur[pid] / sizeof(T), dst);
+    cells_.commit(pid, stream, bytes);
+    bumpPartitionBytes(pid, bytes);
+    cur[pid] = 0;
+    return;
+  }
+  uint8_t block[kMaxBlockBytes];
+  const uint32_t bytes = full
+      ? encodeBlockFull<T>(line, block)
+      : encodeBlock<T>(line, cur[pid] / sizeof(T), block);
+  cells_.append(pid, stream, block, bytes);
+  bumpPartitionBytes(pid, bytes);
+  cur[pid] = 0;
+}
+
+void CellSplitter::flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur) {
+  cells_.append(pid, stream, cacheLine(stream, pid), cur[pid]);
+  bumpPartitionBytes(pid, cur[pid]);
+  cur[pid] = 0;
+}
+
+void CellSplitter::enableDictionary(uint32_t col) {
+  BOLT_CHECK(
+      layout_.isStringColumn(col),
+      "dictionary form is defined for string columns only");
+  dictEnabled_[col] = 1;
+  dictStates_[col].assign(numPartitions_, DictState{});
+  residentBytes_ += static_cast<int64_t>(numPartitions_) * sizeof(DictState);
+  const auto wire = layout_.wireColumn(col);
+  encodingTags_[wire / 8] |= static_cast<uint8_t>(1u << (wire % 8));
+}
+
+void CellSplitter::closeDictSegment(
+    uint32_t dataStream,
+    uint32_t pid,
+    DictState& st,
+    uint8_t* dataCur,
+    bool last) {
+  // The whole framing lands in one append: DataCells::append copies only
+  // after every needed cell is held, so a spill fired inside the grow sees
+  // none of these bytes and the dictionary never crosses a Run boundary
+  // (spec section 5.4).
+  const uint32_t serialized = dataCur[pid];
+  uint8_t buf[kDictSerializedBudget + 1 + 1 + 4];
+  ::memcpy(buf, cacheLine(dataStream, pid), serialized);
+  buf[serialized] = last ? kDictLastMarker : kDictMoreMarker;
+  ::memcpy(buf + serialized + 1, &st.matched, 4);
+  const uint32_t bytes = serialized + 5;
+  cells_.append(pid, dataStream, buf, bytes);
+  bumpPartitionBytes(pid, bytes);
+  auto& stats = dictStats_[layout_.stream(dataStream).column];
+  stats.matchedRows += st.matched;
+  st.matched = 0;
+  st.entryCount = 0;
+  st.uniformLen = DictState::kUniformUnset;
+  dataCur[pid] = 0;
+}
+
+FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
+    uint32_t lengthStream,
+    uint32_t dataStream,
+    uint32_t pid,
+    DictState& st,
+    const StringView& view,
+    uint64_t key,
+    uint8_t* lengthCur,
+    uint8_t* dataCur) {
+  const uint32_t size = static_cast<uint32_t>(key);
+  // An entry costs 1 + size serialized bytes and one dictionary is capped
+  // at 63 (reader L1 rule): a value that can never fit alone can never be
+  // an entry, and the format only allows a fallback tail after that.
+  if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
+    const uint32_t count = st.entryCount;
+    // The dictionary lives in the column's idle data-stream cache line in
+    // its serialized [len][bytes]... form, the cursor holding the
+    // serialized byte count; the walk over entry boundaries is inherent,
+    // so each step is made as cheap as the form allows: one 8-byte window
+    // load per entry yields the length byte AND up to seven content
+    // bytes, so a short value - the common dictionary shape - compares
+    // whole in the same register, and the walk issues exactly one load
+    // per entry. A window anchored at the last boundary may read past the
+    // line into the neighbour's staged bytes (the arena leaves tail
+    // slack); the needle's leading length byte makes a match impossible
+    // outside a real entry, so the garbage is inert.
+    const char* entries = cacheLine(dataStream, pid);
+    const uint32_t uniform = st.uniformLen;
+    uint32_t i;
+    if (FOLLY_LIKELY(uniform == size)) {
+      // Every entry has exactly the value's length (the usual dictionary
+      // vocabulary shape): boundaries are arithmetic, stride 1 + size, so
+      // the probe's window loads carry no boundary chain and all issue in
+      // parallel. Values up to 7 chars are always inline in the
+      // StringView, whose bytes 4..11 hold the zero-padded characters:
+      // the whole value in one register, no data() branch; length byte
+      // and content compare as one masked word, needle = [size][chars].
+      //
+      // The walk is branchless with a fixed trip count: an early-exit
+      // loop mispredicts once per row on the data-dependent hit position;
+      // entries are unique by construction, so at most one step matches
+      // and a plain conditional-move accumulation is exact.
+      const uint32_t stride = 1 + size;
+      uint32_t hit = count;
+      if (FOLLY_LIKELY(size <= 7)) {
+        uint64_t value;
+        ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+        const uint64_t needle = (value << 8) | size;
+        const uint64_t needleMask =
+            (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
+        uint32_t off = 0;
+        for (uint32_t k = 0; k < count; ++k) {
+          uint64_t window;
+          ::memcpy(&window, entries + off, 8);
+          if ((window & needleMask) == needle) {
+            hit = k;
+          }
+          off += stride;
+        }
+      } else {
+        const char* data = view.data();
+        for (uint32_t k = 0; k < count; ++k) {
+          if (::memcmp(entries + k * stride + 1, data, size) == 0) {
+            hit = k;
+            break;
+          }
+        }
+      }
+      i = hit;
+    } else if (uniform != DictState::kUniformMixed) {
+      // A uniform dictionary of a different length (or an empty one): no
+      // entry can match this value, no walk at all.
+      i = count;
+    } else {
+      // Mixed lengths: the serial boundary walk, one 8-byte window load
+      // per entry yielding the length byte and up to seven content bytes.
+      uint32_t off = 0;
+      i = 0;
+      if (FOLLY_LIKELY(size <= 7)) {
+        uint64_t value;
+        ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+        const uint64_t needle = (value << 8) | size;
+        const uint64_t needleMask =
+            (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
+        uint32_t hit = count;
+        for (uint32_t k = 0; k < count; ++k) {
+          uint64_t window;
+          ::memcpy(&window, entries + off, 8);
+          if ((window & needleMask) == needle) {
+            hit = k; // at most once; compiles to a flag-carrying select
+          }
+          off += 1 + static_cast<uint32_t>(window & 0xFF);
+        }
+        i = hit;
+      } else {
+        for (; i < count; ++i) {
+          const uint32_t len = static_cast<uint8_t>(entries[off]);
+          if (len == size &&
+              ::memcmp(entries + off + 1, view.data(), size) == 0) {
+            break;
+          }
+          off += 1 + len;
+        }
+      }
+    }
+    if (FOLLY_UNLIKELY(i == count)) {
+      // New value. Room left: it becomes an entry. No room: the segment
+      // closes, and its hit rate decides between a successor segment
+      // seeded with this value and the permanent fallback tail.
+      if (count == DictState::kMaxEntries ||
+          dataCur[pid] + 1 + size > kDictSerializedBudget) {
+        if (st.matched >= kDictSegmentContinueFactor * count) {
+          closeDictSegment(dataStream, pid, st, dataCur, /*last=*/false);
+        } else {
+          closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
+          st.mode = DictState::kModeFallback;
+          // Pending index bytes flush raw before the first staged
+          // fallback length reuses the cache line.
+          if (lengthCur[pid] > 0) {
+            flushRaw(lengthStream, pid, lengthCur);
+          }
+          return false;
+        }
+      }
+      char* line = cacheLine(dataStream, pid);
+      line[dataCur[pid]] = static_cast<char>(size);
+      ::memcpy(line + dataCur[pid] + 1, view.data(), size);
+      dataCur[pid] += static_cast<uint8_t>(1 + size);
+      if (st.entryCount == 0) {
+        st.uniformLen = static_cast<uint8_t>(size);
+      } else if (st.uniformLen != size) {
+        st.uniformLen = DictState::kUniformMixed;
+      }
+      i = st.entryCount++;
+    }
+    ++st.matched;
+    cacheLine(lengthStream, pid)[lengthCur[pid]] = static_cast<char>(i);
+    if (FOLLY_UNLIKELY(++lengthCur[pid] == kBlockSourceBytes)) {
+      flushRaw(lengthStream, pid, lengthCur);
+    }
+    return true;
+  }
+  // A value too long for any entry: the format only allows a fallback
+  // tail, so this partition demotes now (an empty sequence is still owed
+  // when no segment was ever written).
+  closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
+  st.mode = DictState::kModeFallback;
+  if (lengthCur[pid] > 0) {
+    flushRaw(lengthStream, pid, lengthCur);
+  }
+  return false;
+}
+
+template <typename T, bool kHasNulls, bool kIndexed>
+void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col];
+  const T* __restrict vals = decoded.data<T>();
+  const uint32_t stream = layout_.columnStream(col);
+  uint8_t* __restrict cur = cursors(stream);
+  char* __restrict base =
+      cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_) << 6);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  // nulls() merges wrapping nulls into a bitmap indexed by top-level row
+  // (materialized once per batch): one bit test replaces the isNullAt
+  // call - which the compiler declines to inline here - for identity and
+  // dictionary inputs alike.
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const T value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    char* slot = base + (static_cast<size_t>(pid) << 6) + cur[pid];
+    ::memcpy(slot, &value, sizeof(T));
+    cur[pid] += sizeof(T);
+    if (FOLLY_UNLIKELY(cur[pid] == kBlockSourceBytes)) {
+      flushEncoded<T>(stream, pid, cur);
+    }
+  }
+}
+
+template <typename T, bool kHasNulls, bool kIndexed>
+void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col];
+  const T* __restrict vals = decoded.data<T>();
+  const uint32_t stream = layout_.columnStream(col);
+  uint8_t* __restrict cur = cursors(stream);
+  char* __restrict base =
+      cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_) << 6);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  // nulls() merges wrapping nulls into a bitmap indexed by top-level row
+  // (materialized once per batch): one bit test replaces the isNullAt
+  // call - which the compiler declines to inline here - for identity and
+  // dictionary inputs alike.
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const T value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    char* slot = base + (static_cast<size_t>(pid) << 6) + cur[pid];
+    ::memcpy(slot, &value, sizeof(T));
+    cur[pid] += sizeof(T);
+    if (FOLLY_UNLIKELY(cur[pid] == kBlockSourceBytes)) {
+      flushRaw(stream, pid, cur);
+    }
+  }
+}
+
+template <bool kHasNulls, bool kIndexed>
+void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col];
+  const StringView* __restrict views = decoded.data<StringView>();
+  const uint32_t lengthStream = layout_.columnStream(col);
+  const uint32_t dataStream = lengthStream + 1;
+  uint8_t* __restrict lengthCur = cursors(lengthStream);
+  uint8_t* __restrict dataCur = cursors(dataStream);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const StringView view = kIndexed ? views[decoded.index(row)] : views[row];
+
+    // Length stream: an int64 value in an 8-byte cache slot.
+    {
+      char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
+      const int64_t length = view.size();
+      ::memcpy(slot, &length, sizeof(int64_t));
+      lengthCur[pid] += sizeof(int64_t);
+      if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockSourceBytes)) {
+        flushEncoded<int64_t>(lengthStream, pid, lengthCur);
+      }
+    }
+
+    // Data stream: raw bytes, staged through the cache line for locality;
+    // long values bypass it after a flush keeps the byte order.
+    const uint32_t size = view.size();
+    variableBytes_[pid] += size;
+    if (FOLLY_UNLIKELY(size >= kBlockSourceBytes)) {
+      if (dataCur[pid] > 0) {
+        flushRaw(dataStream, pid, dataCur);
+      }
+      // Raw stream bytes may split anywhere (spec section 5.4), so a huge
+      // value is appended in bounded pieces: each append then pre-holds at
+      // most a couple of cells and a spill can reclaim between pieces,
+      // keeping the memory cap meaningful.
+      constexpr uint32_t kDirectAppendPiece = 256 << 10;
+      const char* src = view.data();
+      uint32_t left = size;
+      while (left > 0) {
+        const uint32_t piece =
+            left < kDirectAppendPiece ? left : kDirectAppendPiece;
+        cells_.append(pid, dataStream, src, piece);
+        src += piece;
+        left -= piece;
+      }
+      bumpPartitionBytes(pid, size);
+      continue;
+    }
+    if (dataCur[pid] + size > kBlockSourceBytes) {
+      flushRaw(dataStream, pid, dataCur);
+    }
+    ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
+    dataCur[pid] += static_cast<uint8_t>(size);
+  }
+}
+
+template <bool kHasNulls, bool kIndexed>
+void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col]; // nulls() may materialize lazily
+  const StringView* __restrict views = decoded.data<StringView>();
+  const uint32_t lengthStream = layout_.columnStream(col);
+  const uint32_t dataStream = lengthStream + 1;
+  uint8_t* __restrict lengthCur = cursors(lengthStream);
+  uint8_t* __restrict dataCur = cursors(dataStream);
+  DictState* __restrict states = dictStates_[col].data();
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  // nulls() merges wrapping nulls into a bitmap indexed by top-level row
+  // (materialized once per batch): one bit test replaces the isNullAt
+  // call for identity and dictionary inputs alike.
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+  char* __restrict dictLineBase =
+      cacheBase_ + ((static_cast<size_t>(dataStream) * numPartitions_) << 6);
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if (FOLLY_LIKELY(row + 8 < batch.numRows)) {
+      // With tens of thousands of partitions the dictionary lines
+      // (64B x P) blow past the caches and the probe's first load eats
+      // memory latency; the pid stream is known well ahead.
+      __builtin_prefetch(
+          dictLineBase + (static_cast<size_t>(row2pid[row + 8]) << 6));
+    }
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const StringView& view = kIndexed ? views[decoded.index(row)] : views[row];
+    // The first 8 StringView bytes are (size u32)(zero-padded 4-byte
+    // prefix) for inline and heap values alike: one load feeds the size,
+    // the byte accounting and the whole dictionary probe, and view.data()
+    // with its inline-or-pointer branch stays off the hit path.
+    static_assert(StringView::kPrefixSize == 4, "prefix layout assumed");
+    uint64_t key;
+    ::memcpy(&key, &view, sizeof(uint64_t));
+    variableBytes_[pid] += static_cast<uint32_t>(key);
+    DictState& st = states[pid];
+    if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
+        appendDictValue(
+            lengthStream, dataStream, pid, st, view, key, lengthCur, dataCur)) {
+      continue;
+    }
+
+    // The fallback tail of a demoted partition: byte-identical to the raw
+    // string path of splitString.
+    ++dictStats_[col].fallbackRows;
+    {
+      char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
+      const int64_t length = view.size();
+      ::memcpy(slot, &length, sizeof(int64_t));
+      lengthCur[pid] += sizeof(int64_t);
+      if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockSourceBytes)) {
+        flushEncoded<int64_t>(lengthStream, pid, lengthCur);
+      }
+    }
+    const uint32_t size = view.size();
+    if (FOLLY_UNLIKELY(size >= kBlockSourceBytes)) {
+      if (dataCur[pid] > 0) {
+        flushRaw(dataStream, pid, dataCur);
+      }
+      constexpr uint32_t kDirectAppendPiece = 256 << 10;
+      const char* src = view.data();
+      uint32_t left = size;
+      while (left > 0) {
+        const uint32_t piece =
+            left < kDirectAppendPiece ? left : kDirectAppendPiece;
+        cells_.append(pid, dataStream, src, piece);
+        src += piece;
+        left -= piece;
+      }
+      bumpPartitionBytes(pid, size);
+      continue;
+    }
+    if (dataCur[pid] + size > kBlockSourceBytes) {
+      flushRaw(dataStream, pid, dataCur);
+    }
+    ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
+    dataCur[pid] += static_cast<uint8_t>(size);
+  }
+}
+
+template <typename T>
+void CellSplitter::dispatchEncoded(
+    uint32_t col,
+    const SplitBatch& batch,
+    bool hasNulls) {
+  const auto& decoded = batch.decoded[col];
+  const bool indexed = !decoded.isIdentityMapping();
+  if (hasNulls) {
+    indexed ? splitFixed<T, true, true>(col, batch)
+            : splitFixed<T, true, false>(col, batch);
+  } else {
+    indexed ? splitFixed<T, false, true>(col, batch)
+            : splitFixed<T, false, false>(col, batch);
+  }
+}
+
+template <typename T>
+void CellSplitter::dispatchRaw(
+    uint32_t col,
+    const SplitBatch& batch,
+    bool hasNulls) {
+  const auto& decoded = batch.decoded[col];
+  const bool indexed = !decoded.isIdentityMapping();
+  if (hasNulls) {
+    indexed ? splitRawFixed<T, true, true>(col, batch)
+            : splitRawFixed<T, true, false>(col, batch);
+  } else {
+    indexed ? splitRawFixed<T, false, true>(col, batch)
+            : splitRawFixed<T, false, false>(col, batch);
+  }
+}
+
+template <bool kHasNulls>
+void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col];
+  const uint32_t stream = layout_.columnStream(col);
+  uint8_t* __restrict cur = cursors(stream);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    cacheLine(stream, pid)[cur[pid]] = decoded.valueAt<bool>(row) ? 1 : 0;
+    if (FOLLY_UNLIKELY(++cur[pid] == kBlockSourceBytes)) {
+      flushRaw(stream, pid, cur);
+    }
+  }
+}
+
+template <bool kHasNulls, bool kIndexed>
+void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
+  const auto nullColumn = layout_.wireColumn(col);
+  auto& decoded = batch.decoded[col];
+  const Timestamp* __restrict vals = decoded.data<Timestamp>();
+  const uint32_t secondsStream = layout_.columnStream(col);
+  const uint32_t nanosStream = secondsStream + 1;
+  uint8_t* __restrict secondsCur = cursors(secondsStream);
+  uint8_t* __restrict nanosCur = cursors(nanosStream);
+  char* __restrict secondsBase =
+      cacheBase_ + ((static_cast<size_t>(secondsStream) * numPartitions_) << 6);
+  char* __restrict nanosBase =
+      cacheBase_ + ((static_cast<size_t>(nanosStream) * numPartitions_) << 6);
+  const uint32_t* __restrict row2pid = batch.row2Partition;
+  const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
+
+  for (uint32_t row = 0; row < batch.numRows; ++row) {
+    const uint32_t pid = row2pid[row];
+    if constexpr (kHasNulls) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
+        nulls_.setNull(
+            pid, nullColumn, windowRowCounts_[pid] + batch.rowIndexInPid[row]);
+        continue;
+      }
+    }
+    const Timestamp& value = kIndexed ? vals[decoded.index(row)] : vals[row];
+    const int64_t seconds = value.getSeconds();
+    const int64_t nanos = static_cast<int64_t>(value.getNanos());
+    // Both streams hold one 8-byte value per row, so the two cursors are
+    // always equal and both lines fill on the same row.
+    const size_t at = (static_cast<size_t>(pid) << 6) + secondsCur[pid];
+    ::memcpy(secondsBase + at, &seconds, sizeof(int64_t));
+    ::memcpy(nanosBase + at, &nanos, sizeof(int64_t));
+    secondsCur[pid] += sizeof(int64_t);
+    nanosCur[pid] += sizeof(int64_t);
+    if (FOLLY_UNLIKELY(secondsCur[pid] == kBlockSourceBytes)) {
+      flushEncoded<int64_t>(secondsStream, pid, secondsCur);
+      flushEncoded<int64_t>(nanosStream, pid, nanosCur);
+    }
+  }
+}
+
+void CellSplitter::split(const SplitBatch& batch) {
+  const auto& rowType = layout_.rowType();
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (layout_.isUnknownColumn(col)) {
+      continue;
+    }
+    const auto nullColumn = layout_.wireColumn(col);
+    const auto klass = batch.nullClass[col];
+    if (klass == BatchNullClass::kAllNull) {
+      // The whole batch is null in this column (constant null, or a flat
+      // vector whose scan came back all-null): values contribute nothing
+      // (dense pack) and the nulls are a counted run per partition - the
+      // column costs O(partitions) per batch and allocates no bitmap.
+      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+        const uint32_t count = batch.partition2RowCount[pid];
+        if (count > 0) {
+          nulls_.setNullRun(pid, nullColumn, windowRowCounts_[pid], count);
+        }
+      }
+      continue;
+    }
+    const bool hasNulls = klass == BatchNullClass::kSomeNulls;
+    switch (rowType->childAt(col)->kind()) {
+      case TypeKind::SMALLINT:
+        dispatchEncoded<int16_t>(col, batch, hasNulls);
+        break;
+      case TypeKind::INTEGER:
+        dispatchEncoded<int32_t>(col, batch, hasNulls);
+        break;
+      case TypeKind::BIGINT:
+        dispatchEncoded<int64_t>(col, batch, hasNulls);
+        break;
+      case TypeKind::BOOLEAN:
+        hasNulls ? splitBoolean<true>(col, batch)
+                 : splitBoolean<false>(col, batch);
+        break;
+      case TypeKind::TIMESTAMP: {
+        const bool indexed = !batch.decoded[col].isIdentityMapping();
+        if (hasNulls) {
+          indexed ? splitTimestamp<true, true>(col, batch)
+                  : splitTimestamp<true, false>(col, batch);
+        } else {
+          indexed ? splitTimestamp<false, true>(col, batch)
+                  : splitTimestamp<false, false>(col, batch);
+        }
+        break;
+      }
+      case TypeKind::HUGEINT:
+        dispatchRaw<int128_t>(col, batch, hasNulls);
+        break;
+      case TypeKind::TINYINT:
+        dispatchRaw<int8_t>(col, batch, hasNulls);
+        break;
+      case TypeKind::REAL:
+        dispatchRaw<float>(col, batch, hasNulls);
+        break;
+      case TypeKind::DOUBLE:
+        dispatchRaw<double>(col, batch, hasNulls);
+        break;
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY: {
+        const bool indexed = !batch.decoded[col].isIdentityMapping();
+        if (dictEnabled_[col] != 0) {
+          if (hasNulls) {
+            indexed ? splitStringDict<true, true>(col, batch)
+                    : splitStringDict<true, false>(col, batch);
+          } else {
+            indexed ? splitStringDict<false, true>(col, batch)
+                    : splitStringDict<false, false>(col, batch);
+          }
+        } else if (hasNulls) {
+          indexed ? splitString<true, true>(col, batch)
+                  : splitString<true, false>(col, batch);
+        } else {
+          indexed ? splitString<false, true>(col, batch)
+                  : splitString<false, false>(col, batch);
+        }
+        break;
+      }
+      default:
+        BOLT_UNREACHABLE();
+    }
+  }
+
+  // Commit row counts only after every column has been appended. A Run spill
+  // during the split reads cell bytes without closing this partial batch.
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    const uint32_t added = batch.partition2RowCount[pid];
+    if (added == 0) {
+      continue;
+    }
+    windowRowCounts_[pid] += added;
+    if (windowRowCounts_[pid] > maxWindowRows_) {
+      maxWindowRows_ = windowRowCounts_[pid];
+    }
+  }
+  totalWindowRows_ += batch.numRows;
+}
+
+CellWindowInput CellSplitter::windowInput() const {
+  CellWindowInput in;
+  in.cells = &cells_;
+  in.nulls = &nulls_;
+  in.layout = &layout_;
+  in.rowCounts = windowRowCounts_.data();
+  in.variableBytes = variableBytes_.data();
+  in.encodingTags = encodingTags_.data();
+  in.numPartitions = numPartitions_;
+  return in;
+}
+
+void CellSplitter::spillRun() {
+  if (writingOutput_ || cells_.totalBytes() == 0) {
+    return;
+  }
+  writingOutput_ = true;
+  SCOPE_EXIT {
+    writingOutput_ = false;
+  };
+  output_.spillRun(windowInput());
+  cells_.releaseAll();
+  // Refill the lowest chunks first so later reclaim can release idle tails.
+  allocator_.packFreelist();
+}
+
+void CellSplitter::sealWindow() {
+  BOLT_CHECK(!writingOutput_, "cannot seal a window during output");
+  if (!hasWindowRows()) {
+    return;
+  }
+  // Cache flushes can grow cells and trigger a Run spill. Only protect the
+  // actual output call, after all cache residues have been committed.
+  flushAll();
+  spillRun();
+  writingOutput_ = true;
+  SCOPE_EXIT {
+    writingOutput_ = false;
+  };
+  output_.sealWindow(windowInput());
+  resetWindow();
+}
+
+void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
+  BOLT_CHECK(!writingOutput_, "cannot finish during output");
+  const bool windowHasData = hasWindowRows();
+  if (windowHasData) {
+    flushAll();
+  }
+
+  // Capture utilization after cache flushes, before resident data is released.
+  const int64_t chunkBytes = allocator_.allocatedBytes();
+  const int64_t dataBytes = static_cast<int64_t>(cells_.totalBytes());
+  const auto* pool = arena_.pool();
+  LOG(INFO) << "CellShuffleWriter memory: chunks=" << (chunkBytes >> 20)
+            << "MB, data=" << (dataBytes >> 20) << "MB ("
+            << (chunkBytes > 0 ? 100.0 * dataBytes / chunkBytes : 0.0)
+            << "% utilization), resident=" << (residentBytes_ >> 20)
+            << "MB, nulls=" << (nulls_.allocatedBytes() >> 20)
+            << "MB, pool used=" << (pool->usedBytes() >> 20)
+            << "MB, pool peak=" << (pool->peakBytes() >> 20) << "MB";
+
+  writingOutput_ = true;
+  SCOPE_EXIT {
+    writingOutput_ = false;
+  };
+  // Preserve direct output of the resident window, even if earlier Runs
+  // exist. Finalization does not force an extra spill or sealed window.
+  output_.finalize(windowInput(), windowHasData, metrics);
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (dictEnabled_[col] == 0) {
+      continue;
+    }
+    const auto& stats = dictStats_[col];
+    metrics.dictionaryMatchedRows += static_cast<int64_t>(stats.matchedRows);
+    metrics.dictionaryFallbackRows += static_cast<int64_t>(stats.fallbackRows);
+    const uint64_t rows = stats.matchedRows + stats.fallbackRows;
+    LOG(INFO) << "CellShuffleWriter dictionary column " << col << ": matched "
+              << stats.matchedRows << " of " << rows << " rows ("
+              << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%)";
+  }
+  cells_.releaseAll();
+  resetWindow();
+}
+
+void CellSplitter::flushAll() {
+  // Dictionary columns first: a partition still in dictionary mode has raw
+  // index bytes in its length cache (flushed raw, so the generic loop below
+  // sees an empty cursor and cannot re-encode them) and owes the closing
+  // 0xFF framing to its data stream. A partition with no indexed row wrote
+  // nothing and gets no framing (an empty-stream column, spec section 9).
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (dictEnabled_[col] == 0) {
+      continue;
+    }
+    const uint32_t lengthStream = layout_.columnStream(col);
+    const uint32_t dataStream = lengthStream + 1;
+    uint8_t* lengthCur = cursors(lengthStream);
+    uint8_t* dataCur = cursors(dataStream);
+    auto* states = dictStates_[col].data();
+    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      DictState& st = states[pid];
+      if (st.mode != DictState::kModeDict) {
+        continue; // demoted: framing closed at demote time
+      }
+      if (st.matched == 0) {
+        continue; // no value this window
+      }
+      if (lengthCur[pid] > 0) {
+        flushRaw(lengthStream, pid, lengthCur);
+      }
+      // Also zeroes the data cursor, so the generic loop below cannot
+      // mistake the dictionary bytes for staged fallback chars.
+      closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
+    }
+  }
+  for (uint32_t stream = 0; stream < numStreams_; ++stream) {
+    const auto& info = layout_.stream(stream);
+    uint8_t* cur = cursors(stream);
+    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      if (cur[pid] == 0) {
+        continue;
+      }
+      if (info.kind == StreamKind::kEncoded) {
+        switch (info.sourceWidth) {
+          case 2:
+            flushEncoded<int16_t>(stream, pid, cur);
+            break;
+          case 4:
+            flushEncoded<int32_t>(stream, pid, cur);
+            break;
+          case 8:
+            flushEncoded<int64_t>(stream, pid, cur);
+            break;
+          default:
+            BOLT_UNREACHABLE();
+        }
+      } else {
+        flushRaw(stream, pid, cur);
+      }
+    }
+  }
+}
+
+void CellSplitter::resetWindow() {
+  nulls_.reset();
+  std::fill(windowRowCounts_.begin(), windowRowCounts_.end(), 0);
+  totalWindowRows_ = 0;
+  maxWindowRows_ = 0;
+  std::fill(partitionBytes_.begin(), partitionBytes_.end(), 0);
+  std::fill(variableBytes_.begin(), variableBytes_.end(), 0);
+  maxPartitionBytes_ = 0;
+  // A payload is self-contained: every partition re-enters dictionary mode
+  // with an empty open segment for the next window.
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (dictEnabled_[col] == 0) {
+      continue;
+    }
+    for (auto& st : dictStates_[col]) {
+      st.matched = 0;
+      st.mode = DictState::kModeDict;
+      st.entryCount = 0;
+      st.uniformLen = DictState::kUniformUnset;
+    }
+  }
+}
+
+// The fixed-width split templates are only referenced from this translation
+// unit; no explicit instantiation is needed.
+
+} // namespace bytedance::bolt::shuffle::sparksql::cell

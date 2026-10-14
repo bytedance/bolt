@@ -161,3 +161,14 @@ add_test(
   COMMAND
     bolt_shuffle_local_partition_writer_test
 )
+
+add_executable(
+  bolt_shuffle_cell_test
+  CellChunkTest.cpp
+  CellEncodingTest.cpp
+  CellWriterTest.cpp
+)
+
+target_link_libraries(bolt_shuffle_cell_test PRIVATE bolt_gtest_main)
+
+add_test(NAME bolt_shuffle_cell_test COMMAND bolt_shuffle_cell_test)

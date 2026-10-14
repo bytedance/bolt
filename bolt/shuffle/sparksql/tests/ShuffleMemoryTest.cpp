@@ -740,4 +740,102 @@ TEST_F(ShuffleMemoryTest, testRowBasedKeepsLargeSplitsUnderMemoryPressure) {
       static_cast<int32_t>(ShuffleWriterType::RowBased)));
 }
 
+// Under a reclaimable hog, the cell writer's chunk reservations arbitrate
+// the hog away instead of fragmenting its own state: the task completes
+// with zero evictions and zero sealed windows - the largest possible
+// payloads, which is this scenario's whole point (issue #662).
+TEST_F(ShuffleMemoryTest, testCellWriterKeepsDataResidentUnderReclaimableHog) {
+  const auto metrics =
+      runReclaimableHogScenario(static_cast<int32_t>(ShuffleWriterType::Cell));
+  ASSERT_GT(metrics.totalBytesWritten, 0);
+  int64_t lengthSum = 0;
+  for (const auto length : metrics.partitionLengths) {
+    lengthSum += length;
+  }
+  EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
+  EXPECT_EQ(metrics.totalBytesEvicted, 0)
+      << "pressure should resolve by reclaiming the hog, not the writer";
+  EXPECT_EQ(metrics.spillCount, 0);
+}
+
+// The inverse pressure: a transient allocation forces the arbitrator to
+// reclaim the writer itself between batches. The cell writer must spill its
+// Runs, shrink, and still produce a byte-exact file.
+TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
+  using namespace bytedance::bolt::exec::test;
+
+  constexpr int32_t kNumPartitions = 4;
+  constexpr int32_t kRowCount = 1024;
+  std::string str(8 * 1024, 'x');
+  constexpr int32_t kNumBatches = 8;
+  constexpr int32_t kTriggerAt = 6;
+  auto rowType = ROW({"pid", "c0"}, {INTEGER(), VARCHAR()});
+  std::vector<RowVectorPtr> batches;
+  for (int b = 0; b < kNumBatches; ++b) {
+    auto pidVector = makeFlatVector<int32_t>(
+        kRowCount, [](auto row) { return row % kNumPartitions; });
+    auto dataVector = makeFlatVector<StringView>(
+        kRowCount, [&](auto /*row*/) { return StringView(str); });
+    batches.push_back(makeRowVector({"pid", "c0"}, {pidVector, dataVector}));
+  }
+
+  const int64_t memoryLimit = 128 * 1024 * 1024;
+  auto memoryManagerHolder = TestMemoryManagerHolder::create(
+      memoryLimit, /*withOperatorReclaim=*/true);
+
+  auto tempDir = TempDirectoryPath::create();
+  std::string localDir = tempDir->path + "/local_dir";
+  std::filesystem::create_directories(localDir);
+
+  ShuffleWriterOptions writerOptions;
+  writerOptions.partitioning = Partitioning::kHash;
+  writerOptions.forceShuffleWriterType =
+      static_cast<int32_t>(ShuffleWriterType::Cell);
+  writerOptions.partitionWriterOptions.numPartitions = kNumPartitions;
+  writerOptions.partitionWriterOptions.partitionWriterType =
+      PartitionWriterType::kLocal;
+  writerOptions.partitionWriterOptions.dataFile =
+      tempDir->path + "/shuffle_data.bin";
+  writerOptions.partitionWriterOptions.configuredDirs = {localDir};
+  writerOptions.partitionWriterOptions.numSubDirs = 1;
+  writerOptions.taskAttemptId = memoryManagerHolder->taskAttemptId();
+
+  auto sourceNode = std::make_shared<MemoryHogNode>(
+      "source",
+      rowType,
+      batches,
+      kTriggerAt,
+      /*allocBytes=*/100 * 1024 * 1024);
+  core::PlanNodeId writerId("writer");
+  ShuffleWriterMetrics metrics;
+  auto reportCallback = [&](const ShuffleWriterMetrics& m) { metrics = m; };
+  auto writerNode = std::make_shared<SparkShuffleWriterNode>(
+      writerId, writerOptions, reportCallback, sourceNode);
+
+  CursorParameters params;
+  params.planNode = writerNode;
+  params.serialExecution = true;
+  params.queryCtx = core::QueryCtx::create(
+      nullptr,
+      core::QueryConfig{{}},
+      {},
+      cache::AsyncDataCache::getInstance(),
+      memoryManagerHolder->rootPool());
+
+  auto cursor = TaskCursor::create(params);
+  EXPECT_NO_THROW({
+    while (cursor->moveNext()) {
+    }
+  });
+  ASSERT_GT(metrics.totalBytesWritten, 0);
+  int64_t lengthSum = 0;
+  for (const auto length : metrics.partitionLengths) {
+    lengthSum += length;
+  }
+  EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
+  EXPECT_GT(metrics.totalBytesEvicted, 0)
+      << "reclaim should have forced the writer to spill Runs";
+  EXPECT_GT(metrics.externalReclaimTime, 0);
+}
+
 } // namespace bytedance::bolt::shuffle::sparksql::test
