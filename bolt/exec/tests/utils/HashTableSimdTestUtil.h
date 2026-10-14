@@ -28,25 +28,30 @@ inline void assertQueryResultsEqualWithSimdHashTable(
     memory::MemoryPool* pool,
     const char* operatorName,
     const std::unordered_map<std::string, std::string>& extraConfigs = {}) {
-  auto run = [&](bool enableSimd) {
+  auto run = [&](bool enableSimd, bool useMonoAlloc) {
     AssertQueryBuilder builder(plan);
     builder.config(
         core::QueryConfig::kSimdHashTableEnabled,
         enableSimd ? "true" : "false");
+    builder.config(
+        core::QueryConfig::kUseMonoAlloc, useMonoAlloc ? "true" : "false");
     for (const auto& [name, value] : extraConfigs) {
       builder.config(name, value);
     }
     return builder.copyResults(pool);
   };
 
-  auto scalarResult = run(false);
-  auto simdResult = run(true);
-  ASSERT_TRUE(test::assertEqualResults(
-      std::vector<RowVectorPtr>{simdResult},
-      std::vector<RowVectorPtr>{scalarResult}))
-      << "SIMD vs scalar " << operatorName
-      << " results differ.\nSIMD rows=" << simdResult->size()
-      << " scalar rows=" << scalarResult->size();
+  for (bool useMonoAlloc : {false, true}) {
+    SCOPED_TRACE(useMonoAlloc);
+    auto scalarResult = run(false, useMonoAlloc);
+    auto simdResult = run(true, useMonoAlloc);
+    ASSERT_TRUE(test::assertEqualResults(
+        std::vector<RowVectorPtr>{simdResult},
+        std::vector<RowVectorPtr>{scalarResult}))
+        << "SIMD vs scalar " << operatorName
+        << " results differ.\nSIMD rows=" << simdResult->size()
+        << " scalar rows=" << scalarResult->size();
+  }
 }
 
 inline std::vector<std::string> hashTableSimdVarcharValues() {
@@ -60,6 +65,7 @@ inline std::vector<std::string> hashTableSimdVarcharValues() {
       std::string(13, 'p'),
       std::string(13, 'q'),
       std::string(64, 'X'),
+      std::string("PRFX") + std::string(60, '\0'),
       std::string("PRFX") + std::string(60, 'A'),
       std::string("PRFX") + std::string(60, 'B'),
       std::string(16 * 1024, 'Z'),

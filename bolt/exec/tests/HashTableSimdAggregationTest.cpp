@@ -286,7 +286,7 @@ TEST_F(HashTableSimdAggregationTest, withSpill) {
              kRows, [b](auto row) { return row + b * 1000; })}));
   }
 
-  auto runWithConfig = [&](bool enableSimd) {
+  auto runWithConfig = [&](bool enableSimd, bool useMonoAlloc) {
     auto tempDir = exec::test::TempDirectoryPath::create();
     auto plan = PlanBuilder()
                     .values(batches)
@@ -296,6 +296,9 @@ TEST_F(HashTableSimdAggregationTest, withSpill) {
     auto result =
         AssertQueryBuilder(plan)
             .spillDirectory(tempDir->getPath())
+            .config(
+                core::QueryConfig::kUseMonoAlloc,
+                useMonoAlloc ? "true" : "false")
             .config(core::QueryConfig::kSpillEnabled, "true")
             .config(core::QueryConfig::kAggregationSpillEnabled, "true")
             .config(core::QueryConfig::kSpillStartPartitionBit, "29")
@@ -308,11 +311,14 @@ TEST_F(HashTableSimdAggregationTest, withSpill) {
     EXPECT_GT(toPlanStats(task->taskStats()).at(plan->id()).spilledBytes, 0);
     return result;
   };
-  auto scalarResult = runWithConfig(false);
-  auto simdResult = runWithConfig(true);
-  ASSERT_TRUE(test::assertEqualResults(
-      std::vector<RowVectorPtr>{simdResult},
-      std::vector<RowVectorPtr>{scalarResult}));
+  for (bool useMonoAlloc : {false, true}) {
+    SCOPED_TRACE(useMonoAlloc);
+    auto scalarResult = runWithConfig(false, useMonoAlloc);
+    auto simdResult = runWithConfig(true, useMonoAlloc);
+    ASSERT_TRUE(test::assertEqualResults(
+        std::vector<RowVectorPtr>{simdResult},
+        std::vector<RowVectorPtr>{scalarResult}));
+  }
 }
 
 TEST_F(HashTableSimdAggregationTest, encodedKeys) {

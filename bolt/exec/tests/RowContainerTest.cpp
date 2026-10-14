@@ -174,7 +174,7 @@ class RowContainerTest : public exec::test::RowContainerTestBase,
       // contains stored null values.
       auto syntheticNullResult =
           BaseVector::create(expected->type(), size, pool_.get());
-      RowContainer::extractColumn(
+      container.extractColumn(
           input.data(),
           size,
           container.columnAt(column),
@@ -1793,36 +1793,79 @@ TEST_F(RowContainerTest, ownsAndResetsMonotonicMemoryResource) {
 }
 
 TEST_F(RowContainerTest, extractStringsByAllocationMode) {
-  auto values = makeFlatVector<std::string>(
-      {"", "inline", std::string(HashStringAllocator::kMaxAlloc + 1, 'a')});
-  DecodedVector decoded(*values);
+  for (const auto& type : std::vector<TypePtr>{VARCHAR(), VARBINARY()}) {
+    SCOPED_TRACE(type->toString());
+    auto values = makeFlatVector<std::string>(
+        {"", "inline", std::string(HashStringAllocator::kMaxAlloc + 1, 'a')},
+        type);
+    DecodedVector decoded(*values);
 
-  for (const bool useMonotonicStringAllocation : {false, true}) {
-    for (const bool nullableKeys : {false, true}) {
-      SCOPED_TRACE(fmt::format(
-          "useMonotonicStringAllocation: {}, nullableKeys: {}",
-          useMonotonicStringAllocation,
-          nullableKeys));
+    for (const bool useMonotonicStringAllocation : {false, true}) {
+      for (const bool nullableKeys : {false, true}) {
+        SCOPED_TRACE(fmt::format(
+            "useMonotonicStringAllocation: {}, nullableKeys: {}",
+            useMonotonicStringAllocation,
+            nullableKeys));
 
-      RowContainer::RowContainerParam params;
-      params.useMonotonicStringAllocation = useMonotonicStringAllocation;
-      RowContainer container(
-          {VARCHAR()},
-          nullableKeys,
-          {},
-          {},
-          false,
-          false,
-          false,
-          false,
-          false,
-          pool_.get(),
-          params);
+        RowContainer::RowContainerParam params;
+        params.useMonotonicStringAllocation = useMonotonicStringAllocation;
+        RowContainer container(
+            std::vector<TypePtr>{type},
+            nullableKeys,
+            {},
+            {},
+            false,
+            false,
+            false,
+            false,
+            false,
+            pool_.get(),
+            params);
 
-      auto rows = store(container, decoded, values->size());
-      auto result = BaseVector::create(VARCHAR(), values->size(), pool_.get());
-      container.extractColumn(rows.data(), rows.size(), 0, result);
-      assertEqualVectors(values, result);
+        auto rows = store(container, decoded, values->size());
+        auto result = BaseVector::create(type, values->size(), pool_.get());
+        container.extractColumn(rows.data(), rows.size(), 0, result);
+        assertEqualVectors(values, result);
+
+        // Outer-join misses must remain null even when all stored strings are
+        // non-null and their payloads use monotonic allocation.
+        ASSERT_FALSE(container.columnHasNulls(0));
+        std::vector<char*> selectedRows{rows[2], nullptr, rows[1], rows[2]};
+        auto expected = makeNullableFlatVector<std::string>(
+            {std::string(HashStringAllocator::kMaxAlloc + 1, 'a'),
+             std::nullopt,
+             "inline",
+             std::string(HashStringAllocator::kMaxAlloc + 1, 'a')},
+            type);
+        container.extractColumn(
+            selectedRows.data(),
+            selectedRows.size(),
+            container.columnAt(0),
+            result,
+            false,
+            false,
+            true);
+        assertEqualVectors(expected, result);
+
+        const std::vector<vector_size_t> rowNumbers{3, 2, 1, 0};
+        auto reversedExpected = makeNullableFlatVector<std::string>(
+            {std::string(HashStringAllocator::kMaxAlloc + 1, 'a'),
+             "inline",
+             std::nullopt,
+             std::string(HashStringAllocator::kMaxAlloc + 1, 'a')},
+            type);
+        container.extractColumn(
+            selectedRows.data(),
+            folly::Range<const vector_size_t*>(
+                rowNumbers.data(), rowNumbers.size()),
+            container.columnAt(0),
+            0,
+            result,
+            false,
+            false,
+            true);
+        assertEqualVectors(reversedExpected, result);
+      }
     }
   }
 }
