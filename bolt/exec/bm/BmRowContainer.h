@@ -150,9 +150,10 @@ class BmRowContainer {
   // loaded now. Requires admissionMultiplier times the unloaded bytes to leave
   // headroom for caller processing. Only blocks with active BufferHandle are
   // treated as loaded; unpinned resident blocks are counted as reloadable
-  // because MaybeReserve() may reclaim them while probing capacity. This is a
-  // hint only: BulkReadSession::load() still performs the actual reservation
-  // and may throw if memory changes.
+  // because MaybeReserve() may reclaim them while probing capacity.
+  // This is only an admission snapshot; the subsequent load still reserves
+  // its own memory. When called on a Driver thread, the probe disables new
+  // task memory expansion without revoking existing capacity.
   bool canBulkRead(
       folly::Range<const SegmentId*> segments,
       size_t admissionMultiplier = 2) const;

@@ -29,3 +29,18 @@ gtest_add_tests(
   ""
   AUTO
 )
+
+# Isolate the singleton execution-memory configuration used by admission tests.
+add_executable(bolt_bm_bulkread_admission_test BmBulkReadAdmissionTest.cpp)
+target_link_libraries(
+  bolt_bm_bulkread_admission_test
+  PRIVATE
+    bolt_exec_bm
+    bolt_gtest_main
+    GTest::gmock
+)
+gtest_add_tests(
+  bolt_bm_bulkread_admission_test
+  ""
+  AUTO
+)
