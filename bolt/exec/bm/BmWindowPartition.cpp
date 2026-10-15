@@ -167,6 +167,7 @@ BmWindowPartition::BmWindowPartition(
                                 : std::vector<exec::bm::SegmentId>{}),
       peerStartBits_(std::move(descriptor.peerStartBits)),
       aggregateResults_(std::move(descriptor.aggregateResults)),
+      canReleaseConsumedChunks_(descriptor.canReleaseConsumedChunks),
       numRows_(descriptor.numRows),
       peerBoundaryMode_(descriptor.peerBoundaryMode) {
   BOLT_CHECK_NOT_NULL(data_);
@@ -753,6 +754,9 @@ void BmWindowPartition::extractInputColumns(
 
   BOLT_CHECK(mode == RowAccessMode::kWindowRead);
   BOLT_CHECK(readSession_.has_value());
+  const bool releaseConsumedChunks = canReleaseConsumedChunks_ &&
+      results.size() == inputMapping_.size() &&
+      partitionOffset == consumedInputRows_;
   auto ranges = getSegmentRanges(partitionOffset, numRows);
   vector_size_t rowsExtracted = 0;
   for (auto range : ranges) {
@@ -771,6 +775,16 @@ void BmWindowPartition::extractInputColumns(
             resultOffset + rowsExtracted + batchOffset);
       }
       const auto loadedRows = static_cast<exec::bm::RowNumber>(rows.size());
+      if (releaseConsumedChunks) {
+        // All future window results come from cached aggregates. Original
+        // columns now own their contents, so a fully consumed chunk can be
+        // destroyed before loading the next chunk instead of being written
+        // back by memory reclamation. End this batch's lease first.
+        rows.reset();
+        readSession_->releaseConsumedChunk(
+            {range.segment, range.begin, loadedRows});
+        consumedInputRows_ += loadedRows;
+      }
       rowsExtracted += loadedRows;
       range.begin += loadedRows;
       range.count -= loadedRows;

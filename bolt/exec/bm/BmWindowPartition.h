@@ -37,6 +37,8 @@ struct BmWindowPartitionDescriptor {
   std::vector<char*> residentRows;
   std::vector<uint64_t> peerStartBits;
   std::vector<VectorPtr> aggregateResults;
+  // Every window function is an input-accumulated full-partition aggregate.
+  bool canReleaseConsumedChunks{false};
   bool hasSpilledRows{false};
   BmPeerBoundaryMode peerBoundaryMode{BmPeerBoundaryMode::kNotNeeded};
 };
@@ -237,6 +239,8 @@ class BmWindowPartition : public exec::WindowPartition {
   std::vector<exec::bm::SegmentId> segmentIds_;
   std::vector<uint64_t> peerStartBits_;
   std::vector<VectorPtr> aggregateResults_;
+  const bool canReleaseConsumedChunks_;
+  mutable vector_size_t consumedInputRows_{0};
   vector_size_t numRows_{0};
   BmPeerBoundaryMode peerBoundaryMode_{BmPeerBoundaryMode::kNotNeeded};
   mutable RowAccessMode rowAccessMode_{RowAccessMode::kUndecided};
