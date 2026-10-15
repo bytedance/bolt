@@ -121,6 +121,13 @@ class BmWindowPartition : public exec::WindowPartition {
       vector_size_t numRows,
       const BufferPtr& nullsBuffer) const override;
 
+  void extractInputColumns(
+      vector_size_t partitionOffset,
+      vector_size_t numRows,
+      vector_size_t resultOffset,
+      folly::Range<const VectorPtr*> results,
+      bool exactSize = false) const override;
+
   void extractColumns(
       folly::Range<const column_index_t*> columnIndices,
       vector_size_t partitionOffset,

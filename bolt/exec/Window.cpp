@@ -921,10 +921,11 @@ void Window::getInputColumns(
     vector_size_t resultOffset,
     const RowVectorPtr& result) {
   auto numRows = endRow - startRow;
-  for (int i = 0; i < numInputColumns_; ++i) {
-    currentPartition_->extractColumn(
-        i, partitionOffset_, numRows, resultOffset, result->childAt(i));
-  }
+  currentPartition_->extractInputColumns(
+      partitionOffset_,
+      numRows,
+      resultOffset,
+      {result->children().data(), static_cast<size_t>(numInputColumns_)});
 }
 
 void Window::callApplyForPartitionRows(

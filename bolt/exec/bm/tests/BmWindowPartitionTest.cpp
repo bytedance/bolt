@@ -504,6 +504,133 @@ TEST_F(
 
 TEST_F(
     BmRowContainerDiskIoTest,
+    BmWindowPartitionExtractsColumnsWithChunkScopedWindowReads) {
+  constexpr vector_size_t rowsPerSegment = 8'192;
+  constexpr vector_size_t totalRows = 2 * rowsPerSegment;
+  constexpr uint32_t blockSize = 32 << 10;
+  BmRowContainer container(
+      {BIGINT(), VARCHAR(), BIGINT(), VARCHAR()},
+      {true, true, true, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      blockSize,
+      blockSize);
+
+  std::vector<SegmentId> segments;
+  for (vector_size_t segmentIndex = 0; segmentIndex < 2; ++segmentIndex) {
+    const auto firstRow = segmentIndex * rowsPerSegment;
+    auto input = makeRowVector({
+        makeFlatVector<int64_t>(
+            rowsPerSegment, [firstRow](auto row) { return firstRow + row; }),
+        makeFlatVector<std::string>(
+            rowsPerSegment,
+            [firstRow](auto row) {
+              return fmt::format(
+                  "name-{}-{}", firstRow + row, std::string(256, 'x'));
+            },
+            [firstRow](auto row) { return (firstRow + row) % 11 == 0; }),
+        makeFlatVector<int64_t>(
+            rowsPerSegment,
+            [firstRow](auto row) { return 3 * (firstRow + row); }),
+        makeFlatVector<std::string>(
+            rowsPerSegment,
+            [firstRow](auto row) {
+              return fmt::format(
+                  "payload-{}-{}", firstRow + row, std::string(256, 'y'));
+            }),
+    });
+    storeRows(container, input);
+    segments.push_back(container.spillActiveSegment());
+  }
+
+  bytedance::bolt::exec::window::BmWindowPartitionDescriptor descriptor;
+  descriptor.numRows = totalRows;
+  for (const auto segment : segments) {
+    descriptor.ranges.push_back({segment, 0, rowsPerSegment});
+  }
+  descriptor.hasSpilledRows = true;
+
+  bytedance::bolt::exec::window::BmWindowPartition partition(
+      &container,
+      pool(),
+      {BIGINT(), VARCHAR(), BIGINT(), VARCHAR()},
+      std::move(descriptor),
+      {0, 1, 2, 3},
+      {{0, SortOrder{true, true}}});
+
+  // Select WindowRead under admission pressure, then release the pressure so
+  // the remainder verifies chunk extraction with the original memory budget.
+  {
+    constexpr uint64_t kReadSlack = 10 << 20;
+    const auto freeBeforePressure = root_->freeBytes();
+    ASSERT_GT(freeBeforePressure, kReadSlack);
+    const auto pressureBytes = freeBeforePressure - kReadSlack;
+    auto pressurePool = root_->addLeafChild("chunk-window-read-pressure");
+    auto* pressure = pressurePool->allocate(pressureBytes);
+    auto pressureGuard = folly::makeGuard(
+        [&]() { pressurePool->free(pressure, pressureBytes); });
+    ASSERT_FALSE(container.canBulkRead({segments.data(), segments.size()}));
+    auto probe = BaseVector::create(BIGINT(), 0, pool());
+    partition.extractColumn(0, 0, 1, 0, probe);
+  }
+  bufferManager_->Reclaim(bufferManager_->reclaimableBytes());
+
+  constexpr vector_size_t resultOffset = 3;
+  constexpr vector_size_t partitionOffset = rowsPerSegment - 500;
+  constexpr vector_size_t numRows = 2'000;
+  std::vector<VectorPtr> results{
+      makeFlatVector<int64_t>(resultOffset, [](auto /*row*/) { return -1; }),
+      makeFlatVector<std::string>(
+          resultOffset, [](auto /*row*/) { return "prefix"; }),
+      makeFlatVector<int64_t>(resultOffset, [](auto /*row*/) { return -3; }),
+      makeFlatVector<std::string>(
+          resultOffset, [](auto /*row*/) { return "prefix"; }),
+  };
+
+#ifndef NDEBUG
+  bytedance::bolt::exec::window::resetBmWindowPartitionTestStats();
+#endif
+  partition.extractInputColumns(
+      partitionOffset, numRows, resultOffset, {results.data(), results.size()});
+
+  for (vector_size_t row = 0; row < resultOffset; ++row) {
+    EXPECT_EQ(-1, results[0]->asFlatVector<int64_t>()->valueAt(row));
+    EXPECT_EQ("prefix", results[1]->asFlatVector<StringView>()->valueAt(row));
+    EXPECT_EQ(-3, results[2]->asFlatVector<int64_t>()->valueAt(row));
+    EXPECT_EQ("prefix", results[3]->asFlatVector<StringView>()->valueAt(row));
+  }
+  for (vector_size_t row = 0; row < numRows; ++row) {
+    const auto sourceRow = partitionOffset + row;
+    const auto outputRow = resultOffset + row;
+    EXPECT_EQ(
+        sourceRow, results[0]->asFlatVector<int64_t>()->valueAt(outputRow));
+    if (sourceRow % 11 == 0) {
+      EXPECT_TRUE(results[1]->isNullAt(outputRow));
+    } else {
+      EXPECT_EQ(
+          fmt::format("name-{}-{}", sourceRow, std::string(256, 'x')),
+          results[1]->asFlatVector<StringView>()->valueAt(outputRow));
+    }
+    EXPECT_EQ(
+        3 * sourceRow, results[2]->asFlatVector<int64_t>()->valueAt(outputRow));
+    EXPECT_EQ(
+        fmt::format("payload-{}-{}", sourceRow, std::string(256, 'y')),
+        results[3]->asFlatVector<StringView>()->valueAt(outputRow));
+  }
+
+#ifndef NDEBUG
+  const auto stats =
+      bytedance::bolt::exec::window::bmWindowPartitionTestStats();
+  EXPECT_EQ(numRows, stats.loadedRows);
+  EXPECT_GT(stats.loadRowsCalls, 1);
+  EXPECT_LT(stats.maxLoadedRows, numRows);
+#endif
+  EXPECT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
+}
+
+TEST_F(
+    BmRowContainerDiskIoTest,
     BmWindowPartitionPrecomputedEmptyPeerMetadataDoesNotLoadRows) {
   constexpr vector_size_t size = 9'000;
   BmRowContainer container(
