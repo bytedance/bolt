@@ -152,7 +152,7 @@ std::string ShuffleWriterMetrics::toString() const {
   }
   return fmt::format(
       "totalInputRowNumber={} totalInputBatches={} totalBytesWritten={} "
-      "totalBytesEvicted={} totalWriteTime={} totalEvictTime={} "
+      "totalBytesEvicted={} totalSpillFiles={} totalWriteTime={} totalEvictTime={} "
       "totalCompressTime={} splitTime={} convertTime={} flattenTime={} "
       "computePidTime={} shuffleWriteTime={} externalReclaimTime={} "
       "maxPartitionBufferSize={} avgPreallocSize={} dataSize={} peakBytes={} "
@@ -163,6 +163,7 @@ std::string ShuffleWriterMetrics::toString() const {
       totalInputBatches,
       succinctBytes(totalBytesWritten),
       succinctBytes(totalBytesEvicted),
+      totalSpillFiles,
       asMillis(totalWriteTime),
       asMillis(totalEvictTime),
       asMillis(totalCompressTime),

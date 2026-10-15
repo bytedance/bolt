@@ -1975,7 +1975,7 @@ arrow::Status BoltShuffleWriter::resizePartitionBuffer(
           binaryBuf.lengthPtr = lengthBuffer->mutable_data();
           break;
         }
-        auto valueOffset = 0;
+        uint64_t valueOffset = 0;
         // If preserve data, the new valueBufferSize should not be smaller than
         // the current offset.
         if (preserveData) {

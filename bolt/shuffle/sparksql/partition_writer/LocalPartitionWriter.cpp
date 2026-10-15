@@ -761,6 +761,8 @@ arrow::Status LocalPartitionWriter::requestSpill() {
   if (!spiller_ || spiller_->finished()) {
     ARROW_ASSIGN_OR_RAISE(
         auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
+    ++totalSpillFiles_;
+    ++spillFilesFromRequestSpill_;
     spiller_ = std::make_unique<LocalSpiller>(
         numPartitions_,
         spillFile,
@@ -860,6 +862,8 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(
     const auto beforeSpill = static_cast<int64_t>(cachedPayloadSize());
     ARROW_ASSIGN_OR_RAISE(
         auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
+    ++totalSpillFiles_;
+    ++spillFilesFromReclaimFixedSize_;
     spills_.emplace_back();
     ARROW_ASSIGN_OR_RAISE(
         spills_.back(),
@@ -902,9 +906,20 @@ arrow::Status LocalPartitionWriter::populateMetrics(
   metrics->totalEvictTime += spillTime_;
   metrics->totalWriteTime += writeTime_;
   metrics->totalBytesEvicted += totalBytesEvicted_;
+  metrics->totalSpillFiles += totalSpillFiles_;
   metrics->totalBytesWritten += totalBytesWritten_;
   metrics->partitionLengths = std::move(partitionLengths_);
   metrics->rawPartitionLengths = std::move(rawPartitionLengths_);
+  LOG(INFO) << "LocalPartitionWriter spill file summary: totalSpillFiles="
+            << totalSpillFiles_
+            << ", requestSpill=" << spillFilesFromRequestSpill_
+            << ", reclaimFixedSize=" << spillFilesFromReclaimFixedSize_
+            << ", reclaimFixedSizeNoMerge="
+            << spillFilesFromReclaimFixedSizeNoMerge_
+            << ", evictPayloadCache=" << spillFilesFromEvictPayloadCache_
+            << ", clearPayloadCacheSequential="
+            << spillFilesFromClearPayloadCacheSequential_
+            << ", rowBasedEvict=" << spillFilesFromRowBasedEvict_;
   return arrow::Status::OK();
 }
 
@@ -921,6 +936,8 @@ arrow::Status LocalPartitionWriter::reclaimFixedSizeNoMerge(
     auto beforeSpill = payloadPool_->bytes_allocated();
     ARROW_ASSIGN_OR_RAISE(
         auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
+    ++totalSpillFiles_;
+    ++spillFilesFromReclaimFixedSizeNoMerge_;
     spills_.emplace_back();
     ARROW_ASSIGN_OR_RAISE(
         spills_.back(),
@@ -943,6 +960,8 @@ arrow::Status LocalPartitionWriter::evictPayLoadCache() {
   if (payloadCache_ && payloadCache_->canSpill()) {
     ARROW_ASSIGN_OR_RAISE(
         auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
+    ++totalSpillFiles_;
+    ++spillFilesFromEvictPayloadCache_;
     spills_.emplace_back();
     ARROW_ASSIGN_OR_RAISE(
         spills_.back(),
@@ -956,6 +975,8 @@ arrow::Status LocalPartitionWriter::startClearPayLoadCacheSequential() {
   RETURN_NOT_OK(finishSpill());
   ARROW_ASSIGN_OR_RAISE(
       auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
+  ++totalSpillFiles_;
+  ++spillFilesFromClearPayloadCacheSequential_;
   if (UNLIKELY(!payloadCache_)) {
     payloadCache_ = std::make_shared<PayloadCache>(
         numPartitions_, options_.bufferedSpillWrite);
@@ -1031,6 +1052,8 @@ arrow::Status LocalPartitionWriter::evict(
 arrow::Status LocalPartitionWriter::startEvictRowsSequential() {
   ARROW_ASSIGN_OR_RAISE(
       auto spillFile, createTempShuffleFile(nextSpilledFileDir()));
+  ++totalSpillFiles_;
+  ++spillFilesFromRowBasedEvict_;
   RETURN_NOT_OK(
       partitionRowWriter_->startSpill(numPartitions_, spillFile, pool_));
   return arrow::Status::OK();

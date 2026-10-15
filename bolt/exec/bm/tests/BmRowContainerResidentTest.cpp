@@ -404,6 +404,106 @@ TEST_F(BmRowContainerTest, NullableExtractPreservesNulls) {
   EXPECT_EQ("alpha", varcharFlat->valueAt(2).str());
 }
 
+TEST_F(BmRowContainerTest, NullableExtractAllocatesNullsOnDemand) {
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({10, std::nullopt, 30, std::nullopt, 50}),
+      makeNullableFlatVector<double>(
+          {1.5, std::nullopt, 3.5, std::nullopt, 5.5}),
+      makeNullableFlatVector<std::string>(
+          {"short", std::nullopt, std::string(80, 'x'), std::nullopt, "tail"}),
+  });
+  BmRowContainer container(
+      {BIGINT(), DOUBLE(), VARCHAR()},
+      {true, true, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto rows = storeAll(container, input);
+
+  for (bool indexed : {false, true}) {
+    for (auto column = 0; column < input->childrenSize(); ++column) {
+      SCOPED_TRACE(fmt::format("indexed={}, column={}", indexed, column));
+      const auto& source = input->childAt(column);
+      auto result = BaseVector::create(source->type(), 0, pool());
+      auto extract = [&](const std::vector<vector_size_t>& selected,
+                         vector_size_t offset = 0) {
+        auto expected = BaseVector::create(
+            source->type(), offset + selected.size(), pool());
+        if (offset != 0) {
+          expected->copy(result.get(), 0, 0, offset);
+        }
+        for (auto i = 0; i < selected.size(); ++i) {
+          if (selected[i] < 0) {
+            expected->setNull(offset + i, true);
+          } else {
+            expected->copy(source.get(), offset + i, selected[i], 1);
+          }
+        }
+        if (indexed) {
+          container.extractColumnResident(
+              rows.data(),
+              {selected.data(), selected.size()},
+              column,
+              offset,
+              result);
+        } else {
+          std::vector<const char*> selectedRows;
+          for (auto row : selected) {
+            selectedRows.push_back(rows[row]);
+          }
+          container.extractColumnResident(
+              selectedRows.data(), selectedRows.size(), column, offset, result);
+        }
+        test::assertEqualVectors(expected, result);
+      };
+
+      extract({0, 2, 4});
+      EXPECT_EQ(nullptr, result->rawNulls());
+      BaseVector::prepareForReuse(result, 1);
+      extract({4});
+      EXPECT_EQ(nullptr, result->rawNulls());
+
+      // The first null can occur anywhere in a newly extracted range.
+      for (const auto& selected :
+           {std::vector<vector_size_t>{1, 0, 2}, {0, 1, 2}, {0, 2, 1}}) {
+        result = BaseVector::create(source->type(), 0, pool());
+        extract(selected);
+        ASSERT_NE(nullptr, result->rawNulls());
+      }
+
+      result = BaseVector::create(source->type(), 0, pool());
+      extract({1, 3, 1});
+      auto previous = BaseVector::create(source->type(), 3, pool());
+      previous->setNulls(result->nulls());
+      extract({0, 2, 4});
+      EXPECT_TRUE(previous->isNullAt(0));
+      EXPECT_TRUE(previous->isNullAt(1));
+      EXPECT_TRUE(previous->isNullAt(2));
+
+      // Appending non-null rows must preserve a null in the existing prefix.
+      extract({0, 1});
+      extract({2, 4}, 2);
+      EXPECT_TRUE(result->isNullAt(1));
+      // Creating the bitmap during append must preserve the non-null prefix.
+      result = BaseVector::create(source->type(), 0, pool());
+      extract({0, 2});
+      EXPECT_EQ(nullptr, result->rawNulls());
+      extract({1, 4}, 2);
+      EXPECT_FALSE(result->isNullAt(0));
+      EXPECT_FALSE(result->isNullAt(1));
+      EXPECT_TRUE(result->isNullAt(2));
+
+      if (indexed) {
+        result = BaseVector::create(source->type(), 0, pool());
+        extract({0, -1, 2});
+        EXPECT_TRUE(result->isNullAt(1));
+        extract({-1, 4});
+        EXPECT_TRUE(result->isNullAt(0));
+      }
+    }
+  }
+}
+
 TEST_F(BmRowContainerTest, NullableStoreClearsNullBitForNonNullValue) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
@@ -470,6 +570,13 @@ TEST_F(BmRowContainerDiskIoTest, NullableStringNullSurvivesSpillRead) {
   EXPECT_EQ("delta", flat->valueAt(0).str());
   EXPECT_TRUE(flat->isNullAt(1));
   EXPECT_EQ("alpha", flat->valueAt(2).str());
+
+  std::vector<vector_size_t> selected{2, 1, 0};
+  container.extractColumnResident(
+      rows.data(), {selected.data(), selected.size()}, 1, 0, result);
+  EXPECT_EQ("alpha", flat->valueAt(0).str());
+  EXPECT_TRUE(flat->isNullAt(1));
+  EXPECT_EQ("delta", flat->valueAt(2).str());
 }
 
 TEST_F(BmRowContainerTest, RejectsTooManyKeyColumns) {
@@ -477,6 +584,48 @@ TEST_F(BmRowContainerTest, RejectsTooManyKeyColumns) {
       BmRowContainer(
           {ARRAY(BIGINT())}, {false}, 2, bufferManager_, MemoryTag::kTesting),
       BoltRuntimeError);
+}
+
+TEST_F(BmRowContainerTest, InlineStringExtractPreservesSharedValues) {
+  for (const auto& type : std::vector<TypePtr>{VARCHAR(), VARBINARY()}) {
+    auto source = makeNullableFlatVector<std::string>(
+        {std::nullopt, std::string("a\0b", 3), std::string(80, 'x'), "tail"},
+        type);
+    BmRowContainer container(
+        {type}, {true}, 0, bufferManager_, MemoryTag::kTesting);
+    const auto rows = storeAll(container, makeRowVector({source}));
+    for (const bool indexed : {false, true}) {
+      auto result = makeNullableFlatVector<std::string>(
+          {std::nullopt, "old", std::string(64, '!'), "z"}, type);
+      auto expectedPrevious = makeNullableFlatVector<std::string>(
+          {std::nullopt, "old", std::string(64, '!'), "z"}, type);
+      auto previous = std::make_shared<FlatVector<StringView>>(
+          pool(),
+          type,
+          result->nulls(),
+          result->size(),
+          result->values(),
+          std::vector<BufferPtr>(result->stringBuffers()));
+      std::vector<vector_size_t> selected{3, 0, 2, 1};
+      if (indexed) {
+        container.extractColumnResident(
+            rows.data(), {selected.data(), selected.size()}, 0, 0, result);
+      } else {
+        std::vector<const char*> selectedRows;
+        for (const auto row : selected)
+          selectedRows.push_back(rows[row]);
+        container.extractColumnResident(
+            selectedRows.data(), selectedRows.size(), 0, result);
+      }
+      auto expected = makeNullableFlatVector<std::string>(
+          {"tail", std::nullopt, std::string(80, 'x'), std::string("a\0b", 3)},
+          type);
+      test::assertEqualVectors(expected, result);
+      test::assertEqualVectors(expectedPrevious, previous);
+      EXPECT_NE(result->values().get(), previous->values().get());
+      EXPECT_NE(result->nulls().get(), previous->nulls().get());
+    }
+  }
 }
 
 } // namespace

@@ -391,6 +391,119 @@ TEST_F(JsonFucntionTest, invalidJsonPath) {
   }
 }
 
+TEST_F(JsonFucntionTest, rootOnlyWhitespaceInJsonPath) {
+  const char* json = R"("result")";
+  const auto test = [&]() {
+    for (const char whitespace : {' ', '\t', '\n', '\v', '\f', '\r'}) {
+      std::string path{"$"};
+      path.append(3, whitespace);
+
+      EXPECT_EQ(
+          testGetJsonObjectOnce(json, path),
+          std::optional<std::string>{"result"})
+          << "whitespace code: "
+          << static_cast<int>(static_cast<unsigned char>(whitespace));
+    }
+  };
+
+  for (const auto& [useSonicJson, useDomParser] :
+       {std::pair{"false", "true"},
+        std::pair{"false", "false"},
+        std::pair{"true", "false"}}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, useSonicJson},
+         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser}});
+    test();
+  }
+}
+
+TEST_F(JsonFucntionTest, whitespaceAfterDotInJsonPath) {
+  const char* json = R"({"outer":{"value":"result"}})";
+  const auto test = [&]() {
+    EXPECT_EQ(
+        testGetJsonObjectOnce(json, "$. outer. value"),
+        std::optional<std::string>{"result"});
+    EXPECT_EQ(
+        testGetJsonObjectOnce(json, "$.outer.  value"),
+        std::optional<std::string>{"result"});
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.outer .value"), std::nullopt);
+
+    for (const char whitespace : {' ', '\t', '\n', '\v', '\f', '\r'}) {
+      std::string path = "$.";
+      path.push_back(whitespace);
+      path.append("outer.");
+      path.push_back(whitespace);
+      path.append("value");
+
+      EXPECT_EQ(
+          testGetJsonObjectOnce(json, path),
+          std::optional<std::string>{"result"})
+          << "whitespace code: "
+          << static_cast<int>(static_cast<unsigned char>(whitespace));
+    }
+  };
+
+  for (const auto& [useSonicJson, useDomParser] :
+       {std::pair{"false", "true"},
+        std::pair{"false", "false"},
+        std::pair{"true", "false"}}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, useSonicJson},
+         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser}});
+    test();
+  }
+}
+
+TEST_F(JsonFucntionTest, arrayWildcardSyntax) {
+  GTEST_SKIP() << "TODO: Fix Spark-compatible wildcard semantics";
+
+  const char* json =
+      R"({"arr":[10,20],"object":{"*":"star"," *":"space star","*suffix":"suffix"}})";
+  const auto test = [&]() {
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.arr. *"), std::nullopt);
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.arr.*"), std::nullopt);
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.arr[*]"), "[10,20]");
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object.*"), "star");
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object. *"), "star");
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object.*suffix"), "suffix");
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object['*']"), "star");
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$.object[*]"), std::nullopt);
+  };
+
+  for (const auto& [useSonicJson, useDomParser] :
+       {std::pair{"false", "true"},
+        std::pair{"false", "false"},
+        std::pair{"true", "false"}}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, useSonicJson},
+         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser}});
+    test();
+  }
+}
+
+TEST_F(JsonFucntionTest, preserveQuotedBracketKeys) {
+  const char* json = R"({"a-b":"dash","a:b":"colon"})";
+  for (const char* useDomParser : {"true", "false"}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, "false"},
+         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser}});
+
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$['a-b']"), "dash");
+    EXPECT_EQ(testGetJsonObjectOnce(json, "$['a:b']"), "colon");
+  }
+}
+
+TEST_F(JsonFucntionTest, preserveSpacesInQuotedBracketKeys) {
+  const char* json = R"({"a. b":"expected","a.b":"wrong"})";
+  for (const char* useDomParser : {"true", "false"}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kUseSonicJson, "false"},
+         {core::QueryConfig::kUseDOMParserInGetJsonObject, useDomParser}});
+
+    EXPECT_EQ(testGetJsonObjectOnce(json, R"($['a. b'])"), "expected");
+  }
+}
+
 TEST_F(JsonFucntionTest, emptyInput) {
   // test dom
   for (auto value : {"true", "false"}) {
