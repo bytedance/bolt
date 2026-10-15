@@ -38,6 +38,8 @@ using ParseResult = folly::Expected<std::string, bool>;
 
 class JsonPathTokenizer {
  public:
+  explicit JsonPathTokenizer(bool spark_compatible)
+      : spark_compatible_(spark_compatible){};
   bool reset(folly::StringPiece path);
 
   bool hasNext() const;
@@ -64,6 +66,8 @@ class JsonPathTokenizer {
   folly::StringPiece path_;
 
   std::string simdJsonPathPointer_;
+
+  const bool spark_compatible_;
 };
 
 } // namespace bytedance::bolt::functions

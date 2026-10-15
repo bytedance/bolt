@@ -71,6 +71,7 @@ add_executable(
   JsonSplitTest.cpp
   JsonToMapTest.cpp
   JsonTupleTest.cpp
+  JsonPathNormalizerTest.cpp
   LeastGreatestTest.cpp
   LuhnCheckTest.cpp
   MakeDecimalTest.cpp
