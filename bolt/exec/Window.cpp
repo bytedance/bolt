@@ -487,7 +487,7 @@ void Window::createWindowFunctions() {
 
   if (isBmStreamingWindowBuild_) {
     auto aggregation = window::prepareBmAggregateWindowFunctions(
-        windowNode_->windowFunctions(), windowFunctions_, operatorCtx_->pool());
+        *windowNode_, windowFunctions_, operatorCtx_->pool());
     dynamic_cast<window::BmStreamingWindowBuild*>(windowBuild_.get())
         ->setInputAggregation(std::move(aggregation));
   }

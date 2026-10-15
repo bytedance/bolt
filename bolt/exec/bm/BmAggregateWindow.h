@@ -91,10 +91,17 @@ class BmEntirePartitionAggregation {
   std::vector<VectorPtr> inputVectors_;
 };
 
+// Full-partition BM aggregates share a coordinator for output scans. Input
+// aggregation is enabled only without partition keys and when every candidate
+// is SUM, COUNT, MIN, MAX, or AVG. Returns the coordinator for Build's input
+// accumulation, or nullptr when only output scans are enabled.
 std::shared_ptr<BmEntirePartitionAggregation> prepareBmAggregateWindowFunctions(
-    const std::vector<core::WindowNode::Function>& functionSpecs,
+    const core::WindowNode& windowNode,
     const std::vector<std::unique_ptr<exec::WindowFunction>>& functions,
-    memory::MemoryPool* pool,
-    bool enableInputAggregation = true);
+    memory::MemoryPool* pool);
+
+// Overrides input aggregation in tests and benchmarks. nullopt follows the
+// production policy.
+void setBmInputAggregationEnabledForTest(std::optional<bool> enabled);
 
 } // namespace bytedance::bolt::exec::window
