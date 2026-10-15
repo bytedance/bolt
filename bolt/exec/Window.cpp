@@ -1084,7 +1084,8 @@ RowVectorPtr Window::getOutput() {
   }
 
   auto numOutputRows = std::min(numRowsPerOutput_, numRowsLeft);
-  auto usedBytes = operatorCtx_->pool()->currentBytes();
+  const auto usedBytes =
+      isBmStreamingWindowBuild_ ? 0 : operatorCtx_->pool()->currentBytes();
   auto result = BaseVector::create<RowVector>(
       outputType_, numOutputRows, operatorCtx_->pool());
 
@@ -1094,18 +1095,41 @@ RowVectorPtr Window::getOutput() {
     windowBuild_->finish();
   }
 
-  auto resultBytes = operatorCtx_->pool()->currentBytes() - usedBytes;
-  std::optional<uint64_t> resultRowSize = resultBytes / numResultRows;
-
-  auto rowsPerOutput = outputBatchRows(resultRowSize);
-  if (rowsPerOutput < maxNumRowsPerOutput_) {
-    numRowsPerOutput_ = rowsPerOutput;
-    windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+  if (!isBmStreamingWindowBuild_) {
+    auto resultBytes = operatorCtx_->pool()->currentBytes() - usedBytes;
+    std::optional<uint64_t> resultRowSize = resultBytes / numResultRows;
+    auto rowsPerOutput = outputBatchRows(resultRowSize);
+    if (rowsPerOutput < maxNumRowsPerOutput_) {
+      numRowsPerOutput_ = rowsPerOutput;
+      windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+    }
+    return numResultRows < numOutputRows
+        ? std::dynamic_pointer_cast<RowVector>(result->slice(0, numResultRows))
+        : result;
   }
 
-  return numResultRows < numOutputRows
-      ? std::dynamic_pointer_cast<RowVector>(result->slice(0, numResultRows))
-      : result;
+  if (numResultRows < numOutputRows) {
+    result =
+        std::dynamic_pointer_cast<RowVector>(result->slice(0, numResultRows));
+  }
+
+  if (numResultRows > 0) {
+    // Estimate from the returned rows. Pool usage also includes Window state
+    // that may be allocated or released while producing the batch.
+    const auto resultBytes = result->estimateFlatSize();
+    const auto resultRowSize =
+        resultBytes / numResultRows + (resultBytes % numResultRows != 0);
+    // Frame buffers were allocated at initialization. Allow batches to grow
+    // back to that capacity after narrower output, but never exceed it.
+    const auto rowsPerOutput =
+        std::min(outputBatchRows(resultRowSize), maxNumRowsPerOutput_);
+    if (rowsPerOutput != numRowsPerOutput_) {
+      numRowsPerOutput_ = rowsPerOutput;
+      windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+    }
+  }
+
+  return result;
 }
 
 RowVectorPtr Window::getOutputFromSpilledPartition() {
