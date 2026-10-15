@@ -281,17 +281,27 @@ void BmStreamingWindowBuild::recordResidentPreviousRow(const char* row) {
 void BmStreamingWindowBuild::prepareMemoryForAppend(const RowVectorPtr& input) {
   constexpr uint64_t kAppendMemoryAmplification = 2;
   constexpr uint64_t kMinAppendGranularitySlack = 16ULL << 20;
+  // Existing pinned storage can absorb the batch without allocating blocks.
+  // Retain the input-size allowance for partition and aggregation work.
+  const bool fitsCurrentChunk = bmData_->canAppendToCurrentChunk(input);
+  const auto segmentBeforeReserve = bmData_->activeSegmentId();
   const auto estimatedBytes = (input->usedSize() * kAppendMemoryAmplification) +
-      kMinAppendGranularitySlack;
+      (fitsCurrentChunk ? 0 : kMinAppendGranularitySlack);
   // Preflight before entering appendBatch(), which mutates BM segment/chunk
   // metadata under a non-reclaimable section. maybeReserve() can trigger memory
   // arbitration while this Window is still reclaimable, allowing
   // Window::reclaim to spill the current active segment first. The result is
   // only a hint: the real append can still allocate later if memory changes.
   memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
-  const auto reserved = bufferManager_->MaybeReserve(estimatedBytes);
+  (void)bufferManager_->MaybeReserve(estimatedBytes);
+  if (fitsCurrentChunk && bmData_->activeSegmentId() != segmentBeforeReserve) {
+    // Arbitration sealed the reusable chunk. Prepare for new blocks while
+    // this Window is still reclaimable, using the original reservation hint.
+    const auto fallbackBytes = input->usedSize() * kAppendMemoryAmplification +
+        kMinAppendGranularitySlack;
+    (void)bufferManager_->MaybeReserve(fallbackBytes);
+  }
   bufferManager_->ReleaseUnusedReservation();
-  (void)reserved;
 }
 
 void BmStreamingWindowBuild::copyPreviousRowBeforeSpill() {

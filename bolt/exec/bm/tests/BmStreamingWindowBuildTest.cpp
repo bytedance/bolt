@@ -93,6 +93,7 @@ class PlainWindowPartition final : public WindowPartition {
 struct AutoSpillTestStats {
   uint64_t triggers{0};
   uint64_t requestedBytes{0};
+  std::vector<int64_t> requestSizes;
   uint64_t reclaimedBytes{0};
   uint64_t shrunkenBytes{0};
   uint64_t returnedBytes{0};
@@ -201,6 +202,7 @@ class AutoSpillTestContext {
       std::lock_guard<std::mutex> lock(statsMutex_);
       ++stats_.triggers;
       stats_.requestedBytes += static_cast<uint64_t>(size);
+      stats_.requestSizes.push_back(size);
     }
 
     auto manager = holder_->getManager();
@@ -1605,6 +1607,87 @@ TEST_F(BmStreamingWindowBuildTest, doesNotSpillDuringStoreWithoutReclaim) {
   build.addInput(data);
 
   EXPECT_FALSE(build.windowSpilledStats().has_value());
+}
+
+TEST_F(
+    BmStreamingWindowBuildDiskIoTest,
+    appendReservationRechecksAfterReclaim) {
+  constexpr vector_size_t kRows = 512;
+  constexpr int64_t kMemoryLimit = 64LL << 20;
+  auto data = makeRowVector(
+      {"id", "payload"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+       makeFlatVector<std::string>(
+           kRows, [](auto row) { return std::string(64, 'a' + row % 26); })});
+  auto plan =
+      PlanBuilder(pool())
+          .values({data, data})
+          .streamingWindow(
+              {"max(id) over (rows between unbounded preceding and unbounded following)"})
+          .planNode();
+  auto node = std::dynamic_pointer_cast<const core::WindowNode>(plan);
+  AutoSpillTestContext context{
+      "bm-window-append-reservation-recheck", kMemoryLimit};
+  auto directory = TempDirectoryPath::create();
+  auto task = makeDirectWindowTask(plan, directory->path, context.rootPool());
+  auto driverCtx = std::make_unique<DriverCtx>(task, 0, 0, 0, 0);
+  auto* driverCtxRaw = driverCtx.get();
+  auto driver = Driver::testingCreate(std::move(driverCtx));
+  TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+  Window window(0, driverCtxRaw, node);
+  window.initialize();
+  window.addInput(data);
+  ASSERT_EQ(0, task->bufferManager()->stats().spillWriteCount);
+
+  auto root = context.rootPool();
+  auto pressurePool = root->addLeafChild("append-recheck-pressure");
+  ASSERT_LT(root->reservedBytes() + (4 << 20), kMemoryLimit);
+  const auto pressureBytes = kMemoryLimit - root->reservedBytes() - (4 << 20);
+  auto* pressure = pressurePool->allocate(pressureBytes);
+  auto pressureGuard =
+      folly::makeGuard([&] { pressurePool->free(pressure, pressureBytes); });
+  const auto triggersBefore = context.stats().triggers;
+  const auto requestsBefore = context.stats().requestSizes.size();
+
+  // The batch fits the pinned row/heap tails, but its reduced reservation
+  // rounds up to 8 MiB and exceeds the remaining 4 MiB task budget. Reclaim
+  // seals the segment, so preflight must also issue the original full hint.
+  window.addInput(data);
+  EXPECT_GT(context.stats().triggers, triggersBefore);
+  EXPECT_GT(task->bufferManager()->stats().spillWriteCount, 0);
+  const auto requests = context.stats().requestSizes;
+  // Task quota reports the deficit, not the original reservation size. The
+  // full hint requires a larger request than the reduced 8 MiB hint here.
+  EXPECT_TRUE(std::any_of(
+      requests.begin() + requestsBefore, requests.end(), [](auto bytes) {
+        return bytes > (8 << 20);
+      }));
+  RecordProperty("append_reclaim_requests", folly::join(",", requests));
+  pressureGuard.dismiss();
+  pressurePool->free(pressure, pressureBytes);
+
+  window.noMoreInput();
+  vector_size_t outputRows = 0;
+  for (auto attempts = 0; attempts < 16 && !window.isFinished(); ++attempts) {
+    Operator::NonReclaimableSectionGuard guard(&window);
+    auto output = window.getOutput();
+    if (output == nullptr) {
+      continue;
+    }
+    for (vector_size_t row = 0; row < output->size(); ++row) {
+      const auto sourceRow = (outputRows + row) % kRows;
+      EXPECT_EQ(
+          sourceRow, output->childAt(0)->asFlatVector<int64_t>()->valueAt(row));
+      EXPECT_EQ(
+          std::string(64, 'a' + sourceRow % 26),
+          output->childAt(1)->asFlatVector<StringView>()->valueAt(row).str());
+      EXPECT_EQ(
+          kRows - 1, output->childAt(2)->asFlatVector<int64_t>()->valueAt(row));
+    }
+    outputRows += output->size();
+  }
+  EXPECT_EQ(2 * kRows, outputRows);
+  EXPECT_TRUE(window.isFinished());
 }
 
 TEST_F(BmStreamingWindowBuildDiskIoTest, windowReclaimSpillsDuringStore) {
