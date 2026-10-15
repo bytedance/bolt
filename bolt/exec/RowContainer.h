@@ -127,7 +127,7 @@ struct RowContainerIterator {
   char* FOLLY_NULLABLE endOfRun{nullptr};
 
   // Cursor used by fast row listing with cached row pointers.
-  int32_t listRowCursor{0};
+  size_t listRowCursor{0};
 
   // Returns the current row, skipping a possible normalized key below the first
   // byte of row.
@@ -552,8 +552,7 @@ class RowContainer {
       int32_t maxRows,
       char* FOLLY_NONNULL* FOLLY_NONNULL rows) const {
     int32_t count = 0;
-    while (count < maxRows &&
-           iter->listRowCursor < static_cast<int32_t>(rowPointers_.size())) {
+    while (count < maxRows && iter->listRowCursor < rowPointers_.size()) {
       rows[count++] = rowPointers_[iter->listRowCursor];
       ++iter->listRowCursor;
     }

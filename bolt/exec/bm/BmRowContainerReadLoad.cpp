@@ -17,6 +17,8 @@
 #include "bolt/exec/bm/BmRowContainer.h"
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/exec/Driver.h"
+#include "bolt/exec/Task.h"
 
 #include <limits>
 
@@ -69,6 +71,12 @@ bool BmRowContainer::canBulkRead(
   if (bytes > maxBulkReadBytes) {
     return false;
   }
+  // Disable new task quota borrowing for this admission probe only.
+  const auto* context = exec::driverThreadContext();
+  const auto* driverCtx = context != nullptr ? context->driverCtx() : nullptr;
+  const auto guard = driverCtx != nullptr
+      ? driverCtx->task->maybeScopedDisableMemoryExpansion()
+      : std::nullopt;
   const auto reserved =
       bufferManager_->MaybeReserve(bytes * admissionMultiplier);
   bufferManager_->ReleaseUnusedReservation();
