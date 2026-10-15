@@ -31,6 +31,7 @@ namespace bytedance::bolt::exec::window {
 namespace {
 
 constexpr vector_size_t kExtractNullsBatchRows = 4096;
+constexpr vector_size_t kWindowReadExtractBatchRows = 1024;
 constexpr vector_size_t kDirectRowNumberRunRows = 8;
 constexpr vector_size_t kCachedNullsMinRows = 1024;
 
@@ -705,6 +706,76 @@ void BmWindowPartition::extractNulls(
     offset += batchRows;
   }
   cacheNulls(physicalColumn, partitionOffset, numRows, nullsBuffer);
+}
+
+void BmWindowPartition::extractInputColumns(
+    vector_size_t partitionOffset,
+    vector_size_t numRows,
+    vector_size_t resultOffset,
+    folly::Range<const VectorPtr*> results,
+    bool exactSize) const {
+  BOLT_CHECK_LE(results.size(), inputMapping_.size());
+  if (results.empty()) {
+    return;
+  }
+  if (numRows == 0) {
+    for (const auto& result : results) {
+      result->resize(resultOffset);
+    }
+    return;
+  }
+
+  const auto extractAllColumns = [&](const char* const* rows,
+                                     vector_size_t rowsCount,
+                                     vector_size_t outputOffset) {
+    for (auto column = 0; column < results.size(); ++column) {
+      extractRowsToVector(
+          rows,
+          rowsCount,
+          inputMapping_[column],
+          outputOffset,
+          results[column],
+          exactSize);
+    }
+  };
+
+  const auto mode = ensureAccessMode();
+  if (mode == RowAccessMode::kResidentRows) {
+    extractAllColumns(residentRowsData(partitionOffset), numRows, resultOffset);
+    return;
+  }
+  if (mode == RowAccessMode::kBulkRead) {
+    auto rows = loadRows(partitionOffset, numRows);
+    extractAllColumns(rows.data(), rows.size(), resultOffset);
+    return;
+  }
+
+  BOLT_CHECK(mode == RowAccessMode::kWindowRead);
+  BOLT_CHECK(readSession_.has_value());
+  auto ranges = getSegmentRanges(partitionOffset, numRows);
+  vector_size_t rowsExtracted = 0;
+  for (auto range : ranges) {
+    while (range.count > 0) {
+      auto rows = readSession_->loadChunkBoundedRowsScoped(range);
+#ifndef NDEBUG
+      recordLoadedRows(rows.size());
+#endif
+      for (vector_size_t batchOffset = 0; batchOffset < rows.size();
+           batchOffset += kWindowReadExtractBatchRows) {
+        const auto numBatchRows = std::min<vector_size_t>(
+            kWindowReadExtractBatchRows, rows.size() - batchOffset);
+        extractAllColumns(
+            rows.data() + batchOffset,
+            numBatchRows,
+            resultOffset + rowsExtracted + batchOffset);
+      }
+      const auto loadedRows = static_cast<exec::bm::RowNumber>(rows.size());
+      rowsExtracted += loadedRows;
+      range.begin += loadedRows;
+      range.count -= loadedRows;
+    }
+  }
+  BOLT_CHECK_EQ(rowsExtracted, numRows);
 }
 
 void BmWindowPartition::extractColumns(

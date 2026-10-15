@@ -89,6 +89,23 @@ void WindowPartition::extractColumn(
       true);
 }
 
+void WindowPartition::extractInputColumns(
+    vector_size_t partitionOffset,
+    vector_size_t numRows,
+    vector_size_t resultOffset,
+    folly::Range<const VectorPtr*> results,
+    bool exactSize) const {
+  for (auto column = 0; column < results.size(); ++column) {
+    extractColumn(
+        column,
+        partitionOffset,
+        numRows,
+        resultOffset,
+        results[column],
+        exactSize);
+  }
+}
+
 void WindowPartition::extractNulls(
     int32_t columnIndex,
     vector_size_t partitionOffset,
