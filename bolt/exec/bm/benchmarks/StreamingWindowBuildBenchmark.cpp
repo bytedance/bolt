@@ -19,6 +19,7 @@
 #include <folly/init/Init.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -451,6 +452,8 @@ int main(int argc, char** argv) {
   const InputProfile unaligned{
       unalignedPartitionRows, 1, PayloadProfile::kFixed};
   const InputProfile singleLarge{totalRows, 1, PayloadProfile::kFixed};
+  const InputProfile singleLargeString{
+      totalRows, 1, PayloadProfile::kLargeString};
   const InputProfile nullable{
       defaultPartitionRows, 1, PayloadProfile::kNullable};
   const InputProfile largeString{
@@ -471,7 +474,42 @@ int main(int argc, char** argv) {
   const std::string descNullsLastMultiKeyOver =
       "partition by p order by s desc nulls last, d asc nulls first";
 
+  auto wholePartitionAggregates = [](int32_t numFunctions) {
+    static const std::array<std::string, 4> kAggregates{
+        "count", "sum", "min", "max"};
+    static const std::array<std::string, 2> kColumns{"d", "x"};
+    std::vector<std::string> functions;
+    functions.reserve(numFunctions);
+    for (auto i = 0; i < numFunctions; ++i) {
+      functions.push_back(fmt::format(
+          "{}({}) over (partition by p order by s rows between unbounded preceding and unbounded following)",
+          kAggregates[i % kAggregates.size()],
+          kColumns[(i / kAggregates.size()) % kColumns.size()]));
+    }
+    return functions;
+  };
+
+  auto wholePartitionStringAggregates = [] {
+    static const std::array<std::string, 2> kAggregates{"min", "max"};
+    constexpr int32_t kNumFunctions = 16;
+    std::vector<std::string> functions;
+    functions.reserve(kNumFunctions);
+    for (auto i = 0; i < kNumFunctions; ++i) {
+      functions.push_back(fmt::format(
+          "{}(v) over (partition by p order by s rows between unbounded preceding and unbounded following)",
+          kAggregates[i % kAggregates.size()]));
+    }
+    return functions;
+  };
+
   std::vector<BenchmarkCase> cases{
+      {"whole_partition_agg_01", wholePartitionAggregates(1), singleLarge},
+      {"whole_partition_agg_04", wholePartitionAggregates(4), singleLarge},
+      {"whole_partition_agg_16", wholePartitionAggregates(16), singleLarge},
+      {"whole_partition_agg_48", wholePartitionAggregates(48), singleLarge},
+      {"whole_partition_string_agg_16",
+       wholePartitionStringAggregates(),
+       singleLargeString},
       {"row_number_default",
        {"row_number() over (partition by p order by s)"},
        defaultFixed},

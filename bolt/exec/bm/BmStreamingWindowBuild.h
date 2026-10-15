@@ -25,6 +25,8 @@
 
 namespace bytedance::bolt::exec::window {
 
+class BmEntirePartitionAggregation;
+
 class BmStreamingWindowBuild : public exec::WindowBuild {
  public:
   BmStreamingWindowBuild(
@@ -57,6 +59,9 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   }
 
   void finish() override;
+
+  void setInputAggregation(
+      std::shared_ptr<BmEntirePartitionAggregation> aggregation);
 
  private:
   enum class AdjacentRelation {
@@ -116,6 +121,7 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
       exec::bm::SegmentId segment,
       exec::bm::RowNumber begin,
       const std::vector<char*>& rows,
+      const RowVectorPtr& input,
       vector_size_t offset,
       vector_size_t size);
 
@@ -124,7 +130,8 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   void splitRowsIntoPartitions(
       exec::bm::SegmentId segment,
       exec::bm::RowNumber begin,
-      const std::vector<char*>& rows);
+      const std::vector<char*>& rows,
+      const RowVectorPtr& input);
 
   void prepareMemoryForAppend(const RowVectorPtr& input);
 
@@ -148,6 +155,7 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   vector_size_t activeRowsInDescriptor(
       const BmWindowPartitionDescriptor& descriptor) const;
 
+  std::shared_ptr<BmEntirePartitionAggregation> inputAggregation_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   std::unique_ptr<exec::bm::BmRowContainer> bmData_;
   std::shared_ptr<const BmWindowPartitionSchema> partitionSchema_;

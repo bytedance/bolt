@@ -56,6 +56,13 @@ void recordReverseIncrementalRows(vector_size_t numRows) {
   });
 }
 
+void recordSharedScan(size_t numFunctions) {
+  testStats().withWLock([&](auto& stats) {
+    ++stats.sharedScanCalls;
+    stats.sharedScanFunctions += numFunctions;
+  });
+}
+
 #endif
 
 bool supportsReverseIncrementalAggregation(const std::string& name) {
@@ -189,6 +196,14 @@ class BmWindowFrameReader {
   uint64_t useClock_{0};
 };
 
+bool isEntirePartitionFrame(const core::WindowNode::Frame* frame) {
+  return frame != nullptr &&
+      frame->startType == core::WindowNode::BoundType::kUnboundedPreceding &&
+      frame->endType == core::WindowNode::BoundType::kUnboundedFollowing;
+}
+
+} // namespace
+
 class BmAggregateWindowFunction : public exec::WindowFunction {
  public:
   BmAggregateWindowFunction(
@@ -249,6 +264,14 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     computeDefaultAggregateValue(resultType);
   }
 
+  void setEntirePartitionAggregation(
+      std::shared_ptr<BmEntirePartitionAggregation> aggregation) {
+    BOLT_CHECK_NOT_NULL(aggregation);
+    BOLT_CHECK_NULL(entirePartitionAggregation_);
+    entirePartitionAggregation_ = std::move(aggregation);
+    entirePartitionAggregation_->registerFunction(this);
+  }
+
   ~BmAggregateWindowFunction() override {
     if (aggregateInitialized_) {
       std::vector<char*> singleGroupRowVector = {rawSingleGroupRow_};
@@ -263,6 +286,9 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     previousFrameMetadata_.reset();
     frameReader_->resetPartition(partition_);
     invalidateAggregateResultCache();
+    if (entirePartitionAggregation_ != nullptr) {
+      entirePartitionAggregation_->resetPartition(partition_);
+    }
   }
 
   void apply(
@@ -274,6 +300,12 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       vector_size_t resultOffset,
       const VectorPtr& result) override {
     if (handleAllEmptyFrames(validRows, resultOffset, result)) {
+      return;
+    }
+
+    if (entirePartitionAggregation_ != nullptr) {
+      entirePartitionAggregation_->prepare();
+      copyAggregateResultToRows(validRows, resultOffset, result);
       return;
     }
 
@@ -310,6 +342,8 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   }
 
  private:
+  friend class BmEntirePartitionAggregation;
+
   struct FrameMetadata {
     vector_size_t firstRow;
     vector_size_t lastRow;
@@ -553,6 +587,7 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   std::vector<VectorPtr> argVectors_;
   std::unique_ptr<BmWindowFrameReader> frameReader_;
   bool supportsReverseIncremental_{false};
+  std::shared_ptr<BmEntirePartitionAggregation> entirePartitionAggregation_;
   SelectivityVector aggregateRows_;
   vector_size_t selectedAggregateRowsStart_{0};
   vector_size_t selectedAggregateRowsEnd_{0};
@@ -569,7 +604,171 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   VectorPtr emptyResult_;
 };
 
-} // namespace
+BmEntirePartitionAggregation::BmEntirePartitionAggregation(
+    memory::MemoryPool* pool)
+    : pool_(pool) {
+  BOLT_CHECK_NOT_NULL(pool_);
+}
+
+void BmEntirePartitionAggregation::registerFunction(
+    BmAggregateWindowFunction* function) {
+  BOLT_CHECK_NOT_NULL(function);
+  functions_.push_back(function);
+  std::vector<std::optional<size_t>> inputIndices;
+  inputIndices.reserve(function->argIndices_.size());
+  for (auto i = 0; i < function->argIndices_.size(); ++i) {
+    const auto channel = function->argIndices_[i];
+    if (channel == kConstantChannel) {
+      inputIndices.push_back(std::nullopt);
+      continue;
+    }
+    const auto existing =
+        std::find(inputChannels_.begin(), inputChannels_.end(), channel);
+    if (existing != inputChannels_.end()) {
+      const auto existingIndex = existing - inputChannels_.begin();
+      BOLT_CHECK(
+          inputTypes_[existingIndex]->equivalent(*function->argTypes_[i]));
+      inputIndices.push_back(existingIndex);
+      continue;
+    }
+    inputIndices.push_back(inputChannels_.size());
+    inputChannels_.push_back(channel);
+    inputTypes_.push_back(function->argTypes_[i]);
+    inputVectors_.push_back(
+        BaseVector::create(function->argTypes_[i], 0, pool_));
+  }
+  functionInputIndices_.push_back(std::move(inputIndices));
+}
+
+void BmEntirePartitionAggregation::resetPartition(
+    const BmWindowPartition* partition) {
+  BOLT_CHECK_NOT_NULL(partition);
+  partition_ = partition;
+  prepared_ = false;
+}
+
+void BmEntirePartitionAggregation::addInput(
+    const RowVectorPtr& input,
+    vector_size_t offset,
+    vector_size_t size) {
+  BOLT_CHECK_GT(size, 0);
+  BOLT_CHECK_LE(offset + size, input->size());
+  if (inputRows_ == 0) {
+    for (auto* function : functions_) {
+      function->resetAggregateGroup();
+    }
+  }
+  std::vector<VectorPtr> inputs;
+  inputs.reserve(inputChannels_.size());
+  for (const auto channel : inputChannels_) {
+    inputs.push_back(input->childAt(channel));
+  }
+  // Use the original vectors and select only this partition's input range.
+  addBatch(inputs, input->size(), offset, size);
+  inputRows_ += size;
+}
+
+void BmEntirePartitionAggregation::addBatch(
+    const std::vector<VectorPtr>& inputs,
+    vector_size_t batchRows,
+    vector_size_t offset,
+    vector_size_t size) {
+  for (auto functionIndex = 0; functionIndex < functions_.size();
+       ++functionIndex) {
+    auto* function = functions_[functionIndex];
+    const auto& inputIndices = functionInputIndices_[functionIndex];
+    std::vector<VectorPtr> arguments;
+    arguments.reserve(inputIndices.size());
+    for (auto i = 0; i < inputIndices.size(); ++i) {
+      arguments.push_back(
+          inputIndices[i].has_value() ? inputs[inputIndices[i].value()]
+                                      : function->argVectors_[i]);
+    }
+    function->selectAggregateRows(batchRows, offset, offset + size);
+    function->aggregate_->addSingleGroupRawInput(
+        function->rawSingleGroupRow_,
+        function->aggregateRows_,
+        arguments,
+        false);
+    function->markAggregateStateChanged();
+  }
+}
+
+std::vector<VectorPtr> BmEntirePartitionAggregation::finishPartition() {
+  BOLT_CHECK_GT(inputRows_, 0);
+  std::vector<VectorPtr> results;
+  results.reserve(functions_.size());
+  for (auto* function : functions_) {
+    // Each closed partition owns its result, including variable-width payloads.
+    // Do not reuse the output scratch vector while another partition holds it.
+    auto result =
+        BaseVector::create(function->aggregateResultVector_->type(), 1, pool_);
+    function->aggregate_->extractValues(
+        &function->rawSingleGroupRow_, 1, &result);
+    BOLT_CHECK_NOT_NULL(result);
+    BOLT_CHECK_EQ(result->size(), 1);
+    results.push_back(std::move(result));
+  }
+#ifndef NDEBUG
+  testStats().withWLock([&](auto& stats) {
+    stats.inputAggregationRows += inputRows_;
+    ++stats.inputAggregationPartitions;
+    stats.inputAggregationFunctions += functions_.size();
+  });
+#endif
+  inputRows_ = 0;
+  return results;
+}
+
+void BmEntirePartitionAggregation::prepare() {
+  if (prepared_) {
+    return;
+  }
+  BOLT_CHECK_NOT_NULL(partition_);
+  BOLT_CHECK_GT(functions_.size(), 0);
+  const auto& results = partition_->aggregateResults();
+  if (!results.empty()) {
+    BOLT_CHECK_EQ(results.size(), functions_.size());
+    for (auto i = 0; i < functions_.size(); ++i) {
+      auto* function = functions_[i];
+      function->aggregateResultVector_ = results[i];
+      function->extractedStateVersion_ = function->aggregateStateVersion_;
+    }
+    prepared_ = true;
+    return;
+  }
+
+  for (auto* function : functions_) {
+    BOLT_CHECK_NOT_NULL(function);
+    function->resetAggregateGroup();
+  }
+
+  for (vector_size_t batchStart = 0; batchStart < partition_->numRows();
+       batchStart += kAggregateInputBatchRows) {
+    const auto batchRows = std::min<vector_size_t>(
+        kAggregateInputBatchRows, partition_->numRows() - batchStart);
+    if (!inputChannels_.empty()) {
+      for (auto& input : inputVectors_) {
+        BaseVector::prepareForReuse(input, batchRows);
+      }
+#ifndef NDEBUG
+      recordMaterializedRows(batchRows);
+#endif
+      partition_->extractColumns(
+          {inputChannels_.data(), inputChannels_.size()},
+          batchStart,
+          batchRows,
+          {inputVectors_.data(), inputVectors_.size()});
+    }
+
+    addBatch(inputVectors_, batchRows, 0, batchRows);
+  }
+
+  prepared_ = true;
+#ifndef NDEBUG
+  recordSharedScan(functions_.size());
+#endif
+}
 
 #ifndef NDEBUG
 void resetBmAggregateWindowTestStats() {
@@ -605,6 +804,42 @@ std::unique_ptr<exec::WindowFunction> createBmAggregateWindowFunction(
 
   return std::make_unique<BmAggregateWindowFunction>(
       name, args, resultType, ignoreNulls, pool, stringAllocator, config);
+}
+
+std::shared_ptr<BmEntirePartitionAggregation> prepareBmAggregateWindowFunctions(
+    const std::vector<core::WindowNode::Function>& functionSpecs,
+    const std::vector<std::unique_ptr<exec::WindowFunction>>& functions,
+    memory::MemoryPool* pool,
+    bool enableInputAggregation) {
+  BOLT_CHECK_EQ(functionSpecs.size(), functions.size());
+
+  std::vector<BmAggregateWindowFunction*> candidates;
+  bool canAccumulateInput = enableInputAggregation;
+  for (auto i = 0; i < functions.size(); ++i) {
+    if (!isEntirePartitionFrame(&functionSpecs[i].frame)) {
+      continue;
+    }
+    if (auto* function =
+            dynamic_cast<BmAggregateWindowFunction*>(functions[i].get())) {
+      candidates.push_back(function);
+      const auto& name = functionSpecs[i].functionCall->name();
+      // Match Spillable's bounded-state full-partition aggregate scope.
+      canAccumulateInput &= name == "sum" || name == "count" || name == "min" ||
+          name == "max" || name == "avg";
+    }
+  }
+
+  if (candidates.empty()) {
+    return nullptr;
+  }
+
+  auto aggregation = std::make_shared<BmEntirePartitionAggregation>(pool);
+  for (auto* function : candidates) {
+    function->setEntirePartitionAggregation(aggregation);
+  }
+  // The return value only enables input accumulation. Even when returning
+  // nullptr, candidates retain this coordinator for shared scans during output.
+  return canAccumulateInput ? aggregation : nullptr;
 }
 
 } // namespace bytedance::bolt::exec::window
