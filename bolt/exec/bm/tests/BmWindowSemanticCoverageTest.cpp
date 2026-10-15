@@ -145,6 +145,7 @@ class BmWindowSemanticCoverageTest : public OperatorTestBase {
         {"p",
          "s",
          "array_value",
+         "array_string_value",
          "days_value",
          "map_varchar_int_value",
          "map_int_value",
@@ -162,6 +163,15 @@ class BmWindowSemanticCoverageTest : public OperatorTestBase {
                  {14, 15},
                  {6, 7},
                  {16, 17}}),
+            makeArrayVector<std::string>(
+                {{"a", "aa"},
+                 {"b"},
+                 {"c", "cc"},
+                 {"d"},
+                 {"e", "ee"},
+                 {"f"},
+                 {"g", "gg"},
+                 {"h"}}),
             makeArrayVector<int64_t>(
                 {{7, 8, 9},
                  {4, 5, 6},
@@ -290,7 +300,8 @@ RowVectorPtr runWindowPlan(
     memory::MemoryPool* pool,
     const RowVectorPtr& data,
     const std::string& windowFunction,
-    WindowBuildType buildType) {
+    WindowBuildType buildType,
+    bool canonicalizeArrayResult = false) {
   core::PlanNodePtr plan;
   if (buildType == WindowBuildType::kBmStreamingWindowBuild) {
     auto sortKeys = streamingSortKeysForWindow(windowFunction);
@@ -298,9 +309,22 @@ RowVectorPtr runWindowPlan(
     if (!sortKeys.empty()) {
       builder.orderBy(sortKeys, false);
     }
-    plan = builder.streamingWindow({windowFunction}).planNode();
+    builder.streamingWindow(
+        {canonicalizeArrayResult ? windowFunction + " as window_result"
+                                 : windowFunction});
+    if (canonicalizeArrayResult) {
+      builder.project({"row_id", "array_sort(window_result)"});
+    }
+    plan = builder.planNode();
   } else {
-    plan = PlanBuilder().values({data}).window({windowFunction}).planNode();
+    auto builder = PlanBuilder().values({data});
+    builder.window(
+        {canonicalizeArrayResult ? windowFunction + " as window_result"
+                                 : windowFunction});
+    if (canonicalizeArrayResult) {
+      builder.project({"row_id", "array_sort(window_result)"});
+    }
+    plan = builder.planNode();
   }
 
   TestWindowInjection windowInjection(buildType);
@@ -336,10 +360,21 @@ void assertBmMatchesSortWindow(
     const RowVectorPtr& data,
     const std::string& windowFunction) {
   SCOPED_TRACE(windowFunction);
+  const auto canonicalizeArrayResult =
+      windowFunction.find("collect_list(") != std::string::npos ||
+      windowFunction.find("collect_set(") != std::string::npos;
   auto expected = runWindowPlan(
-      pool, data, windowFunction, WindowBuildType::kSortWindowBuild);
+      pool,
+      data,
+      windowFunction,
+      WindowBuildType::kSortWindowBuild,
+      canonicalizeArrayResult);
   auto actual = runWindowPlan(
-      pool, data, windowFunction, WindowBuildType::kBmStreamingWindowBuild);
+      pool,
+      data,
+      windowFunction,
+      WindowBuildType::kBmStreamingWindowBuild,
+      canonicalizeArrayResult);
   ASSERT_TRUE(assertEqualResults({expected}, {actual}));
 }
 
@@ -502,7 +537,7 @@ std::vector<AggregateCoverageCase> nativeAggregateCoverageCases() {
   return cases;
 }
 
-std::set<std::string> complexInputFallbackAggregateNames() {
+std::set<std::string> complexInputAggregateNames() {
   return {
       "aggregate_map_sum",
       "array_addition",
@@ -552,8 +587,8 @@ TEST_F(BmWindowSemanticCoverageTest, registeredFunctionCensusIsClassified) {
 
   auto aggregateNames = registeredMainAggregateNames();
   auto classified = nativeAggregateCoverageNames();
-  auto fallback = complexInputFallbackAggregateNames();
-  classified.insert(fallback.begin(), fallback.end());
+  auto complex = complexInputAggregateNames();
+  classified.insert(complex.begin(), complex.end());
   auto baselineUnsupported = baselineUnsupportedAggregateNames();
   classified.insert(baselineUnsupported.begin(), baselineUnsupported.end());
 
@@ -633,6 +668,56 @@ TEST_F(
             pool(), data, windowSql(aggregateCase.call, over, frame));
       }
     }
+  }
+}
+
+TEST_F(
+    BmWindowSemanticCoverageTest,
+    collectionAndByExtremeAggregatesMatchSortWindowWithBm) {
+  auto data = makeCoverageInput();
+  const std::vector<std::string> functionCalls{
+      "collect_list(bigint_value)",
+      "collect_set(bigint_value)",
+      "max_by(varchar_value, row_id)",
+      "min_by(varchar_value, row_id)",
+  };
+  const std::vector<std::string> frames{
+      "rows between unbounded preceding and unbounded following",
+      "rows between unbounded preceding and current row",
+      "rows between current row and unbounded following",
+      "rows between 2 preceding and 2 following",
+  };
+
+  for (const auto& functionCall : functionCalls) {
+    for (const auto& frame : frames) {
+      assertBmMatchesSortWindow(
+          pool(),
+          data,
+          windowSql(
+              functionCall, "partition by c0 order by c1, c3, row_id", frame));
+    }
+  }
+}
+
+TEST_F(
+    BmWindowSemanticCoverageTest,
+    collectionAndByExtremeAggregatesCrossBmInputBatchBoundary) {
+  auto data = makeCoverageInput(1'030);
+  const std::vector<std::string> functionCalls{
+      "collect_list(bigint_value)",
+      "collect_set(bigint_value)",
+      "max_by(varchar_value, row_id)",
+      "min_by(varchar_value, row_id)",
+  };
+
+  for (const auto& functionCall : functionCalls) {
+    assertBmMatchesSortWindow(
+        pool(),
+        data,
+        windowSql(
+            functionCall,
+            "order by row_id",
+            "rows between unbounded preceding and current row"));
   }
 }
 
@@ -722,7 +807,7 @@ TEST_F(BmWindowSemanticCoverageTest, supportedInputTypesMatchSortWindow) {
 
 TEST_F(
     BmWindowSemanticCoverageTest,
-    complexInputAggregatesMatchSortWindowThroughFeatureFlagFallback) {
+    complexInputAggregatesMatchSortWindowWithBm) {
   auto data = makeComplexCoverageInput();
   const std::vector<std::string> functionCalls{
       "array_agg(array_value)",
@@ -741,7 +826,7 @@ TEST_F(
   };
 
   for (const auto& functionCall : functionCalls) {
-    assertAutoBmFeatureMatchesSortWindow(
+    assertBmMatchesSortWindow(
         pool(),
         data,
         windowSql(
@@ -749,6 +834,33 @@ TEST_F(
             "partition by p order by s",
             "rows between 2 preceding and current row"));
   }
+}
+
+TEST_F(BmWindowSemanticCoverageTest, complexValueFunctionsMatchSortWindow) {
+  auto data = makeComplexCoverageInput();
+  const std::vector<std::string> functionCalls{
+      "first_value(array_string_value)",
+      "last_value(map_varchar_int_value)",
+      "nth_value(row_value, 2)",
+      "lead(array_string_value, 1)",
+      "lag(map_int_value, 1)",
+  };
+
+  for (const auto& functionCall : functionCalls) {
+    assertBmMatchesSortWindow(
+        pool(),
+        data,
+        windowSql(
+            functionCall,
+            "partition by p order by s",
+            "rows between unbounded preceding and unbounded following"));
+  }
+}
+
+TEST_F(BmWindowSemanticCoverageTest, complexInputUsesBmFeatureFlag) {
+  auto data = makeComplexCoverageInput();
+  assertAutoBmFeatureMatchesSortWindow(
+      pool(), data, windowSql("row_number()", "partition by p order by s"));
 }
 
 TEST_F(

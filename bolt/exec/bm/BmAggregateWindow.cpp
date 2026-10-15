@@ -60,7 +60,8 @@ void recordReverseIncrementalRows(vector_size_t numRows) {
 
 bool supportsReverseIncrementalAggregation(const std::string& name) {
   return name == "sum" || name == "count" || name == "min" || name == "max" ||
-      name == "avg";
+      name == "avg" || name == "collect_list" || name == "collect_set" ||
+      name == "max_by" || name == "min_by";
 }
 
 class BmWindowFrameReader {
@@ -598,8 +599,7 @@ std::unique_ptr<exec::WindowFunction> createBmAggregateWindowFunction(
   if (!exec::getAggregateFunctionSignatures(name).has_value()) {
     return nullptr;
   }
-  if (name == "collect_list" || name == "collect_set" || name == "max_by" ||
-      name == "min_by" || name == "percentile") {
+  if (name == "percentile") {
     return nullptr;
   }
 

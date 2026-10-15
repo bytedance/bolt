@@ -55,9 +55,21 @@ TestWindowInjection::~TestWindowInjection() {
 
 namespace {
 
+bool isBmRowContainerSupportedType(const TypePtr& type);
+
 template <TypeKind Kind>
-bool isBmRowContainerSupportedTypeKind(const TypePtr& /*type*/) {
-  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+bool isBmRowContainerSupportedTypeKind(const TypePtr& type) {
+  if constexpr (
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
+    for (uint32_t i = 0; i < type->size(); ++i) {
+      if (!isBmRowContainerSupportedType(type->childAt(i))) {
+        return false;
+      }
+    }
+    return true;
+  } else if constexpr (
+      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
     return true;
   } else if constexpr (
       Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
