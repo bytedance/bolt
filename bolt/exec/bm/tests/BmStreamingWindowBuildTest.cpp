@@ -38,6 +38,7 @@
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/functions/prestosql/window/WindowFunctionsRegistration.h"
+#include "bolt/vector/DecodedVector.h"
 
 #include <folly/String.h>
 
@@ -388,6 +389,270 @@ std::shared_ptr<Task> runBmStreamingWindow(
       selectAllWithWindowFunctions(data, functions),
       duckDbQueryRunner,
       spillDirectory);
+}
+
+TEST_F(BmStreamingWindowBuildTest, outputBatchSizeRecoversAfterWideRows) {
+  constexpr vector_size_t size = 1024;
+  constexpr vector_size_t capacity = 128;
+  auto data = makeRowVector(
+      {"s", "v"},
+      {makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+       makeFlatVector<std::string>(size, [](auto row) {
+         return row < capacity ? std::string(4096, 'x') : "x";
+       })});
+  CursorParameters params;
+  params.planNode = PlanBuilder()
+                        .values({data})
+                        .streamingWindow({"row_number() over (order by s)"})
+                        .planNode();
+  params.serialExecution = true;
+  auto spillDirectory = TempDirectoryPath::create();
+  params.spillDirectory = spillDirectory->path;
+  params.queryConfigs = {
+      {core::QueryConfig::kPreferredOutputBatchRows, std::to_string(capacity)},
+      {core::QueryConfig::kMaxOutputBatchRows, std::to_string(capacity)},
+      {core::QueryConfig::kPreferredOutputBatchBytes, "8192"},
+      {core::QueryConfig::kBufferManagerEnabled, "true"},
+      {core::QueryConfig::kBmStreamingWindowBuildEnabled, "true"}};
+  TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+  auto cursor = TaskCursor::create(params);
+  vector_size_t rows = 0;
+  vector_size_t minObservedBatchRows = capacity;
+  bool recovered = false;
+  while (cursor->moveNext()) {
+    const auto& output = cursor->current();
+    ASSERT_GT(output->size(), 0);
+    ASSERT_LE(output->size(), capacity);
+    if (rows + output->size() < size) {
+      minObservedBatchRows = std::min(minObservedBatchRows, output->size());
+    }
+    if (minObservedBatchRows == 1 && output->size() == capacity) {
+      recovered = true;
+    }
+    DecodedVector keys(*output->childAt(0));
+    DecodedVector values(*output->childAt(1));
+    DecodedVector ranks(*output->childAt(2));
+    for (vector_size_t i = 0; i < output->size(); ++i) {
+      const auto row = rows + i;
+      EXPECT_EQ(row, keys.valueAt<int64_t>(i));
+      EXPECT_EQ(row + 1, ranks.valueAt<int64_t>(i));
+      EXPECT_EQ(
+          row < capacity ? std::string(4096, 'x') : "x",
+          values.valueAt<StringView>(i).str());
+    }
+    rows += output->size();
+    cursor->current().reset();
+  }
+  EXPECT_EQ(size, rows);
+  EXPECT_EQ(1, minObservedBatchRows);
+  EXPECT_TRUE(recovered);
+}
+
+TEST_F(BmStreamingWindowBuildTest, nonBmOutputBatchSizingIgnoresBmConfig) {
+  constexpr vector_size_t size = 1024;
+  constexpr vector_size_t capacity = 128;
+  auto data = makeRowVector(
+      {"s", "v"},
+      {makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+       makeFlatVector<std::string>(size, [](auto row) {
+         return row < capacity ? std::string(4096, 'x') : "x";
+       })});
+  auto spillDirectory = TempDirectoryPath::create();
+  for (auto buildType :
+       {WindowBuildType::kSortWindowBuild,
+        WindowBuildType::kRowStreamingWindowBuild,
+        WindowBuildType::kSpillableWindowBuild}) {
+    SCOPED_TRACE(static_cast<int>(buildType));
+    const bool spillable = buildType == WindowBuildType::kSpillableWindowBuild;
+    auto plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {spillable
+                     ? "sum(s) over (order by s rows between unbounded preceding and unbounded following)"
+                     : "row_number() over (order by s)"})
+            .planNode();
+    std::vector<vector_size_t> baselineBatchSizes;
+    for (bool bmEnabled : {false, true}) {
+      SCOPED_TRACE(bmEnabled);
+      CursorParameters params;
+      params.planNode = plan;
+      params.serialExecution = true;
+      params.spillDirectory = spillDirectory->path;
+      params.queryConfigs = {
+          {core::QueryConfig::kPreferredOutputBatchRows,
+           std::to_string(capacity)},
+          {core::QueryConfig::kMaxOutputBatchRows, std::to_string(capacity)},
+          {core::QueryConfig::kPreferredOutputBatchBytes, "8192"},
+          {core::QueryConfig::kBufferManagerEnabled, "true"},
+          {core::QueryConfig::kBmStreamingWindowBuildEnabled,
+           bmEnabled ? "true" : "false"}};
+      TestWindowInjection injection(buildType);
+      auto cursor = TaskCursor::create(params);
+      vector_size_t rows = 0;
+      std::vector<vector_size_t> batchSizes;
+      while (cursor->moveNext()) {
+        const auto& output = cursor->current();
+        ASSERT_GT(output->size(), 0);
+        ASSERT_LE(output->size(), capacity);
+        bytedance::bolt::test::assertEqualVectors(
+            data->slice(rows, output->size()),
+            makeRowVector({output->childAt(0), output->childAt(1)}));
+        DecodedVector ranks(*output->childAt(2));
+        for (vector_size_t i = 0; i < output->size(); ++i) {
+          EXPECT_EQ(
+              spillable ? size * (size - 1) / 2 : rows + i + 1,
+              ranks.valueAt<int64_t>(i));
+        }
+        rows += output->size();
+        batchSizes.push_back(output->size());
+        cursor->current().reset();
+      }
+      EXPECT_EQ(size, rows);
+      if (buildType == WindowBuildType::kSortWindowBuild) {
+        // Preserve the legacy pool-delta sizing, even with BM configured.
+        ASSERT_GT(batchSizes.size(), 2);
+        EXPECT_LT(batchSizes[batchSizes.size() - 2], capacity);
+      }
+      if (!bmEnabled) {
+        baselineBatchSizes = std::move(batchSizes);
+      } else {
+        EXPECT_EQ(baselineBatchSizes, batchSizes);
+      }
+    }
+  }
+}
+
+TEST_F(BmStreamingWindowBuildTest, outputBatchSizeRecoversAfterShortWideSlice) {
+  constexpr vector_size_t batchRows = 128;
+  auto first = makeRowVector(
+      {"p", "s", "v"},
+      {makeFlatVector<int64_t>(1, [](auto) { return 0; }),
+       makeFlatVector<int64_t>(1, [](auto) { return 0; }),
+       makeFlatVector<std::string>(
+           1, [](auto) { return std::string(1 << 20, 'x'); })});
+  auto rest = makeRowVector(
+      {"p", "s", "v"},
+      {makeFlatVector<int64_t>(batchRows * 4, [](auto) { return 1; }),
+       makeFlatVector<int64_t>(batchRows * 4, [](auto row) { return row + 1; }),
+       makeFlatVector<std::string>(batchRows * 4, [](auto) { return "x"; })});
+
+  CursorParameters params;
+  params.planNode =
+      PlanBuilder()
+          .values({first, rest})
+          .streamingWindow({"row_number() over (partition by p order by s)"})
+          .planNode();
+  params.serialExecution = true;
+  auto spillDirectory = TempDirectoryPath::create();
+  params.spillDirectory = spillDirectory->path;
+  params.queryConfigs = {
+      {core::QueryConfig::kPreferredOutputBatchRows, std::to_string(batchRows)},
+      {core::QueryConfig::kMaxOutputBatchRows, std::to_string(batchRows)},
+      {core::QueryConfig::kPreferredOutputBatchBytes, "8192"},
+      {core::QueryConfig::kBufferManagerEnabled, "true"},
+      {core::QueryConfig::kBmStreamingWindowBuildEnabled, "true"}};
+  TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+  auto cursor = TaskCursor::create(params);
+
+  vector_size_t rows = 0;
+  bool sawShortWideSlice = false;
+  bool recovered = false;
+  while (cursor->moveNext()) {
+    const auto& output = cursor->current();
+    ASSERT_GT(output->size(), 0);
+    ASSERT_LE(output->size(), batchRows);
+    if (rows == 0 && output->size() < batchRows) {
+      sawShortWideSlice = true;
+    }
+    if (sawShortWideSlice && output->size() == batchRows) {
+      recovered = true;
+    }
+    rows += output->size();
+    cursor->current().reset();
+  }
+  EXPECT_EQ(1 + batchRows * 4, rows);
+  EXPECT_TRUE(sawShortWideSlice);
+  EXPECT_TRUE(recovered);
+}
+
+TEST_F(
+    BmStreamingWindowBuildTest,
+    bmSmallPartitionsDoNotProduceSingleRowBatches) {
+  constexpr vector_size_t size = 4096;
+  constexpr vector_size_t batchRows = 128;
+  for (const vector_size_t partitionRows : {1, 36}) {
+    for (const bool stringResult : {false, true}) {
+      SCOPED_TRACE(partitionRows);
+      SCOPED_TRACE(stringResult);
+      auto data = makeRowVector(
+          {"p", "s", "v"},
+          {makeFlatVector<int64_t>(
+               size, [partitionRows](auto row) { return row / partitionRows; }),
+           makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+           makeFlatVector<std::string>(size, [](auto row) {
+             return fmt::format("long-value-{:06}", row);
+           })});
+      const auto function = stringResult ? "min(v)" : "count(s)";
+      CursorParameters params;
+      params.planNode = PlanBuilder()
+                            .values(split(data, 16))
+                            .streamingWindow({fmt::format(
+                                "{} over (partition by p rows between "
+                                "unbounded preceding and unbounded following)",
+                                function)})
+                            .planNode();
+      params.serialExecution = true;
+      auto spillDirectory = TempDirectoryPath::create();
+      params.spillDirectory = spillDirectory->path;
+      params.queryConfigs = {
+          {core::QueryConfig::kPreferredOutputBatchRows, "128"},
+          {core::QueryConfig::kMaxOutputBatchRows, "128"},
+          {core::QueryConfig::kPreferredOutputBatchBytes, "1048576"},
+          {core::QueryConfig::kSpillEnabled, "true"},
+          {core::QueryConfig::kWindowSpillEnabled, "true"},
+          {core::QueryConfig::kBufferManagerEnabled, "true"},
+          {core::QueryConfig::kBmStreamingWindowBuildEnabled, "true"}};
+      TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+      auto cursor = TaskCursor::create(params);
+      vector_size_t rows = 0;
+      vector_size_t batches = 0;
+      while (cursor->moveNext()) {
+        const auto& output = cursor->current();
+        ASSERT_GT(output->size(), 0);
+        ASSERT_LE(output->size(), batchRows);
+        DecodedVector keys(*output->childAt(0));
+        DecodedVector ids(*output->childAt(1));
+        DecodedVector values(*output->childAt(2));
+        DecodedVector result(*output->childAt(3));
+        for (vector_size_t i = 0; i < output->size(); ++i) {
+          const auto row = rows + i;
+          const auto begin = row / partitionRows * partitionRows;
+          EXPECT_EQ(row / partitionRows, keys.valueAt<int64_t>(i));
+          EXPECT_EQ(row, ids.valueAt<int64_t>(i));
+          EXPECT_EQ(
+              fmt::format("long-value-{:06}", row),
+              values.valueAt<StringView>(i).str());
+          if (stringResult) {
+            EXPECT_EQ(
+                fmt::format("long-value-{:06}", begin),
+                result.valueAt<StringView>(i).str());
+          } else {
+            EXPECT_EQ(
+                std::min(partitionRows, size - begin),
+                result.valueAt<int64_t>(i));
+          }
+        }
+        rows += output->size();
+        ++batches;
+        cursor->current().reset();
+      }
+      EXPECT_EQ(size, rows);
+      // Variable-width outputs may legitimately need smaller batches. They
+      // should not collapse to one row per batch when cached results are freed.
+      EXPECT_LT(batches, size / 4);
+    }
+  }
 }
 
 TEST_F(BmStreamingWindowBuildTest, rowNumber) {
