@@ -997,21 +997,54 @@ TEST_F(BmStreamingWindowBuildTest, aggregateWindowRequiresBmPartition) {
   EXPECT_THROW(function->resetPartition(&partition), BoltRuntimeError);
 }
 
-TEST_F(BmStreamingWindowBuildTest, complexAggregatesUseGenericWindowFunction) {
+TEST_F(
+    BmStreamingWindowBuildTest,
+    collectionAndByExtremeAggregatesUseBmWindowFunction) {
   HashStringAllocator stringAllocator(pool());
   const core::QueryConfig config{
       std::unordered_map<std::string, std::string>{}};
-  std::vector<WindowFunctionArg> args{{BIGINT(), nullptr, column_index_t{0}}};
-
-  for (const auto* name :
-       {"collect_list", "collect_set", "max_by", "min_by", "percentile"}) {
+  const std::vector<WindowFunctionArg> collectionArgs{
+      {BIGINT(), nullptr, column_index_t{0}}};
+  for (const auto* name : {"collect_list", "collect_set"}) {
     auto function = window::createBmAggregateWindowFunction(
-        name, args, BIGINT(), false, pool(), &stringAllocator, config);
-    EXPECT_EQ(nullptr, function) << name;
+        name,
+        collectionArgs,
+        ARRAY(BIGINT()),
+        false,
+        pool(),
+        &stringAllocator,
+        config);
+    EXPECT_NE(nullptr, function) << name;
+  }
+
+  const std::vector<WindowFunctionArg> byExtremeArgs{
+      {VARCHAR(), nullptr, column_index_t{0}},
+      {BIGINT(), nullptr, column_index_t{1}}};
+  for (const auto* name : {"max_by", "min_by"}) {
+    auto function = window::createBmAggregateWindowFunction(
+        name,
+        byExtremeArgs,
+        VARCHAR(),
+        false,
+        pool(),
+        &stringAllocator,
+        config);
+    EXPECT_NE(nullptr, function) << name;
   }
 }
 
-TEST_F(BmStreamingWindowBuildTest, featureFlagFallsBackForUnsupportedTypes) {
+TEST_F(BmStreamingWindowBuildTest, percentileUsesGenericWindowFunction) {
+  HashStringAllocator stringAllocator(pool());
+  const core::QueryConfig config{
+      std::unordered_map<std::string, std::string>{}};
+  const std::vector<WindowFunctionArg> args{
+      {BIGINT(), nullptr, column_index_t{0}}};
+  auto function = window::createBmAggregateWindowFunction(
+      "percentile", args, BIGINT(), false, pool(), &stringAllocator, config);
+  EXPECT_EQ(nullptr, function);
+}
+
+TEST_F(BmStreamingWindowBuildTest, featureFlagAcceptsComplexInput) {
   const vector_size_t size = 32;
   auto data = makeRowVector(
       {"a", "p", "s"},
@@ -1030,14 +1063,52 @@ TEST_F(BmStreamingWindowBuildTest, featureFlagFallsBackForUnsupportedTypes) {
           .planNode();
 
   auto spillDirectory = TempDirectoryPath::create();
-  ASSERT_NO_THROW(
+  std::shared_ptr<Task> task;
+  auto result =
       AssertQueryBuilder(plan)
           .config(core::QueryConfig::kBufferManagerEnabled, "true")
           .config(core::QueryConfig::kBmStreamingWindowBuildEnabled, "true")
           .config(core::QueryConfig::kSpillEnabled, "true")
           .config(core::QueryConfig::kWindowSpillEnabled, "true")
           .spillDirectory(spillDirectory->path)
-          .copyResults(pool()));
+          .copyResults(pool(), task);
+  ASSERT_NE(nullptr, result);
+  ASSERT_NE(nullptr, task);
+  ASSERT_NE(nullptr, task->bufferManager());
+  EXPECT_GT(task->bufferManager()->stats().allocatedBlocks, 0);
+}
+
+TEST_F(BmStreamingWindowBuildTest, mapPartitionKeyUsesCanonicalOrder) {
+  auto maps = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {1, 10}},
+      {{1, 10}, {2, 20}},
+      {{3, 30}},
+      {{3, 30}},
+  });
+  auto data =
+      makeRowVector({"m", "s"}, {maps, makeFlatVector<int32_t>({0, 1, 0, 1})});
+  auto plan =
+      PlanBuilder()
+          .values(split(data, 2))
+          .streamingWindow({"row_number() over (partition by m order by s)"})
+          .planNode();
+
+  auto spillDirectory = TempDirectoryPath::create();
+  TestWindowInjection windowInjection(WindowBuildType::kBmStreamingWindowBuild);
+  auto result = AssertQueryBuilder(plan)
+                    .config(core::QueryConfig::kBufferManagerEnabled, "true")
+                    .config(core::QueryConfig::kSpillEnabled, "true")
+                    .config(core::QueryConfig::kWindowSpillEnabled, "true")
+                    .spillDirectory(spillDirectory->path)
+                    .copyResults(pool());
+  auto* rowNumbers =
+      result->childAt(data->childrenSize())->asFlatVector<int64_t>();
+  ASSERT_NE(nullptr, rowNumbers);
+  ASSERT_EQ(4, rowNumbers->size());
+  EXPECT_EQ(1, rowNumbers->valueAt(0));
+  EXPECT_EQ(2, rowNumbers->valueAt(1));
+  EXPECT_EQ(1, rowNumbers->valueAt(2));
+  EXPECT_EQ(2, rowNumbers->valueAt(3));
 }
 
 TEST_F(BmStreamingWindowBuildTest, doesNotSpillDuringStoreWithoutReclaim) {
@@ -1209,6 +1280,41 @@ TEST_F(
   EXPECT_LE(partitionStats.maxLoadedRows, 4'096);
 #endif
   EXPECT_GT(runStats.bufferManager.reclaimedBytes, 0);
+}
+
+TEST_F(
+    BmStreamingWindowBuildDiskIoTest,
+    complexValueReadsSpilledRowsAcrossChunksAndOutputReclaim) {
+  constexpr vector_size_t size = 20'480;
+  constexpr vector_size_t inputRowsPerBatch = 4'096;
+  constexpr int64_t memoryLimitBytes = 96LL << 20;
+
+  std::vector<std::vector<std::string>> values;
+  std::vector<std::vector<std::string>> payloads;
+  values.reserve(size);
+  payloads.reserve(size);
+  for (vector_size_t row = 0; row < size; ++row) {
+    values.push_back({fmt::format("value-{}", row)});
+    payloads.push_back({std::string(4'096, 'a' + row % 26)});
+  }
+
+  auto data = makeRowVector(
+      {"v", "payload", "p", "s"},
+      {
+          makeArrayVector<std::string>(values),
+          makeArrayVector<std::string>(payloads),
+          makeFlatVector<int16_t>(size, [](auto /*row*/) { return 0; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+  const std::vector<std::string> functions{
+      "lead(v, 1) over (partition by p order by s)"};
+  auto expected = expectedSortWindowResults(pool(), data, functions);
+  auto input = split(data, size / inputRowsPerBatch);
+  auto plan = PlanBuilder().values(input).streamingWindow(functions).planNode();
+  AutoSpillTestContext context{
+      "bm-streaming-window-complex-value-auto-spill", memoryLimitBytes};
+  AutoSpillWindowRunStats stats;
+  runAutoSpillWindow(plan, input, expected, context, &stats);
 }
 
 TEST_F(
