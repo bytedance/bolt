@@ -33,6 +33,8 @@ namespace bytedance::bolt::exec::window {
 namespace {
 
 constexpr vector_size_t kAggregateInputBatchRows = 1024;
+// -1 follows the production policy; 0/1 override it for comparisons.
+tsan_atomic<int32_t> inputAggregationOverrideForTest{-1};
 
 #ifndef NDEBUG
 folly::Synchronized<BmAggregateWindowTestStats>& testStats() {
@@ -807,14 +809,19 @@ std::unique_ptr<exec::WindowFunction> createBmAggregateWindowFunction(
 }
 
 std::shared_ptr<BmEntirePartitionAggregation> prepareBmAggregateWindowFunctions(
-    const std::vector<core::WindowNode::Function>& functionSpecs,
+    const core::WindowNode& windowNode,
     const std::vector<std::unique_ptr<exec::WindowFunction>>& functions,
-    memory::MemoryPool* pool,
-    bool enableInputAggregation) {
+    memory::MemoryPool* pool) {
+  const auto& functionSpecs = windowNode.windowFunctions();
   BOLT_CHECK_EQ(functionSpecs.size(), functions.size());
 
   std::vector<BmAggregateWindowFunction*> candidates;
-  bool canAccumulateInput = enableInputAggregation;
+  // Keyed windows scan on output to avoid retaining a result per partition.
+  // A global window has one result and avoids rescanning BM rows on output.
+  const int32_t inputAggregationOverride = inputAggregationOverrideForTest;
+  bool canAccumulateInput = inputAggregationOverride < 0
+      ? windowNode.partitionKeys().empty()
+      : inputAggregationOverride != 0;
   for (auto i = 0; i < functions.size(); ++i) {
     if (!isEntirePartitionFrame(&functionSpecs[i].frame)) {
       continue;
@@ -840,6 +847,11 @@ std::shared_ptr<BmEntirePartitionAggregation> prepareBmAggregateWindowFunctions(
   // The return value only enables input accumulation. Even when returning
   // nullptr, candidates retain this coordinator for shared scans during output.
   return canAccumulateInput ? aggregation : nullptr;
+}
+
+void setBmInputAggregationEnabledForTest(std::optional<bool> enabled) {
+  inputAggregationOverrideForTest =
+      enabled.has_value() ? int32_t(*enabled) : -1;
 }
 
 } // namespace bytedance::bolt::exec::window
