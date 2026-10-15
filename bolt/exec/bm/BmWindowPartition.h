@@ -43,6 +43,13 @@ struct BmWindowPartitionDescriptor {
   BmPeerBoundaryMode peerBoundaryMode{BmPeerBoundaryMode::kNotNeeded};
 };
 
+struct BmWindowAccessStats {
+  uint64_t fastPathPartitions{0};
+  uint64_t fastPathRows{0};
+  uint64_t windowReadPartitions{0};
+  uint64_t windowReadRows{0};
+};
+
 // Test observation counters are collected only in Debug builds.
 struct BmWindowPartitionTestStats {
   uint64_t extractNullCalls{0};
@@ -86,7 +93,8 @@ class BmWindowPartition : public exec::WindowPartition {
       BmWindowPartitionDescriptor descriptor,
       const std::vector<column_index_t>& inputMapping,
       const std::vector<std::pair<column_index_t, core::SortOrder>>&
-          sortKeyInfo);
+          sortKeyInfo,
+      std::shared_ptr<BmWindowAccessStats> accessStats = nullptr);
 
   BmWindowPartition(
       exec::bm::BmRowContainer* data,
@@ -95,7 +103,8 @@ class BmWindowPartition : public exec::WindowPartition {
       BmWindowPartitionDescriptor descriptor,
       const std::vector<column_index_t>& inputMapping,
       const std::vector<std::pair<column_index_t, core::SortOrder>>&
-          sortKeyInfo);
+          sortKeyInfo,
+      std::shared_ptr<BmWindowAccessStats> accessStats = nullptr);
 
   vector_size_t numRows() const override;
 
@@ -168,6 +177,8 @@ class BmWindowPartition : public exec::WindowPartition {
   bool canBulkReadPartition() const;
 
   RowAccessMode ensureAccessMode() const;
+
+  void recordAccessMode() const;
 
   exec::bm::ScopedLoadedRows loadRows(
       vector_size_t partitionOffset,
@@ -244,6 +255,8 @@ class BmWindowPartition : public exec::WindowPartition {
   vector_size_t numRows_{0};
   BmPeerBoundaryMode peerBoundaryMode_{BmPeerBoundaryMode::kNotNeeded};
   mutable RowAccessMode rowAccessMode_{RowAccessMode::kUndecided};
+  std::shared_ptr<BmWindowAccessStats> accessStats_;
+  mutable bool accessModeRecorded_{false};
   mutable std::optional<exec::bm::BulkReadSession> bulkSession_;
   mutable std::optional<exec::bm::ReadOnlyWindowReadSession> readSession_;
 };

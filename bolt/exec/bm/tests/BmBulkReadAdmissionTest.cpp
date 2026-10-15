@@ -200,20 +200,23 @@ TEST_F(BmBulkReadAdmissionTest, LargePartitionSelectsWindowReadBeforeBulkPin) {
   descriptor.ranges.push_back(
       {segment, 0, static_cast<RowNumber>(input->size())});
   descriptor.hasSpilledRows = true;
+  auto stats = std::make_shared<window::BmWindowAccessStats>();
   window::BmWindowPartition partition(
       &container,
       windowPool_.get(),
       {BIGINT(), VARCHAR()},
       std::move(descriptor),
       {0, 1},
-      {});
+      {},
+      stats);
   auto values = BaseVector::create(VARCHAR(), 0, pool());
   auto task = makeTask();
   DriverCtx driverCtx(task, 0, 0, 0, 0);
   ScopedDriverThreadContext driverContext(&driverCtx);
   partition.extractColumn(1, 0, input->size(), 0, values);
   bytedance::bolt::test::assertEqualVectors(input->childAt(1), values);
-  EXPECT_GT(partition.reclaimReadChunks(), 0);
+  EXPECT_EQ(1, stats->windowReadPartitions);
+  EXPECT_EQ(0, stats->fastPathPartitions);
 }
 
 } // namespace

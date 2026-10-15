@@ -145,6 +145,10 @@ Window::Window(
       ignore,
       maxBatchRows,
       preferredBatchBytes);
+  BOLT_CHECK(windowBuildKind_ != WindowBuildKind::kUnknown);
+  addRuntimeStat(
+      "windowBuildType",
+      RuntimeCounter{static_cast<int64_t>(windowBuildKind_)});
 }
 
 void Window::setRowsStreamingWindowBuild(
@@ -167,6 +171,7 @@ void Window::setRowsStreamingWindowBuild(
   } else {
     windowBuild_ = ROWS_STREAMING_WINDOW_BUILD_CTR(false);
   }
+  windowBuildKind_ = WindowBuildKind::kRowsStreaming;
   windowBuild_->setIgnorePeer(ignorePeer);
 }
 
@@ -186,6 +191,7 @@ void Window::setStreamingWindowBuild(
   if (needSort_) {
     LOG(INFO) << "SortWindowBuild";
     windowBuild_ = SORT_WINDOW_BUILD_CTR();
+    windowBuildKind_ = WindowBuildKind::kSort;
   } else {
     LOG(INFO) << "StreamingWindowBuild";
     windowBuild_ = std::make_unique<StreamingWindowBuild>(
@@ -195,6 +201,7 @@ void Window::setStreamingWindowBuild(
         &nonReclaimableSection_,
         spillThreshold,
         enableJit_);
+    windowBuildKind_ = WindowBuildKind::kStreaming;
   }
 }
 
@@ -220,6 +227,7 @@ void Window::setSpillableWindowBuild(
   } else {
     windowBuild_ = SPILLABLE_WINDOW_BUILD_CTR(false);
   }
+  windowBuildKind_ = WindowBuildKind::kSpillable;
   windowBuild_->setIfAggWindowFunc(isAggWindowFunc_);
 }
 
@@ -246,6 +254,7 @@ void Window::setBmStreamingWindowBuild(
       spillThreshold,
       enableJit_,
       std::move(bufferManager));
+  windowBuildKind_ = WindowBuildKind::kBmStreaming;
   windowBuild_->setIgnorePeer(ignorePeer);
   isBmStreamingWindowBuild_ = true;
 }
@@ -262,6 +271,7 @@ void Window::setWindowBuild(
       if (windowNode_->followedTopNum() > 0 && needSort_) {
         LOG(INFO) << "sort+SortWindowBuild for follwedTopNum > 0 ";
         windowBuild_ = SORT_WINDOW_BUILD_CTR();
+        windowBuildKind_ = WindowBuildKind::kSort;
         return;
       }
 
@@ -1243,6 +1253,24 @@ void Window::recordWindowStats() {
   if (!hasRecordSpillStats_ && spillStats) {
     recordSpillStats(spillStats.value());
     hasRecordSpillStats_ = true;
+  }
+  if (isBmStreamingWindowBuild_ && !hasRecordedBmWindowStats_) {
+    const auto* bmWindowBuild =
+        dynamic_cast<const window::BmStreamingWindowBuild*>(windowBuild_.get());
+    BOLT_CHECK_NOT_NULL(bmWindowBuild);
+    const auto accessStats = bmWindowBuild->windowAccessStats();
+    addRuntimeStat(
+        "bmFastPathPartitions",
+        RuntimeCounter{static_cast<int64_t>(accessStats.fastPathPartitions)});
+    addRuntimeStat(
+        "bmWindowReadPartitions",
+        RuntimeCounter{static_cast<int64_t>(accessStats.windowReadPartitions)});
+    LOG(INFO) << "BM_WINDOW_ACCESS_SUMMARY fastPathPartitions="
+              << accessStats.fastPathPartitions
+              << ", fastPathRows=" << accessStats.fastPathRows
+              << ", windowReadPartitions=" << accessStats.windowReadPartitions
+              << ", windowReadRows=" << accessStats.windowReadRows;
+    hasRecordedBmWindowStats_ = true;
   }
   auto windowStatsOr = windowStats();
   addInputTimeUs_ = 0;

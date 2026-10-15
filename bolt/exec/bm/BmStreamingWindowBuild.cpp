@@ -514,7 +514,8 @@ std::shared_ptr<exec::WindowPartition> BmStreamingWindowBuild::nextPartition() {
       partitionSchema_,
       std::move(descriptor),
       inversedInputChannels_,
-      sortKeyInfo_);
+      sortKeyInfo_,
+      windowAccessStats_);
   returnedPartition_ = partition;
   return partition;
 }

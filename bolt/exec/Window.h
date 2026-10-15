@@ -259,6 +259,15 @@ class Window : public Operator {
 
   void createWindowFunctionsForSpillableWindowBuild();
 
+  enum class WindowBuildKind : int64_t {
+    kUnknown = 0,
+    kSort = 1,
+    kStreaming = 2,
+    kRowsStreaming = 3,
+    kSpillable = 4,
+    kBmStreaming = 5,
+  };
+
   const vector_size_t numInputColumns_;
 
   bool enableJit;
@@ -270,6 +279,8 @@ class Window : public Operator {
   // WindowBuild is used to store input rows and return WindowPartitions
   // for the processing.
   std::unique_ptr<WindowBuild> windowBuild_;
+
+  WindowBuildKind windowBuildKind_{WindowBuildKind::kUnknown};
 
   std::vector<std::pair<column_index_t, core::SortOrder>> sortKeyInfo_;
 
@@ -364,6 +375,7 @@ class Window : public Operator {
   uint64_t loadFromSpillTimeUs_{0};
   uint64_t windowSpillTimeUs_{0};
   bool hasRecordSpillStats_ = false;
+  bool hasRecordedBmWindowStats_{false};
 };
 
 } // namespace bytedance::bolt::exec
