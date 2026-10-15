@@ -86,6 +86,8 @@ TEST_F(BmRowContainerTest, BmWindowPartitionExtractsFromResidentPointers) {
       container.activeSegmentId(),
       false,
       std::move(stored.rowPointers));
+  auto accessStats =
+      std::make_shared<bytedance::bolt::exec::window::BmWindowAccessStats>();
 
   bytedance::bolt::exec::window::BmWindowPartition partition(
       &container,
@@ -93,7 +95,8 @@ TEST_F(BmRowContainerTest, BmWindowPartitionExtractsFromResidentPointers) {
       {BIGINT(), VARCHAR()},
       std::move(descriptor),
       {0, 1},
-      {{0, SortOrder{true, true}}});
+      {{0, SortOrder{true, true}}},
+      accessStats);
 
   auto values = BaseVector::create(BIGINT(), 0, pool());
   partition.extractColumn(0, 1, 2, 0, values);
@@ -124,6 +127,8 @@ TEST_F(BmRowContainerTest, BmWindowPartitionExtractsFromResidentPointers) {
   EXPECT_TRUE(bits::isBitSet(rawNulls, 1));
   EXPECT_FALSE(bits::isBitSet(rawNulls, 2));
   EXPECT_FALSE(bits::isBitSet(rawNulls, 3));
+  EXPECT_EQ(1, accessStats->fastPathPartitions);
+  EXPECT_EQ(0, accessStats->windowReadPartitions);
 }
 
 TEST_F(BmRowContainerTest, BmWindowPartitionCanUseResidentRowsFromDescriptor) {
@@ -336,6 +341,8 @@ TEST_F(
   descriptor.numRows = size;
   descriptor.ranges.push_back({segment, 0, static_cast<RowNumber>(size)});
   descriptor.hasSpilledRows = true;
+  auto accessStats =
+      std::make_shared<bytedance::bolt::exec::window::BmWindowAccessStats>();
 
   bytedance::bolt::exec::window::BmWindowPartition partition(
       &container,
@@ -343,7 +350,8 @@ TEST_F(
       {BIGINT(), VARCHAR()},
       std::move(descriptor),
       {0, 1},
-      {{0, SortOrder{true, true}}});
+      {{0, SortOrder{true, true}}},
+      accessStats);
 
 #ifndef NDEBUG
   bytedance::bolt::exec::window::resetBmWindowPartitionTestStats();
@@ -360,7 +368,9 @@ TEST_F(
       bytedance::bolt::exec::window::bmWindowPartitionTestStats();
   EXPECT_EQ(0, stats.loadRowsCalls);
 #endif
-  EXPECT_EQ(partition.reclaimReadChunks(), 0);
+  EXPECT_EQ(1, accessStats->fastPathPartitions);
+  EXPECT_EQ(0, accessStats->windowReadPartitions);
+  EXPECT_GT(bufferManager_->stats().pinnedResidentBytes, 0);
 }
 
 TEST_F(BmRowContainerDiskIoTest, BmWindowPartitionKeepsBulkReadOnReclaim) {
@@ -454,6 +464,8 @@ TEST_F(
   storeRows(container, input);
   auto segment = container.spillActiveSegment();
   auto descriptor = makeDescriptor(input->size(), segment, true);
+  auto accessStats =
+      std::make_shared<bytedance::bolt::exec::window::BmWindowAccessStats>();
 
   bytedance::bolt::exec::window::BmWindowPartition partition(
       &container,
@@ -461,7 +473,8 @@ TEST_F(
       {BIGINT(), VARCHAR()},
       std::move(descriptor),
       {0, 1},
-      {{0, SortOrder{true, true}}});
+      {{0, SortOrder{true, true}}},
+      accessStats);
 
   constexpr uint64_t kReadSlack = 10 << 20;
   const auto freeBeforePressure = root_->freeBytes();
@@ -483,6 +496,8 @@ TEST_F(
   EXPECT_GT(stats.loadRowsCalls, 0);
   EXPECT_EQ(0, stats.reclaimReadChunksCalls);
 #endif
+  EXPECT_EQ(0, accessStats->fastPathPartitions);
+  EXPECT_EQ(1, accessStats->windowReadPartitions);
 
   const auto reclaimed = partition.reclaimReadChunks();
   // Scoped extraction has already unpinned the chunk. Explicit Window reclaim
@@ -648,6 +663,8 @@ TEST_F(
   auto descriptor = makeDescriptor(input->size(), segment, true);
   descriptor.peerBoundaryMode =
       bytedance::bolt::exec::window::BmPeerBoundaryMode::kPrecomputed;
+  auto accessStats =
+      std::make_shared<bytedance::bolt::exec::window::BmWindowAccessStats>();
 
   bytedance::bolt::exec::window::BmWindowPartition partition(
       &container,
@@ -655,7 +672,8 @@ TEST_F(
       {BIGINT(), BIGINT()},
       std::move(descriptor),
       {0, 1},
-      {{0, SortOrder{true, true}}});
+      {{0, SortOrder{true, true}}},
+      accessStats);
 
   std::vector<vector_size_t> peerStarts(3);
   std::vector<vector_size_t> peerEnds(3);
@@ -674,6 +692,8 @@ TEST_F(
   EXPECT_EQ(0, stats.loadRowsCalls);
   EXPECT_EQ(0, stats.loadedRows);
 #endif
+  EXPECT_EQ(0, accessStats->fastPathPartitions);
+  EXPECT_EQ(0, accessStats->windowReadPartitions);
 }
 
 TEST_F(

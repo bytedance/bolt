@@ -48,6 +48,10 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
 
   std::optional<common::SpillStats> windowSpilledStats() const override;
 
+  BmWindowAccessStats windowAccessStats() const {
+    return *windowAccessStats_;
+  }
+
   void noMoreInput() override;
 
   bool hasNextPartition() override;
@@ -159,6 +163,8 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   std::unique_ptr<exec::bm::BmRowContainer> bmData_;
   std::shared_ptr<const BmWindowPartitionSchema> partitionSchema_;
+  std::shared_ptr<BmWindowAccessStats> windowAccessStats_{
+      std::make_shared<BmWindowAccessStats>()};
   std::vector<int32_t> boundaryKeyColumns_;
   std::optional<BmWindowPartitionDescriptor> openPartition_;
   std::deque<BmWindowPartitionDescriptor> readyPartitions_;

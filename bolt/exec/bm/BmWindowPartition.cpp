@@ -140,14 +140,16 @@ BmWindowPartition::BmWindowPartition(
     std::vector<TypePtr> logicalTypes,
     BmWindowPartitionDescriptor descriptor,
     const std::vector<column_index_t>& inputMapping,
-    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo,
+    std::shared_ptr<BmWindowAccessStats> accessStats)
     : BmWindowPartition(
           data,
           pool,
           makeBmWindowPartitionSchema(std::move(logicalTypes), inputMapping),
           std::move(descriptor),
           inputMapping,
-          sortKeyInfo) {}
+          sortKeyInfo,
+          std::move(accessStats)) {}
 
 BmWindowPartition::BmWindowPartition(
     exec::bm::BmRowContainer* data,
@@ -155,7 +157,8 @@ BmWindowPartition::BmWindowPartition(
     std::shared_ptr<const BmWindowPartitionSchema> schema,
     BmWindowPartitionDescriptor descriptor,
     const std::vector<column_index_t>& inputMapping,
-    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo,
+    std::shared_ptr<BmWindowAccessStats> accessStats)
     : WindowPartition(inputMapping, sortKeyInfo),
       data_(data),
       pool_(pool),
@@ -168,7 +171,8 @@ BmWindowPartition::BmWindowPartition(
       peerStartBits_(std::move(descriptor.peerStartBits)),
       aggregateResults_(std::move(descriptor.aggregateResults)),
       numRows_(descriptor.numRows),
-      peerBoundaryMode_(descriptor.peerBoundaryMode) {
+      peerBoundaryMode_(descriptor.peerBoundaryMode),
+      accessStats_(std::move(accessStats)) {
   BOLT_CHECK_NOT_NULL(data_);
   BOLT_CHECK_NOT_NULL(pool_);
   BOLT_CHECK_NOT_NULL(schema_);
@@ -204,6 +208,7 @@ bool BmWindowPartition::canBulkReadPartition() const {
 
 BmWindowPartition::RowAccessMode BmWindowPartition::ensureAccessMode() const {
   if (rowAccessMode_ != RowAccessMode::kUndecided) {
+    recordAccessMode();
     return rowAccessMode_;
   }
 
@@ -211,6 +216,7 @@ BmWindowPartition::RowAccessMode BmWindowPartition::ensureAccessMode() const {
     readSession_.emplace(data_->beginReadOnlyWindowReadSegments(
         {segmentIds_.data(), segmentIds_.size()}));
     rowAccessMode_ = RowAccessMode::kWindowRead;
+    recordAccessMode();
     return rowAccessMode_;
   }
 
@@ -218,7 +224,25 @@ BmWindowPartition::RowAccessMode BmWindowPartition::ensureAccessMode() const {
       data_->beginBulkReadSegments({segmentIds_.data(), segmentIds_.size()}));
   bulkSession_->load();
   rowAccessMode_ = RowAccessMode::kBulkRead;
+  recordAccessMode();
   return rowAccessMode_;
+}
+
+void BmWindowPartition::recordAccessMode() const {
+  if (accessModeRecorded_ || accessStats_ == nullptr) {
+    return;
+  }
+  BOLT_CHECK_NE(
+      static_cast<uint8_t>(rowAccessMode_),
+      static_cast<uint8_t>(RowAccessMode::kUndecided));
+  if (rowAccessMode_ == RowAccessMode::kWindowRead) {
+    ++accessStats_->windowReadPartitions;
+    accessStats_->windowReadRows += numRows_;
+  } else {
+    ++accessStats_->fastPathPartitions;
+    accessStats_->fastPathRows += numRows_;
+  }
+  accessModeRecorded_ = true;
 }
 
 vector_size_t BmWindowPartition::numRows() const {
