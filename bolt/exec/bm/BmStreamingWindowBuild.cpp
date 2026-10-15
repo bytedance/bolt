@@ -19,6 +19,7 @@
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/memory/MemoryArbitrator.h"
 #include "bolt/common/memory/bm/MemoryTag.h"
+#include "bolt/exec/bm/BmAggregateWindow.h"
 
 #include <folly/ScopeGuard.h>
 
@@ -106,6 +107,7 @@ void BmStreamingWindowBuild::appendRowsToOpenPartition(
     exec::bm::SegmentId segment,
     exec::bm::RowNumber begin,
     const std::vector<char*>& rows,
+    const RowVectorPtr& input,
     vector_size_t offset,
     vector_size_t size) {
   if (size == 0) {
@@ -142,6 +144,9 @@ void BmStreamingWindowBuild::appendRowsToOpenPartition(
         descriptor.residentRows.end(),
         rows.begin() + offset,
         rows.begin() + offset + size);
+  }
+  if (inputAggregation_ != nullptr) {
+    inputAggregation_->addInput(input, offset, size);
   }
   descriptor.numRows += size;
 }
@@ -180,6 +185,9 @@ void BmStreamingWindowBuild::closeOpenPartition() {
     openPartition_.reset();
     return;
   }
+  if (inputAggregation_ != nullptr) {
+    openPartition_->aggregateResults = inputAggregation_->finishPartition();
+  }
   readyPartitions_.push_back(std::move(*openPartition_));
   openPartition_.reset();
 }
@@ -187,7 +195,8 @@ void BmStreamingWindowBuild::closeOpenPartition() {
 void BmStreamingWindowBuild::splitRowsIntoPartitions(
     exec::bm::SegmentId segment,
     exec::bm::RowNumber begin,
-    const std::vector<char*>& rows) {
+    const std::vector<char*>& rows,
+    const RowVectorPtr& input) {
   if (rows.empty()) {
     return;
   }
@@ -216,7 +225,7 @@ void BmStreamingWindowBuild::splitRowsIntoPartitions(
   if (rows.size() == 1 ||
       classifyAdjacentRows(rows.front(), rows.back()) ==
           AdjacentRelation::kSamePeer) {
-    appendRowsToOpenPartition(segment, begin, rows, 0, rows.size());
+    appendRowsToOpenPartition(segment, begin, rows, input, 0, rows.size());
     recordResidentPreviousRow(rows.back());
     return;
   }
@@ -240,6 +249,7 @@ void BmStreamingWindowBuild::splitRowsIntoPartitions(
         segment,
         static_cast<exec::bm::RowNumber>(begin + runBegin),
         rows,
+        input,
         runBegin,
         i - runBegin);
     closeOpenPartition();
@@ -251,6 +261,7 @@ void BmStreamingWindowBuild::splitRowsIntoPartitions(
       segment,
       static_cast<exec::bm::RowNumber>(begin + runBegin),
       rows,
+      input,
       runBegin,
       rows.size() - runBegin);
   recordResidentPreviousRow(rows.back());
@@ -427,7 +438,7 @@ void BmStreamingWindowBuild::addInput(RowVectorPtr input) {
   BOLT_CHECK_GE(end, rows.size());
   const auto begin = static_cast<exec::bm::RowNumber>(end - rows.size());
 
-  splitRowsIntoPartitions(segment, begin, rows);
+  splitRowsIntoPartitions(segment, begin, rows, input);
   activeRows_ += rows.size();
   numRows_ += input->size();
 }
@@ -493,7 +504,14 @@ std::shared_ptr<exec::WindowPartition> BmStreamingWindowBuild::nextPartition() {
   return partition;
 }
 
+void BmStreamingWindowBuild::setInputAggregation(
+    std::shared_ptr<BmEntirePartitionAggregation> aggregation) {
+  BOLT_CHECK_EQ(numRows_, 0);
+  inputAggregation_ = std::move(aggregation);
+}
+
 void BmStreamingWindowBuild::finish() {
+  inputAggregation_.reset();
   readyPartitions_.clear();
   openPartition_.reset();
   returnedPartition_.reset();

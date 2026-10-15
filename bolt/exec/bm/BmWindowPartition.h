@@ -36,6 +36,7 @@ struct BmWindowPartitionDescriptor {
   std::vector<exec::bm::SegmentRowRange> ranges;
   std::vector<char*> residentRows;
   std::vector<uint64_t> peerStartBits;
+  std::vector<VectorPtr> aggregateResults;
   bool hasSpilledRows{false};
   BmPeerBoundaryMode peerBoundaryMode{BmPeerBoundaryMode::kNotNeeded};
 };
@@ -95,6 +96,10 @@ class BmWindowPartition : public exec::WindowPartition {
           sortKeyInfo);
 
   vector_size_t numRows() const override;
+
+  const std::vector<VectorPtr>& aggregateResults() const {
+    return aggregateResults_;
+  }
 
   bool hasResidentRows() const {
     return rowAccessMode_ == RowAccessMode::kResidentRows;
@@ -231,6 +236,7 @@ class BmWindowPartition : public exec::WindowPartition {
   std::vector<exec::bm::SegmentRowRange> rowRanges_;
   std::vector<exec::bm::SegmentId> segmentIds_;
   std::vector<uint64_t> peerStartBits_;
+  std::vector<VectorPtr> aggregateResults_;
   vector_size_t numRows_{0};
   BmPeerBoundaryMode peerBoundaryMode_{BmPeerBoundaryMode::kNotNeeded};
   mutable RowAccessMode rowAccessMode_{RowAccessMode::kUndecided};

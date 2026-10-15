@@ -474,6 +474,13 @@ void Window::createWindowFunctions() {
     windowFrames_.push_back(
         createWindowFrame(windowNode_, windowNodeFunction.frame, inputType));
   }
+
+  if (isBmStreamingWindowBuild_) {
+    auto aggregation = window::prepareBmAggregateWindowFunctions(
+        windowNode_->windowFunctions(), windowFunctions_, operatorCtx_->pool());
+    dynamic_cast<window::BmStreamingWindowBuild*>(windowBuild_.get())
+        ->setInputAggregation(std::move(aggregation));
+  }
 }
 
 void Window::createWindowFunctionsForSpillableWindowBuild() {

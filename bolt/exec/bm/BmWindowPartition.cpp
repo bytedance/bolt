@@ -166,6 +166,7 @@ BmWindowPartition::BmWindowPartition(
           residentRows_.empty() ? collectSegmentIds(rowRanges_)
                                 : std::vector<exec::bm::SegmentId>{}),
       peerStartBits_(std::move(descriptor.peerStartBits)),
+      aggregateResults_(std::move(descriptor.aggregateResults)),
       numRows_(descriptor.numRows),
       peerBoundaryMode_(descriptor.peerBoundaryMode) {
   BOLT_CHECK_NOT_NULL(data_);

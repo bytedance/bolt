@@ -625,6 +625,426 @@ TEST_F(BmStreamingWindowBuildTest, aggregate) {
           fmt::format("SELECT *, {}, {} FROM tmp", runningSum, boundedSum));
 }
 
+TEST_F(BmStreamingWindowBuildTest, sharesEntirePartitionAggregateInput) {
+  constexpr vector_size_t size = 512;
+  auto data = makeRowVector(
+      {"d0", "d1", "d2", "d3", "p", "s"},
+      {
+          makeFlatVector<int64_t>(
+              size,
+              [](auto row) { return row % 17; },
+              [](auto row) { return row % 19 == 0; }),
+          makeFlatVector<int64_t>(size, [](auto row) { return row * 3; }),
+          makeFlatVector<int64_t>(size, [](auto row) { return row % 31; }),
+          makeFlatVector<int64_t>(size, [](auto row) { return row % 43; }),
+          makeFlatVector<int16_t>(size, [](auto /*row*/) { return 0; }),
+          makeFlatVector<int32_t>(size, [](auto row) { return row; }),
+      });
+
+  createDuckDbTable({data});
+
+  const std::string frame =
+      "partition by p order by s rows between unbounded preceding and "
+      "unbounded following";
+  const std::vector<std::string> functions{
+      fmt::format("count(d0) over ({})", frame),
+      fmt::format("sum(d1) over ({})", frame),
+      fmt::format("min(d2) over ({})", frame),
+      fmt::format("max(d3) over ({})", frame)};
+  auto plan = PlanBuilder()
+                  .values(split(data, 8))
+                  .streamingWindow(functions)
+                  .planNode();
+  auto windowNode = std::dynamic_pointer_cast<const core::WindowNode>(plan);
+  ASSERT_NE(nullptr, windowNode);
+  for (const auto& function : windowNode->windowFunctions()) {
+    EXPECT_EQ(
+        core::WindowNode::BoundType::kUnboundedPreceding,
+        function.frame.startType);
+    EXPECT_EQ(
+        core::WindowNode::BoundType::kUnboundedFollowing,
+        function.frame.endType);
+  }
+
+#ifndef NDEBUG
+  window::resetBmAggregateWindowTestStats();
+#endif
+  auto spillDirectory = TempDirectoryPath::create();
+  runBmStreamingWindow(
+      plan,
+      fmt::format("SELECT *, {} FROM tmp", folly::join(", ", functions)),
+      duckDbQueryRunner_,
+      spillDirectory->path);
+
+#ifndef NDEBUG
+  const auto stats = window::bmAggregateWindowTestStats();
+  EXPECT_EQ(0, stats.sharedScanCalls);
+  EXPECT_EQ(0, stats.materializedRows);
+  EXPECT_EQ(size, stats.inputAggregationRows);
+  EXPECT_EQ(1, stats.inputAggregationPartitions);
+  EXPECT_EQ(functions.size(), stats.inputAggregationFunctions);
+#endif
+}
+
+TEST_F(BmStreamingWindowBuildTest, unsupportedInputAggregateUsesSharedScan) {
+  constexpr vector_size_t size = 2053;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {makeFlatVector<int64_t>(size, [](auto row) { return row % 17; }),
+       makeFlatVector<int32_t>(size, [](auto /*row*/) { return 0; }),
+       makeFlatVector<int32_t>(size, [](auto row) { return row; })});
+  createDuckDbTable({data});
+  const std::string frame =
+      "partition by p order by s rows between unbounded preceding and "
+      "unbounded following";
+  for (const bool single : {true, false}) {
+    SCOPED_TRACE(single);
+    std::vector<std::string> functions;
+    std::vector<std::string> expected;
+    if (!single) {
+      functions.push_back(fmt::format("sum(d) over ({})", frame));
+      expected.push_back(functions.back());
+    }
+    functions.push_back(fmt::format("max_by(d, s) over ({})", frame));
+    expected.push_back(fmt::format("arg_max(d, s) over ({})", frame));
+    auto plan = PlanBuilder()
+                    .values(split(data, 8))
+                    .streamingWindow(functions)
+                    .planNode();
+#ifndef NDEBUG
+    window::resetBmAggregateWindowTestStats();
+#endif
+    auto spillDirectory = TempDirectoryPath::create();
+    runBmStreamingWindow(
+        plan,
+        fmt::format("SELECT *, {} FROM tmp", folly::join(", ", expected)),
+        duckDbQueryRunner_,
+        spillDirectory->path);
+#ifndef NDEBUG
+    const auto stats = window::bmAggregateWindowTestStats();
+    EXPECT_EQ(0, stats.inputAggregationRows);
+    EXPECT_EQ(1, stats.sharedScanCalls);
+    EXPECT_EQ(functions.size(), stats.sharedScanFunctions);
+    EXPECT_EQ(size, stats.materializedRows);
+#endif
+  }
+}
+
+TEST_F(
+    BmStreamingWindowBuildTest,
+    inputAggregateResultsAreIndependentPerPartition) {
+  constexpr vector_size_t size = 4096;
+  std::string value;
+  auto data = makeRowVector(
+      {"d", "v", "p", "s"},
+      {makeFlatVector<int64_t>(
+           size,
+           [](auto row) { return row % 17; },
+           [](auto row) { return row < 683 || row % 3 == 0; }),
+       makeFlatVector<StringView>(
+           size,
+           [&value](auto row) {
+             value = fmt::format("long-string-partition-{}-{}", row / 683, row);
+             return StringView(value);
+           },
+           [](auto row) { return row < 683 || row % 5 == 0; }),
+       makeFlatVector<int32_t>(size, [](auto row) { return row / 683; }),
+       makeFlatVector<int32_t>(size, [](auto row) { return row; })});
+  createDuckDbTable({data});
+  const std::string frame =
+      "partition by p order by s rows between unbounded preceding and "
+      "unbounded following";
+  for (const bool single : {true, false}) {
+    SCOPED_TRACE(single);
+    std::vector<std::string> functions{fmt::format("sum(d) over ({})", frame)};
+    if (!single) {
+      for (const auto* call :
+           {"count(d)",
+            "min(d)",
+            "max(d)",
+            "avg(d)",
+            "max(v)",
+            "count(1)",
+            "count(*)"}) {
+        functions.push_back(fmt::format("{} over ({})", call, frame));
+      }
+    }
+    auto plan = PlanBuilder()
+                    .values(split(data, 12))
+                    .streamingWindow(functions)
+                    .planNode();
+#ifndef NDEBUG
+    window::resetBmAggregateWindowTestStats();
+#endif
+    auto spillDirectory = TempDirectoryPath::create();
+    runBmStreamingWindow(
+        plan,
+        fmt::format("SELECT *, {} FROM tmp", folly::join(", ", functions)),
+        duckDbQueryRunner_,
+        spillDirectory->path);
+#ifndef NDEBUG
+    const auto stats = window::bmAggregateWindowTestStats();
+    EXPECT_EQ(size, stats.inputAggregationRows);
+    EXPECT_EQ(6, stats.inputAggregationPartitions);
+    EXPECT_EQ(6 * functions.size(), stats.inputAggregationFunctions);
+    EXPECT_EQ(0, stats.sharedScanCalls);
+    EXPECT_EQ(0, stats.materializedRows);
+#endif
+  }
+}
+
+TEST_F(
+    BmStreamingWindowBuildDiskIoTest,
+    inputAggregateInlineHourSurvivesWindowSpill) {
+  constexpr vector_size_t kRows = 131072;
+  for (const bool allNull : {false, true}) {
+    SCOPED_TRACE(allNull);
+    auto data = makeRowVector(
+        {"hour", "payload", "id"},
+        {makeFlatVector<std::string>(
+             kRows,
+             [](auto row) { return fmt::format("{:02}", row % 24); },
+             [allNull](auto row) { return allNull || row % 7 == 0; }),
+         makeFlatVector<std::string>(
+             kRows, [](auto row) { return std::string(256, 'a' + row % 26); }),
+         makeFlatVector<int64_t>(kRows, [](auto row) { return row; })});
+    auto plan =
+        PlanBuilder(pool())
+            .values({data})
+            .streamingWindow({
+                // Match Spark's full-partition normalization of OVER().
+                "max(hour) over (rows between unbounded preceding and unbounded following)",
+            })
+            .planNode();
+    auto node = std::dynamic_pointer_cast<const core::WindowNode>(plan);
+    ASSERT_NE(nullptr, node);
+    ASSERT_EQ(
+        core::WindowNode::BoundType::kUnboundedFollowing,
+        node->windowFunctions().front().frame.endType);
+    auto root = memory::memoryManager()->addRootPool(
+        "bm-inline-hour-spill", 128 << 20, memory::MemoryReclaimer::create());
+    auto directory = TempDirectoryPath::create();
+    auto task = makeDirectWindowTask(plan, directory->path, root);
+    auto config = task->queryCtx()->queryConfig().rawConfigsCopy();
+    config[core::QueryConfig::kPreferredOutputBatchRows] = "8192";
+    config[core::QueryConfig::kMaxOutputBatchRows] = "8192";
+    task->queryCtx()->testingOverrideConfigUnsafe(std::move(config));
+    auto driverCtx = std::make_unique<DriverCtx>(task, 0, 0, 0, 0);
+    auto* context = driverCtx.get();
+    auto driver = Driver::testingCreate(std::move(driverCtx));
+    TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+    Window window(0, context, node);
+    window.initialize();
+#ifndef NDEBUG
+    window::resetBmAggregateWindowTestStats();
+    window::resetBmWindowPartitionTestStats();
+#endif
+    window.addInput(data);
+    // The physical rows span several 4 MiB row blocks. Finalize and spill them
+    // before output, exercising cached results across chunk and batch
+    // boundaries.
+    memory::MemoryReclaimer::Stats reclaimStats;
+    window.reclaim(1, reclaimStats);
+    ASSERT_GT(task->bufferManager()->stats().spillWriteCount, 0);
+    window.noMoreInput();
+    // Select WindowRead under temporary admission pressure, then remove that
+    // pressure so the unrelated resident re-pin reservation issue is excluded.
+    auto pressurePool = root->addLeafChild("force-window-read");
+    const auto pressureBytes = root->freeBytes() - (40 << 20);
+    auto* pressure = pressurePool->allocate(pressureBytes);
+    auto pressureGuard = folly::makeGuard([&] {
+      if (pressure != nullptr) {
+        pressurePool->free(pressure, pressureBytes);
+      }
+    });
+    vector_size_t offset = 0;
+    while (offset < kRows) {
+      Operator::NonReclaimableSectionGuard guard(&window);
+      auto output = window.getOutput();
+      ASSERT_NE(nullptr, output);
+      if (pressure != nullptr) {
+        pressurePool->free(pressure, pressureBytes);
+        pressure = nullptr;
+      }
+      ASSERT_LE(output->size(), 8192);
+      for (vector_size_t row = 0; row < output->size(); ++row) {
+        for (column_index_t column = 0; column < 3; ++column) {
+          ASSERT_TRUE(output->childAt(column)->equalValueAt(
+              data->childAt(column).get(), row, offset + row));
+        }
+        ASSERT_EQ(allNull, output->childAt(3)->isNullAt(row));
+        if (!allNull) {
+          ASSERT_EQ(
+              "23",
+              output->childAt(3)
+                  ->asFlatVector<StringView>()
+                  ->valueAt(row)
+                  .str());
+        }
+      }
+      offset += output->size();
+    }
+    EXPECT_EQ(kRows, offset);
+    EXPECT_TRUE(window.isFinished());
+#ifndef NDEBUG
+    const auto stats = window::bmAggregateWindowTestStats();
+    EXPECT_EQ(kRows, stats.inputAggregationRows);
+    EXPECT_EQ(1, stats.inputAggregationPartitions);
+    EXPECT_EQ(1, stats.inputAggregationFunctions);
+    EXPECT_EQ(0, stats.materializedRows);
+#endif
+    EXPECT_GT(task->bufferManager()->stats().spillReadCount, 0);
+#ifndef NDEBUG
+    EXPECT_GT(window::bmWindowPartitionTestStats().loadRowsCalls, 1);
+#endif
+  }
+}
+
+TEST_F(BmStreamingWindowBuildTest, smallPartitionStringResultMemoryComparison) {
+  constexpr vector_size_t kRows = 4096;
+  auto values = makeFlatVector<std::string>(
+      kRows, [](auto row) { return std::string(64, 'a' + row % 26); });
+  auto data = makeRowVector(
+      {"p", "v"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }), values});
+  auto plan =
+      PlanBuilder(pool())
+          .values({data})
+          .streamingWindow({
+              "max(v) over (partition by p rows between unbounded preceding and unbounded following)",
+          })
+          .planNode();
+  auto node = std::dynamic_pointer_cast<const core::WindowNode>(plan);
+  for (const bool bm : {false, true}) {
+    SCOPED_TRACE(bm);
+    auto root = memory::memoryManager()->addRootPool(
+        "window-small-partition-results",
+        256 << 20,
+        memory::MemoryReclaimer::create());
+    auto directory = TempDirectoryPath::create();
+    auto task = makeDirectWindowTask(plan, directory->path, root);
+    auto config = task->queryCtx()->queryConfig().rawConfigsCopy();
+    config[core::QueryConfig::kPreferredOutputBatchRows] = "128";
+    config[core::QueryConfig::kMaxOutputBatchRows] = "128";
+    task->queryCtx()->testingOverrideConfigUnsafe(std::move(config));
+    auto driverCtx = std::make_unique<DriverCtx>(task, 0, 0, 0, 0);
+    auto* context = driverCtx.get();
+    auto driver = Driver::testingCreate(std::move(driverCtx));
+    TestWindowInjection injection(
+        bm ? WindowBuildType::kBmStreamingWindowBuild
+           : WindowBuildType::kSpillableWindowBuild);
+    Window window(0, context, node);
+    window.initialize();
+#ifndef NDEBUG
+    window::resetBmAggregateWindowTestStats();
+#endif
+    window.addInput(data);
+    // Record the queue before a small output batch can drain it. This is a
+    // diagnostic comparison, not a regression bound or a claim of bounded
+    // memory.
+    RecordProperty(
+        bm ? "bm_input_phase_bytes" : "spillable_input_phase_bytes",
+        root->currentBytes());
+    window.noMoreInput();
+    vector_size_t offset = 0;
+    while (offset < kRows) {
+      Operator::NonReclaimableSectionGuard guard(&window);
+      auto output = window.getOutput();
+      ASSERT_NE(nullptr, output);
+      ASSERT_LE(output->size(), 128);
+      for (vector_size_t row = 0; row < output->size(); ++row) {
+        ASSERT_TRUE(output->childAt(0)->equalValueAt(
+            data->childAt(0).get(), row, offset + row));
+        ASSERT_TRUE(
+            output->childAt(1)->equalValueAt(values.get(), row, offset + row));
+        ASSERT_TRUE(
+            output->childAt(2)->equalValueAt(values.get(), row, offset + row));
+      }
+      offset += output->size();
+    }
+    EXPECT_EQ(kRows, offset);
+    EXPECT_TRUE(window.isFinished());
+    RecordProperty(
+        bm ? "bm_peak_bytes" : "spillable_peak_bytes", root->peakBytes());
+#ifndef NDEBUG
+    if (bm) {
+      EXPECT_EQ(
+          kRows, window::bmAggregateWindowTestStats().inputAggregationRows);
+      EXPECT_EQ(
+          kRows,
+          window::bmAggregateWindowTestStats().inputAggregationPartitions);
+    }
+#endif
+  }
+}
+
+TEST_F(BmStreamingWindowBuildDiskIoTest, inputAggregateSurvivesExplicitSpill) {
+  constexpr vector_size_t size = 16384;
+  auto data = makeRowVector(
+      {"d", "p", "s"},
+      {makeFlatVector<int64_t>(size, [](auto row) { return row; }),
+       makeFlatVector<int32_t>(size, [](auto /*row*/) { return 0; }),
+       makeFlatVector<int32_t>(size, [](auto row) { return row; })});
+  auto plan =
+      PlanBuilder(pool())
+          .values({data})
+          .streamingWindow(
+              {"sum(d) over (partition by p rows between unbounded preceding and unbounded following)"})
+          .planNode();
+  auto node = std::dynamic_pointer_cast<const core::WindowNode>(plan);
+  ASSERT_NE(nullptr, node);
+  auto root = memory::memoryManager()->addRootPool(
+      "bm-input-aggregation-spill",
+      64 << 20,
+      memory::MemoryReclaimer::create());
+  auto manager = createWindowTestBufferManager(root.get(), root->name());
+  tsan_atomic<bool> nonReclaimable{false};
+  common::SpillConfig spillConfig;
+  window::BmStreamingWindowBuild build(
+      node, pool(), &spillConfig, &nonReclaimable, 0, false, manager);
+  HashStringAllocator allocator(pool());
+  std::vector<std::unique_ptr<WindowFunction>> functions;
+  functions.push_back(window::createBmAggregateWindowFunction(
+      "sum",
+      {{BIGINT(), nullptr, 0}},
+      BIGINT(),
+      false,
+      pool(),
+      &allocator,
+      core::QueryConfig({})));
+#ifndef NDEBUG
+  window::resetBmAggregateWindowTestStats();
+#endif
+  build.setInputAggregation(window::prepareBmAggregateWindowFunctions(
+      node->windowFunctions(), functions, pool()));
+  for (const auto& input : split(data, 8)) {
+    build.addInput(input);
+    build.spill();
+  }
+  build.noMoreInput();
+  auto partition = build.nextPartition();
+  functions.front()->resetPartition(partition.get());
+  auto starts = AlignedBuffer::allocate<vector_size_t>(17, pool());
+  auto ends = AlignedBuffer::allocate<vector_size_t>(17, pool());
+  std::fill_n(starts->asMutable<vector_size_t>(), 17, 0);
+  std::fill_n(ends->asMutable<vector_size_t>(), 17, size - 1);
+  auto result = BaseVector::create(BIGINT(), 17, pool());
+  const auto readsBefore = manager->stats().spillReadCount;
+  functions.front()->apply(
+      nullptr, nullptr, starts, ends, SelectivityVector(17), 0, result);
+  for (vector_size_t i = 0; i < 17; ++i) {
+    EXPECT_EQ(
+        int64_t{size} * (size - 1) / 2,
+        result->asFlatVector<int64_t>()->valueAt(i));
+  }
+  EXPECT_EQ(readsBefore, manager->stats().spillReadCount);
+#ifndef NDEBUG
+  EXPECT_EQ(size, window::bmAggregateWindowTestStats().inputAggregationRows);
+  EXPECT_EQ(0, window::bmAggregateWindowTestStats().materializedRows);
+#endif
+  EXPECT_GT(build.windowSpilledStats()->spilledBytes, 0);
+}
+
 TEST_F(BmStreamingWindowBuildTest, sortNullAndRankingFunctionMatrix) {
   constexpr vector_size_t size = 72;
   auto data = makeRowVector(
@@ -1747,11 +2167,11 @@ TEST_F(BmStreamingWindowBuildTest, materializesArgsInChunks) {
 
   createDuckDbTable({data});
 
-  auto fullPartitionCount =
-      "count(d) over (partition by p order by s rows between unbounded preceding and unbounded following)";
+  auto runningCount =
+      "count(d) over (partition by p order by s rows between unbounded preceding and current row)";
   auto plan = PlanBuilder()
                   .values(split(data, size / inputRowsPerBatch))
-                  .streamingWindow({fullPartitionCount})
+                  .streamingWindow({runningCount})
                   .planNode();
 
 #ifndef NDEBUG
@@ -1760,7 +2180,7 @@ TEST_F(BmStreamingWindowBuildTest, materializesArgsInChunks) {
   auto spillDirectory = TempDirectoryPath::create();
   runBmStreamingWindow(
       plan,
-      fmt::format("SELECT *, {} FROM tmp", fullPartitionCount),
+      fmt::format("SELECT *, {} FROM tmp", runningCount),
       duckDbQueryRunner_,
       spillDirectory->path);
 
