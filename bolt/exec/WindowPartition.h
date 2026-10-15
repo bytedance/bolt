@@ -154,7 +154,7 @@ class WindowPartition {
   /// Extracts null positions at 'columnIndex' into 'nullsBuffer' for
   /// 'numRows' starting at positions 'partitionOffset' in the partition
   /// input data.
-  void extractNulls(
+  virtual void extractNulls(
       int32_t columnIndex,
       vector_size_t partitionOffset,
       vector_size_t numRows,
@@ -272,6 +272,11 @@ class WindowPartition {
       vector_size_t* rawFrameBounds) const;
 
  protected:
+  WindowPartition(
+      const std::vector<column_index_t>& inputMapping,
+      const std::vector<std::pair<column_index_t, core::SortOrder>>&
+          sortKeyInfo);
+
   // The RowContainer associated with the partition.
   // It is owned by the WindowBuild that creates the partition.
   RowContainer* data_;
