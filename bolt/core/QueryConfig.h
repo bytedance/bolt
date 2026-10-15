@@ -498,6 +498,12 @@ class QueryConfig {
   static constexpr const char* kMinTableRowsForParallelJoinBuild =
       "min_table_rows_for_parallel_join_build";
 
+  /// If true, enable SIMD-specialized hash table paths for the main
+  /// HashAggregation and HashJoin hash tables. Other hash table users keep the
+  /// scalar default unless they explicitly opt in.
+  static constexpr const char* kSimdHashTableEnabled =
+      "simd_hash_table_enabled";
+
   static constexpr const char* kExchangeCompression = "exchange_compression";
 
   static constexpr const char* kNativeCacheEnabled = "native_cache_enabled";
@@ -1535,6 +1541,10 @@ class QueryConfig {
 
   uint32_t minTableRowsForParallelJoinBuild() const {
     return get<uint32_t>(kMinTableRowsForParallelJoinBuild, 1'000);
+  }
+
+  bool simdHashTableEnabled() const {
+    return get<bool>(kSimdHashTableEnabled, false);
   }
 
   bool isExchangeCompressionEnabled() const {

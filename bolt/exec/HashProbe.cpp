@@ -89,8 +89,42 @@ void extractColumns(
     memory::MemoryPool* pool,
     const std::vector<TypePtr>& resultTypes,
     std::vector<VectorPtr>& resultVectors,
-    bool allowSorting = true) {
+    bool allowSorting = true,
+    bool mayHaveNullRows = false) {
   BOLT_CHECK_EQ(resultTypes.size(), resultVectors.size())
+  if (projections.empty()) {
+    return;
+  }
+  // Callers set mayHaveNullRows only for probe-side paths that can emit
+  // misses. If the table has no distinct keys, every output row is a miss.
+  bool allNullRows = mayHaveNullRows && table->numDistinct() == 0;
+  bool hasNullRows = allNullRows;
+  if (mayHaveNullRows && !allNullRows) {
+    hasNullRows = std::find(rows.begin(), rows.end(), nullptr) != rows.end();
+    allNullRows = hasNullRows &&
+        std::all_of(rows.begin(), rows.end(), [](const char* row) {
+                    return row == nullptr;
+                  });
+  }
+
+  if (allNullRows) {
+    for (auto projection : projections) {
+      const auto resultChannel = projection.outputChannel;
+      BOLT_CHECK_LT(resultChannel, resultVectors.size())
+      auto& child = resultVectors[resultChannel];
+      if (!child || !BaseVector::isVectorWritable(child) ||
+          !child->isFlatEncoding()) {
+        child =
+            BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
+      }
+      child->resize(rows.size());
+      auto* rawNulls = child->mutableNulls(rows.size())->asMutable<uint64_t>();
+      bits::fillBits(rawNulls, 0, rows.size(), bits::kNull);
+      child->setNullCount(rows.size());
+    }
+    return;
+  }
+
   auto hybridData = table->hybridData();
   if (hybridData != nullptr) {
     std::vector<HybridRowId> outputRowIds;
@@ -147,8 +181,7 @@ void extractColumns(
             BaseVector::create(resultTypes[resultChannel], rows.size(), pool);
       }
       child->resize(rows.size());
-      table->rows()->extractColumn(
-          rows.data(), rows.size(), projection.inputChannel, child);
+      table->extractColumn(rows, projection.inputChannel, child, hasNullRows);
     }
   }
 }
@@ -942,7 +975,8 @@ void HashProbe::fillOutput(vector_size_t size) {
           pool(),
           outputType_->children(),
           dictOutput->children(),
-          /*allowSorting=*/!hasProbeColumns);
+          /*allowSorting=*/!hasProbeColumns,
+          /*mayHaveNullRows=*/joinIncludesMissesFromLeft(joinType_));
 
       // calculate dictionary index
       BufferPtr indexBuffer;
@@ -965,7 +999,8 @@ void HashProbe::fillOutput(vector_size_t size) {
           pool(),
           outputType_->children(),
           output_->children(),
-          /*allowSorting=*/!hasProbeColumns);
+          /*allowSorting=*/!hasProbeColumns,
+          /*mayHaveNullRows=*/joinIncludesMissesFromLeft(joinType_));
     }
   }
 }
@@ -1303,7 +1338,9 @@ RowVectorPtr HashProbe::fillFilterInput(vector_size_t size) {
       filterTableProjections_,
       pool(),
       filterInputType_->children(),
-      filterColumns);
+      filterColumns,
+      /*allowSorting=*/true,
+      /*mayHaveNullRows=*/joinIncludesMissesFromLeft(joinType_));
 
   return std::make_shared<RowVector>(
       pool(), filterInputType_, nullptr, size, std::move(filterColumns));
@@ -1438,9 +1475,8 @@ void HashProbe::applyFilterOnTableRowsForNullAwareJoin(
       }
     } else {
       for (auto& projection : filterTableProjections_) {
-        tableRows->extractColumn(
-            data,
-            numRows,
+        table_->extractColumn(
+            folly::Range<char* const*>(data, numRows),
             projection.inputChannel,
             filterTableInput_->childAt(projection.outputChannel));
       }

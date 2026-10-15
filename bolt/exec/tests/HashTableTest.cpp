@@ -34,6 +34,7 @@
 #include "bolt/common/testutil/TestValue.h"
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/VectorHasher.h"
+#include "bolt/exec/tests/utils/HashTableSimdTestUtil.h"
 #include "bolt/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 #include "folly/experimental/EventCount.h"
@@ -41,7 +42,10 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest.h>
+#include <array>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string_view>
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::exec;
@@ -65,6 +69,10 @@ class HashTableTestHelper {
 
   void allocateTables(uint64_t size) {
     table_->allocateTables(size);
+  }
+
+  int32_t simdBuildScratchSize() const {
+    return table_->simdBuildScratch_.activeRows.size();
   }
 
   size_t tableSlotSize() const {
@@ -171,6 +179,7 @@ class HashTableTest : public testing::TestWithParam<HashTableTestParam>,
           1'000,
           pool(),
           GetParam().jitRowEqVectors);
+      table->setSimdEnabled(false);
 
       makeRows(size, 1, sequence, buildType, batches);
       copyVectorsToTable(batches, startOffset, table.get());
@@ -263,12 +272,14 @@ class HashTableTest : public testing::TestWithParam<HashTableTestParam>,
           std::make_unique<VectorHasher>(tableType->childAt(channel), channel));
     }
 
-    return HashTable<false>::createForAggregation(
+    auto _simdOffTable = HashTable<false>::createForAggregation(
         std::move(keyHashers),
         std::vector<Accumulator>{},
         pool(),
         nullptr,
         jitRowEqVectors);
+    _simdOffTable->setSimdEnabled(false);
+    return _simdOffTable;
   }
 
   void insertGroups(
@@ -580,6 +591,7 @@ class HashTableTest : public testing::TestWithParam<HashTableTestParam>,
         1'000,
         pool(),
         GetParam().jitRowEqVectors);
+    table->setSimdEnabled(false);
     copyVectorsToTable({batch}, 0, table.get());
     table->prepareJoinTable({}, executor_.get());
     ASSERT_EQ(table->hashMode(), mode);
@@ -685,6 +697,7 @@ TEST_P(HashTableTest, clear) {
       pool(),
       nullptr,
       GetParam().jitRowEqVectors);
+  table->setSimdEnabled(false);
   ASSERT_NO_THROW(table->clear());
 }
 
@@ -842,6 +855,7 @@ TEST_P(HashTableTest, regularHashingTableSize) {
         1'000,
         pool(),
         GetParam().jitRowEqVectors);
+    table->setSimdEnabled(false);
     std::vector<RowVectorPtr> batches;
     makeRows(1 << 12, 1, 0, type, batches);
     copyVectorsToTable(batches, 0, table.get());
@@ -857,6 +871,581 @@ TEST_P(HashTableTest, regularHashingTableSize) {
     auto type = ROW({"k1", "k2"}, {BIGINT(), BIGINT()});
     checkTableSize(BaseHashTable::HashMode::kNormalizedKey, type);
   }
+}
+
+TEST_P(HashTableTest, simdDisabledByDefault) {
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(VectorHasher::create(BIGINT(), 0));
+  auto table = HashTable<true>::createForJoin(
+      std::move(hashers),
+      {},
+      false,
+      false,
+      BaseHashTable::HashMode::kHash,
+      1'000,
+      pool(),
+      GetParam().jitRowEqVectors);
+  EXPECT_FALSE(table->simdEnabled());
+  EXPECT_FALSE(table->simdActive());
+}
+
+TEST_P(HashTableTest, simdDisabledForHybridJoin) {
+  const auto makeTable = [&](bool hybridMode) {
+    std::vector<std::unique_ptr<VectorHasher>> hashers;
+    hashers.push_back(VectorHasher::create(BIGINT(), 0));
+    return HashTable<true>::createForJoin(
+        std::move(hashers),
+        {BIGINT()},
+        false,
+        false,
+        BaseHashTable::HashMode::kHash,
+        1'000,
+        pool(),
+        GetParam().jitRowEqVectors,
+        hybridMode,
+        true);
+  };
+
+  auto table = makeTable(false);
+  EXPECT_EQ(table->simdActive(), process::hasAvx2());
+  EXPECT_EQ(table->simdHashLayoutActive(), process::hasAvx2());
+
+  auto hybridTable = makeTable(true);
+  ASSERT_TRUE(hybridTable->simdEnabled());
+  ASSERT_NE(hybridTable->hybridData(), nullptr);
+  EXPECT_FALSE(hybridTable->simdActive());
+  EXPECT_FALSE(hybridTable->simdHashLayoutActive());
+}
+
+TEST_P(HashTableTest, simdNormalizedKeyLayoutOnlyForAggregation) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+
+  std::vector<std::unique_ptr<VectorHasher>> joinHashers;
+  joinHashers.push_back(VectorHasher::create(BIGINT(), 0));
+  joinHashers.push_back(VectorHasher::create(BIGINT(), 1));
+  auto joinTable = HashTable<true>::createForJoin(
+      std::move(joinHashers),
+      {},
+      false,
+      false,
+      BaseHashTable::HashMode::kNormalizedKey,
+      1'000,
+      pool(),
+      GetParam().jitRowEqVectors,
+      false,
+      true);
+  EXPECT_TRUE(joinTable->simdActive());
+  EXPECT_FALSE(joinTable->simdNormalizedKeyLayoutActive());
+
+  std::vector<std::unique_ptr<VectorHasher>> aggregationHashers;
+  aggregationHashers.push_back(VectorHasher::create(BIGINT(), 0));
+  aggregationHashers.push_back(VectorHasher::create(BIGINT(), 1));
+  auto aggregationTable = HashTable<true>::createForAggregation(
+      std::move(aggregationHashers),
+      {},
+      pool(),
+      nullptr,
+      GetParam().jitRowEqVectors,
+      true);
+  auto helper = HashTableTestHelper<true>::create(aggregationTable.get());
+  helper.setHashMode(BaseHashTable::HashMode::kNormalizedKey, 1);
+  EXPECT_TRUE(aggregationTable->simdNormalizedKeyLayoutActive());
+}
+
+TEST_P(HashTableTest, simdConsistencyWithDuplicateJoinKeys) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(std::make_unique<VectorHasher>(VARCHAR(), 0));
+  auto table = HashTable<true>::createForJoin(
+      std::move(hashers),
+      {},
+      true,
+      false,
+      BaseHashTable::HashMode::kHash,
+      1'000,
+      pool(),
+      GetParam().jitRowEqVectors);
+  table->setSimdEnabled(true);
+
+  constexpr int32_t kNumRows = 1'000;
+  auto palette = hashTableSimdVarcharValues();
+  auto batch = makeRowVector({makeFlatVector<std::string>(
+      kNumRows, [&](auto row) { return palette[row % palette.size()]; })});
+  copyVectorsToTable({batch}, 0, table.get());
+  table->prepareJoinTable({}, executor_.get());
+
+  ASSERT_EQ(table->hashMode(), BaseHashTable::HashMode::kHash);
+  ASSERT_TRUE(table->simdHashLayoutActive());
+  ASSERT_TRUE(table->hasDuplicateKeys());
+  ASSERT_EQ(table->numDistinct(), kNumRows);
+  ASSERT_NO_THROW(table->checkConsistency());
+
+  // Exercise the HASH probe, including scratch reuse across sizes/encodings.
+  // Low-cardinality operator tests can otherwise stay in ARRAY mode.
+  std::vector<std::optional<std::string>> probeKeys(
+      palette.begin(), palette.end());
+  probeKeys.emplace_back("missing_key");
+  probeKeys.emplace_back(std::nullopt);
+  auto base = makeNullableFlatVector<std::string>(probeKeys);
+  HashLookup lookup(table->hashers(), GetParam().jitRowEqVectors);
+  for (vector_size_t size : {1, 3, 4, 5, 63, 64, 65, 1025, 5}) {
+    SCOPED_TRACE(size);
+    auto flat = makeFlatVector<std::string>(
+        size,
+        [&](auto row) {
+          return probeKeys[row % probeKeys.size()].value_or("");
+        },
+        [&](auto row) {
+          return !probeKeys[row % probeKeys.size()].has_value();
+        });
+    auto indices = makeIndices(
+        size, [&](auto row) { return (row * 3 + 1) % probeKeys.size(); });
+    for (const auto& probe : std::vector<VectorPtr>{
+             flat,
+             BaseVector::wrapInDictionary(nullptr, indices, size, base),
+             BaseVector::wrapInDictionary(
+                 makeNulls(size, nullEvery(3)), indices, size, base),
+             BaseVector::wrapInConstant(size, palette.size() - 1, base),
+             BaseVector::wrapInConstant(size, palette.size(), base),
+             BaseVector::wrapInConstant(size, palette.size() + 1, base)}) {
+      SCOPED_TRACE(probe->toString());
+      SelectivityVector selected(size);
+      table->prepareForJoinProbe(
+          lookup, makeRowVector({probe}), selected, true);
+      if (!lookup.rows.empty()) {
+        table->joinProbe(lookup);
+      }
+      DecodedVector decoded(*probe);
+      for (vector_size_t row = 0; row < size; ++row) {
+        if (decoded.isNullAt(row)) {
+          EXPECT_FALSE(selected.isValid(row));
+          continue;
+        }
+        ASSERT_TRUE(selected.isValid(row));
+        const auto key = decoded.valueAt<StringView>(row);
+        auto* hit = lookup.hits[row];
+        if (key == StringView("missing_key")) {
+          EXPECT_EQ(hit, nullptr);
+        } else {
+          ASSERT_NE(hit, nullptr);
+          const auto& stored = RowContainer::valueAt<StringView>(
+              hit, table->rows()->columnAt(0).offset());
+          std::string storage;
+          EXPECT_EQ(
+              HashStringAllocator::contiguousString(stored, storage), key);
+        }
+      }
+    }
+  }
+}
+
+TEST_P(HashTableTest, simdKeyColumnsUseNullMask) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(VectorHasher::create(BIGINT(), 0));
+  HashLookup lookup(hashers);
+  auto input = makeFlatVector<int64_t>({1, 2});
+  SelectivityVector selected(input->size());
+  hashers[0]->decode(*input, selected);
+  for (bool nullable : {false, true}) {
+    RowContainer rows(
+        {BIGINT()},
+        nullable,
+        {},
+        {},
+        false,
+        false,
+        false,
+        false,
+        false,
+        pool());
+    std::vector<hash_table_simd::KeyColumn> columns;
+    hash_table_simd::buildKeyColumns<false>(lookup, columns, &rows, false, {});
+    ASSERT_EQ(columns.size(), 1);
+    EXPECT_EQ(columns[0].hasNulls, nullable);
+    // A stored NULL from an earlier batch must still compare with null
+    // semantics.
+    auto* stored = rows.newRow();
+    if (nullable) {
+      auto nullInput = makeNullableFlatVector<int64_t>({std::nullopt});
+      DecodedVector decoded(*nullInput);
+      rows.store(decoded, 0, stored, 0);
+    } else {
+      rows.store(hashers[0]->decodedVector(), 0, stored, 0);
+    }
+    vector_size_t candidate = 0;
+    vector_size_t mismatch = -1;
+    uint64_t candidateSlot = 17;
+    uint64_t mismatchSlot = 0;
+    int32_t numMismatches = 0;
+    uint8_t matchMask = 0;
+    uint8_t nullMask = 0;
+    const auto matches = hash_table_simd::compareProbeColumns<false>(
+        columns,
+        &candidate,
+        &stored,
+        &candidateSlot,
+        1,
+        &mismatch,
+        &mismatchSlot,
+        numMismatches,
+        &rows,
+        31,
+        &matchMask,
+        &nullMask);
+    EXPECT_EQ(matches, nullable ? 0 : 1);
+    EXPECT_EQ(numMismatches, nullable ? 1 : 0);
+    EXPECT_EQ(mismatchSlot, nullable ? 18 : 0);
+  }
+}
+
+TEST_P(HashTableTest, simdProbeCandidateCompaction) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(VectorHasher::create(BIGINT(), 0));
+  hashers.push_back(VectorHasher::create(BIGINT(), 1));
+  HashLookup lookup(hashers);
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({10, 20, 30, std::nullopt, 50}),
+      makeNullableFlatVector<int64_t>({100, 200, 300, 400, std::nullopt}),
+  });
+  auto storedValues = makeRowVector({
+      makeNullableFlatVector<int64_t>({10, 21, 30, std::nullopt, 50}),
+      makeNullableFlatVector<int64_t>({100, 200, 301, 400, std::nullopt}),
+  });
+  SelectivityVector selected(input->size());
+  for (int32_t column = 0; column < hashers.size(); ++column) {
+    hashers[column]->decode(*input->childAt(column), selected);
+  }
+
+  RowContainer rows(
+      {BIGINT(), BIGINT()},
+      true,
+      {},
+      {},
+      false,
+      false,
+      false,
+      false,
+      false,
+      pool());
+  std::vector<DecodedVector> storedColumns;
+  storedColumns.reserve(2);
+  for (int32_t column = 0; column < 2; ++column) {
+    storedColumns.emplace_back(*storedValues->childAt(column), selected);
+  }
+  std::array<char*, 5> storedRows;
+  for (int32_t row = 0; row < storedRows.size(); ++row) {
+    storedRows[row] = rows.newRow();
+    for (int32_t column = 0; column < storedColumns.size(); ++column) {
+      rows.store(storedColumns[column], row, storedRows[row], column);
+    }
+  }
+
+  std::vector<hash_table_simd::KeyColumn> columns;
+  hash_table_simd::buildKeyColumns<false>(
+      lookup, columns, &rows, true, {true, true});
+  std::array<vector_size_t, 5> candidateRows{0, 1, 2, 3, 4};
+  std::array<char*, 5> candidateGroups = storedRows;
+  std::array<uint64_t, 5> candidateSlots{4, 9, 14, 19, 24};
+  std::array<vector_size_t, 5> mismatchRows{};
+  std::array<uint64_t, 5> mismatchSlots{};
+  std::array<uint8_t, 5> matchMask{};
+  std::array<uint8_t, 5> bothNullMask{};
+  int32_t numMismatches = 0;
+
+  const auto numMatches = hash_table_simd::compareProbeColumns<false>(
+      columns,
+      candidateRows.data(),
+      candidateGroups.data(),
+      candidateSlots.data(),
+      candidateRows.size(),
+      mismatchRows.data(),
+      mismatchSlots.data(),
+      numMismatches,
+      &rows,
+      31,
+      matchMask.data(),
+      bothNullMask.data());
+
+  EXPECT_EQ(numMatches, 3);
+  EXPECT_EQ(
+      (std::array<vector_size_t, 3>{
+          candidateRows[0], candidateRows[1], candidateRows[2]}),
+      (std::array<vector_size_t, 3>{0, 3, 4}));
+  EXPECT_EQ(numMismatches, 2);
+  EXPECT_EQ(
+      (std::array<vector_size_t, 2>{mismatchRows[0], mismatchRows[1]}),
+      (std::array<vector_size_t, 2>{1, 2}));
+  EXPECT_EQ(
+      (std::array<uint64_t, 2>{mismatchSlots[0], mismatchSlots[1]}),
+      (std::array<uint64_t, 2>{10, 15}));
+}
+
+TEST_P(HashTableTest, simdAggregationCollisionAndRehash) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+
+  using Key = std::pair<std::optional<int64_t>, std::optional<int64_t>>;
+
+  std::vector<std::unique_ptr<VectorHasher>> hashers;
+  hashers.push_back(VectorHasher::create(BIGINT(), 0));
+  hashers.push_back(VectorHasher::create(BIGINT(), 1));
+  auto table = HashTable<false>::createForAggregation(
+      std::move(hashers),
+      {},
+      pool(),
+      nullptr,
+      GetParam().jitRowEqVectors,
+      true);
+  auto helper = HashTableTestHelper<false>::create(table.get());
+  helper.setHashMode(BaseHashTable::HashMode::kHash, 1);
+  ASSERT_TRUE(table->simdHashLayoutActive());
+
+  const auto mask = table->capacity() - 1;
+  std::unordered_map<uint64_t, int64_t> keyBySignature;
+  std::array<int64_t, 2> collidingKeys{};
+  for (int64_t value = 1; value < 100'000; ++value) {
+    const auto hash = bits::hashMix(
+        folly::hasher<int64_t>()(7), folly::hasher<int64_t>()(value));
+    const auto signature = (hash & hash_table_simd::kTagMask) |
+        hash_table_simd::bucketStart(hash & mask);
+    const auto [it, inserted] = keyBySignature.emplace(signature, value);
+    if (!inserted) {
+      collidingKeys = {it->second, value};
+      break;
+    }
+  }
+  ASSERT_NE(collidingKeys[1], 0);
+
+  std::map<Key, char*> groupsByKey;
+  HashLookup lookup(table->hashers(), GetParam().jitRowEqVectors);
+  auto runBatch = [&](const std::vector<Key>& keys) {
+    std::vector<std::optional<int64_t>> firstKeys;
+    std::vector<std::optional<int64_t>> secondKeys;
+    firstKeys.reserve(keys.size());
+    secondKeys.reserve(keys.size());
+    for (const auto& [first, second] : keys) {
+      firstKeys.push_back(first);
+      secondKeys.push_back(second);
+    }
+    auto input = makeRowVector({
+        makeNullableFlatVector<int64_t>(firstKeys),
+        makeNullableFlatVector<int64_t>(secondKeys),
+    });
+    insertGroups(*input, lookup, *table);
+    const auto firstColumn = table->rows()->columnAt(0);
+    const auto secondColumn = table->rows()->columnAt(1);
+    for (int32_t row = 0; row < keys.size(); ++row) {
+      auto* group = lookup.hits[row];
+      ASSERT_NE(group, nullptr);
+      const auto& [first, second] = keys[row];
+      EXPECT_EQ(RowContainer::isNullAt(group, firstColumn), !first.has_value());
+      EXPECT_EQ(
+          RowContainer::isNullAt(group, secondColumn), !second.has_value());
+      if (first) {
+        EXPECT_EQ(
+            folly::loadUnaligned<int64_t>(group + firstColumn.offset()),
+            *first);
+      }
+      if (second) {
+        EXPECT_EQ(
+            folly::loadUnaligned<int64_t>(group + secondColumn.offset()),
+            *second);
+      }
+      const auto [it, inserted] = groupsByKey.emplace(keys[row], group);
+      if (!inserted) {
+        EXPECT_EQ(group, it->second);
+      }
+    }
+    EXPECT_EQ(table->numDistinct(), groupsByKey.size());
+    ASSERT_NO_THROW(table->checkConsistency());
+  };
+
+  std::vector<Key> collisionBatch;
+  collisionBatch.reserve(257);
+  for (int32_t row = 0; row < 257; ++row) {
+    switch (row % 4) {
+      case 0:
+        collisionBatch.emplace_back(7, collidingKeys[0]);
+        break;
+      case 1:
+        collisionBatch.emplace_back(7, collidingKeys[1]);
+        break;
+      case 2:
+        collisionBatch.emplace_back(std::nullopt, 31);
+        break;
+      default:
+        collisionBatch.emplace_back(10'000 + row, 20'000 + row);
+        break;
+    }
+  }
+  runBatch(collisionBatch);
+
+  std::vector<Key> rehashBatch;
+  rehashBatch.reserve(1'800);
+  for (int32_t row = 0; row < 1'800; ++row) {
+    if (row % 127 == 0) {
+      rehashBatch.emplace_back(std::nullopt, 31);
+    } else if (row % 31 == 0) {
+      rehashBatch.emplace_back(
+          7, row % 62 == 0 ? collidingKeys[0] : collidingKeys[1]);
+    } else {
+      rehashBatch.emplace_back(100'000 + row, 200'000 + row * 13);
+    }
+  }
+  const auto initialCapacity = table->capacity();
+  runBatch(rehashBatch);
+  EXPECT_GT(table->capacity(), initialCapacity);
+  runBatch(collisionBatch);
+}
+
+TEST_P(HashTableTest, simdSkewedParallelBuildOverflow) {
+  if (!process::hasAvx2()) {
+    GTEST_SKIP() << "SIMD requires AVX2";
+  }
+  constexpr int32_t kRows = 4096;
+  std::vector<int64_t> keys;
+  for (int64_t key = 0; keys.size() < kRows; ++key) {
+    if ((folly::hasher<int64_t>()(key) & 6144) == 0) {
+      keys.push_back(key);
+    }
+  }
+  auto input = makeRowVector({makeFlatVector<int64_t>(keys)});
+  SelectivityVector selected(kRows);
+  DecodedVector decoded(*input->childAt(0), selected);
+  std::vector<std::unique_ptr<BaseHashTable>> tables;
+  for (int way = 0; way < 4; ++way) {
+    std::vector<std::unique_ptr<VectorHasher>> hashers;
+    hashers.push_back(VectorHasher::create(BIGINT(), 0));
+    auto table = HashTable<true>::createForJoin(
+        std::move(hashers),
+        {},
+        true,
+        false,
+        BaseHashTable::HashMode::kHash,
+        1000,
+        pool(),
+        GetParam().jitRowEqVectors,
+        false,
+        true);
+    for (int i = way; i < kRows; i += 4) {
+      auto* row = table->rows()->newRow();
+      *reinterpret_cast<char**>(row + table->rows()->nextOffset()) = nullptr;
+      table->rows()->store(decoded, i, row, 0);
+    }
+    tables.push_back(std::move(table));
+  }
+  auto table = std::move(tables.back());
+  tables.pop_back();
+  folly::CPUThreadPoolExecutor executor(4);
+  table->prepareJoinTable(std::move(tables), &executor);
+  ASSERT_EQ(table->capacity(), 8192);
+  auto* typed = dynamic_cast<HashTable<true>*>(table.get());
+  ASSERT_NE(typed, nullptr);
+  ASSERT_TRUE(typed->simdHashLayoutActive());
+  const auto helper = HashTableTestHelper<true>::create(typed);
+  EXPECT_GT(helper.simdBuildScratchSize(), 0);
+  EXPECT_LE(helper.simdBuildScratchSize(), 1024);
+  HashLookup lookup(table->hashers(), GetParam().jitRowEqVectors);
+  table->prepareForJoinProbe(lookup, input, selected, true);
+  table->joinProbe(lookup);
+  for (int row = 0; row < kRows; ++row) {
+    ASSERT_NE(lookup.hits[row], nullptr);
+    EXPECT_EQ(
+        folly::loadUnaligned<int64_t>(
+            lookup.hits[row] + table->rows()->columnAt(0).offset()),
+        keys[row]);
+  }
+  EXPECT_FALSE(table->hasDuplicateKeys());
+}
+
+TEST_P(HashTableTest, extractColumnUsesMergedNulls) {
+  auto makeTable = [&](int64_t firstKey, bool hasNull) {
+    std::vector<std::unique_ptr<VectorHasher>> hashers;
+    hashers.push_back(VectorHasher::create(BIGINT(), 0));
+    auto table = HashTable<false>::createForJoin(
+        std::move(hashers),
+        {BIGINT(), BIGINT()},
+        true,
+        false,
+        BaseHashTable::HashMode::kHash,
+        1,
+        pool(),
+        GetParam().jitRowEqVectors);
+    auto nullable = hasNull
+        ? makeNullableFlatVector<int64_t>({std::nullopt, firstKey + 21})
+        : makeNullableFlatVector<int64_t>({firstKey + 20, firstKey + 21});
+    auto input = makeRowVector(
+        {makeFlatVector<int64_t>({firstKey, firstKey + 1}),
+         makeFlatVector<int64_t>({firstKey + 10, firstKey + 11}),
+         nullable});
+    copyVectorsToTable({input}, 0, table.get());
+    return table;
+  };
+
+  auto table = makeTable(0, false);
+  auto other = makeTable(2, true);
+  ASSERT_FALSE(table->rows()->columnHasNulls(1));
+  ASSERT_FALSE(table->rows()->columnHasNulls(2));
+  ASSERT_TRUE(other->rows()->columnHasNulls(2));
+
+  std::vector<std::unique_ptr<BaseHashTable>> others;
+  others.push_back(std::move(other));
+  table->prepareJoinTable(std::move(others), executor_.get());
+
+  std::vector<char*> rows(4);
+  BaseHashTable::RowsIterator iterator;
+  int32_t numRows = 0;
+  while (auto count = table->listAllRows(
+             &iterator,
+             rows.size() - numRows,
+             RowContainer::kUnlimited,
+             rows.data() + numRows)) {
+    numRows += count;
+  }
+  ASSERT_EQ(numRows, rows.size());
+
+  auto nullFree = BaseVector::create<FlatVector<int64_t>>(BIGINT(), 4, pool());
+  table->extractColumn(
+      folly::Range<char* const*>(rows.data(), rows.size()), 1, nullFree);
+  EXPECT_FALSE(nullFree->mayHaveNulls());
+
+  auto nullable = BaseVector::create<FlatVector<int64_t>>(BIGINT(), 4, pool());
+  table->extractColumn(
+      folly::Range<char* const*>(rows.data(), rows.size()), 2, nullable);
+  EXPECT_TRUE(nullable->mayHaveNulls());
+  int32_t numNulls = 0;
+  for (vector_size_t i = 0; i < nullable->size(); ++i) {
+    numNulls += nullable->isNullAt(i);
+  }
+  EXPECT_EQ(numNulls, 1);
+
+  std::vector<char*> rowsWithSyntheticNulls{rows[0], nullptr, rows[1], nullptr};
+  auto syntheticNulls =
+      BaseVector::create<FlatVector<int64_t>>(BIGINT(), 4, pool());
+  table->extractColumn(
+      folly::Range<char* const*>(
+          rowsWithSyntheticNulls.data(), rowsWithSyntheticNulls.size()),
+      1,
+      syntheticNulls,
+      true);
+  EXPECT_FALSE(syntheticNulls->isNullAt(0));
+  EXPECT_TRUE(syntheticNulls->isNullAt(1));
+  EXPECT_FALSE(syntheticNulls->isNullAt(2));
+  EXPECT_TRUE(syntheticNulls->isNullAt(3));
 }
 
 TEST_P(HashTableTest, groupBySpill) {
@@ -966,6 +1555,7 @@ DEBUG_ONLY_TEST_P(HashTableTest, nextBucketOffset) {
         1'000,
         pool(),
         GetParam().jitRowEqVectors);
+    table->setSimdEnabled(false);
     auto testHelper = HashTableTestHelper<true>::create(table.get());
     const uint64_t numDistincts = bits::nextPowerOfTwo(
         2UL * std::numeric_limits<int32_t>::max() / testHelper.tableSlotSize());
@@ -1082,6 +1672,7 @@ DEBUG_ONLY_TEST_P(HashTableTest, failureInCreateRowPartitions) {
         1,
         pool(),
         GetParam().jitRowEqVectors);
+    table->setSimdEnabled(false);
     copyVectorsToTable({batch}, 0, table.get());
 
     if (topTable == nullptr) {
@@ -1174,6 +1765,7 @@ TEST_P(HashTableTest, toStringSingleKey) {
       1 /*minTableSizeForParallelJoinBuild*/,
       pool(),
       GetParam().jitRowEqVectors);
+  table->setSimdEnabled(false);
 
   auto data = makeRowVector({
       makeFlatVector<int64_t>(1'000, [](auto row) { return row / 2; }),
@@ -1204,6 +1796,7 @@ TEST_P(HashTableTest, toStringMultipleKeys) {
       1 /*minTableSizeForParallelJoinBuild*/,
       pool(),
       GetParam().jitRowEqVectors);
+  table->setSimdEnabled(false);
 
   vector_size_t size = 1'000;
   auto data = makeRowVector({

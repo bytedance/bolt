@@ -1257,6 +1257,7 @@ DEBUG_ONLY_TEST_P(
 
 TEST_P(MultiThreadedHashJoinTest, normalizedKey) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .config(core::QueryConfig::kSimdHashTableEnabled, "true")
       .numDrivers(numDrivers_)
       .hybridJoin(hybridJoin_)
       .keyTypes({BIGINT(), VARCHAR()})
@@ -1339,6 +1340,7 @@ DEBUG_ONLY_TEST_P(
 
 TEST_F(HashJoinTest, allTypes) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .config(core::QueryConfig::kSimdHashTableEnabled, "true")
       .keyTypes(
           {BIGINT(),
            VARCHAR(),
@@ -2319,6 +2321,7 @@ TEST_P(
     auto testProbeVectors = probeVectors;
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+        .config(core::QueryConfig::kSimdHashTableEnabled, "true")
         .numDrivers(numDrivers_)
         .hybridJoin(hybridJoin_)
         .probeKeys({"t0"})
