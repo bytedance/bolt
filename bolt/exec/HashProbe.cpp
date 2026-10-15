@@ -1176,6 +1176,17 @@ RowVectorPtr HashProbe::getOutput() {
   auto outputBatchSize = (isLeftSemiOrAntiJoinNoFilter || emptyBuildSide)
       ? inputSize
       : outputBatchSize_;
+
+  const auto outputTableRowsCapacity = outputBatchSize;
+  if (filter_ && outputBatchSize == outputBatchSize_ &&
+      (isLeftJoin(joinType_) || isFullJoin(joinType_) ||
+       isAntiJoin(joinType_) || isLeftSemiFilterJoin(joinType_) ||
+       isLeftSemiProjectJoin(joinType_))) {
+    // If we need non-matching probe side row, there is a possibility that such
+    // row exists at end of an input batch and being carried over in the next
+    // output batch, so we need to make extra room of one row in output.
+    ++outputBatchSize;
+  }
   auto mapping =
       initializeRowNumberMapping(outputRowMapping_, outputBatchSize, pool());
   outputTableRows_.resize(outputBatchSize);
@@ -1215,15 +1226,19 @@ RowVectorPtr HashProbe::getOutput() {
         numOut = table_->listJoinResults(
             results_,
             joinIncludesMissesFromLeft(joinType_),
-            mapping,
-            folly::Range(outputTableRows_.data(), outputTableRows_.size()),
+            folly::Range<vector_size_t*>(
+                mapping.begin(), outputTableRowsCapacity),
+            folly::Range<char**>(
+                outputTableRows_.data(), outputTableRowsCapacity),
             accumulatedMatchFlag_->childAt(0).get());
       } else {
         numOut = table_->listJoinResults(
             results_,
             joinIncludesMissesFromLeft(joinType_),
-            mapping,
-            folly::Range(outputTableRows_.data(), outputTableRows_.size()));
+            folly::Range<vector_size_t*>(
+                mapping.begin(), outputTableRowsCapacity),
+            folly::Range<char**>(
+                outputTableRows_.data(), outputTableRowsCapacity));
       }
     }
 
