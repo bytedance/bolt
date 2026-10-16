@@ -29,7 +29,7 @@ if(NOT _paimon_check_result EQUAL 0)
     WARNING
     "Python package pypaimon is not available for ${Python3_EXECUTABLE}; "
     "PaimonConnectorTest will fail. Install it with: "
-    "${Python3_EXECUTABLE} -m pip install pypaimon==1.4.1 requests"
+    "${Python3_EXECUTABLE} -m pip install pypaimon==1.4.1"
   )
 endif()
 

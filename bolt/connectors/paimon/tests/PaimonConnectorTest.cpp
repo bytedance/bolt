@@ -77,7 +77,7 @@ class PaimonConnectorTest
     CHECK(isPypaimonAvailable())
         << "Python package pypaimon is required to create Paimon test tables. "
         << "Install it with: " << pythonExecutableForTests()
-        << " -m pip install pypaimon==1.4.1 requests";
+        << " -m pip install pypaimon==1.4.1";
 
     // Create a temporary directory for the test
     tempDir_ = exec::test::TempDirectoryPath::create();
