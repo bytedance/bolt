@@ -92,8 +92,10 @@ jobs:
         env:
           BOLT_TEST_LINKAGE: static
         run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-dev
+
           # Match the Python wheel dependency graph in bolt_build_backend.py.
-          # Skip Python discovery while packaging pybind11 headers.
           conan install . \
             -pr:h default -pr:b default \
             -s "build_type=Release" \
@@ -103,7 +105,6 @@ jobs:
             -o "&:enable_jit=False" \
             -o "&:spark_compatible=False" \
             -o "&:shared=False" \
-            -c 'pybind11/*:tools.cmake.cmaketoolchain:extra_variables={"PYBIND11_NOPYTHON": True}' \
             --build=missing -r=bolt-cci-local
 
       - name: Install Debug dependency graph
