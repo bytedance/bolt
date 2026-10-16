@@ -52,8 +52,11 @@ struct JsonObjectKeysFunction {
       return false;
     }
 
-    // The result is NULL if the given string is not a JSON object string.
-    if (jsonDoc.type() != simdjson::ondemand::json_type::object) {
+    // On-Demand parsing is lazy. Check the result before reading the type to
+    // avoid surfacing parser errors for invalid JSON.
+    auto jsonType = jsonDoc.type();
+    if (jsonType.error() != simdjson::SUCCESS ||
+        jsonType.value_unsafe() != simdjson::ondemand::json_type::object) {
       return false;
     }
 
@@ -64,9 +67,20 @@ struct JsonObjectKeysFunction {
     }
 
     for (auto field : jsonObject) {
-      out.add_item().copy_from(std::string_view(field.unescaped_key(false)));
+      if (field.error() != simdjson::SUCCESS) {
+        return false;
+      }
+
+      auto key = field.unescaped_key(false);
+      if (key.error() != simdjson::SUCCESS) {
+        return false;
+      }
+      out.add_item().copy_from(std::string_view(key.value_unsafe()));
     }
-    return true;
+
+    // Iteration validates the object structure, while at_end() rejects valid
+    // objects followed by trailing non-whitespace content.
+    return jsonDoc.at_end();
   }
 };
 
