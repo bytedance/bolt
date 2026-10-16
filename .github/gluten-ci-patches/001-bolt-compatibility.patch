@@ -1,0 +1,186 @@
+diff --git a/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala b/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala
+--- a/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala
++++ b/backends-bolt/src-delta/main/scala/org/apache/gluten/component/BoltDeltaComponent.scala
+@@ -37,7 +37,10 @@ class BoltDeltaComponent extends Component {
+     val legacy = injector.gluten.legacy
+     legacy.injectTransform {
+       c =>
+-        val offload = Seq(OffloadDeltaScan(), OffloadDeltaProject(), OffloadDeltaFilter())
++        val offload = Seq(
++          OffloadDeltaScan(enableNativeDmlRowIndexScan = false),
++          OffloadDeltaProject(),
++          OffloadDeltaFilter())
+           .map(_.toStrcitRule())
+         HeuristicTransform.Simple(
+           Validators.newValidator(new GlutenConfig(c.sqlConf), offload),
+diff --git a/cpp/bolt.CMakeLists.cmake b/cpp/bolt.CMakeLists.cmake
+index d4ee2eef1d..b8ff46f0ad 100644
+--- a/cpp/bolt.CMakeLists.cmake
++++ b/cpp/bolt.CMakeLists.cmake
+@@ -135,7 +135,7 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+   add_compile_definitions(_GNU_SOURCE)
+ endif()
+
+-if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
++if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-class-memaccess")
+ endif()
+
+diff --git a/cpp/bolt/CMakeLists.txt b/cpp/bolt/CMakeLists.txt
+index 14b71e4744..f17faa52be 100644
+--- a/cpp/bolt/CMakeLists.txt
++++ b/cpp/bolt/CMakeLists.txt
+@@ -66,8 +66,8 @@ endif()
+
+ set(CMAKE_CXX_FLAGS
+     "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations -Wno-attributes")
+-if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
++if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-class-memaccess")
+ endif()
+
+ message("Bolt module final CMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}")
+diff --git a/cpp/bolt/compute/BoltRuntime.h b/cpp/bolt/compute/BoltRuntime.h
+index 8276ccce34..40d3f0aa0e 100644
+--- a/cpp/bolt/compute/BoltRuntime.h
++++ b/cpp/bolt/compute/BoltRuntime.h
+@@ -117,6 +117,9 @@ class BoltRuntime final : public Runtime {
+       std::vector<bytedance::bolt::core::PlanNodeId>& scanIds,
+       std::vector<bytedance::bolt::core::PlanNodeId>& streamIds);
+
++  using Runtime::createShuffleReader;
++  using Runtime::createShuffleWriter;
++
+   std::shared_ptr<ShuffleWriterBase> createShuffleWriter(
+       const ShuffleWriterInfo& info,
+       std::shared_ptr<RssClient> rssClient,
+diff --git a/cpp/bolt/jni/BoltJniWrapper.cc b/cpp/bolt/jni/BoltJniWrapper.cc
+index 7fcabb65c4..a17a6bd383 100644
+--- a/cpp/bolt/jni/BoltJniWrapper.cc
++++ b/cpp/bolt/jni/BoltJniWrapper.cc
+@@ -479,9 +479,8 @@ static inline std::vector<std::string> FromByteArrToStringVector(JNIEnv* env, jo
+   for (int i = 0; i < length; i++) {
+     jbyteArray byte_array = reinterpret_cast<jbyteArray>(env->GetObjectArrayElement(str_array, i));
+     int bytes_len = env->GetArrayLength(byte_array);
+-    signed char array[bytes_len];
+-    env->GetByteArrayRegion(byte_array, 0, bytes_len, array);
+-    std::string j_string(reinterpret_cast<char*>(array), sizeof(array));
++    std::string j_string(bytes_len, '\0');
++    env->GetByteArrayRegion(byte_array, 0, bytes_len, reinterpret_cast<jbyte*>(j_string.data()));
+     vector.push_back(j_string);
+   }
+   return vector;
+diff --git a/cpp/bolt/tests/MemoryManagerTest.cc b/cpp/bolt/tests/MemoryManagerTest.cc
+index 860e95e9e7..cf899aaac4 100644
+--- a/cpp/bolt/tests/MemoryManagerTest.cc
++++ b/cpp/bolt/tests/MemoryManagerTest.cc
+@@ -376,7 +376,7 @@ TEST_F(MultiMemoryManagerTest, spill) {
+         pool->setReclaimer(std::make_unique<MockMemoryReclaimer>(buffs[i], allocateSize));
+         listener->set(tmm.newListener(
+             [](uint64_t bytes) -> uint64_t { return 0; },
+-            [i, &vmms, &mutex, &pool](uint64_t bytes) -> uint64_t {
++            [i, &vmms, &mutex](uint64_t bytes) -> uint64_t {
+               std::unique_lock<std::recursive_mutex> l(mutex);
+               return vmms[i]->getMemoryManager()->arbitrator()->shrinkCapacity(bytes, true);
+             }));
+diff --git a/dev/build_bolt_arrow.sh b/dev/build_bolt_arrow.sh
+index d20f3dee68..c9642e639d 100644
+--- a/dev/build_bolt_arrow.sh
++++ b/dev/build_bolt_arrow.sh
+@@ -29,6 +29,8 @@ function prepare_arrow_build() {
+     ARROW_CACHE_DIR=$(conan cache path arrow/${BOLT_ARROW_BUILD_VERSION})
+     ARROW_SOURCE_DIR=${ARROW_CACHE_DIR}/../s/src
+     cp -a ${ARROW_SOURCE_DIR}/. ${ARROW_PREFIX}
++    # THRIFT-5842: Thrift 0.16 needs an explicit cstdint include with GCC 15+.
++    patch -d "${ARROW_PREFIX}" -p1 < "${CURRENT_DIR}/bolt-arrow-thrift.patch"
+ }
+
+ function build_arrow_java() {
+diff --git a/dev/bolt-arrow-thrift.patch b/dev/bolt-arrow-thrift.patch
+new file mode 100644
+index 0000000000..20ac226388
+--- /dev/null
++++ b/dev/bolt-arrow-thrift.patch
+@@ -0,0 +1,30 @@
++--- a/cpp/cmake_modules/ThirdpartyToolchain.cmake
+++++ b/cpp/cmake_modules/ThirdpartyToolchain.cmake
++@@ -1684,11 +1684,14 @@
++     set(THRIFT_DEPENDENCIES ${THRIFT_DEPENDENCIES} boost_ep)
++   endif()
++
+++  find_program(THRIFT_PATCH patch REQUIRED)
++   externalproject_add(thrift_ep
++                       ${EP_COMMON_OPTIONS}
++                       URL ${THRIFT_SOURCE_URL}
++                       URL_HASH "SHA256=${ARROW_THRIFT_BUILD_SHA256_CHECKSUM}"
++                       BUILD_BYPRODUCTS "${THRIFT_LIB}"
+++                      PATCH_COMMAND ${THRIFT_PATCH} -p1 -i
+++                                    ${CMAKE_CURRENT_LIST_DIR}/thrift-cstdint.diff
++                       CMAKE_ARGS ${THRIFT_CMAKE_ARGS}
++                       DEPENDS ${THRIFT_DEPENDENCIES})
++
++--- /dev/null
+++++ b/cpp/cmake_modules/thrift-cstdint.diff
++@@ -0,0 +1,10 @@
+++--- a/lib/cpp/src/thrift/concurrency/Mutex.h
++++++ b/lib/cpp/src/thrift/concurrency/Mutex.h
+++@@ -20,6 +20,7 @@
+++ #ifndef _THRIFT_CONCURRENCY_MUTEX_H_
+++ #define _THRIFT_CONCURRENCY_MUTEX_H_ 1
+++
++++#include <cstdint>
+++ #include <memory>
+++ #include <thrift/TNonCopyable.h>
+++
+diff --git a/backends-bolt/src/main/scala/org/apache/spark/api/python/ColumnarArrowEvalPythonExec.scala b/backends-bolt/src/main/scala/org/apache/spark/api/python/ColumnarArrowEvalPythonExec.scala
+index 312d3fd5d..8a89614bd 100644
+--- a/backends-bolt/src/main/scala/org/apache/spark/api/python/ColumnarArrowEvalPythonExec.scala
++++ b/backends-bolt/src/main/scala/org/apache/spark/api/python/ColumnarArrowEvalPythonExec.scala
+@@ -156,13 +156,16 @@ class ColumnarArrowPythonRunner(
+       }
+
+       def writeNextInputToStream(dataOut: DataOutputStream): Boolean = {
+-        writeToStreamHelper(dataOut)
++        // Spark 4 stops calling the incremental writer once the input is exhausted.
++        if (!inputIterator.hasNext) {
++          false
++        } else {
++          writeToStreamHelper(dataOut)
++        }
+       }
+
+       def writeToStreamHelper(dataOut: DataOutputStream): Boolean = {
+-        if (!inputIterator.hasNext) {
+-          return false
+-        }
++        // Spark 3's one-shot writer must send a schema and EOS even for empty partitions.
+         var numRows: Long = 0
+         val arrowSchema = SparkSchemaUtil.toArrowSchema(schema, timeZoneId)
+         val allocator = ArrowBufferAllocators.contextInstance()
+diff --git a/backends-bolt/src/main/scala/org/apache/spark/sql/execution/BoltColumnarWriteFilesExec.scala b/backends-bolt/src/main/scala/org/apache/spark/sql/execution/BoltColumnarWriteFilesExec.scala
+index 4cb2badcc..210506e9d 100644
+--- a/backends-bolt/src/main/scala/org/apache/spark/sql/execution/BoltColumnarWriteFilesExec.scala
++++ b/backends-bolt/src/main/scala/org/apache/spark/sql/execution/BoltColumnarWriteFilesExec.scala
+@@ -21,8 +21,9 @@ import org.apache.gluten.columnarbatch.ColumnarBatches
+ import org.apache.gluten.execution.ValidationResult
+ import org.apache.gluten.execution.WriteFilesExecTransformer
+ import org.apache.gluten.memory.arrow.alloc.ArrowBufferAllocators
++import org.apache.gluten.sql.shims.SparkShimLoader
+
+-import org.apache.spark.{Partition, SparkException, TaskContext, TaskOutputFileAlreadyExistException}
++import org.apache.spark.{Partition, TaskContext, TaskOutputFileAlreadyExistException}
+ import org.apache.spark.internal.io.{FileCommitProtocol, FileNameSpec, SparkHadoopWriterUtils}
+ import org.apache.spark.internal.io.FileCommitProtocol.TaskCommitMessage
+ import org.apache.spark.rdd.RDD
+@@ -237,10 +238,7 @@ class BoltColumnarWriteFilesRDD(
+       case f: FileAlreadyExistsException if SQLConf.get.fastFailFileFormatOutput =>
+         throw new TaskOutputFileAlreadyExistException(f)
+       case t: Throwable =>
+-        throw new SparkException(
+-          s"Task failed while writing rows to staging path: $writePath, " +
+-            s"output path: ${description.path}",
+-          t)
++        SparkShimLoader.getSparkShims.throwExceptionInWrite(t, writePath, description.path)
+     }
+
+     assert(writeTaskResult != null)

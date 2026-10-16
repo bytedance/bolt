@@ -1,0 +1,1402 @@
+# Temporary Bolt backend exclusions observed by the local CI matrix.
+# Format: [Spark minor/Scala binary]fully qualified suite class#exact registered test name.
+# No suite-wide, prefix, regex or aborted-suite exclusions.
+# Repeated Spark/Scala versions are not distinct defects.
+# Missing Bolt plan baselines are identified separately.
+
+# jvm
+# Inline Generate is not offloaded by Bolt; upstream struct-field coverage requires it.
+[3.5/2.12]org.apache.gluten.expression.StructFieldBindSuite#struct fields with duplicate names read through the generate rewrite
+# Native JSON field-name change (#1044); repair after CI enablement.
+[3.5/2.12]org.apache.gluten.functions.JsonFunctionsValidateSuite#from_json function row
+[3.5/2.12]org.apache.gluten.execution.AutoAdjustStageResourceProfileSuite#Apply new resource profile when whole stage fallback
+[3.5/2.12]org.apache.gluten.functions.DateFunctionsValidateSuite#make_timestamp
+
+# spark-2
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - to_unix_timestamp
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - unix_timestamp
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - unhex
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-47307: base64 encoding without chunking
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
+[3.5/2.12]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+[3.5/2.12]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+[3.5/2.12]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#SPARK-46590 adaptive query execution works correctly with cartesian join and union
+[3.5/2.12]org.apache.spark.sql.execution.GlutenRemoveRedundantWindowGroupLimitsSuite#Gluten - remove redundant WindowGroupLimits
+[3.5/2.12]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on dense_rank
+[3.5/2.12]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on rank
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+
+# spark-3
+[3.5/2.12]org.apache.spark.sql.GlutenBitmapExpressionsQuerySuite#bitmap_construct_agg routes to native
+[3.5/2.12]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - SPARK-36120: Support cache/uncache table with TimestampNTZ type
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within map keys
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within map values
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in both map key and value
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in map key
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in map value
+[3.5/2.12]org.apache.spark.sql.GlutenDataFrameFunctionsSuite#Gluten - map with arrays
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in both map key and value
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in map key
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in map value
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#char/varchar type values length check: partitioned columns of other types
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#length check for input string values: partitioned columns
+[3.5/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - SPARK-45171: Handle evaluated nondeterministic expression
+[3.5/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - single-column stack with null padding is offloaded
+[3.5/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack is offloaded
+[3.5/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack without null padding is offloaded
+[3.5/2.12]org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite#Gluten - ORC positional and Parquet name mapping can coexist in one Velox query
+
+# Backend assertions exposed after replacing the missing fixture.
+[3.5/2.12]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before generator
+[3.5/2.12]org.apache.gluten.execution.BoltExplodeExpressionSuite#Remove project before generator
+# Full backend-group plan assertion; SQL results still match vanilla Spark.
+[3.5/2.12]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before filter and generator
+
+# slow-hive: file-list assertion and external HCatalog/Ivy download failures.
+[3.5/2.12]org.apache.spark.sql.hive.execution.GlutenHiveQuerySuite#Gluten - ADD FILE command
+[3.5/2.12]org.apache.spark.sql.hive.execution.GlutenHiveQuerySuite#Gluten - ADD JAR command 2
+[3.5/2.12]org.apache.spark.sql.hive.execution.GlutenHiveQuerySuite#Gluten - SPARK-33084: Add jar support Ivy URI in SQL
+
+# Additional exact native capability failures observed during integration.
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#deletion vector
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on partitioned table
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on shallow-cloned table
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: create table with TIMESTAMP_NTZ and return correct results
+[3.5/2.12]org.apache.gluten.execution.MiscOperatorSuite#Test sample op
+[3.5/2.12]org.apache.gluten.execution.MiscOperatorSuite#fix non-deterministic filter executed twice when push down to scan
+[3.5/2.12]org.apache.gluten.functions.MathFunctionsValidateSuite#rand
+
+# Delta CDF native scan assertions observed against current Apache main.
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with column mapping
+[3.5/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with deletion vectors
+
+# Backend compatibility failures observed with the reference storage profiles (3.5/2.12).
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#insert overwrite date type partition table
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate empty: product
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate empty: sum
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: bool_and
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: bool_or
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: first_non_null_value
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: first_value
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: last_non_null_value
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: last_value
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: listagg
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: max
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: min
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: product
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: sum
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon filter push down: value filter
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon first row supports transform
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_bucket - cross-partition data consistency
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_bucket, simple bucketed table
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_file_path - MOR table, overwrite records
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_file_path - tables with multiple insert operations
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition - behavior under table modifications
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket no partition no bucket
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket no partition yes bucket
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket yes partition no bucket
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_row_index - MOR table, overwrite records
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_row_index - MOR tables with multiple insert operations
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: combined usage of __paimon_bucket and __paimon_partition
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer exists: primary key table(full compact)
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer exists: primary key with sequence field
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table - custom multiple sequence key
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table - custom single sequence key
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table with partial-update engine
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NOT NULL + NOT NULL
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NOT NULL + NULL
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NULL + NOT NULL
+[3.5/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - custom row kind
+[3.5/2.12]org.apache.gluten.execution.DisableNativeSource#paimon transformer exists: append table with fallback
+
+# Backend compatibility failures observed with the reference storage profiles (3.5/2.13).
+[3.5/2.13]org.apache.gluten.execution.AutoAdjustStageResourceProfileSuite#Apply new resource profile when whole stage fallback
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on partitioned table
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on shallow-cloned table
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with column mapping
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with deletion vectors
+[3.5/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: create table with TIMESTAMP_NTZ and return correct results
+[3.5/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before filter and generator
+[3.5/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before generator
+[3.5/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Remove project before generator
+[3.5/2.13]org.apache.gluten.expression.StructFieldBindSuite#struct fields with duplicate names read through the generate rewrite
+[3.5/2.13]org.apache.gluten.functions.DateFunctionsValidateSuite#make_timestamp
+[3.5/2.13]org.apache.gluten.functions.JsonFunctionsValidateSuite#from_json function row
+
+# Reference SQL Parquet and shuffle compatibility failures (3.4/2.12).
+[3.4/2.12]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+[3.4/2.12]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+[3.4/2.12]org.apache.spark.sql.execution.datasources.GlutenFileMetadataStructRowIndexSuite#reading _tmp_metadata_row_index - present in a table
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-40128 read DELTA_LENGTH_BYTE_ARRAY encoded strings
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct with unannotated array
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+
+# Reference SQL Parquet and shuffle compatibility failures (3.5/2.12).
+[3.5/2.12]org.apache.spark.sql.execution.datasources.GlutenParquetCodecSuite#write and read - file source parquet - codec: lz4_raw
+[3.5/2.12]org.apache.spark.sql.execution.datasources.GlutenParquetCodecSuite#write and read - file source parquet - codec: lz4raw
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct with unannotated array
+
+# Reference SQL Parquet and shuffle compatibility failures (3.5/2.13).
+[3.5/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+[3.5/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+[3.5/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#SPARK-46590 adaptive query execution works correctly with cartesian join and union
+[3.5/2.13]org.apache.spark.sql.execution.datasources.GlutenParquetCodecSuite#write and read - file source parquet - codec: lz4_raw
+[3.5/2.13]org.apache.spark.sql.execution.datasources.GlutenParquetCodecSuite#write and read - file source parquet - codec: lz4raw
+[3.5/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetFileMetadataStructRowIndexSuite#reading _tmp_metadata_row_index - present in a table
+[3.5/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-40128 read DELTA_LENGTH_BYTE_ARRAY encoded strings
+[3.5/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct
+[3.5/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct with unannotated array
+[3.5/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+[3.5/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+
+# Backend compatibility failures with reference storage profiles (4.0/2.13).
+[4.0/2.13]org.apache.gluten.execution.AutoAdjustStageResourceProfileSuite#Apply new resource profile when whole stage fallback
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on partitioned table
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on shallow-cloned table
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with column mapping
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with deletion vectors
+[4.0/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: create table with TIMESTAMP_NTZ and return correct results
+[4.0/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before filter and generator
+[4.0/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before generator
+[4.0/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Remove project before generator
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#insert overwrite date type partition table
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate empty: product
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate empty: sum
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: bool_and
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: bool_or
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: first_non_null_value
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: first_value
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: last_non_null_value
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: last_value
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: listagg
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: max
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: min
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: product
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: sum
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon filter push down: value filter
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon first row supports transform
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: _ROW_ID
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: _SEQUENCE_NUMBER
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_bucket - cross-partition data consistency
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_bucket, simple bucketed table
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_file_path - MOR table, overwrite records
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_file_path - tables with multiple insert operations
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition - behavior under table modifications
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket no partition no bucket
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket no partition yes bucket
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket yes partition no bucket
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_row_index - MOR table, overwrite records
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_row_index - MOR tables with multiple insert operations
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: combined usage of __paimon_bucket and __paimon_partition
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer exists: primary key table(full compact)
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer exists: primary key with sequence field
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table - custom multiple sequence key
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table - custom single sequence key
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table with partial-update engine
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NOT NULL + NOT NULL
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NOT NULL + NULL
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NULL + NOT NULL
+[4.0/2.13]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - custom row kind
+[4.0/2.13]org.apache.gluten.execution.DisableNativeSource#paimon transformer exists: append table with fallback
+[4.0/2.13]org.apache.gluten.execution.FallbackSuite#fallback with index based schema evolution
+[4.0/2.13]org.apache.gluten.expression.StructFieldBindSuite#struct fields with duplicate names read through the generate rewrite
+[4.0/2.13]org.apache.gluten.functions.DateFunctionsValidateSuite#make_timestamp
+[4.0/2.13]org.apache.gluten.functions.JsonFunctionsValidateSuite#from_json function row
+
+# Backend compatibility failures with reference storage profiles (4.1/2.13).
+[4.1/2.13]org.apache.gluten.execution.AutoAdjustStageResourceProfileSuite#Apply new resource profile when whole stage fallback
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on partitioned table
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#deletion vector on shallow-cloned table
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with column mapping
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with deletion vectors
+[4.1/2.13]org.apache.gluten.execution.BoltDeltaSuite#delta: create table with TIMESTAMP_NTZ and return correct results
+[4.1/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before filter and generator
+[4.1/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before generator
+[4.1/2.13]org.apache.gluten.execution.BoltExplodeExpressionSuite#Remove project before generator
+[4.1/2.13]org.apache.gluten.execution.BoltStringFunctionsSuite#split
+[4.1/2.13]org.apache.gluten.execution.FallbackSuite#fallback with index based schema evolution
+[4.1/2.13]org.apache.gluten.expression.StructFieldBindSuite#struct fields with duplicate names read through the generate rewrite
+[4.1/2.13]org.apache.gluten.functions.DateFunctionsValidateSuite#make_timestamp
+[4.1/2.13]org.apache.gluten.functions.JsonFunctionsValidateSuite#from_json function row
+
+# Full reference SQL runs: native cast/timezone, JSON, regex and Parquet differences.
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - data type casting
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#SPARK-36286: invalid string cast to timestamp
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#casting to fixed-precision decimals
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - to_unix_timestamp
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - unix_timestamp
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#TIMESTAMP_SECONDS
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenJsonExpressionsSuite#json_object_keys
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - unhex
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#unhex
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenRegexpExpressionsSuite#RegexReplace
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-33468: ParseUrl in ANSI mode should fail if input string is not a valid url
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
+[3.4/2.12]org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - data type casting
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - data type casting
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#SPARK-36286: invalid string cast to timestamp
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#casting to fixed-precision decimals
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#TIMESTAMP_SECONDS
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenJsonExpressionsSuite#json_object_keys
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#unhex
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenRegexpExpressionsSuite#RegexReplace
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-33468: ParseUrl in ANSI mode should fail if input string is not a valid url
+[3.5/2.12]org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - data type casting
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetFileMetadataStructRowIndexSuite#reading _tmp_metadata_row_index - present in a table
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-40128 read DELTA_LENGTH_BYTE_ARRAY encoded strings
+[4.0/2.13]org.apache.gluten.sql.SQLQuerySuite#Incorrect decimal casting for partition read
+
+# Spark 3.5 / Scala 2.13 reference SQL compatibility failures.
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - cast string to timestamp
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#Gluten - data type casting
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#SPARK-36286: invalid string cast to timestamp
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastSuite#casting to fixed-precision decimals
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - to_unix_timestamp
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - unix_timestamp
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#TIMESTAMP_SECONDS
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenJsonExpressionsSuite#json_object_keys
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - unhex
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#unhex
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenRegexpExpressionsSuite#RegexReplace
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-33468: ParseUrl in ANSI mode should fail if input string is not a valid url
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-47307: base64 encoding without chunking
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - cast string to timestamp
+[3.5/2.13]org.apache.spark.sql.catalyst.expressions.GlutenTryCastSuite#Gluten - data type casting
+[3.5/2.13]org.apache.spark.sql.execution.GlutenRemoveRedundantWindowGroupLimitsSuite#Gluten - remove redundant WindowGroupLimits
+[3.5/2.13]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on dense_rank
+[3.5/2.13]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on rank
+
+# Spark 3.4 Scala backend native storage, expression and plan compatibility failures.
+[3.4/2.12]org.apache.gluten.execution.AutoAdjustStageResourceProfileSuite#Apply new resource profile when whole stage fallback
+[3.4/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read
+[3.4/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with column mapping
+[3.4/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: change data feed read with deletion vectors
+[3.4/2.12]org.apache.gluten.execution.BoltDeltaSuite#delta: create table with TIMESTAMP_NTZ and return correct results
+[3.4/2.12]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before filter and generator
+[3.4/2.12]org.apache.gluten.execution.BoltExplodeExpressionSuite#Pushdown project before generator
+[3.4/2.12]org.apache.gluten.execution.BoltExplodeExpressionSuite#Remove project before generator
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#insert overwrite date type partition table
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate empty: product
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate empty: sum
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: bool_and
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: bool_or
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: first_non_null_value
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: first_value
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: last_non_null_value
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: last_value
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: listagg
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: max
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: min
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: product
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon aggregate: sum
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon filter push down: value filter
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon first row supports transform
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: _ROW_ID
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: _SEQUENCE_NUMBER
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_bucket - cross-partition data consistency
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_bucket, simple bucketed table
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_file_path - MOR table, overwrite records
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_file_path - tables with multiple insert operations
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition - behavior under table modifications
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket no partition no bucket
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket no partition yes bucket
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_partition and __paimon_bucket yes partition no bucket
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_row_index - MOR table, overwrite records
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: __paimon_row_index - MOR tables with multiple insert operations
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon metadata columns: combined usage of __paimon_bucket and __paimon_partition
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer exists: primary key table(full compact)
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer exists: primary key with sequence field
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table - custom multiple sequence key
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table - custom single sequence key
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer fallback: primary key table with partial-update engine
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NOT NULL + NOT NULL
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NOT NULL + NULL
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - NULL + NOT NULL
+[3.4/2.12]org.apache.gluten.execution.BoltPaimonSuite#paimon transformer: primary key table - custom row kind
+[3.4/2.12]org.apache.gluten.execution.DisableNativeSource#paimon transformer exists: append table with fallback
+[3.4/2.12]org.apache.gluten.expression.StructFieldBindSuite#struct fields with duplicate names read through the generate rewrite
+[3.4/2.12]org.apache.gluten.functions.DateFunctionsValidateSuite#make_timestamp
+[3.4/2.12]org.apache.gluten.functions.JsonFunctionsValidateSuite#from_json function row
+
+# Spark 4.1 common SQL decimal partition casting.
+[4.1/2.13]org.apache.gluten.sql.SQLQuerySuite#Incorrect decimal casting for partition read
+
+# Closed suites from the expanded reference groups: native SQL compatibility gaps.
+[3.4/2.12]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - SPARK-36120: Support cache/uncache table with TimestampNTZ type
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within arrays
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within map keys
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within map values
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - char/varchar type values length check: partitioned columns of other types
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array of array
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array of struct
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in both map key and value
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in map key
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in map value
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in struct of array
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: top-level columns
+[3.4/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: with implicit cast
+[3.4/2.12]org.apache.spark.sql.GlutenDataFrameFunctionsSuite#Gluten - map with arrays
+[3.4/2.12]org.apache.spark.sql.GlutenDataFrameSuite#Gluten - Allow leading/trailing whitespace in string before casting
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - char/varchar type values length check: partitioned columns of other types
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array of array
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array of struct
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in both map key and value
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in map key
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in map value
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in struct of array
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: partitioned columns
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: top-level columns
+[3.4/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: with implicit cast
+[3.4/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - single-column stack with null padding is offloaded
+[3.4/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack is offloaded
+[3.4/2.12]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack without null padding is offloaded
+[3.4/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple - do not truncate results
+[3.4/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple filter and group
+[3.4/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple select
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQuerySuite#TABLE SAMPLE
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#group-by-ordinal.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#group-by.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#join-lateral.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#json-functions.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#random.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#regexp-functions.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#table-valued-functions.sql
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#typeCoercion/native/stringCastAndExpressions.sql
+[3.4/2.12]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc results should be consistent with the written value if writing and desc happen in the same time zone
+[3.4/2.12]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc should show different results if writing in UTC and desc in other time zones
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - date
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - timestamp
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within arrays
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - char/varchar type values length check: partitioned columns of other types
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array of array
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array of struct
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in struct of array
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: top-level columns
+[3.5/2.12]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: with implicit cast
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - char/varchar type values length check: partitioned columns of other types
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array of array
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array of struct
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in struct of array
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: partitioned columns
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: top-level columns
+[3.5/2.12]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: with implicit cast
+[3.5/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_object_keys function
+[3.5/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple - do not truncate results
+[3.5/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple filter and group
+[3.5/2.12]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple select
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQuerySuite#TABLE SAMPLE
+[3.5/2.12]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc results should be consistent with the written value if writing and desc happen in the same time zone
+[3.5/2.12]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc should show different results if writing in UTC and desc in other time zones
+[3.5/2.13]org.apache.spark.sql.GlutenBitmapExpressionsQuerySuite#bitmap_construct_agg routes to native
+[3.5/2.13]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - SPARK-36120: Support cache/uncache table with TimestampNTZ type
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within arrays
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within map keys
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - SPARK-42611: check char/varchar length in reordered structs within map values
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - char/varchar type values length check: partitioned columns of other types
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array of array
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in array of struct
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in both map key and value
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in map key
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in map value
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: nested in struct of array
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: top-level columns
+[3.5/2.13]org.apache.spark.sql.GlutenDSV2CharVarcharTestSuite#Gluten - length check for input string values: with implicit cast
+[3.5/2.13]org.apache.spark.sql.GlutenDataFrameFunctionsSuite#Gluten - map with arrays
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - char/varchar type values length check: partitioned columns of other types
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array of array
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array of struct
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in both map key and value
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in map key
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in map value
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in struct of array
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: partitioned columns
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: top-level columns
+[3.5/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: with implicit cast
+[3.5/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - SPARK-45171: Handle evaluated nondeterministic expression
+[3.5/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - single-column stack with null padding is offloaded
+[3.5/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack is offloaded
+[3.5/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack without null padding is offloaded
+[3.5/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_object_keys function
+[3.5/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple - do not truncate results
+[3.5/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple filter and group
+[3.5/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple select
+[3.5/2.13]org.apache.spark.sql.GlutenSQLQuerySuite#TABLE SAMPLE
+[3.5/2.13]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc results should be consistent with the written value if writing and desc happen in the same time zone
+[3.5/2.13]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc should show different results if writing in UTC and desc in other time zones
+[3.5/2.13]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update char/varchar columns
+[3.5/2.13]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update nested struct fields
+[4.0/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+[4.0/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+[4.0/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#SPARK-46590 adaptive query execution works correctly with cartesian join and union
+[4.0/2.13]org.apache.spark.sql.execution.GlutenRemoveRedundantWindowGroupLimitsSuite#Gluten - remove redundant WindowGroupLimits
+[4.0/2.13]org.apache.spark.sql.execution.GlutenSQLExecutionSuite#concurrent query execution with fork-join pool (SPARK-13747)
+[4.0/2.13]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on dense_rank
+[4.0/2.13]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on rank
+[4.0/2.13]org.apache.spark.sql.execution.GlutenTakeOrderedAndProjectSuite#SPARK-47104: Non-deterministic expressions in projection
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetFileMetadataStructRowIndexSuite#reading _tmp_metadata_row_index - present in a table
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-40128 read DELTA_LENGTH_BYTE_ARRAY encoded strings
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-49991: Respect 'mapreduce.output.basename' to generate file names
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-7837 Do not close output writer twice when commitTask() fails
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct with unannotated array
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(10, 4) -> Decimal(12, 7)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(10, 6) -> Decimal(12, 4)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(10, 7) -> Decimal(5, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(12, 4) -> Decimal(10, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(12, 4) -> Decimal(10, 6)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(20, 17) -> Decimal(10, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(20, 17) -> Decimal(5, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(22, 4) -> Decimal(20, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(22, 5) -> Decimal(20, 7)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(5, 2) -> Decimal(6, 4)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(7, 4) -> Decimal(5, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(10, 2) -> Decimal(5, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(12, 2) -> Decimal(10, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(20, 2) -> Decimal(10, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(20, 2) -> Decimal(5, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(22, 2) -> Decimal(20, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(7, 2) -> Decimal(5, 2)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(1,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(2,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(3,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(3,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(4,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion IntegerType -> DecimalType(10,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion IntegerType -> DecimalType(5,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion IntegerType -> DecimalType(9,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion LongType -> DecimalType(10,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion LongType -> DecimalType(19,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion LongType -> DecimalType(20,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(3,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(4,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(5,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(5,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(6,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(10, 2) -> Decimal(12, 4)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(10, 2) -> Decimal(20, 12)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(5, 2) -> Decimal(10, 7)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(5, 2) -> Decimal(20, 17)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(5, 2) -> Decimal(7, 4)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal type change IntegerType -> ShortType overflows
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion ByteType -> DecimalType(11,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion ByteType -> DecimalType(20,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion IntegerType -> DecimalType(11,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion IntegerType -> DecimalType(20,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion IntegerType -> DecimalType(38,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion LongType -> DecimalType(20,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion LongType -> DecimalType(21,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion LongType -> DecimalType(38,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion ShortType -> DecimalType(11,1)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion ShortType -> DecimalType(20,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet widening conversion ShortType -> DecimalType(38,0)
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion DateType -> TimestampType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion DoubleType -> FloatType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion FloatType -> LongType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion IntegerType -> TimestampType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion LongType -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion LongType -> DoubleType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion LongType -> IntegerType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampNTZType (INT96) -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampNTZType (TIMESTAMP_MICROS) -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampNTZType (TIMESTAMP_MILLIS) -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampType (INT96) -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampType (TIMESTAMP_MICROS) -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampType (TIMESTAMP_MILLIS) -> DateType
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+[4.1/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned
+[4.1/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#Gluten - determining the number of reducers: plan already partitioned(minNumPostShufflePartitions: 5)
+[4.1/2.13]org.apache.spark.sql.execution.GlutenCoalesceShufflePartitionsSuite#SPARK-46590 adaptive query execution works correctly with cartesian join and union
+[4.1/2.13]org.apache.spark.sql.execution.GlutenRemoveRedundantWindowGroupLimitsSuite#Gluten - remove redundant WindowGroupLimits
+[4.1/2.13]org.apache.spark.sql.execution.GlutenSQLExecutionSuite#concurrent query execution with fork-join pool (SPARK-13747)
+[4.1/2.13]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on dense_rank
+[4.1/2.13]org.apache.spark.sql.execution.GlutenSQLWindowFunctionSuite#Gluten - Filter on rank
+[4.1/2.13]org.apache.spark.sql.execution.GlutenTakeOrderedAndProjectSuite#SPARK-47104: Non-deterministic expressions in projection
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetFileMetadataStructRowIndexSuite#reading _tmp_metadata_row_index - present in a table
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#Gluten - SPARK-54220: vectorized reader: missing all struct fields, struct with NullType only
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-40128 read DELTA_LENGTH_BYTE_ARRAY encoded strings
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-49991: Respect 'mapreduce.output.basename' to generate file names
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-54220: NullType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetIOSuite#SPARK-7837 Do not close output writer twice when commitTask() fails
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetProtobufCompatibilitySuite#unannotated array of struct with unannotated array
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(10, 4) -> Decimal(12, 7)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(10, 6) -> Decimal(12, 4)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(10, 7) -> Decimal(5, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(12, 4) -> Decimal(10, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(12, 4) -> Decimal(10, 6)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(20, 17) -> Decimal(10, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(20, 17) -> Decimal(5, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(22, 4) -> Decimal(20, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(22, 5) -> Decimal(20, 7)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(5, 2) -> Decimal(6, 4)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision and scale change Decimal(7, 4) -> Decimal(5, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(10, 2) -> Decimal(5, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(12, 2) -> Decimal(10, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(20, 2) -> Decimal(10, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(20, 2) -> Decimal(5, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(22, 2) -> Decimal(20, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - parquet decimal precision change Decimal(7, 2) -> Decimal(5, 2)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(1,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(2,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(3,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(3,1)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ByteType -> DecimalType(4,1)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion IntegerType -> DecimalType(10,1)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion IntegerType -> DecimalType(5,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion IntegerType -> DecimalType(9,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion LongType -> DecimalType(10,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion LongType -> DecimalType(19,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion LongType -> DecimalType(20,1)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(3,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(4,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(5,0)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(5,1)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#Gluten - unsupported parquet conversion ShortType -> DecimalType(6,1)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(10, 2) -> Decimal(12, 4)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(10, 2) -> Decimal(20, 12)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(5, 2) -> Decimal(10, 7)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(5, 2) -> Decimal(20, 17)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal precision and scale change Decimal(5, 2) -> Decimal(7, 4)
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#parquet decimal type change IntegerType -> ShortType overflows
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion DateType -> TimestampType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion DoubleType -> FloatType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion FloatType -> LongType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion IntegerType -> TimestampType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion LongType -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion LongType -> DoubleType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet conversion LongType -> IntegerType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampNTZType (INT96) -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampNTZType (TIMESTAMP_MICROS) -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampNTZType (TIMESTAMP_MILLIS) -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampType (INT96) -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampType (TIMESTAMP_MICROS) -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetTypeWideningSuite#unsupported parquet timestamp conversion TimestampType (TIMESTAMP_MILLIS) -> DateType
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#SPARK-47120: subquery literal filter pushdown
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - date
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - timestamp
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2PartitionDiscoverySuite#SPARK-18108 Parquet reader fails when data column types conflict with partition ones
+
+# Native date/time filtering, ORC column mapping and Arrow null-column gaps.
+[3.4/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#udf/udf-inline-table.sql - Scalar Pandas UDF
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - date
+[3.4/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - timestamp
+[3.4/2.12]org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite#Gluten - orc.force.positional.evolution maps Hive ORC columns by position
+[3.5/2.13]org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite#Gluten - ORC positional and Parquet name mapping can coexist in one Velox query
+
+# Additional observed native nested-field and filter failures.
+[3.5/2.12]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update char/varchar columns
+[3.5/2.12]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update nested struct fields
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#SPARK-47120: subquery literal filter pushdown
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - date
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - timestamp
+
+# Spark 4 Bolt plan snapshots are not yet provided upstream; Velox plans differ.
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q10)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q19)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q27)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q3)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q34)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q42)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q43)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q46)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q52)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q53)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q55)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q59)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q63)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q65)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q68)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q7)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q73)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q79)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q89)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q98)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/ss_max)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q10)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q19)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q27)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q3)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q34)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q42)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q43)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q46)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q52)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q53)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q55)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q59)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q63)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q65)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q68)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q7)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q73)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q79)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q89)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q98)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/ss_max)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q1)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q10)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q11)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q12)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q13)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q14a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q14b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q15)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q16)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q17)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q18)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q19)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q2)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q20)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q21)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q22)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q23a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q23b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q24a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q24b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q25)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q26)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q27)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q28)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q29)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q3)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q30)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q31)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q32)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q33)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q35)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q36)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q37)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q38)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q39a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q39b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q4)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q40)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q41)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q42)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q43)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q44)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q45)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q46)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q48)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q49)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q5)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q50)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q51)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q52)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q53)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q54)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q55)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q56)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q58)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q59)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q60)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q61)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q62)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q63)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q65)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q66)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q67)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q68)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q69)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q7)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q70)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q71)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q72)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q73)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q76)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q77)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q79)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q8)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q80)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q81)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q82)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q83)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q84)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q85)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q86)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q87)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q88)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q89)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q9)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q90)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q91)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q92)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q93)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q94)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q95)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q96)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q97)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q98)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q99)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q1)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q10)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q11)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q12)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q13)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q14a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q14b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q15)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q16)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q17)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q18)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q19)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q2)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q20)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q21)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q22)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q23a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q23b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q24a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q24b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q25)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q26)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q27)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q28)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q29)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q3)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q30)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q31)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q32)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q33)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q35)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q36)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q37)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q38)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q39a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q39b)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q4)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q40)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q41)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q42)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q43)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q44)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q45)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q46)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q47)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q48)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q49)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q5)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q50)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q51)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q52)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q53)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q54)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q55)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q56)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q57)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q58)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q59)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q60)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q61)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q62)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q63)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q65)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q66)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q67)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q68)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q69)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q7)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q70)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q71)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q72)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q73)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q76)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q77)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q79)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q8)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q80)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q81)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q82)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q83)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q84)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q85)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q86)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q87)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q88)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q89)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q9)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q90)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q91)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q92)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q93)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q94)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q95)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q96)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q97)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q98)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q99)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q10a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q11)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q12)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q14)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q14a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q18a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q20)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q22)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q22a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q24)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q27a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q34)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q35)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q35a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q36a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q47)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q49)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q51a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q57)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q5a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q6)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q64)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q67a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q70a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q72)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q74)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q75)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q77a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q78)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q80a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q86a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q98)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q10)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q19)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q27)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q3)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q34)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q42)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q43)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q46)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q52)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q53)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q55)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q59)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q63)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q65)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q68)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q7)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q73)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q79)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q89)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/q98)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilityWithStatsSuite#check simplified sf100 (tpcds-modifiedQueries/ss_max)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q1)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q10)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q11)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q12)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q13)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q14a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q14b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q15)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q16)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q17)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q18)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q19)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q2)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q20)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q21)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q22)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q23a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q23b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q24a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q24b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q25)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q26)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q27)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q28)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q29)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q3)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q30)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q31)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q32)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q33)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q35)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q36)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q37)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q38)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q39a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q39b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q4)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q40)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q41)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q42)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q43)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q44)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q45)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q46)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q48)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q49)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q5)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q50)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q51)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q52)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q53)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q54)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q55)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q56)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q58)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q59)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q60)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q61)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q62)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q63)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q65)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q66)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q67)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q68)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q69)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q7)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q70)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q71)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q72)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q73)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q76)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q77)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q79)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q8)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q80)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q81)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q82)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q83)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q84)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q85)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q86)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q87)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q88)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q89)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q9)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q90)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q91)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q92)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q93)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q94)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q95)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q96)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q97)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q98)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q99)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q1)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q10)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q11)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q12)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q13)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q14a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q14b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q15)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q16)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q17)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q18)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q19)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q2)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q20)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q21)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q22)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q23a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q23b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q24a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q24b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q25)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q26)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q27)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q28)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q29)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q3)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q30)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q31)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q32)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q33)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q35)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q36)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q37)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q38)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q39a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q39b)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q4)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q40)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q41)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q42)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q43)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q44)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q45)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q46)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q47)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q48)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q49)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q5)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q50)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q51)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q52)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q53)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q54)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q55)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q56)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q57)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q58)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q59)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q60)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q61)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q62)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q63)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q65)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q66)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q67)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q68)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q69)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q7)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q70)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q71)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q72)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q73)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q76)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q77)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q79)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q8)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q80)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q81)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q82)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q83)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q84)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q85)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q86)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q87)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q88)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q89)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q9)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q90)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q91)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q92)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q93)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q94)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q95)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q96)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q97)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q98)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v1.4/q99)
+
+# Native SQL compatibility gaps observed in the remaining reference groups.
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#array.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#datetime-legacy.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#group-by-ordinal.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#group-by.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#join-lateral.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#json-functions.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#random.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#regexp-functions.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#string-functions.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#table-valued-functions.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#try_element_at.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#typeCoercion/native/stringCastAndExpressions.sql
+[3.5/2.12]org.apache.spark.sql.GlutenSQLQueryTestSuite#window.sql
+[4.0/2.13]org.apache.spark.sql.GlutenBloomFilterAggregateQuerySuite#Gluten - Test bloom_filter_agg produces identically-sized bytes on native and JVM
+[4.0/2.13]org.apache.spark.sql.GlutenBloomFilterAggregateQuerySuiteCGOff#Gluten - Test bloom_filter_agg produces identically-sized bytes on native and JVM
+[4.0/2.13]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - InMemoryRelation statistics
+[4.0/2.13]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - SPARK-36120: Support cache/uncache table with TimestampNTZ type
+[4.0/2.13]org.apache.spark.sql.GlutenConfigBehaviorSuite#SPARK-22160 spark.sql.execution.rangeExchange.sampleSizePerPartition
+[4.0/2.13]org.apache.spark.sql.GlutenDataFrameFunctionsSuite#Gluten - map with arrays
+[4.0/2.13]org.apache.spark.sql.GlutenDateFunctionsSuite#Gluten - function to_date
+[4.0/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[4.0/2.13]org.apache.spark.sql.GlutenSQLQuerySuite#TABLE SAMPLE
+[4.0/2.13]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc results should be consistent with the written value if writing and desc happen in the same time zone
+[4.0/2.13]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc should show different results if writing in UTC and desc in other time zones
+[4.0/2.13]org.apache.spark.sql.GlutenStringFunctionsSuite#RegExpReplace throws the right exception when replace fails on a particular row
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q47)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q57)
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#array rebuild
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#custom casts
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#extract from shredded array
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#extract from shredded object
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#malformed input
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#missing fields
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#object rebuild
+[4.0/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#scalar types rebuild
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastWithAnsiOffSuite#SPARK-36286: invalid string cast to timestamp
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastWithAnsiOffSuite#casting to fixed-precision decimals
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - to_unix_timestamp
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - unix_timestamp
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#TIMESTAMP_SECONDS
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - unhex
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#unhex
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenRegexpExpressionsSuite#RegexReplace
+[4.1/2.13]org.apache.spark.sql.GlutenConfigBehaviorSuite#SPARK-22160 spark.sql.execution.rangeExchange.sampleSizePerPartition
+[4.1/2.13]org.apache.spark.sql.GlutenDataFrameFunctionsSuite#Gluten - map with arrays
+[4.1/2.13]org.apache.spark.sql.GlutenFileSourceCharVarcharTestSuite#Gluten - length check for input string values: nested in array
+[4.1/2.13]org.apache.spark.sql.GlutenMapStatusEndToEndSuite#Propagate checksum from executor to driver
+[4.1/2.13]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc results should be consistent with the written value if writing and desc happen in the same time zone
+[4.1/2.13]org.apache.spark.sql.GlutenStatisticsCollectionSuite#SPARK-38140: describe column stats (min, max) for timestamp column: desc should show different results if writing in UTC and desc in other time zones
+[4.1/2.13]org.apache.spark.sql.GlutenStringFunctionsSuite#RegExpReplace throws the right exception when replace fails on a particular row
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q47)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV1_4_PlanStabilitySuite#check simplified (tpcds-v1.4/q57)
+[4.1/2.13]org.apache.spark.sql.GlutenTimestampNtzAggregateSuite#Gluten - min and max
+[4.1/2.13]org.apache.spark.sql.GlutenTimestampNtzAggregateSuite#Gluten - min and max grouped by timestamp_ntz
+[4.1/2.13]org.apache.spark.sql.GlutenTimestampNtzAggregateSuite#Gluten - null predicate projections respect timestamp_ntz validation
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#array rebuild
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#custom casts
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#extract from shredded array
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#extract from shredded object
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#malformed input
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#missing fields
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#object rebuild
+[4.1/2.13]org.apache.spark.sql.GlutenVariantShreddingSuite#scalar types rebuild
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastWithAnsiOffSuite#SPARK-36286: invalid string cast to timestamp
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenCastWithAnsiOffSuite#casting to fixed-precision decimals
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - to_unix_timestamp
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#Gluten - unix_timestamp
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenDateExpressionsSuite#TIMESTAMP_SECONDS
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#Gluten - unhex
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenMathExpressionsSuite#unhex
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenRegexpExpressionsSuite#RegexReplace
+[4.1/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenVariantInferShreddingSuite#infer shredding with mixed scale
+
+# Additional missing Bolt plan snapshots in completed suites.
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q10a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q11)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q12)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q14)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q14a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q18a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q20)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q22)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q22a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q24)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q27a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q34)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q35)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q35a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q36a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q49)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q51a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q5a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q6)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q64)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q67a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q70a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q72)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q74)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q75)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q77a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q78)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q80a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q86a)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q98)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q1)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q10)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q11)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q12)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q13)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q14)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q15)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q16)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q17)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q18)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q19)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q2)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q20)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q21)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q22)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q3)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q4)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q5)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q6)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q7)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q8)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q9)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q10)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q19)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q27)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q3)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q34)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q42)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q43)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q46)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q52)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q53)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q55)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q59)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q63)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q65)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q68)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q7)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q73)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q79)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q89)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/q98)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSModifiedPlanStabilitySuite#check simplified (tpcds-modifiedQueries/ss_max)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q10a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q11)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q12)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q14)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q14a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q18a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q20)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q22)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q22a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q24)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q27a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q34)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q35)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q35a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q36a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q47)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q49)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q51a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q57)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q5a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q6)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q64)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q67a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q70a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q72)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q74)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q75)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q77a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q78)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q80a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q86a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilityWithStatsSuite#check simplified sf100 (tpcds-v2.7.0/q98)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q1)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q10)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q11)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q12)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q13)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q14)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q15)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q16)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q17)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q18)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q19)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q2)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q20)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q21)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q22)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q3)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q4)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q5)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q6)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q7)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q8)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCHPlanStabilitySuite#check simplified (tpch/q9)
+
+# Additional native SQL compatibility gaps in completed suites.
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - date
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - timestamp
+[4.0/2.13]org.apache.spark.sql.GlutenBitmapExpressionsQuerySuite#bitmap_construct_agg routes to native
+[4.0/2.13]org.apache.spark.sql.GlutenDataFrameAggregateSuite#SPARK-32038: NormalizeFloatingNumbers should work on distinct aggregate
+[4.0/2.13]org.apache.spark.sql.GlutenDataFrameSuite#Gluten - Allow leading/trailing whitespace in string before casting
+[4.0/2.13]org.apache.spark.sql.GlutenDataFrameSuite#SPARK-22271: mean overflows and returns null for some decimal variables
+[4.0/2.13]org.apache.spark.sql.GlutenDatasetSuite#SPARK-23627: provide isEmpty in DataSet
+[4.0/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - SPARK-45171: Handle evaluated nondeterministic expression
+[4.0/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - single-column stack with null padding is offloaded
+[4.0/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack is offloaded
+[4.0/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack without null padding is offloaded
+[4.0/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#function json_tuple - field names foldable
+[4.0/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_object_keys function
+[4.0/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple - do not truncate results
+[4.0/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple filter and group
+[4.0/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple select
+[4.0/2.13]org.apache.spark.sql.GlutenRuntimeNullChecksV2Writes#Gluten - NOT NULL checks for fields inside nullable maps (byPosition)
+[4.0/2.13]org.apache.spark.sql.GlutenRuntimeNullChecksV2Writes#Gluten - NOT NULL checks for nullable map with required values (byName)
+[4.0/2.13]org.apache.spark.sql.GlutenRuntimeNullChecksV2Writes#Gluten - NOT NULL checks for nullable map with required values (byPosition)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q47)
+[4.0/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q57)
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenJsonExpressionsSuite#json_object_keys
+[4.0/2.13]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-47307: base64 encoding without chunking
+[4.0/2.13]org.apache.spark.sql.connector.GlutenGroupBasedUpdateTableSuite#Gluten - update with NOT NULL checks
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#SPARK-47120: subquery literal filter pushdown
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - date
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - timestamp
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#SPARK-47120: subquery literal filter pushdown
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - date
+[4.0/2.13]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV2FilterSuite#filter pushdown - timestamp
+[4.1/2.13]org.apache.spark.sql.GlutenBitmapExpressionsQuerySuite#bitmap_construct_agg routes to native
+[4.1/2.13]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - InMemoryRelation statistics
+[4.1/2.13]org.apache.spark.sql.GlutenCachedTableSuite#Gluten - SPARK-36120: Support cache/uncache table with TimestampNTZ type
+[4.1/2.13]org.apache.spark.sql.GlutenDataFrameAggregateSuite#SPARK-32038: NormalizeFloatingNumbers should work on distinct aggregate
+[4.1/2.13]org.apache.spark.sql.GlutenDatasetSuite#SPARK-23627: provide isEmpty in DataSet
+[4.1/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - SPARK-45171: Handle evaluated nondeterministic expression
+[4.1/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - single-column stack with null padding is offloaded
+[4.1/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack is offloaded
+[4.1/2.13]org.apache.spark.sql.GlutenGeneratorFunctionSuite#Gluten - stack without null padding is offloaded
+[4.1/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#function json_tuple - field names foldable
+[4.1/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_object_keys function
+[4.1/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple - do not truncate results
+[4.1/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple filter and group
+[4.1/2.13]org.apache.spark.sql.GlutenJsonFunctionsSuite#json_tuple select
+[4.1/2.13]org.apache.spark.sql.GlutenRuntimeNullChecksV2Writes#Gluten - NOT NULL checks for fields inside nullable maps (byPosition)
+[4.1/2.13]org.apache.spark.sql.GlutenRuntimeNullChecksV2Writes#Gluten - NOT NULL checks for nullable map with required values (byName)
+[4.1/2.13]org.apache.spark.sql.GlutenRuntimeNullChecksV2Writes#Gluten - NOT NULL checks for nullable map with required values (byPosition)
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenJsonExpressionsSuite#json_object_keys
+[4.1/2.13]org.apache.spark.sql.catalyst.expressions.GlutenStringExpressionsSuite#SPARK-47307: base64 encoding without chunking
+
+# Additional native SQL compatibility gaps in completed suites.
+[4.1/2.13]org.apache.spark.sql.GlutenDataFrameSuite#Gluten - Allow leading/trailing whitespace in string before casting
+[4.1/2.13]org.apache.spark.sql.GlutenDataFrameSuite#SPARK-22271: mean overflows and returns null for some decimal variables
+
+# Additional missing Bolt plan snapshots in completed suites.
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q10a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q11)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q12)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q14)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q14a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q18a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q20)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q22)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q22a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q24)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q27a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q34)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q35)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q35a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q36a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q49)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q51a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q5a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q6)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q64)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q67a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q70a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q72)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q74)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q75)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q77a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q78)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q80a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q86a)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q98)
+
+# Additional native SQL compatibility gaps in completed suites.
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - date
+[3.5/2.12]org.apache.spark.sql.execution.datasources.parquet.GlutenParquetV1FilterSuite#filter pushdown - timestamp
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q47)
+[4.1/2.13]org.apache.spark.sql.GlutenTPCDSV2_7_PlanStabilitySuite#check simplified (tpcds-v2.7.0/q57)
+
+# Additional native SQL compatibility gaps in completed suites.
+[4.1/2.13]org.apache.spark.sql.connector.GlutenGroupBasedUpdateTableSuite#Gluten - update with NOT NULL checks
+[4.1/2.13]org.apache.spark.sql.gluten.GlutenRowBasedChecksumSuite#Gluten row-based checksum detects data change
+[4.1/2.13]org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite#Gluten - orc.force.positional.evolution maps Hive ORC columns by position
+[4.1/2.13]org.apache.spark.sql.GlutenSQLQuerySuite#TABLE SAMPLE
+
+# Spark 4.x coverage of existing V2 nested-update and ORC positional gaps.
+[4.0/2.13]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update char/varchar columns
+[4.0/2.13]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update nested struct fields
+[4.0/2.13]org.apache.spark.sql.hive.execution.GlutenHiveSQLQuerySuite#Gluten - orc.force.positional.evolution maps Hive ORC columns by position
+[4.1/2.13]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update char/varchar columns
+[4.1/2.13]org.apache.spark.sql.connector.GlutenDeltaBasedUpdateAsDeleteAndInsertTableSuite#update nested struct fields

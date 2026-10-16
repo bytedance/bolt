@@ -8,6 +8,7 @@ Welcome to the Bolt community! Bolt is a C++ acceleration library focused on hig
 - [Fork and PR Workflow](#fork-and-pr-workflow)
 - [Building and Testing](#building-and-testing)
   - [Common Targets](#common-targets)
+  - [Gluten Bolt backend CI](#gluten-bolt-backend-ci)
   - [Working with IDE](#working-with-ide)
 - [Code Style and Static Analysis](#code-style-and-static-analysis)
   - [Formatting (clang-format)](#formatting-clang-format)
@@ -152,6 +153,136 @@ make release_spark
 make release_spark BUILD_VERSION=main
 ```
 
+
+### Gluten Bolt backend CI
+
+The [Gluten Bolt Backend workflow](.github/workflows/gluten-bolt.yml) is called
+by Build and Test on pull requests and merge groups, and also supports manual
+dispatch. It tests the candidate Bolt code against `apache/gluten:main`.
+Gluten builds the candidate Bolt engine and test utility library with
+`release_spark` and `enable_testutil=True`; Bolt's own UT executables are not
+built on this path. The existing `release_spark_with_test` job still builds and
+runs Bolt's UTs independently, so Gluten does not wait for it. Both paths enable
+HDFS and use Bolt's existing compiler cache. Gluten shares its native build and
+newly built dependencies with all downstream test jobs through short-lived
+Actions artifacts, without publishing to a Conan remote. The `gluten-bolt-check`
+job in Build and Test requires every Gluten job to succeed.
+Native CTest runs with the shared build. JVM compilation runs once per
+Spark/Scala/storage configuration. Each job verifies the native library hashes,
+then tests its own JVM build without transferring it between jobs.
+Native Iceberg connector tests are skipped because Bolt does not implement that
+connector. The inherited Java fixtures are still compiled; Iceberg helper and
+ordinary backend Java UTs run separately from Scala tests because their ORC
+dependencies conflict. Scala tests use the regular Spark 3.4 profile for
+Extended SQL/Slow Hive and retain the Iceberg fallback test that checks ordinary
+Parquet scans remain offloaded when native Iceberg reads are disabled.
+Reports and logs are retained separately for each test group and uploaded per profile.
+The regular x86 test scope follows Gluten's `velox_backend_x86.yml`:
+
+| Spark / Scala | Storage profiles | Spark SQL groups |
+| --- | --- | --- |
+| 3.4 / 2.12 | Iceberg (helper Java UTs), Delta, Hudi, Paimon | Three regular groups, Extended SQL, Slow Hive |
+| 3.5 / 2.12 | Iceberg, Delta, Hudi, Paimon | Three regular groups, Extended SQL, Slow Hive |
+| 3.5 / 2.13 | Iceberg, Delta | Three regular groups |
+| 4.0 / 2.13 | Delta, Paimon (Paimon excluded from Slow Hive) | Three regular groups, Extended SQL, Slow Hive |
+| 4.1 / 2.13 | Delta (regular groups only) | Three regular groups, Extended SQL, Slow Hive |
+
+These 23 SQL groups use Velox's suite/case selection and SQL-query golden resources via
+`GLUTEN_BOLT_USE_VELOX_TEST_SETTINGS=true`. The workflow has ten jobs: one resolves
+Apache main, one builds the shared native backend, and eight compile and test the
+Spark/Scala/storage profiles above. Each profile reuses its JVM build in the same
+job and runs its SQL groups sequentially. There are no JVM artifact transfers or
+SQL suite shards; fewer jobs trade some parallelism for less setup and network
+traffic. Backend JVM tests run for all five Spark/Scala combinations. Isolated
+Delta suites run for Spark 3.5, 4.0 and 4.1;
+Spark 3.4's Delta 2.4 coverage is in the backend JVM suites. TPC-H/TPC-DS
+comparison runs on Spark 3.5. Backend tests are excluded from the SQL reactor runs
+to avoid duplication. Additional OS/JDK/ARM, ANSI and fault-injection matrices
+are outside this workflow's scope. Test selection parity does not imply that
+Bolt passes every selected test; temporary exact exclusions remain explicit.
+Temporary source compatibility fixes live in
+`.github/gluten-ci-patches/` and are applied explicitly to the resolved Apache
+main. Already-applied patches are accepted; incompatible patches fail the job.
+
+The default image and runner match Bolt's existing CI. Missing or empty
+repository Actions variables use these defaults:
+
+| Optional variable | Default |
+| --- | --- |
+| `BOLT_GLUTEN_CI_IMAGE` | `bolt-registry:5000/bolt-ci:20260921` |
+| `BOLT_GLUTEN_CI_CONAN_IMAGE` | `bolt-registry:5000/conan-server:latest` |
+| `BOLT_GLUTEN_CI_RUNNER` | `["self-hosted", "medium"]` |
+
+Image overrides must be available to every selected runner. The runner must
+reach the Bolt registry and Conan service. The workflow
+reuses `bolt-build-base` for Conan setup and `install-bolt-deps.sh`, installs a
+full JDK 17 with `setup-java`, and provisions the pinned Python test runtime.
+Maven builds and tests use the same local repository, defaulting to
+`$HOME/.m2/repository`. Set `GLUTEN_MAVEN_REPO` to reuse a different local cache.
+Only the native build is transferred between jobs using GitHub Actions artifacts;
+Bolt and Gluten Conan packages are not uploaded to a Conan remote. Downloads are
+retried and checked against GitHub's SHA256 digest before extraction.
+Spark binaries and SQL test resources come from Gluten's existing
+`.github/workflows/util/install-spark-resources.sh`; its SHA512 verification
+requires `shasum` in the CI image.
+
+Local execution requires Linux x86_64, a full JDK 17 with AWT, Python 3.10+,
+Conan 2.32.0, Maven 3.9+, CMake 3.31, Ninja, mold, curl, jq,
+xmllint (libxml2-utils), unzip, and a C++ compiler. Provide a Spark 3.5.5 binary
+distribution with Python ZIPs and the matching source `sql/`
+test resources, plus PySpark 3.5.5, pandas 2.2.3 and PyArrow 20.0.0. Set
+`BOLT_GLUTEN_SPARK_HOME` to the binary directory; its `sql/` can be a symlink
+to the source tree. The container default is `/opt/shims/spark35/spark_home`.
+
+Use an isolated checkout and Conan home, with the same linker settings as the
+workflow. From the Bolt repository root:
+
+```bash
+git clone --branch main https://github.com/apache/gluten.git gluten
+export JAVA_HOME=/path/to/jdk17
+export PATH="$JAVA_HOME/bin:$PATH"
+export BOLT_GLUTEN_SPARK_HOME=/path/to/spark-3.5.5
+export CONAN_HOME="$PWD/.ci/conan"
+./scripts/install-bolt-deps.sh
+python3 scripts/configure-conan-profile.py \
+  --compiler clang --libcxx libstdc++11 --linker mold --lto none
+export CI_BUILD=spark35
+export GLUTEN_BOLT_USE_VELOX_TEST_SETTINGS=true
+source .github/scripts/gluten_ci.sh
+ci_apply_patches
+ci_init
+ci_spark_environment
+# Run one backend suite against the native backend built from this checkout.
+CI_SUITES=org.apache.gluten.execution.BoltLiteralSuite \
+  ci_maven_test jvm backends-bolt "${MVN[@]}" test \
+    "-DargLine=-Xmx4g -Dspark.test.home=${SPARK_HOME}"
+```
+
+Build and test commands are in the `build` and `test` jobs' `run` blocks in
+`.github/workflows/gluten-bolt.yml`; execute them in order for a complete local
+run. The build block configures Release and exports the
+candidate Bolt package into the selected Conan home. The example above runs
+one suite after that build. Set `CI_NUM_THREADS` for local build parallelism.
+Reports and failure logs go to `.ci/gluten-bolt/`. Test JVMs use a 4 GiB heap so
+heap-dependent Spark tests behave consistently across local and CI hosts.
+The shell helper handles runtime activation, logging and fresh report capture.
+Maven test stages also require valid fresh XML reports with executed tests;
+missing, malformed, empty or entirely skipped reports cannot pass a stage.
+Tests use CTest, Maven and Gluten's `gluten-it.sh` entry points directly; their
+exit status determines whether a stage succeeds. The workflow checks that
+Gluten consumes the exported candidate Bolt package and native libraries.
+
+`.github/gluten-ci-blacklist.txt` lists temporary exact testcase exclusions.
+`ci_init` exports its path as `GLUTEN_TEST_BLACKLIST`; a Gluten test-layer patch
+registers matching cases as ignored before executing their bodies. Unlisted
+failures, compilation errors, suite aborts and crashes remain fatal to Maven.
+Entries use `[Spark/Scala]suite#exact testcase`, for example the version prefix
+`[3.5/2.12]`; exclusions apply only to that Spark minor and Scala binary version.
+The blacklist covers exact observed failures in supported tests. Unsupported
+native Iceberg connector tests are excluded in `backends-bolt` rather than
+enumerated in this file. Unset
+`GLUTEN_TEST_BLACKLIST` after `ci_init` to retest excluded cases. Remove entries
+only after verifying the corresponding fixes.
 
 ### Working with IDE
 

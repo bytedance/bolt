@@ -1,0 +1,428 @@
+diff --git a/gluten-substrait/src/test/scala/org/apache/gluten/utils/GlutenTestBlacklist.scala b/gluten-substrait/src/test/scala/org/apache/gluten/utils/GlutenTestBlacklist.scala
+new file mode 100644
+index 000000000..081d1c70e
+--- /dev/null
++++ b/gluten-substrait/src/test/scala/org/apache/gluten/utils/GlutenTestBlacklist.scala
+@@ -0,0 +1,92 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.gluten.utils
++
++import org.scalactic.source.Position
++import org.scalatest.Tag
++import org.scalatest.funsuite.AnyFunSuiteLike
++
++import java.nio.charset.StandardCharsets.UTF_8
++import java.nio.file.{Files, Paths}
++
++import scala.collection.JavaConverters._
++import scala.collection.mutable
++import scala.util.control.NonFatal
++
++/** Registers exact external exclusions as ignored tests, before their bodies can execute. */
++trait GlutenTestBlacklist extends AnyFunSuiteLike {
++  protected def glutenTestBlacklist: Set[(String, String)] = GlutenTestBlacklist.entries
++
++  override protected def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit
++      pos: Position): Unit = {
++    if (glutenTestBlacklist.contains((getClass.getCanonicalName, testName))) {
++      super.ignore(testName, testTags: _*)(testFun)
++    } else {
++      super.test(testName, testTags: _*)(testFun)
++    }
++  }
++}
++
++object GlutenTestBlacklist {
++  // Unset means disabled. A configured file must be readable and contain unique
++  // canonical suite#exact test name entries, optionally prefixed with [Spark/Scala]; blank lines and # comments are allowed.
++  private lazy val entries = load(sys.env.get("GLUTEN_TEST_BLACKLIST"))
++
++  private[gluten] def load(path: Option[String]): Set[(String, String)] = {
++    path.map {
++      file =>
++        val lines =
++          try {
++            require(file.nonEmpty, "empty path")
++            Files.readAllLines(Paths.get(file), UTF_8).asScala
++          } catch {
++            case NonFatal(e) =>
++              throw new IllegalArgumentException(s"Cannot read GLUTEN_TEST_BLACKLIST '$file'", e)
++          }
++        val entries = mutable.Set.empty[(String, String)]
++        val seen = mutable.Set.empty[String]
++        val sparkVersion = org.apache.spark.SPARK_VERSION.split("\\.").take(2).mkString(".")
++        val scalaVersion =
++          scala.util.Properties.versionNumberString.split("\\.").take(2).mkString(".")
++        val scoped = "\\[(\\d+\\.\\d+)/(\\d+\\.\\d+)\\](.+)".r
++        lines.zipWithIndex.foreach {
++          case (line, index) if line.trim.nonEmpty && !line.trim.startsWith("#") =>
++            val location = s"GLUTEN_TEST_BLACKLIST $file:${index + 1}"
++            val (matchesVersion, entry) = line match {
++              case scoped(spark, scala, value) =>
++                (spark == sparkVersion && scala == scalaVersion, value)
++              case value => (true, value)
++            }
++            val separator = entry.indexOf('#')
++            require(separator > 0, s"$location: expected canonical suite#exact test name")
++            val suite = entry.substring(0, separator)
++            val testName = entry.substring(separator + 1)
++            require(
++              suite.matches("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)+") &&
++                testName.trim.nonEmpty,
++              s"$location: expected canonical suite#exact test name"
++            )
++            require(seen.add(line), s"$location: duplicate entry '$line'")
++            if (matchesVersion) {
++              entries.add((suite, testName))
++            }
++          case _ =>
++        }
++        entries.toSet
++    }.getOrElse(Set.empty)
++  }
++}
+diff --git a/gluten-substrait/src/test/scala/org/apache/spark/sql/GlutenQueryTest.scala b/gluten-substrait/src/test/scala/org/apache/spark/sql/GlutenQueryTest.scala
+index 8d726359c..b20a550d1 100644
+--- a/gluten-substrait/src/test/scala/org/apache/spark/sql/GlutenQueryTest.scala
++++ b/gluten-substrait/src/test/scala/org/apache/spark/sql/GlutenQueryTest.scala
+@@ -23,6 +23,7 @@ package org.apache.spark.sql
+ import org.apache.gluten.backendsapi.BackendsApiManager
+ import org.apache.gluten.execution.{GlutenPlan, TransformSupport, WholeStageTransformer}
+ import org.apache.gluten.sql.shims.SparkShimLoader
++import org.apache.gluten.utils.GlutenTestBlacklist
+
+ import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf}
+ import org.apache.spark.sql.catalyst.expressions.Attribute
+@@ -44,7 +45,10 @@ import scala.collection.JavaConverters._
+ import scala.reflect.ClassTag
+ import scala.reflect.runtime.universe
+
+-abstract class GlutenQueryTest extends QueryTest with AdaptiveSparkPlanHelper {
++abstract class GlutenQueryTest
++  extends QueryTest
++  with AdaptiveSparkPlanHelper
++  with GlutenTestBlacklist {
+
+   // TODO: remove this if we can suppress unused import error.
+   locally {
+diff --git a/gluten-ut/common/src/test/scala/org/apache/spark/sql/GlutenTestsBaseTrait.scala b/gluten-ut/common/src/test/scala/org/apache/spark/sql/GlutenTestsBaseTrait.scala
+index c51602208..470cfac54 100644
+--- a/gluten-ut/common/src/test/scala/org/apache/spark/sql/GlutenTestsBaseTrait.scala
++++ b/gluten-ut/common/src/test/scala/org/apache/spark/sql/GlutenTestsBaseTrait.scala
+@@ -16,17 +16,16 @@
+  */
+ package org.apache.spark.sql
+
+-import org.apache.gluten.utils.BackendTestSettings
++import org.apache.gluten.utils.{BackendTestSettings, GlutenTestBlacklist}
+
+ import org.apache.spark.sql.GlutenTestConstants.GLUTEN_TEST
+
+ import org.scalactic.source.Position
+ import org.scalatest.Tag
+-import org.scalatest.funsuite.AnyFunSuiteLike
+
+ import java.io.File
+
+-trait GlutenTestsBaseTrait extends AnyFunSuiteLike {
++trait GlutenTestsBaseTrait extends GlutenTestBlacklist {
+
+   protected val rootPath: String = getClass.getResource("/").getPath
+   protected val basePath: String =
+diff --git a/gluten-ut/test/src/test/scala/org/apache/gluten/utils/GlutenTestBlacklistSuite.scala b/gluten-ut/test/src/test/scala/org/apache/gluten/utils/GlutenTestBlacklistSuite.scala
+new file mode 100644
+index 000000000..a7161f4d8
+--- /dev/null
++++ b/gluten-ut/test/src/test/scala/org/apache/gluten/utils/GlutenTestBlacklistSuite.scala
+@@ -0,0 +1,192 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.gluten.utils
++
++import org.apache.spark.sql.{GlutenQueryTest, GlutenTestsBaseTrait, SparkSession}
++
++import org.scalatest.{Args, Reporter}
++import org.scalatest.events.{Event, TestFailed, TestIgnored}
++import org.scalatest.funsuite.AnyFunSuite
++
++import java.nio.charset.StandardCharsets.UTF_8
++import java.nio.file.Files
++
++import scala.collection.mutable.ArrayBuffer
++
++class GlutenTestBlacklistSuite extends AnyFunSuite {
++  private val fixtureSuiteName = "org.apache.gluten.utils.BlacklistFixture"
++
++  private def withBlacklist(contents: String)(f: String => Unit): Unit = {
++    val path = Files.createTempFile("gluten-blacklist", ".txt")
++    try {
++      Files.write(path, contents.getBytes(UTF_8))
++      f(path.toString)
++    } finally {
++      Files.delete(path)
++    }
++  }
++
++  test("an absent blacklist leaves all tests enabled") {
++    val fixture = new BlacklistFixture(GlutenTestBlacklist.load(None))
++    val status = fixture.run(None, Args(new RecordingReporter))
++    assert(status.succeeds())
++    assert(fixture.executed.toSeq == Seq("listed # case", "listed # case suffix", "unlisted"))
++  }
++
++  test("comments and blank lines are allowed and test names retain hashes") {
++    withBlacklist(s"# comment\n\n$fixtureSuiteName#listed # case\n") {
++      path =>
++        assert(GlutenTestBlacklist.load(Some(path)) == Set((fixtureSuiteName, "listed # case")))
++    }
++  }
++
++  test("version scoped exclusions do not suppress other Spark or Scala versions") {
++    val spark = org.apache.spark.SPARK_VERSION.split("\\.").take(2).mkString(".")
++    val scalaVersion = scala.util.Properties.versionNumberString.split("\\.").take(2).mkString(".")
++    withBlacklist(
++      s"[$spark/$scalaVersion]$fixtureSuiteName#listed # case\n" +
++        s"[0.0/$scalaVersion]$fixtureSuiteName#unlisted\n" +
++        s"[$spark/0.0]$fixtureSuiteName#unlisted\n") {
++      path =>
++        assert(GlutenTestBlacklist.load(Some(path)) == Set((fixtureSuiteName, "listed # case")))
++    }
++  }
++
++  test("only the exact suite and test pair is ignored before executing its body") {
++    withBlacklist(s"$fixtureSuiteName#listed # case\n") {
++      path =>
++        val fixture = new BlacklistFixture(GlutenTestBlacklist.load(Some(path)))
++        val reporter = new RecordingReporter
++        assert(fixture.run(None, Args(reporter)).succeeds())
++        assert(fixture.executed.toSeq == Seq("listed # case suffix", "unlisted"))
++        assert(reporter.events.collect { case e: TestIgnored => e.testName }.toSeq ==
++          Seq("listed # case"))
++    }
++  }
++
++  test("suite names and test names do not match by prefix, pattern, or case") {
++    val entries = Set(
++      (fixtureSuiteName + "Other", "listed # case"),
++      (fixtureSuiteName, "listed"),
++      (fixtureSuiteName, "listed.*"),
++      (fixtureSuiteName, "Listed # case"))
++    val fixture = new BlacklistFixture(entries)
++    assert(fixture.run(None, Args(new RecordingReporter)).succeeds())
++    assert(fixture.executed.size == 3)
++  }
++
++  test("unlisted failures still fail the suite") {
++    val fixture =
++      new BlacklistFixture(Set((fixtureSuiteName, "listed # case")), failUnlisted = true)
++    val reporter = new RecordingReporter
++    assert(!fixture.run(None, Args(reporter)).succeeds())
++    assert(reporter.events.collect { case e: TestFailed => e.testName }.toSeq == Seq("unlisted"))
++  }
++
++  test("Spark UT registration applies the blacklist after adding the Gluten prefix") {
++    val fixture = new SparkBlacklistFixture(
++      Set(("org.apache.gluten.utils.SparkBlacklistFixture", "Gluten - listed")))
++    val reporter = new RecordingReporter
++    assert(fixture.run(None, Args(reporter)).succeeds())
++    assert(reporter.events.collect { case e: TestIgnored => e.testName }.toSeq ==
++      Seq("Gluten - listed"))
++  }
++
++  test("backend query test registration applies the same blacklist") {
++    val fixture = new QueryBlacklistFixture(
++      Set(("org.apache.gluten.utils.QueryBlacklistFixture", "listed")))
++    assert(fixture.tags("listed").contains("org.scalatest.Ignore"))
++    assert(!fixture.tags.getOrElse("unlisted", Set.empty).contains("org.scalatest.Ignore"))
++  }
++
++  test("malformed entries fail with their path and line number") {
++    Seq("missing separator", "suite#test", "org.example.Suite#", "org.example.*#test")
++      .foreach {
++        entry =>
++          withBlacklist(s"# comment\n$entry\n") {
++            path =>
++              val error = intercept[IllegalArgumentException] {
++                GlutenTestBlacklist.load(Some(path))
++              }
++              assert(error.getMessage.contains(path))
++              assert(error.getMessage.contains(":2"))
++          }
++      }
++  }
++
++  test("duplicate entries fail with their path and line number") {
++    withBlacklist(s"$fixtureSuiteName#listed # case\n$fixtureSuiteName#listed # case\n") {
++      path =>
++        val error = intercept[IllegalArgumentException] {
++          GlutenTestBlacklist.load(Some(path))
++        }
++        assert(error.getMessage.contains(path))
++        assert(error.getMessage.contains(":2"))
++    }
++  }
++
++  test("a configured missing file or empty path fails clearly") {
++    val missing = Files.createTempFile("gluten-blacklist-missing", ".txt")
++    Files.delete(missing)
++    Seq(missing.toString, "").foreach {
++      path =>
++        val error = intercept[IllegalArgumentException] {
++          GlutenTestBlacklist.load(Some(path))
++        }
++        assert(error.getMessage.contains("GLUTEN_TEST_BLACKLIST"))
++    }
++  }
++}
++
++private class RecordingReporter extends Reporter {
++  val events: ArrayBuffer[Event] = ArrayBuffer.empty
++  override def apply(event: Event): Unit = events += event
++}
++
++private class BlacklistFixture(
++    override protected val glutenTestBlacklist: Set[(String, String)],
++    failUnlisted: Boolean = false)
++  extends AnyFunSuite
++  with GlutenTestBlacklist {
++  val executed: ArrayBuffer[String] = ArrayBuffer.empty
++  Seq("listed # case", "listed # case suffix", "unlisted").foreach {
++    name =>
++      test(name) {
++        executed += name
++        if (name == "unlisted" && failUnlisted) {
++          fail("unlisted regression")
++        }
++      }
++  }
++}
++
++private class SparkBlacklistFixture(
++    override protected val glutenTestBlacklist: Set[(String, String)])
++  extends AnyFunSuite
++  with GlutenTestsBaseTrait {
++  override protected def shouldRun(testName: String): Boolean = true
++  testGluten("listed")(fail("blacklisted Spark test body executed"))
++  testGluten("unlisted")(assert(true))
++}
++
++private class QueryBlacklistFixture(
++    override protected val glutenTestBlacklist: Set[(String, String)])
++  extends GlutenQueryTest {
++  override protected def spark: SparkSession = null
++  test("listed")(fail("blacklisted backend test body executed"))
++  test("unlisted")(assert(true))
++}
+diff --git a/gluten-ut/spark34/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala b/gluten-ut/spark34/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+index ab7738c89..fcce17411 100644
+--- a/gluten-ut/spark34/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
++++ b/gluten-ut/spark34/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+@@ -18,7 +18,7 @@ package org.apache.spark.sql
+
+ import org.apache.gluten.config.GlutenConfig
+ import org.apache.gluten.exception.GlutenException
+-import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils}
++import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils, GlutenTestBlacklist}
+
+ import org.apache.spark.{SparkConf, SparkException, SparkThrowable}
+ import org.apache.spark.ErrorMessageFormat.MINIMAL
+@@ -128,6 +128,7 @@ import scala.util.control.NonFatal
+ @ExtendedSQLTest
+ class GlutenSQLQueryTestSuite
+   extends QueryTest
++  with GlutenTestBlacklist
+   with SharedSparkSession
+   with SQLHelper
+   with SQLQueryTestHelper {
+diff --git a/gluten-ut/spark35/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala b/gluten-ut/spark35/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+index 2ee9ecdaa..407ba91f9 100644
+--- a/gluten-ut/spark35/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
++++ b/gluten-ut/spark35/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+@@ -18,7 +18,7 @@ package org.apache.spark.sql
+
+ import org.apache.gluten.config.GlutenConfig
+ import org.apache.gluten.exception.GlutenException
+-import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils}
++import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils, GlutenTestBlacklist}
+
+ import org.apache.spark.{SparkConf, SparkException, SparkThrowable, TestUtils}
+ import org.apache.spark.ErrorMessageFormat.MINIMAL
+@@ -60,6 +60,7 @@ import scala.util.control.NonFatal
+ @ExtendedSQLTest
+ class GlutenSQLQueryTestSuite
+   extends QueryTest
++  with GlutenTestBlacklist
+   with SharedSparkSession
+   with SQLHelper
+   with SQLQueryTestHelper {
+diff --git a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+index fb40c2de2..53698f1ec 100644
+--- a/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
++++ b/gluten-ut/spark40/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+@@ -18,7 +18,7 @@ package org.apache.spark.sql
+
+ import org.apache.gluten.config.GlutenConfig
+ // import org.apache.gluten.exception.GlutenException
+-import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils}
++import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils, GlutenTestBlacklist}
+
+ import org.apache.spark.{SparkConf, TestUtils}
+ // import org.apache.spark.ErrorMessageFormat.MINIMAL
+@@ -61,6 +61,7 @@ import scala.collection.mutable.ArrayBuffer
+ @ExtendedSQLTest
+ class GlutenSQLQueryTestSuite
+   extends QueryTest
++  with GlutenTestBlacklist
+   with SharedSparkSession
+   with SQLHelper
+   with SQLQueryTestHelper {
+diff --git a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+index fb40c2de2..53698f1ec 100644
+--- a/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
++++ b/gluten-ut/spark41/src/test/scala/org/apache/spark/sql/GlutenSQLQueryTestSuite.scala
+@@ -18,7 +18,7 @@ package org.apache.spark.sql
+
+ import org.apache.gluten.config.GlutenConfig
+ // import org.apache.gluten.exception.GlutenException
+-import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils}
++import org.apache.gluten.utils.{BackendTestSettings, BackendTestUtils, GlutenTestBlacklist}
+
+ import org.apache.spark.{SparkConf, TestUtils}
+ // import org.apache.spark.ErrorMessageFormat.MINIMAL
+@@ -61,6 +61,7 @@ import scala.collection.mutable.ArrayBuffer
+ @ExtendedSQLTest
+ class GlutenSQLQueryTestSuite
+   extends QueryTest
++  with GlutenTestBlacklist
+   with SharedSparkSession
+   with SQLHelper
+   with SQLQueryTestHelper {

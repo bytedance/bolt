@@ -72,6 +72,9 @@ CONAN_OPTIONS ?=
 # for passing skip_test
 CONAN_CONFIG ?=
 
+# Extra arguments for conan build, without changing graph/install commands.
+CONAN_BUILD_ARGS ?=
+
 # for passing high priority options.
 # options in CONAN_OVERRIDE will override the options in CONAN_OPTIONS
 CONAN_OVERRIDE ?=
@@ -264,7 +267,7 @@ conan_build: _conan_prepare
 	BOLT_BUILD_TESTING_WITH_COVERAGE=${BOLT_BUILD_TESTING_WITH_COVERAGE} \
 	conan build ../.. $(CONAN_PACKAGE_ARGS) \
 	   $(CONAN_BUILD_SETTINGS) \
-	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} && \
+	   --build=missing $${ALL_CONAN_OPTIONS} ${CONAN_CONFIG} ${CONAN_BUILD_ARGS} && \
 	cd -
 
 _compile_db: _conan_prepare
