@@ -2,4 +2,6 @@ conan==2.32.0
 pydot==2.0.0
 pre-commit==4.5.0
 clang-format==14.0.6
-pypaimon @ git+https://github.com/apache/paimon@release-1.4.1-rc2#subdirectory=paimon-python
+pypaimon==1.4.1
+# pypaimon 1.4.1 imports requests without declaring it as a dependency.
+requests
