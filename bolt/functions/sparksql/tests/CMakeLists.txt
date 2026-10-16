@@ -43,6 +43,7 @@ add_executable(
   ArraysZipTest.cpp
   AtLeastNNonNullsTest.cpp
   Base64Test.cpp
+  BitmapBucketNumberTest.cpp
   BitmapCountTest.cpp
   BitwiseTest.cpp
   CharVarcharTest.cpp
