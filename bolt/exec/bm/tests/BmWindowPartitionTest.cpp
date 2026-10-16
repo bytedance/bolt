@@ -807,7 +807,8 @@ TEST_F(
       MemoryTag::kTesting);
   auto input = makeRowVector({
       makeFlatVector<int64_t>(size, [](auto row) { return row; }),
-      makeFlatVector<int64_t>(size, [](auto /*row*/) { return frameEnd; }),
+      makeFlatVector<int64_t>(
+          size, [frameEnd](auto /*row*/) { return frameEnd; }),
   });
   storeRows(container, input);
   auto segment = container.spillActiveSegment();
