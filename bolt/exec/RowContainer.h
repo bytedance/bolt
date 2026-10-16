@@ -1187,6 +1187,13 @@ class RowContainer {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
 
+    if constexpr (std::is_same_v<T, StringView> && !isContinuousString) {
+      extractStringsBatch(
+          rows, rowNumbers, numRows, offset, nullByte, nullMask, resultOffset,
+          result, true, exactSize);
+      return;
+    }
+
     BufferPtr& nullBuffer = result->mutableNulls(maxRows);
     auto nulls = nullBuffer->asMutable<uint64_t>();
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
@@ -1236,6 +1243,14 @@ class RowContainer {
       bool exactSize) {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
+
+    if constexpr (std::is_same_v<T, StringView> && !isContinuousString) {
+      extractStringsBatch(
+          rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
+          false, exactSize);
+      return;
+    }
+
     BufferPtr valuesBuffer = result->mutableValues(maxRows);
     [[maybe_unused]] auto values = valuesBuffer->asMutableRange<T>();
     for (int32_t i = 0; i < numRows; ++i) {
@@ -1485,6 +1500,20 @@ class RowContainer {
     values->setStringViewValue(
         index, std::bit_cast<StringView>(value), exactSize);
   }
+
+  // Batched variant of extractString: pre-scan the rows, reserve the string
+  // buffer once, then copy all out-of-line strings in a single pass.
+  static void extractStringsBatch(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t offset,
+      int32_t nullByte,
+      uint8_t nullMask,
+      int32_t resultOffset,
+      FlatVector<StringView>* FOLLY_NONNULL result,
+      bool hasNulls,
+      bool exactSize);
 
   int32_t compareStringAsc(
       StringView left,
