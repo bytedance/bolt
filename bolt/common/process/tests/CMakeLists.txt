@@ -28,6 +28,7 @@
 add_executable(
   bolt_process_test
   ExceptionTraceTest.cpp
+  ProcessBaseTest.cpp
   TraceContextTest.cpp
 )
 
