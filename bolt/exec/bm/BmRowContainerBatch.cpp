@@ -130,6 +130,58 @@ struct BatchHeapWriter {
 
 } // namespace
 
+bool BmRowContainer::canAppendToCurrentChunk(const RowVectorPtr& input) const {
+  const auto segmentId = segments_.activeSegmentId(kDefaultPartition);
+  if (segmentId == kNoSegment) {
+    return false;
+  }
+  // The whole batch must fit the pinned row block without switching chunks.
+  const auto& cursor = segments_.segmentData(segmentId).writeCursor;
+  if (cursor.chunk == nullptr || !cursor.chunk->rowBlock.handle.valid() ||
+      input->size() >
+          (cursor.rowBlockEnd - cursor.nextRow) / segments_.rowStride()) {
+    return false;
+  }
+
+  // All string columns share the last heap block's remaining capacity.
+  uint64_t heapFreeBytes = 0;
+  if (!cursor.chunk->heapBlocks.empty()) {
+    const auto& heap = cursor.chunk->heapBlocks.back();
+    if (!heap.handle.valid()) {
+      return false;
+    }
+    heapFreeBytes = heap.size - heap.used;
+  }
+  SelectivityVector allRows(input->size());
+  for (auto column = 0; column < types_.size(); ++column) {
+    const auto& plan = layout_.storePlan(column);
+    const auto& child = input->childAt(column);
+    if (plan.complexKind || isLazyNotLoaded(*child)) {
+      return false;
+    }
+    if (!plan.stringKind) {
+      continue;
+    }
+    DecodedVector decoded(*child, allRows);
+    for (vector_size_t row = 0; row < input->size(); ++row) {
+      if (decoded.isNullAt(row)) {
+        continue;
+      }
+      const auto value = decoded.valueAt<StringView>(row);
+      // Inline values live in the row block; other values are copied per row.
+      if (!value.isInline()) {
+        if (value.size() > heapFreeBytes) {
+          return false;
+        }
+        heapFreeBytes -= value.size();
+      }
+    }
+  }
+  // Decoding may allocate. Do not use the earlier capacity observation if
+  // arbitration sealed the active segment in the meantime.
+  return segments_.activeSegmentId(kDefaultPartition) == segmentId;
+}
+
 void BmRowContainer::appendBatch(
     const RowVectorPtr& input,
     PartitionId partition,

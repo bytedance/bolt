@@ -55,3 +55,30 @@ target_link_libraries(
     ${FOLLY_BENCHMARK}
     pthread
 )
+
+add_executable(bolt_streaming_window_build_benchmark StreamingWindowBuildBenchmark.cpp)
+
+target_compile_features(bolt_streaming_window_build_benchmark PRIVATE cxx_std_20)
+
+target_link_libraries(
+  bolt_streaming_window_build_benchmark
+  PRIVATE
+    bolt_testutils
+    ${FOLLY_BENCHMARK}
+)
+
+add_executable(
+  bolt_bm_window_partition_extract_benchmark
+  BmRowContainerBenchmarkCommon.cpp
+  BmRowContainerBenchmarkProfiles.cpp
+  BmWindowPartitionExtractBenchmark.cpp
+)
+
+target_compile_features(bolt_bm_window_partition_extract_benchmark PRIVATE cxx_std_20)
+
+target_link_libraries(
+  bolt_bm_window_partition_extract_benchmark
+  PRIVATE
+    bolt_testutils
+    pthread
+)

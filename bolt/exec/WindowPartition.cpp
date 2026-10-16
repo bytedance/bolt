@@ -48,6 +48,14 @@ WindowPartition::WindowPartition(
   }
 }
 
+WindowPartition::WindowPartition(
+    const std::vector<column_index_t>& inputMapping,
+    const std::vector<std::pair<column_index_t, core::SortOrder>>& sortKeyInfo)
+    : data_(nullptr),
+      partition_(),
+      inputMapping_(inputMapping),
+      sortKeyInfo_(sortKeyInfo) {}
+
 void WindowPartition::extractColumn(
     int32_t columnIndex,
     folly::Range<const vector_size_t*> rowNumbers,
@@ -77,6 +85,23 @@ void WindowPartition::extractColumn(
       resultOffset,
       result,
       exactSize);
+}
+
+void WindowPartition::extractInputColumns(
+    vector_size_t partitionOffset,
+    vector_size_t numRows,
+    vector_size_t resultOffset,
+    folly::Range<const VectorPtr*> results,
+    bool exactSize) const {
+  for (auto column = 0; column < results.size(); ++column) {
+    extractColumn(
+        column,
+        partitionOffset,
+        numRows,
+        resultOffset,
+        results[column],
+        exactSize);
+  }
 }
 
 void WindowPartition::extractNulls(
