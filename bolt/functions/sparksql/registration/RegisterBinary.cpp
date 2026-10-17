@@ -30,6 +30,7 @@
 
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/prestosql/BinaryFunctions.h"
+#include "bolt/functions/sparksql/EncodeDecode.h"
 #include "bolt/functions/sparksql/Hash.h"
 #include "bolt/functions/sparksql/MightContain.h"
 #include "bolt/functions/sparksql/String.h"
@@ -61,6 +62,13 @@ void registerBinaryFunctions(const std::string& prefix) {
   // Register bloom filter function
   registerFunction<BloomFilterMightContainFunction, bool, Varbinary, int64_t>(
       {prefix + "might_contain"});
+
+  // Spark's encode/decode take a charset name, so they are stateful: a
+  // constant charset argument lets the converter be built once per plan.
+  exec::registerStatefulVectorFunction(
+      prefix + "encode", encodeSignatures(), makeEncode);
+  exec::registerStatefulVectorFunction(
+      prefix + "decode", decodeSignatures(), makeDecode);
 }
 
 } // namespace bytedance::bolt::functions::sparksql
