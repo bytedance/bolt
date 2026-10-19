@@ -890,6 +890,75 @@ TEST_F(BmStreamingWindowBuildTest, aggregate) {
           fmt::format("SELECT *, {}, {} FROM tmp", runningSum, boundedSum));
 }
 
+TEST_F(BmStreamingWindowBuildTest, fullPartitionResultBroadcast) {
+  // Exercises copyAggregateResultToRows()'s all-selected broadcast path for
+  // fixed-width, inline string, non-inline string, and NULL results. Partition
+  // layout mixes 1-row and 2-row tiny partitions with one large partition so
+  // the broadcast writes single-row and multi-row output ranges at non-zero
+  // offsets, and several partitions share one output batch. Partition parity
+  // alternates all-NULL and all-non-NULL inputs so the NULL-result branch
+  // (source->isNullAt(0)) is covered for every aggregate.
+  constexpr vector_size_t kRows = 4096;
+  // Partition ids: rows [0,1536) are 1-row partitions; [1536,2048) are 2-row
+  // partitions; [2048,kRows) form one large partition.
+  auto partitionOf = [](vector_size_t row) -> int64_t {
+    if (row < 1536) {
+      return row; // one row per partition
+    }
+    if (row < 2048) {
+      return 1536 + (row - 1536) / 2; // two rows per partition
+    }
+    return 1000000; // single large partition
+  };
+  auto partitionKey = makeFlatVector<int64_t>(
+      kRows, [&](auto row) { return partitionOf(row); });
+  // A partition is all-NULL when its id is even; the large partition (even id)
+  // is therefore all-NULL too, covering a long NULL broadcast range.
+  auto partitionAllNull = [&](vector_size_t row) {
+    return partitionOf(row) % 2 == 0;
+  };
+  auto inlineStr = makeFlatVector<std::string>(
+      kRows,
+      [](auto row) { return fmt::format("2026-{:02d}", row % 12 + 1); },
+      [&](auto row) { return partitionAllNull(row); });
+  // Non-inline (>12B) strings to cover shared-buffer broadcast; NULL on the
+  // same all-NULL partitions.
+  auto longStr = makeFlatVector<std::string>(
+      kRows,
+      [](auto row) {
+        return fmt::format("long-non-inline-payload-{:08d}", row);
+      },
+      [&](auto row) { return partitionAllNull(row); });
+  auto numVal = makeFlatVector<int64_t>(
+      kRows,
+      [](auto row) { return row % 31; },
+      [&](auto row) { return partitionAllNull(row); });
+  auto data = makeRowVector(
+      {"p", "d", "l", "n"}, {partitionKey, inlineStr, longStr, numVal});
+
+  createDuckDbTable({data});
+
+  std::vector<std::string> functions{
+      "min(d) over (partition by p rows between unbounded preceding and unbounded following)",
+      "max(l) over (partition by p rows between unbounded preceding and unbounded following)",
+      "sum(n) over (partition by p rows between unbounded preceding and unbounded following)",
+      "count(n) over (partition by p rows between unbounded preceding and unbounded following)"};
+  auto plan = PlanBuilder()
+                  .values(split(data, 11))
+                  .streamingWindow(functions)
+                  .planNode();
+
+  auto spillDirectory = TempDirectoryPath::create();
+  TestWindowInjection windowInjection(WindowBuildType::kBmStreamingWindowBuild);
+  AssertQueryBuilder(plan, duckDbQueryRunner_)
+      .config(core::QueryConfig::kBufferManagerEnabled, "true")
+      .config(core::QueryConfig::kSpillEnabled, "true")
+      .config(core::QueryConfig::kWindowSpillEnabled, "true")
+      .spillDirectory(spillDirectory->path)
+      .assertResults(
+          fmt::format("SELECT *, {} FROM tmp", folly::join(", ", functions)));
+}
+
 TEST_F(BmStreamingWindowBuildTest, entirePartitionAggregationPolicy) {
   constexpr vector_size_t size = 512;
   auto data = makeRowVector(

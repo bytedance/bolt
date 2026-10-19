@@ -475,6 +475,11 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
     }
 
     if (validRows.isAllSelected()) {
+      if (broadcastSingleResult(resultOffset, validRows.size(), result)) {
+        return;
+      }
+      // Complex results and anything the typed path declines fall back to the
+      // original constant wrap.
       auto repeated = BaseVector::wrapInConstant(
           validRows.size(), 0, aggregateResultVector_);
       result->copy(repeated.get(), resultOffset, 0, validRows.size());
@@ -485,6 +490,83 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       result->copy(aggregateResultVector_.get(), resultOffset + row, 0, 1);
     });
     setEmptyFramesResult(validRows, resultOffset, emptyResult_, result);
+  }
+
+  // Repeats the single aggregate result across the output range without
+  // constructing a temporary ConstantVector. 'aggregateResultVector_' holds the
+  // one value at index 0; this writes it into [resultOffset, resultOffset +
+  // count). Returns false for types the direct path does not handle so the
+  // caller can fall back.
+  template <TypeKind Kind>
+  bool broadcastResultTyped(
+      vector_size_t resultOffset,
+      vector_size_t count,
+      const VectorPtr& result) {
+    if constexpr (
+        Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType) {
+      return false;
+    } else {
+      using T = typename TypeTraits<Kind>::NativeType;
+      auto* source = aggregateResultVector_->asFlatVector<T>();
+      auto* flatResult = result->asFlatVector<T>();
+      if (source == nullptr || flatResult == nullptr) {
+        return false;
+      }
+
+      const vector_size_t end = resultOffset + count;
+      if (source->isNullAt(0)) {
+        bits::fillBits(
+            flatResult->mutableRawNulls(), resultOffset, end, bits::kNull);
+        return true;
+      }
+
+      // Non-null value: clear any existing null bits in this output range.
+      if (flatResult->rawNulls() != nullptr) {
+        flatResult->clearNulls(resultOffset, end);
+      }
+
+      const T value = source->valueAt(0);
+      if constexpr (std::is_same_v<T, bool>) {
+        bits::fillBits(
+            flatResult->template mutableRawValues<uint64_t>(),
+            resultOffset,
+            end,
+            value);
+      } else if constexpr (std::is_same_v<T, StringView>) {
+        StringView writeValue = value;
+        if (!value.isInline()) {
+          // Copy the payload once into the output's growing string buffer and
+          // point every row at that copy. Avoid retaining references to the
+          // scratch string buffers so they remain eligible for reuse by
+          // prepareForReuse(). Results from many small partitions can share a
+          // consolidated output buffer.
+          char* target = flatResult->getRawStringBufferWithSpace(value.size());
+          memcpy(target, value.data(), value.size());
+          writeValue = StringView(target, value.size());
+        }
+        auto* rawValues = flatResult->mutableRawValues();
+        std::fill(rawValues + resultOffset, rawValues + end, writeValue);
+      } else {
+        auto* rawValues = flatResult->mutableRawValues();
+        std::fill(rawValues + resultOffset, rawValues + end, value);
+      }
+      return true;
+    }
+  }
+
+  bool broadcastSingleResult(
+      vector_size_t resultOffset,
+      vector_size_t count,
+      const VectorPtr& result) {
+    if (!result->type()->isPrimitiveType()) {
+      return false;
+    }
+    return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+        broadcastResultTyped,
+        aggregateResultVector_->typeKind(),
+        resultOffset,
+        count,
+        result);
   }
 
   void selectAggregateRows(
