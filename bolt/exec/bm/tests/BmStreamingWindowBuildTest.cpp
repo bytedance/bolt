@@ -1105,6 +1105,78 @@ TEST_F(
   }
 }
 
+TEST_F(BmStreamingWindowBuildTest, inputAggregationReleasesArgumentReferences) {
+  auto schemaInput = makeRowVector(
+      {"d", "v"},
+      {makeFlatVector<int64_t>({0}), makeFlatVector<std::string>({"schema"})});
+  auto plan =
+      PlanBuilder(pool())
+          .values({schemaInput})
+          .streamingWindow(
+              {"sum(d) over (rows between unbounded preceding and unbounded following)",
+               "min(v) over (rows between unbounded preceding and unbounded following)",
+               "count(*) over (rows between unbounded preceding and unbounded following)",
+               "sum(1) over (rows between unbounded preceding and unbounded following)"})
+          .planNode();
+  auto node = std::dynamic_pointer_cast<const core::WindowNode>(plan);
+  ASSERT_NE(nullptr, node);
+  HashStringAllocator allocator(pool());
+  std::vector<std::unique_ptr<WindowFunction>> functions;
+  for (const auto& spec : node->windowFunctions()) {
+    std::vector<WindowFunctionArg> args;
+    for (const auto& arg : spec.functionCall->inputs()) {
+      const auto channel = exprToChannel(arg.get(), node->inputType());
+      args.push_back(
+          channel == kConstantChannel
+              ? WindowFunctionArg{arg->type(), core::TypedExprs::asConstant(arg)->toConstantVector(pool()), std::nullopt}
+              : WindowFunctionArg{arg->type(), nullptr, channel});
+    }
+    functions.push_back(window::createBmAggregateWindowFunction(
+        spec.functionCall->name(),
+        args,
+        spec.functionCall->type(),
+        spec.ignoreNulls,
+        pool(),
+        &allocator,
+        core::QueryConfig({})));
+    ASSERT_NE(nullptr, functions.back());
+  }
+  auto aggregation =
+      window::prepareBmAggregateWindowFunctions(*node, functions, pool());
+  ASSERT_NE(nullptr, aggregation);
+  for (int partition = 0; partition < 3; ++partition) {
+    const auto prefix = std::string(32, 'a' + partition);
+    for (int batch = 0; batch < 3; ++batch) {
+      auto input = makeRowVector(
+          {"d", "v"},
+          {makeFlatVector<int64_t>(
+               3,
+               [&](auto row) {
+                 return 10 * (partition + 1) + batch * 3 + row;
+               }),
+           makeFlatVector<std::string>(3, [&](auto row) {
+             return prefix + std::to_string(batch * 3 + row);
+           })});
+      std::weak_ptr<BaseVector> numbers = input->childAt(0);
+      std::weak_ptr<BaseVector> strings = input->childAt(1);
+      aggregation->addInput(input, 0, input->size());
+      input.reset();
+      // Retaining only capacity must not keep either source column alive.
+      EXPECT_TRUE(numbers.expired());
+      EXPECT_TRUE(strings.expired());
+    }
+    auto results = aggregation->finishPartition();
+    ASSERT_EQ(4, results.size());
+    EXPECT_EQ(
+        90 * (partition + 1) + 36,
+        results[0]->asFlatVector<int64_t>()->valueAt(0));
+    EXPECT_EQ(
+        prefix + "0", results[1]->asFlatVector<StringView>()->valueAt(0).str());
+    EXPECT_EQ(9, results[2]->asFlatVector<int64_t>()->valueAt(0));
+    EXPECT_EQ(9, results[3]->asFlatVector<int64_t>()->valueAt(0));
+  }
+}
+
 TEST_F(BmStreamingWindowBuildTest, unsupportedInputAggregateUsesSharedScan) {
   constexpr vector_size_t size = 2053;
   auto data = makeRowVector(

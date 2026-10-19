@@ -20,6 +20,8 @@
 #include "bolt/exec/Aggregate.h"
 #include "bolt/exec/bm/BmWindowPartition.h"
 
+#include <folly/ScopeGuard.h>
+
 #ifndef NDEBUG
 #include <folly/Synchronized.h>
 #endif
@@ -587,6 +589,7 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
   std::vector<TypePtr> argTypes_;
   std::vector<column_index_t> argIndices_;
   std::vector<VectorPtr> argVectors_;
+  std::vector<VectorPtr> arguments_;
   std::unique_ptr<BmWindowFrameReader> frameReader_;
   bool supportsReverseIncremental_{false};
   std::shared_ptr<BmEntirePartitionAggregation> entirePartitionAggregation_;
@@ -640,6 +643,7 @@ void BmEntirePartitionAggregation::registerFunction(
         BaseVector::create(function->argTypes_[i], 0, pool_));
   }
   functionInputIndices_.push_back(std::move(inputIndices));
+  function->arguments_.reserve(function->argIndices_.size());
 }
 
 void BmEntirePartitionAggregation::resetPartition(
@@ -679,8 +683,10 @@ void BmEntirePartitionAggregation::addBatch(
        ++functionIndex) {
     auto* function = functions_[functionIndex];
     const auto& inputIndices = functionInputIndices_[functionIndex];
-    std::vector<VectorPtr> arguments;
-    arguments.reserve(inputIndices.size());
+    auto& arguments = function->arguments_;
+    BOLT_DCHECK(arguments.empty());
+    // Retain capacity, but release references before input scratch is reused.
+    auto clearArguments = folly::makeGuard([&arguments] { arguments.clear(); });
     for (auto i = 0; i < inputIndices.size(); ++i) {
       arguments.push_back(
           inputIndices[i].has_value() ? inputs[inputIndices[i].value()]
