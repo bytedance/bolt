@@ -1187,10 +1187,16 @@ class RowContainer {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
 
-    if constexpr (std::is_same_v<T, StringView> && !isContinuousString) {
-      extractStringsBatch(
-          rows, rowNumbers, numRows, offset, nullByte, nullMask, resultOffset,
-          result, true, exactSize);
+    if constexpr (std::is_same_v<T, StringView>) {
+      if constexpr (isContinuousString) {
+        extractContinuousStringsBatch(
+            rows, rowNumbers, numRows, offset, nullByte, nullMask,
+            resultOffset, result, true, exactSize);
+      } else {
+        extractStringsBatch(
+            rows, rowNumbers, numRows, offset, nullByte, nullMask,
+            resultOffset, result, true, exactSize);
+      }
       return;
     }
 
@@ -1211,23 +1217,7 @@ class RowContainer {
         bits::setNull(nulls, resultIndex, true);
       } else {
         bits::setNull(nulls, resultIndex, false);
-        if constexpr (std::is_same_v<T, StringView>) {
-          if constexpr (isContinuousString) {
-            extractContinuousString(
-                valueAt<StringView>(row, offset),
-                result,
-                resultIndex,
-                exactSize);
-          } else {
-            extractString(
-                valueAt<StringView>(row, offset),
-                result,
-                resultIndex,
-                exactSize);
-          }
-        } else {
-          values[resultIndex] = valueAt<T>(row, offset);
-        }
+        values[resultIndex] = valueAt<T>(row, offset);
       }
     }
   }
@@ -1244,10 +1234,16 @@ class RowContainer {
     auto maxRows = numRows + resultOffset;
     BOLT_DCHECK_LE(maxRows, result->size());
 
-    if constexpr (std::is_same_v<T, StringView> && !isContinuousString) {
-      extractStringsBatch(
-          rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
-          false, exactSize);
+    if constexpr (std::is_same_v<T, StringView>) {
+      if constexpr (isContinuousString) {
+        extractContinuousStringsBatch(
+            rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
+            false, exactSize);
+      } else {
+        extractStringsBatch(
+            rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
+            false, exactSize);
+      }
       return;
     }
 
@@ -1266,23 +1262,7 @@ class RowContainer {
         result->setNull(resultIndex, true);
       } else {
         result->setNull(resultIndex, false);
-        if constexpr (std::is_same_v<T, StringView>) {
-          if constexpr (isContinuousString) {
-            extractContinuousString(
-                valueAt<StringView>(row, offset),
-                result,
-                resultIndex,
-                exactSize);
-          } else {
-            extractString(
-                valueAt<StringView>(row, offset),
-                result,
-                resultIndex,
-                exactSize);
-          }
-        } else {
-          values[resultIndex] = valueAt<T>(row, offset);
-        }
+        values[resultIndex] = valueAt<T>(row, offset);
       }
     }
   }
@@ -1504,6 +1484,22 @@ class RowContainer {
   // Batched variant of extractString: pre-scan the rows, reserve the string
   // buffer once, then copy all out-of-line strings in a single pass.
   static void extractStringsBatch(
+      const char* const* rows,
+      folly::Range<const vector_size_t*> rowNumbers,
+      int32_t numRows,
+      int32_t offset,
+      int32_t nullByte,
+      uint8_t nullMask,
+      int32_t resultOffset,
+      FlatVector<StringView>* FOLLY_NONNULL result,
+      bool hasNulls,
+      bool exactSize);
+
+  // Batched variant of extractContinuousString for rows whose strings are
+  // stored contiguously (no HSA headers, single-piece by construction):
+  // pre-scan to size the result buffer once, then copy all out-of-line
+  // strings in a single pass. No multi-piece handling is needed.
+  static void extractContinuousStringsBatch(
       const char* const* rows,
       folly::Range<const vector_size_t*> rowNumbers,
       int32_t numRows,
