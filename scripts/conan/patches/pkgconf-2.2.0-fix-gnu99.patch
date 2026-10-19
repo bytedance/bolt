@@ -1,9 +1,0 @@
-diff --git a/recipes/pkgconf/all/conanfile.py b/recipes/pkgconf/all/conanfile.py
-index cc30d5628..a224911b2 100644
---- a/recipes/pkgconf/all/conanfile.py
-+++ b/recipes/pkgconf/all/conanfile.py
-@@ -72,2 +72,2 @@ class PkgConfConan(ConanFile):
--            "project('pkgconf', 'c',",
--            "project('pkgconf', 'c',\ndefault_options : ['c_std=gnu99'],")
-+                "default_options : ['c_std=c99'],",
-+                "default_options : ['c_std=gnu99'],")

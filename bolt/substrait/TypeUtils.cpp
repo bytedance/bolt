@@ -77,4 +77,51 @@ std::string_view getNameBeforeDelimiter(
   }
   return std::string_view(compoundName.data(), pos);
 }
+
+dwio::common::FileFormat toBoltFileFormat(
+    const ::substrait::ReadRel::LocalFiles::FileOrFiles& file) {
+  using SubstraitFileFormatCase =
+      ::substrait::ReadRel_LocalFiles_FileOrFiles::FileFormatCase;
+  switch (file.file_format_case()) {
+    case SubstraitFileFormatCase::kOrc:
+      return dwio::common::FileFormat::ORC;
+    case SubstraitFileFormatCase::kParquet:
+      return dwio::common::FileFormat::PARQUET;
+    case SubstraitFileFormatCase::kDwrf:
+      return dwio::common::FileFormat::DWRF;
+    case SubstraitFileFormatCase::kText:
+      return dwio::common::FileFormat::TEXT;
+    case SubstraitFileFormatCase::kArrow:
+      return dwio::common::FileFormat::UNKNOWN;
+    case SubstraitFileFormatCase::kExtension:
+      return dwio::common::FileFormat::UNKNOWN;
+    case SubstraitFileFormatCase::FILE_FORMAT_NOT_SET:
+    default:
+      return dwio::common::FileFormat::UNKNOWN;
+  }
+}
+
+::substrait::ReadRel::LocalFiles::FileOrFiles toSubstraitFileFormat(
+    dwio::common::FileFormat fmt) {
+  ::substrait::ReadRel::LocalFiles::FileOrFiles file;
+  switch (fmt) {
+    case dwio::common::FileFormat::ORC:
+      file.mutable_orc();
+      break;
+    case dwio::common::FileFormat::PARQUET:
+      file.mutable_parquet();
+      break;
+    case dwio::common::FileFormat::DWRF:
+      file.mutable_dwrf();
+      break;
+    case dwio::common::FileFormat::TEXT:
+      file.mutable_text();
+      break;
+    default:
+      // Leave unset for UNKNOWN and other unsupported mappings.
+      break;
+  }
+  return file;
+}
+
 } // namespace bytedance::bolt::substrait

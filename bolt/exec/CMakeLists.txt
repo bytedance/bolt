@@ -150,6 +150,7 @@ target_link_libraries(
   bolt_expression
   bolt_presto_serializer
   bolt_cpu_usage
+  bolt_memory_bm
   $<TARGET_NAME_IF_EXISTS:bolt_thrustjit>
   gfx::timsort
   arrow::arrow
@@ -176,6 +177,8 @@ if(${BOLT_ENABLE_CUDF})
     cudf::cudf
   )
 endif()
+
+add_subdirectory(bm)
 
 if(${BOLT_BUILD_TESTING})
   add_subdirectory(fuzzer)

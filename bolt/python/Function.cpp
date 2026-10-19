@@ -60,33 +60,29 @@ class PythonFunction : public exec::VectorFunction {
     if (mapBatch_) {
       BOLT_CHECK_EQ(defaultArgs_.size(), 0)
       std::shared_ptr<RowVector> rowVector =
-          bolt::python::combineInputColumns(args, context);
+          bytedance::bolt::python::combineInputColumns(args, context);
       pyArgs.append(pybind11::cast(rowVector));
     } else {
-      pyArgs = bolt::python::asPyArgs(nArgs_, args, defaultArgs_);
+      pyArgs = bytedance::bolt::python::asPyArgs(nArgs_, args, defaultArgs_);
     }
 
-    bolt::python::pyTry<void>(
+    bytedance::bolt::python::pyTry<void>(
         [&]() { result = function_(*pyArgs).cast<VectorPtr>(); },
         [&]() {
           return fmt::format(
               "Failed to evaluate function '{}' with "
               "arguments: '{}'",
-              bolt::python::pyTypeStr(function_),
-              bolt::python::toString(pyArgs));
+              bytedance::bolt::python::pyTypeStr(function_),
+              bytedance::bolt::python::toString(pyArgs));
         });
     // `result` will be allocated from the pool of the `pybolt` python
     // module. Its lifetime is the same as the one of that module.
-    if (outputType->isPrimitiveType()) {
-      BOLT_CHECK_EQ(result->type(), outputType);
-    } else {
-      BOLT_CHECK(result->type()->equivalent(*outputType))
-    }
+    BOLT_CHECK(result->type()->equivalent(*outputType))
   }
 };
 } // namespace
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 void registerPythonFunction(
     pybind11::function callable,
     const std::string& functionName,
@@ -102,4 +98,4 @@ void registerPythonFunction(
       std::make_unique<PythonFunction>(
           std::move(callable), nArgs, std::move(defaultArgs), mapBatch));
 }
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <type_traits>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/process/StackTrace.h"
 #include "bolt/exec/Aggregate.h"
@@ -1551,6 +1552,32 @@ TEST_F(RowContainerTest, listRowIndexClearReleasesAllocatorStorageBeforeReuse) {
   ASSERT_EQ(data->numRows(), kRowsToUseHashStringAllocatorPool);
 }
 
+TEST_F(RowContainerTest, listRowsFastInBatches) {
+  constexpr int32_t kNumRows = 5;
+  constexpr int32_t kBatchSize = 2;
+  auto data = makeRowContainer({BIGINT()}, {}, false, true);
+
+  std::vector<char*> expectedRows;
+  expectedRows.reserve(kNumRows);
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    expectedRows.push_back(data->newRow());
+  }
+
+  RowContainerIterator iter;
+  static_assert(
+      std::is_same_v<decltype(iter.listRowCursor), size_t>,
+      "The fast-list cursor must address all rows in the container.");
+
+  std::vector<char*> listedRows(kNumRows);
+  EXPECT_EQ(data->listRows(&iter, kBatchSize, listedRows.data()), kBatchSize);
+  EXPECT_EQ(
+      data->listRows(&iter, kBatchSize, listedRows.data() + kBatchSize),
+      kBatchSize);
+  EXPECT_EQ(
+      data->listRows(&iter, kBatchSize, listedRows.data() + 2 * kBatchSize), 1);
+  EXPECT_EQ(listedRows, expectedRows);
+}
+
 TEST_F(RowContainerTest, unknown) {
   std::vector<TypePtr> types = {UNKNOWN()};
   auto rowContainer = std::make_unique<RowContainer>(types, pool_.get());
@@ -1708,6 +1735,83 @@ TEST_F(RowContainerTest, partialWriteComplexTypedRow) {
   rowContainer->eraseRows(folly::Range<char**>(&row, 1));
 }
 
+TEST_F(RowContainerTest, ownsAndResetsMonotonicMemoryResource) {
+  RowContainer::RowContainerParam params;
+  params.useMonotonicStringAllocation = true;
+  auto makeContainer = [&]() {
+    return std::make_unique<RowContainer>(
+        std::vector<TypePtr>{VARCHAR()},
+        false,
+        std::vector<Accumulator>{},
+        std::vector<TypePtr>{},
+        false,
+        false,
+        false,
+        false,
+        false,
+        pool_.get(),
+        params);
+  };
+  auto first = makeContainer();
+  auto second = makeContainer();
+
+  ASSERT_NE(nullptr, first->monotonicMemoryResource());
+  ASSERT_NE(nullptr, second->monotonicMemoryResource());
+  EXPECT_NE(
+      first->monotonicMemoryResource(), second->monotonicMemoryResource());
+
+  auto values = makeFlatVector<std::string>({"a non-inline string"});
+  DecodedVector decoded(*values);
+  auto* row = first->newRow();
+  first->store(decoded, 0, row, 0);
+  EXPECT_GT(first->monotonicMemoryResource()->usedBytes(), 0);
+
+  auto* resource = first->monotonicMemoryResource();
+  first->clear();
+  EXPECT_EQ(first->monotonicMemoryResource(), resource);
+  EXPECT_EQ(resource->reservedBytes(), 0);
+  EXPECT_EQ(first->monotonicMemoryResource()->usedBytes(), 0);
+
+  row = first->newRow();
+  first->store(decoded, 0, row, 0);
+  EXPECT_GT(first->monotonicMemoryResource()->usedBytes(), 0);
+}
+
+TEST_F(RowContainerTest, extractStringsByAllocationMode) {
+  auto values = makeFlatVector<std::string>(
+      {"", "inline", std::string(HashStringAllocator::kMaxAlloc + 1, 'a')});
+  DecodedVector decoded(*values);
+
+  for (const bool useMonotonicStringAllocation : {false, true}) {
+    for (const bool nullableKeys : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "useMonotonicStringAllocation: {}, nullableKeys: {}",
+          useMonotonicStringAllocation,
+          nullableKeys));
+
+      RowContainer::RowContainerParam params;
+      params.useMonotonicStringAllocation = useMonotonicStringAllocation;
+      RowContainer container(
+          {VARCHAR()},
+          nullableKeys,
+          {},
+          {},
+          false,
+          false,
+          false,
+          false,
+          false,
+          pool_.get(),
+          params);
+
+      auto rows = store(container, decoded, values->size());
+      auto result = BaseVector::create(VARCHAR(), values->size(), pool_.get());
+      container.extractColumn(rows.data(), rows.size(), 0, result);
+      assertEqualVectors(values, result);
+    }
+  }
+}
+
 TEST_F(RowContainerTest, extractSerializedRow) {
   VectorFuzzer fuzzer(
       {
@@ -1749,6 +1853,65 @@ TEST_F(RowContainerTest, extractSerializedRow) {
           rows.data(), copy->size(), i, copy->childAt(i));
     }
     assertEqualVectors(data, copy);
+  }
+}
+
+TEST_F(RowContainerTest, serializedRowSize) {
+  auto strings =
+      makeFlatVector<std::string>({"", "inline", std::string(100, 'a')});
+  auto binary = makeFlatVector<std::string>(
+      {"", "inline", std::string(200, 'b')}, VARBINARY());
+  auto data = makeRowVector({
+      strings,
+      binary,
+      makeArrayVector<int64_t>({{1, 2, 3}, {4, 5}, {6, 7, 8, 9}}),
+  });
+  for (bool monotonic : {false, true}) {
+    SCOPED_TRACE(monotonic);
+    RowContainer::RowContainerParam params;
+    params.useMonotonicStringAllocation = monotonic;
+    RowContainer container(
+        data->type()->asRow().children(),
+        true,
+        std::vector<Accumulator>{},
+        std::vector<TypePtr>{},
+        false,
+        false,
+        false,
+        false,
+        false,
+        pool(),
+        params);
+    auto rows = store(container, data);
+    auto serialized = BaseVector::create<FlatVector<StringView>>(
+        VARBINARY(), data->size(), pool());
+    container.extractSerializedRows(
+        folly::Range(rows.data(), rows.size()), serialized);
+    container.clear();
+    rows.clear();
+    for (vector_size_t i = 0; i < data->size(); ++i) {
+      auto* row = container.newRow();
+      rows.push_back(row);
+      const auto initialSize = container.rowSize(row);
+      const auto allocated = container.stringAllocator().cumulativeBytes();
+      container.storeSerializedRow(*serialized, i, row);
+      auto expectedSize =
+          container.stringAllocator().cumulativeBytes() - allocated;
+      // Complex values must still be counted by the outer tracker.
+      EXPECT_GT(expectedSize, 0);
+      if (monotonic) {
+        for (const auto& vector : {strings, binary}) {
+          const auto value = vector->valueAt(i);
+          if (!value.isInline()) {
+            expectedSize += value.size();
+          }
+        }
+      }
+      EXPECT_EQ(container.rowSize(row) - initialSize, expectedSize);
+    }
+    for (column_index_t i = 0; i < data->childrenSize(); ++i) {
+      testExtractColumn(container, rows, i, data->childAt(i));
+    }
   }
 }
 

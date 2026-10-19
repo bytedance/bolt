@@ -48,6 +48,10 @@ class IExpr;
 namespace bytedance::bolt::tpch {
 enum class Table : uint8_t;
 }
+
+namespace bytedance::bolt::tpcds {
+enum class Table : uint8_t;
+}
 namespace bytedance::bolt::exec::test {
 
 /// A builder class with fluent API for building query plans. Plans are built
@@ -126,6 +130,8 @@ class PlanBuilder {
 
   static constexpr const std::string_view kHiveDefaultConnectorId{"test-hive"};
   static constexpr const std::string_view kTpchDefaultConnectorId{"test-tpch"};
+  static constexpr const std::string_view kTpcdsDefaultConnectorId{
+      "test-tpcds"};
 
   /// Add a TableScanNode to scan a Hive table.
   ///
@@ -198,6 +204,19 @@ class PlanBuilder {
       std::vector<std::string>&& columnNames,
       double scaleFactor = 1,
       const std::string& connectorId = "tpch-test");
+
+  /// Add a TableScanNode to scan a TPC-DS table.
+  ///
+  /// @param tpcdsTableHandle The handle that specifies the target TPC-DS table
+  /// and scale factor.
+  /// @param columnNames The columns to be returned from that table.
+  /// @param scaleFactor The TPC-DS scale factor.
+  /// @param connectorId The TPC-DS connector id.
+  PlanBuilder& tpcdsTableScan(
+      tpcds::Table table,
+      std::vector<std::string> columnNames,
+      double scaleFactor = 0.01,
+      std::string_view connectorId = kTpcdsDefaultConnectorId);
 
   /// Helper class to build a custom TableScanNode.
   /// Uses a planBuilder instance to get the next plan id, memory pool, and

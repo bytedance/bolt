@@ -102,6 +102,9 @@ ParseResult JsonPathTokenizer::matchDotKey() {
   } else {
     // `.*`, `.name`
     while (index_ < path_.size() && isDotKeyFormat(path_[index_])) {
+      if (path_[index_] == ' ' && !spark_compatible_) {
+        return folly::makeUnexpected(false);
+      }
       index_++;
     }
     if (index_ <= start) {

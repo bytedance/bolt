@@ -115,6 +115,21 @@ class BoltSubstraitRoundTripTest : public OperatorTestBase {
       std::make_shared<SubstraitBoltPlanConverter>(pool_.get());
 };
 
+TEST_F(BoltSubstraitRoundTripTest, virtualTableUsesOneStructPerRow) {
+  auto vectors = makeVectors(2, 3, 4);
+  auto plan = PlanBuilder().values(vectors).planNode();
+  google::protobuf::Arena arena;
+  const auto& encoded = boltConvertor_->toSubstrait(arena, plan);
+  const auto& table =
+      encoded.relations(0).root().input().read().virtual_table();
+  ASSERT_EQ(table.values_size(), 8);
+  for (const auto& row : table.values()) {
+    EXPECT_EQ(row.fields_size(), 3);
+  }
+  createDuckDbTable(vectors);
+  assertQuery(substraitConverter_->toBoltPlan(encoded), "SELECT * FROM tmp");
+}
+
 TEST_F(BoltSubstraitRoundTripTest, torch) {
 #if defined BOLT_HAS_TORCH && BOLT_HAS_TORCH == 1
   constexpr auto kTorchScriptInput = R"JIT(

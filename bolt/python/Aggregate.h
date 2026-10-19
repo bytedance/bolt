@@ -33,7 +33,7 @@
 
 #include "bolt/exec/Aggregate.h"
 
-namespace bolt::python {
+namespace bytedance::bolt::python {
 
 class PythonAggregate final : public bytedance::bolt::exec::Aggregate {
  public:
@@ -116,4 +116,4 @@ class PythonAggregate final : public bytedance::bolt::exec::Aggregate {
 
   pybind11::object aggregatorClass_;
 };
-} // namespace bolt::python
+} // namespace bytedance::bolt::python

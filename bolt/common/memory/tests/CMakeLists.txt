@@ -45,6 +45,7 @@ add_executable(
   RawVectorTest.cpp
   ScratchTest.cpp
   SharedArbitratorTest.cpp
+  SlabAllocatorTest.cpp
   StreamArenaTest.cpp
 )
 

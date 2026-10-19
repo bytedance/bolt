@@ -80,7 +80,7 @@ class ArrowVectorSerde : public VectorSerde {
     }
   };
 
-  ArrowVectorSerde() : VectorSerde(Kind::kArrow) {}
+  ArrowVectorSerde();
 
   void estimateSerializedSize(
       VectorPtr vector,
@@ -93,6 +93,21 @@ class ArrowVectorSerde : public VectorSerde {
       const folly::Range<const vector_size_t*> rows,
       vector_size_t** sizes,
       Scratch& scratch) override;
+
+  // Use the serializer options when estimating an explicit timestamp encoding.
+  void estimateSerializedSize(
+      VectorPtr vector,
+      const folly::Range<const IndexRange*>& ranges,
+      vector_size_t** sizes,
+      Scratch& scratch,
+      const Options* options);
+
+  void estimateSerializedSize(
+      VectorPtr vector,
+      const folly::Range<const vector_size_t*> rows,
+      vector_size_t** sizes,
+      Scratch& scratch,
+      const Options* options);
 
   std::unique_ptr<VectorSerializer> createSerializer(
       RowTypePtr type,

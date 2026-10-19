@@ -257,6 +257,8 @@ class BoltConan(ConanFile):
             self.requires("cpr/1.10.5")
         self.requires("zlib/[>=1.3.1 <2]", force=True)
         self.requires("zstd/1.5.7", override=True)
+        self.requires("lz4/1.10.0", override=True)
+        self.requires("openzl/0.2.0", transitive_headers=True, transitive_libs=True)
         self.requires(
             "flex/2.6.4",
             visible=False,
@@ -495,11 +497,7 @@ class BoltConan(ConanFile):
             tc.extra_cflags.append(flags)
 
         if str(self.settings.compiler) == "clang":
-            # ThinLTO needs bitcode inputs as well as the linker flag.
-            tc.extra_cflags.append("-flto=thin")
-            tc.extra_cxxflags.append("-flto=thin")
-            tc.extra_exelinkflags.append("-flto=thin")
-            tc.extra_sharedlinkflags.append("-flto=thin")
+            # Configure LTO and PGO in the global Conan profile.
             # Avoid incorrect dynamic_cast results across ThinLTO shared libraries.
             # https://github.com/llvm/llvm-project/issues/71196
             tc.extra_cxxflags.append("-fno-assume-unique-vtables")
@@ -758,6 +756,7 @@ class BoltConan(ConanFile):
                 "liburing::liburing",
                 "zlib::zlib",
                 "libbacktrace::libbacktrace",
+                "openzl::openzl",
             ]
         )
         if self.options.get_safe("enable_testutil"):

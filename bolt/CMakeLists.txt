@@ -92,11 +92,15 @@ function(bolt_add_library target_name)
     "dwio/parquet/arrow/tests"
     "tpch/gen/dbgen"
     "tpch/gen"
+    "tpcds/gen"
+    "tpcds/gen/dsdgen"
+    "tpcds/gen/utils"
     "functions/lib/aggregates/tests/utils"
     "functions/lib/window/tests"
     "functions/prestosql/tests/utils"
     "connectors/fuzzer"
     "connectors/tpch"
+    "connectors/tpcds"
     "cudf/tests"
     "exec/fuzzer"
     "exec/tests/utils"
@@ -253,6 +257,10 @@ endif()
 
 if(${BOLT_ENABLE_TPCH_CONNECTOR})
   add_subdirectory(tpch/gen)
+endif()
+
+if(${BOLT_ENABLE_TPCDS_CONNECTOR})
+  add_subdirectory(tpcds/gen)
 endif()
 
 add_subdirectory(functions) # depends on md5 (postgresql)

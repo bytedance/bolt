@@ -30,6 +30,7 @@
 
 #include "SortBuffer.h"
 #include <algorithm>
+#include <limits>
 #include "Spiller.h"
 #include "bolt/exec/MemoryReclaimer.h"
 #include "bolt/exec/RowToColumnVector.h"
@@ -111,11 +112,19 @@ SortBuffer::SortBuffer(
     sortedSpillColumnTypes.emplace_back(input_->childAt(i));
     sortedSpillColumnNames.emplace_back(input->nameOf(i));
   }
+  const bool useMonoAlloc = operatorCtx
+      ? operatorCtx->driverCtx()->queryConfig().useMonoAlloc()
+      : core::QueryConfig({}).useMonoAlloc();
   hybridSortEnabled_ = hybridSortEnabled_ && !nonSortedColumnTypes.empty();
   if (hybridSortEnabled_) {
     std::vector<TypePtr> rowIdType = {BIGINT()};
     data_ = std::make_unique<RowContainer>(
-        sortedColumnTypes, rowIdType, true /*useListRowIndex*/, pool_);
+        sortedColumnTypes,
+        rowIdType,
+        true /*useListRowIndex*/,
+        pool_,
+        RowContainer::RowContainerParam{
+            .useMonotonicStringAllocation = useMonoAlloc});
     hybridData_ = std::make_unique<HybridContainer>(
         sortedColumnTypes, nonSortedColumnTypes, data_.get());
     // Set allContainer
@@ -132,7 +141,9 @@ SortBuffer::SortBuffer(
         sortedColumnTypes,
         nonSortedColumnTypes,
         true /*useListRowIndex*/,
-        pool_);
+        pool_,
+        RowContainer::RowContainerParam{
+            .useMonotonicStringAllocation = useMonoAlloc});
   }
   spillerStoreType_ =
       ROW(std::move(sortedSpillColumnNames), std::move(sortedSpillColumnTypes));
@@ -231,7 +242,14 @@ void SortBuffer::noMoreInput() {
     // TODO: Reuse 'RowContainer::rowPointers_'.
     sortedRows_.resize(numInputRows_);
     RowContainerIterator iter;
-    data_->listRows(&iter, numInputRows_, sortedRows_.data());
+    // RowContainer::listRows() accepts at most an int32_t number of rows.
+    size_t numListedRows = 0;
+    while (numListedRows < numInputRows_) {
+      const auto numRows = static_cast<int32_t>(std::min<size_t>(
+          numInputRows_ - numListedRows, std::numeric_limits<int32_t>::max()));
+      data_->listRows(&iter, numRows, sortedRows_.data() + numListedRows);
+      numListedRows += numRows;
+    }
 
     MicrosecondTimer timer(&sortInSortTimeUs_);
 
@@ -359,8 +377,7 @@ void SortBuffer::ensureInputFits(const VectorPtr& input) {
   }
 
   auto [freeRows, outOfLineFreeBytes] = data_->freeSpace();
-  const auto outOfLineBytes =
-      data_->stringAllocator().retainedSize() - outOfLineFreeBytes;
+  const auto outOfLineBytes = data_->variableWidthUsedBytes();
   const int64_t flatInputBytes = input->usedSize();
 
   // Test-only spill path.

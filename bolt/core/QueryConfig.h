@@ -180,6 +180,11 @@ class QueryConfig {
   static constexpr const char* kHashAggregationCompositeOutputEnabled =
       "hashaggregation_composite_output_enabled";
 
+  // Store row strings in per-container monotonic resources for aggregation,
+  // hash join and sorting. Individual row erasure does not reclaim strings;
+  // clearing or destroying the container releases them.
+  static constexpr const char* kUseMonoAlloc = "use_mono_alloc";
+
   static constexpr const char* kHashAggregationUniqueRowOpt =
       "hashaggregation_unique_row_opt";
 
@@ -246,6 +251,14 @@ class QueryConfig {
 
   /// Global enable spilling flag.
   static constexpr const char* kSpillEnabled = "spill_enabled";
+
+  /// Enables the task-level BufferManager for operators that opt in.
+  static constexpr const char* kBufferManagerEnabled = "buffer_manager_enabled";
+
+  /// Overrides the BufferManager spill codec independently of the legacy
+  /// operator spill codec. Empty preserves the existing mapping.
+  static constexpr const char* kBufferManagerSpillCompressionKind =
+      "buffer_manager_spill_compression_kind";
 
   /// Aggregation spilling flag, only applies if "spill_enabled" flag is set.
   static constexpr const char* kAggregationSpillEnabled =
@@ -891,6 +904,10 @@ class QueryConfig {
     return get<bool>(kHashAggregationCompositeOutputEnabled, false);
   }
 
+  bool useMonoAlloc() const {
+    return get<bool>(kUseMonoAlloc, true);
+  }
+
   bool isUniqueRowOptimizationEnabled() const {
     return get<bool>(kHashAggregationUniqueRowOpt, false);
   }
@@ -1103,6 +1120,14 @@ class QueryConfig {
   /// Returns true if spilling is enabled.
   bool spillEnabled() const {
     return get<bool>(kSpillEnabled, false);
+  }
+
+  bool bufferManagerEnabled() const {
+    return get<bool>(kBufferManagerEnabled, false);
+  }
+
+  std::string bufferManagerSpillCompressionKind() const {
+    return get<std::string>(kBufferManagerSpillCompressionKind, "");
   }
 
   config::AB_MODE spillUringEnabled() const {

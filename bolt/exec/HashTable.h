@@ -31,7 +31,10 @@
 #pragma once
 
 #include <vector/TypeAliases.h>
+#include <optional>
+#include <unordered_map>
 #include "bolt/common/base/Portability.h"
+#include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/exec/OneWayStatusFlag.h"
 #include "bolt/exec/RowContainer.h"
 #include "bolt/exec/VectorHasher.h"
@@ -468,6 +471,16 @@ class BaseHashTable {
   CpuWallTiming offThreadBuildTiming_;
 };
 
+namespace detail {
+
+/// Updates runtime stats to report only 'hashMode', or removes all hash mode
+/// stats if 'hashMode' is not set.
+void addHashModeRuntimeStats(
+    std::unordered_map<std::string, RuntimeMetric>& runtimeStats,
+    std::optional<BaseHashTable::HashMode> hashMode);
+
+} // namespace detail
+
 FOLLY_ALWAYS_INLINE std::ostream& operator<<(
     std::ostream& os,
     const BaseHashTable::HashMode& mode) {
@@ -551,6 +564,7 @@ class HashTable : public BaseHashTable {
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
       bool enableJitRowEqVectors,
+      bool useMonotonicStringAllocation = false,
       bool hybridMode = false);
 
   HashTable(
@@ -565,6 +579,7 @@ class HashTable : public BaseHashTable {
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
       bool enableJitRowEqVectors,
+      bool useMonotonicStringAllocation = false,
       bool hybridMode = false);
 
   ~HashTable() override = default;
@@ -574,7 +589,8 @@ class HashTable : public BaseHashTable {
       const std::vector<Accumulator>& accumulators,
       memory::MemoryPool* pool,
       const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
-      bool jitRowEqVectors) {
+      bool jitRowEqVectors,
+      bool useMonotonicStringAllocation = false) {
     return std::make_unique<HashTable>(
         std::move(hashers),
         accumulators,
@@ -585,7 +601,8 @@ class HashTable : public BaseHashTable {
         0, // minTableSizeForParallelJoinBuild
         pool,
         stringArena,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        useMonotonicStringAllocation);
   }
 
   static std::unique_ptr<HashTable> createForJoin(
@@ -597,7 +614,8 @@ class HashTable : public BaseHashTable {
       uint32_t minTableSizeForParallelJoinBuild,
       memory::MemoryPool* pool,
       bool jitRowEqVectors,
-      bool hybridMode = false) {
+      bool hybridMode = false,
+      bool useMonoAlloc = true) {
     return std::make_unique<HashTable>(
         std::move(hashers),
         std::vector<Accumulator>{},
@@ -610,6 +628,7 @@ class HashTable : public BaseHashTable {
         pool,
         nullptr,
         jitRowEqVectors,
+        useMonoAlloc /*useMonotonicStringAllocation*/,
         hybridMode);
   }
 

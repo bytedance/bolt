@@ -33,6 +33,9 @@
 #include <arrow/type.h>
 #include <gtest/gtest.h>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -421,6 +424,55 @@ class ArrowBridgeSchemaImportTest : public ArrowBridgeSchemaExportTest {
   }
 };
 
+TEST_F(ArrowBridgeSchemaImportTest, functionPointer) {
+  const auto importSchema = &importFromArrow;
+  auto schema = makeArrowSchema("tsn:");
+  EXPECT_EQ(*TIMESTAMP(), *importSchema(schema));
+  schema.release(&schema);
+}
+
+TEST_F(ArrowBridgeSchemaImportTest, optionsStructuredBindings) {
+  static_assert(std::is_aggregate_v<ArrowOptions>);
+  ArrowOptions options{
+      true,
+      false,
+      TimestampUnit::kMicro,
+      std::nullopt,
+      true,
+      false,
+      true,
+      false,
+      true};
+  options.timestampEncoding = TimestampEncoding::kSecondsNanos;
+  options.timeImportMode = TimeImportMode::kMillisOfDay;
+
+  auto commonOptions = [](auto&& value) {
+    auto&& [dict, constant, unit, zone, view, large, copy, ipc, array] =
+        std::forward<decltype(value)>(value);
+    EXPECT_EQ(&unit, &value.timestampUnit);
+    EXPECT_EQ(&zone, &value.timestampTimeZone);
+    return std::tie(dict, constant, unit, zone, view, large, copy, ipc, array);
+  };
+  const auto expected = std::make_tuple(
+      true,
+      false,
+      TimestampUnit::kMicro,
+      std::optional<std::string>{},
+      true,
+      false,
+      true,
+      false,
+      true);
+  EXPECT_EQ(commonOptions(options), expected);
+  EXPECT_EQ(commonOptions(std::as_const(options)), expected);
+  EXPECT_EQ(commonOptions(std::move(options)), expected);
+  EXPECT_EQ(commonOptions(std::move(std::as_const(options))), expected);
+  std::get<2>(commonOptions(options)) = TimestampUnit::kMilli;
+  EXPECT_EQ(options.timestampUnit, TimestampUnit::kMilli);
+  EXPECT_EQ(options.timestampEncoding, TimestampEncoding::kSecondsNanos);
+  EXPECT_EQ(options.timeImportMode, TimeImportMode::kMillisOfDay);
+}
+
 TEST_F(ArrowBridgeSchemaImportTest, scalar) {
   EXPECT_EQ(*BOOLEAN(), *testSchemaImport("b"));
   EXPECT_EQ(*TINYINT(), *testSchemaImport("c"));
@@ -437,6 +489,10 @@ TEST_F(ArrowBridgeSchemaImportTest, scalar) {
 
   // Temporal.
   EXPECT_EQ(*TIMESTAMP(), *testSchemaImport("tsu:"));
+  EXPECT_EQ(*INTEGER(), *testSchemaImport("tts"));
+  EXPECT_EQ(*INTEGER(), *testSchemaImport("ttm"));
+  EXPECT_EQ(*BIGINT(), *testSchemaImport("ttu"));
+  EXPECT_EQ(*BIGINT(), *testSchemaImport("ttn"));
   EXPECT_EQ(*DATE(), *testSchemaImport("tdD"));
   EXPECT_EQ(*INTERVAL_YEAR_MONTH(), *testSchemaImport("tiM"));
 
@@ -538,8 +594,6 @@ TEST_F(ArrowBridgeSchemaImportTest, unsupported) {
   EXPECT_THROW(testSchemaImport("w:42"), BoltUserError);
 
   EXPECT_THROW(testSchemaImport("tdm"), BoltUserError);
-  EXPECT_THROW(testSchemaImport("tts"), BoltUserError);
-  EXPECT_THROW(testSchemaImport("ttm"), BoltUserError);
   EXPECT_THROW(testSchemaImport("tDs"), BoltUserError);
 
   EXPECT_THROW(testSchemaImport("+"), BoltUserError);

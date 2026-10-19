@@ -56,7 +56,7 @@ namespace bytedance::bolt::functions::detail {
 }
 
 bool SIMDJsonExtractor::tokenize(const std::string& path) {
-  thread_local static JsonPathTokenizer tokenizer;
+  thread_local static JsonPathTokenizer tokenizer(false);
 
   if (path.empty()) {
     return false;

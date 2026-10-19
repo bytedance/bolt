@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ci
-    image: localhost:5000/bolt-ci:20260114
+    image: localhost:5000/bolt-ci:20260921
     command: ["/bin/bash", "-c", "Bolt CI Image"]
   conan_server:
     build:
@@ -27,7 +27,7 @@ services:
         - >-
           wget -q --spider
           --header='Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
-          http://localhost:5000/v2/bolt-ci/manifests/20260114 &&
+          http://localhost:5000/v2/bolt-ci/manifests/20260921 &&
           wget -q --spider
           --header='Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
           http://localhost:5000/v2/conan-server/manifests/latest

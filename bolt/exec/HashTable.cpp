@@ -28,10 +28,12 @@
  * --------------------------------------------------------------------------
  */
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include <boost/sort/pdqsort/pdqsort.hpp>
@@ -64,6 +66,25 @@ std::string BaseHashTable::modeString(HashMode mode) {
   }
 }
 
+void detail::addHashModeRuntimeStats(
+    std::unordered_map<std::string, RuntimeMetric>& runtimeStats,
+    std::optional<BaseHashTable::HashMode> hashMode) {
+  using HashMode = BaseHashTable::HashMode;
+  static constexpr std::array<std::pair<HashMode, const char*>, 3>
+      kHashModeMetrics{{
+          {HashMode::kArray, "hashtable.hashModeArray"},
+          {HashMode::kNormalizedKey, "hashtable.hashModeNormalizedKey"},
+          {HashMode::kHash, "hashtable.hashModeHash"},
+      }};
+  for (const auto& [mode, metricName] : kHashModeMetrics) {
+    if (hashMode == mode) {
+      runtimeStats[metricName] = RuntimeMetric(1);
+    } else {
+      runtimeStats.erase(metricName);
+    }
+  }
+}
+
 template <bool ignoreNullKeys>
 HashTable<ignoreNullKeys>::HashTable(
     std::vector<std::unique_ptr<VectorHasher>>&& hashers,
@@ -77,6 +98,7 @@ HashTable<ignoreNullKeys>::HashTable(
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
     bool enableJit,
+    bool useMonotonicStringAllocation,
     bool hybridMode)
     : BaseHashTable(std::move(hashers)),
       minTableSizeForParallelJoinBuild_(minTableSizeForParallelJoinBuild),
@@ -103,7 +125,10 @@ HashTable<ignoreNullKeys>::HashTable(
         hasProbedFlag,
         hashMode_ != HashMode::kHash,
         false /*useListRowIndex*/,
-        pool);
+        pool,
+        RowContainer::RowContainerParam{
+            .hsaAllocator = stringArena,
+            .useMonotonicStringAllocation = useMonotonicStringAllocation});
     hybridData_ =
         std::make_unique<HybridContainer>(keys, dependentTypes, rows_.get());
   } else {
@@ -118,7 +143,9 @@ HashTable<ignoreNullKeys>::HashTable(
         hashMode_ != HashMode::kHash,
         false /*useListRowIndex*/,
         pool,
-        stringArena);
+        RowContainer::RowContainerParam{
+            .hsaAllocator = stringArena,
+            .useMonotonicStringAllocation = useMonotonicStringAllocation});
   }
   nextOffset_ = rows_->nextOffset();
 #ifdef ENABLE_BOLT_JIT // generate JIT lazily?
@@ -148,6 +175,7 @@ HashTable<ignoreNullKeys>::HashTable(
     memory::MemoryPool* pool,
     const std::shared_ptr<bolt::HashStringAllocator>& stringArena,
     bool enableJitRowEqVectors,
+    bool useMonotonicStringAllocation,
     bool hybridMode)
     : HashTable<ignoreNullKeys>(
           std::move(hashers),
@@ -161,6 +189,7 @@ HashTable<ignoreNullKeys>::HashTable(
           pool,
           stringArena,
           enableJitRowEqVectors,
+          useMonotonicStringAllocation,
           hybridMode) {}
 
 int32_t ProbeState::row() const {
@@ -941,7 +970,8 @@ bool HashTable<ignoreNullKeys>::hashRows(
               column.offset(),
               column.nullByte(),
               ignoreNullKeys ? 0 : column.nullMask(),
-              hashes)) {
+              hashes,
+              rows_->useMonotonicStringAllocation())) {
         // Must reconsider 'hashMode_' and start over.
         return false;
       }
@@ -2164,7 +2194,8 @@ void HashTable<ignoreNullKeys>::erase(folly::Range<char**> rows) {
               column.offset(),
               column.nullByte(),
               ignoreNullKeys ? 0 : column.nullMask(),
-              hashes)) {
+              hashes,
+              rows_->useMonotonicStringAllocation())) {
         BOLT_FAIL("Value ids in erase must exist for all keys");
       }
     }

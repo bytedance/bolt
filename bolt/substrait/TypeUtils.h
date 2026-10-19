@@ -28,10 +28,23 @@
  * --------------------------------------------------------------------------
  */
 
+#include "bolt/dwio/common/Options.h"
+#include "bolt/substrait/proto/substrait/algebra.pb.h"
 #include "bolt/type/Type.h"
 namespace bytedance::bolt::substrait {
 
 std::string_view getNameBeforeDelimiter(
     const std::string& compoundName,
     const std::string& delimiter);
+
+// Convert Substrait file format to Bolt FileFormat.
+// Extracts the file_format oneof from a Substrait FileOrFiles and maps to
+// dwio::common::FileFormat.
+dwio::common::FileFormat toBoltFileFormat(
+    const ::substrait::ReadRel::LocalFiles::FileOrFiles& file);
+
+// Create a Substrait FileOrFiles message with only file_format set based on
+// Bolt FileFormat.
+::substrait::ReadRel::LocalFiles::FileOrFiles toSubstraitFileFormat(
+    dwio::common::FileFormat fmt);
 } // namespace bytedance::bolt::substrait

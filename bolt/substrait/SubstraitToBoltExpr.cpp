@@ -29,6 +29,7 @@
  */
 
 #include "bolt/substrait/SubstraitToBoltExpr.h"
+#include <cstring>
 #include "bolt/substrait/TypeUtils.h"
 #include "bolt/vector/FlatVector.h"
 using namespace bytedance::bolt;
@@ -81,13 +82,50 @@ uint32_t getLiteralValue(const ::substrait::Expression::Literal& literal) {
 
 template <>
 Timestamp getLiteralValue(const ::substrait::Expression::Literal& literal) {
-  return Timestamp::fromMicros(literal.timestamp());
+  if (literal.has_timestamp()) {
+    return Timestamp::fromMicros(literal.timestamp());
+  }
+
+  const auto& timestamp = literal.precision_timestamp();
+  const auto precision = timestamp.precision();
+  BOLT_USER_CHECK_GE(precision, 0, "Timestamp precision must be non-negative");
+  BOLT_USER_CHECK_LE(precision, 9, "Timestamp precision exceeds nanoseconds");
+  int64_t unitsPerSecond = 1;
+  for (int32_t i = 0; i < precision; ++i) {
+    unitsPerSecond *= 10;
+  }
+  auto seconds = timestamp.value() / unitsPerSecond;
+  auto remainder = timestamp.value() % unitsPerSecond;
+  // Timestamp stores negative fractional times with a non-negative nanos part.
+  if (remainder < 0) {
+    --seconds;
+    remainder += unitsPerSecond;
+  }
+  BOLT_USER_CHECK_GE(
+      seconds, Timestamp::kMinSeconds, "Timestamp seconds out of range");
+  BOLT_USER_CHECK_LE(
+      seconds, Timestamp::kMaxSeconds, "Timestamp seconds out of range");
+  return Timestamp(
+      seconds, remainder * (Timestamp::kNanosInSecond / unitsPerSecond));
+}
+
+int128_t decimalLiteralValue(
+    const ::substrait::Expression_Literal_Decimal& decimal) {
+  BOLT_CHECK_EQ(
+      decimal.value().size(),
+      sizeof(int128_t),
+      "Expected decimal literal to be encoded as a 16-byte signed integer.");
+  int128_t value;
+  std::memcpy(&value, decimal.value().data(), sizeof(value));
+  return value;
 }
 
 ArrayVectorPtr makeArrayVector(const VectorPtr& elements) {
-  BufferPtr offsets = allocateOffsets(1, elements->pool());
+  BufferPtr offsets = allocateOffsets(2, elements->pool());
   BufferPtr sizes = allocateOffsets(1, elements->pool());
   sizes->asMutable<vector_size_t>()[0] = elements->size();
+  offsets->asMutable<vector_size_t>()[0] = 0;
+  offsets->asMutable<vector_size_t>()[1] = elements->size();
 
   return std::make_shared<ArrayVector>(
       elements->pool(),
@@ -97,13 +135,6 @@ ArrayVectorPtr makeArrayVector(const VectorPtr& elements) {
       offsets,
       sizes,
       elements);
-}
-
-ArrayVectorPtr makeEmptyArrayVector(memory::MemoryPool* pool) {
-  BufferPtr offsets = allocateOffsets(1, pool);
-  BufferPtr sizes = allocateOffsets(1, pool);
-  return std::make_shared<ArrayVector>(
-      pool, ARRAY(UNKNOWN()), nullptr, 1, offsets, sizes, nullptr);
 }
 
 template <typename T>
@@ -118,6 +149,8 @@ void setLiteralValue(
       vector->set(index, StringView(literal.string()));
     } else if (literal.has_var_char()) {
       vector->set(index, StringView(literal.var_char().value()));
+    } else if (literal.has_binary()) {
+      vector->set(index, StringView(literal.binary()));
     } else {
       BOLT_FAIL("Unexpected string literal");
     }
@@ -137,6 +170,9 @@ VectorPtr constructFlatVector(
     memory::MemoryPool* pool) {
   BOLT_CHECK(type->isPrimitiveType());
   auto vector = BaseVector::create(type, size, pool);
+  if (size == 0) {
+    return vector;
+  }
   using T = typename TypeTraits<kind>::NativeType;
   auto flatVector = vector->as<FlatVector<T>>();
 
@@ -177,7 +213,7 @@ SubstraitBoltExprConverter::toBoltExpr(
     case ::substrait::Expression::FieldReference::ReferenceTypeCase::
         kDirectReference: {
       const auto& directRef = substraitField.direct_reference();
-      int32_t colIdx = substraitParser_.parseReferenceSegment(directRef);
+      int32_t colIdx = substraitParser_->parseReferenceSegment(directRef);
       const auto& inputNames = inputType->names();
       const int64_t inputSize = inputNames.size();
       if (colIdx <= inputSize) {
@@ -208,9 +244,11 @@ core::TypedExprPtr SubstraitBoltExprConverter::toBoltExpr(
     params.emplace_back(expr);
     inputTypes.emplace_back(expr->type());
   }
-  const auto& boltFunction = substraitParser_.findBoltFunction(
-      functionMap_, substraitFunc.function_reference());
-  auto outputType = substraitParser_.parseType(substraitFunc.output_type());
+  const auto& boltFunction = functionMap_
+      ? substraitParser_->findBoltFunction(
+            *functionMap_, substraitFunc.function_reference())
+      : substraitParser_->findBoltFunction(substraitFunc.function_reference());
+  auto outputType = substraitParser_->parseType(substraitFunc.output_type());
   if (specialFunctions_.count(boltFunction) == 0) {
     auto returnType = resolveFunction(boltFunction, inputTypes);
     if (!returnType) {
@@ -251,6 +289,14 @@ SubstraitBoltExprConverter::toBoltExpr(
     const ::substrait::Expression::Literal& substraitLit) {
   auto typeCase = substraitLit.literal_type_case();
   switch (typeCase) {
+    case ::substrait::Expression_Literal::LiteralTypeCase::LITERAL_TYPE_NOT_SET:
+      // Treat unspecified literal as NULL of UNKNOWN type.
+      // Some producers emit an unset literal to represent None.
+      {
+        auto t = UNKNOWN();
+        return std::make_shared<core::ConstantTypedExpr>(
+            t, variant::null(t->kind()));
+      }
     case ::substrait::Expression_Literal::LiteralTypeCase::kBoolean:
       return std::make_shared<core::ConstantTypedExpr>(
           BOOLEAN(), variant(substraitLit.boolean()));
@@ -274,11 +320,15 @@ SubstraitBoltExprConverter::toBoltExpr(
     case ::substrait::Expression_Literal::LiteralTypeCase::kFp64:
       return std::make_shared<core::ConstantTypedExpr>(
           DOUBLE(), variant(substraitLit.fp64()));
+    case ::substrait::Expression_Literal::LiteralTypeCase::kBinary:
+      // Binary literal maps to Bolt VARBINARY
+      return std::make_shared<core::ConstantTypedExpr>(
+          VARBINARY(), variant::binary(substraitLit.binary()));
     case ::substrait::Expression_Literal::LiteralTypeCase::kString:
       return std::make_shared<core::ConstantTypedExpr>(
           VARCHAR(), variant(substraitLit.string()));
     case ::substrait::Expression_Literal::LiteralTypeCase::kNull: {
-      auto boltType = substraitParser_.parseType(substraitLit.null());
+      auto boltType = substraitParser_->parseType(substraitLit.null());
       return std::make_shared<core::ConstantTypedExpr>(
           boltType, variant::null(boltType->kind()));
     }
@@ -288,25 +338,151 @@ SubstraitBoltExprConverter::toBoltExpr(
     case ::substrait::Expression_Literal::LiteralTypeCase::kFixedChar:
       return std::make_shared<core::ConstantTypedExpr>(
           VARCHAR(), variant(substraitLit.fixed_char()));
-    case ::substrait::Expression_Literal::LiteralTypeCase::kList: {
+    case ::substrait::Expression_Literal::LiteralTypeCase::kDate:
+      return std::make_shared<core::ConstantTypedExpr>(
+          DATE(), variant(int(substraitLit.date())));
+    case ::substrait::Expression_Literal::LiteralTypeCase::kTimestamp:
+    case ::substrait::Expression_Literal::LiteralTypeCase::kPrecisionTimestamp:
+      return std::make_shared<core::ConstantTypedExpr>(
+          TIMESTAMP(), variant(getLiteralValue<Timestamp>(substraitLit)));
+    case ::substrait::Expression_Literal::LiteralTypeCase::kDecimal: {
+      const auto& decimal = substraitLit.decimal();
+      auto boltType = DECIMAL(decimal.precision(), decimal.scale());
+      auto value = decimalLiteralValue(decimal);
+      if (boltType->isShortDecimal()) {
+        return std::make_shared<core::ConstantTypedExpr>(
+            boltType, variant(static_cast<int64_t>(value)));
+      }
+      return std::make_shared<core::ConstantTypedExpr>(
+          boltType, variant(value));
+    }
+    case ::substrait::Expression_Literal::LiteralTypeCase::kUserDefined: {
+      const auto& ud = substraitLit.user_defined();
+      const uint32_t anchor = ud.type_reference();
+      const std::string& name{substraitParser_->getTypeExtensionName(anchor)};
+      if (name == "UNKNOWN") {
+        auto t = UNKNOWN();
+        return std::make_shared<core::ConstantTypedExpr>(
+            t, variant::null(t->kind()));
+      }
+      BOLT_NYI("Unsupported user-defined literal type '{}'.", name);
+    }
+    case ::substrait::Expression_Literal::LiteralTypeCase::kList:
+    case ::substrait::Expression_Literal::LiteralTypeCase::kEmptyList: {
       auto constantVector =
           BaseVector::wrapInConstant(1, 0, literalsToArrayVector(substraitLit));
       return std::make_shared<const core::ConstantTypedExpr>(constantVector);
     }
-    case ::substrait::Expression_Literal::LiteralTypeCase::kDate:
-      return std::make_shared<core::ConstantTypedExpr>(
-          DATE(), variant(int(substraitLit.date())));
+    case ::substrait::Expression_Literal::LiteralTypeCase::kMap:
+    case ::substrait::Expression_Literal::LiteralTypeCase::kEmptyMap: {
+      auto constantVector =
+          BaseVector::wrapInConstant(1, 0, literalsToMapVector(substraitLit));
+      return std::make_shared<const core::ConstantTypedExpr>(constantVector);
+    }
+    case ::substrait::Expression_Literal::LiteralTypeCase::kStruct:
+      // TODO: return a RowVector.
+      // Use a similar method as for the kList case above.
     default:
       BOLT_NYI(
           "Substrait conversion not supported for type case '{}'", typeCase);
   }
 }
 
+MapVectorPtr SubstraitBoltExprConverter::literalsToMapVector(
+    const ::substrait::Expression::Literal& mapLiteral) {
+  if (mapLiteral.has_empty_map()) {
+    // Create empty list literals for keys and values
+    ::substrait::Expression::Literal emptyKeysList;
+    *emptyKeysList.mutable_empty_list()->mutable_type() =
+        mapLiteral.empty_map().key();
+    ::substrait::Expression::Literal emptyValuesList;
+    *emptyValuesList.mutable_empty_list()->mutable_type() =
+        mapLiteral.empty_map().value();
+
+    // Convert to array vectors
+    auto emptyKeysArray = literalsToArrayVector(emptyKeysList);
+    auto emptyValuesArray = literalsToArrayVector(emptyValuesList);
+    auto mapType =
+        MAP(emptyKeysArray->type()->childAt(0),
+            emptyValuesArray->type()->childAt(0));
+
+    // Create empty map vector
+    BufferPtr offsets = allocateOffsets(1, pool_);
+    BufferPtr sizes = allocateOffsets(1, pool_);
+    offsets->asMutable<vector_size_t>()[0] = 0;
+    sizes->asMutable<vector_size_t>()[0] = 0;
+    return std::make_shared<MapVector>(
+        pool_,
+        mapType,
+        nullptr,
+        1,
+        offsets,
+        sizes,
+        emptyKeysArray->elements(),
+        emptyValuesArray->elements());
+  } else if (mapLiteral.has_map()) {
+    const auto& map = mapLiteral.map();
+    size_t entryCount = map.key_values_size();
+
+    // Create list literals for keys and values
+    ::substrait::Expression::Literal keysList;
+    auto* keysListValue = keysList.mutable_list();
+    ::substrait::Expression::Literal valuesList;
+    auto* valuesListValue = valuesList.mutable_list();
+
+    // Populate keys and values lists
+    for (int i = 0; i < map.key_values_size(); i++) {
+      const auto& keyValue = map.key_values(i);
+      keysListValue->add_values()->CopyFrom(keyValue.key());
+      valuesListValue->add_values()->CopyFrom(keyValue.value());
+    }
+
+    // Convert to array vectors
+    auto keysArray = literalsToArrayVector(keysList);
+    auto valuesArray = literalsToArrayVector(valuesList);
+
+    // Create map vector
+    BufferPtr offsets = allocateOffsets(2, pool_);
+    BufferPtr sizes = allocateOffsets(1, pool_);
+    sizes->asMutable<vector_size_t>()[0] = entryCount;
+    offsets->asMutable<vector_size_t>()[0] = 0;
+    offsets->asMutable<vector_size_t>()[1] = entryCount;
+
+    // Get child types from array vectors
+    TypePtr keyType = keysArray->type()->childAt(0);
+    TypePtr valueType = valuesArray->type()->childAt(0);
+
+    return std::make_shared<MapVector>(
+        pool_,
+        MAP(keyType, valueType),
+        nullptr,
+        1,
+        offsets,
+        sizes,
+        keysArray->elements(),
+        valuesArray->elements());
+  } else {
+    BOLT_FAIL(
+        "Cannot convert literal {} to map.", mapLiteral.SerializeAsString());
+  }
+}
+
 ArrayVectorPtr SubstraitBoltExprConverter::literalsToArrayVector(
     const ::substrait::Expression::Literal& listLiteral) {
-  auto childSize = listLiteral.list().values().size();
+  vector_size_t childSize = 0;
+  if (listLiteral.has_empty_list()) {
+    auto elementType =
+        substraitParser_->parseType(listLiteral.empty_list().type());
+    return makeArrayVector(BaseVector::create(elementType, 0, pool_));
+  } else if (listLiteral.has_list()) {
+    childSize = listLiteral.list().values().size();
+  } else {
+    BOLT_FAIL(
+        "Cannot convert literal {} to list.", listLiteral.SerializeAsString());
+  }
+
   if (childSize == 0) {
-    return makeEmptyArrayVector(pool_);
+    return makeArrayVector(BaseVector::create(UNKNOWN(), 0, pool_));
   }
   auto typeCase = listLiteral.list().values(0).literal_type_case();
   switch (typeCase) {
@@ -336,7 +512,8 @@ ArrayVectorPtr SubstraitBoltExprConverter::literalsToArrayVector(
       return makeArrayVector(constructFlatVector<TypeKind::VARCHAR>(
           listLiteral, childSize, VARCHAR(), pool_));
     case ::substrait::Expression_Literal::LiteralTypeCase::kNull: {
-      auto boltType = substraitParser_.parseType(listLiteral.null());
+      auto boltType =
+          substraitParser_->parseType(listLiteral.list().values(0).null());
       auto kind = boltType->kind();
       return makeArrayVector(BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
           constructFlatVector, kind, listLiteral, childSize, boltType, pool_));
@@ -345,15 +522,20 @@ ArrayVectorPtr SubstraitBoltExprConverter::literalsToArrayVector(
       return makeArrayVector(constructFlatVector<TypeKind::INTEGER>(
           listLiteral, childSize, DATE(), pool_));
     case ::substrait::Expression_Literal::LiteralTypeCase::kTimestamp:
+    case ::substrait::Expression_Literal::LiteralTypeCase::kPrecisionTimestamp:
       return makeArrayVector(constructFlatVector<TypeKind::TIMESTAMP>(
           listLiteral, childSize, TIMESTAMP(), pool_));
+    case ::substrait::Expression_Literal::LiteralTypeCase::kBinary:
+      return makeArrayVector(constructFlatVector<TypeKind::VARBINARY>(
+          listLiteral, childSize, VARBINARY(), pool_));
     case ::substrait::Expression_Literal::LiteralTypeCase::kIntervalDayToSecond:
       return makeArrayVector(constructFlatVector<TypeKind::BIGINT>(
           listLiteral, childSize, INTERVAL_DAY_TIME(), pool_));
     case ::substrait::Expression_Literal::LiteralTypeCase::kIntervalYearToMonth:
       return makeArrayVector(constructFlatVector<TypeKind::INTEGER>(
           listLiteral, childSize, INTERVAL_YEAR_MONTH(), pool_));
-    case ::substrait::Expression_Literal::LiteralTypeCase::kList: {
+    case ::substrait::Expression_Literal::LiteralTypeCase::kList:
+    case ::substrait::Expression_Literal::LiteralTypeCase::kEmptyList: {
       VectorPtr elements;
       for (auto it : listLiteral.list().values()) {
         auto v = literalsToArrayVector(it);
@@ -374,7 +556,7 @@ ArrayVectorPtr SubstraitBoltExprConverter::literalsToArrayVector(
 core::TypedExprPtr SubstraitBoltExprConverter::toBoltExpr(
     const ::substrait::Expression::Cast& castExpr,
     const RowTypePtr& inputType) {
-  auto type = substraitParser_.parseType(castExpr.type());
+  auto type = substraitParser_->parseType(castExpr.type());
   bool nullOnFailure = isNullOnFailure(castExpr.failure_behavior());
 
   std::vector<core::TypedExprPtr> inputs{
@@ -441,5 +623,15 @@ core::TypedExprPtr SubstraitBoltExprConverter::toBoltExpr(
       resultType, std::move(inputs), "if");
 }
 std::unordered_set<std::string> SubstraitBoltExprConverter::specialFunctions_ =
-    {"and", "or", "cast", "try_cast", "coalesce", "if", "switch", "try"};
+    {"and",
+     "or",
+     "cast",
+     "try_cast",
+     "coalesce",
+     "if",
+     "switch",
+     "try",
+     // Null checks are treated as built-ins with explicit output types
+     "is_null",
+     "NOT is_null"};
 } // namespace bytedance::bolt::substrait

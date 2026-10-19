@@ -43,6 +43,10 @@ if(${BOLT_ENABLE_TPCH_CONNECTOR})
   add_subdirectory(tpch)
 endif()
 
+if(${BOLT_ENABLE_TPCDS_CONNECTOR})
+  add_subdirectory(tpcds)
+endif()
+
 if(${BOLT_ENABLE_PAIMON})
   add_subdirectory(paimon)
 endif()

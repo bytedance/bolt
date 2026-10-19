@@ -20,6 +20,7 @@
 #include "bolt/vector/LazyVector.h"
 #include "bolt/vector/VectorStream.h"
 #include "bolt/vector/arrow/Bridge.h"
+#include "bolt/vector/arrow/TimestampExtensionType.h"
 
 #include <arrow/array.h>
 #include <arrow/buffer.h>
@@ -989,7 +990,20 @@ unwrapToBase(const BaseVector* v, vector_size_t row, vector_size_t& baseIndex) {
   return v;
 }
 
-static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
+size_t timestampByteWidth(const VectorSerde::Options* options) {
+  const auto* arrowOptions =
+      dynamic_cast<const ArrowVectorSerde::ArrowSerdeOptions*>(options);
+  return arrowOptions &&
+          arrowOptions->arrowOptions.timestampEncoding ==
+              TimestampEncoding::kSecondsNanos
+      ? 16
+      : 8;
+}
+
+static size_t estimateCellBytes(
+    const VectorPtr& vec,
+    vector_size_t row,
+    size_t timestampBytes) {
   if (!vec)
     return 1;
   if (vec->type()->kind() == TypeKind::UNKNOWN) {
@@ -997,7 +1011,7 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
   }
   if (vec->encoding() == VectorEncoding::Simple::LAZY) {
     auto loaded = BaseVector::loadedVectorShared(vec);
-    return estimateCellBytes(loaded, row);
+    return estimateCellBytes(loaded, row, timestampBytes);
   }
 
   vector_size_t baseIndex = row;
@@ -1022,7 +1036,7 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
     case TypeKind::DOUBLE:
       return 1 + 8;
     case TypeKind::TIMESTAMP:
-      return 1 + 8;
+      return 1 + timestampBytes;
 
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY: {
@@ -1038,7 +1052,7 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
         auto len = arr->sizeAt(baseIndex);
         auto elems = arr->elements();
         for (vector_size_t i = 0; i < len; ++i) {
-          bytes += estimateCellBytes(elems, off + i);
+          bytes += estimateCellBytes(elems, off + i, timestampBytes);
         }
       }
       return bytes;
@@ -1053,8 +1067,8 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
         auto keys = map->mapKeys();
         auto vals = map->mapValues();
         for (vector_size_t i = 0; i < len; ++i) {
-          bytes += estimateCellBytes(keys, off + i);
-          bytes += estimateCellBytes(vals, off + i);
+          bytes += estimateCellBytes(keys, off + i, timestampBytes);
+          bytes += estimateCellBytes(vals, off + i, timestampBytes);
         }
       }
       return bytes;
@@ -1064,7 +1078,7 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
       auto rowv = static_cast<const RowVector*>(base);
       size_t bytes = 1; // struct validity
       for (size_t c = 0; c < rowv->childrenSize(); ++c) {
-        bytes += estimateCellBytes(rowv->childAt(c), baseIndex);
+        bytes += estimateCellBytes(rowv->childAt(c), baseIndex, timestampBytes);
       }
       return bytes;
     }
@@ -1072,8 +1086,10 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
     case TypeKind::VARIANT: {
       auto variantv = static_cast<const VariantVector*>(base);
       size_t bytes = 1; // variant validity
-      bytes += estimateCellBytes(variantv->valueChildVector(), baseIndex);
-      bytes += estimateCellBytes(variantv->metadataChildVector(), baseIndex);
+      bytes += estimateCellBytes(
+          variantv->valueChildVector(), baseIndex, timestampBytes);
+      bytes += estimateCellBytes(
+          variantv->metadataChildVector(), baseIndex, timestampBytes);
       return bytes;
     }
 
@@ -1082,6 +1098,10 @@ static size_t estimateCellBytes(const VectorPtr& vec, vector_size_t row) {
   }
 }
 } // namespace
+
+ArrowVectorSerde::ArrowVectorSerde() : VectorSerde(Kind::kArrow) {
+  registerArrowTimestampType();
+}
 
 ArrowVectorSerde::ArrowSerdeOptions
 ArrowVectorSerde::ArrowSerdeOptions::fromPrestoOptions(
@@ -1098,9 +1118,19 @@ void ArrowVectorSerde::estimateSerializedSize(
     const folly::Range<const IndexRange*>& ranges,
     vector_size_t** sizes,
     Scratch& scratch) {
+  estimateSerializedSize(std::move(vector), ranges, sizes, scratch, nullptr);
+}
+
+void ArrowVectorSerde::estimateSerializedSize(
+    VectorPtr vector,
+    const folly::Range<const IndexRange*>& ranges,
+    vector_size_t** sizes,
+    Scratch& scratch,
+    const Options* options) {
   if (!vector || ranges.size() == 0 || sizes == nullptr)
     return;
 
+  const auto timestampBytes = timestampByteWidth(options);
   auto rowv = std::static_pointer_cast<RowVector>(vector);
   const size_t nRanges = ranges.size();
 
@@ -1114,7 +1144,7 @@ void ArrowVectorSerde::estimateSerializedSize(
     for (vector_size_t r = 0; r < rg.size; ++r) {
       const vector_size_t row = rg.begin + r;
       for (size_t c = 0; c < rowv->childrenSize(); ++c) {
-        bytes += estimateCellBytes(rowv->childAt(c), row);
+        bytes += estimateCellBytes(rowv->childAt(c), row, timestampBytes);
       }
     }
     if (!overheadAdded) {
@@ -1132,9 +1162,19 @@ void ArrowVectorSerde::estimateSerializedSize(
     const folly::Range<const vector_size_t*> rows,
     vector_size_t** sizes,
     Scratch& scratch) {
+  estimateSerializedSize(std::move(vector), rows, sizes, scratch, nullptr);
+}
+
+void ArrowVectorSerde::estimateSerializedSize(
+    VectorPtr vector,
+    const folly::Range<const vector_size_t*> rows,
+    vector_size_t** sizes,
+    Scratch& scratch,
+    const Options* options) {
   if (!vector || rows.size() == 0 || sizes == nullptr)
     return;
 
+  const auto timestampBytes = timestampByteWidth(options);
   auto rowv = std::static_pointer_cast<RowVector>(vector);
   const size_t n = rows.size();
 
@@ -1145,7 +1185,7 @@ void ArrowVectorSerde::estimateSerializedSize(
     vector_size_t row = rows[i];
     size_t bytes = 0;
     for (size_t c = 0; c < rowv->childrenSize(); ++c) {
-      bytes += estimateCellBytes(rowv->childAt(c), row);
+      bytes += estimateCellBytes(rowv->childAt(c), row, timestampBytes);
     }
     if (i == 0)
       bytes += perPageOverhead;
@@ -1388,8 +1428,11 @@ void ArrowVectorSerde::deserialize(
     (*result)->resize(totalOut);
   }
   {
-    bytedance::bolt::SelectivityVector all(totalOut);
-    (*result)->ensureWritable(all);
+    // Preserve the prefix when flattening encoded children for the append.
+    SelectivityVector rows(totalOut, false);
+    rows.setValidRange(resultOffset, totalOut, true);
+    rows.updateBounds();
+    (*result)->ensureWritable(rows);
   }
 
   // container offsets/sizes buffer writable

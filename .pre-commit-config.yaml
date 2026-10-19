@@ -101,7 +101,7 @@ repos:
         language: python
         files: \.(c|cc|cpp|cxx|h|hpp|hxx)$
         pass_filenames: false
-        additional_dependencies: [clang-tidy==18.1.8]
+        additional_dependencies: [clang-tidy==22.1.8]
         require_serial: true
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.1

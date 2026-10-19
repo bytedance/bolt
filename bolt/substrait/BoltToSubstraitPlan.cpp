@@ -33,6 +33,7 @@
 #if defined BOLT_HAS_TORCH && BOLT_HAS_TORCH == 1
 #include "bolt/expression/TypeSignature.h"
 #endif
+
 namespace bytedance::bolt::substrait {
 
 namespace {
@@ -83,21 +84,19 @@ namespace {
 ::substrait::Plan& BoltToSubstraitPlanConvertor::toSubstrait(
     google::protobuf::Arena& arena,
     const core::PlanNodePtr& plan) {
-  // Construct the extension colllector.
+  // Construct the extension collector.
   extensionCollector_ = std::make_shared<SubstraitExtensionCollector>();
   // Construct the expression converter.
   exprConvertor_ =
       std::make_shared<BoltToSubstraitExprConvertor>(extensionCollector_);
+  // Construct the type converter.
+  typeConvertor_ =
+      std::make_shared<BoltToSubstraitTypeConvertor>(extensionCollector_);
 
   auto substraitPlan =
       google::protobuf::Arena::CreateMessage<::substrait::Plan>(&arena);
 
-  // Add unknown type in extension.
-  auto unknownType = substraitPlan->add_extensions()->mutable_extension_type();
-
-  unknownType->set_extension_uri_reference(0);
-  unknownType->set_type_anchor(0);
-  unknownType->set_name("UNKNOWN");
+  extensionCollector_->getTypeAnchor("UNKNOWN");
 
   // Do conversion.
   ::substrait::RelRoot* rootRel =
@@ -214,16 +213,17 @@ void BoltToSubstraitPlanConvertor::toSubstrait(
       readRel->mutable_virtual_table();
 
   for (const auto& vector : valuesNode->values()) {
-    ::substrait::Expression_Literal_Struct* litValue =
-        virtualTable->add_values();
-
-    for (const auto& column : vector->children()) {
-      ::substrait::Expression_Literal* substraitField =
-          google::protobuf::Arena::CreateMessage<
-              ::substrait::Expression_Literal>(&arena);
-
-      substraitField->MergeFrom(
-          exprConvertor_->toSubstraitLiteral(arena, column, litValue));
+    for (vector_size_t row = 0; row < vector->size(); ++row) {
+      auto* litValue = virtualTable->add_values();
+      for (const auto& column : vector->children()) {
+        auto value = BaseVector::wrapInConstant(1, row, column);
+        if (value->isScalar()) {
+          exprConvertor_->toSubstraitLiteral(arena, value, litValue);
+        } else {
+          litValue->add_fields()->CopyFrom(
+              exprConvertor_->toSubstraitLiteral(arena, value, nullptr));
+        }
+      }
     }
   }
 

@@ -25,9 +25,21 @@
 # This modified file is released under the same license.
 # --------------------------------------------------------------------------
 
+# GCC 10 and older can fail to link large Python modules with IPO.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "11")
+  foreach(suffix IN ITEMS "" _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION${suffix} OFF)
+  endforeach()
+endif()
+
 bolt_add_library(
-  bolt_python Aggregate.cpp Function.cpp Operator.cpp PlanNode.cpp PythonScalarFunction.cpp
-              Utils.cpp
+  bolt_python
+  Aggregate.cpp
+  Function.cpp
+  Operator.cpp
+  PlanNode.cpp
+  PythonScalarFunction.cpp
+  Utils.cpp
 )
 
 target_include_directories(
@@ -48,8 +60,6 @@ target_include_directories(
     ${date_INCLUDE_DIRS} # transitive include
 )
 
-target_compile_options(bolt_python PRIVATE -fvisibility=hidden)
-
 if(${ENABLE_BOLT_JIT})
   target_include_directories(bolt_python PRIVATE ${LLVM_INCLUDE_DIRS})
 endif()
@@ -57,9 +67,13 @@ endif()
 # icu is needed as a result of a transitive include calling a function from icu library.
 target_link_libraries(
   bolt_python
+  PUBLIC
+    pybind11::embed
   PRIVATE
-    pybind11::pybind11
     icu::icu
     folly::folly
 )
 target_compile_definitions(bolt_python PRIVATE ${glog_DEFINITIONS})
+
+add_subdirectory(pybolt)
+include(packaging/HiveThrift.cmake)

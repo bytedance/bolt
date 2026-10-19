@@ -115,6 +115,8 @@ class RadixSortBuffer : public SortBufferBase {
 
   void spillMemoryRun();
 
+  void finishPendingOutputSpill();
+
   void prepareMerge();
 
   void prepareOutputShell(vector_size_t outputBatchSize);
@@ -150,6 +152,7 @@ class RadixSortBuffer : public SortBufferBase {
   uint64_t storedRows_{0};
   uint64_t storedBytes_{0};
   bool variableKeysFitRadixPrefix_{true};
+  uint64_t pendingSpillReaderBytes_{0};
   std::vector<uint8_t> spilledSpecialValueFlags_;
   uint64_t appendTimeUs_{0};
   uint64_t sortTimeUs_{0};

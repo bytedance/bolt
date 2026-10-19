@@ -28,9 +28,11 @@
  * --------------------------------------------------------------------------
  */
 
+#include <folly/ScopeGuard.h>
 #include <folly/hash/Hash.h>
 
 #include "bolt/common/base/BitUtil.h"
+#include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/Nulls.h"
 #include "bolt/common/base/SimdUtil.h"
@@ -402,6 +404,79 @@ template <typename T>
 void FlatVector<T>::copyRanges(
     const BaseVector* source,
     const folly::Range<const BaseVector::CopyRange*>& ranges) {
+  if (ranges.empty()) {
+    return;
+  }
+
+  // Collect stats only for full, ordered target coverage, ignoring empty
+  // ranges.
+  bool collectStringStats = false;
+  bool canReuseSourceStringStats = false;
+  if constexpr (std::is_same_v<T, StringView>) {
+    bool hasNonEmptyRanges = false;
+    bool canCollectStringStats = true;
+    bool copiesSourceIdentity = source != this;
+    uint64_t nextTarget = 0;
+    const auto targetSize = static_cast<uint64_t>(BaseVector::length_);
+    const auto sourceSize = static_cast<uint64_t>(source->size());
+
+    for (const auto& range : ranges) {
+      if (range.count == 0) {
+        continue;
+      }
+
+      hasNonEmptyRanges = true;
+      const auto count = static_cast<uint64_t>(range.count);
+      if (static_cast<uint64_t>(range.targetIndex) != nextTarget) {
+        canCollectStringStats = false;
+        continue;
+      }
+      if (static_cast<uint64_t>(range.sourceIndex) != nextTarget) {
+        copiesSourceIdentity = false;
+      }
+      nextTarget += count;
+    }
+
+    if (!hasNonEmptyRanges) {
+      return;
+    }
+
+    // Any write invalidates cached stats.
+    this->stringStats_.reset();
+    collectStringStats = canCollectStringStats && nextTarget == targetSize;
+    canReuseSourceStringStats =
+        collectStringStats && copiesSourceIdentity && sourceSize == targetSize;
+  }
+
+  uint64_t stringStatsTotal = 0;
+  uint64_t stringStatsMax = 0;
+
+  auto recordStringValue = [&](const T& value) {
+    if constexpr (std::is_same_v<T, StringView>) {
+      if (!collectStringStats) {
+        return;
+      }
+
+      stringStatsMax =
+          std::max(stringStatsMax, static_cast<uint64_t>(value.size()));
+      if (!value.isInline()) {
+        stringStatsTotal = checkedPlus<uint64_t>(
+            stringStatsTotal,
+            static_cast<uint64_t>(value.size()),
+            "StringViewStats total bytes");
+      }
+    }
+  };
+  // Commit stats on normal returns, never on exceptions during copying.
+  SCOPE_SUCCESS {
+    if constexpr (std::is_same_v<T, StringView>) {
+      if (collectStringStats && stringStatsMax > 0) {
+        this->setStringViewStats(
+            StringViewStats{stringStatsTotal, stringStatsMax});
+      }
+    }
+  };
+
   if (source->typeKind() == TypeKind::UNKNOWN) {
     BaseVector::setNulls(BaseVector::mutableRawNulls(), ranges, true);
     return;
@@ -418,8 +493,9 @@ void FlatVector<T>::copyRanges(
         if (source->isNullAt(sourceIndex)) {
           this->setNull(targetIndex, true);
         } else {
-          this->set(
-              targetIndex, leaf->valueAt(source->wrappedIndex(sourceIndex)));
+          const auto value = leaf->valueAt(source->wrappedIndex(sourceIndex));
+          this->set(targetIndex, value);
+          recordStringValue(value);
         }
       });
       return;
@@ -443,6 +519,15 @@ void FlatVector<T>::copyRanges(
 
   if (source->isFlatEncoding()) {
     auto* flatSource = source->asUnchecked<FlatVector<T>>();
+    if constexpr (std::is_same_v<T, StringView>) {
+      // Bulk copies only inherit stats; avoid rescanning to prevent
+      // regressions.
+      if (canReuseSourceStringStats && flatSource->stringStats().has_value()) {
+        const auto& sourceStats = flatSource->stringStats().value();
+        stringStatsTotal = sourceStats.totalBytes;
+        stringStatsMax = sourceStats.maxLength;
+      }
+    }
     if (flatSource->values() == nullptr) {
       // All source values are null.
       BaseVector::setNulls(BaseVector::mutableRawNulls(), ranges, true);
@@ -502,6 +587,7 @@ void FlatVector<T>::copyRanges(
     } else {
       applyToEachRow(ranges, [&](auto targetIndex, auto /*sourceIndex*/) {
         rawValues_[targetIndex] = value;
+        recordStringValue(value);
       });
     }
 
@@ -521,6 +607,7 @@ void FlatVector<T>::copyRanges(
           bits::setBit(rawBoolValues, targetIndex, sourceValue);
         } else {
           rawValues_[targetIndex] = sourceValue;
+          recordStringValue(sourceValue);
         }
         if (rawNulls) {
           bits::clearNull(rawNulls, targetIndex);
@@ -593,6 +680,10 @@ void FlatVector<T>::resize(vector_size_t newSize, bool setNotNull) {
 
 template <typename T>
 void FlatVector<T>::ensureWritable(const SelectivityVector& rows) {
+  if constexpr (std::is_same_v<T, StringView>) {
+    this->stringStats_.reset();
+  }
+
   auto newSize = std::max<vector_size_t>(rows.end(), BaseVector::length_);
   if (values_ && !values_->isMutable()) {
     BufferPtr newValues;

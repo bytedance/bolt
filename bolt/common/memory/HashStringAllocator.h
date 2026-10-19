@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <new>
+
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/memory/AllocationPool.h"
 #include "bolt/common/memory/ByteStream.h"
@@ -202,7 +204,7 @@ class HashStringAllocator : public StreamArena {
   // always zero copy but will accommodate the odd extra large string.
   void copyMultipart(const StringView& str, char* group, int32_t offset) {
     if (str.isInline()) {
-      *reinterpret_cast<StringView*>(group + offset) = str;
+      new (group + offset) StringView(str);
       return;
     }
     copyMultipartNoInline(str, group, offset);
@@ -363,6 +365,8 @@ class HashStringAllocator : public StreamArena {
   static constexpr int32_t kUnitSize = 16 * memory::AllocationTraits::kPageSize;
   static constexpr int32_t kMinContiguous = 48;
   static constexpr int32_t kNumFreeLists = kMaxAlloc - kMinAlloc + 2;
+  static constexpr int32_t kNumFreeBitmapWords = bits::nwords(kNumFreeLists);
+  static_assert(kNumFreeBitmapWords <= 64);
 
   void newRange(
       int32_t bytes,
@@ -376,6 +380,8 @@ class HashStringAllocator : public StreamArena {
   void newSlab();
 
   void removeFromFreeList(Header* FOLLY_NONNULL header);
+
+  void updateFreeListAfterRemoval(int32_t index, bool listIsEmpty);
 
   /// Allocates a block of specified size. If exactSize is false, the block may
   /// be smaller or larger. Checks free list before allocating new memory.
@@ -413,11 +419,18 @@ class HashStringAllocator : public StreamArena {
   // Returns the free list index for 'size'.
   int32_t freeListIndex(int size);
 
+  // Returns the first non-empty free list at or after 'begin'.
+  int32_t findFirstFreeList(int32_t begin) const;
+
   // Circular list of free blocks.
   CompactDoubleList free_[kNumFreeLists];
 
   // Bitmap with a 1 if the corresponding list in 'free_' is not empty.
-  uint64_t freeNonEmpty_[bits::nwords(kNumFreeLists)]{};
+  uint64_t freeNonEmpty_[kNumFreeBitmapWords]{};
+
+  // Bitmap with a 1 if the corresponding word in 'freeNonEmpty_' is not
+  // empty.
+  uint64_t freeBitmapIndx_{0};
 
   // Count of elements in 'free_'. This is 0 when all free_[i].next() ==
   // &free_[i].

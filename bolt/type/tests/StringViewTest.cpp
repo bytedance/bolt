@@ -30,6 +30,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <array>
+#include <numeric>
 #include <sstream>
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/common/memory/RawVector.h"
@@ -58,6 +60,20 @@ TEST(StringView, basic) {
     std::stringstream viewAsSteam;
     viewAsSteam << view;
     EXPECT_EQ(subText, viewAsSteam.str());
+  }
+}
+
+TEST(StringView, unalignedInput) {
+  alignas(8) std::array<char, 64> data;
+  std::iota(data.begin(), data.end(), 'a');
+  for (int offset = 0; offset < 8; ++offset) {
+    for (int length : {0, 1, 11, 12, 13, 16, 31}) {
+      SCOPED_TRACE(fmt::format("offset={}, length={}", offset, length));
+      const std::string expected(data.data() + offset, length);
+      StringView view(data.data() + offset, length);
+      EXPECT_EQ(view.materialize(), expected);
+      EXPECT_EQ(view, StringView(expected));
+    }
   }
 }
 

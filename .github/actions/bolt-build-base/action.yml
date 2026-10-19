@@ -3,24 +3,22 @@ description: 'Executes necessary commands to setup environment for the bolt buil
 runs:
   using: "composite"
   steps:
+    - name: Install Bolt dependencies
+      shell: bash
+      run: |
+        ./scripts/install-bolt-deps.sh
+
     - name: Setup conan profile
       shell: bash
       run: |
-        conan profile detect
-        cat >> ~/.conan2/profiles/default <<EOF
-
-        [conf]
-        tools.build:exelinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
-        tools.build:sharedlinkflags=['-fuse-ld=mold', '-Wl,--allow-multiple-definition']
-        EOF
+        python3 scripts/configure-conan-profile.py \
+          --compiler clang \
+          --libcxx libstdc++11 \
+          --linker mold \
+          --lto none  && \
         echo "core.download:parallel=1" >> ~/.conan2/global.conf
 
     - name: Add CI conan remote
       shell: bash
       run: |
-        conan remote add --index=0 ci http://conanserver:9300
-
-    - name: Install Bolt dependencies
-      shell: bash
-      run: |
-        ./scripts/install-bolt-deps.sh
+        conan remote add ci http://conanserver:9300

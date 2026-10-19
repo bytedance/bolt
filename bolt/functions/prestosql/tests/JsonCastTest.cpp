@@ -1016,7 +1016,7 @@ TEST_F(JsonCastTest, toRow) {
   auto map = makeNullableFlatVector<JsonNativeType>(
       {R"({"c0":123,"c1":"abc","c2":true})"_sv,
        R"({"c1":"abc","c2":true,"c0":123})"_sv,
-       R"({"c0":123,"c2":true,"c0":456})"_sv,
+       R"({"c10":123,"c2":true,"c0":456})"_sv,
        R"({"c3":123,"c4":"abc","c2":false})"_sv,
        R"({"c0":null,"c2":false})"_sv,
        R"({"c0":null,"c2":null,"c1":null})"_sv},
@@ -1037,17 +1037,17 @@ TEST_F(JsonCastTest, toRow) {
 
   // Use a mix of lower case and upper case JSON keys.
   map = makeNullableFlatVector<JsonNativeType>(
-      {R"({"c0":123,"c1":"abc","c2":true})"_sv,
-       R"({"c1":"abc","c2":true,"c0":123})"_sv,
-       R"({"c0":123,"c2":true,"c0":456})"_sv,
-       R"({"c3":123,"c4":"abc","c2":false})"_sv,
+      {R"({"C0":123,"C1":"abc","C2":true})"_sv,
+       R"({"c1":"abc","C2":true,"c0":123})"_sv,
+       R"({"C10":123,"C2":true,"c0":456})"_sv,
+       R"({"c3":123,"C4":"abc","c2":false})"_sv,
        R"({"c0":null,"c2":false})"_sv,
-       R"({"c0":null,"c2":null,"c1":null})"_sv},
+       R"({"c0":null,"c2":null,"C1":null})"_sv},
       JSON());
   testCast(map, makeRowVector({child4, child5, child6}));
 
   // Use a mix of lower case and upper case field names in target ROW type.
-  testCast(map, makeRowVector({child4, child5, child6}));
+  testCast(map, makeRowVector({"c0", "C1", "C2"}, {child4, child5, child6}));
 
   // Test casting to ROW from JSON null.
   auto null = makeNullableFlatVector<JsonNativeType>({"null"_sv}, JSON());
@@ -1307,4 +1307,36 @@ TEST_F(JsonCastTest, tryCastFromJson) {
       {makeFlatVector<float>({0, 0})}, [](auto /*row*/) { return true; });
   evaluateAndVerify(
       JSON(), ROW({REAL()}), makeRowVector({data}), expectedRow, true);
+}
+
+TEST_F(JsonCastTest, duplicateCaseInsensitiveFields) {
+  auto input = makeFlatVector<JsonNativeType>(
+      {R"({"Name":"first","name":"second"})"_sv}, JSON());
+
+  BOLT_ASSERT_USER_THROW(
+      evaluateCast(JSON(), ROW({"name"}, {VARCHAR()}), makeRowVector({input})),
+      "Duplicate field: name");
+}
+
+TEST_F(JsonCastTest, fromJsonIgnoresDuplicateCaseInsensitiveFields) {
+  auto input = makeFlatVector<StringView>(
+      {R"({"FieldA":["READ","BLUE"],"Foo":"Bar","fieldA":["red","blue"],"foo":"bar"})"},
+      JSON());
+  auto resultType = ROW({"FieldA", "Foo"}, {ARRAY(VARCHAR()), VARCHAR()});
+  auto inputRow = makeRowVector({input});
+  SelectivityVector rows(input->size());
+  exec::ExprSet exprSet({}, &execCtx_);
+  exec::EvalCtx context(&execCtx_, &exprSet, inputRow.get());
+  VectorPtr result;
+
+  auto* jsonCast =
+      dynamic_cast<const JsonCastOperator*>(JsonCastOperator::get().get());
+  ASSERT_NE(jsonCast, nullptr);
+  jsonCast->castFrom(
+      *input, context, rows, resultType, result, /*isFromJson=*/true);
+
+  auto fieldA = makeArrayVector<std::string>({{"READ", "BLUE"}});
+  auto foo = makeFlatVector<StringView>({"Bar"});
+  auto expected = makeRowVector({"FieldA", "Foo"}, {fieldA, foo});
+  bytedance::bolt::test::assertEqualVectors(expected, result);
 }

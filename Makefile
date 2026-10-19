@@ -44,6 +44,7 @@
 .PHONY: release_with_test release_with_debug_info_with_test
 .PHONY: debug_with_test debug_with_test_spark debug_with_test_cov
 .PHONY: debug_spark_with_test release_spark_with_test
+.PHONY: python-wheel
 
 # --- 5. Benchmark Build Targets ---
 .PHONY: benchmarks-basic-build benchmarks-build
@@ -93,8 +94,7 @@ CONAN_PACKAGE_ARGS = \
 	--channel=${BUILD_CHANNEL}
 
 CONAN_HOST_PROFILE_ARGS = \
-	-pr:h ${PROFILE} \
-	-pr:h ../../scripts/conan/bolt.profile
+	-pr:h ${PROFILE}
 
 # Package-scoped settings only apply when the matching dependency is in the graph.
 CONAN_BUILD_SETTINGS = \
@@ -201,6 +201,9 @@ CONAN_BUILD_ENV = \
 CPU_TARGET ?= "avx"
 
 PYTHON_EXECUTABLE ?= $(shell which python3)
+
+PYTHON_PACKAGE_DIR = $(CURDIR)/bolt/python
+PYTHON_DIST_DIR = $(CURDIR)/dist
 
 all: 			#: Build the release version
 	$(MAKE) release
@@ -343,6 +346,16 @@ release_spark_with_test:
 
 debug_spark_with_test:
 	$(MAKE) conan_build BUILD_TYPE=Debug CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS)"
+
+# Wheels statically include the Bolt engine and test utilities.
+python-wheel: BOLT_TEST_LINKAGE = static
+
+python-wheel:
+	NUM_THREADS="$(NUM_THREADS)" NUM_LINK_JOB="$(NUM_LINK_JOB)" \
+	  "$(PYTHON_EXECUTABLE)" \
+	  "$(PYTHON_PACKAGE_DIR)/packaging/build_dev_wheel.py" \
+	  --build-type "$(BUILD_TYPE)" --out-dir "$(PYTHON_DIST_DIR)" \
+	  --profile "$(PROFILE)" --dependency-build-type "$(DEPENDENCY_BUILD_TYPE)"
 
 benchmarks-basic-build:
 	$(MAKE) conan_build BUILD_TYPE=Release BOLT_BUILD_BENCHMARKS_BASIC="ON" CONAN_CONFIG="$(CONAN_TEST_CONFIG)" CONAN_OPTIONS="$(CONAN_SPARK_OPTIONS) $(CONAN_TESTUTIL_OPTIONS) $(CONAN_PERF_OPTIONS)"

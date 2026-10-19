@@ -139,6 +139,7 @@ option(BOLT_ENABLE_EXEC "Build exec." ON)
 option(BOLT_ENABLE_AGGREGATES "Build aggregates." ON)
 option(BOLT_ENABLE_HIVE_CONNECTOR "Build Hive connector." ON)
 option(BOLT_ENABLE_TPCH_CONNECTOR "Build TPC-H connector." ON)
+option(BOLT_ENABLE_TPCDS_CONNECTOR "Build TPC-DS connector." ON)
 option(BOLT_ENABLE_ARROW_CONNECTOR "Build Arrow Memory connector." ON)
 option(BOLT_ENABLE_PRESTO_FUNCTIONS "Build Presto SQL functions." ON)
 option(BOLT_ENABLE_SPARK_FUNCTIONS "Build Spark SQL functions." ON)
@@ -307,6 +308,7 @@ if(${BOLT_BUILD_MINIMAL})
   set(BOLT_ENABLE_AGGREGATES OFF)
   set(BOLT_ENABLE_HIVE_CONNECTOR OFF)
   set(BOLT_ENABLE_TPCH_CONNECTOR OFF)
+  set(BOLT_ENABLE_TPCDS_CONNECTOR OFF)
   set(BOLT_ENABLE_ARROW_CONNECTOR OFF)
   set(BOLT_ENABLE_SPARK_FUNCTIONS OFF)
   set(BOLT_ENABLE_FLINK_FUNCTIONS OFF)
@@ -328,6 +330,7 @@ if(${BOLT_BUILD_TESTING})
   set(BOLT_ENABLE_AGGREGATES ON)
   set(BOLT_ENABLE_HIVE_CONNECTOR ON)
   set(BOLT_ENABLE_TPCH_CONNECTOR ON)
+  set(BOLT_ENABLE_TPCDS_CONNECTOR ON)
   # set(BOLT_ENABLE_ARROW_CONNECTOR ON)
   set(BOLT_ENABLE_SPARK_FUNCTIONS ON)
   set(BOLT_ENABLE_FLINK_FUNCTIONS ON)
@@ -694,7 +697,7 @@ if(NOT ${BOLT_BUILD_MINIMAL})
   find_package(lz4 CONFIG REQUIRED)
   find_package(zstd CONFIG REQUIRED)
   find_package(Snappy CONFIG REQUIRED)
-  find_package(zstd CONFIG REQUIRED)
+  find_package(openzl CONFIG REQUIRED)
 endif()
 
 find_package(re2 CONFIG REQUIRED)
@@ -909,6 +912,13 @@ if(BOLT_ENABLE_TORCH)
 endif()
 
 if(BOLT_BUILD_PYTHON_PACKAGE)
+  find_package(
+    Python3
+    REQUIRED
+    COMPONENTS
+      Development
+      Interpreter
+  )
   find_package(pybind11 CONFIG REQUIRED)
 endif()
 

@@ -70,13 +70,19 @@ DEFINE_int32(
     "Percentage of lineitem columns to "
     "include in IO meter query. The columns are sorted by name and the n% first "
     "are scanned");
+DEFINE_bool(
+    bolt_benchmark_enable_cpu_profiler,
+    false,
+    "Enable gperftools CPU profiling and write samples to tpch.prof");
 
 std::shared_ptr<TpchQueryBuilder> queryBuilder;
 
 class TpchBenchmark : public QueryBenchmarkBase {
  public:
   void runMain(std::ostream& out, RunStats& runStats) override {
-    BoltProfilerStart("tpch.prof");
+    if (FLAGS_bolt_benchmark_enable_cpu_profiler) {
+      BoltProfilerStart("tpch.prof");
+    }
     if (FLAGS_bolt_benchmark_run_query_verbose == -1 &&
         FLAGS_bolt_benchmark_io_meter_column_pct == 0) {
       folly::runBenchmarks();
@@ -110,6 +116,8 @@ class TpchBenchmark : public QueryBenchmarkBase {
                  succinctMillis(
                      stats.executionEndTimeMs - stats.executionStartTimeMs))
           << std::endl;
+      out << fmt::format("MemoryPool peak bytes: {}", task->pool()->peakBytes())
+          << std::endl;
       out << fmt::format(
                  "Splits total: {}, finished: {}",
                  stats.numTotalSplits,
@@ -122,7 +130,9 @@ class TpchBenchmark : public QueryBenchmarkBase {
                  true)
           << std::endl;
     }
-    BoltProfilerStop();
+    if (FLAGS_bolt_benchmark_enable_cpu_profiler) {
+      BoltProfilerStop();
+    }
   }
 };
 

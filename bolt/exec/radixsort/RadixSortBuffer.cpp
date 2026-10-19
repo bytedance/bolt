@@ -122,6 +122,31 @@ uint64_t spillReadBytesPerRun(common::CompressionKind compressionKind) {
   return bytes;
 }
 
+uint64_t spillReaderAllocationBytes(
+    memory::MemoryPool* pool,
+    uint64_t uncompressedSize,
+    uint64_t storedSize,
+    common::CompressionKind compressionKind,
+    bool spillUringEnabled) {
+  BOLT_CHECK_GT(uncompressedSize, 0);
+  BOLT_CHECK_GT(storedSize, 0);
+  const auto allocationBytes = [&](uint64_t size) {
+    return pool->preferredSize(checkedByteSum(
+        size, AlignedBuffer::kPaddedSize, "spill reader allocation"));
+  };
+  auto bytes = checkedByteSize(
+      spillUringEnabled ? 2 : 1,
+      allocationBytes(kRadixSortSpillBufferSize),
+      "spill read buffers");
+  bytes = checkedByteSum(
+      bytes, allocationBytes(uncompressedSize), "spill reader allocation");
+  if (compressionKind != common::CompressionKind_NONE) {
+    bytes = checkedByteSum(
+        bytes, allocationBytes(storedSize), "spill reader allocation");
+  }
+  return bytes;
+}
+
 bool maybeReserve(
     memory::MemoryPool* pool,
     uint64_t bytes,
@@ -508,6 +533,11 @@ void RadixSortBuffer::ensureOutputFits(vector_size_t batchSize) {
   if (run_->retainedBytes() != retainedBytesBefore) {
     reserveOutputForCurrentState(batchSize);
   }
+  // Admission must finish before initializing a pending reader because it may
+  // synchronously reclaim this buffer and replace the in-memory stream.
+  if (FOLLY_UNLIKELY(pendingSpillReaderBytes_ != 0)) {
+    finishPendingOutputSpill();
+  }
 }
 
 uint64_t RadixSortBuffer::OutputAdmissionEstimate::total() const {
@@ -527,8 +557,9 @@ RadixSortBuffer::outputAdmissionEstimate(vector_size_t batchSize) {
   const auto outputBytes = checkedByteSize(*rowSize, rows, "output allocation");
   const auto outputGrowth = canReuseOutput(batchSize) ? 0 : outputBytes;
 
+  const auto needsMerge = merger_ != nullptr || pendingSpillReaderBytes_ != 0;
   uint64_t scratchGrowth;
-  if (merger_ == nullptr) {
+  if (!needsMerge) {
     scratchGrowth = run_->directOutputScratchAllocationBytes(batchSize);
   } else {
     scratchGrowth = run_->mergeOutputScratchAllocationBytes(batchSize);
@@ -552,6 +583,11 @@ RadixSortBuffer::outputAdmissionEstimate(vector_size_t batchSize) {
               "merge payload pointer scratch"),
           "merge output scratch");
     }
+  }
+
+  if (FOLLY_UNLIKELY(pendingSpillReaderBytes_ != 0)) {
+    scratchGrowth = checkedByteSum(
+        scratchGrowth, pendingSpillReaderBytes_, "merge output scratch");
   }
 
   return {outputGrowth, scratchGrowth};
@@ -801,6 +837,12 @@ void RadixSortBuffer::spillMemoryRun() {
   const auto writeBegin = std::chrono::steady_clock::now();
   auto files = writer.writeRun(*run_->storage(), payloadLayout.get(), begin);
   const auto writeEnd = std::chrono::steady_clock::now();
+  const auto pendingSpillReaderBytes = spillReaderAllocationBytes(
+      pool_,
+      writer.firstBlockUncompressedSize(),
+      writer.firstBlockStoredSize(),
+      spillConfig_->compressionKind,
+      spillConfig_->spillUringEnabled);
   auto cleanupUncommittedFiles =
       folly::makeGuard([&files]() { cleanupSpillFilesNoThrow(files); });
   auto serializationTimeUs =
@@ -827,7 +869,6 @@ void RadixSortBuffer::spillMemoryRun() {
     output_.reset();
     run_->clear();
     appendSpillRun(spilledRuns_, files);
-    prepareMerge();
     cleanupUncommittedFiles.dismiss();
   } else {
     auto meta =
@@ -850,6 +891,7 @@ void RadixSortBuffer::spillMemoryRun() {
     }
     cleanupUncommittedFiles.dismiss();
   }
+  pendingSpillReaderBytes_ = pendingSpillReaderBytes;
 
   bool firstSpilledPartition;
   {
@@ -870,6 +912,24 @@ void RadixSortBuffer::spillMemoryRun() {
   }
   common::updateGlobalSpillTotalTime(totalTimeUs);
   pool_->release();
+}
+
+void RadixSortBuffer::finishPendingOutputSpill() {
+  BOLT_DCHECK_NE(pendingSpillReaderBytes_, 0);
+  try {
+    if (!spilledRuns_.empty()) {
+      BOLT_CHECK_NULL(merger_);
+      prepareMerge();
+    } else {
+      BOLT_CHECK_NOT_NULL(merger_);
+      merger_->finishMemoryReplacement();
+    }
+    pendingSpillReaderBytes_ = 0;
+  } catch (...) {
+    pendingSpillReaderBytes_ = 0;
+    merger_.reset();
+    throw;
+  }
 }
 
 void RadixSortBuffer::prepareMerge() {

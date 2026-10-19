@@ -1119,7 +1119,9 @@ struct CastFromJsonTypedImpl {
         for (column_index_t numFields = rowType.size(), i = 0; i < numFields;
              ++i) {
           rowKey = rowType.nameOf(i);
-          boost::algorithm::to_lower(rowKey);
+          if (!isFromJson) {
+            boost::algorithm::to_lower(rowKey);
+          }
           fieldKey2Idx[rowKey] = i;
           appearedIdxs.insert(i);
         }
@@ -1134,12 +1136,22 @@ struct CastFromJsonTypedImpl {
         for (auto fieldResult : object) {
           SIMDJSON_ASSIGN_OR_RAISE(auto field, fieldResult);
           SIMDJSON_ASSIGN_OR_RAISE(jsonKey, field.unescaped_key(true));
-          boost::algorithm::to_lower(jsonKey);
+          if (!isFromJson) {
+            boost::algorithm::to_lower(jsonKey);
+          }
           auto it = fieldKey2Idx.find(jsonKey);
           if (it == fieldKey2Idx.end()) {
             continue;
           }
           column_index_t jsonKeyIdx = it->second;
+          const bool isFirstOccurrence = appearedIdxs.erase(jsonKeyIdx) > 0;
+          if (!isFirstOccurrence) {
+            if (isFromJson) {
+              continue;
+            }
+            BOLT_USER_FAIL("Duplicate field: {}", jsonKey);
+          }
+
           if (!field.value().is_null()) {
             auto err = BOLT_DYNAMIC_TYPE_DISPATCH(
                 CastFromJsonTypedImpl<simdjson::ondemand::value>::apply,
@@ -1157,7 +1169,6 @@ struct CastFromJsonTypedImpl {
           } else {
             writerTyped.set_null_at(jsonKeyIdx);
           }
-          appearedIdxs.erase(jsonKeyIdx);
         }
 
         // set all non appearing columns to null
@@ -1509,7 +1520,7 @@ void JsonCastOperator::castFromJson(
   auto flinkCompatible =
       context.execCtx()->queryCtx()->queryConfig().enableFlinkCompatible();
 
-  rows.applyToSelected([&](auto row) {
+  context.applyToSelectedNoThrow(rows, [&](auto row) {
     writer.setOffset(row);
     if (inputVector->isNullAt(row)) {
       if (flinkCompatible &&
