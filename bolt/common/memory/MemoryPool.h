@@ -627,6 +627,8 @@ std::ostream& operator<<(std::ostream& out, MemoryPool::Kind kind);
 std::ostream& operator<<(std::ostream& os, const MemoryPool::Stats& stats);
 
 class MemoryPoolImpl : public MemoryPool {
+  friend class SlabMemoryResource;
+
  public:
   /// The callback invoked on the root memory pool destruction. It is set by
   /// memory manager to removes the pool from 'MemoryManager::pools_'.

@@ -79,10 +79,41 @@ TEST_F(BufferManagerPrivateStateTest, PinRejectsSpillingAndUnknownStates) {
   auto block = testingCreateBlockHandle(4096, MemoryTag::kTesting);
 
   block->memory_->state = BlockMemoryState::kSpilling;
+  EXPECT_FALSE(bm->IsSpilled(block));
   EXPECT_THROW((void)bm->Pin(block), std::exception);
 
   block->memory_->state = static_cast<BlockMemoryState>(99);
+  EXPECT_FALSE(bm->IsSpilled(block));
   EXPECT_THROW((void)bm->Pin(block), std::exception);
+}
+
+TEST_F(BufferManagerPrivateStateTest, IsSpilledTracksReclaimAndPrefetch) {
+  auto bm = makeBufferManager("is-spilled");
+  auto handle = bm->Allocate(4096, MemoryTag::kTesting);
+  auto block = handle.block();
+  handle.Ptr()[0] = 42;
+  EXPECT_FALSE(bm->IsSpilled(block));
+  handle = BufferHandle{};
+  EXPECT_FALSE(bm->IsSpilled(block));
+  try {
+    ASSERT_EQ(4096, bm->Reclaim(4096));
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+  EXPECT_TRUE(bm->IsSpilled(block));
+  std::array<std::shared_ptr<BlockHandle>, 1> blocks{block};
+  bm->Prefetch(blocks);
+  EXPECT_FALSE(bm->IsSpilled(block));
+  handle = bm->Pin(block);
+  EXPECT_EQ(42, handle.Ptr()[0]);
+  EXPECT_FALSE(bm->IsSpilled(block));
+  handle = BufferHandle{};
+  EXPECT_FALSE(bm->IsSpilled(block));
+  EXPECT_EQ(4096, bm->DiscardCleanResidentBlocks(blocks));
+  EXPECT_TRUE(bm->IsSpilled(block));
 }
 
 TEST_F(BufferManagerPrivateStateTest, PrefetchSubmitFailurePropagates) {

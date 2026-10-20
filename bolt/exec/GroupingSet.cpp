@@ -143,6 +143,9 @@ GroupingSet::~GroupingSet() {
   if (isGlobal_) {
     destroyGlobalAggregations();
   }
+  intermediateRows_.reset();
+  mergeRows_.reset();
+  table_.reset();
 }
 
 std::unique_ptr<GroupingSet> GroupingSet::createForMarkDistinct(
@@ -408,14 +411,16 @@ void GroupingSet::createHashTable() {
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        queryConfig_.useMonoAlloc());
   } else {
     table_ = HashTable<false>::createForAggregation(
         std::move(hashers_),
         accumulators(false),
         &pool_,
         nullptr,
-        jitRowEqVectors);
+        jitRowEqVectors,
+        queryConfig_.useMonoAlloc());
   }
 
   RowContainer& rows = *table_->rows();
@@ -929,6 +934,7 @@ void GroupingSet::resetTable() {
     table_->clear();
   }
 }
+
 void GroupingSet::resetDistinctNewGroups() {
   if (lookup_) {
     lookup_->distinctNewGroups.clear();
@@ -983,8 +989,7 @@ void GroupingSet::ensureInputFits(const RowVectorPtr& input) {
 
   auto* rows = table_->rows();
   auto [freeRows, outOfLineFreeBytes] = rows->freeSpace();
-  const auto outOfLineBytes =
-      rows->stringAllocator().retainedSize() - outOfLineFreeBytes;
+  const auto outOfLineBytes = rows->variableWidthUsedBytes();
   const auto outOfLineBytesPerRow = outOfLineBytes / numDistinct;
   const int64_t flatBytes = input->usedSize();
 
@@ -1223,7 +1228,9 @@ bool GroupingSet::getOutputWithSpill(
           false,
           false /*useListRowIndex*/,
           &pool_,
-          table_->rows()->stringAllocatorShared());
+          RowContainer::RowContainerParam{
+              .hsaAllocator = table_->rows()->stringAllocatorShared(),
+              .useMonotonicStringAllocation = queryConfig_.useMonoAlloc()});
 
       initializeAggregates(aggregates_, *mergeRows_, false);
     }
@@ -2060,7 +2067,9 @@ void GroupingSet::abandonPartialAggregation() {
       false,
       false /*useListRowIndex*/,
       &pool_,
-      table_->rows()->stringAllocatorShared());
+      RowContainer::RowContainerParam{
+          .hsaAllocator = table_->rows()->stringAllocatorShared(),
+          .useMonotonicStringAllocation = queryConfig_.useMonoAlloc()});
   initializeAggregates(aggregates_, *intermediateRows_, true);
   table_.reset();
 }

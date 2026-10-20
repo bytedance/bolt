@@ -378,10 +378,21 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
       core::PlanNodePtr planNode,
       const core::PlanNodeId& orderById,
       const std::string& duckDbSql,
-      const std::vector<uint32_t>& sortingKeys) {
+      const std::vector<uint32_t>& sortingKeys,
+      const std::unordered_map<std::string, std::string>& queryConfigs = {}) {
     {
       SCOPED_TRACE("run without spilling");
-      assertQueryOrdered(planNode, duckDbSql, sortingKeys);
+      if (queryConfigs.empty()) {
+        assertQueryOrdered(planNode, duckDbSql, sortingKeys);
+      } else {
+        auto queryCtx = core::QueryCtx::create(executor_.get());
+        auto queryConfigsCopy = queryConfigs;
+        queryCtx->testingOverrideConfigUnsafe(std::move(queryConfigsCopy));
+        CursorParameters params;
+        params.planNode = planNode;
+        params.queryCtx = queryCtx;
+        assertQueryOrdered(params, duckDbSql, sortingKeys);
+      }
     }
     if (GetParam().useGPU) {
       // Exiting function. The current GPU operators lack support for spilling.
@@ -392,11 +403,13 @@ class OrderByTest : public OperatorTestBase, public WithGPUParamInterface<> {
       auto spillDirectory = exec::test::TempDirectoryPath::create();
       auto queryCtx = core::QueryCtx::create(executor_.get());
       TestScopedSpillInjection scopedSpillInjection(100);
-      queryCtx->testingOverrideConfigUnsafe({
+      std::unordered_map<std::string, std::string> spillQueryConfigs{
           {core::QueryConfig::kSpillEnabled, "true"},
           {core::QueryConfig::kOrderBySpillEnabled, "true"},
           {core::QueryConfig::kJitLevel, "-1"},
-      });
+      };
+      spillQueryConfigs.insert(queryConfigs.begin(), queryConfigs.end());
+      queryCtx->testingOverrideConfigUnsafe(std::move(spillQueryConfigs));
       CursorParameters params;
       params.planNode = planNode;
       params.queryCtx = queryCtx;
@@ -861,6 +874,80 @@ TEST_P(OrderByTest, complexTypeKeys) {
       }
     }
   }
+}
+
+TEST_P(OrderByTest, stringAllocationModes) {
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>(
+           {"zz long string key",
+            "aa long string key",
+            "bb long string key",
+            "cc long string key"}),
+       makeFlatVector<std::string>(
+           {"payload longer than inline 0",
+            "payload longer than inline 1",
+            "payload longer than inline 2",
+            "payload longer than inline 3"})});
+  // A second batch lets forced spilling run with rows already buffered.
+  std::vector<RowVectorPtr> inputs{input, input};
+  createDuckDbTable(inputs);
+  core::PlanNodeId orderById;
+  auto plan = PlanBuilder()
+                  .values(inputs)
+                  .orderBy({"c0"}, false, GetParam().useGPU)
+                  .capturePlanNodeId(orderById)
+                  .planNode();
+  for (auto mono : {"false", "true"}) {
+    for (auto jit : {"-1", "1"}) {
+      for (bool hybrid : {false, true}) {
+        SCOPED_TRACE(
+            fmt::format("mono={}, jit={}, hybrid={}", mono, jit, hybrid));
+        runTest(
+            plan,
+            orderById,
+            "SELECT * FROM tmp ORDER BY c0",
+            {0},
+            {{core::QueryConfig::kUseMonoAlloc, mono},
+             {core::QueryConfig::kJitLevel, jit},
+             {core::QueryConfig::kHybridSortEnabled, hybrid ? "true" : "false"},
+             {core::QueryConfig::kRowBasedSpillMode,
+              hybrid ? "" : core::QueryConfig::kDefaultRowBasedSpillMode}});
+      }
+    }
+  }
+}
+
+TEST_P(OrderByTest, nameDescAgeAsc) {
+  std::vector<RowVectorPtr> vectors{
+      makeRowVector(
+          {"name", "age", "info"},
+          {makeFlatVector<StringView>(
+               {"alice", "bob", "bob", "carol", "alice", "dave"}),
+           makeFlatVector<int32_t>({34, 21, 18, 45, 29, 30}),
+           makeFlatVector<StringView>(
+               {"a34", "b21", "b18", "c45", "a29", "d30"})}),
+      makeRowVector(
+          {"name", "age", "info"},
+          {makeFlatVector<StringView>(
+               {"bob", "carol", "alice", "dave", "carol", "bob"}),
+           makeFlatVector<int32_t>({25, 41, 31, 27, 39, 22}),
+           makeFlatVector<StringView>(
+               {"b25", "c41", "a31", "d27", "c39", "b22"})})};
+  createDuckDbTable(vectors);
+
+  core::PlanNodeId orderById;
+  auto plan = PlanBuilder()
+                  .values(vectors)
+                  .orderBy({"name DESC", "age"}, false, GetParam().useGPU)
+                  .capturePlanNodeId(orderById)
+                  .planNode();
+
+  runTest(
+      plan,
+      orderById,
+      "SELECT name, age, info FROM tmp ORDER BY name desc, age",
+      {0, 1},
+      {{core::QueryConfig::kJitLevel, "1"}});
 }
 
 TEST_P(OrderByTest, DISABLED_moreThan3Keys) {

@@ -171,6 +171,12 @@ bool BufferManager::IsDirty(const std::shared_ptr<BlockHandle>& block) const {
   return block->memory_->dirty;
 }
 
+bool BufferManager::IsSpilled(const std::shared_ptr<BlockHandle>& block) const {
+  BOLT_CHECK_NOT_NULL(block);
+  BOLT_CHECK_NOT_NULL(block->memory_);
+  return block->memory_->state == BlockMemoryState::kSpilled;
+}
+
 void BufferManager::MarkDirty(const std::shared_ptr<BlockHandle>& block) {
   BOLT_CHECK_NOT_NULL(block);
   BOLT_CHECK_NOT_NULL(block->memory_);

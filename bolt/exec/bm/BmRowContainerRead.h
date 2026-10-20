@@ -17,17 +17,20 @@
 #pragma once
 
 #include "bolt/exec/bm/BmRowContainerPublicTypes.h"
+#include "bolt/exec/bm/BmScopedLoadedRows.h"
 #include "bolt/vector/TypeAliases.h"
 
 #include <folly/Range.h>
 
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace bytedance::bolt::exec::bm {
 
 class BmRowContainer;
+struct ChunkData;
 
 // Full segment reader. It keeps all bound segments loaded and does not provide
 // loaded-block eviction. Use ReadOnlyWindowReadSession when the working set
@@ -56,28 +59,37 @@ class BulkReadSession {
   friend class BmRowContainer;
 };
 
-// RowId-driven read-only reader for working sets that should not be fully kept
-// pinned. Each load pins required chunks through the owning BmRowContainer.
-// releaseLoadedChunks() drops the session's pins so BufferManager can reclaim
-// the chunks later under memory pressure. evictLoadedChunks() remains available
-// for explicit reclaim paths that want to release resident memory immediately.
-// Both operations are intentionally chunk-granular: a chunk's row block and
-// heap blocks move together so StringView rebase metadata can stay synchronized
-// with the heap base currently referenced by row-block StringViews.
+// RowId-driven read-only reader. Each scoped batch keeps its required chunks
+// pinned until destruction or reset. Overlapping batches from this session
+// share chunk leases; the final lease releases the row and heap block pins so
+// BufferManager can reclaim them under memory pressure. Pins already held by
+// a resident or bulk reader remain owned by that reader.
+// Lease counts are session-local. Callers must not overlap reads from multiple
+// ReadOnlyWindowReadSessions bound to the same BmRowContainer.
 class ReadOnlyWindowReadSession {
  public:
   ReadOnlyWindowReadSession() = default;
+  ~ReadOnlyWindowReadSession();
+  // A session can only move when it has no outstanding scoped batches.
+  ReadOnlyWindowReadSession(ReadOnlyWindowReadSession&& other) noexcept;
+  ReadOnlyWindowReadSession& operator=(
+      ReadOnlyWindowReadSession&& other) noexcept;
+  ReadOnlyWindowReadSession(const ReadOnlyWindowReadSession&) = delete;
+  ReadOnlyWindowReadSession& operator=(const ReadOnlyWindowReadSession&) =
+      delete;
 
   std::vector<RowId> listRowIds() const;
 
-  std::vector<const char*> loadRows(folly::Range<const RowId*> rows);
-  std::vector<const char*> loadRows(
-      folly::Range<const SegmentRowRange*> ranges);
+  ScopedLoadedRows loadRowsScoped(folly::Range<const RowId*> rows);
+  ScopedLoadedRows loadRowsScoped(folly::Range<const SegmentRowRange*> ranges);
 
-  const char* loadRow(const RowId& row);
+  /// Loads the leading rows of 'range' that belong to one physical chunk.
+  /// The returned ScopedLoadedRows owns the chunk lease. Its row pointers
+  /// remain valid until the ScopedLoadedRows object is destroyed.
+  ScopedLoadedRows loadChunkBoundedRowsScoped(const SegmentRowRange& range);
 
-  uint64_t releaseLoadedChunks(uint64_t targetBytes = kUnlimitedBytes);
-
+  // Reclaims chunks read by this session after their scoped batches end.
+  // Active batches and pins held by another owner remain protected.
   uint64_t evictLoadedChunks(uint64_t targetBytes = kUnlimitedBytes);
 
  private:
@@ -85,15 +97,31 @@ class ReadOnlyWindowReadSession {
       BmRowContainer* container,
       std::vector<SegmentId> segments);
 
+  std::vector<ChunkData*> chunksForRows(folly::Range<const RowId*> rows) const;
+  std::vector<RowId> expandRanges(
+      folly::Range<const SegmentRowRange*> ranges) const;
+  void releaseRowLeases(const std::vector<uint64_t>& chunkKeys) noexcept;
+
+  struct ActiveLease {
+    ChunkData* chunk;
+    uint64_t count{0};
+    // Do not release pins borrowed from the resident or bulk reader owner.
+    bool releasePins;
+  };
+
   BmRowContainer* container_{nullptr};
   // Segment read order requested by the caller.
   std::vector<SegmentId> segmentOrder_;
   // Fast validation set for RowIds submitted to this session.
   std::unordered_set<SegmentId> segments_;
+  // Tracks chunk identities for explicit eviction, without keeping pins.
   std::vector<std::pair<SegmentId, ChunkId>> loadedChunks_;
   std::unordered_set<uint64_t> loadedChunkKeys_;
+  std::unordered_map<uint64_t, ActiveLease> activeLeases_;
 
   friend class BmRowContainer;
+  friend class ScopedLoadedRows;
+  friend class ReadOnlyWindowReadSessionTestHelper;
 };
 
 // Read session for scanning multiple physically ordered segments.

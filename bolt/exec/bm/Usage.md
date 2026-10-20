@@ -126,25 +126,51 @@ auto session = rows.beginReadOnlyWindowReadSegments(range);
 std::vector<RowId> rowIds = session.listRowIds();
 
 std::vector<RowId> needed = ...;
-std::vector<const char*> rowPtrs = session.loadRows(
+auto batch = session.loadRowsScoped(
     folly::Range<const RowId*>(needed.data(), needed.size()));
+// Keep batch alive while using the const char* pointers from batch.data().
 ```
 
-Single-row loading is an explicit slow path:
+For a single row, pass a range of length one:
 
 ```cpp
-const char* row = session.loadRow(rowId);
+auto batch = session.loadRowsScoped(folly::Range<const RowId*>(&rowId, 1));
+const char* row = batch.data()[0];
+// Use row while batch is alive.
 ```
 
-The session returns only `const char*`. After the current batch is no longer in
-use, call `releaseLoadedChunks(targetBytes)` to release session-owned pins. The
-blocks remain managed by BufferManager and may later be reclaimed or spilled.
-Release is chunk-granular: a chunk's row block and heap blocks are unpinned
-together.
+`ScopedLoadedRows` is move-only. Destruction or `reset()` ends the read and
+releases its chunk leases. Overlapping batches within one session share lease
+counts: the final lease unpins the chunk's row block and heap blocks together.
+Pins borrowed from a resident or bulk reader remain owned by that reader.
 
-Use `evictLoadedChunks(targetBytes)` when resident blocks should be reclaimed
-immediately. Clean blocks can be discarded; dirty row blocks are written back
+Nested reads can keep an outer batch alive while releasing each inner batch
+at the end of its iteration:
+
+```cpp
+auto outer = session.loadRowsScoped(outerRowIds);
+for (const auto& candidateRowIds : candidateBatches) {
+  auto inner = session.loadRowsScoped(candidateRowIds);
+  // Compare rows using outer.data() and inner.data().
+} // Each inner batch ends here; outer remains valid.
+```
+
+To limit a range read to one physical chunk, use
+`loadChunkBoundedRowsScoped(range)`. It returns the leading rows of the range
+that belong to that chunk. Advance by the returned batch size to read the
+remaining rows.
+
+Unpinning does not immediately reclaim memory or write data. BufferManager
+keeps managing the blocks and can reclaim them under memory pressure. Use
+`evictLoadedChunks(targetBytes)` to attempt immediate reclamation after a
+batch ends. It skips chunks with active leases or pins held by another owner.
+Clean blocks can be discarded; dirty blocks that need writeback are written
 to their spill backing.
+
+The session and container must outlive every batch. Do not move the session,
+mutate the container, perform consuming reads, or acquire pins through another
+session while a batch is active. Overlapping reads from multiple read-only
+window sessions on the same container are unsupported.
 
 ## Reordered Segments and Merge Read
 
@@ -181,17 +207,23 @@ auto merge = rows.beginMergeReadSegments(range, false);
 
 ## Releasing and Evicting Data
 
-Release pins while keeping data available for later reads:
+End the current batch while keeping data available for later reads:
 
 ```cpp
-session.releaseLoadedChunks(targetBytes);
+batch.reset(); // Or let batch leave its scope.
 ```
 
-Attempt immediate resident-memory reclamation:
+Do not use pointers obtained from the batch after it ends. If another batch
+still uses the same chunk, that chunk remains pinned.
+
+Attempt immediate reclamation of resident blocks with no remaining users:
 
 ```cpp
 session.evictLoadedChunks(targetBytes);
 ```
+
+Eviction is chunk-granular, so the reclaimed bytes can exceed `targetBytes`.
+Call `loadRowsScoped()` again to read the same RowIds later.
 
 Release data permanently:
 
@@ -216,7 +248,7 @@ Hash Build:
 2. Call `spillActivePartitionSegment(partition)` as often as needed.
 3. Read `segmentsForPartition(partition)` during probe or later processing.
 4. Use `BulkReadSession::loadRows()` when everything fits; otherwise use
-   `ReadOnlyWindowReadSession::listRowIds()` and `loadRows()`.
+   `ReadOnlyWindowReadSession::listRowIds()` and `loadRowsScoped()`.
 5. Release the partition's segments when processing completes.
 
 ## Usage Constraints

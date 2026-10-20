@@ -31,10 +31,15 @@ set(
   ${FOLLY_BENCHMARK}
 )
 
+if(NOT APPLE)
+  find_package(jemalloc CONFIG REQUIRED)
+endif()
+
 add_executable(bolt_memory_alloc_benchmark MemoryAllocationBenchmark.cpp)
 add_executable(bolt_memory_alloc_contiguous_benchmark AllocateContiguousBenchmark.cpp)
 add_executable(bolt_memory_realloc_benchmark ReallocateBenchmark.cpp)
 add_executable(bolt_memory_realloc_contiguous_benchmark ReallocateContiguousBenchmark.cpp)
+add_executable(bolt_slab_allocator_benchmark SlabAllocatorBenchmark.cpp)
 
 target_link_libraries(
   bolt_memory_alloc_benchmark
@@ -52,6 +57,14 @@ target_link_libraries(
   bolt_memory_realloc_benchmark
   ${BOLT_BENCHMARK_DEPS}
   bolt_memory
+  pthread
+)
+
+target_link_libraries(
+  bolt_slab_allocator_benchmark
+  ${BOLT_BENCHMARK_DEPS}
+  bolt_memory
+  jemalloc::jemalloc
   pthread
 )
 

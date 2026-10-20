@@ -32,8 +32,10 @@
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/dwio/common/TypeWithId.h"
+#include "bolt/dwio/dwrf/writer/ColumnWriter.h"
 #include "bolt/dwio/dwrf/writer/WriterContext.h"
 #include "bolt/exec/MemoryReclaimer.h"
+#include "bolt/vector/FlatVector.h"
 
 using namespace ::testing;
 namespace bytedance::bolt::dwrf {
@@ -44,6 +46,61 @@ class WriterContextTest : public testing::Test {
   }
 };
 
+TEST_F(WriterContextTest, WideTableDictionaryMemory) {
+  constexpr uint32_t kNumColumns = 80'000;
+  constexpr int64_t kMiB = 1 << 20;
+  auto root = memory::memoryManager()->addRootPool(
+      "wide_table_dictionaries", 512 * kMiB);
+  auto inputPool = memory::memoryManager()->addLeafPool();
+  auto config = std::make_shared<Config>();
+  config->set(Config::COMPRESSION, common::CompressionKind_NONE);
+  config->set(Config::DISABLE_LOW_MEMORY_MODE, true);
+
+  // Keep all 80,000 column dictionaries live. Alternate integer and string
+  // columns to exercise both production resource-wiring paths. Two identical
+  // rows per column exercise insertion and dictionary lookup.
+  auto integers = BaseVector::create(BIGINT(), 2, inputPool.get());
+  integers->asFlatVector<int64_t>()->set(0, 42);
+  integers->asFlatVector<int64_t>()->set(1, 42);
+  auto strings = BaseVector::create(VARCHAR(), 2, inputPool.get());
+  strings->asFlatVector<StringView>()->set(0, StringView("shared"));
+  strings->asFlatVector<StringView>()->set(1, StringView("shared"));
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  std::vector<VectorPtr> children;
+  names.reserve(kNumColumns);
+  types.reserve(kNumColumns);
+  children.reserve(kNumColumns);
+  for (uint32_t i = 0; i < kNumColumns; ++i) {
+    names.push_back(fmt::format("c{}", i));
+    auto child = i % 2 == 0 ? integers : strings;
+    types.push_back(child->type());
+    children.push_back(std::move(child));
+  }
+  const auto rowType = ROW(std::move(names), std::move(types));
+  auto input = std::make_shared<RowVector>(
+      inputPool.get(), rowType, nullptr, 2, std::move(children));
+  auto typeWithId = dwio::common::TypeWithId::create(rowType);
+  {
+    WriterContext context{config, root};
+    auto writer = BaseColumnWriter::create(context, *typeWithId);
+    writer->write(input, common::Ranges::of(0, 2));
+
+    // Per-column slab resources would charge about 80 GiB and exhaust the
+    // 512 MiB pool before reaching this point. Only one reservation's worth
+    // of unused slab space may be charged across the entire writer.
+    const auto& resource = context.slabResource();
+    EXPECT_GT(resource.usedBytes(), 0);
+    EXPECT_LT(resource.freeBytes(), kMiB);
+    // Each column writer also preallocates a 4 KiB row buffer (312.5 MiB
+    // in total). Allow that real storage plus dictionary data and metadata.
+    EXPECT_LT(
+        context.getMemoryPool(MemoryUsageCategory::GENERAL).usedBytes(),
+        384 * kMiB);
+  }
+  EXPECT_EQ(root->usedBytes(), 0);
+}
+
 TEST_F(WriterContextTest, GetIntDictionaryEncoder) {
   auto config = std::make_shared<Config>();
   WriterContext context{
@@ -51,29 +108,26 @@ TEST_F(WriterContextTest, GetIntDictionaryEncoder) {
 
   EXPECT_EQ(0, context.dictEncoders_.size());
   auto& intEncoder_1_0 = context.getIntDictionaryEncoder<int32_t>(
-      {1, 0}, *context.dictionaryPool_, *context.generalPool_);
+      {1, 0}, *context.dictionaryPool_);
   EXPECT_EQ(1, context.dictEncoders_.size());
   ASSERT_EQ(1, intEncoder_1_0.refCount_);
 
   auto& duplicateCallResult_1_0 = context.getIntDictionaryEncoder<int32_t>(
-      {1, 0}, *context.dictionaryPool_, *context.generalPool_);
+      {1, 0}, *context.dictionaryPool_);
   EXPECT_EQ(1, context.dictEncoders_.size());
   EXPECT_EQ(&intEncoder_1_0, &duplicateCallResult_1_0);
   EXPECT_EQ(2, intEncoder_1_0.refCount_);
 
   for (size_t i = 0; i < 40; ++i) {
-    context.getIntDictionaryEncoder<int32_t>(
-        {1, 0}, *context.dictionaryPool_, *context.generalPool_);
+    context.getIntDictionaryEncoder<int32_t>({1, 0}, *context.dictionaryPool_);
   }
   EXPECT_EQ(42, intEncoder_1_0.refCount_);
 
   // Ignore the mismatched type request.
-  context.getIntDictionaryEncoder<int64_t>(
-      {1, 0}, *context.dictionaryPool_, *context.generalPool_);
+  context.getIntDictionaryEncoder<int64_t>({1, 0}, *context.dictionaryPool_);
   EXPECT_EQ(1, context.dictEncoders_.size());
 
-  context.getIntDictionaryEncoder<int32_t>(
-      {2, 0}, *context.dictionaryPool_, *context.generalPool_);
+  context.getIntDictionaryEncoder<int32_t>({2, 0}, *context.dictionaryPool_);
   EXPECT_EQ(2, context.dictEncoders_.size());
 }
 
@@ -85,22 +139,15 @@ TEST_F(WriterContextTest, RemoveIntDictionaryEncoderForNode) {
       memory::memoryManager()->addRootPool(
           "RemoveIntDictionaryEncoderForNode")};
 
-  context.getIntDictionaryEncoder<int32_t>(
-      {1, 1}, *context.dictionaryPool_, *context.generalPool_);
-  context.getIntDictionaryEncoder<int32_t>(
-      {1, 2}, *context.dictionaryPool_, *context.generalPool_);
-  context.getIntDictionaryEncoder<int32_t>(
-      {1, 4}, *context.dictionaryPool_, *context.generalPool_);
-  context.getIntDictionaryEncoder<int32_t>(
-      {1, 5}, *context.dictionaryPool_, *context.generalPool_);
+  context.getIntDictionaryEncoder<int32_t>({1, 1}, *context.dictionaryPool_);
+  context.getIntDictionaryEncoder<int32_t>({1, 2}, *context.dictionaryPool_);
+  context.getIntDictionaryEncoder<int32_t>({1, 4}, *context.dictionaryPool_);
+  context.getIntDictionaryEncoder<int32_t>({1, 5}, *context.dictionaryPool_);
   EXPECT_EQ(4, context.dictEncoders_.size());
 
-  context.getIntDictionaryEncoder<int32_t>(
-      {2, 0}, *context.dictionaryPool_, *context.generalPool_);
-  context.getIntDictionaryEncoder<int32_t>(
-      {3, 1}, *context.dictionaryPool_, *context.generalPool_);
-  context.getIntDictionaryEncoder<int32_t>(
-      {3, 3}, *context.dictionaryPool_, *context.generalPool_);
+  context.getIntDictionaryEncoder<int32_t>({2, 0}, *context.dictionaryPool_);
+  context.getIntDictionaryEncoder<int32_t>({3, 1}, *context.dictionaryPool_);
+  context.getIntDictionaryEncoder<int32_t>({3, 3}, *context.dictionaryPool_);
   EXPECT_EQ(7, context.dictEncoders_.size());
 
   context.removeAllIntDictionaryEncodersOnNode(

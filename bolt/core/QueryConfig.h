@@ -180,6 +180,11 @@ class QueryConfig {
   static constexpr const char* kHashAggregationCompositeOutputEnabled =
       "hashaggregation_composite_output_enabled";
 
+  // Store row strings in per-container monotonic resources for aggregation,
+  // hash join and sorting. Individual row erasure does not reclaim strings;
+  // clearing or destroying the container releases them.
+  static constexpr const char* kUseMonoAlloc = "use_mono_alloc";
+
   static constexpr const char* kHashAggregationUniqueRowOpt =
       "hashaggregation_unique_row_opt";
 
@@ -897,6 +902,10 @@ class QueryConfig {
 
   bool isHashAggregationCompositeOutputEnabled() const {
     return get<bool>(kHashAggregationCompositeOutputEnabled, false);
+  }
+
+  bool useMonoAlloc() const {
+    return get<bool>(kUseMonoAlloc, true);
   }
 
   bool isUniqueRowOptimizationEnabled() const {

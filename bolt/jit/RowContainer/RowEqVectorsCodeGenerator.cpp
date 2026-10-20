@@ -30,8 +30,16 @@ namespace bytedance::bolt::jit {
 std::string RowEqVectorsCodeGenerator::GetCmpFuncName() {
   std::string fn = "jit_r=v_cmp";
   fn += hasNullKeys ? "_null" : "";
+  bool hasStringView = false;
   for (auto i = 0; i < keysTypes.size(); ++i) {
     fn.append(keysTypes[i]->jitName());
+    if (keysTypes[i]->kind() == bytedance::bolt::TypeKind::VARCHAR ||
+        keysTypes[i]->kind() == bytedance::bolt::TypeKind::VARBINARY) {
+      hasStringView = true;
+    }
+  }
+  if (hasStringView && stringsAreContiguous_) {
+    fn.append("c");
   }
   return fn;
 }

@@ -333,7 +333,7 @@ TEST_F(
   auto session = container.beginReadOnlyWindowReadSegments({&segment, 1});
   auto rowIds = session.listRowIds();
   ASSERT_EQ(kRows, rowIds.size());
-  auto rows = session.loadRows({rowIds.data(), rowIds.size()});
+  auto rows = session.loadRowsScoped({rowIds.data(), rowIds.size()});
   ASSERT_EQ(kRows, rows.size());
 
   auto bigint = BaseVector::create(BIGINT(), rows.size(), pool());
