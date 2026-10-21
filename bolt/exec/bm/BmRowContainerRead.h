@@ -88,6 +88,11 @@ class ReadOnlyWindowReadSession {
   /// remain valid until the ScopedLoadedRows object is destroyed.
   ScopedLoadedRows loadChunkBoundedRowsScoped(const SegmentRowRange& range);
 
+  // The caller guarantees that every row through range's end has been
+  // consumed and will never be read again. Releases only a complete finalized
+  // chunk without outstanding leases; a chunk containing later rows is kept.
+  void releaseConsumedChunk(const SegmentRowRange& range);
+
   // Reclaims chunks read by this session after their scoped batches end.
   // Active batches and pins held by another owner remain protected.
   uint64_t evictLoadedChunks(uint64_t targetBytes = kUnlimitedBytes);

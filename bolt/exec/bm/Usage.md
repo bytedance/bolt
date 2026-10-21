@@ -56,6 +56,16 @@ char* row = context.row();
 `RowWriteContext` describes only the current row's write location. Never retain
 it across containers, spills, or asynchronous operations.
 
+To append a complete input batch, use `appendBatch(input, partitionId,
+&rowPtrs)`. The optional output receives resident row pointers. The default
+string storage mode copies non-inline strings into container-owned storage.
+
+`canAppendToCurrentChunk(input)` checks whether a batch fits the default
+partition's current pinned row block and last heap block without allocating
+another block. Unsupported inputs return false. This is a capacity snapshot,
+not a reservation: it excludes caller allocations, and spilling invalidates
+previous observations.
+
 ## Resident Pointer Access
 
 Comparison and extraction require resident row pointers:
@@ -224,6 +234,14 @@ session.evictLoadedChunks(targetBytes);
 
 Eviction is chunk-granular, so the reclaimed bytes can exceed `targetBytes`.
 Call `loadRowsScoped()` again to read the same RowIds later.
+
+For a sequential read whose consumed rows will never be needed again, call
+`session.releaseConsumedChunk(consumedRange)` after ending its scoped batch.
+The caller must have consumed every row through the range's end. The operation
+releases only the finalized chunk ending exactly there, with no outstanding
+leases or pins. Partial chunks and active write chunks remain available.
+Unlike eviction, this permanently removes the chunk's data; it cannot be read
+again. Release of the scoped batch alone only unpins its blocks.
 
 Release data permanently:
 

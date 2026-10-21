@@ -27,6 +27,98 @@
 namespace bytedance::bolt::exec::bm {
 namespace {
 
+TEST_F(BmRowContainerDiskIoTest, AppendFitUsesOnlyPinnedCurrentChunkCapacity) {
+  auto seed = makeRowVector({
+      makeFlatVector<std::string>({std::string(32, 'a')}),
+      makeFlatVector<std::string>({"00"}),
+  });
+  BmRowContainer container(
+      {VARCHAR(), VARCHAR()},
+      {true, true},
+      0,
+      bufferManager_,
+      memory::bm::MemoryTag::kTesting,
+      4096,
+      128);
+  EXPECT_FALSE(container.canAppendToCurrentChunk(seed));
+  container.appendBatch(seed);
+
+  // Both columns share the same 96-byte heap tail. Exact fit succeeds; each
+  // column fitting separately is insufficient when their combined size grows.
+  auto exactFit = makeRowVector({
+      makeFlatVector<std::string>({std::string(48, 'b')}),
+      makeFlatVector<std::string>({std::string(48, 'c')}),
+  });
+  EXPECT_TRUE(container.canAppendToCurrentChunk(exactFit));
+  auto dictionaryFit = makeRowVector({
+      wrapInDictionary(makeIndices({0, 0}), exactFit->childAt(0)),
+      makeNullableFlatVector<std::string>({std::nullopt, "00"}),
+  });
+  EXPECT_TRUE(container.canAppendToCurrentChunk(dictionaryFit));
+  auto overflow = makeRowVector({
+      makeFlatVector<std::string>({std::string(49, 'b')}),
+      makeFlatVector<std::string>({std::string(48, 'c')}),
+  });
+  EXPECT_FALSE(container.canAppendToCurrentChunk(overflow));
+  const auto before = bufferManager_->stats();
+  std::vector<char*> rows;
+  container.appendBatch(exactFit, kDefaultPartition, &rows);
+  EXPECT_EQ(before.liveBlocks, bufferManager_->stats().liveBlocks);
+  for (int column = 0; column < 2; ++column) {
+    auto result = BaseVector::create(VARCHAR(), 1, pool());
+    container.extractColumnResident(rows.data(), 1, column, result, true);
+    test::assertEqualVectors(exactFit->childAt(column), result);
+  }
+
+  auto inlineAndNull = makeRowVector({
+      makeNullableFlatVector<std::string>({"23", std::nullopt}),
+      makeNullableFlatVector<std::string>({std::nullopt, "00"}),
+  });
+  EXPECT_TRUE(container.canAppendToCurrentChunk(inlineAndNull));
+  EXPECT_FALSE(container.canAppendToCurrentChunk(seed));
+  auto tooManyRows = makeRowVector({
+      makeFlatVector<std::string>(4096, [](auto) { return "00"; }),
+      makeFlatVector<std::string>(4096, [](auto) { return "23"; }),
+  });
+  EXPECT_FALSE(container.canAppendToCurrentChunk(tooManyRows));
+  container.spillActiveSegment();
+  EXPECT_FALSE(container.canAppendToCurrentChunk(inlineAndNull));
+}
+
+TEST_F(BmRowContainerTest, AppendFitRejectsComplexInputs) {
+  auto input = makeRowVector({makeArrayVector<int64_t>({{1, 2}})});
+  BmRowContainer container(
+      {input->childAt(0)->type()},
+      {false},
+      0,
+      bufferManager_,
+      memory::bm::MemoryTag::kTesting,
+      4096,
+      128);
+  container.appendBatch(input);
+  EXPECT_FALSE(container.canAppendToCurrentChunk(input));
+}
+
+TEST_F(BmRowContainerTest, AppendFitNeedsNoHeapForInlineOrFixedWidthInputs) {
+  auto input = makeRowVector({
+      makeNullableFlatVector<int64_t>({1, std::nullopt}),
+      makeNullableFlatVector<std::string>({"00", std::nullopt}),
+  });
+  BmRowContainer container(
+      {BIGINT(), VARCHAR()},
+      {true, true},
+      0,
+      bufferManager_,
+      memory::bm::MemoryTag::kTesting,
+      4096,
+      128);
+  container.appendBatch(input);
+  EXPECT_TRUE(container.canAppendToCurrentChunk(input));
+  const auto before = bufferManager_->stats();
+  container.appendBatch(input);
+  EXPECT_EQ(before.liveBlocks, bufferManager_->stats().liveBlocks);
+}
+
 using bytedance::bolt::memory::bm::MemoryTag;
 
 TEST_F(BmRowContainerTest, AppendBatchStoresComplexEncodings) {

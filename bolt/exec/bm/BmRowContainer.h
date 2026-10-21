@@ -68,6 +68,11 @@ class BmRowContainer {
       std::vector<char*>* rows = nullptr,
       BmBatchStringStoreMode stringStoreMode = BmBatchStringStoreMode::kCopy);
 
+  // Checks whether copying this batch needs no new row or heap block. Only
+  // considers the current pinned chunk and its last heap block; unsupported
+  // inputs conservatively return false. Does not cover caller allocations.
+  bool canAppendToCurrentChunk(const RowVectorPtr& input) const;
+
   FOLLY_ALWAYS_INLINE void store(
       RowWriteContext& context,
       const DecodedVector& decoded,
