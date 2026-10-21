@@ -94,6 +94,13 @@ class BmRowContainer {
       const char* right,
       const std::vector<CompareFlags>& flags = {});
 
+  // Returns true if all selected columns are equal. Common scalar types avoid
+  // the general ordering comparator; unsupported types fall back to compare().
+  bool equalKeys(
+      const char* left,
+      const char* right,
+      folly::Range<const column_index_t*> columns) const;
+
   uint64_t hash(const char* row, int32_t column) const;
 
   FOLLY_ALWAYS_INLINE bool isNull(const char* row, int32_t column) const {
