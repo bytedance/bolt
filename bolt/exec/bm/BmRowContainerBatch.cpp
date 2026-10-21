@@ -131,6 +131,9 @@ struct BatchHeapWriter {
 } // namespace
 
 bool BmRowContainer::canAppendToCurrentChunk(const RowVectorPtr& input) const {
+  if (input == nullptr || input->childrenSize() != types_.size()) {
+    return false;
+  }
   const auto segmentId = segments_.activeSegmentId(kDefaultPartition);
   if (segmentId == kNoSegment) {
     return false;

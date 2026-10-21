@@ -85,6 +85,39 @@ TEST_F(BmRowContainerDiskIoTest, AppendFitUsesOnlyPinnedCurrentChunkCapacity) {
   EXPECT_FALSE(container.canAppendToCurrentChunk(inlineAndNull));
 }
 
+TEST_F(BmRowContainerTest, AppendFitRejectsNullAndMismatchedInputs) {
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({1}),
+      makeFlatVector<int64_t>({2}),
+  });
+  BmRowContainer container(
+      {BIGINT(), BIGINT()},
+      {false, false},
+      0,
+      bufferManager_,
+      memory::bm::MemoryTag::kTesting,
+      4096,
+      128);
+  container.appendBatch(input);
+  ASSERT_TRUE(container.canAppendToCurrentChunk(input));
+
+  EXPECT_FALSE(container.canAppendToCurrentChunk(nullptr));
+  auto fewerChildren = std::make_shared<RowVector>(
+      pool(),
+      input->type(),
+      nullptr,
+      input->size(),
+      std::vector<VectorPtr>{input->childAt(0)});
+  EXPECT_FALSE(container.canAppendToCurrentChunk(fewerChildren));
+  auto extraChildren = makeRowVector({
+      input->childAt(0),
+      input->childAt(1),
+      input->childAt(1),
+  });
+  EXPECT_FALSE(container.canAppendToCurrentChunk(extraChildren));
+  EXPECT_TRUE(container.canAppendToCurrentChunk(input));
+}
+
 TEST_F(BmRowContainerTest, AppendFitRejectsComplexInputs) {
   auto input = makeRowVector({makeArrayVector<int64_t>({{1, 2}})});
   BmRowContainer container(
