@@ -199,7 +199,7 @@ vector_size_t SequenceFunction<T, K>::checkArguments(
     DecodedVector* stepVector,
     vector_size_t row,
     bool isDate,
-    bool isYearMonth) {
+    bool isYearMonth) const {
   T start = startVector->valueAt<T>(row);
   T stop = stopVector->valueAt<T>(row);
   auto step = getStep(
@@ -225,9 +225,9 @@ vector_size_t SequenceFunction<T, K>::checkArguments(
 
   BOLT_USER_CHECK_LE(
       sequenceCount,
-      kMaxResultEntries,
+      maxResultEntries_,
       "result of sequence function must not have more than {} entries",
-      kMaxResultEntries);
+      maxResultEntries_);
   return sequenceCount;
 }
 
