@@ -150,6 +150,21 @@ jobs:
       run: |
         make ctest_release
 
+  gluten:
+    uses: ./.github/workflows/gluten-bolt.yml
+
+  gluten-bolt-check:
+    name: gluten-bolt-check
+    needs: gluten
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Gluten job to succeed
+        env:
+          GLUTEN_RESULT: ${{ needs.gluten.result }}
+        run: test "${GLUTEN_RESULT}" = success
+
   build-only:
       needs: [reuse-check, changes]
       if: >-

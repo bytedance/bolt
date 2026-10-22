@@ -133,6 +133,7 @@ jobs:
         if: ${{ steps.filter.outputs.lint == 'true' }}
         env:
           SKIP: clang-tidy
+          PRE_COMMIT_NO_CONCURRENCY: '1'
         run: |
           pre-commit run --all-files
 

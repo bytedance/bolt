@@ -14,6 +14,7 @@
 
 """Run installed BoltML through Ray Client and real workers on a local cluster."""
 
+from functools import partial
 import hashlib
 from importlib.metadata import version
 import os
@@ -66,14 +67,22 @@ class RayExecutionTests(unittest.TestCase):
             port = listener.getsockname()[1]
         cls.cluster = Cluster(shutdown_at_exit=True)
         cls.addClassCleanup(cls.cluster.shutdown)
-        cls.cluster.add_node(
-            node_ip_address="127.0.0.1",
-            num_cpus=4,
-            object_store_memory=128 * 1024 * 1024,
-            include_dashboard=False,
-            ray_client_server_port=port,
-            temp_dir=str(Path(cls.temporary.name) / "ray"),
-        )
+        # This fixture has one client. Avoid the multi-client proxy's gRPC fork
+        # race (ray-project/ray#63202) while keeping real Ray Client/worker execution.
+        with patch(
+            "ray._private.services.start_ray_client_server",
+            partial(
+                ray._private.services.start_ray_client_server, server_type="legacy"
+            ),
+        ):
+            cls.cluster.add_node(
+                node_ip_address="127.0.0.1",
+                num_cpus=4,
+                object_store_memory=128 * 1024 * 1024,
+                include_dashboard=False,
+                ray_client_server_port=port,
+                temp_dir=str(Path(cls.temporary.name) / "ray"),
+            )
         cls.addClassCleanup(ray.shutdown)
         try:
             ray.init(

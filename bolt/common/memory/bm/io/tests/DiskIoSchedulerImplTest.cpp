@@ -770,10 +770,9 @@ TEST(DiskIoSchedulerImplTest, retryableBackendBusyDoesNotFailRequest) {
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  ASSERT_EQ(1, backendPtr->submitAttempts());
-  EXPECT_EQ(
-      std::future_status::timeout,
-      future.wait_for(std::chrono::milliseconds(10)));
+  // The worker may dispatch before submit() posts its enqueue notification.
+  // That notification can then wake the worker for the successful retry.
+  ASSERT_GE(backendPtr->submitAttempts(), 1);
 
   backendPtr->wake();
   ASSERT_TRUE(waitUntilReady(future));
@@ -806,10 +805,12 @@ TEST(
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  ASSERT_EQ(1, backendPtr->submitAttempts());
+  ASSERT_GE(backendPtr->submitAttempts(), 1);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  EXPECT_EQ(1, backendPtr->submitAttempts());
+  // A late enqueue notification permits one retry after the initial dispatch.
+  // Further attempts without another wakeup would indicate a busy loop.
+  EXPECT_LE(backendPtr->submitAttempts(), 2);
   EXPECT_EQ(
       std::future_status::timeout,
       future.wait_for(std::chrono::milliseconds(0)));
