@@ -3579,6 +3579,92 @@ TEST_F(HashJoinTest, fullJoinWithNoMatchRangePartition) {
       .run();
 }
 
+class RangePartitionMatchFlagTest
+    : public HashJoinTest,
+      public testing::WithParamInterface<
+          std::tuple<core::JoinType, bool, std::string>> {};
+
+TEST_P(RangePartitionMatchFlagTest, reuseAcrossProbeBatches) {
+  const auto& [joinType, withFilter, spillMode] = GetParam();
+  std::vector<RowVectorPtr> buildVectors;
+  int64_t offset = 0;
+  for (int32_t size : {64, 257, 31}) {
+    buildVectors.push_back(makeRowVector(
+        {"bkey", "bvalue"},
+        {makeFlatVector<int64_t>(size, [](auto /*row*/) { return 7; }),
+         makeFlatVector<int64_t>(
+             size, [&](auto row) { return offset + row; })}));
+    offset += size;
+  }
+
+  // Reuse the match flags for both larger and smaller probe batches. Include
+  // rows that match early, match only in later ranges, or never match.
+  std::vector<RowVectorPtr> probeVectors;
+  for (int32_t size : {1, 129, 3}) {
+    probeVectors.push_back(makeRowVector(
+        {"pkey", "pvalue"},
+        {makeFlatVector<int64_t>(
+             size, [](auto row) { return row % 4 == 3 ? 9 : 7; }),
+         makeFlatVector<int64_t>(size, [](auto row) {
+           return row % 3 == 0 ? 10 : (row % 3 == 1 ? 100 : 1'000);
+         })}));
+  }
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto ids = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(ids)
+                  .values(probeVectors)
+                  .hashJoin(
+                      {"pkey"},
+                      {"bkey"},
+                      PlanBuilder(ids).values(buildVectors).planNode(),
+                      withFilter ? "pvalue < bvalue" : "",
+                      {"pkey", "pvalue", "bkey", "bvalue"},
+                      joinType)
+                  .planNode();
+  auto spillDirectory = TempDirectoryPath::create();
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .maxDrivers(1)
+          .spillDirectory(spillDirectory->path)
+          .config(core::QueryConfig::kSpillEnabled, true)
+          .config(core::QueryConfig::kJoinSpillEnabled, true)
+          .config(core::QueryConfig::kJoinSpillMemoryThreshold, 1)
+          // Force multiple build files using the existing byte-size limit and
+          // keep probe batches separate when they are spilled.
+          .config(core::QueryConfig::kMaxSpillFileSize, 1)
+          .config(core::QueryConfig::kSpillWriteBufferSize, 0)
+          .config(core::QueryConfig::kHashJoinSkewedPartitionEnabled, true)
+          .config(core::QueryConfig::kRowBasedSpillMode, spillMode)
+          .config(core::QueryConfig::kHybridJoinEnabled, false)
+          .config(core::QueryConfig::kJitLevel, -1)
+          .assertResults(fmt::format(
+              "SELECT pkey, pvalue, bkey, bvalue FROM t {} JOIN u "
+              "ON pkey = bkey{}",
+              joinType == core::JoinType::kLeft ? "LEFT" : "FULL",
+              withFilter ? " AND pvalue < bvalue" : ""));
+  const auto stats = taskSpilledStats(*task);
+  ASSERT_GE(stats.first.spilledFiles, 3);
+  const auto planStats = toPlanStats(task->taskStats());
+  ASSERT_EQ(
+      planStats.at(plan->id())
+          .customStats.at("skewedHashBuildUsingRangePartition")
+          .sum,
+      1);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    HashJoin,
+    RangePartitionMatchFlagTest,
+    testing::Combine(
+        testing::Values(core::JoinType::kLeft, core::JoinType::kFull),
+        testing::Bool(),
+        testing::Values(
+            std::string("disable"),
+            std::string("raw"),
+            std::string("compression"))));
+
 TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
   // Left side keys are [0, 1, 2,..10].
   std::vector<RowVectorPtr> probeVectors = mergeBatches(

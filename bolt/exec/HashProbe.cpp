@@ -879,6 +879,8 @@ void HashProbe::prepareMatchFlag(vector_size_t size, RowVectorPtr& matchFlag) {
   }
   // set match flag to false
   auto flags = matchFlag->childAt(0)->as<FlatVector<bool>>();
+  // Reusing a RowVector resets its children to size zero.
+  flags->resize(size);
   memset(
       (char*)(flags->asRange().data()), 0x00, BaseVector::byteSize<bool>(size));
 }
