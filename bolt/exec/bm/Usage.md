@@ -56,16 +56,6 @@ char* row = context.row();
 `RowWriteContext` describes only the current row's write location. Never retain
 it across containers, spills, or asynchronous operations.
 
-To append a complete input batch, use `appendBatch(input, partitionId,
-&rowPtrs)`. The optional output receives resident row pointers. The default
-string storage mode copies non-inline strings into container-owned storage.
-
-`canAppendToCurrentChunk(input)` checks whether a batch fits the default
-partition's current pinned row block and last heap block without allocating
-another block. Unsupported inputs return false. This is a capacity snapshot,
-not a reservation: it excludes caller allocations, and spilling invalidates
-previous observations.
-
 ## Resident Pointer Access
 
 Comparison and extraction require resident row pointers:
