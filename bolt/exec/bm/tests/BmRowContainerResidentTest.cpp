@@ -321,6 +321,104 @@ TEST_F(BmRowContainerTest, EqualKeysMatchesGeneralComparison) {
       rows[0], rows[5], {firstKey.data(), firstKey.size()}));
 }
 
+TEST_F(BmRowContainerTest, EqualKeysMatchesComplexComparison) {
+  auto arrays = makeNullableArrayVector<int64_t>({
+      {1, std::nullopt},
+      {1, std::nullopt},
+      {1, 2},
+      {2, std::nullopt},
+      {1, std::nullopt},
+  });
+  auto maps = makeMapVector<int64_t, int64_t>({
+      {{2, 20}, {1, std::nullopt}},
+      {{1, std::nullopt}, {2, 20}},
+      {{1, 10}, {2, 20}},
+      {{1, std::nullopt}, {2, 21}},
+      {{2, 20}, {1, std::nullopt}},
+  });
+  auto nestedRows = makeRowVector({
+      makeNullableFlatVector<int64_t>(
+          {std::nullopt, std::nullopt, std::nullopt, std::nullopt, 7}),
+      arrays,
+  });
+  BmRowContainer container(
+      {arrays->type(), maps->type(), nestedRows->type()},
+      {false, false, false},
+      3,
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto rows = storeAll(container, makeRowVector({arrays, maps, nestedRows}));
+  ASSERT_EQ(5, rows.size());
+
+  // Top-level keys are non-null, so nested nulls exercise complex comparison.
+  // Rows 0 and 1 are equivalent; rows 2 and 3 change a null or a value.
+  for (column_index_t column = 0; column < 3; ++column) {
+    SCOPED_TRACE(column);
+    const std::array<column_index_t, 1> key{column};
+    const auto equal = [&](vector_size_t left, vector_size_t right) {
+      return container.equalKeys(
+          rows[left], rows[right], {key.data(), key.size()});
+    };
+    EXPECT_TRUE(equal(0, 1));
+    EXPECT_FALSE(equal(0, 2));
+    EXPECT_FALSE(equal(0, 3));
+    for (vector_size_t left = 0; left < rows.size(); ++left) {
+      for (vector_size_t right = 0; right < rows.size(); ++right) {
+        EXPECT_EQ(
+            container.compare(rows[left], rows[right], column) == 0,
+            equal(left, right))
+            << "left=" << left << " right=" << right;
+      }
+    }
+  }
+
+  // Row 4 differs from row 0 only in the ROW key's nullable scalar field.
+  const std::array<column_index_t, 1> rowKey{2};
+  EXPECT_FALSE(
+      container.equalKeys(rows[0], rows[4], {rowKey.data(), rowKey.size()}));
+}
+
+TEST_F(BmRowContainerTest, EqualKeysUsesOnlySelectedColumns) {
+  auto input = makeRowVector({
+      makeFlatVector<int64_t>({1, 1, 1, 2}),
+      makeFlatVector<std::string>({"same", "different", "same", "same"}),
+      makeFlatVector<int32_t>({7, 7, 8, 7}),
+  });
+  BmRowContainer container(
+      {BIGINT(), VARCHAR(), INTEGER()},
+      {false, false, false},
+      3,
+      bufferManager_,
+      MemoryTag::kTesting);
+  auto rows = storeAll(container, input);
+  ASSERT_EQ(4, rows.size());
+
+  // Distinct rows with different values still match an empty selection.
+  EXPECT_TRUE(container.equalKeys(rows[0], rows[3], {}));
+
+  const std::array<column_index_t, 2> nonContiguous{0, 2};
+  const std::array<column_index_t, 2> reordered{2, 0};
+  for (const auto& columns : {nonContiguous, reordered}) {
+    SCOPED_TRACE(columns[0]);
+    const folly::Range<const column_index_t*> selected{
+        columns.data(), columns.size()};
+    // Ignore column 1, but observe differences in either selected column.
+    EXPECT_TRUE(container.equalKeys(rows[0], rows[1], selected));
+    EXPECT_FALSE(container.equalKeys(rows[0], rows[2], selected));
+    EXPECT_FALSE(container.equalKeys(rows[0], rows[3], selected));
+    for (vector_size_t left = 0; left < rows.size(); ++left) {
+      for (vector_size_t right = 0; right < rows.size(); ++right) {
+        const bool expected =
+            container.compare(rows[left], rows[right], columns[0]) == 0 &&
+            container.compare(rows[left], rows[right], columns[1]) == 0;
+        EXPECT_EQ(
+            expected, container.equalKeys(rows[left], rows[right], selected))
+            << "left=" << left << " right=" << right;
+      }
+    }
+  }
+}
+
 TEST_F(BmRowContainerTest, EqualKeysMatchesGeneralComparisonSpecialValues) {
   const auto nan = std::numeric_limits<double>::quiet_NaN();
   const auto floatNan = std::numeric_limits<float>::quiet_NaN();
