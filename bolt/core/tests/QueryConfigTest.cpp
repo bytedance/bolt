@@ -126,6 +126,29 @@ TEST_F(QueryConfigTest, useMonoAlloc) {
   ASSERT_FALSE(queryCtx->queryConfig().useMonoAlloc());
 }
 
+TEST_F(QueryConfigTest, simdHashTableEnabled) {
+  {
+    auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+
+  {
+    std::unordered_map<std::string, std::string> configData(
+        {{QueryConfig::kSimdHashTableEnabled, "false"}});
+    auto queryCtx =
+        QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+
+  {
+    std::unordered_map<std::string, std::string> configData(
+        {{QueryConfig::kSimdHashTableEnabled, "true"}});
+    auto queryCtx =
+        QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+    EXPECT_TRUE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+}
+
 TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {
   auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
   ASSERT_TRUE(queryCtx->queryConfig()

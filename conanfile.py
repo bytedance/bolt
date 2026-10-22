@@ -801,8 +801,12 @@ class BoltConan(ConanFile):
                 ]
             )
         if self.options.get_safe("enable_s3"):
-            self.cpp_info.components["bolt_engine"].requires.append(
-                "aws-c-common::aws-c-common"
+            self.cpp_info.components["bolt_engine"].requires.extend(
+                [
+                    "aws-sdk-cpp::s3",
+                    "aws-sdk-cpp::identity-management",
+                    "aws-c-common::aws-c-common",
+                ]
             )
         if self.options.get_safe("spark_compatible") and not self.options.shared:
             self.cpp_info.components["bolt_engine"].requires.append(

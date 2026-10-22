@@ -881,9 +881,9 @@ class DecimalUtil {
     }
     int32_t parsedPrecision = static_cast<int32_t>(significantDigits);
 
-    int32_t parsedScale = 0;
+    int64_t parsedScale = 0;
     bool roundUp = false;
-    const int32_t fractionSize = decimalComponents.fractionalDigits.size();
+    const int64_t fractionSize = decimalComponents.fractionalDigits.size();
     if (!decimalComponents.exponent.has_value()) {
       if (fractionSize > toScale) {
         if (decimalComponents.fractionalDigits[toScale] >= '5') {
@@ -896,7 +896,7 @@ class DecimalUtil {
         parsedScale = fractionSize;
       }
     } else {
-      const auto exponent = decimalComponents.exponent.value();
+      const int64_t exponent = decimalComponents.exponent.value();
       parsedScale = -exponent + fractionSize;
       // Truncate the fractionalDigits.
       if (parsedScale > toScale) {
@@ -956,8 +956,14 @@ class DecimalUtil {
       if (UNLIKELY(overflow)) {
         return Status::UserError("Value too large.");
       }
-      parsedPrecision -= parsedScale;
+      parsedPrecision -= static_cast<int32_t>(parsedScale);
       parsedScale = toScale;
+    }
+
+    if (FOLLY_UNLIKELY(
+            parsedScale - toScale > LongDecimalType::kMaxPrecision)) {
+      decimalValue = 0;
+      return Status::OK();
     }
 
     const auto status = DecimalUtil::rescaleWithRoundUp<int128_t, T>(

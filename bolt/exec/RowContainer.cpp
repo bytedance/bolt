@@ -271,6 +271,7 @@ RowContainer::RowContainer(
       ++nullOffset;
     }
     keyIndices_.emplace_back(keyIdx++);
+    columnHasNulls_.push_back(false);
   }
   // Make offset at least sizeof pointer so that there is space for a
   // free list next pointer below the bit at 'freeFlagOffset_'.
@@ -290,6 +291,7 @@ RowContainer::RowContainer(
     nullOffsets_.push_back(nullOffset);
     ++nullOffset;
     isVariableWidth |= !type->isFixedWidth();
+    columnHasNulls_.push_back(false);
   }
   if (hasProbedFlag) {
     nullOffsets_.push_back(nullOffset);
@@ -611,7 +613,8 @@ void RowContainer::store(
         row,
         rowColumn.offset(),
         rowColumn.nullByte(),
-        rowColumn.nullMask());
+        rowColumn.nullMask(),
+        column);
   }
 }
 
@@ -813,6 +816,7 @@ void RowContainer::copySerializedRow(
     RowFormatInfo* const info) {
   auto newRow = this->newRow();
   memcpy(newRow, serializedRow, info->fixRowSize);
+  updateColumnHasNulls(newRow);
   for (const auto& [isStr, rowColumn] : info->variableColumns) {
     if (RowContainer::isNullAt(serializedRow, rowColumn)) {
       continue;
@@ -847,6 +851,7 @@ void RowContainer::storeSerializedRow(
 
   const int32_t nullBytes = bits::nbytes(nullOffsets_.size());
   memcpy(row + rowColumns_[0].nullByte(), serialized.data(), nullBytes);
+  updateColumnHasNulls(row);
   offset += nullBytes;
 
   RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
@@ -889,11 +894,13 @@ void RowContainer::storeComplexType(
     char* row,
     int32_t offset,
     int32_t nullByte,
-    uint8_t nullMask) {
+    uint8_t nullMask,
+    int32_t column) {
   if (decoded.isNullAt(index)) {
     BOLT_DCHECK(nullMask);
     row[nullByte] |= nullMask;
     valueAt<std::string_view>(row, offset) = std::string_view();
+    updateColumnHasNulls(column);
     return;
   }
   // RowSizeTracker tracker(row[rowSizeOffset_], *stringAllocator_);
@@ -920,6 +927,14 @@ void RowContainer::storeComplexType(
   auto value = *reinterpret_cast<uint32_t*>(row + rowSizeOffset_) + size;
   *reinterpret_cast<uint32_t*>(row + rowSizeOffset_) =
       std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max());
+}
+
+void RowContainer::updateColumnHasNulls(const char* row) {
+  for (int32_t i = 0; i < columnHasNulls_.size(); ++i) {
+    if (isNullAt(row, columnAt(i))) {
+      columnHasNulls_[i] = true;
+    }
+  }
 }
 
 //   static
