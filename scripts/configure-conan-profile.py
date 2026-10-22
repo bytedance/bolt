@@ -81,6 +81,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -306,9 +307,33 @@ def run_command(command: list[str]) -> str:
     ).stdout.strip()
 
 
+def validate_conan_compiler(compiler: CompilerInfo) -> None:
+    # Ask the active Conan installation, including settings_user.yml overrides.
+    # Validate before replacing an existing profile.
+    with tempfile.TemporaryDirectory(prefix="bolt-conan-") as directory:
+        profile = Path(directory) / "compiler"
+        profile.write_text(
+            f"[settings]\ncompiler={compiler.family}\n"
+            f"compiler.version={compiler.version}\n"
+        )
+        result = subprocess.run(
+            ["conan", "profile", "show", "-pr:h", str(profile), "-pr:b", str(profile)],
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode:
+        raise RuntimeError(
+            f"Conan cannot use {compiler.family} {compiler.version}. "
+            "Upgrade Conan (python -m pip install --upgrade conan) or update "
+            "the active Conan settings to support this compiler.\n"
+            f"{result.stderr.strip()}"
+        )
+
+
 def resolve_executable(command: str) -> str:
     if "/" in command:
-        executable = Path(command).expanduser().resolve()
+        # Preserve argv[0]: clang++ may symlink to clang but selects the C++ driver.
+        executable = Path(command).expanduser().absolute()
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise RuntimeError(
                 f"Required compiler not found or not executable: {command}"
@@ -969,6 +994,7 @@ def main() -> int:
             compiler_info, libcxx = select_compiler_and_libcxx(
                 args.compiler, args.libcxx
             )
+            validate_conan_compiler(compiler_info)
         except (OSError, RuntimeError, subprocess.SubprocessError) as error:
             requested_compiler = args.compiler or "an automatically selected compiler"
             print(
