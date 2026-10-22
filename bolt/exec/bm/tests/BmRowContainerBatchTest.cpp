@@ -109,6 +109,31 @@ TEST_F(BmRowContainerTest, AppendBatchStoresFixedAndVariableRows) {
   EXPECT_EQ("charlie", varcharFlat->valueAt(2).str());
 }
 
+TEST_F(BmRowContainerTest, AppendBatchPreservesBooleanBitPatterns) {
+  // Cross byte and word boundaries in the bit-packed source. The nullable
+  // column exercises decoded.valueAt<bool>() as a reference for the fast path.
+  auto values = makeFlatVector<bool>(
+      130, [](auto row) { return row % 3 == 0 || row == 63 || row == 64; });
+  auto input = makeRowVector({values, values});
+  BmRowContainer container(
+      {BOOLEAN(), BOOLEAN()},
+      {false, true},
+      0,
+      bufferManager_,
+      MemoryTag::kTesting,
+      64);
+  std::vector<char*> rows;
+  container.appendBatch(input, kDefaultPartition, &rows);
+  ASSERT_EQ(input->size(), rows.size());
+
+  for (int32_t column = 0; column < 2; ++column) {
+    SCOPED_TRACE(column);
+    auto result = BaseVector::create(BOOLEAN(), rows.size(), pool());
+    container.extractColumnResident(rows.data(), rows.size(), column, result);
+    test::assertEqualVectors(values, result);
+  }
+}
+
 TEST_F(BmRowContainerTest, AppendBatchPreservesNulls) {
   BmRowContainer container(
       {BIGINT(), VARCHAR()},
