@@ -42,6 +42,24 @@ using namespace bytedance::bolt::dwio::common::typeutils;
 using bytedance::bolt::type::fbhive::HiveTypeParser;
 using bytedance::bolt::type::fbhive::HiveTypeSerializer;
 
+namespace {
+class JsonType : public VarcharType {
+ public:
+  bool equivalent(const Type& other) const override {
+    return this == &other;
+  }
+
+  const char* name() const override {
+    return "JSON";
+  }
+};
+
+const TypePtr& jsonType() {
+  static const TypePtr type = std::make_shared<const JsonType>();
+  return type;
+}
+} // namespace
+
 TEST(TestType, selectedType) {
   auto type = HiveTypeParser().parse(
       "struct<col0:tinyint,col1:smallint,col2:array<string>,"
@@ -207,6 +225,20 @@ TEST(TestType, typeCompatibility) {
 
   from = ROW({MAP(VARCHAR(), INTEGER())});
   to = ROW({MAP(VARCHAR(), DOUBLE())});
+  EXPECT_THROW(checkTypeCompatibility(*from, *to, true), BoltUserError);
+
+  from = ROW({ROW({BIGINT(), BOOLEAN()})});
+  to = ROW({ROW({VARCHAR(), BOOLEAN()})});
+  checkTypeCompatibility(*from, *to, true);
+
+  // Short decimals use BIGINT as their physical kind, but must not be routed
+  // through the integer-to-string reader.
+  from = ROW({DECIMAL(10, 2)});
+  to = ROW({VARCHAR()});
+  EXPECT_THROW(checkTypeCompatibility(*from, *to, true), BoltUserError);
+
+  from = ROW({BIGINT()});
+  to = ROW({jsonType()});
   EXPECT_THROW(checkTypeCompatibility(*from, *to, true), BoltUserError);
 }
 
