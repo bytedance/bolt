@@ -31,7 +31,7 @@ void BigDecimal::compactVal() {
   }
 }
 
-void BigDecimal::setScale(int newScale) {
+void BigDecimal::setScale(int newScale, RoundingMode mode) {
   if (scale == newScale || isZero) {
     return;
   }
@@ -40,9 +40,17 @@ void BigDecimal::setScale(int newScale) {
     int changeScale = scale - newScale;
     boost::multiprecision::cpp_int scaleVal = boost::multiprecision::pow(
         boost::multiprecision::cpp_int(10), changeScale);
-    boost::multiprecision::cpp_int quotient = intVal % scaleVal;
+    boost::multiprecision::cpp_int remainder = intVal % scaleVal;
     intVal /= scaleVal;
-    bool increment = quotient >= scaleVal / 2;
+    // intVal is the magnitude and sign is tracked separately, so incrementing
+    // rounds away from zero, matching java.math.RoundingMode semantics.
+    const boost::multiprecision::cpp_int half = scaleVal / 2;
+    bool increment;
+    if (mode == RoundingMode::kHalfEven) {
+      increment = remainder > half || (remainder == half && intVal % 2 != 0);
+    } else {
+      increment = remainder >= half;
+    }
     if (increment) {
       intVal++;
     }
