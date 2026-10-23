@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Ensure paimon Python package is available for tests that use it.
-# Only runs during cmake configuration; skips if already installed.
+# PaimonConnectorTest creates its tables with the pypaimon Python package.
+# Only check for it here; the test fails at runtime when it is missing.
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -25,23 +25,12 @@ execute_process(
   OUTPUT_QUIET
 )
 if(NOT _paimon_check_result EQUAL 0)
-  message(STATUS "Installing paimon Python package for integration tests...")
-  execute_process(
-    COMMAND
-      ${Python3_EXECUTABLE} -m pip install
-      "git+https://github.com/apache/paimon@release-1.4.1-rc2#subdirectory=paimon-python"
-    RESULT_VARIABLE _paimon_install_result
-    OUTPUT_VARIABLE _paimon_install_output
-    ERROR_VARIABLE _paimon_install_error
+  message(
+    WARNING
+    "Python package pypaimon is not available for ${Python3_EXECUTABLE}; "
+    "PaimonConnectorTest will fail. Install it with: "
+    "${Python3_EXECUTABLE} -m pip install pypaimon==1.4.1"
   )
-  if(NOT _paimon_install_result EQUAL 0)
-    message(
-      WARNING
-      "Failed to install paimon Python package: ${_paimon_install_error}. Please install at least version 1.4.1"
-    )
-  else()
-    message(STATUS "paimon Python package installed successfully")
-  endif()
 endif()
 
 set(
