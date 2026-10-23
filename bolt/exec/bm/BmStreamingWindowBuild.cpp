@@ -22,6 +22,7 @@
 #include "bolt/exec/bm/BmAggregateWindow.h"
 
 #include <folly/ScopeGuard.h>
+#include <glog/logging.h>
 
 #include <algorithm>
 
@@ -54,17 +55,10 @@ BmStreamingWindowBuild::BmStreamingWindowBuild(
           enableJit),
       numWindowFunctions_(windowNode->windowFunctions().size()),
       bufferManager_(std::move(bufferManager)),
-      bmData_(std::make_unique<exec::bm::BmRowContainer>(
-          inputType_->children(),
-          makeNullableColumns(inputType_->size()),
-          partitionKeyInfo_.size() + sortKeyInfo_.size(),
-          bufferManager_,
-          memory::bm::MemoryTag::kWindow,
-          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge),
-          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge))),
       partitionSchema_(makeBmWindowPartitionSchema(
           windowNode->inputType()->children(),
           inversedInputChannels_)) {
+  BOLT_CHECK_NOT_NULL(bufferManager_);
   partitionKeyColumns_.reserve(partitionKeyInfo_.size());
   boundaryKeyColumns_.reserve(partitionKeyInfo_.size() + sortKeyInfo_.size());
   auto addBoundaryKeyColumn = [&](int32_t column) {
@@ -81,6 +75,28 @@ BmStreamingWindowBuild::BmStreamingWindowBuild(
   for (const auto& key : sortKeyInfo_) {
     addBoundaryKeyColumn(key.first);
   }
+}
+
+void BmStreamingWindowBuild::initializeData() {
+  if (bmData_ != nullptr) {
+    return;
+  }
+  if (allocationPool_ == nullptr) {
+    allocationPool_ = bufferManager_->addOperatorPool("bm." + pool_->name());
+    LOG(INFO) << "BM allocation leaf created: aggregate="
+              << allocationPool_->parent()->name()
+              << ", op_pool=" << pool_->name()
+              << ", bm_leaf=" << allocationPool_->name();
+  }
+  bmData_ = std::make_unique<exec::bm::BmRowContainer>(
+      inputType_->children(),
+      makeNullableColumns(inputType_->size()),
+      partitionKeyInfo_.size() + sortKeyInfo_.size(),
+      bufferManager_,
+      memory::bm::MemoryTag::kWindow,
+      memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge),
+      memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge),
+      allocationPool_);
 }
 
 bool BmStreamingWindowBuild::needsInput() {
@@ -291,8 +307,8 @@ void BmStreamingWindowBuild::prepareMemoryForAppend(const RowVectorPtr& input) {
   // Window::reclaim to spill the current active segment first. The result is
   // only a hint: the real append can still allocate later if memory changes.
   memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
-  const auto reserved = bufferManager_->MaybeReserve(estimatedBytes);
-  bufferManager_->ReleaseUnusedReservation();
+  const auto reserved = allocationPool_->maybeReserve(estimatedBytes);
+  allocationPool_->release();
   (void)reserved;
 }
 
@@ -431,6 +447,7 @@ void BmStreamingWindowBuild::addInput(RowVectorPtr input) {
     return;
   }
 
+  initializeData();
   auto reordered = makeReorderedInput(input);
   std::vector<char*> rows;
   prepareMemoryForAppend(reordered);
@@ -530,6 +547,9 @@ void BmStreamingWindowBuild::finish() {
   inputFinished_ = false;
   activeRows_ = 0;
   bmData_.reset();
+  if (allocationPool_ != nullptr) {
+    allocationPool_->release();
+  }
 }
 
 } // namespace bytedance::bolt::exec::window

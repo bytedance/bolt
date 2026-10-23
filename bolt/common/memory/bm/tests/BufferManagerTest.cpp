@@ -236,6 +236,59 @@ TEST_F(BufferManagerTest, BatchAllocateZeroCountReturnsEmpty) {
   EXPECT_EQ(0, bm->stats().allocatedBlocks);
 }
 
+TEST_F(BufferManagerTest, ExplicitOperatorPoolsKeepSameTagAllocationsSeparate) {
+  auto bm = makeBufferManager("operator-pool-separation");
+  auto firstPool = bm->addOperatorPool("same-tag-first");
+  auto secondPool = bm->addOperatorPool("same-tag-second");
+
+  auto first = bm->Allocate(4096, MemoryTag::kTesting, firstPool);
+  auto second = bm->Allocate(4096, MemoryTag::kTesting, secondPool);
+
+  EXPECT_EQ(4096, firstPool->usedBytes());
+  EXPECT_EQ(4096, secondPool->usedBytes());
+
+  first = BufferHandle{};
+  EXPECT_EQ(0, firstPool->usedBytes());
+  EXPECT_EQ(4096, secondPool->usedBytes());
+
+  second = BufferHandle{};
+  EXPECT_EQ(0, firstPool->usedBytes());
+  EXPECT_EQ(0, secondPool->usedBytes());
+}
+
+TEST_F(BufferManagerTest, OldAndExplicitAllocationApisCanBeMixed) {
+  auto bm = makeBufferManager("mixed-allocation-apis");
+  auto defaultPool = bm->defaultAllocationPool();
+  auto explicitPool = bm->addOperatorPool("explicit-operator");
+
+  auto oldHandle = bm->Allocate(4096, MemoryTag::kTesting);
+  auto explicitHandle = bm->Allocate(4096, MemoryTag::kTesting, explicitPool);
+  auto batch = bm->BatchAllocate(2, 4096, MemoryTag::kTesting);
+
+  EXPECT_EQ(defaultPool, bm->defaultAllocationPool());
+  ASSERT_EQ(2, batch.size());
+  EXPECT_EQ(3 * 4096, defaultPool->usedBytes());
+  EXPECT_EQ(4096, explicitPool->usedBytes());
+}
+
+TEST_F(BufferManagerTest, RejectsForeignAndInvalidExplicitAllocationPools) {
+  auto bm = makeBufferManager("foreign-pool-local");
+  auto otherBm = makeBufferManager("foreign-pool-other");
+  auto localPool = bm->addOperatorPool("local-operator");
+  auto foreignPool = otherBm->addOperatorPool("foreign-operator");
+  auto rootLeaf = root_->addLeafChild("foreign-root-leaf");
+  std::shared_ptr<MemoryPool> nullPool;
+
+  EXPECT_NO_THROW((void)bm->Allocate(4096, MemoryTag::kTesting, localPool));
+  EXPECT_THROW(
+      (void)bm->Allocate(4096, MemoryTag::kTesting, foreignPool),
+      std::exception);
+  EXPECT_THROW(
+      (void)bm->Allocate(4096, MemoryTag::kTesting, rootLeaf), std::exception);
+  EXPECT_THROW(
+      (void)bm->Allocate(4096, MemoryTag::kTesting, nullPool), std::exception);
+}
+
 TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   auto bm = makeBufferManager("reclaim-pin");
   std::shared_ptr<BlockHandle> block;
@@ -259,6 +312,66 @@ TEST_F(BufferManagerTest, ReclaimSpillsAndPinReadsBackPayload) {
   auto repin = bm->Pin(block);
   EXPECT_EQ(9, repin.Ptr()[0]);
   EXPECT_EQ(9, repin.Ptr()[4095]);
+}
+
+TEST_F(BufferManagerTest, ExplicitPoolSpillReadbackUsesOriginalLeaf) {
+  auto bm = makeBufferManager("explicit-pool-readback");
+  auto readbackPool = bm->addOperatorPool("readback-operator");
+  auto otherPool = bm->addOperatorPool("other-operator");
+  std::shared_ptr<BlockHandle> pinBlock;
+  std::shared_ptr<BlockHandle> batchBlock;
+  std::shared_ptr<BlockHandle> prefetchBlock;
+  {
+    auto pinHandle = bm->Allocate(4096, MemoryTag::kTesting, readbackPool);
+    auto batchHandle = bm->Allocate(4096, MemoryTag::kTesting, readbackPool);
+    auto prefetchHandle = bm->Allocate(4096, MemoryTag::kTesting, readbackPool);
+    pinBlock = pinHandle.block();
+    batchBlock = batchHandle.block();
+    prefetchBlock = prefetchHandle.block();
+    std::memset(pinHandle.Ptr(), 3, pinBlock->size());
+    std::memset(batchHandle.Ptr(), 5, batchBlock->size());
+    std::memset(prefetchHandle.Ptr(), 7, prefetchBlock->size());
+  }
+
+  std::array<std::shared_ptr<BlockHandle>, 3> blocks{
+      pinBlock, batchBlock, prefetchBlock};
+  try {
+    bm->SpillBlocks(blocks);
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+  EXPECT_EQ(0, readbackPool->usedBytes());
+  EXPECT_EQ(0, otherPool->usedBytes());
+
+  {
+    auto handle = bm->Pin(pinBlock);
+    EXPECT_EQ(3, handle.Ptr()[0]);
+    EXPECT_EQ(4096, readbackPool->usedBytes());
+    EXPECT_EQ(0, otherPool->usedBytes());
+  }
+
+  {
+    std::array<std::shared_ptr<BlockHandle>, 2> batchBlocks{
+        pinBlock, batchBlock};
+    auto handles = bm->BatchPin(batchBlocks);
+    ASSERT_EQ(2, handles.size());
+    EXPECT_EQ(3, handles[0].Ptr()[0]);
+    EXPECT_EQ(5, handles[1].Ptr()[0]);
+    EXPECT_EQ(2 * 4096, readbackPool->usedBytes());
+    EXPECT_EQ(0, otherPool->usedBytes());
+  }
+
+  {
+    std::array<std::shared_ptr<BlockHandle>, 1> prefetchBlocks{prefetchBlock};
+    bm->Prefetch(prefetchBlocks);
+    auto handle = bm->Pin(prefetchBlock);
+    EXPECT_EQ(7, handle.Ptr()[0]);
+    EXPECT_EQ(3 * 4096, readbackPool->usedBytes());
+    EXPECT_EQ(0, otherPool->usedBytes());
+  }
 }
 
 TEST_F(BufferManagerTest, SpillBlocksSpillsOnlyUnpinnedResidentBlocks) {

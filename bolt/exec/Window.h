@@ -131,6 +131,9 @@ class Window : public Operator {
 
   void recordWindowStats();
 
+ protected:
+  memory::MemoryPool* externalReclaimPool() const override;
+
  private:
   // Used for k preceding/following frames. Index is the column index if k is a
   // column. value is used to read column values from the column index when k

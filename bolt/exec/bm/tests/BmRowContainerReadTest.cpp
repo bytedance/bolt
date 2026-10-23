@@ -732,12 +732,7 @@ TEST_F(BmRowContainerDiskIoTest, ScopedRowsSharePinsAndReleaseAllHeapBlocks) {
   const auto segment = container.spillActiveSegment();
   auto window = container.beginReadOnlyWindowReadSegments({&segment, 1});
   const auto ids = window.listRowIds();
-  memory::MemoryPool* bmPool = nullptr;
-  root_->visitChildren([&](memory::MemoryPool* child) {
-    bmPool = child;
-    return false;
-  });
-  ASSERT_NE(nullptr, bmPool);
+  auto bmPool = bufferManager_->defaultAllocationPool();
 
   auto outer = window.loadRowsScoped({ids.data(), 1});
   const auto outerStats = bufferManager_->stats();
@@ -1126,16 +1121,17 @@ TEST_F(BmRowContainerDiskIoTest, CanBulkReadReservesForUnpinnedResidentBlocks) {
   ASSERT_EQ(0, bufferManager_->stats().pinnedResidentBytes);
   ASSERT_GT(bufferManager_->stats().unpinnedResidentBytes, 0);
 
-  memory::MemoryPool* bmPool = nullptr;
-  root_->visitChildren([&](memory::MemoryPool* child) {
-    bmPool = child;
-    return false;
-  });
-  ASSERT_NE(nullptr, bmPool);
+  auto bmPool = bufferManager_->defaultAllocationPool();
+
+  auto otherPool = bufferManager_->addOperatorPool("bulk-read-idle-operator");
+  ASSERT_TRUE(otherPool->maybeReserve(1 << 20));
+  const auto otherReservation = otherPool->reservedBytes();
+  ASSERT_GT(otherReservation, 0);
 
   const auto reservesBefore = bmPool->stats().numReserves;
   EXPECT_TRUE(container.canBulkRead({&segment, 1}));
   EXPECT_EQ(reservesBefore + 1, bmPool->stats().numReserves);
+  EXPECT_EQ(otherReservation, otherPool->reservedBytes());
 }
 
 TEST_F(BmRowContainerDiskIoTest, CanBulkReadRequiresProcessingHeadroom) {

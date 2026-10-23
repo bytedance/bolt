@@ -2126,6 +2126,226 @@ TEST_F(BmStreamingWindowBuildTest, mapPartitionKeyUsesCanonicalOrder) {
   EXPECT_EQ(2, rowNumbers->valueAt(3));
 }
 
+TEST_F(
+    BmStreamingWindowBuildDiskIoTest,
+    operatorLeafAccountingDoesNotIncludeOtherWindow) {
+  class InspectableWindow : public Window {
+   public:
+    using Window::externalReclaimPool;
+    using Window::Window;
+  };
+
+  constexpr vector_size_t kRows = 512;
+  auto data = makeRowVector(
+      {"id", "payload"},
+      {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+       makeFlatVector<std::string>(
+           kRows, [](auto row) { return std::string(64, 'a' + row % 26); })});
+  PlanBuilder builder(pool());
+  auto firstNode = std::dynamic_pointer_cast<const core::WindowNode>(
+      builder.values({data})
+          .streamingWindow({"row_number() over (order by id) as first_rank"})
+          .planNode());
+  auto secondNode = std::dynamic_pointer_cast<const core::WindowNode>(
+      builder
+          .streamingWindow({"row_number() over (order by id) as second_rank"})
+          .planNode());
+  ASSERT_NE(nullptr, firstNode);
+  ASSERT_NE(nullptr, secondNode);
+
+  auto root = memory::memoryManager()->addRootPool(
+      "bm-two-window-leaf-accounting",
+      memory::kMaxMemory,
+      memory::MemoryReclaimer::create());
+  auto directory = TempDirectoryPath::create();
+  auto task = makeDirectWindowTask(secondNode, directory->path, root);
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(task, 0, 0, 0, 0));
+  TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+  InspectableWindow first(0, driver->driverCtx(), firstNode);
+  InspectableWindow second(1, driver->driverCtx(), secondNode);
+  first.initialize();
+  second.initialize();
+  EXPECT_EQ(nullptr, first.externalReclaimPool());
+  EXPECT_EQ(nullptr, second.externalReclaimPool());
+  first.addInput(std::dynamic_pointer_cast<RowVector>(data->slice(0, 0)));
+  EXPECT_EQ(nullptr, first.externalReclaimPool());
+  first.addInput(data);
+  second.addInput(makeRowVector(
+      {"id", "payload", "first_rank"},
+      {data->childAt(0),
+       data->childAt(1),
+       makeFlatVector<int64_t>(kRows, [](auto row) { return row + 1; })}));
+
+  auto* firstBmPool = first.externalReclaimPool();
+  auto* secondBmPool = second.externalReclaimPool();
+  ASSERT_NE(nullptr, firstBmPool);
+  ASSERT_NE(nullptr, secondBmPool);
+  ASSERT_NE(firstBmPool, secondBmPool);
+  ASSERT_EQ(firstBmPool->parent(), secondBmPool->parent());
+  EXPECT_EQ(2, firstBmPool->parent()->getChildCount());
+  EXPECT_GT(firstBmPool->currentBytes(), 0);
+  EXPECT_GT(secondBmPool->currentBytes(), 0);
+
+  const auto firstBefore =
+      first.pool()->reservedBytes() + firstBmPool->reservedBytes();
+  const auto secondOpBefore = second.pool()->reservedBytes();
+  const auto secondBmBefore = secondBmPool->reservedBytes();
+  uint64_t candidateBytes{0};
+  ASSERT_TRUE(first.reclaimableBytes(candidateBytes));
+  EXPECT_EQ(firstBefore, candidateBytes);
+  ASSERT_TRUE(second.reclaimableBytes(candidateBytes));
+  EXPECT_EQ(secondOpBefore + secondBmBefore, candidateBytes);
+
+  class LaterReclaimer : public memory::MemoryReclaimer {
+   public:
+    explicit LaterReclaimer(int& calls)
+        : memory::MemoryReclaimer(1000), calls_(calls) {}
+
+    bool reclaimableBytes(const memory::MemoryPool&, uint64_t& bytes)
+        const override {
+      bytes = 1;
+      return true;
+    }
+
+    uint64_t reclaim(memory::MemoryPool*, uint64_t, uint64_t, Stats&) override {
+      ++calls_;
+      return 0;
+    }
+
+   private:
+    int& calls_;
+  };
+  int laterReclaimCalls = 0;
+  auto laterPool = first.pool()->parent()->addLeafChild(
+      "later-reclaim-candidate",
+      true,
+      std::make_unique<LaterReclaimer>(laterReclaimCalls));
+
+  task->requestPause().wait();
+  auto resumeGuard = folly::makeGuard([&]() { Task::resume(task); });
+  memory::MemoryReclaimer::Stats stats;
+  // The parent must stop once this Window's combined net release meets target.
+  uint64_t reclaimed;
+  {
+    memory::ScopedMemoryArbitrationContext arbitrationContext{first.pool()};
+    reclaimed = first.pool()->parent()->reclaim(1, 10'000, stats);
+  }
+  EXPECT_EQ(0, laterReclaimCalls);
+  const auto firstAfter =
+      first.pool()->reservedBytes() + firstBmPool->reservedBytes();
+  EXPECT_GT(reclaimed, 0);
+  EXPECT_EQ(firstBefore - firstAfter, reclaimed);
+  EXPECT_EQ(reclaimed, stats.reclaimedBytes);
+  EXPECT_EQ(secondOpBefore, second.pool()->reservedBytes());
+  EXPECT_EQ(secondBmBefore, secondBmPool->reservedBytes());
+  ASSERT_TRUE(second.reclaimableBytes(candidateBytes));
+  EXPECT_EQ(secondOpBefore + secondBmBefore, candidateBytes);
+  resumeGuard.dismiss();
+  Task::resume(task);
+
+  for (auto* window : {&first, &second}) {
+    window->noMoreInput();
+    vector_size_t rows = 0;
+    for (auto attempts = 0; attempts < 32 && !window->isFinished();
+         ++attempts) {
+      Operator::NonReclaimableSectionGuard guard(window);
+      auto output = window->getOutput();
+      if (output == nullptr) {
+        continue;
+      }
+      auto* rank =
+          output->childAt(output->childrenSize() - 1)->asFlatVector<int64_t>();
+      ASSERT_NE(nullptr, rank);
+      DecodedVector ids(*output->childAt(0));
+      DecodedVector payloads(*output->childAt(1));
+      for (vector_size_t row = 0; row < output->size(); ++row) {
+        EXPECT_EQ(rows + row, ids.valueAt<int64_t>(row));
+        EXPECT_EQ(
+            std::string(64, 'a' + (rows + row) % 26),
+            payloads.valueAt<StringView>(row).str());
+        EXPECT_EQ(rows + row + 1, rank->valueAt(row));
+      }
+      rows += output->size();
+    }
+    EXPECT_EQ(kRows, rows);
+    EXPECT_TRUE(window->isFinished());
+  }
+  EXPECT_EQ(firstBmPool, first.externalReclaimPool());
+  EXPECT_EQ(secondBmPool, second.externalReclaimPool());
+  EXPECT_GT(task->bufferManager()->stats().spillReadCount, 0);
+}
+
+TEST_F(
+    BmStreamingWindowBuildDiskIoTest,
+    operatorReclaimClampsCombinedReservationGrowthToZero) {
+  class GrowingWindow : public Window {
+   public:
+    using Window::externalReclaimPool;
+    using Window::Window;
+
+    ~GrowingWindow() override {
+      if (growth_ != nullptr) {
+        pool()->free(growth_, growthBytes_);
+      }
+    }
+
+    void reclaim(uint64_t targetBytes, memory::MemoryReclaimer::Stats& stats)
+        override {
+      // Exercise the real Window spill, then offset the freed BM reservation
+      // with operator allocation. Only the combined net change is reclaim.
+      growthBytes_ = pool()->reservedBytes() +
+          externalReclaimPool()->reservedBytes() + (1 << 20);
+      Window::reclaim(targetBytes, stats);
+      growth_ = pool()->allocate(growthBytes_);
+    }
+
+   private:
+    void* growth_{nullptr};
+    int64_t growthBytes_{0};
+  };
+
+  auto data = makeRowVector(
+      {"id", "payload"},
+      {makeFlatVector<int64_t>(512, [](auto row) { return row; }),
+       makeFlatVector<std::string>(
+           512, [](auto) { return std::string(64, 'x'); })});
+  auto node = std::dynamic_pointer_cast<const core::WindowNode>(
+      PlanBuilder(pool())
+          .values({data})
+          .streamingWindow({"row_number() over (order by id) as rank"})
+          .planNode());
+  auto root = memory::memoryManager()->addRootPool(
+      "bm-window-negative-net-reclaim",
+      memory::kMaxMemory,
+      memory::MemoryReclaimer::create());
+  auto directory = TempDirectoryPath::create();
+  auto task = makeDirectWindowTask(node, directory->path, root);
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(task, 0, 0, 0, 0));
+  TestWindowInjection injection(WindowBuildType::kBmStreamingWindowBuild);
+  GrowingWindow window(0, driver->driverCtx(), node);
+  window.initialize();
+  window.addInput(data);
+  auto* bmPool = window.externalReclaimPool();
+  ASSERT_NE(nullptr, bmPool);
+  const auto bmBefore = bmPool->reservedBytes();
+  const auto before = window.pool()->reservedBytes() + bmBefore;
+  ASSERT_GT(bmBefore, 0);
+
+  task->requestPause().wait();
+  auto resumeGuard = folly::makeGuard([&]() { Task::resume(task); });
+  memory::MemoryReclaimer::Stats stats;
+  {
+    memory::ScopedMemoryArbitrationContext arbitrationContext{window.pool()};
+    EXPECT_EQ(0, window.pool()->reclaim(1, 10'000, stats));
+  }
+  EXPECT_EQ(0, stats.reclaimedBytes);
+  EXPECT_LT(bmPool->reservedBytes(), bmBefore);
+  EXPECT_GT(window.pool()->reservedBytes() + bmPool->reservedBytes(), before);
+  EXPECT_GT(task->bufferManager()->stats().spillWriteCount, 0);
+}
+
 TEST_F(BmStreamingWindowBuildTest, doesNotSpillDuringStoreWithoutReclaim) {
   const vector_size_t size = 512;
   auto data = makeRowVector(

@@ -52,7 +52,8 @@ class BmRowContainer {
       uint32_t rowBlockSize = static_cast<uint32_t>(
           memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
       uint32_t heapBlockSize = static_cast<uint32_t>(
-          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)));
+          memory::bm::allocateSizeBytes(memory::bm::AllocateSize::kLarge)),
+      std::shared_ptr<memory::MemoryPool> allocationPool = nullptr);
 
   // Allocates one row in the active segment for partition. The caller must fill
   // columns with store() before treating the row as complete.
@@ -157,7 +158,7 @@ class BmRowContainer {
   // loaded now. Requires admissionMultiplier times the unloaded bytes to leave
   // headroom for caller processing. Only blocks with active BufferHandle are
   // treated as loaded; unpinned resident blocks are counted as reloadable
-  // because MaybeReserve() may reclaim them while probing capacity.
+  // because MemoryPool::maybeReserve() may reclaim them while probing capacity.
   // This is only an admission snapshot; the subsequent load still reserves
   // its own memory. When called on a Driver thread, the probe disables new
   // task memory expansion without revoking existing capacity.
@@ -322,6 +323,7 @@ class BmRowContainer {
   std::vector<TypePtr> types_;
   BmRowLayout layout_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
+  std::shared_ptr<memory::MemoryPool> allocationPool_;
   BmSegmentCollection segments_;
   BmRowBlockLoader blockLoader_;
   BmRowCopier rowCopier_;

@@ -19,6 +19,15 @@
 #include "bolt/common/base/Exceptions.h"
 
 namespace bytedance::bolt::exec::bm {
+namespace {
+
+std::shared_ptr<memory::MemoryPool> defaultAllocationPool(
+    const std::shared_ptr<memory::bm::BufferManager>& bufferManager) {
+  BOLT_CHECK_NOT_NULL(bufferManager);
+  return bufferManager->defaultAllocationPool();
+}
+
+} // namespace
 
 BmRowContainer::BmRowContainer(
     std::vector<TypePtr> types,
@@ -27,14 +36,25 @@ BmRowContainer::BmRowContainer(
     std::shared_ptr<memory::bm::BufferManager> bufferManager,
     memory::bm::MemoryTag tag,
     uint32_t rowBlockSize,
-    uint32_t heapBlockSize)
+    uint32_t heapBlockSize,
+    std::shared_ptr<memory::MemoryPool> allocationPool)
     : types_(std::move(types)),
       layout_(types_, nullable, numKeyColumns, rowBlockSize),
       bufferManager_(std::move(bufferManager)),
-      segments_(bufferManager_, tag, &layout_, rowBlockSize, heapBlockSize),
+      allocationPool_(
+          allocationPool != nullptr ? std::move(allocationPool)
+                                    : defaultAllocationPool(bufferManager_)),
+      segments_(
+          bufferManager_,
+          tag,
+          &layout_,
+          rowBlockSize,
+          heapBlockSize,
+          allocationPool_),
       blockLoader_(bufferManager_, &layout_, &segments_),
       rowCopier_(&layout_, &segments_) {
   BOLT_CHECK_NOT_NULL(bufferManager_);
+  BOLT_CHECK_NOT_NULL(allocationPool_);
 }
 
 RowWriteContext BmRowContainer::appendRow(PartitionId partition) {

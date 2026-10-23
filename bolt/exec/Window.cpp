@@ -259,6 +259,14 @@ void Window::setBmStreamingWindowBuild(
   isBmStreamingWindowBuild_ = true;
 }
 
+memory::MemoryPool* Window::externalReclaimPool() const {
+  if (!isBmStreamingWindowBuild_) {
+    return nullptr;
+  }
+  return static_cast<const window::BmStreamingWindowBuild*>(windowBuild_.get())
+      ->allocationPool();
+}
+
 void Window::setWindowBuild(
     WindowBuildType windowBuildType,
     const common::SpillConfig* spillConfig,
@@ -610,9 +618,6 @@ void Window::reclaim(
   }
 
   pool()->release();
-  LOG(INFO) << __FUNCTION__
-            << " after release usedBytes = " << pool()->currentBytes()
-            << ", reservedBytes = " << pool()->reservedBytes();
 }
 
 void Window::createPeerAndFrameBuffers() {

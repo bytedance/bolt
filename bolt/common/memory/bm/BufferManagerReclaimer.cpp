@@ -44,6 +44,11 @@ void BufferManagerReclaimer::leaveArbitration() noexcept {
 bool BufferManagerReclaimer::reclaimableBytes(
     const MemoryPool& pool,
     uint64_t& reclaimableBytes) const {
+  if (pool.kind() == MemoryPool::Kind::kLeaf) {
+    reclaimableBytes = 0;
+    return false;
+  }
+
   auto manager = manager_.lock();
   if (!manager) {
     reclaimableBytes = 0;
@@ -62,22 +67,36 @@ uint64_t BufferManagerReclaimer::reclaim(
   // timeout budgeting will be added with the production arbitration policy.
   (void)maxWaitMs;
   BOLT_CHECK_NOT_NULL(pool);
+  if (pool->kind() == MemoryPool::Kind::kLeaf) {
+    return 0;
+  }
+
   auto manager = manager_.lock();
   if (!manager) {
     return 0;
   }
-  const auto reclaimedByRecorder = memory::MemoryReclaimer::run(
+  return memory::MemoryReclaimer::run(
       [&]() {
-        int64_t reclaimedBytes{0};
-        {
-          memory::ScopedReclaimedBytesRecorder recorder(pool, &reclaimedBytes);
-          manager->Reclaim(targetBytes);
-          pool->release();
+        const auto before = pool->reservedBytes();
+        manager->Reclaim(targetBytes);
+        manager->ReleaseUnusedReservation();
+        const auto after = pool->reservedBytes();
+        if (after > before) {
+          return int64_t{0};
         }
-        return reclaimedBytes;
+        return before - after;
       },
       stats);
-  return reclaimedByRecorder;
+}
+
+void BufferManagerReclaimer::abort(
+    MemoryPool* pool,
+    const std::exception_ptr& error) {
+  BOLT_CHECK_NOT_NULL(pool);
+  if (pool->kind() == MemoryPool::Kind::kLeaf) {
+    return;
+  }
+  memory::MemoryReclaimer::abort(pool, error);
 }
 
 } // namespace bytedance::bolt::memory::bm

@@ -34,6 +34,8 @@
 namespace bytedance::bolt::memory::bm {
 namespace {
 
+constexpr const char* kDefaultAllocationPoolSuffix = ".default_allocation";
+
 bool shouldAllocateHugePageAligned(size_t size) {
   return size >= AllocationTraits::kHugePageSize;
 }
@@ -55,39 +57,95 @@ BufferManager::BufferManager(BufferManagerConfig config)
       accounting_(std::make_unique<BufferManagerStatsCollector>()),
       evictionQueue_(std::make_unique<EvictionQueue>()) {}
 
-BufferManager::~BufferManager() = default;
+BufferManager::~BufferManager() {
+  ReleaseUnusedReservation();
+}
 
 void BufferManager::Initialize(MemoryPool& parent) {
-  // v1 keeps the default thread-safe leaf pool. For strictly thread-local BM
+  aggregatePool_ = parent.addAggregateChild(
+      config_.poolName,
+      std::make_unique<BufferManagerReclaimer>(
+          weak_from_this(), config_.arbitrationReclaimer));
+  BOLT_CHECK_NOT_NULL(aggregatePool_);
+  spillStore_ = std::make_unique<SpillStore>(config_.spillStoreConfig);
+}
+
+std::shared_ptr<MemoryPool> BufferManager::addOperatorPool(
+    const std::string& name) {
+  BOLT_CHECK(!name.empty());
+  BOLT_CHECK_NOT_NULL(aggregatePool_);
+  // v1 keeps allocation leaves thread-safe. For strictly thread-local BM
   // instances this can be optimized to addLeafChild(name, false) later.
-  pool_ = parent.addLeafChild(config_.poolName);
-  BOLT_CHECK_NOT_NULL(pool_);
-  spillStore_ =
-      std::make_unique<SpillStore>(config_.spillStoreConfig, pool_.get());
-  pool_->setReclaimer(std::make_unique<BufferManagerReclaimer>(
-      weak_from_this(), config_.arbitrationReclaimer));
+  auto pool = aggregatePool_->addLeafChild(
+      name,
+      true,
+      std::make_unique<BufferManagerReclaimer>(
+          weak_from_this(), config_.arbitrationReclaimer));
+  BOLT_CHECK_NOT_NULL(pool);
+  allocationPools_.push_back(pool);
+  return pool;
+}
+
+std::shared_ptr<MemoryPool> BufferManager::defaultAllocationPool() {
+  if (defaultAllocationPool_ == nullptr) {
+    defaultAllocationPool_ =
+        addOperatorPool(config_.poolName + kDefaultAllocationPoolSuffix);
+  }
+  return defaultAllocationPool_;
 }
 
 BufferHandle BufferManager::Allocate(size_t size, MemoryTag tag) {
-  return AllocateOne(size, tag);
+  return Allocate(size, tag, defaultAllocationPool());
+}
+
+BufferHandle BufferManager::Allocate(
+    size_t size,
+    MemoryTag tag,
+    const std::shared_ptr<MemoryPool>& allocationPool) {
+  return AllocateOne(size, tag, allocationPool);
 }
 
 std::vector<BufferHandle>
 BufferManager::BatchAllocate(size_t count, size_t size, MemoryTag tag) {
+  if (count == 0) {
+    return {};
+  }
+  const auto allocationPool = defaultAllocationPool();
   std::vector<BufferHandle> handles;
   handles.reserve(count);
   for (size_t i = 0; i < count; ++i) {
-    handles.push_back(AllocateOne(size, tag));
+    handles.push_back(AllocateOne(size, tag, allocationPool));
   }
   return handles;
 }
 
-BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
+void BufferManager::ValidateAllocationPool(
+    const std::shared_ptr<MemoryPool>& allocationPool) const {
+  BOLT_CHECK_NOT_NULL(aggregatePool_);
+  BOLT_CHECK_NOT_NULL(allocationPool);
+  BOLT_CHECK_EQ(
+      allocationPool->kind(),
+      MemoryPool::Kind::kLeaf,
+      "BM allocation pool must be a leaf, pool={}",
+      allocationPool->name());
+  BOLT_CHECK(
+      allocationPool->parent() == aggregatePool_.get(),
+      "BM allocation pool {} is not a direct leaf of aggregate {}",
+      allocationPool->name(),
+      aggregatePool_->name());
+}
+
+BufferHandle BufferManager::AllocateOne(
+    size_t size,
+    MemoryTag tag,
+    const std::shared_ptr<MemoryPool>& allocationPool) {
   BOLT_CHECK_GT(size, 0);
+  ValidateAllocationPool(allocationPool);
   auto memory = std::make_shared<BlockMemory>(nextBlockId_++, size, tag);
+  memory->allocationPool = allocationPool;
   memory->payload = shouldAllocateHugePageAligned(size)
-      ? IoBuffer::allocateHugePageAlignedFromPool(pool_.get(), size)
-      : IoBuffer::allocateFromPool(pool_.get(), size);
+      ? IoBuffer::allocateHugePageAlignedFromPool(allocationPool.get(), size)
+      : IoBuffer::allocateFromPool(allocationPool.get(), size);
   memory->pinCount = 1;
   accounting_->RecordAllocate(*memory);
   memory->owner = weak_from_this();
@@ -96,11 +154,15 @@ BufferHandle BufferManager::AllocateOne(size_t size, MemoryTag tag) {
 }
 
 bool BufferManager::MaybeReserve(size_t size) {
-  return pool_->maybeReserve(size);
+  return defaultAllocationPool()->maybeReserve(size);
 }
 
 void BufferManager::ReleaseUnusedReservation() {
-  pool_->release();
+  for (const auto& pool : allocationPools_) {
+    if (pool != nullptr) {
+      pool->release();
+    }
+  }
 }
 
 BufferHandle BufferManager::Pin(const std::shared_ptr<BlockHandle>& block) {
@@ -329,9 +391,14 @@ void BufferManager::SubmitRead(
       memory.state == BlockMemoryState::kSpilled,
       "BM read submission expects a spilled block");
   BOLT_CHECK(memory.segment.has_value());
+  ValidateAllocationPool(memory.allocationPool);
 
   auto future = spillStore_->SubmitReadBlock(
-      *memory.segment, memory.size, priority, memory.id);
+      *memory.segment,
+      memory.size,
+      priority,
+      memory.id,
+      memory.allocationPool.get());
   BlockStateMachine::SubmitRead(memory, std::move(future));
   accounting_->OnReadSubmitted(memory);
 }

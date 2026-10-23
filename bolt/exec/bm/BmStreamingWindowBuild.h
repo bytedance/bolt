@@ -38,6 +38,11 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
       bool enableJit,
       std::shared_ptr<memory::bm::BufferManager> bufferManager);
 
+  /// Null until the first non-empty input; retained after finish().
+  memory::MemoryPool* allocationPool() const {
+    return allocationPool_.get();
+  }
+
   bool needsInput() override;
 
   bool hasOutputAll() override;
@@ -68,6 +73,8 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
       std::shared_ptr<BmEntirePartitionAggregation> aggregation);
 
  private:
+  void initializeData();
+
   enum class AdjacentRelation {
     kSamePeer,
     kNewPeer,
@@ -169,6 +176,7 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   const size_t numWindowFunctions_;
   std::shared_ptr<BmEntirePartitionAggregation> inputAggregation_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
+  std::shared_ptr<memory::MemoryPool> allocationPool_;
   std::unique_ptr<exec::bm::BmRowContainer> bmData_;
   std::shared_ptr<const BmWindowPartitionSchema> partitionSchema_;
   std::shared_ptr<BmWindowAccessStats> windowAccessStats_{
