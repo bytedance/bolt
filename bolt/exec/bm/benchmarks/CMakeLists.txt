@@ -24,6 +24,7 @@ add_bm_row_container_benchmark(
   bolt_exec_bm_row_container_benchmark
   BmRowContainerReadBenchmark.cpp
   BmRowContainerBatchStoreBenchmark.cpp
+  BmPartitionKeyEqualityBenchmark.cpp
   BmRowContainerSpillReadBenchmark.cpp
   BmRowContainerSpillWriteBenchmark.cpp
   BmRowContainerStoreBenchmark.cpp

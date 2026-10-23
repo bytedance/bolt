@@ -204,4 +204,39 @@ TEST_F(SequenceTest, wrongDirectionError) {
       "to start");
 }
 
+// Spark does not apply Presto's 10'000 entry limit to a single sequence.
+TEST_F(SequenceTest, moreThanPrestoLimit) {
+  const std::vector<int32_t> sizes = {10'000, 10'001, 19'030, 36'343};
+  std::vector<int32_t> stops;
+  for (auto size : sizes) {
+    stops.push_back(size - 1);
+  }
+  const auto result = evaluate(
+      "sequence(c0, c1)",
+      makeRowVector({
+          makeConstant<int32_t>(0, sizes.size()),
+          makeFlatVector<int32_t>(stops),
+      }));
+
+  std::vector<std::vector<int32_t>> expectedRows;
+  for (auto size : sizes) {
+    auto& row = expectedRows.emplace_back();
+    for (int32_t i = 0; i < size; ++i) {
+      row.push_back(i);
+    }
+  }
+  assertEqualVectors(makeArrayVector<int32_t>(expectedRows), result);
+}
+
+TEST_F(SequenceTest, moreThanSparkLimit) {
+  BOLT_ASSERT_THROW(
+      evaluate(
+          "sequence(c0, c1)",
+          makeRowVector({
+              makeFlatVector<int64_t>({0}),
+              makeFlatVector<int64_t>({2'147'483'632}),
+          })),
+      "result of sequence function must not have more than 2147483632 entries");
+}
+
 } // namespace bytedance::bolt::functions::sparksql::test

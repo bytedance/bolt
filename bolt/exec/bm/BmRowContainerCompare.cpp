@@ -42,6 +42,32 @@ int32_t compareValues(const char* left, const char* right) {
   return l < r ? -1 : (l > r ? 1 : 0);
 }
 
+template <TypeKind Kind>
+std::optional<bool> equalScalarValues(const char* left, const char* right) {
+  if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    return *reinterpret_cast<const StringView*>(left) ==
+        *reinterpret_cast<const StringView*>(right);
+  } else if constexpr (Kind == TypeKind::HUGEINT) {
+    return HugeInt::deserialize(left) == HugeInt::deserialize(right);
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
+    return std::nullopt;
+  } else {
+    using T = typename TypeTraits<Kind>::NativeType;
+    const auto l = *reinterpret_cast<const T*>(left);
+    const auto r = *reinterpret_cast<const T*>(right);
+    if constexpr (std::is_floating_point_v<T>) {
+      // Mirror compareValues(), which orders NaN after every non-NaN value, so
+      // equality must use the same NaN-aware ordering rather than raw < and >.
+      const util::floating_point::NaNAwareLessThan<T> less;
+      return !less(l, r) && !less(r, l);
+    } else {
+      return l == r;
+    }
+  }
+}
+
 int32_t normalizeCompare(int32_t result) {
   return result < 0 ? -1 : (result > 0 ? 1 : 0);
 }
@@ -199,6 +225,43 @@ int32_t BmRowContainer::compareRows(
     }
   }
   return 0;
+}
+
+bool BmRowContainer::equalKeys(
+    const char* left,
+    const char* right,
+    folly::Range<const column_index_t*> columns) const {
+  if (left == right) {
+    return true;
+  }
+  for (const auto column : columns) {
+    BOLT_DCHECK_LT(column, layout_.columns().size());
+    const auto& plan = layout_.storePlan(column);
+    if (FOLLY_UNLIKELY(plan.nullable)) {
+      const bool leftNull = left[plan.nullByte] & plan.nullMask;
+      const bool rightNull = right[plan.nullByte] & plan.nullMask;
+      if (leftNull || rightNull) {
+        if (leftNull != rightNull) {
+          return false;
+        }
+        continue;
+      }
+    }
+
+    const auto equality = BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+        equalScalarValues, plan.kind, left + plan.offset, right + plan.offset);
+    if (equality.has_value()) {
+      if (!equality.value()) {
+        return false;
+      }
+      continue;
+    }
+
+    if (compareNonNull(left, right, column, column, CompareFlags{}) != 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 int32_t BmRowContainer::compareNonNull(
