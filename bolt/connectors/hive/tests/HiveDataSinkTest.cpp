@@ -36,9 +36,12 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/config/Config.h"
 #include "bolt/common/testutil/TestValue.h"
+#include "bolt/connectors/hive/HivePartitionFunction.h"
 #include "bolt/dwio/common/Options.h"
+#include "bolt/exec/tests/utils/AssertQueryBuilder.h"
 #include "bolt/exec/tests/utils/PlanBuilder.h"
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
+#include "bolt/vector/DecodedVector.h"
 #include "bolt/vector/fuzzer/VectorFuzzer.h"
 namespace bytedance::bolt::connector::hive {
 namespace {
@@ -47,9 +50,18 @@ using namespace bytedance::bolt::exec::test;
 using namespace bytedance::bolt::common::testutil;
 
 constexpr const char* kHiveConnectorId = "test-hive";
+constexpr const char* kParquetSerdeMarker =
+    "spark.gluten.sql.native.writer.hive.parquet.serde";
 
 class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
  protected:
+  static std::string decodedStringAt(
+      const VectorPtr& vector,
+      vector_size_t row) {
+    DecodedVector decoded(*vector);
+    return decoded.valueAt<StringView>(row).str();
+  }
+
   static void SetUpTestCase() {
     FLAGS_bolt_testing_enable_arbitration = true;
     OperatorTestBase::SetUpTestCase();
@@ -156,8 +168,10 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
       dwio::common::FileFormat fileFormat = dwio::common::FileFormat::DWRF,
       const std::vector<std::string>& partitionedBy = {},
       const std::shared_ptr<connector::hive::HiveBucketProperty>&
-          bucketProperty = nullptr) {
-    return makeHiveInsertTableHandle(
+          bucketProperty = nullptr,
+      const std::unordered_map<std::string, std::string>& serdeParameters =
+          {}) {
+    auto tableHandle = makeHiveInsertTableHandle(
         outputRowType->names(),
         outputRowType->children(),
         partitionedBy,
@@ -168,6 +182,13 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
             connector::hive::LocationHandle::TableType::kNew),
         fileFormat,
         CompressionKind::CompressionKind_ZSTD);
+    return std::make_shared<HiveInsertTableHandle>(
+        tableHandle->inputColumns(),
+        tableHandle->locationHandle(),
+        tableHandle->storageFormat(),
+        bucketProperty,
+        tableHandle->compressionKind(),
+        serdeParameters);
   }
 
   std::shared_ptr<HiveDataSink> createDataSink(
@@ -176,7 +197,9 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
       dwio::common::FileFormat fileFormat = dwio::common::FileFormat::DWRF,
       const std::vector<std::string>& partitionedBy = {},
       const std::shared_ptr<connector::hive::HiveBucketProperty>&
-          bucketProperty = nullptr) {
+          bucketProperty = nullptr,
+      const std::unordered_map<std::string, std::string>& serdeParameters =
+          {}) {
     return std::make_shared<HiveDataSink>(
         rowType,
         createHiveInsertTableHandle(
@@ -184,11 +207,41 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
             outputDirectoryPath,
             fileFormat,
             partitionedBy,
-            bucketProperty),
+            bucketProperty,
+            serdeParameters),
         connectorQueryCtx_.get(),
         CommitStrategy::kNoCommit,
         connectorConfig_,
         queryConfig_);
+  }
+
+  RowVectorPtr writeAndReadInvalidUtf8(
+      dwio::common::FileFormat fileFormat,
+      const std::unordered_map<std::string, std::string>& serdeParameters,
+      const std::string& invalid = std::string{"\xD5", 1}) {
+    const auto rowType = ROW({"invalid_varchar"}, {VARCHAR()});
+    const auto input = makeRowVector({makeFlatVector<std::string>({invalid})});
+    const auto outputDirectory = TempDirectoryPath::create();
+    auto dataSink = createDataSink(
+        rowType,
+        outputDirectory->path,
+        fileFormat,
+        {},
+        nullptr,
+        serdeParameters);
+    dataSink->appendData(input);
+    dataSink->close();
+
+    const auto files = listFiles(outputDirectory->path);
+    BOLT_CHECK_EQ(1, files.size());
+    auto split = connector::hive::HiveConnectorSplitBuilder(files.at(0))
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(fileFormat)
+                     .build();
+    return exec::test::AssertQueryBuilder(
+               PlanBuilder().tableScan(rowType).planNode())
+        .split(split)
+        .copyResults(pool());
   }
 
   std::vector<std::string> listFiles(const std::string& dirPath) {
@@ -533,6 +586,177 @@ TEST_F(HiveDataSinkTest, basic) {
 
   createDuckDbTable(vectors);
   verifyWrittenData(outputDirectory->path);
+}
+
+#ifdef BOLT_ENABLE_PARQUET
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8Enabled) {
+  const std::string replacement{"\xEF\xBF\xBD", 3};
+  const auto output = writeAndReadInvalidUtf8(
+      dwio::common::FileFormat::PARQUET, {{kParquetSerdeMarker, "true"}});
+
+  EXPECT_EQ(replacement, decodedStringAt(output->childAt(0), 0));
+}
+
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8BinaryPayload) {
+  const std::string input{
+      "\x20\x02\x0F\x00\x01\x00\x00\x00\x9C\xA9\x06\x60\x00\x00"
+      "\x00\x00\x02\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x00",
+      28};
+  const std::string expected{
+      "\x20\x02\x0F\x00\x01\x00\x00\x00\xEF\xBF\xBD\xEF\xBF"
+      "\xBD\x06\x60\x00\x00\x00\x00\x02\x00\x00\x00\x05\x00"
+      "\x00\x00\x01\x00\x00\x00",
+      32};
+  const auto output = writeAndReadInvalidUtf8(
+      dwio::common::FileFormat::PARQUET,
+      {{kParquetSerdeMarker, "true"}},
+      input);
+
+  EXPECT_EQ(expected, decodedStringAt(output->childAt(0), 0));
+}
+
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8Disabled) {
+  const std::string invalid{"\xD5", 1};
+  const auto output =
+      writeAndReadInvalidUtf8(dwio::common::FileFormat::PARQUET, {});
+
+  EXPECT_EQ(invalid, decodedStringAt(output->childAt(0), 0));
+}
+
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8AcrossPartitions) {
+  const std::string invalid{"\xD5", 1};
+  const std::string replacement{"\xEF\xBF\xBD", 3};
+  const auto inputType = ROW({"v", "p"}, {VARCHAR(), INTEGER()});
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>({invalid, invalid, invalid, "valid"}),
+       makeFlatVector<int32_t>({0, 1, 0, 1})},
+      [](vector_size_t row) { return row == 2; });
+  const auto outputDirectory = TempDirectoryPath::create();
+  auto dataSink = createDataSink(
+      inputType,
+      outputDirectory->path,
+      dwio::common::FileFormat::PARQUET,
+      {"p"},
+      nullptr,
+      {{kParquetSerdeMarker, "TrUe"}});
+
+  dataSink->appendData(input);
+  const auto partitions = dataSink->close();
+  ASSERT_EQ(2, partitions.size());
+
+  std::vector<exec::Split> splits;
+  for (const auto& file : listFiles(outputDirectory->path)) {
+    splits.emplace_back(connector::hive::HiveConnectorSplitBuilder(file)
+                            .connectorId(kHiveConnectorId)
+                            .fileFormat(dwio::common::FileFormat::PARQUET)
+                            .build());
+  }
+  ASSERT_EQ(2, splits.size());
+  const auto outputType = ROW({"v"}, {VARCHAR()});
+  auto output = exec::test::AssertQueryBuilder(
+                    PlanBuilder().tableScan(outputType).planNode())
+                    .splits(std::move(splits))
+                    .copyResults(pool());
+
+  ASSERT_EQ(4, output->size());
+  size_t replacementCount = 0;
+  for (vector_size_t row = 0; row < output->size(); ++row) {
+    replacementCount += decodedStringAt(output->childAt(0), row) == replacement;
+  }
+  EXPECT_EQ(3, replacementCount);
+}
+
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8BucketedAndSorted) {
+  const std::string invalid{"\xD5", 1};
+  const std::string replacement{"\xEF\xBF\xBD", 3};
+  const auto inputType = ROW({"bucket_key", "v"}, {BIGINT(), VARCHAR()});
+  const std::vector<int64_t> keys = {0, 1, 2, 3, 4, 5, 6, 7};
+  const std::vector<std::string> values = {
+      "m", invalid + "0", "a", "z", "b", invalid + "1", "x", "c"};
+  auto input = makeRowVector(
+      {makeFlatVector<int64_t>(keys), makeFlatVector<std::string>(values)});
+
+  constexpr int32_t kNumBuckets = 2;
+  auto bucketProperty = std::make_shared<HiveBucketProperty>(
+      HiveBucketProperty::Kind::kHiveCompatible,
+      kNumBuckets,
+      std::vector<std::string>{"bucket_key"},
+      std::vector<TypePtr>{BIGINT()},
+      std::vector<std::shared_ptr<const HiveSortingColumn>>{
+          std::make_shared<HiveSortingColumn>(
+              "v", core::SortOrder{true, true})});
+  const auto outputDirectory = TempDirectoryPath::create();
+  auto dataSink = createDataSink(
+      inputType,
+      outputDirectory->path,
+      dwio::common::FileFormat::PARQUET,
+      {},
+      bucketProperty,
+      {{kParquetSerdeMarker, "true"}});
+
+  HivePartitionFunction partitionFunction(kNumBuckets, {0});
+  std::vector<uint32_t> bucketIds(input->size());
+  partitionFunction.partition(*input, bucketIds);
+  std::vector<std::vector<std::pair<int64_t, std::string>>> expected(
+      kNumBuckets);
+  for (vector_size_t row = 0; row < input->size(); ++row) {
+    auto value = values[row];
+    const auto invalidPosition = value.find(invalid);
+    if (invalidPosition != std::string::npos) {
+      value.replace(invalidPosition, invalid.size(), replacement);
+    }
+    expected[bucketIds[row]].emplace_back(keys[row], std::move(value));
+  }
+  size_t expectedFiles = 0;
+  for (auto& rows : expected) {
+    expectedFiles += !rows.empty();
+    std::sort(
+        rows.begin(), rows.end(), [](const auto& left, const auto& right) {
+          return left.second < right.second;
+        });
+  }
+
+  dataSink->appendData(input);
+  const auto partitions = dataSink->close();
+  ASSERT_EQ(expectedFiles, partitions.size());
+
+  const auto files = listFiles(outputDirectory->path);
+  ASSERT_EQ(expectedFiles, files.size());
+  for (const auto& file : files) {
+    const auto fileName = fs::path(file).filename().string();
+    const auto separator = fileName.find('_');
+    ASSERT_NE(std::string::npos, separator);
+    const auto bucketId =
+        folly::to<uint32_t>(fileName.substr(1, separator - 1));
+    ASSERT_LT(bucketId, kNumBuckets);
+
+    auto split = connector::hive::HiveConnectorSplitBuilder(file)
+                     .connectorId(kHiveConnectorId)
+                     .fileFormat(dwio::common::FileFormat::PARQUET)
+                     .build();
+    auto output = exec::test::AssertQueryBuilder(
+                      PlanBuilder().tableScan(inputType).planNode())
+                      .split(split)
+                      .copyResults(pool());
+    ASSERT_EQ(expected[bucketId].size(), output->size());
+    DecodedVector outputKeys(*output->childAt(0));
+    for (vector_size_t row = 0; row < output->size(); ++row) {
+      EXPECT_EQ(
+          expected[bucketId][row].first, outputKeys.valueAt<int64_t>(row));
+      EXPECT_EQ(
+          expected[bucketId][row].second,
+          decodedStringAt(output->childAt(1), row));
+    }
+  }
+}
+#endif
+
+TEST_F(HiveDataSinkTest, hiveParquetSerdeInvalidUtf8IgnoredForDwrf) {
+  const std::string invalid{"\xD5", 1};
+  const auto output = writeAndReadInvalidUtf8(
+      dwio::common::FileFormat::DWRF, {{kParquetSerdeMarker, "true"}});
+
+  EXPECT_EQ(invalid, decodedStringAt(output->childAt(0), 0));
 }
 
 TEST_F(HiveDataSinkTest, basicBucket) {

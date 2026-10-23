@@ -324,6 +324,28 @@ TEST_F(SimpleVectorNonParameterizedTest, isAscii) {
   }
 }
 
+TEST_F(SimpleVectorNonParameterizedTest, isAsciiAllRows) {
+  for (auto encoding : kAsciiEncodings) {
+    auto vector = maker_.encodedVector(encoding, stringData_);
+
+    EXPECT_FALSE(vector->isAscii().has_value());
+
+    SelectivityVector subset(stringData_.size(), false);
+    subset.setValidRange(1, stringData_.size(), true);
+    subset.updateBounds();
+    vector->setIsAscii(true, subset);
+    EXPECT_FALSE(vector->isAscii().has_value());
+
+    vector->setAllIsAscii(true);
+    ASSERT_TRUE(vector->isAscii().has_value());
+    EXPECT_TRUE(vector->isAscii().value());
+
+    vector->setAllIsAscii(false);
+    ASSERT_TRUE(vector->isAscii().has_value());
+    EXPECT_FALSE(vector->isAscii().value());
+  }
+}
+
 TEST_F(SimpleVectorNonParameterizedTest, isAsciiIndex) {
   for (auto encoding : kAsciiEncodings) {
     LOG(INFO) << "Running:" << encoding;
