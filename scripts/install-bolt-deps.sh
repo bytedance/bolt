@@ -15,12 +15,8 @@
 #
 set -euo pipefail
 
-# Download the conan recipes for Bolt dependencies from the https://github.com/bytedance/conan-center-index.git.
-# And configure it as a local conan remote for building Bolt dependencies.
-#
-# For each Bolt release, a corresponding tag is created in bytedance/conan-center-index. This script downloads the Conan recipes from the tag matching the current Bolt version and configures them as a local Conan remote.
-# If the --branch argument is provided, it must be a valid branch or tag in the conan-center-index repository.
-# If the --repository argument is provided, it must point to a conan-center-index repository.
+# Configure Bolt's Conan recipe index. Release tags use matching recipe tags;
+# other checkouts use main unless --branch selects a branch or tag explicitly.
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" > /dev/null && pwd)"
 readonly BOLT_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
@@ -65,49 +61,41 @@ parse_args() {
 }
 
 resolve_cci_ref() {
-  if [[ -n "${CCI_REF}" ]]; then
-    return
+  local ref="$1"
+  if [[ -z "$ref" ]]; then
+    ref=$(git -C "${BOLT_ROOT}" describe --exact-match --tags HEAD 2> /dev/null || true)
   fi
-
-  # Bolt release tags have matching tags in bytedance/conan-center-index.
-  CCI_REF="$(git -C "${BOLT_ROOT}" describe --exact-match --tags HEAD 2> /dev/null || true)"
-  CCI_REF="${CCI_REF:-main}"
+  echo "${ref:-main}"
 }
 
 download_conan_recipes() {
   local cci_repository="$1"
+  local cci_ref="$2"
 
-  echo "ℹ️  Cloning conan-center-index at ${CCI_REF} from ${cci_repository}..."
+  echo "ℹ️  Cloning conan-center-index at ${cci_ref} from ${cci_repository}..."
   rm -rf "${CCI_HOME}"
-  git clone --quiet --depth 1 --branch "${CCI_REF}" "${cci_repository}" "${CCI_HOME}"
+  git clone --quiet --depth 1 --branch "$cci_ref" "${cci_repository}" "${CCI_HOME}"
 }
 
-update_conan_remote() {
-  local remote_name="$1"
-  local remote_url="$2"
-  local remote_index="$3"
-  local remote_type="${4:-}"
-
-  pip install --upgrade conan==2.32.0
-
+configure_conan_remote() {
+  local remote_name="bolt-cci-local"
   echo "⚙️  Configuring remote '${remote_name}'..."
-  conan remote remove "${remote_name}" > /dev/null 2>&1 || true
-
-  if [[ -n "${remote_type}" ]]; then
-    conan remote add --index "${remote_index}" --type "${remote_type}" "${remote_name}" "${remote_url}" > /dev/null
-  else
-    conan remote add --index "${remote_index}" "${remote_name}" "${remote_url}" > /dev/null
-  fi
+  conan remote remove "$remote_name" > /dev/null 2>&1 || true
+  conan remote add --index 0 --type local-recipes-index \
+    "$remote_name" "$CCI_HOME" > /dev/null
 }
 
 main() {
   parse_args "$@"
   command -v conan > /dev/null 2>&1 || die "'conan' command not found"
-  resolve_cci_ref
-  download_conan_recipes "${CCI_REPOSITORY}"
-  update_conan_remote "bolt-cci-local" "${CCI_HOME}" 0 "local-recipes-index"
+  local cci_ref
+  cci_ref=$(resolve_cci_ref "$CCI_REF")
+  download_conan_recipes "$CCI_REPOSITORY" "$cci_ref"
+  configure_conan_remote
 
   echo "🎉 All done! Conan remotes configured."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
