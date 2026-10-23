@@ -164,6 +164,9 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   vector_size_t activeRowsInDescriptor(
       const BmWindowPartitionDescriptor& descriptor) const;
 
+  // Require cached results for every window function before releasing input
+  // rows.
+  const size_t numWindowFunctions_;
   std::shared_ptr<BmEntirePartitionAggregation> inputAggregation_;
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
   std::unique_ptr<exec::bm::BmRowContainer> bmData_;

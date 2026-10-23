@@ -52,6 +52,7 @@ BmStreamingWindowBuild::BmStreamingWindowBuild(
           nonReclaimableSection,
           spillMemoryThreshold,
           enableJit),
+      numWindowFunctions_(windowNode->windowFunctions().size()),
       bufferManager_(std::move(bufferManager)),
       bmData_(std::make_unique<exec::bm::BmRowContainer>(
           inputType_->children(),
@@ -189,6 +190,10 @@ void BmStreamingWindowBuild::closeOpenPartition() {
   }
   if (inputAggregation_ != nullptr) {
     openPartition_->aggregateResults = inputAggregation_->finishPartition();
+    const auto& results = openPartition_->aggregateResults;
+    BOLT_CHECK_EQ(results.size(), inputAggregation_->numFunctions());
+    openPartition_->canReleaseConsumedChunks =
+        results.size() == numWindowFunctions_;
   }
   readyPartitions_.push_back(std::move(*openPartition_));
   openPartition_.reset();

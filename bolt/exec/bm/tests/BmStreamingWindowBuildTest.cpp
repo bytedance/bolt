@@ -1357,8 +1357,12 @@ TEST_F(
     BmStreamingWindowBuildDiskIoTest,
     inputAggregateInlineHourSurvivesWindowSpill) {
   constexpr vector_size_t kRows = 131072;
-  for (const bool allNull : {false, true}) {
+  for (const auto& [allNull, mixedFrame] :
+       {std::pair{false, false},
+        std::pair{true, false},
+        std::pair{false, true}}) {
     SCOPED_TRACE(allNull);
+    SCOPED_TRACE(mixedFrame);
     auto data = makeRowVector(
         {"hour", "payload", "id"},
         {makeFlatVector<std::string>(
@@ -1368,14 +1372,17 @@ TEST_F(
          makeFlatVector<std::string>(
              kRows, [](auto row) { return std::string(256, 'a' + row % 26); }),
          makeFlatVector<int64_t>(kRows, [](auto row) { return row; })});
-    auto plan =
-        PlanBuilder(pool())
-            .values({data})
-            .streamingWindow({
-                // Match Spark's full-partition normalization of OVER().
-                "max(hour) over (rows between unbounded preceding and unbounded following)",
-            })
-            .planNode();
+    std::vector<std::string> functions{
+        // Match Spark's full-partition normalization of OVER().
+        "max(hour) over (rows between unbounded preceding and unbounded following)"};
+    if (mixedFrame) {
+      functions.push_back(
+          "sum(id) over (rows between unbounded preceding and current row)");
+    }
+    auto plan = PlanBuilder(pool())
+                    .values({data})
+                    .streamingWindow(functions)
+                    .planNode();
     auto node = std::dynamic_pointer_cast<const core::WindowNode>(plan);
     ASSERT_NE(nullptr, node);
     ASSERT_EQ(
@@ -1410,13 +1417,20 @@ TEST_F(
     // Select WindowRead under temporary admission pressure, then remove that
     // pressure so the unrelated resident re-pin reservation issue is excluded.
     auto pressurePool = root->addLeafChild("force-window-read");
-    const auto pressureBytes = root->freeBytes() - (40 << 20);
+    // The mixed frame extracts the same chunk again during apply(). Leave
+    // space for its existing re-pin reservation while still rejecting the
+    // 88 MiB all-segment bulk probe.
+    const uint64_t readSlack = (mixedFrame ? 80 : 40) << 20;
+    const auto pressureBytes = root->freeBytes() - readSlack;
     auto* pressure = pressurePool->allocate(pressureBytes);
     auto pressureGuard = folly::makeGuard([&] {
       if (pressure != nullptr) {
         pressurePool->free(pressure, pressureBytes);
       }
     });
+    const auto liveBlocksBeforeOutput =
+        task->bufferManager()->stats().liveBlocks;
+    bool releasedBeforePartitionEnd = false;
     vector_size_t offset = 0;
     while (offset < kRows) {
       Operator::NonReclaimableSectionGuard guard(&window);
@@ -1442,16 +1456,38 @@ TEST_F(
                   .str());
         }
       }
+      if (mixedFrame) {
+        for (vector_size_t row = 0; row < output->size(); ++row) {
+          const int64_t inputRow = offset + row;
+          ASSERT_EQ(
+              inputRow * (inputRow + 1) / 2,
+              output->childAt(4)->asFlatVector<int64_t>()->valueAt(row));
+        }
+      }
       offset += output->size();
+      if (offset < kRows) {
+        const auto liveBlocks = task->bufferManager()->stats().liveBlocks;
+        releasedBeforePartitionEnd |= liveBlocks < liveBlocksBeforeOutput;
+        if (mixedFrame) {
+          // A running frame still needs the original rows: caching MAX alone
+          // must not grant release eligibility to the whole partition.
+          EXPECT_EQ(liveBlocksBeforeOutput, liveBlocks);
+        }
+      }
     }
     EXPECT_EQ(kRows, offset);
     EXPECT_TRUE(window.isFinished());
+    EXPECT_EQ(!mixedFrame, releasedBeforePartitionEnd);
 #ifndef NDEBUG
     const auto stats = window::bmAggregateWindowTestStats();
     EXPECT_EQ(kRows, stats.inputAggregationRows);
     EXPECT_EQ(1, stats.inputAggregationPartitions);
     EXPECT_EQ(1, stats.inputAggregationFunctions);
-    EXPECT_EQ(0, stats.materializedRows);
+    if (mixedFrame) {
+      EXPECT_GT(stats.materializedRows, 0);
+    } else {
+      EXPECT_EQ(0, stats.materializedRows);
+    }
 #endif
     EXPECT_GT(task->bufferManager()->stats().spillReadCount, 0);
 #ifndef NDEBUG
