@@ -64,6 +64,7 @@ BmStreamingWindowBuild::BmStreamingWindowBuild(
       partitionSchema_(makeBmWindowPartitionSchema(
           windowNode->inputType()->children(),
           inversedInputChannels_)) {
+  partitionKeyColumns_.reserve(partitionKeyInfo_.size());
   boundaryKeyColumns_.reserve(partitionKeyInfo_.size() + sortKeyInfo_.size());
   auto addBoundaryKeyColumn = [&](int32_t column) {
     if (std::find(
@@ -73,6 +74,7 @@ BmStreamingWindowBuild::BmStreamingWindowBuild(
     }
   };
   for (const auto& key : partitionKeyInfo_) {
+    partitionKeyColumns_.push_back(key.first);
     addBoundaryKeyColumn(key.first);
   }
   for (const auto& key : sortKeyInfo_) {

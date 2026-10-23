@@ -104,7 +104,12 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
 
   FOLLY_ALWAYS_INLINE int32_t
   comparePartitionRows(const char* left, const char* right) const {
-    return compareBmRowsWithKeys(left, right, partitionKeyInfo_);
+    return bmData_->equalKeys(
+               left,
+               right,
+               {partitionKeyColumns_.data(), partitionKeyColumns_.size()})
+        ? 0
+        : 1;
   }
 
   FOLLY_ALWAYS_INLINE int32_t
@@ -166,6 +171,7 @@ class BmStreamingWindowBuild : public exec::WindowBuild {
   std::shared_ptr<BmWindowAccessStats> windowAccessStats_{
       std::make_shared<BmWindowAccessStats>()};
   std::vector<int32_t> boundaryKeyColumns_;
+  std::vector<column_index_t> partitionKeyColumns_;
   std::optional<BmWindowPartitionDescriptor> openPartition_;
   std::deque<BmWindowPartitionDescriptor> readyPartitions_;
   std::weak_ptr<exec::WindowPartition> returnedPartition_;
