@@ -28,6 +28,7 @@
  * --------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <unordered_map>
 
 #include "bolt/buffer/Buffer.h"
@@ -123,7 +124,6 @@ void complexGatherCopy(
         1);
   }
 }
-
 // We want to aggregate some operator runtime metrics per operator rather than
 // per event. This function returns true for such metrics.
 bool shouldAggregateRuntimeMetric(const std::string& name) {
@@ -369,6 +369,38 @@ RowVectorPtr wrapAndCombineDict(
       pool, rowType, nullptr, size, wrappedChildren);
 }
 
+RowVectorPtr
+wrap(vector_size_t size, BufferPtr mapping, const RowVectorPtr& vector) {
+  if (!mapping) {
+    return vector;
+  }
+
+  return wrap(
+      size,
+      std::move(mapping),
+      asRowType(vector->type()),
+      vector->children(),
+      vector->pool());
+}
+
+RowVectorPtr wrap(
+    vector_size_t size,
+    BufferPtr mapping,
+    const RowTypePtr& rowType,
+    const std::vector<VectorPtr>& childVectors,
+    memory::MemoryPool* pool) {
+  if (mapping == nullptr) {
+    return RowVector::createEmpty(rowType, pool);
+  }
+  std::vector<VectorPtr> wrappedChildren;
+  wrappedChildren.reserve(childVectors.size());
+  for (auto& child : childVectors) {
+    wrappedChildren.emplace_back(wrapChild(size, mapping, child));
+  }
+  return std::make_shared<RowVector>(
+      pool, rowType, nullptr, size, wrappedChildren);
+}
+
 void loadColumns(const RowVectorPtr& input, core::ExecCtx& execCtx) {
   LocalDecodedVector decodedHolder(execCtx);
   LocalSelectivityVector baseRowsHolder(&execCtx);
@@ -396,7 +428,11 @@ void gatherCopy(
     const std::vector<const RowVector*>& sources,
     const std::vector<vector_size_t>& sourceIndices,
     column_index_t sourceChannel) {
-  if (target->isScalar()) {
+  const bool flattenSources = std::all_of(
+      sources.begin(), sources.begin() + count, [&](const auto& source) {
+        return source->childAt(sourceChannel)->isFlatEncoding();
+      });
+  if (target->isScalar() && flattenSources) {
     BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
         scalarGatherCopy,
         target->type()->kind(),
