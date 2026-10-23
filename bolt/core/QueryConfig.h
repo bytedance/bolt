@@ -264,6 +264,9 @@ class QueryConfig {
   static constexpr const char* kAggregationSpillEnabled =
       "aggregation_spill_enabled";
 
+  /// Keeps the final sorted aggregation runs in memory after input spilling,
+  /// and spills their unconsumed suffixes on reclaim. Requires aggregation
+  /// spilling; aggregates with ORDER BY or DISTINCT inputs use the legacy path.
   static constexpr const char* kAggregationDynamicFinalSpillEnabled =
       "aggregation_dynamic_final_spill_enabled";
 

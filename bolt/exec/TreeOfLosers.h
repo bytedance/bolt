@@ -38,7 +38,6 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SimdUtil.h"
 
-#include <folly/Function.h>
 #include <folly/Likely.h>
 namespace bytedance::bolt {
 
@@ -101,68 +100,38 @@ class TreeOfLosers {
     return streams_[index].get();
   }
 
+  /// Replaces a range of streams and resets selection. Empty replacements
+  /// remove the range; a zero count inserts streams at 'index'. The caller
+  /// owns any external backing and must keep it alive until removal completes.
   void replaceStreams(
       size_t index,
       size_t count,
-      folly::FunctionRef<std::vector<std::unique_ptr<Stream>>()>
-          makeReplacements,
-      folly::FunctionRef<void()> releaseOldBacking) {
+      std::vector<std::unique_ptr<Stream>> replacements) {
     BOLT_CHECK_LE(index, streams_.size());
     BOLT_CHECK_LE(count, streams_.size() - index);
-    BOLT_CHECK_GT(count, 0);
-    for (size_t i = index; i < index + count; ++i) {
-      streams_[i].reset();
-    }
-    try {
-      releaseOldBacking();
-      auto replacements = makeReplacements();
-      BOLT_CHECK(!replacements.empty());
-      streams_.erase(
-          streams_.begin() + index, streams_.begin() + index + count);
-      streams_.insert(
-          streams_.begin() + index,
-          std::make_move_iterator(replacements.begin()),
-          std::make_move_iterator(replacements.end()));
-      resetSelection();
-    } catch (...) {
-      streams_.clear();
-      values_.clear();
-      equals_.clear();
-      lastIndex_ = kEmpty;
-      firstStream_ = 0;
-      throw;
-    }
+    const auto remaining = streams_.size() - count;
+    BOLT_CHECK_LT(
+        replacements.size(), std::numeric_limits<TIndex>::max() - remaining);
+    // Reserve before modifying the existing streams so allocation failure
+    // preserves them. Removal never grows storage and is safe during reclaim.
+    const auto size = remaining + replacements.size();
+    streams_.reserve(size);
+    values_.reserve(size == 0 ? 0 : size - 1);
+    equals_.reserve(size == 0 ? 0 : size - 1);
+    streams_.erase(streams_.begin() + index, streams_.begin() + index + count);
+    streams_.insert(
+        streams_.begin() + index,
+        std::make_move_iterator(replacements.begin()),
+        std::make_move_iterator(replacements.end()));
+    resetSelection();
   }
 
  private:
   /// Rebuilds the loser-tree topology and selection state after replacement.
   void resetSelection() {
-    int32_t size = 0;
-    int32_t levelSize = 1;
-    int32_t numStreams = streams_.size();
-    while (numStreams > levelSize) {
-      size += levelSize;
-      levelSize *= 2;
-    }
-
-    if (numStreams == bits::nextPowerOfTwo(numStreams)) {
-      // All leaves are on last level.
-      firstStream_ = size;
-    } else {
-      // Some of the streams are on the last level and some on the level before.
-      // The first stream follows the last inner node in the node numbering.
-
-      auto secondLastSize = levelSize / 2;
-      auto overflow = numStreams - secondLastSize;
-      // Suppose 12 streams. The last level has 16 places, the second
-      // last 8. If we fill the second last level we have 8 streams
-      // and 4 left over. These 4 need parents on the second last
-      // level. So, we end up with 4 inner nodes on the second last
-      // level and 8 nodes on the last level. The streams at the left
-      // of the second last level become inner nodes and their streams
-      // move to the level below.
-      firstStream_ = (size - secondLastSize) + overflow;
-    }
+    // A full binary tree with N leaves has N - 1 internal nodes. Leaves
+    // follow the internal nodes, including when N is not a power of two.
+    firstStream_ = streams_.empty() ? 0 : streams_.size() - 1;
     values_.assign(firstStream_, kEmpty);
     equals_.assign(firstStream_, false);
     lastIndex_ = kEmpty;
@@ -181,7 +150,8 @@ class TreeOfLosers {
     if (UNLIKELY(lastIndex_ == kEmpty)) {
       if (UNLIKELY(values_.empty())) {
         // Only one stream. We handle this off the common path.
-        return streams_[0]->hasData() ? streams_[0].get() : nullptr;
+        return !streams_.empty() && streams_[0]->hasData() ? streams_[0].get()
+                                                           : nullptr;
       }
       lastIndex_ = first(0);
     } else {
@@ -204,7 +174,7 @@ class TreeOfLosers {
     if (UNLIKELY(lastIndex_ == kEmpty)) {
       // Only one stream. We handle this off the common path.
       if (values_.empty()) {
-        return streams_[0]->hasData()
+        return !streams_.empty() && streams_[0]->hasData()
             ? std::make_pair(streams_[0].get(), streams_[0]->isNextEqual())
             : std::make_pair(nullptr, false);
       }

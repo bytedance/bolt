@@ -628,13 +628,6 @@ class RowContainerSpillMergeStream final : public SpillMergeStream {
     return batchBegin_ + index_;
   }
 
-  bool isNextEqual() const override {
-    const auto position = *memoryPosition();
-    return position + 1 < rows_.size() &&
-        container_.compareRows(
-            rows_[position], rows_[position + 1], sortCompareFlags_) == 0;
-  }
-
  private:
   const std::vector<SpillSortKey>& sortingKeys() const override {
     return sortingKeys_;
@@ -736,6 +729,9 @@ class RowContainerRowBasedSpillMergeStream final
     rowVector_.clear();
     rowLengths_.clear();
     if (batchBegin_ >= rows_.size()) {
+      rowBuffer_.reset();
+      std::vector<char*>().swap(rowVector_);
+      std::vector<size_t>().swap(rowLengths_);
       return;
     }
     const auto limit =
@@ -784,9 +780,6 @@ class RowContainerRowBasedSpillMergeStream final
             ContainerRow2RowSerde::deserialize(row, rowInfo_, false);
       }
       rowVector_.push_back(row);
-    }
-    if (!withLengths) {
-      rowLengths_.clear();
     }
   }
 

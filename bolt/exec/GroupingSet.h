@@ -387,6 +387,7 @@ class GroupingSet {
   void prepareSpillMerge(bool dynamicFinalSpill);
   void releaseResidentRuns();
   void releaseResidentBacking();
+  void finishPendingOutputSpill();
   uint64_t residentPosition(size_t run) const;
   bool residentRunsFinished() const;
 
@@ -459,26 +460,22 @@ class GroupingSet {
       vector_size_t resultOffset);
 
   void copyKeyAndInitGroup(
-      AggregationMergeScratch& scratch,
       size_t& initGroupCount,
       const RowVectorPtr& result,
       const vector_size_t resultOffset);
 
   void copyKeyAndUpdateGroups(
-      AggregationMergeScratch& scratch,
       size_t& initGroupCount,
       const RowContainer* container,
       const RowVectorPtr& result,
       const vector_size_t resultOffset);
 
   void outputUniqueGroups(
-      AggregationMergeScratch& scratch,
       const RowVectorPtr& result,
       size_t& uniqueCount,
       size_t& estimateUniqueBytesPerRow);
 
   void outputUniqueGroupsInRowFormat(
-      AggregationMergeScratch& scratch,
       const RowVectorPtr& result,
       const int32_t resultOffset,
       size_t& estimateUniqueBytesPerRow);
@@ -615,6 +612,9 @@ class GroupingSet {
   // existing variable-length storage from the size of each output batch.
   uint64_t residentStringBytes_{0};
   std::optional<OwnedSpillPartition> pendingInputSpillPartition_;
+  // Suffix files waiting for output admission. While set, the resident streams
+  // have been removed and firstResidentStreamIndex_ is their insertion point.
+  std::optional<OwnedSpillPartition> pendingOutputSpillPartition_;
   common::SpillStats residentSuffixSpillStats_;
   std::optional<size_t> firstResidentStreamIndex_;
   bool spillMergePrepared_{false};

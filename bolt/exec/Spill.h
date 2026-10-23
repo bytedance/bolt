@@ -431,28 +431,13 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
 #endif
       ,
       DistinctProvenance provenance = DistinctProvenance::kNew) {
-    const auto sortingKeys = spillFile->sortingKeys();
+    return createInternal(
+        std::move(spillFile),
 #ifdef ENABLE_BOLT_JIT
-    const auto compare = jitModule
-        ? reinterpret_cast<RowRowCompare>(
-              jitModule->getFuncPtr(jitModule->getKey()))
-        : nullptr;
-#else
-    const RowRowCompare compare = nullptr;
+        std::move(jitModule),
 #endif
-    auto spillStream = std::unique_ptr<RowBasedFileSpillMergeStream>(
-        new RowBasedFileSpillMergeStream(
-            std::move(spillFile),
-            sortingKeys,
-            provenance,
-            compare
-#ifdef ENABLE_BOLT_JIT
-            ,
-            std::move(jitModule)
-#endif
-                ));
-    spillStream->nextBatch();
-    return spillStream;
+        provenance,
+        false);
   }
 
   static std::unique_ptr<RowBasedSpillMergeStream> createWithLength(
@@ -463,28 +448,13 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
 #endif
       ,
       DistinctProvenance provenance = DistinctProvenance::kNew) {
-    const auto sortingKeys = spillFile->sortingKeys();
+    return createInternal(
+        std::move(spillFile),
 #ifdef ENABLE_BOLT_JIT
-    const auto compare = jitModule
-        ? reinterpret_cast<RowRowCompare>(
-              jitModule->getFuncPtr(jitModule->getKey()))
-        : nullptr;
-#else
-    const RowRowCompare compare = nullptr;
+        std::move(jitModule),
 #endif
-    auto spillStream = std::unique_ptr<RowBasedFileSpillMergeStream>(
-        new RowBasedFileSpillMergeStream(
-            std::move(spillFile),
-            sortingKeys,
-            provenance,
-            compare
-#ifdef ENABLE_BOLT_JIT
-            ,
-            std::move(jitModule)
-#endif
-                ));
-    spillStream->nextBatchWithLengths();
-    return spillStream;
+        provenance,
+        true);
   }
 
   void prefetch() override {
@@ -508,6 +478,41 @@ class RowBasedFileSpillMergeStream : public RowBasedSpillMergeStream {
   ~RowBasedFileSpillMergeStream() override;
 
  private:
+  static std::unique_ptr<RowBasedSpillMergeStream> createInternal(
+      std::unique_ptr<RowBasedSpillReadFile> spillFile,
+#ifdef ENABLE_BOLT_JIT
+      bolt::jit::CompiledModuleSP jitModule,
+#endif
+      DistinctProvenance provenance,
+      bool withLengths) {
+    const auto sortingKeys = spillFile->sortingKeys();
+#ifdef ENABLE_BOLT_JIT
+    const auto compare = jitModule
+        ? reinterpret_cast<RowRowCompare>(
+              jitModule->getFuncPtr(jitModule->getKey()))
+        : nullptr;
+#else
+    const RowRowCompare compare = nullptr;
+#endif
+    auto spillStream = std::unique_ptr<RowBasedFileSpillMergeStream>(
+        new RowBasedFileSpillMergeStream(
+            std::move(spillFile),
+            sortingKeys,
+            provenance,
+            compare
+#ifdef ENABLE_BOLT_JIT
+            ,
+            std::move(jitModule)
+#endif
+                ));
+    if (withLengths) {
+      spillStream->nextBatchWithLengths();
+    } else {
+      spillStream->nextBatch();
+    }
+    return spillStream;
+  }
+
   explicit RowBasedFileSpillMergeStream(
       std::unique_ptr<RowBasedSpillReadFile> spillFile,
       std::vector<SpillSortKey> sortingKeys,

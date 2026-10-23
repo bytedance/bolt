@@ -307,8 +307,7 @@ class Spiller {
       const common::SpillConfig* spillConfig);
 
   OwnedSpillPartition spillSortedRunsAndFinish(
-      const std::vector<folly::Range<char* const*>>& runs,
-      bool needSetNextEqual);
+      const std::vector<folly::Range<char* const*>>& runs);
 
   uint64_t sortRowsInPlace(folly::Range<char**> rows);
 
@@ -436,7 +435,7 @@ class Spiller {
   // set nextEqual if rows[i] == rows[i+1], return whether equal rows to
   // feedback whether bypass hash table or not
   size_t setNextEqualForAgg(SpillRun& run);
-  void setNextEqualForAgg(folly::Range<char* const*> rows);
+  size_t setNextEqualForAgg(folly::Range<char* const*> rows);
 
   // Function for writing a spill partition on an executor. Writes to
   // 'partition' until all rows in spillRuns_[partition] are written

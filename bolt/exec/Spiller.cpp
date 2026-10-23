@@ -605,80 +605,37 @@ uint64_t Spiller::sortRowsInPlace(folly::Range<char**> rows) {
 }
 
 size_t Spiller::setNextEqualForAgg(SpillRun& run) {
-  if ((type_ != Type::kAggregateInput && type_ != Type::kAggregateOutput) ||
-      run.rows.empty()) {
-    return false;
+  if (type_ != Type::kAggregateInput && type_ != Type::kAggregateOutput) {
+    return 0;
   }
-  CHECK(container_->probedFlagOffset() > 0);
-  size_t i = 0;
-  bool equal = false;
-  size_t equalNum = 0;
-  for (; i < run.rows.size() - 1; i++) {
-    if (cmp_ != nullptr) {
-      // the sorted rows[i] <= rows[i+1] results from cmp_ compares rows[i] <
-      // rows[i+1], so cmp_ returns false means rows[i] == rows[i+1]
-      equal = !cmp_(run.rows[i], run.rows[i + 1]);
-#if DEBUG_JIT
-      bool jitEqual = (int)equal > 0; // as cmp_ may return 255 for true
-      auto expected = container_->compareRows(
-                          run.rows[i], run.rows[i + 1], compareFlags_) == 0;
-      if ((expected != jitEqual)) {
-        std::stringstream ss;
-        ss << " bypass expected: " << (int)expected
-           << " jitEqual: " << (int)jitEqual
-           << " row[i]: " << container_->toString(run.rows[i])
-           << " row[i+1]: " << container_->toString(run.rows[i + 1])
-           << std::endl;
-        std::cerr << ss.str() << std::endl;
-        BOLT_CHECK(false);
-      }
-#endif
-    } else {
-      equal = container_->compareRows(
-                  run.rows[i], run.rows[i + 1], compareFlags_) == 0;
-    }
-    if (equal) {
-      bits::setBit(run.rows[i], container_->probedFlagOffset(), true);
-      equalNum += 1;
-    }
-#ifdef DEBUG
-    bool writeEqual =
-        bits::isBitSet(run.rows[i], container_->probedFlagOffset());
-    if (equal != writeEqual ||
-        (equal && writeEqual && !spillConfig_->needSetNextEqual)) {
-      LOG(ERROR) << "i: " << i << " of total rows " << run.rows.size()
-                 << ", type: " << typeName(type_)
-                 << ", writeEqual: " << writeEqual
-                 << ", offset = " << container_->probedFlagOffset()
-                 << ", equal: " << equal
-                 << ", needSetNextEqual: " << spillConfig_->needSetNextEqual;
-      CHECK_EQ(equal, writeEqual);
-      CHECK(spillConfig_->needSetNextEqual);
-    }
-#endif
-  }
-  // the last is false
-  bits::setBit(run.rows[i], container_->probedFlagOffset(), false);
-  return equalNum;
+  return setNextEqualForAgg(
+      folly::Range<char* const*>(run.rows.data(), run.rows.size()));
 }
 
-void Spiller::setNextEqualForAgg(folly::Range<char* const*> rows) {
+size_t Spiller::setNextEqualForAgg(folly::Range<char* const*> rows) {
   if (rows.empty()) {
-    return;
+    return 0;
   }
   BOLT_CHECK_GT(container_->probedFlagOffset(), 0);
+  size_t equalCount = 0;
   for (size_t i = 0; i + 1 < rows.size(); ++i) {
     const auto equal = cmp_ != nullptr
         ? !cmp_(rows[i], rows[i + 1])
         : container_->compareRows(rows[i], rows[i + 1], compareFlags_) == 0;
+#if DEBUG_JIT
+    BOLT_CHECK_EQ(
+        equal,
+        container_->compareRows(rows[i], rows[i + 1], compareFlags_) == 0);
+#endif
     bits::setBit(rows[i], container_->probedFlagOffset(), equal);
+    equalCount += equal;
   }
   bits::setBit(rows.back(), container_->probedFlagOffset(), false);
+  return equalCount;
 }
 
 OwnedSpillPartition Spiller::spillSortedRunsAndFinish(
-    const std::vector<folly::Range<char* const*>>& runs,
-    bool needSetNextEqual) {
+    const std::vector<folly::Range<char* const*>>& runs) {
   CHECK_NOT_FINALIZED();
   BOLT_CHECK_EQ(type_, Type::kAggregateOutput);
   BOLT_CHECK(!runs.empty());
@@ -694,9 +651,6 @@ OwnedSpillPartition Spiller::spillSortedRunsAndFinish(
     MicrosecondTimer timer(&totalTimeUs);
     for (const auto rows : runs) {
       BOLT_CHECK(!rows.empty());
-      if (needSetNextEqual) {
-        setNextEqualForAgg(rows);
-      }
 #ifndef NDEBUG
       for (size_t i = 1; i < rows.size(); ++i) {
         BOLT_DCHECK_LE(

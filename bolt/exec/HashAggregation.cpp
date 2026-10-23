@@ -387,7 +387,7 @@ void HashAggregation::updateRuntimeStats() {
 
 void HashAggregation::recordSpillStats() {
   auto spillStatsOr = groupingSet_->spilledStats();
-  if (spillStatsOr.has_value()) {
+  if (spillStatsOr.has_value() && spillStatsOr.value() != recordedSpillStats_) {
     const auto delta = spillStatsOr.value() - recordedSpillStats_;
     Operator::recordSpillStats(delta);
     recordedSpillStats_ = spillStatsOr.value();
@@ -770,6 +770,10 @@ bool HashAggregation::canReclaim() const {
 }
 
 void HashAggregation::updateReclaimable() noexcept {
+  if (groupingSet_ == nullptr) {
+    reclaimable_.store(false, std::memory_order_relaxed);
+    return;
+  }
   const bool hasReclaimableState = !noMoreInput_ ||
       (groupingSet_->hasSpilled() ? groupingSet_->dynamicFinalSpillActive()
                                   : groupingSet_->numRows() > 0);
