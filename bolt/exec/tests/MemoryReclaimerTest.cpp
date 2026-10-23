@@ -285,6 +285,43 @@ TEST_F(MemoryReclaimerTest, operatorWithExternalPool) {
   }
 }
 
+TEST_F(MemoryReclaimerTest, parentReclaimsOperatorWithOnlyExternalReservation) {
+  auto driver =
+      Driver::testingCreate(std::make_unique<DriverCtx>(fakeTask_, 0, 0, 0, 0));
+  ExternalPoolReclaimTestOperator op(driver->driverCtx());
+  op.pool()->setReclaimer(op.makeReclaimer());
+  auto* parent = op.pool()->parent();
+  auto* external = op.externalReclaimPool();
+  auto allocation = AlignedBuffer::allocate<char>(2 << 20, external);
+  ASSERT_TRUE(external->maybeReserve(8 << 20));
+  ASSERT_EQ(op.pool()->reservedBytes(), 0);
+  ASSERT_EQ(external->reclaimer(), nullptr);
+  const auto before = op.pool()->reservedBytes() + external->reservedBytes();
+  ASSERT_GT(before, 0);
+  const auto candidate = parent->reclaimableBytes();
+  ASSERT_TRUE(candidate.has_value());
+  EXPECT_EQ(candidate.value(), before);
+
+  int reclaimCalls = 0;
+  op.onReclaim = [&]() {
+    ++reclaimCalls;
+    allocation.reset();
+  };
+  fakeTask_->requestPause().wait();
+  ScopedMemoryArbitrationContext arbitrationContext;
+  memory::MemoryReclaimer::Stats stats;
+  // The external leaf has no reclaimer and the operator leaf has no
+  // reservation. Only the operator's combined estimate can make it a
+  // parent-level candidate.
+  const auto reclaimed = parent->reclaim(1, 0, stats);
+  EXPECT_EQ(reclaimCalls, 1);
+  const auto after = op.pool()->reservedBytes() + external->reservedBytes();
+  EXPECT_EQ(after, 0);
+  EXPECT_EQ(reclaimed, before - after);
+  EXPECT_EQ(stats.reclaimedBytes, reclaimed);
+  EXPECT_EQ(parent->reservedBytes(), 0);
+}
+
 TEST_F(MemoryReclaimerTest, externalPoolGrowthOffsetsReclaimedBytes) {
   auto driver =
       Driver::testingCreate(std::make_unique<DriverCtx>(fakeTask_, 0, 0, 0, 0));
