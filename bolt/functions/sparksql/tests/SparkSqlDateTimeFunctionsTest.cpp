@@ -2359,14 +2359,15 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
   resetQueryConfig();
 }
 
-TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
+TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeWeekYearWithMonth) {
+  setTimeParserPolicy("legacy");
   const auto fromUnixTime = [&](const std::optional<std::string>& unixTime,
                                 const std::optional<std::string>& timeFormat) {
     return evaluateOnce<std::string>(
         "from_unixtime(try_cast(c0 as bigint), c1)", unixTime, timeFormat);
   };
 
-  EXPECT_THROW(fromUnixTime("1609167953", "YYYY-MM-dd"), BoltUserError);
+  EXPECT_EQ("2021-12-28", fromUnixTime("1609167953", "YYYY-MM-dd").value());
 
   const auto fromUnixTimeWithTimezone = [&](const std::optional<std::string>&
                                                 unixTime,
@@ -2381,9 +2382,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
         timezone);
   };
 
-  EXPECT_THROW(
-      fromUnixTimeWithTimezone("1609167953", "YYYY-MM-dd", "Asia/Shanghai"),
-      BoltUserError);
+  EXPECT_EQ(
+      "2021-12-28",
+      fromUnixTimeWithTimezone("1609167953", "YYYY-MM-dd", "Asia/Shanghai")
+          .value());
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
@@ -2401,9 +2403,19 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
         resultVector->as<SimpleVector<StringView>>()->valueAt(0);
     return resultStringView.getString();
   };
-  EXPECT_THROW(
-      dateFormat(fromTimestampString("1970-01-01", nullptr), "YYYY-MM-dd"),
-      BoltUserError);
+  setTimeParserPolicy("legacy");
+  EXPECT_EQ(
+      "2019-12-30",
+      dateFormat(fromTimestampString("2018-12-30", nullptr), "YYYY-MM-dd"));
+  EXPECT_EQ(
+      "2019-12-30",
+      evaluate(
+          "date_format(c0, 'YYYY-MM-dd')",
+          makeRowVector({makeFlatVector<Timestamp>(
+              {fromTimestampString("2018-12-30", nullptr)})}))
+          ->as<SimpleVector<StringView>>()
+          ->valueAt(0)
+          .str());
   EXPECT_EQ(
       "20180314 01:02:03.123",
       dateFormat(
@@ -2460,8 +2472,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, weekBased) {
   };
 
   setTimeParserPolicy("legacy");
-  // YYYY should not used with MM
-  EXPECT_THROW(dateFormat("1970-01-01", "YYYY-MM-dd"), BoltUserError);
+  EXPECT_EQ("2018-12-29", dateFormat("2018-12-29", "YYYY-MM-dd"));
+  EXPECT_EQ("2019-12-30", dateFormat("2018-12-30", "YYYY-MM-dd"));
+  EXPECT_EQ("2019-12-31", dateFormat("2018-12-31", "YYYY-MM-dd"));
+  EXPECT_EQ("2019-01-01", dateFormat("2019-01-01", "YYYY-MM-dd"));
 
   // YYYY-ww-uu
   EXPECT_EQ("2024-52-06", dateFormat("2024-12-28", "YYYY-ww-uu"));
@@ -2513,8 +2527,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, weekBased) {
         ->toString(options);
   };
 
-  // YYYY should not used with MM
-  EXPECT_THROW(getTimestamp("1970-01-01", "YYYY-MM-dd"), BoltUserError);
+  EXPECT_EQ("1969-12-28", getTimestamp("1970-01-01", "YYYY-MM-dd"));
+  EXPECT_EQ("2020-12-27", getTimestamp("2021-12-31", "YYYY-MM-dd"));
+  EXPECT_EQ("2001-06-15", getTimestamp("1970-2001-06-15", "YYYY-yyyy-MM-dd"));
+  EXPECT_EQ("1969-12-28", getTimestamp("2001-1970-06-15", "yyyy-YYYY-MM-dd"));
 
   // YYYY-ww-uu
   EXPECT_EQ("2024-12-28", getTimestamp("2024-52-06", "YYYY-ww-uu"));
