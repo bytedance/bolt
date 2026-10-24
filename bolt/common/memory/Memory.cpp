@@ -44,17 +44,17 @@ constexpr std::string_view kSysRootName{"__sys_root__"};
 constexpr size_t kNumSystemPools{3};
 
 struct SingletonState {
-  ~SingletonState() {
-    delete instance.load(std::memory_order_acquire);
-  }
-
   std::atomic<MemoryManager*> instance{nullptr};
   std::mutex mutex;
 };
 
 SingletonState& singletonState() {
-  static SingletonState state;
-  return state;
+  // Native worker threads may still access the manager and its system pools
+  // while JVM and DSO exit handlers are running. Keep the holder and the
+  // production manager alive for the process lifetime. testingSetInstance()
+  // still explicitly replaces and deletes test instances.
+  static auto* state = new SingletonState;
+  return *state;
 }
 
 std::shared_ptr<MemoryAllocator> createAllocator(
