@@ -22,6 +22,16 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
+namespace {
+
+/// Bytes allocated past the last cache line. The dictionary probe loads a
+/// uint64_t at each entry's start, so a last entry near the end of its line
+/// reads up to 7 bytes past it: into the neighbouring line, or for the very
+/// last line into this padding rather than past the allocation.
+constexpr size_t kCacheTailPadding = sizeof(uint64_t);
+
+} // namespace
+
 CellSplitter::CellSplitter(
     const CellLayout& layout,
     uint32_t numPartitions,
@@ -49,11 +59,8 @@ CellSplitter::CellSplitter(
   const size_t cacheBytes =
       static_cast<size_t>(numPartitions_) * numStreams_ * kBlockValueBytes;
   const size_t cursorBytes = static_cast<size_t>(numPartitions_) * numStreams_;
-  // + 8: the dictionary probe loads 8 bytes at each entry's start, so a
-  // last entry near the end of its line reads up to 7 bytes past it - into
-  // the neighbouring line, or for the very last line into this slack
-  // rather than past the allocation.
-  cacheBase_ = arena_.allocateFixed(cacheBytes + 8, kBlockValueBytes);
+  cacheBase_ =
+      arena_.allocateFixed(cacheBytes + kCacheTailPadding, kBlockValueBytes);
   cursors_ = reinterpret_cast<uint8_t*>(arena_.allocateFixed(cursorBytes, 64));
   ::memset(cursors_, 0, cursorBytes);
   residentBytes_ = static_cast<int64_t>(cacheBytes + cursorBytes) +
@@ -150,9 +157,9 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     // bytes, so a short value - the common dictionary shape - compares
     // whole in the same register, and the walk issues exactly one load
     // per entry. A window anchored at the last boundary may read past the
-    // line into the neighbour's staged bytes (the arena leaves tail
-    // slack); the needle's leading length byte makes a match impossible
-    // outside a real entry, so the garbage is inert.
+    // line into the neighbour's staged bytes (or into
+    // kCacheTailPadding); the needle's leading length byte makes a match
+    // impossible outside a real entry, so the garbage is inert.
     const char* entries = cacheLine(dataStream, pid);
     const uint32_t uniform = st.uniformLen;
     uint32_t i;
@@ -180,7 +187,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
         uint32_t off = 0;
         for (uint32_t k = 0; k < count; ++k) {
           uint64_t window;
-          ::memcpy(&window, entries + off, 8);
+          ::memcpy(&window, entries + off, sizeof(window));
           if ((window & needleMask) == needle) {
             hit = k;
           }
@@ -214,7 +221,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
         uint32_t hit = count;
         for (uint32_t k = 0; k < count; ++k) {
           uint64_t window;
-          ::memcpy(&window, entries + off, 8);
+          ::memcpy(&window, entries + off, sizeof(window));
           if ((window & needleMask) == needle) {
             hit = k; // at most once; compiles to a flag-carrying select
           }
