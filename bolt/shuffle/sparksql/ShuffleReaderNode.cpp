@@ -92,12 +92,13 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
-  // Mirror of the writer-side gate: the cell writer is only ever used for
-  // hash/range partitioning, on local and Celeborn shuffles alike.
-  // Unsupported types fail at the adapter boundary instead of changing the
-  // wire format.
-  useCellReader_ = shuffleWriterType_ == ShuffleWriterType::Cell &&
-      supportAdaptiveShuffleWriter(partitioning);
+  // Mirror of the writer's choice: Cell when forced, or preferred by an
+  // adaptive choice that did not pick the row-based writer; never without
+  // a pid. A forced other type wins over the preference on both sides.
+  useCellReader_ = supportAdaptiveShuffleWriter(partitioning) &&
+      (shuffleWriterType_ == ShuffleWriterType::Cell ||
+       (shuffleWriterType_ == ShuffleWriterType::Adaptive &&
+        shuffleReaderOptions_.preferCellShuffle && !isRowBased_));
 }
 
 void SparkShuffleReader::init() {
