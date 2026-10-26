@@ -30,8 +30,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 // Buffers shuffle data by partition and stream, with chunk-backed cell
 // allocation, data chains, and null tracking.
 
-/// L0 of the Cell shuffle writer: the only component that talks to the
-/// engine MemoryPool for cell data.
+/// The Cell shuffle writer's chunk allocator: the only component that talks to
+/// the engine MemoryPool for cell data.
 ///
 /// "Chunk owns memory, Cell owns data": memory is requested from and returned
 /// to the pool exclusively in fixed-size chunks (default 4MB, matching the
@@ -160,7 +160,7 @@ class ChunkAllocator {
   int64_t usedCells_{0};
 };
 
-/// L1 of the Cell shuffle writer: the (partition, stream) -> cell-chain
+/// The Cell shuffle writer's (partition, stream) -> cell-chain
 /// directory. Cells express data ownership; all real memory lives in the
 /// ChunkAllocator below.
 ///
@@ -359,8 +359,8 @@ class NullCells {
   /// Summarizes (pid, col) over the first rowCount rows of the window.
   Summary summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const;
 
-  /// Writes the spec-form bitmap for (pid, col): ceil(rowCount / 8) bytes,
-  /// bit 1 = non-null, unused bits of the last byte zeroed (spec 4.2). Only
+  /// Writes the null body bitmap for (pid, col): ceil(rowCount / 8) bytes,
+  /// bit 1 = non-null, unused bits of the last byte zeroed. Only
   /// meaningful when summarize() returned kRawNull, but valid for any tag.
   void emitBitmap(uint32_t pid, uint32_t col, uint32_t rowCount, uint8_t* out)
       const;
