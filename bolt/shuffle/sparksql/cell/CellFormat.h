@@ -65,6 +65,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "bolt/type/Type.h"
@@ -139,6 +140,19 @@ enum class CellBlockKind : uint8_t {
 ///   layout    u8   RunLayout::kCombined (compressed) or kCombinedUncompressed
 ///   body           rows back to back, each [size i32][size bytes]
 constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
+
+/// The size prefix of a CompositeRows row. Rows lie back to back, so the
+/// prefix is in general unaligned: read through memcpy, one load.
+inline int32_t compositeRowSize(const void* row) {
+  int32_t size;
+  ::memcpy(&size, row, sizeof(size));
+  return size;
+}
+
+/// Bytes of a CompositeRows row with its size prefix.
+inline uint64_t compositeRowBytes(const void* row) {
+  return sizeof(int32_t) + static_cast<uint64_t>(compositeRowSize(row));
+}
 
 /// A run's compression layout: all streams compressed as one buffer, each
 /// stream compressed on its own, or all streams stored uncompressed. A

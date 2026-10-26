@@ -34,12 +34,6 @@ namespace {
 /// gives the reader batch-sized pieces.
 constexpr uint64_t kCompositeBlockBytes = 4 << 20;
 
-uint64_t compositeRowBytes(const uint8_t* row) {
-  int32_t size;
-  ::memcpy(&size, row, sizeof(size));
-  return sizeof(size) + static_cast<uint64_t>(size);
-}
-
 /// Assembles one CompositeRows block (CellFormat.h) of `rows` into `block`.
 /// The body is gathered in place, so a stored block needs no second copy
 /// and a compressed one is copied back over it; when the compression
