@@ -121,8 +121,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
 
   perPidCounter_.assign(numPartitions_, 0);
-  // Partitioner::compute fills but does not size this.
-  partition2RowCount_.resize(numPartitions_);
   decoded_.resize(layout_.numColumns());
 
   // Warm the reservation for the resident structures and the first chunks;
@@ -131,24 +129,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
     boltPool_->maybeReserve(splitter_->residentBytes() + 2 * kChunkBytes);
   }
   initialized_ = true;
-}
-
-const int32_t* CellShuffleWriter::pidArray(const RowVector& rv) {
-  const auto& pidChild = rv.childAt(0);
-  BOLT_CHECK_EQ(
-      static_cast<int32_t>(pidChild->typeKind()),
-      static_cast<int32_t>(TypeKind::INTEGER),
-      "pid column must be INTEGER");
-  if (pidChild->isFlatEncoding()) {
-    return pidChild->asUnchecked<FlatVector<int32_t>>()->rawValues();
-  }
-  // Defensive path: materialize a wrapped pid column.
-  pidDecoded_.decode(*pidChild);
-  pidValues_.resize(rv.size());
-  for (uint32_t row = 0; row < rv.size(); ++row) {
-    pidValues_[row] = pidDecoded_.valueAt<int32_t>(row);
-  }
-  return pidValues_.data();
 }
 
 arrow::Status CellShuffleWriter::splitOrdinary(
@@ -240,9 +220,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     return arrow::Status::OK();
   }
 
-  const int32_t* pids = pidArray(*rv);
-  auto status =
-      partitioner_->compute(pids, numRows, row2Partition_, partition2RowCount_);
+  auto status = computePartitions(*rv);
   if (!status.ok()) {
     inSplit_ = false;
     return status;

@@ -79,7 +79,15 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// the subclass ends it in stopOrdinary().
   virtual RawPartitionOutput& output() = 0;
 
+  /// Partitions `rv` by its pid column (child 0, INTEGER) into
+  /// row2Partition_ and partition2RowCount_. Both sides use them: they never
+  /// split at the same time - a reclaim reached from inside a split goes to
+  /// the active side, and a composite flush waits for the split's end.
+  arrow::Status computePartitions(const RowVector& rv);
+
   memory::MemoryPool* const boltPool_;
+  std::vector<uint32_t> row2Partition_;
+  std::vector<uint32_t> partition2RowCount_;
 
  private:
   void splitComposite(const CompositeRowVectorPtr& rv);
@@ -90,8 +98,13 @@ class CompositeShuffleWriter : public ShuffleWriter {
 
   void writeComposite();
 
-  /// The RawBlockSource of writeComposite(): partition `pid`'s next block.
-  bool nextBlock(uint32_t pid, BufferPtr& block);
+  /// The RawBlockSource of writeComposite(): partition `pid`'s next block,
+  /// from its row `nextRow` on, compressed through `scratch`.
+  bool nextBlock(
+      uint32_t pid,
+      BufferPtr& block,
+      size_t& nextRow,
+      BufferPtr& scratch);
 
   bool finished_{false};
   /// The last batch was composite: that side is the active one - it takes
@@ -104,10 +117,9 @@ class CompositeShuffleWriter : public ShuffleWriter {
   ShuffleRowToRowConverter converter_;
   /// Per partition: the held rows, each pointing at [size i32][bytes].
   std::vector<std::vector<uint8_t*>> heldRows_;
-  std::vector<uint32_t> row2Partition_;
-  std::vector<uint32_t> partition2RowCount_;
-  std::vector<int32_t> batchPids_;
+  /// A wrapped pid column, materialized; a flat one is read in place.
   DecodedVector pidDecoded_;
+  std::vector<int32_t> pidValues_;
   /// Bytes of heldRows_, as the batches' totalRowSize() counted them.
   int64_t heldRowBytes_{0};
   /// A composite split or write is under way. A flush reached from inside
@@ -115,14 +127,12 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// to its end rather than writing rows the split is still adding.
   bool compositeInProgress_{false};
   bool flushDeferred_{false};
-  /// During a write: the current partition's first row not yet in a block.
-  size_t nextBlockRow_{0};
-  /// Compression workspace of the blocks.
-  BufferPtr compressScratch_;
 
+  /// Accumulated here, not in metrics_: the outputs assign their raw
+  /// partition lengths and compression time when stopOrdinary() ends them,
+  /// and stop() adds these after.
   std::vector<int64_t> rawPartitionBytes_;
   uint64_t compressTimeNs_{0};
-  uint64_t convertTimeNs_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
