@@ -214,7 +214,7 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
   if (!in.read(&layoutByte, 1)) {
     return fail(error, "truncated run header");
   }
-  if (layoutByte > static_cast<uint8_t>(RunLayout::kCombinedStored)) {
+  if (layoutByte > static_cast<uint8_t>(RunLayout::kCombinedUncompressed)) {
     return fail(error, "unknown run compression layout");
   }
   const auto runLayout = static_cast<RunLayout>(layoutByte);
@@ -297,10 +297,10 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
       }
       return true;
 
-    case RunLayout::kCombinedStored:
+    case RunLayout::kCombinedUncompressed:
       // The single stored buffer is the concatenation itself.
       if (storedSizes_[0] != decodedSum) {
-        return fail(error, "combined-stored size mismatch");
+        return fail(error, "combined-uncompressed size mismatch");
       }
       for (uint32_t s = 0; s < numStreams; ++s) {
         const uint64_t decoded = decodedSizes_[s];
@@ -1275,7 +1275,7 @@ RunLayout maybeCompressRun(
       return RunLayout::kCombined;
     }
   }
-  return RunLayout::kCombinedStored;
+  return RunLayout::kCombinedUncompressed;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -670,7 +670,7 @@ TEST_F(CellWriterTest, rejectsOutOfRangeTimestamp) {
     bytes[16] = 1; // null_stored_size: one tags byte
     bytes.push_back(0x01); // NO_NULL
     bytes.push_back(0x00); // encoding tags
-    bytes.push_back(static_cast<char>(RunLayout::kCombinedStored));
+    bytes.push_back(static_cast<char>(RunLayout::kCombinedUncompressed));
     const auto appendU64 = [&](uint64_t value) {
       bytes.append(reinterpret_cast<const char*>(&value), 8);
     };

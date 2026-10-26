@@ -168,7 +168,7 @@ bool CellShuffleReader::decodeComposite(std::string& error) {
   if (stored > source_->remainingBound()) {
     return fail("composite block out of bounds");
   }
-  if (layout == RunLayout::kCombinedStored) {
+  if (layout == RunLayout::kCombinedUncompressed) {
     if (stored != rawBytes) {
       return fail("stored composite block size mismatch");
     }
