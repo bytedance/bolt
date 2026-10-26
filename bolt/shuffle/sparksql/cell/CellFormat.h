@@ -15,10 +15,52 @@
  */
 
 /// Shared wire format and stream layout of the Cell shuffle writer and reader.
+/// This header is the format's definition: every constant and enum below is
+/// on the wire, and changing one changes the format for both sides.
 ///
-/// Wire semantics come from bolt/shuffle/sparksql/ColumnarPayloadFormat.md;
-/// every constant marked "spec" below mirrors a value that document fixes.
-/// Changing one is a wire format change and follows its section 11 rules.
+/// A partition's shuffle bytes are blocks back to back, each opening with a
+/// CellBlockKind byte. A ColumnarPayload holds some rows of one partition:
+///
+///   header      24 bytes: rowCount u32, runCount u32, variableBytes u64 (a
+///               preallocation hint, never validated), nullStoredSize u32,
+///               nullDecodedSize u32 (0: the null body is stored as is;
+///               else it is compressed and decodes to this many bytes)
+///   null body   nullStoredSize bytes: one 2-bit NullTag per wire column,
+///               then a ceil(rowCount / 8)-byte bitmap (bit 1 = non-null,
+///               unused high bits zero) per kRawNull column, in column order
+///   enc tags    ceil(W / 8) bytes, W wire columns: bit set = the string
+///               column is in dictionary form
+///   runs        runCount runs, each: RunLayout u8, stored size(s) u64 (one,
+///               or one per stream for kSeparate), decoded size u64 per
+///               stream, then the stored bytes
+///
+/// UNKNOWN columns have no wire column. A wire column's values live in its
+/// streams (CellLayout): only non-null rows have values, and an all-null
+/// column's streams are empty. A stream is the
+/// concatenation of its bytes in every run, in run order; a run may end a
+/// raw stream's bytes anywhere, but never inside an Encoding Block or a
+/// dictionary. Encoded streams
+/// are Encoding Blocks back to back: each covers kBlockSourceBytes of source
+/// values (the stream's last block fewer) and opens with an EncodingByte,
+/// EncodingKind in the low 2 bits and a parameter in the high 6:
+///
+///   kConstNarrow  every value equal; body: parameter (1..width) bytes,
+///                 sign-extended
+///   kBitPack      body: values in parameter (1..min(63, 8 * width)) bits,
+///                 LSB-first, sign-extended
+///   kForBitPack   body: base (width bytes), then value - base in parameter
+///                 (0..63) bits, LSB-first
+///   kPlain        parameter 0; body: the values as they are, little endian
+///
+/// Raw streams hold one fixed-width value per non-null row (a Boolean as
+/// one 0/1 byte). A string column has a length stream (encoded, Bigint) and
+/// a data stream (the bytes). In dictionary form, the data stream starts
+/// with a dictionary sequence - per dictionary, entries of a length byte
+/// (<= kDictEntryMaxLen) and the bytes, kDictMoreMarker or kDictLastMarker,
+/// then the u32 count of rows it matches - and ends with the raw bytes of
+/// the unmatched rows; the length stream holds one index byte per matched
+/// row, then the lengths of the unmatched ones. Matched rows come first, in
+/// dictionary order.
 
 #pragma once
 
@@ -29,10 +71,10 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Source bytes covered by one full Encoding Block (spec section 7.2).
+/// Source bytes covered by one full Encoding Block.
 inline constexpr uint32_t kBlockSourceBytes = 64;
 
-/// Fixed payload header length (spec section 3).
+/// Fixed payload header length.
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 
 /// Most rows one partition gathers in a window, and so one payload holds.
@@ -42,17 +84,17 @@ inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 inline constexpr uint32_t kMaxPayloadRows = (1u << 31) - 1;
 
 /// Worst-case serialized size of one Encoding Block: 1 byte EncodingByte,
-/// 8 bytes FOR base, 64 bytes body (spec section 7.3).
+/// 8 bytes FOR base, 64 bytes body.
 inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kBlockSourceBytes;
 
-/// String dictionary limits (spec section 8): an entry's length byte is at
-/// most 63, and the serialized entries of one dictionary must stay under 64
-/// bytes in total, terminator excluded.
+/// String dictionary limits: an entry's length byte is at most 63, and the
+/// serialized entries of one dictionary must stay under 64 bytes in total,
+/// terminator excluded.
 inline constexpr uint32_t kDictEntryMaxLen = 63;
 inline constexpr uint32_t kDictSerializedBudget = 63;
 
-/// Dictionary sequence markers ending an entry list (spec section 8):
-/// another dictionary follows, or the fallback tail begins.
+/// Dictionary sequence markers ending an entry list: another dictionary
+/// follows, or the fallback tail begins.
 inline constexpr uint8_t kDictMoreMarker = 0xFE;
 inline constexpr uint8_t kDictLastMarker = 0xFF;
 
@@ -62,7 +104,7 @@ inline constexpr uint8_t kDictLastMarker = 0xFF;
 /// per-row lookups).
 inline constexpr uint32_t kDictSegmentContinueFactor = 4;
 
-/// Spec section 7.3, low 2 bits of the EncodingByte.
+/// The low 2 bits of an EncodingByte.
 enum class EncodingKind : uint8_t {
   kConstNarrow = 0,
   kBitPack = 1,
@@ -70,7 +112,7 @@ enum class EncodingKind : uint8_t {
   kPlain = 3,
 };
 
-/// Spec section 4.2, 2-bit per-column null tag.
+/// A wire column's 2-bit null tag in the null body.
 enum class NullTag : uint8_t {
   kAllNull = 0b00,
   kNoNull = 0b01,
@@ -98,16 +140,18 @@ enum class CellBlockKind : uint8_t {
 ///   body           rows back to back, each [size i32][size bytes]
 constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 
-/// Spec section 5, Run compression layout byte.
+/// A run's compression layout: all streams compressed as one buffer, each
+/// stream compressed on its own, or all streams stored uncompressed. A
+/// writer falls back to the stored form when compression does not pay.
 enum class RunLayout : uint8_t {
   kCombined = 0x00,
   kSeparate = 0x01,
   kCombinedStored = 0x02,
 };
 
-/// How one stream's bytes are produced and parsed (spec sections 1.4, 7.1).
+/// How one stream's bytes are produced and parsed.
 enum class StreamKind : uint8_t {
-  /// Encoding Loop stream: SmallInt/Integer/Bigint/Date value stream, a
+  /// Encoded stream: SmallInt/Integer/Bigint/Date value stream, a
   /// Timestamp Seconds or Nanos stream, or a String Length/Index stream
   /// (Timestamp halves and lengths encoded as Bigint).
   kEncoded,
@@ -117,21 +161,21 @@ enum class StreamKind : uint8_t {
   kStringData,
 };
 
-/// One physical stream of the layout (spec section 1.4).
+/// One physical stream of the layout.
 struct CellStream {
   uint16_t column; // logical column index
   StreamKind kind;
   /// Bytes per source value: 1/2/4/8/16 for value streams, 8 for a String
   /// length stream, 0 for kStringData.
   uint8_t sourceWidth;
-  /// Sign-extension rule for encoded streams (spec section 7.3). String
-  /// lengths are non-negative so either interpretation matches; they are
-  /// flagged signed to match their Bigint definition.
+  /// Sign extension of kConstNarrow and kBitPack values. String lengths are
+  /// non-negative so either interpretation matches; they are flagged signed
+  /// to match their Bigint encoding.
   bool isSigned;
 };
 
-/// Maps a shuffle row type (pid column already stripped) onto the spec's
-/// stream model. The input adapter converts supported complex types to binary;
+/// Maps a shuffle row type (pid column already stripped) onto wire columns
+/// and streams. The input adapter converts supported complex types to binary;
 /// create() rejects physical types it cannot map.
 class CellLayout {
  public:
@@ -143,7 +187,7 @@ class CellLayout {
       case TypeKind::HUGEINT:
       case TypeKind::TINYINT:
       case TypeKind::SMALLINT:
-      case TypeKind::INTEGER: // includes DATE (spec type Date)
+      case TypeKind::INTEGER: // includes DATE
       case TypeKind::BIGINT: // includes short DECIMAL, mapped to Bigint
       case TypeKind::REAL:
       case TypeKind::DOUBLE:
@@ -161,7 +205,8 @@ class CellLayout {
         return false;
       }
     }
-    // C == 0 is a pid-only shuffle: a W == 0 layout (spec section 9).
+    // C == 0 is a pid-only shuffle: a layout without wire columns, whose
+    // payloads are headers only.
     return true;
   }
 

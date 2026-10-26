@@ -36,14 +36,14 @@ struct CellWindowInput {
   /// Per partition: rows and raw variable bytes of the current window.
   const uint32_t* rowCounts;
   const uint64_t* variableBytes;
-  /// Payload encoding tags (spec section 3.2): ceil(C/8) bytes, one bit per
+  /// Payload encoding tags: ceil(C/8) bytes, one bit per
   /// column, set when the column is written in dictionary form. Constant
   /// for the writer's lifetime (the probe decides once).
   const uint8_t* encodingTags;
   uint32_t numPartitions;
 };
 
-/// L4 of the Cell shuffle writer: the output backend. Run = physical
+/// The Cell shuffle writer's output backend. Run = physical
 /// swap-out (may happen at any allocation point, never closes the logical
 /// window); sealed window = payload boundary. Local and RSS backends differ
 /// only here.
@@ -200,8 +200,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 
   /// Compression policy shared by spill and merge: points `body`/`stored`
   /// at the COMBINED form when the codec shrinks the bytes, else at the
-  /// input (spec section 5: fall back to the stored form when compression
-  /// does not pay). Returns the layout to declare.
+  /// input (the stored form when compression does not pay). Returns the
+  /// layout to declare.
   RunLayout maybeCompressRun(
       const char* data,
       uint64_t dataBytes,

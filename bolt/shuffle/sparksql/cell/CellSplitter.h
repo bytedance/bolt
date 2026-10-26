@@ -74,7 +74,7 @@ class CellSplitter {
 
   void split(const SplitBatch& batch);
 
-  /// Switches one string column to dictionary form (spec section 8) for the
+  /// Switches one string column to dictionary form for the
   /// writer's lifetime and sets its encoding tag. Called by the probe before
   /// the first split.
   void enableDictionary(uint32_t col);
@@ -141,8 +141,8 @@ class CellSplitter {
   template <bool kHasNulls>
   void splitBoolean(uint32_t col, const SplitBatch& batch);
 
-  /// The full 16-byte Timestamp: seconds and nanos into two Bigint
-  /// Encoding Loop streams whose cache cursors move in lockstep.
+  /// The full 16-byte Timestamp: seconds and nanos into two Bigint encoded
+  /// streams whose cache cursors move in lockstep.
   template <bool kHasNulls, bool kIndexed>
   void splitTimestamp(uint32_t col, const SplitBatch& batch);
 
@@ -155,7 +155,7 @@ class CellSplitter {
     return cursors_ + static_cast<size_t>(stream) * numPartitions_;
   }
 
-  /// Encodes the full or partial cache line of an Encoding Loop stream into
+  /// Encodes the full or partial cache line of an encoded stream into
   /// the cells. Out of the hot loop by design.
   template <typename T>
   FOLLY_ALWAYS_INLINE void
@@ -185,8 +185,8 @@ class CellSplitter {
 
   /// Per (partition, dictionary column): the open dictionary segment. Its
   /// entries live here, never in the cells, until the segment closes - a
-  /// spill between two closes must not split a dictionary across Runs
-  /// (spec section 5.4). While `mode` is dictionary, the column's length
+  /// spill between two closes must not split a dictionary across Runs.
+  /// While `mode` is dictionary, the column's length
   /// cache stages raw index bytes and its data cache stays empty.
   /// Per (partition, dictionary column) bookkeeping only - 8 bytes. The
   /// dictionary bytes themselves live in the column's DATA-stream cache

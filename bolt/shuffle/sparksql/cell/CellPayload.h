@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-/// L6 of the Cell shuffle: ColumnarPayload decode, from bytes to RowVectors.
+/// ColumnarPayload decode (format in CellFormat.h), from bytes to
+/// RowVectors, plus the payload pieces the writer's outputs assemble.
 ///
-/// Implements ColumnarPayloadFormat.md sections 3-9 in the reading order its
-/// section 12.5 recommends, with every L1 validation of section 10.1: a
-/// malformed payload is reported, never crashed on and never guessed at.
+/// Every field is validated before it is used: a malformed payload is
+/// reported, never crashed on and never guessed at.
 /// Deliberately independent of the existing shuffle reader stack: no Payload
 /// class, no arrow buffers; vectors are built directly.
 
@@ -52,8 +52,8 @@ class CellByteSource {
   virtual bool atEnd() const = 0;
 
   /// Upper bound on bytes still available, SIZE_MAX when unknown. The
-  /// decoder compares declared lengths against it before allocating (the
-  /// bounds-before-reads principle of spec section 10).
+  /// decoder compares declared lengths against it before allocating or
+  /// reading.
   virtual size_t remainingBound() const {
     return std::numeric_limits<size_t>::max();
   }
@@ -89,11 +89,10 @@ class MemoryByteSource final : public CellByteSource {
   size_t pos_{0};
 };
 
-/// Implementation-level bounds on untrusted input (spec section 10.3); zero
-/// disables a limit. The row and run counts match what the writer can emit.
-/// Decoded run size is unbounded by default: a run holds a whole window of
-/// one partition and a single value may reach 2 GiB, so no fixed cap is
-/// safe for payloads of the same-binary writer (spec section 11.1). Every
+/// Bounds on untrusted input; zero disables a limit. The row and run counts
+/// match what the writer can emit. Decoded run size is unbounded by default: a
+/// run holds a whole window of one partition and a single value may reach 2
+/// GiB, so no fixed cap is safe for payloads of the same-binary writer. Every
 /// buffer sized from the run and null-region size fields comes from the
 /// reader pool, so a corrupt size fails on the pool's capacity rather than
 /// exhausting the process. The row count sizes nothing but the null region,
@@ -105,15 +104,15 @@ struct CellDecodeLimits {
   uint64_t maxDecodedBytes{0};
 };
 
-/// The external codec context of spec section 2, decompression side. The
-/// format never identifies a codec; writer and reader are configured with
-/// the same one by the outer protocol.
+/// The codec, decompression side. The format never identifies a codec;
+/// writer and reader are configured with the same one by the outer
+/// protocol.
 class CellDecompressor {
  public:
   virtual ~CellDecompressor() = default;
 
   /// Decompresses data into exactly decodedSize bytes at out; false when the
-  /// input cannot be decoded or produces a different length (L1 rule 11).
+  /// input cannot be decoded or produces a different length.
   virtual bool decompress(
       const uint8_t* data,
       size_t size,
@@ -240,8 +239,8 @@ class CellPayloadDecoder {
 
   bool openStringColumn(uint32_t col, std::string& error);
 
-  /// The whole-stream checks, once the last row was appended (rule 20 and
-  /// the string data lengths).
+  /// The whole-stream checks, once the last row was appended: the blocks
+  /// and string bytes consumed their streams exactly.
   bool finishPayload(std::string& error);
 
   void openBatch(vector_size_t capacity);
@@ -363,7 +362,7 @@ void appendLe32(BufferPtr& out, uint32_t value, memory::MemoryPool* pool);
 
 void appendLe64(BufferPtr& out, uint64_t value, memory::MemoryPool* pool);
 
-/// Appends the null body (spec section 4.2) of one partition.
+/// Appends the null body of one partition.
 void buildNullBody(
     const CellWindowInput& in,
     uint32_t pid,
@@ -402,9 +401,8 @@ void writeRunHeader(
 
 /// The run compression policy: compresses into `scratch` and points
 /// `body`/`stored` at the COMBINED form when the codec shrinks the bytes,
-/// else at the input (spec section 5: fall back to the stored form when
-/// compression does not pay). Adds the codec time to `compressTimeNs`.
-/// Returns the layout to declare.
+/// else at the input (the stored form when compression does not pay). Adds the
+/// codec time to `compressTimeNs`. Returns the layout to declare.
 RunLayout maybeCompressRun(
     Codec* codec,
     const char* data,

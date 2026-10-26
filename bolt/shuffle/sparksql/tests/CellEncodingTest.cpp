@@ -189,7 +189,7 @@ TEST(CellEncodingTest, streamMustConsumeExactly) {
   std::string encoded;
   encodeStream(values.data(), values.size(), encoded);
   std::vector<int32_t> decoded(16);
-  // Trailing garbage violates rule 20.
+  // Trailing garbage: the blocks must consume the stream exactly.
   std::string padded = encoded + std::string(1, '\0');
   EXPECT_FALSE(decodeStream(
       reinterpret_cast<const uint8_t*>(padded.data()),
@@ -207,19 +207,19 @@ TEST(CellEncodingTest, streamMustConsumeExactly) {
 TEST(CellEncodingTest, malformedBlocksRejected) {
   std::vector<int32_t> dst(16);
   {
-    // PLAIN with a non-zero parameter (rule 13).
+    // PLAIN with a non-zero parameter.
     uint8_t bad[65] = {makeEncodingByte(EncodingKind::kPlain, 1)};
     EXPECT_EQ(decodeBlock(bad, sizeof(bad), 16, dst.data()), 0u);
   }
   {
-    // CONST_NARROW with narrow_bytes of 0 and beyond type width (rule 14).
+    // CONST_NARROW with narrow_bytes of 0 and beyond type width.
     uint8_t bad[9] = {makeEncodingByte(EncodingKind::kConstNarrow, 0)};
     EXPECT_EQ(decodeBlock(bad, sizeof(bad), 16, dst.data()), 0u);
     bad[0] = makeEncodingByte(EncodingKind::kConstNarrow, 5); // > 4 for i32
     EXPECT_EQ(decodeBlock(bad, sizeof(bad), 16, dst.data()), 0u);
   }
   {
-    // BIT_PACK width 0 and width beyond min(63, 8 * width) (rule 15).
+    // BIT_PACK width 0 and width beyond min(63, 8 * width).
     uint8_t bad[70] = {makeEncodingByte(EncodingKind::kBitPack, 0)};
     EXPECT_EQ(decodeBlock(bad, sizeof(bad), 16, dst.data()), 0u);
     bad[0] = makeEncodingByte(EncodingKind::kBitPack, 33); // > 32 for i32
@@ -229,7 +229,7 @@ TEST(CellEncodingTest, malformedBlocksRejected) {
     EXPECT_NE(decodeBlock(bad64, sizeof(bad64), 8, wide.data()), 0u);
   }
   {
-    // Bodies larger than the remaining bytes (rule 17).
+    // Bodies larger than the remaining bytes.
     std::vector<int64_t> wide(8);
     uint8_t tiny[3] = {makeEncodingByte(EncodingKind::kPlain, 0), 0, 0};
     EXPECT_EQ(decodeBlock(tiny, sizeof(tiny), 8, wide.data()), 0u);
@@ -388,7 +388,7 @@ TEST(CellEncodingTest, streamCursorReadsInArbitraryPieces) {
   fuzzType(int32_t{});
   fuzzType(int64_t{});
 
-  // A trailing byte past the last block is not consumed (rule 20).
+  // A trailing byte past the last block is not consumed.
   std::vector<int64_t> values(9, 5);
   std::string encoded;
   encodeStream(values.data(), values.size(), encoded);
@@ -401,9 +401,9 @@ TEST(CellEncodingTest, streamCursorReadsInArbitraryPieces) {
   EXPECT_FALSE(cursor.finished());
 }
 
-TEST(CellEncodingTest, appendixBVectors) {
-  // Reader side: the pinned blocks of ColumnarPayloadFormat.md appendix B
-  // decode to the documented values.
+TEST(CellEncodingTest, pinnedWireBytes) {
+  // Reader side: fixed wire bytes decode to known values, so a format
+  // change cannot pass unnoticed.
   {
     // Stream 0: PLAIN tail block of two Integers 10, 12.
     const uint8_t block[] = {0x03, 0x0A, 0, 0, 0, 0x0C, 0, 0, 0};
@@ -418,8 +418,8 @@ TEST(CellEncodingTest, appendixBVectors) {
     EXPECT_TRUE(decodeStream(block, sizeof(block), 3, decoded.data()));
     EXPECT_EQ(decoded, (std::vector<int64_t>{2, 2, 2}));
   }
-  // Writer side: the same length column encodes to exactly the appendix
-  // bytes (CONST_NARROW is the unique minimal choice).
+  // Writer side: the same length column encodes to exactly these bytes
+  // (CONST_NARROW is the unique minimal choice).
   {
     const std::vector<int64_t> lengths{2, 2, 2};
     std::string encoded;
@@ -438,7 +438,7 @@ TEST(CellEncodingTest, nullTagHelpers) {
   setNullTag(tags, 1, NullTag::kNoNull);
   setNullTag(tags, 4, NullTag::kAllNull);
   setNullTag(tags, 5, NullTag::kRawNull);
-  // Appendix B: col0 RAW_NULL, col1 NO_NULL -> 0b0000_0110.
+  // col0 RAW_NULL, col1 NO_NULL -> 0b0000_0110.
   EXPECT_EQ(tags[0], 0x06);
   EXPECT_EQ(getNullTag(tags, 0), NullTag::kRawNull);
   EXPECT_EQ(getNullTag(tags, 1), NullTag::kNoNull);
