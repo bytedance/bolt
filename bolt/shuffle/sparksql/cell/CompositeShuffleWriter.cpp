@@ -68,7 +68,7 @@ void buildBlock(
     offset += bytes;
   }
 
-  auto layout = RunLayout::kCombinedStored;
+  auto layout = RunLayout::kCombinedUncompressed;
   uint64_t stored = rawBytes;
   try {
     const char* compressed = nullptr;
@@ -86,7 +86,7 @@ void buildBlock(
     }
   } catch (const std::exception&) {
     scratch.reset();
-    layout = RunLayout::kCombinedStored;
+    layout = RunLayout::kCombinedUncompressed;
     stored = rawBytes;
   }
 

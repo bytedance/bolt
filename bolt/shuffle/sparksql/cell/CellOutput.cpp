@@ -71,7 +71,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
       // when run coalescing is disabled.
       const char* body = nullptr;
       uint64_t stored = total;
-      auto runLayout = RunLayout::kCombinedStored;
+      auto runLayout = RunLayout::kCombinedUncompressed;
       if (codec_ != nullptr && cellOptions_.compressSpill) {
         // The gather/compress workspaces come from the task pool, and a
         // spill is often the moment that pool is exhausted; when they cannot
@@ -90,7 +90,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
           runLayout =
               maybeCompressRun(runScratch_->as<char>(), total, body, stored);
         } catch (const std::exception&) {
-          runLayout = RunLayout::kCombinedStored;
+          runLayout = RunLayout::kCombinedUncompressed;
           body = nullptr;
           stored = total;
           run.storedIsFinal = false;
@@ -261,7 +261,7 @@ uint64_t LocalCellOutput::gatherPartitionRuns(
     } else {
       BOLT_CHECK_EQ(
           layouts[i],
-          static_cast<uint8_t>(RunLayout::kCombinedStored),
+          static_cast<uint8_t>(RunLayout::kCombinedUncompressed),
           "corrupt cell spill segment");
       resizeBuffer(runScratch_, 0, pool_);
       resizeBuffer(runScratch_, dataBytes, pool_);
@@ -348,7 +348,7 @@ void LocalCellOutput::writeSpilledSegment(
   const auto segmentLayout = static_cast<RunLayout>(scratch_->as<uint8_t>()[0]);
   BOLT_CHECK(
       segmentLayout == RunLayout::kCombined ||
-          segmentLayout == RunLayout::kCombinedStored,
+          segmentLayout == RunLayout::kCombinedUncompressed,
       "corrupt cell spill segment");
   std::vector<uint64_t> decodedSizes(numStreams);
   ::memcpy(decodedSizes.data(), scratch_->as<char>() + 9, 8ull * numStreams);
@@ -357,8 +357,9 @@ void LocalCellOutput::writeSpilledSegment(
   // compression attempt, is the final run. Any other stored segment gets
   // the attempt here - unless its workspace cannot be funded, in which case
   // the stored form, a valid run as well, is copied as it is.
-  if (segmentLayout == RunLayout::kCombinedStored && !segment.storedIsFinal &&
-      codec_ != nullptr && dataBytes >= kMinCompressRunBytes) {
+  if (segmentLayout == RunLayout::kCombinedUncompressed &&
+      !segment.storedIsFinal && codec_ != nullptr &&
+      dataBytes >= kMinCompressRunBytes) {
     bool funded = true;
     try {
       resizeBuffer(runScratch_, 0, pool_);
@@ -647,7 +648,7 @@ void RssCellOutput::buildPayload(
     gatherResident(
         in, pid, payload->asMutable<char>() + bodyAt, streamSizes_.data());
     raw += runHeaderBytes(numStreams) + total;
-    auto runLayout = RunLayout::kCombinedStored;
+    auto runLayout = RunLayout::kCombinedUncompressed;
     uint64_t stored = total;
     try {
       const char* body = nullptr;
@@ -665,7 +666,7 @@ void RssCellOutput::buildPayload(
       }
     } catch (const std::exception&) {
       compressScratch_.reset();
-      runLayout = RunLayout::kCombinedStored;
+      runLayout = RunLayout::kCombinedUncompressed;
       stored = total;
     }
     writeRunHeader(
