@@ -161,6 +161,8 @@ struct ShuffleReaderOptions {
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 
+  bool preferCellShuffle = false;
+
   /// Returns the options in a human readable form.
   std::string toString() const;
 };
@@ -213,6 +215,7 @@ struct ShuffleWriterOptions {
   int64_t taskAttemptId = -1;
   int32_t startPartitionId = 0;
   int32_t forceShuffleWriterType = kDefaultForceShuffleWriterType;
+  bool preferCellShuffle = false;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
       kDefaultRowVectorModeCompressionMinColumns;
