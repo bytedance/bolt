@@ -168,9 +168,13 @@ arrow::Status CompositeShuffleWriter::reclaimFixedSize(
 arrow::Status CompositeShuffleWriter::stop() {
   BOLT_CHECK(!finished_, "stop called twice");
   finished_ = true;
-  // The composite rows go out before the output's final merge.
+  // Order matters: stopOrdinary() ends output() - it merges the composite
+  // spill file into the data file, or ends the Celeborn attempt - so every
+  // held composite row must be in output() before it runs.
   flushComposite();
   RETURN_NOT_OK(stopOrdinary());
+  // stopOrdinary() reported the ordinary bytes only; the composite blocks'
+  // raw bytes are added here, partition by partition.
   metrics_.rawPartitionLengths.resize(numPartitions_, 0);
   for (int32_t pid = 0; pid < numPartitions_; ++pid) {
     metrics_.rawPartitionLengths[pid] += rawPartitionBytes_[pid];

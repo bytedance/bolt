@@ -64,11 +64,19 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// memory.
   virtual arrow::Status flushOrdinary() = 0;
 
-  /// Final output, after the composite rows went to output().
+  /// Final output. Called once, after every composite row went to
+  /// output(); nothing is written to output() afterwards. It must end
+  /// output() together with the ordinary data, in one partition-major pass:
+  /// locally a single data file in which each partition's ordinary data is
+  /// followed by its composite blocks - the merge seals both spill files,
+  /// so a block written later would be lost - and on Celeborn the end of
+  /// the map attempt. It reports the ordinary side's rawPartitionLengths
+  /// only: stop() adds the composite bytes and derives dataSize after it.
   virtual arrow::Status stopOrdinary() = 0;
 
-  /// Where the composite blocks go; exists from construction. The subclass
-  /// ends it together with its own output in stopOrdinary().
+  /// Where the composite blocks go; exists from construction. Locally it is
+  /// a partial spiller that the ordinary output merges into its data file;
+  /// the subclass ends it in stopOrdinary().
   virtual RawPartitionOutput& output() = 0;
 
   memory::MemoryPool* const boltPool_;
