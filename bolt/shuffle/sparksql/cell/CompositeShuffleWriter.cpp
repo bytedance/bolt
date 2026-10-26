@@ -25,6 +25,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
+#include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -105,9 +106,10 @@ CompositeShuffleWriter::CompositeShuffleWriter(
           options, // copied: the count above is read from it
           arrowPool),
       boltPool_(boltPool),
+      // Partitioner::compute fills but does not size this.
+      partition2RowCount_(numPartitions_),
       converter_(boltPool),
       heldRows_(numPartitions_),
-      partition2RowCount_(numPartitions_),
       rawPartitionBytes_(numPartitions_, 0) {
   auto maybePartitioner = Partitioner::make(
       options_.partitioning, numPartitions_, options_.startPartitionId);
@@ -128,6 +130,27 @@ CompositeShuffleWriter::CompositeShuffleWriter(
             writerOptions.compressionLevel,
             writerOptions.checksumEnabled});
   }
+}
+
+arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
+  const auto& pidChild = rv.childAt(0);
+  BOLT_CHECK_EQ(
+      static_cast<int32_t>(pidChild->typeKind()),
+      static_cast<int32_t>(TypeKind::INTEGER),
+      "pid column must be INTEGER");
+  const int32_t* pids;
+  if (pidChild->isFlatEncoding()) {
+    pids = pidChild->asUnchecked<FlatVector<int32_t>>()->rawValues();
+  } else {
+    pidDecoded_.decode(*pidChild);
+    pidValues_.resize(rv.size());
+    for (vector_size_t row = 0; row < rv.size(); ++row) {
+      pidValues_[row] = pidDecoded_.valueAt<int32_t>(row);
+    }
+    pids = pidValues_.data();
+  }
+  return partitioner_->compute(
+      pids, rv.size(), row2Partition_, partition2RowCount_);
 }
 
 CompositeShuffleWriter::~CompositeShuffleWriter() {
@@ -184,7 +207,6 @@ arrow::Status CompositeShuffleWriter::stop() {
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
   metrics_.totalCompressTime += static_cast<int64_t>(compressTimeNs_);
-  metrics_.convertTime += static_cast<int64_t>(convertTimeNs_);
   return arrow::Status::OK();
 }
 
@@ -202,17 +224,11 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     if (heldRowBytes_ > 0 && !boltPool_->maybeReserve(rv->totalRowSize())) {
       writeComposite();
     }
-    pidDecoded_.decode(*rv->childAt(0));
-    batchPids_.resize(numRows);
-    for (vector_size_t row = 0; row < numRows; ++row) {
-      batchPids_[row] = pidDecoded_.valueAt<int32_t>(row);
-    }
-    const auto status = partitioner_->compute(
-        batchPids_.data(), numRows, row2Partition_, partition2RowCount_);
+    const auto status = computePartitions(*rv);
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     const uint64_t start = currentTimeNs();
     converter_.convert(rv, row2Partition_, heldRows_);
-    convertTimeNs_ += currentTimeNs() - start;
+    metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
     heldRowBytes_ += rv->totalRowSize();
   }
   if (flushDeferred_) {
@@ -239,39 +255,45 @@ void CompositeShuffleWriter::writeComposite() {
   if (heldRowBytes_ == 0) {
     return;
   }
-  nextBlockRow_ = 0;
-  output().spillRaw(
-      [this](uint32_t pid, BufferPtr& block) { return nextBlock(pid, block); });
+  size_t nextRow = 0;
+  BufferPtr scratch;
+  output().spillRaw([&](uint32_t pid, BufferPtr& block) {
+    return nextBlock(pid, block, nextRow, scratch);
+  });
   converter_.reset();
   heldRowBytes_ = 0;
-  compressScratch_.reset();
+  scratch.reset();
   boltPool_->release();
 }
 
-bool CompositeShuffleWriter::nextBlock(uint32_t pid, BufferPtr& block) {
+bool CompositeShuffleWriter::nextBlock(
+    uint32_t pid,
+    BufferPtr& block,
+    size_t& nextRow,
+    BufferPtr& scratch) {
   auto& rows = heldRows_[pid];
-  if (nextBlockRow_ >= rows.size()) {
+  if (nextRow >= rows.size()) {
     rows.clear();
-    nextBlockRow_ = 0;
+    nextRow = 0;
     return false;
   }
-  const size_t begin = nextBlockRow_;
+  const size_t begin = nextRow;
   uint64_t raw = 0;
-  while (nextBlockRow_ < rows.size()) {
-    const uint64_t bytes = compositeRowBytes(rows[nextBlockRow_]);
-    if (nextBlockRow_ > begin && raw + bytes > kCompositeBlockBytes) {
+  while (nextRow < rows.size()) {
+    const uint64_t bytes = compositeRowBytes(rows[nextRow]);
+    if (nextRow > begin && raw + bytes > kCompositeBlockBytes) {
       break;
     }
     raw += bytes;
-    ++nextBlockRow_;
+    ++nextRow;
   }
   buildBlock(
       rows.data() + begin,
-      nextBlockRow_ - begin,
+      nextRow - begin,
       raw,
       codec_.get(),
       block,
-      compressScratch_,
+      scratch,
       boltPool_,
       compressTimeNs_);
   rawPartitionBytes_[pid] +=
