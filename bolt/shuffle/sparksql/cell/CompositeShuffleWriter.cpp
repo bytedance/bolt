@@ -106,9 +106,9 @@ CompositeShuffleWriter::CompositeShuffleWriter(
           arrowPool),
       boltPool_(boltPool),
       converter_(boltPool),
-      rows_(numPartitions_),
+      heldRows_(numPartitions_),
       partition2RowCount_(numPartitions_),
-      rawBytes_(numPartitions_, 0) {
+      rawPartitionBytes_(numPartitions_, 0) {
   auto maybePartitioner = Partitioner::make(
       options_.partitioning, numPartitions_, options_.startPartitionId);
   BOLT_CHECK(
@@ -139,15 +139,15 @@ CompositeShuffleWriter::~CompositeShuffleWriter() {
 arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
   BOLT_CHECK(!finished_, "split after stop");
   if (!RowVector::isComposite(rv)) {
-    if (compositeHeld_) {
+    if (compositeActive_) {
       flushComposite();
-      compositeHeld_ = false;
+      compositeActive_ = false;
     }
     return splitOrdinary(std::move(rv), memLimit);
   }
-  if (!compositeHeld_) {
+  if (!compositeActive_) {
     RETURN_NOT_OK(flushOrdinary());
-    compositeHeld_ = true;
+    compositeActive_ = true;
   }
   splitComposite(std::static_pointer_cast<CompositeRowVector>(rv));
   return arrow::Status::OK();
@@ -156,7 +156,7 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
 arrow::Status CompositeShuffleWriter::reclaimFixedSize(
     int64_t size,
     int64_t* actual) {
-  if (!compositeHeld_) {
+  if (!compositeActive_) {
     return reclaimOrdinary(size, actual);
   }
   const int64_t before = boltPool_->reservedBytes();
@@ -173,7 +173,7 @@ arrow::Status CompositeShuffleWriter::stop() {
   RETURN_NOT_OK(stopOrdinary());
   metrics_.rawPartitionLengths.resize(numPartitions_, 0);
   for (int32_t pid = 0; pid < numPartitions_; ++pid) {
-    metrics_.rawPartitionLengths[pid] += rawBytes_[pid];
+    metrics_.rawPartitionLengths[pid] += rawPartitionBytes_[pid];
   }
   metrics_.dataSize = std::accumulate(
       metrics_.rawPartitionLengths.begin(),
@@ -186,91 +186,92 @@ arrow::Status CompositeShuffleWriter::stop() {
 
 void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
   {
-    busy_ = true;
+    compositeInProgress_ = true;
     SCOPE_EXIT {
-      busy_ = false;
+      compositeInProgress_ = false;
     };
     const vector_size_t numRows = rv->size();
     if (numRows == 0) {
       return;
     }
     // Composite rows are copied in whole batches: make room first.
-    if (heldBytes_ > 0 && !boltPool_->maybeReserve(rv->totalRowSize())) {
+    if (heldRowBytes_ > 0 && !boltPool_->maybeReserve(rv->totalRowSize())) {
       writeComposite();
     }
     pidDecoded_.decode(*rv->childAt(0));
-    pids_.resize(numRows);
+    batchPids_.resize(numRows);
     for (vector_size_t row = 0; row < numRows; ++row) {
-      pids_[row] = pidDecoded_.valueAt<int32_t>(row);
+      batchPids_[row] = pidDecoded_.valueAt<int32_t>(row);
     }
     const auto status = partitioner_->compute(
-        pids_.data(), numRows, row2Partition_, partition2RowCount_);
+        batchPids_.data(), numRows, row2Partition_, partition2RowCount_);
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     const uint64_t start = currentTimeNs();
-    converter_.convert(rv, row2Partition_, rows_);
+    converter_.convert(rv, row2Partition_, heldRows_);
     convertTimeNs_ += currentTimeNs() - start;
-    heldBytes_ += rv->totalRowSize();
+    heldRowBytes_ += rv->totalRowSize();
   }
-  if (flushRequested_) {
+  if (flushDeferred_) {
     flushComposite();
   }
 }
 
 void CompositeShuffleWriter::flushComposite() {
-  if (busy_) {
-    flushRequested_ = true;
+  if (compositeInProgress_) {
+    flushDeferred_ = true;
     return;
   }
-  busy_ = true;
+  compositeInProgress_ = true;
   SCOPE_EXIT {
-    busy_ = false;
+    compositeInProgress_ = false;
   };
   writeComposite();
 }
 
 void CompositeShuffleWriter::writeComposite() {
   SCOPE_EXIT {
-    flushRequested_ = false;
+    flushDeferred_ = false;
   };
-  if (heldBytes_ == 0) {
+  if (heldRowBytes_ == 0) {
     return;
   }
-  nextRow_ = 0;
+  nextBlockRow_ = 0;
   output().spillRaw(
       [this](uint32_t pid, BufferPtr& block) { return nextBlock(pid, block); });
   converter_.reset();
-  heldBytes_ = 0;
-  scratch_.reset();
+  heldRowBytes_ = 0;
+  compressScratch_.reset();
   boltPool_->release();
 }
 
 bool CompositeShuffleWriter::nextBlock(uint32_t pid, BufferPtr& block) {
-  auto& rows = rows_[pid];
-  if (nextRow_ >= rows.size()) {
+  auto& rows = heldRows_[pid];
+  if (nextBlockRow_ >= rows.size()) {
     rows.clear();
-    nextRow_ = 0;
+    nextBlockRow_ = 0;
     return false;
   }
-  const size_t begin = nextRow_;
+  const size_t begin = nextBlockRow_;
   uint64_t raw = 0;
-  while (nextRow_ < rows.size()) {
-    const uint64_t bytes = compositeRowBytes(rows[nextRow_]);
-    if (nextRow_ > begin && raw + bytes > kCompositeBlockBytes) {
+  while (nextBlockRow_ < rows.size()) {
+    const uint64_t bytes = compositeRowBytes(rows[nextBlockRow_]);
+    if (nextBlockRow_ > begin && raw + bytes > kCompositeBlockBytes) {
       break;
     }
     raw += bytes;
-    ++nextRow_;
+    ++nextBlockRow_;
   }
   buildBlock(
       rows.data() + begin,
-      nextRow_ - begin,
+      nextBlockRow_ - begin,
       raw,
       codec_.get(),
       block,
-      scratch_,
+      compressScratch_,
       boltPool_,
       compressTimeNs_);
-  rawBytes_[pid] += static_cast<int64_t>(kCompositeBlockHeaderBytes + raw);
+  rawPartitionBytes_[pid] +=
+      static_cast<int64_t>(kCompositeBlockHeaderBytes + raw);
   return true;
 }
 
