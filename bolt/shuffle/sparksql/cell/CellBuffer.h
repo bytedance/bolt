@@ -20,6 +20,7 @@
 #include <functional>
 #include <vector>
 
+#include <folly/CPortability.h>
 #include <folly/Likely.h>
 
 #include "bolt/common/memory/MemoryPool.h"
@@ -342,11 +343,16 @@ class NullCells {
   /// column col in partition pid as null. Rows are visited in strictly
   /// increasing order per partition; capacity grows on demand.
   ///
+  /// Forced inline: the split loops call it per null row, and the compiler
+  /// otherwise keeps it out of line behind a PLT call; table opening and
+  /// growth stay out of line.
+  ///
   /// An all-null-so-far column is pure counting: while every row of the
   /// window has been null, only the slot's prefix advances and no bitmap
   /// exists. The first non-null row freezes the prefix (it simply never
   /// calls in), and later nulls fall through to the bitmap.
-  inline void setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
+  FOLLY_ALWAYS_INLINE void
+  setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
     Slot& slot = slotFor(pid, col);
     if (rowInWindow == slot.prefix) {
       ++slot.prefix;
@@ -429,7 +435,7 @@ class NullCells {
   static constexpr uint32_t kNumSizeClasses =
       kMaxArenaBitmapLog2 - kMinBitmapLog2 + 1;
 
-  inline Slot& slotFor(uint32_t pid, uint32_t col) {
+  FOLLY_ALWAYS_INLINE Slot& slotFor(uint32_t pid, uint32_t col) {
     Slot* table = tables_[pid];
     if (FOLLY_UNLIKELY(table == nullptr)) {
       table = openTable(pid);
