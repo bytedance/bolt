@@ -126,7 +126,7 @@ bool CellPayloadDecoder::parseNullRegion(
     return fail(error, "truncated null body");
   }
   if (nullDecodedSize == 0) {
-    auto* nullData = resizeBuffer(nullBody_, nullStoredSize, pool_);
+    auto* nullData = resetBuffer(nullBody_, nullStoredSize, pool_);
     if (!in.read(nullData, nullStoredSize)) {
       return fail(error, "truncated null body");
     }
@@ -138,11 +138,11 @@ bool CellPayloadDecoder::parseNullRegion(
         nullDecodedSize > limits_.maxDecodedBytes) {
       return fail(error, "null decoded size beyond sanity bound");
     }
-    auto* stored = resizeBuffer(scratch_, nullStoredSize, pool_);
+    auto* stored = resetBuffer(scratch_, nullStoredSize, pool_);
     if (!in.read(stored, nullStoredSize)) {
       return fail(error, "truncated null body");
     }
-    auto* decoded = resizeBuffer(nullBody_, nullDecodedSize, pool_);
+    auto* decoded = resetBuffer(nullBody_, nullDecodedSize, pool_);
     if (!decompressor_->decompress(
             reinterpret_cast<const uint8_t*>(stored),
             nullStoredSize,
@@ -279,7 +279,7 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
           if (decompressor_ == nullptr) {
             return fail(error, "compressed buffer without a codec");
           }
-          auto* input = resizeBuffer(scratch_, stored, pool_);
+          auto* input = resetBuffer(scratch_, stored, pool_);
           if (!in.read(input, stored)) {
             return fail(error, "truncated run buffer");
           }
@@ -321,11 +321,11 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
       if (decompressor_ == nullptr) {
         return fail(error, "compressed buffer without a codec");
       }
-      auto* input = resizeBuffer(scratch_, storedSizes_[0], pool_);
+      auto* input = resetBuffer(scratch_, storedSizes_[0], pool_);
       if (!in.read(input, storedSizes_[0])) {
         return fail(error, "truncated run buffer");
       }
-      auto* decodedData = resizeBuffer(scratch2_, decodedSum, pool_);
+      auto* decodedData = resetBuffer(scratch2_, decodedSum, pool_);
       if (!decompressor_->decompress(
               reinterpret_cast<const uint8_t*>(input),
               storedSizes_[0],
@@ -808,7 +808,7 @@ bool CellPayloadDecoder::placeValues(
   }
   T* values = nullptr;
   if (dense > 0) {
-    values = reinterpret_cast<T*>(resizeBuffer(
+    values = reinterpret_cast<T*>(resetBuffer(
         denseScratch_, static_cast<size_t>(dense) * sizeof(T), pool_));
     if (!read(dense, values)) {
       return false;
@@ -885,7 +885,7 @@ bool CellPayloadDecoder::appendTimestamp(
     uint32_t dense,
     std::string& error) {
   auto& cursor = cursors_[col];
-  auto* scratch = reinterpret_cast<int64_t*>(resizeBuffer(
+  auto* scratch = reinterpret_cast<int64_t*>(resetBuffer(
       timestampScratch_,
       2 * sizeof(int64_t) * static_cast<size_t>(dense),
       pool_));
@@ -1141,6 +1141,18 @@ char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
   return buffer->asMutable<char>();
 }
 
+char* resetBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool) {
+  if (buffer == nullptr || size > buffer->capacity()) {
+    buffer.reset();
+    if (size == 0) {
+      return nullptr;
+    }
+    buffer = AlignedBuffer::allocate<char>(size, pool);
+  }
+  buffer->setSize(size);
+  return buffer->asMutable<char>();
+}
+
 void appendBytes(
     BufferPtr& out,
     const void* data,
@@ -1261,7 +1273,7 @@ RunLayout maybeCompressRun(
   stored = dataBytes;
   if (codec != nullptr && dataBytes >= kMinCompressRunBytes) {
     const uint64_t start = currentTimeNs();
-    resizeBuffer(scratch, codec->maxCompressedLen(dataBytes), pool);
+    resetBuffer(scratch, codec->maxCompressedLen(dataBytes), pool);
     const int64_t written = codec->compress(
         reinterpret_cast<const uint8_t*>(data),
         static_cast<int64_t>(dataBytes),

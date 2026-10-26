@@ -348,9 +348,16 @@ inline uint64_t runHeaderBytes(uint32_t numStreams) {
 uint64_t currentTimeNs();
 
 /// Sets the size of `buffer`, allocating or growing it from `pool`, and
-/// returns its data. Keeps the capacity on clear or shrink, so one workspace
-/// serves every partition or payload.
+/// returns its data. Keeps the bytes - growth copies them and doubles the
+/// capacity - for buffers appended to; and the capacity on shrink, so one
+/// buffer serves every partition or payload.
 char* resizeBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool);
+
+/// resizeBuffer() for a workspace about to be overwritten: the bytes are
+/// not kept. Within the capacity it only sets the size; past it, the old
+/// buffer goes back to `pool` before one of exactly `size` is allocated, so
+/// growing neither copies nor holds both, nor over-allocates.
+char* resetBuffer(BufferPtr& buffer, size_t size, memory::MemoryPool* pool);
 
 void appendBytes(
     BufferPtr& out,

@@ -176,16 +176,14 @@ bool CellShuffleReader::decodeComposite(std::string& error) {
     return fail("unsupported composite block layout");
   }
 
-  resizeBuffer(compositeStored_, 0, pool_);
-  resizeBuffer(compositeStored_, stored, pool_);
+  resetBuffer(compositeStored_, stored, pool_);
   if (stored > 0 &&
       !source_->read(compositeStored_->asMutable<char>(), stored)) {
     return fail("truncated composite block body");
   }
   const char* raw = compositeStored_->as<char>();
   if (layout == RunLayout::kCombined) {
-    resizeBuffer(compositeRaw_, 0, pool_);
-    resizeBuffer(compositeRaw_, rawBytes, pool_);
+    resetBuffer(compositeRaw_, rawBytes, pool_);
     if (!decompressor_->decompress(
             compositeStored_->as<uint8_t>(),
             stored,
