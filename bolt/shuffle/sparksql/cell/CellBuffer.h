@@ -287,14 +287,23 @@ class DataCells {
 };
 
 /// Null bitmaps per (partition, non-UNKNOWN wire column) for the current
-/// checkpoint window, kept in the writer's semantics: bit 1 = non-null, bit 0 =
-/// null (spec section 4.2).
+/// checkpoint window, in the null body's bit order: bit 1 = non-null, bit 0
+/// = null.
 ///
-/// Storage is lazy: a partition allocates nothing until its first null.
-/// Untouched (partition, column) pairs cost zero memory and summarize as
-/// NO_NULL, which realizes the "all rows non-null by default, never touched"
-/// design. Rows beyond a partition's allocated capacity are implicitly
+/// Storage is lazy at both levels. A partition holds nothing until its first
+/// null: then it gets a table of one 16-byte slot per column. A slot holds
+/// the column's counted all-null prefix and, only once a null follows a
+/// non-null row, a bitmap of its own. Untouched (partition, column) pairs
+/// summarize as NO_NULL, which realizes the "all rows non-null by default,
+/// never touched" design; rows beyond a bitmap's capacity are implicitly
 /// non-null.
+///
+/// A bitmap grows by doubling. Tables and small bitmaps are carved from
+/// arena chunks of the pool; a small bitmap's outgrown block goes to a
+/// freelist of its size class for the next slot to reach that size. Large
+/// bitmaps come from the pool itself and go back to it as they grow, so the
+/// blocks held but unused stay under 112 bytes per slot. Everything returns
+/// to the pool when the window closes.
 class NullCells {
  public:
   NullCells(
@@ -311,24 +320,20 @@ class NullCells {
   /// increasing order per partition; capacity grows on demand.
   ///
   /// An all-null-so-far column is pure counting: while every row of the
-  /// window has been null, only nullPrefix_ advances and no bitmap storage
+  /// window has been null, only the slot's prefix advances and no bitmap
   /// exists. The first non-null row freezes the prefix (it simply never
   /// calls in), and later nulls fall through to the bitmap.
   inline void setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
-    const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
-    if (rowInWindow == nullPrefix_[slot]) {
-      ++nullPrefix_[slot];
-      hasNull_[slot] = 1;
+    Slot& slot = slotFor(pid, col);
+    if (rowInWindow == slot.prefix) {
+      ++slot.prefix;
       return;
     }
-    uint32_t cap = capBytes_[pid];
-    if (FOLLY_UNLIKELY((rowInWindow >> 3) >= cap)) {
-      grow(pid, rowInWindow);
-      cap = capBytes_[pid];
+    if (FOLLY_UNLIKELY((rowInWindow >> 3) >= slot.capBytes)) {
+      grow(slot, rowInWindow);
     }
-    base_[pid][static_cast<size_t>(col) * cap + (rowInWindow >> 3)] &=
-        static_cast<char>(~(1u << (rowInWindow & 7)));
-    hasNull_[slot] = 1;
+    slot.bits[rowInWindow >> 3] &=
+        static_cast<uint8_t>(~(1u << (rowInWindow & 7)));
   }
 
   /// Bulk form for a run of consecutive window rows that are all null in
@@ -336,10 +341,9 @@ class NullCells {
   /// still all-null in this partition, per-row otherwise.
   inline void
   setNullRun(uint32_t pid, uint32_t col, uint32_t startRow, uint32_t count) {
-    const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
-    if (startRow == nullPrefix_[slot]) {
-      nullPrefix_[slot] += count;
-      hasNull_[slot] = 1;
+    Slot& slot = slotFor(pid, col);
+    if (startRow == slot.prefix) {
+      slot.prefix += count;
       return;
     }
     for (uint32_t i = 0; i < count; ++i) {
@@ -361,36 +365,89 @@ class NullCells {
   void emitBitmap(uint32_t pid, uint32_t col, uint32_t rowCount, uint8_t* out)
       const;
 
-  /// Drops all bitmaps and returns to the all-non-null state (checkpoint
-  /// window close).
+  /// Drops all tables and bitmaps and returns to the all-non-null state
+  /// (checkpoint window close).
   void reset();
 
-  /// Releases one partition's bitmaps (RSS partial flush seam).
+  /// Releases one partition's table and bitmaps to the freelists (RSS
+  /// partial flush seam).
   void releasePartition(uint32_t pid);
 
-  /// Bytes currently held; input to the checkpoint trigger.
+  /// Bytes of the slots' bitmaps; input to the checkpoint trigger. Not in
+  /// it, as both stay bounded whatever the window's size: the slot tables,
+  /// 16 bytes per (partition, column) of a partition with a null, and the
+  /// outgrown arena blocks on the freelists, under 112 bytes per bitmap.
   int64_t allocatedBytes() const {
-    return allocatedBytes_;
+    return bitmapBytes_;
+  }
+
+  /// Bytes of slot tables held.
+  int64_t tableBytes() const {
+    return tableBytes_;
   }
 
  private:
-  void grow(uint32_t pid, uint32_t rowInWindow);
+  struct Slot {
+    /// Rows [0, prefix) of the window are null with no bitmap backing.
+    /// Frozen once a non-null row appears (rows arrive in order, so a later
+    /// null misses the prefix match).
+    uint32_t prefix;
+    /// Bytes of bits; 0 while the column has no bitmap.
+    uint32_t capBytes;
+    uint8_t* bits;
+  };
+
+  /// Power-of-two bitmap sizes from 16 bytes (128 rows); up to 64 bytes
+  /// (512 rows) they come from the arena. The bound keeps a slot's outgrown
+  /// arena blocks under 112 bytes: slots grow in step, so few are reused.
+  static constexpr uint32_t kMinBitmapLog2 = 4;
+  static constexpr uint32_t kMaxArenaBitmapLog2 = 6;
+  static constexpr uint32_t kMaxArenaBitmapBytes = 1u << kMaxArenaBitmapLog2;
+  static constexpr uint32_t kNumSizeClasses =
+      kMaxArenaBitmapLog2 - kMinBitmapLog2 + 1;
+
+  inline Slot& slotFor(uint32_t pid, uint32_t col) {
+    Slot* table = tables_[pid];
+    if (FOLLY_UNLIKELY(table == nullptr)) {
+      table = openTable(pid);
+    }
+    return table[col];
+  }
+
+  const Slot* findSlot(uint32_t pid, uint32_t col) const {
+    const Slot* table = tables_[pid];
+    return table == nullptr ? nullptr : table + col;
+  }
+
+  Slot* openTable(uint32_t pid);
+  void grow(Slot& slot, uint32_t rowInWindow);
+  /// A bitmap block of 2^log2 bytes.
+  uint8_t* allocateBitmap(uint32_t log2);
+  void freeBitmap(uint8_t* bits, uint32_t capBytes);
+  /// `bytes` (a multiple of 8) from the arena.
+  uint8_t* carve(size_t bytes);
+  void freeChunks();
 
   memory::MemoryPool* const pool_;
   const uint32_t numPartitions_;
   const uint32_t numColumns_;
 
-  /// Per partition: bitmap block of numColumns * capBytes_[pid] bytes,
-  /// column-major with stride capBytes_[pid]; nullptr until first null.
-  std::vector<char*> base_;
-  std::vector<uint32_t> capBytes_;
-  /// Per (pid, col): 1 once a null was recorded in this window.
-  std::vector<uint8_t> hasNull_;
-  /// Per (pid, col): rows [0, prefix) of the window are null with no bitmap
-  /// backing. Frozen once a non-null row appears (rows arrive in order, so
-  /// a later null misses the prefix match).
-  std::vector<uint32_t> nullPrefix_;
-  int64_t allocatedBytes_{0};
+  /// Per partition: its slot table, nullptr until its first null.
+  std::vector<Slot*> tables_;
+  /// Intrusive freelists: a free block's first 8 bytes link the next one.
+  uint8_t* freeBitmaps_[kNumSizeClasses] = {};
+  uint8_t* freeTables_{nullptr};
+
+  struct Chunk {
+    uint8_t* data;
+    size_t size;
+  };
+  std::vector<Chunk> chunks_;
+  uint8_t* chunkFree_{nullptr};
+  size_t chunkLeft_{0};
+
+  int64_t bitmapBytes_{0};
+  int64_t tableBytes_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
