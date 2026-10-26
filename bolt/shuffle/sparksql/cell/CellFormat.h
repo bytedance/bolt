@@ -136,7 +136,7 @@ enum class CellBlockKind : uint8_t {
 ///   rowCount  u32
 ///   rawBytes  u64  body bytes before compression
 ///   stored    u64  body bytes that follow
-///   layout    u8   RunLayout::kCombined (compressed) or kCombinedStored
+///   layout    u8   RunLayout::kCombined (compressed) or kCombinedUncompressed
 ///   body           rows back to back, each [size i32][size bytes]
 constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 
@@ -146,7 +146,7 @@ constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 enum class RunLayout : uint8_t {
   kCombined = 0x00,
   kSeparate = 0x01,
-  kCombinedStored = 0x02,
+  kCombinedUncompressed = 0x02,
 };
 
 /// How one stream's bytes are produced and parsed.
