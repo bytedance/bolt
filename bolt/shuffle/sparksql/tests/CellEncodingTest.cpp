@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <limits>
 #include <random>
 
@@ -294,6 +295,53 @@ TEST(CellEncodingTest, fuzzRoundtripAcrossShapes) {
   fuzzType(int16_t{});
   fuzzType(int32_t{});
   fuzzType(int64_t{});
+}
+
+TEST(CellEncodingTest, streamCursorReadsInArbitraryPieces) {
+  std::mt19937_64 rng(77);
+  const auto fuzzType = [&](auto tag) {
+    using T = decltype(tag);
+    for (int iter = 0; iter < 200; ++iter) {
+      const uint32_t count = rng() % 500;
+      std::vector<T> values(count);
+      for (auto& v : values) {
+        v = static_cast<T>(iter % 2 ? rng() : rng() % 100);
+      }
+      std::string encoded;
+      encodeStream(values.data(), values.size(), encoded);
+      const auto* in = reinterpret_cast<const uint8_t*>(encoded.data());
+      StreamCursor<T> cursor;
+      cursor.reset(in, encoded.size(), count);
+      std::vector<T> decoded(count);
+      uint32_t at = 0;
+      while (at < count) {
+        // Pieces of 1..70 values straddle the 8/16/32-value blocks.
+        const uint32_t n = std::min<uint32_t>(count - at, 1 + rng() % 70);
+        ASSERT_TRUE(cursor.next(n, decoded.data() + at));
+        at += n;
+      }
+      EXPECT_TRUE(cursor.finished());
+      ASSERT_EQ(decoded, values)
+          << "type width " << sizeof(T) << " iter " << iter;
+      T extra;
+      EXPECT_FALSE(cursor.next(1, &extra));
+    }
+  };
+  fuzzType(int16_t{});
+  fuzzType(int32_t{});
+  fuzzType(int64_t{});
+
+  // A trailing byte past the last block is not consumed (rule 20).
+  std::vector<int64_t> values(9, 5);
+  std::string encoded;
+  encodeStream(values.data(), values.size(), encoded);
+  encoded.push_back('\0');
+  StreamCursor<int64_t> cursor;
+  cursor.reset(
+      reinterpret_cast<const uint8_t*>(encoded.data()), encoded.size(), 9);
+  std::vector<int64_t> decoded(9);
+  ASSERT_TRUE(cursor.next(9, decoded.data()));
+  EXPECT_FALSE(cursor.finished());
 }
 
 TEST(CellEncodingTest, appendixBVectors) {

@@ -178,7 +178,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
 arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
   // Oversized inputs are sliced so a checkpoint boundary exists inside
   // them: one giant batch must not inflate a single payload window past
-  // the reader-side bounds (the legacy writers slice the same way). Lazy
+  // the partition byte bound (the legacy writers slice the same way). Lazy
   // children are loaded first: unloaded they estimate as zero bytes and
   // the byte bound would never fire.
   if (isLazyNotLoaded(*rv)) {
@@ -187,13 +187,10 @@ arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
   const int64_t flatSize = rv->estimateFlatSize();
   const int64_t maxBytes =
       remote_ ? kRemoteSliceBytes : kMaxShuffleWriterBatchBytes;
-  const int32_t rowLimit = std::max<int32_t>(
-      1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
-  if ((flatSize > maxBytes || rv->size() > rowLimit) && rv->size() > 1) {
+  if (flatSize > maxBytes && rv->size() > 1) {
     const int64_t pieces = std::max<int64_t>(
         1, std::min<int64_t>(rv->size(), (flatSize + maxBytes - 1) / maxBytes));
-    const int32_t rowsPerPiece =
-        std::min<int64_t>(rowLimit, (rv->size() + pieces - 1) / pieces);
+    const int32_t rowsPerPiece = (rv->size() + pieces - 1) / pieces;
     for (int32_t begin = 0; begin < rv->size(); begin += rowsPerPiece) {
       const int32_t length =
           std::min<int32_t>(rowsPerPiece, rv->size() - begin);
@@ -229,10 +226,11 @@ void CellShuffleWriter::admitRemoteSlice(int64_t estimatedBytes) {
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   const uint64_t start = currentTimeNs();
-  const uint64_t rowLimit = std::max<int64_t>(
-      1, std::min<int64_t>(options_.cellOptions.maxWindowRows, 1 << 24));
+  // The row fields of a payload are u32: a window closes before any of
+  // its partitions could pass kMaxPayloadRows. Nothing else bounds the
+  // rows - the reader decodes a payload in batches of its own size.
   if (splitter_->hasWindowRows() &&
-      splitter_->maxWindowRows() + uint64_t(rv->size()) > rowLimit) {
+      splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
     checkpoint();
   }
   inSplit_ = true;
@@ -438,8 +436,7 @@ void CellShuffleWriter::maybeCheckpoint() {
   if (checkpointRequested_ ||
       splitter_->maxPartitionBytes() >
           static_cast<uint64_t>(cellOpts.checkpointPartitionBytes) ||
-      splitter_->nullBytes() > cellOpts.nullMemLimitBytes ||
-      splitter_->maxWindowRows() > cellOpts.maxWindowRows) {
+      splitter_->nullBytes() > cellOpts.nullMemLimitBytes) {
     checkpoint();
   }
 }

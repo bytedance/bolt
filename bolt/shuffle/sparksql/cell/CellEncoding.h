@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -236,6 +237,76 @@ void encodeStream(const T* values, size_t count, std::string& out);
 /// (spec section 7.2 and rule 20). Returns false on any violation.
 template <typename T>
 bool decodeStream(const uint8_t* in, size_t inBytes, size_t valueCount, T* dst);
+
+/// decodeStream in pieces: the values of an Encoding Loop stream of
+/// `valueCount` values, handed out in arbitrary-sized reads. A block that
+/// straddles two reads is decoded once and its rest staged here, so the
+/// caller never needs room for more than one read.
+template <typename T>
+class StreamCursor {
+ public:
+  void reset(const uint8_t* in, size_t inBytes, uint64_t valueCount) {
+    in_ = in;
+    size_ = inBytes;
+    offset_ = 0;
+    blockValuesLeft_ = valueCount;
+    stagedPos_ = 0;
+    stagedCount_ = 0;
+  }
+
+  /// Writes the next `n` values to dst. False when the stream holds fewer
+  /// values or a block is malformed (rules 13-17).
+  bool next(uint64_t n, T* dst) {
+    const uint32_t staged = std::min<uint64_t>(n, stagedCount_ - stagedPos_);
+    ::memcpy(dst, staged_ + stagedPos_, staged * sizeof(T));
+    stagedPos_ += staged;
+    dst += staged;
+    n -= staged;
+    while (n > 0) {
+      if (blockValuesLeft_ == 0) {
+        return false;
+      }
+      const uint32_t blockValues =
+          std::min<uint64_t>(kValuesPerBlock, blockValuesLeft_);
+      T* target = n >= blockValues ? dst : staged_;
+      const uint32_t consumed =
+          decodeBlock(in_ + offset_, size_ - offset_, blockValues, target);
+      if (consumed == 0) {
+        return false;
+      }
+      offset_ += consumed;
+      blockValuesLeft_ -= blockValues;
+      if (target == dst) {
+        dst += blockValues;
+        n -= blockValues;
+      } else {
+        stagedCount_ = blockValues;
+        stagedPos_ = static_cast<uint32_t>(n);
+        ::memcpy(dst, staged_, n * sizeof(T));
+        n = 0;
+      }
+    }
+    return true;
+  }
+
+  /// Rule 20, once every value was read: the blocks consumed the stream
+  /// exactly.
+  bool finished() const {
+    return blockValuesLeft_ == 0 && stagedPos_ == stagedCount_ &&
+        offset_ == size_;
+  }
+
+ private:
+  static constexpr uint32_t kValuesPerBlock = kBlockSourceBytes / sizeof(T);
+
+  const uint8_t* in_{nullptr};
+  size_t size_{0};
+  size_t offset_{0};
+  uint64_t blockValuesLeft_{0};
+  uint32_t stagedPos_{0};
+  uint32_t stagedCount_{0};
+  T staged_[kValuesPerBlock];
+};
 
 /// --- Null region helpers (spec section 4.2) ---
 

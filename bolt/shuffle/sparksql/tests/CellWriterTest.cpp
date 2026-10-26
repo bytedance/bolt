@@ -195,6 +195,34 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
         std::move(children));
   }
 
+  /// `input` as consecutive batches of at most `rows` rows, beside their
+  /// slices of `pids`; a lazy child stays lazy in every batch. With
+  /// checkpointPartitionBytes = 1, every batch boundary then closes a
+  /// window: one payload per batch and partition.
+  std::pair<std::vector<std::vector<int32_t>>, std::vector<RowVectorPtr>>
+  sliceBatches(
+      const RowVectorPtr& input,
+      const std::vector<int32_t>& pids,
+      vector_size_t rows) {
+    std::vector<std::vector<int32_t>> pidSlices;
+    std::vector<RowVectorPtr> batches;
+    for (vector_size_t begin = 0; begin < input->size(); begin += rows) {
+      const auto length = std::min(rows, input->size() - begin);
+      std::vector<VectorPtr> children;
+      for (auto& child : input->children()) {
+        children.push_back(
+            child->isLazy() ? wrapInLazyDictionary(
+                                  child->loadedVector()->slice(begin, length))
+                            : child->slice(begin, length));
+      }
+      batches.push_back(std::make_shared<RowVector>(
+          pool(), input->type(), nullptr, length, std::move(children)));
+      pidSlices.emplace_back(
+          pids.begin() + begin, pids.begin() + begin + length);
+    }
+    return {std::move(pidSlices), std::move(batches)};
+  }
+
   VectorPtr makeNullableStrings(int n, std::mt19937& rng) {
     std::vector<std::string> storage(n);
     std::vector<std::optional<StringView>> views(n);
@@ -575,7 +603,7 @@ TEST_F(CellWriterTest, timestampKeepsAllSixteenBytes) {
     pids[row] = row % 4;
   }
   auto options = makeOptions(4);
-  options.cellOptions.maxWindowRows = 256;
+  options.cellOptions.checkpointPartitionBytes = 1;
   for (const auto& input :
        {data,
         makeRowVector({BaseVector::wrapInDictionary(
@@ -586,7 +614,8 @@ TEST_F(CellWriterTest, timestampKeepsAllSixteenBytes) {
         makeRowVector({wrapInLazyDictionary(timestamps)}),
         makeRowVector({BaseVector::wrapInConstant(n, 1, timestamps)})}) {
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
-    roundTrip(options, {pids}, {input}, &writer);
+    const auto [pidSlices, batches] = sliceBatches(input, pids, 256);
+    roundTrip(options, pidSlices, batches, &writer);
   }
 
   // Spilled, merged and all-null batches: both streams stay in lockstep
@@ -917,14 +946,15 @@ TEST_F(CellWriterTest, fullPrimitiveTypesAndUnknownWireSlots) {
       n, [](auto) { return StringView("dictionary"); }));
   auto data = makeRowVector(children);
   auto options = makeOptions(4);
-  options.cellOptions.maxWindowRows = 1024;
+  options.cellOptions.checkpointPartitionBytes = 1;
   std::vector<int32_t> pids(n);
   for (int i = 0; i < n; ++i) {
     pids[i] = i % 3;
   }
   const auto roundTripWithDictionary = [&](const RowVectorPtr& input) {
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
-    roundTrip(options, {pids}, {input}, &writer);
+    const auto [pidSlices, batches] = sliceBatches(input, pids, 1024);
+    roundTrip(options, pidSlices, batches, &writer);
     EXPECT_GT(writer.metrics().dictionaryMatchedRows, 0);
   };
   roundTripWithDictionary(data);
@@ -960,11 +990,6 @@ TEST_F(CellWriterTest, unknownOnlyHeaderAndRowBoundaries) {
   const auto bytes = file.substr(1);
   EXPECT_EQ(static_cast<uint8_t>(bytes[0]), 99);
   EXPECT_EQ(bytes.substr(1), std::string(23, '\0'));
-
-  options.cellOptions.maxWindowRows = 10;
-  CellShuffleWriter bounded(options, pool(), arrow::default_memory_pool());
-  roundTrip(options, {std::vector<int32_t>(99, 1)}, {data}, &bounded);
-  EXPECT_EQ(bounded.metrics().partitionLengths[1], 10 * 25);
 
   auto layout = CellLayout::create(asRowType(data->type()));
   CellPayloadDecoder decoder(layout, nullptr, pool());
@@ -1010,8 +1035,9 @@ TEST_F(CellWriterTest, groupedComplexAdapterAndCellRoundTrip) {
   }
   bolt::test::assertEqualVectors(logical, decodeComplex(adapter, physical));
   auto options = makeOptions(1);
-  options.cellOptions.maxWindowRows = 2;
-  roundTrip(options, {{0, 0, 0, 0}}, {physical});
+  options.cellOptions.checkpointPartitionBytes = 1;
+  const auto [pidSlices, batches] = sliceBatches(physical, {0, 0, 0, 0}, 2);
+  roundTrip(options, pidSlices, batches);
   auto payloads = decodePartition(
       CellLayout::create(adapter.physicalType()),
       readFile(),
@@ -1957,6 +1983,115 @@ TEST_F(CellWriterTest, complexColumnsRoundTripThroughWriterAndReader) {
       }
     }
     EXPECT_GE(next, kRows);
+  }
+}
+
+TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
+  // One large payload per partition comes out over many batches of
+  // batchSize rows; payloads near a batch's size straddle batches, and
+  // many small ones fill one batch across their boundaries. Every column kind,
+  // with nulls, inline and out-of-line strings, dictionary strings and an
+  // all-null column.
+  constexpr int32_t kPartitions = 2;
+  constexpr vector_size_t kRows = 20'000;
+  std::mt19937 rng(5);
+  const auto data = makeRowVector(
+      {makeFlatVector<int64_t>(
+           kRows,
+           [](auto row) { return row * 7919; },
+           [](auto row) { return row % 13 == 0; }),
+       makeFlatVector<int16_t>(kRows, [](auto row) { return row % 300; }),
+       makeFlatVector<bool>(
+           kRows,
+           [](auto row) { return row % 3 == 0; },
+           [](auto row) { return row % 7 == 0; }),
+       makeFlatVector<double>(
+           kRows,
+           [](auto row) { return row * 0.5; },
+           [](auto row) { return row % 5 == 0; }),
+       makeFlatVector<Timestamp>(
+           kRows,
+           [](auto row) { return Timestamp(row, row * 1000); },
+           [](auto row) { return row % 9 == 0; }),
+       makeNullableStrings(kRows, rng),
+       makeFlatVector<StringView>(
+           kRows,
+           [](auto row) {
+             return StringView(
+                 row % 3 == 0 ? "a dictionary value past inline" : "short");
+           }),
+       BaseVector::createNullConstant(BIGINT(), kRows, pool())});
+  std::vector<int32_t> pids(kRows);
+  for (vector_size_t row = 0; row < kRows; ++row) {
+    pids[row] = row % kPartitions;
+  }
+  auto codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  for (const vector_size_t windowRows : {0, 2048, 7}) {
+    SCOPED_TRACE(windowRows);
+    auto options = makeOptions(kPartitions);
+    std::vector<std::vector<int32_t>> pidSlices{pids};
+    std::vector<RowVectorPtr> batches{data};
+    if (windowRows != 0) {
+      options.cellOptions.checkpointPartitionBytes = 1;
+      std::tie(pidSlices, batches) = sliceBatches(data, pids, windowRows);
+    }
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    for (size_t i = 0; i < batches.size(); ++i) {
+      ASSERT_TRUE(writer.split(withPid(pidSlices[i], batches[i]), 0).ok());
+    }
+    ASSERT_TRUE(writer.stop().ok());
+    // The dictionary probe needs a first batch of 1024 rows.
+    if (windowRows == 0 || windowRows >= 1024) {
+      EXPECT_GT(writer.metrics().dictionaryMatchedRows, 0);
+    }
+
+    const auto file = readFile();
+    for (const int32_t batchSize : {333, 1000}) {
+      SCOPED_TRACE(batchSize);
+      uint64_t offset = 0;
+      for (int32_t pid = 0; pid < kPartitions; ++pid) {
+        const auto length = writer.metrics().partitionLengths[pid];
+        if (windowRows == 0) {
+          EXPECT_EQ(
+              decodePartition(
+                  CellLayout::create(asRowType(data->type())),
+                  file,
+                  offset,
+                  length)
+                  .size(),
+              1);
+        }
+        CellShuffleReader reader(
+            std::make_shared<test::MemoryReaderStreamIterator>(
+                std::vector<std::vector<char>>{std::vector<char>(
+                    file.begin() + offset, file.begin() + offset + length)}),
+            asRowType(data->type()),
+            codec.get(),
+            arrow::default_memory_pool(),
+            pool(),
+            batchSize,
+            1 << 30);
+        offset += length;
+        vector_size_t next = pid;
+        bool sawShort = false;
+        while (auto batch = reader.next()) {
+          // Only the last batch of a partition may be short.
+          EXPECT_FALSE(sawShort);
+          ASSERT_LE(batch->size(), batchSize);
+          sawShort = batch->size() < batchSize;
+          for (vector_size_t row = 0; row < batch->size(); ++row) {
+            ASSERT_LT(next, kRows);
+            ASSERT_TRUE(data->equalValueAt(batch.get(), next, row))
+                << "partition " << pid << " row " << next;
+            next += kPartitions;
+          }
+        }
+        EXPECT_EQ(next, kRows + pid);
+      }
+    }
+    ::unlink(dataFile_.c_str());
   }
 }
 

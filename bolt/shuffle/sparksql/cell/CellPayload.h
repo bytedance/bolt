@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-/// L6 of the Cell shuffle: ColumnarPayload decode, from bytes to RowVector.
+/// L6 of the Cell shuffle: ColumnarPayload decode, from bytes to RowVectors.
 ///
 /// Implements ColumnarPayloadFormat.md sections 3-9 in the reading order its
 /// section 12.5 recommends, with every L1 validation of section 10.1: a
@@ -27,9 +27,11 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
+#include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/vector/ComplexVector.h"
@@ -88,18 +90,17 @@ class MemoryByteSource final : public CellByteSource {
 };
 
 /// Implementation-level bounds on untrusted input (spec section 10.3); zero
-/// disables a limit. The row and run counts match what the writer can emit
-/// (it slices batches to at most 1 << 24 rows per window). Decoded run size
-/// is unbounded by default: a run holds a whole window of one partition and
-/// a single value may reach 2 GiB, so no fixed cap is safe for payloads of
-/// the same-binary writer (spec section 11.1). Every buffer sized from the
-/// run and null-region size fields comes from the reader pool, so a corrupt
-/// size fails on the pool's capacity rather than exhausting the process.
-/// Decode scratch outside the pool (per-row value views, dictionary tables)
-/// is linear in maxRowCount and in those pool-backed stream bytes.
-/// Untrusted deployments set it.
+/// disables a limit. The row and run counts match what the writer can emit.
+/// Decoded run size is unbounded by default: a run holds a whole window of
+/// one partition and a single value may reach 2 GiB, so no fixed cap is
+/// safe for payloads of the same-binary writer (spec section 11.1). Every
+/// buffer sized from the run and null-region size fields comes from the
+/// reader pool, so a corrupt size fails on the pool's capacity rather than
+/// exhausting the process. The row count sizes nothing but the null region,
+/// which the input bytes bound: rows come out in batches of the caller's
+/// size. Untrusted deployments set maxDecodedBytes.
 struct CellDecodeLimits {
-  uint32_t maxRowCount{1u << 24};
+  uint32_t maxRowCount{kMaxPayloadRows};
   uint32_t maxRunCount{1u << 16};
   uint64_t maxDecodedBytes{0};
 };
@@ -120,8 +121,11 @@ class CellDecompressor {
       size_t decodedSize) = 0;
 };
 
-/// Decodes ColumnarPayloads of one schema into RowVectors. Reusable across
-/// payloads; scratch buffers are retained between calls.
+/// Decodes ColumnarPayloads of one schema into RowVectors, streaming: a
+/// payload's encoded bytes are read whole, its rows come out in pieces of
+/// the caller's size into a batch that may span payloads. Memory is the
+/// payload's encoded bytes plus one batch, whatever the payload's row
+/// count. Reusable across payloads; scratch buffers are retained.
 class CellPayloadDecoder {
  public:
   /// `decompressor` may be null when payloads are known to be uncompressed;
@@ -136,9 +140,39 @@ class CellPayloadDecoder {
   CellPayloadDecoder& operator=(const CellPayloadDecoder&) = delete;
   CellPayloadDecoder(CellPayloadDecoder&&) = default;
 
-  /// Decodes exactly one payload from `in`. On success fills `out` and
-  /// returns true; on malformed input returns false with `error` set and
-  /// consumes an unspecified prefix of `in`.
+  /// Reads one payload from `in`: header, null region and every run. Its
+  /// rows then come out through appendRows(). The previous payload must be
+  /// fully appended. On malformed input returns false with `error` set,
+  /// having consumed an unspecified prefix of `in`.
+  bool beginPayload(CellByteSource& in, std::string& error);
+
+  /// Rows of the current payload not appended yet.
+  uint32_t payloadRowsLeft() const {
+    return rowCount_ - rowsRead_;
+  }
+
+  /// Appends the next `numRows` rows of the current payload to the batch
+  /// under construction, opening one of `capacity` rows when none is open.
+  /// The checks that need a whole stream run with the payload's last rows.
+  /// On malformed input returns false with `error` set; the payload and the
+  /// batch are then dropped.
+  bool appendRows(uint32_t numRows, vector_size_t capacity, std::string& error);
+
+  vector_size_t batchRows() const {
+    return batchRows_;
+  }
+
+  /// Bytes the batch's values take: fixed widths plus out-of-line strings.
+  uint64_t batchBytes() const {
+    return static_cast<uint64_t>(batchRows_) * rowBytes_ + batchStringBytes_;
+  }
+
+  /// The batch built so far, closing it; nullptr when none is open.
+  RowVectorPtr finishBatch();
+
+  /// Decodes exactly one payload from `in` as one vector of all its rows.
+  /// On success fills `out` and returns true; on malformed input returns
+  /// false with `error` set and consumes an unspecified prefix of `in`.
   bool decode(CellByteSource& in, RowVectorPtr& out, std::string& error);
 
   const CellLayout& layout() const {
@@ -146,6 +180,46 @@ class CellPayloadDecoder {
   }
 
  private:
+  struct Dictionary {
+    size_t firstEntry;
+    size_t numEntries;
+    uint32_t matched;
+  };
+
+  /// Read position of one column in the current payload.
+  struct ColumnCursor {
+    /// Non-null values consumed: the raw-stream offset in values.
+    uint64_t dense{0};
+    StreamCursor<int16_t> values16;
+    StreamCursor<int32_t> values32;
+    /// Bigint values, or timestamp seconds.
+    StreamCursor<int64_t> values64;
+    /// Timestamp nanos, string lengths, or dictionary fallback lengths.
+    StreamCursor<int64_t> lengths;
+    /// Strings: the data stream, or the fallback bytes after the
+    /// dictionaries; dataOffset is the next value's start.
+    std::string_view data;
+    uint64_t dataOffset{0};
+    bool dictionary{false};
+    std::vector<std::string_view> entries;
+    std::vector<Dictionary> dictionaries;
+    const uint8_t* indexes{nullptr};
+    uint64_t matchedSum{0};
+    uint64_t indexPos{0};
+    size_t nextDictionary{0};
+    size_t currentDictionary{0};
+    uint32_t dictionaryLeft{0};
+  };
+
+  /// One column of the batch under construction.
+  struct ColumnBatch {
+    BufferPtr values;
+    BufferPtr nulls; // allocated at the batch's first null
+    std::vector<BufferPtr> strings;
+    char* charsFree{nullptr};
+    size_t charsLeft{0};
+  };
+
   bool fail(std::string& error, const char* what) const {
     error = what;
     return false;
@@ -160,53 +234,75 @@ class CellPayloadDecoder {
 
   bool parseRun(CellByteSource& in, std::string& error);
 
-  template <typename T>
-  bool buildEncodedColumn(
+  /// Positions the column's cursor at the payload's first row, checking
+  /// what can be checked before any value is read.
+  bool openColumn(uint32_t col, std::string& error);
+
+  bool openStringColumn(uint32_t col, std::string& error);
+
+  /// The whole-stream checks, once the last row was appended (rule 20 and
+  /// the string data lengths).
+  bool finishPayload(std::string& error);
+
+  void openBatch(vector_size_t capacity);
+
+  void dropBatch();
+
+  /// Marks the nulls of the next numRows payload rows in the batch; returns
+  /// how many of those rows are non-null.
+  uint32_t appendNulls(uint32_t col, uint32_t numRows);
+
+  /// Writes numRows values at out: `dense` non-null ones from read(count,
+  /// dst), scattered by the payload bitmap, T{} at the null rows.
+  template <typename T, typename Read>
+  bool placeValues(
       uint32_t col,
-      uint32_t rowCount,
-      const TypePtr& type,
-      VectorPtr& out,
-      std::string& error);
+      uint32_t numRows,
+      uint32_t dense,
+      T* out,
+      const Read& read);
 
   template <typename T>
-  bool buildRawColumn(
+  bool appendEncoded(
       uint32_t col,
-      uint32_t rowCount,
-      const TypePtr& type,
-      VectorPtr& out,
+      uint32_t numRows,
+      uint32_t dense,
+      StreamCursor<T>& cursor,
       std::string& error);
 
-  bool buildStringColumn(
+  template <typename T>
+  bool appendRaw(uint32_t col, uint32_t numRows, uint32_t dense);
+
+  bool appendBoolean(
       uint32_t col,
-      uint32_t rowCount,
-      const TypePtr& type,
-      bool dictionaryEncoded,
-      VectorPtr& out,
+      uint32_t numRows,
+      uint32_t dense,
       std::string& error);
 
-  bool buildBooleanColumn(
+  bool appendTimestamp(
       uint32_t col,
-      uint32_t rowCount,
-      const TypePtr& type,
-      VectorPtr& out,
+      uint32_t numRows,
+      uint32_t dense,
       std::string& error);
 
-  bool buildTimestampColumn(
+  bool appendString(
       uint32_t col,
-      uint32_t rowCount,
-      const TypePtr& type,
-      VectorPtr& out,
+      uint32_t numRows,
+      uint32_t dense,
       std::string& error);
 
-  /// Nulls buffer for a column: nullptr for NO_NULL, otherwise bits in the
-  /// engine convention (bit set = non-null), which is byte-identical to the
-  /// spec's bitmap.
-  BufferPtr makeNulls(uint32_t col, uint32_t rowCount);
+  /// `bytes` of string space in the column's batch buffers.
+  char* stringSpace(uint32_t col, uint64_t bytes);
+
+  template <typename T>
+  VectorPtr makeFlat(uint32_t col, const TypePtr& type);
 
   const CellLayout layout_;
   CellDecompressor* const decompressor_;
   memory::MemoryPool* const pool_;
   const CellDecodeLimits limits_;
+  /// Fixed bytes of one decoded row, the batch byte estimate's base.
+  uint32_t rowBytes_{0};
 
   // Per-payload state, reused across calls. The byte buffers sized from
   // untrusted payload fields live in the reader pool so decoded runs stay
@@ -219,10 +315,23 @@ class CellPayloadDecoder {
   std::vector<uint8_t> encodingTags_;
   std::vector<uint64_t> storedSizes_;
   std::vector<uint64_t> decodedSizes_;
+  std::vector<ColumnCursor> cursors_;
+  uint32_t rowCount_{0};
+  uint32_t rowsRead_{0};
   BufferPtr scratch_;
   BufferPtr scratch2_;
-  BufferPtr timestampScratch_; // dense seconds then nanos, 2 x non-null
+
+  // Per-append scratch, at most one batch of dense values.
+  BufferPtr denseScratch_;
+  BufferPtr timestampScratch_; // dense seconds then nanos
   std::vector<int64_t> lengthScratch_;
+  std::vector<std::string_view> views_;
+
+  std::vector<ColumnBatch> batch_;
+  bool batchOpen_{false};
+  vector_size_t batchCapacity_{0};
+  vector_size_t batchRows_{0};
+  uint64_t batchStringBytes_{0};
 };
 
 // Writer side: the pieces both output backends assemble payloads from.
