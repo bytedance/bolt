@@ -123,10 +123,10 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   perPidCounter_.assign(numPartitions_, 0);
   decoded_.resize(layout_.numColumns());
 
-  // Warm the reservation for the resident structures and the first chunks;
-  // failure is not fatal, allocation will arbitrate.
+  // Warm the reservation for the first chunks; failure is not fatal,
+  // allocation will arbitrate. The splitter's caches are allocated already.
   if (numStreams != 0) {
-    boltPool_->maybeReserve(splitter_->residentBytes() + 2 * kChunkBytes);
+    boltPool_->maybeReserve(2 * kChunkBytes);
   }
   initialized_ = true;
 }
