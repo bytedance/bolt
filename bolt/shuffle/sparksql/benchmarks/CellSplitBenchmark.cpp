@@ -14,17 +14,29 @@
  * limitations under the License.
  */
 
-/// Split-path comparison of the shuffle writers on identical inputs.
+/// Write-path comparison of the shuffle writers on identical, large inputs.
 ///
-/// Every benchmark drives one writer lifecycle (construct, split a fixed set
-/// of batches, stop) and returns the rows processed, so folly reports
-/// time per row. stop() and construction run under a suspender: the numbers
-/// are the split path. A summary table printed at exit adds what the split
-/// numbers cannot show: bytes written per writer per scenario.
+/// Every benchmark drives one writer lifecycle (construct, split every batch
+/// of a scenario, stop) and returns the rows processed, so folly reports
+/// time per row. Split and stop are both timed: the writers place their
+/// compression and writing differently (V1 evicts during split once its
+/// buffers fill, Cell keeps cells resident until a spill or stop), so split
+/// alone does not compare them. Construction and teardown run under a
+/// suspender.
+///
+/// Each scenario holds about --input_mb of input (1 GiB by default), enough
+/// to amortize what a writer provisions up front (first cells, partition
+/// buffers); smaller inputs measure that provisioning instead of
+/// throughput. Scenarios are built on first use, one resident at a time. A
+/// summary table printed at exit splits each lifecycle into split and stop
+/// and adds bytes written.
 
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
 
+#include <algorithm>
+#include <chrono>
+#include <functional>
 #include <map>
 #include <random>
 
@@ -41,11 +53,19 @@
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/FlatVector.h"
 
+DEFINE_int64(
+    input_mb,
+    1024,
+    "Input per scenario in MiB, as the estimateFlatSize of its batches.");
 DEFINE_bool(
     phases,
     false,
     "Skip the folly benchmarks; print a writer/reader phase breakdown for "
-    "the dictionary string scenario across Cell(dict on/off)/V1/V2.");
+    "--phases_scenario across Cell(dict on/off)/V1/V2.");
+DEFINE_string(
+    phases_scenario,
+    "strdict_P1024",
+    "Scenario the --phases breakdown runs on.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -53,14 +73,23 @@ using namespace bytedance::bolt::shuffle::sparksql;
 namespace {
 
 constexpr int32_t kRowsPerBatch = 4096;
-constexpr int32_t kBatches = 96;
 constexpr int64_t kMemLimit = 1LL << 30;
+/// Chunk-memory spill threshold of the CellCap variants, below the cell data
+/// of the scenarios they run on (fixed4 ~600MB, strings ~600MB at the
+/// default input), so the lifecycle spills and merges.
+constexpr int64_t kCellCapBytes = 256LL << 20;
 
 struct Scenario {
   std::string name;
   int32_t numPartitions;
   std::vector<RowVectorPtr> batches; // pid column first
 };
+
+uint64_t clockNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 memory::MemoryPool* leafPool() {
   // Cell writers automatically size cells from this pool's capacity.
@@ -193,26 +222,33 @@ VectorPtr makePids(int32_t numPartitions, std::mt19937& rng) {
   return makeFlat(pids);
 }
 
+/// Batches from `makeNext(batchIndex)` until they hold --input_mb.
+std::vector<RowVectorPtr> fillToInputSize(
+    const std::function<RowVectorPtr(int32_t)>& makeNext) {
+  const int64_t target = FLAGS_input_mb << 20;
+  std::vector<RowVectorPtr> batches;
+  int64_t bytes = 0;
+  for (int32_t b = 0; bytes < target; ++b) {
+    batches.push_back(makeNext(b));
+    bytes += batches.back()->estimateFlatSize();
+  }
+  return batches;
+}
+
 /// Frame-of-reference friendly bigints, bit-packable ints.
-Scenario makeFixedScenario(
+std::vector<RowVectorPtr> makeFixedBatches(
     int32_t numPartitions,
-    int32_t numBatches = kBatches,
-    const char* tag = "",
     int32_t nullPercent = 0,
     bool addAllNullColumn = false,
     bool defensiveNulls = false) {
   std::mt19937 rng(17);
-  Scenario scenario{
-      "fixed4" + std::string(tag) + "_P" + std::to_string(numPartitions),
-      numPartitions,
-      {}};
-  for (int b = 0; b < numBatches; ++b) {
+  return fillToInputSize([&](int32_t b) {
     std::vector<int64_t> ids(kRowsPerBatch);
     std::vector<int64_t> timestamps(kRowsPerBatch);
     std::vector<int32_t> smalls(kRowsPerBatch);
     std::vector<int32_t> randoms(kRowsPerBatch);
     for (int i = 0; i < kRowsPerBatch; ++i) {
-      ids[i] = 7'000'000'000LL + b * kRowsPerBatch + i;
+      ids[i] = 7'000'000'000LL + static_cast<int64_t>(b) * kRowsPerBatch + i;
       timestamps[i] = 1'726'000'000'000LL + (rng() % 3'600'000);
       smalls[i] = rng() % 1000;
       randoms[i] = static_cast<int32_t>(rng());
@@ -229,17 +265,35 @@ Scenario makeFixedScenario(
       children.push_back(
           BaseVector::createNullConstant(BIGINT(), kRowsPerBatch, leafPool()));
     }
-    scenario.batches.push_back(
-        makeBatch(std::move(names), std::move(children)));
-  }
-  return scenario;
+    return makeBatch(std::move(names), std::move(children));
+  });
 }
 
-Scenario makeStringScenario(int32_t numPartitions) {
+/// A wide table: kWideColumns bigints, the first two with 1% sparse nulls.
+/// Null bitmaps sized per partition for every column would fill the null
+/// memory limit long before the partition byte bound.
+std::vector<RowVectorPtr> makeWideSparseNullBatches(int32_t numPartitions) {
+  constexpr int32_t kWideColumns = 100;
+  std::mt19937 rng(29);
+  return fillToInputSize([&](int32_t b) {
+    std::vector<std::string> names;
+    std::vector<VectorPtr> children{makePids(numPartitions, rng)};
+    std::vector<int64_t> values(kRowsPerBatch);
+    for (int32_t col = 0; col < kWideColumns; ++col) {
+      for (int i = 0; i < kRowsPerBatch; ++i) {
+        values[i] = static_cast<int64_t>(b) * kRowsPerBatch + i + col;
+      }
+      names.push_back("c" + std::to_string(col));
+      children.push_back(
+          makeFlatNullable<int64_t>(values, col < 2 ? 1 : 0, rng, false));
+    }
+    return makeBatch(std::move(names), std::move(children));
+  });
+}
+
+std::vector<RowVectorPtr> makeStringBatches(int32_t numPartitions) {
   std::mt19937 rng(23);
-  Scenario scenario{
-      "strings_P" + std::to_string(numPartitions), numPartitions, {}};
-  for (int b = 0; b < kBatches; ++b) {
+  return fillToInputSize([&](int32_t /*b*/) {
     std::vector<int64_t> keys(kRowsPerBatch);
     std::vector<std::string> values(kRowsPerBatch);
     std::vector<bool> nulls(kRowsPerBatch);
@@ -248,22 +302,19 @@ Scenario makeStringScenario(int32_t numPartitions) {
       nulls[i] = rng() % 10 == 0;
       values[i].assign(8 + rng() % 92, static_cast<char>('a' + rng() % 26));
     }
-    scenario.batches.push_back(makeBatch(
+    return makeBatch(
         {"key", "value"},
         {makePids(numPartitions, rng),
          makeFlat(keys),
-         makeStrings(values, nulls)}));
-  }
-  return scenario;
+         makeStrings(values, nulls)});
+  });
 }
 
 /// Low-cardinality strings: 12 distinct 4-char values (60 serialized
 /// bytes, inside the single-dictionary probe criterion). `clustered` feeds
 /// the values in runs of 64, the shape the MRU check is built for.
-Scenario makeDictStringScenario(
+std::vector<RowVectorPtr> makeDictStringBatches(
     int32_t numPartitions,
-    int32_t numBatches,
-    const char* tag,
     bool clustered) {
   std::mt19937 rng(31);
   static const std::vector<std::string> vocab = {
@@ -279,11 +330,7 @@ Scenario makeDictStringScenario(
       "jjjj",
       "kkkk",
       "llll"};
-  Scenario scenario{
-      std::string("strdict") + tag + "_P" + std::to_string(numPartitions),
-      numPartitions,
-      {}};
-  for (int b = 0; b < numBatches; ++b) {
+  return fillToInputSize([&](int32_t /*b*/) {
     std::vector<int64_t> keys(kRowsPerBatch);
     std::vector<std::string> values(kRowsPerBatch);
     std::vector<bool> nulls(kRowsPerBatch);
@@ -293,20 +340,19 @@ Scenario makeDictStringScenario(
       values[i] = clustered ? vocab[(i / 64) % vocab.size()]
                             : vocab[rng() % vocab.size()];
     }
-    scenario.batches.push_back(makeBatch(
+    return makeBatch(
         {"key", "value"},
         {makePids(numPartitions, rng),
          makeFlat(keys),
-         makeStrings(values, nulls)}));
-  }
-  return scenario;
+         makeStrings(values, nulls)});
+  });
 }
 
 /// Production shape: tens of thousands of partitions, dictionary-wrapped
 /// inputs (the scan-side norm, forcing the indexed row loop), a
 /// mixed-length dictionary vocabulary and nulls. With so many partitions
 /// every destination line and tail cell goes cold between touches.
-Scenario makeProdScenario(int32_t numPartitions, int32_t numBatches) {
+std::vector<RowVectorPtr> makeProdBatches(int32_t numPartitions) {
   std::mt19937 rng(41);
   const std::vector<std::string> vocab = {
       "us",
@@ -321,9 +367,7 @@ Scenario makeProdScenario(int32_t numPartitions, int32_t numBatches) {
       "zloty",
       "baht",
       "lira"};
-  Scenario scenario{
-      "prod_P" + std::to_string(numPartitions), numPartitions, {}};
-  for (int b = 0; b < numBatches; ++b) {
+  return fillToInputSize([&](int32_t /*b*/) {
     std::vector<int64_t> keys(kRowsPerBatch);
     std::vector<std::string> values(kRowsPerBatch);
     std::vector<bool> nulls(kRowsPerBatch);
@@ -343,53 +387,110 @@ Scenario makeProdScenario(int32_t numPartitions, int32_t numBatches) {
       return BaseVector::wrapInDictionary(
           nullptr, indices, kRowsPerBatch, std::move(base));
     };
-    scenario.batches.push_back(makeBatch(
+    return makeBatch(
         {"key", "cur"},
         {makePids(numPartitions, rng),
          wrap(makeFlat(keys)),
-         wrap(makeStrings(values, nulls))}));
-  }
-  return scenario;
+         wrap(makeStrings(values, nulls))});
+  });
 }
 
-const std::vector<Scenario>& scenarios() {
-  static std::vector<Scenario> all = [] {
-    std::vector<Scenario> s;
-    s.push_back(makeFixedScenario(64));
-    s.push_back(makeFixedScenario(1024));
-    s.push_back(makeFixedScenario(4096));
-    s.push_back(makeStringScenario(1024));
-    // Large-volume variants: ~100MB of raw column data per writer lifecycle,
-    // so the destinations blow past the LLC and the split loop's memory
-    // behavior, not per-lifecycle provisioning, dominates.
-    s.push_back(makeFixedScenario(1024, 1024, "big"));
-    s.push_back(makeFixedScenario(4096, 1024, "big"));
-    // Null-cost isolation: identical shape to fixed4big_P1024 with nulls on
-    // every column.
-    s.push_back(makeFixedScenario(1024, 1024, "nulls10big", 10));
-    s.push_back(makeFixedScenario(1024, 1024, "nulls40big", 40));
-    // fixed4big plus one all-null constant column: its cost should be near
-    // zero (whole-batch counted nulls, no bitmap, no values).
-    s.push_back(makeFixedScenario(1024, 1024, "deadcolbig", 0, true));
-    // Stale nulls buffers on every column (all-set, zero actual nulls): the
-    // batch classification must keep the no-null row loop.
-    s.push_back(makeFixedScenario(1024, 1024, "stalenullsbig", 0, false, true));
-    // Dictionary-friendly strings, random and clustered order.
-    s.push_back(makeDictStringScenario(1024, 1024, "big", false));
-    s.push_back(makeDictStringScenario(1024, 1024, "clusbig", true));
-    // Production shape: huge P, indexed inputs, mixed-length vocabulary.
-    s.push_back(makeProdScenario(30000, 256));
-    return s;
-  }();
-  return all;
+struct ScenarioSpec {
+  const char* name;
+  int32_t numPartitions;
+  std::function<std::vector<RowVectorPtr>(int32_t numPartitions)> make;
+};
+
+const std::vector<ScenarioSpec>& scenarioSpecs() {
+  static const std::vector<ScenarioSpec> specs = {
+      // Spark's default partition count, then wider fan-outs.
+      {"fixed4_P200", 200, [](int32_t p) { return makeFixedBatches(p); }},
+      {"fixed4_P1024", 1024, [](int32_t p) { return makeFixedBatches(p); }},
+      {"fixed4_P4096", 4096, [](int32_t p) { return makeFixedBatches(p); }},
+      // Null-cost isolation: fixed4_P1024 with nulls on every column.
+      {"fixed4nulls10_P1024",
+       1024,
+       [](int32_t p) { return makeFixedBatches(p, 10); }},
+      {"fixed4nulls40_P1024",
+       1024,
+       [](int32_t p) { return makeFixedBatches(p, 40); }},
+      // fixed4_P1024 plus one all-null constant column: its cost should be
+      // near zero (whole-batch counted nulls, no bitmap, no values).
+      {"fixed4deadcol_P1024",
+       1024,
+       [](int32_t p) { return makeFixedBatches(p, 0, true); }},
+      // Stale nulls buffers on every column (all-set, zero actual nulls):
+      // the batch classification must keep the no-null row loop.
+      {"fixed4stalenulls_P1024",
+       1024,
+       [](int32_t p) { return makeFixedBatches(p, 0, false, true); }},
+      {"wide100sparse_P200", 200, makeWideSparseNullBatches},
+      {"strings_P1024", 1024, makeStringBatches},
+      // Dictionary-friendly strings, random and clustered order.
+      {"strdict_P1024",
+       1024,
+       [](int32_t p) { return makeDictStringBatches(p, false); }},
+      {"strdictclus_P1024",
+       1024,
+       [](int32_t p) { return makeDictStringBatches(p, true); }},
+      // Production shape: huge P, indexed inputs, mixed-length vocabulary.
+      {"prod_P30000", 30000, makeProdBatches},
+  };
+  return specs;
+}
+
+/// main() resets it before returning: static destruction would otherwise
+/// free its vectors after the pool they came from.
+std::unique_ptr<Scenario>& residentScenario() {
+  static std::unique_ptr<Scenario> current;
+  return current;
+}
+
+/// The named scenario, built on first use. Only one is resident: the
+/// benchmarks of a scenario run back to back, and at --input_mb several
+/// would not fit in memory together.
+const Scenario& getScenario(const std::string& name) {
+  auto& current = residentScenario();
+  if (current == nullptr || current->name != name) {
+    current.reset();
+    const auto& specs = scenarioSpecs();
+    const auto it =
+        std::find_if(specs.begin(), specs.end(), [&](const auto& spec) {
+          return name == spec.name;
+        });
+    BOLT_CHECK(it != specs.end(), "unknown scenario {}", name);
+    current = std::make_unique<Scenario>(
+        Scenario{it->name, it->numPartitions, it->make(it->numPartitions)});
+  }
+  return *current;
+}
+
+/// Shallow copies of a scenario's batches for one lifecycle. The legacy
+/// writers flatten their input's children in place (ensureFlatten); without
+/// copies every later lifecycle would split pre-flattened input.
+std::vector<RowVectorPtr> lifecycleBatches(const Scenario& scenario) {
+  std::vector<RowVectorPtr> batches;
+  batches.reserve(scenario.batches.size());
+  for (const auto& batch : scenario.batches) {
+    batches.push_back(std::make_shared<RowVector>(
+        leafPool(),
+        batch->type(),
+        BufferPtr(nullptr),
+        batch->size(),
+        batch->children()));
+  }
+  return batches;
 }
 
 struct Written {
+  int64_t rows{0};
   int64_t bytes{0};
-  int64_t rawBytes{0};
+  int64_t splitNs{0};
+  int64_t stopNs{0};
   int64_t compressNs{0};
   int64_t writeNs{0};
-  int64_t rows{0};
+  int64_t evictedBytes{0};
+  int64_t windows{0};
 };
 
 std::map<std::string, Written>& results() {
@@ -397,15 +498,24 @@ std::map<std::string, Written>& results() {
   return map;
 }
 
-/// One writer lifecycle over a scenario; returns rows split.
+/// One writer lifecycle over a scenario; returns rows written. A nonzero
+/// `cellCapBytes` sets the Cell chunk-memory spill threshold.
 size_t runWriter(
     int32_t writerType,
-    const Scenario& scenario,
-    bool disableDict = false) {
+    const char* scenarioName,
+    bool disableDict = false,
+    int64_t cellCapBytes = 0) {
+  const Scenario* scenario = nullptr;
+  std::vector<RowVectorPtr> batches;
   std::shared_ptr<ShuffleWriter> writer;
   std::string dataFile;
   std::unique_ptr<BoltArrowMemoryPool> arrowPool;
   BENCHMARK_SUSPEND {
+    scenario = &getScenario(scenarioName);
+    batches = lifecycleBatches(*scenario);
+    // Earlier lifecycles' dirty pages would otherwise be written back
+    // during this one's stop().
+    ::sync();
     char pathTemplate[] = "/tmp/bolt_cell_split_bench_XXXXXX";
     const int fd = ::mkstemp(pathTemplate);
     BOLT_CHECK_GE(fd, 0);
@@ -421,13 +531,14 @@ size_t runWriter(
     ShuffleWriterOptions options;
     options.partitioning = Partitioning::kHash;
     options.forceShuffleWriterType = writerType;
-    options.partitionWriterOptions.numPartitions = scenario.numPartitions;
+    options.partitionWriterOptions.numPartitions = scenario->numPartitions;
     options.partitionWriterOptions.dataFile = dataFile;
     options.partitionWriterOptions.configuredDirs = {spillDir};
     options.partitionWriterOptions.numSubDirs = 1;
     options.cellOptions.enableStringDictionary = !disableDict;
+    options.cellOptions.cellMemoryCapBytes = cellCapBytes;
     arrowPool = std::make_unique<BoltArrowMemoryPool>(leafPool());
-    const auto& first = scenario.batches[0];
+    const auto& first = scenario->batches[0];
     writer = BoltShuffleWriter::createShuffleWriter(
         options,
         first->type()->size() - 1,
@@ -438,98 +549,105 @@ size_t runWriter(
         arrowPool.get());
   }
   size_t rows = 0;
-  for (const auto& batch : scenario.batches) {
+  const uint64_t splitStart = clockNs();
+  for (const auto& batch : batches) {
     const auto status = writer->split(batch, kMemLimit);
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     rows += batch->size();
   }
+  const uint64_t stopStart = clockNs();
+  const auto status = writer->stop();
+  const uint64_t stopEnd = clockNs();
+  BOLT_CHECK(status.ok(), "{}", status.ToString());
   BENCHMARK_SUSPEND {
-    const auto status = writer->stop();
-    BOLT_CHECK(status.ok(), "{}", status.ToString());
-    const auto& metrics = writer->metrics();
-    auto& slot = results()
-        [scenario.name + "/" +
-         (writerType == 4       ? (disableDict ? "Cell-nodict" : "Cell")
-              : writerType == 2 ? "V2"
-                                : "V1")];
-    slot.bytes = metrics.totalBytesWritten;
-    int64_t raw = 0;
-    for (const auto length : metrics.rawPartitionLengths) {
-      raw += length;
+    std::string label = writerType == 4 ? "Cell"
+        : writerType == 2               ? "V2"
+                                        : "V1";
+    if (disableDict) {
+      label += "-nodict";
     }
-    slot.rawBytes = raw;
+    if (cellCapBytes > 0) {
+      label += "-cap" + std::to_string(cellCapBytes >> 20) + "M";
+    }
+    const auto& metrics = writer->metrics();
+    auto& slot = results()[scenario->name + "/" + label];
+    slot.rows = static_cast<int64_t>(rows);
+    slot.bytes = metrics.totalBytesWritten;
+    slot.splitNs = stopStart - splitStart;
+    slot.stopNs = stopEnd - stopStart;
     slot.compressNs = metrics.totalCompressTime;
     slot.writeNs = metrics.totalWriteTime;
-    slot.rows = static_cast<int64_t>(rows);
+    slot.evictedBytes = metrics.totalBytesEvicted;
+    slot.windows = metrics.spillCount;
     writer.reset();
     arrowPool.reset();
+    batches.clear();
     ::unlink(dataFile.c_str());
     ::unlink((dataFile + ".cellspill").c_str());
   }
   return rows;
 }
 
-#define CELL_SPLIT_BENCH(scenarioIndex, suffix)      \
-  BENCHMARK_MULTI(split_##suffix##_Cell) {           \
-    return runWriter(4, scenarios()[scenarioIndex]); \
-  }                                                  \
-  BENCHMARK_MULTI(split_##suffix##_V1) {             \
-    return runWriter(1, scenarios()[scenarioIndex]); \
-  }                                                  \
-  BENCHMARK_MULTI(split_##suffix##_V2) {             \
-    return runWriter(2, scenarios()[scenarioIndex]); \
-  }                                                  \
-  BENCHMARK_DRAW_LINE();
+#define WRITE_BENCH(scenario)                \
+  BENCHMARK_MULTI(write_##scenario##_Cell) { \
+    return runWriter(4, #scenario);          \
+  }                                          \
+  BENCHMARK_MULTI(write_##scenario##_V1) {   \
+    return runWriter(1, #scenario);          \
+  }
 
-CELL_SPLIT_BENCH(0, fixed4_P64)
-CELL_SPLIT_BENCH(1, fixed4_P1024)
-CELL_SPLIT_BENCH(2, fixed4_P4096)
-CELL_SPLIT_BENCH(3, strings_P1024)
-CELL_SPLIT_BENCH(4, fixed4big_P1024)
-CELL_SPLIT_BENCH(5, fixed4big_P4096)
-CELL_SPLIT_BENCH(6, fixed4nulls10big_P1024)
-CELL_SPLIT_BENCH(7, fixed4nulls40big_P1024)
-CELL_SPLIT_BENCH(8, fixed4deadcolbig_P1024)
-CELL_SPLIT_BENCH(9, fixed4stalenullsbig_P1024)
+#define WRITE_BENCH_V2(scenario)           \
+  BENCHMARK_MULTI(write_##scenario##_V2) { \
+    return runWriter(2, #scenario);        \
+  }
 
-BENCHMARK_MULTI(split_strdictbig_P1024_Cell) {
-  return runWriter(4, scenarios()[10]);
-}
-BENCHMARK_MULTI(split_strdictbig_P1024_CellNoDict) {
-  return runWriter(4, scenarios()[10], /*disableDict=*/true);
-}
-BENCHMARK_MULTI(split_strdictbig_P1024_V1) {
-  return runWriter(1, scenarios()[10]);
-}
+#define WRITE_BENCH_NODICT(scenario)                      \
+  BENCHMARK_MULTI(write_##scenario##_CellNoDict) {        \
+    return runWriter(4, #scenario, /*disableDict=*/true); \
+  }
+
+/// Cell under a chunk-memory threshold below its input, so the lifecycle
+/// spills and merges as a memory-bound task does.
+#define WRITE_BENCH_CAP(scenario)                                         \
+  BENCHMARK_MULTI(write_##scenario##_CellCap) {                           \
+    return runWriter(4, #scenario, /*disableDict=*/false, kCellCapBytes); \
+  }
+
+WRITE_BENCH(fixed4_P200)
+WRITE_BENCH_V2(fixed4_P200)
 BENCHMARK_DRAW_LINE();
-BENCHMARK_MULTI(split_strdictclusbig_P1024_Cell) {
-  return runWriter(4, scenarios()[11]);
-}
-BENCHMARK_MULTI(split_strdictclusbig_P1024_CellNoDict) {
-  return runWriter(4, scenarios()[11], /*disableDict=*/true);
-}
-BENCHMARK_MULTI(split_strdictclusbig_P1024_V1) {
-  return runWriter(1, scenarios()[11]);
-}
+WRITE_BENCH(fixed4_P1024)
+WRITE_BENCH_V2(fixed4_P1024)
+WRITE_BENCH_CAP(fixed4_P1024)
 BENCHMARK_DRAW_LINE();
-BENCHMARK_MULTI(split_prod_P30000_Cell) {
-  return runWriter(4, scenarios()[12]);
-}
-BENCHMARK_MULTI(split_prod_P30000_CellNoDict) {
-  return runWriter(4, scenarios()[12], /*disableDict=*/true);
-}
-BENCHMARK_MULTI(split_prod_P30000_V1) {
-  return runWriter(1, scenarios()[12]);
-}
+WRITE_BENCH(fixed4_P4096)
+WRITE_BENCH_V2(fixed4_P4096)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(fixed4nulls10_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(fixed4nulls40_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(fixed4deadcol_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(fixed4stalenulls_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(wide100sparse_P200)
+
+WRITE_BENCH(strings_P1024)
+WRITE_BENCH_V2(strings_P1024)
+WRITE_BENCH_CAP(strings_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(strdict_P1024)
+WRITE_BENCH_NODICT(strdict_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(strdictclus_P1024)
+WRITE_BENCH_NODICT(strdictclus_P1024)
+BENCHMARK_DRAW_LINE();
+WRITE_BENCH(prod_P30000)
+WRITE_BENCH_NODICT(prod_P30000)
 BENCHMARK_DRAW_LINE();
 
 // ---- Phase breakdown (--phases) -------------------------------------------
-
-uint64_t phaseNowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
 
 RowTypePtr dataRowType(const Scenario& scenario) {
   const auto& row = scenario.batches[0]->type()->asRow();
@@ -598,9 +716,9 @@ class TimingCodec final : public Codec {
 
   int64_t decompress(const uint8_t* in, int64_t n, uint8_t* out, int64_t cap)
       override {
-    const uint64_t start = phaseNowNs();
+    const uint64_t start = clockNs();
     const auto result = inner_->decompress(in, n, out, cap);
-    decompressNs += phaseNowNs() - start;
+    decompressNs += clockNs() - start;
     return result;
   }
 
@@ -644,6 +762,7 @@ WriterPhases runWriterPhases(
     bool disableDict,
     const Scenario& scenario) {
   WriterPhases result;
+  ::sync();
   char pathTemplate[] = "/tmp/bolt_cell_phase_bench_XXXXXX";
   const int fd = ::mkstemp(pathTemplate);
   BOLT_CHECK_GE(fd, 0);
@@ -675,17 +794,18 @@ WriterPhases runWriterPhases(
       leafPool(),
       arrowPool.get());
 
+  const auto batches = lifecycleBatches(scenario);
   uint64_t splitNs = 0;
-  for (const auto& batch : scenario.batches) {
-    const uint64_t start = phaseNowNs();
+  for (const auto& batch : batches) {
+    const uint64_t start = clockNs();
     const auto status = writer->split(batch, kMemLimit);
-    splitNs += phaseNowNs() - start;
+    splitNs += clockNs() - start;
     BOLT_CHECK(status.ok(), "{}", status.ToString());
     result.rows += batch->size();
   }
-  const uint64_t stopStart = phaseNowNs();
+  const uint64_t stopStart = clockNs();
   const auto status = writer->stop();
-  const uint64_t stopNs = phaseNowNs() - stopStart;
+  const uint64_t stopNs = clockNs() - stopStart;
   BOLT_CHECK(status.ok(), "{}", status.ToString());
 
   const auto& metrics = writer->metrics();
@@ -727,11 +847,11 @@ ReaderPhases runCellReaderPhases(
       leafPool(),
       /*batchSize=*/4096,
       /*batchByteSize=*/1 << 20);
-  const uint64_t start = phaseNowNs();
+  const uint64_t start = clockNs();
   while (auto batch = reader.next()) {
     result.rows += batch->size();
   }
-  result.wallMs = (phaseNowNs() - start) / 1e6;
+  result.wallMs = (clockNs() - start) / 1e6;
   result.decompressMs = timing.decompressNs / 1e6;
   result.decodeMs = (reader.decodeTimeNs() - timing.decompressNs) / 1e6;
   result.glueMs = result.wallMs - reader.decodeTimeNs() / 1e6;
@@ -760,7 +880,7 @@ ReaderPhases runLegacyReaderPhases(
   factory.setNumPartitions(scenario.numPartitions);
   factory.setpartitioningShortName("hash");
 
-  const uint64_t start = phaseNowNs();
+  const uint64_t start = clockNs();
   int64_t offset = 0;
   for (const auto length : written.partitionLengths) {
     if (length == 0) {
@@ -774,7 +894,7 @@ ReaderPhases runLegacyReaderPhases(
       result.rows += batch->size();
     }
   }
-  result.wallMs = (phaseNowNs() - start) / 1e6;
+  result.wallMs = (clockNs() - start) / 1e6;
   result.decompressMs = factory.getDecompressTime() / 1e6;
   result.decodeMs = factory.getDeserializeTime() / 1e6;
   result.mergeMs = factory.getMergeTime() / 1e6;
@@ -784,7 +904,7 @@ ReaderPhases runLegacyReaderPhases(
 }
 
 void runPhaseTable() {
-  const auto& scenario = scenarios()[10]; // strdictbig_P1024
+  const auto& scenario = getScenario(FLAGS_phases_scenario);
   struct Variant {
     const char* name;
     int32_t writerType;
@@ -883,29 +1003,36 @@ int main(int argc, char** argv) {
   memory::MemoryManager::initialize(options);
   if (FLAGS_phases) {
     runPhaseTable();
+    residentScenario().reset();
     return 0;
   }
   folly::runBenchmarks();
+  residentScenario().reset();
 
+  // The last lifecycle of each benchmark.
   printf(
-      "\n%-32s %12s %12s %11s %11s %11s\n",
+      "\n%-36s %10s %12s %9s %9s %10s %9s %7s %7s\n",
       "scenario/writer",
+      "rows",
       "bytesWritten",
-      "rawBytes",
+      "splitMs",
+      "stopMs",
       "compressMs",
-      "cmpNsPerRow",
-      "writeMs");
+      "writeMs",
+      "evictMB",
+      "windows");
   for (const auto& [name, written] : results()) {
     printf(
-        "%-32s %12ld %12ld %11.2f %11.2f %11.2f\n",
+        "%-36s %10ld %12ld %9.1f %9.1f %10.1f %9.1f %7.0f %7ld\n",
         name.c_str(),
+        static_cast<long>(written.rows),
         static_cast<long>(written.bytes),
-        static_cast<long>(written.rawBytes),
+        written.splitNs / 1e6,
+        written.stopNs / 1e6,
         written.compressNs / 1e6,
-        written.rows > 0
-            ? static_cast<double>(written.compressNs) / written.rows
-            : 0.0,
-        written.writeNs / 1e6);
+        written.writeNs / 1e6,
+        written.evictedBytes / 1048576.0,
+        static_cast<long>(written.windows));
   }
   return 0;
 }
