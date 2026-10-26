@@ -66,8 +66,8 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
         layout.isString_.push_back(false);
         break;
       case TypeKind::TIMESTAMP:
-        // The full 16-byte value: Seconds stream first, Nanos stream second
-        // (spec section 1.4), both Bigint Encoding Loop streams.
+        // The full 16-byte value: Seconds stream first, Nanos stream second,
+        // both encoded as Bigint.
         layout.streams_.push_back(
             {static_cast<uint16_t>(col), StreamKind::kEncoded, 8, true});
         layout.streams_.push_back(
@@ -91,7 +91,7 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
         break;
       case TypeKind::VARCHAR:
       case TypeKind::VARBINARY:
-        // Length/Index stream first, Data stream second (spec section 1.4).
+        // Length/Index stream first, Data stream second.
         layout.streams_.push_back(
             {static_cast<uint16_t>(col), StreamKind::kEncoded, 8, true});
         layout.streams_.push_back(

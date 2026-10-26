@@ -108,8 +108,7 @@ void CellSplitter::closeDictSegment(
     bool last) {
   // The whole framing lands in one append: DataCells::append copies only
   // after every needed cell is held, so a spill fired inside the grow sees
-  // none of these bytes and the dictionary never crosses a Run boundary
-  // (spec section 5.4).
+  // none of these bytes and the dictionary never crosses a Run boundary.
   const uint32_t serialized = dataCur[pid];
   uint8_t buf[kDictSerializedBudget + 1 + 1 + 4];
   ::memcpy(buf, cacheLine(dataStream, pid), serialized);
@@ -137,7 +136,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     uint8_t* dataCur) {
   const uint32_t size = static_cast<uint32_t>(key);
   // An entry costs 1 + size serialized bytes and one dictionary is capped
-  // at 63 (reader L1 rule): a value that can never fit alone can never be
+  // at 63, which readers enforce: a value that can never fit alone can never be
   // an entry, and the format only allows a fallback tail after that.
   if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
     const uint32_t count = st.entryCount;
@@ -391,7 +390,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
       if (dataCur[pid] > 0) {
         flushRaw(dataStream, pid, dataCur);
       }
-      // Raw stream bytes may split anywhere (spec section 5.4), so a huge
+      // Raw stream bytes may split anywhere across Runs, so a huge
       // value is appended in bounded pieces: each append then pre-holds at
       // most a couple of cells and a spill can reclaim between pieces,
       // keeping the memory cap meaningful.
@@ -800,7 +799,7 @@ void CellSplitter::flushAll() {
   // index bytes in its length cache (flushed raw, so the generic loop below
   // sees an empty cursor and cannot re-encode them) and owes the closing
   // 0xFF framing to its data stream. A partition with no indexed row wrote
-  // nothing and gets no framing (an empty-stream column, spec section 9).
+  // nothing and gets no framing (an empty-stream column).
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (dictEnabled_[col] == 0) {
       continue;

@@ -14,13 +14,11 @@
  * limitations under the License.
  */
 
-/// L2 of the Cell shuffle writer and reader: the Encoding Loop kernels of
-/// ColumnarPayloadFormat.md section 7 and the null-region bit helpers of
-/// section 4.
+/// The Encoding Block kernels of the Cell shuffle writer and reader, and the
+/// null body's tag helpers; CellFormat.h defines both formats.
 ///
-/// Implemented from the spec alone: no dependency on the engine's existing
-/// varint/bitpack code, and none on the test-only reference implementation.
-/// Pure functions over caller-provided memory; nothing here allocates.
+/// Self-contained: no dependency on the engine's varint/bitpack code. Pure
+/// functions over caller-provided memory; nothing here allocates.
 /// Header-only, so the block kernels inline into the stream loops and
 /// specialize on the full-block value count.
 
@@ -115,8 +113,8 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   }
   const bool allEqual = minValue == maxValue;
 
-  // Candidate body sizes (spec section 7.3); selection mirrors the reference
-  // encoder: strict improvement in PLAIN, CONST, BIT_PACK, FOR order.
+  // Candidate body sizes; a later kind wins only by being strictly smaller,
+  // in PLAIN, CONST, BIT_PACK, FOR order.
   const uint32_t constBytes =
       allEqual ? narrowBytesFor(static_cast<int64_t>(values[0]), kWidth) : 0;
   const uint32_t packBitsNeeded =
@@ -446,15 +444,16 @@ inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
 
 /// Encodes one Encoding Block of `count` source values (count * sizeof(T)
 /// must be <= 64, a full block or the stream's tail). Chooses the smallest
-/// legal body per spec section 12.4; ties resolve PLAIN, CONST_NARROW,
-/// BIT_PACK, FOR_BIT_PACK in first-wins order, matching the reference
-/// encoder. `out` must hold at least kMaxBlockBytes. Returns bytes written.
+/// legal body; ties resolve PLAIN, CONST_NARROW, BIT_PACK, FOR_BIT_PACK in
+/// first-wins order, so the bytes for given values are deterministic.
+/// `out` must hold at least kMaxBlockBytes. Returns bytes written.
 ///
 /// Header-inline so the flush call sites can fold the encode in; the
 /// compiler keeps or drops the inlining per site.
 ///
-/// T is one of int16_t, int32_t, int64_t: exactly the Encoding Loop source
-/// types (SmallInt / Integer, Date / Bigint, String lengths).
+/// T is one of int16_t, int32_t, int64_t: exactly the encoded stream source
+/// types (SmallInt / Integer, Date / Bigint, Timestamp halves, String
+/// lengths).
 template <typename T>
 inline uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
   return detail::encodeBlockImpl(values, count, out);
@@ -568,7 +567,7 @@ class StreamCursor {
   }
 
   /// Writes the next `n` values to dst. False when the stream holds fewer
-  /// values or a block is malformed (rules 13-17).
+  /// values or a block is malformed.
   bool next(uint64_t n, T* dst) {
     const uint32_t staged = std::min<uint64_t>(n, stagedCount_ - stagedPos_);
     ::memcpy(dst, staged_ + stagedPos_, staged * sizeof(T));
@@ -603,7 +602,7 @@ class StreamCursor {
     return true;
   }
 
-  /// Rule 20, once every value was read: the blocks consumed the stream
+  /// Once every value was read: whether the blocks consumed the stream
   /// exactly.
   bool finished() const {
     return blockValuesLeft_ == 0 && stagedPos_ == stagedCount_ &&
@@ -622,7 +621,7 @@ class StreamCursor {
   T staged_[kValuesPerBlock];
 };
 
-/// --- Null region helpers (spec section 4.2) ---
+/// --- Null body tag helpers ---
 
 /// ceil(numColumns * 2 / 8) bytes of tags.
 inline uint32_t nullTagBytes(uint32_t numColumns) {
