@@ -1419,6 +1419,7 @@ void writeCounters(
   setCounter(counters, "bytes_raw", m.dataSize, metric);
   setCounter(counters, "bytes_evicted", m.totalBytesEvicted, metric);
   setCounter(counters, "windows_or_spills", m.spillCount);
+  setCounter(counters, "spill_files", m.totalSpillFiles);
   setCounter(counters, "dict_matched_rows", m.dictionaryMatchedRows);
   setCounter(counters, "dict_fallback_rows", m.dictionaryFallbackRows);
   setCounter(

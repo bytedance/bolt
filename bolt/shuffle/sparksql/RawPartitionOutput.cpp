@@ -193,10 +193,12 @@ void PartialSpiller::mergeToDataFile(
   }
   out.close(metrics);
   metrics.totalBytesEvicted = 0;
+  metrics.totalSpillFiles = 0;
   metrics.totalEvictTime = 0;
   for (auto* spiller : spillers) {
     spiller->spill_.remove();
     metrics.totalBytesEvicted += spiller->spill_.bytesWritten();
+    metrics.totalSpillFiles += spiller->spillRuns_;
     metrics.totalEvictTime +=
         static_cast<int64_t>(spiller->spill_.writeTimeNs());
   }
@@ -216,6 +218,7 @@ void LocalRawOutput::spillRaw(const RawBlockSource& next) {
     }
     ends[pid + 1] = spill_.end();
   }
+  countRun(ends[0]);
   spill_.flush();
 }
 
