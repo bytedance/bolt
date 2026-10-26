@@ -350,59 +350,110 @@ NullCells::NullCells(
     : pool_(pool),
       numPartitions_(numColumns == 0 ? 0 : numPartitions),
       numColumns_(numColumns),
-      base_(numPartitions_, nullptr),
-      capBytes_(numPartitions_, 0),
-      hasNull_(static_cast<size_t>(numPartitions) * numColumns, 0),
-      nullPrefix_(static_cast<size_t>(numPartitions) * numColumns, 0) {}
+      tables_(numPartitions_, nullptr) {}
 
 NullCells::~NullCells() {
   reset();
 }
 
-void NullCells::grow(uint32_t pid, uint32_t rowInWindow) {
-  constexpr uint32_t kMinCapBytes = 16; // 128 rows, the design's NullCell
+uint8_t* NullCells::carve(size_t bytes) {
+  // Chunks double from 64KB to 4MB, so a writer with a few nulls stays
+  // small; a bitmap above the cap gets a chunk of its own size.
+  constexpr size_t kMinChunkBytes = 64 << 10;
+  constexpr size_t kMaxChunkBytes = 4 << 20;
+  if (chunkLeft_ < bytes) {
+    const size_t next = chunks_.empty()
+        ? kMinChunkBytes
+        : std::min(kMaxChunkBytes, chunks_.back().size * 2);
+    const size_t size = std::max(next, bytes);
+    auto* data = reinterpret_cast<uint8_t*>(pool_->allocate(size));
+    chunks_.push_back({data, size});
+    chunkFree_ = data;
+    chunkLeft_ = size;
+  }
+  uint8_t* out = chunkFree_;
+  chunkFree_ += bytes;
+  chunkLeft_ -= bytes;
+  return out;
+}
+
+NullCells::Slot* NullCells::openTable(uint32_t pid) {
+  const size_t bytes = sizeof(Slot) * numColumns_;
+  uint8_t* table = freeTables_;
+  if (table != nullptr) {
+    ::memcpy(&freeTables_, table, sizeof(uint8_t*));
+  } else {
+    table = carve(bytes);
+    tableBytes_ += static_cast<int64_t>(bytes);
+  }
+  ::memset(table, 0, bytes);
+  tables_[pid] = reinterpret_cast<Slot*>(table);
+  return tables_[pid];
+}
+
+uint8_t* NullCells::allocateBitmap(uint32_t log2) {
+  const size_t bytes = size_t{1} << log2;
+  bitmapBytes_ += static_cast<int64_t>(bytes);
+  if (log2 > kMaxArenaBitmapLog2) {
+    return reinterpret_cast<uint8_t*>(pool_->allocate(bytes));
+  }
+  uint8_t*& head = freeBitmaps_[log2 - kMinBitmapLog2];
+  if (head != nullptr) {
+    uint8_t* block = head;
+    ::memcpy(&head, block, sizeof(uint8_t*));
+    return block;
+  }
+  return carve(bytes);
+}
+
+void NullCells::freeBitmap(uint8_t* bits, uint32_t capBytes) {
+  bitmapBytes_ -= capBytes;
+  if (capBytes > kMaxArenaBitmapBytes) {
+    pool_->free(bits, capBytes);
+    return;
+  }
+  // Arena blocks stay held until the window resets.
+  uint8_t*& head = freeBitmaps_[31 - __builtin_clz(capBytes) - kMinBitmapLog2];
+  ::memcpy(bits, &head, sizeof(uint8_t*));
+  head = bits;
+}
+
+void NullCells::grow(Slot& slot, uint32_t rowInWindow) {
   const uint32_t needBytes = (rowInWindow >> 3) + 1;
-  const uint32_t newCap = std::max(
-      kMinCapBytes, static_cast<uint32_t>(bits::nextPowerOfTwo(needBytes)));
-  const uint32_t oldCap = capBytes_[pid];
-  char* grown = reinterpret_cast<char*>(
-      pool_->allocate(static_cast<size_t>(numColumns_) * newCap));
-  for (uint32_t col = 0; col < numColumns_; ++col) {
-    char* dst = grown + static_cast<size_t>(col) * newCap;
-    if (oldCap > 0) {
-      ::memcpy(dst, base_[pid] + static_cast<size_t>(col) * oldCap, oldCap);
-    }
-    ::memset(dst + oldCap, 0xFF, newCap - oldCap);
+  // ceil(log2(needBytes)), at least the 16-byte minimum (128 rows).
+  const uint32_t log2 = std::max<uint32_t>(
+      kMinBitmapLog2, needBytes <= 1 ? 0 : 32 - __builtin_clz(needBytes - 1));
+  const uint32_t newCap = 1u << log2;
+  uint8_t* grown = allocateBitmap(log2);
+  const uint32_t oldCap = slot.capBytes;
+  if (oldCap > 0) {
+    ::memcpy(grown, slot.bits, oldCap);
+    freeBitmap(slot.bits, oldCap);
   }
-  if (base_[pid] != nullptr) {
-    pool_->free(base_[pid], static_cast<size_t>(numColumns_) * oldCap);
-    allocatedBytes_ -= static_cast<int64_t>(numColumns_) * oldCap;
-  }
-  base_[pid] = grown;
-  capBytes_[pid] = newCap;
-  allocatedBytes_ += static_cast<int64_t>(numColumns_) * newCap;
+  ::memset(grown + oldCap, 0xFF, newCap - oldCap);
+  slot.bits = grown;
+  slot.capBytes = newCap;
 }
 
 NullCells::Summary
 NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
-  const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
-  if (rowCount == 0 || hasNull_[slot] == 0) {
+  const Slot* slot = findSlot(pid, col);
+  if (rowCount == 0 || slot == nullptr ||
+      (slot->prefix == 0 && slot->capBytes == 0)) {
     return {NullTag::kNoNull, rowCount};
   }
-  const uint32_t prefix = std::min(nullPrefix_[slot], rowCount);
+  const uint32_t prefix = std::min(slot->prefix, rowCount);
   if (prefix == rowCount) {
     return {NullTag::kAllNull, 0}; // pure counting, no storage was touched
   }
   uint32_t nonNull = rowCount - prefix;
-  const uint32_t cap = capBytes_[pid];
-  if (base_[pid] != nullptr) {
-    const auto* bits = reinterpret_cast<const uint8_t*>(
-        base_[pid] + static_cast<size_t>(col) * cap);
+  if (slot->capBytes != 0) {
+    const uint8_t* bits = slot->bits;
     // Count set (non-null) bits in [prefix, coveredRows); rows past the
     // allocated capacity are implicitly non-null. Bits below the prefix are
     // untouched defaults, so counting from the prefix is exact.
     const uint32_t coveredRows =
-        std::min<uint64_t>(rowCount, uint64_t(cap) * 8);
+        std::min<uint64_t>(rowCount, uint64_t(slot->capBytes) * 8);
     if (prefix < coveredRows) {
       uint32_t setBits = 0;
       uint32_t byte = prefix >> 3;
@@ -449,17 +500,18 @@ void NullCells::emitBitmap(
     uint32_t rowCount,
     uint8_t* out) const {
   const uint32_t outBytes = (rowCount + 7) >> 3;
-  const uint32_t cap = capBytes_[pid];
-  const uint32_t covered = base_[pid] == nullptr ? 0 : std::min(outBytes, cap);
-  if (covered > 0) {
-    ::memcpy(out, base_[pid] + static_cast<size_t>(col) * cap, covered);
+  const Slot* slot = findSlot(pid, col);
+  uint32_t covered = 0;
+  if (slot != nullptr && slot->capBytes != 0) {
+    covered = std::min(outBytes, slot->capBytes);
+    ::memcpy(out, slot->bits, covered);
   }
   if (covered < outBytes) {
     ::memset(out + covered, 0xFF, outBytes - covered);
   }
   // The counted null prefix is not in the storage: overlay it as zeros.
-  const size_t slot = static_cast<size_t>(pid) * numColumns_ + col;
-  const uint32_t prefix = std::min(nullPrefix_[slot], rowCount);
+  const uint32_t prefix =
+      slot == nullptr ? 0 : std::min(slot->prefix, rowCount);
   ::memset(out, 0, prefix >> 3);
   if ((prefix & 7) != 0) {
     out[prefix >> 3] &= static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
@@ -470,38 +522,48 @@ void NullCells::emitBitmap(
   }
 }
 
-void NullCells::reset() {
-  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-    if (base_[pid] != nullptr) {
-      pool_->free(
-          base_[pid], static_cast<size_t>(numColumns_) * capBytes_[pid]);
-      base_[pid] = nullptr;
-      capBytes_[pid] = 0;
-    }
+void NullCells::freeChunks() {
+  for (const auto& chunk : chunks_) {
+    pool_->free(chunk.data, chunk.size);
   }
-  std::fill(hasNull_.begin(), hasNull_.end(), 0);
-  std::fill(nullPrefix_.begin(), nullPrefix_.end(), 0);
-  allocatedBytes_ = 0;
+  chunks_.clear();
+  chunkFree_ = nullptr;
+  chunkLeft_ = 0;
+}
+
+void NullCells::reset() {
+  for (auto& table : tables_) {
+    if (table == nullptr) {
+      continue;
+    }
+    for (uint32_t col = 0; col < numColumns_; ++col) {
+      if (table[col].capBytes > kMaxArenaBitmapBytes) {
+        pool_->free(table[col].bits, table[col].capBytes);
+      }
+    }
+    table = nullptr;
+  }
+  std::fill(std::begin(freeBitmaps_), std::end(freeBitmaps_), nullptr);
+  freeTables_ = nullptr;
+  freeChunks();
+  bitmapBytes_ = 0;
+  tableBytes_ = 0;
 }
 
 void NullCells::releasePartition(uint32_t pid) {
-  if (numColumns_ == 0) {
+  if (numColumns_ == 0 || tables_[pid] == nullptr) {
     return;
   }
-  if (base_[pid] != nullptr) {
-    pool_->free(base_[pid], static_cast<size_t>(numColumns_) * capBytes_[pid]);
-    allocatedBytes_ -= static_cast<int64_t>(numColumns_) * capBytes_[pid];
-    base_[pid] = nullptr;
-    capBytes_[pid] = 0;
+  Slot* table = tables_[pid];
+  for (uint32_t col = 0; col < numColumns_; ++col) {
+    if (table[col].capBytes != 0) {
+      freeBitmap(table[col].bits, table[col].capBytes);
+    }
   }
-  std::fill_n(
-      hasNull_.begin() + static_cast<size_t>(pid) * numColumns_,
-      numColumns_,
-      0);
-  std::fill_n(
-      nullPrefix_.begin() + static_cast<size_t>(pid) * numColumns_,
-      numColumns_,
-      0);
+  auto* block = reinterpret_cast<uint8_t*>(table);
+  ::memcpy(block, &freeTables_, sizeof(uint8_t*));
+  freeTables_ = block;
+  tables_[pid] = nullptr;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
