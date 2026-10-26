@@ -1447,7 +1447,11 @@ void HashBuild::setupSpillInput(HashJoinBridge::SpillInput spillInput) {
   // spilled file and use HashBuild::addInput(RowVectorPtr input) to add input
   // data, but spillInput(input) in addInput(RowVectorPtr input) will not
   // trigger spill again (OOM in end).
-  if (spiller_ != nullptr) {
+  // Peer spillers have already been moved to the last finishing builder.
+  // Their row counts are unavailable here, so only adapt repartitioning for
+  // a single builder until repartition bits are coordinated across builders.
+  if (spiller_ != nullptr && joinBridge_->numBuilders() == 1 &&
+      operatorCtx_->task()->numDrivers(operatorCtx_->driverCtx()) == 1) {
     maxPartitionRowCount = spiller_->maxPartitionRowCount();
   }
   table_.reset();

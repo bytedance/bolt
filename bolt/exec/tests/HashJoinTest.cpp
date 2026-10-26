@@ -6291,6 +6291,8 @@ TEST_F(HashJoinTest, antiJoinAbandomBuildNoDupHashEarly) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .config(core::QueryConfig::kAbandonBuildNoDupHashMinRows, "1")
       .config(core::QueryConfig::kAbandonBuildNoDupHashMinPct, "10")
+      // Leave enough hash bits for two levels of adaptive repartitioning.
+      .config(core::QueryConfig::kSpillStartPartitionBit, "29")
       .numDrivers(numDrivers_)
       .hybridJoin(hybridJoin_)
       .probeKeys({"t0"})
