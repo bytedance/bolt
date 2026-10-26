@@ -65,8 +65,92 @@ uint32_t popcountBits(const uint8_t* bits, uint32_t rowCount) {
   return count;
 }
 
-inline bool bitSet(const uint8_t* bits, uint32_t row) {
-  return (bits[row / 8] >> (row % 8)) & 1;
+/// The low `n` bits set, 0 < n <= 64.
+inline uint64_t lowBits(uint32_t n) {
+  return n == 64 ? ~0ULL : (1ULL << n) - 1;
+}
+
+/// The 64 bits of a `bytes`-byte bitmap from bit `offset`; bits past its
+/// end read 0, so a bitmap at the end of its buffer is never read beyond.
+inline uint64_t
+loadBitWord(const uint8_t* bits, uint64_t bytes, uint64_t offset) {
+  const uint64_t byte = offset / 8;
+  const uint32_t shift = offset % 8;
+  if (byte + 9 <= bytes) {
+    const uint64_t word = loadU64(bits + byte);
+    return shift == 0 ? word
+                      : (word >> shift) |
+            (static_cast<uint64_t>(bits[byte + 8]) << (64 - shift));
+  }
+  uint64_t word = 0;
+  for (uint32_t i = 0; i < 9 && byte + i < bytes; ++i) {
+    const uint64_t value = bits[byte + i];
+    const uint32_t at = 8 * i;
+    if (at < shift) {
+      word |= value >> (shift - at);
+    } else if (at - shift < 64) {
+      word |= value << (at - shift);
+    }
+  }
+  return word;
+}
+
+/// Sets the `n` bits of `target` from bit `offset` to the low bits of
+/// `word`, keeping every other bit.
+inline void
+storeBitWord(uint64_t* target, uint64_t offset, uint64_t word, uint32_t n) {
+  const uint64_t index = offset / 64;
+  const uint32_t shift = offset % 64;
+  const uint64_t mask = lowBits(n);
+  word &= mask;
+  target[index] = (target[index] & ~(mask << shift)) | (word << shift);
+  if (shift != 0 && shift + n > 64) {
+    const uint64_t high = lowBits(shift + n - 64);
+    target[index + 1] = (target[index + 1] & ~high) | (word >> (64 - shift));
+  }
+}
+
+/// Calls `visit(base, n, word)` for rows [begin, begin + numRows) of a
+/// bitmap, 64 at a time: `word` holds the bits of rows base..base + n - 1
+/// (relative to begin), the bits above n clear.
+template <typename Visit>
+inline void forEachBitWord(
+    const uint8_t* bits,
+    uint64_t bytes,
+    uint64_t begin,
+    uint32_t numRows,
+    const Visit& visit) {
+  for (uint32_t base = 0; base < numRows; base += 64) {
+    const uint32_t n = std::min<uint32_t>(64, numRows - base);
+    visit(base, n, loadBitWord(bits, bytes, begin + base) & lowBits(n));
+  }
+}
+
+/// For rows [0, numRows) under a bitmap from bit `begin`: `absent(base, n)`
+/// for each block of up to 64 rows holding a null, then `present(row)` for
+/// each non-null row of the block, in row order.
+template <typename Absent, typename Present>
+inline void scatterRows(
+    const uint8_t* bits,
+    uint64_t bytes,
+    uint64_t begin,
+    uint32_t numRows,
+    const Absent& absent,
+    const Present& present) {
+  forEachBitWord(
+      bits,
+      bytes,
+      begin,
+      numRows,
+      [&](uint32_t base, uint32_t n, uint64_t word) {
+        if (word != lowBits(n)) {
+          absent(base, n);
+        }
+        while (word != 0) {
+          present(base + static_cast<uint32_t>(__builtin_ctzll(word)));
+          word &= word - 1;
+        }
+      });
 }
 
 /// Bytes one row of a column takes in a decoded vector, nulls aside; for a
@@ -199,6 +283,7 @@ bool CellPayloadDecoder::parseNullRegion(
         break;
       case NullTag::kRawNull:
         bitmaps_[col] = cursor;
+        bitmapBytes_ = bitmapBytes;
         nonNullCount_[col] = popcountBits(cursor, rowCount);
         cursor += bitmapBytes;
         break;
@@ -776,19 +861,25 @@ uint32_t CellPayloadDecoder::appendNulls(uint32_t col, uint32_t numRows) {
       bits::fillBits(nulls(), batchRows_, batchRows_ + numRows, bits::kNull);
       return 0;
     case NullTag::kRawNull: {
-      const uint8_t* bitmap = bitmaps_[col];
+      // The payload bitmap and the vector's nulls share the convention, a
+      // set bit for a value: whole words copy across. A batch's nulls start
+      // all set, so only words holding a null need writing.
       uint64_t* rawNulls = nullptr;
       uint32_t dense = 0;
-      for (uint32_t i = 0; i < numRows; ++i) {
-        if (bitSet(bitmap, rowsRead_ + i)) {
-          ++dense;
-        } else {
-          if (rawNulls == nullptr) {
-            rawNulls = nulls();
-          }
-          bits::clearBit(rawNulls, batchRows_ + i);
-        }
-      }
+      forEachBitWord(
+          bitmaps_[col],
+          bitmapBytes_,
+          rowsRead_,
+          numRows,
+          [&](uint32_t base, uint32_t n, uint64_t word) {
+            dense += static_cast<uint32_t>(__builtin_popcountll(word));
+            if (word != lowBits(n)) {
+              if (rawNulls == nullptr) {
+                rawNulls = nulls();
+              }
+              storeBitWord(rawNulls, batchRows_ + base, word, n);
+            }
+          });
       return dense;
     }
     default:
@@ -815,11 +906,31 @@ bool CellPayloadDecoder::placeValues(
     }
   }
   const uint8_t* bitmap = bitmaps_[col];
-  uint32_t next = 0;
-  for (uint32_t i = 0; i < numRows; ++i) {
-    out[i] = bitmap != nullptr && bitSet(bitmap, rowsRead_ + i) ? values[next++]
-                                                                : T{};
+  if (bitmap == nullptr) {
+    std::fill_n(out, numRows, T{});
+    return true;
   }
+  // A word of values is one copy; a word holding nulls clears, then places
+  // its values.
+  uint32_t next = 0;
+  forEachBitWord(
+      bitmap,
+      bitmapBytes_,
+      rowsRead_,
+      numRows,
+      [&](uint32_t base, uint32_t n, uint64_t word) {
+        T* block = out + base;
+        if (word == lowBits(n)) {
+          ::memcpy(block, values + next, static_cast<size_t>(n) * sizeof(T));
+          next += n;
+          return;
+        }
+        std::fill_n(block, n, T{});
+        while (word != 0) {
+          block[__builtin_ctzll(word)] = values[next++];
+          word &= word - 1;
+        }
+      });
   return true;
 }
 
@@ -862,20 +973,34 @@ bool CellPayloadDecoder::appendBoolean(
   const auto* src =
       reinterpret_cast<const uint8_t*>(bytes.data()) + cursors_[col].dense;
   auto* out = batch_[col].values->asMutable<uint64_t>();
-  const uint8_t* bitmap = dense == numRows ? nullptr : bitmaps_[col];
-  uint32_t next = 0;
-  for (uint32_t i = 0; i < numRows; ++i) {
-    bool value = false;
-    if (dense == numRows ||
-        (bitmap != nullptr && bitSet(bitmap, rowsRead_ + i))) {
-      const uint8_t byte = src[next++];
-      if (byte > 1) {
-        return fail(error, "invalid boolean byte");
-      }
-      value = byte != 0;
+  for (uint32_t i = 0; i < dense; ++i) {
+    if (src[i] > 1) {
+      return fail(error, "invalid boolean byte");
     }
-    bits::setBit(out, batchRows_ + i, value);
   }
+  if (dense == numRows) {
+    for (uint32_t i = 0; i < numRows; ++i) {
+      bits::setBit(out, batchRows_ + i, src[i] != 0);
+    }
+    return true;
+  }
+  const uint8_t* bitmap = bitmaps_[col];
+  if (bitmap == nullptr) {
+    bits::fillBits(out, batchRows_, batchRows_ + numRows, false);
+    return true;
+  }
+  uint32_t next = 0;
+  scatterRows(
+      bitmap,
+      bitmapBytes_,
+      rowsRead_,
+      numRows,
+      [&](uint32_t base, uint32_t n) {
+        bits::fillBits(out, batchRows_ + base, batchRows_ + base + n, false);
+      },
+      [&](uint32_t row) {
+        bits::setBit(out, batchRows_ + row, src[next++] != 0);
+      });
   return true;
 }
 
@@ -906,17 +1031,30 @@ bool CellPayloadDecoder::appendTimestamp(
     }
   }
   auto* out = batch_[col].values->asMutable<Timestamp>() + batchRows_;
-  const uint8_t* bitmap = dense == numRows ? nullptr : bitmaps_[col];
-  uint32_t next = 0;
-  for (uint32_t i = 0; i < numRows; ++i) {
-    if (dense == numRows ||
-        (bitmap != nullptr && bitSet(bitmap, rowsRead_ + i))) {
-      out[i] = Timestamp(seconds[next], nanos[next]);
-      ++next;
-    } else {
-      out[i] = Timestamp();
+  if (dense == numRows) {
+    for (uint32_t i = 0; i < numRows; ++i) {
+      out[i] = Timestamp(seconds[i], nanos[i]);
     }
+    return true;
   }
+  const uint8_t* bitmap = bitmaps_[col];
+  if (bitmap == nullptr) {
+    std::fill_n(out, numRows, Timestamp());
+    return true;
+  }
+  uint32_t next = 0;
+  scatterRows(
+      bitmap,
+      bitmapBytes_,
+      rowsRead_,
+      numRows,
+      [&](uint32_t base, uint32_t n) {
+        std::fill_n(out + base, n, Timestamp());
+      },
+      [&](uint32_t row) {
+        out[row] = Timestamp(seconds[next], nanos[next]);
+        ++next;
+      });
   return true;
 }
 
@@ -992,24 +1130,38 @@ bool CellPayloadDecoder::appendString(
   }
   char* chars = heapChars == 0 ? nullptr : stringSpace(col, heapChars);
   auto* out = batch_[col].values->asMutable<StringView>() + batchRows_;
-  const uint8_t* bitmap = dense == numRows ? nullptr : bitmaps_[col];
   uint32_t next = 0;
-  for (uint32_t i = 0; i < numRows; ++i) {
-    if (dense == numRows ||
-        (bitmap != nullptr && bitSet(bitmap, rowsRead_ + i))) {
-      const auto value = views_[next++];
-      const auto size = static_cast<int32_t>(value.size());
-      if (value.size() > StringView::kInlineSize) {
-        ::memcpy(chars, value.data(), value.size());
-        out[i] = StringView(chars, size);
-        chars += value.size();
-      } else {
-        out[i] = StringView(value.data(), size);
-      }
+  const auto place = [&](uint32_t row) {
+    const auto value = views_[next++];
+    const auto size = static_cast<int32_t>(value.size());
+    if (value.size() > StringView::kInlineSize) {
+      ::memcpy(chars, value.data(), value.size());
+      out[row] = StringView(chars, size);
+      chars += value.size();
     } else {
-      out[i] = StringView();
+      out[row] = StringView(value.data(), size);
     }
+  };
+  if (dense == numRows) {
+    for (uint32_t i = 0; i < numRows; ++i) {
+      place(i);
+    }
+    return true;
   }
+  const uint8_t* bitmap = bitmaps_[col];
+  if (bitmap == nullptr) {
+    std::fill_n(out, numRows, StringView());
+    return true;
+  }
+  scatterRows(
+      bitmap,
+      bitmapBytes_,
+      rowsRead_,
+      numRows,
+      [&](uint32_t base, uint32_t n) {
+        std::fill_n(out + base, n, StringView());
+      },
+      place);
   return true;
 }
 
