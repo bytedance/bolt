@@ -311,6 +311,7 @@ class CellPayloadDecoder {
   std::vector<NullTag> tags_;
   std::vector<uint32_t> nonNullCount_;
   std::vector<const uint8_t*> bitmaps_; // into nullBody_, per column
+  uint64_t bitmapBytes_{0}; // of each raw-null bitmap in nullBody_
   std::vector<uint8_t> encodingTags_;
   std::vector<uint64_t> storedSizes_;
   std::vector<uint64_t> decodedSizes_;
