@@ -89,7 +89,7 @@ class CellOutput {
 /// together with the task's composite output.
 ///
 /// Spill segments are stored in the exact Run body form of the wire format:
-/// COMBINED when spill compression pays, COMBINED_STORED otherwise. A
+/// COMBINED when spill compression pays, COMBINED_UNCOMPRESSED otherwise. A
 /// payload that is a single run (one spilled segment, or only resident
 /// cells) is a header plus a verbatim copy. With coalesceMergedRuns,
 /// several segments - or segments plus resident cells - are gathered
@@ -134,7 +134,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     /// P + 1 absolute spill-file offsets; equal neighbours mean an empty
     /// segment for that partition.
     std::vector<uint64_t> pidEnds;
-    /// Whether the run's COMBINED_STORED segments already are their final
+    /// Whether the run's COMBINED_UNCOMPRESSED segments already are their final
     /// form: there is no codec, or spill-time compression was tried and did
     /// not pay. False with compressSpill off, or when a pressure spill could
     /// not fund the compression workspace; merge then compresses them.
