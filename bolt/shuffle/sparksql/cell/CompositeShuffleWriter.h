@@ -86,26 +86,33 @@ class CompositeShuffleWriter : public ShuffleWriter {
   bool nextBlock(uint32_t pid, BufferPtr& block);
 
   bool finished_{false};
-  /// The last batch was composite, so that side holds the data.
-  bool compositeHeld_{false};
+  /// The last batch was composite: that side is the active one - it takes
+  /// reclaims - and the ordinary side holds nothing, having been flushed
+  /// at the switch. Composite rows may or may not be held (heldRowBytes_).
+  bool compositeActive_{false};
 
   /// Null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
   ShuffleRowToRowConverter converter_;
   /// Per partition: the held rows, each pointing at [size i32][bytes].
-  std::vector<std::vector<uint8_t*>> rows_;
+  std::vector<std::vector<uint8_t*>> heldRows_;
   std::vector<uint32_t> row2Partition_;
   std::vector<uint32_t> partition2RowCount_;
-  std::vector<int32_t> pids_;
+  std::vector<int32_t> batchPids_;
   DecodedVector pidDecoded_;
-  int64_t heldBytes_{0};
-  bool busy_{false};
-  bool flushRequested_{false};
-  /// Rows of the current partition already handed out during a write.
-  size_t nextRow_{0};
-  BufferPtr scratch_;
+  /// Bytes of heldRows_, as the batches' totalRowSize() counted them.
+  int64_t heldRowBytes_{0};
+  /// A composite split or write is under way. A flush reached from inside
+  /// it - a reclaim its allocation set off - is deferred (flushDeferred_)
+  /// to its end rather than writing rows the split is still adding.
+  bool compositeInProgress_{false};
+  bool flushDeferred_{false};
+  /// During a write: the current partition's first row not yet in a block.
+  size_t nextBlockRow_{0};
+  /// Compression workspace of the blocks.
+  BufferPtr compressScratch_;
 
-  std::vector<int64_t> rawBytes_;
+  std::vector<int64_t> rawPartitionBytes_;
   uint64_t compressTimeNs_{0};
   uint64_t convertTimeNs_{0};
 };
