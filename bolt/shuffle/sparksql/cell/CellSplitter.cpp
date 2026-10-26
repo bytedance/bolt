@@ -63,8 +63,6 @@ CellSplitter::CellSplitter(
       arena_.allocateFixed(cacheBytes + kCacheTailPadding, kBlockValueBytes);
   cursors_ = reinterpret_cast<uint8_t*>(arena_.allocateFixed(cursorBytes, 64));
   ::memset(cursors_, 0, cursorBytes);
-  residentBytes_ = static_cast<int64_t>(cacheBytes + cursorBytes) +
-      static_cast<int64_t>(partitionBytes_.size() + variableBytes_.size()) * 8;
 }
 
 template <typename T>
@@ -104,7 +102,6 @@ void CellSplitter::enableDictionary(uint32_t col) {
       "dictionary form is defined for string columns only");
   dictEnabled_[col] = 1;
   dictStates_[col].assign(numPartitions_, DictState{});
-  residentBytes_ += static_cast<int64_t>(numPartitions_) * sizeof(DictState);
   const auto wire = layout_.wireColumn(col);
   encodingTags_[wire / 8] |= static_cast<uint8_t>(1u << (wire % 8));
 }
@@ -774,7 +771,7 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
   LOG(INFO) << "CellShuffleWriter memory: chunks=" << (chunkBytes >> 20)
             << "MB, data=" << (dataBytes >> 20) << "MB ("
             << (chunkBytes > 0 ? 100.0 * dataBytes / chunkBytes : 0.0)
-            << "% utilization), resident=" << (residentBytes_ >> 20)
+            << "% utilization), caches=" << (arena_.allocatedBytes() >> 20)
             << "MB, nulls="
             << ((nulls_.allocatedBytes() + nulls_.tableBytes()) >> 20)
             << "MB, pool used=" << (pool->usedBytes() >> 20)
