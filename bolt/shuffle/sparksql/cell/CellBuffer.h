@@ -164,8 +164,10 @@ class ChunkAllocator {
 /// directory. Cells express data ownership; all real memory lives in the
 /// ChunkAllocator below.
 ///
-/// A chain's cells are all full except the last (tailUsed bytes). Chain
-/// order is append order, which is the byte order of the stream.
+/// A chain's cells are all full except the last. Chain order is append
+/// order, which is the byte order of the stream. Each chain keeps its tail's
+/// write position as a pointer: a linked cell's chunk is never freed or
+/// moved, so the hot appends reach the cell without the cell id arithmetic.
 class DataCells {
  public:
   DataCells(
@@ -186,23 +188,35 @@ class DataCells {
   /// sees only complete prior appends. The spill must release chains via
   /// releaseAll()/releasePartition() (recycling), never the allocator's
   /// resetAll(), so held ids stay valid.
-  void append(uint32_t pid, uint32_t stream, const void* data, uint32_t bytes);
+  void append(uint32_t pid, uint32_t stream, const void* data, uint32_t bytes) {
+    auto& info = infos_[chainIndex(pid, stream)];
+    // Fast path: the bytes fit the tail cell - the overwhelmingly common
+    // case. Nothing is allocated, so no spill can fire mid-append. An empty
+    // chain has tailLeft 0, and bytes == 0 wraps past it: both go slow.
+    if (FOLLY_LIKELY(bytes - 1 < info.tailLeft)) {
+      ::memcpy(info.tail, data, bytes);
+      info.tail += bytes;
+      info.tailLeft -= bytes;
+      totalBytes_ += bytes;
+      return;
+    }
+    appendSlow(pid, stream, data, bytes);
+  }
 
   /// Contiguous scratch inside the current tail cell, or nullptr when the
   /// tail cannot hold maxBytes. Allocates nothing, so no spill can fire
   /// between a reserve and its commit; the caller writes up to maxBytes and
   /// commits the actual size.
   char* tryReserve(uint32_t pid, uint32_t stream, uint32_t maxBytes) {
-    auto& info = infos_[chainIndex(pid, stream)];
-    if (info.numCells == 0 ||
-        info.tailUsed + maxBytes > allocator_->cellBytes()) {
-      return nullptr;
-    }
-    return allocator_->cellData(info.lastCell) + info.tailUsed;
+    const auto& info = infos_[chainIndex(pid, stream)];
+    return maxBytes <= info.tailLeft && info.tail != nullptr ? info.tail
+                                                             : nullptr;
   }
 
   void commit(uint32_t pid, uint32_t stream, uint32_t bytes) {
-    infos_[chainIndex(pid, stream)].tailUsed += bytes;
+    auto& info = infos_[chainIndex(pid, stream)];
+    info.tail += bytes;
+    info.tailLeft -= bytes;
     totalBytes_ += bytes;
   }
 
@@ -213,11 +227,7 @@ class DataCells {
 
   /// Total bytes buffered for (pid, stream).
   uint64_t bytes(uint32_t pid, uint32_t stream) const {
-    const auto& info = infos_[chainIndex(pid, stream)];
-    return info.numCells == 0
-        ? 0
-        : (static_cast<uint64_t>(info.numCells - 1) * allocator_->cellBytes()) +
-            info.tailUsed;
+    return chainBytes(infos_[chainIndex(pid, stream)]);
   }
 
   /// Visits the chain in byte order: fn(const char* data, uint32_t bytes).
@@ -232,7 +242,7 @@ class DataCells {
       fn(allocator_->cellData(id), allocator_->cellBytes());
       id = next_[id];
     }
-    fn(allocator_->cellData(id), info.tailUsed);
+    fn(allocator_->cellData(id), allocator_->cellBytes() - info.tailLeft);
   }
 
   /// Clears every chain. The caller resets or shrinks the allocator; ids
@@ -256,13 +266,26 @@ class DataCells {
   }
 
  private:
-  struct ChainInfo {
+  /// One chain, in half a cache line: the append path reads tail and
+  /// tailLeft only.
+  struct alignas(32) ChainInfo {
+    /// Write position in the last cell; nullptr while the chain is empty.
+    char* tail{nullptr};
+    /// Bytes left in the last cell; 0 while the chain is empty.
+    uint32_t tailLeft{0};
     uint32_t firstCell{ChunkAllocator::kInvalidCell};
     uint32_t lastCell{ChunkAllocator::kInvalidCell};
-    uint32_t tailUsed{0};
     uint32_t numCells{0};
   };
-  static_assert(sizeof(ChainInfo) == 16);
+  static_assert(sizeof(ChainInfo) == 32);
+
+  uint64_t chainBytes(const ChainInfo& info) const {
+    return static_cast<uint64_t>(info.numCells) * allocator_->cellBytes() -
+        info.tailLeft;
+  }
+
+  void
+  appendSlow(uint32_t pid, uint32_t stream, const void* data, uint32_t bytes);
 
   /// Stream-major: one column's chains are contiguous, matching the cache
   /// layer's per-column flush pattern.
