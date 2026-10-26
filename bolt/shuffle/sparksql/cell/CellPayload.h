@@ -231,7 +231,9 @@ class CellPayloadDecoder {
       uint32_t nullDecodedSize,
       std::string& error);
 
-  bool parseRun(CellByteSource& in, std::string& error);
+  /// `sole`: the payload's only run, whose combined buffer the streams may
+  /// view in place instead of copying it apart.
+  bool parseRun(CellByteSource& in, bool sole, std::string& error);
 
   /// Positions the column's cursor at the payload's first row, checking
   /// what can be checked before any value is read.
@@ -307,6 +309,10 @@ class CellPayloadDecoder {
   // untrusted payload fields live in the reader pool so decoded runs stay
   // inside task memory accounting.
   std::vector<BufferPtr> streamBytes_;
+  /// The payload's decoded streams: into streamBytes_, or into scratch2_
+  /// when a sole combined run is decompressed there.
+  std::vector<std::string_view> streamViews_;
+  bool streamsViewed_{false};
   BufferPtr nullBody_;
   std::vector<NullTag> tags_;
   std::vector<uint32_t> nonNullCount_;

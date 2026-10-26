@@ -294,7 +294,10 @@ bool CellPayloadDecoder::parseNullRegion(
   return true;
 }
 
-bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
+bool CellPayloadDecoder::parseRun(
+    CellByteSource& in,
+    bool sole,
+    std::string& error) {
   uint8_t layoutByte;
   if (!in.read(&layoutByte, 1)) {
     return fail(error, "truncated run header");
@@ -418,6 +421,18 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
               decodedSum)) {
         return fail(error, "combined buffer decompression failed");
       }
+      if (sole) {
+        // The streams are consecutive in the decoded buffer: view them there.
+        size_t offset = 0;
+        for (uint32_t s = 0; s < numStreams; ++s) {
+          streamViews_[s] = std::string_view(
+              reinterpret_cast<const char*>(decodedData) + offset,
+              decodedSizes_[s]);
+          offset += decodedSizes_[s];
+        }
+        streamsViewed_ = true;
+        return true;
+      }
       size_t offset = 0;
       for (uint32_t s = 0; s < numStreams; ++s) {
         if (decodedSizes_[s] == 0) {
@@ -495,9 +510,16 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
       stream->setSize(0);
     }
   }
+  streamViews_.assign(streamBytes_.size(), std::string_view());
+  streamsViewed_ = false;
   for (uint32_t run = 0; run < runCount; ++run) {
-    if (!parseRun(in, error)) {
+    if (!parseRun(in, runCount == 1, error)) {
       return false;
+    }
+  }
+  if (!streamsViewed_) {
+    for (size_t s = 0; s < streamBytes_.size(); ++s) {
+      streamViews_[s] = bufferBytes(streamBytes_[s]);
     }
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
@@ -517,7 +539,7 @@ bool CellPayloadDecoder::openColumn(uint32_t col, std::string& error) {
     return true;
   }
   const uint32_t stream = layout_.columnStream(col);
-  const auto bytes = bufferBytes(streamBytes_[stream]);
+  const auto bytes = streamViews_[stream];
   const auto* data = reinterpret_cast<const uint8_t*>(bytes.data());
   const uint32_t nonNull = nonNullCount_[col];
   switch (kind) {
@@ -531,7 +553,7 @@ bool CellPayloadDecoder::openColumn(uint32_t col, std::string& error) {
       cursor.values64.reset(data, bytes.size(), nonNull);
       return true;
     case TypeKind::TIMESTAMP: {
-      const auto nanos = bufferBytes(streamBytes_[stream + 1]);
+      const auto nanos = streamViews_[stream + 1];
       cursor.values64.reset(data, bytes.size(), nonNull);
       cursor.lengths.reset(
           reinterpret_cast<const uint8_t*>(nanos.data()),
@@ -560,9 +582,8 @@ bool CellPayloadDecoder::openColumn(uint32_t col, std::string& error) {
 
 bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   auto& cursor = cursors_[col];
-  const auto lengthBytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
-  const auto dataBytes =
-      bufferBytes(streamBytes_[layout_.columnStream(col) + 1]);
+  const auto lengthBytes = streamViews_[layout_.columnStream(col)];
+  const auto dataBytes = streamViews_[layout_.columnStream(col) + 1];
   const uint32_t nonNull = nonNullCount_[col];
   const auto wire = layout_.wireColumn(col);
   cursor.dictionary = (encodingTags_[wire / 8] >> (wire % 8)) & 1;
@@ -955,7 +976,7 @@ bool CellPayloadDecoder::appendRaw(
     uint32_t col,
     uint32_t numRows,
     uint32_t dense) {
-  const auto bytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
+  const auto bytes = streamViews_[layout_.columnStream(col)];
   const char* src = bytes.data() + cursors_[col].dense * sizeof(T);
   T* out = batch_[col].values->template asMutable<T>() + batchRows_;
   return placeValues<T>(col, numRows, dense, out, [&](uint32_t count, T* dst) {
@@ -969,7 +990,7 @@ bool CellPayloadDecoder::appendBoolean(
     uint32_t numRows,
     uint32_t dense,
     std::string& error) {
-  const auto bytes = bufferBytes(streamBytes_[layout_.columnStream(col)]);
+  const auto bytes = streamViews_[layout_.columnStream(col)];
   const auto* src =
       reinterpret_cast<const uint8_t*>(bytes.data()) + cursors_[col].dense;
   auto* out = batch_[col].values->asMutable<uint64_t>();
