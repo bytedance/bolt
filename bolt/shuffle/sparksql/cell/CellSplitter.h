@@ -115,11 +115,6 @@ class CellSplitter {
     return writingOutput_;
   }
 
-  /// Fixed memory held by the splitter (caches, cursors).
-  int64_t residentBytes() const {
-    return residentBytes_;
-  }
-
  private:
   /// Lifetime dictionary row counters for logging and metrics. Updated when
   /// segments close and in the fallback row loop, off the dictionary hit path.
@@ -278,7 +273,6 @@ class CellSplitter {
   memory::AllocationPool arena_;
   char* cacheBase_{nullptr};
   uint8_t* cursors_{nullptr};
-  int64_t residentBytes_{0};
 
   std::vector<uint64_t> partitionBytes_;
   std::vector<uint64_t> variableBytes_;
