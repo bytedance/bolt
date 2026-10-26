@@ -56,12 +56,11 @@ const char* rowFormatName(row::RowFormat format) {
 std::string CellShuffleOptions::toString() const {
   return fmt::format(
       "cellMemoryCapBytes={} "
-      "checkpointPartitionBytes={} nullMemLimitBytes={} maxWindowRows={} "
+      "checkpointPartitionBytes={} nullMemLimitBytes={} "
       "enableStringDictionary={} coalesceMergedRuns={} compressSpill={}",
       cellMemoryCapBytes,
       checkpointPartitionBytes,
       nullMemLimitBytes,
-      maxWindowRows,
       enableStringDictionary,
       coalesceMergedRuns,
       compressSpill);
