@@ -51,8 +51,7 @@ void buildBlock(
       numRows,
       std::numeric_limits<uint32_t>::max(),
       "too many rows for one composite block");
-  resizeBuffer(block, 0, pool);
-  resizeBuffer(
+  resetBuffer(
       block, checkedPlus<size_t>(kCompositeBlockHeaderBytes, rawBytes), pool);
   char* body = block->asMutable<char>() + kCompositeBlockHeaderBytes;
   uint64_t offset = 0;
