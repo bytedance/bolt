@@ -304,7 +304,7 @@ TEST(CellEncodingTest, packedBlocksOfEveryWidth) {
   std::mt19937_64 rng(11);
   const auto run = [&](auto tag) {
     using T = decltype(tag);
-    constexpr uint32_t kPerBlock = kBlockSourceBytes / sizeof(T);
+    constexpr uint32_t kPerBlock = kBlockValueBytes / sizeof(T);
     constexpr uint32_t kMaxBits = sizeof(T) * 8 < 63 ? sizeof(T) * 8 : 63;
     for (const bool isFor : {false, true}) {
       for (uint32_t bits = 1; bits <= kMaxBits; ++bits) {

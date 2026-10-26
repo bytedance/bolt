@@ -161,7 +161,7 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
     case EncodingKind::kBitPack: {
       *pos++ = makeEncodingByte(EncodingKind::kBitPack, bitWidth);
       const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
-      uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
+      uint64_t staged[kBlockValueBytes / sizeof(int16_t)];
       for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
         staged[i] =
             static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
@@ -176,7 +176,7 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       pos += kWidth;
       if (deltaBits > 0) {
         const uint64_t base = static_cast<uint64_t>(minValue);
-        uint64_t staged[kBlockSourceBytes / sizeof(int16_t)];
+        uint64_t staged[kBlockValueBytes / sizeof(int16_t)];
         for (uint32_t i = 0; i < count; ++i) { // widen + subtract: vectorizes
           staged[i] = static_cast<uint64_t>(values[i]) - base;
         }
@@ -312,7 +312,7 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
 /// shift).
 template <typename T>
 inline void finishFieldsAvx2(T* dst, uint32_t bits, bool isFor, T base) {
-  constexpr uint32_t kCount = kBlockSourceBytes / sizeof(T);
+  constexpr uint32_t kCount = kBlockValueBytes / sizeof(T);
   constexpr uint32_t kLanes = 32 / sizeof(T);
   if (!isFor && bits == sizeof(T) * 8) {
     return;
@@ -349,7 +349,7 @@ inline void finishFieldsAvx2(T* dst, uint32_t bits, bool isFor, T base) {
 /// up to 57; every gather reads 8 bytes or fewer from a field's first byte.
 template <typename T>
 inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
-  constexpr uint32_t kCount = kBlockSourceBytes / sizeof(T);
+  constexpr uint32_t kCount = kBlockValueBytes / sizeof(T);
   if (sizeof(T) == 8 || bits > 25) {
     const __m256i mask =
         _mm256_set1_epi64x(static_cast<int64_t>((uint64_t{1} << bits) - 1));
@@ -410,7 +410,7 @@ inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
 template <typename T>
 inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
   constexpr uint32_t kWidth = sizeof(T);
-  constexpr uint32_t kCount = kBlockSourceBytes / kWidth;
+  constexpr uint32_t kCount = kBlockValueBytes / kWidth;
   constexpr uint32_t kMaxBits = kWidth == 8 ? 57 : kWidth * 8;
   if (inBytes < 1) {
     return 0;
@@ -459,15 +459,15 @@ inline uint32_t encodeBlock(const T* values, uint32_t count, uint8_t* out) {
   return detail::encodeBlockImpl(values, count, out);
 }
 
-/// encodeBlock for a full 64-source-byte block: the count is a compile-time
-/// constant (8/16/32), so the scan and pack loops fully unroll. The split
-/// hot path only ever flushes full blocks; tails appear at window close.
+/// encodeBlock for a full block of kBlockValueBytes: the count is a
+/// compile-time constant (8/16/32), so the scan and pack loops fully unroll.
+/// The split hot path only ever flushes full blocks; tails appear at window
+/// close.
 template <typename T>
 inline uint32_t encodeBlockFull(const T* values, uint8_t* out) {
   return detail::encodeBlockImpl(
-      static_cast<const T*>(
-          __builtin_assume_aligned(values, kBlockSourceBytes)),
-      std::integral_constant<uint32_t, kBlockSourceBytes / sizeof(T)>{},
+      static_cast<const T*>(__builtin_assume_aligned(values, kBlockValueBytes)),
+      std::integral_constant<uint32_t, kBlockValueBytes / sizeof(T)>{},
       out);
 }
 
@@ -483,9 +483,9 @@ decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
   return detail::decodeBlockImpl(in, inBytes, count, dst);
 }
 
-/// decodeBlock for a full 64-source-byte block: the count is a compile-time
-/// constant (8/16/32), so the fill and unpack loops fully unroll. Every
-/// block of a stream but its tail is full. With AVX2, BIT_PACK and
+/// decodeBlock for a full block of kBlockValueBytes: the count is a
+/// compile-time constant (8/16/32), so the fill and unpack loops fully unroll.
+/// Every block of a stream but its tail is full. With AVX2, BIT_PACK and
 /// FOR_BIT_PACK blocks unpack in vector lanes; the scalar path takes the
 /// rest, and the last blocks of an input that the 8-byte gathers would
 /// read past.
@@ -499,7 +499,7 @@ inline uint32_t decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
   return detail::decodeBlockImpl(
       in,
       inBytes,
-      std::integral_constant<uint32_t, kBlockSourceBytes / sizeof(T)>{},
+      std::integral_constant<uint32_t, kBlockValueBytes / sizeof(T)>{},
       dst);
 }
 
@@ -509,7 +509,7 @@ inline uint32_t decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
 /// a time as its cache lines fill.
 template <typename T>
 inline void encodeStream(const T* values, size_t count, std::string& out) {
-  constexpr uint32_t kValuesPerBlock = kBlockSourceBytes / sizeof(T);
+  constexpr uint32_t kValuesPerBlock = kBlockValueBytes / sizeof(T);
   uint8_t block[kMaxBlockBytes];
   size_t i = 0;
   for (; i + kValuesPerBlock <= count; i += kValuesPerBlock) {
@@ -529,7 +529,7 @@ inline void encodeStream(const T* values, size_t count, std::string& out) {
 template <typename T>
 inline bool
 decodeStream(const uint8_t* in, size_t inBytes, size_t valueCount, T* dst) {
-  constexpr uint32_t kValuesPerBlock = kBlockSourceBytes / sizeof(T);
+  constexpr uint32_t kValuesPerBlock = kBlockValueBytes / sizeof(T);
   size_t offset = 0;
   size_t decoded = 0;
   while (decoded < valueCount) {
@@ -610,7 +610,7 @@ class StreamCursor {
   }
 
  private:
-  static constexpr uint32_t kValuesPerBlock = kBlockSourceBytes / sizeof(T);
+  static constexpr uint32_t kValuesPerBlock = kBlockValueBytes / sizeof(T);
 
   const uint8_t* in_{nullptr};
   size_t size_{0};

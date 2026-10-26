@@ -40,7 +40,7 @@
 /// concatenation of its bytes in every run, in run order; a run may end a
 /// raw stream's bytes anywhere, but never inside an Encoding Block or a
 /// dictionary. Encoded streams
-/// are Encoding Blocks back to back: each covers kBlockSourceBytes of source
+/// are Encoding Blocks back to back: each covers kBlockValueBytes of
 /// values (the stream's last block fewer) and opens with an EncodingByte,
 /// EncodingKind in the low 2 bits and a parameter in the high 6:
 ///
@@ -72,8 +72,10 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Source bytes covered by one full Encoding Block.
-inline constexpr uint32_t kBlockSourceBytes = 64;
+/// Bytes of values one full Encoding Block covers, before encoding: 8
+/// Bigints, 16 Integers or 32 SmallInts. kMaxBlockBytes bounds the encoded
+/// size.
+inline constexpr uint32_t kBlockValueBytes = 64;
 
 /// Fixed payload header length.
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
@@ -86,7 +88,7 @@ inline constexpr uint32_t kMaxPayloadRows = (1u << 31) - 1;
 
 /// Worst-case serialized size of one Encoding Block: 1 byte EncodingByte,
 /// 8 bytes FOR base, 64 bytes body.
-inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kBlockSourceBytes;
+inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kBlockValueBytes;
 
 /// String dictionary limits: an entry's length byte is at most 63, and the
 /// serialized entries of one dictionary must stay under 64 bytes in total,
