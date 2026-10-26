@@ -297,6 +297,63 @@ TEST(CellEncodingTest, fuzzRoundtripAcrossShapes) {
   fuzzType(int64_t{});
 }
 
+TEST(CellEncodingTest, packedBlocksOfEveryWidth) {
+  // BIT_PACK and FOR_BIT_PACK streams of every legal width, built block by
+  // block: the full blocks with input after them take the vector path, the
+  // last ones the scalar path, and both must agree with the source.
+  std::mt19937_64 rng(11);
+  const auto run = [&](auto tag) {
+    using T = decltype(tag);
+    constexpr uint32_t kPerBlock = kBlockSourceBytes / sizeof(T);
+    constexpr uint32_t kMaxBits = sizeof(T) * 8 < 63 ? sizeof(T) * 8 : 63;
+    for (const bool isFor : {false, true}) {
+      for (uint32_t bits = 1; bits <= kMaxBits; ++bits) {
+        constexpr uint32_t kBlocks = 5;
+        std::vector<T> expected;
+        std::string stream;
+        for (uint32_t block = 0; block < kBlocks; ++block) {
+          const T base = isFor ? static_cast<T>(rng()) : T{};
+          uint64_t staged[kPerBlock];
+          for (uint32_t i = 0; i < kPerBlock; ++i) {
+            staged[i] = rng() & ((uint64_t{1} << bits) - 1);
+            expected.push_back(
+                isFor ? static_cast<T>(static_cast<uint64_t>(base) + staged[i])
+                      : static_cast<T>(detail::signExtend(staged[i], bits)));
+          }
+          uint8_t out[kMaxBlockBytes];
+          uint8_t* pos = out;
+          *pos++ = makeEncodingByte(
+              isFor ? EncodingKind::kForBitPack : EncodingKind::kBitPack, bits);
+          if (isFor) {
+            ::memcpy(pos, &base, sizeof(T));
+            pos += sizeof(T);
+          }
+          pos = detail::packBits(staged, kPerBlock, bits, pos);
+          stream.append(reinterpret_cast<const char*>(out), pos - out);
+        }
+        std::vector<T> decoded(expected.size());
+        ASSERT_TRUE(decodeStream(
+            reinterpret_cast<const uint8_t*>(stream.data()),
+            stream.size(),
+            decoded.size(),
+            decoded.data()))
+            << "width " << sizeof(T) << " bits " << bits << " for " << isFor;
+        ASSERT_EQ(decoded, expected)
+            << "width " << sizeof(T) << " bits " << bits << " for " << isFor;
+        // One byte short: the last block is truncated, never over-read.
+        EXPECT_FALSE(decodeStream(
+            reinterpret_cast<const uint8_t*>(stream.data()),
+            stream.size() - 1,
+            decoded.size(),
+            decoded.data()));
+      }
+    }
+  };
+  run(int16_t{});
+  run(int32_t{});
+  run(int64_t{});
+}
+
 TEST(CellEncodingTest, streamCursorReadsInArbitraryPieces) {
   std::mt19937_64 rng(77);
   const auto fuzzType = [&](auto tag) {
