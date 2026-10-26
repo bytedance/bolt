@@ -34,7 +34,6 @@ bolt_add_library(
   BoltShuffleWriterV2.cpp
   CelebornReaderStreamIterator.cpp
   cell/CellBuffer.cpp
-  cell/CellEncoding.cpp
   cell/CellOutput.cpp
   cell/CellPayload.cpp
   cell/CellSplitter.cpp

@@ -21,6 +21,8 @@
 /// Implemented from the spec alone: no dependency on the engine's existing
 /// varint/bitpack code, and none on the test-only reference implementation.
 /// Pure functions over caller-provided memory; nothing here allocates.
+/// Header-only, so the block kernels inline into the stream loops and
+/// specialize on the full-block value count.
 
 #pragma once
 
@@ -28,12 +30,17 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <type_traits>
 
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// EncodingByte: low 2 bits kind, high 6 bits parameter (spec section 7.3).
+/// EncodingByte: low 2 bits kind, high 6 bits parameter.
 inline uint8_t makeEncodingByte(EncodingKind kind, uint32_t param) {
   return static_cast<uint8_t>(
       static_cast<uint8_t>(kind) | static_cast<uint8_t>(param << 2));
@@ -188,6 +195,253 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   return static_cast<uint32_t>(pos - out);
 }
 
+/// Unpacks `count` values, `bits` wide each (1..63), LSB-first from `in`;
+/// the caller has verified in holds ceil(count * bits / 8) bytes. `put(i, v)`
+/// receives the raw unsigned bit pattern.
+template <typename Count, typename Put>
+inline void
+unpackBits(const uint8_t* in, Count count, uint32_t bits, const Put& put) {
+  const uint64_t mask = (uint64_t{1} << bits) - 1;
+  // 128-bit accumulator: refilling by whole bytes can hold up to
+  // bits - 1 + 8 = 70 pending bits when bits is large.
+  unsigned __int128 acc = 0;
+  uint32_t accBits = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    while (accBits < bits) {
+      acc |= static_cast<unsigned __int128>(*in++) << accBits;
+      accBits += 8;
+    }
+    put(i, static_cast<uint64_t>(acc) & mask);
+    acc >>= bits;
+    accBits -= bits;
+  }
+}
+
+/// Sign-extends the low `bits` bits of `raw`.
+inline int64_t signExtend(uint64_t raw, uint32_t bits) {
+  const uint32_t shift = 64 - bits;
+  return static_cast<int64_t>(raw << shift) >> shift;
+}
+
+inline uint64_t loadLeDec(const uint8_t* in, uint32_t bytes) {
+  uint64_t value = 0;
+  ::memcpy(&value, in, bytes);
+  return value;
+}
+
+template <typename T, typename Count>
+inline uint32_t
+decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
+  constexpr uint32_t kWidth = sizeof(T);
+  constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
+  if (inBytes < 1) {
+    return 0;
+  }
+  const uint8_t header = in[0];
+  const auto kind = static_cast<EncodingKind>(header & 0x03);
+  const uint32_t param = header >> 2;
+  const uint8_t* body = in + 1;
+  const size_t bodyAvail = inBytes - 1;
+
+  switch (kind) {
+    case EncodingKind::kConstNarrow: {
+      // 1 <= narrow_bytes <= type_width.
+      if (param < 1 || param > kWidth || bodyAvail < param) {
+        return 0;
+      }
+      const T value =
+          static_cast<T>(signExtend(loadLeDec(body, param), param * 8));
+      for (uint32_t i = 0; i < count; ++i) {
+        dst[i] = value;
+      }
+      return 1 + param;
+    }
+    case EncodingKind::kBitPack: {
+      // 1 <= bit_width <= min(63, type_width * 8).
+      if (param < 1 || param > kMaxPackBits) {
+        return 0;
+      }
+      const size_t bodyBytes = (static_cast<size_t>(count) * param + 7) / 8;
+      if (bodyAvail < bodyBytes) {
+        return 0;
+      }
+      unpackBits(body, count, param, [&](uint32_t i, uint64_t raw) {
+        dst[i] = static_cast<T>(signExtend(raw, param));
+      });
+      return static_cast<uint32_t>(1 + bodyBytes);
+    }
+    case EncodingKind::kForBitPack: {
+      // delta_bit_width <= 63.
+      if (param > 63 || bodyAvail < kWidth) {
+        return 0;
+      }
+      const uint64_t base = static_cast<uint64_t>(
+          signExtend(loadLeDec(body, kWidth), kWidth * 8));
+      if (param == 0) {
+        const T value = static_cast<T>(base);
+        for (uint32_t i = 0; i < count; ++i) {
+          dst[i] = value;
+        }
+        return 1 + kWidth;
+      }
+      const size_t deltaBytes = (static_cast<size_t>(count) * param + 7) / 8;
+      if (bodyAvail < kWidth + deltaBytes) {
+        return 0;
+      }
+      unpackBits(body + kWidth, count, param, [&](uint32_t i, uint64_t delta) {
+        dst[i] = static_cast<T>(base + delta);
+      });
+      return static_cast<uint32_t>(1 + kWidth + deltaBytes);
+    }
+    case EncodingKind::kPlain: {
+      // PLAIN's parameter must be zero.
+      const size_t bodyBytes = static_cast<size_t>(count) * kWidth;
+      if (param != 0 || bodyAvail < bodyBytes) {
+        return 0;
+      }
+      ::memcpy(dst, body, bodyBytes);
+      return static_cast<uint32_t>(1 + bodyBytes);
+    }
+  }
+  return 0;
+}
+
+#if defined(__AVX2__)
+
+/// Applies the decoded fields' final step on T lanes, in place: the base of
+/// FOR_BIT_PACK, or the sign extension of a BIT_PACK field narrower than T
+/// as (x ^ m) - m with m its sign bit (AVX2 has no 64-bit arithmetic
+/// shift).
+template <typename T>
+inline void finishFieldsAvx2(T* dst, uint32_t bits, bool isFor, T base) {
+  constexpr uint32_t kCount = kBlockSourceBytes / sizeof(T);
+  constexpr uint32_t kLanes = 32 / sizeof(T);
+  if (!isFor && bits == sizeof(T) * 8) {
+    return;
+  }
+  __m256i addend;
+  __m256i flip;
+  if constexpr (sizeof(T) == 8) {
+    addend = _mm256_set1_epi64x(isFor ? base : int64_t{1} << (bits - 1));
+  } else if constexpr (sizeof(T) == 4) {
+    addend = _mm256_set1_epi32(
+        isFor ? base : static_cast<int32_t>(uint32_t{1} << (bits - 1)));
+  } else {
+    addend = _mm256_set1_epi16(
+        isFor ? base : static_cast<int16_t>(uint16_t{1} << (bits - 1)));
+  }
+  flip = isFor ? _mm256_setzero_si256() : addend;
+  for (uint32_t i = 0; i < kCount; i += kLanes) {
+    auto* lane = reinterpret_cast<__m256i*>(dst + i);
+    __m256i v = _mm256_xor_si256(_mm256_loadu_si256(lane), flip);
+    if constexpr (sizeof(T) == 8) {
+      v = isFor ? _mm256_add_epi64(v, addend) : _mm256_sub_epi64(v, addend);
+    } else if constexpr (sizeof(T) == 4) {
+      v = isFor ? _mm256_add_epi32(v, addend) : _mm256_sub_epi32(v, addend);
+    } else {
+      v = isFor ? _mm256_add_epi16(v, addend) : _mm256_sub_epi16(v, addend);
+    }
+    _mm256_storeu_si256(lane, v);
+  }
+}
+
+/// Zero-extended `bits`-wide fields of a full block, LSB-first from `in`:
+/// field i is gathered from byte (i * bits) / 8 and shifted right by the
+/// rest. 32-bit lanes hold fields up to 25 bits (shift <= 7), 64-bit lanes
+/// up to 57; every gather reads 8 bytes or fewer from a field's first byte.
+template <typename T>
+inline void unpackFieldsAvx2(const uint8_t* in, uint32_t bits, T* dst) {
+  constexpr uint32_t kCount = kBlockSourceBytes / sizeof(T);
+  if (sizeof(T) == 8 || bits > 25) {
+    const __m256i mask =
+        _mm256_set1_epi64x(static_cast<int64_t>((uint64_t{1} << bits) - 1));
+    const __m256i width = _mm256_set1_epi64x(bits);
+    for (uint32_t i = 0; i < kCount; i += 4) {
+      const __m256i bit = _mm256_mul_epu32(
+          _mm256_add_epi64(
+              _mm256_setr_epi64x(0, 1, 2, 3), _mm256_set1_epi64x(i)),
+          width);
+      __m256i v = _mm256_i64gather_epi64(
+          reinterpret_cast<const long long*>(in), _mm256_srli_epi64(bit, 3), 1);
+      v = _mm256_and_si256(
+          _mm256_srlv_epi64(v, _mm256_and_si256(bit, _mm256_set1_epi64x(7))),
+          mask);
+      if constexpr (sizeof(T) == 8) {
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
+      } else {
+        // 4 x u64 to 4 x u32: only int32 fields of 26..32 bits come here.
+        const __m256i narrow = _mm256_permutevar8x32_epi32(
+            v, _mm256_setr_epi32(0, 2, 4, 6, 1, 3, 5, 7));
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(dst + i),
+            _mm256_castsi256_si128(narrow));
+      }
+    }
+    return;
+  }
+  const __m256i mask =
+      _mm256_set1_epi32(static_cast<int32_t>((uint32_t{1} << bits) - 1));
+  const __m256i width = _mm256_set1_epi32(bits);
+  for (uint32_t i = 0; i < kCount; i += 8) {
+    const __m256i bit = _mm256_mullo_epi32(
+        _mm256_add_epi32(
+            _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), _mm256_set1_epi32(i)),
+        width);
+    __m256i v = _mm256_i32gather_epi32(
+        reinterpret_cast<const int*>(in), _mm256_srli_epi32(bit, 3), 1);
+    v = _mm256_and_si256(
+        _mm256_srlv_epi32(v, _mm256_and_si256(bit, _mm256_set1_epi32(7))),
+        mask);
+    if constexpr (sizeof(T) == 4) {
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
+    } else {
+      // 8 x u32 holding at most 16 bits to 8 x u16.
+      const __m256i packed =
+          _mm256_permute4x64_epi64(_mm256_packus_epi32(v, v), 0xD8);
+      _mm_storeu_si128(
+          reinterpret_cast<__m128i*>(dst + i), _mm256_castsi256_si128(packed));
+    }
+  }
+}
+
+/// The AVX2 form of a full BIT_PACK or FOR_BIT_PACK block. Returns 0, having
+/// written nothing, when the block is not one it handles: another kind, a
+/// width past its lanes (int64 fields over 57 bits), a malformed block, or
+/// too little input after the block for the gathers' 8-byte reads (a
+/// stream's last blocks). The scalar decoder then takes the block.
+template <typename T>
+inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
+  constexpr uint32_t kWidth = sizeof(T);
+  constexpr uint32_t kCount = kBlockSourceBytes / kWidth;
+  constexpr uint32_t kMaxBits = kWidth == 8 ? 57 : kWidth * 8;
+  if (inBytes < 1) {
+    return 0;
+  }
+  const auto kind = static_cast<EncodingKind>(in[0] & 0x03);
+  const uint32_t bits = in[0] >> 2;
+  const bool isFor = kind == EncodingKind::kForBitPack;
+  if ((!isFor && kind != EncodingKind::kBitPack) || bits < 1 ||
+      bits > kMaxBits) {
+    return 0;
+  }
+  const size_t headerBytes = 1 + (isFor ? kWidth : 0);
+  const size_t bodyBytes = (static_cast<size_t>(kCount) * bits + 7) / 8;
+  const size_t reach = ((static_cast<size_t>(kCount - 1) * bits) >> 3) + 8;
+  if (inBytes < headerBytes ||
+      inBytes - headerBytes < std::max(bodyBytes, reach)) {
+    return 0;
+  }
+  T base{};
+  if (isFor) {
+    base = static_cast<T>(signExtend(loadLeDec(in + 1, kWidth), kWidth * 8));
+  }
+  unpackFieldsAvx2(in + headerBytes, bits, dst);
+  finishFieldsAvx2(dst, bits, isFor, base);
+  return static_cast<uint32_t>(headerBytes + bodyBytes);
+}
+
+#endif
+
 } // namespace detail
 
 /// Encodes one Encoding Block of `count` source values (count * sizeof(T)
@@ -218,27 +472,86 @@ inline uint32_t encodeBlockFull(const T* values, uint8_t* out) {
       out);
 }
 
-/// Decodes one Encoding Block holding `count` values. Applies the L1 header
-/// and bounds rules (spec section 10.1, rules 13-17): on any violation
-/// returns 0 and writes nothing. Otherwise fills dst[0, count) and returns
-/// the bytes consumed (1 + body).
+/// Decodes one Encoding Block holding `count` values. Validates it fully - a
+/// legal parameter for its kind, and a body within inBytes - and on any
+/// violation returns 0 and writes nothing. Otherwise fills dst[0, count) and
+/// returns the bytes consumed (1 + body).
+///
+/// T is one of int16_t, int32_t, int64_t, like encodeBlock.
 template <typename T>
-uint32_t decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst);
+inline uint32_t
+decodeBlock(const uint8_t* in, size_t inBytes, uint32_t count, T* dst) {
+  return detail::decodeBlockImpl(in, inBytes, count, dst);
+}
 
-/// Encodes a whole source array as the spec's block sequence: full 64-byte
-/// source blocks then at most one tail block (spec section 7.2). Appends to
-/// out. Used for stream tails at checkpoint time and by tests; the split hot
-/// path encodes full blocks one at a time as its cache lines fill.
+/// decodeBlock for a full 64-source-byte block: the count is a compile-time
+/// constant (8/16/32), so the fill and unpack loops fully unroll. Every
+/// block of a stream but its tail is full. With AVX2, BIT_PACK and
+/// FOR_BIT_PACK blocks unpack in vector lanes; the scalar path takes the
+/// rest, and the last blocks of an input that the 8-byte gathers would
+/// read past.
 template <typename T>
-void encodeStream(const T* values, size_t count, std::string& out);
+inline uint32_t decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
+#if defined(__AVX2__)
+  if (const uint32_t consumed = detail::decodeFullBlockAvx2(in, inBytes, dst)) {
+    return consumed;
+  }
+#endif
+  return detail::decodeBlockImpl(
+      in,
+      inBytes,
+      std::integral_constant<uint32_t, kBlockSourceBytes / sizeof(T)>{},
+      dst);
+}
 
-/// Decodes an Encoding Loop stream of exactly `valueCount` values from
-/// in[0, inBytes). The block sequence must consume the input exactly
-/// (spec section 7.2 and rule 20). Returns false on any violation.
+/// Encodes a whole source array as an encoded stream: full 64-byte source
+/// blocks then at most one tail block. Appends to out. Used for stream tails at
+/// checkpoint time and by tests; the split hot path encodes full blocks one at
+/// a time as its cache lines fill.
 template <typename T>
-bool decodeStream(const uint8_t* in, size_t inBytes, size_t valueCount, T* dst);
+inline void encodeStream(const T* values, size_t count, std::string& out) {
+  constexpr uint32_t kValuesPerBlock = kBlockSourceBytes / sizeof(T);
+  uint8_t block[kMaxBlockBytes];
+  size_t i = 0;
+  for (; i + kValuesPerBlock <= count; i += kValuesPerBlock) {
+    const uint32_t bytes = encodeBlock(values + i, kValuesPerBlock, block);
+    out.append(reinterpret_cast<const char*>(block), bytes);
+  }
+  if (i < count) {
+    const uint32_t bytes =
+        encodeBlock(values + i, static_cast<uint32_t>(count - i), block);
+    out.append(reinterpret_cast<const char*>(block), bytes);
+  }
+}
 
-/// decodeStream in pieces: the values of an Encoding Loop stream of
+/// Decodes an encoded stream of exactly `valueCount` values from
+/// in[0, inBytes). The blocks must consume the input exactly. Returns false
+/// on any violation.
+template <typename T>
+inline bool
+decodeStream(const uint8_t* in, size_t inBytes, size_t valueCount, T* dst) {
+  constexpr uint32_t kValuesPerBlock = kBlockSourceBytes / sizeof(T);
+  size_t offset = 0;
+  size_t decoded = 0;
+  while (decoded < valueCount) {
+    const uint32_t consumed = valueCount - decoded >= kValuesPerBlock
+        ? decodeBlockFull(in + offset, inBytes - offset, dst + decoded)
+        : decodeBlock(
+              in + offset,
+              inBytes - offset,
+              static_cast<uint32_t>(valueCount - decoded),
+              dst + decoded);
+    if (consumed == 0) {
+      return false;
+    }
+    offset += consumed;
+    decoded += std::min<size_t>(kValuesPerBlock, valueCount - decoded);
+  }
+  // The blocks consume the stream exactly.
+  return offset == inBytes;
+}
+
+/// decodeStream in pieces: the values of an encoded stream of
 /// `valueCount` values, handed out in arbitrary-sized reads. A block that
 /// straddles two reads is decoded once and its rest staged here, so the
 /// caller never needs room for more than one read.
@@ -269,8 +582,9 @@ class StreamCursor {
       const uint32_t blockValues =
           std::min<uint64_t>(kValuesPerBlock, blockValuesLeft_);
       T* target = n >= blockValues ? dst : staged_;
-      const uint32_t consumed =
-          decodeBlock(in_ + offset_, size_ - offset_, blockValues, target);
+      const uint32_t consumed = blockValues == kValuesPerBlock
+          ? decodeBlockFull(in_ + offset_, size_ - offset_, target)
+          : decodeBlock(in_ + offset_, size_ - offset_, blockValues, target);
       if (consumed == 0) {
         return false;
       }
