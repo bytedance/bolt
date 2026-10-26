@@ -78,7 +78,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   void admitRemoteSlice(int64_t estimatedBytes);
   /// The single dictionary probe (first batch, lifetime decision).
   void probeDictionary(uint32_t numRows);
-  const int32_t* pidArray(const RowVector& rv);
   void onBeforeChunkGrow();
   void checkpoint();
   /// Remote: seals (pushes) the window and returns its memory; returns the
@@ -107,14 +106,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<CellOutput> output_;
   std::unique_ptr<CellSplitter> splitter_;
 
-  std::vector<uint32_t> row2Partition_;
-  std::vector<uint32_t> partition2RowCount_;
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
-  std::vector<int32_t> pidValues_;
   std::vector<DecodedVector> decoded_;
   std::vector<BatchNullClass> nullClass_;
-  DecodedVector pidDecoded_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
