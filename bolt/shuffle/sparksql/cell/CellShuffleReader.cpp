@@ -200,12 +200,11 @@ bool CellShuffleReader::decodeComposite(std::string& error) {
   rows.reserve(rowCount);
   uint64_t pos = 0;
   for (uint32_t i = 0; i < rowCount; ++i) {
-    if (rawBytes - pos < 4) {
+    if (rawBytes - pos < sizeof(int32_t)) {
       return fail("truncated composite row header");
     }
-    int32_t size;
-    ::memcpy(&size, raw + pos, 4);
-    pos += 4;
+    const int32_t size = compositeRowSize(raw + pos);
+    pos += sizeof(int32_t);
     if (size < 0 || static_cast<uint64_t>(size) > rawBytes - pos) {
       return fail("composite row out of bounds");
     }
