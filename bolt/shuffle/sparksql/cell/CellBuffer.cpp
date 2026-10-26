@@ -517,7 +517,7 @@ void NullCells::emitBitmap(
     out[prefix >> 3] &= static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
   }
   if ((rowCount & 7) != 0) {
-    // Unused bits of the last byte must be zero (spec section 4.2).
+    // Unused bits of the last byte must be zero.
     out[outBytes - 1] &= static_cast<uint8_t>((1u << (rowCount & 7)) - 1);
   }
 }

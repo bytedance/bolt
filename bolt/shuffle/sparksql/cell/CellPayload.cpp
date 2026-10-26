@@ -148,7 +148,7 @@ bool CellPayloadDecoder::parseNullRegion(
             nullStoredSize,
             reinterpret_cast<uint8_t*>(decoded),
             nullDecodedSize)) {
-      // Rule 5: the decompressed length must match exactly.
+      // The decompressed length must match exactly.
       return fail(error, "null body decompression failed");
     }
   }
@@ -166,7 +166,7 @@ bool CellPayloadDecoder::parseNullRegion(
         ? NullTag::kAllNull
         : getNullTag(nullData, layout_.wireColumn(col));
     if (tag == NullTag::kReserved) {
-      return fail(error, "reserved null tag"); // rule 7
+      return fail(error, "reserved null tag");
     }
     tags_[col] = tag;
     rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
@@ -183,7 +183,7 @@ bool CellPayloadDecoder::parseNullRegion(
   const uint64_t expected =
       tagBytes + static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
   if (nullBody.size() != expected) {
-    return fail(error, "null body length mismatch"); // rule 6
+    return fail(error, "null body length mismatch");
   }
 
   const uint8_t* cursor = tagBytes == 0 ? nullptr : nullData + tagBytes;
@@ -215,7 +215,7 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
     return fail(error, "truncated run header");
   }
   if (layoutByte > static_cast<uint8_t>(RunLayout::kCombinedStored)) {
-    return fail(error, "unknown run compression layout"); // rule 8
+    return fail(error, "unknown run compression layout");
   }
   const auto runLayout = static_cast<RunLayout>(layoutByte);
   const uint32_t numStreams = layout_.numStreams();
@@ -231,14 +231,14 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
     return fail(error, "truncated run decoded sizes");
   }
 
-  // Rule 9: sums must not overflow.
+  // Sums must not overflow.
   uint64_t storedSum = 0;
   for (const auto size : storedSizes_) {
     if (addOverflows(storedSum, size, storedSum)) {
       return fail(error, "run stored sizes overflow");
     }
   }
-  // Rule 9: the run's declared wire bytes must fit the remaining input, and
+  // The run's declared wire bytes must fit the remaining input, and
   // the check comes before any allocation sized from those fields.
   if (storedSum > in.remainingBound()) {
     return fail(error, "run larger than the remaining input");
@@ -264,7 +264,7 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
           if (decoded != 0) {
             return fail(error, "empty stored buffer with decoded size");
           }
-          continue; // rule: empty stream, the codec is not invoked
+          continue; // an empty stream: the codec is not invoked
         }
         auto& stream = streamBytes_[s];
         if (decoded == 0) {
@@ -291,14 +291,14 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
                   stored,
                   reinterpret_cast<uint8_t*>(out) + offset,
                   decoded)) {
-            return fail(error, "run buffer decompression failed"); // rule 11
+            return fail(error, "run buffer decompression failed");
           }
         }
       }
       return true;
 
     case RunLayout::kCombinedStored:
-      // Rule 12: the single stored buffer is the concatenation itself.
+      // The single stored buffer is the concatenation itself.
       if (storedSizes_[0] != decodedSum) {
         return fail(error, "combined-stored size mismatch");
       }
@@ -331,7 +331,7 @@ bool CellPayloadDecoder::parseRun(CellByteSource& in, std::string& error) {
               storedSizes_[0],
               reinterpret_cast<uint8_t*>(decodedData),
               decodedSum)) {
-        return fail(error, "combined buffer decompression failed"); // rule 12
+        return fail(error, "combined buffer decompression failed");
       }
       size_t offset = 0;
       for (uint32_t s = 0; s < numStreams; ++s) {
@@ -357,12 +357,11 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
   rowsRead_ = 0;
   uint8_t header[kPayloadFixedHeaderBytes];
   if (!in.read(header, sizeof(header))) {
-    return fail(error, "truncated payload header"); // rule 1
+    return fail(error, "truncated payload header");
   }
   const uint32_t rowCount = loadU32(header);
   const uint32_t runCount = loadU32(header + 4);
-  // variable_size at offset 8 is a preallocation hint, never validated
-  // (spec section 3.1).
+  // variableBytes at offset 8 is a preallocation hint, never validated.
   const uint32_t nullStoredSize = loadU32(header + 16);
   const uint32_t nullDecodedSize = loadU32(header + 20);
   if (layout_.numWireColumns() == 0 &&
@@ -372,9 +371,9 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
         error, "payload without wire columns must contain only its header");
   }
   if (layout_.numWireColumns() != 0 && nullStoredSize < 1) {
-    return fail(error, "null stored size must be at least 1"); // rule 2
+    return fail(error, "null stored size must be at least 1");
   }
-  // Implementation-level bounds on untrusted fields (spec section 10.3).
+  // Bounds on untrusted fields.
   if (limits_.maxRowCount != 0 && rowCount > limits_.maxRowCount) {
     return fail(error, "row count beyond the configured limit");
   }
@@ -389,7 +388,7 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
   const uint32_t numColumns = layout_.numColumns();
   encodingTags_.resize((layout_.numWireColumns() + 7) / 8);
   if (!in.read(encodingTags_.data(), encodingTags_.size())) {
-    return fail(error, "truncated encoding tags"); // rule 3
+    return fail(error, "truncated encoding tags");
   }
   for (uint32_t col = 0; col < numColumns; ++col) {
     if (layout_.isUnknownColumn(col)) {
@@ -494,7 +493,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
   cursor.dictionaryLeft = 0;
 
   if (nonNull == 0) {
-    // Spec section 9: every stream of such a column must be empty.
+    // Every stream of an all-null column must be empty.
     if (!lengthBytes.empty() || !dataBytes.empty()) {
       return fail(error, "streams of an all-null column are not empty");
     }
@@ -510,7 +509,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
     return true;
   }
 
-  // Spec section 8: DictionarySequence in the data stream, then the index
+  // The dictionary sequence in the data stream, then the index
   // segment and fallback lengths in the length stream. Every dictionary's
   // entries go into one flat table; per dictionary its first entry, entry
   // count and matched count.
@@ -534,7 +533,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
         ++pos;
         break;
       }
-      // Entry: length byte + bytes (rule 18); the 64-byte dictionary
+      // Entry: length byte + bytes; the 64-byte dictionary
       // budget bounds both the entry length and the entry count.
       const uint32_t length = marker;
       if (length > 63) {
@@ -565,7 +564,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
       break;
     }
   }
-  // Rule 22.
+  // Matched rows are non-null rows.
   if (matchedSum > nonNull) {
     return fail(error, "matched counts beyond non-null rows");
   }
@@ -615,7 +614,7 @@ bool CellPayloadDecoder::finishPayload(std::string& error) {
               cursor.dictionary ? "malformed fallback length stream"
                                 : "malformed string length stream");
         }
-        // Rule 23, and the data stream must end exactly at the last value.
+        // The data stream must end exactly at the last value.
         if (cursor.dataOffset != cursor.data.size()) {
           return fail(
               error,
@@ -942,7 +941,7 @@ bool CellPayloadDecoder::appendString(
             cursor.dictionary ? "fallback length out of range"
                               : "string length out of range");
       }
-      // Rule 23: the values must fit the data stream.
+      // The values must fit the data stream.
       if (static_cast<uint64_t>(length) >
           cursor.data.size() - cursor.dataOffset) {
         return fail(
@@ -961,7 +960,7 @@ bool CellPayloadDecoder::appendString(
     }
   } else {
     // Dictionary hits precede the fallback rows; hits resolve against
-    // their segment's dictionary (rule 19).
+    // their segment's dictionary.
     const auto hits = static_cast<uint32_t>(
         std::min<uint64_t>(dense, cursor.matchedSum - cursor.indexPos));
     for (uint32_t i = 0; i < hits; ++i) {
@@ -1269,8 +1268,7 @@ RunLayout maybeCompressRun(
         scratch->asMutable<uint8_t>(),
         static_cast<int64_t>(scratch->size()));
     compressTimeNs += currentTimeNs() - start;
-    // Spec section 5: fall back to the stored form when compression does
-    // not pay.
+    // Fall back to the stored form when compression does not pay.
     if (written > 0 && static_cast<uint64_t>(written) < dataBytes) {
       body = scratch->as<char>();
       stored = static_cast<uint64_t>(written);
