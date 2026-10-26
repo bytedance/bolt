@@ -27,8 +27,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// The Cell shuffle read chain, complete in itself: pulls reader streams,
 /// parses back-to-back ColumnarPayloads (no dispatch byte, no outer
 /// framing — the wire protocol is not compatible with the other writers and
-/// is selected by shuffleWriterType on both sides), and batches small
-/// payloads into output vectors.
+/// is selected by shuffleWriterType on both sides), and decodes them into
+/// batches of at most batchSize rows: a large payload over several batches,
+/// small ones into one.
 ///
 /// Deliberately shares nothing with the existing deserializer stack; its
 /// only inputs are the stream iterator, the schema and the codec. Batches
@@ -102,9 +103,9 @@ class CellShuffleReader {
 
   enum class Decoded { kPayload, kComposite, kEnd };
 
-  /// Decodes the next block across streams: a payload into `out`, or a
+  /// Opens the next block across streams: a payload in the decoder, or a
   /// CompositeRows block into compositeRows_.
-  Decoded nextDecoded(RowVectorPtr& out);
+  Decoded nextBlock();
 
   /// Reads one CompositeRows block (CellFormat.h) whose kind byte was
   /// consumed; false, with `error`, on a malformed one.
@@ -118,10 +119,9 @@ class CellShuffleReader {
   /// as a CompositeRowVector the way the V1 reader does.
   RowVectorPtr nextComposite();
 
-  /// Next batch in the physical (Cell) schema; nullptr at the end.
+  /// Next batch in the physical (Cell) schema, at most batchSize rows;
+  /// nullptr at the end.
   RowVectorPtr nextPhysical();
-
-  RowVectorPtr concat(const std::vector<RowVectorPtr>& parts);
 
   std::shared_ptr<ReaderStreamIterator> streams_;
   const CellShuffleTypeAdapter adapter_;

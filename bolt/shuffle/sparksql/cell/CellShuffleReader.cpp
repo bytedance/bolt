@@ -17,6 +17,7 @@
 #include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 
 #include <arrow/io/interfaces.h>
+#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -106,7 +107,7 @@ CellShuffleReader::CellShuffleReader(
       decoder_(layout_, decompressor_.get(), pool_),
       compositeConverter_(outputType, pool_) {}
 
-CellShuffleReader::Decoded CellShuffleReader::nextDecoded(RowVectorPtr& out) {
+CellShuffleReader::Decoded CellShuffleReader::nextBlock() {
   while (!exhausted_) {
     if (source_ == nullptr) {
       auto in = streams_->nextStream(arrowPool_);
@@ -132,7 +133,7 @@ CellShuffleReader::Decoded CellShuffleReader::nextDecoded(RowVectorPtr& out) {
         kind,
         static_cast<uint8_t>(CellBlockKind::kPayload),
         "unknown cell shuffle block kind");
-    const bool ok = decoder_.decode(*source_, out, error);
+    const bool ok = decoder_.beginPayload(*source_, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
     return Decoded::kPayload;
   }
@@ -240,20 +241,6 @@ RowVectorPtr CellShuffleReader::nextComposite() {
   return output;
 }
 
-RowVectorPtr CellShuffleReader::concat(const std::vector<RowVectorPtr>& parts) {
-  vector_size_t total = 0;
-  for (const auto& part : parts) {
-    total += part->size();
-  }
-  auto result = BaseVector::create<RowVector>(layout_.rowType(), total, pool_);
-  vector_size_t offset = 0;
-  for (const auto& part : parts) {
-    result->copy(part.get(), offset, 0, part->size());
-    offset += part->size();
-  }
-  return result;
-}
-
 RowVectorPtr CellShuffleReader::next() {
   // A composite block met while batching payloads goes out next.
   if (hasCompositeRows()) {
@@ -284,31 +271,28 @@ RowVectorPtr CellShuffleReader::next() {
 
 RowVectorPtr CellShuffleReader::nextPhysical() {
   const uint64_t start = currentTimeNs();
-  std::vector<RowVectorPtr> parts;
-  int64_t pendingRows = 0;
-  int64_t pendingBytes = 0;
-  while (pendingRows < batchSize_ && pendingBytes < batchByteSize_) {
-    RowVectorPtr decoded;
-    const auto kind = nextDecoded(decoded);
-    if (kind != Decoded::kPayload) {
-      // End of input, or a composite block that next() emits on its own.
-      break;
-    }
-    if (decoded->size() == 0) {
+  const vector_size_t capacity = std::max(batchSize_, 1);
+  // One batch at a time: a large payload comes out over several calls,
+  // small ones fill the same batch until it is full.
+  while (decoder_.batchRows() < capacity &&
+         static_cast<int64_t>(decoder_.batchBytes()) < batchByteSize_) {
+    const uint32_t left = decoder_.payloadRowsLeft();
+    if (left == 0) {
+      if (nextBlock() != Decoded::kPayload) {
+        // End of input, or a composite block that next() emits on its own.
+        break;
+      }
       continue;
     }
-    pendingRows += decoded->size();
-    pendingBytes += decoded->estimateFlatSize();
-    parts.push_back(std::move(decoded));
+    const auto rows = static_cast<uint32_t>(
+        std::min<int64_t>(left, capacity - decoder_.batchRows()));
+    std::string error;
+    const bool ok = decoder_.appendRows(rows, capacity, error);
+    BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
   }
+  auto output = decoder_.finishBatch();
   decodeTimeNs_ += currentTimeNs() - start;
-  if (parts.empty()) {
-    return nullptr;
-  }
-  if (parts.size() == 1) {
-    return std::move(parts[0]);
-  }
-  return concat(parts);
+  return output;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

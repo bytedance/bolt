@@ -35,6 +35,12 @@ inline constexpr uint32_t kBlockSourceBytes = 64;
 /// Fixed payload header length (spec section 3).
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 
+/// Most rows one partition gathers in a window, and so one payload holds.
+/// Not a memory bound: the reader decodes a payload in batches, whatever
+/// its row count. It keeps the u32 row fields exact and a payload
+/// decodable as one vector.
+inline constexpr uint32_t kMaxPayloadRows = (1u << 31) - 1;
+
 /// Worst-case serialized size of one Encoding Block: 1 byte EncodingByte,
 /// 8 bytes FOR base, 64 bytes body (spec section 7.3).
 inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kBlockSourceBytes;

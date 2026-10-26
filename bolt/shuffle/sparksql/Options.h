@@ -101,8 +101,6 @@ struct CellShuffleOptions {
   int64_t checkpointPartitionBytes = 40LL << 20;
   // Close the window when total null bitmap memory exceeds this threshold.
   int64_t nullMemLimitBytes = 16LL << 20;
-  // Maximum rows per partition window.
-  uint32_t maxWindowRows = 1u << 22;
   // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
   // Merge runs per partition; disabling avoids gathering the whole window.
