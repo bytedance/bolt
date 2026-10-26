@@ -202,6 +202,8 @@ DataCells::DataCells(
   }
   infos_ = reinterpret_cast<ChainInfo*>(
       pool_->allocate(numChains * sizeof(ChainInfo)));
+  // The pool aligns to 64 bytes: every ChainInfo stays in one cache line.
+  BOLT_DCHECK_EQ(reinterpret_cast<uintptr_t>(infos_) % alignof(ChainInfo), 0);
   if (numChains != 0) {
     std::fill(infos_, infos_ + numChains, ChainInfo{});
   }
@@ -238,11 +240,12 @@ void DataCells::linkCell(ChainInfo& info, uint32_t id) {
     next_[info.lastCell] = id;
   }
   info.lastCell = id;
-  info.tailUsed = 0;
+  info.tail = allocator_->cellData(id);
+  info.tailLeft = allocator_->cellBytes();
   ++info.numCells;
 }
 
-void DataCells::append(
+void DataCells::appendSlow(
     uint32_t pid,
     uint32_t stream,
     const void* data,
@@ -251,20 +254,6 @@ void DataCells::append(
     return;
   }
   const uint32_t cellBytes = allocator_->cellBytes();
-  {
-    // Fast path: the bytes fit the current tail cell. Nothing is allocated,
-    // so no spill can fire mid-append and the chain cannot move under us.
-    // With blocks of at most kMaxBlockBytes and cells of >= 256 bytes this
-    // is the overwhelmingly common case.
-    auto& info = infos_[chainIndex(pid, stream)];
-    if (info.numCells != 0 && info.tailUsed + bytes <= cellBytes) {
-      ::memcpy(
-          allocator_->cellData(info.lastCell) + info.tailUsed, data, bytes);
-      info.tailUsed += bytes;
-      totalBytes_ += bytes;
-      return;
-    }
-  }
   // Phase 1: allocate every cell this append could need, before touching the
   // chain or copying a byte. The allocator's callback or pool arbitration
   // during chunk growth may spill and release all chains here; the held ids
@@ -296,14 +285,14 @@ void DataCells::append(
   totalBytes_ += bytes;
   uint32_t nextHeld = 0;
   while (bytes > 0) {
-    if (info.numCells == 0 || info.tailUsed == cellBytes) {
+    if (info.tailLeft == 0) {
       const uint32_t id = heldAt(nextHeld++);
       linkCell(info, id);
     }
-    const uint32_t space = cellBytes - info.tailUsed;
-    const uint32_t copy = bytes < space ? bytes : space;
-    ::memcpy(allocator_->cellData(info.lastCell) + info.tailUsed, src, copy);
-    info.tailUsed += copy;
+    const uint32_t copy = bytes < info.tailLeft ? bytes : info.tailLeft;
+    ::memcpy(info.tail, src, copy);
+    info.tail += copy;
+    info.tailLeft -= copy;
     src += copy;
     bytes -= copy;
   }
@@ -335,10 +324,7 @@ void DataCells::releasePartition(uint32_t pid) {
       allocator_->recycle(id);
       id = following;
     }
-    totalBytes_ -= info.numCells == 0
-        ? 0
-        : (static_cast<uint64_t>(info.numCells - 1) * allocator_->cellBytes()) +
-            info.tailUsed;
+    totalBytes_ -= chainBytes(info);
     info = ChainInfo{};
   }
 }
