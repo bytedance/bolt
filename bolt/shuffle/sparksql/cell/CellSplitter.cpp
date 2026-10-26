@@ -300,7 +300,8 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   // dictionary inputs alike.
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
-  for (uint32_t row = 0; row < batch.numRows; ++row) {
+  const uint32_t numRows = batch.numRows; // stores may alias the batch
+  for (uint32_t row = 0; row < numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
@@ -310,10 +311,15 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
       }
     }
     const T value = kIndexed ? vals[decoded.index(row)] : vals[row];
-    char* slot = base + (static_cast<size_t>(pid) << 6) + cur[pid];
-    ::memcpy(slot, &value, sizeof(T));
-    cur[pid] += sizeof(T);
-    if (FOLLY_UNLIKELY(cur[pid] == kBlockValueBytes)) {
+    // Aligned for T: lines are 64-byte aligned and the cursor steps by
+    // sizeof(T), so the line holds a T array, as flush*() reads it. The
+    // cursor goes through a register rather than being re-read after the
+    // store.
+    const uint32_t at = cur[pid];
+    *reinterpret_cast<T*>(base + (static_cast<size_t>(pid) << 6) + at) = value;
+    const uint32_t next = at + sizeof(T);
+    cur[pid] = static_cast<uint8_t>(next);
+    if (FOLLY_UNLIKELY(next == kBlockValueBytes)) {
       flushEncoded<T>(stream, pid, cur);
     }
   }
@@ -335,7 +341,8 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   // dictionary inputs alike.
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
-  for (uint32_t row = 0; row < batch.numRows; ++row) {
+  const uint32_t numRows = batch.numRows; // stores may alias the batch
+  for (uint32_t row = 0; row < numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
@@ -345,10 +352,15 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
       }
     }
     const T value = kIndexed ? vals[decoded.index(row)] : vals[row];
-    char* slot = base + (static_cast<size_t>(pid) << 6) + cur[pid];
-    ::memcpy(slot, &value, sizeof(T));
-    cur[pid] += sizeof(T);
-    if (FOLLY_UNLIKELY(cur[pid] == kBlockValueBytes)) {
+    // Aligned for T: lines are 64-byte aligned and the cursor steps by
+    // sizeof(T), so the line holds a T array, as flush*() reads it. The
+    // cursor goes through a register rather than being re-read after the
+    // store.
+    const uint32_t at = cur[pid];
+    *reinterpret_cast<T*>(base + (static_cast<size_t>(pid) << 6) + at) = value;
+    const uint32_t next = at + sizeof(T);
+    cur[pid] = static_cast<uint8_t>(next);
+    if (FOLLY_UNLIKELY(next == kBlockValueBytes)) {
       flushRaw(stream, pid, cur);
     }
   }
@@ -366,7 +378,8 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
-  for (uint32_t row = 0; row < batch.numRows; ++row) {
+  const uint32_t numRows = batch.numRows; // stores may alias the batch
+  for (uint32_t row = 0; row < numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
@@ -439,7 +452,8 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   char* __restrict dictLineBase =
       cacheBase_ + ((static_cast<size_t>(dataStream) * numPartitions_) << 6);
 
-  for (uint32_t row = 0; row < batch.numRows; ++row) {
+  const uint32_t numRows = batch.numRows; // stores may alias the batch
+  for (uint32_t row = 0; row < numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if (FOLLY_LIKELY(row + 8 < batch.numRows)) {
       // With tens of thousands of partitions the dictionary lines
@@ -550,7 +564,8 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
-  for (uint32_t row = 0; row < batch.numRows; ++row) {
+  const uint32_t numRows = batch.numRows; // stores may alias the batch
+  for (uint32_t row = 0; row < numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
@@ -582,7 +597,8 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
 
-  for (uint32_t row = 0; row < batch.numRows; ++row) {
+  const uint32_t numRows = batch.numRows; // stores may alias the batch
+  for (uint32_t row = 0; row < numRows; ++row) {
     const uint32_t pid = row2pid[row];
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {
