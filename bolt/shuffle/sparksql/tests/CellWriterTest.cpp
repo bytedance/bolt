@@ -655,6 +655,8 @@ TEST_F(CellWriterTest, timestampKeepsAllSixteenBytes) {
   roundTrip(spillOptions, bigPids, batches, &spilling);
   EXPECT_GT(spilling.metrics().totalBytesEvicted, 0);
   EXPECT_GT(spilling.metrics().spillCount, 0);
+  // Every window spills at least one Run before its null bodies.
+  EXPECT_GE(spilling.metrics().totalSpillFiles, spilling.metrics().spillCount);
 }
 
 TEST_F(CellWriterTest, rejectsOutOfRangeTimestamp) {
