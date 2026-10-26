@@ -1448,7 +1448,7 @@ void HashBuild::setupSpillInput(HashJoinBridge::SpillInput spillInput) {
   // data, but spillInput(input) in addInput(RowVectorPtr input) will not
   // trigger spill again (OOM in end).
   if (spiller_ != nullptr) {
-    auto maxPartitionRowCount = spiller_->maxPartitionRowCount();
+    maxPartitionRowCount = spiller_->maxPartitionRowCount();
   }
   table_.reset();
   spiller_.reset();

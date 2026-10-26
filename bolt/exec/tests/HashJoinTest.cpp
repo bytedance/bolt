@@ -3674,7 +3674,11 @@ TEST_P(MultiThreadedHashJoinTest, noSpillLevelLimit) {
         if (!hasSpill) {
           return;
         }
-        ASSERT_EQ(maxHashBuildSpillLevel(*task), 4);
+        // Adaptive repartitioning can consume the available hash bits in
+        // fewer levels than the default 3 bits per level.
+        const auto spillLevel = maxHashBuildSpillLevel(*task);
+        ASSERT_GT(spillLevel, 0);
+        ASSERT_LE(spillLevel, 4);
       })
       .run();
 }
@@ -6298,6 +6302,40 @@ TEST_F(HashJoinTest, antiJoinAbandomBuildNoDupHashEarly) {
       .referenceQuery(
           "SELECT t.* FROM t WHERE NOT EXISTS (SELECT * FROM u WHERE u.u0 = t.t0)")
       .run();
+}
+
+TEST_F(HashJoinTest, adaptiveRepartitionBits) {
+  for (const auto numBuildBatches : {2, 20}) {
+    SCOPED_TRACE(numBuildBatches);
+    // All rows land in one partition. Spilling after the first 100 rows
+    // leaves either 200 or 2,000 rows to restore. Repartitioning should keep
+    // the default 3 bits or increase to 5 bits, respectively.
+    const auto buildBatch = makeRowVector(
+        {"u0"}, {makeFlatVector<int64_t>(100, [](auto) { return 1; })});
+    HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+        .probeKeys({"t0"})
+        .probeVectors({makeRowVector({"t0"}, {makeFlatVector<int64_t>({1})})})
+        .buildKeys({"u0"})
+        .buildVectors(std::vector<RowVectorPtr>(numBuildBatches, buildBatch))
+        .joinOutputLayout({"t0", "u0"})
+        .referenceQuery("SELECT t0, u0 FROM t, u WHERE t0 = u0")
+        .injectSpill(false)
+        .spillMemoryThreshold(1)
+        .maxSpillLevel(1)
+        .config(core::QueryConfig::kSpillStartPartitionBit, "29")
+        .config(core::QueryConfig::kSpillNumPartitionBits, "3")
+        .config(core::QueryConfig::kSpillWriteBufferSize, "0")
+        .config(core::QueryConfig::kRowBasedSpillMode, "disable")
+        .config(core::QueryConfig::kHashJoinSkewedPartitionEnabled, "false")
+        .verifier([&](const std::shared_ptr<Task>& task, bool) {
+          EXPECT_EQ(maxHashBuildSpillLevel(*task), 1);
+          // Count the initial 8 partitions and the repartitioned set.
+          EXPECT_EQ(
+              taskSpilledStats(*task).first.spilledPartitions,
+              8 + (numBuildBatches == 2 ? 8 : 32));
+        })
+        .run();
+  }
 }
 
 TEST_F(HashJoinTest, spillPartitionBitsOverlap) {
