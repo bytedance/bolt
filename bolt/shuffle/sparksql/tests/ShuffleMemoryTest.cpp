@@ -723,6 +723,7 @@ TEST_F(ShuffleMemoryTest, testCellWriterKeepsDataResidentUnderReclaimableHog) {
   EXPECT_EQ(metrics.totalBytesEvicted, 0)
       << "pressure should resolve by reclaiming the hog, not the writer";
   EXPECT_EQ(metrics.spillCount, 0);
+  EXPECT_EQ(metrics.totalSpillFiles, 0);
 }
 
 ShuffleWriterMetrics ShuffleMemoryTest::runCellUnderPressure(
@@ -818,6 +819,7 @@ TEST_F(ShuffleMemoryTest, testCellWriterReclaimViaMemoryPressure) {
   ASSERT_GT(metrics.totalBytesWritten, 0);
   EXPECT_GT(metrics.totalBytesEvicted, 0)
       << "reclaim should have forced the writer to spill Runs";
+  EXPECT_GT(metrics.totalSpillFiles, 0);
   EXPECT_GT(metrics.externalReclaimTime, 0);
 }
 
@@ -829,6 +831,7 @@ TEST_F(ShuffleMemoryTest, testCellWriterOnCelebornPushesWhenReclaimed) {
       PartitionWriterType::kCeleborn, 128 << 20, 100 << 20, client);
   ASSERT_GT(metrics.totalBytesWritten, 0);
   EXPECT_GT(metrics.spillCount, 0) << "reclaim should have pushed a window";
+  EXPECT_EQ(metrics.totalSpillFiles, 0) << "nothing should touch local disk";
   EXPECT_GT(metrics.externalReclaimTime, 0);
   int64_t pushed = 0;
   for (const auto& [pid, bytes] : client->getData()) {
