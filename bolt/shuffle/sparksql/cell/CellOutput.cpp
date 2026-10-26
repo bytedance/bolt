@@ -114,6 +114,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
     }
     ends[pid + 1] = spill_.end();
   }
+  countRun(ends[0]);
   // A spill exists to free memory: hand the workspace capacity back too.
   runScratch_.reset();
   compressScratch_.reset();
