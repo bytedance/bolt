@@ -335,6 +335,73 @@ TEST_F(CellChunkTest, nullCellsAllNullIsPureCounting) {
   EXPECT_EQ(nulls.summarize(2, 1, 1500).tag, NullTag::kAllNull);
 }
 
+TEST_F(CellChunkTest, nullCellsAllocatePerColumn) {
+  constexpr uint32_t kColumns = 100;
+  NullCells nulls(pool_.get(), 8, kColumns);
+  // One sparse null in one column: one 16-byte bitmap, not one per column.
+  nulls.setNull(3, 42, 7);
+  EXPECT_EQ(nulls.allocatedBytes(), 16);
+  EXPECT_EQ(nulls.tableBytes(), kColumns * 16);
+  EXPECT_EQ(nulls.summarize(3, 42, 100).tag, NullTag::kRawNull);
+  EXPECT_EQ(nulls.summarize(3, 41, 100).tag, NullTag::kNoNull);
+  EXPECT_EQ(nulls.summarize(2, 42, 100).tag, NullTag::kNoNull);
+
+  // Prefix-only columns of the same partition need no bitmap either.
+  nulls.setNullRun(3, 0, 0, 1000);
+  EXPECT_EQ(nulls.allocatedBytes(), 16);
+  EXPECT_EQ(nulls.summarize(3, 0, 1000).tag, NullTag::kAllNull);
+
+  // A second partition opens a table of its own.
+  nulls.setNull(5, 1, 0);
+  EXPECT_EQ(nulls.tableBytes(), 2 * kColumns * 16);
+}
+
+TEST_F(CellChunkTest, nullCellsReuseOutgrownBitmaps) {
+  NullCells nulls(pool_.get(), 2, 2);
+  // Column 0 grows 16 -> 32 bytes; its 16-byte block is freed and column
+  // 1's first bitmap reuses it. Only the slots' bitmaps count.
+  nulls.setNull(0, 0, 1);
+  nulls.setNull(0, 0, 200);
+  EXPECT_EQ(nulls.allocatedBytes(), 32);
+  nulls.setNull(0, 1, 3);
+  EXPECT_EQ(nulls.allocatedBytes(), 32 + 16);
+
+  // Bits survive the growth, and the reused block starts all non-null.
+  std::vector<uint8_t> bitmap(26);
+  nulls.emitBitmap(0, 0, 201, bitmap.data());
+  for (uint32_t row = 0; row < 201; ++row) {
+    EXPECT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row != 1 && row != 200)
+        << "row " << row;
+  }
+  nulls.emitBitmap(0, 1, 201, bitmap.data());
+  for (uint32_t row = 0; row < 201; ++row) {
+    EXPECT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row != 3) << "row " << row;
+  }
+
+  // A released partition hands its table and bitmaps to the next one.
+  nulls.releasePartition(0);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
+  EXPECT_EQ(nulls.summarize(0, 0, 201).tag, NullTag::kNoNull);
+  const auto tables = nulls.tableBytes();
+  nulls.setNull(1, 0, 1);
+  nulls.setNull(1, 1, 200);
+  EXPECT_EQ(nulls.tableBytes(), tables);
+  EXPECT_EQ(nulls.allocatedBytes(), 16 + 32);
+  EXPECT_EQ(nulls.summarize(1, 0, 201).nonNullCount, 200);
+  EXPECT_EQ(nulls.summarize(1, 1, 201).nonNullCount, 200);
+
+  // Past 64 bytes a bitmap comes from the pool and goes back as it grows.
+  nulls.setNull(1, 0, 5000); // 1KB; the 16-byte block is freelisted
+  EXPECT_EQ(nulls.allocatedBytes(), 1024 + 32);
+  nulls.setNull(1, 0, 12000); // 2KB; the 1KB block is freed
+  EXPECT_EQ(nulls.allocatedBytes(), 2048 + 32);
+  EXPECT_EQ(nulls.summarize(1, 0, 12001).nonNullCount, 12001 - 3);
+
+  nulls.reset();
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
+  EXPECT_EQ(nulls.tableBytes(), 0);
+}
+
 TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
   NullCells nulls(pool_.get(), 2, 1);
   // Rows 0..9 null (prefix), 10..19 non-null, 20 null again: the late null

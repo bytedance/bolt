@@ -767,7 +767,8 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
             << "MB, data=" << (dataBytes >> 20) << "MB ("
             << (chunkBytes > 0 ? 100.0 * dataBytes / chunkBytes : 0.0)
             << "% utilization), resident=" << (residentBytes_ >> 20)
-            << "MB, nulls=" << (nulls_.allocatedBytes() >> 20)
+            << "MB, nulls="
+            << ((nulls_.allocatedBytes() + nulls_.tableBytes()) >> 20)
             << "MB, pool used=" << (pool->usedBytes() >> 20)
             << "MB, pool peak=" << (pool->peakBytes() >> 20) << "MB";
 
