@@ -346,6 +346,8 @@ struct CellWindowInput;
 
 /// Runs below this size are stored: compression would not pay for itself.
 constexpr uint64_t kMinCompressRunBytes = 1 << 10;
+/// A final run at least this large is written SEPARATE, stream by stream.
+constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
 
 /// Bytes of a run header: layout byte, stored size, per-stream sizes.
 inline uint64_t runHeaderBytes(uint32_t numStreams) {

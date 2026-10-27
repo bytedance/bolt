@@ -397,7 +397,7 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     std::vector<uint32_t> runCounts;
     const uint64_t end = offset + length;
     const uint64_t tagBytes = (layout.numWireColumns() + 7) / 8;
-    const uint64_t runHeaderBytes = 1 + 8 + 8ull * layout.numStreams();
+    const uint64_t numStreams = layout.numStreams();
     while (offset < end) {
       ++offset; // the block kind byte
       uint32_t runCount;
@@ -406,9 +406,17 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
       ::memcpy(&nullStored, file.data() + offset + 16, sizeof(nullStored));
       offset += 24 + nullStored + tagBytes;
       for (uint32_t run = 0; run < runCount; ++run) {
-        uint64_t stored;
-        ::memcpy(&stored, file.data() + offset + 1, sizeof(stored));
-        offset += runHeaderBytes + stored;
+        // A SEPARATE run has a stored size per stream, the others one.
+        const bool separate = static_cast<uint8_t>(file[offset]) ==
+            static_cast<uint8_t>(RunLayout::kSeparate);
+        const uint64_t storedCount = separate ? numStreams : 1;
+        uint64_t stored = 0;
+        for (uint64_t i = 0; i < storedCount; ++i) {
+          uint64_t size;
+          ::memcpy(&size, file.data() + offset + 1 + 8 * i, sizeof(size));
+          stored += size;
+        }
+        offset += 1 + 8 * (storedCount + numStreams) + stored;
       }
       runCounts.push_back(runCount);
     }
