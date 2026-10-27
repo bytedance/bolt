@@ -21,6 +21,7 @@
 #include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/BitUtil.h"
+#include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/vector/FlatVector.h"
@@ -109,11 +110,24 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 
   const auto& cellOpts = options_.cellOptions;
   const uint32_t numStreams = layout_.numStreams();
-  const int64_t capacity = boltPool_->maxCapacity();
-  // An unlimited pool reports kMaxMemory; use a 1 GiB sizing budget.
-  const int64_t budget = (capacity <= 0 || capacity > (int64_t{1} << 40))
-      ? (int64_t{1} << 30)
-      : std::min<int64_t>(capacity / 4, int64_t{1} << 30);
+  // The memory the writer can count on: the pool's capacity, or, from an
+  // unlimited pool (kMaxMemory: under Spark the limit lives in the task's
+  // execution memory), the Spark execution memory per task. Cell tail
+  // slack is bounded by a share of it, so sizing from a budget far above
+  // the real one wastes a large part of the real memory in half-filled
+  // tail cells. With neither, a 1 GiB budget.
+  constexpr int64_t kUnlimited = int64_t{1} << 40;
+  int64_t limit = boltPool_->maxCapacity();
+  if (limit <= 0 || limit > kUnlimited) {
+    const auto perTask =
+        memory::sparksql::ExecutionMemoryPool::getAvailableMemoryPerTask();
+    limit = perTask.has_value() && *perTask > 0 && *perTask <= kUnlimited
+        ? *perTask
+        : 0;
+  }
+  const int64_t budget = limit > 0
+      ? std::min<int64_t>(limit / 4, int64_t{1} << 30)
+      : (int64_t{1} << 30);
   const int64_t perStream =
       budget / 8 / numPartitions_ / std::max<uint32_t>(1, numStreams);
   const uint32_t cellBytes = prevPowerOfTwo(
