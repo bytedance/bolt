@@ -54,6 +54,10 @@ void Lz4FrameStreamCompressor::init() {
   if (checksumEnabled()) {
     prefs_.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
   }
+  if (independentBlocks()) {
+    prefs_.frameInfo.blockMode = LZ4F_blockIndependent;
+    prefs_.frameInfo.blockSizeID = LZ4F_max256KB;
+  }
   firstTime_ = true;
 
   LZ4F_errorCode_t ret = LZ4F_createCompressionContext(&cctx_, LZ4F_VERSION);
@@ -78,6 +82,7 @@ int64_t Lz4FrameStreamCompressor::writeHeader(
       !LZ4F_isError(ret), "Bolt shuffle codec: LZ4F_compressBegin failed.");
 
   firstTime_ = false;
+  frameOpen_ = true;
   dst += ret;
   dstCapacity -= ret;
   return static_cast<int64_t>(ret);
@@ -168,18 +173,26 @@ StreamEndResult Lz4FrameStreamCompressor::end(
 
   size_t ret = LZ4F_compressEnd(cctx_, dst, dstCapacity, nullptr /* options */);
   BOLT_CODEC_CHECK(!LZ4F_isError(ret), "LZ4F_compressEnd failed.");
+  frameOpen_ = false;
 
   bytesWritten += static_cast<int64_t>(ret);
   return StreamEndResult{bytesWritten, true};
 }
 
 void Lz4FrameStreamCompressor::reset() {
-  // LZ4 frame API doesn't have a reset function for compression context
-  // We need to free and recreate
+  // A context whose frame ended starts the next one at LZ4F_compressBegin,
+  // keeping the block buffer and state it allocated: recreating them for
+  // every frame dominates when frames are small and many. A frame left
+  // open has no reset in the LZ4 frame API: free and recreate.
+  if (!frameOpen_) {
+    firstTime_ = true;
+    return;
+  }
   if (cctx_) {
     LZ4F_freeCompressionContext(cctx_);
     cctx_ = nullptr;
   }
+  frameOpen_ = false;
   init();
 }
 
