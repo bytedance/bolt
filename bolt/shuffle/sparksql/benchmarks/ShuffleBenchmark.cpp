@@ -105,11 +105,38 @@ DEFINE_bool(
     bolt_benchmark_shuffle_list,
     false,
     "Print the cases of the tier and exit.");
+DEFINE_string(
+    bolt_benchmark_shuffle_codec,
+    "lz4",
+    "Shuffle compression of every writer and reader: lz4 (LZ4 frame) or "
+    "zstd.");
+DEFINE_int32(
+    bolt_benchmark_shuffle_codec_level,
+    0,
+    "Compression level; 0 keeps the codec's default.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
 
 namespace {
+
+arrow::Compression::type benchmarkCodec() {
+  if (FLAGS_bolt_benchmark_shuffle_codec == "lz4") {
+    return arrow::Compression::LZ4_FRAME;
+  }
+  if (FLAGS_bolt_benchmark_shuffle_codec == "zstd") {
+    return arrow::Compression::ZSTD;
+  }
+  BOLT_FAIL(
+      "Unknown --bolt_benchmark_shuffle_codec: {}",
+      FLAGS_bolt_benchmark_shuffle_codec);
+}
+
+int32_t benchmarkCodecLevel() {
+  return FLAGS_bolt_benchmark_shuffle_codec_level == 0
+      ? kDefaultCompressionLevel
+      : FLAGS_bolt_benchmark_shuffle_codec_level;
+}
 
 constexpr int32_t kRowsPerBatch = 4096;
 constexpr int64_t kSplitMemLimit = 1LL << 30;
@@ -1229,6 +1256,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
   options.partitionWriterOptions.dataFile = dataFile;
   options.partitionWriterOptions.configuredDirs = {spillDir()};
   options.partitionWriterOptions.numSubDirs = 1;
+  options.partitionWriterOptions.compressionType = benchmarkCodec();
+  options.partitionWriterOptions.compressionLevel = benchmarkCodecLevel();
   options.cellOptions.enableStringDictionary = writer != Writer::kCellNoDict;
   return options;
 }
@@ -1421,7 +1450,9 @@ class BufferStreamIterator final : public ReaderStreamIterator {
 class TimingCodec final : public Codec {
  public:
   explicit TimingCodec(Codec* inner)
-      : Codec(CodecType::LZ4_FRAME, CodecOptions{CodecBackend::NONE}),
+      : Codec(
+            fromArrowCodecType(benchmarkCodec()),
+            CodecOptions{CodecBackend::NONE}),
         inner_(inner) {}
 
   int64_t compress(const uint8_t* in, int64_t n, uint8_t* out, int64_t cap)
@@ -1485,8 +1516,8 @@ Read readBack(
   const auto rowType = dataType(c);
   auto pool = freshPool("reader");
   auto codec = createCodec(
-      arrow::Compression::LZ4_FRAME,
-      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+      benchmarkCodec(),
+      CodecOptions{CodecBackend::NONE, benchmarkCodecLevel(), true});
   const int64_t rssBase = resetPeakRss();
   if (isCell(output.writer)) {
     TimingCodec timing(codec.get());
