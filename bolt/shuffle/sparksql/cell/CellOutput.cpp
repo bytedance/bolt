@@ -63,8 +63,10 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
 
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     uint64_t total = 0;
-    for (uint32_t s = 0; s < numStreams; ++s) {
-      total += in.cells->bytes(pid, s);
+    if (in.runPartitions == nullptr || in.runPartitions[pid] != 0) {
+      for (uint32_t s = 0; s < numStreams; ++s) {
+        total += in.cells->bytes(pid, s);
+      }
     }
     if (total > 0) {
       // Store runs in wire format so merge can copy them without re-encoding

@@ -1416,8 +1416,21 @@ TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
         if (coalesce) {
           EXPECT_EQ(runCounts[0], 1);
         } else {
-          // Spilled segments, plus the resident cells when not sealed.
-          EXPECT_GE(runCounts[0], 2);
+          // Spilled segments, plus the resident cells when not sealed. A
+          // pressure spill takes the largest partitions only, so not every
+          // one is in every Run: some large partition's first payload spans
+          // several.
+          uint32_t most = 0;
+          uint64_t offset = 0;
+          for (int32_t pid = 0; pid + 1 < kPartitions; ++pid) {
+            const auto counts = payloadRunCounts(
+                layout, file, offset, metrics.partitionLengths[pid]);
+            offset += metrics.partitionLengths[pid];
+            if (!counts.empty()) {
+              most = std::max(most, counts[0]);
+            }
+          }
+          EXPECT_GE(most, 2);
         }
         evicted[compressSpill] = metrics.totalBytesEvicted;
         written[compressSpill] = metrics.totalBytesWritten;
