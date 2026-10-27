@@ -208,13 +208,26 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       const char*& body,
       uint64_t& stored);
 
-  /// Writes one run to the data file, compressed per the policy above.
-  /// `data` is the concatenated stream bytes; sizes are the per-stream
-  /// decoded lengths.
+  /// Writes one run to the data file. A `separable` run of at least
+  /// kMinSeparateRunBytes is SEPARATE: each stream compressed on its own and
+  /// kept compressed only when that shrinks it, as the V1/V2 payloads treat
+  /// each buffer, so a stream that does not compress is read without a
+  /// decompression or a checksum pass. A smaller run follows the policy
+  /// above, the form a spill run takes; a spilled segment compressed only
+  /// at the merge is not separable, so the final file does not depend on
+  /// compressSpill. `data` is the concatenated stream bytes; sizes are the
+  /// per-stream decoded lengths.
   void writeRun(
       DataFileWriter& out,
       const char* data,
       uint64_t dataBytes,
+      const uint64_t* decodedSizes,
+      bool separable);
+
+  /// writeRun()'s SEPARATE form.
+  void writeSeparateRun(
+      DataFileWriter& out,
+      const char* data,
       const uint64_t* decodedSizes);
 
   /// Appends one partition's payload for the current (unsealed) window:
