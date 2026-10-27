@@ -38,6 +38,10 @@ constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
 constexpr uint32_t kDictMinProbeRows = 1024;
 constexpr uint32_t kDictMinRepeatRatio = 4;
+/// A pressure spill writes the largest partitions until this share of the
+/// cell data is covered, and keeps the rest resident for the merge to write
+/// directly, as the V1/V2 writers evict partitions until the request is met.
+constexpr uint64_t kPartialSpillDivisor = 2;
 
 uint32_t prevPowerOfTwo(uint64_t value) {
   return uint32_t{1} << (63 - __builtin_clzll(value));
@@ -376,7 +380,10 @@ void CellShuffleWriter::onBeforeChunkGrow() {
     return;
   }
   if (overCap || !boltPool_->maybeReserve(kChunkBytes)) {
-    splitter_->spillRun();
+    // The cells freed go back to the freelist, which the growth retries
+    // first: a partial Run makes room without returning a chunk.
+    splitter_->spillPartitions(
+        static_cast<uint64_t>(allocator_->usedBytes()) / kPartialSpillDivisor);
   }
 }
 
@@ -453,8 +460,17 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
       allocator_->allocatedBytes() < 2 * kChunkBytes) {
     return arrow::Status::OK();
   }
-  splitter_->spillRun();
-  *actual += allocator_->shrink();
+  // The largest partitions first, as much as the request asks. Their cells
+  // are spread over every chunk, so the chunks they free may not cover the
+  // request: then the whole window goes, as before.
+  if (size > 0) {
+    splitter_->spillPartitions(static_cast<uint64_t>(size - *actual));
+    *actual += allocator_->shrink();
+  }
+  if (size <= 0 || *actual < size) {
+    splitter_->spillRun();
+    *actual += allocator_->shrink();
+  }
   // Freed chunks alone are not enough: the reservation built up by the
   // chunk-grow choke point must go back too, or the arbitrator's requester
   // still sees no room (the standard spill-then-release() pattern).
