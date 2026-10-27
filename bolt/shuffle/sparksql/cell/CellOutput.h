@@ -24,6 +24,7 @@
 #include "bolt/shuffle/sparksql/RawPartitionOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/shuffle/sparksql/compression/StreamCodec.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -255,6 +256,15 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// The kind byte that opens every block on the wire.
   void appendBlockKind();
 
+  /// Writes partition `pid`'s resident cells to the data file as one run,
+  /// compressed by streamCompressor_ straight from the cells: SEPARATE
+  /// when at least kMinSeparateRunBytes, else COMBINED.
+  void streamResidentRun(
+      DataFileWriter& out,
+      const CellWindowInput& in,
+      uint32_t pid,
+      uint64_t total);
+
   PartialSpiller& composite_;
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
@@ -262,6 +272,15 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   memory::MemoryPool* const pool_;
   /// Spill and merge codec; null when compressionType is UNCOMPRESSED.
   std::unique_ptr<Codec> codec_;
+  /// The same compression as a stream: runs written from the cells go
+  /// through it piece by piece, so no workspace sized by the run is ever
+  /// needed. Null with no codec, or when the codec has no stream form;
+  /// codec_ then compresses gathered runs as before.
+  std::unique_ptr<StreamCompressor> streamCompressor_;
+  /// streamCompressor_'s input staging and output buffers, fixed sizes for
+  /// the writer's life.
+  std::vector<uint8_t> streamStage_;
+  std::vector<uint8_t> streamOut_;
   /// Time metrics align with the V1/V2 partition writers and never
   /// overlap: compress = codec calls only; write = fwrite/fflush moments
   /// on the data file; evict = fwrite/fflush moments on the spill file.
