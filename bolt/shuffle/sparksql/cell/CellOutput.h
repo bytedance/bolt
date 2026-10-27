@@ -41,6 +41,9 @@ struct CellWindowInput {
   /// for the writer's lifetime (the probe decides once).
   const uint8_t* encodingTags;
   uint32_t numPartitions;
+  /// For a Run only: per partition, nonzero when the Run takes it. Null
+  /// when the Run takes every partition.
+  const uint8_t* runPartitions = nullptr;
 };
 
 /// The Cell shuffle writer's output backend. Run = physical
@@ -59,8 +62,9 @@ class CellOutput {
     return false;
   }
 
-  /// Physically drains every DataCell chain into a Run of the current
-  /// window. Does not release the cells: the splitter recycles them (so a
+  /// Physically drains the DataCell chains of the partitions the input
+  /// names (every partition by default) into a Run of the current window.
+  /// Does not release the cells: the splitter recycles them (so a
   /// spill fired from inside an append never frees held ids twice).
   virtual void spillRun(const CellWindowInput& in) = 0;
 
