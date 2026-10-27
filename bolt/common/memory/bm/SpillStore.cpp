@@ -135,13 +135,17 @@ SpillReadResult SpillReadFuture::get() {
   return result;
 }
 
-SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
+SpillStore::SpillStore(SpillStoreConfig config)
     : config_(std::move(config)),
       compression_(std::make_shared<compress::CompressionManager>(
-          config_.compressionConfig)),
-      pool_(pool) {
+          config_.compressionConfig)) {
   allocator_ = CreateFileSegmentAllocator(config_.fileAllocatorConfig);
   BOLT_CHECK_NOT_NULL(allocator_);
+}
+
+SpillStore::SpillStore(SpillStoreConfig config, MemoryPool* pool)
+    : SpillStore(std::move(config)) {
+  pool_ = pool;
   BOLT_CHECK_NOT_NULL(pool_);
 }
 
@@ -200,12 +204,20 @@ SpillReadFuture SpillStore::SubmitReadBlock(
     size_t expectedRawSize,
     IoPriority priority,
     uint64_t blockId) {
+  return SubmitReadBlock(segment, expectedRawSize, priority, blockId, pool_);
+}
+
+SpillReadFuture SpillStore::SubmitReadBlock(
+    const ManagedFileSegment& segment,
+    size_t expectedRawSize,
+    IoPriority priority,
+    uint64_t blockId,
+    MemoryPool* outputPool) {
+  BOLT_CHECK_NOT_NULL(outputPool);
+  auto rawFuture =
+      SubmitReadRaw(segment, segment.segment().requested_size, priority);
   return SpillReadFuture{
-      SubmitReadRaw(segment, segment.segment().requested_size, priority),
-      compression_,
-      pool_,
-      expectedRawSize,
-      blockId};
+      std::move(rawFuture), compression_, outputPool, expectedRawSize, blockId};
 }
 
 } // namespace bytedance::bolt::memory::bm

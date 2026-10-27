@@ -85,6 +85,7 @@ CoalesceIoStats coalesceIo(
   auto lastEndOffset = startOffset;
   std::vector<Range> ranges;
   CoalesceIoStats result;
+  bool previousNoCoalesce = false;
   for (int32_t i = 0; i < items.size(); ++i) {
     auto& item = items[i];
     const auto itemOffset = offsetFunc(i);
@@ -92,7 +93,7 @@ CoalesceIoStats coalesceIo(
     result.payloadBytes += itemSize;
     const int32_t numRangesForItem = numRanges(i);
     const bool enoughRanges =
-        (numRangesForItem == kNoCoalesce ||
+        (previousNoCoalesce || numRangesForItem == kNoCoalesce ||
          ranges.size() + numRangesForItem >= rangesPerIo) &&
         !ranges.empty();
     if ((lastEndOffset != itemOffset) || enoughRanges) {
@@ -112,6 +113,7 @@ CoalesceIoStats coalesceIo(
     }
     addRanges(item, ranges);
     lastEndOffset = itemOffset + itemSize;
+    previousNoCoalesce = numRangesForItem == kNoCoalesce;
   }
   ioFunc(items, startItem, items.size(), startOffset, ranges);
   ++result.numIos;

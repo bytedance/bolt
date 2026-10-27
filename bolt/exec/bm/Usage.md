@@ -63,10 +63,16 @@ Comparison and extraction require resident row pointers:
 ```cpp
 int32_t result = rows.compare(leftRow, rightRow, column, flags);
 int32_t rowResult = rows.compareRows(leftRow, rightRow, keyFlags);
+bool sameKeys = rows.equalKeys(leftRow, rightRow, keyColumns);
 
 rows.extractColumnResident(
     rowPtrs.data(), rowPtrs.size(), column, outputVector);
 ```
+
+`equalKeys()` compares only the selected columns and returns a boolean;
+continue to use `compare()` or `compareRows()` when an ordering is required.
+It follows the general comparator's equality semantics, including equal nulls
+and equal NaNs, and falls back to general comparison for unsupported types.
 
 Pointers obtained before a spill are invalid afterward. Obtain new pointers
 through `BulkReadSession`, `ReadOnlyWindowReadSession`, or `MergeReadSession`.
@@ -225,6 +231,14 @@ session.evictLoadedChunks(targetBytes);
 Eviction is chunk-granular, so the reclaimed bytes can exceed `targetBytes`.
 Call `loadRowsScoped()` again to read the same RowIds later.
 
+For a sequential read whose consumed rows will never be needed again, call
+`session.releaseConsumedChunk(consumedRange)` after ending its scoped batch.
+The caller must have consumed every row through the range's end. The operation
+releases only the finalized chunk ending exactly there, with no outstanding
+leases or pins. Partial chunks and active write chunks remain available.
+Unlike eviction, this permanently removes the chunk's data; it cannot be read
+again. Release of the scoped batch alone only unpins its blocks.
+
 Release data permanently:
 
 ```cpp
@@ -255,8 +269,8 @@ Hash Build:
 
 - Never use a row pointer after its data has spilled.
 - Treat `RowId` as opaque and return it to `ReadOnlyWindowReadSession`.
-- `compare()`, `compareRows()`, and `extractColumnResident()` require resident
-  pointers.
+- `compare()`, `compareRows()`, `equalKeys()`, and `extractColumnResident()`
+  require resident pointers.
 - Use `RowWriteContext` only for per-column stores into its current row.
 - Common fast paths cover fixed-width values, `VARCHAR`, and `VARBINARY`.
   Verify complex-type behavior explicitly instead of assuming a fast path.

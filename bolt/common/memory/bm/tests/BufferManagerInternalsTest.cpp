@@ -32,6 +32,8 @@
 #include <filesystem>
 #include <future>
 #include <span>
+#include <stdexcept>
+#include <utility>
 
 #include <fmt/format.h>
 #include <glog/logging.h>
@@ -54,7 +56,9 @@ class BufferManagerInternalsTest : public testing::Test {
         MemoryReclaimer::create());
   }
 
-  std::shared_ptr<BufferManager> makeBufferManager(const std::string& name) {
+  std::shared_ptr<BufferManager> makeBufferManager(
+      const std::string& name,
+      std::shared_ptr<MemoryReclaimer> arbitrationReclaimer = nullptr) {
     const auto directory =
         test::UniqueTempDir(fmt::format("bolt-bm-internals-{}", name));
     std::filesystem::remove_all(directory);
@@ -63,6 +67,7 @@ class BufferManagerInternalsTest : public testing::Test {
     config.poolName = fmt::format("bm-internals-{}", name);
     config.spillStoreConfig.fileAllocatorConfig =
         test::ValidConfigWithDirectory(directory);
+    config.arbitrationReclaimer = std::move(arbitrationReclaimer);
     return BufferManager::Create(*root_, std::move(config));
   }
 
@@ -343,6 +348,32 @@ TEST_F(BufferManagerInternalsTest, ReclaimerDelegatesArbitrationLifecycle) {
 
   EXPECT_EQ(1, delegate->enterCount);
   EXPECT_EQ(1, delegate->leaveCount);
+}
+
+TEST_F(
+    BufferManagerInternalsTest,
+    AllocationLeafReclaimerForwardsLifecycleButDoesNotReclaimOrAbort) {
+  auto delegate = std::make_shared<CountingArbitrationReclaimer>();
+  auto bm = makeBufferManager("leaf-reclaimer-role", delegate);
+  auto leaf = bm->addOperatorPool("leaf-reclaimer-role-operator");
+
+  leaf->enterArbitration();
+  leaf->leaveArbitration();
+
+  EXPECT_EQ(1, delegate->enterCount);
+  EXPECT_EQ(1, delegate->leaveCount);
+
+  uint64_t reclaimable = 999;
+  ASSERT_NE(nullptr, leaf->reclaimer());
+  EXPECT_FALSE(leaf->reclaimer()->reclaimableBytes(*leaf, reclaimable));
+  EXPECT_EQ(0, reclaimable);
+
+  MemoryReclaimer::Stats stats;
+  EXPECT_EQ(0, leaf->reclaim(4096, 5, stats));
+  EXPECT_EQ(0, stats.reclaimedBytes);
+
+  auto error = std::make_exception_ptr(std::runtime_error("test abort"));
+  EXPECT_NO_THROW(leaf->reclaimer()->abort(leaf.get(), error));
 }
 
 TEST_F(BufferManagerInternalsTest, PublicControlsDoNotRequireSpillPath) {

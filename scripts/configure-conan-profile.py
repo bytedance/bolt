@@ -41,8 +41,9 @@
 # Explicit --compiler, --libcxx, and --linker options override these defaults.
 # Use --linker ld to select the compiler-default linker without adding a
 # -fuse-ld flag.
-# The selected profile is deleted and regenerated from scratch; profiles with
-# other names are left unchanged.
+# The selected profile is regenerated from scratch and atomically replaced after
+# generation succeeds. Preparation, generation or replacement failures leave the
+# original profile intact; profiles with other names are left unchanged.
 #
 #   # Configure a named profile for Clang 18, libc++, and ThinLTO.
 #   python3 scripts/configure-conan-profile.py \
@@ -862,8 +863,43 @@ def update_selected_profile(
     libc_version: str | None = None,
     pgo: PgoProfile | None = None,
 ) -> None:
-    profile_file.unlink(missing_ok=True)
     profile_file.parent.mkdir(parents=True, exist_ok=True)
+    print(f"🔧 Updating Conan profile: {profile_file}")
+    # Stage on the same filesystem so readers see either the old or full profile.
+    with tempfile.TemporaryDirectory(
+        dir=profile_file.parent, prefix=".bolt-profile-"
+    ) as directory:
+        staged_profile = Path(directory) / "profile"
+        summary = _generate_selected_profile(
+            staged_profile,
+            profile_name,
+            compiler_info,
+            libcxx,
+            lto,
+            linker,
+            extra_cflags,
+            extra_link_flags,
+            libc,
+            libc_version,
+            pgo,
+        )
+        staged_profile.replace(profile_file)
+    print(summary)
+
+
+def _generate_selected_profile(
+    profile_file: Path,
+    profile_name: str,
+    compiler_info: CompilerInfo,
+    libcxx: str,
+    lto: str,
+    linker: str | None,
+    extra_cflags: list[str],
+    extra_link_flags: list[str],
+    libc: str | None,
+    libc_version: str | None,
+    pgo: PgoProfile | None,
+) -> str:
     update_profile_with_libc_template(profile_file, libc, libc_version)
 
     profile_settings = existing_profile_settings(profile_file)
@@ -908,7 +944,6 @@ def update_selected_profile(
             "RANLIB": resolve_llvm_tool(compiler_info.executables["c"], "llvm-ranlib"),
         }
 
-    print(f"🔧 Updating Conan profile: {profile_file}")
     update_profile_entries(
         profile_file,
         "settings",
@@ -964,7 +999,7 @@ def update_selected_profile(
         summary += f" with {lto} LTO"
     if pgo is not None:
         summary += f" with {pgo.mode} PGO (SHA-256: {pgo.sha256})"
-    print(summary)
+    return summary
 
 
 def main() -> int:
