@@ -89,6 +89,10 @@ class CellSplitter {
   /// cell bytes written.
   uint64_t spillPartitions(uint64_t targetBytes);
 
+  /// DataCells::compact() between output calls: empties chunks for shrink()
+  /// to return. Returns the bytes of the chunks emptied.
+  uint64_t compactCells(uint64_t targetBytes);
+
   /// Flushes caches, drains cells (unless the output seals resident cells)
   /// and seals the window, then recycles every cell and resets its state.
   /// Called only at a complete batch boundary.
