@@ -52,6 +52,8 @@ class Lz4FrameStreamCompressor : public StreamCompressor {
   LZ4F_cctx* cctx_{nullptr};
   LZ4F_preferences_t prefs_;
   bool firstTime_{true};
+  /// A frame was begun and not ended.
+  bool frameOpen_{false};
 };
 
 /// LZ4 Frame streaming decompressor implementation.
