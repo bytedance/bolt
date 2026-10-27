@@ -51,11 +51,13 @@ LocalCellOutput::LocalCellOutput(
             options_.compressionLevel,
             options_.checksumEnabled});
   }
+  openFrom_.assign(options_.numPartitions, 0);
+  sealed_.resize(options_.numPartitions);
 }
 
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
   const uint32_t numStreams = layout_->numStreams();
-  auto& run = openWindowRuns_.emplace_back();
+  auto& run = runs_.emplace_back();
   run.storedIsFinal = codec_ == nullptr || cellOptions_.compressSpill;
   auto& ends = run.pidEnds;
   ends.resize(in.numPartitions + 1);
@@ -125,30 +127,33 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
 }
 
 void LocalCellOutput::sealWindow(const CellWindowInput& in) {
-  SealedWindow window;
-  window.runs = std::move(openWindowRuns_);
-  openWindowRuns_.clear();
-  window.nullOffset.resize(in.numPartitions, 0);
-  window.nullLength.resize(in.numPartitions, 0);
-  window.rowCounts.assign(in.rowCounts, in.rowCounts + in.numPartitions);
-  window.variableBytes.assign(
-      in.variableBytes, in.variableBytes + in.numPartitions);
-
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
-    if (window.rowCounts[pid] == 0) {
+    if (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0) {
       continue;
     }
+    // The partition's open payload ends here: its segments since the last
+    // seal become the sealed payload's, and later Runs open the next one.
+    const size_t from = openFrom_[pid];
+    openFrom_[pid] = runs_.size();
+    if (in.rowCounts[pid] == 0) {
+      continue;
+    }
+    SealedPayload payload;
+    payload.segments = partitionSegments(runs_, pid, from);
+    payload.rows = in.rowCounts[pid];
+    payload.variableBytes = in.variableBytes[pid];
     resetBuffer(scratch_, 0, pool_);
-    buildNullBody(in, pid, window.rowCounts[pid], scratch_, pool_);
-    window.nullOffset[pid] = spill_.end();
-    window.nullLength[pid] =
-        scratch_ ? static_cast<uint32_t>(scratch_->size()) : 0;
-    if (window.nullLength[pid] > 0) {
+    buildNullBody(in, pid, payload.rows, scratch_, pool_);
+    payload.nullOffset = spill_.end();
+    payload.nullLength = scratch_ ? static_cast<uint32_t>(scratch_->size()) : 0;
+    if (payload.nullLength > 0) {
       spill_.append(scratch_->as<char>(), scratch_->size());
     }
+    sealed_[pid].push_back(std::move(payload));
+    ++numSealedPayloads_;
   }
   spill_.flush();
-  sealed_.push_back(std::move(window));
+  ++numSeals_;
 }
 
 RunLayout LocalCellOutput::maybeCompressRun(
@@ -353,14 +358,11 @@ uint64_t LocalCellOutput::gatherPartitionRuns(
 
 void LocalCellOutput::writeDiskPayload(
     DataFileWriter& out,
-    const SealedWindow& w,
+    const SealedPayload& payload,
     const uint8_t* encodingTags,
     uint32_t pid) {
-  const uint32_t rows = w.rowCounts[pid];
-  if (rows == 0) {
-    return;
-  }
-  const auto segments = partitionSegments(w.runs, pid);
+  const uint32_t rows = payload.rows;
+  const auto& segments = payload.segments;
   const bool coalesce = cellOptions_.coalesceMergedRuns;
   const uint32_t runCount = coalesce ? (segments.empty() ? 0 : 1)
                                      : static_cast<uint32_t>(segments.size());
@@ -368,15 +370,16 @@ void LocalCellOutput::writeDiskPayload(
   appendBlockKind();
   appendLe32(scratch_, rows, pool_);
   appendLe32(scratch_, runCount, pool_);
-  appendLe64(scratch_, w.variableBytes[pid], pool_);
-  appendLe32(scratch_, w.nullLength[pid], pool_);
+  appendLe64(scratch_, payload.variableBytes, pool_);
+  appendLe32(scratch_, payload.nullLength, pool_);
   appendLe32(scratch_, 0, pool_); // null body stored uncompressed
   const size_t nullAt = scratch_->size();
-  resizeBuffer(scratch_, checkedPlus<size_t>(nullAt, w.nullLength[pid]), pool_);
+  resizeBuffer(
+      scratch_, checkedPlus<size_t>(nullAt, payload.nullLength), pool_);
   spill_.read(
-      w.nullOffset[pid],
+      payload.nullOffset,
       scratch_->asMutable<char>() + nullAt,
-      w.nullLength[pid]);
+      payload.nullLength);
   appendBytes(
       scratch_, encodingTags, (layout_->numWireColumns() + 7) / 8, pool_);
   rawAccum_ += scratch_->size();
@@ -466,7 +469,7 @@ void LocalCellOutput::writeCurrentWindowPayload(
     uint32_t pid) {
   const uint32_t numStreams = layout_->numStreams();
   const uint64_t total = residentBytes(in, pid);
-  const auto segments = partitionSegments(openWindowRuns_, pid);
+  const auto segments = partitionSegments(runs_, pid, openFrom_[pid]);
   const bool coalesce = cellOptions_.coalesceMergedRuns;
   uint32_t runCount;
   if (coalesce) {
@@ -546,10 +549,11 @@ uint64_t LocalCellOutput::describeRuns(
 
 std::vector<LocalCellOutput::SpillSegment> LocalCellOutput::partitionSegments(
     const std::vector<SpilledRun>& runs,
-    uint32_t pid) {
+    uint32_t pid,
+    size_t from) {
   std::vector<SpillSegment> segments;
-  segments.reserve(runs.size());
-  for (const auto& run : runs) {
+  for (size_t i = from; i < runs.size(); ++i) {
+    const auto& run = runs[i];
     if (run.pidEnds[pid + 1] > run.pidEnds[pid]) {
       segments.push_back(
           {run.pidEnds[pid], run.pidEnds[pid + 1], run.storedIsFinal});
@@ -561,61 +565,34 @@ std::vector<LocalCellOutput::SpillSegment> LocalCellOutput::partitionSegments(
 void LocalCellOutput::logWindowDiagnostics(
     const CellWindowInput& in,
     bool windowHasData) {
-  constexpr size_t kMaxListedWindows = 64;
-  uint64_t totalRuns = 0;
-  uint64_t totalRunBytes = 0;
-  for (size_t w = 0; w < sealed_.size(); ++w) {
-    const auto& window = sealed_[w];
-    uint64_t rows = 0;
-    uint32_t nonEmpty = 0;
+  uint64_t sealedRows = 0;
+  uint64_t nullBytes = 0;
+  for (const auto& payloads : sealed_) {
+    for (const auto& payload : payloads) {
+      sealedRows += payload.rows;
+      nullBytes += payload.nullLength;
+    }
+  }
+  uint64_t rows = 0;
+  uint64_t resident = 0;
+  if (windowHasData) {
+    const uint32_t numStreams = layout_->numStreams();
     for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
-      rows += window.rowCounts[pid];
-      nonEmpty += window.rowCounts[pid] > 0 ? 1 : 0;
-    }
-    uint64_t nullBytes = 0;
-    for (const auto length : window.nullLength) {
-      nullBytes += length;
-    }
-    std::ostringstream os;
-    os << "CellShuffleWriter window " << w << ": rows=" << rows
-       << ", partitions=" << nonEmpty << "/" << in.numPartitions
-       << ", nullBytes=" << mb(nullBytes) << ", ";
-    const uint64_t runBytes = describeRuns(window.runs, in.numPartitions, os);
-    totalRuns += window.runs.size();
-    totalRunBytes += runBytes;
-    if (w < kMaxListedWindows) {
-      LOG(INFO) << os.str();
-    } else if (w == kMaxListedWindows) {
-      LOG(INFO) << "CellShuffleWriter ... " << (sealed_.size() - w)
-                << " more sealed windows elided";
-    }
-  }
-  {
-    uint64_t rows = 0;
-    uint64_t resident = 0;
-    if (windowHasData) {
-      for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
-        rows += in.rowCounts[pid];
-      }
-      const uint32_t numStreams = layout_->numStreams();
-      for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
-        for (uint32_t s = 0; s < numStreams; ++s) {
-          resident += in.cells->bytes(pid, s);
-        }
+      rows += in.rowCounts[pid];
+      for (uint32_t s = 0; s < numStreams; ++s) {
+        resident += in.cells->bytes(pid, s);
       }
     }
-    std::ostringstream os;
-    os << "CellShuffleWriter residual window: rows=" << rows
-       << ", resident=" << mb(resident) << ", spilled ";
-    const uint64_t runBytes =
-        describeRuns(openWindowRuns_, in.numPartitions, os);
-    totalRuns += openWindowRuns_.size();
-    totalRunBytes += runBytes;
-    LOG(INFO) << os.str();
   }
-  LOG(INFO) << "CellShuffleWriter totals: " << sealed_.size()
-            << " sealed windows, " << totalRuns << " runs, "
-            << mb(totalRunBytes) << " spilled";
+  std::ostringstream os;
+  os << "CellShuffleWriter residual window: rows=" << rows
+     << ", resident=" << mb(resident) << ", spilled ";
+  const uint64_t runBytes = describeRuns(runs_, in.numPartitions, os);
+  LOG(INFO) << os.str();
+  LOG(INFO) << "CellShuffleWriter totals: " << numSeals_ << " seals closing "
+            << numSealedPayloads_ << " partition payloads (" << sealedRows
+            << " rows, nullBytes=" << mb(nullBytes) << "), " << runs_.size()
+            << " runs, " << mb(runBytes) << " spilled";
 }
 
 void LocalCellOutput::appendBlockKind() {
@@ -647,14 +624,14 @@ void LocalCellOutput::finalize(
   scratch_.reset();
   metrics.rawPartitionLengths = rawLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
-  metrics.spillCount = static_cast<int64_t>(sealed_.size());
+  metrics.spillCount = static_cast<int64_t>(numSeals_);
 }
 
 void LocalCellOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
   BOLT_CHECK_NOT_NULL(residual_, "Cell payloads merged outside finalize()");
   const uint64_t rawStart = rawAccum_;
-  for (const auto& window : sealed_) {
-    writeDiskPayload(out, window, residual_->encodingTags, pid);
+  for (const auto& payload : sealed_[pid]) {
+    writeDiskPayload(out, payload, residual_->encodingTags, pid);
   }
   if (residualHasData_ && residual_->rowCounts[pid] > 0) {
     writeCurrentWindowPayload(out, *residual_, pid);
@@ -693,7 +670,8 @@ void RssCellOutput::sealWindow(const CellWindowInput& in) {
 void RssCellOutput::sendWindow(const CellWindowInput& in) {
   uint32_t built = std::numeric_limits<uint32_t>::max();
   raw_.spillRaw([&](uint32_t pid, BufferPtr& block) {
-    if (pid == built || in.rowCounts[pid] == 0) {
+    if (pid == built || in.rowCounts[pid] == 0 ||
+        (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0)) {
       return false;
     }
     buildPayload(in, pid, block);
