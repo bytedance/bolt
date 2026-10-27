@@ -87,6 +87,94 @@ static std::vector<std::string_view> javaStyleSplitFastEmptyPattern(
   return result;
 }
 
+template <bool isSpark34Plus = false>
+static void javaStyleSplitFastEmptyPatternWriter(
+    std::string_view input,
+    int32_t limit,
+    exec::ArrayWriter<Varchar>& arrayWriter) {
+  if constexpr (isSpark34Plus) {
+    auto result = javaStyleSplitFastEmptyPattern<true>(input, "", limit);
+    for (const auto& item : result) {
+      arrayWriter.add_item().setNoCopy(StringView(item));
+    }
+    return;
+  }
+
+  // Before Spark 3.4, an empty regex is handled by Java String.split and
+  // therefore works on UTF-16 code units. A supplementary Unicode character
+  // becomes two isolated surrogate strings. Java's UTF-8 encoder replaces
+  // each isolated surrogate with '?'.
+  if (input.empty()) {
+    arrayWriter.add_item().setNoCopyUnsafe(StringView(input));
+    return;
+  }
+
+  const bool limited = limit > 0;
+  if (limited && limit == 1) {
+    arrayWriter.add_item().setNoCopyUnsafe(StringView(input));
+    return;
+  }
+
+  size_t offset = 0;
+  size_t resultSize = 0;
+  while (offset < input.size()) {
+    if (limited && resultSize >= static_cast<size_t>(limit) - 1) {
+      arrayWriter.add_item().setNoCopyUnsafe(
+          StringView(input.data() + offset, input.size() - offset));
+      return;
+    }
+
+    const unsigned char lead = input[offset];
+    size_t charLength = 1;
+    if ((lead >> 5) == 0x6) { // 110xxxxx, 2 bytes
+      charLength = 2;
+    } else if ((lead >> 4) == 0xE) { // 1110xxxx, 3 bytes
+      charLength = 3;
+    } else if ((lead >> 3) == 0x1E) { // 11110xxx, 4 bytes
+      charLength = 4;
+    }
+
+    BOLT_CHECK_LE(
+        offset + charLength,
+        input.size(),
+        "Invalid UTF-8 sequence at position: {}",
+        offset);
+
+    if (charLength != 4) {
+      arrayWriter.add_item().setNoCopyUnsafe(
+          StringView(input.data() + offset, charLength));
+      offset += charLength;
+      ++resultSize;
+      continue;
+    }
+
+    arrayWriter.add_item().copy_from(StringView("?"));
+    ++resultSize;
+
+    if (limited && resultSize >= static_cast<size_t>(limit) - 1) {
+      // The final field starts with an isolated low surrogate when the limit
+      // boundary falls between the pair. Encode it as '?' and preserve the
+      // remaining valid UTF-8 suffix.
+      std::string remainder;
+      remainder.reserve(1 + input.size() - offset - charLength);
+      remainder.push_back('?');
+      remainder.append(
+          input.data() + offset + charLength,
+          input.size() - offset - charLength);
+      arrayWriter.add_item().copy_from(StringView(remainder));
+      return;
+    }
+
+    arrayWriter.add_item().copy_from(StringView("?"));
+    ++resultSize;
+    offset += charLength;
+  }
+
+  if (!limited || resultSize < static_cast<size_t>(limit)) {
+    arrayWriter.add_item().setNoCopyUnsafe(StringView(""));
+  }
+}
+
 static std::vector<std::string_view> javaStyleSplitFast(
     std::string_view input,
     std::string_view pattern,
