@@ -3674,9 +3674,19 @@ TEST_P(MultiThreadedHashJoinTest, noSpillLevelLimit) {
         if (!hasSpill) {
           return;
         }
-        // Adaptive repartitioning can consume the available hash bits in
-        // fewer levels than the default 3 bits per level.
         const auto spillLevel = maxHashBuildSpillLevel(*task);
+        const auto stats = task->taskStats();
+        for (const auto& pipeline : stats.pipelineStats) {
+          for (const auto& op : pipeline.operatorStats) {
+            if (op.operatorType == "HashBuild" && op.numDrivers > 1) {
+              // Parallel builders use the fixed 3 bits per repartition level.
+              ASSERT_EQ(spillLevel, 4);
+              return;
+            }
+          }
+        }
+        // A serial build can also run with parallel probing. Its adaptive
+        // repartitioning may consume the available hash bits in fewer levels.
         ASSERT_GT(spillLevel, 0);
         ASSERT_LE(spillLevel, 4);
       })
