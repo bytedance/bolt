@@ -1444,6 +1444,54 @@ TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
   }
 }
 
+TEST_F(CellWriterTest, skewedPartitionSealsAlone) {
+  // Most rows go to partition 0, which passes the payload bound several
+  // times; the others stay far below it. Only partition 0's payloads close
+  // and spill: the others keep one payload, written from memory.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(23);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 12; ++batch) {
+    auto& batchPids = pids.emplace_back(4096);
+    std::vector<std::string> storage(4096);
+    std::vector<std::optional<StringView>> views(4096);
+    for (int i = 0; i < 4096; ++i) {
+      batchPids[i] = rng() % 16 == 0 ? 1 + rng() % (kPartitions - 1) : 0;
+      storage[i].assign(256, static_cast<char>('a' + rng() % 26));
+      views[i] = StringView(storage[i]);
+    }
+    batches.push_back(makeRowVector(
+        {"v", "s"},
+        {makeFlatVector<int64_t>(4096, [&](auto row) { return row * 7; }),
+         makeNullableFlatVector<StringView>(views)}));
+  }
+  const auto layout = CellLayout::create(asRowType(batches[0]->type()));
+  auto options = makeOptions(kPartitions);
+  options.cellOptions.checkpointPartitionBytes = 2 << 20;
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  roundTrip(options, pids, batches, &writer);
+
+  const auto& metrics = writer.metrics();
+  const auto file = readFile();
+  uint64_t offset = 0;
+  std::vector<size_t> payloads;
+  for (int32_t pid = 0; pid < kPartitions; ++pid) {
+    payloads.push_back(
+        payloadRunCounts(layout, file, offset, metrics.partitionLengths[pid])
+            .size());
+    offset += metrics.partitionLengths[pid];
+  }
+  EXPECT_GE(payloads[0], 4);
+  for (int32_t pid = 1; pid < kPartitions; ++pid) {
+    EXPECT_EQ(payloads[pid], 1) << "pid " << pid;
+  }
+  // Only partition 0's sealed payloads went through the spill file: well
+  // under its share of the output, nothing of the others'.
+  EXPECT_GT(metrics.totalBytesEvicted, 0);
+  EXPECT_LT(metrics.totalBytesEvicted, metrics.partitionLengths[0] * 11 / 10);
+}
+
 TEST_F(CellWriterTest, unfundedSpillCompressionIsMadeAtMerge) {
   // A pressure spill whose pool cannot fund the compression workspace
   // streams its runs out stored; those segments are not final, so the

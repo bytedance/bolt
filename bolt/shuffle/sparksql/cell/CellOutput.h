@@ -44,6 +44,10 @@ struct CellWindowInput {
   /// For a Run only: per partition, nonzero when the Run takes it. Null
   /// when the Run takes every partition.
   const uint8_t* runPartitions = nullptr;
+  /// For a seal only: per partition, nonzero when the seal closes its
+  /// payload. Null when the seal closes every partition's: the whole
+  /// window.
+  const uint8_t* sealPartitions = nullptr;
 };
 
 /// The Cell shuffle writer's output backend. Run = physical
@@ -68,9 +72,11 @@ class CellOutput {
   /// spill fired from inside an append never frees held ids twice).
   virtual void spillRun(const CellWindowInput& in) = 0;
 
-  /// Closes the logical window: records the null region and row counts.
-  /// Precondition (splitter-orchestrated): caches flushed, and the cells
-  /// drained unless sealsResidentCells().
+  /// Closes the payloads of the partitions the input names (every
+  /// partition by default): records their null regions and row counts.
+  /// The other partitions' payloads stay open. Precondition
+  /// (splitter-orchestrated): the named partitions' caches flushed, and
+  /// their cells drained unless sealsResidentCells().
   virtual void sealWindow(const CellWindowInput& in) = 0;
 
   /// Final merge. `windowHasData` says whether the current (unsealed)
@@ -152,18 +158,19 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     bool storedIsFinal;
   };
 
-  struct SealedWindow {
-    std::vector<SpilledRun> runs;
-    std::vector<uint64_t> nullOffset;
-    std::vector<uint32_t> nullLength;
-    std::vector<uint32_t> rowCounts;
-    std::vector<uint64_t> variableBytes;
+  /// One partition's closed payload: its run segments, oldest first, and
+  /// its null body in the spill file.
+  struct SealedPayload {
+    std::vector<SpillSegment> segments;
+    uint64_t nullOffset{0};
+    uint32_t nullLength{0};
+    uint32_t rows{0};
+    uint64_t variableBytes{0};
   };
 
-  /// One INFO line per checkpoint window at finalize - rows, non-empty
-  /// partitions, null bytes and every run's spill-file span - plus the
-  /// residual window and a summary. Diagnostic output, capped so a
-  /// checkpoint-heavy task cannot flood the log.
+  /// One INFO line per seal at finalize - partitions sealed, rows and null
+  /// bytes - plus the runs, the residual window and a summary. Diagnostic
+  /// output, capped so a checkpoint-heavy task cannot flood the log.
   void logWindowDiagnostics(const CellWindowInput& in, bool windowHasData);
 
   /// Appends "N runs [a, b, ...]" for one window's runs and returns their
@@ -173,15 +180,16 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t numPartitions,
       std::ostream& os);
 
-  /// The non-empty segments of `pid` across `runs`, oldest first.
+  /// The non-empty segments of `pid` across runs [from, end), oldest first.
   static std::vector<SpillSegment> partitionSegments(
       const std::vector<SpilledRun>& runs,
-      uint32_t pid);
+      uint32_t pid,
+      size_t from);
 
-  /// Appends one partition's payload assembled from a sealed window.
+  /// Appends a sealed payload of partition `pid`.
   void writeDiskPayload(
       DataFileWriter& out,
-      const SealedWindow& w,
+      const SealedPayload& payload,
       const uint8_t* encodingTags,
       uint32_t pid);
 
@@ -269,9 +277,16 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   BufferPtr compressScratch_;
   BufferPtr gather_;
 
-  /// Runs of the still-open window, then folded into a SealedWindow.
-  std::vector<SpilledRun> openWindowRuns_;
-  std::vector<SealedWindow> sealed_;
+  /// Every Run, oldest first. A partition's open payload owns its segments
+  /// from openFrom_[pid] on; a seal moves them into the partition's
+  /// SealedPayload and the partition's open payload past them.
+  std::vector<SpilledRun> runs_;
+  std::vector<size_t> openFrom_;
+  /// Per partition: its sealed payloads, oldest first.
+  std::vector<std::vector<SealedPayload>> sealed_;
+  /// Seals, and the partition payloads they closed.
+  uint64_t numSeals_{0};
+  uint64_t numSealedPayloads_{0};
   /// The window still in memory, borrowed by finalize() for its merge.
   const CellWindowInput* residual_{nullptr};
   bool residualHasData_{false};
