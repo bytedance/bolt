@@ -83,6 +83,12 @@ class CellSplitter {
   /// Safe during a split or cache flush; nested output calls are suppressed.
   void spillRun();
 
+  /// spillRun() of the largest partitions only, enough of them to cover
+  /// `targetBytes` of cell data; every partition when that is all of it.
+  /// The rest stay resident for the merge to write directly. Returns the
+  /// cell bytes written.
+  uint64_t spillPartitions(uint64_t targetBytes);
+
   /// Flushes caches, drains cells (unless the output seals resident cells)
   /// and seals the window, then recycles every cell and resets its state.
   /// Called only at a complete batch boundary.
@@ -267,6 +273,9 @@ class CellSplitter {
   uint32_t maxWindowRows_{0};
   /// One bit per wire column, set by enableDictionary for the writer lifetime.
   std::vector<uint8_t> encodingTags_;
+  /// spillPartitions() scratch: (bytes, pid) candidates and the Run's mask.
+  std::vector<std::pair<uint64_t, uint32_t>> spillOrder_;
+  std::vector<uint8_t> runPartitions_;
 
   /// Cache lines (64B * P * S) and cursors (P * S), one arena allocation,
   /// huge-page backed above the threshold.

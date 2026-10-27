@@ -16,6 +16,9 @@
 
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 
+#include <algorithm>
+#include <functional>
+
 #include <folly/ScopeGuard.h>
 
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
@@ -747,6 +750,54 @@ void CellSplitter::spillRun() {
   cells_.releaseAll();
   // Refill the lowest chunks first so later reclaim can release idle tails.
   allocator_.packFreelist();
+}
+
+uint64_t CellSplitter::spillPartitions(uint64_t targetBytes) {
+  const uint64_t total = cells_.totalBytes();
+  if (writingOutput_ || total == 0) {
+    return 0;
+  }
+  if (targetBytes >= total) {
+    spillRun();
+    return total;
+  }
+  const uint32_t numStreams = layout_.numStreams();
+  spillOrder_.clear();
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    uint64_t bytes = 0;
+    for (uint32_t s = 0; s < numStreams; ++s) {
+      bytes += cells_.bytes(pid, s);
+    }
+    if (bytes > 0) {
+      spillOrder_.emplace_back(bytes, pid);
+    }
+  }
+  // Largest first: the fewest partitions, and the fewest run segments, for
+  // the bytes freed.
+  std::sort(spillOrder_.begin(), spillOrder_.end(), std::greater<>());
+  runPartitions_.assign(numPartitions_, 0);
+  uint64_t taken = 0;
+  for (const auto& [bytes, pid] : spillOrder_) {
+    runPartitions_[pid] = 1;
+    taken += bytes;
+    if (taken >= targetBytes) {
+      break;
+    }
+  }
+  writingOutput_ = true;
+  SCOPE_EXIT {
+    writingOutput_ = false;
+  };
+  auto in = windowInput();
+  in.runPartitions = runPartitions_.data();
+  output_.spillRun(in);
+  for (const auto& [bytes, pid] : spillOrder_) {
+    if (runPartitions_[pid] != 0) {
+      cells_.releasePartition(pid);
+    }
+  }
+  allocator_.packFreelist();
+  return taken;
 }
 
 void CellSplitter::sealWindow() {
