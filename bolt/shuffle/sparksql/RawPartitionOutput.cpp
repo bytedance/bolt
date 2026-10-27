@@ -83,11 +83,45 @@ void ShuffleSpillFile::flush() {
   {
     NanosecondTimer timer(&writeTimeNs_);
     status = ::fflush(file_);
+    for (const auto& [offset, bytes] : pendingPatches_) {
+      const ssize_t written =
+          ::pwrite(fd_, bytes.data(), bytes.size(), static_cast<off_t>(offset));
+      BOLT_CHECK_EQ(
+          written,
+          static_cast<ssize_t>(bytes.size()),
+          "shuffle spill patch failed");
+    }
   }
+  pendingPatches_.clear();
   BOLT_CHECK_EQ(status, 0, "shuffle spill flush failed");
 }
 
+void ShuffleSpillFile::patch(uint64_t offset, const void* data, size_t bytes) {
+  BOLT_CHECK_LE(offset + bytes, end_, "shuffle spill patch beyond its end");
+  pendingPatches_.emplace_back(
+      offset, std::string(static_cast<const char*>(data), bytes));
+}
+
+void ShuffleSpillFile::truncate(uint64_t offset) {
+  BOLT_CHECK(!sealed_, "shuffle spill file truncated after it was sealed");
+  BOLT_CHECK_LE(offset, end_, "shuffle spill truncate beyond its end");
+  if (offset == end_) {
+    return;
+  }
+  // Patches into the dropped bytes go with them.
+  std::erase_if(pendingPatches_, [offset](const auto& patch) {
+    return patch.first >= offset;
+  });
+  flush();
+  const int truncated = ::ftruncate(fd_, static_cast<off_t>(offset));
+  BOLT_CHECK_EQ(truncated, 0, "shuffle spill truncate failed");
+  const int sought = ::fseeko(file_, static_cast<off_t>(offset), SEEK_SET);
+  BOLT_CHECK_EQ(sought, 0, "shuffle spill seek failed");
+  end_ = offset;
+}
+
 void ShuffleSpillFile::read(uint64_t offset, void* out, size_t bytes) const {
+  BOLT_DCHECK(pendingPatches_.empty(), "shuffle spill read before flush()");
   BOLT_CHECK(
       offset + bytes <= end_, "shuffle spill read beyond what was written");
   size_t done = 0;
@@ -135,6 +169,42 @@ void DataFileWriter::write(const void* data, size_t bytes) {
   bytes_ += static_cast<int64_t>(bytes);
 }
 
+void DataFileWriter::patch(uint64_t position, const void* data, size_t bytes) {
+  BOLT_CHECK_LE(
+      position + bytes,
+      static_cast<uint64_t>(bytes_),
+      "shuffle data file patch beyond its end");
+  pendingPatches_.emplace_back(
+      position, std::string(static_cast<const char*>(data), bytes));
+}
+
+void DataFileWriter::rewind(uint64_t position) {
+  const uint64_t end = static_cast<uint64_t>(bytes_);
+  BOLT_CHECK_LE(position, end, "shuffle data file rewind beyond its end");
+  const int64_t dropped = static_cast<int64_t>(end - position);
+  BOLT_CHECK_LE(dropped, lengths_[pid_], "rewind past the current partition");
+  if (dropped == 0) {
+    return;
+  }
+  std::erase_if(pendingPatches_, [position](const auto& patch) {
+    return patch.first >= position;
+  });
+  {
+    NanosecondTimer timer(&writeTimeNs_);
+    BOLT_CHECK_EQ(::fflush(file_), 0, "shuffle data file flush failed");
+    BOLT_CHECK_EQ(
+        ::ftruncate(::fileno(file_), static_cast<off_t>(position)),
+        0,
+        "shuffle data file truncate failed");
+    BOLT_CHECK_EQ(
+        ::fseeko(file_, static_cast<off_t>(position), SEEK_SET),
+        0,
+        "shuffle data file seek failed");
+  }
+  lengths_[pid_] -= dropped;
+  bytes_ -= dropped;
+}
+
 void DataFileWriter::copyFrom(
     const ShuffleSpillFile& spill,
     uint64_t begin,
@@ -154,7 +224,19 @@ void DataFileWriter::close(ShuffleWriterMetrics& metrics) {
   {
     NanosecondTimer timer(&writeTimeNs_);
     status = ::fflush(file_);
+    for (const auto& [position, bytes] : pendingPatches_) {
+      const ssize_t written = ::pwrite(
+          ::fileno(file_),
+          bytes.data(),
+          bytes.size(),
+          static_cast<off_t>(position));
+      BOLT_CHECK_EQ(
+          written,
+          static_cast<ssize_t>(bytes.size()),
+          "shuffle data file patch failed");
+    }
   }
+  pendingPatches_.clear();
   BOLT_CHECK_EQ(status, 0, "shuffle data file flush failed");
   std::FILE* file = file_;
   file_ = nullptr;
