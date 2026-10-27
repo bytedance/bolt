@@ -1492,10 +1492,10 @@ TEST_F(CellWriterTest, skewedPartitionSealsAlone) {
   EXPECT_LT(metrics.totalBytesEvicted, metrics.partitionLengths[0] * 11 / 10);
 }
 
-TEST_F(CellWriterTest, unfundedSpillCompressionIsMadeAtMerge) {
-  // A pressure spill whose pool cannot fund the compression workspace
-  // streams its runs out stored; those segments are not final, so the
-  // merge makes the compression attempt for them.
+TEST_F(CellWriterTest, pressureSpillCompressesWithoutWorkspace) {
+  // A pressure spill under a pool with no room to spare still compresses:
+  // runs stream from the cells through a fixed buffer, with no workspace
+  // sized by the run to fund.
   constexpr int32_t kPartitions = 4;
   std::mt19937 rng(37);
   std::vector<std::vector<int32_t>> pids;
@@ -1530,9 +1530,9 @@ TEST_F(CellWriterTest, unfundedSpillCompressionIsMadeAtMerge) {
         });
     const auto& metrics = writer.metrics();
     EXPECT_GT(metrics.spillCount, 0);
-    // The spills could not compress: the spill file holds raw runs ...
-    EXPECT_GT(metrics.totalBytesEvicted * 2, rawBytes);
-    // ... and the merge compressed them all the same.
+    // The spill file holds compressed runs, and so does the data file.
+    EXPECT_GT(metrics.totalBytesEvicted, 0);
+    EXPECT_LT(metrics.totalBytesEvicted * 8, rawBytes);
     EXPECT_LT(metrics.totalBytesWritten * 8, rawBytes);
     ::unlink(dataFile_.c_str());
   }

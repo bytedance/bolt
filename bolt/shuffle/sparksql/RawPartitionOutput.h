@@ -21,6 +21,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
@@ -45,6 +46,14 @@ class ShuffleSpillFile {
 
   /// Makes every append visible to read(), which bypasses stdio buffering.
   void flush();
+
+  /// Overwrites `bytes` already appended at `offset`, e.g. a header whose
+  /// sizes are known only once its body is written. Applied at the next
+  /// flush(), so a patch per run does not break up the buffered writes.
+  void patch(uint64_t offset, const void* data, size_t bytes);
+
+  /// Drops every byte from `offset` on; appends continue there.
+  void truncate(uint64_t offset);
 
   void read(uint64_t offset, void* out, size_t bytes) const;
 
@@ -83,6 +92,8 @@ class ShuffleSpillFile {
   uint64_t end_{0};
   bool sealed_{false};
   uint64_t writeTimeNs_{0};
+  /// patch()es not applied yet: offset and bytes.
+  std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
 };
 
 /// The task's final data file, written once, partition by partition.
@@ -97,6 +108,19 @@ class DataFileWriter {
 
   void write(const void* data, size_t bytes);
 
+  /// Bytes written so far: where the next write lands.
+  uint64_t position() const {
+    return static_cast<uint64_t>(bytes_);
+  }
+
+  /// Overwrites `bytes` already written at `position`. Applied at close(),
+  /// so a patch per run does not break up the buffered writes.
+  void patch(uint64_t position, const void* data, size_t bytes);
+
+  /// Drops every byte the current partition wrote from `position` on;
+  /// writes continue there.
+  void rewind(uint64_t position);
+
   /// Copies `bytes` of `spill` from `begin`.
   void copyFrom(const ShuffleSpillFile& spill, uint64_t begin, uint64_t bytes);
 
@@ -110,6 +134,8 @@ class DataFileWriter {
   uint32_t pid_{0};
   int64_t bytes_{0};
   uint64_t writeTimeNs_{0};
+  /// patch()es not applied yet: position and bytes.
+  std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
 };
 
 /// A local output that spills to a ShuffleSpillFile of its own, in pieces
