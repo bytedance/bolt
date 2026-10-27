@@ -53,6 +53,7 @@
 /// pinned core, two rounds or more, and comparing the counters.
 
 #include <folly/Benchmark.h>
+#include <folly/hash/Hash.h>
 #include <folly/init/Init.h>
 
 #include <algorithm>
@@ -131,6 +132,8 @@ enum class Family {
   kWideSparse,
   kDeadColumn,
   kStaleNulls,
+  kStrRealistic,
+  kQ22Rollup,
 };
 
 const char* familyName(Family family) {
@@ -165,13 +168,18 @@ const char* familyName(Family family) {
       return "int_narrow_dead_column";
     case Family::kStaleNulls:
       return "int_narrow_stale_nulls";
+    case Family::kStrRealistic:
+      return "str_realistic";
+    case Family::kQ22Rollup:
+      return "q22_rollup";
   }
   return "?";
 }
 
 bool isDictionaryFamily(Family family) {
   return family == Family::kStrLowCard ||
-      family == Family::kStrLowCardClustered || family == Family::kProd;
+      family == Family::kStrLowCardClustered || family == Family::kProd ||
+      family == Family::kQ22Rollup;
 }
 
 struct CaseSpec {
@@ -278,6 +286,12 @@ std::vector<CaseSpec> caseSpecs() {
   add("F5", Family::kStrMedium, 1024, kFull, 0, 1024, false, 256);
   add("F6", Family::kStrLong, 1024, kFull, 0, 1024, false, 256);
   add("F7", Family::kStrLowCard, 1024, kFull, 0, 1024, false, 256);
+  // Compressible data: strings with real structure, and TPC-DS q22's rollup
+  // shuffle. Spark's default 200 partitions for q22.
+  add("A12", Family::kStrRealistic, 1024, kStd);
+  add("A13", Family::kQ22Rollup, 200, kStd);
+  add("F8", Family::kStrRealistic, 1024, kFull, 0, 1024, false, 256);
+  add("F9", Family::kQ22Rollup, 200, kFull, 0, 1024, false, 256);
   return c;
 }
 
@@ -760,6 +774,166 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
         }
       }
       return makeRow(std::move(names), std::move(columns));
+    }
+    case Family::kStrRealistic: {
+      // Web log fields: a URL over a few hosts and paths with an item id
+      // and query tags, and a product title from a word list with a size
+      // and a color. Fragments repeat, whole values rarely do: LZ4 takes it
+      // to about a third, as it does real text columns, and the values are
+      // far too many for a dictionary.
+      static const std::vector<std::string> hosts = {
+          "www.shop.example.com",
+          "m.shop.example.com",
+          "api.shop.example.com",
+          "img.cdn.example.net",
+          "search.example.org",
+          "blog.example.org",
+          "partners.example.com",
+          "checkout.example.com"};
+      static const std::vector<std::string> paths = {
+          "catalog",
+          "electronics",
+          "home",
+          "garden",
+          "kitchen",
+          "outdoor",
+          "sports",
+          "toys",
+          "books",
+          "music",
+          "fashion",
+          "beauty"};
+      static const std::vector<std::string> sources = {
+          "google", "bing", "newsletter", "facebook", "direct", "affiliate"};
+      static const std::vector<std::string> words = {
+          "wireless",   "portable", "stainless", "steel",  "classic", "premium",
+          "compact",    "deluxe",   "organic",   "cotton", "leather", "bamboo",
+          "ceramic",    "digital",  "smart",     "ultra",  "slim",    "heavy",
+          "duty",       "kids",     "outdoor",   "indoor", "travel",  "kitchen",
+          "garden",     "office",   "chair",     "table",  "lamp",    "speaker",
+          "headphones", "backpack", "bottle",    "mug",    "jacket",  "shoes",
+          "watch",      "charger",  "cable",     "case",   "cover",   "set",
+          "pack",       "edition",  "series",    "pro",    "mini",    "max"};
+      static const std::vector<std::string> sizes = {"S", "M", "L", "XL"};
+      static const std::vector<std::string> colors = {
+          "Black", "White", "Navy", "Red", "Green", "Grey", "Beige"};
+      // Skewed toward the first entries, as real vocabularies are.
+      const auto pick =
+          [&](const std::vector<std::string>& from) -> const std::string& {
+        return from[std::min(rng() % from.size(), rng() % from.size())];
+      };
+      return makeRow(
+          {"pid", "key", "url", "title"},
+          {pid,
+           key(),
+           strings(
+               nulls,
+               rng,
+               [&](vector_size_t, std::string& out) {
+                 out = "https://" + pick(hosts) + "/" + pick(paths) + "/" +
+                     pick(paths) + "/item/" +
+                     std::to_string(rng() % 2'000'000) +
+                     "?ref=" + pick(sources) + "&utm_campaign=spring_" +
+                     std::to_string(rng() % 40);
+               }),
+           strings(nulls, rng, [&](vector_size_t, std::string& out) {
+             out.clear();
+             const int numWords = 3 + rng() % 5;
+             for (int w = 0; w < numWords; ++w) {
+               if (w > 0) {
+                 out += ' ';
+               }
+               out += pick(words);
+             }
+             out += ", " + pick(sizes) + ", " + pick(colors);
+           })});
+    }
+    case Family::kQ22Rollup: {
+      // TPC-DS q22's rollup shuffle when the partial aggregate does not
+      // reduce: the expand of (product, brand, class, category) row by row.
+      // An inventory row becomes five adjacent rows, one per grouping set,
+      // the keys a set drops left null; the inventory is scanned by item,
+      // so a product spans long runs. Rows go to partitions by their
+      // grouping keys. Narrow and repetitive within a partition: it
+      // compresses tens of times.
+      static const std::vector<std::string> categories = {
+          "Books",
+          "Children",
+          "Electronics",
+          "Home",
+          "Jewelry",
+          "Men",
+          "Music",
+          "Shoes",
+          "Sports",
+          "Women"};
+      constexpr int64_t kSets = 5;
+      constexpr int64_t kInventoryPerProduct = 256;
+      std::vector<int32_t> level(kRowsPerBatch);
+      std::vector<int32_t> product(kRowsPerBatch);
+      std::vector<int64_t> quantity(kRowsPerBatch);
+      int64_t onHand = 0;
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        const int64_t row = int64_t{batch} * kRowsPerBatch + i;
+        const int64_t inventory = row / kSets;
+        level[i] = static_cast<int32_t>(row % kSets);
+        product[i] =
+            static_cast<int32_t>((inventory / kInventoryPerProduct) % 20'000);
+        if (level[i] == 0) {
+          onHand = static_cast<int64_t>(rng() % 1000);
+        }
+        quantity[i] = onHand;
+      }
+      // Keys from the most specific: a set of level k drops the k first.
+      const auto keyColumn = [&](int32_t depth, auto&& value) {
+        auto column = strings(0, rng, [&](vector_size_t i, std::string& out) {
+          out = level[i] > depth ? std::string() : value(product[i]);
+        });
+        for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+          if (level[i] > depth) {
+            column->setNull(i, true);
+          }
+        }
+        return column;
+      };
+      // The partition of a row's group: its level and the keys it keeps.
+      auto groupPid = flat<int32_t>(INTEGER(), 0, rng, [&](vector_size_t i) {
+        // The most specific key the set keeps: product, brand, class,
+        // category, or none for the grand total.
+        static constexpr int32_t kModulus[] = {20'000, 1000, 100, 10, 1};
+        const int32_t group = product[i] % kModulus[level[i]];
+        return static_cast<int32_t>(
+            folly::hash::hash_combine(level[i], group) % spec.partitions);
+      });
+      return makeRow(
+          {"pid",
+           "i_product_name",
+           "i_brand",
+           "i_class",
+           "i_category",
+           "spark_grouping_id",
+           "sum_qty",
+           "count_qty"},
+          {std::move(groupPid),
+           keyColumn(
+               0, [](int32_t p) { return "product" + std::to_string(p); }),
+           keyColumn(
+               1,
+               [](int32_t p) { return "brand#" + std::to_string(p % 1000); }),
+           keyColumn(
+               2, [](int32_t p) { return "class" + std::to_string(p % 100); }),
+           keyColumn(3, [&](int32_t p) { return categories[p % 10]; }),
+           flat<int64_t>(
+               BIGINT(),
+               0,
+               rng,
+               [&](vector_size_t i) {
+                 return static_cast<int64_t>((1 << level[i]) - 1);
+               }),
+           flat<int64_t>(
+               BIGINT(), 0, rng, [&](vector_size_t i) { return quantity[i]; }),
+           flat<int64_t>(
+               BIGINT(), 0, rng, [&](vector_size_t) { return int64_t{1}; })});
     }
     case Family::kWideSparse: {
       // 100 bigints, the first two with 1% sparse nulls.
