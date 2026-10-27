@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <random>
 #include <string>
@@ -701,5 +702,104 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<CorruptionTestParam>& info) {
       return info.param.toString();
     });
+
+// The Cell writer streams runs from its cells through a StreamCompressor,
+// 64 KiB at a time, and the reader decompresses them in one call. The
+// frame must read back with the one-shot codec, and be no larger than the
+// one-shot codec's: LZ4 frames match exactly (the frame buffers input into
+// the same blocks however it is fed); ZSTD's lacks only the content size.
+TEST(StreamFrameTest, matchesOneShotFrame) {
+  std::mt19937 rng(11);
+  std::string input;
+  static const char* kWords[] = {
+      "shuffle", "partition", "column", "stream", "block", "payload"};
+  while (input.size() < (1 << 20)) {
+    input += kWords[rng() % 6];
+    input += std::to_string(rng() % 1000);
+    input += ' ';
+  }
+  const auto* data = reinterpret_cast<const uint8_t*>(input.data());
+  const int64_t size = static_cast<int64_t>(input.size());
+  for (const auto type : {CodecType::LZ4_FRAME, CodecType::ZSTD}) {
+    for (const bool checksum : {false, true}) {
+      SCOPED_TRACE(
+          std::string(Codec::codecTypeName(type)) +
+          (checksum ? " with checksum" : ""));
+      const CodecOptions options{
+          CodecBackend::NONE, kDefaultCompressionLevel, checksum};
+      auto codec = Codec::create(type, options);
+      std::vector<uint8_t> oneShot(codec->maxCompressedLen(size));
+      const int64_t oneShotSize =
+          codec->compress(data, size, oneShot.data(), oneShot.size());
+
+      auto compressor = StreamCompressor::create(type, options);
+      std::vector<uint8_t> out(1 << 20);
+      std::vector<uint8_t> streamed;
+      for (int64_t at = 0; at < size;) {
+        const int64_t piece = std::min<int64_t>(64 << 10, size - at);
+        const auto result =
+            compressor->compress(data + at, piece, out.data(), out.size());
+        ASSERT_GT(result.bytesRead, 0);
+        streamed.insert(
+            streamed.end(), out.begin(), out.begin() + result.bytesWritten);
+        at += result.bytesRead;
+      }
+      for (;;) {
+        const auto end = compressor->end(out.data(), out.size());
+        streamed.insert(
+            streamed.end(), out.begin(), out.begin() + end.bytesWritten);
+        if (end.noMoreOutput) {
+          break;
+        }
+      }
+      if (type == CodecType::LZ4_FRAME) {
+        EXPECT_EQ(static_cast<int64_t>(streamed.size()), oneShotSize);
+      } else {
+        EXPECT_LE(static_cast<int64_t>(streamed.size()), oneShotSize + 16);
+        EXPECT_GE(static_cast<int64_t>(streamed.size()), oneShotSize - 16);
+      }
+      if (type == CodecType::LZ4_FRAME) {
+        // Independent blocks: no dictionary across blocks, a little larger
+        // past one block, and read back the same way.
+        CodecOptions independent = options;
+        independent.independentBlocks = true;
+        auto blockCompressor = StreamCompressor::create(type, independent);
+        std::vector<uint8_t> blocks;
+        for (int64_t at = 0; at < size;) {
+          const int64_t piece = std::min<int64_t>(256 << 10, size - at);
+          const auto result = blockCompressor->compress(
+              data + at, piece, out.data(), out.size());
+          blocks.insert(
+              blocks.end(), out.begin(), out.begin() + result.bytesWritten);
+          at += result.bytesRead;
+        }
+        const auto end = blockCompressor->end(out.data(), out.size());
+        blocks.insert(
+            blocks.end(), out.begin(), out.begin() + end.bytesWritten);
+        EXPECT_LE(blocks.size(), oneShotSize * 11 / 10);
+        std::string blockDecoded(input.size(), '\0');
+        EXPECT_EQ(
+            codec->decompress(
+                blocks.data(),
+                static_cast<int64_t>(blocks.size()),
+                reinterpret_cast<uint8_t*>(blockDecoded.data()),
+                size),
+            size);
+        EXPECT_EQ(blockDecoded, input);
+        RecordProperty(
+            "independent_vs_linked_bytes",
+            std::to_string(blocks.size()) + "/" + std::to_string(oneShotSize));
+      }
+      std::string decoded(input.size(), '\0');
+      const int64_t decodedSize = codec->decompress(
+          streamed.data(),
+          static_cast<int64_t>(streamed.size()),
+          reinterpret_cast<uint8_t*>(decoded.data()),
+          size);
+      EXPECT_EQ(decodedSize, size);
+      EXPECT_EQ(decoded, input);
+    }
+  }
+}
 
 } // namespace bytedance::bolt::shuffle::sparksql::test
