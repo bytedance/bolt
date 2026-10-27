@@ -433,10 +433,21 @@ void CellShuffleWriter::maybeCheckpoint() {
   }
   const auto& cellOpts = options_.cellOptions;
   if (checkpointRequested_ ||
-      splitter_->maxPartitionBytes() >
-          static_cast<uint64_t>(cellOpts.checkpointPartitionBytes) ||
       splitter_->nullBytes() > cellOpts.nullMemLimitBytes) {
+    // Memory or the null bitmaps of every partition: the whole window.
     checkpoint();
+  } else if (
+      splitter_->maxPartitionBytes() >
+      static_cast<uint64_t>(cellOpts.checkpointPartitionBytes)) {
+    // A payload grown past its bound: close that partition's alone, so a
+    // skewed partition does not seal - and in local mode spill - every
+    // other partition with it.
+    sealing_ = true;
+    SCOPE_EXIT {
+      sealing_ = false;
+    };
+    splitter_->sealPartitionsOver(
+        static_cast<uint64_t>(cellOpts.checkpointPartitionBytes));
   }
 }
 

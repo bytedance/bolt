@@ -742,12 +742,26 @@ void CellSplitter::spillRun() {
   if (writingOutput_ || cells_.totalBytes() == 0) {
     return;
   }
+  drainCells(nullptr);
+}
+
+void CellSplitter::drainCells(const uint8_t* only) {
   writingOutput_ = true;
   SCOPE_EXIT {
     writingOutput_ = false;
   };
-  output_.spillRun(windowInput());
-  cells_.releaseAll();
+  auto in = windowInput();
+  in.runPartitions = only;
+  output_.spillRun(in);
+  if (only == nullptr) {
+    cells_.releaseAll();
+  } else {
+    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      if (only[pid] != 0) {
+        cells_.releasePartition(pid);
+      }
+    }
+  }
   // Refill the lowest chunks first so later reclaim can release idle tails.
   allocator_.packFreelist();
 }
@@ -784,19 +798,7 @@ uint64_t CellSplitter::spillPartitions(uint64_t targetBytes) {
       break;
     }
   }
-  writingOutput_ = true;
-  SCOPE_EXIT {
-    writingOutput_ = false;
-  };
-  auto in = windowInput();
-  in.runPartitions = runPartitions_.data();
-  output_.spillRun(in);
-  for (const auto& [bytes, pid] : spillOrder_) {
-    if (runPartitions_[pid] != 0) {
-      cells_.releasePartition(pid);
-    }
-  }
-  allocator_.packFreelist();
+  drainCells(runPartitions_.data());
   return taken;
 }
 
@@ -812,23 +814,59 @@ void CellSplitter::sealWindow() {
   if (!hasWindowRows()) {
     return;
   }
+  seal(nullptr);
+}
+
+uint32_t CellSplitter::sealPartitionsOver(uint64_t maxBytes) {
+  BOLT_CHECK(!writingOutput_, "cannot seal a window during output");
+  sealPartitions_.assign(numPartitions_, 0);
+  uint32_t sealed = 0;
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    if (partitionBytes_[pid] > maxBytes && windowRowCounts_[pid] > 0) {
+      sealPartitions_[pid] = 1;
+      ++sealed;
+    }
+  }
+  if (sealed > 0) {
+    seal(sealPartitions_.data());
+  }
+  return sealed;
+}
+
+void CellSplitter::seal(const uint8_t* only) {
   // Cache flushes can grow cells and trigger a Run spill. Only protect the
   // actual output call, after all cache residues have been committed.
-  flushAll();
+  flushAll(only);
   const bool sealsResident = output_.sealsResidentCells();
-  if (!sealsResident) {
-    spillRun();
+  if (!sealsResident && cells_.totalBytes() > 0) {
+    drainCells(only);
   }
-  writingOutput_ = true;
-  SCOPE_EXIT {
-    writingOutput_ = false;
-  };
-  output_.sealWindow(windowInput());
+  {
+    writingOutput_ = true;
+    SCOPE_EXIT {
+      writingOutput_ = false;
+    };
+    auto in = windowInput();
+    in.sealPartitions = only;
+    output_.sealWindow(in);
+  }
   if (sealsResident) {
-    cells_.releaseAll();
+    if (only == nullptr) {
+      cells_.releaseAll();
+    } else {
+      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+        if (only[pid] != 0) {
+          cells_.releasePartition(pid);
+        }
+      }
+    }
     allocator_.packFreelist();
   }
-  resetWindow();
+  if (only == nullptr) {
+    resetWindow();
+  } else {
+    resetPartitions(only);
+  }
 }
 
 void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
@@ -874,7 +912,10 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
   resetWindow();
 }
 
-void CellSplitter::flushAll() {
+void CellSplitter::flushAll(const uint8_t* only) {
+  const auto skip = [only](uint32_t pid) {
+    return only != nullptr && only[pid] == 0;
+  };
   // Dictionary columns first: a partition still in dictionary mode has raw
   // index bytes in its length cache (flushed raw, so the generic loop below
   // sees an empty cursor and cannot re-encode them) and owes the closing
@@ -890,6 +931,9 @@ void CellSplitter::flushAll() {
     uint8_t* dataCur = cursors(dataStream);
     auto* states = dictStates_[col].data();
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      if (skip(pid)) {
+        continue;
+      }
       DictState& st = states[pid];
       if (st.mode != DictState::kModeDict) {
         continue; // demoted: framing closed at demote time
@@ -909,7 +953,7 @@ void CellSplitter::flushAll() {
     const auto& info = layout_.stream(stream);
     uint8_t* cur = cursors(stream);
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      if (cur[pid] == 0) {
+      if (cur[pid] == 0 || skip(pid)) {
         continue;
       }
       if (info.kind == StreamKind::kEncoded) {
@@ -954,6 +998,35 @@ void CellSplitter::resetWindow() {
       st.uniformLen = DictState::kUniformUnset;
     }
   }
+}
+
+void CellSplitter::resetPartitions(const uint8_t* only) {
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    if (only[pid] == 0) {
+      continue;
+    }
+    nulls_.releasePartition(pid);
+    totalWindowRows_ -= windowRowCounts_[pid];
+    windowRowCounts_[pid] = 0;
+    partitionBytes_[pid] = 0;
+    variableBytes_[pid] = 0;
+    // A payload is self-contained: the partition re-enters dictionary mode
+    // with an empty open segment for its next payload.
+    for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+      if (dictEnabled_[col] == 0) {
+        continue;
+      }
+      auto& st = dictStates_[col][pid];
+      st.matched = 0;
+      st.mode = DictState::kModeDict;
+      st.entryCount = 0;
+      st.uniformLen = DictState::kUniformUnset;
+    }
+  }
+  maxWindowRows_ =
+      *std::max_element(windowRowCounts_.begin(), windowRowCounts_.end());
+  maxPartitionBytes_ =
+      *std::max_element(partitionBytes_.begin(), partitionBytes_.end());
 }
 
 // The fixed-width split templates are only referenced from this translation

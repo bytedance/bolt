@@ -98,6 +98,12 @@ class CellSplitter {
   /// Called only at a complete batch boundary.
   void sealWindow();
 
+  /// sealWindow() of the partitions whose bytes since their payload opened
+  /// exceed `maxBytes`: only their payloads close, and only their cells are
+  /// drained, so a skewed partition does not take every other partition's
+  /// data through the spill file with it. Returns the partitions sealed.
+  uint32_t sealPartitionsOver(uint64_t maxBytes);
+
   /// Flushes caches and finalizes the output, allowing the backend to consume
   /// resident cells directly. Populates output and dictionary metrics.
   void finish(ShuffleWriterMetrics& metrics);
@@ -133,12 +139,24 @@ class CellSplitter {
     uint64_t fallbackRows{0}; // rows written through the fallback tail
   };
 
-  /// Encodes cache residues as stream tail blocks before a window closes.
-  /// Chunk growth during this step may still spill complete prior appends.
-  void flushAll();
+  /// Encodes cache residues as stream tail blocks before a window closes:
+  /// of the partitions `only` marks, or of every partition. Chunk growth
+  /// during this step may still spill complete prior appends.
+  void flushAll(const uint8_t* only = nullptr);
 
   /// Clears nulls, row counts and dictionary state after successful output.
   void resetWindow();
+
+  /// resetWindow() of the partitions `only` marks.
+  void resetPartitions(const uint8_t* only);
+
+  /// The Run step of spillRun()/spillPartitions(): writes the marked
+  /// partitions' cells (every partition's when `only` is null) and
+  /// recycles them.
+  void drainCells(const uint8_t* only);
+
+  /// The seal of the marked partitions (every partition when null).
+  void seal(const uint8_t* only);
 
   CellWindowInput windowInput() const;
 
@@ -280,6 +298,8 @@ class CellSplitter {
   /// spillPartitions() scratch: (bytes, pid) candidates and the Run's mask.
   std::vector<std::pair<uint64_t, uint32_t>> spillOrder_;
   std::vector<uint8_t> runPartitions_;
+  /// sealPartitionsOver() scratch: the seal's mask.
+  std::vector<uint8_t> sealPartitions_;
 
   /// Cache lines (64B * P * S) and cursors (P * S), one arena allocation,
   /// huge-page backed above the threshold.
