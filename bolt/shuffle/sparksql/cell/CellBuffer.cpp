@@ -21,6 +21,8 @@
 #include <functional>
 #include <utility>
 
+#include <folly/ScopeGuard.h>
+
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/memory/Allocation.h"
@@ -112,7 +114,14 @@ void ChunkAllocator::packFreelist() {
 void ChunkAllocator::recycle(uint32_t cellId) {
   BOLT_DCHECK_LT(cellId >> cellsPerChunkShift_, chunks_.size());
   BOLT_DCHECK_GT(chunkLiveCells_[cellId >> cellsPerChunkShift_], 0);
-  freeList_.push_back(cellId);
+  // A cell recycled out of a chunk being evacuated must not be handed out
+  // again by the evacuation itself.
+  if (FOLLY_UNLIKELY(!evacuating_.empty()) &&
+      evacuating_[cellId >> cellsPerChunkShift_] != 0) {
+    parkedFree_.push_back(cellId);
+  } else {
+    freeList_.push_back(cellId);
+  }
   --chunkLiveCells_[cellId >> cellsPerChunkShift_];
   --usedCells_;
 }
@@ -153,6 +162,51 @@ int64_t ChunkAllocator::shrink() {
     freeList_.resize(kept);
   }
   return released;
+}
+
+void ChunkAllocator::beginEvacuation(const std::vector<uint8_t>& evacuating) {
+  BOLT_CHECK(evacuating_.empty(), "nested chunk evacuation");
+  evacuating_ = evacuating;
+  evacuating_.resize(chunks_.size(), 0);
+  size_t kept = 0;
+  for (const uint32_t id : freeList_) {
+    if (evacuating_[id >> cellsPerChunkShift_] != 0) {
+      parkedFree_.push_back(id);
+    } else {
+      freeList_[kept++] = id;
+    }
+  }
+  freeList_.resize(kept);
+}
+
+uint32_t ChunkAllocator::allocForEvacuation() {
+  if (!freeList_.empty()) {
+    const uint32_t id = freeList_.back();
+    freeList_.pop_back();
+    ++chunkLiveCells_[id >> cellsPerChunkShift_];
+    ++usedCells_;
+    return id;
+  }
+  for (uint32_t chunk = 0; chunk < chunks_.size(); ++chunk) {
+    if (chunks_[chunk].empty() || evacuating_[chunk] != 0 ||
+        chunkBump_[chunk] == cellsPerChunk()) {
+      continue;
+    }
+    const uint32_t id = (chunk << cellsPerChunkShift_) | chunkBump_[chunk]++;
+    ++chunkLiveCells_[chunk];
+    ++usedCells_;
+    if (bumpChunk_ == chunk && chunkBump_[chunk] == cellsPerChunk()) {
+      bumpChunk_ = kNoChunk;
+    }
+    return id;
+  }
+  return kInvalidCell;
+}
+
+void ChunkAllocator::endEvacuation() {
+  freeList_.insert(freeList_.end(), parkedFree_.begin(), parkedFree_.end());
+  parkedFree_.clear();
+  evacuating_.clear();
 }
 
 void ChunkAllocator::growChunk() {
@@ -313,6 +367,108 @@ void DataCells::reset() {
     std::fill(infos_, infos_ + numChains, ChainInfo{});
   }
   totalBytes_ = 0;
+}
+
+uint64_t DataCells::compact(uint64_t targetBytes) {
+  const uint32_t numChunks = allocator_->numChunkSlots();
+  if (numChunks < 2 || targetBytes == 0) {
+    return 0;
+  }
+  const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
+  // Chained cells per chunk: a chunk whose live cells are all on chains can
+  // be emptied; one with a cell an append holds unlinked cannot.
+  std::vector<uint32_t> chained(numChunks, 0);
+  for (size_t c = 0; c < numChains; ++c) {
+    const auto& info = infos_[c];
+    uint32_t id = info.firstCell;
+    for (uint32_t i = 0; i < info.numCells; ++i) {
+      ++chained[allocator_->chunkOf(id)];
+      id = next_[id];
+    }
+  }
+  const uint32_t perChunk = allocator_->cellsPerChunk();
+  const uint64_t chunkBytes =
+      static_cast<uint64_t>(perChunk) * allocator_->cellBytes();
+  // 1 marks a chunk to empty; 2 a chunk that only receives no cells: its
+  // ids lie past next_, which compact() must not grow from the pool.
+  std::vector<uint8_t> excluded(numChunks, 0);
+  std::vector<uint32_t> candidates;
+  uint64_t room = 0;
+  for (uint32_t chunk = 0; chunk < numChunks; ++chunk) {
+    if (!allocator_->chunkRetained(chunk)) {
+      continue;
+    }
+    const uint32_t live = allocator_->chunkLiveCells(chunk);
+    if (static_cast<uint64_t>(chunk + 1) * perChunk > nextCapacity_) {
+      excluded[chunk] = 2;
+    } else {
+      room += perChunk - live;
+    }
+    if (live == chained[chunk]) {
+      candidates.push_back(chunk);
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(), [&](uint32_t a, uint32_t b) {
+    return allocator_->chunkLiveCells(a) < allocator_->chunkLiveCells(b);
+  });
+  uint64_t moving = 0;
+  uint64_t freed = 0;
+  for (const uint32_t chunk : candidates) {
+    if (freed >= targetBytes) {
+      break;
+    }
+    const uint32_t live = allocator_->chunkLiveCells(chunk);
+    // Emptied, the chunk's own free cells no longer count as room.
+    const uint64_t own = excluded[chunk] == 0 ? perChunk - live : 0;
+    if (moving + live + own > room) {
+      continue;
+    }
+    room -= own;
+    moving += live;
+    excluded[chunk] = 1;
+    freed += chunkBytes;
+  }
+  if (freed == 0) {
+    return 0;
+  }
+  const uint32_t cellBytes = allocator_->cellBytes();
+  allocator_->beginEvacuation(excluded);
+  SCOPE_EXIT {
+    allocator_->endEvacuation();
+  };
+  for (size_t c = 0; c < numChains; ++c) {
+    auto& info = infos_[c];
+    uint32_t prev = ChunkAllocator::kInvalidCell;
+    uint32_t id = info.firstCell;
+    for (uint32_t i = 0; i < info.numCells; ++i) {
+      const uint32_t following = next_[id];
+      if (excluded[allocator_->chunkOf(id)] == 1) {
+        const uint32_t moved = allocator_->allocForEvacuation();
+        BOLT_CHECK_NE(
+            moved,
+            ChunkAllocator::kInvalidCell,
+            "cell compaction ran out of room");
+        BOLT_DCHECK_LT(moved, nextCapacity_);
+        ::memcpy(
+            allocator_->cellData(moved), allocator_->cellData(id), cellBytes);
+        next_[moved] = following;
+        if (prev == ChunkAllocator::kInvalidCell) {
+          info.firstCell = moved;
+        } else {
+          next_[prev] = moved;
+        }
+        if (id == info.lastCell) {
+          info.lastCell = moved;
+          info.tail = allocator_->cellData(moved) + (cellBytes - info.tailLeft);
+        }
+        allocator_->recycle(id);
+        id = moved;
+      }
+      prev = id;
+      id = following;
+    }
+  }
+  return freed;
 }
 
 void DataCells::releasePartition(uint32_t pid) {
