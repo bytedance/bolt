@@ -800,6 +800,13 @@ uint64_t CellSplitter::spillPartitions(uint64_t targetBytes) {
   return taken;
 }
 
+uint64_t CellSplitter::compactCells(uint64_t targetBytes) {
+  if (writingOutput_) {
+    return 0;
+  }
+  return cells_.compact(targetBytes);
+}
+
 void CellSplitter::sealWindow() {
   BOLT_CHECK(!writingOutput_, "cannot seal a window during output");
   if (!hasWindowRows()) {
