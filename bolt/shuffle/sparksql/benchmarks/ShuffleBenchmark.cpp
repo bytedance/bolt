@@ -1782,7 +1782,17 @@ int main(int argc, char** argv) {
     FLAGS_bolt_benchmark_shuffle_input_mb = 64;
   }
   const auto writers = parseWriters();
-  for (const auto& spec : caseSpecs()) {
+  // Memory-limited cases run last: the first one initializes the process's
+  // Spark execution memory pool, which then stays, and a writer sizing from
+  // it would see a limit an unlimited case does not have. The list keeps
+  // the frozen order.
+  auto specs = caseSpecs();
+  if (!FLAGS_bolt_benchmark_shuffle_list) {
+    std::stable_partition(specs.begin(), specs.end(), [](const auto& spec) {
+      return spec.memLimitMb == 0;
+    });
+  }
+  for (const auto& spec : specs) {
     if ((spec.tiers & tier) == 0) {
       continue;
     }
