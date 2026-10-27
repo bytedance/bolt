@@ -250,8 +250,8 @@ class DataCells {
   /// held by this directory are invalid afterwards.
   void reset();
 
-  /// Recycles the cells of one partition back to the allocator (RSS partial
-  /// flush seam; unused on the ESS full-drain path).
+  /// Recycles the cells of one partition back to the allocator: a partial
+  /// Run's release step.
   void releasePartition(uint32_t pid);
 
   uint64_t totalBytes() const {
