@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <random>
 
 #include "bolt/common/memory/Memory.h"
@@ -248,6 +249,93 @@ TEST_F(CellChunkTest, dataCellsReleasePartitionRecycles) {
   const auto bytesBefore = alloc.allocatedBytes();
   cells.append(3, 1, blobA.data(), blobA.size());
   EXPECT_EQ(alloc.allocatedBytes(), bytesBefore);
+}
+
+TEST_F(CellChunkTest, dataCellsCompactEmptiesChunksAfterPartialRelease) {
+  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
+  constexpr uint32_t kPartitions = 8;
+  constexpr uint32_t kStreams = 2;
+  DataCells cells(pool_.get(), &alloc, kPartitions, kStreams);
+
+  // Round-robin appends spread every partition over every chunk.
+  std::mt19937 rng(7);
+  std::vector<std::string> expected(kPartitions * kStreams);
+  for (int round = 0; round < 40; ++round) {
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      for (uint32_t stream = 0; stream < kStreams; ++stream) {
+        std::string blob(1 + rng() % kCellBytes, '\0');
+        for (auto& c : blob) {
+          c = static_cast<char>(rng());
+        }
+        cells.append(pid, stream, blob.data(), blob.size());
+        expected[stream * kPartitions + pid] += blob;
+      }
+    }
+  }
+  const auto allocatedBefore = alloc.allocatedBytes();
+  ASSERT_GE(allocatedBefore, 4 * kChunkBytes);
+
+  // Releasing half the partitions frees cells in every chunk, no chunk.
+  for (uint32_t pid = 0; pid < kPartitions; pid += 2) {
+    cells.releasePartition(pid);
+    expected[pid].clear();
+    expected[kPartitions + pid].clear();
+  }
+  alloc.packFreelist();
+  EXPECT_EQ(alloc.shrink(), 0);
+
+  const uint64_t freed = cells.compact(allocatedBefore);
+  EXPECT_GT(freed, 0);
+  EXPECT_EQ(alloc.shrink(), static_cast<int64_t>(freed));
+  EXPECT_EQ(alloc.allocatedBytes(), allocatedBefore - freed);
+  EXPECT_LE(alloc.usedBytes(), alloc.allocatedBytes());
+
+  // Moved chains read back intact and keep appending at the moved tail.
+  for (uint32_t pid = 1; pid < kPartitions; pid += 2) {
+    cells.append(pid, 1, "tail", 4);
+    expected[kPartitions + pid] += "tail";
+  }
+  for (uint32_t stream = 0; stream < kStreams; ++stream) {
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      const auto& want = expected[stream * kPartitions + pid];
+      EXPECT_EQ(cells.bytes(pid, stream), want.size());
+      std::string got;
+      cells.scan(pid, stream, [&](const char* data, uint32_t len) {
+        got.append(data, len);
+      });
+      EXPECT_EQ(got, want) << "pid " << pid << " stream " << stream;
+    }
+  }
+}
+
+TEST_F(CellChunkTest, dataCellsCompactLeavesChunksWithHeldCells) {
+  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
+  DataCells cells(pool_.get(), &alloc, 2, 1);
+  const std::string blob(kCellBytes, 'x');
+  // Alternating full cells: every chunk holds both partitions.
+  for (uint32_t i = 0; i + 1 < 4 * kCellsPerChunk; ++i) {
+    cells.append(i % 2, 0, blob.data(), blob.size());
+  }
+  // The last free slot, held unlinked as an append holds the cells it is
+  // about to fill.
+  const uint32_t held = alloc.allocCell();
+  const uint32_t heldChunk = alloc.chunkOf(held);
+  ::memset(alloc.cellData(held), 'h', kCellBytes);
+  cells.releasePartition(0);
+
+  cells.compact(4 * kChunkBytes);
+  alloc.shrink();
+  // The held cell's chunk stays, and so does what the append wrote there.
+  EXPECT_TRUE(alloc.chunkRetained(heldChunk));
+  EXPECT_EQ(
+      std::string(alloc.cellData(held), kCellBytes),
+      std::string(kCellBytes, 'h'));
+  // Partition 1 took the odd appends: 2 * kCellsPerChunk - 1 full cells.
+  std::string got;
+  cells.scan(
+      1, 0, [&](const char* data, uint32_t len) { got.append(data, len); });
+  EXPECT_EQ(got, std::string((2 * kCellsPerChunk - 1) * kCellBytes, 'x'));
+  alloc.recycle(held);
 }
 
 TEST_F(CellChunkTest, nullCellsDefaultIsNoNullAndCostsNothing) {
