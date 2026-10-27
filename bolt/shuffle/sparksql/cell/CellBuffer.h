@@ -109,6 +109,42 @@ class ChunkAllocator {
   /// pointing into released chunks are dropped. Returns bytes released.
   int64_t shrink();
 
+  // Evacuation: moving live cells out of chunks so shrink() can return
+  // them. DataCells::compact() drives it.
+
+  /// Chunk slots, retained or holes; a chunk index is below this.
+  uint32_t numChunkSlots() const {
+    return static_cast<uint32_t>(chunks_.size());
+  }
+
+  /// Whether slot `chunk` holds memory (a hole left by shrink() does not).
+  bool chunkRetained(uint32_t chunk) const {
+    return !chunks_[chunk].empty();
+  }
+
+  /// Cells handed out of `chunk` and not recycled.
+  uint32_t chunkLiveCells(uint32_t chunk) const {
+    return chunkLiveCells_[chunk];
+  }
+
+  uint32_t chunkOf(uint32_t cellId) const {
+    return cellId >> cellsPerChunkShift_;
+  }
+
+  uint32_t cellsPerChunk() const {
+    return 1u << cellsPerChunkShift_;
+  }
+
+  /// Until endEvacuation(), allocForEvacuation() hands out cells only from
+  /// retained chunks whose `evacuating` entry is 0, and nothing grows.
+  void beginEvacuation(const std::vector<uint8_t>& evacuating);
+
+  /// A free cell outside the evacuating chunks; kInvalidCell when none is
+  /// left. Never calls the grow callback or the pool.
+  uint32_t allocForEvacuation();
+
+  void endEvacuation();
+
   /// Live chunks times chunk size: exactly the pool-visible footprint.
   int64_t allocatedBytes() const {
     return static_cast<int64_t>(liveChunks_) * chunkBytes_;
@@ -124,10 +160,6 @@ class ChunkAllocator {
 
  private:
   static constexpr uint32_t kNoChunk = 0xFFFFFFFFu;
-
-  uint32_t cellsPerChunk() const {
-    return 1u << cellsPerChunkShift_;
-  }
 
   /// Allocates a chunk from the pool into a hole slot or a new slot and makes
   /// it the current bump chunk.
@@ -153,6 +185,11 @@ class ChunkAllocator {
   std::vector<uint32_t> chunkLiveCells_;
   /// Cells handed back by recycle(), LIFO.
   std::vector<uint32_t> freeList_;
+
+  /// During an evacuation: the chunks being emptied, and the freelist
+  /// entries inside them, set aside until endEvacuation().
+  std::vector<uint8_t> evacuating_;
+  std::vector<uint32_t> parkedFree_;
 
   /// Chunk currently served by bump allocation, or kNoChunk.
   uint32_t bumpChunk_{kNoChunk};
@@ -253,6 +290,15 @@ class DataCells {
   /// Recycles the cells of one partition back to the allocator: a partial
   /// Run's release step.
   void releasePartition(uint32_t pid);
+
+  /// Empties chunks so shrink() can return at least `targetBytes`, when the
+  /// other chunks have room: moves the chained cells of the least-occupied
+  /// chunks into free cells elsewhere and relinks them. Cells are spread
+  /// over the chunks without regard to partition, so after a partial Run
+  /// every chunk is still partly live and frees nothing on its own. A chunk
+  /// holding a cell an append holds unlinked stays put. Allocates nothing
+  /// from the pool. Returns the bytes of the chunks emptied.
+  uint64_t compact(uint64_t targetBytes);
 
   uint64_t totalBytes() const {
     return totalBytes_;

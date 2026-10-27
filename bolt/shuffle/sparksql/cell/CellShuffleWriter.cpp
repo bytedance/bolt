@@ -461,11 +461,16 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     return arrow::Status::OK();
   }
   // The largest partitions first, as much as the request asks. Their cells
-  // are spread over every chunk, so the chunks they free may not cover the
-  // request: then the whole window goes, as before.
+  // are spread over every chunk, so compaction then moves the remaining
+  // cells out of the emptiest chunks for shrink() to return. Only when that
+  // still falls short does the whole window go, as before.
   if (size > 0) {
     splitter_->spillPartitions(static_cast<uint64_t>(size - *actual));
     *actual += allocator_->shrink();
+    if (*actual < size) {
+      splitter_->compactCells(static_cast<uint64_t>(size - *actual));
+      *actual += allocator_->shrink();
+    }
   }
   if (size <= 0 || *actual < size) {
     splitter_->spillRun();
