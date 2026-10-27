@@ -103,8 +103,12 @@ struct CellShuffleOptions {
   int64_t nullMemLimitBytes = 16LL << 20;
   // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
-  // Merge runs per partition; disabling avoids gathering the whole window.
-  bool coalesceMergedRuns = true;
+  // Gather a partition's spilled segments and resident cells into one run
+  // at merge. Off by default: with compressSpill the segments are final
+  // runs already, and gathering them decompresses and compresses again
+  // every spilled byte - under memory pressure that doubled the codec time
+  // of compressible data for a few percent faster reads of the fewer runs.
+  bool coalesceMergedRuns = false;
   // Compress runs as they spill, so both disk passes write compressed bytes
   // (SSD endurance). Spilled segments are then final runs, copied verbatim
   // at merge; only with coalesceMergedRuns, a payload gathered from several
