@@ -169,10 +169,16 @@ void LocalCellOutput::writeRun(
     DataFileWriter& out,
     const char* data,
     uint64_t dataBytes,
-    const uint64_t* decodedSizes) {
+    const uint64_t* decodedSizes,
+    bool separable) {
   const uint32_t numStreams = layout_->numStreams();
   const uint64_t headerBytes = 1 + 8 + 8ull * numStreams;
   rawAccum_ += headerBytes + dataBytes;
+
+  if (separable && codec_ != nullptr && dataBytes >= kMinSeparateRunBytes) {
+    writeSeparateRun(out, data, decodedSizes);
+    return;
+  }
 
   const char* body = nullptr;
   uint64_t stored = 0;
@@ -186,6 +192,63 @@ void LocalCellOutput::writeRun(
   }
   out.write(scratch_->as<char>(), scratch_->size());
   out.write(body, stored);
+}
+
+void LocalCellOutput::writeSeparateRun(
+    DataFileWriter& out,
+    const char* data,
+    const uint64_t* decodedSizes) {
+  const uint32_t numStreams = layout_->numStreams();
+  uint64_t capacity = 0;
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    if (decodedSizes[s] >= kMinCompressRunBytes) {
+      capacity += codec_->maxCompressedLen(decodedSizes[s]);
+    }
+  }
+  resetBuffer(compressScratch_, capacity, pool_);
+  // Header: the layout, the stored size per stream, then the decoded size
+  // per stream - 0 for a stream stored as it is.
+  std::vector<uint64_t> stored(numStreams);
+  std::vector<uint64_t> decoded(numStreams, 0);
+  std::vector<const char*> bodies(numStreams);
+  char* compressed = compressScratch_->asMutable<char>();
+  const char* source = data;
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    const uint64_t bytes = decodedSizes[s];
+    stored[s] = bytes;
+    bodies[s] = source;
+    if (bytes >= kMinCompressRunBytes) {
+      const uint64_t start = currentTimeNs();
+      const int64_t written = codec_->compress(
+          reinterpret_cast<const uint8_t*>(source),
+          static_cast<int64_t>(bytes),
+          reinterpret_cast<uint8_t*>(compressed),
+          codec_->maxCompressedLen(bytes));
+      compressTimeNs_ += currentTimeNs() - start;
+      if (written > 0 && static_cast<uint64_t>(written) < bytes) {
+        stored[s] = static_cast<uint64_t>(written);
+        decoded[s] = bytes;
+        bodies[s] = compressed;
+        compressed += written;
+      }
+    }
+    source += bytes;
+  }
+  resetBuffer(scratch_, 1, pool_);
+  scratch_->asMutable<uint8_t>()[0] =
+      static_cast<uint8_t>(RunLayout::kSeparate);
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    appendLe64(scratch_, stored[s], pool_);
+  }
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    appendLe64(scratch_, decoded[s], pool_);
+  }
+  out.write(scratch_->as<char>(), scratch_->size());
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    if (stored[s] > 0) {
+      out.write(bodies[s], stored[s]);
+    }
+  }
 }
 
 uint64_t LocalCellOutput::gatherPartitionRuns(
@@ -321,7 +384,12 @@ void LocalCellOutput::writeDiskPayload(
     std::vector<uint64_t> streamSizes;
     const uint64_t total =
         gatherPartitionRuns(segments, nullptr, pid, streamSizes);
-    writeRun(out, gather_->as<char>(), total, streamSizes.data());
+    writeRun(
+        out,
+        gather_->as<char>(),
+        total,
+        streamSizes.data(),
+        /*separable=*/true);
     return;
   }
   // Without coalescing, or with a single segment that already is the one
@@ -370,7 +438,14 @@ void LocalCellOutput::writeSpilledSegment(
           segment.begin + runHeaderBytes,
           runScratch_->asMutable<char>(),
           dataBytes);
-      writeRun(out, runScratch_->as<char>(), dataBytes, decodedSizes.data());
+      // The form a spill-time compression would have given it, so that
+      // compressSpill never changes the final file.
+      writeRun(
+          out,
+          runScratch_->as<char>(),
+          dataBytes,
+          decodedSizes.data(),
+          /*separable=*/false);
       return;
     }
   }
@@ -407,7 +482,12 @@ void LocalCellOutput::writeCurrentWindowPayload(
     std::vector<uint64_t> streamSizes;
     const uint64_t gathered =
         gatherPartitionRuns(segments, &in, pid, streamSizes);
-    writeRun(out, gather_->as<char>(), gathered, streamSizes.data());
+    writeRun(
+        out,
+        gather_->as<char>(),
+        gathered,
+        streamSizes.data(),
+        /*separable=*/true);
     return;
   }
   // Without coalescing, or when the payload already is a single run (one
@@ -422,7 +502,12 @@ void LocalCellOutput::writeCurrentWindowPayload(
     resetBuffer(runScratch_, total, pool_);
     gatherResident(
         in, pid, runScratch_->asMutable<char>(), decodedSizes.data());
-    writeRun(out, runScratch_->as<char>(), total, decodedSizes.data());
+    writeRun(
+        out,
+        runScratch_->as<char>(),
+        total,
+        decodedSizes.data(),
+        /*separable=*/true);
   }
 }
 
