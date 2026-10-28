@@ -285,14 +285,13 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 class RssCellOutput final : public CellOutput {
  public:
   /// `raw` must outlive this object. `options` gives the codec and
-  /// `streamCompression` its mode; `pool` backs the payloads and workspaces
-  /// so they stay inside task memory accounting and must outlive this
-  /// object.
+  /// `cellOptions` its mode; `pool` backs the payloads and workspaces so
+  /// they stay inside task memory accounting and must outlive this object.
   RssCellOutput(
       RawPartitionOutput& raw,
       const CellLayout* layout,
       const PartitionWriterOptions& options,
-      bool streamCompression,
+      const CellShuffleOptions& cellOptions,
       memory::MemoryPool* pool);
 
   bool sealsResidentCells() const override {
