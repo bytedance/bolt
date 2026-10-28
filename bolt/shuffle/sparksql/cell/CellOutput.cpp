@@ -99,11 +99,7 @@ LocalCellOutput::LocalCellOutput(
       layout_(layout),
       cellOptions_(cellOptions),
       pool_(pool),
-      compressor_(
-          options_,
-          cellOptions_.streamCompression,
-          pool,
-          &compressTimeNs_) {
+      compressor_(options_, cellOptions_, pool, &compressTimeNs_) {
   openFrom_.assign(options_.numPartitions, 0);
   sealed_.resize(options_.numPartitions);
 }
@@ -630,12 +626,12 @@ RssCellOutput::RssCellOutput(
     RawPartitionOutput& raw,
     const CellLayout* layout,
     const PartitionWriterOptions& options,
-    bool streamCompression,
+    const CellShuffleOptions& cellOptions,
     memory::MemoryPool* pool)
     : raw_(raw),
       layout_(layout),
       pool_(pool),
-      compressor_(options, streamCompression, pool, &compressTimeNs_),
+      compressor_(options, cellOptions, pool, &compressTimeNs_),
       rawPartitionLengths_(options.numPartitions, 0) {}
 
 void RssCellOutput::spillRun(const CellWindowInput& /*in*/) {

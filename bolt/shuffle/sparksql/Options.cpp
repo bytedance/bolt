@@ -58,14 +58,15 @@ std::string CellShuffleOptions::toString() const {
       "cellMemoryCapBytes={} "
       "checkpointPartitionBytes={} nullMemLimitBytes={} "
       "enableStringDictionary={} coalesceMergedRuns={} compressSpill={} "
-      "streamCompression={}",
+      "streamCompression={} adaptiveCompression={}",
       cellMemoryCapBytes,
       checkpointPartitionBytes,
       nullMemLimitBytes,
       enableStringDictionary,
       coalesceMergedRuns,
       compressSpill,
-      streamCompression);
+      streamCompression,
+      adaptiveCompression);
 }
 
 std::string ShuffleReaderOptions::toString() const {
