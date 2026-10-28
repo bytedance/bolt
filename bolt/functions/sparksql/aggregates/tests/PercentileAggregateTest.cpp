@@ -406,6 +406,13 @@ TEST_F(PercentileTest, releasesSortScratch) {
   EXPECT_EQ(accumulator.estimatePercentile(0.5), 511.5);
 }
 
+TEST_F(PercentileTest, accumulatorAlignment) {
+  detail::PercentileAggregate<int32_t, int64_t> aggregate(false, DOUBLE());
+  EXPECT_EQ(
+      aggregate.accumulatorAlignmentSize(),
+      alignof(detail::Accumulator<int32_t>));
+}
+
 TEST_F(PercentileTest, partialFull) {
   // Make sure partial aggregation runs out of memory after first batch.
   CursorParameters params;

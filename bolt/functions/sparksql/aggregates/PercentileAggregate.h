@@ -390,6 +390,10 @@ class PercentileAggregate : public exec::Aggregate {
     return sizeof(AccumulatorType);
   }
 
+  int32_t accumulatorAlignmentSize() const override {
+    return alignof(AccumulatorType);
+  }
+
   bool isFixedSize() const override {
     return false;
   }
