@@ -16,6 +16,7 @@
 
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
 
+#include <fmt/format.h>
 #include <algorithm>
 #include <cstring>
 
@@ -112,12 +113,20 @@ bool RunCompressor::write(
     total += sizes[s];
   }
   if (codec_ == nullptr || total < kMinCompressRunBytes) {
-    writeStored(sink, numStreams, sizes, visit);
+    storeRun(sink, numStreams, sizes, visit);
+    ++stats_.storedRuns;
+    if (codec_ != nullptr && total > 0) {
+      ++stats_.tinyFrames;
+      stats_.tinyBytes += total;
+    }
     return true;
   }
   if (streamSkips_.size() != numStreams) {
     streamSkips_.assign(numStreams, 0);
     combinedSkip_ = 0;
+  }
+  if (streamStats_.size() < numStreams) {
+    streamStats_.resize(numStreams);
   }
   if (total < kMinSeparateRunBytes) {
     std::vector<char> header(runHeaderBytes(numStreams));
@@ -128,13 +137,16 @@ bool RunCompressor::write(
         visit(s, fn);
       }
     };
+    ++stats_.combinedRuns;
     Frame frame;
-    if (!skipFrame(combinedSkip_)) {
+    const bool skipped = skipFrame(combinedSkip_);
+    if (!skipped) {
       frame = writeFrame(sink, total, visitAll, /*probe=*/false);
       if (frame.final) {
         learn(combinedSkip_, frame.stored > 0);
       }
     }
+    countFrame(frame, total, skipped);
     const uint64_t stored = frame.stored;
     if (stored == 0) {
       visitAll(
@@ -151,6 +163,7 @@ bool RunCompressor::write(
   }
   // SEPARATE: the stored size per stream, then the decoded size - 0 for a
   // stream stored as it is.
+  ++stats_.separateRuns;
   bool final = true;
   std::vector<uint64_t> header(2ull * numStreams, 0);
   const uint64_t headerAt = sink.position();
@@ -165,11 +178,23 @@ bool RunCompressor::write(
     }
     const auto visitStream = [&](RunPieceFn fn) { visit(s, fn); };
     Frame frame;
-    if (bytes >= kMinCompressRunBytes && !skipFrame(streamSkips_[s])) {
+    auto& streamStats = streamStats_[s];
+    if (bytes < kMinCompressRunBytes) {
+      ++stats_.tinyFrames;
+      stats_.tinyBytes += bytes;
+    } else if (skipFrame(streamSkips_[s])) {
+      countFrame(frame, bytes, /*skipped=*/true);
+      ++streamStats.skipped;
+    } else {
       frame = writeFrame(sink, bytes, visitStream, /*probe=*/true);
       if (frame.final) {
         learn(streamSkips_[s], frame.stored > 0);
       }
+      countFrame(frame, bytes, /*skipped=*/false);
+      ++streamStats.tried;
+      streamStats.compressed += frame.stored > 0;
+      streamStats.inBytes += bytes;
+      streamStats.outBytes += frame.stored > 0 ? frame.stored : bytes;
     }
     if (frame.stored > 0) {
       header[s] = frame.stored;
@@ -186,6 +211,15 @@ bool RunCompressor::write(
 }
 
 void RunCompressor::writeStored(
+    RunSink& sink,
+    uint32_t numStreams,
+    const uint64_t* sizes,
+    RunStreamVisitor visit) {
+  ++stats_.deferredRuns;
+  storeRun(sink, numStreams, sizes, visit);
+}
+
+void RunCompressor::storeRun(
     RunSink& sink,
     uint32_t numStreams,
     const uint64_t* sizes,
@@ -220,6 +254,51 @@ void RunCompressor::learn(uint32_t& skip, bool shrank) const {
   if (adaptive_ && !shrank) {
     skip = kProbeEveryFrames - 1;
   }
+}
+
+void RunCompressor::countFrame(
+    const Frame& frame,
+    uint64_t bytes,
+    bool skipped) {
+  if (skipped) {
+    ++stats_.skippedFrames;
+    stats_.skippedBytes += bytes;
+  } else if (frame.stored > 0) {
+    ++stats_.compressedFrames;
+    stats_.compressedInBytes += bytes;
+    stats_.compressedOutBytes += frame.stored;
+  } else if (frame.final) {
+    ++stats_.unshrunkFrames;
+    stats_.unshrunkBytes += bytes;
+  } else {
+    ++stats_.unfundedFrames;
+    stats_.unfundedBytes += bytes;
+  }
+}
+
+std::string RunCompressor::Stats::toString() const {
+  const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
+  return fmt::format(
+      "runs stored={} deferred={} combined={} separate={}; "
+      "frames compressed={} ({:.1f}MB -> {:.1f}MB) unshrunk={} ({:.1f}MB, "
+      "early={}) skipped={} ({:.1f}MB) tiny={} ({:.1f}MB) unfunded={} "
+      "({:.1f}MB)",
+      storedRuns,
+      deferredRuns,
+      combinedRuns,
+      separateRuns,
+      compressedFrames,
+      mb(compressedInBytes),
+      mb(compressedOutBytes),
+      unshrunkFrames,
+      mb(unshrunkBytes),
+      earlyFrames,
+      skippedFrames,
+      mb(skippedBytes),
+      tinyFrames,
+      mb(tinyBytes),
+      unfundedFrames,
+      mb(unfundedBytes));
 }
 
 void RunCompressor::releaseWorkspace() {
@@ -304,6 +383,7 @@ uint64_t RunCompressor::streamFrame(
     compressStaged();
   }
   if (storedInstead) {
+    ++stats_.earlyFrames;
     return 0;
   }
   for (;;) {
