@@ -114,6 +114,11 @@ DEFINE_int32(
     bolt_benchmark_shuffle_codec_level,
     0,
     "Compression level; 0 keeps the codec's default.");
+DEFINE_bool(
+    bolt_benchmark_shuffle_cell_stream_compression,
+    true,
+    "Cell writers compress runs through the codec's stream form; false "
+    "compresses each frame at once from a gathered workspace.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -1259,6 +1264,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
   options.partitionWriterOptions.compressionType = benchmarkCodec();
   options.partitionWriterOptions.compressionLevel = benchmarkCodecLevel();
   options.cellOptions.enableStringDictionary = writer != Writer::kCellNoDict;
+  options.cellOptions.streamCompression =
+      FLAGS_bolt_benchmark_shuffle_cell_stream_compression;
   return options;
 }
 
