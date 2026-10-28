@@ -119,6 +119,11 @@ DEFINE_bool(
     true,
     "Cell writers compress runs through the codec's stream form; false "
     "compresses each frame at once from a gathered workspace.");
+DEFINE_bool(
+    bolt_benchmark_shuffle_cell_adaptive_compression,
+    true,
+    "Cell writers store, without a codec call, the frames of a kind that "
+    "last did not shrink, trying one in ten.");
 
 using namespace bytedance::bolt;
 using namespace bytedance::bolt::shuffle::sparksql;
@@ -1266,6 +1271,8 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
   options.cellOptions.enableStringDictionary = writer != Writer::kCellNoDict;
   options.cellOptions.streamCompression =
       FLAGS_bolt_benchmark_shuffle_cell_stream_compression;
+  options.cellOptions.adaptiveCompression =
+      FLAGS_bolt_benchmark_shuffle_cell_adaptive_compression;
   return options;
 }
 
