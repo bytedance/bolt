@@ -100,7 +100,9 @@ class CellOutput {
 /// together with the task's composite output.
 ///
 /// Spill segments are stored in the exact Run body form of the wire format:
-/// COMBINED when spill compression pays, COMBINED_UNCOMPRESSED otherwise. A
+/// when compressed by the stream codec, the form of a final run of the same
+/// bytes (SEPARATE from kMinSeparateRunBytes, else COMBINED); otherwise
+/// COMBINED when spill compression pays, COMBINED_UNCOMPRESSED if not. A
 /// payload that is a single run (one spilled segment, or only resident
 /// cells) is a header plus a verbatim copy. With coalesceMergedRuns,
 /// several segments - or segments plus resident cells - are gathered

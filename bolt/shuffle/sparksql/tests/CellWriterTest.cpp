@@ -1538,6 +1538,59 @@ TEST_F(CellWriterTest, pressureSpillCompressesWithoutWorkspace) {
   }
 }
 
+TEST_F(CellWriterTest, spilledRunCompressesPastAnIncompressibleStream) {
+  // Each spilled run opens with a stream of random integers no codec
+  // shrinks, followed by a stream of repetitive strings that makes most of
+  // its bytes. Written stream by stream, the strings still compress: one
+  // frame over the whole run would be given up within its first blocks.
+  std::mt19937_64 rng(41);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 8; ++batch) {
+    constexpr int kRows = 4096;
+    pids.emplace_back(kRows, 0);
+    std::vector<VectorPtr> columns;
+    std::vector<std::string> names;
+    for (int c = 0; c < 4; ++c) {
+      columns.push_back(makeFlatVector<int64_t>(
+          kRows, [&](auto) { return static_cast<int64_t>(rng()); }));
+      names.push_back(fmt::format("v{}", c));
+    }
+    std::vector<std::string> storage(kRows);
+    std::vector<std::optional<StringView>> views(kRows);
+    for (int i = 0; i < kRows; ++i) {
+      storage[i].assign(192, static_cast<char>('a' + i % 4));
+      views[i] = StringView(storage[i]);
+    }
+    columns.push_back(makeNullableFlatVector<StringView>(views));
+    names.push_back("s");
+    batches.push_back(makeRowVector(names, columns));
+  }
+
+  const auto runOnce = [&](arrow::Compression::type compressionType) {
+    auto options = makeOptions(1);
+    // Payloads close every ~2MB, each as a run through the spill file.
+    options.cellOptions.checkpointPartitionBytes = 2 << 20;
+    options.partitionWriterOptions.compressionType = compressionType;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    EXPECT_GT(writer.metrics().totalBytesEvicted, 0);
+    const auto result = std::make_pair(
+        writer.metrics().totalBytesEvicted, writer.metrics().totalBytesWritten);
+    ::unlink(dataFile_.c_str());
+    return result;
+  };
+
+  const auto [compressedSpill, compressedOut] =
+      runOnce(arrow::Compression::LZ4_FRAME);
+  const auto [rawSpill, rawOut] = runOnce(arrow::Compression::UNCOMPRESSED);
+  // The strings are 6/7 of the bytes: well under half remains of them.
+  EXPECT_LT(compressedSpill * 2, rawSpill)
+      << "compressed spill " << compressedSpill << " vs raw " << rawSpill;
+  EXPECT_LT(compressedOut * 2, rawOut)
+      << "compressed output " << compressedOut << " vs raw " << rawOut;
+}
+
 TEST_F(CellWriterTest, celebornPushesEveryWindowWhole) {
   // Under a cap far below the data, every pressure point turns into a seal
   // at the next batch boundary: many windows, each pushed as one whole
