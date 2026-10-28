@@ -120,6 +120,11 @@ struct CellShuffleOptions {
   // and compressed at once. Codecs with no stream form are always one-shot.
   // Both write the same run layouts.
   bool streamCompression = true;
+  // Learn per stream whether compressing pays: a stream whose frames keep
+  // not shrinking (random keys, hashes, packed doubles) is stored without a
+  // codec call, and tried again after a growing stretch of skipped bytes in
+  // case its data changed. Off, every frame is compressed and judged.
+  bool adaptiveCompression = true;
 
   /// Returns all options in a human readable form.
   std::string toString() const;

@@ -85,6 +85,12 @@ using RunStreamVisitor =
 /// whose first blocks speak for the rest; a COMBINED frame, spanning
 /// streams, is judged on its whole size only.
 ///
+/// Adaptive, a frame that does not shrink has the next frames of the same
+/// kind stored without a codec call, the tenth tried again: frames of a
+/// stream for SEPARATE runs, and all COMBINED frames together, which span
+/// the same streams. Stream s of every run must therefore be the same
+/// stream.
+///
 /// Streaming compresses a frame straight from the visitor through fixed
 /// buffers: no workspace sized by the data, ever. One-shot gathers each
 /// frame into a workspace from the pool and compresses it at once; a frame
@@ -93,11 +99,12 @@ using RunStreamVisitor =
 class RunCompressor {
  public:
   /// Compresses with `options`' codec; stores everything when it is
-  /// UNCOMPRESSED. Codec time is added to `*compressTimeNs`; `pool` funds
-  /// the one-shot workspaces and must outlive this object.
+  /// UNCOMPRESSED. `cellOptions` gives the mode (streamCompression,
+  /// adaptiveCompression). Codec time is added to `*compressTimeNs`;
+  /// `pool` funds the one-shot workspaces and must outlive this object.
   RunCompressor(
       const PartitionWriterOptions& options,
-      bool streaming,
+      const CellShuffleOptions& cellOptions,
       memory::MemoryPool* pool,
       uint64_t* compressTimeNs);
 
@@ -158,8 +165,22 @@ class RunCompressor {
 
   Frame oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit);
 
+  /// Whether a frame whose kind has `skip` frames left to store without a
+  /// try is stored so; counts it down if so.
+  bool skipFrame(uint32_t& skip) const;
+
+  /// Learns from a frame tried: one that did not shrink has the next ones
+  /// of its kind stored without a try.
+  void learn(uint32_t& skip, bool shrank) const;
+
   memory::MemoryPool* const pool_;
   uint64_t* const compressTimeNs_;
+  const bool adaptive_;
+  /// Per stream, its SEPARATE frames still to store without a try; reset
+  /// when a run comes with another number of streams.
+  std::vector<uint32_t> streamSkips_;
+  /// The same for COMBINED frames.
+  uint32_t combinedSkip_{0};
   std::unique_ptr<Codec> codec_;
   /// Null when one-shot.
   std::unique_ptr<StreamCompressor> streamCompressor_;
