@@ -78,7 +78,6 @@ class PercentileTest : public AggregationTestBase {
     AggregationTestBase::SetUp();
     random::setSeed(0);
     allowInputShuffle();
-    AggregationTestBase::disableTestIncremental();
   }
 
   template <typename T>
@@ -404,6 +403,7 @@ TEST_F(PercentileTest, releasesSortScratch) {
   accumulator.freeSortData();
   EXPECT_EQ(accumulator.keys_.capacity(), 0);
   EXPECT_EQ(accumulator.counts_.capacity(), 0);
+  EXPECT_EQ(accumulator.estimatePercentile(0.5), 511.5);
 }
 
 TEST_F(PercentileTest, partialFull) {

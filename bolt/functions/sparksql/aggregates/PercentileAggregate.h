@@ -239,6 +239,7 @@ struct Accumulator {
   void freeSortData() {
     std::vector<T>{}.swap(keys_);
     std::vector<int64_t>{}.swap(counts_);
+    sort_ = false;
   }
 
   void free(HashStringAllocator& allocator) {
