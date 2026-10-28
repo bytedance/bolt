@@ -648,9 +648,19 @@ class BmAggregateWindowFunction : public exec::WindowFunction {
       const vector_size_t* rawFrameEnds,
       vector_size_t resultOffset,
       const VectorPtr& result) {
+    // Valid frame bounds are nonnegative. Recompute the first selected frame
+    // and reuse the existing aggregate state/result only within this call.
+    vector_size_t previousStart = -1;
+    vector_size_t previousEnd = -1;
     validRows.applyToSelected([&](auto i) {
-      resetAggregateGroup();
-      addFrameRows(rawFrameStarts[i], rawFrameEnds[i]);
+      const auto frameStart = rawFrameStarts[i];
+      const auto frameEnd = rawFrameEnds[i];
+      if (frameStart != previousStart || frameEnd != previousEnd) {
+        resetAggregateGroup();
+        addFrameRows(frameStart, frameEnd);
+        previousStart = frameStart;
+        previousEnd = frameEnd;
+      }
       extractAggregateResult(result, resultOffset + i);
     });
 
