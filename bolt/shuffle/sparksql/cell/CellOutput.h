@@ -23,8 +23,7 @@
 #include "bolt/shuffle/sparksql/Options.h"
 #include "bolt/shuffle/sparksql/RawPartitionOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
-#include "bolt/shuffle/sparksql/compression/Codec.h"
-#include "bolt/shuffle/sparksql/compression/StreamCodec.h"
+#include "bolt/shuffle/sparksql/cell/RunCompressor.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
@@ -99,10 +98,9 @@ class CellOutput {
 /// finalize() merges them into the shuffle data file, partition-major,
 /// together with the task's composite output.
 ///
-/// Spill segments are stored in the exact Run body form of the wire format:
-/// when compressed by the stream codec, the form of a final run of the same
-/// bytes (SEPARATE from kMinSeparateRunBytes, else COMBINED); otherwise
-/// COMBINED when spill compression pays, COMBINED_UNCOMPRESSED if not. A
+/// Spill segments are runs in their wire form, written by the RunCompressor
+/// as any final run of the same bytes - or stored, with compressSpill off,
+/// for the merge to compress. A
 /// payload that is a single run (one spilled segment, or only resident
 /// cells) is a header plus a verbatim copy. With coalesceMergedRuns,
 /// several segments - or segments plus resident cells - are gathered
@@ -148,9 +146,9 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     /// segment for that partition.
     std::vector<uint64_t> pidEnds;
     /// Whether the run's COMBINED_UNCOMPRESSED segments already are their final
-    /// form: there is no codec, or spill-time compression was tried and did
-    /// not pay. False with compressSpill off, or when a pressure spill could
-    /// not fund the compression workspace; merge then compresses them.
+    /// form: there is no codec, or the segment is too small to compress.
+    /// False with compressSpill off, or when a pressure spill could not fund
+    /// the compression workspace; merge then compresses them.
     bool storedIsFinal{false};
   };
 
@@ -197,9 +195,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t pid);
 
   /// Copies one spilled run segment into the data file: verbatim when it
-  /// already is in final form, else through the compressing run writer -
-  /// or still verbatim when that writer's workspace cannot be funded, since
-  /// the stored form is a valid run too.
+  /// already is in final form, else through the compressor.
   void writeSpilledSegment(DataFileWriter& out, const SpillSegment& segment);
 
   /// Coalesced merge: reads every spilled segment of one partition
@@ -213,37 +209,18 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t pid,
       std::vector<uint64_t>& streamSizes);
 
-  /// Compression policy shared by spill and merge: points `body`/`stored`
-  /// at the COMBINED form when the codec shrinks the bytes, else at the
-  /// input (the stored form when compression does not pay). Returns the
-  /// layout to declare.
-  RunLayout maybeCompressRun(
-      const char* data,
-      uint64_t dataBytes,
-      const char*& body,
-      uint64_t& stored);
-
-  /// Writes one run to the data file. A `separable` run of at least
-  /// kMinSeparateRunBytes is SEPARATE: each stream compressed on its own and
-  /// kept compressed only when that shrinks it, as the V1/V2 payloads treat
-  /// each buffer, so a stream that does not compress is read without a
-  /// decompression or a checksum pass. A smaller run follows the policy
-  /// above, the form a spill run takes; a spilled segment compressed only
-  /// at the merge is not separable, so the final file does not depend on
-  /// compressSpill. `data` is the concatenated stream bytes; sizes are the
-  /// per-stream decoded lengths.
-  void writeRun(
+  /// Writes partition `pid`'s resident cells to the data file as one run.
+  void writeResidentRun(
       DataFileWriter& out,
-      const char* data,
-      uint64_t dataBytes,
-      const uint64_t* decodedSizes,
-      bool separable);
+      const CellWindowInput& in,
+      uint32_t pid,
+      uint64_t total);
 
-  /// writeRun()'s SEPARATE form.
-  void writeSeparateRun(
+  /// Writes the run gatherPartitionRuns() laid out in gather_.
+  void writeGatheredRun(
       DataFileWriter& out,
-      const char* data,
-      const uint64_t* decodedSizes);
+      uint64_t total,
+      const std::vector<uint64_t>& streamSizes);
 
   /// Appends one partition's payload for the current (unsealed) window:
   /// header, null body and row counts straight from memory, then the
@@ -258,42 +235,21 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// The kind byte that opens every block on the wire.
   void appendBlockKind();
 
-  /// Writes partition `pid`'s resident cells to the data file as one run,
-  /// compressed by streamCompressor_ straight from the cells: SEPARATE
-  /// when at least kMinSeparateRunBytes, else COMBINED.
-  void streamResidentRun(
-      DataFileWriter& out,
-      const CellWindowInput& in,
-      uint32_t pid,
-      uint64_t total);
-
   PartialSpiller& composite_;
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
   const CellShuffleOptions cellOptions_;
   memory::MemoryPool* const pool_;
-  /// Spill and merge codec; null when compressionType is UNCOMPRESSED.
-  std::unique_ptr<Codec> codec_;
-  /// The same compression as a stream: runs written from the cells go
-  /// through it piece by piece, so no workspace sized by the run is ever
-  /// needed. Null with no codec, or when the codec has no stream form;
-  /// codec_ then compresses gathered runs as before.
-  std::unique_ptr<StreamCompressor> streamCompressor_;
-  /// streamCompressor_'s input staging and output buffers, fixed sizes for
-  /// the writer's life.
-  std::vector<uint8_t> streamStage_;
-  std::vector<uint8_t> streamOut_;
   /// Time metrics align with the V1/V2 partition writers and never
   /// overlap: compress = codec calls only; write = fwrite/fflush moments
   /// on the data file; evict = fwrite/fflush moments on the spill file.
   /// Assembly glue (chain scans, null bodies, spill read-back) is counted
   /// nowhere, as in V1 where it rides inside split.
   uint64_t compressTimeNs_{0};
-  /// Pool-backed workspaces, released after every spill and after finalize
-  /// so their capacity never sits on the reservation between uses. When the
-  /// pool cannot fund them during a pressure spill, spillRun degrades to
-  /// streaming the run out uncompressed instead of failing, and the merge
-  /// makes the compression attempt for it.
+  /// Every run's compression.
+  RunCompressor compressor_;
+  /// Pool-backed workspaces of the coalesced merge, released after
+  /// finalize so their capacity never sits on the reservation.
   BufferPtr runScratch_;
   BufferPtr compressScratch_;
   BufferPtr gather_;
@@ -323,18 +279,20 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 /// them, so every block is exactly one complete ColumnarPayload: a window is
 /// only ever output whole, at a seal - one spillRaw() of every partition's
 /// payload - and nothing is spilled. Each payload carries the partition's
-/// resident cells as one run, compressed when that pays. The payloads go
+/// resident cells as one run, written by the RunCompressor. The payloads go
 /// through `raw`, the push channel the task's composite blocks share, which
 /// finalize() ends once for both.
 class RssCellOutput final : public CellOutput {
  public:
-  /// `raw` must outlive this object. `options` gives the codec; `pool`
-  /// backs the payload workspaces so they stay inside task memory
-  /// accounting and must outlive this object.
+  /// `raw` must outlive this object. `options` gives the codec and
+  /// `streamCompression` its mode; `pool` backs the payloads and workspaces
+  /// so they stay inside task memory accounting and must outlive this
+  /// object.
   RssCellOutput(
       RawPartitionOutput& raw,
       const CellLayout* layout,
       const PartitionWriterOptions& options,
+      bool streamCompression,
       memory::MemoryPool* pool);
 
   bool sealsResidentCells() const override {
@@ -363,15 +321,11 @@ class RssCellOutput final : public CellOutput {
   RawPartitionOutput& raw_;
   const CellLayout* const layout_;
   memory::MemoryPool* const pool_;
-  /// Null when compressionType is UNCOMPRESSED.
-  std::unique_ptr<Codec> codec_;
-
-  BufferPtr compressScratch_;
-  std::vector<uint64_t> streamSizes_;
+  uint64_t compressTimeNs_{0};
+  RunCompressor compressor_;
 
   std::vector<int64_t> rawPartitionLengths_;
   uint64_t numSealed_{0};
-  uint64_t compressTimeNs_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
