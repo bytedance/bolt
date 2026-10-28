@@ -18,6 +18,7 @@
 #include <boost/sort/pdqsort/pdqsort.hpp>
 
 #include <folly/Likely.h>
+#include <folly/ScopeGuard.h>
 #include <folly/container/F14Map.h>
 #include <cmath>
 #include <exception>
@@ -236,8 +237,8 @@ struct Accumulator {
   }
 
   void freeSortData() {
-    keys_.clear();
-    counts_.clear();
+    std::vector<T>{}.swap(keys_);
+    std::vector<int64_t>{}.swap(counts_);
   }
 
   void free(HashStringAllocator& allocator) {
@@ -687,6 +688,8 @@ class PercentileAggregate : public exec::Aggregate {
     for (auto i = 0; i < numGroups; ++i) {
       char* group = groups[i];
       auto accumulator = value<AccumulatorType>(group);
+      auto cleanup =
+          folly::makeGuard([accumulator]() { accumulator->freeSortData(); });
       if (accumulator->size() == 0) {
         result->setNull(i, true);
       } else {
@@ -695,7 +698,6 @@ class PercentileAggregate : public exec::Aggregate {
         }
         extractFunction(accumulator, result, i);
       }
-      accumulator->freeSortData();
     }
   }
 
