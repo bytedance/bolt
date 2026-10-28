@@ -396,6 +396,7 @@ void LocalCellOutput::writeSpilledSegment(
       decodedSum += decoded != 0 ? decoded : sizes[s];
     }
     rawAccum_ += runHeaderBytes + decodedSum;
+    ++copiedSegments_;
     out.copyFrom(spill_, segment.begin, segmentBytes);
     return;
   }
@@ -418,6 +419,7 @@ void LocalCellOutput::writeSpilledSegment(
   // final file.
   if (layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
       segment.storedIsFinal) {
+    ++copiedSegments_;
     out.copyFrom(spill_, segment.begin, segmentBytes);
     return;
   }
@@ -427,6 +429,7 @@ void LocalCellOutput::writeSpilledSegment(
     streamAt[s] = at;
     at += decodedSizes[s];
   }
+  ++compressedSegments_;
   DataRunSink sink(out);
   compressor_.write(
       sink, numStreams, decodedSizes.data(), [&](uint32_t s, RunPieceFn fn) {
@@ -579,6 +582,7 @@ void LocalCellOutput::writeGatheredRun(
     uint64_t total,
     const std::vector<uint64_t>& streamSizes) {
   const uint32_t numStreams = layout_->numStreams();
+  ++gatheredPayloads_;
   rawAccum_ += runHeaderBytes(numStreams) + total;
   std::vector<uint64_t> streamAt(numStreams);
   uint64_t at = 0;
@@ -631,6 +635,9 @@ void LocalCellOutput::finalize(
   metrics.rawPartitionLengths = rawLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSeals_);
+  LOG(INFO) << "CellShuffleWriter merge: segments copied=" << copiedSegments_
+            << " compressed=" << compressedSegments_
+            << ", gathered payloads=" << gatheredPayloads_;
   logCompression(compressor_, *layout_);
 }
 

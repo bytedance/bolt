@@ -18,6 +18,8 @@
 
 #include <numeric>
 
+#include <fmt/format.h>
+
 #include <folly/ScopeGuard.h>
 
 #include "bolt/common/base/BitUtil.h"
@@ -222,7 +224,7 @@ void CellShuffleWriter::admitRemoteSlice(int64_t estimatedBytes) {
   const int64_t cap = options_.cellOptions.cellMemoryCapBytes;
   if ((cap > 0 && allocator_->allocatedBytes() + sliceBytes > cap) ||
       !boltPool_->maybeReserve(sliceBytes + pushBytes)) {
-    flushRemoteWindow();
+    flushRemoteWindow(SealReason::kRemoteAdmit);
   }
 }
 
@@ -233,7 +235,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   // rows - the reader decodes a payload in batches of its own size.
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
-    checkpoint();
+    checkpoint(SealReason::kRows);
   }
   inSplit_ = true;
   const uint32_t numRows = rv->size();
@@ -400,12 +402,14 @@ void CellShuffleWriter::onBeforeChunkGrow() {
   if (overCap || !boltPool_->maybeReserve(kChunkBytes)) {
     // The cells freed go back to the freelist, which the growth retries
     // first: a partial Run makes room without returning a chunk.
-    splitter_->spillPartitions(
+    ++pressure_.growthSpills;
+    pressure_.growthSpillBytes += splitter_->spillPartitions(
         static_cast<uint64_t>(allocator_->usedBytes()) / kPartialSpillDivisor);
   }
 }
 
-void CellShuffleWriter::checkpoint() {
+void CellShuffleWriter::checkpoint(SealReason reason) {
+  ++pressure_.seals[static_cast<size_t>(reason)];
   {
     sealing_ = true;
     SCOPE_EXIT {
@@ -418,8 +422,8 @@ void CellShuffleWriter::checkpoint() {
   boltPool_->release();
 }
 
-int64_t CellShuffleWriter::flushRemoteWindow() {
-  checkpoint();
+int64_t CellShuffleWriter::flushRemoteWindow(SealReason reason) {
+  checkpoint(reason);
   // Every cell was recycled by the seal: the chunks go back as well.
   const int64_t freed = allocator_->shrink();
   boltPool_->release();
@@ -432,14 +436,14 @@ void CellShuffleWriter::maybeCheckpoint() {
   }
   if (remote_ && checkpointRequested_) {
     // Memory ran short mid-batch: push the window now that it is whole.
-    flushRemoteWindow();
+    flushRemoteWindow(SealReason::kMemory);
     return;
   }
   const auto& cellOpts = options_.cellOptions;
   if (checkpointRequested_ ||
       splitter_->nullBytes() > cellOpts.nullMemLimitBytes) {
     // Memory or the null bitmaps of every partition: the whole window.
-    checkpoint();
+    checkpoint(checkpointRequested_ ? SealReason::kMemory : SealReason::kNulls);
   } else if (
       splitter_->maxPartitionBytes() >
       static_cast<uint64_t>(cellOpts.checkpointPartitionBytes)) {
@@ -450,8 +454,10 @@ void CellShuffleWriter::maybeCheckpoint() {
     SCOPE_EXIT {
       sealing_ = false;
     };
-    splitter_->sealPartitionsOver(
+    const uint32_t sealed = splitter_->sealPartitionsOver(
         static_cast<uint64_t>(cellOpts.checkpointPartitionBytes));
+    pressure_.partitionSeals += sealed > 0;
+    pressure_.partitionsSealed += sealed;
   }
 }
 
@@ -462,6 +468,11 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (!initialized_) {
     return arrow::Status::OK();
   }
+  ++pressure_.reclaims;
+  pressure_.requestedBytes += std::max<int64_t>(size, 0);
+  SCOPE_EXIT {
+    pressure_.freedBytes += std::max<int64_t>(*actual, 0);
+  };
   // Free memory first, without touching data: chunks that hold no live
   // cell (the freelist is chunk-packed after every spill, so mid-refill
   // the untouched tail chunks are all returnable) and reservation slack.
@@ -469,9 +480,11 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // the output reads cells - and a window seal, which recycles every cell
   // before writing its null bodies, is exactly when most chunks are idle.
   *actual = allocator_->shrink();
+  pressure_.freedIdle += *actual;
   boltPool_->release();
   if (stopped_ || splitter_->isWritingOutput()) {
     // The output is reading the cells: no run may drain them now.
+    ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
   if (remote_) {
@@ -487,6 +500,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // satisfied by the idle memory).
   if ((size > 0 && *actual >= size) ||
       allocator_->allocatedBytes() < 2 * kChunkBytes) {
+    ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
   // The largest partitions first, as much as the request asks. Their cells
@@ -494,16 +508,27 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // cells out of the emptiest chunks for shrink() to return. Only when that
   // still falls short does the whole window go, as before.
   if (size > 0) {
-    splitter_->spillPartitions(static_cast<uint64_t>(size - *actual));
-    *actual += allocator_->shrink();
+    ++pressure_.reclaimSpills;
+    pressure_.reclaimSpillBytes +=
+        splitter_->spillPartitions(static_cast<uint64_t>(size - *actual));
+    int64_t freed = allocator_->shrink();
+    pressure_.freedBySpill += freed;
+    *actual += freed;
     if (*actual < size) {
-      splitter_->compactCells(static_cast<uint64_t>(size - *actual));
-      *actual += allocator_->shrink();
+      ++pressure_.compactions;
+      pressure_.compactedBytes +=
+          splitter_->compactCells(static_cast<uint64_t>(size - *actual));
+      freed = allocator_->shrink();
+      pressure_.freedByCompaction += freed;
+      *actual += freed;
     }
   }
   if (size <= 0 || *actual < size) {
+    ++pressure_.fullRuns;
     splitter_->spillRun();
-    *actual += allocator_->shrink();
+    const int64_t freed = allocator_->shrink();
+    pressure_.freedByRun += freed;
+    *actual += freed;
   }
   // Freed chunks alone are not enough: the reservation built up by the
   // chunk-grow choke point must go back too, or the arbitrator's requester
@@ -525,15 +550,19 @@ arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
   // the idle memory freed above.
   if (inSplit_ || sealing_) {
     checkpointRequested_ = true;
+    ++pressure_.deferredReclaims;
     return arrow::Status::OK();
   }
   // Same bar as a local run: no push when the idle memory already covers
   // the request or the window holds nothing meaningful.
   if ((size > 0 && *actual >= size) || !splitter_->hasWindowRows() ||
       allocator_->allocatedBytes() < 2 * kChunkBytes) {
+    ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
-  *actual += flushRemoteWindow();
+  const int64_t freed = flushRemoteWindow(SealReason::kRemoteReclaim);
+  pressure_.freedByPush += freed;
+  *actual += freed;
   metrics_.totalBytesEvicted = output_->bytesEvicted();
   return arrow::Status::OK();
 }
@@ -542,7 +571,7 @@ arrow::Status CellShuffleWriter::flushOrdinary() {
   // Composite rows come next: the window goes out whole and its memory
   // back, so the two kinds never share memory or a payload.
   if (initialized_ && splitter_->hasWindowRows()) {
-    checkpoint();
+    checkpoint(SealReason::kFlush);
     allocator_->shrink();
     boltPool_->release();
   }
@@ -568,6 +597,9 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       metrics_.rawPartitionLengths.end(),
       int64_t{0});
   metrics_.peakBytes = boltPool_->peakBytes();
+  if (initialized_) {
+    LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString();
+  }
 
   // The splitter has released its window; return idle chunks and reservation.
   if (allocator_ != nullptr) {
@@ -575,6 +607,45 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   }
   boltPool_->release();
   return arrow::Status::OK();
+}
+
+std::string CellShuffleWriter::PressureStats::toString() const {
+  const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
+  const auto seal = [&](SealReason reason) {
+    return seals[static_cast<size_t>(reason)];
+  };
+  return fmt::format(
+      "reclaims={} (idle={} deferred={}) requested={:.1f}MB freed={:.1f}MB "
+      "[idle={:.1f}MB spill={:.1f}MB compaction={:.1f}MB run={:.1f}MB "
+      "push={:.1f}MB]; partial runs reclaim={} ({:.1f}MB) growth={} "
+      "({:.1f}MB); compactions={} ({:.1f}MB emptied); full runs={}; seals "
+      "rows={} memory={} nulls={} flush={} remoteAdmit={} remoteReclaim={}; "
+      "partition seals={} ({} partitions)",
+      reclaims,
+      idleReclaims,
+      deferredReclaims,
+      mb(requestedBytes),
+      mb(freedBytes),
+      mb(freedIdle),
+      mb(freedBySpill),
+      mb(freedByCompaction),
+      mb(freedByRun),
+      mb(freedByPush),
+      reclaimSpills,
+      mb(reclaimSpillBytes),
+      growthSpills,
+      mb(growthSpillBytes),
+      compactions,
+      mb(compactedBytes),
+      fullRuns,
+      seal(SealReason::kRows),
+      seal(SealReason::kMemory),
+      seal(SealReason::kNulls),
+      seal(SealReason::kFlush),
+      seal(SealReason::kRemoteAdmit),
+      seal(SealReason::kRemoteReclaim),
+      partitionSeals,
+      partitionsSealed);
 }
 
 std::string CellShuffleWriter::toString() const {
