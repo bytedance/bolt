@@ -70,7 +70,7 @@ CellShuffleWriter::CellShuffleWriter(
         *raw_,
         &layout_,
         options_.partitionWriterOptions,
-        options_.cellOptions.streamCompression,
+        options_.cellOptions,
         boltPool_);
   } else {
     // Two outputs with a spill file each, merged into the one data file.
