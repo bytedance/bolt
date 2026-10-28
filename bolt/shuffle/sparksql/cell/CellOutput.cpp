@@ -34,211 +34,55 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
-/// Input fed to a stream compressor at a time - its independent block
-/// size: small cells are staged up to it, so every call carries a full
-/// block, compressed straight from the stage. The output buffer holds the
-/// frame so far up to kStreamOutBytes, plus the worst case of one piece and
-/// the frame's trailer: a frame no larger stays out of the file until it
-/// proves smaller than its input.
-constexpr int64_t kStreamPieceBytes = 256 << 10;
-constexpr int64_t kStreamOutBytes = 512 << 10;
-constexpr int64_t kStreamOutSlackBytes = 64;
-/// Input after which a frame that has not shrunk the data is abandoned: a
-/// few blocks show incompressible data, and storing it is cheaper to read.
-constexpr uint64_t kStreamProbeBytes = 256 << 10;
+/// Runs go to the spill file...
+class SpillRunSink final : public RunSink {
+ public:
+  explicit SpillRunSink(ShuffleSpillFile& file) : file_(file) {}
+  uint64_t position() const override {
+    return file_.end();
+  }
+  void write(const void* data, size_t bytes) override {
+    file_.append(data, bytes);
+  }
+  void patch(uint64_t position, const void* data, size_t bytes) override {
+    file_.patch(position, data, bytes);
+  }
 
-/// Where a streamed run goes: the spill file or the data file.
-struct SpillSink {
-  ShuffleSpillFile& file;
-  uint64_t position() const {
-    return file.end();
-  }
-  void write(const void* data, size_t bytes) {
-    file.append(data, bytes);
-  }
-  void rewind(uint64_t position) {
-    file.truncate(position);
-  }
-  void patch(uint64_t position, const void* data, size_t bytes) {
-    file.patch(position, data, bytes);
-  }
+ private:
+  ShuffleSpillFile& file_;
 };
 
-struct DataSink {
-  DataFileWriter& file;
-  uint64_t position() const {
-    return file.position();
+/// ...or to the data file.
+class DataRunSink final : public RunSink {
+ public:
+  explicit DataRunSink(DataFileWriter& file) : file_(file) {}
+  uint64_t position() const override {
+    return file_.position();
   }
-  void write(const void* data, size_t bytes) {
-    file.write(data, bytes);
+  void write(const void* data, size_t bytes) override {
+    file_.write(data, bytes);
   }
-  void rewind(uint64_t position) {
-    file.rewind(position);
+  void patch(uint64_t position, const void* data, size_t bytes) override {
+    file_.patch(position, data, bytes);
   }
-  void patch(uint64_t position, const void* data, size_t bytes) {
-    file.patch(position, data, bytes);
-  }
+
+ private:
+  DataFileWriter& file_;
 };
-
-/// Compresses the `total` bytes `visit` hands over - visit(fn) calls
-/// fn(data, bytes) for each piece in order - as one frame into `sink`, and
-/// returns the frame's size. `stage` (kStreamPieceBytes) gathers small
-/// pieces into full blocks; `out` holds the frame until it either outgrows
-/// kStreamOutBytes or ends. Gives up, returning 0 with nothing left in the
-/// sink, when the frame would not be smaller than the input: early, once
-/// kStreamProbeBytes show the data does not shrink, or at its end. Adds
-/// the codec time to `timeNs`.
-template <typename Sink, typename Visit>
-uint64_t streamFrame(
-    StreamCompressor& compressor,
-    std::vector<uint8_t>& stage,
-    std::vector<uint8_t>& out,
-    Sink& sink,
-    uint64_t total,
-    const Visit& visit,
-    uint64_t& timeNs) {
-  const uint64_t begin = sink.position();
-  compressor.reset();
-  const int64_t outCapacity = static_cast<int64_t>(out.size());
-  const int64_t pieceBound =
-      outCapacity - kStreamOutBytes; // worst case of one piece, plus slack
-  int64_t held = 0; // frame bytes in `out`, not yet in the sink
-  bool spilledToSink = false;
-  uint64_t fed = 0;
-  uint64_t emitted = 0;
-  size_t staged = 0;
-  bool gaveUp = false;
-  const auto drain = [&]() {
-    sink.write(out.data(), static_cast<size_t>(held));
-    held = 0;
-    spilledToSink = true;
-  };
-  const auto compressStaged = [&]() {
-    if (staged == 0) {
-      return;
-    }
-    if (outCapacity - held < pieceBound) {
-      drain();
-    }
-    StreamCompressResult result;
-    {
-      NanosecondTimer timer(&timeNs);
-      result = compressor.compress(
-          stage.data(),
-          static_cast<int64_t>(staged),
-          out.data() + held,
-          outCapacity - held);
-    }
-    BOLT_CHECK_EQ(
-        result.bytesRead,
-        static_cast<int64_t>(staged),
-        "stream compressor left input behind");
-    held += result.bytesWritten;
-    emitted += static_cast<uint64_t>(result.bytesWritten);
-    fed += staged;
-    staged = 0;
-    if (fed >= kStreamProbeBytes && emitted + emitted / 32 >= fed) {
-      gaveUp = true;
-    }
-  };
-  visit([&](const char* data, uint32_t bytes) {
-    while (bytes > 0 && !gaveUp) {
-      const size_t take = std::min<size_t>(bytes, stage.size() - staged);
-      ::memcpy(stage.data() + staged, data, take);
-      staged += take;
-      data += take;
-      bytes -= static_cast<uint32_t>(take);
-      if (staged == stage.size()) {
-        compressStaged();
-      }
-    }
-  });
-  if (!gaveUp) {
-    compressStaged();
-  }
-  if (!gaveUp) {
-    for (;;) {
-      if (outCapacity - held < pieceBound) {
-        drain();
-      }
-      StreamEndResult end;
-      {
-        NanosecondTimer timer(&timeNs);
-        end = compressor.end(out.data() + held, outCapacity - held);
-      }
-      held += end.bytesWritten;
-      emitted += static_cast<uint64_t>(end.bytesWritten);
-      if (end.noMoreOutput) {
-        break;
-      }
-    }
-  }
-  if (gaveUp || emitted >= total) {
-    if (spilledToSink) {
-      sink.rewind(begin);
-    }
-    return 0;
-  }
-  if (held > 0) {
-    sink.write(out.data(), static_cast<size_t>(held));
-  }
-  return emitted;
-}
-
-/// Appends the raw bytes `visit` hands over to `sink`.
-template <typename Sink, typename Visit>
-void streamRaw(Sink& sink, const Visit& visit) {
-  visit([&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
-}
-
-/// Writes a SEPARATE run of `numStreams` streams, `sizes[s]` bytes each,
-/// to `sink`: every stream its own frame, kept only when it shrinks, so a
-/// stream that does not compress never decides for the others - as one
-/// frame, a run opening with such a stream would be given up within its
-/// first blocks. visitStream(s, fn) hands over stream s as streamFrame()'s
-/// `visit` does. The sizes are known once every stream is written, so the
-/// header is patched in.
-template <typename Sink, typename VisitStream>
-void streamSeparateRun(
-    StreamCompressor& compressor,
-    std::vector<uint8_t>& stage,
-    std::vector<uint8_t>& out,
-    Sink& sink,
-    uint32_t numStreams,
-    const uint64_t* sizes,
-    const VisitStream& visitStream,
-    uint64_t& timeNs) {
-  // The stored size per stream, then the decoded size - 0 for a stream
-  // stored as it is.
-  std::vector<uint64_t> header(2ull * numStreams, 0);
-  const uint64_t headerAt = sink.position();
-  const auto runLayout = static_cast<uint8_t>(RunLayout::kSeparate);
-  sink.write(&runLayout, 1);
-  sink.write(header.data(), header.size() * sizeof(uint64_t));
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    const uint64_t bytes = sizes[s];
-    header[s] = bytes;
-    if (bytes == 0) {
-      continue;
-    }
-    const auto visit = [&](const auto& fn) { visitStream(s, fn); };
-    const uint64_t compressed = bytes >= kMinCompressRunBytes
-        ? streamFrame(compressor, stage, out, sink, bytes, visit, timeNs)
-        : 0;
-    if (compressed > 0) {
-      header[s] = compressed;
-      header[numStreams + s] = bytes;
-    } else {
-      streamRaw(sink, visit);
-    }
-  }
-  sink.patch(headerAt + 1, header.data(), header.size() * sizeof(uint64_t));
-}
 
 /// Bytes of a SEPARATE run header: layout byte, stored and decoded size
 /// per stream.
 uint64_t separateRunHeaderBytes(uint32_t numStreams) {
   return 1 + 16ull * numStreams;
+}
+
+/// The per-stream sizes of partition `pid`'s resident cells.
+std::vector<uint64_t> residentSizes(const CellWindowInput& in, uint32_t pid) {
+  std::vector<uint64_t> sizes(in.layout->numStreams());
+  for (uint32_t s = 0; s < sizes.size(); ++s) {
+    sizes[s] = in.cells->bytes(pid, s);
+  }
+  return sizes;
 }
 
 } // namespace
@@ -254,34 +98,12 @@ LocalCellOutput::LocalCellOutput(
       options_(std::move(options)),
       layout_(layout),
       cellOptions_(cellOptions),
-      pool_(pool) {
-  if (options_.compressionType != arrow::Compression::UNCOMPRESSED) {
-    codec_ = createCodec(
-        options_.compressionType,
-        CodecOptions{
-            getCodecBackend(options_.codecBackend),
-            options_.compressionLevel,
-            options_.checksumEnabled});
-    try {
-      // Independent blocks: the staging buffer is reused for every block,
-      // so a linked block would compress against a copied-aside dictionary.
-      streamCompressor_ = StreamCompressor::create(
-          fromArrowCodecType(options_.compressionType),
-          CodecOptions{
-              getCodecBackend(options_.codecBackend),
-              options_.compressionLevel,
-              options_.checksumEnabled,
-              /*independentBlocks=*/true});
-      streamStage_.resize(kStreamPieceBytes);
-      streamOut_.resize(
-          kStreamOutBytes +
-          streamCompressor_->recommendedOutputSize(kStreamPieceBytes) +
-          kStreamOutSlackBytes);
-    } catch (const std::exception&) {
-      // No stream form for this codec or backend: gathered runs it is.
-      streamCompressor_.reset();
-    }
-  }
+      pool_(pool),
+      compressor_(
+          options_,
+          cellOptions_.streamCompression,
+          pool,
+          &compressTimeNs_) {
   openFrom_.assign(options_.numPartitions, 0);
   sealed_.resize(options_.numPartitions);
 }
@@ -289,120 +111,26 @@ LocalCellOutput::LocalCellOutput(
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
   const uint32_t numStreams = layout_->numStreams();
   auto& run = runs_.emplace_back();
-  run.storedIsFinal = codec_ == nullptr || cellOptions_.compressSpill;
+  const bool compress = compressor_.compresses() && cellOptions_.compressSpill;
+  // With compressSpill off, the merge compresses the stored segments.
+  run.storedIsFinal = !compressor_.compresses() || compress;
   auto& ends = run.pidEnds;
   ends.resize(in.numPartitions + 1);
   ends[0] = spill_.end();
 
+  SpillRunSink sink(spill_);
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
-    uint64_t total = 0;
     if (in.runPartitions == nullptr || in.runPartitions[pid] != 0) {
-      for (uint32_t s = 0; s < numStreams; ++s) {
-        total += in.cells->bytes(pid, s);
-      }
-    }
-    if (total > 0 && streamCompressor_ != nullptr &&
-        cellOptions_.compressSpill) {
-      // The run is compressed straight from the cells into the spill file:
-      // no workspace sized by the run, so a spill under pressure never has
-      // to give up compressing for want of memory. In the form a final run
-      // of the same bytes takes, so merge copies it as it is.
-      std::vector<uint64_t> decodedSizes(numStreams);
-      for (uint32_t s = 0; s < numStreams; ++s) {
-        decodedSizes[s] = in.cells->bytes(pid, s);
-      }
-      SpillSink sink{spill_};
-      if (total >= kMinSeparateRunBytes) {
-        streamSeparateRun(
-            *streamCompressor_,
-            streamStage_,
-            streamOut_,
-            sink,
-            numStreams,
-            decodedSizes.data(),
-            [&](uint32_t s, const auto& fn) { in.cells->scan(pid, s, fn); },
-            compressTimeNs_);
-        ends[pid + 1] = spill_.end();
-        continue;
-      }
-      resetBuffer(scratch_, runHeaderBytes(numStreams), pool_);
-      writeRunHeader(
-          scratch_->asMutable<char>(),
-          RunLayout::kCombinedUncompressed,
-          total,
-          decodedSizes.data(),
-          numStreams);
-      const uint64_t headerAt = spill_.end();
-      spill_.append(scratch_->as<char>(), scratch_->size());
-      const auto visitAll = [&](const auto& fn) {
-        for (uint32_t s = 0; s < numStreams; ++s) {
+      const auto sizes = residentSizes(in, pid);
+      if (residentBytes(in, pid) > 0) {
+        const auto visit = [&](uint32_t s, RunPieceFn fn) {
           in.cells->scan(pid, s, fn);
-        }
-      };
-      const uint64_t stored = total >= kMinCompressRunBytes
-          ? streamFrame(
-                *streamCompressor_,
-                streamStage_,
-                streamOut_,
-                sink,
-                total,
-                visitAll,
-                compressTimeNs_)
-          : 0;
-      if (stored > 0) {
-        writeRunHeader(
-            scratch_->asMutable<char>(),
-            RunLayout::kCombined,
-            stored,
-            decodedSizes.data(),
-            numStreams);
-        spill_.patch(headerAt, scratch_->as<char>(), 9);
-      } else {
-        streamRaw(sink, visitAll);
-      }
-    } else if (total > 0) {
-      // Store runs in wire format so merge can copy them without re-encoding
-      // when run coalescing is disabled.
-      const char* body = nullptr;
-      uint64_t stored = total;
-      auto runLayout = RunLayout::kCombinedUncompressed;
-      if (codec_ != nullptr && cellOptions_.compressSpill) {
-        // The gather/compress workspaces come from the task pool, and a
-        // spill is often the moment that pool is exhausted; when they cannot
-        // be funded, degrade to streaming the run out uncompressed rather
-        // than failing the very operation meant to relieve the pressure.
-        try {
-          resetBuffer(runScratch_, total, pool_);
-          size_t offset = 0;
-          for (uint32_t s = 0; s < numStreams; ++s) {
-            in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
-              ::memcpy(runScratch_->asMutable<char>() + offset, data, bytes);
-              offset += bytes;
-            });
-          }
-          runLayout =
-              maybeCompressRun(runScratch_->as<char>(), total, body, stored);
-        } catch (const std::exception&) {
-          runLayout = RunLayout::kCombinedUncompressed;
-          body = nullptr;
-          stored = total;
-          run.storedIsFinal = false;
-        }
-      }
-      resetBuffer(scratch_, 1, pool_);
-      scratch_->asMutable<uint8_t>()[0] = static_cast<uint8_t>(runLayout);
-      appendLe64(scratch_, stored, pool_);
-      for (uint32_t s = 0; s < numStreams; ++s) {
-        appendLe64(scratch_, in.cells->bytes(pid, s), pool_);
-      }
-      spill_.append(scratch_->as<char>(), scratch_->size());
-      if (body != nullptr) {
-        spill_.append(body, stored);
-      } else {
-        for (uint32_t s = 0; s < numStreams; ++s) {
-          in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
-            spill_.append(data, bytes);
-          });
+        };
+        if (compress) {
+          run.storedIsFinal &=
+              compressor_.write(sink, numStreams, sizes.data(), visit);
+        } else {
+          compressor_.writeStored(sink, numStreams, sizes.data(), visit);
         }
       }
     }
@@ -410,8 +138,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   }
   countRun(ends[0]);
   // A spill exists to free memory: hand the workspace capacity back too.
-  runScratch_.reset();
-  compressScratch_.reset();
+  compressor_.releaseWorkspace();
   scratch_.reset();
   spill_.flush();
 }
@@ -444,108 +171,6 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
   }
   spill_.flush();
   ++numSeals_;
-}
-
-RunLayout LocalCellOutput::maybeCompressRun(
-    const char* data,
-    uint64_t dataBytes,
-    const char*& body,
-    uint64_t& stored) {
-  return cell::maybeCompressRun(
-      codec_.get(),
-      data,
-      dataBytes,
-      compressScratch_,
-      pool_,
-      body,
-      stored,
-      compressTimeNs_);
-}
-
-void LocalCellOutput::writeRun(
-    DataFileWriter& out,
-    const char* data,
-    uint64_t dataBytes,
-    const uint64_t* decodedSizes,
-    bool separable) {
-  const uint32_t numStreams = layout_->numStreams();
-  const uint64_t headerBytes = 1 + 8 + 8ull * numStreams;
-  rawAccum_ += headerBytes + dataBytes;
-
-  if (separable && codec_ != nullptr && dataBytes >= kMinSeparateRunBytes) {
-    writeSeparateRun(out, data, decodedSizes);
-    return;
-  }
-
-  const char* body = nullptr;
-  uint64_t stored = 0;
-  const auto runLayout = maybeCompressRun(data, dataBytes, body, stored);
-
-  resetBuffer(scratch_, 1, pool_);
-  scratch_->asMutable<uint8_t>()[0] = static_cast<uint8_t>(runLayout);
-  appendLe64(scratch_, stored, pool_);
-  for (uint32_t stream = 0; stream < numStreams; ++stream) {
-    appendLe64(scratch_, decodedSizes[stream], pool_);
-  }
-  out.write(scratch_->as<char>(), scratch_->size());
-  out.write(body, stored);
-}
-
-void LocalCellOutput::writeSeparateRun(
-    DataFileWriter& out,
-    const char* data,
-    const uint64_t* decodedSizes) {
-  const uint32_t numStreams = layout_->numStreams();
-  uint64_t capacity = 0;
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    if (decodedSizes[s] >= kMinCompressRunBytes) {
-      capacity += codec_->maxCompressedLen(decodedSizes[s]);
-    }
-  }
-  resetBuffer(compressScratch_, capacity, pool_);
-  // Header: the layout, the stored size per stream, then the decoded size
-  // per stream - 0 for a stream stored as it is.
-  std::vector<uint64_t> stored(numStreams);
-  std::vector<uint64_t> decoded(numStreams, 0);
-  std::vector<const char*> bodies(numStreams);
-  char* compressed = compressScratch_->asMutable<char>();
-  const char* source = data;
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    const uint64_t bytes = decodedSizes[s];
-    stored[s] = bytes;
-    bodies[s] = source;
-    if (bytes >= kMinCompressRunBytes) {
-      const uint64_t start = currentTimeNs();
-      const int64_t written = codec_->compress(
-          reinterpret_cast<const uint8_t*>(source),
-          static_cast<int64_t>(bytes),
-          reinterpret_cast<uint8_t*>(compressed),
-          codec_->maxCompressedLen(bytes));
-      compressTimeNs_ += currentTimeNs() - start;
-      if (written > 0 && static_cast<uint64_t>(written) < bytes) {
-        stored[s] = static_cast<uint64_t>(written);
-        decoded[s] = bytes;
-        bodies[s] = compressed;
-        compressed += written;
-      }
-    }
-    source += bytes;
-  }
-  resetBuffer(scratch_, 1, pool_);
-  scratch_->asMutable<uint8_t>()[0] =
-      static_cast<uint8_t>(RunLayout::kSeparate);
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    appendLe64(scratch_, stored[s], pool_);
-  }
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    appendLe64(scratch_, decoded[s], pool_);
-  }
-  out.write(scratch_->as<char>(), scratch_->size());
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    if (stored[s] > 0) {
-      out.write(bodies[s], stored[s]);
-    }
-  }
 }
 
 uint64_t LocalCellOutput::gatherPartitionRuns(
@@ -618,7 +243,7 @@ uint64_t LocalCellOutput::gatherPartitionRuns(
           resetBuffer(runScratch_, stored, pool_);
           spill_.read(at, runScratch_->asMutable<char>(), stored);
           const uint64_t decompressStart = currentTimeNs();
-          const int64_t decoded = codec_->decompress(
+          const int64_t decoded = compressor_.codec()->decompress(
               runScratch_->as<uint8_t>(),
               static_cast<int64_t>(stored),
               reinterpret_cast<uint8_t*>(target),
@@ -645,7 +270,7 @@ uint64_t LocalCellOutput::gatherPartitionRuns(
       // Codec time, reported with compression: the merge's decompression
       // is the price of spill-time compression.
       const uint64_t decompressStart = currentTimeNs();
-      const int64_t decoded = codec_->decompress(
+      const int64_t decoded = compressor_.codec()->decompress(
           runScratch_->as<uint8_t>(),
           static_cast<int64_t>(storedSizes[i]),
           compressScratch_->asMutable<uint8_t>(),
@@ -720,12 +345,7 @@ void LocalCellOutput::writeDiskPayload(
     std::vector<uint64_t> streamSizes;
     const uint64_t total =
         gatherPartitionRuns(segments, nullptr, pid, streamSizes);
-    writeRun(
-        out,
-        gather_->as<char>(),
-        total,
-        streamSizes.data(),
-        /*separable=*/true);
+    writeGatheredRun(out, total, streamSizes);
     return;
   }
   // Without coalescing, or with a single segment that already is the one
@@ -739,9 +359,9 @@ void LocalCellOutput::writeSpilledSegment(
     DataFileWriter& out,
     const SpillSegment& segment) {
   const uint32_t numStreams = layout_->numStreams();
-  const uint64_t runHeaderBytes = 1 + 8 + 8ull * numStreams;
+  const uint64_t runHeaderBytes = cell::runHeaderBytes(numStreams);
   const uint64_t segmentBytes = segment.end - segment.begin;
-  // The spill segment is a run body in wire form.
+  // The spill segment is a run in wire form.
   BOLT_CHECK_GE(segmentBytes, 1, "corrupt cell spill segment");
   uint8_t layoutByte;
   spill_.read(segment.begin, &layoutByte, 1);
@@ -760,119 +380,46 @@ void LocalCellOutput::writeSpilledSegment(
     out.copyFrom(spill_, segment.begin, segmentBytes);
     return;
   }
-  BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
-  resetBuffer(scratch_, runHeaderBytes, pool_);
-  spill_.read(segment.begin, scratch_->asMutable<char>(), runHeaderBytes);
-  const auto segmentLayout = static_cast<RunLayout>(scratch_->as<uint8_t>()[0]);
   BOLT_CHECK(
-      segmentLayout == RunLayout::kCombined ||
-          segmentLayout == RunLayout::kCombinedUncompressed,
+      layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
+          layoutByte == static_cast<uint8_t>(RunLayout::kCombinedUncompressed),
       "corrupt cell spill segment");
+  BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
   std::vector<uint64_t> decodedSizes(numStreams);
-  ::memcpy(decodedSizes.data(), scratch_->as<char>() + 9, 8ull * numStreams);
-  const uint64_t dataBytes = segmentBytes - runHeaderBytes;
-  // A compressed segment, and a stored one whose spill already made the
-  // compression attempt, is the final run. Any other stored segment gets
-  // the attempt here - unless its workspace cannot be funded, in which case
-  // the stored form, a valid run as well, is copied as it is.
-  if (segmentLayout == RunLayout::kCombinedUncompressed &&
-      !segment.storedIsFinal && streamCompressor_ != nullptr &&
-      dataBytes >= kMinCompressRunBytes) {
-    // Streamed from the spill file through the same staging a spill-time
-    // compression uses: the same run, so compressSpill never changes the
-    // final file, and no workspace sized by the segment.
-    rawAccum_ += runHeaderBytes + dataBytes;
-    const auto visitRange = [&](uint64_t from, uint64_t bytes, const auto& fn) {
-      char buffer[16 << 10];
-      for (uint64_t at = 0; at < bytes;) {
-        const uint64_t chunk = std::min<uint64_t>(sizeof(buffer), bytes - at);
-        spill_.read(from + at, buffer, chunk);
-        fn(buffer, static_cast<uint32_t>(chunk));
-        at += chunk;
-      }
-    };
-    DataSink sink{out};
-    if (dataBytes >= kMinSeparateRunBytes) {
-      std::vector<uint64_t> streamAt(numStreams);
-      uint64_t at = segment.begin + runHeaderBytes;
-      for (uint32_t s = 0; s < numStreams; ++s) {
-        streamAt[s] = at;
-        at += decodedSizes[s];
-      }
-      streamSeparateRun(
-          *streamCompressor_,
-          streamStage_,
-          streamOut_,
-          sink,
-          numStreams,
-          decodedSizes.data(),
-          [&](uint32_t s, const auto& fn) {
-            visitRange(streamAt[s], decodedSizes[s], fn);
-          },
-          compressTimeNs_);
-      return;
-    }
-    const uint64_t headerAt = out.position();
-    out.write(scratch_->as<char>(), runHeaderBytes);
-    const auto visitSegment = [&](const auto& fn) {
-      visitRange(segment.begin + runHeaderBytes, dataBytes, fn);
-    };
-    const uint64_t stored = streamFrame(
-        *streamCompressor_,
-        streamStage_,
-        streamOut_,
-        sink,
-        dataBytes,
-        visitSegment,
-        compressTimeNs_);
-    if (stored > 0) {
-      writeRunHeader(
-          scratch_->asMutable<char>(),
-          RunLayout::kCombined,
-          stored,
-          decodedSizes.data(),
-          numStreams);
-      out.patch(headerAt, scratch_->as<char>(), 9);
-    } else {
-      streamRaw(sink, visitSegment);
-    }
-    return;
-  }
-  if (segmentLayout == RunLayout::kCombinedUncompressed &&
-      !segment.storedIsFinal && codec_ != nullptr &&
-      dataBytes >= kMinCompressRunBytes) {
-    bool funded = true;
-    try {
-      resetBuffer(runScratch_, dataBytes, pool_);
-      resetBuffer(compressScratch_, codec_->maxCompressedLen(dataBytes), pool_);
-    } catch (const std::exception&) {
-      funded = false;
-      runScratch_.reset();
-      compressScratch_.reset();
-    }
-    if (funded) {
-      spill_.read(
-          segment.begin + runHeaderBytes,
-          runScratch_->asMutable<char>(),
-          dataBytes);
-      // The form a spill-time compression would have given it, so that
-      // compressSpill never changes the final file.
-      writeRun(
-          out,
-          runScratch_->as<char>(),
-          dataBytes,
-          decodedSizes.data(),
-          /*separable=*/false);
-      return;
-    }
-  }
+  spill_.read(segment.begin + 9, decodedSizes.data(), 8ull * numStreams);
   uint64_t decodedSum = 0;
   for (const auto size : decodedSizes) {
     decodedSum += size;
   }
   rawAccum_ += runHeaderBytes + decodedSum;
-  out.write(scratch_->as<char>(), runHeaderBytes);
-  out.copyFrom(spill_, segment.begin + runHeaderBytes, dataBytes);
+  // A compressed segment, and a stored one the spill already made final,
+  // is copied as it is. Any other stored segment is compressed now, read
+  // back from the spill file stream by stream, into the run a spill-time
+  // compression gives the same bytes: compressSpill never changes the
+  // final file.
+  if (layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
+      segment.storedIsFinal) {
+    out.copyFrom(spill_, segment.begin, segmentBytes);
+    return;
+  }
+  std::vector<uint64_t> streamAt(numStreams);
+  uint64_t at = segment.begin + runHeaderBytes;
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    streamAt[s] = at;
+    at += decodedSizes[s];
+  }
+  DataRunSink sink(out);
+  compressor_.write(
+      sink, numStreams, decodedSizes.data(), [&](uint32_t s, RunPieceFn fn) {
+        char buffer[16 << 10];
+        for (uint64_t done = 0; done < decodedSizes[s];) {
+          const uint64_t chunk =
+              std::min<uint64_t>(sizeof(buffer), decodedSizes[s] - done);
+          spill_.read(streamAt[s] + done, buffer, chunk);
+          fn(buffer, static_cast<uint32_t>(chunk));
+          done += chunk;
+        }
+      });
 }
 
 void LocalCellOutput::writeCurrentWindowPayload(
@@ -899,12 +446,7 @@ void LocalCellOutput::writeCurrentWindowPayload(
     std::vector<uint64_t> streamSizes;
     const uint64_t gathered =
         gatherPartitionRuns(segments, &in, pid, streamSizes);
-    writeRun(
-        out,
-        gather_->as<char>(),
-        gathered,
-        streamSizes.data(),
-        /*separable=*/true);
+    writeGatheredRun(out, gathered, streamSizes);
     return;
   }
   // Without coalescing, or when the payload already is a single run (one
@@ -914,19 +456,8 @@ void LocalCellOutput::writeCurrentWindowPayload(
   for (const auto& segment : segments) {
     writeSpilledSegment(out, segment);
   }
-  if (total > 0 && streamCompressor_ != nullptr) {
-    streamResidentRun(out, in, pid, total);
-  } else if (total > 0) {
-    std::vector<uint64_t> decodedSizes(numStreams);
-    resetBuffer(runScratch_, total, pool_);
-    gatherResident(
-        in, pid, runScratch_->asMutable<char>(), decodedSizes.data());
-    writeRun(
-        out,
-        runScratch_->as<char>(),
-        total,
-        decodedSizes.data(),
-        /*separable=*/true);
+  if (total > 0) {
+    writeResidentRun(out, in, pid, total);
   }
 }
 
@@ -1009,66 +540,45 @@ void LocalCellOutput::logWindowDiagnostics(
             << " runs, " << mb(runBytes) << " spilled";
 }
 
-void LocalCellOutput::streamResidentRun(
+void LocalCellOutput::writeResidentRun(
     DataFileWriter& out,
     const CellWindowInput& in,
     uint32_t pid,
     uint64_t total) {
   const uint32_t numStreams = layout_->numStreams();
-  std::vector<uint64_t> decodedSizes(numStreams);
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    decodedSizes[s] = in.cells->bytes(pid, s);
-  }
+  const auto sizes = residentSizes(in, pid);
   rawAccum_ += runHeaderBytes(numStreams) + total;
-  DataSink sink{out};
-  if (total < kMinSeparateRunBytes) {
-    // COMBINED, as a spill run.
-    resetBuffer(scratch_, runHeaderBytes(numStreams), pool_);
-    writeRunHeader(
-        scratch_->asMutable<char>(),
-        RunLayout::kCombinedUncompressed,
-        total,
-        decodedSizes.data(),
-        numStreams);
-    const uint64_t headerAt = out.position();
-    out.write(scratch_->as<char>(), scratch_->size());
-    const auto visitAll = [&](const auto& fn) {
-      for (uint32_t s = 0; s < numStreams; ++s) {
+  DataRunSink sink(out);
+  compressor_.write(
+      sink, numStreams, sizes.data(), [&](uint32_t s, RunPieceFn fn) {
         in.cells->scan(pid, s, fn);
-      }
-    };
-    const uint64_t stored = total >= kMinCompressRunBytes
-        ? streamFrame(
-              *streamCompressor_,
-              streamStage_,
-              streamOut_,
-              sink,
-              total,
-              visitAll,
-              compressTimeNs_)
-        : 0;
-    if (stored > 0) {
-      writeRunHeader(
-          scratch_->asMutable<char>(),
-          RunLayout::kCombined,
-          stored,
-          decodedSizes.data(),
-          numStreams);
-      out.patch(headerAt, scratch_->as<char>(), 9);
-    } else {
-      streamRaw(sink, visitAll);
-    }
-    return;
+      });
+}
+
+void LocalCellOutput::writeGatheredRun(
+    DataFileWriter& out,
+    uint64_t total,
+    const std::vector<uint64_t>& streamSizes) {
+  const uint32_t numStreams = layout_->numStreams();
+  rawAccum_ += runHeaderBytes(numStreams) + total;
+  std::vector<uint64_t> streamAt(numStreams);
+  uint64_t at = 0;
+  for (uint32_t s = 0; s < numStreams; ++s) {
+    streamAt[s] = at;
+    at += streamSizes[s];
   }
-  streamSeparateRun(
-      *streamCompressor_,
-      streamStage_,
-      streamOut_,
-      sink,
-      numStreams,
-      decodedSizes.data(),
-      [&](uint32_t s, const auto& fn) { in.cells->scan(pid, s, fn); },
-      compressTimeNs_);
+  DataRunSink sink(out);
+  compressor_.write(
+      sink, numStreams, streamSizes.data(), [&](uint32_t s, RunPieceFn fn) {
+        // In pieces, so a single stream past 4GiB still fits the callback.
+        const char* data = gather_->as<char>() + streamAt[s];
+        for (uint64_t done = 0; done < streamSizes[s];) {
+          const uint64_t chunk =
+              std::min<uint64_t>(1u << 30, streamSizes[s] - done);
+          fn(data + done, static_cast<uint32_t>(chunk));
+          done += chunk;
+        }
+      });
 }
 
 void LocalCellOutput::appendBlockKind() {
@@ -1094,6 +604,7 @@ void LocalCellOutput::finalize(
     // Per partition: the Cell payloads, then the composite blocks.
     mergeToDataFile(options_, {this, &composite_}, metrics);
   }
+  compressor_.releaseWorkspace();
   runScratch_.reset();
   compressScratch_.reset();
   gather_.reset();
@@ -1119,20 +630,13 @@ RssCellOutput::RssCellOutput(
     RawPartitionOutput& raw,
     const CellLayout* layout,
     const PartitionWriterOptions& options,
+    bool streamCompression,
     memory::MemoryPool* pool)
     : raw_(raw),
       layout_(layout),
       pool_(pool),
-      rawPartitionLengths_(options.numPartitions, 0) {
-  if (options.compressionType != arrow::Compression::UNCOMPRESSED) {
-    codec_ = createCodec(
-        options.compressionType,
-        CodecOptions{
-            getCodecBackend(options.codecBackend),
-            options.compressionLevel,
-            options.checksumEnabled});
-  }
-}
+      compressor_(options, streamCompression, pool, &compressTimeNs_),
+      rawPartitionLengths_(options.numPartitions, 0) {}
 
 void RssCellOutput::spillRun(const CellWindowInput& /*in*/) {
   BOLT_FAIL("RssCellOutput never spills: windows are sent whole");
@@ -1155,7 +659,7 @@ void RssCellOutput::sendWindow(const CellWindowInput& in) {
     return true;
   });
   // A seal exists to free memory: hand the workspace capacity back too.
-  compressScratch_.reset();
+  compressor_.releaseWorkspace();
 }
 
 void RssCellOutput::buildPayload(
@@ -1170,46 +674,13 @@ void RssCellOutput::buildPayload(
   appendPayloadPrefix(in, pid, total > 0 ? 1 : 0, payload, pool_);
   uint64_t raw = payload->size();
   if (total > 0) {
-    // The run is gathered straight into its place in the payload, so a
-    // stored run needs no second copy and a compressed one is copied back
-    // over it. When the compression workspace cannot be funded - a seal is
-    // often the moment the pool is exhausted - the stored run goes out as
-    // it is rather than failing the operation meant to free memory.
-    const size_t headerAt = payload->size();
-    const size_t bodyAt = headerAt + runHeaderBytes(numStreams);
-    resizeBuffer(payload, checkedPlus<size_t>(bodyAt, total), pool_);
-    streamSizes_.resize(numStreams);
-    gatherResident(
-        in, pid, payload->asMutable<char>() + bodyAt, streamSizes_.data());
+    const auto sizes = residentSizes(in, pid);
+    BufferRunSink sink(payload, pool_);
+    compressor_.write(
+        sink, numStreams, sizes.data(), [&](uint32_t s, RunPieceFn fn) {
+          in.cells->scan(pid, s, fn);
+        });
     raw += runHeaderBytes(numStreams) + total;
-    auto runLayout = RunLayout::kCombinedUncompressed;
-    uint64_t stored = total;
-    try {
-      const char* body = nullptr;
-      runLayout = maybeCompressRun(
-          codec_.get(),
-          payload->as<char>() + bodyAt,
-          total,
-          compressScratch_,
-          pool_,
-          body,
-          stored,
-          compressTimeNs_);
-      if (runLayout == RunLayout::kCombined) {
-        ::memcpy(payload->asMutable<char>() + bodyAt, body, stored);
-      }
-    } catch (const std::exception&) {
-      compressScratch_.reset();
-      runLayout = RunLayout::kCombinedUncompressed;
-      stored = total;
-    }
-    writeRunHeader(
-        payload->asMutable<char>() + headerAt,
-        runLayout,
-        stored,
-        streamSizes_.data(),
-        numStreams);
-    payload->setSize(bodyAt + stored);
   }
   rawPartitionLengths_[pid] += static_cast<int64_t>(raw);
 }

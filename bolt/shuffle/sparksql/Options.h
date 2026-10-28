@@ -115,6 +115,11 @@ struct CellShuffleOptions {
   // segments is decompressed and compressed again as a single run.
   // Disabling trades that codec CPU for uncompressed spill writes.
   bool compressSpill = true;
+  // Compress runs through the codec's stream form, straight from the cells
+  // with fixed buffers; off, each frame is gathered into a pool workspace
+  // and compressed at once. Codecs with no stream form are always one-shot.
+  // Both write the same run layouts.
+  bool streamCompression = true;
 
   /// Returns all options in a human readable form.
   std::string toString() const;

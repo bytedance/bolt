@@ -42,6 +42,7 @@ bolt_add_library(
   cell/CellShuffleTypeAdapter.cpp
   cell/CellShuffleWriter.cpp
   cell/CellFormat.cpp
+  cell/RunCompressor.cpp
   compression/Compression.cpp
   compression/Codec.cpp
   compression/GzipCodec.cpp
