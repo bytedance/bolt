@@ -597,7 +597,7 @@ void ArrayVectorBase::copyRangesImpl(
         ranges, [&](auto targetIndex, auto sourceIndex, auto count) {
           if (count > 0) {
             BOLT_DCHECK(BaseVector::length_ >= targetIndex + count);
-            totalCount += count;
+            totalCount = checkedPlus(totalCount, count);
           }
         });
     outRanges.reserve(totalCount);
@@ -610,6 +610,7 @@ void ArrayVectorBase::copyRangesImpl(
         }
         auto wrappedIndex = source->wrappedIndex(sourceIndex);
         auto copySize = sourceArray->sizeAt(wrappedIndex);
+        const auto newChildSize = checkedPlus(childSize, copySize);
 
         if (copySize > 0) {
           auto copyOffset = sourceArray->offsetAt(wrappedIndex);
@@ -619,7 +620,8 @@ void ArrayVectorBase::copyRangesImpl(
           if (!outRanges.empty() &&
               (outRanges.back().sourceIndex + outRanges.back().count ==
                copyOffset)) {
-            outRanges.back().count += copySize;
+            outRanges.back().count =
+                checkedPlus(outRanges.back().count, copySize);
           } else {
             outRanges.push_back({copyOffset, childSize, copySize});
           }
@@ -627,7 +629,7 @@ void ArrayVectorBase::copyRangesImpl(
 
         mutableOffsets[targetIndex] = childSize;
         mutableSizes[targetIndex] = copySize;
-        childSize += copySize;
+        childSize = newChildSize;
       }
     });
 
