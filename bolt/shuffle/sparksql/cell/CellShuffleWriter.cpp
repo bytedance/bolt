@@ -375,10 +375,10 @@ void CellShuffleWriter::probeDictionary(uint32_t numRows) {
     if (enable) {
       splitter_->enableDictionary(col);
     }
-    LOG(INFO) << "CellShuffleWriter dictionary probe: column " << col
-              << (enable ? " ON" : " OFF") << " (ndv=" << seen.size()
-              << (fits ? "" : "+") << ", serializedBytes=" << serialized
-              << ", nonNull=" << nonNull << " of " << numRows << " rows)";
+    VLOG(1) << "CellShuffleWriter dictionary probe: column " << col
+            << (enable ? " ON" : " OFF") << " (ndv=" << seen.size()
+            << (fits ? "" : "+") << ", serializedBytes=" << serialized
+            << ", nonNull=" << nonNull << " of " << numRows << " rows)";
   }
 }
 
