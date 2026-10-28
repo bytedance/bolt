@@ -16,6 +16,9 @@
 
 #pragma once
 
+#include <array>
+#include <string>
+
 #include "bolt/vector/ComplexVector.h"
 
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
@@ -69,6 +72,53 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   }
 
  private:
+  /// Why a whole window was sealed.
+  enum class SealReason : uint8_t {
+    kRows, // a payload's rows would pass kMaxPayloadRows
+    kMemory, // memory pressure asked for it
+    kNulls, // the null bitmaps passed nullMemLimitBytes
+    kFlush, // composite rows come next
+    kRemoteAdmit, // remote: the next slice could not be reserved
+    kRemoteReclaim, // remote: a reclaim pushed the window
+    kCount,
+  };
+
+  /// What memory pressure made the writer do, counted per event - never per
+  /// row - and logged once at stop.
+  struct PressureStats {
+    /// Reclaims, and those answered with idle chunks alone, or deferred to
+    /// the next batch boundary (remote, mid-batch).
+    uint64_t reclaims{0};
+    uint64_t idleReclaims{0};
+    uint64_t deferredReclaims{0};
+    uint64_t requestedBytes{0};
+    uint64_t freedBytes{0};
+    /// Chunk bytes freed by each step of a reclaim.
+    uint64_t freedIdle{0};
+    uint64_t freedBySpill{0};
+    uint64_t freedByCompaction{0};
+    uint64_t freedByRun{0};
+    uint64_t freedByPush{0};
+    /// Partial runs of the largest partitions: asked by a reclaim, or by
+    /// the chunk growth past the cap or the reservation; with cell bytes.
+    uint64_t reclaimSpills{0};
+    uint64_t reclaimSpillBytes{0};
+    uint64_t growthSpills{0};
+    uint64_t growthSpillBytes{0};
+    /// Cell compactions and the chunk bytes they emptied.
+    uint64_t compactions{0};
+    uint64_t compactedBytes{0};
+    /// Whole-window runs a reclaim fell back to.
+    uint64_t fullRuns{0};
+    std::array<uint64_t, static_cast<size_t>(SealReason::kCount)> seals{};
+    /// Seals of oversized partitions alone, and the partitions they closed.
+    uint64_t partitionSeals{0};
+    uint64_t partitionsSealed{0};
+
+    /// One key=value line.
+    std::string toString() const;
+  };
+
   void initOnFirstBatch(const RowVector& rv);
   /// Splits one physical (adapter-converted) batch, slicing oversized ones.
   arrow::Status splitPhysical(RowVectorPtr rv);
@@ -79,10 +129,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// The single dictionary probe (first batch, lifetime decision).
   void probeDictionary(uint32_t numRows);
   void onBeforeChunkGrow();
-  void checkpoint();
+  void checkpoint(SealReason reason);
   /// Remote: seals (pushes) the window and returns its memory; returns the
   /// chunk bytes freed.
-  int64_t flushRemoteWindow();
+  int64_t flushRemoteWindow(SealReason reason);
   void maybeCheckpoint();
   arrow::Status reclaimRemote(int64_t size, int64_t* actual);
 
@@ -95,6 +145,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   bool checkpointRequested_{false};
   bool sealing_{false};
   bool dictProbed_{false};
+  PressureStats pressure_;
 
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   CellLayout layout_;

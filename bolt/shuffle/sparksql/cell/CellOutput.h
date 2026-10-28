@@ -264,6 +264,11 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// Seals, and the partition payloads they closed.
   uint64_t numSeals_{0};
   uint64_t numSealedPayloads_{0};
+  /// The merge: spilled segments copied as they are or compressed on the
+  /// way, and payloads whose runs were gathered into one.
+  uint64_t copiedSegments_{0};
+  uint64_t compressedSegments_{0};
+  uint64_t gatheredPayloads_{0};
   /// The window still in memory, borrowed by finalize() for its merge.
   const CellWindowInput* residual_{nullptr};
   bool residualHasData_{false};
