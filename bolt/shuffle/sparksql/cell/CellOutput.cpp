@@ -76,6 +76,29 @@ uint64_t separateRunHeaderBytes(uint32_t numStreams) {
   return 1 + 16ull * numStreams;
 }
 
+/// The compressor's totals at INFO, its per-stream detail at VLOG(1).
+void logCompression(const RunCompressor& compressor, const CellLayout& layout) {
+  LOG(INFO) << "CellShuffleWriter compression: "
+            << compressor.stats().toString();
+  if (!VLOG_IS_ON(1)) {
+    return;
+  }
+  const auto& streams = compressor.streamStats();
+  for (uint32_t s = 0; s < streams.size() && s < layout.numStreams(); ++s) {
+    const auto& stats = streams[s];
+    if (stats.tried + stats.skipped == 0) {
+      continue;
+    }
+    VLOG(1) << "CellShuffleWriter compression stream " << s << " (column "
+            << layout.stream(s).column << ", kind "
+            << static_cast<int>(layout.stream(s).kind)
+            << "): tried=" << stats.tried << " compressed=" << stats.compressed
+            << " skipped=" << stats.skipped << " ratio="
+            << (stats.inBytes > 0 ? double(stats.outBytes) / stats.inBytes
+                                  : 1.0);
+  }
+}
+
 /// The per-stream sizes of partition `pid`'s resident cells.
 std::vector<uint64_t> residentSizes(const CellWindowInput& in, uint32_t pid) {
   std::vector<uint64_t> sizes(in.layout->numStreams());
@@ -608,6 +631,7 @@ void LocalCellOutput::finalize(
   metrics.rawPartitionLengths = rawLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSeals_);
+  logCompression(compressor_, *layout_);
 }
 
 void LocalCellOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
@@ -689,6 +713,7 @@ void RssCellOutput::finalize(
     sendWindow(in);
   }
   LOG(INFO) << "CellShuffleWriter rss: sealed windows=" << numSealed_;
+  logCompression(compressor_, *layout_);
   raw_.finish(metrics);
   metrics.rawPartitionLengths = rawPartitionLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
