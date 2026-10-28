@@ -1444,6 +1444,53 @@ TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
   }
 }
 
+TEST_F(CellWriterTest, oneShotAndStreamingCompressionWriteTheSameRuns) {
+  // The two compression modes differ only in how a frame is compressed:
+  // the same runs, the same layouts, the same rows read back - through
+  // pressure spills, seals and, coalesced or not, the merge.
+  constexpr int32_t kPartitions = 4;
+  std::mt19937 rng(43);
+  std::vector<std::vector<int32_t>> pids;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 9; ++batch) {
+    pids.emplace_back();
+    batches.push_back(makeCompressibleBatch(
+        batch < 8 ? 4096 : 256, kPartitions, rng, pids.back()));
+  }
+  const auto layout = CellLayout::create(asRowType(batches[0]->type()));
+  for (const bool coalesce : {false, true}) {
+    SCOPED_TRACE(coalesce ? "coalesced" : "run per segment");
+    std::vector<std::vector<uint32_t>> runCounts[2];
+    int64_t written[2] = {0, 0};
+    for (const bool streaming : {true, false}) {
+      auto options = makeOptions(kPartitions);
+      options.partitionWriterOptions.compressionType =
+          arrow::Compression::LZ4_FRAME;
+      options.cellOptions.streamCompression = streaming;
+      options.cellOptions.coalesceMergedRuns = coalesce;
+      options.cellOptions.cellMemoryCapBytes = 8 << 20;
+      options.cellOptions.checkpointPartitionBytes = 4 << 20;
+      CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+      roundTrip(options, pids, batches, &writer);
+      const auto& metrics = writer.metrics();
+      EXPECT_GT(metrics.totalBytesEvicted, 0);
+      const auto file = readFile();
+      uint64_t offset = 0;
+      for (int32_t pid = 0; pid < kPartitions; ++pid) {
+        runCounts[streaming].push_back(payloadRunCounts(
+            layout, file, offset, metrics.partitionLengths[pid]));
+        offset += metrics.partitionLengths[pid];
+      }
+      written[streaming] = metrics.totalBytesWritten;
+      ::unlink(dataFile_.c_str());
+    }
+    EXPECT_EQ(runCounts[0], runCounts[1]);
+    // Frames compressed whole or in independent blocks: close in size.
+    EXPECT_LT(written[1], written[0] * 11 / 10);
+    EXPECT_LT(written[0], written[1] * 11 / 10);
+  }
+}
+
 TEST_F(CellWriterTest, skewedPartitionSealsAlone) {
   // Most rows go to partition 0, which passes the payload bound several
   // times; the others stay far below it. Only partition 0's payloads close

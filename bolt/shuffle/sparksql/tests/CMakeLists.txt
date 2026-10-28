@@ -171,6 +171,7 @@ add_executable(
   CellChunkTest.cpp
   CellEncodingTest.cpp
   CellWriterTest.cpp
+  RunCompressorTest.cpp
 )
 
 target_link_libraries(bolt_shuffle_cell_test PRIVATE bolt_gtest_main)

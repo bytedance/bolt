@@ -67,7 +67,11 @@ CellShuffleWriter::CellShuffleWriter(
         "CellShuffleWriter on Celeborn requires an RSS client");
     raw_ = std::make_unique<RssRawOutput>(options_.partitionWriterOptions);
     output_ = std::make_unique<RssCellOutput>(
-        *raw_, &layout_, options_.partitionWriterOptions, boltPool_);
+        *raw_,
+        &layout_,
+        options_.partitionWriterOptions,
+        options_.cellOptions.streamCompression,
+        boltPool_);
   } else {
     // Two outputs with a spill file each, merged into the one data file.
     auto composite =

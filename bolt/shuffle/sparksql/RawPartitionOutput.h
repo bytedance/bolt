@@ -52,9 +52,6 @@ class ShuffleSpillFile {
   /// flush(), so a patch per run does not break up the buffered writes.
   void patch(uint64_t offset, const void* data, size_t bytes);
 
-  /// Drops every byte from `offset` on; appends continue there.
-  void truncate(uint64_t offset);
-
   void read(uint64_t offset, void* out, size_t bytes) const;
 
   /// The offset the next append starts at.
@@ -116,10 +113,6 @@ class DataFileWriter {
   /// Overwrites `bytes` already written at `position`. Applied at close(),
   /// so a patch per run does not break up the buffered writes.
   void patch(uint64_t position, const void* data, size_t bytes);
-
-  /// Drops every byte the current partition wrote from `position` on;
-  /// writes continue there.
-  void rewind(uint64_t position);
 
   /// Copies `bytes` of `spill` from `begin`.
   void copyFrom(const ShuffleSpillFile& spill, uint64_t begin, uint64_t bytes);
