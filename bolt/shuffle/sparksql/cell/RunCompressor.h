@@ -19,6 +19,7 @@
 #include <folly/Function.h>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "bolt/buffer/Buffer.h"
@@ -141,6 +142,57 @@ class RunCompressor {
   /// Gives the one-shot workspaces back to the pool.
   void releaseWorkspace();
 
+  /// What the compressor did, counted per run and per frame - never per
+  /// byte - so the counting costs nothing measurable.
+  struct Stats {
+    /// Runs by layout. `storedRuns` were under kMinCompressRunBytes or met
+    /// no codec; `deferredRuns` came through writeStored().
+    uint64_t storedRuns{0};
+    uint64_t deferredRuns{0};
+    uint64_t combinedRuns{0};
+    uint64_t separateRuns{0};
+    /// Frames by outcome, with the bytes they took in. A compressed frame
+    /// also counts the bytes it wrote; the others are stored as they are.
+    uint64_t compressedFrames{0};
+    uint64_t compressedInBytes{0};
+    uint64_t compressedOutBytes{0};
+    /// Tried, and stored because they did not shrink; `earlyFrames` of
+    /// them given up after their first blocks.
+    uint64_t unshrunkFrames{0};
+    uint64_t unshrunkBytes{0};
+    uint64_t earlyFrames{0};
+    /// Stored without a try: adaptive skips, frames below
+    /// kMinCompressRunBytes, and one-shot frames whose workspace could not
+    /// be funded.
+    uint64_t skippedFrames{0};
+    uint64_t skippedBytes{0};
+    uint64_t tinyFrames{0};
+    uint64_t tinyBytes{0};
+    uint64_t unfundedFrames{0};
+    uint64_t unfundedBytes{0};
+
+    /// One key=value line.
+    std::string toString() const;
+  };
+
+  /// The same, for one stream's SEPARATE frames.
+  struct StreamStats {
+    uint64_t tried{0};
+    uint64_t compressed{0};
+    uint64_t skipped{0};
+    uint64_t inBytes{0};
+    uint64_t outBytes{0};
+  };
+
+  const Stats& stats() const {
+    return stats_;
+  }
+
+  /// Per stream index, when SEPARATE runs were written.
+  const std::vector<StreamStats>& streamStats() const {
+    return streamStats_;
+  }
+
  private:
   using FrameVisitor = folly::FunctionRef<void(RunPieceFn fn)>;
 
@@ -173,6 +225,16 @@ class RunCompressor {
   /// of its kind stored without a try.
   void learn(uint32_t& skip, bool shrank) const;
 
+  /// writeStored() without the counting.
+  void storeRun(
+      RunSink& sink,
+      uint32_t numStreams,
+      const uint64_t* sizes,
+      RunStreamVisitor visit);
+
+  /// Counts a frame of `bytes` that was tried, or not when `skipped`.
+  void countFrame(const Frame& frame, uint64_t bytes, bool skipped);
+
   memory::MemoryPool* const pool_;
   uint64_t* const compressTimeNs_;
   const bool adaptive_;
@@ -181,6 +243,8 @@ class RunCompressor {
   std::vector<uint32_t> streamSkips_;
   /// The same for COMBINED frames.
   uint32_t combinedSkip_{0};
+  Stats stats_;
+  std::vector<StreamStats> streamStats_;
   std::unique_ptr<Codec> codec_;
   /// Null when one-shot.
   std::unique_ptr<StreamCompressor> streamCompressor_;

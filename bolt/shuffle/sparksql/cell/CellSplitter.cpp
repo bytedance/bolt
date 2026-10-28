@@ -904,9 +904,9 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
     metrics.dictionaryMatchedRows += static_cast<int64_t>(stats.matchedRows);
     metrics.dictionaryFallbackRows += static_cast<int64_t>(stats.fallbackRows);
     const uint64_t rows = stats.matchedRows + stats.fallbackRows;
-    LOG(INFO) << "CellShuffleWriter dictionary column " << col << ": matched "
-              << stats.matchedRows << " of " << rows << " rows ("
-              << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%)";
+    VLOG(1) << "CellShuffleWriter dictionary column " << col << ": matched "
+            << stats.matchedRows << " of " << rows << " rows ("
+            << (rows > 0 ? 100.0 * stats.matchedRows / rows : 0.0) << "%)";
   }
   cells_.releaseAll();
   resetWindow();
