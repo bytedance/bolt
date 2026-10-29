@@ -51,20 +51,6 @@ inline bool addOverflows(uint64_t a, uint64_t b, uint64_t& out) {
   return __builtin_add_overflow(a, b, &out);
 }
 
-/// Set bits among the first `rowCount` bits.
-uint32_t popcountBits(const uint8_t* bits, uint32_t rowCount) {
-  uint32_t count = 0;
-  const uint32_t fullBytes = rowCount / 8;
-  for (uint32_t i = 0; i < fullBytes; ++i) {
-    count += __builtin_popcount(bits[i]);
-  }
-  if ((rowCount & 7) != 0) {
-    const uint8_t mask = static_cast<uint8_t>((1u << (rowCount & 7)) - 1);
-    count += __builtin_popcount(bits[fullBytes] & mask);
-  }
-  return count;
-}
-
 /// The low `n` bits set, 0 < n <= 64.
 inline uint64_t lowBits(uint32_t n) {
   return n == 64 ? ~0ULL : (1ULL << n) - 1;
@@ -153,6 +139,66 @@ inline void scatterRows(
       });
 }
 
+/// Writes a bitmap front to back, 64 bits at a time. Each word is stored
+/// whole: the last one written may cover up to 7 bytes past the bitmap,
+/// which must be writable.
+class BitAppender {
+ public:
+  explicit BitAppender(uint8_t* out) : out_(out) {}
+
+  /// Appends the low `n` (<= 64) bits of `bits`, its bits above them clear.
+  void append(uint64_t bits, uint32_t n) {
+    word_ |= bits << used_;
+    const uint32_t used = used_ + n;
+    if (used < 64) {
+      used_ = used;
+      return;
+    }
+    store(word_);
+    // The bits that did not fit in the word.
+    word_ = used_ == 0 ? 0 : bits >> (64 - used_);
+    used_ = used - 64;
+  }
+
+  /// Appends `n` bits, all set or all clear.
+  void appendRun(bool set, uint64_t n) {
+    const uint64_t fill = set ? ~0ULL : 0;
+    if (used_ != 0) {
+      const uint32_t room = 64 - used_;
+      if (n < room) {
+        append(
+            fill & lowBits(static_cast<uint32_t>(n)), static_cast<uint32_t>(n));
+        return;
+      }
+      append(fill & lowBits(room), room);
+      n -= room;
+    }
+    const uint64_t words = n / 64;
+    ::memset(out_, set ? 0xFF : 0, words * 8);
+    out_ += words * 8;
+    if ((n & 63) != 0) {
+      append(fill & lowBits(n & 63), n & 63);
+    }
+  }
+
+  /// Writes the bits appended last, the rest of their word clear.
+  void finish() {
+    if (used_ != 0) {
+      store(word_);
+    }
+  }
+
+ private:
+  void store(uint64_t word) {
+    ::memcpy(out_, &word, sizeof(word));
+    out_ += sizeof(word);
+  }
+
+  uint8_t* out_;
+  uint64_t word_{0};
+  uint32_t used_{0};
+};
+
 /// Bytes one row of a column takes in a decoded vector, nulls aside; for a
 /// raw stream also the wire width of one value.
 uint32_t decodedRowBytes(TypeKind kind) {
@@ -198,6 +244,72 @@ CellPayloadDecoder::CellPayloadDecoder(
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     rowBytes_ += decodedRowBytes(layout_.rowType()->childAt(col)->kind());
   }
+}
+
+bool expandNullRecords(
+    const uint8_t*& cursor,
+    const uint8_t* end,
+    uint32_t rowCount,
+    uint8_t* bitmap,
+    uint32_t& nonNullCount,
+    std::string& error) {
+  if (end - cursor < static_cast<ptrdiff_t>(sizeof(uint32_t))) {
+    error = "truncated null records";
+    return false;
+  }
+  const uint32_t count = loadU32(cursor);
+  cursor += sizeof(uint32_t);
+  if (count > static_cast<uint64_t>(end - cursor) / kNullRecordBytes) {
+    error = "truncated null records";
+    return false;
+  }
+  BitAppender out(bitmap);
+  uint64_t row = 0;
+  uint64_t nulls = 0;
+  for (uint32_t i = 0; i < count; ++i, cursor += kNullRecordBytes) {
+    uint16_t run;
+    ::memcpy(&run, cursor, sizeof(run));
+    const uint32_t fill = cursor[2];
+    const uint8_t* bits = cursor + (kNullRecordBytes - kNullRecordBitmapBytes);
+    if (fill > kNullRecordBits) {
+      error = "null record fill beyond its bitmap";
+      return false;
+    }
+    bool padded = (fill & 7) == 0 || (bits[fill >> 3] >> (fill & 7)) == 0;
+    for (uint32_t b = (fill + 7) >> 3; b < kNullRecordBitmapBytes; ++b) {
+      padded = padded && bits[b] == 0;
+    }
+    if (!padded) {
+      error = "non-zero bits past a null record's fill";
+      return false;
+    }
+    const uint32_t runRows = run & kNullRecordMaxRun;
+    const uint64_t rows = runRows + fill;
+    if (rows == 0) {
+      error = "empty null record";
+      return false;
+    }
+    if (row + rows > rowCount) {
+      error = "null records past the payload's rows";
+      return false;
+    }
+    const bool runNull = (run & kNullRecordRunNull) != 0;
+    out.appendRun(!runNull, runRows);
+    nulls += runNull ? runRows : 0;
+    uint64_t words[4] = {};
+    ::memcpy(words, bits, kNullRecordBitmapBytes);
+    for (uint32_t taken = 0, w = 0; taken < fill; taken += 64, ++w) {
+      const uint32_t n = std::min<uint32_t>(64, fill - taken);
+      out.append(words[w], n);
+      nulls += n - __builtin_popcountll(words[w]);
+    }
+    row += rows;
+  }
+  // The rows past the records are non-null.
+  out.appendRun(true, rowCount - row);
+  out.finish();
+  nonNullCount = static_cast<uint32_t>(rowCount - nulls);
+  return true;
 }
 
 bool CellPayloadDecoder::parseNullRegion(
@@ -263,14 +375,18 @@ bool CellPayloadDecoder::parseNullRegion(
     }
   }
 
+  // Each kRawNull column's records, expanded to a bitmap of the rows.
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
-  const uint64_t expected =
-      tagBytes + static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
-  if (nullBody.size() != expected) {
-    return fail(error, "null body length mismatch");
+  const uint64_t expandedBytes =
+      static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
+  if (limits_.maxDecodedBytes != 0 && expandedBytes > limits_.maxDecodedBytes) {
+    return fail(error, "null bitmaps beyond sanity bound");
   }
-
-  const uint8_t* cursor = tagBytes == 0 ? nullptr : nullData + tagBytes;
+  // Room for the last bitmap's whole last word.
+  auto* bitmap = reinterpret_cast<uint8_t*>(
+      resetBuffer(expandedNulls_, expandedBytes + sizeof(uint64_t), pool_));
+  const uint8_t* cursor = nullData + tagBytes;
+  const uint8_t* const end = nullData + nullBody.size();
   for (uint32_t col = 0; col < numColumns; ++col) {
     switch (tags_[col]) {
       case NullTag::kAllNull:
@@ -282,14 +398,20 @@ bool CellPayloadDecoder::parseNullRegion(
         bitmaps_[col] = nullptr;
         break;
       case NullTag::kRawNull:
-        bitmaps_[col] = cursor;
+        if (!expandNullRecords(
+                cursor, end, rowCount, bitmap, nonNullCount_[col], error)) {
+          return false;
+        }
+        bitmaps_[col] = bitmap;
         bitmapBytes_ = bitmapBytes;
-        nonNullCount_[col] = popcountBits(cursor, rowCount);
-        cursor += bitmapBytes;
+        bitmap += bitmapBytes;
         break;
       case NullTag::kReserved:
         break;
     }
+  }
+  if (cursor != end) {
+    return fail(error, "null body length mismatch");
   }
   return true;
 }
@@ -1362,38 +1484,30 @@ void buildNullBody(
   resizeBuffer(out, checkedPlus<size_t>(tagStart, tagBytes), pool);
   auto* tags = out->asMutable<uint8_t>() + tagStart;
   ::memset(tags, 0, tagBytes);
-  const uint32_t bitmapBytes = (rows + 7) / 8;
   for (uint32_t col = 0; col < numColumns; ++col) {
     const auto summary = in.nulls->summarize(pid, col, rows);
     setNullTag(tags, col, summary.tag);
   }
-  // Bitmaps follow the tags for RAW_NULL columns, in column order, written
+  // Records follow the tags for RAW_NULL columns, in column order, written
   // together once `out` has room for them all.
   std::vector<uint32_t> rawColumns;
+  size_t recordsBytes = 0;
   for (uint32_t col = 0; col < numColumns; ++col) {
     if (getNullTag(out->as<uint8_t>() + tagStart, col) == NullTag::kRawNull) {
       rawColumns.push_back(col);
+      recordsBytes += in.nulls->recordsBytes(pid, col);
     }
   }
   if (rawColumns.empty()) {
     return;
   }
   const size_t at = out->size();
-  resizeBuffer(
-      out,
-      checkedPlus<size_t>(
-          at, checkedMultiply<size_t>(rawColumns.size(), bitmapBytes)),
-      pool);
-  std::vector<uint8_t*> bitmaps(rawColumns.size());
-  for (size_t i = 0; i < rawColumns.size(); ++i) {
-    bitmaps[i] = out->asMutable<uint8_t>() + at + i * bitmapBytes;
-  }
-  in.nulls->emitBitmaps(
+  resizeBuffer(out, checkedPlus<size_t>(at, recordsBytes), pool);
+  in.nulls->emitRecords(
       pid,
       rawColumns.data(),
       static_cast<uint32_t>(rawColumns.size()),
-      rows,
-      bitmaps.data());
+      out->asMutable<uint8_t>() + at);
 }
 
 void appendPayloadPrefix(
