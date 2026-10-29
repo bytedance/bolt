@@ -43,6 +43,56 @@ class CellChunkTest : public testing::Test {
   std::shared_ptr<memory::MemoryPool> pool_;
 };
 
+TEST_F(CellChunkTest, appendCoversNewCellIdsBeforeLinking) {
+  // The chain links (next_) must cover every held cell id before an append
+  // links any of them: growing them while linking would allocate - and may
+  // reclaim, spilling the chain - with part of the bytes copied. They grow
+  // geometrically, a few times rather than once per chunk.
+  ChunkAllocator alloc(pool_.get(), kChunkBytes, kCellBytes);
+  DataCells cells(pool_.get(), &alloc, 2, 1);
+  std::vector<char> bytes(kCellBytes + 44, 'x');
+  uint32_t growths = 0;
+  uint32_t lastCapacity = cells.nextCapacity();
+  for (int i = 0; i < 64 * static_cast<int>(kCellsPerChunk); ++i) {
+    cells.append(i % 2, 0, bytes.data(), static_cast<uint32_t>(bytes.size()));
+    ASSERT_GE(cells.nextCapacity(), alloc.cellIdCapacity());
+    if (cells.nextCapacity() != lastCapacity) {
+      ++growths;
+      lastCapacity = cells.nextCapacity();
+    }
+  }
+  // About 80 chunks' worth of ids; one growth per chunk would be ~80.
+  EXPECT_GE(alloc.cellIdCapacity(), 64 * kCellsPerChunk);
+  EXPECT_LE(growths, 10);
+}
+
+TEST_F(CellChunkTest, failedAppendLeavesTheChainUntouched) {
+  // The chain links grow in an append's allocation phase, before a byte is
+  // copied. When that allocation fails, the append changes nothing: no
+  // bytes counted or copied, no cell linked or kept.
+  auto root = memory::memoryManager()->addRootPool("cellLinks", 1 << 20);
+  auto links = root->addLeafChild("links");
+  ChunkAllocator alloc(pool_.get(), kChunkBytes, 64);
+  DataCells cells(links.get(), &alloc, 2, 1);
+  const std::vector<char> bytes(100, 'x');
+  bool failed = false;
+  for (int i = 0; i < (1 << 20) && !failed; ++i) {
+    const uint32_t pid = i % 2;
+    const uint64_t total = cells.totalBytes();
+    const uint64_t chainBytes = cells.bytes(pid, 0);
+    const int64_t used = alloc.usedBytes();
+    try {
+      cells.append(pid, 0, bytes.data(), static_cast<uint32_t>(bytes.size()));
+    } catch (const std::exception&) {
+      failed = true;
+      EXPECT_EQ(cells.totalBytes(), total);
+      EXPECT_EQ(cells.bytes(pid, 0), chainBytes);
+      EXPECT_EQ(alloc.usedBytes(), used);
+    }
+  }
+  EXPECT_TRUE(failed);
+}
+
 TEST_F(CellChunkTest, bumpAllocationAndAddressing) {
   int growCalls = 0;
   ChunkAllocator alloc(

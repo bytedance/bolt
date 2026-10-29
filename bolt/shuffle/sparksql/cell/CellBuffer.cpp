@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <utility>
 
 #include <folly/ScopeGuard.h>
@@ -273,19 +274,34 @@ DataCells::~DataCells() {
   }
 }
 
+void DataCells::reserveNext(uint32_t capacity) {
+  if (capacity <= nextCapacity_) {
+    return;
+  }
+  // At least doubling: next_ grows a few times per task, not once per
+  // chunk, so its copies stay linear in its final size.
+  const uint32_t newCapacity = static_cast<uint32_t>(std::max<uint64_t>(
+      capacity,
+      std::min<uint64_t>(
+          2ULL * nextCapacity_, std::numeric_limits<uint32_t>::max())));
+  // The pool may reclaim from this writer while it allocates; next_ is
+  // copied only afterwards, so a compaction run by that reclaim is kept.
+  auto* grown = reinterpret_cast<uint32_t*>(
+      pool_->allocate(static_cast<size_t>(newCapacity) * sizeof(uint32_t)));
+  if (next_ != nullptr) {
+    ::memcpy(
+        grown, next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
+    pool_->free(next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
+  }
+  next_ = grown;
+  nextCapacity_ = newCapacity;
+}
+
 void DataCells::linkCell(ChainInfo& info, uint32_t id) {
   if (FOLLY_UNLIKELY(id >= nextCapacity_)) {
-    const uint32_t newCapacity = allocator_->cellIdCapacity();
-    BOLT_CHECK_LT(id, newCapacity);
-    auto* grown = reinterpret_cast<uint32_t*>(
-        pool_->allocate(static_cast<size_t>(newCapacity) * sizeof(uint32_t)));
-    if (next_ != nullptr) {
-      ::memcpy(
-          grown, next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
-      pool_->free(next_, static_cast<size_t>(nextCapacity_) * sizeof(uint32_t));
-    }
-    next_ = grown;
-    nextCapacity_ = newCapacity;
+    // appendSlow() reserves next_ before it links: not reached from there.
+    BOLT_CHECK_LT(id, allocator_->cellIdCapacity());
+    reserveNext(allocator_->cellIdCapacity());
   }
   next_[id] = ChunkAllocator::kInvalidCell;
   if (info.numCells == 0) {
@@ -316,21 +332,36 @@ void DataCells::appendSlow(
   const uint32_t maxNeeded = bytes / cellBytes + 2;
   uint32_t held[2];
   std::vector<uint32_t> heldOverflow;
+  // Reserved up front, so that no held id is lost to a failing push_back.
+  heldOverflow.reserve(maxNeeded > 2 ? maxNeeded - 2 : 0);
   uint32_t heldCount = 0;
-  const auto holdCell = [&](uint32_t id) {
-    if (heldCount < 2) {
-      held[heldCount] = id;
-    } else {
-      heldOverflow.push_back(id);
-    }
-    ++heldCount;
-  };
-  for (uint32_t i = 0; i < maxNeeded; ++i) {
-    holdCell(allocator_->allocCell());
-  }
   const auto heldAt = [&](uint32_t i) {
     return i < 2 ? held[i] : heldOverflow[i - 2];
   };
+  {
+    // An allocation failing here leaves the chain as it was: the cells
+    // already held go back.
+    auto release = folly::makeGuard([&] {
+      for (uint32_t i = 0; i < heldCount; ++i) {
+        allocator_->recycle(heldAt(i));
+      }
+    });
+    for (uint32_t i = 0; i < maxNeeded; ++i) {
+      const uint32_t id = allocator_->allocCell();
+      if (heldCount < 2) {
+        held[heldCount] = id;
+      } else {
+        heldOverflow.push_back(id);
+      }
+      ++heldCount;
+    }
+    // next_ must cover the held ids before phase 2 links them: growing it
+    // there would allocate - and possibly reclaim, spilling this chain -
+    // with part of the bytes already copied, splitting one append across
+    // Runs.
+    reserveNext(allocator_->cellIdCapacity());
+    release.dismiss();
+  }
 
   // Phase 2: re-read the chain (a spill may have emptied it), link held
   // cells as needed, copy, and recycle the surplus.
