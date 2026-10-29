@@ -300,6 +300,12 @@ class DataCells {
   /// from the pool. Returns the bytes of the chunks emptied.
   uint64_t compact(uint64_t targetBytes);
 
+  /// Cell ids the chain links cover: every id the allocator has handed out
+  /// once an append returns.
+  uint32_t nextCapacity() const {
+    return nextCapacity_;
+  }
+
   uint64_t totalBytes() const {
     return totalBytes_;
   }
@@ -342,6 +348,9 @@ class DataCells {
 
   /// Links an already-allocated cell to the end of the chain.
   void linkCell(ChainInfo& info, uint32_t id);
+
+  /// Grows next_ to cover cell ids below `capacity`.
+  void reserveNext(uint32_t capacity);
 
   memory::MemoryPool* const pool_;
   ChunkAllocator* const allocator_;
