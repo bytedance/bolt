@@ -486,6 +486,12 @@ class NullCells {
     return tableBytes_;
   }
 
+  /// Every byte held from the pool: slot arrays, arena chunks with their
+  /// freelisted blocks, and bitmaps beyond the arena.
+  int64_t footprintBytes() const {
+    return tableBytes_ + arenaBytes_ + poolBitmapBytes_;
+  }
+
  private:
   /// What a column has held over the window so far.
   enum class ColumnState : uint8_t {
@@ -561,6 +567,8 @@ class NullCells {
 
   int64_t bitmapBytes_{0};
   int64_t tableBytes_{0};
+  int64_t arenaBytes_{0};
+  int64_t poolBitmapBytes_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
