@@ -31,6 +31,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 #include "bolt/common/config/Config.h"
 #include "bolt/core/Config.h"
 #include "bolt/vector/TypeAliases.h"
@@ -255,10 +256,25 @@ class QueryConfig {
   /// Enables the task-level BufferManager for operators that opt in.
   static constexpr const char* kBufferManagerEnabled = "buffer_manager_enabled";
 
-  /// Overrides the BufferManager spill codec independently of the legacy
-  /// operator spill codec. Empty preserves the existing mapping.
+  /// Maximum size in bytes of each BufferManager bucket file. Does not apply
+  /// to dedicated files for records larger than the largest bucket.
+  static constexpr const char* kBufferManagerSpillFileSize =
+      "buffer_manager_spill_file_size";
+
+  /// Maximum number of files held by each bucket in a task's BufferManager.
+  static constexpr const char* kBufferManagerSpillMaxFilesPerBucket =
+      "buffer_manager_spill_max_files_per_bucket";
+
+  /// BufferManager spill codec, independent of the legacy operator spill
+  /// codec. Defaults to zstd; an explicit empty value is a compatibility alias
+  /// for zstd. Use none to disable compression.
   static constexpr const char* kBufferManagerSpillCompressionKind =
       "buffer_manager_spill_compression_kind";
+
+  /// Optional level for the selected BufferManager spill codec. Unset keeps
+  /// the codec's default; ignored when compression is disabled.
+  static constexpr const char* kBufferManagerSpillCompressionLevel =
+      "buffer_manager_spill_compression_level";
 
   /// Enables BufferManager-backed streaming Window build for pre-sorted input.
   static constexpr const char* kBmStreamingWindowBuildEnabled =
@@ -1136,8 +1152,20 @@ class QueryConfig {
     return get<bool>(kBufferManagerEnabled, false);
   }
 
+  int64_t bufferManagerSpillFileSize() const {
+    return get<int64_t>(kBufferManagerSpillFileSize, 2LL << 30);
+  }
+
+  int64_t bufferManagerSpillMaxFilesPerBucket() const {
+    return get<int64_t>(kBufferManagerSpillMaxFilesPerBucket, 64);
+  }
+
   std::string bufferManagerSpillCompressionKind() const {
-    return get<std::string>(kBufferManagerSpillCompressionKind, "");
+    return get<std::string>(kBufferManagerSpillCompressionKind, "zstd");
+  }
+
+  std::optional<int32_t> bufferManagerSpillCompressionLevel() const {
+    return get<int32_t>(kBufferManagerSpillCompressionLevel);
   }
 
   bool bmStreamingWindowBuildEnabled() const {

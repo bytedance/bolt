@@ -26,6 +26,7 @@
 #include "bolt/common/memory/bm/SpillCandidateProvider.h"
 #include "bolt/common/memory/bm/SpillStore.h"
 #include "bolt/common/memory/bm/SpillWriteDriver.h"
+#include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 
 #include <glog/logging.h>
 
@@ -40,12 +41,40 @@ bool shouldAllocateHugePageAligned(size_t size) {
   return size >= AllocationTraits::kHugePageSize;
 }
 
+void applySpillCompressionOptions(BufferManagerConfig& config) {
+  if (!config.spillCompression.has_value()) {
+    return;
+  }
+  const auto& options = *config.spillCompression;
+  const auto& compressionKind = options.kind;
+  BOLT_USER_CHECK(
+      compressionKind.empty() || compressionKind == "none" ||
+          compressionKind == "zstd" || compressionKind == "openzl",
+      "Unsupported BufferManager spill compression kind '{}'; allowed "
+      "values are none, zstd and openzl",
+      compressionKind);
+  auto& compressionConfig = config.spillStoreConfig.compressionConfig;
+  if (compressionKind == "none") {
+    compressionConfig.kind = compress::CompressionKind::kNone;
+  } else if (compressionKind == "openzl") {
+    compressionConfig.kind = compress::CompressionKind::kOpenZlFrame;
+  } else {
+    compressionConfig.kind = compress::CompressionKind::kZstdFrame;
+  }
+  if (options.level.has_value()) {
+    compress::SetCompressionLevel(compressionConfig, *options.level);
+  }
+  // Only the resolved typed configuration is retained by the manager.
+  config.spillCompression.reset();
+}
+
 } // namespace
 
 std::shared_ptr<BufferManager> BufferManager::Create(
     MemoryPool& parent,
     BufferManagerConfig config) {
   BOLT_CHECK(!config.poolName.empty());
+  applySpillCompressionOptions(config);
   auto manager =
       std::shared_ptr<BufferManager>(new BufferManager(std::move(config)));
   manager->Initialize(parent);

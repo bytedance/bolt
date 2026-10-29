@@ -15,6 +15,7 @@
  */
 
 #include "bolt/common/memory/bm/BufferManager.h"
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/bm/file/tests/FileSegmentAllocatorTestUtil.h"
 
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -31,6 +33,7 @@
 #include <folly/ScopeGuard.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
+#include <zstd.h>
 
 namespace bytedance::bolt::memory::bm {
 namespace {
@@ -117,6 +120,38 @@ TEST_F(BufferManagerTest, AllocateReturnsPinnedWritablePayload) {
   std::memset(handle.Ptr(), 7, block->size());
   EXPECT_EQ(4096, block->size());
   EXPECT_EQ(MemoryTag::kTesting, block->tag());
+}
+
+TEST_F(BufferManagerTest, ValidatesCompressionBeforeCreatingResources) {
+  const auto directory =
+      test::UniqueTempDir("bolt-bm-buffer-manager-invalid-compression");
+  std::filesystem::remove_all(directory);
+  BufferManagerConfig config;
+  config.poolName = "bm-invalid-compression";
+  config.spillStoreConfig.fileAllocatorConfig =
+      test::ValidConfigWithDirectory(directory);
+  const auto children = root_->getChildCount();
+
+  config.spillCompression = SpillCompressionOptions{.kind = "lz4"};
+  BOLT_ASSERT_THROW(
+      BufferManager::Create(*root_, config),
+      "Unsupported BufferManager spill compression kind");
+  for (const auto* kind : {"", "zstd"}) {
+    for (const auto level : {ZSTD_minCLevel() - 1, ZSTD_maxCLevel() + 1}) {
+      config.spillCompression =
+          SpillCompressionOptions{.kind = kind, .level = level};
+      BOLT_ASSERT_THROW(
+          BufferManager::Create(*root_, config),
+          "Invalid BM Zstd compression level");
+    }
+  }
+  EXPECT_EQ(children, root_->getChildCount());
+  EXPECT_FALSE(std::filesystem::exists(directory));
+
+  // Disabled compression ignores the level, including out-of-range values.
+  config.spillCompression = SpillCompressionOptions{
+      .kind = "none", .level = std::numeric_limits<int32_t>::max()};
+  EXPECT_NE(nullptr, BufferManager::Create(*root_, config));
 }
 
 TEST_F(BufferManagerTest, AllocateLargeReturnsHugePageAlignedPayload) {
@@ -692,6 +727,16 @@ TEST_P(BufferManagerCompressionKindTest, CompressionKindSpillsAndReadsBack) {
   auto repin = bm->Pin(block);
   EXPECT_EQ(21, repin.Ptr()[0]);
   EXPECT_EQ(21, repin.Ptr()[block->size() - 1]);
+  const auto stats = bm->stats();
+  EXPECT_EQ(
+      GetParam() == compress::CompressionKind::kLz4Block ? 1 : 0,
+      stats.spillLz4Blocks);
+  EXPECT_EQ(
+      GetParam() == compress::CompressionKind::kZstdFrame ? 1 : 0,
+      stats.spillZstdBlocks);
+  EXPECT_EQ(
+      GetParam() == compress::CompressionKind::kSnappyRaw ? 1 : 0,
+      stats.spillSnappyBlocks);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -700,7 +745,8 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Values(
         compress::CompressionKind::kLz4Block,
         compress::CompressionKind::kZstdFrame,
-        compress::CompressionKind::kSnappyRaw));
+        compress::CompressionKind::kSnappyRaw,
+        compress::CompressionKind::kNone));
 
 TEST_F(BufferManagerTest, DebugStringContainsCoreCounters) {
   auto bm = makeBufferManager("debug-string");
