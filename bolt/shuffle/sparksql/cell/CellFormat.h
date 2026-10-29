@@ -26,13 +26,22 @@
 ///               nullDecodedSize u32 (0: the null body is stored as is;
 ///               else it is compressed and decodes to this many bytes)
 ///   null body   nullStoredSize bytes: one 2-bit NullTag per wire column,
-///               then a ceil(rowCount / 8)-byte bitmap (bit 1 = non-null,
-///               unused high bits zero) per kRawNull column, in column order
+///               then per kRawNull column, in column order, its null
+///               records: a u32 count, then the records
 ///   enc tags    ceil(W / 8) bytes, W wire columns: bit set = the string
 ///               column is in dictionary form
 ///   runs        runCount runs, each: RunLayout u8, stored size(s) u64 (one,
 ///               or one per stream for kSeparate), decoded size u64 per
 ///               stream, then the stored bytes
+///
+/// A null record holds consecutive rows of a column, from the row after
+/// the previous record's: a run of up to kNullRecordMaxRun rows of one
+/// null-ness, then a bitmap of up to kNullRecordBits rows. Its
+/// kNullRecordBytes bytes: run u16 (the run's rows, plus kNullRecordRunNull
+/// when they are null), fill u8 (the bitmap's rows), then the bitmap, bit 1
+/// = non-null, its bits past fill zero. A record covers at least one row;
+/// a column's records cover at most rowCount rows, the rows past them
+/// non-null.
 ///
 /// UNKNOWN columns have no wire column. A wire column's values live in its
 /// streams (CellLayout): only non-null rows have values, and an all-null
@@ -114,6 +123,14 @@ enum class EncodingKind : uint8_t {
   kForBitPack = 2,
   kPlain = 3,
 };
+
+/// A null record: its bytes, the rows of its bitmap, the flag marking its
+/// run null and the rows a run holds at most.
+inline constexpr uint32_t kNullRecordBytes = 28;
+inline constexpr uint32_t kNullRecordBitmapBytes = 25;
+inline constexpr uint32_t kNullRecordBits = 8 * kNullRecordBitmapBytes;
+inline constexpr uint16_t kNullRecordRunNull = 0x8000;
+inline constexpr uint32_t kNullRecordMaxRun = 0x7FFF;
 
 /// A wire column's 2-bit null tag in the null body.
 enum class NullTag : uint8_t {

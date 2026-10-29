@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -377,15 +378,16 @@ class DataCells {
 /// first recorded null: a cell per partition, the column's cells contiguous
 /// for locality.
 ///
-/// A cell holds a stretch of a partition's rows in 32 bytes: a run of up to
-/// 32767 rows all null or all non-null, then a bitmap of up to 200 rows.
-/// Only null rows are recorded; the non-null rows before one join the run
-/// or the bitmap as it passes them, and the rows after the last recorded
-/// null are non-null. The cell in the column's array is the partition's
-/// last: once full it moves to a cell of a chunk allocator, linked from the
-/// next, so a partition's rows are a chain read from its last cell back. A
-/// released partition's cells go back to the allocator for reuse, and
-/// everything returns to the pool when the window closes.
+/// A cell holds a stretch of a partition's rows in 32 bytes, a null record
+/// of the null body (CellFormat.h) after a link: a run of up to 32767 rows
+/// all null or all non-null, then a bitmap of up to 200 rows. Only null
+/// rows are recorded; the non-null rows before one join the run or the
+/// bitmap as it passes them, and the rows after the last recorded null are
+/// non-null. The cell in the column's array is the partition's last: once
+/// full it moves to a cell of a chunk allocator, linked from the next, so a
+/// partition's rows are a chain read from its last cell back. A released
+/// partition's cells go back to the allocator for reuse, and everything
+/// returns to the pool when the window closes.
 class NullCells {
  public:
   NullCells(
@@ -463,24 +465,24 @@ class NullCells {
   /// which cover every row recorded.
   Summary summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const;
 
-  /// Writes the null body bitmap for (pid, col): ceil(rowCount / 8) bytes,
-  /// bit 1 = non-null, unused bits of the last byte zeroed. Only
-  /// meaningful when summarize() returned kRawNull, but valid for any tag.
-  void emitBitmap(uint32_t pid, uint32_t col, uint32_t rowCount, uint8_t* out)
-      const {
-    emitBitmaps(pid, &col, 1, rowCount, &out);
+  /// Bytes of the null records of (pid, col), a column summarize() found
+  /// kRawNull: their u32 count and the records.
+  size_t recordsBytes(uint32_t pid, uint32_t col) const {
+    return sizeof(uint32_t) +
+        kNullRecordBytes * (size_t{columns_[col].tails[pid].moved} + 1);
   }
 
-  /// emitBitmap() for `numCols` columns of partition pid, the bitmap of
-  /// cols[i] to outs[i]. The columns' cells are read in step, each cell's
-  /// predecessor fetched while the other columns' cells are applied, so
+  /// Writes the null records of partition pid's columns cols[0..numCols),
+  /// each one summarize() found kRawNull, at `out`: per column in turn,
+  /// recordsBytes() of them - its record count, then its cells as records
+  /// in row order. The columns' cells are read in step, each cell's
+  /// predecessor fetched while the other columns' cells are written, so
   /// that their cache misses overlap.
-  void emitBitmaps(
+  void emitRecords(
       uint32_t pid,
       const uint32_t* cols,
       uint32_t numCols,
-      uint32_t rowCount,
-      uint8_t* const* outs) const;
+      uint8_t* out) const;
 
   /// Drops every column's state and cells (checkpoint window close).
   void reset();
@@ -491,7 +493,7 @@ class NullCells {
 
   /// Bytes of the partitions' moved cells; input to the checkpoint
   /// trigger. Not in it, as they stay bounded whatever the window's size:
-  /// the columns' cell arrays, 40 bytes per partition of a column with
+  /// the columns' cell arrays, 44 bytes per partition of a column with
   /// nulls recorded.
   int64_t allocatedBytes() const {
     return chainCells_.usedBytes();
@@ -517,7 +519,8 @@ class NullCells {
     kMixed, // both: the cells record the nulls
   };
 
-  /// A stretch of a partition's rows: a run, then a bitmap.
+  /// A stretch of a partition's rows: a link, then a null record whose
+  /// bitmap's bits past `fill` are 1, not 0 as on the wire.
   struct Cell {
     /// The cell holding the rows before this one's; kInvalidCell for the
     /// first.
@@ -527,12 +530,16 @@ class NullCells {
     /// Rows in `bits`, after the run's.
     uint8_t fill;
     /// Bit 1 = non-null; the bits past `fill` stay 1.
-    uint8_t bits[25];
+    uint8_t bits[kNullRecordBitmapBytes];
   };
   static_assert(sizeof(Cell) == 32);
-  static constexpr uint16_t kNullRun = 0x8000;
-  static constexpr uint32_t kMaxRunRows = 0x7FFF;
-  static constexpr uint32_t kCellBits = 8 * sizeof(Cell::bits);
+  static_assert(
+      offsetof(Cell, run) == sizeof(uint32_t) &&
+          sizeof(Cell) - offsetof(Cell, run) == kNullRecordBytes,
+      "a cell after its link is a null record");
+  static constexpr uint16_t kNullRun = kNullRecordRunNull;
+  static constexpr uint32_t kMaxRunRows = kNullRecordMaxRun;
+  static constexpr uint32_t kCellBits = kNullRecordBits;
 
   /// Where a partition's rows stand in a column.
   struct Tail {
@@ -540,6 +547,8 @@ class NullCells {
     uint32_t end;
     /// The null rows among them.
     uint32_t nulls;
+    /// The chain's cells moved to the allocator, all but its last.
+    uint32_t moved;
   };
 
   /// A mixed column's storage, one cell and one tail per partition, in one

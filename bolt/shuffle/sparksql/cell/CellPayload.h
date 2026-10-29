@@ -316,8 +316,10 @@ class CellPayloadDecoder {
   BufferPtr nullBody_;
   std::vector<NullTag> tags_;
   std::vector<uint32_t> nonNullCount_;
-  std::vector<const uint8_t*> bitmaps_; // into nullBody_, per column
-  uint64_t bitmapBytes_{0}; // of each raw-null bitmap in nullBody_
+  /// The kRawNull columns' records expanded, a bitmap per column.
+  BufferPtr expandedNulls_;
+  std::vector<const uint8_t*> bitmaps_; // into expandedNulls_, per column
+  uint64_t bitmapBytes_{0}; // of each bitmap in expandedNulls_
   std::vector<uint8_t> encodingTags_;
   std::vector<uint64_t> storedSizes_;
   std::vector<uint64_t> decodedSizes_;
@@ -341,6 +343,20 @@ class CellPayloadDecoder {
 };
 
 // Writer side: the pieces both output backends assemble payloads from.
+
+/// Expands the null records of one kRawNull column at `cursor` - their u32
+/// count, then the records (CellFormat.h) - into `bitmap`, the
+/// ceil(rowCount / 8)-byte bitmap of the column (bit 1 = non-null, unused
+/// high bits zero), counts its non-null rows and moves `cursor` past the
+/// records; never reads past `end`. Writes up to 7 bytes past the bitmap,
+/// which must be writable. False, with `error`, when they are malformed.
+bool expandNullRecords(
+    const uint8_t*& cursor,
+    const uint8_t* end,
+    uint32_t rowCount,
+    uint8_t* bitmap,
+    uint32_t& nonNullCount,
+    std::string& error);
 
 struct CellWindowInput;
 
