@@ -1367,15 +1367,33 @@ void buildNullBody(
     const auto summary = in.nulls->summarize(pid, col, rows);
     setNullTag(tags, col, summary.tag);
   }
-  // Bitmaps follow the tags for RAW_NULL columns, in column order. The tag
-  // byte array may move as `out` grows, so tags were fully written first.
+  // Bitmaps follow the tags for RAW_NULL columns, in column order, written
+  // together once `out` has room for them all.
+  std::vector<uint32_t> rawColumns;
   for (uint32_t col = 0; col < numColumns; ++col) {
     if (getNullTag(out->as<uint8_t>() + tagStart, col) == NullTag::kRawNull) {
-      const size_t at = out->size();
-      resizeBuffer(out, checkedPlus<size_t>(at, bitmapBytes), pool);
-      in.nulls->emitBitmap(pid, col, rows, out->asMutable<uint8_t>() + at);
+      rawColumns.push_back(col);
     }
   }
+  if (rawColumns.empty()) {
+    return;
+  }
+  const size_t at = out->size();
+  resizeBuffer(
+      out,
+      checkedPlus<size_t>(
+          at, checkedMultiply<size_t>(rawColumns.size(), bitmapBytes)),
+      pool);
+  std::vector<uint8_t*> bitmaps(rawColumns.size());
+  for (size_t i = 0; i < rawColumns.size(); ++i) {
+    bitmaps[i] = out->asMutable<uint8_t>() + at + i * bitmapBytes;
+  }
+  in.nulls->emitBitmaps(
+      pid,
+      rawColumns.data(),
+      static_cast<uint32_t>(rawColumns.size()),
+      rows,
+      bitmaps.data());
 }
 
 void appendPayloadPrefix(

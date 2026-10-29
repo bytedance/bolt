@@ -16,8 +16,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <random>
+#include <vector>
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
@@ -29,6 +31,12 @@ namespace {
 constexpr uint32_t kChunkBytes = 16 << 10; // 16KB
 constexpr uint32_t kCellBytes = 256;
 constexpr uint32_t kCellsPerChunk = kChunkBytes / kCellBytes;
+
+/// Bytes of a mixed column's cell array: a 32-byte cell and an 8-byte tail
+/// per partition, and room to align the cells.
+constexpr int64_t cellArrayBytes(uint32_t numPartitions) {
+  return 32 + 40 * int64_t{numPartitions};
+}
 
 class CellChunkTest : public testing::Test {
  protected:
@@ -441,28 +449,33 @@ TEST_F(CellChunkTest, nullCellsAllNull) {
   EXPECT_EQ(summary.nonNullCount, 0);
 }
 
-TEST_F(CellChunkTest, nullCellsGrowthPreservesBitsAndImplicitTail) {
+TEST_F(CellChunkTest, nullCellsLongGapsAndImplicitTail) {
   NullCells nulls(pool_.get(), 2, 3);
   markMixed(nulls, 2, 1);
+  // A null after 5 non-null rows: a run of those and the null in the
+  // bitmap, all in the partition's cell of the column's array.
   nulls.setNull(0, 1, 5);
-  const auto small = nulls.allocatedBytes();
-  EXPECT_GT(small, 0);
-  nulls.setNull(0, 1, 5000); // forces growth well past the first 128 rows
-  EXPECT_GT(nulls.allocatedBytes(), small);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
+  // 4994 more non-null rows do not fit the bitmap: the cell moves to the
+  // allocator, and the next one starts with their run.
+  nulls.setNull(0, 1, 5000);
+  EXPECT_EQ(nulls.allocatedBytes(), 32);
 
   const auto summary = nulls.summarize(0, 1, 6000);
   EXPECT_EQ(summary.tag, NullTag::kRawNull);
-  // Rows beyond capacity stay implicitly non-null; exactly two nulls exist.
+  // Rows after the last null are non-null; exactly two nulls exist.
   EXPECT_EQ(summary.nonNullCount, 5998);
 
   std::vector<uint8_t> bitmap((6000 + 7) / 8);
   nulls.emitBitmap(0, 1, 6000, bitmap.data());
-  EXPECT_EQ(bitmap[0] & (1u << 5), 0u);
-  EXPECT_EQ(bitmap[5000 / 8] & (1u << (5000 % 8)), 0u);
-  EXPECT_NE(bitmap[3000 / 8] & (1u << (3000 % 8)), 0u);
+  for (uint32_t row = 0; row < 6000; ++row) {
+    ASSERT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row != 5 && row != 5000)
+        << "row " << row;
+  }
 
   nulls.reset();
   EXPECT_EQ(nulls.allocatedBytes(), 0);
+  EXPECT_EQ(nulls.footprintBytes(), 0);
   EXPECT_EQ(nulls.summarize(0, 1, 6000).tag, NullTag::kNoNull);
 }
 
@@ -470,8 +483,8 @@ TEST_F(CellChunkTest, nullCellsAllNullIsPureCounting) {
   NullCells nulls(pool_.get(), 4, 2);
   markMixed(nulls, 4, 0);
   markMixed(nulls, 4, 1);
-  // A partition whose every row is null, in order: the prefix counter
-  // absorbs it and no bitmap storage is ever allocated.
+  // A partition whose every row is null, in order: the cell's null run
+  // absorbs it, and no cell moves.
   for (uint32_t row = 0; row < 500; ++row) {
     nulls.setNull(1, 0, row);
   }
@@ -480,7 +493,7 @@ TEST_F(CellChunkTest, nullCellsAllNullIsPureCounting) {
   EXPECT_EQ(summary.tag, NullTag::kAllNull);
   EXPECT_EQ(summary.nonNullCount, 0);
 
-  // The bulk form does the same in O(1).
+  // The bulk form does the same.
   nulls.setNullRun(2, 1, 0, 1000);
   nulls.setNullRun(2, 1, 1000, 500);
   EXPECT_EQ(nulls.allocatedBytes(), 0);
@@ -490,72 +503,62 @@ TEST_F(CellChunkTest, nullCellsAllNullIsPureCounting) {
 TEST_F(CellChunkTest, nullCellsAllocatePerColumn) {
   constexpr uint32_t kPartitions = 8;
   NullCells nulls(pool_.get(), kPartitions, 100);
-  // Only a mixed column has slots, one per partition and contiguous, from
+  // Only a mixed column has cells, one per partition and contiguous, from
   // its first null: a batch classified as having nulls may hold none.
   markMixed(nulls, kPartitions, 42);
   markMixed(nulls, kPartitions, 41);
   EXPECT_EQ(nulls.tableBytes(), 0);
-  // One sparse null: one 16-byte bitmap, not one per column.
+  // One sparse null: it sits in the partition's cell, nothing more.
   nulls.setNull(3, 42, 7);
-  EXPECT_EQ(nulls.tableBytes(), kPartitions * 16);
-  EXPECT_EQ(nulls.allocatedBytes(), 16);
+  EXPECT_EQ(nulls.tableBytes(), cellArrayBytes(kPartitions));
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
   EXPECT_EQ(nulls.summarize(3, 42, 100).tag, NullTag::kRawNull);
   EXPECT_EQ(nulls.summarize(3, 41, 100).tag, NullTag::kNoNull);
   EXPECT_EQ(nulls.summarize(2, 42, 100).tag, NullTag::kNoNull);
 
-  // A partition null from its first row needs no bitmap either.
+  // A partition null from its first row is a run.
   markMixed(nulls, kPartitions, 0);
   nulls.setNullRun(3, 0, 0, 1000);
-  EXPECT_EQ(nulls.allocatedBytes(), 16);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
   EXPECT_EQ(nulls.summarize(3, 0, 1000).tag, NullTag::kAllNull);
-  EXPECT_EQ(nulls.tableBytes(), 2 * kPartitions * 16);
+  EXPECT_EQ(nulls.tableBytes(), 2 * cellArrayBytes(kPartitions));
 }
 
-TEST_F(CellChunkTest, nullCellsReuseOutgrownBitmaps) {
-  NullCells nulls(pool_.get(), 2, 2);
-  markMixed(nulls, 2, 0);
-  markMixed(nulls, 2, 1);
-  // Column 0 grows 16 -> 32 bytes; its 16-byte block is freed and column
-  // 1's first bitmap reuses it. Only the slots' bitmaps count.
-  nulls.setNull(0, 0, 1);
-  nulls.setNull(0, 0, 200);
-  EXPECT_EQ(nulls.allocatedBytes(), 32);
-  nulls.setNull(0, 1, 3);
-  EXPECT_EQ(nulls.allocatedBytes(), 32 + 16);
+TEST_F(CellChunkTest, nullCellsRecycleReleasedCells) {
+  constexpr uint32_t kPartitions = 2;
+  NullCells nulls(pool_.get(), kPartitions, 2);
+  markMixed(nulls, kPartitions, 0);
+  markMixed(nulls, kPartitions, 1);
+  // Every other row null: a cell holds 201 rows, a run of one and 200 in
+  // its bitmap, so 4000 rows take 20 cells, 19 of them moved.
+  const auto everyOther = [&](uint32_t pid, uint32_t col) {
+    for (uint32_t row = 0; row < 4000; row += 2) {
+      nulls.setNull(pid, col, row);
+    }
+  };
+  const auto checkEveryOther = [&](uint32_t pid, uint32_t col) {
+    std::vector<uint8_t> bitmap(500);
+    nulls.emitBitmap(pid, col, 4000, bitmap.data());
+    for (uint32_t row = 0; row < 4000; ++row) {
+      ASSERT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row % 2) << "row " << row;
+    }
+    EXPECT_EQ(nulls.summarize(pid, col, 4000).nonNullCount, 2000);
+  };
+  everyOther(0, 0);
+  EXPECT_EQ(nulls.allocatedBytes(), 19 * 32);
+  checkEveryOther(0, 0);
+  // Held from the pool beyond the arrays: one chunk of cells.
+  EXPECT_EQ(nulls.footprintBytes() - nulls.tableBytes(), 64 << 10);
 
-  // Bits survive the growth, and the reused block starts all non-null.
-  std::vector<uint8_t> bitmap(26);
-  nulls.emitBitmap(0, 0, 201, bitmap.data());
-  for (uint32_t row = 0; row < 201; ++row) {
-    EXPECT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row != 1 && row != 200)
-        << "row " << row;
-  }
-  nulls.emitBitmap(0, 1, 201, bitmap.data());
-  for (uint32_t row = 0; row < 201; ++row) {
-    EXPECT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row != 3) << "row " << row;
-  }
-
-  // A released partition hands its bitmaps to the next one; the slots stay.
+  // A released partition's cells go back to the allocator, and the next
+  // partition needing cells reuses them.
   nulls.releasePartition(0);
   EXPECT_EQ(nulls.allocatedBytes(), 0);
-  EXPECT_EQ(nulls.summarize(0, 0, 201).tag, NullTag::kNoNull);
-  const auto tables = nulls.tableBytes();
-  nulls.setNull(1, 0, 1);
-  nulls.setNull(1, 1, 200);
-  EXPECT_EQ(nulls.tableBytes(), tables);
-  EXPECT_EQ(nulls.allocatedBytes(), 16 + 32);
-  EXPECT_EQ(nulls.summarize(1, 0, 201).nonNullCount, 200);
-  EXPECT_EQ(nulls.summarize(1, 1, 201).nonNullCount, 200);
-
-  // Past 64 bytes a bitmap comes from the pool and goes back as it grows.
-  nulls.setNull(1, 0, 5000); // 1KB; the 16-byte block is freelisted
-  EXPECT_EQ(nulls.allocatedBytes(), 1024 + 32);
-  nulls.setNull(1, 0, 12000); // 2KB; the 1KB block is freed
-  EXPECT_EQ(nulls.allocatedBytes(), 2048 + 32);
-  EXPECT_EQ(nulls.summarize(1, 0, 12001).nonNullCount, 12001 - 3);
-  // Held from the pool: the slot arrays, the arena's first 64KB chunk, and
-  // the one bitmap beyond the arena.
-  EXPECT_EQ(nulls.footprintBytes(), nulls.tableBytes() + (64 << 10) + 2048);
+  EXPECT_EQ(nulls.summarize(0, 0, 4000).tag, NullTag::kNoNull);
+  everyOther(1, 1);
+  EXPECT_EQ(nulls.allocatedBytes(), 19 * 32);
+  EXPECT_EQ(nulls.footprintBytes() - nulls.tableBytes(), 64 << 10);
+  checkEveryOther(1, 1);
 
   nulls.reset();
   EXPECT_EQ(nulls.allocatedBytes(), 0);
@@ -563,17 +566,183 @@ TEST_F(CellChunkTest, nullCellsReuseOutgrownBitmaps) {
   EXPECT_EQ(nulls.footprintBytes(), 0);
 }
 
+TEST_F(CellChunkTest, nullCellsRunsSpanCells) {
+  NullCells nulls(pool_.get(), 2, 1);
+  markMixed(nulls, 2, 0);
+  // A run holds at most 32767 rows: 100000 null rows take four cells.
+  nulls.setNullRun(0, 0, 0, 100000);
+  EXPECT_EQ(nulls.allocatedBytes(), 3 * 32);
+  // As do 100000 non-null rows before the next null, which then starts the
+  // last cell's bitmap.
+  nulls.setNull(0, 0, 200000);
+  EXPECT_EQ(nulls.allocatedBytes(), 7 * 32);
+  const uint32_t rows = 200006;
+  const auto summary = nulls.summarize(0, 0, rows);
+  EXPECT_EQ(summary.tag, NullTag::kRawNull);
+  EXPECT_EQ(summary.nonNullCount, rows - 100001);
+  std::vector<uint8_t> bitmap((rows + 7) / 8);
+  nulls.emitBitmap(0, 0, rows, bitmap.data());
+  for (uint32_t row = 0; row < rows; ++row) {
+    ASSERT_EQ(
+        (bitmap[row / 8] >> (row % 8)) & 1, row >= 100000 && row != 200000)
+        << "row " << row;
+  }
+  EXPECT_EQ(bitmap.back() >> (rows % 8), 0);
+
+  // Null by null, the run fills and moves the same way.
+  for (uint32_t row = 0; row < 70000; ++row) {
+    nulls.setNull(1, 0, row);
+  }
+  EXPECT_EQ(nulls.allocatedBytes(), (7 + 2) * 32);
+  EXPECT_EQ(nulls.summarize(1, 0, 70000).tag, NullTag::kAllNull);
+}
+
+TEST_F(CellChunkTest, nullCellsMatchAReferenceBitmap) {
+  constexpr uint32_t kPartitions = 3;
+  std::mt19937 rng(17);
+  std::uniform_real_distribution<double> unit(0, 1);
+  for (const double density : {0.001, 0.01, 0.1, 0.5, 0.9, 0.999}) {
+    SCOPED_TRACE(density);
+    NullCells nulls(pool_.get(), kPartitions, 1);
+    // Per partition, true = null.
+    std::vector<std::vector<bool>> expected(kPartitions);
+    // Null throughout at first, up to past one run's capacity, then mixed:
+    // each partition's rows so far become runs.
+    std::vector<uint32_t> rows(kPartitions, 0);
+    ASSERT_FALSE(nulls.observeBatch(0, true, true, rows.data()));
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      rows[pid] = rng() % 50000;
+      expected[pid].assign(rows[pid], true);
+    }
+    ASSERT_TRUE(nulls.observeBatch(0, true, false, rows.data()));
+    for (int step = 0; step < 5000; ++step) {
+      const uint32_t pid = rng() % kPartitions;
+      auto& nullRows = expected[pid];
+      const uint32_t row = nullRows.size();
+      switch (rng() % 64) {
+        case 0: { // An all-null batch's rows.
+          const uint32_t count = 1 + rng() % 70000;
+          nulls.setNullRun(pid, 0, row, count);
+          nullRows.resize(row + count, true);
+          break;
+        }
+        case 1: // Non-null rows: nothing to record.
+          nullRows.resize(row + rng() % 70000, false);
+          break;
+        case 2: // The partition's payload closes, now and then.
+          if (rng() % 8 == 0) {
+            nulls.releasePartition(pid);
+            nullRows.clear();
+          }
+          break;
+        default: {
+          const bool isNull = unit(rng) < density;
+          if (isNull) {
+            nulls.setNull(pid, 0, row);
+          }
+          nullRows.push_back(isNull);
+          break;
+        }
+      }
+    }
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      const auto& nullRows = expected[pid];
+      // Rows past the last recorded one, non-null.
+      const uint32_t rowCount = nullRows.size() + rng() % 100;
+      std::vector<uint8_t> want((rowCount + 7) / 8, 0);
+      uint32_t nullCount = 0;
+      for (uint32_t row = 0; row < rowCount; ++row) {
+        const bool isNull = row < nullRows.size() && nullRows[row];
+        nullCount += isNull;
+        if (!isNull) {
+          want[row / 8] |= 1 << (row % 8);
+        }
+      }
+      const auto summary = nulls.summarize(pid, 0, rowCount);
+      if (rowCount == 0 || nullCount == 0) {
+        EXPECT_EQ(summary.tag, NullTag::kNoNull) << "partition " << pid;
+      } else if (nullCount == rowCount) {
+        EXPECT_EQ(summary.tag, NullTag::kAllNull) << "partition " << pid;
+      } else {
+        EXPECT_EQ(summary.tag, NullTag::kRawNull) << "partition " << pid;
+        EXPECT_EQ(summary.nonNullCount, rowCount - nullCount);
+      }
+      std::vector<uint8_t> got(want.size());
+      nulls.emitBitmap(pid, 0, rowCount, got.data());
+      const auto diff = std::mismatch(want.begin(), want.end(), got.begin());
+      EXPECT_TRUE(diff.first == want.end())
+          << "partition " << pid << " of " << rowCount << " rows: byte "
+          << (diff.first - want.begin());
+    }
+  }
+}
+
+TEST_F(CellChunkTest, nullCellsEmitColumnsTogether) {
+  // More columns than are read in step at once, of every kind, emitted
+  // together: each bitmap must hold its own column's nulls.
+  constexpr uint32_t kColumns = 21;
+  constexpr uint32_t kRows = 5003;
+  NullCells nulls(pool_.get(), 2, kColumns);
+  std::mt19937 rng(5);
+  const std::vector<uint32_t> noRows(2, 0);
+  std::vector<std::vector<bool>> expectNull(
+      kColumns, std::vector<bool>(kRows, false));
+  for (uint32_t col = 0; col < kColumns; ++col) {
+    switch (col % 7) {
+      case 0: // Null throughout.
+        ASSERT_FALSE(nulls.observeBatch(col, true, true, noRows.data()));
+        expectNull[col].assign(kRows, true);
+        break;
+      case 1: // Non-null throughout.
+        ASSERT_FALSE(nulls.observeBatch(col, false, false, noRows.data()));
+        break;
+      case 2: // Mixed, but no null recorded.
+        markMixed(nulls, 2, col);
+        break;
+      default: { // Mixed, at a density of its own.
+        markMixed(nulls, 2, col);
+        const uint32_t perMille[] = {5, 100, 500, 995};
+        for (uint32_t row = 0; row < kRows; ++row) {
+          if (rng() % 1000 < perMille[col % 7 - 3]) {
+            nulls.setNull(1, col, row);
+            expectNull[col][row] = true;
+          }
+        }
+        break;
+      }
+    }
+  }
+  const uint32_t bytes = (kRows + 7) / 8;
+  std::vector<uint32_t> cols(kColumns);
+  std::vector<std::vector<uint8_t>> bitmaps(kColumns);
+  std::vector<uint8_t*> outs(kColumns);
+  for (uint32_t col = 0; col < kColumns; ++col) {
+    cols[col] = col;
+    bitmaps[col].assign(bytes, 0xAA);
+    outs[col] = bitmaps[col].data();
+  }
+  nulls.emitBitmaps(1, cols.data(), kColumns, kRows, outs.data());
+  for (uint32_t col = 0; col < kColumns; ++col) {
+    std::vector<uint8_t> want(bytes, 0);
+    for (uint32_t row = 0; row < kRows; ++row) {
+      if (!expectNull[col][row]) {
+        want[row / 8] |= 1 << (row % 8);
+      }
+    }
+    EXPECT_EQ(bitmaps[col], want) << "column " << col;
+  }
+}
+
 TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
   NullCells nulls(pool_.get(), 2, 1);
   markMixed(nulls, 2, 0);
-  // Rows 0..9 null (prefix), 10..19 non-null, 20 null again: the late null
-  // must go to the bitmap while the prefix stays counted.
+  // Rows 0..9 null (a run), 10..19 non-null, 20 null again: the late null
+  // and the rows before it go to the bitmap, after the run.
   for (uint32_t row = 0; row < 10; ++row) {
     nulls.setNull(0, 0, row);
   }
-  EXPECT_EQ(nulls.allocatedBytes(), 0);
   nulls.setNull(0, 0, 20);
-  EXPECT_GT(nulls.allocatedBytes(), 0);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
 
   const auto summary = nulls.summarize(0, 0, 30);
   EXPECT_EQ(summary.tag, NullTag::kRawNull);
@@ -587,12 +756,12 @@ TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
     EXPECT_EQ(nonNull, !expectNull) << "row " << row;
   }
 
-  // A pure prefix with no bitmap at all still synthesizes correctly.
+  // A run with no bitmap at all still synthesizes correctly.
   nulls.setNull(1, 0, 0);
   nulls.setNull(1, 0, 1);
-  const auto prefixOnly = nulls.summarize(1, 0, 8);
-  EXPECT_EQ(prefixOnly.tag, NullTag::kRawNull);
-  EXPECT_EQ(prefixOnly.nonNullCount, 6);
+  const auto runOnly = nulls.summarize(1, 0, 8);
+  EXPECT_EQ(runOnly.tag, NullTag::kRawNull);
+  EXPECT_EQ(runOnly.nonNullCount, 6);
   uint8_t byte;
   nulls.emitBitmap(1, 0, 8, &byte);
   EXPECT_EQ(byte, 0b11111100);
@@ -642,15 +811,14 @@ TEST_F(CellChunkTest, nullCellsAllNullColumnTurningMixedKeepsItsNulls) {
   std::vector<uint32_t> rows(kPartitions, 0);
   EXPECT_FALSE(nulls.observeBatch(0, true, true, rows.data()));
   // A batch with non-null rows after 5, 0 and 9 null ones: each
-  // partition's rows so far become its counted prefix, no bitmap.
+  // partition's rows so far become a null run of its own.
   rows = {5, 0, 9};
   EXPECT_TRUE(nulls.observeBatch(0, true, false, rows.data()));
-  EXPECT_EQ(nulls.tableBytes(), kPartitions * 16);
+  EXPECT_EQ(nulls.tableBytes(), cellArrayBytes(kPartitions));
   EXPECT_EQ(nulls.allocatedBytes(), 0);
   // The batch: partition 0 gets rows 5 (null) and 6, partition 1 row 0,
   // partition 2 rows 9 and 10.
-  nulls.setNull(0, 0, 5);
-  EXPECT_EQ(nulls.allocatedBytes(), 0); // the prefix goes on
+  nulls.setNull(0, 0, 5); // the run goes on
 
   const auto first = nulls.summarize(0, 0, 7);
   EXPECT_EQ(first.tag, NullTag::kRawNull);
@@ -667,12 +835,12 @@ TEST_F(CellChunkTest, nullCellsAllNullColumnTurningMixedKeepsItsNulls) {
   EXPECT_EQ(bitmap[0], 0);
   EXPECT_EQ(bitmap[1], 0b00000110);
 
-  // Mixed for the rest of the window: a later all-null batch is a counted
-  // run per partition, here past a non-null row.
+  // Mixed for the rest of the window: a later all-null batch records its
+  // rows per partition, here past a non-null row.
   rows = {7, 1, 11};
   EXPECT_TRUE(nulls.observeBatch(0, true, true, rows.data()));
   nulls.setNullRun(1, 0, 1, 3);
-  EXPECT_EQ(nulls.allocatedBytes(), 16);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
   EXPECT_EQ(nulls.summarize(1, 0, 4).nonNullCount, 1);
 }
 
@@ -682,30 +850,28 @@ TEST_F(CellChunkTest, nullCellsNoNullColumnTurningMixed) {
   std::vector<uint32_t> rows(kPartitions, 0);
   EXPECT_FALSE(nulls.observeBatch(0, false, false, rows.data()));
   // An all-null batch after 4 non-null rows of partition 0: those need
-  // nothing, being the slots' default.
+  // nothing, being what unrecorded rows are.
   rows = {4, 0};
   EXPECT_TRUE(nulls.observeBatch(0, true, true, rows.data()));
   EXPECT_EQ(nulls.tableBytes(), 0);
   nulls.setNullRun(0, 0, 4, 2);
   nulls.setNullRun(1, 0, 0, 3);
-  EXPECT_EQ(nulls.tableBytes(), kPartitions * 16);
+  EXPECT_EQ(nulls.tableBytes(), cellArrayBytes(kPartitions));
   const auto first = nulls.summarize(0, 0, 6);
   EXPECT_EQ(first.tag, NullTag::kRawNull);
   EXPECT_EQ(first.nonNullCount, 4);
   uint8_t byte;
   nulls.emitBitmap(0, 0, 6, &byte);
   EXPECT_EQ(byte, 0b00001111);
-  // Partition 1's rows are all null: a prefix alone.
+  // Partition 1's rows are all null: a run alone.
   EXPECT_EQ(nulls.summarize(1, 0, 3).tag, NullTag::kAllNull);
-  EXPECT_EQ(nulls.allocatedBytes(), 16);
+  EXPECT_EQ(nulls.allocatedBytes(), 0);
 
   // A released partition starts over within the still mixed column.
   nulls.releasePartition(0);
-  EXPECT_EQ(nulls.allocatedBytes(), 0);
   EXPECT_EQ(nulls.summarize(0, 0, 6).tag, NullTag::kNoNull);
   nulls.setNull(0, 0, 0);
   EXPECT_EQ(nulls.summarize(0, 0, 2).nonNullCount, 1);
-  EXPECT_EQ(nulls.allocatedBytes(), 0);
 }
 
 TEST_F(CellChunkTest, cellLayoutStreams) {

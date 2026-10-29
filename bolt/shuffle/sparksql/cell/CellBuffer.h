@@ -374,17 +374,18 @@ class DataCells {
 /// every row so far is non-null, or every row so far null, the state says
 /// it all and nothing else is stored or touched - an all-null column costs
 /// nothing per batch. Only a column that holds both gets storage, at its
-/// first recorded null: a slot per partition, the column's slots contiguous
-/// for locality. A slot holds the partition's counted all-null prefix and,
-/// only once a null follows a non-null row, a bitmap of its own; rows
-/// beyond a bitmap's capacity are implicitly non-null.
+/// first recorded null: a cell per partition, the column's cells contiguous
+/// for locality.
 ///
-/// A bitmap grows by doubling. Small bitmaps are carved from arena chunks
-/// of the pool, a small bitmap's outgrown block going to a freelist of its
-/// size class for the next slot to reach that size; large bitmaps come from
-/// the pool itself and go back to it as they grow, so the blocks held but
-/// unused stay under 112 bytes per slot. Everything returns to the pool
-/// when the window closes.
+/// A cell holds a stretch of a partition's rows in 32 bytes: a run of up to
+/// 32767 rows all null or all non-null, then a bitmap of up to 200 rows.
+/// Only null rows are recorded; the non-null rows before one join the run
+/// or the bitmap as it passes them, and the rows after the last recorded
+/// null are non-null. The cell in the column's array is the partition's
+/// last: once full it moves to a cell of a chunk allocator, linked from the
+/// next, so a partition's rows are a chain read from its last cell back. A
+/// released partition's cells go back to the allocator for reuse, and
+/// everything returns to the pool when the window closes.
 class NullCells {
  public:
   NullCells(
@@ -412,43 +413,45 @@ class NullCells {
   /// Marks rowInWindow (0-based since the partition's payload opened) of
   /// column col in partition pid as null. Only for a column that
   /// observeBatch() found mixed. Rows are visited in strictly increasing
-  /// order per partition; capacity grows on demand.
+  /// order per partition.
   ///
   /// Forced inline: the split loops call it per null row, and the compiler
-  /// otherwise keeps it out of line behind a PLT call; opening the column's
-  /// slots and growth stay out of line.
-  ///
-  /// An all-null-so-far partition is pure counting: while every row of the
-  /// partition has been null, only the slot's prefix advances and no bitmap
-  /// exists. The first non-null row freezes the prefix (it simply never
-  /// calls in), and later nulls fall through to the bitmap.
+  /// otherwise keeps it out of line behind a PLT call. A null that lands in
+  /// the cell's bitmap or extends its null run is recorded here; starting a
+  /// run or a bitmap, moving a full cell and opening the column stay out of
+  /// line.
   FOLLY_ALWAYS_INLINE void
   setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
-    Slot& slot = slotFor(pid, col);
-    if (rowInWindow == slot.prefix) {
-      ++slot.prefix;
+    Column& column = columnFor(col);
+    Cell& cell = column.cells[pid];
+    Tail& tail = column.tails[pid];
+    if (cell.fill != 0) {
+      // The rows since the last recorded one are non-null: bits already set.
+      const uint32_t bit = cell.fill + (rowInWindow - tail.end);
+      if (FOLLY_LIKELY(bit < kCellBits)) {
+        cell.bits[bit >> 3] &= static_cast<uint8_t>(~(1u << (bit & 7)));
+        cell.fill = static_cast<uint8_t>(bit + 1);
+        tail.end = rowInWindow + 1;
+        ++tail.nulls;
+        return;
+      }
+    } else if (
+        rowInWindow == tail.end && cell.run >= kNullRun &&
+        cell.run < kNullRun + kMaxRunRows) {
+      // The next row of the cell's null run, which has room for it.
+      ++cell.run;
+      ++tail.end;
+      ++tail.nulls;
       return;
     }
-    if (FOLLY_UNLIKELY((rowInWindow >> 3) >= slot.capBytes)) {
-      grow(slot, rowInWindow);
-    }
-    slot.bits[rowInWindow >> 3] &=
-        static_cast<uint8_t>(~(1u << (rowInWindow & 7)));
+    appendNulls(column, pid, rowInWindow, 1);
   }
 
   /// Bulk form for a run of consecutive rows that are all null in this
-  /// column: O(1) while the partition is still all-null in it, per-row
-  /// otherwise. Only for a mixed column, as setNull().
-  inline void
+  /// column. Only for a mixed column, as setNull().
+  void
   setNullRun(uint32_t pid, uint32_t col, uint32_t startRow, uint32_t count) {
-    Slot& slot = slotFor(pid, col);
-    if (startRow == slot.prefix) {
-      slot.prefix += count;
-      return;
-    }
-    for (uint32_t i = 0; i < count; ++i) {
-      setNull(pid, col, startRow + i);
-    }
+    appendNulls(columnFor(col), pid, startRow, count);
   }
 
   struct Summary {
@@ -456,40 +459,53 @@ class NullCells {
     uint32_t nonNullCount;
   };
 
-  /// Summarizes (pid, col) over the first rowCount rows of the partition.
+  /// Summarizes (pid, col) over the first rowCount rows of the partition,
+  /// which cover every row recorded.
   Summary summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const;
 
   /// Writes the null body bitmap for (pid, col): ceil(rowCount / 8) bytes,
   /// bit 1 = non-null, unused bits of the last byte zeroed. Only
   /// meaningful when summarize() returned kRawNull, but valid for any tag.
   void emitBitmap(uint32_t pid, uint32_t col, uint32_t rowCount, uint8_t* out)
-      const;
+      const {
+    emitBitmaps(pid, &col, 1, rowCount, &out);
+  }
 
-  /// Drops every column's state, slots and bitmaps (checkpoint window
-  /// close).
+  /// emitBitmap() for `numCols` columns of partition pid, the bitmap of
+  /// cols[i] to outs[i]. The columns' cells are read in step, each cell's
+  /// predecessor fetched while the other columns' cells are applied, so
+  /// that their cache misses overlap.
+  void emitBitmaps(
+      uint32_t pid,
+      const uint32_t* cols,
+      uint32_t numCols,
+      uint32_t rowCount,
+      uint8_t* const* outs) const;
+
+  /// Drops every column's state and cells (checkpoint window close).
   void reset();
 
-  /// Empties one partition's slots, its payload having closed; the
+  /// Empties one partition's cells, its payload having closed; the
   /// columns' states, which hold for the rows still to come, stay.
   void releasePartition(uint32_t pid);
 
-  /// Bytes of the slots' bitmaps; input to the checkpoint trigger. Not in
-  /// it, as both stay bounded whatever the window's size: the slot arrays,
-  /// 16 bytes per partition of a column with nulls recorded, and the
-  /// outgrown arena blocks on the freelists, under 112 bytes per bitmap.
+  /// Bytes of the partitions' moved cells; input to the checkpoint
+  /// trigger. Not in it, as they stay bounded whatever the window's size:
+  /// the columns' cell arrays, 40 bytes per partition of a column with
+  /// nulls recorded.
   int64_t allocatedBytes() const {
-    return bitmapBytes_;
+    return chainCells_.usedBytes();
   }
 
-  /// Bytes of slot arrays held.
+  /// Bytes of the columns' cell arrays.
   int64_t tableBytes() const {
     return tableBytes_;
   }
 
-  /// Every byte held from the pool: slot arrays, arena chunks with their
-  /// freelisted blocks, and bitmaps beyond the arena.
+  /// Every byte held from the pool: the cell arrays and the allocator's
+  /// chunks, free cells included.
   int64_t footprintBytes() const {
-    return tableBytes_ + arenaBytes_ + poolBitmapBytes_;
+    return tableBytes_ + chainCells_.allocatedBytes();
   }
 
  private:
@@ -498,77 +514,77 @@ class NullCells {
     kEmpty, // no batch yet
     kNoNull, // every row non-null: nothing stored
     kAllNull, // every row null: nothing stored
-    kMixed, // both: the slots record the nulls
+    kMixed, // both: the cells record the nulls
   };
 
-  struct Slot {
-    /// Rows [0, prefix) of the partition are null with no bitmap backing.
-    /// Frozen once a non-null row appears (rows arrive in order, so a later
-    /// null misses the prefix match).
-    uint32_t prefix;
-    /// Bytes of bits; 0 while the slot has no bitmap.
-    uint32_t capBytes;
-    uint8_t* bits;
+  /// A stretch of a partition's rows: a run, then a bitmap.
+  struct Cell {
+    /// The cell holding the rows before this one's; kInvalidCell for the
+    /// first.
+    uint32_t prev;
+    /// The run's rows, plus kNullRun when they are null.
+    uint16_t run;
+    /// Rows in `bits`, after the run's.
+    uint8_t fill;
+    /// Bit 1 = non-null; the bits past `fill` stay 1.
+    uint8_t bits[25];
+  };
+  static_assert(sizeof(Cell) == 32);
+  static constexpr uint16_t kNullRun = 0x8000;
+  static constexpr uint32_t kMaxRunRows = 0x7FFF;
+  static constexpr uint32_t kCellBits = 8 * sizeof(Cell::bits);
+
+  /// Where a partition's rows stand in a column.
+  struct Tail {
+    /// Rows recorded: the chain holds rows [0, end).
+    uint32_t end;
+    /// The null rows among them.
+    uint32_t nulls;
   };
 
-  /// Power-of-two bitmap sizes from 16 bytes (128 rows); up to 64 bytes
-  /// (512 rows) they come from the arena. The bound keeps a slot's outgrown
-  /// arena blocks under 112 bytes: slots grow in step, so few are reused.
-  static constexpr uint32_t kMinBitmapLog2 = 4;
-  static constexpr uint32_t kMaxArenaBitmapLog2 = 6;
-  static constexpr uint32_t kMaxArenaBitmapBytes = 1u << kMaxArenaBitmapLog2;
-  static constexpr uint32_t kNumSizeClasses =
-      kMaxArenaBitmapLog2 - kMinBitmapLog2 + 1;
+  /// A mixed column's storage, one cell and one tail per partition, in one
+  /// block; nullptr until the column records a null. A batch's nulls can be
+  /// classified conservatively, so a mixed column may never record one.
+  struct Column {
+    Cell* cells{nullptr};
+    Tail* tails{nullptr};
+    void* block{nullptr};
+  };
 
-  FOLLY_ALWAYS_INLINE Slot& slotFor(uint32_t pid, uint32_t col) {
+  FOLLY_ALWAYS_INLINE Column& columnFor(uint32_t col) {
     BOLT_DCHECK(
         states_[col] == ColumnState::kMixed, "nulls of an unmixed column");
-    Slot* slots = columnSlots_[col];
-    if (FOLLY_UNLIKELY(slots == nullptr)) {
-      slots = openColumn(col);
+    Column& column = columns_[col];
+    if (FOLLY_UNLIKELY(column.cells == nullptr)) {
+      openColumn(column);
     }
-    return slots[pid];
+    return column;
   }
 
-  const Slot* findSlot(uint32_t pid, uint32_t col) const {
-    const Slot* slots = columnSlots_[col];
-    return slots == nullptr ? nullptr : slots + pid;
+  const Cell& chainCell(uint32_t id) const {
+    return *reinterpret_cast<const Cell*>(chainCells_.cellData(id));
   }
 
-  /// Gives a mixed column its slots, all empty.
-  Slot* openColumn(uint32_t col);
-  void grow(Slot& slot, uint32_t rowInWindow);
-  /// A bitmap block of 2^log2 bytes.
-  uint8_t* allocateBitmap(uint32_t log2);
-  void freeBitmap(uint8_t* bits, uint32_t capBytes);
-  /// `bytes` (a multiple of 8) from the arena.
-  uint8_t* carve(size_t bytes);
-  void freeChunks();
+  static Cell emptyCell(uint32_t prev);
+  size_t columnBlockBytes() const;
+  void openColumn(Column& column);
+  /// Records the non-null rows before `row`, then `count` null rows.
+  void appendNulls(Column& column, uint32_t pid, uint32_t row, uint32_t count);
+  /// Records the next `rows` rows of the partition, all null or all not.
+  void appendRows(Column& column, uint32_t pid, bool null, uint32_t rows);
+  /// Moves the partition's full cell to the allocator, leaving an empty
+  /// cell linked to it.
+  void moveCell(Column& column, uint32_t pid);
 
   memory::MemoryPool* const pool_;
   const uint32_t numPartitions_;
   const uint32_t numColumns_;
 
-  /// Per column: its state, and its slots - numPartitions_ contiguous ones,
-  /// nullptr until the mixed column records a null. A batch's nulls can be
-  /// classified conservatively, so a mixed column may never record one.
   std::vector<ColumnState> states_;
-  std::vector<Slot*> columnSlots_;
-  /// Intrusive freelists: a free block's first 8 bytes link the next one.
-  uint8_t* freeBitmaps_[kNumSizeClasses] = {};
-
-  struct Chunk {
-    uint8_t* data;
-    size_t size;
-  };
-  std::vector<Chunk> chunks_;
-  uint8_t* chunkFree_{nullptr};
-  size_t chunkLeft_{0};
-
-  int64_t bitmapBytes_{0};
+  std::vector<Column> columns_;
+  /// The moved cells of every column and partition.
+  ChunkAllocator chainCells_;
   int64_t tableBytes_{0};
-  int64_t arenaBytes_{0};
-  int64_t poolBitmapBytes_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
