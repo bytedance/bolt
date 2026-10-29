@@ -33,7 +33,9 @@ namespace {
 /// block, compressed straight from the stage.
 constexpr int64_t kStreamPieceBytes = 256 << 10;
 /// The output buffer gathers a frame into sink writes of about this size,
-/// with room past it for the worst case of one piece and the trailer.
+/// with room past it for the codec's bound on one piece of fresh input and
+/// the trailer. A call may still emit more - deflate also flushes a block
+/// carried over from earlier calls - which compressStaged copes with.
 constexpr int64_t kStreamOutBytes = 512 << 10;
 constexpr int64_t kStreamOutSlackBytes = 64;
 /// Input after which a frame that has not shrunk the data is stored
@@ -83,22 +85,35 @@ RunCompressor::RunCompressor(
   if (!cellOptions.streamCompression) {
     return;
   }
+  std::unique_ptr<StreamCompressor> streamCompressor;
   try {
     // Independent blocks: the stage is reused for every block, so a linked
     // block would compress against a copied-aside dictionary.
     auto streamOptions = codecOptions;
     streamOptions.independentBlocks = true;
-    streamCompressor_ = StreamCompressor::create(
+    streamCompressor = StreamCompressor::create(
         fromArrowCodecType(options.compressionType), streamOptions);
   } catch (const std::exception&) {
     // No stream form for this codec or backend: one-shot it is.
     return;
   }
+  useStreamCompressor(std::move(streamCompressor));
+}
+
+void RunCompressor::useStreamCompressor(
+    std::unique_ptr<StreamCompressor> compressor) {
+  streamCompressor_ = std::move(compressor);
   stage_.resize(kStreamPieceBytes);
   out_.resize(
       kStreamOutBytes +
       streamCompressor_->recommendedOutputSize(kStreamPieceBytes) +
       kStreamOutSlackBytes);
+}
+
+void RunCompressor::testingSetStreamCompressor(
+    std::unique_ptr<StreamCompressor> compressor) {
+  BOLT_CHECK_NOT_NULL(codec_, "a stream form needs a codec");
+  useStreamCompressor(std::move(compressor));
 }
 
 RunCompressor::~RunCompressor() = default;
@@ -325,19 +340,23 @@ uint64_t RunCompressor::streamFrame(
   auto& compressor = *streamCompressor_;
   compressor.reset();
   const int64_t outCapacity = static_cast<int64_t>(out_.size());
-  const int64_t pieceBound =
-      outCapacity - kStreamOutBytes; // worst case of one piece, plus slack
+  // Room left before each call: the codec's bound on one piece of fresh
+  // input, plus slack.
+  const int64_t pieceBound = outCapacity - kStreamOutBytes;
   int64_t held = 0; // frame bytes in out_, not yet in the sink
   bool written = false; // whether some of the frame is in the sink
   uint64_t fed = 0;
   uint64_t emitted = 0;
   size_t staged = 0;
   bool storedInstead = false;
+  const auto drain = [&]() {
+    sink.write(out_.data(), static_cast<size_t>(held));
+    held = 0;
+    written = true;
+  };
   const auto makeRoom = [&]() {
     if (outCapacity - held < pieceBound) {
-      sink.write(out_.data(), static_cast<size_t>(held));
-      held = 0;
-      written = true;
+      drain();
     }
   };
   const auto compressStaged = [&]() {
@@ -345,21 +364,31 @@ uint64_t RunCompressor::streamFrame(
       return;
     }
     makeRoom();
-    StreamCompressResult result;
-    {
-      NanosecondTimer timer(compressTimeNs_);
-      result = compressor.compress(
-          stage_.data(),
-          static_cast<int64_t>(staged),
-          out_.data() + held,
-          outCapacity - held);
+    // One call normally takes the whole stage: pieceBound is the codec's
+    // bound for one piece. A codec may still stop short - deflate also
+    // flushes the block it carried over from earlier calls - so the output
+    // goes to the sink and the rest of the stage is fed again.
+    size_t consumed = 0;
+    while (consumed < staged) {
+      StreamCompressResult result;
+      {
+        NanosecondTimer timer(compressTimeNs_);
+        result = compressor.compress(
+            stage_.data() + consumed,
+            static_cast<int64_t>(staged - consumed),
+            out_.data() + held,
+            outCapacity - held);
+      }
+      BOLT_CHECK(
+          result.bytesRead > 0 || result.bytesWritten > 0 || held > 0,
+          "stream compressor made no progress");
+      held += result.bytesWritten;
+      emitted += static_cast<uint64_t>(result.bytesWritten);
+      consumed += static_cast<size_t>(result.bytesRead);
+      if (consumed < staged && held > 0) {
+        drain();
+      }
     }
-    BOLT_CHECK_EQ(
-        result.bytesRead,
-        static_cast<int64_t>(staged),
-        "stream compressor left input behind");
-    held += result.bytesWritten;
-    emitted += static_cast<uint64_t>(result.bytesWritten);
     fed += staged;
     staged = 0;
     if (probe && !written && fed >= kStreamProbeBytes &&

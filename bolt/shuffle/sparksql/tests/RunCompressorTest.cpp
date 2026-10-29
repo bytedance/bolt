@@ -16,11 +16,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
 
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/memory/Memory.h"
 #include "bolt/common/memory/MemoryPool.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
@@ -278,6 +281,103 @@ TEST_P(RunCompressorTest, frameStoredLateKeepsWhatWasWritten) {
   EXPECT_TRUE(decoded.compressed[0]);
 }
 
+/// A stream form that takes at most `maxRead` input bytes per call - or
+/// none at all - in front of a real one: codec behaviour the real codecs
+/// rarely show, stopping short of the input they are given.
+class ShortReadCompressor final : public StreamCompressor {
+ public:
+  ShortReadCompressor(
+      CodecType type,
+      std::unique_ptr<StreamCompressor> inner,
+      int64_t maxRead)
+      : StreamCompressor(type, CodecOptions{CodecBackend::NONE}),
+        inner_(std::move(inner)),
+        maxRead_(maxRead) {}
+
+  int32_t defaultCompressionLevel() const override {
+    return inner_->defaultCompressionLevel();
+  }
+  StreamCompressResult compress(
+      const uint8_t* input,
+      int64_t inputLen,
+      uint8_t* output,
+      int64_t outputLen) override {
+    ++calls;
+    const int64_t take = std::min(inputLen, maxRead_);
+    if (take == 0) {
+      return StreamCompressResult{0, 0};
+    }
+    shortReads += take < inputLen;
+    return inner_->compress(input, take, output, outputLen);
+  }
+  StreamFlushResult flush(uint8_t* output, int64_t outputLen) override {
+    return inner_->flush(output, outputLen);
+  }
+  StreamEndResult end(uint8_t* output, int64_t outputLen) override {
+    return inner_->end(output, outputLen);
+  }
+  void reset() override {
+    inner_->reset();
+  }
+  int64_t recommendedInputSize() const override {
+    return inner_->recommendedInputSize();
+  }
+  int64_t recommendedOutputSize(int64_t inputSize) const override {
+    return inner_->recommendedOutputSize(inputSize);
+  }
+
+  int64_t calls{0};
+  int64_t shortReads{0};
+
+ private:
+  const std::unique_ptr<StreamCompressor> inner_;
+  const int64_t maxRead_;
+};
+
+TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
+  // A stream form may take less than a whole staging piece per call: the
+  // compressor writes out what it holds and feeds it the rest. One that
+  // takes nothing and writes nothing fails the frame rather than spinning.
+  if (!streaming()) {
+    return;
+  }
+  const auto type = fromArrowCodecType(options_.compressionType);
+  const auto realStreamForm = [&] {
+    CodecOptions codecOptions{
+        CodecBackend::NONE,
+        options_.compressionLevel,
+        options_.checksumEnabled,
+        /*independentBlocks=*/true};
+    return StreamCompressor::create(type, codecOptions);
+  };
+  std::mt19937_64 rng(19);
+  std::string mixed;
+  while (mixed.size() < (2 << 20)) {
+    mixed += repetitive(20 << 10);
+    mixed += randomBytes(12 << 10, rng);
+  }
+  const std::vector<std::string> streams = {mixed, repetitive(100 << 10)};
+  for (const int64_t maxRead : {int64_t{1000}, int64_t{100} << 10}) {
+    SCOPED_TRACE(maxRead);
+    RunCompressor compressor(
+        options_, cellOptions(), pool_.get(), &compressTimeNs_);
+    auto shortReads =
+        std::make_unique<ShortReadCompressor>(type, realStreamForm(), maxRead);
+    auto* probe = shortReads.get();
+    compressor.testingSetStreamCompressor(std::move(shortReads));
+    const auto decoded =
+        decodeRun(compressRun(compressor, streams), 2, compressor.codec());
+    EXPECT_EQ(decoded.streams, streams);
+    EXPECT_TRUE(decoded.compressed[0]);
+    EXPECT_GT(probe->shortReads, 0);
+  }
+
+  RunCompressor stalled(options_, cellOptions(), pool_.get(), &compressTimeNs_);
+  stalled.testingSetStreamCompressor(
+      std::make_unique<ShortReadCompressor>(type, realStreamForm(), 0));
+  BOLT_ASSERT_THROW(compressRun(stalled, streams), "made no progress");
+}
+
 TEST_P(RunCompressorTest, unfundedOneShotFrameIsStored) {
   // A pool with no room for the workspace: one-shot stores the frame and
   // says so; streaming needs no workspace and compresses regardless.
@@ -389,12 +489,15 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Combine(
         testing::Values(
             arrow::Compression::LZ4_FRAME,
-            arrow::Compression::ZSTD),
+            arrow::Compression::ZSTD,
+            arrow::Compression::GZIP),
         testing::Bool()),
     [](const auto& info) {
-      return std::string(
-                 std::get<0>(info.param) == arrow::Compression::ZSTD ? "zstd"
-                                                                     : "lz4") +
+      const auto codec = std::get<0>(info.param);
+      const char* name = codec == arrow::Compression::ZSTD ? "zstd"
+          : codec == arrow::Compression::GZIP              ? "gzip"
+                                                           : "lz4";
+      return std::string(name) +
           (std::get<1>(info.param) ? "Streaming" : "OneShot");
     });
 
