@@ -759,6 +759,18 @@ void BaseVector::copy(
   copyRanges(source, ranges);
 }
 
+void BaseVector::transferOrCopyTo(bolt::memory::MemoryPool* pool) {
+  if (pool == pool_) {
+    return;
+  }
+
+  if (nulls_ && !nulls_->transferTo(pool)) {
+    nulls_ = AlignedBuffer::copy<bool>(nulls_, pool);
+    rawNulls_ = nulls_->as<uint64_t>();
+  }
+  pool_ = pool;
+}
+
 namespace {
 
 template <TypeKind kind>

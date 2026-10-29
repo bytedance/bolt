@@ -140,6 +140,17 @@ T rand(FuzzerGenerator& rng) {
   }
 }
 
+template <
+    typename T,
+    typename std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
+inline T rand(FuzzerGenerator& rng, T min, T max) {
+  if constexpr (std::is_integral_v<T>) {
+    return boost::random::uniform_int_distribution<T>(min, max)(rng);
+  } else {
+    return boost::random::uniform_real_distribution<T>(min, max)(rng);
+  }
+}
+
 // Generate special values for the different supported types.
 // Special values include NaN, MIN, MAX, 9, 99, 999, etc.
 template <typename T>
@@ -1429,6 +1440,10 @@ RowTypePtr VectorFuzzer::randRowType(
     const std::vector<TypePtr>& scalarTypes,
     int maxDepth) {
   return bolt::randRowType(rng_, scalarTypes, maxDepth);
+}
+
+size_t VectorFuzzer::randInRange(size_t min, size_t max) {
+  return rand(rng_, min, max);
 }
 
 VectorPtr VectorFuzzer::wrapInLazyVector(VectorPtr baseVector) {
