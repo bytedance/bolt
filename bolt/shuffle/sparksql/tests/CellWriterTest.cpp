@@ -2437,6 +2437,54 @@ TEST_F(CellWriterTest, staleNullsBufferAndFlatAllNull) {
       {makeRowVector({"a", "b"}, {stale, flatNull})});
 }
 
+TEST_F(CellWriterTest, nullBodiesCompressAndRoundTrip) {
+  // Sparse nulls: long null bodies of mostly zero bytes, compressed whole -
+  // payloads of the window in memory, sealed ones and pushed ones alike.
+  constexpr int32_t kPartitions = 2;
+  const int n = 20000;
+  std::vector<std::vector<int32_t>> pids(2);
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 2; ++batch) {
+    pids[batch].resize(n);
+    for (int i = 0; i < n; ++i) {
+      pids[batch][i] = i % kPartitions;
+    }
+    batches.push_back(makeRowVector(
+        {"v"},
+        {makeFlatVector<int64_t>(
+            n,
+            [&](auto row) { return row * 7 + batch; },
+            [](auto row) { return row % 301 == 0; })}));
+  }
+  // The first payload: its kind byte, then the header.
+  const auto expectCompressedNulls = [](const std::string& bytes) {
+    ASSERT_GT(bytes.size(), 1 + kPayloadFixedHeaderBytes);
+    uint32_t stored;
+    uint32_t decoded;
+    ::memcpy(&stored, bytes.data() + 1 + 16, sizeof(stored));
+    ::memcpy(&decoded, bytes.data() + 1 + 20, sizeof(decoded));
+    EXPECT_GT(decoded, stored);
+  };
+  // Pushed first: the pushing writer expects no local data file.
+  auto client = std::make_shared<RecordingRssClient>();
+  auto pushing = makeCelebornOptions(kPartitions, client);
+  pushing.partitionWriterOptions.compressionType =
+      arrow::Compression::LZ4_FRAME;
+  roundTrip(pushing, pids, batches);
+  ASSERT_FALSE(client->pushes[0].empty());
+  expectCompressedNulls(client->pushes[0][0]);
+
+  roundTrip(makeOptions(kPartitions), pids, batches);
+  expectCompressedNulls(readFile());
+
+  auto sealing = makeOptions(kPartitions);
+  sealing.cellOptions.checkpointPartitionBytes = 1;
+  CellShuffleWriter sealed(sealing, pool(), arrow::default_memory_pool());
+  roundTrip(sealing, pids, batches, &sealed);
+  EXPECT_GT(sealed.metrics().spillCount, 0);
+  expectCompressedNulls(readFile());
+}
+
 TEST_F(CellWriterTest, constantNullColumnRoundTrip) {
   constexpr int32_t kPartitions = 4;
   const int n = 700;

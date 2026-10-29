@@ -180,6 +180,7 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
     payload.variableBytes = in.variableBytes[pid];
     resetBuffer(scratch_, 0, pool_);
     buildNullBody(in, pid, payload.rows, scratch_, pool_);
+    payload.nullDecodedSize = compressor_.compressNullBody(scratch_, 0);
     payload.nullOffset = spill_.end();
     payload.nullLength = scratch_ ? static_cast<uint32_t>(scratch_->size()) : 0;
     if (payload.nullLength > 0) {
@@ -188,6 +189,8 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
     sealed_[pid].push_back(std::move(payload));
     ++numSealedPayloads_;
   }
+  // A seal exists to free memory: hand the workspace capacity back too.
+  compressor_.releaseWorkspace();
   spill_.flush();
   ++numSeals_;
 }
@@ -347,7 +350,7 @@ void LocalCellOutput::writeDiskPayload(
   appendLe32(scratch_, runCount, pool_);
   appendLe64(scratch_, payload.variableBytes, pool_);
   appendLe32(scratch_, payload.nullLength, pool_);
-  appendLe32(scratch_, 0, pool_); // null body stored uncompressed
+  appendLe32(scratch_, payload.nullDecodedSize, pool_);
   const size_t nullAt = scratch_->size();
   resizeBuffer(
       scratch_, checkedPlus<size_t>(nullAt, payload.nullLength), pool_);
@@ -357,7 +360,11 @@ void LocalCellOutput::writeDiskPayload(
       payload.nullLength);
   appendBytes(
       scratch_, encodingTags, (layout_->numWireColumns() + 7) / 8, pool_);
-  rawAccum_ += scratch_->size();
+  // Raw, the null body counts decompressed.
+  rawAccum_ += scratch_->size() +
+      (payload.nullDecodedSize == 0
+           ? 0
+           : payload.nullDecodedSize - payload.nullLength);
   out.write(scratch_->as<char>(), scratch_->size());
 
   if (coalesce && segments.size() > 1) {
@@ -461,7 +468,8 @@ void LocalCellOutput::writeCurrentWindowPayload(
 
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
-  appendPayloadPrefix(in, pid, runCount, scratch_, pool_);
+  rawAccum_ +=
+      appendPayloadPrefix(in, pid, runCount, compressor_, scratch_, pool_);
   rawAccum_ += scratch_->size();
   out.write(scratch_->as<char>(), scratch_->size());
   if (coalesce && (segments.size() > 1 || (total > 0 && !segments.empty()))) {
@@ -698,8 +706,9 @@ void RssCellOutput::buildPayload(
   resetBuffer(payload, 0, pool_);
   const auto kind = static_cast<uint8_t>(CellBlockKind::kPayload);
   appendBytes(payload, &kind, 1, pool_);
-  appendPayloadPrefix(in, pid, total > 0 ? 1 : 0, payload, pool_);
-  uint64_t raw = payload->size();
+  uint64_t raw = appendPayloadPrefix(
+      in, pid, total > 0 ? 1 : 0, compressor_, payload, pool_);
+  raw += payload->size();
   if (total > 0) {
     const auto sizes = residentSizes(in, pid);
     BufferRunSink sink(payload, pool_);
