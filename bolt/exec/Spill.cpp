@@ -672,7 +672,8 @@ class RowContainerRowBasedSpillMergeStream final
       std::vector<CompareFlags> sortCompareFlags,
       RowFormatInfo rowInfo,
       DistinctProvenance provenance,
-      RowRowCompare compare)
+      RowRowCompare compare,
+      bool serializedRowsRequired)
       : RowBasedSpillMergeStream(
             std::move(rowType),
             rowInfo.rowColumns,
@@ -688,8 +689,7 @@ class RowContainerRowBasedSpillMergeStream final
         rows_(rows),
         rowInfo_(std::move(rowInfo)),
         needsMaterialization_(
-            !rowInfo_.variableColumns.empty() ||
-            !rowInfo_.serializableAccumulators.empty()),
+            needsMaterialization(rowInfo_, serializedRowsRequired)),
         canInitializeStringViews_(
             rowInfo_.serializableAccumulators.empty() &&
             std::all_of(
@@ -709,21 +709,22 @@ class RowContainerRowBasedSpillMergeStream final
     return batchBegin_ + index_;
   }
 
+  uint64_t serializedRowSize() const override {
+    return needsMaterialization_ ? RowBasedSpillMergeStream::serializedRowSize()
+                                 : rowInfo_.getRowSize(rowVector_[index_]);
+  }
+
   bool isNextEqual() const override {
     return rowInfo_.nextEqualOffset > 0 &&
         bits::isBitSet(rowVector_[index_], rowInfo_.nextEqualOffset);
   }
 
  private:
-  void nextBatch() override {
-    loadBatch(false);
-  }
-
   void nextBatchWithLengths() override {
-    loadBatch(true);
+    nextBatch();
   }
 
-  void loadBatch(bool withLengths) {
+  void nextBatch() override {
     batchBegin_ += rowVector_.size();
     index_ = 0;
     rowVector_.clear();
@@ -734,29 +735,37 @@ class RowContainerRowBasedSpillMergeStream final
       std::vector<size_t>().swap(rowLengths_);
       return;
     }
-    const auto limit =
-        std::min<uint64_t>(kResidentBatchRows, rows_.size() - batchBegin_);
+    const auto limit = std::min<uint64_t>(
+        std::min<uint64_t>(kResidentBatchRows, rows_.size() - batchBegin_),
+        std::max<uint64_t>(
+            uint64_t{1}, kResidentBatchBytes / rowInfo_.fixRowSize));
     rowVector_.reserve(limit);
-    if (!needsMaterialization_) {
-      const auto rowSize = rowInfo_.getRowSize(rows_[batchBegin_]);
-      const auto count = std::min<uint64_t>(
-          limit, std::max<uint64_t>(1, kResidentBatchBytes / rowSize));
+    if (!needsMaterialization_ && rowInfo_.variableColumns.empty()) {
       rowVector_.assign(
-          rows_.begin() + batchBegin_, rows_.begin() + batchBegin_ + count);
-      if (withLengths) {
-        rowLengths_.assign(count, rowSize);
-      }
+          rows_.begin() + batchBegin_, rows_.begin() + batchBegin_ + limit);
       return;
     }
-    rowLengths_.reserve(limit);
+    if (needsMaterialization_) {
+      rowLengths_.reserve(limit);
+    }
     size_t bytes = 0;
-    for (size_t i = 0; i < limit; ++i) {
-      const auto size = rowInfo_.getRowSize(rows_[batchBegin_ + i]);
-      if (i != 0 && bytes + size > kResidentBatchBytes) {
+    size_t count = 0;
+    for (; count < limit; ++count) {
+      const auto size = rowInfo_.getRowSize(rows_[batchBegin_ + count]);
+      if (count != 0 && bytes + size > kResidentBatchBytes) {
         break;
       }
-      rowLengths_.push_back(size);
+      if (needsMaterialization_) {
+        rowLengths_.push_back(size);
+      }
       bytes += size;
+    }
+    if (!needsMaterialization_) {
+      // Contiguous native strings are already readable. Only retain pointers,
+      // while keeping batches within the same byte limit as file readers.
+      rowVector_.assign(
+          rows_.begin() + batchBegin_, rows_.begin() + batchBegin_ + count);
+      return;
     }
     // Expose the same row layout as file readers, so comparisons and output
     // extraction can process a mixed merge in batches. Fixed-width rows above
@@ -824,7 +833,8 @@ makeRowContainerRowBasedSpillMergeStream(
     const std::vector<CompareFlags>& sortCompareFlags,
     const RowFormatInfo& rowInfo,
     DistinctProvenance provenance,
-    RowRowCompare compare) {
+    RowRowCompare compare,
+    bool serializedRowsRequired) {
   return std::make_unique<RowContainerRowBasedSpillMergeStream>(
       container,
       rowType,
@@ -833,7 +843,8 @@ makeRowContainerRowBasedSpillMergeStream(
       sortCompareFlags,
       rowInfo,
       provenance,
-      compare);
+      compare,
+      serializedRowsRequired);
 }
 
 OwnedSpillPartition::OwnedSpillPartition(SpillPartition&& partition)

@@ -43,89 +43,6 @@
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
-class RowContainerSortedRuns {
- public:
-  RowContainerSortedRuns(
-      RowContainer& rows,
-      memory::MemoryPool& pool,
-      uint64_t maxRunRows,
-      bool measureSerializedRows);
-  folly::Range<char* const*> rows() const;
-  folly::Range<char* const*> run(size_t index) const;
-  folly::Range<char**> mutableRun(size_t index);
-  size_t numRuns() const;
-  uint64_t maxSerializedRowBytes() const {
-    return maxSerializedRowBytes_;
-  }
-
- private:
-  BufferPtr sortedRows_;
-  uint64_t size_{0};
-  uint64_t runSize_{0};
-  uint64_t maxSerializedRowBytes_{0};
-};
-
-RowContainerSortedRuns::RowContainerSortedRuns(
-    RowContainer& rows,
-    memory::MemoryPool& pool,
-    uint64_t maxRunRows,
-    bool measureSerializedRows) {
-  size_ = rows.numRows();
-  // Match Spiller::fillSpillRuns, which checks the limit after listing a
-  // complete batch of 4096 rows.
-  runSize_ = maxRunRows == 0 || maxRunRows >= size_
-      ? size_
-      : std::min<uint64_t>(size_, bits::roundUp(maxRunRows, uint64_t{4096}));
-  if (size_ == 0) {
-    return;
-  }
-  sortedRows_ = AlignedBuffer::allocate<char*>(size_, &pool);
-  RowContainerIterator iterator;
-  uint64_t listed = 0;
-  auto** rawRows = sortedRows_->asMutable<char*>();
-  std::optional<RowFormatInfo> rowInfo;
-  if (measureSerializedRows) {
-    rowInfo.emplace(&rows, true);
-  }
-  while (listed < size_) {
-    const auto count = rows.listRows(
-        &iterator,
-        std::min<uint64_t>(size_ - listed, std::numeric_limits<int32_t>::max()),
-        rawRows + listed);
-    BOLT_CHECK_GT(count, 0);
-    if (rowInfo.has_value()) {
-      for (int32_t i = 0; i < count; ++i) {
-        maxSerializedRowBytes_ = std::max<uint64_t>(
-            maxSerializedRowBytes_, rowInfo->getRowSize(rawRows[listed + i]));
-      }
-    }
-    listed += count;
-  }
-}
-
-folly::Range<char* const*> RowContainerSortedRuns::rows() const {
-  if (sortedRows_ == nullptr) {
-    return {};
-  }
-  return folly::Range<char* const*>(sortedRows_->as<char*>(), size_);
-}
-
-folly::Range<char* const*> RowContainerSortedRuns::run(size_t index) const {
-  const auto offset = index * runSize_;
-  return rows().subpiece(offset, std::min(runSize_, size_ - offset));
-}
-
-folly::Range<char**> RowContainerSortedRuns::mutableRun(size_t index) {
-  const auto offset = index * runSize_;
-  return folly::Range<char**>(
-      sortedRows_->asMutable<char*>() + offset,
-      std::min(runSize_, size_ - offset));
-}
-
-size_t RowContainerSortedRuns::numRuns() const {
-  return size_ == 0 ? 0 : size_ / runSize_ + (size_ % runSize_ != 0);
-}
-
 namespace {
 bool allAreSinglyReferenced(
     const std::vector<column_index_t>& argList,
@@ -312,14 +229,12 @@ void GroupingSet::noMoreInput() {
   }
 
   if (hasSpilled()) {
-    if (!(supportsDynamicFinalSpill() && prepareResidentRuns()) &&
+    if (!(supportsDynamicFinalSpill() && prepareResidentRows()) &&
         table_ != nullptr && table_->rows()->numRows() > 0) {
       spill();
     }
     const auto diskRows = spiller_->sumPartitionRowCount();
-    const auto residentRows =
-        residentRuns_ == nullptr ? 0 : residentRuns_->rows().size();
-    spillSumRowCount_ = diskRows + residentRows;
+    spillSumRowCount_ = diskRows + residentRows().size();
     if (dynamicFinalSpillActive()) {
       pendingInputSpillPartition_.emplace(spiller_->finishSpill());
     }
@@ -337,7 +252,7 @@ bool GroupingSet::supportsDynamicFinalSpill() const {
              [](const auto& aggregation) { return aggregation != nullptr; });
 }
 
-bool GroupingSet::prepareResidentRuns() {
+bool GroupingSet::prepareResidentRows() {
   if (table_ == nullptr || table_->rows()->numRows() == 0) {
     return false;
   }
@@ -372,18 +287,25 @@ bool GroupingSet::prepareResidentRuns() {
   uint64_t totalTimeUs{0};
   {
     MicrosecondTimer timer(&totalTimeUs);
-    auto runs = std::make_unique<RowContainerSortedRuns>(
-        *table_->rows(),
-        pool_,
-        spillConfig_->maxSpillRunRows,
-        spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE);
-    for (size_t i = 0; i < runs->numRuns(); ++i) {
-      sortTimeUs += spiller_->sortRowsInPlace(runs->mutableRun(i));
-      if (bypassProbeHT_) {
-        spiller_->setNextEqualForAgg(runs->run(i));
-      }
+    const auto size = table_->rows()->numRows();
+    auto sortedRows = AlignedBuffer::allocate<char*>(size, &pool_);
+    auto rows = folly::Range<char**>(sortedRows->asMutable<char*>(), size);
+    RowContainerIterator iterator;
+    uint64_t listed = 0;
+    while (listed < size) {
+      const auto count = table_->rows()->listRows(
+          &iterator,
+          std::min<uint64_t>(
+              size - listed, std::numeric_limits<int32_t>::max()),
+          rows.data() + listed);
+      BOLT_CHECK_GT(count, 0);
+      listed += count;
     }
-    residentRuns_ = std::move(runs);
+    sortTimeUs = spiller_->sortRowsInPlace(rows);
+    if (bypassProbeHT_) {
+      spiller_->setNextEqualForAgg(rows);
+    }
+    residentRows_ = std::move(sortedRows);
     const auto& allocator = table_->rows()->stringAllocator();
     residentStringBytes_ = allocator.retainedSize() - allocator.freeSpace();
     if (ignoreNullKeys_) {
@@ -398,15 +320,15 @@ bool GroupingSet::prepareResidentRuns() {
   return true;
 }
 
-uint64_t GroupingSet::residentPosition(size_t run) const {
-  if (residentRuns_ == nullptr) {
+uint64_t GroupingSet::residentPosition() const {
+  if (residentRows_ == nullptr) {
     return 0;
   }
   if (!spillMergePrepared_) {
     return 0;
   }
-  BOLT_CHECK(firstResidentStreamIndex_.has_value());
-  const auto streamIndex = *firstResidentStreamIndex_ + run;
+  BOLT_CHECK(residentStreamIndex_.has_value());
+  const auto streamIndex = *residentStreamIndex_;
   const auto position =
       spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE
       ? merge_->streamAt(streamIndex)->memoryPosition()
@@ -415,23 +337,20 @@ uint64_t GroupingSet::residentPosition(size_t run) const {
   return *position;
 }
 
-bool GroupingSet::residentRunsFinished() const {
-  if (residentRuns_ == nullptr) {
+bool GroupingSet::residentRowsFinished() const {
+  if (residentRows_ == nullptr) {
     return true;
   }
-  for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
-    if (residentPosition(i) < residentRuns_->run(i).size()) {
-      return false;
-    }
-  }
-  return true;
+  const auto position = residentPosition();
+  BOLT_CHECK_LE(position, residentRows().size());
+  return position == residentRows().size();
 }
 
 void GroupingSet::releaseResidentBacking() {
-  if (residentRuns_ == nullptr) {
+  if (residentRows_ == nullptr) {
     return;
   }
-  residentRuns_.reset();
+  residentRows_.reset();
   residentStringBytes_ = 0;
   if (table_ != nullptr) {
     BOLT_CHECK(mergeRows_ == nullptr || mergeRows_->numRows() == 0);
@@ -443,58 +362,46 @@ void GroupingSet::releaseResidentBacking() {
   pool_.release();
 }
 
-void GroupingSet::releaseResidentRuns() {
+void GroupingSet::releaseResidentRows() {
   if (spillMergePrepared_) {
-    BOLT_CHECK(firstResidentStreamIndex_.has_value());
-    for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
-      const auto index = *firstResidentStreamIndex_ + i;
-      if (spillConfig_->rowBasedSpillMode ==
-          common::RowBasedSpillMode::DISABLE) {
-        BOLT_CHECK(!merge_->streamAt(index)->hasData());
-      } else {
-        BOLT_CHECK(!rowBasedSpillMerge_->streamAt(index)->hasData());
-      }
+    BOLT_CHECK(residentStreamIndex_.has_value());
+    const auto index = *residentStreamIndex_;
+    if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
+      BOLT_CHECK(!merge_->streamAt(index)->hasData());
+    } else {
+      BOLT_CHECK(!rowBasedSpillMerge_->streamAt(index)->hasData());
     }
-    firstResidentStreamIndex_.reset();
+    residentStreamIndex_.reset();
   }
   releaseResidentBacking();
 }
 
 void GroupingSet::spillRemainingResidentRuns() {
-  if (residentRuns_ == nullptr) {
+  if (residentRows_ == nullptr) {
     return;
   }
-  if (residentRunsFinished()) {
-    releaseResidentRuns();
+  if (residentRowsFinished()) {
+    releaseResidentRows();
     return;
   }
-  std::vector<folly::Range<char* const*>> remainingRuns;
-  remainingRuns.reserve(residentRuns_->numRuns());
-  for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
-    const auto run = residentRuns_->run(i);
-    const auto position = residentPosition(i);
-    BOLT_CHECK_LE(position, run.size());
-    if (position < run.size()) {
-      remainingRuns.push_back(run.subpiece(position));
-    }
-  }
+  const auto remainingRows = residentRows().subpiece(residentPosition());
 
   memory::NonReclaimableSectionGuard guard(nonReclaimableSection_);
   auto outputSpiller = Spiller::createSortedOutput(
       table_->rows(), makeSpillType(), keyChannels_.size(), {}, spillConfig_);
-  // Next-equal flags were computed once when the resident runs were sorted.
-  auto owned = outputSpiller->spillSortedRunsAndFinish(remainingRuns);
+  // Next-equal flags were computed once when the resident rows were sorted.
+  auto owned = outputSpiller->spillSortedRowsAndFinish(remainingRows);
   const auto completedStats = outputSpiller->stats();
 
   if (!spillMergePrepared_) {
     pendingInputSpillPartition_->addFiles(owned.takeFiles());
   } else {
     BOLT_CHECK(!pendingOutputSpillPartition_.has_value());
-    const auto index = *firstResidentStreamIndex_;
+    const auto index = *residentStreamIndex_;
     if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
-      merge_->replaceStreams(index, residentRuns_->numRuns(), {});
+      merge_->replaceStreams(index, 1, {});
     } else {
-      rowBasedSpillMerge_->replaceStreams(index, residentRuns_->numRuns(), {});
+      rowBasedSpillMerge_->replaceStreams(index, 1, {});
     }
     pendingOutputSpillPartition_.emplace(std::move(owned));
   }
@@ -506,7 +413,7 @@ void GroupingSet::spillRemainingResidentRuns() {
 
 void GroupingSet::finishPendingOutputSpill() {
   BOLT_CHECK(pendingOutputSpillPartition_.has_value());
-  const auto index = firstResidentStreamIndex_.value();
+  const auto index = residentStreamIndex_.value();
   if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
     merge_->replaceStreams(
         index,
@@ -526,7 +433,7 @@ void GroupingSet::finishPendingOutputSpill() {
             DistinctProvenance::kNew));
   }
   pendingOutputSpillPartition_.reset();
-  firstResidentStreamIndex_.reset();
+  residentStreamIndex_.reset();
 }
 
 bool GroupingSet::hasSpilled() const {
@@ -1408,34 +1315,43 @@ void GroupingSet::ensureOutputFits(
           : pendingInputSpillPartition_->numFiles();
       readerBytes = checkedMultiply<uint64_t>(
           fileCount, spillReaderBytes(), "aggregation merge readers");
-      if (residentRuns_ != nullptr) {
-        for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
-          const auto run = residentRuns_->run(i);
-          uint64_t batchBytes;
-          if (spillConfig_->rowBasedSpillMode ==
-              common::RowBasedSpillMode::DISABLE) {
-            batchBytes = checkedMultiply<uint64_t>(
-                std::min<uint64_t>(run.size(), 64),
-                residentRuns_->maxSerializedRowBytes(),
+      if (residentRows_ != nullptr) {
+        const auto rows = residentRows();
+        uint64_t batchBytes = 0;
+        if (spillConfig_->rowBasedSpillMode ==
+            common::RowBasedSpillMode::DISABLE) {
+          const auto limit = std::min<uint64_t>(rows.size(), 64);
+          for (size_t i = 0; i < limit; ++i) {
+            batchBytes = checkedPlus<uint64_t>(
+                batchBytes,
+                rowInfo_->getRowSize(rows[i]),
                 "resident stream first batch");
-          } else {
-            const auto limit = std::min<uint64_t>(
-                run.size(), RowBasedSpillMergeStream::kResidentBatchRows);
-            batchBytes = limit * (sizeof(char*) + sizeof(size_t));
-            if (!rowInfo_->variableColumns.empty() ||
-                !rowInfo_->serializableAccumulators.empty()) {
-              const auto rowBytes = std::max<uint64_t>(
-                  RowBasedSpillMergeStream::kResidentBatchBytes,
-                  rowInfo_->getRowSize(run.front()));
-              batchBytes += pool_.preferredSize(checkedPlus<uint64_t>(
-                  rowBytes,
-                  AlignedBuffer::kPaddedSize,
-                  "resident materialization buffer"));
-            }
           }
-          readerBytes = checkedPlus<uint64_t>(
-              readerBytes, batchBytes, "aggregation merge readers");
+        } else {
+          const auto limit = std::min<uint64_t>(
+              std::min<uint64_t>(
+                  rows.size(), RowBasedSpillMergeStream::kResidentBatchRows),
+              std::max<uint64_t>(
+                  uint64_t{1},
+                  RowBasedSpillMergeStream::kResidentBatchBytes /
+                      rowInfo_->fixRowSize));
+          const auto materialize =
+              RowBasedSpillMergeStream::needsMaterialization(
+                  rowInfo_.value(), supportRowBasedOutput_);
+          batchBytes =
+              limit * (sizeof(char*) + (materialize ? sizeof(size_t) : 0));
+          if (materialize) {
+            const auto rowBytes = std::max<uint64_t>(
+                RowBasedSpillMergeStream::kResidentBatchBytes,
+                rowInfo_->getRowSize(rows.front()));
+            batchBytes += pool_.preferredSize(checkedPlus<uint64_t>(
+                rowBytes,
+                AlignedBuffer::kPaddedSize,
+                "resident materialization buffer"));
+          }
         }
+        readerBytes = checkedPlus<uint64_t>(
+            readerBytes, batchBytes, "aggregation merge readers");
       }
     }
     auto required = checkedPlus<uint64_t>(
@@ -1453,7 +1369,7 @@ void GroupingSet::ensureOutputFits(
     if (availableReservation >= required) {
       return;
     }
-    const bool hadResident = residentRuns_ != nullptr;
+    const bool hadResident = residentRows_ != nullptr;
     bool reserved;
     {
       memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
@@ -1462,18 +1378,22 @@ void GroupingSet::ensureOutputFits(
     BOLT_TEST_ADJUST(
         "bytedance::bolt::exec::GroupingSet::ensureOutputFits::afterReserve",
         &reserved);
-    if (reserved && hadResident == (residentRuns_ != nullptr)) {
+    if (reserved && hadResident == (residentRows_ != nullptr)) {
       return;
     }
     // Arbitration may have spilled or released the resident run. Re-estimate
     // the pure-file state before continuing.
-    if (hadResident && residentRuns_ == nullptr) {
+    if (hadResident && residentRows_ == nullptr) {
       continue;
     }
     LOG(WARNING) << "Failed to reserve " << succinctBytes(required)
                  << " for aggregation spill output in pool " << pool_.name()
                  << ", usage: " << succinctBytes(pool_.currentBytes())
                  << ", reservation: " << succinctBytes(pool_.reservedBytes());
+    // Keeping the final rows resident is optional. If output headroom cannot
+    // be reserved, release them through the existing spill path instead of
+    // retrying the same failed reservation for every output batch.
+    spillRemainingResidentRuns();
     return;
   }
 }
@@ -1650,8 +1570,8 @@ bool GroupingSet::getOutputWithSpill(
   }
 
   const auto hasOutput = mergeNext(maxOutputRows, maxOutputBytes, result);
-  if (dynamicFinalSpillActive() && residentRunsFinished()) {
-    releaseResidentRuns();
+  if (dynamicFinalSpillActive() && residentRowsFinished()) {
+    releaseResidentRows();
   }
   return hasOutput;
 }
@@ -1684,37 +1604,34 @@ void GroupingSet::prepareSpillMerge(bool dynamicFinalSpill) {
     }
     pendingInputSpillPartition_.reset();
   }
-  if (residentRuns_ != nullptr) {
+  if (residentRows_ != nullptr) {
     const auto spillType = makeSpillType();
     if (spillConfig_->rowBasedSpillMode == common::RowBasedSpillMode::DISABLE) {
-      firstResidentStreamIndex_ = streams.size();
-      for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
-        streams.push_back(makeRowContainerSpillMergeStream(
-            *table_->rows(),
-            spillType,
-            residentRuns_->run(i),
-            keyChannels_.size(),
-            {},
-            &pool_,
-            DistinctProvenance::kNew));
-      }
+      residentStreamIndex_ = streams.size();
+      streams.push_back(makeRowContainerSpillMergeStream(
+          *table_->rows(),
+          spillType,
+          residentRows(),
+          keyChannels_.size(),
+          {},
+          &pool_,
+          DistinctProvenance::kNew));
     } else {
       // File and resident streams use the same serialized row layout. Reuse
       // the file reader's compiled comparator instead of compiling it twice.
       const auto residentCompare =
           rowStreams.empty() ? nullptr : rowStreams.front()->rowCompare();
-      firstResidentStreamIndex_ = rowStreams.size();
-      for (size_t i = 0; i < residentRuns_->numRuns(); ++i) {
-        rowStreams.push_back(makeRowContainerRowBasedSpillMergeStream(
-            *table_->rows(),
-            spillType,
-            residentRuns_->run(i),
-            keyChannels_.size(),
-            {},
-            rowInfo_.value(),
-            DistinctProvenance::kNew,
-            residentCompare));
-      }
+      residentStreamIndex_ = rowStreams.size();
+      rowStreams.push_back(makeRowContainerRowBasedSpillMergeStream(
+          *table_->rows(),
+          spillType,
+          residentRows(),
+          keyChannels_.size(),
+          {},
+          rowInfo_.value(),
+          DistinctProvenance::kNew,
+          residentCompare,
+          supportRowBasedOutput_));
     }
   }
 
@@ -2250,7 +2167,7 @@ bool GroupingSet::mergeNextWithAggregates(
       // gather intermediate and add intermediate to groups
       if (!scratch.intermediate) {
         scratch.intermediate = BaseVector::create<RowVector>(
-            sources.back()->type(), maxOutputRows, &pool_);
+            sources.back()->type(), sources.size(), &pool_);
       }
       scratch.intermediate->resize(sources.size());
       // only copy intermediate part

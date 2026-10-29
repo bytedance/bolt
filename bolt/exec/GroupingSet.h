@@ -41,8 +41,6 @@
 #include "bolt/exec/VectorHasher.h"
 namespace bytedance::bolt::exec {
 
-class RowContainerSortedRuns;
-
 class GroupingSet {
  public:
   GroupingSet(
@@ -225,7 +223,7 @@ class GroupingSet {
 
   void spillRemainingResidentRuns();
   bool dynamicFinalSpillActive() const {
-    return residentRuns_ != nullptr;
+    return residentRows_ != nullptr;
   }
 
   common::AggregationStats getRuntimeStats() {
@@ -381,15 +379,22 @@ class GroupingSet {
   void ensureOutputFits();
 
   bool supportsDynamicFinalSpill() const;
-  bool prepareResidentRuns();
+  bool prepareResidentRows();
   uint64_t spillReaderBytes() const;
   void initializeSpillMergeRows();
   void prepareSpillMerge(bool dynamicFinalSpill);
-  void releaseResidentRuns();
+  void releaseResidentRows();
   void releaseResidentBacking();
   void finishPendingOutputSpill();
-  uint64_t residentPosition(size_t run) const;
-  bool residentRunsFinished() const;
+  uint64_t residentPosition() const;
+  folly::Range<char* const*> residentRows() const {
+    return residentRows_ == nullptr
+        ? folly::Range<char* const*>{}
+        : folly::Range<char* const*>(
+              residentRows_->as<char*>(),
+              residentRows_->size() / sizeof(char*));
+  }
+  bool residentRowsFinished() const;
 
   // Copies the grouping keys and aggregates for 'groups' into 'result' If
   // partial output, extracts the intermediate type for aggregates, final result
@@ -606,17 +611,17 @@ class GroupingSet {
   std::unique_ptr<TreeOfLosers<SpillMergeStream>> merge_;
   std::unique_ptr<TreeOfLosers<RowBasedSpillMergeStream>> rowBasedSpillMerge_;
   // Owns the sorted index; the hash table continues to own the row storage.
-  std::unique_ptr<RowContainerSortedRuns> residentRuns_;
+  BufferPtr residentRows_;
 
   // mergeRows_ shares this allocator with the resident rows. Exclude their
   // existing variable-length storage from the size of each output batch.
   uint64_t residentStringBytes_{0};
   std::optional<OwnedSpillPartition> pendingInputSpillPartition_;
-  // Suffix files waiting for output admission. While set, the resident streams
-  // have been removed and firstResidentStreamIndex_ is their insertion point.
+  // Suffix file waiting for output admission. While set, the resident stream
+  // has been removed and residentStreamIndex_ is its insertion point.
   std::optional<OwnedSpillPartition> pendingOutputSpillPartition_;
   common::SpillStats residentSuffixSpillStats_;
-  std::optional<size_t> firstResidentStreamIndex_;
+  std::optional<size_t> residentStreamIndex_;
   bool spillMergePrepared_{false};
   // Indicates the group indices passed to initializeNewGroups in spill merge
   // stage, element should be 0, 1, 2 ... groupIndicesOfRows_.size()

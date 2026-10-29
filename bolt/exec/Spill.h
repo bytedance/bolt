@@ -269,6 +269,20 @@ class RowBasedSpillMergeStream : public MergeStream {
   static constexpr size_t kResidentBatchRows = 64 << 10;
   static constexpr size_t kResidentBatchBytes = 1 << 20;
 
+  // Normal row-based output can read native fixed fields and contiguous
+  // strings directly. Composite output needs a self-contained serialized row.
+  static bool needsMaterialization(
+      const RowFormatInfo& info,
+      bool serializedRowsRequired) {
+    return !info.serializableAccumulators.empty() ||
+        (!info.variableColumns.empty() &&
+         (serializedRowsRequired || !info.stringViewsAreContiguous ||
+          std::any_of(
+              info.variableColumns.begin(),
+              info.variableColumns.end(),
+              [](const auto& column) { return !column.first; })));
+  }
+
   RowBasedSpillMergeStream(
       RowTypePtr rowType,
       std::vector<RowColumn> rowColumns,
@@ -337,7 +351,7 @@ class RowBasedSpillMergeStream : public MergeStream {
     return 0;
   }
 
-  uint64_t serializedRowSize() const;
+  virtual uint64_t serializedRowSize() const;
 
   const std::vector<size_t>& currentLengths() const {
     return rowLengths_;
@@ -961,7 +975,8 @@ makeRowContainerRowBasedSpillMergeStream(
     const std::vector<CompareFlags>& sortCompareFlags,
     const RowFormatInfo& rowInfo,
     DistinctProvenance provenance,
-    RowRowCompare compare = nullptr);
+    RowRowCompare compare = nullptr,
+    bool serializedRowsRequired = true);
 
 using SpillPartitionSet =
     std::map<SpillPartitionId, std::unique_ptr<SpillPartition>>;

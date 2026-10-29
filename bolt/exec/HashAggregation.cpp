@@ -619,7 +619,9 @@ RowVectorPtr HashAggregation::getOutput() {
   }
 
   const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
-  auto maxOutputRows = isGlobal_ ? 1 : outputBatchRows(estimatedOutputRowSize_);
+  const auto initialOutputRows =
+      isGlobal_ ? 1 : outputBatchRows(estimatedOutputRowSize_);
+  auto maxOutputRows = initialOutputRows;
   if (!isGlobal_ && !isDistinct_ && groupingSet_->hasSpilled() &&
       queryConfig.aggregationDynamicFinalSpillEnabled()) {
     // Spill merge applies the byte limit to its live merge state. A stale
@@ -639,7 +641,10 @@ RowVectorPtr HashAggregation::getOutput() {
       maxOutputRows, queryConfig.preferredOutputBatchBytes());
   // Admission can synchronously reclaim the resident run. Prepare the output
   // shell only after the GroupingSet has re-read its output state.
-  prepareOutput(maxOutputRows, supportRowBasedOutput_);
+  // The merge row limit can be much larger than a byte-sized batch for wide
+  // output. Allocate using the row-size estimate and grow to the actual size.
+  prepareOutput(
+      std::min(initialOutputRows, maxOutputRows), supportRowBasedOutput_);
 
   const bool hasData = groupingSet_->getOutput(
       maxOutputRows,

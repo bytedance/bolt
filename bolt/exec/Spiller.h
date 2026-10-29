@@ -306,8 +306,7 @@ class Spiller {
       const std::vector<CompareFlags>& sortCompareFlags,
       const common::SpillConfig* spillConfig);
 
-  OwnedSpillPartition spillSortedRunsAndFinish(
-      const std::vector<folly::Range<char* const*>>& runs);
+  OwnedSpillPartition spillSortedRowsAndFinish(folly::Range<char* const*> rows);
 
   uint64_t sortRowsInPlace(folly::Range<char**> rows);
 

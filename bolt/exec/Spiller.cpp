@@ -634,11 +634,11 @@ size_t Spiller::setNextEqualForAgg(folly::Range<char* const*> rows) {
   return equalCount;
 }
 
-OwnedSpillPartition Spiller::spillSortedRunsAndFinish(
-    const std::vector<folly::Range<char* const*>>& runs) {
+OwnedSpillPartition Spiller::spillSortedRowsAndFinish(
+    folly::Range<char* const*> rows) {
   CHECK_NOT_FINALIZED();
   BOLT_CHECK_EQ(type_, Type::kAggregateOutput);
-  BOLT_CHECK(!runs.empty());
+  BOLT_CHECK(!rows.empty());
   markAllPartitionsSpilled();
   auto cleanupFiles =
       folly::makeGuard([this]() { state_.cleanupPartitionFilesNoThrow(0); });
@@ -649,33 +649,30 @@ OwnedSpillPartition Spiller::spillSortedRunsAndFinish(
   uint64_t totalTimeUs = 0;
   {
     MicrosecondTimer timer(&totalTimeUs);
-    for (const auto rows : runs) {
-      BOLT_CHECK(!rows.empty());
 #ifndef NDEBUG
-      for (size_t i = 1; i < rows.size(); ++i) {
-        BOLT_DCHECK_LE(
-            container_->compareRows(rows[i - 1], rows[i], compareFlags_), 0);
-      }
-#endif
-      if (spillMode_ == Mode::kRowContainer) {
-        state_.appendToPartition(0, rows, rowType_, rowInfo_.value());
-      } else {
-        RowVectorPtr spillVector;
-        size_t offset = 0;
-        while (offset < rows.size()) {
-          extractSpillVector(
-              rows, kTargetBatchRows, kTargetBatchBytes, spillVector, offset);
-          state_.appendToPartition(0, spillVector);
-        }
-      }
-      state_.finishFile(0);
+    for (size_t i = 1; i < rows.size(); ++i) {
+      BOLT_DCHECK_LE(
+          container_->compareRows(rows[i - 1], rows[i], compareFlags_), 0);
     }
+#endif
+    if (spillMode_ == Mode::kRowContainer) {
+      state_.appendToPartition(0, rows, rowType_, rowInfo_.value());
+    } else {
+      RowVectorPtr spillVector;
+      size_t offset = 0;
+      while (offset < rows.size()) {
+        extractSpillVector(
+            rows, kTargetBatchRows, kTargetBatchBytes, spillVector, offset);
+        state_.appendToPartition(0, spillVector);
+      }
+    }
+    state_.finishFile(0);
   }
   updateSpillTotalTime(totalTimeUs);
-  stats_.wlock()->spillRuns += runs.size();
+  ++stats_.wlock()->spillRuns;
   auto partition = finishSpill();
   OwnedSpillPartition owned(std::move(partition));
-  BOLT_CHECK_EQ(owned.numFiles(), runs.size());
+  BOLT_CHECK_EQ(owned.numFiles(), 1);
   cleanupFiles.dismiss();
   return owned;
 }
