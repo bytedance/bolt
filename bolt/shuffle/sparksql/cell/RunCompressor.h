@@ -77,7 +77,7 @@ using RunStreamVisitor =
 ///
 /// A run below kMinSeparateRunBytes is one COMBINED frame over all its
 /// streams; a larger one is SEPARATE, every stream its own frame, so each
-/// stream's data alone sets its ratio. A frame below kMinCompressRunBytes
+/// stream's data alone sets its ratio. A frame below kMinCompressBytes
 /// is stored, and so is a frame that does not shrink: it is then cheaper to
 /// read as it is. That is decided only while the whole frame so far is
 /// still in memory - after its first blocks of input, or at its end when
@@ -150,7 +150,7 @@ class RunCompressor {
   /// What the compressor did, counted per run and per frame - never per
   /// byte - so the counting costs nothing measurable.
   struct Stats {
-    /// Runs by layout. `storedRuns` were under kMinCompressRunBytes or met
+    /// Runs by layout. `storedRuns` were under kMinCompressBytes or met
     /// no codec; `deferredRuns` came through writeStored().
     uint64_t storedRuns{0};
     uint64_t deferredRuns{0};
@@ -167,7 +167,7 @@ class RunCompressor {
     uint64_t unshrunkBytes{0};
     uint64_t earlyFrames{0};
     /// Stored without a try: adaptive skips, frames below
-    /// kMinCompressRunBytes, and one-shot frames whose workspace could not
+    /// kMinCompressBytes, and one-shot frames whose workspace could not
     /// be funded.
     uint64_t skippedFrames{0};
     uint64_t skippedBytes{0};

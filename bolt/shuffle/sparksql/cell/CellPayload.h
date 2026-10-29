@@ -344,8 +344,11 @@ class CellPayloadDecoder {
 
 struct CellWindowInput;
 
-/// Runs below this size are stored: compression would not pay for itself.
-constexpr uint64_t kMinCompressRunBytes = 1 << 10;
+/// Bytes below which a frame is stored rather than compressed - a run, a
+/// stream of a SEPARATE run, a composite block: the codec's frame would not
+/// pay for itself. The one threshold for every frame the Cell writer
+/// compresses.
+constexpr uint64_t kMinCompressBytes = 256;
 /// A final run at least this large is written SEPARATE, stream by stream.
 constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
 

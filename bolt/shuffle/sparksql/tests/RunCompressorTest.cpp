@@ -200,7 +200,7 @@ TEST_P(RunCompressorTest, layoutFollowsTheRunSize) {
   };
   const std::vector<Case> cases = {
       // Too small to pay for a frame.
-      {{repetitive(300), repetitive(200)}, RunLayout::kCombinedUncompressed},
+      {{repetitive(120), repetitive(80)}, RunLayout::kCombinedUncompressed},
       // One frame over both streams.
       {{repetitive(20 << 10), repetitive(10 << 10)}, RunLayout::kCombined},
       // A frame per stream; the empty stream takes none.
@@ -222,7 +222,7 @@ TEST_P(RunCompressorTest, layoutFollowsTheRunSize) {
   EXPECT_EQ(stats.combinedRuns, 1);
   EXPECT_EQ(stats.separateRuns, 1);
   EXPECT_EQ(stats.tinyFrames, 1);
-  EXPECT_EQ(stats.tinyBytes, 500);
+  EXPECT_EQ(stats.tinyBytes, 200);
   // One COMBINED frame, two SEPARATE ones: the empty stream takes none.
   EXPECT_EQ(stats.compressedFrames, 3);
   EXPECT_EQ(stats.compressedInBytes, (30 << 10) + (1000 << 10));
@@ -239,7 +239,7 @@ TEST_P(RunCompressorTest, separateStreamThatDoesNotShrinkIsStored) {
       randomBytes(600 << 10, rng),
       repetitive(900 << 10),
       randomBytes(100 << 10, rng), // judged on its whole size
-      repetitive(512)};
+      repetitive(200)};
   const auto run = compressRun(compressor, streams);
   const auto decoded = decodeRun(run, 4, compressor.codec());
   ASSERT_EQ(decoded.layout, RunLayout::kSeparate);
@@ -247,7 +247,7 @@ TEST_P(RunCompressorTest, separateStreamThatDoesNotShrinkIsStored) {
   EXPECT_FALSE(decoded.compressed[0]);
   EXPECT_TRUE(decoded.compressed[1]);
   EXPECT_FALSE(decoded.compressed[2]);
-  EXPECT_FALSE(decoded.compressed[3]); // below kMinCompressRunBytes
+  EXPECT_FALSE(decoded.compressed[3]); // below kMinCompressBytes
   EXPECT_LT(readU64(run, 9) * 4, streams[1].size());
 }
 
@@ -457,7 +457,7 @@ TEST_P(RunCompressorTest, adaptiveSkipsPerStream) {
   int tried = 0;
   for (int frame = 0; frame < 25; ++frame) {
     const std::vector<std::string> streams = {
-        randomBytes(100 << 10, rng), repetitive(500)};
+        randomBytes(100 << 10, rng), repetitive(200)};
     const uint64_t before = compressTimeNs_;
     const auto decoded =
         decodeRun(compressRun(compressor, streams), 2, compressor.codec());
@@ -470,14 +470,14 @@ TEST_P(RunCompressorTest, adaptiveSkipsPerStream) {
   EXPECT_EQ(stats.unshrunkFrames, 3);
   EXPECT_EQ(stats.skippedFrames, 22);
   EXPECT_EQ(stats.skippedBytes, 22ull * (100 << 10));
-  EXPECT_EQ(stats.tinyFrames, 25); // the 500-byte stream
+  EXPECT_EQ(stats.tinyFrames, 25); // the 200-byte stream
   ASSERT_GE(compressor.streamStats().size(), 1);
   EXPECT_EQ(compressor.streamStats()[0].tried, 3);
   EXPECT_EQ(compressor.streamStats()[0].skipped, 22);
   EXPECT_EQ(compressor.streamStats()[0].compressed, 0);
   // Another number of streams: the hints start over.
   const std::vector<std::string> three = {
-      randomBytes(100 << 10, rng), repetitive(500), repetitive(500)};
+      randomBytes(100 << 10, rng), repetitive(200), repetitive(200)};
   const uint64_t before = compressTimeNs_;
   compressRun(compressor, three);
   EXPECT_GT(compressTimeNs_, before);
