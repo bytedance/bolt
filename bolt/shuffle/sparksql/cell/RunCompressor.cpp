@@ -127,7 +127,7 @@ bool RunCompressor::write(
   for (uint32_t s = 0; s < numStreams; ++s) {
     total += sizes[s];
   }
-  if (codec_ == nullptr || total < kMinCompressRunBytes) {
+  if (codec_ == nullptr || total < kMinCompressBytes) {
     storeRun(sink, numStreams, sizes, visit);
     ++stats_.storedRuns;
     if (codec_ != nullptr && total > 0) {
@@ -194,7 +194,7 @@ bool RunCompressor::write(
     const auto visitStream = [&](RunPieceFn fn) { visit(s, fn); };
     Frame frame;
     auto& streamStats = streamStats_[s];
-    if (bytes < kMinCompressRunBytes) {
+    if (bytes < kMinCompressBytes) {
       ++stats_.tinyFrames;
       stats_.tinyBytes += bytes;
     } else if (skipFrame(streamSkips_[s])) {
