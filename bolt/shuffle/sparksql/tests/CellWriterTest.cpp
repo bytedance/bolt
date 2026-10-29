@@ -2262,6 +2262,40 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
         EXPECT_EQ(next, kRows + pid);
       }
     }
+    // A byte target at or below zero still reads every row, one append per
+    // batch: at most one window's rows when the windows are small.
+    for (const int64_t batchByteSize : {int64_t{0}, int64_t{-1}}) {
+      SCOPED_TRACE(batchByteSize);
+      uint64_t offset = 0;
+      for (int32_t pid = 0; pid < kPartitions; ++pid) {
+        const auto length = writer.metrics().partitionLengths[pid];
+        CellShuffleReader reader(
+            std::make_shared<test::MemoryReaderStreamIterator>(
+                std::vector<std::vector<char>>{std::vector<char>(
+                    file.begin() + offset, file.begin() + offset + length)}),
+            asRowType(data->type()),
+            codec.get(),
+            arrow::default_memory_pool(),
+            pool(),
+            1000,
+            batchByteSize);
+        offset += length;
+        vector_size_t next = pid;
+        while (auto batch = reader.next()) {
+          ASSERT_GT(batch->size(), 0);
+          if (windowRows != 0) {
+            ASSERT_LE(batch->size(), windowRows);
+          }
+          for (vector_size_t row = 0; row < batch->size(); ++row) {
+            ASSERT_LT(next, kRows);
+            ASSERT_TRUE(data->equalValueAt(batch.get(), next, row))
+                << "partition " << pid << " row " << next;
+            next += kPartitions;
+          }
+        }
+        EXPECT_EQ(next, kRows + pid);
+      }
+    }
     ::unlink(dataFile_.c_str());
   }
 }

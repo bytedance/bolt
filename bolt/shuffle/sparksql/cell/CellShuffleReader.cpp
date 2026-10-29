@@ -270,9 +270,12 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
   const uint64_t start = currentTimeNs();
   const vector_size_t capacity = std::max(batchSize_, 1);
   // One batch at a time: a large payload comes out over several calls,
-  // small ones fill the same batch until it is full.
+  // small ones fill the same batch until it is full. An empty batch always
+  // takes one append, as the legacy reader always takes one payload: a byte
+  // target at or below zero then reads one append per batch.
   while (decoder_.batchRows() < capacity &&
-         static_cast<int64_t>(decoder_.batchBytes()) < batchByteSize_) {
+         (decoder_.batchRows() == 0 ||
+          static_cast<int64_t>(decoder_.batchBytes()) < batchByteSize_)) {
     const uint32_t left = decoder_.payloadRowsLeft();
     if (left == 0) {
       if (nextBlock() != Decoded::kPayload) {
