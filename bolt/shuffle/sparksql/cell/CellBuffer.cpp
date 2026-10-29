@@ -583,6 +583,7 @@ uint8_t* NullCells::carve(size_t bytes) {
     const size_t size = std::max(next, bytes);
     auto* data = reinterpret_cast<uint8_t*>(pool_->allocate(size));
     chunks_.push_back({data, size});
+    arenaBytes_ += static_cast<int64_t>(size);
     chunkFree_ = data;
     chunkLeft_ = size;
   }
@@ -596,6 +597,7 @@ uint8_t* NullCells::allocateBitmap(uint32_t log2) {
   const size_t bytes = size_t{1} << log2;
   bitmapBytes_ += static_cast<int64_t>(bytes);
   if (log2 > kMaxArenaBitmapLog2) {
+    poolBitmapBytes_ += static_cast<int64_t>(bytes);
     return reinterpret_cast<uint8_t*>(pool_->allocate(bytes));
   }
   uint8_t*& head = freeBitmaps_[log2 - kMinBitmapLog2];
@@ -610,6 +612,7 @@ uint8_t* NullCells::allocateBitmap(uint32_t log2) {
 void NullCells::freeBitmap(uint8_t* bits, uint32_t capBytes) {
   bitmapBytes_ -= capBytes;
   if (capBytes > kMaxArenaBitmapBytes) {
+    poolBitmapBytes_ -= capBytes;
     pool_->free(bits, capBytes);
     return;
   }
@@ -745,6 +748,7 @@ void NullCells::freeChunks() {
   chunks_.clear();
   chunkFree_ = nullptr;
   chunkLeft_ = 0;
+  arenaBytes_ = 0;
 }
 
 void NullCells::reset() {
@@ -765,6 +769,7 @@ void NullCells::reset() {
   freeChunks();
   bitmapBytes_ = 0;
   tableBytes_ = 0;
+  poolBitmapBytes_ = 0;
 }
 
 void NullCells::releasePartition(uint32_t pid) {

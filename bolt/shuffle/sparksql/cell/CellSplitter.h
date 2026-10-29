@@ -126,6 +126,11 @@ class CellSplitter {
     return nulls_.allocatedBytes();
   }
 
+  /// All memory the null state holds; see NullCells::footprintBytes().
+  int64_t nullFootprintBytes() const {
+    return nulls_.footprintBytes();
+  }
+
   /// Reclaim must not change cells while the output is reading them.
   bool isWritingOutput() const {
     return writingOutput_;
