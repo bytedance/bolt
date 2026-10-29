@@ -516,6 +516,73 @@ void DataCells::releasePartition(uint32_t pid) {
   }
 }
 
+namespace {
+
+/// Clears bits [begin, end) of a little-endian bit array.
+void clearBitRange(uint8_t* bytes, uint64_t begin, uint64_t end) {
+  if (begin >= end) {
+    return;
+  }
+  const uint64_t first = begin >> 3;
+  const uint64_t last = (end - 1) >> 3;
+  const auto firstMask = static_cast<uint8_t>(0xFFu << (begin & 7));
+  const auto lastMask = static_cast<uint8_t>(0xFFu >> (7 - ((end - 1) & 7)));
+  if (first == last) {
+    bytes[first] &= static_cast<uint8_t>(~(firstMask & lastMask));
+    return;
+  }
+  bytes[first] &= static_cast<uint8_t>(~firstMask);
+  ::memset(bytes + first + 1, 0, last - first - 1);
+  bytes[last] &= static_cast<uint8_t>(~lastMask);
+}
+
+/// ANDs the first `count` (<= 256) bits of `src` into the `dstBytes`-byte
+/// bit array `dst` from bit `at`. Its bits past `count` are read as 1, which
+/// they must be in the bytes holding them.
+void andBits(
+    uint8_t* dst,
+    uint64_t dstBytes,
+    uint64_t at,
+    const uint8_t* src,
+    uint32_t count) {
+  uint64_t words[4];
+  ::memset(words, 0xFF, sizeof(words));
+  ::memcpy(words, src, (count + 7) >> 3);
+  const uint32_t shift = at & 7;
+  const uint64_t keepLow = (uint64_t{1} << shift) - 1;
+  uint64_t byte = at >> 3;
+  for (uint32_t i = 0; i < (count + 63) >> 6; ++i, byte += 8) {
+    const uint64_t word = words[i];
+    if (byte + 9 <= dstBytes) {
+      // The word shifted into place spans 9 bytes.
+      uint64_t low;
+      ::memcpy(&low, dst + byte, sizeof(low));
+      low &= (word << shift) | keepLow;
+      ::memcpy(dst + byte, &low, sizeof(low));
+      if (shift != 0) {
+        dst[byte + 8] &=
+            static_cast<uint8_t>((word >> (64 - shift)) | (0xFFu << shift));
+      }
+      continue;
+    }
+    // The end of `dst`: byte by byte.
+    for (uint32_t k = 0; k < 8 && byte + k < dstBytes; ++k) {
+      const auto bits = static_cast<uint32_t>((word >> (8 * k)) & 0xFF);
+      dst[byte + k] &=
+          static_cast<uint8_t>((bits << shift) | ((1u << shift) - 1));
+      if (shift != 0 && byte + k + 1 < dstBytes) {
+        dst[byte + k + 1] &=
+            static_cast<uint8_t>((bits >> (8 - shift)) | (0xFFu << shift));
+      }
+    }
+  }
+}
+
+/// Chunks of the moved null cells: 2048 cells each.
+constexpr uint32_t kNullChunkBytes = 64 << 10;
+
+} // namespace
+
 NullCells::NullCells(
     memory::MemoryPool* pool,
     uint32_t numPartitions,
@@ -524,7 +591,8 @@ NullCells::NullCells(
       numPartitions_(numColumns == 0 ? 0 : numPartitions),
       numColumns_(numColumns),
       states_(numColumns, ColumnState::kEmpty),
-      columnSlots_(numColumns, nullptr) {}
+      columns_(numColumns),
+      chainCells_(pool, kNullChunkBytes, sizeof(Cell)) {}
 
 NullCells::~NullCells() {
   reset();
@@ -549,94 +617,102 @@ bool NullCells::observeBatch(
     state = batch;
     return false;
   }
-  // The column turns mixed. Its rows so far are all non-null - the slots'
-  // default, which need no storage yet - or all null: each partition's
-  // become a counted prefix of its own.
+  // The column turns mixed. Its rows so far are all non-null - what
+  // unrecorded rows are, needing no storage yet - or all null: each
+  // partition's become a null run of its own.
   state = ColumnState::kMixed;
   if (nullSoFar) {
-    Slot* slots = openColumn(col);
+    Column& column = columnFor(col);
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-      slots[pid].prefix = windowRows[pid];
+      appendRows(column, pid, true, windowRows[pid]);
     }
   }
   return true;
 }
 
-NullCells::Slot* NullCells::openColumn(uint32_t col) {
-  const size_t bytes = sizeof(Slot) * numPartitions_;
-  auto* slots = reinterpret_cast<Slot*>(pool_->allocate(bytes));
-  std::fill(slots, slots + numPartitions_, Slot{0, 0, nullptr});
-  columnSlots_[col] = slots;
+NullCells::Cell NullCells::emptyCell(uint32_t prev) {
+  Cell cell;
+  cell.prev = prev;
+  cell.run = 0;
+  cell.fill = 0;
+  ::memset(cell.bits, 0xFF, sizeof(cell.bits));
+  return cell;
+}
+
+size_t NullCells::columnBlockBytes() const {
+  // Room to align the cells to their size, so none spans two cache lines.
+  return sizeof(Cell) + (sizeof(Cell) + sizeof(Tail)) * numPartitions_;
+}
+
+void NullCells::openColumn(Column& column) {
+  const size_t bytes = columnBlockBytes();
+  void* block = pool_->allocate(bytes);
+  auto* cells = reinterpret_cast<Cell*>(
+      (reinterpret_cast<uintptr_t>(block) + sizeof(Cell) - 1) &
+      ~(uintptr_t{sizeof(Cell)} - 1));
+  auto* tails = reinterpret_cast<Tail*>(cells + numPartitions_);
+  const Cell empty = emptyCell(ChunkAllocator::kInvalidCell);
+  std::fill(cells, cells + numPartitions_, empty);
+  std::fill(tails, tails + numPartitions_, Tail{0, 0});
+  column = Column{cells, tails, block};
   tableBytes_ += static_cast<int64_t>(bytes);
-  return slots;
 }
 
-uint8_t* NullCells::carve(size_t bytes) {
-  // Chunks double from 64KB to 4MB, so a writer with a few nulls stays
-  // small; a bitmap above the cap gets a chunk of its own size.
-  constexpr size_t kMinChunkBytes = 64 << 10;
-  constexpr size_t kMaxChunkBytes = 4 << 20;
-  if (chunkLeft_ < bytes) {
-    const size_t next = chunks_.empty()
-        ? kMinChunkBytes
-        : std::min(kMaxChunkBytes, chunks_.back().size * 2);
-    const size_t size = std::max(next, bytes);
-    auto* data = reinterpret_cast<uint8_t*>(pool_->allocate(size));
-    chunks_.push_back({data, size});
-    arenaBytes_ += static_cast<int64_t>(size);
-    chunkFree_ = data;
-    chunkLeft_ = size;
-  }
-  uint8_t* out = chunkFree_;
-  chunkFree_ += bytes;
-  chunkLeft_ -= bytes;
-  return out;
+void NullCells::appendNulls(
+    Column& column,
+    uint32_t pid,
+    uint32_t row,
+    uint32_t count) {
+  const uint32_t end = column.tails[pid].end;
+  BOLT_DCHECK_GE(row, end, "null rows out of order");
+  appendRows(column, pid, false, row - end);
+  appendRows(column, pid, true, count);
 }
 
-uint8_t* NullCells::allocateBitmap(uint32_t log2) {
-  const size_t bytes = size_t{1} << log2;
-  bitmapBytes_ += static_cast<int64_t>(bytes);
-  if (log2 > kMaxArenaBitmapLog2) {
-    poolBitmapBytes_ += static_cast<int64_t>(bytes);
-    return reinterpret_cast<uint8_t*>(pool_->allocate(bytes));
+void NullCells::appendRows(
+    Column& column,
+    uint32_t pid,
+    bool null,
+    uint32_t rows) {
+  Tail& tail = column.tails[pid];
+  while (rows > 0) {
+    Cell& cell = column.cells[pid];
+    const uint32_t runRows = cell.run & kMaxRunRows;
+    const bool runNull = (cell.run & kNullRun) != 0;
+    uint32_t taken;
+    if (cell.fill == 0 &&
+        (runRows == 0 || (runNull == null && runRows < kMaxRunRows))) {
+      // The rows start or extend the cell's run.
+      taken = std::min(rows, kMaxRunRows - runRows);
+      cell.run =
+          static_cast<uint16_t>((null ? kNullRun : 0) | (runRows + taken));
+    } else if (
+        (cell.fill != 0 || runNull != null) && rows <= kCellBits - cell.fill) {
+      // They fit the bitmap, whose bits past `fill` are already non-null.
+      taken = rows;
+      if (null) {
+        clearBitRange(cell.bits, cell.fill, cell.fill + taken);
+      }
+      cell.fill = static_cast<uint8_t>(cell.fill + taken);
+    } else {
+      // A full run, or more rows than the bitmap can take: they start the
+      // next cell.
+      moveCell(column, pid);
+      continue;
+    }
+    rows -= taken;
+    tail.end += taken;
+    if (null) {
+      tail.nulls += taken;
+    }
   }
-  uint8_t*& head = freeBitmaps_[log2 - kMinBitmapLog2];
-  if (head != nullptr) {
-    uint8_t* block = head;
-    ::memcpy(&head, block, sizeof(uint8_t*));
-    return block;
-  }
-  return carve(bytes);
 }
 
-void NullCells::freeBitmap(uint8_t* bits, uint32_t capBytes) {
-  bitmapBytes_ -= capBytes;
-  if (capBytes > kMaxArenaBitmapBytes) {
-    poolBitmapBytes_ -= capBytes;
-    pool_->free(bits, capBytes);
-    return;
-  }
-  // Arena blocks stay held until the window resets.
-  uint8_t*& head = freeBitmaps_[31 - __builtin_clz(capBytes) - kMinBitmapLog2];
-  ::memcpy(bits, &head, sizeof(uint8_t*));
-  head = bits;
-}
-
-void NullCells::grow(Slot& slot, uint32_t rowInWindow) {
-  const uint32_t needBytes = (rowInWindow >> 3) + 1;
-  // ceil(log2(needBytes)), at least the 16-byte minimum (128 rows).
-  const uint32_t log2 = std::max<uint32_t>(
-      kMinBitmapLog2, needBytes <= 1 ? 0 : 32 - __builtin_clz(needBytes - 1));
-  const uint32_t newCap = 1u << log2;
-  uint8_t* grown = allocateBitmap(log2);
-  const uint32_t oldCap = slot.capBytes;
-  if (oldCap > 0) {
-    ::memcpy(grown, slot.bits, oldCap);
-    freeBitmap(slot.bits, oldCap);
-  }
-  ::memset(grown + oldCap, 0xFF, newCap - oldCap);
-  slot.bits = grown;
-  slot.capBytes = newCap;
+void NullCells::moveCell(Column& column, uint32_t pid) {
+  const uint32_t id = chainCells_.allocCell();
+  Cell& cell = column.cells[pid];
+  ::memcpy(chainCells_.cellData(id), &cell, sizeof(Cell));
+  cell = emptyCell(id);
 }
 
 NullCells::Summary
@@ -653,136 +729,122 @@ NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
     case ColumnState::kMixed:
       break;
   }
-  const Slot* slot = findSlot(pid, col);
-  if (slot == nullptr || (slot->prefix == 0 && slot->capBytes == 0)) {
+  const Column& column = columns_[col];
+  if (column.cells == nullptr) {
     return {NullTag::kNoNull, rowCount};
   }
-  const uint32_t prefix = std::min(slot->prefix, rowCount);
-  if (prefix == rowCount) {
-    return {NullTag::kAllNull, 0}; // pure counting, no storage was touched
+  const Tail& tail = column.tails[pid];
+  BOLT_CHECK_LE(tail.end, rowCount, "nulls recorded past the partition's rows");
+  if (tail.nulls == 0) {
+    return {NullTag::kNoNull, rowCount};
   }
-  uint32_t nonNull = rowCount - prefix;
-  if (slot->capBytes != 0) {
-    const uint8_t* bits = slot->bits;
-    // Count set (non-null) bits in [prefix, coveredRows); rows past the
-    // allocated capacity are implicitly non-null. Bits below the prefix are
-    // untouched defaults, so counting from the prefix is exact.
-    const uint32_t coveredRows =
-        std::min<uint64_t>(rowCount, uint64_t(slot->capBytes) * 8);
-    if (prefix < coveredRows) {
-      uint32_t setBits = 0;
-      uint32_t byte = prefix >> 3;
-      const uint32_t lastByte = (coveredRows - 1) >> 3;
-      uint8_t first =
-          bits[byte] & static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
-      if (byte == lastByte) {
-        if ((coveredRows & 7) != 0) {
-          first &= static_cast<uint8_t>((1u << (coveredRows & 7)) - 1);
-        }
-        setBits = __builtin_popcount(first);
-      } else {
-        setBits = __builtin_popcount(first);
-        ++byte;
-        for (; byte + 8 <= lastByte; byte += 8) {
-          uint64_t word;
-          ::memcpy(&word, bits + byte, 8);
-          setBits += static_cast<uint32_t>(__builtin_popcountll(word));
-        }
-        for (; byte < lastByte; ++byte) {
-          setBits += __builtin_popcount(bits[byte]);
-        }
-        uint8_t last = bits[lastByte];
-        if ((coveredRows & 7) != 0) {
-          last &= static_cast<uint8_t>((1u << (coveredRows & 7)) - 1);
-        }
-        setBits += __builtin_popcount(last);
-      }
-      nonNull = (rowCount - coveredRows) + setBits;
-    }
-  }
-  if (nonNull == 0) {
+  if (tail.nulls == rowCount) {
     return {NullTag::kAllNull, 0};
   }
-  if (nonNull == rowCount) {
-    return {NullTag::kNoNull, rowCount};
-  }
-  return {NullTag::kRawNull, nonNull};
+  return {NullTag::kRawNull, rowCount - tail.nulls};
 }
 
-void NullCells::emitBitmap(
+void NullCells::emitBitmaps(
     uint32_t pid,
-    uint32_t col,
+    const uint32_t* cols,
+    uint32_t numCols,
     uint32_t rowCount,
-    uint8_t* out) const {
+    uint8_t* const* outs) const {
   const uint32_t outBytes = (rowCount + 7) >> 3;
-  if (states_[col] == ColumnState::kAllNull) {
-    ::memset(out, 0, outBytes);
-    return;
+  // A chain read from its last cell back; each cell ends where the next
+  // one starts.
+  struct Walk {
+    const Cell* cell;
+    uint32_t end;
+    uint8_t* out;
+  };
+  constexpr uint32_t kMaxWalks = 16;
+  Walk walks[kMaxWalks];
+  uint32_t numWalks = 0;
+  const auto walkInStep = [&] {
+    while (numWalks > 0) {
+      for (uint32_t i = 0; i < numWalks;) {
+        Walk& walk = walks[i];
+        const Cell& cell = *walk.cell;
+        const Cell* prev = cell.prev == ChunkAllocator::kInvalidCell
+            ? nullptr
+            : &chainCell(cell.prev);
+        if (prev != nullptr) {
+          __builtin_prefetch(prev);
+        }
+        const uint32_t runRows = cell.run & kMaxRunRows;
+        const uint32_t start = walk.end - runRows - cell.fill;
+        if ((cell.run & kNullRun) != 0) {
+          clearBitRange(walk.out, start, start + runRows);
+        }
+        andBits(walk.out, outBytes, start + runRows, cell.bits, cell.fill);
+        if (prev == nullptr) {
+          walk = walks[--numWalks];
+          continue;
+        }
+        walk.cell = prev;
+        walk.end = start;
+        ++i;
+      }
+    }
+  };
+  for (uint32_t i = 0; i < numCols; ++i) {
+    const uint32_t col = cols[i];
+    uint8_t* out = outs[i];
+    if (states_[col] == ColumnState::kAllNull) {
+      ::memset(out, 0, outBytes);
+      continue;
+    }
+    ::memset(out, 0xFF, outBytes);
+    const Column& column = columns_[col];
+    if (column.cells != nullptr) {
+      const Tail& tail = column.tails[pid];
+      BOLT_CHECK_LE(
+          tail.end, rowCount, "nulls recorded past the partition's rows");
+      walks[numWalks++] = {&column.cells[pid], tail.end, out};
+      if (numWalks == kMaxWalks) {
+        walkInStep();
+      }
+    }
   }
-  const Slot* slot = findSlot(pid, col);
-  uint32_t covered = 0;
-  if (slot != nullptr && slot->capBytes != 0) {
-    covered = std::min(outBytes, slot->capBytes);
-    ::memcpy(out, slot->bits, covered);
-  }
-  if (covered < outBytes) {
-    ::memset(out + covered, 0xFF, outBytes - covered);
-  }
-  // The counted null prefix is not in the storage: overlay it as zeros.
-  const uint32_t prefix =
-      slot == nullptr ? 0 : std::min(slot->prefix, rowCount);
-  ::memset(out, 0, prefix >> 3);
-  if ((prefix & 7) != 0) {
-    out[prefix >> 3] &= static_cast<uint8_t>(~((1u << (prefix & 7)) - 1));
-  }
+  walkInStep();
   if ((rowCount & 7) != 0) {
     // Unused bits of the last byte must be zero.
-    out[outBytes - 1] &= static_cast<uint8_t>((1u << (rowCount & 7)) - 1);
+    const auto lastMask = static_cast<uint8_t>((1u << (rowCount & 7)) - 1);
+    for (uint32_t i = 0; i < numCols; ++i) {
+      outs[i][outBytes - 1] &= lastMask;
+    }
   }
-}
-
-void NullCells::freeChunks() {
-  for (const auto& chunk : chunks_) {
-    pool_->free(chunk.data, chunk.size);
-  }
-  chunks_.clear();
-  chunkFree_ = nullptr;
-  chunkLeft_ = 0;
-  arenaBytes_ = 0;
 }
 
 void NullCells::reset() {
   for (uint32_t col = 0; col < numColumns_; ++col) {
-    Slot* slots = columnSlots_[col];
-    if (slots != nullptr) {
-      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-        if (slots[pid].capBytes > kMaxArenaBitmapBytes) {
-          pool_->free(slots[pid].bits, slots[pid].capBytes);
-        }
-      }
-      pool_->free(slots, sizeof(Slot) * numPartitions_);
-      columnSlots_[col] = nullptr;
+    Column& column = columns_[col];
+    if (column.block != nullptr) {
+      pool_->free(column.block, columnBlockBytes());
+      column = Column{};
     }
     states_[col] = ColumnState::kEmpty;
   }
-  std::fill(std::begin(freeBitmaps_), std::end(freeBitmaps_), nullptr);
-  freeChunks();
-  bitmapBytes_ = 0;
+  chainCells_.resetAll();
+  chainCells_.shrink();
   tableBytes_ = 0;
-  poolBitmapBytes_ = 0;
 }
 
 void NullCells::releasePartition(uint32_t pid) {
   for (uint32_t col = 0; col < numColumns_; ++col) {
-    Slot* slots = columnSlots_[col];
-    if (slots == nullptr) {
+    Column& column = columns_[col];
+    if (column.cells == nullptr) {
       continue;
     }
-    Slot& slot = slots[pid];
-    if (slot.capBytes != 0) {
-      freeBitmap(slot.bits, slot.capBytes);
+    uint32_t id = column.cells[pid].prev;
+    while (id != ChunkAllocator::kInvalidCell) {
+      const uint32_t prev = chainCell(id).prev;
+      chainCells_.recycle(id);
+      id = prev;
     }
-    slot = Slot{0, 0, nullptr};
+    column.cells[pid] = emptyCell(ChunkAllocator::kInvalidCell);
+    column.tails[pid] = Tail{0, 0};
   }
 }
 
