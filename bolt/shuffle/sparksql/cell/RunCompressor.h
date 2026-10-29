@@ -73,7 +73,8 @@ using RunStreamVisitor =
     folly::FunctionRef<void(uint32_t stream, RunPieceFn fn)>;
 
 /// The Cell writer's run compression, one policy for every run it writes:
-/// spilled, merged, or sent in an RSS payload.
+/// spilled, merged, or sent in an RSS payload. A payload's null body goes
+/// through it too, compressed whole as one frame.
 ///
 /// A run below kMinSeparateRunBytes is one COMBINED frame over all its
 /// streams; a larger one is SEPARATE, every stream its own frame, so each
@@ -139,6 +140,14 @@ class RunCompressor {
       const uint64_t* sizes,
       RunStreamVisitor visit);
 
+  /// Compresses the null body `out` holds from byte `at` to its end, one
+  /// frame in place, when it is at least kMinCompressBytes and compresses
+  /// to half its size or less; a null body that does not has the next ones
+  /// stored without a try, adaptive, as frames of a kind do. Returns its
+  /// decoded size, the payload header's nullDecodedSize: 0 when it stays
+  /// as it is.
+  uint32_t compressNullBody(BufferPtr& out, size_t at);
+
   /// Gives the one-shot workspaces back to the pool.
   void releaseWorkspace();
 
@@ -175,6 +184,13 @@ class RunCompressor {
     uint64_t tinyBytes{0};
     uint64_t unfundedFrames{0};
     uint64_t unfundedBytes{0};
+    /// Null bodies compressed, with the bytes they took in and wrote, and
+    /// stored as they are: too small, skipped, unshrunk or unfunded.
+    uint64_t compressedNullBodies{0};
+    uint64_t nullInBytes{0};
+    uint64_t nullOutBytes{0};
+    uint64_t storedNullBodies{0};
+    uint64_t storedNullBytes{0};
 
     /// One key=value line.
     std::string toString() const;
@@ -249,8 +265,9 @@ class RunCompressor {
   /// Per stream, its SEPARATE frames still to store without a try; reset
   /// when a run comes with another number of streams.
   std::vector<uint32_t> streamSkips_;
-  /// The same for COMBINED frames.
+  /// The same for COMBINED frames, and for null bodies.
   uint32_t combinedSkip_{0};
+  uint32_t nullSkip_{0};
   Stats stats_;
   std::vector<StreamStats> streamStats_;
   std::unique_ptr<Codec> codec_;
@@ -260,7 +277,8 @@ class RunCompressor {
   /// the compressor's life.
   std::vector<uint8_t> stage_;
   std::vector<uint8_t> out_;
-  /// One-shot workspaces: the gathered frame and its compressed form.
+  /// One-shot workspaces: the gathered frame and its compressed form, or a
+  /// null body's.
   BufferPtr frame_;
   BufferPtr compressed_;
 };
