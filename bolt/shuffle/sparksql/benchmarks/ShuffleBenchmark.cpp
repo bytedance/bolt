@@ -57,6 +57,7 @@
 #include <folly/init/Init.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -171,6 +172,7 @@ enum class Family {
   kStaleNulls,
   kStrRealistic,
   kQ22Rollup,
+  kDeadWide,
 };
 
 const char* familyName(Family family) {
@@ -209,6 +211,8 @@ const char* familyName(Family family) {
       return "str_realistic";
     case Family::kQ22Rollup:
       return "q22_rollup";
+    case Family::kDeadWide:
+      return "int_narrow_dead_wide";
   }
   return "?";
 }
@@ -329,6 +333,9 @@ std::vector<CaseSpec> caseSpecs() {
   add("A13", Family::kQ22Rollup, 200, kStd);
   add("F8", Family::kStrRealistic, 1024, kFull, 0, 1024, false, 256);
   add("F9", Family::kQ22Rollup, 200, kFull, 0, 1024, false, 256);
+  // Many columns null throughout, as a wide table's unused ones.
+  add("C-dead-wide", Family::kDeadWide, 1024, kStd);
+  add("C-dead-wide-P30000", Family::kDeadWide, 30000, kStd);
   return c;
 }
 
@@ -589,6 +596,43 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
           BaseVector::createNullConstant(BIGINT(), kRowsPerBatch, inputPool()));
       return makeRow(
           {"pid", "id", "ts", "small", "rnd", "dead"}, std::move(columns));
+    }
+    case Family::kDeadWide: {
+      // 32 columns null in every row: constant nulls, and flat vectors
+      // whose every row is null.
+      auto columns = intNarrowColumns(batch, nulls, rng, false);
+      columns.insert(columns.begin(), pid);
+      std::vector<std::string> names{"pid", "id", "ts", "small", "rnd"};
+      const std::array<TypePtr, 4> types{
+          BIGINT(), INTEGER(), DOUBLE(), VARCHAR()};
+      for (int col = 0; col < 32; ++col) {
+        names.push_back("dead" + std::to_string(col));
+        const auto& type = types[(col / 2) % types.size()];
+        if (col % 2 == 0) {
+          columns.push_back(
+              BaseVector::createNullConstant(type, kRowsPerBatch, inputPool()));
+          continue;
+        }
+        switch (type->kind()) {
+          case TypeKind::BIGINT:
+            columns.push_back(flat<int64_t>(
+                type, 100, rng, [](vector_size_t) { return int64_t{0}; }));
+            break;
+          case TypeKind::INTEGER:
+            columns.push_back(flat<int32_t>(
+                type, 100, rng, [](vector_size_t) { return int32_t{0}; }));
+            break;
+          case TypeKind::DOUBLE:
+            columns.push_back(flat<double>(
+                type, 100, rng, [](vector_size_t) { return 0.0; }));
+            break;
+          default:
+            columns.push_back(
+                strings(100, rng, [](vector_size_t, std::string&) {}));
+            break;
+        }
+      }
+      return makeRow(std::move(names), std::move(columns));
     }
     case Family::kIntRandom: {
       std::vector<VectorPtr> columns{pid};
