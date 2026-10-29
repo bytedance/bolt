@@ -1444,7 +1444,7 @@ RunLayout maybeCompressRun(
     uint64_t& compressTimeNs) {
   body = data;
   stored = dataBytes;
-  if (codec != nullptr && dataBytes >= kMinCompressRunBytes) {
+  if (codec != nullptr && dataBytes >= kMinCompressBytes) {
     const uint64_t start = currentTimeNs();
     resetBuffer(scratch, codec->maxCompressedLen(dataBytes), pool);
     const int64_t written = codec->compress(
