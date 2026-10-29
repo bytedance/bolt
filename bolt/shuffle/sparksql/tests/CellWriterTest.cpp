@@ -2436,6 +2436,59 @@ TEST_F(CellWriterTest, constantNullColumnRoundTrip) {
       {makeRowVector({"v", "dead"}, {values, allNull})});
 }
 
+TEST_F(CellWriterTest, columnsChangingNullShapeMidWindow) {
+  constexpr int32_t kPartitions = 5;
+  // Payloads closing by partition, then whole windows closing on the null
+  // bitmaps: columns change state over partitions part-written, released
+  // and fresh, and start over in each window.
+  auto bySize = makeOptions(kPartitions);
+  bySize.cellOptions.checkpointPartitionBytes = 8 << 10;
+  auto byNulls = makeOptions(kPartitions);
+  byNulls.cellOptions.nullMemLimitBytes = 1;
+  for (const auto& options : {bySize, byNulls}) {
+    std::mt19937 rng(23);
+    std::vector<std::vector<int32_t>> pids;
+    std::vector<RowVectorPtr> batches;
+    for (int batch = 0; batch < 8; ++batch) {
+      const int n = 400 + batch * 31;
+      std::vector<int32_t> batchPids(n);
+      for (int i = 0; i < n; ++i) {
+        // Half the rows go to partition 0; partition 4 has none before
+        // batch 3.
+        batchPids[i] = rng() % 2 == 0 ? 0 : 1 + rng() % (batch < 3 ? 3 : 4);
+      }
+      auto values = makeFlatVector<int64_t>(
+          n, [&](auto row) { return row * 13 + batch; });
+      // Null throughout, then mixed: constant null, flat all-null, flat.
+      VectorPtr a = batch < 2
+          ? BaseVector::createNullConstant(BIGINT(), n, pool())
+          : batch < 3 ? makeAllNullFlatVector<int64_t>(n)
+                      : makeFlatVector<int64_t>(
+                            n,
+                            [&](auto row) { return row + batch; },
+                            [](auto row) { return row % 3 == 0; });
+      // Non-null throughout, then null throughout, then non-null again.
+      VectorPtr b = batch == 4 || batch == 5
+          ? BaseVector::createNullConstant(INTEGER(), n, pool())
+          : makeFlatVector<int32_t>(n, [&](auto row) { return row - batch; });
+      // Never anything but null.
+      VectorPtr c = batch % 2 == 0
+          ? BaseVector::createNullConstant(SMALLINT(), n, pool())
+          : makeAllNullFlatVector<int16_t>(n);
+      // Strings null throughout, then mixed.
+      VectorPtr d = batch < 4
+          ? BaseVector::createNullConstant(VARCHAR(), n, pool())
+          : makeNullableStrings(n, rng);
+      batches.push_back(
+          makeRowVector({"v", "a", "b", "c", "d"}, {values, a, b, c, d}));
+      pids.push_back(std::move(batchPids));
+    }
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    EXPECT_GT(writer.metrics().spillCount, 0) << "expected sealed payloads";
+  }
+}
+
 TEST_F(CellWriterTest, stringDictionaryRoundTripAndShrinksBytes) {
   constexpr int32_t kPartitions = 8;
   constexpr int kRows = 2000;
