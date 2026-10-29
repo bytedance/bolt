@@ -523,10 +523,52 @@ NullCells::NullCells(
     : pool_(pool),
       numPartitions_(numColumns == 0 ? 0 : numPartitions),
       numColumns_(numColumns),
-      tables_(numPartitions_, nullptr) {}
+      states_(numColumns, ColumnState::kEmpty),
+      columnSlots_(numColumns, nullptr) {}
 
 NullCells::~NullCells() {
   reset();
+}
+
+bool NullCells::observeBatch(
+    uint32_t col,
+    bool anyNull,
+    bool allNull,
+    const uint32_t* windowRows) {
+  // A column's state joins its batches': it stays kNoNull or kAllNull only
+  // while every batch is.
+  const ColumnState batch = !anyNull ? ColumnState::kNoNull
+      : allNull                      ? ColumnState::kAllNull
+                                     : ColumnState::kMixed;
+  ColumnState& state = states_[col];
+  if (state == ColumnState::kMixed || state == batch) {
+    return state == ColumnState::kMixed;
+  }
+  const bool nullSoFar = state == ColumnState::kAllNull;
+  if (state == ColumnState::kEmpty && batch != ColumnState::kMixed) {
+    state = batch;
+    return false;
+  }
+  // The column turns mixed. Its rows so far are all non-null - the slots'
+  // default, which need no storage yet - or all null: each partition's
+  // become a counted prefix of its own.
+  state = ColumnState::kMixed;
+  if (nullSoFar) {
+    Slot* slots = openColumn(col);
+    for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+      slots[pid].prefix = windowRows[pid];
+    }
+  }
+  return true;
+}
+
+NullCells::Slot* NullCells::openColumn(uint32_t col) {
+  const size_t bytes = sizeof(Slot) * numPartitions_;
+  auto* slots = reinterpret_cast<Slot*>(pool_->allocate(bytes));
+  std::fill(slots, slots + numPartitions_, Slot{0, 0, nullptr});
+  columnSlots_[col] = slots;
+  tableBytes_ += static_cast<int64_t>(bytes);
+  return slots;
 }
 
 uint8_t* NullCells::carve(size_t bytes) {
@@ -548,20 +590,6 @@ uint8_t* NullCells::carve(size_t bytes) {
   chunkFree_ += bytes;
   chunkLeft_ -= bytes;
   return out;
-}
-
-NullCells::Slot* NullCells::openTable(uint32_t pid) {
-  const size_t bytes = sizeof(Slot) * numColumns_;
-  uint8_t* table = freeTables_;
-  if (table != nullptr) {
-    ::memcpy(&freeTables_, table, sizeof(uint8_t*));
-  } else {
-    table = carve(bytes);
-    tableBytes_ += static_cast<int64_t>(bytes);
-  }
-  ::memset(table, 0, bytes);
-  tables_[pid] = reinterpret_cast<Slot*>(table);
-  return tables_[pid];
 }
 
 uint8_t* NullCells::allocateBitmap(uint32_t log2) {
@@ -610,9 +638,20 @@ void NullCells::grow(Slot& slot, uint32_t rowInWindow) {
 
 NullCells::Summary
 NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
+  if (rowCount == 0) {
+    return {NullTag::kNoNull, 0};
+  }
+  switch (states_[col]) {
+    case ColumnState::kEmpty:
+    case ColumnState::kNoNull:
+      return {NullTag::kNoNull, rowCount};
+    case ColumnState::kAllNull:
+      return {NullTag::kAllNull, 0};
+    case ColumnState::kMixed:
+      break;
+  }
   const Slot* slot = findSlot(pid, col);
-  if (rowCount == 0 || slot == nullptr ||
-      (slot->prefix == 0 && slot->capBytes == 0)) {
+  if (slot == nullptr || (slot->prefix == 0 && slot->capBytes == 0)) {
     return {NullTag::kNoNull, rowCount};
   }
   const uint32_t prefix = std::min(slot->prefix, rowCount);
@@ -673,6 +712,10 @@ void NullCells::emitBitmap(
     uint32_t rowCount,
     uint8_t* out) const {
   const uint32_t outBytes = (rowCount + 7) >> 3;
+  if (states_[col] == ColumnState::kAllNull) {
+    ::memset(out, 0, outBytes);
+    return;
+  }
   const Slot* slot = findSlot(pid, col);
   uint32_t covered = 0;
   if (slot != nullptr && slot->capBytes != 0) {
@@ -705,38 +748,37 @@ void NullCells::freeChunks() {
 }
 
 void NullCells::reset() {
-  for (auto& table : tables_) {
-    if (table == nullptr) {
-      continue;
-    }
-    for (uint32_t col = 0; col < numColumns_; ++col) {
-      if (table[col].capBytes > kMaxArenaBitmapBytes) {
-        pool_->free(table[col].bits, table[col].capBytes);
+  for (uint32_t col = 0; col < numColumns_; ++col) {
+    Slot* slots = columnSlots_[col];
+    if (slots != nullptr) {
+      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+        if (slots[pid].capBytes > kMaxArenaBitmapBytes) {
+          pool_->free(slots[pid].bits, slots[pid].capBytes);
+        }
       }
+      pool_->free(slots, sizeof(Slot) * numPartitions_);
+      columnSlots_[col] = nullptr;
     }
-    table = nullptr;
+    states_[col] = ColumnState::kEmpty;
   }
   std::fill(std::begin(freeBitmaps_), std::end(freeBitmaps_), nullptr);
-  freeTables_ = nullptr;
   freeChunks();
   bitmapBytes_ = 0;
   tableBytes_ = 0;
 }
 
 void NullCells::releasePartition(uint32_t pid) {
-  if (numColumns_ == 0 || tables_[pid] == nullptr) {
-    return;
-  }
-  Slot* table = tables_[pid];
   for (uint32_t col = 0; col < numColumns_; ++col) {
-    if (table[col].capBytes != 0) {
-      freeBitmap(table[col].bits, table[col].capBytes);
+    Slot* slots = columnSlots_[col];
+    if (slots == nullptr) {
+      continue;
     }
+    Slot& slot = slots[pid];
+    if (slot.capBytes != 0) {
+      freeBitmap(slot.bits, slot.capBytes);
+    }
+    slot = Slot{0, 0, nullptr};
   }
-  auto* block = reinterpret_cast<uint8_t*>(table);
-  ::memcpy(block, &freeTables_, sizeof(uint8_t*));
-  freeTables_ = block;
-  tables_[pid] = nullptr;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

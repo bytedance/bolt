@@ -635,15 +635,23 @@ void CellSplitter::split(const SplitBatch& batch) {
     }
     const auto nullColumn = layout_.wireColumn(col);
     const auto klass = batch.nullClass[col];
+    const bool recordNulls = nulls_.observeBatch(
+        nullColumn,
+        klass != BatchNullClass::kNoNulls,
+        klass == BatchNullClass::kAllNull,
+        windowRowCounts_.data());
     if (klass == BatchNullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat
       // vector whose scan came back all-null): values contribute nothing
-      // (dense pack) and the nulls are a counted run per partition - the
-      // column costs O(partitions) per batch and allocates no bitmap.
-      for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-        const uint32_t count = batch.partition2RowCount[pid];
-        if (count > 0) {
-          nulls_.setNullRun(pid, nullColumn, windowRowCounts_[pid], count);
+      // (dense pack). While the column has been null throughout, its state
+      // says so and the batch costs nothing more; otherwise the nulls are a
+      // counted run per partition, allocating no bitmap.
+      if (recordNulls) {
+        for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+          const uint32_t count = batch.partition2RowCount[pid];
+          if (count > 0) {
+            nulls_.setNullRun(pid, nullColumn, windowRowCounts_[pid], count);
+          }
         }
       }
       continue;
