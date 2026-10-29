@@ -305,6 +305,8 @@ class BoltColumnarBatchDeserializerFactory {
         shuffleWriterType_ = ShuffleWriterType::RowBased;
         break;
       case 4:
+        // Recorded for createDeserializer(), which refuses it where the
+        // writer would have written Cell payloads.
         shuffleWriterType_ = ShuffleWriterType::Cell;
         break;
       default:
@@ -331,6 +333,12 @@ class BoltColumnarBatchDeserializerFactory {
     rowBasedShuffleThreshold_ = threshold;
   }
 
+  /// The writer side's preferCellShuffle: an adaptive writer that honours
+  /// it writes Cell payloads, which this factory cannot read.
+  void setPreferCellShuffle(bool prefer) {
+    preferCellShuffle_ = prefer;
+  }
+
  private:
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<Codec> codec_;
@@ -344,6 +352,7 @@ class BoltColumnarBatchDeserializerFactory {
   bytedance::bolt::row::RowFormat rowFormat_{
       bytedance::bolt::row::RowFormat::DENSE};
   int64_t rowBasedShuffleThreshold_{kDefaultRowBasedShuffleThreshold};
+  bool preferCellShuffle_{false};
   arrow::MemoryPool* memoryPool_;
   bytedance::bolt::memory::MemoryPool* boltPool_;
 

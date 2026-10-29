@@ -771,6 +771,19 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
          static_cast<int64_t>(numPartitions_) * schema_->num_fields() >
              rowBasedShuffleThreshold_)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
+  // Mirror of the writer's choice (and of SparkShuffleReaderNode's): Cell
+  // when forced, or preferred by an adaptive choice that did not pick the
+  // row-based writer, and only under a partitioning with a pid - elsewhere
+  // the writer falls back to V1, which is read here as usual. Cell
+  // payloads are not V1/V2/row payloads: only SparkShuffleReaderNode reads
+  // them.
+  BOLT_CHECK(
+      !(supportAdaptiveShuffleWriter(partitioning) &&
+        (shuffleWriterType_ == ShuffleWriterType::Cell ||
+         (shuffleWriterType_ == ShuffleWriterType::Adaptive &&
+          preferCellShuffle_ && !isRowBased))),
+      "The writer emits Cell payloads here, which are read by "
+      "SparkShuffleReaderNode, not by BoltShuffleReader");
   if (!zstdCodec_) {
     zstdCodec_ = std::make_shared<AdaptiveParallelZstdCodec>(
         1 /*not used*/, false, memoryPool_, checksumEnabled_);
@@ -888,6 +901,7 @@ BoltShuffleReader::BoltShuffleReader(
   factory_->setShuffleBufferSize(options.shuffleBufferSize);
   factory_->setRowFormat(options.rowFormat);
   factory_->setRowBasedShuffleThreshold(options.rowBasedShuffleThreshold);
+  factory_->setPreferCellShuffle(options.preferCellShuffle);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql
