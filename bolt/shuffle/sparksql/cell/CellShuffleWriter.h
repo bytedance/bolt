@@ -114,6 +114,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     /// Seals of oversized partitions alone, and the partitions they closed.
     uint64_t partitionSeals{0};
     uint64_t partitionsSealed{0};
+    /// The most memory the null state held after a batch.
+    uint64_t nullPeakBytes{0};
 
     /// One key=value line.
     std::string toString() const;
