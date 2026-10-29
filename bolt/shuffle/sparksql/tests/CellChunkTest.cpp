@@ -553,10 +553,14 @@ TEST_F(CellChunkTest, nullCellsReuseOutgrownBitmaps) {
   nulls.setNull(1, 0, 12000); // 2KB; the 1KB block is freed
   EXPECT_EQ(nulls.allocatedBytes(), 2048 + 32);
   EXPECT_EQ(nulls.summarize(1, 0, 12001).nonNullCount, 12001 - 3);
+  // Held from the pool: the slot arrays, the arena's first 64KB chunk, and
+  // the one bitmap beyond the arena.
+  EXPECT_EQ(nulls.footprintBytes(), nulls.tableBytes() + (64 << 10) + 2048);
 
   nulls.reset();
   EXPECT_EQ(nulls.allocatedBytes(), 0);
   EXPECT_EQ(nulls.tableBytes(), 0);
+  EXPECT_EQ(nulls.footprintBytes(), 0);
 }
 
 TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {

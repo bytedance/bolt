@@ -434,6 +434,8 @@ void CellShuffleWriter::maybeCheckpoint() {
   if (!initialized_ || !splitter_->hasWindowRows()) {
     return;
   }
+  pressure_.nullPeakBytes = std::max<uint64_t>(
+      pressure_.nullPeakBytes, splitter_->nullFootprintBytes());
   if (remote_ && checkpointRequested_) {
     // Memory ran short mid-batch: push the window now that it is whole.
     flushRemoteWindow(SealReason::kMemory);
@@ -620,7 +622,7 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       "push={:.1f}MB]; partial runs reclaim={} ({:.1f}MB) growth={} "
       "({:.1f}MB); compactions={} ({:.1f}MB emptied); full runs={}; seals "
       "rows={} memory={} nulls={} flush={} remoteAdmit={} remoteReclaim={}; "
-      "partition seals={} ({} partitions)",
+      "partition seals={} ({} partitions); null peak={:.1f}MB",
       reclaims,
       idleReclaims,
       deferredReclaims,
@@ -645,7 +647,8 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       seal(SealReason::kRemoteAdmit),
       seal(SealReason::kRemoteReclaim),
       partitionSeals,
-      partitionsSealed);
+      partitionsSealed,
+      mb(nullPeakBytes));
 }
 
 std::string CellShuffleWriter::toString() const {
