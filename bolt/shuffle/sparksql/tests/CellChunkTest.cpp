@@ -19,11 +19,13 @@
 #include <algorithm>
 #include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
+#include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
@@ -32,10 +34,53 @@ constexpr uint32_t kChunkBytes = 16 << 10; // 16KB
 constexpr uint32_t kCellBytes = 256;
 constexpr uint32_t kCellsPerChunk = kChunkBytes / kCellBytes;
 
-/// Bytes of a mixed column's cell array: a 32-byte cell and an 8-byte tail
+/// Bytes of a mixed column's cell array: a 32-byte cell and a 12-byte tail
 /// per partition, and room to align the cells.
 constexpr int64_t cellArrayBytes(uint32_t numPartitions) {
-  return 32 + 40 * int64_t{numPartitions};
+  return 32 + 44 * int64_t{numPartitions};
+}
+
+/// The bitmap of (pid, col) as a reader gets it: from the tag summarize()
+/// gives and, for kRawNull, the records emitRecords() writes, expanded by
+/// expandNullRecords().
+void emitBitmap(
+    const NullCells& nulls,
+    uint32_t pid,
+    uint32_t col,
+    uint32_t rowCount,
+    uint8_t* out) {
+  const uint32_t bytes = (rowCount + 7) / 8;
+  switch (nulls.summarize(pid, col, rowCount).tag) {
+    case NullTag::kAllNull:
+      ::memset(out, 0, bytes);
+      return;
+    case NullTag::kNoNull:
+      ::memset(out, 0xFF, bytes);
+      if ((rowCount & 7) != 0) {
+        out[bytes - 1] &= static_cast<uint8_t>((1u << (rowCount & 7)) - 1);
+      }
+      return;
+    default: {
+      std::vector<uint8_t> records(nulls.recordsBytes(pid, col));
+      nulls.emitRecords(pid, &col, 1, records.data());
+      const uint8_t* cursor = records.data();
+      // Room for the whole last word the expansion writes.
+      std::vector<uint8_t> bitmap(bytes + 7);
+      uint32_t nonNull = 0;
+      std::string error;
+      ASSERT_TRUE(expandNullRecords(
+          cursor,
+          records.data() + records.size(),
+          rowCount,
+          bitmap.data(),
+          nonNull,
+          error))
+          << error;
+      EXPECT_EQ(cursor, records.data() + records.size());
+      EXPECT_EQ(nonNull, nulls.summarize(pid, col, rowCount).nonNullCount);
+      ::memcpy(out, bitmap.data(), bytes);
+    }
+  }
 }
 
 class CellChunkTest : public testing::Test {
@@ -428,7 +473,7 @@ TEST_F(CellChunkTest, nullCellsRawBitmapAndMasking) {
   EXPECT_EQ(summary.nonNullCount, 8);
 
   uint8_t bitmap[2];
-  nulls.emitBitmap(1, 0, 11, bitmap);
+  emitBitmap(nulls, 1, 0, 11, bitmap);
   // bit 1 = non-null: rows 1-4, 6-7 in byte 0 -> 0b1101_1110.
   EXPECT_EQ(bitmap[0], 0b11011110);
   // rows 8, 9 non-null, row 10 null; bits 3..7 past rowCount must be zero.
@@ -467,7 +512,7 @@ TEST_F(CellChunkTest, nullCellsLongGapsAndImplicitTail) {
   EXPECT_EQ(summary.nonNullCount, 5998);
 
   std::vector<uint8_t> bitmap((6000 + 7) / 8);
-  nulls.emitBitmap(0, 1, 6000, bitmap.data());
+  emitBitmap(nulls, 0, 1, 6000, bitmap.data());
   for (uint32_t row = 0; row < 6000; ++row) {
     ASSERT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row != 5 && row != 5000)
         << "row " << row;
@@ -538,7 +583,7 @@ TEST_F(CellChunkTest, nullCellsRecycleReleasedCells) {
   };
   const auto checkEveryOther = [&](uint32_t pid, uint32_t col) {
     std::vector<uint8_t> bitmap(500);
-    nulls.emitBitmap(pid, col, 4000, bitmap.data());
+    emitBitmap(nulls, pid, col, 4000, bitmap.data());
     for (uint32_t row = 0; row < 4000; ++row) {
       ASSERT_EQ((bitmap[row / 8] >> (row % 8)) & 1, row % 2) << "row " << row;
     }
@@ -581,7 +626,7 @@ TEST_F(CellChunkTest, nullCellsRunsSpanCells) {
   EXPECT_EQ(summary.tag, NullTag::kRawNull);
   EXPECT_EQ(summary.nonNullCount, rows - 100001);
   std::vector<uint8_t> bitmap((rows + 7) / 8);
-  nulls.emitBitmap(0, 0, rows, bitmap.data());
+  emitBitmap(nulls, 0, 0, rows, bitmap.data());
   for (uint32_t row = 0; row < rows; ++row) {
     ASSERT_EQ(
         (bitmap[row / 8] >> (row % 8)) & 1, row >= 100000 && row != 200000)
@@ -668,7 +713,7 @@ TEST_F(CellChunkTest, nullCellsMatchAReferenceBitmap) {
         EXPECT_EQ(summary.nonNullCount, rowCount - nullCount);
       }
       std::vector<uint8_t> got(want.size());
-      nulls.emitBitmap(pid, 0, rowCount, got.data());
+      emitBitmap(nulls, pid, 0, rowCount, got.data());
       const auto diff = std::mismatch(want.begin(), want.end(), got.begin());
       EXPECT_TRUE(diff.first == want.end())
           << "partition " << pid << " of " << rowCount << " rows: byte "
@@ -680,7 +725,7 @@ TEST_F(CellChunkTest, nullCellsMatchAReferenceBitmap) {
 TEST_F(CellChunkTest, nullCellsEmitColumnsTogether) {
   // More columns than are read in step at once, of every kind, emitted
   // together: each bitmap must hold its own column's nulls.
-  constexpr uint32_t kColumns = 21;
+  constexpr uint32_t kColumns = 35;
   constexpr uint32_t kRows = 5003;
   NullCells nulls(pool_.get(), 2, kColumns);
   std::mt19937 rng(5);
@@ -712,25 +757,153 @@ TEST_F(CellChunkTest, nullCellsEmitColumnsTogether) {
       }
     }
   }
-  const uint32_t bytes = (kRows + 7) / 8;
-  std::vector<uint32_t> cols(kColumns);
-  std::vector<std::vector<uint8_t>> bitmaps(kColumns);
-  std::vector<uint8_t*> outs(kColumns);
+  // The kRawNull columns' records, written together as a null body holds
+  // them, then read back column by column.
+  std::vector<uint32_t> rawColumns;
+  size_t recordsBytes = 0;
   for (uint32_t col = 0; col < kColumns; ++col) {
-    cols[col] = col;
-    bitmaps[col].assign(bytes, 0xAA);
-    outs[col] = bitmaps[col].data();
+    const auto tag = nulls.summarize(1, col, kRows).tag;
+    switch (col % 7) {
+      case 0:
+        EXPECT_EQ(tag, NullTag::kAllNull) << "column " << col;
+        break;
+      case 1:
+      case 2:
+        EXPECT_EQ(tag, NullTag::kNoNull) << "column " << col;
+        break;
+      default:
+        ASSERT_EQ(tag, NullTag::kRawNull) << "column " << col;
+        rawColumns.push_back(col);
+        recordsBytes += nulls.recordsBytes(1, col);
+        break;
+    }
   }
-  nulls.emitBitmaps(1, cols.data(), kColumns, kRows, outs.data());
-  for (uint32_t col = 0; col < kColumns; ++col) {
-    std::vector<uint8_t> want(bytes, 0);
+  // More columns than are read in step at once.
+  ASSERT_GT(rawColumns.size(), 16);
+  std::vector<uint8_t> records(recordsBytes);
+  nulls.emitRecords(
+      1,
+      rawColumns.data(),
+      static_cast<uint32_t>(rawColumns.size()),
+      records.data());
+  const uint8_t* cursor = records.data();
+  for (const uint32_t col : rawColumns) {
+    std::vector<uint8_t> bitmap((kRows + 7) / 8 + 7, 0xAA);
+    uint32_t nonNull = 0;
+    std::string error;
+    ASSERT_TRUE(expandNullRecords(
+        cursor,
+        records.data() + records.size(),
+        kRows,
+        bitmap.data(),
+        nonNull,
+        error))
+        << error;
+    bitmap.resize((kRows + 7) / 8);
+    std::vector<uint8_t> want(bitmap.size(), 0);
+    uint32_t wantNonNull = 0;
     for (uint32_t row = 0; row < kRows; ++row) {
       if (!expectNull[col][row]) {
         want[row / 8] |= 1 << (row % 8);
+        ++wantNonNull;
       }
     }
-    EXPECT_EQ(bitmaps[col], want) << "column " << col;
+    EXPECT_EQ(bitmap, want) << "column " << col;
+    EXPECT_EQ(nonNull, wantNonNull) << "column " << col;
   }
+  EXPECT_EQ(cursor, records.data() + records.size());
+}
+
+TEST_F(CellChunkTest, nullCellsRecordsOnTheWire) {
+  NullCells nulls(pool_.get(), 1, 1);
+  markMixed(nulls, 1, 0);
+  // Rows 0-2 null, 3-4 not, 5 null: a null run of three, then three rows
+  // in the bitmap.
+  nulls.setNullRun(0, 0, 0, 3);
+  nulls.setNull(0, 0, 5);
+  ASSERT_EQ(nulls.recordsBytes(0, 0), 4 + kNullRecordBytes);
+  std::vector<uint8_t> records(nulls.recordsBytes(0, 0), 0xAA);
+  const uint32_t col = 0;
+  nulls.emitRecords(0, &col, 1, records.data());
+  std::vector<uint8_t> want(4 + kNullRecordBytes, 0);
+  want[0] = 1; // one record
+  want[4] = 3; // a run of 3 rows...
+  want[5] = 0x80; // ...null
+  want[6] = 3; // 3 rows in the bitmap
+  want[7] = 0b011; // rows 3 and 4 non-null; the bits past them zero
+  EXPECT_EQ(records, want);
+
+  // A gap the bitmap cannot take moves the cell: two records, in row order.
+  nulls.setNull(0, 0, 1000);
+  ASSERT_EQ(nulls.recordsBytes(0, 0), 4 + 2 * kNullRecordBytes);
+  records.assign(nulls.recordsBytes(0, 0), 0xAA);
+  nulls.emitRecords(0, &col, 1, records.data());
+  EXPECT_EQ(records[0], 2);
+  EXPECT_TRUE(std::equal(
+      want.begin() + 4, want.end(), records.begin() + 4)); // the first
+  const uint8_t* second = records.data() + 4 + kNullRecordBytes;
+  EXPECT_EQ(second[0] | (second[1] << 8), 994); // a non-null run
+  EXPECT_EQ(second[2], 1);
+  EXPECT_EQ(second[3], 0); // the null, and zeros past it
+  for (uint32_t i = 4; i < kNullRecordBytes; ++i) {
+    EXPECT_EQ(second[i], 0) << "byte " << i;
+  }
+}
+
+TEST_F(CellChunkTest, malformedNullRecordsAreRejected) {
+  constexpr uint32_t kRows = 100;
+  // One record: a non-null run of 10 rows, then 5 rows in the bitmap.
+  std::vector<uint8_t> valid(4 + kNullRecordBytes, 0);
+  valid[0] = 1;
+  valid[4] = 10;
+  valid[6] = 5;
+  valid[7] = 0b10101;
+  const auto expand = [&](const std::vector<uint8_t>& records,
+                          uint32_t rows,
+                          std::string& error) {
+    std::vector<uint8_t> bitmap((rows + 7) / 8 + 7);
+    const uint8_t* cursor = records.data();
+    uint32_t nonNull = 0;
+    const bool ok = expandNullRecords(
+        cursor,
+        records.data() + records.size(),
+        rows,
+        bitmap.data(),
+        nonNull,
+        error);
+    // 3 non-null rows in the bitmap, 10 in the run, 85 past the record.
+    EXPECT_TRUE(!ok || nonNull == rows - 2);
+    return ok;
+  };
+  std::string error;
+  ASSERT_TRUE(expand(valid, kRows, error)) << error;
+
+  const auto rejects = [&](std::vector<uint8_t> records,
+                           uint32_t rows,
+                           const std::string& message) {
+    std::string error;
+    EXPECT_FALSE(expand(records, rows, error));
+    EXPECT_EQ(error, message);
+  };
+  auto bad = valid;
+  bad[0] = 2; // a record more than there are bytes for
+  rejects(bad, kRows, "truncated null records");
+  rejects({1, 0}, kRows, "truncated null records");
+  bad = valid;
+  bad[6] = kNullRecordBits + 1;
+  rejects(bad, kRows, "null record fill beyond its bitmap");
+  bad = valid;
+  bad[7] |= 0b100000; // a bit past the fill
+  rejects(bad, kRows, "non-zero bits past a null record's fill");
+  bad = valid;
+  bad[4 + kNullRecordBytes - 1] = 1; // the bitmap's last byte
+  rejects(bad, kRows, "non-zero bits past a null record's fill");
+  bad = valid;
+  bad[4] = 0;
+  bad[6] = 0;
+  bad[7] = 0;
+  rejects(bad, kRows, "empty null record");
+  rejects(valid, 14, "null records past the payload's rows");
 }
 
 TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
@@ -749,7 +922,7 @@ TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
   EXPECT_EQ(summary.nonNullCount, 30 - 11);
 
   std::vector<uint8_t> bitmap((30 + 7) / 8);
-  nulls.emitBitmap(0, 0, 30, bitmap.data());
+  emitBitmap(nulls, 0, 0, 30, bitmap.data());
   for (uint32_t row = 0; row < 30; ++row) {
     const bool nonNull = (bitmap[row / 8] >> (row % 8)) & 1;
     const bool expectNull = row < 10 || row == 20;
@@ -763,7 +936,7 @@ TEST_F(CellChunkTest, nullCellsPrefixThenMixed) {
   EXPECT_EQ(runOnly.tag, NullTag::kRawNull);
   EXPECT_EQ(runOnly.nonNullCount, 6);
   uint8_t byte;
-  nulls.emitBitmap(1, 0, 8, &byte);
+  emitBitmap(nulls, 1, 0, 8, &byte);
   EXPECT_EQ(byte, 0b11111100);
 }
 
@@ -790,10 +963,10 @@ TEST_F(CellChunkTest, nullCellsUniformColumnsStoreNothing) {
   EXPECT_EQ(noNull.nonNullCount, 15);
 
   uint8_t bitmap[2];
-  nulls.emitBitmap(1, 0, 11, bitmap);
+  emitBitmap(nulls, 1, 0, 11, bitmap);
   EXPECT_EQ(bitmap[0], 0);
   EXPECT_EQ(bitmap[1], 0);
-  nulls.emitBitmap(1, 1, 11, bitmap);
+  emitBitmap(nulls, 1, 1, 11, bitmap);
   EXPECT_EQ(bitmap[0], 0xFF);
   EXPECT_EQ(bitmap[1], 0b00000111);
 
@@ -824,14 +997,14 @@ TEST_F(CellChunkTest, nullCellsAllNullColumnTurningMixedKeepsItsNulls) {
   EXPECT_EQ(first.tag, NullTag::kRawNull);
   EXPECT_EQ(first.nonNullCount, 1);
   uint8_t byte;
-  nulls.emitBitmap(0, 0, 7, &byte);
+  emitBitmap(nulls, 0, 0, 7, &byte);
   EXPECT_EQ(byte, 0b01000000);
   EXPECT_EQ(nulls.summarize(1, 0, 1).tag, NullTag::kNoNull);
   const auto last = nulls.summarize(2, 0, 11);
   EXPECT_EQ(last.tag, NullTag::kRawNull);
   EXPECT_EQ(last.nonNullCount, 2);
   uint8_t bitmap[2];
-  nulls.emitBitmap(2, 0, 11, bitmap);
+  emitBitmap(nulls, 2, 0, 11, bitmap);
   EXPECT_EQ(bitmap[0], 0);
   EXPECT_EQ(bitmap[1], 0b00000110);
 
@@ -861,7 +1034,7 @@ TEST_F(CellChunkTest, nullCellsNoNullColumnTurningMixed) {
   EXPECT_EQ(first.tag, NullTag::kRawNull);
   EXPECT_EQ(first.nonNullCount, 4);
   uint8_t byte;
-  nulls.emitBitmap(0, 0, 6, &byte);
+  emitBitmap(nulls, 0, 0, 6, &byte);
   EXPECT_EQ(byte, 0b00001111);
   // Partition 1's rows are all null: a run alone.
   EXPECT_EQ(nulls.summarize(1, 0, 3).tag, NullTag::kAllNull);
