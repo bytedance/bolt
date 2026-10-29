@@ -536,48 +536,6 @@ void clearBitRange(uint8_t* bytes, uint64_t begin, uint64_t end) {
   bytes[last] &= static_cast<uint8_t>(~lastMask);
 }
 
-/// ANDs the first `count` (<= 256) bits of `src` into the `dstBytes`-byte
-/// bit array `dst` from bit `at`. Its bits past `count` are read as 1, which
-/// they must be in the bytes holding them.
-void andBits(
-    uint8_t* dst,
-    uint64_t dstBytes,
-    uint64_t at,
-    const uint8_t* src,
-    uint32_t count) {
-  uint64_t words[4];
-  ::memset(words, 0xFF, sizeof(words));
-  ::memcpy(words, src, (count + 7) >> 3);
-  const uint32_t shift = at & 7;
-  const uint64_t keepLow = (uint64_t{1} << shift) - 1;
-  uint64_t byte = at >> 3;
-  for (uint32_t i = 0; i < (count + 63) >> 6; ++i, byte += 8) {
-    const uint64_t word = words[i];
-    if (byte + 9 <= dstBytes) {
-      // The word shifted into place spans 9 bytes.
-      uint64_t low;
-      ::memcpy(&low, dst + byte, sizeof(low));
-      low &= (word << shift) | keepLow;
-      ::memcpy(dst + byte, &low, sizeof(low));
-      if (shift != 0) {
-        dst[byte + 8] &=
-            static_cast<uint8_t>((word >> (64 - shift)) | (0xFFu << shift));
-      }
-      continue;
-    }
-    // The end of `dst`: byte by byte.
-    for (uint32_t k = 0; k < 8 && byte + k < dstBytes; ++k) {
-      const auto bits = static_cast<uint32_t>((word >> (8 * k)) & 0xFF);
-      dst[byte + k] &=
-          static_cast<uint8_t>((bits << shift) | ((1u << shift) - 1));
-      if (shift != 0 && byte + k + 1 < dstBytes) {
-        dst[byte + k + 1] &=
-            static_cast<uint8_t>((bits >> (8 - shift)) | (0xFFu << shift));
-      }
-    }
-  }
-}
-
 /// Chunks of the moved null cells: 2048 cells each.
 constexpr uint32_t kNullChunkBytes = 64 << 10;
 
@@ -653,7 +611,7 @@ void NullCells::openColumn(Column& column) {
   auto* tails = reinterpret_cast<Tail*>(cells + numPartitions_);
   const Cell empty = emptyCell(ChunkAllocator::kInvalidCell);
   std::fill(cells, cells + numPartitions_, empty);
-  std::fill(tails, tails + numPartitions_, Tail{0, 0});
+  std::fill(tails, tails + numPartitions_, Tail{0, 0, 0});
   column = Column{cells, tails, block};
   tableBytes_ += static_cast<int64_t>(bytes);
 }
@@ -713,6 +671,7 @@ void NullCells::moveCell(Column& column, uint32_t pid) {
   Cell& cell = column.cells[pid];
   ::memcpy(chainCells_.cellData(id), &cell, sizeof(Cell));
   cell = emptyCell(id);
+  ++column.tails[pid].moved;
 }
 
 NullCells::Summary
@@ -744,19 +703,16 @@ NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
   return {NullTag::kRawNull, rowCount - tail.nulls};
 }
 
-void NullCells::emitBitmaps(
+void NullCells::emitRecords(
     uint32_t pid,
     const uint32_t* cols,
     uint32_t numCols,
-    uint32_t rowCount,
-    uint8_t* const* outs) const {
-  const uint32_t outBytes = (rowCount + 7) >> 3;
-  // A chain read from its last cell back; each cell ends where the next
-  // one starts.
+    uint8_t* out) const {
+  // A chain read from its last cell back, each cell written as a record
+  // just before the one after it.
   struct Walk {
     const Cell* cell;
-    uint32_t end;
-    uint8_t* out;
+    uint8_t* record;
   };
   constexpr uint32_t kMaxWalks = 16;
   Walk walks[kMaxWalks];
@@ -772,49 +728,41 @@ void NullCells::emitBitmaps(
         if (prev != nullptr) {
           __builtin_prefetch(prev);
         }
-        const uint32_t runRows = cell.run & kMaxRunRows;
-        const uint32_t start = walk.end - runRows - cell.fill;
-        if ((cell.run & kNullRun) != 0) {
-          clearBitRange(walk.out, start, start + runRows);
+        ::memcpy(walk.record, &cell.run, kNullRecordBytes);
+        // On the wire the bits past fill are zero.
+        uint8_t* bits =
+            walk.record + (kNullRecordBytes - kNullRecordBitmapBytes);
+        const uint32_t fullBytes = cell.fill >> 3;
+        if ((cell.fill & 7) != 0) {
+          bits[fullBytes] &= static_cast<uint8_t>((1u << (cell.fill & 7)) - 1);
         }
-        andBits(walk.out, outBytes, start + runRows, cell.bits, cell.fill);
+        const uint32_t usedBytes = (cell.fill + 7) >> 3;
+        ::memset(bits + usedBytes, 0, kNullRecordBitmapBytes - usedBytes);
         if (prev == nullptr) {
           walk = walks[--numWalks];
           continue;
         }
         walk.cell = prev;
-        walk.end = start;
+        walk.record -= kNullRecordBytes;
         ++i;
       }
     }
   };
   for (uint32_t i = 0; i < numCols; ++i) {
-    const uint32_t col = cols[i];
-    uint8_t* out = outs[i];
-    if (states_[col] == ColumnState::kAllNull) {
-      ::memset(out, 0, outBytes);
-      continue;
-    }
-    ::memset(out, 0xFF, outBytes);
-    const Column& column = columns_[col];
-    if (column.cells != nullptr) {
-      const Tail& tail = column.tails[pid];
-      BOLT_CHECK_LE(
-          tail.end, rowCount, "nulls recorded past the partition's rows");
-      walks[numWalks++] = {&column.cells[pid], tail.end, out};
-      if (numWalks == kMaxWalks) {
-        walkInStep();
-      }
+    const Column& column = columns_[cols[i]];
+    BOLT_DCHECK(column.cells != nullptr, "records of a column without nulls");
+    const uint32_t records = column.tails[pid].moved + 1;
+    ::memcpy(out, &records, sizeof(records));
+    out += sizeof(records);
+    // The last cell's record goes last.
+    walks[numWalks++] = {
+        &column.cells[pid], out + size_t{kNullRecordBytes} * (records - 1)};
+    out += size_t{kNullRecordBytes} * records;
+    if (numWalks == kMaxWalks) {
+      walkInStep();
     }
   }
   walkInStep();
-  if ((rowCount & 7) != 0) {
-    // Unused bits of the last byte must be zero.
-    const auto lastMask = static_cast<uint8_t>((1u << (rowCount & 7)) - 1);
-    for (uint32_t i = 0; i < numCols; ++i) {
-      outs[i][outBytes - 1] &= lastMask;
-    }
-  }
 }
 
 void NullCells::reset() {
@@ -844,7 +792,7 @@ void NullCells::releasePartition(uint32_t pid) {
       id = prev;
     }
     column.cells[pid] = emptyCell(ChunkAllocator::kInvalidCell);
-    column.tails[pid] = Tail{0, 0};
+    column.tails[pid] = Tail{0, 0, 0};
   }
 }
 

@@ -873,9 +873,25 @@ TEST_F(CellWriterTest, splitterSealsWindowAndFinishesResidentData) {
     const auto summary = in.nulls->summarize(0, 0, in.rowCounts[0]);
     EXPECT_EQ(summary.tag, NullTag::kRawNull);
     EXPECT_EQ(summary.nonNullCount, 2);
-    uint8_t bitmap = 0;
-    in.nulls->emitBitmap(0, 0, in.rowCounts[0], &bitmap);
-    EXPECT_EQ(bitmap, 0b110);
+    // One record: the first row null, the rows past it non-null.
+    std::vector<uint8_t> records(in.nulls->recordsBytes(0, 0));
+    const uint32_t col = 0;
+    in.nulls->emitRecords(0, &col, 1, records.data());
+    const uint8_t* cursor = records.data();
+    // A byte of bitmap, and room for the whole word the expansion writes.
+    uint8_t bitmap[8] = {};
+    uint32_t nonNull = 0;
+    std::string error;
+    ASSERT_TRUE(expandNullRecords(
+        cursor,
+        records.data() + records.size(),
+        in.rowCounts[0],
+        bitmap,
+        nonNull,
+        error))
+        << error;
+    EXPECT_EQ(bitmap[0], 0b110);
+    EXPECT_EQ(nonNull, 2);
   };
   splitOnePartition(
       splitter,
