@@ -297,7 +297,8 @@ std::string RunCompressor::Stats::toString() const {
       "runs stored={} deferred={} combined={} separate={}; "
       "frames compressed={} ({:.1f}MB -> {:.1f}MB) unshrunk={} ({:.1f}MB, "
       "early={}) skipped={} ({:.1f}MB) tiny={} ({:.1f}MB) unfunded={} "
-      "({:.1f}MB)",
+      "({:.1f}MB); null bodies compressed={} ({:.1f}MB -> {:.1f}MB) "
+      "stored={} ({:.1f}MB)",
       storedRuns,
       deferredRuns,
       combinedRuns,
@@ -313,7 +314,57 @@ std::string RunCompressor::Stats::toString() const {
       tinyFrames,
       mb(tinyBytes),
       unfundedFrames,
-      mb(unfundedBytes));
+      mb(unfundedBytes),
+      compressedNullBodies,
+      mb(nullInBytes),
+      mb(nullOutBytes),
+      storedNullBodies,
+      mb(storedNullBytes));
+}
+
+uint32_t RunCompressor::compressNullBody(BufferPtr& out, size_t at) {
+  const uint64_t bytes = out == nullptr ? 0 : out->size() - at;
+  if (codec_ == nullptr || bytes == 0) {
+    return 0;
+  }
+  const auto stored = [&] {
+    ++stats_.storedNullBodies;
+    stats_.storedNullBytes += bytes;
+    return 0;
+  };
+  if (bytes < kMinCompressBytes || skipFrame(nullSkip_)) {
+    return stored();
+  }
+  try {
+    resetBuffer(compressed_, codec_->maxCompressedLen(bytes), pool_);
+  } catch (const std::exception&) {
+    releaseWorkspace();
+    return stored();
+  }
+  int64_t written;
+  {
+    NanosecondTimer timer(compressTimeNs_);
+    written = codec_->compress(
+        out->as<uint8_t>() + at,
+        static_cast<int64_t>(bytes),
+        compressed_->asMutable<uint8_t>(),
+        static_cast<int64_t>(compressed_->size()));
+  }
+  BOLT_CHECK_GT(written, 0, "null body compression failed");
+  // Kept only at half its size or less: a null body compressing worse holds
+  // nulls spread at random, whose few saved bytes cost more codec time, on
+  // both sides, than they are worth.
+  const bool shrank = static_cast<uint64_t>(written) * 2 <= bytes;
+  learn(nullSkip_, shrank);
+  if (!shrank) {
+    return stored();
+  }
+  ::memcpy(out->asMutable<char>() + at, compressed_->as<char>(), written);
+  out->setSize(at + written);
+  ++stats_.compressedNullBodies;
+  stats_.nullInBytes += bytes;
+  stats_.nullOutBytes += static_cast<uint64_t>(written);
+  return static_cast<uint32_t>(bytes);
 }
 
 void RunCompressor::releaseWorkspace() {

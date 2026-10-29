@@ -22,6 +22,7 @@
 
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
+#include "bolt/shuffle/sparksql/cell/RunCompressor.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
 #include "bolt/vector/FlatVector.h"
 
@@ -1510,25 +1511,29 @@ void buildNullBody(
       out->asMutable<uint8_t>() + at);
 }
 
-void appendPayloadPrefix(
+uint64_t appendPayloadPrefix(
     const CellWindowInput& in,
     uint32_t pid,
     uint32_t runCount,
+    RunCompressor& compressor,
     BufferPtr& out,
     memory::MemoryPool* pool) {
   const uint32_t rows = in.rowCounts[pid];
   appendLe32(out, rows, pool);
   appendLe32(out, runCount, pool);
   appendLe64(out, in.variableBytes[pid], pool);
-  const size_t nullSizeAt = out->size();
-  appendLe32(out, 0, pool); // patched below
-  appendLe32(out, 0, pool); // uncompressed
+  const size_t nullSizesAt = out->size();
+  appendLe64(out, 0, pool); // stored and decoded sizes, patched below
   const size_t nullBodyAt = out->size();
   buildNullBody(in, pid, rows, out, pool);
-  const uint32_t nullLength = static_cast<uint32_t>(out->size() - nullBodyAt);
-  ::memcpy(out->asMutable<char>() + nullSizeAt, &nullLength, 4);
+  const uint32_t nullDecodedSize = compressor.compressNullBody(out, nullBodyAt);
+  const uint32_t nullStoredSize =
+      static_cast<uint32_t>(out->size() - nullBodyAt);
+  ::memcpy(out->asMutable<char>() + nullSizesAt, &nullStoredSize, 4);
+  ::memcpy(out->asMutable<char>() + nullSizesAt + 4, &nullDecodedSize, 4);
   appendBytes(
       out, in.encodingTags, (in.layout->numWireColumns() + 7) / 8, pool);
+  return nullDecodedSize == 0 ? 0 : nullDecodedSize - nullStoredSize;
 }
 
 uint64_t residentBytes(const CellWindowInput& in, uint32_t pid) {
