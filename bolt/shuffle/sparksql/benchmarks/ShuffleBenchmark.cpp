@@ -173,6 +173,7 @@ enum class Family {
   kStrRealistic,
   kQ22Rollup,
   kDeadWide,
+  kWideOptional,
 };
 
 const char* familyName(Family family) {
@@ -213,6 +214,8 @@ const char* familyName(Family family) {
       return "q22_rollup";
     case Family::kDeadWide:
       return "int_narrow_dead_wide";
+    case Family::kWideOptional:
+      return "wide50_optional";
   }
   return "?";
 }
@@ -336,6 +339,8 @@ std::vector<CaseSpec> caseSpecs() {
   // Many columns null throughout, as a wide table's unused ones.
   add("C-dead-wide", Family::kDeadWide, 1024, kStd);
   add("C-dead-wide-P30000", Family::kDeadWide, 30000, kStd);
+  // Optional fields of a wide table: nulls rare, or values rare.
+  add("C-wide-optional", Family::kWideOptional, 1024, kStd);
   return c;
 }
 
@@ -1015,6 +1020,30 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
                BIGINT(), 0, rng, [&](vector_size_t i) { return quantity[i]; }),
            flat<int64_t>(
                BIGINT(), 0, rng, [&](vector_size_t) { return int64_t{1}; })});
+    }
+    case Family::kWideOptional: {
+      // 50 bigints, half null in 0.1% of rows and half in 99.9%.
+      std::vector<std::string> names{"pid"};
+      std::vector<VectorPtr> columns{pid};
+      for (int col = 0; col < 50; ++col) {
+        names.push_back("o" + std::to_string(col));
+        auto column =
+            flat<int64_t>(BIGINT(), 0, rng, [&, col](vector_size_t i) {
+              return int64_t{batch} * kRowsPerBatch + i + col;
+            });
+        const uint32_t nullPerMille = col < 25 ? 1 : 999;
+        auto nulls = AlignedBuffer::allocate<bool>(
+            kRowsPerBatch, inputPool(), bits::kNotNull);
+        auto* raw = nulls->asMutable<uint64_t>();
+        for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+          if (rng() % 1000 < nullPerMille) {
+            bits::setNull(raw, i);
+          }
+        }
+        column->setNulls(std::move(nulls));
+        columns.push_back(std::move(column));
+      }
+      return makeRow(std::move(names), std::move(columns));
     }
     case Family::kWideSparse: {
       // 100 bigints, the first two with 1% sparse nulls.
