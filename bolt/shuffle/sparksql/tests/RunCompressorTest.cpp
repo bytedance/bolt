@@ -448,6 +448,59 @@ TEST_P(RunCompressorTest, adaptiveSkipsCombinedFrames) {
       RunLayout::kCombined);
 }
 
+TEST_P(RunCompressorTest, nullBodiesCompressInPlaceWhenTheyPay) {
+  RunCompressor compressor(
+      options_, cellOptions(/*adaptive=*/true), pool_.get(), &compressTimeNs_);
+  const std::string header(24, 'h');
+  const auto withBody = [&](const std::string& body) {
+    BufferPtr out;
+    appendBytes(out, header.data(), header.size(), pool_.get());
+    appendBytes(out, body.data(), body.size(), pool_.get());
+    return out;
+  };
+  // A compressible body after the header: replaced by its compressed form.
+  const auto body = repetitive(4000);
+  auto out = withBody(body);
+  EXPECT_EQ(compressor.compressNullBody(out, header.size()), body.size());
+  ASSERT_LT(out->size(), header.size() + body.size());
+  EXPECT_EQ(std::string(out->as<char>(), header.size()), header);
+  std::string back(body.size(), '\0');
+  EXPECT_EQ(
+      compressor.codec()->decompress(
+          out->as<uint8_t>() + header.size(),
+          static_cast<int64_t>(out->size() - header.size()),
+          reinterpret_cast<uint8_t*>(back.data()),
+          static_cast<int64_t>(back.size())),
+      static_cast<int64_t>(back.size()));
+  EXPECT_EQ(back, body);
+
+  // Below kMinCompressBytes: left as it is, without a try.
+  const uint64_t before = compressTimeNs_;
+  out = withBody(repetitive(200));
+  EXPECT_EQ(compressor.compressNullBody(out, header.size()), 0);
+  EXPECT_EQ(out->size(), header.size() + 200);
+  EXPECT_EQ(compressTimeNs_, before);
+
+  // One that does not compress to half its size stays as it is, and the
+  // next 9 are not tried.
+  std::mt19937_64 rng(3);
+  int tried = 0;
+  for (int i = 0; i < 20; ++i) {
+    const auto random = randomBytes(1000, rng);
+    out = withBody(random);
+    const uint64_t start = compressTimeNs_;
+    EXPECT_EQ(compressor.compressNullBody(out, header.size()), 0);
+    EXPECT_EQ(std::string(out->as<char>() + header.size(), 1000), random);
+    tried += compressTimeNs_ > start;
+  }
+  EXPECT_EQ(tried, 2);
+  const auto& stats = compressor.stats();
+  EXPECT_EQ(stats.compressedNullBodies, 1);
+  EXPECT_EQ(stats.nullInBytes, body.size());
+  EXPECT_EQ(stats.storedNullBodies, 21);
+  EXPECT_EQ(stats.storedNullBytes, 200 + 20 * 1000);
+}
+
 TEST_P(RunCompressorTest, adaptiveSkipsPerStream) {
   // A SEPARATE stream that does not shrink is tried 1 in 10 frames: counted
   // through the codec time, the other stream being too small to compress.

@@ -359,6 +359,7 @@ bool expandNullRecords(
     std::string& error);
 
 struct CellWindowInput;
+class RunCompressor;
 
 /// Bytes below which a frame is stored rather than compressed - a run, a
 /// stream of a SEPARATE run, a composite block: the codec's frame would not
@@ -406,12 +407,14 @@ void buildNullBody(
     memory::MemoryPool* pool);
 
 /// Appends everything of one partition's payload that precedes its runs,
-/// for the window in memory: fixed header, uncompressed null region and
-/// encoding tags.
-void appendPayloadPrefix(
+/// for the window in memory: fixed header, null body - compressed by
+/// `compressor` when that pays - and encoding tags. Returns the bytes the
+/// null body's compression saved, to count the payload's raw size.
+uint64_t appendPayloadPrefix(
     const CellWindowInput& in,
     uint32_t pid,
     uint32_t runCount,
+    RunCompressor& compressor,
     BufferPtr& out,
     memory::MemoryPool* pool);
 

@@ -165,6 +165,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     std::vector<SpillSegment> segments;
     uint64_t nullOffset{0};
     uint32_t nullLength{0};
+    /// The null body's size decompressed; 0 when stored as it is.
+    uint32_t nullDecodedSize{0};
     uint32_t rows{0};
     uint64_t variableBytes{0};
   };
