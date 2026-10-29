@@ -142,6 +142,11 @@ class RunCompressor {
   /// Gives the one-shot workspaces back to the pool.
   void releaseWorkspace();
 
+  /// Streams frames through `compressor` from now on, in place of the
+  /// codec's own stream form; it must write frames the codec reads. For
+  /// tests of codec behaviour the real codecs rarely show.
+  void testingSetStreamCompressor(std::unique_ptr<StreamCompressor> compressor);
+
   /// What the compressor did, counted per run and per frame - never per
   /// byte - so the counting costs nothing measurable.
   struct Stats {
@@ -195,6 +200,9 @@ class RunCompressor {
 
  private:
   using FrameVisitor = folly::FunctionRef<void(RunPieceFn fn)>;
+
+  /// Takes `compressor` as the stream form and sizes its buffers.
+  void useStreamCompressor(std::unique_ptr<StreamCompressor> compressor);
 
   /// How a frame went.
   struct Frame {
