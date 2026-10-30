@@ -37,6 +37,7 @@
 #include "bolt/dwio/dwrf/common/DecoderUtil.h"
 #include "bolt/dwio/dwrf/reader/ConstantColumnReader.h"
 #include "bolt/dwio/dwrf/reader/FlatMapColumnReader.h"
+#include "bolt/dwio/dwrf/reader/TimestampDecoder.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DictionaryVector.h"
@@ -68,20 +69,7 @@ void fillTimestamps(
     vector_size_t numValues) {
   for (vector_size_t i = 0; i < numValues; i++) {
     if (!nullsPtr || !bits::isBitNull(nullsPtr, i)) {
-      auto nanos = nanosPtr[i];
-      uint64_t zeros = nanos & 0x7;
-      nanos >>= 3;
-      if (zeros != 0) {
-        for (uint64_t j = 0; j <= zeros; ++j) {
-          nanos *= 10;
-        }
-      }
-      auto seconds = secondsPtr[i] + dwio::common::EPOCH_OFFSET;
-      ;
-      if (seconds < 0 && nanos != 0) {
-        seconds -= 1;
-      }
-      timestamps[i] = Timestamp(seconds, nanos);
+      timestamps[i] = decodeTimestamp(secondsPtr[i], nanosPtr[i]);
     }
   }
 }
