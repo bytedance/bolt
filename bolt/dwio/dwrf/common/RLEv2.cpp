@@ -372,11 +372,14 @@ void RleDecoderV2<isSigned>::skipValues(uint64_t numValues) {
             if (nSkip == 1) {
               prevValue = firstValue;
             } else {
-              prevValue =
-                  firstValue + static_cast<int64_t>(nSkip - 1) * deltaBase;
+              prevValue = static_cast<int64_t>(
+                  static_cast<uint64_t>(firstValue) +
+                  (nSkip - 1) * static_cast<uint64_t>(deltaBase));
             }
           } else {
-            prevValue += static_cast<int64_t>(nSkip) * deltaBase;
+            prevValue = static_cast<int64_t>(
+                static_cast<uint64_t>(prevValue) +
+                nSkip * static_cast<uint64_t>(deltaBase));
           }
           runRead += nSkip;
         } else {

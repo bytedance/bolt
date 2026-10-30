@@ -416,6 +416,48 @@ TEST_F(RLEv2Test, readValueFixedDeltaWideIntermediate) {
   EXPECT_EQ(decodeRLEv2(bytes.data(), bytes.size(), 4, 4), expected);
 }
 
+TEST_F(RLEv2Test, skipFixedDeltaWideIntermediate) {
+  auto pool = memory::memoryManager()->addLeafPool();
+
+  // Skipping the entire run computes first + 3 * delta. The mathematical
+  // result fits in int64_t, but the signed product does not.
+  const auto first = std::numeric_limits<int64_t>::min();
+  const int64_t delta = int64_t{1} << 62;
+  std::vector<unsigned char> bytes{0xc0, 0x03};
+  appendVarint(bytes, encodeZigZag(first));
+  appendVarint(bytes, encodeZigZag(delta));
+  RleDecoderV2<true> decoder(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(
+          bytes.data(), bytes.size()),
+      *pool);
+  decoder.skip(4);
+  EXPECT_NO_THROW(decoder.skipPending());
+}
+
+TEST_F(RLEv2Test, skipFixedDeltaWideIntermediateAfterRead) {
+  auto pool = memory::memoryManager()->addLeafPool();
+
+  // After reading the first value, skipping six values computes first +
+  // 6 * delta. The intermediate product overflows int64_t, while the value
+  // reached by the skip and the following value are both representable.
+  const auto first = std::numeric_limits<int64_t>::min();
+  const int64_t delta = int64_t{1} << 61;
+  std::vector<unsigned char> bytes{0xc0, 0x07};
+  appendVarint(bytes, encodeZigZag(first));
+  appendVarint(bytes, encodeZigZag(delta));
+  RleDecoderV2<true> decoder(
+      std::make_unique<dwio::common::SeekableArrayInputStream>(
+          bytes.data(), bytes.size()),
+      *pool);
+
+  int64_t value;
+  decoder.next(&value, 1, nullptr);
+  ASSERT_EQ(value, first);
+  decoder.skip(6);
+  decoder.next(&value, 1, nullptr);
+  EXPECT_EQ(value, 3 * delta);
+}
+
 TEST_F(RLEv2Test, readValueMixedRunsAndTruncatedInput) {
   const std::vector<unsigned char> bytes{
       0x07, 0x84, // Ten repetitions of 66.
