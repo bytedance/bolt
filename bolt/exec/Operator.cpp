@@ -35,6 +35,7 @@
 #include <common/base/WindowStat.h>
 #include <exec/OperatorMetric.h>
 #include <cstdint>
+#include <limits>
 #include "bolt/common/base/Counters.h"
 #include "bolt/common/base/HashBuildSpillStats.h"
 #include "bolt/common/base/StatsReporter.h"
@@ -49,6 +50,24 @@
 
 using bytedance::bolt::common::testutil::TestValue;
 namespace bytedance::bolt::exec {
+namespace {
+
+int64_t reclaimReservationBytes(
+    const memory::MemoryPool& pool,
+    const memory::MemoryPool& externalPool) {
+  BOLT_CHECK(&externalPool != &pool);
+  BOLT_CHECK_EQ(externalPool.kind(), memory::MemoryPool::Kind::kLeaf);
+  BOLT_CHECK(externalPool.root() == pool.root());
+  const auto reserved = pool.reservedBytes();
+  const auto externalReserved = externalPool.reservedBytes();
+  BOLT_CHECK_GE(reserved, 0);
+  BOLT_CHECK_GE(externalReserved, 0);
+  BOLT_CHECK_LE(
+      reserved, std::numeric_limits<int64_t>::max() - externalReserved);
+  return reserved + externalReserved;
+}
+
+} // namespace
 
 OperatorCtx::OperatorCtx(
     DriverCtx* driverCtx,
@@ -112,6 +131,20 @@ Operator::Operator(
           std::move(operatorType),
           driverCtx->isAbtestControlGroup,
           driverCtx->queryConfig().getAbtestMetrics()}) {}
+
+bool Operator::reclaimableBytes(uint64_t& reclaimableBytes) const {
+  if (!canReclaim()) {
+    reclaimableBytes = 0;
+    return false;
+  }
+  auto* externalPool = externalReclaimPool();
+  if (externalPool == nullptr) {
+    reclaimableBytes = pool()->reservedBytes();
+  } else {
+    reclaimableBytes = reclaimReservationBytes(*pool(), *externalPool);
+  }
+  return true;
+}
 
 void Operator::maybeSetReclaimer() {
   BOLT_CHECK_NULL(pool()->reclaimer());
@@ -1184,6 +1217,7 @@ uint64_t Operator::MemoryReclaimer::reclaim(
     uint64_t targetBytes,
     uint64_t /*unused*/,
     memory::MemoryReclaimer::Stats& stats) {
+  BOLT_CHECK_NOT_NULL(pool);
   std::shared_ptr<Driver> driver = ensureDriver();
   if (FOLLY_UNLIKELY(driver == nullptr)) {
     return 0;
@@ -1220,14 +1254,28 @@ uint64_t Operator::MemoryReclaimer::reclaim(
 
   RuntimeStatWriterScopeGuard opStatsGuard(op_);
 
+  auto* externalPool = op_->externalReclaimPool();
+  if (externalPool == nullptr) {
+    return memory::MemoryReclaimer::run(
+        [&]() {
+          int64_t reclaimedBytes{0};
+          {
+            memory::ScopedReclaimedBytesRecorder recoder(pool, &reclaimedBytes);
+            op_->reclaim(targetBytes, stats);
+          }
+          return reclaimedBytes;
+        },
+        stats);
+  }
+
   return memory::MemoryReclaimer::run(
       [&]() {
-        int64_t reclaimedBytes{0};
-        {
-          memory::ScopedReclaimedBytesRecorder recoder(pool, &reclaimedBytes);
-          op_->reclaim(targetBytes, stats);
-        }
-        return reclaimedBytes;
+        const auto before = reclaimReservationBytes(*pool, *externalPool);
+        op_->reclaim(targetBytes, stats);
+        pool->release();
+        externalPool->release();
+        const auto after = reclaimReservationBytes(*pool, *externalPool);
+        return after <= before ? before - after : int64_t{0};
       },
       stats);
 }

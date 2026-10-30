@@ -141,6 +141,10 @@ target_link_libraries(
 
 add_test(NAME bolt_shuffle_reader_test COMMAND bolt_shuffle_reader_test)
 
+add_executable(bolt_shuffle_writer_v2_test BoltShuffleWriterV2Test.cpp)
+target_link_libraries(bolt_shuffle_writer_v2_test PRIVATE bolt_gtest_main)
+add_test(NAME bolt_shuffle_writer_v2_test COMMAND bolt_shuffle_writer_v2_test)
+
 add_executable(bolt_shuffle_payload_test PayloadTest.cpp)
 
 target_link_libraries(bolt_shuffle_payload_test PRIVATE bolt_gtest_main)

@@ -59,8 +59,8 @@ TEST_F(QueryConfigTest, parquetReaderImplicitCastMask) {
 
 TEST_F(QueryConfigTest, bufferManagerSpillCompressionKind) {
   auto defaultConfig = QueryCtx::create(nullptr, QueryConfig{{}});
-  EXPECT_TRUE(
-      defaultConfig->queryConfig().bufferManagerSpillCompressionKind().empty());
+  EXPECT_EQ(
+      "zstd", defaultConfig->queryConfig().bufferManagerSpillCompressionKind());
 
   auto configured = QueryCtx::create(
       nullptr,
@@ -93,7 +93,7 @@ TEST_F(
     bufferManagerSpillCompressionKindHyphenatedKeyIsIgnored) {
   const auto oldKey = std::string{"buffer-manager"} + "-spill-compression-kind";
   QueryConfig config{{{oldKey, "openzl"}}};
-  EXPECT_TRUE(config.bufferManagerSpillCompressionKind().empty());
+  EXPECT_EQ("zstd", config.bufferManagerSpillCompressionKind());
 }
 
 TEST_F(QueryConfigTest, setConfig) {
@@ -124,6 +124,29 @@ TEST_F(QueryConfigTest, useMonoAlloc) {
       {{QueryConfig::kUseMonoAlloc, "false"}});
   queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
   ASSERT_FALSE(queryCtx->queryConfig().useMonoAlloc());
+}
+
+TEST_F(QueryConfigTest, simdHashTableEnabled) {
+  {
+    auto queryCtx = QueryCtx::create(nullptr, QueryConfig{{}});
+    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+
+  {
+    std::unordered_map<std::string, std::string> configData(
+        {{QueryConfig::kSimdHashTableEnabled, "false"}});
+    auto queryCtx =
+        QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+    EXPECT_FALSE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
+
+  {
+    std::unordered_map<std::string, std::string> configData(
+        {{QueryConfig::kSimdHashTableEnabled, "true"}});
+    auto queryCtx =
+        QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+    EXPECT_TRUE(queryCtx->queryConfig().simdHashTableEnabled());
+  }
 }
 
 TEST_F(QueryConfigTest, hashBuildProbeAdmissionUnderMemoryPressureConfig) {

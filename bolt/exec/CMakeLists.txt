@@ -59,6 +59,8 @@ bolt_add_library(
   HashPartitionFunction.cpp
   HashProbe.cpp
   HashTable.cpp
+  HashTableSimdHash.cpp
+  HashTableSimdKey.cpp
   IndexLookupJoin.cpp
   JoinBridge.cpp
   Limit.cpp
@@ -120,6 +122,10 @@ bolt_add_library(
   WindowBuild.cpp
   WindowFunction.cpp
   WindowPartition.cpp
+  bm/BmAggregateWindow.cpp
+  bm/BmRangeFrameBounds.cpp
+  bm/BmStreamingWindowBuild.cpp
+  bm/BmWindowPartition.cpp
 )
 
 set_target_properties(

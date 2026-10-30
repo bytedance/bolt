@@ -31,6 +31,7 @@
 #include "bolt/common/base/CoalesceIo.h"
 
 #include <gtest/gtest.h>
+#include <utility>
 using namespace bytedance::bolt;
 
 // Mockup of a cache entry: Offset, size, number of elements in a
@@ -125,4 +126,151 @@ TEST(CoalesceIoTest, basic) {
   EXPECT_EQ(2, ioGroups[1].size());
   EXPECT_EQ(1, ioGroups[2].size());
   EXPECT_EQ(1, ioGroups[3].size());
+}
+
+namespace {
+
+// Checks group boundaries, transferred ranges, and callback order together.
+void checkGroups(
+    const std::vector<IoUnit>& data,
+    const std::vector<int32_t>& expectedEnds,
+    int64_t expectedExtraBytes,
+    int32_t maxGap = 100,
+    int32_t rangesPerIo = 100,
+    int64_t byteLimit = 0) {
+  std::vector<int32_t> ends;
+  std::vector<int32_t> events;
+  std::vector<int64_t> skips;
+  std::vector<int64_t> expectedSkips;
+  int64_t coalescedBytes = 0;
+  int64_t payloadBytes = 0;
+  for (const auto& item : data) {
+    payloadBytes += item.size;
+  }
+  const auto stats = coalesceIo<IoUnit, Range>(
+      data,
+      maxGap,
+      rangesPerIo,
+      [&](int32_t index) { return data.at(index).offset; },
+      [&](int32_t index) {
+        events.push_back(3 * index);
+        coalescedBytes += data.at(index).size;
+        return data.at(index).size;
+      },
+      [&](int32_t index) {
+        events.push_back(3 * index + 1);
+        if (byteLimit > 0 && coalescedBytes > byteLimit) {
+          coalescedBytes = 0;
+          return kNoCoalesce;
+        }
+        return data.at(index).mayCoalesce ? 1 : kNoCoalesce;
+      },
+      [&](const IoUnit& item, std::vector<Range>& ranges) {
+        const auto index = &item - data.data();
+        events.push_back(3 * index + 2);
+        ranges.emplace_back(item.size, 1);
+      },
+      [&](int64_t gap, std::vector<Range>& ranges) {
+        skips.push_back(gap);
+        ranges.emplace_back(gap, 0);
+      },
+      [&](const auto&,
+          int32_t begin,
+          int32_t end,
+          int64_t offset,
+          const std::vector<Range>& ranges) {
+        ASSERT_LT(ends.size(), expectedEnds.size());
+        const auto expectedBegin =
+            ends.empty() ? 0 : expectedEnds[ends.size() - 1];
+        const auto expectedEnd = expectedEnds[ends.size()];
+        ends.push_back(end);
+        EXPECT_EQ(expectedBegin, begin);
+        EXPECT_EQ(expectedEnd, end);
+        EXPECT_EQ(data.at(expectedBegin).offset, offset);
+        std::vector<std::pair<int64_t, int32_t>> expectedRanges;
+        for (auto i = expectedBegin; i < expectedEnd; ++i) {
+          if (i > expectedBegin) {
+            const auto gap =
+                data[i].offset - data[i - 1].offset - data[i - 1].size;
+            if (gap > 0) {
+              expectedRanges.emplace_back(gap, 0);
+              expectedSkips.push_back(gap);
+            }
+          }
+          expectedRanges.emplace_back(data[i].size, 1);
+        }
+        std::vector<std::pair<int64_t, int32_t>> actualRanges;
+        for (const auto& range : ranges) {
+          actualRanges.emplace_back(range.size, range.numBuffers);
+        }
+        EXPECT_EQ(expectedRanges, actualRanges);
+      });
+  EXPECT_EQ(expectedEnds, ends);
+  EXPECT_EQ(expectedEnds.size(), stats.numIos);
+  EXPECT_EQ(payloadBytes, stats.payloadBytes);
+  EXPECT_EQ(expectedExtraBytes, stats.extraBytes);
+  EXPECT_EQ(expectedSkips, skips);
+  std::vector<int32_t> expectedEvents;
+  for (int32_t i = 0; i < 3 * data.size(); ++i) {
+    expectedEvents.push_back(i);
+  }
+  EXPECT_EQ(expectedEvents, events);
+}
+
+} // namespace
+
+TEST(CoalesceIoTest, noCoalesce) {
+  struct TestCase {
+    std::vector<bool> mayCoalesce;
+    std::vector<int32_t> ends;
+  };
+  const std::vector<TestCase> cases{
+      {{true, true}, {2}},
+      {{false, true}, {1, 2}},
+      {{true, true, false, true, true}, {2, 3, 5}},
+      {{true, false, false, true, true}, {1, 2, 3, 5}},
+      {{false, false, false}, {1, 2, 3}},
+      {{true, true, false}, {2, 3}},
+      {{false}, {1}},
+      {{true}, {1}}};
+  for (const auto gap : {0, 5}) {
+    for (const auto& test : cases) {
+      SCOPED_TRACE(
+          testing::Message() << "gap=" << gap << " flags="
+                             << testing::PrintToString(test.mayCoalesce));
+      std::vector<IoUnit> data;
+      for (int32_t i = 0; i < test.mayCoalesce.size(); ++i) {
+        data.emplace_back(100 + i * (10 + gap), 10, 1, test.mayCoalesce[i]);
+      }
+      checkGroups(data, test.ends, (data.size() - test.ends.size()) * gap);
+    }
+  }
+}
+
+TEST(CoalesceIoTest, ordinaryBoundaries) {
+  // The range limit splits when adding an item would reach the limit.
+  checkGroups({IoUnit(0, 10, 1), IoUnit(10, 10, 1)}, {1, 2}, 0, 100, 2);
+  for (const auto gap : {99, 100, 101, -1}) {
+    SCOPED_TRACE(gap);
+    const bool coalesces = gap == 99;
+    checkGroups(
+        {IoUnit(0, 10, 1), IoUnit(10 + gap, 10, 1)},
+        coalesces ? std::vector<int32_t>{2} : std::vector<int32_t>{1, 2},
+        coalesces ? gap : 0);
+  }
+}
+
+TEST(CoalesceIoTest, statefulByteLimit) {
+  // Match the readers: size accumulates bytes, numRanges resets on overflow.
+  // The third item exceeds the limit and must remain separate from the fourth.
+  checkGroups(
+      {IoUnit(0, 10, 1),
+       IoUnit(10, 10, 1),
+       IoUnit(20, 10, 1),
+       IoUnit(30, 10, 1)},
+      {2, 3, 4},
+      0,
+      100,
+      100,
+      20);
 }

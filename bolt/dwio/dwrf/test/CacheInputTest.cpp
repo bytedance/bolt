@@ -546,12 +546,18 @@ TEST_F(CacheTest, enqueueLargePairTriggersAllSplitCoalescedLoads) {
   const void* data;
   int32_t size;
   int32_t bytesRead = 0;
+  // The third quantum exceeds maxCoalesceBytes and cannot coalesce with either
+  // neighbor, producing groups [0, 2), [2, 3), and [3, 4). The paired stream
+  // must trigger all three loads on its first Next().
   while (second->Next(&data, &size)) {
+    ASSERT_GT(size, 0);
+    ASSERT_LE(size, region.length - bytesRead);
+    EXPECT_EQ(3, file->numIos() - previous);
     file->checkData(data, region.offset + bytesRead, size);
     bytesRead += size;
   }
   EXPECT_EQ(region.length, bytesRead);
-  EXPECT_EQ(2, file->numIos() - previous);
+  EXPECT_EQ(3, file->numIos() - previous);
 }
 
 TEST_F(CacheTest, window) {

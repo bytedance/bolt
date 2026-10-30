@@ -950,32 +950,74 @@ TEST_P(AggregationTest, hashmodes) {
       std::function<void(void*)>([&](void* newMode) {
         mode = *reinterpret_cast<BaseHashTable::HashMode*>(newMode);
       }));
-  auto task = assertQuery(
-      op,
-      "SELECT c0, c1, C2, C3, C4, C5, sum(1) FROM tmp "
-      " GROUP BY c0, c1, c2, c3, c4, c5");
-  if (!GetParam().useGPU) {
-    int32_t numAggregations = 0;
-    for (const auto& pipeline : task->taskStats().pipelineStats) {
-      for (const auto& operatorStats : pipeline.operatorStats) {
-        if (operatorStats.operatorType != "Aggregation") {
-          continue;
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    mode = BaseHashTable::HashMode::kArray;
+    const auto task =
+        AssertQueryBuilder(op, duckDbQueryRunner_)
+            .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+            .assertResults(
+                "SELECT c0, c1, C2, C3, C4, C5, sum(1) FROM tmp "
+                " GROUP BY c0, c1, c2, c3, c4, c5");
+    if (!GetParam().useGPU) {
+      int32_t numAggregations = 0;
+      for (const auto& pipeline : task->taskStats().pipelineStats) {
+        for (const auto& operatorStats : pipeline.operatorStats) {
+          if (operatorStats.operatorType != "Aggregation") {
+            continue;
+          }
+          EXPECT_EQ(
+              operatorStats.runtimeStats.at("hashtable.hashModeHash").sum, 1);
+          EXPECT_EQ(
+              operatorStats.runtimeStats.count("hashtable.hashModeArray"), 0);
+          EXPECT_EQ(
+              operatorStats.runtimeStats.count(
+                  "hashtable.hashModeNormalizedKey"),
+              0);
+          ++numAggregations;
         }
-        EXPECT_EQ(
-            operatorStats.runtimeStats.at("hashtable.hashModeHash").sum, 1);
-        EXPECT_EQ(
-            operatorStats.runtimeStats.count("hashtable.hashModeArray"), 0);
-        EXPECT_EQ(
-            operatorStats.runtimeStats.count("hashtable.hashModeNormalizedKey"),
-            0);
-        ++numAggregations;
       }
+      EXPECT_EQ(numAggregations, 1);
     }
-    EXPECT_EQ(numAggregations, 1);
-  }
 #ifndef NDEBUG
-  EXPECT_EQ(mode, BaseHashTable::HashMode::kHash);
+    EXPECT_EQ(mode, BaseHashTable::HashMode::kHash);
 #endif
+  }
+}
+
+TEST_P(AggregationTest, simdHashPreservesStoredNullKeysAcrossBatches) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not use the SIMD hash table";
+  }
+
+  const auto targetBucket =
+      folly::hasher<int32_t>{}(std::numeric_limits<int32_t>::max()) & 2040;
+  std::vector<int32_t> collisionKeys;
+  for (int32_t key = 0; collisionKeys.size() < targetBucket; ++key) {
+    if ((folly::hasher<int32_t>{}(key)&2040) == 0) {
+      collisionKeys.push_back(key);
+    }
+  }
+
+  const auto regularKeys =
+      makeRowVector({makeFlatVector<int32_t>(collisionKeys)});
+  const auto nullKey =
+      makeRowVector({makeNullableFlatVector<int32_t>({std::nullopt})});
+  const auto maxKey = makeRowVector(
+      {makeFlatVector<int32_t>({std::numeric_limits<int32_t>::max()})});
+  createDuckDbTable({regularKeys, nullKey, maxKey});
+  const auto plan = PlanBuilder()
+                        .values({regularKeys, nullKey, maxKey})
+                        .singleAggregation({"c0"}, {"count(1)"})
+                        .planNode();
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    AssertQueryBuilder(plan, duckDbQueryRunner_)
+        .config(QueryConfig::kHashAdaptivityEnabled, false)
+        .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+        .maxDrivers(1)
+        .assertResults("SELECT c0, count(1) FROM tmp GROUP BY c0");
+  }
 }
 
 TEST_P(AggregationTest, rangeToDistinct) {
@@ -1003,10 +1045,14 @@ TEST_P(AggregationTest, rangeToDistinct) {
                     GetParam().useGPU)
                 .planNode();
 
-  assertQuery(
-      op,
-      "SELECT c0, c1, c2, c3, c4, c5, sum(1) FROM tmp "
-      " GROUP BY c0, c1, c2, c3, c4, c5");
+  for (bool simdEnabled : {false, true}) {
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    AssertQueryBuilder(op, duckDbQueryRunner_)
+        .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+        .assertResults(
+            "SELECT c0, c1, c2, c3, c4, c5, sum(1) FROM tmp "
+            " GROUP BY c0, c1, c2, c3, c4, c5");
+  }
 
   RowVectorPtr output = AssertQueryBuilder(op).copyResults(pool_.get());
 
@@ -2096,11 +2142,11 @@ TEST_P(AggregationTest, DISABLED_memoryAllocations) {
 
   task = assertQuery(plan, "SELECT c0, sum(c0 + c1) FROM tmp GROUP BY 1");
 
-  // Verify memory allocations. Aggregation should make 5 allocations: 1 for the
-  // hash table, 1 for the RowContainer holding accumulators, 3 for results (2
-  // for values and nulls buffers of the grouping key column, 1 for sum column).
+  // Verify memory allocations. Aggregation should make 4 allocations: 1 for the
+  // hash table, 1 for the RowContainer holding accumulators, 2 for results (1
+  // for values of the grouping key column, 1 for sum column).
   planStats = toPlanStats(task->taskStats());
-  ASSERT_EQ(5, planStats.at(aggNodeId).numMemoryAllocations);
+  ASSERT_EQ(4, planStats.at(aggNodeId).numMemoryAllocations);
 }
 
 TEST_P(AggregationTest, optimizedDistinctAggregationPath) {

@@ -95,8 +95,9 @@ FLATTEN void VectorHasher::hashValues(
     });
   } else if (decoded_.mayHaveNulls()) {
     auto hashVec = result;
-    std::vector<uint64_t> hashVector(rows.end(), kNullHash);
+    std::vector<uint64_t> hashVector;
     if (mix) {
+      hashVector.resize(rows.end(), kNullHash);
       hashVec = hashVector.data();
     } else {
       rows.applyToSelected(
@@ -104,7 +105,7 @@ FLATTEN void VectorHasher::hashValues(
     }
     rows.applyToSelected(
         [&](vector_size_t row) { hashVec[row] = hashOne<Kind>(decoded_, row); },
-        decoded_.nulls());
+        decoded_.nulls(&rows));
     if (mix) {
       rows.applyToSelected([&](vector_size_t row) {
         result[row] = bits::hashMix(result[row], hashVec[row]);

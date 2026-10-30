@@ -66,7 +66,7 @@ void recordHeapBase(ChunkData& chunk, const BlockRef& heap) {
 } // namespace
 
 BlockRef BmSegmentCollection::addBlock(uint32_t blockSize) {
-  auto handle = bufferManager_->Allocate(blockSize, tag_);
+  auto handle = bufferManager_->Allocate(blockSize, tag_, allocationPool_);
   BlockRef block;
   block.id = nextBlockId_++;
   block.size = blockSize;

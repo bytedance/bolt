@@ -93,6 +93,7 @@ round(const TNum& number, const TDecimals& decimals = 0) {
     auto res = decimal.floatValue();
     return res;
   }
+  assert(false);
 }
 
 // This is used by Bolt for floating points plus.

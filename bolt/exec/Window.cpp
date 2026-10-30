@@ -35,6 +35,8 @@
 #include "bolt/exec/SpillableWindowBuild.h"
 #include "bolt/exec/StreamingWindowBuild.h"
 #include "bolt/exec/Task.h"
+#include "bolt/exec/bm/BmAggregateWindow.h"
+#include "bolt/exec/bm/BmStreamingWindowBuild.h"
 namespace bytedance::bolt::exec {
 
 tsan_atomic<WindowBuildType>& getWindowBuildType() {
@@ -50,6 +52,49 @@ TestWindowInjection::TestWindowInjection(WindowBuildType WindowBuildType) {
 TestWindowInjection::~TestWindowInjection() {
   getWindowBuildType() = WindowBuildType::kUnspecified;
 }
+
+namespace {
+
+bool isBmRowContainerSupportedType(const TypePtr& type);
+
+template <TypeKind Kind>
+bool isBmRowContainerSupportedTypeKind(const TypePtr& type) {
+  if constexpr (
+      Kind == TypeKind::ARRAY || Kind == TypeKind::MAP ||
+      Kind == TypeKind::ROW) {
+    for (uint32_t i = 0; i < type->size(); ++i) {
+      if (!isBmRowContainerSupportedType(type->childAt(i))) {
+        return false;
+      }
+    }
+    return true;
+  } else if constexpr (
+      Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+    return true;
+  } else if constexpr (
+      Kind == TypeKind::UNKNOWN || !TypeTraits<Kind>::isPrimitiveType ||
+      !TypeTraits<Kind>::isFixedWidth) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+bool isBmRowContainerSupportedType(const TypePtr& type) {
+  return BOLT_DYNAMIC_TYPE_DISPATCH_ALL(
+      isBmRowContainerSupportedTypeKind, type->kind(), type);
+}
+
+bool isBmStreamingWindowBuildSupportedInput(const RowTypePtr& inputType) {
+  for (const auto& type : inputType->children()) {
+    if (!isBmRowContainerSupportedType(type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
 
 Window::Window(
     int32_t operatorId,
@@ -100,6 +145,10 @@ Window::Window(
       ignore,
       maxBatchRows,
       preferredBatchBytes);
+  BOLT_CHECK(windowBuildKind_ != WindowBuildKind::kUnknown);
+  addRuntimeStat(
+      "windowBuildType",
+      RuntimeCounter{static_cast<int64_t>(windowBuildKind_)});
 }
 
 void Window::setRowsStreamingWindowBuild(
@@ -122,6 +171,7 @@ void Window::setRowsStreamingWindowBuild(
   } else {
     windowBuild_ = ROWS_STREAMING_WINDOW_BUILD_CTR(false);
   }
+  windowBuildKind_ = WindowBuildKind::kRowsStreaming;
   windowBuild_->setIgnorePeer(ignorePeer);
 }
 
@@ -141,6 +191,7 @@ void Window::setStreamingWindowBuild(
   if (needSort_) {
     LOG(INFO) << "SortWindowBuild";
     windowBuild_ = SORT_WINDOW_BUILD_CTR();
+    windowBuildKind_ = WindowBuildKind::kSort;
   } else {
     LOG(INFO) << "StreamingWindowBuild";
     windowBuild_ = std::make_unique<StreamingWindowBuild>(
@@ -150,6 +201,7 @@ void Window::setStreamingWindowBuild(
         &nonReclaimableSection_,
         spillThreshold,
         enableJit_);
+    windowBuildKind_ = WindowBuildKind::kStreaming;
   }
 }
 
@@ -175,7 +227,44 @@ void Window::setSpillableWindowBuild(
   } else {
     windowBuild_ = SPILLABLE_WINDOW_BUILD_CTR(false);
   }
+  windowBuildKind_ = WindowBuildKind::kSpillable;
   windowBuild_->setIfAggWindowFunc(isAggWindowFunc_);
+}
+
+void Window::setBmStreamingWindowBuild(
+    bool ignorePeer,
+    const common::SpillConfig* spillConfig,
+    int64_t spillThreshold) {
+  BOLT_CHECK(
+      !needSort_, "BmStreamingWindowBuild requires pre-sorted window input");
+  BOLT_USER_CHECK(
+      isBmStreamingWindowBuildSupportedInput(windowNode_->inputType()),
+      "BmStreamingWindowBuild does not support input type {}",
+      windowNode_->inputType()->toString());
+  auto bufferManager = operatorCtx_->driverCtx()->bufferManager();
+  BOLT_CHECK_NOT_NULL(
+      bufferManager,
+      "BmStreamingWindowBuild requires QueryConfig::kBufferManagerEnabled");
+  LOG(INFO) << "BmStreamingWindowBuild";
+  windowBuild_ = std::make_unique<window::BmStreamingWindowBuild>(
+      windowNode_,
+      pool(),
+      spillConfig,
+      &nonReclaimableSection_,
+      spillThreshold,
+      enableJit_,
+      std::move(bufferManager));
+  windowBuildKind_ = WindowBuildKind::kBmStreaming;
+  windowBuild_->setIgnorePeer(ignorePeer);
+  isBmStreamingWindowBuild_ = true;
+}
+
+memory::MemoryPool* Window::externalReclaimPool() const {
+  if (!isBmStreamingWindowBuild_) {
+    return nullptr;
+  }
+  return static_cast<const window::BmStreamingWindowBuild*>(windowBuild_.get())
+      ->allocationPool();
 }
 
 void Window::setWindowBuild(
@@ -190,12 +279,27 @@ void Window::setWindowBuild(
       if (windowNode_->followedTopNum() > 0 && needSort_) {
         LOG(INFO) << "sort+SortWindowBuild for follwedTopNum > 0 ";
         windowBuild_ = SORT_WINDOW_BUILD_CTR();
+        windowBuildKind_ = WindowBuildKind::kSort;
         return;
       }
 
       if (supportRowsStreaming()) {
         setRowsStreamingWindowBuild(ignorePeer, spillConfig, spillThreshold);
         return;
+      }
+
+      if (!needSort_ &&
+          operatorCtx_->driverCtx()
+              ->queryConfig()
+              .bmStreamingWindowBuildEnabled()) {
+        if (isBmStreamingWindowBuildSupportedInput(windowNode_->inputType())) {
+          setBmStreamingWindowBuild(ignorePeer, spillConfig, spillThreshold);
+          return;
+        }
+        LOG(INFO) << "BmStreamingWindowBuild is enabled but input type "
+                  << windowNode_->inputType()->toString()
+                  << " is not supported by BmRowContainer. Falling back to "
+                     "existing WindowBuild selection.";
       }
 
       if (isSpillableWindowBuild()) {
@@ -218,6 +322,9 @@ void Window::setWindowBuild(
       BOLT_CHECK_GT(isSpillableWindowBuild(), 0);
       setSpillableWindowBuild(
           maxBatchRows, preferredBatchBytes, spillConfig, spillThreshold);
+      return;
+    case WindowBuildType::kBmStreamingWindowBuild:
+      setBmStreamingWindowBuild(ignorePeer, spillConfig, spillThreshold);
       return;
   }
 } // namespace bytedance::bolt::exec
@@ -355,17 +462,42 @@ void Window::createWindowFunctions() {
       }
     }
 
-    windowFunctions_.push_back(WindowFunction::create(
-        windowNodeFunction.functionCall->name(),
-        functionArgs,
-        windowNodeFunction.functionCall->type(),
-        windowNodeFunction.ignoreNulls,
-        operatorCtx_->pool(),
-        &stringAllocator_,
-        operatorCtx_->driverCtx()->queryConfig()));
+    bool createdWindowFunction = false;
+    if (isBmStreamingWindowBuild_) {
+      auto bmAggregateWindowFunction = window::createBmAggregateWindowFunction(
+          windowNodeFunction.functionCall->name(),
+          functionArgs,
+          windowNodeFunction.functionCall->type(),
+          windowNodeFunction.ignoreNulls,
+          operatorCtx_->pool(),
+          &stringAllocator_,
+          operatorCtx_->driverCtx()->queryConfig());
+      if (bmAggregateWindowFunction) {
+        windowFunctions_.push_back(std::move(bmAggregateWindowFunction));
+        createdWindowFunction = true;
+      }
+    }
+
+    if (!createdWindowFunction) {
+      windowFunctions_.push_back(WindowFunction::create(
+          windowNodeFunction.functionCall->name(),
+          functionArgs,
+          windowNodeFunction.functionCall->type(),
+          windowNodeFunction.ignoreNulls,
+          operatorCtx_->pool(),
+          &stringAllocator_,
+          operatorCtx_->driverCtx()->queryConfig()));
+    }
 
     windowFrames_.push_back(
         createWindowFrame(windowNode_, windowNodeFunction.frame, inputType));
+  }
+
+  if (isBmStreamingWindowBuild_) {
+    auto aggregation = window::prepareBmAggregateWindowFunctions(
+        *windowNode_, windowFunctions_, operatorCtx_->pool());
+    dynamic_cast<window::BmStreamingWindowBuild*>(windowBuild_.get())
+        ->setInputAggregation(std::move(aggregation));
   }
 }
 
@@ -464,7 +596,7 @@ void Window::reclaim(
   BOLT_CHECK(canReclaim());
   BOLT_CHECK(!nonReclaimableSection_);
 
-  if (!needSort_ && noMoreInput_) {
+  if (!needSort_ && noMoreInput_ && !isBmStreamingWindowBuild_) {
     ++stats.numNonReclaimableAttempts;
     // TODO Add support for spilling after noMoreInput().
     LOG(WARNING)
@@ -486,9 +618,6 @@ void Window::reclaim(
   }
 
   pool()->release();
-  LOG(INFO) << __FUNCTION__
-            << " after release usedBytes = " << pool()->currentBytes()
-            << ", reservedBytes = " << pool()->reservedBytes();
 }
 
 void Window::createPeerAndFrameBuffers() {
@@ -814,10 +943,11 @@ void Window::getInputColumns(
     vector_size_t resultOffset,
     const RowVectorPtr& result) {
   auto numRows = endRow - startRow;
-  for (int i = 0; i < numInputColumns_; ++i) {
-    currentPartition_->extractColumn(
-        i, partitionOffset_, numRows, resultOffset, result->childAt(i));
-  }
+  currentPartition_->extractInputColumns(
+      partitionOffset_,
+      numRows,
+      resultOffset,
+      {result->children().data(), static_cast<size_t>(numInputColumns_)});
 }
 
 void Window::callApplyForPartitionRows(
@@ -959,7 +1089,8 @@ RowVectorPtr Window::getOutput() {
   }
 
   auto numOutputRows = std::min(numRowsPerOutput_, numRowsLeft);
-  auto usedBytes = operatorCtx_->pool()->currentBytes();
+  const auto usedBytes =
+      isBmStreamingWindowBuild_ ? 0 : operatorCtx_->pool()->currentBytes();
   auto result = BaseVector::create<RowVector>(
       outputType_, numOutputRows, operatorCtx_->pool());
 
@@ -969,18 +1100,41 @@ RowVectorPtr Window::getOutput() {
     windowBuild_->finish();
   }
 
-  auto resultBytes = operatorCtx_->pool()->currentBytes() - usedBytes;
-  std::optional<uint64_t> resultRowSize = resultBytes / numResultRows;
-
-  auto rowsPerOutput = outputBatchRows(resultRowSize);
-  if (rowsPerOutput < maxNumRowsPerOutput_) {
-    numRowsPerOutput_ = rowsPerOutput;
-    windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+  if (!isBmStreamingWindowBuild_) {
+    auto resultBytes = operatorCtx_->pool()->currentBytes() - usedBytes;
+    std::optional<uint64_t> resultRowSize = resultBytes / numResultRows;
+    auto rowsPerOutput = outputBatchRows(resultRowSize);
+    if (rowsPerOutput < maxNumRowsPerOutput_) {
+      numRowsPerOutput_ = rowsPerOutput;
+      windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+    }
+    return numResultRows < numOutputRows
+        ? std::dynamic_pointer_cast<RowVector>(result->slice(0, numResultRows))
+        : result;
   }
 
-  return numResultRows < numOutputRows
-      ? std::dynamic_pointer_cast<RowVector>(result->slice(0, numResultRows))
-      : result;
+  if (numResultRows < numOutputRows) {
+    result =
+        std::dynamic_pointer_cast<RowVector>(result->slice(0, numResultRows));
+  }
+
+  if (numResultRows > 0) {
+    // Estimate from the returned rows. Pool usage also includes Window state
+    // that may be allocated or released while producing the batch.
+    const auto resultBytes = result->estimateFlatSize();
+    const auto resultRowSize =
+        resultBytes / numResultRows + (resultBytes % numResultRows != 0);
+    // Frame buffers were allocated at initialization. Allow batches to grow
+    // back to that capacity after narrower output, but never exceed it.
+    const auto rowsPerOutput =
+        std::min(outputBatchRows(resultRowSize), maxNumRowsPerOutput_);
+    if (rowsPerOutput != numRowsPerOutput_) {
+      numRowsPerOutput_ = rowsPerOutput;
+      windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+    }
+  }
+
+  return result;
 }
 
 RowVectorPtr Window::getOutputFromSpilledPartition() {
@@ -1128,6 +1282,24 @@ void Window::recordWindowStats() {
   if (!hasRecordSpillStats_ && spillStats) {
     recordSpillStats(spillStats.value());
     hasRecordSpillStats_ = true;
+  }
+  if (isBmStreamingWindowBuild_ && !hasRecordedBmWindowStats_) {
+    const auto* bmWindowBuild =
+        dynamic_cast<const window::BmStreamingWindowBuild*>(windowBuild_.get());
+    BOLT_CHECK_NOT_NULL(bmWindowBuild);
+    const auto accessStats = bmWindowBuild->windowAccessStats();
+    addRuntimeStat(
+        "bmFastPathPartitions",
+        RuntimeCounter{static_cast<int64_t>(accessStats.fastPathPartitions)});
+    addRuntimeStat(
+        "bmWindowReadPartitions",
+        RuntimeCounter{static_cast<int64_t>(accessStats.windowReadPartitions)});
+    LOG(INFO) << "BM_WINDOW_ACCESS_SUMMARY fastPathPartitions="
+              << accessStats.fastPathPartitions
+              << ", fastPathRows=" << accessStats.fastPathRows
+              << ", windowReadPartitions=" << accessStats.windowReadPartitions
+              << ", windowReadRows=" << accessStats.windowReadRows;
+    hasRecordedBmWindowStats_ = true;
   }
   auto windowStatsOr = windowStats();
   addInputTimeUs_ = 0;

@@ -64,6 +64,7 @@ struct OpenZlOptions {
   size_t graphCacheCapacity{256};
   // Zero means that the compressed output size is unlimited.
   size_t maxOutputBytes{0};
+  int compressionLevel{3};
 };
 
 struct CompressionConfig {

@@ -1340,3 +1340,15 @@ TEST_F(JsonCastTest, fromJsonIgnoresDuplicateCaseInsensitiveFields) {
   auto expected = makeRowVector({"FieldA", "Foo"}, {fieldA, foo});
   bytedance::bolt::test::assertEqualVectors(expected, result);
 }
+
+TEST_F(JsonCastTest, toArrayFromObject) {
+  // SELECT CAST(json_parse('{"a": "A"}') AS ARRAY(ROW(a VARCHAR)));
+  // Unlike Spark's from_json, which parses a JSON object as a single-element
+  // array when the target is an array of ROW, Presto's cast from JSON to ARRAY
+  // requires the JSON value to be an array and throws for a JSON object.
+  testThrow<JsonNativeType>(
+      JSON(),
+      ARRAY(ROW({"a"}, {VARCHAR()})),
+      {R"({"a": "A"})"_sv},
+      "The JSON element does not have the requested type");
+}

@@ -53,6 +53,8 @@ struct BlockMemory {
   // Generation token for lazy eviction queue entries. It changes whenever an
   // older queued entry should no longer represent this block's evictability.
   uint64_t evictionSequence{0};
+  // Keep the allocation owner alive until payload and pending reads are gone.
+  std::shared_ptr<MemoryPool> allocationPool;
   std::shared_ptr<const BlockDescriptor> descriptor;
   std::optional<IoBuffer> payload;
   std::optional<ManagedFileSegment> segment;

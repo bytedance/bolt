@@ -117,6 +117,7 @@ def is_empty(value: str | None) -> bool:
 
 def quote_string(value: str) -> str:
     escaped = unquote_string(value).replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return f'"{escaped}"'
 
 
