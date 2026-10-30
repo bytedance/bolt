@@ -1190,12 +1190,28 @@ class RowContainer {
     if constexpr (std::is_same_v<T, StringView>) {
       if constexpr (isContinuousString) {
         extractContinuousStringsBatch(
-            rows, rowNumbers, numRows, offset, nullByte, nullMask,
-            resultOffset, result, true, exactSize);
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            nullByte,
+            nullMask,
+            resultOffset,
+            result,
+            true,
+            exactSize);
       } else {
         extractStringsBatch(
-            rows, rowNumbers, numRows, offset, nullByte, nullMask,
-            resultOffset, result, true, exactSize);
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            nullByte,
+            nullMask,
+            resultOffset,
+            result,
+            true,
+            exactSize);
       }
       return;
     }
@@ -1237,12 +1253,28 @@ class RowContainer {
     if constexpr (std::is_same_v<T, StringView>) {
       if constexpr (isContinuousString) {
         extractContinuousStringsBatch(
-            rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
-            false, exactSize);
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            0,
+            0,
+            resultOffset,
+            result,
+            false,
+            exactSize);
       } else {
         extractStringsBatch(
-            rows, rowNumbers, numRows, offset, 0, 0, resultOffset, result,
-            false, exactSize);
+            rows,
+            rowNumbers,
+            numRows,
+            offset,
+            0,
+            0,
+            resultOffset,
+            result,
+            false,
+            exactSize);
       }
       return;
     }
@@ -1496,9 +1528,9 @@ class RowContainer {
       bool exactSize);
 
   // Batched variant of extractContinuousString for rows whose strings are
-  // stored contiguously (no HSA headers, single-piece by construction):
-  // pre-scan to size the result buffer once, then copy all out-of-line
-  // strings in a single pass. No multi-piece handling is needed.
+  // stored contiguously (no allocator block headers, single-piece by
+  // construction): pre-scan to size the result buffer once, then copy all
+  // out-of-line strings in a single pass. No multi-piece handling is needed.
   static void extractContinuousStringsBatch(
       const char* const* rows,
       folly::Range<const vector_size_t*> rowNumbers,

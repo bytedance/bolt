@@ -952,15 +952,16 @@ void RowContainer::extractStringsBatch(
         rawValues[resultIndex] = value;
         meta[i] = {nullptr, 0, false};
       } else {
-        auto* header = reinterpret_cast<const HashStringAllocator::Header*>(
-            value.data()) - 1;
+        auto* header =
+            reinterpret_cast<const HashStringAllocator::Header*>(value.data()) -
+            1;
         // Multi-piece if the first block is continued or smaller than the
         // string: the remaining bytes live in later blocks and must be
         // gathered through prepareRead.
         bool isMultiPiece =
             header->isContinued() || header->size() < value.size();
-        meta[i] = {value.data(), static_cast<uint32_t>(value.size()),
-                   isMultiPiece};
+        meta[i] = {
+            value.data(), static_cast<uint32_t>(value.size()), isMultiPiece};
         totalBytes += value.size();
       }
     }
