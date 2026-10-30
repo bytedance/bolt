@@ -18,6 +18,7 @@
 #include "bolt/expression/SpecialFormRegistry.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
+#include "bolt/functions/flinksql/Comparisons.h"
 #include "bolt/functions/flinksql/DateTimeDiff.h"
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
 #include "bolt/functions/flinksql/HashCodeFunction.h"
@@ -69,6 +70,10 @@ static void registerStringFunctions(const std::string& prefix) {
       {prefix + "split_index"});
   registerFunction<SplitIndex, Varchar, Varchar, int32_t, int64_t>(
       {prefix + "split_index"});
+  registerFunction<FlinkSplitIndex, Varchar, Varchar, Varchar, int64_t>(
+      {prefix + "flink_split_index"});
+  registerFunction<FlinkSplitIndex, Varchar, Varchar, int32_t, int64_t>(
+      {prefix + "flink_split_index"});
   registerFunction<FlinkParseUrlFunction, Varchar, Varchar, Varchar>(
       {prefix + "flink_parse_url"});
   registerFunction<FlinkParseUrlFunction, Varchar, Varchar, Varchar, Varchar>(
@@ -148,6 +153,13 @@ static void registerMathFunctions(const std::string& prefix) {
       {prefix + "rand_integer"});
   registerFunction<RandIntegerFunction, int32_t, int32_t, Constant<int32_t>>(
       {prefix + "rand_integer"});
+  registerFunction<FlinkRandFunction, double>({prefix + "flink_rand"});
+  registerFunction<FlinkRandFunction, double, int32_t>({prefix + "flink_rand"});
+  registerFunction<FlinkRandFunction, double, int64_t>({prefix + "flink_rand"});
+  registerFunction<FlinkRandIntegerFunction, int32_t, int32_t>(
+      {prefix + "flink_rand_integer"});
+  registerFunction<FlinkRandIntegerFunction, int32_t, int32_t, int32_t>(
+      {prefix + "flink_rand_integer"});
 }
 
 static void registerJsonFunctions(const std::string& prefix) {
@@ -207,7 +219,15 @@ void registerSpecialFormFunctions(const std::string& prefix) {
 
 } // namespace
 
+static void registerComparisonFunctions(const std::string& prefix) {
+  registerFunction<RowEqualFunction, bool, Generic<T1>, Generic<T1>>(
+      {prefix + "flink_complex_equal"});
+  BOLT_REGISTER_VECTOR_FUNCTION(
+      flink_map_equal, prefix + "flink_complex_equal");
+}
+
 void registerFunctions(const std::string& prefix) {
+  registerComparisonFunctions(prefix);
   registerStringFunctions(prefix);
   registerDatetimeFunctions(prefix);
   registerMathFunctions(prefix);

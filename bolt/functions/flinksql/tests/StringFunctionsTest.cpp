@@ -18,6 +18,8 @@
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
 namespace bytedance::bolt::functions::flinksql::test {
 
+using bytedance::bolt::test::assertEqualVectors;
+
 namespace {
 class StringFunctionsTest : public FlinkFunctionBaseTest {
  public:
@@ -174,6 +176,69 @@ TEST_F(StringFunctionsTest, splitIndex) {
   EXPECT_EQ(std::nullopt, splitIndexInt("AQIDBA==", 0, 0));
   EXPECT_EQ(std::nullopt, splitIndexInt("AQIDBA==", 'I', std::nullopt));
   EXPECT_EQ(std::nullopt, splitIndexInt("", ',', 0));
+}
+
+TEST_F(StringFunctionsTest, splitIndexUsesUnicodeIntegerDelimiter) {
+  auto actual = evaluate(
+      "flink_split_index(c0, c1, c2)",
+      makeRowVector(
+          {makeFlatVector<std::string>({"aéb", "aéb", "aÿb", "x"}),
+           makeFlatVector<int32_t>({233, 233, 255, 256}),
+           makeFlatVector<int64_t>({0, 1, 1, 0})}));
+  assertEqualVectors(
+      makeNullableFlatVector<std::string>({"a", "b", "b", std::nullopt}),
+      actual);
+}
+
+TEST_F(StringFunctionsTest, splitIndexLegacySemanticsAreUnchanged) {
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "split_index(c0, c1, c2)",
+          std::optional<std::string>{"a b"},
+          std::optional<std::string>{""},
+          std::optional<int64_t>{0}),
+      "a b");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "split_index(c0, c1, c2)",
+          std::optional<std::string>{"aéb"},
+          std::optional<int32_t>{233},
+          std::optional<int64_t>{0}),
+      "aéb");
+  EXPECT_EQ(
+      evaluateOnce<std::string>(
+          "split_index(c0, c1, c2)",
+          std::optional<std::string>{"a\xe9"
+                                     "b"},
+          std::optional<int32_t>{233},
+          std::optional<int64_t>{0}),
+      "a");
+}
+
+TEST_F(StringFunctionsTest, splitIndexEmptyDelimiterPreservesWhitespaceTokens) {
+  auto actual = evaluate(
+      "flink_split_index(c0, c1, c2)",
+      makeRowVector(
+          {makeFlatVector<std::string>(
+               {"a b", "a  b", "a b", "", "a", "a\u180eb"}),
+           makeFlatVector<std::string>({"", "", "", "", "", ""}),
+           makeFlatVector<int64_t>({0, 1, 1, 0, 1, 1})}));
+  assertEqualVectors(
+      makeNullableFlatVector<std::string>(
+          {"a", "", "b", std::nullopt, std::nullopt, "b"}),
+      actual);
+}
+
+TEST_F(StringFunctionsTest, splitIndexResultRetainsInputBuffer) {
+  const std::string first(128, 'a');
+  VectorPtr result;
+  {
+    auto input = makeFlatVector<std::string>({first + ",b"});
+    result = evaluate(
+        "flink_split_index(c0, ',', cast(0 as bigint))",
+        makeRowVector({input}));
+  }
+  assertEqualVectors(makeFlatVector<std::string>({first}), result);
 }
 
 TEST_F(StringFunctionsTest, isDigit) {
