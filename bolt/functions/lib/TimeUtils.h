@@ -30,7 +30,10 @@
 
 #pragma once
 
+#include <date/date.h>
+#include <date/iso_week.h>
 #include <date/tz.h>
+#include <chrono>
 #include <regex>
 
 #include "bolt/core/QueryConfig.h"
@@ -162,6 +165,25 @@ FOLLY_ALWAYS_INLINE int32_t getQuarter(const std::tm& time) {
 
 FOLLY_ALWAYS_INLINE int32_t getDayOfYear(const std::tm& time) {
   return time.tm_yday + 1;
+}
+
+FOLLY_ALWAYS_INLINE uint32_t getWeek(
+    const Timestamp& timestamp,
+    const tz::TimeZone* timezone,
+    bool allowOverflow) {
+  // The computation of ISO week from date follows the algorithm here:
+  // https://en.wikipedia.org/wiki/ISO_week_date
+  Timestamp t = timestamp;
+  if (timezone) {
+    t.toTimezone(*timezone);
+  }
+  const auto millis = allowOverflow ? t.toMillisAllowOverflow() : t.toMillis();
+  const ::date::sys_time<std::chrono::milliseconds> timePoint{
+      std::chrono::milliseconds(millis)};
+  const auto daysTimePoint = ::date::floor<::date::days>(timePoint);
+  const ::date::year_month_day calDate(daysTimePoint);
+  auto weekNum = ::iso_week::year_weeknum_weekday{calDate}.weeknum();
+  return static_cast<uint32_t>(weekNum);
 }
 
 template <typename T>
