@@ -7694,6 +7694,7 @@ TEST_F(HashJoinTest, exceededMaxSpillLevel) {
       .referenceQuery(
           "SELECT t_k1, t_k2, t_v1, u_k1, u_k2, u_v1 FROM t, u WHERE t.t_k1 = u.u_k1")
       .config(core::QueryConfig::kSpillStartPartitionBit, "29")
+      .config(core::QueryConfig::kHashJoinSkewedPartitionEnabled, "false")
       .verifier([&](const std::shared_ptr<Task>& task, bool /*unused*/) {
         auto joinStats = task->taskStats()
                              .pipelineStats.back()
