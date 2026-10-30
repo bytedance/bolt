@@ -26,6 +26,35 @@
 # --------------------------------------------------------------------------
 
 find_package(zstd CONFIG REQUIRED)
+
+# Keep SVE instructions out of the baseline decoder and dispatch at runtime.
+# This also keeps the public headers usable with the ordinary ARM target.
+set(rlev2_sve_sources)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag(
+    "-march=armv8-a+sve"
+    BOLT_COMPILER_SUPPORTS_RLEV2_SVE
+  )
+  if(BOLT_COMPILER_SUPPORTS_RLEV2_SVE)
+    list(APPEND rlev2_sve_sources RLEv2SVE.cpp)
+    set_source_files_properties(
+      RLEv2SVE.cpp
+      PROPERTIES
+        COMPILE_OPTIONS
+          "-march=armv8-a+sve"
+    )
+    set_property(
+      SOURCE
+        RLEv2.cpp
+      APPEND
+      PROPERTY
+        COMPILE_DEFINITIONS
+          BOLT_RLEV2_SVE
+    )
+  endif()
+endif()
+
 bolt_add_library(
   bolt_dwio_dwrf_common
   ByteRLE.cpp
@@ -38,6 +67,7 @@ bolt_add_library(
   IntEncoder.cpp
   RLEv1.cpp
   RLEv2.cpp
+  ${rlev2_sve_sources}
   Statistics.cpp
 )
 
