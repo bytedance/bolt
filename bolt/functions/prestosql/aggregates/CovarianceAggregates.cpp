@@ -750,9 +750,6 @@ class CovarianceAggregate : public exec::Aggregate {
       VectorPtr* result) override {
     auto rowVector = (*result)->as<RowVector>();
     rowVector->resize(numGroups);
-    for (auto& child : rowVector->children()) {
-      child->resize(numGroups);
-    }
 
     uint64_t* rawNulls = getRawNulls(rowVector);
 
