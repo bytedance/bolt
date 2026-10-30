@@ -143,7 +143,9 @@ class GroupingSet {
     if (spiller_ == nullptr) {
       return std::nullopt;
     }
-    return spiller_->stats();
+    auto stats = spiller_->stats();
+    stats += residentSuffixSpillStats_;
+    return stats;
   }
 
   /// Returns the spill read stats, currently only spillReadTime supported.
@@ -217,6 +219,13 @@ class GroupingSet {
     return spillOutputRowCount_;
   }
 
+  void ensureOutputFits(int32_t maxOutputRows, int32_t maxOutputBytes);
+
+  void spillRemainingResidentRuns();
+  bool dynamicFinalSpillActive() const {
+    return residentRows_ != nullptr;
+  }
+
   common::AggregationStats getRuntimeStats() {
     return stats_;
   }
@@ -242,18 +251,89 @@ class GroupingSet {
 
   void convertRowsFromContainerRows(
       const CompositeRowVectorPtr& compositeResult,
-      folly::Range<char**> groups,
-      const std::vector<std::pair<int32_t, int32_t>>& resultRanges);
+      folly::Range<char* const*> groups,
+      folly::Range<const std::pair<int32_t, int32_t>*> resultRanges);
 
   void convertRowsFromSpilledRows(
       const CompositeRowVectorPtr& compositeResult,
-      std::vector<char*>& rows,
+      folly::Range<char* const*> rows,
       int32_t resultOffset,
-      const std::vector<int32_t>& rowSizeVec,
+      folly::Range<const int32_t*> rowSizes,
       const int64_t totalUniqueRowSize);
 
  private:
   using RowSizeType = int32_t;
+
+  struct AggregationMergeScratch {
+    template <typename T>
+    using Vector = std::vector<T, memory::StlAllocator<T>>;
+
+    explicit AggregationMergeScratch(memory::MemoryPool& pool)
+        : rows(memory::StlAllocator<char*>(pool)),
+          distinctRows(memory::StlAllocator<char*>(pool)),
+          uniqueRows(memory::StlAllocator<char*>(pool)),
+          groups(memory::StlAllocator<char*>(pool)),
+          groupOfRows(memory::StlAllocator<char*>(pool)),
+          sources(memory::StlAllocator<const RowVector*>(pool)),
+          sourceIndices(memory::StlAllocator<vector_size_t>(pool)),
+          distinctInputs(memory::StlAllocator<const RowVector*>(pool)),
+          distinctIndices(memory::StlAllocator<vector_size_t>(pool)),
+          uniqueRowSizes(memory::StlAllocator<int32_t>(pool)),
+          resultRanges(memory::StlAllocator<std::pair<int32_t, int32_t>>(pool)),
+          outputRows(memory::StlAllocator<char*>(pool)) {}
+
+    void clear() {
+      rows.clear();
+      distinctRows.clear();
+      uniqueRows.clear();
+      groups.clear();
+      groupOfRows.clear();
+      sources.clear();
+      sourceIndices.clear();
+      distinctInputs.clear();
+      distinctIndices.clear();
+      uniqueRowSizes.clear();
+      resultRanges.clear();
+      outputRows.clear();
+      for (auto* vector : {intermediate.get(), uniqueResult.get()}) {
+        if (vector == nullptr) {
+          continue;
+        }
+        for (auto& child : vector->children()) {
+          if (child->type()->isFixedWidth()) {
+            continue;
+          }
+          if (child->type()->isVarchar() || child->type()->isVarbinary()) {
+            child->asFlatVector<StringView>()->clearStringBuffers();
+          } else if (child->type()->isRow()) {
+            // Grow from zero so RowVector::resize also resizes nested children.
+            BaseVector::prepareForReuse(child, 0);
+            child->resize(vector->size());
+          } else {
+            BaseVector::prepareForReuse(child, vector->size());
+          }
+        }
+      }
+      if (uniqueResult != nullptr) {
+        uniqueResult->resize(0);
+      }
+    }
+
+    Vector<char*> rows;
+    Vector<char*> distinctRows;
+    Vector<char*> uniqueRows;
+    Vector<char*> groups;
+    Vector<char*> groupOfRows;
+    Vector<const RowVector*> sources;
+    Vector<vector_size_t> sourceIndices;
+    Vector<const RowVector*> distinctInputs;
+    Vector<vector_size_t> distinctIndices;
+    Vector<int32_t> uniqueRowSizes;
+    Vector<std::pair<int32_t, int32_t>> resultRanges;
+    Vector<char*> outputRows;
+    RowVectorPtr intermediate;
+    RowVectorPtr uniqueResult;
+  };
 
   bool isDistinct() const {
     return aggregates_.empty();
@@ -298,6 +378,24 @@ class GroupingSet {
   // spills enough to make output fit.
   void ensureOutputFits();
 
+  bool supportsDynamicFinalSpill() const;
+  bool prepareResidentRows();
+  uint64_t spillReaderBytes() const;
+  void initializeSpillMergeRows();
+  void prepareSpillMerge(bool dynamicFinalSpill);
+  void releaseResidentRows();
+  void releaseResidentBacking();
+  void finishPendingOutputSpill();
+  uint64_t residentPosition() const;
+  folly::Range<char* const*> residentRows() const {
+    return residentRows_ == nullptr
+        ? folly::Range<char* const*>{}
+        : folly::Range<char* const*>(
+              residentRows_->as<char*>(),
+              residentRows_->size() / sizeof(char*));
+  }
+  bool residentRowsFinished() const;
+
   // Copies the grouping keys and aggregates for 'groups' into 'result' If
   // partial output, extracts the intermediate type for aggregates, final result
   // otherwise.
@@ -314,7 +412,7 @@ class GroupingSet {
   void extractSpilledGroupsInRowFormat(
       folly::Range<char**> groups,
       const RowVectorPtr& result,
-      const std::vector<std::pair<int32_t, int32_t>>& resultRanges);
+      folly::Range<const std::pair<int32_t, int32_t>*> resultRanges);
 
   // Produces output in if spilling has occurred. First produces data
   // from non-spilled partitions, then merges spill runs and unspilled data
@@ -334,6 +432,11 @@ class GroupingSet {
       int32_t maxOutputRows,
       int32_t maxOutputBytes,
       const RowVectorPtr& result);
+
+  uint64_t mergeOutputBytes() const {
+    const auto bytes = mergeRows_->usedBytes();
+    return bytes > residentStringBytes_ ? bytes - residentStringBytes_ : 0;
+  }
 
   // Reads from spilled rows for group by with aggregates.
   bool mergeNextWithAggregates(
@@ -356,37 +459,31 @@ class GroupingSet {
       int32_t maxOutputBytes,
       const RowVectorPtr& result);
 
+  void extractMergeKeys(
+      folly::Range<char* const*> rows,
+      const RowVectorPtr& result,
+      vector_size_t resultOffset);
+
   void copyKeyAndInitGroup(
-      std::vector<char*>& distinctRows,
-      std::vector<char*>& groups,
       size_t& initGroupCount,
-      const RowContainer* container,
       const RowVectorPtr& result,
       const vector_size_t resultOffset);
 
   void copyKeyAndUpdateGroups(
-      std::vector<char*>& rows,
-      std::vector<char*>& groupOfRows,
-      std::vector<char*>& distinctRows,
-      std::vector<char*>& groups,
       size_t& initGroupCount,
       const RowContainer* container,
       const RowVectorPtr& result,
       const vector_size_t resultOffset);
 
   void outputUniqueGroups(
-      std::vector<char*>& uniqueRows,
-      const RowVectorPtr& uniqueRes,
+      const RowVectorPtr& result,
       size_t& uniqueCount,
       size_t& estimateUniqueBytesPerRow);
 
   void outputUniqueGroupsInRowFormat(
-      std::vector<char*>& uniqueRows,
       const RowVectorPtr& result,
       const int32_t resultOffset,
-      size_t& estimateUniqueBytesPerRow,
-      const std::vector<int32_t>& rowSizeVec,
-      const uint64_t totalUniqueRowSize);
+      size_t& estimateUniqueBytesPerRow);
 
   // ensure groupIndicesOfRows_ contains 0, 1, 2 ... size
   void ensureGroupIndices(vector_size_t size);
@@ -397,12 +494,12 @@ class GroupingSet {
   // called on each initialized row. When enough rows have been accumulated and
   // we have a new key, we produce the output and clear 'mergeRows_' with
   // extractSpillResult().
-  void initializeRows(std::vector<char*> rows);
+  void initializeRows(folly::Range<char* const*> rows);
 
   // Updates the accumulators in 'rows' with the intermediate type data from
   // 'input', each input data stores it's row in rows. This is called when we
   // receive enough intermediate from a merge of spilled data.
-  void updateRows(const RowVectorPtr& input, std::vector<char*>& rows);
+  void updateRows(const RowVectorPtr& input, folly::Range<char* const*> rows);
 
   // Returns a RowType of the spilled data.
   RowTypePtr makeSpillType() const;
@@ -414,7 +511,7 @@ class GroupingSet {
 
   void extractSpillResultInRowFormat(
       const RowVectorPtr& result,
-      const std::vector<std::pair<int32_t, int32_t>>& resultRanges);
+      folly::Range<const std::pair<int32_t, int32_t>*> resultRanges);
 
   // Return a list of accumulators for 'aggregates_', plus one more accumulator
   // for 'sortedAggregations_', and one for each 'distinctAggregations_'.  When
@@ -513,6 +610,19 @@ class GroupingSet {
   size_t numDistinctSpilledFiles_{0};
   std::unique_ptr<TreeOfLosers<SpillMergeStream>> merge_;
   std::unique_ptr<TreeOfLosers<RowBasedSpillMergeStream>> rowBasedSpillMerge_;
+  // Owns the sorted index; the hash table continues to own the row storage.
+  BufferPtr residentRows_;
+
+  // mergeRows_ shares this allocator with the resident rows. Exclude their
+  // existing variable-length storage from the size of each output batch.
+  uint64_t residentStringBytes_{0};
+  std::optional<OwnedSpillPartition> pendingInputSpillPartition_;
+  // Suffix file waiting for output admission. While set, the resident stream
+  // has been removed and residentStreamIndex_ is its insertion point.
+  std::optional<OwnedSpillPartition> pendingOutputSpillPartition_;
+  common::SpillStats residentSuffixSpillStats_;
+  std::optional<size_t> residentStreamIndex_;
+  bool spillMergePrepared_{false};
   // Indicates the group indices passed to initializeNewGroups in spill merge
   // stage, element should be 0, 1, 2 ... groupIndicesOfRows_.size()
   std::vector<vector_size_t> groupIndicesOfRows_;
@@ -532,6 +642,8 @@ class GroupingSet {
 
   // Pool of the OperatorCtx. Used for spilling.
   memory::MemoryPool& pool_;
+
+  AggregationMergeScratch mergeScratch_;
 
   OperatorCtx* operatorCtx_;
 

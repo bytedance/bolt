@@ -268,6 +268,12 @@ class QueryConfig {
   static constexpr const char* kAggregationSpillEnabled =
       "aggregation_spill_enabled";
 
+  /// Keeps the final sorted aggregation runs in memory after input spilling,
+  /// and spills their unconsumed suffixes on reclaim. Requires aggregation
+  /// spilling; aggregates with ORDER BY or DISTINCT inputs use the legacy path.
+  static constexpr const char* kAggregationDynamicFinalSpillEnabled =
+      "aggregation_dynamic_final_spill_enabled";
+
   static constexpr const char* kHllSketchRounded = "hll_sketch_rounded";
 
   static constexpr const char* kSpilledAggregationBypassHTRatio =
@@ -1192,6 +1198,10 @@ class QueryConfig {
   /// spillEnabled()!
   bool aggregationSpillEnabled() const {
     return get<bool>(kAggregationSpillEnabled, true);
+  }
+
+  bool aggregationDynamicFinalSpillEnabled() const {
+    return get<bool>(kAggregationDynamicFinalSpillEnabled, false);
   }
 
   /// Returns 'is hll sketch return rounded result' flag.

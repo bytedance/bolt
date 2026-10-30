@@ -60,8 +60,8 @@ __attribute__((flatten)) void scalarGatherCopy(
     BaseVector* target,
     vector_size_t targetIndex,
     vector_size_t count,
-    const std::vector<const RowVector*>& sources,
-    const std::vector<vector_size_t>& sourceIndices,
+    folly::Range<const RowVector* const*> sources,
+    folly::Range<const vector_size_t*> sourceIndices,
     column_index_t sourceColumnChannel) {
   BOLT_DCHECK(target->isFlatEncoding());
 
@@ -112,8 +112,8 @@ void complexGatherCopy(
     BaseVector* target,
     vector_size_t targetIndex,
     vector_size_t count,
-    const std::vector<const RowVector*>& sources,
-    const std::vector<vector_size_t>& sourceIndices,
+    folly::Range<const RowVector* const*> sources,
+    folly::Range<const vector_size_t*> sourceIndices,
     column_index_t sourceChannel) {
   for (int i = 0; i < count; ++i) {
     target->copy(
@@ -396,6 +396,23 @@ void gatherCopy(
     const std::vector<const RowVector*>& sources,
     const std::vector<vector_size_t>& sourceIndices,
     column_index_t sourceChannel) {
+  gatherCopy(
+      target,
+      targetIndex,
+      count,
+      folly::Range<const RowVector* const*>(sources.data(), sources.size()),
+      folly::Range<const vector_size_t*>(
+          sourceIndices.data(), sourceIndices.size()),
+      sourceChannel);
+}
+
+void gatherCopy(
+    BaseVector* target,
+    vector_size_t targetIndex,
+    vector_size_t count,
+    folly::Range<const RowVector* const*> sources,
+    folly::Range<const vector_size_t*> sourceIndices,
+    column_index_t sourceChannel) {
   if (target->isScalar()) {
     BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
         scalarGatherCopy,
@@ -436,6 +453,23 @@ void gatherCopy(
     vector_size_t count,
     const std::vector<const RowVector*>& sources,
     const std::vector<vector_size_t>& sourceIndices,
+    const std::vector<IdentityProjection>& columnMap) {
+  gatherCopy(
+      target,
+      targetIndex,
+      count,
+      folly::Range<const RowVector* const*>(sources.data(), sources.size()),
+      folly::Range<const vector_size_t*>(
+          sourceIndices.data(), sourceIndices.size()),
+      columnMap);
+}
+
+void gatherCopy(
+    RowVector* target,
+    vector_size_t targetIndex,
+    vector_size_t count,
+    folly::Range<const RowVector* const*> sources,
+    folly::Range<const vector_size_t*> sourceIndices,
     const std::vector<IdentityProjection>& columnMap) {
   BOLT_DCHECK_GE(count, 0);
   if (FOLLY_UNLIKELY(count <= 0)) {

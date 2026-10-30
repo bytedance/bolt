@@ -92,37 +92,52 @@ class TreeOfLosers {
     static_assert(std::is_base_of_v<MergeStream, Stream>);
     BOLT_CHECK_LT(streams_.size(), std::numeric_limits<TIndex>::max());
     BOLT_CHECK_GE(streams_.size(), 1);
-
-    int32_t size = 0;
-    int32_t levelSize = 1;
-    int32_t numStreams = streams_.size();
-    while (numStreams > levelSize) {
-      size += levelSize;
-      levelSize *= 2;
-    }
-
-    if (numStreams == bits::nextPowerOfTwo(numStreams)) {
-      // All leaves are on last level.
-      firstStream_ = size;
-    } else {
-      // Some of the streams are on the last level and some on the level before.
-      // The first stream follows the last inner node in the node numbering.
-
-      auto secondLastSize = levelSize / 2;
-      auto overflow = numStreams - secondLastSize;
-      // Suppose 12 streams. The last level has 16 places, the second
-      // last 8. If we fill the second last level we have 8 streams
-      // and 4 left over. These 4 need parents on the second last
-      // level. So, we end up with 4 inner nodes on the second last
-      // level and 8 nodes on the last level. The streams at the left
-      // of the second last level become inner nodes and their streams
-      // move to the level below.
-      firstStream_ = (size - secondLastSize) + overflow;
-    }
-    values_.resize(firstStream_, kEmpty);
-    equals_.resize(firstStream_, false);
+    resetSelection();
   }
 
+  const Stream* streamAt(size_t index) const {
+    BOLT_CHECK_LT(index, streams_.size());
+    return streams_[index].get();
+  }
+
+  /// Replaces a range of streams and resets selection. Empty replacements
+  /// remove the range; a zero count inserts streams at 'index'. The caller
+  /// owns any external backing and must keep it alive until removal completes.
+  void replaceStreams(
+      size_t index,
+      size_t count,
+      std::vector<std::unique_ptr<Stream>> replacements) {
+    BOLT_CHECK_LE(index, streams_.size());
+    BOLT_CHECK_LE(count, streams_.size() - index);
+    const auto remaining = streams_.size() - count;
+    BOLT_CHECK_LT(
+        replacements.size(), std::numeric_limits<TIndex>::max() - remaining);
+    // Reserve before modifying the existing streams so allocation failure
+    // preserves them. Removal never grows storage and is safe during reclaim.
+    const auto size = remaining + replacements.size();
+    streams_.reserve(size);
+    values_.reserve(size == 0 ? 0 : size - 1);
+    equals_.reserve(size == 0 ? 0 : size - 1);
+    streams_.erase(streams_.begin() + index, streams_.begin() + index + count);
+    streams_.insert(
+        streams_.begin() + index,
+        std::make_move_iterator(replacements.begin()),
+        std::make_move_iterator(replacements.end()));
+    resetSelection();
+  }
+
+ private:
+  /// Rebuilds the loser-tree topology and selection state after replacement.
+  void resetSelection() {
+    // A full binary tree with N leaves has N - 1 internal nodes. Leaves
+    // follow the internal nodes, including when N is not a power of two.
+    firstStream_ = streams_.empty() ? 0 : streams_.size() - 1;
+    values_.assign(firstStream_, kEmpty);
+    equals_.assign(firstStream_, false);
+    lastIndex_ = kEmpty;
+  }
+
+ public:
   /// Returns the number of streams.
   size_t numStreams() const {
     return streams_.size();
@@ -135,7 +150,8 @@ class TreeOfLosers {
     if (UNLIKELY(lastIndex_ == kEmpty)) {
       if (UNLIKELY(values_.empty())) {
         // Only one stream. We handle this off the common path.
-        return streams_[0]->hasData() ? streams_[0].get() : nullptr;
+        return !streams_.empty() && streams_[0]->hasData() ? streams_[0].get()
+                                                           : nullptr;
       }
       lastIndex_ = first(0);
     } else {
@@ -158,7 +174,7 @@ class TreeOfLosers {
     if (UNLIKELY(lastIndex_ == kEmpty)) {
       // Only one stream. We handle this off the common path.
       if (values_.empty()) {
-        return streams_[0]->hasData()
+        return !streams_.empty() && streams_[0]->hasData()
             ? std::make_pair(streams_[0].get(), streams_[0]->isNextEqual())
             : std::make_pair(nullptr, false);
       }
@@ -218,7 +234,7 @@ class TreeOfLosers {
     return std::pair<TIndex, bool>{index, flag};
   }
 
-  TIndex first(TIndex node) {
+  TIndex first(size_t node) {
     if (node >= firstStream_) {
       return streams_[node - firstStream_]->hasData() ? node - firstStream_
                                                       : kEmpty;
@@ -238,7 +254,7 @@ class TreeOfLosers {
     }
   }
 
-  FOLLY_ALWAYS_INLINE TIndex propagate(TIndex node, TIndex value) {
+  FOLLY_ALWAYS_INLINE TIndex propagate(size_t node, TIndex value) {
     while (UNLIKELY(values_[node] == kEmpty)) {
       if (UNLIKELY(node == 0)) {
         return value;
@@ -267,7 +283,7 @@ class TreeOfLosers {
     }
   }
 
-  IndexAndFlag firstWithEquals(TIndex node) {
+  IndexAndFlag firstWithEquals(size_t node) {
     if (node >= firstStream_) {
       BOLT_DCHECK_LT(node - firstStream_, streams_.size());
       return streams_[node - firstStream_]->hasData()
@@ -301,7 +317,7 @@ class TreeOfLosers {
   }
 
   FOLLY_ALWAYS_INLINE IndexAndFlag
-  propagateWithEquals(TIndex node, TIndex valueIndex) {
+  propagateWithEquals(size_t node, TIndex valueIndex) {
     auto value = indexAndFlag(
         valueIndex,
         valueIndex == kEmpty ? false : streams_[valueIndex]->isNextEqual());
@@ -344,19 +360,19 @@ class TreeOfLosers {
     }
   }
 
-  static TIndex parent(TIndex node) {
+  static size_t parent(size_t node) {
     return (node - 1) / 2;
   }
 
-  static TIndex leftChild(TIndex node) {
+  static size_t leftChild(size_t node) {
     return node * 2 + 1;
   }
 
-  static TIndex rightChild(TIndex node) {
+  static size_t rightChild(size_t node) {
     return node * 2 + 2;
   }
 
-  const std::vector<std::unique_ptr<Stream>> streams_;
+  std::vector<std::unique_ptr<Stream>> streams_;
 
   std::vector<TIndex> values_;
   // 'true' if the corresponding element of 'values_' has met an equal
@@ -364,7 +380,7 @@ class TreeOfLosers {
   // A byte vector is in this case faster than one of bool.
   std::vector<uint8_t> equals_;
   TIndex lastIndex_ = kEmpty;
-  int32_t firstStream_;
+  size_t firstStream_;
 };
 
 // Array-based merging structure implementing the same interface as
