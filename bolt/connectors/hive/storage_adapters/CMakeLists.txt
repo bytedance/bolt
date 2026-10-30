@@ -26,6 +26,7 @@
 # --------------------------------------------------------------------------
 
 add_subdirectory(s3fs)
+add_subdirectory(tos)
 add_subdirectory(gcs)
 add_subdirectory(abfs)
 add_subdirectory(hdfs)

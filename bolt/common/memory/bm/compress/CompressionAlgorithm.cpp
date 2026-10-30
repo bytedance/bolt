@@ -17,6 +17,11 @@
 #include "bolt/common/memory/bm/compress/CompressionAlgorithm.h"
 
 #include "bolt/common/base/Exceptions.h"
+
+#include <folly/ScopeGuard.h>
+#include <openzl/openzl.h>
+#include <zstd.h>
+
 namespace bytedance::bolt::memory::bm::compress {
 
 bool SupportedCompressionKind(CompressionKind kind) {
@@ -24,6 +29,37 @@ bool SupportedCompressionKind(CompressionKind kind) {
       kind == CompressionKind::kZstdFrame ||
       kind == CompressionKind::kSnappyRaw ||
       kind == CompressionKind::kOpenZlFrame;
+}
+
+void SetCompressionLevel(CompressionConfig& config, int32_t level) {
+  switch (config.kind) {
+    case CompressionKind::kNone:
+      return;
+    case CompressionKind::kZstdFrame:
+      BOLT_USER_CHECK(
+          level >= ZSTD_minCLevel() && level <= ZSTD_maxCLevel(),
+          "Invalid BM Zstd compression level {}; expected between {} and {}",
+          level,
+          ZSTD_minCLevel(),
+          ZSTD_maxCLevel());
+      config.zstd.compressionLevel = level;
+      return;
+    case CompressionKind::kOpenZlFrame: {
+      auto* compressor = ZL_Compressor_create();
+      BOLT_CHECK_NOT_NULL(compressor);
+      auto cleanup = folly::makeGuard([&] { ZL_Compressor_free(compressor); });
+      const auto status = ZL_Compressor_setParameter(
+          compressor, ZL_CParam_compressionLevel, level);
+      BOLT_USER_CHECK(
+          !ZL_isError(status), "Invalid BM OpenZL compression level {}", level);
+      config.openZl.compressionLevel = level;
+      return;
+    }
+    default:
+      BOLT_USER_FAIL(
+          "BM compression level is not supported for codec {}",
+          static_cast<uint32_t>(config.kind));
+  }
 }
 
 size_t MaxCompressedLength(CompressionKind kind, size_t rawSize) {

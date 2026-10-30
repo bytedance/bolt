@@ -151,10 +151,20 @@ class WindowPartition {
       const VectorPtr& result,
       bool exactSize = false) const;
 
+  /// Copies the first 'results.size()' input columns into the corresponding
+  /// result vectors. Implementations may override this to share row access
+  /// across columns.
+  virtual void extractInputColumns(
+      vector_size_t partitionOffset,
+      vector_size_t numRows,
+      vector_size_t resultOffset,
+      folly::Range<const VectorPtr*> results,
+      bool exactSize = false) const;
+
   /// Extracts null positions at 'columnIndex' into 'nullsBuffer' for
   /// 'numRows' starting at positions 'partitionOffset' in the partition
   /// input data.
-  void extractNulls(
+  virtual void extractNulls(
       int32_t columnIndex,
       vector_size_t partitionOffset,
       vector_size_t numRows,
@@ -272,6 +282,11 @@ class WindowPartition {
       vector_size_t* rawFrameBounds) const;
 
  protected:
+  WindowPartition(
+      const std::vector<column_index_t>& inputMapping,
+      const std::vector<std::pair<column_index_t, core::SortOrder>>&
+          sortKeyInfo);
+
   // The RowContainer associated with the partition.
   // It is owned by the WindowBuild that creates the partition.
   RowContainer* data_;

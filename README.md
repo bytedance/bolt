@@ -56,17 +56,25 @@ cd bolt
 
 ### Set Up the Development Environment
 
-Run the following script to set up your development environment and install dependencies:
+Use the latest stable **Clang, version 22 or newer**. CI validates the Clang
+toolchain; newer GCC versions are not covered by CI.
+
+Run the following script to set up your development environment. It reuses an
+installed Clang 22 or newer, or installs the latest stable LLVM toolchain when
+none is available. Automatic compiler installation uses
+[LLVM's APT repository](https://apt.llvm.org/) on Debian/Ubuntu (requires sudo or
+root) and Homebrew on macOS:
 
 ```shell
 scripts/setup-dev-env.sh
-
-# configure your conan profile
-# For more detailed usage, see the instructions in configure-conan-profile.py.
-python ./scripts/configure-conan-profile.py --compiler clang  --libcxx=libc++
-# or
-python ./scripts/configure-conan-profile.py --compiler gcc  --libcxx=libstdc++11
 ```
+
+The setup script configures the default Conan profile with
+`--compiler=clang --libcxx=libc++`, using the installed LLVM toolchain first on PATH.
+It also makes the installed Clang and LLD the default commands (through
+`update-alternatives` on Debian/Ubuntu or the shell PATH on macOS).
+See [manual setup](CONTRIBUTING.md#option-2-manual-setup-for-advanced-users) for
+other distributions or custom toolchains.
 
 Bolt manages its dependencies with [Conan](https://conan.io/), an open-source, cross-platform package manager.
 

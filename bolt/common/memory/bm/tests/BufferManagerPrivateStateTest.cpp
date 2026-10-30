@@ -116,6 +116,72 @@ TEST_F(BufferManagerPrivateStateTest, IsSpilledTracksReclaimAndPrefetch) {
   EXPECT_TRUE(bm->IsSpilled(block));
 }
 
+TEST_F(
+    BufferManagerPrivateStateTest,
+    ExplicitPathDoesNotCreateDefaultLeafAndOldPathReusesIt) {
+  auto bm = makeBufferManager("default-leaf-lifecycle");
+  EXPECT_EQ(MemoryPool::Kind::kAggregate, bm->aggregatePool_->kind());
+  EXPECT_EQ(0, bm->aggregatePool_->getChildCount());
+
+  auto operatorPool = bm->addOperatorPool("explicit-operator");
+  EXPECT_EQ(1, bm->aggregatePool_->getChildCount());
+  {
+    auto handle = bm->Allocate(4096, MemoryTag::kTesting, operatorPool);
+    EXPECT_EQ(1, bm->aggregatePool_->getChildCount());
+  }
+
+  auto firstOld = bm->Allocate(4096, MemoryTag::kTesting);
+  auto defaultPool = bm->defaultAllocationPool();
+  EXPECT_EQ(2, bm->aggregatePool_->getChildCount());
+  auto secondOld = bm->Allocate(4096, MemoryTag::kTesting);
+  EXPECT_EQ(defaultPool, bm->defaultAllocationPool());
+  EXPECT_EQ(2, bm->aggregatePool_->getChildCount());
+  EXPECT_EQ(2 * 4096, defaultPool->usedBytes());
+}
+
+TEST_F(
+    BufferManagerPrivateStateTest,
+    AggregateReclaimerReleasesReservationsAcrossLeaves) {
+  auto bm = makeBufferManager("aggregate-reclaim-cross-leaf");
+  auto firstPool = bm->addOperatorPool("first-operator");
+  auto secondPool = bm->addOperatorPool("second-operator");
+  std::shared_ptr<BlockHandle> firstBlock;
+  std::shared_ptr<BlockHandle> secondBlock;
+
+  {
+    auto first = bm->Allocate(4096, MemoryTag::kTesting, firstPool);
+    auto second = bm->Allocate(4096, MemoryTag::kTesting, secondPool);
+    firstBlock = first.block();
+    secondBlock = second.block();
+    std::memset(first.Ptr(), 1, first.block()->size());
+    std::memset(second.Ptr(), 2, second.block()->size());
+  }
+  ASSERT_NE(nullptr, firstBlock);
+  ASSERT_NE(nullptr, secondBlock);
+
+  const auto before = bm->aggregatePool_->reservedBytes();
+  ASSERT_GT(before, 0);
+
+  MemoryReclaimer::Stats stats;
+  uint64_t reclaimed = 0;
+  try {
+    ScopedMemoryArbitrationContext arbitrationContext(bm->aggregatePool_.get());
+    reclaimed = bm->aggregatePool_->reclaim(0, 0, stats);
+  } catch (const std::exception& e) {
+    if (IsIoUringUnavailable(e)) {
+      GTEST_SKIP() << e.what();
+    }
+    throw;
+  }
+
+  EXPECT_EQ(before, reclaimed);
+  EXPECT_EQ(reclaimed, stats.reclaimedBytes);
+  EXPECT_EQ(0, bm->aggregatePool_->reservedBytes());
+  EXPECT_EQ(0, firstPool->reservedBytes());
+  EXPECT_EQ(0, secondPool->reservedBytes());
+  EXPECT_EQ(8192, bm->stats().spilledBytes);
+}
+
 TEST_F(BufferManagerPrivateStateTest, PrefetchSubmitFailurePropagates) {
   auto bm = makeBufferManager("prefetch-failure");
   auto block = testingCreateBlockHandle(4096, MemoryTag::kTesting);
@@ -137,11 +203,12 @@ TEST_F(BufferManagerPrivateStateTest, PinPrefetchingReportsReadFailure) {
   std::promise<IoResult> promise;
   promise.set_value(std::move(failedRead));
   block->memory_->state = BlockMemoryState::kPrefetching;
+  block->memory_->allocationPool = bm->defaultAllocationPool();
   block->memory_->prefetchFuture = SpillReadFuture{
       promise.get_future(),
       std::make_shared<compress::CompressionManager>(
           bm->config_.spillStoreConfig.compressionConfig),
-      bm->pool_.get(),
+      block->memory_->allocationPool.get(),
       block->size()};
   bm->accounting_->OnReadSubmitted(*block->memory_);
 

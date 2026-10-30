@@ -1886,7 +1886,7 @@ TEST_F(TaskTest, taskCreatesBufferManagerWhenEnabled) {
   ASSERT_EQ(task->bufferManager().get(), ctx.bufferManager().get());
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, taskMapsZstdSpillCodecToBufferManagerConfig) {
+DEBUG_ONLY_TEST_F(TaskTest, taskPassesDefaultBufferManagerCompressionOptions) {
   auto data = makeRowVector({makeFlatVector<int64_t>({1})});
   auto plan = PlanBuilder().values({data}).planFragment();
   auto spillDirectory = TempDirectoryPath::create();
@@ -1903,7 +1903,7 @@ DEBUG_ONLY_TEST_F(TaskTest, taskMapsZstdSpillCodecToBufferManagerConfig) {
       driverExecutor_.get(),
       core::QueryConfig{
           {{core::QueryConfig::kBufferManagerEnabled, "true"},
-           {core::QueryConfig::kSpillCompressionKind, "zstd"}}});
+           {core::QueryConfig::kSpillCompressionKind, "none"}}});
 
   auto task = Task::create(
       "task.buffer.manager.zstd",
@@ -1918,12 +1918,15 @@ DEBUG_ONLY_TEST_F(TaskTest, taskMapsZstdSpillCodecToBufferManagerConfig) {
 
   ASSERT_NE(nullptr, task->bufferManager());
   ASSERT_TRUE(observed);
-  EXPECT_EQ(
-      memory::bm::compress::CompressionKind::kZstdFrame,
-      observedConfig.spillStoreConfig.compressionConfig.kind);
+  const auto& allocator = observedConfig.spillStoreConfig.fileAllocatorConfig;
+  EXPECT_EQ(2LL << 30, allocator.file_size_limit_bytes);
+  EXPECT_EQ(64, allocator.max_open_files_per_bucket);
+  ASSERT_TRUE(observedConfig.spillCompression.has_value());
+  EXPECT_EQ("zstd", observedConfig.spillCompression->kind);
+  EXPECT_FALSE(observedConfig.spillCompression->level.has_value());
 }
 
-DEBUG_ONLY_TEST_F(TaskTest, taskSelectsOpenZlBufferManagerCodec) {
+DEBUG_ONLY_TEST_F(TaskTest, taskPassesOpenZlBufferManagerCompressionOptions) {
   auto data = makeRowVector({makeFlatVector<int64_t>({1})});
   auto plan = PlanBuilder().values({data}).planFragment();
   auto spillDirectory = TempDirectoryPath::create();
@@ -1940,7 +1943,8 @@ DEBUG_ONLY_TEST_F(TaskTest, taskSelectsOpenZlBufferManagerCodec) {
       driverExecutor_.get(),
       core::QueryConfig{
           {{core::QueryConfig::kBufferManagerEnabled, "true"},
-           {core::QueryConfig::kBufferManagerSpillCompressionKind, "openzl"}}});
+           {core::QueryConfig::kBufferManagerSpillCompressionKind, "openzl"},
+           {core::QueryConfig::kBufferManagerSpillCompressionLevel, "9"}}});
 
   auto task = Task::create(
       "task.buffer.manager.openzl",
@@ -1955,9 +1959,10 @@ DEBUG_ONLY_TEST_F(TaskTest, taskSelectsOpenZlBufferManagerCodec) {
 
   ASSERT_NE(nullptr, task->bufferManager());
   ASSERT_TRUE(observed);
-  EXPECT_EQ(
-      memory::bm::compress::CompressionKind::kOpenZlFrame,
-      observedConfig.spillStoreConfig.compressionConfig.kind);
+  ASSERT_TRUE(observedConfig.spillCompression.has_value());
+  EXPECT_EQ("openzl", observedConfig.spillCompression->kind);
+  ASSERT_TRUE(observedConfig.spillCompression->level.has_value());
+  EXPECT_EQ(9, *observedConfig.spillCompression->level);
 }
 
 TEST_F(TaskTest, taskRejectsUnsupportedBufferManagerSpillCodec) {

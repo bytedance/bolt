@@ -323,5 +323,19 @@ TEST_F(FromJsonTest, caseSensitiveFields) {
   testFromJson(input, expected);
 }
 
+TEST_F(FromJsonTest, arrayObjAsSingleElement) {
+  // SELECT from_json('{"a": "A"}', 'ARRAY<STRUCT<a:string>>');
+  // When the root type is an array of ROW, a JSON object is parsed as a
+  // single-element array, matching Spark's behavior.
+  const std::string inputJson = R"({"a": "A"})";
+  auto input = makeFlatVector<std::string>({inputJson, inputJson, inputJson});
+  auto rowVector =
+      makeRowVector({"a"}, {makeFlatVector<StringView>({"A", "A", "A"})});
+  std::vector<vector_size_t> offsets{0, 1, 2};
+  auto expected = makeArrayVector(offsets, rowVector);
+
+  testFromJson(input, expected);
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

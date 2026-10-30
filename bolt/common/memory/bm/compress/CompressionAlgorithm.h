@@ -28,6 +28,11 @@ namespace bytedance::bolt::memory::bm::compress {
 // kOpenZlFrame are handled directly by CompressionManager instead of the
 // generic algorithm dispatch below.
 bool SupportedCompressionKind(CompressionKind kind);
+
+// Validates and sets the selected codec's level. kNone ignores the level.
+// OpenZL's fallback to Zstd retains its independent Zstd options.
+void SetCompressionLevel(CompressionConfig& config, int32_t level);
+
 size_t MaxCompressedLength(CompressionKind kind, size_t rawSize);
 
 uint64_t CompressWithAlgorithm(

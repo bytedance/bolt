@@ -63,7 +63,8 @@ class BmSegmentCollection {
       memory::bm::MemoryTag tag,
       const BmRowLayout* layout,
       uint32_t rowBlockSize,
-      uint32_t heapBlockSize);
+      uint32_t heapBlockSize,
+      std::shared_ptr<memory::MemoryPool> allocationPool = nullptr);
 
   // Segment lifecycle and partition ownership.
   SegmentId spillActiveSegment();
@@ -164,6 +165,7 @@ class BmSegmentCollection {
   }
 
   std::shared_ptr<memory::bm::BufferManager> bufferManager_;
+  std::shared_ptr<memory::MemoryPool> allocationPool_;
   memory::bm::MemoryTag tag_;
   const BmRowLayout* layout_{nullptr};
   uint32_t rowBlockSize_;

@@ -104,6 +104,7 @@ class SpillReadFuture {
 
 class SpillStore {
  public:
+  explicit SpillStore(SpillStoreConfig config);
   SpillStore(SpillStoreConfig config, MemoryPool* pool);
   ~SpillStore();
 
@@ -118,6 +119,14 @@ class SpillStore {
       size_t expectedRawSize,
       IoPriority priority,
       uint64_t blockId = 0);
+  /// The caller retains outputPool through read, decode, and payload use.
+  /// BM keeps this owner in BlockMemory, alongside the future and payload.
+  SpillReadFuture SubmitReadBlock(
+      const ManagedFileSegment& segment,
+      size_t expectedRawSize,
+      IoPriority priority,
+      uint64_t blockId,
+      MemoryPool* outputPool);
 
  private:
   FileAllocateResult AllocateSegment(size_t size);

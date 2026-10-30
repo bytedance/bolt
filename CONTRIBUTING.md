@@ -46,9 +46,9 @@ Bolt uses **Conan 2** for dependency management and a Makefile to drive its buil
 
 - **OS**: Linux (Ubuntu 20.04+, CentOS 7+) or macOS (Experimental).
 
-- **Compiler**: GCC 10+ or Clang 16+ (Must support C++17).
+- **Compiler**: The latest stable Clang is recommended, with **Clang 22 as the minimum recommended version**. CI validates the Clang toolchain; newer GCC versions are not covered by CI. macOS support remains experimental.
 - **Build Tools**: CMake 3.25+, Ninja.
-- **Dependency Manager**: Conan 2.0+.
+- **Dependency Manager**: Conan 2.33.0+.
 
 ### Setup Options
 
@@ -61,20 +61,38 @@ scripts/setup-dev-env.sh
 ```
 **⚠️ Important: What this script does** This script is "opinionated" and performs the following actions. Please review them to ensure they fit your workflow:
 
-1. **Python Environment (Miniconda)**:
+1. **LLVM Toolchain**:
+   - First checks Clang executables on PATH and in standard LLVM installation directories. Reuses the highest available major version when it is at least 22, skipping LLVM installation.
+   - On Debian/Ubuntu supported by [apt.llvm.org](https://apt.llvm.org/), installs the latest stable LLVM release using the official installer's `all` option, including Clang, LLD, LLDB, clangd, LLVM development tools, libc++, libc++abi, OpenMP, compiler-rt, libunwind, and Polly. Also installs the matching LLVM BOLT package and its runtime development files, which the official installer's `all` option omits. Requires root or `sudo`.
+   - On macOS, installs or upgrades Homebrew `llvm` and `lld`. Homebrew must already be installed.
+   - Sets `clang`, `clang++`, `lld`, and `ld.lld` to the installed LLVM version using `update-alternatives` on Debian/Ubuntu. On macOS, adds the Homebrew LLVM and LLD directories to the shell configuration. Use `ld.lld --version` on Linux or `ld64.lld --version` on macOS; `lld` itself is the generic driver.
+   - Configures the default Conan profile with `--compiler=clang --libcxx=libc++`, using the selected LLVM toolchain first on PATH. If no Clang 22+ is found, installs the current stable LLVM release.
+   - Other Linux distributions require manual compiler installation.
+2. **Python Environment (Miniconda)**:
    - Checks for `~/miniconda3`.
    - **If missing**: Automatically downloads and installs Miniconda locally.
    - **Shell Modification**: Appends the Miniconda path to your shell configuration file (`~/.bashrc` or `~/.zshrc`).
    - Installs Python dependencies (including `conan`) into this environment.
-2. **Conan Configuration**:
-   - Sets the C++ standard to `gnu17` in the default Conan profile.
+3. **Conan Configuration**:
+   - Sets the C++ standard to `gnu20` in the default Conan profile.
    - **Clones & Patches Recipes**: Calls `install-bolt-deps.sh` to download a specific version of `conan-center-index` to `~/.conan2/conan-center-index` and applies Bolt-specific patches (required for `folly`, `arrow`, etc.).
    - Configures local Conan remotes to prioritize these patched recipes.
-3. **Git Hooks**: Installs `pre-commit` hooks for automatic code formatting.
+4. **Git Hooks**: Installs `pre-commit` hooks for automatic code formatting.
 
 #### Option 2: Manual Setup (For Advanced Users)
 
 If you prefer to manage your own Python environment (e.g., via system packages, pyenv, or poetry) or use a specific compiler, you can skip the setup script. However, you **must** still configure the Conan dependencies manually.
+
+Install the latest stable Clang (22 or newer) and LLD using your platform's
+package manager. After installing the Python dependencies below, select it
+explicitly, for example:
+
+```bash
+python scripts/configure-conan-profile.py --compiler clang-22
+```
+
+Replace `clang-22` with the installed newer version or its absolute path.
+Newer GCC versions are not covered by CI; validate such configurations yourself.
 
 1. **Install Python Dependencies**:
 
@@ -161,7 +179,7 @@ Vscode guide in [English](./doc/vscode-config-en.md) or [Chinese](./doc/vscode-c
 
 To maintain consistent code quality and style, please run the following checks before submitting your changes.
 
-- **C++ Standard**: We use **C++17**.
+- **C++ Standard**: We use **C++23** for all building Bolt code.
 
 - **Formatting**: We use `clang-format-14`.
 
