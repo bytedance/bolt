@@ -3275,10 +3275,13 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterTracksRolledFileRows) {
   const auto globalStatsBefore = common::globalSpillStats();
   const auto firstBytes = writeBlock('x', 3);
   const auto secondBytes = writeBlock('y', 5);
+  EXPECT_EQ(writer.numFinishedFiles(), 0);
   const auto thirdBytes = writeBlock('z', 7);
   auto files = writer.finish();
 
   ASSERT_EQ(files.size(), 2);
+  EXPECT_EQ(files[0].rowCount, 8);
+  EXPECT_EQ(files[1].rowCount, 7);
   EXPECT_EQ(
       std::filesystem::file_size(files[0].path), firstBytes + secondBytes);
   EXPECT_EQ(std::filesystem::file_size(files[1].path), thirdBytes);
@@ -3299,6 +3302,43 @@ TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterTracksRolledFileRows) {
   EXPECT_EQ(globalDelta.spilledBytes, finalStats.spilledBytes);
   EXPECT_EQ(globalDelta.spillWrites, finalStats.spillWrites);
   EXPECT_EQ(globalDelta.spilledFiles, finalStats.spilledFiles);
+}
+
+TEST_F(RadixSortSpillSectionsTest, encodedBlockWriterFileRowTarget) {
+  for (const uint64_t targetRows : {0, 7, 8}) {
+    SCOPED_TRACE(targetRows);
+    auto directory = exec::test::TempDirectoryPath::create();
+    folly::Synchronized<common::SpillStats> stats;
+    auto config =
+        spillConfig(directory->path, common::CompressionKind_NONE, 1 << 20);
+    SpillWriter writer(
+        directory->path + "/encoded",
+        std::numeric_limits<uint64_t>::max(),
+        config.spillIOConfig(1),
+        pool_.get(),
+        &stats,
+        targetRows);
+    constexpr uint32_t kHeaderSize = 2 * sizeof(int32_t);
+    constexpr int32_t kBodySize = 96;
+    std::array<char, kHeaderSize + kBodySize> frame{};
+    writer.writeEncodedBlock(frame.data(), kHeaderSize, kBodySize, 3);
+    writer.writeEncodedBlock(frame.data(), kHeaderSize, kBodySize, 5);
+    EXPECT_EQ(writer.numFinishedFiles(), 0);
+    writer.writeEncodedBlock(frame.data(), kHeaderSize, kBodySize, 7);
+    auto files = writer.finish();
+
+    if (targetRows == 0) {
+      ASSERT_EQ(files.size(), 1);
+      EXPECT_EQ(files[0].rowCount, 15);
+      EXPECT_EQ(std::filesystem::file_size(files[0].path), 3 * frame.size());
+    } else {
+      ASSERT_EQ(files.size(), 2);
+      EXPECT_EQ(files[0].rowCount, 8);
+      EXPECT_EQ(files[1].rowCount, 7);
+      EXPECT_EQ(std::filesystem::file_size(files[0].path), 2 * frame.size());
+      EXPECT_EQ(std::filesystem::file_size(files[1].path), frame.size());
+    }
+  }
 }
 
 TEST_F(RadixSortSpillSectionsTest, writerReturnedFilesOutliveWriter) {

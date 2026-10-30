@@ -27,11 +27,16 @@ other partitions and trigger OOM at that restore point.
 
 The execution path in the current code is straightforward:
 
-1. detect skewed partitions during build-side spill;
-2. split the corresponding spill files into multiple sub-ranges;
-3. restore one sub-range at a time in HashBuild;
-4. let HashProbe process those sub-ranges while preserving outer join
-   semantics.
+1. `HashBuild::prepareForFirstSpill()` estimates the restore row budget before
+   the first spill writes any files.
+2. `Spiller` passes that budget to each eligible partition's `SpillWriter`,
+   which rolls files at write-block boundaries.
+3. `Spiller::finishSpill()` calls `trySplitSkewPartition()` to compare partition
+   sizes and row counts with averages and group skewed partitions' files into
+   sub-ranges.
+4. HashBuild restores one sub-range at a time.
+5. HashProbe replays the corresponding probe partition for each sub-range,
+   carrying match state across ranges where outer join semantics require it.
 
 Here, "range partition" is closer to ordered processing over sub-ranges. It is
 not a new repartition by key range. It is a split over the file set that
@@ -39,30 +44,15 @@ belongs to a skewed spill partition.
 
 ## 3. How skewed partitions are identified
 
-The identification logic is in `Spiller`, with two entry points.
+Before spilling, `HashBuild::prepareForFirstSpill()` sets the restore row
+budget in `Spiller::maxRowsInMemory_`. With skew support enabled, `Spiller`
+passes this budget to each partition's writer as `targetFileRows_`.
+`SpillWriter::ensureFile()` rolls the file before the next block if the
+current file exceeds its byte-size target or reaches its nonzero row target.
+The row target is soft: whole blocks may exceed it, and zero disables
+row-based rollover. These file boundaries support later range splitting.
 
-The first is `Spiller::prepareForRangPartitionIfNeeded()`. It runs during spill
-and checks the current spilled row counts of the partitions. If the row-count
-ratio between the largest and smallest partition exceeds the threshold, and the
-skewed partition has not finished a file yet, Bolt marks it as
-`skewedVictim_` and forces the current file to finish:
-
-```cpp
-if (minRowCount != 0 &&
-    maxRowCount / minRowCount > skewRowCountRatioThreshold_ &&
-    state_.numFinishedFiles(skewedPartitionNumber) == 0) {
-  skewedVictim_ = skewedPartitionNumber;
-  maxRowsPerFile_ = maxRowCount;
-  state_.finishFile(skewedPartitionNumber);
-}
-```
-
-The purpose of this check is to identify clearly skewed partitions early in the
-spill process and end the current spill file in advance. That keeps later data
-from continuing to accumulate in one large file and leaves a more suitable file
-granularity for later sub-range splitting and incremental restore.
-
-The second entry point is `Spiller::trySplitSkewPartition()`. It runs during
+Skew detection happens in `Spiller::trySplitSkewPartition()`. It runs during
 `finishSpill`, recomputes file size and row count for the spilled partitions,
 and compares them with the average. When a partition exceeds the internal skew
 threshold, it is marked as skewed and enters the split path:
@@ -74,14 +64,6 @@ if (fileSizeRatio >= threshold || rowCountRatio >= threshold) {
   ...
 }
 ```
-
-Whether to split mainly depends on two signals:
-
-- row-count skew observed during spill, used to cut the skewed victim into
-  multiple files early and provide a better file granularity for later
-  sub-range splitting;
-- partition size / row-count skew observed after spill, used to decide whether
-  that partition should be further split into sub-ranges.
 
 ## 4. How a skewed partition becomes sub-ranges
 
@@ -247,9 +229,8 @@ focus here.
 
 Skew HashBuild addresses the case where a heavily skewed partition causes the
 memory peak of build restore to concentrate at one point and trigger OOM. Bolt
-handles this by identifying skewed partitions during spill, splitting them into
-smaller sub-ranges, and restoring them incrementally in the spill / restore
-path.
+prepares file boundaries during writing, identifies skewed partitions when
+spilling finishes, and splits them into sub-ranges for incremental restoration.
 
 It does not introduce a new join algorithm or require an exact skew-key phase
 before plan rewrite. It reuses the existing spill files and turns one skewed
