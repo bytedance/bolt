@@ -135,7 +135,7 @@ class SpillWriter {
   /// write to file. 'fileOptions' specifies the file layout on remote storage
   /// which is storage system specific. 'pool' is used for buffering and
   /// constructing the result data read from 'this'. 'stats' is used to collect
-  /// the spill write stats.
+  /// the spill write stats. 'targetFileRows' is the target row count of a file.
   ///
   /// When writing sorted spill runs, the caller is responsible for buffering
   /// and sorting the data. write is called multiple times, followed by flush().
@@ -148,7 +148,8 @@ class SpillWriter {
       memory::MemoryPool* pool,
       folly::Synchronized<common::SpillStats>* stats,
       uint32_t maxBatchRows = 0,
-      std::optional<RowFormatInfo> rowInfo = std::nullopt);
+      std::optional<RowFormatInfo> rowInfo = std::nullopt,
+      uint64_t targetFileRows = 0);
 
   /// Creates a writer for caller-defined spill formats. The caller provides
   /// encoded blocks via writeEncodedBlock(); SpillWriter owns the file IO,
@@ -158,7 +159,8 @@ class SpillWriter {
       uint64_t targetFileSize,
       const common::SpillConfig::SpillIOConfig& ioConfig,
       memory::MemoryPool* pool,
-      folly::Synchronized<common::SpillStats>* stats);
+      folly::Synchronized<common::SpillStats>* stats,
+      uint64_t targetFileRows = 0);
 
   /// Adds 'rows' for the positions in 'indices' into 'this'. The indices
   /// must produce a view where the rows are sorted if sorting is desired.
@@ -203,10 +205,6 @@ class SpillWriter {
 
   std::vector<uint32_t> testingSpilledFileIds() const;
 
-  uint64_t rowsInCurrentFile() const {
-    return rowsInCurrentFile_;
-  }
-
   void cleanupFilesNoThrow() noexcept;
 
  private:
@@ -216,8 +214,9 @@ class SpillWriter {
 
   // Returns an open spill file for write. If there is no open spill file, then
   // the function creates a new one. If the current open spill file exceeds the
-  // target file size limit, then it first closes the current one and then
-  // creates a new one. 'currentFile_' points to the current open spill file.
+  // target file size limit or the target file row count, then it first closes
+  // the current one and then creates a new one. 'currentFile_' points to the
+  // current open spill file.
   SpillWriteFile* ensureFile();
 
   // Closes the current open spill file pointed by 'currentFile_'.
@@ -245,6 +244,7 @@ class SpillWriter {
   const common::CompressionKind compressionKind_;
   const std::string pathPrefix_;
   const uint64_t targetFileSize_;
+  const uint64_t targetFileRows_;
   const bool spillUringEnabled_;
   const uint64_t writeBufferSize_;
   const std::string fileCreateConfig_;

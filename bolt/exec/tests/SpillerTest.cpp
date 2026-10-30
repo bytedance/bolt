@@ -1359,102 +1359,81 @@ TEST_P(HashJoinBuildOnly, writeBufferSize) {
   }
 }
 
-TEST_P(HashJoinBuildOnly, rowBasedHashBuildSkewedVictimFinishFile) {
-  // Covers the fix scenario: row-based HashBuild spills via
-  // spill(RowContainerIterator*). After skewedVictim_ is identified, we still
-  // must call prepareForRangPartitionIfNeeded() to enforce maxRowsPerFile_ and
-  // finish the current spill file for the victim partition.
-
-  // Only need the row container and the spiller; no need to pre-populate the
-  // row container.
-  setupSpillData(rowType_, numKeys_, 0, 0);
-  setupSpiller(
-      std::numeric_limits<uint64_t>::max(),
-      0,
-      false,
-      0,
-      true /*rowBasedSpill*/,
-      true /*supportSkewPartition*/);
-
-  // Lower thresholds to make the test quickly identify skewedVictim_.
-  spiller_->setSkewThreshold(1 /*fileSizeThreshold*/, 2 /*rowCountThreshold*/);
-
-  // spill(partition, spillVector) requires the partition to be marked as
-  // spilled.
-  spiller_->spill();
-
-  HashPartitionFunction partitionFn(hashBits_, rowType_, keyChannels_);
-
-  auto makeSubsetForPartition = [&](uint32_t targetPartition,
-                                    int32_t needRows) -> RowVectorPtr {
-    BOLT_CHECK(needRows > 0, "needRows must be > 0");
-    for (int attempt = 0; attempt < 50; ++attempt) {
-      const auto input = makeDataset(rowType_, 2048, nullptr);
-      spillPartitions_.resize(input->size());
-      const auto singlePartition =
-          partitionFn.partition(*input, spillPartitions_);
-      std::vector<vector_size_t> indices;
-      indices.reserve(needRows);
-      for (vector_size_t i = 0; i < input->size() && indices.size() < needRows;
-           ++i) {
-        const auto p = singlePartition.has_value() ? singlePartition.value()
-                                                   : spillPartitions_[i];
-        if (p == targetPartition) {
-          indices.push_back(i);
-        }
-      }
-      if (static_cast<int32_t>(indices.size()) < needRows) {
-        continue;
-      }
-      auto indicesBuffer = allocateIndices(needRows, pool_.get());
-      auto* raw = indicesBuffer->asMutable<vector_size_t>();
-      for (int i = 0; i < needRows; ++i) {
-        raw[i] = indices[i];
-      }
-      return wrapAndCombineDict(needRows, indicesBuffer, input);
+TEST_P(HashJoinBuildOnly, spillFileRowTarget) {
+  constexpr vector_size_t kBatchRows = 6;
+  constexpr vector_size_t kNumRows = 3 * kBatchRows;
+  rowType_ = ROW({"key", "value"}, {BIGINT(), BIGINT()});
+  struct {
+    uint64_t targetRows;
+    bool supportSkewPartition;
+    std::string debugString() const {
+      return fmt::format(
+          "targetRows {}, supportSkewPartition {}",
+          targetRows,
+          supportSkewPartition);
     }
-    BOLT_CHECK(
+  } testSettings[] = {{10, true}, {0, true}, {10, false}};
+
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+    spiller_.reset();
+    setupSpillData(rowType_, 1, kNumRows, 0, [&](RowVectorPtr input) {
+      input->childAt(0) =
+          makeFlatVector<int64_t>(kNumRows, [](auto /*row*/) { return 0; });
+      input->childAt(1) =
+          makeFlatVector<int64_t>(kNumRows, [](auto row) { return row; });
+    });
+    rowContainer_->clear();
+    setupSpiller(
+        std::numeric_limits<uint64_t>::max(),
+        0,
         false,
-        "Failed to generate enough rows for partition {} (needRows={})",
-        targetPartition,
-        needRows);
-    return nullptr;
-  };
-
-  const uint32_t victimPartition = 0;
-  const uint32_t otherPartition = 1;
-  const int32_t victimRows = 50;
-  const int32_t otherRows = 1;
-
-  // Create a strong row-count skew so prepareForRangPartitionIfNeeded()
-  // identifies the victim partition.
-  const auto victimVector = makeSubsetForPartition(victimPartition, victimRows);
-  const auto otherVector = makeSubsetForPartition(otherPartition, otherRows);
-  spiller_->spill(victimPartition, victimVector);
-  spiller_->spill(otherPartition, otherVector);
-
-  spiller_->prepareForRangPartitionIfNeeded();
-  ASSERT_EQ(spiller_->state().numFinishedFiles(victimPartition), 1);
-
-  // Spill again via spill(RowContainerIterator*) and fill up the victim
-  // partition's current file, which should trigger a second finishFile().
-  const auto victimVector2 =
-      makeSubsetForPartition(victimPartition, victimRows);
-  const SelectivityVector allRows(victimVector2->size());
-  std::vector<DecodedVector> decoded;
-  decoded.reserve(rowType_->size());
-  for (int i = 0; i < rowType_->size(); ++i) {
-    decoded.emplace_back(*victimVector2->childAt(i), allRows);
-  }
-  for (vector_size_t row = 0; row < victimVector2->size(); ++row) {
-    char* newRow = rowContainer_->newRow();
-    for (int col = 0; col < rowType_->size(); ++col) {
-      rowContainer_->store(decoded[col], row, newRow, col);
+        0,
+        false,
+        testData.supportSkewPartition);
+    spiller_->setMaxRowsInMemory(testData.targetRows);
+    // Mark partitions without creating a writer, so the direct spill path
+    // must pass the row target when it creates one.
+    spiller_->spill();
+    HashPartitionFunction partitionFn(hashBits_, rowType_, {0});
+    std::vector<uint32_t> partitionNumbers(kNumRows);
+    const auto singlePartition =
+        partitionFn.partition(*rowVector_, partitionNumbers);
+    const auto partitionNumber = singlePartition.value_or(partitionNumbers[0]);
+    for (vector_size_t offset = 0; offset < kNumRows; offset += kBatchRows) {
+      spiller_->spill(
+          partitionNumber,
+          std::static_pointer_cast<RowVector>(
+              rowVector_->slice(offset, kBatchRows)));
     }
-  }
 
-  spiller_->spill();
-  ASSERT_EQ(spiller_->state().numFinishedFiles(victimPartition), 2);
+    SpillPartitionSet partitions;
+    spiller_->finishSpill(partitions);
+    std::vector<uint64_t> fileRows;
+    int64_t nextValue = 0;
+    for (const auto& [id, partition] : partitions) {
+      for (const auto& file : partition->files()) {
+        fileRows.push_back(file.rowCount);
+        const auto firstValue = nextValue;
+        auto reader = SpillReadFile::create(file, pool(), false);
+        RowVectorPtr output;
+        while (reader->nextBatch(output)) {
+          DecodedVector values(*output->childAt(1));
+          for (vector_size_t row = 0; row < output->size(); ++row) {
+            ASSERT_EQ(values.valueAt<int64_t>(row), nextValue++);
+          }
+        }
+        ASSERT_EQ(nextValue - firstValue, file.rowCount);
+      }
+    }
+    const std::vector<uint64_t> expectedRows =
+        testData.targetRows && testData.supportSkewPartition
+        ? std::vector<uint64_t>{12, 6}
+        : std::vector<uint64_t>{18};
+    ASSERT_EQ(fileRows, expectedRows);
+    ASSERT_EQ(nextValue, kNumRows);
+    ASSERT_EQ(spiller_->stats().spilledRows, kNumRows);
+  }
 }
 
 class AggregationOutputOnly : public SpillerTest,
