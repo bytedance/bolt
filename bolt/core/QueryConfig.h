@@ -787,12 +787,6 @@ class QueryConfig {
   static constexpr const char* kHashJoinSkewedPartitionEnabled =
       "hash_join_skewed_partition_enabled";
 
-  static constexpr const char* kSkewFileSizeRatioThreshold =
-      "hash_join_skewed_file_size_ratio";
-
-  static constexpr const char* kSkewRowCountRatioThreshold =
-      "hash_join_skewed_row_count_ratio";
-
   // -1 means print all exceptions, usualing for debug
   // 0 means disable all exceptions,
   // 1 means print exceptions whose prefix is in the white list(default)
@@ -1753,14 +1747,6 @@ class QueryConfig {
 
   bool isHashJoinSkewedPartitionEnabled() const {
     return get<bool>(kHashJoinSkewedPartitionEnabled, true);
-  }
-
-  int32_t skewFileSizeRatioThreshold() const {
-    return get<int32_t>(kSkewFileSizeRatioThreshold, 10);
-  }
-
-  int32_t skewRowCountRatioThreshold() const {
-    return get<int32_t>(kSkewRowCountRatioThreshold, 100);
   }
 
   bool morselDrivenEnabled() const {
