@@ -59,6 +59,28 @@ class Spiller;
 
 enum class DistinctProvenance : uint8_t { kAlreadyOutput, kNew };
 
+// Keeps a resident source's identity while its unread rows move to a file.
+class ResidentSpillStream {
+ public:
+  virtual ~ResidentSpillStream();
+
+  virtual uint64_t position() const = 0;
+
+  void setSpilledFile(SpillFileInfo file);
+
+  bool hasPendingFile() const {
+    return pendingFile_.has_value();
+  }
+
+  // Called after output admission and before the tree observes the source.
+  virtual void prepareFileReader(bool spillUringEnabled, bool withLengths) = 0;
+
+ protected:
+  virtual void releaseBatch() noexcept = 0;
+
+  std::optional<SpillFileInfo> pendingFile_;
+};
+
 // A source of sorted spilled RowVectors coming either from a file or memory.
 class SpillMergeStream : public MergeStream {
  public:
@@ -72,10 +94,6 @@ class SpillMergeStream : public MergeStream {
 
   DistinctProvenance provenance() const {
     return provenance_;
-  }
-
-  virtual std::optional<uint64_t> memoryPosition() const {
-    return std::nullopt;
   }
 
   bool hasData() const final {
@@ -129,11 +147,11 @@ class SpillMergeStream : public MergeStream {
   }
 
  protected:
+  virtual void close();
+
   virtual const std::vector<SpillSortKey>& sortingKeys() const = 0;
 
   virtual void nextBatch() = 0;
-
-  virtual void close();
 
   // loads the next 'rowVector' and sets 'decoded_' if this is initialized.
   void setNextBatch() {
@@ -274,7 +292,7 @@ class RowBasedSpillMergeStream : public MergeStream {
   static bool needsMaterialization(
       const RowFormatInfo& info,
       bool serializedRowsRequired) {
-    return !info.serializableAccumulators.empty() ||
+    return (serializedRowsRequired && !info.serializableAccumulators.empty()) ||
         (!info.variableColumns.empty() &&
          (serializedRowsRequired || !info.stringViewsAreContiguous ||
           std::any_of(
@@ -296,10 +314,6 @@ class RowBasedSpillMergeStream : public MergeStream {
 
   DistinctProvenance provenance() const {
     return provenance_;
-  }
-
-  virtual std::optional<uint64_t> memoryPosition() const {
-    return std::nullopt;
   }
 
   virtual void prefetch(){};
@@ -964,7 +978,8 @@ std::unique_ptr<SpillMergeStream> makeRowContainerSpillMergeStream(
     int32_t numSortKeys,
     const std::vector<CompareFlags>& sortCompareFlags,
     memory::MemoryPool* pool,
-    DistinctProvenance provenance);
+    DistinctProvenance provenance,
+    ResidentSpillStream** residentStream = nullptr);
 
 std::unique_ptr<RowBasedSpillMergeStream>
 makeRowContainerRowBasedSpillMergeStream(
@@ -976,7 +991,8 @@ makeRowContainerRowBasedSpillMergeStream(
     const RowFormatInfo& rowInfo,
     DistinctProvenance provenance,
     RowRowCompare compare = nullptr,
-    bool serializedRowsRequired = true);
+    bool serializedRowsRequired = true,
+    ResidentSpillStream** residentStream = nullptr);
 
 using SpillPartitionSet =
     std::map<SpillPartitionId, std::unique_ptr<SpillPartition>>;

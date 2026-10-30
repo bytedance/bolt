@@ -385,7 +385,6 @@ class GroupingSet {
   void prepareSpillMerge(bool dynamicFinalSpill);
   void releaseResidentRows();
   void releaseResidentBacking();
-  void finishPendingOutputSpill();
   uint64_t residentPosition() const;
   folly::Range<char* const*> residentRows() const {
     return residentRows_ == nullptr
@@ -422,7 +421,7 @@ class GroupingSet {
   bool getOutputWithSpill(
       int32_t maxOutputRows,
       int32_t maxOutputBytes,
-      const RowVectorPtr& result);
+      RowVectorPtr& result);
 
   // Reads from spilled rows until producing a batch of final results in
   // 'result'. Returns false and leaves 'result' empty when the spilled data is
@@ -431,7 +430,7 @@ class GroupingSet {
   bool mergeNext(
       int32_t maxOutputRows,
       int32_t maxOutputBytes,
-      const RowVectorPtr& result);
+      RowVectorPtr& result);
 
   uint64_t mergeOutputBytes() const {
     const auto bytes = mergeRows_->usedBytes();
@@ -452,7 +451,7 @@ class GroupingSet {
   bool mergeNextWithRowBasedSpill(
       int32_t maxOutputRows,
       int32_t maxOutputBytes,
-      const RowVectorPtr& result);
+      RowVectorPtr& result);
 
   bool mergeNextWithRowBasedSpillInRowFormat(
       int32_t maxOutputRows,
@@ -616,12 +615,11 @@ class GroupingSet {
   // mergeRows_ shares this allocator with the resident rows. Exclude their
   // existing variable-length storage from the size of each output batch.
   uint64_t residentStringBytes_{0};
-  std::optional<OwnedSpillPartition> pendingInputSpillPartition_;
-  // Suffix file waiting for output admission. While set, the resident stream
-  // has been removed and residentStreamIndex_ is its insertion point.
-  std::optional<OwnedSpillPartition> pendingOutputSpillPartition_;
+  // Owns input files until the merge readers are prepared.
+  std::optional<OwnedSpillPartition> pendingSpillPartition_;
   common::SpillStats residentSuffixSpillStats_;
-  std::optional<size_t> residentStreamIndex_;
+  // Borrowed from the merge tree. Its identity survives a suffix spill.
+  ResidentSpillStream* residentStream_{nullptr};
   bool spillMergePrepared_{false};
   // Indicates the group indices passed to initializeNewGroups in spill merge
   // stage, element should be 0, 1, 2 ... groupIndicesOfRows_.size()

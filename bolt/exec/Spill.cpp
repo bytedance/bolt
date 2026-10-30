@@ -29,6 +29,7 @@
  */
 
 #include "bolt/exec/Spill.h"
+#include <type_traits>
 #include "bolt/common/base/CompareFlags.h"
 #include "bolt/common/base/RuntimeMetrics.h"
 #include "bolt/common/file/FileSystems.h"
@@ -63,7 +64,42 @@ void removeSpillFilesNoThrow(const SpillFiles& files) noexcept {
     removeSpillFileNoThrow(file.path);
   }
 }
+
+template <typename Reader>
+void closeSpillReader(
+    std::unique_ptr<Reader>& reader,
+    uint64_t& decompressTime,
+    uint64_t& readIOTime) noexcept {
+  if (reader == nullptr) {
+    return;
+  }
+  if constexpr (std::is_same_v<Reader, RowBasedSpillReadFile>) {
+    decompressTime += reader->getSpillDecompressTime();
+  }
+  readIOTime += reader->getSpillReadIOTime();
+  try {
+    const auto path = reader->testingFilePath();
+    reader.reset();
+    removeSpillFileNoThrow(path);
+  } catch (...) {
+    // Path copying can allocate while unwinding an allocation failure.
+    removeSpillFileNoThrow(reader->testingFilePath());
+    reader.reset();
+  }
+}
 } // namespace
+
+ResidentSpillStream::~ResidentSpillStream() {
+  if (pendingFile_.has_value()) {
+    removeSpillFileNoThrow(pendingFile_->path);
+  }
+}
+
+void ResidentSpillStream::setSpilledFile(SpillFileInfo file) {
+  BOLT_CHECK(!pendingFile_.has_value());
+  pendingFile_.emplace(std::move(file));
+  releaseBatch();
+}
 
 void SpillMergeStream::pop() {
   BOLT_CHECK(!closed_);
@@ -552,17 +588,10 @@ RowBasedFileSpillMergeStream::~RowBasedFileSpillMergeStream() {
 }
 
 void RowBasedFileSpillMergeStream::close() noexcept {
-  if (spillFile_ == nullptr) {
-    return;
-  }
-  spillDecompressTimeUs_ += spillFile_->getSpillDecompressTime();
-  spillReadIOTimeUs_ += spillFile_->getSpillReadIOTime();
-  const auto path = spillFile_->testingFilePath();
-  spillFile_.reset();
+  closeSpillReader(spillFile_, spillDecompressTimeUs_, spillReadIOTimeUs_);
   rowVector_.clear();
   rowLengths_.clear();
   index_ = 0;
-  removeSpillFileNoThrow(path);
 }
 
 void extractRowContainerSpillVector(
@@ -591,7 +620,8 @@ void extractRowContainerSpillVector(
 }
 
 namespace {
-class RowContainerSpillMergeStream final : public SpillMergeStream {
+class RowContainerSpillMergeStream final : public SpillMergeStream,
+                                           public ResidentSpillStream {
  public:
   RowContainerSpillMergeStream(
       RowContainer& container,
@@ -605,15 +635,14 @@ class RowContainerSpillMergeStream final : public SpillMergeStream {
         container_(container),
         rowType_(std::move(rowType)),
         rows_(rows),
-        sortCompareFlags_(std::move(sortCompareFlags)),
         pool_(pool) {
     BOLT_CHECK(
-        sortCompareFlags_.empty() || sortCompareFlags_.size() == numSortKeys);
+        sortCompareFlags.empty() || sortCompareFlags.size() == numSortKeys);
     sortingKeys_.reserve(numSortKeys);
     for (int32_t key = 0; key < numSortKeys; ++key) {
       sortingKeys_.emplace_back(
           key,
-          sortCompareFlags_.empty() ? CompareFlags() : sortCompareFlags_[key]);
+          sortCompareFlags.empty() ? CompareFlags() : sortCompareFlags[key]);
     }
     if (!rows_.empty()) {
       nextBatch();
@@ -624,11 +653,36 @@ class RowContainerSpillMergeStream final : public SpillMergeStream {
     return std::numeric_limits<uint32_t>::max();
   }
 
-  std::optional<uint64_t> memoryPosition() const override {
+  uint64_t position() const override {
     return batchBegin_ + index_;
   }
 
+  ~RowContainerSpillMergeStream() override {
+    closeSpillReader(spillFile_, spillDecompressTimeUs_, spillReadIOTimeUs_);
+  }
+
+  void prepareFileReader(bool spillUringEnabled, bool /*withLengths*/)
+      override {
+    auto start = getCurrentTimeMicro();
+    spillFile_ = SpillReadFile::create(*pendingFile_, pool_, spillUringEnabled);
+    spillReadIOTimeUs_ += getCurrentTimeMicro() - start;
+    BOLT_TEST_ADJUST(
+        "bytedance::bolt::exec::ResidentSpillStream::prepareFileReader",
+        static_cast<ResidentSpillStream*>(this));
+    nextBatch();
+    pendingFile_->path.clear();
+    pendingFile_.reset();
+  }
+
  private:
+  void releaseBatch() noexcept override {
+    rowVector_.reset();
+    decoded_.clear();
+    SpillMergeStream::rows_.resize(0);
+    index_ = 0;
+    size_ = 0;
+  }
+
   const std::vector<SpillSortKey>& sortingKeys() const override {
     return sortingKeys_;
   }
@@ -636,6 +690,18 @@ class RowContainerSpillMergeStream final : public SpillMergeStream {
   void nextBatch() override {
     static constexpr vector_size_t kMaxRows = 64;
     BOLT_CHECK(!closed_);
+    if (spillFile_ != nullptr) {
+      MicrosecondTimer timer(&spillReadTimeUs_);
+      index_ = 0;
+      if (!spillFile_->nextBatch(rowVector_)) {
+        closeSpillReader(
+            spillFile_, spillDecompressTimeUs_, spillReadIOTimeUs_);
+        SpillMergeStream::close();
+      } else {
+        size_ = rowVector_->size();
+      }
+      return;
+    }
     batchBegin_ += size_;
     if (batchBegin_ >= rows_.size()) {
       SpillMergeStream::close();
@@ -655,14 +721,15 @@ class RowContainerSpillMergeStream final : public SpillMergeStream {
   RowContainer& container_;
   const RowTypePtr rowType_;
   const folly::Range<char* const*> rows_;
-  const std::vector<CompareFlags> sortCompareFlags_;
   std::vector<SpillSortKey> sortingKeys_;
   memory::MemoryPool* const pool_;
+  std::unique_ptr<SpillReadFile> spillFile_;
   uint64_t batchBegin_{0};
 };
 
 class RowContainerRowBasedSpillMergeStream final
-    : public RowBasedSpillMergeStream {
+    : public RowBasedSpillMergeStream,
+      public ResidentSpillStream {
  public:
   RowContainerRowBasedSpillMergeStream(
       RowContainer& container,
@@ -705,13 +772,36 @@ class RowContainerRowBasedSpillMergeStream final
     return std::numeric_limits<uint32_t>::max();
   }
 
-  std::optional<uint64_t> memoryPosition() const override {
+  uint64_t position() const override {
     return batchBegin_ + index_;
   }
 
+  ~RowContainerRowBasedSpillMergeStream() override {
+    closeSpillReader(spillFile_, spillDecompressTimeUs_, spillReadIOTimeUs_);
+  }
+
+  uint64_t getSpillReadIOTime() override {
+    return spillReadIOTimeUs_ +
+        (spillFile_ == nullptr ? 0 : spillFile_->getSpillReadIOTime());
+  }
+
+  void prepareFileReader(bool spillUringEnabled, bool withLengths) override {
+    auto start = getCurrentTimeMicro();
+    spillFile_ = RowBasedSpillReadFile::create(
+        *pendingFile_, container_.pool(), spillUringEnabled);
+    spillReadTimeUs_ += getCurrentTimeMicro() - start;
+    BOLT_TEST_ADJUST(
+        "bytedance::bolt::exec::ResidentSpillStream::prepareFileReader",
+        static_cast<ResidentSpillStream*>(this));
+    withLengths ? nextBatchWithLengths() : nextBatch();
+    pendingFile_->path.clear();
+    pendingFile_.reset();
+  }
+
   uint64_t serializedRowSize() const override {
-    return needsMaterialization_ ? RowBasedSpillMergeStream::serializedRowSize()
-                                 : rowInfo_.getRowSize(rowVector_[index_]);
+    return spillFile_ != nullptr || needsMaterialization_
+        ? RowBasedSpillMergeStream::serializedRowSize()
+        : rowInfo_.getRowSize(rowVector_[index_]);
   }
 
   bool isNextEqual() const override {
@@ -720,19 +810,40 @@ class RowContainerRowBasedSpillMergeStream final
   }
 
  private:
+  void releaseBatch() noexcept override {
+    rowBuffer_.reset();
+    std::vector<char*>().swap(rowVector_);
+    std::vector<size_t>().swap(rowLengths_);
+    index_ = 0;
+  }
+
   void nextBatchWithLengths() override {
-    nextBatch();
+    loadBatch(true);
   }
 
   void nextBatch() override {
+    loadBatch(false);
+  }
+
+  void loadBatch(bool withLengths) {
+    if (spillFile_ != nullptr) {
+      MicrosecondTimer timer(&spillReadTimeUs_);
+      index_ = 0;
+      const bool loaded = withLengths
+          ? spillFile_->nextBatch(rowVector_, rowLengths_)
+          : spillFile_->nextBatch(rowVector_) != 0;
+      if (!loaded) {
+        closeSpillReader(
+            spillFile_, spillDecompressTimeUs_, spillReadIOTimeUs_);
+      }
+      return;
+    }
     batchBegin_ += rowVector_.size();
     index_ = 0;
     rowVector_.clear();
     rowLengths_.clear();
     if (batchBegin_ >= rows_.size()) {
-      rowBuffer_.reset();
-      std::vector<char*>().swap(rowVector_);
-      std::vector<size_t>().swap(rowLengths_);
+      releaseBatch();
       return;
     }
     const auto limit = std::min<uint64_t>(
@@ -740,7 +851,8 @@ class RowContainerRowBasedSpillMergeStream final
         std::max<uint64_t>(
             uint64_t{1}, kResidentBatchBytes / rowInfo_.fixRowSize));
     rowVector_.reserve(limit);
-    if (!needsMaterialization_ && rowInfo_.variableColumns.empty()) {
+    if (!needsMaterialization_ && rowInfo_.variableColumns.empty() &&
+        rowInfo_.serializableAccumulators.empty()) {
       rowVector_.assign(
           rows_.begin() + batchBegin_, rows_.begin() + batchBegin_ + limit);
       return;
@@ -802,6 +914,7 @@ class RowContainerRowBasedSpillMergeStream final
   const bool needsMaterialization_;
   const bool canInitializeStringViews_;
   BufferPtr rowBuffer_;
+  std::unique_ptr<RowBasedSpillReadFile> spillFile_;
   uint64_t batchBegin_{0};
 };
 } // namespace
@@ -813,8 +926,9 @@ std::unique_ptr<SpillMergeStream> makeRowContainerSpillMergeStream(
     int32_t numSortKeys,
     const std::vector<CompareFlags>& sortCompareFlags,
     memory::MemoryPool* pool,
-    DistinctProvenance provenance) {
-  return std::make_unique<RowContainerSpillMergeStream>(
+    DistinctProvenance provenance,
+    ResidentSpillStream** residentStream) {
+  auto stream = std::make_unique<RowContainerSpillMergeStream>(
       container,
       rowType,
       rows,
@@ -822,6 +936,10 @@ std::unique_ptr<SpillMergeStream> makeRowContainerSpillMergeStream(
       sortCompareFlags,
       pool,
       provenance);
+  if (residentStream != nullptr) {
+    *residentStream = stream.get();
+  }
+  return stream;
 }
 
 std::unique_ptr<RowBasedSpillMergeStream>
@@ -834,8 +952,9 @@ makeRowContainerRowBasedSpillMergeStream(
     const RowFormatInfo& rowInfo,
     DistinctProvenance provenance,
     RowRowCompare compare,
-    bool serializedRowsRequired) {
-  return std::make_unique<RowContainerRowBasedSpillMergeStream>(
+    bool serializedRowsRequired,
+    ResidentSpillStream** residentStream) {
+  auto stream = std::make_unique<RowContainerRowBasedSpillMergeStream>(
       container,
       rowType,
       rows,
@@ -845,6 +964,10 @@ makeRowContainerRowBasedSpillMergeStream(
       provenance,
       compare,
       serializedRowsRequired);
+  if (residentStream != nullptr) {
+    *residentStream = stream.get();
+  }
+  return stream;
 }
 
 OwnedSpillPartition::OwnedSpillPartition(SpillPartition&& partition)

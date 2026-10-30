@@ -161,10 +161,49 @@ class AggregateFunc : public Aggregate {
       VectorPtr* /*result*/) override {}
 };
 
+class ConstantOutputAggregate final : public AggregateFunc {
+ public:
+  ConstantOutputAggregate(TypePtr resultType, bool nullOutput)
+      : AggregateFunc(std::move(resultType)), nullOutput_(nullOutput) {}
+
+  void extractValues(char** /*groups*/, int32_t numGroups, VectorPtr* result)
+      override {
+    const auto& type = (*result)->type();
+    auto* pool = (*result)->pool();
+    if (nullOutput_) {
+      *result = BaseVector::createNullConstant(type, numGroups, pool);
+    } else if (type->isBigint()) {
+      *result = BaseVector::createConstant(type, int64_t{7}, numGroups, pool);
+    } else {
+      VectorPtr value = BaseVector::create(type, 1, pool);
+      auto* array = value->as<ArrayVector>();
+      array->mutableOffsets(1)->asMutable<vector_size_t>()[0] = 0;
+      array->mutableSizes(1)->asMutable<vector_size_t>()[0] = 1;
+      array->elements()->resize(1);
+      array->elements()->asFlatVector<int64_t>()->set(0, 7);
+      *result = BaseVector::wrapInConstant(numGroups, 0, std::move(value));
+    }
+  }
+
+  void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
+      override {
+    extractValues(groups, numGroups, result);
+  }
+
+ private:
+  const bool nullOutput_;
+};
+
 class CountingSerializableAggregate final : public AggregateFunc {
  public:
-  explicit CountingSerializableAggregate(int32_t& sizeCalls)
-      : AggregateFunc(BIGINT()), sizeCalls_(sizeCalls) {}
+  explicit CountingSerializableAggregate(
+      int32_t& sizeCalls,
+      int32_t* serializeCalls = nullptr,
+      int32_t* deserializeCalls = nullptr)
+      : AggregateFunc(BIGINT()),
+        sizeCalls_(sizeCalls),
+        serializeCalls_(serializeCalls),
+        deserializeCalls_(deserializeCalls) {}
 
   bool isFixedSize() const override {
     return false;
@@ -180,15 +219,23 @@ class CountingSerializableAggregate final : public AggregateFunc {
   }
 
   char* serializeAccumulator(char* /*group*/, char* dst) const override {
+    if (serializeCalls_ != nullptr) {
+      ++*serializeCalls_;
+    }
     return dst + 7;
   }
 
   char* deserializeAccumulator(char* /*group*/, char* src) const override {
+    if (deserializeCalls_ != nullptr) {
+      ++*deserializeCalls_;
+    }
     return src + 7;
   }
 
  private:
   int32_t& sizeCalls_;
+  int32_t* const serializeCalls_;
+  int32_t* const deserializeCalls_;
 };
 
 void checkSpillStats(PlanNodeStats& stats, bool expectedSpill) {
@@ -2345,6 +2392,127 @@ TEST_P(AggregationTest, dynamicFinalReclaimDoesNotIncreaseReservation) {
   }
 }
 
+TEST_P(AggregationTest, dynamicFinalSourceSwitchPreservesGroups) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  const auto makeBatch = [&](int batch, vector_size_t size) {
+    return makeRowVector({
+        makeFlatVector<int64_t>(size, [](auto row) { return row % 257; }),
+        makeFlatVector<int64_t>(
+            size, [batch](auto row) { return row + batch; }),
+        makeFlatVector<std::string>(
+            size,
+            [batch](auto row) {
+              return std::string(128, 'v') + fmt::format("{}-{}", batch, row);
+            }),
+    });
+  };
+  const std::vector<RowVectorPtr> input{
+      makeBatch(0, 257), makeBatch(1, 257), makeBatch(2, 4'096)};
+  const auto plan =
+      PlanBuilder()
+          .values(input)
+          .singleAggregation(
+              {"c0"}, {"sum(c1)", "avg(c1)", "min(c2)", "count(1)"})
+          .planNode();
+  const auto expected = AssertQueryBuilder(plan).copyResults(pool());
+  for (const auto* mode : {"disable", "raw", "compression"}) {
+    SCOPED_TRACE(mode);
+    auto dir = TempDirectoryPath::create();
+    CursorParameters params;
+    params.planNode = plan;
+    params.serialExecution = true;
+    params.copyResult = true;
+    params.spillDirectory = dir->path;
+    params.queryConfigs = {
+        {QueryConfig::kSpillEnabled, "true"},
+        {QueryConfig::kAggregationSpillEnabled, "true"},
+        {QueryConfig::kTestingSpillPct, "100"},
+        {QueryConfig::kAggregationDynamicFinalSpillEnabled, "true"},
+        {QueryConfig::kRowBasedSpillMode, mode},
+        {QueryConfig::kMaxSpillRunRows, "32"},
+        {QueryConfig::kMaxOutputBatchRows, "8"},
+        {QueryConfig::kPreferredOutputBatchRows, "8"},
+    };
+    auto cursor = TaskCursor::create(params);
+    ASSERT_TRUE(cursor->moveNext());
+    std::vector<RowVectorPtr> output{cursor->current()};
+    size_t reclaims = 0;
+    cursor->task()->testingVisitDrivers([&](Driver* driver) {
+      auto* op = driver->findOperator(plan->id());
+      ASSERT_NE(op, nullptr);
+      ASSERT_TRUE(op->canReclaim());
+      const auto before = op->stats().copy().spilledFiles;
+      memory::ScopedMemoryArbitrationContext context(op->pool());
+      memory::MemoryReclaimer::Stats stats;
+      op->reclaim(0, stats);
+      EXPECT_EQ(op->stats().copy().spilledFiles - before, 1);
+      ++reclaims;
+    });
+    ASSERT_EQ(reclaims, 1);
+    while (cursor->moveNext()) {
+      output.push_back(cursor->current());
+    }
+    auto task = cursor->task();
+    cursor.reset();
+    ASSERT_TRUE(assertEqualResults({expected}, output));
+    output.clear();
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  }
+}
+
+DEBUG_ONLY_TEST_P(AggregationTest, dynamicFinalSourceReaderFailureCleansFiles) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  auto batch = makeRowVector(
+      {makeFlatVector<int64_t>(4'096, [](auto row) { return row; })});
+  const auto plan = PlanBuilder()
+                        .values({batch, batch})
+                        .singleAggregation({"c0"}, {"count(1)"})
+                        .planNode();
+  for (const auto* mode : {"disable", "raw", "compression"}) {
+    SCOPED_TRACE(mode);
+    auto dir = TempDirectoryPath::create();
+    CursorParameters params;
+    params.planNode = plan;
+    params.serialExecution = true;
+    params.copyResult = true;
+    params.spillDirectory = dir->path;
+    params.queryConfigs = {
+        {QueryConfig::kSpillEnabled, "true"},
+        {QueryConfig::kAggregationSpillEnabled, "true"},
+        {QueryConfig::kTestingSpillPct, "100"},
+        {QueryConfig::kAggregationDynamicFinalSpillEnabled, "true"},
+        {QueryConfig::kRowBasedSpillMode, mode},
+        {QueryConfig::kMaxOutputBatchRows, "8"},
+    };
+    auto cursor = TaskCursor::create(params);
+    ASSERT_TRUE(cursor->moveNext());
+    cursor->task()->testingVisitDrivers([&](Driver* driver) {
+      auto* op = driver->findOperator(plan->id());
+      ASSERT_NE(op, nullptr);
+      ASSERT_TRUE(op->canReclaim());
+      memory::ScopedMemoryArbitrationContext context(op->pool());
+      memory::MemoryReclaimer::Stats stats;
+      op->reclaim(0, stats);
+    });
+    size_t readerCalls = 0;
+    SCOPED_TESTVALUE_SET(
+        "bytedance::bolt::exec::ResidentSpillStream::prepareFileReader",
+        std::function<void(ResidentSpillStream*)>([&](ResidentSpillStream*) {
+          ++readerCalls;
+          throw std::runtime_error("injected suffix reader failure");
+        }));
+    BOLT_ASSERT_THROW(cursor->moveNext(), "injected suffix reader failure");
+    EXPECT_EQ(readerCalls, 1);
+    auto task = cursor->task();
+    cursor.reset();
+    OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+  }
+}
+
 TEST_P(AggregationTest, dynamicFinalStringOutputSurvivesReclaim) {
   if (GetParam().useGPU) {
     GTEST_SKIP() << "GPU Aggregation does not support spilling";
@@ -2697,6 +2865,75 @@ TEST_P(AggregationTest, residentOversizedStringsRespectBatchLimit) {
   }
 }
 
+TEST_P(AggregationTest, residentKeysDoNotSerializePayload) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not use row-based spill streams";
+  }
+  for (const bool serializedOutput : {false, true}) {
+    SCOPED_TRACE(serializedOutput);
+    int32_t sizeCalls = 0;
+    int32_t serializeCalls = 0;
+    int32_t deserializeCalls = 0;
+    CountingSerializableAggregate aggregate(
+        sizeCalls, &serializeCalls, &deserializeCalls);
+    RowContainer rows(
+        {VARCHAR()},
+        true,
+        {Accumulator(&aggregate, BIGINT())},
+        {},
+        false,
+        false,
+        false,
+        false,
+        false,
+        pool(),
+        RowContainer::RowContainerParam{.useMonotonicStringAllocation = true});
+    auto input = makeFlatVector<std::string>(1'024, [](auto row) {
+      return std::string(4'096, 'k') + std::to_string(row);
+    });
+    input->setNull(17, true);
+    DecodedVector decoded(*input);
+    std::vector<char*> stored;
+    for (vector_size_t row = 0; row < input->size(); ++row) {
+      auto* target = rows.newRow();
+      rows.store(decoded, row, target, 0);
+      stored.push_back(target);
+    }
+    const auto before = pool()->currentBytes();
+    auto stream = makeRowContainerRowBasedSpillMergeStream(
+        rows,
+        ROW({VARCHAR(), BIGINT()}),
+        folly::Range<char* const*>(stored.data(), stored.size()),
+        1,
+        {},
+        RowFormatInfo(&rows, false),
+        DistinctProvenance::kNew,
+        nullptr,
+        serializedOutput);
+    vector_size_t consumed = 0;
+    while (stream->hasData()) {
+      EXPECT_EQ(
+          stream->current()[stream->currentIndex()] == stored[consumed],
+          !serializedOutput);
+      const auto* key = stream->current()[stream->currentIndex()];
+      EXPECT_EQ(
+          RowContainer::isNullAt(key, rows.columnAt(0)),
+          input->isNullAt(consumed));
+      if (!input->isNullAt(consumed)) {
+        EXPECT_EQ(
+            RowContainer::valueAt<StringView>(key, rows.columnAt(0).offset()),
+            input->valueAt(consumed));
+      }
+      stream->pop();
+      ++consumed;
+    }
+    EXPECT_EQ(consumed, input->size());
+    EXPECT_EQ(serializeCalls, serializedOutput ? input->size() : 0);
+    EXPECT_EQ(deserializeCalls, serializedOutput ? input->size() : 0);
+    EXPECT_EQ(pool()->currentBytes(), before);
+  }
+}
+
 TEST_P(AggregationTest, residentRowLengthsAreReused) {
   if (GetParam().useGPU) {
     GTEST_SKIP() << "GPU Aggregation does not use row-based spill streams";
@@ -2835,6 +3072,165 @@ TEST_P(AggregationTest, dynamicFinalInterleavedStringKeys) {
         EXPECT_LT(allocations, 2048);
         OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
       }
+    }
+  }
+}
+
+TEST_P(AggregationTest, dynamicFinalConstantAggregateOutput) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  for (const bool nullOutput : {false, true}) {
+    SCOPED_TRACE(nullOutput);
+    registerAggregateFunction(
+        "bolt_testing_constant_output",
+        {AggregateFunctionSignatureBuilder()
+             .returnType(nullOutput ? "varchar" : "array(bigint)")
+             .intermediateType("bigint")
+             .argumentType("bigint")
+             .build()},
+        [nullOutput](
+            core::AggregationNode::Step,
+            const std::vector<TypePtr>&,
+            const TypePtr& resultType,
+            const core::QueryConfig&) -> std::unique_ptr<Aggregate> {
+          return std::make_unique<ConstantOutputAggregate>(
+              resultType, nullOutput);
+        });
+    std::vector<RowVectorPtr> batches;
+    for (int batch = 0; batch < 3; ++batch) {
+      batches.push_back(makeRowVector({
+          makeFlatVector<std::string>(
+              400,
+              [batch](auto row) {
+                const auto key = row % 32 == 0 ? row * 3 : row * 3 + batch;
+                return std::string(4096, 'k') + fmt::format("{:04}", key);
+              }),
+          makeFlatVector<int64_t>(400, [](auto row) { return row; }),
+      }));
+    }
+    for (const bool partial : {false, true}) {
+      auto builder = PlanBuilder().values(batches);
+      const std::vector<std::string> aggregates{
+          "bolt_testing_constant_output(c1)", "sum(c1)"};
+      partial ? builder.partialAggregation({"c0"}, aggregates)
+              : builder.singleAggregation({"c0"}, aggregates);
+      const auto plan = builder.planNode();
+      const auto expected = AssertQueryBuilder(plan).copyResults(pool());
+      for (const auto* mode : {"raw", "compression"}) {
+        SCOPED_TRACE(fmt::format("partial={} mode={}", partial, mode));
+        auto dir = TempDirectoryPath::create();
+        std::shared_ptr<Task> task;
+        auto actual =
+            AssertQueryBuilder(plan)
+                .spillDirectory(dir->path)
+                .config(QueryConfig::kSpillEnabled, true)
+                .config(QueryConfig::kAggregationSpillEnabled, true)
+                .config(QueryConfig::kTestingSpillPct, 100)
+                .config(QueryConfig::kPreferPartialAggregationSpill, true)
+                .config(QueryConfig::kAggregationDynamicFinalSpillEnabled, true)
+                .config(
+                    QueryConfig::kHashAggregationCompositeOutputEnabled, false)
+                .config(QueryConfig::kRowBasedSpillMode, mode)
+                .config(QueryConfig::kPreferredOutputBatchBytes, 4 << 20)
+                .config(QueryConfig::kMaxOutputBatchRows, 512)
+                .maxDrivers(1)
+                .copyResults(pool(), task);
+        ASSERT_TRUE(assertEqualResults({expected}, {actual}));
+        auto stats = toPlanStats(task->taskStats());
+        checkRowBasedSpillStats(stats.at(plan->id()), true);
+        EXPECT_GT(
+            stats.at(plan->id()).customStats.at("aggOutputUniqueRows").sum, 0);
+        actual.reset();
+        OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+      }
+    }
+  }
+}
+
+TEST_P(AggregationTest, dynamicFinalMixedUniqueOutputTypes) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  constexpr vector_size_t kRows = 400;
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 3; ++batch) {
+    auto values = makeFlatVector<int64_t>(
+        kRows, [batch](auto row) { return row + batch; });
+    auto strings = makeFlatVector<std::string>(kRows, [batch](auto row) {
+      return std::string(128, 'v') + fmt::format("{}-{}", batch, row);
+    });
+    for (vector_size_t row = 0; row < kRows; row += 5) {
+      values->setNull(row, true);
+      strings->setNull(row, true);
+    }
+    batches.push_back(makeRowVector({
+        makeFlatVector<std::string>(
+            kRows,
+            [batch](auto row) {
+              // Some groups merge across inputs; the others are unique. Wide
+              // keys force file-batch boundaries within a single output batch.
+              const auto key = row % 32 == 0 ? row * 3 : row * 3 + batch;
+              return std::string(4096, 'k') + fmt::format("{:04}", key);
+            }),
+        values,
+        strings,
+    }));
+  }
+  const std::vector<std::string> aggregates{
+      "sum(c1)", "avg(c1)", "min(c2)", "count(c1)"};
+  for (const bool partial : {false, true}) {
+    auto builder = PlanBuilder().values(batches);
+    if (partial) {
+      builder.partialAggregation({"c0"}, aggregates);
+    } else {
+      builder.singleAggregation({"c0"}, aggregates);
+    }
+    const auto plan = builder.planNode();
+    const auto expected = AssertQueryBuilder(plan).copyResults(pool());
+    for (const auto* mode : {"raw", "compression"}) {
+      SCOPED_TRACE(fmt::format("partial={} mode={}", partial, mode));
+      auto dir = TempDirectoryPath::create();
+      CursorParameters params;
+      params.planNode = plan;
+      params.serialExecution = true;
+      params.copyResult = false;
+      params.spillDirectory = dir->path;
+      params.queryConfigs = {
+          {QueryConfig::kSpillEnabled, "true"},
+          {QueryConfig::kAggregationSpillEnabled, "true"},
+          {QueryConfig::kTestingSpillPct, "100"},
+          {QueryConfig::kPreferPartialAggregationSpill, "true"},
+          {QueryConfig::kAggregationDynamicFinalSpillEnabled, "true"},
+          {QueryConfig::kHashAggregationCompositeOutputEnabled, "false"},
+          {QueryConfig::kRowBasedSpillMode, mode},
+          {QueryConfig::kPreferredOutputBatchBytes, "4194304"},
+          {QueryConfig::kPreferredOutputBatchRows, "512"},
+          {QueryConfig::kMaxOutputBatchRows, "512"},
+      };
+      auto cursor = TaskCursor::create(params);
+      std::vector<RowVectorPtr> retained;
+      std::shared_ptr<memory::MemoryPool> retainedPool;
+      while (cursor->moveNext()) {
+        retained.push_back(cursor->current());
+        if (retainedPool == nullptr) {
+          cursor->task()->testingVisitDrivers([&](Driver* driver) {
+            if (auto* op = driver->findOperator(plan->id())) {
+              retainedPool = op->pool()->shared_from_this();
+            }
+          });
+        }
+      }
+      ASSERT_GT(retained.size(), 1);
+      auto planStats = toPlanStats(cursor->task()->taskStats());
+      auto& stats = planStats.at(plan->id());
+      checkRowBasedSpillStats(stats, true);
+      EXPECT_GT(stats.customStats.at("aggOutputUniqueRows").sum, 0);
+      auto task = cursor->task();
+      cursor.reset();
+      OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+      ASSERT_TRUE(assertEqualResults({expected}, retained));
+      retained.clear();
     }
   }
 }
@@ -3454,7 +3850,7 @@ DEBUG_ONLY_TEST_P(AggregationTest, dynamicFinalSuffixSpillFailureCleansFiles) {
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
 }
 
-DEBUG_ONLY_TEST_P(AggregationTest, dynamicFinalSingleStreamReplacement) {
+DEBUG_ONLY_TEST_P(AggregationTest, dynamicFinalSingleStreamSourceSwitch) {
   if (GetParam().useGPU) {
     GTEST_SKIP() << "GPU Aggregation does not support spilling";
   }

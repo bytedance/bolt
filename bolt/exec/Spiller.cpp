@@ -59,15 +59,7 @@ namespace {
 std::unique_ptr<Spiller> Spiller::createSortedOutput(
     RowContainer* container,
     RowTypePtr rowType,
-    int32_t numSortingKeys,
-    const std::vector<CompareFlags>& sortCompareFlags,
     const common::SpillConfig* spillConfig) {
-  BOLT_CHECK(
-      sortCompareFlags.empty() || sortCompareFlags.size() == numSortingKeys);
-  std::vector<CompareFlags> flags = sortCompareFlags;
-  if (flags.empty()) {
-    flags.resize(numSortingKeys);
-  }
   auto ioConfig = spillConfig->spillIOConfig(1);
   ioConfig.fileNamePrefix =
       fmt::format("{}-output", spillConfig->fileNamePrefix);
@@ -76,7 +68,8 @@ std::unique_ptr<Spiller> Spiller::createSortedOutput(
       container,
       std::move(rowType),
       HashBitRange{},
-      SpillState::makeSortingKeys(flags),
+      SpillState::makeSortingKeys(
+          std::vector<CompareFlags>(container->keyTypes().size())),
       ioConfig,
       std::numeric_limits<uint64_t>::max(),
       nullptr,

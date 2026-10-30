@@ -302,8 +302,6 @@ class Spiller {
   static std::unique_ptr<Spiller> createSortedOutput(
       RowContainer* container,
       RowTypePtr rowType,
-      int32_t numSortingKeys,
-      const std::vector<CompareFlags>& sortCompareFlags,
       const common::SpillConfig* spillConfig);
 
   OwnedSpillPartition spillSortedRowsAndFinish(folly::Range<char* const*> rows);

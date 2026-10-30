@@ -92,52 +92,13 @@ class TreeOfLosers {
     static_assert(std::is_base_of_v<MergeStream, Stream>);
     BOLT_CHECK_LT(streams_.size(), std::numeric_limits<TIndex>::max());
     BOLT_CHECK_GE(streams_.size(), 1);
-    resetSelection();
-  }
-
-  const Stream* streamAt(size_t index) const {
-    BOLT_CHECK_LT(index, streams_.size());
-    return streams_[index].get();
-  }
-
-  /// Replaces a range of streams and resets selection. Empty replacements
-  /// remove the range; a zero count inserts streams at 'index'. The caller
-  /// owns any external backing and must keep it alive until removal completes.
-  void replaceStreams(
-      size_t index,
-      size_t count,
-      std::vector<std::unique_ptr<Stream>> replacements) {
-    BOLT_CHECK_LE(index, streams_.size());
-    BOLT_CHECK_LE(count, streams_.size() - index);
-    const auto remaining = streams_.size() - count;
-    BOLT_CHECK_LT(
-        replacements.size(), std::numeric_limits<TIndex>::max() - remaining);
-    // Reserve before modifying the existing streams so allocation failure
-    // preserves them. Removal never grows storage and is safe during reclaim.
-    const auto size = remaining + replacements.size();
-    streams_.reserve(size);
-    values_.reserve(size == 0 ? 0 : size - 1);
-    equals_.reserve(size == 0 ? 0 : size - 1);
-    streams_.erase(streams_.begin() + index, streams_.begin() + index + count);
-    streams_.insert(
-        streams_.begin() + index,
-        std::make_move_iterator(replacements.begin()),
-        std::make_move_iterator(replacements.end()));
-    resetSelection();
-  }
-
- private:
-  /// Rebuilds the loser-tree topology and selection state after replacement.
-  void resetSelection() {
     // A full binary tree with N leaves has N - 1 internal nodes. Leaves
     // follow the internal nodes, including when N is not a power of two.
-    firstStream_ = streams_.empty() ? 0 : streams_.size() - 1;
-    values_.assign(firstStream_, kEmpty);
-    equals_.assign(firstStream_, false);
-    lastIndex_ = kEmpty;
+    firstStream_ = streams_.size() - 1;
+    values_.resize(firstStream_, kEmpty);
+    equals_.resize(firstStream_, false);
   }
 
- public:
   /// Returns the number of streams.
   size_t numStreams() const {
     return streams_.size();
@@ -150,8 +111,7 @@ class TreeOfLosers {
     if (UNLIKELY(lastIndex_ == kEmpty)) {
       if (UNLIKELY(values_.empty())) {
         // Only one stream. We handle this off the common path.
-        return !streams_.empty() && streams_[0]->hasData() ? streams_[0].get()
-                                                           : nullptr;
+        return streams_[0]->hasData() ? streams_[0].get() : nullptr;
       }
       lastIndex_ = first(0);
     } else {
@@ -174,7 +134,7 @@ class TreeOfLosers {
     if (UNLIKELY(lastIndex_ == kEmpty)) {
       // Only one stream. We handle this off the common path.
       if (values_.empty()) {
-        return !streams_.empty() && streams_[0]->hasData()
+        return streams_[0]->hasData()
             ? std::make_pair(streams_[0].get(), streams_[0]->isNextEqual())
             : std::make_pair(nullptr, false);
       }
