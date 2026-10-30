@@ -56,7 +56,8 @@ class SimpleNumericAggregate : public exec::Aggregate {
       char** groups,
       int32_t numGroups,
       VectorPtr* result,
-      ExtractOneValue extractOneValue) {
+      ExtractOneValue extractOneValue,
+      vector_size_t resultOffset = 0) {
     BOLT_CHECK_EQ((*result)->encoding(), VectorEncoding::Simple::FLAT);
     auto vector = (*result)->as<FlatVector<TData>>();
     BOLT_CHECK(
@@ -64,27 +65,27 @@ class SimpleNumericAggregate : public exec::Aggregate {
         "Unexpected type of the result vector: {}",
         (*result)->type()->toString());
     BOLT_CHECK_EQ(vector->elementSize(), sizeof(TData));
-    vector->resize(numGroups);
+    vector->resize(resultOffset + numGroups);
     uint64_t* rawNulls = getRawNulls(vector);
     if constexpr (std::is_same_v<TData, bool>) {
       uint64_t* rawValues = vector->template mutableRawValues<uint64_t>();
       for (int32_t i = 0; i < numGroups; ++i) {
         char* group = groups[i];
         if (isNull(group)) {
-          vector->setNull(i, true);
+          vector->setNull(resultOffset + i, true);
         } else {
-          clearNull(rawNulls, i);
-          bits::setBit(rawValues, i, extractOneValue(group));
+          clearNull(rawNulls, resultOffset + i);
+          bits::setBit(rawValues, resultOffset + i, extractOneValue(group));
         }
       }
     } else {
-      TData* rawValues = vector->mutableRawValues();
+      TData* rawValues = vector->mutableRawValues() + resultOffset;
       for (int32_t i = 0; i < numGroups; ++i) {
         char* group = groups[i];
         if (isNull(group)) {
-          vector->setNull(i, true);
+          vector->setNull(resultOffset + i, true);
         } else {
-          clearNull(rawNulls, i);
+          clearNull(rawNulls, resultOffset + i);
           rawValues[i] = extractOneValue(group);
         }
       }

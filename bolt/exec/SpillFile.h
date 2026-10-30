@@ -526,6 +526,8 @@ class RowBasedSpillReadFile : public SpillReadFileBase {
   uint64_t spillDecompressTimeUs_{0};
 
  private:
+  void finishBatch(std::vector<char*>& rows);
+
   const RowFormatInfo info_;
   BufferPtr rowBuffer_;
   BufferPtr compressedBuffer_;

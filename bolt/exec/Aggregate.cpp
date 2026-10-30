@@ -37,6 +37,54 @@
 #include "bolt/expression/SignatureBinder.h"
 namespace bytedance::bolt::exec {
 
+namespace {
+void extractWithOffset(
+    Aggregate& aggregate,
+    char** groups,
+    int32_t numGroups,
+    VectorPtr* result,
+    vector_size_t resultOffset,
+    bool intermediate) {
+  BOLT_CHECK_GE(resultOffset, 0);
+  BOLT_CHECK_LE(
+      numGroups, std::numeric_limits<vector_size_t>::max() - resultOffset);
+  VectorPtr temporary;
+  auto* destination = result;
+  if (resultOffset != 0) {
+    temporary =
+        BaseVector::create((*result)->type(), numGroups, (*result)->pool());
+    destination = &temporary;
+  }
+  intermediate ? aggregate.extractAccumulators(groups, numGroups, destination)
+               : aggregate.extractValues(groups, numGroups, destination);
+  if (resultOffset != 0) {
+    BaseVector::ensureWritable(
+        SelectivityVector::empty(),
+        (*result)->type(),
+        (*result)->pool(),
+        *result);
+    (*result)->resize(resultOffset + numGroups);
+    (*result)->copy(temporary.get(), resultOffset, 0, numGroups);
+  }
+}
+} // namespace
+
+void Aggregate::extractValuesWithOffset(
+    char** groups,
+    int32_t numGroups,
+    VectorPtr* result,
+    vector_size_t resultOffset) {
+  extractWithOffset(*this, groups, numGroups, result, resultOffset, false);
+}
+
+void Aggregate::extractAccumulatorsWithOffset(
+    char** groups,
+    int32_t numGroups,
+    VectorPtr* result,
+    vector_size_t resultOffset) {
+  extractWithOffset(*this, groups, numGroups, result, resultOffset, true);
+}
+
 bool isRawInput(core::AggregationNode::Step step) {
   return step == core::AggregationNode::Step::kPartial ||
       step == core::AggregationNode::Step::kSingle;

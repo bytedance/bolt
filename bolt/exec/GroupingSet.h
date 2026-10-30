@@ -295,27 +295,22 @@ class GroupingSet {
       uniqueRowSizes.clear();
       resultRanges.clear();
       outputRows.clear();
-      for (auto* vector : {intermediate.get(), uniqueResult.get()}) {
-        if (vector == nullptr) {
+      if (intermediate == nullptr) {
+        return;
+      }
+      for (auto& child : intermediate->children()) {
+        if (child->type()->isFixedWidth()) {
           continue;
         }
-        for (auto& child : vector->children()) {
-          if (child->type()->isFixedWidth()) {
-            continue;
-          }
-          if (child->type()->isVarchar() || child->type()->isVarbinary()) {
-            child->asFlatVector<StringView>()->clearStringBuffers();
-          } else if (child->type()->isRow()) {
-            // Grow from zero so RowVector::resize also resizes nested children.
-            BaseVector::prepareForReuse(child, 0);
-            child->resize(vector->size());
-          } else {
-            BaseVector::prepareForReuse(child, vector->size());
-          }
+        if (child->type()->isVarchar() || child->type()->isVarbinary()) {
+          child->asFlatVector<StringView>()->clearStringBuffers();
+        } else if (child->type()->isRow()) {
+          // Grow from zero so RowVector::resize also resizes nested children.
+          BaseVector::prepareForReuse(child, 0);
+          child->resize(intermediate->size());
+        } else {
+          BaseVector::prepareForReuse(child, intermediate->size());
         }
-      }
-      if (uniqueResult != nullptr) {
-        uniqueResult->resize(0);
       }
     }
 
@@ -332,7 +327,6 @@ class GroupingSet {
     Vector<std::pair<int32_t, int32_t>> resultRanges;
     Vector<char*> outputRows;
     RowVectorPtr intermediate;
-    RowVectorPtr uniqueResult;
   };
 
   bool isDistinct() const {
@@ -474,10 +468,13 @@ class GroupingSet {
       const RowVectorPtr& result,
       const vector_size_t resultOffset);
 
-  void outputUniqueGroups(
+  void updateSpillRows(const RowContainer* container);
+
+  void extractSpillGroups(
+      folly::Range<char* const*> rows,
       const RowVectorPtr& result,
-      size_t& uniqueCount,
-      size_t& estimateUniqueBytesPerRow);
+      vector_size_t resultOffset,
+      bool spillExtract);
 
   void outputUniqueGroupsInRowFormat(
       const RowVectorPtr& result,

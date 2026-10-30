@@ -580,7 +580,12 @@ uint64_t RowBasedSpillMergeStream::serializedRowSize() const {
   if (!rowLengths_.empty()) {
     return rowLengths_[index_];
   }
-  return ContainerRow2RowSerde::rowSize(rowVector_[index_], info());
+  const auto& rowInfo = info();
+  if (rowInfo.variableColumns.empty() &&
+      rowInfo.serializableAccumulators.empty()) {
+    return bits::roundUp(rowInfo.fixRowSize, rowInfo.alignment);
+  }
+  return ContainerRow2RowSerde::rowSize(rowVector_[index_], rowInfo);
 }
 
 RowBasedFileSpillMergeStream::~RowBasedFileSpillMergeStream() {
@@ -764,7 +769,7 @@ class RowContainerRowBasedSpillMergeStream final
                 rowInfo_.variableColumns.end(),
                 [](const auto& column) { return column.first; })) {
     if (!rows_.empty()) {
-      nextBatch();
+      loadBatch(!container.accumulators().empty());
     }
   }
 
@@ -799,7 +804,8 @@ class RowContainerRowBasedSpillMergeStream final
   }
 
   uint64_t serializedRowSize() const override {
-    return spillFile_ != nullptr || needsMaterialization_
+    return spillFile_ != nullptr || needsMaterialization_ ||
+            !rowLengths_.empty()
         ? RowBasedSpillMergeStream::serializedRowSize()
         : rowInfo_.getRowSize(rowVector_[index_]);
   }
@@ -857,7 +863,7 @@ class RowContainerRowBasedSpillMergeStream final
           rows_.begin() + batchBegin_, rows_.begin() + batchBegin_ + limit);
       return;
     }
-    if (needsMaterialization_) {
+    if (needsMaterialization_ || withLengths) {
       rowLengths_.reserve(limit);
     }
     size_t bytes = 0;
@@ -867,7 +873,7 @@ class RowContainerRowBasedSpillMergeStream final
       if (count != 0 && bytes + size > kResidentBatchBytes) {
         break;
       }
-      if (needsMaterialization_) {
+      if (needsMaterialization_ || withLengths) {
         rowLengths_.push_back(size);
       }
       bytes += size;

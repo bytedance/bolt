@@ -2865,6 +2865,109 @@ TEST_P(AggregationTest, residentOversizedStringsRespectBatchLimit) {
   }
 }
 
+TEST_P(AggregationTest, dynamicFinalNumericAppendWithNulls) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 3; ++batch) {
+    auto values = makeFlatVector<int64_t>(
+        2048, [batch](auto row) { return row * 7 - batch; });
+    for (vector_size_t row = 0; row < values->size(); row += 17) {
+      values->setNull(row, true);
+    }
+    batches.push_back(makeRowVector({
+        makeFlatVector<int64_t>(
+            2048, [batch](auto row) { return row * 3 + batch; }),
+        values,
+    }));
+  }
+  for (const bool partial : {false, true}) {
+    auto builder = PlanBuilder().values(batches);
+    std::vector<std::string> aggregates(128, "sum(c1)");
+    partial ? builder.partialAggregation({"c0"}, aggregates)
+            : builder.singleAggregation({"c0"}, aggregates);
+    const auto plan = builder.planNode();
+    auto expected = AssertQueryBuilder(plan).copyResults(pool());
+    for (const auto* mode : {"raw", "compression"}) {
+      auto dir = TempDirectoryPath::create();
+      AssertQueryBuilder(plan)
+          .spillDirectory(dir->path)
+          .config(QueryConfig::kSpillEnabled, true)
+          .config(QueryConfig::kAggregationSpillEnabled, true)
+          .config(QueryConfig::kTestingSpillPct, 100)
+          .config(QueryConfig::kPreferPartialAggregationSpill, true)
+          .config(QueryConfig::kAggregationDynamicFinalSpillEnabled, true)
+          .config(QueryConfig::kHashAggregationCompositeOutputEnabled, false)
+          .config(QueryConfig::kPreferredOutputBatchBytes, 8 << 20)
+          .config(QueryConfig::kMaxOutputBatchRows, 4096)
+          .config(QueryConfig::kRowBasedSpillMode, mode)
+          .maxDrivers(1)
+          .assertResults(expected);
+    }
+  }
+}
+
+TEST_P(AggregationTest, dynamicFinalComplexMinMaxAppend) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+  std::vector<RowVectorPtr> batches;
+  for (int batch = 0; batch < 3; ++batch) {
+    std::vector<std::vector<int64_t>> arrays;
+    for (vector_size_t row = 0; row < 400; ++row) {
+      arrays.push_back({row, batch, row % 7});
+    }
+    auto array = makeArrayVector<int64_t>(arrays);
+    auto nested = makeRowVector({
+        makeFlatVector<int64_t>(400, [batch](auto row) { return row + batch; }),
+        makeFlatVector<std::string>(
+            400,
+            [batch](auto row) { return fmt::format("{}-{}", batch, row); }),
+    });
+    for (vector_size_t row = 0; row < 400; row += 17) {
+      array->setNull(row, true);
+      nested->setNull(row, true);
+    }
+    batches.push_back(makeRowVector({
+        makeFlatVector<std::string>(
+            400,
+            [batch](auto row) {
+              const auto key = row % 32 == 0 ? row * 3 : row * 3 + batch;
+              return std::string(4096, 'k') + fmt::format("{:04}", key);
+            }),
+        array,
+        nested,
+    }));
+  }
+  for (const bool partial : {false, true}) {
+    auto builder = PlanBuilder().values(batches);
+    const std::vector<std::string> aggregates{"min(c1)", "max(c2)"};
+    partial ? builder.partialAggregation({"c0"}, aggregates)
+            : builder.singleAggregation({"c0"}, aggregates);
+    const auto plan = builder.planNode();
+    const auto expected = AssertQueryBuilder(plan).copyResults(pool());
+    for (const auto* mode : {"raw", "compression"}) {
+      SCOPED_TRACE(fmt::format("partial={} mode={}", partial, mode));
+      auto dir = TempDirectoryPath::create();
+      AssertQueryBuilder(plan)
+          .spillDirectory(dir->path)
+          .config(QueryConfig::kSpillEnabled, true)
+          .config(QueryConfig::kAggregationSpillEnabled, true)
+          .config(QueryConfig::kTestingSpillPct, 100)
+          .config(QueryConfig::kPreferPartialAggregationSpill, true)
+          .config(QueryConfig::kAggregationDynamicFinalSpillEnabled, true)
+          .config(QueryConfig::kHashAggregationCompositeOutputEnabled, false)
+          // Wide keys exhaust an input batch before this output row limit.
+          .config(QueryConfig::kPreferredOutputBatchBytes, 8 << 20)
+          .config(QueryConfig::kMaxOutputBatchRows, 512)
+          .config(QueryConfig::kRowBasedSpillMode, mode)
+          .maxDrivers(1)
+          .assertResults(expected);
+    }
+  }
+}
+
 TEST_P(AggregationTest, residentKeysDoNotSerializePayload) {
   if (GetParam().useGPU) {
     GTEST_SKIP() << "GPU Aggregation does not use row-based spill streams";
