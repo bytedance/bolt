@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <unicode/utf8.h>
+
 #include "bolt/functions/Macros.h"
 #include "bolt/functions/lib/string/StringCore.h"
 #include "bolt/functions/lib/string/StringImpl.h"
@@ -102,7 +104,7 @@ struct IsDecimalFunction {
 };
 
 // Field indexes start with 0.
-template <typename T>
+template <typename T, bool flinkCompatible = false>
 struct SplitIndex {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
@@ -120,6 +122,14 @@ struct SplitIndex {
     if (input.empty()) {
       return false;
     }
+    if constexpr (flinkCompatible) {
+      if (index < 0) {
+        return false;
+      }
+      if (delimiter.empty()) {
+        return splitWhitespace(result, input, index);
+      }
+    }
     return stringImpl::splitPart(result, input, delimiter, index, 0);
   }
 
@@ -131,9 +141,65 @@ struct SplitIndex {
     if (delimiter > 255 || delimiter < 1 || index < 0 || input.empty()) {
       return false;
     }
-    auto delimiterStr = std::string(1, static_cast<char>(delimiter));
-    return stringImpl::splitPart(
-        result, input, arg_type<Varchar>{delimiterStr}, index, 0);
+    if constexpr (flinkCompatible) {
+      char encoded[2];
+      size_t size = 1;
+      if (delimiter < 128) {
+        encoded[0] = static_cast<char>(delimiter);
+      } else {
+        encoded[0] = static_cast<char>(0xc0 | (delimiter >> 6));
+        encoded[1] = static_cast<char>(0x80 | (delimiter & 0x3f));
+        size = 2;
+      }
+      return stringImpl::splitPart(
+          result, input, StringView(encoded, size), index, 0);
+    } else {
+      auto delimiterStr = std::string(1, static_cast<char>(delimiter));
+      return stringImpl::splitPart(
+          result, input, arg_type<Varchar>{delimiterStr}, index, 0);
+    }
+  }
+
+ private:
+  static bool isJavaWhitespace(UChar32 codePoint) {
+    // Character.isWhitespace in Java 8 includes U+180E and excludes NBSP.
+    return (codePoint >= 0x09 && codePoint <= 0x0d) ||
+        (codePoint >= 0x1c && codePoint <= 0x20) || codePoint == 0x1680 ||
+        codePoint == 0x180e || (codePoint >= 0x2000 && codePoint <= 0x2006) ||
+        (codePoint >= 0x2008 && codePoint <= 0x200a) || codePoint == 0x2028 ||
+        codePoint == 0x2029 || codePoint == 0x205f || codePoint == 0x3000;
+  }
+
+  static bool splitWhitespace(
+      out_type<Varchar>& result,
+      const arg_type<Varchar>& input,
+      int64_t index) {
+    int32_t begin = 0;
+    int32_t pos = 0;
+    int64_t token = 0;
+    const auto size = static_cast<int32_t>(input.size());
+    while (pos < size) {
+      const auto end = pos;
+      UChar32 codePoint;
+      U8_NEXT(input.data(), pos, size, codePoint);
+      if (isJavaWhitespace(codePoint)) {
+        if (token == index) {
+          result.setNoCopy(StringView(input.data() + begin, end - begin));
+          return true;
+        }
+        ++token;
+        begin = pos;
+      }
+    }
+    if (token == index) {
+      result.setNoCopy(StringView(input.data() + begin, size - begin));
+      return true;
+    }
+    return false;
   }
 };
+
+template <typename T>
+using FlinkSplitIndex = SplitIndex<T, true>;
+
 } // namespace bytedance::bolt::functions::flinksql

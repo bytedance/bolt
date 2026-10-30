@@ -19,6 +19,8 @@
 #include <string>
 namespace bytedance::bolt::functions::flinksql {
 
+/// Registers SQL functions and the explicit Flink compatibility entry points
+/// flink_split_index, flink_rand, flink_rand_integer and flink_complex_equal.
 void registerFunctions(const std::string& prefix = "");
 
 } // namespace bytedance::bolt::functions::flinksql

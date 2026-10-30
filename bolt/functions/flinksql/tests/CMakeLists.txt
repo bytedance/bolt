@@ -15,6 +15,7 @@
 
 add_executable(
   bolt_functions_flink_test
+  ComparisonsTest.cpp
   RoundTest.cpp
   ElementAtTest.cpp
   FlinkCastExprTest.cpp
