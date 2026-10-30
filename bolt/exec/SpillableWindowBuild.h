@@ -118,6 +118,11 @@ class SpillableWindowBuild : public WindowBuild {
 
   std::optional<size_t> rowLength_ = std::nullopt;
 
+  int64_t fixedArgumentBytes_{0};
+  int64_t variableArgumentCount_{0};
+  int64_t fixedResultBytes_{0};
+  int64_t variableResultCount_{0};
+
   // Vector of pointers to each input row in the data_ RowContainer.
   // Rows are erased from data_ when they are output from the
   // Window operator.

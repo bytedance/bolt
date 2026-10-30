@@ -16,6 +16,7 @@
 
 #include "bolt/exec/SpillableWindowBuild.h"
 #include <exec/Spill.h>
+#include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/SimdUtil.h"
 #include "bolt/exec/ContainerRow2RowSerde.h"
 #include "bolt/exec/MemoryReclaimer.h"
@@ -42,6 +43,22 @@ SpillableWindowBuild<needSort>::SpillableWindowBuild(
       maxBatchRows_(maxBatchRows),
       preferredOutputBatchBytes_(preferredOutputBatchBytes),
       outputType_(windowNode->inputType()) {
+  auto addType = [](const TypePtr& type, int64_t& fixed, int64_t& variable) {
+    if (type->isFixedWidth()) {
+      fixed = checkedPlus<int64_t>(fixed, type->cppSizeInBytes());
+    } else {
+      variable = checkedPlus<int64_t>(variable, 1);
+    }
+  };
+  for (const auto& function : windowNode->windowFunctions()) {
+    const auto& call = function.functionCall;
+    for (const auto& arg : call->inputs()) {
+      if (!std::dynamic_pointer_cast<const core::ConstantTypedExpr>(arg)) {
+        addType(arg->type(), fixedArgumentBytes_, variableArgumentCount_);
+      }
+    }
+    addType(call->type(), fixedResultBytes_, variableResultCount_);
+  }
   partitionStartRows_.push_back(0);
 }
 template <bool needSort>
@@ -271,11 +288,35 @@ void SpillableWindowBuild<needSort>::ensureInputFits(
     }
   }
 
-  // Check if we can increase reservation. The increment is the largest of twice
-  // the maximum increment from this input and 'spillableReservationGrowthPct_'
-  // of the current memory usage.
+  int64_t outputBytes = 0;
+  if (isAggWindowFunc()) {
+    const auto rowSize = data_->estimateRowSize().value();
+    const auto variableWidth =
+        checkedPlus<int64_t>(sizeof(StringView), outOfLineBytesPerRow);
+    int64_t rows = checkedPlus<int64_t>(inputRows_.size(), input->size());
+    // needsInput permits at most the last delivered resident partition.
+    const auto last = partitionStartRows_.size() - 1;
+    if (last > 0) {
+      rows = std::max<int64_t>(
+          rows, partitionStartRows_[last] - partitionStartRows_[last - 1]);
+    }
+    const auto arguments = checkedPlus(
+        fixedArgumentBytes_,
+        checkedMultiply(variableArgumentCount_, variableWidth));
+    const auto results = checkedPlus(
+        fixedResultBytes_,
+        checkedMultiply(variableResultCount_, variableWidth));
+    // Include one batch of copied input/results, with headroom for nulls and
+    // allocator growth.
+    outputBytes = checkedMultiply<int64_t>(
+        2,
+        checkedPlus(
+            checkedMultiply(rows, arguments),
+            checkedMultiply<int64_t>(
+                numRowsPerOutput_, checkedPlus(rowSize, results))));
+  }
   const auto targetIncrementBytes = std::max<int64_t>(
-      incrementBytes * 2,
+      checkedPlus<int64_t>(incrementBytes * 2, outputBytes),
       currentUsage * spillConfig_->spillableReservationGrowthPct / 100);
   {
     memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
