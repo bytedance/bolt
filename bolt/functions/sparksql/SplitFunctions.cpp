@@ -147,7 +147,7 @@ class Split final : public exec::VectorFunction {
           javaStyle::javaStyleSplitFastEmptyPatternWriter<isSpark34Plus>(
               std::string_view(current), limit, arrayWriter);
         } else {
-          auto res = javaStyle::javaStyleSplit<isSpark34Plus>(
+          auto res = javaStyle::javaStyleSplitNoEmpty<isSpark34Plus>(
               std::string_view(current), std::string_view(pattern), limit);
           for (const auto& s : res) {
             arrayWriter.add_item().setNoCopy(StringView(s));

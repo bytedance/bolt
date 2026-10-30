@@ -333,13 +333,13 @@ static std::vector<std::string_view> javaStyleSplitRegex(
 }
 
 template <bool isSpark34Plus = false>
-static std::vector<std::string_view> javaStyleSplit(
+static std::vector<std::string_view> javaStyleSplitNoEmpty(
     std::string_view input,
     std::string_view pattern,
     int32_t limit) {
   BOLT_CHECK(
       !pattern.empty(),
-      "Empty pattern must be handled by javaStyleSplitFastEmptyPattern");
+      "Empty pattern must be handled by javaStyleSplitFastEmptyPatternWriter");
   std::string newPattern{pattern};
   if (!stringCore::checkRegexPattern(newPattern)) {
     return javaStyleSplitFast(input, newPattern, limit);

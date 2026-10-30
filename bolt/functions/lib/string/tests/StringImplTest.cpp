@@ -1005,66 +1005,72 @@ TEST_F(StringImplTest, LargeInput) {
 }
 
 TEST_F(StringImplTest, EmptyString) {
-  EXPECT_EQ(javaStyleSplit("", ",", -1), std::vector<std::string_view>({""}));
-  EXPECT_EQ(javaStyleSplit("", ",", 0), std::vector<std::string_view>({""}));
-  EXPECT_EQ(javaStyleSplit("", ",", 1), std::vector<std::string_view>({""}));
+  EXPECT_EQ(
+      javaStyleSplitNoEmpty("", ",", -1), std::vector<std::string_view>({""}));
+  EXPECT_EQ(
+      javaStyleSplitNoEmpty("", ",", 0), std::vector<std::string_view>({""}));
+  EXPECT_EQ(
+      javaStyleSplitNoEmpty("", ",", 1), std::vector<std::string_view>({""}));
 }
 
 TEST_F(StringImplTest, StringWithoutDelimiter) {
   EXPECT_EQ(
-      javaStyleSplit("test", ",", -1), std::vector<std::string_view>({"test"}));
+      javaStyleSplitNoEmpty("test", ",", -1),
+      std::vector<std::string_view>({"test"}));
   EXPECT_EQ(
-      javaStyleSplit("test", ",", 0), std::vector<std::string_view>({"test"}));
+      javaStyleSplitNoEmpty("test", ",", 0),
+      std::vector<std::string_view>({"test"}));
   EXPECT_EQ(
-      javaStyleSplit("test", ",", 1), std::vector<std::string_view>({"test"}));
+      javaStyleSplitNoEmpty("test", ",", 1),
+      std::vector<std::string_view>({"test"}));
 }
 
 TEST_F(StringImplTest, StringWithDelimiter) {
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", ",", -1),
+      javaStyleSplitNoEmpty("a,b,c", ",", -1),
       std::vector<std::string_view>({"a", "b", "c"}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", ",", 0),
+      javaStyleSplitNoEmpty("a,b,c", ",", 0),
       std::vector<std::string_view>({"a", "b", "c"}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", ",", 2),
+      javaStyleSplitNoEmpty("a,b,c", ",", 2),
       std::vector<std::string_view>({"a", "b,c"}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", ",", 4),
+      javaStyleSplitNoEmpty("a,b,c", ",", 4),
       std::vector<std::string_view>({"a", "b", "c"}));
 }
 
 TEST_F(StringImplTest, DelimiterAtStartOrEnd) {
   EXPECT_EQ(
-      javaStyleSplit(",a,b,c,", ",", -1),
+      javaStyleSplitNoEmpty(",a,b,c,", ",", -1),
       std::vector<std::string_view>({"", "a", "b", "c", ""}));
   EXPECT_EQ(
-      javaStyleSplit(",a,b,c,", ",", 0),
+      javaStyleSplitNoEmpty(",a,b,c,", ",", 0),
       std::vector<std::string_view>({"", "a", "b", "c"}));
   EXPECT_EQ(
-      javaStyleSplit(",a,b,c,", ",", 6),
+      javaStyleSplitNoEmpty(",a,b,c,", ",", 6),
       std::vector<std::string_view>({"", "a", "b", "c", ""}));
 
   EXPECT_EQ(
-      javaStyleSplit(",a,b,c,", ",", 1),
+      javaStyleSplitNoEmpty(",a,b,c,", ",", 1),
       std::vector<std::string_view>({",a,b,c,"}));
 }
 
 TEST_F(StringImplTest, SpecialCharactersAndEscapeSequences) {
   EXPECT_EQ(
-      javaStyleSplit("a\\,b,c", "\\,", -1),
+      javaStyleSplitNoEmpty("a\\,b,c", "\\,", -1),
       std::vector<std::string_view>({"a\\", "b", "c"}));
   EXPECT_EQ(
-      javaStyleSplit("word1 word2\tword3\nword4", "\\s+", -1),
+      javaStyleSplitNoEmpty("word1 word2\tword3\nword4", "\\s+", -1),
       std::vector<std::string_view>({"word1", "word2", "word3", "word4"}));
 }
 
 TEST_F(StringImplTest, MultipleDelimitersAtEnd) {
   EXPECT_EQ(
-      javaStyleSplit("a,b,c,,", ",", -1),
+      javaStyleSplitNoEmpty("a,b,c,,", ",", -1),
       std::vector<std::string_view>({"a", "b", "c", "", ""}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c,,", ",", 0),
+      javaStyleSplitNoEmpty("a,b,c,,", ",", 0),
       std::vector<std::string_view>({"a", "b", "c"}));
 }
 
@@ -1089,39 +1095,39 @@ TEST_F(StringImplTest, EmptyDelimiter) {
 // Different 'limit' parameter values
 TEST_F(StringImplTest, StringWithLimitParameter) {
   EXPECT_EQ(
-      javaStyleSplit("one,two,three", ",", 2),
+      javaStyleSplitNoEmpty("one,two,three", ",", 2),
       std::vector<std::string_view>({"one", "two,three"}));
 
   EXPECT_EQ(
-      javaStyleSplit("one,two,three", ",", -1),
+      javaStyleSplitNoEmpty("one,two,three", ",", -1),
       std::vector<std::string_view>({"one", "two", "three"}));
 
   EXPECT_EQ(
-      javaStyleSplit("one,two,three", ",", 0),
+      javaStyleSplitNoEmpty("one,two,three", ",", 0),
       std::vector<std::string_view>({"one", "two", "three"}));
 }
 
 // Special characters like dot (which needs escaping) and space
 TEST_F(StringImplTest, StringWithSpecialCharacters) {
   EXPECT_EQ(
-      javaStyleSplit("one.two three", "\\.", -1),
+      javaStyleSplitNoEmpty("one.two three", "\\.", -1),
       std::vector<std::string_view>({"one", "two three"}));
   EXPECT_EQ(
-      javaStyleSplit("one.two three", " ", -1),
+      javaStyleSplitNoEmpty("one.two three", " ", -1),
       std::vector<std::string_view>({"one.two", "three"}));
 }
 
 // Treatment of regular expression metacharacters
 TEST_F(StringImplTest, StringWithRegExMetacharacters) {
   EXPECT_EQ(
-      javaStyleSplit("one*two+three?four", "\\*", -1),
+      javaStyleSplitNoEmpty("one*two+three?four", "\\*", -1),
       std::vector<std::string_view>({"one", "two+three?four"}));
 }
 
 // Mixed Chinese, English, and emoji characters
 TEST_F(StringImplTest, StringWithMixedCharacters) {
   EXPECT_EQ(
-      javaStyleSplit(u8sv(u8"hello,你好,😊"), ",", -1),
+      javaStyleSplitNoEmpty(u8sv(u8"hello,你好,😊"), ",", -1),
       std::vector<std::string_view>(
           {u8sv(u8"hello"), u8sv(u8"你好"), u8sv(u8"😊")}));
 }
@@ -1129,73 +1135,73 @@ TEST_F(StringImplTest, StringWithMixedCharacters) {
 // Delimiter is a complex regex pattern
 TEST_F(StringImplTest, StringWithComplexRegexPattern) {
   EXPECT_EQ(
-      javaStyleSplit("one42two42three", "\\d+", -1),
+      javaStyleSplitNoEmpty("one42two42three", "\\d+", -1),
       std::vector<std::string_view>({"one", "two", "three"}));
 }
 
 // String contains escape sequences
 TEST_F(StringImplTest, StringWithEscapeSequences) {
   EXPECT_EQ(
-      javaStyleSplit("one\ntwo\tthree", "\n", -1),
+      javaStyleSplitNoEmpty("one\ntwo\tthree", "\n", -1),
       std::vector<std::string_view>({"one", "two\tthree"}));
   EXPECT_EQ(
-      javaStyleSplit("one\ntwo\tthree", "\t", -1),
+      javaStyleSplitNoEmpty("one\ntwo\tthree", "\t", -1),
       std::vector<std::string_view>({"one\ntwo", "three"}));
 }
 
 // UTF-8 encoded multibyte characters
 TEST_F(StringImplTest, StringWithUTF8MultibyteCharacters) {
   EXPECT_EQ(
-      javaStyleSplit(u8sv(u8"α,β,γ"), ",", -1),
+      javaStyleSplitNoEmpty(u8sv(u8"α,β,γ"), ",", -1),
       std::vector<std::string_view>({u8sv(u8"α"), u8sv(u8"β"), u8sv(u8"γ")}));
 }
 
 // Newline character as delimiter
 TEST_F(StringImplTest, StringWithNewlineDelimiter) {
   EXPECT_EQ(
-      javaStyleSplit("one\ntwo\nthree", "\n", -1),
+      javaStyleSplitNoEmpty("one\ntwo\nthree", "\n", -1),
       std::vector<std::string_view>({"one", "two", "three"}));
 }
 
 // String containing only whitespace characters
 TEST_F(StringImplTest, StringWithWhitespacesOnly) {
   EXPECT_EQ(
-      javaStyleSplit("   \t\n", "\\s", -1),
+      javaStyleSplitNoEmpty("   \t\n", "\\s", -1),
       std::vector<std::string_view>({"", "", "", "", "", ""}));
 }
 
 // String and delimiter are non-ASCII characters
 TEST_F(StringImplTest, StringAndDelimiterNonASCII) {
   EXPECT_EQ(
-      javaStyleSplit(u8sv(u8"你好✓世界✓"), u8sv(u8"✓"), -1),
+      javaStyleSplitNoEmpty(u8sv(u8"你好✓世界✓"), u8sv(u8"✓"), -1),
       std::vector<std::string_view>({u8sv(u8"你好"), u8sv(u8"世界"), ""}));
 }
 
 // Delimiter is a string, not a single character
 TEST_F(StringImplTest, StringWithDelimiterString) {
   EXPECT_EQ(
-      javaStyleSplit("oneANDtwoANDthree", "AND", -1),
+      javaStyleSplitNoEmpty("oneANDtwoANDthree", "AND", -1),
       std::vector<std::string_view>({"one", "two", "three"}));
 }
 
 // Delimiter string contains regex metacharacters
 TEST_F(StringImplTest, StringWithRegexMetacharactersInDelimiter) {
   EXPECT_EQ(
-      javaStyleSplit("one*+?two*+?three", "\\*\\+\\?", -1),
+      javaStyleSplitNoEmpty("one*+?two*+?three", "\\*\\+\\?", -1),
       std::vector<std::string_view>({"one", "two", "three"}));
 }
 
 // Long string and long delimiter pattern
 TEST_F(StringImplTest, LongStringAndLongDelimiterPattern) {
   EXPECT_EQ(
-      javaStyleSplit("longstringwithnodelimiter", "LONGDELIMITER", -1),
+      javaStyleSplitNoEmpty("longstringwithnodelimiter", "LONGDELIMITER", -1),
       std::vector<std::string_view>({"longstringwithnodelimiter"}));
 }
 
 // String contains regex boundary matchers
 TEST_F(StringImplTest, StringWithRegexBoundaryMatchers) {
   EXPECT_EQ(
-      javaStyleSplit("^one$^two$^three$", "\\$", -1),
+      javaStyleSplitNoEmpty("^one$^two$^three$", "\\$", -1),
       std::vector<std::string_view>({"^one", "^two", "^three", ""}));
 }
 
