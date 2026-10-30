@@ -337,16 +337,14 @@ static std::vector<std::string_view> javaStyleSplit(
     std::string_view input,
     std::string_view pattern,
     int32_t limit) {
-  if (pattern.size() == 0) {
-    return javaStyleSplitFastEmptyPattern<isSpark34Plus>(input, pattern, limit);
+  BOLT_CHECK(
+      !pattern.empty(),
+      "Empty pattern must be handled by javaStyleSplitFastEmptyPattern");
+  std::string newPattern{pattern};
+  if (!stringCore::checkRegexPattern(newPattern)) {
+    return javaStyleSplitFast(input, newPattern, limit);
   } else {
-    std::string new_pattern = std::string(pattern);
-    auto isRegex = stringCore::checkRegexPattern(new_pattern);
-    if (!isRegex) {
-      return javaStyleSplitFast(input, new_pattern, limit);
-    } else {
-      return javaStyleSplitRegex(input, pattern, limit);
-    }
+    return javaStyleSplitRegex(input, pattern, limit);
   }
 }
 

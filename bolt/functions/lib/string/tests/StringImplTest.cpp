@@ -1070,18 +1070,19 @@ TEST_F(StringImplTest, MultipleDelimitersAtEnd) {
 
 TEST_F(StringImplTest, EmptyDelimiter) {
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", "", -1),
+      javaStyleSplitFastEmptyPattern("a,b,c", "", -1),
       std::vector<std::string_view>({"a", ",", "b", ",", "c", ""}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", "", 0),
+      javaStyleSplitFastEmptyPattern("a,b,c", "", 0),
       std::vector<std::string_view>({"a", ",", "b", ",", "c"}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", "", 1), std::vector<std::string_view>({"a,b,c"}));
+      javaStyleSplitFastEmptyPattern("a,b,c", "", 1),
+      std::vector<std::string_view>({"a,b,c"}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", "", 2),
+      javaStyleSplitFastEmptyPattern("a,b,c", "", 2),
       std::vector<std::string_view>({"a", ",b,c"}));
   EXPECT_EQ(
-      javaStyleSplit("a,b,c", "", 10),
+      javaStyleSplitFastEmptyPattern("a,b,c", "", 10),
       std::vector<std::string_view>({"a", ",", "b", ",", "c", ""}));
 }
 
