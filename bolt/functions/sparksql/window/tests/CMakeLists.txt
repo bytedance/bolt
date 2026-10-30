@@ -27,7 +27,11 @@
 
 set(CMAKE_WINDOW_TEST_LINK_LIBRARIES bolt_gtest_main)
 
-add_executable(bolt_spark_windows_test SparkWindowTest.cpp)
+add_executable(
+  bolt_spark_windows_test
+  SparkWindowTest.cpp
+  SpillableWindowStorageCleanupTest.cpp
+)
 
 add_test(NAME bolt_spark_windows_test COMMAND bolt_spark_windows_test WORKING_DIRECTORY .)
 

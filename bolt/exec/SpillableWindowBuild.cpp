@@ -145,7 +145,10 @@ void SpillableWindowBuild<needSort>::spill() {
 
     spilledNumRows_ += inputRows_.size();
 
-    if (inputRows_.size() == data_->numRows()) {
+    // The retained boundary row already has an independent spill-pool copy.
+    // Keeping it in RowContainer would pin all freed row/string allocations.
+    if (inputRows_.size() == data_->numRows() ||
+        (keepLastRow && inputRows_.size() + 1 == data_->numRows())) {
       data_->clear();
       data_->pool()->release();
     } else {
@@ -157,12 +160,13 @@ void SpillableWindowBuild<needSort>::spill() {
     if (keepLastRow) {
       if (data_->numRows() == 0) {
         BOLT_CHECK(lastRowPtr != nullptr);
-        for (auto i = 0; i < inputChannels_.size(); ++i) {
-          decodedInputVectors_[i].decode(*lastRowPtr->childAt(i));
-        }
         char* newRow = data_->newRow();
         for (auto col = 0; col < lastRowPtr->childrenSize(); ++col) {
-          data_->store(decodedInputVectors_[col], 0, newRow, col);
+          // Spill can run during ensureInputFits, after the incoming batch was
+          // decoded. Restoring the boundary row must not replace those
+          // decoders.
+          DecodedVector decoded(*lastRowPtr->childAt(col));
+          data_->store(decoded, 0, newRow, col);
         }
         previousRow_ = newRow;
       }
@@ -574,6 +578,13 @@ SpillableWindowBuild<needSort>::nextPartition() {
         }
       }
     }
+  }
+
+  if (rowBasedSpillSortMerger_ == nullptr && data_->numRows() == 0) {
+    // eraseRows only populates allocator free lists. A spilled partition has
+    // no resident rows to protect, so return that backing storage as well.
+    data_->clear();
+    data_->pool()->release();
   }
 
   auto partitionSize = partitionStartRows_[currentPartition_ + 1] -
