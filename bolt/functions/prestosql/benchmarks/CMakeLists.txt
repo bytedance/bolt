@@ -45,6 +45,9 @@ set(
 add_executable(bolt_functions_prestosql_benchmarks_array_contains ArrayContainsBenchmark.cpp)
 target_link_libraries(bolt_functions_prestosql_benchmarks_array_contains ${BENCHMARK_DEPENDENCIES})
 
+add_executable(bolt_functions_prestosql_benchmarks_array_intersect ArrayIntersectBenchmark.cpp)
+target_link_libraries(bolt_functions_prestosql_benchmarks_array_intersect ${BENCHMARK_DEPENDENCIES})
+
 add_executable(bolt_functions_prestosql_benchmarks_array_min_max ArrayMinMaxBenchmark.cpp)
 target_link_libraries(bolt_functions_prestosql_benchmarks_array_min_max ${BENCHMARK_DEPENDENCIES})
 
