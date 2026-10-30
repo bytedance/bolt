@@ -64,6 +64,148 @@ class ConfigureConanProfileTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return patcher.start()
 
+    def test_compiler_paths_preserve_links_and_find_installation_cpp_driver(self):
+        installation = self.root / "llvm-22" / "bin"
+        installation.mkdir(parents=True)
+        clang = installation / "clang"
+        clang.write_text('#!/bin/sh\necho "clang version 22.1.8"\n')
+        clang.chmod(0o755)
+        clang_cpp = installation / "clang++"
+        clang_cpp.symlink_to("clang")
+        commands = self.root / "bin"
+        commands.mkdir()
+        (commands / "clang").symlink_to(clang)
+        (commands / "clang++").symlink_to(clang_cpp)
+        (commands / "clang-22").symlink_to(clang)
+        (commands / "clang++-22").symlink_to(clang_cpp)
+
+        with mock.patch.dict(os.environ, {"PATH": str(commands)}):
+            for compiler in ("clang", "clang-22", str(commands / "clang")):
+                with self.subTest(compiler=compiler):
+                    self.assertEqual(
+                        configure.resolve_executable(compiler),
+                        str(commands / Path(compiler).name),
+                    )
+                    self.assertEqual(
+                        configure.resolve_compiler_pair(compiler, "clang"),
+                        str(clang_cpp),
+                    )
+            self.assertEqual(
+                configure.resolve_executable(str(commands / "clang++-22")),
+                str(commands / "clang++-22"),
+            )
+
+    def test_clang_cpp_link_to_versioned_driver_without_versioned_cpp(self):
+        installation = self.root / "llvm-22" / "bin"
+        installation.mkdir(parents=True)
+        driver = installation / "clang-22"
+        driver.write_text(
+            '#!/bin/sh\ncase "$1" in\n'
+            '--version) echo "clang version 22.1.8" ;;\n'
+            '--print-driver-mode) echo "${0##*/}" ;;\nesac\n'
+        )
+        driver.chmod(0o755)
+        clang = installation / "clang"
+        clang.symlink_to(driver.name)
+        clang_cpp = installation / "clang++"
+        clang_cpp.symlink_to(driver.name)
+        commands = self.root / "bin"
+        commands.mkdir()
+        (commands / "clang").symlink_to(clang)
+        (commands / "clang++").symlink_to(clang_cpp)
+
+        with mock.patch.dict(os.environ, {"PATH": str(commands)}):
+            for compiler in ("clang", str(commands / "clang"), str(driver)):
+                with self.subTest(compiler=compiler):
+                    detected = configure.detect_compiler(compiler)
+                    self.assertEqual(detected.version, "22")
+                    self.assertEqual(detected.executables["cpp"], str(clang_cpp))
+                    self.assertEqual(
+                        configure.run_command(
+                            [detected.executables["cpp"], "--print-driver-mode"]
+                        ),
+                        "clang++",
+                    )
+            self.assertEqual(
+                configure.resolve_executable("clang++"), str(commands / "clang++")
+            )
+
+    def test_compiler_named_ccache_links_preserve_wrapper_invocation(self):
+        wrapper = self.root / "libexec" / "ccache"
+        wrapper.parent.mkdir()
+        wrapper.write_text(
+            '#!/bin/sh\ncase "${0##*/}" in\n'
+            'clang*) echo "clang version 22.1.8" ;;\n'
+            '*) echo "ccache version 4.12" ;;\nesac\n'
+        )
+        wrapper.chmod(0o755)
+        commands = self.root / "bin"
+        commands.mkdir()
+        for name in ("clang", "clang++", "clang-22", "clang++-22"):
+            (commands / name).symlink_to(wrapper)
+
+        with mock.patch.dict(os.environ, {"PATH": str(commands)}):
+            for compiler in ("clang", "clang-22", str(commands / "clang")):
+                with self.subTest(compiler=compiler):
+                    detected = configure.detect_compiler(compiler)
+                    self.assertEqual(detected.version, "22")
+                    self.assertEqual(
+                        detected.executables,
+                        {
+                            "c": str(commands / Path(compiler).name),
+                            "cpp": str(
+                                commands
+                                / Path(compiler).name.replace("clang", "clang++")
+                            ),
+                        },
+                    )
+
+    def test_clang_finds_cpp_in_installation_without_cpp_on_path(self):
+        installation = self.root / "llvm-22" / "bin"
+        installation.mkdir(parents=True)
+        clang = installation / "clang"
+        clang.write_text('#!/bin/sh\necho "clang version 22.1.8"\n')
+        clang.chmod(0o755)
+        clang_cpp = installation / "clang++"
+        clang_cpp.symlink_to("clang")
+        commands = self.root / "bin"
+        commands.mkdir()
+        (commands / "clang").symlink_to(clang)
+        # An unrelated clang++ on PATH must not override the selected toolchain.
+        unrelated_cpp = commands / "clang++"
+        unrelated_cpp.write_text('#!/bin/sh\necho "clang version 18.0.0"\n')
+        unrelated_cpp.chmod(0o755)
+
+        with mock.patch.dict(os.environ, {"PATH": str(commands)}):
+            for cpp_on_path in (True, False):
+                with self.subTest(cpp_on_path=cpp_on_path):
+                    if not cpp_on_path:
+                        unrelated_cpp.unlink()
+                    compiler = configure.detect_compiler("clang")
+                    self.assertEqual(compiler.version, "22")
+                    self.assertEqual(
+                        compiler.executables,
+                        {"c": str(commands / "clang"), "cpp": str(clang_cpp)},
+                    )
+
+    def test_compiler_pair_skips_mismatched_installation_sibling(self):
+        installation = self.root / "tools"
+        installation.mkdir()
+        commands = self.root / "bin"
+        commands.mkdir()
+        for path, version in (
+            (installation / "clang", 22),
+            (installation / "clang++", 18),
+            (commands / "clang++-22", 22),
+        ):
+            path.write_text(f'#!/bin/sh\necho "clang version {version}.0.0"\n')
+            path.chmod(0o755)
+        (commands / "clang-22").symlink_to(installation / "clang")
+        with mock.patch.dict(os.environ, {"PATH": str(commands)}):
+            selected = configure.detect_compiler("clang-22")
+            self.assertEqual(selected.version, "22")
+            self.assertEqual(selected.executables["cpp"], str(commands / "clang++-22"))
+
     def update(self, **overrides):
         arguments = dict(
             profile_file=self.profile,
@@ -77,6 +219,87 @@ class ConfigureConanProfileTest(unittest.TestCase):
         )
         arguments.update(overrides)
         configure.update_selected_profile(**arguments)
+
+    def test_generic_clang_selects_latest_matching_pair_on_path(self):
+        early = self.root / "early"
+        later = self.root / "later"
+        early.mkdir()
+        later.mkdir()
+        for directory, name, version in (
+            (early, "clang", 18),
+            (early, "clang-9", 9),
+            (later, "clang-22", 22),
+            (later, "clang-23", 23),
+        ):
+            executable = directory / name
+            executable.write_text(f'#!/bin/sh\necho "clang version {version}.0.0"\n')
+            executable.chmod(0o755)
+            if version != 23:
+                (directory / name.replace("clang", "clang++")).symlink_to(name)
+
+        with mock.patch.dict(os.environ, {"PATH": f"{early}{os.pathsep}{later}"}):
+            selected, libcxx = configure.select_compiler_and_libcxx("clang", "libc++")
+            self.assertEqual(selected.version, "22")
+            self.assertEqual(libcxx, "libc++")
+            self.assertEqual(
+                selected.executables,
+                {"c": str(later / "clang-22"), "cpp": str(later / "clang++-22")},
+            )
+            for compiler in ("clang-9", str(early / "clang")):
+                with self.subTest(compiler=compiler):
+                    selected, _ = configure.select_compiler_and_libcxx(
+                        compiler, "libc++"
+                    )
+                    self.assertEqual(
+                        selected.version, "9" if compiler == "clang-9" else "18"
+                    )
+
+    def test_generic_clang_finds_versioned_cpp_in_another_path_directory(self):
+        early = self.root / "early"
+        later = self.root / "later"
+        early.mkdir()
+        later.mkdir()
+        for path, version in (
+            (early / "clang", 18),
+            (early / "clang++", 18),
+            (early / "clang-22", 22),
+            (later / "clang++-22", 22),
+        ):
+            path.write_text(f'#!/bin/sh\necho "clang version {version}.0.0"\n')
+            path.chmod(0o755)
+
+        with mock.patch.dict(os.environ, {"PATH": f"{early}{os.pathsep}{later}"}):
+            for compiler in ("clang", "clang-22", str(early / "clang-22")):
+                with self.subTest(compiler=compiler):
+                    selected, _ = configure.select_compiler_and_libcxx(
+                        compiler, "libc++"
+                    )
+                    self.assertEqual(selected.version, "22")
+                    self.assertEqual(
+                        selected.executables,
+                        {
+                            "c": str(early / "clang-22"),
+                            "cpp": str(later / "clang++-22"),
+                        },
+                    )
+
+    def test_generic_clang_does_not_fall_back_to_gcc(self):
+        with (
+            mock.patch.dict(os.environ, {"PATH": str(self.root)}),
+            mock.patch.object(sys, "platform", "linux"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Cannot find any usable Clang"):
+                configure.select_compiler_and_libcxx("clang", None)
+
+    def test_generic_clang_preserves_apple_clang_fallback(self):
+        apple_clang = configure.CompilerInfo("apple-clang", "17", {})
+        self.patch("discover_latest_clang", side_effect=RuntimeError("not found"))
+        self.patch("discover_apple_clang", return_value=apple_clang)
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(
+                configure.select_compiler_and_libcxx("clang", None),
+                (apple_clang, "libc++"),
+            )
 
     def assert_complete(self, profile):
         text = profile.read_text()

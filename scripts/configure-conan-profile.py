@@ -38,7 +38,9 @@
 # | Other platforms with only Clang | Highest-version Clang | libc++ | lld |
 # | Other platforms with GCC but no Clang | Highest-version GCC | libstdc++11 | ld |
 #
-# Explicit --compiler, --libcxx, and --linker options override these defaults.
+# --compiler clang selects the highest-version usable Clang on PATH.
+# Versioned compiler names and paths select that specific compiler.
+# Explicit --libcxx and --linker options override these defaults.
 # Use --linker ld to select the compiler-default linker without adding a
 # -fuse-ld flag.
 # The selected profile is regenerated from scratch and atomically replaced after
@@ -66,7 +68,7 @@
 #       --extra-link-flags="-Wl,--as-needed" \
 #       --libc gnu --libc-version 2.17
 #
-#   # Only add os.libc/os.libc_version to settings_user.yml.
+#   # Configure settings_user.yml and the source cache without updating a profile.
 #   python3 scripts/configure-conan-profile.py --skip-profile
 #
 #   # Use a converted perf profile (use instrumentation for merged .profraw data).
@@ -201,13 +203,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-profile",
         action="store_true",
-        help="Only update settings_user.yml, do not touch any Conan profile",
+        help="Update settings_user.yml and global.conf, do not touch any Conan profile",
     )
     parser.add_argument(
         "--compiler",
         help=(
             "Compiler name or path, for example clang, gcc-12 or "
-            "/opt/compiler/bin/clang (default: auto-detect)"
+            "/opt/compiler/bin/clang (default: auto-detect); "
+            "clang selects the highest-version usable Clang on PATH"
         ),
     )
     # Clang with libstdc++ selects the newest GCC/G++ pair on PATH; --libcxx libc++ skips this.
@@ -333,18 +336,17 @@ def validate_conan_compiler(compiler: CompilerInfo) -> None:
 
 def resolve_executable(command: str) -> str:
     if "/" in command:
-        # Preserve argv[0]: clang++ may symlink to clang but selects the C++ driver.
         executable = Path(command).expanduser().absolute()
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise RuntimeError(
-                f"Required compiler not found or not executable: {command}"
-            )
-        return str(executable)
+    else:
+        found = shutil.which(command)
+        if found is None:
+            raise RuntimeError(f"Required compiler not found: {command}")
+        executable = Path(found)
 
-    executable = shutil.which(command)
-    if executable is None:
-        raise RuntimeError(f"Required compiler not found: {command}")
-    return os.path.abspath(executable)
+    # Preserve argv[0] for C++ drivers and compiler-named wrappers such as ccache.
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(f"Required compiler not found or not executable: {command}")
+    return str(executable.absolute())
 
 
 def compiler_pair_name(compiler: str, family: str) -> str:
@@ -353,26 +355,54 @@ def compiler_pair_name(compiler: str, family: str) -> str:
     pair_stem = stem.replace(family, replacement, 1)
     if "/" not in compiler:
         return pair_stem
-    return str(Path(compiler).expanduser().resolve().parent / pair_stem)
+    return str(Path(compiler).expanduser().absolute().parent / pair_stem)
 
 
-def resolve_compiler_pair(compiler: str, family: str) -> str:
-    candidates = [compiler_pair_name(compiler, family)]
-    generic_pair = "clang++" if family == "clang" else "g++"
-
-    if "/" in compiler:
-        sibling_generic = str(
-            Path(compiler).expanduser().resolve().parent / generic_pair
+def resolve_compiler_pair(
+    compiler: str,
+    family: str,
+    expected: tuple[str, str] | None = None,
+) -> str:
+    executable = Path(resolve_executable(compiler))
+    if expected is None:
+        expected = (
+            detect_clang(str(executable))
+            if family == "clang"
+            else (family, detect_gcc_version(str(executable)))
         )
-        if sibling_generic not in candidates:
-            candidates.append(sibling_generic)
-    elif generic_pair not in candidates:
-        candidates.append(generic_pair)
+    resolved_compiler = executable.resolve()
+    candidates = []
+    generic_pair = "clang++" if family == "clang" else "g++"
+    # Use the selected installation first, but never treat a wrapper as a compiler.
+    if resolved_compiler.name.startswith(family):
+        candidates.extend(
+            [
+                compiler_pair_name(str(resolved_compiler), family),
+                str(resolved_compiler.parent / generic_pair),
+            ]
+        )
+    candidates.extend(
+        [
+            compiler_pair_name(str(executable), family),
+            str(executable.parent / generic_pair),
+            compiler_pair_name(compiler, family),
+            compiler_pair_name(executable.name, family),
+            generic_pair,
+        ]
+    )
+    candidates = list(dict.fromkeys(candidates))
 
     for candidate in candidates:
         try:
-            return resolve_executable(candidate)
-        except RuntimeError:
+            cpp_path = resolve_executable(candidate)
+            actual = (
+                detect_clang(cpp_path)
+                if family == "clang"
+                else (family, detect_gcc_version(cpp_path))
+            )
+            if actual == expected:
+                return cpp_path
+        except (RuntimeError, OSError, subprocess.SubprocessError):
             continue
 
     raise RuntimeError(
@@ -432,19 +462,12 @@ def detect_compiler(compiler: str) -> CompilerInfo:
     compiler_name = Path(compiler).name
     family = "clang" if compiler_name.startswith("clang") else "gcc"
     c_path = resolve_executable(compiler)
-    cpp_path = resolve_compiler_pair(compiler, family)
     if family == "clang":
         c_family, c_version = detect_clang(c_path)
-        cpp_family, cpp_version = detect_clang(cpp_path)
     else:
-        c_family = cpp_family = family
+        c_family = family
         c_version = detect_gcc_version(c_path)
-        cpp_version = detect_gcc_version(cpp_path)
-    if (c_family, c_version) != (cpp_family, cpp_version):
-        raise RuntimeError(
-            f"C compiler {c_path} ({c_family} {c_version}) does not match "
-            f"C++ compiler {cpp_path} ({cpp_family} {cpp_version})"
-        )
+    cpp_path = resolve_compiler_pair(compiler, family, (c_family, c_version))
     return CompilerInfo(
         family=c_family,
         version=c_version,
@@ -469,6 +492,19 @@ def read_profile_lines(profile_file: Path) -> list[str]:
     if not profile_file.exists():
         return []
     return profile_file.read_text().splitlines()
+
+
+def configure_source_download_cache(conan_home: Path) -> None:
+    global_conf = conan_home / "global.conf"
+    text = global_conf.read_text() if global_conf.exists() else ""
+    key = "core.sources:download_cache"
+    if any(line.partition("=")[0].strip() == key for line in text.splitlines()):
+        return
+    cache_path = conan_home.resolve() / "source-backup"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    global_conf.write_text(f"{text}{key}={cache_path}\n")
+    print(f"✅ Configured source download cache: {cache_path}")
 
 
 def update_settings_user_file(settings_user_file: Path) -> None:
@@ -807,7 +843,14 @@ def discover_apple_clang() -> CompilerInfo:
 def select_compiler_and_libcxx(
     compiler: str | None, libcxx: str | None
 ) -> tuple[CompilerInfo, str]:
-    if compiler is not None:
+    if compiler == "clang":
+        try:
+            compiler_info = discover_latest_clang()
+        except RuntimeError:
+            if sys.platform != "darwin":
+                raise
+            compiler_info = discover_apple_clang()
+    elif compiler is not None:
         compiler_info = detect_compiler(compiler)
     elif sys.platform == "darwin":
         compiler_info = discover_apple_clang()
@@ -1046,6 +1089,7 @@ def main() -> int:
     print(
         "✅ Added Linux settings override to settings_user.yml: os.libc / os.libc_version"
     )
+    configure_source_download_cache(conan_home)
 
     if args.skip_profile:
         print("ℹ️  Skipped profile update by request")

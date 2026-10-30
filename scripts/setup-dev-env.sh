@@ -60,36 +60,47 @@ download_file() {
 }
 
 check_basic_tools() {
-  local all_installed=true
-  if command -v wget > /dev/null 2>&1; then
-    echo "✅ Already installed wget"
-  elif command -v curl > /dev/null 2>&1; then
-    echo "wget not found, using curl..."
-  else
-    echo "❌ Error: Neither 'wget' nor 'curl' found."
-    all_installed=false
-  fi
-
+  local missing_tools=()
   local tool
-  local tools=("make" "cmake" "ninja")
+  local tools=("cmake" "make" "git" "wget" "curl")
 
   for tool in "${tools[@]}"; do
     if command -v "$tool" > /dev/null 2>&1; then
       printf "✅ Already installed %s\n" "$tool"
     else
-      printf "❌ Not installed %s\n" "$tool"
-      all_installed=false
+      missing_tools+=("$tool")
     fi
   done
 
-  if ! $all_installed; then
-    if [[ "$OS_TYPE" == "Darwin" ]]; then
-      echo "👉 Please install missing tools using brew install wget make cmake ninja"
-    else
-      echo "👉 Please install missing tools using your package manager (apt/yum)."
+  if ((${#missing_tools[@]} == 0)); then
+    return 0
+  fi
+
+  printf 'Installing missing tools: %s\n' "${missing_tools[*]}"
+  if [[ "$OS_TYPE" == "Darwin" ]]; then
+    if ! command -v brew > /dev/null 2>&1; then
+      echo "❌ Install Homebrew (https://brew.sh) before running setup."
+      return 1
     fi
+    brew install "${missing_tools[@]}"
+  elif command -v apt-get > /dev/null 2>&1; then
+    run_as_root apt-get update
+    run_as_root apt-get install -y "${missing_tools[@]}"
+  elif command -v dnf > /dev/null 2>&1; then
+    run_as_root dnf install -y "${missing_tools[@]}"
+  elif command -v yum > /dev/null 2>&1; then
+    run_as_root yum install -y "${missing_tools[@]}"
+  else
+    echo "❌ No supported package manager found. Install ${missing_tools[*]} manually."
     return 1
   fi
+
+  for tool in "${missing_tools[@]}"; do
+    if ! command -v "$tool" > /dev/null 2>&1; then
+      printf '❌ Required tool still missing after installation: %s\n' "$tool"
+      return 1
+    fi
+  done
 }
 
 find_installed_clang() {
@@ -296,11 +307,14 @@ install_miniconda() {
   fi
 
   echo "Installing conda"
-  local installer shell_config
-  installer=$(mktemp /tmp/bolt-miniconda.XXXXXX)
+  local installer_dir installer shell_config
+  installer_dir=$(mktemp -d /tmp/bolt-miniconda.XXXXXX)
+  # The installer requires a .sh filename even when invoked with bash.
+  installer="$installer_dir/miniconda.sh"
   download_file "$(miniconda_url)" "$installer"
   bash "$installer" -b -u -p "$CONDA_INSTALL_DIR"
   rm -f "$installer"
+  rmdir "$installer_dir"
   shell_config=$(runtime_conf_path)
   printf 'export PATH=%q:$PATH\n' "$CONDA_INSTALL_DIR/bin" >> "$shell_config"
 }
@@ -309,7 +323,37 @@ install_python_dependencies() {
   # Use the same environment for installation and all subsequent setup steps.
   export PATH="$CONDA_INSTALL_DIR/bin:$PATH"
   "$CONDA_INSTALL_DIR/bin/pip" install --upgrade pip || true
-  "$CONDA_INSTALL_DIR/bin/pip" install -r "${SCRIPT_DIR}/../requirements.txt"
+  local requirements_file
+  requirements_file=$(mktemp /tmp/bolt-python-requirements.XXXXXX)
+  "$CONDA_INSTALL_DIR/bin/python" - "${SCRIPT_DIR}/../requirements.txt" "$requirements_file" << 'PY'
+import importlib.metadata
+import json
+import pathlib
+import sys
+
+installed_requirement = None
+try:
+    distribution = importlib.metadata.distribution("pypaimon")
+    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+    vcs = direct_url.get("vcs_info", {})
+    if vcs.get("vcs") == "git" and vcs.get("requested_revision"):
+        installed_requirement = (
+            f"pypaimon @ git+{direct_url.get('url')}@{vcs['requested_revision']}"
+            f"#subdirectory={direct_url.get('subdirectory')}"
+        )
+except (importlib.metadata.PackageNotFoundError, ValueError):
+    pass
+
+requirements = []
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines(keepends=True):
+    if line.strip() == installed_requirement:
+        print(f"Already installed {line.strip()}; skipping installation.")
+    else:
+        requirements.append(line)
+pathlib.Path(sys.argv[2]).write_text("".join(requirements))
+PY
+  "$CONDA_INSTALL_DIR/bin/pip" install -r "$requirements_file"
+  rm -f "$requirements_file"
   # Existing minimum-version installations may not recognize newer Clang releases.
   "$CONDA_INSTALL_DIR/bin/pip" install --upgrade 'conan>=2.33.0'
 }
