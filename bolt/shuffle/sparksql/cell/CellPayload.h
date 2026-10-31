@@ -97,7 +97,11 @@ class MemoryByteSource final : public CellByteSource {
 /// reader pool, so a corrupt size fails on the pool's capacity rather than
 /// exhausting the process. The row count sizes nothing but the null region,
 /// which the input bytes bound: rows come out in batches of the caller's
-/// size. Untrusted deployments set maxDecodedBytes.
+/// size. In a layout whose columns have different position counts, a
+/// batch's position count varies with the data, and only maxDecodedBytes
+/// bounds it. The null bitmap and batch bounds apply per decoder: a caller
+/// driving several decoders bounds their sum. Untrusted deployments set
+/// maxDecodedBytes.
 struct CellDecodeLimits {
   uint32_t maxRowCount{kMaxPayloadRows};
   uint32_t maxRunCount{1u << 16};
@@ -124,7 +128,10 @@ class CellDecompressor {
 /// payload's encoded bytes are read whole, its rows come out in pieces of
 /// the caller's size into a batch that may span payloads. Memory is the
 /// payload's encoded bytes plus one batch, whatever the payload's row
-/// count. Reusable across payloads; scratch buffers are retained.
+/// count. Reusable across payloads; scratch buffers are retained. A payload
+/// whose columns have different position counts is read by one decoder
+/// (readPayload()), and the columns at the same positions are decoded by a
+/// decoder of their own (openPayload()).
 class CellPayloadDecoder {
  public:
   /// `decompressor` may be null when payloads are known to be uncompressed;
@@ -145,13 +152,33 @@ class CellPayloadDecoder {
   /// having consumed an unspecified prefix of `in`.
   bool beginPayload(CellByteSource& in, std::string& error);
 
+  /// Reads one payload as beginPayload() does, but opens no column: the
+  /// decoders of its columns open it with openPayload(). `rowCount` is the
+  /// header's. What it read stays valid until the next readPayload().
+  bool readPayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
+
+  /// Opens the payload another decoder, `source`, read for this decoder's
+  /// columns, column c being source's sourceColumns[c], of the same type, at
+  /// `positions` positions each: they come out through appendRows() as this
+  /// decoder's rows, and `source` reads no other payload until they are all
+  /// appended. The previous payload must be fully appended. On malformed
+  /// input returns false with `error` set.
+  bool openPayload(
+      const CellPayloadDecoder& source,
+      const uint32_t* sourceColumns,
+      uint32_t positions,
+      std::string& error);
+
   /// Rows of the current payload not appended yet.
   uint32_t payloadRowsLeft() const {
     return rowCount_ - rowsRead_;
   }
 
   /// Appends the next `numRows` rows of the current payload to the batch
-  /// under construction, opening one of `capacity` rows when none is open.
+  /// under construction, opening one of `capacity` rows when none is open
+  /// and growing it when they do not fit: in a layout whose columns have
+  /// different position counts, a batch's position count varies with the
+  /// data. Growth keeps the batch's fixed bytes within maxDecodedBytes.
   /// The checks that need a whole stream run with the payload's last rows.
   /// On malformed input returns false with `error` set; the payload and the
   /// batch are then dropped.
@@ -168,6 +195,27 @@ class CellPayloadDecoder {
 
   /// The batch built so far, closing it; nullptr when none is open.
   RowVectorPtr finishBatch();
+
+  /// Non-null rows of a column in the payload opened last.
+  uint32_t nonNullCount(uint32_t col) const {
+    return nonNullCount_[col];
+  }
+
+  /// A stream's bytes in the payload read or opened last.
+  std::string_view streamBytes(uint32_t stream) const {
+    return streamViews_[stream];
+  }
+
+  /// Fixed bytes of one decoded row.
+  uint32_t rowBytes() const {
+    return rowBytes_;
+  }
+
+  /// A column's values in the open batch, T{} at its null rows;
+  /// appendRows() may move them.
+  const BufferPtr& batchValues(uint32_t col) const {
+    return batch_[col].values;
+  }
 
   /// Decodes exactly one payload from `in` as one vector of all its rows.
   /// On success fills `out` and returns true; on malformed input returns
@@ -224,16 +272,26 @@ class CellPayloadDecoder {
     return false;
   }
 
+  /// Header, null region and every run.
+  bool parsePayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
+
+  /// Reads the null body's tags and locates each kRawNull column's records.
   bool parseNullRegion(
       CellByteSource& in,
-      uint32_t rowCount,
       uint32_t nullStoredSize,
       uint32_t nullDecodedSize,
       std::string& error);
 
+  /// Expands the located records into bitmaps of `rowCount` rows.
+  bool expandNulls(uint32_t rowCount, std::string& error);
+
   /// `sole`: the payload's only run, whose combined buffer the streams may
   /// view in place instead of copying it apart.
   bool parseRun(CellByteSource& in, bool sole, std::string& error);
+
+  /// Expands the nulls and opens every column at `rowCount` rows; with none,
+  /// runs the whole-stream checks at once.
+  bool openColumns(uint32_t rowCount, std::string& error);
 
   /// Positions the column's cursor at the payload's first row, checking
   /// what can be checked before any value is read.
@@ -246,6 +304,11 @@ class CellPayloadDecoder {
   bool finishPayload(std::string& error);
 
   void openBatch(vector_size_t capacity);
+
+  /// Grows the open batch to hold `rows` rows, doubling it, within one
+  /// vector and maxDecodedBytes of fixed bytes; false, with `error`, past
+  /// maxDecodedBytes.
+  bool growBatch(uint64_t rows, std::string& error);
 
   void dropBatch();
 
@@ -315,6 +378,9 @@ class CellPayloadDecoder {
   bool streamsViewed_{false};
   BufferPtr nullBody_;
   std::vector<NullTag> tags_;
+  /// Per kRawNull column, its records in the null body of the reading
+  /// decoder.
+  std::vector<const uint8_t*> records_;
   std::vector<uint32_t> nonNullCount_;
   /// The kRawNull columns' records expanded, a bitmap per column.
   BufferPtr expandedNulls_;
