@@ -51,6 +51,22 @@ std::string pythonExecutableForTests() {
   return python != nullptr && python[0] != '\0' ? python : "python3";
 }
 
+bool isPypaimonAvailable() {
+  try {
+    folly::Subprocess process(
+        {pythonExecutableForTests(), "-c", "import pypaimon"},
+        folly::Subprocess::Options()
+            .usePath()
+            .stdoutFd(folly::Subprocess::DEV_NULL)
+            .stderrFd(folly::Subprocess::DEV_NULL));
+    const auto status = process.wait();
+    return status.exited() && status.exitStatus() == 0;
+  } catch (const folly::SubprocessSpawnError& e) {
+    LOG(WARNING) << "Failed to run Python for Paimon tests: " << e.what();
+    return false;
+  }
+}
+
 } // namespace
 
 class PaimonConnectorTest
@@ -58,6 +74,10 @@ class PaimonConnectorTest
  protected:
   static void SetUpTestCase() {
     filesystems::registerLocalFileSystem();
+    CHECK(isPypaimonAvailable())
+        << "Python package pypaimon is required to create Paimon test tables. "
+        << "Install it with: " << pythonExecutableForTests()
+        << " -m pip install pypaimon==1.4.1";
 
     // Create a temporary directory for the test
     tempDir_ = exec::test::TempDirectoryPath::create();
