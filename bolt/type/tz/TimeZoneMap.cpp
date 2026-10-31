@@ -38,6 +38,7 @@
 #include <folly/container/F14Set.h>
 #include <exception>
 #include <sstream>
+#include <unordered_map>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -52,6 +53,9 @@ using TTimeZoneIndex = folly::F14FastMap<std::string, const TimeZone*>;
 
 // Defined in TimeZoneDatabase.cpp
 extern const std::vector<std::pair<int16_t, std::string>>& getTimeZoneEntries();
+
+// Defined in TimeZoneLinks.cpp
+extern const std::unordered_map<std::string, std::string>& getTimeZoneLinks();
 
 namespace {
 // Returns the offset in minutes for a specific time zone offset in the
@@ -93,6 +97,16 @@ TTimeZoneDatabase buildTimeZoneDatabase(
       try {
         zone = locateZoneImpl(entry.second);
       } catch (std::exception& err) {
+        const auto& links = getTimeZoneLinks();
+        const auto link = links.find(entry.second);
+        if (link != links.end()) {
+          zone = locateZoneImpl(link->second);
+          timeZonePtr =
+              std::make_unique<TimeZone>(entry.second, entry.first, zone);
+          tzDatabase[entry.first] = std::move(timeZonePtr);
+          continue;
+        }
+
         // When this exception is thrown, it typically means the time zone name
         // we are trying to locate cannot be found from OS's time zone database.
         // Thus, we just command a "continue;" to skip the creation of the
@@ -104,7 +118,6 @@ TTimeZoneDatabase buildTimeZoneDatabase(
                      << "]: " << err.what();
         throw std::runtime_error(fmt::format(
             "Invalid time zone [{}]: {}", entry.second, err.what()));
-        continue;
       }
       timeZonePtr = std::make_unique<TimeZone>(entry.second, entry.first, zone);
     }

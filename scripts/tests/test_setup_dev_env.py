@@ -48,15 +48,15 @@ class SetupReviewTest(unittest.TestCase):
             ld.mkdir()
             for name, version in [
                 ("clang", "18"),
-                ("clang-99", "99"),
-                ("clang++-99", "99"),
+                ("clang-22", "22"),
+                ("clang++-22", "22"),
             ]:
                 path = cc / name
                 path.write_text(
                     f'#!/bin/bash\ncase "$1" in\n-dumpversion) echo {version};;\n--version) echo "InstalledDir: {cc}";;\nesac\n'
                 )
                 path.chmod(0o755)
-            for name in ["ld.lld-99", "lld-99"]:
+            for name in ["ld.lld-22", "lld-22"]:
                 path = ld / name
                 path.write_text("#!/bin/bash\nexit 0\n")
                 path.chmod(0o755)
@@ -65,8 +65,8 @@ export PATH="{cc}:{ld}:$PATH"
 OS_TYPE=Linux
 find_installed_clang
 find_clang_linker
-[[ "$CLANG_COMPILER" == "{cc}/clang-99" ]]
-[[ "$CLANG_LINKER" == "{ld}/ld.lld-99" ]]
+[[ "$CLANG_COMPILER" == "{cc}/clang-22" ]]
+[[ "$CLANG_LINKER" == "{ld}/ld.lld-22" ]]
 sudo() {{ "$@"; }}
 update-alternatives() {{ printf '%s\\n' "$*"; }}
 set_default_llvm
@@ -74,10 +74,10 @@ python() {{ printf '%s\\n' "$*"; }}
 configure_conan_profile
 ''')
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(f"--set ld.lld {ld}/ld.lld-99", result.stdout)
-            self.assertIn(f"--set lld {ld}/lld-99", result.stdout)
-            self.assertIn(f"--set clang {cc}/clang-99", result.stdout)
-            self.assertIn(f"--compiler={cc}/clang-99", result.stdout)
+            self.assertIn(f"--set ld.lld {ld}/ld.lld-22", result.stdout)
+            self.assertIn(f"--set lld {ld}/lld-22", result.stdout)
+            self.assertIn(f"--set clang {cc}/clang-22", result.stdout)
+            self.assertIn(f"--compiler={cc}/clang-22", result.stdout)
 
     def test_missing_libcxx(self):
         result = self.run_shell(
@@ -90,6 +90,7 @@ configure_conan_profile
         result = self.run_shell("""
 check_basic_tools() { :; }
 install_clang() { :; }
+install_patched_lld() { :; }
 set_default_llvm() { :; }
 install_miniconda() { :; }
 install_python_dependencies() { :; }

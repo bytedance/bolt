@@ -46,7 +46,7 @@ Bolt uses **Conan 2** for dependency management and a Makefile to drive its buil
 
 - **OS**: Linux (Ubuntu 20.04+, CentOS 7+) or macOS (Experimental).
 
-- **Compiler**: The latest stable Clang is recommended, with **Clang 22 as the minimum recommended version**. CI validates the Clang toolchain; newer GCC versions are not covered by CI. macOS support remains experimental.
+- **Compiler**: **Clang 22 is required**. CI validates this Clang toolchain; newer GCC versions are not covered by CI. macOS support remains experimental.
 - **Build Tools**: CMake 3.25+, Ninja.
 - **Dependency Manager**: Conan 2.33.0+.
 
@@ -62,11 +62,12 @@ scripts/setup-dev-env.sh
 **⚠️ Important: What this script does** This script is "opinionated" and performs the following actions. Please review them to ensure they fit your workflow:
 
 1. **LLVM Toolchain**:
-   - First checks Clang executables on PATH and in standard LLVM installation directories. Reuses the highest available major version when it is at least 22, skipping LLVM installation.
-   - On Debian/Ubuntu supported by [apt.llvm.org](https://apt.llvm.org/), installs the latest stable LLVM release using the official installer's `all` option, including Clang, LLD, LLDB, clangd, LLVM development tools, libc++, libc++abi, OpenMP, compiler-rt, libunwind, and Polly. Also installs the matching LLVM BOLT package and its runtime development files, which the official installer's `all` option omits. Requires root or `sudo`.
+   - First checks Clang executables on PATH and in standard LLVM installation directories. Reuses Clang 22 when available, skipping LLVM installation.
+   - On Debian/Ubuntu supported by [apt.llvm.org](https://apt.llvm.org/), installs LLVM 22 using the official installer's `all` option, including Clang, LLD, LLDB, clangd, LLVM development tools, libc++, libc++abi, OpenMP, compiler-rt, libunwind, and Polly. Also installs the matching LLVM BOLT package and its runtime development files, which the official installer's `all` option omits. Requires root or `sudo`.
+   - On Linux, builds patched LLD 22.1.8 under `/opt/clang-22.1.8` with the repository's `llvm-pr220492.patch` and selects that linker for the Conan profile.
    - On macOS, installs or upgrades Homebrew `llvm` and `lld`. Homebrew must already be installed.
    - Sets `clang`, `clang++`, `lld`, and `ld.lld` to the installed LLVM version using `update-alternatives` on Debian/Ubuntu. On macOS, adds the Homebrew LLVM and LLD directories to the shell configuration. Use `ld.lld --version` on Linux or `ld64.lld --version` on macOS; `lld` itself is the generic driver.
-   - Configures the default Conan profile with `--compiler=clang --libcxx=libc++`, using the selected LLVM toolchain first on PATH. If no Clang 22+ is found, installs the current stable LLVM release.
+   - Configures the default Conan profile with `--compiler=clang --libcxx=libc++`, using the selected LLVM toolchain first on PATH. If Clang 22 is not found, installs LLVM 22.
    - Other Linux distributions require manual compiler installation.
 2. **Python Environment (Miniconda)**:
    - Checks for `~/miniconda3`.
@@ -83,16 +84,18 @@ scripts/setup-dev-env.sh
 
 If you prefer to manage your own Python environment (e.g., via system packages, pyenv, or poetry) or use a specific compiler, you can skip the setup script. However, you **must** still configure the Conan dependencies manually.
 
-Install the latest stable Clang (22 or newer) and LLD using your platform's
-package manager. After installing the Python dependencies below, select it
-explicitly, for example:
+Install Clang 22 and libc++ using your platform's package manager. On Linux,
+build LLD 22.1.8 with `.github/runners/assets/patches/llvm-pr220492.patch` and
+install it under `/opt/clang-22.1.8`. After installing the Python dependencies
+below, select the compiler and patched linker explicitly, for example:
 
 ```bash
-python scripts/configure-conan-profile.py --compiler clang-22
+python scripts/configure-conan-profile.py \
+  --compiler clang-22 --linker /opt/clang-22.1.8/bin/ld.lld
 ```
 
-Replace `clang-22` with the installed newer version or its absolute path.
-Newer GCC versions are not covered by CI; validate such configurations yourself.
+The compiler and linker options also accept absolute paths. Newer compiler
+versions and GCC are not covered by CI; validate such configurations yourself.
 
 1. **Install Python Dependencies**:
 
