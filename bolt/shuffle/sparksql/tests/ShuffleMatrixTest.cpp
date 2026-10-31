@@ -66,7 +66,7 @@ std::vector<ShuffleTestParam> buildShuffleParams() {
 
 class CellTypeIntegrationTest : public ShuffleTestBase {};
 
-TEST_F(CellTypeIntegrationTest, complexUsesAdapterUnderLimitedMemory) {
+TEST_F(CellTypeIntegrationTest, arraysFlattenUnderLimitedMemory) {
   for (const auto writerType :
        {PartitionWriterType::kLocal, PartitionWriterType::kCeleborn}) {
     SCOPED_TRACE(fmt::format("{}", writerType));
@@ -82,7 +82,8 @@ TEST_F(CellTypeIntegrationTest, complexUsesAdapterUnderLimitedMemory) {
     input.inputsPerMapper = {{makeRowVector({arrays})}};
     ShuffleRunResult result;
     executeTestWithCustomInput(param, input, &result);
-    EXPECT_GT(result.metrics.convertTime, 0);
+    EXPECT_GT(result.metrics.flattenTime, 0);
+    EXPECT_EQ(result.metrics.convertTime, 0);
   }
 }
 
