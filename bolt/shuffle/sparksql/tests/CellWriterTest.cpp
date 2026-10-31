@@ -326,6 +326,19 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     return added;
   }
 
+  /// The layout of the columns `columns` of `rowType`, in that order.
+  static CellLayout subsetLayout(
+      const RowTypePtr& rowType,
+      const std::vector<uint32_t>& columns) {
+    std::vector<std::string> names;
+    std::vector<TypePtr> types;
+    for (const auto col : columns) {
+      names.push_back(rowType->nameOf(col));
+      types.push_back(rowType->childAt(col));
+    }
+    return CellLayout::create(ROW(std::move(names), std::move(types)));
+  }
+
   /// Reads partition `pid` of the window `in` back in column groups: group
   /// g holds the layout columns groups[g], ascending, at positions[g]
   /// positions. Builds the partition's null body as the outputs do, gives
@@ -375,16 +388,8 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     ASSERT_EQ(cursor, end);
 
     vectors.clear();
-    const auto& rowType = layout.rowType();
     for (uint32_t g = 0; g < groups.size(); ++g) {
-      std::vector<std::string> names;
-      std::vector<TypePtr> types;
-      for (const auto col : groups[g]) {
-        names.push_back(rowType->nameOf(col));
-        types.push_back(rowType->childAt(col));
-      }
-      const auto groupLayout =
-          CellLayout::create(ROW(std::move(names), std::move(types)));
+      const auto groupLayout = subsetLayout(layout.rowType(), groups[g]);
       const uint32_t groupWire = groupLayout.numWireColumns();
       std::string nullBody(nullTagBytes(groupWire), '\0');
       std::string encodingTags((groupWire + 7) / 8, '\0');
@@ -1463,6 +1468,664 @@ TEST_F(CellWriterTest, everySealCountsAndEmptiesItsPartitions) {
   EXPECT_EQ(splitter.sealPartitionsOver(1 << 10), 1);
   EXPECT_EQ(splitter.sealCount(), 3);
   EXPECT_EQ(output.sealCalls, 3);
+}
+
+TEST_F(CellWriterTest, decodersOpenColumnGroupsAtTheirOwnPositions) {
+  // Two column groups of one flat layout sit at positions of their own: as
+  // many per row as the row's column na (group A) or nb (group B) says,
+  // none when it is null. They go through the real outputs - local, with
+  // and without runs spilled mid-window, and RSS - over partition and window
+  // seals. One decoder reads each payload, and each group's decoder opens
+  // the group's columns at the positions its rows' counts add up to, read
+  // from the payload alone. Batches of every size span payloads, grow as
+  // their rows' positions come in, and come out in step: a group's batch
+  // holds exactly the positions of the rows' batch. Partition 1 never takes
+  // a position of group A, nor partition 2 one of group B: their payloads
+  // open those groups at zero positions. The same decoders read every
+  // output, and only some writers encode a0 as a dictionary: a decoder
+  // opens a column in either encoding after the other. Group A's batches
+  // grow with an UNKNOWN column, which has no values to move.
+  const auto rowType =
+      ROW({"r", "na", "a0", "u", "a1", "nb", "b0", "a2", "b1", "b2"},
+          {BIGINT(),
+           INTEGER(),
+           VARCHAR(),
+           UNKNOWN(),
+           BOOLEAN(),
+           INTEGER(),
+           TIMESTAMP(),
+           INTEGER(),
+           DOUBLE(),
+           VARCHAR()});
+  const auto layout = CellLayout::create(rowType);
+  constexpr uint32_t kPartitions = 4;
+  // The rows, group A and group B: their layout columns, and for A and B
+  // the rows' column counting their positions, as a column of the rows'
+  // decoder, and the partition taking none of them.
+  const std::vector<std::vector<uint32_t>> kGroups{
+      {0, 1, 5}, {2, 3, 4, 7}, {6, 8, 9}};
+  const uint32_t kCountColumn[] = {0, 1, 5};
+  const uint32_t kLocalCountColumn[] = {0, 1, 2};
+  const uint32_t kSkipped[] = {kPartitions, 1, 2};
+
+  // Per round, a letter per layout column: values only (V), some nulls
+  // (S) or all null (N). A null na or nb takes no position.
+  const char* const kFills[] = {
+      "VSSNVVSNVS",
+      "SVNNSSVSVV",
+      "VNSNVVSVNS",
+      "VSVNSSNSVN",
+      "SSNNNVVVSS",
+      "VVSNSNSSVV",
+  };
+  const char* const kWords[] = {"ab", "cd", "ef", "gh"};
+  using Expected = std::vector<std::pair<RowVectorPtr, vector_size_t>>;
+  struct Written {
+    /// Per group and partition, the (block, row) at each position.
+    std::vector<std::vector<Expected>> expected;
+    /// Per partition, its payloads back to back.
+    std::vector<std::string> bytes;
+  };
+
+  const auto write = [&](bool remote,
+                         arrow::Compression::type compression,
+                         bool spill,
+                         bool dictionary) {
+    Written written;
+    written.expected.assign(3, std::vector<Expected>(kPartitions));
+    auto client = std::make_shared<RecordingRssClient>();
+    auto options = remote ? makeCelebornOptions(kPartitions, client)
+                          : makeOptions(kPartitions);
+    options.partitionWriterOptions.compressionType = compression;
+    std::unique_ptr<RawPartitionOutput> raw;
+    std::unique_ptr<CellOutput> output;
+    if (remote) {
+      raw = std::make_unique<RssRawOutput>(options.partitionWriterOptions);
+      output = std::make_unique<RssCellOutput>(
+          *raw,
+          &layout,
+          options.partitionWriterOptions,
+          options.cellOptions,
+          pool());
+    } else {
+      auto local =
+          std::make_unique<LocalRawOutput>(options.partitionWriterOptions);
+      output = std::make_unique<LocalCellOutput>(
+          *local,
+          &layout,
+          options.cellOptions,
+          options.partitionWriterOptions,
+          pool());
+      raw = std::move(local);
+    }
+    ChunkAllocator allocator(pool(), 16 << 10, 256);
+    CellSplitter splitter(layout, kPartitions, allocator, *output, *pool());
+    if (dictionary) {
+      splitter.enableDictionary(2);
+    }
+    // The writer's position counts of groups A and B per partition.
+    std::vector<std::vector<uint32_t>> counts(
+        3, std::vector<uint32_t>(kPartitions, 0));
+    // Wire columns r, na, a0, a1, nb, b0, a2, b1, b2.
+    const auto* countsA = counts[1].data();
+    const auto* countsB = counts[2].data();
+    splitter.setColumnPositions(
+        {nullptr,
+         nullptr,
+         countsA,
+         countsA,
+         nullptr,
+         countsB,
+         countsA,
+         countsB,
+         countsB});
+    uint64_t seals = 0;
+    const auto followSeals = [&] {
+      if (splitter.sealCount() == seals) {
+        return;
+      }
+      seals = splitter.sealCount();
+      for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+        if (splitter.windowRowCounts()[pid] == 0) {
+          counts[1][pid] = 0;
+          counts[2][pid] = 0;
+        }
+      }
+    };
+
+    std::mt19937 rng(23);
+    const auto makeColumn =
+        [&](uint32_t round,
+            uint32_t col,
+            const std::vector<uint32_t>& pids) -> VectorPtr {
+      const auto n = static_cast<vector_size_t>(pids.size());
+      const char fill = kFills[round][col];
+      const auto null = [&](vector_size_t k) {
+        return fill == 'N' || (fill == 'S' && (k + col) % 3 == 1);
+      };
+      const auto value = [&](vector_size_t k) {
+        return int64_t{round} * 7919 + k * 31 + col;
+      };
+      switch (col) {
+        case 0:
+          return makeFlatVector<int64_t>(
+              n, [&](auto k) { return value(k) * 1000003; }, null);
+        case 2:
+          return makeFlatVector<StringView>(
+              n,
+              [&](auto k) { return StringView(kWords[value(k) % 4]); },
+              null);
+        case 3:
+          return BaseVector::createNullConstant(UNKNOWN(), n, pool());
+        case 4:
+          return makeFlatVector<bool>(
+              n, [&](auto k) { return value(k) % 3 == 0; }, null);
+        case 6:
+          return makeFlatVector<Timestamp>(
+              n,
+              [&](auto k) {
+                return Timestamp(value(k), value(k) * 7919 % 1'000'000'000);
+              },
+              null);
+        case 7:
+          return makeFlatVector<int32_t>(
+              n,
+              [&](auto k) { return static_cast<int32_t>(value(k)) - 999; },
+              null);
+        case 8:
+          return makeFlatVector<double>(
+              n, [&](auto k) { return value(k) * 0.25; }, null);
+        default: {
+          // The first round's first value of partition 0 is long enough
+          // for that partition alone to pass the partition seal's
+          // threshold.
+          std::string text;
+          bool placed = round != 0;
+          return makeFlatVector<StringView>(
+              n,
+              [&](auto k) {
+                if (!placed && pids[k] == 0 && !null(k)) {
+                  text.assign(40 << 10, 'z');
+                  placed = true;
+                } else {
+                  text.assign(value(k) % 23, static_cast<char>('a' + k % 26));
+                }
+                return StringView(text);
+              },
+              null);
+        }
+      }
+    };
+    const auto splitRound = [&](uint32_t round, uint32_t numRows, bool withP3) {
+      followSeals();
+      // The rows, then each group's positions: per row, its count of them
+      // in its partition.
+      std::vector<std::vector<uint32_t>> pids(3);
+      std::vector<std::vector<std::optional<int32_t>>> lengths(3);
+      for (uint32_t row = 0; row < numRows; ++row) {
+        const uint32_t pid = rng() % (withP3 ? 4 : 3);
+        pids[0].push_back(pid);
+        for (uint32_t g = 1; g < 3; ++g) {
+          const char fill = kFills[round][kCountColumn[g]];
+          const int32_t length = pid == kSkipped[g] ? 0 : rng() % (g + 3);
+          if (fill == 'N' || (fill == 'S' && (row + g) % 4 == 0)) {
+            lengths[g].push_back(std::nullopt);
+            continue;
+          }
+          lengths[g].push_back(length);
+          pids[g].insert(pids[g].end(), length, pid);
+        }
+      }
+      for (uint32_t g = 0; g < 3; ++g) {
+        if (pids[g].empty()) {
+          continue;
+        }
+        std::vector<std::string> names;
+        std::vector<VectorPtr> children;
+        for (const auto col : kGroups[g]) {
+          names.push_back(rowType->nameOf(col));
+          children.push_back(
+              col == kCountColumn[1] || col == kCountColumn[2]
+                  ? makeNullableFlatVector<int32_t>(
+                        lengths[col == kCountColumn[1] ? 1 : 2])
+                  : makeColumn(round, col, pids[g]));
+        }
+        const auto block = makeRowVector(names, children);
+        const auto added = splitColumns(
+            splitter,
+            layout.numColumns(),
+            kPartitions,
+            kGroups[g],
+            block,
+            pids[g],
+            g == 0 ? nullptr : counts[g].data());
+        for (uint32_t pid = 0; g != 0 && pid < kPartitions; ++pid) {
+          counts[g][pid] += added[pid];
+        }
+        for (vector_size_t k = 0; k < block->size(); ++k) {
+          written.expected[g][pids[g][k]].emplace_back(block, k);
+        }
+      }
+    };
+
+    splitRound(0, 300, false);
+    if (spill) {
+      splitter.spillRun();
+    }
+    splitRound(1, 150, false);
+    EXPECT_EQ(splitter.sealPartitionsOver(32 << 10), 1);
+    splitRound(2, 400, true);
+    splitRound(3, 64, true);
+    splitter.sealWindow();
+    splitRound(4, 200, false);
+    if (spill) {
+      splitter.spillRun();
+    }
+    splitRound(5, 250, true);
+    EXPECT_EQ(splitter.sealCount(), 2);
+    ShuffleWriterMetrics metrics;
+    splitter.finish(metrics);
+
+    written.bytes.resize(kPartitions);
+    if (remote) {
+      for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+        for (const auto& blob : client->pushes[pid]) {
+          written.bytes[pid] += blob;
+        }
+      }
+    } else {
+      const auto file = readFile();
+      uint64_t offset = 0;
+      for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+        written.bytes[pid] = file.substr(offset, metrics.partitionLengths[pid]);
+        offset += metrics.partitionLengths[pid];
+      }
+      EXPECT_EQ(offset, file.size());
+      ::unlink(dataFile_.c_str());
+    }
+    return written;
+  };
+
+  auto codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  TestDecompressor decompressor(codec.get());
+  CellPayloadDecoder reader(layout, &decompressor, pool());
+  std::vector<std::unique_ptr<CellPayloadDecoder>> decoders;
+  for (const auto& columns : kGroups) {
+    decoders.push_back(std::make_unique<CellPayloadDecoder>(
+        subsetLayout(rowType, columns), &decompressor, pool()));
+  }
+  auto& rows = *decoders[0];
+  const auto readBack = [&](const Written& written, int32_t batchSize) {
+    // Rows taken per append, as a byte budget might cut them.
+    const uint32_t kPieces[] = {1, 7, 64, 1000};
+    uint32_t piece = 0;
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      SCOPED_TRACE("partition " + std::to_string(pid));
+      const auto& bytes = written.bytes[pid];
+      MemoryByteSource source(
+          reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+      std::vector<size_t> next(3, 0);
+      uint32_t payloads = 0;
+      std::string error;
+      const auto takeBatches = [&] {
+        // Each group's batch holds the positions its rows' counts add up to.
+        uint64_t positions[3] = {};
+        for (uint32_t g = 0; g < 3; ++g) {
+          const auto vector = decoders[g]->finishBatch();
+          ASSERT_NE(vector, nullptr) << "group " << g;
+          for (uint32_t t = 1; g == 0 && t < 3; ++t) {
+            const auto* lengths = vector->childAt(kLocalCountColumn[t])
+                                      ->as<SimpleVector<int32_t>>();
+            for (vector_size_t row = 0; row < vector->size(); ++row) {
+              positions[t] +=
+                  lengths->isNullAt(row) ? 0 : lengths->valueAt(row);
+            }
+          }
+          if (g != 0) {
+            ASSERT_EQ(vector->size(), positions[g]) << "group " << g;
+          }
+          const auto& expected = written.expected[g][pid];
+          ASSERT_LE(next[g] + vector->size(), expected.size());
+          for (vector_size_t row = 0; row < vector->size(); ++row) {
+            const auto& [block, sourceRow] = expected[next[g] + row];
+            ASSERT_TRUE(block->equalValueAt(vector.get(), sourceRow, row))
+                << "group " << g << " position " << next[g] + row
+                << ": expected " << block->toString(sourceRow) << ", got "
+                << vector->toString(row);
+          }
+          next[g] += vector->size();
+        }
+      };
+      while (true) {
+        if (rows.payloadRowsLeft() == 0) {
+          if (source.atEnd()) {
+            break;
+          }
+          uint8_t kind;
+          ASSERT_TRUE(source.read(&kind, 1));
+          ASSERT_EQ(kind, static_cast<uint8_t>(CellBlockKind::kPayload));
+          uint32_t rowCount;
+          ASSERT_TRUE(reader.readPayload(source, rowCount, error)) << error;
+          EXPECT_EQ(reader.payloadRowsLeft(), 0);
+          ++payloads;
+          ASSERT_TRUE(
+              rows.openPayload(reader, kGroups[0].data(), rowCount, error))
+              << error;
+          for (uint32_t g = 1; g < 3; ++g) {
+            // The group's positions: its rows' counts, added up.
+            const uint32_t col = kLocalCountColumn[g];
+            const auto stream =
+                rows.streamBytes(rows.layout().columnStream(col));
+            StreamCursor<int32_t> cursor;
+            cursor.reset(
+                reinterpret_cast<const uint8_t*>(stream.data()),
+                stream.size(),
+                rows.nonNullCount(col));
+            uint64_t positions = 0;
+            int32_t lengths[1024];
+            for (uint32_t left = rows.nonNullCount(col); left > 0;) {
+              const uint32_t n = std::min<uint32_t>(left, 1024);
+              ASSERT_TRUE(cursor.next(n, lengths));
+              for (uint32_t i = 0; i < n; ++i) {
+                ASSERT_GE(lengths[i], 0);
+                positions += lengths[i];
+              }
+              left -= n;
+            }
+            ASSERT_TRUE(cursor.finished());
+            ASSERT_TRUE(decoders[g]->openPayload(
+                reader, kGroups[g].data(), positions, error))
+                << error;
+            if (pid == kSkipped[g]) {
+              EXPECT_EQ(positions, 0);
+              EXPECT_EQ(decoders[g]->payloadRowsLeft(), 0);
+            }
+          }
+          continue;
+        }
+        const uint32_t n = std::min(
+            {rows.payloadRowsLeft(),
+             static_cast<uint32_t>(batchSize - rows.batchRows()),
+             kPieces[piece++ % 4]});
+        const vector_size_t at = rows.batchRows();
+        ASSERT_TRUE(rows.appendRows(n, batchSize, error)) << error;
+        for (uint32_t g = 1; g < 3; ++g) {
+          // A null count reads 0.
+          const auto* lengths =
+              rows.batchValues(kLocalCountColumn[g])->as<int32_t>() + at;
+          uint32_t positions = 0;
+          for (uint32_t i = 0; i < n; ++i) {
+            positions += lengths[i];
+          }
+          // Group A's batches open at one position and grow from there,
+          // group B's at their first append's positions.
+          ASSERT_TRUE(decoders[g]->appendRows(
+              positions,
+              g == 1 ? 1 : static_cast<vector_size_t>(std::max(positions, 1u)),
+              error))
+              << error;
+        }
+        if (rows.batchRows() == batchSize) {
+          ASSERT_NO_FATAL_FAILURE(takeBatches());
+        }
+      }
+      if (rows.batchRows() > 0) {
+        ASSERT_NO_FATAL_FAILURE(takeBatches());
+      }
+      for (uint32_t g = 0; g < 3; ++g) {
+        EXPECT_EQ(next[g], written.expected[g][pid].size()) << "group " << g;
+        EXPECT_EQ(decoders[g]->payloadRowsLeft(), 0);
+      }
+      // Partition 0 has a payload per seal and the last window's.
+      EXPECT_GE(payloads, pid == 0 ? 3 : 2);
+    }
+  };
+
+  for (const auto& [remote, compression, spill, dictionary] :
+       {std::tuple{false, arrow::Compression::LZ4_FRAME, true, true},
+        std::tuple{false, arrow::Compression::UNCOMPRESSED, false, false},
+        std::tuple{true, arrow::Compression::LZ4_FRAME, false, true}}) {
+    SCOPED_TRACE(
+        std::string(remote ? "rss" : "local") + (spill ? " spilled" : "") +
+        (compression == arrow::Compression::UNCOMPRESSED ? " stored" : "") +
+        (dictionary ? " dictionary" : ""));
+    const auto written = write(remote, compression, spill, dictionary);
+    for (uint32_t g = 1; g < 3; ++g) {
+      EXPECT_TRUE(written.expected[g][kSkipped[g]].empty());
+      EXPECT_FALSE(written.expected[g][0].empty());
+    }
+    for (const int32_t batchSize : {1, 63, 64, 65, 4096}) {
+      SCOPED_TRACE("batch size " + std::to_string(batchSize));
+      readBack(written, batchSize);
+    }
+  }
+}
+
+TEST_F(CellWriterTest, openedColumnsHoldExactlyTheirPositions) {
+  // A group of columns x, y, s, u at 37 positions of its own beside 10
+  // rows, through the real output; s is null at its last position, so its
+  // records cover all 37. Opened at 37 the group decodes. At any other
+  // count the payload is malformed for it - records past the positions, a
+  // stream with values left over or missing, zero positions with records
+  // or values - and so is a count past the position limit, or null bitmaps
+  // past the byte bound: the open or the last append fails, and the decoder
+  // then opens the right count cleanly. A batch grows within
+  // maxDecodedBytes only: past it the append fails and drops the payload
+  // and the batch; u, taking no bytes, grows past any bound. A byte past
+  // the null body's records fails the whole payload.
+  const auto rowType =
+      ROW({"r", "x", "y", "s", "u"},
+          {BIGINT(), INTEGER(), DOUBLE(), VARCHAR(), UNKNOWN()});
+  const auto layout = CellLayout::create(rowType);
+  constexpr uint32_t kRows = 10;
+  constexpr uint32_t kPositions = 37;
+  auto options = makeOptions(1);
+  LocalRawOutput raw(options.partitionWriterOptions);
+  LocalCellOutput output(
+      raw,
+      &layout,
+      options.cellOptions,
+      options.partitionWriterOptions,
+      pool());
+  ChunkAllocator allocator(pool(), 16 << 10, 256);
+  CellSplitter splitter(layout, 1, allocator, output, *pool());
+  std::vector<uint32_t> counts{0};
+  splitter.setColumnPositions(
+      {nullptr, counts.data(), counts.data(), counts.data()});
+  splitColumns(
+      splitter,
+      layout.numColumns(),
+      1,
+      {0},
+      makeRowVector(
+          {"r"},
+          {makeFlatVector<int64_t>(kRows, [](auto row) { return row * 3; })}),
+      std::vector<uint32_t>(kRows, 0),
+      nullptr);
+  const auto group = makeRowVector(
+      {"x", "y", "s", "u"},
+      {makeFlatVector<int32_t>(
+           kPositions, [](auto k) { return k * 1000003 % 99991; }),
+       makeFlatVector<double>(kPositions, [](auto k) { return k * 0.5; }),
+       makeFlatVector<StringView>(
+           kPositions,
+           [](auto k) { return StringView(k % 2 ? "odd" : "even"); },
+           [](auto k) { return k == 5 || k == kPositions - 1; }),
+       BaseVector::createNullConstant(UNKNOWN(), kPositions, pool())});
+  counts[0] += splitColumns(
+      splitter,
+      layout.numColumns(),
+      1,
+      {1, 2, 3, 4},
+      group,
+      std::vector<uint32_t>(kPositions, 0),
+      counts.data())[0];
+  ShuffleWriterMetrics metrics;
+  splitter.finish(metrics);
+  const auto file = readFile();
+  ASSERT_EQ(file[0], static_cast<char>(CellBlockKind::kPayload));
+
+  auto codec = createCodec(
+      arrow::Compression::LZ4_FRAME,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  TestDecompressor decompressor(codec.get());
+  std::string error;
+  {
+    // The null body is stored as it is: a byte past its records.
+    auto payload = file.substr(1);
+    uint32_t nullSizes[2];
+    ::memcpy(nullSizes, payload.data() + 16, sizeof(nullSizes));
+    ASSERT_EQ(nullSizes[1], 0u);
+    payload.insert(kPayloadFixedHeaderBytes + nullSizes[0], 1, '\0');
+    ++nullSizes[0];
+    ::memcpy(payload.data() + 16, nullSizes, sizeof(nullSizes[0]));
+    CellPayloadDecoder decoder(layout, &decompressor, pool());
+    MemoryByteSource bytes(
+        reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    RowVectorPtr vector;
+    EXPECT_FALSE(decoder.decode(bytes, vector, error));
+    EXPECT_EQ(error, "null body length mismatch");
+  }
+  CellPayloadDecoder reader(layout, &decompressor, pool());
+  MemoryByteSource source(
+      reinterpret_cast<const uint8_t*>(file.data()) + 1, file.size() - 1);
+  uint32_t rowCount;
+  ASSERT_TRUE(reader.readPayload(source, rowCount, error)) << error;
+  ASSERT_TRUE(source.atEnd());
+  ASSERT_EQ(rowCount, kRows);
+  // Other decoders open what a decoder read, never the decoder itself.
+  const uint32_t identity[] = {0, 1, 2, 3, 4};
+  EXPECT_THROW(
+      reader.openPayload(reader, identity, kRows, error), BoltException);
+
+  // A decoder of the layout columns `columns`, of the group.
+  const auto decoderOf = [&](const std::vector<uint32_t>& columns,
+                             CellDecodeLimits limits = {}) {
+    return std::make_unique<CellPayloadDecoder>(
+        subsetLayout(rowType, columns), &decompressor, pool(), limits);
+  };
+  const auto expectGroup = [&](const RowVectorPtr& vector,
+                               const std::vector<uint32_t>& columns) {
+    ASSERT_NE(vector, nullptr);
+    ASSERT_EQ(vector->size(), kPositions);
+    for (uint32_t i = 0; i < columns.size(); ++i) {
+      for (vector_size_t k = 0; k < kPositions; ++k) {
+        ASSERT_TRUE(group->childAt(columns[i] - 1)
+                        ->equalValueAt(vector->childAt(i).get(), k, k))
+            << "column " << columns[i] << " position " << k;
+      }
+    }
+  };
+  const std::vector<uint32_t> all{1, 2, 3, 4};
+  {
+    auto decoder = decoderOf(all);
+    EXPECT_EQ(decoder->rowBytes(), 4u + 8 + 16);
+    ASSERT_TRUE(decoder->openPayload(reader, all.data(), kPositions, error))
+        << error;
+    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
+    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), all));
+  }
+  {
+    // Records past the positions, and zero positions with records.
+    const std::vector<uint32_t> s{3};
+    auto decoder = decoderOf(s);
+    for (const uint32_t positions : {kPositions - 1, 0u}) {
+      EXPECT_FALSE(decoder->openPayload(reader, s.data(), positions, error));
+      EXPECT_EQ(error, "null records past the payload's rows");
+      EXPECT_EQ(decoder->payloadRowsLeft(), 0);
+    }
+    ASSERT_TRUE(decoder->openPayload(reader, s.data(), kPositions, error))
+        << error;
+    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
+    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), s));
+  }
+  {
+    // A raw stream checks its length when opened, at zero positions too.
+    const std::vector<uint32_t> y{2};
+    auto decoder = decoderOf(y);
+    for (const uint32_t positions : {kPositions - 1, kPositions + 1, 0u}) {
+      EXPECT_FALSE(decoder->openPayload(reader, y.data(), positions, error));
+      EXPECT_EQ(error, "raw stream length mismatch");
+    }
+    ASSERT_TRUE(decoder->openPayload(reader, y.data(), kPositions, error))
+        << error;
+    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
+    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), y));
+  }
+  {
+    // An encoded stream with values left over fails at the last position,
+    // one with values missing when they run out, and one with values at
+    // zero positions when opened.
+    const std::vector<uint32_t> x{1};
+    auto decoder = decoderOf(x);
+    ASSERT_TRUE(decoder->openPayload(reader, x.data(), kPositions - 1, error))
+        << error;
+    ASSERT_TRUE(decoder->appendRows(20, 64, error)) << error;
+    EXPECT_FALSE(decoder->appendRows(kPositions - 21, 64, error));
+    EXPECT_EQ(error, "malformed value stream");
+    EXPECT_EQ(decoder->payloadRowsLeft(), 0);
+    EXPECT_EQ(decoder->finishBatch(), nullptr);
+    ASSERT_TRUE(decoder->openPayload(reader, x.data(), kPositions + 1, error))
+        << error;
+    EXPECT_FALSE(decoder->appendRows(kPositions + 1, 64, error));
+    EXPECT_EQ(error, "malformed value stream");
+    EXPECT_FALSE(decoder->openPayload(reader, x.data(), 0, error));
+    EXPECT_EQ(error, "malformed value stream");
+    ASSERT_TRUE(decoder->openPayload(reader, x.data(), kPositions, error))
+        << error;
+    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
+    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), x));
+  }
+  {
+    // More positions than the limit allows, and more bitmap bytes than the
+    // bound: s's bitmap takes 5.
+    CellDecodeLimits limits;
+    limits.maxRowCount = kPositions - 1;
+    EXPECT_FALSE(decoderOf(all, limits)
+                     ->openPayload(reader, all.data(), kPositions, error));
+    EXPECT_EQ(error, "positions beyond the configured limit");
+    limits.maxRowCount = kPositions;
+    EXPECT_TRUE(decoderOf(all, limits)
+                    ->openPayload(reader, all.data(), kPositions, error))
+        << error;
+    limits.maxDecodedBytes = 4;
+    EXPECT_FALSE(decoderOf(all, limits)
+                     ->openPayload(reader, all.data(), kPositions, error));
+    EXPECT_EQ(error, "null bitmaps beyond sanity bound");
+  }
+  {
+    // x takes 4 bytes a position: a bound of 30 positions caps the
+    // doubling - 16 positions grow to 30, not 32 - and fails the 31st.
+    const std::vector<uint32_t> x{1};
+    CellDecodeLimits limits;
+    limits.maxDecodedBytes = 4 * 30;
+    auto decoder = decoderOf(x, limits);
+    ASSERT_TRUE(decoder->openPayload(reader, x.data(), kPositions, error))
+        << error;
+    for (const uint32_t positions : {1, 15, 10, 4}) {
+      ASSERT_TRUE(decoder->appendRows(positions, 1, error)) << error;
+    }
+    EXPECT_EQ(decoder->batchRows(), 30);
+    EXPECT_FALSE(decoder->appendRows(1, 1, error));
+    EXPECT_EQ(error, "batch beyond sanity bound");
+    EXPECT_EQ(decoder->payloadRowsLeft(), 0);
+    EXPECT_EQ(decoder->batchRows(), 0);
+    EXPECT_EQ(decoder->finishBatch(), nullptr);
+    // With room for every position x grows to them all, and u, taking no
+    // bytes, grows past any bound.
+    limits.maxDecodedBytes = 4 * kPositions;
+    for (const auto& columns : {x, std::vector<uint32_t>{4}}) {
+      auto bounded = decoderOf(columns, limits);
+      ASSERT_TRUE(
+          bounded->openPayload(reader, columns.data(), kPositions, error))
+          << error;
+      ASSERT_TRUE(bounded->appendRows(1, 1, error)) << error;
+      ASSERT_TRUE(bounded->appendRows(kPositions - 1, 1, error)) << error;
+      ASSERT_NO_FATAL_FAILURE(expectGroup(bounded->finishBatch(), columns));
+    }
+  }
 }
 
 TEST_F(CellWriterTest, fullPrimitiveTypesAndUnknownWireSlots) {
