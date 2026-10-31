@@ -51,6 +51,8 @@ TEST(TimeZoneMapTest, getTimeZoneID) {
   EXPECT_EQ(2231, getTimeZoneID("Pacific/Kanton"));
   EXPECT_EQ(2232, getTimeZoneID("Europe/Kyiv"));
   EXPECT_EQ(2233, getTimeZoneID("America/Ciudad_Juarez"));
+  EXPECT_EQ(1686, getTimeZoneID("Africa/Asmera"));
+  EXPECT_EQ("Africa/Asmera", getTimeZoneName(1686));
   EXPECT_EQ(0, getTimeZoneID("UTC"));
   EXPECT_EQ(0, getTimeZoneID("GMT"));
   EXPECT_EQ(0, getTimeZoneID("Z"));

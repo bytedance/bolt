@@ -32,6 +32,13 @@ set -euo pipefail
 
 OS_TYPE=$(uname -s)
 ARCH_TYPE=$(uname -m)
+# LLD in LLVM 22.1.8 and LLVM 23 is affected by the issue fixed by
+# llvm-pr220492.patch. Keep using patched LLVM 22.1.8 until the fix is
+# available in LLVM 24, then upgrade directly to that release.
+LLVM_VERSION=22
+LLVM_RELEASE=22.1.8
+LLVM_INSTALL_PREFIX="/opt/clang-${LLVM_RELEASE}"
+LLVM_SOURCE_ARCHIVE=${LLVM_SOURCE_ARCHIVE:-}
 CLANG_COMPILER=""
 CLANG_LINKER=""
 CONDA_INSTALL_DIR="$HOME/miniconda3"
@@ -61,8 +68,9 @@ download_file() {
 
 check_basic_tools() {
   local missing_tools=()
-  local tool
-  local tools=("cmake" "make" "git" "wget" "curl")
+  local missing_packages=()
+  local i tool
+  local tools=("cmake" "make" "git" "wget" "curl" "ninja")
 
   for tool in "${tools[@]}"; do
     if command -v "$tool" > /dev/null 2>&1; then
@@ -76,20 +84,29 @@ check_basic_tools() {
     return 0
   fi
 
+  missing_packages=("${missing_tools[@]}")
+  if [[ "$OS_TYPE" != "Darwin" ]]; then
+    for i in "${!missing_packages[@]}"; do
+      if [[ "${missing_packages[$i]}" == "ninja" ]]; then
+        missing_packages[$i]="ninja-build"
+      fi
+    done
+  fi
+
   printf 'Installing missing tools: %s\n' "${missing_tools[*]}"
   if [[ "$OS_TYPE" == "Darwin" ]]; then
     if ! command -v brew > /dev/null 2>&1; then
       echo "❌ Install Homebrew (https://brew.sh) before running setup."
       return 1
     fi
-    brew install "${missing_tools[@]}"
+    brew install "${missing_packages[@]}"
   elif command -v apt-get > /dev/null 2>&1; then
     run_as_root apt-get update
-    run_as_root apt-get install -y "${missing_tools[@]}"
+    run_as_root apt-get install -y "${missing_packages[@]}"
   elif command -v dnf > /dev/null 2>&1; then
-    run_as_root dnf install -y "${missing_tools[@]}"
+    run_as_root dnf install -y "${missing_packages[@]}"
   elif command -v yum > /dev/null 2>&1; then
-    run_as_root yum install -y "${missing_tools[@]}"
+    run_as_root yum install -y "${missing_packages[@]}"
   else
     echo "❌ No supported package manager found. Install ${missing_tools[*]} manually."
     return 1
@@ -109,28 +126,27 @@ find_installed_clang() {
   IFS=: read -r -a search_dirs <<< "$PATH"
   search_dirs+=(/usr/lib/llvm-*/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
   local dir candidate version compiler_bin installed_version
-  local newest_major=21
   for dir in "${search_dirs[@]}"; do
     for candidate in "${dir:-.}/clang" "${dir:-.}"/clang-[0-9]*; do
       [[ -x "$candidate" ]] || continue
       version=$("$candidate" -dumpversion 2> /dev/null) || continue
       [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]] || continue
-      ((${version%%.*} > newest_major)) || continue
+      ((${version%%.*} == LLVM_VERSION)) || continue
       # Use the compiler's installation directory, not an alternatives symlink.
       compiler_bin=$("$candidate" --version | sed -n 's/^InstalledDir: //p')
       installed_version=$("$compiler_bin/clang" -dumpversion 2> /dev/null) || installed_version=""
-      newest_major=${version%%.*}
       if [[ "$installed_version" == "$version" ]]; then
         CLANG_COMPILER="$compiler_bin/clang"
       else
         # A versioned executable can coexist with an older unversioned clang.
         CLANG_COMPILER="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
       fi
+      break 2
     done
   done
   [[ -n "$CLANG_COMPILER" ]] || return 1
 
-  echo "✅ Found Clang $newest_major: $CLANG_COMPILER; skipping LLVM installation."
+  echo "✅ Found Clang $LLVM_VERSION: $CLANG_COMPILER; skipping LLVM installation."
 }
 
 find_clang_linker() {
@@ -167,28 +183,20 @@ install_llvm_debian() {
   local llvm_script
   llvm_script=$(mktemp /tmp/bolt-llvm.XXXXXX)
   download_file "https://apt.llvm.org/llvm.sh" "$llvm_script"
-  # Follow the official stable release, including future major versions.
-  local llvm_version
-  llvm_version=$(sed -n 's/^CURRENT_LLVM_STABLE=\([0-9][0-9]*\)$/\1/p' "$llvm_script")
-  if [[ ! "$llvm_version" =~ ^[0-9]+$ ]] || ((llvm_version < 22)); then
-    rm -f "$llvm_script"
-    echo "❌ Cannot determine a supported stable LLVM version (Clang 22+ required)."
-    return 1
-  fi
-  run_as_root bash "$llvm_script" "$llvm_version" all
+  run_as_root bash "$llvm_script" "$LLVM_VERSION" all
   rm -f "$llvm_script"
   # The official installer's "all" set does not include LLVM BOLT.
-  run_as_root apt-get install -y "bolt-${llvm_version}"
-  CLANG_COMPILER="/usr/lib/llvm-${llvm_version}/bin/clang"
-  CLANG_LINKER="/usr/bin/ld.lld-${llvm_version}"
-  export PATH="/usr/lib/llvm-${llvm_version}/bin:$PATH"
+  run_as_root apt-get install -y "bolt-${LLVM_VERSION}"
+  CLANG_COMPILER="/usr/lib/llvm-${LLVM_VERSION}/bin/clang"
+  CLANG_LINKER="/usr/bin/ld.lld-${LLVM_VERSION}"
+  export PATH="/usr/lib/llvm-${LLVM_VERSION}/bin:$PATH"
 }
 
 check_llvm_toolchain() {
   local version
   version=$("$CLANG_COMPILER" -dumpversion)
-  if ((${version%%.*} < 22)); then
-    echo "❌ Clang 22 or newer is required; found ${version}."
+  if ((${version%%.*} != LLVM_VERSION)); then
+    echo "❌ Clang $LLVM_VERSION is required; found ${version}."
     return 1
   fi
   if [[ ! -x "$CLANG_LINKER" ]]; then
@@ -207,7 +215,7 @@ install_clang() {
     install_llvm_debian
   else
     echo "❌ Automatic Clang installation supports Debian/Ubuntu and macOS."
-    echo "Install the latest stable Clang (22+) and LLD, then follow the manual setup in CONTRIBUTING.md."
+    echo "Install Clang $LLVM_VERSION and matching LLD, then follow the manual setup in CONTRIBUTING.md."
     return 1
   fi
   check_llvm_toolchain
@@ -260,12 +268,13 @@ register_llvm_alternatives() {
   local compiler_name
   compiler_name=$(basename "$CLANG_COMPILER")
   local tool tool_path
-  for tool in clang clang++ lld ld.lld; do
+  for tool in clang clang++ lld ld.lld ld; do
     case "$tool" in
       clang) tool_path="$CLANG_COMPILER" ;;
       clang++) tool_path="$llvm_bin/${compiler_name/clang/clang++}" ;;
       lld) tool_path="$lld_driver" ;;
       ld.lld) tool_path="$CLANG_LINKER" ;;
+      ld) tool_path="$CLANG_LINKER" ;;
     esac
     if [[ ! -x "$tool_path" ]]; then
       echo "❌ Required LLVM tool is missing: $tool_path"
@@ -290,6 +299,123 @@ set_default_llvm() {
   hash -r
 }
 
+configure_patched_lld_links() {
+  local linker_bin="$LLVM_INSTALL_PREFIX/bin"
+  local installed_lld="$linker_bin/lld"
+  local patched_lld="$linker_bin/lld-${LLVM_RELEASE}-patched"
+  if [[ ! -x "$patched_lld" ]]; then
+    if [[ ! -x "$installed_lld" || -L "$installed_lld" ]]; then
+      echo "❌ Patched LLD executable is missing: $patched_lld"
+      return 1
+    fi
+    run_as_root mv "$installed_lld" "$patched_lld"
+  fi
+
+  local driver
+  for driver in lld ld.lld lld-link ld64.lld; do
+    run_as_root ln -sfn "$(basename "$patched_lld")" "$linker_bin/$driver"
+  done
+}
+
+has_patched_lld_links() {
+  local linker_bin="$LLVM_INSTALL_PREFIX/bin"
+  local installed_lld="$linker_bin/lld"
+  local patched_lld="$linker_bin/lld-${LLVM_RELEASE}-patched"
+  [[ -x "$patched_lld" && -L "$installed_lld" ]] \
+    && [[ "$(readlink -f "$installed_lld")" == "$patched_lld" ]]
+}
+
+install_patched_lld() {
+  if [[ "$OS_TYPE" == "Darwin" ]]; then
+    echo "⚠️  The LLVM LLD patch targets ELF; keeping the Homebrew LLD installation."
+    return 0
+  fi
+
+  local installed_lld="$LLVM_INSTALL_PREFIX/bin/ld.lld"
+  local install_marker="$LLVM_INSTALL_PREFIX/.bolt-lld-pr220492"
+  if has_patched_lld_links; then
+    configure_patched_lld_links
+    CLANG_LINKER="$installed_lld"
+    echo "✅ Found patched LLD $LLVM_RELEASE: $CLANG_LINKER; skipping source installation."
+    return 0
+  fi
+  if [[ -f "$install_marker" ]]; then
+    configure_patched_lld_links
+    CLANG_LINKER="$installed_lld"
+    echo "✅ Found patched LLD $LLVM_RELEASE: $CLANG_LINKER; skipping source installation."
+    return 0
+  fi
+
+  if ! command -v ninja > /dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
+      run_as_root apt-get update
+      run_as_root apt-get install -y ninja-build
+    else
+      echo "❌ Ninja is required to build patched LLD from source."
+      return 1
+    fi
+  fi
+
+  local source_root source_archive source_dir build_dir clang_cxx compiler_name
+  source_root=$(mktemp -d /tmp/bolt-lld.XXXXXX)
+  source_archive="$source_root/llvm-project-${LLVM_RELEASE}.tar.gz"
+  source_dir="$source_root/llvm-project-llvmorg-${LLVM_RELEASE}"
+  build_dir="$source_root/build"
+  compiler_name=$(basename "$CLANG_COMPILER")
+  clang_cxx="$(dirname "$CLANG_COMPILER")/${compiler_name/clang/clang++}"
+  if [[ ! -x "$clang_cxx" ]]; then
+    rm -rf "$source_root"
+    echo "❌ Required C++ compiler is missing: $clang_cxx"
+    return 1
+  fi
+
+  if [[ -n "$LLVM_SOURCE_ARCHIVE" ]]; then
+    if [[ ! -f "$LLVM_SOURCE_ARCHIVE" ]]; then
+      echo "❌ LLVM source archive does not exist: $LLVM_SOURCE_ARCHIVE"
+      return 1
+    fi
+    source_archive="$LLVM_SOURCE_ARCHIVE"
+  else
+    download_file \
+      "https://codeload.github.com/llvm/llvm-project/tar.gz/refs/tags/llvmorg-${LLVM_RELEASE}" \
+      "$source_archive"
+  fi
+  mkdir -p "$source_dir"
+  tar -C "$source_dir" --strip-components=1 -xf "$source_archive"
+  (
+    cd "$source_dir"
+    git apply --check "${SCRIPT_DIR}/../.github/runners/assets/patches/llvm-pr220492.patch"
+    git apply "${SCRIPT_DIR}/../.github/runners/assets/patches/llvm-pr220492.patch"
+  )
+  cmake -S "$source_dir/llvm" -B "$build_dir" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$CLANG_COMPILER" \
+    -DCMAKE_CXX_COMPILER="$clang_cxx" \
+    -DCMAKE_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX" \
+    -DLLVM_ENABLE_PROJECTS=lld \
+    -DLLVM_DISTRIBUTION_COMPONENTS=lld \
+    -DLLVM_BUILD_TESTS=OFF \
+    -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_BUILD_DOCS=OFF \
+    -DLLVM_INCLUDE_DOCS=OFF \
+    -DLLVM_BUILD_EXAMPLES=OFF \
+    -DLLVM_INCLUDE_EXAMPLES=OFF
+  # Build as the invoking user, then elevate only the install step that writes
+  # to LLVM_INSTALL_PREFIX under /opt.
+  cmake --build "$build_dir" --target lld --parallel "$(nproc)"
+  run_as_root cmake --build "$build_dir" --target install-distribution-stripped
+  configure_patched_lld_links
+  run_as_root touch "$install_marker"
+  rm -rf "$source_root"
+
+  CLANG_LINKER="$installed_lld"
+  if [[ ! -x "$CLANG_LINKER" ]]; then
+    echo "❌ Patched LLD installation did not create $CLANG_LINKER."
+    return 1
+  fi
+  "$CLANG_LINKER" --version
+}
+
 miniconda_url() {
   local version="py310_23.1.0-1"
   local platform="Linux-$ARCH_TYPE"
@@ -303,20 +429,34 @@ miniconda_url() {
 install_miniconda() {
   if [[ -d "$CONDA_INSTALL_DIR" ]]; then
     echo "Conda has been installed"
-    return 0
+  else
+    echo "Installing conda"
+    local installer_dir installer
+    installer_dir=$(mktemp -d /tmp/bolt-miniconda.XXXXXX)
+    # The installer requires a .sh filename even when invoked with bash.
+    installer="$installer_dir/miniconda.sh"
+    download_file "$(miniconda_url)" "$installer"
+    bash "$installer" -b -u -p "$CONDA_INSTALL_DIR"
+    rm -f "$installer"
+    rmdir "$installer_dir"
   fi
 
-  echo "Installing conda"
-  local installer_dir installer shell_config
-  installer_dir=$(mktemp -d /tmp/bolt-miniconda.XXXXXX)
-  # The installer requires a .sh filename even when invoked with bash.
-  installer="$installer_dir/miniconda.sh"
-  download_file "$(miniconda_url)" "$installer"
-  bash "$installer" -b -u -p "$CONDA_INSTALL_DIR"
-  rm -f "$installer"
-  rmdir "$installer_dir"
+  local path_line shell_config
+  printf -v path_line 'export PATH=%q:$PATH' "$CONDA_INSTALL_DIR/bin"
   shell_config=$(runtime_conf_path)
-  printf 'export PATH=%q:$PATH\n' "$CONDA_INSTALL_DIR/bin" >> "$shell_config"
+  touch "$shell_config"
+  if ! grep -Fxq "$path_line" "$shell_config"; then
+    printf '\n%s\n' "$path_line" >> "$shell_config"
+  fi
+  # Non-interactive login shells do not process lines appended after the
+  # early-return guard in the default Ubuntu .bashrc. Persist the same path in
+  # .profile so commands such as `docker exec ... bash -lc` find Conan too.
+  if [[ "$OS_TYPE" == "Linux" && "$shell_config" != "$HOME/.profile" ]]; then
+    touch "$HOME/.profile"
+    if ! grep -Fxq "$path_line" "$HOME/.profile"; then
+      printf '\n%s\n' "$path_line" >> "$HOME/.profile"
+    fi
+  fi
 }
 
 install_python_dependencies() {
@@ -364,6 +504,22 @@ configure_conan_profile() {
     --compiler="$CLANG_COMPILER" --libcxx=libc++ --linker="$CLANG_LINKER"
 }
 
+remove_default_conan_remote() {
+  # Bolt resolves dependencies from its pinned local recipe index.
+  if conan remote list | grep -q '^conancenter:'; then
+    conan remote remove conancenter
+  fi
+}
+
+configure_git_safe_directory() {
+  local repo_root
+  repo_root=$(cd "${SCRIPT_DIR}/.." && pwd -P)
+  if ! git config --global --get-all safe.directory 2> /dev/null \
+    | grep -Fxq -- "$repo_root"; then
+    git config --global --add safe.directory "$repo_root"
+  fi
+}
+
 install_git_hooks() {
   if ! command -v pre-commit > /dev/null 2>&1; then
     echo "❌ Expect pre-commit has been installed"
@@ -373,6 +529,7 @@ install_git_hooks() {
     echo "❌ Expect .pre-commit-config.yaml exists in path ${SCRIPT_DIR}/../"
     return 1
   fi
+  configure_git_safe_directory
   (cd "${SCRIPT_DIR}/../" && pre-commit install)
   echo "✅ Installing all git hooks successfully"
 }
@@ -389,10 +546,12 @@ install_bolt_dependencies() {
 main() {
   check_basic_tools
   install_clang
+  install_patched_lld
   set_default_llvm
   install_miniconda
   install_python_dependencies
   configure_conan_profile
+  remove_default_conan_remote
   echo "All required tools have been installed!"
   install_bolt_dependencies "$@"
   install_git_hooks

@@ -301,6 +301,18 @@ class WriterFlushTestHelper {
   }
 
  private:
+  static uint32_t randomInRange(uint32_t min, uint32_t max, std::mt19937& gen) {
+    if (min == max) {
+      return min;
+    }
+
+    // std::uniform_int_distribution produces different sequences with
+    // libc++ and libstdc++. Map the engine output directly so this simulation
+    // has the same result with either standard library.
+    const auto range = static_cast<uint64_t>(max - min);
+    return min + static_cast<uint32_t>((range * gen()) >> 32);
+  }
+
   static void zeroOutMemoryUsage(WriterContext& context) {
     clearSimulatedMemory(context);
   }
@@ -323,12 +335,10 @@ class WriterFlushTestHelper {
         auto generalMemoryUsage = simulatedMemory(
             context.getMemoryPool(MemoryUsageCategory::GENERAL));
 
-        uint64_t flushOverhead =
-            folly::Random::rand32(0, context.stripeRawSize(), gen);
+        uint64_t flushOverhead = randomInRange(0, context.stripeRawSize(), gen);
         uint64_t compressedSize =
-            folly::Random::rand32(0, context.stripeRawSize(), gen);
-        uint64_t dictMemoryUsage =
-            folly::Random::rand32(0, flushOverhead / 3, gen);
+            randomInRange(0, context.stripeRawSize(), gen);
+        uint64_t dictMemoryUsage = randomInRange(0, flushOverhead / 3, gen);
         SimulatedFlush{
             flushOverhead,
             context.stripeRowCount(),
@@ -367,14 +377,14 @@ class WriterFlushTestHelper {
     for (size_t i = 0; i < sequenceLength; ++i) {
       sequence.emplace_back(
           1000,
-          folly::Random::rand32(
+          randomInRange(
               averageOutputStreamMemoryUsage / 2,
               averageOutputStreamMemoryUsage,
               gen),
           // For simplicity, general pool memory footprint is monotonically
           // increasing from 0. It's equivalent to removing the base
           // footprint from the budget anyway.
-          folly::Random::rand32(0, generalMemoryUsageVariation, gen));
+          randomInRange(0, generalMemoryUsageVariation, gen));
     }
     return sequence;
   }
@@ -562,7 +572,7 @@ TEST_F(TestWriterFlush, MemoryBasedFlushRandom) {
       // TODO: investigate why this fails on linux specifically.
       // {30227679, 20 * kSizeMB, 30},
       {10237629, 10 * kSizeMB, 8},
-      {30227679, 10 * kSizeMB, 9},
+      {30227679, 10 * kSizeMB, 8},
       {10237629, 49 * kSizeMB, 42},
       {30227679, 70 * kSizeMB, 61}};
 
