@@ -34,18 +34,34 @@
 ///               or one per stream for kSeparate), decoded size u64 per
 ///               stream, then the stored bytes
 ///
-/// A null record holds consecutive rows of a column, from the row after
-/// the previous record's: a run of up to kNullRecordMaxRun rows of one
-/// null-ness, then a bitmap of up to kNullRecordBits rows. Its
-/// kNullRecordBytes bytes: run u16 (the run's rows, plus kNullRecordRunNull
-/// when they are null), fill u8 (the bitmap's rows), then the bitmap, bit 1
-/// = non-null, its bits past fill zero. A record covers at least one row;
-/// a column's records cover at most rowCount rows, the rows past them
-/// non-null.
+/// A null record holds consecutive positions of a column, from the position
+/// after the previous record's: a run of up to kNullRecordMaxRun positions
+/// of one null-ness, then a bitmap of up to kNullRecordBits positions. Its
+/// kNullRecordBytes bytes: run u16 (the run's positions, plus
+/// kNullRecordRunNull when they are null), fill u8 (the bitmap's
+/// positions), then the bitmap, bit 1 = non-null, its bits past fill zero.
+/// A record covers at least one position; a column's records cover at most
+/// its positions, the positions past them non-null. A column's positions
+/// are the payload's rows, except in a nested layout.
+///
+/// Nested layouts. A row type with ARRAY or MAP columns and no ROW at any
+/// depth takes one when every leaf type is supported and it flattens into
+/// at most 65535 columns; other row types with complex columns pack them
+/// into one trailing binary column. It is flattened in pre-order into plain
+/// columns: a leaf is a column of its type; an ARRAY or MAP an Integer
+/// column holding each non-null entry's length, followed by the columns of
+/// its element, or of its key and then its value; a ROW a SmallInt column
+/// holding 1 at each non-null struct, followed by the columns of its
+/// fields. A top-level column's positions are the payload's rows. An
+/// ARRAY's element column and a MAP's key and value columns have one
+/// position per element of the container's non-null entries, entry by
+/// entry, as many as its lengths add up to and at most 2^31 - 8 in a
+/// payload; a ROW's field columns have the ROW's positions. A column is
+/// null wherever a ROW above it at the same positions is null.
 ///
 /// UNKNOWN columns have no wire column. A wire column's values live in its
-/// streams (CellLayout): only non-null rows have values, and an all-null
-/// column's streams are empty. A stream is the
+/// streams (CellLayout): only non-null positions have values, and an
+/// all-null column's streams are empty. A stream is the
 /// concatenation of its bytes in every run, in run order; a run may end a
 /// raw stream's bytes anywhere, but never inside an Encoding Block or a
 /// dictionary. Encoded streams
@@ -61,8 +77,8 @@
 ///                 (0..63) bits, LSB-first
 ///   kPlain        parameter 0; body: the values as they are, little endian
 ///
-/// Raw streams hold one fixed-width value per non-null row (a Boolean as
-/// one 0/1 byte). A string column has a length stream (encoded, Bigint) and
+/// Raw streams hold one fixed-width value per non-null position (a Boolean
+/// as one 0/1 byte). A string column has a length stream (encoded, Bigint) and
 /// a data stream (the bytes). In dictionary form, the data stream starts
 /// with a dictionary sequence - per dictionary, entries of a length byte
 /// (<= kDictEntryMaxLen) and the bytes, kDictMoreMarker or kDictLastMarker,
@@ -196,7 +212,7 @@ enum class StreamKind : uint8_t {
 
 /// One physical stream of the layout.
 struct CellStream {
-  uint16_t column; // logical column index
+  uint16_t column; // layout column index
   StreamKind kind;
   /// Bytes per source value: 1/2/4/8/16 for value streams, 8 for a String
   /// length stream, 0 for kStringData.
@@ -208,8 +224,8 @@ struct CellStream {
 };
 
 /// Maps a shuffle row type (pid column already stripped) onto wire columns
-/// and streams. The input adapter converts supported complex types to binary;
-/// create() rejects physical types it cannot map.
+/// and streams. Complex types reach it flattened (nested layouts) or packed
+/// into binary; create() rejects physical types it cannot map.
 class CellLayout {
  public:
   static bool isSupportedType(const TypePtr& type) {
