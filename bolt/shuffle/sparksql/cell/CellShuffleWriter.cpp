@@ -90,6 +90,7 @@ CellShuffleWriter::CellShuffleWriter(
 
 CellShuffleWriter::~CellShuffleWriter() {
   // Failed split/stop paths must return the warm reservation as well.
+  flattener_.reset();
   splitter_.reset();
   output_.reset();
   allocator_.reset();
@@ -100,19 +101,31 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   const auto& inputType = rv.type()->asRow();
   // A pid column alone is legal: the payloads then carry only row counts.
   BOLT_CHECK_GE(inputType.size(), 1, "expected a pid column");
-  // The adapter rejects unsupported logical types and maps complex columns
-  // onto one trailing binary column; the pid column stays first.
-  adapter_ = std::make_unique<CellShuffleTypeAdapter>(asRowType(rv.type()));
-  const auto& physicalType = adapter_->physicalType()->asRow();
-  std::vector<std::string> names;
-  std::vector<TypePtr> types;
-  names.reserve(physicalType.size() - 1);
-  types.reserve(physicalType.size() - 1);
-  for (uint32_t i = 1; i < physicalType.size(); ++i) {
-    names.push_back(physicalType.nameOf(i));
-    types.push_back(physicalType.childAt(i));
+  auto logicalType =
+      ROW(std::vector<std::string>(
+              inputType.names().begin() + 1, inputType.names().end()),
+          std::vector<TypePtr>(
+              inputType.children().begin() + 1, inputType.children().end()));
+  if (CellNestedLayout::supports(logicalType)) {
+    // ARRAY and MAP columns flatten into plain columns at positions of
+    // their own.
+    nested_ = std::make_unique<CellNestedLayout>(std::move(logicalType));
+    layout_ = nested_->layout();
+  } else {
+    // The adapter rejects unsupported logical types and maps complex
+    // columns onto one trailing binary column; the pid column stays first.
+    adapter_ = std::make_unique<CellShuffleTypeAdapter>(asRowType(rv.type()));
+    const auto& physicalType = adapter_->physicalType()->asRow();
+    std::vector<std::string> names;
+    std::vector<TypePtr> types;
+    names.reserve(physicalType.size() - 1);
+    types.reserve(physicalType.size() - 1);
+    for (uint32_t i = 1; i < physicalType.size(); ++i) {
+      names.push_back(physicalType.nameOf(i));
+      types.push_back(physicalType.childAt(i));
+    }
+    layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
   }
-  layout_ = CellLayout::create(ROW(std::move(names), std::move(types)));
 
   const auto& cellOpts = options_.cellOptions;
   const uint32_t numStreams = layout_.numStreams();
@@ -143,6 +156,16 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       boltPool_, kChunkBytes, cellBytes, [this]() { onBeforeChunkGrow(); });
   splitter_ = std::make_unique<CellSplitter>(
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
+  if (nested_ != nullptr) {
+    flattener_ = std::make_unique<CellFlattener>(
+        *nested_, *splitter_, numPartitions_, *boltPool_);
+  }
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    if (layout_.isStringColumn(col) &&
+        (flattener_ == nullptr || flattener_->inRowSpace(col))) {
+      probeColumns_.push_back(col);
+    }
+  }
 
   perPidCounter_.assign(numPartitions_, 0);
   decoded_.resize(layout_.numColumns());
@@ -162,7 +185,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
-  if (!adapter_->hasComplexColumns()) {
+  if (flattener_ != nullptr || !adapter_->hasComplexColumns()) {
     return splitPhysical(std::move(rv));
   }
   // Complex columns are serialized in bounded slices, each split on its own.
@@ -229,6 +252,9 @@ void CellShuffleWriter::admitRemoteSlice(int64_t estimatedBytes) {
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
+  if (flattener_ != nullptr) {
+    return splitNested(std::move(rv));
+  }
   const uint64_t start = currentTimeNs();
   // The row fields of a payload are u32: a window closes before any of
   // its partitions could pass kMaxPayloadRows. Nothing else bounds the
@@ -304,7 +330,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     // tiny, or sliced small because its rows are wide - therefore settles
     // on no dictionary rather than deferring; wide rows gain little from
     // 64-byte entries anyway.
-    probeDictionary(numRows);
+    probeDictionary(numRows, probeColumns_, decoded_.data(), nullClass_.data());
     dictProbed_ = true;
   }
 
@@ -326,18 +352,84 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   return arrow::Status::OK();
 }
 
-void CellShuffleWriter::probeDictionary(uint32_t numRows) {
+arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
+  const uint64_t start = currentTimeNs();
+  // The rows' bound, as for flat batches.
+  if (splitter_->hasWindowRows() &&
+      splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
+    checkpoint(SealReason::kRows);
+  }
+  const uint32_t numRows = rv->size();
+  if (numRows == 0) {
+    return arrow::Status::OK();
+  }
+  // Every space's positions too: a few bytes may hold any number of them,
+  // so only their count bounds a payload. Checked before the split begins,
+  // as the rows' are.
+  flattener_->prepare(*rv);
+  if (flattener_->exceedsPositions()) {
+    if (splitter_->hasWindowRows()) {
+      checkpoint(SealReason::kRows);
+      flattener_->prepare(*rv);
+    }
+    if (flattener_->exceedsPositions()) {
+      if (numRows == 1) {
+        BOLT_USER_FAIL(
+            "a row holds more than {} nested elements at one level, more "
+            "than a Cell shuffle payload carries",
+            CellNestedLayout::kMaxPositions);
+      }
+      const int64_t flatten = flattener_->takeFlattenTimeNs();
+      metrics_.flattenTime += flatten;
+      metrics_.splitTime +=
+          static_cast<int64_t>(currentTimeNs() - start) - flatten;
+      const uint32_t half = numRows / 2;
+      RETURN_NOT_OK(splitNested(
+          std::dynamic_pointer_cast<RowVector>(rv->slice(0, half))));
+      return splitNested(std::dynamic_pointer_cast<RowVector>(
+          rv->slice(half, numRows - half)));
+    }
+  }
+
+  inSplit_ = true;
+  auto status = computePartitions(*rv);
+  if (!status.ok()) {
+    inSplit_ = false;
+    return status;
+  }
+  if (FOLLY_UNLIKELY(!dictProbed_)) {
+    probeDictionary(
+        numRows, probeColumns_, flattener_->decoded(), flattener_->nullClass());
+    dictProbed_ = true;
+  }
+  flattener_->split(row2Partition_.data(), partition2RowCount_.data());
+  metrics_.totalInputRowNumber += numRows;
+  metrics_.totalInputBatches += 1;
+  inSplit_ = false;
+
+  maybeCheckpoint();
+  // Flattening is no part of the split, as in the V1 writer.
+  const int64_t flatten = flattener_->takeFlattenTimeNs();
+  metrics_.flattenTime += flatten;
+  metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start) - flatten;
+  return arrow::Status::OK();
+}
+
+void CellShuffleWriter::probeDictionary(
+    uint32_t numRows,
+    const std::vector<uint32_t>& columns,
+    const DecodedVector* decoded,
+    const BatchNullClass* nullClass) {
   const auto& cellOpts = options_.cellOptions;
   if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
     return;
   }
-  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (!layout_.isStringColumn(col) ||
-        nullClass_[col] == BatchNullClass::kAllNull) {
+  for (const uint32_t col : columns) {
+    if (nullClass[col] == BatchNullClass::kAllNull) {
       continue;
     }
-    const auto& decoded = decoded_[col];
-    const bool hasNulls = nullClass_[col] == BatchNullClass::kSomeNulls;
+    const auto& column = decoded[col];
+    const bool hasNulls = nullClass[col] == BatchNullClass::kSomeNulls;
     // Distinct scan with early exit: once past the 64-byte serialization
     // budget the column can never meet the conservative criterion, so a
     // high-cardinality column costs only a handful of rows here.
@@ -346,10 +438,10 @@ void CellShuffleWriter::probeDictionary(uint32_t numRows) {
     uint64_t nonNull = 0;
     bool fits = true;
     for (uint32_t row = 0; row < numRows; ++row) {
-      if (hasNulls && decoded.isNullAt(row)) {
+      if (hasNulls && column.isNullAt(row)) {
         continue;
       }
-      const auto view = decoded.valueAt<StringView>(row);
+      const auto view = column.valueAt<StringView>(row);
       ++nonNull;
       if (view.size() > kDictEntryMaxLen) {
         fits = false;

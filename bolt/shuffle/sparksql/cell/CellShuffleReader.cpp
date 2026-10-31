@@ -22,6 +22,7 @@
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/shuffle/sparksql/cell/CellAssembler.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -105,6 +106,7 @@ CellShuffleReader::CellShuffleReader(
       batchSize_(batchSize),
       batchByteSize_(batchByteSize),
       decoder_(layout_, decompressor_.get(), pool_),
+      nested_(makeCellAssembler(outputType, decompressor_.get(), pool_)),
       compositeConverter_(outputType, pool_) {}
 
 CellShuffleReader::Decoded CellShuffleReader::nextBlock() {
@@ -133,7 +135,8 @@ CellShuffleReader::Decoded CellShuffleReader::nextBlock() {
         kind,
         static_cast<uint8_t>(CellBlockKind::kPayload),
         "unknown cell shuffle block kind");
-    const bool ok = decoder_.beginPayload(*source_, error);
+    const bool ok = nested_ != nullptr ? nested_->beginPayload(*source_, error)
+                                       : decoder_.beginPayload(*source_, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
     return Decoded::kPayload;
   }
@@ -244,7 +247,13 @@ RowVectorPtr CellShuffleReader::next() {
     return nextComposite();
   }
   RowVectorPtr output;
-  if (!adapter_.hasComplexColumns()) {
+  if (nested_ != nullptr) {
+    const uint64_t start = currentTimeNs();
+    output = nested_->nextBatch(std::max(batchSize_, 1), batchByteSize_, [&] {
+      return nextBlock() == Decoded::kPayload;
+    });
+    decodeTimeNs_ += currentTimeNs() - start;
+  } else if (!adapter_.hasComplexColumns()) {
     output = nextPhysical();
   } else {
     if (pending_ == nullptr) {
