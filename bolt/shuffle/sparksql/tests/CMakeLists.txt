@@ -170,6 +170,7 @@ add_executable(
   bolt_shuffle_cell_test
   CellChunkTest.cpp
   CellEncodingTest.cpp
+  CellFlatGoldenTest.cpp
   CellWriterTest.cpp
   RunCompressorTest.cpp
 )
