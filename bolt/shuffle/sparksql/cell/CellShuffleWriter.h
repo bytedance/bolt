@@ -21,6 +21,8 @@
 
 #include "bolt/vector/ComplexVector.h"
 
+#include "bolt/shuffle/sparksql/cell/CellFlattener.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
@@ -31,10 +33,11 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// Prepares decoded and partitioned input batches and schedules spills,
 /// window seals and final output through CellSplitter.
 ///
-/// Accepts logical rows (pid column first): complex columns are packed into
-/// the trailing binary column by the type adapter here, so callers never
-/// see the physical Cell schema. CompositeRowVectors are handled entirely by
-/// the CompositeShuffleWriter base.
+/// Accepts logical rows (pid column first), so callers never see the
+/// physical Cell schema: the columns of a nested layout are flattened into
+/// plain ones by a CellFlattener, and other complex columns packed into the
+/// trailing binary column by the type adapter. CompositeRowVectors are
+/// handled entirely by the CompositeShuffleWriter base.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
 /// ignored by design): the only choke point is the chunk-grow callback,
@@ -122,14 +125,23 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   };
 
   void initOnFirstBatch(const RowVector& rv);
-  /// Splits one physical (adapter-converted) batch, slicing oversized ones.
+  /// Splits one physical (adapter-converted) or nested batch, slicing
+  /// oversized ones.
   arrow::Status splitPhysical(RowVectorPtr rv);
   arrow::Status splitBatch(RowVectorPtr rv);
+  /// splitBatch() of a nested layout: halves a batch whose positions a
+  /// payload cannot hold.
+  arrow::Status splitNested(RowVectorPtr rv);
   /// Remote only: pushes the window first when the next slice of about
   /// `estimatedBytes` cannot be reserved.
   void admitRemoteSlice(int64_t estimatedBytes);
-  /// The single dictionary probe (first batch, lifetime decision).
-  void probeDictionary(uint32_t numRows);
+  /// The single dictionary probe (first batch, lifetime decision) of the
+  /// string columns `columns`, as `decoded` and `nullClass` hold them.
+  void probeDictionary(
+      uint32_t numRows,
+      const std::vector<uint32_t>& columns,
+      const DecodedVector* decoded,
+      const BatchNullClass* nullClass);
   void onBeforeChunkGrow();
   void checkpoint(SealReason reason);
   /// Remote: seals (pushes) the window and returns its memory; returns the
@@ -150,6 +162,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   PressureStats pressure_;
 
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
+  /// Set, in place of adapter_, when the schema takes a nested layout.
+  std::unique_ptr<CellNestedLayout> nested_;
   CellLayout layout_;
   std::unique_ptr<ChunkAllocator> allocator_;
   /// The composite blocks' output: locally a spill of its own, merged by
@@ -158,11 +172,15 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<RawPartitionOutput> raw_;
   std::unique_ptr<CellOutput> output_;
   std::unique_ptr<CellSplitter> splitter_;
+  std::unique_ptr<CellFlattener> flattener_;
 
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
   std::vector<DecodedVector> decoded_;
   std::vector<BatchNullClass> nullClass_;
+  /// The string columns the dictionary probe considers: every one, or a
+  /// nested layout's at the rows' positions.
+  std::vector<uint32_t> probeColumns_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

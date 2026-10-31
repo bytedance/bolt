@@ -154,7 +154,8 @@ class CellPayloadDecoder {
 
   /// Reads one payload as beginPayload() does, but opens no column: the
   /// decoders of its columns open it with openPayload(). `rowCount` is the
-  /// header's. What it read stays valid until the next readPayload().
+  /// header's. What it read stays valid until the next readPayload(),
+  /// beginPayload() or decode() of this decoder.
   bool readPayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Opens the payload another decoder, `source`, read for this decoder's

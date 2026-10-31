@@ -178,8 +178,9 @@ inline WrittenShuffle writeShuffle(
   return written;
 }
 
-/// Every batch CellShuffleReader decodes from one partition's bytes.
-/// `codec` may be null when nothing was compressed.
+/// Every batch CellShuffleReader decodes from one partition's bytes, each
+/// checked to be a well-formed vector. `codec` may be null when nothing was
+/// compressed.
 inline std::vector<RowVectorPtr> readPartition(
     const std::string& bytes,
     const RowTypePtr& type,
@@ -199,6 +200,9 @@ inline std::vector<RowVectorPtr> readPartition(
       batchByteSize);
   std::vector<RowVectorPtr> batches;
   while (auto batch = reader.next()) {
+    // What a consumer that validates, slices or resizes the batch relies
+    // on, the values aside: buffers covering every row, offsets in range.
+    batch->validate({});
     batches.push_back(std::move(batch));
   }
   return batches;
