@@ -49,6 +49,8 @@
 #include "bolt/shuffle/sparksql/BoltArrowMemoryPool.h"
 #include "bolt/shuffle/sparksql/BoltRowBasedSortShuffleWriter.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriterV2.h"
+#include "bolt/shuffle/sparksql/Options.h"
+#include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/vector/arrow/Abi.h"
 #include "bolt/vector/arrow/Bridge.h"
 #include "common/memory/sparksql/ExecutionMemoryPool.h"
@@ -316,6 +318,7 @@ ShuffleWriterType decideBoltShuffleWriterType(
                 << ", recommendedColumn2RowSize = "
                 << options.recommendedColumn2RowSize
                 << ", use BoltRowBasedSortShuffleWriter";
+      return type;
     } else if (
         (preAllocSize > options.useV2PreallocSizeThreshold) ||
         (numPartitions > v1PartitionThreholdL1 &&
@@ -328,50 +331,29 @@ ShuffleWriterType decideBoltShuffleWriterType(
       // V1 is supposed to behave much better due to prealloc buffer for each
       // partition(experimental)
       type = ShuffleWriterType::V1;
-
-      LOG(INFO) << __FUNCTION__ << ": forceShuffleWriterType = "
-                << options.forceShuffleWriterType << ", preAllocSize "
-                << preAllocSize << " >= " << options.useV2PreallocSizeThreshold
-                << ", partitions = " << numPartitions
-                << ", partitioning = " << options.partitioning
-                << ", or not hashPartitioning, use BoltShuffleWriter";
     } else {
       type = ShuffleWriterType::V2;
-      LOG(INFO) << __FUNCTION__ << ": forceShuffleWriterType = "
-                << options.forceShuffleWriterType << ", preAllocSize "
-                << preAllocSize << " <= " << options.useV2PreallocSizeThreshold
-                << ", partitions = " << numPartitions
-                << ", partitioning = " << options.partitioning
-                << ", use BoltShuffleWriterV2";
     }
-  } else {
-    LOG(INFO) << __FUNCTION__
-              << ": forceShuffleWriterType = " << options.forceShuffleWriterType
-              << ", preAllocSize " << preAllocSize
-              << " <= " << options.useV2PreallocSizeThreshold
-              << ", partitions = " << numPartitions
-              << ", partitioning = " << options.partitioning
-              << ", use BoltShuffleWriterV";
   }
+  // The Cell writer needs a pid; the row-based choice returned above.
+  if (supportAdaptive && options.preferCellShuffle) {
+    type = ShuffleWriterType::Cell;
+  }
+  LOG(INFO) << __FUNCTION__
+            << ": forceShuffleWriterType = " << options.forceShuffleWriterType
+            << ", preAllocSize = " << preAllocSize
+            << ", threshold = " << options.useV2PreallocSizeThreshold
+            << ", partitions = " << numPartitions
+            << ", partitioning = " << options.partitioning
+            << ", shuffle type = " << static_cast<uint32_t>(type);
   return type;
 }
 
-std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
+std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::createForType(
+    ShuffleWriterType type,
     const ShuffleWriterOptions& options,
-    int32_t numColumnsExludePid,
-    int64_t firstBatchRowNumber,
-    int64_t firstBatchFlatSize,
-    int64_t memLimit,
     bytedance::bolt::memory::MemoryPool* boltPool,
     arrow::MemoryPool* arrowPool) {
-  ShuffleWriterType type = decideBoltShuffleWriterType(
-      options,
-      numColumnsExludePid,
-      firstBatchRowNumber,
-      firstBatchFlatSize,
-      memLimit,
-      boltPool);
-
   std::shared_ptr<BoltShuffleWriter> shuffle_writer;
   switch (type) {
     case ShuffleWriterType::V1: {
@@ -396,6 +378,12 @@ std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
           std::move(options), boltPool, arrowPool);
       break;
     }
+    case ShuffleWriterType::Cell:
+      // A reader configured for Cell cannot read V1 bytes, so a silent V1
+      // downgrade here would fail only later and far away.
+      BOLT_FAIL(
+          "forceShuffleWriterType=Cell requires "
+          "BoltShuffleWriter::createShuffleWriter()");
     default:
       BOLT_CHECK(
           false,
@@ -404,6 +392,49 @@ std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
   auto status = shuffle_writer->init();
   BOLT_CHECK(status.ok(), "Failed to init BoltShuffleWriter");
   return shuffle_writer;
+}
+
+std::shared_ptr<ShuffleWriter> BoltShuffleWriter::createShuffleWriter(
+    const ShuffleWriterOptions& options,
+    int32_t numColumnsExludePid,
+    int64_t firstBatchRowNumber,
+    int64_t firstBatchFlatSize,
+    int64_t memLimit,
+    bytedance::bolt::memory::MemoryPool* boltPool,
+    arrow::MemoryPool* arrowPool) {
+  const ShuffleWriterType type = decideBoltShuffleWriterType(
+      options,
+      numColumnsExludePid,
+      firstBatchRowNumber,
+      firstBatchFlatSize,
+      memLimit,
+      boltPool);
+  if (type == ShuffleWriterType::Cell) {
+    return std::make_shared<cell::CellShuffleWriter>(
+        options, boltPool, arrowPool);
+  }
+  return createForType(type, options, boltPool, arrowPool);
+}
+
+std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::create(
+    const ShuffleWriterOptions& options,
+    int32_t numColumnsExludePid,
+    int64_t firstBatchRowNumber,
+    int64_t firstBatchFlatSize,
+    int64_t memLimit,
+    bytedance::bolt::memory::MemoryPool* boltPool,
+    arrow::MemoryPool* arrowPool) {
+  return createForType(
+      decideBoltShuffleWriterType(
+          options,
+          numColumnsExludePid,
+          firstBatchRowNumber,
+          firstBatchFlatSize,
+          memLimit,
+          boltPool),
+      options,
+      boltPool,
+      arrowPool);
 }
 
 std::shared_ptr<BoltShuffleWriter> BoltShuffleWriter::createDefault(

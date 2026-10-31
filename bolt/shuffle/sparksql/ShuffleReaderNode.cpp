@@ -92,6 +92,13 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
+  // Mirror of the writer's choice: Cell when forced, or preferred by an
+  // adaptive choice that did not pick the row-based writer; never without
+  // a pid. A forced other type wins over the preference on both sides.
+  useCellReader_ = supportAdaptiveShuffleWriter(partitioning) &&
+      (shuffleWriterType_ == ShuffleWriterType::Cell ||
+       (shuffleWriterType_ == ShuffleWriterType::Adaptive &&
+        shuffleReaderOptions_.preferCellShuffle && !isRowBased_));
 }
 
 void SparkShuffleReader::init() {
@@ -107,6 +114,25 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
   std::call_once(initFlag_, &SparkShuffleReader::init, this);
   if (finished_) {
     return nullptr;
+  }
+
+  if (useCellReader_) {
+    if (!cellShuffleReader_) {
+      NanosecondTimer timer(&deserializerCreateTime_);
+      cellShuffleReader_ = std::make_unique<cell::CellShuffleReader>(
+          readerStreamIterator_,
+          outputType_,
+          codec_.get(),
+          arrowPool_.get(),
+          pool(),
+          batchSize_,
+          shuffleBatchByteSize_);
+    }
+    auto output = cellShuffleReader_->next();
+    if (!output) {
+      finished_ = true;
+    }
+    return output;
   }
 
   if (reuseBufferedInputStream_) {
@@ -202,6 +228,14 @@ void SparkShuffleReader::close() {
     columnBufferPool_->release();
   }
 
+  if (cellShuffleReader_) {
+    // Report decompression and deserialization disjointly, matching the
+    // legacy reader's accounting.
+    const uint64_t decompressNs = cellShuffleReader_->decompressTimeNs();
+    decompressTime_ += decompressNs;
+    deserializeTime_ += cellShuffleReader_->decodeTimeNs() - decompressNs;
+    cellShuffleReader_.reset();
+  }
   {
     auto stats = this->stats().rlock();
     readerStreamIterator_->updateMetrics(

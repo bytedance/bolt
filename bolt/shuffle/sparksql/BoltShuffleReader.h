@@ -304,6 +304,9 @@ class BoltColumnarBatchDeserializerFactory {
       case 3:
         shuffleWriterType_ = ShuffleWriterType::RowBased;
         break;
+      case 4:
+        shuffleWriterType_ = ShuffleWriterType::Cell;
+        break;
       default:
         BOLT_CHECK(
             false,

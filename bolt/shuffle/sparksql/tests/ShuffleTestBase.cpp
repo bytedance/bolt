@@ -29,6 +29,7 @@
 #include "bolt/exec/tests/utils/TempDirectoryPath.h"
 #include "bolt/shuffle/sparksql/CelebornReaderStreamIterator.h"
 #include "bolt/shuffle/sparksql/Options.h"
+#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleReaderNode.h"
 #include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriterNode.h"
@@ -110,6 +111,8 @@ std::string shuffleModeToString(int mode) {
       return "V2";
     case 3:
       return "RowBased";
+    case 4:
+      return "Cell";
     default:
       BOLT_UNREACHABLE();
       return "Unknown";
@@ -826,6 +829,50 @@ void ShuffleTestBase::executeTestWithCustomInput(
 void ShuffleTestBase::executeTest(const ShuffleTestParam& param) {
   auto inputData = makeInputData(param);
   executeTestWithCustomInput(param, inputData);
+}
+
+std::shared_ptr<CompositeRowVector> ShuffleTestBase::createCompositeInput(
+    const RowVectorPtr& input,
+    row::RowFormat rowFormat) {
+  ShuffleColumnarToRowConverter converter(
+      std::dynamic_pointer_cast<const RowType>(input->type()),
+      pool(),
+      rowFormat);
+  auto stats =
+      converter.getWithStats(input, std::numeric_limits<int64_t>::max());
+  std::vector<std::vector<uint8_t*>> rows(1);
+  std::vector<uint32_t> partitions(input->size(), 0);
+  std::vector<int64_t> partitionBytes(1, 0);
+  converter.convert(stats, partitions, rows, partitionBytes);
+
+  auto names = input->type()->asRow().names();
+  auto types = input->type()->asRow().children();
+  names.insert(names.begin(), "pid");
+  types.insert(types.begin(), INTEGER());
+  auto rowType = ROW(std::move(names), std::move(types));
+  auto validColumns =
+      std::make_unique<SelectivityVector>(rowType->size(), true);
+  auto children = input->children();
+  children.insert(
+      children.begin(),
+      makeFlatVector<int32_t>(input->size(), [](auto) { return 0; }));
+  auto composite = std::make_shared<CompositeRowVector>(
+      rowType,
+      input->size(),
+      pool(),
+      std::move(validColumns),
+      std::move(children));
+  composite->allocateRows(partitionBytes[0]);
+  RowInfoTracker tracker(composite.get(), 0, input->size());
+  for (auto i = 0; i < input->size(); ++i) {
+    const auto rowSize =
+        *reinterpret_cast<int32_t*>(rows[0][i]) + kSizeOfRowHeader;
+    auto* row = composite->newRow();
+    std::memcpy(row, rows[0][i], rowSize);
+    composite->store(i, row);
+    composite->advance(rowSize);
+  }
+  return composite;
 }
 
 std::shared_ptr<CompositeRowVector>

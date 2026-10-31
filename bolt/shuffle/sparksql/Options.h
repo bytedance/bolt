@@ -82,7 +82,48 @@ static constexpr bool kDefaultReuseColumnBuffer = false;
 static constexpr int32_t kMaxShuffleWriterBatchBytes =
     200 * 1024 * 1024; // 200MB
 
-enum class ShuffleWriterType { Adaptive = 0, V1 = 1, V2 = 2, RowBased = 3 };
+enum class ShuffleWriterType {
+  Adaptive = 0,
+  V1 = 1,
+  V2 = 2,
+  RowBased = 3,
+  Cell = 4
+};
+
+// Cell memory thresholds and encoding policy; compression uses
+// PartitionWriterOptions. On Celeborn nothing is spilled: the spill
+// thresholds push the window at the next batch boundary instead, and the
+// run options (coalesceMergedRuns, compressSpill) do not apply.
+struct CellShuffleOptions {
+  // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
+  int64_t cellMemoryCapBytes = 0;
+  // Close the window at a batch boundary when a partition exceeds this size.
+  int64_t checkpointPartitionBytes = 40LL << 20;
+  // Close the window when total null bitmap memory exceeds this threshold.
+  int64_t nullMemLimitBytes = 16LL << 20;
+  // Probe the first batch to enable dictionary encoding per string column.
+  bool enableStringDictionary = true;
+  // Gather a partition's spilled segments and resident cells into one run
+  // at merge. Off by default: with compressSpill the segments are final
+  // runs already, and gathering them decompresses and compresses again
+  // every spilled byte - under memory pressure that doubled the codec time
+  // of compressible data for a few percent faster reads of the fewer runs.
+  bool coalesceMergedRuns = false;
+  // Compress runs as they spill, so both disk passes write compressed bytes
+  // (SSD endurance). Spilled segments are then final runs, copied verbatim
+  // at merge; only with coalesceMergedRuns, a payload gathered from several
+  // segments is decompressed and compressed again as a single run.
+  // Disabling trades that codec CPU for uncompressed spill writes.
+  bool compressSpill = true;
+  // Compress runs through the codec's stream form, straight from the cells
+  // with fixed buffers; off, each frame is gathered into a pool workspace
+  // and compressed at once. Codecs with no stream form are always one-shot.
+  // Both write the same run layouts.
+  bool streamCompression = true;
+
+  /// Returns all options in a human readable form.
+  std::string toString() const;
+};
 
 enum PartitionWriterType { kLocal, kCeleborn };
 
@@ -128,6 +169,8 @@ struct ShuffleReaderOptions {
   bool reuseBufferedInputStream = kDefaultReuseBufferedInputStream;
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
+
+  bool preferCellShuffle = false;
 
   /// Returns the options in a human readable form.
   std::string toString() const;
@@ -181,6 +224,7 @@ struct ShuffleWriterOptions {
   int64_t taskAttemptId = -1;
   int32_t startPartitionId = 0;
   int32_t forceShuffleWriterType = kDefaultForceShuffleWriterType;
+  bool preferCellShuffle = false;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
       kDefaultRowVectorModeCompressionMinColumns;
@@ -195,6 +239,7 @@ struct ShuffleWriterOptions {
   int32_t shuffleCheckMaxColumns = kDefaultShuffleCheckMaxColumns;
   row::RowFormat rowFormat = row::RowFormat::COMPACT;
   int64_t rowBasedShuffleThreshold = kDefaultRowBasedShuffleThreshold;
+  CellShuffleOptions cellOptions{};
   PartitionWriterOptions partitionWriterOptions{};
 
   /// Returns the options in a human readable form.
@@ -204,6 +249,11 @@ struct ShuffleWriterOptions {
 struct ShuffleWriterMetrics {
   int64_t totalInputRowNumber{0};
   int64_t totalInputBatches{0};
+  // CellShuffleWriter: sealed checkpoint windows.
+  int64_t spillCount{0};
+  // Cell row counts summed over dictionary-enabled columns.
+  int64_t dictionaryMatchedRows{0};
+  int64_t dictionaryFallbackRows{0};
   int64_t totalBytesWritten{0};
   int64_t totalBytesEvicted{0};
   // Number of temporary local shuffle files created, excluding final output.

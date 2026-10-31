@@ -49,6 +49,13 @@ struct CodecOptions {
   CodecBackend backend;
   int32_t compressionLevel = kDefaultCompressionLevel;
   bool checksumEnabled = false;
+  /// Stream compressors only: compress each block on its own, without the
+  /// previous block as a dictionary, in blocks of 256 KiB for LZ4. A
+  /// caller that reuses its input buffer for the next block otherwise makes
+  /// LZ4 copy every block aside as a dictionary and compress against it out
+  /// of line - several times the cost; the larger blocks keep the ratio
+  /// lost at block boundaries small.
+  bool independentBlocks = false;
 
   std::string toString() const;
 };
@@ -171,6 +178,9 @@ class Codec {
   CodecType codecType_;
   CodecOptions options_;
 };
+
+/// The Bolt codec type of an Arrow compression type.
+CodecType fromArrowCodecType(arrow::Compression::type type);
 
 std::unique_ptr<Codec> createCodec(
     arrow::Compression::type type,

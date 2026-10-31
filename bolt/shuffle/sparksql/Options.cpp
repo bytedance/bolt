@@ -53,6 +53,21 @@ const char* rowFormatName(row::RowFormat format) {
 
 } // namespace
 
+std::string CellShuffleOptions::toString() const {
+  return fmt::format(
+      "cellMemoryCapBytes={} "
+      "checkpointPartitionBytes={} nullMemLimitBytes={} "
+      "enableStringDictionary={} coalesceMergedRuns={} compressSpill={} "
+      "streamCompression={}",
+      cellMemoryCapBytes,
+      checkpointPartitionBytes,
+      nullMemLimitBytes,
+      enableStringDictionary,
+      coalesceMergedRuns,
+      compressSpill,
+      streamCompression);
+}
+
 std::string ShuffleReaderOptions::toString() const {
   return fmt::format(
       "compressionType={} codecBackend={} batchSize={} "
@@ -116,7 +131,8 @@ std::string ShuffleWriterOptions::toString() const {
       "accumulateBatchMaxBatches={} recommendedColumn2RowSize={} "
       "rowFormat={} rowBasedShuffleThreshold={} shuffleCheckRatio={} "
       "shuffleCheckMaxColumns={} rowvectorModeCompressionMinColumns={} "
-      "rowvectorModeCompressionMaxBufferSize={} partitionWriterOptions=[{}]",
+      "rowvectorModeCompressionMaxBufferSize={} cellOptions=[{}] "
+      "partitionWriterOptions=[{}]",
       partitioningName(partitioning),
       taskAttemptId,
       startPartitionId,
@@ -135,6 +151,7 @@ std::string ShuffleWriterOptions::toString() const {
       shuffleCheckMaxColumns,
       rowvectorModeCompressionMinColumns,
       rowvectorModeCompressionMaxBufferSize,
+      cellOptions.toString(),
       partitionWriterOptions.toString());
 }
 
@@ -152,7 +169,9 @@ std::string ShuffleWriterMetrics::toString() const {
   }
   return fmt::format(
       "totalInputRowNumber={} totalInputBatches={} totalBytesWritten={} "
-      "totalBytesEvicted={} totalSpillFiles={} totalWriteTime={} totalEvictTime={} "
+      "totalBytesEvicted={} totalSpillFiles={} spillCount={} "
+      "dictionaryMatchedRows={} dictionaryFallbackRows={} totalWriteTime={} "
+      "totalEvictTime={} "
       "totalCompressTime={} splitTime={} convertTime={} flattenTime={} "
       "computePidTime={} shuffleWriteTime={} externalReclaimTime={} "
       "maxPartitionBufferSize={} avgPreallocSize={} dataSize={} peakBytes={} "
@@ -164,6 +183,9 @@ std::string ShuffleWriterMetrics::toString() const {
       succinctBytes(totalBytesWritten),
       succinctBytes(totalBytesEvicted),
       totalSpillFiles,
+      spillCount,
+      dictionaryMatchedRows,
+      dictionaryFallbackRows,
       asMillis(totalWriteTime),
       asMillis(totalEvictTime),
       asMillis(totalCompressTime),
