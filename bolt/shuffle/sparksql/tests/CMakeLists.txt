@@ -186,6 +186,7 @@ add_executable(
   CellChunkTest.cpp
   CellEncodingTest.cpp
   CellFlatGoldenTest.cpp
+  CellNestedTest.cpp
   CellWriterTest.cpp
   RunCompressorTest.cpp
 )
