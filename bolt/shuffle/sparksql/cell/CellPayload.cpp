@@ -236,8 +236,10 @@ CellPayloadDecoder::CellPayloadDecoder(
       decompressor_(decompressor),
       pool_(pool),
       limits_(limits),
-      streamBytes_(layout_.numStreams()) {
+      streamBytes_(layout_.numStreams()),
+      streamViews_(layout_.numStreams()) {
   tags_.resize(layout_.numColumns());
+  records_.resize(layout_.numColumns());
   nonNullCount_.resize(layout_.numColumns());
   bitmaps_.resize(layout_.numColumns());
   cursors_.resize(layout_.numColumns());
@@ -315,7 +317,6 @@ bool expandNullRecords(
 
 bool CellPayloadDecoder::parseNullRegion(
     CellByteSource& in,
-    uint32_t rowCount,
     uint32_t nullStoredSize,
     uint32_t nullDecodedSize,
     std::string& error) {
@@ -357,7 +358,6 @@ bool CellPayloadDecoder::parseNullRegion(
   if (nullBody.size() < tagBytes) {
     return fail(error, "null body shorter than its tags");
   }
-  uint32_t rawNullColumns = 0;
   for (uint32_t col = 0; col < numColumns; ++col) {
     const auto tag = layout_.isUnknownColumn(col)
         ? NullTag::kAllNull
@@ -366,7 +366,6 @@ bool CellPayloadDecoder::parseNullRegion(
       return fail(error, "reserved null tag");
     }
     tags_[col] = tag;
-    rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
   }
   // Unused high bits of the last tags byte must be zero.
   if ((layout_.numWireColumns() % 4) != 0) {
@@ -376,6 +375,34 @@ bool CellPayloadDecoder::parseNullRegion(
     }
   }
 
+  // Each kRawNull column's records - their u32 count, then the records -
+  // expanded once the column's rows are known.
+  const uint8_t* cursor = nullData + tagBytes;
+  const uint8_t* const end = nullData + nullBody.size();
+  for (uint32_t col = 0; col < numColumns; ++col) {
+    if (tags_[col] != NullTag::kRawNull) {
+      continue;
+    }
+    if (end - cursor < static_cast<ptrdiff_t>(sizeof(uint32_t)) ||
+        loadU32(cursor) >
+            static_cast<uint64_t>(end - cursor - sizeof(uint32_t)) /
+                kNullRecordBytes) {
+      return fail(error, "truncated null records");
+    }
+    records_[col] = cursor;
+    cursor += sizeof(uint32_t) + uint64_t{loadU32(cursor)} * kNullRecordBytes;
+  }
+  if (cursor != end) {
+    return fail(error, "null body length mismatch");
+  }
+  return true;
+}
+
+bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
+  uint32_t rawNullColumns = 0;
+  for (const auto tag : tags_) {
+    rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
+  }
   // Each kRawNull column's records, expanded to a bitmap of the rows.
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
   const uint64_t expandedBytes =
@@ -386,9 +413,7 @@ bool CellPayloadDecoder::parseNullRegion(
   // Room for the last bitmap's whole last word.
   auto* bitmap = reinterpret_cast<uint8_t*>(
       resetBuffer(expandedNulls_, expandedBytes + sizeof(uint64_t), pool_));
-  const uint8_t* cursor = nullData + tagBytes;
-  const uint8_t* const end = nullData + nullBody.size();
-  for (uint32_t col = 0; col < numColumns; ++col) {
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     switch (tags_[col]) {
       case NullTag::kAllNull:
         nonNullCount_[col] = 0;
@@ -398,7 +423,10 @@ bool CellPayloadDecoder::parseNullRegion(
         nonNullCount_[col] = rowCount;
         bitmaps_[col] = nullptr;
         break;
-      case NullTag::kRawNull:
+      case NullTag::kRawNull: {
+        const uint8_t* cursor = records_[col];
+        const uint8_t* const end = cursor + sizeof(uint32_t) +
+            uint64_t{loadU32(cursor)} * kNullRecordBytes;
         if (!expandNullRecords(
                 cursor, end, rowCount, bitmap, nonNullCount_[col], error)) {
           return false;
@@ -407,12 +435,10 @@ bool CellPayloadDecoder::parseNullRegion(
         bitmapBytes_ = bitmapBytes;
         bitmap += bitmapBytes;
         break;
+      }
       case NullTag::kReserved:
         break;
     }
-  }
-  if (cursor != end) {
-    return fail(error, "null body length mismatch");
   }
   return true;
 }
@@ -578,11 +604,65 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
+  uint32_t rowCount = 0;
+  return parsePayload(in, rowCount, error) && openColumns(rowCount, error);
+}
+
+bool CellPayloadDecoder::readPayload(
+    CellByteSource& in,
+    uint32_t& rowCount,
+    std::string& error) {
+  BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "a payload of this decoder is open");
+  return parsePayload(in, rowCount, error);
+}
+
+bool CellPayloadDecoder::openPayload(
+    const CellPayloadDecoder& source,
+    const uint32_t* sourceColumns,
+    uint32_t positions,
+    std::string& error) {
+  BOLT_CHECK(&source != this, "a decoder cannot open the payload it read");
+  BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
+  rowCount_ = 0;
+  rowsRead_ = 0;
+  if (limits_.maxRowCount != 0 && positions > limits_.maxRowCount) {
+    return fail(error, "positions beyond the configured limit");
+  }
+  // The source's null tags, records, encoding tags and streams of each
+  // column.
+  encodingTags_.assign((layout_.numWireColumns() + 7) / 8, 0);
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    const uint32_t from = sourceColumns[col];
+    BOLT_DCHECK_EQ(
+        layout_.rowType()->childAt(col)->kind(),
+        source.layout_.rowType()->childAt(from)->kind());
+    tags_[col] = source.tags_[from];
+    records_[col] = source.records_[from];
+    if (layout_.isStringColumn(col)) {
+      const uint32_t at = source.layout_.wireColumn(from);
+      const uint32_t wire = layout_.wireColumn(col);
+      encodingTags_[wire / 8] |= static_cast<uint8_t>(
+          ((source.encodingTags_[at / 8] >> (at % 8)) & 1) << (wire % 8));
+    }
+  }
+  for (uint32_t s = 0; s < layout_.numStreams(); ++s) {
+    const uint32_t col = layout_.stream(s).column;
+    const uint32_t from = source.layout_.columnStream(sourceColumns[col]) + s -
+        layout_.columnStream(col);
+    streamViews_[s] = source.streamViews_[from];
+  }
+  return openColumns(positions, error);
+}
+
+bool CellPayloadDecoder::parsePayload(
+    CellByteSource& in,
+    uint32_t& rowCount,
+    std::string& error) {
   uint8_t header[kPayloadFixedHeaderBytes];
   if (!in.read(header, sizeof(header))) {
     return fail(error, "truncated payload header");
   }
-  const uint32_t rowCount = loadU32(header);
+  rowCount = loadU32(header);
   const uint32_t runCount = loadU32(header + 4);
   // variableBytes at offset 8 is a preallocation hint, never validated.
   const uint32_t nullStoredSize = loadU32(header + 16);
@@ -604,7 +684,7 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
     return fail(error, "run count beyond the configured limit");
   }
 
-  if (!parseNullRegion(in, rowCount, nullStoredSize, nullDecodedSize, error)) {
+  if (!parseNullRegion(in, nullStoredSize, nullDecodedSize, error)) {
     return false;
   }
 
@@ -645,7 +725,14 @@ bool CellPayloadDecoder::beginPayload(CellByteSource& in, std::string& error) {
       streamViews_[s] = bufferBytes(streamBytes_[s]);
     }
   }
-  for (uint32_t col = 0; col < numColumns; ++col) {
+  return true;
+}
+
+bool CellPayloadDecoder::openColumns(uint32_t rowCount, std::string& error) {
+  if (!expandNulls(rowCount, error)) {
+    return false;
+  }
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (!openColumn(col, error)) {
       return false;
     }
@@ -926,15 +1013,16 @@ bool CellPayloadDecoder::appendRows(
   if (!batchOpen_) {
     openBatch(capacity);
   }
-  BOLT_CHECK_LE(
-      static_cast<uint64_t>(batchRows_) + numRows,
-      static_cast<uint64_t>(batchCapacity_));
   const auto failed = [&] {
     rowCount_ = 0;
     rowsRead_ = 0;
     dropBatch();
     return false;
   };
+  const uint64_t rows = static_cast<uint64_t>(batchRows_) + numRows;
+  if (rows > static_cast<uint64_t>(batchCapacity_) && !growBatch(rows, error)) {
+    return failed();
+  }
   for (uint32_t col = 0; col < layout_.numColumns() && numRows > 0; ++col) {
     const auto kind = layout_.rowType()->childAt(col)->kind();
     if (kind == TypeKind::UNKNOWN) {
@@ -989,6 +1077,40 @@ bool CellPayloadDecoder::appendRows(
   if (numRows > 0 && rowsRead_ == rowCount_ && !finishPayload(error)) {
     return failed();
   }
+  return true;
+}
+
+bool CellPayloadDecoder::growBatch(uint64_t rows, std::string& error) {
+  constexpr uint64_t kMaxRows = std::numeric_limits<vector_size_t>::max();
+  BOLT_CHECK_LE(rows, kMaxRows, "batch beyond one vector");
+  // Doubling stops 7 rows short of one vector, where a null buffer's int32
+  // bit count no longer rounds up to whole bytes.
+  uint64_t capacity =
+      std::max(rows, std::min<uint64_t>(kMaxRows - 7, 2ull * batchCapacity_));
+  if (limits_.maxDecodedBytes != 0 && rowBytes_ != 0) {
+    const uint64_t maxRows = limits_.maxDecodedBytes / rowBytes_;
+    if (rows > maxRows) {
+      return fail(error, "batch beyond sanity bound");
+    }
+    capacity = std::min(capacity, maxRows);
+  }
+  // Values and nulls move, the new rows' null bits set as in a new batch;
+  // string bytes stay in their buffers.
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    auto& column = batch_[col];
+    if (column.values != nullptr) {
+      const auto kind = layout_.rowType()->childAt(col)->kind();
+      AlignedBuffer::reallocate<char>(
+          &column.values,
+          kind == TypeKind::BOOLEAN ? (capacity + 7) / 8
+                                    : capacity * decodedRowBytes(kind));
+    }
+    if (column.nulls != nullptr) {
+      AlignedBuffer::reallocate<uint8_t>(
+          &column.nulls, (capacity + 7) / 8, uint8_t{0xFF});
+    }
+  }
+  batchCapacity_ = static_cast<vector_size_t>(capacity);
   return true;
 }
 
