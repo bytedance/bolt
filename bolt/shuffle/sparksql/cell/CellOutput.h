@@ -41,6 +41,9 @@ struct CellWindowInput {
   /// for the writer's lifetime (the probe decides once).
   const uint8_t* encodingTags;
   uint32_t numPartitions;
+  /// Per wire column, the column's position count per partition; nullptr,
+  /// or a nullptr entry, means rowCounts.
+  const uint32_t* const* columnPositions = nullptr;
   /// For a Run only: per partition, nonzero when the Run takes it. Null
   /// when the Run takes every partition.
   const uint8_t* runPartitions = nullptr;

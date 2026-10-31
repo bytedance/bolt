@@ -71,6 +71,10 @@ class TestDecompressor : public cell::CellDecompressor {
 /// Observes synchronous output calls and can simulate reclaim or failure.
 class RecordingCellOutput final : public CellOutput {
  public:
+  bool sealsResidentCells() const override {
+    return keepsCells;
+  }
+
   void spillRun(const CellWindowInput& in) override {
     ++spillCalls;
     if (onSpill) {
@@ -99,6 +103,8 @@ class RecordingCellOutput final : public CellOutput {
     return 0;
   }
 
+  /// Seals then find the window's cells resident, as the RSS output does.
+  bool keepsCells{false};
   uint32_t spillCalls{0};
   uint32_t sealCalls{0};
   uint32_t finalizeCalls{0};
@@ -271,6 +277,172 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
         numRows,
         rowIndex.data()};
     splitter.split(batch);
+  }
+
+  /// Splits `block`, whose children are the layout columns `columns` of a
+  /// layout of `numColumns`, into the partitions `pids` at `positionBase`
+  /// (nullptr: the window's rows). Returns its rows per partition.
+  std::vector<uint32_t> splitColumns(
+      CellSplitter& splitter,
+      uint32_t numColumns,
+      uint32_t numPartitions,
+      const std::vector<uint32_t>& columns,
+      const RowVectorPtr& block,
+      const std::vector<uint32_t>& pids,
+      const uint32_t* positionBase) {
+    const uint32_t numRows = block->size();
+    std::vector<DecodedVector> decoded(numColumns);
+    std::vector<BatchNullClass> nullClass(numColumns);
+    for (uint32_t i = 0; i < columns.size(); ++i) {
+      if (block->childAt(i)->typeKind() == TypeKind::UNKNOWN) {
+        continue;
+      }
+      auto& column = decoded[columns[i]];
+      column.decode(*block->childAt(i));
+      uint32_t nullCount = 0;
+      for (uint32_t row = 0; row < numRows; ++row) {
+        nullCount += column.isNullAt(row);
+      }
+      nullClass[columns[i]] = nullCount == 0 ? BatchNullClass::kNoNulls
+          : nullCount == numRows             ? BatchNullClass::kAllNull
+                                             : BatchNullClass::kSomeNulls;
+    }
+    std::vector<uint32_t> added(numPartitions, 0);
+    std::vector<uint32_t> rowIndex(numRows);
+    for (uint32_t row = 0; row < numRows; ++row) {
+      rowIndex[row] = added[pids[row]]++;
+    }
+    SplitBatch batch{
+        decoded.data(),
+        pids.data(),
+        added.data(),
+        nullClass.data(),
+        numRows,
+        rowIndex.data()};
+    batch.columns = columns.data();
+    batch.numColumns = columns.size();
+    batch.positionBase = positionBase;
+    splitter.split(batch);
+    return added;
+  }
+
+  /// Reads partition `pid` of the window `in` back in column groups: group
+  /// g holds the layout columns groups[g], ascending, at positions[g]
+  /// positions. Builds the partition's null body as the outputs do, gives
+  /// each wire column's tag and expands each kRawNull column's records over
+  /// its group's positions; then decodes each group as a payload of its own
+  /// - the group's tags, records and resident streams - into `vectors`.
+  void readColumnGroups(
+      const CellWindowInput& in,
+      uint32_t pid,
+      const std::vector<std::vector<uint32_t>>& groups,
+      const std::vector<uint32_t>& positions,
+      std::vector<NullTag>& tags,
+      std::vector<RowVectorPtr>& vectors) {
+    const auto& layout = *in.layout;
+    const uint32_t numWire = layout.numWireColumns();
+    std::vector<uint32_t> groupOf(
+        layout.numColumns(), static_cast<uint32_t>(groups.size()));
+    for (uint32_t g = 0; g < groups.size(); ++g) {
+      for (const auto col : groups[g]) {
+        groupOf[col] = g;
+      }
+    }
+    BufferPtr body;
+    buildNullBody(in, pid, in.rowCounts[pid], body, pool());
+    ASSERT_NE(body, nullptr);
+    const auto* data = body->as<uint8_t>();
+    const uint8_t* cursor = data + nullTagBytes(numWire);
+    const uint8_t* const end = data + body->size();
+    tags.resize(numWire);
+    std::vector<std::string> records(numWire);
+    for (uint32_t wire = 0; wire < numWire; ++wire) {
+      tags[wire] = getNullTag(data, wire);
+      if (tags[wire] != NullTag::kRawNull) {
+        continue;
+      }
+      const uint32_t count = positions[groupOf[layout.logicalColumn(wire)]];
+      std::vector<uint8_t> bitmap(count / 8 + 8);
+      uint32_t nonNull;
+      std::string error;
+      const auto* start = cursor;
+      ASSERT_TRUE(
+          expandNullRecords(cursor, end, count, bitmap.data(), nonNull, error))
+          << "wire column " << wire << ": " << error;
+      records[wire].assign(
+          reinterpret_cast<const char*>(start), cursor - start);
+    }
+    ASSERT_EQ(cursor, end);
+
+    vectors.clear();
+    const auto& rowType = layout.rowType();
+    for (uint32_t g = 0; g < groups.size(); ++g) {
+      std::vector<std::string> names;
+      std::vector<TypePtr> types;
+      for (const auto col : groups[g]) {
+        names.push_back(rowType->nameOf(col));
+        types.push_back(rowType->childAt(col));
+      }
+      const auto groupLayout =
+          CellLayout::create(ROW(std::move(names), std::move(types)));
+      const uint32_t groupWire = groupLayout.numWireColumns();
+      std::string nullBody(nullTagBytes(groupWire), '\0');
+      std::string encodingTags((groupWire + 7) / 8, '\0');
+      std::string groupRecords;
+      for (uint32_t i = 0; i < groups[g].size(); ++i) {
+        const uint32_t col = groups[g][i];
+        if (layout.isUnknownColumn(col)) {
+          continue;
+        }
+        const uint32_t wire = layout.wireColumn(col);
+        const uint32_t to = groupLayout.wireColumn(i);
+        setNullTag(reinterpret_cast<uint8_t*>(nullBody.data()), to, tags[wire]);
+        groupRecords += records[wire];
+        if ((in.encodingTags[wire / 8] >> (wire % 8)) & 1) {
+          encodingTags[to / 8] |= static_cast<char>(1 << (to % 8));
+        }
+      }
+      nullBody += groupRecords;
+      std::string streams;
+      std::vector<uint64_t> streamSizes;
+      for (uint32_t s = 0; s < layout.numStreams(); ++s) {
+        if (groupOf[layout.stream(s).column] != g) {
+          continue;
+        }
+        const size_t start = streams.size();
+        in.cells->scan(pid, s, [&](const char* bytes, uint32_t size) {
+          streams.append(bytes, size);
+        });
+        streamSizes.push_back(streams.size() - start);
+      }
+      ASSERT_EQ(streamSizes.size(), groupLayout.numStreams());
+      std::string payload;
+      const auto put = [&](auto value) {
+        payload.append(reinterpret_cast<const char*>(&value), sizeof(value));
+      };
+      put(positions[g]);
+      put(uint32_t{1}); // runs
+      put(uint64_t{0}); // variable bytes
+      put(static_cast<uint32_t>(nullBody.size()));
+      put(uint32_t{0}); // stored as it is
+      payload += nullBody;
+      payload += encodingTags;
+      put(static_cast<uint8_t>(RunLayout::kCombinedUncompressed));
+      put(static_cast<uint64_t>(streams.size()));
+      for (const auto size : streamSizes) {
+        put(size);
+      }
+      payload += streams;
+      CellPayloadDecoder decoder(groupLayout, nullptr, pool());
+      MemoryByteSource source(
+          reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+      RowVectorPtr vector;
+      std::string error;
+      ASSERT_TRUE(decoder.decode(source, vector, error))
+          << "group " << g << ": " << error;
+      ASSERT_TRUE(source.atEnd());
+      vectors.push_back(std::move(vector));
+    }
   }
 
   RowVectorPtr decodeComplex(
@@ -944,6 +1116,353 @@ TEST_F(CellWriterTest, splitterSealsWindowAndFinishesResidentData) {
   EXPECT_EQ(output.sealCalls, sealsBeforeFinish);
   EXPECT_EQ(metrics.dictionaryMatchedRows, 3);
   EXPECT_EQ(metrics.dictionaryFallbackRows, 1);
+}
+
+TEST_F(CellWriterTest, splitterKeepsColumnGroupsAtTheirOwnPositions) {
+  // Three column groups of one flat layout split into the same windows: the
+  // rows, and two groups at positions the test counts itself - counts per
+  // partition other than its rows, and none at all in one partition each.
+  // Every group's null tags and records must hold over its own positions,
+  // through all-null blocks of mixed columns, all-null columns turning
+  // mixed, first nulls arriving late, and partition and window seals. The
+  // UNKNOWN column puts the wire ids one behind the layout ids from there on.
+  const auto rowType =
+      ROW({"r", "u", "a0", "a1", "a2", "b0", "b1", "b2"},
+          {BIGINT(),
+           UNKNOWN(),
+           INTEGER(),
+           VARCHAR(),
+           BOOLEAN(),
+           DOUBLE(),
+           TIMESTAMP(),
+           VARCHAR()});
+  const auto layout = CellLayout::create(rowType);
+  constexpr uint32_t kPartitions = 4;
+  ChunkAllocator allocator(pool(), 16 << 10, 256);
+  RecordingCellOutput output;
+  output.keepsCells = true;
+  CellSplitter splitter(layout, kPartitions, allocator, output, *pool());
+  splitter.enableDictionary(3);
+
+  struct Group {
+    std::vector<uint32_t> columns;
+    /// The test's position counts per partition; none for the rows.
+    std::vector<uint32_t> counts;
+    /// The partition that never takes a position of the group.
+    uint32_t skipped;
+    /// Per partition, the (block, row) at each position of its payload.
+    std::vector<std::vector<std::pair<RowVectorPtr, vector_size_t>>> expected;
+  };
+  std::vector<Group> groups(3);
+  groups[0] = {{0}, {}, kPartitions, {}};
+  groups[1] = {{1, 2, 3, 4}, std::vector<uint32_t>(kPartitions, 0), 1, {}};
+  groups[2] = {{5, 6, 7}, std::vector<uint32_t>(kPartitions, 0), 2, {}};
+  for (auto& group : groups) {
+    group.expected.resize(kPartitions);
+  }
+  // Wire columns r, a0, a1, a2, b0, b1, b2.
+  const auto* countsA = groups[1].counts.data();
+  const auto* countsB = groups[2].counts.data();
+  splitter.setColumnPositions(
+      {nullptr, countsA, countsA, countsA, countsB, countsB, countsB});
+
+  uint32_t payloads = 0;
+  const auto check = [&](const CellWindowInput& in) {
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      if (in.rowCounts[pid] == 0 ||
+          (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0)) {
+        continue;
+      }
+      SCOPED_TRACE("partition " + std::to_string(pid));
+      ++payloads;
+      std::vector<std::vector<uint32_t>> columns;
+      std::vector<uint32_t> positions;
+      for (const auto& group : groups) {
+        columns.push_back(group.columns);
+        positions.push_back(
+            group.counts.empty() ? in.rowCounts[pid] : group.counts[pid]);
+        ASSERT_EQ(positions.back(), group.expected[pid].size());
+      }
+      std::vector<NullTag> tags;
+      std::vector<RowVectorPtr> vectors;
+      ASSERT_NO_FATAL_FAILURE(
+          readColumnGroups(in, pid, columns, positions, tags, vectors));
+      for (uint32_t g = 0; g < groups.size(); ++g) {
+        const auto& expected = groups[g].expected[pid];
+        for (uint32_t i = 0; i < columns[g].size(); ++i) {
+          const uint32_t col = columns[g][i];
+          if (layout.isUnknownColumn(col)) {
+            continue;
+          }
+          size_t nulls = 0;
+          for (const auto& [block, row] : expected) {
+            nulls += block->childAt(i)->isNullAt(row);
+          }
+          EXPECT_EQ(
+              tags[layout.wireColumn(col)],
+              nulls == 0                     ? NullTag::kNoNull
+                  : nulls == expected.size() ? NullTag::kAllNull
+                                             : NullTag::kRawNull)
+              << "column " << col;
+        }
+        ASSERT_EQ(vectors[g]->size(), expected.size());
+        for (vector_size_t row = 0; row < vectors[g]->size(); ++row) {
+          const auto& [block, sourceRow] = expected[row];
+          ASSERT_TRUE(block->equalValueAt(vectors[g].get(), sourceRow, row))
+              << "group " << g << " position " << row << ": expected "
+              << block->toString(sourceRow) << ", got "
+              << vectors[g]->toString(row);
+        }
+      }
+    }
+  };
+  output.onSeal = check;
+  output.onFinalize = [&](const CellWindowInput& in, bool windowHasData) {
+    EXPECT_TRUE(windowHasData);
+    check(in);
+  };
+
+  // A seal restarts the positions of the partitions it emptied, which the
+  // caller learns from the seal count.
+  uint64_t seals = 0;
+  const auto followSeals = [&] {
+    if (splitter.sealCount() == seals) {
+      return;
+    }
+    seals = splitter.sealCount();
+    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
+      if (splitter.windowRowCounts()[pid] != 0) {
+        continue;
+      }
+      for (auto& group : groups) {
+        if (!group.counts.empty()) {
+          group.counts[pid] = 0;
+        }
+        group.expected[pid].clear();
+      }
+    }
+  };
+
+  // Per round, a letter per layout column r, u, a0, a1, a2, b0, b1, b2:
+  // values only (V), some nulls (S) or all null (N).
+  const char* const kFills[] = {
+      "VNSSVNVS",
+      "SNNSSNVV",
+      "VNSVNSVS",
+      "VNVSSVSN",
+      "SNNNVNVS",
+      "VNNSSNSV",
+  };
+  const char* const kWords[] = {"ab", "cd", "ef", "gh"};
+  std::mt19937 rng(17);
+  const auto makeColumn = [&](uint32_t round,
+                              uint32_t col,
+                              const std::vector<uint32_t>& pids) -> VectorPtr {
+    const auto n = static_cast<vector_size_t>(pids.size());
+    const char fill = kFills[round][col];
+    const auto null = [&](vector_size_t k) {
+      return fill == 'N' || (fill == 'S' && (k + col) % 3 == 1);
+    };
+    const auto value = [&](vector_size_t k) {
+      return int64_t{round} * 7919 + k * 31 + col;
+    };
+    switch (col) {
+      case 0:
+        return makeFlatVector<int64_t>(
+            n, [&](auto k) { return value(k) * 1000003; }, null);
+      case 1:
+        return BaseVector::createNullConstant(UNKNOWN(), n, pool());
+      case 2:
+        return makeFlatVector<int32_t>(
+            n,
+            [&](auto k) { return static_cast<int32_t>(value(k)) - 999; },
+            null);
+      case 3:
+        return makeFlatVector<StringView>(
+            n, [&](auto k) { return StringView(kWords[value(k) % 4]); }, null);
+      case 4:
+        return makeFlatVector<bool>(
+            n, [&](auto k) { return value(k) % 3 == 0; }, null);
+      case 5:
+        return makeFlatVector<double>(
+            n, [&](auto k) { return value(k) * 0.25; }, null);
+      case 6:
+        return makeFlatVector<Timestamp>(
+            n,
+            [&](auto k) {
+              return Timestamp(value(k), value(k) * 7919 % 1'000'000'000);
+            },
+            null);
+      default: {
+        // The first round's first value of partition 0 is long enough for
+        // that partition alone to pass the partition seal's threshold.
+        std::string text;
+        bool placed = round != 0;
+        return makeFlatVector<StringView>(
+            n,
+            [&](auto k) {
+              if (!placed && pids[k] == 0 && !null(k)) {
+                text.assign(40 << 10, 'z');
+                placed = true;
+              } else {
+                text.assign(value(k) % 23, static_cast<char>('a' + k % 26));
+              }
+              return StringView(text);
+            },
+            null);
+      }
+    }
+  };
+  const auto splitRound = [&](uint32_t round, uint32_t numRows, bool withP3) {
+    followSeals();
+    std::vector<uint32_t> rowPids(numRows);
+    for (auto& pid : rowPids) {
+      pid = rng() % (withP3 ? 4 : 3);
+    }
+    for (uint32_t g = 0; g < groups.size(); ++g) {
+      auto& group = groups[g];
+      // Each row takes up to 3 (A) or 2 (B) positions of the group.
+      std::vector<uint32_t> pids;
+      for (const auto pid : rowPids) {
+        if (group.counts.empty()) {
+          pids.push_back(pid);
+        } else if (pid != group.skipped) {
+          pids.insert(pids.end(), rng() % (g == 1 ? 4 : 3), pid);
+        }
+      }
+      if (pids.empty()) {
+        continue;
+      }
+      std::vector<std::string> names;
+      std::vector<VectorPtr> children;
+      for (const auto col : group.columns) {
+        names.push_back(rowType->nameOf(col));
+        children.push_back(makeColumn(round, col, pids));
+      }
+      const auto block = makeRowVector(names, children);
+      const auto added = splitColumns(
+          splitter,
+          layout.numColumns(),
+          kPartitions,
+          group.columns,
+          block,
+          pids,
+          group.counts.empty() ? nullptr : group.counts.data());
+      for (uint32_t pid = 0; !group.counts.empty() && pid < kPartitions;
+           ++pid) {
+        group.counts[pid] += added[pid];
+      }
+      for (vector_size_t k = 0; k < block->size(); ++k) {
+        group.expected[pids[k]].emplace_back(block, k);
+      }
+    }
+  };
+
+  splitRound(0, 300, false);
+  splitRound(1, 150, false);
+  EXPECT_EQ(splitter.sealPartitionsOver(32 << 10), 1);
+  EXPECT_EQ(output.sealCalls, 1);
+  EXPECT_EQ(payloads, 1);
+  EXPECT_EQ(splitter.sealCount(), 1);
+  EXPECT_EQ(splitter.windowRowCounts()[0], 0);
+  EXPECT_GT(splitter.windowRowCounts()[1], 0);
+  splitRound(2, 400, true);
+  splitRound(3, 64, true);
+  splitter.sealWindow();
+  EXPECT_EQ(output.sealCalls, 2);
+  EXPECT_EQ(payloads, 5);
+  EXPECT_EQ(splitter.sealCount(), 2);
+  EXPECT_FALSE(splitter.hasWindowRows());
+  splitRound(4, 200, false);
+  splitRound(5, 250, true);
+  ShuffleWriterMetrics metrics;
+  splitter.finish(metrics);
+  EXPECT_EQ(output.finalizeCalls, 1);
+  EXPECT_EQ(payloads, 9);
+  EXPECT_EQ(splitter.sealCount(), 2);
+  EXPECT_EQ(output.spillCalls, 0);
+}
+
+TEST_F(CellWriterTest, splitsAtCallerPositionsLeaveTheWindowRows) {
+  // Splits at a caller's positions add no rows to the window: neither its
+  // partitions' counts nor whether it holds rows at all - positions alone
+  // seal nothing.
+  const auto rowType = ROW({"a", "b"}, {BIGINT(), INTEGER()});
+  const auto layout = CellLayout::create(rowType);
+  ChunkAllocator allocator(pool(), 16 << 10, 256);
+  RecordingCellOutput output;
+  CellSplitter splitter(layout, 2, allocator, output, *pool());
+  const auto block = makeRowVector(
+      {"b"}, {makeNullableFlatVector<int32_t>({1, std::nullopt, 3, 4, 5})});
+  const std::vector<uint32_t> base{7, 0};
+  const auto added =
+      splitColumns(splitter, 2, 2, {1}, block, {0, 1, 1, 0, 1}, base.data());
+  EXPECT_EQ(added, (std::vector<uint32_t>{2, 3}));
+  EXPECT_FALSE(splitter.hasWindowRows());
+  EXPECT_EQ(splitter.maxWindowRows(), 0);
+  EXPECT_EQ(splitter.windowRowCounts()[0], 0);
+  EXPECT_EQ(splitter.windowRowCounts()[1], 0);
+  splitter.sealWindow();
+  EXPECT_EQ(output.sealCalls, 0);
+  EXPECT_EQ(splitter.sealCount(), 0);
+
+  // The other column at the window's rows commits them.
+  splitColumns(
+      splitter,
+      2,
+      2,
+      {0},
+      makeRowVector({"a"}, {makeFlatVector<int64_t>({10, 11, 12})}),
+      {1, 0, 1},
+      nullptr);
+  EXPECT_TRUE(splitter.hasWindowRows());
+  EXPECT_EQ(splitter.maxWindowRows(), 2);
+  EXPECT_EQ(splitter.windowRowCounts()[0], 1);
+  EXPECT_EQ(splitter.windowRowCounts()[1], 2);
+}
+
+TEST_F(CellWriterTest, everySealCountsAndEmptiesItsPartitions) {
+  // Window and partition seals alike advance the seal count and zero the
+  // rows of the partitions they close; a call that closes nothing is no
+  // seal.
+  const auto layout = CellLayout::create(ROW({"s"}, {VARCHAR()}));
+  ChunkAllocator allocator(pool(), 16 << 10, 256);
+  RecordingCellOutput output;
+  CellSplitter splitter(layout, 3, allocator, output, *pool());
+  const std::string longValue(4 << 10, 'x');
+  const auto split = [&] {
+    splitColumns(
+        splitter,
+        1,
+        3,
+        {0},
+        makeRowVector(
+            {"s"},
+            {makeFlatVector<StringView>(
+                {StringView(longValue), "a", "b", "c"})}),
+        {0, 1, 2, 1},
+        nullptr);
+  };
+  split();
+  EXPECT_EQ(splitter.sealCount(), 0);
+  EXPECT_EQ(splitter.sealPartitionsOver(1 << 10), 1);
+  EXPECT_EQ(splitter.sealCount(), 1);
+  EXPECT_EQ(splitter.windowRowCounts()[0], 0);
+  EXPECT_EQ(splitter.windowRowCounts()[1], 2);
+  EXPECT_EQ(splitter.windowRowCounts()[2], 1);
+  EXPECT_EQ(splitter.sealPartitionsOver(1 << 10), 0);
+  EXPECT_EQ(splitter.sealCount(), 1);
+  splitter.sealWindow();
+  EXPECT_EQ(splitter.sealCount(), 2);
+  for (uint32_t pid = 0; pid < 3; ++pid) {
+    EXPECT_EQ(splitter.windowRowCounts()[pid], 0);
+  }
+  splitter.sealWindow();
+  EXPECT_EQ(splitter.sealCount(), 2);
+  split();
+  EXPECT_EQ(splitter.sealPartitionsOver(1 << 10), 1);
+  EXPECT_EQ(splitter.sealCount(), 3);
+  EXPECT_EQ(output.sealCalls, 3);
 }
 
 TEST_F(CellWriterTest, fullPrimitiveTypesAndUnknownWireSlots) {
