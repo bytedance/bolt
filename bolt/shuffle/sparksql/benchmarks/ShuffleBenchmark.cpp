@@ -34,18 +34,25 @@
 ///   A  data shapes, P=1024, 1 GiB: narrow and random ints, doubles, short,
 ///      medium and long strings, low-cardinality strings (random and
 ///      clustered order), a store_sales-like mix, 100 wide columns, complex
-///      types, and the production shape (P=30000, dictionary-wrapped input)
+///      types, and the production shape (P=30000, dictionary-wrapped input);
+///      nested types: arrays of structs, maps of arrays, long arrays, the
+///      complex types with nulls, four levels deep
 ///   B  partition counts 200/4096/30000 on ints, strings, dictionary
-///      strings; P=1 on the mix
+///      strings, P=30000 on the complex types with and without the struct;
+///      P=1 on the mix
 ///   C  10% and 50% nulls on the same three; a wide table with sparse
-///      nulls, an all-null column, stale all-set null buffers
+///      nulls, an all-null column, stale all-set null buffers; nulls in
+///      long arrays, in arrays of structs, in arrays of their own and of
+///      structs themselves, nested fields null throughout, low-cardinality
+///      complex values and arrays
 ///   D  16 and 256 MiB inputs on narrow ints and the wide table: the fixed
 ///      cost of a writer against its throughput
 ///   E  one partition taking half the rows, on strings, dictionary strings
 ///      and the mix
 ///   F  a 256 MiB task memory limit enforced by the Spark memory manager,
 ///      so every writer spills through reclaim: ints, medium and long
-///      strings, dictionary strings
+///      strings, dictionary strings; the complex types, nested nulls, 50%
+///      nulls, optional fields
 ///
 /// --bolt_benchmark_shuffle_tier picks the set: smoke (A1, A5, A7, A8 at
 /// 64 MiB), standard (A, B, C) or full (A to F). --bm_regex narrows it.
@@ -61,6 +68,7 @@
 #include <chrono>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <random>
 #include <regex>
 
@@ -88,8 +96,9 @@ DEFINE_string(
 DEFINE_string(
     bolt_benchmark_shuffle_writers,
     "Cell,V1,V2",
-    "Writers to run, of Cell, V1, V2; CellNoDict joins the dictionary cases "
-    "whenever Cell runs.");
+    "Writers to run, of Cell, V1, V2; whenever Cell runs, CellNoDict joins "
+    "the dictionary cases and CellUnsealedNulls, which never seals a window "
+    "for its null memory, the cases with heavy nulls.");
 DEFINE_int64(
     bolt_benchmark_shuffle_input_mb,
     0,
@@ -174,6 +183,21 @@ enum class Family {
   kQ22Rollup,
   kDeadWide,
   kWideOptional,
+  kArrayStruct,
+  kMapStringArray,
+  kArrayDouble,
+  kArrayBigint,
+  kDeepNested,
+  kArrayIntNulls,
+  kNestedOptional,
+  kNestedDense,
+  kNestedDead,
+  kStructDense,
+  kStructChain,
+  kLowCardComplex,
+  kContainers,
+  kArraysOptional,
+  kLowCardArray,
 };
 
 const char* familyName(Family family) {
@@ -216,6 +240,36 @@ const char* familyName(Family family) {
       return "int_narrow_dead_wide";
     case Family::kWideOptional:
       return "wide50_optional";
+    case Family::kArrayStruct:
+      return "array_struct";
+    case Family::kMapStringArray:
+      return "map_str_array";
+    case Family::kArrayDouble:
+      return "array_double128";
+    case Family::kArrayBigint:
+      return "array_bigint1k";
+    case Family::kDeepNested:
+      return "array_map_array_struct";
+    case Family::kArrayIntNulls:
+      return "array_int1k";
+    case Family::kNestedOptional:
+      return "array_struct50_optional";
+    case Family::kNestedDense:
+      return "array_struct20";
+    case Family::kNestedDead:
+      return "array_struct_dead32";
+    case Family::kStructDense:
+      return "struct50";
+    case Family::kStructChain:
+      return "struct_chain8";
+    case Family::kLowCardComplex:
+      return "lowcard_complex";
+    case Family::kContainers:
+      return "array_map";
+    case Family::kArraysOptional:
+      return "arrays50_optional";
+    case Family::kLowCardArray:
+      return "lowcard_array";
   }
   return "?";
 }
@@ -223,7 +277,33 @@ const char* familyName(Family family) {
 bool isDictionaryFamily(Family family) {
   return family == Family::kStrLowCard ||
       family == Family::kStrLowCardClustered || family == Family::kProd ||
-      family == Family::kQ22Rollup;
+      family == Family::kQ22Rollup || family == Family::kLowCardComplex ||
+      family == Family::kLowCardArray;
+}
+
+/// Families with ARRAY, MAP or ROW columns.
+bool isNestedFamily(Family family) {
+  switch (family) {
+    case Family::kComplex:
+    case Family::kArrayStruct:
+    case Family::kMapStringArray:
+    case Family::kArrayDouble:
+    case Family::kArrayBigint:
+    case Family::kDeepNested:
+    case Family::kArrayIntNulls:
+    case Family::kNestedOptional:
+    case Family::kNestedDense:
+    case Family::kNestedDead:
+    case Family::kStructDense:
+    case Family::kStructChain:
+    case Family::kLowCardComplex:
+    case Family::kContainers:
+    case Family::kArraysOptional:
+    case Family::kLowCardArray:
+      return true;
+    default:
+      return false;
+  }
 }
 
 struct CaseSpec {
@@ -237,11 +317,27 @@ struct CaseSpec {
   /// under the Spark memory manager.
   int64_t memLimitMb;
   uint32_t tiers;
+  /// The null rate of the families that take one in per mille rather than
+  /// nullPercent.
+  int32_t nullPerMille{0};
 
   std::string name() const {
     return id + "." + familyName(family);
   }
 };
+
+/// The cases whose nulls can fill the null state, which CellUnsealedNulls
+/// joins: the nested ones with nulls at some level, and the flat ones with
+/// nulls in half the rows or more of several columns.
+bool hasHeavyNulls(const CaseSpec& spec) {
+  if (isNestedFamily(spec.family)) {
+    return spec.nullPercent > 0 || spec.nullPerMille > 0 ||
+        spec.family == Family::kNestedOptional ||
+        spec.family == Family::kArraysOptional;
+  }
+  return (spec.family == Family::kIntNarrow && spec.nullPercent >= 50) ||
+      spec.family == Family::kWideOptional;
+}
 
 /// The frozen case list. Append only: an id keeps its meaning across
 /// versions so results stay comparable.
@@ -341,6 +437,103 @@ std::vector<CaseSpec> caseSpecs() {
   add("C-dead-wide-P30000", Family::kDeadWide, 30000, kStd);
   // Optional fields of a wide table: nulls rare, or values rare.
   add("C-wide-optional", Family::kWideOptional, 1024, kStd);
+  // Nested types: arrays of structs, maps of arrays, long arrays, the
+  // complex types with nulls at every level, four levels deep; the complex
+  // types at P=30000 and under the memory limit.
+  add("A14", Family::kArrayStruct, 1024, kStd);
+  add("A15", Family::kMapStringArray, 1024, kStd);
+  add("A16", Family::kArrayDouble, 1024, kStd);
+  add("A17", Family::kArrayBigint, 1024, kStd);
+  add("A18", Family::kComplex, 1024, kStd, 10);
+  add("A19", Family::kDeepNested, 1024, kStd, 5);
+  add("B-nested-P30000", Family::kComplex, 30000, kStd);
+  add("F10", Family::kComplex, 1024, kFull, 0, 1024, false, 256);
+  // Nulls among the elements of long arrays, in per mille.
+  for (const auto& [suffix, perMille] :
+       {std::pair{"N0", 0},
+        std::pair{"N0p1", 1},
+        std::pair{"N1", 10},
+        std::pair{"N50", 500}}) {
+    add(std::string("C-array-nulls-") + suffix,
+        Family::kArrayIntNulls,
+        1024,
+        kStd);
+    c.back().nullPerMille = perMille;
+  }
+  for (const auto& [suffix, perMille] :
+       {std::pair{"N1", 10}, std::pair{"N50", 500}}) {
+    add(std::string("F-array-nulls-") + suffix,
+        Family::kArrayIntNulls,
+        1024,
+        kFull,
+        0,
+        1024,
+        false,
+        256);
+    c.back().nullPerMille = perMille;
+  }
+  // The optional fields of a wide table in an array of structs, the fields
+  // of dense structs with nulls, and structs of fields null throughout.
+  add("C-nested-optional", Family::kNestedOptional, 1024, kStd);
+  add("C-nested-optional-P30000", Family::kNestedOptional, 30000, kStd);
+  add("F-nested-optional-P30000",
+      Family::kNestedOptional,
+      30000,
+      kFull,
+      0,
+      1024,
+      false,
+      256);
+  add("C-nested-dense", Family::kNestedDense, 1024, kStd, 10);
+  add("C-nested-dense-P30000", Family::kNestedDense, 30000, kStd, 10);
+  add("F-nested-dense",
+      Family::kNestedDense,
+      1024,
+      kFull,
+      10,
+      1024,
+      false,
+      256);
+  add("F-nested-dense-P30000",
+      Family::kNestedDense,
+      30000,
+      kFull,
+      10,
+      1024,
+      false,
+      256);
+  add("C-nested-dead", Family::kNestedDead, 1024, kStd);
+  add("C-nested-dead-P30000", Family::kNestedDead, 30000, kStd);
+  // The null-heavy flat shapes under the memory limit.
+  add("F-C1-N50", Family::kIntNarrow, 1024, kFull, 50, 1024, false, 256);
+  add("F-wide-optional",
+      Family::kWideOptional,
+      1024,
+      kFull,
+      0,
+      1024,
+      false,
+      256);
+  // Null structs: in an array of wide ones, a wide one alone, eight nested
+  // in one another. Then complex values of four values each.
+  add("C-nested-optional-S10", Family::kNestedOptional, 1024, kStd, 10);
+  add("C-struct-dense-S10", Family::kStructDense, 1024, kStd, 10);
+  add("C-struct-chain", Family::kStructChain, 1024, kStd, 10);
+  add("C-lowcard-complex", Family::kLowCardComplex, 1024, kStd);
+  // The P=30000 nested shapes without structs: the complex types but the
+  // struct, and the optional fields as arrays of their own.
+  add("B-containers-P30000", Family::kContainers, 30000, kStd);
+  add("C-arrays-optional-P30000", Family::kArraysOptional, 30000, kStd);
+  add("F-arrays-optional-P30000",
+      Family::kArraysOptional,
+      30000,
+      kFull,
+      0,
+      1024,
+      false,
+      256);
+  // Arrays of four values few and small enough for a string dictionary.
+  add("C-lowcard-array", Family::kLowCardArray, 1024, kStd);
   return c;
 }
 
@@ -418,22 +611,39 @@ BufferPtr nullsFor(vector_size_t n, int32_t nullPercent, Rng& rng) {
   return nulls;
 }
 
+/// Nulls of `n` rows at `perMille` per mille; nullptr at 0.
+BufferPtr nullsPerMille(vector_size_t n, int32_t perMille, Rng& rng) {
+  if (perMille == 0) {
+    return nullptr;
+  }
+  auto nulls = AlignedBuffer::allocate<bool>(n, inputPool(), bits::kNotNull);
+  auto* raw = nulls->asMutable<uint64_t>();
+  for (vector_size_t i = 0; i < n; ++i) {
+    if (static_cast<int32_t>(rng() % 1000) < perMille) {
+      bits::setNull(raw, i);
+    }
+  }
+  return nulls;
+}
+
+/// `n` rows of `value`, a batch of them by default.
 template <typename T>
 VectorPtr flat(
     const TypePtr& type,
     int32_t nullPercent,
     Rng& rng,
-    const std::function<T(vector_size_t)>& value) {
-  auto values = AlignedBuffer::allocate<T>(kRowsPerBatch, inputPool());
+    const std::function<T(vector_size_t)>& value,
+    vector_size_t n = kRowsPerBatch) {
+  auto values = AlignedBuffer::allocate<T>(n, inputPool());
   auto* raw = values->template asMutable<T>();
-  for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+  for (vector_size_t i = 0; i < n; ++i) {
     raw[i] = value(i);
   }
   return std::make_shared<FlatVector<T>>(
       inputPool(),
       type,
-      nullsFor(kRowsPerBatch, nullPercent, rng),
-      kRowsPerBatch,
+      nullsFor(n, nullPercent, rng),
+      n,
       std::move(values),
       std::vector<BufferPtr>{});
 }
@@ -443,17 +653,18 @@ VectorPtr flat<bool>(
     const TypePtr& type,
     int32_t nullPercent,
     Rng& rng,
-    const std::function<bool(vector_size_t)>& value) {
-  auto values = AlignedBuffer::allocate<bool>(kRowsPerBatch, inputPool());
+    const std::function<bool(vector_size_t)>& value,
+    vector_size_t n) {
+  auto values = AlignedBuffer::allocate<bool>(n, inputPool());
   auto* raw = values->asMutable<uint64_t>();
-  for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+  for (vector_size_t i = 0; i < n; ++i) {
     bits::setBit(raw, i, value(i));
   }
   return std::make_shared<FlatVector<bool>>(
       inputPool(),
       type,
-      nullsFor(kRowsPerBatch, nullPercent, rng),
-      kRowsPerBatch,
+      nullsFor(n, nullPercent, rng),
+      n,
       std::move(values),
       std::vector<BufferPtr>{});
 }
@@ -463,19 +674,20 @@ VectorPtr strings(
     int32_t nullPercent,
     Rng& rng,
     const std::function<void(vector_size_t, std::string& out)>& value,
-    const TypePtr& type = VARCHAR()) {
-  std::vector<std::string> all(kRowsPerBatch);
+    const TypePtr& type = VARCHAR(),
+    vector_size_t n = kRowsPerBatch) {
+  std::vector<std::string> all(n);
   size_t total = 0;
-  for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+  for (vector_size_t i = 0; i < n; ++i) {
     value(i, all[i]);
     total += all[i].size();
   }
   auto chars = AlignedBuffer::allocate<char>(total, inputPool());
-  auto views = AlignedBuffer::allocate<StringView>(kRowsPerBatch, inputPool());
+  auto views = AlignedBuffer::allocate<StringView>(n, inputPool());
   auto* rawChars = chars->asMutable<char>();
   auto* rawViews = views->asMutable<StringView>();
   size_t offset = 0;
-  for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+  for (vector_size_t i = 0; i < n; ++i) {
     ::memcpy(rawChars + offset, all[i].data(), all[i].size());
     rawViews[i] =
         StringView(rawChars + offset, static_cast<int32_t>(all[i].size()));
@@ -484,10 +696,96 @@ VectorPtr strings(
   return std::make_shared<FlatVector<StringView>>(
       inputPool(),
       type,
-      nullsFor(kRowsPerBatch, nullPercent, rng),
-      kRowsPerBatch,
+      nullsFor(n, nullPercent, rng),
+      n,
       std::move(views),
       std::vector<BufferPtr>{std::move(chars)});
+}
+
+/// The entries of a container column, laid out back to back.
+struct Entries {
+  BufferPtr offsets;
+  BufferPtr sizes;
+  /// Elements of all the entries together.
+  vector_size_t total{0};
+};
+
+Entries entries(const std::vector<vector_size_t>& sizes) {
+  const auto n = static_cast<vector_size_t>(sizes.size());
+  Entries result;
+  result.offsets = allocateOffsets(n, inputPool());
+  result.sizes = allocateSizes(n, inputPool());
+  auto* rawOffsets = result.offsets->asMutable<vector_size_t>();
+  auto* rawSizes = result.sizes->asMutable<vector_size_t>();
+  for (vector_size_t i = 0; i < n; ++i) {
+    rawOffsets[i] = result.total;
+    rawSizes[i] = sizes[i];
+    result.total += sizes[i];
+  }
+  return result;
+}
+
+/// `n` entries of `low` to `high` elements, uniform.
+Entries
+entries(vector_size_t n, vector_size_t low, vector_size_t high, Rng& rng) {
+  std::vector<vector_size_t> sizes(n, low);
+  if (high > low) {
+    for (auto& size : sizes) {
+      size += static_cast<vector_size_t>(rng() % (high - low + 1));
+    }
+  }
+  return entries(sizes);
+}
+
+/// `n` arrays over `elements`. Null entries keep their elements, as the
+/// complex family's.
+VectorPtr arrayOf(
+    vector_size_t n,
+    BufferPtr nulls,
+    const Entries& at,
+    VectorPtr elements) {
+  return std::make_shared<ArrayVector>(
+      inputPool(),
+      ARRAY(elements->type()),
+      std::move(nulls),
+      n,
+      at.offsets,
+      at.sizes,
+      std::move(elements));
+}
+
+VectorPtr mapOf(
+    vector_size_t n,
+    BufferPtr nulls,
+    const Entries& at,
+    VectorPtr keys,
+    VectorPtr values) {
+  return std::make_shared<MapVector>(
+      inputPool(),
+      MAP(keys->type(), values->type()),
+      std::move(nulls),
+      n,
+      at.offsets,
+      at.sizes,
+      std::move(keys),
+      std::move(values));
+}
+
+VectorPtr structOf(
+    std::vector<std::string> names,
+    std::vector<VectorPtr> fields,
+    BufferPtr nulls,
+    vector_size_t n) {
+  std::vector<TypePtr> types;
+  for (const auto& field : fields) {
+    types.push_back(field->type());
+  }
+  return std::make_shared<RowVector>(
+      inputPool(),
+      ROW(std::move(names), std::move(types)),
+      std::move(nulls),
+      n,
+      std::move(fields));
 }
 
 void randomChars(Rng& rng, size_t length, std::string& out) {
@@ -1058,9 +1356,11 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
       }
       return makeRow(std::move(names), std::move(columns));
     }
-    case Family::kComplex: {
+    case Family::kComplex:
+    case Family::kContainers: {
       // An array of bigints, a map of int to bigint, a struct of an int and
-      // a string.
+      // a string; nulls in the containers, the struct and every value but
+      // the map keys. The containers family stops before the struct.
       std::vector<vector_size_t> arraySizes(kRowsPerBatch);
       std::vector<vector_size_t> mapSizes(kRowsPerBatch);
       vector_size_t arrayTotal = 0;
@@ -1085,66 +1385,81 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
           at += sizes[i];
         }
       };
-      const auto elements = [&](vector_size_t n, auto value, TypePtr type) {
-        using T = decltype(value(0));
-        auto values = AlignedBuffer::allocate<T>(n, inputPool());
-        auto* raw = values->template asMutable<T>();
-        for (vector_size_t i = 0; i < n; ++i) {
-          raw[i] = value(i);
-        }
-        return std::make_shared<FlatVector<T>>(
-            inputPool(),
-            std::move(type),
-            nullptr,
-            n,
-            std::move(values),
-            std::vector<BufferPtr>{});
-      };
+      // The values, then their nulls; nullptr at no nulls, which draws
+      // nothing from the generator.
+      const auto elements =
+          [&](vector_size_t n, auto value, TypePtr type, int32_t nullPercent) {
+            using T = decltype(value(0));
+            auto values = AlignedBuffer::allocate<T>(n, inputPool());
+            auto* raw = values->template asMutable<T>();
+            for (vector_size_t i = 0; i < n; ++i) {
+              raw[i] = value(i);
+            }
+            return std::make_shared<FlatVector<T>>(
+                inputPool(),
+                std::move(type),
+                nullsFor(n, nullPercent, rng),
+                n,
+                std::move(values),
+                std::vector<BufferPtr>{});
+          };
       BufferPtr arrayOffsets, arrayLengths, mapOffsets, mapLengths;
       offsetsAndSizes(arraySizes, arrayOffsets, arrayLengths);
       offsetsAndSizes(mapSizes, mapOffsets, mapLengths);
+      // One draw from the generator per statement, so the order of the
+      // draws is the order of the code.
+      auto arrayNulls = nullsFor(kRowsPerBatch, nulls, rng);
+      auto arrayElements = elements(
+          arrayTotal,
+          [&](vector_size_t) { return static_cast<int64_t>(rng() % 100000); },
+          BIGINT(),
+          nulls);
       auto array = std::make_shared<ArrayVector>(
           inputPool(),
           ARRAY(BIGINT()),
-          nullsFor(kRowsPerBatch, nulls, rng),
+          std::move(arrayNulls),
           kRowsPerBatch,
           arrayOffsets,
           arrayLengths,
-          elements(
-              arrayTotal,
-              [&](vector_size_t) {
-                return static_cast<int64_t>(rng() % 100000);
-              },
-              BIGINT()));
+          std::move(arrayElements));
+      auto mapNulls = nullsFor(kRowsPerBatch, nulls, rng);
+      auto mapKeys = elements(
+          mapTotal,
+          [&](vector_size_t i) { return static_cast<int32_t>(i % 5); },
+          INTEGER(),
+          0);
+      auto mapValues = elements(
+          mapTotal,
+          [&](vector_size_t) { return static_cast<int64_t>(rng()); },
+          BIGINT(),
+          nulls);
       auto map = std::make_shared<MapVector>(
           inputPool(),
           MAP(INTEGER(), BIGINT()),
-          nullsFor(kRowsPerBatch, nulls, rng),
+          std::move(mapNulls),
           kRowsPerBatch,
           mapOffsets,
           mapLengths,
-          elements(
-              mapTotal,
-              [&](vector_size_t i) { return static_cast<int32_t>(i % 5); },
-              INTEGER()),
-          elements(
-              mapTotal,
-              [&](vector_size_t) { return static_cast<int64_t>(rng()); },
-              BIGINT()));
+          std::move(mapKeys),
+          std::move(mapValues));
+      if (spec.family == Family::kContainers) {
+        return makeRow({"pid", "key", "arr", "map"}, {pid, key(), array, map});
+      }
+      auto structNulls = nullsFor(kRowsPerBatch, nulls, rng);
       auto structure = std::make_shared<RowVector>(
           inputPool(),
           ROW({"a", "b"}, {INTEGER(), VARCHAR()}),
-          nullsFor(kRowsPerBatch, nulls, rng),
+          std::move(structNulls),
           kRowsPerBatch,
           std::vector<VectorPtr>{
               flat<int32_t>(
                   INTEGER(),
-                  0,
+                  nulls,
                   rng,
                   [&](vector_size_t) {
                     return static_cast<int32_t>(rng() % 1000);
                   }),
-              strings(0, rng, [&](vector_size_t, std::string& out) {
+              strings(nulls, rng, [&](vector_size_t, std::string& out) {
                 randomChars(rng, 4 + rng() % 9, out);
               })});
       return makeRow(
@@ -1185,6 +1500,394 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
            wrap(strings(10, rng, [&](vector_size_t, std::string& out) {
              out = vocab[rng() % vocab.size()];
            }))});
+    }
+    // The nested families draw from the generator once per statement, so
+    // the order of the draws is the order of the code.
+    case Family::kArrayStruct: {
+      // An array of 0 to 8 structs of an int and a short string.
+      const auto at = entries(kRowsPerBatch, 0, 8, rng);
+      auto a = flat<int32_t>(
+          INTEGER(),
+          0,
+          rng,
+          [&](vector_size_t) { return static_cast<int32_t>(rng() % 1000); },
+          at.total);
+      auto b = strings(
+          0,
+          rng,
+          [&](vector_size_t, std::string& out) {
+            randomChars(rng, 4 + rng() % 9, out);
+          },
+          VARCHAR(),
+          at.total);
+      auto elements = structOf({"a", "b"}, {a, b}, nullptr, at.total);
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, elements);
+      return makeRow({"pid", "key", "arr"}, {pid, key(), array});
+    }
+    case Family::kMapStringArray: {
+      // A map of 0 to 4 low-cardinality words to arrays of 0 to 8 bigints.
+      const auto& vocab = lowCardVocabulary();
+      const auto mapAt = entries(kRowsPerBatch, 0, 4, rng);
+      auto keys = strings(
+          0,
+          rng,
+          [&](vector_size_t, std::string& out) {
+            out = vocab[rng() % vocab.size()];
+          },
+          VARCHAR(),
+          mapAt.total);
+      const auto arrayAt = entries(mapAt.total, 0, 8, rng);
+      auto elements = flat<int64_t>(
+          BIGINT(),
+          0,
+          rng,
+          [&](vector_size_t) { return static_cast<int64_t>(rng() % 100000); },
+          arrayAt.total);
+      auto values = arrayOf(mapAt.total, nullptr, arrayAt, elements);
+      auto map = mapOf(kRowsPerBatch, nullptr, mapAt, keys, values);
+      return makeRow({"pid", "key", "map"}, {pid, key(), map});
+    }
+    case Family::kArrayDouble: {
+      // An array of 128 prices.
+      const auto at = entries(kRowsPerBatch, 128, 128, rng);
+      auto prices = flat<double>(
+          DOUBLE(),
+          0,
+          rng,
+          [&](vector_size_t) { return (rng() % 1'000'000) / 100.0; },
+          at.total);
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, prices);
+      return makeRow({"pid", "key", "prices"}, {pid, key(), array});
+    }
+    case Family::kArrayBigint: {
+      // An array of 900 to 1100 bigints.
+      const auto at = entries(kRowsPerBatch, 900, 1100, rng);
+      auto values = flat<int64_t>(
+          BIGINT(),
+          0,
+          rng,
+          [&](vector_size_t) { return static_cast<int64_t>(rng() % 100000); },
+          at.total);
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, values);
+      return makeRow({"pid", "key", "values"}, {pid, key(), array});
+    }
+    case Family::kDeepNested: {
+      // Four levels: an array of maps of low-cardinality words to arrays
+      // of structs of an int and a timestamp, each level 0 to 3 long, with
+      // nulls at every level but the map keys.
+      const auto& vocab = lowCardVocabulary();
+      const auto outerAt = entries(kRowsPerBatch, 0, 3, rng);
+      auto outerNulls = nullsFor(kRowsPerBatch, nulls, rng);
+      const auto mapAt = entries(outerAt.total, 0, 3, rng);
+      auto mapNulls = nullsFor(outerAt.total, nulls, rng);
+      auto keys = strings(
+          0,
+          rng,
+          [&](vector_size_t, std::string& out) {
+            out = vocab[rng() % vocab.size()];
+          },
+          VARCHAR(),
+          mapAt.total);
+      const auto innerAt = entries(mapAt.total, 0, 3, rng);
+      auto innerNulls = nullsFor(mapAt.total, nulls, rng);
+      auto structNulls = nullsFor(innerAt.total, nulls, rng);
+      auto x = flat<int32_t>(
+          INTEGER(),
+          nulls,
+          rng,
+          [&](vector_size_t) { return static_cast<int32_t>(rng() % 1000); },
+          innerAt.total);
+      // Microsecond precision: what every writer keeps.
+      auto y = flat<Timestamp>(
+          TIMESTAMP(),
+          nulls,
+          rng,
+          [&](vector_size_t) {
+            const auto seconds =
+                1'726'000'000 + static_cast<int64_t>(rng() % 3'600'000);
+            const auto nanos = (rng() % 1'000'000) * 1000;
+            return Timestamp(seconds, nanos);
+          },
+          innerAt.total);
+      auto structs =
+          structOf({"x", "y"}, {x, y}, std::move(structNulls), innerAt.total);
+      auto inner =
+          arrayOf(mapAt.total, std::move(innerNulls), innerAt, structs);
+      auto maps = mapOf(outerAt.total, std::move(mapNulls), mapAt, keys, inner);
+      auto outer = arrayOf(kRowsPerBatch, std::move(outerNulls), outerAt, maps);
+      return makeRow({"pid", "key", "deep"}, {pid, key(), outer});
+    }
+    case Family::kArrayIntNulls: {
+      // An array of 900 to 1100 ints, nullPerMille of them null.
+      const auto at = entries(kRowsPerBatch, 900, 1100, rng);
+      auto values = flat<int32_t>(
+          INTEGER(),
+          0,
+          rng,
+          [&](vector_size_t) { return static_cast<int32_t>(rng() % 100000); },
+          at.total);
+      values->setNulls(nullsPerMille(at.total, spec.nullPerMille, rng));
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, values);
+      return makeRow({"pid", "key", "values"}, {pid, key(), array});
+    }
+    case Family::kNestedOptional: {
+      // The optional fields of a wide table in an array of 0 to 8 structs:
+      // 50 bigints, half null in 0.1% of the structs and half in 99.9%;
+      // nullPercent of the structs null.
+      const auto at = entries(kRowsPerBatch, 0, 8, rng);
+      std::vector<std::string> names;
+      std::vector<VectorPtr> fields;
+      for (int col = 0; col < 50; ++col) {
+        names.push_back("f" + std::to_string(col));
+        auto field = flat<int64_t>(
+            BIGINT(),
+            0,
+            rng,
+            [&, col](vector_size_t i) {
+              return int64_t{batch} * kRowsPerBatch * 8 + i + col;
+            },
+            at.total);
+        field->setNulls(nullsPerMille(at.total, col < 25 ? 1 : 999, rng));
+        fields.push_back(std::move(field));
+      }
+      auto structNulls = nullsFor(at.total, nulls, rng);
+      auto structs = structOf(
+          std::move(names),
+          std::move(fields),
+          std::move(structNulls),
+          at.total);
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, structs);
+      return makeRow({"pid", "key", "arr"}, {pid, key(), array});
+    }
+    case Family::kNestedDense: {
+      // An array of 10 structs of 20 bigints, nullPercent of each field
+      // null.
+      const auto at = entries(kRowsPerBatch, 10, 10, rng);
+      std::vector<std::string> names;
+      std::vector<VectorPtr> fields;
+      for (int col = 0; col < 20; ++col) {
+        names.push_back("f" + std::to_string(col));
+        fields.push_back(flat<int64_t>(
+            BIGINT(),
+            nulls,
+            rng,
+            [&](vector_size_t) { return static_cast<int64_t>(rng() % 100000); },
+            at.total));
+      }
+      auto structs =
+          structOf(std::move(names), std::move(fields), nullptr, at.total);
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, structs);
+      return makeRow({"pid", "key", "arr"}, {pid, key(), array});
+    }
+    case Family::kNestedDead: {
+      // An array of 0 to 8 structs of four fields with values and 32 null
+      // in every row: constant nulls, and flat vectors whose every row is
+      // null.
+      const auto at = entries(kRowsPerBatch, 0, 8, rng);
+      std::vector<std::string> names{"a", "b", "c", "d"};
+      std::vector<VectorPtr> fields;
+      fields.push_back(flat<int32_t>(
+          INTEGER(),
+          0,
+          rng,
+          [&](vector_size_t) { return static_cast<int32_t>(rng() % 1000); },
+          at.total));
+      fields.push_back(flat<int64_t>(
+          BIGINT(),
+          0,
+          rng,
+          [&](vector_size_t) { return static_cast<int64_t>(rng() % 100000); },
+          at.total));
+      fields.push_back(flat<double>(
+          DOUBLE(),
+          0,
+          rng,
+          [&](vector_size_t) { return (rng() % 1'000'000) / 100.0; },
+          at.total));
+      fields.push_back(strings(
+          0,
+          rng,
+          [&](vector_size_t, std::string& out) {
+            randomChars(rng, 4 + rng() % 9, out);
+          },
+          VARCHAR(),
+          at.total));
+      const std::array<TypePtr, 4> types{
+          BIGINT(), INTEGER(), DOUBLE(), VARCHAR()};
+      for (int col = 0; col < 32; ++col) {
+        names.push_back("dead" + std::to_string(col));
+        const auto& type = types[(col / 2) % types.size()];
+        if (col % 2 == 0) {
+          fields.push_back(
+              BaseVector::createNullConstant(type, at.total, inputPool()));
+          continue;
+        }
+        VectorPtr dead;
+        switch (type->kind()) {
+          case TypeKind::BIGINT:
+            dead = flat<int64_t>(
+                type,
+                0,
+                rng,
+                [](vector_size_t) { return int64_t{0}; },
+                at.total);
+            break;
+          case TypeKind::INTEGER:
+            dead = flat<int32_t>(
+                type,
+                0,
+                rng,
+                [](vector_size_t) { return int32_t{0}; },
+                at.total);
+            break;
+          case TypeKind::DOUBLE:
+            dead = flat<double>(
+                type, 0, rng, [](vector_size_t) { return 0.0; }, at.total);
+            break;
+          default:
+            dead = strings(
+                0, rng, [](vector_size_t, std::string&) {}, type, at.total);
+            break;
+        }
+        dead->setNulls(
+            AlignedBuffer::allocate<bool>(at.total, inputPool(), bits::kNull));
+        fields.push_back(std::move(dead));
+      }
+      auto structs =
+          structOf(std::move(names), std::move(fields), nullptr, at.total);
+      auto array = arrayOf(kRowsPerBatch, nullptr, at, structs);
+      return makeRow({"pid", "key", "arr"}, {pid, key(), array});
+    }
+    case Family::kStructDense: {
+      // A struct of 50 bigints, nullPercent of the structs null; the
+      // fields have no nulls of their own.
+      std::vector<std::string> names;
+      std::vector<VectorPtr> fields;
+      for (int col = 0; col < 50; ++col) {
+        names.push_back("f" + std::to_string(col));
+        fields.push_back(flat<int64_t>(BIGINT(), 0, rng, [&](vector_size_t) {
+          return static_cast<int64_t>(rng() % 100000);
+        }));
+      }
+      auto structNulls = nullsFor(kRowsPerBatch, nulls, rng);
+      auto structure = structOf(
+          std::move(names),
+          std::move(fields),
+          std::move(structNulls),
+          kRowsPerBatch);
+      return makeRow({"pid", "key", "st"}, {pid, key(), structure});
+    }
+    case Family::kStructChain: {
+      // Eight structs nested in one another, each of a bigint and the next
+      // one, nullPercent of each null; the bigints have no nulls of their
+      // own.
+      VectorPtr chain;
+      for (int level = 8; level >= 1; --level) {
+        std::vector<std::string> names{"v" + std::to_string(level)};
+        std::vector<VectorPtr> fields{
+            flat<int64_t>(BIGINT(), 0, rng, [&](vector_size_t) {
+              return static_cast<int64_t>(rng() % 100000);
+            })};
+        if (chain != nullptr) {
+          names.push_back("s" + std::to_string(level + 1));
+          fields.push_back(std::move(chain));
+        }
+        auto structNulls = nullsFor(kRowsPerBatch, nulls, rng);
+        chain = structOf(
+            std::move(names),
+            std::move(fields),
+            std::move(structNulls),
+            kRowsPerBatch);
+      }
+      return makeRow({"pid", "key", "s1"}, {pid, key(), chain});
+    }
+    case Family::kLowCardComplex: {
+      // A struct of an int and a word, and an array of 0 to 3 words, each
+      // of four values only: struct k holds 100 + k and word k, array k the
+      // first k of three other words.
+      const auto& vocab = lowCardVocabulary();
+      std::vector<int32_t> structValue(kRowsPerBatch);
+      std::vector<vector_size_t> arrayValue(kRowsPerBatch);
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        structValue[i] = static_cast<int32_t>(rng() % 4);
+      }
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        arrayValue[i] = static_cast<vector_size_t>(rng() % 4);
+      }
+      auto a = flat<int32_t>(INTEGER(), 0, rng, [&](vector_size_t i) {
+        return 100 + structValue[i];
+      });
+      auto b = strings(0, rng, [&](vector_size_t i, std::string& out) {
+        out = vocab[structValue[i]];
+      });
+      auto structure = structOf({"a", "b"}, {a, b}, nullptr, kRowsPerBatch);
+      const auto at = entries(arrayValue);
+      std::vector<int32_t> word(at.total);
+      for (vector_size_t i = 0, next = 0; i < kRowsPerBatch; ++i) {
+        for (vector_size_t k = 0; k < arrayValue[i]; ++k) {
+          word[next++] = 4 + k;
+        }
+      }
+      auto words = strings(
+          0,
+          rng,
+          [&](vector_size_t i, std::string& out) { out = vocab[word[i]]; },
+          VARCHAR(),
+          at.total);
+      auto tags = arrayOf(kRowsPerBatch, nullptr, at, words);
+      return makeRow(
+          {"pid", "key", "st", "tags"}, {pid, key(), structure, tags});
+    }
+    case Family::kArraysOptional: {
+      // The optional fields of the nested family as arrays of their own:
+      // 50 arrays of bigints, all of one length per row, 0 to 8; half null
+      // in 0.1% of the elements and half in 99.9%.
+      const auto at = entries(kRowsPerBatch, 0, 8, rng);
+      std::vector<std::string> names{"pid", "key"};
+      std::vector<VectorPtr> columns{pid, key()};
+      for (int col = 0; col < 50; ++col) {
+        names.push_back("f" + std::to_string(col));
+        auto values = flat<int64_t>(
+            BIGINT(),
+            0,
+            rng,
+            [&, col](vector_size_t i) {
+              return int64_t{batch} * kRowsPerBatch * 8 + i + col;
+            },
+            at.total);
+        values->setNulls(nullsPerMille(at.total, col < 25 ? 1 : 999, rng));
+        columns.push_back(arrayOf(kRowsPerBatch, nullptr, at, values));
+      }
+      return makeRow(std::move(names), std::move(columns));
+    }
+    case Family::kLowCardArray: {
+      // An array of one of four values - none, either or both of two words
+      // - whose serialized forms fit one string dictionary together.
+      const auto& vocab = lowCardVocabulary();
+      std::vector<uint32_t> mask(kRowsPerBatch);
+      std::vector<vector_size_t> sizes(kRowsPerBatch);
+      for (vector_size_t i = 0; i < kRowsPerBatch; ++i) {
+        mask[i] = static_cast<uint32_t>(rng() % 4);
+        sizes[i] = static_cast<vector_size_t>((mask[i] & 1) + (mask[i] >> 1));
+      }
+      const auto at = entries(sizes);
+      std::vector<uint32_t> word;
+      word.reserve(at.total);
+      for (const auto m : mask) {
+        for (uint32_t w = 0; w < 2; ++w) {
+          if ((m >> w) & 1) {
+            word.push_back(w);
+          }
+        }
+      }
+      auto words = strings(
+          0,
+          rng,
+          [&](vector_size_t i, std::string& out) { out = vocab[word[i]]; },
+          VARCHAR(),
+          at.total);
+      auto tags = arrayOf(kRowsPerBatch, nullptr, at, words);
+      return makeRow({"pid", "key", "tags"}, {pid, key(), tags});
     }
   }
   BOLT_UNREACHABLE();
@@ -1277,7 +1980,9 @@ RowTypePtr dataType(const Case& c) {
 
 // ---- Writers ---------------------------------------------------------------
 
-enum class Writer { kCell, kCellNoDict, kV1, kV2 };
+/// CellNoDict is Cell without string dictionaries; CellUnsealedNulls is
+/// Cell that never seals a window for its null memory.
+enum class Writer { kCell, kCellNoDict, kV1, kV2, kCellUnsealedNulls };
 
 const char* writerName(Writer writer) {
   switch (writer) {
@@ -1289,6 +1994,8 @@ const char* writerName(Writer writer) {
       return "V1";
     case Writer::kV2:
       return "V2";
+    case Writer::kCellUnsealedNulls:
+      return "CellUnsealedNulls";
   }
   return "?";
 }
@@ -1297,6 +2004,7 @@ int32_t writerType(Writer writer) {
   switch (writer) {
     case Writer::kCell:
     case Writer::kCellNoDict:
+    case Writer::kCellUnsealedNulls:
       return static_cast<int32_t>(ShuffleWriterType::Cell);
     case Writer::kV1:
       return static_cast<int32_t>(ShuffleWriterType::V1);
@@ -1307,7 +2015,8 @@ int32_t writerType(Writer writer) {
 }
 
 bool isCell(Writer writer) {
-  return writer == Writer::kCell || writer == Writer::kCellNoDict;
+  return writer == Writer::kCell || writer == Writer::kCellNoDict ||
+      writer == Writer::kCellUnsealedNulls;
 }
 
 std::string tempPath(const char* name) {
@@ -1342,6 +2051,10 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
   options.partitionWriterOptions.compressionType = benchmarkCodec();
   options.partitionWriterOptions.compressionLevel = benchmarkCodecLevel();
   options.cellOptions.enableStringDictionary = writer != Writer::kCellNoDict;
+  if (writer == Writer::kCellUnsealedNulls) {
+    // Neither the null memory nor a reclaim's share of it closes a window.
+    options.cellOptions.nullMemLimitBytes = std::numeric_limits<int64_t>::max();
+  }
   options.cellOptions.streamCompression =
       FLAGS_bolt_benchmark_shuffle_cell_stream_compression;
   options.cellOptions.adaptiveCompression =
@@ -1785,6 +2498,9 @@ void registerCase(const CaseSpec& spec, const std::vector<Writer>& writers) {
     if (writer == Writer::kCellNoDict && !isDictionaryFamily(spec.family)) {
       continue;
     }
+    if (writer == Writer::kCellUnsealedNulls && !hasHeavyNulls(spec)) {
+      continue;
+    }
     const std::string prefix = spec.name() + "/" + writerName(writer);
     folly::addBenchmark(
         __FILE__,
@@ -1869,6 +2585,7 @@ std::vector<Writer> parseWriters() {
   }
   if (cell) {
     writers.push_back(Writer::kCellNoDict);
+    writers.push_back(Writer::kCellUnsealedNulls);
   }
   return writers;
 }
@@ -1915,12 +2632,14 @@ int main(int argc, char** argv) {
       continue;
     }
     if (FLAGS_bolt_benchmark_shuffle_list) {
+      // A rate in per mille shows as its whole percent, and in full after
+      // the other fields.
       printf(
-          "%-16s %-24s P=%-6d nulls=%-3d input=%lldMB%s%s\n",
+          "%-16s %-24s P=%-6d nulls=%-3d input=%lldMB%s%s%s\n",
           spec.id.c_str(),
           familyName(spec.family),
           spec.partitions,
-          spec.nullPercent,
+          spec.nullPerMille > 0 ? spec.nullPerMille / 10 : spec.nullPercent,
           static_cast<long long>(
               FLAGS_bolt_benchmark_shuffle_input_mb > 0
                   ? FLAGS_bolt_benchmark_shuffle_input_mb
@@ -1928,6 +2647,9 @@ int main(int argc, char** argv) {
           spec.skewed ? " skewed" : "",
           spec.memLimitMb > 0
               ? (" memLimit=" + std::to_string(spec.memLimitMb) + "MB").c_str()
+              : "",
+          spec.nullPerMille > 0
+              ? (" nullPerMille=" + std::to_string(spec.nullPerMille)).c_str()
               : "");
       continue;
     }
