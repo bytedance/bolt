@@ -1486,7 +1486,11 @@ void buildNullBody(
   auto* tags = out->asMutable<uint8_t>() + tagStart;
   ::memset(tags, 0, tagBytes);
   for (uint32_t col = 0; col < numColumns; ++col) {
-    const auto summary = in.nulls->summarize(pid, col, rows);
+    const uint32_t positions =
+        in.columnPositions != nullptr && in.columnPositions[col] != nullptr
+        ? in.columnPositions[col][pid]
+        : rows;
+    const auto summary = in.nulls->summarize(pid, col, positions);
     setNullTag(tags, col, summary.tag);
   }
   // Records follow the tags for RAW_NULL columns, in column order, written

@@ -47,9 +47,16 @@ struct SplitBatch {
   const BatchNullClass* nullClass;
   uint32_t numRows;
   /// Position of row r within its partition in this batch. The splitter
-  /// adds its current window row count to locate the null bit. May be null
+  /// adds the partition's position base to locate the null bit. May be null
   /// when no column of this batch requires per-row null checks.
   const uint32_t* rowIndexInPid;
+  /// The numColumns layout columns this batch covers; nullptr: every column.
+  const uint32_t* columns = nullptr;
+  uint32_t numColumns = 0;
+  /// Per partition, how many positions the columns hold in the window
+  /// before this batch. nullptr: the window's rows, which split() then
+  /// advances by partition2RowCount; otherwise the caller advances its own.
+  const uint32_t* positionBase = nullptr;
 };
 
 /// Splits decoded column values into partitioned cells. Every (partition,
@@ -73,6 +80,11 @@ class CellSplitter {
       memory::MemoryPool& pool);
 
   void split(const SplitBatch& batch);
+
+  /// Per wire column, its position counts per partition, for its null
+  /// bodies; a nullptr entry, or none set, means the partition's rows. The
+  /// arrays must stay valid through every later output call.
+  void setColumnPositions(std::vector<const uint32_t*> positions);
 
   /// Switches one string column to dictionary form for the
   /// writer's lifetime and sets its encoding tag. Called by the probe before
@@ -122,6 +134,17 @@ class CellSplitter {
     return maxWindowRows_;
   }
 
+  /// Rows per partition in the current window.
+  const uint32_t* windowRowCounts() const {
+    return windowRowCounts_.data();
+  }
+
+  /// Window and partition seals so far; a seal zeroes the rows of the
+  /// partitions it closes.
+  uint64_t sealCount() const {
+    return sealCount_;
+  }
+
   int64_t nullBytes() const {
     return nulls_.allocatedBytes();
   }
@@ -164,6 +187,11 @@ class CellSplitter {
   void seal(const uint8_t* only);
 
   CellWindowInput windowInput() const;
+
+  const uint32_t* positionBase(const SplitBatch& batch) const {
+    return batch.positionBase != nullptr ? batch.positionBase
+                                         : windowRowCounts_.data();
+  }
 
   /// Boolean values as 0/1 bytes of a Raw Data stream.
   template <bool kHasNulls>
@@ -298,6 +326,8 @@ class CellSplitter {
   std::vector<uint32_t> windowRowCounts_;
   uint64_t totalWindowRows_{0};
   uint32_t maxWindowRows_{0};
+  uint64_t sealCount_{0};
+  std::vector<const uint32_t*> columnPositions_;
   /// One bit per wire column, set by enableDictionary for the writer lifetime.
   std::vector<uint8_t> encodingTags_;
   /// spillPartitions() scratch: (bytes, pid) candidates and the Run's mask.
