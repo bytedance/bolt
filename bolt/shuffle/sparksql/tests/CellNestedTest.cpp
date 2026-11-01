@@ -766,6 +766,8 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
     struct CellOutput {
       bool rss;
       bool compressed;
+      bool nested;
+      bool nativeNestedTypes;
       test::WrittenShuffle written;
     };
     std::vector<CellOutput> outputs;
@@ -789,9 +791,11 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
           tune(options.cellOptions, rss);
         }
         auto written = test::writeShuffle(options, input, pool());
+        const bool native = options.cellOptions.nativeNestedTypes;
+        const bool nested = native && CellNestedLayout::supports(rowType);
         {
           SCOPED_TRACE(rss ? "rss" : "local");
-          if (CellNestedLayout::supports(rowType)) {
+          if (nested) {
             EXPECT_GT(written.metrics.flattenTime, 0);
             EXPECT_EQ(written.metrics.convertTime, 0);
           } else if (hasComplexColumns(rowType)) {
@@ -802,7 +806,8 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
             check(written, rss);
           }
         }
-        outputs.push_back({rss, compressed, std::move(written)});
+        outputs.push_back(
+            {rss, compressed, nested, native, std::move(written)});
       }
     }
     // V1 must read back the input as well, or it is no reference.
@@ -836,12 +841,13 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
               output.compressed ? lz4.get() : nullptr,
               pool(),
               shape.batchSize,
-              shape.batchByteSize);
+              shape.batchByteSize,
+              output.nativeNestedTypes);
           {
             SCOPED_TRACE("against the input");
             test::expectPartitionRows(rows[pid], batches, pid, shape.batchSize);
           }
-          if (CellNestedLayout::supports(rowType)) {
+          if (output.nested) {
             for (const auto& batch : batches) {
               expectStructNullsFolded(*batch);
             }
@@ -1119,6 +1125,29 @@ TEST_F(CellNestedTest, wrappedAndOverlappingInput) {
           encodingOf);
       roundTrip(input, numPartitions);
     }
+  }
+}
+
+TEST_F(CellNestedTest, adapterWhenNestedTypesAreNotNative) {
+  // With nativeNestedTypes off on both sides, every nested schema goes
+  // through the adapter's binary column, converted and not flattened, and
+  // reads back as it does in a nested layout.
+  NestedVectorMaker::Options options;
+  options.nullPercent = {10, 20, 10};
+  options.wrapPercent = 50;
+  options.scatteredPercent = 50;
+  for (const auto& type : {deepRowType(), deepNestedType()}) {
+    SCOPED_TRACE(type->toString());
+    ASSERT_TRUE(CellNestedLayout::supports(type));
+    const auto input = makeInput(type, options, {300, 1, 700}, 7, 23);
+    roundTrip(
+        input,
+        7,
+        [](CellShuffleOptions& cell, bool) { cell.nativeNestedTypes = false; },
+        [](const test::WrittenShuffle& written, bool) {
+          EXPECT_GT(written.metrics.convertTime, 0);
+          EXPECT_EQ(written.metrics.flattenTime, 0);
+        });
   }
 }
 

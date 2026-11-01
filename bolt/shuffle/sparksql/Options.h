@@ -125,6 +125,13 @@ struct CellShuffleOptions {
   // codec call, and tried again after a growing stretch of skipped bytes in
   // case its data changed. Off, every frame is compressed and judged.
   bool adaptiveCompression = true;
+  // Flatten ARRAY, MAP and ROW columns into plain columns of a nested
+  // layout (cell/CellFormat.h). Off, the type adapter packs them row by row
+  // into one binary column, as before nested layouts existed: a fallback
+  // for wide nested schemas at high partition counts, whose per-stream
+  // state the adapter's single column avoids. The reader must be set alike
+  // (ShuffleReaderOptions::cellNativeNestedTypes).
+  bool nativeNestedTypes = true;
 
   /// Returns all options in a human readable form.
   std::string toString() const;
@@ -176,6 +183,11 @@ struct ShuffleReaderOptions {
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 
   bool preferCellShuffle = false;
+
+  // The writer side's CellShuffleOptions::nativeNestedTypes: whether Cell
+  // payloads carry nested columns in a nested layout or packed by the type
+  // adapter. Both sides must agree; the payloads do not say.
+  bool cellNativeNestedTypes = true;
 
   /// Returns the options in a human readable form.
   std::string toString() const;

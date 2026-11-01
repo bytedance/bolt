@@ -180,14 +180,15 @@ inline WrittenShuffle writeShuffle(
 
 /// Every batch CellShuffleReader decodes from one partition's bytes, each
 /// checked to be a well-formed vector. `codec` may be null when nothing was
-/// compressed.
+/// compressed; `nativeNestedTypes` is the writer's option of that name.
 inline std::vector<RowVectorPtr> readPartition(
     const std::string& bytes,
     const RowTypePtr& type,
     Codec* codec,
     memory::MemoryPool* pool,
     int32_t batchSize,
-    int64_t batchByteSize) {
+    int64_t batchByteSize,
+    bool nativeNestedTypes = true) {
   CellShuffleReader reader(
       std::make_shared<sparksql::test::MemoryReaderStreamIterator>(
           std::vector<std::vector<char>>{
@@ -197,7 +198,8 @@ inline std::vector<RowVectorPtr> readPartition(
       arrow::default_memory_pool(),
       pool,
       batchSize,
-      batchByteSize);
+      batchByteSize,
+      nativeNestedTypes);
   std::vector<RowVectorPtr> batches;
   while (auto batch = reader.next()) {
     // What a consumer that validates, slices or resizes the batch relies

@@ -159,7 +159,8 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
               inputType.names().begin() + 1, inputType.names().end()),
           std::vector<TypePtr>(
               inputType.children().begin() + 1, inputType.children().end()));
-  if (CellNestedLayout::supports(logicalType)) {
+  if (options_.cellOptions.nativeNestedTypes &&
+      CellNestedLayout::supports(logicalType)) {
     // ARRAY, MAP and ROW columns flatten into plain columns, a container's
     // elements at positions of their own.
     nested_ = std::make_unique<CellNestedLayout>(std::move(logicalType));

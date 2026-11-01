@@ -58,7 +58,7 @@ std::string CellShuffleOptions::toString() const {
       "cellMemoryCapBytes={} "
       "checkpointPartitionBytes={} nullMemLimitBytes={} "
       "enableStringDictionary={} coalesceMergedRuns={} compressSpill={} "
-      "streamCompression={} adaptiveCompression={}",
+      "streamCompression={} adaptiveCompression={} nativeNestedTypes={}",
       cellMemoryCapBytes,
       checkpointPartitionBytes,
       nullMemLimitBytes,
@@ -66,7 +66,8 @@ std::string CellShuffleOptions::toString() const {
       coalesceMergedRuns,
       compressSpill,
       streamCompression,
-      adaptiveCompression);
+      adaptiveCompression,
+      nativeNestedTypes);
 }
 
 std::string ShuffleReaderOptions::toString() const {
@@ -75,7 +76,8 @@ std::string ShuffleReaderOptions::toString() const {
       "shuffleBatchByteSize={} shuffleBufferSize={} numPartitions={} "
       "partitionShortName={} forceShuffleWriterType={} rowFormat={} "
       "rowBasedShuffleThreshold={} checksumEnabled={} "
-      "reuseBufferedInputStream={} reuseColumnBuffer={}",
+      "reuseBufferedInputStream={} reuseColumnBuffer={} "
+      "preferCellShuffle={} cellNativeNestedTypes={}",
       arrow::util::Codec::GetCodecAsString(compressionType),
       codecBackend,
       batchSize,
@@ -88,7 +90,9 @@ std::string ShuffleReaderOptions::toString() const {
       rowBasedShuffleThreshold,
       checksumEnabled,
       reuseBufferedInputStream,
-      reuseColumnBuffer);
+      reuseColumnBuffer,
+      preferCellShuffle,
+      cellNativeNestedTypes);
 }
 
 std::string PartitionWriterOptions::toString() const {
