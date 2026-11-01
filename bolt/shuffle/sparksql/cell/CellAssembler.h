@@ -30,7 +30,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// its owner's entries add up to, counted from their stream before any
 /// value is read. A batch takes the rows' next positions, then of each
 /// container's space as many as the lengths just appended call for, and so
-/// down, and comes out as ARRAY and MAP vectors over the spaces' batches.
+/// down, and comes out as ARRAY, MAP and ROW vectors over the spaces'
+/// batches, a ROW null where its presence is.
 ///
 /// Every check of a flat payload holds per space; besides, a length must
 /// not be negative, a length stream must hold exactly its entries' lengths,

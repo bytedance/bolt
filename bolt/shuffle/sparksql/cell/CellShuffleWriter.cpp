@@ -107,8 +107,8 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
           std::vector<TypePtr>(
               inputType.children().begin() + 1, inputType.children().end()));
   if (CellNestedLayout::supports(logicalType)) {
-    // ARRAY and MAP columns flatten into plain columns at positions of
-    // their own.
+    // ARRAY, MAP and ROW columns flatten into plain columns, a container's
+    // elements at positions of their own.
     nested_ = std::make_unique<CellNestedLayout>(std::move(logicalType));
     layout_ = nested_->layout();
   } else {
@@ -573,7 +573,11 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // shrink() never frees a chunk with a live cell, so this is safe while
   // the output reads cells - and a window seal, which recycles every cell
   // before writing its null bodies, is exactly when most chunks are idle.
+  // The flattener's scratch goes too, unless a batch is being flattened.
   *actual = allocator_->shrink();
+  if (flattener_ != nullptr) {
+    *actual += flattener_->releaseScratch();
+  }
   pressure_.freedIdle += *actual;
   boltPool_->release();
   if (stopped_ || splitter_->isWritingOutput()) {
@@ -695,7 +699,11 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
     LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString();
   }
 
-  // The splitter has released its window; return idle chunks and reservation.
+  // The splitter has released its window; return idle chunks, the
+  // flattener's scratch and reservation.
+  if (flattener_ != nullptr) {
+    flattener_->releaseScratch();
+  }
   if (allocator_ != nullptr) {
     allocator_->shrink();
   }

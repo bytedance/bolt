@@ -3291,7 +3291,7 @@ TEST_F(CellWriterTest, reclaimAfterStopIsHarmless) {
 
 TEST_F(CellWriterTest, complexColumnsRoundTripThroughWriterAndReader) {
   // Callers hand logical rows to the writer and get logical rows back from
-  // the reader; the CompactRow packing stays inside the Cell classes.
+  // the reader; the flattening stays inside the Cell classes.
   constexpr int32_t kPartitions = 3;
   constexpr vector_size_t kRows = 3000;
   auto data = makeRowVector(
@@ -3320,7 +3320,8 @@ TEST_F(CellWriterTest, complexColumnsRoundTripThroughWriterAndReader) {
   CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
   ASSERT_TRUE(writer.split(withPid(pids, data), 0).ok());
   ASSERT_TRUE(writer.stop().ok());
-  EXPECT_GT(writer.metrics().convertTime, 0);
+  EXPECT_GT(writer.metrics().flattenTime, 0);
+  EXPECT_EQ(writer.metrics().convertTime, 0);
 
   const auto file = readFile();
   auto codec = createCodec(
