@@ -26,9 +26,21 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
+CellNestedLayout::Kind kindOf(const TypePtr& type) {
+  switch (type->kind()) {
+    case TypeKind::ARRAY:
+      return CellNestedLayout::Kind::kArray;
+    case TypeKind::MAP:
+      return CellNestedLayout::Kind::kMap;
+    case TypeKind::ROW:
+      return CellNestedLayout::Kind::kRow;
+    default:
+      return CellNestedLayout::Kind::kLeaf;
+  }
+}
+
 bool isComplex(const TypePtr& type) {
-  return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
-      type->kind() == TypeKind::ROW;
+  return kindOf(type) != CellNestedLayout::Kind::kLeaf;
 }
 
 /// Adds the columns `type` flattens into to `columns`; false when it holds a
@@ -115,10 +127,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
 uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
   const auto id = static_cast<uint32_t>(nodes_.size());
   Node node;
-  node.kind = type->kind() == TypeKind::ARRAY ? Kind::kArray
-      : type->kind() == TypeKind::MAP         ? Kind::kMap
-      : type->kind() == TypeKind::ROW         ? Kind::kRow
-                                              : Kind::kLeaf;
+  node.kind = kindOf(type);
   node.type = type;
   node.space = space;
   node.spaceColumn = static_cast<uint32_t>(spaces_[space].columns.size());
@@ -130,16 +139,14 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
     maxDepth_ = std::max(maxDepth_, depth);
     spaces_.push_back(Space{id, depth, {}, {}, {}, nullptr});
   }
+  // A ROW's fields have its positions, a container's children those of its
+  // space.
+  const uint32_t childSpace = node.kind == Kind::kRow ? space : node.ownedSpace;
   nodes_.push_back(std::move(node));
-  if (nodes_[id].kind != Kind::kLeaf) {
-    // A ROW's fields have its positions, a container's children those of
-    // its space.
-    const uint32_t childSpace =
-        nodes_[id].kind == Kind::kRow ? space : nodes_[id].ownedSpace;
-    for (uint32_t i = 0; i < type->size(); ++i) {
-      const uint32_t child = addNode(type->childAt(i), childSpace);
-      nodes_[id].children.push_back(child);
-    }
+  for (uint32_t i = 0; i < type->size(); ++i) {
+    // Adding the child may reallocate nodes_.
+    const uint32_t child = addNode(type->childAt(i), childSpace);
+    nodes_[id].children.push_back(child);
   }
   return id;
 }

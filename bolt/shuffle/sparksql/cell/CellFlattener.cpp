@@ -205,6 +205,13 @@ T* CellFlattener::scratch(BufferPtr& buffer, size_t n) {
       resetBuffer(buffer, std::max<size_t>(n, 1) * sizeof(T), &pool_));
 }
 
+template <typename T>
+const BufferPtr&
+CellFlattener::copyToScratch(BufferPtr& buffer, const T* data, size_t n) {
+  std::copy_n(data, n, scratch<T>(buffer, n));
+  return buffer;
+}
+
 void CellFlattener::followSeals() {
   if (splitter_.sealCount() == seals_) {
     return;
@@ -258,31 +265,7 @@ void CellFlattener::prepare(const RowVector& rv) {
       klass = classifyNulls(decoded_[col], numRows_);
       continue;
     }
-    auto& decoded = input.decoded;
-    auto& view = views_[col];
-    view.reset();
-    if (decoded.isIdentityMapping()) {
-      view = input.values;
-    } else if (decoded.isConstantMapping()) {
-      view =
-          BaseVector::wrapInConstant(numRows_, decoded.index(0), input.values);
-    } else {
-      std::copy_n(
-          decoded.indices(),
-          numRows_,
-          scratch<vector_size_t>(viewIndices_[col], numRows_));
-      BufferPtr nulls;
-      if (decoded.mayHaveNulls()) {
-        const auto words = bits::nwords(numRows_);
-        std::copy_n(
-            decoded.nulls(), words, scratch<uint64_t>(viewNulls_[col], words));
-        nulls = viewNulls_[col];
-      }
-      view = BaseVector::wrapInDictionary(
-          std::move(nulls), viewIndices_[col], numRows_, input.values);
-    }
-    decoded_[col].decode(*view);
-    klass = classifyNulls(decoded_[col], numRows_);
+    klass = viewRows(col);
   }
 
   // Loading lazy vectors and taking scratch may have pushed a remote
@@ -294,6 +277,30 @@ void CellFlattener::prepare(const RowVector& rv) {
     }
   }
   flattenNs_ += currentTimeNs() - start;
+}
+
+BatchNullClass CellFlattener::viewRows(uint32_t col) {
+  auto& input = inputs_[col];
+  auto& decoded = input.decoded;
+  auto& view = views_[col];
+  view.reset();
+  if (decoded.isIdentityMapping()) {
+    view = input.values;
+  } else if (decoded.isConstantMapping()) {
+    view = BaseVector::wrapInConstant(numRows_, decoded.index(0), input.values);
+  } else {
+    const BufferPtr& indices =
+        copyToScratch(viewIndices_[col], decoded.indices(), numRows_);
+    BufferPtr nulls;
+    if (decoded.mayHaveNulls()) {
+      nulls = copyToScratch(
+          viewNulls_[col], decoded.nulls(), bits::nwords(numRows_));
+    }
+    view = BaseVector::wrapInDictionary(
+        std::move(nulls), indices, numRows_, input.values);
+  }
+  decoded_[col].decode(*view);
+  return classifyNulls(decoded_[col], numRows_);
 }
 
 void CellFlattener::inputNode(uint32_t n, const VectorPtr& vector) {
@@ -375,19 +382,12 @@ void CellFlattener::inputRow(uint32_t n, const VectorPtr& vector) {
   if (!structs.isConstantMapping()) {
     const uint64_t* raw = structs.mayHaveNulls() ? structs.nulls() : nullptr;
     if (raw != nullptr && !bits::isAllSet(raw, 0, size, true)) {
-      if (structs.isIdentityMapping()) {
-        nulls = base->nulls();
-      } else {
-        const auto words = bits::nwords(size);
-        std::copy_n(raw, words, scratch<uint64_t>(input.structNulls, words));
-        nulls = input.structNulls;
-      }
+      nulls = structs.isIdentityMapping()
+          ? base->nulls()
+          : copyToScratch(input.structNulls, raw, bits::nwords(size));
     }
     if (!structs.isIdentityMapping()) {
-      std::copy_n(
-          structs.indices(),
-          size,
-          scratch<vector_size_t>(input.structIndices, size));
+      copyToScratch(input.structIndices, structs.indices(), size);
     }
   }
   VectorPtr presence;
@@ -728,12 +728,7 @@ void CellFlattener::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
   }
   touched_.clear();
 
-  const Entries entries{
-      pids,
-      chunk.contiguous ? nullptr : chunk.srcs->as<vector_size_t>(),
-      chunk.start,
-      chunk.size,
-      depth};
+  const Entries entries{pids, chunk.sources(), chunk.start, chunk.size, depth};
   for (const uint32_t y : space.containers) {
     emit(y, entries);
   }
@@ -766,8 +761,7 @@ BatchNullClass CellFlattener::view(uint32_t col, const Chunk& chunk) {
     uint64_t* nulls = decoded.mayHaveNulls()
         ? scratch<uint64_t>(viewNulls_[col], bits::nwords(n))
         : nullptr;
-    const vector_size_t* src =
-        chunk.contiguous ? nullptr : chunk.srcs->as<vector_size_t>();
+    const vector_size_t* src = chunk.sources();
     for (vector_size_t k = 0; k < n; ++k) {
       const vector_size_t j = src != nullptr ? src[k] : chunk.start + k;
       indices[k] = decoded.index(j);

@@ -322,10 +322,10 @@ void CellAssembler::appendSpace(
 
 vector_size_t* CellAssembler::offsets(uint32_t x, uint64_t entries) {
   auto& buffer = offsets_[x];
-  const uint64_t bytes = std::max<uint64_t>(entries, 1) * sizeof(vector_size_t);
+  const uint64_t size = std::max<uint64_t>(entries, 1);
+  const uint64_t bytes = size * sizeof(vector_size_t);
   if (buffer == nullptr) {
-    buffer = AlignedBuffer::allocate<vector_size_t>(
-        std::max<uint64_t>(entries, 1), pool_);
+    buffer = AlignedBuffer::allocate<vector_size_t>(size, pool_);
   } else if (buffer->capacity() < bytes) {
     AlignedBuffer::reallocate<vector_size_t>(
         &buffer,

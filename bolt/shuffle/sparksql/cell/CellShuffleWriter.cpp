@@ -77,9 +77,10 @@ RowVectorPtr sliceRows(
     memory::MemoryPool* pool) {
   const vector_size_t end = offset + length;
   const auto& columns = rv->children();
-  if (std::all_of(columns.begin(), columns.end(), [&](const auto& column) {
-        return column == nullptr || fieldsReach(*column, end);
-      })) {
+  const auto reaches = [&](const VectorPtr& column) {
+    return column == nullptr || fieldsReach(*column, end);
+  };
+  if (std::all_of(columns.begin(), columns.end(), reaches)) {
     return std::dynamic_pointer_cast<RowVector>(rv->slice(offset, length));
   }
   auto indices = allocateIndices(length, pool);
@@ -432,10 +433,7 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
             "than a Cell shuffle payload carries",
             CellNestedLayout::kMaxPositions);
       }
-      const int64_t flatten = flattener_->takeFlattenTimeNs();
-      metrics_.flattenTime += flatten;
-      metrics_.splitTime +=
-          static_cast<int64_t>(currentTimeNs() - start) - flatten;
+      addNestedSplitTime(start);
       const uint32_t half = numRows / 2;
       RETURN_NOT_OK(splitNested(sliceRows(rv, 0, half, boltPool_)));
       return splitNested(sliceRows(rv, half, numRows - half, boltPool_));
@@ -459,11 +457,15 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   inSplit_ = false;
 
   maybeCheckpoint();
+  addNestedSplitTime(start);
+  return arrow::Status::OK();
+}
+
+void CellShuffleWriter::addNestedSplitTime(uint64_t start) {
   // Flattening is no part of the split, as in the V1 writer.
   const int64_t flatten = flattener_->takeFlattenTimeNs();
   metrics_.flattenTime += flatten;
   metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start) - flatten;
-  return arrow::Status::OK();
 }
 
 void CellShuffleWriter::probeDictionary(
