@@ -23,14 +23,16 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// A row type with ARRAY and MAP columns as plain Cell columns: a nested
-/// layout of CellFormat.h. Its type tree is flattened in pre-order, one node
-/// per column: node n is column n of layout(), a leaf a column of its type,
-/// an ARRAY or MAP an Integer column of its entries' lengths, null where an
-/// entry is. The payload's rows are space 0, and every container owns a
-/// space of its own, numbered in pre-order, holding the elements of its
-/// non-null entries; a node's column has the positions of the space its
-/// parent owns. Describes the flattening only: no data passes through here.
+/// A row type with ARRAY, MAP and ROW columns as plain Cell columns: a
+/// nested layout of CellFormat.h. Its type tree is flattened in pre-order,
+/// one node per column: node n is column n of layout(), a leaf a column of
+/// its type, an ARRAY or MAP an Integer column of its entries' lengths, null
+/// where an entry is, a ROW a SmallInt column holding 1 at each non-null
+/// struct. The payload's rows are space 0, and every container owns a space
+/// of its own, numbered in pre-order, holding the elements of its non-null
+/// entries; a ROW owns none. A node's column has the positions of the space
+/// its parent owns or, below a ROW, the ROW's positions. Describes the
+/// flattening only: no data passes through here.
 class CellNestedLayout {
  public:
   static constexpr uint32_t kNone = ~0u;
@@ -44,6 +46,7 @@ class CellNestedLayout {
     kLeaf,
     kArray,
     kMap,
+    kRow,
   };
 
   struct Node {
@@ -54,9 +57,9 @@ class CellNestedLayout {
     uint32_t space;
     /// The column's index among its space's columns.
     uint32_t spaceColumn;
-    /// A container's space; kNone for a leaf.
+    /// A container's space; kNone for a leaf or a ROW.
     uint32_t ownedSpace{kNone};
-    /// An ARRAY's element; a MAP's key, then its value.
+    /// An ARRAY's element; a MAP's key, then its value; a ROW's fields.
     std::vector<uint32_t> children;
   };
 
@@ -76,10 +79,10 @@ class CellNestedLayout {
     RowTypePtr rowType;
   };
 
-  /// Whether `rowType` takes a nested layout: it has ARRAY or MAP columns,
-  /// no ROW at any depth, every leaf a supported type, and it flattens into
-  /// at most 65535 columns. Writer and reader decide alike from the same
-  /// logical row type.
+  /// Whether `rowType` takes a nested layout: it has ARRAY, MAP or ROW
+  /// columns, every leaf a supported type, and it flattens into at most
+  /// 65535 columns. Writer and reader decide alike from the same logical row
+  /// type.
   static bool supports(const RowTypePtr& rowType);
 
   /// `rowType` must be supported.
