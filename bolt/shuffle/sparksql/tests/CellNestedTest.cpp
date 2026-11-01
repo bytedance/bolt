@@ -2686,6 +2686,124 @@ TEST_F(CellNestedTest, fieldsShorterThanTheirStructs) {
   EXPECT_EQ(valueSizes(), before);
 }
 
+TEST_F(CellNestedTest, slicedBatchesKeepShortFields) {
+  // RowVector::slice slices every field of a struct, and a struct's fields
+  // may stop short of it where every struct from there on is null. The
+  // writer slices a batch past its byte bound, 8 MiB on a remote shuffle,
+  // and halves one whose elements pass a payload's positions; neither may
+  // cut such a field past its end.
+  const auto fieldsType = ROW({"a", "s"}, {BIGINT(), VARCHAR()});
+  // `size` structs, null at every fourth row and from `length` on, whose
+  // fields hold `length` rows.
+  const auto structs = [&](vector_size_t size, vector_size_t length) {
+    return std::make_shared<RowVector>(
+        pool(),
+        fieldsType,
+        makeNulls(
+            size, [&](auto row) { return row % 4 == 0 || row >= length; }),
+        size,
+        std::vector<VectorPtr>{
+            makeFlatVector<int64_t>(length, [](auto row) { return row * 3; }),
+            makeFlatVector<std::string>(
+                length, [](auto row) { return std::string(row % 17, 's'); })});
+  };
+  {
+    SCOPED_TRACE("sliced at the byte bound");
+    // About 12 MiB of 4 KiB strings: two slices on a remote shuffle, both
+    // past the 1000 rows of r's fields and the 500 of the struct in n.
+    constexpr vector_size_t kRows = 3000;
+    ShuffleInput input;
+    input.data.push_back(makeRowVector(
+        {"id", "pad", "r", "n"},
+        {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+         makeFlatVector<std::string>(
+             kRows, [](auto row) { return std::string(4096, 'a' + row % 26); }),
+         structs(kRows, 1000),
+         makeRowVector({"r"}, {structs(kRows, 500)})}));
+    auto& pids = input.pids.emplace_back(kRows);
+    for (vector_size_t row = 0; row < kRows; ++row) {
+      pids[row] = row % 7;
+    }
+    roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}});
+  }
+  {
+    SCOPED_TRACE("halved past the positions");
+    // Rows of 2^30 UNKNOWN elements, as in unknownElementsPastTheRowLimit:
+    // the batch is halved, and its second half again, past the 2 rows of
+    // r's fields.
+    constexpr vector_size_t kLength = 1 << 30;
+    const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
+    const auto rows = static_cast<vector_size_t>(lengths.size());
+    auto offsets = allocateOffsets(rows, pool());
+    auto sizes = allocateSizes(rows, pool());
+    for (vector_size_t row = 0; row < rows; ++row) {
+      offsets->asMutable<vector_size_t>()[row] = 0;
+      sizes->asMutable<vector_size_t>()[row] = lengths[row];
+    }
+    const auto data = makeRowVector(
+        {"id", "c", "r"},
+        {makeFlatVector<int64_t>(rows, [](auto row) { return row; }),
+         std::make_shared<ArrayVector>(
+             pool(),
+             ARRAY(UNKNOWN()),
+             nullptr,
+             rows,
+             offsets,
+             sizes,
+             BaseVector::createNullConstant(UNKNOWN(), kLength, pool())),
+         structs(rows, 2)});
+    for (const bool rss : {false, true}) {
+      SCOPED_TRACE(rss ? "rss" : "local");
+      ShuffleInput input;
+      input.data = {data};
+      input.pids = {std::vector<int32_t>(rows, 0)};
+      removeFiles();
+      ShuffleWriterOptions options;
+      options.partitioning = Partitioning::kHash;
+      options.partitionWriterOptions.numPartitions = 1;
+      options.partitionWriterOptions.dataFile = dataFile_;
+      if (rss) {
+        options.partitionWriterOptions.partitionWriterType =
+            PartitionWriterType::kCeleborn;
+        options.partitionWriterOptions.rssClient =
+            std::make_shared<test::RecordingRssClient>();
+      }
+      const auto written = test::writeShuffle(options, input, pool());
+      const auto batches = test::readPartition(
+          written.partitions[0],
+          asRowType(data->type()),
+          createCodec(
+              arrow::Compression::LZ4_FRAME,
+              CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true})
+              .get(),
+          pool(),
+          4096,
+          1 << 20);
+      vector_size_t next = 0;
+      for (const auto& batch : batches) {
+        const auto* ids = batch->childAt(0)->asFlatVector<int64_t>();
+        const auto* containers = batch->childAt(1)->as<ArrayVector>();
+        const auto* r = batch->childAt(2)->as<RowVector>();
+        ASSERT_NE(r, nullptr);
+        for (vector_size_t row = 0; row < batch->size(); ++row, ++next) {
+          ASSERT_LT(next, rows);
+          EXPECT_EQ(ids->valueAt(row), next);
+          EXPECT_EQ(containers->sizeAt(row), lengths[next]);
+          // Only row 1 holds a struct: a = 3, s = "s".
+          EXPECT_EQ(r->isNullAt(row), next != 1);
+          if (next == 1) {
+            EXPECT_EQ(r->childAt(0)->asFlatVector<int64_t>()->valueAt(row), 3);
+            EXPECT_EQ(
+                r->childAt(1)->asFlatVector<StringView>()->valueAt(row).str(),
+                "s");
+          }
+        }
+      }
+      EXPECT_EQ(next, rows);
+    }
+  }
+}
+
 TEST_F(CellNestedTest, dictionaryProbeTakesTheStructsStrings) {
   // The string fields of top-level structs, at any depth, have the rows'
   // positions and go into dictionary form as top-level strings do, null
