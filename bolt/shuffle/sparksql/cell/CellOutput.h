@@ -103,20 +103,19 @@ class CellOutput {
 ///
 /// Spill segments are runs in their wire form, written by the RunCompressor
 /// as any final run of the same bytes - or stored, with compressSpill off,
-/// for the merge to compress. A
-/// payload that is a single run (one spilled segment, or only resident
-/// cells) is a header plus a verbatim copy. With coalesceMergedRuns,
-/// several segments - or segments plus resident cells - are gathered
-/// stream-major and written as one run; without it, each segment stays a
-/// run of its own. A task whose data never needed a spill writes payloads
-/// straight from the live cells and touches no temporary file at all.
+/// for the merge to compress. The merge writes a payload's header, then its
+/// spilled segments, oldest first, each a run of its own and copied
+/// verbatim when final, and last - for the window still in memory - its
+/// resident cells as one more run. A task whose data never needed a spill
+/// writes payloads straight from the live cells and touches no temporary
+/// file at all.
 class LocalCellOutput final : public CellOutput, public PartialSpiller {
  public:
   /// `composite` holds the task's CompositeRowVector blocks, merged after
   /// this output's payloads in every partition; it must outlive this
   /// object. `options` gives the codec, the data file and the spill
-  /// directories; `pool` backs the gather/compress workspaces so they stay
-  /// inside task memory accounting and must outlive this object.
+  /// directories; `pool` backs the scratch and compression workspaces so
+  /// they stay inside task memory accounting and must outlive this object.
   LocalCellOutput(
       PartialSpiller& composite,
       const CellLayout* layout,
@@ -192,27 +191,15 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t pid,
       size_t from);
 
-  /// Appends a sealed payload of partition `pid`.
+  /// Appends one partition's sealed payload.
   void writeDiskPayload(
       DataFileWriter& out,
       const SealedPayload& payload,
-      const uint8_t* encodingTags,
-      uint32_t pid);
+      const uint8_t* encodingTags);
 
   /// Copies one spilled run segment into the data file: verbatim when it
   /// already is in final form, else through the compressor.
   void writeSpilledSegment(DataFileWriter& out, const SpillSegment& segment);
-
-  /// Coalesced merge: reads every spilled segment of one partition
-  /// (decompressing the ones compressed at spill time), lays their bytes
-  /// out stream-major in gather_, and appends the still-resident cells -
-  /// when `resident` is set - as the chronologically last piece of every
-  /// stream. Fills the per-stream sizes and returns the total.
-  uint64_t gatherPartitionRuns(
-      const std::vector<SpillSegment>& segments,
-      const CellWindowInput* resident,
-      uint32_t pid,
-      std::vector<uint64_t>& streamSizes);
 
   /// Writes partition `pid`'s resident cells to the data file as one run.
   void writeResidentRun(
@@ -221,17 +208,10 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       uint32_t pid,
       uint64_t total);
 
-  /// Writes the run gatherPartitionRuns() laid out in gather_.
-  void writeGatheredRun(
-      DataFileWriter& out,
-      uint64_t total,
-      const std::vector<uint64_t>& streamSizes);
-
   /// Appends one partition's payload for the current (unsealed) window:
   /// header, null body and row counts straight from memory, then the
-  /// mid-window spilled runs and the still-resident cells - coalesced into
-  /// one run, or as separate runs in that order. The residual never takes a
-  /// spill round-trip.
+  /// mid-window spilled runs and the still-resident cells as one more run,
+  /// in that order. The residual never takes a spill round-trip.
   void writeCurrentWindowPayload(
       DataFileWriter& out,
       const CellWindowInput& in,
@@ -253,11 +233,6 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   uint64_t compressTimeNs_{0};
   /// Every run's compression.
   RunCompressor compressor_;
-  /// Pool-backed workspaces of the coalesced merge, released after
-  /// finalize so their capacity never sits on the reservation.
-  BufferPtr runScratch_;
-  BufferPtr compressScratch_;
-  BufferPtr gather_;
 
   /// Every Run, oldest first. A partition's open payload owns its segments
   /// from openFrom_[pid] on; a seal moves them into the partition's
@@ -269,11 +244,9 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// Seals, and the partition payloads they closed.
   uint64_t numSeals_{0};
   uint64_t numSealedPayloads_{0};
-  /// The merge: spilled segments copied as they are or compressed on the
-  /// way, and payloads whose runs were gathered into one.
+  /// The merge: spilled segments copied as they are or compressed on the way.
   uint64_t copiedSegments_{0};
   uint64_t compressedSegments_{0};
-  uint64_t gatheredPayloads_{0};
   /// The window still in memory, borrowed by finalize() for its merge.
   const CellWindowInput* residual_{nullptr};
   bool residualHasData_{false};

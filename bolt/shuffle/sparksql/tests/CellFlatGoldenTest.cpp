@@ -609,17 +609,6 @@ TEST_F(CellFlatGoldenTest, flatSchemasKeepTheirBytes) {
       {"p7_none_null_seals", 7, false, false, nullSeals, true, false},
       {"p7_lz4_null_seals_rss", 7, true, true, nullSeals, true, false},
       {"p7_lz4_spills", 7, true, false, spills, false, true},
-      {"p7_lz4_spills_coalesced_raw",
-       7,
-       true,
-       false,
-       [](CellShuffleOptions& options) {
-         options.cellMemoryCapBytes = 4 << 20;
-         options.coalesceMergedRuns = true;
-         options.compressSpill = false;
-       },
-       false,
-       true},
       {"p1024_none_spills", 1024, false, false, spills, false, true},
       {"p7_lz4_spills_rss", 7, true, true, spills, true, false},
       // One partition: payloads sealed past their size and windows past
@@ -680,7 +669,6 @@ TEST_F(CellFlatGoldenTest, flatSchemasKeepTheirBytes) {
       {"p7_none_null_seals", 2517492, 0x1106137322994b0bULL},
       {"p7_lz4_null_seals_rss", 2195802, 0x96c55930ef2c427cULL},
       {"p7_lz4_spills", 2225204, 0xc5b10e613bdb4177ULL},
-      {"p7_lz4_spills_coalesced_raw", 2224672, 0xc66f85f1f0af1d01ULL},
       {"p1024_none_spills", 8607376, 0x461a472c16799b04ULL},
       {"p7_lz4_spills_rss", 2205597, 0xd4066274994f0980ULL},
       {"p1_lz4_seals", 2231503, 0x922c06cea263f3dbULL},
