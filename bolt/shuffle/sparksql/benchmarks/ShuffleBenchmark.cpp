@@ -97,8 +97,9 @@ DEFINE_string(
     bolt_benchmark_shuffle_writers,
     "Cell,V1,V2",
     "Writers to run, of Cell, V1, V2; whenever Cell runs, CellNoDict joins "
-    "the dictionary cases and CellUnsealedNulls, which never seals a window "
-    "for its null memory, the cases with heavy nulls.");
+    "the dictionary cases, CellUnsealedNulls, which never seals a window "
+    "for its null memory, the cases with heavy nulls, and CellAdapter, which "
+    "packs nested columns through the type adapter, the nested cases.");
 DEFINE_int64(
     bolt_benchmark_shuffle_input_mb,
     0,
@@ -1981,8 +1982,16 @@ RowTypePtr dataType(const Case& c) {
 // ---- Writers ---------------------------------------------------------------
 
 /// CellNoDict is Cell without string dictionaries; CellUnsealedNulls is
-/// Cell that never seals a window for its null memory.
-enum class Writer { kCell, kCellNoDict, kV1, kV2, kCellUnsealedNulls };
+/// Cell that never seals a window for its null memory; CellAdapter is Cell
+/// with nested columns packed by the type adapter instead of flattened.
+enum class Writer {
+  kCell,
+  kCellNoDict,
+  kV1,
+  kV2,
+  kCellUnsealedNulls,
+  kCellAdapter,
+};
 
 const char* writerName(Writer writer) {
   switch (writer) {
@@ -1996,6 +2005,8 @@ const char* writerName(Writer writer) {
       return "V2";
     case Writer::kCellUnsealedNulls:
       return "CellUnsealedNulls";
+    case Writer::kCellAdapter:
+      return "CellAdapter";
   }
   return "?";
 }
@@ -2005,6 +2016,7 @@ int32_t writerType(Writer writer) {
     case Writer::kCell:
     case Writer::kCellNoDict:
     case Writer::kCellUnsealedNulls:
+    case Writer::kCellAdapter:
       return static_cast<int32_t>(ShuffleWriterType::Cell);
     case Writer::kV1:
       return static_cast<int32_t>(ShuffleWriterType::V1);
@@ -2016,7 +2028,7 @@ int32_t writerType(Writer writer) {
 
 bool isCell(Writer writer) {
   return writer == Writer::kCell || writer == Writer::kCellNoDict ||
-      writer == Writer::kCellUnsealedNulls;
+      writer == Writer::kCellUnsealedNulls || writer == Writer::kCellAdapter;
 }
 
 std::string tempPath(const char* name) {
@@ -2051,6 +2063,9 @@ writerOptions(const Case& c, Writer writer, const std::string& dataFile) {
   options.partitionWriterOptions.compressionType = benchmarkCodec();
   options.partitionWriterOptions.compressionLevel = benchmarkCodecLevel();
   options.cellOptions.enableStringDictionary = writer != Writer::kCellNoDict;
+  // Nested columns packed into the adapter's binary column, as before
+  // nested layouts.
+  options.cellOptions.nativeNestedTypes = writer != Writer::kCellAdapter;
   if (writer == Writer::kCellUnsealedNulls) {
     // Neither the null memory nor a reclaim's share of it closes a window.
     options.cellOptions.nullMemLimitBytes = std::numeric_limits<int64_t>::max();
@@ -2330,7 +2345,8 @@ Read readBack(
         arrow::default_memory_pool(),
         pool.get(),
         /*batchSize=*/4096,
-        /*batchByteSize=*/1 << 20);
+        /*batchByteSize=*/1 << 20,
+        /*nativeNestedTypes=*/output.writer != Writer::kCellAdapter);
     const uint64_t start = clockNs();
     while (auto batch = reader.next()) {
       result.rows += batch->size();
@@ -2498,6 +2514,9 @@ void registerCase(const CaseSpec& spec, const std::vector<Writer>& writers) {
     if (writer == Writer::kCellNoDict && !isDictionaryFamily(spec.family)) {
       continue;
     }
+    if (writer == Writer::kCellAdapter && !isNestedFamily(spec.family)) {
+      continue;
+    }
     if (writer == Writer::kCellUnsealedNulls && !hasHeavyNulls(spec)) {
       continue;
     }
@@ -2586,6 +2605,7 @@ std::vector<Writer> parseWriters() {
   if (cell) {
     writers.push_back(Writer::kCellNoDict);
     writers.push_back(Writer::kCellUnsealedNulls);
+    writers.push_back(Writer::kCellAdapter);
   }
   return writers;
 }
