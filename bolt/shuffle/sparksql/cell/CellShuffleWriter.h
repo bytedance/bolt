@@ -132,6 +132,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// splitBatch() of a nested layout: halves a batch whose positions a
   /// payload cannot hold.
   arrow::Status splitNested(RowVectorPtr rv);
+  /// Adds the time since `start` to the metrics: the flattener's to
+  /// flattenTime, the rest to splitTime.
+  void addNestedSplitTime(uint64_t start);
   /// Remote only: pushes the window first when the next slice of about
   /// `estimatedBytes` cannot be reserved.
   void admitRemoteSlice(int64_t estimatedBytes);

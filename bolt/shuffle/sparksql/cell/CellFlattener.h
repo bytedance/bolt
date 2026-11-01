@@ -158,6 +158,11 @@ class CellFlattener {
     /// The elements lie in a row from `start`; src is unwritten then.
     bool contiguous{true};
     vector_size_t start{0};
+
+    /// The elements' indices, as Entries::src takes them.
+    const vector_size_t* sources() const {
+      return contiguous ? nullptr : srcs->as<vector_size_t>();
+    }
   };
 
   /// Re-reads the seals: a sealed partition's counts restart at zero.
@@ -196,6 +201,10 @@ class CellFlattener {
   /// containers' elements.
   void flush(uint32_t t, Chunk& chunk, uint32_t depth);
 
+  /// Builds and decodes the view of the rows in column col, a container's
+  /// lengths.
+  BatchNullClass viewRows(uint32_t col);
+
   /// Builds and decodes the view of `chunk` in column col.
   BatchNullClass view(uint32_t col, const Chunk& chunk);
 
@@ -204,6 +213,10 @@ class CellFlattener {
   /// `n` elements of a pool buffer kept across batches.
   template <typename T>
   T* scratch(BufferPtr& buffer, size_t n);
+
+  /// `buffer`, as scratch(), holding a copy of the `n` elements at `data`.
+  template <typename T>
+  const BufferPtr& copyToScratch(BufferPtr& buffer, const T* data, size_t n);
 
   const CellNestedLayout& layout_;
   CellSplitter& splitter_;
