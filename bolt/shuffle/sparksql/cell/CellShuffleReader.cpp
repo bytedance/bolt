@@ -94,7 +94,8 @@ CellShuffleReader::CellShuffleReader(
     arrow::MemoryPool* arrowPool,
     memory::MemoryPool* pool,
     int32_t batchSize,
-    int64_t batchByteSize)
+    int64_t batchByteSize,
+    bool nativeNestedTypes)
     : streams_(std::move(streams)),
       adapter_(outputType),
       layout_(CellLayout::create(adapter_.physicalType())),
@@ -106,7 +107,10 @@ CellShuffleReader::CellShuffleReader(
       batchSize_(batchSize),
       batchByteSize_(batchByteSize),
       decoder_(layout_, decompressor_.get(), pool_),
-      nested_(makeCellAssembler(outputType, decompressor_.get(), pool_)),
+      nested_(
+          nativeNestedTypes
+              ? makeCellAssembler(outputType, decompressor_.get(), pool_)
+              : nullptr),
       compositeConverter_(outputType, pool_) {}
 
 CellShuffleReader::Decoded CellShuffleReader::nextBlock() {
