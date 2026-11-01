@@ -303,9 +303,13 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
       for (uint32_t row = 0; row < numRows; ++row) {
         nullCount += column.isNullAt(row);
       }
-      nullClass[columns[i]] = nullCount == 0 ? BatchNullClass::kNoNulls
-          : nullCount == numRows             ? BatchNullClass::kAllNull
-                                             : BatchNullClass::kSomeNulls;
+      if (nullCount == 0) {
+        nullClass[columns[i]] = BatchNullClass::kNoNulls;
+      } else if (nullCount == numRows) {
+        nullClass[columns[i]] = BatchNullClass::kAllNull;
+      } else {
+        nullClass[columns[i]] = BatchNullClass::kSomeNulls;
+      }
     }
     std::vector<uint32_t> added(numPartitions, 0);
     std::vector<uint32_t> rowIndex(numRows);
@@ -324,6 +328,93 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
     batch.positionBase = positionBase;
     splitter.split(batch);
     return added;
+  }
+
+  /// Column `col` of `rowType` in round `round` of a column-group test:
+  /// `pids.size()` values of the round, the position and the column, none
+  /// of them null when `fill` is 'V', some when 'S' and all when 'N'. The
+  /// last column is a VARCHAR whose first value in partition 0 in round 0
+  /// takes 40 KiB, enough for that partition alone to pass a partition seal.
+  VectorPtr groupColumn(
+      const RowTypePtr& rowType,
+      uint32_t round,
+      uint32_t col,
+      char fill,
+      const std::vector<uint32_t>& pids) {
+    static const char* const kWords[] = {"ab", "cd", "ef", "gh"};
+    const auto n = static_cast<vector_size_t>(pids.size());
+    const auto null = [&](vector_size_t k) {
+      return fill == 'N' || (fill == 'S' && (k + col) % 3 == 1);
+    };
+    const auto value = [&](vector_size_t k) {
+      return int64_t{round} * 7919 + k * 31 + col;
+    };
+    switch (rowType->childAt(col)->kind()) {
+      case TypeKind::BIGINT:
+        return makeFlatVector<int64_t>(
+            n, [&](auto k) { return value(k) * 1000003; }, null);
+      case TypeKind::UNKNOWN:
+        return BaseVector::createNullConstant(UNKNOWN(), n, pool());
+      case TypeKind::INTEGER:
+        return makeFlatVector<int32_t>(
+            n,
+            [&](auto k) { return static_cast<int32_t>(value(k)) - 999; },
+            null);
+      case TypeKind::BOOLEAN:
+        return makeFlatVector<bool>(
+            n, [&](auto k) { return value(k) % 3 == 0; }, null);
+      case TypeKind::DOUBLE:
+        return makeFlatVector<double>(
+            n, [&](auto k) { return value(k) * 0.25; }, null);
+      case TypeKind::TIMESTAMP:
+        return makeFlatVector<Timestamp>(
+            n,
+            [&](auto k) {
+              return Timestamp(value(k), value(k) * 7919 % 1'000'000'000);
+            },
+            null);
+      case TypeKind::VARCHAR:
+        break;
+      default:
+        BOLT_UNREACHABLE();
+    }
+    if (col + 1 < rowType->size()) {
+      return makeFlatVector<StringView>(
+          n, [&](auto k) { return StringView(kWords[value(k) % 4]); }, null);
+    }
+    std::string text;
+    bool placed = round != 0;
+    return makeFlatVector<StringView>(
+        n,
+        [&](auto k) {
+          if (!placed && pids[k] == 0 && !null(k)) {
+            text.assign(40 << 10, 'z');
+            placed = true;
+          } else {
+            text.assign(value(k) % 23, static_cast<char>('a' + k % 26));
+          }
+          return StringView(text);
+        },
+        null);
+  }
+
+  /// The partitions the splitter's seals emptied since it counted `seals`,
+  /// which it brings up to date: their positions start over.
+  static std::vector<uint32_t> emptiedBySeals(
+      const CellSplitter& splitter,
+      uint32_t numPartitions,
+      uint64_t& seals) {
+    std::vector<uint32_t> emptied;
+    if (splitter.sealCount() == seals) {
+      return emptied;
+    }
+    seals = splitter.sealCount();
+    for (uint32_t pid = 0; pid < numPartitions; ++pid) {
+      if (splitter.windowRowCounts()[pid] == 0) {
+        emptied.push_back(pid);
+      }
+    }
+    return emptied;
   }
 
   /// The layout of the columns `columns` of `rowType`, in that order.
@@ -1171,6 +1262,13 @@ TEST_F(CellWriterTest, splitterKeepsColumnGroupsAtTheirOwnPositions) {
   splitter.setColumnPositions(
       {nullptr, countsA, countsA, countsA, countsB, countsB, countsB});
 
+  // The tag of a column of `size` positions, `nulls` of them null.
+  const auto tagOf = [](size_t nulls, size_t size) {
+    if (nulls == 0) {
+      return NullTag::kNoNull;
+    }
+    return nulls == size ? NullTag::kAllNull : NullTag::kRawNull;
+  };
   uint32_t payloads = 0;
   const auto check = [&](const CellWindowInput& in) {
     for (uint32_t pid = 0; pid < kPartitions; ++pid) {
@@ -1203,11 +1301,7 @@ TEST_F(CellWriterTest, splitterKeepsColumnGroupsAtTheirOwnPositions) {
           for (const auto& [block, row] : expected) {
             nulls += block->childAt(i)->isNullAt(row);
           }
-          EXPECT_EQ(
-              tags[layout.wireColumn(col)],
-              nulls == 0                     ? NullTag::kNoNull
-                  : nulls == expected.size() ? NullTag::kAllNull
-                                             : NullTag::kRawNull)
+          EXPECT_EQ(tags[layout.wireColumn(col)], tagOf(nulls, expected.size()))
               << "column " << col;
         }
         ASSERT_EQ(vectors[g]->size(), expected.size());
@@ -1227,27 +1321,6 @@ TEST_F(CellWriterTest, splitterKeepsColumnGroupsAtTheirOwnPositions) {
     check(in);
   };
 
-  // A seal restarts the positions of the partitions it emptied, which the
-  // caller learns from the seal count.
-  uint64_t seals = 0;
-  const auto followSeals = [&] {
-    if (splitter.sealCount() == seals) {
-      return;
-    }
-    seals = splitter.sealCount();
-    for (uint32_t pid = 0; pid < kPartitions; ++pid) {
-      if (splitter.windowRowCounts()[pid] != 0) {
-        continue;
-      }
-      for (auto& group : groups) {
-        if (!group.counts.empty()) {
-          group.counts[pid] = 0;
-        }
-        group.expected[pid].clear();
-      }
-    }
-  };
-
   // Per round, a letter per layout column r, u, a0, a1, a2, b0, b1, b2:
   // values only (V), some nulls (S) or all null (N).
   const char* const kFills[] = {
@@ -1258,68 +1331,19 @@ TEST_F(CellWriterTest, splitterKeepsColumnGroupsAtTheirOwnPositions) {
       "SNNNVNVS",
       "VNNSSNSV",
   };
-  const char* const kWords[] = {"ab", "cd", "ef", "gh"};
   std::mt19937 rng(17);
-  const auto makeColumn = [&](uint32_t round,
-                              uint32_t col,
-                              const std::vector<uint32_t>& pids) -> VectorPtr {
-    const auto n = static_cast<vector_size_t>(pids.size());
-    const char fill = kFills[round][col];
-    const auto null = [&](vector_size_t k) {
-      return fill == 'N' || (fill == 'S' && (k + col) % 3 == 1);
-    };
-    const auto value = [&](vector_size_t k) {
-      return int64_t{round} * 7919 + k * 31 + col;
-    };
-    switch (col) {
-      case 0:
-        return makeFlatVector<int64_t>(
-            n, [&](auto k) { return value(k) * 1000003; }, null);
-      case 1:
-        return BaseVector::createNullConstant(UNKNOWN(), n, pool());
-      case 2:
-        return makeFlatVector<int32_t>(
-            n,
-            [&](auto k) { return static_cast<int32_t>(value(k)) - 999; },
-            null);
-      case 3:
-        return makeFlatVector<StringView>(
-            n, [&](auto k) { return StringView(kWords[value(k) % 4]); }, null);
-      case 4:
-        return makeFlatVector<bool>(
-            n, [&](auto k) { return value(k) % 3 == 0; }, null);
-      case 5:
-        return makeFlatVector<double>(
-            n, [&](auto k) { return value(k) * 0.25; }, null);
-      case 6:
-        return makeFlatVector<Timestamp>(
-            n,
-            [&](auto k) {
-              return Timestamp(value(k), value(k) * 7919 % 1'000'000'000);
-            },
-            null);
-      default: {
-        // The first round's first value of partition 0 is long enough for
-        // that partition alone to pass the partition seal's threshold.
-        std::string text;
-        bool placed = round != 0;
-        return makeFlatVector<StringView>(
-            n,
-            [&](auto k) {
-              if (!placed && pids[k] == 0 && !null(k)) {
-                text.assign(40 << 10, 'z');
-                placed = true;
-              } else {
-                text.assign(value(k) % 23, static_cast<char>('a' + k % 26));
-              }
-              return StringView(text);
-            },
-            null);
+  // A seal restarts the positions of the partitions it emptied, which the
+  // caller learns from the seal count.
+  uint64_t seals = 0;
+  const auto splitRound = [&](uint32_t round, uint32_t numRows, bool withP3) {
+    for (const auto pid : emptiedBySeals(splitter, kPartitions, seals)) {
+      for (auto& group : groups) {
+        if (!group.counts.empty()) {
+          group.counts[pid] = 0;
+        }
+        group.expected[pid].clear();
       }
     }
-  };
-  const auto splitRound = [&](uint32_t round, uint32_t numRows, bool withP3) {
-    followSeals();
     std::vector<uint32_t> rowPids(numRows);
     for (auto& pid : rowPids) {
       pid = rng() % (withP3 ? 4 : 3);
@@ -1342,7 +1366,8 @@ TEST_F(CellWriterTest, splitterKeepsColumnGroupsAtTheirOwnPositions) {
       std::vector<VectorPtr> children;
       for (const auto col : group.columns) {
         names.push_back(rowType->nameOf(col));
-        children.push_back(makeColumn(round, col, pids));
+        children.push_back(
+            groupColumn(rowType, round, col, kFills[round][col], pids));
       }
       const auto block = makeRowVector(names, children);
       const auto added = splitColumns(
@@ -1518,7 +1543,6 @@ TEST_F(CellWriterTest, decodersOpenColumnGroupsAtTheirOwnPositions) {
       "SSNNNVVVSS",
       "VVSNSNSSVV",
   };
-  const char* const kWords[] = {"ab", "cd", "ef", "gh"};
   using Expected = std::vector<std::pair<RowVectorPtr, vector_size_t>>;
   struct Written {
     /// Per group and partition, the (block, row) at each position.
@@ -1580,84 +1604,12 @@ TEST_F(CellWriterTest, decodersOpenColumnGroupsAtTheirOwnPositions) {
          countsB,
          countsB});
     uint64_t seals = 0;
-    const auto followSeals = [&] {
-      if (splitter.sealCount() == seals) {
-        return;
-      }
-      seals = splitter.sealCount();
-      for (uint32_t pid = 0; pid < kPartitions; ++pid) {
-        if (splitter.windowRowCounts()[pid] == 0) {
-          counts[1][pid] = 0;
-          counts[2][pid] = 0;
-        }
-      }
-    };
-
     std::mt19937 rng(23);
-    const auto makeColumn =
-        [&](uint32_t round,
-            uint32_t col,
-            const std::vector<uint32_t>& pids) -> VectorPtr {
-      const auto n = static_cast<vector_size_t>(pids.size());
-      const char fill = kFills[round][col];
-      const auto null = [&](vector_size_t k) {
-        return fill == 'N' || (fill == 'S' && (k + col) % 3 == 1);
-      };
-      const auto value = [&](vector_size_t k) {
-        return int64_t{round} * 7919 + k * 31 + col;
-      };
-      switch (col) {
-        case 0:
-          return makeFlatVector<int64_t>(
-              n, [&](auto k) { return value(k) * 1000003; }, null);
-        case 2:
-          return makeFlatVector<StringView>(
-              n,
-              [&](auto k) { return StringView(kWords[value(k) % 4]); },
-              null);
-        case 3:
-          return BaseVector::createNullConstant(UNKNOWN(), n, pool());
-        case 4:
-          return makeFlatVector<bool>(
-              n, [&](auto k) { return value(k) % 3 == 0; }, null);
-        case 6:
-          return makeFlatVector<Timestamp>(
-              n,
-              [&](auto k) {
-                return Timestamp(value(k), value(k) * 7919 % 1'000'000'000);
-              },
-              null);
-        case 7:
-          return makeFlatVector<int32_t>(
-              n,
-              [&](auto k) { return static_cast<int32_t>(value(k)) - 999; },
-              null);
-        case 8:
-          return makeFlatVector<double>(
-              n, [&](auto k) { return value(k) * 0.25; }, null);
-        default: {
-          // The first round's first value of partition 0 is long enough
-          // for that partition alone to pass the partition seal's
-          // threshold.
-          std::string text;
-          bool placed = round != 0;
-          return makeFlatVector<StringView>(
-              n,
-              [&](auto k) {
-                if (!placed && pids[k] == 0 && !null(k)) {
-                  text.assign(40 << 10, 'z');
-                  placed = true;
-                } else {
-                  text.assign(value(k) % 23, static_cast<char>('a' + k % 26));
-                }
-                return StringView(text);
-              },
-              null);
-        }
-      }
-    };
     const auto splitRound = [&](uint32_t round, uint32_t numRows, bool withP3) {
-      followSeals();
+      for (const auto pid : emptiedBySeals(splitter, kPartitions, seals)) {
+        counts[1][pid] = 0;
+        counts[2][pid] = 0;
+      }
       // The rows, then each group's positions: per row, its count of them
       // in its partition.
       std::vector<std::vector<uint32_t>> pids(3);
@@ -1688,7 +1640,8 @@ TEST_F(CellWriterTest, decodersOpenColumnGroupsAtTheirOwnPositions) {
               col == kCountColumn[1] || col == kCountColumn[2]
                   ? makeNullableFlatVector<int32_t>(
                         lengths[col == kCountColumn[1] ? 1 : 2])
-                  : makeColumn(round, col, pids[g]));
+                  : groupColumn(
+                        rowType, round, col, kFills[round][col], pids[g]));
         }
         const auto block = makeRowVector(names, children);
         const auto added = splitColumns(
@@ -2018,14 +1971,19 @@ TEST_F(CellWriterTest, openedColumnsHoldExactlyTheirPositions) {
       }
     }
   };
+  // Opens `decoder` at the group's positions, all of which it reads.
+  const auto expectOpens = [&](CellPayloadDecoder& decoder,
+                               const std::vector<uint32_t>& columns) {
+    ASSERT_TRUE(decoder.openPayload(reader, columns.data(), kPositions, error))
+        << error;
+    ASSERT_TRUE(decoder.appendRows(kPositions, kPositions, error)) << error;
+    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder.finishBatch(), columns));
+  };
   const std::vector<uint32_t> all{1, 2, 3, 4};
   {
     auto decoder = decoderOf(all);
     EXPECT_EQ(decoder->rowBytes(), 4u + 8 + 16);
-    ASSERT_TRUE(decoder->openPayload(reader, all.data(), kPositions, error))
-        << error;
-    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
-    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), all));
+    ASSERT_NO_FATAL_FAILURE(expectOpens(*decoder, all));
   }
   {
     // Records past the positions, and zero positions with records.
@@ -2036,10 +1994,7 @@ TEST_F(CellWriterTest, openedColumnsHoldExactlyTheirPositions) {
       EXPECT_EQ(error, "null records past the payload's rows");
       EXPECT_EQ(decoder->payloadRowsLeft(), 0);
     }
-    ASSERT_TRUE(decoder->openPayload(reader, s.data(), kPositions, error))
-        << error;
-    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
-    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), s));
+    ASSERT_NO_FATAL_FAILURE(expectOpens(*decoder, s));
   }
   {
     // A raw stream checks its length when opened, at zero positions too.
@@ -2049,10 +2004,7 @@ TEST_F(CellWriterTest, openedColumnsHoldExactlyTheirPositions) {
       EXPECT_FALSE(decoder->openPayload(reader, y.data(), positions, error));
       EXPECT_EQ(error, "raw stream length mismatch");
     }
-    ASSERT_TRUE(decoder->openPayload(reader, y.data(), kPositions, error))
-        << error;
-    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
-    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), y));
+    ASSERT_NO_FATAL_FAILURE(expectOpens(*decoder, y));
   }
   {
     // An encoded stream with values left over fails at the last position,
@@ -2073,10 +2025,7 @@ TEST_F(CellWriterTest, openedColumnsHoldExactlyTheirPositions) {
     EXPECT_EQ(error, "malformed value stream");
     EXPECT_FALSE(decoder->openPayload(reader, x.data(), 0, error));
     EXPECT_EQ(error, "malformed value stream");
-    ASSERT_TRUE(decoder->openPayload(reader, x.data(), kPositions, error))
-        << error;
-    ASSERT_TRUE(decoder->appendRows(kPositions, kPositions, error)) << error;
-    ASSERT_NO_FATAL_FAILURE(expectGroup(decoder->finishBatch(), x));
+    ASSERT_NO_FATAL_FAILURE(expectOpens(*decoder, x));
   }
   {
     // More positions than the limit allows, and more bitmap bytes than the
