@@ -69,7 +69,9 @@ class CellShuffleReader {
       arrow::MemoryPool* arrowPool, // only handed to nextStream()
       memory::MemoryPool* pool,
       int32_t batchSize,
-      int64_t batchByteSize);
+      int64_t batchByteSize,
+      // The writer's CellShuffleOptions::nativeNestedTypes.
+      bool nativeNestedTypes = true);
 
   /// Next output batch; nullptr when every stream is exhausted.
   RowVectorPtr next();

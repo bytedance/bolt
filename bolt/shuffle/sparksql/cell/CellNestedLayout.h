@@ -82,7 +82,7 @@ class CellNestedLayout {
   /// Whether `rowType` takes a nested layout: it has ARRAY, MAP or ROW
   /// columns, every leaf a supported type, and it flattens into at most
   /// 65535 columns. Writer and reader decide alike from the same logical row
-  /// type.
+  /// type, unless both are configured to pack nested types instead.
   static bool supports(const RowTypePtr& rowType);
 
   /// `rowType` must be supported.
