@@ -92,8 +92,8 @@ enum class ShuffleWriterType {
 
 // Cell memory thresholds and encoding policy; compression uses
 // PartitionWriterOptions. On Celeborn nothing is spilled: the spill
-// thresholds push the window at the next batch boundary instead, and the
-// run options (coalesceMergedRuns, compressSpill) do not apply.
+// thresholds push the window at the next batch boundary instead, and
+// compressSpill does not apply.
 struct CellShuffleOptions {
   // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
   int64_t cellMemoryCapBytes = 0;
@@ -103,17 +103,10 @@ struct CellShuffleOptions {
   int64_t nullMemLimitBytes = 16LL << 20;
   // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
-  // Gather a partition's spilled segments and resident cells into one run
-  // at merge. Off by default: with compressSpill the segments are final
-  // runs already, and gathering them decompresses and compresses again
-  // every spilled byte - under memory pressure that doubled the codec time
-  // of compressible data for a few percent faster reads of the fewer runs.
-  bool coalesceMergedRuns = false;
   // Compress runs as they spill, so both disk passes write compressed bytes
   // (SSD endurance). Spilled segments are then final runs, copied verbatim
-  // at merge; only with coalesceMergedRuns, a payload gathered from several
-  // segments is decompressed and compressed again as a single run.
-  // Disabling trades that codec CPU for uncompressed spill writes.
+  // at merge. Disabling stores them uncompressed and leaves the codec work
+  // to the merge.
   bool compressSpill = true;
   // Compress runs through the codec's stream form, straight from the cells
   // with fixed buffers; off, each frame is gathered into a pool workspace
