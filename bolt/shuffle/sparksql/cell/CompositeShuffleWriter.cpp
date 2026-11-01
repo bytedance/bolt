@@ -230,6 +230,8 @@ void CompositeShuffleWriter::splitComposite(const CompositeRowVectorPtr& rv) {
     converter_.convert(rv, row2Partition_, heldRows_);
     metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
     heldRowBytes_ += rv->totalRowSize();
+    metrics_.totalInputRowNumber += numRows;
+    metrics_.totalInputBatches += 1;
   }
   if (flushDeferred_) {
     flushComposite();

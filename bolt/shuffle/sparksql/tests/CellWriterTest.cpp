@@ -2909,6 +2909,9 @@ TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {
     EXPECT_EQ(lengthSum, metrics.totalBytesWritten);
     EXPECT_GE(metrics.spillCount, 1) << "an ordinary window was sealed";
     EXPECT_GT(metrics.convertTime, 0);
+    // Every row and batch counts, composite or ordinary.
+    EXPECT_EQ(metrics.totalInputRowNumber, base);
+    EXPECT_EQ(metrics.totalInputBatches, static_cast<int64_t>(batches.size()));
 
     std::vector<std::vector<char>> streams(kPartitions);
     if (celeborn) {
@@ -2998,6 +3001,10 @@ TEST_F(CellWriterTest, compositeReclaimWritesTheBufferedRows) {
     ASSERT_TRUE(writer.split(makeComposite(pids, data), 0).ok());
     ASSERT_TRUE(writer.stop().ok());
     const auto& metrics = writer.metrics();
+    // Spark reports these as the stage's records written, which AQE reads
+    // as the shuffle's row count: zero would make it an empty relation.
+    EXPECT_EQ(metrics.totalInputRowNumber, 2 * data->size());
+    EXPECT_EQ(metrics.totalInputBatches, 2);
     EXPECT_GT(metrics.totalBytesWritten, 0);
     EXPECT_GT(metrics.totalBytesEvicted, 0);
     EXPECT_GT(metrics.dataSize, 2 * data->size() * 4);
