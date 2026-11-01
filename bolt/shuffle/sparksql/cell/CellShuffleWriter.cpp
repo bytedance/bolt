@@ -50,6 +50,59 @@ uint32_t prevPowerOfTwo(uint64_t value) {
   return uint32_t{1} << (63 - __builtin_clzll(value));
 }
 
+/// Whether RowVector::slice can take `vector`'s rows up to `end`: it slices
+/// every field of a struct, and a struct's fields may stop short of it
+/// where every struct from there on is null (RowVector::validate allows
+/// it). Other encodings slice only buffers as long as the vector.
+bool fieldsReach(const BaseVector& vector, vector_size_t end) {
+  if (vector.encoding() != VectorEncoding::Simple::ROW) {
+    return true;
+  }
+  for (const auto& field : vector.asUnchecked<RowVector>()->children()) {
+    if (field != nullptr &&
+        (field->size() < end || !fieldsReach(*field, end))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Rows [offset, offset + length) of a batch, as a slice except for the
+/// columns whose struct fields stop short of their end: those take the
+/// rows through a dictionary instead.
+RowVectorPtr sliceRows(
+    const RowVectorPtr& rv,
+    vector_size_t offset,
+    vector_size_t length,
+    memory::MemoryPool* pool) {
+  const vector_size_t end = offset + length;
+  const auto& columns = rv->children();
+  if (std::all_of(columns.begin(), columns.end(), [&](const auto& column) {
+        return column == nullptr || fieldsReach(*column, end);
+      })) {
+    return std::dynamic_pointer_cast<RowVector>(rv->slice(offset, length));
+  }
+  auto indices = allocateIndices(length, pool);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  std::iota(rawIndices, rawIndices + length, offset);
+  std::vector<VectorPtr> sliced(columns.size());
+  for (size_t i = 0; i < columns.size(); ++i) {
+    if (columns[i] != nullptr) {
+      sliced[i] = fieldsReach(*columns[i], end)
+          ? columns[i]->slice(offset, length)
+          : BaseVector::wrapInDictionary(nullptr, indices, length, columns[i]);
+    }
+  }
+  BufferPtr nulls;
+  if (rv->rawNulls() != nullptr) {
+    nulls = allocateNulls(length, pool);
+    bits::copyBits(
+        rv->rawNulls(), offset, nulls->asMutable<uint64_t>(), 0, length);
+  }
+  return std::make_shared<RowVector>(
+      pool, rv->type(), std::move(nulls), length, std::move(sliced));
+}
+
 } // namespace
 
 CellShuffleWriter::CellShuffleWriter(
@@ -221,8 +274,7 @@ arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
     for (int32_t begin = 0; begin < rv->size(); begin += rowsPerPiece) {
       const int32_t length =
           std::min<int32_t>(rowsPerPiece, rv->size() - begin);
-      auto piece =
-          std::dynamic_pointer_cast<RowVector>(rv->slice(begin, length));
+      auto piece = sliceRows(rv, begin, length, boltPool_);
       BOLT_CHECK_NOT_NULL(piece);
       admitRemoteSlice(flatSize * length / rv->size());
       RETURN_NOT_OK(splitBatch(std::move(piece)));
@@ -384,10 +436,8 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
       metrics_.splitTime +=
           static_cast<int64_t>(currentTimeNs() - start) - flatten;
       const uint32_t half = numRows / 2;
-      RETURN_NOT_OK(splitNested(
-          std::dynamic_pointer_cast<RowVector>(rv->slice(0, half))));
-      return splitNested(std::dynamic_pointer_cast<RowVector>(
-          rv->slice(half, numRows - half)));
+      RETURN_NOT_OK(splitNested(sliceRows(rv, 0, half, boltPool_)));
+      return splitNested(sliceRows(rv, half, numRows - half, boltPool_));
     }
   }
 
