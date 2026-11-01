@@ -17,7 +17,6 @@
 #include <gtest/gtest.h>
 
 #include <unistd.h>
-#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -79,6 +78,44 @@ class TestDecompressor final : public CellDecompressor {
 
  private:
   Codec* const codec_;
+};
+
+/// A CellSplitter of `layout` over the outputs the Cell writer gives it for
+/// `options`: the data file, or pushes to the options' RSS client.
+struct TestSplitter {
+  TestSplitter(
+      ShuffleWriterOptions writerOptions,
+      const CellLayout& layout,
+      memory::MemoryPool* pool)
+      : options(std::move(writerOptions)), allocator(pool, 16 << 10, 256) {
+    // The outputs are made of the options held here, which outlive them.
+    const auto& partitionWriter = options.partitionWriterOptions;
+    if (partitionWriter.partitionWriterType == PartitionWriterType::kCeleborn) {
+      raw = std::make_unique<RssRawOutput>(partitionWriter);
+      output = std::make_unique<RssCellOutput>(
+          *raw, &layout, partitionWriter, options.cellOptions, pool);
+    } else {
+      auto local = std::make_unique<LocalRawOutput>(partitionWriter);
+      output = std::make_unique<LocalCellOutput>(
+          *local, &layout, options.cellOptions, partitionWriter, pool);
+      raw = std::move(local);
+    }
+    splitter = std::make_unique<CellSplitter>(
+        layout, partitionWriter.numPartitions, allocator, *output, *pool);
+  }
+
+  /// Finishes the splitter and returns each partition's bytes.
+  std::vector<std::string> finish() {
+    ShuffleWriterMetrics metrics;
+    splitter->finish(metrics);
+    return test::partitionBytes(options, metrics.partitionLengths);
+  }
+
+  const ShuffleWriterOptions options;
+  std::unique_ptr<RawPartitionOutput> raw;
+  std::unique_ptr<CellOutput> output;
+  ChunkAllocator allocator;
+  std::unique_ptr<CellSplitter> splitter;
 };
 
 /// Vectors of any Cell type, nested to any depth, from a seed: nulls at
@@ -540,6 +577,41 @@ std::string nullTrace(
   return trace;
 }
 
+/// `bytes` as a source of payloads.
+MemoryByteSource sourceOf(const std::string& bytes) {
+  return MemoryByteSource(
+      reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+}
+
+/// The offsets of `count` containers of `length` elements each, back to
+/// back.
+std::vector<vector_size_t> evenOffsets(
+    vector_size_t count,
+    vector_size_t length) {
+  std::vector<vector_size_t> offsets(count);
+  for (vector_size_t i = 0; i < count; ++i) {
+    offsets[i] = i * length;
+  }
+  return offsets;
+}
+
+/// Timestamps to the nanosecond, at and around the epoch and far from it,
+/// then 3000 more from `seed`.
+std::vector<Timestamp> nanoTimestamps(uint64_t seed) {
+  std::vector<Timestamp> values = {
+      Timestamp(0, 1),
+      Timestamp(-1, 999'999'999),
+      Timestamp(1'700'000'000, 123'456'789),
+      Timestamp(-62'135'596'800, 7)};
+  std::mt19937_64 rng(seed);
+  for (int i = 0; i < 3000; ++i) {
+    const auto seconds =
+        static_cast<int64_t>(rng() % 200'000'000'000) - 100'000'000'000;
+    values.push_back(Timestamp(seconds, rng() % 1'000'000'000));
+  }
+  return values;
+}
+
 class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
   /// One way to read a partition back: rows and bytes per batch.
@@ -547,6 +619,18 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
     int32_t batchSize;
     int64_t batchByteSize;
   };
+
+  /// Whole batches, a row per batch, a row per append and an append per
+  /// batch.
+  static inline const std::vector<ReadShape> kReadShapes{
+      {4096, 1 << 20},
+      {1, 1 << 20},
+      {100, 1},
+      {1000, 0}};
+  /// Whole batches and a row per append.
+  static inline const std::vector<ReadShape> kFewerReadShapes{
+      {4096, 1 << 20},
+      {100, 1}};
 
   static void SetUpTestSuite() {
     memory::MemoryManager::testingSetInstance({});
@@ -564,9 +648,36 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
   }
 
   void removeFiles() {
-    ::unlink(dataFile_.c_str());
-    ::unlink((dataFile_ + ".cell.spill").c_str());
-    ::unlink((dataFile_ + ".raw.spill").c_str());
+    test::removeShuffleFiles(dataFile_);
+  }
+
+  /// A hash shuffle of `numPartitions` partitions into the data file, its
+  /// old files removed, or pushed to a RecordingRssClient when `rss`.
+  ShuffleWriterOptions writerOptions(
+      int32_t numPartitions,
+      bool rss = false,
+      arrow::Compression::type compression = arrow::Compression::UNCOMPRESSED) {
+    removeFiles();
+    return test::shuffleOptions(dataFile_, numPartitions, compression, rss);
+  }
+
+  /// Expects every partition of `partitions`, compressed with `codec` if
+  /// any, to read back in batches of 4096 rows the rows `input` sent it.
+  void expectReadsBack(
+      const ShuffleInput& input,
+      const std::vector<std::string>& partitions,
+      Codec* codec = nullptr) {
+    const auto type = asRowType(input.data[0]->type());
+    const auto numPartitions = static_cast<int32_t>(partitions.size());
+    const auto expected = input.rowsOf(numPartitions);
+    for (int32_t pid = 0; pid < numPartitions; ++pid) {
+      test::expectPartitionRows(
+          expected[pid],
+          test::readPartition(
+              partitions[pid], type, codec, pool(), 4096, 1 << 20),
+          pid,
+          4096);
+    }
   }
 
   /// A top-level column of `type`, `size` rows, held as `encoding`, over
@@ -711,9 +822,7 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
         (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     BoltColumnarBatchDeserializerFactory factory(
         boltTypeToArrowSchema(rowType, pool()),
-        createCodec(
-            arrow::Compression::LZ4_FRAME,
-            CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true}),
+        test::lz4Codec(),
         rowType,
         4096,
         1 << 20,
@@ -754,39 +863,27 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
       const std::function<void(CellShuffleOptions&, bool rss)>& tune = nullptr,
       const std::function<void(const test::WrittenShuffle&, bool rss)>& check =
           nullptr,
-      const std::vector<ReadShape>& readShapes =
-          {{4096, 1 << 20}, {1, 1 << 20}, {100, 1}, {1000, 0}}) {
+      const std::vector<ReadShape>& readShapes = kReadShapes) {
     const auto rowType = asRowType(input.data[0]->type());
     const auto rows = input.rowsOf(numPartitions);
-    const auto lz4 = createCodec(
-        arrow::Compression::LZ4_FRAME,
-        CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+    const auto lz4 = test::lz4Codec();
     // Every Cell writer first, so that the first one sees the input's lazy
     // vectors unloaded.
-    struct CellOutput {
+    struct Output {
       bool rss;
       bool compressed;
       bool nested;
       bool nativeNestedTypes;
       test::WrittenShuffle written;
     };
-    std::vector<CellOutput> outputs;
+    std::vector<Output> outputs;
     for (const bool rss : {false, true}) {
       for (const bool compressed : {false, true}) {
-        removeFiles();
-        ShuffleWriterOptions options;
-        options.partitioning = Partitioning::kHash;
-        options.partitionWriterOptions.numPartitions = numPartitions;
-        options.partitionWriterOptions.dataFile = dataFile_;
-        options.partitionWriterOptions.compressionType = compressed
-            ? arrow::Compression::LZ4_FRAME
-            : arrow::Compression::UNCOMPRESSED;
-        if (rss) {
-          options.partitionWriterOptions.partitionWriterType =
-              PartitionWriterType::kCeleborn;
-          options.partitionWriterOptions.rssClient =
-              std::make_shared<test::RecordingRssClient>();
-        }
+        auto options = writerOptions(
+            numPartitions,
+            rss,
+            compressed ? arrow::Compression::LZ4_FRAME
+                       : arrow::Compression::UNCOMPRESSED);
         if (tune) {
           tune(options.cellOptions, rss);
         }
@@ -865,6 +962,79 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
     }
   }
 
+  /// roundTrip() of batches of `rows` rows of `type` over `numPartitions`,
+  /// from `options` at each list of per-level null rates of `rates`, the
+  /// i-th made from seed `seed` + i.
+  void roundTripAtNullRates(
+      const RowTypePtr& type,
+      NestedVectorMaker::Options options,
+      const std::vector<std::vector<uint32_t>>& rates,
+      const std::vector<vector_size_t>& rows,
+      int32_t numPartitions,
+      uint64_t seed,
+      const std::vector<ReadShape>& readShapes = kReadShapes) {
+    for (size_t i = 0; i < rates.size(); ++i) {
+      SCOPED_TRACE(nullTrace(numPartitions, rates[i]) + " " + type->toString());
+      options.nullPercent = rates[i];
+      const auto input =
+          makeInput(type, options, rows, numPartitions, seed + i);
+      roundTrip(input, numPartitions, nullptr, nullptr, readShapes);
+      if (HasFatalFailure()) {
+        return;
+      }
+    }
+  }
+
+  /// Arrays of `elements`, each from its first: row r holds `lengths[r]` of
+  /// them. With `map`, maps whose keys and values are both `elements`.
+  VectorPtr containersOf(
+      const std::vector<vector_size_t>& lengths,
+      const VectorPtr& elements,
+      bool map = false) {
+    const auto rows = static_cast<vector_size_t>(lengths.size());
+    auto offsets = allocateOffsets(rows, pool());
+    auto sizes = allocateSizes(rows, pool());
+    std::copy(
+        lengths.begin(), lengths.end(), sizes->asMutable<vector_size_t>());
+    const auto& type = elements->type();
+    if (map) {
+      return std::make_shared<MapVector>(
+          pool(),
+          MAP(type, type),
+          nullptr,
+          rows,
+          offsets,
+          sizes,
+          elements,
+          elements);
+    }
+    return std::make_shared<ArrayVector>(
+        pool(), ARRAY(type), nullptr, rows, offsets, sizes, elements);
+  }
+
+  /// Flattens batch `batch` of `input` and splits it, as the writer does;
+  /// `beforeSplit`, if any, runs between prepare() and split().
+  void flattenBatch(
+      CellFlattener& flattener,
+      const ShuffleInput& input,
+      size_t batch,
+      uint32_t numPartitions,
+      const std::function<void()>& beforeSplit = nullptr) {
+    const auto rv = test::withPid(input.pids[batch], input.data[batch], pool());
+    const std::vector<uint32_t> pids(
+        input.pids[batch].begin(), input.pids[batch].end());
+    std::vector<uint32_t> rows(numPartitions, 0);
+    for (const auto pid : pids) {
+      ++rows[pid];
+    }
+    flattener.prepare(*rv);
+    EXPECT_FALSE(flattener.exceedsPositions());
+    if (beforeSplit) {
+      beforeSplit();
+    }
+    flattener.split(pids.data(), rows.data());
+  }
+
   /// Every batch a CellAssembler of `type`, appending at most
   /// `appendPositions` positions at a time, reads from one partition's
   /// uncompressed bytes.
@@ -876,8 +1046,7 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
       int64_t byteBudget = 1 << 20,
       CellDecodeLimits limits = {}) {
     CellAssembler assembler(type, nullptr, pool(), limits, appendPositions);
-    MemoryByteSource source(
-        reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    auto source = sourceOf(bytes);
     const auto nextPayload = [&] {
       if (source.atEnd()) {
         return false;
@@ -958,13 +1127,10 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
       const std::string& bytes,
       const RowTypePtr& type) {
     const CellNestedLayout nested(type);
-    const auto lz4 = createCodec(
-        arrow::Compression::LZ4_FRAME,
-        CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+    const auto lz4 = test::lz4Codec();
     TestDecompressor decompressor(lz4.get());
     CellPayloadDecoder reader(nested.layout(), &decompressor, pool());
-    MemoryByteSource source(
-        reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    auto source = sourceOf(bytes);
     std::vector<uint32_t> rows;
     while (!source.atEnd()) {
       uint8_t kind;
@@ -1026,47 +1192,33 @@ TEST_F(CellNestedTest, everyLeafTypeInsideEveryContainer) {
 TEST_F(CellNestedTest, fourLevelsAtEveryNullRate) {
   // Arrays, maps and structs four deep, alone and mixed, and arrays and
   // maps alone; the rates list each level's nulls from the top.
-  const std::vector<std::vector<uint32_t>> rates = {
-      {0}, {10}, {50}, {100}, {0, 100}, {0, 0, 0, 100}, {50, 0, 10, 0, 50}};
+  NestedVectorMaker::Options options;
+  options.maxLength = 3;
   for (const auto& type : {deepRowType(), deepNestedType()}) {
-    for (size_t i = 0; i < rates.size(); ++i) {
-      SCOPED_TRACE(nullTrace(7, rates[i]) + " " + type->toString());
-      NestedVectorMaker::Options options;
-      options.nullPercent = rates[i];
-      options.maxLength = 3;
-      const auto input = makeInput(type, options, {800, 3, 1200}, 7, 100 + i);
-      roundTrip(input, 7);
-      if (HasFatalFailure()) {
-        return;
-      }
-    }
+    roundTripAtNullRates(
+        type,
+        options,
+        {{0}, {10}, {50}, {100}, {0, 100}, {0, 0, 0, 100}, {50, 0, 10, 0, 50}},
+        {800, 3, 1200},
+        7,
+        100);
   }
 }
 
 TEST_F(CellNestedTest, fourLevelsAtEveryPartitionCount) {
   // One partition, and a few rows in each of 1024.
-  const std::vector<std::vector<uint32_t>> rates = {
-      {10}, {0, 100}, {50, 0, 10, 0, 50}};
+  NestedVectorMaker::Options options;
+  options.maxLength = 3;
   for (const auto& type : {deepRowType(), deepNestedType()}) {
     for (const int32_t numPartitions : {1, 1024}) {
-      for (size_t i = 0; i < rates.size(); ++i) {
-        SCOPED_TRACE(
-            nullTrace(numPartitions, rates[i]) + " " + type->toString());
-        NestedVectorMaker::Options options;
-        options.nullPercent = rates[i];
-        options.maxLength = 3;
-        const auto input =
-            makeInput(type, options, {800, 3, 1200}, numPartitions, 200 + i);
-        roundTrip(
-            input,
-            numPartitions,
-            nullptr,
-            nullptr,
-            {{4096, 1 << 20}, {100, 1}});
-        if (HasFatalFailure()) {
-          return;
-        }
-      }
+      roundTripAtNullRates(
+          type,
+          options,
+          {{10}, {0, 100}, {50, 0, 10, 0, 50}},
+          {800, 3, 1200},
+          numPartitions,
+          200,
+          kFewerReadShapes);
     }
   }
 }
@@ -1296,23 +1448,10 @@ TEST_F(CellNestedTest, timestampsInsideContainers) {
   const auto n = static_cast<vector_size_t>(values.size());
   auto flat = makeFlatVector<Timestamp>(
       n, [&](auto row) { return values[row]; }, nullEvery(9));
-  auto arrays = makeArrayVector(
-      [&] {
-        std::vector<vector_size_t> offsets;
-        for (vector_size_t row = 0; row < n; row += 4) {
-          offsets.push_back(row);
-        }
-        return offsets;
-      }(),
-      flat);
+  // Arrays of 4 and maps of 3 of them, the last ones shorter.
+  auto arrays = makeArrayVector(evenOffsets((n + 3) / 4, 4), flat);
   auto maps = makeMapVector(
-      [&] {
-        std::vector<vector_size_t> offsets;
-        for (vector_size_t row = 0; row < n; row += 3) {
-          offsets.push_back(row);
-        }
-        return offsets;
-      }(),
+      evenOffsets((n + 2) / 3, 3),
       makeFlatVector<int32_t>(n, [](auto row) { return row; }),
       flat);
   const auto rows = std::min(arrays->size(), maps->size());
@@ -1325,13 +1464,7 @@ TEST_F(CellNestedTest, timestampsInsideContainers) {
       names.push_back("st");
       children.push_back(makeRowVector({"t"}, {flat->slice(0, rows)}));
     }
-    ShuffleInput input;
-    input.data = {makeRowVector(names, children)};
-    input.pids.emplace_back(rows);
-    for (vector_size_t row = 0; row < rows; ++row) {
-      input.pids[0][row] = row % 3;
-    }
-    roundTrip(input, 3);
+    roundTrip(test::roundRobin({makeRowVector(names, children)}, 3), 3);
   }
 }
 
@@ -1425,9 +1558,9 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
   // Three payloads of 1000 rows of an id and 10 elements each: a row
   // decodes into 8 + 4 bytes at the rows' positions and 10 * 8 at the
   // elements', 92 in all.
-  ShuffleInput uniform;
+  std::vector<RowVectorPtr> batches;
   for (int64_t batch = 0; batch < 3; ++batch) {
-    uniform.data.push_back(makeRowVector(
+    batches.push_back(makeRowVector(
         {"id", "a"},
         {makeFlatVector<int64_t>(
              1000, [&](auto row) { return batch * 1000 + row; }),
@@ -1435,19 +1568,14 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
              1000,
              [](auto) { return 10; },
              [&](auto idx) { return batch * 10'000 + idx; })}));
-    uniform.pids.emplace_back(1000, 0);
   }
+  const auto uniform = test::roundRobin(std::move(batches), 1);
   const auto type = asRowType(uniform.data[0]->type());
-  removeFiles();
-  ShuffleWriterOptions writerOptions;
-  writerOptions.partitioning = Partitioning::kHash;
-  writerOptions.partitionWriterOptions.numPartitions = 1;
-  writerOptions.partitionWriterOptions.dataFile = dataFile_;
-  writerOptions.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  writerOptions.cellOptions.checkpointPartitionBytes = 1;
+  // A payload per batch.
+  auto sealEveryBatch = writerOptions(1);
+  sealEveryBatch.cellOptions.checkpointPartitionBytes = 1;
   const auto bytes =
-      test::writeShuffle(writerOptions, uniform, pool()).partitions[0];
+      test::writeShuffle(sealEveryBatch, uniform, pool()).partitions[0];
   ASSERT_EQ(payloadRows(bytes, type), (std::vector<uint32_t>(3, 1000)));
   const auto expected = uniform.rowsOf(1)[0];
   const auto batchSizes = [&](int32_t batchSize, int64_t budget) {
@@ -1482,31 +1610,19 @@ TEST_F(CellNestedTest, readerTimesTheAssembly) {
   NestedVectorMaker::Options options;
   options.nullPercent = {10, 20};
   const auto input = makeInput(deepNestedType(), options, {2000}, 1, 93);
-  removeFiles();
-  ShuffleWriterOptions writerOptions;
-  writerOptions.partitioning = Partitioning::kHash;
-  writerOptions.partitionWriterOptions.numPartitions = 1;
-  writerOptions.partitionWriterOptions.dataFile = dataFile_;
-  writerOptions.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  const auto bytes =
-      test::writeShuffle(writerOptions, input, pool()).partitions[0];
-  CellShuffleReader reader(
-      std::make_shared<sparksql::test::MemoryReaderStreamIterator>(
-          std::vector<std::vector<char>>{
-              std::vector<char>(bytes.begin(), bytes.end())}),
+  const auto reader = test::makeReader(
+      test::writeShuffle(writerOptions(1), input, pool()).partitions[0],
       asRowType(input.data[0]->type()),
       nullptr,
-      arrow::default_memory_pool(),
       pool(),
       100,
       1 << 20);
   vector_size_t rows = 0;
-  while (auto batch = reader.next()) {
+  while (auto batch = reader->next()) {
     rows += batch->size();
   }
   EXPECT_EQ(rows, 2000);
-  EXPECT_GT(reader.decodeTimeNs(), 0);
+  EXPECT_GT(reader->decodeTimeNs(), 0);
 }
 
 TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
@@ -1541,53 +1657,17 @@ TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
           input.data[batch].get(), row);
     }
   }
+  const auto batchOf = [&](size_t batch) -> RowVectorPtr {
+    if (composite[batch]) {
+      return makeComposite(input.pids[batch], input.data[batch]);
+    }
+    return test::withPid(input.pids[batch], input.data[batch], pool());
+  };
   for (const bool rss : {false, true}) {
     SCOPED_TRACE(rss ? "rss" : "local");
-    removeFiles();
-    ShuffleWriterOptions writerOptions;
-    writerOptions.partitioning = Partitioning::kHash;
-    writerOptions.partitionWriterOptions.numPartitions = kPartitions;
-    writerOptions.partitionWriterOptions.dataFile = dataFile_;
-    writerOptions.partitionWriterOptions.compressionType =
-        arrow::Compression::UNCOMPRESSED;
-    const auto client = std::make_shared<test::RecordingRssClient>();
-    if (rss) {
-      writerOptions.partitionWriterOptions.partitionWriterType =
-          PartitionWriterType::kCeleborn;
-      writerOptions.partitionWriterOptions.rssClient = client;
-    }
-    std::vector<std::string> partitions(kPartitions);
-    {
-      CellShuffleWriter writer(
-          writerOptions, pool(), arrow::default_memory_pool());
-      for (size_t batch = 0; batch < composite.size(); ++batch) {
-        const RowVectorPtr rv = composite[batch]
-            ? makeComposite(input.pids[batch], input.data[batch])
-            : test::withPid(input.pids[batch], input.data[batch], pool());
-        ASSERT_TRUE(writer.split(rv, 0).ok());
-      }
-      ASSERT_TRUE(writer.stop().ok());
-      EXPECT_GT(writer.metrics().flattenTime, 0);
-      if (rss) {
-        for (const auto& [pid, blobs] : client->pushes) {
-          for (const auto& blob : blobs) {
-            partitions[pid] += blob;
-          }
-        }
-      } else {
-        std::ifstream in(dataFile_, std::ios::binary);
-        const std::string file(
-            (std::istreambuf_iterator<char>(in)),
-            std::istreambuf_iterator<char>());
-        uint64_t offset = 0;
-        for (int32_t pid = 0; pid < kPartitions; ++pid) {
-          const auto length = writer.metrics().partitionLengths[pid];
-          partitions[pid] = file.substr(offset, length);
-          offset += length;
-        }
-        EXPECT_EQ(offset, file.size());
-      }
-    }
+    const auto written = test::writeShuffle(
+        writerOptions(kPartitions, rss), input, pool(), batchOf);
+    EXPECT_GT(written.metrics.flattenTime, 0);
     for (const auto& shape : std::vector<ReadShape>{
              {4096, 1 << 30}, {1000, 0}, {7, 1}, {250, 2000}}) {
       SCOPED_TRACE(fmt::format(
@@ -1595,19 +1675,15 @@ TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
           shape.batchSize,
           shape.batchByteSize));
       for (int32_t pid = 0; pid < kPartitions; ++pid) {
-        const auto& bytes = partitions[pid];
-        CellShuffleReader reader(
-            std::make_shared<sparksql::test::MemoryReaderStreamIterator>(
-                std::vector<std::vector<char>>{
-                    std::vector<char>(bytes.begin(), bytes.end())}),
+        const auto reader = test::makeReader(
+            written.partitions[pid],
             type,
             nullptr,
-            arrow::default_memory_pool(),
             pool(),
             shape.batchSize,
             shape.batchByteSize);
         std::vector<RowVectorPtr> batches[2];
-        while (auto batch = reader.next()) {
+        while (auto batch = reader->next()) {
           if (RowVector::isComposite(batch)) {
             ASSERT_LE(batch->size(), shape.batchSize);
             batches[1].push_back(compositeRows(type, batch));
@@ -1631,190 +1707,161 @@ TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
   }
 }
 
-TEST_F(CellNestedTest, nanosecondsInsideContainers) {
+TEST_F(CellNestedTest, nanosecondsInsideContainersAndStructs) {
   // A nested layout keeps every nanosecond of a timestamp, at any depth, as
-  // a flat column does.
-  std::vector<Timestamp> values = {
-      Timestamp(0, 1),
-      Timestamp(-1, 999'999'999),
-      Timestamp(1'700'000'000, 123'456'789),
-      Timestamp(-62'135'596'800, 7)};
-  std::mt19937_64 rng(9);
-  for (int i = 0; i < 3000; ++i) {
-    const auto seconds =
-        static_cast<int64_t>(rng() % 200'000'000'000) - 100'000'000'000;
-    values.push_back(Timestamp(seconds, rng() % 1'000'000'000));
+  // a flat column does: in arrays and in the arrays of maps' values, and at
+  // the top level of a struct, in a struct below it and in structs in an
+  // array. V1 keeps microseconds, so the input alone is the reference.
+  std::vector<RowVectorPtr> data;
+  {
+    const auto values = nanoTimestamps(9);
+    const auto n = static_cast<vector_size_t>(values.size());
+    auto flat = makeFlatVector<Timestamp>(
+        n, [&](auto row) { return values[row]; }, nullEvery(7));
+    const auto rows = n / 4;
+    data.push_back(makeRowVector(
+        {"arr", "map"},
+        {makeArrayVector<Timestamp>(
+             rows,
+             [](auto) { return 4; },
+             [&](auto idx) { return values[idx]; },
+             nullEvery(9)),
+         makeMapVector(
+             evenOffsets(rows, 2),
+             makeFlatVector<int32_t>(rows * 2, [](auto idx) { return idx; }),
+             makeArrayVector(evenOffsets(rows * 2, 2), flat))}));
   }
-  const auto n = static_cast<vector_size_t>(values.size());
-  auto flat = makeFlatVector<Timestamp>(
-      n, [&](auto row) { return values[row]; }, nullEvery(7));
-  const auto rows = n / 4;
-  const auto data = makeRowVector(
-      {"arr", "map"},
-      {makeArrayVector<Timestamp>(
-           rows,
-           [](auto) { return 4; },
-           [&](auto idx) { return values[idx]; },
-           nullEvery(9)),
-       makeMapVector(
-           [&] {
-             std::vector<vector_size_t> offsets;
-             for (vector_size_t row = 0; row < rows; ++row) {
-               offsets.push_back(row * 2);
-             }
-             return offsets;
-           }(),
-           makeFlatVector<int32_t>(rows * 2, [](auto idx) { return idx; }),
-           makeArrayVector(
-               [&] {
-                 std::vector<vector_size_t> offsets;
-                 for (vector_size_t row = 0; row < rows * 2; ++row) {
-                   offsets.push_back(row * 2);
-                 }
-                 return offsets;
-               }(),
-               flat))});
-  ShuffleInput input;
-  input.data = {data};
-  input.pids.emplace_back(rows);
-  for (vector_size_t row = 0; row < rows; ++row) {
-    input.pids[0][row] = row % 3;
+  {
+    const auto values = nanoTimestamps(11);
+    const auto rows = static_cast<vector_size_t>(values.size());
+    const auto stamps = [&](vector_size_t size, vector_size_t shift) {
+      return makeFlatVector<Timestamp>(
+          size,
+          [&, shift](auto row) { return values[(row + shift) % rows]; },
+          nullEvery(9));
+    };
+    data.push_back(makeRowVector(
+        {"r", "ar"},
+        {makeRowVector(
+             {"t", "n"},
+             {stamps(rows, 0),
+              makeRowVector({"u"}, {stamps(rows, 1)}, nullEvery(5))},
+             nullEvery(3)),
+         makeArrayVector(
+             evenOffsets(rows, 2),
+             makeRowVector({"t"}, {stamps(2 * rows, 2)}, nullEvery(4)))}));
   }
-  removeFiles();
-  ShuffleWriterOptions options;
-  options.partitioning = Partitioning::kHash;
-  options.partitionWriterOptions.numPartitions = 3;
-  options.partitionWriterOptions.dataFile = dataFile_;
-  options.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  const auto written = test::writeShuffle(options, input, pool());
-  EXPECT_GT(written.metrics.flattenTime, 0);
-  const auto expected = input.rowsOf(3);
-  for (int32_t pid = 0; pid < 3; ++pid) {
-    const auto batches = test::readPartition(
-        written.partitions[pid],
-        asRowType(data->type()),
-        nullptr,
-        pool(),
-        4096,
-        1 << 20);
-    test::expectPartitionRows(expected[pid], batches, pid, 4096);
+  for (const auto& batch : data) {
+    SCOPED_TRACE(batch->type()->toString());
+    const auto input = test::roundRobin({batch}, 3);
+    const auto written = test::writeShuffle(writerOptions(3), input, pool());
+    EXPECT_GT(written.metrics.flattenTime, 0);
+    expectReadsBack(input, written.partitions);
   }
 }
 
 TEST_F(CellNestedTest, dictionaryProbeTakesTheRowsStrings) {
   // A string column at the rows' positions goes into dictionary form as in
-  // a flat schema; the strings in arrays, at positions of their own, are
-  // never probed: every dictionary row is one of the rows'.
+  // a flat schema, and so do the string fields of top-level structs, at any
+  // depth, null where their struct is; the strings at positions of their
+  // own - in arrays, and in the structs in an array - are never probed:
+  // every dictionary row is one of the rows'.
   constexpr vector_size_t kRows = 4096;
   const char* const kWords[] = {"red", "green", "blue", "cyan"};
-  const auto data = makeRowVector(
-      {"s", "tags"},
-      {makeFlatVector<StringView>(
-           kRows, [&](auto row) { return StringView(kWords[row % 4]); }),
-       makeArrayVector<StringView>(
-           kRows,
-           [](auto row) { return 1 + row % 3; },
-           [&](auto idx) { return StringView(kWords[idx % 4]); })});
-  ShuffleInput input;
-  input.data = {data};
-  input.pids.emplace_back(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    input.pids[0][row] = row % 5;
+  const auto words = [&](vector_size_t size, int shift) {
+    return makeFlatVector<StringView>(size, [&, shift](auto row) {
+      return StringView(kWords[(row + shift) % 4]);
+    });
+  };
+  // Each batch, and the rows of it in dictionary form.
+  const std::vector<std::pair<RowVectorPtr, int64_t>> batches{
+      {makeRowVector(
+           {"s", "tags"},
+           {words(kRows, 0),
+            makeArrayVector<StringView>(
+                kRows,
+                [](auto row) { return 1 + row % 3; },
+                [&](auto idx) { return StringView(kWords[idx % 4]); })}),
+       kRows},
+      // The two strings of each struct but the null ones.
+      {makeRowVector(
+           {"r", "ar"},
+           {makeRowVector(
+                {"s", "n"},
+                {words(kRows, 0), makeRowVector({"t"}, {words(kRows, 1)})},
+                nullEvery(7)),
+            makeArrayVector(
+                evenOffsets(kRows, 2),
+                makeRowVector({"u"}, {words(2 * kRows, 2)}))}),
+       2 * (kRows - (kRows + 6) / 7)}};
+  for (const auto& [data, matched] : batches) {
+    SCOPED_TRACE(data->type()->toString());
+    roundTrip(
+        test::roundRobin({data}, 5),
+        5,
+        nullptr,
+        [&](const test::WrittenShuffle& written, bool) {
+          EXPECT_EQ(written.metrics.dictionaryMatchedRows, matched);
+          EXPECT_EQ(written.metrics.dictionaryFallbackRows, 0);
+        },
+        {{4096, 1 << 20}});
   }
-  roundTrip(
-      input,
-      5,
-      nullptr,
-      [&](const test::WrittenShuffle& written, bool) {
-        EXPECT_EQ(written.metrics.dictionaryMatchedRows, kRows);
-        EXPECT_EQ(written.metrics.dictionaryFallbackRows, 0);
-      },
-      {{4096, 1 << 20}});
 }
 
-TEST_F(CellNestedTest, unknownElementsPastTheRowLimit) {
-  // Arrays and maps of UNKNOWN carry lengths only: rows of 2^30 elements
-  // cost nothing to write or read. Three such rows in one partition hold
-  // more elements than a payload may, so the writer closes a window before
-  // each, whether the rows come in one batch or one by one; and a batch
-  // holding a payload's elements takes no next payload whose elements would
-  // take its space past kMaxPositions, so it ends there.
+TEST_F(CellNestedTest, elementsPastTheRowLimit) {
+  // Rows of 2^30 elements: arrays and maps of UNKNOWN, which carry lengths
+  // only and cost nothing to write or read, and arrays of null BIGINTs,
+  // whose space has a column on the wire. Three such rows in one partition
+  // hold more positions than a payload may, so the writer closes a window
+  // before each, however few bytes they take, whether the rows come in one
+  // batch or one by one; and a batch holding a payload's elements takes no
+  // next payload whose elements would take its space past kMaxPositions,
+  // so it ends there. The BIGINT payloads are parsed, not read: their
+  // elements would take 8 GiB.
   constexpr vector_size_t kLength = 1 << 30;
   const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
   const auto rows = static_cast<vector_size_t>(lengths.size());
-  for (const bool map : {false, true}) {
-    auto offsets = allocateOffsets(rows, pool());
-    auto sizes = allocateSizes(rows, pool());
-    for (vector_size_t row = 0; row < rows; ++row) {
-      offsets->asMutable<vector_size_t>()[row] = 0;
-      sizes->asMutable<vector_size_t>()[row] = lengths[row];
-    }
-    auto elements = BaseVector::createNullConstant(UNKNOWN(), kLength, pool());
-    VectorPtr column = map ? VectorPtr(std::make_shared<MapVector>(
-                                 pool(),
-                                 MAP(UNKNOWN(), UNKNOWN()),
-                                 nullptr,
-                                 rows,
-                                 offsets,
-                                 sizes,
-                                 elements,
-                                 elements))
-                           : VectorPtr(std::make_shared<ArrayVector>(
-                                 pool(),
-                                 ARRAY(UNKNOWN()),
-                                 nullptr,
-                                 rows,
-                                 offsets,
-                                 sizes,
-                                 elements));
+  const auto unknowns =
+      BaseVector::createNullConstant(UNKNOWN(), kLength, pool());
+  const std::vector<std::pair<const char*, VectorPtr>> columns{
+      {"array", containersOf(lengths, unknowns)},
+      {"map", containersOf(lengths, unknowns, true)},
+      {"null BIGINTs",
+       containersOf(
+           lengths,
+           BaseVector::createNullConstant(BIGINT(), kLength, pool()))}};
+  const auto lz4 = test::lz4Codec();
+  for (const auto& [name, column] : columns) {
     const auto data = makeRowVector(
         {"id", "c"},
         {makeFlatVector<int64_t>(rows, [](auto row) { return row; }), column});
     const auto type = asRowType(data->type());
-    for (const bool oneBatch : {true, false}) {
+    std::vector<RowVectorPtr> rowByRow;
+    for (vector_size_t row = 0; row < rows; ++row) {
+      rowByRow.push_back(
+          std::dynamic_pointer_cast<RowVector>(data->slice(row, 1)));
+    }
+    for (const auto& split : {std::vector<RowVectorPtr>{data}, rowByRow}) {
       for (const bool rss : {false, true}) {
         SCOPED_TRACE(fmt::format(
             "{} {} {}",
-            map ? "map" : "array",
-            oneBatch ? "one batch" : "a batch per row",
+            name,
+            split.size() == 1 ? "one batch" : "a batch per row",
             rss ? "rss" : "local"));
-        ShuffleInput input;
-        if (oneBatch) {
-          input.data = {data};
-          input.pids = {std::vector<int32_t>(rows, 0)};
-        } else {
-          for (vector_size_t row = 0; row < rows; ++row) {
-            input.data.push_back(
-                std::dynamic_pointer_cast<RowVector>(data->slice(row, 1)));
-            input.pids.push_back({0});
-          }
-        }
-        removeFiles();
-        ShuffleWriterOptions options;
-        options.partitioning = Partitioning::kHash;
-        options.partitionWriterOptions.numPartitions = 1;
-        options.partitionWriterOptions.dataFile = dataFile_;
-        if (rss) {
-          options.partitionWriterOptions.partitionWriterType =
-              PartitionWriterType::kCeleborn;
-          options.partitionWriterOptions.rssClient =
-              std::make_shared<test::RecordingRssClient>();
-        }
-        const auto written = test::writeShuffle(options, input, pool());
+        const auto written = test::writeShuffle(
+            writerOptions(1, rss, arrow::Compression::LZ4_FRAME),
+            test::roundRobin(split, 1),
+            pool());
         EXPECT_GT(written.metrics.flattenTime, 0);
-        const auto batches = test::readPartition(
-            written.partitions[0],
-            type,
-            createCodec(
-                arrow::Compression::LZ4_FRAME,
-                CodecOptions{
-                    CodecBackend::NONE, kDefaultCompressionLevel, true})
-                .get(),
-            pool(),
-            4096,
-            1 << 20);
         // A payload per window: rows 0 and 1, row 2, row 3.
+        EXPECT_EQ(
+            payloadRows(written.partitions[0], type),
+            (std::vector<uint32_t>{2, 1, 1}));
+        if (column->type()->childAt(0)->kind() != TypeKind::UNKNOWN) {
+          continue;
+        }
+        const auto batches = test::readPartition(
+            written.partitions[0], type, lz4.get(), pool(), 4096, 1 << 20);
         ASSERT_EQ(batches.size(), 3);
         const std::vector<vector_size_t> batchRows{2, 1, 1};
         vector_size_t next = 0;
@@ -1831,75 +1878,13 @@ TEST_F(CellNestedTest, unknownElementsPastTheRowLimit) {
             EXPECT_EQ(containers->sizeAt(row), lengths[next]);
             total += containers->sizeAt(row);
           }
-          const auto& values = map
+          const auto& values = column->typeKind() == TypeKind::MAP
               ? batches[b]->childAt(1)->as<MapVector>()->mapValues()
               : batches[b]->childAt(1)->as<ArrayVector>()->elements();
           EXPECT_EQ(values->size(), total);
           EXPECT_TRUE(values->isNullAt(0));
         }
       }
-    }
-  }
-}
-
-TEST_F(CellNestedTest, nullElementsPastTheRowLimit) {
-  // The rows of unknownElementsPastTheRowLimit with null BIGINT elements: a
-  // space whose column is on the wire closes windows by its positions as
-  // well, however few bytes they take. The payloads are parsed, not read:
-  // their elements would take 8 GiB.
-  constexpr vector_size_t kLength = 1 << 30;
-  const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
-  const auto rows = static_cast<vector_size_t>(lengths.size());
-  auto offsets = allocateOffsets(rows, pool());
-  auto sizes = allocateSizes(rows, pool());
-  for (vector_size_t row = 0; row < rows; ++row) {
-    sizes->asMutable<vector_size_t>()[row] = lengths[row];
-  }
-  const auto data = makeRowVector(
-      {"id", "c"},
-      {makeFlatVector<int64_t>(rows, [](auto row) { return row; }),
-       std::make_shared<ArrayVector>(
-           pool(),
-           ARRAY(BIGINT()),
-           nullptr,
-           rows,
-           offsets,
-           sizes,
-           BaseVector::createNullConstant(BIGINT(), kLength, pool()))});
-  const auto type = asRowType(data->type());
-  for (const bool oneBatch : {true, false}) {
-    for (const bool rss : {false, true}) {
-      SCOPED_TRACE(fmt::format(
-          "{} {}",
-          oneBatch ? "one batch" : "a batch per row",
-          rss ? "rss" : "local"));
-      ShuffleInput input;
-      if (oneBatch) {
-        input.data = {data};
-        input.pids = {std::vector<int32_t>(rows, 0)};
-      } else {
-        for (vector_size_t row = 0; row < rows; ++row) {
-          input.data.push_back(
-              std::dynamic_pointer_cast<RowVector>(data->slice(row, 1)));
-          input.pids.push_back({0});
-        }
-      }
-      removeFiles();
-      ShuffleWriterOptions options;
-      options.partitioning = Partitioning::kHash;
-      options.partitionWriterOptions.numPartitions = 1;
-      options.partitionWriterOptions.dataFile = dataFile_;
-      if (rss) {
-        options.partitionWriterOptions.partitionWriterType =
-            PartitionWriterType::kCeleborn;
-        options.partitionWriterOptions.rssClient =
-            std::make_shared<test::RecordingRssClient>();
-      }
-      const auto written = test::writeShuffle(options, input, pool());
-      // A payload per window: rows 0 and 1, row 2, row 3.
-      EXPECT_EQ(
-          payloadRows(written.partitions[0], type),
-          (std::vector<uint32_t>{2, 1, 1}));
     }
   }
 }
@@ -1913,37 +1898,18 @@ TEST_F(CellNestedTest, positionsUpToTheLimit) {
   constexpr auto kMax =
       static_cast<vector_size_t>(CellNestedLayout::kMaxPositions);
   const auto arrayOf = [&](vector_size_t length) {
-    auto offsets = allocateOffsets(1, pool());
-    auto sizes = allocateSizes(1, pool());
-    sizes->asMutable<vector_size_t>()[0] = length;
     return makeRowVector(
         {"c"},
-        {std::make_shared<ArrayVector>(
-            pool(),
-            ARRAY(UNKNOWN()),
-            nullptr,
-            1,
-            offsets,
-            sizes,
+        {containersOf(
+            {length},
             BaseVector::createNullConstant(UNKNOWN(), length, pool()))});
   };
   const auto type = asRowType(arrayOf(1)->type());
-  const auto options = [&] {
-    removeFiles();
-    ShuffleWriterOptions options;
-    options.partitioning = Partitioning::kHash;
-    options.partitionWriterOptions.numPartitions = 1;
-    options.partitionWriterOptions.dataFile = dataFile_;
-    options.partitionWriterOptions.compressionType =
-        arrow::Compression::UNCOMPRESSED;
-    return options;
-  };
   // One row's partition bytes.
   const auto bytesOf = [&](vector_size_t length) {
-    ShuffleInput input;
-    input.data = {arrayOf(length)};
-    input.pids = {{0}};
-    return test::writeShuffle(options(), input, pool()).partitions[0];
+    return test::writeShuffle(
+               writerOptions(1), test::roundRobin({arrayOf(length)}, 1), pool())
+        .partitions[0];
   };
   {
     const auto batches =
@@ -1954,7 +1920,8 @@ TEST_F(CellNestedTest, positionsUpToTheLimit) {
     EXPECT_EQ(arrays->elements()->size(), kMax);
   }
   {
-    CellShuffleWriter writer(options(), pool(), arrow::default_memory_pool());
+    CellShuffleWriter writer(
+        writerOptions(1), pool(), arrow::default_memory_pool());
     EXPECT_THROW(
         (void)writer.split(test::withPid({0}, arrayOf(kMax + 1), pool()), 0),
         BoltUserError);
@@ -1980,30 +1947,20 @@ TEST_F(CellNestedTest, constantArraysPastThePositionLimit) {
   // in 32 bits; 2^20 references to an array of 2^20 references to one of
   // 2^10 elements are 2^50. The writer counts in 64 bits, stops once past
   // the limit and fails the row, having split nothing of it.
-  const auto innerOf = [&](vector_size_t length, const VectorPtr& elements) {
-    auto offsets = allocateOffsets(1, pool());
-    auto sizes = allocateSizes(1, pool());
-    offsets->asMutable<vector_size_t>()[0] = 0;
-    sizes->asMutable<vector_size_t>()[0] = length;
-    return std::make_shared<ArrayVector>(
-        pool(), ARRAY(elements->type()), nullptr, 1, offsets, sizes, elements);
-  };
   const auto repeat = [&](vector_size_t times, const VectorPtr& vector) {
-    return innerOf(times, BaseVector::wrapInConstant(times, 0, vector));
+    return containersOf({times}, BaseVector::wrapInConstant(times, 0, vector));
   };
   const auto leaf = BaseVector::wrapInConstant(
       1 << 30, 0, makeFlatVector<int64_t>(std::vector<int64_t>{7}));
   const std::vector<VectorPtr> columns{
-      repeat(4, innerOf(1 << 30, leaf)),
-      repeat(1 << 20, repeat(1 << 20, innerOf(1 << 10, leaf)))};
+      repeat(4, containersOf({1 << 30}, leaf)),
+      repeat(1 << 20, repeat(1 << 20, containersOf({1 << 10}, leaf)))};
   for (const auto& column : columns) {
     SCOPED_TRACE(column->type()->toString());
-    removeFiles();
-    ShuffleWriterOptions options;
-    options.partitioning = Partitioning::kHash;
-    options.partitionWriterOptions.numPartitions = 2;
-    options.partitionWriterOptions.dataFile = dataFile_;
-    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    CellShuffleWriter writer(
+        writerOptions(2, false, arrow::Compression::LZ4_FRAME),
+        pool(),
+        arrow::default_memory_pool());
     const auto data = makeRowVector({"a"}, {column});
     EXPECT_THROW(
         (void)writer.split(test::withPid({1}, data, pool()), 0), BoltUserError);
@@ -2045,29 +2002,13 @@ TEST_F(CellNestedTest, pushWhileABatchIsDecoded) {
   // `rows` arrays of `elements`, the first holding `length` of them.
   const auto arrays =
       [&](vector_size_t rows, vector_size_t length, VectorPtr elements) {
-        auto offsets = allocateOffsets(rows, pool());
-        auto sizes = allocateSizes(rows, pool());
-        sizes->asMutable<vector_size_t>()[0] = length;
-        return std::make_shared<ArrayVector>(
-            pool(),
-            ARRAY(elements->type()),
-            nullptr,
-            rows,
-            offsets,
-            sizes,
-            std::move(elements));
+        std::vector<vector_size_t> lengths(rows, 0);
+        lengths[0] = length;
+        return containersOf(lengths, elements);
       };
   for (const bool whileDecoding : {false, true}) {
     SCOPED_TRACE(whileDecoding ? "while decoding the row" : "before the row");
-    ShuffleWriterOptions options;
-    options.partitioning = Partitioning::kHash;
-    options.partitionWriterOptions.numPartitions = 1;
-    options.partitionWriterOptions.compressionType =
-        arrow::Compression::UNCOMPRESSED;
-    options.partitionWriterOptions.partitionWriterType =
-        PartitionWriterType::kCeleborn;
-    const auto client = std::make_shared<test::RecordingRssClient>();
-    options.partitionWriterOptions.rssClient = client;
+    const auto options = writerOptions(1, true);
     CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
     // 16 MB of strings: a window worth a push.
     const std::string text(8 << 10, 'q');
@@ -2109,10 +2050,8 @@ TEST_F(CellNestedTest, pushWhileABatchIsDecoded) {
     ASSERT_TRUE(writer.split(test::withPid({0}, row, pool()), 0).ok());
     EXPECT_EQ(reclaims, 1);
     ASSERT_TRUE(writer.stop().ok());
-    std::string bytes;
-    for (const auto& blob : client->pushes[0]) {
-      bytes += blob;
-    }
+    const auto bytes =
+        test::partitionBytes(options, writer.metrics().partitionLengths)[0];
     const auto type = asRowType(row->type());
     // The pushed window, then the row's.
     EXPECT_EQ(payloadRows(bytes, type), (std::vector<uint32_t>{kRows, 1}));
@@ -2140,151 +2079,87 @@ TEST_F(CellNestedTest, pushWhileABatchIsDecoded) {
 
 TEST_F(CellNestedTest, fuzzedSchemasMatchV1) {
   // Random arrays and maps over every leaf type V1 carries, up to three
-  // deep, from VectorFuzzer in the encodings it makes, lazy ones included:
-  // what V1 reads back, the Cell shuffle must.
-  const std::vector<TypePtr> leaves{
-      BOOLEAN(),
-      TINYINT(),
-      SMALLINT(),
-      INTEGER(),
-      BIGINT(),
-      REAL(),
-      DOUBLE(),
-      VARCHAR(),
-      VARBINARY(),
-      TIMESTAMP(),
-      DATE(),
-      DECIMAL(10, 2),
-      DECIMAL(30, 3)};
-  const std::vector<TypePtr> keys{INTEGER(), BIGINT(), VARCHAR()};
-  std::mt19937_64 rng(2026);
-  std::function<TypePtr(uint32_t)> randomType = [&](uint32_t depth) -> TypePtr {
-    const auto pick = rng() % 4;
-    if (depth == 0 || pick >= 2) {
-      return leaves[rng() % leaves.size()];
-    }
-    if (pick == 0) {
-      return ARRAY(randomType(depth - 1));
-    }
-    return MAP(keys[rng() % keys.size()], randomType(depth - 1));
-  };
-  for (uint32_t iteration = 0; iteration < 10; ++iteration) {
-    std::vector<std::string> names;
-    std::vector<TypePtr> types;
-    const auto numColumns = 1 + rng() % 4;
-    for (uint32_t col = 0; col < numColumns; ++col) {
-      names.push_back(fmt::format("c{}", col));
-      types.push_back(col == 0 ? ARRAY(randomType(2)) : randomType(3));
-    }
-    const auto type = ROW(std::move(names), std::move(types));
-    SCOPED_TRACE(fmt::format("iteration {}: {}", iteration, type->toString()));
-    ASSERT_TRUE(CellNestedLayout::supports(type));
-    VectorFuzzer::Options fuzzerOptions;
-    fuzzerOptions.vectorSize = 300;
-    fuzzerOptions.nullRatio = 0.05 * (iteration % 5);
-    fuzzerOptions.containerLength = 6;
-    fuzzerOptions.complexElementsMaxSize = 3000;
-    fuzzerOptions.stringLength = 20;
-    fuzzerOptions.stringVariableLength = true;
-    fuzzerOptions.allowLazyVector = iteration % 2 == 1;
-    // What V1 keeps of a timestamp.
-    fuzzerOptions.timestampPrecision =
-        VectorFuzzer::Options::TimestampPrecision::kMicroSeconds;
-    fuzzerOptions.timestampFormat = {
-        VectorFuzzer::Options::TimestampFormat::kStandard};
-    VectorFuzzer fuzzer(fuzzerOptions, pool(), 7 + iteration);
-    ShuffleInput input;
-    for (uint32_t batch = 0; batch < 3; ++batch) {
-      input.data.push_back(fuzzer.fuzzInputRow(type));
-      auto& pids = input.pids.emplace_back(input.data.back()->size());
-      for (auto& pid : pids) {
-        pid = static_cast<int32_t>(rng() % 7);
-      }
-    }
-    roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}, {7, 100}});
-    if (HasFatalFailure()) {
-      return;
+  // deep, and then with structs among them, at the top level and at any
+  // depth below, from VectorFuzzer in the encodings it makes, lazy ones
+  // included: what V1 reads back, the Cell shuffle must.
+  std::vector<TypePtr> leaves;
+  for (const auto& leaf : leafTypes()) {
+    // VectorFuzzer makes no UNKNOWN values.
+    if (v1Carries(leaf) && leaf->kind() != TypeKind::UNKNOWN) {
+      leaves.push_back(leaf);
     }
   }
-}
-
-TEST_F(CellNestedTest, fuzzedStructSchemasMatchV1) {
-  // fuzzedSchemasMatchV1 with structs among the arrays and maps, at the top
-  // level and at any depth below, in the encodings VectorFuzzer makes.
-  const std::vector<TypePtr> leaves{
-      BOOLEAN(),
-      TINYINT(),
-      SMALLINT(),
-      INTEGER(),
-      BIGINT(),
-      REAL(),
-      DOUBLE(),
-      VARCHAR(),
-      VARBINARY(),
-      TIMESTAMP(),
-      DATE(),
-      DECIMAL(10, 2),
-      DECIMAL(30, 3)};
   const std::vector<TypePtr> keys{INTEGER(), BIGINT(), VARCHAR()};
-  std::mt19937_64 rng(2027);
-  std::function<TypePtr(uint32_t)> randomType = [&](uint32_t depth) -> TypePtr {
-    const auto pick = rng() % 5;
-    if (depth == 0 || pick >= 3) {
-      return leaves[rng() % leaves.size()];
-    }
-    if (pick == 0) {
-      return ARRAY(randomType(depth - 1));
-    }
-    if (pick == 1) {
-      return MAP(keys[rng() % keys.size()], randomType(depth - 1));
-    }
-    std::vector<std::string> names;
-    std::vector<TypePtr> types;
-    const auto numFields = 1 + rng() % 3;
-    for (uint32_t f = 0; f < numFields; ++f) {
-      names.push_back(fmt::format("f{}", f));
-      types.push_back(randomType(depth - 1));
-    }
-    return ROW(std::move(names), std::move(types));
-  };
-  for (uint32_t iteration = 0; iteration < 10; ++iteration) {
-    std::vector<std::string> names;
-    std::vector<TypePtr> types;
-    const auto numColumns = 1 + rng() % 4;
-    for (uint32_t col = 0; col < numColumns; ++col) {
-      names.push_back(fmt::format("c{}", col));
-      types.push_back(
-          col == 0 ? ROW({"a", "b"}, {randomType(2), randomType(2)})
-                   : randomType(3));
-    }
-    const auto type = ROW(std::move(names), std::move(types));
-    SCOPED_TRACE(fmt::format("iteration {}: {}", iteration, type->toString()));
-    ASSERT_TRUE(CellNestedLayout::supports(type));
-    VectorFuzzer::Options fuzzerOptions;
-    fuzzerOptions.vectorSize = 300;
-    fuzzerOptions.nullRatio = 0.05 * (iteration % 5);
-    fuzzerOptions.containerLength = 6;
-    fuzzerOptions.complexElementsMaxSize = 3000;
-    fuzzerOptions.stringLength = 20;
-    fuzzerOptions.stringVariableLength = true;
-    fuzzerOptions.allowLazyVector = iteration % 2 == 1;
-    // What V1 keeps of a timestamp.
-    fuzzerOptions.timestampPrecision =
-        VectorFuzzer::Options::TimestampPrecision::kMicroSeconds;
-    fuzzerOptions.timestampFormat = {
-        VectorFuzzer::Options::TimestampFormat::kStandard};
-    VectorFuzzer fuzzer(fuzzerOptions, pool(), 17 + iteration);
-    ShuffleInput input;
-    for (uint32_t batch = 0; batch < 3; ++batch) {
-      input.data.push_back(fuzzer.fuzzInputRow(type));
-      auto& pids = input.pids.emplace_back(input.data.back()->size());
-      for (auto& pid : pids) {
-        pid = static_cast<int32_t>(rng() % 7);
+  for (const bool withStructs : {false, true}) {
+    std::mt19937_64 rng(withStructs ? 2027 : 2026);
+    // A leaf, an array, a map or, `withStructs`, a struct, of `depth` levels
+    // at most below it.
+    std::function<TypePtr(uint32_t)> randomType =
+        [&](uint32_t depth) -> TypePtr {
+      const auto pick = rng() % (withStructs ? 5 : 4);
+      if (depth == 0 || pick >= (withStructs ? 3 : 2)) {
+        return leaves[rng() % leaves.size()];
       }
-    }
-    roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}, {7, 100}});
-    if (HasFatalFailure()) {
-      return;
+      if (pick == 0) {
+        return ARRAY(randomType(depth - 1));
+      }
+      if (pick == 1) {
+        return MAP(keys[rng() % keys.size()], randomType(depth - 1));
+      }
+      std::vector<std::string> names;
+      std::vector<TypePtr> types;
+      const auto numFields = 1 + rng() % 3;
+      for (uint32_t f = 0; f < numFields; ++f) {
+        names.push_back(fmt::format("f{}", f));
+        types.push_back(randomType(depth - 1));
+      }
+      return ROW(std::move(names), std::move(types));
+    };
+    for (uint32_t iteration = 0; iteration < 10; ++iteration) {
+      std::vector<std::string> names;
+      std::vector<TypePtr> types;
+      const auto numColumns = 1 + rng() % 4;
+      for (uint32_t col = 0; col < numColumns; ++col) {
+        names.push_back(fmt::format("c{}", col));
+        if (col > 0) {
+          types.push_back(randomType(3));
+        } else if (withStructs) {
+          types.push_back(ROW({"a", "b"}, {randomType(2), randomType(2)}));
+        } else {
+          types.push_back(ARRAY(randomType(2)));
+        }
+      }
+      const auto type = ROW(std::move(names), std::move(types));
+      SCOPED_TRACE(
+          fmt::format("iteration {}: {}", iteration, type->toString()));
+      ASSERT_TRUE(CellNestedLayout::supports(type));
+      VectorFuzzer::Options fuzzerOptions;
+      fuzzerOptions.vectorSize = 300;
+      fuzzerOptions.nullRatio = 0.05 * (iteration % 5);
+      fuzzerOptions.containerLength = 6;
+      fuzzerOptions.complexElementsMaxSize = 3000;
+      fuzzerOptions.stringLength = 20;
+      fuzzerOptions.stringVariableLength = true;
+      fuzzerOptions.allowLazyVector = iteration % 2 == 1;
+      // What V1 keeps of a timestamp.
+      fuzzerOptions.timestampPrecision =
+          VectorFuzzer::Options::TimestampPrecision::kMicroSeconds;
+      fuzzerOptions.timestampFormat = {
+          VectorFuzzer::Options::TimestampFormat::kStandard};
+      VectorFuzzer fuzzer(
+          fuzzerOptions, pool(), (withStructs ? 17 : 7) + iteration);
+      ShuffleInput input;
+      for (uint32_t batch = 0; batch < 3; ++batch) {
+        input.data.push_back(fuzzer.fuzzInputRow(type));
+        auto& pids = input.pids.emplace_back(input.data.back()->size());
+        for (auto& pid : pids) {
+          pid = static_cast<int32_t>(rng() % 7);
+        }
+      }
+      roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}, {7, 100}});
+      if (HasFatalFailure()) {
+        return;
+      }
     }
   }
 }
@@ -2321,7 +2196,7 @@ TEST_F(CellNestedTest, structNullsAgainstFieldNulls) {
         options.maxLength = 3;
         const auto input = makeInput(
             type, options, {500, 700}, 7, 500 + 7 * structNulls + fieldNulls);
-        roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}, {100, 1}});
+        roundTrip(input, 7, nullptr, nullptr, kFewerReadShapes);
         if (HasFatalFailure()) {
           return;
         }
@@ -2340,27 +2215,21 @@ TEST_F(CellNestedTest, structsEightLevelsDeep) {
         ROW({fmt::format("v{}", level), fmt::format("s{}", level), "next"},
             {BIGINT(), VARCHAR(), chain});
   }
-  const auto type = ROW({"id", "chain"}, {BIGINT(), chain});
-  // From the top, a level per struct.
-  const std::vector<std::vector<uint32_t>> rates = {
-      {10},
-      {0, 0, 0, 0, 0, 0, 0, 100},
-      {50, 0, 50, 0, 50, 0, 50, 0},
-      {0, 10, 0, 10, 0, 10, 0, 10, 50}};
+  NestedVectorMaker::Options options;
+  options.maxLength = 3;
   for (const int32_t numPartitions : {7, 1024}) {
-    for (size_t i = 0; i < rates.size(); ++i) {
-      SCOPED_TRACE(nullTrace(numPartitions, rates[i]));
-      NestedVectorMaker::Options options;
-      options.nullPercent = rates[i];
-      options.maxLength = 3;
-      const auto input =
-          makeInput(type, options, {600, 900}, numPartitions, 600 + i);
-      roundTrip(
-          input, numPartitions, nullptr, nullptr, {{4096, 1 << 20}, {100, 1}});
-      if (HasFatalFailure()) {
-        return;
-      }
-    }
+    // From the top, a level per struct.
+    roundTripAtNullRates(
+        ROW({"id", "chain"}, {BIGINT(), chain}),
+        options,
+        {{10},
+         {0, 0, 0, 0, 0, 0, 0, 100},
+         {50, 0, 50, 0, 50, 0, 50, 0},
+         {0, 10, 0, 10, 0, 10, 0, 10, 50}},
+        {600, 900},
+        numPartitions,
+        600,
+        kFewerReadShapes);
   }
 }
 
@@ -2378,25 +2247,21 @@ TEST_F(CellNestedTest, structsInsideAndAroundContainers) {
        MAP(VARCHAR(),
            ROW({"x", "y"}, {DOUBLE(), ARRAY(ROW({"z"}, {SMALLINT()}))})),
        MAP(ROW({"k", "t"}, {INTEGER(), VARCHAR()}), ROW({"v"}, {BIGINT()}))});
-  const std::vector<std::vector<uint32_t>> rates = {
-      {0}, {10}, {0, 50}, {50, 10, 50, 10}, {0, 100}};
   for (const bool wrapped : {false, true}) {
-    for (size_t i = 0; i < rates.size(); ++i) {
-      SCOPED_TRACE(nullTrace(7, rates[i]) + (wrapped ? ", wrapped" : ""));
-      NestedVectorMaker::Options options;
-      options.nullPercent = rates[i];
-      options.maxLength = 4;
-      if (wrapped) {
-        options.wrapPercent = 50;
-        options.scatteredPercent = 50;
-      }
-      const auto input =
-          makeInput(type, options, {600, 1, 900}, 7, 700 + 10 * wrapped + i);
-      roundTrip(input, 7);
-      if (HasFatalFailure()) {
-        return;
-      }
+    SCOPED_TRACE(wrapped ? "wrapped" : "plain");
+    NestedVectorMaker::Options options;
+    options.maxLength = 4;
+    if (wrapped) {
+      options.wrapPercent = 50;
+      options.scatteredPercent = 50;
     }
+    roundTripAtNullRates(
+        type,
+        options,
+        {{0}, {10}, {0, 50}, {50, 10, 50, 10}, {0, 100}},
+        {600, 1, 900},
+        7,
+        700 + 10 * wrapped);
   }
 }
 
@@ -2411,17 +2276,8 @@ TEST_F(CellNestedTest, unknownFieldsOfStructs) {
            ARRAY(ROW({"u", "a", "s"}, {UNKNOWN(), INTEGER(), VARCHAR()})),
            MAP(INTEGER(), ROW({"a", "u"}, {BIGINT(), UNKNOWN()})),
            ROW({"u", "w"}, {UNKNOWN(), UNKNOWN()})});
-  const std::vector<std::vector<uint32_t>> rates = {{0}, {10}, {50, 50}, {100}};
-  for (size_t i = 0; i < rates.size(); ++i) {
-    SCOPED_TRACE(nullTrace(7, rates[i]));
-    NestedVectorMaker::Options options;
-    options.nullPercent = rates[i];
-    const auto input = makeInput(type, options, {500, 800}, 7, 800 + i);
-    roundTrip(input, 7);
-    if (HasFatalFailure()) {
-      return;
-    }
-  }
+  roundTripAtNullRates(
+      type, {}, {{0}, {10}, {50, 50}, {100}}, {500, 800}, 7, 800);
 }
 
 TEST_F(CellNestedTest, structNullsFirstInALaterBatch) {
@@ -2481,16 +2337,13 @@ TEST_F(CellNestedTest, structNullsFirstInALaterBatch) {
           size,
           std::move(values));
     };
-    std::vector<vector_size_t> offsets;
-    for (vector_size_t row = 0; row < kRows; ++row) {
-      offsets.push_back(row * 2);
-    }
     return makeRowVector(
         {"id", "r", "ar"},
         {makeFlatVector<int64_t>(
              kRows, [&](auto row) { return batch * kRows + row; }),
          structs(kRows, batch * kRows),
-         makeArrayVector(offsets, structs(2 * kRows, 2 * batch * kRows))});
+         makeArrayVector(
+             evenOffsets(kRows, 2), structs(2 * kRows, 2 * batch * kRows))});
   };
   for (const int32_t numPartitions : {7, 1024}) {
     SCOPED_TRACE(fmt::format("P={}", numPartitions));
@@ -2504,8 +2357,7 @@ TEST_F(CellNestedTest, structNullsFirstInALaterBatch) {
         pid = static_cast<int32_t>(rng() % numPartitions);
       }
     }
-    roundTrip(
-        input, numPartitions, nullptr, nullptr, {{4096, 1 << 20}, {100, 1}});
+    roundTrip(input, numPartitions, nullptr, nullptr, kFewerReadShapes);
     if (HasFatalFailure()) {
       return;
     }
@@ -2574,16 +2426,13 @@ TEST_F(CellNestedTest, wrappedStructsAndFields) {
     if (isLazy(elementsEncoding)) {
       elementsEncoding = Encoding::kDictionary;
     }
-    std::vector<vector_size_t> offsets;
-    for (vector_size_t row = 0; row < rows; ++row) {
-      offsets.push_back(row * 2);
-    }
     input.data.push_back(makeRowVector(
         {"id", "r", "ar"},
         {makeFlatVector<int64_t>(rows, [](auto row) { return row; }),
          structs(rows, top, batch + 4 * (batch / kEncodings), false),
          makeArrayVector(
-             offsets, structs(2 * rows, elementsEncoding, batch + 1, true))}));
+             evenOffsets(rows, 2),
+             structs(2 * rows, elementsEncoding, batch + 1, true))}));
     auto& pids = input.pids.emplace_back(rows);
     for (auto& pid : pids) {
       pid = static_cast<int32_t>(rng() % kPartitions);
@@ -2668,15 +2517,11 @@ TEST_F(CellNestedTest, fieldsShorterThanTheirStructs) {
   const auto add = [&](const VectorPtr& top, const VectorPtr& elements) {
     const vector_size_t rows = top->size();
     BOLT_CHECK_EQ(elements->size(), 4 * rows);
-    std::vector<vector_size_t> offsets;
-    for (vector_size_t row = 0; row < rows; ++row) {
-      offsets.push_back(row * 4);
-    }
     input.data.push_back(makeRowVector(
         {"id", "r", "ar"},
         {makeFlatVector<int64_t>(rows, [](auto row) { return row; }),
          top,
-         makeArrayVector(offsets, elements)}));
+         makeArrayVector(evenOffsets(rows, 4), elements)}));
     auto& pids = input.pids.emplace_back(rows);
     for (auto& pid : pids) {
       pid = static_cast<int32_t>(rng() % kPartitions);
@@ -2711,7 +2556,7 @@ TEST_F(CellNestedTest, fieldsShorterThanTheirStructs) {
     return sizes;
   };
   const auto before = valueSizes();
-  roundTrip(input, kPartitions, nullptr, nullptr, {{4096, 1 << 20}, {100, 1}});
+  roundTrip(input, kPartitions, nullptr, nullptr, kFewerReadShapes);
   EXPECT_EQ(valueSizes(), before);
 }
 
@@ -2741,18 +2586,16 @@ TEST_F(CellNestedTest, slicedBatchesKeepShortFields) {
     // About 12 MiB of 4 KiB strings: two slices on a remote shuffle, both
     // past the 1000 rows of r's fields and the 500 of the struct in n.
     constexpr vector_size_t kRows = 3000;
-    ShuffleInput input;
-    input.data.push_back(makeRowVector(
-        {"id", "pad", "r", "n"},
-        {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-         makeFlatVector<std::string>(
-             kRows, [](auto row) { return std::string(4096, 'a' + row % 26); }),
-         structs(kRows, 1000),
-         makeRowVector({"r"}, {structs(kRows, 500)})}));
-    auto& pids = input.pids.emplace_back(kRows);
-    for (vector_size_t row = 0; row < kRows; ++row) {
-      pids[row] = row % 7;
-    }
+    const auto input = test::roundRobin(
+        {makeRowVector(
+            {"id", "pad", "r", "n"},
+            {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
+             makeFlatVector<std::string>(
+                 kRows,
+                 [](auto row) { return std::string(4096, 'a' + row % 26); }),
+             structs(kRows, 1000),
+             makeRowVector({"r"}, {structs(kRows, 500)})})},
+        7);
     roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}});
   }
   {
@@ -2763,48 +2606,24 @@ TEST_F(CellNestedTest, slicedBatchesKeepShortFields) {
     constexpr vector_size_t kLength = 1 << 30;
     const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
     const auto rows = static_cast<vector_size_t>(lengths.size());
-    auto offsets = allocateOffsets(rows, pool());
-    auto sizes = allocateSizes(rows, pool());
-    for (vector_size_t row = 0; row < rows; ++row) {
-      offsets->asMutable<vector_size_t>()[row] = 0;
-      sizes->asMutable<vector_size_t>()[row] = lengths[row];
-    }
     const auto data = makeRowVector(
         {"id", "c", "r"},
         {makeFlatVector<int64_t>(rows, [](auto row) { return row; }),
-         std::make_shared<ArrayVector>(
-             pool(),
-             ARRAY(UNKNOWN()),
-             nullptr,
-             rows,
-             offsets,
-             sizes,
+         containersOf(
+             lengths,
              BaseVector::createNullConstant(UNKNOWN(), kLength, pool())),
          structs(rows, 2)});
+    const auto lz4 = test::lz4Codec();
     for (const bool rss : {false, true}) {
       SCOPED_TRACE(rss ? "rss" : "local");
-      ShuffleInput input;
-      input.data = {data};
-      input.pids = {std::vector<int32_t>(rows, 0)};
-      removeFiles();
-      ShuffleWriterOptions options;
-      options.partitioning = Partitioning::kHash;
-      options.partitionWriterOptions.numPartitions = 1;
-      options.partitionWriterOptions.dataFile = dataFile_;
-      if (rss) {
-        options.partitionWriterOptions.partitionWriterType =
-            PartitionWriterType::kCeleborn;
-        options.partitionWriterOptions.rssClient =
-            std::make_shared<test::RecordingRssClient>();
-      }
-      const auto written = test::writeShuffle(options, input, pool());
+      const auto written = test::writeShuffle(
+          writerOptions(1, rss, arrow::Compression::LZ4_FRAME),
+          test::roundRobin({data}, 1),
+          pool());
       const auto batches = test::readPartition(
           written.partitions[0],
           asRowType(data->type()),
-          createCodec(
-              arrow::Compression::LZ4_FRAME,
-              CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true})
-              .get(),
+          lz4.get(),
           pool(),
           4096,
           1 << 20);
@@ -2833,113 +2652,6 @@ TEST_F(CellNestedTest, slicedBatchesKeepShortFields) {
   }
 }
 
-TEST_F(CellNestedTest, dictionaryProbeTakesTheStructsStrings) {
-  // The string fields of top-level structs, at any depth, have the rows'
-  // positions and go into dictionary form as top-level strings do, null
-  // where their struct is; the strings of the structs in an array, at the
-  // elements' positions, are never probed: every dictionary row is one of
-  // the top-level structs'.
-  constexpr vector_size_t kRows = 4096;
-  const char* const kWords[] = {"red", "green", "blue", "cyan"};
-  const auto words = [&](vector_size_t size, int shift) {
-    return makeFlatVector<StringView>(size, [&, shift](auto row) {
-      return StringView(kWords[(row + shift) % 4]);
-    });
-  };
-  std::vector<vector_size_t> offsets;
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    offsets.push_back(row * 2);
-  }
-  const auto data = makeRowVector(
-      {"r", "ar"},
-      {makeRowVector(
-           {"s", "n"},
-           {words(kRows, 0), makeRowVector({"t"}, {words(kRows, 1)})},
-           nullEvery(7)),
-       makeArrayVector(offsets, makeRowVector({"u"}, {words(2 * kRows, 2)}))});
-  ShuffleInput input;
-  input.data = {data};
-  input.pids.emplace_back(kRows);
-  for (vector_size_t row = 0; row < kRows; ++row) {
-    input.pids[0][row] = row % 5;
-  }
-  // The two strings of each struct but the null ones.
-  const int64_t matched = 2 * (kRows - (kRows + 6) / 7);
-  roundTrip(
-      input,
-      5,
-      nullptr,
-      [&](const test::WrittenShuffle& written, bool) {
-        EXPECT_EQ(written.metrics.dictionaryMatchedRows, matched);
-        EXPECT_EQ(written.metrics.dictionaryFallbackRows, 0);
-      },
-      {{4096, 1 << 20}});
-}
-
-TEST_F(CellNestedTest, nanosecondsInsideStructs) {
-  // A struct's timestamps keep every nanosecond, as a flat column's do: at
-  // the top level, in a struct below it and in structs in an array. V1
-  // keeps microseconds, so the input alone is the reference.
-  std::vector<Timestamp> values = {
-      Timestamp(0, 1),
-      Timestamp(-1, 999'999'999),
-      Timestamp(1'700'000'000, 123'456'789),
-      Timestamp(-62'135'596'800, 7)};
-  std::mt19937_64 rng(11);
-  for (int i = 0; i < 3000; ++i) {
-    const auto seconds =
-        static_cast<int64_t>(rng() % 200'000'000'000) - 100'000'000'000;
-    values.push_back(Timestamp(seconds, rng() % 1'000'000'000));
-  }
-  const auto rows = static_cast<vector_size_t>(values.size());
-  const auto stamps = [&](vector_size_t size, vector_size_t shift) {
-    return makeFlatVector<Timestamp>(
-        size,
-        [&, shift](auto row) { return values[(row + shift) % rows]; },
-        nullEvery(9));
-  };
-  std::vector<vector_size_t> offsets;
-  for (vector_size_t row = 0; row < rows; ++row) {
-    offsets.push_back(row * 2);
-  }
-  const auto data = makeRowVector(
-      {"r", "ar"},
-      {makeRowVector(
-           {"t", "n"},
-           {stamps(rows, 0),
-            makeRowVector({"u"}, {stamps(rows, 1)}, nullEvery(5))},
-           nullEvery(3)),
-       makeArrayVector(
-           offsets,
-           makeRowVector({"t"}, {stamps(2 * rows, 2)}, nullEvery(4)))});
-  ShuffleInput input;
-  input.data = {data};
-  input.pids.emplace_back(rows);
-  for (vector_size_t row = 0; row < rows; ++row) {
-    input.pids[0][row] = row % 3;
-  }
-  removeFiles();
-  ShuffleWriterOptions options;
-  options.partitioning = Partitioning::kHash;
-  options.partitionWriterOptions.numPartitions = 3;
-  options.partitionWriterOptions.dataFile = dataFile_;
-  options.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  const auto written = test::writeShuffle(options, input, pool());
-  EXPECT_GT(written.metrics.flattenTime, 0);
-  const auto expected = input.rowsOf(3);
-  for (int32_t pid = 0; pid < 3; ++pid) {
-    const auto batches = test::readPartition(
-        written.partitions[pid],
-        asRowType(data->type()),
-        nullptr,
-        pool(),
-        4096,
-        1 << 20);
-    test::expectPartitionRows(expected[pid], batches, pid, 4096);
-  }
-}
-
 TEST_F(CellNestedTest, structsPastTheColumnLimitTakeTheAdapter) {
   // A struct of 65535 fields flattens into 65536 columns, one more than a
   // nested layout holds: it still goes through the adapter's binary column,
@@ -2963,28 +2675,11 @@ TEST_F(CellNestedTest, structsPastTheColumnLimitTakeTheAdapter) {
   EXPECT_TRUE(CellNestedLayout::supports(ROW(
       {"r"},
       {ROW(std::move(names), std::vector<TypePtr>(kFields - 1, BIGINT()))})));
-  ShuffleInput input;
-  input.data = {data};
-  input.pids = {{0, 1, 0}};
-  removeFiles();
-  ShuffleWriterOptions options;
-  options.partitioning = Partitioning::kHash;
-  options.partitionWriterOptions.numPartitions = 2;
-  options.partitionWriterOptions.dataFile = dataFile_;
-  options.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  const auto written = test::writeShuffle(options, input, pool());
+  const auto input = test::roundRobin({data}, 2);
+  const auto written = test::writeShuffle(writerOptions(2), input, pool());
   EXPECT_GT(written.metrics.convertTime, 0);
   EXPECT_EQ(written.metrics.flattenTime, 0);
-  const auto expected = input.rowsOf(2);
-  for (int32_t pid = 0; pid < 2; ++pid) {
-    test::expectPartitionRows(
-        expected[pid],
-        test::readPartition(
-            written.partitions[pid], type, nullptr, pool(), 4096, 1 << 20),
-        pid,
-        4096);
-  }
+  expectReadsBack(input, written.partitions);
 }
 
 TEST_F(CellNestedTest, flattenTimeIsNoPartOfTheSplit) {
@@ -3006,35 +2701,13 @@ TEST_F(CellNestedTest, flattenTimeIsNoPartOfTheSplit) {
       });
   for (const bool rss : {false, true}) {
     SCOPED_TRACE(rss ? "rss" : "local");
-    removeFiles();
-    ShuffleWriterOptions writerOptions;
-    writerOptions.partitioning = Partitioning::kHash;
-    writerOptions.partitionWriterOptions.numPartitions = 7;
-    writerOptions.partitionWriterOptions.dataFile = dataFile_;
-    if (rss) {
-      writerOptions.partitionWriterOptions.partitionWriterType =
-          PartitionWriterType::kCeleborn;
-      writerOptions.partitionWriterOptions.rssClient =
-          std::make_shared<test::RecordingRssClient>();
-    }
-    CellShuffleWriter writer(
-        writerOptions, pool(), arrow::default_memory_pool());
-    int64_t wall = 0;
-    for (size_t batch = 0; batch < input.data.size(); ++batch) {
-      const auto rv =
-          test::withPid(input.pids[batch], input.data[batch], pool());
-      const auto start = std::chrono::steady_clock::now();
-      ASSERT_TRUE(writer.split(rv, 0).ok());
-      wall += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::steady_clock::now() - start)
-                  .count();
-    }
-    ASSERT_TRUE(writer.stop().ok());
-    const auto& metrics = writer.metrics();
+    const auto written = test::writeShuffle(
+        writerOptions(7, rss, arrow::Compression::LZ4_FRAME), input, pool());
+    const auto& metrics = written.metrics;
     EXPECT_GT(metrics.flattenTime, 0);
     EXPECT_GT(metrics.splitTime, 0);
     EXPECT_EQ(metrics.convertTime, 0);
-    EXPECT_LE(metrics.splitTime + metrics.flattenTime, wall);
+    EXPECT_LE(metrics.splitTime + metrics.flattenTime, written.splitWallNs);
   }
 }
 
@@ -3234,28 +2907,19 @@ TEST_F(CellNestedTest, structNullsFoldIntoTheColumnsBelow) {
                nullEvery(7))},
           nullEvery(3))});
   const auto type = asRowType(data->type());
-  ShuffleInput input;
-  input.data = {
-      data,
-      makeRowVector(
-          {"r"},
-          {BaseVector::wrapInConstant(
-              kConstantRows, kConstantRow, data->childAt(0))})};
-  input.pids = {
-      std::vector<int32_t>(kRows, 0), std::vector<int32_t>(kConstantRows, 0)};
-  removeFiles();
-  ShuffleWriterOptions options;
-  options.partitioning = Partitioning::kHash;
-  options.partitionWriterOptions.numPartitions = 1;
-  options.partitionWriterOptions.dataFile = dataFile_;
-  options.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  const auto bytes = test::writeShuffle(options, input, pool()).partitions[0];
+  const auto input = test::roundRobin(
+      {data,
+       makeRowVector(
+           {"r"},
+           {BaseVector::wrapInConstant(
+               kConstantRows, kConstantRow, data->childAt(0))})},
+      1);
+  const auto bytes =
+      test::writeShuffle(writerOptions(1), input, pool()).partitions[0];
   const CellNestedLayout nested(type);
   ASSERT_EQ(nested.numSpaces(), 1);
   CellPayloadDecoder decoder(nested.layout(), nullptr, pool());
-  MemoryByteSource source(
-      reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+  auto source = sourceOf(bytes);
   uint8_t kind;
   ASSERT_TRUE(source.read(&kind, 1));
   ASSERT_EQ(kind, static_cast<uint8_t>(CellBlockKind::kPayload));
@@ -3329,40 +2993,14 @@ TEST_F(CellNestedTest, flattenerFollowsSealsBeforeTheSplit) {
     }
     const auto expected = input.rowsOf(kPartitions);
     const CellNestedLayout nested(type);
-    const CellLayout layout = nested.layout();
     for (const uint32_t chunkPositions : {CellFlattener::kChunkPositions, 5u}) {
       SCOPED_TRACE(fmt::format("chunks of {}", chunkPositions));
-      removeFiles();
-      ShuffleWriterOptions writerOptions;
-      writerOptions.partitioning = Partitioning::kHash;
-      writerOptions.partitionWriterOptions.numPartitions = kPartitions;
-      writerOptions.partitionWriterOptions.dataFile = dataFile_;
-      writerOptions.partitionWriterOptions.compressionType =
-          arrow::Compression::UNCOMPRESSED;
-      ShuffleWriterMetrics metrics;
-      {
-        LocalRawOutput raw(writerOptions.partitionWriterOptions);
-        LocalCellOutput output(
-            raw,
-            &layout,
-            writerOptions.cellOptions,
-            writerOptions.partitionWriterOptions,
-            pool());
-        ChunkAllocator allocator(pool(), 16 << 10, 256);
-        CellSplitter splitter(layout, kPartitions, allocator, output, *pool());
-        CellFlattener flattener(
-            nested, splitter, kPartitions, *pool(), chunkPositions);
-        for (size_t batch = 0; batch < input.data.size(); ++batch) {
-          const auto rv =
-              test::withPid(input.pids[batch], input.data[batch], pool());
-          const std::vector<uint32_t> pids(
-              input.pids[batch].begin(), input.pids[batch].end());
-          std::vector<uint32_t> rows(kPartitions, 0);
-          for (const auto pid : pids) {
-            ++rows[pid];
-          }
-          flattener.prepare(*rv);
-          ASSERT_FALSE(flattener.exceedsPositions());
+      TestSplitter local(writerOptions(kPartitions), nested.layout(), pool());
+      auto& splitter = *local.splitter;
+      CellFlattener flattener(
+          nested, splitter, kPartitions, *pool(), chunkPositions);
+      for (size_t batch = 0; batch < input.data.size(); ++batch) {
+        flattenBatch(flattener, input, batch, kPartitions, [&] {
           if (batch == 1) {
             // Partition 0's payload closes; the others' stay open.
             EXPECT_EQ(
@@ -3373,36 +3011,21 @@ TEST_F(CellNestedTest, flattenerFollowsSealsBeforeTheSplit) {
           } else if (batch == 3) {
             splitter.sealWindow();
           }
-          flattener.split(pids.data(), rows.data());
-        }
-        EXPECT_EQ(splitter.sealCount(), 2);
-        splitter.finish(metrics);
+        });
       }
-      std::ifstream in(dataFile_, std::ios::binary);
-      const std::string file(
-          (std::istreambuf_iterator<char>(in)),
-          std::istreambuf_iterator<char>());
-      uint64_t offset = 0;
+      EXPECT_EQ(splitter.sealCount(), 2);
+      const auto partitions = local.finish();
+      expectReadsBack(input, partitions);
       for (int32_t pid = 0; pid < kPartitions; ++pid) {
-        const auto length =
-            static_cast<uint64_t>(metrics.partitionLengths[pid]);
-        const auto bytes = file.substr(offset, length);
-        offset += length;
-        test::expectPartitionRows(
-            expected[pid],
-            test::readPartition(bytes, type, nullptr, pool(), 4096, 1 << 20),
-            pid,
-            4096);
         for (const vector_size_t batchSize : {4096, 7}) {
           SCOPED_TRACE(fmt::format("appends of 3, batches of {}", batchSize));
           test::expectPartitionRows(
               expected[pid],
-              assemblePartition(bytes, type, 3, batchSize),
+              assemblePartition(partitions[pid], type, 3, batchSize),
               pid,
               batchSize);
         }
       }
-      EXPECT_EQ(offset, file.size());
     }
   }
 }
@@ -3435,10 +3058,6 @@ TEST_F(CellNestedTest, flattenerGivesBackStructScratch) {
                            VectorPtr listed) {
     const vector_size_t size = rows * perRow;
     BOLT_CHECK_EQ(listed->size(), size / 2);
-    std::vector<vector_size_t> offsets;
-    for (vector_size_t row = 0; row < rows; ++row) {
-      offsets.push_back(row * perRow);
-    }
     std::vector<vector_size_t> listOffsets;
     for (vector_size_t row = 0; row < size; ++row) {
       listOffsets.push_back(row / 2);
@@ -3457,6 +3076,7 @@ TEST_F(CellNestedTest, flattenerGivesBackStructScratch) {
             {"l", "a"},
             {makeArrayVector(listOffsets, std::move(listed)), numbers(size)},
             nullEvery(7)));
+    const auto offsets = evenOffsets(rows, perRow);
     return makeRowVector(
         {"ar", "ad"},
         {makeArrayVector(offsets, flat), makeArrayVector(offsets, wrapped)});
@@ -3468,65 +3088,31 @@ TEST_F(CellNestedTest, flattenerGivesBackStructScratch) {
     ++loads;
     releasedWhileLoading = flattener->releaseScratch();
   };
-  ShuffleInput input;
-  input.data = {
-      batchOf(
-          kRows,
-          kPerRow,
-          std::make_shared<LazyVector>(
-              pool(),
-              BIGINT(),
-              kElements / 2,
-              std::make_unique<CallbackLoader>(
-                  numbers(kElements / 2), onLoad))),
-      batchOf(10, 3, numbers(15))};
-  for (const auto& data : input.data) {
-    auto& pids = input.pids.emplace_back(data->size());
-    for (size_t row = 0; row < pids.size(); ++row) {
-      pids[row] = static_cast<int32_t>(row % kPartitions);
-    }
-  }
-  const auto type = asRowType(input.data[0]->type());
-  const auto expected = input.rowsOf(kPartitions);
-  const CellNestedLayout nested(type);
-  const CellLayout layout = nested.layout();
+  const auto input = test::roundRobin(
+      {batchOf(
+           kRows,
+           kPerRow,
+           std::make_shared<LazyVector>(
+               pool(),
+               BIGINT(),
+               kElements / 2,
+               std::make_unique<CallbackLoader>(
+                   numbers(kElements / 2), onLoad))),
+       batchOf(10, 3, numbers(15))},
+      kPartitions);
+  const CellNestedLayout nested(asRowType(input.data[0]->type()));
   // The flattener's own pool shows its scratch alone.
   auto root = memory::memoryManager()->addRootPool("flattenerScratch");
   auto scratchPool = root->addLeafChild("flattener");
-  removeFiles();
-  ShuffleWriterOptions writerOptions;
-  writerOptions.partitioning = Partitioning::kHash;
-  writerOptions.partitionWriterOptions.numPartitions = kPartitions;
-  writerOptions.partitionWriterOptions.dataFile = dataFile_;
-  writerOptions.partitionWriterOptions.compressionType =
-      arrow::Compression::UNCOMPRESSED;
-  ShuffleWriterMetrics metrics;
-  {
-    LocalRawOutput raw(writerOptions.partitionWriterOptions);
-    LocalCellOutput output(
-        raw,
-        &layout,
-        writerOptions.cellOptions,
-        writerOptions.partitionWriterOptions,
-        pool());
-    ChunkAllocator allocator(pool(), 16 << 10, 256);
-    CellSplitter splitter(layout, kPartitions, allocator, output, *pool());
-    CellFlattener cellFlattener(
-        nested, splitter, kPartitions, *scratchPool, kChunkPositions);
-    flattener = &cellFlattener;
-    // Its partition counts, which it never gives back.
-    const int64_t state = scratchPool->usedBytes();
-    for (size_t batch = 0; batch < input.data.size(); ++batch) {
-      SCOPED_TRACE(fmt::format("batch {}", batch));
-      const auto rv =
-          test::withPid(input.pids[batch], input.data[batch], pool());
-      const std::vector<uint32_t> pids(
-          input.pids[batch].begin(), input.pids[batch].end());
-      std::vector<uint32_t> rows(kPartitions, 0);
-      for (const auto pid : pids) {
-        ++rows[pid];
-      }
-      cellFlattener.prepare(*rv);
+  TestSplitter local(writerOptions(kPartitions), nested.layout(), pool());
+  CellFlattener cellFlattener(
+      nested, *local.splitter, kPartitions, *scratchPool, kChunkPositions);
+  flattener = &cellFlattener;
+  // Its partition counts, which it never gives back.
+  const int64_t state = scratchPool->usedBytes();
+  for (size_t batch = 0; batch < input.data.size(); ++batch) {
+    SCOPED_TRACE(fmt::format("batch {}", batch));
+    flattenBatch(cellFlattener, input, batch, kPartitions, [&] {
       if (batch == 0) {
         EXPECT_EQ(loads, 1);
         EXPECT_EQ(releasedWhileLoading, 0);
@@ -3535,33 +3121,17 @@ TEST_F(CellNestedTest, flattenerGivesBackStructScratch) {
       } else {
         EXPECT_EQ(cellFlattener.releaseScratch(), 0);
       }
-      cellFlattener.split(pids.data(), rows.data());
-      // What it keeps is a chunk's worth, far below a byte per element.
-      const int64_t kept = scratchPool->usedBytes() - state;
-      EXPECT_GT(kept, 0);
-      EXPECT_LT(kept, kElements / 2);
-      if (batch == 0) {
-        EXPECT_EQ(cellFlattener.releaseScratch(), kept);
-        EXPECT_EQ(scratchPool->usedBytes(), state);
-      }
+    });
+    // What it keeps is a chunk's worth, far below a byte per element.
+    const int64_t kept = scratchPool->usedBytes() - state;
+    EXPECT_GT(kept, 0);
+    EXPECT_LT(kept, kElements / 2);
+    if (batch == 0) {
+      EXPECT_EQ(cellFlattener.releaseScratch(), kept);
+      EXPECT_EQ(scratchPool->usedBytes(), state);
     }
-    splitter.finish(metrics);
   }
-  std::ifstream in(dataFile_, std::ios::binary);
-  const std::string file(
-      (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  uint64_t offset = 0;
-  for (int32_t pid = 0; pid < kPartitions; ++pid) {
-    const auto length = static_cast<uint64_t>(metrics.partitionLengths[pid]);
-    test::expectPartitionRows(
-        expected[pid],
-        test::readPartition(
-            file.substr(offset, length), type, nullptr, pool(), 4096, 1 << 20),
-        pid,
-        4096);
-    offset += length;
-  }
-  EXPECT_EQ(offset, file.size());
+  expectReadsBack(input, local.finish());
 }
 
 /// One payload as the format lays it out, its kind byte excluded: `rows`
@@ -3625,8 +3195,7 @@ TEST_F(CellNestedTest, assemblerChecksTheLengths) {
   const auto begin = [&](CellBatchSource& assembler,
                          const std::string& payload,
                          std::string& error) {
-    MemoryByteSource source(
-        reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    auto source = sourceOf(payload);
     const bool ok = assembler.beginPayload(source, error);
     EXPECT_TRUE(!ok || source.atEnd());
     return ok;
@@ -3767,8 +3336,7 @@ TEST_F(CellNestedTest, assemblerBoundsDecodedBytesTogether) {
     CellDecodeLimits limits;
     limits.maxDecodedBytes = bound;
     auto assembler = makeCellAssembler(type, nullptr, pool(), limits);
-    MemoryByteSource source(
-        reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+    auto source = sourceOf(payload);
     std::string error;
     if (bound < kBitmaps) {
       EXPECT_FALSE(assembler->beginPayload(source, error));
@@ -3807,8 +3375,7 @@ TEST_F(CellNestedTest, assemblerBoundsDecodedBytesTogether) {
     limits.maxDecodedBytes = bound;
     auto assembler = makeCellAssembler(type, nullptr, pool(), limits);
     const std::string twice = payload + payload;
-    MemoryByteSource source(
-        reinterpret_cast<const uint8_t*>(twice.data()), twice.size());
+    auto source = sourceOf(twice);
     const auto nextPayload = [&] {
       if (source.atEnd()) {
         return false;
@@ -3873,8 +3440,7 @@ TEST_F(CellNestedTest, assemblerBoundsTheBatchItHolds) {
     CellDecodeLimits limits;
     limits.maxDecodedBytes = bound;
     auto assembler = makeCellAssembler(type, nullptr, pool(), limits);
-    MemoryByteSource source(
-        reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    auto source = sourceOf(bytes);
     const auto nextPayload = [&] {
       uint8_t kind;
       std::string error;
@@ -3936,28 +3502,15 @@ TEST_F(CellNestedTest, assemblerClosesBatchesAtTheBound) {
                 })});
       };
   const auto write = [&](const ShuffleInput& input, int64_t partitionBytes) {
-    removeFiles();
-    ShuffleWriterOptions options;
-    options.partitioning = Partitioning::kHash;
-    options.partitionWriterOptions.numPartitions = 1;
-    options.partitionWriterOptions.dataFile = dataFile_;
-    options.partitionWriterOptions.compressionType =
-        arrow::Compression::UNCOMPRESSED;
+    auto options = writerOptions(1);
     options.cellOptions.checkpointPartitionBytes = partitionBytes;
     options.cellOptions.enableStringDictionary = false;
     return test::writeShuffle(options, input, pool()).partitions[0];
   };
-  ShuffleInput oneRowEach;
-  for (int batch = 0; batch < 3; ++batch) {
-    oneRowEach.data.push_back(rowsOf(batch, 1));
-    oneRowEach.pids.push_back({0});
-  }
-  ShuffleInput threeRows;
-  threeRows.data = {rowsOf(0, 3)};
-  threeRows.pids = {{0, 0, 0}};
-  ShuffleInput sixRows;
-  sixRows.data = {rowsOf(0, 6, 500)};
-  sixRows.pids = {std::vector<int32_t>(6, 0)};
+  const auto oneRowEach =
+      test::roundRobin({rowsOf(0, 1), rowsOf(1, 1), rowsOf(2, 1)}, 1);
+  const auto threeRows = test::roundRobin({rowsOf(0, 3)}, 1);
+  const auto sixRows = test::roundRobin({rowsOf(0, 6, 500)}, 1);
   const auto type = asRowType(threeRows.data[0]->type());
   // Per bound and byte budget, the batches the rows come out in; none: the
   // read fails.

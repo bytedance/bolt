@@ -172,9 +172,7 @@ class CellFlatGoldenTest : public testing::Test,
   }
 
   void removeFiles() {
-    ::unlink(dataFile_.c_str());
-    ::unlink((dataFile_ + ".cell.spill").c_str());
-    ::unlink((dataFile_ + ".raw.spill").c_str());
+    test::removeShuffleFiles(dataFile_);
   }
 
   /// `n` rows, each the next `value()`.
@@ -485,19 +483,12 @@ class CellFlatGoldenTest : public testing::Test,
   Golden run(const Scenario& scenario) {
     removeFiles();
     const auto input = makeInput(scenario.numPartitions);
-    ShuffleWriterOptions options;
-    options.partitioning = Partitioning::kHash;
-    options.partitionWriterOptions.numPartitions = scenario.numPartitions;
-    options.partitionWriterOptions.dataFile = dataFile_;
-    options.partitionWriterOptions.compressionType = scenario.lz4
-        ? arrow::Compression::LZ4_FRAME
-        : arrow::Compression::UNCOMPRESSED;
-    if (scenario.rss) {
-      options.partitionWriterOptions.partitionWriterType =
-          PartitionWriterType::kCeleborn;
-      options.partitionWriterOptions.rssClient =
-          std::make_shared<test::RecordingRssClient>();
-    }
+    auto options = test::shuffleOptions(
+        dataFile_,
+        scenario.numPartitions,
+        scenario.lz4 ? arrow::Compression::LZ4_FRAME
+                     : arrow::Compression::UNCOMPRESSED,
+        scenario.rss);
     if (scenario.tune) {
       scenario.tune(options.cellOptions);
     }
@@ -533,11 +524,7 @@ class CellFlatGoldenTest : public testing::Test,
           hash, written.partitions[pid].data(), written.partitions[pid].size());
     }
 
-    auto codec = scenario.lz4
-        ? createCodec(
-              arrow::Compression::LZ4_FRAME,
-              CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true})
-        : nullptr;
+    const auto codec = scenario.lz4 ? test::lz4Codec() : nullptr;
     const auto rows = input.rowsOf(scenario.numPartitions);
     for (int32_t pid = 0; pid < scenario.numPartitions; ++pid) {
       SCOPED_TRACE(scenario.name);
