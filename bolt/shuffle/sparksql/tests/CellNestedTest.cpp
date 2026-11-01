@@ -1381,7 +1381,6 @@ TEST_F(CellNestedTest, spillsAndSeals) {
          [](CellShuffleOptions& cell, bool rss) {
            cell.cellMemoryCapBytes = rss ? 12 << 20 : 4 << 20;
            cell.checkpointPartitionBytes = rss ? 128 << 10 : 1 << 20;
-           cell.coalesceMergedRuns = true;
          },
          true,
          true},
@@ -1393,7 +1392,6 @@ TEST_F(CellNestedTest, spillsAndSeals) {
            cell.cellMemoryCapBytes = 4 << 20;
            cell.checkpointPartitionBytes = rss ? 128 << 10 : 1 << 20;
            cell.nullMemLimitBytes = 4 << 10;
-           cell.coalesceMergedRuns = true;
          },
          true}};
     for (const auto& limit : limits) {

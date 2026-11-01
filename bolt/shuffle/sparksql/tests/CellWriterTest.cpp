@@ -2528,73 +2528,63 @@ TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
   }
   const auto layout = CellLayout::create(asRowType(batches[0]->type()));
   // Sealed windows (the first payload of a partition spans several spill
-  // runs), then one window only: the residual payload gathers its spilled
-  // segments together with the resident cells.
+  // runs), then one window only: the residual payload carries its spilled
+  // segments and then the resident cells.
   for (const bool seal : {true, false}) {
-    for (const bool coalesce : {true, false}) {
-      SCOPED_TRACE(
-          std::string(seal ? "sealed windows" : "residual window") + ", " +
-          (coalesce ? "coalesced" : "run per segment"));
-      int64_t evicted[2] = {0, 0};
-      int64_t written[2] = {0, 0};
-      for (const bool compressSpill : {true, false}) {
-        auto options = makeOptions(kPartitions);
-        options.partitionWriterOptions.compressionType =
-            arrow::Compression::LZ4_FRAME;
-        options.cellOptions.compressSpill = compressSpill;
-        options.cellOptions.coalesceMergedRuns = coalesce;
-        options.cellOptions.cellMemoryCapBytes = 8 << 20;
-        options.cellOptions.checkpointPartitionBytes =
-            seal ? 4 << 20 : 1LL << 30;
-        CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
-        roundTrip(options, pids, batches, &writer);
-        const auto& metrics = writer.metrics();
-        EXPECT_GT(metrics.totalBytesEvicted, 0);
-        EXPECT_EQ(metrics.spillCount > 0, seal); // sealed windows
-        const auto file = readFile();
-        const auto runCounts =
-            payloadRunCounts(layout, file, 0, metrics.partitionLengths[0]);
-        ASSERT_FALSE(runCounts.empty());
-        if (seal) {
-          EXPECT_GE(runCounts.size(), 2);
-        } else {
-          EXPECT_EQ(runCounts.size(), 1);
-        }
-        if (coalesce) {
-          EXPECT_EQ(runCounts[0], 1);
-        } else {
-          // Spilled segments, plus the resident cells when not sealed. A
-          // pressure spill takes the largest partitions only, so not every
-          // one is in every Run: some large partition's first payload spans
-          // several.
-          uint32_t most = 0;
-          uint64_t offset = 0;
-          for (int32_t pid = 0; pid + 1 < kPartitions; ++pid) {
-            const auto counts = payloadRunCounts(
-                layout, file, offset, metrics.partitionLengths[pid]);
-            offset += metrics.partitionLengths[pid];
-            if (!counts.empty()) {
-              most = std::max(most, counts[0]);
-            }
-          }
-          EXPECT_GE(most, 2);
-        }
-        evicted[compressSpill] = metrics.totalBytesEvicted;
-        written[compressSpill] = metrics.totalBytesWritten;
-        ::unlink(dataFile_.c_str());
+    SCOPED_TRACE(seal ? "sealed windows" : "residual window");
+    int64_t evicted[2] = {0, 0};
+    int64_t written[2] = {0, 0};
+    for (const bool compressSpill : {true, false}) {
+      auto options = makeOptions(kPartitions);
+      options.partitionWriterOptions.compressionType =
+          arrow::Compression::LZ4_FRAME;
+      options.cellOptions.compressSpill = compressSpill;
+      options.cellOptions.cellMemoryCapBytes = 8 << 20;
+      options.cellOptions.checkpointPartitionBytes = seal ? 4 << 20 : 1LL << 30;
+      CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+      roundTrip(options, pids, batches, &writer);
+      const auto& metrics = writer.metrics();
+      EXPECT_GT(metrics.totalBytesEvicted, 0);
+      EXPECT_EQ(metrics.spillCount > 0, seal); // sealed windows
+      const auto file = readFile();
+      const auto runCounts =
+          payloadRunCounts(layout, file, 0, metrics.partitionLengths[0]);
+      ASSERT_FALSE(runCounts.empty());
+      if (seal) {
+        EXPECT_GE(runCounts.size(), 2);
+      } else {
+        EXPECT_EQ(runCounts.size(), 1);
       }
-      EXPECT_LT(evicted[1] * 2, evicted[0]);
-      // Spill compression changes what hits the spill file, never the
-      // final file: verbatim and re-merged runs carry the same bytes.
-      EXPECT_EQ(written[1], written[0]);
+      // Spilled segments, plus the resident cells when not sealed. A
+      // pressure spill takes the largest partitions only, so not every one
+      // is in every Run: some large partition's first payload spans
+      // several.
+      uint32_t most = 0;
+      uint64_t offset = 0;
+      for (int32_t pid = 0; pid + 1 < kPartitions; ++pid) {
+        const auto counts = payloadRunCounts(
+            layout, file, offset, metrics.partitionLengths[pid]);
+        offset += metrics.partitionLengths[pid];
+        if (!counts.empty()) {
+          most = std::max(most, counts[0]);
+        }
+      }
+      EXPECT_GE(most, 2);
+      evicted[compressSpill] = metrics.totalBytesEvicted;
+      written[compressSpill] = metrics.totalBytesWritten;
+      ::unlink(dataFile_.c_str());
     }
+    EXPECT_LT(evicted[1] * 2, evicted[0]);
+    // Spill compression changes what hits the spill file, never the final
+    // file: verbatim and re-merged runs carry the same bytes.
+    EXPECT_EQ(written[1], written[0]);
   }
 }
 
 TEST_F(CellWriterTest, oneShotAndStreamingCompressionWriteTheSameRuns) {
   // The two compression modes differ only in how a frame is compressed:
   // the same runs, the same layouts, the same rows read back - through
-  // pressure spills, seals and, coalesced or not, the merge.
+  // pressure spills, seals and the merge.
   constexpr int32_t kPartitions = 4;
   std::mt19937 rng(43);
   std::vector<std::vector<int32_t>> pids;
@@ -2605,37 +2595,33 @@ TEST_F(CellWriterTest, oneShotAndStreamingCompressionWriteTheSameRuns) {
         batch < 8 ? 4096 : 256, kPartitions, rng, pids.back()));
   }
   const auto layout = CellLayout::create(asRowType(batches[0]->type()));
-  for (const bool coalesce : {false, true}) {
-    SCOPED_TRACE(coalesce ? "coalesced" : "run per segment");
-    std::vector<std::vector<uint32_t>> runCounts[2];
-    int64_t written[2] = {0, 0};
-    for (const bool streaming : {true, false}) {
-      auto options = makeOptions(kPartitions);
-      options.partitionWriterOptions.compressionType =
-          arrow::Compression::LZ4_FRAME;
-      options.cellOptions.streamCompression = streaming;
-      options.cellOptions.coalesceMergedRuns = coalesce;
-      options.cellOptions.cellMemoryCapBytes = 8 << 20;
-      options.cellOptions.checkpointPartitionBytes = 4 << 20;
-      CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
-      roundTrip(options, pids, batches, &writer);
-      const auto& metrics = writer.metrics();
-      EXPECT_GT(metrics.totalBytesEvicted, 0);
-      const auto file = readFile();
-      uint64_t offset = 0;
-      for (int32_t pid = 0; pid < kPartitions; ++pid) {
-        runCounts[streaming].push_back(payloadRunCounts(
-            layout, file, offset, metrics.partitionLengths[pid]));
-        offset += metrics.partitionLengths[pid];
-      }
-      written[streaming] = metrics.totalBytesWritten;
-      ::unlink(dataFile_.c_str());
+  std::vector<std::vector<uint32_t>> runCounts[2];
+  int64_t written[2] = {0, 0};
+  for (const bool streaming : {true, false}) {
+    auto options = makeOptions(kPartitions);
+    options.partitionWriterOptions.compressionType =
+        arrow::Compression::LZ4_FRAME;
+    options.cellOptions.streamCompression = streaming;
+    options.cellOptions.cellMemoryCapBytes = 8 << 20;
+    options.cellOptions.checkpointPartitionBytes = 4 << 20;
+    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+    roundTrip(options, pids, batches, &writer);
+    const auto& metrics = writer.metrics();
+    EXPECT_GT(metrics.totalBytesEvicted, 0);
+    const auto file = readFile();
+    uint64_t offset = 0;
+    for (int32_t pid = 0; pid < kPartitions; ++pid) {
+      runCounts[streaming].push_back(payloadRunCounts(
+          layout, file, offset, metrics.partitionLengths[pid]));
+      offset += metrics.partitionLengths[pid];
     }
-    EXPECT_EQ(runCounts[0], runCounts[1]);
-    // Frames compressed whole or in independent blocks: close in size.
-    EXPECT_LT(written[1], written[0] * 11 / 10);
-    EXPECT_LT(written[0], written[1] * 11 / 10);
+    written[streaming] = metrics.totalBytesWritten;
+    ::unlink(dataFile_.c_str());
   }
+  EXPECT_EQ(runCounts[0], runCounts[1]);
+  // Frames compressed whole or in independent blocks: close in size.
+  EXPECT_LT(written[1], written[0] * 11 / 10);
+  EXPECT_LT(written[0], written[1] * 11 / 10);
 }
 
 TEST_F(CellWriterTest, skewedPartitionSealsAlone) {
@@ -2707,29 +2693,24 @@ TEST_F(CellWriterTest, pressureSpillCompressesWithoutWorkspace) {
   const auto setCapacity = [&](int64_t bytes) {
     static_cast<memory::MemoryPoolImpl*>(root.get())->testingSetCapacity(bytes);
   };
-  for (const bool coalesce : {true, false}) {
-    SCOPED_TRACE(coalesce ? "coalesced" : "run per segment");
-    auto options = makeOptions(kPartitions);
-    options.partitionWriterOptions.compressionType =
-        arrow::Compression::LZ4_FRAME;
-    options.cellOptions.coalesceMergedRuns = coalesce;
-    options.cellOptions.checkpointPartitionBytes = 4 << 20;
-    setCapacity(24 << 20);
-    CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
-    roundTrip(
-        options, pids, batches, &writer, [&](CellShuffleWriter&, uint32_t i) {
-          if (i + 1 == batches.size()) {
-            setCapacity(1LL << 30); // the merge is funded
-          }
-        });
-    const auto& metrics = writer.metrics();
-    EXPECT_GT(metrics.spillCount, 0);
-    // The spill file holds compressed runs, and so does the data file.
-    EXPECT_GT(metrics.totalBytesEvicted, 0);
-    EXPECT_LT(metrics.totalBytesEvicted * 8, rawBytes);
-    EXPECT_LT(metrics.totalBytesWritten * 8, rawBytes);
-    ::unlink(dataFile_.c_str());
-  }
+  auto options = makeOptions(kPartitions);
+  options.partitionWriterOptions.compressionType =
+      arrow::Compression::LZ4_FRAME;
+  options.cellOptions.checkpointPartitionBytes = 4 << 20;
+  setCapacity(24 << 20);
+  CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
+  roundTrip(
+      options, pids, batches, &writer, [&](CellShuffleWriter&, uint32_t i) {
+        if (i + 1 == batches.size()) {
+          setCapacity(1LL << 30); // the merge is funded
+        }
+      });
+  const auto& metrics = writer.metrics();
+  EXPECT_GT(metrics.spillCount, 0);
+  // The spill file holds compressed runs, and so does the data file.
+  EXPECT_GT(metrics.totalBytesEvicted, 0);
+  EXPECT_LT(metrics.totalBytesEvicted * 8, rawBytes);
+  EXPECT_LT(metrics.totalBytesWritten * 8, rawBytes);
 }
 
 TEST_F(CellWriterTest, spilledRunCompressesPastAnIncompressibleStream) {
@@ -3830,11 +3811,11 @@ TEST_F(CellWriterTest, dictionarySegmentsChainDemoteAndResetAcrossWindows) {
   }
 }
 
-TEST_F(CellWriterTest, coalescedMergeShrinksManyRunPayloads) {
+TEST_F(CellWriterTest, manyRunPayloadsRoundTrip) {
   // Wide schema (many streams) plus a tiny memory cap: runs spill every
-  // few batches, so without coalescing every payload carries many runs
-  // whose per-run headers (1 + 8 + 8 x streams bytes) and tiny
-  // compression contexts dominate the file.
+  // few batches, so payloads carry many runs, each with its own header
+  // (1 + 8 + 8 x streams bytes) and compression context, read back in
+  // order.
   constexpr int32_t kPartitions = 64;
   constexpr int kColumns = 12;
   std::mt19937 rng(11);
@@ -3857,19 +3838,24 @@ TEST_F(CellWriterTest, coalescedMergeShrinksManyRunPayloads) {
     pids.push_back(std::move(batchPids));
   }
 
-  int64_t bytesCoalesced = 0;
-  int64_t bytesPerSpill = 0;
-  for (const bool coalesce : {true, false}) {
-    auto options = makeOptions(kPartitions);
-    options.cellOptions.cellMemoryCapBytes = 8 << 20;
-    options.cellOptions.coalesceMergedRuns = coalesce;
-    CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
-    roundTrip(options, pids, batches, &writer);
-    EXPECT_GT(writer.metrics().totalBytesEvicted, 0) << "expected spills";
-    (coalesce ? bytesCoalesced : bytesPerSpill) =
-        writer.metrics().totalBytesWritten;
+  auto options = makeOptions(kPartitions);
+  options.cellOptions.cellMemoryCapBytes = 8 << 20;
+  CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+  roundTrip(options, pids, batches, &writer);
+  const auto& metrics = writer.metrics();
+  EXPECT_GT(metrics.totalBytesEvicted, 0) << "expected spills";
+  const auto layout = CellLayout::create(asRowType(batches[0]->type()));
+  const auto file = readFile();
+  uint32_t most = 0;
+  uint64_t offset = 0;
+  for (int32_t pid = 0; pid < kPartitions; ++pid) {
+    for (const auto runs : payloadRunCounts(
+             layout, file, offset, metrics.partitionLengths[pid])) {
+      most = std::max(most, runs);
+    }
+    offset += metrics.partitionLengths[pid];
   }
-  EXPECT_LT(bytesCoalesced, bytesPerSpill);
+  EXPECT_GE(most, 2);
 }
 
 } // namespace
