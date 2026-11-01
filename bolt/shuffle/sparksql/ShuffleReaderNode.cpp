@@ -126,7 +126,8 @@ bytedance::bolt::RowVectorPtr SparkShuffleReader::getOutput() {
           arrowPool_.get(),
           pool(),
           batchSize_,
-          shuffleBatchByteSize_);
+          shuffleBatchByteSize_,
+          shuffleReaderOptions_.cellNativeNestedTypes);
     }
     auto output = cellShuffleReader_->next();
     if (!output) {
