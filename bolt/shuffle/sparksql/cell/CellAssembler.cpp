@@ -356,6 +356,18 @@ RowVectorPtr CellAssembler::assemble() {
       vectors[n] = std::move(column);
       continue;
     }
+    if (node.kind == Kind::kRow) {
+      // The structs are null where the presence is; its values are not
+      // read. The fields have its positions, nulls included.
+      std::vector<VectorPtr> fields;
+      fields.reserve(node.children.size());
+      for (const uint32_t child : node.children) {
+        fields.push_back(std::move(vectors[child]));
+      }
+      vectors[n] = std::make_shared<RowVector>(
+          pool_, node.type, column->nulls(), column->size(), std::move(fields));
+      continue;
+    }
     // The lengths, 0 at a null entry, are the sizes as they are.
     const auto* lengths = column->asFlatVector<int32_t>();
     BOLT_CHECK_NOT_NULL(lengths);

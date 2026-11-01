@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <numeric>
 
+#include <folly/ScopeGuard.h>
+
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Nulls.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
@@ -64,6 +66,92 @@ bool allNull(DecodedVector& decoded, vector_size_t size) {
   }
   const uint64_t* nulls = decoded.nulls();
   return nulls != nullptr && bits::isAllSet(nulls, 0, size, false);
+}
+
+/// Whether `vector` holds its rows itself, unwrapped.
+bool isFlatEncoded(const BaseVector& vector) {
+  switch (vector.encoding()) {
+    case VectorEncoding::Simple::FLAT:
+    case VectorEncoding::Simple::ARRAY:
+    case VectorEncoding::Simple::MAP:
+    case VectorEncoding::Simple::ROW:
+      return true;
+    default:
+      return false;
+  }
+}
+
+template <TypeKind kKind>
+VectorPtr flatWithNulls(
+    const BaseVector& vector,
+    BufferPtr nulls,
+    vector_size_t size,
+    memory::MemoryPool* pool) {
+  using T = typename TypeTraits<kKind>::NativeType;
+  const auto& flat = *vector.asUnchecked<FlatVector<T>>();
+  return std::make_shared<FlatVector<T>>(
+      pool,
+      vector.type(),
+      std::move(nulls),
+      size,
+      flat.values(),
+      std::vector<BufferPtr>(flat.stringBuffers()));
+}
+
+/// The first `size` rows of `vector`, flat encoded, under `nulls`: its
+/// buffers and children shared, its nulls replaced.
+VectorPtr withNulls(
+    const BaseVector& vector,
+    BufferPtr nulls,
+    vector_size_t size,
+    memory::MemoryPool* pool) {
+  switch (vector.encoding()) {
+    case VectorEncoding::Simple::ARRAY: {
+      const auto& arrays = *vector.asUnchecked<ArrayVector>();
+      return std::make_shared<ArrayVector>(
+          pool,
+          vector.type(),
+          std::move(nulls),
+          size,
+          arrays.offsets(),
+          arrays.sizes(),
+          arrays.elements());
+    }
+    case VectorEncoding::Simple::MAP: {
+      const auto& maps = *vector.asUnchecked<MapVector>();
+      return std::make_shared<MapVector>(
+          pool,
+          vector.type(),
+          std::move(nulls),
+          size,
+          maps.offsets(),
+          maps.sizes(),
+          maps.mapKeys(),
+          maps.mapValues());
+    }
+    case VectorEncoding::Simple::ROW:
+      return std::make_shared<RowVector>(
+          pool,
+          vector.type(),
+          std::move(nulls),
+          size,
+          vector.asUnchecked<RowVector>()->children());
+    default:
+      return BOLT_DYNAMIC_SCALAR_TYPE_DISPATCH(
+          flatWithNulls,
+          vector.typeKind(),
+          vector,
+          std::move(nulls),
+          size,
+          pool);
+  }
+}
+
+/// Lets go of `buffer` when it was last sized past `bytes`.
+void releaseOver(BufferPtr& buffer, size_t bytes) {
+  if (buffer != nullptr && buffer->size() > bytes) {
+    buffer.reset();
+  }
 }
 
 } // namespace
@@ -140,6 +228,10 @@ void CellFlattener::followSeals() {
 
 void CellFlattener::prepare(const RowVector& rv) {
   const uint64_t start = currentTimeNs();
+  busy_ = true;
+  SCOPE_EXIT {
+    busy_ = false;
+  };
   numRows_ = rv.size();
   exceeds_ = false;
   std::fill(totals_.begin(), totals_.end(), 0);
@@ -152,21 +244,18 @@ void CellFlattener::prepare(const RowVector& rv) {
     inputNode(topNodes[i], rv.childAt(i + 1));
   }
 
-  // The rows' columns: a leaf as it comes, a container as its lengths.
+  // The rows' columns: a leaf as it comes, a ROW as its presence, a
+  // container as its lengths.
   for (const uint32_t col : layout_.space(0).columns) {
     const auto& node = layout_.node(col);
     auto& klass = nullClass_[col];
-    if (node.type->kind() == TypeKind::UNKNOWN) {
-      klass = BatchNullClass::kAllNull;
-      continue;
-    }
-    if (node.kind == Kind::kLeaf) {
-      klass = classifyNulls(decoded_[col], numRows_);
-      continue;
-    }
     auto& input = inputs_[col];
-    if (input.allNull) {
+    if (node.type->kind() == TypeKind::UNKNOWN || input.allNull) {
       klass = BatchNullClass::kAllNull;
+      continue;
+    }
+    if (node.kind == Kind::kLeaf || node.kind == Kind::kRow) {
+      klass = classifyNulls(decoded_[col], numRows_);
       continue;
     }
     auto& decoded = input.decoded;
@@ -212,20 +301,14 @@ void CellFlattener::inputNode(uint32_t n, const VectorPtr& vector) {
   auto& input = inputs_[n];
   input.vector = vector;
   input.allNull = false;
+  if (node.kind == Kind::kRow) {
+    inputRow(n, vector);
+    return;
+  }
   if (node.kind == Kind::kLeaf) {
-    if (node.type->kind() == TypeKind::UNKNOWN) {
-      return;
+    if (node.type->kind() != TypeKind::UNKNOWN) {
+      inputColumn(n, vector);
     }
-    if (node.space == 0) {
-      decoded_[n].decode(*vector);
-      return;
-    }
-    input.decoded.decode(*vector);
-    input.allNull = allNull(input.decoded, vector->size());
-    // The base belongs to the vector: the view shares its ownership.
-    input.values = input.allNull
-        ? nullptr
-        : VectorPtr(vector, const_cast<BaseVector*>(input.decoded.base()));
     return;
   }
   input.decoded.decode(*vector);
@@ -256,6 +339,131 @@ void CellFlattener::inputNode(uint32_t n, const VectorPtr& vector) {
     inputNode(node.children[0], map->mapKeys());
     inputNode(node.children[1], map->mapValues());
   }
+}
+
+void CellFlattener::inputColumn(uint32_t n, const VectorPtr& vector) {
+  auto& input = inputs_[n];
+  if (layout_.node(n).space == 0) {
+    decoded_[n].decode(*vector);
+    return;
+  }
+  input.decoded.decode(*vector);
+  input.allNull = allNull(input.decoded, vector->size());
+  // The base belongs to the vector: the view shares its ownership.
+  input.values = input.allNull
+      ? nullptr
+      : VectorPtr(vector, const_cast<BaseVector*>(input.decoded.base()));
+}
+
+void CellFlattener::inputRow(uint32_t n, const VectorPtr& vector) {
+  const auto& node = layout_.node(n);
+  auto& input = inputs_[n];
+  auto& structs = input.decoded;
+  structs.decode(*vector);
+  const vector_size_t size = vector->size();
+  // A null constant has no base struct.
+  const auto* base = dynamic_cast<const RowVector*>(structs.base());
+  if (base == nullptr || allNull(structs, size)) {
+    // Every struct null: so is every column below at these positions, and
+    // no container below holds an element.
+    clearNode(n);
+    return;
+  }
+  // The structs' nulls at the entries, null when there is none; a
+  // dictionary's indices for the fields to index the structs' base by.
+  BufferPtr nulls;
+  if (!structs.isConstantMapping()) {
+    const uint64_t* raw = structs.mayHaveNulls() ? structs.nulls() : nullptr;
+    if (raw != nullptr && !bits::isAllSet(raw, 0, size, true)) {
+      if (structs.isIdentityMapping()) {
+        nulls = base->nulls();
+      } else {
+        const auto words = bits::nwords(size);
+        std::copy_n(raw, words, scratch<uint64_t>(input.structNulls, words));
+        nulls = input.structNulls;
+      }
+    }
+    if (!structs.isIdentityMapping()) {
+      std::copy_n(
+          structs.indices(),
+          size,
+          scratch<vector_size_t>(input.structIndices, size));
+    }
+  }
+  VectorPtr presence;
+  if (structs.isConstantMapping()) {
+    presence = std::make_shared<ConstantVector<int16_t>>(
+        &pool_, size, false, SMALLINT(), int16_t{1});
+  } else {
+    presence = std::make_shared<FlatVector<int16_t>>(
+        &pool_, SMALLINT(), nulls, size, ones(size), std::vector<BufferPtr>{});
+  }
+  for (uint32_t i = 0; i < node.children.size(); ++i) {
+    inputNode(node.children[i], fold(n, i, nulls));
+  }
+  // The structs are decoded until here, the presence from here.
+  input.vector = presence;
+  inputColumn(n, presence);
+}
+
+VectorPtr CellFlattener::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
+  auto& input = inputs_[n];
+  const auto& structs = input.decoded;
+  const vector_size_t size = structs.size();
+  const uint32_t field = layout_.node(n).children[i];
+  const auto& vector = structs.base()->asUnchecked<RowVector>()->childAt(i);
+  if (layout_.node(field).type->kind() == TypeKind::UNKNOWN) {
+    // No column of it goes on the wire.
+    return vector;
+  }
+  const auto& loaded = BaseVector::loadedVectorShared(vector);
+  if (structs.isConstantMapping()) {
+    return BaseVector::wrapInConstant(size, structs.index(0), loaded);
+  }
+  if (!structs.isIdentityMapping()) {
+    return BaseVector::wrapInDictionary(
+        nulls, input.structIndices, size, loaded);
+  }
+  if (nulls == nullptr) {
+    return loaded;
+  }
+  // A field may stop short of its structs where every struct past it is
+  // null: a dictionary reads nothing of it there and leaves its buffers as
+  // they are.
+  if (!isFlatEncoded(*loaded) || loaded->size() < size) {
+    return BaseVector::wrapInDictionary(nulls, identity(size), size, loaded);
+  }
+  // A flat field keeps its values under its nulls and the structs'.
+  BufferPtr combined = nulls;
+  if (const uint64_t* own = loaded->rawNulls()) {
+    const auto words = bits::nwords(size);
+    auto& fieldNulls = inputs_[field].fieldNulls;
+    auto* raw = scratch<uint64_t>(fieldNulls, words);
+    const auto* structNulls = nulls->as<uint64_t>();
+    for (size_t w = 0; w < words; ++w) {
+      raw[w] = structNulls[w] & own[w];
+    }
+    combined = fieldNulls;
+  }
+  return withNulls(*loaded, std::move(combined), size, &pool_);
+}
+
+const BufferPtr& CellFlattener::ones(vector_size_t size) {
+  if (ones_ == nullptr ||
+      ones_->size() < static_cast<size_t>(size) * sizeof(int16_t)) {
+    ones_ = AlignedBuffer::allocate<int16_t>(size, &pool_, int16_t{1});
+  }
+  return ones_;
+}
+
+const BufferPtr& CellFlattener::identity(vector_size_t size) {
+  if (identity_ == nullptr ||
+      identity_->size() < static_cast<size_t>(size) * sizeof(vector_size_t)) {
+    identity_ = AlignedBuffer::allocate<vector_size_t>(size, &pool_);
+    auto* indices = identity_->asMutable<vector_size_t>();
+    std::iota(indices, indices + size, 0);
+  }
+  return identity_;
 }
 
 void CellFlattener::clearNode(uint32_t n) {
@@ -309,6 +517,10 @@ void CellFlattener::split(
     const uint32_t* partition2RowCount) {
   BOLT_CHECK(!exceeds_, "a batch past the positions a payload holds");
   const uint64_t start = currentTimeNs();
+  busy_ = true;
+  SCOPE_EXIT {
+    busy_ = false;
+  };
   splitNs_ = 0;
   // A seal since prepare() - a remote push before the split began - empties
   // its partitions here. None comes before the batch ends.
@@ -352,15 +564,49 @@ void CellFlattener::split(
         "positions committed in space {} differ from those counted",
         s);
   }
-  // The batch's vectors go back with it.
+  // The batch's vectors go back with it, and so does the scratch of its
+  // structs past the larger of its rows and a chunk.
+  const size_t keep = std::max<size_t>(numRows_, chunkPositions_);
+  const size_t keepNulls = bits::nwords(keep) * sizeof(uint64_t);
   for (auto& input : inputs_) {
     input.vector.reset();
     input.values.reset();
+    releaseOver(input.fieldNulls, keepNulls);
+    releaseOver(input.structNulls, keepNulls);
+    releaseOver(input.structIndices, keep * sizeof(vector_size_t));
   }
   for (auto& view : views_) {
     view.reset();
   }
+  releaseOver(ones_, keep * sizeof(int16_t));
+  releaseOver(identity_, keep * sizeof(vector_size_t));
   flattenNs_ += currentTimeNs() - start - splitNs_;
+}
+
+int64_t CellFlattener::releaseScratch() {
+  if (busy_) {
+    return 0;
+  }
+  // A prepared batch's vectors hold what they use of it.
+  const int64_t held = pool_.usedBytes();
+  rowIndex_.reset();
+  ones_.reset();
+  identity_.reset();
+  for (auto& chunk : chunks_) {
+    chunk.pids.reset();
+    chunk.rels.reset();
+    chunk.srcs.reset();
+  }
+  for (uint32_t col = 0; col < viewIndices_.size(); ++col) {
+    viewIndices_[col].reset();
+    viewNulls_[col].reset();
+  }
+  for (auto& input : inputs_) {
+    input.fieldNulls.reset();
+    input.structNulls.reset();
+    input.structIndices.reset();
+  }
+  return held - pool_.usedBytes();
 }
 
 void CellFlattener::emit(uint32_t x, const Entries& parent) {

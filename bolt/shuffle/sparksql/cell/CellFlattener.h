@@ -30,6 +30,14 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// positions of every other space it counts here, per partition, and hands
 /// to the splitter as the columns' position bases and position counts.
 ///
+/// A ROW is read as columns at its own positions: its presence, 1 at each
+/// non-null struct, and its fields with the structs' nulls folded in, so
+/// that every column below a null struct is null there and every container
+/// below it holds no element. A flat field of flat structs, as long as
+/// they are, keeps its values under its nulls and theirs, a field of a
+/// constant struct is a constant, and any other field takes the structs'
+/// indices and nulls through a dictionary.
+///
 /// A container space is split in chunks of up to `chunkPositions` elements,
 /// in the order of the entries holding them, and each chunk's counts are
 /// committed before the next chunk of the space is split, and before the
@@ -38,7 +46,10 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// else a dictionary over the decoded base. After a seal the counts of the
 /// partitions it emptied restart at zero.
 ///
-/// Scratch comes from the writer's pool and is kept across batches.
+/// Scratch comes from the writer's pool. What a batch takes past the larger
+/// of its rows and a chunk - a ROW below a container takes it per element -
+/// goes back with the batch; the rest is kept across batches until
+/// releaseScratch().
 class CellFlattener {
  public:
   /// Elements one split of a container space covers at most, by default.
@@ -92,15 +103,22 @@ class CellFlattener {
     return ns;
   }
 
+  /// Gives back the scratch kept across batches and returns the bytes the
+  /// pool got back; the next batch takes it anew. Does nothing inside
+  /// prepare() or split(), where a reclaim may come while a vector loads or
+  /// scratch is taken.
+  int64_t releaseScratch();
+
  private:
   /// What a node's column reads in the current batch.
   struct NodeInput {
-    /// The vector the node's entries index: a top-level column, or an
-    /// element, key or value vector of its parent's base. Null when the
+    /// The vector the node's entries index: a top-level column, an element,
+    /// key or value vector of its parent's base, or a field of its parent
+    /// ROW's, the structs' nulls folded in; a ROW's presence. Null when the
     /// parent holds no element in this batch.
     VectorPtr vector;
     DecodedVector decoded;
-    /// What a view of the column wraps: a leaf's decoded base; a
+    /// What a view of the column wraps: a leaf's or a ROW's decoded base; a
     /// container's lengths, an Integer vector over its base's sizes.
     VectorPtr values;
     /// A container's base offsets and sizes.
@@ -108,6 +126,12 @@ class CellFlattener {
     const vector_size_t* sizes{nullptr};
     /// Every entry null, so no view is needed.
     bool allNull{false};
+    /// A field's nulls and its structs', combined, where the field stays
+    /// flat; a ROW's structs' nulls and indices, where its fields index
+    /// them through a dictionary.
+    BufferPtr fieldNulls;
+    BufferPtr structNulls;
+    BufferPtr structIndices;
   };
 
   /// The entries of a space being split: the rows, or a chunk.
@@ -141,6 +165,22 @@ class CellFlattener {
 
   /// Decodes `vector`, the entries of node n, and below n.
   void inputNode(uint32_t n, const VectorPtr& vector);
+
+  /// inputNode() of a ROW: its presence and every field at its entries.
+  void inputRow(uint32_t n, const VectorPtr& vector);
+
+  /// Decodes the vector of a leaf's column or of a ROW's presence.
+  void inputColumn(uint32_t n, const VectorPtr& vector);
+
+  /// Field i of ROW n's structs, as decoded, at the structs' entries and
+  /// with their nulls there, `nulls`, folded in; `nulls` is null when no
+  /// struct is.
+  VectorPtr fold(uint32_t n, uint32_t i, const BufferPtr& nulls);
+
+  /// `size` SmallInt values of 1, and 0 to `size` - 1: buffers that grow
+  /// as a batch needs, shared by every vector over them.
+  const BufferPtr& ones(vector_size_t size);
+  const BufferPtr& identity(vector_size_t size);
 
   /// Marks node n and below as holding no entry this batch.
   void clearNode(uint32_t n);
@@ -199,6 +239,11 @@ class CellFlattener {
   std::vector<uint32_t> touched_;
   /// The rows' index within their partition, when a column needs it.
   BufferPtr rowIndex_;
+  /// The presence columns' values, and the identity indices.
+  BufferPtr ones_;
+  BufferPtr identity_;
+  /// Inside prepare() or split().
+  bool busy_{false};
 
   uint64_t flattenNs_{0};
   uint64_t splitNs_{0};

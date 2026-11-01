@@ -26,18 +26,16 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
-bool isContainer(const TypePtr& type) {
-  return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP;
+bool isComplex(const TypePtr& type) {
+  return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
+      type->kind() == TypeKind::ROW;
 }
 
 /// Adds the columns `type` flattens into to `columns`; false when it holds a
-/// ROW or a leaf no Cell column carries.
+/// leaf no Cell column carries.
 bool countColumns(const TypePtr& type, uint64_t& columns) {
   ++columns;
-  if (type->kind() == TypeKind::ROW) {
-    return false;
-  }
-  if (!isContainer(type)) {
+  if (!isComplex(type)) {
     return CellLayout::isSupportedType(type);
   }
   for (uint32_t i = 0; i < type->size(); ++i) {
@@ -48,6 +46,19 @@ bool countColumns(const TypePtr& type, uint64_t& columns) {
   return true;
 }
 
+/// The type of a node's column: a leaf's own, a container's lengths, a
+/// ROW's presence.
+TypePtr columnType(const CellNestedLayout::Node& node) {
+  switch (node.kind) {
+    case CellNestedLayout::Kind::kLeaf:
+      return node.type;
+    case CellNestedLayout::Kind::kRow:
+      return SMALLINT();
+    default:
+      return INTEGER();
+  }
+}
+
 } // namespace
 
 // static
@@ -55,7 +66,7 @@ bool CellNestedLayout::supports(const RowTypePtr& rowType) {
   bool nested = false;
   uint64_t columns = 0;
   for (const auto& child : rowType->children()) {
-    nested = nested || isContainer(child);
+    nested = nested || isComplex(child);
     if (!countColumns(child, columns)) {
       return false;
     }
@@ -80,7 +91,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
   types.reserve(nodes_.size());
   for (uint32_t n = 0; n < nodes_.size(); ++n) {
     names.push_back(fmt::format("n{}", n));
-    types.push_back(nodes_[n].kind == Kind::kLeaf ? nodes_[n].type : INTEGER());
+    types.push_back(columnType(nodes_[n]));
   }
   for (auto& space : spaces_) {
     std::vector<std::string> spaceNames;
@@ -106,12 +117,13 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
   Node node;
   node.kind = type->kind() == TypeKind::ARRAY ? Kind::kArray
       : type->kind() == TypeKind::MAP         ? Kind::kMap
+      : type->kind() == TypeKind::ROW         ? Kind::kRow
                                               : Kind::kLeaf;
   node.type = type;
   node.space = space;
   node.spaceColumn = static_cast<uint32_t>(spaces_[space].columns.size());
   spaces_[space].columns.push_back(id);
-  if (node.kind != Kind::kLeaf) {
+  if (node.kind == Kind::kArray || node.kind == Kind::kMap) {
     node.ownedSpace = static_cast<uint32_t>(spaces_.size());
     spaces_[space].containers.push_back(id);
     const uint32_t depth = spaces_[space].depth + 1;
@@ -120,9 +132,12 @@ uint32_t CellNestedLayout::addNode(const TypePtr& type, uint32_t space) {
   }
   nodes_.push_back(std::move(node));
   if (nodes_[id].kind != Kind::kLeaf) {
-    const uint32_t owned = nodes_[id].ownedSpace;
+    // A ROW's fields have its positions, a container's children those of
+    // its space.
+    const uint32_t childSpace =
+        nodes_[id].kind == Kind::kRow ? space : nodes_[id].ownedSpace;
     for (uint32_t i = 0; i < type->size(); ++i) {
-      const uint32_t child = addNode(type->childAt(i), owned);
+      const uint32_t child = addNode(type->childAt(i), childSpace);
       nodes_[id].children.push_back(child);
     }
   }
