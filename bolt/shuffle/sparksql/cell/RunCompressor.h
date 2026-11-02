@@ -133,13 +133,6 @@ class RunCompressor {
       const uint64_t* sizes,
       RunStreamVisitor visit);
 
-  /// Writes the run uncompressed: COMBINED_UNCOMPRESSED.
-  void writeStored(
-      RunSink& sink,
-      uint32_t numStreams,
-      const uint64_t* sizes,
-      RunStreamVisitor visit);
-
   /// Compresses the null body `out` holds from byte `at` to its end, one
   /// frame in place, when it is at least kMinCompressBytes and compresses
   /// to half its size or less; a null body that does not has the next ones
@@ -160,9 +153,8 @@ class RunCompressor {
   /// byte - so the counting costs nothing measurable.
   struct Stats {
     /// Runs by layout. `storedRuns` were under kMinCompressBytes or met
-    /// no codec; `deferredRuns` came through writeStored().
+    /// no codec.
     uint64_t storedRuns{0};
-    uint64_t deferredRuns{0};
     uint64_t combinedRuns{0};
     uint64_t separateRuns{0};
     /// Frames by outcome, with the bytes they took in. A compressed frame
@@ -249,7 +241,7 @@ class RunCompressor {
   /// of its kind stored without a try.
   void learn(uint32_t& skip, bool shrank) const;
 
-  /// writeStored() without the counting.
+  /// Writes the run uncompressed: COMBINED_UNCOMPRESSED.
   void storeRun(
       RunSink& sink,
       uint32_t numStreams,

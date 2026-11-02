@@ -57,13 +57,12 @@ std::string CellShuffleOptions::toString() const {
   return fmt::format(
       "cellMemoryCapBytes={} "
       "checkpointPartitionBytes={} nullMemLimitBytes={} "
-      "enableStringDictionary={} compressSpill={} "
+      "enableStringDictionary={} "
       "streamCompression={} adaptiveCompression={} nativeNestedTypes={}",
       cellMemoryCapBytes,
       checkpointPartitionBytes,
       nullMemLimitBytes,
       enableStringDictionary,
-      compressSpill,
       streamCompression,
       adaptiveCompression,
       nativeNestedTypes);

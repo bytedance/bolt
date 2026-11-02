@@ -568,16 +568,16 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
   }
 }
 
-TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
+TEST_F(CellWriterTest, spillsCompressAcrossMergeShapes) {
   // ~4MB per batch: with an 8MB chunk cap every window sees several
   // pressure spills. The last partition takes one short row per batch, so
   // its segments stay below the compression minimum - stored at spill time
-  // even with compressSpill, and final as they are. The closing small
-  // batch leaves resident cells beside the last window's spilled segments.
-  // Sealed windows, the first payload of a partition spanning several
-  // spill runs, then one window only, whose payload carries its spilled
-  // segments and then the resident cells. Spill compression shrinks what
-  // hits the spill file and never changes what the data file holds.
+  // and final as they are. The closing small batch leaves resident cells
+  // beside the last window's spilled segments. Sealed windows, the first
+  // payload of a partition spanning several spill runs, then one window
+  // only, whose payload carries its spilled segments and then the resident
+  // cells. Spills are compressed: what hits the spill file is far smaller
+  // than without a codec.
   constexpr int32_t kPartitions = 4;
   std::mt19937 rng(31);
   ShuffleInput input;
@@ -588,23 +588,20 @@ TEST_F(CellWriterTest, compressSpillToggleAcrossMergeShapes) {
   for (const bool seal : {true, false}) {
     SCOPED_TRACE(seal ? "sealed windows" : "residual window");
     int64_t evicted[2] = {0, 0};
-    std::vector<std::string> partitions[2];
-    for (const bool compressSpill : {true, false}) {
+    for (const bool compressed : {true, false}) {
+      const auto codec = compressed ? arrow::Compression::LZ4_FRAME
+                                    : arrow::Compression::UNCOMPRESSED;
       auto options = writerOptions(kPartitions);
-      options.cellOptions.compressSpill = compressSpill;
+      options.partitionWriterOptions.compressionType = codec;
       options.cellOptions.cellMemoryCapBytes = 8 << 20;
       options.cellOptions.checkpointPartitionBytes = seal ? 4 << 20 : 1LL << 30;
       const auto written = test::writeShuffle(options, input, pool());
-      test::expectReadsBack(
-          input, written, arrow::Compression::LZ4_FRAME, pool());
+      test::expectReadsBack(input, written, codec, pool());
       EXPECT_GT(written.metrics.totalBytesEvicted, 0);
       EXPECT_EQ(written.metrics.spillCount > 0, seal);
-      evicted[compressSpill] = written.metrics.totalBytesEvicted;
-      partitions[compressSpill] = written.partitions;
+      evicted[compressed] = written.metrics.totalBytesEvicted;
     }
     EXPECT_LT(evicted[1] * 2, evicted[0]);
-    // Verbatim and re-merged runs carry the same bytes.
-    EXPECT_EQ(partitions[1], partitions[0]);
   }
 }
 
