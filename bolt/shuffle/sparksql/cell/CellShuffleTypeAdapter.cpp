@@ -64,14 +64,14 @@ CellShuffleTypeAdapter::CellShuffleTypeAdapter(RowTypePtr logicalType)
       complexNames.push_back(logicalType_->nameOf(i));
       complexTypes.push_back(type);
     } else {
-      retainedColumns_.push_back(i);
+      simpleColumns_.push_back(i);
       names.push_back(logicalType_->nameOf(i));
       types.push_back(type);
     }
   }
   if (hasComplexColumns()) {
-    complexType_ = ROW(std::move(complexNames), std::move(complexTypes));
-    names.push_back("__cell_complex_payload");
+    packedType_ = ROW(std::move(complexNames), std::move(complexTypes));
+    names.push_back("__cell_packed_complex");
     types.push_back(VARBINARY());
     physicalType_ = ROW(std::move(names), std::move(types));
   } else {
@@ -79,7 +79,7 @@ CellShuffleTypeAdapter::CellShuffleTypeAdapter(RowTypePtr logicalType)
   }
 }
 
-RowVectorPtr CellShuffleTypeAdapter::encode(
+RowVectorPtr CellShuffleTypeAdapter::pack(
     const RowVectorPtr& input,
     memory::MemoryPool* pool) const {
   BOLT_CHECK(
@@ -96,9 +96,9 @@ RowVectorPtr CellShuffleTypeAdapter::encode(
     complex.push_back(BaseVector::loadedVectorShared(input->childAt(col)));
   }
   auto grouped = std::make_shared<RowVector>(
-      pool, complexType_, nullptr, numRows, std::move(complex));
+      pool, packedType_, nullptr, numRows, std::move(complex));
   row::CompactRow serde(grouped);
-  const auto fixedSize = row::CompactRow::fixedRowSize(complexType_);
+  const auto fixedSize = row::CompactRow::fixedRowSize(packedType_);
   std::vector<int32_t> sizes(numRows);
   uint64_t bytes = 0;
   for (vector_size_t i = 0; i < numRows; ++i) {
@@ -122,7 +122,7 @@ RowVectorPtr CellShuffleTypeAdapter::encode(
   }
   binary->setStringBuffers({buffer});
   std::vector<VectorPtr> children;
-  for (const auto col : retainedColumns_) {
+  for (const auto col : simpleColumns_) {
     children.push_back(BaseVector::loadedVectorShared(input->childAt(col)));
   }
   children.push_back(std::move(binary));
@@ -130,7 +130,7 @@ RowVectorPtr CellShuffleTypeAdapter::encode(
       pool, physicalType_, nullptr, numRows, std::move(children));
 }
 
-RowVectorPtr CellShuffleTypeAdapter::decode(
+RowVectorPtr CellShuffleTypeAdapter::unpack(
     const RowVectorPtr& input,
     memory::MemoryPool* pool) const {
   if (!hasComplexColumns()) {
@@ -140,7 +140,7 @@ RowVectorPtr CellShuffleTypeAdapter::decode(
       input->type()->equivalent(*physicalType_),
       "Invalid Cell physical schema");
   const vector_size_t numRows = input->size();
-  DecodedVector binary(*input->childAt(retainedColumns_.size()));
+  DecodedVector binary(*input->childAt(simpleColumns_.size()));
   std::vector<std::string_view> rows;
   rows.reserve(numRows);
   for (vector_size_t i = 0; i < numRows; ++i) {
@@ -148,10 +148,10 @@ RowVectorPtr CellShuffleTypeAdapter::decode(
     const auto& value = binary.data<StringView>()[binary.index(i)];
     rows.emplace_back(value.data(), value.size());
   }
-  auto complex = row::CompactRow::deserialize(rows, complexType_, pool);
+  auto complex = row::CompactRow::deserialize(rows, packedType_, pool);
   std::vector<VectorPtr> children(logicalType_->size());
-  for (uint32_t i = 0; i < retainedColumns_.size(); ++i) {
-    children[retainedColumns_[i]] = input->childAt(i);
+  for (uint32_t i = 0; i < simpleColumns_.size(); ++i) {
+    children[simpleColumns_[i]] = input->childAt(i);
   }
   for (uint32_t i = 0; i < complexColumns_.size(); ++i) {
     children[complexColumns_[i]] = complex->childAt(i);

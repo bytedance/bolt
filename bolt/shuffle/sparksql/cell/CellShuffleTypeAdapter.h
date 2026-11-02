@@ -44,19 +44,18 @@ class CellShuffleTypeAdapter {
   /// sharing their storage, then one binary column holding each row's
   /// complex fields as a CompactRow. Without complex columns, `input`
   /// itself.
-  RowVectorPtr encode(const RowVectorPtr& input, memory::MemoryPool* pool)
-      const;
+  RowVectorPtr pack(const RowVectorPtr& input, memory::MemoryPool* pool) const;
 
-  /// The logical batch of a physical batch encode() made, row for row: the
+  /// The logical batch of a physical batch pack() made, row for row: the
   /// simple columns shared, the complex ones deserialized.
-  RowVectorPtr decode(const RowVectorPtr& input, memory::MemoryPool* pool)
+  RowVectorPtr unpack(const RowVectorPtr& input, memory::MemoryPool* pool)
       const;
 
  private:
   RowTypePtr logicalType_;
   RowTypePtr physicalType_;
-  RowTypePtr complexType_;
-  std::vector<uint32_t> retainedColumns_;
+  RowTypePtr packedType_;
+  std::vector<uint32_t> simpleColumns_;
   std::vector<uint32_t> complexColumns_;
 };
 

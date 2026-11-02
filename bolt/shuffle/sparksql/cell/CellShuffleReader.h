@@ -127,15 +127,15 @@ class CellShuffleReader {
     uint64_t decompressTimeNs_{0};
   };
 
-  enum class Decoded { kPayload, kComposite, kEnd };
+  enum class NextBlock { kPayload, kCompositeRows, kEnd };
 
   /// Opens the next block across streams: a payload in the decoder, or a
   /// CompositeRows block into compositeRows_.
-  Decoded nextBlock();
+  NextBlock nextBlock();
 
   /// Reads one CompositeRows block (CellFormat.h) whose kind byte was
   /// consumed; false, with `error`, on a malformed one.
-  bool decodeComposite(std::string& error);
+  bool readCompositeBlock(std::string& error);
 
   bool hasCompositeRows() const {
     return nextCompositeRow_ < compositeRows_.size();
@@ -163,7 +163,7 @@ class CellShuffleReader {
   std::unique_ptr<CellBatchSource> nested_;
   ShuffleRowToColumnarConverter compositeConverter_;
   BufferPtr compositeStored_;
-  BufferPtr compositeRaw_;
+  BufferPtr compositeDecoded_;
   /// Row bodies (without the size prefix) of the last CompositeRows block.
   std::vector<std::string_view> compositeRows_;
   size_t nextCompositeRow_{0};

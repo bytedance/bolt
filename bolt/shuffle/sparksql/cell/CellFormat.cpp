@@ -34,15 +34,15 @@ CellLayout CellLayout::create(const RowTypePtr& rowType) {
   CellLayout layout;
   layout.rowType_ = rowType;
   layout.numColumns_ = static_cast<uint32_t>(rowType->size());
-  layout.columnStream_.reserve(layout.numColumns_);
+  layout.firstStream_.reserve(layout.numColumns_);
   layout.isString_.reserve(layout.numColumns_);
   for (uint32_t col = 0; col < layout.numColumns_; ++col) {
     const auto kind = rowType->childAt(col)->kind();
-    layout.columnStream_.push_back(
+    layout.firstStream_.push_back(
         static_cast<uint32_t>(layout.streams_.size()));
-    layout.wireIndex_.push_back(layout.wireColumns_.size());
+    layout.wireOfColumn_.push_back(layout.logicalOfWire_.size());
     if (kind != TypeKind::UNKNOWN) {
-      layout.wireColumns_.push_back(col);
+      layout.logicalOfWire_.push_back(col);
     }
     switch (kind) {
       case TypeKind::UNKNOWN:
