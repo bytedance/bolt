@@ -37,19 +37,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// not be negative, a length stream must hold exactly its entries' lengths,
 /// and a space at most CellNestedLayout::kMaxPositions positions. A batch
 /// closes before a new payload's positions would take some space's batch
-/// past that.
-///
-/// maxDecodedBytes bounds the decoders together: the payload's null
-/// bitmaps, at most, and what the batch's positions take in every space -
-/// values, nulls and offsets, with the slack of their growth - and its
-/// strings, counted by their stream bytes until they are read. A batch
-/// closes rather than pass the bound: before a new payload that does not
-/// fit beside it whole, and before the open payload's rows past the room
-/// left, at the bytes per row of its rows left. A read fails only on a row
-/// that passes the bound alone, or where that estimate falls short: rows
-/// far above the average of their payload's rows left, or strings a
-/// dictionary repeats. As for a flat payload, the rows' batch opens at the
-/// caller's capacity, which the bound leaves to the caller.
+/// past that. As for a flat payload, the rows' batch opens at the caller's
+/// capacity.
 class CellNestedAssembler final : public CellBatchSource {
  public:
   /// Positions one append covers at most by default, so that a decoder's
@@ -82,27 +71,11 @@ class CellNestedAssembler final : public CellBatchSource {
   bool countPositions(uint32_t x, std::string& error);
 
   /// Whether the batch takes the payload just begun as well: every space's
-  /// positions, and its bytes within maxDecodedBytes.
+  /// positions.
   bool fits() const;
 
   /// Bytes the batch's values take, every space's together.
   uint64_t batchBytes() const;
-
-  /// Bytes the batch's strings take out of line, every space's together.
-  uint64_t batchStrings() const;
-
-  /// Bytes `positions` positions of space s take in a batch: values, a null
-  /// bit per column and the containers' offsets.
-  uint64_t positionBytes(uint32_t s, uint64_t positions) const;
-
-  /// What maxDecodedBytes counts of the batch: the payload's null bitmaps
-  /// at most, every space's position bytes, doubled for their growth, and
-  /// the strings read.
-  uint64_t heldBytes() const;
-
-  /// heldBytes() once the rest of the open payload joins the batch, its
-  /// strings by their stream bytes.
-  uint64_t restBytes() const;
 
   /// Appends the next `positions` positions of space s, then the elements
   /// their containers' entries hold.
@@ -116,7 +89,6 @@ class CellNestedAssembler final : public CellBatchSource {
 
   const CellNestedLayout layout_;
   memory::MemoryPool* const pool_;
-  const CellDecodeLimits limits_;
   const uint32_t appendPositions_;
   CellPayloadDecoder reader_;
   std::vector<std::unique_ptr<CellPayloadDecoder>> decoders_;
@@ -127,10 +99,6 @@ class CellNestedAssembler final : public CellBatchSource {
   /// A payload row's decoded bytes, every space's together: what the byte
   /// budget counts by.
   uint64_t rowBytes_{1};
-  /// For maxDecodedBytes: the payload's null bitmaps at most, and the
-  /// stream bytes of its strings not read yet.
-  uint64_t nullBytes_{0};
-  uint64_t stringsLeft_{0};
 };
 
 /// A CellNestedAssembler of `type` when it takes a nested layout, else nullptr;
