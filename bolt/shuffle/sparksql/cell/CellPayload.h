@@ -19,8 +19,6 @@
 ///
 /// Every field is validated before it is used: a malformed payload is
 /// reported, never crashed on and never guessed at.
-/// Deliberately independent of the existing shuffle reader stack: no Payload
-/// class, no arrow buffers; vectors are built directly.
 
 #pragma once
 
@@ -127,11 +125,11 @@ class CellDecompressor {
 /// Decodes ColumnarPayloads of one schema into RowVectors, streaming: a
 /// payload's encoded bytes are read whole, its rows come out in pieces of
 /// the caller's size into a batch that may span payloads. Memory is the
-/// payload's encoded bytes plus one batch, whatever the payload's row
-/// count. Reusable across payloads; scratch buffers are retained. A payload
-/// whose columns have different position counts is read by one decoder
-/// (readPayload()), and the columns at the same positions are decoded by a
-/// decoder of their own (openPayload()).
+/// payload's decoded streams, a bitmap per kRawNull column, and one batch,
+/// whatever the payload's row count. Reusable across payloads; scratch buffers
+/// are retained. A payload whose columns have different position counts is read
+/// by one decoder (readPayload()), and the columns at the same positions are
+/// decoded by a decoder of their own (openPayload()).
 class CellPayloadDecoder {
  public:
   /// `decompressor` may be null when payloads are known to be uncompressed;
@@ -409,8 +407,6 @@ class CellPayloadDecoder {
   uint64_t batchStringBytes_{0};
 };
 
-// Writer side: the pieces both output backends assemble payloads from.
-
 /// Expands the null records of one kRawNull column at `cursor` - their u32
 /// count, then the records (CellFormat.h) - into `bitmap`, the
 /// ceil(rowCount / 8)-byte bitmap of the column (bit 1 = non-null, unused
@@ -425,18 +421,22 @@ BOLT_CELL_KERNEL bool expandNullRecords(
     uint32_t& nonNullCount,
     std::string& error);
 
+// Buffer helpers shared by both sides, and the writer's payload pieces.
+
 struct CellWindowInput;
 class RunCompressor;
 
 /// Bytes below which a frame is stored rather than compressed - a run, a
-/// stream of a SEPARATE run, a composite block: the codec's frame would not
-/// pay for itself. The one threshold for every frame the Cell writer
-/// compresses.
+/// stream of a kSeparate run, a null body, a CompositeRows body: the
+/// codec's frame would not pay for itself. The one threshold for every frame
+/// the Cell writer compresses.
 constexpr uint64_t kMinCompressBytes = 256;
-/// A final run at least this large is written SEPARATE, stream by stream.
+/// A run at least this large is written kSeparate, each stream its own
+/// frame.
 constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
 
-/// Bytes of a run header: layout byte, stored size, per-stream sizes.
+/// Bytes of a kCombined or kCombinedUncompressed run header: layout byte,
+/// stored size u64, decoded size u64 per stream.
 inline uint64_t runHeaderBytes(uint32_t numStreams) {
   return 1 + 8 + 8ull * numStreams;
 }

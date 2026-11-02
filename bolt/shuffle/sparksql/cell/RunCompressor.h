@@ -138,7 +138,7 @@ class RunCompressor {
   /// as it is.
   uint32_t compressNullBody(BufferPtr& out, size_t at);
 
-  /// Gives the one-shot workspaces back to the pool.
+  /// Gives the one-shot workspaces back to the spill pool.
   void releaseWorkspace();
 
   /// Streams frames through `compressor` from now on, in place of the

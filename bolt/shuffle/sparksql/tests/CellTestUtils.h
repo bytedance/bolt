@@ -471,9 +471,10 @@ inline std::vector<vector_size_t> readerBatchSizes(
 }
 
 /// Whether row `leftRow` of `left` and row `rightRow` of `right` hold the
-/// same value, whatever their encodings: arrays and maps entry by entry in
-/// their order, structs field by field. Unlike equalValueAt, which compares
-/// maps as sets of entries, a map whose entries changed order differs.
+/// same value, whatever their encodings: arrays element by element and maps
+/// key-value pair by pair, in their order, structs field by field. Unlike
+/// equalValueAt, which compares maps as sets of pairs, a map whose pairs
+/// changed order differs.
 inline bool sameValue(
     const BaseVector& left,
     vector_size_t leftRow,
@@ -702,14 +703,14 @@ inline const std::vector<ShuffleOutput> kShuffleOutputs{
     {false, arrow::Compression::UNCOMPRESSED},
     {true, arrow::Compression::LZ4_FRAME}};
 
-/// Writes `input` once per output of `outputs` - into `dataFile`, or pushed
-/// to a RecordingRssClient - and reads every partition back at every read
-/// shape, an RSS partition push by push, expecting the input's rows in
-/// order. Each writer must have shredded the complex columns of a schema
-/// that takes a nested layout, its struct nulls folded into the columns
-/// below, else converted them; an uncompressed output's raw lengths are
-/// its lengths. `tune` adjusts the writer of each output, `check` sees what
-/// it wrote. Returns what each output wrote.
+/// Writes `input` once per output of `outputs` and reads every partition
+/// back at every read shape (an RSS partition push by push), expecting the
+/// input's rows in order. Also expects a schema that takes a nested layout
+/// to report flattenTime, which holds the shredding, any other complex
+/// schema to report convertTime, every field null below a null struct, and
+/// an uncompressed output's raw lengths to be its lengths. `tune` adjusts
+/// each writer, `check` sees what it wrote. Returns what each output
+/// wrote.
 inline std::vector<WrittenShuffle> roundTrip(
     const ShuffleInput& input,
     int32_t numPartitions,

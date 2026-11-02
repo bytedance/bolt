@@ -96,6 +96,8 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// under way, right after it.
   void flushComposite();
 
+  /// Writes the held rows now. The caller holds compositeInProgress_, or
+  /// is the split making room.
   void writeComposite();
 
   /// The BlockSource of writeComposite(): partition `pid`'s next block,

@@ -456,9 +456,9 @@ class NestedVectorMaker {
   const Options options_;
 };
 
-/// Batches of `rows` rows each of `type` from `options` and seed `seed`,
-/// spread over `numPartitions`; the columns of batch b are held as
-/// `encodingOf(b, column)`.
+/// One batch per entry of `rows`, of that many rows of `type`, from
+/// `options` and `seed`, spread over `numPartitions`; the columns of batch
+/// b are held as `encodingOf(b, column)`.
 inline ShuffleInput makeInput(
     const RowTypePtr& type,
     NestedVectorMaker::Options options,
@@ -538,8 +538,8 @@ inline RowTypePtr deepRowType() {
        MAP(BIGINT(), MAP(VARCHAR(), MAP(INTEGER(), DOUBLE())))});
 }
 
-/// The arrays and maps of deepRowType(), four levels deep, with no ROW at
-/// any depth.
+/// Arrays and maps four levels deep with no ROW at any depth, beside a
+/// BIGINT and a VARCHAR column.
 inline RowTypePtr deepNestedType() {
   return ROW(
       {"id", "arrays", "maps", "mixed", "nestedMaps", "s"},
@@ -580,8 +580,9 @@ inline std::vector<Timestamp> nanoTimestamps(uint64_t seed) {
   return values;
 }
 
-/// Arrays of `elements`, each from its first: row r holds `lengths[r]` of
-/// them. With `map`, maps whose keys and values are both `elements`.
+/// Arrays of `elements`, every one starting at element 0: row r holds the
+/// first `lengths[r]`. With `map`, maps whose keys and values are both
+/// `elements`.
 inline VectorPtr containersOf(
     const std::vector<vector_size_t>& lengths,
     const VectorPtr& elements,

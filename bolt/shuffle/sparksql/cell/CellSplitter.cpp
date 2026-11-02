@@ -102,17 +102,17 @@ template <typename T>
 void CellSplitter::flushEncoded(
     uint32_t stream,
     uint32_t pid,
-    const char* staged,
+    const char* line,
     uint8_t* cur) {
-  const auto* line = reinterpret_cast<const T*>(staged);
+  const auto* values = reinterpret_cast<const T*>(line);
   const bool full = cur[pid] == kCacheLineBytes;
   // Common case: encode straight into the tail cell (reserve allocates
   // nothing, so nothing can spill between reserve and commit).
   if (auto* dst = reinterpret_cast<uint8_t*>(
           cells_.tryReserve(pid, stream, kMaxBlockBytes))) {
     const uint32_t bytes = full
-        ? encodeBlockFull<T>(line, dst)
-        : encodeBlock<T>(line, cur[pid] / sizeof(T), dst);
+        ? encodeBlockFull<T>(values, dst)
+        : encodeBlock<T>(values, cur[pid] / sizeof(T), dst);
     cells_.commit(pid, stream, bytes);
     bumpPartitionBytes(pid, bytes);
     cur[pid] = 0;
@@ -120,8 +120,8 @@ void CellSplitter::flushEncoded(
   }
   uint8_t block[kMaxBlockBytes];
   const uint32_t bytes = full
-      ? encodeBlockFull<T>(line, block)
-      : encodeBlock<T>(line, cur[pid] / sizeof(T), block);
+      ? encodeBlockFull<T>(values, block)
+      : encodeBlock<T>(values, cur[pid] / sizeof(T), block);
   cells_.append(pid, stream, block, bytes);
   bumpPartitionBytes(pid, bytes);
   cur[pid] = 0;
@@ -868,17 +868,9 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
   // an entry, and the format only allows a fallback tail after that.
   if (FOLLY_LIKELY(1 + size <= kDictSerializedBudget)) {
     const uint32_t count = st.entryCount;
-    // The dictionary lives in the column's idle data-stream cache line in
-    // its serialized [len][bytes]... form, the cursor holding the
-    // serialized byte count; the walk over entry boundaries is inherent,
-    // so each step is made as cheap as the form allows: one 8-byte window
-    // load per entry yields the length byte AND up to seven content
-    // bytes, so a short value - the common dictionary shape - compares
-    // whole in the same register, and the walk issues exactly one load
-    // per entry. A window anchored at the last boundary may read past the
-    // line into the neighbour's staged bytes (or into
-    // kCacheTailPadding); the needle's leading length byte makes a match
-    // impossible outside a real entry, so the garbage is inert.
+    // A window anchored at the last entry may read into the next line or
+    // kCacheTailPadding; the needle's length byte makes those bytes
+    // unmatchable.
     const char* entries = cacheLine(dataStream, pid);
     const uint32_t uniform = st.uniformLen;
     uint32_t i;

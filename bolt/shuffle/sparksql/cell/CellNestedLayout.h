@@ -23,15 +23,15 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// A row type with ARRAY, MAP and ROW columns as plain Cell columns: a
-/// nested layout of CellFormat.h. Its type tree is shredded in pre-order,
-/// one node per column: node n is column n of layout(), a leaf a column of
-/// its type, an ARRAY or MAP an Integer column of its entries' lengths, null
-/// where an entry is, a ROW a SmallInt column holding 1 at each non-null
-/// struct. The payload's rows are space 0, and every container owns a space
-/// of its own, numbered in pre-order, holding the elements of its non-null
-/// entries; a ROW owns none. A node's column has the positions of the space
-/// its parent owns or, below a ROW, the ROW's positions. Describes the
+/// The nested layout (CellFormat.h) of a row type with ARRAY, MAP or ROW
+/// columns: its type tree shredded in pre-order into one plain Cell column
+/// per node, node n being column n of layout(). A leaf is a column of its
+/// own type; an ARRAY or MAP an Integer column of each value's length, null
+/// where the value is; a ROW a SmallInt presence column, 1 at each non-null
+/// struct. Space 0 holds the payload's rows; each ARRAY or MAP owns a
+/// space, numbered in pre-order, holding the elements of its non-null
+/// values; a ROW owns none. A node's column has the positions of its
+/// parent's space or, below a ROW, the ROW's positions. Describes the
 /// shredding only: no data passes through here.
 class CellNestedLayout {
  public:

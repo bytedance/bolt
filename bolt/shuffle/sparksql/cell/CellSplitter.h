@@ -26,7 +26,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// One decoded input batch, pid column already excluded. Borrowed for the
 /// duration of a split call.
 struct SplitBatch {
-  /// One DecodedVector per logical column of the layout. Mutable because
+  /// One DecodedVector per layout column. Mutable because
   /// nulls() may materialize lazily.
   DecodedVector* decoded;
   const uint32_t* row2Partition;
@@ -54,11 +54,16 @@ struct SplitBatch {
 /// lines and a full line becomes one Encoding Block (or a raw copy) appended
 /// to the DataCells.
 ///
-/// Locality by construction: a column's cache lines are contiguous
+/// Locality by construction: a stream's cache lines are contiguous
 /// (64B * P, L2-resident), its cursors are a P-byte array (L1-resident), and
 /// the only scattered store of the hot loop lands inside that window.
 /// Owns the cells, nulls and window metadata, and submits them to CellOutput.
 /// The writer decides when to spill, seal a window or finish.
+///
+/// The window is every partition's open payload. Per-partition window
+/// counts (windowRowCounts(), a row's position in the window) run since
+/// that partition's payload opened: a partition seal closes single
+/// payloads, so they need not have opened together.
 class CellSplitter {
  public:
   /// The layout, allocator, output and pool must outlive this splitter.
@@ -105,8 +110,8 @@ class CellSplitter {
   /// resident cells directly. Populates output and dictionary metrics.
   void finish(ShuffleWriterMetrics& metrics);
 
-  /// Maximum bytes appended to a partition since the window opened; drives
-  /// the checkpoint trigger and approximates its payload size.
+  /// Largest bytes appended to one partition since its payload opened.
+  /// Drives the partition seal and approximates that payload's size.
   uint64_t maxPartitionBytes() const {
     return maxPartitionBytes_;
   }
@@ -236,23 +241,13 @@ class CellSplitter {
   template <bool kHasNulls, bool kIndexed>
   BOLT_CELL_KERNEL void splitStringDict(uint32_t col, const SplitBatch& batch);
 
-  /// Per (partition, dictionary column): the open dictionary segment. Its
-  /// entries live here, never in the cells, until the segment closes - a
-  /// spill between two closes must not split a dictionary across Runs.
-  /// While `mode` is dictionary, the column's length
-  /// cache stages raw index bytes and its data cache stays empty.
-  /// Per (partition, dictionary column) bookkeeping only - 8 bytes. The
-  /// dictionary bytes themselves live in the column's DATA-stream cache
-  /// line, which is idle while the partition is in dictionary mode (hits
-  /// write nothing but an index byte to the length stream), in the wire
-  /// serialization [len][bytes][len][bytes]... with no unpacked lengths,
-  /// offsets or key shadows (a hard design constraint). The line's cursor
-  /// doubles as the serialized byte count. Only what the wire framing
-  /// needs (matched) plus mode and entry count lives here, an
-  /// L1-resident array. The probe walks the boundary chain in the line;
-  /// each step is one 8-byte load yielding the length byte and up to
-  /// seven content bytes together, so a short value compares whole in the
-  /// same register.
+  /// Per (partition, dictionary column): the open segment's bookkeeping, 8
+  /// bytes. Its entries are staged in the column's idle data-stream cache
+  /// line as [len][bytes]..., the line's cursor being the serialized size,
+  /// and reach the cells only when the segment closes, so a spill never
+  /// splits a dictionary across Runs. In dictionary mode the length cache
+  /// stages index bytes. The probe walks the entries in the line, one load
+  /// per entry yielding the length byte and the characters together.
   struct DictState {
     static constexpr uint8_t kModeDict = 0;
     static constexpr uint8_t kModeFallback = 1;
@@ -278,9 +273,8 @@ class CellSplitter {
   /// Writes the open segment - the data-stream cache line's dataCur[pid]
   /// serialized bytes - as [entries][terminator][matched u32] into the
   /// data stream cells, then clears the open-segment fields and the
-  /// cursor. A segment with no indexed row is written only when `last`
-  /// requires the framing (a demote before any hit still owes the empty
-  /// sequence).
+  /// cursor. Always appends the framing: callers skip a segment with no
+  /// indexed row unless a demote owes the empty sequence.
   void closeDictSegment(
       uint32_t dataStream,
       uint32_t pid,
@@ -291,8 +285,7 @@ class CellSplitter {
   /// Appends one non-null value of a dictionary-mode partition. Returns
   /// false when the partition just demoted to the fallback tail (the value
   /// was not appended; the caller routes it through the fallback path).
-  /// Always inlined into the row loop: a per-row call was 13% of the
-  /// dictionary split profile.
+  /// Always inlined: it runs once per non-null row.
   FOLLY_ALWAYS_INLINE bool appendDictValue(
       uint32_t lengthStream,
       uint32_t dataStream,

@@ -42,8 +42,8 @@
 /// outside: rows into CellShuffleWriter, every partition's bytes out
 /// through CellShuffleReader, compared with the input, and fuzzed schemas
 /// with V1's output as well. Every partition reads back its rows, in order
-/// and with every map's entries in their order, whatever the nesting, the
-/// nulls at each level, the input's encodings, the partition count, codec,
+/// and with every map's key-value pairs in their order, whatever the nesting,
+/// the nulls at each level, the input's encodings, the partition count, codec,
 /// output, spills, seals and read batch sizes. Besides the rows, the tests
 /// check what the shuffle shows of itself: which way a schema takes - a
 /// nested layout, or the adapter's binary column - the batches the reader
@@ -70,7 +70,7 @@ std::string nullTrace(
 
 class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
-  /// Whole batches and a row per append.
+  /// Whole batches, and a row per batch.
   static inline const std::vector<ReadShape> kFewerReadShapes{
       {4096, 1 << 20},
       {100, 1}};
@@ -365,8 +365,8 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
     }
   }
 
-  // Rows of tens of thousands of elements among small ones, read back one
-  // row and one append at a time as well.
+  // Rows of tens of thousands of elements among small ones, read back a row
+  // at a time as well, by batch size and by byte budget.
   cases.push_back(
       {"large containers",
        7,
@@ -389,14 +389,11 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
        },
        {{4096, 1 << 20}, {1, 1 << 20}, {1000, 1}}});
 
-  // Containers of up to 150000 elements among small ones: an entry's
-  // elements go into several of the writer's chunks, a chunk holds the
-  // elements of many entries, and a batch of a space more positions than
-  // one append takes. Partition 0 takes both large rows. Read back in
-  // batches of every row, of one row, of one append and with no byte
-  // target.
+  // Containers of up to 150000 elements among small ones, partition 0
+  // taking both large rows. Read back whole, a row per batch by batch size
+  // and by byte budget, and an append per batch with no byte target.
   cases.push_back(
-      {"elements past a chunk",
+      {"containers of 150000 elements",
        7,
        [this] {
          const auto type =
@@ -647,14 +644,11 @@ TEST_F(CellNestedTest, adapterWhenNestedTypesAreNotNative) {
 }
 
 TEST_F(CellNestedTest, spillsAndSeals) {
-  // Enough rows for the writer to seal payloads past a small size: of every
-  // partition, of partition 0 alone, and together with spills under a
-  // small cap and windows sealed past a small null memory; on an RSS
-  // client a seal pushes its payloads. Half the rows go to partition 0,
-  // whose payload passes a bound well before the others' do: past a bound
-  // only it reaches, its payloads close while the others' stay open, which
-  // the reader shows as more payloads - a batch each at a byte target of
-  // zero - in partition 0 than in some other partition.
+  // Enough rows for the writer to seal payloads: of every partition, of
+  // partition 0 alone, and with spills and null seals as well; on an RSS
+  // client a seal pushes. Half the rows go to partition 0, so under the
+  // per-partition bound only its payloads close, which the reader shows as
+  // more payloads in partition 0 than in some other.
   const auto withRow =
       ROW({"id", "s", "tags", "attrs", "st"},
           {BIGINT(),
@@ -951,15 +945,10 @@ TEST_F(CellNestedTest, dictionaryProbeTakesTheRowsStrings) {
 }
 
 TEST_F(CellNestedTest, elementsPastTheRowLimit) {
-  // Rows of 2^30 elements: arrays and maps of UNKNOWN, which carry lengths
-  // only and cost nothing to write or read, and arrays of null BOOLEANs,
-  // whose space has a column on the wire, 2^30 null bits a row to read
-  // back. Two such rows in one partition hold more positions than a
-  // payload may. Coming one by one, the writer closes a window before each,
-  // however few bytes they take; and a batch holding a payload's elements
-  // takes no next payload whose elements would take its space past
-  // kMaxPositions, so it ends there. Coming in one batch, they fail the
-  // write: no payload carries the batch.
+  // Rows of 2^30 elements: of UNKNOWN, lengths only, and of null BOOLEANs,
+  // 2^30 null bits a row. Two such rows exceed one payload's positions:
+  // sent one by one they spread over three payloads, read back a batch
+  // each; sent in one batch they fail the write.
   constexpr vector_size_t kLength = 1 << 30;
   const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
   const auto rows = static_cast<vector_size_t>(lengths.size());
@@ -1333,8 +1322,7 @@ TEST_F(CellNestedTest, structNullsFirstInALaterBatch) {
   // Structs without a null in the first two batches and with some in the
   // third: their fields, with no null of their own, turn mixed only there,
   // and so does a field null throughout until then, at the top level and as
-  // an array's elements. At P=1024 a column turning mixed fills in the
-  // positions every partition held before. Four batches more hold structs
+  // an array's elements. Four batches more hold structs
   // null only past their first 64 or only among their first 100, flat and
   // then in a dictionary: a batch's struct nulls count wherever they lie.
   constexpr vector_size_t kRows = 2000;
@@ -1421,9 +1409,7 @@ TEST_F(CellNestedTest, wrappedStructsAndFields) {
   // too, lazy only in a flat struct at the top level, as a scan makes them:
   // a different way per batch, struct and field. In the second round the
   // fields' ways shift, so that each way of a struct meets two sets of them
-  // and a flat struct at the top level the lazy ones. A wrapped struct's
-  // fields, and the wrapped fields of a flat struct with nulls, take the
-  // structs' nulls through a dictionary.
+  // and a flat struct at the top level the lazy ones.
   NestedVectorMaker::Options options;
   options.nullPercent = {10, 20};
   NestedVectorMaker maker(pool(), 23, options);
@@ -1709,17 +1695,12 @@ TEST_F(CellNestedTest, nestedShuffleMetrics) {
 
 TEST_F(CellNestedTest, writerReturnsScratchAfterEachBatch) {
   // Structs below a container have an entry per element, far more than a
-  // batch has rows. The scratch the writer takes per element - a
-  // dictionary's indices and nulls, the presences' values, a field's nulls
-  // with its structs' - goes back with the batch: after one of 2^22 structs
-  // that take little else of the writer, it holds less than a byte per
-  // struct. A reclaim gives back the scratch it keeps between batches, and
-  // may come in the middle of a batch, while the numbers in a struct's
-  // array load and before the struct's next field takes the structs'
-  // indices: it then gives back nothing the batch still uses. On an RSS
-  // client the window goes out as each batch ends, and its cells' memory
-  // with it, so that the writer's own pool shows its scratch and state
-  // alone. Every partition reads back its rows.
+  // batch has rows. After a batch of 2^22 such structs the writer holds
+  // less than a byte per struct; a reclaim between batches, or in the
+  // middle of one while a lazy field loads, gives back its scratch without
+  // breaking the batch. On an RSS client each window goes out as its batch
+  // ends, so the writer's pool shows its scratch alone. Every partition
+  // reads back its rows.
   constexpr int32_t kPartitions = 3;
   constexpr vector_size_t kRows = 100;
   constexpr vector_size_t kPerRow = 2500;

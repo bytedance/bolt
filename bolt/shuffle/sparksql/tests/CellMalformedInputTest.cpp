@@ -676,8 +676,8 @@ TEST_F(CellMalformedInputTest, edgesOfTheFormatAreRead) {
         batchSize);
   }
 
-  // A payload of kMaxPayloadRows rows: the rows' positions are a decoder's
-  // at most, here every one a null array.
+  // A payload of kMaxPayloadRows rows, the most a decoder takes, every one
+  // a null array: its first batch reads back.
   const auto arrays = ROW({"a"}, {ARRAY(BIGINT())});
   const auto mostRows = payload(
       kMaxPayloadRows,

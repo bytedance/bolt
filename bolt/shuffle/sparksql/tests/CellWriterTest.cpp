@@ -474,11 +474,10 @@ TEST_F(CellWriterTest, lazyInputIsSlicedByLoadedBytes) {
 }
 
 TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
-  // Every codec, streaming and one-shot, compresses what spills and what
-  // is written - pushed to an RSS client as well - past a stream of random
-  // numbers no codec shrinks: well under half the bytes of the same
-  // shuffle uncompressed, whose sizes its raw lengths are. A pool with no
-  // room to spare compresses alike, streaming and one-shot.
+  // Every codec, streaming and one-shot, shrinks what spills and what is
+  // written, locally and pushed, to under half of the uncompressed
+  // shuffle, despite a column of random numbers; the raw lengths match the
+  // uncompressed sizes. A pool with no room to spare compresses alike.
   constexpr int32_t kPartitions = 4;
   std::mt19937 rng(37);
   std::mt19937_64 random(41);
@@ -532,8 +531,8 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
     }
   }
 
-  // 32 MB through a 24 MiB pool, raised before stop() so that the merge is
-  // funded.
+  // 32 MB through a 24 MiB pool, raised after the last batch so that
+  // stop() has room to write the output.
   ShuffleInput large;
   int64_t rawBytes = 0;
   for (int batch = 0; batch < 8; ++batch) {
@@ -568,8 +567,8 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
 TEST_F(CellWriterTest, spillsCompressAcrossMergeShapes) {
   // ~4MB per batch: with an 8MB chunk cap every window sees several
   // pressure spills. The last partition takes one short row per batch, so
-  // its segments stay below the compression minimum - stored at spill time
-  // and final as they are. The closing small batch leaves resident cells
+  // its segments stay below the compression minimum and are stored as they
+  // are. The closing small batch leaves resident cells
   // beside the last window's spilled segments. Sealed windows, the first
   // payload of a partition spanning several spill runs, then one window
   // only, whose payload carries its spilled segments and then the resident
