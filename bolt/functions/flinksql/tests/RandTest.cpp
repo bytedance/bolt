@@ -95,13 +95,13 @@ TEST_F(RandTest, LiteralSeedMatchesJavaRandomSequence) {
   EXPECT_DOUBLE_EQ(doubles->valueAt(2), 0.20771484130971707);
 
   auto integers = evaluate<SimpleVector<int32_t>>(
-      "flink_rand_integer(cast(1 as integer), cast(100 as integer))", input);
+      "flink_rand_integer(cast(100 as integer), cast(1 as integer))", input);
   EXPECT_EQ(integers->valueAt(0), 85);
   EXPECT_EQ(integers->valueAt(1), 88);
   EXPECT_EQ(integers->valueAt(2), 47);
 
   auto powersOfTwo = evaluate<SimpleVector<int32_t>>(
-      "flink_rand_integer(cast(1 as integer), cast(128 as integer))", input);
+      "flink_rand_integer(cast(128 as integer), cast(1 as integer))", input);
   EXPECT_EQ(powersOfTwo->valueAt(0), 93);
   EXPECT_EQ(powersOfTwo->valueAt(1), 12);
   EXPECT_EQ(powersOfTwo->valueAt(2), 52);
@@ -119,8 +119,8 @@ TEST_F(RandTest, LegacySeededIntegerSequenceIsUnchanged) {
 
 TEST_F(RandTest, DynamicIntegerSeedAndBound) {
   auto input = makeRowVector(
-      {makeNullableFlatVector<int32_t>({1, 2, std::nullopt, 1, 1}),
-       makeNullableFlatVector<int32_t>({100, 100, 100, std::nullopt, 100})});
+      {makeNullableFlatVector<int32_t>({100, 100, 100, std::nullopt, 100}),
+       makeNullableFlatVector<int32_t>({1, 2, std::nullopt, 1, 1})});
   assertEqualVectors(
       makeNullableFlatVector<int32_t>({85, 8, std::nullopt, std::nullopt, 85}),
       evaluate("flink_rand_integer(c0, c1)", input));
@@ -135,7 +135,7 @@ TEST_F(RandTest, NullLiteralSeed) {
   assertEqualVectors(
       makeNullableFlatVector<int32_t>(
           {std::nullopt, std::nullopt, std::nullopt}),
-      evaluate("flink_rand_integer(cast(null as integer), c0)", input));
+      evaluate("flink_rand_integer(c0, cast(null as integer))", input));
 }
 
 TEST_F(RandTest, LargeBoundMatchesJavaRejectionSampling) {
@@ -143,7 +143,7 @@ TEST_F(RandTest, LargeBoundMatchesJavaRejectionSampling) {
   assertEqualVectors(
       makeFlatVector<int32_t>(
           {215764588, 880641847, 874970313, 446064254, 77814904}),
-      evaluate("flink_rand_integer(1, 1073741825)", input));
+      evaluate("flink_rand_integer(1073741825, 1)", input));
 }
 
 TEST_F(RandTest, BigintDynamicSeeds) {
@@ -170,7 +170,7 @@ TEST_F(RandTest, LiteralSeedContinuesAcrossBatches) {
   EXPECT_DOUBLE_EQ(second, 0.41008081149220166);
 
   auto integers =
-      compileExpression("flink_rand_integer(1, 100)", asRowType(input->type()));
+      compileExpression("flink_rand_integer(100, 1)", asRowType(input->type()));
   auto firstInteger =
       evaluate(*integers, input)->as<SimpleVector<int32_t>>()->valueAt(0);
   auto secondInteger =
@@ -208,17 +208,25 @@ TEST_F(RandTest, NullBoundDoesNotConsumeSeededSequence) {
   auto input = makeRowVector(
       {makeNullableFlatVector<int32_t>({100, std::nullopt, 100})});
   auto result = evaluate<SimpleVector<int32_t>>(
-      "flink_rand_integer(cast(1 as integer), c0)", input);
+      "flink_rand_integer(c0, cast(1 as integer))", input);
   EXPECT_EQ(result->valueAt(0), 85);
   EXPECT_TRUE(result->isNullAt(1));
   EXPECT_EQ(result->valueAt(2), 88);
+}
+
+TEST_F(RandTest, DynamicIntegerSeedWithConstantBound) {
+  auto input =
+      makeRowVector({makeNullableFlatVector<int32_t>({1, 2, std::nullopt, 1})});
+  assertEqualVectors(
+      makeNullableFlatVector<int32_t>({85, 8, std::nullopt, 85}),
+      evaluate("flink_rand_integer(cast(100 as integer), c0)", input));
 }
 
 TEST_F(RandTest, IntegerBoundMustBePositive) {
   auto input =
       makeRowVector({makeFlatVector<int32_t>(std::vector<int32_t>{0})});
   EXPECT_ANY_THROW(evaluate(
-      "flink_rand_integer(cast(1 as integer), cast(0 as integer))", input));
+      "flink_rand_integer(cast(0 as integer), cast(1 as integer))", input));
 }
 
 } // namespace

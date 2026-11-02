@@ -166,7 +166,7 @@ struct FlinkRandFunction {
   detail::FlinkRandomState state_;
 };
 
-/// flink_rand_integer([seed,] bound) uses Flink SQL argument order.
+/// flink_rand_integer(bound[, seed]) uses native plan argument order.
 template <typename T>
 struct FlinkRandIntegerFunction {
   BOLT_DEFINE_FUNCTION_TYPES(T);
@@ -183,8 +183,8 @@ struct FlinkRandIntegerFunction {
   void initialize(
       const std::vector<TypePtr>&,
       const core::QueryConfig&,
-      const int32_t* seed,
-      const int32_t*) {
+      const int32_t*,
+      const int32_t* seed) {
     state_.initialize(seed);
   }
 
@@ -192,7 +192,7 @@ struct FlinkRandIntegerFunction {
     result = state_.generator().nextInt(bound);
   }
 
-  void call(int32_t& result, int32_t seed, int32_t bound) {
+  void call(int32_t& result, int32_t bound, int32_t seed) {
     result = state_.generate(
         seed, [bound](auto& generator) { return generator.nextInt(bound); });
   }
