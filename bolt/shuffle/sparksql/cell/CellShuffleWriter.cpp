@@ -204,6 +204,25 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     rv->loadedVector();
   }
   const int64_t flatSize = rv->estimateFlatSize();
+  // Where a window is released only whole (remote): releases it first
+  // when the next slice of about `estimatedBytes` cannot be reserved.
+  const auto reserveSlice = [this](int64_t estimatedBytes) {
+    // A slice must fit before it starts: halfway through, the window cannot
+    // be pushed. The reservation also keeps room to assemble the window's
+    // largest payload and its compressed copy, since a push needs that room
+    // exactly when memory is short. Without it, the window goes out first.
+    if (!remote_ || !splitter_->hasWindowRows()) {
+      return;
+    }
+    const int64_t sliceBytes = estimatedBytes + kChunkBytes;
+    const int64_t pushBytes =
+        2 * static_cast<int64_t>(splitter_->maxPartitionBytes());
+    const int64_t cap = options_.cellOptions.cellMemoryCapBytes;
+    if ((cap > 0 && allocator_->allocatedBytes() + sliceBytes > cap) ||
+        !boltPool_->maybeReserve(sliceBytes + pushBytes)) {
+      releaseWindow(SealReason::kReserve);
+    }
+  };
   const int64_t maxBytes =
       remote_ ? kReservedSliceBytes : kMaxShuffleWriterBatchBytes;
   if (flatSize > maxBytes && rv->size() > 1) {
@@ -223,24 +242,6 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   }
   reserveSlice(flatSize);
   return splitBatch(std::move(rv));
-}
-
-void CellShuffleWriter::reserveSlice(int64_t estimatedBytes) {
-  // A slice must fit before it starts: halfway through, the window cannot
-  // be pushed. The reservation also keeps room to assemble the window's
-  // largest payload and its compressed copy, since a push needs that room
-  // exactly when memory is short. Without it, the window goes out first.
-  if (!remote_ || !splitter_->hasWindowRows()) {
-    return;
-  }
-  const int64_t sliceBytes = estimatedBytes + kChunkBytes;
-  const int64_t pushBytes =
-      2 * static_cast<int64_t>(splitter_->maxPartitionBytes());
-  const int64_t cap = options_.cellOptions.cellMemoryCapBytes;
-  if ((cap > 0 && allocator_->allocatedBytes() + sliceBytes > cap) ||
-      !boltPool_->maybeReserve(sliceBytes + pushBytes)) {
-    releaseWindow(SealReason::kReserve);
-  }
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
