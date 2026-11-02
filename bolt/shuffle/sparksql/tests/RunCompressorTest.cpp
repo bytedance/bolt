@@ -118,31 +118,26 @@ decodeRun(const std::string& run, uint32_t numStreams, Codec* codec) {
   return decoded;
 }
 
-/// Writes `streams` as one run, each handed over in pieces of `piece`
-/// bytes.
+/// Writes `streams` as one run, each handed over in pieces of 1000 bytes.
 std::string compressRun(
     RunCompressor& compressor,
-    const std::vector<std::string>& streams,
-    bool* final = nullptr,
-    size_t piece = 1000) {
+    const std::vector<std::string>& streams) {
+  constexpr size_t kPiece = 1000;
   std::vector<uint64_t> sizes;
   for (const auto& stream : streams) {
     sizes.push_back(stream.size());
   }
   StringSink sink;
-  const bool isFinal = compressor.write(
+  compressor.write(
       sink,
       static_cast<uint32_t>(streams.size()),
       sizes.data(),
       [&](uint32_t s, RunPieceFn fn) {
-        for (size_t at = 0; at < streams[s].size(); at += piece) {
-          const size_t bytes = std::min(piece, streams[s].size() - at);
+        for (size_t at = 0; at < streams[s].size(); at += kPiece) {
+          const size_t bytes = std::min(kPiece, streams[s].size() - at);
           fn(streams[s].data() + at, static_cast<uint32_t>(bytes));
         }
       });
-  if (final != nullptr) {
-    *final = isFinal;
-  }
   return sink.bytes;
 }
 
@@ -162,8 +157,9 @@ std::string repetitive(size_t size) {
   return bytes;
 }
 
-class RunCompressorTest : public testing::TestWithParam<
-                              std::tuple<arrow::Compression::type, bool>> {
+/// The stream form of each codec: what streaming compression feeds.
+class RunCompressorTest
+    : public testing::TestWithParam<arrow::Compression::type> {
  protected:
   static void SetUpTestSuite() {
     memory::MemoryManager::testingSetInstance({});
@@ -171,18 +167,14 @@ class RunCompressorTest : public testing::TestWithParam<
 
   void SetUp() override {
     pool_ = memory::memoryManager()->addLeafPool();
-    options_.compressionType = std::get<0>(GetParam());
+    options_.compressionType = GetParam();
   }
 
-  bool streaming() const {
-    return std::get<1>(GetParam());
-  }
-
-  /// The mode under test; not adaptive unless a test asks for it.
-  CellShuffleOptions cellOptions(bool adaptive = false) const {
+  /// Streaming, not adaptive.
+  static CellShuffleOptions cellOptions() {
     CellShuffleOptions options;
-    options.streamCompression = streaming();
-    options.adaptiveCompression = adaptive;
+    options.streamCompression = true;
+    options.adaptiveCompression = false;
     return options;
   }
 
@@ -190,96 +182,6 @@ class RunCompressorTest : public testing::TestWithParam<
   PartitionWriterOptions options_;
   uint64_t compressTimeNs_{0};
 };
-
-TEST_P(RunCompressorTest, layoutFollowsTheRunSize) {
-  RunCompressor compressor(
-      options_, cellOptions(), pool_.get(), &compressTimeNs_);
-  struct Case {
-    std::vector<std::string> streams;
-    RunLayout layout;
-  };
-  const std::vector<Case> cases = {
-      // Too small to pay for a frame.
-      {{repetitive(120), repetitive(80)}, RunLayout::kCombinedUncompressed},
-      // One frame over both streams.
-      {{repetitive(20 << 10), repetitive(10 << 10)}, RunLayout::kCombined},
-      // A frame per stream; the empty stream takes none.
-      {{repetitive(300 << 10), "", repetitive(700 << 10)},
-       RunLayout::kSeparate},
-  };
-  for (const auto& test : cases) {
-    bool final = false;
-    const auto run = compressRun(compressor, test.streams, &final);
-    EXPECT_TRUE(final);
-    const auto decoded = decodeRun(
-        run, static_cast<uint32_t>(test.streams.size()), compressor.codec());
-    EXPECT_EQ(decoded.layout, test.layout);
-    EXPECT_EQ(decoded.streams, test.streams);
-  }
-  EXPECT_GT(compressTimeNs_, 0);
-  const auto& stats = compressor.stats();
-  EXPECT_EQ(stats.storedRuns, 1);
-  EXPECT_EQ(stats.combinedRuns, 1);
-  EXPECT_EQ(stats.separateRuns, 1);
-  EXPECT_EQ(stats.tinyFrames, 1);
-  EXPECT_EQ(stats.tinyBytes, 200);
-  // One COMBINED frame, two SEPARATE ones: the empty stream takes none.
-  EXPECT_EQ(stats.compressedFrames, 3);
-  EXPECT_EQ(stats.compressedInBytes, (30 << 10) + (1000 << 10));
-  EXPECT_LT(stats.compressedOutBytes, stats.compressedInBytes / 4);
-}
-
-TEST_P(RunCompressorTest, separateStreamThatDoesNotShrinkIsStored) {
-  // Each stream decides alone: the random one is stored, read back as it
-  // is, while the repetitive one beside it is compressed.
-  RunCompressor compressor(
-      options_, cellOptions(), pool_.get(), &compressTimeNs_);
-  std::mt19937_64 rng(7);
-  const std::vector<std::string> streams = {
-      randomBytes(600 << 10, rng),
-      repetitive(900 << 10),
-      randomBytes(100 << 10, rng), // judged on its whole size
-      repetitive(200)};
-  const auto run = compressRun(compressor, streams);
-  const auto decoded = decodeRun(run, 4, compressor.codec());
-  ASSERT_EQ(decoded.layout, RunLayout::kSeparate);
-  EXPECT_EQ(decoded.streams, streams);
-  EXPECT_FALSE(decoded.compressed[0]);
-  EXPECT_TRUE(decoded.compressed[1]);
-  EXPECT_FALSE(decoded.compressed[2]);
-  EXPECT_FALSE(decoded.compressed[3]); // below kMinCompressBytes
-  EXPECT_LT(readU64(run, 9) * 4, streams[1].size());
-}
-
-TEST_P(RunCompressorTest, combinedFrameIsJudgedOnItsWholeSize) {
-  // A COMBINED frame spans streams: an incompressible first stream does
-  // not decide for the compressible ones after it.
-  RunCompressor compressor(
-      options_, cellOptions(), pool_.get(), &compressTimeNs_);
-  std::mt19937_64 rng(9);
-  const std::vector<std::string> streams = {
-      randomBytes(8 << 10, rng), repetitive(40 << 10)};
-  const auto run = compressRun(compressor, streams);
-  const auto decoded = decodeRun(run, 2, compressor.codec());
-  EXPECT_EQ(decoded.layout, RunLayout::kCombined);
-  EXPECT_EQ(decoded.streams, streams);
-  EXPECT_LT(run.size(), (48 << 10) / 2);
-}
-
-TEST_P(RunCompressorTest, frameStoredLateKeepsWhatWasWritten) {
-  // A frame that shrinks over its first blocks is kept compressed even
-  // when the rest does not: it has reached the sink by then, and nothing
-  // written is taken back.
-  RunCompressor compressor(
-      options_, cellOptions(), pool_.get(), &compressTimeNs_);
-  std::mt19937_64 rng(11);
-  const std::vector<std::string> streams = {
-      repetitive(2 << 20) + randomBytes(2 << 20, rng)};
-  const auto run = compressRun(compressor, streams);
-  const auto decoded = decodeRun(run, 1, compressor.codec());
-  EXPECT_EQ(decoded.streams, streams);
-  EXPECT_TRUE(decoded.compressed[0]);
-}
 
 /// A stream form that takes at most `maxRead` input bytes per call - or
 /// none at all - in front of a real one: codec behaviour the real codecs
@@ -338,9 +240,6 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   // A stream form may take less than a whole staging piece per call: the
   // compressor writes out what it holds and feeds it the rest. One that
   // takes nothing and writes nothing fails the frame rather than spinning.
-  if (!streaming()) {
-    return;
-  }
   const auto type = fromArrowCodecType(options_.compressionType);
   const auto realStreamForm = [&] {
     CodecOptions codecOptions{
@@ -378,197 +277,23 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   BOLT_ASSERT_THROW(compressRun(stalled, streams), "made no progress");
 }
 
-TEST_P(RunCompressorTest, unfundedOneShotFrameIsStored) {
-  // A pool with no room for the workspace: one-shot stores the frame and
-  // says so; streaming needs no workspace and compresses regardless.
-  auto root = memory::memoryManager()->addRootPool("runCompressor", 1 << 20);
-  auto leaf = root->addLeafChild("compressor");
-  RunCompressor compressor(
-      options_, cellOptions(), leaf.get(), &compressTimeNs_);
-  const std::vector<std::string> streams = {repetitive(3 << 20)};
-  bool final = true;
-  const auto run = compressRun(compressor, streams, &final);
-  const auto decoded = decodeRun(run, 1, compressor.codec());
-  EXPECT_EQ(decoded.streams, streams);
-  EXPECT_EQ(final, streaming());
-  EXPECT_EQ(decoded.compressed[0], streaming());
-}
-
-TEST_P(RunCompressorTest, storedRunIsCombinedUncompressed) {
-  RunCompressor compressor(
-      options_, cellOptions(), pool_.get(), &compressTimeNs_);
-  const std::vector<std::string> streams = {repetitive(100 << 10), "xyz"};
-  const std::vector<uint64_t> sizes = {streams[0].size(), streams[1].size()};
-  StringSink sink;
-  compressor.writeStored(sink, 2, sizes.data(), [&](uint32_t s, RunPieceFn fn) {
-    fn(streams[s].data(), static_cast<uint32_t>(streams[s].size()));
-  });
-  const auto decoded = decodeRun(sink.bytes, 2, compressor.codec());
-  EXPECT_EQ(decoded.layout, RunLayout::kCombinedUncompressed);
-  EXPECT_EQ(decoded.streams, streams);
-}
-
-TEST_P(RunCompressorTest, adaptiveSkipsCombinedFrames) {
-  // COMBINED frames that do not shrink have the next nine stored without a
-  // codec call and the tenth tried; once they shrink again they are
-  // compressed every time.
-  RunCompressor compressor(
-      options_, cellOptions(/*adaptive=*/true), pool_.get(), &compressTimeNs_);
-  std::mt19937_64 rng(13);
-  // COMBINED frames: random throughout, so 1 in 10 is tried.
-  int compressedCalls = 0;
-  for (int frame = 0; frame < 21; ++frame) {
-    const std::vector<std::string> streams = {
-        randomBytes(20 << 10, rng), randomBytes(10 << 10, rng)};
-    const uint64_t before = compressTimeNs_;
-    const auto run = compressRun(compressor, streams);
-    const auto decoded = decodeRun(run, 2, compressor.codec());
-    EXPECT_EQ(decoded.layout, RunLayout::kCombinedUncompressed);
-    EXPECT_EQ(decoded.streams, streams);
-    compressedCalls += compressTimeNs_ > before;
-  }
-  EXPECT_EQ(compressedCalls, 3);
-
-  // A compressible COMBINED frame is still compressed when its turn to be
-  // tried comes, and from then on every time.
-  bool compressedAgain = false;
-  for (int frame = 0; frame < 10; ++frame) {
-    const std::vector<std::string> streams = {
-        repetitive(20 << 10), repetitive(10 << 10)};
-    const auto decoded =
-        decodeRun(compressRun(compressor, streams), 2, compressor.codec());
-    EXPECT_EQ(decoded.streams, streams);
-    compressedAgain |= decoded.layout == RunLayout::kCombined;
-  }
-  EXPECT_TRUE(compressedAgain);
-  const std::vector<std::string> streams = {
-      repetitive(20 << 10), repetitive(10 << 10)};
-  EXPECT_EQ(
-      decodeRun(compressRun(compressor, streams), 2, compressor.codec()).layout,
-      RunLayout::kCombined);
-}
-
-TEST_P(RunCompressorTest, nullBodiesCompressInPlaceWhenTheyPay) {
-  RunCompressor compressor(
-      options_, cellOptions(/*adaptive=*/true), pool_.get(), &compressTimeNs_);
-  const std::string header(24, 'h');
-  const auto withBody = [&](const std::string& body) {
-    BufferPtr out;
-    appendBytes(out, header.data(), header.size(), pool_.get());
-    appendBytes(out, body.data(), body.size(), pool_.get());
-    return out;
-  };
-  // A compressible body after the header: replaced by its compressed form.
-  const auto body = repetitive(4000);
-  auto out = withBody(body);
-  EXPECT_EQ(compressor.compressNullBody(out, header.size()), body.size());
-  ASSERT_LT(out->size(), header.size() + body.size());
-  EXPECT_EQ(std::string(out->as<char>(), header.size()), header);
-  std::string back(body.size(), '\0');
-  EXPECT_EQ(
-      compressor.codec()->decompress(
-          out->as<uint8_t>() + header.size(),
-          static_cast<int64_t>(out->size() - header.size()),
-          reinterpret_cast<uint8_t*>(back.data()),
-          static_cast<int64_t>(back.size())),
-      static_cast<int64_t>(back.size()));
-  EXPECT_EQ(back, body);
-
-  // Below kMinCompressBytes: left as it is, without a try.
-  const uint64_t before = compressTimeNs_;
-  out = withBody(repetitive(200));
-  EXPECT_EQ(compressor.compressNullBody(out, header.size()), 0);
-  EXPECT_EQ(out->size(), header.size() + 200);
-  EXPECT_EQ(compressTimeNs_, before);
-
-  // One that does not compress to half its size stays as it is, and the
-  // next 9 are not tried.
-  std::mt19937_64 rng(3);
-  int tried = 0;
-  for (int i = 0; i < 20; ++i) {
-    const auto random = randomBytes(1000, rng);
-    out = withBody(random);
-    const uint64_t start = compressTimeNs_;
-    EXPECT_EQ(compressor.compressNullBody(out, header.size()), 0);
-    EXPECT_EQ(std::string(out->as<char>() + header.size(), 1000), random);
-    tried += compressTimeNs_ > start;
-  }
-  EXPECT_EQ(tried, 2);
-  const auto& stats = compressor.stats();
-  EXPECT_EQ(stats.compressedNullBodies, 1);
-  EXPECT_EQ(stats.nullInBytes, body.size());
-  EXPECT_EQ(stats.storedNullBodies, 21);
-  EXPECT_EQ(stats.storedNullBytes, 200 + 20 * 1000);
-}
-
-TEST_P(RunCompressorTest, adaptiveSkipsPerStream) {
-  // A SEPARATE stream that does not shrink is tried 1 in 10 frames: counted
-  // through the codec time, the other stream being too small to compress.
-  RunCompressor compressor(
-      options_, cellOptions(/*adaptive=*/true), pool_.get(), &compressTimeNs_);
-  std::mt19937_64 rng(17);
-  int tried = 0;
-  for (int frame = 0; frame < 25; ++frame) {
-    const std::vector<std::string> streams = {
-        randomBytes(100 << 10, rng), repetitive(200)};
-    const uint64_t before = compressTimeNs_;
-    const auto decoded =
-        decodeRun(compressRun(compressor, streams), 2, compressor.codec());
-    EXPECT_EQ(decoded.streams, streams);
-    EXPECT_FALSE(decoded.compressed[0]);
-    tried += compressTimeNs_ > before;
-  }
-  EXPECT_EQ(tried, 3); // frames 0, 10 and 20
-  const auto& stats = compressor.stats();
-  EXPECT_EQ(stats.unshrunkFrames, 3);
-  EXPECT_EQ(stats.skippedFrames, 22);
-  EXPECT_EQ(stats.skippedBytes, 22ull * (100 << 10));
-  EXPECT_EQ(stats.tinyFrames, 25); // the 200-byte stream
-  ASSERT_GE(compressor.streamStats().size(), 1);
-  EXPECT_EQ(compressor.streamStats()[0].tried, 3);
-  EXPECT_EQ(compressor.streamStats()[0].skipped, 22);
-  EXPECT_EQ(compressor.streamStats()[0].compressed, 0);
-  // Another number of streams: the hints start over.
-  const std::vector<std::string> three = {
-      randomBytes(100 << 10, rng), repetitive(200), repetitive(200)};
-  const uint64_t before = compressTimeNs_;
-  compressRun(compressor, three);
-  EXPECT_GT(compressTimeNs_, before);
-}
-
 INSTANTIATE_TEST_SUITE_P(
     Codecs,
     RunCompressorTest,
-    testing::Combine(
-        testing::Values(
-            arrow::Compression::LZ4_FRAME,
-            arrow::Compression::ZSTD,
-            arrow::Compression::GZIP),
-        testing::Bool()),
+    testing::Values(
+        arrow::Compression::LZ4_FRAME,
+        arrow::Compression::ZSTD,
+        arrow::Compression::GZIP),
     [](const auto& info) {
-      const auto codec = std::get<0>(info.param);
-      const char* name = codec == arrow::Compression::ZSTD ? "zstd"
-          : codec == arrow::Compression::GZIP              ? "gzip"
-                                                           : "lz4";
-      return std::string(name) +
-          (std::get<1>(info.param) ? "Streaming" : "OneShot");
+      switch (info.param) {
+        case arrow::Compression::ZSTD:
+          return "zstd";
+        case arrow::Compression::GZIP:
+          return "gzip";
+        default:
+          return "lz4";
+      }
     });
-
-TEST(RunCompressorUncompressedTest, storesEveryRun) {
-  memory::MemoryManager::testingSetInstance({});
-  auto pool = memory::memoryManager()->addLeafPool();
-  PartitionWriterOptions options;
-  options.compressionType = arrow::Compression::UNCOMPRESSED;
-  uint64_t timeNs = 0;
-  RunCompressor compressor(options, CellShuffleOptions{}, pool.get(), &timeNs);
-  EXPECT_FALSE(compressor.compresses());
-  const std::vector<std::string> streams = {repetitive(200 << 10)};
-  bool final = false;
-  const auto run = compressRun(compressor, streams, &final);
-  EXPECT_TRUE(final);
-  EXPECT_EQ(static_cast<RunLayout>(run[0]), RunLayout::kCombinedUncompressed);
-  EXPECT_EQ(run.substr(runHeaderBytes(1)), streams[0]);
-}
 
 } // namespace
 } // namespace bytedance::bolt::shuffle::sparksql::cell
