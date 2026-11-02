@@ -700,8 +700,14 @@ void CellFlattener::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
   if (someNulls) {
     rels = chunk.rels->asMutable<uint32_t>();
     uint32_t* ordinals = ordinals_->asMutable<uint32_t>();
-    for (uint32_t k = 0; k < chunk.size; ++k) {
-      rels[k] = ordinals[pids[k]]++;
+    const uint32_t size = chunk.size;
+    if (touched_.size() == 1) {
+      // One partition: an element's index in it is its chunk index.
+      std::iota(rels, rels + size, 0u);
+    } else {
+      for (uint32_t k = 0; k < size; ++k) {
+        rels[k] = ordinals[pids[k]]++;
+      }
     }
     for (const uint32_t pid : touched_) {
       ordinals[pid] = 0;

@@ -315,12 +315,12 @@ class CellPayloadDecoder {
 
   /// Marks the nulls of the next numRows payload rows in the batch; returns
   /// how many of those rows are non-null.
-  uint32_t appendNulls(uint32_t col, uint32_t numRows);
+  BOLT_CELL_KERNEL uint32_t appendNulls(uint32_t col, uint32_t numRows);
 
   /// Writes numRows values at out: `dense` non-null ones from read(count,
   /// dst), scattered by the payload bitmap, T{} at the null rows.
   template <typename T, typename Read>
-  bool placeValues(
+  BOLT_CELL_KERNEL bool placeValues(
       uint32_t col,
       uint32_t numRows,
       uint32_t dense,
@@ -350,7 +350,7 @@ class CellPayloadDecoder {
       uint32_t dense,
       std::string& error);
 
-  bool appendString(
+  BOLT_CELL_KERNEL bool appendString(
       uint32_t col,
       uint32_t numRows,
       uint32_t dense,
@@ -417,7 +417,7 @@ class CellPayloadDecoder {
 /// high bits zero), counts its non-null rows and moves `cursor` past the
 /// records; never reads past `end`. Writes up to 7 bytes past the bitmap,
 /// which must be writable. False, with `error`, when they are malformed.
-bool expandNullRecords(
+BOLT_CELL_KERNEL bool expandNullRecords(
     const uint8_t*& cursor,
     const uint8_t* end,
     uint32_t rowCount,

@@ -79,7 +79,7 @@ class CellSplitter {
       CellOutput& output,
       memory::MemoryPool& pool);
 
-  void split(const SplitBatch& batch);
+  BOLT_CELL_KERNEL void split(const SplitBatch& batch);
 
   /// Per wire column, its position counts per partition, for its null
   /// bodies; a nullptr entry, or none set, means the partition's rows. The
@@ -195,12 +195,12 @@ class CellSplitter {
 
   /// Boolean values as 0/1 bytes of a Raw Data stream.
   template <bool kHasNulls>
-  void splitBoolean(uint32_t col, const SplitBatch& batch);
+  BOLT_CELL_KERNEL void splitBoolean(uint32_t col, const SplitBatch& batch);
 
   /// The full 16-byte Timestamp: seconds and nanos into two Bigint encoded
   /// streams whose cache cursors move in lockstep.
   template <bool kHasNulls, bool kIndexed>
-  void splitTimestamp(uint32_t col, const SplitBatch& batch);
+  BOLT_CELL_KERNEL void splitTimestamp(uint32_t col, const SplitBatch& batch);
 
   char* cacheLine(uint32_t stream, uint32_t pid) const {
     return cacheBase_ +
@@ -228,16 +228,16 @@ class CellSplitter {
   }
 
   template <typename T, bool kHasNulls, bool kIndexed>
-  void splitFixed(uint32_t col, const SplitBatch& batch);
+  BOLT_CELL_KERNEL void splitFixed(uint32_t col, const SplitBatch& batch);
 
   template <typename T, bool kHasNulls, bool kIndexed>
-  void splitRawFixed(uint32_t col, const SplitBatch& batch);
+  BOLT_CELL_KERNEL void splitRawFixed(uint32_t col, const SplitBatch& batch);
 
   template <bool kHasNulls, bool kIndexed>
-  void splitString(uint32_t col, const SplitBatch& batch);
+  BOLT_CELL_KERNEL void splitString(uint32_t col, const SplitBatch& batch);
 
   template <bool kHasNulls, bool kIndexed>
-  void splitStringDict(uint32_t col, const SplitBatch& batch);
+  BOLT_CELL_KERNEL void splitStringDict(uint32_t col, const SplitBatch& batch);
 
   /// Per (partition, dictionary column): the open dictionary segment. Its
   /// entries live here, never in the cells, until the segment closes - a
