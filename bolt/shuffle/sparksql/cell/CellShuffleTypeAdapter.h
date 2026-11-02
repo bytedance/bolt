@@ -25,6 +25,10 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 // CompactRow owns the binary format and its serialization/deserialization.
 class CellShuffleTypeAdapter {
  public:
+  /// Whether every leaf of `type`, at any depth of ARRAY, MAP and ROW, is a
+  /// type a Cell column carries: the schemas both Cell layouts take.
+  static bool isSupported(const TypePtr& type);
+
   explicit CellShuffleTypeAdapter(RowTypePtr logicalType);
 
   const RowTypePtr& physicalType() const {
@@ -50,8 +54,6 @@ class CellShuffleTypeAdapter {
       memory::MemoryPool* pool) const;
 
  private:
-  static bool isSupported(const TypePtr& type);
-
   RowTypePtr logicalType_;
   RowTypePtr physicalType_;
   RowTypePtr complexType_;
