@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/cell/CellAssembler.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedAssembler.h"
 
 #include <algorithm>
 
@@ -39,7 +39,7 @@ uint64_t stringBytes(const CellPayloadDecoder& decoder) {
 
 } // namespace
 
-CellAssembler::CellAssembler(
+CellNestedAssembler::CellNestedAssembler(
     RowTypePtr type,
     CellDecompressor* decompressor,
     memory::MemoryPool* pool,
@@ -60,7 +60,7 @@ CellAssembler::CellAssembler(
   }
 }
 
-bool CellAssembler::beginPayload(CellByteSource& in, std::string& error) {
+bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
   uint32_t rowCount = 0;
   if (!reader_.readPayload(in, rowCount, error)) {
     return false;
@@ -111,7 +111,7 @@ bool CellAssembler::beginPayload(CellByteSource& in, std::string& error) {
   return true;
 }
 
-bool CellAssembler::countPositions(uint32_t x, std::string& error) {
+bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
   const auto& node = layout_.node(x);
   const auto& decoder = *decoders_[node.space];
   const uint32_t col = node.spaceColumn;
@@ -148,7 +148,7 @@ bool CellAssembler::countPositions(uint32_t x, std::string& error) {
   return true;
 }
 
-bool CellAssembler::fits() const {
+bool CellNestedAssembler::fits() const {
   for (uint32_t s = 1; s < layout_.numSpaces(); ++s) {
     if (static_cast<uint64_t>(decoders_[s]->batchRows()) + positions_[s] >
         CellNestedLayout::kMaxPositions) {
@@ -158,7 +158,7 @@ bool CellAssembler::fits() const {
   return limits_.maxDecodedBytes == 0 || restBytes() <= limits_.maxDecodedBytes;
 }
 
-uint64_t CellAssembler::batchBytes() const {
+uint64_t CellNestedAssembler::batchBytes() const {
   uint64_t bytes = 0;
   for (const auto& decoder : decoders_) {
     bytes += decoder->batchBytes();
@@ -166,7 +166,8 @@ uint64_t CellAssembler::batchBytes() const {
   return bytes;
 }
 
-uint64_t CellAssembler::positionBytes(uint32_t s, uint64_t positions) const {
+uint64_t CellNestedAssembler::positionBytes(uint32_t s, uint64_t positions)
+    const {
   const auto& space = layout_.space(s);
   return positions *
       (decoders_[s]->rowBytes() +
@@ -174,7 +175,7 @@ uint64_t CellAssembler::positionBytes(uint32_t s, uint64_t positions) const {
       (positions * space.splitColumns.size() + 7) / 8;
 }
 
-uint64_t CellAssembler::batchStrings() const {
+uint64_t CellNestedAssembler::batchStrings() const {
   uint64_t bytes = 0;
   for (const auto& decoder : decoders_) {
     bytes += stringBytes(*decoder);
@@ -182,7 +183,7 @@ uint64_t CellAssembler::batchStrings() const {
   return bytes;
 }
 
-uint64_t CellAssembler::heldBytes() const {
+uint64_t CellNestedAssembler::heldBytes() const {
   uint64_t bytes = nullBytes_ + batchStrings();
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     bytes += 2 * positionBytes(s, decoders_[s]->batchRows());
@@ -190,7 +191,7 @@ uint64_t CellAssembler::heldBytes() const {
   return bytes;
 }
 
-uint64_t CellAssembler::restBytes() const {
+uint64_t CellNestedAssembler::restBytes() const {
   uint64_t bytes = nullBytes_ + batchStrings() + stringsLeft_;
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     const auto& decoder = *decoders_[s];
@@ -203,7 +204,7 @@ uint64_t CellAssembler::restBytes() const {
   return bytes;
 }
 
-RowVectorPtr CellAssembler::nextBatch(
+RowVectorPtr CellNestedAssembler::nextBatch(
     vector_size_t capacity,
     int64_t byteBudget,
     const std::function<bool()>& nextPayload) {
@@ -267,7 +268,7 @@ RowVectorPtr CellAssembler::nextBatch(
   return rows.batchRows() == 0 ? nullptr : assemble();
 }
 
-void CellAssembler::appendSpace(
+void CellNestedAssembler::appendSpace(
     uint32_t s,
     uint64_t positions,
     vector_size_t capacity) {
@@ -320,7 +321,7 @@ void CellAssembler::appendSpace(
   }
 }
 
-vector_size_t* CellAssembler::offsets(uint32_t x, uint64_t entries) {
+vector_size_t* CellNestedAssembler::offsets(uint32_t x, uint64_t entries) {
   auto& buffer = offsets_[x];
   const uint64_t size = std::max<uint64_t>(entries, 1);
   const uint64_t bytes = size * sizeof(vector_size_t);
@@ -340,7 +341,7 @@ vector_size_t* CellAssembler::offsets(uint32_t x, uint64_t entries) {
   return buffer->asMutable<vector_size_t>();
 }
 
-RowVectorPtr CellAssembler::assemble() {
+RowVectorPtr CellNestedAssembler::assemble() {
   std::vector<RowVectorPtr> batches;
   batches.reserve(layout_.numSpaces());
   for (const auto& decoder : decoders_) {
@@ -406,7 +407,7 @@ RowVectorPtr CellAssembler::assemble() {
       std::move(children));
 }
 
-std::unique_ptr<CellBatchSource> makeCellAssembler(
+std::unique_ptr<CellBatchSource> makeCellNestedAssembler(
     const RowTypePtr& type,
     CellDecompressor* decompressor,
     memory::MemoryPool* pool,
@@ -414,7 +415,8 @@ std::unique_ptr<CellBatchSource> makeCellAssembler(
   if (!CellNestedLayout::supports(type)) {
     return nullptr;
   }
-  return std::make_unique<CellAssembler>(type, decompressor, pool, limits);
+  return std::make_unique<CellNestedAssembler>(
+      type, decompressor, pool, limits);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

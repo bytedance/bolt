@@ -43,7 +43,7 @@ bool isComplex(const TypePtr& type) {
   return kindOf(type) != CellNestedLayout::Kind::kLeaf;
 }
 
-/// Adds the columns `type` flattens into to `columns`.
+/// Adds the columns `type` shreds into to `columns`.
 void countColumns(const TypePtr& type, uint64_t& columns) {
   ++columns;
   if (isComplex(type)) {
