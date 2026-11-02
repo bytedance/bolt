@@ -61,10 +61,10 @@ CellSplitter::CellSplitter(
     return;
   }
   const size_t cacheBytes =
-      static_cast<size_t>(numPartitions_) * numStreams_ * kBlockValueBytes;
+      static_cast<size_t>(numPartitions_) * numStreams_ * kCacheLineBytes;
   const size_t cursorBytes = static_cast<size_t>(numPartitions_) * numStreams_;
   cacheBase_ =
-      arena_.allocateFixed(cacheBytes + kCacheTailPadding, kBlockValueBytes);
+      arena_.allocateFixed(cacheBytes + kCacheTailPadding, kCacheLineBytes);
   cursors_ = reinterpret_cast<uint8_t*>(arena_.allocateFixed(cursorBytes, 64));
   ::memset(cursors_, 0, cursorBytes);
 }
@@ -76,7 +76,7 @@ void CellSplitter::flushEncoded(
     const char* staged,
     uint8_t* cur) {
   const auto* line = reinterpret_cast<const T*>(staged);
-  const bool full = cur[pid] == kBlockValueBytes;
+  const bool full = cur[pid] == kCacheLineBytes;
   // Common case: encode straight into the tail cell (reserve allocates
   // nothing, so nothing can spill between reserve and commit).
   if (auto* dst = reinterpret_cast<uint8_t*>(
@@ -144,7 +144,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
     *reinterpret_cast<T*>(base + (static_cast<size_t>(pid) << 6) + at) = value;
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
-    if (FOLLY_UNLIKELY(next == kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
       flushEncoded<T>(stream, pid, base + (static_cast<size_t>(pid) << 6), cur);
     }
   }
@@ -186,7 +186,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
     *reinterpret_cast<T*>(base + (static_cast<size_t>(pid) << 6) + at) = value;
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
-    if (FOLLY_UNLIKELY(next == kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
       flushRaw(stream, pid, base + (static_cast<size_t>(pid) << 6), cur);
     }
   }
@@ -223,7 +223,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
       const int64_t length = view.size();
       folly::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
-      if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockValueBytes)) {
+      if (FOLLY_UNLIKELY(lengthCur[pid] == kCacheLineBytes)) {
         flushEncoded<int64_t>(
             lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
       }
@@ -233,7 +233,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
     // long values bypass it after a flush keeps the byte order.
     const uint32_t size = view.size();
     variableBytes_[pid] += size;
-    if (FOLLY_UNLIKELY(size >= kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(size >= kCacheLineBytes)) {
       if (dataCur[pid] > 0) {
         flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
       }
@@ -254,7 +254,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
       bumpPartitionBytes(pid, size);
       continue;
     }
-    if (dataCur[pid] + size > kBlockValueBytes) {
+    if (dataCur[pid] + size > kCacheLineBytes) {
       flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
     }
     ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
@@ -315,7 +315,7 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
       }
     }
     cacheLine(stream, pid)[cur[pid]] = decoded.valueAt<bool>(row) ? 1 : 0;
-    if (FOLLY_UNLIKELY(++cur[pid] == kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(++cur[pid] == kCacheLineBytes)) {
       flushRaw(stream, pid, cacheLine(stream, pid), cur);
     }
   }
@@ -359,7 +359,7 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
     folly::storeUnaligned<int64_t>(nanosBase + at, nanos);
     secondsCur[pid] += sizeof(int64_t);
     nanosCur[pid] += sizeof(int64_t);
-    if (FOLLY_UNLIKELY(secondsCur[pid] == kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(secondsCur[pid] == kCacheLineBytes)) {
       flushEncoded<int64_t>(secondsStream, pid, secondsBase + line, secondsCur);
       flushEncoded<int64_t>(nanosStream, pid, nanosBase + line, nanosCur);
     }
@@ -962,7 +962,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     }
     ++st.matched;
     cacheLine(lengthStream, pid)[lengthCur[pid]] = static_cast<char>(i);
-    if (FOLLY_UNLIKELY(++lengthCur[pid] == kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(++lengthCur[pid] == kCacheLineBytes)) {
       flushRaw(lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
     }
     return true;
@@ -1037,13 +1037,13 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       const int64_t length = view.size();
       folly::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
-      if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockValueBytes)) {
+      if (FOLLY_UNLIKELY(lengthCur[pid] == kCacheLineBytes)) {
         flushEncoded<int64_t>(
             lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
       }
     }
     const uint32_t size = view.size();
-    if (FOLLY_UNLIKELY(size >= kBlockValueBytes)) {
+    if (FOLLY_UNLIKELY(size >= kCacheLineBytes)) {
       if (dataCur[pid] > 0) {
         flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
       }
@@ -1060,7 +1060,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       bumpPartitionBytes(pid, size);
       continue;
     }
-    if (dataCur[pid] + size > kBlockValueBytes) {
+    if (dataCur[pid] + size > kCacheLineBytes) {
       flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
     }
     ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
