@@ -21,7 +21,7 @@
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/Options.h"
-#include "bolt/shuffle/sparksql/RawPartitionOutput.h"
+#include "bolt/shuffle/sparksql/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 #include "bolt/shuffle/sparksql/cell/RunCompressor.h"
 
@@ -252,18 +252,18 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 /// The remote shuffle service (RSS) backend, e.g. Celeborn. The service may
 /// reorder a mapper's pushes and interleave other mappers' pushes between
 /// them, so every block is exactly one complete ColumnarPayload: a window is
-/// only ever output whole, at a seal - one spillRaw() of every partition's
+/// only ever output whole, at a seal - one writeBlocks() of every partition's
 /// payload - and nothing is spilled. Each payload carries the partition's
 /// resident cells as one run, written by the RunCompressor. The payloads go
-/// through `raw`, the push channel the task's composite blocks share, which
+/// through `blocks`, the push channel the task's composite blocks share, which
 /// finalize() ends once for both.
 class RssCellOutput final : public CellOutput {
  public:
-  /// `raw` must outlive this object. `options` gives the codec and
+  /// `blocks` must outlive this object. `options` gives the codec and
   /// `cellOptions` its mode; `pool` backs the payloads and workspaces so
   /// they stay inside task memory accounting and must outlive this object.
   RssCellOutput(
-      RawPartitionOutput& raw,
+      PartitionBlockOutput& blocks,
       const CellLayout* layout,
       const PartitionWriterOptions& options,
       const CellShuffleOptions& cellOptions,
@@ -281,18 +281,18 @@ class RssCellOutput final : public CellOutput {
       ShuffleWriterMetrics& metrics) override;
 
   int64_t bytesEvicted() const override {
-    return raw_.bytesEvicted();
+    return blocks_.bytesEvicted();
   }
 
  private:
-  /// One spillRaw() carrying the whole payload of every partition with rows.
+  /// One writeBlocks() carrying the whole payload of every partition with rows.
   void sendWindow(const CellWindowInput& in);
 
   /// Assembles partition `pid`'s payload into `payload`.
   void
   buildPayload(const CellWindowInput& in, uint32_t pid, BufferPtr& payload);
 
-  RawPartitionOutput& raw_;
+  PartitionBlockOutput& blocks_;
   const CellLayout* const layout_;
   memory::MemoryPool* const pool_;
   uint64_t compressTimeNs_{0};

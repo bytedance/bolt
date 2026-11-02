@@ -19,7 +19,7 @@
 #include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/DecodedVector.h"
 
-#include "bolt/shuffle/sparksql/RawPartitionOutput.h"
+#include "bolt/shuffle/sparksql/PartitionBlockOutput.h"
 #include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
 #include "bolt/shuffle/sparksql/ShuffleWriter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
@@ -35,7 +35,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// writes everything of the current one out, so each side reclaims only its
 /// own state. Composite rows - serialized aggregation state, kept byte for
 /// byte - are buffered per partition and written through output() as
-/// CompositeRows blocks, all partitions in one spillRaw() call; the kind
+/// CompositeRows blocks, all partitions in one writeBlocks() call; the kind
 /// byte that opens every block on the wire tells the reader which is which.
 class CompositeShuffleWriter : public ShuffleWriter {
  public:
@@ -77,7 +77,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
   /// Where the composite blocks go; exists from construction. Locally it is
   /// a partial spiller that the ordinary output merges into its data file;
   /// the subclass ends it in stopOrdinary().
-  virtual RawPartitionOutput& output() = 0;
+  virtual PartitionBlockOutput& output() = 0;
 
   /// Partitions `rv` by its pid column (child 0, INTEGER) into
   /// row2Partition_ and partition2RowCount_. Both sides use them: they never
@@ -98,7 +98,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
 
   void writeComposite();
 
-  /// The RawBlockSource of writeComposite(): partition `pid`'s next block,
+  /// The BlockSource of writeComposite(): partition `pid`'s next block,
   /// from its row `nextRow` on, compressed through `scratch`.
   bool nextBlock(
       uint32_t pid,

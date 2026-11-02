@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/RawPartitionOutput.h"
+#include "bolt/shuffle/sparksql/PartitionBlockOutput.h"
 
 #include <unistd.h>
 #include <algorithm>
@@ -202,12 +202,12 @@ void DataFileWriter::close(ShuffleWriterMetrics& metrics) {
   metrics.totalWriteTime = static_cast<int64_t>(writeTimeNs_);
 }
 
-std::unique_ptr<RawPartitionOutput> RawPartitionOutput::create(
+std::unique_ptr<PartitionBlockOutput> PartitionBlockOutput::create(
     PartitionWriterOptions options) {
   if (options.partitionWriterType == PartitionWriterType::kCeleborn) {
-    return std::make_unique<RssRawOutput>(std::move(options));
+    return std::make_unique<RssBlockOutput>(std::move(options));
   }
-  return std::make_unique<LocalRawOutput>(std::move(options));
+  return std::make_unique<LocalBlockOutput>(std::move(options));
 }
 
 void PartialSpiller::mergeToDataFile(
@@ -241,12 +241,12 @@ void PartialSpiller::mergeToDataFile(
   }
 }
 
-LocalRawOutput::LocalRawOutput(PartitionWriterOptions options)
-    : PartialSpiller(options, "raw"), options_(std::move(options)) {}
+LocalBlockOutput::LocalBlockOutput(PartitionWriterOptions options)
+    : PartialSpiller(options, "blocks"), options_(std::move(options)) {}
 
-void LocalRawOutput::spillRaw(const RawBlockSource& next) {
-  BOLT_CHECK(!spill_.sealed(), "spillRaw after the merge");
-  auto& ends = rawRuns_.emplace_back(options_.numPartitions + 1);
+void LocalBlockOutput::writeBlocks(const BlockSource& next) {
+  BOLT_CHECK(!spill_.sealed(), "writeBlocks after the merge");
+  auto& ends = blockRuns_.emplace_back(options_.numPartitions + 1);
   ends[0] = spill_.end();
   BufferPtr block;
   for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
@@ -259,17 +259,17 @@ void LocalRawOutput::spillRaw(const RawBlockSource& next) {
   spill_.flush();
 }
 
-void LocalRawOutput::finish(ShuffleWriterMetrics& metrics) {
+void LocalBlockOutput::finish(ShuffleWriterMetrics& metrics) {
   mergeToDataFile(options_, {this}, metrics);
 }
 
-void LocalRawOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
-  for (const auto& ends : rawRuns_) {
+void LocalBlockOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
+  for (const auto& ends : blockRuns_) {
     out.copyFrom(spill_, ends[pid], ends[pid + 1] - ends[pid]);
   }
 }
 
-RssRawOutput::RssRawOutput(PartitionWriterOptions options)
+RssBlockOutput::RssBlockOutput(PartitionWriterOptions options)
     : options_(std::move(options)),
       client_(options_.rssClient),
       partitionLengths_(options_.numPartitions, 0) {
@@ -277,8 +277,8 @@ RssRawOutput::RssRawOutput(PartitionWriterOptions options)
       client_, "a remote shuffle output requires an RSS client");
 }
 
-void RssRawOutput::spillRaw(const RawBlockSource& next) {
-  BOLT_CHECK(!finished_, "spillRaw after finish");
+void RssBlockOutput::writeBlocks(const BlockSource& next) {
+  BOLT_CHECK(!finished_, "writeBlocks after finish");
   BufferPtr block;
   for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
     while (next(pid, block)) {
@@ -287,7 +287,7 @@ void RssRawOutput::spillRaw(const RawBlockSource& next) {
   }
 }
 
-void RssRawOutput::push(uint32_t pid, BufferPtr& bytes) {
+void RssBlockOutput::push(uint32_t pid, BufferPtr& bytes) {
   int32_t pushed;
   {
     NanosecondTimer timer(&pushTimeNs_);
@@ -301,7 +301,7 @@ void RssRawOutput::push(uint32_t pid, BufferPtr& bytes) {
   ++numPushes_;
 }
 
-void RssRawOutput::finish(ShuffleWriterMetrics& metrics) {
+void RssBlockOutput::finish(ShuffleWriterMetrics& metrics) {
   BOLT_CHECK(!finished_, "finish called twice");
   finished_ = true;
   client_->stop();
