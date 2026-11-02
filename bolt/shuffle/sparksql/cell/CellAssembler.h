@@ -133,7 +133,8 @@ class CellAssembler final : public CellBatchSource {
   uint64_t stringsLeft_{0};
 };
 
-/// A CellAssembler of `type` when it takes a nested layout, else nullptr.
+/// A CellAssembler of `type` when it takes a nested layout, else nullptr;
+/// `type` must be supported (CellShuffleTypeAdapter::isSupported).
 /// `decompressor` may be null when payloads are known to be uncompressed;
 /// it and `pool` must outlive the result.
 std::unique_ptr<CellBatchSource> makeCellAssembler(

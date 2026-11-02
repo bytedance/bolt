@@ -149,6 +149,7 @@ class CellShuffleReader {
   RowVectorPtr nextPhysical();
 
   std::shared_ptr<ReaderStreamIterator> streams_;
+  /// Built first: its schema check covers nested_ too.
   const CellShuffleTypeAdapter adapter_;
   const CellLayout layout_;
   std::unique_ptr<CodecDecompressor> decompressor_;
