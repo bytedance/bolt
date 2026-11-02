@@ -118,9 +118,8 @@ LocalCellOutput::LocalCellOutput(
       composite_(composite),
       options_(std::move(options)),
       layout_(layout),
-      cellOptions_(cellOptions),
       pool_(pool),
-      compressor_(options_, cellOptions_, &compressTimeNs_) {
+      compressor_(options_, cellOptions, &compressTimeNs_) {
   openFrom_.assign(options_.numPartitions, 0);
   sealed_.resize(options_.numPartitions);
 }

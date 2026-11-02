@@ -201,7 +201,6 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   PartialSpiller& composite_;
   const PartitionWriterOptions options_;
   const CellLayout* const layout_;
-  const CellShuffleOptions cellOptions_;
   memory::MemoryPool* const pool_;
   /// Time metrics align with the V1/V2 partition writers and never
   /// overlap: compress = codec calls only; write = fwrite/fflush moments

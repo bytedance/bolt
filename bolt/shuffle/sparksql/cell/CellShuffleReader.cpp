@@ -99,7 +99,6 @@ CellShuffleReader::CellShuffleReader(
     bool nativeNestedTypes)
     : streams_(std::move(streams)),
       adapter_(outputType),
-      layout_(CellLayout::create(adapter_.physicalType())),
       decompressor_(
           codec == nullptr ? nullptr
                            : std::make_unique<CodecDecompressor>(codec)),
@@ -107,7 +106,10 @@ CellShuffleReader::CellShuffleReader(
       pool_(pool),
       batchSize_(batchSize),
       batchByteSize_(batchByteSize),
-      decoder_(layout_, decompressor_.get(), pool_),
+      decoder_(
+          CellLayout::create(adapter_.physicalType()),
+          decompressor_.get(),
+          pool_),
       nested_(
           nativeNestedTypes
               ? makeCellNestedAssembler(outputType, decompressor_.get(), pool_)

@@ -129,10 +129,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// batch's positions do not fit beside it.
   arrow::Status splitNested(RowVectorPtr rv);
   /// The single dictionary probe (first batch, lifetime decision) of the
-  /// string columns `columns`, as `decoded` and `nullClass` hold them.
+  /// string columns - a nested layout's at the rows' positions - as
+  /// `decoded` and `nullClass` hold them.
   void probeDictionary(
       uint32_t numRows,
-      const std::vector<uint32_t>& columns,
       const DecodedVector* decoded,
       const NullClass* nullClass);
   /// The allocator's ReserveChunkFn: reserves a chunk's memory within
@@ -182,9 +182,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::vector<uint32_t> perPidCounter_;
   std::vector<DecodedVector> decoded_;
   std::vector<NullClass> nullClass_;
-  /// The string columns the dictionary probe considers: every one, or a
-  /// nested layout's at the rows' positions.
-  std::vector<uint32_t> probeColumns_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -170,12 +170,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
     shredder_ = std::make_unique<CellNestedShredder>(
         *nested_, *splitter_, numPartitions_, *boltPool_);
   }
-  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
-    if (layout_.isStringColumn(col) &&
-        (shredder_ == nullptr || shredder_->inRowSpace(col))) {
-      probeColumns_.push_back(col);
-    }
-  }
 
   perPidCounter_.assign(numPartitions_, 0);
   decoded_.resize(layout_.numColumns());
@@ -339,7 +333,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     // tiny, or sliced small because its rows are wide - therefore settles
     // on no dictionary rather than deferring; wide rows gain little from
     // 64-byte entries anyway.
-    probeDictionary(numRows, probeColumns_, decoded_.data(), nullClass_.data());
+    probeDictionary(numRows, decoded_.data(), nullClass_.data());
     dictProbed_ = true;
   }
 
@@ -391,8 +385,7 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
     return status;
   }
   if (FOLLY_UNLIKELY(!dictProbed_)) {
-    probeDictionary(
-        numRows, probeColumns_, shredder_->decoded(), shredder_->nullClass());
+    probeDictionary(numRows, shredder_->decoded(), shredder_->nullClass());
     dictProbed_ = true;
   }
   shredder_->split(row2Partition_.data(), partition2RowCount_.data());
@@ -412,15 +405,17 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
 
 void CellShuffleWriter::probeDictionary(
     uint32_t numRows,
-    const std::vector<uint32_t>& columns,
     const DecodedVector* decoded,
     const NullClass* nullClass) {
   const auto& cellOpts = options_.cellOptions;
   if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
     return;
   }
-  for (const uint32_t col : columns) {
-    if (nullClass[col] == NullClass::kAllNull) {
+  for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
+    // Every string column, or a nested layout's at the rows' positions.
+    if (!layout_.isStringColumn(col) ||
+        (shredder_ != nullptr && !shredder_->inRowSpace(col)) ||
+        nullClass[col] == NullClass::kAllNull) {
       continue;
     }
     const auto& column = decoded[col];
