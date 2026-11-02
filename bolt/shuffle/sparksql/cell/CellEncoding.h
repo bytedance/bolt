@@ -65,8 +65,10 @@ inline uint32_t narrowBytesFor(int64_t value, uint32_t maxBytes) {
 }
 
 /// Packs `count` staged values, `bits` wide each (1..63), LSB-first into
-/// out. Writes ceil(count * bits / 8) bytes; trailing bits stay zero. The
-/// staging split is deliberate: masking / delta subtraction is data-parallel
+/// out. Packs ceil(count * bits / 8) bytes, trailing bits zero, and returns
+/// their end; the last partial word goes out as one 8-byte store, so up to
+/// 8 bytes from that end may be written (see encodeBlockImpl). The staging
+/// split is deliberate: masking / delta subtraction is data-parallel
 /// and auto-vectorizes, while this bit-stitch is a serial dependency chain
 /// the compiler can only unroll.
 BOLT_CELL_KERNEL inline uint8_t*
@@ -84,21 +86,27 @@ packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
       acc = accBits == 0 ? 0 : v >> (bits - accBits);
     }
   }
-  if (accBits > 0) {
-    const uint32_t bytes = (accBits + 7) / 8;
-    ::memcpy(out, &acc, bytes);
-    out += bytes;
-  }
-  return out;
+  folly::storeUnaligned<uint64_t>(out, acc);
+  return out + (accBits + 7) / 8;
 }
 
 inline void storeLeEnc(uint8_t* out, uint64_t value, uint32_t bytes) {
   ::memcpy(out, &value, bytes);
 }
 
+/// Encodes one block of `count` values at `out`, which must hold
+/// kMaxBlockBytes: the CONST body and the packed tail go out as whole
+/// 8-byte stores past the block's end. A kind is chosen only when strictly
+/// smaller than the values' 64 bytes or fewer, so a BIT_PACK body is at most
+/// 63 bytes and its last store ends by out + 65; a FOR_BIT_PACK body after
+/// its kWidth-byte base at most 63 - kWidth, its last store ending by
+/// out + 72; CONST's by out + 9.
 template <typename T, typename Count>
 BOLT_CELL_KERNEL inline uint32_t
 encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
+  static_assert(
+      kMaxBlockBytes >= 1 + kCacheLineBytes + sizeof(uint64_t),
+      "an 8-byte store past a packed body stays within the block");
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
   const uint32_t sourceBytes = count * kWidth;
@@ -153,10 +161,8 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   switch (bestKind) {
     case EncodingKind::kConstNarrow:
       *pos++ = makeEncodingByte(EncodingKind::kConstNarrow, constBytes);
-      storeLeEnc(
-          pos,
-          static_cast<uint64_t>(static_cast<int64_t>(values[0])),
-          constBytes);
+      folly::storeUnaligned<uint64_t>(
+          pos, static_cast<uint64_t>(static_cast<int64_t>(values[0])));
       pos += constBytes;
       break;
     case EncodingKind::kBitPack: {
