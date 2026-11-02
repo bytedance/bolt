@@ -98,13 +98,18 @@ void logCompression(const RunCompressor& compressor, const CellLayout& layout) {
   }
 }
 
-/// The per-stream sizes of partition `pid`'s resident cells.
-std::vector<uint64_t> residentSizes(const CellWindowInput& in, uint32_t pid) {
-  std::vector<uint64_t> sizes(in.layout->numStreams());
-  for (uint32_t s = 0; s < sizes.size(); ++s) {
-    sizes[s] = in.cells->bytes(pid, s);
-  }
-  return sizes;
+/// Writes partition `pid`'s resident cells to `sink` as one run; nothing
+/// when it has none.
+void writeCells(
+    RunCompressor& compressor,
+    RunSink& sink,
+    const CellWindowInput& in,
+    uint32_t pid) {
+  compressor.write(
+      sink,
+      in.layout->numStreams(),
+      [&](uint32_t s) { return in.cells->bytes(pid, s); },
+      [&](uint32_t s, RunPieceFn fn) { in.cells->scan(pid, s, fn); });
 }
 
 } // namespace
@@ -127,7 +132,6 @@ LocalCellOutput::LocalCellOutput(
 }
 
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
-  const uint32_t numStreams = layout_->numStreams();
   auto& run = runs_.emplace_back();
   // Runs are compressed as they spill, in their final form: both disk
   // passes write compressed bytes and the merge copies the segments
@@ -139,13 +143,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
   SpillRunSink sink(spill_);
   for (uint32_t pid = 0; pid < in.numPartitions; ++pid) {
     if (in.runPartitions == nullptr || in.runPartitions[pid] != 0) {
-      const auto sizes = residentSizes(in, pid);
-      if (residentBytes(in, pid) > 0) {
-        const auto visit = [&](uint32_t s, RunPieceFn fn) {
-          in.cells->scan(pid, s, fn);
-        };
-        compressor_.write(sink, numStreams, sizes.data(), visit);
-      }
+      writeCells(compressor_, sink, in, pid);
     }
     ends[pid + 1] = spill_.end();
   }
@@ -375,14 +373,9 @@ void LocalCellOutput::writeResidentRun(
     const CellWindowInput& in,
     uint32_t pid,
     uint64_t total) {
-  const uint32_t numStreams = layout_->numStreams();
-  const auto sizes = residentSizes(in, pid);
-  rawAccum_ += runHeaderBytes(numStreams) + total;
+  rawAccum_ += runHeaderBytes(layout_->numStreams()) + total;
   DataRunSink sink(out);
-  compressor_.write(
-      sink, numStreams, sizes.data(), [&](uint32_t s, RunPieceFn fn) {
-        in.cells->scan(pid, s, fn);
-      });
+  writeCells(compressor_, sink, in, pid);
 }
 
 void LocalCellOutput::appendBlockKind() {
@@ -478,12 +471,8 @@ void RssCellOutput::buildPayload(
       in, pid, total > 0 ? 1 : 0, compressor_, payload, pool_);
   raw += payload->size();
   if (total > 0) {
-    const auto sizes = residentSizes(in, pid);
     BufferRunSink sink(payload, pool_);
-    compressor_.write(
-        sink, numStreams, sizes.data(), [&](uint32_t s, RunPieceFn fn) {
-          in.cells->scan(pid, s, fn);
-        });
+    writeCells(compressor_, sink, in, pid);
     raw += runHeaderBytes(numStreams) + total;
   }
   rawPartitionLengths_[pid] += static_cast<int64_t>(raw);
