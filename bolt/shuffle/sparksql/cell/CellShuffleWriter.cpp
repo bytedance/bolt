@@ -291,7 +291,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   nullClass_.resize(layout_.numColumns());
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (layout_.isUnknownColumn(col)) {
-      nullClass_[col] = BatchNullClass::kAllNull;
+      nullClass_[col] = NullClass::kAllNull;
       continue;
     }
     auto& decoded = decoded_[col];
@@ -300,28 +300,27 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     // buffer exists, and defensively allocated all-set buffers are common.
     // A word-level scan (~n/64 compares, early exit) is far cheaper than
     // taxing every row of the loop with a bit test for absent nulls.
-    auto klass = BatchNullClass::kNoNulls;
+    auto klass = NullClass::kNoNulls;
     if (decoded.mayHaveNulls()) {
       if (decoded.isConstantMapping()) {
-        klass = decoded.isNullAt(0) ? BatchNullClass::kAllNull
-                                    : BatchNullClass::kNoNulls;
+        klass = decoded.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
       } else if (decoded.isIdentityMapping()) {
         const uint64_t* nulls = decoded.nulls();
         if (nulls == nullptr || bits::isAllSet(nulls, 0, numRows, true)) {
-          klass = BatchNullClass::kNoNulls; // stale buffer, no actual null
+          klass = NullClass::kNoNulls; // stale buffer, no actual null
         } else if (bits::isAllSet(nulls, 0, numRows, false)) {
-          klass = BatchNullClass::kAllNull;
+          klass = NullClass::kAllNull;
         } else {
-          klass = BatchNullClass::kSomeNulls;
+          klass = NullClass::kSomeNulls;
         }
       } else {
         // Wrapped nulls: take the per-row path rather than materializing
         // a combined bitmap here.
-        klass = BatchNullClass::kSomeNulls;
+        klass = NullClass::kSomeNulls;
       }
     }
     nullClass_[col] = klass;
-    anyNullable = anyNullable || klass == BatchNullClass::kSomeNulls;
+    anyNullable = anyNullable || klass == NullClass::kSomeNulls;
   }
   nullClassifyNs_ += currentTimeNs() - classifyStart;
   if (anyNullable) {
@@ -417,17 +416,17 @@ void CellShuffleWriter::probeDictionary(
     uint32_t numRows,
     const std::vector<uint32_t>& columns,
     const DecodedVector* decoded,
-    const BatchNullClass* nullClass) {
+    const NullClass* nullClass) {
   const auto& cellOpts = options_.cellOptions;
   if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
     return;
   }
   for (const uint32_t col : columns) {
-    if (nullClass[col] == BatchNullClass::kAllNull) {
+    if (nullClass[col] == NullClass::kAllNull) {
       continue;
     }
     const auto& column = decoded[col];
-    const bool hasNulls = nullClass[col] == BatchNullClass::kSomeNulls;
+    const bool hasNulls = nullClass[col] == NullClass::kSomeNulls;
     // Distinct scan with early exit: once past the 64-byte serialization
     // budget the column can never meet the conservative criterion, so a
     // high-cardinality column costs only a handful of rows here.

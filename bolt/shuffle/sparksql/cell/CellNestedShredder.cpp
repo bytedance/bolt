@@ -34,22 +34,21 @@ using Kind = CellNestedLayout::Kind;
 
 /// The null shape of the first `n` decoded rows, exactly: kNoNulls and
 /// kAllNull are what the split kernels rely on.
-BatchNullClass classifyNulls(DecodedVector& decoded, vector_size_t n) {
+NullClass classifyNulls(DecodedVector& decoded, vector_size_t n) {
   if (!decoded.mayHaveNulls()) {
-    return BatchNullClass::kNoNulls;
+    return NullClass::kNoNulls;
   }
   if (decoded.isConstantMapping()) {
-    return decoded.isNullAt(0) ? BatchNullClass::kAllNull
-                               : BatchNullClass::kNoNulls;
+    return decoded.isNullAt(0) ? NullClass::kAllNull : NullClass::kNoNulls;
   }
   const uint64_t* nulls = decoded.nulls();
   if (nulls == nullptr || bits::isAllSet(nulls, 0, n, true)) {
-    return BatchNullClass::kNoNulls;
+    return NullClass::kNoNulls;
   }
   if (bits::isAllSet(nulls, 0, n, false)) {
-    return BatchNullClass::kAllNull;
+    return NullClass::kAllNull;
   }
-  return BatchNullClass::kSomeNulls;
+  return NullClass::kSomeNulls;
 }
 
 /// Whether every one of the `size` decoded entries is null, whichever a
@@ -169,7 +168,7 @@ CellNestedShredder::CellNestedShredder(
       chunkPositions_(chunkPositions),
       inputs_(layout.numNodes()),
       decoded_(layout.numNodes()),
-      nullClass_(layout.numNodes(), BatchNullClass::kAllNull),
+      nullClass_(layout.numNodes(), NullClass::kAllNull),
       views_(layout.numNodes()),
       viewIndices_(layout.numNodes()),
       viewNulls_(layout.numNodes()),
@@ -257,7 +256,7 @@ void CellNestedShredder::prepare(const RowVector& rv) {
     auto& klass = nullClass_[col];
     auto& input = inputs_[col];
     if (node.type->kind() == TypeKind::UNKNOWN || input.allNull) {
-      klass = BatchNullClass::kAllNull;
+      klass = NullClass::kAllNull;
       continue;
     }
     if (node.kind == Kind::kLeaf || node.kind == Kind::kRow) {
@@ -273,7 +272,7 @@ void CellNestedShredder::prepare(const RowVector& rv) {
   shredNs_ += currentTimeNs() - start;
 }
 
-BatchNullClass CellNestedShredder::viewRows(uint32_t col) {
+NullClass CellNestedShredder::viewRows(uint32_t col) {
   auto& input = inputs_[col];
   auto& decoded = input.decoded;
   auto& view = views_[col];
@@ -531,7 +530,7 @@ void CellNestedShredder::split(
   const auto& rows = layout_.space(0);
   bool someNulls = false;
   for (const uint32_t col : rows.splitColumns) {
-    someNulls = someNulls || nullClass_[col] == BatchNullClass::kSomeNulls;
+    someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
   uint32_t* rowIndex = nullptr;
   if (someNulls) {
@@ -693,7 +692,7 @@ void CellNestedShredder::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
   bool someNulls = false;
   for (const uint32_t col : space.splitColumns) {
     nullClass_[col] = view(col, chunk);
-    someNulls = someNulls || nullClass_[col] == BatchNullClass::kSomeNulls;
+    someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
   const uint32_t* pids = chunk.pids->as<uint32_t>();
   uint32_t* counters = counters_->asMutable<uint32_t>();
@@ -743,10 +742,10 @@ void CellNestedShredder::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
   chunk.contiguous = true;
 }
 
-BatchNullClass CellNestedShredder::view(uint32_t col, const Chunk& chunk) {
+NullClass CellNestedShredder::view(uint32_t col, const Chunk& chunk) {
   auto& input = inputs_[col];
   if (input.allNull) {
-    return BatchNullClass::kAllNull;
+    return NullClass::kAllNull;
   }
   auto& decoded = input.decoded;
   const auto n = static_cast<vector_size_t>(chunk.size);

@@ -378,12 +378,8 @@ void CellSplitter::split(const SplitBatch& batch) {
     }
     const auto nullColumn = layout_.wireColumn(col);
     const auto klass = batch.nullClass[col];
-    const bool recordNulls = nulls_.observeBatch(
-        nullColumn,
-        klass != BatchNullClass::kNoNulls,
-        klass == BatchNullClass::kAllNull,
-        positions);
-    if (klass == BatchNullClass::kAllNull) {
+    const bool recordNulls = nulls_.observeBatch(nullColumn, klass, positions);
+    if (klass == NullClass::kAllNull) {
       // The whole batch is null in this column (constant null, or a flat
       // vector whose scan came back all-null): values contribute nothing
       // (dense pack). While the column has been null throughout, its state
@@ -399,7 +395,7 @@ void CellSplitter::split(const SplitBatch& batch) {
       }
       continue;
     }
-    const bool hasNulls = klass == BatchNullClass::kSomeNulls;
+    const bool hasNulls = klass == NullClass::kSomeNulls;
     switch (rowType->childAt(col)->kind()) {
       case TypeKind::SMALLINT:
         dispatchEncoded<int16_t>(col, batch, hasNulls);

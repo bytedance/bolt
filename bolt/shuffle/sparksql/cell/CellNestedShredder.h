@@ -85,7 +85,7 @@ class CellNestedShredder {
     return decoded_.data();
   }
 
-  const BatchNullClass* nullClass() const {
+  const NullClass* nullClass() const {
     return nullClass_.data();
   }
 
@@ -206,10 +206,10 @@ class CellNestedShredder {
 
   /// Builds and decodes the view of the rows in column col, a container's
   /// lengths.
-  BatchNullClass viewRows(uint32_t col);
+  NullClass viewRows(uint32_t col);
 
   /// Builds and decodes the view of `chunk` in column col.
-  BatchNullClass view(uint32_t col, const Chunk& chunk);
+  NullClass view(uint32_t col, const Chunk& chunk);
 
   void splitColumns(const SplitBatch& batch);
 
@@ -230,7 +230,7 @@ class CellNestedShredder {
   std::vector<NodeInput> inputs_;
   /// Per layout column: the rows' decoded column, or a chunk's view decoded.
   std::vector<DecodedVector> decoded_;
-  std::vector<BatchNullClass> nullClass_;
+  std::vector<NullClass> nullClass_;
   std::vector<VectorPtr> views_;
   /// A dictionary view's indices and nulls, per layout column.
   std::vector<BufferPtr> viewIndices_;
