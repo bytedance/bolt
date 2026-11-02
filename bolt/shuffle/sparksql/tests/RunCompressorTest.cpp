@@ -166,7 +166,6 @@ class RunCompressorTest
   }
 
   void SetUp() override {
-    pool_ = memory::memoryManager()->addLeafPool();
     options_.compressionType = GetParam();
   }
 
@@ -178,7 +177,6 @@ class RunCompressorTest
     return options;
   }
 
-  std::shared_ptr<memory::MemoryPool> pool_;
   PartitionWriterOptions options_;
   uint64_t compressTimeNs_{0};
 };
@@ -258,8 +256,7 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   const std::vector<std::string> streams = {mixed, repetitive(100 << 10)};
   for (const int64_t maxRead : {int64_t{1000}, int64_t{100} << 10}) {
     SCOPED_TRACE(maxRead);
-    RunCompressor compressor(
-        options_, cellOptions(), pool_.get(), &compressTimeNs_);
+    RunCompressor compressor(options_, cellOptions(), &compressTimeNs_);
     auto shortReads =
         std::make_unique<ShortReadCompressor>(type, realStreamForm(), maxRead);
     auto* probe = shortReads.get();
@@ -271,7 +268,7 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
     EXPECT_GT(probe->shortReads, 0);
   }
 
-  RunCompressor stalled(options_, cellOptions(), pool_.get(), &compressTimeNs_);
+  RunCompressor stalled(options_, cellOptions(), &compressTimeNs_);
   stalled.testingSetStreamCompressor(
       std::make_unique<ShortReadCompressor>(type, realStreamForm(), 0));
   BOLT_ASSERT_THROW(compressRun(stalled, streams), "made no progress");
