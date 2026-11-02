@@ -39,19 +39,17 @@ class CellShuffleTypeAdapter {
     return !complexColumns_.empty();
   }
 
-  // Converts a bounded slice and advances offset. Simple columns share their
-  // input storage. Without complex columns returns the original batch.
-  RowVectorPtr encodeNext(
-      const RowVectorPtr& input,
-      vector_size_t& offset,
-      memory::MemoryPool* pool) const;
+  /// The physical batch of `input`, row for row: the simple columns,
+  /// sharing their storage, then one binary column holding each row's
+  /// complex fields as a CompactRow. Without complex columns, `input`
+  /// itself.
+  RowVectorPtr encode(const RowVectorPtr& input, memory::MemoryPool* pool)
+      const;
 
-  // Restores a bounded part of a physical payload, advancing offset only after
-  // success. The caller retains input until every row has been consumed.
-  RowVectorPtr decodeNext(
-      const RowVectorPtr& input,
-      vector_size_t& offset,
-      memory::MemoryPool* pool) const;
+  /// The logical batch of a physical batch encode() made, row for row: the
+  /// simple columns shared, the complex ones deserialized.
+  RowVectorPtr decode(const RowVectorPtr& input, memory::MemoryPool* pool)
+      const;
 
  private:
   RowTypePtr logicalType_;

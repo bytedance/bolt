@@ -16,17 +16,14 @@
 
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 
+#include <cstring>
+
 #include "bolt/row/CompactRow.h"
 #include "bolt/shuffle/sparksql/cell/CellFormat.h"
 #include "bolt/vector/FlatVector.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
-
-// Batch targets apply to serialized rows, not decoded vector memory. A
-// single row larger than the target still forms a batch of its own.
-constexpr vector_size_t kMaxBatchRows = 1024;
-constexpr uint64_t kTargetBatchBytes = 8ULL << 20;
 
 bool isComplex(const TypePtr& type) {
   return type->kind() == TypeKind::ARRAY || type->kind() == TypeKind::MAP ||
@@ -82,9 +79,8 @@ CellShuffleTypeAdapter::CellShuffleTypeAdapter(RowTypePtr logicalType)
   }
 }
 
-RowVectorPtr CellShuffleTypeAdapter::encodeNext(
+RowVectorPtr CellShuffleTypeAdapter::encode(
     const RowVectorPtr& input,
-    vector_size_t& offset,
     memory::MemoryPool* pool) const {
   BOLT_CHECK(
       !RowVector::isComposite(input),
@@ -92,42 +88,34 @@ RowVectorPtr CellShuffleTypeAdapter::encodeNext(
   BOLT_CHECK(
       input->type()->equivalent(*logicalType_), "Cell input schema changed");
   if (!hasComplexColumns()) {
-    BOLT_CHECK_EQ(offset, 0);
-    offset = input->size();
     return input;
   }
-  BOLT_CHECK_GE(offset, 0);
-  BOLT_CHECK_LE(offset, input->size());
-  const auto start = offset;
-  const auto candidateRows = std::min(kMaxBatchRows, input->size() - start);
+  const vector_size_t numRows = input->size();
   std::vector<VectorPtr> complex;
   for (const auto col : complexColumns_) {
-    complex.push_back(BaseVector::loadedVectorShared(input->childAt(col))
-                          ->slice(start, candidateRows));
+    complex.push_back(BaseVector::loadedVectorShared(input->childAt(col)));
   }
   auto grouped = std::make_shared<RowVector>(
-      pool, complexType_, nullptr, candidateRows, std::move(complex));
+      pool, complexType_, nullptr, numRows, std::move(complex));
   row::CompactRow serde(grouped);
   const auto fixedSize = row::CompactRow::fixedRowSize(complexType_);
-  std::vector<int32_t> sizes;
+  std::vector<int32_t> sizes(numRows);
   uint64_t bytes = 0;
-  for (vector_size_t i = 0; i < candidateRows; ++i) {
-    const int32_t size = fixedSize ? *fixedSize : serde.rowSize(i);
-    BOLT_CHECK_GE(size, 0);
-    if (!sizes.empty() && bytes + size > kTargetBatchBytes) {
-      break;
-    }
-    sizes.push_back(size);
-    bytes += size;
+  for (vector_size_t i = 0; i < numRows; ++i) {
+    sizes[i] = fixedSize ? *fixedSize : serde.rowSize(i);
+    BOLT_CHECK_GE(sizes[i], 0);
+    bytes += sizes[i];
   }
-  const vector_size_t rows = sizes.size();
   auto binary =
-      BaseVector::create<FlatVector<StringView>>(VARBINARY(), rows, pool);
+      BaseVector::create<FlatVector<StringView>>(VARBINARY(), numRows, pool);
   // One pool-owned buffer, retained by the binary vector until split completes.
-  auto buffer = AlignedBuffer::allocate<char>(bytes, pool, 0);
+  auto buffer = AlignedBuffer::allocate<char>(bytes, pool);
   auto* data = buffer->asMutable<char>();
   size_t at = 0;
-  for (vector_size_t i = 0; i < rows; ++i) {
+  for (vector_size_t i = 0; i < numRows; ++i) {
+    // CompactRow only sets null bits and skips null values: each row starts
+    // zeroed, just before it is written, while it is in cache.
+    ::memset(data + at, 0, sizes[i]);
     BOLT_CHECK_EQ(serde.serialize(i, data + at), sizes[i]);
     binary->setNoCopy(i, StringView(data + at, sizes[i]));
     at += sizes[i];
@@ -135,60 +123,41 @@ RowVectorPtr CellShuffleTypeAdapter::encodeNext(
   binary->setStringBuffers({buffer});
   std::vector<VectorPtr> children;
   for (const auto col : retainedColumns_) {
-    children.push_back(BaseVector::loadedVectorShared(input->childAt(col))
-                           ->slice(start, rows));
+    children.push_back(BaseVector::loadedVectorShared(input->childAt(col)));
   }
   children.push_back(std::move(binary));
-  offset += rows;
   return std::make_shared<RowVector>(
-      pool, physicalType_, nullptr, rows, std::move(children));
+      pool, physicalType_, nullptr, numRows, std::move(children));
 }
 
-RowVectorPtr CellShuffleTypeAdapter::decodeNext(
+RowVectorPtr CellShuffleTypeAdapter::decode(
     const RowVectorPtr& input,
-    vector_size_t& offset,
     memory::MemoryPool* pool) const {
-  if (!input || !hasComplexColumns()) {
-    if (input) {
-      BOLT_CHECK_EQ(offset, 0);
-      offset = input->size();
-    }
+  if (!hasComplexColumns()) {
     return input;
   }
   BOLT_CHECK(
       input->type()->equivalent(*physicalType_),
       "Invalid Cell physical schema");
-  BOLT_CHECK_GE(offset, 0);
-  BOLT_CHECK_LE(offset, input->size());
-  const auto start = offset;
-  const auto count = std::min(kMaxBatchRows, input->size() - start);
+  const vector_size_t numRows = input->size();
   DecodedVector binary(*input->childAt(retainedColumns_.size()));
   std::vector<std::string_view> rows;
-  rows.reserve(count);
-  uint64_t bytes = 0;
-  for (vector_size_t i = start; i < start + count; ++i) {
+  rows.reserve(numRows);
+  for (vector_size_t i = 0; i < numRows; ++i) {
     BOLT_CHECK(!binary.isNullAt(i), "Cell complex payload must be non-null");
     const auto& value = binary.data<StringView>()[binary.index(i)];
-    if (!rows.empty() && bytes + value.size() > kTargetBatchBytes) {
-      break;
-    }
-    bytes += value.size();
     rows.emplace_back(value.data(), value.size());
   }
   auto complex = row::CompactRow::deserialize(rows, complexType_, pool);
   std::vector<VectorPtr> children(logicalType_->size());
   for (uint32_t i = 0; i < retainedColumns_.size(); ++i) {
-    children[retainedColumns_[i]] = start == 0 && rows.size() == input->size()
-        ? input->childAt(i)
-        : input->childAt(i)->slice(start, rows.size());
+    children[retainedColumns_[i]] = input->childAt(i);
   }
   for (uint32_t i = 0; i < complexColumns_.size(); ++i) {
     children[complexColumns_[i]] = complex->childAt(i);
   }
-  auto output = std::make_shared<RowVector>(
-      pool, logicalType_, nullptr, rows.size(), std::move(children));
-  offset += rows.size();
-  return output;
+  return std::make_shared<RowVector>(
+      pool, logicalType_, nullptr, numRows, std::move(children));
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
