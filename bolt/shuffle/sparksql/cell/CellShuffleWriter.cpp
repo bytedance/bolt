@@ -67,24 +67,25 @@ CellShuffleWriter::CellShuffleWriter(
     BOLT_CHECK_NOT_NULL(
         options_.partitionWriterOptions.rssClient,
         "CellShuffleWriter on Celeborn requires an RSS client");
-    raw_ = std::make_unique<RssRawOutput>(options_.partitionWriterOptions);
+    blocks_ = std::make_unique<RssBlockOutput>(options_.partitionWriterOptions);
     output_ = std::make_unique<RssCellOutput>(
-        *raw_,
+        *blocks_,
         &layout_,
         options_.partitionWriterOptions,
         options_.cellOptions,
         boltPool_);
   } else {
-    // Two outputs with a spill file each, merged into the one data file.
-    auto composite =
-        std::make_unique<LocalRawOutput>(options_.partitionWriterOptions);
+    // Two outputs with a spill file each, merged into the one data file:
+    // the Cell output, and `blocks`, which serves the composite rows.
+    auto blocks =
+        std::make_unique<LocalBlockOutput>(options_.partitionWriterOptions);
     output_ = std::make_unique<LocalCellOutput>(
-        *composite,
+        *blocks,
         &layout_,
         options_.cellOptions,
         options_.partitionWriterOptions,
         boltPool_);
-    raw_ = std::move(composite);
+    blocks_ = std::move(blocks);
   }
 }
 
@@ -679,9 +680,9 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   if (initialized_) {
     splitter_->finish(metrics_);
   } else {
-    // No ordinary batch ever came: the raw output alone writes the data file
+    // No ordinary batch ever came: the block output alone writes the data file
     // - empty, or the composite rows - or ends the Celeborn attempt.
-    raw_->finish(metrics_);
+    blocks_->finish(metrics_);
     metrics_.rawPartitionLengths.assign(numPartitions_, 0);
   }
   // Data size is the pre-compression payload volume (what the raw lengths
