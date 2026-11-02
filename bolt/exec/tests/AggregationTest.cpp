@@ -1940,6 +1940,126 @@ TEST_P(AggregationTest, dynamicFinalResidentRun) {
   }
 }
 
+DEBUG_ONLY_TEST_P(
+    AggregationTest,
+    dynamicFinalReleasesLookupBeforeReservation) {
+  if (GetParam().useGPU) {
+    GTEST_SKIP() << "GPU Aggregation does not support spilling";
+  }
+
+  constexpr vector_size_t kResidentGroups = 8'192;
+  const std::vector<RowVectorPtr> input{
+      makeRowVector({
+          makeFlatVector<int64_t>(1'024, [](auto row) { return row % 16; }),
+          makeFlatVector<int64_t>(1'024, [](auto) { return 1; }),
+      }),
+      makeRowVector({
+          makeFlatVector<int64_t>(
+              2 * kResidentGroups,
+              [](auto row) { return row % kResidentGroups; }),
+          makeFlatVector<int64_t>(2 * kResidentGroups, [](auto) { return 1; }),
+      })};
+  const auto plan = PlanBuilder()
+                        .values(input)
+                        .singleAggregation({"c0"}, {"sum(c1)"})
+                        .planNode();
+  const auto expected = AssertQueryBuilder(plan).copyResults(pool());
+
+  enum class Admission { kSuccess, kFailure, kReclaim };
+  for (const auto admission :
+       {Admission::kSuccess, Admission::kFailure, Admission::kReclaim}) {
+    SCOPED_TRACE(static_cast<int>(admission));
+    for (const auto* mode : {"disable", "raw", "compression"}) {
+      SCOPED_TRACE(mode);
+      Operator* aggregation = nullptr;
+      GroupingSet* groupingSet = nullptr;
+      int64_t bytesBeforePreparation = 0;
+      int64_t peakBeforePreparation = 0;
+      bool checkedPreparationPeak = false;
+      size_t preparationCalls = 0;
+      size_t admissionCalls = 0;
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::Driver::runInternal::noMoreInput",
+          std::function<void(Operator*)>([&](Operator* op) {
+            if (op->operatorType() == "Aggregation") {
+              aggregation = op;
+              bytesBeforePreparation = op->pool()->currentBytes();
+              peakBeforePreparation = op->pool()->peakBytes();
+            }
+          }));
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::Driver::runInternal::getOutput",
+          std::function<void(Operator*)>([&](Operator* op) {
+            if (op != aggregation || !op->testingNoMoreInput() ||
+                checkedPreparationPeak) {
+              return;
+            }
+            checkedPreparationPeak = true;
+            if (admission == Admission::kSuccess) {
+              const auto preparationPeak = op->pool()->peakBytes();
+              RecordProperty(
+                  std::string("prepare_peak_before_") + mode,
+                  std::to_string(peakBeforePreparation));
+              RecordProperty(
+                  std::string("prepare_peak_after_") + mode,
+                  std::to_string(preparationPeak));
+              // This fixture's lookup is larger than the resident index. Its
+              // preparation must not exceed the input-stage memory peak.
+              EXPECT_LE(preparationPeak, peakBeforePreparation);
+            }
+          }));
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::GroupingSet::prepareResidentRows::beforeReserve",
+          std::function<void(GroupingSet*)>([&](GroupingSet* groups) {
+            groupingSet = groups;
+            ++preparationCalls;
+            EXPECT_EQ(groups->hashTableStats().capacity, 0);
+            EXPECT_EQ(groups->numRows(), kResidentGroups);
+            EXPECT_LT(
+                groups->testingPool().currentBytes(), bytesBeforePreparation);
+          }));
+      SCOPED_TESTVALUE_SET(
+          "bytedance::bolt::exec::GroupingSet::prepareResidentRows::afterReserve",
+          std::function<void(bool*)>([&](bool* reserved) {
+            ++admissionCalls;
+            ASSERT_NE(groupingSet, nullptr);
+            ASSERT_TRUE(*reserved);
+            if (admission == Admission::kFailure) {
+              *reserved = false;
+            } else if (admission == Admission::kReclaim) {
+              ASSERT_NE(aggregation, nullptr);
+              ASSERT_TRUE(aggregation->canReclaim());
+              memory::ScopedMemoryArbitrationContext context(
+                  aggregation->pool());
+              memory::MemoryReclaimer::Stats stats;
+              aggregation->reclaim(0, stats);
+              EXPECT_EQ(groupingSet->numRows(), 0);
+            }
+          }));
+
+      auto dir = TempDirectoryPath::create();
+      auto task =
+          AssertQueryBuilder(plan)
+              .spillDirectory(dir->path)
+              .config(QueryConfig::kSpillEnabled, true)
+              .config(QueryConfig::kAggregationSpillEnabled, true)
+              .config(QueryConfig::kTestingSpillPct, 100)
+              .config(QueryConfig::kAggregationDynamicFinalSpillEnabled, true)
+              .config(QueryConfig::kRowBasedSpillMode, mode)
+              .maxDrivers(1)
+              .assertResults(expected);
+      EXPECT_EQ(preparationCalls, 1);
+      EXPECT_EQ(admissionCalls, 1);
+      EXPECT_TRUE(checkedPreparationPeak);
+      const auto stats = toPlanStats(task->taskStats());
+      EXPECT_EQ(
+          stats.at(plan->id()).spilledRows,
+          admission == Admission::kSuccess ? 16 : 16 + kResidentGroups);
+      OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+    }
+  }
+}
+
 // A spill merge can return much less than maxOutputBatchRows for wide rows.
 // Its output shell must not retain a full maximum-sized vector per column.
 TEST_P(AggregationTest, dynamicFinalWideOutputAllocation) {

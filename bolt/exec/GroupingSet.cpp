@@ -256,6 +256,19 @@ bool GroupingSet::prepareResidentRows() {
   if (table_ == nullptr || table_->rows()->numRows() == 0) {
     return false;
   }
+  // Input is complete. Keep payload rows, but free the lookup before reserving
+  // and allocating the resident index so their memory usage does not overlap.
+  uint64_t totalTimeUs{0};
+  {
+    MicrosecondTimer timer(&totalTimeUs);
+    if (ignoreNullKeys_) {
+      static_cast<HashTable<true>*>(table_.get())->releaseTable();
+    } else {
+      static_cast<HashTable<false>*>(table_.get())->releaseTable();
+    }
+    lookup_.reset();
+  }
+
   const auto rowCount = static_cast<uint64_t>(table_->rows()->numRows());
   const auto indexBytes = checkedMultiply<uint64_t>(
       rowCount, sizeof(char*), "resident row pointer index");
@@ -271,10 +284,17 @@ bool GroupingSet::prepareResidentRows() {
       reserveBytes, reserveBytes / 5, "resident row pointer admission");
   const auto availableReservation =
       static_cast<uint64_t>(std::max<int64_t>(pool_.availableReservation(), 0));
+  BOLT_TEST_ADJUST(
+      "bytedance::bolt::exec::GroupingSet::prepareResidentRows::beforeReserve",
+      this);
   {
     memory::ReclaimableSectionGuard guard(nonReclaimableSection_);
-    if (availableReservation < reserveBytes &&
-        !pool_.maybeReserve(reserveBytes)) {
+    bool reserved = availableReservation >= reserveBytes ||
+        pool_.maybeReserve(reserveBytes);
+    BOLT_TEST_ADJUST(
+        "bytedance::bolt::exec::GroupingSet::prepareResidentRows::afterReserve",
+        &reserved);
+    if (!reserved) {
       return false;
     }
   }
@@ -284,7 +304,6 @@ bool GroupingSet::prepareResidentRows() {
   }
 
   uint64_t sortTimeUs{0};
-  uint64_t totalTimeUs{0};
   {
     MicrosecondTimer timer(&totalTimeUs);
     const auto size = table_->rows()->numRows();
@@ -308,12 +327,6 @@ bool GroupingSet::prepareResidentRows() {
     residentRows_ = std::move(sortedRows);
     const auto& allocator = table_->rows()->stringAllocator();
     residentStringBytes_ = allocator.retainedSize() - allocator.freeSpace();
-    if (ignoreNullKeys_) {
-      static_cast<HashTable<true>*>(table_.get())->releaseTable();
-    } else {
-      static_cast<HashTable<false>*>(table_.get())->releaseTable();
-    }
-    lookup_.reset();
   }
   spiller_->updateSpillSortTime(sortTimeUs);
   spiller_->updateSpillTotalTime(totalTimeUs);
