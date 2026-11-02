@@ -23,6 +23,7 @@
 #include <utility>
 
 #include <folly/ScopeGuard.h>
+#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/base/Exceptions.h"
@@ -586,18 +587,36 @@ bool NullCells::observeBatch(
   return true;
 }
 
-NullCells::Cell NullCells::emptyCell(uint32_t prev) {
+NullCells::Cell NullCells::emptyCell(uint32_t head) {
   Cell cell;
-  cell.prev = prev;
+  cell.head = head;
   cell.run = 0;
   cell.fill = 0;
   ::memset(cell.bits, 0xFF, sizeof(cell.bits));
   return cell;
 }
 
+uint32_t NullCells::cellNulls(const Cell& cell) {
+  // The bitmap's bits past `fill` are 1, so its zero bits are its nulls.
+  uint32_t ones = 0;
+  for (uint32_t at = 0; at + sizeof(uint64_t) <= sizeof(cell.bits);
+       at += sizeof(uint64_t)) {
+    ones +=
+        __builtin_popcountll(folly::loadUnaligned<uint64_t>(cell.bits + at));
+  }
+  for (uint32_t at = sizeof(cell.bits) / sizeof(uint64_t) * sizeof(uint64_t);
+       at < sizeof(cell.bits);
+       ++at) {
+    ones += __builtin_popcount(cell.bits[at]);
+  }
+  const uint32_t runNulls =
+      (cell.run & kNullRun) != 0 ? cell.run & kMaxRunRows : 0;
+  return runNulls + (kCellBits - ones);
+}
+
 size_t NullCells::columnBlockBytes() const {
   // Room to align the cells to their size, so none spans two cache lines.
-  return sizeof(Cell) + (sizeof(Cell) + sizeof(Tail)) * numPartitions_;
+  return sizeof(Cell) + (sizeof(Cell) + sizeof(Progress)) * numPartitions_;
 }
 
 void NullCells::openColumn(Column& column) {
@@ -606,11 +625,13 @@ void NullCells::openColumn(Column& column) {
   auto* cells = reinterpret_cast<Cell*>(
       (reinterpret_cast<uintptr_t>(block) + sizeof(Cell) - 1) &
       ~(uintptr_t{sizeof(Cell)} - 1));
-  auto* tails = reinterpret_cast<Tail*>(cells + numPartitions_);
-  const Cell empty = emptyCell(ChunkAllocator::kInvalidCell);
-  std::fill(cells, cells + numPartitions_, empty);
-  std::fill(tails, tails + numPartitions_, Tail{0, 0, 0});
-  column = Column{cells, tails, block};
+  auto* progress = reinterpret_cast<Progress*>(cells + numPartitions_);
+  std::fill(cells, cells + numPartitions_, emptyCell(0));
+  std::fill(
+      progress,
+      progress + numPartitions_,
+      Progress{ChunkAllocator::kInvalidCell, 0, 0});
+  column = Column{cells, progress, block};
   tableBytes_ += static_cast<int64_t>(bytes);
 }
 
@@ -619,7 +640,7 @@ void NullCells::appendNulls(
     uint32_t pid,
     uint32_t row,
     uint32_t count) {
-  const uint32_t end = column.tails[pid].end;
+  const uint32_t end = column.cells[pid].head;
   BOLT_DCHECK_GE(row, end, "null rows out of order");
   appendRows(column, pid, false, row - end);
   appendRows(column, pid, true, count);
@@ -630,7 +651,6 @@ void NullCells::appendRows(
     uint32_t pid,
     bool null,
     uint32_t rows) {
-  Tail& tail = column.tails[pid];
   while (rows > 0) {
     Cell& cell = column.cells[pid];
     const uint32_t runRows = cell.run & kMaxRunRows;
@@ -657,19 +677,21 @@ void NullCells::appendRows(
       continue;
     }
     rows -= taken;
-    tail.end += taken;
-    if (null) {
-      tail.nulls += taken;
-    }
+    cell.head += taken;
   }
 }
 
 void NullCells::moveCell(Column& column, uint32_t pid) {
   const uint32_t id = chainCells_.allocCell();
   Cell& cell = column.cells[pid];
-  ::memcpy(chainCells_.cellData(id), &cell, sizeof(Cell));
-  cell = emptyCell(id);
-  ++column.tails[pid].moved;
+  Progress& progress = column.progress[pid];
+  auto* moved = reinterpret_cast<Cell*>(chainCells_.cellData(id));
+  moved->head = progress.last;
+  ::memcpy(&moved->run, &cell.run, kNullRecordBytes);
+  progress.last = id;
+  progress.nulls += cellNulls(cell);
+  ++progress.moved;
+  cell = emptyCell(cell.head);
 }
 
 NullCells::Summary
@@ -689,15 +711,17 @@ NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
   if (column.cells == nullptr) {
     return {NullTag::kNoNull, rowCount};
   }
-  const Tail& tail = column.tails[pid];
-  BOLT_CHECK_LE(tail.end, rowCount, "nulls recorded past the partition's rows");
-  if (tail.nulls == 0) {
+  const Cell& cell = column.cells[pid];
+  BOLT_CHECK_LE(
+      cell.head, rowCount, "nulls recorded past the partition's rows");
+  const uint32_t nulls = column.progress[pid].nulls + cellNulls(cell);
+  if (nulls == 0) {
     return {NullTag::kNoNull, rowCount};
   }
-  if (tail.nulls == rowCount) {
+  if (nulls == rowCount) {
     return {NullTag::kAllNull, 0};
   }
-  return {NullTag::kRawNull, rowCount - tail.nulls};
+  return {NullTag::kRawNull, rowCount - nulls};
 }
 
 void NullCells::emitRecords(
@@ -705,11 +729,16 @@ void NullCells::emitRecords(
     const uint32_t* cols,
     uint32_t numCols,
     uint8_t* out) const {
-  // A chain read from its last cell back, each cell written as a record
-  // just before the one after it.
+  // The current cell's record last, then the chain read from its last
+  // moved cell back, each cell written as a record just before the one
+  // after it.
   struct Walk {
     const Cell* cell;
     uint8_t* record;
+    /// For the current cell, whose head counts rows, the cell before it:
+    /// the partition's last moved cell. A moved cell's head links it.
+    uint32_t currentPrev;
+    bool current;
   };
   constexpr uint32_t kMaxWalks = 16;
   Walk walks[kMaxWalks];
@@ -719,9 +748,10 @@ void NullCells::emitRecords(
       for (uint32_t i = 0; i < numWalks;) {
         Walk& walk = walks[i];
         const Cell& cell = *walk.cell;
-        const Cell* prev = cell.prev == ChunkAllocator::kInvalidCell
+        const uint32_t prevId = walk.current ? walk.currentPrev : cell.head;
+        const Cell* prev = prevId == ChunkAllocator::kInvalidCell
             ? nullptr
-            : &chainCell(cell.prev);
+            : &chainCell(prevId);
         if (prev != nullptr) {
           __builtin_prefetch(prev);
         }
@@ -740,6 +770,7 @@ void NullCells::emitRecords(
           continue;
         }
         walk.cell = prev;
+        walk.current = false;
         walk.record -= kNullRecordBytes;
         ++i;
       }
@@ -748,12 +779,16 @@ void NullCells::emitRecords(
   for (uint32_t i = 0; i < numCols; ++i) {
     const Column& column = columns_[cols[i]];
     BOLT_DCHECK(column.cells != nullptr, "records of a column without nulls");
-    const uint32_t records = column.tails[pid].moved + 1;
+    const Progress& progress = column.progress[pid];
+    const uint32_t records = progress.moved + 1;
     folly::storeUnaligned<uint32_t>(out, records);
     out += sizeof(records);
-    // The last cell's record goes last.
+    // The current cell's record goes last.
     walks[numWalks++] = {
-        &column.cells[pid], out + size_t{kNullRecordBytes} * (records - 1)};
+        &column.cells[pid],
+        out + size_t{kNullRecordBytes} * (records - 1),
+        progress.last,
+        true};
     out += size_t{kNullRecordBytes} * records;
     if (numWalks == kMaxWalks) {
       walkInStep();
@@ -782,14 +817,14 @@ void NullCells::releasePartition(uint32_t pid) {
     if (column.cells == nullptr) {
       continue;
     }
-    uint32_t id = column.cells[pid].prev;
+    uint32_t id = column.progress[pid].last;
     while (id != ChunkAllocator::kInvalidCell) {
-      const uint32_t prev = chainCell(id).prev;
+      const uint32_t prev = chainCell(id).head;
       chainCells_.recycle(id);
       id = prev;
     }
-    column.cells[pid] = emptyCell(ChunkAllocator::kInvalidCell);
-    column.tails[pid] = Tail{0, 0, 0};
+    column.cells[pid] = emptyCell(0);
+    column.progress[pid] = Progress{ChunkAllocator::kInvalidCell, 0, 0};
   }
 }
 
