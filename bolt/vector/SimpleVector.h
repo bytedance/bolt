@@ -42,6 +42,7 @@
 #include <glog/logging.h>
 
 #include "bolt/type/DecimalUtil.h"
+#include "bolt/type/FloatingPointUtil.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/BaseVector.h"
 #include "bolt/vector/TypeAliases.h"
@@ -186,8 +187,14 @@ class SimpleVector : public BaseVector {
    * @return the hash of the value at the given index in this vector
    */
   uint64_t hashValueAt(vector_size_t index) const override {
-    return isNullAt(index) ? BaseVector::kNullHash
-                           : folly::hasher<T>{}(valueAt(index));
+    if (isNullAt(index)) {
+      return BaseVector::kNullHash;
+    }
+    if constexpr (std::is_floating_point_v<T>) {
+      return util::floating_point::NaNAwareHash<T>{}(valueAt(index));
+    } else {
+      return folly::hasher<T>{}(valueAt(index));
+    }
   }
 
   std::optional<bool> isSorted() const {

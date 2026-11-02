@@ -59,7 +59,7 @@ void testFloatingPoint() {
 
   ASSERT_EQ(NaNAwareHash<T>{}(kNaN), NaNAwareHash<T>{}(kSNAN));
   ASSERT_EQ(NaNAwareHash<T>{}(kNaN), NaNAwareHash<T>{}(kNaN));
-  ASSERT_EQ(NaNAwareHash<T>{}(0.0), NaNAwareHash<T>{}(0.0));
+  ASSERT_EQ(NaNAwareHash<T>{}(0.0), NaNAwareHash<T>{}(-0.0));
   ASSERT_EQ(NaNAwareHash<T>{}(kInf), NaNAwareHash<T>{}(kInf));
   ASSERT_NE(NaNAwareHash<T>{}(kNaN), NaNAwareHash<T>{}(kInf));
   ASSERT_NE(NaNAwareHash<T>{}(kNaN), NaNAwareHash<T>{}(0.0));

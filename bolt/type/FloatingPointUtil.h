@@ -43,6 +43,7 @@ namespace bytedance::bolt {
 /// designed to ensure consistent NaN handling according to the following rules:
 /// -> NaN == NaN returns true, even for NaNs with differing binary
 ///   representations.
+/// -> Positive and negative zero compare equal and produce the same hash.
 /// -> NaN is considered greater than infinity. There is no ordering between
 ///    NaNs with differing binary representations.
 /// These can be passed to standard containers and functions like std::map and
@@ -117,6 +118,9 @@ struct NaNAwareHash {
         folly::hasher<FLOAT>{}(std::numeric_limits<FLOAT>::quiet_NaN());
     if (std::isnan(val)) {
       return kNanHash;
+    }
+    if (val == 0) {
+      return folly::hasher<FLOAT>{}(0);
     }
     return folly::hasher<FLOAT>{}(val);
   }
