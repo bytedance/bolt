@@ -212,7 +212,7 @@ struct NestedScenario {
   RowTypePtr type;
   test::NestedVectorMaker::Options options;
   /// How batch b holds column c; flat when not given.
-  std::function<test::Encoding(uint32_t, uint32_t)> encodingOf;
+  std::function<test::ColumnEncoding(uint32_t, uint32_t)> encodingOf;
   int32_t numPartitions;
   bool lz4;
   bool rss;
@@ -813,8 +813,8 @@ TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
   wrapped.wrapPercent = 50;
   wrapped.scatteredPercent = 50;
   const auto everyEncoding = [](uint32_t batch, uint32_t col) {
-    return static_cast<test::Encoding>(
-        (batch + col) % static_cast<uint32_t>(test::Encoding::kCount));
+    return static_cast<test::ColumnEncoding>(
+        (batch + col) % static_cast<uint32_t>(test::ColumnEncoding::kCount));
   };
   test::NestedVectorMaker::Options structNulls;
   structNulls.nullPercent = {10, 30};
