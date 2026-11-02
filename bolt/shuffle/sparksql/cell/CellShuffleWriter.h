@@ -134,7 +134,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       uint32_t numRows,
       const std::vector<uint32_t>& columns,
       const DecodedVector* decoded,
-      const BatchNullClass* nullClass);
+      const NullClass* nullClass);
   /// The allocator's ReserveChunkFn: reserves a chunk's memory within
   /// cellMemoryCapBytes. Locally, when it cannot, it spills the largest
   /// partitions until half the cell data is covered, and the growth then
@@ -181,7 +181,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
   std::vector<DecodedVector> decoded_;
-  std::vector<BatchNullClass> nullClass_;
+  std::vector<NullClass> nullClass_;
   /// The string columns the dictionary probe considers: every one, or a
   /// nested layout's at the rows' positions.
   std::vector<uint32_t> probeColumns_;

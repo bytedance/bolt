@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include <folly/CPortability.h>
@@ -372,6 +373,23 @@ class DataCells {
   uint64_t totalBytes_{0};
 };
 
+/// The null shape of a column's rows.
+///
+/// For a batch, its classification by the writer, with a word-level scan
+/// of the decoded nulls, because mayHaveNulls() only says a nulls buffer
+/// EXISTS - upstream operators routinely attach defensively allocated,
+/// all-set buffers, and trusting them would tax every row of the loop for
+/// nulls that are not there. kSomeNulls may be conservative: wrapped nulls,
+/// or a stale buffer judged row by row, may turn out to hold none.
+///
+/// For a window, the join of its batches' classes: kNoNulls or kAllNull
+/// while every batch is, kSomeNulls once they differ.
+enum class NullClass : uint8_t {
+  kNoNulls = 0, // buffer absent, all-set, or constant non-null
+  kSomeNulls = 1, // mixed: the per-row null path applies
+  kAllNull = 2, // every row null: one counted run per partition
+};
+
 /// The null state of the current checkpoint window, per non-UNKNOWN wire
 /// column and partition, in the null body's bit order: bit 1 = non-null,
 /// bit 0 = null. All null information lives here.
@@ -404,18 +422,13 @@ class NullCells {
   NullCells(const NullCells&) = delete;
   NullCells& operator=(const NullCells&) = delete;
 
-  /// Records what one batch holds in column col - some row null
-  /// (`anyNull`), every row null (`allNull`) - and returns whether the
-  /// batch's nulls must be recorded through setNull()/setNullRun(): only
-  /// once the column holds both null and non-null rows in this window.
-  /// `windowRows` gives each partition's rows before this batch: a column
-  /// turning mixed after all-null rows records those as a null run per
-  /// partition, once.
-  bool observeBatch(
-      uint32_t col,
-      bool anyNull,
-      bool allNull,
-      const uint32_t* windowRows);
+  /// Joins `batch`, one batch's class in column col, into the column's
+  /// class for the window, and returns whether the batch's nulls must be
+  /// recorded through setNull()/setNullRun(): only once the column's class
+  /// is kSomeNulls. `windowRows` gives each partition's rows before this
+  /// batch: a column turning kSomeNulls after all-null rows records those
+  /// as a null run per partition, once.
+  bool observeBatch(uint32_t col, NullClass batch, const uint32_t* windowRows);
 
   /// Marks rowInWindow (0-based since the partition's payload opened) of
   /// column col in partition pid as null. Only for a column that
@@ -516,14 +529,6 @@ class NullCells {
   }
 
  private:
-  /// What a column has held over the window so far.
-  enum class ColumnState : uint8_t {
-    kEmpty, // no batch yet
-    kNoNull, // every row non-null: nothing stored
-    kAllNull, // every row null: nothing stored
-    kMixed, // both: the cells record the nulls
-  };
-
   /// A stretch of a partition's rows: a link, then a null record whose
   /// bitmap's bits past `fill` are 1, not 0 as on the wire.
   struct Cell {
@@ -567,7 +572,7 @@ class NullCells {
 
   FOLLY_ALWAYS_INLINE Column& columnFor(uint32_t col) {
     BOLT_DCHECK(
-        states_[col] == ColumnState::kMixed, "nulls of an unmixed column");
+        states_[col] == NullClass::kSomeNulls, "nulls of an unmixed column");
     Column& column = columns_[col];
     if (FOLLY_UNLIKELY(column.cells == nullptr)) {
       openColumn(column);
@@ -594,7 +599,9 @@ class NullCells {
   const uint32_t numPartitions_;
   const uint32_t numColumns_;
 
-  std::vector<ColumnState> states_;
+  /// Per column, its class over the window so far; nullopt before its
+  /// first batch. Only a kSomeNulls column stores anything.
+  std::vector<std::optional<NullClass>> states_;
   std::vector<Column> columns_;
   /// The moved cells of every column and partition.
   ChunkAllocator chainCells_;
