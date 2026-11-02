@@ -1937,13 +1937,13 @@ class BufferStreamIterator final : public ReaderStreamIterator {
     if (next_ == lengths_->size()) {
       return nullptr;
     }
-    int64_t offset = 0;
-    for (size_t i = 0; i < next_; ++i) {
-      offset += (*lengths_)[i];
-    }
-    return std::make_shared<arrow::io::BufferReader>(
-        reinterpret_cast<const uint8_t*>(file_->data()) + offset,
-        (*lengths_)[next_++]);
+    // Partitions lie back to back: the skipped ones are empty, so offset_
+    // is where partition next_ starts.
+    const int64_t length = (*lengths_)[next_++];
+    auto stream = std::make_shared<arrow::io::BufferReader>(
+        reinterpret_cast<const uint8_t*>(file_->data()) + offset_, length);
+    offset_ += length;
+    return stream;
   }
 
   void close() override {}
@@ -1961,6 +1961,7 @@ class BufferStreamIterator final : public ReaderStreamIterator {
   const std::string* const file_;
   const std::vector<int64_t>* const lengths_;
   size_t next_{0};
+  int64_t offset_{0};
 };
 
 /// Delegating codec that meters decompression, the seam the cell reader
