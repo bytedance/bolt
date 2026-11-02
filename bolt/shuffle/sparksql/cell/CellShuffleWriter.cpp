@@ -90,7 +90,7 @@ CellShuffleWriter::CellShuffleWriter(
 
 CellShuffleWriter::~CellShuffleWriter() {
   // Failed split/stop paths must return the chunk reservations as well.
-  flattener_.reset();
+  shredder_.reset();
   splitter_.reset();
   output_.reset();
   allocator_.reset();
@@ -112,7 +112,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       logicalType->toString());
   if (options_.cellOptions.nativeNestedTypes &&
       CellNestedLayout::supports(logicalType)) {
-    // ARRAY, MAP and ROW columns flatten into plain columns, a container's
+    // ARRAY, MAP and ROW columns shred into plain columns, a container's
     // elements at positions of their own.
     nested_ = std::make_unique<CellNestedLayout>(std::move(logicalType));
     layout_ = nested_->layout();
@@ -168,12 +168,12 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   splitter_ = std::make_unique<CellSplitter>(
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
   if (nested_ != nullptr) {
-    flattener_ = std::make_unique<CellFlattener>(
+    shredder_ = std::make_unique<CellNestedShredder>(
         *nested_, *splitter_, numPartitions_, *boltPool_);
   }
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (layout_.isStringColumn(col) &&
-        (flattener_ == nullptr || flattener_->inRowSpace(col))) {
+        (shredder_ == nullptr || shredder_->inRowSpace(col))) {
       probeColumns_.push_back(col);
     }
   }
@@ -203,7 +203,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
-  if (flattener_ == nullptr && adapter_->hasComplexColumns()) {
+  if (shredder_ == nullptr && adapter_->hasComplexColumns()) {
     const uint64_t start = currentTimeNs();
     rv = adapter_->encode(rv, boltPool_);
     metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
@@ -258,7 +258,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
 }
 
 arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
-  if (flattener_ != nullptr) {
+  if (shredder_ != nullptr) {
     return splitNested(std::move(rv));
   }
   const uint64_t start = currentTimeNs();
@@ -377,13 +377,13 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   // Every space's positions too: a few bytes may hold any number of them,
   // so only their count bounds a payload. Checked before the split begins,
   // as the rows' are; prepare() fails a batch no payload carries.
-  flattener_->prepare(*rv);
-  if (!flattener_->fitsWindow()) {
+  shredder_->prepare(*rv);
+  if (!shredder_->fitsWindow()) {
     LOG(INFO) << "CellShuffleWriter seals the window for its nested "
               << "positions: maxWindowRows=" << splitter_->maxWindowRows()
               << ", batchRows=" << numRows;
     checkpoint(SealReason::kRows);
-    BOLT_CHECK(flattener_->fitsWindow());
+    BOLT_CHECK(shredder_->fitsWindow());
   }
 
   inSplit_ = true;
@@ -394,19 +394,21 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   }
   if (FOLLY_UNLIKELY(!dictProbed_)) {
     probeDictionary(
-        numRows, probeColumns_, flattener_->decoded(), flattener_->nullClass());
+        numRows, probeColumns_, shredder_->decoded(), shredder_->nullClass());
     dictProbed_ = true;
   }
-  flattener_->split(row2Partition_.data(), partition2RowCount_.data());
+  shredder_->split(row2Partition_.data(), partition2RowCount_.data());
   metrics_.totalInputRowNumber += numRows;
   metrics_.totalInputBatches += 1;
   inSplit_ = false;
 
   maybeCheckpoint();
-  // Flattening is no part of the split, as in the V1 writer.
-  const int64_t flatten = flattener_->takeFlattenTimeNs();
-  metrics_.flattenTime += flatten;
-  metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start) - flatten;
+  // Shredding is no part of the split, as flattening is not in the V1
+  // writer: flattenTime, shared with the other writers, holds the shred
+  // time.
+  const int64_t shred = shredder_->takeShredTimeNs();
+  metrics_.flattenTime += shred;
+  metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start) - shred;
   return arrow::Status::OK();
 }
 
@@ -568,10 +570,10 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // shrink() never frees a chunk with a live cell, so this is safe while
   // the output reads cells - and a window seal, which recycles every cell
   // before writing its null bodies, is exactly when most chunks are idle.
-  // The flattener's scratch goes too, unless a batch is being flattened.
+  // The shredder's scratch goes too, unless a batch is being shredded.
   *actual = allocator_->shrink();
-  if (flattener_ != nullptr) {
-    *actual += flattener_->releaseScratch();
+  if (shredder_ != nullptr) {
+    *actual += shredder_->releaseScratch();
   }
   pressure_.freedIdle += *actual;
   boltPool_->release();
@@ -696,9 +698,9 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
   }
 
   // The splitter has released its window; return idle chunks, the
-  // flattener's scratch and reservation.
-  if (flattener_ != nullptr) {
-    flattener_->releaseScratch();
+  // shredder's scratch and reservation.
+  if (shredder_ != nullptr) {
+    shredder_->releaseScratch();
   }
   if (allocator_ != nullptr) {
     allocator_->shrink();

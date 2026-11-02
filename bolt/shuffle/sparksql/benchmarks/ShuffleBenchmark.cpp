@@ -1699,7 +1699,7 @@ RowTypePtr dataType(const Case& c) {
 
 /// CellNoDict is Cell without string dictionaries; CellUnsealedNulls is
 /// Cell that never seals a window for its null memory; CellAdapter is Cell
-/// with nested columns packed by the type adapter instead of flattened.
+/// with nested columns packed by the type adapter instead of shredded.
 enum class Writer {
   kCell,
   kCellNoDict,

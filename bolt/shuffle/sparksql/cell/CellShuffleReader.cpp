@@ -23,7 +23,7 @@
 #include <limits>
 
 #include "bolt/common/base/Exceptions.h"
-#include "bolt/shuffle/sparksql/cell/CellAssembler.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedAssembler.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
@@ -110,7 +110,7 @@ CellShuffleReader::CellShuffleReader(
       decoder_(layout_, decompressor_.get(), pool_),
       nested_(
           nativeNestedTypes
-              ? makeCellAssembler(outputType, decompressor_.get(), pool_)
+              ? makeCellNestedAssembler(outputType, decompressor_.get(), pool_)
               : nullptr),
       compositeConverter_(outputType, pool_) {}
 
