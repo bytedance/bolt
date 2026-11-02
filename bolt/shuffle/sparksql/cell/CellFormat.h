@@ -98,6 +98,12 @@
 
 #include "bolt/type/Type.h"
 
+/// Starts a hot Cell kernel on a cache line. Its loops then keep their
+/// offsets within a line whatever code links before it, so that a size
+/// change in an unrelated function cannot move a tight loop across a line
+/// and shift throughput by several percent.
+#define BOLT_CELL_KERNEL __attribute__((aligned(64)))
+
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// Bytes of values one full Encoding Block covers, before encoding: 8

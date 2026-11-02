@@ -69,7 +69,7 @@ inline uint32_t narrowBytesFor(int64_t value, uint32_t maxBytes) {
 /// staging split is deliberate: masking / delta subtraction is data-parallel
 /// and auto-vectorizes, while this bit-stitch is a serial dependency chain
 /// the compiler can only unroll.
-inline uint8_t*
+BOLT_CELL_KERNEL inline uint8_t*
 packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
   uint64_t acc = 0;
   uint32_t accBits = 0;
@@ -97,7 +97,7 @@ inline void storeLeEnc(uint8_t* out, uint64_t value, uint32_t bytes) {
 }
 
 template <typename T, typename Count>
-inline uint32_t
+BOLT_CELL_KERNEL inline uint32_t
 encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
   constexpr uint32_t kWidth = sizeof(T);
   constexpr uint32_t kMaxPackBits = kWidth * 8 < 63 ? kWidth * 8 : 63;
@@ -569,7 +569,7 @@ class StreamCursor {
 
   /// Writes the next `n` values to dst. False when the stream holds fewer
   /// values or a block is malformed.
-  bool next(uint64_t n, T* dst) {
+  BOLT_CELL_KERNEL bool next(uint64_t n, T* dst) {
     const uint32_t staged = std::min<uint64_t>(n, stagedCount_ - stagedPos_);
     ::memcpy(dst, staged_ + stagedPos_, staged * sizeof(T));
     stagedPos_ += staged;

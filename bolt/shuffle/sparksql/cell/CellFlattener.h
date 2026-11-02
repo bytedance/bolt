@@ -195,11 +195,11 @@ class CellFlattener {
   bool countRange(uint32_t x, vector_size_t begin, vector_size_t end);
 
   /// Splits the elements of x's non-null entries among `parent`'s.
-  void emit(uint32_t x, const Entries& parent);
+  BOLT_CELL_KERNEL void emit(uint32_t x, const Entries& parent);
 
   /// Splits a full or last chunk of space t, commits it, then its
   /// containers' elements.
-  void flush(uint32_t t, Chunk& chunk, uint32_t depth);
+  BOLT_CELL_KERNEL void flush(uint32_t t, Chunk& chunk, uint32_t depth);
 
   /// Builds and decodes the view of the rows in column col, a container's
   /// lengths.
