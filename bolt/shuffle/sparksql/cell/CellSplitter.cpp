@@ -832,10 +832,12 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     uint32_t pid,
     DictState& st,
     const StringView& view,
-    uint64_t key,
     uint8_t* lengthCur,
     uint8_t* dataCur) {
-  const uint32_t size = static_cast<uint32_t>(key);
+  // The probe's needle reads the characters from StringView byte 4 on,
+  // where the 4-byte prefix and the inline bytes that follow it lie.
+  static_assert(StringView::kPrefixSize == 4, "prefix layout assumed");
+  const uint32_t size = view.size();
   // An entry costs 1 + size serialized bytes and one dictionary is capped
   // at 63, which readers enforce: a value that can never fit alone can never be
   // an entry, and the format only allows a fallback tail after that.
@@ -1015,17 +1017,11 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       }
     }
     const StringView& view = kIndexed ? views[decoded.index(row)] : views[row];
-    // The first 8 StringView bytes are (size u32)(zero-padded 4-byte
-    // prefix) for inline and heap values alike: one load feeds the size,
-    // the byte accounting and the whole dictionary probe, and view.data()
-    // with its inline-or-pointer branch stays off the hit path.
-    static_assert(StringView::kPrefixSize == 4, "prefix layout assumed");
-    const auto key = folly::loadUnaligned<uint64_t>(&view);
-    variableBytes_[pid] += static_cast<uint32_t>(key);
+    variableBytes_[pid] += view.size();
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
         appendDictValue(
-            lengthStream, dataStream, pid, st, view, key, lengthCur, dataCur)) {
+            lengthStream, dataStream, pid, st, view, lengthCur, dataCur)) {
       continue;
     }
 
