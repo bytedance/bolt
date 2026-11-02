@@ -220,7 +220,8 @@ void LocalCellOutput::writeSpilledSegment(
     DataFileWriter& out,
     const SpillSegment& segment) {
   const uint32_t numStreams = layout_->numStreams();
-  const uint64_t runHeaderBytes = cell::runHeaderBytes(numStreams);
+  const uint64_t combinedRunHeaderBytes =
+      cell::combinedRunHeaderBytes(numStreams);
   const uint64_t segmentBytes = segment.end - segment.begin;
   // The spill segment is a run in wire form.
   BOLT_CHECK_GE(segmentBytes, 1, "corrupt cell spill segment");
@@ -228,7 +229,7 @@ void LocalCellOutput::writeSpilledSegment(
   spill_.read(segment.begin, &layoutByte, 1);
   if (layoutByte == static_cast<uint8_t>(RunLayout::kSeparate)) {
     // Compressed stream by stream at spill time: the final run.
-    // A SEPARATE run header: layout byte, stored and decoded size per
+    // A kSeparate run header: layout byte, stored and decoded size per
     // stream.
     const uint64_t headerBytes = 1 + 16ull * numStreams;
     BOLT_CHECK_GE(segmentBytes, headerBytes, "corrupt cell spill segment");
@@ -239,7 +240,7 @@ void LocalCellOutput::writeSpilledSegment(
       const uint64_t decoded = sizes[numStreams + s];
       decodedSum += decoded != 0 ? decoded : sizes[s];
     }
-    rawBytesWritten_ += runHeaderBytes + decodedSum;
+    rawBytesWritten_ += combinedRunHeaderBytes + decodedSum;
     ++copiedSegments_;
     out.copyFrom(spill_, segment.begin, segmentBytes);
     return;
@@ -248,7 +249,8 @@ void LocalCellOutput::writeSpilledSegment(
       layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
           layoutByte == static_cast<uint8_t>(RunLayout::kCombinedUncompressed),
       "corrupt cell spill segment");
-  BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
+  BOLT_CHECK_GE(
+      segmentBytes, combinedRunHeaderBytes, "corrupt cell spill segment");
   std::vector<uint64_t> decodedSizes(numStreams);
   // Past the layout byte and the u64 stored size.
   spill_.read(segment.begin + 9, decodedSizes.data(), 8ull * numStreams);
@@ -256,7 +258,7 @@ void LocalCellOutput::writeSpilledSegment(
   for (const auto size : decodedSizes) {
     decodedSum += size;
   }
-  rawBytesWritten_ += runHeaderBytes + decodedSum;
+  rawBytesWritten_ += combinedRunHeaderBytes + decodedSum;
   ++copiedSegments_;
   out.copyFrom(spill_, segment.begin, segmentBytes);
 }
@@ -282,7 +284,7 @@ void LocalCellOutput::writeResidentPayload(
     writeSpilledSegment(out, segment);
   }
   if (total > 0) {
-    rawBytesWritten_ += runHeaderBytes(layout_->numStreams()) + total;
+    rawBytesWritten_ += combinedRunHeaderBytes(layout_->numStreams()) + total;
     DataRunSink sink(out);
     writeCells(compressor_, sink, in, pid);
   }
@@ -456,7 +458,7 @@ void RssCellOutput::buildPayload(
   if (total > 0) {
     BufferRunSink sink(payload, pool_);
     writeCells(compressor_, sink, in, pid);
-    raw += runHeaderBytes(numStreams) + total;
+    raw += combinedRunHeaderBytes(numStreams) + total;
   }
   rawPartitionLengths_[pid] += static_cast<int64_t>(raw);
 }

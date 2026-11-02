@@ -105,7 +105,7 @@ decodeRun(const std::string& run, uint32_t numStreams, Codec* codec) {
     sizes[s] = readU64(run, 9 + 8ull * s);
     total += sizes[s];
   }
-  const size_t bodyAt = runHeaderBytes(numStreams);
+  const size_t bodyAt = combinedRunHeaderBytes(numStreams);
   EXPECT_EQ(bodyAt + stored, run.size());
   const bool compressed = decoded.layout == RunLayout::kCombined;
   const std::string body =
