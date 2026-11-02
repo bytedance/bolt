@@ -685,20 +685,18 @@ TEST_F(CellNestedTest, spillsAndSeals) {
     };
     const std::vector<Limit> limits = {
         {"partition seals",
-         [](CellShuffleOptions& cell, bool) {
-           cell.checkpointPartitionBytes = 1;
-         }},
+         [](CellShuffleOptions& cell, bool) { cell.partitionSealBytes = 1; }},
         {"seals of partition 0",
          [](CellShuffleOptions& cell, bool rss) {
-           cell.checkpointPartitionBytes = rss ? 128 << 10 : 1 << 20;
+           cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
          },
          true},
         // Every limit at once: locally growth spills and a null seal per
         // batch, on RSS a push at the cap per batch, each closing the
         // window before partition 0's payload passes its bound.
         {"all", [](CellShuffleOptions& cell, bool rss) {
-           cell.cellMemoryCapBytes = 4 << 20;
-           cell.checkpointPartitionBytes = rss ? 128 << 10 : 1 << 20;
+           cell.cellMemorySpillBytes = 4 << 20;
+           cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
            cell.nullMemLimitBytes = 4 << 10;
          }}};
     for (const auto& limit : limits) {
@@ -771,7 +769,7 @@ TEST_F(CellNestedTest, readsAtEveryByteBudget) {
   const auto type = asRowType(uniform.data[0]->type());
   // A payload per batch.
   auto sealEveryBatch = writerOptions(1);
-  sealEveryBatch.cellOptions.checkpointPartitionBytes = 1;
+  sealEveryBatch.cellOptions.partitionSealBytes = 1;
   const auto bytes =
       test::writeShuffle(sealEveryBatch, uniform, pool()).partitions[0];
   ASSERT_EQ(
@@ -1770,7 +1768,7 @@ TEST_F(CellNestedTest, writerReturnsScratchAfterEachBatch) {
   auto root = memory::memoryManager()->addRootPool("cellNestedScratch");
   auto writerPool = root->addLeafChild("writer");
   auto options = writerOptions(kPartitions, true);
-  options.cellOptions.cellMemoryCapBytes = 1;
+  options.cellOptions.cellMemorySpillBytes = 1;
   CellShuffleWriter writer(
       options, writerPool.get(), arrow::default_memory_pool());
   const auto reclaim = [&] {

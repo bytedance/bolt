@@ -146,7 +146,7 @@ class CellWriterTest : public testing::Test, public bolt::test::VectorTestBase {
   }
 
   /// `data` as consecutive batches of at most `rows` rows, partitioned as
-  /// `pids`. With checkpointPartitionBytes = 1, every batch boundary then
+  /// `pids`. With partitionSealBytes = 1, every batch boundary then
   /// closes a window: one payload per batch and partition.
   ShuffleInput sliceBatches(
       const RowVectorPtr& data,
@@ -387,7 +387,7 @@ TEST_F(CellWriterTest, valuesAtTheirLimits) {
         kPartitions,
         outputs,
         [](CellShuffleOptions& cell, bool) {
-          cell.checkpointPartitionBytes = 64 << 10;
+          cell.partitionSealBytes = 64 << 10;
         },
         [](const test::WrittenShuffle& written, bool) {
           EXPECT_GT(written.metrics.spillCount, 0);
@@ -495,7 +495,7 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
   const auto write =
       [&](bool rss, arrow::Compression::type compression, bool streaming) {
         auto options = writerOptions(kPartitions, rss, compression);
-        options.cellOptions.cellMemoryCapBytes = 8 << 20;
+        options.cellOptions.cellMemorySpillBytes = 8 << 20;
         options.cellOptions.streamCompression = streaming;
         auto written = test::writeShuffle(options, input, pool());
         test::expectReadsBack(input, written, compression, pool());
@@ -546,7 +546,7 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
         fmt::format("squeezedCodec{}", streaming), 24 << 20);
     auto leaf = root->addLeafChild("writer");
     auto options = writerOptions(kPartitions);
-    options.cellOptions.checkpointPartitionBytes = 4 << 20;
+    options.cellOptions.partitionSealBytes = 4 << 20;
     options.cellOptions.streamCompression = streaming;
     CellShuffleWriter writer(options, leaf.get(), arrow::default_memory_pool());
     const auto written = test::writeShuffle(
@@ -589,8 +589,8 @@ TEST_F(CellWriterTest, spillsCompressAcrossMergeShapes) {
                                     : arrow::Compression::UNCOMPRESSED;
       auto options = writerOptions(kPartitions);
       options.partitionWriterOptions.compressionType = codec;
-      options.cellOptions.cellMemoryCapBytes = 8 << 20;
-      options.cellOptions.checkpointPartitionBytes = seal ? 4 << 20 : 1LL << 30;
+      options.cellOptions.cellMemorySpillBytes = 8 << 20;
+      options.cellOptions.partitionSealBytes = seal ? 4 << 20 : 1LL << 30;
       const auto written = test::writeShuffle(options, input, pool());
       test::expectReadsBack(input, written, codec, pool());
       EXPECT_GT(written.metrics.totalBytesEvicted, 0);
@@ -684,9 +684,7 @@ TEST_F(CellWriterTest, dictionaryVocabularies) {
       kPartitions,
       {{false, arrow::Compression::LZ4_FRAME},
        {true, arrow::Compression::LZ4_FRAME}},
-      [](CellShuffleOptions& cell, bool) {
-        cell.checkpointPartitionBytes = 2 << 10;
-      },
+      [](CellShuffleOptions& cell, bool) { cell.partitionSealBytes = 2 << 10; },
       [](const test::WrittenShuffle& written, bool) {
         EXPECT_GT(written.metrics.dictionaryMatchedRows, 0);
         EXPECT_GT(written.metrics.dictionaryFallbackRows, 0);
@@ -758,7 +756,7 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
     auto options = writerOptions(kPartitions);
     auto input = test::roundRobin({data}, kPartitions);
     if (windowRows != 0) {
-      options.cellOptions.checkpointPartitionBytes = 1;
+      options.cellOptions.partitionSealBytes = 1;
       input = sliceBatches(data, pids, windowRows);
     }
     const auto written = test::writeShuffle(options, input, pool());
@@ -812,7 +810,7 @@ TEST_F(CellWriterTest, readerStreamsPayloadsInBatches) {
        makeFlatVector<StringView>(
            kStringRows, [&](auto) { return StringView(text); })});
   auto options = writerOptions(kPartitions);
-  options.cellOptions.checkpointPartitionBytes = 1;
+  options.cellOptions.partitionSealBytes = 1;
   const auto input =
       sliceBatches(strings, roundRobinPids(kStringRows, kPartitions), 7);
   const auto written = test::writeShuffle(options, input, pool());

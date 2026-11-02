@@ -398,13 +398,14 @@ class NullCells {
   NullCells(const NullCells&) = delete;
   NullCells& operator=(const NullCells&) = delete;
 
-  /// Joins `batch`, one batch's class in column col, into the column's
+  /// Joins `batchClass`, one batch's class in column col, into the column's
   /// class for the window, and returns whether the batch's nulls must be
   /// recorded through setNull()/setNullRun(): only once the column's class
   /// is kSomeNulls. `windowRows` gives each partition's rows before this
   /// batch: a column turning kSomeNulls after all-null rows records those
   /// as a null run per partition, once.
-  bool observeBatch(uint32_t col, NullClass batch, const uint32_t* windowRows);
+  bool
+  observeBatch(uint32_t col, NullClass batchClass, const uint32_t* windowRows);
 
   /// Marks rowInWindow (0-based since the partition's payload opened) of
   /// column col in partition pid as null. Only for a column that
@@ -485,14 +486,14 @@ class NullCells {
   /// Bytes of the partitions' moved cells; input to the kNulls seal. Not
   /// in it, as they stay bounded whatever the window's size: the columns'
   /// cell arrays, 44 bytes per partition of a column with nulls recorded.
-  int64_t allocatedBytes() const {
-    return chainCells_.usedBytes();
+  int64_t movedCellBytes() const {
+    return movedCells_.usedBytes();
   }
 
   /// Every byte held from the pool: the cell arrays and the allocator's
   /// chunks, free cells included.
   int64_t footprintBytes() const {
-    return tableBytes_ + chainCells_.allocatedBytes();
+    return cellArrayBytes_ + movedCells_.allocatedBytes();
   }
 
  private:
@@ -552,8 +553,8 @@ class NullCells {
     return column;
   }
 
-  const Cell& chainCell(uint32_t id) const {
-    return *reinterpret_cast<const Cell*>(chainCells_.cellData(id));
+  const Cell& movedCell(uint32_t id) const {
+    return *reinterpret_cast<const Cell*>(movedCells_.cellData(id));
   }
 
   /// A cell holding no row, whose head is `head`.
@@ -579,8 +580,8 @@ class NullCells {
   std::vector<std::optional<NullClass>> states_;
   std::vector<Column> columns_;
   /// The moved cells of every column and partition.
-  ChunkAllocator chainCells_;
-  int64_t tableBytes_{0};
+  ChunkAllocator movedCells_;
+  int64_t cellArrayBytes_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
