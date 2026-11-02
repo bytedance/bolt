@@ -165,7 +165,7 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       std::clamp<int64_t>(perStream, kMinDataCellBytes, kMaxDataCellBytes));
 
   allocator_ = std::make_unique<ChunkAllocator>(
-      boltPool_, kChunkBytes, cellBytes, [this]() { onBeforeChunkGrow(); });
+      boltPool_, kChunkBytes, cellBytes, [this]() { reserveChunk(); });
   splitter_ = std::make_unique<CellSplitter>(
       layout_, numPartitions_, *allocator_, *output_, *boltPool_);
   if (nested_ != nullptr) {
@@ -474,7 +474,7 @@ void CellShuffleWriter::probeDictionary(
   }
 }
 
-void CellShuffleWriter::onBeforeChunkGrow() {
+void CellShuffleWriter::reserveChunk() {
   if (!initialized_ || splitter_->isWritingOutput()) {
     return;
   }
