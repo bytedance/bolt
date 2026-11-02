@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <folly/lang/Bits.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -59,9 +60,7 @@ struct DecodedRun {
 };
 
 uint64_t readU64(const std::string& bytes, size_t at) {
-  uint64_t value;
-  ::memcpy(&value, bytes.data() + at, sizeof(value));
-  return value;
+  return folly::loadUnaligned<uint64_t>(bytes.data() + at);
 }
 
 DecodedRun

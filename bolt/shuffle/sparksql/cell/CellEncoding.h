@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -77,7 +78,7 @@ packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
     acc |= v << accBits;
     accBits += bits;
     if (accBits >= 64) {
-      ::memcpy(out, &acc, 8);
+      folly::storeUnaligned<uint64_t>(out, acc);
       out += 8;
       accBits -= 64;
       acc = accBits == 0 ? 0 : v >> (bits - accBits);

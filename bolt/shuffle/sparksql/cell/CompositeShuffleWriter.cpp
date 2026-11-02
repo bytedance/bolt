@@ -17,6 +17,7 @@
 #include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
 
 #include <folly/ScopeGuard.h>
+#include <folly/lang/Bits.h>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -82,9 +83,9 @@ void buildBlock(
   char* header = block->asMutable<char>();
   header[0] = static_cast<char>(CellBlockKind::kCompositeRows);
   const auto rowCount = static_cast<uint32_t>(numRows);
-  ::memcpy(header + 1, &rowCount, 4);
-  ::memcpy(header + 5, &rawBytes, 8);
-  ::memcpy(header + 13, &stored, 8);
+  folly::storeUnaligned<uint32_t>(header + 1, rowCount);
+  folly::storeUnaligned<uint64_t>(header + 5, rawBytes);
+  folly::storeUnaligned<uint64_t>(header + 13, stored);
   header[21] = static_cast<char>(layout);
   block->setSize(kCompositeBlockHeaderBytes + stored);
 }

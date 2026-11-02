@@ -17,6 +17,7 @@
 #include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 
 #include <arrow/io/interfaces.h>
+#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -158,12 +159,9 @@ bool CellShuffleReader::decodeComposite(std::string& error) {
   if (!source_->read(header, sizeof(header))) {
     return fail("truncated composite block header");
   }
-  uint32_t rowCount;
-  uint64_t rawBytes;
-  uint64_t stored;
-  ::memcpy(&rowCount, header, 4);
-  ::memcpy(&rawBytes, header + 4, 8);
-  ::memcpy(&stored, header + 12, 8);
+  const auto rowCount = folly::loadUnaligned<uint32_t>(header);
+  const auto rawBytes = folly::loadUnaligned<uint64_t>(header + 4);
+  const auto stored = folly::loadUnaligned<uint64_t>(header + 12);
   const auto layout = static_cast<RunLayout>(header[20]);
   const CellDecodeLimits limits;
   if (rowCount == 0 || rowCount > limits.maxRowCount) {
