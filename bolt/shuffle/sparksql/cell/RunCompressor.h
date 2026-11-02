@@ -79,20 +79,20 @@ using RunStreamSize = folly::FunctionRef<uint64_t(uint32_t stream)>;
 /// spilled, merged, or sent in an RSS payload. A payload's null body goes
 /// through it too, compressed whole as one frame.
 ///
-/// A run below kMinSeparateRunBytes is one COMBINED frame over all its
-/// streams; a larger one is SEPARATE, every stream its own frame, so each
+/// A run below kMinSeparateRunBytes is one kCombined frame over all its
+/// streams; a larger one is kSeparate, every stream its own frame, so each
 /// stream's data alone sets its ratio. A frame below kMinCompressBytes
 /// is stored, and so is a frame that does not shrink: it is then cheaper to
 /// read as it is. That is decided only while the whole frame so far is
 /// still in memory - after its first blocks of input, or at its end when
 /// it is no larger - so nothing written is ever taken back: once a frame
-/// reaches the sink it is kept compressed. A SEPARATE frame is one stream,
-/// whose first blocks speak for the rest; a COMBINED frame, spanning
+/// reaches the sink it is kept compressed. A kSeparate frame is one stream,
+/// whose first blocks speak for the rest; a kCombined frame, spanning
 /// streams, is judged on its whole size only.
 ///
 /// Adaptive, a frame that does not shrink has the next frames of the same
 /// kind stored without a codec call, the tenth tried again: frames of a
-/// stream for SEPARATE runs, and all COMBINED frames together, which span
+/// stream for kSeparate runs, and all kCombined frames together, which span
 /// the same streams. Stream s of every run must therefore be the same
 /// stream.
 ///
@@ -182,7 +182,7 @@ class RunCompressor {
     std::string toString() const;
   };
 
-  /// The same, for one stream's SEPARATE frames.
+  /// The same, for one stream's kSeparate frames.
   struct StreamStats {
     uint64_t tried{0};
     uint64_t compressed{0};
@@ -195,7 +195,7 @@ class RunCompressor {
     return stats_;
   }
 
-  /// Per stream index, when SEPARATE runs were written.
+  /// Per stream index, when kSeparate runs were written.
   const std::vector<StreamStats>& streamStats() const {
     return streamStats_;
   }
@@ -232,7 +232,7 @@ class RunCompressor {
   /// of its kind stored without a try.
   void recordOutcome(uint32_t& skip, bool shrank) const;
 
-  /// Writes the run uncompressed: COMBINED_UNCOMPRESSED.
+  /// Writes the run uncompressed: kCombinedUncompressed.
   void storeRun(
       RunSink& sink,
       uint32_t numStreams,
@@ -246,10 +246,10 @@ class RunCompressor {
   memory::MemoryPool* const spillPool_;
   uint64_t* const compressTimeNs_;
   const bool adaptive_;
-  /// Per stream, its SEPARATE frames still to store without a try; reset
+  /// Per stream, its kSeparate frames still to store without a try; reset
   /// when a run comes with another number of streams.
   std::vector<uint32_t> streamSkips_;
-  /// The same for COMBINED frames, and for null bodies.
+  /// The same for kCombined frames, and for null bodies.
   uint32_t combinedSkip_{0};
   uint32_t nullSkip_{0};
   Stats stats_;

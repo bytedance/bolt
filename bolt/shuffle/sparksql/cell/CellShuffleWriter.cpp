@@ -197,7 +197,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   }
   if (shredder_ == nullptr && adapter_->hasComplexColumns()) {
     const uint64_t start = currentTimeNs();
-    rv = adapter_->encode(rv, boltPool_);
+    rv = adapter_->pack(rv, boltPool_);
     metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
   }
   // Oversized inputs are sliced so a seal boundary exists inside

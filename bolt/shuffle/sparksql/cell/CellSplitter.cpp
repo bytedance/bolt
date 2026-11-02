@@ -142,7 +142,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
-  const uint32_t stream = layout_.columnStream(col);
+  const uint32_t stream = layout_.firstStream(col);
   uint8_t* __restrict cur = cursors(stream);
   char* __restrict base = cacheBase_ +
       ((static_cast<size_t>(stream) * numPartitions_) << kLineShift);
@@ -186,7 +186,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const T* __restrict vals = decoded.data<T>();
-  const uint32_t stream = layout_.columnStream(col);
+  const uint32_t stream = layout_.firstStream(col);
   uint8_t* __restrict cur = cursors(stream);
   char* __restrict base = cacheBase_ +
       ((static_cast<size_t>(stream) * numPartitions_) << kLineShift);
@@ -230,7 +230,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const StringView* __restrict views = decoded.data<StringView>();
-  const uint32_t lengthStream = layout_.columnStream(col);
+  const uint32_t lengthStream = layout_.firstStream(col);
   const uint32_t dataStream = lengthStream + 1;
   uint8_t* __restrict lengthCur = cursors(lengthStream);
   uint8_t* __restrict dataCur = cursors(dataStream);
@@ -331,7 +331,7 @@ template <bool kHasNulls>
 void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
-  const uint32_t stream = layout_.columnStream(col);
+  const uint32_t stream = layout_.firstStream(col);
   uint8_t* __restrict cur = cursors(stream);
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint32_t* __restrict positions = positionBase(batch);
@@ -359,7 +359,7 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col];
   const Timestamp* __restrict vals = decoded.data<Timestamp>();
-  const uint32_t secondsStream = layout_.columnStream(col);
+  const uint32_t secondsStream = layout_.firstStream(col);
   const uint32_t nanosStream = secondsStream + 1;
   uint8_t* __restrict secondsCur = cursors(secondsStream);
   uint8_t* __restrict nanosCur = cursors(nanosStream);
@@ -716,7 +716,7 @@ void CellSplitter::flushCaches(const uint8_t* only) {
     if (dictEnabled_[col] == 0) {
       continue;
     }
-    const uint32_t lengthStream = layout_.columnStream(col);
+    const uint32_t lengthStream = layout_.firstStream(col);
     const uint32_t dataStream = lengthStream + 1;
     uint8_t* lengthCur = cursors(lengthStream);
     uint8_t* dataCur = cursors(dataStream);
@@ -1037,7 +1037,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   const auto nullColumn = layout_.wireColumn(col);
   auto& decoded = batch.decoded[col]; // nulls() may materialize lazily
   const StringView* __restrict views = decoded.data<StringView>();
-  const uint32_t lengthStream = layout_.columnStream(col);
+  const uint32_t lengthStream = layout_.firstStream(col);
   const uint32_t dataStream = lengthStream + 1;
   uint8_t* __restrict lengthCur = cursors(lengthStream);
   uint8_t* __restrict dataCur = cursors(dataStream);
