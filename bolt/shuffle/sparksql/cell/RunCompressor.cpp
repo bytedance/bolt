@@ -121,16 +121,22 @@ RunCompressor::~RunCompressor() = default;
 void RunCompressor::write(
     RunSink& sink,
     uint32_t numStreams,
-    const uint64_t* sizes,
+    RunStreamSize size,
     RunStreamVisitor visit) {
+  sizes_.resize(numStreams);
   uint64_t total = 0;
   for (uint32_t s = 0; s < numStreams; ++s) {
-    total += sizes[s];
+    sizes_[s] = size(s);
+    total += sizes_[s];
   }
+  if (total == 0) {
+    return;
+  }
+  const uint64_t* sizes = sizes_.data();
   if (codec_ == nullptr || total < kMinCompressBytes) {
     storeRun(sink, numStreams, sizes, visit);
     ++stats_.storedRuns;
-    if (codec_ != nullptr && total > 0) {
+    if (codec_ != nullptr) {
       ++stats_.tinyFrames;
       stats_.tinyBytes += total;
     }
