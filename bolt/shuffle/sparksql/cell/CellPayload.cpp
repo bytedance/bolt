@@ -320,10 +320,6 @@ bool CellPayloadDecoder::parseNullRegion(
     if (decompressor_ == nullptr) {
       return fail(error, "compressed null body without a codec");
     }
-    if (limits_.maxDecodedBytes != 0 &&
-        nullDecodedSize > limits_.maxDecodedBytes) {
-      return fail(error, "null decoded size beyond sanity bound");
-    }
     auto* stored = resetBuffer(scratch_, nullStoredSize, pool_);
     if (!in.read(stored, nullStoredSize)) {
       return fail(error, "truncated null body");
@@ -395,9 +391,6 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
   const uint64_t expandedBytes =
       static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
-  if (limits_.maxDecodedBytes != 0 && expandedBytes > limits_.maxDecodedBytes) {
-    return fail(error, "null bitmaps beyond sanity bound");
-  }
   // Room for the last bitmap's whole last word.
   auto* bitmap = reinterpret_cast<uint8_t*>(
       resetBuffer(expandedNulls_, expandedBytes + sizeof(uint64_t), pool_));
@@ -473,11 +466,6 @@ bool CellPayloadDecoder::parseRun(
     if (addOverflows(decodedSum, size, decodedSum)) {
       return fail(error, "run decoded sizes overflow");
     }
-  }
-  if (limits_.maxDecodedBytes != 0 &&
-      (decodedSum > limits_.maxDecodedBytes ||
-       storedSum > limits_.maxDecodedBytes)) {
-    return fail(error, "run size beyond sanity bound");
   }
 
   switch (runLayout) {
@@ -1012,8 +1000,8 @@ bool CellPayloadDecoder::appendRows(
     return false;
   };
   const uint64_t rows = static_cast<uint64_t>(batchRows_) + numRows;
-  if (rows > static_cast<uint64_t>(batchCapacity_) && !growBatch(rows, error)) {
-    return failed();
+  if (rows > static_cast<uint64_t>(batchCapacity_)) {
+    growBatch(rows);
   }
   for (uint32_t col = 0; col < layout_.numColumns() && numRows > 0; ++col) {
     const auto kind = layout_.rowType()->childAt(col)->kind();
@@ -1072,20 +1060,13 @@ bool CellPayloadDecoder::appendRows(
   return true;
 }
 
-bool CellPayloadDecoder::growBatch(uint64_t rows, std::string& error) {
+void CellPayloadDecoder::growBatch(uint64_t rows) {
   constexpr uint64_t kMaxRows = std::numeric_limits<vector_size_t>::max();
   BOLT_CHECK_LE(rows, kMaxRows, "batch beyond one vector");
   // Doubling stops 7 rows short of one vector, where a null buffer's int32
   // bit count no longer rounds up to whole bytes.
-  uint64_t capacity =
+  const uint64_t capacity =
       std::max(rows, std::min<uint64_t>(kMaxRows - 7, 2ull * batchCapacity_));
-  if (limits_.maxDecodedBytes != 0 && rowBytes_ != 0) {
-    const uint64_t maxRows = limits_.maxDecodedBytes / rowBytes_;
-    if (rows > maxRows) {
-      return fail(error, "batch beyond sanity bound");
-    }
-    capacity = std::min(capacity, maxRows);
-  }
   // Values and nulls move, the new rows' null bits set as in a new batch;
   // string bytes stay in their buffers.
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
@@ -1103,7 +1084,6 @@ bool CellPayloadDecoder::growBatch(uint64_t rows, std::string& error) {
     }
   }
   batchCapacity_ = static_cast<vector_size_t>(capacity);
-  return true;
 }
 
 uint32_t CellPayloadDecoder::appendNulls(uint32_t col, uint32_t numRows) {
