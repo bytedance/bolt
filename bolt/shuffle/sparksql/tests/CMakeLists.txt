@@ -183,9 +183,8 @@ add_test(
 
 add_executable(
   bolt_shuffle_cell_test
-  CellChunkTest.cpp
-  CellEncodingTest.cpp
   CellFlatGoldenTest.cpp
+  CellMalformedInputTest.cpp
   CellNestedTest.cpp
   CellWriterTest.cpp
   RunCompressorTest.cpp
