@@ -257,17 +257,6 @@ class CellLayout {
     }
   }
 
-  static bool isSupportedRowType(const RowTypePtr& rowType) {
-    for (const auto& child : rowType->children()) {
-      if (!isSupportedType(child)) {
-        return false;
-      }
-    }
-    // C == 0 is a pid-only shuffle: a layout without wire columns, whose
-    // payloads are headers only.
-    return true;
-  }
-
   static CellLayout create(const RowTypePtr& rowType);
 
   uint32_t numColumns() const {

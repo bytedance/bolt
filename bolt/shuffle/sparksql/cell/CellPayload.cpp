@@ -1687,34 +1687,4 @@ void writeRunHeader(
   ::memcpy(out + 9, decodedSizes, 8ull * numStreams);
 }
 
-RunLayout maybeCompressRun(
-    Codec* codec,
-    const char* data,
-    uint64_t dataBytes,
-    BufferPtr& scratch,
-    memory::MemoryPool* pool,
-    const char*& body,
-    uint64_t& stored,
-    uint64_t& compressTimeNs) {
-  body = data;
-  stored = dataBytes;
-  if (codec != nullptr && dataBytes >= kMinCompressBytes) {
-    const uint64_t start = currentTimeNs();
-    resetBuffer(scratch, codec->maxCompressedLen(dataBytes), pool);
-    const int64_t written = codec->compress(
-        reinterpret_cast<const uint8_t*>(data),
-        static_cast<int64_t>(dataBytes),
-        scratch->asMutable<uint8_t>(),
-        static_cast<int64_t>(scratch->size()));
-    compressTimeNs += currentTimeNs() - start;
-    // Fall back to the stored form when compression does not pay.
-    if (written > 0 && static_cast<uint64_t>(written) < dataBytes) {
-      body = scratch->as<char>();
-      stored = static_cast<uint64_t>(written);
-      return RunLayout::kCombined;
-    }
-  }
-  return RunLayout::kCombinedUncompressed;
-}
-
 } // namespace bytedance::bolt::shuffle::sparksql::cell

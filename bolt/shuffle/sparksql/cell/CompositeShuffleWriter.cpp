@@ -65,19 +65,24 @@ void buildBlock(
     offset += bytes;
   }
 
-  const char* compressed = nullptr;
+  // Compressed when the codec shrinks the body, else stored as is.
   uint64_t stored = rawBytes;
-  const auto layout = maybeCompressRun(
-      codec,
-      body,
-      rawBytes,
-      scratch,
-      memory::spillMemoryPool(),
-      compressed,
-      stored,
-      compressTimeNs);
-  if (layout == RunLayout::kCombined) {
-    ::memcpy(body, compressed, stored);
+  auto layout = RunLayout::kCombinedUncompressed;
+  if (codec != nullptr && rawBytes >= kMinCompressBytes) {
+    const uint64_t start = currentTimeNs();
+    resetBuffer(
+        scratch, codec->maxCompressedLen(rawBytes), memory::spillMemoryPool());
+    const int64_t written = codec->compress(
+        reinterpret_cast<const uint8_t*>(body),
+        static_cast<int64_t>(rawBytes),
+        scratch->asMutable<uint8_t>(),
+        static_cast<int64_t>(scratch->size()));
+    compressTimeNs += currentTimeNs() - start;
+    if (written > 0 && static_cast<uint64_t>(written) < rawBytes) {
+      stored = static_cast<uint64_t>(written);
+      layout = RunLayout::kCombined;
+      ::memcpy(body, scratch->as<char>(), stored);
+    }
   }
 
   char* header = block->asMutable<char>();

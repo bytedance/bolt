@@ -22,10 +22,14 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 
 // static
 CellLayout CellLayout::create(const RowTypePtr& rowType) {
-  BOLT_CHECK(
-      isSupportedRowType(rowType),
-      "CellLayout: unsupported row type {}",
-      rowType->toString());
+  // No column at all is a pid-only shuffle: a layout without wire columns,
+  // whose payloads are headers only.
+  for (const auto& child : rowType->children()) {
+    BOLT_CHECK(
+        isSupportedType(child),
+        "CellLayout: unsupported row type {}",
+        rowType->toString());
+  }
   BOLT_CHECK_LE(rowType->size(), UINT16_MAX, "too many Cell columns");
   CellLayout layout;
   layout.rowType_ = rowType;

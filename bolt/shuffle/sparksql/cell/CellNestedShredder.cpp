@@ -388,8 +388,13 @@ void CellNestedShredder::inputRow(uint32_t n, const VectorPtr& vector) {
     presence = std::make_shared<ConstantVector<int16_t>>(
         &pool_, size, false, SMALLINT(), int16_t{1});
   } else {
+    // `size` values of 1, in a buffer that grows as a batch needs.
+    if (ones_ == nullptr ||
+        ones_->size() < static_cast<size_t>(size) * sizeof(int16_t)) {
+      ones_ = AlignedBuffer::allocate<int16_t>(size, &pool_, int16_t{1});
+    }
     presence = std::make_shared<FlatVector<int16_t>>(
-        &pool_, SMALLINT(), nulls, size, ones(size), std::vector<BufferPtr>{});
+        &pool_, SMALLINT(), nulls, size, ones_, std::vector<BufferPtr>{});
   }
   for (uint32_t i = 0; i < node.children.size(); ++i) {
     inputNode(node.children[i], fold(n, i, nulls));
@@ -425,7 +430,14 @@ CellNestedShredder::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
   // null: a dictionary reads nothing of it there and leaves its buffers as
   // they are.
   if (!isFlatEncoded(*loaded) || loaded->size() < size) {
-    return BaseVector::wrapInDictionary(nulls, identity(size), size, loaded);
+    // Indices 0 to `size` - 1, in a buffer that grows as a batch needs.
+    if (identity_ == nullptr ||
+        identity_->size() < static_cast<size_t>(size) * sizeof(vector_size_t)) {
+      identity_ = AlignedBuffer::allocate<vector_size_t>(size, &pool_);
+      auto* indices = identity_->asMutable<vector_size_t>();
+      std::iota(indices, indices + size, 0);
+    }
+    return BaseVector::wrapInDictionary(nulls, identity_, size, loaded);
   }
   // A flat field keeps its values under its nulls and the structs'.
   BufferPtr combined = nulls;
@@ -440,24 +452,6 @@ CellNestedShredder::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
     combined = fieldNulls;
   }
   return withNulls(*loaded, std::move(combined), size, &pool_);
-}
-
-const BufferPtr& CellNestedShredder::ones(vector_size_t size) {
-  if (ones_ == nullptr ||
-      ones_->size() < static_cast<size_t>(size) * sizeof(int16_t)) {
-    ones_ = AlignedBuffer::allocate<int16_t>(size, &pool_, int16_t{1});
-  }
-  return ones_;
-}
-
-const BufferPtr& CellNestedShredder::identity(vector_size_t size) {
-  if (identity_ == nullptr ||
-      identity_->size() < static_cast<size_t>(size) * sizeof(vector_size_t)) {
-    identity_ = AlignedBuffer::allocate<vector_size_t>(size, &pool_);
-    auto* indices = identity_->asMutable<vector_size_t>();
-    std::iota(indices, indices + size, 0);
-  }
-  return identity_;
 }
 
 void CellNestedShredder::clearNode(uint32_t n) {
