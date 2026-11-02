@@ -40,7 +40,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// handled entirely by the CompositeShuffleWriter base.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
-/// ignored by design): the only choke point is the chunk-grow callback,
+/// ignored by design): the only choke point is reserveChunk() at chunk growth,
 /// where a failed maybeReserve — or the optional self cap — triggers a
 /// physical Run spill; external reclaim drains and shrinks. Accounting is
 /// the allocator's exact chunk/cell counters.
@@ -135,7 +135,12 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       const std::vector<uint32_t>& columns,
       const DecodedVector* decoded,
       const BatchNullClass* nullClass);
-  void onBeforeChunkGrow();
+  /// The allocator's ReserveChunkFn: reserves a chunk's memory within
+  /// cellMemoryCapBytes. Locally, when it cannot, it spills the largest
+  /// partitions until half the cell data is covered, and the growth then
+  /// takes their recycled cells. Remotely, a window is released only whole
+  /// at a batch boundary, so it requests that and lets this growth proceed.
+  void reserveChunk();
   void checkpoint(SealReason reason);
   /// Seals the whole window - on a remote shuffle, pushes it - and returns
   /// its memory; returns the chunk bytes freed.

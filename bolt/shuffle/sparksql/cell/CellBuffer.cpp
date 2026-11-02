@@ -34,9 +34,9 @@ ChunkAllocator::ChunkAllocator(
     memory::MemoryPool* pool,
     uint32_t chunkBytes,
     uint32_t cellBytes,
-    GrowCallback beforeGrow)
+    ReserveChunkFn reserveChunk)
     : pool_(pool),
-      beforeGrow_(std::move(beforeGrow)),
+      reserveChunk_(std::move(reserveChunk)),
       chunkBytes_(chunkBytes),
       cellBytes_(cellBytes) {
   BOLT_CHECK_NOT_NULL(pool_);
@@ -80,9 +80,9 @@ uint32_t ChunkAllocator::allocCell() {
     findBumpChunk();
   }
   if (bumpChunk_ == kNoChunk) {
-    if (beforeGrow_) {
-      beforeGrow_();
-      // The callback may have spilled and recycled cells.
+    if (reserveChunk_) {
+      reserveChunk_();
+      // reserveChunk may have spilled and recycled cells.
       if (!freeList_.empty()) {
         const uint32_t id = freeList_.back();
         freeList_.pop_back();
@@ -325,7 +325,7 @@ void DataCells::appendSlow(
   }
   const uint32_t cellBytes = allocator_->cellBytes();
   // Phase 1: allocate every cell this append could need, before touching the
-  // chain or copying a byte. The allocator's callback or pool arbitration
+  // chain or copying a byte. The allocator's reserveChunk or pool arbitration
   // during chunk growth may spill and release all chains here; the held ids
   // are unlinked and survive. One spare covers the tail the spill may have
   // taken away.
