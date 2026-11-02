@@ -47,16 +47,17 @@ class CellBatchSource {
 };
 
 /// The Cell shuffle read chain, complete in itself: pulls reader streams,
-/// parses back-to-back ColumnarPayloads (no dispatch byte, no outer
-/// framing — the wire protocol is not compatible with the other writers and
-/// is selected by shuffleWriterType on both sides), and decodes them into
-/// batches of at most batchSize rows: a large payload over several batches,
-/// small ones into one.
+/// parses each stream's blocks (CellFormat.h) - a CellBlockKind byte, then
+/// a ColumnarPayload or a CompositeRows block; the protocol is not
+/// compatible with the other writers and is selected by shuffleWriterType
+/// on both sides - and decodes the payloads into batches of at most
+/// batchSize rows: a large payload over several batches, small ones into
+/// one.
 ///
-/// Deliberately shares nothing with the existing deserializer stack; its
-/// only inputs are the stream iterator, the schema and the codec. Batches
-/// come out in the logical schema: a nested layout's by a CellBatchSource,
-/// complex columns packed by the writer restored here by the type adapter.
+/// Its inputs are the stream iterator, the logical schema and the codec.
+/// Batches come out in the logical schema: a nested layout's by a
+/// CellBatchSource, complex columns packed by the writer restored here by
+/// the type adapter.
 /// Every block opens with a kind byte; CompositeRows blocks come out as
 /// CompositeRowVectors of at most batchSize rows, never concatenated with
 /// payload rows.

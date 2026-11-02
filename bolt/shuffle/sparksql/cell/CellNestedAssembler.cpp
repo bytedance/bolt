@@ -131,7 +131,7 @@ bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
       total += static_cast<uint64_t>(lengths[i]);
     }
     if (total > CellNestedLayout::kMaxPositions) {
-      return fail(error, "container lengths beyond the payload's positions");
+      return fail(error, "container lengths beyond the position limit");
     }
     left -= n;
   }
