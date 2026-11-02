@@ -41,7 +41,6 @@ CellNestedAssembler::CellNestedAssembler(
     uint32_t appendPositions)
     : layout_(std::move(type)),
       pool_(pool),
-      limits_(limits),
       appendPositions_(appendPositions),
       reader_(layout_.layout(), decompressor, pool, limits),
       positions_(layout_.numSpaces(), 0),
@@ -60,19 +59,10 @@ bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
     return false;
   }
   positions_[0] = rowCount;
-  nullBytes_ = 0;
   // Spaces are numbered after their owners': a space's positions are known
   // by the time it opens.
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     const auto& space = layout_.space(s);
-    if (limits_.maxDecodedBytes != 0) {
-      // Each decoder bounds its own bitmaps; together, every column of
-      // every space at most.
-      nullBytes_ += space.splitColumns.size() * ((positions_[s] + 7) / 8 + 8);
-      if (nullBytes_ > limits_.maxDecodedBytes) {
-        return fail(error, "null bitmaps beyond sanity bound");
-      }
-    }
     if (!decoders_[s]->openPayload(
             reader_,
             space.columns.data(),
@@ -88,20 +78,19 @@ bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
   }
   // Every space's fixed bytes and string data, per row.
   uint64_t bytes = 0;
-  stringsLeft_ = 0;
+  uint64_t strings = 0;
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     const auto& decoder = *decoders_[s];
     bytes += positions_[s] * decoder.rowBytes();
     const auto& cellLayout = decoder.layout();
     for (uint32_t col = 0; col < cellLayout.numColumns(); ++col) {
       if (cellLayout.isStringColumn(col)) {
-        stringsLeft_ +=
-            decoder.streamBytes(cellLayout.columnStream(col) + 1).size();
+        strings += decoder.streamBytes(cellLayout.columnStream(col) + 1).size();
       }
     }
   }
   rowBytes_ = std::max<uint64_t>(
-      1, (bytes + stringsLeft_) / std::max<uint32_t>(1, rowCount));
+      1, (bytes + strings) / std::max<uint32_t>(1, rowCount));
   return true;
 }
 
@@ -149,53 +138,13 @@ bool CellNestedAssembler::fits() const {
       return false;
     }
   }
-  return limits_.maxDecodedBytes == 0 || restBytes() <= limits_.maxDecodedBytes;
+  return true;
 }
 
 uint64_t CellNestedAssembler::batchBytes() const {
   uint64_t bytes = 0;
   for (const auto& decoder : decoders_) {
     bytes += decoder->batchBytes();
-  }
-  return bytes;
-}
-
-uint64_t CellNestedAssembler::positionBytes(uint32_t s, uint64_t positions)
-    const {
-  const auto& space = layout_.space(s);
-  return positions *
-      (decoders_[s]->rowBytes() +
-       sizeof(vector_size_t) * space.containers.size()) +
-      (positions * space.splitColumns.size() + 7) / 8;
-}
-
-uint64_t CellNestedAssembler::batchStrings() const {
-  uint64_t bytes = 0;
-  for (const auto& decoder : decoders_) {
-    // The bytes its batch's strings take out of line.
-    bytes += decoder->batchBytes() -
-        static_cast<uint64_t>(decoder->batchRows()) * decoder->rowBytes();
-  }
-  return bytes;
-}
-
-uint64_t CellNestedAssembler::heldBytes() const {
-  uint64_t bytes = nullBytes_ + batchStrings();
-  for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
-    bytes += 2 * positionBytes(s, decoders_[s]->batchRows());
-  }
-  return bytes;
-}
-
-uint64_t CellNestedAssembler::restBytes() const {
-  uint64_t bytes = nullBytes_ + batchStrings() + stringsLeft_;
-  for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
-    const auto& decoder = *decoders_[s];
-    bytes += 2 *
-        positionBytes(
-                 s,
-                 static_cast<uint64_t>(decoder.batchRows()) +
-                     decoder.payloadRowsLeft());
   }
   return bytes;
 }
@@ -237,29 +186,7 @@ RowVectorPtr CellNestedAssembler::nextBatch(
       n = std::min<uint64_t>(
           n, std::max<uint64_t>(1, (budget - used) / rowBytes_));
     }
-    const uint64_t bound = limits_.maxDecodedBytes;
-    if (bound != 0) {
-      const uint64_t rest = restBytes();
-      if (rest > bound) {
-        // The rows the bound has room for, by the bytes per row of the
-        // payload's rows left; a row that alone passes it fails below.
-        const uint64_t held = heldBytes();
-        const uint64_t left = rows.payloadRowsLeft();
-        const uint64_t perRow = (rest - held + left - 1) / left;
-        n = std::min(n, (bound - std::min(held, bound)) / perRow);
-        if (n == 0) {
-          if (batchRows > 0) {
-            break;
-          }
-          n = 1;
-        }
-      }
-    }
-    const uint64_t strings = batchStrings();
     appendSpace(0, n, capacity);
-    // Out of line, the strings just read take at most their stream bytes,
-    // unless a dictionary repeats them.
-    stringsLeft_ -= std::min(stringsLeft_, batchStrings() - strings);
   }
   return rows.batchRows() == 0 ? nullptr : assemble();
 }
@@ -271,15 +198,6 @@ void CellNestedAssembler::appendSpace(
   auto& decoder = *decoders_[s];
   const auto& space = layout_.space(s);
   const vector_size_t at = decoder.batchRows();
-  if (limits_.maxDecodedBytes != 0) {
-    // Checked before any of the positions is read; the strings they hold
-    // count once they are.
-    BOLT_CHECK_LE(
-        heldBytes() +
-            2 * (positionBytes(s, at + positions) - positionBytes(s, at)),
-        limits_.maxDecodedBytes,
-        "malformed cell shuffle payload: batch beyond sanity bound");
-  }
   // A batch of the rows opens at the reader's capacity, one of elements at
   // its first append's: it grows from there as entries need it.
   const vector_size_t open = s == 0
