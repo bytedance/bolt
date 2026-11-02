@@ -122,15 +122,11 @@ std::string compressRun(
     RunCompressor& compressor,
     const std::vector<std::string>& streams) {
   constexpr size_t kPiece = 1000;
-  std::vector<uint64_t> sizes;
-  for (const auto& stream : streams) {
-    sizes.push_back(stream.size());
-  }
   StringSink sink;
   compressor.write(
       sink,
       static_cast<uint32_t>(streams.size()),
-      sizes.data(),
+      [&](uint32_t s) { return streams[s].size(); },
       [&](uint32_t s, RunPieceFn fn) {
         for (size_t at = 0; at < streams[s].size(); at += kPiece) {
           const size_t bytes = std::min(kPiece, streams[s].size() - at);
