@@ -20,14 +20,21 @@
 
 #include <unistd.h>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
+#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
+#include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleReader.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleWriter.h"
 #include "bolt/shuffle/sparksql/compression/Codec.h"
@@ -48,6 +55,7 @@ class RecordingRssClient final : public RssClient {
       override {
     BOLT_CHECK_EQ(stops, 0, "push after stop");
     pushes[partitionId].emplace_back(bytes, size);
+    ++numPushes;
     return static_cast<int32_t>(size);
   }
 
@@ -56,14 +64,24 @@ class RecordingRssClient final : public RssClient {
   }
 
   std::map<int32_t, std::vector<std::string>> pushes;
+  uint64_t numPushes{0};
   int32_t stops{0};
 };
 
+/// The codec the reader decompresses `compression` with; null when
+/// UNCOMPRESSED.
+inline std::unique_ptr<Codec> codecOf(arrow::Compression::type compression) {
+  if (compression == arrow::Compression::UNCOMPRESSED) {
+    return nullptr;
+  }
+  return createCodec(
+      compression,
+      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+}
+
 /// LZ4 frames, as the writer and the reader use them.
 inline std::unique_ptr<Codec> lz4Codec() {
-  return createCodec(
-      arrow::Compression::LZ4_FRAME,
-      CodecOptions{CodecBackend::NONE, kDefaultCompressionLevel, true});
+  return codecOf(arrow::Compression::LZ4_FRAME);
 }
 
 /// Removes the data file `dataFile` and the spill files beside it.
@@ -94,6 +112,14 @@ inline ShuffleWriterOptions shuffleOptions(
   return options;
 }
 
+/// The RecordingRssClient of options shuffleOptions() made with `rss`.
+inline RecordingRssClient& rssClient(const ShuffleWriterOptions& options) {
+  auto* client = dynamic_cast<RecordingRssClient*>(
+      options.partitionWriterOptions.rssClient.get());
+  BOLT_CHECK_NOT_NULL(client);
+  return *client;
+}
+
 /// Each partition's bytes as its reader gets them: the ranges of the data
 /// file that `partitionLengths` gives, or every push the options'
 /// RecordingRssClient took, back to back; `pushes`, if given, gets those
@@ -105,13 +131,11 @@ inline std::vector<std::string> partitionBytes(
   const auto& partitionWriter = options.partitionWriterOptions;
   std::vector<std::string> partitions(partitionWriter.numPartitions);
   if (partitionWriter.partitionWriterType == PartitionWriterType::kCeleborn) {
-    const auto client = std::dynamic_pointer_cast<RecordingRssClient>(
-        partitionWriter.rssClient);
-    BOLT_CHECK_NOT_NULL(client);
+    const auto& client = rssClient(options);
     if (pushes != nullptr) {
       pushes->resize(partitions.size());
     }
-    for (const auto& [pid, blobs] : client->pushes) {
+    for (const auto& [pid, blobs] : client.pushes) {
       for (const auto& blob : blobs) {
         partitions[pid] += blob;
       }
@@ -220,40 +244,38 @@ inline RowVectorPtr withPid(
       std::move(children));
 }
 
-/// Writes `input` through one CellShuffleWriter on `pool` and collects its
+/// Writes `input` through `writer`, made of `options`, and collects its
 /// output: the data file's partitions, or the pushes the options'
 /// RecordingRssClient took. Each split() takes `batchOf(batch)`, by default
-/// the batch behind its pid column.
+/// the batch behind its pid column; `afterSplit(batch)` follows it.
 inline WrittenShuffle writeShuffle(
+    ShuffleWriter& writer,
     const ShuffleWriterOptions& options,
     const ShuffleInput& input,
     memory::MemoryPool* pool,
-    const std::function<RowVectorPtr(size_t)>& batchOf = nullptr) {
+    const std::function<RowVectorPtr(size_t)>& batchOf = nullptr,
+    const std::function<void(size_t)>& afterSplit = nullptr) {
   WrittenShuffle written;
-  {
-    CellShuffleWriter writer(options, pool, arrow::default_memory_pool());
-    for (size_t batch = 0; batch < input.data.size(); ++batch) {
-      const auto rv = batchOf
-          ? batchOf(batch)
-          : withPid(input.pids[batch], input.data[batch], pool);
-      const auto start = std::chrono::steady_clock::now();
-      const auto status = writer.split(rv, 0);
-      written.splitWallNs +=
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now() - start)
-              .count();
-      BOLT_CHECK(status.ok(), "{}", status.ToString());
-    }
-    const auto status = writer.stop();
+  for (size_t batch = 0; batch < input.data.size(); ++batch) {
+    const auto rv = batchOf
+        ? batchOf(batch)
+        : withPid(input.pids[batch], input.data[batch], pool);
+    const auto start = std::chrono::steady_clock::now();
+    const auto status = writer.split(rv, 0);
+    written.splitWallNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count();
     BOLT_CHECK(status.ok(), "{}", status.ToString());
-    written.metrics = writer.metrics();
+    if (afterSplit) {
+      afterSplit(batch);
+    }
   }
+  const auto status = writer.stop();
+  BOLT_CHECK(status.ok(), "{}", status.ToString());
+  written.metrics = writer.metrics();
   if (options.partitionWriterOptions.partitionWriterType ==
       PartitionWriterType::kCeleborn) {
-    const auto client = std::dynamic_pointer_cast<RecordingRssClient>(
-        options.partitionWriterOptions.rssClient);
-    BOLT_CHECK_NOT_NULL(client);
-    BOLT_CHECK_EQ(client->stops, 1);
+    BOLT_CHECK_EQ(rssClient(options).stops, 1);
   }
   written.partitions = partitionBytes(
       options, written.metrics.partitionLengths, &written.pushes);
@@ -265,21 +287,101 @@ inline WrittenShuffle writeShuffle(
   return written;
 }
 
-/// A CellShuffleReader of one partition's bytes. `codec` may be null when
-/// nothing was compressed; `nativeNestedTypes` is the writer's option of
-/// that name.
+/// writeShuffle() through a CellShuffleWriter of `options` on `pool`.
+inline WrittenShuffle writeShuffle(
+    const ShuffleWriterOptions& options,
+    const ShuffleInput& input,
+    memory::MemoryPool* pool,
+    const std::function<RowVectorPtr(size_t)>& batchOf = nullptr) {
+  CellShuffleWriter writer(options, pool, arrow::default_memory_pool());
+  return writeShuffle(writer, options, input, pool, batchOf);
+}
+
+/// Partition `pid` of `written` as its reader gets it: the data file's
+/// range, or, from an RSS client, each push as a stream of its own - a
+/// payload never spans two pushes.
+inline std::vector<std::string> partitionStreams(
+    const WrittenShuffle& written,
+    int32_t pid) {
+  if (written.pushes.empty()) {
+    return {written.partitions[pid]};
+  }
+  return written.pushes[pid];
+}
+
+/// `data` as HashAggregation composite output behind a pid column of
+/// `pids`: each row [size i32][CompactRow bytes], as serialized
+/// aggregation state is.
+inline std::shared_ptr<CompositeRowVector> makeComposite(
+    const std::vector<int32_t>& pids,
+    const RowVectorPtr& data,
+    memory::MemoryPool* pool) {
+  ShuffleColumnarToRowConverter converter(
+      asRowType(data->type()), pool, row::RowFormat::COMPACT);
+  auto stats =
+      converter.getWithStats(data, std::numeric_limits<int64_t>::max());
+  std::vector<std::vector<uint8_t*>> rows(1);
+  std::vector<uint32_t> partitions(data->size(), 0);
+  std::vector<int64_t> partitionBytes(1, 0);
+  converter.convert(stats, partitions, rows, partitionBytes);
+  const auto ordinary = withPid(pids, data, pool);
+  auto children = ordinary->children();
+  auto composite = std::make_shared<CompositeRowVector>(
+      ordinary->type(),
+      data->size(),
+      pool,
+      std::make_unique<SelectivityVector>(children.size(), true),
+      std::move(children));
+  composite->allocateRows(partitionBytes[0]);
+  RowInfoTracker tracker(composite.get(), 0, data->size());
+  for (vector_size_t i = 0; i < data->size(); ++i) {
+    const auto rowSize =
+        *reinterpret_cast<int32_t*>(rows[0][i]) + kSizeOfRowHeader;
+    auto* row = composite->newRow();
+    ::memcpy(row, rows[0][i], rowSize);
+    composite->store(i, row);
+    composite->advance(rowSize);
+  }
+  return composite;
+}
+
+/// The rows of a CompositeRowVector the reader returned, decoded as `type`.
+inline RowVectorPtr compositeRows(
+    const RowTypePtr& type,
+    const RowVectorPtr& batch,
+    memory::MemoryPool* pool) {
+  const auto composite = std::dynamic_pointer_cast<CompositeRowVector>(batch);
+  BOLT_CHECK_NOT_NULL(composite);
+  std::vector<std::string_view> rows;
+  for (vector_size_t row = 0; row < composite->size(); ++row) {
+    auto* data = composite->rowAt(row);
+    auto* end = row + 1 < composite->size()
+        ? composite->rowAt(row + 1)
+        : composite->rowAt(0) + composite->totalRowSize();
+    rows.emplace_back(data, end - data);
+  }
+  ShuffleRowToColumnarConverter converter(type, pool, row::RowFormat::COMPACT);
+  return converter.convert(rows);
+}
+
+/// A CellShuffleReader of one partition's `streams`, read in turn. `codec`
+/// may be null when nothing was compressed; `nativeNestedTypes` is the
+/// writer's option of that name.
 inline std::unique_ptr<CellShuffleReader> makeReader(
-    const std::string& bytes,
+    const std::vector<std::string>& streams,
     const RowTypePtr& type,
     Codec* codec,
     memory::MemoryPool* pool,
     int32_t batchSize,
     int64_t batchByteSize,
     bool nativeNestedTypes = true) {
+  std::vector<std::vector<char>> bytes;
+  for (const auto& stream : streams) {
+    bytes.emplace_back(stream.begin(), stream.end());
+  }
   return std::make_unique<CellShuffleReader>(
       std::make_shared<sparksql::test::MemoryReaderStreamIterator>(
-          std::vector<std::vector<char>>{
-              std::vector<char>(bytes.begin(), bytes.end())}),
+          std::move(bytes)),
       type,
       codec,
       arrow::default_memory_pool(),
@@ -289,9 +391,8 @@ inline std::unique_ptr<CellShuffleReader> makeReader(
       nativeNestedTypes);
 }
 
-/// Every batch CellShuffleReader decodes from one partition's bytes, each
-/// checked to be a well-formed vector; the arguments are makeReader()'s.
-inline std::vector<RowVectorPtr> readPartition(
+/// makeReader() of one stream, `bytes`.
+inline std::unique_ptr<CellShuffleReader> makeReader(
     const std::string& bytes,
     const RowTypePtr& type,
     Codec* codec,
@@ -299,8 +400,29 @@ inline std::vector<RowVectorPtr> readPartition(
     int32_t batchSize,
     int64_t batchByteSize,
     bool nativeNestedTypes = true) {
+  return makeReader(
+      std::vector<std::string>{bytes},
+      type,
+      codec,
+      pool,
+      batchSize,
+      batchByteSize,
+      nativeNestedTypes);
+}
+
+/// Every batch CellShuffleReader decodes from one partition's `streams`,
+/// each checked to be a well-formed vector; the arguments are
+/// makeReader()'s.
+inline std::vector<RowVectorPtr> readPartition(
+    const std::vector<std::string>& streams,
+    const RowTypePtr& type,
+    Codec* codec,
+    memory::MemoryPool* pool,
+    int32_t batchSize,
+    int64_t batchByteSize,
+    bool nativeNestedTypes = true) {
   const auto reader = makeReader(
-      bytes, type, codec, pool, batchSize, batchByteSize, nativeNestedTypes);
+      streams, type, codec, pool, batchSize, batchByteSize, nativeNestedTypes);
   std::vector<RowVectorPtr> batches;
   while (auto batch = reader->next()) {
     // What a consumer that validates, slices or resizes the batch relies
@@ -309,6 +431,43 @@ inline std::vector<RowVectorPtr> readPartition(
     batches.push_back(std::move(batch));
   }
   return batches;
+}
+
+/// readPartition() of one stream, `bytes`.
+inline std::vector<RowVectorPtr> readPartition(
+    const std::string& bytes,
+    const RowTypePtr& type,
+    Codec* codec,
+    memory::MemoryPool* pool,
+    int32_t batchSize,
+    int64_t batchByteSize,
+    bool nativeNestedTypes = true) {
+  return readPartition(
+      std::vector<std::string>{bytes},
+      type,
+      codec,
+      pool,
+      batchSize,
+      batchByteSize,
+      nativeNestedTypes);
+}
+
+/// The rows of every batch CellShuffleReader returns from one partition's
+/// bytes; the arguments are makeReader()'s. With a byte target at or below
+/// zero and a batch size above every payload's rows, a batch is a payload.
+inline std::vector<vector_size_t> readerBatchSizes(
+    const std::string& bytes,
+    const RowTypePtr& type,
+    Codec* codec,
+    memory::MemoryPool* pool,
+    int32_t batchSize,
+    int64_t batchByteSize) {
+  std::vector<vector_size_t> sizes;
+  for (const auto& batch :
+       readPartition(bytes, type, codec, pool, batchSize, batchByteSize)) {
+    sizes.push_back(batch->size());
+  }
+  return sizes;
 }
 
 /// Whether row `leftRow` of `left` and row `rightRow` of `right` hold the
@@ -424,6 +583,192 @@ inline void expectPartitionRows(
     }
   }
   EXPECT_EQ(next, expected.size()) << "partition " << pid;
+}
+
+/// One way to read a partition back: rows and bytes per batch.
+struct ReadShape {
+  int32_t batchSize;
+  int64_t batchByteSize;
+};
+
+/// Whole batches, and small ones that a byte budget cuts.
+inline const std::vector<ReadShape> kReadShapes{{4096, 1 << 20}, {7, 100}};
+
+/// Expects every partition `written` holds, compressed as `compression`, to
+/// read back at `shape` the rows `input` sent it, in order.
+inline void expectReadsBack(
+    const ShuffleInput& input,
+    const WrittenShuffle& written,
+    arrow::Compression::type compression,
+    memory::MemoryPool* pool,
+    const ReadShape& shape = kReadShapes[0],
+    bool nativeNestedTypes = true) {
+  const auto type = asRowType(input.data[0]->type());
+  const auto numPartitions = static_cast<int32_t>(written.partitions.size());
+  const auto rows = input.rowsOf(numPartitions);
+  const auto codec = codecOf(compression);
+  for (int32_t pid = 0; pid < numPartitions; ++pid) {
+    expectPartitionRows(
+        rows[pid],
+        readPartition(
+            partitionStreams(written, pid),
+            type,
+            codec.get(),
+            pool,
+            shape.batchSize,
+            shape.batchByteSize,
+            nativeNestedTypes),
+        pid,
+        shape.batchSize);
+    if (::testing::Test::HasFatalFailure()) {
+      return;
+    }
+  }
+}
+
+/// Whether some column of `type` is an ARRAY, MAP or ROW.
+inline bool hasComplexColumns(const RowTypePtr& type) {
+  for (const auto& child : type->children()) {
+    if (child->kind() == TypeKind::ARRAY || child->kind() == TypeKind::MAP ||
+        child->kind() == TypeKind::ROW) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Expects what a nested layout reads back below a null struct of `vector`:
+/// every field null there, and every container among them empty.
+inline void expectStructNullsFolded(const BaseVector& vector) {
+  if (const auto* row = vector.as<RowVector>()) {
+    for (const auto& child : row->children()) {
+      const auto* containers = child->as<ArrayVectorBase>();
+      for (vector_size_t i = 0; i < row->size(); ++i) {
+        if (row->isNullAt(i)) {
+          ASSERT_TRUE(child->isNullAt(i)) << "row " << i;
+          ASSERT_TRUE(containers == nullptr || containers->sizeAt(i) == 0);
+        }
+      }
+      expectStructNullsFolded(*child);
+    }
+  } else if (const auto* array = vector.as<ArrayVector>()) {
+    expectStructNullsFolded(*array->elements());
+  } else if (const auto* map = vector.as<MapVector>()) {
+    expectStructNullsFolded(*map->mapKeys());
+    expectStructNullsFolded(*map->mapValues());
+  }
+}
+
+/// The name of `compression` in test traces.
+inline const char* codecName(arrow::Compression::type compression) {
+  switch (compression) {
+    case arrow::Compression::UNCOMPRESSED:
+      return "none";
+    case arrow::Compression::LZ4_FRAME:
+      return "lz4";
+    case arrow::Compression::ZSTD:
+      return "zstd";
+    case arrow::Compression::GZIP:
+      return "gzip";
+    default:
+      return "other";
+  }
+}
+
+/// Where a round trip writes, and with which codec.
+struct ShuffleOutput {
+  bool rss;
+  arrow::Compression::type compression;
+
+  std::string toString() const {
+    return fmt::format("{} {}", rss ? "rss" : "local", codecName(compression));
+  }
+};
+
+/// Into the data file uncompressed, and pushed to an RSS client with LZ4.
+inline const std::vector<ShuffleOutput> kShuffleOutputs{
+    {false, arrow::Compression::UNCOMPRESSED},
+    {true, arrow::Compression::LZ4_FRAME}};
+
+/// Writes `input` once per output of `outputs` - into `dataFile`, or pushed
+/// to a RecordingRssClient - and reads every partition back at every read
+/// shape, an RSS partition push by push, expecting the input's rows in
+/// order. Each writer must have flattened the complex columns of a schema
+/// that takes a nested layout, its struct nulls folded into the columns
+/// below, else converted them; an uncompressed output's raw lengths are
+/// its lengths. `tune` adjusts the writer of each output, `check` sees what
+/// it wrote. Returns what each output wrote.
+inline std::vector<WrittenShuffle> roundTrip(
+    const ShuffleInput& input,
+    int32_t numPartitions,
+    const std::string& dataFile,
+    memory::MemoryPool* pool,
+    const std::function<void(CellShuffleOptions&, bool rss)>& tune = nullptr,
+    const std::function<void(const WrittenShuffle&, bool rss)>& check = nullptr,
+    const std::vector<ReadShape>& readShapes = kReadShapes,
+    const std::vector<ShuffleOutput>& outputs = kShuffleOutputs) {
+  const auto rowType = asRowType(input.data[0]->type());
+  const auto rows = input.rowsOf(numPartitions);
+  // Every writer first, so that the first one sees the input's lazy
+  // vectors unloaded.
+  std::vector<WrittenShuffle> written;
+  std::vector<bool> native;
+  for (const auto& output : outputs) {
+    SCOPED_TRACE(output.toString());
+    removeShuffleFiles(dataFile);
+    auto options =
+        shuffleOptions(dataFile, numPartitions, output.compression, output.rss);
+    if (tune) {
+      tune(options.cellOptions, output.rss);
+    }
+    written.push_back(writeShuffle(options, input, pool));
+    native.push_back(options.cellOptions.nativeNestedTypes);
+    const auto& metrics = written.back().metrics;
+    if (native.back() && CellNestedLayout::supports(rowType)) {
+      EXPECT_GT(metrics.flattenTime, 0);
+      EXPECT_EQ(metrics.convertTime, 0);
+    } else if (hasComplexColumns(rowType)) {
+      EXPECT_GT(metrics.convertTime, 0);
+      EXPECT_EQ(metrics.flattenTime, 0);
+    }
+    if (output.compression == arrow::Compression::UNCOMPRESSED) {
+      EXPECT_EQ(metrics.rawPartitionLengths, metrics.partitionLengths);
+    }
+    if (check) {
+      check(written.back(), output.rss);
+    }
+  }
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    SCOPED_TRACE(outputs[i].toString());
+    const bool nested = native[i] && CellNestedLayout::supports(rowType);
+    const auto codec = codecOf(outputs[i].compression);
+    for (const auto& shape : readShapes) {
+      SCOPED_TRACE(fmt::format(
+          "batches of {} rows, {} bytes",
+          shape.batchSize,
+          shape.batchByteSize));
+      for (int32_t pid = 0; pid < numPartitions; ++pid) {
+        const auto batches = readPartition(
+            partitionStreams(written[i], pid),
+            rowType,
+            codec.get(),
+            pool,
+            shape.batchSize,
+            shape.batchByteSize,
+            native[i]);
+        expectPartitionRows(rows[pid], batches, pid, shape.batchSize);
+        if (nested) {
+          for (const auto& batch : batches) {
+            expectStructNullsFolded(*batch);
+          }
+        }
+        if (::testing::Test::HasFatalFailure()) {
+          return written;
+        }
+      }
+    }
+  }
+  return written;
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell::test
