@@ -45,11 +45,11 @@
 /// are the payload's rows, except in a nested layout.
 ///
 /// Nested layouts. A row type with ARRAY, MAP or ROW columns takes one when
-/// every leaf type is supported and it flattens into at most 65535 columns;
-/// one that flattens into more, or any such row type when writer and reader
+/// every leaf type is supported and it shreds into at most 65535 columns;
+/// one that shreds into more, or any such row type when writer and reader
 /// are configured to pack nested types (CellShuffleOptions::
 /// nativeNestedTypes off), packs its complex columns into one trailing
-/// binary column. It is flattened in pre-order into plain
+/// binary column. It is shredded in pre-order into plain
 /// columns: a leaf is a column of its type; an ARRAY or MAP an Integer
 /// column holding each non-null entry's length, followed by the columns of
 /// its element, or of its key and then its value; a ROW a SmallInt column
@@ -231,7 +231,7 @@ struct CellStream {
 };
 
 /// Maps a shuffle row type (pid column already stripped) onto wire columns
-/// and streams. Complex types reach it flattened (nested layouts) or packed
+/// and streams. Complex types reach it shredded (nested layouts) or packed
 /// into binary; create() rejects physical types it cannot map.
 class CellLayout {
  public:

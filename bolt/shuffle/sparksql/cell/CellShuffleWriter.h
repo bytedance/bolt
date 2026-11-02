@@ -21,8 +21,8 @@
 
 #include "bolt/vector/ComplexVector.h"
 
-#include "bolt/shuffle/sparksql/cell/CellFlattener.h"
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedShredder.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
 #include "bolt/shuffle/sparksql/cell/CellShuffleTypeAdapter.h"
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
@@ -34,9 +34,9 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// window seals and final output through CellSplitter.
 ///
 /// Accepts logical rows (pid column first), so callers never see the
-/// physical Cell schema: the columns of a nested layout are flattened into
-/// plain ones by a CellFlattener, and other complex columns packed into the
-/// trailing binary column by the type adapter. CompositeRowVectors are
+/// physical Cell schema: the columns of a nested layout are shredded into
+/// plain ones by a CellNestedShredder, and other complex columns packed into
+/// the trailing binary column by the type adapter. CompositeRowVectors are
 /// handled entirely by the CompositeShuffleWriter base.
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
@@ -156,7 +156,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   PressureStats pressure_;
   /// Time the flat path spends decoding the columns of its batches and
   /// classifying their nulls, logged at stop. The nested path's is part of
-  /// the flatten time.
+  /// the shred time.
   uint64_t nullClassifyNs_{0};
 
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
@@ -170,7 +170,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<RawPartitionOutput> raw_;
   std::unique_ptr<CellOutput> output_;
   std::unique_ptr<CellSplitter> splitter_;
-  std::unique_ptr<CellFlattener> flattener_;
+  std::unique_ptr<CellNestedShredder> shredder_;
 
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
