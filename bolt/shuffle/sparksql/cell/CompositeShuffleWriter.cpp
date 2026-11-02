@@ -255,7 +255,7 @@ void CompositeShuffleWriter::writeComposite() {
   }
   size_t nextRow = 0;
   BufferPtr scratch;
-  output().spillRaw([&](uint32_t pid, BufferPtr& block) {
+  output().writeBlocks([&](uint32_t pid, BufferPtr& block) {
     return nextBlock(pid, block, nextRow, scratch);
   });
   converter_.reset();

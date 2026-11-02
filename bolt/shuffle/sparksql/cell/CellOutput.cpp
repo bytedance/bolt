@@ -423,12 +423,12 @@ void LocalCellOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
 }
 
 RssCellOutput::RssCellOutput(
-    RawPartitionOutput& raw,
+    PartitionBlockOutput& blocks,
     const CellLayout* layout,
     const PartitionWriterOptions& options,
     const CellShuffleOptions& cellOptions,
     memory::MemoryPool* pool)
-    : raw_(raw),
+    : blocks_(blocks),
       layout_(layout),
       pool_(pool),
       compressor_(options, cellOptions, &compressTimeNs_),
@@ -445,7 +445,7 @@ void RssCellOutput::sealWindow(const CellWindowInput& in) {
 
 void RssCellOutput::sendWindow(const CellWindowInput& in) {
   uint32_t built = std::numeric_limits<uint32_t>::max();
-  raw_.spillRaw([&](uint32_t pid, BufferPtr& block) {
+  blocks_.writeBlocks([&](uint32_t pid, BufferPtr& block) {
     if (pid == built || in.rowCounts[pid] == 0 ||
         (in.sealPartitions != nullptr && in.sealPartitions[pid] == 0)) {
       return false;
@@ -487,7 +487,7 @@ void RssCellOutput::finalize(
   }
   LOG(INFO) << "CellShuffleWriter rss: sealed windows=" << numSealed_;
   logCompression(compressor_, *layout_);
-  raw_.finish(metrics);
+  blocks_.finish(metrics);
   metrics.rawPartitionLengths = rawPartitionLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSealed_);

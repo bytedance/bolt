@@ -179,25 +179,25 @@ class PartialSpiller {
 
 /// Produces the next opaque block of partition `pid` into `block`; false
 /// once that partition has no more.
-using RawBlockSource = std::function<bool(uint32_t pid, BufferPtr& block)>;
+using BlockSource = std::function<bool(uint32_t pid, BufferPtr& block)>;
 
 /// The output of a shuffle writer as whole, already-framed blocks per
 /// partition: a local spill file merged partition by partition into the
 /// data file at the end, or pushes to a remote shuffle service, which does
 /// that merge itself. The owner frames and compresses the blocks; this layer
 /// only places them.
-class RawPartitionOutput {
+class PartitionBlockOutput {
  public:
   /// The local or the remote output, by options.partitionWriterType.
-  static std::unique_ptr<RawPartitionOutput> create(
+  static std::unique_ptr<PartitionBlockOutput> create(
       PartitionWriterOptions options);
 
-  virtual ~RawPartitionOutput() = default;
+  virtual ~PartitionBlockOutput() = default;
 
   /// Writes one unit over all partitions: `next` is called for partition 0,
   /// 1, ... until it returns false for each, and every block is written
   /// before the next call, so the producer may reuse the buffer.
-  virtual void spillRaw(const RawBlockSource& next) = 0;
+  virtual void writeBlocks(const BlockSource& next) = 0;
 
   /// Ends the output on its own - writes a data file of its blocks alone, or
   /// ends the map attempt - and fills partitionLengths, totalBytesWritten,
@@ -209,15 +209,16 @@ class RawPartitionOutput {
   virtual int64_t bytesEvicted() const = 0;
 };
 
-/// Local disk. Each spillRaw() call becomes a raw run of P + 1 offsets in
-/// its own spill file; the merge copies each partition's raw blocks
+/// Local disk. Each writeBlocks() call becomes a block run of P + 1 offsets
+/// in its own spill file; the merge copies each partition's blocks
 /// verbatim, in call order. Merged with another output's share by
 /// mergeToDataFile(), or on its own by finish().
-class LocalRawOutput final : public RawPartitionOutput, public PartialSpiller {
+class LocalBlockOutput final : public PartitionBlockOutput,
+                               public PartialSpiller {
  public:
-  explicit LocalRawOutput(PartitionWriterOptions options);
+  explicit LocalBlockOutput(PartitionWriterOptions options);
 
-  void spillRaw(const RawBlockSource& next) override;
+  void writeBlocks(const BlockSource& next) override;
 
   /// mergeToDataFile() of this output alone.
   void finish(ShuffleWriterMetrics& metrics) override;
@@ -230,8 +231,8 @@ class LocalRawOutput final : public RawPartitionOutput, public PartialSpiller {
   void mergeToFinal(uint32_t pid, DataFileWriter& out) override;
 
   const PartitionWriterOptions options_;
-  /// Per raw run: P + 1 absolute spill-file offsets.
-  std::vector<std::vector<uint64_t>> rawRuns_;
+  /// Per block run: P + 1 absolute spill-file offsets.
+  std::vector<std::vector<uint64_t>> blockRuns_;
 };
 
 /// A remote shuffle service. Every block is pushed as it comes, so each
@@ -240,11 +241,11 @@ class LocalRawOutput final : public RawPartitionOutput, public PartialSpiller {
 /// copies them before it returns. Nothing touches local disk, and with
 /// nothing to merge, a task's producers can share one: finish() ends the
 /// attempt once for all of them.
-class RssRawOutput final : public RawPartitionOutput {
+class RssBlockOutput final : public PartitionBlockOutput {
  public:
-  explicit RssRawOutput(PartitionWriterOptions options);
+  explicit RssBlockOutput(PartitionWriterOptions options);
 
-  void spillRaw(const RawBlockSource& next) override;
+  void writeBlocks(const BlockSource& next) override;
 
   /// Ends the map attempt; partition lengths are the bytes pushed.
   void finish(ShuffleWriterMetrics& metrics) override;
