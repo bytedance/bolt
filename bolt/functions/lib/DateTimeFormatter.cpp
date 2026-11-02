@@ -83,7 +83,7 @@ struct Date {
   int32_t hour = 0;
   int32_t minute = 0;
   int32_t second = 0;
-  int32_t microsecond = 0;
+  int32_t subsecond = 0;
   bool isAm = true; // AM -> true, PM -> false
   int64_t timezoneId = -1;
 
@@ -720,6 +720,7 @@ int getMaxDigitConsume(
 
 using ErrorCode = DateTimeResult::ErrorCode;
 
+template <bool nanosecondPrecision = false>
 ErrorCode parseFromPattern(
     FormatPattern curPattern,
     const std::string_view& input,
@@ -819,7 +820,14 @@ ErrorCode parseFromPattern(
           return ErrorCode::PARSE_FRACTION_ERROR;
         }
       }
-      if constexpr (::bytedance::bolt::kSparkCompatible) {
+      if constexpr (nanosecondPrecision) {
+        if (count == 0) {
+          return ErrorCode::PARSE_FRACTION_ERROR;
+        }
+        for (int i = count; i < 9; ++i) {
+          number *= 10;
+        }
+      } else if constexpr (::bytedance::bolt::kSparkCompatible) {
         // .8 + S => .8 CORRECTED
         // .8 + SS => .8 CORRECTED
         // .8 + SSS => .8 CORRECTED
@@ -1050,9 +1058,13 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::FRACTION_OF_SECOND:
-        date.microsecond = ::bytedance::bolt::kSparkCompatible
-            ? number
-            : number * util::kMicrosPerMsec;
+        if constexpr (nanosecondPrecision) {
+          date.subsecond = number;
+        } else {
+          date.subsecond = ::bytedance::bolt::kSparkCompatible
+              ? number
+              : number * util::kMicrosPerMsec;
+        }
         break;
 
       case DateTimeFormatSpecifier::WEEK_YEAR:
@@ -1719,13 +1731,14 @@ DateTimeResult DateTimeFormatter::parse(const std::string_view& input) const {
   }
 
   int64_t microsSinceMidnight =
-      util::fromTime(date.hour, date.minute, date.second, date.microsecond);
+      util::fromTime(date.hour, date.minute, date.second, date.subsecond);
   return DateTimeResult{
       util::fromDatetime(daysSinceEpoch, microsSinceMidnight), date.timezoneId};
 }
 
 // sql.legacy.timeParserPolicy = "legacy", "corrected", "exception"
-DateTimeResult DateTimeFormatter::parse(
+template <bool nanosecondPrecision>
+FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
     const std::string_view& input,
     const TimePolicy timeParserPolicy) const {
   Date date;
@@ -1770,13 +1783,13 @@ DateTimeResult DateTimeFormatter::parse(
         }
         if (i + 1 < tokens_.size() &&
             tokens_[i + 1].type == DateTimeToken::Type::kPattern) {
-          auto errorCode = parseFromPattern(
+          auto errorCode = parseFromPattern<nanosecondPrecision>(
               tok.pattern, input, cur, end, date, true, type_, isLegacy);
           if (!noError(errorCode)) {
             return errorCode;
           }
         } else {
-          auto errorCode = parseFromPattern(
+          auto errorCode = parseFromPattern<nanosecondPrecision>(
               tok.pattern, input, cur, end, date, false, type_, isLegacy);
           if (!noError(errorCode)) {
             return errorCode;
@@ -1954,10 +1967,29 @@ DateTimeResult DateTimeFormatter::parse(
         util::daysSinceEpochFromDate(date.year, date.month, date.day);
   }
 
+  if constexpr (nanosecondPrecision) {
+    return DateTimeResult{
+        Timestamp(
+            daysSinceEpoch * util::kSecsPerDay + date.hour * 3600 +
+                date.minute * 60 + date.second,
+            date.subsecond),
+        date.timezoneId};
+  }
   int64_t microsSinceMidnight =
-      util::fromTime(date.hour, date.minute, date.second, date.microsecond);
+      util::fromTime(date.hour, date.minute, date.second, date.subsecond);
   return DateTimeResult{
       util::fromDatetime(daysSinceEpoch, microsSinceMidnight), date.timezoneId};
+}
+
+DateTimeResult DateTimeFormatter::parse(
+    const std::string_view& input,
+    TimePolicy timeParserPolicy) const {
+  return parseImpl<false>(input, timeParserPolicy);
+}
+
+DateTimeResult DateTimeFormatter::parseWithNanosecondPrecision(
+    const std::string_view& input) const {
+  return parseImpl<true>(input, TimePolicy::CORRECTED);
 }
 
 std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(

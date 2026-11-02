@@ -340,6 +340,11 @@ class DateTimeFormatter {
       const std::string_view& input,
       const TimePolicy timeParserPolicy) const;
 
+  /// Parses fractional seconds without reducing their precision to
+  /// microseconds.
+  DateTimeResult parseWithNanosecondPrecision(
+      const std::string_view& input) const;
+
   /// Returns max size of the formatted string. Can be used to preallocate
   /// memory before calling format() to avoid extra copy.
   uint32_t maxResultSize(const tz::TimeZone* timezone) const;
@@ -355,6 +360,11 @@ class DateTimeFormatter {
       const std::optional<std::string>& zeroOffsetText = std::nullopt) const;
 
  private:
+  template <bool nanosecondPrecision>
+  DateTimeResult parseImpl(
+      const std::string_view& input,
+      TimePolicy timeParserPolicy) const;
+
   std::unique_ptr<char[]> literalBuf_;
   size_t bufSize_;
   std::vector<DateTimeToken> tokens_;

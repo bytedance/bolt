@@ -24,6 +24,7 @@
 #include "StringView.h"
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/expression/VectorWriters.h"
+#include "bolt/functions/lib/RegexCache.h"
 #include "bolt/functions/lib/string/RegexUtils.h"
 #include "bolt/functions/lib/string/StringCore.h"
 #include "bolt/functions/lib/string/StringImpl.h"
@@ -647,24 +648,31 @@ class ICURegexpExtractAllFunction final : public exec::VectorFunction {
   bool matchDanglingRightBrackets_;
 };
 
-template <typename T>
+template <typename T, bool literalReplacement = false>
 void replace(
     FlatVector<StringView>* result,
     int row,
     const exec::LocalDecodedVector& toReplace,
     StringView replacement,
-    const icu::LocalPointer<icu::RegexPattern>& regexPattern,
+    const icu::RegexPattern& regexPattern,
     T pos = 1) {
   const StringView str = toReplace->valueAt<StringView>(row);
-  icu::UnicodeString uStr(str.data(), str.size());
-  if (pos - 1 >= uStr.length()) {
+  auto uStr = [&]() {
+    if constexpr (literalReplacement) {
+      return icu::UnicodeString::fromUTF8(
+          icu::StringPiece(str.data(), str.size()));
+    } else {
+      return icu::UnicodeString(str.data(), str.size());
+    }
+  }();
+  if (literalReplacement ? pos - 1 > uStr.length() : pos - 1 >= uStr.length()) {
     result->setNoCopy(row, StringView(str.data(), str.size()));
     return;
   }
 
   UErrorCode status = U_ZERO_ERROR;
   icu::LocalPointer<icu::RegexMatcher> matcher(
-      regexPattern->matcher(uStr, status));
+      regexPattern.matcher(uStr, status));
 
   if (UNLIKELY(U_FAILURE(status))) {
     BOLT_USER_FAIL(
@@ -673,7 +681,14 @@ void replace(
         u_errorName(status));
   }
 
-  icu::UnicodeString uReplacement(replacement.data(), replacement.size());
+  auto uReplacement = [&]() {
+    if constexpr (literalReplacement) {
+      return icu::UnicodeString::fromUTF8(
+          icu::StringPiece(replacement.data(), replacement.size()));
+    } else {
+      return icu::UnicodeString(replacement.data(), replacement.size());
+    }
+  }();
   icu::UnicodeString uReplaced;
 
   matcher->region(pos - 1, uStr.length(), status);
@@ -683,8 +698,16 @@ void replace(
         str,
         u_errorName(status));
   }
+  int32_t previousEnd = 0;
   while (matcher->find(status) && U_SUCCESS(status)) {
-    matcher->appendReplacement(uReplaced, uReplacement, status);
+    if constexpr (literalReplacement) {
+      const auto start = matcher->start(status);
+      uReplaced.append(uStr, previousEnd, start - previousEnd);
+      uReplaced.append(uReplacement);
+      previousEnd = matcher->end(status);
+    } else {
+      matcher->appendReplacement(uReplaced, uReplacement, status);
+    }
   }
   if (UNLIKELY(U_FAILURE(status))) {
     BOLT_USER_FAIL(
@@ -692,7 +715,11 @@ void replace(
         str,
         u_errorName(status));
   }
-  matcher->appendTail(uReplaced);
+  if constexpr (literalReplacement) {
+    uReplaced.append(uStr, previousEnd, uStr.length() - previousEnd);
+  } else {
+    matcher->appendTail(uReplaced);
+  }
 
   std::string replaced;
   uReplaced.toUTF8String(replaced);
@@ -707,14 +734,14 @@ void replace(
   result->setNoCopy(row, StringView(rawBuffer, size));
 }
 
-template <typename T>
+template <typename T, bool literalReplacement = false>
 class ICURegexpReplaceConstantPatternFunction : public exec::VectorFunction {
  public:
   explicit ICURegexpReplaceConstantPatternFunction(
       StringView pattern,
       bool matchDanglingRightBrackets,
       T pos = 1)
-      : regexPattern_(getRegexPattern(pattern, matchDanglingRightBrackets)),
+      : regexPattern_(compilePattern(pattern, matchDanglingRightBrackets)),
         pos_(pos) {}
 
   void apply(
@@ -726,6 +753,12 @@ class ICURegexpReplaceConstantPatternFunction : public exec::VectorFunction {
     BOLT_CHECK(args.size() == 3 || args.size() == 4);
     context.ensureWritable(rows, VARCHAR(), result);
     auto resultFlat = result->asFlatVector<StringView>();
+    if constexpr (literalReplacement) {
+      if (regexPattern_.isNull()) {
+        rows.applyToSelected([&](auto row) { resultFlat->setNull(row, true); });
+        return;
+      }
+    }
     exec::LocalDecodedVector toReplace(context, *args[0], rows);
 
     if (args[2]->encoding() == VectorEncoding::Simple::CONSTANT &&
@@ -733,8 +766,8 @@ class ICURegexpReplaceConstantPatternFunction : public exec::VectorFunction {
       const auto replacement =
           (args[2])->as<ConstantVector<StringView>>()->valueAt(0);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
-        replace<T>(
-            resultFlat, row, toReplace, replacement, regexPattern_, pos_);
+        replace<T, literalReplacement>(
+            resultFlat, row, toReplace, replacement, *regexPattern_, pos_);
       });
       return;
     }
@@ -742,16 +775,30 @@ class ICURegexpReplaceConstantPatternFunction : public exec::VectorFunction {
     exec::LocalDecodedVector replacements(context, *args[2], rows);
     context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
       StringView replacement = replacements->valueAt<StringView>(row);
-      replace<T>(resultFlat, row, toReplace, replacement, regexPattern_, pos_);
+      replace<T, literalReplacement>(
+          resultFlat, row, toReplace, replacement, *regexPattern_, pos_);
     });
   }
 
  private:
+  static icu::LocalPointer<icu::RegexPattern> compilePattern(
+      StringView pattern,
+      bool matchDanglingRightBrackets) {
+    if constexpr (literalReplacement) {
+      try {
+        return regex::compileRegexPattern(regex::transRegexPattern(pattern));
+      } catch (const BoltUserError&) {
+        return icu::LocalPointer<icu::RegexPattern>(nullptr);
+      }
+    } else {
+      return getRegexPattern(pattern, matchDanglingRightBrackets);
+    }
+  }
   icu::LocalPointer<icu::RegexPattern> regexPattern_;
   T pos_;
 };
 
-template <typename T>
+template <typename T, bool literalReplacement = false>
 class ICURegexpReplaceFunction : public exec::VectorFunction {
  public:
   explicit ICURegexpReplaceFunction(bool matchDanglingRightBrackets, T pos = 1)
@@ -770,8 +817,14 @@ class ICURegexpReplaceFunction : public exec::VectorFunction {
     if (args[1]->encoding() == VectorEncoding::Simple::CONSTANT &&
         args[1]->isNullAt(0) == false) {
       auto pattern = (args[1])->as<ConstantVector<StringView>>()->valueAt(0);
-      ICURegexpReplaceConstantPatternFunction<T>(pattern, pos_)
-          .apply(rows, args, outputType, context, result);
+      if constexpr (literalReplacement) {
+        ICURegexpReplaceConstantPatternFunction<T, true>(
+            pattern, matchDanglingRightBrackets_, pos_)
+            .apply(rows, args, outputType, context, result);
+      } else {
+        ICURegexpReplaceConstantPatternFunction<T>(pattern, pos_)
+            .apply(rows, args, outputType, context, result);
+      }
       return;
     }
     context.ensureWritable(rows, VARCHAR(), result);
@@ -788,9 +841,15 @@ class ICURegexpReplaceFunction : public exec::VectorFunction {
       context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
         status = U_ZERO_ERROR;
         const auto pattern = patterns->valueAt<StringView>(row);
-        auto regexPattern =
-            getRegexPattern(pattern, matchDanglingRightBrackets_);
-        replace<T>(resultFlat, row, toReplace, replacement, regexPattern, pos_);
+        auto regexPattern = compilePattern(pattern);
+        if constexpr (literalReplacement) {
+          if (!regexPattern) {
+            resultFlat->setNull(row, true);
+            return;
+          }
+        }
+        replace<T, literalReplacement>(
+            resultFlat, row, toReplace, replacement, *regexPattern, pos_);
       });
 
       return;
@@ -801,12 +860,40 @@ class ICURegexpReplaceFunction : public exec::VectorFunction {
       status = U_ZERO_ERROR;
       StringView replacement = replacements->valueAt<StringView>(row);
       const auto pattern = patterns->valueAt<StringView>(row);
-      auto regexPattern = getRegexPattern(pattern, matchDanglingRightBrackets_);
-      replace<T>(resultFlat, row, toReplace, replacement, regexPattern, pos_);
+      auto regexPattern = compilePattern(pattern);
+      if constexpr (literalReplacement) {
+        if (!regexPattern) {
+          resultFlat->setNull(row, true);
+          return;
+        }
+      }
+      replace<T, literalReplacement>(
+          resultFlat, row, toReplace, replacement, *regexPattern, pos_);
     });
   }
 
  private:
+  auto compilePattern(StringView pattern) const {
+    if constexpr (literalReplacement) {
+      return cache_.get(pattern, [&](StringView value) {
+        try {
+          auto compiled =
+              regex::compileRegexPattern(regex::transRegexPattern(value));
+          return std::shared_ptr<const icu::RegexPattern>(compiled.orphan());
+        } catch (const BoltUserError&) {
+          return std::shared_ptr<const icu::RegexPattern>();
+        }
+      });
+    } else {
+      return getRegexPattern(pattern, matchDanglingRightBrackets_);
+    }
+  }
+
+  [[no_unique_address]] std::conditional_t<
+      literalReplacement,
+      regex::RegexCache<icu::RegexPattern>,
+      regex::NoRegexCache>
+      cache_;
   bool matchDanglingRightBrackets_;
   T pos_;
 };
@@ -1034,7 +1121,8 @@ icuRegexExtractAllSignatures() {
   };
 }
 
-std::shared_ptr<exec::VectorFunction> makeICURegexReplace(
+template <bool literalReplacement>
+std::shared_ptr<exec::VectorFunction> makeICURegexReplaceImpl(
     const std::string& name,
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config) {
@@ -1097,13 +1185,13 @@ std::shared_ptr<exec::VectorFunction> makeICURegexReplace(
         constantPattern->as<ConstantVector<StringView>>()->valueAt(0);
     switch (posTypeKind) {
       case TypeKind::INTEGER:
-        return std::make_shared<
-            ICURegexpReplaceConstantPatternFunction<int32_t>>(
-            pattern, matchDanglingRightBrackets, pos_32);
+        return std::make_shared<ICURegexpReplaceConstantPatternFunction<
+            int32_t,
+            literalReplacement>>(pattern, matchDanglingRightBrackets, pos_32);
       case TypeKind::BIGINT:
-        return std::make_shared<
-            ICURegexpReplaceConstantPatternFunction<int64_t>>(
-            pattern, matchDanglingRightBrackets, pos_64);
+        return std::make_shared<ICURegexpReplaceConstantPatternFunction<
+            int64_t,
+            literalReplacement>>(pattern, matchDanglingRightBrackets, pos_64);
       default:
         BOLT_UNREACHABLE();
     }
@@ -1111,14 +1199,30 @@ std::shared_ptr<exec::VectorFunction> makeICURegexReplace(
 
   switch (posTypeKind) {
     case TypeKind::INTEGER:
-      return std::make_shared<ICURegexpReplaceFunction<int32_t>>(
+      return std::make_shared<
+          ICURegexpReplaceFunction<int32_t, literalReplacement>>(
           matchDanglingRightBrackets, pos_32);
     case TypeKind::BIGINT:
-      return std::make_shared<ICURegexpReplaceFunction<int64_t>>(
+      return std::make_shared<
+          ICURegexpReplaceFunction<int64_t, literalReplacement>>(
           matchDanglingRightBrackets, pos_64);
     default:
       BOLT_UNREACHABLE();
   }
+}
+
+std::shared_ptr<exec::VectorFunction> makeICURegexReplace(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config) {
+  return makeICURegexReplaceImpl<false>(name, inputArgs, config);
+}
+
+std::shared_ptr<exec::VectorFunction> makeICURegexReplaceLiteral(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config) {
+  return makeICURegexReplaceImpl<true>(name, inputArgs, config);
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>>

@@ -210,6 +210,54 @@ TEST_F(TemporalFunctionsTest, formattedTimestampFallback) {
       evaluate("to_timestamp(c0, c1)", makeRowVector({texts, formats})));
 }
 
+TEST_F(TemporalFunctionsTest, formattedNanoseconds) {
+  std::vector<std::string> texts;
+  std::vector<std::string> formats;
+  std::vector<Timestamp> expected;
+  for (const auto& date :
+       {std::string("1969-12-31 23:59:59"),
+        std::string("2024-02-29 12:34:56")}) {
+    for (int precision = 1; precision <= 9; ++precision) {
+      texts.push_back(
+          date + "." + std::string("123456789").substr(0, precision));
+      formats.push_back("yyyy-MM-dd HH:mm:ss." + std::string(precision, 'S'));
+      expected.push_back(timestamp(texts.back()));
+      EXPECT_EQ(
+          expected.back(),
+          parseString(
+              "to_timestamp(c0, '" + formats.back() + "')", texts.back()));
+    }
+  }
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>(texts),
+       makeFlatVector<std::string>(formats)});
+  testEncodings(
+      parseExpression("to_timestamp(c0,c1)", asRowType(input->type())),
+      input->children(),
+      makeFlatVector<Timestamp>(expected));
+  EXPECT_EQ(
+      Timestamp(0, 123456789),
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSSSS')",
+          "1970/01/01 00:00:00.123456789"));
+  EXPECT_EQ(
+      Timestamp(0, 123456700),
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSS', 'UTC', cast(0 as integer))",
+          "1970/01/01 00:00:00.1234567"));
+  for (const auto& invalid :
+       {"1970/01/01 00:00:00.", "1970/01/01 00:00:00.1234567890", "invalid"}) {
+    EXPECT_EQ(
+        std::nullopt,
+        parseString(
+            "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSSSS')", invalid));
+  }
+  EXPECT_EQ(
+      std::nullopt,
+      parseString(
+          "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSSSS')", std::nullopt));
+}
+
 TEST_F(TemporalFunctionsTest, formattedTimestampDefaultJvmZone) {
   const std::string input = "2021-03-14 02:30:00.123";
   EXPECT_EQ(

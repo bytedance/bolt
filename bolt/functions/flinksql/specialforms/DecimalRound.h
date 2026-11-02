@@ -36,4 +36,18 @@ class DecimalRoundCallToSpecialForm : public exec::FunctionCallToSpecialForm {
   static constexpr const char* kRoundDecimal = "decimal_round";
 };
 
+class DecimalTruncateCallToSpecialForm
+    : public exec::FunctionCallToSpecialForm {
+ public:
+  TypePtr resolveType(const std::vector<TypePtr>& argTypes) override;
+
+  exec::ExprPtr constructSpecialForm(
+      const TypePtr& type,
+      std::vector<exec::ExprPtr>&& args,
+      bool trackCpuUsage,
+      const core::QueryConfig& config) override;
+
+  static constexpr const char* kTruncateDecimal = "decimal_truncate";
+};
+
 } // namespace bytedance::bolt::functions::flinksql

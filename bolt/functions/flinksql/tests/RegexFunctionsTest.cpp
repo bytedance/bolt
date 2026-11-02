@@ -16,7 +16,11 @@
 
 #include <limits>
 
+#include "bolt/functions/lib/RegexCache.h"
+
 #include <fmt/format.h>
+#include <folly/ScopeGuard.h>
+#include <unicode/ucnv.h>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
@@ -222,14 +226,89 @@ TEST_P(FlinkRegexpExtractTest, hostnameNoMatch) {
           std::optional<int32_t>{0}));
 }
 
-TEST_P(FlinkRegexpExtractTest, rejectsVariablePattern) {
-  auto input = makeRowVector({
-      makeFlatVector<std::string>({"foothebar"}),
-      makeFlatVector<std::string>({"foo(.*?)(bar)"}),
-  });
-  BOLT_ASSERT_THROW(
-      evaluate(fmt::format("{}(c0, c1, 2)", functionName()), input),
-      fmt::format("{} requires a constant pattern", functionName()));
+TEST_P(FlinkRegexpExtractTest, variablePatternsAndGroups) {
+  auto inputs = makeNullableFlatVector<std::string>(
+      {"foo123",
+       "fooabc",
+       "foo123",
+       "foo123",
+       "b",
+       "b",
+       std::nullopt,
+       "foo123"});
+  auto patterns = makeNullableFlatVector<std::string>(
+      {"foo([0-9]+)",
+       "foo([a-z]+)",
+       "*",
+       "foo([0-9]+)",
+       "(a)?b",
+       "(a*)b",
+       "foo(.*)",
+       std::nullopt});
+  for (const auto& groupType : std::vector<TypePtr>{INTEGER(), BIGINT()}) {
+    VectorPtr groups = groupType->isInteger()
+        ? VectorPtr(makeNullableFlatVector<int32_t>({1, 1, 0, -1, 1, 1, 1, 1}))
+        : VectorPtr(makeNullableFlatVector<int64_t>({1, 1, 0, -1, 1, 1, 1, 1}));
+    auto input = makeRowVector({inputs, patterns, groups});
+    auto expected = makeNullableFlatVector<std::string>(
+        {"123",
+         "abc",
+         std::nullopt,
+         std::nullopt,
+         std::nullopt,
+         "",
+         std::nullopt,
+         std::nullopt});
+    const auto expression = fmt::format("{}(c0, c1, c2)", functionName());
+    testEncodings(
+        parseExpression(expression, asRowType(input->type())),
+        input->children(),
+        expected);
+  }
+  auto input = makeRowVector({inputs, patterns});
+  testEncodings(
+      parseExpression(
+          fmt::format("{}(c0, c1)", functionName()), asRowType(input->type())),
+      input->children(),
+      makeNullableFlatVector<std::string>(
+          {"foo123",
+           "fooabc",
+           std::nullopt,
+           "foo123",
+           "b",
+           "b",
+           std::nullopt,
+           std::nullopt}));
+}
+
+TEST_P(FlinkRegexpExtractTest, variablePatternsAcrossBatches) {
+  auto expression = compileExpression(
+      fmt::format("{}(c0, c1, 1)", functionName()),
+      ROW({"c0", "c1"}, {VARCHAR(), VARCHAR()}));
+  VectorPtr retained;
+  for (int batch = 0; batch < 3; ++batch) {
+    auto input = makeRowVector(
+        {makeFlatVector<std::string>(
+             96,
+             [](auto) {
+               return "long_result_with_more_than_twelve_characters";
+             }),
+         makeFlatVector<std::string>(96, [&](auto row) {
+           return fmt::format(
+               "(long_result_with_more_than_twelve_characters)(?:x{{{}}})?",
+               batch * 96 + row);
+         })});
+    auto result = evaluate(*expression, input);
+    bytedance::bolt::test::assertEqualVectors(input->childAt(0), result);
+    if (batch == 0) {
+      retained = result;
+    }
+  }
+  bytedance::bolt::test::assertEqualVectors(
+      makeFlatVector<std::string>(
+          96,
+          [](auto) { return "long_result_with_more_than_twelve_characters"; }),
+      retained);
 }
 
 TEST_P(FlinkRegexpExtractTest, preservesRowsAndInputBuffers) {
@@ -245,6 +324,109 @@ TEST_P(FlinkRegexpExtractTest, preservesRowsAndInputBuffers) {
   bytedance::bolt::test::assertEqualVectors(
       expected,
       evaluate(fmt::format("{}(c0, 'foo([\\w]+)', 1)", functionName()), input));
+}
+
+TEST_F(FlinkRegexFunctionsTest, literalReplacement) {
+  auto input = makeRowVector(
+      {makeNullableFlatVector<std::string>(
+           {"foobar",
+            "foobar",
+            "ö😀ö",
+            "",
+            "abc",
+            "foobar",
+            "foobar",
+            std::nullopt}),
+       makeNullableFlatVector<std::string>(
+           {"o", "o", "ö", "", "", "*", std::nullopt, "o"}),
+       makeNullableFlatVector<std::string>(
+           {"\\", "$1", "[$1\\]", "#", "#", "x", "x", "x"})});
+  auto expected = makeNullableFlatVector<std::string>(
+      {"f\\\\bar",
+       "f$1$1bar",
+       "[$1\\]😀[$1\\]",
+       "#",
+       "#a#b#c#",
+       std::nullopt,
+       std::nullopt,
+       std::nullopt});
+  testEncodings(
+      parseExpression(
+          "flink_regexp_replace(c0,c1,c2)", asRowType(input->type())),
+      input->children(),
+      expected);
+
+  auto values =
+      makeRowVector({makeFlatVector<std::string>({"foobar", "foofoo", "foo"})});
+  testEncodings(
+      parseExpression(
+          "flink_regexp_replace(c0,'(foo)','$1')", asRowType(values->type())),
+      values->children(),
+      makeFlatVector<std::string>({"$1bar", "$1$1", "$1"}));
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateOnce<std::string>(
+          "flink_regexp_replace(c0,'*','x')",
+          std::optional<std::string>{"abc"}));
+}
+
+TEST_F(FlinkRegexFunctionsTest, literalReplacementUsesUtf8) {
+  const std::string originalCharset = ucnv_getDefaultName();
+  auto restore =
+      folly::makeGuard([&]() { ucnv_setDefaultName(originalCharset.c_str()); });
+  ucnv_setDefaultName("ISO-8859-1");
+  EXPECT_EQ(
+      "X😀X",
+      evaluateOnce<std::string>(
+          "flink_regexp_replace(c0, 'ö', 'X')",
+          std::optional<std::string>{"ö😀ö"}));
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>({"ö😀ö", "ö", "abc"}),
+       makeFlatVector<std::string>({"ö", "ö", "a"})});
+  testEncodings(
+      parseExpression(
+          "flink_regexp_replace(c0,c1,'$1')", asRowType(input->type())),
+      input->children(),
+      makeFlatVector<std::string>({"$1😀$1", "$1", "$1bc"}));
+}
+
+TEST_F(FlinkICURegexpExtractTest, variableJavaPatterns) {
+  auto input = makeRowVector(
+      {makeFlatVector<std::string>({"foobar", "foobar", "ö😀ö"}),
+       makeFlatVector<std::string>({"foo(?=bar)", "(?<=foo)bar", "(ö😀)"})});
+  testEncodings(
+      parseExpression("icu_regexp_extract(c0,c1)", asRowType(input->type())),
+      input->children(),
+      makeFlatVector<std::string>({"foo", "bar", "ö😀"}));
+}
+
+TEST_F(FlinkRegexFunctionsTest, regexCacheOwnershipAndEviction) {
+  regex::RegexCache<int> cache;
+  int compilations = 0;
+  const auto compile = [&](StringView) {
+    return std::make_shared<const int>(++compilations);
+  };
+  auto pinned = cache.get(StringView("first"), compile);
+  std::weak_ptr<const int> weak = pinned;
+  EXPECT_EQ(pinned, cache.get(StringView("first"), compile));
+  for (int i = 0; i < 80; ++i) {
+    auto key = fmt::format("pattern_{}", i);
+    cache.get(StringView(key), compile);
+  }
+  EXPECT_FALSE(weak.expired());
+  pinned.reset();
+  EXPECT_TRUE(weak.expired());
+  auto key = std::string(4097, 'x');
+  auto large = cache.get(StringView(key), compile);
+  EXPECT_NE(large, cache.get(StringView(key), compile));
+  int invalidCompilations = 0;
+  const auto invalid = [&](StringView) {
+    ++invalidCompilations;
+    return std::shared_ptr<const int>();
+  };
+  EXPECT_EQ(nullptr, cache.get(StringView("invalid"), invalid));
+  EXPECT_EQ(nullptr, cache.get(StringView("invalid"), invalid));
+  EXPECT_EQ(1, invalidCompilations);
 }
 
 TEST_F(FlinkICURegexpExtractTest, javaRegexSemantics) {

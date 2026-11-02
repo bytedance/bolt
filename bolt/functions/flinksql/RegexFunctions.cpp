@@ -41,13 +41,7 @@ std::shared_ptr<exec::VectorFunction> makeRegexpExtract(
   options.invalidGroupPolicy = Re2ExtractErrorPolicy::kReturnNull;
   options.unmatchedGroupPolicy = Re2ExtractResultPolicy::kReturnNull;
 
-  auto result = makeRe2ExtractWithOptions(name, inputArgs, config, options);
-  BOLT_USER_CHECK(
-      inputArgs[1].constantValue != nullptr &&
-          inputArgs[1].constantValue->isConstantEncoding(),
-      "{} requires a constant pattern.",
-      name);
-  return result;
+  return makeCachedRe2ExtractWithOptions(name, inputArgs, config, options);
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>>

@@ -42,7 +42,11 @@ namespace bytedance::bolt::functions {
 /// Round function
 /// when AlwaysRoundNegDec is false, presto semantics is followed which does not
 /// round negative decimals for integrals and round it otherwise
-template <typename TNum, typename TDecimals, bool alwaysRoundNegDec = false>
+template <
+    typename TNum,
+    typename TDecimals,
+    bool alwaysRoundNegDec = false,
+    bool truncate = false>
 FOLLY_ALWAYS_INLINE TNum
 round(const TNum& number, const TDecimals& decimals = 0) {
   static_assert(!std::is_same_v<TNum, bool> && "round not supported for bool");
@@ -59,7 +63,7 @@ round(const TNum& number, const TDecimals& decimals = 0) {
       //  alwaysRoundNegDec is true
       constexpr auto kMaxScale = sizeof(DecimalUtil::kPowersOfTen) /
           sizeof(DecimalUtil::kPowersOfTen[0]);
-      const auto scale = static_cast<uint64_t>(-decimals);
+      const auto scale = uint64_t{0} - static_cast<uint64_t>(decimals);
       if (scale >= kMaxScale) {
         return static_cast<TNum>(0);
       }
@@ -67,11 +71,13 @@ round(const TNum& number, const TDecimals& decimals = 0) {
       const auto scalingFactor = DecimalUtil::kPowersOfTen[scale];
       int128_t value = static_cast<int128_t>(number);
       int128_t quotient = value / scalingFactor;
-      int128_t remainder = value % scalingFactor;
-      if (value >= 0 && remainder >= scalingFactor / 2) {
-        ++quotient;
-      } else if (remainder <= -scalingFactor / 2) {
-        --quotient;
+      if constexpr (!truncate) {
+        int128_t remainder = value % scalingFactor;
+        if (value >= 0 && remainder >= scalingFactor / 2) {
+          ++quotient;
+        } else if (remainder <= -scalingFactor / 2) {
+          --quotient;
+        }
       }
       int128_t rounded = quotient * scalingFactor;
       return static_cast<TNum>(rounded);
@@ -80,12 +86,27 @@ round(const TNum& number, const TDecimals& decimals = 0) {
     }
   }
   if (!std::isfinite(number)) {
+    if constexpr (truncate) {
+      BOLT_USER_FAIL("Cannot truncate an infinite or NaN value");
+    }
     return number;
   }
 
   double dNumber = static_cast<double>(number);
   BigDecimal decimal(dNumber);
-  decimal.setScale(decimals);
+  if constexpr (truncate) {
+    if constexpr (std::is_same_v<TNum, float>) {
+      BOLT_USER_CHECK_LT(
+          std::abs(dNumber), 1e20, "Value exceeds DECIMAL(38, 18)");
+      decimal.setScale(18);
+      if (decimals >= 18) {
+        return decimal.floatValue();
+      }
+    }
+    decimal.truncateScale(decimals);
+  } else {
+    decimal.setScale(decimals);
+  }
   if constexpr (std::is_same_v<TNum, double>) {
     auto res = decimal.doubleValue();
     return res;

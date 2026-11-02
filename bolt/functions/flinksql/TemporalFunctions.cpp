@@ -507,7 +507,7 @@ struct ToTimestampWithFormatFunction : LegacyTimestampContext {
       fmt = lastFormatter_.get();
     }
     const auto input = std::string_view(dateStr.data(), dateStr.size());
-    auto parsed = fmt->parse(input, TimePolicy::CORRECTED);
+    auto parsed = fmt->parseWithNanosecondPrecision(input);
     if (parsed.hasError()) {
       return parse(input, result, /*allowCanonical=*/false);
     }

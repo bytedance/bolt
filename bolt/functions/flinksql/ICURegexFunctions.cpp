@@ -24,6 +24,7 @@
 #include <unicode/stringpiece.h>
 #include <unicode/unistr.h>
 
+#include "bolt/functions/lib/RegexCache.h"
 #include "bolt/functions/lib/string/RegexUtils.h"
 #include "bolt/functions/lib/string/StringCore.h"
 #include "bolt/vector/ConstantVector.h"
@@ -61,14 +62,14 @@ bool extract(
     vector_size_t row,
     const exec::LocalDecodedVector& inputs,
     int32_t groupId,
-    const icu::LocalPointer<icu::RegexPattern>& regexPattern) {
+    const icu::RegexPattern& regexPattern) {
   const auto input = inputs->valueAt<StringView>(row);
   const auto unicodeInput = icu::UnicodeString::fromUTF8(
       icu::StringPiece(input.data(), input.size()));
 
   UErrorCode status = U_ZERO_ERROR;
   icu::LocalPointer<icu::RegexMatcher> matcher(
-      regexPattern->matcher(unicodeInput, status));
+      regexPattern.matcher(unicodeInput, status));
   if (U_FAILURE(status) || !matcher->find(status) || U_FAILURE(status)) {
     result.setNull(row, true);
     return false;
@@ -129,7 +130,7 @@ class ICURegexpExtractConstantPatternFunction final
     bool mustRefInputStrings = false;
     const auto extractGroup = [&](vector_size_t row, T groupId) {
       mustRefInputStrings |= extract(
-          result, row, inputs, narrowGroupIdLikeJava(groupId), regexPattern_);
+          result, row, inputs, narrowGroupIdLikeJava(groupId), *regexPattern_);
     };
 
     if (args.size() == 2) {
@@ -155,6 +156,57 @@ class ICURegexpExtractConstantPatternFunction final
   const icu::LocalPointer<icu::RegexPattern> regexPattern_;
 };
 
+template <typename T>
+class ICURegexpExtractFunction final : public exec::VectorFunction {
+ public:
+  void apply(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      const TypePtr& outputType,
+      exec::EvalCtx& context,
+      VectorPtr& resultRef) const override {
+    if (args[1]->isConstantEncoding() && !args[1]->isNullAt(0)) {
+      ICURegexpExtractConstantPatternFunction<T>(
+          args[1]->as<ConstantVector<StringView>>()->valueAt(0))
+          .apply(rows, args, outputType, context, resultRef);
+      return;
+    }
+    context.ensureWritable(rows, VARCHAR(), resultRef);
+    auto& result = *resultRef->asFlatVector<StringView>();
+    exec::LocalDecodedVector inputs(context, *args[0], rows);
+    exec::LocalDecodedVector patterns(context, *args[1], rows);
+    bool mustRefInputStrings = false;
+    const auto extractGroup = [&](vector_size_t row, T groupId) {
+      auto pattern =
+          cache_.get(patterns->valueAt<StringView>(row), [](StringView value) {
+            auto compiled = compileJavaRegex(value);
+            return std::shared_ptr<const icu::RegexPattern>(compiled.orphan());
+          });
+      if (!pattern) {
+        result.setNull(row, true);
+        return;
+      }
+      mustRefInputStrings |= extract(
+          result, row, inputs, narrowGroupIdLikeJava(groupId), *pattern);
+    };
+    if (args.size() == 2) {
+      context.applyToSelectedNoThrow(
+          rows, [&](vector_size_t row) { extractGroup(row, T{0}); });
+    } else {
+      exec::LocalDecodedVector groupIds(context, *args[2], rows);
+      context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
+        extractGroup(row, groupIds->valueAt<T>(row));
+      });
+    }
+    if (mustRefInputStrings) {
+      result.acquireSharedStringBuffers(inputs->base());
+    }
+  }
+
+ private:
+  regex::RegexCache<icu::RegexPattern> cache_;
+};
+
 } // namespace
 
 std::shared_ptr<exec::VectorFunction> makeICURegexExtract(
@@ -177,11 +229,6 @@ std::shared_ptr<exec::VectorFunction> makeICURegexExtract(
       "{} requires second argument of type VARCHAR, but got {}",
       name,
       inputArgs[1].type->toString());
-  BOLT_USER_CHECK(
-      inputArgs[1].constantValue != nullptr &&
-          inputArgs[1].constantValue->isConstantEncoding(),
-      "{} requires a constant pattern.",
-      name);
 
   auto groupIdType = TypeKind::INTEGER;
   if (numArgs == 3) {
@@ -194,6 +241,12 @@ std::shared_ptr<exec::VectorFunction> makeICURegexExtract(
   }
 
   const auto* patternVector = inputArgs[1].constantValue.get();
+  if (patternVector == nullptr) {
+    if (groupIdType == TypeKind::INTEGER) {
+      return std::make_shared<ICURegexpExtractFunction<int32_t>>();
+    }
+    return std::make_shared<ICURegexpExtractFunction<int64_t>>();
+  }
   if (patternVector->isNullAt(0)) {
     if (groupIdType == TypeKind::INTEGER) {
       return std::make_shared<

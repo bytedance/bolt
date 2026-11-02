@@ -18,6 +18,7 @@
 #include "bolt/expression/SpecialFormRegistry.h"
 #include "bolt/expression/VectorFunction.h"
 #include "bolt/functions/Registerer.h"
+#include "bolt/functions/flinksql/Arithmetic.h"
 #include "bolt/functions/flinksql/Comparisons.h"
 #include "bolt/functions/flinksql/DateTimeDiff.h"
 #include "bolt/functions/flinksql/DateTimeFunctions.h"
@@ -32,6 +33,7 @@
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/sparksql/Arithmetic.h"
+#include "bolt/functions/sparksql/ICURegexFunctions.h"
 
 namespace bytedance::bolt::functions {
 // If the function registration order is Presto, Spark, Flink,
@@ -66,6 +68,15 @@ static void registerStringFunctions(const std::string& prefix) {
       prefix + "icu_regexp_extract",
       icuRegexExtractSignatures(),
       makeICURegexExtract);
+  exec::registerStatefulVectorFunction(
+      prefix + "flink_regexp_replace",
+      {exec::FunctionSignatureBuilder()
+           .returnType("varchar")
+           .argumentType("varchar")
+           .argumentType("varchar")
+           .argumentType("varchar")
+           .build()},
+      sparksql::makeICURegexReplaceLiteral);
   registerFunction<SplitIndex, Varchar, Varchar, Varchar, int64_t>(
       {prefix + "split_index"});
   registerFunction<SplitIndex, Varchar, Varchar, int32_t, int64_t>(
@@ -149,6 +160,20 @@ static void registerMathFunctions(const std::string& prefix) {
   registerFunction<sparksql::RoundFunction, double, double, int32_t>(
       {prefix + "round"});
 
+  registerUnaryNumeric<FlinkTruncateFunction>({prefix + "flink_truncate"});
+  registerFunction<FlinkTruncateFunction, int8_t, int8_t, int32_t>(
+      {prefix + "flink_truncate"});
+  registerFunction<FlinkTruncateFunction, int16_t, int16_t, int32_t>(
+      {prefix + "flink_truncate"});
+  registerFunction<FlinkTruncateFunction, int32_t, int32_t, int32_t>(
+      {prefix + "flink_truncate"});
+  registerFunction<FlinkTruncateFunction, int64_t, int64_t, int32_t>(
+      {prefix + "flink_truncate"});
+  registerFunction<FlinkTruncateFunction, float, float, int32_t>(
+      {prefix + "flink_truncate"});
+  registerFunction<FlinkTruncateFunction, double, double, int32_t>(
+      {prefix + "flink_truncate"});
+
   registerFunction<RandIntegerFunction, int32_t, int32_t>(
       {prefix + "rand_integer"});
   registerFunction<RandIntegerFunction, int32_t, int32_t, Constant<int32_t>>(
@@ -210,6 +235,10 @@ void registerSpecialFormFunctions(const std::string& prefix) {
   exec::registerFunctionCallToSpecialForm(
       DecimalRoundCallToSpecialForm::kRoundDecimal,
       std::make_unique<DecimalRoundCallToSpecialForm>());
+
+  exec::registerFunctionCallToSpecialForm(
+      DecimalTruncateCallToSpecialForm::kTruncateDecimal,
+      std::make_unique<DecimalTruncateCallToSpecialForm>());
 
   exec::registerFunctionCallToSpecialForm(
       "cast", std::make_unique<FlinkCastCallToSpecialForm>());
