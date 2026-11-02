@@ -86,11 +86,6 @@ class CellSplitter {
   /// arrays must stay valid through every later output call.
   void setColumnPositions(std::vector<const uint32_t*> positions);
 
-  /// Switches one string column to dictionary form for the
-  /// writer's lifetime and sets its encoding tag. Called by the probe before
-  /// the first split.
-  void enableDictionary(uint32_t col);
-
   /// Writes and recycles the linked cells, retaining caches and window state.
   /// Safe during a split or cache flush; nested output calls are suppressed.
   void spillRun();
@@ -159,14 +154,12 @@ class CellSplitter {
     return writingOutput_;
   }
 
- private:
-  /// Lifetime dictionary row counters for logging and metrics. Updated when
-  /// segments close and in the fallback row loop, off the dictionary hit path.
-  struct DictColumnStats {
-    uint64_t matchedRows{0}; // rows written as dictionary indexes
-    uint64_t fallbackRows{0}; // rows written through the fallback tail
-  };
+  /// Switches one string column to dictionary form for the
+  /// writer's lifetime and sets its encoding tag. Called by the probe before
+  /// the first split.
+  void enableDictionary(uint32_t col);
 
+ private:
   /// Encodes cache residues as stream tail blocks before a window closes:
   /// of the partitions `only` marks, or of every partition. Chunk growth
   /// during this step may still spill complete prior appends.
@@ -236,6 +229,19 @@ class CellSplitter {
 
   template <bool kHasNulls, bool kIndexed>
   BOLT_CELL_KERNEL void splitString(uint32_t col, const SplitBatch& batch);
+
+  template <typename T>
+  void dispatchEncoded(uint32_t col, const SplitBatch& batch, bool hasNulls);
+
+  template <typename T>
+  void dispatchRaw(uint32_t col, const SplitBatch& batch, bool hasNulls);
+
+  /// Lifetime dictionary row counters for logging and metrics. Updated when
+  /// segments close and in the fallback row loop, off the dictionary hit path.
+  struct DictColumnStats {
+    uint64_t matchedRows{0}; // rows written as dictionary indexes
+    uint64_t fallbackRows{0}; // rows written through the fallback tail
+  };
 
   template <bool kHasNulls, bool kIndexed>
   BOLT_CELL_KERNEL void splitStringDict(uint32_t col, const SplitBatch& batch);
@@ -307,12 +313,6 @@ class CellSplitter {
       uint64_t key,
       uint8_t* lengthCur,
       uint8_t* dataCur);
-
-  template <typename T>
-  void dispatchEncoded(uint32_t col, const SplitBatch& batch, bool hasNulls);
-
-  template <typename T>
-  void dispatchRaw(uint32_t col, const SplitBatch& batch, bool hasNulls);
 
   const CellLayout& layout_;
   ChunkAllocator& allocator_;
