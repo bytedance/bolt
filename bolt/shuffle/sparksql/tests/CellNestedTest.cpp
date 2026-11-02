@@ -608,12 +608,9 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
 TEST_F(CellNestedTest, adapterWhenNestedTypesAreNotNative) {
   // With nativeNestedTypes off on both sides, every nested schema goes
   // through the adapter's binary column, converted and not flattened, and
-  // reads back as it does in a nested layout. The adapter serializes a
-  // batch in slices of at most 1024 rows and, past their first row, 8 MiB:
-  // a batch of 3000 rows is three slices, each with its own rows'
-  // partitions and flat columns; a struct of three 3 MiB strings is two,
-  // and so is a row of 64 MiB + 1 beside one of 3 MiB. The reader restores
-  // a decoded batch in slices of the same bounds, each of every row.
+  // reads back as it does in a nested layout - batches of 3000 rows and
+  // batches of large rows, a struct of three 3 MiB strings and a row of
+  // 64 MiB + 1 beside one of 3 MiB, alike.
   const auto notNative = [](CellShuffleOptions& cell, bool) {
     cell.nativeNestedTypes = false;
   };

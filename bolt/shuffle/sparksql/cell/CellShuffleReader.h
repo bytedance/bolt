@@ -170,9 +170,6 @@ class CellShuffleReader {
   std::unique_ptr<StreamSource> source_;
   bool exhausted_{false};
   uint64_t decodeTimeNs_{0};
-  /// Physical batch whose complex rows are still being restored.
-  RowVectorPtr pending_;
-  vector_size_t pendingOffset_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

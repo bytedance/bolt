@@ -244,24 +244,11 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   if (!initialized_) {
     initOnFirstBatch(*rv);
   }
-  if (flattener_ != nullptr || !adapter_->hasComplexColumns()) {
-    return splitPhysical(std::move(rv));
+  if (flattener_ == nullptr && adapter_->hasComplexColumns()) {
+    const uint64_t start = currentTimeNs();
+    rv = adapter_->encode(rv, boltPool_);
+    metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
   }
-  // Complex columns are serialized in bounded slices, each split on its own.
-  vector_size_t offset = 0;
-  do {
-    RowVectorPtr physical;
-    {
-      const uint64_t start = currentTimeNs();
-      physical = adapter_->encodeNext(rv, offset, boltPool_);
-      metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
-    }
-    RETURN_NOT_OK(splitPhysical(std::move(physical)));
-  } while (offset < rv->size());
-  return arrow::Status::OK();
-}
-
-arrow::Status CellShuffleWriter::splitPhysical(RowVectorPtr rv) {
   // Oversized inputs are sliced so a checkpoint boundary exists inside
   // them: one giant batch must not inflate a single payload window past
   // the partition byte bound (the legacy writers slice the same way). Lazy
