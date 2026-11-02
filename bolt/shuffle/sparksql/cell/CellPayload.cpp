@@ -653,7 +653,8 @@ bool CellPayloadDecoder::parsePayload(
   }
   rowCount = folly::loadUnaligned<uint32_t>(header);
   const uint32_t runCount = folly::loadUnaligned<uint32_t>(header + 4);
-  // variableBytes at offset 8 is a preallocation hint, never validated.
+  // variableBytes (offset 8) is unused here; it must be 0 only in a
+  // payload without wire columns.
   const uint32_t nullStoredSize = folly::loadUnaligned<uint32_t>(header + 16);
   const uint32_t nullDecodedSize = folly::loadUnaligned<uint32_t>(header + 20);
   if (layout_.numWireColumns() == 0 &&
@@ -834,21 +835,24 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
         return fail(error, "unterminated dictionary sequence");
       }
       marker = data[pos];
-      if (marker >= 0xFE) {
+      static_assert(
+          kDictLastMarker == 0xFF && kDictMoreMarker == kDictLastMarker - 1,
+          "the markers are the two highest byte values");
+      if (marker >= kDictMoreMarker) {
         ++pos;
         break;
       }
-      // Entry: length byte + bytes; the 64-byte dictionary
-      // budget bounds both the entry length and the entry count.
+      // Entry: length byte + bytes; the serialized budget bounds both the
+      // entry length and the entry count.
       const uint32_t length = marker;
-      if (length > 63) {
+      if (length > kDictEntryMaxLen) {
         return fail(error, "dictionary entry too long");
       }
       if (dataSize - pos < 1 + static_cast<size_t>(length)) {
         return fail(error, "dictionary entry out of bounds");
       }
       serialized += 1 + length;
-      if (serialized >= 64) {
+      if (serialized > kDictSerializedBudget) {
         return fail(error, "dictionary over its serialized budget");
       }
       cursor.entries.emplace_back(
@@ -865,7 +869,7 @@ bool CellPayloadDecoder::openStringColumn(uint32_t col, std::string& error) {
     if (addOverflows(matchedSum, matchedRows, matchedSum)) {
       return fail(error, "matched counts overflow");
     }
-    if (marker == 0xFF) {
+    if (marker == kDictLastMarker) {
       break;
     }
   }
