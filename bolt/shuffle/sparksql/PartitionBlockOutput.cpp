@@ -282,23 +282,19 @@ void RssBlockOutput::writeBlocks(const BlockSource& next) {
   BufferPtr block;
   for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
     while (next(pid, block)) {
-      push(pid, block);
+      int32_t pushed;
+      {
+        NanosecondTimer timer(&pushTimeNs_);
+        pushed = client_->pushPartitionData(
+            static_cast<int32_t>(pid),
+            block->asMutable<char>(),
+            static_cast<int64_t>(block->size()));
+      }
+      partitionLengths_[pid] += pushed;
+      pushedBytes_ += pushed;
+      ++numPushes_;
     }
   }
-}
-
-void RssBlockOutput::push(uint32_t pid, BufferPtr& bytes) {
-  int32_t pushed;
-  {
-    NanosecondTimer timer(&pushTimeNs_);
-    pushed = client_->pushPartitionData(
-        static_cast<int32_t>(pid),
-        bytes->asMutable<char>(),
-        static_cast<int64_t>(bytes->size()));
-  }
-  partitionLengths_[pid] += pushed;
-  pushedBytes_ += pushed;
-  ++numPushes_;
 }
 
 void RssBlockOutput::finish(ShuffleWriterMetrics& metrics) {

@@ -298,24 +298,6 @@ void DataCells::reserveNext(uint32_t capacity) {
   nextCapacity_ = newCapacity;
 }
 
-void DataCells::linkCell(ChainInfo& info, uint32_t id) {
-  if (FOLLY_UNLIKELY(id >= nextCapacity_)) {
-    // appendSlow() reserves next_ before it links: not reached from there.
-    BOLT_CHECK_LT(id, allocator_->cellIdCapacity());
-    reserveNext(allocator_->cellIdCapacity());
-  }
-  next_[id] = ChunkAllocator::kInvalidCell;
-  if (info.numCells == 0) {
-    info.firstCell = id;
-  } else {
-    next_[info.lastCell] = id;
-  }
-  info.lastCell = id;
-  info.tail = allocator_->cellData(id);
-  info.tailLeft = allocator_->cellBytes();
-  ++info.numCells;
-}
-
 void DataCells::appendSlow(
     uint32_t pid,
     uint32_t stream,
@@ -372,8 +354,20 @@ void DataCells::appendSlow(
   uint32_t nextHeld = 0;
   while (bytes > 0) {
     if (info.tailLeft == 0) {
+      // Link the next held cell to the end of the chain; next_ covers it,
+      // reserved in phase 1.
       const uint32_t id = heldAt(nextHeld++);
-      linkCell(info, id);
+      BOLT_DCHECK_LT(id, nextCapacity_);
+      next_[id] = ChunkAllocator::kInvalidCell;
+      if (info.numCells == 0) {
+        info.firstCell = id;
+      } else {
+        next_[info.lastCell] = id;
+      }
+      info.lastCell = id;
+      info.tail = allocator_->cellData(id);
+      info.tailLeft = allocator_->cellBytes();
+      ++info.numCells;
     }
     const uint32_t copy = bytes < info.tailLeft ? bytes : info.tailLeft;
     ::memcpy(info.tail, src, copy);

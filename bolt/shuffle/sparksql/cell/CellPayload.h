@@ -504,18 +504,4 @@ void writeRunHeader(
     const uint64_t* decodedSizes,
     uint32_t numStreams);
 
-/// The run compression policy: compresses into `scratch` and points
-/// `body`/`stored` at the COMBINED form when the codec shrinks the bytes,
-/// else at the input (the stored form when compression does not pay). Adds the
-/// codec time to `compressTimeNs`. Returns the layout to declare.
-RunLayout maybeCompressRun(
-    Codec* codec,
-    const char* data,
-    uint64_t dataBytes,
-    BufferPtr& scratch,
-    memory::MemoryPool* pool,
-    const char*& body,
-    uint64_t& stored,
-    uint64_t& compressTimeNs);
-
 } // namespace bytedance::bolt::shuffle::sparksql::cell
