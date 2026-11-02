@@ -752,10 +752,7 @@ void NullCells::emitRecords(
     const Column& column = columns_[cols[i]];
     BOLT_DCHECK(column.cells != nullptr, "records of a column without nulls");
     const uint32_t records = column.tails[pid].moved + 1;
-    // ::memcpy until the hot loops stop depending on link layout: the
-    // helper grows this function, which moves a CellFlattener::flush loop
-    // linked after it across a cache line (~11% slower writes).
-    ::memcpy(out, &records, sizeof(records));
+    folly::storeUnaligned<uint32_t>(out, records);
     out += sizeof(records);
     // The last cell's record goes last.
     walks[numWalks++] = {
