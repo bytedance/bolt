@@ -28,15 +28,40 @@
  * --------------------------------------------------------------------------
  */
 
+#include <date/tz.h>
 #include <gtest/gtest.h>
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/common/testutil/TestValue.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::tz {
 namespace {
 
-TEST(TimeZoneMapTest, getTimeZoneName) {
+using common::testutil::TestValue;
+
+class TimeZoneMapTest : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+#ifndef NDEBUG
+    BOLT_TEST_VALUE_ENABLE();
+    TestValue::set<std::string_view>(
+        "bytedance::bolt::tz::locateZoneImpl", [](std::string_view* name) {
+          if (*name == "Africa/Asmera") {
+            *name = "Invalid/Africa-Asmera";
+          }
+        });
+#endif
+  }
+
+  static void TearDownTestSuite() {
+#ifndef NDEBUG
+    TestValue::clear("bytedance::bolt::tz::locateZoneImpl");
+#endif
+  }
+};
+
+TEST_F(TimeZoneMapTest, getTimeZoneName) {
   EXPECT_EQ("America/Los_Angeles", getTimeZoneName(1825));
   EXPECT_EQ("Europe/Moscow", getTimeZoneName(2079));
   EXPECT_EQ("Pacific/Kanton", getTimeZoneName(2231));
@@ -45,12 +70,17 @@ TEST(TimeZoneMapTest, getTimeZoneName) {
   EXPECT_EQ("-00:01", getTimeZoneName(840));
 }
 
-TEST(TimeZoneMapTest, getTimeZoneID) {
+TEST_F(TimeZoneMapTest, getTimeZoneID) {
   EXPECT_EQ(1825, getTimeZoneID("America/Los_Angeles"));
   EXPECT_EQ(2079, getTimeZoneID("Europe/Moscow"));
   EXPECT_EQ(2231, getTimeZoneID("Pacific/Kanton"));
   EXPECT_EQ(2232, getTimeZoneID("Europe/Kyiv"));
   EXPECT_EQ(2233, getTimeZoneID("America/Ciudad_Juarez"));
+  EXPECT_EQ(1686, getTimeZoneID("Africa/Asmera"));
+  EXPECT_EQ("Africa/Asmera", getTimeZoneName(1686));
+#ifndef NDEBUG
+  EXPECT_EQ("Africa/Asmara", locateZone(1686)->tz()->name());
+#endif
   EXPECT_EQ(0, getTimeZoneID("UTC"));
   EXPECT_EQ(0, getTimeZoneID("GMT"));
   EXPECT_EQ(0, getTimeZoneID("Z"));
@@ -80,7 +110,7 @@ TEST(TimeZoneMapTest, getTimeZoneID) {
   EXPECT_EQ(1825, getTimeZoneID("aMERICa/los_angeles"));
 }
 
-TEST(TimeZoneMapTest, invalid) {
+TEST_F(TimeZoneMapTest, invalid) {
   BOLT_ASSERT_THROW(getTimeZoneName(99999999), "Unable to resolve timeZoneID");
   BOLT_ASSERT_THROW(getTimeZoneID("This is a test"), "Unknown time zone");
 

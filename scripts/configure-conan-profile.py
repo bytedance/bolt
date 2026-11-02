@@ -42,7 +42,7 @@
 # Versioned compiler names and paths select that specific compiler.
 # Explicit --libcxx and --linker options override these defaults.
 # Use --linker ld to select the compiler-default linker without adding a
-# -fuse-ld flag.
+# linker-selection flag.
 # The selected profile is regenerated from scratch and atomically replaced after
 # generation succeeds. Preparation, generation or replacement failures leave the
 # original profile intact; profiles with other names are left unchanged.
@@ -241,8 +241,8 @@ def parse_args() -> argparse.Namespace:
         "--linker",
         default=None,
         help=(
-            "Linker for -fuse-ld (default: lld for Clang/Apple Clang, ld otherwise); "
-            "use 'ld' to omit -fuse-ld"
+            "Linker to select (default: lld for Clang/Apple Clang, ld otherwise); "
+            "use 'ld' to omit the linker-selection flag"
         ),
     )
     parser.add_argument(
@@ -700,7 +700,7 @@ def lto_package_id_entries(
 def toolchain_flag_entries(
     profile_file: Path,
     toolchain_root: Path | None,
-    linker: str | None,
+    linker_flag: str | None,
     lto: str,
     extra_cflags: list[str],
     extra_link_flags: list[str],
@@ -715,6 +715,7 @@ def toolchain_flag_entries(
             for flag in remove_pgo_flags(values)
             if not flag.startswith("--gcc-toolchain=")
             and not flag.startswith("-fuse-ld=")
+            and not flag.startswith("--ld-path=")
             and not flag.startswith("-flto")
         ]
         extra_flags = (
@@ -728,11 +729,11 @@ def toolchain_flag_entries(
             normalized_values.append(pgo.flag)
         if toolchain_root is not None and key == "tools.build:cxxflags":
             normalized_values.append(shlex.quote(f"--gcc-toolchain={toolchain_root}"))
-        if linker and key in (
+        if linker_flag and key in (
             "tools.build:exelinkflags",
             "tools.build:sharedlinkflags",
         ):
-            normalized_values.append(f"-fuse-ld={linker}")
+            normalized_values.append(linker_flag)
         if lto != "none":
             normalized_values.append(f"-flto={lto}")
         entries[key] = repr(normalized_values)
@@ -967,11 +968,20 @@ def _generate_selected_profile(
         selected_linker = "lld"
     if selected_linker == "ld":
         selected_linker = None
+    linker_flag = None
+    if selected_linker:
+        if (
+            is_clang_family(compiler_info.family)
+            and Path(selected_linker).is_absolute()
+        ):
+            linker_flag = f"--ld-path={selected_linker}"
+        else:
+            linker_flag = f"-fuse-ld={selected_linker}"
     conf.update(
         toolchain_flag_entries(
             profile_file,
             selected_gcc_toolchain.root if selected_gcc_toolchain is not None else None,
-            linker=selected_linker,
+            linker_flag=linker_flag,
             lto=lto if is_clang_family(compiler_info.family) else "none",
             extra_cflags=extra_cflags,
             extra_link_flags=extra_link_flags,

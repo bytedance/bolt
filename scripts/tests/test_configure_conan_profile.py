@@ -64,6 +64,33 @@ class ConfigureConanProfileTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return patcher.start()
 
+    def test_configure_source_download_cache(self):
+        cache_key = "core.sources:download_cache"
+        expected_setting = f"{cache_key}={self.root.resolve() / 'source-backup'}\n"
+        cases = (
+            ("missing", None, expected_setting),
+            ("already_set", f"{cache_key}=/existing/cache\n", None),
+            ("no_trailing_newline", "core:non_interactive=True", None),
+            ("commented_key", f"# {cache_key}=/commented/cache\n", None),
+        )
+
+        for name, original, expected in cases:
+            with self.subTest(name=name):
+                global_conf = self.root / "global.conf"
+                global_conf.unlink(missing_ok=True)
+                if original is not None:
+                    global_conf.write_text(original)
+
+                configure.configure_source_download_cache(self.root)
+
+                if name == "already_set":
+                    self.assertEqual(global_conf.read_text(), original)
+                else:
+                    prefix = "" if original is None else original.rstrip("\n") + "\n"
+                    self.assertEqual(
+                        global_conf.read_text(), prefix + (expected or expected_setting)
+                    )
+
     def test_compiler_paths_preserve_links_and_find_installation_cpp_driver(self):
         installation = self.root / "llvm-22" / "bin"
         installation.mkdir(parents=True)
