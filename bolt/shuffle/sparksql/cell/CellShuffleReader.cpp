@@ -257,19 +257,11 @@ RowVectorPtr CellShuffleReader::next() {
       return nextBlock() == Decoded::kPayload;
     });
     decodeTimeNs_ += currentTimeNs() - start;
-  } else if (!adapter_.hasComplexColumns()) {
-    output = nextPhysical();
   } else {
-    if (pending_ == nullptr) {
-      pending_ = nextPhysical();
-      pendingOffset_ = 0;
-    }
-    if (pending_ != nullptr) {
+    output = nextPhysical();
+    if (output != nullptr && adapter_.hasComplexColumns()) {
       const uint64_t start = currentTimeNs();
-      output = adapter_.decodeNext(pending_, pendingOffset_, pool_);
-      if (pendingOffset_ == pending_->size()) {
-        pending_.reset();
-      }
+      output = adapter_.decode(output, pool_);
       decodeTimeNs_ += currentTimeNs() - start;
     }
   }
