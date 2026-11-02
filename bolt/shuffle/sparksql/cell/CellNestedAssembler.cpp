@@ -31,12 +31,6 @@ using Kind = CellNestedLayout::Kind;
 /// Lengths decoded at a time while counting a space's positions.
 constexpr uint32_t kCountBatch = 1024;
 
-/// Bytes the strings of a decoder's batch take out of line.
-uint64_t stringBytes(const CellPayloadDecoder& decoder) {
-  return decoder.batchBytes() -
-      static_cast<uint64_t>(decoder.batchRows()) * decoder.rowBytes();
-}
-
 } // namespace
 
 CellNestedAssembler::CellNestedAssembler(
@@ -178,7 +172,9 @@ uint64_t CellNestedAssembler::positionBytes(uint32_t s, uint64_t positions)
 uint64_t CellNestedAssembler::batchStrings() const {
   uint64_t bytes = 0;
   for (const auto& decoder : decoders_) {
-    bytes += stringBytes(*decoder);
+    // The bytes its batch's strings take out of line.
+    bytes += decoder->batchBytes() -
+        static_cast<uint64_t>(decoder->batchRows()) * decoder->rowBytes();
   }
   return bytes;
 }

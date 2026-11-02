@@ -354,9 +354,6 @@ class DataCells {
     return static_cast<size_t>(stream) * numPartitions_ + pid;
   }
 
-  /// Links an already-allocated cell to the end of the chain.
-  void linkCell(ChainInfo& info, uint32_t id);
-
   /// Grows next_ to cover cell ids below `capacity`.
   void reserveNext(uint32_t capacity);
 

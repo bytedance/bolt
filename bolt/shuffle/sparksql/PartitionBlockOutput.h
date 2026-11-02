@@ -255,8 +255,6 @@ class RssBlockOutput final : public PartitionBlockOutput {
   }
 
  private:
-  void push(uint32_t pid, BufferPtr& bytes);
-
   const PartitionWriterOptions options_;
   const std::shared_ptr<RssClient> client_;
   std::vector<int64_t> partitionLengths_;

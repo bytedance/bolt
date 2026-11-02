@@ -53,19 +53,6 @@ void countColumns(const TypePtr& type, uint64_t& columns) {
   }
 }
 
-/// The type of a node's column: a leaf's own, a container's lengths, a
-/// ROW's presence.
-TypePtr columnType(const CellNestedLayout::Node& node) {
-  switch (node.kind) {
-    case CellNestedLayout::Kind::kLeaf:
-      return node.type;
-    case CellNestedLayout::Kind::kRow:
-      return SMALLINT();
-    default:
-      return INTEGER();
-  }
-}
-
 } // namespace
 
 // static
@@ -96,7 +83,16 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
   types.reserve(nodes_.size());
   for (uint32_t n = 0; n < nodes_.size(); ++n) {
     names.push_back(fmt::format("n{}", n));
-    types.push_back(columnType(nodes_[n]));
+    // A leaf's column has its own type, a container's its lengths, a
+    // ROW's its presence.
+    const auto& node = nodes_[n];
+    if (node.kind == Kind::kLeaf) {
+      types.push_back(node.type);
+    } else if (node.kind == Kind::kRow) {
+      types.push_back(SMALLINT());
+    } else {
+      types.push_back(INTEGER());
+    }
   }
   for (auto& space : spaces_) {
     std::vector<std::string> spaceNames;
