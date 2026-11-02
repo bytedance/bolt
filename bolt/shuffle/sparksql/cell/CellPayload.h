@@ -488,14 +488,6 @@ uint64_t appendPayloadPrefix(
 /// Bytes of one partition's resident cells, all streams together.
 uint64_t residentBytes(const CellWindowInput& in, uint32_t pid);
 
-/// Copies one partition's resident cells stream-major into `out`, which
-/// holds residentBytes(); fills the per-stream sizes.
-void gatherResident(
-    const CellWindowInput& in,
-    uint32_t pid,
-    char* out,
-    uint64_t* streamSizes);
-
 /// Writes a run header at `out`, which holds runHeaderBytes().
 void writeRunHeader(
     char* out,
