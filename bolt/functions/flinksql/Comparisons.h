@@ -50,14 +50,65 @@ inline bool supportsRowEquality(const Type& type) {
   }
 }
 
+inline bool supportsMapKeyEquality(const Type& type) {
+  if (type.kind() == TypeKind::REAL || type.kind() == TypeKind::DOUBLE) {
+    return std::string_view(type.name()) == type.kindName();
+  }
+  // Java byte arrays and composite keys have representation-dependent equality.
+  return type.kind() != TypeKind::ROW && type.kind() != TypeKind::VARBINARY &&
+      supportsRowEquality(type);
+}
+
+inline bool supportsMapEquality(const Type& type);
+
+inline bool supportsMapValueEquality(const Type& type) {
+  switch (type.kind()) {
+    case TypeKind::ARRAY:
+      return supportsMapValueEquality(*type.childAt(0));
+    case TypeKind::ROW:
+      for (const auto& child : type.asRow().children()) {
+        if (!supportsMapValueEquality(*child)) {
+          return false;
+        }
+      }
+      return true;
+    case TypeKind::MAP:
+      return supportsMapEquality(type);
+    case TypeKind::VARBINARY:
+      return std::string_view(type.name()) == type.kindName();
+    default:
+      return supportsMapKeyEquality(type);
+  }
+}
+
+inline bool supportsMapEquality(const Type& type) {
+  return type.isMap() && supportsMapKeyEquality(*type.childAt(0)) &&
+      supportsMapValueEquality(*type.childAt(1));
+}
+
 } // namespace detail
 
 /// Flink compares null ROW fields as values. Floating-point and collection
 /// fields need separate policies and are deliberately excluded here.
-template <typename T>
+template <typename T, bool negate = false>
 struct RowEqualFunction
     : EqFunction<T, CompareFlags::NullHandlingMode::kNullAsValue> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
+
+  bool call(
+      bool& result,
+      const arg_type<Generic<T1>>& left,
+      const arg_type<Generic<T1>>& right) {
+    const auto valid =
+        EqFunction<T, CompareFlags::NullHandlingMode::kNullAsValue>::call(
+            result, left, right);
+    if constexpr (negate) {
+      if (valid) {
+        result = !result;
+      }
+    }
+    return valid;
+  }
 
   void initialize(
       const std::vector<TypePtr>& inputTypes,
@@ -70,5 +121,8 @@ struct RowEqualFunction
         inputTypes[0]->toString());
   }
 };
+
+template <typename T>
+using RowNotEqualFunction = RowEqualFunction<T, true>;
 
 } // namespace bytedance::bolt::functions::flinksql
