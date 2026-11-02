@@ -141,7 +141,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
  private:
   /// The partition's payloads: every sealed window's, then the window
   /// borrowed by finalize().
-  void mergeToFinal(uint32_t pid, DataFileWriter& out) override;
+  void writePartitionShare(uint32_t pid, DataFileWriter& out) override;
 
   struct SpilledRun {
     /// P + 1 absolute spill-file offsets; equal neighbours mean an empty
@@ -178,7 +178,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       size_t from);
 
   /// Appends one partition's sealed payload.
-  void writeDiskPayload(
+  void writeSealedPayload(
       DataFileWriter& out,
       const SealedPayload& payload,
       const uint8_t* encodingTags);
@@ -191,7 +191,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// header, null body and row counts straight from memory, then the
   /// mid-window spilled runs and the still-resident cells as one more run,
   /// in that order. The residual never takes a spill round-trip.
-  void writeCurrentWindowPayload(
+  void writeResidentPayload(
       DataFileWriter& out,
       const CellWindowInput& in,
       uint32_t pid);
@@ -225,12 +225,13 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// The merge: spilled segments copied.
   uint64_t copiedSegments_{0};
   /// The window still in memory, borrowed by finalize() for its merge.
-  const CellWindowInput* residual_{nullptr};
-  bool residualHasData_{false};
+  const CellWindowInput* resident_{nullptr};
+  bool residentHasData_{false};
 
-  uint64_t rawAccum_{0};
+  /// Pre-compression bytes merged so far.
+  uint64_t rawBytesWritten_{0};
   /// Pre-compression bytes merged per partition.
-  std::vector<int64_t> rawLengths_;
+  std::vector<int64_t> rawPartitionLengths_;
   BufferPtr scratch_;
 };
 
@@ -284,7 +285,7 @@ class RssCellOutput final : public CellOutput {
   RunCompressor compressor_;
 
   std::vector<int64_t> rawPartitionLengths_;
-  uint64_t numSealed_{0};
+  uint64_t numSeals_{0};
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

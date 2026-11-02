@@ -161,7 +161,7 @@ CompositeShuffleWriter::~CompositeShuffleWriter() {
 }
 
 arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
-  BOLT_CHECK(!finished_, "split after stop");
+  BOLT_CHECK(!stopped_, "split after stop");
   if (!RowVector::isComposite(rv)) {
     if (compositeActive_) {
       flushComposite();
@@ -190,8 +190,8 @@ arrow::Status CompositeShuffleWriter::reclaimFixedSize(
 }
 
 arrow::Status CompositeShuffleWriter::stop() {
-  BOLT_CHECK(!finished_, "stop called twice");
-  finished_ = true;
+  BOLT_CHECK(!stopped_, "stop called twice");
+  stopped_ = true;
   // Order matters: stopOrdinary() ends output() - it merges the composite
   // spill file into the data file, or ends the Celeborn attempt - so every
   // held composite row must be in output() before it runs.

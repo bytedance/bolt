@@ -108,7 +108,7 @@ class CompositeShuffleWriter : public ShuffleWriter {
       size_t& nextRow,
       BufferPtr& scratch);
 
-  bool finished_{false};
+  bool stopped_{false};
   /// The last batch was composite: that side is the active one - it takes
   /// reclaims - and the ordinary side holds nothing, having been flushed
   /// at the switch. Composite rows may or may not be held (heldRowBytes_).

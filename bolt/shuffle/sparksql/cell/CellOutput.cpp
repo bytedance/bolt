@@ -140,7 +140,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
     }
     ends[pid + 1] = spill_.end();
   }
-  countRun(ends[0]);
+  countSpill(ends[0]);
   // A spill exists to free memory: hand the workspace capacity back too.
   compressor_.releaseWorkspace();
   scratch_.reset();
@@ -180,7 +180,7 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
   ++numSeals_;
 }
 
-void LocalCellOutput::writeDiskPayload(
+void LocalCellOutput::writeSealedPayload(
     DataFileWriter& out,
     const SealedPayload& payload,
     const uint8_t* encodingTags) {
@@ -204,7 +204,7 @@ void LocalCellOutput::writeDiskPayload(
   appendBytes(
       scratch_, encodingTags, (layout_->numWireColumns() + 7) / 8, pool_);
   // The raw length counts the null body at its decompressed size.
-  rawAccum_ += scratch_->size() +
+  rawBytesWritten_ += scratch_->size() +
       (payload.nullDecodedSize == 0
            ? 0
            : payload.nullDecodedSize - payload.nullLength);
@@ -239,7 +239,7 @@ void LocalCellOutput::writeSpilledSegment(
       const uint64_t decoded = sizes[numStreams + s];
       decodedSum += decoded != 0 ? decoded : sizes[s];
     }
-    rawAccum_ += runHeaderBytes + decodedSum;
+    rawBytesWritten_ += runHeaderBytes + decodedSum;
     ++copiedSegments_;
     out.copyFrom(spill_, segment.begin, segmentBytes);
     return;
@@ -256,12 +256,12 @@ void LocalCellOutput::writeSpilledSegment(
   for (const auto size : decodedSizes) {
     decodedSum += size;
   }
-  rawAccum_ += runHeaderBytes + decodedSum;
+  rawBytesWritten_ += runHeaderBytes + decodedSum;
   ++copiedSegments_;
   out.copyFrom(spill_, segment.begin, segmentBytes);
 }
 
-void LocalCellOutput::writeCurrentWindowPayload(
+void LocalCellOutput::writeResidentPayload(
     DataFileWriter& out,
     const CellWindowInput& in,
     uint32_t pid) {
@@ -272,9 +272,9 @@ void LocalCellOutput::writeCurrentWindowPayload(
 
   resetBuffer(scratch_, 0, pool_);
   appendBlockKind();
-  rawAccum_ +=
+  rawBytesWritten_ +=
       appendPayloadPrefix(in, pid, runCount, compressor_, scratch_, pool_);
-  rawAccum_ += scratch_->size();
+  rawBytesWritten_ += scratch_->size();
   out.write(scratch_->as<char>(), scratch_->size());
   // Mid-window spilled runs first (they hold the older blocks), the
   // resident cells last.
@@ -282,7 +282,7 @@ void LocalCellOutput::writeCurrentWindowPayload(
     writeSpilledSegment(out, segment);
   }
   if (total > 0) {
-    rawAccum_ += runHeaderBytes(layout_->numStreams()) + total;
+    rawBytesWritten_ += runHeaderBytes(layout_->numStreams()) + total;
     DataRunSink sink(out);
     writeCells(compressor_, sink, in, pid);
   }
@@ -373,35 +373,36 @@ void LocalCellOutput::finalize(
   // in memory is written straight into the data file by the merge,
   // alongside any runs the window already spilled mid-stream.
   logWindowDiagnostics(in, windowHasData);
-  residual_ = &in;
-  residualHasData_ = windowHasData;
-  rawLengths_.assign(in.numPartitions, 0);
+  resident_ = &in;
+  residentHasData_ = windowHasData;
+  rawPartitionLengths_.assign(in.numPartitions, 0);
   {
     SCOPE_EXIT {
-      residual_ = nullptr;
+      resident_ = nullptr;
     };
     // Per partition: the Cell payloads, then the composite blocks.
     mergeToDataFile(options_, {this, &composite_}, metrics);
   }
   compressor_.releaseWorkspace();
   scratch_.reset();
-  metrics.rawPartitionLengths = rawLengths_;
+  metrics.rawPartitionLengths = rawPartitionLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSeals_);
   LOG(INFO) << "CellShuffleWriter merge: segments copied=" << copiedSegments_;
   logCompression(compressor_, *layout_);
 }
 
-void LocalCellOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
-  BOLT_CHECK_NOT_NULL(residual_, "Cell payloads merged outside finalize()");
-  const uint64_t rawStart = rawAccum_;
+void LocalCellOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
+  BOLT_CHECK_NOT_NULL(resident_, "Cell payloads merged outside finalize()");
+  const uint64_t rawStart = rawBytesWritten_;
   for (const auto& payload : sealed_[pid]) {
-    writeDiskPayload(out, payload, residual_->encodingTags);
+    writeSealedPayload(out, payload, resident_->encodingTags);
   }
-  if (residualHasData_ && residual_->rowCounts[pid] > 0) {
-    writeCurrentWindowPayload(out, *residual_, pid);
+  if (residentHasData_ && resident_->rowCounts[pid] > 0) {
+    writeResidentPayload(out, *resident_, pid);
   }
-  rawLengths_[pid] += static_cast<int64_t>(rawAccum_ - rawStart);
+  rawPartitionLengths_[pid] +=
+      static_cast<int64_t>(rawBytesWritten_ - rawStart);
 }
 
 RssCellOutput::RssCellOutput(
@@ -422,7 +423,7 @@ void RssCellOutput::spillRun(const CellWindowInput& /*in*/) {
 
 void RssCellOutput::sealWindow(const CellWindowInput& in) {
   sendWindow(in);
-  ++numSealed_;
+  ++numSeals_;
 }
 
 void RssCellOutput::sendWindow(const CellWindowInput& in) {
@@ -467,12 +468,12 @@ void RssCellOutput::finalize(
   if (windowHasData) {
     sendWindow(in);
   }
-  LOG(INFO) << "CellShuffleWriter rss: seals=" << numSealed_;
+  LOG(INFO) << "CellShuffleWriter rss: seals=" << numSeals_;
   logCompression(compressor_, *layout_);
   blocks_.finish(metrics);
   metrics.rawPartitionLengths = rawPartitionLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
-  metrics.spillCount = static_cast<int64_t>(numSealed_);
+  metrics.spillCount = static_cast<int64_t>(numSeals_);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
