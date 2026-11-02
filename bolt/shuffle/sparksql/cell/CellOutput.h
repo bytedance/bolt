@@ -102,13 +102,13 @@ class CellOutput {
 /// together with the task's composite output.
 ///
 /// Spill segments are runs in their wire form, written by the RunCompressor
-/// as any final run of the same bytes - or stored, with compressSpill off,
-/// for the merge to compress. The merge writes a payload's header, then its
-/// spilled segments, oldest first, each a run of its own and copied
-/// verbatim when final, and last - for the window still in memory - its
-/// resident cells as one more run. A task whose data never needed a spill
-/// writes payloads straight from the live cells and touches no temporary
-/// file at all.
+/// as any final run of the same bytes - or stored, when a pressure spill
+/// could not fund the compression workspace, for the merge to compress. The
+/// merge writes a payload's header, then its spilled segments, oldest
+/// first, each a run of its own and copied verbatim when final, and last -
+/// for the window still in memory - its resident cells as one more run. A
+/// task whose data never needed a spill writes payloads straight from the
+/// live cells and touches no temporary file at all.
 class LocalCellOutput final : public CellOutput, public PartialSpiller {
  public:
   /// `composite` holds the task's CompositeRowVector blocks, merged after
@@ -149,8 +149,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     std::vector<uint64_t> pidEnds;
     /// Whether the run's COMBINED_UNCOMPRESSED segments already are their final
     /// form: there is no codec, or the segment is too small to compress.
-    /// False with compressSpill off, or when a pressure spill could not fund
-    /// the compression workspace; merge then compresses them.
+    /// False when a pressure spill could not fund the compression
+    /// workspace; merge then compresses them.
     bool storedIsFinal{false};
   };
 
