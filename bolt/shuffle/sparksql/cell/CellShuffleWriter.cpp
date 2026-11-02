@@ -36,7 +36,7 @@ constexpr uint32_t kChunkBytes = 4 << 20;
 /// Slice bound on a remote shuffle, where a window is released only whole
 /// at a batch boundary: one slice bounds how far memory runs past a failed
 /// reservation before the window can be pushed.
-constexpr int64_t kRemoteSliceBytes = 8 << 20;
+constexpr int64_t kReservedSliceBytes = 8 << 20;
 constexpr uint32_t kMinDataCellBytes = 256;
 constexpr uint32_t kMaxDataCellBytes = 64 << 10;
 constexpr uint32_t kDictMinProbeRows = 1024;
@@ -259,7 +259,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
   }
   const int64_t flatSize = rv->estimateFlatSize();
   const int64_t maxBytes =
-      remote_ ? kRemoteSliceBytes : kMaxShuffleWriterBatchBytes;
+      remote_ ? kReservedSliceBytes : kMaxShuffleWriterBatchBytes;
   if (flatSize > maxBytes && rv->size() > 1) {
     const int64_t pieces = std::max<int64_t>(
         1, std::min<int64_t>(rv->size(), (flatSize + maxBytes - 1) / maxBytes));
@@ -269,16 +269,16 @@ arrow::Status CellShuffleWriter::splitOrdinary(
           std::min<int32_t>(rowsPerPiece, rv->size() - begin);
       auto piece = sliceRows(rv, begin, length, boltPool_);
       BOLT_CHECK_NOT_NULL(piece);
-      admitRemoteSlice(flatSize * length / rv->size());
+      reserveSlice(flatSize * length / rv->size());
       RETURN_NOT_OK(splitBatch(std::move(piece)));
     }
     return arrow::Status::OK();
   }
-  admitRemoteSlice(flatSize);
+  reserveSlice(flatSize);
   return splitBatch(std::move(rv));
 }
 
-void CellShuffleWriter::admitRemoteSlice(int64_t estimatedBytes) {
+void CellShuffleWriter::reserveSlice(int64_t estimatedBytes) {
   // A slice must fit before it starts: halfway through, the window cannot
   // be pushed. The reservation also keeps room to assemble the window's
   // largest payload and its compressed copy, since a push needs that room
@@ -292,7 +292,7 @@ void CellShuffleWriter::admitRemoteSlice(int64_t estimatedBytes) {
   const int64_t cap = options_.cellOptions.cellMemoryCapBytes;
   if ((cap > 0 && allocator_->allocatedBytes() + sliceBytes > cap) ||
       !boltPool_->maybeReserve(sliceBytes + pushBytes)) {
-    flushRemoteWindow(SealReason::kRemoteAdmit);
+    releaseWindow(SealReason::kReserve);
   }
 }
 
@@ -558,7 +558,7 @@ void CellShuffleWriter::checkpoint(SealReason reason) {
   boltPool_->release();
 }
 
-int64_t CellShuffleWriter::flushRemoteWindow(SealReason reason) {
+int64_t CellShuffleWriter::releaseWindow(SealReason reason) {
   checkpoint(reason);
   // Every cell was recycled by the seal: the chunks go back as well.
   const int64_t freed = allocator_->shrink();
@@ -574,7 +574,7 @@ void CellShuffleWriter::maybeCheckpoint() {
       pressure_.nullPeakBytes, splitter_->nullFootprintBytes());
   if (remote_ && checkpointRequested_) {
     // Memory ran short mid-batch: push the window now that it is whole.
-    flushRemoteWindow(SealReason::kMemory);
+    releaseWindow(SealReason::kMemory);
     return;
   }
   const auto& cellOpts = options_.cellOptions;
@@ -630,7 +630,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
     return arrow::Status::OK();
   }
   if (remote_) {
-    return reclaimRemote(size, actual);
+    return reclaimWindow(size, actual);
   }
   // A run costs an O(partitions x streams) drain and a segment with its
   // own header and spill compression context per non-empty partition, so
@@ -686,7 +686,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   return arrow::Status::OK();
 }
 
-arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
+arrow::Status CellShuffleWriter::reclaimWindow(int64_t size, int64_t* actual) {
   // Only a whole window can be pushed: mid-batch or mid-seal the request
   // is honored at the next batch boundary, and this reclaim returns just
   // the idle memory freed above.
@@ -702,7 +702,7 @@ arrow::Status CellShuffleWriter::reclaimRemote(int64_t size, int64_t* actual) {
     ++pressure_.idleReclaims;
     return arrow::Status::OK();
   }
-  const int64_t freed = flushRemoteWindow(SealReason::kRemoteReclaim);
+  const int64_t freed = releaseWindow(SealReason::kMemory);
   pressure_.freedByPush += freed;
   *actual += freed;
   metrics_.totalBytesEvicted = output_->bytesEvicted();
@@ -765,7 +765,7 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       "[idle={:.1f}MB spill={:.1f}MB compaction={:.1f}MB run={:.1f}MB "
       "push={:.1f}MB]; partial runs reclaim={} ({:.1f}MB) growth={} "
       "({:.1f}MB); compactions={} ({:.1f}MB emptied); full runs={}; seals "
-      "rows={} memory={} nulls={} flush={} remoteAdmit={} remoteReclaim={}; "
+      "rows={} memory={} nulls={} flush={} reserve={}; "
       "partition seals={} ({} partitions); null peak={:.1f}MB",
       reclaims,
       idleReclaims,
@@ -788,8 +788,7 @@ std::string CellShuffleWriter::PressureStats::toString() const {
       seal(SealReason::kMemory),
       seal(SealReason::kNulls),
       seal(SealReason::kFlush),
-      seal(SealReason::kRemoteAdmit),
-      seal(SealReason::kRemoteReclaim),
+      seal(SealReason::kReserve),
       partitionSeals,
       partitionsSealed,
       mb(nullPeakBytes));
