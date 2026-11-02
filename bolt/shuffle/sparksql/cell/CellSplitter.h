@@ -298,19 +298,17 @@ class CellSplitter {
       uint8_t* dataCur,
       bool last);
 
-  /// Appends one non-null value of a dictionary-mode partition. `key` is
-  /// the value's first 8 StringView bytes, loaded once by the caller; its
-  /// low word is the size. Returns false when the partition just demoted
-  /// to the fallback tail (the value was not appended; the caller routes
-  /// it through the fallback path). Always inlined into the row loop: a
-  /// per-row call was 13% of the dictionary split profile.
+  /// Appends one non-null value of a dictionary-mode partition. Returns
+  /// false when the partition just demoted to the fallback tail (the value
+  /// was not appended; the caller routes it through the fallback path).
+  /// Always inlined into the row loop: a per-row call was 13% of the
+  /// dictionary split profile.
   FOLLY_ALWAYS_INLINE bool appendDictValue(
       uint32_t lengthStream,
       uint32_t dataStream,
       uint32_t pid,
       DictState& st,
       const StringView& view,
-      uint64_t key,
       uint8_t* lengthCur,
       uint8_t* dataCur);
 
