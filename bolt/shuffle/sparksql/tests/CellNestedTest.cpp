@@ -29,8 +29,6 @@
 
 #include "bolt/shuffle/sparksql/BoltShuffleReader.h"
 #include "bolt/shuffle/sparksql/BoltShuffleWriter.h"
-#include "bolt/shuffle/sparksql/ShuffleColumnarToRowConverter.h"
-#include "bolt/shuffle/sparksql/ShuffleRowToColumnarConverter.h"
 #include "bolt/shuffle/sparksql/Utils.h"
 #include "bolt/shuffle/sparksql/cell/CellAssembler.h"
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
@@ -43,19 +41,20 @@
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
 /// ARRAY, MAP and ROW columns through the Cell shuffle, checked against
-/// their input and against V1: every partition reads back its rows, in
-/// order and with every map's entries in their order, whatever the
-/// nesting, the nulls at each level, the input's encodings, the partition
-/// count, codec, output, spills, seals and read batch sizes. The round trips
-/// see the shuffle only from the outside, so they hold for any way the Cell
-/// writer and reader carry nested values; each checks only which way a
-/// schema takes - a nested layout, or the adapter's binary column. The last
-/// tests check the nested layout's pieces directly: its flattening, its
-/// structs' nulls on the wire, the flattener across seals, and what the
-/// assembler accepts.
+/// their input, and fuzzed schemas against V1 as well: every partition
+/// reads back its rows, in order and with every map's entries in their
+/// order, whatever the nesting, the nulls at each level, the input's
+/// encodings, the partition count, codec, output, spills, seals and read
+/// batch sizes. The round trips see the shuffle only from the outside, so
+/// they hold for any way the Cell writer and reader carry nested values;
+/// each checks only which way a schema takes - a nested layout, or the
+/// adapter's binary column. The last tests check the nested layout's pieces
+/// directly: its flattening, its structs' nulls on the wire, the flattener
+/// across seals, and what the assembler accepts.
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
+using test::ReadShape;
 using test::ShuffleInput;
 
 /// Decompression over an engine codec, as the reader wires it.
@@ -533,39 +532,6 @@ RowTypePtr deepNestedType() {
        VARCHAR()});
 }
 
-/// Whether some column of `type` is an ARRAY, MAP or ROW.
-bool hasComplexColumns(const RowTypePtr& type) {
-  for (const auto& child : type->children()) {
-    if (child->kind() == TypeKind::ARRAY || child->kind() == TypeKind::MAP ||
-        child->kind() == TypeKind::ROW) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/// Expects what a nested layout reads back below a null struct of `vector`:
-/// every field null there, and every container among them empty.
-void expectStructNullsFolded(const BaseVector& vector) {
-  if (const auto* row = vector.as<RowVector>()) {
-    for (const auto& child : row->children()) {
-      const auto* containers = child->as<ArrayVectorBase>();
-      for (vector_size_t i = 0; i < row->size(); ++i) {
-        if (row->isNullAt(i)) {
-          ASSERT_TRUE(child->isNullAt(i)) << "row " << i;
-          ASSERT_TRUE(containers == nullptr || containers->sizeAt(i) == 0);
-        }
-      }
-      expectStructNullsFolded(*child);
-    }
-  } else if (const auto* array = vector.as<ArrayVector>()) {
-    expectStructNullsFolded(*array->elements());
-  } else if (const auto* map = vector.as<MapVector>()) {
-    expectStructNullsFolded(*map->mapKeys());
-    expectStructNullsFolded(*map->mapValues());
-  }
-}
-
 /// "P=<partitions> nulls a% b% ..." for a list of per-level null rates.
 std::string nullTrace(
     int32_t numPartitions,
@@ -614,19 +580,6 @@ std::vector<Timestamp> nanoTimestamps(uint64_t seed) {
 
 class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
-  /// One way to read a partition back: rows and bytes per batch.
-  struct ReadShape {
-    int32_t batchSize;
-    int64_t batchByteSize;
-  };
-
-  /// Whole batches, a row per batch, a row per append and an append per
-  /// batch.
-  static inline const std::vector<ReadShape> kReadShapes{
-      {4096, 1 << 20},
-      {1, 1 << 20},
-      {100, 1},
-      {1000, 0}};
   /// Whole batches and a row per append.
   static inline const std::vector<ReadShape> kFewerReadShapes{
       {4096, 1 << 20},
@@ -850,116 +803,16 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
     return partitions;
   }
 
-  /// Writes `input` to a local file and to an RSS client, uncompressed and
-  /// with LZ4, and reads every partition back at every read shape,
-  /// expecting the input's rows in order and, when V1 carries the schema,
-  /// V1's. Each writer must have flattened the complex columns when the
-  /// schema takes a nested layout, its struct nulls folded into the columns
-  /// below, else converted them. `tune` adjusts the writer of each output,
-  /// `check` sees what each writer wrote and reports.
+  /// test::roundTrip() of `input` through this test's data file.
   void roundTrip(
       const ShuffleInput& input,
       int32_t numPartitions,
       const std::function<void(CellShuffleOptions&, bool rss)>& tune = nullptr,
       const std::function<void(const test::WrittenShuffle&, bool rss)>& check =
           nullptr,
-      const std::vector<ReadShape>& readShapes = kReadShapes) {
-    const auto rowType = asRowType(input.data[0]->type());
-    const auto rows = input.rowsOf(numPartitions);
-    const auto lz4 = test::lz4Codec();
-    // Every Cell writer first, so that the first one sees the input's lazy
-    // vectors unloaded.
-    struct Output {
-      bool rss;
-      bool compressed;
-      bool nested;
-      bool nativeNestedTypes;
-      test::WrittenShuffle written;
-    };
-    std::vector<Output> outputs;
-    for (const bool rss : {false, true}) {
-      for (const bool compressed : {false, true}) {
-        auto options = writerOptions(
-            numPartitions,
-            rss,
-            compressed ? arrow::Compression::LZ4_FRAME
-                       : arrow::Compression::UNCOMPRESSED);
-        if (tune) {
-          tune(options.cellOptions, rss);
-        }
-        auto written = test::writeShuffle(options, input, pool());
-        const bool native = options.cellOptions.nativeNestedTypes;
-        const bool nested = native && CellNestedLayout::supports(rowType);
-        {
-          SCOPED_TRACE(rss ? "rss" : "local");
-          if (nested) {
-            EXPECT_GT(written.metrics.flattenTime, 0);
-            EXPECT_EQ(written.metrics.convertTime, 0);
-          } else if (hasComplexColumns(rowType)) {
-            EXPECT_GT(written.metrics.convertTime, 0);
-            EXPECT_EQ(written.metrics.flattenTime, 0);
-          }
-          if (check) {
-            check(written, rss);
-          }
-        }
-        outputs.push_back(
-            {rss, compressed, nested, native, std::move(written)});
-      }
-    }
-    // V1 must read back the input as well, or it is no reference.
-    const bool withV1 = v1Carries(rowType);
-    const auto v1 = withV1 ? v1Partitions(input, numPartitions)
-                           : std::vector<std::vector<RowVectorPtr>>{};
-    std::vector<std::vector<test::RowRef>> v1Rows;
-    for (int32_t pid = 0; withV1 && pid < numPartitions; ++pid) {
-      SCOPED_TRACE("V1 against the input");
-      test::expectPartitionRows(
-          rows[pid], v1[pid], pid, std::numeric_limits<int32_t>::max());
-      if (HasFatalFailure()) {
-        return;
-      }
-      v1Rows.push_back(test::rowsIn(v1[pid]));
-    }
-    for (const auto& output : outputs) {
-      SCOPED_TRACE(fmt::format(
-          "{} {}",
-          output.rss ? "rss" : "local",
-          output.compressed ? "lz4" : "none"));
-      for (const auto& shape : readShapes) {
-        SCOPED_TRACE(fmt::format(
-            "batches of {} rows, {} bytes",
-            shape.batchSize,
-            shape.batchByteSize));
-        for (int32_t pid = 0; pid < numPartitions; ++pid) {
-          const auto batches = test::readPartition(
-              output.written.partitions[pid],
-              rowType,
-              output.compressed ? lz4.get() : nullptr,
-              pool(),
-              shape.batchSize,
-              shape.batchByteSize,
-              output.nativeNestedTypes);
-          {
-            SCOPED_TRACE("against the input");
-            test::expectPartitionRows(rows[pid], batches, pid, shape.batchSize);
-          }
-          if (output.nested) {
-            for (const auto& batch : batches) {
-              expectStructNullsFolded(*batch);
-            }
-          }
-          if (withV1) {
-            SCOPED_TRACE("against V1");
-            test::expectPartitionRows(
-                v1Rows[pid], batches, pid, shape.batchSize);
-          }
-          if (HasFatalFailure()) {
-            return;
-          }
-        }
-      }
-    }
+      const std::vector<ReadShape>& readShapes = test::kReadShapes) {
+    test::roundTrip(
+        input, numPartitions, dataFile_, pool(), tune, check, readShapes);
   }
 
   /// roundTrip() of batches of `rows` rows of `type` over `numPartitions`,
@@ -972,7 +825,7 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
       const std::vector<vector_size_t>& rows,
       int32_t numPartitions,
       uint64_t seed,
-      const std::vector<ReadShape>& readShapes = kReadShapes) {
+      const std::vector<ReadShape>& readShapes = test::kReadShapes) {
     for (size_t i = 0; i < rates.size(); ++i) {
       SCOPED_TRACE(nullTrace(numPartitions, rates[i]) + " " + type->toString());
       options.nullPercent = rates[i];
@@ -1065,59 +918,6 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
       batches.push_back(std::move(batch));
     }
     return batches;
-  }
-
-  /// `data` as aggregation state rows behind a pid column of `pids`: each
-  /// row [size i32][CompactRow bytes] in a CompositeRowVector.
-  std::shared_ptr<CompositeRowVector> makeComposite(
-      const std::vector<int32_t>& pids,
-      const RowVectorPtr& data) {
-    ShuffleColumnarToRowConverter converter(
-        asRowType(data->type()), pool(), row::RowFormat::COMPACT);
-    auto stats =
-        converter.getWithStats(data, std::numeric_limits<int64_t>::max());
-    std::vector<std::vector<uint8_t*>> rows(1);
-    std::vector<uint32_t> partitions(data->size(), 0);
-    std::vector<int64_t> partitionBytes(1, 0);
-    converter.convert(stats, partitions, rows, partitionBytes);
-    const auto ordinary = test::withPid(pids, data, pool());
-    auto children = ordinary->children();
-    auto composite = std::make_shared<CompositeRowVector>(
-        ordinary->type(),
-        data->size(),
-        pool(),
-        std::make_unique<SelectivityVector>(children.size(), true),
-        std::move(children));
-    composite->allocateRows(partitionBytes[0]);
-    RowInfoTracker tracker(composite.get(), 0, data->size());
-    for (vector_size_t i = 0; i < data->size(); ++i) {
-      const auto rowSize =
-          *reinterpret_cast<int32_t*>(rows[0][i]) + kSizeOfRowHeader;
-      auto* row = composite->newRow();
-      ::memcpy(row, rows[0][i], rowSize);
-      composite->store(i, row);
-      composite->advance(rowSize);
-    }
-    return composite;
-  }
-
-  /// The rows of a CompositeRowVector the reader returned, decoded.
-  RowVectorPtr compositeRows(
-      const RowTypePtr& type,
-      const RowVectorPtr& batch) {
-    const auto composite = std::dynamic_pointer_cast<CompositeRowVector>(batch);
-    BOLT_CHECK_NOT_NULL(composite);
-    std::vector<std::string_view> rows;
-    for (vector_size_t row = 0; row < composite->size(); ++row) {
-      auto* data = composite->rowAt(row);
-      auto* end = row + 1 < composite->size()
-          ? composite->rowAt(row + 1)
-          : composite->rowAt(0) + composite->totalRowSize();
-      rows.emplace_back(data, end - data);
-    }
-    ShuffleRowToColumnarConverter converter(
-        type, pool(), row::RowFormat::COMPACT);
-    return converter.convert(rows);
   }
 
   /// The row count of each payload in one partition's bytes of a nested
@@ -1657,7 +1457,7 @@ TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
   }
   const auto batchOf = [&](size_t batch) -> RowVectorPtr {
     if (composite[batch]) {
-      return makeComposite(input.pids[batch], input.data[batch]);
+      return test::makeComposite(input.pids[batch], input.data[batch], pool());
     }
     return test::withPid(input.pids[batch], input.data[batch], pool());
   };
@@ -1684,7 +1484,7 @@ TEST_F(CellNestedTest, compositeBlocksBetweenPayloads) {
         while (auto batch = reader->next()) {
           if (RowVector::isComposite(batch)) {
             ASSERT_LE(batch->size(), shape.batchSize);
-            batches[1].push_back(compositeRows(type, batch));
+            batches[1].push_back(test::compositeRows(type, batch, pool()));
           } else {
             batch->validate({});
             batches[0].push_back(std::move(batch));
@@ -2155,6 +1955,13 @@ TEST_F(CellNestedTest, fuzzedSchemasMatchV1) {
         }
       }
       roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}, {7, 100}});
+      const auto v1 = v1Partitions(input, 7);
+      const auto rows = input.rowsOf(7);
+      for (int32_t pid = 0; pid < 7; ++pid) {
+        SCOPED_TRACE("V1");
+        test::expectPartitionRows(
+            rows[pid], v1[pid], pid, std::numeric_limits<int32_t>::max());
+      }
       if (HasFatalFailure()) {
         return;
       }
