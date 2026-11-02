@@ -1996,7 +1996,7 @@ class BufferStreamIterator final : public ReaderStreamIterator {
   int64_t offset_{0};
 };
 
-/// Delegating codec that meters decompression, the seam the cell reader
+/// Delegating codec that meters decompression, which the Cell reader
 /// cannot meter itself.
 class TimingCodec final : public Codec {
  public:

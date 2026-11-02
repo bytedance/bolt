@@ -41,7 +41,7 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// capacity.
 class CellNestedAssembler final : public CellBatchSource {
  public:
-  /// Positions one append covers at most by default, so that a decoder's
+  /// Positions one append covers at most, so that a decoder's
   /// per-append scratch stays what a flat batch's takes.
   static constexpr uint32_t kAppendPositions = 64 << 10;
 
@@ -50,8 +50,7 @@ class CellNestedAssembler final : public CellBatchSource {
       RowTypePtr type,
       CellDecompressor* decompressor,
       memory::MemoryPool* pool,
-      CellDecodeLimits limits,
-      uint32_t appendPositions = kAppendPositions);
+      CellDecodeLimits limits);
 
   bool beginPayload(CellByteSource& in, std::string& error) override;
 
@@ -72,7 +71,7 @@ class CellNestedAssembler final : public CellBatchSource {
 
   /// Whether the batch takes the payload just begun as well: every space's
   /// positions.
-  bool fits() const;
+  bool takesPayload() const;
 
   /// Bytes the batch's values take, every space's together.
   uint64_t batchBytes() const;
@@ -89,16 +88,15 @@ class CellNestedAssembler final : public CellBatchSource {
 
   const CellNestedLayout layout_;
   memory::MemoryPool* const pool_;
-  const uint32_t appendPositions_;
-  CellPayloadDecoder reader_;
+  CellPayloadDecoder payloadDecoder_;
   std::vector<std::unique_ptr<CellPayloadDecoder>> decoders_;
   /// Per space, the payload's positions.
-  std::vector<uint64_t> positions_;
+  std::vector<uint64_t> payloadPositions_;
   /// Per container node, its batch entries' offsets.
   std::vector<BufferPtr> offsets_;
   /// A payload row's decoded bytes, every space's together: what the byte
   /// budget counts by.
-  uint64_t rowBytes_{1};
+  uint64_t payloadRowBytes_{1};
 };
 
 /// A CellNestedAssembler of `type` when it takes a nested layout, else nullptr;

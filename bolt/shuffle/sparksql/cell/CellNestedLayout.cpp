@@ -101,7 +101,7 @@ CellNestedLayout::CellNestedLayout(RowTypePtr rowType)
       spaceNames.push_back(names[col]);
       spaceTypes.push_back(types[col]);
       if (types[col]->kind() != TypeKind::UNKNOWN) {
-        space.splitColumns.push_back(col);
+        space.wireColumns.push_back(col);
       }
     }
     space.rowType = ROW(std::move(spaceNames), std::move(spaceTypes));

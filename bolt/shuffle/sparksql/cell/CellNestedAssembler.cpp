@@ -29,7 +29,7 @@ namespace {
 using Kind = CellNestedLayout::Kind;
 
 /// Lengths decoded at a time while counting a space's positions.
-constexpr uint32_t kCountBatch = 1024;
+constexpr uint32_t kLengthsPerRead = 1024;
 
 } // namespace
 
@@ -37,16 +37,13 @@ CellNestedAssembler::CellNestedAssembler(
     RowTypePtr type,
     CellDecompressor* decompressor,
     memory::MemoryPool* pool,
-    CellDecodeLimits limits,
-    uint32_t appendPositions)
+    CellDecodeLimits limits)
     : layout_(std::move(type)),
       pool_(pool),
-      appendPositions_(appendPositions),
-      reader_(layout_.layout(), decompressor, pool, limits),
-      positions_(layout_.numSpaces(), 0),
+      payloadDecoder_(layout_.layout(), decompressor, pool, limits),
+      payloadPositions_(layout_.numSpaces(), 0),
       offsets_(layout_.numNodes()) {
-  BOLT_CHECK_GT(appendPositions_, 0);
-  // The spaces' decoders open what reader_ decompressed.
+  // The spaces' decoders open what payloadDecoder_ decompressed.
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     decoders_.push_back(std::make_unique<CellPayloadDecoder>(
         CellLayout::create(layout_.space(s).rowType), nullptr, pool, limits));
@@ -55,18 +52,18 @@ CellNestedAssembler::CellNestedAssembler(
 
 bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
   uint32_t rowCount = 0;
-  if (!reader_.readPayload(in, rowCount, error)) {
+  if (!payloadDecoder_.readPayload(in, rowCount, error)) {
     return false;
   }
-  positions_[0] = rowCount;
+  payloadPositions_[0] = rowCount;
   // Spaces are numbered after their owners': a space's positions are known
   // by the time it opens.
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     const auto& space = layout_.space(s);
     if (!decoders_[s]->openPayload(
-            reader_,
+            payloadDecoder_,
             space.columns.data(),
-            static_cast<uint32_t>(positions_[s]),
+            static_cast<uint32_t>(payloadPositions_[s]),
             error)) {
       return false;
     }
@@ -81,7 +78,7 @@ bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
   uint64_t strings = 0;
   for (uint32_t s = 0; s < layout_.numSpaces(); ++s) {
     const auto& decoder = *decoders_[s];
-    bytes += positions_[s] * decoder.rowBytes();
+    bytes += payloadPositions_[s] * decoder.rowBytes();
     const auto& cellLayout = decoder.layout();
     for (uint32_t col = 0; col < cellLayout.numColumns(); ++col) {
       if (cellLayout.isStringColumn(col)) {
@@ -89,7 +86,7 @@ bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
       }
     }
   }
-  rowBytes_ = std::max<uint64_t>(
+  payloadRowBytes_ = std::max<uint64_t>(
       1, (bytes + strings) / std::max<uint32_t>(1, rowCount));
   return true;
 }
@@ -107,9 +104,9 @@ bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
   // The stream is decoded once more when its rows are appended; the
   // lengths are not kept.
   uint64_t total = 0;
-  int32_t lengths[kCountBatch];
+  int32_t lengths[kLengthsPerRead];
   for (uint32_t left = decoder.nonNullCount(col); left > 0;) {
-    const uint32_t n = std::min(left, kCountBatch);
+    const uint32_t n = std::min(left, kLengthsPerRead);
     if (!cursor.next(n, lengths)) {
       return fail(error, "malformed container length stream");
     }
@@ -127,13 +124,14 @@ bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
   if (!cursor.finished()) {
     return fail(error, "malformed container length stream");
   }
-  positions_[node.ownedSpace] = total;
+  payloadPositions_[node.ownedSpace] = total;
   return true;
 }
 
-bool CellNestedAssembler::fits() const {
+bool CellNestedAssembler::takesPayload() const {
   for (uint32_t s = 1; s < layout_.numSpaces(); ++s) {
-    if (static_cast<uint64_t>(decoders_[s]->batchRows()) + positions_[s] >
+    if (static_cast<uint64_t>(decoders_[s]->batchRows()) +
+            payloadPositions_[s] >
         CellNestedLayout::kMaxPositions) {
       return false;
     }
@@ -170,7 +168,7 @@ RowVectorPtr CellNestedAssembler::nextBatch(
         // End of input, or a composite block that comes out on its own.
         break;
       }
-      if (batchRows > 0 && !fits()) {
+      if (batchRows > 0 && !takesPayload()) {
         // The new payload starts the next batch, whose positions always
         // take it.
         break;
@@ -184,7 +182,7 @@ RowVectorPtr CellNestedAssembler::nextBatch(
       const uint64_t budget = static_cast<uint64_t>(byteBudget);
       const uint64_t used = std::min(batchBytes(), budget);
       n = std::min<uint64_t>(
-          n, std::max<uint64_t>(1, (budget - used) / rowBytes_));
+          n, std::max<uint64_t>(1, (budget - used) / payloadRowBytes_));
     }
     appendSpace(0, n, capacity);
   }
@@ -207,7 +205,7 @@ void CellNestedAssembler::appendSpace(
   uint64_t left = positions;
   do {
     const auto piece =
-        static_cast<uint32_t>(std::min<uint64_t>(left, appendPositions_));
+        static_cast<uint32_t>(std::min<uint64_t>(left, kAppendPositions));
     const bool ok = decoder.appendRows(piece, open, error);
     BOLT_CHECK(ok, "malformed cell shuffle payload: {}", error);
     left -= piece;
@@ -223,7 +221,7 @@ void CellNestedAssembler::appendSpace(
     const uint64_t base = elements.batchRows();
     uint64_t total = 0;
     for (uint64_t i = 0; i < positions; ++i) {
-      // Within one vector: fits() held when the payload began.
+      // Within one vector: takesPayload() held when the payload began.
       entryOffsets[at + i] = static_cast<vector_size_t>(base + total);
       total += static_cast<uint64_t>(lengths[i]);
     }
