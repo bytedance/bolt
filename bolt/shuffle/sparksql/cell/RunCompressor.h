@@ -72,6 +72,9 @@ using RunPieceFn = folly::FunctionRef<void(const char* data, uint32_t bytes)>;
 using RunStreamVisitor =
     folly::FunctionRef<void(uint32_t stream, RunPieceFn fn)>;
 
+/// size(s) is the number of bytes visit(s, fn) hands over.
+using RunStreamSize = folly::FunctionRef<uint64_t(uint32_t stream)>;
+
 /// The Cell writer's run compression, one policy for every run it writes:
 /// spilled, merged, or sent in an RSS payload. A payload's null body goes
 /// through it too, compressed whole as one frame.
@@ -122,12 +125,14 @@ class RunCompressor {
     return codec_.get();
   }
 
-  /// Writes one run of `numStreams` streams, `sizes[s]` bytes each, that
-  /// `visit` hands over - twice for a frame stored after all.
+  /// Writes one run of `numStreams` streams, `size(s)` bytes each, that
+  /// `visit` hands over - twice for a frame stored after all. The sizes
+  /// come first: they choose the layout and fill the header. A run without
+  /// bytes writes nothing.
   void write(
       RunSink& sink,
       uint32_t numStreams,
-      const uint64_t* sizes,
+      RunStreamSize size,
       RunStreamVisitor visit);
 
   /// Compresses the null body `out` holds from byte `at` to its end, one
@@ -259,6 +264,8 @@ class RunCompressor {
   /// null body's.
   BufferPtr frame_;
   BufferPtr compressed_;
+  /// write()'s stream sizes.
+  std::vector<uint64_t> sizes_;
 };
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
