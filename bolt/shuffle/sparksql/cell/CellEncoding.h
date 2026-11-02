@@ -17,8 +17,7 @@
 /// The Encoding Block kernels of the Cell shuffle writer and reader, and the
 /// null body's tag helpers; CellFormat.h defines both formats.
 ///
-/// Self-contained: no dependency on the engine's varint/bitpack code. Pure
-/// functions over caller-provided memory; nothing here allocates.
+/// Pure functions over caller-provided memory; nothing here allocates.
 /// Header-only, so the block kernels inline into the stream loops and
 /// specialize on the full-block value count.
 
@@ -89,6 +88,10 @@ packBits(const uint64_t* staged, uint32_t count, uint32_t bits, uint8_t* out) {
   folly::storeUnaligned<uint64_t>(out, acc);
   return out + (accBits + 7) / 8;
 }
+
+/// Values one block holds at most: a line of SmallInts. A block of T holds
+/// at most kCacheLineBytes / sizeof(T).
+inline constexpr uint32_t kMaxBlockValues = kCacheLineBytes / sizeof(int16_t);
 
 inline void storeLeEnc(uint8_t* out, uint64_t value, uint32_t bytes) {
   ::memcpy(out, &value, bytes);
@@ -168,7 +171,7 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
     case EncodingKind::kBitPack: {
       *pos++ = makeEncodingByte(EncodingKind::kBitPack, bitWidth);
       const uint64_t mask = (uint64_t{1} << bitWidth) - 1;
-      uint64_t staged[kCacheLineBytes / sizeof(int16_t)];
+      uint64_t staged[kMaxBlockValues];
       for (uint32_t i = 0; i < count; ++i) { // widen + mask: vectorizes
         staged[i] =
             static_cast<uint64_t>(static_cast<int64_t>(values[i])) & mask;
@@ -183,7 +186,7 @@ encodeBlockImpl(const T* values, const Count count, uint8_t* out) {
       pos += kWidth;
       if (deltaBits > 0) {
         const uint64_t base = static_cast<uint64_t>(minValue);
-        uint64_t staged[kCacheLineBytes / sizeof(int16_t)];
+        uint64_t staged[kMaxBlockValues];
         for (uint32_t i = 0; i < count; ++i) { // widen + subtract: vectorizes
           staged[i] = static_cast<uint64_t>(values[i]) - base;
         }
@@ -250,7 +253,7 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
 
   switch (kind) {
     case EncodingKind::kConstNarrow: {
-      // 1 <= narrow_bytes <= type_width.
+      // 1 <= param <= kWidth.
       if (param < 1 || param > kWidth || bodyAvail < param) {
         return 0;
       }
@@ -262,7 +265,7 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
       return 1 + param;
     }
     case EncodingKind::kBitPack: {
-      // 1 <= bit_width <= min(63, type_width * 8).
+      // 1 <= param <= kMaxPackBits.
       if (param < 1 || param > kMaxPackBits) {
         return 0;
       }
@@ -276,7 +279,7 @@ decodeBlockImpl(const uint8_t* in, size_t inBytes, const Count count, T* dst) {
       return static_cast<uint32_t>(1 + bodyBytes);
     }
     case EncodingKind::kForBitPack: {
-      // delta_bit_width <= 63.
+      // param <= 63.
       if (param > 63 || bodyAvail < kWidth) {
         return 0;
       }
@@ -431,6 +434,7 @@ inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
   }
   const size_t headerBytes = 1 + (isFor ? kWidth : 0);
   const size_t bodyBytes = (static_cast<size_t>(kCount) * bits + 7) / 8;
+  // The last field's gather loads 8 bytes from its first byte.
   const size_t reach = ((static_cast<size_t>(kCount - 1) * bits) >> 3) + 8;
   if (inBytes < headerBytes ||
       inBytes - headerBytes < std::max(bodyBytes, reach)) {
@@ -455,9 +459,6 @@ inline uint32_t decodeFullBlockAvx2(const uint8_t* in, size_t inBytes, T* dst) {
 /// first-wins order, so the bytes for given values are deterministic.
 /// `out` must hold at least kMaxBlockBytes. Returns bytes written.
 ///
-/// Header-inline so the flush call sites can fold the encode in; the
-/// compiler keeps or drops the inlining per site.
-///
 /// T is one of int16_t, int32_t, int64_t: exactly the encoded stream source
 /// types (SmallInt / Integer, Date / Bigint, Timestamp halves, String
 /// lengths).
@@ -478,10 +479,11 @@ inline uint32_t encodeBlockFull(const T* values, uint8_t* out) {
       out);
 }
 
-/// Decodes one Encoding Block holding `count` values. Validates it fully - a
-/// legal parameter for its kind, and a body within inBytes - and on any
-/// violation returns 0 and writes nothing. Otherwise fills dst[0, count) and
-/// returns the bytes consumed (1 + body).
+/// Decodes one Encoding Block holding `count` values, count * sizeof(T) <=
+/// kCacheLineBytes. Validates it fully - a legal parameter for its kind,
+/// and a body within inBytes - and on any violation returns 0 and writes
+/// nothing. Otherwise fills dst[0, count) and returns the bytes consumed
+/// (1 + body).
 ///
 /// T is one of int16_t, int32_t, int64_t, like encodeBlock.
 template <typename T>

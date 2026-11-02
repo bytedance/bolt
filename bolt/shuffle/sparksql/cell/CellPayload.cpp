@@ -189,8 +189,8 @@ class BitAppender {
   uint32_t used_{0};
 };
 
-/// Bytes one row of a column takes in a decoded vector, nulls aside; for a
-/// raw stream also the wire width of one value.
+/// Values-buffer bytes per row, a Boolean counted as one byte (an upper
+/// bound); for a raw stream, also the wire width of one value.
 uint32_t decodedRowBytes(TypeKind kind) {
   switch (kind) {
     case TypeKind::BOOLEAN:
@@ -392,7 +392,6 @@ bool CellPayloadDecoder::expandNulls(uint32_t rowCount, std::string& error) {
   for (const auto tag : tags_) {
     rawNullColumns += tag == NullTag::kRawNull ? 1 : 0;
   }
-  // Each kRawNull column's records, expanded to a bitmap of the rows.
   const uint64_t bitmapBytes = (static_cast<uint64_t>(rowCount) + 7) / 8;
   const uint64_t expandedBytes =
       static_cast<uint64_t>(rawNullColumns) * bitmapBytes;
@@ -457,15 +456,15 @@ bool CellPayloadDecoder::parseRun(
     return fail(error, "truncated run decoded sizes");
   }
 
-  // Sums must not overflow.
   uint64_t storedSum = 0;
   for (const auto size : storedSizes_) {
     if (addOverflows(storedSum, size, storedSum)) {
       return fail(error, "run stored sizes overflow");
     }
   }
-  // The run's declared wire bytes must fit the remaining input, and
-  // the check comes before any allocation sized from those fields.
+  // Stored sizes must fit the remaining input when the source knows it
+  // (MemoryByteSource). Decoded sizes are bounded only by the pool's
+  // capacity.
   if (storedSum > in.remainingBound()) {
     return fail(error, "run larger than the remaining input");
   }
@@ -1214,6 +1213,9 @@ bool CellPayloadDecoder::appendRaw(
     uint32_t col,
     uint32_t numRows,
     uint32_t dense) {
+  // openColumn() checked that the stream holds exactly the column's
+  // non-null values, and no more than those are read: these `dense` are in
+  // bounds.
   const auto bytes = streamViews_[layout_.columnStream(col)];
   const char* src = bytes.data() + cursors_[col].dense * sizeof(T);
   T* out = batch_[col].values->template asMutable<T>() + batchRows_;
@@ -1228,6 +1230,9 @@ bool CellPayloadDecoder::appendBoolean(
     uint32_t numRows,
     uint32_t dense,
     std::string& error) {
+  // openColumn() checked that the stream holds exactly the column's
+  // non-null values, and no more than those are read: these `dense` are in
+  // bounds.
   const auto bytes = streamViews_[layout_.columnStream(col)];
   const auto* src =
       reinterpret_cast<const uint8_t*>(bytes.data()) + cursors_[col].dense;
@@ -1608,7 +1613,7 @@ void buildNullBody(
     const auto summary = in.nulls->summarize(pid, col, positions);
     setNullTag(tags, col, summary.tag);
   }
-  // Records follow the tags for RAW_NULL columns, in column order, written
+  // Records follow the tags for kRawNull columns, in column order, written
   // together once `out` has room for them all.
   std::vector<uint32_t> rawColumns;
   size_t recordsBytes = 0;

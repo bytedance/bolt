@@ -344,7 +344,8 @@ RowVectorPtr CellNestedAssembler::assemble() {
     batches.push_back(decoder->finishBatch());
     BOLT_CHECK_NOT_NULL(batches.back(), "a space's batch never opened");
   }
-  // Bottom up: a node's children are built when it is.
+  // Children have larger ids than their parent (pre-order), so going down
+  // from the last node builds them first.
   std::vector<VectorPtr> vectors(layout_.numNodes());
   for (uint32_t n = layout_.numNodes(); n-- > 0;) {
     const auto& node = layout_.node(n);

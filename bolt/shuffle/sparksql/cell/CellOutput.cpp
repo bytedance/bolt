@@ -203,7 +203,7 @@ void LocalCellOutput::writeDiskPayload(
       payload.nullLength);
   appendBytes(
       scratch_, encodingTags, (layout_->numWireColumns() + 7) / 8, pool_);
-  // Raw, the null body counts decompressed.
+  // The raw length counts the null body at its decompressed size.
   rawAccum_ += scratch_->size() +
       (payload.nullDecodedSize == 0
            ? 0
@@ -250,6 +250,7 @@ void LocalCellOutput::writeSpilledSegment(
       "corrupt cell spill segment");
   BOLT_CHECK_GE(segmentBytes, runHeaderBytes, "corrupt cell spill segment");
   std::vector<uint64_t> decodedSizes(numStreams);
+  // Past the layout byte and the u64 stored size.
   spill_.read(segment.begin + 9, decodedSizes.data(), 8ull * numStreams);
   uint64_t decodedSum = 0;
   for (const auto size : decodedSizes) {
@@ -466,7 +467,7 @@ void RssCellOutput::finalize(
   if (windowHasData) {
     sendWindow(in);
   }
-  LOG(INFO) << "CellShuffleWriter rss: sealed windows=" << numSealed_;
+  LOG(INFO) << "CellShuffleWriter rss: seals=" << numSealed_;
   logCompression(compressor_, *layout_);
   blocks_.finish(metrics);
   metrics.rawPartitionLengths = rawPartitionLengths_;

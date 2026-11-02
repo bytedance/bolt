@@ -24,19 +24,20 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// The writer side of a nested layout: splits a batch's rows, and then the
+/// The writer side of a nested layout: splits a batch's rows, then the
 /// elements of its containers space by space, through the splitter's column
-/// subsets. The rows are the window's, which the splitter counts; the
-/// positions of every other space it counts here, per partition, and hands
-/// to the splitter as the columns' position bases and position counts.
+/// subsets. The splitter counts the window's rows itself; for every other
+/// space the shredder counts each partition's committed positions and hands
+/// them to the splitter as the columns' position bases.
 ///
 /// A ROW is read as columns at its own positions: its presence, 1 at each
 /// non-null struct, and its fields with the structs' nulls folded in, so
 /// that every column below a null struct is null there and every container
-/// below it holds no element. A flat field of flat structs, as long as
-/// they are, keeps its values under its nulls and theirs, a field of a
-/// constant struct is a constant, and any other field takes the structs'
-/// indices and nulls through a dictionary.
+/// below it holds no element. A flat field of flat structs keeps its
+/// values under its nulls and theirs, a field of a constant struct is a
+/// constant, and any other field - a field shorter than its structs, which
+/// it may be where every struct past its end is null, included - takes the
+/// structs' indices and nulls through a dictionary.
 ///
 /// A container space is split in chunks of up to `chunkPositions` elements,
 /// in the order of the entries holding them, and each chunk's counts are
@@ -66,10 +67,9 @@ class CellNestedShredder {
       uint32_t chunkPositions = kChunkPositions);
 
   /// Takes the next batch, pid column first: decodes it, classifies the
-  /// nulls of the rows' columns and counts each space's positions in the
-  /// batch alone. Throws a user error, as soon as the count passes it, when
-  /// some space holds more than CellNestedLayout's kMaxPositions: no
-  /// payload carries that batch.
+  /// nulls of the rows' columns and counts each space's positions in this
+  /// batch alone. Throws a user error once some space passes
+  /// CellNestedLayout::kMaxPositions: no payload can carry the batch.
   void prepare(const RowVector& rv);
 
   /// Whether the prepared batch's positions in every space, added to the
@@ -138,12 +138,15 @@ class CellNestedShredder {
 
   /// The entries of a space being split: the rows, or a chunk.
   struct Entries {
+    /// The partition of each entry.
     const uint32_t* pid;
     /// Entry k's index into the vectors of the space's nodes: src[k], or
     /// start + k when src is null.
     const vector_size_t* src;
     vector_size_t start;
     uint32_t size;
+    /// The depth of the entries' space; chunks_[depth + 1] takes their
+    /// elements.
     uint32_t depth;
 
     vector_size_t index(uint32_t k) const {
@@ -179,9 +182,9 @@ class CellNestedShredder {
   /// Decodes the vector of a leaf's column or of a ROW's presence.
   void inputColumn(uint32_t n, const VectorPtr& vector);
 
-  /// Field i of ROW n's structs, as decoded, at the structs' entries and
-  /// with their nulls there, `nulls`, folded in; `nulls` is null when no
-  /// struct is.
+  /// Field i of ROW n at the structs' positions, null wherever its struct
+  /// is. `nulls` holds the structs' nulls, or is null when no struct is
+  /// null.
   VectorPtr fold(uint32_t n, uint32_t i, const BufferPtr& nulls);
 
   /// Marks node n and below as holding no entry this batch.
@@ -239,10 +242,14 @@ class CellNestedShredder {
   std::vector<uint32_t> maxCount_;
   std::vector<uint64_t> totals_;
   std::vector<uint64_t> committed_;
+  /// The splitter's sealCount() as last followed: a new seal zeroes the
+  /// counts of the partitions it emptied.
   uint64_t seals_{0};
 
-  /// Chunks by depth, and per partition a chunk's entries and their running
-  /// index; `touched` lists the partitions a chunk holds.
+  /// One chunk per depth: a chunk stays open while the chunks of the spaces
+  /// below it split. Per partition, the current chunk's positions and an
+  /// element's running index; `touched_` lists the partitions the chunk
+  /// holds.
   std::vector<Chunk> chunks_;
   BufferPtr counters_;
   BufferPtr ordinals_;
