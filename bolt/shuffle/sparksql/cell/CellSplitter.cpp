@@ -16,6 +16,7 @@
 
 #include "bolt/shuffle/sparksql/cell/CellSplitter.h"
 
+#include <folly/lang/Bits.h>
 #include <algorithm>
 #include <functional>
 
@@ -122,7 +123,7 @@ void CellSplitter::closeDictSegment(
   uint8_t buf[kDictSerializedBudget + 1 + 1 + 4];
   ::memcpy(buf, cacheLine(dataStream, pid), serialized);
   buf[serialized] = last ? kDictLastMarker : kDictMoreMarker;
-  ::memcpy(buf + serialized + 1, &st.matched, 4);
+  folly::storeUnaligned<uint32_t>(buf + serialized + 1, st.matched);
   const uint32_t bytes = serialized + 5;
   cells_.append(pid, dataStream, buf, bytes);
   bumpPartitionBytes(pid, bytes);
@@ -179,15 +180,14 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
       const uint32_t stride = 1 + size;
       uint32_t hit = count;
       if (FOLLY_LIKELY(size <= 7)) {
-        uint64_t value;
-        ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+        const auto value = folly::loadUnaligned<uint64_t>(
+            reinterpret_cast<const char*>(&view) + 4);
         const uint64_t needle = (value << 8) | size;
         const uint64_t needleMask =
             (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
         uint32_t off = 0;
         for (uint32_t k = 0; k < count; ++k) {
-          uint64_t window;
-          ::memcpy(&window, entries + off, sizeof(window));
+          const auto window = folly::loadUnaligned<uint64_t>(entries + off);
           if ((window & needleMask) == needle) {
             hit = k;
           }
@@ -213,15 +213,14 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
       uint32_t off = 0;
       i = 0;
       if (FOLLY_LIKELY(size <= 7)) {
-        uint64_t value;
-        ::memcpy(&value, reinterpret_cast<const char*>(&view) + 4, 8);
+        const auto value = folly::loadUnaligned<uint64_t>(
+            reinterpret_cast<const char*>(&view) + 4);
         const uint64_t needle = (value << 8) | size;
         const uint64_t needleMask =
             (((uint64_t{1} << (size * 8)) - 1) << 8) | 0xFF;
         uint32_t hit = count;
         for (uint32_t k = 0; k < count; ++k) {
-          uint64_t window;
-          ::memcpy(&window, entries + off, sizeof(window));
+          const auto window = folly::loadUnaligned<uint64_t>(entries + off);
           if ((window & needleMask) == needle) {
             hit = k; // at most once; compiles to a flag-carrying select
           }
@@ -400,7 +399,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
     {
       char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
       const int64_t length = view.size();
-      ::memcpy(slot, &length, sizeof(int64_t));
+      folly::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
       if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockValueBytes)) {
         flushEncoded<int64_t>(lengthStream, pid, lengthCur);
@@ -482,8 +481,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
     // the byte accounting and the whole dictionary probe, and view.data()
     // with its inline-or-pointer branch stays off the hit path.
     static_assert(StringView::kPrefixSize == 4, "prefix layout assumed");
-    uint64_t key;
-    ::memcpy(&key, &view, sizeof(uint64_t));
+    const auto key = folly::loadUnaligned<uint64_t>(&view);
     variableBytes_[pid] += static_cast<uint32_t>(key);
     DictState& st = states[pid];
     if (FOLLY_LIKELY(st.mode == DictState::kModeDict) &&
@@ -498,7 +496,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
     {
       char* slot = cacheLine(lengthStream, pid) + lengthCur[pid];
       const int64_t length = view.size();
-      ::memcpy(slot, &length, sizeof(int64_t));
+      folly::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
       if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockValueBytes)) {
         flushEncoded<int64_t>(lengthStream, pid, lengthCur);
@@ -622,8 +620,8 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
     // Both streams hold one 8-byte value per row, so the two cursors are
     // always equal and both lines fill on the same row.
     const size_t at = (static_cast<size_t>(pid) << 6) + secondsCur[pid];
-    ::memcpy(secondsBase + at, &seconds, sizeof(int64_t));
-    ::memcpy(nanosBase + at, &nanos, sizeof(int64_t));
+    folly::storeUnaligned<int64_t>(secondsBase + at, seconds);
+    folly::storeUnaligned<int64_t>(nanosBase + at, nanos);
     secondsCur[pid] += sizeof(int64_t);
     nanosCur[pid] += sizeof(int64_t);
     if (FOLLY_UNLIKELY(secondsCur[pid] == kBlockValueBytes)) {

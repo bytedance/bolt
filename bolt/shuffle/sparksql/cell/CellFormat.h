@@ -91,6 +91,7 @@
 
 #pragma once
 
+#include <folly/lang/Bits.h>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -181,9 +182,7 @@ constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 /// The size prefix of a CompositeRows row. Rows lie back to back, so the
 /// prefix is in general unaligned: read through memcpy, one load.
 inline int32_t compositeRowSize(const void* row) {
-  int32_t size;
-  ::memcpy(&size, row, sizeof(size));
-  return size;
+  return folly::loadUnaligned<int32_t>(row);
 }
 
 /// Bytes of a CompositeRows row with its size prefix.

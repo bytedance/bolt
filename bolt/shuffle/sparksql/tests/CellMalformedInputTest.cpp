@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <folly/lang/Bits.h>
 #include <gtest/gtest.h>
 
 #include <unistd.h>
@@ -55,7 +56,7 @@ void put(std::string& out, T value) {
 /// `bytes` with `value` written at `at`.
 template <typename T>
 std::string with(std::string bytes, size_t at, T value) {
-  ::memcpy(bytes.data() + at, &value, sizeof(value));
+  folly::storeUnaligned<T>(bytes.data() + at, value);
   return bytes;
 }
 
