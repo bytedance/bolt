@@ -95,19 +95,18 @@ using RunStreamVisitor =
 ///
 /// Streaming compresses a frame straight from the visitor through fixed
 /// buffers: no workspace sized by the data, ever. One-shot gathers each
-/// frame into a workspace from the pool and compresses it at once; a frame
-/// whose workspace cannot be funded is stored instead. Codecs with no
-/// stream form are always one-shot. Both write the same layouts.
+/// frame into a workspace from the spill pool and compresses it at once:
+/// spills and seals come when the task's pool is short, and must not fail
+/// for the memory meant to relieve it. Codecs with no stream form are
+/// always one-shot. Both write the same layouts.
 class RunCompressor {
  public:
   /// Compresses with `options`' codec; stores everything when it is
   /// UNCOMPRESSED. `cellOptions` gives the mode (streamCompression,
-  /// adaptiveCompression). Codec time is added to `*compressTimeNs`;
-  /// `pool` funds the one-shot workspaces and must outlive this object.
+  /// adaptiveCompression). Codec time is added to `*compressTimeNs`.
   RunCompressor(
       const PartitionWriterOptions& options,
       const CellShuffleOptions& cellOptions,
-      memory::MemoryPool* pool,
       uint64_t* compressTimeNs);
 
   ~RunCompressor();
@@ -124,10 +123,8 @@ class RunCompressor {
   }
 
   /// Writes one run of `numStreams` streams, `sizes[s]` bytes each, that
-  /// `visit` hands over - twice for a frame stored after all. Returns false
-  /// when a frame was stored for want of a one-shot workspace: a valid run
-  /// still, which a later pass may compress.
-  bool write(
+  /// `visit` hands over - twice for a frame stored after all.
+  void write(
       RunSink& sink,
       uint32_t numStreams,
       const uint64_t* sizes,
@@ -167,17 +164,14 @@ class RunCompressor {
     uint64_t unshrunkFrames{0};
     uint64_t unshrunkBytes{0};
     uint64_t earlyFrames{0};
-    /// Stored without a try: adaptive skips, frames below
-    /// kMinCompressBytes, and one-shot frames whose workspace could not
-    /// be funded.
+    /// Stored without a try: adaptive skips and frames below
+    /// kMinCompressBytes.
     uint64_t skippedFrames{0};
     uint64_t skippedBytes{0};
     uint64_t tinyFrames{0};
     uint64_t tinyBytes{0};
-    uint64_t unfundedFrames{0};
-    uint64_t unfundedBytes{0};
     /// Null bodies compressed, with the bytes they took in and wrote, and
-    /// stored as they are: too small, skipped, unshrunk or unfunded.
+    /// stored as they are: too small, skipped or unshrunk.
     uint64_t compressedNullBodies{0};
     uint64_t nullInBytes{0};
     uint64_t nullOutBytes{0};
@@ -212,26 +206,17 @@ class RunCompressor {
   /// Takes `compressor` as the stream form and sizes its buffers.
   void useStreamCompressor(std::unique_ptr<StreamCompressor> compressor);
 
-  /// How a frame went.
-  struct Frame {
-    /// The compressed frame's size; 0 when it was not compressed, and
-    /// nothing was written.
-    uint64_t stored{0};
-    /// False when not compressed for want of a one-shot workspace, rather
-    /// than because it does not shrink.
-    bool final{true};
-  };
-
   /// Writes the `bytes` `visit` hands over as one compressed frame, unless
   /// it does not shrink - judged early from its first blocks when `probe`,
-  /// else on its whole size - or its one-shot workspace cannot be funded.
-  Frame
+  /// else on its whole size. Returns the compressed frame's size; 0 when it
+  /// was not compressed, and nothing was written.
+  uint64_t
   writeFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit, bool probe);
 
   uint64_t
   streamFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit, bool probe);
 
-  Frame oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit);
+  uint64_t oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit);
 
   /// Whether a frame whose kind has `skip` frames left to store without a
   /// try is stored so; counts it down if so.
@@ -248,8 +233,9 @@ class RunCompressor {
       const uint64_t* sizes,
       RunStreamVisitor visit);
 
-  /// Counts a frame of `bytes` that was tried, or not when `skipped`.
-  void countFrame(const Frame& frame, uint64_t bytes, bool skipped);
+  /// Counts a frame of `bytes`, compressed into `stored` bytes (0: stored
+  /// as it is), that was tried, or not when `skipped`.
+  void countFrame(uint64_t stored, uint64_t bytes, bool skipped);
 
   memory::MemoryPool* const pool_;
   uint64_t* const compressTimeNs_;

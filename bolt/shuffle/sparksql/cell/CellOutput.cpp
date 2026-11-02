@@ -121,7 +121,7 @@ LocalCellOutput::LocalCellOutput(
       layout_(layout),
       cellOptions_(cellOptions),
       pool_(pool),
-      compressor_(options_, cellOptions_, pool, &compressTimeNs_) {
+      compressor_(options_, cellOptions_, &compressTimeNs_) {
   openFrom_.assign(options_.numPartitions, 0);
   sealed_.resize(options_.numPartitions);
 }
@@ -129,11 +129,9 @@ LocalCellOutput::LocalCellOutput(
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
   const uint32_t numStreams = layout_->numStreams();
   auto& run = runs_.emplace_back();
-  // Runs are compressed as they spill, so both disk passes write compressed
-  // bytes and the merge copies the segments verbatim. A run a pressure spill
-  // had to store for want of a workspace is not final: the merge compresses
-  // it.
-  run.storedIsFinal = true;
+  // Runs are compressed as they spill, in their final form: both disk
+  // passes write compressed bytes and the merge copies the segments
+  // verbatim.
   auto& ends = run.pidEnds;
   ends.resize(in.numPartitions + 1);
   ends[0] = spill_.end();
@@ -146,8 +144,7 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
         const auto visit = [&](uint32_t s, RunPieceFn fn) {
           in.cells->scan(pid, s, fn);
         };
-        run.storedIsFinal &=
-            compressor_.write(sink, numStreams, sizes.data(), visit);
+        compressor_.write(sink, numStreams, sizes.data(), visit);
       }
     }
     ends[pid + 1] = spill_.end();
@@ -266,35 +263,8 @@ void LocalCellOutput::writeSpilledSegment(
     decodedSum += size;
   }
   rawAccum_ += runHeaderBytes + decodedSum;
-  // A compressed segment, and a stored one the spill already made final,
-  // is copied as it is. Any other stored segment - one a pressure spill
-  // could not compress - is compressed now, read back from the spill file
-  // stream by stream.
-  if (layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
-      segment.storedIsFinal) {
-    ++copiedSegments_;
-    out.copyFrom(spill_, segment.begin, segmentBytes);
-    return;
-  }
-  std::vector<uint64_t> streamAt(numStreams);
-  uint64_t at = segment.begin + runHeaderBytes;
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    streamAt[s] = at;
-    at += decodedSizes[s];
-  }
-  ++compressedSegments_;
-  DataRunSink sink(out);
-  compressor_.write(
-      sink, numStreams, decodedSizes.data(), [&](uint32_t s, RunPieceFn fn) {
-        char buffer[16 << 10];
-        for (uint64_t done = 0; done < decodedSizes[s];) {
-          const uint64_t chunk =
-              std::min<uint64_t>(sizeof(buffer), decodedSizes[s] - done);
-          spill_.read(streamAt[s] + done, buffer, chunk);
-          fn(buffer, static_cast<uint32_t>(chunk));
-          done += chunk;
-        }
-      });
+  ++copiedSegments_;
+  out.copyFrom(spill_, segment.begin, segmentBytes);
 }
 
 void LocalCellOutput::writeCurrentWindowPayload(
@@ -361,8 +331,7 @@ std::vector<LocalCellOutput::SpillSegment> LocalCellOutput::partitionSegments(
   for (size_t i = from; i < runs.size(); ++i) {
     const auto& run = runs[i];
     if (run.pidEnds[pid + 1] > run.pidEnds[pid]) {
-      segments.push_back(
-          {run.pidEnds[pid], run.pidEnds[pid + 1], run.storedIsFinal});
+      segments.push_back({run.pidEnds[pid], run.pidEnds[pid + 1]});
     }
   }
   return segments;
@@ -444,8 +413,7 @@ void LocalCellOutput::finalize(
   metrics.rawPartitionLengths = rawLengths_;
   metrics.totalCompressTime = static_cast<int64_t>(compressTimeNs_);
   metrics.spillCount = static_cast<int64_t>(numSeals_);
-  LOG(INFO) << "CellShuffleWriter merge: segments copied=" << copiedSegments_
-            << " compressed=" << compressedSegments_;
+  LOG(INFO) << "CellShuffleWriter merge: segments copied=" << copiedSegments_;
   logCompression(compressor_, *layout_);
 }
 
@@ -470,7 +438,7 @@ RssCellOutput::RssCellOutput(
     : raw_(raw),
       layout_(layout),
       pool_(pool),
-      compressor_(options, cellOptions, pool, &compressTimeNs_),
+      compressor_(options, cellOptions, &compressTimeNs_),
       rawPartitionLengths_(options.numPartitions, 0) {}
 
 void RssCellOutput::spillRun(const CellWindowInput& /*in*/) {
