@@ -160,6 +160,10 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
               inputType.names().begin() + 1, inputType.names().end()),
           std::vector<TypePtr>(
               inputType.children().begin() + 1, inputType.children().end()));
+  BOLT_CHECK(
+      CellShuffleTypeAdapter::isSupported(logicalType),
+      "Unsupported Cell logical schema: {}",
+      logicalType->toString());
   if (options_.cellOptions.nativeNestedTypes &&
       CellNestedLayout::supports(logicalType)) {
     // ARRAY, MAP and ROW columns flatten into plain columns, a container's
