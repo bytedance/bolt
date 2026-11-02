@@ -168,6 +168,15 @@ TEST_F(RandTest, LiteralSeedContinuesAcrossBatches) {
       evaluate(*expression, input)->as<SimpleVector<double>>()->valueAt(0);
   EXPECT_DOUBLE_EQ(first, 0.7308781907032909);
   EXPECT_DOUBLE_EQ(second, 0.41008081149220166);
+
+  auto integers =
+      compileExpression("flink_rand_integer(1, 100)", asRowType(input->type()));
+  auto firstInteger =
+      evaluate(*integers, input)->as<SimpleVector<int32_t>>()->valueAt(0);
+  auto secondInteger =
+      evaluate(*integers, input)->as<SimpleVector<int32_t>>()->valueAt(0);
+  EXPECT_EQ(firstInteger, 85);
+  EXPECT_EQ(secondInteger, 88);
 }
 
 TEST_F(RandTest, DynamicSeedStartsNewSequenceForEachRow) {

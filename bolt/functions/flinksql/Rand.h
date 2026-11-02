@@ -100,6 +100,37 @@ class JavaRandom {
   uint64_t state_ = 0;
 };
 
+// Literal seeds advance shared state; dynamic seeds restart it for each row.
+class FlinkRandomState {
+ public:
+  void initialize() {
+    initialize<int64_t>(nullptr);
+  }
+
+  template <typename TSeed>
+  void initialize(const TSeed* seed) {
+    constantSeed_ = seed != nullptr;
+    generator_.setSeed(seed ? *seed : folly::Random::rand64());
+  }
+
+  JavaRandom& generator() {
+    return generator_;
+  }
+
+  template <typename TNext>
+  auto generate(int64_t seed, TNext next) {
+    if (constantSeed_) {
+      return next(generator_);
+    }
+    JavaRandom generator(seed);
+    return next(generator);
+  }
+
+ private:
+  bool constantSeed_ = false;
+  JavaRandom generator_;
+};
+
 } // namespace detail
 
 /// flink_rand([seed]) uses the java.util.Random sequence.
@@ -110,7 +141,7 @@ struct FlinkRandFunction {
   static constexpr bool is_deterministic = false;
 
   void initialize(const std::vector<TypePtr>&, const core::QueryConfig&) {
-    generator_.setSeed(folly::Random::rand64());
+    state_.initialize();
   }
 
   template <typename TSeed>
@@ -118,26 +149,21 @@ struct FlinkRandFunction {
       const std::vector<TypePtr>&,
       const core::QueryConfig&,
       const TSeed* seed) {
-    constantSeed_ = seed != nullptr;
-    generator_.setSeed(seed ? *seed : folly::Random::rand64());
+    state_.initialize(seed);
   }
 
   void call(double& result) {
-    result = generator_.nextDouble();
+    result = state_.generator().nextDouble();
   }
 
   template <typename TSeed>
   void call(double& result, TSeed seed) {
-    if (constantSeed_) {
-      result = generator_.nextDouble();
-    } else {
-      result = detail::JavaRandom(seed).nextDouble();
-    }
+    result = state_.generate(
+        seed, [](auto& generator) { return generator.nextDouble(); });
   }
 
  private:
-  bool constantSeed_ = false;
-  detail::JavaRandom generator_;
+  detail::FlinkRandomState state_;
 };
 
 /// flink_rand_integer([seed,] bound) uses Flink SQL argument order.
@@ -151,7 +177,7 @@ struct FlinkRandIntegerFunction {
       const std::vector<TypePtr>&,
       const core::QueryConfig&,
       const int32_t*) {
-    generator_.setSeed(folly::Random::rand64());
+    state_.initialize();
   }
 
   void initialize(
@@ -159,25 +185,20 @@ struct FlinkRandIntegerFunction {
       const core::QueryConfig&,
       const int32_t* seed,
       const int32_t*) {
-    constantSeed_ = seed != nullptr;
-    generator_.setSeed(seed ? *seed : folly::Random::rand64());
+    state_.initialize(seed);
   }
 
   void call(int32_t& result, int32_t bound) {
-    result = generator_.nextInt(bound);
+    result = state_.generator().nextInt(bound);
   }
 
   void call(int32_t& result, int32_t seed, int32_t bound) {
-    if (constantSeed_) {
-      result = generator_.nextInt(bound);
-    } else {
-      result = detail::JavaRandom(seed).nextInt(bound);
-    }
+    result = state_.generate(
+        seed, [bound](auto& generator) { return generator.nextInt(bound); });
   }
 
  private:
-  bool constantSeed_ = false;
-  detail::JavaRandom generator_;
+  detail::FlinkRandomState state_;
 };
 
 } // namespace bytedance::bolt::functions::flinksql
