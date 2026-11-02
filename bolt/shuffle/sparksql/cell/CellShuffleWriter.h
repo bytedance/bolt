@@ -128,9 +128,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// splitBatch() of a nested layout: seals the window first when the
   /// batch's positions do not fit beside it.
   arrow::Status splitNested(RowVectorPtr rv);
-  /// Where a window is released only whole (remote): releases it first
-  /// when the next slice of about `estimatedBytes` cannot be reserved.
-  void reserveSlice(int64_t estimatedBytes);
   /// The single dictionary probe (first batch, lifetime decision) of the
   /// string columns `columns`, as `decoded` and `nullClass` hold them.
   void probeDictionary(
