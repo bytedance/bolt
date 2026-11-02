@@ -51,27 +51,32 @@ class ChunkAllocator {
  public:
   static constexpr uint32_t kInvalidCell = 0xFFFFFFFFu;
 
-  /// Called before the allocator asks the pool for a new chunk. This is the
-  /// caller's budget choke point: it may reserve memory, or spill and
-  /// recycle() cells; allocation then retries the freelist before growing.
-  using GrowCallback = std::function<void()>;
+  /// Called when the freelist is empty, before the allocator asks the pool
+  /// for a new chunk: the caller's budget choke point. It may reserve pool
+  /// memory for the chunk, or free memory by spilling and recycle()-ing
+  /// cells; the allocator takes recycled cells first and grows only if none
+  /// came back. It must not allocate cells from this allocator. It may also
+  /// leave the growth to proceed unreserved, and the pool's own arbitration
+  /// then decides.
+  using ReserveChunkFn = std::function<void()>;
 
   /// Both sizes must be powers of two, 0 < cellBytes <= chunkBytes.
-  /// Stores beforeGrow for later allocations; construction does not call it.
+  /// Stores reserveChunk for later allocations; construction does not call
+  /// it.
   ChunkAllocator(
       memory::MemoryPool* pool,
       uint32_t chunkBytes,
       uint32_t cellBytes,
-      GrowCallback beforeGrow = {});
+      ReserveChunkFn reserveChunk = {});
   ~ChunkAllocator();
 
   ChunkAllocator(const ChunkAllocator&) = delete;
   ChunkAllocator& operator=(const ChunkAllocator&) = delete;
 
   /// Returns a cell id. Order of preference: freelist, never-yet-handed slot
-  /// of a retained chunk, then a new chunk from the pool (invoking the stored
-  /// callback first and re-checking the freelist after it, since it may spill
-  /// and recycle).
+  /// of a retained chunk, then a new chunk from the pool (calling
+  /// reserveChunk first and re-checking the freelist after it, since it may
+  /// spill and recycle).
   uint32_t allocCell();
 
   /// O(1) id -> address. Valid until the owning chunk is released by
@@ -142,7 +147,7 @@ class ChunkAllocator {
   void beginEvacuation(const std::vector<uint8_t>& evacuating);
 
   /// A free cell outside the evacuating chunks; kInvalidCell when none is
-  /// left. Never calls the grow callback or the pool.
+  /// left. Never calls reserveChunk or the pool.
   uint32_t allocForEvacuation();
 
   void endEvacuation();
@@ -172,7 +177,7 @@ class ChunkAllocator {
   void findBumpChunk();
 
   memory::MemoryPool* const pool_;
-  const GrowCallback beforeGrow_;
+  const ReserveChunkFn reserveChunk_;
   const uint32_t chunkBytes_;
   const uint32_t cellBytes_;
   uint32_t cellBytesShift_;
@@ -224,7 +229,7 @@ class DataCells {
   ///
   /// Spill-safe by construction: every cell the append may need is allocated
   /// (held unlinked) before a single byte is copied, so a spill fired from
-  /// the allocator's callback or the pool's arbitration during chunk growth
+  /// the allocator's reserveChunk or the pool's arbitration during chunk growth
   /// sees only complete prior appends. The spill must release chains via
   /// releaseAll()/releasePartition() (recycling), never the allocator's
   /// resetAll(), so held ids stay valid.
