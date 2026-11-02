@@ -330,11 +330,6 @@ class CellSplitter {
   std::vector<const uint32_t*> columnPositions_;
   /// One bit per wire column, set by enableDictionary for the writer lifetime.
   std::vector<uint8_t> encodingTags_;
-  /// spillPartitions() scratch: (bytes, pid) candidates and the Run's mask.
-  std::vector<std::pair<uint64_t, uint32_t>> spillOrder_;
-  std::vector<uint8_t> runPartitions_;
-  /// sealPartitionsOver() scratch: the seal's mask.
-  std::vector<uint8_t> sealPartitions_;
 
   /// Cache lines (64B * P * S) and cursors (P * S), one arena allocation,
   /// huge-page backed above the threshold.
