@@ -134,20 +134,24 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
 
   const auto& cellOpts = options_.cellOptions;
   const uint32_t numStreams = layout_.numStreams();
-  // The memory the writer can count on: the pool's capacity, or, from an
-  // unlimited pool (kMaxMemory: under Spark the limit lives in the task's
-  // execution memory), the Spark execution memory per task. Cell tail
-  // slack is bounded by a share of it, so sizing from a budget far above
-  // the real one wastes a large part of the real memory in half-filled
-  // tail cells. With neither, a 1 GiB budget.
+  // The memory the writer can count on: the tighter of the root pool's cap,
+  // which maxCapacity() reads, and the Spark execution memory per task,
+  // each where it is set (a pool without a cap reports kMaxMemory: under
+  // Spark the limit lives in the task's execution memory). Cell tail slack
+  // is bounded by a share of it, so sizing from a budget far above the
+  // real one wastes a large part of the real memory in half-filled tail
+  // cells. With neither, a 1 GiB budget.
   constexpr int64_t kUnlimited = int64_t{1} << 40;
-  int64_t limit = boltPool_->maxCapacity();
-  if (limit <= 0 || limit > kUnlimited) {
-    const auto perTask =
-        memory::sparksql::ExecutionMemoryPool::getAvailableMemoryPerTask();
-    limit = perTask.has_value() && *perTask > 0 && *perTask <= kUnlimited
-        ? *perTask
-        : 0;
+  const auto bounded = [](int64_t bytes) {
+    return bytes > 0 && bytes <= kUnlimited;
+  };
+  const int64_t poolCap = boltPool_->maxCapacity();
+  const auto perTask =
+      memory::sparksql::ExecutionMemoryPool::getAvailableMemoryPerTask();
+  int64_t limit = bounded(poolCap) ? poolCap : 0;
+  if (perTask.has_value() && bounded(*perTask) &&
+      (limit == 0 || *perTask < limit)) {
+    limit = *perTask;
   }
   const int64_t budget = limit > 0
       ? std::min<int64_t>(limit / 4, int64_t{1} << 30)
