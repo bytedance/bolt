@@ -36,7 +36,7 @@ ShuffleSpillFile::~ShuffleSpillFile() {
 }
 
 uint64_t ShuffleSpillFile::append(const void* data, size_t bytes) {
-  BOLT_CHECK(!sealed_, "shuffle spill file appended after it was sealed");
+  BOLT_CHECK(!frozen_, "shuffle spill file appended after it was frozen");
   if (file_ == nullptr) {
     if (!options_.configuredDirs.empty()) {
       // In a random directory as the local partition writer does, so
@@ -209,15 +209,15 @@ void PartialSpiller::mergeToDataFile(
   // Nothing may be appended behind the merge: it would break the
   // partition-major order or be missed by partitions already written.
   for (auto* spiller : spillers) {
-    BOLT_CHECK(!spiller->spill_.sealed(), "partial spiller merged twice");
+    BOLT_CHECK(!spiller->spill_.isFrozen(), "partial spiller merged twice");
     spiller->spill_.flush();
-    spiller->spill_.seal();
+    spiller->spill_.freeze();
   }
   DataFileWriter out(options.dataFile, options.numPartitions);
   for (uint32_t pid = 0; pid < options.numPartitions; ++pid) {
     out.beginPartition(pid);
     for (auto* spiller : spillers) {
-      spiller->mergeToFinal(pid, out);
+      spiller->writePartitionShare(pid, out);
     }
   }
   out.close(metrics);
@@ -227,7 +227,7 @@ void PartialSpiller::mergeToDataFile(
   for (auto* spiller : spillers) {
     spiller->spill_.remove();
     metrics.totalBytesEvicted += spiller->spill_.bytesWritten();
-    metrics.totalSpillFiles += spiller->spillRuns_;
+    metrics.totalSpillFiles += spiller->numSpills_;
     metrics.totalEvictTime +=
         static_cast<int64_t>(spiller->spill_.writeTimeNs());
   }
@@ -237,8 +237,8 @@ LocalBlockOutput::LocalBlockOutput(PartitionWriterOptions options)
     : PartialSpiller(options, "blocks"), options_(std::move(options)) {}
 
 void LocalBlockOutput::writeBlocks(const BlockSource& next) {
-  BOLT_CHECK(!spill_.sealed(), "writeBlocks after the merge");
-  auto& ends = blockRuns_.emplace_back(options_.numPartitions + 1);
+  BOLT_CHECK(!spill_.isFrozen(), "writeBlocks after the merge");
+  auto& ends = spillOffsets_.emplace_back(options_.numPartitions + 1);
   ends[0] = spill_.end();
   BufferPtr block;
   for (uint32_t pid = 0; pid < options_.numPartitions; ++pid) {
@@ -247,7 +247,7 @@ void LocalBlockOutput::writeBlocks(const BlockSource& next) {
     }
     ends[pid + 1] = spill_.end();
   }
-  countRun(ends[0]);
+  countSpill(ends[0]);
   spill_.flush();
 }
 
@@ -255,8 +255,8 @@ void LocalBlockOutput::finish(ShuffleWriterMetrics& metrics) {
   mergeToDataFile(options_, {this}, metrics);
 }
 
-void LocalBlockOutput::mergeToFinal(uint32_t pid, DataFileWriter& out) {
-  for (const auto& ends : blockRuns_) {
+void LocalBlockOutput::writePartitionShare(uint32_t pid, DataFileWriter& out) {
+  for (const auto& ends : spillOffsets_) {
     out.copyFrom(spill_, ends[pid], ends[pid + 1] - ends[pid]);
   }
 }

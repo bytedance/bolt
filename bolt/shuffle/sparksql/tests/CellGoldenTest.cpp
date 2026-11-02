@@ -702,13 +702,13 @@ TEST_F(CellGoldenTest, inputHoldsEveryShape) {
 
 TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
   const auto partitionSeals = [](CellShuffleOptions& options) {
-    options.checkpointPartitionBytes = 64 << 10;
+    options.partitionSealBytes = 64 << 10;
   };
   const auto nullSeals = [](CellShuffleOptions& options) {
     options.nullMemLimitBytes = 1 << 10;
   };
   const auto spills = [](CellShuffleOptions& options) {
-    options.cellMemoryCapBytes = 4 << 20;
+    options.cellMemorySpillBytes = 4 << 20;
   };
   const std::vector<Scenario> scenarios = {
       {"p1_none", 1, false, false, nullptr, false, false},
@@ -737,7 +737,7 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
        true,
        false,
        [](CellShuffleOptions& options) {
-         options.checkpointPartitionBytes = 256 << 10;
+         options.partitionSealBytes = 256 << 10;
          options.nullMemLimitBytes = 4 << 10;
        },
        true,
@@ -749,8 +749,8 @@ TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
        true,
        false,
        [](CellShuffleOptions& options) {
-         options.cellMemoryCapBytes = 4 << 20;
-         options.checkpointPartitionBytes = 96 << 10;
+         options.cellMemorySpillBytes = 4 << 20;
+         options.partitionSealBytes = 96 << 10;
          options.nullMemLimitBytes = 8 << 10;
        },
        true,
@@ -854,9 +854,7 @@ TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
        7,
        true,
        false,
-       [](CellShuffleOptions& options) {
-         options.checkpointPartitionBytes = 1;
-       },
+       [](CellShuffleOptions& options) { options.partitionSealBytes = 1; },
        true},
       {"deep_rows_p7_lz4_adapter",
        test::deepRowType(),

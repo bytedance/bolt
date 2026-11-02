@@ -99,16 +99,16 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     uint64_t freedBytes{0};
     /// Chunk bytes freed by each step of a reclaim.
     uint64_t freedIdle{0};
-    uint64_t freedBySpill{0};
+    uint64_t freedByPartialRun{0};
     uint64_t freedByCompaction{0};
     uint64_t freedByRun{0};
     uint64_t freedByPush{0};
     /// Partial runs of the largest partitions: asked by a reclaim, or by
     /// the chunk growth past the cap or the reservation; with cell bytes.
-    uint64_t reclaimSpills{0};
-    uint64_t reclaimSpillBytes{0};
-    uint64_t growthSpills{0};
-    uint64_t growthSpillBytes{0};
+    uint64_t reclaimPartialRuns{0};
+    uint64_t reclaimPartialRunBytes{0};
+    uint64_t growthPartialRuns{0};
+    uint64_t growthPartialRunBytes{0};
     /// Cell compactions and the chunk bytes they emptied.
     uint64_t compactions{0};
     uint64_t compactedBytes{0};
@@ -138,26 +138,26 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       const DecodedVector* decoded,
       const NullClass* nullClass);
   /// The allocator's ReserveChunkFn: reserves a chunk's memory within
-  /// cellMemoryCapBytes. Locally, when it cannot, it spills the largest
+  /// cellMemorySpillBytes. Locally, when it cannot, it spills the largest
   /// partitions until half the cell data is covered, and the growth then
   /// takes their recycled cells. Remotely, a window is released only whole
   /// at a batch boundary, so it requests that and lets this growth proceed.
   void reserveChunk();
-  void checkpoint(SealReason reason);
+  void sealWindow(SealReason reason);
   /// Seals the whole window - on a remote shuffle, pushes it - and returns
   /// its memory; returns the chunk bytes freed.
   int64_t releaseWindow(SealReason reason);
-  void maybeCheckpoint();
+  void maybeSeal();
   /// Answers a reclaim by releasing the whole window (remote).
   arrow::Status reclaimWindow(int64_t size, int64_t* actual);
 
   /// Celeborn partition writer: windows are pushed whole, never spilled.
-  const bool remote_;
+  const bool isRemote_;
 
   bool initialized_{false};
   bool inSplit_{false};
   bool stopped_{false};
-  bool checkpointRequested_{false};
+  bool sealRequested_{false};
   bool sealing_{false};
   bool dictProbed_{false};
   PressureStats pressure_;

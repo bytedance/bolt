@@ -95,10 +95,10 @@ enum class ShuffleWriterType {
 // thresholds push the window at the next batch boundary instead.
 struct CellShuffleOptions {
   // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
-  int64_t cellMemoryCapBytes = 0;
+  int64_t cellMemorySpillBytes = 0;
   // Seal a partition's payload at a batch boundary once it exceeds this
   // size; other partitions stay open.
-  int64_t checkpointPartitionBytes = 40LL << 20;
+  int64_t partitionSealBytes = 40LL << 20;
   // Seal the window once the moved null cells exceed this. A reclaim
   // requests a seal above a quarter of it.
   int64_t nullMemLimitBytes = 16LL << 20;

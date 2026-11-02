@@ -135,8 +135,8 @@ class CellSplitter {
     return sealCount_;
   }
 
-  int64_t nullBytes() const {
-    return nulls_.allocatedBytes();
+  int64_t nullMovedBytes() const {
+    return nulls_.movedCellBytes();
   }
 
   /// All memory the null state holds; see NullCells::footprintBytes().
@@ -158,7 +158,7 @@ class CellSplitter {
   /// Encodes cache residues as stream tail blocks before a window closes:
   /// of the partitions `only` marks, or of every partition. Chunk growth
   /// during this step may still spill complete prior appends.
-  void flushAll(const uint8_t* only = nullptr);
+  void flushCaches(const uint8_t* only = nullptr);
 
   /// Clears nulls, row counts and dictionary state after successful output.
   void resetWindow();
@@ -190,9 +190,13 @@ class CellSplitter {
   template <bool kHasNulls, bool kIndexed>
   BOLT_CELL_KERNEL void splitTimestamp(uint32_t col, const SplitBatch& batch);
 
+  /// log2(kCacheLineBytes): a line's offset from its stream's base.
+  static constexpr uint32_t kLineShift = 6;
+  static_assert(kCacheLineBytes == 1u << kLineShift);
+
   char* cacheLine(uint32_t stream, uint32_t pid) const {
     return cacheBase_ +
-        ((static_cast<size_t>(stream) * numPartitions_ + pid) << 6);
+        ((static_cast<size_t>(stream) * numPartitions_ + pid) << kLineShift);
   }
 
   uint8_t* cursors(uint32_t stream) const {

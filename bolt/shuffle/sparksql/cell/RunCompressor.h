@@ -159,11 +159,11 @@ class RunCompressor {
     uint64_t compressedFrames{0};
     uint64_t compressedInBytes{0};
     uint64_t compressedOutBytes{0};
-    /// Tried, and stored because they did not shrink; `earlyFrames` of
+    /// Tried, and stored because they did not shrink; `earlyStoredFrames` of
     /// them given up after their first blocks.
     uint64_t unshrunkFrames{0};
     uint64_t unshrunkBytes{0};
-    uint64_t earlyFrames{0};
+    uint64_t earlyStoredFrames{0};
     /// Stored without a try: adaptive skips and frames below
     /// kMinCompressBytes.
     uint64_t skippedFrames{0};
@@ -207,14 +207,20 @@ class RunCompressor {
   void useStreamCompressor(std::unique_ptr<StreamCompressor> compressor);
 
   /// Writes the `bytes` `visit` hands over as one compressed frame, unless
-  /// it does not shrink - judged early from its first blocks when `probe`,
+  /// it does not shrink - judged early from its first blocks when `judgeEarly`,
   /// else on its whole size. Returns the compressed frame's size; 0 when it
   /// was not compressed, and nothing was written.
-  uint64_t
-  writeFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit, bool probe);
+  uint64_t writeFrame(
+      RunSink& sink,
+      uint64_t bytes,
+      FrameVisitor visit,
+      bool judgeEarly);
 
-  uint64_t
-  streamFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit, bool probe);
+  uint64_t streamFrame(
+      RunSink& sink,
+      uint64_t bytes,
+      FrameVisitor visit,
+      bool judgeEarly);
 
   uint64_t oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit);
 
@@ -224,7 +230,7 @@ class RunCompressor {
 
   /// Learns from a frame tried: one that did not shrink has the next ones
   /// of its kind stored without a try.
-  void learn(uint32_t& skip, bool shrank) const;
+  void recordOutcome(uint32_t& skip, bool shrank) const;
 
   /// Writes the run uncompressed: COMBINED_UNCOMPRESSED.
   void storeRun(
@@ -237,7 +243,7 @@ class RunCompressor {
   /// as it is), that was tried, or not when `skipped`.
   void countFrame(uint64_t stored, uint64_t bytes, bool skipped);
 
-  memory::MemoryPool* const pool_;
+  memory::MemoryPool* const spillPool_;
   uint64_t* const compressTimeNs_;
   const bool adaptive_;
   /// Per stream, its SEPARATE frames still to store without a try; reset

@@ -144,8 +144,8 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_.columnStream(col);
   uint8_t* __restrict cur = cursors(stream);
-  char* __restrict base =
-      cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_) << 6);
+  char* __restrict base = cacheBase_ +
+      ((static_cast<size_t>(stream) * numPartitions_) << kLineShift);
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint32_t* __restrict positions = positionBase(batch);
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
@@ -170,11 +170,13 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
     // cursor goes through a register rather than being re-read after the
     // store.
     const uint32_t at = cur[pid];
-    *reinterpret_cast<T*>(base + (static_cast<size_t>(pid) << 6) + at) = value;
+    *reinterpret_cast<T*>(
+        base + (static_cast<size_t>(pid) << kLineShift) + at) = value;
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
-      flushEncoded<T>(stream, pid, base + (static_cast<size_t>(pid) << 6), cur);
+      flushEncoded<T>(
+          stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
     }
   }
 }
@@ -186,8 +188,8 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
   const T* __restrict vals = decoded.data<T>();
   const uint32_t stream = layout_.columnStream(col);
   uint8_t* __restrict cur = cursors(stream);
-  char* __restrict base =
-      cacheBase_ + ((static_cast<size_t>(stream) * numPartitions_) << 6);
+  char* __restrict base = cacheBase_ +
+      ((static_cast<size_t>(stream) * numPartitions_) << kLineShift);
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint32_t* __restrict positions = positionBase(batch);
   // nulls() merges wrapping nulls into a bitmap indexed by top-level row
@@ -212,11 +214,13 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
     // cursor goes through a register rather than being re-read after the
     // store.
     const uint32_t at = cur[pid];
-    *reinterpret_cast<T*>(base + (static_cast<size_t>(pid) << 6) + at) = value;
+    *reinterpret_cast<T*>(
+        base + (static_cast<size_t>(pid) << kLineShift) + at) = value;
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kCacheLineBytes)) {
-      flushRaw(stream, pid, base + (static_cast<size_t>(pid) << 6), cur);
+      flushRaw(
+          stream, pid, base + (static_cast<size_t>(pid) << kLineShift), cur);
     }
   }
 }
@@ -359,10 +363,10 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
   const uint32_t nanosStream = secondsStream + 1;
   uint8_t* __restrict secondsCur = cursors(secondsStream);
   uint8_t* __restrict nanosCur = cursors(nanosStream);
-  char* __restrict secondsBase =
-      cacheBase_ + ((static_cast<size_t>(secondsStream) * numPartitions_) << 6);
-  char* __restrict nanosBase =
-      cacheBase_ + ((static_cast<size_t>(nanosStream) * numPartitions_) << 6);
+  char* __restrict secondsBase = cacheBase_ +
+      ((static_cast<size_t>(secondsStream) * numPartitions_) << kLineShift);
+  char* __restrict nanosBase = cacheBase_ +
+      ((static_cast<size_t>(nanosStream) * numPartitions_) << kLineShift);
   const uint32_t* __restrict row2pid = batch.row2Partition;
   const uint32_t* __restrict positions = positionBase(batch);
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
@@ -623,7 +627,7 @@ uint32_t CellSplitter::sealPartitionsOver(uint64_t maxBytes) {
 void CellSplitter::seal(const uint8_t* only) {
   // Cache flushes can grow cells and trigger a Run spill. Only protect the
   // actual output call, after all cache residues have been committed.
-  flushAll(only);
+  flushCaches(only);
   const bool sealsResident = output_.sealsResidentCells();
   if (!sealsResident && cells_.totalBytes() > 0) {
     drainCells(only);
@@ -661,7 +665,7 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
   BOLT_CHECK(!writingOutput_, "cannot finish during output");
   const bool windowHasData = hasWindowRows();
   if (windowHasData) {
-    flushAll();
+    flushCaches();
   }
 
   // Capture utilization after cache flushes, before resident data is released.
@@ -699,7 +703,7 @@ void CellSplitter::finish(ShuffleWriterMetrics& metrics) {
   resetWindow();
 }
 
-void CellSplitter::flushAll(const uint8_t* only) {
+void CellSplitter::flushCaches(const uint8_t* only) {
   const auto skip = [only](uint32_t pid) {
     return only != nullptr && only[pid] == 0;
   };
@@ -1044,8 +1048,8 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
   // (materialized once per batch): one bit test replaces the isNullAt
   // call for identity and dictionary inputs alike.
   const uint64_t* __restrict rawNulls = kHasNulls ? decoded.nulls() : nullptr;
-  char* __restrict dictLineBase =
-      cacheBase_ + ((static_cast<size_t>(dataStream) * numPartitions_) << 6);
+  char* __restrict dictLineBase = cacheBase_ +
+      ((static_cast<size_t>(dataStream) * numPartitions_) << kLineShift);
 
   const uint32_t numRows = batch.numRows; // stores may alias the batch
   for (uint32_t row = 0; row < numRows; ++row) {
@@ -1055,7 +1059,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       // (64B x P) blow past the caches and the probe's first load eats
       // memory latency; the pid stream is known well ahead.
       __builtin_prefetch(
-          dictLineBase + (static_cast<size_t>(row2pid[row + 8]) << 6));
+          dictLineBase + (static_cast<size_t>(row2pid[row + 8]) << kLineShift));
     }
     if constexpr (kHasNulls) {
       if (rawNulls != nullptr && bits::isBitNull(rawNulls, row)) {

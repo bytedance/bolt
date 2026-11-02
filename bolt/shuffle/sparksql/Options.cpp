@@ -55,12 +55,12 @@ const char* rowFormatName(row::RowFormat format) {
 
 std::string CellShuffleOptions::toString() const {
   return fmt::format(
-      "cellMemoryCapBytes={} "
-      "checkpointPartitionBytes={} nullMemLimitBytes={} "
+      "cellMemorySpillBytes={} "
+      "partitionSealBytes={} nullMemLimitBytes={} "
       "enableStringDictionary={} "
       "streamCompression={} adaptiveCompression={} nativeNestedTypes={}",
-      cellMemoryCapBytes,
-      checkpointPartitionBytes,
+      cellMemorySpillBytes,
+      partitionSealBytes,
       nullMemLimitBytes,
       enableStringDictionary,
       streamCompression,
