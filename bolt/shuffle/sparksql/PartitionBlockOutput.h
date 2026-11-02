@@ -60,12 +60,12 @@ class ShuffleSpillFile {
   }
 
   /// No append is accepted afterwards; reads still are.
-  void seal() {
-    sealed_ = true;
+  void freeze() {
+    frozen_ = true;
   }
 
-  bool sealed() const {
-    return sealed_;
+  bool isFrozen() const {
+    return frozen_;
   }
 
   /// Closes and deletes the file.
@@ -87,7 +87,7 @@ class ShuffleSpillFile {
   int fd_{-1};
   std::string path_;
   uint64_t end_{0};
-  bool sealed_{false};
+  bool frozen_{false};
   uint64_t writeTimeNs_{0};
   /// patch()es not applied yet: offset and bytes.
   std::vector<std::pair<uint64_t, std::string>> pendingPatches_;
@@ -162,19 +162,19 @@ class PartialSpiller {
       : spill_(std::move(options), std::move(name)) {}
 
   /// Partition `pid`'s share of the data file. Called by mergeToDataFile()
-  /// only, for partition 0, 1, ..., with the spill file sealed.
-  virtual void mergeToFinal(uint32_t pid, DataFileWriter& out) = 0;
+  /// only, for partition 0, 1, ..., with the spill file frozen.
+  virtual void writePartitionShare(uint32_t pid, DataFileWriter& out) = 0;
 
   /// Counts one spill run if `begin`, the spill end before it, has moved.
-  void countRun(uint64_t begin) {
-    spillRuns_ += spill_.end() > begin ? 1 : 0;
+  void countSpill(uint64_t begin) {
+    numSpills_ += spill_.end() > begin ? 1 : 0;
   }
 
   ShuffleSpillFile spill_;
 
  private:
   /// Spills that wrote bytes: totalSpillFiles.
-  int64_t spillRuns_{0};
+  int64_t numSpills_{0};
 };
 
 /// Produces the next opaque block of partition `pid` into `block`; false
@@ -224,11 +224,11 @@ class LocalBlockOutput final : public PartitionBlockOutput,
   }
 
  private:
-  void mergeToFinal(uint32_t pid, DataFileWriter& out) override;
+  void writePartitionShare(uint32_t pid, DataFileWriter& out) override;
 
   const PartitionWriterOptions options_;
   /// Per block run: P + 1 absolute spill-file offsets.
-  std::vector<std::vector<uint64_t>> blockRuns_;
+  std::vector<std::vector<uint64_t>> spillOffsets_;
 };
 
 /// A remote shuffle service. Every block is pushed as it comes, so each
