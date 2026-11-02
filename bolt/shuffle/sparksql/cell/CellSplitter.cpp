@@ -22,17 +22,46 @@
 
 #include <folly/ScopeGuard.h>
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 #include "bolt/shuffle/sparksql/cell/CellEncoding.h"
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 namespace {
 
-/// Bytes allocated past the last cache line. The dictionary probe loads a
-/// uint64_t at each entry's start, so a last entry near the end of its line
-/// reads up to 7 bytes past it: into the neighbouring line, or for the very
-/// last line into this padding rather than past the allocation.
-constexpr size_t kCacheTailPadding = sizeof(uint64_t);
+/// Bytes allocated past the last cache line. The dictionary probe loads up
+/// to 16 bytes at each entry's start, so a last entry near the end of its
+/// line reads up to 15 bytes past it: into the neighbouring line, or for
+/// the very last line into this padding rather than past the allocation.
+constexpr size_t kCacheTailPadding = 16;
+
+#if defined(__SSE2__)
+/// The 16-byte probe needle of a value of 8 to 12 characters, inline in its
+/// StringView: [size][chars][zeros]. The view's 16 bytes are (size u32)
+/// (12 zero-padded characters); shifting out the size's three high bytes,
+/// all zero, leaves its low byte's slot free for the size.
+FOLLY_ALWAYS_INLINE __m128i
+dictNeedle16(const StringView& view, uint32_t size) {
+  const __m128i bytes =
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(&view));
+  return _mm_or_si128(
+      _mm_srli_si128(bytes, 3), _mm_cvtsi32_si128(static_cast<int>(size)));
+}
+
+/// Whether the entry at `entry` holds the value whose needle is `needle`:
+/// the bytes `mask` selects, the length byte and the characters, equal.
+FOLLY_ALWAYS_INLINE bool
+dictEntryEquals16(const char* entry, __m128i needle, uint32_t mask) {
+  const __m128i window =
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(entry));
+  const auto equal =
+      static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(window, needle)));
+  return (equal & mask) == mask;
+}
+#endif
 
 } // namespace
 
@@ -882,7 +911,23 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
           }
           off += stride;
         }
-      } else {
+      }
+#if defined(__SSE2__)
+      else if (size <= StringView::kInlineSize) {
+        // 8 to 12 chars, still inline: the same walk over 16-byte windows,
+        // needle = [size][chars], compared as the first 1 + size bytes.
+        const __m128i needle = dictNeedle16(view, size);
+        const uint32_t mask = (1u << (1 + size)) - 1;
+        uint32_t off = 0;
+        for (uint32_t k = 0; k < count; ++k) {
+          if (dictEntryEquals16(entries + off, needle, mask)) {
+            hit = k;
+          }
+          off += stride;
+        }
+      }
+#endif
+      else {
         const char* data = view.data();
         for (uint32_t k = 0; k < count; ++k) {
           if (::memcmp(entries + k * stride + 1, data, size) == 0) {
@@ -916,7 +961,22 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
           off += 1 + static_cast<uint32_t>(window & 0xFF);
         }
         i = hit;
-      } else {
+      }
+#if defined(__SSE2__)
+      else if (size <= StringView::kInlineSize) {
+        const __m128i needle = dictNeedle16(view, size);
+        const uint32_t mask = (1u << (1 + size)) - 1;
+        uint32_t hit = count;
+        for (uint32_t k = 0; k < count; ++k) {
+          if (dictEntryEquals16(entries + off, needle, mask)) {
+            hit = k;
+          }
+          off += 1 + static_cast<uint8_t>(entries[off]);
+        }
+        i = hit;
+      }
+#endif
+      else {
         for (; i < count; ++i) {
           const uint32_t len = static_cast<uint8_t>(entries[off]);
           if (len == size &&
