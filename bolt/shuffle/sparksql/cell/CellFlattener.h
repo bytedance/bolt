@@ -66,16 +66,18 @@ class CellFlattener {
       uint32_t chunkPositions = kChunkPositions);
 
   /// Takes the next batch, pid column first: decodes it, classifies the
-  /// nulls of the rows' columns and counts each space's positions. The
-  /// count follows any seal the decoding brought about.
+  /// nulls of the rows' columns and counts each space's positions in the
+  /// batch alone. Throws a user error, as soon as the count passes it, when
+  /// some space holds more than CellNestedLayout's kMaxPositions: no
+  /// payload carries that batch.
   void prepare(const RowVector& rv);
 
-  /// Whether the prepared batch's positions in some space, added to the
-  /// most a partition holds there, would pass CellNestedLayout's
-  /// kMaxPositions.
-  bool exceedsPositions() const {
-    return exceeds_;
-  }
+  /// Whether the prepared batch's positions in every space, added to the
+  /// most a partition holds there, stay within kMaxPositions. Follows any
+  /// seal first - loading lazy vectors and taking scratch in prepare() may
+  /// have pushed a remote window - so after a seal of the window the batch
+  /// fits.
+  bool fitsWindow();
 
   /// The rows' columns as prepared, per layout column: what the dictionary
   /// probe reads.
@@ -191,8 +193,9 @@ class CellFlattener {
   void clearNode(uint32_t n);
 
   /// Adds to each space below container x the positions of x's entries at
-  /// [begin, end) of its vector; false once some space exceeds.
-  bool countRange(uint32_t x, vector_size_t begin, vector_size_t end);
+  /// [begin, end) of its vector; throws once some space passes
+  /// kMaxPositions.
+  void countRange(uint32_t x, vector_size_t begin, vector_size_t end);
 
   /// Splits the elements of x's non-null entries among `parent`'s.
   BOLT_CELL_KERNEL void emit(uint32_t x, const Entries& parent);
@@ -241,7 +244,6 @@ class CellFlattener {
   std::vector<uint32_t> maxCount_;
   std::vector<uint64_t> totals_;
   std::vector<uint64_t> committed_;
-  bool exceeds_{false};
   uint64_t seals_{0};
 
   /// Chunks by depth, and per partition a chunk's entries and their running
