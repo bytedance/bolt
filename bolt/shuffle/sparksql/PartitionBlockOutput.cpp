@@ -202,14 +202,6 @@ void DataFileWriter::close(ShuffleWriterMetrics& metrics) {
   metrics.totalWriteTime = static_cast<int64_t>(writeTimeNs_);
 }
 
-std::unique_ptr<PartitionBlockOutput> PartitionBlockOutput::create(
-    PartitionWriterOptions options) {
-  if (options.partitionWriterType == PartitionWriterType::kCeleborn) {
-    return std::make_unique<RssBlockOutput>(std::move(options));
-  }
-  return std::make_unique<LocalBlockOutput>(std::move(options));
-}
-
 void PartialSpiller::mergeToDataFile(
     const PartitionWriterOptions& options,
     std::initializer_list<PartialSpiller*> spillers,
