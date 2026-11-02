@@ -66,10 +66,10 @@
 /// all-null column's streams are empty. A stream is the
 /// concatenation of its bytes in every run, in run order; a run may end a
 /// raw stream's bytes anywhere, but never inside an Encoding Block or a
-/// dictionary. Encoded streams
-/// are Encoding Blocks back to back: each covers kBlockValueBytes of
-/// values (the stream's last block fewer) and opens with an EncodingByte,
-/// EncodingKind in the low 2 bits and a parameter in the high 6:
+/// dictionary. Encoded streams are Encoding Blocks back to back: each
+/// covers the values of one kCacheLineBytes cache line (the stream's last
+/// block fewer) and opens with an EncodingByte, EncodingKind in the low 2
+/// bits and a parameter in the high 6:
 ///
 ///   kConstNarrow  every value equal; body: parameter (1..width) bytes,
 ///                 sign-extended
@@ -106,10 +106,12 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Bytes of values one full Encoding Block covers, before encoding: 8
-/// Bigints, 16 Integers or 32 SmallInts. kMaxBlockBytes bounds the encoded
-/// size.
-inline constexpr uint32_t kBlockValueBytes = 64;
+/// The writer stages each (partition, stream) in one cache line of this
+/// many bytes and flushes a full line as one Encoding Block, so an Encoding
+/// Block covers the values of one cache line: 8 Bigints, 16 Integers or 32
+/// SmallInts. A fixed format constant, not the host's cache line size.
+/// kMaxBlockBytes bounds the encoded size.
+inline constexpr uint32_t kCacheLineBytes = 64;
 
 /// Fixed payload header length.
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
@@ -122,7 +124,7 @@ inline constexpr uint32_t kMaxPayloadRows = (1u << 31) - 1;
 
 /// Worst-case serialized size of one Encoding Block: 1 byte EncodingByte,
 /// 8 bytes FOR base, 64 bytes body.
-inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kBlockValueBytes;
+inline constexpr uint32_t kMaxBlockBytes = 1 + 8 + kCacheLineBytes;
 
 /// String dictionary limits: an entry's length byte is at most 63, and the
 /// serialized entries of one dictionary must stay under 64 bytes in total,
