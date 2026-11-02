@@ -212,13 +212,14 @@ class CellSplitter {
   }
 
   /// Encodes the full or partial cache line of an encoded stream into
-  /// the cells. Out of the hot loop by design.
+  /// the cells; `line` is the stream's staged line of partition `pid`, as
+  /// cacheLine() gives it. Out of the hot loop by design.
   template <typename T>
   FOLLY_ALWAYS_INLINE void
-  flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur);
+  flushEncoded(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);
 
-  /// Flushes a raw stream's cache line bytes as they are.
-  void flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur);
+  /// Flushes a raw stream's staged cache line `line` bytes as they are.
+  void flushRaw(uint32_t stream, uint32_t pid, const char* line, uint8_t* cur);
 
   void bumpPartitionBytes(uint32_t pid, uint64_t bytes) {
     partitionBytes_[pid] += bytes;

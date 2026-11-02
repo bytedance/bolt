@@ -70,8 +70,12 @@ CellSplitter::CellSplitter(
 }
 
 template <typename T>
-void CellSplitter::flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur) {
-  const auto* line = reinterpret_cast<const T*>(cacheLine(stream, pid));
+void CellSplitter::flushEncoded(
+    uint32_t stream,
+    uint32_t pid,
+    const char* staged,
+    uint8_t* cur) {
+  const auto* line = reinterpret_cast<const T*>(staged);
   const bool full = cur[pid] == kBlockValueBytes;
   // Common case: encode straight into the tail cell (reserve allocates
   // nothing, so nothing can spill between reserve and commit).
@@ -94,8 +98,12 @@ void CellSplitter::flushEncoded(uint32_t stream, uint32_t pid, uint8_t* cur) {
   cur[pid] = 0;
 }
 
-void CellSplitter::flushRaw(uint32_t stream, uint32_t pid, uint8_t* cur) {
-  cells_.append(pid, stream, cacheLine(stream, pid), cur[pid]);
+void CellSplitter::flushRaw(
+    uint32_t stream,
+    uint32_t pid,
+    const char* line,
+    uint8_t* cur) {
+  cells_.append(pid, stream, line, cur[pid]);
   bumpPartitionBytes(pid, cur[pid]);
   cur[pid] = 0;
 }
@@ -252,7 +260,8 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
           // Pending index bytes flush raw before the first staged
           // fallback length reuses the cache line.
           if (lengthCur[pid] > 0) {
-            flushRaw(lengthStream, pid, lengthCur);
+            flushRaw(
+                lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
           }
           return false;
         }
@@ -271,7 +280,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
     ++st.matched;
     cacheLine(lengthStream, pid)[lengthCur[pid]] = static_cast<char>(i);
     if (FOLLY_UNLIKELY(++lengthCur[pid] == kBlockValueBytes)) {
-      flushRaw(lengthStream, pid, lengthCur);
+      flushRaw(lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
     }
     return true;
   }
@@ -281,7 +290,7 @@ FOLLY_ALWAYS_INLINE bool CellSplitter::appendDictValue(
   closeDictSegment(dataStream, pid, st, dataCur, /*last=*/true);
   st.mode = DictState::kModeFallback;
   if (lengthCur[pid] > 0) {
-    flushRaw(lengthStream, pid, lengthCur);
+    flushRaw(lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
   }
   return false;
 }
@@ -323,7 +332,7 @@ void CellSplitter::splitFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kBlockValueBytes)) {
-      flushEncoded<T>(stream, pid, cur);
+      flushEncoded<T>(stream, pid, base + (static_cast<size_t>(pid) << 6), cur);
     }
   }
 }
@@ -365,7 +374,7 @@ void CellSplitter::splitRawFixed(uint32_t col, const SplitBatch& batch) {
     const uint32_t next = at + sizeof(T);
     cur[pid] = static_cast<uint8_t>(next);
     if (FOLLY_UNLIKELY(next == kBlockValueBytes)) {
-      flushRaw(stream, pid, cur);
+      flushRaw(stream, pid, base + (static_cast<size_t>(pid) << 6), cur);
     }
   }
 }
@@ -402,7 +411,8 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
       folly::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
       if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockValueBytes)) {
-        flushEncoded<int64_t>(lengthStream, pid, lengthCur);
+        flushEncoded<int64_t>(
+            lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
       }
     }
 
@@ -412,7 +422,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
     variableBytes_[pid] += size;
     if (FOLLY_UNLIKELY(size >= kBlockValueBytes)) {
       if (dataCur[pid] > 0) {
-        flushRaw(dataStream, pid, dataCur);
+        flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
       }
       // Raw stream bytes may split anywhere across Runs, so a huge
       // value is appended in bounded pieces: each append then pre-holds at
@@ -432,7 +442,7 @@ void CellSplitter::splitString(uint32_t col, const SplitBatch& batch) {
       continue;
     }
     if (dataCur[pid] + size > kBlockValueBytes) {
-      flushRaw(dataStream, pid, dataCur);
+      flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
     }
     ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
     dataCur[pid] += static_cast<uint8_t>(size);
@@ -499,13 +509,14 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       folly::storeUnaligned<int64_t>(slot, length);
       lengthCur[pid] += sizeof(int64_t);
       if (FOLLY_UNLIKELY(lengthCur[pid] == kBlockValueBytes)) {
-        flushEncoded<int64_t>(lengthStream, pid, lengthCur);
+        flushEncoded<int64_t>(
+            lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
       }
     }
     const uint32_t size = view.size();
     if (FOLLY_UNLIKELY(size >= kBlockValueBytes)) {
       if (dataCur[pid] > 0) {
-        flushRaw(dataStream, pid, dataCur);
+        flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
       }
       constexpr uint32_t kDirectAppendPiece = 256 << 10;
       const char* src = view.data();
@@ -521,7 +532,7 @@ void CellSplitter::splitStringDict(uint32_t col, const SplitBatch& batch) {
       continue;
     }
     if (dataCur[pid] + size > kBlockValueBytes) {
-      flushRaw(dataStream, pid, dataCur);
+      flushRaw(dataStream, pid, cacheLine(dataStream, pid), dataCur);
     }
     ::memcpy(cacheLine(dataStream, pid) + dataCur[pid], view.data(), size);
     dataCur[pid] += static_cast<uint8_t>(size);
@@ -582,7 +593,7 @@ void CellSplitter::splitBoolean(uint32_t col, const SplitBatch& batch) {
     }
     cacheLine(stream, pid)[cur[pid]] = decoded.valueAt<bool>(row) ? 1 : 0;
     if (FOLLY_UNLIKELY(++cur[pid] == kBlockValueBytes)) {
-      flushRaw(stream, pid, cur);
+      flushRaw(stream, pid, cacheLine(stream, pid), cur);
     }
   }
 }
@@ -619,14 +630,15 @@ void CellSplitter::splitTimestamp(uint32_t col, const SplitBatch& batch) {
     const int64_t nanos = static_cast<int64_t>(value.getNanos());
     // Both streams hold one 8-byte value per row, so the two cursors are
     // always equal and both lines fill on the same row.
-    const size_t at = (static_cast<size_t>(pid) << 6) + secondsCur[pid];
+    const size_t line = static_cast<size_t>(pid) << 6;
+    const size_t at = line + secondsCur[pid];
     folly::storeUnaligned<int64_t>(secondsBase + at, seconds);
     folly::storeUnaligned<int64_t>(nanosBase + at, nanos);
     secondsCur[pid] += sizeof(int64_t);
     nanosCur[pid] += sizeof(int64_t);
     if (FOLLY_UNLIKELY(secondsCur[pid] == kBlockValueBytes)) {
-      flushEncoded<int64_t>(secondsStream, pid, secondsCur);
-      flushEncoded<int64_t>(nanosStream, pid, nanosCur);
+      flushEncoded<int64_t>(secondsStream, pid, secondsBase + line, secondsCur);
+      flushEncoded<int64_t>(nanosStream, pid, nanosBase + line, nanosCur);
     }
   }
 }
@@ -969,7 +981,7 @@ void CellSplitter::flushAll(const uint8_t* only) {
         continue; // no value this window
       }
       if (lengthCur[pid] > 0) {
-        flushRaw(lengthStream, pid, lengthCur);
+        flushRaw(lengthStream, pid, cacheLine(lengthStream, pid), lengthCur);
       }
       // Also zeroes the data cursor, so the generic loop below cannot
       // mistake the dictionary bytes for staged fallback chars.
@@ -986,19 +998,19 @@ void CellSplitter::flushAll(const uint8_t* only) {
       if (info.kind == StreamKind::kEncoded) {
         switch (info.sourceWidth) {
           case 2:
-            flushEncoded<int16_t>(stream, pid, cur);
+            flushEncoded<int16_t>(stream, pid, cacheLine(stream, pid), cur);
             break;
           case 4:
-            flushEncoded<int32_t>(stream, pid, cur);
+            flushEncoded<int32_t>(stream, pid, cacheLine(stream, pid), cur);
             break;
           case 8:
-            flushEncoded<int64_t>(stream, pid, cur);
+            flushEncoded<int64_t>(stream, pid, cacheLine(stream, pid), cur);
             break;
           default:
             BOLT_UNREACHABLE();
         }
       } else {
-        flushRaw(stream, pid, cur);
+        flushRaw(stream, pid, cacheLine(stream, pid), cur);
       }
     }
   }
