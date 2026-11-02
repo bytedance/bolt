@@ -199,6 +199,8 @@ enum class Family {
   kContainers,
   kArraysOptional,
   kLowCardArray,
+  kStrDate8,
+  kStrDate10,
 };
 
 /// The families an extra Cell writer joins: CellNoDict the dictionary ones,
@@ -247,6 +249,8 @@ constexpr FamilyInfo kFamilies[] = {
     {Family::kContainers, "array_map", kNested},
     {Family::kArraysOptional, "arrays50_optional", kNested},
     {Family::kLowCardArray, "lowcard_array", kDictionary | kNested},
+    {Family::kStrDate8, "str_date8", kDictionary},
+    {Family::kStrDate10, "str_date10", kDictionary},
 };
 
 const FamilyInfo& familyInfo(Family family) {
@@ -456,6 +460,10 @@ std::vector<CaseSpec> caseSpecs() {
   limited("F-arrays-optional-P30000", Family::kArraysOptional, 30000);
   // Arrays of four values few and small enough for a string dictionary.
   add("C-lowcard-array", Family::kLowCardArray, 1024, kStd);
+  // Five dates as strings, "20261102" and "2026-11-02": values of 8 and 10
+  // characters that a string dictionary holds.
+  add("A7-date8", Family::kStrDate8, 1024, kStd);
+  add("A7-date10", Family::kStrDate10, 1024, kStd);
   return c;
 }
 
@@ -828,6 +836,22 @@ RowVectorPtr makeRow(
       std::move(names), std::move(children), nullptr, kRowsPerBatch);
 }
 
+/// Five consecutive dates as 8-character "yyyyMMdd" strings, or as
+/// 10-character "yyyy-MM-dd" ones.
+const std::vector<std::string>& dateVocabulary(bool dashed) {
+  static const auto make = [](bool withDashes) {
+    std::vector<std::string> dates;
+    for (int day = 1; day <= 5; ++day) {
+      dates.push_back(
+          (withDashes ? "2026-11-0" : "2026110") + std::to_string(day));
+    }
+    return dates;
+  };
+  static const std::vector<std::string> plain = make(false);
+  static const std::vector<std::string> dashes = make(true);
+  return dashed ? dashes : plain;
+}
+
 const std::vector<std::string>& lowCardVocabulary() {
   static const std::vector<std::string> vocab = {
       "aaaa",
@@ -1004,6 +1028,14 @@ RowVectorPtr makeBatch(const CaseSpec& spec, int32_t batch, Rng& rng) {
       return makeRow(
           {"pid", "key", "value"},
           {pid, key(), randomWords(nulls, rng, lowCardVocabulary())});
+    case Family::kStrDate8:
+    case Family::kStrDate10:
+      return makeRow(
+          {"pid", "key", "value"},
+          {pid,
+           key(),
+           randomWords(
+               nulls, rng, dateVocabulary(spec.family == Family::kStrDate10))});
     case Family::kStrLowCardClustered: {
       // Runs of 64 rows of one word.
       const auto& vocab = lowCardVocabulary();
