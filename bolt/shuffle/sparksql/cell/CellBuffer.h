@@ -402,15 +402,19 @@ enum class NullClass : uint8_t {
 /// for locality.
 ///
 /// A cell holds a stretch of a partition's rows in 32 bytes, a null record
-/// of the null body (CellFormat.h) after a link: a run of up to 32767 rows
-/// all null or all non-null, then a bitmap of up to 200 rows. Only null
-/// rows are recorded; the non-null rows before one join the run or the
-/// bitmap as it passes them, and the rows after the last recorded null are
-/// non-null. The cell in the column's array is the partition's last: once
-/// full it moves to a cell of a chunk allocator, linked from the next, so a
-/// partition's rows are a chain read from its last cell back. A released
-/// partition's cells go back to the allocator for reuse, and everything
-/// returns to the pool when the window closes.
+/// of the null body (CellFormat.h) after a 4-byte head: a run of up to
+/// 32767 rows all null or all non-null, then a bitmap of up to 200 rows.
+/// Only null rows are recorded; the non-null rows before one join the run
+/// or the bitmap as it passes them, and the rows after the last recorded
+/// null are non-null. The cell in the column's array is the partition's
+/// current one, whose head is the rows recorded: recording a null touches
+/// that cell alone. Once full it moves to a cell of a chunk allocator,
+/// whose head links the cell moved before it, and the partition's progress
+/// - the last cell moved, the nulls and the count of the cells moved - is
+/// updated then only. A partition's rows are the chain read from its last
+/// moved cell back, then the current cell. A released partition's cells go
+/// back to the allocator for reuse, and everything returns to the pool when
+/// the window closes.
 class NullCells {
  public:
   NullCells(
@@ -437,31 +441,28 @@ class NullCells {
   ///
   /// Forced inline: the split loops call it per null row, and the compiler
   /// otherwise keeps it out of line behind a PLT call. A null that lands in
-  /// the cell's bitmap or extends its null run is recorded here; starting a
-  /// run or a bitmap, moving a full cell and opening the column stay out of
-  /// line.
+  /// the cell's bitmap or extends its null run is recorded here, in the
+  /// partition's current cell alone; starting a run or a bitmap, moving a
+  /// full cell and opening the column stay out of line.
   FOLLY_ALWAYS_INLINE void
   setNull(uint32_t pid, uint32_t col, uint32_t rowInWindow) {
     Column& column = columnFor(col);
     Cell& cell = column.cells[pid];
-    Tail& tail = column.tails[pid];
     if (cell.fill != 0) {
       // The rows since the last recorded one are non-null: bits already set.
-      const uint32_t bit = cell.fill + (rowInWindow - tail.end);
+      const uint32_t bit = cell.fill + (rowInWindow - cell.head);
       if (FOLLY_LIKELY(bit < kCellBits)) {
         cell.bits[bit >> 3] &= static_cast<uint8_t>(~(1u << (bit & 7)));
         cell.fill = static_cast<uint8_t>(bit + 1);
-        tail.end = rowInWindow + 1;
-        ++tail.nulls;
+        cell.head = rowInWindow + 1;
         return;
       }
     } else if (
-        rowInWindow == tail.end && cell.run >= kNullRun &&
+        rowInWindow == cell.head && cell.run >= kNullRun &&
         cell.run < kNullRun + kMaxRunRows) {
       // The next row of the cell's null run, which has room for it.
       ++cell.run;
-      ++tail.end;
-      ++tail.nulls;
+      ++cell.head;
       return;
     }
     appendNulls(column, pid, rowInWindow, 1);
@@ -487,7 +488,7 @@ class NullCells {
   /// kRawNull: their u32 count and the records.
   size_t recordsBytes(uint32_t pid, uint32_t col) const {
     return sizeof(uint32_t) +
-        kNullRecordBytes * (size_t{columns_[col].tails[pid].moved} + 1);
+        kNullRecordBytes * (size_t{columns_[col].progress[pid].moved} + 1);
   }
 
   /// Writes the null records of partition pid's columns cols[0..numCols),
@@ -529,12 +530,13 @@ class NullCells {
   }
 
  private:
-  /// A stretch of a partition's rows: a link, then a null record whose
+  /// A stretch of a partition's rows: a head, then a null record whose
   /// bitmap's bits past `fill` are 1, not 0 as on the wire.
   struct Cell {
-    /// The cell holding the rows before this one's; kInvalidCell for the
-    /// first.
-    uint32_t prev;
+    /// In a partition's current cell, the rows recorded: the partition
+    /// holds rows [0, head). In a moved cell, the cell moved before it;
+    /// kInvalidCell for the first.
+    uint32_t head;
     /// The run's rows, plus kNullRun when they are null.
     uint16_t run;
     /// Rows in `bits`, after the run's.
@@ -546,27 +548,31 @@ class NullCells {
   static_assert(
       offsetof(Cell, run) == sizeof(uint32_t) &&
           sizeof(Cell) - offsetof(Cell, run) == kNullRecordBytes,
-      "a cell after its link is a null record");
+      "a cell after its 4-byte head is a null record");
+  static_assert(
+      kNullRecordBitmapBytes * 8 == kNullRecordBits,
+      "a cell's nulls are its bitmap's zero bits");
   static constexpr uint16_t kNullRun = kNullRecordRunNull;
   static constexpr uint32_t kMaxRunRows = kNullRecordMaxRun;
   static constexpr uint32_t kCellBits = kNullRecordBits;
 
-  /// Where a partition's rows stand in a column.
-  struct Tail {
-    /// Rows recorded: the chain holds rows [0, end).
-    uint32_t end;
-    /// The null rows among them.
+  /// A partition's moved cells in a column, updated as a cell moves.
+  struct Progress {
+    /// The last cell moved, the head of the chain; kInvalidCell for none.
+    uint32_t last;
+    /// The null rows in the moved cells.
     uint32_t nulls;
-    /// The chain's cells moved to the allocator, all but its last.
+    /// The cells moved.
     uint32_t moved;
   };
 
-  /// A mixed column's storage, one cell and one tail per partition, in one
-  /// block; nullptr until the column records a null. A batch's nulls can be
-  /// classified conservatively, so a mixed column may never record one.
+  /// A mixed column's storage, one current cell and one progress per
+  /// partition, in one block; nullptr until the column records a null. A
+  /// batch's nulls can be classified conservatively, so a mixed column may
+  /// never record one.
   struct Column {
     Cell* cells{nullptr};
-    Tail* tails{nullptr};
+    Progress* progress{nullptr};
     void* block{nullptr};
   };
 
@@ -584,15 +590,18 @@ class NullCells {
     return *reinterpret_cast<const Cell*>(chainCells_.cellData(id));
   }
 
-  static Cell emptyCell(uint32_t prev);
+  /// A cell holding no row, whose head is `head`.
+  static Cell emptyCell(uint32_t head);
+  /// The null rows `cell` records.
+  static uint32_t cellNulls(const Cell& cell);
   size_t columnBlockBytes() const;
   void openColumn(Column& column);
   /// Records the non-null rows before `row`, then `count` null rows.
   void appendNulls(Column& column, uint32_t pid, uint32_t row, uint32_t count);
   /// Records the next `rows` rows of the partition, all null or all not.
   void appendRows(Column& column, uint32_t pid, bool null, uint32_t rows);
-  /// Moves the partition's full cell to the allocator, leaving an empty
-  /// cell linked to it.
+  /// Moves the partition's full current cell to the allocator, linked to
+  /// the cell moved before it, leaving an empty current cell.
   void moveCell(Column& column, uint32_t pid);
 
   memory::MemoryPool* const pool_;
