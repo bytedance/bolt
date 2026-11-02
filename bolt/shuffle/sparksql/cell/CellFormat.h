@@ -15,8 +15,9 @@
  */
 
 /// Shared wire format and stream layout of the Cell shuffle writer and reader.
-/// This header is the format's definition: every constant and enum below is
-/// on the wire, and changing one changes the format for both sides.
+/// This header is the format's definition: the wire constants and enums
+/// below are the format, and changing one changes it for both sides.
+/// kDictSegmentContinueFactor and kMaxPayloadRows are writer policy.
 ///
 /// A partition's shuffle bytes are blocks back to back, each opening with a
 /// CellBlockKind byte. A ColumnarPayload holds some rows of one partition:
@@ -191,8 +192,7 @@ enum class NullTag : uint8_t {
 };
 
 /// What a block of a Cell shuffle stream holds: every block on the wire - a
-/// ColumnarPayload or a CompositeRows block - starts with this byte, as
-/// every V1 block starts with its layout byte.
+/// ColumnarPayload or a CompositeRows block - starts with this byte.
 enum class CellBlockKind : uint8_t {
   kPayload = 0,
   kCompositeRows = 1,
@@ -218,7 +218,7 @@ enum class CellBlockKind : uint8_t {
 inline constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 
 /// The size prefix of a CompositeRows row. Rows lie back to back, so the
-/// prefix is in general unaligned: read through memcpy, one load.
+/// prefix is in general unaligned.
 inline int32_t compositeRowSize(const void* row) {
   return folly::loadUnaligned<int32_t>(row);
 }

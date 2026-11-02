@@ -84,7 +84,7 @@ RowVectorPtr CellShuffleTypeAdapter::encode(
     memory::MemoryPool* pool) const {
   BOLT_CHECK(
       !RowVector::isComposite(input),
-      "Cell complex adapter requires ordinary rows");
+      "CellShuffleTypeAdapter does not take composite rows");
   BOLT_CHECK(
       input->type()->equivalent(*logicalType_), "Cell input schema changed");
   if (!hasComplexColumns()) {

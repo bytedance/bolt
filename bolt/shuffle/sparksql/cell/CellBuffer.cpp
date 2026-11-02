@@ -407,7 +407,7 @@ uint64_t DataCells::compact(uint64_t targetBytes) {
   const uint32_t perChunk = allocator_->cellsPerChunk();
   const uint64_t chunkBytes =
       static_cast<uint64_t>(perChunk) * allocator_->cellBytes();
-  // 1 marks a chunk to empty; 2 a chunk that only receives no cells: its
+  // 1 marks a chunk to empty; 2 a chunk that must receive no cells: its
   // ids lie past next_, which compact() must not grow from the pool.
   std::vector<uint8_t> excluded(numChunks, 0);
   std::vector<uint32_t> candidates;

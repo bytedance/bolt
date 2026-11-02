@@ -41,9 +41,11 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 ///
 /// Memory decisions never consult the split() memLimit parameter (it is
 /// ignored by design): the only choke point is reserveChunk() at chunk growth,
-/// where a failed maybeReserve — or the optional self cap — triggers a
-/// physical Run spill; external reclaim drains and shrinks. Accounting is
-/// the allocator's exact chunk/cell counters.
+/// where a failed maybeReserve - or the optional spill threshold - spills
+/// the largest partitions until half the cell data is covered. A reclaim
+/// frees idle chunks first, then runs partial spills and compaction, and
+/// spills everything only when those fall short. Accounting is the
+/// allocator's exact chunk/cell counters.
 ///
 /// On Celeborn a window can only be pushed whole, so every one of those
 /// spills becomes a seal at the next batch boundary instead: batches are
@@ -77,7 +79,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
  private:
   /// Why a whole window was sealed.
   enum class SealReason : uint8_t {
-    kRows, // a payload's rows would pass kMaxPayloadRows
+    kRows, // a payload's rows or nested positions would pass their bound
     kMemory, // memory pressure asked for it
     kNulls, // the null bitmaps passed nullMemLimitBytes
     kFlush, // composite rows come next
@@ -178,6 +180,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   std::unique_ptr<CellSplitter> splitter_;
   std::unique_ptr<CellNestedShredder> shredder_;
 
+  /// Per row, its index among the batch's rows of its partition, for null
+  /// positions; built only when a column has some nulls, counting through
+  /// perPidCounter_.
   std::vector<uint32_t> rowIndexInPid_;
   std::vector<uint32_t> perPidCounter_;
   std::vector<DecodedVector> decoded_;

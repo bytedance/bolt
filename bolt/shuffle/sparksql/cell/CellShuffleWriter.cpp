@@ -201,7 +201,7 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     rv = adapter_->encode(rv, boltPool_);
     metrics_.convertTime += static_cast<int64_t>(currentTimeNs() - start);
   }
-  // Oversized inputs are sliced so a checkpoint boundary exists inside
+  // Oversized inputs are sliced so a seal boundary exists inside
   // them: one giant batch must not inflate a single payload window past
   // the partition byte bound (the legacy writers slice the same way). Lazy
   // children are loaded first: unloaded they estimate as zero bytes and
@@ -210,13 +210,11 @@ arrow::Status CellShuffleWriter::splitOrdinary(
     rv->loadedVector();
   }
   const int64_t flatSize = rv->estimateFlatSize();
-  // Where a window is released only whole (remote): releases it first
-  // when the next slice of about `estimatedBytes` cannot be reserved.
+  // Remote only: a window is pushed only whole, so reserve room for the
+  // next slice of about `estimatedBytes` (plus the largest payload and its
+  // compressed copy, which the push needs) before it starts; push the
+  // window first if that fails.
   const auto reserveSlice = [this](int64_t estimatedBytes) {
-    // A slice must fit before it starts: halfway through, the window cannot
-    // be pushed. The reservation also keeps room to assemble the window's
-    // largest payload and its compressed copy, since a push needs that room
-    // exactly when memory is short. Without it, the window goes out first.
     if (!remote_ || !splitter_->hasWindowRows()) {
       return;
     }
@@ -394,9 +392,9 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   inSplit_ = false;
 
   maybeCheckpoint();
-  // Shredding is no part of the split, as flattening is not in the V1
-  // writer: flattenTime, shared with the other writers, holds the shred
-  // time.
+  // The shred time is reported as flattenTime, the metric the writers
+  // share for reshaping a batch before the split, and kept out of
+  // splitTime.
   const int64_t shred = shredder_->takeShredTimeNs();
   metrics_.flattenTime += shred;
   metrics_.splitTime += static_cast<int64_t>(currentTimeNs() - start) - shred;
@@ -467,6 +465,8 @@ void CellShuffleWriter::probeDictionary(
 }
 
 void CellShuffleWriter::reserveChunk() {
+  // While the output reads cells nothing may spill, so growth there
+  // proceeds unreserved and the pool arbitrates.
   if (!initialized_ || splitter_->isWritingOutput()) {
     return;
   }
@@ -578,14 +578,9 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   if (remote_) {
     return reclaimWindow(size, actual);
   }
-  // A run costs an O(partitions x streams) drain and a segment with its
-  // own header and spill compression context per non-empty partition, so
-  // it is produced only when actually needed: when the free memory above
-  // already covers the request, or the writer holds nothing meaningful,
-  // no run is written. Anything beyond that means the requester's need
-  // is real and unmet - a small run is a far lesser evil than an OOM,
-  // and the allocation churn case never reaches here (its small asks are
-  // satisfied by the idle memory).
+  // A run costs a drain and a compressed segment per partition, so skip it
+  // when idle memory already covers the request or the writer holds under
+  // two chunks.
   if ((size > 0 && *actual >= size) ||
       allocator_->allocatedBytes() < 2 * kChunkBytes) {
     ++pressure_.idleReclaims;
@@ -594,7 +589,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   // The largest partitions first, as much as the request asks. Their cells
   // are spread over every chunk, so compaction then moves the remaining
   // cells out of the emptiest chunks for shrink() to return. Only when that
-  // still falls short does the whole window go, as before.
+  // still falls short does the whole window go.
   if (size > 0) {
     ++pressure_.reclaimSpills;
     pressure_.reclaimSpillBytes +=
@@ -624,7 +619,7 @@ arrow::Status CellShuffleWriter::reclaimOrdinary(
   boltPool_->release();
   // Close the window at the next batch boundary only when the resident
   // null-bitmap state is actually worth returning; requesting a seal on
-  // every reclaim turns pressure churn into a checkpoint storm.
+  // every reclaim turns pressure churn into a seal storm.
   if (splitter_->nullBytes() > options_.cellOptions.nullMemLimitBytes / 4) {
     checkpointRequested_ = true;
   }

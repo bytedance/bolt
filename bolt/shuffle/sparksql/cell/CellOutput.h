@@ -27,16 +27,18 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
 /// What an output backend reads from the splitter when draining or sealing:
-/// the live window state. Borrowed for the duration of a call.
+/// the live window state. Borrowed for the duration of a call. A
+/// partition's counts run since its payload opened: a partition seal closes
+/// single payloads, so they may have opened at different times.
 struct CellWindowInput {
   const DataCells* cells;
   const NullCells* nulls;
   const CellLayout* layout;
-  /// Per partition: rows and raw variable bytes of the current window.
+  /// Per partition: rows and string bytes of its open payload.
   const uint32_t* rowCounts;
   const uint64_t* variableBytes;
-  /// Payload encoding tags: ceil(C/8) bytes, one bit per
-  /// column, set when the column is written in dictionary form. Constant
+  /// Payload encoding tags: ceil(numWireColumns / 8) bytes, one bit per
+  /// wire column, set when the column is written in dictionary form. Constant
   /// for the writer's lifetime (the probe decides once).
   const uint8_t* encodingTags;
   uint32_t numPartitions;
@@ -52,9 +54,9 @@ struct CellWindowInput {
   const uint8_t* sealPartitions = nullptr;
 };
 
-/// The Cell shuffle writer's output backend. Run = physical
-/// swap-out (may happen at any allocation point, never closes the logical
-/// window); sealed window = payload boundary. Local and RSS backends differ
+/// The Cell shuffle writer's output backend. A Run writes resident cells
+/// out to free memory; it can happen at any allocation point and never
+/// closes a payload. A seal closes payloads. Local and RSS backends differ
 /// only here.
 class CellOutput {
  public:
@@ -68,22 +70,22 @@ class CellOutput {
     return false;
   }
 
-  /// Physically drains the DataCell chains of the partitions the input
+  /// Writes the DataCells chains of the partitions the input
   /// names (every partition by default) into a Run of the current window.
   /// Does not release the cells: the splitter recycles them (so a
   /// spill fired from inside an append never frees held ids twice).
   virtual void spillRun(const CellWindowInput& in) = 0;
 
   /// Closes the payloads of the partitions the input names (every
-  /// partition by default): records their null regions and row counts.
+  /// partition by default): records their null bodies and row counts.
   /// The other partitions' payloads stay open. Precondition
   /// (splitter-orchestrated): the named partitions' caches flushed, and
   /// their cells drained unless sealsResidentCells().
   virtual void sealWindow(const CellWindowInput& in) = 0;
 
-  /// Final merge. `windowHasData` says whether the current (unsealed)
-  /// window still carries rows; the backend either seals it through disk or
-  /// assembles it live when nothing was ever spilled. Fills the metrics
+  /// Final merge. `windowHasData` says whether the unsealed window still
+  /// has rows; the backend writes them directly from memory, after any runs
+  /// that window already spilled (RSS sends them). Fills the metrics
   /// fields it owns (partitionLengths, rawPartitionLengths,
   /// totalBytesWritten, totalBytesEvicted, write/evict times).
   virtual void finalize(
@@ -112,8 +114,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// `composite` holds the task's CompositeRowVector blocks, merged after
   /// this output's payloads in every partition; it must outlive this
   /// object. `options` gives the codec, the data file and the spill
-  /// directories; `pool` backs the scratch and compression workspaces so
-  /// they stay inside task memory accounting and must outlive this object.
+  /// directories; `pool` backs the scratch buffer and must outlive this
+  /// object. The compression workspaces come from the spill pool.
   LocalCellOutput(
       PartialSpiller& composite,
       const CellLayout* layout,
@@ -165,9 +167,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     uint64_t variableBytes{0};
   };
 
-  /// One INFO line per seal at finalize - partitions sealed, rows and null
-  /// bytes - plus the runs, the residual window and a summary. Diagnostic
-  /// output, capped so a checkpoint-heavy task cannot flood the log.
+  /// Logs the resident window and the task's seal and run totals: two INFO
+  /// lines, the runs listed at most 16.
   void logWindowDiagnostics(const CellWindowInput& in, bool windowHasData);
 
   /// The non-empty segments of `pid` across runs [from, end), oldest first.
@@ -244,8 +245,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
 class RssCellOutput final : public CellOutput {
  public:
   /// `blocks` must outlive this object. `options` gives the codec and
-  /// `cellOptions` its mode; `pool` backs the payloads and workspaces so
-  /// they stay inside task memory accounting and must outlive this object.
+  /// `cellOptions` its mode; `pool` backs the payloads and must outlive
+  /// this object. The compression workspaces come from the spill pool.
   RssCellOutput(
       PartitionBlockOutput& blocks,
       const CellLayout* layout,

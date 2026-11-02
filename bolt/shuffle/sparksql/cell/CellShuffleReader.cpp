@@ -165,8 +165,7 @@ bool CellShuffleReader::decodeComposite(std::string& error) {
   const auto rawBytes = folly::loadUnaligned<uint64_t>(header + 4);
   const auto stored = folly::loadUnaligned<uint64_t>(header + 12);
   const auto layout = static_cast<RunLayout>(header[20]);
-  const CellDecodeLimits limits;
-  if (rowCount == 0 || rowCount > limits.maxRowCount) {
+  if (rowCount == 0 || rowCount > kMaxPayloadRows) {
     return fail("composite block row count out of range");
   }
   if (rawBytes < 4ull * rowCount) {
@@ -276,8 +275,8 @@ RowVectorPtr CellShuffleReader::nextPhysical() {
   const vector_size_t capacity = std::max(batchSize_, 1);
   // One batch at a time: a large payload comes out over several calls,
   // small ones fill the same batch until it is full. An empty batch always
-  // takes one append, as the legacy reader always takes one payload: a byte
-  // target at or below zero then reads one append per batch.
+  // takes one append, so a byte target at or below zero reads one append
+  // per batch.
   while (decoder_.batchRows() < capacity &&
          (decoder_.batchRows() == 0 ||
           static_cast<int64_t>(decoder_.batchBytes()) < batchByteSize_)) {
