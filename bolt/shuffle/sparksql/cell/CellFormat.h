@@ -21,25 +21,39 @@
 /// A partition's shuffle bytes are blocks back to back, each opening with a
 /// CellBlockKind byte. A ColumnarPayload holds some rows of one partition:
 ///
-///   header      24 bytes: rowCount u32, runCount u32, variableBytes u64 (a
-///               preallocation hint, never validated), nullStoredSize u32,
-///               nullDecodedSize u32 (0: the null body is stored as is;
-///               else it is compressed and decodes to this many bytes)
+///   header      24 bytes: rowCount u32, runCount u32, variableBytes u64
+///               (a writer statistic, unused by the reader), nullStoredSize
+///               u32, nullDecodedSize u32 (0: the null body is stored as
+///               is; else it is compressed and decodes to this many bytes).
+///               With W wire columns, W = 0 requires nullStoredSize,
+///               nullDecodedSize, runCount and variableBytes all 0 (a
+///               payload of its header alone); W > 0 requires
+///               nullStoredSize >= 1. The reader limits rowCount to
+///               kMaxPayloadRows and runCount to 65536.
 ///   null body   nullStoredSize bytes: one 2-bit NullTag per wire column,
-///               then per kRawNull column, in column order, its null
-///               records: a u32 count, then the records
-///   enc tags    ceil(W / 8) bytes, W wire columns: bit set = the string
-///               column is in dictionary form
+///               four to a byte from the low bits, ceil(W / 4) bytes, the
+///               unused high bits zero and kReserved rejected; then per
+///               kRawNull column, in column order, its null records: a u32
+///               count, then the records. The body ends exactly after the
+///               last column's records.
+///   enc tags    ceil(W / 8) bytes, W wire columns, LSB first: bit set =
+///               the string column is in dictionary form. A bit on a
+///               non-string column is an error; unused high bits are zero.
 ///   runs        runCount runs, each: RunLayout u8, stored size(s) u64 (one,
 ///               or one per stream for kSeparate), decoded size u64 per
-///               stream, then the stored bytes
+///               stream, then the stored bytes. kSeparate: a stream's
+///               decoded size 0 means it is stored as is, and a stored size
+///               0 requires decoded 0; kCombinedUncompressed: the stored
+///               size equals the decoded sizes' sum; kCombined: the stored
+///               bytes decompress to that sum.
 ///
 /// A null record holds consecutive positions of a column, from the position
 /// after the previous record's: a run of up to kNullRecordMaxRun positions
 /// of one null-ness, then a bitmap of up to kNullRecordBits positions. Its
-/// kNullRecordBytes bytes: run u16 (the run's positions, plus
+/// kNullRecordBytes (28) bytes: run u16 (the run's positions, plus
 /// kNullRecordRunNull when they are null), fill u8 (the bitmap's
-/// positions), then the bitmap, bit 1 = non-null, its bits past fill zero.
+/// positions), then the kNullRecordBitmapBytes (25)-byte bitmap, bit 1 =
+/// non-null, its bits past fill zero.
 /// A record covers at least one position; a column's records cover at most
 /// its positions, the positions past them non-null. A column's positions
 /// are the payload's rows, except in a nested layout.
@@ -64,9 +78,10 @@
 /// UNKNOWN columns have no wire column. A wire column's values live in its
 /// streams (CellLayout): only non-null positions have values, and an
 /// all-null column's streams are empty. A stream is the
-/// concatenation of its bytes in every run, in run order; a run may end a
-/// raw stream's bytes anywhere, but never inside an Encoding Block or a
-/// dictionary. Encoded streams are Encoding Blocks back to back: each
+/// concatenation of its bytes in every run, in run order; a run may end an
+/// unencoded stream's bytes anywhere, but never inside an Encoding Block or
+/// a dictionary (a writer guarantee: the reader concatenates the runs
+/// first). Encoded streams are Encoding Blocks back to back: each
 /// covers the values of one kCacheLineBytes cache line (the stream's last
 /// block fewer) and opens with an EncodingByte, EncodingKind in the low 2
 /// bits and a parameter in the high 6:
@@ -83,11 +98,18 @@
 /// as one 0/1 byte). A string column has a length stream (encoded, Bigint) and
 /// a data stream (the bytes). In dictionary form, the data stream starts
 /// with a dictionary sequence - per dictionary, entries of a length byte
-/// (<= kDictEntryMaxLen) and the bytes, kDictMoreMarker or kDictLastMarker,
-/// then the u32 count of rows it matches - and ends with the raw bytes of
-/// the unmatched rows; the length stream holds one index byte per matched
-/// row, then the lengths of the unmatched ones. Matched rows come first, in
-/// dictionary order.
+/// (<= kDictEntryMaxLen) and the bytes, at most kDictSerializedBudget bytes
+/// together, an empty entry list allowed, then kDictMoreMarker or
+/// kDictLastMarker, then the u32 count of rows it matches - and ends with
+/// the bytes of the unmatched rows; the length stream holds one index byte
+/// per matched row, then the lengths of the unmatched ones. Matched rows
+/// come first, in dictionary order; an index byte is below the entry count
+/// of the dictionary whose matched rows it falls in, and the matched counts
+/// add up to at most the non-null positions.
+///
+/// The reader also requires: Boolean bytes 0 or 1, string lengths within
+/// [0, INT32_MAX], Timestamp seconds and nanos within Timestamp's range,
+/// and every stream consumed exactly by its values.
 
 #pragma once
 
@@ -113,7 +135,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// kMaxBlockBytes bounds the encoded size.
 inline constexpr uint32_t kCacheLineBytes = 64;
 
-/// Fixed payload header length.
+/// Fixed payload header length, after the CellBlockKind byte. Unlike
+/// kCompositeBlockHeaderBytes, it does not count that byte.
 inline constexpr uint32_t kPayloadFixedHeaderBytes = 24;
 
 /// Most rows one partition gathers in a window, and so one payload holds.
@@ -185,7 +208,14 @@ enum class CellBlockKind : uint8_t {
 ///   stored    u64  body bytes that follow
 ///   layout    u8   RunLayout::kCombined (compressed) or kCombinedUncompressed
 ///   body           rows back to back, each [size i32][size bytes]
-constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
+///
+/// The reader requires rowCount in [1, kMaxPayloadRows], rawBytes at least
+/// 4 * rowCount, a non-negative size per row, rows consuming the body
+/// exactly, stored = rawBytes for kCombinedUncompressed, and a codec for
+/// kCombined. The header size counts the kind byte, unlike
+/// kPayloadFixedHeaderBytes: the reader, past the kind byte, reads the
+/// rest of it.
+inline constexpr uint64_t kCompositeBlockHeaderBytes = 1 + 4 + 8 + 8 + 1;
 
 /// The size prefix of a CompositeRows row. Rows lie back to back, so the
 /// prefix is in general unaligned: read through memcpy, one load.
