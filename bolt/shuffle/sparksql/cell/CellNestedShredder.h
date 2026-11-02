@@ -50,15 +50,15 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// of its rows and a chunk - a ROW below a container takes it per element -
 /// goes back with the batch; the rest is kept across batches until
 /// releaseScratch().
-class CellFlattener {
+class CellNestedShredder {
  public:
   /// Elements one split of a container space covers at most, by default.
   static constexpr uint32_t kChunkPositions = 64 << 10;
 
   /// Sets the splitter's column positions. `layout`, `splitter` and `pool`
-  /// must outlive the flattener, and the flattener every output call of the
+  /// must outlive the shredder, and the shredder every output call of the
   /// splitter.
-  CellFlattener(
+  CellNestedShredder(
       const CellNestedLayout& layout,
       CellSplitter& splitter,
       uint32_t numPartitions,
@@ -98,10 +98,10 @@ class CellFlattener {
   /// rows, then every container's elements.
   void split(const uint32_t* row2Partition, const uint32_t* partition2RowCount);
 
-  /// Time spent flattening since the last call, the splitter's own excluded.
-  uint64_t takeFlattenTimeNs() {
-    const uint64_t ns = flattenNs_;
-    flattenNs_ = 0;
+  /// Time spent shredding since the last call, the splitter's own excluded.
+  uint64_t takeShredTimeNs() {
+    const uint64_t ns = shredNs_;
+    shredNs_ = 0;
     return ns;
   }
 
@@ -260,7 +260,7 @@ class CellFlattener {
   /// Inside prepare() or split().
   bool busy_{false};
 
-  uint64_t flattenNs_{0};
+  uint64_t shredNs_{0};
   uint64_t splitNs_{0};
 };
 

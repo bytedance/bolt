@@ -705,7 +705,7 @@ inline const std::vector<ShuffleOutput> kShuffleOutputs{
 /// Writes `input` once per output of `outputs` - into `dataFile`, or pushed
 /// to a RecordingRssClient - and reads every partition back at every read
 /// shape, an RSS partition push by push, expecting the input's rows in
-/// order. Each writer must have flattened the complex columns of a schema
+/// order. Each writer must have shredded the complex columns of a schema
 /// that takes a nested layout, its struct nulls folded into the columns
 /// below, else converted them; an uncompressed output's raw lengths are
 /// its lengths. `tune` adjusts the writer of each output, `check` sees what

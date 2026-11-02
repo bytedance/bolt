@@ -50,14 +50,14 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// far above the average of their payload's rows left, or strings a
 /// dictionary repeats. As for a flat payload, the rows' batch opens at the
 /// caller's capacity, which the bound leaves to the caller.
-class CellAssembler final : public CellBatchSource {
+class CellNestedAssembler final : public CellBatchSource {
  public:
   /// Positions one append covers at most by default, so that a decoder's
   /// per-append scratch stays what a flat batch's takes.
   static constexpr uint32_t kAppendPositions = 64 << 10;
 
   /// `type` must take a nested layout.
-  CellAssembler(
+  CellNestedAssembler(
       RowTypePtr type,
       CellDecompressor* decompressor,
       memory::MemoryPool* pool,
@@ -133,11 +133,11 @@ class CellAssembler final : public CellBatchSource {
   uint64_t stringsLeft_{0};
 };
 
-/// A CellAssembler of `type` when it takes a nested layout, else nullptr;
+/// A CellNestedAssembler of `type` when it takes a nested layout, else nullptr;
 /// `type` must be supported (CellShuffleTypeAdapter::isSupported).
 /// `decompressor` may be null when payloads are known to be uncompressed;
 /// it and `pool` must outlive the result.
-std::unique_ptr<CellBatchSource> makeCellAssembler(
+std::unique_ptr<CellBatchSource> makeCellNestedAssembler(
     const RowTypePtr& type,
     CellDecompressor* decompressor,
     memory::MemoryPool* pool,

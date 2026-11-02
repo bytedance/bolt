@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "bolt/shuffle/sparksql/cell/CellFlattener.h"
+#include "bolt/shuffle/sparksql/cell/CellNestedShredder.h"
 
 #include <algorithm>
 #include <numeric>
@@ -156,7 +156,7 @@ void releaseOver(BufferPtr& buffer, size_t bytes) {
 
 } // namespace
 
-CellFlattener::CellFlattener(
+CellNestedShredder::CellNestedShredder(
     const CellNestedLayout& layout,
     CellSplitter& splitter,
     uint32_t numPartitions,
@@ -200,19 +200,19 @@ CellFlattener::CellFlattener(
 }
 
 template <typename T>
-T* CellFlattener::scratch(BufferPtr& buffer, size_t n) {
+T* CellNestedShredder::scratch(BufferPtr& buffer, size_t n) {
   return reinterpret_cast<T*>(
       resetBuffer(buffer, std::max<size_t>(n, 1) * sizeof(T), &pool_));
 }
 
 template <typename T>
 const BufferPtr&
-CellFlattener::copyToScratch(BufferPtr& buffer, const T* data, size_t n) {
+CellNestedShredder::copyToScratch(BufferPtr& buffer, const T* data, size_t n) {
   std::copy_n(data, n, scratch<T>(buffer, n));
   return buffer;
 }
 
-void CellFlattener::followSeals() {
+void CellNestedShredder::followSeals() {
   if (splitter_.sealCount() == seals_) {
     return;
   }
@@ -233,7 +233,7 @@ void CellFlattener::followSeals() {
   }
 }
 
-void CellFlattener::prepare(const RowVector& rv) {
+void CellNestedShredder::prepare(const RowVector& rv) {
   const uint64_t start = currentTimeNs();
   busy_ = true;
   SCOPE_EXIT {
@@ -270,10 +270,10 @@ void CellFlattener::prepare(const RowVector& rv) {
   for (const uint32_t x : layout_.space(0).containers) {
     countRange(x, 0, numRows_);
   }
-  flattenNs_ += currentTimeNs() - start;
+  shredNs_ += currentTimeNs() - start;
 }
 
-BatchNullClass CellFlattener::viewRows(uint32_t col) {
+BatchNullClass CellNestedShredder::viewRows(uint32_t col) {
   auto& input = inputs_[col];
   auto& decoded = input.decoded;
   auto& view = views_[col];
@@ -297,7 +297,7 @@ BatchNullClass CellFlattener::viewRows(uint32_t col) {
   return classifyNulls(decoded_[col], numRows_);
 }
 
-void CellFlattener::inputNode(uint32_t n, const VectorPtr& vector) {
+void CellNestedShredder::inputNode(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
   auto& input = inputs_[n];
   input.vector = vector;
@@ -342,7 +342,7 @@ void CellFlattener::inputNode(uint32_t n, const VectorPtr& vector) {
   }
 }
 
-void CellFlattener::inputColumn(uint32_t n, const VectorPtr& vector) {
+void CellNestedShredder::inputColumn(uint32_t n, const VectorPtr& vector) {
   auto& input = inputs_[n];
   if (layout_.node(n).space == 0) {
     decoded_[n].decode(*vector);
@@ -356,7 +356,7 @@ void CellFlattener::inputColumn(uint32_t n, const VectorPtr& vector) {
       : VectorPtr(vector, const_cast<BaseVector*>(input.decoded.base()));
 }
 
-void CellFlattener::inputRow(uint32_t n, const VectorPtr& vector) {
+void CellNestedShredder::inputRow(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
   auto& input = inputs_[n];
   auto& structs = input.decoded;
@@ -400,7 +400,8 @@ void CellFlattener::inputRow(uint32_t n, const VectorPtr& vector) {
   inputColumn(n, presence);
 }
 
-VectorPtr CellFlattener::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
+VectorPtr
+CellNestedShredder::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
   auto& input = inputs_[n];
   const auto& structs = input.decoded;
   const vector_size_t size = structs.size();
@@ -442,7 +443,7 @@ VectorPtr CellFlattener::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
   return withNulls(*loaded, std::move(combined), size, &pool_);
 }
 
-const BufferPtr& CellFlattener::ones(vector_size_t size) {
+const BufferPtr& CellNestedShredder::ones(vector_size_t size) {
   if (ones_ == nullptr ||
       ones_->size() < static_cast<size_t>(size) * sizeof(int16_t)) {
     ones_ = AlignedBuffer::allocate<int16_t>(size, &pool_, int16_t{1});
@@ -450,7 +451,7 @@ const BufferPtr& CellFlattener::ones(vector_size_t size) {
   return ones_;
 }
 
-const BufferPtr& CellFlattener::identity(vector_size_t size) {
+const BufferPtr& CellNestedShredder::identity(vector_size_t size) {
   if (identity_ == nullptr ||
       identity_->size() < static_cast<size_t>(size) * sizeof(vector_size_t)) {
     identity_ = AlignedBuffer::allocate<vector_size_t>(size, &pool_);
@@ -460,7 +461,7 @@ const BufferPtr& CellFlattener::identity(vector_size_t size) {
   return identity_;
 }
 
-void CellFlattener::clearNode(uint32_t n) {
+void CellNestedShredder::clearNode(uint32_t n) {
   auto& input = inputs_[n];
   input.vector.reset();
   input.values.reset();
@@ -470,7 +471,7 @@ void CellFlattener::clearNode(uint32_t n) {
   }
 }
 
-void CellFlattener::countRange(
+void CellNestedShredder::countRange(
     uint32_t x,
     vector_size_t begin,
     vector_size_t end) {
@@ -503,7 +504,7 @@ void CellFlattener::countRange(
   }
 }
 
-bool CellFlattener::fitsWindow() {
+bool CellNestedShredder::fitsWindow() {
   followSeals();
   for (uint32_t t = 1; t < layout_.numSpaces(); ++t) {
     if (totals_[t] + maxCount_[t] > CellNestedLayout::kMaxPositions) {
@@ -513,7 +514,7 @@ bool CellFlattener::fitsWindow() {
   return true;
 }
 
-void CellFlattener::split(
+void CellNestedShredder::split(
     const uint32_t* row2Partition,
     const uint32_t* partition2RowCount) {
   const uint64_t start = currentTimeNs();
@@ -580,10 +581,10 @@ void CellFlattener::split(
   }
   releaseOver(ones_, keep * sizeof(int16_t));
   releaseOver(identity_, keep * sizeof(vector_size_t));
-  flattenNs_ += currentTimeNs() - start - splitNs_;
+  shredNs_ += currentTimeNs() - start - splitNs_;
 }
 
-int64_t CellFlattener::releaseScratch() {
+int64_t CellNestedShredder::releaseScratch() {
   if (busy_) {
     return 0;
   }
@@ -609,7 +610,7 @@ int64_t CellFlattener::releaseScratch() {
   return held - pool_.usedBytes();
 }
 
-void CellFlattener::emit(uint32_t x, const Entries& parent) {
+void CellNestedShredder::emit(uint32_t x, const Entries& parent) {
   auto& input = inputs_[x];
   if (input.allNull) {
     return;
@@ -687,7 +688,7 @@ void CellFlattener::emit(uint32_t x, const Entries& parent) {
   }
 }
 
-void CellFlattener::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
+void CellNestedShredder::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
   const auto& space = layout_.space(t);
   bool someNulls = false;
   for (const uint32_t col : space.splitColumns) {
@@ -742,7 +743,7 @@ void CellFlattener::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
   chunk.contiguous = true;
 }
 
-BatchNullClass CellFlattener::view(uint32_t col, const Chunk& chunk) {
+BatchNullClass CellNestedShredder::view(uint32_t col, const Chunk& chunk) {
   auto& input = inputs_[col];
   if (input.allNull) {
     return BatchNullClass::kAllNull;
@@ -785,7 +786,7 @@ BatchNullClass CellFlattener::view(uint32_t col, const Chunk& chunk) {
   return classifyNulls(decoded_[col], n);
 }
 
-void CellFlattener::splitColumns(const SplitBatch& batch) {
+void CellNestedShredder::splitColumns(const SplitBatch& batch) {
   const uint64_t start = currentTimeNs();
   splitter_.split(batch);
   splitNs_ += currentTimeNs() - start;
