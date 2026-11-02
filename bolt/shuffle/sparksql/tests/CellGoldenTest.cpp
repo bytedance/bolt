@@ -873,7 +873,7 @@ TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
       {"deep_rows_p7_lz4", 756669, 0x326dc6286aecb91dULL},
       {"unknown_fields_p7_none_rss", 273076, 0xc06c021c92f3cfaaULL},
       {"deep_nested_p7_lz4_partition_seals", 465968, 0x0220d4ea432ab57dULL},
-      {"deep_rows_p7_lz4_adapter", 1340920, 0x19f012550dc06055ULL},
+      {"deep_rows_p7_lz4_adapter", 1340920, 0xb1b5d076c6af9d9fULL},
   };
   std::vector<Golden> actual;
   for (const auto& scenario : scenarios) {

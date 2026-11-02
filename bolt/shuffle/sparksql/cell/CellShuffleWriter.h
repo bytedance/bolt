@@ -125,9 +125,6 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   };
 
   void initOnFirstBatch(const RowVector& rv);
-  /// Splits one physical (adapter-converted) or nested batch, slicing
-  /// oversized ones.
-  arrow::Status splitPhysical(RowVectorPtr rv);
   arrow::Status splitBatch(RowVectorPtr rv);
   /// splitBatch() of a nested layout: halves a batch whose positions a
   /// payload cannot hold.
