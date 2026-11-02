@@ -43,19 +43,14 @@ bool isComplex(const TypePtr& type) {
   return kindOf(type) != CellNestedLayout::Kind::kLeaf;
 }
 
-/// Adds the columns `type` flattens into to `columns`; false when it holds a
-/// leaf no Cell column carries.
-bool countColumns(const TypePtr& type, uint64_t& columns) {
+/// Adds the columns `type` flattens into to `columns`.
+void countColumns(const TypePtr& type, uint64_t& columns) {
   ++columns;
-  if (!isComplex(type)) {
-    return CellLayout::isSupportedType(type);
-  }
-  for (uint32_t i = 0; i < type->size(); ++i) {
-    if (!countColumns(type->childAt(i), columns)) {
-      return false;
+  if (isComplex(type)) {
+    for (uint32_t i = 0; i < type->size(); ++i) {
+      countColumns(type->childAt(i), columns);
     }
   }
-  return true;
 }
 
 /// The type of a node's column: a leaf's own, a container's lengths, a
@@ -79,9 +74,7 @@ bool CellNestedLayout::supports(const RowTypePtr& rowType) {
   uint64_t columns = 0;
   for (const auto& child : rowType->children()) {
     nested = nested || isComplex(child);
-    if (!countColumns(child, columns)) {
-      return false;
-    }
+    countColumns(child, columns);
   }
   return nested && columns <= UINT16_MAX;
 }
