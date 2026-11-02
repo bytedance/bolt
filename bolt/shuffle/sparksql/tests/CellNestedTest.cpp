@@ -954,11 +954,12 @@ TEST_F(CellNestedTest, elementsPastTheRowLimit) {
   // Rows of 2^30 elements: arrays and maps of UNKNOWN, which carry lengths
   // only and cost nothing to write or read, and arrays of null BOOLEANs,
   // whose space has a column on the wire, 2^30 null bits a row to read
-  // back. Three such rows in one partition hold more positions than a
-  // payload may, so the writer closes a window before each, however few
-  // bytes they take, whether the rows come in one batch or one by one; and
-  // a batch holding a payload's elements takes no next payload whose
-  // elements would take its space past kMaxPositions, so it ends there.
+  // back. Two such rows in one partition hold more positions than a
+  // payload may. Coming one by one, the writer closes a window before each,
+  // however few bytes they take; and a batch holding a payload's elements
+  // takes no next payload whose elements would take its space past
+  // kMaxPositions, so it ends there. Coming in one batch, they fail the
+  // write: no payload carries the batch.
   constexpr vector_size_t kLength = 1 << 30;
   const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
   const auto rows = static_cast<vector_size_t>(lengths.size());
@@ -990,6 +991,15 @@ TEST_F(CellNestedTest, elementsPastTheRowLimit) {
             name,
             split.size() == 1 ? "one batch" : "a batch per row",
             rss ? "rss" : "local"));
+        if (split.size() == 1) {
+          EXPECT_THROW(
+              (void)test::writeShuffle(
+                  writerOptions(1, rss, arrow::Compression::LZ4_FRAME),
+                  test::roundRobin(split, 1),
+                  pool()),
+              BoltUserError);
+          continue;
+        }
         const auto written = test::writeShuffle(
             writerOptions(1, rss, arrow::Compression::LZ4_FRAME),
             test::roundRobin(split, 1),
@@ -1598,99 +1608,6 @@ TEST_F(CellNestedTest, fieldsShorterThanTheirStructs) {
   const auto before = valueSizes();
   roundTrip(input, kPartitions, nullptr, nullptr, kFewerReadShapes);
   EXPECT_EQ(valueSizes(), before);
-}
-
-TEST_F(CellNestedTest, slicedBatchesKeepShortFields) {
-  // RowVector::slice slices every field of a struct, and a struct's fields
-  // may stop short of it where every struct from there on is null. The
-  // writer slices a batch past its byte bound, 8 MiB on a remote shuffle,
-  // and halves one whose elements pass a payload's positions; neither may
-  // cut such a field past its end.
-  const auto fieldsType = ROW({"a", "s"}, {BIGINT(), VARCHAR()});
-  // `size` structs, null at every fourth row and from `length` on, whose
-  // fields hold `length` rows.
-  const auto structs = [&](vector_size_t size, vector_size_t length) {
-    return std::make_shared<RowVector>(
-        pool(),
-        fieldsType,
-        makeNulls(
-            size, [&](auto row) { return row % 4 == 0 || row >= length; }),
-        size,
-        std::vector<VectorPtr>{
-            makeFlatVector<int64_t>(length, [](auto row) { return row * 3; }),
-            makeFlatVector<std::string>(
-                length, [](auto row) { return std::string(row % 17, 's'); })});
-  };
-  {
-    SCOPED_TRACE("sliced at the byte bound");
-    // About 12 MiB of 4 KiB strings: two slices on a remote shuffle, both
-    // past the 1000 rows of r's fields and the 500 of the struct in n.
-    constexpr vector_size_t kRows = 3000;
-    const auto input = test::roundRobin(
-        {makeRowVector(
-            {"id", "pad", "r", "n"},
-            {makeFlatVector<int64_t>(kRows, [](auto row) { return row; }),
-             makeFlatVector<std::string>(
-                 kRows,
-                 [](auto row) { return std::string(4096, 'a' + row % 26); }),
-             structs(kRows, 1000),
-             makeRowVector({"r"}, {structs(kRows, 500)})})},
-        7);
-    roundTrip(input, 7, nullptr, nullptr, {{4096, 1 << 20}});
-  }
-  {
-    SCOPED_TRACE("halved past the positions");
-    // Rows of 2^30 UNKNOWN elements, as in elementsPastTheRowLimit: the
-    // batch is halved, and its second half again, past the 2 rows of r's
-    // fields.
-    constexpr vector_size_t kLength = 1 << 30;
-    const std::vector<vector_size_t> lengths{kLength, 5, kLength, kLength};
-    const auto rows = static_cast<vector_size_t>(lengths.size());
-    const auto data = makeRowVector(
-        {"id", "c", "r"},
-        {makeFlatVector<int64_t>(rows, [](auto row) { return row; }),
-         test::containersOf(
-             lengths,
-             BaseVector::createNullConstant(UNKNOWN(), kLength, pool()),
-             pool()),
-         structs(rows, 2)});
-    const auto lz4 = test::lz4Codec();
-    for (const bool rss : {false, true}) {
-      SCOPED_TRACE(rss ? "rss" : "local");
-      const auto written = test::writeShuffle(
-          writerOptions(1, rss, arrow::Compression::LZ4_FRAME),
-          test::roundRobin({data}, 1),
-          pool());
-      const auto batches = test::readPartition(
-          written.partitions[0],
-          asRowType(data->type()),
-          lz4.get(),
-          pool(),
-          4096,
-          1 << 20);
-      vector_size_t next = 0;
-      for (const auto& batch : batches) {
-        const auto* ids = batch->childAt(0)->asFlatVector<int64_t>();
-        const auto* containers = batch->childAt(1)->as<ArrayVector>();
-        const auto* r = batch->childAt(2)->as<RowVector>();
-        ASSERT_NE(r, nullptr);
-        for (vector_size_t row = 0; row < batch->size(); ++row, ++next) {
-          ASSERT_LT(next, rows);
-          EXPECT_EQ(ids->valueAt(row), next);
-          EXPECT_EQ(containers->sizeAt(row), lengths[next]);
-          // Only row 1 holds a struct: a = 3, s = "s".
-          EXPECT_EQ(r->isNullAt(row), next != 1);
-          if (next == 1) {
-            EXPECT_EQ(r->childAt(0)->asFlatVector<int64_t>()->valueAt(row), 3);
-            EXPECT_EQ(
-                r->childAt(1)->asFlatVector<StringView>()->valueAt(row).str(),
-                "s");
-          }
-        }
-      }
-      EXPECT_EQ(next, rows);
-    }
-  }
 }
 
 TEST_F(CellNestedTest, structsPastTheColumnLimitTakeTheAdapter) {

@@ -240,7 +240,6 @@ void CellFlattener::prepare(const RowVector& rv) {
     busy_ = false;
   };
   numRows_ = rv.size();
-  exceeds_ = false;
   std::fill(totals_.begin(), totals_.end(), 0);
   const auto& topNodes = layout_.topNodes();
   BOLT_CHECK_EQ(rv.childrenSize(), topNodes.size() + 1);
@@ -268,13 +267,8 @@ void CellFlattener::prepare(const RowVector& rv) {
     klass = viewRows(col);
   }
 
-  // Loading lazy vectors and taking scratch may have pushed a remote
-  // window: the counts are read after any seal that brought about.
-  followSeals();
   for (const uint32_t x : layout_.space(0).containers) {
-    if (!countRange(x, 0, numRows_)) {
-      break;
-    }
+    countRange(x, 0, numRows_);
   }
   flattenNs_ += currentTimeNs() - start;
 }
@@ -476,19 +470,16 @@ void CellFlattener::clearNode(uint32_t n) {
   }
 }
 
-bool CellFlattener::countRange(
+void CellFlattener::countRange(
     uint32_t x,
     vector_size_t begin,
     vector_size_t end) {
   auto& input = inputs_[x];
   if (input.allNull) {
-    return true;
+    return;
   }
   const uint32_t t = layout_.node(x).ownedSpace;
   const auto& containers = layout_.space(t).containers;
-  // Past this the space would take some partition past the positions a
-  // payload holds: the batch is cut, so the count can stop.
-  const uint64_t limit = CellNestedLayout::kMaxPositions - maxCount_[t];
   uint64_t& total = totals_[t];
   const auto& decoded = input.decoded;
   for (vector_size_t j = begin; j < end; ++j) {
@@ -498,15 +489,25 @@ bool CellFlattener::countRange(
     const vector_size_t i = decoded.index(j);
     const vector_size_t size = input.sizes[i];
     total += static_cast<uint64_t>(size);
-    if (total > limit) {
-      exceeds_ = true;
-      return false;
+    // No window carries the batch: the count stops here.
+    if (total > CellNestedLayout::kMaxPositions) {
+      BOLT_USER_FAIL(
+          "a batch holds more than {} nested elements at one level, more "
+          "than a Cell shuffle payload carries",
+          CellNestedLayout::kMaxPositions);
     }
     for (const uint32_t y : containers) {
       const vector_size_t offset = input.offsets[i];
-      if (!countRange(y, offset, offset + size)) {
-        return false;
-      }
+      countRange(y, offset, offset + size);
+    }
+  }
+}
+
+bool CellFlattener::fitsWindow() {
+  followSeals();
+  for (uint32_t t = 1; t < layout_.numSpaces(); ++t) {
+    if (totals_[t] + maxCount_[t] > CellNestedLayout::kMaxPositions) {
+      return false;
     }
   }
   return true;
@@ -515,7 +516,6 @@ bool CellFlattener::countRange(
 void CellFlattener::split(
     const uint32_t* row2Partition,
     const uint32_t* partition2RowCount) {
-  BOLT_CHECK(!exceeds_, "a batch past the positions a payload holds");
   const uint64_t start = currentTimeNs();
   busy_ = true;
   SCOPE_EXIT {

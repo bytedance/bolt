@@ -125,12 +125,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
 
   void initOnFirstBatch(const RowVector& rv);
   arrow::Status splitBatch(RowVectorPtr rv);
-  /// splitBatch() of a nested layout: halves a batch whose positions a
-  /// payload cannot hold.
+  /// splitBatch() of a nested layout: seals the window first when the
+  /// batch's positions do not fit beside it.
   arrow::Status splitNested(RowVectorPtr rv);
-  /// Adds the time since `start` to the metrics: the flattener's to
-  /// flattenTime, the rest to splitTime.
-  void addNestedSplitTime(uint64_t start);
   /// Where a window is released only whole (remote): releases it first
   /// when the next slice of about `estimatedBytes` cannot be reserved.
   void reserveSlice(int64_t estimatedBytes);
