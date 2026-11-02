@@ -17,7 +17,6 @@
 #pragma once
 
 #include <cstdio>
-#include <iosfwd>
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/Options.h"
@@ -171,13 +170,6 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// output, capped so a checkpoint-heavy task cannot flood the log.
   void logWindowDiagnostics(const CellWindowInput& in, bool windowHasData);
 
-  /// Appends "N runs [a, b, ...]" for one window's runs and returns their
-  /// total spill bytes.
-  static uint64_t describeRuns(
-      const std::vector<SpilledRun>& runs,
-      uint32_t numPartitions,
-      std::ostream& os);
-
   /// The non-empty segments of `pid` across runs [from, end), oldest first.
   static std::vector<SpillSegment> partitionSegments(
       const std::vector<SpilledRun>& runs,
@@ -193,13 +185,6 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// Copies one spilled run segment, in its final form, into the data
   /// file.
   void writeSpilledSegment(DataFileWriter& out, const SpillSegment& segment);
-
-  /// Writes partition `pid`'s resident cells to the data file as one run.
-  void writeResidentRun(
-      DataFileWriter& out,
-      const CellWindowInput& in,
-      uint32_t pid,
-      uint64_t total);
 
   /// Appends one partition's payload for the current (unsealed) window:
   /// header, null body and row counts straight from memory, then the

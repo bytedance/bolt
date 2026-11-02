@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 
 #include <folly/ScopeGuard.h>
+#include <folly/lang/Bits.h>
 
 #include "bolt/common/base/BitUtil.h"
 #include "bolt/common/memory/sparksql/ExecutionMemoryPool.h"
@@ -45,10 +46,6 @@ constexpr uint32_t kDictMinRepeatRatio = 4;
 /// cell data is covered, and keeps the rest resident for the merge to write
 /// directly, as the V1/V2 writers evict partitions until the request is met.
 constexpr uint64_t kPartialSpillDivisor = 2;
-
-uint32_t prevPowerOfTwo(uint64_t value) {
-  return uint32_t{1} << (63 - __builtin_clzll(value));
-}
 
 } // namespace
 
@@ -161,8 +158,9 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
       : (int64_t{1} << 30);
   const int64_t perStream =
       budget / 8 / numPartitions_ / std::max<uint32_t>(1, numStreams);
-  const uint32_t cellBytes = prevPowerOfTwo(
-      std::clamp<int64_t>(perStream, kMinDataCellBytes, kMaxDataCellBytes));
+  const auto cellBytes = static_cast<uint32_t>(
+      folly::prevPowTwo(static_cast<uint64_t>(std::clamp<int64_t>(
+          perStream, kMinDataCellBytes, kMaxDataCellBytes))));
 
   allocator_ = std::make_unique<ChunkAllocator>(
       boltPool_, kChunkBytes, cellBytes, [this]() { reserveChunk(); });

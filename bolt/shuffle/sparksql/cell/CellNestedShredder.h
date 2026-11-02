@@ -184,11 +184,6 @@ class CellNestedShredder {
   /// struct is.
   VectorPtr fold(uint32_t n, uint32_t i, const BufferPtr& nulls);
 
-  /// `size` SmallInt values of 1, and 0 to `size` - 1: buffers that grow
-  /// as a batch needs, shared by every vector over them.
-  const BufferPtr& ones(vector_size_t size);
-  const BufferPtr& identity(vector_size_t size);
-
   /// Marks node n and below as holding no entry this batch.
   void clearNode(uint32_t n);
 
