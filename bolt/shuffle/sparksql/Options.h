@@ -92,8 +92,7 @@ enum class ShuffleWriterType {
 
 // Cell memory thresholds and encoding policy; compression uses
 // PartitionWriterOptions. On Celeborn nothing is spilled: the spill
-// thresholds push the window at the next batch boundary instead, and
-// compressSpill does not apply.
+// thresholds push the window at the next batch boundary instead.
 struct CellShuffleOptions {
   // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
   int64_t cellMemoryCapBytes = 0;
@@ -103,20 +102,17 @@ struct CellShuffleOptions {
   int64_t nullMemLimitBytes = 16LL << 20;
   // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
-  // Compress runs as they spill, so both disk passes write compressed bytes
-  // (SSD endurance). Spilled segments are then final runs, copied verbatim
-  // at merge. Disabling stores them uncompressed and leaves the codec work
-  // to the merge.
-  bool compressSpill = true;
   // Compress runs through the codec's stream form, straight from the cells
   // with fixed buffers; off, each frame is gathered into a pool workspace
   // and compressed at once. Codecs with no stream form are always one-shot.
   // Both write the same run layouts.
   bool streamCompression = true;
-  // Learn per stream whether compressing pays: a stream whose frames keep
-  // not shrinking (random keys, hashes, packed doubles) is stored without a
-  // codec call, and tried again after a growing stretch of skipped bytes in
-  // case its data changed. Off, every frame is compressed and judged.
+  // Learn whether compressing pays, per stream and for COMBINED frames and
+  // null bodies: after a frame that compressed too little to be kept
+  // (random keys, hashes, packed doubles), only one frame of its kind in ten
+  // is compressed and judged, the others stored without a codec call, so a
+  // kind whose data starts to compress is picked up again. Off, every frame
+  // is compressed and judged.
   bool adaptiveCompression = true;
   // Flatten ARRAY, MAP and ROW columns into plain columns of a nested
   // layout (cell/CellFormat.h). Off, the type adapter packs them row by row

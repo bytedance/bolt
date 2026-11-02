@@ -129,9 +129,11 @@ LocalCellOutput::LocalCellOutput(
 void LocalCellOutput::spillRun(const CellWindowInput& in) {
   const uint32_t numStreams = layout_->numStreams();
   auto& run = runs_.emplace_back();
-  const bool compress = compressor_.compresses() && cellOptions_.compressSpill;
-  // With compressSpill off, the merge compresses the stored segments.
-  run.storedIsFinal = !compressor_.compresses() || compress;
+  // Runs are compressed as they spill, so both disk passes write compressed
+  // bytes and the merge copies the segments verbatim. A run a pressure spill
+  // had to store for want of a workspace is not final: the merge compresses
+  // it.
+  run.storedIsFinal = true;
   auto& ends = run.pidEnds;
   ends.resize(in.numPartitions + 1);
   ends[0] = spill_.end();
@@ -144,12 +146,8 @@ void LocalCellOutput::spillRun(const CellWindowInput& in) {
         const auto visit = [&](uint32_t s, RunPieceFn fn) {
           in.cells->scan(pid, s, fn);
         };
-        if (compress) {
-          run.storedIsFinal &=
-              compressor_.write(sink, numStreams, sizes.data(), visit);
-        } else {
-          compressor_.writeStored(sink, numStreams, sizes.data(), visit);
-        }
+        run.storedIsFinal &=
+            compressor_.write(sink, numStreams, sizes.data(), visit);
       }
     }
     ends[pid + 1] = spill_.end();
@@ -269,10 +267,9 @@ void LocalCellOutput::writeSpilledSegment(
   }
   rawAccum_ += runHeaderBytes + decodedSum;
   // A compressed segment, and a stored one the spill already made final,
-  // is copied as it is. Any other stored segment is compressed now, read
-  // back from the spill file stream by stream, into the run a spill-time
-  // compression gives the same bytes: compressSpill never changes the
-  // final file.
+  // is copied as it is. Any other stored segment - one a pressure spill
+  // could not compress - is compressed now, read back from the spill file
+  // stream by stream.
   if (layoutByte == static_cast<uint8_t>(RunLayout::kCombined) ||
       segment.storedIsFinal) {
     ++copiedSegments_;

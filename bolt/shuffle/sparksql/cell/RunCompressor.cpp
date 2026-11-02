@@ -225,15 +225,6 @@ bool RunCompressor::write(
   return final;
 }
 
-void RunCompressor::writeStored(
-    RunSink& sink,
-    uint32_t numStreams,
-    const uint64_t* sizes,
-    RunStreamVisitor visit) {
-  ++stats_.deferredRuns;
-  storeRun(sink, numStreams, sizes, visit);
-}
-
 void RunCompressor::storeRun(
     RunSink& sink,
     uint32_t numStreams,
@@ -294,13 +285,12 @@ void RunCompressor::countFrame(
 std::string RunCompressor::Stats::toString() const {
   const auto mb = [](uint64_t bytes) { return bytes / double(1 << 20); };
   return fmt::format(
-      "runs stored={} deferred={} combined={} separate={}; "
+      "runs stored={} combined={} separate={}; "
       "frames compressed={} ({:.1f}MB -> {:.1f}MB) unshrunk={} ({:.1f}MB, "
       "early={}) skipped={} ({:.1f}MB) tiny={} ({:.1f}MB) unfunded={} "
       "({:.1f}MB); null bodies compressed={} ({:.1f}MB -> {:.1f}MB) "
       "stored={} ({:.1f}MB)",
       storedRuns,
-      deferredRuns,
       combinedRuns,
       separateRuns,
       compressedFrames,
