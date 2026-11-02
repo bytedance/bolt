@@ -81,8 +81,7 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
     kMemory, // memory pressure asked for it
     kNulls, // the null bitmaps passed nullMemLimitBytes
     kFlush, // composite rows come next
-    kRemoteAdmit, // remote: the next slice could not be reserved
-    kRemoteReclaim, // remote: a reclaim pushed the window
+    kReserve, // the next slice could not be reserved
     kCount,
   };
 
@@ -132,9 +131,9 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// Adds the time since `start` to the metrics: the flattener's to
   /// flattenTime, the rest to splitTime.
   void addNestedSplitTime(uint64_t start);
-  /// Remote only: pushes the window first when the next slice of about
-  /// `estimatedBytes` cannot be reserved.
-  void admitRemoteSlice(int64_t estimatedBytes);
+  /// Where a window is released only whole (remote): releases it first
+  /// when the next slice of about `estimatedBytes` cannot be reserved.
+  void reserveSlice(int64_t estimatedBytes);
   /// The single dictionary probe (first batch, lifetime decision) of the
   /// string columns `columns`, as `decoded` and `nullClass` hold them.
   void probeDictionary(
@@ -144,11 +143,12 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
       const BatchNullClass* nullClass);
   void onBeforeChunkGrow();
   void checkpoint(SealReason reason);
-  /// Remote: seals (pushes) the window and returns its memory; returns the
-  /// chunk bytes freed.
-  int64_t flushRemoteWindow(SealReason reason);
+  /// Seals the whole window - on a remote shuffle, pushes it - and returns
+  /// its memory; returns the chunk bytes freed.
+  int64_t releaseWindow(SealReason reason);
   void maybeCheckpoint();
-  arrow::Status reclaimRemote(int64_t size, int64_t* actual);
+  /// Answers a reclaim by releasing the whole window (remote).
+  arrow::Status reclaimWindow(int64_t size, int64_t* actual);
 
   /// Celeborn partition writer: windows are pushed whole, never spilled.
   const bool remote_;
