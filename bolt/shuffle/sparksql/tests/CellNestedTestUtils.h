@@ -37,13 +37,13 @@
 namespace bytedance::bolt::shuffle::sparksql::cell::test {
 
 /// How a top-level column holds its rows in a batch.
-enum class Encoding {
+enum class ColumnEncoding {
   kFlat,
   kDictionary,
   kConstant,
   kConstantNull,
   kSlice,
-  kLazy,
+  kLazyIdentity,
   kLazyDictionary,
   kCount,
 };
@@ -95,17 +95,17 @@ class NestedVectorMaker {
   NestedVectorMaker(memory::MemoryPool* pool, uint64_t seed, Options options)
       : pool_(pool), rng_(seed), options_(std::move(options)) {}
 
-  /// `size` rows of `type` at nesting level `depth`.
-  VectorPtr make(const TypePtr& type, vector_size_t size, uint32_t depth = 0) {
+  /// `size` rows of `type` at nesting `level`.
+  VectorPtr make(const TypePtr& type, vector_size_t size, uint32_t level = 0) {
     switch (type->kind()) {
       case TypeKind::ARRAY:
-        return makeArray(type, size, depth);
+        return makeArray(type, size, level);
       case TypeKind::MAP:
-        return makeMap(type, size, depth);
+        return makeMap(type, size, level);
       case TypeKind::ROW:
-        return makeRow(type, size, depth);
+        return makeRow(type, size, level);
       default:
-        return makeLeaf(type, size, depth);
+        return makeLeaf(type, size, level);
     }
   }
 
@@ -114,16 +114,16 @@ class NestedVectorMaker {
   VectorPtr column(
       const TypePtr& type,
       vector_size_t size,
-      Encoding encoding,
+      ColumnEncoding encoding,
       const std::function<VectorPtr(vector_size_t)>& makeValues = nullptr) {
     const auto values = [&](vector_size_t n) {
       return makeValues ? makeValues(n) : make(type, n);
     };
     switch (encoding) {
-      case Encoding::kFlat:
+      case ColumnEncoding::kFlat:
         return values(size);
-      case Encoding::kDictionary:
-      case Encoding::kLazyDictionary: {
+      case ColumnEncoding::kDictionary:
+      case ColumnEncoding::kLazyDictionary: {
         const vector_size_t baseSize = size / 2 + 1;
         auto base = values(baseSize);
         auto indices = allocateIndices(size, pool_);
@@ -139,22 +139,22 @@ class NestedVectorMaker {
         }
         auto dictionary = BaseVector::wrapInDictionary(
             std::move(nulls), std::move(indices), size, std::move(base));
-        return encoding == Encoding::kLazyDictionary
+        return encoding == ColumnEncoding::kLazyDictionary
             ? lazyDictionary(std::move(dictionary), pool_)
             : dictionary;
       }
-      case Encoding::kConstant: {
+      case ColumnEncoding::kConstant: {
         auto base = values(4);
         return BaseVector::wrapInConstant(
             size, static_cast<vector_size_t>(rng_() % 4), std::move(base));
       }
-      case Encoding::kConstantNull:
+      case ColumnEncoding::kConstantNull:
         return BaseVector::createNullConstant(type, size, pool_);
-      case Encoding::kSlice:
+      case ColumnEncoding::kSlice:
         return values(size + 20)->slice(7, size);
-      case Encoding::kLazy:
+      case ColumnEncoding::kLazyIdentity:
         return lazyDictionary(values(size), pool_);
-      case Encoding::kCount:
+      case ColumnEncoding::kCount:
         break;
     }
     BOLT_UNREACHABLE();
@@ -169,9 +169,9 @@ class NestedVectorMaker {
     return rng_() % 100 < percent;
   }
 
-  BufferPtr nulls(vector_size_t size, uint32_t depth) {
+  BufferPtr nulls(vector_size_t size, uint32_t level) {
     const auto& rates = options_.nullPercent;
-    const auto percent = rates[std::min<size_t>(depth, rates.size() - 1)];
+    const auto percent = rates[std::min<size_t>(level, rates.size() - 1)];
     if (percent == 0) {
       return nullptr;
     }
@@ -186,29 +186,29 @@ class NestedVectorMaker {
   }
 
   /// A vector below the top level: made as is, or wrapped.
-  VectorPtr child(const TypePtr& type, vector_size_t size, uint32_t depth) {
+  VectorPtr child(const TypePtr& type, vector_size_t size, uint32_t level) {
     if (size == 0 || !chance(options_.wrapPercent)) {
-      return make(type, size, depth);
+      return make(type, size, level);
     }
     switch (rng_() % 3) {
       case 0: {
         const vector_size_t baseSize = size / 2 + 1;
-        auto base = make(type, baseSize, depth);
+        auto base = make(type, baseSize, level);
         auto indices = allocateIndices(size, pool_);
         auto* raw = indices->asMutable<vector_size_t>();
         for (vector_size_t row = 0; row < size; ++row) {
           raw[row] = static_cast<vector_size_t>(rng_() % baseSize);
         }
         return BaseVector::wrapInDictionary(
-            nulls(size, depth), std::move(indices), size, std::move(base));
+            nulls(size, level), std::move(indices), size, std::move(base));
       }
       case 1: {
-        auto base = make(type, 3, depth);
+        auto base = make(type, 3, level);
         return BaseVector::wrapInConstant(
             size, static_cast<vector_size_t>(rng_() % 3), std::move(base));
       }
       default:
-        return make(type, size + 10, depth)->slice(5, size);
+        return make(type, size + 10, level)->slice(5, size);
     }
   }
 
@@ -250,12 +250,12 @@ class NestedVectorMaker {
     return total;
   }
 
-  VectorPtr makeArray(const TypePtr& type, vector_size_t size, uint32_t depth) {
-    auto entryNulls = nulls(size, depth);
+  VectorPtr makeArray(const TypePtr& type, vector_size_t size, uint32_t level) {
+    auto entryNulls = nulls(size, level);
     BufferPtr offsets;
     BufferPtr sizes;
     const auto total = containers(size, entryNulls, offsets, sizes);
-    auto elements = child(type->childAt(0), total, depth + 1);
+    auto elements = child(type->childAt(0), total, level + 1);
     return std::make_shared<ArrayVector>(
         pool_,
         type,
@@ -266,13 +266,13 @@ class NestedVectorMaker {
         std::move(elements));
   }
 
-  VectorPtr makeMap(const TypePtr& type, vector_size_t size, uint32_t depth) {
-    auto entryNulls = nulls(size, depth);
+  VectorPtr makeMap(const TypePtr& type, vector_size_t size, uint32_t level) {
+    auto entryNulls = nulls(size, level);
     BufferPtr offsets;
     BufferPtr sizes;
     const auto total = containers(size, entryNulls, offsets, sizes);
-    auto keys = makeKeys(type->childAt(0), total, depth + 1);
-    auto values = child(type->childAt(1), total, depth + 1);
+    auto keys = makeKeys(type->childAt(0), total, level + 1);
+    auto values = child(type->childAt(1), total, level + 1);
     return std::make_shared<MapVector>(
         pool_,
         type,
@@ -298,8 +298,8 @@ class NestedVectorMaker {
   /// Keys never null and all different, so that no map holds one twice
   /// wherever its entries lie, in no order: a map's entries keep theirs
   /// only if the shuffle keeps it. A struct key differs by its first field,
-  /// its others any value of nesting level `depth`.
-  VectorPtr makeKeys(const TypePtr& type, vector_size_t size, uint32_t depth) {
+  /// its others any value at nesting `level`.
+  VectorPtr makeKeys(const TypePtr& type, vector_size_t size, uint32_t level) {
     const auto base = static_cast<int64_t>(rng_() % 1'000'000);
     const auto order = permutation(size);
     VectorPtr keys;
@@ -335,9 +335,9 @@ class NestedVectorMaker {
         break;
       }
       case TypeKind::ROW: {
-        std::vector<VectorPtr> fields{makeKeys(type->childAt(0), size, depth)};
+        std::vector<VectorPtr> fields{makeKeys(type->childAt(0), size, level)};
         for (uint32_t i = 1; i < type->size(); ++i) {
-          fields.push_back(make(type->childAt(i), size, depth));
+          fields.push_back(make(type->childAt(i), size, level));
         }
         keys = std::make_shared<RowVector>(
             pool_, type, nullptr, size, std::move(fields));
@@ -358,11 +358,11 @@ class NestedVectorMaker {
         nullptr, std::move(indices), size, std::move(keys));
   }
 
-  VectorPtr makeRow(const TypePtr& type, vector_size_t size, uint32_t depth) {
-    auto rowNulls = nulls(size, depth);
+  VectorPtr makeRow(const TypePtr& type, vector_size_t size, uint32_t level) {
+    auto rowNulls = nulls(size, level);
     std::vector<VectorPtr> fields;
     for (uint32_t i = 0; i < type->size(); ++i) {
-      fields.push_back(child(type->childAt(i), size, depth + 1));
+      fields.push_back(child(type->childAt(i), size, level + 1));
     }
     return std::make_shared<RowVector>(
         pool_, type, std::move(rowNulls), size, std::move(fields));
@@ -442,12 +442,12 @@ class NestedVectorMaker {
     }
   }
 
-  VectorPtr makeLeaf(const TypePtr& type, vector_size_t size, uint32_t depth) {
+  VectorPtr makeLeaf(const TypePtr& type, vector_size_t size, uint32_t level) {
     if (type->kind() == TypeKind::UNKNOWN) {
       return BaseVector::createNullConstant(type, size, pool_);
     }
     auto vector = leafValues(type, size);
-    vector->setNulls(nulls(size, depth));
+    vector->setNulls(nulls(size, level));
     return vector;
   }
 
@@ -466,7 +466,8 @@ inline ShuffleInput makeInput(
     int32_t numPartitions,
     uint64_t seed,
     memory::MemoryPool* pool,
-    const std::function<Encoding(uint32_t, uint32_t)>& encodingOf = nullptr) {
+    const std::function<ColumnEncoding(uint32_t, uint32_t)>& encodingOf =
+        nullptr) {
   NestedVectorMaker maker(pool, seed, std::move(options));
   ShuffleInput input;
   for (uint32_t batch = 0; batch < rows.size(); ++batch) {
@@ -475,7 +476,7 @@ inline ShuffleInput makeInput(
       children.push_back(maker.column(
           type->childAt(col),
           rows[batch],
-          encodingOf ? encodingOf(batch, col) : Encoding::kFlat));
+          encodingOf ? encodingOf(batch, col) : ColumnEncoding::kFlat));
     }
     input.data.push_back(std::make_shared<RowVector>(
         pool, type, nullptr, rows[batch], std::move(children)));

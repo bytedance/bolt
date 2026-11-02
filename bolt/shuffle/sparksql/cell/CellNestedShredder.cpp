@@ -52,7 +52,7 @@ NullClass classifyNulls(DecodedVector& decoded, vector_size_t n) {
 }
 
 /// Whether every one of the `size` decoded entries is null, whichever a
-/// chunk takes: a constant null, or a flat vector all null.
+/// element batch takes: a constant null, or a flat vector all null.
 bool allNull(DecodedVector& decoded, vector_size_t size) {
   if (!decoded.mayHaveNulls()) {
     return false;
@@ -159,13 +159,11 @@ CellNestedShredder::CellNestedShredder(
     const CellNestedLayout& layout,
     CellSplitter& splitter,
     uint32_t numPartitions,
-    memory::MemoryPool& pool,
-    uint32_t chunkPositions)
+    memory::MemoryPool& pool)
     : layout_(layout),
       splitter_(splitter),
       numPartitions_(numPartitions),
       pool_(pool),
-      chunkPositions_(chunkPositions),
       inputs_(layout.numNodes()),
       decoded_(layout.numNodes()),
       nullClass_(layout.numNodes(), NullClass::kAllNull),
@@ -177,8 +175,7 @@ CellNestedShredder::CellNestedShredder(
       totals_(layout.numSpaces(), 0),
       committed_(layout.numSpaces(), 0),
       seals_(splitter.sealCount()),
-      chunks_(layout.maxDepth() + 1) {
-  BOLT_CHECK_GT(chunkPositions_, 0);
+      elementBatches_(layout.maxDepth() + 1) {
   const size_t numCounts =
       static_cast<size_t>(layout.numSpaces() - 1) * numPartitions_;
   auto* counts = scratch<uint32_t>(countsBuffer_, numCounts);
@@ -186,13 +183,15 @@ CellNestedShredder::CellNestedShredder(
   for (uint32_t s = 1; s < layout.numSpaces(); ++s) {
     counts_[s] = counts + static_cast<size_t>(s - 1) * numPartitions_;
   }
-  std::fill_n(scratch<uint32_t>(counters_, numPartitions_), numPartitions_, 0);
-  std::fill_n(scratch<uint32_t>(ordinals_, numPartitions_), numPartitions_, 0);
+  std::fill_n(
+      scratch<uint32_t>(elementCounts_, numPartitions_), numPartitions_, 0);
+  std::fill_n(
+      scratch<uint32_t>(runningIndex_, numPartitions_), numPartitions_, 0);
   touched_.reserve(numPartitions_);
-  // The splitter reads counts_ through these pointers as flush() advances
-  // them: a partition's committed positions of a space are the position
-  // base of its next split there. The rows have none: the splitter counts
-  // the window's rows itself.
+  // The splitter reads counts_ through these pointers as
+  // splitElementBatch() advances them: a partition's committed positions of
+  // a space are the position base of its next split there. The rows have
+  // none: the splitter counts the window's rows itself.
   std::vector<const uint32_t*> positions;
   positions.reserve(layout.wireSpaces().size());
   for (const uint32_t space : layout.wireSpaces()) {
@@ -249,7 +248,7 @@ void CellNestedShredder::prepare(const RowVector& rv) {
     BOLT_CHECK(
         rv.childAt(i + 1)->type()->equivalent(*layout_.node(topNodes[i]).type),
         "Cell input schema changed");
-    inputNode(topNodes[i], rv.childAt(i + 1));
+    decodeNode(topNodes[i], rv.childAt(i + 1));
   }
 
   // The rows' columns: a leaf as it comes, a ROW as its presence, a
@@ -269,8 +268,8 @@ void CellNestedShredder::prepare(const RowVector& rv) {
     klass = viewRows(col);
   }
 
-  for (const uint32_t x : layout_.space(0).containers) {
-    countRange(x, 0, numRows_);
+  for (const uint32_t container : layout_.space(0).containers) {
+    countRange(container, 0, numRows_);
   }
   shredNs_ += currentTimeNs() - start;
 }
@@ -281,9 +280,10 @@ NullClass CellNestedShredder::viewRows(uint32_t col) {
   auto& view = views_[col];
   view.reset();
   if (decoded.isIdentityMapping()) {
-    view = input.values;
+    view = input.viewBase;
   } else if (decoded.isConstantMapping()) {
-    view = BaseVector::wrapInConstant(numRows_, decoded.index(0), input.values);
+    view =
+        BaseVector::wrapInConstant(numRows_, decoded.index(0), input.viewBase);
   } else {
     const BufferPtr& indices =
         copyToScratch(viewIndices_[col], decoded.indices(), numRows_);
@@ -293,24 +293,24 @@ NullClass CellNestedShredder::viewRows(uint32_t col) {
           viewNulls_[col], decoded.nulls(), bits::nwords(numRows_));
     }
     view = BaseVector::wrapInDictionary(
-        std::move(nulls), indices, numRows_, input.values);
+        std::move(nulls), indices, numRows_, input.viewBase);
   }
   decoded_[col].decode(*view);
   return classifyNulls(decoded_[col], numRows_);
 }
 
-void CellNestedShredder::inputNode(uint32_t n, const VectorPtr& vector) {
+void CellNestedShredder::decodeNode(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
   auto& input = inputs_[n];
   input.vector = vector;
   input.allNull = false;
   if (node.kind == Kind::kRow) {
-    inputRow(n, vector);
+    decodeRow(n, vector);
     return;
   }
   if (node.kind == Kind::kLeaf) {
     if (node.type->kind() != TypeKind::UNKNOWN) {
-      inputColumn(n, vector);
+      decodeColumn(n, vector);
     }
     return;
   }
@@ -319,7 +319,7 @@ void CellNestedShredder::inputNode(uint32_t n, const VectorPtr& vector) {
   const auto* base = dynamic_cast<const ArrayVectorBase*>(input.decoded.base());
   input.allNull = base == nullptr || allNull(input.decoded, vector->size());
   if (input.allNull) {
-    input.values.reset();
+    input.viewBase.reset();
     for (const uint32_t child : node.children) {
       clearNode(child);
     }
@@ -327,7 +327,7 @@ void CellNestedShredder::inputNode(uint32_t n, const VectorPtr& vector) {
   }
   input.offsets = base->rawOffsets();
   input.sizes = base->rawSizes();
-  input.values = std::make_shared<FlatVector<int32_t>>(
+  input.viewBase = std::make_shared<FlatVector<int32_t>>(
       &pool_,
       INTEGER(),
       base->nulls(),
@@ -335,16 +335,16 @@ void CellNestedShredder::inputNode(uint32_t n, const VectorPtr& vector) {
       base->sizes(),
       std::vector<BufferPtr>{});
   if (node.kind == Kind::kArray) {
-    inputNode(
+    decodeNode(
         node.children[0], static_cast<const ArrayVector*>(base)->elements());
   } else {
     const auto* map = static_cast<const MapVector*>(base);
-    inputNode(node.children[0], map->mapKeys());
-    inputNode(node.children[1], map->mapValues());
+    decodeNode(node.children[0], map->mapKeys());
+    decodeNode(node.children[1], map->mapValues());
   }
 }
 
-void CellNestedShredder::inputColumn(uint32_t n, const VectorPtr& vector) {
+void CellNestedShredder::decodeColumn(uint32_t n, const VectorPtr& vector) {
   auto& input = inputs_[n];
   if (layout_.node(n).space == 0) {
     decoded_[n].decode(*vector);
@@ -353,12 +353,12 @@ void CellNestedShredder::inputColumn(uint32_t n, const VectorPtr& vector) {
   input.decoded.decode(*vector);
   input.allNull = allNull(input.decoded, vector->size());
   // The base belongs to the vector: the view shares its ownership.
-  input.values = input.allNull
+  input.viewBase = input.allNull
       ? nullptr
       : VectorPtr(vector, const_cast<BaseVector*>(input.decoded.base()));
 }
 
-void CellNestedShredder::inputRow(uint32_t n, const VectorPtr& vector) {
+void CellNestedShredder::decodeRow(uint32_t n, const VectorPtr& vector) {
   const auto& node = layout_.node(n);
   auto& input = inputs_[n];
   auto& structs = input.decoded;
@@ -400,15 +400,17 @@ void CellNestedShredder::inputRow(uint32_t n, const VectorPtr& vector) {
         &pool_, SMALLINT(), nulls, size, ones_, std::vector<BufferPtr>{});
   }
   for (uint32_t i = 0; i < node.children.size(); ++i) {
-    inputNode(node.children[i], fold(n, i, nulls));
+    decodeNode(node.children[i], foldStructNulls(n, i, nulls));
   }
   // The structs are decoded until here, the presence from here.
   input.vector = presence;
-  inputColumn(n, presence);
+  decodeColumn(n, presence);
 }
 
-VectorPtr
-CellNestedShredder::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
+VectorPtr CellNestedShredder::foldStructNulls(
+    uint32_t n,
+    uint32_t i,
+    const BufferPtr& nulls) {
   auto& input = inputs_[n];
   const auto& structs = input.decoded;
   const vector_size_t size = structs.size();
@@ -460,7 +462,7 @@ CellNestedShredder::fold(uint32_t n, uint32_t i, const BufferPtr& nulls) {
 void CellNestedShredder::clearNode(uint32_t n) {
   auto& input = inputs_[n];
   input.vector.reset();
-  input.values.reset();
+  input.viewBase.reset();
   input.allNull = true;
   for (const uint32_t child : layout_.node(n).children) {
     clearNode(child);
@@ -468,16 +470,16 @@ void CellNestedShredder::clearNode(uint32_t n) {
 }
 
 void CellNestedShredder::countRange(
-    uint32_t x,
+    uint32_t container,
     vector_size_t begin,
     vector_size_t end) {
-  auto& input = inputs_[x];
+  auto& input = inputs_[container];
   if (input.allNull) {
     return;
   }
-  const uint32_t t = layout_.node(x).ownedSpace;
-  const auto& containers = layout_.space(t).containers;
-  uint64_t& total = totals_[t];
+  const uint32_t ownedSpace = layout_.node(container).ownedSpace;
+  const auto& containers = layout_.space(ownedSpace).containers;
+  uint64_t& total = totals_[ownedSpace];
   const auto& decoded = input.decoded;
   for (vector_size_t j = begin; j < end; ++j) {
     if (decoded.isNullAt(j)) {
@@ -493,17 +495,17 @@ void CellNestedShredder::countRange(
           "its rows together, more than a Cell shuffle payload carries",
           CellNestedLayout::kMaxPositions);
     }
-    for (const uint32_t y : containers) {
+    for (const uint32_t child : containers) {
       const vector_size_t offset = input.offsets[i];
-      countRange(y, offset, offset + size);
+      countRange(child, offset, offset + size);
     }
   }
 }
 
 bool CellNestedShredder::fitsWindow() {
   followSeals();
-  for (uint32_t t = 1; t < layout_.numSpaces(); ++t) {
-    if (totals_[t] + maxCount_[t] > CellNestedLayout::kMaxPositions) {
+  for (uint32_t s = 1; s < layout_.numSpaces(); ++s) {
+    if (totals_[s] + maxCount_[s] > CellNestedLayout::kMaxPositions) {
       return false;
     }
   }
@@ -526,17 +528,17 @@ void CellNestedShredder::split(
 
   const auto& rows = layout_.space(0);
   bool someNulls = false;
-  for (const uint32_t col : rows.splitColumns) {
+  for (const uint32_t col : rows.wireColumns) {
     someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
   uint32_t* rowIndex = nullptr;
   if (someNulls) {
     rowIndex = scratch<uint32_t>(rowIndex_, numRows_);
-    uint32_t* counters = counters_->asMutable<uint32_t>();
+    uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
     for (vector_size_t row = 0; row < numRows_; ++row) {
-      rowIndex[row] = counters[row2Partition[row]]++;
+      rowIndex[row] = elementCounts[row2Partition[row]]++;
     }
-    std::fill_n(counters, numPartitions_, 0);
+    std::fill_n(elementCounts, numPartitions_, 0);
   }
   SplitBatch batch;
   batch.decoded = decoded_.data();
@@ -545,14 +547,14 @@ void CellNestedShredder::split(
   batch.nullClass = nullClass_.data();
   batch.numRows = numRows_;
   batch.rowIndexInPid = rowIndex;
-  batch.columns = rows.splitColumns.data();
-  batch.numColumns = static_cast<uint32_t>(rows.splitColumns.size());
-  splitColumns(batch);
+  batch.columns = rows.wireColumns.data();
+  batch.numColumns = static_cast<uint32_t>(rows.wireColumns.size());
+  wireColumns(batch);
 
   const Entries entries{
       row2Partition, nullptr, 0, static_cast<uint32_t>(numRows_), 0};
-  for (const uint32_t x : rows.containers) {
-    emit(x, entries);
+  for (const uint32_t container : rows.containers) {
+    splitElements(container, entries);
   }
   for (uint32_t s = 1; s < layout_.numSpaces(); ++s) {
     BOLT_CHECK_EQ(
@@ -562,12 +564,12 @@ void CellNestedShredder::split(
         s);
   }
   // The batch's vectors go back with it, and so does the scratch of its
-  // structs past the larger of its rows and a chunk.
-  const size_t keep = std::max<size_t>(numRows_, chunkPositions_);
+  // structs past the larger of its rows and an element batch.
+  const size_t keep = std::max<size_t>(numRows_, kElementBatchPositions);
   const size_t keepNulls = bits::nwords(keep) * sizeof(uint64_t);
   for (auto& input : inputs_) {
     input.vector.reset();
-    input.values.reset();
+    input.viewBase.reset();
     releaseOver(input.fieldNulls, keepNulls);
     releaseOver(input.structNulls, keepNulls);
     releaseOver(input.structIndices, keep * sizeof(vector_size_t));
@@ -589,10 +591,10 @@ int64_t CellNestedShredder::releaseScratch() {
   rowIndex_.reset();
   ones_.reset();
   identity_.reset();
-  for (auto& chunk : chunks_) {
-    chunk.pids.reset();
-    chunk.rels.reset();
-    chunk.srcs.reset();
+  for (auto& elements : elementBatches_) {
+    elements.pids.reset();
+    elements.rowIndexInPid.reset();
+    elements.indices.reset();
   }
   for (uint32_t col = 0; col < viewIndices_.size(); ++col) {
     viewIndices_[col].reset();
@@ -606,17 +608,19 @@ int64_t CellNestedShredder::releaseScratch() {
   return held - pool_.usedBytes();
 }
 
-void CellNestedShredder::emit(uint32_t x, const Entries& parent) {
-  auto& input = inputs_[x];
+void CellNestedShredder::splitElements(
+    uint32_t container,
+    const Entries& parent) {
+  auto& input = inputs_[container];
   if (input.allNull) {
     return;
   }
-  const uint32_t t = layout_.node(x).ownedSpace;
-  const auto& space = layout_.space(t);
+  const uint32_t ownedSpace = layout_.node(container).ownedSpace;
+  const auto& space = layout_.space(ownedSpace);
   const auto& decoded = input.decoded;
-  if (space.splitColumns.empty()) {
+  if (space.wireColumns.empty()) {
     // UNKNOWN elements: positions to count, no value to split.
-    uint32_t* counts = counts_[t];
+    uint32_t* counts = counts_[ownedSpace];
     for (uint32_t k = 0; k < parent.size; ++k) {
       const vector_size_t j = parent.index(k);
       if (decoded.isNullAt(j)) {
@@ -625,23 +629,23 @@ void CellNestedShredder::emit(uint32_t x, const Entries& parent) {
       const auto size = static_cast<uint32_t>(input.sizes[decoded.index(j)]);
       const uint32_t pid = parent.pid[k];
       counts[pid] += size;
-      maxCount_[t] = std::max(maxCount_[t], counts[pid]);
-      committed_[t] += size;
+      maxCount_[ownedSpace] = std::max(maxCount_[ownedSpace], counts[pid]);
+      committed_[ownedSpace] += size;
     }
     return;
   }
 
-  Chunk& chunk = chunks_[parent.depth + 1];
-  if (chunk.pids == nullptr) {
-    scratch<uint32_t>(chunk.pids, chunkPositions_);
-    scratch<uint32_t>(chunk.rels, chunkPositions_);
-    scratch<vector_size_t>(chunk.srcs, chunkPositions_);
+  ElementBatch& elements = elementBatches_[parent.depth + 1];
+  if (elements.pids == nullptr) {
+    scratch<uint32_t>(elements.pids, kElementBatchPositions);
+    scratch<uint32_t>(elements.rowIndexInPid, kElementBatchPositions);
+    scratch<vector_size_t>(elements.indices, kElementBatchPositions);
   }
-  uint32_t* pids = chunk.pids->asMutable<uint32_t>();
-  vector_size_t* srcs = chunk.srcs->asMutable<vector_size_t>();
-  uint32_t* counters = counters_->asMutable<uint32_t>();
-  chunk.size = 0;
-  chunk.contiguous = true;
+  uint32_t* pids = elements.pids->asMutable<uint32_t>();
+  vector_size_t* indices = elements.indices->asMutable<vector_size_t>();
+  uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
+  elements.size = 0;
+  elements.contiguous = true;
   for (uint32_t k = 0; k < parent.size; ++k) {
     const vector_size_t j = parent.index(k);
     if (decoded.isNullAt(j)) {
@@ -651,112 +655,120 @@ void CellNestedShredder::emit(uint32_t x, const Entries& parent) {
     vector_size_t offset = input.offsets[i];
     auto left = static_cast<uint32_t>(input.sizes[i]);
     const uint32_t pid = parent.pid[k];
-    // An entry's elements may go into several chunks.
+    // An entry's elements may go into several element batches.
     while (left > 0) {
-      const uint32_t take = std::min(left, chunkPositions_ - chunk.size);
-      std::fill_n(pids + chunk.size, take, pid);
-      if (chunk.contiguous) {
-        if (chunk.size == 0) {
-          chunk.start = offset;
+      const uint32_t take =
+          std::min(left, kElementBatchPositions - elements.size);
+      std::fill_n(pids + elements.size, take, pid);
+      if (elements.contiguous) {
+        if (elements.size == 0) {
+          elements.start = offset;
         } else if (
-            offset != chunk.start + static_cast<vector_size_t>(chunk.size)) {
-          std::iota(srcs, srcs + chunk.size, chunk.start);
-          chunk.contiguous = false;
+            offset !=
+            elements.start + static_cast<vector_size_t>(elements.size)) {
+          std::iota(indices, indices + elements.size, elements.start);
+          elements.contiguous = false;
         }
       }
-      if (!chunk.contiguous) {
-        std::iota(srcs + chunk.size, srcs + chunk.size + take, offset);
+      if (!elements.contiguous) {
+        std::iota(
+            indices + elements.size, indices + elements.size + take, offset);
       }
-      if (counters[pid] == 0) {
+      if (elementCounts[pid] == 0) {
         touched_.push_back(pid);
       }
-      counters[pid] += take;
-      chunk.size += take;
+      elementCounts[pid] += take;
+      elements.size += take;
       offset += static_cast<vector_size_t>(take);
       left -= take;
-      if (chunk.size == chunkPositions_) {
-        flush(t, chunk, parent.depth + 1);
+      if (elements.size == kElementBatchPositions) {
+        splitElementBatch(ownedSpace, elements, parent.depth + 1);
       }
     }
   }
-  if (chunk.size > 0) {
-    flush(t, chunk, parent.depth + 1);
+  if (elements.size > 0) {
+    splitElementBatch(ownedSpace, elements, parent.depth + 1);
   }
 }
 
-void CellNestedShredder::flush(uint32_t t, Chunk& chunk, uint32_t depth) {
-  const auto& space = layout_.space(t);
+void CellNestedShredder::splitElementBatch(
+    uint32_t spaceIndex,
+    ElementBatch& elements,
+    uint32_t depth) {
+  const auto& space = layout_.space(spaceIndex);
   bool someNulls = false;
-  for (const uint32_t col : space.splitColumns) {
-    nullClass_[col] = view(col, chunk);
+  for (const uint32_t col : space.wireColumns) {
+    nullClass_[col] = view(col, elements);
     someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
-  const uint32_t* pids = chunk.pids->as<uint32_t>();
-  uint32_t* counters = counters_->asMutable<uint32_t>();
-  uint32_t* rels = nullptr;
+  const uint32_t* pids = elements.pids->as<uint32_t>();
+  uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
+  uint32_t* rowIndexInPid = nullptr;
   if (someNulls) {
-    rels = chunk.rels->asMutable<uint32_t>();
-    uint32_t* ordinals = ordinals_->asMutable<uint32_t>();
-    const uint32_t size = chunk.size;
+    rowIndexInPid = elements.rowIndexInPid->asMutable<uint32_t>();
+    uint32_t* runningIndex = runningIndex_->asMutable<uint32_t>();
+    const uint32_t size = elements.size;
     if (touched_.size() == 1) {
-      // One partition: an element's index in it is its chunk index.
-      std::iota(rels, rels + size, 0u);
+      // One partition: an element's index in it is its batch index.
+      std::iota(rowIndexInPid, rowIndexInPid + size, 0u);
     } else {
       for (uint32_t k = 0; k < size; ++k) {
-        rels[k] = ordinals[pids[k]]++;
+        rowIndexInPid[k] = runningIndex[pids[k]]++;
       }
     }
     for (const uint32_t pid : touched_) {
-      ordinals[pid] = 0;
+      runningIndex[pid] = 0;
     }
   }
-  uint32_t* counts = counts_[t];
+  uint32_t* counts = counts_[spaceIndex];
   SplitBatch batch;
   batch.decoded = decoded_.data();
   batch.row2Partition = pids;
-  batch.partition2RowCount = counters;
+  batch.partition2RowCount = elementCounts;
   batch.nullClass = nullClass_.data();
-  batch.numRows = chunk.size;
-  batch.rowIndexInPid = rels;
-  batch.columns = space.splitColumns.data();
-  batch.numColumns = static_cast<uint32_t>(space.splitColumns.size());
+  batch.numRows = elements.size;
+  batch.rowIndexInPid = rowIndexInPid;
+  batch.columns = space.wireColumns.data();
+  batch.numColumns = static_cast<uint32_t>(space.wireColumns.size());
   batch.positionBase = counts;
-  splitColumns(batch);
-  // Committed before the space's next chunk splits, which starts past them.
+  wireColumns(batch);
+  // Committed before the space's next element batch splits, which starts
+  // past them.
   for (const uint32_t pid : touched_) {
-    counts[pid] += counters[pid];
-    maxCount_[t] = std::max(maxCount_[t], counts[pid]);
-    committed_[t] += counters[pid];
-    counters[pid] = 0;
+    counts[pid] += elementCounts[pid];
+    maxCount_[spaceIndex] = std::max(maxCount_[spaceIndex], counts[pid]);
+    committed_[spaceIndex] += elementCounts[pid];
+    elementCounts[pid] = 0;
   }
   touched_.clear();
 
-  const Entries entries{pids, chunk.sources(), chunk.start, chunk.size, depth};
-  for (const uint32_t y : space.containers) {
-    emit(y, entries);
+  const Entries entries{
+      pids, elements.indicesOrNull(), elements.start, elements.size, depth};
+  for (const uint32_t child : space.containers) {
+    splitElements(child, entries);
   }
-  chunk.size = 0;
-  chunk.contiguous = true;
+  elements.size = 0;
+  elements.contiguous = true;
 }
 
-NullClass CellNestedShredder::view(uint32_t col, const Chunk& chunk) {
+NullClass CellNestedShredder::view(uint32_t col, const ElementBatch& elements) {
   auto& input = inputs_[col];
   if (input.allNull) {
     return NullClass::kAllNull;
   }
   auto& decoded = input.decoded;
-  const auto n = static_cast<vector_size_t>(chunk.size);
+  const auto n = static_cast<vector_size_t>(elements.size);
   auto& view = views_[col];
-  // The previous chunk's view lets go of the scratch it shares.
+  // The previous element batch's view lets go of the scratch it shares.
   view.reset();
   if (decoded.isIdentityMapping()) {
     // Elements in a row stay a flat vector; others index it.
-    view = chunk.contiguous
-        ? input.values->slice(chunk.start, n)
+    view = elements.contiguous
+        ? input.viewBase->slice(elements.start, n)
         : BaseVector::wrapInDictionary(
-              BufferPtr(nullptr), chunk.srcs, n, input.values);
+              BufferPtr(nullptr), elements.indices, n, input.viewBase);
   } else if (decoded.isConstantMapping()) {
-    view = BaseVector::wrapInConstant(n, decoded.index(0), input.values);
+    view = BaseVector::wrapInConstant(n, decoded.index(0), input.viewBase);
   } else {
     // One dictionary over the base: the wrappers' indices and nulls
     // combined.
@@ -764,9 +776,9 @@ NullClass CellNestedShredder::view(uint32_t col, const Chunk& chunk) {
     uint64_t* nulls = decoded.mayHaveNulls()
         ? scratch<uint64_t>(viewNulls_[col], bits::nwords(n))
         : nullptr;
-    const vector_size_t* src = chunk.sources();
+    const vector_size_t* src = elements.indicesOrNull();
     for (vector_size_t k = 0; k < n; ++k) {
-      const vector_size_t j = src != nullptr ? src[k] : chunk.start + k;
+      const vector_size_t j = src != nullptr ? src[k] : elements.start + k;
       indices[k] = decoded.index(j);
       if (nulls != nullptr) {
         bits::setNull(nulls, k, decoded.isNullAt(j));
@@ -776,13 +788,13 @@ NullClass CellNestedShredder::view(uint32_t col, const Chunk& chunk) {
         nulls != nullptr ? viewNulls_[col] : BufferPtr(nullptr),
         viewIndices_[col],
         n,
-        input.values);
+        input.viewBase);
   }
   decoded_[col].decode(*view);
   return classifyNulls(decoded_[col], n);
 }
 
-void CellNestedShredder::splitColumns(const SplitBatch& batch) {
+void CellNestedShredder::wireColumns(const SplitBatch& batch) {
   const uint64_t start = currentTimeNs();
   splitter_.split(batch);
   splitNs_ += currentTimeNs() - start;

@@ -52,7 +52,7 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
-using test::Encoding;
+using test::ColumnEncoding;
 using test::NestedVectorMaker;
 using test::ReadShape;
 using test::ShuffleInput;
@@ -341,8 +341,8 @@ TEST_F(CellNestedTest, nestedRoundTrips) {
   wrapped.wrapPercent = 50;
   wrapped.scatteredPercent = 50;
   const auto everyEncoding = [](uint32_t batch, uint32_t col) {
-    return static_cast<Encoding>(
-        (batch + col) % static_cast<uint32_t>(Encoding::kCount));
+    return static_cast<ColumnEncoding>(
+        (batch + col) % static_cast<uint32_t>(ColumnEncoding::kCount));
   };
   for (const auto& type : {test::deepRowType(), test::deepNestedType()}) {
     for (const int32_t numPartitions : {1, 7}) {
@@ -942,7 +942,7 @@ TEST_F(CellNestedTest, dictionaryProbeTakesTheRowsStrings) {
   }
 }
 
-TEST_F(CellNestedTest, elementsPastTheRowLimit) {
+TEST_F(CellNestedTest, hugeContainersSpreadOverPayloads) {
   // Rows of 2^30 elements: of UNKNOWN, lengths only, and of null BOOLEANs,
   // 2^30 null bits a row. Two such rows exceed one payload's positions:
   // sent one by one they spread over three payloads, read back a batch
@@ -1415,25 +1415,26 @@ TEST_F(CellNestedTest, wrappedStructsAndFields) {
   const auto fieldsType =
       ROW({"a", "s", "l", "n"},
           {INTEGER(), VARCHAR(), ARRAY(BIGINT()), ROW({"x"}, {DOUBLE()})});
-  constexpr auto kEncodings = static_cast<uint32_t>(Encoding::kCount);
-  const auto isLazy = [](Encoding encoding) {
-    return encoding == Encoding::kLazy || encoding == Encoding::kLazyDictionary;
+  constexpr auto kEncodings = static_cast<uint32_t>(ColumnEncoding::kCount);
+  const auto isLazy = [](ColumnEncoding encoding) {
+    return encoding == ColumnEncoding::kLazyIdentity ||
+        encoding == ColumnEncoding::kLazyDictionary;
   };
   // `size` structs held as `encoding`, a tenth of them null, field f as
   // encoding `first` + f.
   uint32_t numLazyFields = 0;
   const auto structs = [&](vector_size_t size,
-                           Encoding encoding,
+                           ColumnEncoding encoding,
                            uint32_t first,
                            bool elements) {
-    const bool lazyFields = !elements && encoding == Encoding::kFlat;
+    const bool lazyFields = !elements && encoding == ColumnEncoding::kFlat;
     const auto encodingOf = [&](uint32_t i) {
-      const auto e = static_cast<Encoding>((first + i) % kEncodings);
+      const auto e = static_cast<ColumnEncoding>((first + i) % kEncodings);
       if (!isLazy(e)) {
         return e;
       }
       numLazyFields += lazyFields;
-      return lazyFields ? e : Encoding::kFlat;
+      return lazyFields ? e : ColumnEncoding::kFlat;
     };
     return maker.column(fieldsType, size, encoding, [&](vector_size_t n) {
       std::vector<VectorPtr> fields;
@@ -1455,10 +1456,11 @@ TEST_F(CellNestedTest, wrappedStructsAndFields) {
   ShuffleInput input;
   for (uint32_t batch = 0; batch < 2 * kEncodings; ++batch) {
     const vector_size_t rows = 300 + 50 * static_cast<vector_size_t>(batch);
-    const auto top = static_cast<Encoding>(batch % kEncodings);
-    auto elementsEncoding = static_cast<Encoding>((batch + 3) % kEncodings);
+    const auto top = static_cast<ColumnEncoding>(batch % kEncodings);
+    auto elementsEncoding =
+        static_cast<ColumnEncoding>((batch + 3) % kEncodings);
     if (isLazy(elementsEncoding)) {
-      elementsEncoding = Encoding::kDictionary;
+      elementsEncoding = ColumnEncoding::kDictionary;
     }
     input.data.push_back(makeRowVector(
         {"id", "r", "ar"},
@@ -1650,7 +1652,8 @@ TEST_F(CellNestedTest, nestedShuffleMetrics) {
       111,
       pool(),
       [](uint32_t batch, uint32_t col) {
-        return (batch + col) % 2 == 0 ? Encoding::kDictionary : Encoding::kFlat;
+        return (batch + col) % 2 == 0 ? ColumnEncoding::kDictionary
+                                      : ColumnEncoding::kFlat;
       });
   const auto type = asRowType(input.data[0]->type());
   const auto rows = input.rowsOf(kPartitions);

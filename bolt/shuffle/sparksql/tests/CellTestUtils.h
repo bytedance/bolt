@@ -652,7 +652,7 @@ inline bool hasComplexColumns(const RowTypePtr& type) {
 
 /// Expects what a nested layout reads back below a null struct of `vector`:
 /// every field null there, and every container among them empty.
-inline void expectStructNullsFolded(const BaseVector& vector) {
+inline void expectFieldsNullUnderNullStructs(const BaseVector& vector) {
   if (const auto* row = vector.as<RowVector>()) {
     for (const auto& child : row->children()) {
       const auto* containers = child->as<ArrayVectorBase>();
@@ -662,13 +662,13 @@ inline void expectStructNullsFolded(const BaseVector& vector) {
           ASSERT_TRUE(containers == nullptr || containers->sizeAt(i) == 0);
         }
       }
-      expectStructNullsFolded(*child);
+      expectFieldsNullUnderNullStructs(*child);
     }
   } else if (const auto* array = vector.as<ArrayVector>()) {
-    expectStructNullsFolded(*array->elements());
+    expectFieldsNullUnderNullStructs(*array->elements());
   } else if (const auto* map = vector.as<MapVector>()) {
-    expectStructNullsFolded(*map->mapKeys());
-    expectStructNullsFolded(*map->mapValues());
+    expectFieldsNullUnderNullStructs(*map->mapKeys());
+    expectFieldsNullUnderNullStructs(*map->mapValues());
   }
 }
 
@@ -772,7 +772,7 @@ inline std::vector<WrittenShuffle> roundTrip(
         expectPartitionRows(rows[pid], batches, pid, shape.batchSize);
         if (nested) {
           for (const auto& batch : batches) {
-            expectStructNullsFolded(*batch);
+            expectFieldsNullUnderNullStructs(*batch);
           }
         }
         if (::testing::Test::HasFatalFailure()) {
