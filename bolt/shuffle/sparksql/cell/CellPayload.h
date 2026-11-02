@@ -133,7 +133,7 @@ class CellPayloadDecoder {
   CellPayloadDecoder& operator=(const CellPayloadDecoder&) = delete;
   CellPayloadDecoder(CellPayloadDecoder&&) = default;
 
-  /// Reads one payload from `in`: header, null region and every run. Its
+  /// Reads one payload from `in`: header, null body and every run. Its
   /// rows then come out through appendRows(). The previous payload must be
   /// fully appended. On malformed input returns false with `error` set,
   /// having consumed an unspecified prefix of `in`.
@@ -217,32 +217,32 @@ class CellPayloadDecoder {
   struct Dictionary {
     size_t firstEntry;
     size_t numEntries;
-    uint32_t matched;
+    uint32_t matchedRows;
   };
 
   /// Read position of one column in the current payload.
   struct ColumnCursor {
     /// Non-null values consumed: the raw-stream offset in values.
-    uint64_t dense{0};
+    uint64_t valuesRead{0};
     StreamCursor<int16_t> values16;
     StreamCursor<int32_t> values32;
     /// Bigint values, or timestamp seconds.
     StreamCursor<int64_t> values64;
     /// Timestamp nanos, string lengths, or dictionary fallback lengths.
-    StreamCursor<int64_t> lengths;
+    StreamCursor<int64_t> lengthsOrNanos;
     /// Strings: the data stream, or the fallback bytes after the
     /// dictionaries; dataOffset is the next value's start.
     std::string_view data;
     uint64_t dataOffset{0};
-    bool dictionary{false};
+    bool isDictionary{false};
     std::vector<std::string_view> entries;
     std::vector<Dictionary> dictionaries;
     const uint8_t* indexes{nullptr};
-    uint64_t matchedSum{0};
-    uint64_t indexPos{0};
+    uint64_t matchedRows{0};
+    uint64_t matchedRead{0};
     size_t nextDictionary{0};
     size_t currentDictionary{0};
-    uint32_t dictionaryLeft{0};
+    uint32_t currentMatchedLeft{0};
   };
 
   /// One column of the batch under construction.
@@ -259,11 +259,11 @@ class CellPayloadDecoder {
     return false;
   }
 
-  /// Header, null region and every run.
+  /// Header, null body and every run.
   bool parsePayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Reads the null body's tags and locates each kRawNull column's records.
-  bool parseNullRegion(
+  bool parseNullBody(
       CellByteSource& in,
       uint32_t nullStoredSize,
       uint32_t nullDecodedSize,
@@ -272,9 +272,9 @@ class CellPayloadDecoder {
   /// Expands the located records into bitmaps of `rowCount` rows.
   bool expandNulls(uint32_t rowCount, std::string& error);
 
-  /// `sole`: the payload's only run, whose combined buffer the streams may
+  /// `onlyRun`: the payload's only run, whose combined buffer the streams may
   /// view in place instead of copying it apart.
-  bool parseRun(CellByteSource& in, bool sole, std::string& error);
+  bool parseRun(CellByteSource& in, bool onlyRun, std::string& error);
 
   /// Expands the nulls and opens every column at `rowCount` rows; with none,
   /// runs the whole-stream checks at once.
@@ -358,12 +358,12 @@ class CellPayloadDecoder {
   // untrusted payload fields live in the reader pool so decoded runs stay
   // inside task memory accounting.
   std::vector<BufferPtr> streamBytes_;
-  /// The payload's decoded streams: into streamBytes_, or into scratch2_
-  /// when a sole combined run is decompressed there.
+  /// The payload's decoded streams: into streamBytes_, or into combinedDecoded_
+  /// when a onlyRun combined run is decompressed there.
   std::vector<std::string_view> streamViews_;
-  bool streamsViewed_{false};
+  bool streamsInCombinedDecoded_{false};
   BufferPtr nullBody_;
-  std::vector<NullTag> tags_;
+  std::vector<NullTag> nullTags_;
   /// Per kRawNull column, its records in the null body of the reading
   /// decoder.
   std::vector<const uint8_t*> records_;
@@ -378,14 +378,14 @@ class CellPayloadDecoder {
   std::vector<ColumnCursor> cursors_;
   uint32_t rowCount_{0};
   uint32_t rowsRead_{0};
-  BufferPtr scratch_;
-  BufferPtr scratch2_;
+  BufferPtr compressedScratch_;
+  BufferPtr combinedDecoded_;
 
   // Per-append scratch, at most one batch of dense values.
   BufferPtr denseScratch_;
   BufferPtr timestampScratch_; // dense seconds then nanos
   std::vector<int64_t> lengthScratch_;
-  std::vector<std::string_view> views_;
+  std::vector<std::string_view> stringViews_;
 
   std::vector<ColumnBatch> batch_;
   bool batchOpen_{false};
@@ -424,7 +424,7 @@ constexpr uint64_t kMinSeparateRunBytes = 64 << 10;
 
 /// Bytes of a kCombined or kCombinedUncompressed run header: layout byte,
 /// stored size u64, decoded size u64 per stream.
-inline uint64_t runHeaderBytes(uint32_t numStreams) {
+inline uint64_t combinedRunHeaderBytes(uint32_t numStreams) {
   return 1 + 8 + 8ull * numStreams;
 }
 
@@ -463,7 +463,7 @@ void buildNullBody(
 /// Appends everything of one partition's payload that precedes its runs,
 /// for the window in memory: fixed header, null body - compressed by
 /// `compressor` when that pays - and encoding tags. Returns the bytes the
-/// null body's compression saved, to count the payload's raw size.
+/// null body's compression saved, to count the payload's uncompressed size.
 uint64_t appendPayloadPrefix(
     const CellWindowInput& in,
     uint32_t pid,
@@ -475,8 +475,8 @@ uint64_t appendPayloadPrefix(
 /// Bytes of one partition's resident cells, all streams together.
 uint64_t residentBytes(const CellWindowInput& in, uint32_t pid);
 
-/// Writes a run header at `out`, which holds runHeaderBytes().
-void writeRunHeader(
+/// Writes a run header at `out`, which holds combinedRunHeaderBytes().
+void writeCombinedRunHeader(
     char* out,
     RunLayout layout,
     uint64_t stored,

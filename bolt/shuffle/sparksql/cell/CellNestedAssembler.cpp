@@ -85,7 +85,7 @@ bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
     const auto& cellLayout = decoder.layout();
     for (uint32_t col = 0; col < cellLayout.numColumns(); ++col) {
       if (cellLayout.isStringColumn(col)) {
-        strings += decoder.streamBytes(cellLayout.columnStream(col) + 1).size();
+        strings += decoder.streamBytes(cellLayout.firstStream(col) + 1).size();
       }
     }
   }
@@ -98,7 +98,7 @@ bool CellNestedAssembler::countPositions(uint32_t x, std::string& error) {
   const auto& node = layout_.node(x);
   const auto& decoder = *decoders_[node.space];
   const uint32_t col = node.spaceColumn;
-  const auto bytes = decoder.streamBytes(decoder.layout().columnStream(col));
+  const auto bytes = decoder.streamBytes(decoder.layout().firstStream(col));
   StreamCursor<int32_t> cursor;
   cursor.reset(
       reinterpret_cast<const uint8_t*>(bytes.data()),

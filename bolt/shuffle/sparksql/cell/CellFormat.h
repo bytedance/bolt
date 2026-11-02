@@ -102,8 +102,8 @@
 /// (<= kDictEntryMaxLen) and the bytes, at most kDictSerializedBudget bytes
 /// together, an empty entry list allowed, then kDictMoreMarker or
 /// kDictLastMarker, then the u32 count of rows it matches - and ends with
-/// the bytes of the unmatched rows; the length stream holds one index byte
-/// per matched row, then the lengths of the unmatched ones. Matched rows
+/// the bytes of the fallback rows; the length stream holds one index byte
+/// per matched row, then the lengths of the fallback rows. Matched rows
 /// come first, in dictionary order; an index byte is below the entry count
 /// of the dictionary whose matched rows it falls in, and the matched counts
 /// add up to at most the non-null positions.
@@ -157,13 +157,13 @@ inline constexpr uint32_t kDictEntryMaxLen = 63;
 inline constexpr uint32_t kDictSerializedBudget = 63;
 
 /// Dictionary sequence markers ending an entry list: another dictionary
-/// follows, or the fallback tail begins.
+/// follows, or the fallback rows begin.
 inline constexpr uint8_t kDictMoreMarker = 0xFE;
 inline constexpr uint8_t kDictLastMarker = 0xFF;
 
-/// A closing dictionary segment must have indexed at least this many rows
+/// A closing dictionary must have indexed at least this many rows
 /// per entry for a successor segment to open; otherwise the partition
-/// demotes to the fallback tail (hit rate below 1 - 1/factor is not worth
+/// demotes to fallback rows (match rate below 1 - 1/factor is not worth
 /// per-row lookups).
 inline constexpr uint32_t kDictSegmentContinueFactor = 4;
 
@@ -202,16 +202,17 @@ enum class CellBlockKind : uint8_t {
 /// aggregation state - as opaque bytes, row-framed as the V1 shuffle ships
 /// them:
 ///
-///   kind      u8   kCompositeRows
-///   rowCount  u32
-///   rawBytes  u64  body bytes before compression
-///   stored    u64  body bytes that follow
-///   layout    u8   RunLayout::kCombined (compressed) or kCombinedUncompressed
-///   body           rows back to back, each [size i32][size bytes]
+///   kind         u8   kCompositeRows
+///   rowCount     u32
+///   decodedSize  u64  body bytes before compression
+///   stored       u64  body bytes that follow
+///   layout       u8   RunLayout::kCombined (compressed) or
+///                     kCombinedUncompressed
+///   body              rows back to back, each [size i32][size bytes]
 ///
-/// The reader requires rowCount in [1, kMaxPayloadRows], rawBytes at least
+/// The reader requires rowCount in [1, kMaxPayloadRows], decodedSize at least
 /// 4 * rowCount, a non-negative size per row, rows consuming the body
-/// exactly, stored = rawBytes for kCombinedUncompressed, and a codec for
+/// exactly, stored = decodedSize for kCombinedUncompressed, and a codec for
 /// kCombined. The header size counts the kind byte, unlike
 /// kPayloadFixedHeaderBytes: the reader, past the kind byte, reads the
 /// rest of it.
@@ -251,7 +252,7 @@ enum class StreamKind : uint8_t {
 
 /// One physical stream of the layout.
 struct CellStream {
-  uint16_t column; // layout column index
+  uint16_t column; // logical column (rowType child), not wire column
   StreamKind kind;
   /// Bytes per source value: 1/2/4/8/16 for value streams, 8 for a String
   /// length stream, 0 for kStringData.
@@ -299,15 +300,15 @@ class CellLayout {
   }
 
   uint32_t numWireColumns() const {
-    return wireColumns_.size();
+    return logicalOfWire_.size();
   }
 
   uint32_t wireColumn(uint32_t column) const {
-    return wireIndex_[column];
+    return wireOfColumn_[column];
   }
 
   uint32_t logicalColumn(uint32_t wireColumn) const {
-    return wireColumns_[wireColumn];
+    return logicalOfWire_[wireColumn];
   }
 
   uint32_t numStreams() const {
@@ -321,8 +322,8 @@ class CellLayout {
   /// First stream of a logical column; a String column owns this stream
   /// (Length/Index) and the next one (Data), a Timestamp column this one
   /// (Seconds) and the next one (Nanos).
-  uint32_t columnStream(uint32_t column) const {
-    return columnStream_[column];
+  uint32_t firstStream(uint32_t column) const {
+    return firstStream_[column];
   }
 
   bool isStringColumn(uint32_t column) const {
@@ -336,10 +337,10 @@ class CellLayout {
  private:
   RowTypePtr rowType_;
   uint32_t numColumns_{0};
-  std::vector<uint32_t> wireColumns_;
-  std::vector<uint32_t> wireIndex_;
+  std::vector<uint32_t> logicalOfWire_;
+  std::vector<uint32_t> wireOfColumn_;
   std::vector<CellStream> streams_;
-  std::vector<uint32_t> columnStream_;
+  std::vector<uint32_t> firstStream_;
   std::vector<bool> isString_;
 };
 

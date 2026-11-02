@@ -150,7 +150,7 @@ void RunCompressor::write(
     streamStats_.resize(numStreams);
   }
   if (total < kMinSeparateRunBytes) {
-    std::vector<char> header(runHeaderBytes(numStreams));
+    std::vector<char> header(combinedRunHeaderBytes(numStreams));
     const uint64_t headerAt = sink.position();
     sink.write(header.data(), header.size());
     const auto visitAll = [&](RunPieceFn fn) {
@@ -170,7 +170,7 @@ void RunCompressor::write(
       visitAll(
           [&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
     }
-    writeRunHeader(
+    writeCombinedRunHeader(
         header.data(),
         stored == 0 ? RunLayout::kCombinedUncompressed : RunLayout::kCombined,
         stored == 0 ? total : stored,
@@ -179,7 +179,7 @@ void RunCompressor::write(
     sink.patch(headerAt, header.data(), header.size());
     return;
   }
-  // SEPARATE: the stored size per stream, then the decoded size - 0 for a
+  // kSeparate: the stored size per stream, then the decoded size - 0 for a
   // stream stored as it is.
   ++stats_.separateRuns;
   std::vector<uint64_t> header(2ull * numStreams, 0);
@@ -232,8 +232,8 @@ void RunCompressor::storeRun(
   for (uint32_t s = 0; s < numStreams; ++s) {
     total += sizes[s];
   }
-  std::vector<char> header(runHeaderBytes(numStreams));
-  writeRunHeader(
+  std::vector<char> header(combinedRunHeaderBytes(numStreams));
+  writeCombinedRunHeader(
       header.data(),
       RunLayout::kCombinedUncompressed,
       total,
