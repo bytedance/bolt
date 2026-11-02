@@ -23,6 +23,7 @@
 
 #include "bolt/common/base/CheckedArithmetic.h"
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
 #include "bolt/vector/FlatVector.h"
@@ -37,8 +38,9 @@ constexpr uint64_t kCompositeBlockBytes = 4 << 20;
 
 /// Assembles one CompositeRows block (CellFormat.h) of `rows` into `block`.
 /// The body is gathered in place, so a stored block needs no second copy
-/// and a compressed one is copied back over it; when the compression
-/// workspace cannot be funded the block is stored.
+/// and a compressed one is copied back over it. The compression workspace
+/// comes from the spill pool: blocks are written when the task's pool is
+/// short.
 void buildBlock(
     const uint8_t* const* rows,
     size_t numRows,
@@ -62,26 +64,19 @@ void buildBlock(
     offset += bytes;
   }
 
-  auto layout = RunLayout::kCombinedUncompressed;
+  const char* compressed = nullptr;
   uint64_t stored = rawBytes;
-  try {
-    const char* compressed = nullptr;
-    layout = maybeCompressRun(
-        codec,
-        body,
-        rawBytes,
-        scratch,
-        pool,
-        compressed,
-        stored,
-        compressTimeNs);
-    if (layout == RunLayout::kCombined) {
-      ::memcpy(body, compressed, stored);
-    }
-  } catch (const std::exception&) {
-    scratch.reset();
-    layout = RunLayout::kCombinedUncompressed;
-    stored = rawBytes;
+  const auto layout = maybeCompressRun(
+      codec,
+      body,
+      rawBytes,
+      scratch,
+      memory::spillMemoryPool(),
+      compressed,
+      stored,
+      compressTimeNs);
+  if (layout == RunLayout::kCombined) {
+    ::memcpy(body, compressed, stored);
   }
 
   char* header = block->asMutable<char>();

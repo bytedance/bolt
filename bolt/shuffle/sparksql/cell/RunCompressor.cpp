@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "bolt/common/base/Exceptions.h"
+#include "bolt/common/memory/Memory.h"
 #include "bolt/common/time/Timer.h"
 #include "bolt/shuffle/sparksql/cell/CellPayload.h"
 #include "bolt/shuffle/sparksql/compression/Compression.h"
@@ -69,9 +70,8 @@ void BufferRunSink::patch(uint64_t position, const void* data, size_t bytes) {
 RunCompressor::RunCompressor(
     const PartitionWriterOptions& options,
     const CellShuffleOptions& cellOptions,
-    memory::MemoryPool* pool,
     uint64_t* compressTimeNs)
-    : pool_(pool),
+    : pool_(memory::spillMemoryPool()),
       compressTimeNs_(compressTimeNs),
       adaptive_(cellOptions.adaptiveCompression) {
   if (options.compressionType == arrow::Compression::UNCOMPRESSED) {
@@ -118,7 +118,7 @@ void RunCompressor::testingSetStreamCompressor(
 
 RunCompressor::~RunCompressor() = default;
 
-bool RunCompressor::write(
+void RunCompressor::write(
     RunSink& sink,
     uint32_t numStreams,
     const uint64_t* sizes,
@@ -134,7 +134,7 @@ bool RunCompressor::write(
       ++stats_.tinyFrames;
       stats_.tinyBytes += total;
     }
-    return true;
+    return;
   }
   if (streamSkips_.size() != numStreams) {
     streamSkips_.assign(numStreams, 0);
@@ -153,16 +153,13 @@ bool RunCompressor::write(
       }
     };
     ++stats_.combinedRuns;
-    Frame frame;
+    uint64_t stored = 0;
     const bool skipped = skipFrame(combinedSkip_);
     if (!skipped) {
-      frame = writeFrame(sink, total, visitAll, /*probe=*/false);
-      if (frame.final) {
-        learn(combinedSkip_, frame.stored > 0);
-      }
+      stored = writeFrame(sink, total, visitAll, /*probe=*/false);
+      learn(combinedSkip_, stored > 0);
     }
-    countFrame(frame, total, skipped);
-    const uint64_t stored = frame.stored;
+    countFrame(stored, total, skipped);
     if (stored == 0) {
       visitAll(
           [&](const char* data, uint32_t bytes) { sink.write(data, bytes); });
@@ -174,12 +171,11 @@ bool RunCompressor::write(
         sizes,
         numStreams);
     sink.patch(headerAt, header.data(), header.size());
-    return frame.final;
+    return;
   }
   // SEPARATE: the stored size per stream, then the decoded size - 0 for a
   // stream stored as it is.
   ++stats_.separateRuns;
-  bool final = true;
   std::vector<uint64_t> header(2ull * numStreams, 0);
   const uint64_t headerAt = sink.position();
   const auto layout = static_cast<uint8_t>(RunLayout::kSeparate);
@@ -192,37 +188,33 @@ bool RunCompressor::write(
       continue;
     }
     const auto visitStream = [&](RunPieceFn fn) { visit(s, fn); };
-    Frame frame;
+    uint64_t stored = 0;
     auto& streamStats = streamStats_[s];
     if (bytes < kMinCompressBytes) {
       ++stats_.tinyFrames;
       stats_.tinyBytes += bytes;
     } else if (skipFrame(streamSkips_[s])) {
-      countFrame(frame, bytes, /*skipped=*/true);
+      countFrame(0, bytes, /*skipped=*/true);
       ++streamStats.skipped;
     } else {
-      frame = writeFrame(sink, bytes, visitStream, /*probe=*/true);
-      if (frame.final) {
-        learn(streamSkips_[s], frame.stored > 0);
-      }
-      countFrame(frame, bytes, /*skipped=*/false);
+      stored = writeFrame(sink, bytes, visitStream, /*probe=*/true);
+      learn(streamSkips_[s], stored > 0);
+      countFrame(stored, bytes, /*skipped=*/false);
       ++streamStats.tried;
-      streamStats.compressed += frame.stored > 0;
+      streamStats.compressed += stored > 0;
       streamStats.inBytes += bytes;
-      streamStats.outBytes += frame.stored > 0 ? frame.stored : bytes;
+      streamStats.outBytes += stored > 0 ? stored : bytes;
     }
-    if (frame.stored > 0) {
-      header[s] = frame.stored;
+    if (stored > 0) {
+      header[s] = stored;
       header[numStreams + s] = bytes;
       continue;
     }
-    final &= frame.final;
     visitStream([&](const char* data, uint32_t pieceBytes) {
       sink.write(data, pieceBytes);
     });
   }
   sink.patch(headerAt + 1, header.data(), header.size() * sizeof(uint64_t));
-  return final;
 }
 
 void RunCompressor::storeRun(
@@ -262,23 +254,17 @@ void RunCompressor::learn(uint32_t& skip, bool shrank) const {
   }
 }
 
-void RunCompressor::countFrame(
-    const Frame& frame,
-    uint64_t bytes,
-    bool skipped) {
+void RunCompressor::countFrame(uint64_t stored, uint64_t bytes, bool skipped) {
   if (skipped) {
     ++stats_.skippedFrames;
     stats_.skippedBytes += bytes;
-  } else if (frame.stored > 0) {
+  } else if (stored > 0) {
     ++stats_.compressedFrames;
     stats_.compressedInBytes += bytes;
-    stats_.compressedOutBytes += frame.stored;
-  } else if (frame.final) {
+    stats_.compressedOutBytes += stored;
+  } else {
     ++stats_.unshrunkFrames;
     stats_.unshrunkBytes += bytes;
-  } else {
-    ++stats_.unfundedFrames;
-    stats_.unfundedBytes += bytes;
   }
 }
 
@@ -287,8 +273,8 @@ std::string RunCompressor::Stats::toString() const {
   return fmt::format(
       "runs stored={} combined={} separate={}; "
       "frames compressed={} ({:.1f}MB -> {:.1f}MB) unshrunk={} ({:.1f}MB, "
-      "early={}) skipped={} ({:.1f}MB) tiny={} ({:.1f}MB) unfunded={} "
-      "({:.1f}MB); null bodies compressed={} ({:.1f}MB -> {:.1f}MB) "
+      "early={}) skipped={} ({:.1f}MB) tiny={} ({:.1f}MB); "
+      "null bodies compressed={} ({:.1f}MB -> {:.1f}MB) "
       "stored={} ({:.1f}MB)",
       storedRuns,
       combinedRuns,
@@ -303,8 +289,6 @@ std::string RunCompressor::Stats::toString() const {
       mb(skippedBytes),
       tinyFrames,
       mb(tinyBytes),
-      unfundedFrames,
-      mb(unfundedBytes),
       compressedNullBodies,
       mb(nullInBytes),
       mb(nullOutBytes),
@@ -325,12 +309,7 @@ uint32_t RunCompressor::compressNullBody(BufferPtr& out, size_t at) {
   if (bytes < kMinCompressBytes || skipFrame(nullSkip_)) {
     return stored();
   }
-  try {
-    resetBuffer(compressed_, codec_->maxCompressedLen(bytes), pool_);
-  } catch (const std::exception&) {
-    releaseWorkspace();
-    return stored();
-  }
+  resetBuffer(compressed_, codec_->maxCompressedLen(bytes), pool_);
   int64_t written;
   {
     NanosecondTimer timer(compressTimeNs_);
@@ -362,13 +341,13 @@ void RunCompressor::releaseWorkspace() {
   compressed_.reset();
 }
 
-RunCompressor::Frame RunCompressor::writeFrame(
+uint64_t RunCompressor::writeFrame(
     RunSink& sink,
     uint64_t bytes,
     FrameVisitor visit,
     bool probe) {
   if (streamCompressor_ != nullptr) {
-    return Frame{streamFrame(sink, bytes, visit, probe)};
+    return streamFrame(sink, bytes, visit, probe);
   }
   return oneShotFrame(sink, bytes, visit);
 }
@@ -478,18 +457,10 @@ uint64_t RunCompressor::streamFrame(
   return emitted;
 }
 
-RunCompressor::Frame
+uint64_t
 RunCompressor::oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit) {
-  // The workspaces come from the task pool, and a spill or a seal is often
-  // the moment that pool is exhausted: the frame is then stored rather
-  // than failing the very operation meant to relieve the pressure.
-  try {
-    resetBuffer(frame_, bytes, pool_);
-    resetBuffer(compressed_, codec_->maxCompressedLen(bytes), pool_);
-  } catch (const std::exception&) {
-    releaseWorkspace();
-    return Frame{0, /*final=*/false};
-  }
+  resetBuffer(frame_, bytes, pool_);
+  resetBuffer(compressed_, codec_->maxCompressedLen(bytes), pool_);
   char* frame = frame_->asMutable<char>();
   uint64_t offset = 0;
   visit([&](const char* data, uint32_t pieceBytes) {
@@ -508,10 +479,10 @@ RunCompressor::oneShotFrame(RunSink& sink, uint64_t bytes, FrameVisitor visit) {
   }
   BOLT_CHECK_GT(written, 0, "run frame compression failed");
   if (doesNotShrink(static_cast<uint64_t>(written), bytes)) {
-    return Frame{};
+    return 0;
   }
   sink.write(compressed_->as<char>(), static_cast<size_t>(written));
-  return Frame{static_cast<uint64_t>(written)};
+  return static_cast<uint64_t>(written);
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

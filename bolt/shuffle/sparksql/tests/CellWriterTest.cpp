@@ -478,8 +478,7 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
   // is written - pushed to an RSS client as well - past a stream of random
   // numbers no codec shrinks: well under half the bytes of the same
   // shuffle uncompressed, whose sizes its raw lengths are. A pool with no
-  // room to spare still compresses streaming, and one-shot stores the
-  // frames it cannot fund.
+  // room to spare compresses alike, streaming and one-shot.
   constexpr int32_t kPartitions = 4;
   std::mt19937 rng(37);
   std::mt19937_64 random(41);
@@ -561,10 +560,8 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
     test::expectReadsBack(
         large, written, arrow::Compression::LZ4_FRAME, pool());
     EXPECT_GT(written.metrics.spillCount, 0);
-    if (streaming) {
-      EXPECT_LT(written.metrics.totalBytesEvicted * 8, rawBytes);
-      EXPECT_LT(written.metrics.totalBytesWritten * 8, rawBytes);
-    }
+    EXPECT_LT(written.metrics.totalBytesEvicted * 8, rawBytes);
+    EXPECT_LT(written.metrics.totalBytesWritten * 8, rawBytes);
   }
 }
 
