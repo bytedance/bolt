@@ -72,7 +72,7 @@ class CellNestedLayout {
     /// columns included.
     std::vector<uint32_t> columns;
     /// Those with a wire column: the columns a split of the space covers.
-    std::vector<uint32_t> splitColumns;
+    std::vector<uint32_t> wireColumns;
     /// The containers among the columns, in node order.
     std::vector<uint32_t> containers;
     /// The row type of `columns`, a decoder's for the space.

@@ -564,7 +564,7 @@ TEST_F(CellWriterTest, everyCodecShrinksSpillsAndOutput) {
   }
 }
 
-TEST_F(CellWriterTest, spillsCompressAcrossMergeShapes) {
+TEST_F(CellWriterTest, spillsCompressInSealedAndResidualWindows) {
   // ~4MB per batch: with an 8MB chunk cap every window sees several
   // pressure spills. The last partition takes one short row per batch, so
   // its segments stay below the compression minimum and are stored as they

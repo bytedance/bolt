@@ -163,7 +163,7 @@ class RunCompressorTest
   }
 
   void SetUp() override {
-    options_.compressionType = GetParam();
+    partitionOptions_.compressionType = GetParam();
   }
 
   /// Streaming, not adaptive.
@@ -174,7 +174,7 @@ class RunCompressorTest
     return options;
   }
 
-  PartitionWriterOptions options_;
+  PartitionWriterOptions partitionOptions_;
   uint64_t compressTimeNs_{0};
 };
 
@@ -235,12 +235,12 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   // A stream form may take less than a whole staging piece per call: the
   // compressor writes out what it holds and feeds it the rest. One that
   // takes nothing and writes nothing fails the frame rather than spinning.
-  const auto type = fromArrowCodecType(options_.compressionType);
+  const auto type = fromArrowCodecType(partitionOptions_.compressionType);
   const auto realStreamForm = [&] {
     CodecOptions codecOptions{
         CodecBackend::NONE,
-        options_.compressionLevel,
-        options_.checksumEnabled,
+        partitionOptions_.compressionLevel,
+        partitionOptions_.checksumEnabled,
         /*independentBlocks=*/true};
     return StreamCompressor::create(type, codecOptions);
   };
@@ -253,7 +253,8 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
   const std::vector<std::string> streams = {mixed, repetitive(100 << 10)};
   for (const int64_t maxRead : {int64_t{1000}, int64_t{100} << 10}) {
     SCOPED_TRACE(maxRead);
-    RunCompressor compressor(options_, cellOptions(), &compressTimeNs_);
+    RunCompressor compressor(
+        partitionOptions_, cellOptions(), &compressTimeNs_);
     auto shortReads =
         std::make_unique<ShortReadCompressor>(type, realStreamForm(), maxRead);
     auto* probe = shortReads.get();
@@ -265,7 +266,7 @@ TEST_P(RunCompressorTest, streamCompressorStoppingShortIsFedTheRest) {
     EXPECT_GT(probe->shortReads, 0);
   }
 
-  RunCompressor stalled(options_, cellOptions(), &compressTimeNs_);
+  RunCompressor stalled(partitionOptions_, cellOptions(), &compressTimeNs_);
   stalled.testingSetStreamCompressor(
       std::make_unique<ShortReadCompressor>(type, realStreamForm(), 0));
   BOLT_ASSERT_THROW(compressRun(stalled, streams), "made no progress");
