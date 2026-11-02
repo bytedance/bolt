@@ -486,8 +486,8 @@ void CellNestedShredder::countRange(
     // No window carries the batch: the count stops here.
     if (total > CellNestedLayout::kMaxPositions) {
       BOLT_USER_FAIL(
-          "a batch holds more than {} nested elements at one level, more "
-          "than a Cell shuffle payload carries",
+          "a batch holds more than {} elements in one ARRAY or MAP column, "
+          "its rows together, more than a Cell shuffle payload carries",
           CellNestedLayout::kMaxPositions);
     }
     for (const uint32_t y : containers) {
