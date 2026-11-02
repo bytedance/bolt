@@ -89,7 +89,7 @@ CellShuffleWriter::CellShuffleWriter(
 }
 
 CellShuffleWriter::~CellShuffleWriter() {
-  // Failed split/stop paths must return the warm reservation as well.
+  // Failed split/stop paths must return the chunk reservations as well.
   flattener_.reset();
   splitter_.reset();
   output_.reset();
@@ -181,11 +181,6 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   perPidCounter_.assign(numPartitions_, 0);
   decoded_.resize(layout_.numColumns());
 
-  // Warm the reservation for the first chunks; failure is not fatal,
-  // allocation will arbitrate. The splitter's caches are allocated already.
-  if (numStreams != 0) {
-    boltPool_->maybeReserve(2 * kChunkBytes);
-  }
   initialized_ = true;
   LOG(INFO) << "CellShuffleWriter init: layout="
             << (nested_ != nullptr                  ? "native nested"
