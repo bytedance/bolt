@@ -548,7 +548,7 @@ NullCells::NullCells(
     : pool_(pool),
       numPartitions_(numColumns == 0 ? 0 : numPartitions),
       numColumns_(numColumns),
-      states_(numColumns, ColumnState::kEmpty),
+      states_(numColumns),
       columns_(numColumns),
       chainCells_(pool, kNullChunkBytes, sizeof(Cell)) {}
 
@@ -558,27 +558,25 @@ NullCells::~NullCells() {
 
 bool NullCells::observeBatch(
     uint32_t col,
-    bool anyNull,
-    bool allNull,
+    NullClass batch,
     const uint32_t* windowRows) {
-  // A column's state joins its batches': it stays kNoNull or kAllNull only
+  // A column's class joins its batches': it stays kNoNulls or kAllNull only
   // while every batch is.
-  const ColumnState batch = !anyNull ? ColumnState::kNoNull
-      : allNull                      ? ColumnState::kAllNull
-                                     : ColumnState::kMixed;
-  ColumnState& state = states_[col];
-  if (state == ColumnState::kMixed || state == batch) {
-    return state == ColumnState::kMixed;
-  }
-  const bool nullSoFar = state == ColumnState::kAllNull;
-  if (state == ColumnState::kEmpty && batch != ColumnState::kMixed) {
+  std::optional<NullClass>& state = states_[col];
+  if (!state.has_value()) {
     state = batch;
-    return false;
   }
+  if (*state == batch) {
+    return batch == NullClass::kSomeNulls;
+  }
+  if (*state == NullClass::kSomeNulls) {
+    return true;
+  }
+  const bool nullSoFar = *state == NullClass::kAllNull;
   // The column turns mixed. Its rows so far are all non-null - what
   // unrecorded rows are, needing no storage yet - or all null: each
   // partition's become a null run of its own.
-  state = ColumnState::kMixed;
+  state = NullClass::kSomeNulls;
   if (nullSoFar) {
     Column& column = columnFor(col);
     for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
@@ -679,13 +677,12 @@ NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
   if (rowCount == 0) {
     return {NullTag::kNoNull, 0};
   }
-  switch (states_[col]) {
-    case ColumnState::kEmpty:
-    case ColumnState::kNoNull:
+  switch (states_[col].value_or(NullClass::kNoNulls)) {
+    case NullClass::kNoNulls:
       return {NullTag::kNoNull, rowCount};
-    case ColumnState::kAllNull:
+    case NullClass::kAllNull:
       return {NullTag::kAllNull, 0};
-    case ColumnState::kMixed:
+    case NullClass::kSomeNulls:
       break;
   }
   const Column& column = columns_[col];
@@ -772,7 +769,7 @@ void NullCells::reset() {
       pool_->free(column.block, columnBlockBytes());
       column = Column{};
     }
-    states_[col] = ColumnState::kEmpty;
+    states_[col].reset();
   }
   chainCells_.resetAll();
   chainCells_.shrink();
