@@ -34,7 +34,7 @@
 namespace bytedance::bolt::shuffle::sparksql::cell {
 namespace {
 
-/// A RunSink over a string, recording the patches it takes.
+/// A RunSink that appends to a string and patches it in place.
 class StringSink final : public RunSink {
  public:
   uint64_t position() const override {
@@ -63,6 +63,8 @@ uint64_t readU64(const std::string& bytes, size_t at) {
   return folly::loadUnaligned<uint64_t>(bytes.data() + at);
 }
 
+/// Parses `run` as CellFormat.h lays out a run of `numStreams` streams,
+/// inflating them with `codec`.
 DecodedRun
 decodeRun(const std::string& run, uint32_t numStreams, Codec* codec) {
   DecodedRun decoded;
@@ -152,7 +154,7 @@ std::string repetitive(size_t size) {
   return bytes;
 }
 
-/// The stream form of each codec: what streaming compression feeds.
+/// RunCompressor under each codec, streaming and not adaptive.
 class RunCompressorTest
     : public testing::TestWithParam<arrow::Compression::type> {
  protected:

@@ -26,8 +26,8 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-/// Batches of payloads that one CellPayloadDecoder cannot batch alone, their
-/// columns at positions of their own: a nested layout's
+/// Builds batches from nested-layout payloads, whose columns have different
+/// position counts and so need one CellPayloadDecoder per position group
 /// (makeCellNestedAssembler()).
 class CellBatchSource {
  public:

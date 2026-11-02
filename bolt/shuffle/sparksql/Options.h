@@ -96,14 +96,17 @@ enum class ShuffleWriterType {
 struct CellShuffleOptions {
   // Chunk-memory spill threshold; 0 disables it. Not a hard memory cap.
   int64_t cellMemoryCapBytes = 0;
-  // Close the window at a batch boundary when a partition exceeds this size.
+  // Seal a partition's payload at a batch boundary once it exceeds this
+  // size; other partitions stay open.
   int64_t checkpointPartitionBytes = 40LL << 20;
-  // Close the window when total null bitmap memory exceeds this threshold.
+  // Seal the window once the moved null cells exceed this. A reclaim
+  // requests a seal above a quarter of it.
   int64_t nullMemLimitBytes = 16LL << 20;
   // Probe the first batch to enable dictionary encoding per string column.
   bool enableStringDictionary = true;
   // Compress runs through the codec's stream form, straight from the cells
-  // with fixed buffers; off, each frame is gathered into a pool workspace
+  // with fixed buffers; off, each frame is gathered into a spill-pool
+  // workspace
   // and compressed at once. Codecs with no stream form are always one-shot.
   // Both write the same run layouts.
   bool streamCompression = true;
@@ -116,8 +119,8 @@ struct CellShuffleOptions {
   bool adaptiveCompression = true;
   // Shred ARRAY, MAP and ROW columns into plain columns of a nested
   // layout (cell/CellFormat.h). Off, the type adapter packs them row by row
-  // into one binary column, as before nested layouts existed: a fallback
-  // for wide nested schemas at high partition counts, whose per-stream
+  // into one binary column: a fallback for wide nested schemas at high
+  // partition counts, whose per-stream
   // state the adapter's single column avoids. The reader must be set alike
   // (ShuffleReaderOptions::cellNativeNestedTypes).
   bool nativeNestedTypes = true;
@@ -171,6 +174,8 @@ struct ShuffleReaderOptions {
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 
+  // The writer side's preferCellShuffle: an adaptive writer then writes
+  // Cell. Must match the writer.
   bool preferCellShuffle = false;
 
   // The writer side's CellShuffleOptions::nativeNestedTypes: whether Cell
@@ -255,7 +260,7 @@ struct ShuffleWriterOptions {
 struct ShuffleWriterMetrics {
   int64_t totalInputRowNumber{0};
   int64_t totalInputBatches{0};
-  // CellShuffleWriter: sealed checkpoint windows.
+  // CellShuffleWriter: seals, whole-window and per-partition.
   int64_t spillCount{0};
   // Cell row counts summed over dictionary-enabled columns.
   int64_t dictionaryMatchedRows{0};

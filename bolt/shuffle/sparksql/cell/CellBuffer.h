@@ -98,10 +98,8 @@ class ChunkAllocator {
   }
 
   /// Sorts the freelist so reuse consumes cells chunk by chunk (lowest
-  /// chunk first). Called after a full recycle: refilling then packs the
-  /// leading chunks and leaves trailing chunks untouched, so shrink()
-  /// can hand idle memory back without a spill - the property that makes
-  /// declining a reclaim an honest, materially compliant answer.
+  /// chunk first). Called after cells are recycled, so refills pack the
+  /// lowest chunks and shrink() can return the trailing ones.
   void packFreelist();
 
   /// Returns a cell to the freelist for reuse. The chunk stays with the
@@ -109,8 +107,7 @@ class ChunkAllocator {
   void recycle(uint32_t cellId);
 
   /// Logically frees every cell and invalidates all outstanding ids; chunks
-  /// are retained for reuse. Used after a full drain when more input is
-  /// expected.
+  /// are retained for reuse. NullCells calls it when its window closes.
   void resetAll();
 
   /// Returns fully idle chunks (no live cell) to the pool. Freelist entries
@@ -365,7 +362,7 @@ enum class NullClass : uint8_t {
   kAllNull = 2, // every row null: one counted run per partition
 };
 
-/// The null state of the current checkpoint window, per non-UNKNOWN wire
+/// The null state of every partition's open payload, per non-UNKNOWN wire
 /// column and partition, in the null body's bit order: bit 1 = non-null,
 /// bit 0 = null. All null information lives here.
 ///
@@ -478,17 +475,16 @@ class NullCells {
       uint32_t numCols,
       uint8_t* out) const;
 
-  /// Drops every column's state and cells (checkpoint window close).
+  /// Drops every column's state and cells (window seal).
   void reset();
 
   /// Empties one partition's cells, its payload having closed; the
   /// columns' states, which hold for the rows still to come, stay.
   void releasePartition(uint32_t pid);
 
-  /// Bytes of the partitions' moved cells; input to the checkpoint
-  /// trigger. Not in it, as they stay bounded whatever the window's size:
-  /// the columns' cell arrays, 44 bytes per partition of a column with
-  /// nulls recorded.
+  /// Bytes of the partitions' moved cells; input to the kNulls seal. Not
+  /// in it, as they stay bounded whatever the window's size: the columns'
+  /// cell arrays, 44 bytes per partition of a column with nulls recorded.
   int64_t allocatedBytes() const {
     return chainCells_.usedBytes();
   }

@@ -21,11 +21,11 @@
 /// times one writer lifecycle (split every batch, stop) and
 /// `<case>/<writer>/read` times reading its output back; both count rows, so
 /// folly reports ns per row. Each also fills folly user counters with the
-/// steps behind that time - the writer's split, stop, convert, flatten, pid,
-/// combine, compress, write, evict and reclaim times, bytes and windows,
-/// dictionary hits, memory peaks; the reader's decompress, decode and merge
-/// times - so versions compare step by step. --bm_json_verbose=<file> keeps
-/// them all as raw data.
+/// steps behind that time - the writer's split, stop, convert, flatten
+/// (Cell: shred), pid, combine, compress, write, evict and reclaim times,
+/// bytes and windows, dictionary hits, memory peaks; the reader's
+/// decompress, decode and merge times - so versions compare step by step.
+/// --bm_json_verbose=<file> keeps them all as raw data.
 ///
 /// Cases are frozen: an id never changes meaning, new shapes get new ids.
 /// Input is generated from a seed derived from the case id, and every read

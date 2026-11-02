@@ -20,9 +20,10 @@
 
 namespace bytedance::bolt::shuffle::sparksql::cell {
 
-// Integration boundary for logical Spark rows. Cell itself only sees primitive
-// columns and, when needed, one final binary containing all complex fields.
-// CompactRow owns the binary format and its serialization/deserialization.
+/// Packs a row type's ARRAY, MAP and ROW columns into one trailing VARBINARY
+/// column of CompactRows, and unpacks them. Used when nested types are not
+/// shredded (CellShuffleOptions::nativeNestedTypes off, or a schema past
+/// the nested layout's column limit).
 class CellShuffleTypeAdapter {
  public:
   /// Whether every leaf of `type`, at any depth of ARRAY, MAP and ROW, is a
