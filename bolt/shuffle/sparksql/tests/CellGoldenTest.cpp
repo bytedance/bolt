@@ -22,19 +22,24 @@
 #include <functional>
 #include <random>
 #include <set>
+#include <span>
 
 #include <fmt/format.h>
 
 #include "bolt/shuffle/sparksql/compression/Codec.h"
+#include "bolt/shuffle/sparksql/tests/CellNestedTestUtils.h"
 #include "bolt/shuffle/sparksql/tests/CellTestUtils.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
 
-/// The exact bytes the Cell writer produces for flat schemas, pinned: every
-/// flat type in every null shape and input encoding; string dictionaries,
-/// their successors and their fallbacks; partition and null-memory seals,
-/// spills and both outputs, alone and together; at several partition
-/// counts, uncompressed and LZ4. A change to the writer that is meant to
-/// leave flat schemas alone must keep every hash.
+/// The exact bytes the Cell writer produces, pinned. For flat schemas,
+/// every flat type in every null shape and input encoding; string
+/// dictionaries, their successors and their fallbacks; partition and
+/// null-memory seals, spills and both outputs, alone and together; at
+/// several partition counts, uncompressed and LZ4. For nested schemas,
+/// arrays, maps and structs four levels deep in every input encoding,
+/// struct fields with no column on the wire, partition seals, and the
+/// adapter's binary column. A change to the writer that is meant to leave
+/// the format alone must keep every hash.
 ///
 /// Nothing here depends on the machine or the clock: the input comes from
 /// fixed seeds through the standard engines alone, and the writer runs on a
@@ -60,6 +65,24 @@ uint64_t fnv1a(uint64_t hash, uint64_t value) {
     bytes[i] = static_cast<uint8_t>(value >> (8 * i));
   }
   return fnv1a(hash, bytes, sizeof(bytes));
+}
+
+/// The hash of what `written` holds: each partition's length, from an RSS
+/// client the number and sizes of its pushes, and its bytes.
+uint64_t hashOf(const test::WrittenShuffle& written, bool rss) {
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  for (size_t pid = 0; pid < written.partitions.size(); ++pid) {
+    hash = fnv1a(hash, written.metrics.partitionLengths[pid]);
+    if (rss) {
+      hash = fnv1a(hash, written.pushes[pid].size());
+      for (const auto& push : written.pushes[pid]) {
+        hash = fnv1a(hash, push.size());
+      }
+    }
+    hash = fnv1a(
+        hash, written.partitions[pid].data(), written.partitions[pid].size());
+  }
+  return hash;
 }
 
 /// How a column holds its rows in one batch.
@@ -147,8 +170,63 @@ struct Golden {
   uint64_t hash;
 };
 
-class CellFlatGoldenTest : public testing::Test,
-                           public bolt::test::VectorTestBase {
+/// Expects `actual` to be `recorded`, scenario by scenario, and else gives
+/// the table as the writer now produces it.
+void expectRecorded(
+    const std::vector<Golden>& actual,
+    std::span<const Golden> recorded) {
+  std::string table;
+  bool same = actual.size() == recorded.size();
+  for (size_t i = 0; i < actual.size(); ++i) {
+    const auto& golden = actual[i];
+    const Golden* expected =
+        i < recorded.size() && std::string_view(recorded[i].name) == golden.name
+        ? &recorded[i]
+        : nullptr;
+    if (expected == nullptr) {
+      same = false;
+      ADD_FAILURE() << golden.name << ": not recorded";
+    } else if (
+        golden.bytes != expected->bytes || golden.hash != expected->hash) {
+      same = false;
+      ADD_FAILURE() << golden.name << ": " << golden.bytes << " bytes, hash "
+                    << fmt::format("{:#018x}", golden.hash) << "; recorded "
+                    << expected->bytes << " bytes, hash "
+                    << fmt::format("{:#018x}", expected->hash);
+    }
+    table += fmt::format(
+        "      {{\"{}\", {}, {:#018x}ULL}},\n",
+        golden.name,
+        golden.bytes,
+        golden.hash);
+  }
+  // Only for a deliberate format change: the table as the writer now
+  // produces it.
+  EXPECT_TRUE(same) << "now:\n" << table;
+}
+
+/// A nested shuffle: the input's schema and the options of the maker that
+/// makes it, and the writer's configuration.
+struct NestedScenario {
+  const char* name;
+  RowTypePtr type;
+  test::NestedVectorMaker::Options options;
+  /// How batch b holds column c; flat when not given.
+  std::function<test::Encoding(uint32_t, uint32_t)> encodingOf;
+  int32_t numPartitions;
+  bool lz4;
+  bool rss;
+  std::function<void(CellShuffleOptions&)> tune;
+  /// Whether payloads seal before the end.
+  bool seals;
+};
+
+/// The rows of a nested scenario's batches, small ones among them, and its
+/// seed.
+constexpr vector_size_t kNestedBatches[] = {1500, 1, 0, 2500, 7, 900, 3};
+constexpr uint64_t kNestedSeed = 0x6e57ed;
+
+class CellGoldenTest : public testing::Test, public bolt::test::VectorTestBase {
  protected:
   static void SetUpTestSuite() {
     memory::MemoryManager::testingSetInstance({});
@@ -162,8 +240,8 @@ class CellFlatGoldenTest : public testing::Test,
     dataFile_ = pathTemplate;
     // The writer sizes its cells from its pool's capacity: a fixed one, so
     // nothing of the process's memory configuration reaches the bytes.
-    writerRoot_ = memory::memoryManager()->addRootPool(
-        "cellFlatGolden", int64_t{8} << 30);
+    writerRoot_ =
+        memory::memoryManager()->addRootPool("cellGolden", int64_t{8} << 30);
     writerPool_ = writerRoot_->addLeafChild("writer");
   }
 
@@ -511,19 +589,6 @@ class CellFlatGoldenTest : public testing::Test,
     EXPECT_EQ(metrics.dictionaryFallbackRows > 0, dictionaries)
         << scenario.name;
 
-    uint64_t hash = 0xcbf29ce484222325ULL;
-    for (int32_t pid = 0; pid < scenario.numPartitions; ++pid) {
-      hash = fnv1a(hash, metrics.partitionLengths[pid]);
-      if (scenario.rss) {
-        hash = fnv1a(hash, written.pushes[pid].size());
-        for (const auto& push : written.pushes[pid]) {
-          hash = fnv1a(hash, push.size());
-        }
-      }
-      hash = fnv1a(
-          hash, written.partitions[pid].data(), written.partitions[pid].size());
-    }
-
     const auto codec = scenario.lz4 ? test::lz4Codec() : nullptr;
     const auto rows = input.rowsOf(scenario.numPartitions);
     for (int32_t pid = 0; pid < scenario.numPartitions; ++pid) {
@@ -537,7 +602,60 @@ class CellFlatGoldenTest : public testing::Test,
           1 << 20);
       test::expectPartitionRows(rows[pid], batches, pid, 1000);
     }
-    return {scenario.name, metrics.totalBytesWritten, hash};
+    return {
+        scenario.name,
+        metrics.totalBytesWritten,
+        hashOf(written, scenario.rss)};
+  }
+
+  /// Writes the nested scenario's shuffle of kNestedBatches, checks that it
+  /// takes the way its options say and reads back, and returns its golden
+  /// record.
+  Golden run(const NestedScenario& scenario) {
+    removeFiles();
+    const auto input = test::makeInput(
+        scenario.type,
+        scenario.options,
+        {std::begin(kNestedBatches), std::end(kNestedBatches)},
+        scenario.numPartitions,
+        kNestedSeed,
+        pool(),
+        scenario.encodingOf);
+    auto options = test::shuffleOptions(
+        dataFile_,
+        scenario.numPartitions,
+        scenario.lz4 ? arrow::Compression::LZ4_FRAME
+                     : arrow::Compression::UNCOMPRESSED,
+        scenario.rss);
+    if (scenario.tune) {
+      scenario.tune(options.cellOptions);
+    }
+    const auto written = test::writeShuffle(options, input, writerPool_.get());
+    const auto& metrics = written.metrics;
+    // A nested layout, or the adapter's binary column.
+    const bool native = options.cellOptions.nativeNestedTypes;
+    EXPECT_EQ(metrics.flattenTime > 0, native) << scenario.name;
+    EXPECT_EQ(metrics.convertTime > 0, !native) << scenario.name;
+    EXPECT_EQ(metrics.spillCount > 0, scenario.seals) << scenario.name;
+
+    const auto codec = scenario.lz4 ? test::lz4Codec() : nullptr;
+    const auto rows = input.rowsOf(scenario.numPartitions);
+    for (int32_t pid = 0; pid < scenario.numPartitions; ++pid) {
+      SCOPED_TRACE(scenario.name);
+      const auto batches = test::readPartition(
+          written.partitions[pid],
+          scenario.type,
+          codec.get(),
+          pool(),
+          1000,
+          1 << 20,
+          native);
+      test::expectPartitionRows(rows[pid], batches, pid, 1000);
+    }
+    return {
+        scenario.name,
+        metrics.totalBytesWritten,
+        hashOf(written, scenario.rss)};
   }
 
   std::string dataFile_;
@@ -545,7 +663,7 @@ class CellFlatGoldenTest : public testing::Test,
   std::shared_ptr<memory::MemoryPool> writerPool_;
 };
 
-TEST_F(CellFlatGoldenTest, inputHoldsEveryShape) {
+TEST_F(CellGoldenTest, inputHoldsEveryShape) {
   // What the golden input is meant to hold, so that a change to it cannot
   // quietly weaken what the hashes pin.
   std::vector<std::set<Shape>> shapes;
@@ -582,7 +700,7 @@ TEST_F(CellFlatGoldenTest, inputHoldsEveryShape) {
   EXPECT_GT(longValues, 0);
 }
 
-TEST_F(CellFlatGoldenTest, flatSchemasKeepTheirBytes) {
+TEST_F(CellGoldenTest, flatSchemasKeepTheirBytes) {
   const auto partitionSeals = [](CellShuffleOptions& options) {
     options.checkpointPartitionBytes = 64 << 10;
   };
@@ -676,34 +794,92 @@ TEST_F(CellFlatGoldenTest, flatSchemasKeepTheirBytes) {
       {"p7_lz4_no_dictionary", 2247464, 0x6250503b4b2248f5ULL},
       {"p7_lz4_one_shot", 2204206, 0x0938934d484a8294ULL},
   };
-  std::string actual;
-  bool same = std::size(kGolden) == scenarios.size();
-  for (size_t i = 0; i < scenarios.size(); ++i) {
-    const auto golden = run(scenarios[i]);
-    const Golden* recorded = i < std::size(kGolden) &&
-            std::string_view(kGolden[i].name) == golden.name
-        ? &kGolden[i]
-        : nullptr;
-    if (recorded == nullptr) {
-      same = false;
-      ADD_FAILURE() << golden.name << ": not recorded";
-    } else if (
-        golden.bytes != recorded->bytes || golden.hash != recorded->hash) {
-      same = false;
-      ADD_FAILURE() << golden.name << ": " << golden.bytes << " bytes, hash "
-                    << fmt::format("{:#018x}", golden.hash) << "; recorded "
-                    << recorded->bytes << " bytes, hash "
-                    << fmt::format("{:#018x}", recorded->hash);
-    }
-    actual += fmt::format(
-        "      {{\"{}\", {}, {:#018x}ULL}},\n",
-        golden.name,
-        golden.bytes,
-        golden.hash);
+  std::vector<Golden> actual;
+  for (const auto& scenario : scenarios) {
+    actual.push_back(run(scenario));
   }
-  // Only for a deliberate format change: the table as the writer now
-  // produces it.
-  EXPECT_TRUE(same) << "now:\n" << actual;
+  expectRecorded(actual, kGolden);
+}
+
+TEST_F(CellGoldenTest, nestedSchemasKeepTheirBytes) {
+  // Columns four levels deep, in every encoding at the top level and
+  // wrapped below it; struct fields with no column on the wire and structs
+  // in arrays, pushed to an RSS client; payloads sealed after every batch,
+  // one level's containers all null, so that some payloads of the small
+  // batches hold no position of it; and the four-level columns through the
+  // adapter's binary column.
+  test::NestedVectorMaker::Options wrapped;
+  wrapped.nullPercent = {10, 20, 10};
+  wrapped.wrapPercent = 50;
+  wrapped.scatteredPercent = 50;
+  const auto everyEncoding = [](uint32_t batch, uint32_t col) {
+    return static_cast<test::Encoding>(
+        (batch + col) % static_cast<uint32_t>(test::Encoding::kCount));
+  };
+  test::NestedVectorMaker::Options structNulls;
+  structNulls.nullPercent = {10, 30};
+  test::NestedVectorMaker::Options nullLevel;
+  nullLevel.nullPercent = {10, 20, 10, 100};
+  nullLevel.maxLength = 3;
+  const auto unknownFields = ROW(
+      {"r", "ar", "m", "o", "sa"},
+      {ROW({"u", "a"}, {UNKNOWN(), INTEGER()}),
+       ARRAY(ROW({"u", "a", "s"}, {UNKNOWN(), INTEGER(), VARCHAR()})),
+       MAP(INTEGER(), ROW({"a", "u"}, {BIGINT(), UNKNOWN()})),
+       ROW({"u", "w"}, {UNKNOWN(), UNKNOWN()}),
+       ARRAY(ROW({"x", "l"}, {DOUBLE(), ARRAY(ROW({"z"}, {SMALLINT()}))}))});
+  const std::vector<NestedScenario> scenarios = {
+      {"deep_rows_p7_lz4",
+       test::deepRowType(),
+       wrapped,
+       everyEncoding,
+       7,
+       true,
+       false,
+       nullptr,
+       false},
+      {"unknown_fields_p7_none_rss",
+       unknownFields,
+       structNulls,
+       nullptr,
+       7,
+       false,
+       true,
+       nullptr,
+       false},
+      {"deep_nested_p7_lz4_partition_seals",
+       test::deepNestedType(),
+       nullLevel,
+       nullptr,
+       7,
+       true,
+       false,
+       [](CellShuffleOptions& options) {
+         options.checkpointPartitionBytes = 1;
+       },
+       true},
+      {"deep_rows_p7_lz4_adapter",
+       test::deepRowType(),
+       wrapped,
+       everyEncoding,
+       7,
+       true,
+       false,
+       [](CellShuffleOptions& options) { options.nativeNestedTypes = false; },
+       false},
+  };
+  // Recorded from the writer at ed9584dd.
+  static const Golden kGolden[] = {
+      {"deep_rows_p7_lz4", 756669, 0x326dc6286aecb91dULL},
+      {"unknown_fields_p7_none_rss", 273076, 0xc06c021c92f3cfaaULL},
+      {"deep_nested_p7_lz4_partition_seals", 465968, 0x0220d4ea432ab57dULL},
+      {"deep_rows_p7_lz4_adapter", 1340920, 0x19f012550dc06055ULL},
+  };
+  std::vector<Golden> actual;
+  for (const auto& scenario : scenarios) {
+    actual.push_back(run(scenario));
+  }
+  expectRecorded(actual, kGolden);
 }
 
 } // namespace

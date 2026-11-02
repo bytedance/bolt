@@ -560,6 +560,18 @@ inline bool sameValue(
   }
 }
 
+/// Row `row` of `vector` as text, cut short past 1000 characters: a row may
+/// hold megabytes.
+inline std::string rowText(const BaseVector& vector, vector_size_t row) {
+  constexpr size_t kMaxChars = 1000;
+  auto text = vector.toString(row);
+  if (text.size() > kMaxChars) {
+    text.resize(kMaxChars);
+    text += "...";
+  }
+  return text;
+}
+
 /// Expects `batches`, read back from partition `pid`, to hold the rows
 /// `expected`, in order, in batches of at most `batchSize` rows.
 inline void expectPartitionRows(
@@ -579,7 +591,7 @@ inline void expectPartitionRows(
       const auto [source, sourceRow] = expected[next];
       ASSERT_TRUE(sameValue(*source, sourceRow, *batch, row))
           << "partition " << pid << " row " << next << ": expected "
-          << source->toString(sourceRow) << ", got " << batch->toString(row);
+          << rowText(*source, sourceRow) << ", got " << rowText(*batch, row);
     }
   }
   EXPECT_EQ(next, expected.size()) << "partition " << pid;
