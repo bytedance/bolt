@@ -149,9 +149,11 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
   const auto perTask =
       memory::sparksql::ExecutionMemoryPool::getAvailableMemoryPerTask();
   int64_t limit = bounded(poolCap) ? poolCap : 0;
+  const char* limitSource = limit > 0 ? "pool cap" : "none";
   if (perTask.has_value() && bounded(*perTask) &&
       (limit == 0 || *perTask < limit)) {
     limit = *perTask;
+    limitSource = "task memory";
   }
   const int64_t budget = limit > 0
       ? std::min<int64_t>(limit / 4, int64_t{1} << 30)
@@ -185,6 +187,18 @@ void CellShuffleWriter::initOnFirstBatch(const RowVector& rv) {
     boltPool_->maybeReserve(2 * kChunkBytes);
   }
   initialized_ = true;
+  LOG(INFO) << "CellShuffleWriter init: layout="
+            << (nested_ != nullptr                  ? "native nested"
+                    : adapter_->hasComplexColumns() ? "adapter"
+                                                    : "flat")
+            << ", logicalColumns=" << inputType.size() - 1
+            << ", layoutColumns=" << layout_.numColumns()
+            << ", streams=" << numStreams << ", partitions=" << numPartitions_
+            << ", maxCapacity=" << poolCap << ", perTask="
+            << (perTask.has_value() ? std::to_string(*perTask) : "none")
+            << ", limit=" << limit << " (" << limitSource
+            << "), budget=" << budget << ", perStream=" << perStream
+            << ", cellBytes=" << cellBytes;
 }
 
 arrow::Status CellShuffleWriter::splitOrdinary(
@@ -258,6 +272,9 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   // rows - the reader decodes a payload in batches of its own size.
   if (splitter_->hasWindowRows() &&
       splitter_->maxWindowRows() + uint64_t(rv->size()) > kMaxPayloadRows) {
+    LOG(INFO) << "CellShuffleWriter seals the window for its rows: "
+              << "maxWindowRows=" << splitter_->maxWindowRows()
+              << ", batchRows=" << rv->size();
     checkpoint(SealReason::kRows);
   }
   inSplit_ = true;
@@ -274,6 +291,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
   }
 
   bool anyNullable = false;
+  const uint64_t classifyStart = currentTimeNs();
   nullClass_.resize(layout_.numColumns());
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     if (layout_.isUnknownColumn(col)) {
@@ -309,6 +327,7 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     nullClass_[col] = klass;
     anyNullable = anyNullable || klass == BatchNullClass::kSomeNulls;
   }
+  nullClassifyNs_ += currentTimeNs() - classifyStart;
   if (anyNullable) {
     // One shared pass gives every nullable column its per-partition row
     // index; per-column counters would cost this once per column instead.
@@ -365,6 +384,9 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
   // as the rows' are; prepare() fails a batch no payload carries.
   flattener_->prepare(*rv);
   if (!flattener_->fitsWindow()) {
+    LOG(INFO) << "CellShuffleWriter seals the window for its nested "
+              << "positions: maxWindowRows=" << splitter_->maxWindowRows()
+              << ", batchRows=" << numRows;
     checkpoint(SealReason::kRows);
     BOLT_CHECK(flattener_->fitsWindow());
   }
@@ -674,7 +696,8 @@ arrow::Status CellShuffleWriter::stopOrdinary() {
       int64_t{0});
   metrics_.peakBytes = boltPool_->peakBytes();
   if (initialized_) {
-    LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString();
+    LOG(INFO) << "CellShuffleWriter pressure: " << pressure_.toString()
+              << fmt::format(", nullClassify={:.1f}ms", nullClassifyNs_ / 1e6);
   }
 
   // The splitter has released its window; return idle chunks, the

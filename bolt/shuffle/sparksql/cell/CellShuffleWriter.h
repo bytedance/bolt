@@ -154,6 +154,10 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   bool sealing_{false};
   bool dictProbed_{false};
   PressureStats pressure_;
+  /// Time the flat path spends decoding the columns of its batches and
+  /// classifying their nulls, logged at stop. The nested path's is part of
+  /// the flatten time.
+  uint64_t nullClassifyNs_{0};
 
   std::unique_ptr<CellShuffleTypeAdapter> adapter_;
   /// Set, in place of adapter_, when the schema takes a nested layout.
