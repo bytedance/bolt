@@ -87,23 +87,12 @@ class MemoryByteSource final : public CellByteSource {
   size_t pos_{0};
 };
 
-/// Bounds on untrusted input; zero disables a limit. The row and run counts
-/// match what the writer can emit. Decoded run size is unbounded by default: a
-/// run holds a whole window of one partition and a single value may reach 2
-/// GiB, so no fixed cap is safe for payloads of the same-binary writer. Every
-/// buffer sized from the run and null-region size fields comes from the
-/// reader pool, so a corrupt size fails on the pool's capacity rather than
-/// exhausting the process. The row count sizes nothing but the null region,
-/// which the input bytes bound: rows come out in batches of the caller's
-/// size. In a layout whose columns have different position counts, a
-/// batch's position count varies with the data, and only maxDecodedBytes
-/// bounds it. The null bitmap and batch bounds apply per decoder: a caller
-/// driving several decoders bounds their sum. Untrusted deployments set
-/// maxDecodedBytes.
+/// Bounds on untrusted input; zero disables a limit. The defaults are what
+/// the writer can emit. Run and null-body buffers come from the reader
+/// pool, so a corrupt size fails on the pool's capacity.
 struct CellDecodeLimits {
   uint32_t maxRowCount{kMaxPayloadRows};
   uint32_t maxRunCount{1u << 16};
-  uint64_t maxDecodedBytes{0};
 };
 
 /// The codec, decompression side. The format never identifies a codec;
@@ -177,7 +166,6 @@ class CellPayloadDecoder {
   /// under construction, opening one of `capacity` rows when none is open
   /// and growing it when they do not fit: in a layout whose columns have
   /// different position counts, a batch's position count varies with the
-  /// data. Growth keeps the batch's fixed bytes within maxDecodedBytes.
   /// The checks that need a whole stream run with the payload's last rows.
   /// On malformed input returns false with `error` set; the payload and the
   /// batch are then dropped.
@@ -305,9 +293,8 @@ class CellPayloadDecoder {
   void openBatch(vector_size_t capacity);
 
   /// Grows the open batch to hold `rows` rows, doubling it, within one
-  /// vector and maxDecodedBytes of fixed bytes; false, with `error`, past
-  /// maxDecodedBytes.
-  bool growBatch(uint64_t rows, std::string& error);
+  /// vector.
+  void growBatch(uint64_t rows);
 
   void dropBatch();
 
