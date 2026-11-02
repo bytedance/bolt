@@ -188,10 +188,6 @@ using BlockSource = std::function<bool(uint32_t pid, BufferPtr& block)>;
 /// only places them.
 class PartitionBlockOutput {
  public:
-  /// The local or the remote output, by options.partitionWriterType.
-  static std::unique_ptr<PartitionBlockOutput> create(
-      PartitionWriterOptions options);
-
   virtual ~PartitionBlockOutput() = default;
 
   /// Writes one unit over all partitions: `next` is called for partition 0,

@@ -44,8 +44,8 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 /// above.
 ///
 /// Accounting is exact and O(1): allocatedBytes() is live chunks times chunk
-/// size, which is precisely the pool-visible footprint; usedCells() counts
-/// cells currently handed out.
+/// size, which is precisely the pool-visible footprint; usedBytes() counts
+/// the bytes of the cells currently handed out.
 ///
 /// Not thread-safe; a shuffle writer is single-threaded.
 class ChunkAllocator {
@@ -156,10 +156,6 @@ class ChunkAllocator {
   /// Live chunks times chunk size: exactly the pool-visible footprint.
   int64_t allocatedBytes() const {
     return static_cast<int64_t>(liveChunks_) * chunkBytes_;
-  }
-
-  int64_t usedCells() const {
-    return usedCells_;
   }
 
   int64_t usedBytes() const {
@@ -291,10 +287,6 @@ class DataCells {
     fn(allocator_->cellData(id), allocator_->cellBytes() - info.tailLeft);
   }
 
-  /// Clears every chain. The caller resets or shrinks the allocator; ids
-  /// held by this directory are invalid afterwards.
-  void reset();
-
   /// Recycles the cells of one partition back to the allocator: a partial
   /// Run's release step.
   void releasePartition(uint32_t pid);
@@ -308,22 +300,8 @@ class DataCells {
   /// from the pool. Returns the bytes of the chunks emptied.
   uint64_t compact(uint64_t targetBytes);
 
-  /// Cell ids the chain links cover: every id the allocator has handed out
-  /// once an append returns.
-  uint32_t nextCapacity() const {
-    return nextCapacity_;
-  }
-
   uint64_t totalBytes() const {
     return totalBytes_;
-  }
-
-  uint32_t numPartitions() const {
-    return numPartitions_;
-  }
-
-  uint32_t numStreams() const {
-    return numStreams_;
   }
 
  private:
@@ -513,11 +491,6 @@ class NullCells {
   /// nulls recorded.
   int64_t allocatedBytes() const {
     return chainCells_.usedBytes();
-  }
-
-  /// Bytes of the columns' cell arrays.
-  int64_t tableBytes() const {
-    return tableBytes_;
   }
 
   /// Every byte held from the pool: the cell arrays and the allocator's
