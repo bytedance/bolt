@@ -288,10 +288,6 @@ class CellLayout {
     return streams_[index];
   }
 
-  const std::vector<CellStream>& streams() const {
-    return streams_;
-  }
-
   /// First stream of a logical column; a String column owns this stream
   /// (Length/Index) and the next one (Data), a Timestamp column this one
   /// (Seconds) and the next one (Nanos).

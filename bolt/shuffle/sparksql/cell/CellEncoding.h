@@ -505,9 +505,8 @@ inline uint32_t decodeBlockFull(const uint8_t* in, size_t inBytes, T* dst) {
 }
 
 /// Encodes a whole source array as an encoded stream: full 64-byte source
-/// blocks then at most one tail block. Appends to out. Used for stream tails at
-/// checkpoint time and by tests; the split hot path encodes full blocks one at
-/// a time as its cache lines fill.
+/// blocks then at most one tail block. Appends to out. Used by tests only;
+/// the split path encodes a block at a time as its cache lines fill.
 template <typename T>
 inline void encodeStream(const T* values, size_t count, std::string& out) {
   constexpr uint32_t kValuesPerBlock = kCacheLineBytes / sizeof(T);
@@ -524,37 +523,10 @@ inline void encodeStream(const T* values, size_t count, std::string& out) {
   }
 }
 
-/// Decodes an encoded stream of exactly `valueCount` values from
-/// in[0, inBytes). The blocks must consume the input exactly. Returns false
-/// on any violation.
-template <typename T>
-inline bool
-decodeStream(const uint8_t* in, size_t inBytes, size_t valueCount, T* dst) {
-  constexpr uint32_t kValuesPerBlock = kCacheLineBytes / sizeof(T);
-  size_t offset = 0;
-  size_t decoded = 0;
-  while (decoded < valueCount) {
-    const uint32_t consumed = valueCount - decoded >= kValuesPerBlock
-        ? decodeBlockFull(in + offset, inBytes - offset, dst + decoded)
-        : decodeBlock(
-              in + offset,
-              inBytes - offset,
-              static_cast<uint32_t>(valueCount - decoded),
-              dst + decoded);
-    if (consumed == 0) {
-      return false;
-    }
-    offset += consumed;
-    decoded += std::min<size_t>(kValuesPerBlock, valueCount - decoded);
-  }
-  // The blocks consume the stream exactly.
-  return offset == inBytes;
-}
-
-/// decodeStream in pieces: the values of an encoded stream of
-/// `valueCount` values, handed out in arbitrary-sized reads. A block that
-/// straddles two reads is decoded once and its rest staged here, so the
-/// caller never needs room for more than one read.
+/// Decodes an encoded stream of `valueCount` values in pieces, handed out
+/// in arbitrary-sized reads. A block that straddles two reads is decoded
+/// once and its rest staged here, so the caller never needs room for more
+/// than one read.
 template <typename T>
 class StreamCursor {
  public:

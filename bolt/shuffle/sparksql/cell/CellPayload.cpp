@@ -1661,21 +1661,6 @@ uint64_t residentBytes(const CellWindowInput& in, uint32_t pid) {
   return total;
 }
 
-void gatherResident(
-    const CellWindowInput& in,
-    uint32_t pid,
-    char* out,
-    uint64_t* streamSizes) {
-  size_t offset = 0;
-  for (uint32_t s = 0; s < in.layout->numStreams(); ++s) {
-    streamSizes[s] = in.cells->bytes(pid, s);
-    in.cells->scan(pid, s, [&](const char* data, uint32_t bytes) {
-      ::memcpy(out + offset, data, bytes);
-      offset += bytes;
-    });
-  }
-}
-
 void writeRunHeader(
     char* out,
     RunLayout layout,

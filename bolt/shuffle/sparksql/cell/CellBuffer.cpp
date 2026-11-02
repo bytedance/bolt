@@ -387,14 +387,6 @@ void DataCells::releaseAll() {
   }
 }
 
-void DataCells::reset() {
-  const size_t numChains = static_cast<size_t>(numPartitions_) * numStreams_;
-  if (numChains != 0) {
-    std::fill(infos_, infos_ + numChains, ChainInfo{});
-  }
-  totalBytes_ = 0;
-}
-
 uint64_t DataCells::compact(uint64_t targetBytes) {
   const uint32_t numChunks = allocator_->numChunkSlots();
   if (numChunks < 2 || targetBytes == 0) {

@@ -114,13 +114,8 @@ class RunCompressor {
 
   ~RunCompressor();
 
-  /// Whether runs are compressed at all.
-  bool compresses() const {
-    return codec_ != nullptr;
-  }
-
-  /// The codec, to read compressed runs back; null when compresses() is
-  /// false.
+  /// The codec, to read compressed runs back; null when runs are not
+  /// compressed.
   Codec* codec() const {
     return codec_.get();
   }
