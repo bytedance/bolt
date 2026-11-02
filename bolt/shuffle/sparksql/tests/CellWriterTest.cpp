@@ -51,7 +51,7 @@ using test::ShuffleInput;
 /// block.
 template <typename T>
 std::vector<T> valuesOfEveryWidth(std::mt19937_64& rng) {
-  constexpr uint32_t kPerBlock = kBlockValueBytes / sizeof(T);
+  constexpr uint32_t kPerBlock = kCacheLineBytes / sizeof(T);
   constexpr uint32_t kBits = 8 * sizeof(T);
   // The `i`-th of a block's values in [0, span): its extremes first.
   const auto offsetAt = [&](uint32_t i, uint64_t span) -> uint64_t {
