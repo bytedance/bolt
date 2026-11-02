@@ -804,29 +804,30 @@ uint64_t CellSplitter::spillPartitions(uint64_t targetBytes) {
     return total;
   }
   const uint32_t numStreams = layout_.numStreams();
-  spillOrder_.clear();
+  // (bytes, pid) of every partition holding cells.
+  std::vector<std::pair<uint64_t, uint32_t>> spillOrder;
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
     uint64_t bytes = 0;
     for (uint32_t s = 0; s < numStreams; ++s) {
       bytes += cells_.bytes(pid, s);
     }
     if (bytes > 0) {
-      spillOrder_.emplace_back(bytes, pid);
+      spillOrder.emplace_back(bytes, pid);
     }
   }
   // Largest first: the fewest partitions, and the fewest run segments, for
   // the bytes freed.
-  std::sort(spillOrder_.begin(), spillOrder_.end(), std::greater<>());
-  runPartitions_.assign(numPartitions_, 0);
+  std::sort(spillOrder.begin(), spillOrder.end(), std::greater<>());
+  std::vector<uint8_t> runPartitions(numPartitions_, 0);
   uint64_t taken = 0;
-  for (const auto& [bytes, pid] : spillOrder_) {
-    runPartitions_[pid] = 1;
+  for (const auto& [bytes, pid] : spillOrder) {
+    runPartitions[pid] = 1;
     taken += bytes;
     if (taken >= targetBytes) {
       break;
     }
   }
-  drainCells(runPartitions_.data());
+  drainCells(runPartitions.data());
   return taken;
 }
 
@@ -847,16 +848,16 @@ void CellSplitter::sealWindow() {
 
 uint32_t CellSplitter::sealPartitionsOver(uint64_t maxBytes) {
   BOLT_CHECK(!writingOutput_, "cannot seal a window during output");
-  sealPartitions_.assign(numPartitions_, 0);
+  std::vector<uint8_t> sealPartitions(numPartitions_, 0);
   uint32_t sealed = 0;
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
     if (partitionBytes_[pid] > maxBytes && windowRowCounts_[pid] > 0) {
-      sealPartitions_[pid] = 1;
+      sealPartitions[pid] = 1;
       ++sealed;
     }
   }
   if (sealed > 0) {
-    seal(sealPartitions_.data());
+    seal(sealPartitions.data());
   }
   return sealed;
 }
