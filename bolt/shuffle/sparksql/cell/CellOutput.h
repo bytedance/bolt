@@ -101,12 +101,11 @@ class CellOutput {
 /// finalize() merges them into the shuffle data file, partition-major,
 /// together with the task's composite output.
 ///
-/// Spill segments are runs in their wire form, written by the RunCompressor
-/// as any final run of the same bytes - or stored, when a pressure spill
-/// could not fund the compression workspace, for the merge to compress. The
-/// merge writes a payload's header, then its spilled segments, oldest
-/// first, each a run of its own and copied verbatim when final, and last -
-/// for the window still in memory - its resident cells as one more run. A
+/// Spill segments are runs in their final wire form, written by the
+/// RunCompressor as any run of the same bytes. The merge writes a payload's
+/// header, then its spilled segments, oldest first, each a run of its own
+/// copied verbatim, and last - for the window still in memory - its
+/// resident cells as one more run. A
 /// task whose data never needed a spill writes payloads straight from the
 /// live cells and touches no temporary file at all.
 class LocalCellOutput final : public CellOutput, public PartialSpiller {
@@ -147,18 +146,12 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
     /// P + 1 absolute spill-file offsets; equal neighbours mean an empty
     /// segment for that partition.
     std::vector<uint64_t> pidEnds;
-    /// Whether the run's COMBINED_UNCOMPRESSED segments already are their final
-    /// form: there is no codec, or the segment is too small to compress.
-    /// False when a pressure spill could not fund the compression
-    /// workspace; merge then compresses them.
-    bool storedIsFinal{false};
   };
 
   /// One partition's slice of a SpilledRun.
   struct SpillSegment {
     uint64_t begin;
     uint64_t end;
-    bool storedIsFinal;
   };
 
   /// One partition's closed payload: its run segments, oldest first, and
@@ -197,8 +190,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
       const SealedPayload& payload,
       const uint8_t* encodingTags);
 
-  /// Copies one spilled run segment into the data file: verbatim when it
-  /// already is in final form, else through the compressor.
+  /// Copies one spilled run segment, in its final form, into the data
+  /// file.
   void writeSpilledSegment(DataFileWriter& out, const SpillSegment& segment);
 
   /// Writes partition `pid`'s resident cells to the data file as one run.
@@ -244,9 +237,8 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   /// Seals, and the partition payloads they closed.
   uint64_t numSeals_{0};
   uint64_t numSealedPayloads_{0};
-  /// The merge: spilled segments copied as they are or compressed on the way.
+  /// The merge: spilled segments copied.
   uint64_t copiedSegments_{0};
-  uint64_t compressedSegments_{0};
   /// The window still in memory, borrowed by finalize() for its merge.
   const CellWindowInput* residual_{nullptr};
   bool residualHasData_{false};
