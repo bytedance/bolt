@@ -42,8 +42,12 @@ must be read by the Cell reader, and both sides must select it the same way.
 Writer side (`ShuffleWriterOptions`, [Options.h](../Options.h)):
 
 - `forceShuffleWriterType = 4` (`ShuffleWriterType::Cell`), or
-- `preferCellShuffle = true` with the adaptive type (`0`): the adaptive
-  choice becomes Cell unless it picked the row-based writer.
+- `preferCellShuffle = true`. It takes priority over a forced V1 (`1`) or
+  V2 (`2`), and over the adaptive choice (`0`) unless that picked the
+  row-based writer; a forced RowBased (`3`) stays row-based.
+
+`writesCellShuffle()` in Options.h is the one rule the writer and both
+readers follow.
 
 The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 `createForType(Cell)` fails on purpose rather than silently writing V1.
@@ -65,10 +69,9 @@ The codec, level and backend come from `PartitionWriterOptions`
 writers.
 
 Reader side (`ShuffleReaderOptions`): the Cell reader is used by
-`SparkShuffleReaderNode` when the partitioning has a pid and either
-`forceShuffleWriterType = 4`, or the type is adaptive, `preferCellShuffle` is
-set and the adaptive choice is not row-based. `BoltShuffleReader` refuses
-these configurations with a check. The reader takes `compressionType`,
+`SparkShuffleReaderNode` when the same rule picks Cell from the reader's
+`forceShuffleWriterType` and `preferCellShuffle`. `BoltShuffleReader`
+refuses these configurations with a check. The reader takes `compressionType`,
 `batchSize` and `shuffleBatchByteSize` as usual.
 
 Settings that must match on both sides, because the payloads do not record
