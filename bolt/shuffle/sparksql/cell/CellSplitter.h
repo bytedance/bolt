@@ -16,6 +16,9 @@
 
 #pragma once
 
+#include <optional>
+#include <span>
+
 #include "bolt/common/memory/AllocationPool.h"
 #include "bolt/shuffle/sparksql/cell/CellBuffer.h"
 #include "bolt/shuffle/sparksql/cell/CellOutput.h"
@@ -28,25 +31,28 @@ namespace bytedance::bolt::shuffle::sparksql::cell {
 struct SplitBatch {
   /// One DecodedVector per layout column. Mutable because
   /// nulls() may materialize lazily.
-  DecodedVector* decoded;
-  const uint32_t* row2Partition;
+  std::span<DecodedVector> decoded;
+  /// The partition of each row: one entry per row of the batch.
+  std::span<const uint32_t> row2Partition;
   /// Rows this batch adds per partition (the partitioner's output); lets a
   /// whole-batch fast path work per partition instead of per row.
-  const uint32_t* partition2RowCount;
+  std::span<const uint32_t> partition2RowCount;
   /// Per column, see NullClass.
-  const NullClass* nullClass;
-  uint32_t numRows;
+  std::span<const NullClass> nullClass;
   /// Position of row r within its partition in this batch. The splitter
-  /// adds the partition's position base to locate the null bit. May be null
-  /// when no column of this batch requires per-row null checks.
-  const uint32_t* rowIndexInPid;
-  /// The numColumns layout columns this batch covers; nullptr: every column.
-  const uint32_t* columns = nullptr;
-  uint32_t numColumns = 0;
+  /// adds the partition's position base to locate the null bit. May be
+  /// empty when no column of this batch requires per-row null checks.
+  std::span<const uint32_t> rowIndexInPid;
+  /// The layout columns this batch covers; nullopt: every column.
+  std::optional<std::span<const uint32_t>> columns;
   /// Per partition, how many positions the columns hold in the window
   /// before this batch. nullptr: the window's rows, which split() then
   /// advances by partition2RowCount; otherwise the caller advances its own.
   const uint32_t* positionBase = nullptr;
+
+  uint32_t numRows() const {
+    return static_cast<uint32_t>(row2Partition.size());
+  }
 };
 
 /// Splits decoded column values into partitioned cells. Every (partition,
@@ -125,8 +131,8 @@ class CellSplitter {
   }
 
   /// Rows per partition in the current window.
-  const uint32_t* windowRowCounts() const {
-    return windowRowCounts_.data();
+  std::span<const uint32_t> windowRowCounts() const {
+    return windowRowCounts_;
   }
 
   /// Window and partition seals so far; a seal zeroes the rows of the

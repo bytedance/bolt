@@ -715,8 +715,7 @@ NullCells::summarize(uint32_t pid, uint32_t col, uint32_t rowCount) const {
 
 void NullCells::emitRecords(
     uint32_t pid,
-    const uint32_t* cols,
-    uint32_t numCols,
+    std::span<const uint32_t> cols,
     uint8_t* out) const {
   // The current cell's record last, then the chain read from its last
   // moved cell back, each cell written as a record just before the one
@@ -765,8 +764,8 @@ void NullCells::emitRecords(
       }
     }
   };
-  for (uint32_t i = 0; i < numCols; ++i) {
-    const Column& column = columns_[cols[i]];
+  for (const uint32_t col : cols) {
+    const Column& column = columns_[col];
     BOLT_DCHECK(column.cells != nullptr, "records of a column without nulls");
     const Progress& progress = column.progress[pid];
     const uint32_t records = progress.moved + 1;
