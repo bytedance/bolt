@@ -32,6 +32,7 @@
 
 #include <boost/algorithm/string.hpp>
 #include <date/iso_week.h>
+#include <bit>
 
 #include "bolt/functions/lib/DateTimeFormatter.h"
 #include "bolt/functions/lib/TimeUtils.h"
@@ -378,26 +379,46 @@ struct UnixTimestampFunctionBase {
     return getTimestampResultInGMT(timestamp);
   }
 
-  // create DateTimeFormatter according to format, return nullptr if format is
-  // invalid
   std::shared_ptr<DateTimeFormatter> createFormatter(
       const arg_type<Varchar>* format) {
-    try {
-      if (this->timeParserPolicy == TimePolicy::LEGACY) {
-        return buildLegacySparkDateTimeFormatter(
-            std::string_view(format->data(), format->size()));
-      } else {
-        ensureFormatLegal(std::string_view(format->data(), format->size()));
-        return buildJodaDateTimeFormatter(
-            std::string_view(format->data(), format->size()));
-      }
-    } catch (const BoltUserError& e) {
-      if (e.message().find("week-based year") != std::string::npos) {
-        // rethrow exception to user
-        BOLT_USER_FAIL(e.message());
-      }
-      return nullptr;
+    const std::string_view pattern(format->data(), format->size());
+    return timeParserPolicy == TimePolicy::LEGACY
+        ? buildLegacySparkDateTimeFormatter(pattern, formatterContext_)
+        : buildSparkDateTimeFormatter(pattern);
+  }
+
+  FOLLY_ALWAYS_INLINE bool parseTimestamp(
+      const arg_type<Varchar>& input,
+      const arg_type<Varchar>& format,
+      Timestamp& result) {
+    if (!isConstFormat_) {
+      format_ = createFormatter(&format);
     }
+    const auto* zone = sessionTimeZone_
+        ? sessionTimeZone_
+        : tz::locateZone(tz::getTimeZoneID(sessionTzOffsetInSeconds_ / 60));
+    const std::string_view text(input.data(), input.size());
+    auto parsed = format_->parseToUtc(text, zone, timeParserPolicy);
+    if (parsed.hasError()) {
+      if (timeParserPolicy == TimePolicy::EXCEPTION) {
+        bool legacyAccepted = false;
+        try {
+          auto legacy = buildLegacySparkDateTimeFormatter(
+              std::string_view(format.data(), format.size()),
+              formatterContext_);
+          legacyAccepted = !legacy->parseToUtc(text, zone).hasError();
+        } catch (const BoltUserError&) {
+          // A modern pattern need not be accepted by SimpleDateFormat.
+        }
+        BOLT_USER_CHECK(
+            !legacyAccepted,
+            "Fail to parse. You may get a different result due to the upgrading of Spark");
+      }
+      return false;
+    }
+    result = parsed.value().timestamp;
+    checkSparkTimestampMicrosInRange(result.getSeconds(), result.getNanos());
+    return true;
   }
 
   template <typename StringType>
@@ -406,10 +427,12 @@ struct UnixTimestampFunctionBase {
       const arg_type<Varchar>* format,
       const StringType* timeZone) {
     this->timeParserPolicy = parseTimePolicy(config.timeParserPolicy());
+    if (this->timeParserPolicy != TimePolicy::CORRECTED) {
+      formatterContext_ = getDateTimeFormatterContext(config);
+    }
 
     if (format != nullptr) {
       this->format_ = createFormatter(format);
-      invalidFormat_ = (this->format_ == nullptr);
       isConstFormat_ = true;
     }
 
@@ -449,6 +472,7 @@ struct UnixTimestampFunctionBase {
                    // before 1901, Shanghai use UTC+8:05:43
                    // after, Shanghai change to CST(UTC+8)
   constexpr static int64_t kShSpecOffset = -343;
+  std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> format_;
   int64_t sessionTzOffsetInSeconds_{0};
 
@@ -456,7 +480,6 @@ struct UnixTimestampFunctionBase {
   std::optional<int64_t> sessionTzID_;
   bool isShanghai{false};
   bool isConstFormat_{false};
-  bool invalidFormat_{false};
 
   TimePolicy timeParserPolicy{TimePolicy::CORRECTED};
 };
@@ -500,20 +523,21 @@ struct UnixTimestampParseFunction : public UnixTimestampFunctionBase<T> {
       const std::vector<TypePtr>& /*inputTypes*/,
       const core::QueryConfig& config,
       const arg_type<Date>* /*input*/) {
-    static const StringView kDefaultFormat("yyyy-MM-dd HH:mm:ss");
     this->template initializeInternal<arg_type<Varchar>>(
-        config, &kDefaultFormat, nullptr);
+        config, nullptr, nullptr);
   }
 
   FOLLY_ALWAYS_INLINE bool call(
       int64_t& result,
       const arg_type<Varchar>& input) {
-    auto dateTimeResult =
-        this->format_->parse(std::string_view(input.data(), input.size()));
-    if (dateTimeResult.hasError()) {
+    static const StringView kDefaultFormat("yyyy-MM-dd HH:mm:ss");
+    Timestamp timestamp;
+    if (!this->parseTimestamp(input, kDefaultFormat, timestamp)) {
       return false;
     }
-    return this->getResultInGMT(dateTimeResult.value(), result);
+    result = timestamp.getSeconds() +
+        (timestamp.getSeconds() < 0 && timestamp.getNanos() != 0);
+    return true;
   }
 
   FOLLY_ALWAYS_INLINE void call(int64_t& result, const arg_type<Date>& input) {
@@ -525,8 +549,8 @@ struct UnixTimestampParseFunction : public UnixTimestampFunctionBase<T> {
   FOLLY_ALWAYS_INLINE void call(
       int64_t& result,
       const arg_type<Timestamp>& input) {
-    DateTimeResultValue dateTimeResult{input};
-    result = this->getResultInGMT(dateTimeResult);
+    result =
+        input.getSeconds() + (input.getSeconds() < 0 && input.getNanos() != 0);
   }
 };
 
@@ -564,38 +588,20 @@ struct UnixTimestampParseWithFormatFunction
       const arg_type<Date>* /*input*/,
       const arg_type<Varchar>* format) {
     this->template initializeInternal<arg_type<Varchar>>(
-        config, format, nullptr);
+        config, nullptr, nullptr);
   }
 
   FOLLY_ALWAYS_INLINE bool call(
       int64_t& result,
       const arg_type<Varchar>& input,
       const arg_type<Varchar>& format) {
-    if (this->invalidFormat_) {
+    Timestamp timestamp;
+    if (!this->parseTimestamp(input, format, timestamp)) {
       return false;
     }
-
-    // Format error returns null.
-    if (!this->isConstFormat_) {
-      this->format_ = this->createFormatter(&format);
-      if (this->format_ == nullptr) {
-        return false;
-      }
-    }
-
-    auto dateTimeResult = this->format_->parse(
-        std::string_view(input.data(), input.size()), this->timeParserPolicy);
-    if (dateTimeResult.hasError()) {
-      if (this->timeParserPolicy == TimePolicy::EXCEPTION) {
-        std::string msg = fmt::format(
-            "parse timestamp failed, input: {}, format: {}",
-            std::string_view(input.data(), input.size()),
-            std::string_view(format.data(), format.size()));
-        dateTimeResult.throwExceptionIfErrorOccurs(msg);
-      }
-      return false;
-    }
-    return this->getResultInGMT(dateTimeResult.value(), result);
+    result = timestamp.getSeconds() +
+        (timestamp.getSeconds() < 0 && timestamp.getNanos() != 0);
+    return true;
   }
 
   FOLLY_ALWAYS_INLINE bool call(
@@ -611,39 +617,7 @@ struct UnixTimestampParseWithFormatFunction
       Timestamp& result,
       const arg_type<Varchar>& input,
       const arg_type<Varchar>& format) {
-    if (this->invalidFormat_) {
-      if (this->timeParserPolicy != TimePolicy::LEGACY) {
-        BOLT_USER_FAIL(
-            "Fail to parse. You may get a different result due to the upgrading of Spark");
-      }
-      return false;
-    }
-
-    // Format or parsing error returns null.
-    if (!this->isConstFormat_) {
-      this->format_ = this->createFormatter(&format);
-      if (this->format_ == nullptr) {
-        if (this->timeParserPolicy == TimePolicy::EXCEPTION) {
-          BOLT_USER_FAIL("Fail to parse");
-        }
-        return false;
-      }
-    }
-
-    auto dateTimeResult = this->format_->parse(
-        std::string_view(input.data(), input.size()), this->timeParserPolicy);
-    if (dateTimeResult.hasError()) {
-      if (this->timeParserPolicy == TimePolicy::EXCEPTION) {
-        std::string msg = fmt::format(
-            "parse timestamp failed, input: {}, format: {}",
-            std::string_view(input.data(), input.size()),
-            std::string_view(format.data(), format.size()));
-        dateTimeResult.throwExceptionIfErrorOccurs(msg);
-      }
-      return false;
-    }
-
-    return this->getTimestampResultInGMT(dateTimeResult.value(), result);
+    return this->parseTimestamp(input, format, result);
   }
 
   // get_timestamp(date, format)
@@ -676,7 +650,7 @@ struct UnixTimestampParseWithFormatAndTimestampFunction
       const arg_type<Date>* /*input*/,
       const arg_type<Varchar>* format,
       const arg_type<Varchar>* timeZone) {
-    this->initializeInternal(config, format, timeZone);
+    this->initializeInternal(config, nullptr, timeZone);
   }
 
   // get_timestamp(timestamp, format)
@@ -701,7 +675,8 @@ struct UnixTimestampParseWithFormatAndTimestampFunction
     if (input == nullptr) {
       return false;
     }
-    result = input->getSeconds();
+    result = input->getSeconds() +
+        (input->getSeconds() < 0 && input->getNanos() != 0);
     return true;
   }
   // get_timestamp(timestamp, format)
@@ -724,7 +699,8 @@ struct UnixTimestampParseWithFormatAndTimestampFunction
     if (input == nullptr) {
       return false;
     }
-    result = input->getSeconds();
+    result = input->getSeconds() +
+        (input->getSeconds() < 0 && input->getNanos() != 0);
     return true;
   }
 
@@ -822,10 +798,8 @@ struct GetTimestampFunction {
         formatter_ = buildLegacySparkDateTimeFormatter(
             std::string_view(format->data(), format->size()));
       } else {
-        // Use Joda formatter for other policies.
-
         ensureFormatLegal(std::string_view(format->data(), format->size()));
-        formatter_ = buildJodaDateTimeFormatter(
+        formatter_ = buildSparkDateTimeFormatter(
             std::string_view(format->data(), format->size()));
       }
       isConstantTimeFormat_ = true;
@@ -841,10 +815,8 @@ struct GetTimestampFunction {
         formatter_ = buildLegacySparkDateTimeFormatter(
             std::string_view(format.data(), format.size()));
       } else {
-        // Use Joda formatter for other policies.
-
         ensureFormatLegal(std::string_view(format->data(), format->size()));
-        formatter_ = buildJodaDateTimeFormatter(
+        formatter_ = buildSparkDateTimeFormatter(
             std::string_view(format.data(), format.size()));
       }
     }
@@ -1338,9 +1310,9 @@ template <typename T>
 struct FromUnixtimeFunction : public InitSessionTimezone<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
   const tz::TimeZone* sessionTimeZone_ = nullptr;
+  std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
-  int64_t sessionTzOffsetInSeconds_{0};
   uint32_t maxResultSize_{0};
   bool throwExceptionWhenEncounterBadTimestamp_;
   const char* badTimestampResult_ = "-12345678";
@@ -1348,42 +1320,16 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
   TimePolicy timePolicy_{TimePolicy::CORRECTED};
 
   FOLLY_ALWAYS_INLINE void initialize(
-      const std::vector<TypePtr>& /*inputTypes*/,
+      const std::vector<TypePtr>& inputTypes,
       const core::QueryConfig& config,
-      const arg_type<int64_t>* /*unixtime*/,
+      const arg_type<int64_t>* unixtime,
       const arg_type<Varchar>* formatString,
       const arg_type<Varchar>* timeZoneString) {
-    timePolicy_ = parseTimePolicy(config.timeParserPolicy());
     BOLT_CHECK(timeZoneString);
-
-    throwExceptionWhenEncounterBadTimestamp_ =
-        config.throwExceptionWhenEncounterBadTimestamp();
-    int16_t tzID = tz::getTimeZoneID(std::string_view(*timeZoneString));
-    // time zone like '+00:00'.
-    if (tzID == 0) {
-      return;
-    } else if (tzID <= tz::kMaxFixedOffsetTimeZoneId) {
-      this->sessionTzOffsetInSeconds_ = getPrestoTZOffsetInSeconds(tzID);
-      return;
-    } else { // time zone like 'Asia/Shanghai'
-      sessionTimeZone_ = tz::locateZone(
-          std::string_view(timeZoneString->data(), timeZoneString->size()));
-      BOLT_CHECK(sessionTimeZone_);
-    }
-
-    if (formatString) {
-      if (this->timePolicy_ == TimePolicy::LEGACY) {
-        jodaDateTime_ = buildLegacySparkDateTimeFormatter(
-            std::string_view(formatString->data(), formatString->size()));
-      } else {
-        ensureFormatLegal(
-            std::string_view(formatString->data(), formatString->size()));
-        // Use Joda formatter for other policies.
-        jodaDateTime_ = buildJodaDateTimeFormatter(
-            std::string_view(formatString->data(), formatString->size()));
-      }
+    initialize(inputTypes, config, unixtime, formatString);
+    sessionTimeZone_ = tz::locateZone(std::string_view(*timeZoneString));
+    if (jodaDateTime_) {
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
-      isConstFormat_ = true;
     }
   }
 
@@ -1393,6 +1339,9 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
       const arg_type<int64_t>* /*unixtime*/,
       const arg_type<Varchar>* formatString) {
     timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+    if (timePolicy_ == TimePolicy::LEGACY) {
+      formatterContext_ = getDateTimeFormatterContext(config);
+    }
 
     throwExceptionWhenEncounterBadTimestamp_ =
         config.throwExceptionWhenEncounterBadTimestamp();
@@ -1400,14 +1349,12 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
     if (formatString != nullptr) {
       if (this->timePolicy_ == TimePolicy::LEGACY) {
         jodaDateTime_ = buildLegacySparkDateTimeFormatter(
-            std::string_view(formatString->data(), formatString->size()));
+            std::string_view(formatString->data(), formatString->size()),
+            formatterContext_);
       } else {
-        // Use Joda formatter for other policies.
-
-        ensureFormatLegal(
-            std::string_view(formatString->data(), formatString->size()));
-        jodaDateTime_ = buildJodaDateTimeFormatter(
-            std::string_view(formatString->data(), formatString->size()));
+        jodaDateTime_ = buildSparkDateTimeFormatter(
+            std::string_view(formatString->data(), formatString->size()),
+            false);
       }
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
       isConstFormat_ = true;
@@ -1429,19 +1376,18 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
     if (!isConstFormat_) {
       if (this->timePolicy_ == TimePolicy::LEGACY) {
         jodaDateTime_ = buildLegacySparkDateTimeFormatter(
-            std::string_view(formatString.data(), formatString.size()));
+            std::string_view(formatString.data(), formatString.size()),
+            formatterContext_);
       } else {
-        // Use Joda formatter for other policies.
-        ensureFormatLegal(
-            std::string_view(formatString.data(), formatString.size()));
-        jodaDateTime_ = buildJodaDateTimeFormatter(
-            std::string_view(formatString.data(), formatString.size()));
+        jodaDateTime_ = buildSparkDateTimeFormatter(
+            std::string_view(formatString.data(), formatString.size()), false);
       }
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
     }
     try {
-      auto unixtimeD = unixtime + this->sessionTzOffsetInSeconds_;
-      const Timestamp timestamp{unixtimeD, 0};
+      const auto micros =
+          std::bit_cast<int64_t>(static_cast<uint64_t>(unixtime) * 1'000'000);
+      const auto timestamp = Timestamp::fromMicros(micros);
       result.reserve(maxResultSize_);
       const auto resultSize = jodaDateTime_->format(
           timestamp,

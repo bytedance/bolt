@@ -36,8 +36,7 @@
 namespace bytedance::bolt::functions::sparksql {
 namespace {
 template <typename T>
-using BuildJodaDateFormatFunction =
-    JodaDateFormatFunction<T, ::bytedance::bolt::kSparkCompatible>;
+using BuildJodaDateFormatFunction = JodaDateFormatFunction<T, true>;
 } // namespace
 
 void registerDatetimeFunctions(const std::string& prefix) {

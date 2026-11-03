@@ -604,6 +604,22 @@ class QueryConfig {
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
 
+  /// Default zone used when resolving ambiguous SimpleDateFormat zone names.
+  static constexpr const char* kDateTimeFormatterDefaultTimezone =
+      "date_time_formatter_default_timezone";
+  /// Zone used for hybrid/Gregorian calendar conversion, if different from the
+  /// formatter's zone. The caller selects this from its runtime semantics.
+  static constexpr const char* kDateTimeFormatterRebaseTimezone =
+      "date_time_formatter_rebase_timezone";
+  /// Both values describe the SimpleDateFormat window captured by the caller.
+  static constexpr const char* kSparkLegacyTimestampParserPivotMillis =
+      "spark.legacy_timestamp_parser_pivot_millis";
+  static constexpr const char* kSparkLegacyTimestampParserPivotYear =
+      "spark.legacy_timestamp_parser_pivot_year";
+  /// Semicolon-separated zone=seconds entries for Java TimeZone raw offsets.
+  static constexpr const char* kSparkLegacyTimestampParserTimezoneRawOffsets =
+      "spark.legacy_timestamp_parser_timezone_raw_offsets";
+
   /// If true, base64() chunks its output into 76-character lines separated by
   /// CRLF; if false, it returns a single unchunked string. Mirrors
   /// spark.sql.chunkBase64String.enabled (added in Spark 3.5.2, default true

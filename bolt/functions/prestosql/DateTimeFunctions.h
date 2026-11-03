@@ -1601,6 +1601,7 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
   const tz::TimeZone* sessionTimeZone_ = nullptr;
+  std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
   uint32_t maxResultSize_{0};
@@ -1610,12 +1611,16 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
     if (formatString != nullptr) {
       if (timePolicy_ == TimePolicy::LEGACY) {
         jodaDateTime_ = buildLegacySparkDateTimeFormatter(
-            std::string_view(formatString->data(), formatString->size()));
+            std::string_view(formatString->data(), formatString->size()),
+            formatterContext_);
+      } else if constexpr (SparkCompatible) {
+        jodaDateTime_ = buildSparkDateTimeFormatter(
+            std::string_view(formatString->data(), formatString->size()),
+            false);
       } else {
         jodaDateTime_ = buildJodaDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()));
       }
-      isConstFormat_ = true;
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
     }
   }
@@ -1628,11 +1633,15 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
     sessionTimeZone_ = getTimeZoneFromConfig(config);
     if constexpr (SparkCompatible) {
       timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+      if (timePolicy_ == TimePolicy::LEGACY) {
+        formatterContext_ = getDateTimeFormatterContext(config);
+      }
     } else if (formatString != nullptr) {
       ensureFormatLegal(
           std::string_view(formatString->data(), formatString->size()));
     }
     setFormatter(formatString);
+    isConstFormat_ = formatString != nullptr;
   }
 
   FOLLY_ALWAYS_INLINE void initialize(
@@ -1642,11 +1651,15 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<Varchar>* formatString) {
     if constexpr (SparkCompatible) {
       timePolicy_ = parseTimePolicy(config.timeParserPolicy());
+      if (timePolicy_ == TimePolicy::LEGACY) {
+        formatterContext_ = getDateTimeFormatterContext(config);
+      }
     } else if (formatString != nullptr) {
       ensureFormatLegal(
           std::string_view(formatString->data(), formatString->size()));
     }
     setFormatter(formatString);
+    isConstFormat_ = formatString != nullptr;
   }
 
   FOLLY_ALWAYS_INLINE bool call(

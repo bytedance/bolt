@@ -322,7 +322,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestamp) {
   EXPECT_EQ(std::nullopt, unixTimestamp("malformed input"));
 
   setQueryTimeZone("Asia/Shanghai");
-  EXPECT_EQ(-2177481944, unixTimestamp("1900-12-31 23:59:59"));
+  EXPECT_EQ(-2177481601, unixTimestamp("1900-12-31 23:59:59"));
   EXPECT_EQ(-2177481600, unixTimestamp("1901-01-01 00:00:00"));
   // daylight saving time
   EXPECT_EQ(675702000, unixTimestamp("1991-06-01 00:00:00"));
@@ -630,12 +630,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormat) {
   EXPECT_EQ(-31536000, unixTimestamp("1969", "yyyy"));
   EXPECT_EQ(86400, unixTimestamp("1970-01-02", "yyyy-MM-dd"));
   EXPECT_EQ(86410, unixTimestamp("1970-01-02 00:00:10", "yyyy-MM-dd HH:mm:ss"));
-  // The func unix_timestamp logic in the new version of Spark has changed. When
-  // the input and format are incompatible, the content in the input that has
-  // not been parsed by the format will be ignored. for example, query
-  // `select unix_timestamp("1970-01-01 00:00", "yyyy-MM-dd")` returns -28800,
-  //  which is equal to `select unix_timestamp("1970-01-01", "yyyy-MM-dd")`,
-  // instead of NULL
+  // LEGACY permits unconsumed input after a complete match.
   EXPECT_EQ(
       unixTimestamp("1970-01-02", "yyyy-MM-dd"),
       unixTimestamp("1970-01-02 00:00:10", "yyyy-MM-dd"));
@@ -657,10 +652,9 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormat) {
       1670831131,
       unixTimestamp("2022-12-12 asd 07:45:31", "yyyy-MM-dd 'asd' HH:mm:ss"));
 
-  // Invalid format returns null (unclosed quoted literal).
-  EXPECT_EQ(
-      std::nullopt,
-      unixTimestamp("2022-12-12 asd 07:45:31", "yyyy-MM-dd 'asd HH:mm:ss"));
+  BOLT_ASSERT_THROW(
+      unixTimestamp("2022-12-12 asd 07:45:31", "yyyy-MM-dd 'asd HH:mm:ss"),
+      "No closing single quote");
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampInDstGapReturnsNull) {
@@ -701,9 +695,9 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampDefaultFormatDstGap) {
       }),
       {
           671565599,
-          std::nullopt,
+          671567400,
           671565600,
-          std::nullopt,
+          -62198784343LL,
       });
 
   setPolicyAndTimeZone("corrected", "America/Los_Angeles");
@@ -797,30 +791,30 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampSparkMicrosOverflow) {
   setPolicyAndTimeZone("corrected", "UTC");
   EXPECT_EQ(
       9223372036854,
-      unixTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"));
+      unixTimestamp("+294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"));
   EXPECT_EQ(
       9223372008054,
-      unixTimestamp("294247-01-10 04:00:54 +0800", "yyyy-MM-dd HH:mm:ss Z"));
+      unixTimestamp("+294247-01-10 04:00:54 +0800", "yyyy-MM-dd HH:mm:ss Z"));
   BOLT_ASSERT_THROW(
-      unixTimestamp("294247-01-10 04:00:54 -0800", "yyyy-MM-dd HH:mm:ss Z"),
+      unixTimestamp("+294247-01-10 04:00:54 -0800", "yyyy-MM-dd HH:mm:ss Z"),
       "long overflow");
 
   EXPECT_EQ(
       Timestamp(9223372036854, 0),
-      getTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"));
+      getTimestamp("+294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"));
   EXPECT_EQ(
       Timestamp(9223372008054, 0),
-      getTimestamp("294247-01-10 04:00:54 +0800", "yyyy-MM-dd HH:mm:ss Z"));
+      getTimestamp("+294247-01-10 04:00:54 +0800", "yyyy-MM-dd HH:mm:ss Z"));
   BOLT_ASSERT_THROW(
-      getTimestamp("294247-01-10 04:00:54 -0800", "yyyy-MM-dd HH:mm:ss Z"),
+      getTimestamp("+294247-01-10 04:00:54 -0800", "yyyy-MM-dd HH:mm:ss Z"),
       "long overflow");
 
   setPolicyAndTimeZone("corrected", "America/Los_Angeles");
   BOLT_ASSERT_THROW(
-      unixTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"),
+      unixTimestamp("+294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"),
       "long overflow");
   BOLT_ASSERT_THROW(
-      getTimestamp("294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"),
+      getTimestamp("+294247-01-10 04:00:54", "yyyy-MM-dd HH:mm:ss"),
       "long overflow");
 }
 
@@ -832,8 +826,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampOutOfRangeYears) {
       makeRowVector({makeFlatVector<std::string>({
           "0001-01-01 00:00:00",
           "9999-12-31 23:59:59",
-          "10000-01-01 00:00:00",
-          "40000-01-01 00:00:00",
+          "+10000-01-01 00:00:00",
+          "+40000-01-01 00:00:00",
           "-0001-01-01 00:00:00",
           "-40000-01-01 00:00:00",
       })}));
@@ -845,7 +839,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampOutOfRangeYears) {
           253402271999,
           253402272000,
           1200110832000,
-          std::nullopt,
+          -62198784343LL,
           std::nullopt,
       });
 }
@@ -870,8 +864,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestampDstGapSparkCompatibility) {
           "yyyy-MM-dd HH:mm:ss"),
       {
           Timestamp(671565599, 0),
-          std::nullopt,
-          std::nullopt,
+          Timestamp(671565600, 0),
+          Timestamp(671567400, 0),
           Timestamp(671565600, 0),
       });
 
@@ -937,8 +931,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestampDstGapSparkCompatibility) {
           {
               "0001-01-01 00:00:00",
               "9999-12-31 23:59:59",
-              "10000-01-01 00:00:00",
-              "40000-01-01 00:00:00",
+              "+10000-01-01 00:00:00",
+              "+40000-01-01 00:00:00",
               "-0001-01-01 00:00:00",
               "-40000-01-01 00:00:00",
           },
@@ -948,7 +942,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestampDstGapSparkCompatibility) {
           Timestamp(253402271999, 0),
           Timestamp(253402272000, 0),
           Timestamp(1200110832000, 0),
-          std::nullopt,
+          Timestamp(-62198784343LL, 0),
           std::nullopt,
       });
 }
@@ -1009,7 +1003,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormatTimeZone) {
         fmt::format("unix_timestamp(c0, '{}', '{}')", format, timezone), ts);
   };
 
-  setQueryTimeZone("Asia/Shanghai");
+  setPolicyAndTimeZone("corrected", "Asia/Shanghai");
 
   EXPECT_EQ(
       0,
@@ -1036,15 +1030,12 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormatTimeZone) {
       unixTimestamp(
           "1900-12-31 23:59:59", "yyyy-MM-dd HH:mm:ss", "Asia/Shanghai"));
 
-  // format with different timezone
-  // current yyyy-MM-ddTHH:mm:ss.SSZZ  is not support, since Specifier T is not
-  // supported. // TODO to be supported
-  const std::string ISO_8601_DATE_FORMAT = "yyyy-MM-dd HH:mm:ss.SSZZ";
+  const std::string ISO_8601_DATE_FORMAT = "yyyy-MM-dd HH:mm:ss.SSXXX";
   std::string isoTime = "1970-01-01 05:30:01.00+05:30";
   EXPECT_EQ(1, unixTimestamp(isoTime, ISO_8601_DATE_FORMAT, "Asia/Shanghai"));
 
   // Change timezone to "Asia/Kolkata"  +5:30
-  setQueryTimeZone("Asia/Kolkata");
+  setPolicyAndTimeZone("corrected", "Asia/Kolkata");
   EXPECT_EQ(
       0,
       unixTimestamp(
@@ -1053,7 +1044,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampCustomFormatTimeZone) {
   // https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
   // Change to 	America/Toronto  −05:00	−04:00	EST	EDT
   // but how about CDT ?
-  setQueryTimeZone("America/Toronto");
+  setPolicyAndTimeZone("corrected", "America/Toronto");
   EXPECT_EQ(
       5 * 3600,
       unixTimestamp(
@@ -1936,11 +1927,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestamp) {
   setTimeParserPolicy("exception");
   // Invalid date format.
   BOLT_ASSERT_THROW(
-      getTimestamp("2020/01/24", "AA/MM/dd"),
-      "Fail to parse. You may get a different result due to the upgrading of Spark");
+      getTimestamp("2020/01/24", "AA/MM/dd"), "Illegal pattern character: A");
   BOLT_ASSERT_THROW(
       getTimestamp("2023-07-13 21:34", "yyyy-MM-dd HH:II"),
-      "Fail to parse. You may get a different result due to the upgrading of Spark");
+      "Specifier I is not supported");
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, longToTimestamp) {
@@ -2165,10 +2155,9 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtime) {
   }
 
   // Invalid format.
+  BOLT_ASSERT_THROW(fromUnixTime(0, "yyyy-AA"), "Illegal pattern character: A");
   BOLT_ASSERT_THROW(
-      fromUnixTime(0, "yyyy-AA"), "Specifier A is not supported.");
-  BOLT_ASSERT_THROW(
-      fromUnixTime(0, "yyyy-MM-dd HH:II"), "Specifier I is not supported");
+      fromUnixTime(0, "yyyy-MM-dd HH:II"), "Illegal pattern character: I");
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeIllegal) {
@@ -2202,8 +2191,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, CastStringToLargeTimestamp) {
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkParity) {
-  const std::string correctedPrefix =
-      ::bytedance::bolt::kSparkCompatible ? "+" : "";
+  const std::string correctedPrefix = "+";
   auto fromUnixTime = [&](int64_t unixTime) {
     return evaluateOnce<std::string>(
                "from_unixtime(c0, 'yyyy-MM-dd HH:mm:ss')",
@@ -2344,10 +2332,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
 
   setTimeParserPolicy("corrected");
   for (const auto& c : cases) {
-    // Non-SPARK_COMPATIBLE builds never print '+', matching the legacy text.
-    EXPECT_EQ(
-        fromUnixTime(c.unixTime, c.timeZone),
-        ::bytedance::bolt::kSparkCompatible ? c.corrected : c.legacy)
+    EXPECT_EQ(fromUnixTime(c.unixTime, c.timeZone), c.corrected)
         << c.unixTime << " @ " << c.timeZone;
   }
 
@@ -2359,7 +2344,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeLargeValuesSparkTimezone) {
   resetQueryConfig();
 }
 
-TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
+TEST_F(SparkSqlDateTimeFunctionsTest, fromUnixtimeRejectsWeekYear) {
+  setTimeParserPolicy("corrected");
   const auto fromUnixTime = [&](const std::optional<std::string>& unixTime,
                                 const std::optional<std::string>& timeFormat) {
     return evaluateOnce<std::string>(
@@ -2387,6 +2373,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, FromUnixtimeYYYYThrowError) {
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
+  setTimeParserPolicy("corrected");
   using util::fromTimestampString;
 
   const auto dateFormat = [&](std::optional<Timestamp> timestamp,
@@ -2431,12 +2418,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, jodaDateFormatDefaultCompatibility) {
   const Timestamp* timestamp = nullptr;
   JodaDateFormatFunction<exec::VectorExec> function;
 
-  if (::bytedance::bolt::kSparkCompatible) {
-    EXPECT_NO_THROW(function.initialize({}, config, timestamp, &format));
-  } else {
-    EXPECT_THROW(
-        function.initialize({}, config, timestamp, &format), BoltUserError);
-  }
+  EXPECT_THROW(
+      function.initialize({}, config, timestamp, &format), BoltUserError);
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, weekBased) {
@@ -2460,8 +2443,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, weekBased) {
   };
 
   setTimeParserPolicy("legacy");
-  // YYYY should not used with MM
-  EXPECT_THROW(dateFormat("1970-01-01", "YYYY-MM-dd"), BoltUserError);
+  EXPECT_EQ("1970-01-01", dateFormat("1970-01-01", "YYYY-MM-dd"));
 
   // YYYY-ww-uu
   EXPECT_EQ("2024-52-06", dateFormat("2024-12-28", "YYYY-ww-uu"));
@@ -2513,8 +2495,7 @@ TEST_F(SparkSqlDateTimeFunctionsTest, weekBased) {
         ->toString(options);
   };
 
-  // YYYY should not used with MM
-  EXPECT_THROW(getTimestamp("1970-01-01", "YYYY-MM-dd"), BoltUserError);
+  EXPECT_EQ("1969-12-28", getTimestamp("1970-01-01", "YYYY-MM-dd"));
 
   // YYYY-ww-uu
   EXPECT_EQ("2024-12-28", getTimestamp("2024-52-06", "YYYY-ww-uu"));
@@ -3451,5 +3432,137 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFromUnixDate) {
   EXPECT_EQ(parseDate("5881580-07-11"), dateFromUnixDate(kMax));
   EXPECT_EQ(parseDate("-5877641-06-23"), dateFromUnixDate(kMin));
 }
+TEST_F(SparkSqlDateTimeFunctionsTest, timestampParserContext) {
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kTimeParserPolicy, "legacy"},
+       {core::QueryConfig::kSessionTimezone, "UTC"},
+       {core::QueryConfig::kAdjustTimestampToTimezone, "true"},
+       {core::QueryConfig::kDateTimeFormatterDefaultTimezone, "Asia/Shanghai"},
+       {core::QueryConfig::kDateTimeFormatterRebaseTimezone, "Asia/Shanghai"},
+       {core::QueryConfig::kSparkLegacyTimestampParserPivotMillis,
+        "946657800000"},
+       {core::QueryConfig::kSparkLegacyTimestampParserPivotYear, "2000"},
+       {core::QueryConfig::kSparkLegacyTimestampParserTimezoneRawOffsets,
+        "Asia/Shanghai=28800;America/Chicago=-21600"}});
+  EXPECT_EQ(
+      1704038400,
+      evaluateOnce<int64_t>(
+          "unix_timestamp(c0,'yyyy-MM-dd HH:mm:ss z')",
+          std::optional<std::string>("2024-01-01 00:00:00 CST")));
+  EXPECT_EQ(
+      4102441200,
+      evaluateOnce<int64_t>(
+          "unix_timestamp(c0,'yy-MM-dd HH:mm:ss')",
+          std::optional<std::string>("99-12-31 23:00:00")));
+  EXPECT_EQ(
+      -14826758743LL,
+      evaluateOnce<int64_t>(
+          "unix_timestamp(c0)",
+          std::optional<std::string>("1500-02-28 00:00:00")));
+  EXPECT_EQ(
+      "1500-02-28 00:00:00",
+      evaluateOnce<std::string>(
+          "from_unixtime(c0,'yyyy-MM-dd HH:mm:ss')",
+          std::optional<int64_t>(-14826758743LL)));
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, timestampParserContextValidation) {
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kTimeParserPolicy, "legacy"},
+       {core::QueryConfig::kSparkLegacyTimestampParserPivotMillis, "0"}});
+  BOLT_ASSERT_THROW(
+      evaluateOnce<int64_t>(
+          "unix_timestamp(c0)",
+          std::optional<std::string>("2000-01-01 00:00:00")),
+      "Both timestamp parser pivot");
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kTimeParserPolicy, "legacy"},
+       {core::QueryConfig::kSparkLegacyTimestampParserTimezoneRawOffsets,
+        "Asia/Shanghai=28800junk"}});
+  BOLT_ASSERT_THROW(
+      evaluateOnce<int64_t>(
+          "unix_timestamp(c0)",
+          std::optional<std::string>("2000-01-01 00:00:00")),
+      "Invalid timestamp parser raw offset");
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, javaTimestampPatterns) {
+  setPolicyAndTimeZone("corrected", "UTC");
+  EXPECT_EQ(
+      Timestamp(4070995200LL, 0),
+      evaluateOnce<Timestamp>(
+          "get_timestamp(c0,'yy-MM-dd')",
+          std::optional<std::string>("99-01-02")));
+  EXPECT_EQ(
+      Timestamp(86400, 0),
+      evaluateOnce<Timestamp>(
+          "get_timestamp(c0,'MM-dd')", std::optional<std::string>("01-02")));
+  EXPECT_EQ(
+      Timestamp(1577923200, 0),
+      evaluateOnce<Timestamp>(
+          "get_timestamp(c0,'yyyy-MMMM-dd')",
+          std::optional<std::string>("2020-jAnUaRy-02")));
+  EXPECT_EQ(
+      std::nullopt,
+      evaluateOnce<Timestamp>(
+          "get_timestamp(c0,'yyyy-MM-dd')",
+          std::optional<std::string>("2020-02-30")));
+  setPolicyAndTimeZone("exception", "UTC");
+  BOLT_ASSERT_THROW(
+      evaluateOnce<Timestamp>(
+          "get_timestamp(c0,'yyyy-MM-dd')",
+          std::optional<std::string>("2020-1-2")),
+      "upgrading of Spark");
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampPrecisionAndOverflow) {
+  for (const auto* policy : {"legacy", "corrected"}) {
+    setPolicyAndTimeZone(policy, "UTC");
+    EXPECT_EQ(
+        0,
+        evaluateOnce<int64_t>(
+            "unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ss.SSS')",
+            std::optional<std::string>("1969-12-31 23:59:59.999")));
+    EXPECT_EQ(
+        0,
+        evaluateOnce<int64_t>(
+            "unix_timestamp(c0)",
+            std::optional<Timestamp>(Timestamp(-1, 999999000))));
+    EXPECT_EQ(
+        -1,
+        evaluateOnce<int64_t>(
+            "unix_timestamp(c0)", std::optional<Timestamp>(Timestamp(-1, 0))));
+    EXPECT_EQ(
+        std::string_view(policy) == "legacy" ? "151727-12-17" : "-151726-12-17",
+        evaluateOnce<std::string>(
+            "from_unixtime(c0, 'yyyy-MM-dd')",
+            std::optional<int64_t>(20231228101858000LL)));
+  }
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, fixedZoneAndDynamicFormats) {
+  for (const auto* policy : {"legacy", "corrected"}) {
+    setPolicyAndTimeZone(policy, "UTC");
+    EXPECT_EQ(
+        "1970-01-01 05:30:00 +05:30",
+        evaluateOnce<std::string>(
+            "from_unixtime(c0,'yyyy-MM-dd HH:mm:ss XXX','+05:30')",
+            std::optional<int64_t>(0)));
+    EXPECT_EQ(
+        "1970-01-01 00:00:00 Z",
+        evaluateOnce<std::string>(
+            "from_unixtime(c0,'yyyy-MM-dd HH:mm:ss XXX','UTC')",
+            std::optional<int64_t>(0)));
+    auto data = makeRowVector(
+        {makeFlatVector<Timestamp>(
+             {Timestamp(0, 0), Timestamp(0, 0), Timestamp(0, 0)}),
+         makeFlatVector<std::string>({"yyyy", "MM", "yyyy-MM-dd"})});
+    auto result =
+        evaluate<SimpleVector<StringView>>("date_format(c0,c1)", data);
+    bytedance::bolt::test::assertEqualVectors(
+        makeFlatVector<std::string>({"1970", "01", "1970-01-01"}), result);
+  }
+}
+
 } // namespace
 } // namespace bytedance::bolt::functions::sparksql::test

@@ -30,13 +30,39 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/type/Timestamp.h"
 namespace bytedance::bolt::functions {
 
-enum class DateTimeFormatterType { JODA, MYSQL, HIVE, LEGACY_SPARK, UNKNOWN };
+enum class DateTimeFormatterType {
+  JODA,
+  MYSQL,
+  HIVE,
+  JAVA_TIME,
+  SIMPLE_DATE_FORMAT,
+  LEGACY_SPARK = SIMPLE_DATE_FORMAT,
+  UNKNOWN
+};
+
+struct DateTimeFormatterContext {
+  const tz::TimeZone* defaultTimezone{nullptr};
+  const tz::TimeZone* rebaseTimezone{nullptr};
+  std::optional<Timestamp> twoDigitYearStart;
+  std::optional<int32_t> twoDigitYearStartYear;
+  std::unordered_map<int16_t, int32_t> timezoneRawOffsets;
+};
+
+struct DateTimeParseOptions {
+  bool strict{false};
+  bool caseSensitive{true};
+  bool variableFraction{false};
+  // When false, interpret y as a proleptic year unless an era is present.
+  bool yearOfEra{true};
+};
 
 enum class DateTimeFormatSpecifier : uint8_t {
   // Era, e.g: "AD"
@@ -119,6 +145,10 @@ enum class DateTimeFormatSpecifier : uint8_t {
 
   // day of week in month (e.g., 2 means the 2nd Wednesday of the month)
   DAY_OF_WEEK_IN_MONTH = 25,
+  TIMEZONE_ID = 26,
+  TIMEZONE_OFFSET_ISO8601 = 27,
+  TIMEZONE_OFFSET_ISO8601_NO_Z = 28,
+  TIMEZONE_OFFSET_RFC822 = 29,
 };
 
 enum struct TimePolicy { CORRECTED, LEGACY, EXCEPTION };
@@ -265,6 +295,22 @@ class DateTimeResult {
   DateTimeResult(Timestamp timestamp, int64_t timezoneId)
       : value_{timestamp, timezoneId}, errorCode_(ErrorCode::NO_ERROR) {}
 
+  DateTimeResult(
+      Timestamp timestamp,
+      int64_t timezoneId,
+      std::optional<int32_t> offsetSeconds)
+      : value_{timestamp, timezoneId},
+        errorCode_(ErrorCode::NO_ERROR),
+        hasOffset_(offsetSeconds.has_value()),
+        offsetSeconds_(offsetSeconds.value_or(0)) {}
+
+  /// Numeric offset in the Java dialect. It can have second precision or
+  /// exceed the timezoneId table's range.
+  std::optional<int32_t> timezoneOffsetSeconds() const {
+    throwExceptionIfErrorOccurs();
+    return hasOffset_ ? std::optional<int32_t>(offsetSeconds_) : std::nullopt;
+  }
+
   DateTimeResult(ErrorCode errorCode) : errorCode_(errorCode) {
     BOLT_CHECK(errorCode != ErrorCode::NO_ERROR);
   }
@@ -296,6 +342,8 @@ class DateTimeResult {
  private:
   DateTimeResultValue value_;
   ErrorCode errorCode_;
+  bool hasOffset_{false};
+  int32_t offsetSeconds_{0};
 };
 
 /// A user defined formatter that formats/parses time to/from user provided
@@ -315,7 +363,8 @@ class DateTimeFormatter {
         tokens_(std::move(tokens)),
         type_(type) {
     for (const auto& token : tokens_) {
-      if (token.pattern.specifier == DateTimeFormatSpecifier::ERA) {
+      if (token.type == DateTimeToken::Type::kPattern &&
+          token.pattern.specifier == DateTimeFormatSpecifier::ERA) {
         hasEra_ = true;
         break;
       }
@@ -336,9 +385,23 @@ class DateTimeFormatter {
 
   DateTimeResult parse(const std::string_view& input) const;
 
+  /// Applies the parsed offset or zone, falling back to the supplied zone.
+  /// SimpleDateFormat selects the later overlap and shifts gaps forward.
+  /// Ambiguous names prefer the supplied zone. LEGACY rebases the result
+  /// from the hybrid calendar to the proleptic Gregorian calendar.
+  DateTimeResult parseToUtc(
+      const std::string_view& input,
+      const tz::TimeZone* timezone,
+      TimePolicy timePolicy = TimePolicy::CORRECTED) const;
+
   DateTimeResult parse(
       const std::string_view& input,
       const TimePolicy timeParserPolicy) const;
+
+  /// Parses fractional seconds without reducing their precision to
+  /// microseconds.
+  DateTimeResult parseWithNanosecondPrecision(
+      const std::string_view& input) const;
 
   /// Returns max size of the formatted string. Can be used to preallocate
   /// memory before calling format() to avoid extra copy.
@@ -355,11 +418,34 @@ class DateTimeFormatter {
       const std::optional<std::string>& zeroOffsetText = std::nullopt) const;
 
  private:
+  friend std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
+      const std::string_view& format,
+      std::optional<Timestamp> twoDigitYearStart,
+      bool lenient,
+      std::shared_ptr<const DateTimeFormatterContext> context);
+
+  friend std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
+      const std::string_view& format,
+      DateTimeParseOptions options);
+
+  DateTimeResult parseSimpleDateFormat(
+      const std::string_view& input,
+      const tz::TimeZone* timezone = nullptr) const;
+
+  template <bool nanosecondPrecision, bool javaTime>
+  DateTimeResult parseImpl(
+      const std::string_view& input,
+      TimePolicy timeParserPolicy) const;
+
   std::unique_ptr<char[]> literalBuf_;
   size_t bufSize_;
   std::vector<DateTimeToken> tokens_;
   bool hasEra_ = false;
+  DateTimeParseOptions parseOptions_;
   DateTimeFormatterType type_;
+  int64_t twoDigitYearStartMillis_{0};
+  int32_t twoDigitYearStartYear_{1970};
+  std::shared_ptr<const DateTimeFormatterContext> context_;
 };
 
 std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(
@@ -368,11 +454,34 @@ std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(
 std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
     const std::string_view& format);
 
+/// Java Time patterns with English text and a default year of 1970.
+/// Strict mode rejects invalid dates; otherwise days are clamped as in SMART.
+std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
+    const std::string_view& format,
+    DateTimeParseOptions options = {});
+
+/// Applies Spark's pattern restrictions and Java Time parsing options.
+std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
+    const std::string_view& format,
+    bool isParsing = true);
+
 std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(
     const std::string_view& format);
 
+/// Java SimpleDateFormat with English text and Sunday-based calendar weeks.
+/// The two-digit year window starts 80 years before construction by default.
+std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
+    const std::string_view& format,
+    std::optional<Timestamp> twoDigitYearStart = std::nullopt,
+    bool lenient = true,
+    std::shared_ptr<const DateTimeFormatterContext> context = nullptr);
+
 std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
     const std::string_view& format);
+
+std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
+    const std::string_view& format,
+    std::shared_ptr<const DateTimeFormatterContext> context);
 
 } // namespace bytedance::bolt::functions
 
