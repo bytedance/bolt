@@ -92,13 +92,15 @@ SparkShuffleReader::SparkShuffleReader(
   if (shuffleReaderOptions_.reuseColumnBuffer) {
     columnBufferPool_ = std::make_shared<ColumnBufferPool>(arrowPool_.get());
   }
-  // Mirror of the writer's choice: Cell when forced, or preferred by an
-  // adaptive choice that did not pick the row-based writer; never without
-  // a pid. A forced other type wins over the preference on both sides.
-  useCellReader_ = supportAdaptiveShuffleWriter(partitioning) &&
-      (shuffleWriterType_ == ShuffleWriterType::Cell ||
-       (shuffleWriterType_ == ShuffleWriterType::Adaptive &&
-        shuffleReaderOptions_.preferCellShuffle && !isRowBased_));
+  // Mirror of the writer's choice, writesCellShuffle(): Cell when forced,
+  // or preferred over a forced V1 or V2 or over an adaptive choice that did
+  // not pick the row-based writer; never without a pid. A forced RowBased
+  // wins over the preference on both sides.
+  useCellReader_ = writesCellShuffle(
+      partitioning,
+      shuffleWriterType_,
+      shuffleReaderOptions_.preferCellShuffle,
+      isRowBased_);
 }
 
 void SparkShuffleReader::init() {

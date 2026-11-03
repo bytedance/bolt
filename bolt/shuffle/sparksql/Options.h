@@ -174,8 +174,9 @@ struct ShuffleReaderOptions {
 
   bool reuseColumnBuffer = kDefaultReuseColumnBuffer;
 
-  // The writer side's preferCellShuffle: an adaptive writer then writes
-  // Cell. Must match the writer.
+  // The writer side's preferCellShuffle: the writer then writes Cell when
+  // adaptive (unless that picks the row-based writer) or forced to V1 or V2
+  // (see writesCellShuffle()). Must match the writer.
   bool preferCellShuffle = false;
 
   // The writer side's CellShuffleOptions::nativeNestedTypes: whether Cell
@@ -235,6 +236,10 @@ struct ShuffleWriterOptions {
   int64_t taskAttemptId = -1;
   int32_t startPartitionId = 0;
   int32_t forceShuffleWriterType = kDefaultForceShuffleWriterType;
+  // Write Cell under a partitioning with a pid: in place of the adaptive
+  // choice, unless that is the row-based writer, and in place of a forced
+  // V1 or V2. A forced RowBased or Cell stays as forced. The readers must
+  // set it alike. See writesCellShuffle().
   bool preferCellShuffle = false;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
@@ -304,6 +309,34 @@ struct ShuffleWriterMetrics {
 inline bool supportAdaptiveShuffleWriter(const Partitioning& partitioning) {
   return partitioning == Partitioning::kRange ||
       partitioning == Partitioning::kHash;
+}
+
+/// Whether the writer writes Cell payloads, which only
+/// SparkShuffleReaderNode reads: the one rule the writer's type choice and
+/// both readers follow. Never without a pid (the writer is V1 there). With
+/// one: a forced Cell always; a forced V1 or V2 when preferCellShuffle is
+/// set, which takes priority over them; a forced RowBased never; the
+/// adaptive choice when preferCellShuffle is set, unless it picked the
+/// row-based writer (`isRowBased`).
+inline bool writesCellShuffle(
+    const Partitioning& partitioning,
+    ShuffleWriterType type,
+    bool preferCellShuffle,
+    bool isRowBased) {
+  if (!supportAdaptiveShuffleWriter(partitioning)) {
+    return false;
+  }
+  switch (type) {
+    case ShuffleWriterType::Cell:
+      return true;
+    case ShuffleWriterType::V1:
+    case ShuffleWriterType::V2:
+      return preferCellShuffle;
+    case ShuffleWriterType::Adaptive:
+      return preferCellShuffle && !isRowBased;
+    default:
+      return false;
+  }
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql

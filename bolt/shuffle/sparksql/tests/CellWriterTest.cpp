@@ -264,6 +264,59 @@ TEST_F(CellWriterTest, factoryPicksTheCellWriter) {
   }
 }
 
+TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
+  // preferCellShuffle takes priority over a forced V1 or V2, not over a
+  // forced RowBased, and never applies without a pid. The readers decide
+  // through writesCellShuffle(), which must agree with the writer the
+  // factory returns.
+  struct Case {
+    Partitioning partitioning;
+    ShuffleWriterType forced;
+    bool prefer;
+    bool cell;
+  };
+  const std::vector<Case> cases{
+      {Partitioning::kHash, ShuffleWriterType::V1, true, true},
+      {Partitioning::kHash, ShuffleWriterType::V2, true, true},
+      {Partitioning::kHash, ShuffleWriterType::RowBased, true, false},
+      {Partitioning::kHash, ShuffleWriterType::V1, false, false},
+      {Partitioning::kHash, ShuffleWriterType::V2, false, false},
+      {Partitioning::kHash, ShuffleWriterType::Adaptive, true, true},
+      {Partitioning::kHash, ShuffleWriterType::Cell, false, true},
+      {Partitioning::kSingle, ShuffleWriterType::Adaptive, true, false},
+      {Partitioning::kSingle, ShuffleWriterType::V1, true, false},
+  };
+  for (const auto& c : cases) {
+    SCOPED_TRACE(fmt::format(
+        "partitioning={} forced={} prefer={}",
+        static_cast<int>(c.partitioning),
+        static_cast<int>(c.forced),
+        c.prefer));
+    auto options =
+        writerOptions(c.partitioning == Partitioning::kSingle ? 1 : 2);
+    options.partitioning = c.partitioning;
+    options.forceShuffleWriterType = static_cast<int32_t>(c.forced);
+    options.preferCellShuffle = c.prefer;
+    auto writer = BoltShuffleWriter::createShuffleWriter(
+        options, 1, 64, 64 * 8, 1 << 20, pool(), arrow::default_memory_pool());
+    ASSERT_NE(writer, nullptr);
+    EXPECT_EQ(
+        dynamic_cast<CellShuffleWriter*>(writer.get()) != nullptr, c.cell);
+    // The readers' mirror: a narrow schema, so the adaptive choice is not
+    // the row-based writer.
+    EXPECT_EQ(
+        writesCellShuffle(
+            c.partitioning,
+            c.forced,
+            c.prefer,
+            /*isRowBased=*/c.forced == ShuffleWriterType::RowBased),
+        c.cell);
+  }
+  // An adaptive choice of the row-based writer stays row-based.
+  EXPECT_FALSE(writesCellShuffle(
+      Partitioning::kHash, ShuffleWriterType::Adaptive, true, true));
+}
+
 TEST_F(CellWriterTest, valuesAtTheirLimits) {
   // Values at the edges of what the format carries read back from every
   // partition, locally and from an RSS client: integers of every bit width
