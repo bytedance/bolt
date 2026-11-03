@@ -94,6 +94,18 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, unixTimestamp) {
   std::string isoTime = "1970-01-01 05:30:01.00+05:30";
   EXPECT_EQ(1, unixTimestamp(isoTime, ISO_8601_DATE_FORMAT, "Asia/Shanghai"));
 
+  for (const auto& [zone, expected] :
+       std::vector<std::pair<std::string, int64_t>>{
+           {"+05:30", 0}, {"Asia/Shanghai", LongMinValue}}) {
+    const auto input = std::string("1970-01-01 05:30:00") + zone;
+    EXPECT_EQ(expected, unixTimestamp(input, "yyyy-MM-dd HH:mm:ssZZZ", "UTC"));
+    EXPECT_EQ(
+        expected,
+        evaluateOnce<int64_t>(
+            "flink_unix_timestamp(c0, 'yyyy-MM-dd HH:mm:ssZZZ', 'UTC')",
+            std::optional<std::string>(input)));
+  }
+
   // Empty or malformed input returns null.
   EXPECT_EQ(
       std::nullopt,

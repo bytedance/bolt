@@ -277,6 +277,14 @@ class DateTimeFormatterBuilder {
   /// represent time zone offset id.
   DateTimeFormatterBuilder& appendTimeZoneOffsetId(size_t minDigits);
 
+  DateTimeFormatterBuilder& appendTimeZoneId();
+
+  DateTimeFormatterBuilder& appendISOTimeZoneOffsetId(
+      size_t minDigits,
+      bool zeroAsZ);
+
+  DateTimeFormatterBuilder& appendRFC822TimeZoneOffsetId(size_t minDigits);
+
   DateTimeFormatterBuilder& appendLiteral(const std::string_view& literal);
 
   DateTimeFormatterBuilder& appendLiteral(

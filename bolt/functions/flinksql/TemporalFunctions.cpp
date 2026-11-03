@@ -474,7 +474,7 @@ struct ToTimestampWithFormatFunction : LegacyTimestampContext {
       const arg_type<Varchar>* /*dateStr*/,
       const arg_type<Varchar>* format) {
     if (format != nullptr) {
-      constFormatter_ = buildJodaDateTimeFormatter(
+      constFormatter_ = buildJavaDateTimeFormatter(
           std::string_view(format->data(), format->size()));
     }
   }
@@ -501,7 +501,7 @@ struct ToTimestampWithFormatFunction : LegacyTimestampContext {
       const auto formatView = std::string_view(format.data(), format.size());
       if (lastFormatter_ == nullptr ||
           std::string_view(lastFormat_) != formatView) {
-        lastFormatter_ = buildJodaDateTimeFormatter(formatView);
+        lastFormatter_ = buildJavaDateTimeFormatter(formatView);
         lastFormat_.assign(formatView.data(), formatView.size());
       }
       fmt = lastFormatter_.get();

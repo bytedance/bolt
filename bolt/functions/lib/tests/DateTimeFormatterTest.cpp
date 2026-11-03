@@ -309,7 +309,13 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
   testTokenRange('z', 1, 4, DateTimeFormatSpecifier::TIMEZONE);
 
   // Z specifier
-  testTokenRange('Z', 1, 4, DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID);
+  testTokenRange('Z', 1, 2, DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID);
+  for (const auto* pattern : {"ZZZ", "ZZZZ"}) {
+    EXPECT_EQ(
+        buildJodaDateTimeFormatter(pattern)->tokens(),
+        std::vector<DateTimeToken>{DateTimeToken(
+            FormatPattern{DateTimeFormatSpecifier::TIMEZONE_ID, 3})});
+  }
 
   // Literal case
   expected = {DateTimeToken(" ")};
@@ -368,8 +374,7 @@ TEST_F(JodaDateTimeFormatterTest, validJodaBuild) {
       DateTimeToken(
           FormatPattern{DateTimeFormatSpecifier::FRACTION_OF_SECOND, 6}),
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::TIMEZONE, 3}),
-      DateTimeToken(
-          FormatPattern{DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID, 3}),
+      DateTimeToken(FormatPattern{DateTimeFormatSpecifier::TIMEZONE_ID, 3}),
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::ERA, 2}),
       DateTimeToken("abcdefghijklmnopqrstuvwxyz"),
       DateTimeToken(FormatPattern{DateTimeFormatSpecifier::HALFDAY_OF_DAY, 2}),
@@ -1199,6 +1204,238 @@ TEST_F(JodaDateTimeFormatterTest, parseTimezoneOffset) {
   EXPECT_THROW(parseTZ("+15", "ZZ"), BoltUserError);
   EXPECT_THROW(parseTZ("+16", "ZZ"), BoltUserError);
   EXPECT_THROW(parseTZ("-16", "ZZ"), BoltUserError);
+}
+
+TEST_F(JodaDateTimeFormatterTest, parseTimeZoneIds) {
+  for (const auto& [name, canonical] :
+       std::vector<std::pair<const char*, const char*>>{
+           {"Asia/Shanghai", "Asia/Shanghai"},
+           {"America/Los_Angeles", "America/Los_Angeles"},
+           {"US/Pacific", "America/Los_Angeles"},
+           {"America/Argentina/ComodRivadavia", "America/Argentina/Catamarca"},
+           {"UTC", "UTC"},
+           {"Etc/UTC", "UTC"},
+           {"GMT", "UTC"},
+           {"Etc/GMT+12", "-12:00"},
+           {"Etc/GMT-14", "+14:00"},
+           {"EST", "-05:00"},
+           {"MST", "-07:00"},
+           {"HST", "-10:00"}}) {
+    SCOPED_TRACE(name);
+    const auto input = std::string(name) + "1970";
+    for (const auto* pattern : {"ZZZyyyy", "ZZZZyyyy"}) {
+      auto formatter = buildJodaDateTimeFormatter(pattern);
+      for (const auto parsed :
+           {formatter->parse(input),
+            formatter->parseWithNanosecondPrecision(input)}) {
+        ASSERT_FALSE(parsed.hasError());
+        EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+        const auto expectedId = tz::getTimeZoneID(canonical);
+        EXPECT_EQ(parsed.value().timezoneId, expectedId);
+      }
+    }
+  }
+  for (const auto* invalid :
+       {"", "Asia/Unknown", "asia/Shanghai", "UTCjunk", "Asia/ShanghaiX"}) {
+    SCOPED_TRACE(invalid);
+    EXPECT_TRUE(buildJodaDateTimeFormatter("ZZZ")->parse(invalid).hasError());
+  }
+  auto longest = buildJodaDateTimeFormatter("ZZZyyyy")->parse("Etc/GMT+11970");
+  ASSERT_FALSE(longest.hasError());
+  EXPECT_EQ(longest.value().timezoneId, tz::getTimeZoneID(-11 * 60));
+  EXPECT_EQ(
+      longest.value().timestamp,
+      Timestamp(util::daysSinceEpochFromDate(970, 1, 1) * 86400, 0));
+  EXPECT_EQ("+05:30", parseTZ("+0530", "ZZZ"));
+  EXPECT_EQ("+00:00", parseTZ("Z", "ZZZ"));
+  EXPECT_TRUE(buildJodaDateTimeFormatter("ZZZ'!'yyyy")
+                  ->parse("Asia/Shanghai?1970")
+                  .hasError());
+}
+
+TEST_F(JodaDateTimeFormatterTest, registeredTimeZoneIds) {
+  const auto formatter = buildJodaDateTimeFormatter("ZZZ'@'yyyy");
+  const auto printer = buildJodaDateTimeFormatter("ZZZ");
+  for (const auto id : tz::getTimeZoneIDs()) {
+    if (id != 0 && id <= tz::kMaxFixedOffsetTimeZoneId) {
+      continue;
+    }
+    const auto& name = tz::locateZone(id)->name();
+    SCOPED_TRACE(name);
+    auto parsed = formatter->parse(name + "@1970");
+    ASSERT_FALSE(parsed.hasError());
+    const auto* zone = tz::locateZone(id);
+    std::string canonical(printer->maxResultSize(zone), '\0');
+    canonical.resize(printer->format(
+        Timestamp(0, 0), zone, canonical.size(), canonical.data()));
+    EXPECT_EQ(parsed.value().timezoneId, tz::getTimeZoneID(canonical));
+    EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeZoneOffsets) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    int32_t seconds;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"Z", "+0530", 19800},
+           {"Z'1970'", "+00001970", 0},
+           {"ZZZ", "-0330", -12600},
+           {"ZZZZ", "GMT", 0},
+           {"ZZZZ", "GMT+05:30", 19800},
+           {"ZZZZZ", "Z", 0},
+           {"ZZZZZ", "+05:30:15", 19815},
+           {"X", "+05", 18000},
+           {"X", "+0530", 19800},
+           {"XX", "+0530", 19800},
+           {"XX", "+053015", 19815},
+           {"XXX", "+05:30", 19800},
+           {"XXX", "+05:30:15", 19815},
+           {"XXXX", "+053015", 19815},
+           {"XXXXX", "+05:30:15", 19815},
+           {"xxx", "-00:00", 0},
+           {"x", "+00", 0},
+           {"Z", "+1800", 64800},
+           {"xxx", "-18:00", -64800}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    auto formatter = buildJavaDateTimeFormatter(test.pattern);
+    for (const auto parsed :
+         {formatter->parse(test.input),
+          formatter->parseWithNanosecondPrecision(test.input)}) {
+      ASSERT_FALSE(parsed.hasError());
+      EXPECT_EQ(parsed.timezoneOffsetSeconds(), test.seconds);
+      EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+      if (test.seconds % 60 == 0 && std::abs(test.seconds) <= 14 * 3600) {
+        EXPECT_EQ(
+            parsed.value().timezoneId, tz::getTimeZoneID(test.seconds / 60));
+      } else {
+        EXPECT_EQ(parsed.value().timezoneId, -1);
+      }
+    }
+  }
+  for (const auto& [pattern, input] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"XX", "+05:30"},
+           {"Z'1970'", "+05301970"},
+           {"XXX", "+0530"},
+           {"Z", "Z"},
+           {"ZZZ", "Asia/Shanghai"},
+           {"x", "Z"},
+           {"x", "+0000"},
+           {"xxx", "+18:00:01"},
+           {"Z", "+1860"},
+           {"Z", "+1900"},
+           {"XXX", "+05:60"},
+           {"XXXXX", "+05:30:60"},
+           {"ZZZZ", "GMT+5:30"},
+           {"XXX", "+05:30junk"},
+           {"XXX", std::string("+05:30\0", 7)}}) {
+    SCOPED_TRACE(pattern + ":" + input);
+    EXPECT_TRUE(buildJavaDateTimeFormatter(pattern)->parse(input).hasError());
+  }
+  for (const auto* pattern : {"XXXXXX", "xxxxxx", "ZZZZZZ", "V", "VVV"}) {
+    EXPECT_THROW(buildJavaDateTimeFormatter(pattern), BoltUserError);
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeZoneIds) {
+  for (const auto* name :
+       {"Asia/Shanghai",
+        "US/Pacific",
+        "UTC",
+        "UT",
+        "GMT",
+        "Etc/GMT+5",
+        "Zulu"}) {
+    SCOPED_TRACE(name);
+    auto parsed = buildJavaDateTimeFormatter("VV'@'yyyy")
+                      ->parse(std::string(name) + "@1970");
+    ASSERT_FALSE(parsed.hasError());
+    EXPECT_EQ(parsed.value().timezoneId, tz::getTimeZoneID(name));
+    EXPECT_EQ(parsed.value().timestamp, Timestamp(0, 0));
+  }
+  for (const auto* name :
+       {"+05:30:15", "UTC+05:30:15", "GMT+05:30:15", "UT+05:30:15"}) {
+    auto parsed = buildJavaDateTimeFormatter("VV")->parse(name);
+    ASSERT_FALSE(parsed.hasError());
+    EXPECT_EQ(parsed.timezoneOffsetSeconds(), 19815);
+  }
+  auto prefix = buildJavaDateTimeFormatter("VV'+bad'")->parse("GMT+bad");
+  ASSERT_FALSE(prefix.hasError());
+  EXPECT_EQ(prefix.value().timezoneId, 0);
+  for (const auto* name :
+       {"+05",
+        "+0530",
+        "UTC+05",
+        "Asia/ShanghaiX",
+        "asia/shanghai",
+        "EST",
+        "MST",
+        "HST",
+        "SystemV/EST5EDT"}) {
+    EXPECT_TRUE(buildJavaDateTimeFormatter("VV")->parse(name).hasError());
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaTimeZoneFormatting) {
+  const auto* zone = tz::locateZone("+05:30");
+  for (const auto& [pattern, expected] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"Z", "+0530"},
+           {"ZZ", "+0530"},
+           {"ZZZ", "+0530"},
+           {"ZZZZ", "GMT+05:30"},
+           {"ZZZZZ", "+05:30"},
+           {"X", "+0530"},
+           {"XX", "+0530"},
+           {"XXX", "+05:30"},
+           {"XXXX", "+0530"},
+           {"XXXXX", "+05:30"},
+           {"VV", "+05:30"}}) {
+    auto formatter = buildJavaDateTimeFormatter(pattern);
+    std::string output(formatter->maxResultSize(zone), '\0');
+    output.resize(
+        formatter->format(Timestamp(0, 0), zone, output.size(), output.data()));
+    EXPECT_EQ(output, expected) << pattern;
+  }
+  auto idFormatter = buildJavaDateTimeFormatter("VV");
+  const auto* alias = tz::locateZone("US/Pacific");
+  std::string idOutput(idFormatter->maxResultSize(alias), '\0');
+  idOutput.resize(idFormatter->format(
+      Timestamp(0, 0), alias, idOutput.size(), idOutput.data()));
+  EXPECT_EQ(idOutput, "US/Pacific");
+  const auto* utc = tz::locateZone("UTC");
+  for (const auto& [pattern, expected] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"Z", "+0000"},
+           {"ZZZZ", "GMT"},
+           {"ZZZZZ", "Z"},
+           {"X", "Z"},
+           {"XXX", "Z"},
+           {"x", "+00"},
+           {"xx", "+0000"},
+           {"xxx", "+00:00"}}) {
+    auto formatter = buildJavaDateTimeFormatter(pattern);
+    std::string output(formatter->maxResultSize(utc), '\0');
+    output.resize(
+        formatter->format(Timestamp(0, 0), utc, output.size(), output.data()));
+    EXPECT_EQ(output, expected) << pattern;
+  }
+}
+
+TEST_F(DateTimeFormatterTest, sparkTimeZoneBindings) {
+  EXPECT_TRUE(
+      buildSparkDateTimeFormatter("ZZZ")->parse("Asia/Shanghai").hasError());
+  EXPECT_FALSE(buildSparkDateTimeFormatter("ZZZ")->parse("+05:30").hasError());
+  if (kSparkCompatible) {
+    EXPECT_TRUE(
+        buildSparkDateTimeFormatter("XXX")->parse("Asia/Shanghai").hasError());
+    EXPECT_FALSE(buildSparkDateTimeFormatter("XXX")->parse("+0530").hasError());
+  } else {
+    EXPECT_THROW(buildSparkDateTimeFormatter("XXX"), BoltUserError);
+  }
 }
 
 TEST_F(JodaDateTimeFormatterTest, parseTimezone) {

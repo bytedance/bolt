@@ -35,6 +35,7 @@
 #include <bolt/common/base/Exceptions.h>
 #include <date/tz.h>
 #include <folly/String.h>
+#include <folly/container/F14Map.h>
 #include <charconv>
 #include <cstring>
 #include <stdexcept>
@@ -86,6 +87,8 @@ struct Date {
   int32_t subsecond = 0;
   bool isAm = true; // AM -> true, PM -> false
   int64_t timezoneId = -1;
+  std::optional<int32_t> timezoneOffsetSeconds;
+  bool hasTimeZoneId = false;
 
   bool isClockHour = false; // Whether most recent hour specifier is clockhour
   bool isHourOfHalfDay =
@@ -476,6 +479,237 @@ int64_t parseTimezoneOffset(const char* cur, const char* end, Date& date) {
   return -1;
 }
 
+int64_t parseTimeZoneId(
+    const char* cur,
+    const char* end,
+    Date& date,
+    bool canonicalize = false) {
+  static const auto index = [] {
+    std::pair<
+        folly::F14FastMap<std::string, std::pair<int16_t, int16_t>>,
+        size_t>
+        result;
+    auto add = [&](std::string_view name, int16_t id) {
+      if (id >= 0) {
+        auto it = result.first.try_emplace(name, std::pair{id, id}).first;
+        it->second.second = id;
+        result.second = std::max(result.second, name.size());
+      }
+    };
+    for (auto id : tz::getTimeZoneIDs()) {
+      if (id == 0 || id > tz::kMaxFixedOffsetTimeZoneId) {
+        add(tz::locateZone(id)->name(), id);
+      }
+    }
+    for (const auto& [alias, target] : tz::getTimeZoneLinks()) {
+      add(alias, tz::getTimeZoneID(target, false));
+    }
+    for (auto name : {"GMT", "Etc/GMT", "Etc/UTC"}) {
+      add(name, 0);
+    }
+    for (const auto& [name, minutes] :
+         {std::pair{"EST", -300}, {"MST", -420}, {"HST", -600}}) {
+      add(name, tz::getTimeZoneID(minutes));
+      result.first.at(name).first = -1;
+    }
+    for (int hour = -14; hour <= 12; ++hour) {
+      if (hour != 0) {
+        add(fmt::format("Etc/GMT{:+}", hour), tz::getTimeZoneID(-hour * 60));
+      }
+    }
+    return result;
+  }();
+  for (size_t size = std::min<size_t>(end - cur, index.second); size > 0;
+       --size) {
+    auto it = index.first.find(std::string_view(cur, size));
+    if (it != index.first.end()) {
+      const auto id = canonicalize ? it->second.second : it->second.first;
+      if (id < 0) {
+        continue;
+      }
+      date.timezoneId = id;
+      date.hasTimeZoneId = true;
+      return size;
+    }
+  }
+  return -1;
+}
+
+int64_t parseJavaTimezoneOffset(
+    FormatPattern pattern,
+    const char* cur,
+    const char* end,
+    Date& date) {
+  const auto* start = cur;
+  const bool rfc =
+      pattern.specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822;
+  const auto digits = pattern.minRepresentDigits;
+  const bool localized = rfc && digits == 4;
+  const bool zeroAsZ =
+      pattern.specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601 ||
+      (rfc && digits == 5);
+  const bool colon = rfc ? digits >= 4 : digits == 3 || digits == 5;
+  const bool optionalMinutes = !rfc && digits == 1;
+  const bool optionalSeconds = rfc || digits >= 2;
+  auto setOffset = [&](int32_t offset) {
+    date.timezoneOffsetSeconds = offset;
+    date.timezoneId = offset % 60 == 0 && std::abs(offset) <= 14 * 3600
+        ? tz::getTimeZoneID(offset / 60)
+        : -1;
+  };
+  // Java matches the zero-offset text before reading numeric fields.
+  if ((rfc && digits <= 3) ||
+      pattern.specifier ==
+          DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601_NO_Z) {
+    const std::string_view zero = rfc ? "+0000"
+        : digits == 1                 ? "+00"
+        : digits == 3 || digits == 5  ? "+00:00"
+                                      : "+0000";
+    if (end - cur >= zero.size() &&
+        std::string_view(cur, zero.size()) == zero) {
+      setOffset(0);
+      return zero.size();
+    }
+  }
+  if (localized) {
+    if (end - cur < 3 || std::memcmp(cur, "GMT", 3) != 0) {
+      return -1;
+    }
+    cur += 3;
+    if (cur == end || (*cur != '+' && *cur != '-')) {
+      setOffset(0);
+      return cur - start;
+    }
+  } else if (zeroAsZ && cur < end && *cur == 'Z') {
+    setOffset(0);
+    return 1;
+  }
+  if (cur == end || (*cur != '+' && *cur != '-')) {
+    return -1;
+  }
+  const bool negative = *cur++ == '-';
+  auto readDigits = [&](int32_t& value) {
+    if (end - cur < 2 || !characterIsDigit(cur[0]) ||
+        !characterIsDigit(cur[1])) {
+      return false;
+    }
+    value = (cur[0] - '0') * 10 + cur[1] - '0';
+    cur += 2;
+    return true;
+  };
+  int32_t hour = 0, minute = 0, second = 0;
+  if (!readDigits(hour)) {
+    return -1;
+  }
+  if (!optionalMinutes ||
+      (end - cur >= 2 && characterIsDigit(cur[0]) &&
+       characterIsDigit(cur[1]))) {
+    if (colon && (cur == end || *cur++ != ':')) {
+      return -1;
+    }
+    if (!readDigits(minute)) {
+      return -1;
+    }
+  }
+  if (optionalSeconds) {
+    if (colon) {
+      if (cur < end && *cur == ':') {
+        ++cur;
+        if (!readDigits(second)) {
+          return -1;
+        }
+      }
+    } else if (
+        end - cur >= 2 && characterIsDigit(cur[0]) &&
+        characterIsDigit(cur[1])) {
+      if (!readDigits(second)) {
+        return -1;
+      }
+    }
+  }
+  if (hour > 18 || minute > 59 || second > 59 ||
+      (hour == 18 && (minute || second))) {
+    return -1;
+  }
+  const auto offset = hour * 3600 + minute * 60 + second;
+  setOffset(negative ? -offset : offset);
+  return cur - start;
+}
+
+int64_t parseJavaTimeZoneId(const char* cur, const char* end, Date& date) {
+  const auto offsetPattern =
+      FormatPattern{DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601, 5};
+  if (cur < end && (*cur == '+' || *cur == '-')) {
+    return parseJavaTimezoneOffset(offsetPattern, cur, end, date);
+  }
+  for (std::string_view prefix : {"UTC", "GMT", "UT"}) {
+    if (end - cur >= prefix.size() &&
+        std::string_view(cur, prefix.size()) == prefix) {
+      const auto* offset = cur + prefix.size();
+      if (offset < end && (*offset == '+' || *offset == '-')) {
+        auto size = parseJavaTimezoneOffset(offsetPattern, offset, end, date);
+        if (size >= 0) {
+          return prefix.size() + size;
+        }
+      }
+      date.timezoneId = 0;
+      date.hasTimeZoneId = true;
+      return prefix.size();
+    }
+  }
+  auto size = parseTimeZoneId(cur, end, date);
+  if (size < 0 && cur < end && *cur == 'Z') {
+    date.timezoneId = 0;
+    date.timezoneOffsetSeconds = 0;
+    return 1;
+  }
+  return size;
+}
+
+int32_t
+appendJavaTimezoneOffset(int64_t offset, FormatPattern pattern, char* result) {
+  const auto* start = result;
+  const bool rfc =
+      pattern.specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822;
+  const auto digits = pattern.minRepresentDigits;
+  const bool zeroAsZ =
+      pattern.specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601 ||
+      (rfc && digits == 5);
+  if (rfc && digits == 4) {
+    std::memcpy(result, "GMT", 3);
+    result += 3;
+    if (offset == 0) {
+      return 3;
+    }
+  } else if (zeroAsZ && offset == 0) {
+    *result = 'Z';
+    return 1;
+  }
+  *result++ = offset < 0 ? '-' : '+';
+  offset = std::abs(offset);
+  auto append = [&](int32_t number) {
+    *result++ = '0' + number / 10;
+    *result++ = '0' + number % 10;
+  };
+  append(offset / 3600);
+  const auto minutes = offset / 60 % 60;
+  const bool colon = rfc ? digits >= 4 : digits == 3 || digits == 5;
+  if (rfc || digits != 1 || minutes != 0) {
+    if (colon) {
+      *result++ = ':';
+    }
+    append(minutes);
+    const auto seconds = offset % 60;
+    if (digits >= 4 && seconds != 0) {
+      if (colon) {
+        *result++ = ':';
+      }
+      append(seconds);
+    }
+  }
+  return result - start;
+}
+
 int64_t parseEra(const char* cur, const char* end, Date& date) {
   if ((end - cur) >= 2) {
     if (std::strncmp(cur, "AD", 2) == 0 || std::strncmp(cur, "ad", 2) == 0) {
@@ -656,6 +890,14 @@ std::string getSpecifierName(DateTimeFormatSpecifier s) {
       return "TIMEZONE";
     case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID:
       return "TIMEZONE_OFFSET_ID";
+    case DateTimeFormatSpecifier::TIMEZONE_ID:
+      return "TIMEZONE_ID";
+    case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601:
+      return "TIMEZONE_OFFSET_ISO8601";
+    case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601_NO_Z:
+      return "TIMEZONE_OFFSET_ISO8601_NO_Z";
+    case DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822:
+      return "TIMEZONE_OFFSET_RFC822";
     case DateTimeFormatSpecifier::LITERAL_PERCENT:
       return "LITERAL_PERCENT";
     case DateTimeFormatSpecifier::WEEK_OF_MONTH:
@@ -781,6 +1023,28 @@ ErrorCode parseFromPattern(
       date.hasYear = true;
       date.year = 2000;
     }
+  } else if (curPattern.specifier >= DateTimeFormatSpecifier::TIMEZONE_ID) {
+    int64_t size;
+    if (curPattern.specifier == DateTimeFormatSpecifier::TIMEZONE_ID) {
+      if (type == DateTimeFormatterType::JAVA_TIME) {
+        size = parseJavaTimeZoneId(cur, end, date);
+      } else {
+        if (cur < end && (*cur == '+' || *cur == '-')) {
+          size = parseTimezoneOffset(cur, end, date);
+        } else {
+          size = parseTimeZoneId(cur, end, date, true);
+          if (size < 0) {
+            size = parseTimezoneOffset(cur, end, date);
+          }
+        }
+      }
+    } else {
+      size = parseJavaTimezoneOffset(curPattern, cur, end, date);
+    }
+    if (size < 0) {
+      return ErrorCode::PARSE_TIMEZONE_ERROR;
+    }
+    cur += size;
   } else {
     // Numeric specifier case
     bool negative = false;
@@ -1222,6 +1486,14 @@ uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
           size += 50;
         }
         break;
+      case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601:
+      case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601_NO_Z:
+        size += 9;
+        break;
+      case DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822:
+        size += 12;
+        break;
+      case DateTimeFormatSpecifier::TIMEZONE_ID:
       case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID:
         if (token.pattern.minRepresentDigits == 1) {
           // 'Z' means output the time zone offset without a colon.
@@ -1611,6 +1883,12 @@ int32_t DateTimeFormatter::format(
           result += piece.length();
         } break;
 
+        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601:
+        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601_NO_Z:
+        case DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822:
+          result += appendJavaTimezoneOffset(offset, token.pattern, result);
+          break;
+        case DateTimeFormatSpecifier::TIMEZONE_ID:
         case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID: {
           // Zone: 'Z' outputs offset without a colon, 'ZZ' outputs the offset
           // with a colon, 'ZZZ' or more outputs the zone id.
@@ -1628,6 +1906,11 @@ int32_t DateTimeFormatter::format(
             // Append the time zone ID.
             const auto& piece = timezone->name();
 
+            if (type_ == DateTimeFormatterType::JAVA_TIME) {
+              std::memcpy(result, piece.data(), piece.length());
+              result += piece.length();
+              break;
+            }
             static const auto& timeZoneLinks = tz::getTimeZoneLinks();
             auto timeZoneLinksIter = timeZoneLinks.find(piece);
             if (timeZoneLinksIter != timeZoneLinks.end()) {
@@ -1692,6 +1975,11 @@ DateTimeResult DateTimeFormatter::parse(const std::string_view& input) const {
     }
   }
 
+  if ((type_ == DateTimeFormatterType::JAVA_TIME || date.hasTimeZoneId) &&
+      cur != end) {
+    return ErrorCode::PARSE_LITERAL_ERROR;
+  }
+
   // Era is BC and year of era is provided
   if (date.isYearOfEra && !date.isAd) {
     date.year = -1 * (date.year - 1);
@@ -1733,7 +2021,9 @@ DateTimeResult DateTimeFormatter::parse(const std::string_view& input) const {
   int64_t microsSinceMidnight =
       util::fromTime(date.hour, date.minute, date.second, date.subsecond);
   return DateTimeResult{
-      util::fromDatetime(daysSinceEpoch, microsSinceMidnight), date.timezoneId};
+      util::fromDatetime(daysSinceEpoch, microsSinceMidnight),
+      date.timezoneId,
+      date.timezoneOffsetSeconds};
 }
 
 // sql.legacy.timeParserPolicy = "legacy", "corrected", "exception"
@@ -1802,6 +2092,11 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
   // in legacy policy, return valid value if pattern is short than date string
   if (!isLegacy && cur != end) {
     return DateTimeResult::ErrorCode::PATTERN_TOO_SHORT;
+  }
+
+  if ((type_ == DateTimeFormatterType::JAVA_TIME || date.hasTimeZoneId) &&
+      cur != end) {
+    return ErrorCode::PARSE_LITERAL_ERROR;
   }
 
   // Era is BC and year of era is provided
@@ -1973,12 +2268,15 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
             daysSinceEpoch * util::kSecsPerDay + date.hour * 3600 +
                 date.minute * 60 + date.second,
             date.subsecond),
-        date.timezoneId};
+        date.timezoneId,
+        date.timezoneOffsetSeconds};
   }
   int64_t microsSinceMidnight =
       util::fromTime(date.hour, date.minute, date.second, date.subsecond);
   return DateTimeResult{
-      util::fromDatetime(daysSinceEpoch, microsSinceMidnight), date.timezoneId};
+      util::fromDatetime(daysSinceEpoch, microsSinceMidnight),
+      date.timezoneId,
+      date.timezoneOffsetSeconds};
 }
 
 DateTimeResult DateTimeFormatter::parse(
@@ -2120,8 +2418,10 @@ std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(
   return builder.setType(DateTimeFormatterType::MYSQL).build();
 }
 
-std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
-    const std::string_view& format) {
+namespace {
+std::shared_ptr<DateTimeFormatter> buildPatternDateTimeFormatter(
+    const std::string_view& format,
+    DateTimeFormatterType type) {
   if (format.empty()) {
     BOLT_USER_FAIL("Invalid pattern specification");
   }
@@ -2172,7 +2472,12 @@ std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
           builder.appendYearOfEra(count);
           break;
         case 'x':
-          builder.appendWeekYear(count);
+          if (type == DateTimeFormatterType::JAVA_TIME) {
+            BOLT_USER_CHECK_LE(count, 5, "Too many pattern letters: x");
+            builder.appendISOTimeZoneOffsetId(count, false);
+          } else {
+            builder.appendWeekYear(count);
+          }
           break;
         case 'w':
           builder.appendWeekOfWeekYear(count);
@@ -2227,18 +2532,42 @@ std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
           builder.appendFractionOfSecond(count);
           break;
         case 'u':
-          builder.appendDayOfWeek1Based(count);
+          if (type == DateTimeFormatterType::JAVA_TIME) {
+            builder.appendYear(count);
+          } else {
+            builder.appendDayOfWeek1Based(count);
+          }
           break;
         case 'z':
           builder.appendTimeZone(count);
           break;
         case 'X':
-          if (!::bytedance::bolt::kSparkCompatible) {
-            BOLT_UNSUPPORTED("Specifier X is not supported.");
+          if (type == DateTimeFormatterType::JAVA_TIME) {
+            BOLT_USER_CHECK_LE(count, 5, "Too many pattern letters: X");
+            builder.appendISOTimeZoneOffsetId(count, true);
+          } else {
+            if (!::bytedance::bolt::kSparkCompatible) {
+              BOLT_UNSUPPORTED("Specifier X is not supported.");
+            }
+            builder.appendTimeZoneOffsetId(count);
           }
-          [[fallthrough]];
+          break;
         case 'Z':
-          builder.appendTimeZoneOffsetId(count);
+          if (type == DateTimeFormatterType::JAVA_TIME) {
+            BOLT_USER_CHECK_LE(count, 5, "Too many pattern letters: Z");
+            builder.appendRFC822TimeZoneOffsetId(count);
+          } else if (type == DateTimeFormatterType::JODA && count >= 3) {
+            builder.appendTimeZoneId();
+          } else {
+            builder.appendTimeZoneOffsetId(count);
+          }
+          break;
+        case 'V':
+          if (type != DateTimeFormatterType::JAVA_TIME) {
+            BOLT_UNSUPPORTED("Specifier V is not supported.");
+          }
+          BOLT_USER_CHECK_EQ(count, 2, "Zone ID pattern must be VV");
+          builder.appendTimeZoneId();
           break;
         default:
           if (isalpha(*startTokenPtr)) {
@@ -2250,7 +2579,24 @@ std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
       }
     }
   }
-  return builder.setType(DateTimeFormatterType::JODA).build();
+  return builder.setType(type).build();
+}
+} // namespace
+
+std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
+    const std::string_view& format) {
+  return buildPatternDateTimeFormatter(format, DateTimeFormatterType::JODA);
+}
+
+std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
+    const std::string_view& format) {
+  return buildPatternDateTimeFormatter(
+      format, DateTimeFormatterType::JAVA_TIME);
+}
+
+std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
+    const std::string_view& format) {
+  return buildPatternDateTimeFormatter(format, DateTimeFormatterType::SPARK);
 }
 
 std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(

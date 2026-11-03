@@ -115,7 +115,7 @@ struct FlinkUnixTimestampFunctionWithTimeZone
     // Format error returns null.
     if (!this->isConstFormat_) {
       try {
-        this->format_ = buildJodaDateTimeFormatter(
+        this->format_ = buildSparkDateTimeFormatter(
             std::string_view(format.data(), format.size()));
       } catch (const std::exception&) {
         result = LongMinValue;

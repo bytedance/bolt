@@ -30,13 +30,22 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/type/Timestamp.h"
 namespace bytedance::bolt::functions {
 
-enum class DateTimeFormatterType { JODA, MYSQL, HIVE, LEGACY_SPARK, UNKNOWN };
+enum class DateTimeFormatterType {
+  JODA,
+  MYSQL,
+  HIVE,
+  LEGACY_SPARK,
+  UNKNOWN,
+  JAVA_TIME,
+  SPARK
+};
 
 enum class DateTimeFormatSpecifier : uint8_t {
   // Era, e.g: "AD"
@@ -119,6 +128,10 @@ enum class DateTimeFormatSpecifier : uint8_t {
 
   // day of week in month (e.g., 2 means the 2nd Wednesday of the month)
   DAY_OF_WEEK_IN_MONTH = 25,
+  TIMEZONE_ID = 26,
+  TIMEZONE_OFFSET_ISO8601 = 27,
+  TIMEZONE_OFFSET_ISO8601_NO_Z = 28,
+  TIMEZONE_OFFSET_RFC822 = 29,
 };
 
 enum struct TimePolicy { CORRECTED, LEGACY, EXCEPTION };
@@ -265,6 +278,22 @@ class DateTimeResult {
   DateTimeResult(Timestamp timestamp, int64_t timezoneId)
       : value_{timestamp, timezoneId}, errorCode_(ErrorCode::NO_ERROR) {}
 
+  DateTimeResult(
+      Timestamp timestamp,
+      int64_t timezoneId,
+      std::optional<int32_t> offsetSeconds)
+      : value_{timestamp, timezoneId},
+        errorCode_(ErrorCode::NO_ERROR),
+        hasOffset_(offsetSeconds.has_value()),
+        offsetSeconds_(offsetSeconds.value_or(0)) {}
+
+  /// Numeric offset in the Java dialect. It can have second precision or
+  /// exceed the timezoneId table's range.
+  std::optional<int32_t> timezoneOffsetSeconds() const {
+    throwExceptionIfErrorOccurs();
+    return hasOffset_ ? std::optional<int32_t>(offsetSeconds_) : std::nullopt;
+  }
+
   DateTimeResult(ErrorCode errorCode) : errorCode_(errorCode) {
     BOLT_CHECK(errorCode != ErrorCode::NO_ERROR);
   }
@@ -296,6 +325,8 @@ class DateTimeResult {
  private:
   DateTimeResultValue value_;
   ErrorCode errorCode_;
+  bool hasOffset_{false};
+  int32_t offsetSeconds_{0};
 };
 
 /// A user defined formatter that formats/parses time to/from user provided
@@ -376,6 +407,14 @@ std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(
     const std::string_view& format);
 
 std::shared_ptr<DateTimeFormatter> buildJodaDateTimeFormatter(
+    const std::string_view& format);
+
+/// Builds Java date-time timezone patterns using Bolt's registered zone IDs.
+std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
+    const std::string_view& format);
+
+/// Builds Spark's non-legacy pattern dialect.
+std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
     const std::string_view& format);
 
 std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(

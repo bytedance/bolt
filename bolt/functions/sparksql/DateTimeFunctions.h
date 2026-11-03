@@ -388,7 +388,7 @@ struct UnixTimestampFunctionBase {
             std::string_view(format->data(), format->size()));
       } else {
         ensureFormatLegal(std::string_view(format->data(), format->size()));
-        return buildJodaDateTimeFormatter(
+        return buildSparkDateTimeFormatter(
             std::string_view(format->data(), format->size()));
       }
     } catch (const BoltUserError& e) {
@@ -825,7 +825,7 @@ struct GetTimestampFunction {
         // Use Joda formatter for other policies.
 
         ensureFormatLegal(std::string_view(format->data(), format->size()));
-        formatter_ = buildJodaDateTimeFormatter(
+        formatter_ = buildSparkDateTimeFormatter(
             std::string_view(format->data(), format->size()));
       }
       isConstantTimeFormat_ = true;
@@ -844,7 +844,7 @@ struct GetTimestampFunction {
         // Use Joda formatter for other policies.
 
         ensureFormatLegal(std::string_view(format->data(), format->size()));
-        formatter_ = buildJodaDateTimeFormatter(
+        formatter_ = buildSparkDateTimeFormatter(
             std::string_view(format.data(), format.size()));
       }
     }
@@ -1379,7 +1379,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
         ensureFormatLegal(
             std::string_view(formatString->data(), formatString->size()));
         // Use Joda formatter for other policies.
-        jodaDateTime_ = buildJodaDateTimeFormatter(
+        jodaDateTime_ = buildSparkDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()));
       }
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
@@ -1406,7 +1406,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
 
         ensureFormatLegal(
             std::string_view(formatString->data(), formatString->size()));
-        jodaDateTime_ = buildJodaDateTimeFormatter(
+        jodaDateTime_ = buildSparkDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()));
       }
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
@@ -1434,7 +1434,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
         // Use Joda formatter for other policies.
         ensureFormatLegal(
             std::string_view(formatString.data(), formatString.size()));
-        jodaDateTime_ = buildJodaDateTimeFormatter(
+        jodaDateTime_ = buildSparkDateTimeFormatter(
             std::string_view(formatString.data(), formatString.size()));
       }
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);

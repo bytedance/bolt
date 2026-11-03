@@ -207,6 +207,33 @@ DateTimeFormatterBuilder& DateTimeFormatterBuilder::appendTimeZoneOffsetId(
   return *this;
 }
 
+DateTimeFormatterBuilder& DateTimeFormatterBuilder::appendTimeZoneId() {
+  tokens_.emplace_back(FormatPattern{DateTimeFormatSpecifier::TIMEZONE_ID, 3});
+  return *this;
+}
+
+DateTimeFormatterBuilder& DateTimeFormatterBuilder::appendISOTimeZoneOffsetId(
+    size_t minDigits) {
+  return appendISOTimeZoneOffsetId(minDigits, true);
+}
+
+DateTimeFormatterBuilder& DateTimeFormatterBuilder::appendISOTimeZoneOffsetId(
+    size_t minDigits,
+    bool zeroAsZ) {
+  tokens_.emplace_back(FormatPattern{
+      zeroAsZ ? DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601
+              : DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601_NO_Z,
+      minDigits});
+  return *this;
+}
+
+DateTimeFormatterBuilder&
+DateTimeFormatterBuilder::appendRFC822TimeZoneOffsetId(size_t minDigits) {
+  tokens_.emplace_back(FormatPattern{
+      DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822, minDigits});
+  return *this;
+}
+
 DateTimeFormatterBuilder& DateTimeFormatterBuilder::appendLiteral(
     const std::string_view& literal) {
   return appendLiteral(literal.data(), literal.size());
