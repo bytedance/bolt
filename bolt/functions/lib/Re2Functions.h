@@ -161,6 +161,12 @@ std::shared_ptr<exec::VectorFunction> makeRe2ExtractWithOptions(
     const core::QueryConfig& config,
     const Re2ExtractOptions& options);
 
+std::shared_ptr<exec::VectorFunction> makeCachedRe2ExtractWithOptions(
+    const std::string& name,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config,
+    const Re2ExtractOptions& options);
+
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2ExtractSignatures();
 
 /// Return the pair {pattern kind, length of the fixed pattern} for fixed,

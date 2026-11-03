@@ -29,6 +29,7 @@
  */
 
 #include "bolt/functions/lib/Re2Functions.h"
+#include "bolt/functions/lib/RegexCache.h"
 #include "bolt/functions/lib/string/StringImpl.h"
 #include "folly/container/EvictingCacheMap.h"
 
@@ -460,7 +461,7 @@ class Re2SearchAndExtractConstantPattern final : public VectorFunction {
 
 // The factory function we provide returns a unique instance for each call, so
 // this is safe.
-template <typename T>
+template <typename T, bool cachePatterns = false>
 class Re2SearchAndExtract final : public VectorFunction {
  public:
   explicit Re2SearchAndExtract(const Re2ExtractOptions& options)
@@ -479,8 +480,6 @@ class Re2SearchAndExtract final : public VectorFunction {
       return;
     }
 
-    // The general case. Further optimizations are possible to avoid regex
-    // recompilation, but a constant pattern is by far the most common case.
     FlatVector<StringView>& result =
         ensureWritableStringView(rows, context, resultRef);
     exec::LocalDecodedVector toSearch(context, *args[0], rows);
@@ -490,28 +489,30 @@ class Re2SearchAndExtract final : public VectorFunction {
     if (args.size() == 2) {
       groups.resize(1);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
-        RE2 re(toStringPiece(pattern->valueAt<StringView>(i)), RE2::Quiet);
-        if (!validatePatternForExtract(re, options_.invalidRegexPolicy)) {
-          result.setNull(i, true);
-          return;
-        }
-        mustRefSourceStrings |=
-            re2Extract(result, i, re, toSearch, groups, 0, options_);
+        withPattern(pattern->valueAt<StringView>(i), [&](const RE2& re) {
+          if (!validatePatternForExtract(re, options_.invalidRegexPolicy)) {
+            result.setNull(i, true);
+            return;
+          }
+          mustRefSourceStrings |=
+              re2Extract(result, i, re, toSearch, groups, 0, options_);
+        });
       });
     } else {
       exec::LocalDecodedVector groupIds(context, *args[2], rows);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t i) {
         const auto groupId = groupIds->valueAt<T>(i);
-        RE2 re(toStringPiece(pattern->valueAt<StringView>(i)), RE2::Quiet);
-        if (!validatePatternForExtract(re, options_.invalidRegexPolicy) ||
-            !validateGroupIdForExtract(
-                groupId, re, options_.invalidGroupPolicy)) {
-          result.setNull(i, true);
-          return;
-        }
-        groups.resize(groupId + 1);
-        mustRefSourceStrings |=
-            re2Extract(result, i, re, toSearch, groups, groupId, options_);
+        withPattern(pattern->valueAt<StringView>(i), [&](const RE2& re) {
+          if (!validatePatternForExtract(re, options_.invalidRegexPolicy) ||
+              !validateGroupIdForExtract(
+                  groupId, re, options_.invalidGroupPolicy)) {
+            result.setNull(i, true);
+            return;
+          }
+          groups.resize(groupId + 1);
+          mustRefSourceStrings |=
+              re2Extract(result, i, re, toSearch, groups, groupId, options_);
+        });
       });
     }
     if (mustRefSourceStrings) {
@@ -520,6 +521,23 @@ class Re2SearchAndExtract final : public VectorFunction {
   }
 
  private:
+  template <typename Extract>
+  FOLLY_ALWAYS_INLINE void withPattern(StringView pattern, Extract&& extract)
+      const {
+    if constexpr (cachePatterns) {
+      auto re = cache_.get(pattern, [](StringView value) {
+        return std::make_shared<const RE2>(toStringPiece(value), RE2::Quiet);
+      });
+      extract(*re);
+    } else {
+      RE2 re(toStringPiece(pattern), RE2::Quiet);
+      extract(re);
+    }
+  }
+
+  [[no_unique_address]] std::
+      conditional_t<cachePatterns, regex::RegexCache<RE2>, regex::NoRegexCache>
+          cache_;
   const Re2ExtractOptions options_;
 };
 
@@ -1124,7 +1142,8 @@ std::shared_ptr<VectorFunction> makeRe2Extract(
   return makeRe2ExtractWithOptions(name, inputArgs, config, options);
 }
 
-std::shared_ptr<VectorFunction> makeRe2ExtractWithOptions(
+template <bool cachePatterns>
+std::shared_ptr<VectorFunction> makeRe2ExtractWithOptionsImpl(
     const std::string& name,
     const std::vector<VectorFunctionArg>& inputArgs,
     const core::QueryConfig& /*config*/,
@@ -1178,12 +1197,30 @@ std::shared_ptr<VectorFunction> makeRe2ExtractWithOptions(
 
   switch (groupIdTypeKind) {
     case TypeKind::INTEGER:
-      return std::make_shared<Re2SearchAndExtract<int32_t>>(options);
+      return std::make_shared<Re2SearchAndExtract<int32_t, cachePatterns>>(
+          options);
     case TypeKind::BIGINT:
-      return std::make_shared<Re2SearchAndExtract<int64_t>>(options);
+      return std::make_shared<Re2SearchAndExtract<int64_t, cachePatterns>>(
+          options);
     default:
       BOLT_UNREACHABLE();
   }
+}
+
+std::shared_ptr<VectorFunction> makeRe2ExtractWithOptions(
+    const std::string& name,
+    const std::vector<VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config,
+    const Re2ExtractOptions& options) {
+  return makeRe2ExtractWithOptionsImpl<false>(name, inputArgs, config, options);
+}
+
+std::shared_ptr<VectorFunction> makeCachedRe2ExtractWithOptions(
+    const std::string& name,
+    const std::vector<VectorFunctionArg>& inputArgs,
+    const core::QueryConfig& config,
+    const Re2ExtractOptions& options) {
+  return makeRe2ExtractWithOptionsImpl<true>(name, inputArgs, config, options);
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2ExtractSignatures() {
