@@ -100,6 +100,7 @@ target_link_libraries(
   utf8proc::utf8proc
   date::date
   bolt_type_tz
+  ${ICU_LIBRARIES}
 )
 
 add_subdirectory(aggregates)

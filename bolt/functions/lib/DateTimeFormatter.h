@@ -42,9 +42,10 @@ enum class DateTimeFormatterType {
   MYSQL,
   HIVE,
   LEGACY_SPARK,
-  UNKNOWN,
   JAVA_TIME,
-  SPARK
+  SPARK_CORRECTED,
+  SIMPLE_DATE_FORMAT,
+  UNKNOWN
 };
 
 enum class DateTimeFormatSpecifier : uint8_t {
@@ -367,6 +368,13 @@ class DateTimeFormatter {
 
   DateTimeResult parse(const std::string_view& input) const;
 
+  /// Applies the parsed offset or zone, falling back to the supplied zone.
+  /// SimpleDateFormat selects the later overlap and shifts gaps forward.
+  /// Ambiguous names prefer the supplied zone, then the process default zone.
+  DateTimeResult parseToUtc(
+      const std::string_view& input,
+      const tz::TimeZone* timezone) const;
+
   DateTimeResult parse(
       const std::string_view& input,
       const TimePolicy timeParserPolicy) const;
@@ -391,6 +399,14 @@ class DateTimeFormatter {
       const std::optional<std::string>& zeroOffsetText = std::nullopt) const;
 
  private:
+  friend std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
+      const std::string_view& format,
+      std::optional<Timestamp> twoDigitYearStart);
+
+  DateTimeResult parseSimpleDateFormat(
+      const std::string_view& input,
+      const tz::TimeZone* timezone = nullptr) const;
+
   template <bool nanosecondPrecision>
   DateTimeResult parseImpl(
       const std::string_view& input,
@@ -401,6 +417,7 @@ class DateTimeFormatter {
   std::vector<DateTimeToken> tokens_;
   bool hasEra_ = false;
   DateTimeFormatterType type_;
+  int64_t twoDigitYearStartMillis_{0};
 };
 
 std::shared_ptr<DateTimeFormatter> buildMysqlDateTimeFormatter(
@@ -419,6 +436,12 @@ std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
 
 std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(
     const std::string_view& format);
+
+/// Java SimpleDateFormat with English text and Sunday-based calendar weeks.
+/// The two-digit year window starts 80 years before construction by default.
+std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
+    const std::string_view& format,
+    std::optional<Timestamp> twoDigitYearStart = std::nullopt);
 
 std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
     const std::string_view& format);

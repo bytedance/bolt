@@ -19,8 +19,8 @@
 #include "bolt/functions/Macros.h"
 
 #include "bolt/functions/lib/TimeUtils.h"
-#include "bolt/functions/sparksql/DateTimeFunctions.h"
 
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -85,67 +85,131 @@ struct FlinkUnixTimestampFunction {
 };
 
 template <typename T>
-struct FlinkUnixTimestampFunctionWithTimeZone
-    : public sparksql::UnixTimestampFunctionBase<T> {
-  const int64_t LongMinValue = std::numeric_limits<int64_t>::min();
-
+struct SimpleDateFormatFunctionBase {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  // Add timeZone string parameter to align with gluten
-  // unix_timestamp(input, format, timezone)
+ protected:
+  void initializeFormatter(
+      const arg_type<Varchar>* format,
+      const arg_type<Varchar>* timeZone) {
+    if (format) {
+      updateFormat(*format);
+      constFormat_ = true;
+    }
+    if (timeZone) {
+      updateTimeZone(*timeZone);
+      constTimeZone_ = true;
+    }
+  }
+
+  void updateFormat(const arg_type<Varchar>& format) {
+    const std::string_view value(format.data(), format.size());
+    if (constFormat_ || (hasFormat_ && value == previousFormat_)) {
+      return;
+    }
+    previousFormat_ = value;
+    hasFormat_ = true;
+    try {
+      formatter_ = buildSimpleDateTimeFormatter(value);
+      maxResultSize_ = formatter_->maxResultSize(nullptr);
+    } catch (const BoltUserError&) {
+      formatter_.reset();
+    }
+  }
+
+  void updateTimeZone(const arg_type<Varchar>& timeZone) {
+    const std::string_view value(timeZone.data(), timeZone.size());
+    if (!constTimeZone_ && (!zone_ || value != previousTimeZone_)) {
+      const auto zoneName =
+          value.starts_with("GMT+") || value.starts_with("GMT-")
+          ? value.substr(3)
+          : value;
+      zone_ = tz::locateZone(zoneName);
+      previousTimeZone_ = value;
+    }
+  }
+
+  std::shared_ptr<DateTimeFormatter> formatter_;
+  const tz::TimeZone* zone_{nullptr};
+  uint32_t maxResultSize_{0};
+  bool constFormat_{false};
+  bool constTimeZone_{false};
+  bool hasFormat_{false};
+  std::string previousFormat_;
+  std::string previousTimeZone_;
+};
+
+template <typename T>
+struct FlinkUnixTimestampFunctionWithTimeZone
+    : public SimpleDateFormatFunctionBase<T> {
+  BOLT_DEFINE_FUNCTION_TYPES(T);
+
   FOLLY_ALWAYS_INLINE void initialize(
       const std::vector<TypePtr>& /*inputTypes*/,
-      const core::QueryConfig& config,
+      const core::QueryConfig& /*config*/,
       const arg_type<Varchar>* /*input*/,
       const arg_type<Varchar>* format,
       const arg_type<Varchar>* timeZone) {
-    this->initializeInternal(config, format, timeZone);
+    this->initializeFormatter(format, timeZone);
   }
 
   FOLLY_ALWAYS_INLINE void call(
       int64_t& result,
       const arg_type<Varchar>& input,
       const arg_type<Varchar>& format,
-      const arg_type<Varchar>& /*timeZone*/) {
-    if (this->invalidFormat_) {
-      result = LongMinValue;
+      const arg_type<Varchar>& timeZone) {
+    result = std::numeric_limits<int64_t>::min();
+    this->updateFormat(format);
+    this->updateTimeZone(timeZone);
+    if (!this->formatter_) {
       return;
     }
-
-    // Format error returns null.
-    if (!this->isConstFormat_) {
-      try {
-        this->format_ = buildSparkDateTimeFormatter(
-            std::string_view(format.data(), format.size()));
-      } catch (const std::exception&) {
-        result = LongMinValue;
-        return;
+    const auto parsed = this->formatter_->parseToUtc(
+        std::string_view(input.data(), input.size()), this->zone_);
+    if (!parsed.hasError()) {
+      const auto& timestamp = parsed.value().timestamp;
+      result = timestamp.getSeconds();
+      if (result < 0 && timestamp.getNanos() != 0) {
+        ++result;
       }
     }
-
-    auto dateTimeResult =
-        this->format_->parse(std::string_view(input.data(), input.size()));
-    if (dateTimeResult.hasError()) {
-      result = LongMinValue;
-      return;
-    }
-    result = this->getResultInGMT(dateTimeResult.value());
   }
 };
 
 template <typename T>
-struct FlinkFromUnixtimeFunction : public sparksql::FromUnixtimeFunction<T> {
+struct FlinkFromUnixtimeFunction : public SimpleDateFormatFunctionBase<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
 
-  const int64_t LongMinValue = std::numeric_limits<int64_t>::min();
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& /*config*/,
+      const arg_type<int64_t>* /*unixtime*/,
+      const arg_type<Varchar>* format,
+      const arg_type<Varchar>* timeZone) {
+    this->initializeFormatter(format, timeZone);
+  }
 
   FOLLY_ALWAYS_INLINE bool call(
       out_type<Varchar>& result,
       const arg_type<int64_t>& unixtime,
-      const arg_type<Varchar>& formatString,
-      const arg_type<Varchar>& timeZoneString) {
-    return sparksql::FromUnixtimeFunction<T>::call(
-        result, unixtime == LongMinValue ? 0 : unixtime, formatString);
+      const arg_type<Varchar>& format,
+      const arg_type<Varchar>& timeZone) {
+    this->updateFormat(format);
+    this->updateTimeZone(timeZone);
+    if (!this->formatter_) {
+      return false;
+    }
+    const auto millis =
+        std::bit_cast<int64_t>(static_cast<uint64_t>(unixtime) * 1000);
+    const auto timestamp = Timestamp::fromMillis(millis);
+    result.reserve(this->maxResultSize_);
+    try {
+      result.resize(this->formatter_->format(
+          timestamp, this->zone_, this->maxResultSize_, result.data(), true));
+      return true;
+    } catch (const BoltUserError&) {
+      return false;
+    }
   }
 };
 

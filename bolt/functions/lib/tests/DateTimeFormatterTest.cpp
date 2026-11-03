@@ -3035,4 +3035,201 @@ TEST_F(MysqlDateTimeTest, parseConsecutiveSpecifiers) {
   EXPECT_THROW(parseMysql("1212", "%Y%H"), BoltUserError);
 }
 
+TEST_F(DateTimeFormatterTest, simpleDateFormatParsing) {
+  const auto* utc = tz::locateZone("UTC");
+  const Timestamp centuryStart = Timestamp::fromMillis(-946684800000LL);
+  struct Case {
+    const char* pattern;
+    const char* input;
+    int64_t millis;
+  };
+  const Case cases[] = {
+      {"yyyy-MM-dd HH:mm:ss.SSS", "2023-02-29 25:61:61.1001", 1677722522001LL},
+      {"yyyy-MM-dd HH:mm:ss.SSS", "1969-12-31 23:59:59.999", -1LL},
+      {"yyyy-MM-dd", "   2024-  01-\t02", 1704153600000LL},
+      {"yyyyMMdd", "２０２４０２２９", 1709164800000LL},
+      {"yyyy-MM-dd", "1500-02-29", -14825894400000LL},
+      {"yyyy-MM-dd", "10000-01-01", 253402300800000LL},
+      {"yyyy-MM-dd", "999999-01-01", 31494753244800000LL},
+      {"yy-MM-dd", "39-01-01", 2177452800000LL},
+      {"yy-MM-dd", "40-01-01", 2208988800000LL},
+      {"y-MM-dd", "1-01-01", -62135769600000LL},
+      {"yyyy D", "1582 278", -12219292800000LL},
+      {"yyyy-MM-dd D", "2024-01-02 60", 1709164800000LL},
+      {"yyyy D MM-dd", "2024 60 01-02", 1704153600000LL},
+      {"yyyy-MM-dd dd", "2024-01-32 02", 1704153600000LL},
+      {"yyyy-MM-dd E", "2024-01-02 wEdNeSdAy", 1704153600000LL},
+      {"YYYY-MM-dd", "2021-01-01", 1609027200000LL},
+      {"yyyy-ww-u", "2021-1-7", 1609027200000LL},
+      {"YYYY-ww-u", "2021-54-8", 1641772800000LL},
+      {"yyyy-MM F E", "2024-02 -1 Wed", 1709078400000LL},
+      {"yyyy-MM W u", "2024-02 6 8", 1709424000000LL},
+      {"G yyyy-MM-dd", "BC 0001-01-01", -62167392000000LL},
+      {"hh a", "25 PM", 133200000LL},
+      {"HH a", "01 PM", 3600000LL},
+      {"hh a HH", "12 PM 01", 3600000LL},
+      {"MMM d y", "jAnUaRy 1 2024", 1704067200000LL},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.pattern);
+    SCOPED_TRACE(test.input);
+    const auto formatter =
+        buildSimpleDateTimeFormatter(test.pattern, centuryStart);
+    const auto parsed = formatter->parseToUtc(test.input, utc);
+    ASSERT_FALSE(parsed.hasError());
+    EXPECT_EQ(parsed.value().timestamp, Timestamp::fromMillis(test.millis));
+    EXPECT_EQ(
+        formatter->parse(test.input, TimePolicy::CORRECTED).value().timestamp,
+        formatter->parseWithNanosecondPrecision(test.input).value().timestamp);
+  }
+  for (int width = 1; width <= 9; ++width) {
+    auto formatter = buildSimpleDateTimeFormatter(std::string(width, 'S'));
+    EXPECT_EQ(
+        formatter->parse("1").value().timestamp, Timestamp::fromMillis(1));
+    EXPECT_EQ(
+        formatter->parse("1234").value().timestamp,
+        Timestamp::fromMillis(1234));
+  }
+  for (const auto* pattern : {"C", "e", "x", "VV", "XXXX", "yyyy '", "'a''"}) {
+    SCOPED_TRACE(pattern);
+    EXPECT_THROW(buildSimpleDateTimeFormatter(pattern), BoltUserError);
+  }
+  EXPECT_TRUE(buildSimpleDateTimeFormatter("yyyy-MM-dd")
+                  ->parse("+2024-01-01")
+                  .hasError());
+  EXPECT_TRUE(buildSimpleDateTimeFormatter("")->parse("").hasError());
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatTimeZones) {
+  const auto* utc = tz::locateZone("UTC");
+  for (const auto* pattern : {"Z", "ZZ", "ZZZZZ", "z", "zzzz"}) {
+    auto formatter = buildSimpleDateTimeFormatter(pattern);
+    for (const auto& [text, seconds] :
+         std::vector<std::pair<std::string, int32_t>>{
+             {"+0530", -19800},
+             {"GMT+5:30", -19800},
+             {"PST", 28800},
+             {"Pacific Daylight Time", 25200},
+             {"CEST", -7200},
+             {"+2359", -86340}}) {
+      SCOPED_TRACE(pattern);
+      SCOPED_TRACE(text);
+      EXPECT_EQ(
+          formatter->parseToUtc(text, utc).value().timestamp,
+          Timestamp(seconds, 0));
+    }
+    for (const auto* text : {"+05:30", "Z", "UT", "Asia/Shanghai", "+2400"}) {
+      EXPECT_TRUE(formatter->parse(text).hasError()) << text;
+    }
+  }
+  const auto named = buildSimpleDateTimeFormatter("z");
+  EXPECT_EQ(
+      named->parseToUtc("CST", tz::locateZone("Asia/Shanghai"))
+          .value()
+          .timestamp,
+      Timestamp(-28800, 0));
+  EXPECT_EQ(
+      named->parseToUtc("CST", tz::locateZone("America/Chicago"))
+          .value()
+          .timestamp,
+      Timestamp(21600, 0));
+  EXPECT_EQ(
+      named->parseToUtc("IST", tz::locateZone("Asia/Kolkata"))
+          .value()
+          .timestamp,
+      Timestamp(-19800, 0));
+  const char* offsets[] = {"+05", "+0530", "+05:30"};
+  for (int width = 1; width <= 3; ++width) {
+    auto formatter = buildSimpleDateTimeFormatter(std::string(width, 'X'));
+    EXPECT_EQ(
+        formatter->parseToUtc(offsets[width - 1], utc).value().timestamp,
+        Timestamp(width == 1 ? -18000 : -19800, 0));
+    EXPECT_EQ(
+        formatter->parseToUtc("Z", utc).value().timestamp, Timestamp(0, 0));
+  }
+  auto formatter = buildSimpleDateTimeFormatter("yyyy-MM-dd HH:mm:ss");
+  const auto* newYork = tz::locateZone("America/New_York");
+  EXPECT_EQ(
+      formatter->parseToUtc("2024-03-10 02:30:00", newYork).value().timestamp,
+      Timestamp(1710055800, 0));
+  EXPECT_EQ(
+      formatter->parseToUtc("2024-11-03 01:30:00", newYork).value().timestamp,
+      Timestamp(1730615400, 0));
+  EXPECT_EQ(
+      formatter
+          ->parseToUtc("0001-01-01 00:00:00", tz::locateZone("Asia/Shanghai"))
+          .value()
+          .timestamp,
+      Timestamp(-62135798400, 0));
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatCenturyWindow) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    const char* zone;
+    int64_t millis;
+  };
+  const Case cases[] = {
+      {"yy-MM-dd HH:mm:ss",
+       "40-01-01 00:00:00",
+       "Asia/Shanghai",
+       2208960000000LL},
+      {"yy-MM-dd HH:mm:ss",
+       "40-01-01 07:59:59",
+       "Asia/Shanghai",
+       2208988799000LL},
+      {"yy-MM-dd HH:mm:ss",
+       "40-01-01 08:00:00",
+       "Asia/Shanghai",
+       2208988800000LL},
+      {"yyyy-MM-dd HH:mm:ss",
+       "1900-01-01 08:03:00",
+       "Asia/Shanghai",
+       -2208988620000LL},
+      {"yy-MM-dd HH:mm:ss Z",
+       "40-01-01 00:00:00 +0800",
+       "UTC",
+       2208960000000LL},
+      {"yy-MM-dd HH:mm:ss Z",
+       "40-01-01 08:00:00 +0800",
+       "UTC",
+       2208988800000LL},
+  };
+  for (const auto& test : cases) {
+    const auto formatter = buildSimpleDateTimeFormatter(
+        test.pattern, Timestamp::fromMillis(-946684800000LL));
+    const auto result =
+        formatter->parseToUtc(test.input, tz::locateZone(test.zone));
+    ASSERT_FALSE(result.hasError());
+    EXPECT_EQ(result.value().timestamp, Timestamp::fromMillis(test.millis));
+  }
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatOutput) {
+  const auto render =
+      [](std::string_view pattern, Timestamp timestamp, const char* zone) {
+        const auto formatter = buildSimpleDateTimeFormatter(pattern);
+        const auto* timezone = tz::locateZone(zone);
+        const auto size = formatter->maxResultSize(timezone);
+        std::string result(size, '\0');
+        result.resize(
+            formatter->format(timestamp, timezone, size, result.data(), true));
+        return result;
+      };
+  EXPECT_EQ(
+      render("S SS SSS SSSS", Timestamp::fromMillis(12), "UTC"),
+      "12 12 012 0012");
+  EXPECT_EQ(
+      render("z zzzz Z ZZ ZZZZ X XX XXX", Timestamp(0, 0), "Asia/Kolkata"),
+      "IST India Standard Time +0530 +0530 +0530 +05 +0530 +05:30");
+  EXPECT_EQ(render("X XX XXX", Timestamp(0, 0), "+00:30"), "+00 +0030 +00:30");
+  EXPECT_EQ(
+      render("G yyyy-MM-dd D E u Y w W F", Timestamp(-12219292800, 0), "UTC"),
+      "AD 1582-10-15 278 Fri 5 1582 40 1 1");
+  EXPECT_EQ(
+      render("yyyy-MM-dd", Timestamp(-14825894400, 0), "UTC"), "1500-02-29");
+  EXPECT_EQ(render("", Timestamp(0, 0), "UTC"), "");
+}
+
 } // namespace bytedance::bolt::functions

@@ -36,7 +36,13 @@
 #include <date/tz.h>
 #include <folly/String.h>
 #include <folly/container/F14Map.h>
+#include <unicode/gregocal.h>
+#include <unicode/timezone.h>
+#include <unicode/uchar.h>
+#include <unicode/utf8.h>
+#include <array>
 #include <charconv>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -44,6 +50,7 @@
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
+#include "bolt/type/tz/TimeZoneNames.h"
 
 namespace bytedance::bolt::tz {
 // Defined in TimeZoneLinks.cpp
@@ -1406,7 +1413,604 @@ ErrorCode parseFromPattern(
   return ErrorCode::NO_ERROR;
 }
 
+icu::GregorianCalendar& simpleDateCalendar() {
+  // Calendar fields are scratch state; one bounded instance per thread keeps
+  // shared formatters immutable and avoids allocations while resolving dates.
+  static thread_local auto calendar = [] {
+    UErrorCode status = U_ZERO_ERROR;
+    auto result = std::make_unique<icu::GregorianCalendar>(
+        *icu::TimeZone::getGMT(), icu::Locale::getUS(), status);
+    BOLT_CHECK(U_SUCCESS(status), "Cannot initialize Gregorian calendar");
+    result->setFirstDayOfWeek(UCAL_SUNDAY);
+    result->setMinimalDaysInFirstWeek(1);
+    return result;
+  }();
+  return *calendar;
+}
+
+bool startsWithIgnoreCase(std::string_view text, std::string_view prefix) {
+  return text.size() >= prefix.size() &&
+      folly::StringPiece(text.data(), prefix.size())
+          .equals(prefix, folly::AsciiCaseInsensitive());
+}
+
+int32_t simpleCalendarField(DateTimeFormatSpecifier specifier) {
+  switch (specifier) {
+    case DateTimeFormatSpecifier::ERA:
+      return UCAL_ERA;
+    case DateTimeFormatSpecifier::YEAR:
+      return UCAL_YEAR;
+    case DateTimeFormatSpecifier::WEEK_YEAR:
+      return UCAL_YEAR_WOY;
+    case DateTimeFormatSpecifier::MONTH_OF_YEAR:
+    case DateTimeFormatSpecifier::MONTH_OF_YEAR_TEXT:
+      return UCAL_MONTH;
+    case DateTimeFormatSpecifier::DAY_OF_MONTH:
+      return UCAL_DATE;
+    case DateTimeFormatSpecifier::DAY_OF_YEAR:
+      return UCAL_DAY_OF_YEAR;
+    case DateTimeFormatSpecifier::DAY_OF_WEEK_1_BASED:
+    case DateTimeFormatSpecifier::DAY_OF_WEEK_TEXT:
+      return UCAL_DAY_OF_WEEK;
+    case DateTimeFormatSpecifier::WEEK_OF_WEEK_YEAR:
+      return UCAL_WEEK_OF_YEAR;
+    case DateTimeFormatSpecifier::WEEK_OF_MONTH:
+      return UCAL_WEEK_OF_MONTH;
+    case DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH:
+      return UCAL_DAY_OF_WEEK_IN_MONTH;
+    case DateTimeFormatSpecifier::HOUR_OF_DAY:
+    case DateTimeFormatSpecifier::CLOCK_HOUR_OF_DAY:
+      return UCAL_HOUR_OF_DAY;
+    case DateTimeFormatSpecifier::HOUR_OF_HALFDAY:
+    case DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY:
+      return UCAL_HOUR;
+    case DateTimeFormatSpecifier::HALFDAY_OF_DAY:
+      return UCAL_AM_PM;
+    case DateTimeFormatSpecifier::MINUTE_OF_HOUR:
+      return UCAL_MINUTE;
+    case DateTimeFormatSpecifier::SECOND_OF_MINUTE:
+      return UCAL_SECOND;
+    case DateTimeFormatSpecifier::FRACTION_OF_SECOND:
+      return UCAL_MILLISECOND;
+    default:
+      return -1;
+  }
+}
+
+bool isSimpleNumeric(DateTimeFormatSpecifier specifier) {
+  return simpleCalendarField(specifier) >= 0 &&
+      specifier != DateTimeFormatSpecifier::ERA &&
+      specifier != DateTimeFormatSpecifier::HALFDAY_OF_DAY &&
+      specifier != DateTimeFormatSpecifier::MONTH_OF_YEAR_TEXT &&
+      specifier != DateTimeFormatSpecifier::DAY_OF_WEEK_TEXT;
+}
+
+std::pair<int32_t, int32_t> simpleTimeZoneOffsets(const tz::TimeZone* zone);
+
+bool parseSimpleTimezone(
+    std::string_view& text,
+    FormatPattern pattern,
+    const tz::TimeZone* timezone,
+    int32_t& offset) {
+  const bool iso =
+      pattern.specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601;
+  if (text.empty()) {
+    return false;
+  }
+  if (iso && text.front() == 'Z') {
+    offset = 0;
+    text.remove_prefix(1);
+    return true;
+  }
+  bool gmt = !iso && startsWithIgnoreCase(text, "GMT");
+  if (gmt) {
+    text.remove_prefix(3);
+    if (text.empty() || (text.front() != '+' && text.front() != '-')) {
+      offset = 0;
+      return true;
+    }
+  }
+  if (text.front() == '+' || text.front() == '-') {
+    const int sign = text.front() == '-' ? -1 : 1;
+    size_t pos = 1;
+    auto digit = [&](int32_t& value) {
+      if (pos == text.size() || text[pos] < '0' || text[pos] > '9') {
+        return false;
+      }
+      value = value * 10 + text[pos++] - '0';
+      return true;
+    };
+    int32_t hours = 0, minutes = 0;
+    if (!digit(hours)) {
+      return false;
+    }
+    if (!gmt || (pos < text.size() && text[pos] != ':')) {
+      if (!digit(hours)) {
+        return false;
+      }
+    }
+    if (gmt || !iso || pattern.minRepresentDigits != 1) {
+      if (gmt || (iso && pattern.minRepresentDigits == 3)) {
+        if (pos == text.size() || text[pos++] != ':') {
+          return false;
+        }
+      }
+      if (!digit(minutes) || !digit(minutes)) {
+        return false;
+      }
+    }
+    if (hours > 23 || minutes > 59) {
+      return false;
+    }
+    offset = sign * (hours * 3600 + minutes * 60);
+    text.remove_prefix(pos);
+    return true;
+  }
+  if (gmt || iso || static_cast<unsigned char>(text.front()) > 127) {
+    return false;
+  }
+  auto matchZone = [&](const tz::TimeZone* zone) {
+    if (!zone) {
+      return false;
+    }
+    const auto& names = tz::getTimeZoneNames();
+    const auto it = names.find(zone->name());
+    if (it == names.end()) {
+      return false;
+    }
+    const auto& namesForZone = it->second;
+    const std::pair<std::string_view, bool> candidates[] = {
+        {namesForZone.standardTimeLongName, false},
+        {namesForZone.daylightTimeLongName, true},
+        {namesForZone.standardTimeAbbreviation, false},
+        {namesForZone.daylightTimeAbbreviation, true}};
+    for (const auto& [name, daylight] : candidates) {
+      if (startsWithIgnoreCase(text, name)) {
+        const auto [raw, saving] = simpleTimeZoneOffsets(zone);
+        offset = raw + (daylight ? saving : 0);
+        text.remove_prefix(name.size());
+        return true;
+      }
+    }
+    return false;
+  };
+  static const auto* defaultZone = [] {
+    try {
+      return tz::locateZone(::date::current_zone()->name(), false);
+    } catch (const std::runtime_error&) {
+      return static_cast<const tz::TimeZone*>(nullptr);
+    }
+  }();
+  if (matchZone(timezone) || matchZone(defaultZone)) {
+    return true;
+  }
+  static const auto names = [] {
+    folly::F14FastMap<std::string, int32_t> result;
+    const auto& zones = tz::getTimeZoneNames();
+    auto add = [&](const std::string& id) {
+      const auto it = zones.find(id);
+      if (it == zones.end()) {
+        return;
+      }
+      std::unique_ptr<icu::TimeZone> zone(
+          icu::TimeZone::createTimeZone(icu::UnicodeString::fromUTF8(id)));
+      const auto& names = it->second;
+      auto put = [&](std::string name, bool daylight) {
+        folly::toLowerAscii(name);
+        result.emplace(
+            std::move(name),
+            (zone->getRawOffset() + (daylight ? zone->getDSTSavings() : 0)) /
+                1000);
+      };
+      put(names.standardTimeAbbreviation, false);
+      put(names.standardTimeLongName, false);
+      put(names.daylightTimeAbbreviation, true);
+      put(names.daylightTimeLongName, true);
+    };
+    // Java's English symbols prefer these zones for ambiguous abbreviations.
+    for (const auto* id :
+         {"America/Los_Angeles",
+          "America/Denver",
+          "America/Chicago",
+          "America/New_York",
+          "Pacific/Honolulu",
+          "America/Anchorage",
+          "America/Halifax",
+          "America/St_Johns",
+          "Europe/Paris",
+          "GMT",
+          "Asia/Jerusalem",
+          "Asia/Tokyo",
+          "Europe/Bucharest",
+          "Asia/Shanghai",
+          "UTC"}) {
+      add(id);
+    }
+    std::vector<std::string> ids;
+    for (const auto& [id, names] : zones) {
+      ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+    for (const auto& id : ids) {
+      add(id);
+    }
+    return result;
+  }();
+  std::array<char, 64> lower;
+  const auto length = std::min(text.size(), lower.size());
+  for (size_t i = 0; i < length; ++i) {
+    lower[i] =
+        text[i] >= 'A' && text[i] <= 'Z' ? text[i] + ('a' - 'A') : text[i];
+  }
+  for (size_t size = length; size > 0; --size) {
+    auto it = names.find(std::string_view(lower.data(), size));
+    if (it != names.end()) {
+      offset = it->second;
+      text.remove_prefix(size);
+      return true;
+    }
+  }
+  return false;
+}
+
+std::pair<int32_t, int32_t> simpleTimeZoneOffsets(const tz::TimeZone* zone) {
+  if (!zone) {
+    return {0, 0};
+  }
+  if (const auto fixed = zone->offset()) {
+    return {
+        std::chrono::duration_cast<std::chrono::seconds>(*fixed).count(), 0};
+  }
+  static thread_local const tz::TimeZone* cachedZone = nullptr;
+  static thread_local std::pair<int32_t, int32_t> offsets;
+  if (cachedZone != zone) {
+    std::unique_ptr<icu::TimeZone> javaZone(icu::TimeZone::createTimeZone(
+        icu::UnicodeString::fromUTF8(zone->name())));
+    offsets = {
+        javaZone->getRawOffset() / 1000, javaZone->getDSTSavings() / 1000};
+    cachedZone = zone;
+  }
+  return offsets;
+}
+
+Timestamp simpleDateTimeToUtc(Timestamp timestamp, const tz::TimeZone* zone) {
+  if (!zone || zone->id() == 0) {
+    return timestamp;
+  }
+  const auto local = std::chrono::seconds(timestamp.getSeconds());
+  if (zone->offset()) {
+    return Timestamp(
+        local.count() - zone->offset()->count() * 60, timestamp.getNanos());
+  }
+  constexpr int64_t start = -2'208'988'800;
+  if (local.count() < start + 86'400 &&
+      local < zone->to_local(std::chrono::seconds(start))) {
+    return Timestamp(
+        local.count() - simpleTimeZoneOffsets(zone).first,
+        timestamp.getNanos());
+  }
+  const auto normalized = zone->correct_nonexistent_time(local);
+  return Timestamp(
+      zone->to_sys(normalized, tz::TimeZone::TChoose::kLatest).count(),
+      timestamp.getNanos());
+}
+
 } // namespace
+
+DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
+    const std::string_view& input,
+    const tz::TimeZone* timezone) const {
+  std::array<int32_t, UCAL_FIELD_COUNT> fields{};
+  std::array<size_t, UCAL_FIELD_COUNT> stamps{};
+  fields[UCAL_YEAR] = 1970;
+  fields[UCAL_DATE] = 1;
+  fields[UCAL_ERA] = 1;
+  std::string_view text = input;
+  std::optional<int32_t> offset;
+  int32_t ambiguousYear = -1;
+  for (size_t index = 0; index < tokens_.size(); ++index) {
+    const auto& token = tokens_[index];
+    if (token.type == DateTimeToken::Type::kLiteral) {
+      if (!text.starts_with(token.literal)) {
+        return ErrorCode::PARSE_LITERAL_ERROR;
+      }
+      text.remove_prefix(token.literal.size());
+      continue;
+    }
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+      text.remove_prefix(1);
+    }
+    const auto specifier = token.pattern.specifier;
+    const auto field = simpleCalendarField(specifier);
+    if (field < 0) {
+      int32_t seconds;
+      if (!parseSimpleTimezone(text, token.pattern, timezone, seconds)) {
+        return ErrorCode::PARSE_TIMEZONE_ERROR;
+      }
+      offset = seconds;
+      continue;
+    }
+    int64_t value = 0;
+    if (isSimpleNumeric(specifier)) {
+      const bool adjacent = index + 1 < tokens_.size() &&
+          tokens_[index + 1].type == DateTimeToken::Type::kPattern &&
+          isSimpleNumeric(tokens_[index + 1].pattern.specifier);
+      size_t width = adjacent ? token.pattern.minRepresentDigits : text.size();
+      const bool negative = !text.empty() && text.front() == '-';
+      if (negative) {
+        text.remove_prefix(1);
+        if (width == 0) {
+          return ErrorCode::PARSE_DIGIT_ERROR;
+        }
+        --width;
+      }
+      size_t digits = 0;
+      while (!text.empty() && digits < width) {
+        int32_t length = 1;
+        int32_t digit = static_cast<unsigned char>(text.front()) - '0';
+        if (static_cast<unsigned char>(text.front()) >= 128) {
+          int32_t pos = 0;
+          UChar32 codePoint;
+          U8_NEXT(
+              text.data(), pos, std::min<size_t>(text.size(), 4), codePoint);
+          if (codePoint < 0 || codePoint > 0xffff) {
+            break;
+          }
+          UVersionInfo age;
+          u_charAge(codePoint, age);
+          digit = age[0] < 6 || (age[0] == 6 && age[1] <= 2)
+              ? u_digit(codePoint, 10)
+              : -1;
+          length = pos;
+        }
+        if (digit < 0 || digit > 9) {
+          break;
+        }
+        value = value * 10 + digit;
+        if (value > int64_t{std::numeric_limits<int32_t>::max()} + negative) {
+          return ErrorCode::PARSE_DIGIT_ERROR;
+        }
+        text.remove_prefix(length);
+        ++digits;
+      }
+      if (digits == 0) {
+        return ErrorCode::PARSE_DIGIT_ERROR;
+      }
+      if (negative) {
+        value = -value;
+      }
+      if (field == UCAL_YEAR || field == UCAL_YEAR_WOY) {
+        ambiguousYear = -1;
+        if (!negative && token.pattern.minRepresentDigits <= 2 && digits == 2) {
+          const auto startYear =
+              util::toCivilDateTime(
+                  Timestamp::fromMillis(twoDigitYearStartMillis_))
+                  .date.year;
+          value += (startYear / 100) * 100;
+          if (value < startYear) {
+            value += 100;
+          } else if (value == startYear) {
+            ambiguousYear = field;
+          }
+        }
+      } else if (field == UCAL_MONTH) {
+        --value;
+      } else if (field == UCAL_DAY_OF_WEEK && value >= 1 && value <= 7) {
+        value = value % 7 + 1;
+      } else if (
+          specifier == DateTimeFormatSpecifier::CLOCK_HOUR_OF_DAY &&
+          value == 24) {
+        value = 0;
+      } else if (
+          specifier == DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY &&
+          value == 12) {
+        value = 0;
+      }
+    } else {
+      auto match = [&](const auto& names) {
+        for (int32_t i = 0; i < std::size(names); ++i) {
+          if (startsWithIgnoreCase(text, names[i])) {
+            text.remove_prefix(names[i].size());
+            value = i;
+            return true;
+          }
+        }
+        return false;
+      };
+      bool matched = false;
+      if (field == UCAL_MONTH) {
+        matched = match(monthsFull) || match(monthsShort);
+      } else if (field == UCAL_DAY_OF_WEEK) {
+        matched = match(weekdaysFull) || match(weekdaysShort);
+        ++value;
+      } else if (field == UCAL_AM_PM) {
+        constexpr std::string_view names[] = {"AM", "PM"};
+        matched = match(names);
+      } else if (field == UCAL_ERA) {
+        constexpr std::string_view names[] = {"BC", "AD"};
+        matched = match(names);
+      }
+      if (!matched) {
+        return ErrorCode::PARSE_DIGIT_ERROR;
+      }
+    }
+    if (value < std::numeric_limits<int32_t>::min()) {
+      return ErrorCode::PARSE_DIGIT_ERROR;
+    }
+    fields[field] = value;
+    stamps[field] = index + 1;
+  }
+  if (text.size() == input.size()) {
+    return ErrorCode::PARSE_DIGIT_ERROR;
+  }
+  int64_t millis;
+  if (fields[UCAL_ERA] == 1 && fields[UCAL_YEAR] >= 1583 &&
+      fields[UCAL_YEAR] <= util::kMaxYear && fields[UCAL_MONTH] >= 0 &&
+      fields[UCAL_MONTH] < 12 &&
+      util::isValidDate(
+          fields[UCAL_YEAR], fields[UCAL_MONTH] + 1, fields[UCAL_DATE]) &&
+      !stamps[UCAL_YEAR_WOY] && !stamps[UCAL_WEEK_OF_YEAR] &&
+      !stamps[UCAL_WEEK_OF_MONTH] && !stamps[UCAL_DAY_OF_WEEK_IN_MONTH] &&
+      !stamps[UCAL_DAY_OF_WEEK] && !stamps[UCAL_DAY_OF_YEAR] &&
+      !stamps[UCAL_HOUR] && !stamps[UCAL_AM_PM]) {
+    const __int128_t value =
+        __int128_t{util::daysSinceEpochFromDate(
+            fields[UCAL_YEAR], fields[UCAL_MONTH] + 1, fields[UCAL_DATE])} *
+            86'400'000 +
+        int64_t{fields[UCAL_HOUR_OF_DAY]} * 3'600'000 +
+        int64_t{fields[UCAL_MINUTE]} * 60'000 +
+        int64_t{fields[UCAL_SECOND]} * 1000 + fields[UCAL_MILLISECOND];
+    if (value < std::numeric_limits<int64_t>::min() ||
+        value > std::numeric_limits<int64_t>::max()) {
+      return ErrorCode::YEAR_OUT_OF_RANGE;
+    }
+    millis = value;
+  } else {
+    auto& calendar = simpleDateCalendar();
+    calendar.clear();
+    const bool weekYear = stamps[UCAL_YEAR_WOY] > stamps[UCAL_YEAR];
+    auto rank = [&](int32_t field, bool complete) {
+      const auto stamp = stamps[field];
+      const bool needsWeekday = field == UCAL_WEEK_OF_YEAR ||
+          field == UCAL_WEEK_OF_MONTH || field == UCAL_DAY_OF_WEEK_IN_MONTH;
+      const auto score = needsWeekday
+          ? (complete ? (stamp && stamps[UCAL_DAY_OF_WEEK]
+                             ? std::max(stamp, stamps[UCAL_DAY_OF_WEEK])
+                             : 0)
+                      : (field == UCAL_DAY_OF_WEEK_IN_MONTH
+                             ? std::max(stamp, stamps[UCAL_DAY_OF_WEEK])
+                             : stamp))
+          : stamp;
+      return std::pair(score, stamp);
+    };
+    int32_t selected = UCAL_DATE;
+    for (bool complete : {true, false}) {
+      for (auto field :
+           {UCAL_DATE,
+            UCAL_WEEK_OF_MONTH,
+            UCAL_DAY_OF_WEEK_IN_MONTH,
+            UCAL_DAY_OF_YEAR,
+            UCAL_WEEK_OF_YEAR}) {
+        if (rank(field, complete) > rank(selected, complete)) {
+          selected = field;
+        }
+      }
+      if (rank(selected, complete).first) {
+        break;
+      }
+    }
+    const bool weekDate = weekYear || selected == UCAL_WEEK_OF_YEAR;
+    if (stamps[UCAL_HOUR_OF_DAY] &&
+        (!stamps[UCAL_HOUR] || !stamps[UCAL_AM_PM] ||
+         std::max(stamps[UCAL_HOUR], stamps[UCAL_AM_PM]) <
+             stamps[UCAL_HOUR_OF_DAY])) {
+      stamps[UCAL_HOUR] = stamps[UCAL_AM_PM] = 0;
+    } else if (stamps[UCAL_HOUR] || stamps[UCAL_AM_PM]) {
+      stamps[UCAL_HOUR_OF_DAY] = 0;
+    }
+    auto setFields = [&] {
+      for (int32_t field = 0; field < UCAL_FIELD_COUNT; ++field) {
+        if (!stamps[field] || field == UCAL_YEAR_WOY) {
+          continue;
+        }
+        if ((field == UCAL_DATE || field == UCAL_DAY_OF_YEAR ||
+             field == UCAL_WEEK_OF_YEAR || field == UCAL_WEEK_OF_MONTH ||
+             field == UCAL_DAY_OF_WEEK_IN_MONTH) &&
+            field != selected) {
+          continue;
+        }
+        if ((field == UCAL_DAY_OF_WEEK &&
+             (selected == UCAL_DATE || selected == UCAL_DAY_OF_YEAR)) ||
+            (field == UCAL_MONTH &&
+             (selected == UCAL_DAY_OF_YEAR || selected == UCAL_WEEK_OF_YEAR))) {
+          continue;
+        }
+        calendar.set(static_cast<UCalendarDateFields>(field), fields[field]);
+      }
+    };
+    if (weekDate) {
+      const int32_t year = fields[weekYear ? UCAL_YEAR_WOY : UCAL_YEAR];
+      int64_t week = stamps[UCAL_WEEK_OF_YEAR] ? fields[UCAL_WEEK_OF_YEAR] : 1;
+      int64_t day = stamps[UCAL_DAY_OF_WEEK] ? fields[UCAL_DAY_OF_WEEK] : 1;
+      if (weekYear && (day < 1 || day > 7)) {
+        int64_t normalized = (day - 1) % 7;
+        if (normalized < 0) {
+          normalized += 7;
+        }
+        week += (day - 1 - normalized) / 7;
+        day = (normalized + 1) % 7 + 1;
+      }
+      calendar.set(UCAL_YEAR, year);
+      int32_t era = fields[UCAL_ERA];
+      if (weekYear) {
+        calendar.clear();
+        calendar.set(UCAL_ERA, fields[UCAL_ERA]);
+        calendar.set(UCAL_YEAR, fields[UCAL_YEAR]);
+        setFields();
+        UErrorCode status = U_ZERO_ERROR;
+        era = calendar.get(UCAL_ERA, status);
+        if (U_FAILURE(status)) {
+          return ErrorCode::YEAR_OUT_OF_RANGE;
+        }
+        calendar.clear();
+        calendar.set(UCAL_YEAR, year);
+      }
+      calendar.set(UCAL_ERA, era);
+      calendar.set(UCAL_MONTH, 0);
+      calendar.set(UCAL_DATE, 1);
+      UErrorCode status = U_ZERO_ERROR;
+      const auto first = calendar.getTime(status);
+      const int32_t weekday = calendar.get(UCAL_DAY_OF_WEEK, status);
+      if (U_FAILURE(status)) {
+        return ErrorCode::YEAR_OUT_OF_RANGE;
+      }
+      const int64_t days =
+          (week - 1) * 7 + ((day - 1) % 7 + 7) % 7 - (weekday - 1);
+      calendar.setTime(first + days * 86'400'000, status);
+      for (auto field :
+           {UCAL_YEAR,
+            UCAL_YEAR_WOY,
+            UCAL_MONTH,
+            UCAL_DATE,
+            UCAL_DAY_OF_YEAR,
+            UCAL_WEEK_OF_YEAR,
+            UCAL_WEEK_OF_MONTH,
+            UCAL_DAY_OF_WEEK,
+            UCAL_DAY_OF_WEEK_IN_MONTH,
+            UCAL_ERA}) {
+        stamps[field] = 0;
+      }
+    }
+    setFields();
+    UErrorCode status = U_ZERO_ERROR;
+    const auto resolved = calendar.getTime(status);
+    if (U_FAILURE(status)) {
+      return ErrorCode::DAY_OUT_OF_RANGE;
+    }
+    millis = resolved;
+  }
+  const auto resolvedMillis = ambiguousYear < 0
+      ? millis
+      : (offset ? millis - int64_t{*offset} * 1000
+                : simpleDateTimeToUtc(Timestamp::fromMillis(millis), timezone)
+                      .toMillis());
+  if (ambiguousYear >= 0 && resolvedMillis < twoDigitYearStartMillis_) {
+    auto& calendar = simpleDateCalendar();
+    UErrorCode status = U_ZERO_ERROR;
+    calendar.setTime(millis, status);
+    calendar.add(UCAL_YEAR, 100, status);
+    const auto resolved = calendar.getTime(status);
+    if (U_FAILURE(status)) {
+      return ErrorCode::YEAR_OUT_OF_RANGE;
+    }
+    millis = resolved;
+  }
+  return DateTimeResult{
+      Timestamp::fromMillis(millis),
+      offset && std::abs(*offset) <= 14 * 3600 ? tz::getTimeZoneID(*offset / 60)
+                                               : -1,
+      offset};
+}
 
 uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
   uint32_t size = 0;
@@ -1416,6 +2020,7 @@ uint32_t DateTimeFormatter::maxResultSize(const tz::TimeZone* timezone) const {
       continue;
     }
     if (!::bytedance::bolt::kSparkCompatible &&
+        type_ != DateTimeFormatterType::SIMPLE_DATE_FORMAT &&
         isSparkOnlyFormatSpecifier(token.pattern.specifier)) {
       BOLT_UNSUPPORTED(
           "format is not supported for specifier {}", token.pattern.specifier);
@@ -1524,16 +2129,51 @@ int32_t DateTimeFormatter::format(
     TimePolicy timePolicy,
     bool isPrecision,
     const std::optional<std::string>& zeroOffsetText) const {
+  const bool simple = type_ == DateTimeFormatterType::SIMPLE_DATE_FORMAT;
+  if (simple) {
+    timePolicy = TimePolicy::LEGACY;
+  }
   Timestamp t = timestamp;
   int64_t offset = 0;
-  if (timezone != nullptr) {
+  if (timezone != nullptr && !(simple && timezone->id() == 0)) {
     const auto utcSeconds = timestamp.getSeconds();
-    t.toTimezone(*timezone);
-
+    if (simple && timezone->offset()) {
+      t = Timestamp(
+          utcSeconds + timezone->offset()->count() * 60, t.getNanos());
+    } else if (simple && utcSeconds < -2'208'988'800) {
+      t = Timestamp(
+          utcSeconds + simpleTimeZoneOffsets(timezone).first, t.getNanos());
+    } else {
+      t.toTimezone(*timezone);
+    }
     offset = t.getSeconds() - utcSeconds;
   }
-  const auto civilDateTime =
-      util::toCivilDateTime(t, allowOverflow, isPrecision);
+  auto civilDateTime = util::toCivilDateTime(t, allowOverflow, isPrecision);
+  bool calendarInitialized = false;
+  auto calendarField = [&](UCalendarDateFields field) {
+    auto& calendar = simpleDateCalendar();
+    UErrorCode status = U_ZERO_ERROR;
+    if (!calendarInitialized) {
+      BOLT_USER_CHECK_LE(
+          std::abs(static_cast<double>(t.toMillis())),
+          8.64e15,
+          "Date outside supported calendar range");
+      calendar.setTime(t.toMillis(), status);
+      calendarInitialized = true;
+    }
+    const auto value = calendar.get(field, status);
+    BOLT_USER_CHECK(U_SUCCESS(status), "Date outside supported calendar range");
+    return value;
+  };
+  if (simple && civilDateTime.date.year <= 1582) {
+    civilDateTime.date.year = calendarField(UCAL_YEAR);
+    if (calendarField(UCAL_ERA) == 0) {
+      civilDateTime.date.year = 1 - civilDateTime.date.year;
+    }
+    civilDateTime.date.month = calendarField(UCAL_MONTH) + 1;
+    civilDateTime.date.day = calendarField(UCAL_DATE);
+    civilDateTime.dayOfYear = calendarField(UCAL_DAY_OF_YEAR);
+  }
   const auto& calDate = civilDateTime.date;
   const auto& durationInTheDay = civilDateTime.time;
   const auto weekdayNum = civilDateTime.weekday;
@@ -1552,10 +2192,32 @@ int32_t DateTimeFormatter::format(
       result += token.literal.size();
     } else {
       if (!::bytedance::bolt::kSparkCompatible &&
+          type_ != DateTimeFormatterType::SIMPLE_DATE_FORMAT &&
           isSparkOnlyFormatSpecifier(token.pattern.specifier)) {
         BOLT_UNSUPPORTED(
             "format is not supported for specifier {}",
             token.pattern.specifier);
+      }
+      if (simple &&
+          (token.pattern.specifier ==
+               DateTimeFormatSpecifier::WEEK_OF_WEEK_YEAR ||
+           token.pattern.specifier == DateTimeFormatSpecifier::WEEK_OF_MONTH ||
+           token.pattern.specifier ==
+               DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH)) {
+        int32_t value = calendarField(static_cast<UCalendarDateFields>(
+            simpleCalendarField(token.pattern.specifier)));
+        if (calDate.year == 1582 && calDate.month == 10 && calDate.day >= 15 &&
+            token.pattern.specifier !=
+                DateTimeFormatSpecifier::WEEK_OF_WEEK_YEAR) {
+          const int32_t day = calDate.day - 10;
+          value = token.pattern.specifier ==
+                  DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH
+              ? (day - 1) / 7 + 1
+              : day / 7 + 1;
+        }
+        result += padContent(
+            value, '0', token.pattern.minRepresentDigits, maxResultEnd, result);
+        continue;
       }
       switch (token.pattern.specifier) {
         case DateTimeFormatSpecifier::ERA: {
@@ -1634,7 +2296,11 @@ int32_t DateTimeFormatter::format(
           [[fallthrough]];
         case DateTimeFormatSpecifier::YEAR: {
           auto year = calDate.year;
-          if (::bytedance::bolt::kSparkCompatible &&
+          if (simple &&
+              token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR) {
+            year = calendarField(UCAL_YEAR_WOY);
+          } else if (
+              ::bytedance::bolt::kSparkCompatible &&
               token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR) {
             BOLT_USER_CHECK_EQ(
                 timePolicy,
@@ -1650,7 +2316,7 @@ int32_t DateTimeFormatter::format(
             }
             year = weekYear;
           }
-          if (::bytedance::bolt::kSparkCompatible && year <= 0 &&
+          if ((simple || ::bytedance::bolt::kSparkCompatible) && year <= 0 &&
               (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
             // for spark compatibility, year should be the positive
             // year-of-era for LEGACY policy or when the pattern has an Era:
@@ -1863,6 +2529,15 @@ int32_t DateTimeFormatter::format(
           break;
 
         case DateTimeFormatSpecifier::FRACTION_OF_SECOND: {
+          if (simple) {
+            result += padContent(
+                durationInTheDay.nanosecond / 1'000'000,
+                '0',
+                token.pattern.minRepresentDigits,
+                maxResultEnd,
+                result);
+            break;
+          }
           const auto& piece = formatFractionOfSecond(
               durationInTheDay.nanosecond, token.pattern.minRepresentDigits);
           std::memcpy(result, piece.data(), piece.length());
@@ -1870,6 +2545,32 @@ int32_t DateTimeFormatter::format(
         } break;
 
         case DateTimeFormatSpecifier::TIMEZONE: {
+          if (simple) {
+            std::string_view piece;
+            std::string fixed;
+            if (timezone && timezone->id() != 0 && timezone->offset()) {
+              fixed = "GMT" + timezone->name();
+              piece = fixed;
+            } else {
+              const auto& names = tz::getTimeZoneNames().at(
+                  !timezone || timezone->id() == 0 ? "UTC" : timezone->name());
+              const bool daylight = timezone && timezone->tz() &&
+                  timestamp.getSeconds() >= -2'208'988'800 &&
+                  timezone->tz()
+                          ->get_info(::date::sys_seconds(
+                              std::chrono::seconds(timestamp.getSeconds())))
+                          .save.count() != 0;
+              piece = token.pattern.minRepresentDigits < 4
+                  ? (daylight ? names.daylightTimeAbbreviation
+                              : names.standardTimeAbbreviation)
+                  : (daylight ? names.daylightTimeLongName
+                              : names.standardTimeLongName);
+            }
+            BOLT_CHECK_LE(piece.size(), maxResultEnd - result);
+            std::memcpy(result, piece.data(), piece.size());
+            result += piece.size();
+            break;
+          }
           // TODO: implement short name time zone, need a map from full name to
           // short name
           if (token.pattern.minRepresentDigits <= 3) {
@@ -1886,10 +2587,20 @@ int32_t DateTimeFormatter::format(
         case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601:
         case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601_NO_Z:
         case DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822:
-          result += appendJavaTimezoneOffset(offset, token.pattern, result);
+          if (simple && token.pattern.minRepresentDigits == 1 && offset != 0) {
+            *result++ = offset < 0 ? '-' : '+';
+            result += padContent(
+                std::abs(offset) / 3600, '0', 2, maxResultEnd, result);
+          } else {
+            result += appendJavaTimezoneOffset(offset, token.pattern, result);
+          }
           break;
         case DateTimeFormatSpecifier::TIMEZONE_ID:
         case DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID: {
+          if (simple) {
+            result += appendTimezoneOffset(offset, result, false);
+            break;
+          }
           // Zone: 'Z' outputs offset without a colon, 'ZZ' outputs the offset
           // with a colon, 'ZZZ' or more outputs the zone id.
           if (offset == 0 && zeroOffsetText.has_value()) {
@@ -1941,7 +2652,38 @@ int32_t DateTimeFormatter::format(
   return resultSize;
 }
 
+DateTimeResult DateTimeFormatter::parseToUtc(
+    const std::string_view& input,
+    const tz::TimeZone* timezone) const {
+  const bool simple = type_ == DateTimeFormatterType::SIMPLE_DATE_FORMAT;
+  auto parsed = simple ? parseSimpleDateFormat(input, timezone) : parse(input);
+  if (parsed.hasError()) {
+    return parsed;
+  }
+  auto timestamp = parsed.value().timestamp;
+  if (auto offset = parsed.timezoneOffsetSeconds()) {
+    timestamp =
+        Timestamp(timestamp.getSeconds() - *offset, timestamp.getNanos());
+  } else {
+    if (parsed.value().timezoneId >= 0) {
+      timezone = tz::locateZone(parsed.value().timezoneId);
+    }
+    if (simple) {
+      timestamp = simpleDateTimeToUtc(timestamp, timezone);
+    } else if (timezone) {
+      timestamp = Timestamp(
+          timezone->to_sys(std::chrono::seconds(timestamp.getSeconds()))
+              .count(),
+          timestamp.getNanos());
+    }
+  }
+  return DateTimeResult{timestamp, 0};
+}
+
 DateTimeResult DateTimeFormatter::parse(const std::string_view& input) const {
+  if (UNLIKELY(type_ == DateTimeFormatterType::SIMPLE_DATE_FORMAT)) {
+    return parseSimpleDateFormat(input);
+  }
   Date date;
   const char* cur = input.data();
   const char* end = cur + input.size();
@@ -2282,11 +3024,17 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
 DateTimeResult DateTimeFormatter::parse(
     const std::string_view& input,
     TimePolicy timeParserPolicy) const {
+  if (UNLIKELY(type_ == DateTimeFormatterType::SIMPLE_DATE_FORMAT)) {
+    return parseSimpleDateFormat(input);
+  }
   return parseImpl<false>(input, timeParserPolicy);
 }
 
 DateTimeResult DateTimeFormatter::parseWithNanosecondPrecision(
     const std::string_view& input) const {
+  if (UNLIKELY(type_ == DateTimeFormatterType::SIMPLE_DATE_FORMAT)) {
+    return parseSimpleDateFormat(input);
+  }
   return parseImpl<true>(input, TimePolicy::CORRECTED);
 }
 
@@ -2596,7 +3344,8 @@ std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
 
 std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
     const std::string_view& format) {
-  return buildPatternDateTimeFormatter(format, DateTimeFormatterType::SPARK);
+  return buildPatternDateTimeFormatter(
+      format, DateTimeFormatterType::SPARK_CORRECTED);
 }
 
 std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(
@@ -2710,10 +3459,12 @@ std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(
   return builder.setType(DateTimeFormatterType::HIVE).build();
 }
 
-// https://docs.oracle.com/javase/8/docs/api/java/text/SimpleDateFormat.html
-std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
-    const std::string_view& format) {
-  if (format.empty()) {
+namespace {
+std::shared_ptr<DateTimeFormatter> buildLegacyDateTimeFormatter(
+    const std::string_view& format,
+    DateTimeFormatterType type) {
+  const bool simple = type == DateTimeFormatterType::SIMPLE_DATE_FORMAT;
+  if (format.empty() && !simple) {
     BOLT_USER_FAIL("Invalid pattern specification");
   }
 
@@ -2734,7 +3485,7 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
       } else {
         // Case 2: find closing single quote
         int64_t count = numLiteralChars(startTokenPtr + 1, end);
-        if (count == -1) {
+        if (count == -1 || (simple && startTokenPtr + count + 1 >= end)) {
           BOLT_USER_FAIL("No closing single quote for literal");
         } else {
           for (int64_t i = 1; i <= count; i++) {
@@ -2752,6 +3503,15 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
       while (cur < end && *startTokenPtr == *cur) {
         ++count;
         ++cur;
+      }
+      if (simple &&
+          ((*startTokenPtr >= 'A' && *startTokenPtr <= 'Z') ||
+           (*startTokenPtr >= 'a' && *startTokenPtr <= 'z'))) {
+        BOLT_USER_CHECK(
+            std::string_view("GyYMLwWDdFEuaHkKhmsSzZX").find(*startTokenPtr) !=
+                std::string_view::npos,
+            "Illegal pattern character: {}",
+            *startTokenPtr);
       }
       switch (*startTokenPtr) {
         case 'G':
@@ -2779,6 +3539,11 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
         case 'D':
           builder.appendDayOfYear(count);
           break;
+        case 'L':
+          if (!simple) {
+            BOLT_UNSUPPORTED("Specifier L is not supported.");
+          }
+          [[fallthrough]];
         case 'M':
           hasMonth = true;
           if (count <= 2) {
@@ -2791,7 +3556,7 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
           builder.appendDayOfMonth(count);
           break;
         case 'a':
-          if (::bytedance::bolt::kSparkCompatible && count > 1) {
+          if (!simple && ::bytedance::bolt::kSparkCompatible && count > 1) {
             BOLT_USER_FAIL("The am-pm-of-day pattern letter count must be 1.");
           }
           builder.appendHalfDayOfDay();
@@ -2830,6 +3595,11 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
           builder.appendTimeZone(count);
           break;
         case 'X':
+          if (simple) {
+            BOLT_USER_CHECK_LE(count, 3, "Invalid ISO 8601 pattern length");
+            builder.appendISOTimeZoneOffsetId(count, true);
+            break;
+          }
           if (!::bytedance::bolt::kSparkCompatible) {
             BOLT_UNSUPPORTED("Specifier X is not supported.");
           }
@@ -2849,9 +3619,35 @@ std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
   }
 
   BOLT_USER_CHECK(
-      !(hasWeekBasedYear && hasMonth),
+      simple || !(hasWeekBasedYear && hasMonth),
       "Cannot have both week-based year[YYYY] and month[MM] in the pattern for legacy formatter");
-  return builder.setType(DateTimeFormatterType::LEGACY_SPARK).build();
+  return builder.setType(type).build();
+}
+} // namespace
+
+std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(
+    const std::string_view& format) {
+  return buildLegacyDateTimeFormatter(
+      format, DateTimeFormatterType::LEGACY_SPARK);
+}
+
+std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
+    const std::string_view& format,
+    std::optional<Timestamp> twoDigitYearStart) {
+  auto formatter = buildLegacyDateTimeFormatter(
+      format, DateTimeFormatterType::SIMPLE_DATE_FORMAT);
+  if (twoDigitYearStart) {
+    formatter->twoDigitYearStartMillis_ = twoDigitYearStart->toMillis();
+  } else {
+    auto& calendar = simpleDateCalendar();
+    UErrorCode status = U_ZERO_ERROR;
+    calendar.setTime(Timestamp::now().toMillis(), status);
+    calendar.add(UCAL_YEAR, -80, status);
+    const auto start = calendar.getTime(status);
+    BOLT_CHECK(U_SUCCESS(status), "Cannot initialize two-digit year window");
+    formatter->twoDigitYearStartMillis_ = start;
+  }
+  return formatter;
 }
 
 } // namespace bytedance::bolt::functions
