@@ -24,6 +24,7 @@
 
 #include <cstring>
 #include <limits>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,8 +60,8 @@ class CellByteSource {
 
 class MemoryByteSource final : public CellByteSource {
  public:
-  MemoryByteSource(const uint8_t* data, size_t size)
-      : data_(data), size_(size) {}
+  explicit MemoryByteSource(std::span<const uint8_t> bytes)
+      : data_(bytes.data()), size_(bytes.size()) {}
 
   bool read(void* out, size_t n) override {
     if (size_ - pos_ < n) {
@@ -102,13 +103,11 @@ class CellDecompressor {
  public:
   virtual ~CellDecompressor() = default;
 
-  /// Decompresses data into exactly decodedSize bytes at out; false when the
-  /// input cannot be decoded or produces a different length.
+  /// Decompresses `in` into exactly out.size() bytes at `out`; false when
+  /// the input cannot be decoded or produces a different length.
   virtual bool decompress(
-      const uint8_t* data,
-      size_t size,
-      uint8_t* out,
-      size_t decodedSize) = 0;
+      std::span<const uint8_t> in,
+      std::span<uint8_t> out) = 0;
 };
 
 /// Decodes ColumnarPayloads of one schema into RowVectors, streaming: a
@@ -146,14 +145,15 @@ class CellPayloadDecoder {
   bool readPayload(CellByteSource& in, uint32_t& rowCount, std::string& error);
 
   /// Opens the payload another decoder, `source`, read for this decoder's
-  /// columns, column c being source's sourceColumns[c], of the same type, at
+  /// columns, column c being source's sourceColumns[c] - one entry per
+  /// column of this decoder - of the same type, at
   /// `positions` positions each: they come out through appendRows() as this
   /// decoder's rows, and `source` reads no other payload until they are all
   /// appended. The previous payload must be fully appended. On malformed
   /// input returns false with `error` set.
   bool openPayload(
       const CellPayloadDecoder& source,
-      const uint32_t* sourceColumns,
+      std::span<const uint32_t> sourceColumns,
       uint32_t positions,
       std::string& error);
 
@@ -475,12 +475,12 @@ uint64_t appendPayloadPrefix(
 /// Bytes of one partition's resident cells, all streams together.
 uint64_t residentBytes(const CellWindowInput& in, uint32_t pid);
 
-/// Writes a run header at `out`, which holds combinedRunHeaderBytes().
+/// Writes a run header at `out`, which holds combinedRunHeaderBytes() of
+/// the decodedSizes.size() streams.
 void writeCombinedRunHeader(
     char* out,
     RunLayout layout,
     uint64_t stored,
-    const uint64_t* decodedSizes,
-    uint32_t numStreams);
+    std::span<const uint64_t> decodedSizes);
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <span>
 #include <vector>
 
 #include "bolt/shuffle/sparksql/cell/CellNestedLayout.h"
@@ -82,12 +83,12 @@ class CellNestedShredder {
 
   /// The rows' columns as prepared, per layout column: what the dictionary
   /// probe reads.
-  const DecodedVector* decoded() const {
-    return decoded_.data();
+  std::span<const DecodedVector> decoded() const {
+    return decoded_;
   }
 
-  const NullClass* nullClass() const {
-    return nullClass_.data();
+  std::span<const NullClass> nullClass() const {
+    return nullClass_;
   }
 
   /// Whether a layout column has the rows' positions.
@@ -96,8 +97,11 @@ class CellNestedShredder {
   }
 
   /// Splits the prepared batch: the rows' columns at once, committing the
-  /// rows, then every container's elements.
-  void split(const uint32_t* row2Partition, const uint32_t* partition2RowCount);
+  /// rows, then every container's elements. `row2Partition` has an entry
+  /// per prepared row, `partition2RowCount` one per partition.
+  void split(
+      std::span<const uint32_t> row2Partition,
+      std::span<const uint32_t> partition2RowCount);
 
   /// Time spent shredding since the last call, the splitter's own excluded.
   uint64_t takeShredTimeNs() {

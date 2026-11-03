@@ -19,6 +19,7 @@
 #include <folly/Function.h>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -232,11 +233,11 @@ class RunCompressor {
   /// of its kind stored without a try.
   void recordOutcome(uint32_t& skip, bool shrank) const;
 
-  /// Writes the run uncompressed: kCombinedUncompressed.
+  /// Writes the run of sizes.size() streams uncompressed:
+  /// kCombinedUncompressed.
   void storeRun(
       RunSink& sink,
-      uint32_t numStreams,
-      const uint64_t* sizes,
+      std::span<const uint64_t> sizes,
       RunStreamVisitor visit);
 
   /// Counts a frame of `bytes`, compressed into `stored` bytes (0: stored

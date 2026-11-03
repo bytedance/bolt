@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <folly/CPortability.h>
@@ -464,17 +465,14 @@ class NullCells {
         kNullRecordBytes * (size_t{columns_[col].progress[pid].moved} + 1);
   }
 
-  /// Writes the null records of partition pid's columns cols[0..numCols),
+  /// Writes the null records of partition pid's columns `cols`,
   /// each one summarize() found kRawNull, at `out`: per column in turn,
   /// recordsBytes() of them - its record count, then its cells as records
   /// in row order. The columns' cells are read in step, each cell's
   /// predecessor fetched while the other columns' cells are written, so
   /// that their cache misses overlap.
-  void emitRecords(
-      uint32_t pid,
-      const uint32_t* cols,
-      uint32_t numCols,
-      uint8_t* out) const;
+  void emitRecords(uint32_t pid, std::span<const uint32_t> cols, uint8_t* out)
+      const;
 
   /// Drops every column's state and cells (window seal).
   void reset();

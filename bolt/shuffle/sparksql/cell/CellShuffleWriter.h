@@ -17,6 +17,7 @@
 #pragma once
 
 #include <array>
+#include <span>
 #include <string>
 
 #include "bolt/vector/ComplexVector.h"
@@ -135,8 +136,8 @@ class CellShuffleWriter final : public CompositeShuffleWriter {
   /// `decoded` and `nullClass` hold them.
   void probeDictionary(
       uint32_t numRows,
-      const DecodedVector* decoded,
-      const NullClass* nullClass);
+      std::span<const DecodedVector> decoded,
+      std::span<const NullClass> nullClass);
   /// The allocator's ReserveChunkFn: reserves a chunk's memory within
   /// cellMemorySpillBytes. Locally, when it cannot, it spills the largest
   /// partitions until half the cell data is covered, and the growth then

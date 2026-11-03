@@ -220,7 +220,7 @@ void CellNestedShredder::followSeals() {
   // Partitions with positions below the rows hold rows: a partition the
   // seal left without rows had its payload closed.
   seals_ = splitter_.sealCount();
-  const uint32_t* rows = splitter_.windowRowCounts();
+  const auto rows = splitter_.windowRowCounts();
   for (uint32_t s = 1; s < layout_.numSpaces(); ++s) {
     uint32_t* counts = counts_[s];
     uint32_t most = 0;
@@ -513,8 +513,10 @@ bool CellNestedShredder::fitsWindow() {
 }
 
 void CellNestedShredder::split(
-    const uint32_t* row2Partition,
-    const uint32_t* partition2RowCount) {
+    std::span<const uint32_t> row2Partition,
+    std::span<const uint32_t> partition2RowCount) {
+  BOLT_CHECK_EQ(row2Partition.size(), static_cast<size_t>(numRows_));
+  BOLT_CHECK_EQ(partition2RowCount.size(), numPartitions_);
   const uint64_t start = currentTimeNs();
   busy_ = true;
   SCOPE_EXIT {
@@ -531,28 +533,28 @@ void CellNestedShredder::split(
   for (const uint32_t col : rows.wireColumns) {
     someNulls = someNulls || nullClass_[col] == NullClass::kSomeNulls;
   }
+  const uint32_t* pids = row2Partition.data();
   uint32_t* rowIndex = nullptr;
   if (someNulls) {
     rowIndex = scratch<uint32_t>(rowIndex_, numRows_);
     uint32_t* elementCounts = elementCounts_->asMutable<uint32_t>();
     for (vector_size_t row = 0; row < numRows_; ++row) {
-      rowIndex[row] = elementCounts[row2Partition[row]]++;
+      rowIndex[row] = elementCounts[pids[row]]++;
     }
     std::fill_n(elementCounts, numPartitions_, 0);
   }
   SplitBatch batch;
-  batch.decoded = decoded_.data();
+  batch.decoded = decoded_;
   batch.row2Partition = row2Partition;
   batch.partition2RowCount = partition2RowCount;
-  batch.nullClass = nullClass_.data();
-  batch.numRows = numRows_;
-  batch.rowIndexInPid = rowIndex;
-  batch.columns = rows.wireColumns.data();
-  batch.numColumns = static_cast<uint32_t>(rows.wireColumns.size());
+  batch.nullClass = nullClass_;
+  if (rowIndex != nullptr) {
+    batch.rowIndexInPid = {rowIndex, row2Partition.size()};
+  }
+  batch.columns = rows.wireColumns;
   wireColumns(batch);
 
-  const Entries entries{
-      row2Partition, nullptr, 0, static_cast<uint32_t>(numRows_), 0};
+  const Entries entries{pids, nullptr, 0, static_cast<uint32_t>(numRows_), 0};
   for (const uint32_t container : rows.containers) {
     splitElements(container, entries);
   }
@@ -722,14 +724,14 @@ void CellNestedShredder::splitElementBatch(
   }
   uint32_t* counts = counts_[spaceIndex];
   SplitBatch batch;
-  batch.decoded = decoded_.data();
-  batch.row2Partition = pids;
-  batch.partition2RowCount = elementCounts;
-  batch.nullClass = nullClass_.data();
-  batch.numRows = elements.size;
-  batch.rowIndexInPid = rowIndexInPid;
-  batch.columns = space.wireColumns.data();
-  batch.numColumns = static_cast<uint32_t>(space.wireColumns.size());
+  batch.decoded = decoded_;
+  batch.row2Partition = {pids, elements.size};
+  batch.partition2RowCount = {elementCounts, numPartitions_};
+  batch.nullClass = nullClass_;
+  if (rowIndexInPid != nullptr) {
+    batch.rowIndexInPid = {rowIndexInPid, elements.size};
+  }
+  batch.columns = space.wireColumns;
   batch.positionBase = counts;
   wireColumns(batch);
   // Committed before the space's next element batch splits, which starts
