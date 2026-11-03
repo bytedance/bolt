@@ -518,4 +518,23 @@ INSTANTIATE_TEST_SUITE_P(
     regexpExtractImplementationName);
 
 } // namespace
+TEST_F(FlinkICURegexpExtractTest, malformedUtf8) {
+  for (const auto& input :
+       {std::string("a\xff"
+                    "suffix"),
+        std::string("a long prefix\xff"
+                    "suffix")}) {
+    EXPECT_EQ(
+        "suffix",
+        evaluateOnce<std::string>(
+            "icu_regexp_extract(c0, '(suffix)$', 1)",
+            std::optional<std::string>(input)));
+  }
+  EXPECT_EQ(
+      "\xef\xbf\xbd",
+      evaluateOnce<std::string>(
+          "icu_regexp_extract(c0, '(.)', 1)",
+          std::optional<std::string>("\xff")));
+}
+
 } // namespace bytedance::bolt::functions::flinksql::test

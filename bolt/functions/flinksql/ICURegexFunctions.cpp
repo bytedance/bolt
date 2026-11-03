@@ -153,6 +153,10 @@ bool applyRegex(
     result.setNoCopy(row, StringView(nullptr, 0));
     return false;
   }
+  if (regex.substituted_) {
+    writeUnicode(result, row, regex.text_.tempSubStringBetween(start, end));
+    return false;
+  }
   const auto startIndex = stringCore::char16IndexToByteIndex(
       regex.text_.getBuffer(), input.size(), start);
   const auto resultSize = stringCore::char16IndexToByteIndex(
