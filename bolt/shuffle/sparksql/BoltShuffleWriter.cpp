@@ -282,9 +282,23 @@ ShuffleWriterType decideBoltShuffleWriterType(
 
   int numPartitions = options.partitionWriterOptions.numPartitions;
   bool supportAdaptive = supportAdaptiveShuffleWriter(options.partitioning);
-  // 0 is adaptive strategy, > 0 means shuffle type forced
+  // 0 is adaptive strategy, > 0 means shuffle type forced; preferCellShuffle
+  // takes priority over a forced V1 or V2.
   if (options.forceShuffleWriterType && supportAdaptive) {
-    return (ShuffleWriterType)options.forceShuffleWriterType;
+    const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
+    if (forced != ShuffleWriterType::Cell &&
+        writesCellShuffle(
+            options.partitioning,
+            forced,
+            options.preferCellShuffle,
+            /*isRowBased=*/false)) {
+      LOG(INFO) << __FUNCTION__ << ": preferCellShuffle overrides "
+                << "forceShuffleWriterType = " << options.forceShuffleWriterType
+                << ", shuffle type = "
+                << static_cast<uint32_t>(ShuffleWriterType::Cell);
+      return ShuffleWriterType::Cell;
+    }
+    return forced;
   }
   constexpr int32_t v1PartitionThreholdL1 = 10000;
   constexpr int32_t v1PartitionThreholdL2 = 50000;
@@ -336,7 +350,11 @@ ShuffleWriterType decideBoltShuffleWriterType(
     }
   }
   // The Cell writer needs a pid; the row-based choice returned above.
-  if (supportAdaptive && options.preferCellShuffle) {
+  if (writesCellShuffle(
+          options.partitioning,
+          ShuffleWriterType::Adaptive,
+          options.preferCellShuffle,
+          /*isRowBased=*/false)) {
     type = ShuffleWriterType::Cell;
   }
   LOG(INFO) << __FUNCTION__

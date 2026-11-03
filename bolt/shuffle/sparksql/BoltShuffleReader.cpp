@@ -771,17 +771,15 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
          static_cast<int64_t>(numPartitions_) * schema_->num_fields() >
              rowBasedShuffleThreshold_)) ||
        (shuffleWriterType_ == ShuffleWriterType::RowBased));
-  // Mirror of the writer's choice (and of SparkShuffleReaderNode's): Cell
-  // when forced, or preferred by an adaptive choice that did not pick the
-  // row-based writer, and only under a partitioning with a pid - elsewhere
-  // the writer falls back to V1, which is read here as usual. Cell
-  // payloads are not V1/V2/row payloads: only SparkShuffleReaderNode reads
-  // them.
+  // Mirror of the writer's choice (and of SparkShuffleReaderNode's),
+  // writesCellShuffle(): Cell when forced, or preferred over a forced V1 or
+  // V2 or over an adaptive choice that did not pick the row-based writer,
+  // and only under a partitioning with a pid - elsewhere the writer falls
+  // back to V1, which is read here as usual. Cell payloads are not
+  // V1/V2/row payloads: only SparkShuffleReaderNode reads them.
   BOLT_CHECK(
-      !(supportAdaptiveShuffleWriter(partitioning) &&
-        (shuffleWriterType_ == ShuffleWriterType::Cell ||
-         (shuffleWriterType_ == ShuffleWriterType::Adaptive &&
-          preferCellShuffle_ && !isRowBased))),
+      !writesCellShuffle(
+          partitioning, shuffleWriterType_, preferCellShuffle_, isRowBased),
       "The writer emits Cell payloads here, which are read by "
       "SparkShuffleReaderNode, not by BoltShuffleReader");
   if (!zstdCodec_) {
