@@ -272,8 +272,9 @@ ShuffleWriterType decideBoltShuffleWriterType(
   /*
    * decide shuffle write type based on options.
    *
-   * 1. For partitioning that does not has pid, only support V1, even with force
-   * write type
+   * 0. Cell when writesCellShuffle() says so, under any partitioning.
+   * 1. Otherwise, for partitioning that does not has pid, V1, even with
+   * force write type
    * 2. For partitioning that has pid,
    *   - if column number and partitioner number exceed threshold, use RowBased
    * shuffle.
@@ -284,21 +285,25 @@ ShuffleWriterType decideBoltShuffleWriterType(
   bool supportAdaptive = supportAdaptiveShuffleWriter(options.partitioning);
   // 0 is adaptive strategy, > 0 means shuffle type forced; preferCellShuffle
   // takes priority over a forced V1 or V2.
-  if (options.forceShuffleWriterType && supportAdaptive) {
+  if (options.forceShuffleWriterType) {
     const auto forced = (ShuffleWriterType)options.forceShuffleWriterType;
-    if (forced != ShuffleWriterType::Cell &&
-        writesCellShuffle(
+    if (writesCellShuffle(
             options.partitioning,
             forced,
             options.preferCellShuffle,
             /*isRowBased=*/false)) {
-      LOG(INFO) << __FUNCTION__ << ": preferCellShuffle overrides "
-                << "forceShuffleWriterType = " << options.forceShuffleWriterType
-                << ", shuffle type = "
-                << static_cast<uint32_t>(ShuffleWriterType::Cell);
+      if (forced != ShuffleWriterType::Cell) {
+        LOG(INFO) << __FUNCTION__ << ": preferCellShuffle overrides "
+                  << "forceShuffleWriterType = "
+                  << options.forceShuffleWriterType << ", shuffle type = "
+                  << static_cast<uint32_t>(ShuffleWriterType::Cell);
+      }
       return ShuffleWriterType::Cell;
     }
-    return forced;
+    if (supportAdaptive) {
+      return forced;
+    }
+    // Without a pid, another forced type writes V1, below.
   }
   constexpr int32_t v1PartitionThreholdL1 = 10000;
   constexpr int32_t v1PartitionThreholdL2 = 50000;
@@ -349,8 +354,10 @@ ShuffleWriterType decideBoltShuffleWriterType(
       type = ShuffleWriterType::V2;
     }
   }
-  // The Cell writer needs a pid; the row-based choice returned above.
-  if (writesCellShuffle(
+  // The adaptive choice, unless row-based (returned above); a forced type
+  // reaches here only without a pid, and was not Cell.
+  if (options.forceShuffleWriterType == 0 &&
+      writesCellShuffle(
           options.partitioning,
           ShuffleWriterType::Adaptive,
           options.preferCellShuffle,

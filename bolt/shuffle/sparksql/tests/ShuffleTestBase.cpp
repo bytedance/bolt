@@ -178,11 +178,14 @@ std::string ShuffleTestParam::toString() const {
 }
 
 bool ShuffleTestParam::isSupported() const {
+  // Without a pid, the writer is V1 or Cell (4); a forced V2 or RowBased
+  // would write V1 too, so it adds no case.
+  const bool v1OrCell = shuffleMode <= 1 || shuffleMode == 4;
   if (partitioning == Partitioning::kSingle) {
-    return numPartitions == 1 && shuffleMode <= 1;
+    return numPartitions == 1 && v1OrCell;
   }
   if (partitioning == "rr") {
-    return shuffleMode <= 1;
+    return v1OrCell;
   }
   return true;
 }
