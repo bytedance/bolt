@@ -30,6 +30,7 @@
 
 #include "bolt/exec/VectorHasher.h"
 #include <gtest/gtest.h>
+#include <bit>
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/type/Type.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -236,6 +237,30 @@ TEST_F(VectorHasherTest, flat) {
   for (int32_t i = 0; i < 100; i++) {
     EXPECT_EQ(expected, hashes[i]);
   }
+}
+
+TEST_F(VectorHasherTest, nanPayloadAndSignedZeroHash) {
+  constexpr auto kNanPayloadA = 0x7ff8000000000001ULL;
+  constexpr auto kNanPayloadB = 0x7ff8000000000011ULL;
+  const auto input = makeFlatVector<double>(
+      {std::bit_cast<double>(kNanPayloadA),
+       std::bit_cast<double>(kNanPayloadB),
+       0.0,
+       -0.0});
+  SelectivityVector rows(input->size());
+  auto hasher = VectorHasher::create(DOUBLE(), 0);
+  hasher->decode(*input, rows);
+  raw_vector<uint64_t> hashes(input->size());
+  hasher->hash(rows, false, hashes);
+
+  EXPECT_EQ(hashes[0], hashes[1]);
+  EXPECT_EQ(hashes[2], hashes[3]);
+  EXPECT_NE(hashes[0], hashes[2]);
+  EXPECT_EQ(input->hashValueAt(0), input->hashValueAt(1));
+  EXPECT_EQ(input->hashValueAt(2), input->hashValueAt(3));
+  const auto allHashes = input->hashAll();
+  EXPECT_EQ(allHashes->valueAt(0), allHashes->valueAt(1));
+  EXPECT_EQ(allHashes->valueAt(2), allHashes->valueAt(3));
 }
 
 TEST_F(VectorHasherTest, nonNullConstant) {

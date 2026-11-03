@@ -16,6 +16,9 @@
 
 #include <gtest/gtest.h>
 #include <atomic>
+#include <bit>
+#include <cmath>
+#include <type_traits>
 
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/file/FileSystems.h"
@@ -40,6 +43,84 @@ class HashTableSimdAggregationTest : public OperatorTestBase {
   void SetUp() override {
     OperatorTestBase::SetUp();
     filesystems::registerLocalFileSystem();
+  }
+
+  template <typename T>
+  void testNanPayloadAndSignedZeroKeysWithRehash() {
+    using Bits =
+        std::conditional_t<std::is_same_v<T, float>, uint32_t, uint64_t>;
+    constexpr Bits kNanPayloadA =
+        std::is_same_v<T, float> ? 0x7fc00001ULL : 0x7ff8000000000001ULL;
+    constexpr Bits kNanPayloadB =
+        std::is_same_v<T, float> ? 0x7fc00011ULL : 0x7ff8000000000011ULL;
+    const auto nanA = std::bit_cast<T>(kNanPayloadA);
+    const auto nanB = std::bit_cast<T>(kNanPayloadB);
+    constexpr vector_size_t kFiniteKeys = 4096;
+
+    const auto firstBatch =
+        makeRowVector({"k"}, {makeFlatVector<T>({nanA, 0.0, nanA})});
+    // Exceed the initial hash table capacity while it already contains a NaN.
+    const auto growthBatch =
+        makeRowVector({"k"}, {makeFlatVector<T>(kFiniteKeys, [](auto row) {
+                        return static_cast<T>(row + 1);
+                      })});
+    const auto lastBatch =
+        makeRowVector({"k"}, {makeFlatVector<T>({nanB, -0.0, nanB})});
+    const auto plan = PlanBuilder()
+                          .values({firstBatch, growthBatch, lastBatch})
+                          .singleAggregation({"k"}, {"count(1) AS c"})
+                          .planNode();
+
+    for (const bool simdEnabled : {false, true}) {
+      if (simdEnabled && !process::hasAvx2()) {
+        continue;
+      }
+      SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+      std::shared_ptr<Task> task;
+      const auto result =
+          AssertQueryBuilder(plan)
+              .config(QueryConfig::kHashAdaptivityEnabled, "false")
+              .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+              .maxDrivers(1)
+              .copyResults(pool(), task);
+      const auto stats =
+          toPlanStats(task->taskStats()).at(plan->id()).customStats;
+      ASSERT_GT(stats.at("hashtable.numRehashes").sum, 0);
+      ASSERT_EQ(stats.at("hashtable.hashModeHash").sum, 1);
+
+      EXPECT_EQ(result->size(), kFiniteKeys + 2);
+      const auto* keys = result->childAt(0)->asUnchecked<SimpleVector<T>>();
+      const auto* counts =
+          result->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+      std::vector<bool> seenFiniteKeys(kFiniteKeys, false);
+      int32_t nanGroups{0};
+      int32_t zeroGroups{0};
+      int64_t nanRows{0};
+      int64_t zeroRows{0};
+      for (vector_size_t row = 0; row < result->size(); ++row) {
+        ASSERT_FALSE(keys->isNullAt(row));
+        ASSERT_FALSE(counts->isNullAt(row));
+        const auto key = keys->valueAt(row);
+        if (std::isnan(key)) {
+          ++nanGroups;
+          nanRows += counts->valueAt(row);
+        } else if (key == 0) {
+          ++zeroGroups;
+          zeroRows += counts->valueAt(row);
+        } else {
+          const auto index = static_cast<vector_size_t>(key) - 1;
+          ASSERT_GE(index, 0);
+          ASSERT_LT(index, kFiniteKeys);
+          ASSERT_FALSE(seenFiniteKeys[index]);
+          seenFiniteKeys[index] = true;
+          EXPECT_EQ(counts->valueAt(row), 1);
+        }
+      }
+      EXPECT_EQ(nanGroups, 1);
+      EXPECT_EQ(nanRows, 4);
+      EXPECT_EQ(zeroGroups, 1);
+      EXPECT_EQ(zeroRows, 2);
+    }
   }
 };
 
@@ -163,6 +244,74 @@ TEST_F(HashTableSimdAggregationTest, mixedKeyTypes) {
                       {"k1", "k2", "k3"}, {"sum(v) AS s", "count(v) AS c"})
                   .planNode();
   assertAggregationMatchesScalar(plan, pool());
+}
+
+TEST_F(HashTableSimdAggregationTest, nanPayloadAndSignedZeroKeys) {
+  constexpr auto kNanPayloadA = 0x7ff8000000000001ULL;
+  constexpr auto kNanPayloadB = 0x7ff8000000000011ULL;
+  const auto nanA = std::bit_cast<double>(kNanPayloadA);
+  const auto nanB = std::bit_cast<double>(kNanPayloadB);
+
+  const auto firstBatch =
+      makeRowVector({"k"}, {makeFlatVector<double>({nanA, 0.0, nanA})});
+  const auto secondBatch =
+      makeRowVector({"k"}, {makeFlatVector<double>({nanB, -0.0, nanB})});
+  const auto plan = PlanBuilder()
+                        .values({firstBatch, secondBatch})
+                        .singleAggregation({"k"}, {"count(1) AS c"})
+                        .planNode();
+
+  for (const bool simdEnabled : {false, true}) {
+    if (simdEnabled && !process::hasAvx2()) {
+      continue;
+    }
+    SCOPED_TRACE(fmt::format("SIMD enabled: {}", simdEnabled));
+    const auto result =
+        AssertQueryBuilder(plan)
+            .config(QueryConfig::kHashAdaptivityEnabled, "false")
+            .config(QueryConfig::kSimdHashTableEnabled, simdEnabled)
+            .maxDrivers(1)
+            .copyResults(pool());
+
+    EXPECT_EQ(result->size(), 2);
+    const auto* keys = result->childAt(0)->asUnchecked<SimpleVector<double>>();
+    const auto* counts =
+        result->childAt(1)->asUnchecked<SimpleVector<int64_t>>();
+    int32_t nanGroups{0};
+    int32_t zeroGroups{0};
+    int64_t nanRows{0};
+    int64_t zeroRows{0};
+    for (vector_size_t row = 0; row < result->size(); ++row) {
+      ASSERT_FALSE(keys->isNullAt(row));
+      ASSERT_FALSE(counts->isNullAt(row));
+      const auto key = keys->valueAt(row);
+      if (std::isnan(key)) {
+        ++nanGroups;
+        nanRows += counts->valueAt(row);
+      } else if (key == 0.0) {
+        ++zeroGroups;
+        zeroRows += counts->valueAt(row);
+      } else {
+        FAIL() << "Unexpected grouping key: " << key;
+      }
+    }
+    EXPECT_EQ(nanGroups, 1);
+    EXPECT_EQ(nanRows, 4);
+    EXPECT_EQ(zeroGroups, 1);
+    EXPECT_EQ(zeroRows, 2);
+  }
+}
+
+TEST_F(
+    HashTableSimdAggregationTest,
+    nanPayloadAndSignedZeroKeysWithRehashReal) {
+  testNanPayloadAndSignedZeroKeysWithRehash<float>();
+}
+
+TEST_F(
+    HashTableSimdAggregationTest,
+    nanPayloadAndSignedZeroKeysWithRehashDouble) {
+  testNanPayloadAndSignedZeroKeysWithRehash<double>();
 }
 
 TEST_F(HashTableSimdAggregationTest, distinct) {
