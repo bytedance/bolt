@@ -73,17 +73,15 @@ bool CellShuffleReader::StreamSource::atEnd() const {
 }
 
 bool CellShuffleReader::CodecDecompressor::decompress(
-    const uint8_t* data,
-    size_t size,
-    uint8_t* out,
-    size_t decodedSize) {
+    std::span<const uint8_t> in,
+    std::span<uint8_t> out) {
   const uint64_t start = currentTimeNs();
+  const auto decodedSize = static_cast<int64_t>(out.size());
   const bool ok = codec_->decompress(
-                      data,
-                      static_cast<int64_t>(size),
-                      out,
-                      static_cast<int64_t>(decodedSize)) ==
-      static_cast<int64_t>(decodedSize);
+                      in.data(),
+                      static_cast<int64_t>(in.size()),
+                      out.data(),
+                      decodedSize) == decodedSize;
   decompressTimeNs_ += currentTimeNs() - start;
   return ok;
 }
@@ -191,10 +189,8 @@ bool CellShuffleReader::readCompositeBlock(std::string& error) {
   if (layout == RunLayout::kCombined) {
     resetBuffer(compositeDecoded_, decodedBytes, pool_);
     if (!decompressor_->decompress(
-            compositeStored_->as<uint8_t>(),
-            stored,
-            compositeDecoded_->asMutable<uint8_t>(),
-            decodedBytes)) {
+            {compositeStored_->as<uint8_t>(), stored},
+            {compositeDecoded_->asMutable<uint8_t>(), decodedBytes})) {
       return fail("composite block decompression failed");
     }
     body = compositeDecoded_->as<char>();

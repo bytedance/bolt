@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdio>
+#include <span>
 
 #include "bolt/buffer/Buffer.h"
 #include "bolt/shuffle/sparksql/Options.h"
@@ -35,12 +36,13 @@ struct CellWindowInput {
   const NullCells* nulls;
   const CellLayout* layout;
   /// Per partition: rows and string bytes of its open payload.
-  const uint32_t* rowCounts;
-  const uint64_t* variableBytes;
+  std::span<const uint32_t> rowCounts;
+  std::span<const uint64_t> variableBytes;
   /// Payload encoding tags: ceil(numWireColumns / 8) bytes, one bit per
   /// wire column, set when the column is written in dictionary form. Constant
   /// for the writer's lifetime (the probe decides once).
-  const uint8_t* encodingTags;
+  std::span<const uint8_t> encodingTags;
+  /// Also the length of the per-partition arrays below.
   uint32_t numPartitions;
   /// Per wire column, the column's position count per partition; nullptr,
   /// or a nullptr entry, means rowCounts.
@@ -181,7 +183,7 @@ class LocalCellOutput final : public CellOutput, public PartialSpiller {
   void writeSealedPayload(
       DataFileWriter& out,
       const SealedPayload& payload,
-      const uint8_t* encodingTags);
+      std::span<const uint8_t> encodingTags);
 
   /// Copies one spilled run segment, in its final form, into the data
   /// file.

@@ -62,7 +62,7 @@ bool CellNestedAssembler::beginPayload(CellByteSource& in, std::string& error) {
     const auto& space = layout_.space(s);
     if (!decoders_[s]->openPayload(
             payloadDecoder_,
-            space.columns.data(),
+            space.columns,
             static_cast<uint32_t>(payloadPositions_[s]),
             error)) {
       return false;

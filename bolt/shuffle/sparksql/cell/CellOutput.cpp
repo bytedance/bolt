@@ -183,7 +183,7 @@ void LocalCellOutput::sealWindow(const CellWindowInput& in) {
 void LocalCellOutput::writeSealedPayload(
     DataFileWriter& out,
     const SealedPayload& payload,
-    const uint8_t* encodingTags) {
+    std::span<const uint8_t> encodingTags) {
   const uint32_t rows = payload.rows;
   const auto& segments = payload.segments;
   const uint32_t runCount = static_cast<uint32_t>(segments.size());
@@ -201,8 +201,7 @@ void LocalCellOutput::writeSealedPayload(
       payload.nullOffset,
       scratch_->asMutable<char>() + nullAt,
       payload.nullLength);
-  appendBytes(
-      scratch_, encodingTags, (layout_->numWireColumns() + 7) / 8, pool_);
+  appendBytes(scratch_, encodingTags.data(), encodingTags.size(), pool_);
   // The raw length counts the null body at its decompressed size.
   rawBytesWritten_ += scratch_->size() +
       (payload.nullDecodedSize == 0

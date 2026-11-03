@@ -112,11 +112,8 @@ class CellShuffleReader {
    public:
     explicit CodecDecompressor(Codec* codec) : codec_(codec) {}
 
-    bool decompress(
-        const uint8_t* data,
-        size_t size,
-        uint8_t* out,
-        size_t decodedSize) override;
+    bool decompress(std::span<const uint8_t> in, std::span<uint8_t> out)
+        override;
 
     uint64_t decompressTimeNs() const {
       return decompressTimeNs_;

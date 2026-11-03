@@ -330,17 +330,18 @@ arrow::Status CellShuffleWriter::splitBatch(RowVectorPtr rv) {
     // tiny, or sliced small because its rows are wide - therefore settles
     // on no dictionary rather than deferring; wide rows gain little from
     // 64-byte entries anyway.
-    probeDictionary(numRows, decoded_.data(), nullClass_.data());
+    probeDictionary(numRows, decoded_, nullClass_);
     dictProbed_ = true;
   }
 
   SplitBatch batch;
-  batch.decoded = decoded_.data();
-  batch.row2Partition = row2Partition_.data();
-  batch.partition2RowCount = partition2RowCount_.data();
-  batch.nullClass = nullClass_.data();
-  batch.numRows = numRows;
-  batch.rowIndexInPid = anyNullable ? rowIndexInPid_.data() : nullptr;
+  batch.decoded = decoded_;
+  batch.row2Partition = std::span(row2Partition_).first(numRows);
+  batch.partition2RowCount = partition2RowCount_;
+  batch.nullClass = nullClass_;
+  if (anyNullable) {
+    batch.rowIndexInPid = rowIndexInPid_;
+  }
   splitter_->split(batch);
 
   metrics_.totalInputRowNumber += numRows;
@@ -385,7 +386,8 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
     probeDictionary(numRows, shredder_->decoded(), shredder_->nullClass());
     dictProbed_ = true;
   }
-  shredder_->split(row2Partition_.data(), partition2RowCount_.data());
+  shredder_->split(
+      std::span(row2Partition_).first(numRows), partition2RowCount_);
   metrics_.totalInputRowNumber += numRows;
   metrics_.totalInputBatches += 1;
   inSplit_ = false;
@@ -402,8 +404,8 @@ arrow::Status CellShuffleWriter::splitNested(RowVectorPtr rv) {
 
 void CellShuffleWriter::probeDictionary(
     uint32_t numRows,
-    const DecodedVector* decoded,
-    const NullClass* nullClass) {
+    std::span<const DecodedVector> decoded,
+    std::span<const NullClass> nullClass) {
   const auto& cellOpts = options_.cellOptions;
   if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
     return;
