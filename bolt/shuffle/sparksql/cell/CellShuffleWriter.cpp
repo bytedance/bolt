@@ -410,6 +410,9 @@ void CellShuffleWriter::probeDictionary(
   if (!cellOpts.enableStringDictionary || numRows < kDictMinProbeRows) {
     return;
   }
+  // Per-column decisions, logged together after the loop.
+  std::string enabled;
+  std::string disabled;
   for (uint32_t col = 0; col < layout_.numColumns(); ++col) {
     // Every string column, or a nested layout's at the rows' positions.
     if (!layout_.isStringColumn(col) ||
@@ -458,11 +461,29 @@ void CellShuffleWriter::probeDictionary(
     if (enable) {
       splitter_->enableDictionary(col);
     }
-    VLOG(1) << "CellShuffleWriter dictionary probe: column " << col
-            << (enable ? " ON" : " OFF") << " (ndv=" << seen.size()
-            << (fits ? "" : "+") << ", serializedBytes=" << serialized
-            << ", nonNull=" << nonNull << " of " << numRows << " rows)";
+    auto& list = enable ? enabled : disabled;
+    list += fmt::format(
+        "{}col {} (ndv={}{}, {}B, nonNull={})",
+        list.empty() ? "" : ", ",
+        col,
+        seen.size(),
+        fits ? "" : "+",
+        serialized,
+        nonNull);
   }
+  // The probe runs once per writer, so one line lists every probed column.
+  if (enabled.empty() && disabled.empty()) {
+    return;
+  }
+  std::string parts;
+  if (!enabled.empty()) {
+    parts = "ON " + enabled;
+  }
+  if (!disabled.empty()) {
+    parts += fmt::format("{}OFF {}", parts.empty() ? "" : "; ", disabled);
+  }
+  LOG(INFO) << fmt::format(
+      "CellShuffleWriter dictionary probe ({} rows): {}", numRows, parts);
 }
 
 void CellShuffleWriter::reserveChunk() {
