@@ -390,6 +390,45 @@ TEST_F(FlinkRegexFunctionsTest, literalReplacementUsesUtf8) {
       makeFlatVector<std::string>({"$1😀$1", "$1", "$1bc"}));
 }
 
+TEST_F(FlinkRegexFunctionsTest, literalReplacementAcrossBatches) {
+  auto expression = compileExpression(
+      "flink_regexp_replace(c0,c1,c2)",
+      ROW({"c0", "c1", "c2"}, {VARCHAR(), VARCHAR(), VARCHAR()}));
+  const std::string text = "aaa01234567890123456789";
+  const std::string unicode = "ö😀ö01234567890123456789";
+  VectorPtr retained;
+  for (const auto& pattern : {"a", "missing", "*", "a"}) {
+    auto input = makeRowVector(
+        {makeFlatVector<std::string>({text, unicode}),
+         makeConstant(StringView(pattern), 2),
+         makeConstant(StringView(R"($1\)"), 2)});
+    auto result = evaluate(*expression, input);
+    const bool invalid = std::string_view(pattern) == "*";
+    const bool matching = std::string_view(pattern) == "a";
+    bytedance::bolt::test::assertEqualVectors(
+        makeNullableFlatVector<std::string>(
+            {invalid
+                 ? std::nullopt
+                 : std::optional<std::string>(
+                       matching ? R"($1\$1\$1\01234567890123456789)" : text),
+             invalid ? std::nullopt : std::optional<std::string>(unicode)}),
+        result);
+    if (std::string_view(pattern) == "missing") {
+      EXPECT_EQ(
+          result->asFlatVector<StringView>()->valueAt(0).data(),
+          input->childAt(0)->asFlatVector<StringView>()->valueAt(0).data());
+      retained = result;
+    }
+  }
+  bytedance::bolt::test::assertEqualVectors(
+      makeFlatVector<std::string>({text, unicode}), retained);
+  EXPECT_EQ(
+      std::string("abc\xef\xbf\xbd"),
+      evaluateOnce<std::string>(
+          "flink_regexp_replace(c0,'missing','x')",
+          std::optional<std::string>(std::string("abc\xff", 4))));
+}
+
 TEST_F(FlinkICURegexpExtractTest, variableJavaPatterns) {
   auto input = makeRowVector(
       {makeFlatVector<std::string>({"foobar", "foobar", "ö😀ö"}),

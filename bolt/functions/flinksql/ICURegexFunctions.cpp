@@ -16,7 +16,9 @@
 
 #include "bolt/functions/flinksql/ICURegexFunctions.h"
 
+#include <unicode/ustring.h>
 #include <bit>
+#include <optional>
 
 #include <unicode/localpointer.h>
 #include <unicode/regex.h>
@@ -32,38 +34,115 @@
 namespace bytedance::bolt::functions::flinksql {
 namespace {
 
-icu::LocalPointer<icu::RegexPattern> compileJavaRegex(StringView pattern) {
+using RegexPatternPtr = std::shared_ptr<const icu::RegexPattern>;
+
+RegexPatternPtr compileJavaRegex(StringView pattern) {
   try {
-    return regex::compileRegexPattern(regex::transRegexPattern(pattern));
+    auto compiled =
+        regex::compileRegexPattern(regex::transRegexPattern(pattern));
+    return RegexPatternPtr(compiled.orphan());
   } catch (const BoltUserError&) {
     // Flink returns NULL for invalid patterns.
-    return icu::LocalPointer<icu::RegexPattern>(nullptr);
+    return nullptr;
   }
+}
+
+struct RegexInput {
+  UErrorCode reset(RegexPatternPtr pattern, StringView input) {
+    UErrorCode status = U_ZERO_ERROR;
+    if (pattern != pattern_ || matcher_.isNull()) {
+      matcher_.adoptInstead(nullptr);
+      pattern_ = std::move(pattern);
+      matcher_.adoptInstead(pattern_->matcher(status));
+      if (U_FAILURE(status)) {
+        return status;
+      }
+    }
+    auto* buffer = text_.getBuffer(input.size());
+    if (!buffer) {
+      return U_MEMORY_ALLOCATION_ERROR;
+    }
+    int32_t length = 0;
+    int32_t substitutions = 0;
+    u_strFromUTF8WithSub(
+        buffer,
+        input.size(),
+        &length,
+        input.empty() ? "" : input.data(),
+        input.size(),
+        0xfffd,
+        &substitutions,
+        &status);
+    text_.releaseBuffer(length);
+    substituted_ = substitutions != 0;
+    if (U_SUCCESS(status)) {
+      matcher_->reset(text_);
+    }
+    return status;
+  }
+
+  RegexPatternPtr pattern_;
+  icu::UnicodeString text_;
+  icu::UnicodeString replaced_;
+  icu::LocalPointer<icu::RegexMatcher> matcher_;
+  bool substituted_{false};
+};
+
+void writeUnicode(
+    FlatVector<StringView>& result,
+    vector_size_t row,
+    const icu::UnicodeString& text) {
+  UErrorCode status = U_ZERO_ERROR;
+  int32_t length = 0;
+  u_strToUTF8WithSub(
+      nullptr,
+      0,
+      &length,
+      text.getBuffer(),
+      text.length(),
+      0xfffd,
+      nullptr,
+      &status);
+  BOLT_USER_CHECK(
+      status == U_BUFFER_OVERFLOW_ERROR || U_SUCCESS(status),
+      "Regex result conversion failed: {}",
+      u_errorName(status));
+  exec::StringWriter<> writer(&result, row);
+  writer.resize(length);
+  status = U_ZERO_ERROR;
+  u_strToUTF8WithSub(
+      writer.data(),
+      length,
+      &length,
+      text.getBuffer(),
+      text.length(),
+      0xfffd,
+      nullptr,
+      &status);
+  BOLT_USER_CHECK(
+      U_SUCCESS(status),
+      "Regex result conversion failed: {}",
+      u_errorName(status));
+  writer.resize(length);
+  writer.finalize();
 }
 
 bool applyRegex(
     FlatVector<StringView>& result,
     vector_size_t row,
-    const exec::LocalDecodedVector& inputs,
+    StringView input,
     int32_t groupId,
-    const icu::RegexPattern& regexPattern) {
-  const auto input = inputs->valueAt<StringView>(row);
-  const auto unicodeInput = icu::UnicodeString::fromUTF8(
-      icu::StringPiece(input.data(), input.size()));
-
-  UErrorCode status = U_ZERO_ERROR;
-  icu::LocalPointer<icu::RegexMatcher> matcher(
-      regexPattern.matcher(unicodeInput, status));
+    RegexInput& regex,
+    UErrorCode status) {
+  auto* matcher = regex.matcher_.getAlias();
   if (U_FAILURE(status) || !matcher->find(status) || U_FAILURE(status)) {
     result.setNull(row, true);
     return false;
   }
-
   if (groupId < 0 || groupId > matcher->groupCount()) {
     result.setNull(row, true);
     return false;
   }
-
   const auto start = matcher->start(groupId, status);
   const auto end = matcher->end(groupId, status);
   if (U_FAILURE(status) || start < 0 || end < 0) {
@@ -74,161 +153,150 @@ bool applyRegex(
     result.setNoCopy(row, StringView(nullptr, 0));
     return false;
   }
-
   const auto startIndex = stringCore::char16IndexToByteIndex(
-      unicodeInput.getBuffer(), input.size(), start);
+      regex.text_.getBuffer(), input.size(), start);
   const auto resultSize = stringCore::char16IndexToByteIndex(
-      unicodeInput.getBuffer() + start, input.size(), end - start);
+      regex.text_.getBuffer() + start, input.size(), end - start);
   result.setNoCopy(
       row,
       StringView(input.data() + startIndex, static_cast<int32_t>(resultSize)));
   return !StringView::isInline(resultSize);
 }
 
-inline bool applyRegex(
+bool applyRegex(
     FlatVector<StringView>& result,
     vector_size_t row,
-    const exec::LocalDecodedVector& inputs,
+    StringView input,
     int64_t groupId,
-    const icu::RegexPattern& pattern) {
+    RegexInput& regex,
+    UErrorCode status) {
   return applyRegex(
       result,
       row,
-      inputs,
+      input,
       std::bit_cast<int32_t>(static_cast<uint32_t>(groupId)),
-      pattern);
+      regex,
+      status);
 }
 
 bool applyRegex(
     FlatVector<StringView>& result,
     vector_size_t row,
-    const exec::LocalDecodedVector& inputs,
-    StringView argument,
-    const icu::RegexPattern& pattern) {
-  const auto input = inputs->valueAt<StringView>(row);
-  const auto unicodeInput = icu::UnicodeString::fromUTF8(
-      icu::StringPiece(input.data(), input.size()));
-  UErrorCode status = U_ZERO_ERROR;
-  icu::LocalPointer<icu::RegexMatcher> matcher(
-      pattern.matcher(unicodeInput, status));
+    StringView input,
+    const icu::UnicodeString& replacement,
+    RegexInput& regex,
+    UErrorCode status) {
   BOLT_USER_CHECK(
       U_SUCCESS(status), "Regex matcher failed: {}", u_errorName(status));
-  const auto replacement = icu::UnicodeString::fromUTF8(
-      icu::StringPiece(argument.data(), argument.size()));
-  icu::UnicodeString replaced;
-  int32_t previousEnd = 0;
-  while (matcher->find(status) && U_SUCCESS(status)) {
-    const auto start = matcher->start(status);
-    replaced.append(unicodeInput, previousEnd, start - previousEnd);
-    replaced.append(replacement);
-    previousEnd = matcher->end(status);
-  }
+  auto& matcher = *regex.matcher_;
+  const bool found = matcher.find(status);
   BOLT_USER_CHECK(
       U_SUCCESS(status), "Regex matching failed: {}", u_errorName(status));
-  replaced.append(
-      unicodeInput, previousEnd, unicodeInput.length() - previousEnd);
-  std::string text;
-  replaced.toUTF8String(text);
-  exec::StringWriter<> writer(&result, row);
-  writer.copy_from(text);
-  writer.finalize();
+  if (!found) {
+    if (!regex.substituted_) {
+      result.setNoCopy(row, input);
+      return !input.isInline();
+    }
+    writeUnicode(result, row, regex.text_);
+    return false;
+  }
+  auto& replaced = regex.replaced_;
+  replaced.remove();
+  int32_t previousEnd = 0;
+  do {
+    const auto start = matcher.start(status);
+    replaced.append(regex.text_, previousEnd, start - previousEnd);
+    replaced.append(replacement);
+    previousEnd = matcher.end(status);
+  } while (U_SUCCESS(status) && matcher.find(status));
+  BOLT_USER_CHECK(
+      U_SUCCESS(status), "Regex matching failed: {}", u_errorName(status));
+  replaced.append(regex.text_, previousEnd, regex.text_.length() - previousEnd);
+  BOLT_USER_CHECK(!replaced.isBogus(), "Regex result exceeds string capacity");
+  writeUnicode(result, row, replaced);
   return false;
 }
 
 template <typename T>
-class ICURegexConstantPatternFunction final : public exec::VectorFunction {
- public:
-  ICURegexConstantPatternFunction() = default;
-
-  explicit ICURegexConstantPatternFunction(StringView pattern)
-      : regexPattern_(compileJavaRegex(pattern)) {}
-
-  void apply(
-      const SelectivityVector& rows,
-      std::vector<VectorPtr>& args,
-      const TypePtr& /* outputType */,
-      exec::EvalCtx& context,
-      VectorPtr& resultRef) const override {
-    BOLT_CHECK(args.size() == 2 || args.size() == 3);
-    context.ensureWritable(rows, VARCHAR(), resultRef);
-    auto& result = *resultRef->asFlatVector<StringView>();
-
-    if (regexPattern_.isNull()) {
-      rows.applyToSelected(
-          [&](vector_size_t row) { result.setNull(row, true); });
-      return;
-    }
-
-    exec::LocalDecodedVector inputs(context, *args[0], rows);
-    bool mustRefInputStrings = false;
-    const auto applyRow = [&](vector_size_t row, T argument) {
-      mustRefInputStrings |=
-          applyRegex(result, row, inputs, argument, *regexPattern_);
-    };
-
-    if (args.size() == 2) {
-      context.applyToSelectedNoThrow(
-          rows, [&](vector_size_t row) { applyRow(row, T{}); });
-    } else if (args[2]->isConstantEncoding() && !args[2]->isNullAt(0)) {
-      const auto argument = args[2]->as<ConstantVector<T>>()->valueAt(0);
-      context.applyToSelectedNoThrow(
-          rows, [&](vector_size_t row) { applyRow(row, argument); });
-    } else {
-      exec::LocalDecodedVector arguments(context, *args[2], rows);
-      context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
-        applyRow(row, arguments->valueAt<T>(row));
-      });
-    }
-
-    if (mustRefInputStrings) {
-      result.acquireSharedStringBuffers(inputs->base());
-    }
+auto regexArgument(T argument) {
+  if constexpr (std::is_same_v<T, StringView>) {
+    return icu::UnicodeString::fromUTF8(
+        icu::StringPiece(argument.data(), argument.size()));
+  } else {
+    return argument;
   }
-
- private:
-  const icu::LocalPointer<icu::RegexPattern> regexPattern_;
-};
+}
 
 template <typename T>
 class ICURegexFunction final : public exec::VectorFunction {
  public:
+  ICURegexFunction() = default;
+
+  explicit ICURegexFunction(RegexPatternPtr pattern)
+      : constantPattern_(true), pattern_(std::move(pattern)) {}
+
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
-      const TypePtr& outputType,
+      const TypePtr&,
       exec::EvalCtx& context,
       VectorPtr& resultRef) const override {
-    if (args[1]->isConstantEncoding() && !args[1]->isNullAt(0)) {
-      ICURegexConstantPatternFunction<T>(
-          args[1]->as<ConstantVector<StringView>>()->valueAt(0))
-          .apply(rows, args, outputType, context, resultRef);
+    BOLT_CHECK(args.size() == 2 || args.size() == 3);
+    if (!rows.hasSelections()) {
       return;
     }
     context.ensureWritable(rows, VARCHAR(), resultRef);
     auto& result = *resultRef->asFlatVector<StringView>();
+    const bool constantPattern =
+        constantPattern_ || args[1]->isConstantEncoding();
+    auto pattern = pattern_;
+    if (!constantPattern_ && constantPattern && !args[1]->isNullAt(0)) {
+      pattern = cache_.get(
+          args[1]->as<ConstantVector<StringView>>()->valueAt(0),
+          compileJavaRegex);
+    }
+    if (constantPattern && !pattern) {
+      rows.applyToSelected(
+          [&](vector_size_t row) { result.setNull(row, true); });
+      return;
+    }
     exec::LocalDecodedVector inputs(context, *args[0], rows);
-    exec::LocalDecodedVector patterns(context, *args[1], rows);
+    exec::LocalDecodedVector patterns(context);
+    if (!constantPattern) {
+      patterns.get()->decode(*args[1], rows);
+    }
+    exec::LocalDecodedVector arguments(context);
+    using Argument = decltype(regexArgument(T{}));
+    std::optional<Argument> constantArgument;
+    if (args.size() == 2) {
+      constantArgument = regexArgument(T{});
+    } else {
+      arguments.get()->decode(*args[2], rows);
+      if (arguments->isConstantMapping()) {
+        constantArgument = regexArgument(arguments->valueAt<T>(rows.begin()));
+      }
+    }
+    RegexInput regex;
     bool mustRefInputStrings = false;
-    const auto applyRow = [&](vector_size_t row, T argument) {
-      auto pattern =
-          cache_.get(patterns->valueAt<StringView>(row), [](StringView value) {
-            auto compiled = compileJavaRegex(value);
-            return std::shared_ptr<const icu::RegexPattern>(compiled.orphan());
-          });
-      if (!pattern) {
+    const auto applyRow = [&](vector_size_t row, const Argument& argument) {
+      auto rowPattern = constantPattern
+          ? pattern
+          : cache_.get(patterns->valueAt<StringView>(row), compileJavaRegex);
+      if (!rowPattern) {
         result.setNull(row, true);
         return;
       }
+      const auto input = inputs->valueAt<StringView>(row);
+      const auto status = regex.reset(std::move(rowPattern), input);
       mustRefInputStrings |=
-          applyRegex(result, row, inputs, argument, *pattern);
+          applyRegex(result, row, input, argument, regex, status);
     };
-    if (args.size() == 2) {
+    if (constantArgument) {
       context.applyToSelectedNoThrow(
-          rows, [&](vector_size_t row) { applyRow(row, T{}); });
+          rows, [&](vector_size_t row) { applyRow(row, *constantArgument); });
     } else {
-      exec::LocalDecodedVector arguments(context, *args[2], rows);
       context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
-        applyRow(row, arguments->valueAt<T>(row));
+        applyRow(row, regexArgument(arguments->valueAt<T>(row)));
       });
     }
     if (mustRefInputStrings) {
@@ -237,6 +305,8 @@ class ICURegexFunction final : public exec::VectorFunction {
   }
 
  private:
+  const bool constantPattern_{false};
+  const RegexPatternPtr pattern_;
   regex::RegexCache<icu::RegexPattern> cache_;
 };
 
@@ -246,11 +316,11 @@ std::shared_ptr<exec::VectorFunction> makeICURegexFunction(
   if (!pattern) {
     return std::make_shared<ICURegexFunction<T>>();
   }
-  if (pattern->isNullAt(0)) {
-    return std::make_shared<ICURegexConstantPatternFunction<T>>();
-  }
-  return std::make_shared<ICURegexConstantPatternFunction<T>>(
-      pattern->as<ConstantVector<StringView>>()->valueAt(0));
+  return std::make_shared<ICURegexFunction<T>>(
+      pattern->isNullAt(0)
+          ? nullptr
+          : compileJavaRegex(
+                pattern->as<ConstantVector<StringView>>()->valueAt(0)));
 }
 
 } // namespace

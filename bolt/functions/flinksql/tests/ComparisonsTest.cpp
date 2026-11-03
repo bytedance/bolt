@@ -277,8 +277,36 @@ TEST_F(ComplexEqualTest, ScalarMapKeyAndValueTypes) {
           makeMapVector(
               {0, 1, 2}, keys, wrapInDictionary(permutation, 3, values)),
           {true, false, false});
+      auto reversed = makeIndices(2, [](auto row) { return 1 - row; });
+      auto twoKeys = keys->slice(0, 2);
+      auto twoValues = values->slice(0, 2);
+      assertComparisons(
+          makeMapVector({0}, twoKeys, twoValues),
+          makeMapVector(
+              {0},
+              wrapInDictionary(reversed, 2, twoKeys),
+              wrapInDictionary(reversed, 2, twoValues)),
+          {true});
     }
   }
+}
+
+TEST_F(ComplexEqualTest, NestedMapSorting) {
+  auto leftValues = makeMapVector(
+      {0, 2, 2, 5},
+      makeFlatVector<int32_t>({2, 1, 3, 1, 2, 7}),
+      makeFlatVector<int64_t>({20, 10, 30, 10, 20, 70}));
+  auto rightValues = makeMapVector(
+      {0, 0, 2, 3},
+      makeFlatVector<int32_t>({1, 2, 7, 2, 3, 1}),
+      makeFlatVector<int64_t>({10, 20, 70, 20, 30, 10}));
+  auto left =
+      makeMapVector({0, 2}, makeFlatVector<int32_t>({1, 2, 1, 2}), leftValues);
+  auto right =
+      makeMapVector({0, 2}, makeFlatVector<int32_t>({2, 1, 2, 1}), rightValues);
+  assertComparisons(left, right, {true, true});
+  rightValues->mapValues()->asFlatVector<int64_t>()->set(5, 99);
+  assertComparisons(left, right, {true, false});
 }
 
 TEST_F(ComplexEqualTest, IntegerKeysAndStringValues) {
