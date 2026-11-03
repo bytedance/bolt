@@ -600,7 +600,7 @@ void SelectiveStructColumnReaderBase::getValues(
       auto combinedMap = std::make_shared<MapVector>(
           &memoryPool_,
           MAP(keyType, valueType),
-          nullptr,
+          resultRow->nulls(),
           numRows,
           offsets,
           sizes,
