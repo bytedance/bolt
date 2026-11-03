@@ -88,8 +88,7 @@ inline bool supportsMapEquality(const Type& type) {
 
 } // namespace detail
 
-/// Flink compares null ROW fields as values. Floating-point and collection
-/// fields need separate policies and are deliberately excluded here.
+/// Flink compares null ROW fields as values.
 template <typename T, bool negate = false>
 struct RowEqualFunction
     : EqFunction<T, CompareFlags::NullHandlingMode::kNullAsValue> {

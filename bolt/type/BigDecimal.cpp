@@ -32,7 +32,7 @@ void BigDecimal::compactVal() {
 }
 
 template <bool roundUp>
-FOLLY_ALWAYS_INLINE void BigDecimal::setScaleImpl(int newScale) {
+void BigDecimal::setScaleImpl(int newScale) {
   if constexpr (!roundUp) {
     if (!isZero) {
       BOLT_USER_CHECK_LE(

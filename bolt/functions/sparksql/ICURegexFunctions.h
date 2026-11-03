@@ -48,11 +48,6 @@ std::shared_ptr<exec::VectorFunction> makeICURegexReplace(
     const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& config);
 
-std::shared_ptr<exec::VectorFunction> makeICURegexReplaceLiteral(
-    const std::string& name,
-    const std::vector<exec::VectorFunctionArg>& inputArgs,
-    const core::QueryConfig& config);
-
 std::vector<std::shared_ptr<exec::FunctionSignature>>
 icuRegexReplaceSignatures();
 

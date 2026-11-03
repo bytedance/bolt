@@ -56,11 +56,6 @@ round(const TNum& number, const TDecimals& decimals = 0) {
       if (decimals >= 0) {
         return number;
       }
-      // Fixed integral rounding in round when alwaysRoundNegDec is true and
-      // decimals are negative by rounding to the
-      //  nearest power of ten, preventing fall-through and matching Spark
-      //  expectations. Without this, there will be compilation error when
-      //  alwaysRoundNegDec is true
       constexpr auto kMaxScale = sizeof(DecimalUtil::kPowersOfTen) /
           sizeof(DecimalUtil::kPowersOfTen[0]);
       const auto scale = uint64_t{0} - static_cast<uint64_t>(decimals);

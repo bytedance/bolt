@@ -33,7 +33,6 @@
 #include "bolt/functions/flinksql/specialforms/FlinkCastExpr.h"
 #include "bolt/functions/lib/RegistrationHelpers.h"
 #include "bolt/functions/sparksql/Arithmetic.h"
-#include "bolt/functions/sparksql/ICURegexFunctions.h"
 
 namespace bytedance::bolt::functions {
 // If the function registration order is Presto, Spark, Flink,
@@ -76,7 +75,7 @@ static void registerStringFunctions(const std::string& prefix) {
            .argumentType("varchar")
            .argumentType("varchar")
            .build()},
-      sparksql::makeICURegexReplaceLiteral);
+      makeICURegexReplace);
   registerFunction<SplitIndex, Varchar, Varchar, Varchar, int64_t>(
       {prefix + "split_index"});
   registerFunction<SplitIndex, Varchar, Varchar, int32_t, int64_t>(

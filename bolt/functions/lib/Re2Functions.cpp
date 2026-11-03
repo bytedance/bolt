@@ -480,8 +480,6 @@ class Re2SearchAndExtract final : public VectorFunction {
       return;
     }
 
-    // The general case. Further optimizations are possible to avoid regex
-    // recompilation, but a constant pattern is by far the most common case.
     FlatVector<StringView>& result =
         ensureWritableStringView(rows, context, resultRef);
     exec::LocalDecodedVector toSearch(context, *args[0], rows);

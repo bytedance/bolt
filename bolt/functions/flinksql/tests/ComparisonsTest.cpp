@@ -57,10 +57,6 @@ TEST_F(ComplexEqualTest, NestedRowsAndLegacyNullPolicy) {
   auto right =
       makeRowVector({nested, makeFlatVector<bool>({true, true, true})});
   auto input = makeRowVector({left, right});
-  assertEqualVectors(
-      makeFlatVector<bool>({true, true, false}),
-      evaluate("flink_complex_equal(c0, c1)", input));
-
   assertComparisons(left, right, {true, true, false});
 
   registerFunction<EqFunction, bool, Generic<T1>, Generic<T1>>({"legacy_eq"});
@@ -69,7 +65,7 @@ TEST_F(ComplexEqualTest, NestedRowsAndLegacyNullPolicy) {
       evaluate("legacy_eq(c0, c1)", input));
 }
 
-TEST_F(ComplexEqualTest, RejectsUnverifiedNestedTypes) {
+TEST_F(ComplexEqualTest, RejectsUnsupportedRowFields) {
   auto row = makeRowVector({makeFlatVector<double>({0.0})});
   BOLT_ASSERT_THROW(
       evaluate("flink_complex_equal(c0, c1)", makeRowVector({row, row})),
@@ -88,11 +84,7 @@ TEST_F(ComplexEqualTest, RowsCompareNestedNullsAsValues) {
        makeFlatVector<bool>({true, true, true, true})});
   right->setNull(3, true);
 
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  auto expected =
-      makeNullableFlatVector<bool>({true, true, false, std::nullopt});
-  assertEqualVectors(expected, actual);
+  assertComparisons(left, right, {true, true, false, std::nullopt});
 }
 
 TEST_F(ComplexEqualTest, TwoStringRowsCompareNestedNullsAsValues) {
@@ -102,9 +94,7 @@ TEST_F(ComplexEqualTest, TwoStringRowsCompareNestedNullsAsValues) {
   auto right = makeRowVector(
       {makeFlatVector<std::string>({"a", "a"}),
        makeNullableFlatVector<std::string>({std::nullopt, "c"})});
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  assertEqualVectors(makeFlatVector<bool>({true, false}), actual);
+  assertComparisons(left, right, {true, false});
 }
 
 TEST_F(ComplexEqualTest, MapEncodingsAndEmptyMaps) {
@@ -139,10 +129,7 @@ TEST_F(ComplexEqualTest, MapsCompareNullKeysAndValues) {
       makeNullableFlatVector<std::string>({"a", "a", std::nullopt, "z"}),
       makeNullableFlatVector<int32_t>({1, std::nullopt, 3, 5}));
 
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  auto expected = makeFlatVector<bool>({true, false, true, false});
-  assertEqualVectors(expected, actual);
+  assertComparisons(left, right, {true, false, true, false});
 }
 
 TEST_F(ComplexEqualTest, MapsIgnoreEntryOrder) {
@@ -154,9 +141,7 @@ TEST_F(ComplexEqualTest, MapsIgnoreEntryOrder) {
       {0},
       makeFlatVector<std::string>({"b", "a"}),
       makeFlatVector<int32_t>({2, 1}));
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  assertEqualVectors(makeFlatVector<bool>(std::vector<bool>{true}), actual);
+  assertComparisons(left, right, {true});
 }
 
 TEST_F(ComplexEqualTest, MapsUseLastDuplicateKeyValue) {
@@ -170,9 +155,7 @@ TEST_F(ComplexEqualTest, MapsUseLastDuplicateKeyValue) {
       makeNullableFlatVector<std::string>(
           {"a", "a", "a", "b", "a", "a", std::nullopt, std::nullopt}),
       makeFlatVector<int32_t>({2, 2, 2, 0, 1, 2, 2, 2}));
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  assertEqualVectors(makeFlatVector<bool>({true, true, true, true}), actual);
+  assertComparisons(left, right, {true, true, true, true});
 }
 
 TEST_F(ComplexEqualTest, DifferentMapSizesDoNotLoadValues) {
@@ -221,9 +204,7 @@ TEST_F(ComplexEqualTest, MapsWithDictionaryEncodedChildren) {
       {0},
       makeFlatVector<std::string>({"b", "a"}),
       makeFlatVector<int32_t>({2, 1}));
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  assertEqualVectors(makeFlatVector<bool>(std::vector<bool>{true}), actual);
+  assertComparisons(left, right, {true});
 }
 
 TEST_F(ComplexEqualTest, SparseMapsWithNestedDictionaries) {
@@ -265,9 +246,7 @@ TEST_F(ComplexEqualTest, NullMapIsNull) {
       makeFlatVector<std::string>({"a"}),
       makeFlatVector<int32_t>(std::vector<int32_t>{1}));
   right->setNull(0, true);
-  auto actual =
-      evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right}));
-  assertEqualVectors(makeNullableFlatVector<bool>({std::nullopt}), actual);
+  assertComparisons(left, right, {std::nullopt});
 }
 
 TEST_F(ComplexEqualTest, ScalarMapKeyAndValueTypes) {

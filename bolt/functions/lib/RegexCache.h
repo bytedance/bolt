@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include <folly/container/EvictingCacheMap.h>
 
@@ -38,13 +39,12 @@ class RegexCache {
       return compile(pattern);
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string key(pattern.data(), pattern.size());
-    auto it = patterns_.find(key);
+    auto it = patterns_.find(std::string_view(pattern.data(), pattern.size()));
     if (it != patterns_.end()) {
       return it->second;
     }
     auto compiled = compile(pattern);
-    patterns_.insert(std::move(key), compiled);
+    patterns_.insert(std::string(pattern.data(), pattern.size()), compiled);
     return compiled;
   }
 

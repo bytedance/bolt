@@ -231,11 +231,11 @@ TypePtr DecimalRoundCallToSpecialForm::resolveType(
 }
 
 namespace {
+template <bool truncate>
 exec::ExprPtr constructDecimalRoundSpecialForm(
     const TypePtr& type,
     std::vector<exec::ExprPtr>&& args,
-    bool trackCpuUsage,
-    bool truncate) {
+    bool trackCpuUsage) {
   const auto* name = truncate
       ? DecimalTruncateCallToSpecialForm::kTruncateDecimal
       : DecimalRoundCallToSpecialForm::kRoundDecimal;
@@ -292,18 +292,10 @@ exec::ExprPtr constructDecimalRoundSpecialForm(
       "Unexpected precision or scale for {} result.",
       name);
 
-  std::shared_ptr<exec::VectorFunction> function;
-  if (truncate) {
-    function = dynamicScale ? createDecimalRoundFunction<true, true>(
-                                  args[0]->type(), roundScale, type)
-                            : createDecimalRoundFunction<true, false>(
-                                  args[0]->type(), roundScale, type);
-  } else {
-    function = dynamicScale ? createDecimalRoundFunction<false, true>(
-                                  args[0]->type(), roundScale, type)
-                            : createDecimalRoundFunction<false, false>(
-                                  args[0]->type(), roundScale, type);
-  }
+  auto function = dynamicScale ? createDecimalRoundFunction<truncate, true>(
+                                     args[0]->type(), roundScale, type)
+                               : createDecimalRoundFunction<truncate, false>(
+                                     args[0]->type(), roundScale, type);
   // The bound scale is part of the kernel, keeping constant-scale evaluation
   // on the single-input flat/constant fast path.
   if (!dynamicScale && !nullScale && args.size() == 2) {
@@ -320,8 +312,8 @@ exec::ExprPtr DecimalRoundCallToSpecialForm::constructSpecialForm(
     std::vector<exec::ExprPtr>&& args,
     bool trackCpuUsage,
     const core::QueryConfig& /*config*/) {
-  return constructDecimalRoundSpecialForm(
-      type, std::move(args), trackCpuUsage, false);
+  return constructDecimalRoundSpecialForm<false>(
+      type, std::move(args), trackCpuUsage);
 }
 
 TypePtr DecimalTruncateCallToSpecialForm::resolveType(
@@ -339,8 +331,8 @@ exec::ExprPtr DecimalTruncateCallToSpecialForm::constructSpecialForm(
     std::vector<exec::ExprPtr>&& args,
     bool trackCpuUsage,
     const core::QueryConfig& /*config*/) {
-  return constructDecimalRoundSpecialForm(
-      type, std::move(args), trackCpuUsage, true);
+  return constructDecimalRoundSpecialForm<true>(
+      type, std::move(args), trackCpuUsage);
 }
 
 } // namespace bytedance::bolt::functions::flinksql

@@ -19,11 +19,7 @@
 #include <string>
 namespace bytedance::bolt::functions::flinksql {
 
-/// Registers SQL functions and the explicit Flink compatibility entry points
-/// flink_split_index, flink_rand, flink_rand_integer, flink_complex_equal and
-/// flink_complex_not_equal. MAP equality supports scalar keys except VARBINARY,
-/// with scalar, ARRAY, ROW and MAP values following Flink's generic-data path.
-/// Null ARRAY elements compare unequal; null ROW fields compare as values.
+/// Registers Flink SQL functions and special forms.
 void registerFunctions(const std::string& prefix = "");
 
 } // namespace bytedance::bolt::functions::flinksql
