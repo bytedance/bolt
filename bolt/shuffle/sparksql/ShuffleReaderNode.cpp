@@ -94,8 +94,8 @@ SparkShuffleReader::SparkShuffleReader(
   }
   // Mirror of the writer's choice, writesCellShuffle(): Cell when forced,
   // or preferred over a forced V1 or V2 or over an adaptive choice that did
-  // not pick the row-based writer; never without a pid. A forced RowBased
-  // wins over the preference on both sides.
+  // not pick the row-based writer, under any partitioning. A forced
+  // RowBased wins over the preference on both sides.
   useCellReader_ = writesCellShuffle(
       partitioning,
       shuffleWriterType_,

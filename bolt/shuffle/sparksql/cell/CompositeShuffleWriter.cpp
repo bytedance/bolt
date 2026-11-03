@@ -16,6 +16,7 @@
 
 #include "bolt/shuffle/sparksql/cell/CompositeShuffleWriter.h"
 
+#include <folly/Likely.h>
 #include <folly/ScopeGuard.h>
 #include <folly/lang/Bits.h>
 #include <cstring>
@@ -119,9 +120,16 @@ CompositeShuffleWriter::CompositeShuffleWriter(
       "Failed to create partitioner: {}",
       maybePartitioner.status().ToString());
   partitioner_ = *maybePartitioner;
-  BOLT_CHECK(
-      partitioner_->hasPid(),
-      "CellShuffleWriter requires hash or range partitioning");
+  if (!partitioner_->hasPid()) {
+    // Single or round-robin: split() computes each ordinary batch's
+    // partition ids with this partitioner, as V1 does, and puts them in
+    // front as a pid column; the pid path then takes them as they are.
+    pidSource_ = std::move(partitioner_);
+    auto passThrough = Partitioner::make(
+        Partitioning::kRange, numPartitions_, options_.startPartitionId);
+    BOLT_CHECK(passThrough.ok(), "{}", passThrough.status().ToString());
+    partitioner_ = *passThrough;
+  }
   const auto& writerOptions = options_.partitionWriterOptions;
   if (writerOptions.compressionType != arrow::Compression::UNCOMPRESSED) {
     codec_ = createCodec(
@@ -154,6 +162,45 @@ arrow::Status CompositeShuffleWriter::computePartitions(const RowVector& rv) {
       pids, rv.size(), row2Partition_, partition2RowCount_);
 }
 
+RowVectorPtr CompositeShuffleWriter::withComputedPids(const RowVectorPtr& rv) {
+  const vector_size_t numRows = rv->size();
+  auto pid =
+      BaseVector::create<FlatVector<int32_t>>(INTEGER(), numRows, boltPool_);
+  int32_t* pids = pid->mutableRawValues();
+  if (options_.partitioning == Partitioning::kSingle) {
+    // V1 writes every row to partition 0; SinglePartitioner computes
+    // nothing.
+    std::fill(pids, pids + numRows, 0);
+  } else {
+    // V1's call: the partitioner's round-robin position carries over from
+    // batch to batch, from startPartitionId on.
+    const auto status = pidSource_->compute(
+        nullptr, numRows, row2Partition_, partition2RowCount_);
+    BOLT_CHECK(status.ok(), "{}", status.ToString());
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      pids[row] = static_cast<int32_t>(row2Partition_[row]);
+    }
+  }
+  const auto& rowType = rv->type()->asRow();
+  std::vector<std::string> names{"pid"};
+  std::vector<TypePtr> types{INTEGER()};
+  std::vector<VectorPtr> children{std::move(pid)};
+  names.reserve(rowType.size() + 1);
+  types.reserve(rowType.size() + 1);
+  children.reserve(rowType.size() + 1);
+  for (uint32_t i = 0; i < rowType.size(); ++i) {
+    names.push_back(rowType.nameOf(i));
+    types.push_back(rowType.childAt(i));
+    children.push_back(rv->childAt(i));
+  }
+  return std::make_shared<RowVector>(
+      boltPool_,
+      ROW(std::move(names), std::move(types)),
+      nullptr,
+      numRows,
+      std::move(children));
+}
+
 CompositeShuffleWriter::~CompositeShuffleWriter() {
   // A failed split or stop may leave composite rows held.
   converter_.reset();
@@ -167,8 +214,16 @@ arrow::Status CompositeShuffleWriter::split(RowVectorPtr rv, int64_t memLimit) {
       flushComposite();
       compositeActive_ = false;
     }
+    if (FOLLY_UNLIKELY(pidSource_ != nullptr)) {
+      rv = withComputedPids(rv);
+    }
     return splitOrdinary(std::move(rv), memLimit);
   }
+  // V1 does not take them either: its composite path needs a pid column.
+  BOLT_CHECK(
+      pidSource_ == nullptr,
+      "CellShuffleWriter takes composite rows only under hash or range "
+      "partitioning");
   if (!compositeActive_) {
     RETURN_NOT_OK(flushOrdinary());
     compositeActive_ = true;
