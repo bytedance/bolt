@@ -389,6 +389,23 @@ TEST_F(RoundTest, decimalTruncatePreservesDecimalType) {
   }
 }
 
+TEST_F(RoundTest, decimalTruncateSqlRoundTrip) {
+  const auto type = DECIMAL(5, 2);
+  auto input = makeRowVector({makeFlatVector<int64_t>({12345, -12555}, type)});
+  for (const auto scale :
+       std::vector<std::optional<int32_t>>{1, -1, std::nullopt}) {
+    auto expression = std::make_shared<core::CallTypedExpr>(
+        type,
+        createDecimalRound(type, type, scale)->inputs(),
+        "decimal_truncate");
+    exec::ExprSet expressions({expression}, &execCtx_);
+    auto expected = evaluate(expressions, input);
+    const auto sql = expressions.expr(0)->toSql();
+    SCOPED_TRACE(sql);
+    bolt::test::assertEqualVectors(expected, evaluate(sql, input));
+  }
+}
+
 TEST_F(RoundTest, decimalScaleOverflowIsRecoverable) {
   auto input = makeFlatVector<int64_t>({12345, 0, -12345}, DECIMAL(5, 2));
   auto scales = makeFlatVector<int32_t>(

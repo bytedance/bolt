@@ -137,7 +137,15 @@ class FlinkDecimalRoundFunction : public exec::VectorFunction {
         }
       });
     } else {
-      BOLT_CHECK(args[0]->isConstantEncoding() || args[0]->isFlatEncoding());
+      if (!args[0]->isConstantEncoding() && !args[0]->isFlatEncoding()) {
+        exec::LocalDecodedVector inputs(context, *args[0], rows);
+        context.applyToSelectedNoThrow(rows, [&](auto row) {
+          flatResult->setNull(
+              row,
+              !kernel_.apply(inputs->valueAt<TInput>(row), rawResults[row]));
+        });
+        return;
+      }
       result->clearNulls(rows);
       if (UNLIKELY(kernel_.invalidScale())) {
         exec::LocalDecodedVector inputs(context, *args[0], rows);
@@ -292,11 +300,6 @@ exec::ExprPtr constructDecimalRoundSpecialForm(
                                      args[0]->type(), roundScale, type)
                                : createDecimalRoundFunction<truncate, false>(
                                      args[0]->type(), roundScale, type);
-  // The bound scale is part of the kernel, keeping constant-scale evaluation
-  // on the single-input flat/constant fast path.
-  if (!dynamicScale && !nullScale && args.size() == 2) {
-    args.pop_back();
-  }
   return std::make_shared<exec::Expr>(
       type, std::move(args), std::move(function), name, trackCpuUsage);
 }
