@@ -46,7 +46,10 @@ class CompositeShuffleWriter : public ShuffleWriter {
   arrow::Status stop() final;
 
  protected:
-  /// Builds the hash/range partitioner both sides share.
+  /// Builds the partitioner both sides share. Under single or round-robin
+  /// partitioning, which give no pid column, split() puts one computed by
+  /// that partitioning in front of every ordinary batch, so the subclass
+  /// always sees a pid column; composite rows are refused there.
   CompositeShuffleWriter(
       ShuffleWriterOptions options,
       memory::MemoryPool* boltPool,
@@ -92,6 +95,10 @@ class CompositeShuffleWriter : public ShuffleWriter {
  private:
   void splitComposite(const CompositeRowVectorPtr& rv);
 
+  /// `rv` behind a pid column computed by pidSource_, sharing its
+  /// children.
+  RowVectorPtr withComputedPids(const RowVectorPtr& rv);
+
   /// Writes the held composite rows out - or, while a split or write is
   /// under way, right after it.
   void flushComposite();
@@ -108,6 +115,10 @@ class CompositeShuffleWriter : public ShuffleWriter {
       size_t& nextRow,
       BufferPtr& scratch);
 
+  /// The single or round-robin partitioner that computes the pid column of
+  /// a batch without one; null under hash or range. partitioner_ then
+  /// takes the computed ids as they are.
+  std::shared_ptr<Partitioner> pidSource_;
   bool stopped_{false};
   /// The last batch was composite: that side is the active one - it takes
   /// reclaims - and the ordinary side holds nothing, having been flushed

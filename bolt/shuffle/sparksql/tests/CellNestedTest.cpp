@@ -105,14 +105,20 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
   }
 
   /// What V1 reads back of `input`, per partition: the reference that the
-  /// Cell output must match besides the input.
+  /// Cell output must match besides the input. Under a `partitioning`
+  /// without a pid ("single", "rr"), V1 gets no pid column and assigns the
+  /// partitions itself, from `startPartitionId`; input.pids is not used.
   std::vector<std::vector<RowVectorPtr>> v1Partitions(
       const ShuffleInput& input,
-      int32_t numPartitions) {
+      int32_t numPartitions,
+      const std::string& partitioning = "hash",
+      int32_t startPartitionId = 0) {
     constexpr int64_t kMemLimit = int64_t{1} << 30;
     removeFiles();
     ShuffleWriterOptions options;
-    options.partitioning = Partitioning::kHash;
+    options.partitioning = toPartitioning(partitioning);
+    options.startPartitionId = startPartitionId;
+    const bool hasPid = supportAdaptiveShuffleWriter(options.partitioning);
     options.forceShuffleWriterType =
         static_cast<int32_t>(ShuffleWriterType::V1);
     options.partitionWriterOptions.numPartitions = numPartitions;
@@ -144,12 +150,11 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
           children.push_back(
               BaseVector::copy(*BaseVector::loadedVectorShared(child)));
         }
+        auto flat = std::make_shared<RowVector>(
+            pool(), rowType, nullptr, data->size(), children);
         const auto status = writer->split(
-            test::withPid(
-                input.pids[batch],
-                std::make_shared<RowVector>(
-                    pool(), rowType, nullptr, data->size(), children),
-                pool()),
+            hasPid ? test::withPid(input.pids[batch], flat, pool())
+                   : std::move(flat),
             kMemLimit);
         BOLT_CHECK(status.ok(), "{}", status.ToString());
       }
@@ -170,7 +175,7 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
         pool());
     factory.setShuffleWriterType(static_cast<int32_t>(ShuffleWriterType::V1));
     factory.setNumPartitions(numPartitions);
-    factory.setpartitioningShortName("hash");
+    factory.setpartitioningShortName(partitioning);
     std::vector<std::vector<RowVectorPtr>> partitions(numPartitions);
     int64_t offset = 0;
     for (int32_t pid = 0; pid < numPartitions; ++pid) {
@@ -200,6 +205,50 @@ class CellNestedTest : public testing::Test, public bolt::test::VectorTestBase {
       const std::vector<ReadShape>& readShapes = test::kReadShapes) {
     test::roundTrip(
         input, numPartitions, dataFile_, pool(), tune, check, readShapes);
+  }
+
+  /// `input` as a partitioning without a pid assigns its rows: all to
+  /// partition 0 (`roundRobin` false), or the k-th row of the shuffle,
+  /// counted across batches, to (startPartitionId + k) % numPartitions.
+  static void assignWithoutPid(
+      ShuffleInput& input,
+      bool roundRobin,
+      int32_t numPartitions,
+      int32_t startPartitionId) {
+    int64_t next = startPartitionId % numPartitions;
+    for (auto& pids : input.pids) {
+      for (auto& pid : pids) {
+        pid = roundRobin ? static_cast<int32_t>(next) : 0;
+        next = (next + 1) % numPartitions;
+      }
+    }
+  }
+
+  /// A Cell writer from the factory, forced, under `partitioning` and
+  /// `startPartitionId`; writes `input` without pid columns.
+  test::WrittenShuffle writeWithoutPid(
+      ShuffleWriterOptions options,
+      Partitioning partitioning,
+      int32_t startPartitionId,
+      const ShuffleInput& input) {
+    options.partitioning = partitioning;
+    options.startPartitionId = startPartitionId;
+    options.forceShuffleWriterType =
+        static_cast<int32_t>(ShuffleWriterType::Cell);
+    const auto& first = input.data[0];
+    auto writer = BoltShuffleWriter::createShuffleWriter(
+        options,
+        first->childrenSize(),
+        first->size(),
+        first->estimateFlatSize(),
+        int64_t{1} << 30,
+        pool(),
+        arrow::default_memory_pool());
+    BOLT_CHECK_NOT_NULL(dynamic_cast<CellShuffleWriter*>(writer.get()));
+    return test::writeShuffle(
+        *writer, options, input, pool(), [&](size_t batch) {
+          return input.data[batch];
+        });
   }
 
   /// Holds the data file and, should V1 spill, its spill files.
@@ -1311,6 +1360,136 @@ TEST_F(CellNestedTest, fuzzedSchemasMatchV1) {
       }
       if (HasFatalFailure()) {
         return;
+      }
+    }
+  }
+}
+
+TEST_F(CellNestedTest, singleAndRoundRobinRoundTrips) {
+  // Single and round-robin partitioning give the writer no pid column: it
+  // assigns the rows itself, all to partition 0, or the k-th row of the
+  // shuffle, across batches, to (startPartitionId + k) % P. Every partition
+  // reads back its rows in order - flat, in a nested layout and through
+  // the adapter, in every encoding, locally and on an RSS client, with and
+  // without spills and seals.
+  NestedVectorMaker::Options options;
+  options.nullPercent = {10, 20};
+  options.maxLength = 6;
+  struct Schema {
+    RowTypePtr type;
+    bool native;
+  };
+  const std::vector<Schema> schemas = {
+      {ROW({"id", "s", "d"}, {BIGINT(), VARCHAR(), DOUBLE()}), true},
+      {test::deepRowType(), true},
+      {test::deepRowType(), false}};
+  const auto encodingOf = [](uint32_t batch, uint32_t column) {
+    return static_cast<ColumnEncoding>(
+        (batch + column) % static_cast<uint32_t>(ColumnEncoding::kCount));
+  };
+  std::vector<vector_size_t> rows{300, 1, 700};
+  rows.insert(rows.end(), 8, 2048);
+  for (const bool roundRobin : {false, true}) {
+    const int32_t numPartitions = roundRobin ? 5 : 1;
+    const int32_t start = roundRobin ? 3 : 0;
+    for (const auto& schema : schemas) {
+      SCOPED_TRACE(fmt::format(
+          "{}, {}{}",
+          roundRobin ? "round-robin" : "single",
+          schema.type->toString(),
+          schema.native ? "" : ", adapter"));
+      auto input = test::makeInput(
+          schema.type, options, rows, numPartitions, 51, pool(), encodingOf);
+      assignWithoutPid(input, roundRobin, numPartitions, start);
+      for (const bool rss : {false, true}) {
+        for (const bool limited : {false, true}) {
+          SCOPED_TRACE(fmt::format(
+              "{}{}", rss ? "rss" : "local", limited ? ", limited" : ""));
+          auto writer =
+              writerOptions(numPartitions, rss, arrow::Compression::LZ4_FRAME);
+          auto& cell = writer.cellOptions;
+          cell.nativeNestedTypes = schema.native;
+          if (limited) {
+            cell.cellMemorySpillBytes = 4 << 20;
+            cell.partitionSealBytes = rss ? 128 << 10 : 1 << 20;
+            cell.nullMemLimitBytes = 4 << 10;
+          }
+          const auto written = writeWithoutPid(
+              writer,
+              roundRobin ? Partitioning::kRoundRobin : Partitioning::kSingle,
+              start,
+              input);
+          if (limited) {
+            EXPECT_GT(written.metrics.spillCount, 0);
+            if (!rss) {
+              EXPECT_GT(written.metrics.totalBytesEvicted, 0);
+            }
+          }
+          for (const auto& shape : test::kReadShapes) {
+            test::expectReadsBack(
+                input,
+                written,
+                arrow::Compression::LZ4_FRAME,
+                pool(),
+                shape,
+                schema.native);
+            if (HasFatalFailure()) {
+              return;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(CellNestedTest, roundRobinAssignsAsV1) {
+  // The same batches, round-robin from the same startPartitionId, through
+  // V1 and through Cell: every partition gets the same rows in the same
+  // order, the k-th row of the shuffle in partition (start + k) % P,
+  // however the batches cut the rows. Flat and nested schemas, V1 with its
+  // batch combining and without.
+  NestedVectorMaker::Options options;
+  options.nullPercent = {10, 20};
+  constexpr int32_t kPartitions = 7;
+  for (const auto& type :
+       {ROW({"id", "s"}, {BIGINT(), VARCHAR()}),
+        ROW({"id", "a", "m"},
+            {BIGINT(), ARRAY(INTEGER()), MAP(INTEGER(), VARCHAR())})}) {
+    for (const int32_t start : {0, 4}) {
+      SCOPED_TRACE(fmt::format("start {}: {}", start, type->toString()));
+      auto input = test::makeInput(
+          type, options, {300, 1, 5, 700, 2048, 13}, kPartitions, 61, pool());
+      assignWithoutPid(input, true, kPartitions, start);
+      const auto v1 = v1Partitions(input, kPartitions, "rr", start);
+      const auto written = writeWithoutPid(
+          writerOptions(kPartitions, false, arrow::Compression::LZ4_FRAME),
+          Partitioning::kRoundRobin,
+          start,
+          input);
+      const auto lz4 = test::lz4Codec();
+      const auto rows = input.rowsOf(kPartitions);
+      for (int32_t pid = 0; pid < kPartitions; ++pid) {
+        {
+          SCOPED_TRACE("V1");
+          test::expectPartitionRows(
+              rows[pid], v1[pid], pid, std::numeric_limits<int32_t>::max());
+        }
+        SCOPED_TRACE("Cell against V1");
+        test::expectPartitionRows(
+            test::rowsIn(v1[pid]),
+            test::readPartition(
+                written.partitions[pid],
+                type,
+                lz4.get(),
+                pool(),
+                4096,
+                1 << 20),
+            pid,
+            std::numeric_limits<int32_t>::max());
+        if (HasFatalFailure()) {
+          return;
+        }
       }
     }
   }

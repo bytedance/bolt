@@ -266,7 +266,8 @@ TEST_F(CellWriterTest, factoryPicksTheCellWriter) {
 
 TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
   // preferCellShuffle takes priority over a forced V1 or V2, not over a
-  // forced RowBased, and never applies without a pid. The readers decide
+  // forced RowBased, under every partitioning: single and round-robin take
+  // Cell exactly where hash does, and V1 elsewhere. The readers decide
   // through writesCellShuffle(), which must agree with the writer the
   // factory returns.
   struct Case {
@@ -275,17 +276,22 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
     bool prefer;
     bool cell;
   };
-  const std::vector<Case> cases{
-      {Partitioning::kHash, ShuffleWriterType::V1, true, true},
-      {Partitioning::kHash, ShuffleWriterType::V2, true, true},
-      {Partitioning::kHash, ShuffleWriterType::RowBased, true, false},
-      {Partitioning::kHash, ShuffleWriterType::V1, false, false},
-      {Partitioning::kHash, ShuffleWriterType::V2, false, false},
-      {Partitioning::kHash, ShuffleWriterType::Adaptive, true, true},
-      {Partitioning::kHash, ShuffleWriterType::Cell, false, true},
-      {Partitioning::kSingle, ShuffleWriterType::Adaptive, true, false},
-      {Partitioning::kSingle, ShuffleWriterType::V1, true, false},
-  };
+  std::vector<Case> cases;
+  for (const auto partitioning :
+       {Partitioning::kHash,
+        Partitioning::kSingle,
+        Partitioning::kRoundRobin}) {
+    cases.insert(
+        cases.end(),
+        {{partitioning, ShuffleWriterType::V1, true, true},
+         {partitioning, ShuffleWriterType::V2, true, true},
+         {partitioning, ShuffleWriterType::RowBased, true, false},
+         {partitioning, ShuffleWriterType::V1, false, false},
+         {partitioning, ShuffleWriterType::V2, false, false},
+         {partitioning, ShuffleWriterType::Adaptive, true, true},
+         {partitioning, ShuffleWriterType::Adaptive, false, false},
+         {partitioning, ShuffleWriterType::Cell, false, true}});
+  }
   for (const auto& c : cases) {
     SCOPED_TRACE(fmt::format(
         "partitioning={} forced={} prefer={}",
@@ -302,6 +308,10 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
     ASSERT_NE(writer, nullptr);
     EXPECT_EQ(
         dynamic_cast<CellShuffleWriter*>(writer.get()) != nullptr, c.cell);
+    if (!c.cell && c.partitioning != Partitioning::kHash) {
+      // Without a pid, every other choice is V1.
+      EXPECT_EQ(writer->toString(), "BoltShuffleWriter");
+    }
     // The readers' mirror: a narrow schema, so the adaptive choice is not
     // the row-based writer.
     EXPECT_EQ(
@@ -1209,6 +1219,35 @@ TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {
         SCOPED_TRACE("composite rows");
         test::expectPartitionRows(expected[1][pid], batches[1], pid, 1000);
       }
+    }
+  }
+}
+
+TEST_F(CellWriterTest, compositeRowsNeedHashOrRange) {
+  // Single and round-robin batches carry no pid column, and V1 refuses
+  // composite rows there as well: the Cell writer fails such a batch with
+  // the reason, after ordinary rows as before any.
+  const auto data = makeRowVector(
+      {"k"}, {makeFlatVector<int64_t>(16, [](auto row) { return row; })});
+  for (const auto partitioning :
+       {Partitioning::kSingle, Partitioning::kRoundRobin}) {
+    for (const bool ordinaryFirst : {false, true}) {
+      SCOPED_TRACE(fmt::format(
+          "partitioning={} ordinaryFirst={}",
+          static_cast<int>(partitioning),
+          ordinaryFirst));
+      auto options =
+          writerOptions(partitioning == Partitioning::kSingle ? 1 : 2);
+      options.partitioning = partitioning;
+      CellShuffleWriter writer(options, pool(), arrow::default_memory_pool());
+      if (ordinaryFirst) {
+        ASSERT_TRUE(writer.split(data, 0).ok());
+      }
+      BOLT_ASSERT_THROW(
+          (void)writer.split(
+              test::makeComposite(std::vector<int32_t>(16, 0), data, pool()),
+              0),
+          "composite rows only under hash or range partitioning");
     }
   }
 }

@@ -236,10 +236,10 @@ struct ShuffleWriterOptions {
   int64_t taskAttemptId = -1;
   int32_t startPartitionId = 0;
   int32_t forceShuffleWriterType = kDefaultForceShuffleWriterType;
-  // Write Cell under a partitioning with a pid: in place of the adaptive
-  // choice, unless that is the row-based writer, and in place of a forced
-  // V1 or V2. A forced RowBased or Cell stays as forced. The readers must
-  // set it alike. See writesCellShuffle().
+  // Write Cell in place of the adaptive choice, unless that is the
+  // row-based writer, and in place of a forced V1 or V2, under every
+  // partitioning. A forced RowBased or Cell stays as forced. The readers
+  // must set it alike. See writesCellShuffle().
   bool preferCellShuffle = false;
   int32_t useV2PreallocSizeThreshold = kDefaultUseV2PreallocSizeThreshold;
   int32_t rowvectorModeCompressionMinColumns =
@@ -313,19 +313,17 @@ inline bool supportAdaptiveShuffleWriter(const Partitioning& partitioning) {
 
 /// Whether the writer writes Cell payloads, which only
 /// SparkShuffleReaderNode reads: the one rule the writer's type choice and
-/// both readers follow. Never without a pid (the writer is V1 there). With
-/// one: a forced Cell always; a forced V1 or V2 when preferCellShuffle is
-/// set, which takes priority over them; a forced RowBased never; the
-/// adaptive choice when preferCellShuffle is set, unless it picked the
-/// row-based writer (`isRowBased`).
+/// both readers follow, under every partitioning: a forced Cell always; a
+/// forced V1 or V2 when preferCellShuffle is set, which takes priority over
+/// them; a forced RowBased never; the adaptive choice when
+/// preferCellShuffle is set, unless it picked the row-based writer
+/// (`isRowBased`, never so without a pid). Where this is false, a
+/// partitioning without a pid (single, round-robin) writes V1.
 inline bool writesCellShuffle(
-    const Partitioning& partitioning,
+    const Partitioning& /*partitioning*/,
     ShuffleWriterType type,
     bool preferCellShuffle,
     bool isRowBased) {
-  if (!supportAdaptiveShuffleWriter(partitioning)) {
-    return false;
-  }
   switch (type) {
     case ShuffleWriterType::Cell:
       return true;
