@@ -132,9 +132,9 @@ void RunCompressor::write(
   if (total == 0) {
     return;
   }
-  const uint64_t* sizes = sizes_.data();
+  const std::span<const uint64_t> sizes = sizes_;
   if (codec_ == nullptr || total < kMinCompressBytes) {
-    storeRun(sink, numStreams, sizes, visit);
+    storeRun(sink, sizes, visit);
     ++stats_.storedRuns;
     if (codec_ != nullptr) {
       ++stats_.tinyFrames;
@@ -174,8 +174,7 @@ void RunCompressor::write(
         header.data(),
         stored == 0 ? RunLayout::kCombinedUncompressed : RunLayout::kCombined,
         stored == 0 ? total : stored,
-        sizes,
-        numStreams);
+        sizes);
     sink.patch(headerAt, header.data(), header.size());
     return;
   }
@@ -225,20 +224,16 @@ void RunCompressor::write(
 
 void RunCompressor::storeRun(
     RunSink& sink,
-    uint32_t numStreams,
-    const uint64_t* sizes,
+    std::span<const uint64_t> sizes,
     RunStreamVisitor visit) {
+  const auto numStreams = static_cast<uint32_t>(sizes.size());
   uint64_t total = 0;
-  for (uint32_t s = 0; s < numStreams; ++s) {
-    total += sizes[s];
+  for (const uint64_t size : sizes) {
+    total += size;
   }
   std::vector<char> header(combinedRunHeaderBytes(numStreams));
   writeCombinedRunHeader(
-      header.data(),
-      RunLayout::kCombinedUncompressed,
-      total,
-      sizes,
-      numStreams);
+      header.data(), RunLayout::kCombinedUncompressed, total, sizes);
   sink.write(header.data(), header.size());
   for (uint32_t s = 0; s < numStreams; ++s) {
     visit(

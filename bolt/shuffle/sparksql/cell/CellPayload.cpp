@@ -327,10 +327,8 @@ bool CellPayloadDecoder::parseNullBody(
     }
     auto* decoded = resetBuffer(nullBody_, nullDecodedSize, pool_);
     if (!decompressor_->decompress(
-            reinterpret_cast<const uint8_t*>(stored),
-            nullStoredSize,
-            reinterpret_cast<uint8_t*>(decoded),
-            nullDecodedSize)) {
+            {reinterpret_cast<const uint8_t*>(stored), nullStoredSize},
+            {reinterpret_cast<uint8_t*>(decoded), nullDecodedSize})) {
       // The decompressed length must match exactly.
       return fail(error, "null body decompression failed");
     }
@@ -501,10 +499,8 @@ bool CellPayloadDecoder::parseRun(
           auto* out =
               resizeBuffer(stream, checkedPlus<size_t>(offset, decoded), pool_);
           if (!decompressor_->decompress(
-                  reinterpret_cast<const uint8_t*>(input),
-                  stored,
-                  reinterpret_cast<uint8_t*>(out) + offset,
-                  decoded)) {
+                  {reinterpret_cast<const uint8_t*>(input), stored},
+                  {reinterpret_cast<uint8_t*>(out) + offset, decoded})) {
             return fail(error, "run buffer decompression failed");
           }
         }
@@ -541,10 +537,8 @@ bool CellPayloadDecoder::parseRun(
       }
       auto* decodedData = resetBuffer(combinedDecoded_, decodedSum, pool_);
       if (!decompressor_->decompress(
-              reinterpret_cast<const uint8_t*>(input),
-              storedSizes_[0],
-              reinterpret_cast<uint8_t*>(decodedData),
-              decodedSum)) {
+              {reinterpret_cast<const uint8_t*>(input), storedSizes_[0]},
+              {reinterpret_cast<uint8_t*>(decodedData), decodedSum})) {
         return fail(error, "combined buffer decompression failed");
       }
       if (onlyRun) {
@@ -595,10 +589,11 @@ bool CellPayloadDecoder::readPayload(
 
 bool CellPayloadDecoder::openPayload(
     const CellPayloadDecoder& source,
-    const uint32_t* sourceColumns,
+    std::span<const uint32_t> sourceColumns,
     uint32_t positions,
     std::string& error) {
   BOLT_CHECK(&source != this, "a decoder cannot open the payload it read");
+  BOLT_CHECK_EQ(sourceColumns.size(), layout_.numColumns());
   BOLT_CHECK_EQ(payloadRowsLeft(), 0u, "previous payload not fully read");
   rowCount_ = 0;
   rowsRead_ = 0;
@@ -1609,11 +1604,7 @@ void buildNullBody(
   }
   const size_t at = out->size();
   resizeBuffer(out, checkedPlus<size_t>(at, recordsBytes), pool);
-  in.nulls->emitRecords(
-      pid,
-      rawColumns.data(),
-      static_cast<uint32_t>(rawColumns.size()),
-      out->asMutable<uint8_t>() + at);
+  in.nulls->emitRecords(pid, rawColumns, out->asMutable<uint8_t>() + at);
 }
 
 uint64_t appendPayloadPrefix(
@@ -1638,8 +1629,7 @@ uint64_t appendPayloadPrefix(
       out->asMutable<char>() + nullSizesAt, nullStoredSize);
   folly::storeUnaligned<uint32_t>(
       out->asMutable<char>() + nullSizesAt + 4, nullDecodedSize);
-  appendBytes(
-      out, in.encodingTags, (in.layout->numWireColumns() + 7) / 8, pool);
+  appendBytes(out, in.encodingTags.data(), in.encodingTags.size(), pool);
   return nullDecodedSize == 0 ? 0 : nullDecodedSize - nullStoredSize;
 }
 
@@ -1655,11 +1645,10 @@ void writeCombinedRunHeader(
     char* out,
     RunLayout layout,
     uint64_t stored,
-    const uint64_t* decodedSizes,
-    uint32_t numStreams) {
+    std::span<const uint64_t> decodedSizes) {
   out[0] = static_cast<char>(layout);
   folly::storeUnaligned<uint64_t>(out + 1, stored);
-  ::memcpy(out + 9, decodedSizes, 8ull * numStreams);
+  ::memcpy(out + 9, decodedSizes.data(), decodedSizes.size_bytes());
 }
 
 } // namespace bytedance::bolt::shuffle::sparksql::cell
