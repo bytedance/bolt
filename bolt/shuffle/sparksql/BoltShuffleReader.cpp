@@ -774,9 +774,9 @@ BoltColumnarBatchDeserializerFactory::createDeserializer(
   // Mirror of the writer's choice (and of SparkShuffleReaderNode's),
   // writesCellShuffle(): Cell when forced, or preferred over a forced V1 or
   // V2 or over an adaptive choice that did not pick the row-based writer,
-  // and only under a partitioning with a pid - elsewhere the writer falls
-  // back to V1, which is read here as usual. Cell payloads are not
-  // V1/V2/row payloads: only SparkShuffleReaderNode reads them.
+  // under any partitioning; otherwise the writer is V1, V2 or row-based,
+  // read here as usual. Cell payloads are not V1/V2/row payloads: only
+  // SparkShuffleReaderNode reads them.
   BOLT_CHECK(
       !writesCellShuffle(
           partitioning, shuffleWriterType_, preferCellShuffle_, isRowBased),

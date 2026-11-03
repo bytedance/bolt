@@ -1,10 +1,10 @@
 # Cell shuffle
 
-The Cell shuffle is a columnar Spark shuffle writer and reader for hash and
-range partitioning. It stages every value in a 64-byte cache line of its
-(partition, stream), encodes each full line as one small integer block, and
-keeps a whole window of payloads resident in fixed-size cells until it is
-sealed or spilled. This page gives the overview and the reasoning behind the
+The Cell shuffle is a columnar Spark shuffle writer and reader for hash,
+range, single and round-robin partitioning. It stages every value in a
+64-byte cache line of its (partition, stream), encodes each full line as one
+small integer block, and keeps a whole window of payloads resident in
+fixed-size cells until it is sealed or spilled. This page gives the overview and the reasoning behind the
 design. The wire format is defined, field by field, in
 [CellFormat.h](CellFormat.h); this page does not repeat it.
 
@@ -34,8 +34,6 @@ must be read by the Cell reader, and both sides must select it the same way.
   take about 192 MB), and the cell size shrinks with the same product. Wide
   nested schemas multiply the streams; for them, turning
   `nativeNestedTypes` off packs the complex columns into one column.
-- **Partitioning without a pid** (single, round-robin): Cell is never
-  chosen there, even when forced; the writer is V1.
 
 ### How to enable it
 
@@ -46,8 +44,14 @@ Writer side (`ShuffleWriterOptions`, [Options.h](../Options.h)):
   V2 (`2`), and over the adaptive choice (`0`) unless that picked the
   row-based writer; a forced RowBased (`3`) stays row-based.
 
+The rule is the same under every partitioning. Single and round-robin
+partitioning never pick the row-based writer and, where Cell is not chosen,
+write V1 whatever type is forced, as before.
+
 `writesCellShuffle()` in Options.h is the one rule the writer and both
-readers follow.
+readers follow. A job that sets `preferCellShuffle` writes Cell for its
+single and round-robin exchanges too, so their readers must be
+`SparkShuffleReaderNode` as well.
 
 The writer must be created through `BoltShuffleWriter::createShuffleWriter()`;
 `createForType(Cell)` fails on purpose rather than silently writing V1.
@@ -86,7 +90,7 @@ them:
 ## 2. Data flow
 
 ```text
- input RowVector (pid column first)
+ input RowVector (pid column first; single/round-robin: computed)
    |
    v
  CompositeShuffleWriter --- CompositeRowVector ---> held rows ----------+
@@ -124,8 +128,9 @@ them:
 Step by step:
 
 1. **CompositeShuffleWriter** (base class) partitions every batch by its pid
-   column and buffers `CompositeRowVector` rows (aggregation state) as
-   `CompositeRows` blocks. Only one kind holds data at a time: a batch of the
+   column - computed and put in front first under single or round-robin
+   partitioning - and buffers `CompositeRowVector` rows (aggregation state)
+   as `CompositeRows` blocks. Only one kind holds data at a time: a batch of the
    other kind first writes the current one out.
 2. **CellShuffleWriter** builds the layout on the first batch, sizes the
    cells, runs the one-time dictionary probe, classifies nulls per batch
@@ -374,6 +379,15 @@ Writer and reader decide alike from the same logical type, which is why
 
 ## 7. Limits and failure modes
 
+- **Single and round-robin partitioning:** their batches carry no pid
+  column. `CompositeShuffleWriter::split` computes one per ordinary batch
+  with the partitioner V1 uses - every row to partition 0, or round-robin
+  from `startPartitionId`, its position carried across batches, so each
+  row lands where V1 puts it - and puts it in front, sharing the batch's
+  children; the rest of the writer, and the reader, are the hash path's.
+  This costs one INTEGER column per batch. Composite rows are refused
+  there (`composite rows only under hash or range partitioning`), as V1
+  refuses them.
 - **Supported types:** BOOLEAN, TINYINT, SMALLINT, INTEGER (and DATE),
   BIGINT (and short DECIMAL), HUGEINT (long DECIMAL), REAL, DOUBLE, VARCHAR,
   VARBINARY, TIMESTAMP and UNKNOWN (which has no wire column), plus ARRAY,
