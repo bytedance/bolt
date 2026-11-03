@@ -121,7 +121,8 @@ ScalarComparison scalarComparison(TypeKind kind) {
 
 bool canDecodeWithoutRows(const VectorPtr& vector) {
   return vector->type()->isPrimitiveType() &&
-      (vector->isFlatEncoding() || vector->isConstantEncoding());
+      (vector->isFlatEncoding() ||
+       (vector->isConstantEncoding() && !isLazyNotLoaded(*vector)));
 }
 
 // Cache child decoding once per batch, including selected nested elements.
@@ -157,6 +158,9 @@ struct DecodedValue {
       }
     });
     baseRows.updateBounds();
+    if (!baseRows.hasSelections()) {
+      return;
+    }
     switch (base->typeKind()) {
       case TypeKind::ROW:
         for (const auto& child : base->asUnchecked<RowVector>()->children()) {

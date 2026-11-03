@@ -158,6 +158,33 @@ TEST_F(ComplexEqualTest, MapsUseLastDuplicateKeyValue) {
   assertComparisons(left, right, {true, true, true, true});
 }
 
+TEST_F(ComplexEqualTest, NullEmptyRowMapValues) {
+  auto values = BaseVector::createNullConstant(ROW({}), 1, pool());
+  auto map = makeMapVector({0}, makeFlatVector<int32_t>({1}), values);
+  assertComparisons(map, map, {false});
+}
+
+TEST_F(ComplexEqualTest, ConstantLazyMapValues) {
+  auto lazy = makeLazyFlatVector<int32_t>(
+      4,
+      [](auto row) { return row; },
+      [](auto) { return false; },
+      1,
+      [](auto) { return 2; });
+  auto values = std::make_shared<ConstantVector<int32_t>>(pool(), 2, 2, lazy);
+  auto map = makeMapVector({0, 1}, makeFlatVector<int32_t>({1, 2}), values);
+  assertComparisons(map, map, {true, true});
+}
+
+TEST_F(ComplexEqualTest, EmptyMapsDoNotLoadConstantLazyValues) {
+  auto lazy = makeLazyFlatVector<int32_t>(
+      4, [](auto row) { return row; }, [](auto) { return false; }, 0);
+  auto values = std::make_shared<ConstantVector<int32_t>>(pool(), 0, 2, lazy);
+  auto map = makeMapVector({0}, makeFlatVector<int32_t>({}), values);
+  assertComparisons(map, map, {true});
+  EXPECT_FALSE(lazy->isLoaded());
+}
+
 TEST_F(ComplexEqualTest, DifferentMapSizesDoNotLoadValues) {
   auto leftValues =
       makeLazyFlatVector<int32_t>(2, [](auto row) { return row; });
