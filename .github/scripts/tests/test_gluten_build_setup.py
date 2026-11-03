@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -25,6 +26,45 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class BuildSetupTest(unittest.TestCase):
+    def test_source_mirror_works_without_an_image_helper(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/gluten-bolt.yml").read_text()
+        )
+        step = next(
+            s
+            for s in workflow["jobs"]["build"]["steps"]
+            if s.get("name") == "Configure the prewarmed Conan source mirror"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "global.conf"
+            config.write_text("core.download:parallel=1\n")
+            for mirror in ("http://cache-one/s/", "http://cache-two/s/"):
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "CONAN_HOME": str(root),
+                        "GLUTEN_CONAN_SOURCE_MIRROR": mirror,
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                lines = config.read_text().splitlines()
+                settings = dict(line.split("=", 1) for line in lines)
+                self.assertEqual(len(lines), len(settings))
+                self.assertEqual(settings["core.download:parallel"], "1")
+                self.assertEqual(
+                    json.loads(settings["core.sources:download_urls"]),
+                    [mirror, "origin"],
+                )
+                self.assertEqual(
+                    settings["core.sources:download_cache"],
+                    str(root / "source-backup"),
+                )
+
     def test_profile_setup_honors_isolated_conan_home(self):
         action = yaml.safe_load(
             (ROOT / ".github/actions/bolt-build-base/action.yml").read_text()

@@ -36,45 +36,11 @@ class GlutenCiTest(unittest.TestCase):
                 "HELPER": str(HELPER),
                 "GITHUB_ACTIONS": "false",
                 "GITHUB_ENV": "",
-                "GLUTEN_COMPILE_DEADLINE": "",
                 **env,
             },
             text=True,
             capture_output=True,
         )
-
-    def test_expired_compile_budget_does_not_start_command(self):
-        result = self.shell("ci_compile printf started", GLUTEN_COMPILE_DEADLINE="1")
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertNotIn("started", result.stdout)
-
-    def test_compile_preserves_failure_status(self):
-        result = self.shell(
-            "ci_compile bash -c 'exit 42'",
-            GLUTEN_COMPILE_DEADLINE=str(int(time.time()) + 60),
-        )
-        self.assertEqual(result.returncode, 42, result.stderr)
-
-    def test_deadline_terminates_slow_compile(self):
-        start = time.monotonic()
-        result = self.shell(
-            "ci_compile sleep 30",
-            GLUTEN_COMPILE_DEADLINE=str(int(time.time()) + 2),
-        )
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertLess(time.monotonic() - start, 10)
-
-    def test_deadline_also_terminates_compile_children(self):
-        with tempfile.TemporaryDirectory() as directory:
-            marker = str(Path(directory) / "survived")
-            result = self.shell(
-                "ci_compile bash -c '(sleep 3; touch \"$MARKER\") & wait'",
-                GLUTEN_COMPILE_DEADLINE=str(int(time.time()) + 1),
-                MARKER=marker,
-            )
-            self.assertEqual(result.returncode, 124, result.stderr)
-            time.sleep(3)
-            self.assertFalse(Path(marker).exists(), "Compiler child survived deadline")
 
     def test_spark_shards_do_not_execute_backend_again(self):
         with tempfile.TemporaryDirectory() as directory:

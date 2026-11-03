@@ -29,20 +29,25 @@ targets do not provide the required selection or reports. In particular,
 Scheduled JVM shards install sibling modules before running selected suites;
 TPC checks also install the complete bundle for `tools/gluten-it`.
 
-## Time budgets
+## Build performance
 
-The native compilation job has a 30-minute limit and each JVM compilation job
-has a 25-minute limit, including setup and artifact transfer. The warm-build
-target remains approximately 20 minutes per compilation job. A shell deadline
-also terminates compiler subprocesses
-when that job's budget expires. Scheduled tests start as soon as native libraries
-are available, without waiting for JVM compilation; each has a 35-minute limit.
-Native CTest runs in a separate 10-minute job using the original compiled test
-executables and fixtures. The intended longest execution path is native build
-(target below 25 minutes) plus a Spark test shard (35 minutes). The native-plus-test
-portion can reach 65 minutes, plus up to three minutes of source preparation and
-runner queue time, so a cold run can exceed the one-hour target;
-GitHub schedules and runner queues do not provide a start-time SLA.
+The target is an actual native-plus-JVM build time below 30 minutes, with
+scheduled tests completing within one hour. These are performance targets,
+not termination deadlines. This workflow does not configure job, compiler,
+test or transfer timeouts; GitHub Actions and runner platform limits still apply.
+Scheduled tests start when native libraries are available, without waiting for
+JVM compilation. Measure setup, compilation and artifact transfer separately
+from runner queue time.
+
+The priority is reusing the source mirror from
+[Gluten PR #2](https://github.com/Weixin-Xu/gluten/pull/2).
+In [run 41431212420](https://github.com/bytedance/bolt/actions/runs/41431212420),
+Bolt compiled in about 13 minutes, then a 21.5 MB Arrow source download and its
+retries consumed over 16 minutes before cancellation. The preceding run spent
+about 12 minutes on the same download. PR #2 fetched that archive from its
+prewarmed source mirror in about 0.03 seconds. A binary Conan cache alone does
+not cover this: Gluten also requests Arrow sources. Verify source-mirror hits
+in the native log before increasing compiler parallelism.
 
 PR native and JVM compilation run sequentially and need one available runner
 slot at a time. The scheduled matrix has seven Spark 3.5 jobs plus native CTest;
@@ -64,6 +69,46 @@ existing `bolt-registry:5000/bolt-ci:20260921` image; the Conan service defaults
 JDK 17, Python test dependencies and the Maven version required by Gluten into
 the image to avoid repeated installation. The workflow installs missing report
 tools for compatibility with existing images.
+
+Reuse PR #2's prewarmed Conan **source mirror**, without requiring its
+`20260921-source-cache-v3` image on Bolt runners. Deploy a read-only HTTP service
+for the copied source backup directory, then set the repository Actions variable:
+
+```text
+BOLT_GLUTEN_CI_SOURCE_MIRROR=http://<runner-reachable-cache-host>:9301/s/
+```
+
+The endpoint must serve Conan's checksum-named source archives and their `.json`
+metadata from the existing backup's `s/` directory. Copy the prewarmed Arrow and
+Substrait entries from the existing deployment, rather than fetching them again
+on each PR. This source mirror is separate from the Conan binary service on
+port 9300. It needs to be reachable from every selected job container; in
+Docker-in-Docker, `localhost` identifies the job container, not the physical host.
+
+The workflow reuses `scripts/configure-conan-sources-cache.py` to configure
+`core.sources:download_urls=["<mirror>", "origin"]` and a persistent local source
+backup after Bolt dependency setup. Conan verifies the archive checksums. If the
+variable is unset, an image-provided `configure-bolt-conan-cache` is still used
+when available; otherwise the workflow warns and uses ordinary downloads. The
+performance target is not validated until the source mirror is deployed.
+
+To verify the deployed mirror, run this inside the actual CI job network:
+
+```bash
+# Set this to the same endpoint as the repository variable.
+: "${GLUTEN_SOURCE_MIRROR:?Set the deployed source mirror URL}"
+gluten_arrow_sha=55db63ed9fd6917b7abfe5d4186c9f532cbe48aa53f4040d57e7c29ad70bcefa
+gluten_arrow_archive="$(mktemp)"
+curl -fsSL "${GLUTEN_SOURCE_MIRROR%/}/${gluten_arrow_sha}" \
+  -o "${gluten_arrow_archive}"
+printf '%s  %s\n' "${gluten_arrow_sha}" "${gluten_arrow_archive}" | sha256sum -c -
+rm -f "${gluten_arrow_archive}"
+```
+
+This checksum is the Arrow 15.0.1 source archive from the measured run. Future
+recipe versions may need new mirror entries. The native log should show sources
+found in the remote backup or local source cache. Keep the existing ccache,
+Conan package and Maven cache mounts below; source caching complements them.
 
 Create these directories on **every selected runner host**, outside the checkout:
 
@@ -155,7 +200,7 @@ JVM jobs; large LLVM/static-engine archives are not copied to every test job.
 
 To create the dependency seed, use an administrator-controlled container with
 the **same image, profile and options as the native job**. Run the native build
-once with a longer temporary budget. From that completed Bolt checkout:
+once to populate dependencies. From that completed Bolt checkout:
 
 ```bash
 (
@@ -175,7 +220,7 @@ once with a longer temporary budget. From that completed Bolt checkout:
 ```
 
 If a native job has already warmed the persistent cache, an administrator can
-export its dependencies directly, including when the job later hit its time limit.
+export its dependencies directly, including when a later build step failed.
 Pause that runner while exporting, then run these commands inside the configured
 CI image with both host directories mounted read-write at the same paths:
 
@@ -205,18 +250,18 @@ candidate. Preserve the persistent cache directories when restarting runners.
 
 Publish a seed only from a completed dependency build. Update it after compiler,
 ABI, dependency recipe/options or image changes; keep a seed per image when
-running different toolchains. If the image provides
-`configure-bolt-conan-cache`, the workflow also uses that source-cache helper,
-as in Gluten PR #2. Otherwise dependency sources can be rebuilt on cache misses.
+running different toolchains. The seed commands deliberately exclude unpacked
+sources to keep binary seeds small; `BOLT_GLUTEN_CI_SOURCE_MIRROR` supplies the
+prewarmed source mirror independently. The persistent Conan home retains sources
+and its source-download cache after the first use. Keep both the binary cache
+and source mirror available.
 
 Native archive downloads are cached once per host and artifact digest. Each
 consumer still queries GitHub for the current run's artifact identity and verifies
 the complete ZIP digest and integrity before extraction. Incomplete or corrupt
 entries are downloaded again; new candidates use distinct keys. The first copy
-on a host still requires network access. Transfers retry up to three times, with
-a five-minute cap per attempt and a one-minute low-throughput timeout, within
-the compilation job's remaining budget. This prevents one stalled transfer from
-consuming the entire job before retrying.
+on a host still requires network access. Failed transfers or integrity checks
+retry up to three times, without a compilation deadline.
 
 The Scala Maven plugin's `secondaryCacheDir` points inside that persistent
 Maven directory, so compiled Zinc bridges survive the job's temporary home.
@@ -233,7 +278,6 @@ compiled.
 Use clean worktrees and a prepared Conan toolchain. The native commands and all
 options are visible in `.github/workflows/gluten-bolt.yml`; the helper can also
 be sourced locally. Set `GLUTEN_DIR` when Gluten is outside the Bolt checkout.
-`GLUTEN_COMPILE_DEADLINE=$(( $(date +%s) + 1800 ))` enables the native compile budget.
 
 The primary compilation entry points are:
 
@@ -275,6 +319,8 @@ can invalidate cached objects in both workflows. Record the Conan recipe SHA
 and compare the before/after ccache counters; shared-host counters include other
 concurrent jobs and are not a per-job hit rate.
 
+The source-mirror integration still needs validation on the Bolt runner pool;
+sub-30-minute compilation is a target, not a measured result for this revision.
 Full scheduled Spark/TPC execution and the one-hour runtime target remain
 unverified. Run the scheduled path once with `run_tests=true` after deploying
 the runner cache mounts, and measure it on the available runner pool.

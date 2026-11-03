@@ -21,17 +21,6 @@ BOLT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GLUTEN_DIR="${GLUTEN_DIR:-${BOLT_ROOT}/gluten}"
 GLUTEN_REPORTS_DIR="${GLUTEN_REPORTS_DIR:-${BOLT_ROOT}/.ci/gluten-bolt}"
 
-# Each compilation job has its own deadline. The workflow job timeout also
-# covers checkout and setup; scheduled tests use their separate test budget.
-ci_compile() {
-  local remaining=$((GLUTEN_COMPILE_DEADLINE - $(date +%s)))
-  if ((remaining <= 0)); then
-    echo "Gluten compilation exceeded its job budget" >&2
-    return 124
-  fi
-  timeout --signal=TERM --kill-after=30s "${remaining}s" "$@"
-}
-
 ci_conan_home() {
   # Container jobs have an exclusive /github/home mount. Matching the existing
   # Bolt jobs' dependency paths allows their compiler cache entries to be reused.
@@ -86,15 +75,11 @@ ci_seed_conan() {
       printf '%s\n' "${digest}" > "${marker}"
     fi
   else
-    echo "::warning::No Conan seed: dependency builds may exceed the compilation budget"
+    echo "No Conan seed: using the persistent cache and configured remotes"
   fi
   # Candidate archives are unique to a run and must not accumulate in this
   # dependency cache. The current candidate is exported later in this job.
   conan remove 'bolt/ci-*' --confirm
-  # Optional image helper for read-only download/source caches, as in Gluten PR #2.
-  if command -v configure-bolt-conan-cache > /dev/null; then
-    configure-bolt-conan-cache
-  fi
   local downloads="${GLUTEN_MAVEN_REPO%/maven/*}/conan-downloads"
   mkdir -p "${downloads}"
   printf 'core.download:download_cache=%s\n' "${downloads}" >> "${CONAN_HOME}/global.conf"
@@ -155,11 +140,11 @@ ci_verify_bolt_package() {
 # Verify the complete archive before extraction. A stopped artifact stream can
 # otherwise leave missing or truncated files while its action reports success.
 ci_download_artifact() (
-  local metadata url digest archive attempt max_time remaining artifact_id cached
+  local metadata url digest archive attempt artifact_id cached
   local cache="${GLUTEN_CACHE_ROOT:-/data/gluten-ci-cache}/artifacts"
   local api="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts"
   local auth=(-H "Authorization: Bearer ${GITHUB_TOKEN:?}")
-  metadata="$(curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 60 \
+  metadata="$(curl -fsSL --retry 3 --retry-all-errors \
     "${auth[@]}" --get --data-urlencode "name=$1" "${api}")" || return
   url="$(jq -er '.artifacts | select(length == 1) | .[0].archive_download_url' <<< "${metadata}")" || return
   digest="$(jq -er '.artifacts[0].digest' <<< "${metadata}")" || return
@@ -186,15 +171,7 @@ ci_download_artifact() (
   archive="$(mktemp "${cache}/${artifact_id}-partial-XXXXXX")" || return
   trap 'rm -f "${archive}"' EXIT
   for attempt in 1 2 3; do
-    max_time=300
-    if [[ -n "${GLUTEN_COMPILE_DEADLINE:-}" ]]; then
-      remaining=$((GLUTEN_COMPILE_DEADLINE - $(date +%s)))
-      ((remaining > 0)) || return 124
-      ((remaining >= max_time)) || max_time=${remaining}
-    fi
-    if curl -fsSL --connect-timeout 30 --max-time "${max_time}" \
-      --speed-limit 1024 --speed-time 60 \
-      "${auth[@]}" --output "${archive}" "${url}" \
+    if curl -fsSL "${auth[@]}" --output "${archive}" "${url}" \
       && valid_archive "${archive}"; then
       mv -- "${archive}" "${cached}"
       unzip -oq "${cached}" -d "${GLUTEN_REPORTS_DIR}"
