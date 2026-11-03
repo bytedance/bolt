@@ -41,6 +41,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "bolt/functions/lib/DateTimeFormatterInternal.h"
 #include "bolt/type/TimestampConversion.h"
@@ -817,12 +818,6 @@ FOLLY_ALWAYS_INLINE int getMaxDigitConsume(
     FormatPattern curPattern,
     bool specifierNext,
     DateTimeFormatterType type) {
-  if (type == DateTimeFormatterType::JAVA_TIME &&
-      curPattern.minRepresentDigits == 2 &&
-      (curPattern.specifier == DateTimeFormatSpecifier::YEAR ||
-       curPattern.specifier == DateTimeFormatSpecifier::YEAR_OF_ERA)) {
-    return 2;
-  }
   // Does not support WEEK_YEAR, WEEK_OF_WEEK_YEAR, time zone names
   switch (curPattern.specifier) {
     case DateTimeFormatSpecifier::CENTURY_OF_ERA:
@@ -885,7 +880,9 @@ ErrorCode parseFromPattern(
     bool specifierNext,
     DateTimeFormatterType type,
     bool legacySpark = false,
-    DateTimeParseOptions options = {}) {
+    DateTimeParseOptions options = {},
+    uint32_t followingDigits = 0,
+    uint8_t javaMaxDigits = 0) {
   if (curPattern.specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID) {
     auto size = parseTimezoneOffset(cur, end, date);
     if (size == -1) {
@@ -1021,17 +1018,29 @@ ErrorCode parseFromPattern(
     if (size < 0) {
       return ErrorCode::PARSE_TIMEZONE_ERROR;
     }
+    if constexpr (javaTime) {
+      if (curPattern.specifier != DateTimeFormatSpecifier::TIMEZONE_ID &&
+          !date.record(
+              DateTimeFormatSpecifier::TIMEZONE_OFFSET_RFC822,
+              date.timezoneOffsetSeconds.value())) {
+        return ErrorCode::PARSE_TIMEZONE_ERROR;
+      }
+    }
     cur += size;
   } else {
     // Numeric specifier case
     bool negative = false;
     const char* signStart = cur;
+    const bool javaYear = javaTime &&
+        (curPattern.specifier == DateTimeFormatSpecifier::YEAR ||
+         curPattern.specifier == DateTimeFormatSpecifier::YEAR_OF_ERA);
 
     if (cur < end && specAllowsNegative(curPattern.specifier) && *cur == '-') {
       negative = true;
       ++cur;
     } else if (
-        cur < end && specAllowsPlusSign(curPattern.specifier, specifierNext) &&
+        cur < end &&
+        (javaYear || specAllowsPlusSign(curPattern.specifier, specifierNext)) &&
         *cur == '+') {
       negative = false;
       ++cur;
@@ -1039,7 +1048,32 @@ ErrorCode parseFromPattern(
 
     auto startPos = cur;
     int64_t number = 0;
-    int maxDigitConsume = getMaxDigitConsume(curPattern, specifierNext, type);
+    int maxDigitConsume;
+    if constexpr (javaTime) {
+      const auto width = curPattern.minRepresentDigits;
+      maxDigitConsume = javaMaxDigits;
+      if (UNLIKELY(maxDigitConsume == 0)) {
+        const bool fixedWidth = javaYear ? width == 2 : width > 1;
+        maxDigitConsume = fixedWidth ||
+                curPattern.specifier ==
+                    DateTimeFormatSpecifier::FRACTION_OF_SECOND
+            ? width
+            : 19;
+      }
+      if (followingDigits > 0) {
+        size_t digits = 0;
+        const auto limit =
+            static_cast<size_t>(maxDigitConsume) + followingDigits;
+        while (digits < limit && digits < end - cur &&
+               characterIsDigit(cur[digits])) {
+          ++digits;
+        }
+        maxDigitConsume = std::max<int64_t>(
+            width, static_cast<int64_t>(digits) - followingDigits);
+      }
+    } else {
+      maxDigitConsume = getMaxDigitConsume(curPattern, specifierNext, type);
+    }
 
     if (curPattern.specifier == DateTimeFormatSpecifier::FRACTION_OF_SECOND) {
       if (legacySpark && maxDigitConsume < 3) {
@@ -1189,11 +1223,21 @@ ErrorCode parseFromPattern(
           return ErrorCode::PARSE_DIGIT_ERROR;
         }
       } else {
-        while (cur < end && cur < startPos + maxDigitConsume &&
-               characterIsDigit(*cur)) {
-          number = number * 10 + (*cur - '0');
+        // Java's maximum 19 digits fit in uint64_t; check the signed range
+        // once.
+        std::conditional_t<javaTime, uint64_t, int64_t> parsed = 0;
+        const auto limit =
+            javaTime ? std::min(maxDigitConsume, 19) : maxDigitConsume;
+        while (cur < end && cur - startPos < limit && characterIsDigit(*cur)) {
+          parsed = parsed * 10 + (*cur - '0');
           ++cur;
         }
+        if constexpr (javaTime) {
+          if (parsed > std::numeric_limits<int64_t>::max()) {
+            return ErrorCode::PARSE_DIGIT_ERROR;
+          }
+        }
+        number = static_cast<int64_t>(parsed);
       }
     }
 
@@ -1341,7 +1385,7 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::HOUR_OF_DAY:
-        if (number > 23 || number < 0) {
+        if (number > (javaTime && !options.strict ? 24 : 23) || number < 0) {
           return ErrorCode::HOUR_OUT_OF_RANGE;
         }
         date.isClockHour = false;
@@ -1689,7 +1733,9 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
                   specifierNext,
                   javaTime ? DateTimeFormatterType::JAVA_TIME : type_,
                   isLegacy,
-                  parseOptions_);
+                  parseOptions_,
+                  tok.followingDigits,
+                  tok.maxParseDigits);
           if (!noError(errorCode)) {
             return errorCode;
           }
@@ -1730,6 +1776,15 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
   if (date.isHourOfHalfDay) {
     if (!date.isAm) {
       date.hour += 12;
+    }
+  }
+
+  if constexpr (javaTime) {
+    if (date.hour == 24 &&
+        (date.minute != 0 || date.second != 0 ||
+         (date.has(DateTimeFormatSpecifier::FRACTION_OF_SECOND) &&
+          date.value(DateTimeFormatSpecifier::FRACTION_OF_SECOND) != 0))) {
+      return ErrorCode::HOUR_OUT_OF_RANGE;
     }
   }
 
@@ -1932,6 +1987,13 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
           date.value(DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH)) {
         return ErrorCode::DAY_CONFLICT;
       }
+    }
+  }
+
+  if constexpr (javaTime) {
+    if (date.hour == 24) {
+      ++daysSinceEpoch;
+      date.hour = 0;
     }
   }
 

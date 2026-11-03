@@ -1874,9 +1874,10 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestamp) {
   EXPECT_EQ(
       std::nullopt,
       getTimestamp("2020-01-27 20:06:11.847-0800", "yyyy-MM-dd HH:mm:ss.SSSz"));
+  EXPECT_EQ("null", getTimestampString("1400-365", "yyyy-DD"));
   EXPECT_EQ(
       "1400-12-31 00:00:00.000000000",
-      getTimestampString("1400-365", "yyyy-DD"));
+      getTimestampString("1400-365", "yyyy-DDD"));
   EXPECT_EQ("null", getTimestampString("1400-366", "yyyy-DD"));
   EXPECT_EQ(
       "1400-03-01 00:00:00.000000000",

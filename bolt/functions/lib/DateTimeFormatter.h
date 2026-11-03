@@ -193,7 +193,10 @@ struct FormatPattern {
 };
 
 struct DateTimeToken {
-  enum class Type { kPattern, kLiteral } type;
+  enum class Type : uint8_t { kPattern, kLiteral } type;
+  uint8_t maxParseDigits{0};
+  // Digits reserved for following fixed-width Java numeric fields.
+  uint32_t followingDigits{0};
   union {
     FormatPattern pattern;
     std::string_view literal;

@@ -452,6 +452,9 @@ int32_t DateTimeFormatter::format(
 
         case DateTimeFormatSpecifier::YEAR_OF_ERA: {
           auto year = calDate.year;
+          if (type_ == DateTimeFormatterType::JAVA_TIME && year <= 0) {
+            year = 1 - year;
+          }
           if (token.pattern.minRepresentDigits == 2) {
             result +=
                 padContent(std::abs(year) % 100, '0', 2, maxResultEnd, result);
@@ -530,8 +533,10 @@ int32_t DateTimeFormatter::format(
             }
             year = weekYear;
           }
-          if ((simple || ::bytedance::bolt::kSparkCompatible) && year <= 0 &&
-              (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
+          if ((simple ||
+               (::bytedance::bolt::kSparkCompatible &&
+                type_ != DateTimeFormatterType::JAVA_TIME)) &&
+              year <= 0 && (hasEra_ || timePolicy == TimePolicy::LEGACY)) {
             // for spark compatibility, year should be the positive
             // year-of-era for LEGACY policy or when the pattern has an Era:
             // proleptic year 0 is 1 BC, -1 is 2 BC, etc.
@@ -665,6 +670,10 @@ int32_t DateTimeFormatter::format(
         } break;
 
         case DateTimeFormatSpecifier::DAY_OF_YEAR: {
+          if (type_ == DateTimeFormatterType::JAVA_TIME &&
+              token.pattern.minRepresentDigits == 2) {
+            BOLT_USER_CHECK_LE(dayOfYear, 99, "Day of year exceeds DD width");
+          }
           result += padContent(
               dayOfYear,
               '0',
