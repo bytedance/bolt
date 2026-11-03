@@ -29,7 +29,9 @@
  */
 
 #include "bolt/core/Expressions.h"
+#include <bit>
 #include "bolt/common/encode/Base64.h"
+#include "bolt/vector/ComplexVector.h"
 #include "bolt/vector/VectorSaver.h"
 namespace bytedance::bolt::core {
 
@@ -47,6 +49,115 @@ std::vector<TypedExprPtr> deserializeInputs(
   }
 
   return {};
+}
+
+template <typename T>
+bool equalFloatingPointConstants(T left, T right) {
+  using Bits =
+      std::conditional_t<sizeof(T) == sizeof(uint32_t), uint32_t, uint64_t>;
+  return std::bit_cast<Bits>(left) == std::bit_cast<Bits>(right);
+}
+
+// SQL equality can discard observable constant data, including zero signs and
+// MAP entry order. Expression deduplication must preserve these values.
+bool equalConstantValues(
+    const BaseVector* left,
+    vector_size_t leftIndex,
+    const BaseVector* right,
+    vector_size_t rightIndex) {
+  if (left == right && leftIndex == rightIndex) {
+    return true;
+  }
+  if (!left || !right) {
+    return left == right;
+  }
+  const bool leftNull = left->isNullAt(leftIndex);
+  const bool rightNull = right->isNullAt(rightIndex);
+  if (leftNull || rightNull) {
+    return leftNull == rightNull;
+  }
+  leftIndex = left->wrappedIndex(leftIndex);
+  rightIndex = right->wrappedIndex(rightIndex);
+  left = left->wrappedVector();
+  right = right->wrappedVector();
+  const auto equalElements = [&](const VectorPtr& leftElements,
+                                 vector_size_t leftOffset,
+                                 const VectorPtr& rightElements,
+                                 vector_size_t rightOffset,
+                                 vector_size_t size) {
+    for (vector_size_t i = 0; i < size; ++i) {
+      if (!equalConstantValues(
+              leftElements.get(),
+              leftOffset + i,
+              rightElements.get(),
+              rightOffset + i)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  switch (left->typeKind()) {
+    case TypeKind::REAL:
+      return equalFloatingPointConstants(
+          left->as<SimpleVector<float>>()->valueAt(leftIndex),
+          right->as<SimpleVector<float>>()->valueAt(rightIndex));
+    case TypeKind::DOUBLE:
+      return equalFloatingPointConstants(
+          left->as<SimpleVector<double>>()->valueAt(leftIndex),
+          right->as<SimpleVector<double>>()->valueAt(rightIndex));
+    case TypeKind::ROW: {
+      const auto* leftRow = left->as<RowVector>();
+      const auto* rightRow = right->as<RowVector>();
+      if (leftRow->childrenSize() != rightRow->childrenSize()) {
+        return false;
+      }
+      for (column_index_t i = 0; i < leftRow->childrenSize(); ++i) {
+        if (!equalConstantValues(
+                leftRow->childAt(i).get(),
+                leftIndex,
+                rightRow->childAt(i).get(),
+                rightIndex)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case TypeKind::ARRAY:
+    case TypeKind::MAP: {
+      const auto* leftArray = left->as<ArrayVectorBase>();
+      const auto* rightArray = right->as<ArrayVectorBase>();
+      const auto size = leftArray->sizeAt(leftIndex);
+      if (size != rightArray->sizeAt(rightIndex)) {
+        return false;
+      }
+      const auto leftOffset = leftArray->offsetAt(leftIndex);
+      const auto rightOffset = rightArray->offsetAt(rightIndex);
+      if (left->typeKind() == TypeKind::ARRAY) {
+        return equalElements(
+            left->as<ArrayVector>()->elements(),
+            leftOffset,
+            right->as<ArrayVector>()->elements(),
+            rightOffset,
+            size);
+      }
+      const auto* leftMap = left->as<MapVector>();
+      const auto* rightMap = right->as<MapVector>();
+      return equalElements(
+                 leftMap->mapKeys(),
+                 leftOffset,
+                 rightMap->mapKeys(),
+                 rightOffset,
+                 size) &&
+          equalElements(
+                 leftMap->mapValues(),
+                 leftOffset,
+                 rightMap->mapValues(),
+                 rightOffset,
+                 size);
+    }
+    default:
+      return left->equalValueAt(right, leftIndex, rightIndex);
+  }
 }
 } // namespace
 
@@ -90,6 +201,34 @@ TypedExprPtr InputTypedExpr::create(const folly::dynamic& obj, void* context) {
   auto type = core::deserializeType(obj, context);
 
   return std::make_shared<InputTypedExpr>(std::move(type));
+}
+
+bool ConstantTypedExpr::equals(const ITypedExpr& other) const {
+  const auto* casted = dynamic_cast<const ConstantTypedExpr*>(&other);
+  if (!casted || *type() != *casted->type() ||
+      hasValueVector() != casted->hasValueVector()) {
+    return false;
+  }
+  if (hasValueVector()) {
+    return equalConstantValues(
+        valueVector_.get(), 0, casted->valueVector_.get(), 0);
+  }
+  if (value_.kind() != casted->value_.kind()) {
+    return false;
+  }
+  if (!value_.isNull() && !casted->value_.isNull()) {
+    if (value_.kind() == TypeKind::REAL) {
+      return equalFloatingPointConstants(
+          value_.value<TypeKind::REAL>(),
+          casted->value_.value<TypeKind::REAL>());
+    }
+    if (value_.kind() == TypeKind::DOUBLE) {
+      return equalFloatingPointConstants(
+          value_.value<TypeKind::DOUBLE>(),
+          casted->value_.value<TypeKind::DOUBLE>());
+    }
+  }
+  return value_ == casted->value_;
 }
 
 folly::dynamic ConstantTypedExpr::serialize() const {

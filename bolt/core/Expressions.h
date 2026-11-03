@@ -143,26 +143,7 @@ class ConstantTypedExpr : public ITypedExpr {
     }
   }
 
-  bool equals(const ITypedExpr& other) const {
-    const auto* casted = dynamic_cast<const ConstantTypedExpr*>(&other);
-    if (!casted) {
-      return false;
-    }
-
-    if (*this->type() != *casted->type()) {
-      return false;
-    }
-
-    if (this->hasValueVector() != casted->hasValueVector()) {
-      return false;
-    }
-
-    if (this->hasValueVector()) {
-      return this->valueVector_->equalValueAt(casted->valueVector_.get(), 0, 0);
-    }
-
-    return this->value_ == casted->value_;
-  }
+  bool equals(const ITypedExpr& other) const;
 
   bool operator==(const ITypedExpr& other) const final {
     return this->equals(other);

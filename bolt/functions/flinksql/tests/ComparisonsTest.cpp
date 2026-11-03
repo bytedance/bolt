@@ -364,6 +364,27 @@ TEST_F(ComplexEqualTest, FloatingPointMapKeysAndValues) {
       {true});
 }
 
+TEST_F(ComplexEqualTest, ConstantFloatingPointMapKeys) {
+  const auto check = [&]<typename T>() {
+    const auto constantMap = [&](T key) {
+      return std::make_shared<core::ConstantTypedExpr>(makeMapVector(
+          {0}, makeFlatVector<T>({key}), makeFlatVector<int32_t>({1})));
+    };
+    auto input = makeRowVector({makeFlatVector<int32_t>({1})});
+    for (bool negate : {false, true}) {
+      auto expression = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(),
+          std::vector<core::TypedExprPtr>{
+              constantMap(T(0.0)), constantMap(T(-0.0))},
+          negate ? "flink_complex_not_equal" : "flink_complex_equal");
+      assertEqualVectors(
+          makeFlatVector<bool>({negate}), evaluate(expression, input));
+    }
+  };
+  check.operator()<float>();
+  check.operator()<double>();
+}
+
 TEST_F(ComplexEqualTest, ArraysRowsAndNestedMapsAsValues) {
   auto keys = makeFlatVector<int32_t>({1, 2, 3, 4});
   auto arrays = makeArrayVector(
