@@ -41,6 +41,7 @@
 #include "bolt/type/tz/TimeZoneMap.h"
 
 #include <gtest/gtest.h>
+#include <unicode/timezone.h>
 #include <string>
 using namespace bytedance::bolt;
 namespace bytedance::bolt::functions {
@@ -1464,6 +1465,26 @@ TEST_F(DateTimeFormatterTest, javaAdjacentFieldsAndMidnight) {
             "2024-01-31 Wed 24:00",
             Timestamp(1706745600, 0),
             std::nullopt},
+           {"yyyy-MM-dd HH:mm a",
+            "2024-01-31 24:00 AM",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm a",
+            "2024-01-31 24:00 PM",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd a HH:mm",
+            "2024-01-31 AM 24:00",
+            Timestamp(1706745600, 0),
+            std::nullopt},
+           {"yyyy-MM-dd a HH:mm",
+            "2024-01-31 PM 24:00",
+            std::nullopt,
+            std::nullopt},
+           {"yyyy-MM-dd HH:mm hh",
+            "2024-01-31 24:00 12",
+            Timestamp(1706745600, 0),
+            std::nullopt},
            {"yyyy-MM-dd HH:mm hh a",
             "2024-01-31 24:00 12 AM",
             std::nullopt,
@@ -1490,6 +1511,53 @@ TEST_F(DateTimeFormatterTest, javaAdjacentFieldsAndMidnight) {
         ASSERT_EQ(parsed.hasError(), !expected.has_value());
         if (expected) {
           EXPECT_EQ(parsed.value().timestamp, *expected);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaDayFieldRange) {
+  for (const auto* day : {"4294967297", "9223372032559808513"}) {
+    for (const bool strict : {false, true}) {
+      DateTimeParseOptions options;
+      options.strict = strict;
+      for (const bool dayOfYear : {false, true}) {
+        const auto pattern = dayOfYear ? "uuuu-D" : "uuuu-MM-d";
+        const auto input = std::string(dayOfYear ? "2024-" : "2024-01-") + day;
+        SCOPED_TRACE(std::string(pattern) + ":" + input);
+        const auto formatter = buildJavaDateTimeFormatter(pattern, options);
+        EXPECT_TRUE(formatter->parse(input).hasError());
+        EXPECT_TRUE(formatter->parseWithNanosecondPrecision(input).hasError());
+      }
+    }
+  }
+}
+
+TEST_F(DateTimeFormatterTest, javaClockHourZero) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    Timestamp expected;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"yyyy-MM-dd kk:mm", "2024-01-31 00:02", Timestamp(1706659320, 0)},
+           {"yyyy-MM-dd hh:mm a",
+            "2024-01-31 00:02 AM",
+            Timestamp(1706659320, 0)},
+           {"yyyy-MM-dd hh:mm a",
+            "2024-01-31 00:02 PM",
+            Timestamp(1706702520, 0)}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (const bool strict : {false, true}) {
+      const auto formatter = strict ? buildSparkDateTimeFormatter(test.pattern)
+                                    : buildJavaDateTimeFormatter(test.pattern);
+      for (const auto parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        EXPECT_EQ(parsed.hasError(), strict);
+        if (!parsed.hasError()) {
+          EXPECT_EQ(parsed.value().timestamp, test.expected);
         }
       }
     }
@@ -3641,6 +3709,52 @@ TEST_F(DateTimeFormatterTest, simpleDateFormatContext) {
           .value()
           .timestamp,
       Timestamp::fromMillis(4102441200000LL));
+}
+
+TEST_F(DateTimeFormatterTest, simpleDateFormatSystemTimezone) {
+  std::unique_ptr<icu::TimeZone> systemZone(icu::TimeZone::createDefault());
+  ASSERT_NE(systemZone, nullptr);
+  icu::UnicodeString id;
+  systemZone->getID(id);
+  std::string name;
+  id.toUTF8String(name);
+  if (name.starts_with("GMT+") || name.starts_with("GMT-")) {
+    name.erase(0, 3);
+  }
+  const auto* zone = tz::locateZone(name, false);
+  const auto* utc = tz::locateZone(0);
+  for (auto startMillis : {946670400000LL, 946692000000LL}) {
+    auto context = std::make_shared<DateTimeFormatterContext>();
+    context->twoDigitYearStart = Timestamp::fromMillis(startMillis);
+    auto explicitContext = std::make_shared<DateTimeFormatterContext>(*context);
+    explicitContext->defaultTimezone = zone ? zone : utc;
+    for (const auto& [pattern, input] :
+         {std::pair{"yyyy-MM-dd HH:mm:ss z", "2024-01-01 00:00:00 CST"},
+          std::pair{"yy-MM-dd HH:mm:ss", "99-12-31 23:00:00"},
+          std::pair{"yy-MM-dd HH:mm:ss", "00-01-01 01:00:00"}}) {
+      SCOPED_TRACE(
+          fmt::format("{} {} {} {}", name, startMillis, pattern, input));
+      const auto expected = buildSimpleDateTimeFormatter(
+                                pattern, std::nullopt, false, explicitContext)
+                                ->parseToUtc(input, utc)
+                                .value()
+                                .timestamp;
+      EXPECT_EQ(
+          buildSimpleDateTimeFormatter(pattern, std::nullopt, false, context)
+              ->parseToUtc(input, utc)
+              .value()
+              .timestamp,
+          expected);
+      EXPECT_EQ(
+          buildSimpleDateTimeFormatter(
+              pattern, context->twoDigitYearStart, false)
+              ->parseToUtc(input, utc)
+              .value()
+              .timestamp,
+          expected);
+    }
+    EXPECT_EQ(context->defaultTimezone, nullptr);
+  }
 }
 
 TEST_F(DateTimeFormatterTest, simpleDateFormatRebaseContext) {

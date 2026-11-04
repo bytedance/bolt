@@ -1335,6 +1335,9 @@ ErrorCode parseFromPattern(
 
       case DateTimeFormatSpecifier::DAY_OF_MONTH:
         if constexpr (javaTime) {
+          if (number < 1 || number > 31) {
+            return ErrorCode::DAY_OUT_OF_RANGE;
+          }
           if (date.hasDay && date.day != number) {
             return ErrorCode::DAY_CONFLICT;
           }
@@ -1356,6 +1359,9 @@ ErrorCode parseFromPattern(
 
       case DateTimeFormatSpecifier::DAY_OF_YEAR:
         if constexpr (javaTime) {
+          if (number < 1 || number > 366) {
+            return ErrorCode::DAY_OUT_OF_RANGE;
+          }
           if (date.hasDayOfYear && date.dayOfYear != number) {
             return ErrorCode::DAY_CONFLICT;
           }
@@ -1376,7 +1382,7 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::CLOCK_HOUR_OF_DAY:
-        if (number > 24 || number < 1) {
+        if (number > 24 || number < (javaTime && !options.strict ? 0 : 1)) {
           return ErrorCode::HOUR_OUT_OF_RANGE;
         }
         date.isClockHour = true;
@@ -1394,7 +1400,7 @@ ErrorCode parseFromPattern(
         break;
 
       case DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY:
-        if (number > 12 || number < 1) {
+        if (number > 12 || number < (javaTime && !options.strict ? 0 : 1)) {
           return ErrorCode::HOUR_OUT_OF_RANGE;
         }
         date.isClockHour = true;
@@ -1773,17 +1779,19 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
     if (date.has(DateTimeFormatSpecifier::HOUR_OF_DAY)) {
       date.hour = date.value(DateTimeFormatSpecifier::HOUR_OF_DAY);
       date.isHourOfHalfDay = false;
-      if (date.has(DateTimeFormatSpecifier::HOUR_OF_HALFDAY) &&
-          date.hour % 12 !=
-              date.value(DateTimeFormatSpecifier::HOUR_OF_HALFDAY)) {
-        return ErrorCode::DAY_CONFLICT;
+      if (date.has(DateTimeFormatSpecifier::HOUR_OF_HALFDAY)) {
+        const auto hour = date.value(DateTimeFormatSpecifier::HOUR_OF_HALFDAY);
+        if (date.hasHalfDay ? date.hour != hour + (date.isAm ? 0 : 12)
+                            : date.hour % 12 != hour) {
+          return ErrorCode::DAY_CONFLICT;
+        }
       }
     }
   } else if (date.isYearOfEra && !date.isAd) {
     date.year = 1 - date.year;
   }
   if (javaTime && date.hasHalfDay && !date.isHourOfHalfDay &&
-      (date.hour < 12) != date.isAm) {
+      (date.hour % 24 < 12) != date.isAm) {
     return ErrorCode::DAY_CONFLICT;
   }
   if (date.isHourOfHalfDay) {

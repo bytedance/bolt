@@ -285,6 +285,29 @@ void appendPattern(
 
 using ErrorCode = DateTimeResult::ErrorCode;
 
+const std::shared_ptr<const DateTimeFormatterContext>&
+defaultFormatterContext() {
+  static const std::shared_ptr<const DateTimeFormatterContext> context = [] {
+    std::unique_ptr<icu::TimeZone> zone(icu::TimeZone::createDefault());
+    icu::UnicodeString id;
+    if (zone) {
+      zone->getID(id);
+    }
+    std::string name;
+    id.toUTF8String(name);
+    if (name.starts_with("GMT+") || name.starts_with("GMT-")) {
+      name.erase(0, 3);
+    }
+    auto result = std::make_shared<DateTimeFormatterContext>();
+    result->defaultTimezone = tz::locateZone(name, false);
+    if (!result->defaultTimezone) {
+      result->defaultTimezone = tz::locateZone(0);
+    }
+    return result;
+  }();
+  return context;
+}
+
 bool startsWithIgnoreCase(std::string_view text, std::string_view prefix) {
   return text.size() >= prefix.size() &&
       folly::StringPiece(text.data(), prefix.size())
@@ -387,7 +410,9 @@ bool parseSimpleTimezone(
     }
     return false;
   };
-  if (matchZone(timezone) || (context && matchZone(context->defaultTimezone))) {
+  if (matchZone(timezone) ||
+      (context && context->defaultTimezone != timezone &&
+       matchZone(context->defaultTimezone))) {
     return true;
   }
   static const auto names = [] {
@@ -813,17 +838,33 @@ std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
   auto formatter = detail::buildPatternDateTimeFormatter<appendPattern>(
       format, DateTimeFormatterType::SIMPLE_DATE_FORMAT);
   formatter->parseOptions_.strict = !lenient;
+  bool needsCenturyWindow = false;
+  bool needsDefaultTimezone = false;
+  for (const auto& token : formatter->tokens_) {
+    if (token.type != DateTimeToken::Type::kPattern) {
+      continue;
+    }
+    const auto specifier = token.pattern.specifier;
+    needsDefaultTimezone |= specifier == DateTimeFormatSpecifier::TIMEZONE ||
+        specifier == DateTimeFormatSpecifier::TIMEZONE_OFFSET_ID;
+    if (token.pattern.minRepresentDigits <= 2 &&
+        (specifier == DateTimeFormatSpecifier::YEAR ||
+         specifier == DateTimeFormatSpecifier::WEEK_YEAR)) {
+      needsCenturyWindow = true;
+      break;
+    }
+  }
+  if (needsCenturyWindow || needsDefaultTimezone) {
+    if (!context) {
+      context = defaultFormatterContext();
+    } else if (!context->defaultTimezone) {
+      auto resolved = std::make_shared<DateTimeFormatterContext>(*context);
+      resolved->defaultTimezone = defaultFormatterContext()->defaultTimezone;
+      context = std::move(resolved);
+    }
+  }
   formatter->context_ = std::move(context);
-  const auto needsCenturyWindow = [](const DateTimeToken& token) {
-    return token.type == DateTimeToken::Type::kPattern &&
-        token.pattern.minRepresentDigits <= 2 &&
-        (token.pattern.specifier == DateTimeFormatSpecifier::YEAR ||
-         token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR);
-  };
-  if (std::none_of(
-          formatter->tokens_.begin(),
-          formatter->tokens_.end(),
-          needsCenturyWindow)) {
+  if (!needsCenturyWindow) {
     return formatter;
   }
   const auto* contextPtr = formatter->context_.get();
