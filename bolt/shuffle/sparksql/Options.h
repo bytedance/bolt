@@ -285,6 +285,9 @@ struct ShuffleWriterMetrics {
   int64_t combineVectorTimes{0};
   int64_t combineVectorCost{0};
   int64_t useRowBased{0};
+  // 1 when the writer is the Cell shuffle (CellShuffleWriter); summed over
+  // tasks it counts Cell writers.
+  int64_t useCellShuffle{0};
   int64_t splitTime{0};
   int64_t convertTime{0};
   int64_t flattenTime{0};

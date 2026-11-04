@@ -119,6 +119,10 @@ class ShuffleWriter {
     return metrics_.useRowBased;
   }
 
+  int64_t useCellShuffle() const {
+    return metrics_.useCellShuffle;
+  }
+
   int64_t totalConvertTime() const {
     return metrics_.convertTime;
   }

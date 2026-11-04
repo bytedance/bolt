@@ -2185,6 +2185,7 @@ void writeCounters(
   setCounter(counters, "avg_prealloc", m.avgPreallocSize);
   setCounter(counters, "combine_times", m.combineVectorTimes);
   setCounter(counters, "used_v2", m.useV2);
+  setCounter(counters, "used_cell", m.useCellShuffle);
   setCounter(counters, "used_row_based", m.useRowBased);
   setCounter(counters, "pool_peak", w.poolPeak, metric);
   setCounter(counters, "writer_peak", m.peakBytes, metric);

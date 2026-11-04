@@ -308,6 +308,7 @@ TEST_F(CellWriterTest, preferCellShuffleOverridesForcedV1AndV2) {
     ASSERT_NE(writer, nullptr);
     EXPECT_EQ(
         dynamic_cast<CellShuffleWriter*>(writer.get()) != nullptr, c.cell);
+    EXPECT_EQ(writer->useCellShuffle(), c.cell ? 1 : 0);
     if (!c.cell && c.partitioning != Partitioning::kHash) {
       // Without a pid, every other choice is V1.
       EXPECT_EQ(writer->toString(), "BoltShuffleWriter");
@@ -1136,6 +1137,7 @@ TEST_F(CellWriterTest, celebornEmptyMapperStillEndsTheAttempt) {
   EXPECT_EQ(client.stops, 1);
   EXPECT_EQ(client.numPushes, 0);
   EXPECT_EQ(writer.metrics().partitionLengths, std::vector<int64_t>(3, 0));
+  EXPECT_EQ(writer.metrics().useCellShuffle, 1);
   EXPECT_FALSE(std::filesystem::exists(dataFile_));
 }
 
@@ -1188,6 +1190,7 @@ TEST_F(CellWriterTest, compositeAndOrdinaryBatchesShareTheShuffle) {
       const auto written = test::writeShuffle(
           writerOptions(kPartitions, rss, compression), input, pool(), batchOf);
       const auto& metrics = written.metrics;
+      EXPECT_EQ(metrics.useCellShuffle, 1);
       EXPECT_GE(metrics.spillCount, 1) << "an ordinary window was sealed";
       EXPECT_GT(metrics.convertTime, 0);
       // Every row and batch counts, composite or ordinary.
