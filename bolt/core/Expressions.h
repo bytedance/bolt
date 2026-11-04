@@ -94,14 +94,7 @@ class ConstantTypedExpr : public ITypedExpr {
     return value_.toJson(type());
   }
 
-  size_t localHash() const override {
-    static const size_t kBaseHash =
-        std::hash<const char*>()("ConstantTypedExpr");
-
-    return bits::hashMix(
-        kBaseHash,
-        hasValueVector() ? valueVector_->hashValueAt(0) : value_.hash());
-  }
+  size_t localHash() const override;
 
   bool hasValueVector() const {
     return valueVector_ != nullptr;

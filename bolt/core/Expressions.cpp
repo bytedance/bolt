@@ -52,10 +52,87 @@ std::vector<TypedExprPtr> deserializeInputs(
 }
 
 template <typename T>
-bool equalFloatingPointConstants(T left, T right) {
+auto floatingPointBits(T value) {
   using Bits =
       std::conditional_t<sizeof(T) == sizeof(uint32_t), uint32_t, uint64_t>;
-  return std::bit_cast<Bits>(left) == std::bit_cast<Bits>(right);
+  return std::bit_cast<Bits>(value);
+}
+
+bool needsConstantValueHash(const Type& type) {
+  switch (type.kind()) {
+    case TypeKind::REAL:
+    case TypeKind::DOUBLE:
+    case TypeKind::MAP:
+      return true;
+    case TypeKind::ARRAY:
+    case TypeKind::ROW:
+      for (size_t i = 0; i < type.size(); ++i) {
+        if (needsConstantValueHash(*type.childAt(i))) {
+          return true;
+        }
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+uint64_t hashConstantValue(const BaseVector* vector, vector_size_t index) {
+  if (!vector || vector->isNullAt(index)) {
+    return BaseVector::kNullHash;
+  }
+  index = vector->wrappedIndex(index);
+  vector = vector->wrappedVector();
+  const auto hashElements = [&](const VectorPtr& elements,
+                                vector_size_t offset,
+                                vector_size_t size,
+                                uint64_t hash) {
+    const bool useValueHash =
+        elements && !needsConstantValueHash(*elements->type());
+    for (vector_size_t i = 0; i < size; ++i) {
+      hash = bits::hashMix(
+          hash,
+          useValueHash ? elements->hashValueAt(offset + i)
+                       : hashConstantValue(elements.get(), offset + i));
+    }
+    return hash;
+  };
+  switch (vector->typeKind()) {
+    case TypeKind::REAL:
+      return folly::Hash{}(
+          floatingPointBits(vector->as<SimpleVector<float>>()->valueAt(index)));
+    case TypeKind::DOUBLE:
+      return folly::Hash{}(floatingPointBits(
+          vector->as<SimpleVector<double>>()->valueAt(index)));
+    case TypeKind::ROW: {
+      const auto* row = vector->as<RowVector>();
+      auto hash = bits::hashMix(BaseVector::kNullHash, row->childrenSize());
+      for (const auto& child : row->children()) {
+        hash = bits::hashMix(
+            hash,
+            child && !needsConstantValueHash(*child->type())
+                ? child->hashValueAt(index)
+                : hashConstantValue(child.get(), index));
+      }
+      return hash;
+    }
+    case TypeKind::ARRAY:
+    case TypeKind::MAP: {
+      const auto* array = vector->as<ArrayVectorBase>();
+      const auto size = array->sizeAt(index);
+      const auto offset = array->offsetAt(index);
+      auto hash = bits::hashMix(BaseVector::kNullHash, size);
+      if (vector->typeKind() == TypeKind::ARRAY) {
+        return hashElements(
+            vector->as<ArrayVector>()->elements(), offset, size, hash);
+      }
+      const auto* map = vector->as<MapVector>();
+      hash = hashElements(map->mapKeys(), offset, size, hash);
+      return hashElements(map->mapValues(), offset, size, hash);
+    }
+    default:
+      return vector->hashValueAt(index);
+  }
 }
 
 // SQL equality can discard observable constant data, including zero signs and
@@ -98,13 +175,15 @@ bool equalConstantValues(
   };
   switch (left->typeKind()) {
     case TypeKind::REAL:
-      return equalFloatingPointConstants(
-          left->as<SimpleVector<float>>()->valueAt(leftIndex),
-          right->as<SimpleVector<float>>()->valueAt(rightIndex));
+      return floatingPointBits(
+                 left->as<SimpleVector<float>>()->valueAt(leftIndex)) ==
+          floatingPointBits(
+                 right->as<SimpleVector<float>>()->valueAt(rightIndex));
     case TypeKind::DOUBLE:
-      return equalFloatingPointConstants(
-          left->as<SimpleVector<double>>()->valueAt(leftIndex),
-          right->as<SimpleVector<double>>()->valueAt(rightIndex));
+      return floatingPointBits(
+                 left->as<SimpleVector<double>>()->valueAt(leftIndex)) ==
+          floatingPointBits(
+                 right->as<SimpleVector<double>>()->valueAt(rightIndex));
     case TypeKind::ROW: {
       const auto* leftRow = left->as<RowVector>();
       const auto* rightRow = right->as<RowVector>();
@@ -133,6 +212,11 @@ bool equalConstantValues(
       const auto leftOffset = leftArray->offsetAt(leftIndex);
       const auto rightOffset = rightArray->offsetAt(rightIndex);
       if (left->typeKind() == TypeKind::ARRAY) {
+        const auto& elementType = *left->type()->childAt(0);
+        if (elementType.isPrimitiveType() &&
+            !needsConstantValueHash(elementType)) {
+          return left->equalValueAt(right, leftIndex, rightIndex);
+        }
         return equalElements(
             left->as<ArrayVector>()->elements(),
             leftOffset,
@@ -203,6 +287,28 @@ TypedExprPtr InputTypedExpr::create(const folly::dynamic& obj, void* context) {
   return std::make_shared<InputTypedExpr>(std::move(type));
 }
 
+size_t ConstantTypedExpr::localHash() const {
+  static const size_t kBaseHash = std::hash<const char*>()("ConstantTypedExpr");
+  const auto valueHash = [&]() -> uint64_t {
+    if (hasValueVector()) {
+      return needsConstantValueHash(*type())
+          ? hashConstantValue(valueVector_.get(), 0)
+          : valueVector_->hashValueAt(0);
+    }
+    if (!value_.isNull()) {
+      if (value_.kind() == TypeKind::REAL) {
+        return folly::Hash{}(floatingPointBits(value_.value<TypeKind::REAL>()));
+      }
+      if (value_.kind() == TypeKind::DOUBLE) {
+        return folly::Hash{}(
+            floatingPointBits(value_.value<TypeKind::DOUBLE>()));
+      }
+    }
+    return value_.hash();
+  }();
+  return bits::hashMix(kBaseHash, valueHash);
+}
+
 bool ConstantTypedExpr::equals(const ITypedExpr& other) const {
   const auto* casted = dynamic_cast<const ConstantTypedExpr*>(&other);
   if (!casted || *type() != *casted->type() ||
@@ -218,14 +324,12 @@ bool ConstantTypedExpr::equals(const ITypedExpr& other) const {
   }
   if (!value_.isNull() && !casted->value_.isNull()) {
     if (value_.kind() == TypeKind::REAL) {
-      return equalFloatingPointConstants(
-          value_.value<TypeKind::REAL>(),
-          casted->value_.value<TypeKind::REAL>());
+      return floatingPointBits(value_.value<TypeKind::REAL>()) ==
+          floatingPointBits(casted->value_.value<TypeKind::REAL>());
     }
     if (value_.kind() == TypeKind::DOUBLE) {
-      return equalFloatingPointConstants(
-          value_.value<TypeKind::DOUBLE>(),
-          casted->value_.value<TypeKind::DOUBLE>());
+      return floatingPointBits(value_.value<TypeKind::DOUBLE>()) ==
+          floatingPointBits(casted->value_.value<TypeKind::DOUBLE>());
     }
   }
   return value_ == casted->value_;
