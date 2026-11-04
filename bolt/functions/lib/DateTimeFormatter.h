@@ -365,6 +365,10 @@ class DateTimeFormatter {
         bufSize_(bufSize),
         tokens_(std::move(tokens)),
         type_(type) {
+    if (type_ == DateTimeFormatterType::JAVA_TIME) {
+      initializeJavaParsing();
+      return;
+    }
     for (const auto& token : tokens_) {
       if (token.type == DateTimeToken::Type::kPattern &&
           token.pattern.specifier == DateTimeFormatSpecifier::ERA) {
@@ -430,6 +434,8 @@ class DateTimeFormatter {
   friend std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
       const std::string_view& format,
       DateTimeParseOptions options);
+
+  void initializeJavaParsing();
 
   DateTimeResult parseSimpleDateFormat(
       const std::string_view& input,

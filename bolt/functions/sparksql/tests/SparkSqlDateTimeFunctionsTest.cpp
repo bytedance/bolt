@@ -830,6 +830,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampOutOfRangeYears) {
           "+40000-01-01 00:00:00",
           "-0001-01-01 00:00:00",
           "-40000-01-01 00:00:00",
+          "10000-01-01 00:00:00",
+          "40000-01-01 00:00:00",
       })}));
 
   assertSimpleVector<int64_t>(
@@ -840,6 +842,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestampOutOfRangeYears) {
           253402272000,
           1200110832000,
           -62198784343LL,
+          std::nullopt,
+          std::nullopt,
           std::nullopt,
       });
 }
@@ -935,6 +939,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestampDstGapSparkCompatibility) {
               "+40000-01-01 00:00:00",
               "-0001-01-01 00:00:00",
               "-40000-01-01 00:00:00",
+              "10000-01-01 00:00:00",
+              "40000-01-01 00:00:00",
           },
           "yyyy-MM-dd HH:mm:ss"),
       {
@@ -943,6 +949,8 @@ TEST_F(SparkSqlDateTimeFunctionsTest, getTimestampDstGapSparkCompatibility) {
           Timestamp(253402272000, 0),
           Timestamp(1200110832000, 0),
           Timestamp(-62198784343LL, 0),
+          std::nullopt,
+          std::nullopt,
           std::nullopt,
       });
 }
@@ -2411,6 +2419,13 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
       "2018-03-14 01:02:03.123456789",
       dateFormat(
           Timestamp(1520989323L, 123456789L), "yyy-MM-dd HH:mm:ss.SSSSSSSSS"));
+
+  setTimeParserPolicy("legacy");
+  EXPECT_EQ(
+      "2018/03/14 01:02:03.000123",
+      dateFormat(
+          fromTimestampString("2018-03-14 01:02:03.123456", nullptr),
+          "yyy/MM/dd HH:mm:ss.SSSSSS"));
 }
 
 TEST_F(SparkSqlDateTimeFunctionsTest, dateFormatTimestampWithTimeZone) {

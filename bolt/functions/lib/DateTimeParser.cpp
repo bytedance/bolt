@@ -1018,6 +1018,9 @@ ErrorCode parseFromPattern(
     if (size < 0) {
       return ErrorCode::PARSE_TIMEZONE_ERROR;
     }
+    if (curPattern.specifier == DateTimeFormatSpecifier::TIMEZONE_ID) {
+      date.hasTimeZoneId = true;
+    }
     if constexpr (javaTime) {
       if (curPattern.specifier != DateTimeFormatSpecifier::TIMEZONE_ID &&
           !date.record(
@@ -1308,9 +1311,6 @@ ErrorCode parseFromPattern(
         // Enforce Joda's year range if year was specified as "year".
         if (!date.isYearOfEra && (number > 292278994 || number < -292275055)) {
           return ErrorCode::YEAR_OUT_OF_RANGE;
-        }
-        if (javaTime && date.hasYear && date.year != number) {
-          return ErrorCode::DAY_CONFLICT;
         }
         date.hasYear = true;
         date.year = number;
@@ -1753,12 +1753,23 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
     return ErrorCode::PARSE_LITERAL_ERROR;
   }
 
-  // Era is BC and year of era is provided
-  if (date.isYearOfEra && !date.isAd) {
-    date.year = -1 * (date.year - 1);
-  }
-
   if constexpr (javaTime) {
+    if (date.has(DateTimeFormatSpecifier::YEAR_OF_ERA)) {
+      const bool ad = date.has(DateTimeFormatSpecifier::ERA) ? date.isAd
+          : date.has(DateTimeFormatSpecifier::YEAR)
+          ? date.value(DateTimeFormatSpecifier::YEAR) > 0
+          : true;
+      const auto yearOfEra = date.value(DateTimeFormatSpecifier::YEAR_OF_ERA);
+      date.year = ad ? yearOfEra : 1 - yearOfEra;
+      if (date.has(DateTimeFormatSpecifier::YEAR) &&
+          date.year != date.value(DateTimeFormatSpecifier::YEAR)) {
+        return ErrorCode::DAY_CONFLICT;
+      }
+    }
+    if (date.has(DateTimeFormatSpecifier::ERA) && date.hasYear &&
+        (date.year > 0) != date.isAd) {
+      return ErrorCode::DAY_CONFLICT;
+    }
     if (date.has(DateTimeFormatSpecifier::HOUR_OF_DAY)) {
       date.hour = date.value(DateTimeFormatSpecifier::HOUR_OF_DAY);
       date.isHourOfHalfDay = false;
@@ -1768,6 +1779,8 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
         return ErrorCode::DAY_CONFLICT;
       }
     }
+  } else if (date.isYearOfEra && !date.isAd) {
+    date.year = 1 - date.year;
   }
   if (javaTime && date.hasHalfDay && !date.isHourOfHalfDay &&
       (date.hour < 12) != date.isAm) {

@@ -1273,6 +1273,25 @@ TEST_F(JodaDateTimeFormatterTest, registeredTimeZoneIds) {
   }
 }
 
+TEST_F(JodaDateTimeFormatterTest, timeZoneIdRequiresFullInput) {
+  for (const auto* pattern : {"ZZZ", "ZZZZ"}) {
+    const auto formatter = buildJodaDateTimeFormatter(pattern);
+    for (const auto* input : {"+0530", "-05:30", "Z", "UTC"}) {
+      SCOPED_TRACE(std::string(pattern) + ":" + input);
+      const auto trailing = std::string(input) + "junk";
+      EXPECT_FALSE(formatter->parse(input).hasError());
+      EXPECT_TRUE(formatter->parse(trailing).hasError());
+      EXPECT_FALSE(formatter->parse(input, TimePolicy::LEGACY).hasError());
+      EXPECT_TRUE(formatter->parse(trailing, TimePolicy::LEGACY).hasError());
+      EXPECT_TRUE(formatter->parseWithNanosecondPrecision(trailing).hasError());
+      EXPECT_FALSE(buildJodaDateTimeFormatter(std::string(pattern) + "'junk'")
+                       ->parse(trailing)
+                       .hasError());
+    }
+  }
+  EXPECT_FALSE(buildJodaDateTimeFormatter("ZZ")->parse("+0530junk").hasError());
+}
+
 TEST_F(DateTimeFormatterTest, javaTimePatternValidation) {
   for (const auto* pattern :
        {"C",
@@ -1489,6 +1508,67 @@ TEST_F(DateTimeFormatterTest, javaBuilderParsing) {
   EXPECT_EQ(
       formatter->parse("2024-01-02").value().timestamp,
       Timestamp(1704153600, 0));
+  for (const auto width : {1, 2, 4}) {
+    formatter = DateTimeFormatterBuilder(0)
+                    .appendYear(width)
+                    .appendMonthOfYear(2)
+                    .appendDayOfMonth(2)
+                    .setType(DateTimeFormatterType::JAVA_TIME)
+                    .build();
+    const auto* input = width == 2 ? "240102" : "20240102";
+    for (const auto parsed :
+         {formatter->parse(input),
+          formatter->parseWithNanosecondPrecision(input)}) {
+      ASSERT_FALSE(parsed.hasError());
+      EXPECT_EQ(parsed.value().timestamp, Timestamp(1704153600, 0));
+    }
+  }
+  auto copied = std::make_shared<DateTimeFormatter>(
+      std::make_unique<char[]>(0),
+      0,
+      std::vector<DateTimeToken>(formatter->tokens()),
+      DateTimeFormatterType::JAVA_TIME);
+  EXPECT_EQ(
+      copied->parse("20240102").value().timestamp, Timestamp(1704153600, 0));
+}
+
+TEST_F(DateTimeFormatterTest, javaYearAndEraResolution) {
+  struct Case {
+    const char* pattern;
+    const char* input;
+    std::optional<int32_t> year;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"G yyyy uuuu-MM-dd", "BC 0001 0000-01-01", 0},
+           {"G uuuu yyyy-MM-dd", "BC 0000 0001-01-01", 0},
+           {"yyyy uuuu-MM-dd G", "0002 -0001-01-01 BC", -1},
+           {"yyyy uuuu-MM-dd", "0001 0000-01-01", 0},
+           {"uuuu yyyy-MM-dd", "0000 0001-01-01", 0},
+           {"yyyy uuuu-MM-dd", "2024 2024-01-01", 2024},
+           {"G yyyy uuuu-MM-dd", "BC 0001 0001-01-01", std::nullopt},
+           {"G yyyy uuuu-MM-dd", "AD 0001 0000-01-01", std::nullopt},
+           {"G uuuu-MM-dd", "BC 0000-01-01", 0},
+           {"G uuuu-MM-dd", "AD 0000-01-01", std::nullopt},
+           {"uuuu yyyy-MM-dd", "0000 0002-01-01", std::nullopt},
+           {"yyyy yyyy-MM-dd", "0001 0002-01-01", std::nullopt}}) {
+    SCOPED_TRACE(std::string(test.pattern) + ":" + test.input);
+    for (const bool strict : {false, true}) {
+      DateTimeParseOptions options;
+      options.strict = strict;
+      auto formatter = buildJavaDateTimeFormatter(test.pattern, options);
+      for (const auto parsed :
+           {formatter->parse(test.input),
+            formatter->parseWithNanosecondPrecision(test.input)}) {
+        ASSERT_EQ(parsed.hasError(), !test.year.has_value());
+        if (test.year) {
+          EXPECT_EQ(
+              parsed.value().timestamp,
+              Timestamp(
+                  util::daysSinceEpochFromDate(*test.year, 1, 1) * 86400, 0));
+        }
+      }
+    }
+  }
 }
 
 TEST_F(DateTimeFormatterTest, javaDayOfYearFormatting) {

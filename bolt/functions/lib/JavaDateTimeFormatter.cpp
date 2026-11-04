@@ -101,57 +101,46 @@ appendPattern(DateTimeFormatterBuilder& builder, char letter, size_t count) {
   }
 }
 
-bool isNumericField(DateTimeFormatSpecifier specifier) {
-  switch (specifier) {
-    case DateTimeFormatSpecifier::YEAR:
-    case DateTimeFormatSpecifier::YEAR_OF_ERA:
-    case DateTimeFormatSpecifier::MONTH_OF_YEAR:
-    case DateTimeFormatSpecifier::DAY_OF_MONTH:
-    case DateTimeFormatSpecifier::DAY_OF_YEAR:
-    case DateTimeFormatSpecifier::HOUR_OF_DAY:
-    case DateTimeFormatSpecifier::CLOCK_HOUR_OF_DAY:
-    case DateTimeFormatSpecifier::HOUR_OF_HALFDAY:
-    case DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY:
-    case DateTimeFormatSpecifier::MINUTE_OF_HOUR:
-    case DateTimeFormatSpecifier::SECOND_OF_MINUTE:
-    case DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH:
-      return true;
-    default:
-      return false;
-  }
-}
 } // namespace
 
-std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
-    const std::string_view& format,
-    DateTimeParseOptions options) {
-  auto formatter = detail::buildPatternDateTimeFormatter<appendPattern>(
-      format, DateTimeFormatterType::JAVA_TIME);
-  formatter->parseOptions_ = options;
+void DateTimeFormatter::initializeJavaParsing() {
   DateTimeToken* number = nullptr;
-  for (auto& token : formatter->tokens_) {
+  for (auto& token : tokens_) {
+    token.followingDigits = 0;
     if (token.type != DateTimeToken::Type::kPattern) {
       number = nullptr;
       continue;
     }
-    auto& pattern = token.pattern;
+    const auto& pattern = token.pattern;
+    hasEra_ |= pattern.specifier == DateTimeFormatSpecifier::ERA;
     const bool year = pattern.specifier == DateTimeFormatSpecifier::YEAR ||
         pattern.specifier == DateTimeFormatSpecifier::YEAR_OF_ERA;
     const auto width = pattern.minRepresentDigits;
     if (year) {
       BOLT_USER_CHECK_LE(width, 19, "Too many year pattern letters");
-      if (!options.yearOfEra && !formatter->hasEra_) {
-        pattern.specifier = DateTimeFormatSpecifier::YEAR;
-      }
     }
     const bool fixedWidth = year ? width == 2 : width > 1;
     token.maxParseDigits = fixedWidth ||
             pattern.specifier == DateTimeFormatSpecifier::FRACTION_OF_SECOND
         ? width
         : 19;
-    if (!isNumericField(pattern.specifier)) {
-      number = nullptr;
-      continue;
+    switch (pattern.specifier) {
+      case DateTimeFormatSpecifier::YEAR:
+      case DateTimeFormatSpecifier::YEAR_OF_ERA:
+      case DateTimeFormatSpecifier::MONTH_OF_YEAR:
+      case DateTimeFormatSpecifier::DAY_OF_MONTH:
+      case DateTimeFormatSpecifier::DAY_OF_YEAR:
+      case DateTimeFormatSpecifier::HOUR_OF_DAY:
+      case DateTimeFormatSpecifier::CLOCK_HOUR_OF_DAY:
+      case DateTimeFormatSpecifier::HOUR_OF_HALFDAY:
+      case DateTimeFormatSpecifier::CLOCK_HOUR_OF_HALFDAY:
+      case DateTimeFormatSpecifier::MINUTE_OF_HOUR:
+      case DateTimeFormatSpecifier::SECOND_OF_MINUTE:
+      case DateTimeFormatSpecifier::DAY_OF_WEEK_IN_MONTH:
+        break;
+      default:
+        number = nullptr;
+        continue;
     }
     if (number && fixedWidth) {
       number->followingDigits += static_cast<uint32_t>(width);
@@ -160,6 +149,22 @@ std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
         number->followingDigits = 0;
       }
       number = &token;
+    }
+  }
+}
+
+std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
+    const std::string_view& format,
+    DateTimeParseOptions options) {
+  auto formatter = detail::buildPatternDateTimeFormatter<appendPattern>(
+      format, DateTimeFormatterType::JAVA_TIME);
+  formatter->parseOptions_ = options;
+  if (!options.yearOfEra && !formatter->hasEra_) {
+    for (auto& token : formatter->tokens_) {
+      if (token.type == DateTimeToken::Type::kPattern &&
+          token.pattern.specifier == DateTimeFormatSpecifier::YEAR_OF_ERA) {
+        token.pattern.specifier = DateTimeFormatSpecifier::YEAR;
+      }
     }
   }
   return formatter;
