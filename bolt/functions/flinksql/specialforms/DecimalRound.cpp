@@ -322,6 +322,12 @@ TypePtr DecimalTruncateCallToSpecialForm::resolveType(
       "decimal_truncate expects one or two arguments.");
   BOLT_USER_CHECK(
       argTypes[0]->isDecimal(), "decimal_truncate requires a decimal input.");
+  if (argTypes.size() == 2) {
+    BOLT_USER_CHECK_EQ(
+        argTypes[1]->kind(),
+        TypeKind::INTEGER,
+        "The second argument of decimal_truncate must be integer.");
+  }
   return argTypes[0];
 }
 

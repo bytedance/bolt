@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/expression/RegisterSpecialForm.h"
 #include "bolt/functions/flinksql/specialforms/DecimalRound.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
@@ -406,6 +407,19 @@ TEST_F(RoundTest, decimalTruncateSqlRoundTrip) {
   }
 }
 
+TEST_F(RoundTest, decimalTruncateScaleType) {
+  DecimalTruncateCallToSpecialForm specialForm;
+  const auto decimalType = DECIMAL(5, 2);
+  EXPECT_EQ(specialForm.resolveType({decimalType}), decimalType);
+  EXPECT_EQ(specialForm.resolveType({decimalType, INTEGER()}), decimalType);
+  for (const auto& scaleType : std::vector<TypePtr>{
+           BIGINT(), SMALLINT(), DOUBLE(), VARCHAR(), UNKNOWN()}) {
+    BOLT_ASSERT_USER_THROW(
+        specialForm.resolveType({decimalType, scaleType}),
+        "The second argument of decimal_truncate must be integer.");
+  }
+}
+
 TEST_F(RoundTest, decimalScaleOverflowIsRecoverable) {
   auto input = makeFlatVector<int64_t>({12345, 0, -12345}, DECIMAL(5, 2));
   auto scales = makeFlatVector<int32_t>(
@@ -474,6 +488,26 @@ TEST_F(RoundTest, primitiveTruncate) {
           "flink_truncate(c0,c1)",
           std::optional<double>{-0.123},
           std::optional<int32_t>{2}));
+  for (double value : {1.25, -1.25}) {
+    EXPECT_EQ(
+        value,
+        evaluateOnce<double>(
+            "flink_truncate(c0,c1)",
+            std::optional<double>{value},
+            std::optional<int32_t>{std::numeric_limits<int32_t>::max()}));
+    EXPECT_EQ(
+        value,
+        evaluateOnce<float>(
+            "flink_truncate(c0,c1)",
+            std::optional<float>{value},
+            std::optional<int32_t>{std::numeric_limits<int32_t>::max()}));
+    EXPECT_EQ(
+        std::nullopt,
+        evaluateOnce<double>(
+            "try(flink_truncate(c0,c1))",
+            std::optional<double>{value},
+            std::optional<int32_t>{std::numeric_limits<int32_t>::min()}));
+  }
   EXPECT_EQ(
       1.14f,
       evaluateOnce<float>(

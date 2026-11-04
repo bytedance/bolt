@@ -33,14 +33,6 @@ void BigDecimal::compactVal() {
 
 template <bool roundUp>
 void BigDecimal::setScaleImpl(int newScale) {
-  if constexpr (!roundUp) {
-    if (!isZero) {
-      BOLT_USER_CHECK_LE(
-          std::abs(static_cast<int64_t>(scale) - newScale),
-          kMaxScaleChange,
-          "Decimal scale overflow");
-    }
-  }
   if (scale == newScale || isZero) {
     return;
   }
@@ -49,15 +41,13 @@ void BigDecimal::setScaleImpl(int newScale) {
     int changeScale;
     if constexpr (!roundUp) {
       const auto change = static_cast<int64_t>(scale) - newScale;
-      BOLT_USER_CHECK_LE(
-          change,
-          std::numeric_limits<int32_t>::max(),
-          "Decimal scale overflow");
+      BOLT_USER_CHECK_LE(change, kMaxScaleChange, "Decimal scale overflow");
       // Inputs come from float/double. Beyond their maximum decimal span the
       // discarded digits cannot leave a nonzero quotient.
       if (change > 1024) {
         intVal = 0;
         isZero = true;
+        intCompact = -1;
         return;
       }
       changeScale = change;
@@ -80,6 +70,7 @@ void BigDecimal::setScaleImpl(int newScale) {
 
   if (intVal == 0) {
     isZero = true;
+    intCompact = -1;
     return;
   }
 

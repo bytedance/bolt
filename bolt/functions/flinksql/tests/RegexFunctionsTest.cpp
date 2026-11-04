@@ -14,9 +14,12 @@
  * limitations under the License.
  */
 
+#include <unicode/regex.h>
 #include <limits>
+#include <memory>
 
 #include "bolt/functions/lib/RegexCache.h"
+#include "bolt/functions/lib/string/RegexUtils.h"
 
 #include <fmt/format.h>
 #include <folly/ScopeGuard.h>
@@ -50,6 +53,15 @@ class FlinkRegexpExtractTest : public FlinkFunctionBaseTest,
 };
 
 class FlinkICURegexpExtractTest : public FlinkFunctionBaseTest {};
+
+TEST_F(FlinkRegexFunctionsTest, unterminatedPatternWithTrailingBackslash) {
+  const std::string pattern = "abcdefghijkl\\";
+  auto buffer = std::make_unique<char[]>(pattern.size());
+  std::copy(pattern.begin(), pattern.end(), buffer.get());
+  const StringView view(buffer.get(), pattern.size());
+  ASSERT_FALSE(view.isInline());
+  EXPECT_EQ(regex::transDanglingRightBrackets(view), pattern);
+}
 
 TEST_F(FlinkRegexFunctionsTest, invalidRegexReturnsFalse) {
   EXPECT_EQ(

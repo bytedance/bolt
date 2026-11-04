@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <limits>
+
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
 #include "folly/Random.h"
@@ -225,8 +227,15 @@ TEST_F(RandTest, DynamicIntegerSeedWithConstantBound) {
 TEST_F(RandTest, IntegerBoundMustBePositive) {
   auto input =
       makeRowVector({makeFlatVector<int32_t>(std::vector<int32_t>{0})});
-  EXPECT_ANY_THROW(evaluate(
-      "flink_rand_integer(cast(0 as integer), cast(1 as integer))", input));
+  for (const auto bound : {0, -1, std::numeric_limits<int32_t>::min()}) {
+    BOLT_ASSERT_USER_THROW(
+        evaluate(
+            fmt::format(
+                "flink_rand_integer(cast({} as integer), cast(1 as integer))",
+                bound),
+            input),
+        "bound must be positive");
+  }
 }
 
 } // namespace
