@@ -34,6 +34,7 @@
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/SparkCompatibility.h"
 #include "bolt/functions/lib/DateTimeFormatter.h"
+#include "bolt/functions/lib/DateTimeFormatterCache.h"
 #include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/functions/prestosql/DateTimeImpl.h"
 #include "bolt/functions/prestosql/types/TimestampWithTimeZoneType.h"
@@ -1606,6 +1607,7 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   bool isConstFormat_ = false;
   uint32_t maxResultSize_{0};
   TimePolicy timePolicy_{TimePolicy::CORRECTED};
+  DateTimeFormatterCache formatCache_;
 
   FOLLY_ALWAYS_INLINE void setFormatter(const arg_type<Varchar>* formatString) {
     if (formatString != nullptr) {
@@ -1691,7 +1693,17 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
         ensureFormatLegal(
             std::string_view(formatString.data(), formatString.size()));
       }
-      setFormatter(&formatString);
+      if constexpr (SparkCompatible) {
+        const std::string_view pattern(
+            formatString.data(), formatString.size());
+        jodaDateTime_ = formatCache_.get(pattern, [&] {
+          setFormatter(&formatString);
+          return jodaDateTime_;
+        });
+        maxResultSize_ = jodaDateTime_->maxResultSize(timezone);
+      } else {
+        setFormatter(&formatString);
+      }
     }
 
     result.reserve(maxResultSize_);

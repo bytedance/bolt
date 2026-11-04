@@ -24,6 +24,7 @@
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/expression/UdfTypeResolver.h"
 #include "bolt/functions/prestosql/DateTimeFunctions.h"
+#include "bolt/functions/sparksql/DateTimeFunctions.h"
 #include "bolt/functions/sparksql/tests/SparkFunctionBaseTest.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 namespace bytedance::bolt::functions::sparksql::test {
@@ -3540,6 +3541,70 @@ TEST_F(SparkSqlDateTimeFunctionsTest, timestampParserContextValidation) {
       "Invalid timestamp parser raw offset");
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, dynamicParserContextIsolation) {
+  using Parser = UnixTimestampParseWithFormatFunction<exec::VectorExec>;
+  auto config = [](const std::string& pivotMillis,
+                   const std::string& pivotYear) {
+    return core::QueryConfig(
+        {{core::QueryConfig::kTimeParserPolicy, "legacy"},
+         {core::QueryConfig::kSessionTimezone, "UTC"},
+         {core::QueryConfig::kAdjustTimestampToTimezone, "true"},
+         {core::QueryConfig::kDateTimeFormatterDefaultTimezone, "UTC"},
+         {core::QueryConfig::kSparkLegacyTimestampParserPivotMillis,
+          pivotMillis},
+         {core::QueryConfig::kSparkLegacyTimestampParserPivotYear, pivotYear}});
+  };
+  Parser first, second;
+  const StringView* dynamic = nullptr;
+  first.initialize({}, config("0", "1970"), dynamic, dynamic);
+  second.initialize({}, config("946684800000", "2000"), dynamic, dynamic);
+  for (int i = 0; i < 8; ++i) {
+    const StringView pattern(i % 2 ? "yy/MM/dd" : "yy-MM-dd");
+    const StringView input(i % 2 ? "70/01/01" : "70-01-01");
+    int64_t value;
+    ASSERT_TRUE(first.call(value, input, pattern));
+    EXPECT_EQ(value, 0);
+    ASSERT_TRUE(second.call(value, input, pattern));
+    EXPECT_EQ(value, 3155760000LL);
+  }
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, exceptionParserFormatSwitch) {
+  using Parser = UnixTimestampParseWithFormatFunction<exec::VectorExec>;
+  const core::QueryConfig config(
+      {{core::QueryConfig::kTimeParserPolicy, "exception"},
+       {core::QueryConfig::kSessionTimezone, "UTC"},
+       {core::QueryConfig::kAdjustTimestampToTimezone, "true"}});
+  const StringView* dynamic = nullptr;
+  Parser parser;
+  parser.initialize({}, config, dynamic, dynamic);
+  int64_t result;
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_FALSE(parser.call(
+        result, StringView("invalid"), StringView("yyyy-MM-dd VV")));
+    BOLT_ASSERT_THROW(
+        parser.call(result, StringView("2024-1-2"), StringView("yyyy-MM-dd")),
+        "upgrading of Spark");
+    ASSERT_TRUE(parser.call(
+        result, StringView("2024-01-02"), StringView("yyyy-MM-dd")));
+    EXPECT_EQ(result, 1704153600);
+  }
+  const core::QueryConfig limitedZones(
+      {{core::QueryConfig::kTimeParserPolicy, "exception"},
+       {core::QueryConfig::kSessionTimezone, "UTC"},
+       {core::QueryConfig::kAdjustTimestampToTimezone, "true"},
+       {core::QueryConfig::kDateTimeFormatterDefaultTimezone, "Asia/Shanghai"},
+       {core::QueryConfig::kSparkLegacyTimestampParserTimezoneRawOffsets,
+        "Asia/Shanghai=28800"}});
+  Parser contextParser;
+  contextParser.initialize({}, limitedZones, dynamic, dynamic);
+  const StringView pattern("yyyy-MM-dd z");
+  EXPECT_FALSE(contextParser.call(result, StringView("2024-1-2 PST"), pattern));
+  BOLT_ASSERT_THROW(
+      contextParser.call(result, StringView("2024-1-2 CST"), pattern),
+      "upgrading of Spark");
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, javaTimestampPatterns) {
   setPolicyAndTimeZone("corrected", "UTC");
   EXPECT_EQ(
@@ -3607,14 +3672,35 @@ TEST_F(SparkSqlDateTimeFunctionsTest, fixedZoneAndDynamicFormats) {
         evaluateOnce<std::string>(
             "from_unixtime(c0,'yyyy-MM-dd HH:mm:ss XXX','UTC')",
             std::optional<int64_t>(0)));
+    const std::string longFormat = "'long: 'yyyy-MM-dd HH:mm:ss XXX";
     auto data = makeRowVector(
-        {makeFlatVector<Timestamp>(
-             {Timestamp(0, 0), Timestamp(0, 0), Timestamp(0, 0)}),
-         makeFlatVector<std::string>({"yyyy", "MM", "yyyy-MM-dd"})});
-    auto result =
-        evaluate<SimpleVector<StringView>>("date_format(c0,c1)", data);
-    bytedance::bolt::test::assertEqualVectors(
-        makeFlatVector<std::string>({"1970", "01", "1970-01-01"}), result);
+        {makeFlatVector<Timestamp>(9, [](auto) { return Timestamp(0, 0); }),
+         makeFlatVector<std::string>(
+             {"yyyy",
+              "MM",
+              "yyyy-MM-dd",
+              "yyyy",
+              longFormat,
+              "yy",
+              "yyyy",
+              longFormat,
+              "yy"}),
+         makeFlatVector<int64_t>(9, [](auto) { return 0; })});
+    auto expected = makeFlatVector<std::string>(
+        {"1970",
+         "01",
+         "1970-01-01",
+         "1970",
+         "long: 1970-01-01 00:00:00 Z",
+         "70",
+         "1970",
+         "long: 1970-01-01 00:00:00 Z",
+         "70"});
+    for (const auto* expression :
+         {"date_format(c0,c1)", "from_unixtime(c2,c1)"}) {
+      bytedance::bolt::test::assertEqualVectors(
+          expected, evaluate(expression, data));
+    }
   }
 }
 

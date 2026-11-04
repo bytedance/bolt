@@ -58,14 +58,24 @@ std::pair<int32_t, int32_t> simpleTimeZoneOffsets(
     return {
         std::chrono::duration_cast<std::chrono::seconds>(*fixed).count(), 0};
   }
-  static thread_local const tz::TimeZone* cachedZone = nullptr;
-  static thread_local std::pair<int32_t, int32_t> offsets;
-  if (cachedZone != zone) {
+  struct ZoneOffsets {
+    const tz::TimeZone* zone{nullptr};
+    std::pair<int32_t, int32_t> offsets;
+  };
+  static thread_local std::array<ZoneOffsets, 16> cache;
+  static thread_local size_t next = 0;
+  auto cached =
+      std::find_if(cache.begin(), cache.end(), [&](const auto& entry) {
+        return entry.zone == zone;
+      });
+  if (cached == cache.end()) {
     std::unique_ptr<icu::TimeZone> javaZone(icu::TimeZone::createTimeZone(
         icu::UnicodeString::fromUTF8(zone->name())));
-    offsets = {
+    cached = cache.begin() + next;
+    cached->offsets = {
         javaZone->getRawOffset() / 1000, javaZone->getDSTSavings() / 1000};
-    cachedZone = zone;
+    cached->zone = zone;
+    next = (next + 1) % cache.size();
   }
   if (context && !context->timezoneRawOffsets.empty()) {
     const auto it = context->timezoneRawOffsets.find(zone->id());
@@ -73,9 +83,9 @@ std::pair<int32_t, int32_t> simpleTimeZoneOffsets(
         it != context->timezoneRawOffsets.end(),
         "No Java raw offset for time zone {}",
         zone->name());
-    return {it->second, offsets.second};
+    return {it->second, cached->offsets.second};
   }
-  return offsets;
+  return cached->offsets;
 }
 
 std::pair<int64_t, bool>

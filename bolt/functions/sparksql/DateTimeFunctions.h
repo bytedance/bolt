@@ -35,6 +35,7 @@
 #include <bit>
 
 #include "bolt/functions/lib/DateTimeFormatter.h"
+#include "bolt/functions/lib/DateTimeFormatterCache.h"
 #include "bolt/functions/lib/TimeUtils.h"
 #include "bolt/functions/prestosql/DateTimeImpl.h"
 #include "bolt/type/Timestamp.h"
@@ -392,7 +393,11 @@ struct UnixTimestampFunctionBase {
       const arg_type<Varchar>& format,
       Timestamp& result) {
     if (!isConstFormat_) {
-      format_ = createFormatter(&format);
+      format_ = formatCache_.get(
+          std::string_view(format.data(), format.size()),
+          [&] { return createFormatter(&format); },
+          timeParserPolicy != TimePolicy::LEGACY ||
+              (formatterContext_ && formatterContext_->twoDigitYearStart));
     }
     const auto* zone = sessionTimeZone_
         ? sessionTimeZone_
@@ -402,13 +407,26 @@ struct UnixTimestampFunctionBase {
     if (parsed.hasError()) {
       if (timeParserPolicy == TimePolicy::EXCEPTION) {
         bool legacyAccepted = false;
-        try {
-          auto legacy = buildLegacySparkDateTimeFormatter(
-              std::string_view(format.data(), format.size()),
-              formatterContext_);
-          legacyAccepted = !legacy->parseToUtc(text, zone).hasError();
-        } catch (const BoltUserError&) {
-          // A modern pattern need not be accepted by SimpleDateFormat.
+        const auto legacy = legacyFormatCache_.get(
+            std::string_view(format.data(), format.size()),
+            [&]() -> std::shared_ptr<DateTimeFormatter> {
+              try {
+                return buildLegacySparkDateTimeFormatter(
+                    std::string_view(format.data(), format.size()),
+                    formatterContext_);
+              } catch (const BoltUserError&) {
+                // A modern pattern need not be accepted by SimpleDateFormat.
+                return nullptr;
+              }
+            },
+            isConstFormat_ ||
+                (formatterContext_ && formatterContext_->twoDigitYearStart));
+        if (legacy) {
+          try {
+            legacyAccepted = !legacy->parseToUtc(text, zone).hasError();
+          } catch (const BoltUserError&) {
+            legacyAccepted = false;
+          }
         }
         BOLT_USER_CHECK(
             !legacyAccepted,
@@ -482,6 +500,8 @@ struct UnixTimestampFunctionBase {
   bool isConstFormat_{false};
 
   TimePolicy timeParserPolicy{TimePolicy::CORRECTED};
+  DateTimeFormatterCache formatCache_;
+  DateTimeFormatterCache legacyFormatCache_;
 };
 
 template <typename T>
@@ -1318,6 +1338,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
   const char* badTimestampResult_ = "-12345678";
   const size_t badTimestampResultSize_ = 9;
   TimePolicy timePolicy_{TimePolicy::CORRECTED};
+  DateTimeFormatterCache formatCache_;
 
   FOLLY_ALWAYS_INLINE void initialize(
       const std::vector<TypePtr>& inputTypes,
@@ -1374,14 +1395,12 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
       const arg_type<int64_t>& unixtime,
       const arg_type<Varchar>& formatString) {
     if (!isConstFormat_) {
-      if (this->timePolicy_ == TimePolicy::LEGACY) {
-        jodaDateTime_ = buildLegacySparkDateTimeFormatter(
-            std::string_view(formatString.data(), formatString.size()),
-            formatterContext_);
-      } else {
-        jodaDateTime_ = buildSparkDateTimeFormatter(
-            std::string_view(formatString.data(), formatString.size()), false);
-      }
+      const std::string_view pattern(formatString.data(), formatString.size());
+      jodaDateTime_ = formatCache_.get(pattern, [&] {
+        return timePolicy_ == TimePolicy::LEGACY
+            ? buildLegacySparkDateTimeFormatter(pattern, formatterContext_)
+            : buildSparkDateTimeFormatter(pattern, false);
+      });
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
     }
     try {

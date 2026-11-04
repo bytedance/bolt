@@ -37,6 +37,7 @@
 
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/functions/lib/DateTimeFormatterBuilder.h"
+#include "bolt/functions/lib/DateTimeFormatterCache.h"
 #include "bolt/type/TimestampConversion.h"
 #include "bolt/type/tz/TimeZoneMap.h"
 
@@ -3711,6 +3712,38 @@ TEST_F(DateTimeFormatterTest, simpleDateFormatContext) {
       Timestamp::fromMillis(4102441200000LL));
 }
 
+TEST_F(DateTimeFormatterTest, simpleDateFormatRawOffsetContexts) {
+  const auto* utc = tz::locateZone("UTC");
+  const auto* losAngeles = tz::locateZone("America/Los_Angeles");
+  const auto* newYork = tz::locateZone("America/New_York");
+  auto first = std::make_shared<DateTimeFormatterContext>();
+  first->defaultTimezone = utc;
+  first->timezoneRawOffsets = {
+      {losAngeles->id(), -28800}, {newYork->id(), -18000}};
+  auto second = std::make_shared<DateTimeFormatterContext>(*first);
+  second->timezoneRawOffsets[losAngeles->id()] = -25200;
+  second->timezoneRawOffsets[newYork->id()] = -14400;
+  const auto standard =
+      buildSimpleDateTimeFormatter("z", std::nullopt, false, first);
+  const auto shifted =
+      buildSimpleDateTimeFormatter("z", std::nullopt, false, second);
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(
+        standard->parseToUtc("PST", utc).value().timestamp,
+        Timestamp(28800, 0));
+    EXPECT_EQ(
+        shifted->parseToUtc("EST", utc).value().timestamp, Timestamp(14400, 0));
+    EXPECT_EQ(
+        shifted->parseToUtc("PST", utc).value().timestamp, Timestamp(25200, 0));
+    EXPECT_EQ(
+        standard->parseToUtc("EST", utc).value().timestamp,
+        Timestamp(18000, 0));
+    EXPECT_EQ(
+        standard->parseToUtc("PDT", utc).value().timestamp,
+        Timestamp(25200, 0));
+  }
+}
+
 TEST_F(DateTimeFormatterTest, simpleDateFormatSystemTimezone) {
   std::unique_ptr<icu::TimeZone> systemZone(icu::TimeZone::createDefault());
   ASSERT_NE(systemZone, nullptr);
@@ -3831,6 +3864,81 @@ TEST_F(DateTimeFormatterTest, localTimeTransitions) {
   EXPECT_TRUE(
       strict->parseToUtc("1949-05-01 00:00:00", tz::locateZone("Asia/Shanghai"))
           .hasError());
+}
+
+TEST_F(DateTimeFormatterTest, formatterCache) {
+  DateTimeFormatterCache cache;
+  int builds = 0;
+  auto get = [&](std::string_view pattern) {
+    return cache.get(pattern, [&] {
+      ++builds;
+      return buildJavaDateTimeFormatter(pattern);
+    });
+  };
+  const auto year = get("yyyy");
+  const auto month = get("MM");
+  EXPECT_EQ(year, get("yyyy"));
+  EXPECT_EQ(month, get("MM"));
+  EXPECT_EQ(builds, 2);
+  for (size_t i = 0; i < DateTimeFormatterCache::kMaxEntries; ++i) {
+    get("yyyy'" + std::to_string(i) + "'");
+  }
+  EXPECT_NE(year, get("yyyy"));
+  EXPECT_EQ(builds, DateTimeFormatterCache::kMaxEntries + 3);
+
+  const auto before = builds;
+  const std::string large =
+      "'" + std::string(DateTimeFormatterCache::kMaxPatternSize, 'x') + "'";
+  EXPECT_NE(get(large), get(large));
+  EXPECT_EQ(builds, before + 2);
+  EXPECT_THROW(get("invalid"), BoltUserError);
+  EXPECT_THROW(get("invalid"), BoltUserError);
+  EXPECT_EQ(builds, before + 4);
+  EXPECT_EQ(year->parse("2024").value().timestamp, Timestamp(1704067200, 0));
+}
+
+TEST_F(DateTimeFormatterTest, formatterCacheNegativeResult) {
+  DateTimeFormatterCache cache;
+  int builds = 0;
+  auto unsupported = [&] {
+    return cache.get("VV", [&]() -> std::shared_ptr<DateTimeFormatter> {
+      ++builds;
+      return nullptr;
+    });
+  };
+  EXPECT_EQ(unsupported(), nullptr);
+  EXPECT_EQ(unsupported(), nullptr);
+  EXPECT_EQ(builds, 1);
+  for (size_t i = 0; i < DateTimeFormatterCache::kMaxEntries; ++i) {
+    const auto pattern = "yyyy'" + std::to_string(i) + "'";
+    EXPECT_NE(
+        cache.get(pattern, [&] { return buildJavaDateTimeFormatter(pattern); }),
+        nullptr);
+  }
+  EXPECT_EQ(unsupported(), nullptr);
+  EXPECT_EQ(builds, 2);
+}
+
+TEST_F(DateTimeFormatterTest, formatterCacheCenturyWindow) {
+  for (const auto* pattern : {"y-MM-dd", "yy-MM-dd", "Y-ww-u", "YY-ww-u"}) {
+    DateTimeFormatterCache cache;
+    auto get = [&](bool cacheTwoDigitYears) {
+      return cache.get(
+          pattern,
+          [&] { return buildLegacySparkDateTimeFormatter(pattern); },
+          cacheTwoDigitYears);
+    };
+    EXPECT_NE(get(false), get(false));
+    EXPECT_EQ(get(true), get(true));
+  }
+  DateTimeFormatterCache cache;
+  auto quoted = [&] {
+    return cache.get(
+        "yyyy-MM-dd 'yy'",
+        [&] { return buildLegacySparkDateTimeFormatter("yyyy-MM-dd 'yy'"); },
+        false);
+  };
+  EXPECT_EQ(quoted(), quoted());
 }
 
 } // namespace bytedance::bolt::functions
