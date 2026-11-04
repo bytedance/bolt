@@ -18,6 +18,7 @@
 #include <limits>
 #include <numeric>
 #include "bolt/common/base/tests/GTestUtils.h"
+#include "bolt/expression/ConstantExpr.h"
 #include "bolt/functions/Udf.h"
 #include "bolt/functions/flinksql/tests/FlinkFunctionBaseTest.h"
 #include "bolt/vector/tests/utils/VectorTestBase.h"
@@ -97,7 +98,28 @@ TEST_F(ComplexEqualTest, TwoStringRowsCompareNestedNullsAsValues) {
   assertComparisons(left, right, {true, false});
 }
 
-TEST_F(ComplexEqualTest, MapEncodingsAndEmptyMaps) {
+class MapEqualityModeTest : public ComplexEqualTest,
+                            public testing::WithParamInterface<const char*> {
+ protected:
+  void SetUp() override {
+    ComplexEqualTest::SetUp();
+    if (*GetParam()) {
+      queryCtx_->testingOverrideConfigUnsafe(
+          {{core::QueryConfig::kFlinkMapEqualityMode, GetParam()}});
+    }
+  }
+
+  bool sqlKeys() const {
+    return std::string_view(GetParam()) == "sql_keys";
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    MapEqualityModes,
+    MapEqualityModeTest,
+    testing::Values("", "java_map", "sql_keys"));
+
+TEST_P(MapEqualityModeTest, MapEncodingsAndEmptyMaps) {
   auto left = makeMapVector(
       {0, 0, 1, 3},
       makeFlatVector<std::string>({"a", "a", "b", "c"}),
@@ -119,7 +141,7 @@ TEST_F(ComplexEqualTest, MapEncodingsAndEmptyMaps) {
       makeNullableFlatVector<bool>({false, std::nullopt, false, true}));
 }
 
-TEST_F(ComplexEqualTest, MapsCompareNullKeysAndValues) {
+TEST_P(MapEqualityModeTest, MapsCompareNullKeysAndValues) {
   auto left = makeMapVector(
       {0, 1, 2, 3},
       makeNullableFlatVector<std::string>({"a", "a", std::nullopt, "z"}),
@@ -132,7 +154,7 @@ TEST_F(ComplexEqualTest, MapsCompareNullKeysAndValues) {
   assertComparisons(left, right, {true, false, true, false});
 }
 
-TEST_F(ComplexEqualTest, MapsIgnoreEntryOrder) {
+TEST_P(MapEqualityModeTest, MapsIgnoreEntryOrder) {
   auto left = makeMapVector(
       {0},
       makeFlatVector<std::string>({"a", "b"}),
@@ -144,7 +166,7 @@ TEST_F(ComplexEqualTest, MapsIgnoreEntryOrder) {
   assertComparisons(left, right, {true});
 }
 
-TEST_F(ComplexEqualTest, MapsUseLastDuplicateKeyValue) {
+TEST_P(MapEqualityModeTest, MapsUseLastDuplicateKeyValue) {
   auto left = makeMapVector(
       {0, 2, 4, 6},
       makeNullableFlatVector<std::string>(
@@ -155,16 +177,81 @@ TEST_F(ComplexEqualTest, MapsUseLastDuplicateKeyValue) {
       makeNullableFlatVector<std::string>(
           {"a", "a", "a", "b", "a", "a", std::nullopt, std::nullopt}),
       makeFlatVector<int32_t>({2, 2, 2, 0, 1, 2, 2, 2}));
-  assertComparisons(left, right, {true, true, true, true});
+  assertComparisons(left, right, {true, !sqlKeys(), true, true});
 }
 
-TEST_F(ComplexEqualTest, NullEmptyRowMapValues) {
+TEST_P(MapEqualityModeTest, DuplicateKeyGroups) {
+  auto left = makeMapVector<int64_t, int32_t>(
+      {{{2, 0}, {2, 1}},
+       {{1, 0}, {1, 1}, {3, 3}},
+       {{1, 0}, {1, 1}},
+       {{1, 0}, {1, 1}, {2, 2}},
+       {{1, 0}, {1, 1}},
+       {{1, 0}, {1, 1}}});
+  auto right = makeMapVector<int64_t, int32_t>(
+      {{{1, 9}, {2, 1}},
+       {{1, 1}, {2, 9}, {3, 3}},
+       {{1, 1}, {2, 9}},
+       {{1, 1}, {2, 0}, {2, 2}},
+       {{1, 1}, {1, 0}},
+       {{1, 1}}});
+  const std::vector<std::optional<bool>> forward{
+      !sqlKeys(), !sqlKeys(), !sqlKeys(), true, false, false};
+  const std::vector<std::optional<bool>> reverse{
+      false, false, false, true, false, false};
+  assertComparisons(left, right, forward);
+  assertComparisons(right, left, reverse);
+  auto keys = makeFlatVector<int32_t>(6, [](auto) { return 1; });
+  assertComparisons(
+      makeMapVector({0, 1, 2, 3, 4, 5}, keys, left),
+      makeMapVector({0, 1, 2, 3, 4, 5}, keys, right),
+      forward);
+  assertComparisons(
+      makeMapVector({0, 1, 2, 3, 4, 5}, keys, makeRowVector({right})),
+      makeMapVector({0, 1, 2, 3, 4, 5}, keys, makeRowVector({left})),
+      reverse);
+}
+
+TEST_P(MapEqualityModeTest, ConstantDuplicateKeys) {
+  auto left = std::make_shared<core::ConstantTypedExpr>(
+      makeMapVector<int32_t, int32_t>({{{1, 0}, {1, 1}}}));
+  auto right = std::make_shared<core::ConstantTypedExpr>(
+      makeMapVector<int32_t, int32_t>({{{1, 1}, {2, 0}}}));
+  auto input = makeRowVector({makeFlatVector<int32_t>({1})});
+  for (bool negate : {false, true}) {
+    for (bool reverse : {false, true}) {
+      auto expression = std::make_shared<core::CallTypedExpr>(
+          BOOLEAN(),
+          std::vector<core::TypedExprPtr>{
+              reverse ? right : left, reverse ? left : right},
+          negate ? "flink_complex_not_equal" : "flink_complex_equal");
+      exec::ExprSet compiled({expression}, &execCtx_);
+      ASSERT_NE(
+          dynamic_cast<exec::ConstantExpr*>(compiled.exprs()[0].get()),
+          nullptr);
+      assertEqualVectors(
+          makeFlatVector<bool>({negate != (!sqlKeys() && !reverse)}),
+          evaluate(compiled, input));
+    }
+  }
+}
+
+TEST_F(ComplexEqualTest, RejectsInvalidMapEqualityMode) {
+  queryCtx_->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kFlinkMapEqualityMode, "unknown"}});
+  auto map = makeMapVector<int32_t, int32_t>({{{1, 1}}});
+  BOLT_ASSERT_THROW(
+      evaluate("flink_complex_equal(c0, c1)", makeRowVector({map, map})),
+      "Unsupported Flink MAP equality mode: unknown");
+}
+
+TEST_P(MapEqualityModeTest, NullEmptyRowMapValues) {
   auto values = BaseVector::createNullConstant(ROW({}), 1, pool());
   auto map = makeMapVector({0}, makeFlatVector<int32_t>({1}), values);
   assertComparisons(map, map, {false});
 }
 
-TEST_F(ComplexEqualTest, ConstantLazyMapValues) {
+TEST_P(MapEqualityModeTest, ConstantLazyMapValues) {
   const auto makeMap = [&](vector_size_t index) {
     auto lazy = makeLazyFlatVector<int32_t>(
         4,
@@ -185,7 +272,28 @@ TEST_F(ComplexEqualTest, ConstantLazyMapValues) {
   assertComparisons(left, left, {true, true});
 }
 
-TEST_F(ComplexEqualTest, EmptyMapsDoNotLoadConstantLazyValues) {
+TEST_P(MapEqualityModeTest, ConstantLazyStringKeys) {
+  const auto makeMap = [&](vector_size_t index) {
+    auto lazy = makeLazyFlatVector<std::string>(
+        4,
+        [](auto row) { return "a_long_map_key_" + std::to_string(row); },
+        [](auto) { return false; },
+        1,
+        [index](auto) { return index; });
+    auto keys =
+        std::make_shared<ConstantVector<StringView>>(pool(), 2, index, lazy);
+    return std::make_pair(
+        makeMapVector({0, 1}, keys, makeFlatVector<int32_t>({1, 1})), lazy);
+  };
+  auto [left, leftLazy] = makeMap(1);
+  auto [right, rightLazy] = makeMap(2);
+  assertComparisons(left, right, {false, false});
+  EXPECT_TRUE(leftLazy->isLoaded());
+  EXPECT_TRUE(rightLazy->isLoaded());
+  assertComparisons(left, left, {true, true});
+}
+
+TEST_P(MapEqualityModeTest, EmptyMapsDoNotLoadConstantLazyValues) {
   auto lazy = makeLazyFlatVector<int32_t>(
       4, [](auto row) { return row; }, [](auto) { return false; }, 0);
   auto values = std::make_shared<ConstantVector<int32_t>>(pool(), 0, 2, lazy);
@@ -194,7 +302,7 @@ TEST_F(ComplexEqualTest, EmptyMapsDoNotLoadConstantLazyValues) {
   EXPECT_FALSE(lazy->isLoaded());
 }
 
-TEST_F(ComplexEqualTest, DifferentMapSizesDoNotLoadValues) {
+TEST_P(MapEqualityModeTest, DifferentMapSizesDoNotLoadValues) {
   auto leftValues =
       makeLazyFlatVector<int32_t>(2, [](auto row) { return row; });
   auto rightValues =
@@ -208,7 +316,7 @@ TEST_F(ComplexEqualTest, DifferentMapSizesDoNotLoadValues) {
   EXPECT_FALSE(rightValues->isLoaded());
 }
 
-TEST_F(ComplexEqualTest, OnlyMatchingMapSizesLoadValues) {
+TEST_P(MapEqualityModeTest, OnlyMatchingMapSizesLoadValues) {
   auto leftValues = makeLazyFlatVector<int32_t>(
       3,
       [](auto) { return 1; },
@@ -230,7 +338,7 @@ TEST_F(ComplexEqualTest, OnlyMatchingMapSizesLoadValues) {
       evaluate("flink_complex_equal(c0, c1)", makeRowVector({left, right})));
 }
 
-TEST_F(ComplexEqualTest, MapsWithDictionaryEncodedChildren) {
+TEST_P(MapEqualityModeTest, MapsWithDictionaryEncodedChildren) {
   auto indices = makeIndices(2, [](auto index) { return 1 - index; });
   auto left = makeMapVector(
       {0},
@@ -243,7 +351,7 @@ TEST_F(ComplexEqualTest, MapsWithDictionaryEncodedChildren) {
   assertComparisons(left, right, {true});
 }
 
-TEST_F(ComplexEqualTest, SparseMapsWithNestedDictionaries) {
+TEST_P(MapEqualityModeTest, SparseMapsWithNestedDictionaries) {
   constexpr vector_size_t size = 128;
   std::vector<vector_size_t> offsets(size);
   std::iota(offsets.begin(), offsets.end(), 0);
@@ -272,7 +380,7 @@ TEST_F(ComplexEqualTest, SparseMapsWithNestedDictionaries) {
       evaluate("flink_complex_equal(c0, c1)", sliced));
 }
 
-TEST_F(ComplexEqualTest, NullMapIsNull) {
+TEST_P(MapEqualityModeTest, NullMapIsNull) {
   auto left = makeMapVector(
       {0},
       makeFlatVector<std::string>({"a"}),
@@ -285,7 +393,7 @@ TEST_F(ComplexEqualTest, NullMapIsNull) {
   assertComparisons(left, right, {std::nullopt});
 }
 
-TEST_F(ComplexEqualTest, ScalarMapKeyAndValueTypes) {
+TEST_P(MapEqualityModeTest, ScalarMapKeyAndValueTypes) {
   const std::vector<VectorPtr> scalars{
       makeFlatVector<bool>({false, true, false}),
       makeFlatVector<int8_t>({1, 2, 3}),
@@ -327,7 +435,7 @@ TEST_F(ComplexEqualTest, ScalarMapKeyAndValueTypes) {
   }
 }
 
-TEST_F(ComplexEqualTest, NestedMapSorting) {
+TEST_P(MapEqualityModeTest, NestedMapSorting) {
   auto leftValues = makeMapVector(
       {0, 2, 2, 5},
       makeFlatVector<int32_t>({2, 1, 3, 1, 2, 7}),
@@ -345,7 +453,7 @@ TEST_F(ComplexEqualTest, NestedMapSorting) {
   assertComparisons(left, right, {true, false});
 }
 
-TEST_F(ComplexEqualTest, IntegerKeysAndStringValues) {
+TEST_P(MapEqualityModeTest, IntegerKeysAndStringValues) {
   auto left = makeMapVector(
       {0, 2, 4, 6},
       makeNullableFlatVector<int32_t>({1, 2, 1, 1, std::nullopt, 2, 1, 2}),
@@ -356,13 +464,13 @@ TEST_F(ComplexEqualTest, IntegerKeysAndStringValues) {
       makeNullableFlatVector<int32_t>({2, 1, 1, 2, 2, std::nullopt, 1, 2}),
       makeNullableFlatVector<std::string>(
           {"b", "a", "new", "extra", "b", "a", "a", std::nullopt}));
-  assertComparisons(left, right, {true, true, true, false});
+  assertComparisons(left, right, {true, !sqlKeys(), true, false});
   assertComparisons(right, left, {true, false, true, false});
   right->setNull(2, true);
-  assertComparisons(left, right, {true, true, std::nullopt, false});
+  assertComparisons(left, right, {true, !sqlKeys(), std::nullopt, false});
 }
 
-TEST_F(ComplexEqualTest, FloatingPointMapKeysAndValues) {
+TEST_P(MapEqualityModeTest, FloatingPointMapKeysAndValues) {
   const auto nan = std::numeric_limits<double>::quiet_NaN();
   auto keys = makeFlatVector<double>({nan, -0.0, 0.0, 1.0});
   auto otherKeys = makeFlatVector<double>({-nan, 0.0, -0.0, 1.0});
@@ -370,7 +478,7 @@ TEST_F(ComplexEqualTest, FloatingPointMapKeysAndValues) {
   assertComparisons(
       makeMapVector({0, 1, 2, 3}, keys, ones),
       makeMapVector({0, 1, 2, 3}, otherKeys, ones),
-      {true, false, false, true});
+      {!sqlKeys(), sqlKeys(), sqlKeys(), true});
   auto values = makeFlatVector<double>({nan, -0.0, 0.0, 1.0});
   auto otherValues = makeFlatVector<double>({-nan, 0.0, -0.0, 2.0});
   assertComparisons(
@@ -386,7 +494,7 @@ TEST_F(ComplexEqualTest, FloatingPointMapKeysAndValues) {
           {0},
           makeFlatVector<double>({-nan, -0.0, 0.0, nan}),
           makeFlatVector<int32_t>({0, 2, 1, 3})),
-      {true});
+      {!sqlKeys()});
   const auto floatNan = std::numeric_limits<float>::quiet_NaN();
   assertComparisons(
       makeMapVector(
@@ -397,10 +505,10 @@ TEST_F(ComplexEqualTest, FloatingPointMapKeysAndValues) {
           {0},
           makeFlatVector<float>({-floatNan, -0.0f, 0.0f, floatNan}),
           makeFlatVector<float>({0, 2, 1, 3})),
-      {true});
+      {!sqlKeys()});
 }
 
-TEST_F(ComplexEqualTest, ConstantFloatingPointMapKeys) {
+TEST_P(MapEqualityModeTest, ConstantFloatingPointMapKeys) {
   const auto check = [&]<typename T>() {
     const auto constantMap = [&](T key) {
       return std::make_shared<core::ConstantTypedExpr>(makeMapVector(
@@ -415,7 +523,7 @@ TEST_F(ComplexEqualTest, ConstantFloatingPointMapKeys) {
                 constantMap(T(0.0)), constantMap(sameKey ? T(0.0) : T(-0.0))},
             negate ? "flink_complex_not_equal" : "flink_complex_equal");
         assertEqualVectors(
-            makeFlatVector<bool>({negate != sameKey}),
+            makeFlatVector<bool>({negate != (sameKey || sqlKeys())}),
             evaluate(expression, input));
       }
     }
@@ -424,7 +532,58 @@ TEST_F(ComplexEqualTest, ConstantFloatingPointMapKeys) {
   check.operator()<double>();
 }
 
-TEST_F(ComplexEqualTest, ArraysRowsAndNestedMapsAsValues) {
+TEST_P(MapEqualityModeTest, FloatingDuplicateKeys) {
+  const auto check = [&]<typename T>() {
+    const auto nan = std::numeric_limits<T>::quiet_NaN();
+    auto left = makeMapVector(
+        {0, 2, 4, 6, 8, 10},
+        makeNullableFlatVector<T>(
+            {0,
+             -T(0),
+             0,
+             -T(0),
+             nan,
+             1,
+             1,
+             2,
+             std::nullopt,
+             std::nullopt,
+             std::nullopt,
+             std::nullopt}),
+        makeNullableFlatVector<int32_t>(
+            {1, 2, 1, 2, 1, 2, 1, 2, std::nullopt, 2, 2, std::nullopt}));
+    auto right = makeMapVector(
+        {0, 2, 4, 6, 8, 10},
+        makeNullableFlatVector<T>(
+            {-T(0),
+             0,
+             0,
+             0,
+             1,
+             1,
+             1,
+             nan,
+             std::nullopt,
+             std::nullopt,
+             std::nullopt,
+             std::nullopt}),
+        makeNullableFlatVector<int32_t>(
+            {2, 1, 9, 2, 1, 2, 1, 2, 1, 2, 2, std::nullopt}));
+    assertComparisons(
+        left, right, {!sqlKeys(), sqlKeys(), false, false, true, false});
+    assertComparisons(
+        right, left, {!sqlKeys(), sqlKeys(), !sqlKeys(), false, true, false});
+    auto keys = makeFlatVector<int32_t>(6, [](auto) { return 1; });
+    assertComparisons(
+        makeMapVector({0, 1, 2, 3, 4, 5}, keys, left),
+        makeMapVector({0, 1, 2, 3, 4, 5}, keys, right),
+        {!sqlKeys(), sqlKeys(), false, false, true, false});
+  };
+  check.operator()<float>();
+  check.operator()<double>();
+}
+
+TEST_P(MapEqualityModeTest, ArraysRowsAndNestedMapsAsValues) {
   auto keys = makeFlatVector<int32_t>({1, 2, 3, 4});
   auto arrays = makeArrayVector(
       {0, 2, 4, 4},
@@ -456,7 +615,7 @@ TEST_F(ComplexEqualTest, ArraysRowsAndNestedMapsAsValues) {
       {true, true, true, true});
 }
 
-TEST_F(ComplexEqualTest, NestedSparseDictionariesSlicesAndLazyValues) {
+TEST_P(MapEqualityModeTest, NestedSparseDictionariesSlicesAndLazyValues) {
   constexpr vector_size_t size = 128;
   std::vector<vector_size_t> offsets(size);
   std::iota(offsets.begin(), offsets.end(), 0);
@@ -492,7 +651,7 @@ TEST_F(ComplexEqualTest, NestedSparseDictionariesSlicesAndLazyValues) {
   assertComparisons(left->slice(3, 2), right->slice(3, 2), {true, true});
 }
 
-TEST_F(ComplexEqualTest, MapNotEqualNullAndSizeSemantics) {
+TEST_P(MapEqualityModeTest, MapNotEqualNullAndSizeSemantics) {
   auto keys = makeFlatVector<std::string>({"a", "a"});
   auto values = makeNullableFlatVector<int32_t>({1, std::nullopt});
   auto left = makeMapVector({0, 0, 1}, keys, values);
@@ -503,7 +662,7 @@ TEST_F(ComplexEqualTest, MapNotEqualNullAndSizeSemantics) {
   assertComparisons(left, right, {false, std::nullopt, std::nullopt});
 }
 
-TEST_F(ComplexEqualTest, RejectsRepresentationDependentKeys) {
+TEST_P(MapEqualityModeTest, RejectsRepresentationDependentKeys) {
   auto values = makeFlatVector<int32_t>({1});
   for (const auto& keys : std::vector<VectorPtr>{
            makeFlatVector<std::string>({"a"}, VARBINARY()),
@@ -519,7 +678,7 @@ TEST_F(ComplexEqualTest, RejectsRepresentationDependentKeys) {
   }
 }
 
-TEST_F(ComplexEqualTest, FloatingPointNestedValues) {
+TEST_P(MapEqualityModeTest, FloatingPointNestedValues) {
   const auto nan = std::numeric_limits<double>::quiet_NaN();
   auto keys = makeFlatVector<int32_t>({1, 2, 3});
   auto leftRows =

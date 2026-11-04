@@ -817,6 +817,13 @@ class QueryConfig {
   static constexpr const char* kEnableFlinkCompatible =
       "compatible.flink.enable";
 
+  /// java_map (default) uses boxed-key equality and visits only left key
+  /// groups. sql_keys uses SQL key equality and requires both sides' key
+  /// groups. Both modes require equal entry counts and keep the last duplicate
+  /// value.
+  static constexpr const char* kFlinkMapEqualityMode =
+      "flink_map_equality_mode";
+
   static constexpr const char* kFlinkJniUdfTaskInfo = "flink.jni.udf.task.info";
 
   static constexpr const char* kEnableSonicJsonSplit = "sonic.json_split";
@@ -1798,6 +1805,10 @@ class QueryConfig {
 
   bool enableFlinkCompatible() const {
     return get<bool>(kEnableFlinkCompatible, false);
+  }
+
+  std::string flinkMapEqualityMode() const {
+    return get<std::string>(kFlinkMapEqualityMode, "java_map");
   }
 
   std::string getFlinkJniUdfTaskInfo() const {
