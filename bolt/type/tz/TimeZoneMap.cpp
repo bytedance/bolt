@@ -116,8 +116,7 @@ TTimeZoneDatabase buildTimeZoneDatabase(
         // will be thrown and caller is expected to handle that error in code.
         LOG(WARNING) << "Invalid time zone [" << entry.second
                      << "]: " << err.what();
-        throw std::runtime_error(fmt::format(
-            "Invalid time zone [{}]: {}", entry.second, err.what()));
+        continue;
       }
       timeZonePtr = std::make_unique<TimeZone>(entry.second, entry.first, zone);
     }
