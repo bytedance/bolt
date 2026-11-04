@@ -607,8 +607,9 @@ class QueryConfig {
   /// Default zone used when resolving ambiguous SimpleDateFormat zone names.
   static constexpr const char* kDateTimeFormatterDefaultTimezone =
       "date_time_formatter_default_timezone";
-  /// Zone used for hybrid/Gregorian calendar conversion, if different from the
-  /// formatter's zone. The caller selects this from its runtime semantics.
+  /// Zone used for hybrid/Gregorian calendar conversion; defaults to the
+  /// formatter's zone. For LEGACY parsing, Gluten must pass the JVM default
+  /// zone for Spark 3.3 and the formatter's zone for Spark 3.5.
   static constexpr const char* kDateTimeFormatterRebaseTimezone =
       "date_time_formatter_rebase_timezone";
   /// Both values describe the SimpleDateFormat window captured by the caller.
