@@ -323,6 +323,50 @@ TEST_P(FlinkRegexpExtractTest, variablePatternsAcrossBatches) {
       retained);
 }
 
+TEST_P(FlinkRegexpExtractTest, constantPatternsAcrossBatches) {
+  const std::string inputText =
+      "foo_long_result_with_more_than_twelve_characters";
+  const std::string extracted = "_long_result_with_more_than_twelve_characters";
+  for (const auto& groupSql : {"", ", 1", ", c2"}) {
+    SCOPED_TRACE(groupSql);
+    auto expression = compileExpression(
+        fmt::format("{}(c0, c1{})", functionName(), groupSql),
+        ROW({"c0", "c1", "c2"}, {VARCHAR(), VARCHAR(), INTEGER()}));
+    VectorPtr retained;
+    for (const auto& pattern : {"foo(.*)", "foo([a-z]+)", "*", "foo(.*)"}) {
+      SCOPED_TRACE(pattern);
+      auto input = makeRowVector(
+          {makeNullableFlatVector<std::string>(
+               {inputText, "fooabc", std::nullopt}),
+           makeConstant(StringView(pattern), 3),
+           makeFlatVector<int32_t>({1, 1, 0})});
+      auto result = evaluate(*expression, input);
+      const bool wholeMatch = std::string_view(groupSql).empty();
+      const bool invalid = std::string_view(pattern) == "*";
+      const bool matchFirst = std::string_view(pattern) == "foo(.*)";
+      bytedance::bolt::test::assertEqualVectors(
+          makeNullableFlatVector<std::string>(
+              {matchFirst ? std::optional<std::string>(
+                                wholeMatch ? inputText : extracted)
+                          : std::nullopt,
+               invalid
+                   ? std::nullopt
+                   : std::optional<std::string>(wholeMatch ? "fooabc" : "abc"),
+               std::nullopt}),
+          result);
+      if (!retained) {
+        retained = result;
+      }
+    }
+    bytedance::bolt::test::assertEqualVectors(
+        makeNullableFlatVector<std::string>(
+            {std::string_view(groupSql).empty() ? inputText : extracted,
+             std::string_view(groupSql).empty() ? "fooabc" : "abc",
+             std::nullopt}),
+        retained);
+  }
+}
+
 TEST_P(FlinkRegexpExtractTest, preservesRowsAndInputBuffers) {
   auto input = makeRowVector({
       makeNullableFlatVector<std::string>(
@@ -493,21 +537,73 @@ TEST_F(FlinkICURegexpExtractTest, javaRegexSemantics) {
           std::optional<std::string>{"b"}));
 }
 
-TEST_F(FlinkICURegexpExtractTest, bigintGroupIdUsesJavaNarrowing) {
-  constexpr int64_t kGroupOneAfterNarrowing = (int64_t{1} << 32) + 1;
-
-  EXPECT_EQ(
-      "foothebar",
-      evaluateOnce<std::string>(
-          "icu_regexp_extract(c0, 'foo(.*?)(bar)', "
-          "cast(4294967296 as bigint))",
-          std::optional<std::string>{"foothebar"}));
-  EXPECT_EQ(
-      "the",
-      evaluateOnce<std::string>(
-          "icu_regexp_extract(c0, 'foo(.*?)(bar)', c1)",
-          std::optional<std::string>{"foothebar"},
-          std::optional<int64_t>{kGroupOneAfterNarrowing}));
+TEST_P(FlinkRegexpExtractTest, bigintGroupIdUsesJavaNarrowing) {
+  constexpr int64_t kIntRange = int64_t{1} << 32;
+  const std::vector<std::optional<int64_t>> groups = {
+      0,
+      1,
+      2,
+      -1,
+      kIntRange,
+      kIntRange + 1,
+      -kIntRange,
+      -kIntRange + 1,
+      -kIntRange - 1,
+      std::numeric_limits<int32_t>::max(),
+      std::numeric_limits<int32_t>::min(),
+      int64_t{1} << 31,
+      std::numeric_limits<int64_t>::max(),
+      std::numeric_limits<int64_t>::min(),
+      std::numeric_limits<int64_t>::min() + 1,
+      std::nullopt};
+  const std::vector<std::optional<std::string>> expected = {
+      "foo123",
+      "123",
+      std::nullopt,
+      std::nullopt,
+      "foo123",
+      "123",
+      "foo123",
+      "123",
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      "foo123",
+      "123",
+      std::nullopt};
+  auto values =
+      makeFlatVector<std::string>(groups.size(), [](auto) { return "foo123"; });
+  auto pattern = makeFlatVector<std::string>(
+      groups.size(), [](auto) { return "foo([0-9]+)"; });
+  for (const auto& patterns : std::vector<VectorPtr>{
+           pattern, makeConstant(StringView("foo([0-9]+)"), groups.size())}) {
+    auto input = makeRowVector(
+        {values, patterns, makeNullableFlatVector<int64_t>(groups)});
+    for (const auto& patternSql : {"'foo([0-9]+)'", "c1"}) {
+      SCOPED_TRACE(patternSql);
+      bytedance::bolt::test::assertEqualVectors(
+          makeNullableFlatVector<std::string>(expected),
+          evaluate(
+              fmt::format("{}(c0, {}, c2)", functionName(), patternSql),
+              input));
+      for (size_t i = 0; i < groups.size(); ++i) {
+        SCOPED_TRACE(i);
+        const auto groupSql = groups[i]
+            ? fmt::format("cast('{}' as bigint)", *groups[i])
+            : "cast(null as bigint)";
+        bytedance::bolt::test::assertEqualVectors(
+            makeNullableFlatVector<std::string>(
+                std::vector<std::optional<std::string>>(
+                    groups.size(), expected[i])),
+            evaluate(
+                fmt::format(
+                    "{}(c0, {}, {})", functionName(), patternSql, groupSql),
+                input));
+      }
+    }
+  }
 }
 
 TEST_F(FlinkICURegexpExtractTest, unicode) {

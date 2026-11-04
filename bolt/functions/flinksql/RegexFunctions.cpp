@@ -40,6 +40,7 @@ std::shared_ptr<exec::VectorFunction> makeRegexpExtract(
   options.invalidRegexPolicy = Re2ExtractErrorPolicy::kReturnNull;
   options.invalidGroupPolicy = Re2ExtractErrorPolicy::kReturnNull;
   options.unmatchedGroupPolicy = Re2ExtractResultPolicy::kReturnNull;
+  options.castGroupIdToInt32 = true;
 
   return makeCachedRe2ExtractWithOptions(name, inputArgs, config, options);
 }

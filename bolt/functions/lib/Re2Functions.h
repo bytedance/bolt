@@ -62,6 +62,8 @@ struct Re2ExtractOptions {
   Re2ExtractErrorPolicy invalidGroupPolicy{Re2ExtractErrorPolicy::kThrow};
   Re2ExtractResultPolicy unmatchedGroupPolicy{
       Re2ExtractResultPolicy::kReturnEmptyString};
+  // Apply Java's long-to-int narrowing before validating group IDs.
+  bool castGroupIdToInt32{false};
 };
 
 /// Representation of different kinds of patterns.
