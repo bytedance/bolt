@@ -113,6 +113,9 @@ CompositeShuffleWriter::CompositeShuffleWriter(
       converter_(boltPool),
       heldRows_(numPartitions_),
       rawPartitionBytes_(numPartitions_, 0) {
+  // Set once here so every path reports it (ordinary, composite, empty,
+  // local or RSS); nothing later assigns metrics_ as a whole.
+  metrics_.useCellShuffle = 1;
   auto maybePartitioner = Partitioner::make(
       options_.partitioning, numPartitions_, options_.startPartitionId);
   BOLT_CHECK(
