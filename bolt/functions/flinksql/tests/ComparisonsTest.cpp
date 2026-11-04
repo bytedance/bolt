@@ -165,15 +165,24 @@ TEST_F(ComplexEqualTest, NullEmptyRowMapValues) {
 }
 
 TEST_F(ComplexEqualTest, ConstantLazyMapValues) {
-  auto lazy = makeLazyFlatVector<int32_t>(
-      4,
-      [](auto row) { return row; },
-      [](auto) { return false; },
-      1,
-      [](auto) { return 2; });
-  auto values = std::make_shared<ConstantVector<int32_t>>(pool(), 2, 2, lazy);
-  auto map = makeMapVector({0, 1}, makeFlatVector<int32_t>({1, 2}), values);
-  assertComparisons(map, map, {true, true});
+  const auto makeMap = [&](vector_size_t index) {
+    auto lazy = makeLazyFlatVector<int32_t>(
+        4,
+        [](auto row) { return row; },
+        [](auto) { return false; },
+        1,
+        [index](auto) { return index; });
+    auto values =
+        std::make_shared<ConstantVector<int32_t>>(pool(), 2, index, lazy);
+    return std::make_pair(
+        makeMapVector({0, 1}, makeFlatVector<int32_t>({1, 2}), values), lazy);
+  };
+  auto [left, leftLazy] = makeMap(1);
+  auto [right, rightLazy] = makeMap(2);
+  assertComparisons(left, right, {false, false});
+  EXPECT_TRUE(leftLazy->isLoaded());
+  EXPECT_TRUE(rightLazy->isLoaded());
+  assertComparisons(left, left, {true, true});
 }
 
 TEST_F(ComplexEqualTest, EmptyMapsDoNotLoadConstantLazyValues) {
@@ -399,13 +408,16 @@ TEST_F(ComplexEqualTest, ConstantFloatingPointMapKeys) {
     };
     auto input = makeRowVector({makeFlatVector<int32_t>({1})});
     for (bool negate : {false, true}) {
-      auto expression = std::make_shared<core::CallTypedExpr>(
-          BOOLEAN(),
-          std::vector<core::TypedExprPtr>{
-              constantMap(T(0.0)), constantMap(T(-0.0))},
-          negate ? "flink_complex_not_equal" : "flink_complex_equal");
-      assertEqualVectors(
-          makeFlatVector<bool>({negate}), evaluate(expression, input));
+      for (bool sameKey : {false, true}) {
+        auto expression = std::make_shared<core::CallTypedExpr>(
+            BOOLEAN(),
+            std::vector<core::TypedExprPtr>{
+                constantMap(T(0.0)), constantMap(sameKey ? T(0.0) : T(-0.0))},
+            negate ? "flink_complex_not_equal" : "flink_complex_equal");
+        assertEqualVectors(
+            makeFlatVector<bool>({negate != sameKey}),
+            evaluate(expression, input));
+      }
     }
   };
   check.operator()<float>();

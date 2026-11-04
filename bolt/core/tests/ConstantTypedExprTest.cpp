@@ -84,7 +84,7 @@ TEST(ConstantTypedExprTest, null) {
 }
 
 TEST(ConstantTypedExprTest, floatingPointBits) {
-  const auto check = []<typename T>(T nan) {
+  const auto check = []<typename T>(T nan, T otherNan) {
     const auto type = CppToType<T>::create();
     const auto equal = [&](T left, T right) {
       return ConstantTypedExpr(type, variant(left)) ==
@@ -94,9 +94,14 @@ TEST(ConstantTypedExprTest, floatingPointBits) {
     EXPECT_TRUE(equal(T(-0.0), T(-0.0)));
     EXPECT_TRUE(equal(nan, nan));
     EXPECT_FALSE(equal(nan, -nan));
+    EXPECT_FALSE(equal(nan, otherNan));
   };
-  check(std::bit_cast<float>(uint32_t{0x7fc00001}));
-  check(std::bit_cast<double>(uint64_t{0x7ff8000000000001}));
+  check(
+      std::bit_cast<float>(uint32_t{0x7fc00001}),
+      std::bit_cast<float>(uint32_t{0x7fc00002}));
+  check(
+      std::bit_cast<double>(uint64_t{0x7ff8000000000001}),
+      std::bit_cast<double>(uint64_t{0x7ff8000000000002}));
 }
 
 class ConstantVectorExprTest : public testing::Test,
@@ -152,12 +157,16 @@ TEST_F(ConstantVectorExprTest, projectedRowFields) {
 
 TEST_F(ConstantVectorExprTest, mapEntryOrder) {
   auto maps = makeMapVector<int32_t, int32_t>(
-      {{{1, 10}, {2, 20}}, {{2, 20}, {1, 10}}, {{1, 10}, {2, 20}}});
+      {{{1, 10}, {2, 20}},
+       {{2, 20}, {1, 10}},
+       {{1, 10}, {2, 20}},
+       {{1, 99}, {2, 20}}});
   auto constant = [&](vector_size_t row) {
     return ConstantTypedExpr(BaseVector::wrapInConstant(1, row, maps));
   };
   EXPECT_FALSE(constant(0) == constant(1));
   EXPECT_TRUE(constant(0) == constant(2));
+  EXPECT_FALSE(constant(0) == constant(3));
   EXPECT_EQ(constant(0).hash(), constant(2).hash());
 }
 
