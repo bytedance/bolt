@@ -31,6 +31,9 @@
 #include <date/tz.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdlib>
+
 #include "bolt/common/base/Exceptions.h"
 #include "bolt/common/base/tests/GTestUtils.h"
 #include "bolt/common/testutil/TestValue.h"
@@ -39,6 +42,60 @@ namespace bytedance::bolt::tz {
 namespace {
 
 using common::testutil::TestValue;
+
+#ifndef NDEBUG
+TEST(TimeZoneMapDeathTest, missingNamedTimeZone) {
+  // Re-execute the test binary so the injection precedes the first lookup,
+  // even if another test has already initialized the static time zone cache.
+  const auto previousStyle = testing::FLAGS_gtest_death_test_style;
+  testing::FLAGS_gtest_death_test_style = "threadsafe";
+  EXPECT_EXIT(
+      {
+        BOLT_TEST_VALUE_ENABLE();
+        SCOPED_TESTVALUE_SET(
+            "bytedance::bolt::tz::locateZoneImpl",
+            std::function<void(std::string_view*)>([](std::string_view* name) {
+              if (*name == "Pacific/Kanton") {
+                *name = "Invalid/Pacific-Kanton";
+              }
+            }));
+
+        const auto* shanghai = locateZone("Asia/Shanghai");
+        ASSERT_NE(nullptr, shanghai);
+        EXPECT_EQ(1980, shanghai->id());
+        EXPECT_EQ(shanghai, locateZone(1980));
+        EXPECT_EQ(
+            std::chrono::seconds(28800),
+            shanghai->to_local(std::chrono::seconds(0)));
+
+        BOLT_ASSERT_THROW(
+            locateZone("Pacific/Kanton", true), "Unknown time zone");
+        EXPECT_EQ(nullptr, locateZone("Pacific/Kanton", false));
+        EXPECT_EQ(-1, getTimeZoneID("Pacific/Kanton", false));
+        BOLT_ASSERT_THROW(
+            locateZone(2231, true), "Unable to resolve timeZoneID");
+        EXPECT_EQ(nullptr, locateZone(2231, false));
+        const auto ids = getTimeZoneIDs();
+        EXPECT_EQ(ids.end(), std::find(ids.begin(), ids.end(), 2231));
+
+        const auto* utc = locateZone("UTC");
+        ASSERT_NE(nullptr, utc);
+        EXPECT_EQ(0, utc->id());
+        EXPECT_EQ(utc, locateZone("GMT"));
+        EXPECT_EQ(utc, locateZone("+00:00"));
+        EXPECT_EQ(utc, locateZone("-00:00"));
+        EXPECT_EQ(1320, getTimeZoneID("+08:00"));
+        EXPECT_EQ(
+            std::chrono::seconds(28800),
+            locateZone("+08:00")->to_local(std::chrono::seconds(0)));
+        EXPECT_EQ(541, getTimeZoneID("-05:00"));
+        std::exit(testing::Test::HasFailure() ? EXIT_FAILURE : EXIT_SUCCESS);
+      },
+      testing::ExitedWithCode(EXIT_SUCCESS),
+      "");
+  testing::FLAGS_gtest_death_test_style = previousStyle;
+}
+#endif
 
 class TimeZoneMapTest : public testing::Test {
  protected:
