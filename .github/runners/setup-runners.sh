@@ -9,8 +9,7 @@ case ${1:-} in
   --with-arrow-cache)
     with_arrow_cache=true
     export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:compose.arrow-cache.yml:compose.arrow-runners.yml"
-    export BOLT_ARROW_CACHE_DIR="${BOLT_ARROW_CACHE_DIR:-/data/conan-source-cache}"
-    python3 arrow-cache.py warm
+    python3 arrow-cache.py warm --compose
     ;;
   "") ;;
   *)

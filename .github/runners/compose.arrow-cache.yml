@@ -5,7 +5,7 @@ services:
     ports:
       - "${BOLT_ARROW_CACHE_BIND:-127.0.0.1}:${BOLT_ARROW_CACHE_PORT:-9301}:80"
     volumes:
-      - "${BOLT_ARROW_CACHE_DIR:-/data/conan-source-cache}/s:/srv/archives:ro"
+      - "${BOLT_ARROW_CACHE_DIR:-${HOST_DATA_DIR:-/data}/conan-source-cache}/s:/srv/archives:ro"
       - "./arrow-cache.nginx.conf:/etc/nginx/conf.d/default.conf:ro"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/s/55db63ed9fd6917b7abfe5d4186c9f532cbe48aa53f4040d57e7c29ad70bcefa"]

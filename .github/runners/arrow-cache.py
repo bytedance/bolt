@@ -17,6 +17,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -146,11 +147,37 @@ def configure_local(seed):
     print("Arrow and Substrait sources are ready in the local Conan cache.")
 
 
+def compose_cache_dir(compose):
+    # Use the effective bind, including Compose .env settings and overrides.
+    config = subprocess.check_output(
+        [*compose, "config", "--format", "json", "bolt-source-cache"], text=True
+    )
+    mounts = json.loads(config)["services"]["bolt-source-cache"]["volumes"]
+    for mount in mounts:
+        if mount["type"] == "bind" and mount["target"] == "/srv/archives":
+            blobs = Path(mount["source"])
+            if blobs.name == "s":
+                return blobs.parent
+    raise SystemExit("Expected a source cache bind mount ending in /s.")
+
+
+def install_helper(cache):
+    # Install our own job helper; snapshots contain only the two source archives.
+    with tempfile.TemporaryDirectory(dir=cache) as temp:
+        stage = Path(temp) / "arrow-cache.py"
+        shutil.copyfile(__file__, stage)
+        stage.chmod(0o644)
+        os.replace(stage, cache / stage.name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser(
+    warm_parser = commands.add_parser(
         "warm", help="verify local sources and fetch any missing archives"
+    )
+    warm_parser.add_argument(
+        "--compose", action="store_true", help="use the deployed Compose cache mount"
     )
     commands.add_parser(
         "serve", help="warm and start the standalone read-only source service"
@@ -171,31 +198,30 @@ def main():
                 "Check the read-only source mount and the job's Conan home."
             ) from None
         return
-    cache = Path(
-        os.environ.get("BOLT_ARROW_CACHE_DIR", "/data/conan-source-cache")
-    ).resolve()
+    compose = ["docker", "compose"]
+    if args.command == "serve":
+        compose.extend(
+            ["-p", "bolt-arrow-cache", "-f", str(HERE / "compose.arrow-cache.yml")]
+        )
+    if args.command == "serve" or (args.command == "warm" and args.compose):
+        cache = compose_cache_dir(compose)
+    else:
+        host_data = Path(os.environ.get("HOST_DATA_DIR") or "/data")
+        cache = Path(
+            os.environ.get("BOLT_ARROW_CACHE_DIR") or host_data / "conan-source-cache"
+        ).resolve()
     blobs = cache / "s"
     if args.command == "export":
         export_cache(blobs, args.archive)
     elif args.command == "import":
         import_cache(blobs, args.archive)
+        install_helper(cache)
     else:
         warm(blobs)
+        install_helper(cache)
         if args.command == "serve":
             subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "-p",
-                    "bolt-arrow-cache",
-                    "-f",
-                    str(HERE / "compose.arrow-cache.yml"),
-                    "up",
-                    "-d",
-                    "--wait",
-                    "bolt-source-cache",
-                ],
-                env={**os.environ, "BOLT_ARROW_CACHE_DIR": str(cache)},
+                [*compose, "up", "-d", "--wait", "bolt-source-cache"],
                 check=True,
             )
 

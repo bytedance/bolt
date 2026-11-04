@@ -32,7 +32,7 @@ The runner image's entrypoint (`runner/entrypoint.py`) obtains a short-lived reg
 
 ## Arrow source archives
 
-`arrow-cache.py` uses the Arrow and Substrait checksums pinned by the [arrow/15.0.1-oss recipe](https://github.com/bytedance/conan-center-index/blob/50b9807d8c919306824fbb3f4dc444d3b62f01b2/recipes/arrow/all/conandata.yml). It reuses valid archives from `/data/conan-source-cache/s` and fetches missing archives on the host. Override the parent directory with an absolute `BOLT_ARROW_CACHE_DIR` in the host shell. Conan binary packages are managed separately by the Conan package server.
+`arrow-cache.py` uses the Arrow and Substrait checksums pinned by the [arrow/15.0.1-oss recipe](https://github.com/bytedance/conan-center-index/blob/50b9807d8c919306824fbb3f4dc444d3b62f01b2/recipes/arrow/all/conandata.yml). The cache defaults to `${HOST_DATA_DIR:-/data}/conan-source-cache`. An absolute `BOLT_ARROW_CACHE_DIR` overrides it. Both Compose deployment modes warm the directory in the resolved service bind mount, including settings from Compose’s `.env`. The host reuses verified archives in `s/` and fetches missing archives. Warm-up and import install the job helper as `arrow-cache.py` alongside `s/`. Conan binary packages are managed separately by the Conan package server.
 
 Choose one deployment on a given host and port:
 
@@ -46,7 +46,7 @@ python3 arrow-cache.py serve
 
 The standalone deployment uses Compose project `bolt-arrow-cache`. Both modes use `compose.arrow-cache.yml` and the stock Nginx image. HTTP binds to `127.0.0.1:9301` by default and serves digest-named archives at `/s/<sha256>`. The host operator can set `BOLT_ARROW_CACHE_BIND` and `BOLT_ARROW_CACHE_PORT`. To inspect the standalone service, use `docker compose -p bolt-arrow-cache -f compose.arrow-cache.yml ps`. For full-stack maintenance, include the base file and both optional overlays, as well as your registration override if applicable.
 
-To carry the archives between machines, run the first two commands on the source and the last two in the same checkout on the destination after transferring the tar file:
+For the standalone `warm`, `export`, and `import` commands, export the same directory variables in the host shell if using a custom path. These commands also work without Docker. To carry the archives between machines, run the first two commands on the source and the last two in the same checkout on the destination after transferring the tar file:
 
 ```bash
 python3 arrow-cache.py warm
