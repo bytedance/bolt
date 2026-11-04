@@ -385,7 +385,7 @@ struct UnixTimestampFunctionBase {
     const std::string_view pattern(format->data(), format->size());
     return timeParserPolicy == TimePolicy::LEGACY
         ? buildLegacySparkDateTimeFormatter(pattern, formatterContext_)
-        : buildSparkDateTimeFormatter(pattern);
+        : buildSparkDateTimeFormatter(pattern, true, standaloneMonthText_);
   }
 
   FOLLY_ALWAYS_INLINE bool parseTimestamp(
@@ -396,8 +396,7 @@ struct UnixTimestampFunctionBase {
       format_ = formatCache_.get(
           std::string_view(format.data(), format.size()),
           [&] { return createFormatter(&format); },
-          timeParserPolicy != TimePolicy::LEGACY ||
-              (formatterContext_ && formatterContext_->twoDigitYearStart));
+          false);
     }
     const auto* zone = sessionTimeZone_
         ? sessionTimeZone_
@@ -419,8 +418,7 @@ struct UnixTimestampFunctionBase {
                 return nullptr;
               }
             },
-            isConstFormat_ ||
-                (formatterContext_ && formatterContext_->twoDigitYearStart));
+            isConstFormat_);
         if (legacy) {
           try {
             legacyAccepted = !legacy->parseToUtc(text, zone).hasError();
@@ -444,6 +442,8 @@ struct UnixTimestampFunctionBase {
       const core::QueryConfig& config,
       const arg_type<Varchar>* format,
       const StringType* timeZone) {
+    standaloneMonthText_ = config.get<bool>(
+        core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
     this->timeParserPolicy = parseTimePolicy(config.timeParserPolicy());
     if (this->timeParserPolicy != TimePolicy::CORRECTED) {
       formatterContext_ = getDateTimeFormatterContext(config);
@@ -490,6 +490,7 @@ struct UnixTimestampFunctionBase {
                    // before 1901, Shanghai use UTC+8:05:43
                    // after, Shanghai change to CST(UTC+8)
   constexpr static int64_t kShSpecOffset = -343;
+  bool standaloneMonthText_{false};
   std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> format_;
   int64_t sessionTzOffsetInSeconds_{0};
@@ -809,6 +810,8 @@ struct GetTimestampFunction {
       const arg_type<Varchar>* /*input*/,
       const arg_type<Varchar>* format) {
     auto sessionTimezoneName = config.sessionTimezone();
+    standaloneMonthText_ = config.get<bool>(
+        core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
     this->timeParserPolicy = parseTimePolicy(config.timeParserPolicy());
     if (!sessionTimezoneName.empty()) {
       sessionTimezoneId_ = tz::getTimeZoneID(sessionTimezoneName);
@@ -820,7 +823,9 @@ struct GetTimestampFunction {
       } else {
         ensureFormatLegal(std::string_view(format->data(), format->size()));
         formatter_ = buildSparkDateTimeFormatter(
-            std::string_view(format->data(), format->size()));
+            std::string_view(format->data(), format->size()),
+            true,
+            standaloneMonthText_);
       }
       isConstantTimeFormat_ = true;
     }
@@ -837,7 +842,9 @@ struct GetTimestampFunction {
       } else {
         ensureFormatLegal(std::string_view(format->data(), format->size()));
         formatter_ = buildSparkDateTimeFormatter(
-            std::string_view(format.data(), format.size()));
+            std::string_view(format.data(), format.size()),
+            true,
+            standaloneMonthText_);
       }
     }
     auto dateTimeResult =
@@ -862,6 +869,7 @@ struct GetTimestampFunction {
                                    : sessionTimezoneId_.value_or(0);
   }
 
+  bool standaloneMonthText_{false};
   std::shared_ptr<DateTimeFormatter> formatter_{nullptr};
   bool isConstantTimeFormat_{false};
   std::optional<int64_t> sessionTimezoneId_;
@@ -1330,6 +1338,7 @@ template <typename T>
 struct FromUnixtimeFunction : public InitSessionTimezone<T> {
   BOLT_DEFINE_FUNCTION_TYPES(T);
   const tz::TimeZone* sessionTimeZone_ = nullptr;
+  bool standaloneMonthText_{false};
   std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
@@ -1359,6 +1368,8 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
       const core::QueryConfig& config,
       const arg_type<int64_t>* /*unixtime*/,
       const arg_type<Varchar>* formatString) {
+    standaloneMonthText_ = config.get<bool>(
+        core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
     timePolicy_ = parseTimePolicy(config.timeParserPolicy());
     if (timePolicy_ == TimePolicy::LEGACY) {
       formatterContext_ = getDateTimeFormatterContext(config);
@@ -1375,7 +1386,8 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
       } else {
         jodaDateTime_ = buildSparkDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()),
-            false);
+            false,
+            standaloneMonthText_);
       }
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
       isConstFormat_ = true;
@@ -1399,7 +1411,7 @@ struct FromUnixtimeFunction : public InitSessionTimezone<T> {
       jodaDateTime_ = formatCache_.get(pattern, [&] {
         return timePolicy_ == TimePolicy::LEGACY
             ? buildLegacySparkDateTimeFormatter(pattern, formatterContext_)
-            : buildSparkDateTimeFormatter(pattern, false);
+            : buildSparkDateTimeFormatter(pattern, false, standaloneMonthText_);
       });
       maxResultSize_ = jodaDateTime_->maxResultSize(sessionTimeZone_);
     }

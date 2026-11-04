@@ -35,6 +35,13 @@ namespace bytedance::bolt::functions {
 std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
     const std::string_view& format,
     bool isParsing) {
+  return buildSparkDateTimeFormatter(format, isParsing, false);
+}
+
+std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
+    const std::string_view& format,
+    bool isParsing,
+    bool standaloneMonthText) {
   const auto pattern = format;
   bool quoted = false;
   for (size_t i = 0; i < pattern.size();) {
@@ -83,6 +90,9 @@ std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
       case 'G':
       case 'M':
       case 'L':
+        BOLT_USER_CHECK(
+            letter != 'L' || standaloneMonthText || i - start < 3,
+            "Standalone month text is unsupported by the target JVM");
         BOLT_USER_CHECK_LT(
             i - start, 5, "Too many pattern letters: {}", letter);
         break;
@@ -98,7 +108,8 @@ std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
       {.strict = true,
        .caseSensitive = false,
        .variableFraction = isParsing,
-       .yearOfEra = false});
+       .yearOfEra = false,
+       .preferTimezoneId = true});
 }
 
 std::shared_ptr<DateTimeFormatter> buildLegacySparkDateTimeFormatter(

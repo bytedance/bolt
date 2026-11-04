@@ -62,6 +62,9 @@ struct DateTimeParseOptions {
   bool variableFraction{false};
   // When false, interpret y as a proleptic year unless an era is present.
   bool yearOfEra{true};
+  // Spark resolves local fields in the parsed zone when an offset is also
+  // present.
+  bool preferTimezoneId{false};
 };
 
 enum class DateTimeFormatSpecifier : uint8_t {
@@ -390,6 +393,10 @@ class DateTimeFormatter {
     return tokens_;
   }
 
+  bool dependsOnCreationTime() const {
+    return dependsOnCreationTime_;
+  }
+
   DateTimeResult parse(const std::string_view& input) const;
 
   /// Applies the parsed offset or zone, falling back to the supplied zone.
@@ -450,6 +457,7 @@ class DateTimeFormatter {
   size_t bufSize_;
   std::vector<DateTimeToken> tokens_;
   bool hasEra_ = false;
+  bool dependsOnCreationTime_{false};
   DateTimeParseOptions parseOptions_;
   DateTimeFormatterType type_;
   int64_t twoDigitYearStartMillis_{0};
@@ -473,6 +481,11 @@ std::shared_ptr<DateTimeFormatter> buildJavaDateTimeFormatter(
 std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
     const std::string_view& format,
     bool isParsing = true);
+
+std::shared_ptr<DateTimeFormatter> buildSparkDateTimeFormatter(
+    const std::string_view& format,
+    bool isParsing,
+    bool standaloneMonthText);
 
 std::shared_ptr<DateTimeFormatter> buildHiveDateTimeFormatter(
     const std::string_view& format);

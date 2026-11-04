@@ -87,6 +87,7 @@ struct Date {
   bool hasHalfDay = false;
   int64_t timezoneId = -1;
   std::optional<int32_t> timezoneOffsetSeconds;
+  std::optional<int32_t> zoneOffsetSeconds;
   bool hasTimeZoneId = false;
 
   bool isClockHour = false; // Whether most recent hour specifier is clockhour
@@ -433,6 +434,7 @@ int64_t parseTimeZoneId(
         continue;
       }
       date.timezoneId = id;
+      date.zoneOffsetSeconds.reset();
       date.hasTimeZoneId = true;
       return size;
     }
@@ -457,12 +459,7 @@ int64_t parseJavaTimezoneOffset(
   const bool colon = rfc ? digits >= 4 : digits == 3 || digits == 5;
   const bool optionalMinutes = !rfc && digits == 1;
   const bool optionalSeconds = rfc || digits >= 2;
-  auto setOffset = [&](int32_t offset) {
-    date.timezoneOffsetSeconds = offset;
-    date.timezoneId = offset % 60 == 0 && std::abs(offset) <= 14 * 3600
-        ? tz::getTimeZoneID(offset / 60)
-        : -1;
-  };
+  auto setOffset = [&](int32_t offset) { date.timezoneOffsetSeconds = offset; };
   // Java matches the zero-offset text before reading numeric fields.
   if ((rfc && digits <= 3) ||
       pattern.specifier ==
@@ -554,9 +551,19 @@ int64_t parseJavaTimeZoneId(
     bool caseSensitive) {
   const auto offsetPattern =
       FormatPattern{DateTimeFormatSpecifier::TIMEZONE_OFFSET_ISO8601, 5};
+  auto parseOffset = [&](const char* begin) {
+    Date zone;
+    const auto size =
+        parseJavaTimezoneOffset(offsetPattern, begin, end, zone, caseSensitive);
+    if (size >= 0) {
+      date.zoneOffsetSeconds = zone.timezoneOffsetSeconds;
+      date.timezoneId = -1;
+      date.hasTimeZoneId = true;
+    }
+    return size;
+  };
   if (cur < end && (*cur == '+' || *cur == '-')) {
-    return parseJavaTimezoneOffset(
-        offsetPattern, cur, end, date, caseSensitive);
+    return parseOffset(cur);
   }
   for (std::string_view prefix : {"UTC", "GMT", "UT"}) {
     if (end - cur >= prefix.size() &&
@@ -565,13 +572,13 @@ int64_t parseJavaTimeZoneId(
                              .equals(prefix, folly::AsciiCaseInsensitive()))) {
       const auto* offset = cur + prefix.size();
       if (offset < end && (*offset == '+' || *offset == '-')) {
-        auto size = parseJavaTimezoneOffset(
-            offsetPattern, offset, end, date, caseSensitive);
+        auto size = parseOffset(offset);
         if (size >= 0) {
           return prefix.size() + size;
         }
       }
       date.timezoneId = 0;
+      date.zoneOffsetSeconds.reset();
       date.hasTimeZoneId = true;
       return prefix.size();
     }
@@ -583,7 +590,8 @@ int64_t parseJavaTimeZoneId(
   if (size < 0 && cur < end &&
       (*cur == 'Z' || (!caseSensitive && *cur == 'z'))) {
     date.timezoneId = 0;
-    date.timezoneOffsetSeconds = 0;
+    date.zoneOffsetSeconds.reset();
+    date.hasTimeZoneId = true;
     return 1;
   }
   return size;
@@ -668,6 +676,8 @@ int64_t parseJavaZoneText(
     const auto it = candidates.find(std::string_view(cur, size));
     if (it != candidates.end()) {
       date.timezoneId = it->second;
+      date.zoneOffsetSeconds.reset();
+      date.hasTimeZoneId = true;
       return size;
     }
   }
@@ -1809,8 +1819,7 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
     }
   }
 
-  if (javaTime && !parseOptions_.strict && date.day > 0 && date.day <= 31 &&
-      !date.dayOfYearFormat) {
+  if (javaTime && !parseOptions_.strict && date.hasMonth && date.hasDay) {
     while (!util::isValidDate(date.year, date.month, date.day)) {
       --date.day;
     }
@@ -2015,6 +2024,19 @@ FOLLY_ALWAYS_INLINE DateTimeResult DateTimeFormatter::parseImpl(
     if (date.hour == 24) {
       ++daysSinceEpoch;
       date.hour = 0;
+    }
+  }
+
+  if constexpr (javaTime) {
+    if ((parseOptions_.preferTimezoneId && date.hasTimeZoneId) ||
+        !date.timezoneOffsetSeconds) {
+      date.timezoneOffsetSeconds = date.zoneOffsetSeconds;
+    }
+    if (date.timezoneId < 0 && date.timezoneOffsetSeconds) {
+      const auto offset = *date.timezoneOffsetSeconds;
+      if (offset % 60 == 0 && std::abs(offset) <= 14 * 3600) {
+        date.timezoneId = tz::getTimeZoneID(offset / 60);
+      }
     }
   }
 

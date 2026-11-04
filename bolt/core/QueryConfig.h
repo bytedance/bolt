@@ -604,6 +604,11 @@ class QueryConfig {
   static constexpr const char* kTimeParserPolicy =
       "spark.legacy_time_parser_policy";
 
+  /// Whether the caller's JVM supports standalone month text without the
+  /// Java 8 formatting defect. Spark rejects LLL/LLLL when false (the default).
+  static constexpr const char* kSparkDatetimeStandaloneMonthText =
+      "spark.datetime_standalone_month_text_enabled";
+
   /// Default zone used when resolving ambiguous SimpleDateFormat zone names.
   static constexpr const char* kDateTimeFormatterDefaultTimezone =
       "date_time_formatter_default_timezone";

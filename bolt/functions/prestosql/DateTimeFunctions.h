@@ -1605,6 +1605,7 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
   std::shared_ptr<const DateTimeFormatterContext> formatterContext_;
   std::shared_ptr<DateTimeFormatter> jodaDateTime_;
   bool isConstFormat_ = false;
+  bool standaloneMonthText_{false};
   uint32_t maxResultSize_{0};
   TimePolicy timePolicy_{TimePolicy::CORRECTED};
   DateTimeFormatterCache formatCache_;
@@ -1618,7 +1619,8 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       } else if constexpr (SparkCompatible) {
         jodaDateTime_ = buildSparkDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()),
-            false);
+            false,
+            standaloneMonthText_);
       } else {
         jodaDateTime_ = buildJodaDateTimeFormatter(
             std::string_view(formatString->data(), formatString->size()));
@@ -1634,6 +1636,8 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<Varchar>* formatString) {
     sessionTimeZone_ = getTimeZoneFromConfig(config);
     if constexpr (SparkCompatible) {
+      standaloneMonthText_ = config.get<bool>(
+          core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
       timePolicy_ = parseTimePolicy(config.timeParserPolicy());
       if (timePolicy_ == TimePolicy::LEGACY) {
         formatterContext_ = getDateTimeFormatterContext(config);
@@ -1652,6 +1656,8 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       const arg_type<TimestampWithTimezone>* /*timestamp*/,
       const arg_type<Varchar>* formatString) {
     if constexpr (SparkCompatible) {
+      standaloneMonthText_ = config.get<bool>(
+          core::QueryConfig::kSparkDatetimeStandaloneMonthText, false);
       timePolicy_ = parseTimePolicy(config.timeParserPolicy());
       if (timePolicy_ == TimePolicy::LEGACY) {
         formatterContext_ = getDateTimeFormatterContext(config);

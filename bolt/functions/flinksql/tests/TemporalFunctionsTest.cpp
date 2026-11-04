@@ -210,6 +210,23 @@ TEST_F(TemporalFunctionsTest, formattedTimestampFallback) {
       evaluate("to_timestamp(c0, c1)", makeRowVector({texts, formats})));
 }
 
+TEST_F(TemporalFunctionsTest, smartDateCrossChecks) {
+  for (const auto& [pattern, text] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"yyyy/MM/dd HH:mm:ss D", "2024/02/30 00:00:00 60"},
+           {"D yyyy/MM/dd HH:mm:ss", "60 2024/02/30 00:00:00"}}) {
+    EXPECT_EQ(
+        Timestamp(1709164800, 0),
+        parseString("to_timestamp(c0, '" + pattern + "')", text));
+    EXPECT_EQ(
+        Timestamp(1709164800, 0),
+        evaluateOnce<Timestamp>(
+            "to_timestamp(c0, c1)",
+            std::optional<std::string>{text},
+            std::optional<std::string>{pattern}));
+  }
+}
+
 TEST_F(TemporalFunctionsTest, formattedNanoseconds) {
   std::vector<std::string> texts;
   std::vector<std::string> formats;

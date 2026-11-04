@@ -495,6 +495,89 @@ bool parseSimpleTimezone(
   return false;
 }
 
+int64_t floorDivide(int64_t value, int64_t divisor) {
+  return value / divisor - (value % divisor < 0);
+}
+
+int64_t simpleMonthStart(int32_t year, int32_t month, bool julian) {
+  const auto first = util::daysSinceEpochFromDate(year, month + 1, 1);
+  const int64_t leapYear = int64_t{year} - (month < 2);
+  return first +
+      (julian ? floorDivide(leapYear, 100) - floorDivide(leapYear, 400) - 2
+              : 0);
+}
+
+int64_t sundayBasedWeekday(int64_t day) {
+  return (day % 7 + 11) % 7;
+}
+
+int32_t simpleWeekYear(icu::GregorianCalendar& calendar, UErrorCode& status) {
+  const auto era = calendar.get(UCAL_ERA, status);
+  auto year = calendar.get(UCAL_YEAR, status);
+  if (era == 0) {
+    year = 1 - year;
+  }
+  if (year > 1583) {
+    return calendar.get(UCAL_YEAR_WOY, status);
+  }
+  const auto day = calendar.get(UCAL_DAY_OF_YEAR, status);
+  const auto last = calendar.getActualMaximum(UCAL_DAY_OF_YEAR, status);
+  if (day > 1 && day < last - 6) {
+    return year;
+  }
+  // GregorianCalendar retains the era when setting the next year of era.
+  const auto nextYear = era == 1 ? year + 1 : -year;
+  const auto nextStart = simpleMonthStart(nextYear, 0, nextYear <= 1582);
+  auto firstSunday = (7 - sundayBasedWeekday(nextStart)) % 7;
+  if (firstSunday == 0) {
+    firstSunday = 7;
+  }
+  return year + (last - day + 1 <= 7 - firstSunday);
+}
+
+std::optional<int64_t> simpleWeekDate(
+    int32_t yearOfEra,
+    int32_t era,
+    int32_t month,
+    int64_t week,
+    int64_t dayOfWeek,
+    UCalendarDateFields field) {
+  const int64_t originalYear = era == 1 ? yearOfEra : 1LL - yearOfEra;
+  const auto years = floorDivide(month, 12);
+  const auto year = originalYear + years;
+  month -= years * 12;
+  if (year < util::kMinYear || year > util::kMaxYear) {
+    return std::nullopt;
+  }
+  auto candidate = [&](bool julian) {
+    const auto start = simpleMonthStart(year, month, julian);
+    const auto wanted = ((dayOfWeek - 1) % 7 + 7) % 7;
+    if (field == UCAL_DAY_OF_WEEK_IN_MONTH) {
+      if (week < 0) {
+        constexpr int daysInMonth[] = {
+            31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        const bool leap =
+            year % 4 == 0 && (julian || year % 100 != 0 || year % 400 == 0);
+        const auto last = start + daysInMonth[month] + (month == 1 && leap) - 1;
+        return last - (sundayBasedWeekday(last) - wanted + 7) % 7 +
+            (week + 1) * 7;
+      }
+      return start + (wanted - sundayBasedWeekday(start) + 7) % 7 +
+          (week - 1) * 7;
+    }
+    return start - sundayBasedWeekday(start) + (week - 1) * 7 + wanted;
+  };
+  // Calendar chooses a calendar system using the supplied year before
+  // normalizing overflowing months and weeks across the 1582 cutover.
+  constexpr int64_t cutover = -141427;
+  if (originalYear < 1582 ||
+      (originalYear == 1582 && field == UCAL_WEEK_OF_YEAR)) {
+    return candidate(true);
+  }
+  const auto gregorian = candidate(false);
+  return gregorian >= cutover ? gregorian : candidate(true);
+}
+
 } // namespace
 
 DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
@@ -581,14 +664,12 @@ DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
         value = -value;
       }
       if (field == UCAL_YEAR || field == UCAL_YEAR_WOY) {
-        ambiguousYear = -1;
         if (!negative && token.pattern.minRepresentDigits <= 2 && digits == 2) {
           const auto startYear = twoDigitYearStartYear_;
           value += (startYear / 100) * 100;
+          ambiguousYear = value == startYear ? field : -1;
           if (value < startYear) {
             value += 100;
-          } else if (value == startYear) {
-            ambiguousYear = field;
           }
         }
       } else if (field == UCAL_MONTH) {
@@ -679,7 +760,12 @@ DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
       auto calendarStamps = stamps;
       auto& calendar = detail::simpleDateCalendar();
       calendar.setLenient(!parseOptions_.strict);
-      calendar.clear();
+      auto resetCalendar = [&](int32_t year, int32_t era) {
+        calendar.clear();
+        calendar.set(UCAL_ERA, era);
+        calendar.set(UCAL_YEAR, year);
+      };
+      resetCalendar(fields[UCAL_YEAR], fields[UCAL_ERA]);
       const bool weekYear =
           calendarStamps[UCAL_YEAR_WOY] > calendarStamps[UCAL_YEAR];
       auto rank = [&](int32_t field, bool complete) {
@@ -722,9 +808,10 @@ DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
       } else if (calendarStamps[UCAL_HOUR] || calendarStamps[UCAL_AM_PM]) {
         calendarStamps[UCAL_HOUR_OF_DAY] = 0;
       }
-      auto setFields = [&] {
+      auto setFields = [&](bool timeOnly = false) {
         for (int32_t field = 0; field < UCAL_FIELD_COUNT; ++field) {
-          if (!calendarStamps[field] || field == UCAL_YEAR_WOY) {
+          if (!calendarStamps[field] || field == UCAL_YEAR_WOY ||
+              (timeOnly && field < UCAL_AM_PM)) {
             continue;
           }
           if ((field == UCAL_DATE || field == UCAL_DAY_OF_YEAR ||
@@ -743,6 +830,20 @@ DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
           calendar.set(static_cast<UCalendarDateFields>(field), fields[field]);
         }
       };
+      auto resolveWeek = [&](int32_t year,
+                             int32_t era,
+                             int32_t month,
+                             int64_t week,
+                             int64_t day,
+                             UCalendarDateFields field) -> bool {
+        const auto days = simpleWeekDate(year, era, month, week, day, field);
+        if (!days) {
+          return false;
+        }
+        UErrorCode status = U_ZERO_ERROR;
+        calendar.setTime(*days * 86'400'000.0, status);
+        return U_SUCCESS(status);
+      };
       if (weekDate) {
         const int32_t year = fields[weekYear ? UCAL_YEAR_WOY : UCAL_YEAR];
         int64_t week =
@@ -757,33 +858,51 @@ DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
           week += (day - 1 - normalized) / 7;
           day = (normalized + 1) % 7 + 1;
         }
-        calendar.set(UCAL_YEAR, year);
         int32_t era = fields[UCAL_ERA];
         if (weekYear) {
-          calendar.clear();
-          calendar.set(UCAL_ERA, fields[UCAL_ERA]);
-          calendar.set(UCAL_YEAR, fields[UCAL_YEAR]);
+          calendar.setLenient(true);
+          resetCalendar(fields[UCAL_YEAR], fields[UCAL_ERA]);
           setFields();
           UErrorCode status = U_ZERO_ERROR;
+          if (selected == UCAL_WEEK_OF_YEAR || selected == UCAL_WEEK_OF_MONTH ||
+              selected == UCAL_DAY_OF_WEEK_IN_MONTH) {
+            const auto field = static_cast<UCalendarDateFields>(selected);
+            if (!resolveWeek(
+                    fields[UCAL_YEAR],
+                    fields[UCAL_ERA],
+                    selected == UCAL_WEEK_OF_YEAR ? 0 : fields[UCAL_MONTH],
+                    calendarStamps[selected] ? fields[selected] : 1,
+                    calendarStamps[UCAL_DAY_OF_WEEK] ? fields[UCAL_DAY_OF_WEEK]
+                                                     : 1,
+                    field)) {
+              return ErrorCode::YEAR_OUT_OF_RANGE;
+            }
+            setFields(true);
+          }
           era = calendar.get(UCAL_ERA, status);
           if (U_FAILURE(status)) {
             return ErrorCode::YEAR_OUT_OF_RANGE;
           }
-          calendar.clear();
-          calendar.set(UCAL_YEAR, year);
+          calendar.setLenient(!parseOptions_.strict);
         }
-        calendar.set(UCAL_ERA, era);
-        calendar.set(UCAL_MONTH, 0);
-        calendar.set(UCAL_DATE, 1);
-        UErrorCode status = U_ZERO_ERROR;
-        const auto first = calendar.getTime(status);
-        const int32_t weekday = calendar.get(UCAL_DAY_OF_WEEK, status);
-        if (U_FAILURE(status)) {
+        if (!resolveWeek(year, era, 0, week, day, UCAL_WEEK_OF_YEAR)) {
           return ErrorCode::YEAR_OUT_OF_RANGE;
         }
-        const int64_t days =
-            (week - 1) * 7 + ((day - 1) % 7 + 7) % 7 - (weekday - 1);
-        calendar.setTime(first + days * 86'400'000, status);
+      } else if (
+          selected == UCAL_WEEK_OF_MONTH ||
+          selected == UCAL_DAY_OF_WEEK_IN_MONTH) {
+        if (!resolveWeek(
+                fields[UCAL_YEAR],
+                fields[UCAL_ERA],
+                fields[UCAL_MONTH],
+                calendarStamps[selected] ? fields[selected] : 1,
+                calendarStamps[UCAL_DAY_OF_WEEK] ? fields[UCAL_DAY_OF_WEEK] : 1,
+                static_cast<UCalendarDateFields>(selected))) {
+          return ErrorCode::YEAR_OUT_OF_RANGE;
+        }
+      }
+      if (weekDate || selected == UCAL_WEEK_OF_MONTH ||
+          selected == UCAL_DAY_OF_WEEK_IN_MONTH) {
         for (auto field :
              {UCAL_YEAR,
               UCAL_YEAR_WOY,
@@ -806,13 +925,34 @@ DateTimeResult DateTimeFormatter::parseSimpleDateFormat(
       }
       if (parseOptions_.strict) {
         for (int32_t field = 0; field < UCAL_FIELD_COUNT; ++field) {
-          if (weekYear && field < UCAL_AM_PM && field != UCAL_WEEK_OF_YEAR &&
-              field != UCAL_DAY_OF_WEEK) {
+          if (weekYear &&
+              (field == UCAL_ERA || field == UCAL_YEAR || field == UCAL_MONTH ||
+               field == UCAL_DATE)) {
             continue;
           }
-          if (stamps[field] &&
-              calendar.get(static_cast<UCalendarDateFields>(field), status) !=
-                  fields[field]) {
+          if (!stamps[field] || (field == UCAL_YEAR_WOY && !weekYear)) {
+            continue;
+          }
+          auto value =
+              calendar.get(static_cast<UCalendarDateFields>(field), status);
+          if (field == UCAL_YEAR_WOY) {
+            value = simpleWeekYear(calendar, status);
+          } else if (field == UCAL_WEEK_OF_MONTH) {
+            const auto first = simpleWeekDate(
+                calendar.get(UCAL_YEAR, status),
+                calendar.get(UCAL_ERA, status),
+                calendar.get(UCAL_MONTH, status),
+                1,
+                1,
+                UCAL_WEEK_OF_MONTH);
+            if (!first) {
+              return ErrorCode::YEAR_OUT_OF_RANGE;
+            }
+            const auto days =
+                floorDivide(static_cast<int64_t>(resolved), 86'400'000);
+            value = floorDivide(days - *first, 7) + 1;
+          }
+          if (value != fields[field]) {
             return ErrorCode::DAY_CONFLICT;
           }
         }
@@ -884,6 +1024,7 @@ std::shared_ptr<DateTimeFormatter> buildSimpleDateTimeFormatter(
   if (twoDigitYearStart) {
     formatter->twoDigitYearStartMillis_ = twoDigitYearStart->toMillis();
   } else {
+    formatter->dependsOnCreationTime_ = true;
     auto& calendar = detail::simpleDateCalendar();
     calendar.setLenient(true);
     UErrorCode status = U_ZERO_ERROR;

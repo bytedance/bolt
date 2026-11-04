@@ -30,7 +30,7 @@ class DateTimeFormatterCache {
   std::shared_ptr<DateTimeFormatter> get(
       std::string_view pattern,
       Factory&& factory,
-      bool cacheTwoDigitYears = true) {
+      bool cacheTimeDependent = true) {
     if (pattern.size() > kMaxPatternSize) {
       return factory();
     }
@@ -40,16 +40,9 @@ class DateTimeFormatterCache {
       }
     }
     auto formatter = factory();
-    if (!cacheTwoDigitYears && formatter) {
-      // A dynamic legacy parser without an explicit pivot has a rolling window.
-      for (const auto& token : formatter->tokens()) {
-        if (token.type == DateTimeToken::Type::kPattern &&
-            token.pattern.minRepresentDigits <= 2 &&
-            (token.pattern.specifier == DateTimeFormatSpecifier::YEAR ||
-             token.pattern.specifier == DateTimeFormatSpecifier::WEEK_YEAR)) {
-          return formatter;
-        }
-      }
+    if (!cacheTimeDependent && formatter &&
+        formatter->dependsOnCreationTime()) {
+      return formatter;
     }
     Entry entry{std::string(pattern), formatter};
     if (entries_.size() < kMaxEntries) {

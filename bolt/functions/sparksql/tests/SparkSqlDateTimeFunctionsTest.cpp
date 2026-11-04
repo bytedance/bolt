@@ -273,6 +273,54 @@ TEST_F(SparkSqlDateTimeFunctionsTest, unixDate) {
   EXPECT_EQ(unixDate("-5877641-06-23"), kMin);
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, correctedOffsetAndNamedZone) {
+  setPolicyAndTimeZone("corrected", "UTC");
+  for (const auto& [pattern, text] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"yyyy-MM-dd HH:mm:ss XXX z", "1970-01-01 00:00:00 +01:00 UTC"},
+           {"yyyy-MM-dd HH:mm:ss z XXX", "1970-01-01 00:00:00 UTC +01:00"}}) {
+    EXPECT_EQ(
+        0,
+        evaluateOnce<int64_t>(
+            "unix_timestamp(c0, '" + pattern + "')",
+            std::optional<std::string>{text}));
+    EXPECT_EQ(
+        0,
+        evaluateOnce<int64_t>(
+            "unix_timestamp(c0, c1)",
+            std::optional<std::string>{text},
+            std::optional<std::string>{pattern}));
+  }
+}
+
+TEST_F(SparkSqlDateTimeFunctionsTest, standaloneMonthText) {
+  for (bool supported : {false, true}) {
+    queryCtx_->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kTimeParserPolicy, "corrected"},
+         {core::QueryConfig::kSessionTimezone, "UTC"},
+         {core::QueryConfig::kSparkDatetimeStandaloneMonthText,
+          supported ? "true" : "false"}});
+    for (const auto& [pattern, expected] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"LLL", "Jan"}, {"LLLL", "January"}}) {
+      for (bool constant : {false, true}) {
+        auto evaluateFormat = [&] {
+          return evaluateOnce<std::string>(
+              constant ? "date_format(c0, '" + pattern + "')"
+                       : "date_format(c0, c1)",
+              std::optional<Timestamp>{Timestamp(946684800, 0)},
+              std::optional<std::string>{pattern});
+        };
+        if (supported) {
+          EXPECT_EQ(expected, evaluateFormat());
+        } else {
+          EXPECT_THROW(evaluateFormat(), BoltUserError);
+        }
+      }
+    }
+  }
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, unixTimestamp) {
   const auto unixTimestamp = [&](std::optional<StringView> dateStr) {
     return evaluateOnce<int64_t>("unix_timestamp(c0)", dateStr);
