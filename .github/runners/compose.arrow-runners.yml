@@ -1,0 +1,10 @@
+# The inner Docker daemon needs to see the same paths used by a job's bind mounts.
+x-arrow-mounts: &arrow-mounts
+  - "${BOLT_ARROW_CACHE_DIR:-/data/conan-source-cache}/s:/opt/bolt-arrow-sources:ro"
+  - "./arrow-cache.py:/opt/bolt-arrow-cache.py:ro"
+
+services:
+  runner-medium:
+    volumes: *arrow-mounts
+  runner-small:
+    volumes: *arrow-mounts
