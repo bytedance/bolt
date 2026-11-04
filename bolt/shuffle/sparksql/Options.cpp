@@ -178,7 +178,7 @@ std::string ShuffleWriterMetrics::toString() const {
       "totalCompressTime={} splitTime={} convertTime={} flattenTime={} "
       "computePidTime={} shuffleWriteTime={} externalReclaimTime={} "
       "maxPartitionBufferSize={} avgPreallocSize={} dataSize={} peakBytes={} "
-      "useV2={} useRowBased={} rowVectorModeCompress={} "
+      "useV2={} useRowBased={} useCellShuffle={} rowVectorModeCompress={} "
       "combinedVectorNumber={} combineVectorTimes={} combineVectorCost={} "
       "numPartitions={} totalPartitionLengths={} totalRawPartitionLengths={}",
       totalInputRowNumber,
@@ -204,6 +204,7 @@ std::string ShuffleWriterMetrics::toString() const {
       succinctBytes(peakBytes),
       useV2,
       useRowBased,
+      useCellShuffle,
       rowVectorModeCompress,
       combinedVectorNumber,
       combineVectorTimes,
