@@ -227,6 +227,16 @@ TEST_F(FlinkSqlDateTimeFunctionsTest, timestampParserContext) {
       evaluateOnce<int64_t>(
           "flink_unix_timestamp(c0, 'yy-MM-dd HH:mm:ss', 'UTC')",
           std::optional<std::string>("99-12-31 23:00:00")));
+  EXPECT_EQ(
+      4102416000LL,
+      evaluateOnce<int64_t>(
+          "flink_unix_timestamp(c0, 'yy-MM-dd HH:mm:ss', 'Asia/Shanghai')",
+          std::optional<std::string>("00-01-01 00:00:00")));
+  EXPECT_EQ(
+      946657800LL,
+      evaluateOnce<int64_t>(
+          "flink_unix_timestamp(c0, 'yy-MM-dd HH:mm:ss', 'Asia/Shanghai')",
+          std::optional<std::string>("00-01-01 00:30:00")));
 }
 
 TEST_F(FlinkSqlDateTimeFunctionsTest, timestampToStringV2) {

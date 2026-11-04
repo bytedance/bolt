@@ -245,6 +245,11 @@ TEST_F(TemporalFunctionsTest, formattedNanoseconds) {
       parseString(
           "to_timestamp(c0, 'yyyy/MM/dd HH:mm:ss.SSSSSSS', 'UTC', cast(0 as integer))",
           "1970/01/01 00:00:00.1234567"));
+  EXPECT_EQ(
+      Timestamp(0, 120000000),
+      parseString(
+          "to_timestamp(c0, 'yyyy-MM-dd HH:mm:ss.S')",
+          "1970-01-01 00:00:00.12"));
   for (const auto& invalid :
        {"1970/01/01 00:00:00.", "1970/01/01 00:00:00.1234567890", "invalid"}) {
     EXPECT_EQ(

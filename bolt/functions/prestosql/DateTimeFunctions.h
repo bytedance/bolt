@@ -1666,6 +1666,26 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
       out_type<Varchar>& result,
       const arg_type<Timestamp>& timestamp,
       const arg_type<Varchar>& formatString) {
+    return format(result, timestamp, formatString, sessionTimeZone_);
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Varchar>& result,
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone,
+      const arg_type<Varchar>& formatString) {
+    return format(
+        result,
+        this->toTimestamp(timestampWithTimezone, true),
+        formatString,
+        tz::locateZone(*timestampWithTimezone.template at<1>()));
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE bool format(
+      out_type<Varchar>& result,
+      const Timestamp& timestamp,
+      const arg_type<Varchar>& formatString,
+      const tz::TimeZone* timezone) {
     if (!isConstFormat_) {
       if constexpr (!SparkCompatible) {
         ensureFormatLegal(
@@ -1676,22 +1696,9 @@ struct JodaDateFormatFunction : public TimestampWithTimezoneSupport<T> {
 
     result.reserve(maxResultSize_);
     const auto resultSize = jodaDateTime_->format(
-        timestamp,
-        sessionTimeZone_,
-        maxResultSize_,
-        result.data(),
-        false,
-        timePolicy_);
+        timestamp, timezone, maxResultSize_, result.data(), false, timePolicy_);
     result.resize(resultSize);
     return true;
-  }
-
-  FOLLY_ALWAYS_INLINE bool call(
-      out_type<Varchar>& result,
-      const arg_type<TimestampWithTimezone>& timestampWithTimezone,
-      const arg_type<Varchar>& formatString) {
-    auto timestamp = this->toTimestamp(timestampWithTimezone);
-    return call(result, timestamp, formatString);
   }
 };
 

@@ -2413,6 +2413,44 @@ TEST_F(SparkSqlDateTimeFunctionsTest, dateFormat) {
           Timestamp(1520989323L, 123456789L), "yyy-MM-dd HH:mm:ss.SSSSSSSSS"));
 }
 
+TEST_F(SparkSqlDateTimeFunctionsTest, dateFormatTimestampWithTimeZone) {
+  auto timestamps = std::make_shared<RowVector>(
+      pool(),
+      TIMESTAMP_WITH_TIME_ZONE(),
+      nullptr,
+      4,
+      std::vector<VectorPtr>{
+          makeFlatVector<int64_t>({0, 0, 0, 1593561600000LL}),
+          makeFlatVector<int16_t>(
+              {tz::getTimeZoneID("Asia/Kolkata"),
+               tz::getTimeZoneID("+00:07"),
+               tz::getTimeZoneID("America/New_York"),
+               tz::getTimeZoneID("America/New_York")})});
+  const std::string pattern = "yyyy-MM-dd HH:mm:ss XXX Z";
+  auto input = makeRowVector(
+      {timestamps,
+       makeFlatVector<std::string>(4, [&](auto) { return pattern; })});
+  auto expected = makeFlatVector<std::string>(
+      {"1970-01-01 05:30:00 +05:30 +0530",
+       "1970-01-01 00:07:00 +00:07 +0007",
+       "1969-12-31 19:00:00 -05:00 -0500",
+       "2020-06-30 20:00:00 -04:00 -0400"});
+  for (const auto* policy : {"corrected", "legacy", "exception"}) {
+    SCOPED_TRACE(policy);
+    setPolicyAndTimeZone(policy, "Pacific/Kiritimati");
+    bolt::test::assertEqualVectors(
+        expected, evaluate("date_format(c0, c1)", input));
+    bolt::test::assertEqualVectors(
+        expected,
+        evaluate(fmt::format("date_format(c0, '{}')", pattern), input));
+  }
+  setTimeParserPolicy("corrected");
+  bolt::test::assertEqualVectors(
+      makeFlatVector<std::string>(
+          {"Asia/Kolkata", "+00:07", "America/New_York", "America/New_York"}),
+      evaluate("date_format(c0, 'VV')", input));
+}
+
 TEST_F(SparkSqlDateTimeFunctionsTest, jodaDateFormatDefaultCompatibility) {
   core::QueryConfig config({});
   StringView format("YYYY-ww-ee");
